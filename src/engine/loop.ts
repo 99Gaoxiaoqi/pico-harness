@@ -14,6 +14,7 @@ import type { LLMProvider } from "../provider/interface.js";
 import type { Message, ToolCall } from "../schema/message.js";
 import type { Registry } from "../tools/registry.js";
 import type { Compactor } from "../context/compactor.js";
+import { PromptComposer } from "../context/composer.js";
 import { SilentReporter, type Reporter } from "./reporter.js";
 import type { Session } from "./session.js";
 
@@ -25,13 +26,19 @@ export interface AgentEngineOptions {
   registry: Registry;
   /** 工作区:借鉴 OpenClaw 理念,Agent 必须有明确的物理边界 */
   workDir: string;
-  /** 系统提示词;由 PromptComposer 动态组装 */
+  /** 系统提示词;由 PromptComposer 动态组装。planMode 开启时此项被忽略 */
   systemPrompt?: string;
   /**
    * 慢思考模式开关 (第 03 讲)。
    * 开启后,每轮行动前先发起一次不带工具的纯文本请求,强制模型规划。
    */
   enableThinking?: boolean;
+  /**
+   * 计划模式开关 (第 13 讲)。
+   * 开启后,每次 run 动态用 PromptComposer 组装 System Prompt,
+   * 注入"状态外部化强制规范",引导大模型读写 PLAN.md / TODO.md 管理长程任务。
+   */
+  planMode?: boolean;
   /** WorkingMemory 滑动窗口大小(默认 20 条,给压缩器留判断空间) */
   workingMemoryLimit?: number;
   /**
@@ -52,6 +59,7 @@ export class AgentEngine {
   private readonly workDir: string;
   private readonly systemPrompt: string;
   private readonly enableThinking: boolean;
+  private readonly planMode: boolean;
   private readonly workingMemoryLimit: number;
   private readonly compactor?: Compactor;
   private readonly onTurn?: (info: { turn: number; message: Message }) => void;
@@ -66,10 +74,24 @@ export class AgentEngine {
       "You are tiny-claw, an expert coding assistant running in a Harness engine. " +
         "You have tools to read, write, edit files and run bash. Think step by step.";
     this.enableThinking = opts.enableThinking ?? false;
+    this.planMode = opts.planMode ?? false;
     this.workingMemoryLimit = opts.workingMemoryLimit ?? DEFAULT_WORKING_MEMORY_LIMIT;
     this.compactor = opts.compactor;
     this.onTurn = opts.onTurn;
     this.reporter = opts.reporter ?? new SilentReporter();
+  }
+
+  /**
+   * 组装本轮 System Prompt。
+   * Plan Mode 开启时,每次 run 动态用 PromptComposer 重新组装,
+   * 以反映工作区最新的 AGENTS.md / Skills / 外部化规范状态;
+   * 关闭时使用构造时固定的 systemPrompt。
+   */
+  private async buildSystemPrompt(): Promise<string> {
+    if (this.planMode) {
+      return new PromptComposer(this.workDir, true).build();
+    }
+    return this.systemPrompt;
   }
 
   /**
@@ -87,7 +109,12 @@ export class AgentEngine {
   async run(session: Session, runtimeReporter?: Reporter): Promise<Message[]> {
     const reporter = runtimeReporter ?? this.reporter;
     reporter.onStart(this.workDir, this.enableThinking);
-    console.log(`[Engine] 唤醒会话 [${session.id}],锁定工作区: ${session.workDir}`);
+    console.log(
+      `[Engine] 唤醒会话 [${session.id}],锁定工作区: ${session.workDir} (PlanMode: ${this.planMode})`,
+    );
+
+    // Plan Mode 开启时,每次 run 动态组装 System Prompt(反映最新工作区状态)
+    const systemPrompt = await this.buildSystemPrompt();
 
     const beforeLen = session.length;
     let turnCount = 0;
@@ -106,7 +133,7 @@ export class AgentEngine {
       // ====================================================================
       const workingMemory = session.getWorkingMemory(this.workingMemoryLimit);
       const contextHistory: Message[] = [
-        { role: "system", content: this.systemPrompt },
+        { role: "system", content: systemPrompt },
         ...workingMemory,
       ];
 

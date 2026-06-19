@@ -1,7 +1,9 @@
 // cmd 入口:tiny-claw 引擎启动序列。
 // 第 09 讲:引擎 I/O 解耦,支持 CLI 与 HTTP Server 两种入口。
+// 第 13 讲:新增 --plan 开关,开启 Plan Mode 引导长程任务读写 PLAN.md/TODO.md。
 // 用法:
 //   CLI 模式:tsx --env-file=.env src/cli/main.ts --provider openai "你的任务"
+//   Plan 模式:tsx --env-file=.env src/cli/main.ts --plan "搭建一个极简 Web Server 项目"
 //   HTTP 模式:tsx --env-file=.env src/cli/main.ts --serve --port 3000
 //             然后:curl -X POST localhost:3000/ask -H 'Content-Type: application/json' -d '{"prompt":"..."}'
 
@@ -46,16 +48,24 @@ function consoleSessionId(workDir: string): string {
   return `console:${workDir}`;
 }
 
-async function runOnce(kind: ProviderKind, enableThinking: boolean, task: string): Promise<void> {
+async function runOnce(
+  kind: ProviderKind,
+  enableThinking: boolean,
+  planMode: boolean,
+  task: string,
+): Promise<void> {
   const provider = createProvider(kind);
   const workDir = process.cwd();
   const registry = buildRegistry(workDir);
-  const systemPrompt = await new PromptComposer(workDir).build();
+  // Plan Mode 开启时由引擎每次 run 动态组装 System Prompt(反映最新工作区状态);
+  // 关闭时预构建一次,避免每轮重复读盘。
+  const systemPrompt = planMode ? undefined : await new PromptComposer(workDir).build();
   const engine = new AgentEngine({
     provider,
     registry,
     workDir,
     enableThinking,
+    planMode,
     systemPrompt,
     compactor: buildCompactor(),
     reporter: new TerminalReporter(),
@@ -68,9 +78,14 @@ async function runOnce(kind: ProviderKind, enableThinking: boolean, task: string
 }
 
 /** HTTP Server 模式:接收外部事件流触发 Agent (等价于飞书 webhook 入口) */
-async function serve(kind: ProviderKind, enableThinking: boolean, port: number): Promise<void> {
+async function serve(
+  kind: ProviderKind,
+  enableThinking: boolean,
+  planMode: boolean,
+  port: number,
+): Promise<void> {
   const workDir = process.cwd();
-  const systemPrompt = await new PromptComposer(workDir).build();
+  const systemPrompt = planMode ? undefined : await new PromptComposer(workDir).build();
   const server = createServer(async (req, res) => {
     if (req.method !== "POST" || req.url !== "/ask") {
       res.writeHead(404, { "Content-Type": "application/json" });
@@ -102,6 +117,7 @@ async function serve(kind: ProviderKind, enableThinking: boolean, port: number):
         registry,
         workDir,
         enableThinking,
+        planMode,
         systemPrompt,
         compactor: buildCompactor(),
         reporter,
@@ -144,6 +160,7 @@ async function main() {
     options: {
       provider: { type: "string", default: "openai" },
       thinking: { type: "string", default: "true" },
+      plan: { type: "boolean", default: false },
       serve: { type: "boolean", default: false },
       port: { type: "string", default: "3000" },
       feishu: { type: "boolean", default: false },
@@ -153,21 +170,23 @@ async function main() {
 
   const kind = values.provider as ProviderKind;
   const enableThinking = values.thinking !== "false";
+  const planMode = values.plan;
 
   console.log("🚀 欢迎来到 tiny-claw-harness 引擎启动序列");
-  console.log(`[Provider] ${kind} 协议 | [Thinking] ${enableThinking}`);
+  console.log(`[Provider] ${kind} 协议 | [Thinking] ${enableThinking} | [PlanMode] ${planMode}`);
 
   if (values.feishu) {
     // 飞书模式:启动 WSClient 长连接,群里 @机器人 触发 Agent,状态发回会话
     const workDir = process.cwd();
     const provider = createProvider(kind);
     const registry = buildRegistry(workDir);
-    const systemPrompt = await new PromptComposer(workDir).build();
+    const systemPrompt = planMode ? undefined : await new PromptComposer(workDir).build();
     const engine = new AgentEngine({
       provider,
       registry,
       workDir,
       enableThinking,
+      planMode,
       systemPrompt,
       compactor: buildCompactor(),
       reporter: new SilentReporter(), // 实际回写由运行时 FeishuReporter 负责
@@ -179,13 +198,13 @@ async function main() {
   }
 
   if (values.serve) {
-    await serve(kind, enableThinking, Number(values.port));
+    await serve(kind, enableThinking, planMode, Number(values.port));
     return;
   }
 
   const task =
     positionals[0] ?? "请用 read_file 工具读取 README.md,然后用一句话总结这个项目是做什么的。";
-  await runOnce(kind, enableThinking, task);
+  await runOnce(kind, enableThinking, planMode, task);
 }
 
 main().catch((err) => {

@@ -116,4 +116,44 @@ describe("PromptComposer", () => {
     expect(prompt).not.toContain("项目专属指南");
     expect(prompt).not.toContain("可用专业技能");
   });
+
+  it("planMode=false(默认)不注入状态外部化规范", async () => {
+    const prompt = await new PromptComposer(workDir).build();
+    expect(prompt).not.toContain("Plan Mode: ON");
+    expect(prompt).not.toContain("PLAN.md");
+    expect(prompt).not.toContain("断点续传");
+  });
+
+  it("planMode=true 注入长程任务状态外部化规范", async () => {
+    const prompt = await new PromptComposer(workDir, true).build();
+    // 标题与三步强制流程
+    expect(prompt).toContain("Plan Mode: ON");
+    expect(prompt).toContain("STEP 1: 强制环境嗅探");
+    expect(prompt).toContain("STEP 2: 严格的单步执行与实时打勾");
+    expect(prompt).toContain("STEP 3: 迷失时的自救");
+    // 关键约束:分支 A 全新任务 / 分支 B 断点续传不覆盖
+    expect(prompt).toContain("分支 A (全新任务)");
+    expect(prompt).toContain("分支 B (断点续传 / 任务唤醒)");
+    expect(prompt).toContain("绝对不要覆盖");
+    // 单步打勾约束
+    expect(prompt).toContain("- [ ]");
+    expect(prompt).toContain("- [x]");
+    // 仍包含极简内核(规范追加在内核之后)
+    expect(prompt).toContain("tiny-claw");
+    expect(prompt).toContain("核心纪律");
+  });
+
+  it("planMode=true 与 AGENTS.md/Skills 可共存,三层齐全", async () => {
+    await writeFile(join(workDir, "AGENTS.md"), "# 项目规范\n必须用 TypeScript");
+    await mkdir(join(workDir, ".claw", "skills", "deploy"), { recursive: true });
+    await writeFile(
+      join(workDir, ".claw", "skills", "deploy", "SKILL.md"),
+      "---\nname: deploy\ndescription: 部署到生产\n---\n\n# 部署指南\n跑 npm run build",
+    );
+    const prompt = await new PromptComposer(workDir, true).build();
+    expect(prompt).toContain("Plan Mode: ON");
+    expect(prompt).toContain("项目专属指南");
+    expect(prompt).toContain("必须用 TypeScript");
+    expect(prompt).toContain("deploy");
+  });
 });
