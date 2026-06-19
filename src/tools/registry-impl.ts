@@ -291,3 +291,157 @@ export class BashTool implements BaseTool {
     return stdout;
   }
 }
+
+// ==========================================
+// 内置工具 5:EditFileTool (第 07 讲)
+// 极简工具集原语之一:外科手术式局部替换。
+// 核心:多级模糊匹配链,吸收大模型的"缩进幻觉"格式误差。
+// ==========================================
+
+/**
+ * 多级模糊匹配链 (Chain of Responsibility):四级容错降级替换。
+ * L1 精确匹配 → L2 换行符归一化 → L3 Trim 首尾空白 → L4 逐行去缩进。
+ * 安全底线:匹配结果 > 1 时拒绝替换,要求模型提供更多上下文。
+ */
+function fuzzyReplace(
+  originalContent: string,
+  oldText: string,
+  newText: string,
+): { content: string; level: number } {
+  // L1: 精确匹配
+  const exactCount = countOccurrences(originalContent, oldText);
+  if (exactCount === 1) {
+    return { content: originalContent.replace(oldText, newText), level: 1 };
+  }
+  if (exactCount > 1) {
+    throw new Error(`old_text 精确匹配到了 ${exactCount} 处,请提供更多的上下文代码以确保唯一性`);
+  }
+
+  // L2: 换行符归一化 (\r\n → \n)
+  const normalizedContent = originalContent.replaceAll("\r\n", "\n");
+  const normalizedOld = oldText.replaceAll("\r\n", "\n");
+  const l2Count = countOccurrences(normalizedContent, normalizedOld);
+  if (l2Count === 1) {
+    return { content: normalizedContent.replace(normalizedOld, newText), level: 2 };
+  }
+
+  // L3: Trim Space 匹配 (忽略首尾空行和空格)
+  const trimmedOld = normalizedOld.trim();
+  if (trimmedOld !== "") {
+    const l3Count = countOccurrences(normalizedContent, trimmedOld);
+    if (l3Count === 1) {
+      return { content: normalizedContent.replace(trimmedOld, newText), level: 3 };
+    }
+  }
+
+  // L4: 逐行去缩进匹配 (最强容错,消除模型遗漏缩进的幻觉)
+  return { content: lineByLineReplace(normalizedContent, normalizedOld, newText), level: 4 };
+}
+
+/** 统计子串出现次数 (不重叠) */
+function countOccurrences(haystack: string, needle: string): number {
+  if (needle === "") return 0;
+  let count = 0;
+  let idx = haystack.indexOf(needle);
+  while (idx !== -1) {
+    count++;
+    idx = haystack.indexOf(needle, idx + needle.length);
+  }
+  return count;
+}
+
+/** L4: 按行切割,去除每行首尾空白后滑动窗口匹配 */
+function lineByLineReplace(content: string, oldText: string, newText: string): string {
+  const contentLines = content.split("\n");
+  const oldLines = oldText
+    .trim()
+    .split("\n")
+    .map((l) => l.trim());
+
+  if (oldLines.length === 0 || contentLines.length < oldLines.length) {
+    throw new Error("找不到该代码片段");
+  }
+
+  let matchCount = 0;
+  let matchStart = -1;
+  // 滑动窗口在原文件中寻找匹配块
+  for (let i = 0; i <= contentLines.length - oldLines.length; i++) {
+    let isMatch = true;
+    for (let j = 0; j < oldLines.length; j++) {
+      if (contentLines[i + j]!.trim() !== oldLines[j]) {
+        isMatch = false;
+        break;
+      }
+    }
+    if (isMatch) {
+      matchCount++;
+      matchStart = i;
+    }
+  }
+
+  if (matchCount === 0) {
+    throw new Error("在文件中未找到 old_text,请先调用 read_file 仔细确认要替换的内容");
+  }
+  if (matchCount > 1) {
+    throw new Error(`模糊匹配到了 ${matchCount} 处相似代码,请提供更多上下文行代码以精确定位`);
+  }
+
+  const matchEnd = matchStart + oldLines.length;
+  // 将匹配到的原始行范围替换为 newText
+  return [...contentLines.slice(0, matchStart), newText, ...contentLines.slice(matchEnd)].join("\n");
+}
+
+export class EditFileTool implements BaseTool {
+  constructor(private readonly workDir: string) {}
+
+  name(): string {
+    return "edit_file";
+  }
+
+  definition(): ToolDefinition {
+    return {
+      name: "edit_file",
+      description:
+        "对现有文件进行局部的字符串替换。比重写整个文件更安全、更快速。请提供足够的上下文(建议上下各多包含几行)以确保 old_text 在文件中唯一。",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "要修改的文件路径" },
+          old_text: {
+            type: "string",
+            description: "文件中原有的文本。必须包含足够的上下文以确保唯一匹配。",
+          },
+          new_text: { type: "string", description: "要替换成的新文本" },
+        },
+        required: ["path", "old_text", "new_text"],
+      },
+    };
+  }
+
+  async execute(args: string): Promise<string> {
+    let path: string;
+    let oldText: string;
+    let newText: string;
+    try {
+      const input = JSON.parse(args) as { path?: string; old_text?: string; new_text?: string };
+      path = input.path ?? "";
+      oldText = input.old_text ?? "";
+      newText = input.new_text ?? "";
+    } catch {
+      throw new Error("参数解析失败: 期望 JSON 含 path、old_text、new_text 字段");
+    }
+
+    const fullPath = safeResolve(this.workDir, path);
+
+    // 1. 读取原文件
+    const originalContent = await readFile(fullPath, "utf8");
+
+    // 2. 多级模糊替换
+    const { content: newContent, level } = fuzzyReplace(originalContent, oldText, newText);
+
+    // 3. 写回磁盘
+    await writeFile(fullPath, newContent, "utf8");
+
+    return `✅ 成功修改文件: ${path} (匹配级别 L${level})`;
+  }
+}
