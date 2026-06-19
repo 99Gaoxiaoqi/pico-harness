@@ -19,6 +19,7 @@ import {
   WriteFileTool,
 } from "../tools/registry-impl.js";
 import { FeishuBot, loadFeishuConfig } from "../feishu/bot.js";
+import { PromptComposer } from "../context/composer.js";
 
 function buildRegistry(workDir: string): ToolRegistry {
   const registry = new ToolRegistry();
@@ -33,11 +34,13 @@ function buildRegistry(workDir: string): ToolRegistry {
 async function runOnce(kind: ProviderKind, enableThinking: boolean, task: string): Promise<void> {
   const provider = createProvider(kind);
   const registry = buildRegistry(process.cwd());
+  const systemPrompt = await new PromptComposer(process.cwd()).build();
   const engine = new AgentEngine({
     provider,
     registry,
     workDir: process.cwd(),
     enableThinking,
+    systemPrompt,
     reporter: new TerminalReporter(),
   });
   console.log("开始执行任务...\n");
@@ -45,7 +48,8 @@ async function runOnce(kind: ProviderKind, enableThinking: boolean, task: string
 }
 
 /** HTTP Server 模式:接收外部事件流触发 Agent (等价于飞书 webhook 入口) */
-function serve(kind: ProviderKind, enableThinking: boolean, port: number): void {
+async function serve(kind: ProviderKind, enableThinking: boolean, port: number): Promise<void> {
+  const systemPrompt = await new PromptComposer(process.cwd()).build();
   const server = createServer(async (req, res) => {
     if (req.method !== "POST" || req.url !== "/ask") {
       res.writeHead(404, { "Content-Type": "application/json" });
@@ -77,6 +81,7 @@ function serve(kind: ProviderKind, enableThinking: boolean, port: number): void 
         registry,
         workDir: process.cwd(),
         enableThinking,
+        systemPrompt,
         reporter,
       });
 
@@ -130,11 +135,13 @@ async function main() {
     // 飞书模式:启动 WSClient 长连接,群里 @机器人 触发 Agent,状态发回会话
     const provider = createProvider(kind);
     const registry = buildRegistry(process.cwd());
+    const systemPrompt = await new PromptComposer(process.cwd()).build();
     const engine = new AgentEngine({
       provider,
       registry,
       workDir: process.cwd(),
       enableThinking,
+      systemPrompt,
       reporter: new SilentReporter(), // 实际回写由运行时 FeishuReporter 负责
     });
     const bot = new FeishuBot(engine, loadFeishuConfig());
@@ -143,7 +150,7 @@ async function main() {
   }
 
   if (values.serve) {
-    serve(kind, enableThinking, Number(values.port));
+    await serve(kind, enableThinking, Number(values.port));
     return;
   }
 
