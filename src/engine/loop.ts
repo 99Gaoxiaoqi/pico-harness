@@ -7,7 +7,7 @@
 // 把模型的意图 (ToolCall) 交给执行层,再把物理世界的反馈 (Observation) 追加回内存。
 
 import type { LLMProvider } from "../provider/interface.js";
-import type { Message } from "../schema/message.js";
+import type { Message, ToolCall } from "../schema/message.js";
 import type { Registry } from "../tools/registry.js";
 
 export interface AgentEngineOptions {
@@ -115,30 +115,55 @@ export class AgentEngine {
       // 4. 执行行动 (Action) 与 获取观察结果 (Observation)
       console.log(`[Engine] 模型请求调用 ${toolCalls.length} 个工具...`);
 
-      // 注意:第 08 讲会把这里改成并行执行;第 02/03 讲先保持顺序,贴合课程原始实现。
-      for (const toolCall of toolCalls) {
-        console.log(`    -> 🛠️ 执行工具: ${toolCall.name}, 参数: ${toolCall.arguments}`);
+      // 第 08 讲:Fork-Join 并发执行。
+      // 策略:批次全只读则并行 (Promise.all),含写操作则串行。
+      // 预分配结果数组按原索引写入,既并发安全又保留工具调用原始顺序。
+      const isReadOnly = this.registry.isReadOnlyTool;
+      const allReadOnly =
+        isReadOnly !== undefined && toolCalls.every((tc) => isReadOnly.call(this.registry, tc.name));
 
-        const result = await this.registry.execute(toolCall);
+      const observations: Message[] = new Array(toolCalls.length);
 
-        if (result.isError) {
-          console.log(`    -> ❌ 工具执行报错: ${result.output}`);
-        } else {
-          console.log(`    -> ✅ 工具执行成功 (返回 ${result.output.length} 字节)`);
+      if (allReadOnly) {
+        console.log("[Engine] 批次全为只读工具,启用并行执行 (Fork-Join)...");
+        // 并行执行,按索引写入,保留原始顺序
+        await Promise.all(
+          toolCalls.map(async (toolCall, i) => {
+            observations[i] = await this.runOneTool(toolCall);
+          }),
+        );
+      } else {
+        console.log("[Engine] 批次含写操作,退化为顺序执行...");
+        for (let i = 0; i < toolCalls.length; i++) {
+          observations[i] = await this.runOneTool(toolCalls[i]!);
         }
+      }
 
-        // 将观察结果封装为 User Message 追加到上下文
-        // ToolCallId 必须携带!这是维系大模型推理链条的关键
-        contextHistory.push({
-          role: "user",
-          content: result.output,
-          toolCallId: toolCall.id,
-        });
+      // 将观察结果按顺序追加到上下文
+      for (const obs of observations) {
+        contextHistory.push(obs);
       }
 
       // 循环回到开头,模型带着新加入的 Observation 继续下一轮思考...
     }
 
     return contextHistory;
+  }
+
+  /** 执行单个工具调用并返回观察结果消息 (带日志) */
+  private async runOneTool(toolCall: ToolCall): Promise<Message> {
+    console.log(`    -> 🛠️ 执行工具: ${toolCall.name}, 参数: ${toolCall.arguments}`);
+    const result = await this.registry.execute(toolCall);
+    if (result.isError) {
+      console.log(`    -> ❌ 工具执行报错: ${result.output}`);
+    } else {
+      console.log(`    -> ✅ 工具执行成功 (返回 ${result.output.length} 字节)`);
+    }
+    // ToolCallId 必须携带!这是维系大模型推理链条的关键
+    return {
+      role: "user",
+      content: result.output,
+      toolCallId: toolCall.id,
+    };
   }
 }

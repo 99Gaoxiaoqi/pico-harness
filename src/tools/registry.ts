@@ -17,6 +17,12 @@ export interface BaseTool {
   definition(): ToolDefinition;
   /** 接收大模型吐出的 JSON 参数,执行具体业务逻辑 */
   execute(args: string): Promise<string>;
+  /**
+   * 是否为只读工具 (第 08 讲并发调度用)。
+   * 只读工具的批次可并行执行;含写操作的批次退化为串行。
+   * 默认 false (保守视为写操作)。
+   */
+  readOnly?: boolean;
 }
 
 /** 工具的注册与分发接口 */
@@ -27,6 +33,12 @@ export interface Registry {
   getAvailableTools(): ToolDefinition[];
   /** 实际路由并执行模型请求的工具调用 */
   execute(call: ToolCall): Promise<ToolResult>;
+  /**
+   * 判断工具是否为只读 (第 08 讲)。
+   * 引擎据此决定批次是否可并发:全只读则并行,有写操作则串行。
+   * 默认返回 false (保守视为写操作)。
+   */
+  isReadOnlyTool?(name: string): boolean;
 }
 
 /**

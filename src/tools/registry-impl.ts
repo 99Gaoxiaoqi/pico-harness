@@ -45,6 +45,11 @@ export class ToolRegistry implements Registry {
     return [...this.tools.values()].map((t) => t.definition());
   }
 
+  /** 判断工具是否只读 (默认 false,保守视为写操作) */
+  isReadOnlyTool(name: string): boolean {
+    return this.tools.get(name)?.readOnly ?? false;
+  }
+
   async execute(call: ToolCall): Promise<ToolResult> {
     // 1. 路由查找:找不到说明模型幻觉,返回 isError 让模型自纠
     const tool = this.tools.get(call.name);
@@ -76,6 +81,7 @@ export class ToolRegistry implements Registry {
 // 内置工具 1:EchoTool (验证用,第 04 讲遗留)
 // ==========================================
 export class EchoTool implements BaseTool {
+  readonly readOnly = true;
   name(): string {
     return "echo";
   }
@@ -111,6 +117,7 @@ export class EchoTool implements BaseTool {
 const READ_FILE_MAX_BYTES = 8000;
 
 export class ReadFileTool implements BaseTool {
+  readonly readOnly = true;
   constructor(private readonly workDir: string) {}
 
   name(): string {

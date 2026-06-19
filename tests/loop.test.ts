@@ -66,6 +66,9 @@ class MockRegistry implements Registry {
     this.executed.push(call);
     return { toolCallId: call.id, output: `result-of-${call.name}`, isError: false };
   }
+  isReadOnlyTool(_name: string): boolean {
+    return false;
+  }
 }
 
 describe("AgentEngine Main Loop", () => {
@@ -163,5 +166,95 @@ describe("AgentEngine Main Loop", () => {
 
     // 不应有 toolsCount===0 的调用
     expect(provider.calls.every((c) => c.toolsCount > 0)).toBe(true);
+  });
+
+  it("全只读批次并行执行,且观察结果按原始顺序保留", async () => {
+    // 一次返回 3 个只读工具调用,然后给最终答案
+    const provider = new ScriptedProvider([
+      {
+        role: "assistant",
+        content: "并发读三个文件",
+        toolCalls: [
+          { id: "c1", name: "read", arguments: "{}" },
+          { id: "c2", name: "read", arguments: "{}" },
+          { id: "c3", name: "read", arguments: "{}" },
+        ],
+      },
+      { role: "assistant", content: "完成" },
+    ]);
+
+    // 每个工具执行延迟 50ms;若并行总耗时约 50ms,若串行约 150ms
+    const registry = new (class implements Registry {
+      readonly executed: ToolCall[] = [];
+      register(): void {}
+      getAvailableTools(): ToolDefinition[] {
+        return [{ name: "read", description: "", inputSchema: { type: "object" } }];
+      }
+      async execute(call: ToolCall): Promise<ToolResult> {
+        this.executed.push(call);
+        await new Promise((r) => setTimeout(r, 50));
+        return { toolCallId: call.id, output: `out-${call.id}`, isError: false };
+      }
+      isReadOnlyTool(_name: string): boolean {
+        return true;
+      }
+    })();
+
+    const engine = new AgentEngine({ provider, registry, workDir: "/tmp", enableThinking: false });
+    const start = Date.now();
+    const history = await engine.run("并发读");
+    const elapsed = Date.now() - start;
+
+    // 三个工具都执行了
+    expect(registry.executed).toHaveLength(3);
+    // 并行:总耗时应明显小于 3*50=150ms (留余量取 120ms)
+    expect(elapsed).toBeLessThan(120);
+    // 观察结果按原始顺序 c1/c2/c3 保留
+    const obs = history.filter((m) => m.toolCallId);
+    expect(obs.map((m) => m.toolCallId)).toEqual(["c1", "c2", "c3"]);
+    expect(obs.map((m) => m.content)).toEqual(["out-c1", "out-c2", "out-c3"]);
+  });
+
+  it("含写操作的批次退化为顺序执行", async () => {
+    const provider = new ScriptedProvider([
+      {
+        role: "assistant",
+        content: "先写后读",
+        toolCalls: [
+          { id: "c1", name: "write", arguments: "{}" },
+          { id: "c2", name: "read", arguments: "{}" },
+        ],
+      },
+      { role: "assistant", content: "完成" },
+    ]);
+
+    // write 标记为非只读,read 为只读 → 批次含写操作,应串行
+    const registry = new (class implements Registry {
+      readonly executed: ToolCall[] = [];
+      register(): void {}
+      getAvailableTools(): ToolDefinition[] {
+        return [
+          { name: "write", description: "", inputSchema: { type: "object" } },
+          { name: "read", description: "", inputSchema: { type: "object" } },
+        ];
+      }
+      async execute(call: ToolCall): Promise<ToolResult> {
+        this.executed.push(call);
+        await new Promise((r) => setTimeout(r, 50));
+        return { toolCallId: call.id, output: `out-${call.name}`, isError: false };
+      }
+      isReadOnlyTool(name: string): boolean {
+        return name === "read";
+      }
+    })();
+
+    const engine = new AgentEngine({ provider, registry, workDir: "/tmp", enableThinking: false });
+    const start = Date.now();
+    await engine.run("写读");
+    const elapsed = Date.now() - start;
+
+    // 串行:总耗时应接近 2*50=100ms (大于 90ms)
+    expect(elapsed).toBeGreaterThanOrEqual(90);
+    expect(registry.executed).toHaveLength(2);
   });
 });
