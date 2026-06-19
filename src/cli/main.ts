@@ -5,7 +5,7 @@
 import { parseArgs } from "node:util";
 import { AgentEngine } from "../engine/loop.js";
 import { createProvider, type ProviderKind } from "../provider/factory.js";
-import { EchoTool, ReadFileTool, ToolRegistry } from "../tools/registry-impl.js";
+import { BashTool, EchoTool, ReadFileTool, ToolRegistry, WriteFileTool } from "../tools/registry-impl.js";
 
 async function main() {
   const { values, positionals } = parseArgs({
@@ -29,6 +29,8 @@ async function main() {
   const registry = new ToolRegistry();
   registry.register(new EchoTool());
   registry.register(new ReadFileTool(process.cwd()));
+  registry.register(new WriteFileTool(process.cwd()));
+  registry.register(new BashTool(process.cwd()));
 
   const engine = new AgentEngine({
     provider,
