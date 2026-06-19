@@ -9,6 +9,7 @@ import { parseArgs } from "node:util";
 import { createServer } from "node:http";
 import { AgentEngine } from "../engine/loop.js";
 import { globalSessionManager } from "../engine/session.js";
+import { Compactor } from "../context/compactor.js";
 import { SilentReporter, TerminalReporter } from "../engine/reporter.js";
 import { createProvider, type ProviderKind } from "../provider/factory.js";
 import {
@@ -32,6 +33,14 @@ function buildRegistry(workDir: string): ToolRegistry {
   return registry;
 }
 
+/**
+ * 构建上下文压缩器:防 OOM 的物理防线。
+ * 水位线 20000 字符(约 5K token,留足模型输出空间),保护区最近 6 条消息。
+ */
+function buildCompactor(): Compactor {
+  return new Compactor({ maxChars: 20000, retainLastMsgs: 6 });
+}
+
 /** 控制台入口的 SessionId:以工作目录路径为标识,重启后可恢复 */
 function consoleSessionId(workDir: string): string {
   return `console:${workDir}`;
@@ -48,6 +57,7 @@ async function runOnce(kind: ProviderKind, enableThinking: boolean, task: string
     workDir,
     enableThinking,
     systemPrompt,
+    compactor: buildCompactor(),
     reporter: new TerminalReporter(),
   });
   // 从全局 SessionManager 取/建会话:CLI 模式以工作目录为 sessionId
@@ -93,6 +103,7 @@ async function serve(kind: ProviderKind, enableThinking: boolean, port: number):
         workDir,
         enableThinking,
         systemPrompt,
+        compactor: buildCompactor(),
         reporter,
       });
 
@@ -158,6 +169,7 @@ async function main() {
       workDir,
       enableThinking,
       systemPrompt,
+      compactor: buildCompactor(),
       reporter: new SilentReporter(), // 实际回写由运行时 FeishuReporter 负责
     });
     // 飞书每个 chatId 对应独立 Session,实现多群物理隔离

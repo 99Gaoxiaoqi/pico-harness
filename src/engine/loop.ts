@@ -13,11 +13,12 @@
 import type { LLMProvider } from "../provider/interface.js";
 import type { Message, ToolCall } from "../schema/message.js";
 import type { Registry } from "../tools/registry.js";
+import type { Compactor } from "../context/compactor.js";
 import { SilentReporter, type Reporter } from "./reporter.js";
 import type { Session } from "./session.js";
 
-/** WorkingMemory 滑动窗口大小:截取最近 N 条消息发给大模型 */
-const DEFAULT_WORKING_MEMORY_LIMIT = 6;
+/** WorkingMemory 滑动窗口大小:截取最近 N 条消息供压缩器判断(含远期历史) */
+const DEFAULT_WORKING_MEMORY_LIMIT = 20;
 
 export interface AgentEngineOptions {
   provider: LLMProvider;
@@ -31,8 +32,13 @@ export interface AgentEngineOptions {
    * 开启后,每轮行动前先发起一次不带工具的纯文本请求,强制模型规划。
    */
   enableThinking?: boolean;
-  /** WorkingMemory 滑动窗口大小(默认 6 条) */
+  /** WorkingMemory 滑动窗口大小(默认 20 条,给压缩器留判断空间) */
   workingMemoryLimit?: number;
+  /**
+   * 上下文压缩器:在向 Provider 发起推理前过一遍,防 OOM (第 12 讲)。
+   * 未提供则不压缩(纯靠 WorkingMemory 条数截断)。
+   */
+  compactor?: Compactor;
   /** 可选的轮次日志回调,便于第 19 讲 Tracing 接入 */
   onTurn?: (info: { turn: number; message: Message }) => void;
   /** 输出 Reporter;默认静默 (第 09 讲) */
@@ -47,6 +53,7 @@ export class AgentEngine {
   private readonly systemPrompt: string;
   private readonly enableThinking: boolean;
   private readonly workingMemoryLimit: number;
+  private readonly compactor?: Compactor;
   private readonly onTurn?: (info: { turn: number; message: Message }) => void;
   private readonly reporter: Reporter;
 
@@ -60,6 +67,7 @@ export class AgentEngine {
         "You have tools to read, write, edit files and run bash. Think step by step.";
     this.enableThinking = opts.enableThinking ?? false;
     this.workingMemoryLimit = opts.workingMemoryLimit ?? DEFAULT_WORKING_MEMORY_LIMIT;
+    this.compactor = opts.compactor;
     this.onTurn = opts.onTurn;
     this.reporter = opts.reporter ?? new SilentReporter();
   }
@@ -103,6 +111,16 @@ export class AgentEngine {
       ];
 
       // ====================================================================
+      // 2. 【核心注入点】:在向 Provider 发起推理前,过一遍内存压缩器!
+      // 无论带出多少上下文,若字符总数超标,早期日志将被掩码化,
+      // 超大日志将被掐头去尾。Compact 只作用于本轮发给大模型的临时 Context,
+      // 写入 Session 的永远是全量真实数据。
+      // ====================================================================
+      const compactedContext = this.compactor
+        ? this.compactor.compact(contextHistory)
+        : contextHistory;
+
+      // ====================================================================
       // Phase 1: 慢思考阶段 (Thinking) —— 剥夺工具,强制规划 (第 03 讲)
       // ====================================================================
       if (this.enableThinking) {
@@ -110,25 +128,25 @@ export class AgentEngine {
 
         // 核心机制:传入空的 tools 数组!
         // 大模型看不到任何 JSON Schema,被迫只能输出纯文本的思考过程。
-        const thinkResp = await this.provider.generate(contextHistory, []);
+        const thinkResp = await this.provider.generate(compactedContext, []);
 
         if (thinkResp.content) {
           // 将思考过程持久化到 Session,并追加到本轮临时上下文供 Action 使用
           session.append(thinkResp);
-          contextHistory.push(thinkResp);
+          compactedContext.push(thinkResp);
         }
       }
 
       // ====================================================================
       // Phase 2: 行动阶段 (Action) —— 恢复工具,顺着规划执行
       // ====================================================================
-      // 此时 contextHistory 已包含 Phase 1 模型自己的 Thinking Trace。
+      // 此时 compactedContext 已包含 Phase 1 模型自己的 Thinking Trace。
       // 自回归特性:模型看到自己刚才的规划,会顺理成章生成对应的工具调用。
-      const responseMsg = await this.provider.generate(contextHistory, availableTools);
+      const responseMsg = await this.provider.generate(compactedContext, availableTools);
 
       // 将大模型的行动响应持久化到 Session
       session.append(responseMsg);
-      contextHistory.push(responseMsg);
+      compactedContext.push(responseMsg);
       this.onTurn?.({ turn: turnCount, message: responseMsg });
 
       // 模型回复纯文本时广播 (通常是思考过程或最终结果)
