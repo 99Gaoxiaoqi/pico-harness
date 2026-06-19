@@ -8,6 +8,7 @@
 import { parseArgs } from "node:util";
 import { createServer } from "node:http";
 import { AgentEngine } from "../engine/loop.js";
+import { globalSessionManager } from "../engine/session.js";
 import { SilentReporter, TerminalReporter } from "../engine/reporter.js";
 import { createProvider, type ProviderKind } from "../provider/factory.js";
 import {
@@ -31,25 +32,35 @@ function buildRegistry(workDir: string): ToolRegistry {
   return registry;
 }
 
+/** 控制台入口的 SessionId:以工作目录路径为标识,重启后可恢复 */
+function consoleSessionId(workDir: string): string {
+  return `console:${workDir}`;
+}
+
 async function runOnce(kind: ProviderKind, enableThinking: boolean, task: string): Promise<void> {
   const provider = createProvider(kind);
-  const registry = buildRegistry(process.cwd());
-  const systemPrompt = await new PromptComposer(process.cwd()).build();
+  const workDir = process.cwd();
+  const registry = buildRegistry(workDir);
+  const systemPrompt = await new PromptComposer(workDir).build();
   const engine = new AgentEngine({
     provider,
     registry,
-    workDir: process.cwd(),
+    workDir,
     enableThinking,
     systemPrompt,
     reporter: new TerminalReporter(),
   });
+  // 从全局 SessionManager 取/建会话:CLI 模式以工作目录为 sessionId
+  const session = globalSessionManager.getOrCreate(consoleSessionId(workDir), workDir);
+  session.append({ role: "user", content: task });
   console.log("开始执行任务...\n");
-  await engine.run(task);
+  await engine.run(session);
 }
 
 /** HTTP Server 模式:接收外部事件流触发 Agent (等价于飞书 webhook 入口) */
 async function serve(kind: ProviderKind, enableThinking: boolean, port: number): Promise<void> {
-  const systemPrompt = await new PromptComposer(process.cwd()).build();
+  const workDir = process.cwd();
+  const systemPrompt = await new PromptComposer(workDir).build();
   const server = createServer(async (req, res) => {
     if (req.method !== "POST" || req.url !== "/ask") {
       res.writeHead(404, { "Content-Type": "application/json" });
@@ -59,8 +70,8 @@ async function serve(kind: ProviderKind, enableThinking: boolean, port: number):
 
     try {
       const body = await readBody(req);
-      const { prompt } = JSON.parse(body) as { prompt?: string };
-      if (!prompt) {
+      const parsed = JSON.parse(body) as { prompt?: string; sessionId?: string };
+      if (!parsed.prompt) {
         res.writeHead(400, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "缺少 prompt 字段" }));
         return;
@@ -75,17 +86,21 @@ async function serve(kind: ProviderKind, enableThinking: boolean, port: number):
       })();
 
       const provider = createProvider(kind);
-      const registry = buildRegistry(process.cwd());
+      const registry = buildRegistry(workDir);
       const engine = new AgentEngine({
         provider,
         registry,
-        workDir: process.cwd(),
+        workDir,
         enableThinking,
         systemPrompt,
         reporter,
       });
 
-      await engine.run(prompt);
+      // HTTP 入口:可选传入 sessionId 实现多会话隔离,缺省用单一控制台会话
+      const sessionId = parsed.sessionId ?? `http:${workDir}`;
+      const session = globalSessionManager.getOrCreate(sessionId, workDir);
+      session.append({ role: "user", content: parsed.prompt });
+      await engine.run(session);
 
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ reply: collected.join("\n") }));
@@ -133,18 +148,20 @@ async function main() {
 
   if (values.feishu) {
     // 飞书模式:启动 WSClient 长连接,群里 @机器人 触发 Agent,状态发回会话
+    const workDir = process.cwd();
     const provider = createProvider(kind);
-    const registry = buildRegistry(process.cwd());
-    const systemPrompt = await new PromptComposer(process.cwd()).build();
+    const registry = buildRegistry(workDir);
+    const systemPrompt = await new PromptComposer(workDir).build();
     const engine = new AgentEngine({
       provider,
       registry,
-      workDir: process.cwd(),
+      workDir,
       enableThinking,
       systemPrompt,
       reporter: new SilentReporter(), // 实际回写由运行时 FeishuReporter 负责
     });
-    const bot = new FeishuBot(engine, loadFeishuConfig());
+    // 飞书每个 chatId 对应独立 Session,实现多群物理隔离
+    const bot = new FeishuBot(engine, loadFeishuConfig(), workDir);
     bot.start();
     return;
   }

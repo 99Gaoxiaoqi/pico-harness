@@ -12,6 +12,7 @@
 
 import { Client, EventDispatcher, WSClient } from "@larksuiteoapi/node-sdk";
 import type { AgentEngine } from "../engine/loop.js";
+import { globalSessionManager } from "../engine/session.js";
 import type { Reporter } from "../engine/reporter.js";
 
 /** 飞书机器人配置 */
@@ -45,15 +46,18 @@ const REPORT_MAX_LEN = 200;
 /**
  * FeishuBot:封装飞书机器人的配置与核心业务流。
  * 持有引擎引用,收到消息后跑 Agent,通过 FeishuReporter 回写状态。
+ * 每个 chatId 对应独立 Session,实现多群物理隔离(第 11 讲)。
  */
 export class FeishuBot {
   private readonly client: Client;
   private readonly engine: AgentEngine;
   private readonly config: FeishuConfig;
+  private readonly workDir: string;
 
-  constructor(engine: AgentEngine, config: FeishuConfig) {
+  constructor(engine: AgentEngine, config: FeishuConfig, workDir: string) {
     this.engine = engine;
     this.config = config;
+    this.workDir = workDir;
     this.client = new Client({
       appId: config.appId,
       appSecret: config.appSecret,
@@ -116,8 +120,11 @@ export class FeishuBot {
   private async runAgentAndReport(chatId: string, prompt: string): Promise<void> {
     const reporter = new FeishuReporter(this.client, chatId);
     try {
-      // 第 09 讲:运行时传入 reporter,把引擎状态发回飞书会话
-      await this.engine.run(prompt, reporter);
+      // 第 11 讲:每个 chatId 对应独立 Session,实现多群物理隔离。
+      // 同一群的连续消息复用同一 Session,跨群互不干扰。
+      const session = globalSessionManager.getOrCreate(`feishu:${chatId}`, this.workDir);
+      session.append({ role: "user", content: prompt });
+      await this.engine.run(session, reporter);
     } catch (err) {
       await reporter.onMessage(`❌ 任务执行失败: ${err instanceof Error ? err.message : String(err)}`);
     }

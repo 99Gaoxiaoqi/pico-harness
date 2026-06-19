@@ -2,9 +2,12 @@
 // 用 Mock Provider + Mock Registry 验证:
 // 1. 模型返回 toolCalls 时,Loop 会执行工具并把观察结果追加回上下文
 // 2. 模型不再返回 toolCalls 时,Loop 正常退出
+//
+// 第 11 讲:引擎改为 Session 驱动,测试改为构造 Session 后调用 engine.run(session)。
 
 import { describe, expect, it } from "vitest";
 import { AgentEngine } from "../src/engine/loop.js";
+import { Session } from "../src/engine/session.js";
 import type { LLMProvider } from "../src/provider/interface.js";
 import type { Message, ToolCall, ToolDefinition, ToolResult } from "../src/schema/message.js";
 import type { BaseTool, Registry } from "../src/tools/registry.js";
@@ -71,6 +74,13 @@ class MockRegistry implements Registry {
   }
 }
 
+/** 构造一个带初始用户消息的 Session */
+function newSession(prompt: string, workDir = "/tmp"): Session {
+  const sess = new Session("test", workDir);
+  sess.append({ role: "user", content: prompt });
+  return sess;
+}
+
 describe("AgentEngine Main Loop", () => {
   it("执行一轮工具调用后收到最终答案即退出", async () => {
     const provider = new ScriptedProvider([
@@ -84,10 +94,11 @@ describe("AgentEngine Main Loop", () => {
     const registry = new MockRegistry();
     const engine = new AgentEngine({ provider, registry, workDir: "/tmp" });
 
-    const history = await engine.run("做点什么");
+    const session = newSession("做点什么");
+    const returned = await engine.run(session);
 
     // 末尾应是最终答案消息,且无 toolCalls
-    const last = history[history.length - 1]!;
+    const last = returned[returned.length - 1]!;
     expect(last.content).toBe("完成");
     expect(last.toolCalls ?? []).toHaveLength(0);
     // 工具被调用过一次
@@ -95,7 +106,7 @@ describe("AgentEngine Main Loop", () => {
     expect(registry.executed[0]!.name).toBe("read");
   });
 
-  it("上下文时间线包含 system / user / assistant / 观察结果", async () => {
+  it("Session 完整历史包含 user / assistant / 观察结果", async () => {
     const provider = new ScriptedProvider([
       {
         role: "assistant",
@@ -107,15 +118,18 @@ describe("AgentEngine Main Loop", () => {
     const registry = new MockRegistry();
     const engine = new AgentEngine({ provider, registry, workDir: "/tmp" });
 
-    const history = await engine.run("hi");
+    const session = newSession("hi");
+    await engine.run(session);
+    const history = session.getHistory();
 
-    expect(history[0]!.role).toBe("system");
-    expect(history[1]!.role).toBe("user");
+    // user 输入
+    expect(history[0]!.role).toBe("user");
+    expect(history[0]!.content).toBe("hi");
     // assistant (思考+工具调用)
-    expect(history[2]!.role).toBe("assistant");
-    expect(history[2]!.toolCalls).toHaveLength(1);
+    expect(history[1]!.role).toBe("assistant");
+    expect(history[1]!.toolCalls).toHaveLength(1);
     // 观察结果:user 角色,带 toolCallId
-    const observation = history[3]!;
+    const observation = history[2]!;
     expect(observation.role).toBe("user");
     expect(observation.toolCallId).toBe("c1");
     expect(observation.content).toBe("result-of-bash");
@@ -131,7 +145,8 @@ describe("AgentEngine Main Loop", () => {
       enableThinking: true,
     });
 
-    const history = await engine.run("复杂任务");
+    const session = newSession("复杂任务");
+    await engine.run(session);
 
     // 每一轮都应有一次 toolsCount===0 (Thinking) 紧跟一次 toolsCount>0 (Action)
     // 共两轮 → 4 次 generate 调用
@@ -141,11 +156,10 @@ describe("AgentEngine Main Loop", () => {
     expect(provider.calls[2]!.toolsCount).toBe(0); // Turn2 Thinking
     expect(provider.calls[3]!.toolsCount).toBeGreaterThan(0); // Turn2 Action
 
-    // Turn1 的思考 trace 应作为 assistant 消息出现在 history 中,
-    // 且位置在 Turn1 的 Action 响应之前
-    const thinkMsg = history.find(
-      (m) => m.role === "assistant" && m.content === "我计划先读文件再下结论。",
-    );
+    // Turn1 的思考 trace 应作为 assistant 消息出现在 Session 历史中
+    const thinkMsg = session
+      .getHistory()
+      .find((m) => m.role === "assistant" && m.content === "我计划先读文件再下结论。");
     expect(thinkMsg).toBeDefined();
 
     // 工具仍被调用一次
@@ -162,7 +176,7 @@ describe("AgentEngine Main Loop", () => {
       enableThinking: false,
     });
 
-    await engine.run("简单任务");
+    await engine.run(newSession("简单任务"));
 
     // 不应有 toolsCount===0 的调用
     expect(provider.calls.every((c) => c.toolsCount > 0)).toBe(true);
@@ -202,7 +216,8 @@ describe("AgentEngine Main Loop", () => {
 
     const engine = new AgentEngine({ provider, registry, workDir: "/tmp", enableThinking: false });
     const start = Date.now();
-    const history = await engine.run("并发读");
+    const session = newSession("并发读");
+    await engine.run(session);
     const elapsed = Date.now() - start;
 
     // 三个工具都执行了
@@ -210,7 +225,7 @@ describe("AgentEngine Main Loop", () => {
     // 并行:总耗时应明显小于 3*50=150ms (留余量取 120ms)
     expect(elapsed).toBeLessThan(120);
     // 观察结果按原始顺序 c1/c2/c3 保留
-    const obs = history.filter((m) => m.toolCallId);
+    const obs = session.getHistory().filter((m) => m.toolCallId);
     expect(obs.map((m) => m.toolCallId)).toEqual(["c1", "c2", "c3"]);
     expect(obs.map((m) => m.content)).toEqual(["out-c1", "out-c2", "out-c3"]);
   });
@@ -250,11 +265,58 @@ describe("AgentEngine Main Loop", () => {
 
     const engine = new AgentEngine({ provider, registry, workDir: "/tmp", enableThinking: false });
     const start = Date.now();
-    await engine.run("写读");
+    await engine.run(newSession("写读"));
     const elapsed = Date.now() - start;
 
     // 串行:总耗时应接近 2*50=100ms (大于 90ms)
     expect(elapsed).toBeGreaterThanOrEqual(90);
     expect(registry.executed).toHaveLength(2);
+  });
+
+  it("跨轮 Session 驱动:第二轮从 WorkingMemory 恢复上下文", async () => {
+    // 验证 Session 驱动核心:第二次 run 不从零开始,而是带着历史继续。
+    // 第一轮:调一次工具后给最终答案(无 toolCall,本轮结束)。
+    // 第二轮:给最终答案,provider 收到的历史应包含第一轮全部交互。
+    const seenHistories: Message[][] = [];
+    const provider = new (class implements LLMProvider {
+      private turn = 0;
+      async generate(msgs: Message[], _tools: ToolDefinition[]): Promise<Message> {
+        seenHistories.push(msgs.map((m) => ({ ...m })));
+        this.turn++;
+        if (this.turn === 1) {
+          // 第一轮第一回合:发起工具调用
+          return {
+            role: "assistant",
+            content: "调工具",
+            toolCalls: [{ id: "c1", name: "bash", arguments: "{}" }],
+          };
+        }
+        if (this.turn === 2) {
+          // 第一轮第二回合:工具结果回来后给最终答案,本轮结束
+          return { role: "assistant", content: "第一轮完成" };
+        }
+        // 第二轮(以及之后):给最终答案
+        return { role: "assistant", content: "第二轮看到了历史" };
+      }
+    })();
+    const registry = new MockRegistry();
+    const engine = new AgentEngine({ provider, registry, workDir: "/tmp", enableThinking: false });
+
+    // 第一轮:一次 run 内完成工具调用 + 最终答案
+    const session = newSession("第一轮任务");
+    await engine.run(session);
+
+    // 第二轮:复用同一 Session,append 新用户输入
+    session.append({ role: "user", content: "第二轮任务" });
+    await engine.run(session);
+
+    // 第二轮 provider 收到的历史(第 3 次 generate 调用)应包含第一轮的全部交互
+    const secondTurnHistory = seenHistories[2]!;
+    const contents = secondTurnHistory.map((m) => m.content);
+    expect(contents).toContain("第一轮任务");
+    expect(contents).toContain("调工具");
+    expect(contents).toContain("result-of-bash");
+    expect(contents).toContain("第一轮完成");
+    expect(contents).toContain("第二轮任务");
   });
 });
