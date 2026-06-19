@@ -54,9 +54,15 @@ export class AgentEngine {
     this.reporter = opts.reporter ?? new SilentReporter();
   }
 
-  /** 启动 Agent 的生命周期 */
-  async run(userPrompt: string): Promise<Message[]> {
-    this.reporter.onStart(this.workDir, this.enableThinking);
+  /**
+   * 启动 Agent 的生命周期。
+   * @param userPrompt 用户任务
+   * @param runtimeReporter 可选的运行时 Reporter,覆盖构造时的默认值
+   *                        (第 09 讲:飞书每次会话用独立 reporter 回写)
+   */
+  async run(userPrompt: string, runtimeReporter?: Reporter): Promise<Message[]> {
+    const reporter = runtimeReporter ?? this.reporter;
+    reporter.onStart(this.workDir, this.enableThinking);
 
     // 1. 初始化会话的 Context (上下文内存)
     const contextHistory: Message[] = [
@@ -69,7 +75,7 @@ export class AgentEngine {
     // 2. The Main Loop:心跳开始 (Two-Stage ReAct 循环)
     for (;;) {
       turnCount++;
-      this.reporter.onTurnStart(turnCount);
+      reporter.onTurnStart(turnCount);
 
       // 获取当前挂载的所有工具定义
       const availableTools = this.registry.getAvailableTools();
@@ -78,7 +84,7 @@ export class AgentEngine {
       // Phase 1: 慢思考阶段 (Thinking) —— 剥夺工具,强制规划 (第 03 讲)
       // ====================================================================
       if (this.enableThinking) {
-        this.reporter.onThinking();
+        reporter.onThinking();
 
         // 核心机制:传入空的 tools 数组!
         // 大模型看不到任何 JSON Schema,被迫只能输出纯文本的思考过程。
@@ -103,13 +109,13 @@ export class AgentEngine {
 
       // 模型回复纯文本时广播 (通常是思考过程或最终结果)
       if (responseMsg.content) {
-        this.reporter.onMessage(responseMsg.content);
+        reporter.onMessage(responseMsg.content);
       }
 
       // 3. 退出条件:模型没有请求任何工具调用,说明任务完成
       const toolCalls = responseMsg.toolCalls ?? [];
       if (toolCalls.length === 0) {
-        this.reporter.onFinish();
+        reporter.onFinish();
         break;
       }
 
@@ -126,12 +132,12 @@ export class AgentEngine {
       if (allReadOnly) {
         await Promise.all(
           toolCalls.map(async (toolCall, i) => {
-            observations[i] = await this.runOneTool(toolCall);
+            observations[i] = await this.runOneTool(toolCall, reporter);
           }),
         );
       } else {
         for (let i = 0; i < toolCalls.length; i++) {
-          observations[i] = await this.runOneTool(toolCalls[i]!);
+          observations[i] = await this.runOneTool(toolCalls[i]!, reporter);
         }
       }
 
@@ -147,10 +153,10 @@ export class AgentEngine {
   }
 
   /** 执行单个工具调用并返回观察结果消息 (带日志) */
-  private async runOneTool(toolCall: ToolCall): Promise<Message> {
-    this.reporter.onToolCall(toolCall.name, toolCall.arguments);
+  private async runOneTool(toolCall: ToolCall, reporter: Reporter): Promise<Message> {
+    reporter.onToolCall(toolCall.name, toolCall.arguments);
     const result = await this.registry.execute(toolCall);
-    this.reporter.onToolResult(toolCall.name, result.output, result.isError);
+    reporter.onToolResult(toolCall.name, result.output, result.isError);
     // ToolCallId 必须携带!这是维系大模型推理链条的关键
     return {
       role: "user",

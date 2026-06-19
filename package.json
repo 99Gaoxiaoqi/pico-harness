@@ -20,6 +20,7 @@
     "node": ">=22.0.0"
   },
   "dependencies": {
+    "@larksuiteoapi/node-sdk": "^1.67.0",
     "commander": "^14.0.2",
     "execa": "^9.6.0",
     "pino": "^10.1.0",

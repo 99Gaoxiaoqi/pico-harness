@@ -8,7 +8,7 @@
 import { parseArgs } from "node:util";
 import { createServer } from "node:http";
 import { AgentEngine } from "../engine/loop.js";
-import { TerminalReporter } from "../engine/reporter.js";
+import { SilentReporter, TerminalReporter } from "../engine/reporter.js";
 import { createProvider, type ProviderKind } from "../provider/factory.js";
 import {
   BashTool,
@@ -18,6 +18,7 @@ import {
   ToolRegistry,
   WriteFileTool,
 } from "../tools/registry-impl.js";
+import { FeishuBot, loadFeishuConfig } from "../feishu/bot.js";
 
 function buildRegistry(workDir: string): ToolRegistry {
   const registry = new ToolRegistry();
@@ -114,6 +115,7 @@ async function main() {
       thinking: { type: "string", default: "true" },
       serve: { type: "boolean", default: false },
       port: { type: "string", default: "3000" },
+      feishu: { type: "boolean", default: false },
     },
     allowPositionals: true,
   });
@@ -123,6 +125,22 @@ async function main() {
 
   console.log("🚀 欢迎来到 tiny-claw-harness 引擎启动序列");
   console.log(`[Provider] ${kind} 协议 | [Thinking] ${enableThinking}`);
+
+  if (values.feishu) {
+    // 飞书模式:启动 WSClient 长连接,群里 @机器人 触发 Agent,状态发回会话
+    const provider = createProvider(kind);
+    const registry = buildRegistry(process.cwd());
+    const engine = new AgentEngine({
+      provider,
+      registry,
+      workDir: process.cwd(),
+      enableThinking,
+      reporter: new SilentReporter(), // 实际回写由运行时 FeishuReporter 负责
+    });
+    const bot = new FeishuBot(engine, loadFeishuConfig());
+    bot.start();
+    return;
+  }
 
   if (values.serve) {
     serve(kind, enableThinking, Number(values.port));
