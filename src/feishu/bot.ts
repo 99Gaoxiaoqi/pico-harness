@@ -85,8 +85,9 @@ export class FeishuBot {
 
   /** 处理一条飞书消息:提取文本 → 跑 Agent → 状态回写 */
   private async handleMessage(data: MessageEvent): Promise<void> {
-    const chatId = data?.event?.message?.chat_id;
-    const contentStr = data?.event?.message?.content;
+    // 飞书 SDK 2.0 schema:message/sender 直接挂在 data 顶层
+    const chatId = data?.message?.chat_id;
+    const contentStr = data?.message?.content;
     if (!chatId || !contentStr) {
       console.warn("[Feishu] 消息缺少 chat_id 或 content,跳过");
       return;
@@ -182,12 +183,18 @@ export class FeishuReporter implements Reporter {
   }
 }
 
-/** 飞书消息事件数据 (简化,只取需要的字段) */
+/** 飞书消息事件数据 (SDK 2.0 schema,message/sender 在顶层) */
 interface MessageEvent {
-  event?: {
-    message?: {
-      chat_id?: string;
-      content?: string;
-    };
+  event_type?: string;
+  message?: {
+    chat_id?: string;
+    chat_type?: string;
+    content?: string;
+    message_id?: string;
+    message_type?: string;
+  };
+  sender?: {
+    sender_id?: { open_id?: string };
+    sender_type?: string;
   };
 }
