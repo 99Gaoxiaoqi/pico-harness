@@ -25,6 +25,13 @@ export class Session {
   readonly createdAt: Date;
   updatedAt: Date;
 
+  /** 累计输入 Token(由 CostTracker 在每轮推理后累加) */
+  totalPromptTokens = 0;
+  /** 累计输出 Token */
+  totalCompletionTokens = 0;
+  /** 累计花费(人民币元) */
+  totalCostCNY = 0;
+
   private history: Message[] = [];
 
   constructor(id: string, workDir: string) {
@@ -32,6 +39,13 @@ export class Session {
     this.workDir = workDir;
     this.createdAt = new Date();
     this.updatedAt = new Date();
+  }
+
+  /** 记录一次推理的 Token 用量与花费(供 CostTracker 调用) */
+  recordUsage(promptTokens: number, completionTokens: number, costCNY: number): void {
+    this.totalPromptTokens += promptTokens;
+    this.totalCompletionTokens += completionTokens;
+    this.totalCostCNY += costCNY;
   }
 
   /** 向 Session 追加消息(可批量) */

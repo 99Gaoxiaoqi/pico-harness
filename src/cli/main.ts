@@ -31,6 +31,7 @@ import {
 } from "../approval/manager.js";
 import type { MiddlewareFunc } from "../tools/registry.js";
 import { SubagentTool } from "../tools/subagent.js";
+import { CostTracker } from "../observability/tracker.js";
 
 function buildRegistry(workDir: string): ToolRegistry {
   const registry = new ToolRegistry();
@@ -100,15 +101,25 @@ async function runOnce(
   planMode: boolean,
   task: string,
 ): Promise<void> {
-  const provider = createProvider(kind);
   const workDir = process.cwd();
+  // 先取/建会话,以便 CostTracker 持有 session 引用做累计统计
+  const session = globalSessionManager.getOrCreate(consoleSessionId(workDir), workDir);
+
+  const provider = createProvider(kind);
+  // 第 18 讲:用 CostTracker 装饰 provider,追踪每轮 Token 成本与耗时(对引擎透明)
+  const trackedProvider = new CostTracker(
+    provider,
+    kind === "openai" ? "glm-5.2" : "claude-3-5-sonnet",
+    session,
+  );
+
   const registry = buildRegistry(workDir);
   registry.use(buildApprovalMiddleware(terminalNotifier));
   // Plan Mode 开启时由引擎每次 run 动态组装 System Prompt(反映最新工作区状态);
   // 关闭时预构建一次,避免每轮重复读盘。
   const systemPrompt = planMode ? undefined : await new PromptComposer(workDir).build();
   const engine = new AgentEngine({
-    provider,
+    provider: trackedProvider,
     registry,
     workDir,
     enableThinking,
@@ -119,11 +130,17 @@ async function runOnce(
   });
   // 第 17 讲:注册子智能体工具,让主 Agent 能派出探路者干脏活(仅只读工具)
   registry.register(new SubagentTool(engine, buildReadOnlyRegistry(workDir)));
-  // 从全局 SessionManager 取/建会话:CLI 模式以工作目录为 sessionId
-  const session = globalSessionManager.getOrCreate(consoleSessionId(workDir), workDir);
   session.append({ role: "user", content: task });
   console.log("开始执行任务...\n");
   await engine.run(session);
+
+  // 第 18 讲:任务结束打印财务报表
+  console.log("\n================ 财务报表 ================");
+  console.log(`会话 ID: ${session.id}`);
+  console.log(`总消耗 Input Tokens: ${session.totalPromptTokens}`);
+  console.log(`总消耗 Output Tokens: ${session.totalCompletionTokens}`);
+  console.log(`总计费用 (CNY): ¥${session.totalCostCNY.toFixed(6)}`);
+  console.log("==========================================");
 }
 
 /** HTTP Server 模式:接收外部事件流触发 Agent (等价于飞书 webhook 入口) */

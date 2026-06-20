@@ -20,6 +20,7 @@ type Block =
 interface AnthropicResponse {
   content?: Block[];
   stop_reason?: string;
+  usage?: { input_tokens?: number; output_tokens?: number };
 }
 
 /** Anthropic (Claude) 兼容协议适配器 */
@@ -139,10 +140,21 @@ export class ClaudeProvider implements LLMProvider {
       }
     }
 
+    const usage =
+      data.usage &&
+      (typeof data.usage.input_tokens === "number" ||
+        typeof data.usage.output_tokens === "number")
+        ? {
+            promptTokens: data.usage.input_tokens ?? 0,
+            completionTokens: data.usage.output_tokens ?? 0,
+          }
+        : undefined;
+
     return {
       role: "assistant",
       content: textContent,
       toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+      usage,
     };
   }
 }

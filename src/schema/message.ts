@@ -19,6 +19,12 @@ export interface ToolCall {
   arguments: string;
 }
 
+/** 单次推理的 Token 用量(由 Provider 从厂商响应中填充) */
+export interface Usage {
+  promptTokens: number;
+  completionTokens: number;
+}
+
 /** 上下文中传递的单条消息 */
 export interface Message {
   role: Role;
@@ -28,6 +34,8 @@ export interface Message {
   toolCalls?: ToolCall[];
   /** 若本条是对某次工具调用的响应,此字段必填,以维系推理链条 */
   toolCallId?: string;
+  /** 本条助手消息的 Token 用量(仅模型响应填充,用于成本追踪) */
+  usage?: Usage;
 }
 
 /** 工具执行完毕后返回的物理结果 */

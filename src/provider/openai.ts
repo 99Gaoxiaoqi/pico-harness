@@ -23,6 +23,7 @@ interface OpenAIChoiceMessage {
 
 interface OpenAIChatResponse {
   choices?: { message: OpenAIChoiceMessage }[];
+  usage?: { prompt_tokens?: number; completion_tokens?: number };
 }
 
 /** OpenAI 兼容协议适配器 */
@@ -113,10 +114,21 @@ export class OpenAIProvider implements LLMProvider {
       arguments: tc.function.arguments,
     }));
 
+    const usage =
+      data.usage &&
+      (typeof data.usage.prompt_tokens === "number" ||
+        typeof data.usage.completion_tokens === "number")
+        ? {
+            promptTokens: data.usage.prompt_tokens ?? 0,
+            completionTokens: data.usage.completion_tokens ?? 0,
+          }
+        : undefined;
+
     return {
       role: "assistant",
       content: choice.content ?? "",
       toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+      usage,
     };
   }
 }
