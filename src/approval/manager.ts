@@ -14,6 +14,8 @@
 // 故 waitForApproval 内置超时(默认 30 分钟),超时自动判 Reject,
 // 清理内存资源,防止挂死泄漏。
 
+import { logger } from "../observability/logger.js";
+
 /** 审批结果包 */
 export interface ApprovalResult {
   allowed: boolean;
@@ -79,7 +81,7 @@ Agent 试图执行以下动作:
       const timer = setTimeout(() => {
         if (this.pendingTasks.has(taskId)) {
           this.pendingTasks.delete(taskId);
-          console.warn(`[Approval] 任务 ${taskId} 审批超时(${this.timeoutMs}ms),自动拒绝。`);
+          logger.warn({ taskId, timeoutMs: this.timeoutMs }, `[Approval] 任务 ${taskId} 审批超时,自动拒绝。`);
           resolve({
             allowed: false,
             reason: `审批超时(${Math.floor(this.timeoutMs / 60000)} 分钟无人响应),系统自动拒绝。`,
@@ -91,7 +93,7 @@ Agent 试图执行以下动作:
 
       // 通过通知通道发送审批请求
       notify({ taskId, toolName, args, message });
-      console.log(`[Approval] 已发送审批请求 (TaskID: ${taskId}),执行流挂起等待...`);
+      logger.info({ taskId }, `[Approval] 已发送审批请求,执行流挂起等待...`);
     });
   }
 
@@ -101,12 +103,12 @@ Agent 试图执行以下动作:
   resolveApproval(taskId: string, allowed: boolean, reason: string): boolean {
     const entry = this.pendingTasks.get(taskId);
     if (!entry) {
-      console.warn(`[Approval] 找不到对应的 TaskID: ${taskId},可能已超时或处理完毕。`);
+      logger.warn({ taskId }, `[Approval] 找不到对应的 TaskID: ${taskId},可能已超时或处理完毕。`);
       return false;
     }
     clearTimeout(entry.timer);
     this.pendingTasks.delete(taskId);
-    console.log(`[Approval] 收到审批结果 (TaskID: ${taskId}, Allowed: ${allowed}): ${reason}`);
+    logger.info({ taskId, allowed, reason }, `[Approval] 收到审批结果 (TaskID: ${taskId}, Allowed: ${allowed}): ${reason}`);
     entry.resolve({ allowed, reason });
     return true;
   }

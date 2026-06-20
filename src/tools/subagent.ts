@@ -14,6 +14,7 @@ import type { BaseTool } from "./registry.js";
 import type { ToolDefinition } from "../schema/message.js";
 import type { Registry } from "./registry.js";
 import type { Reporter } from "../engine/reporter.js";
+import { logger } from "../observability/logger.js";
 
 /**
  * AgentRunner:打破循环依赖的抽象接口。
@@ -85,7 +86,7 @@ export class SubagentTool implements BaseTool {
       throw new Error("spawn_subagent 缺少 task_prompt 参数");
     }
 
-    console.log(
+    logger.info(
       `[Subagent] 🚀 主 Agent 发起委派!正在拉起探路者: [${input.task_prompt.slice(0, 80)}...]`,
     );
 
@@ -97,7 +98,7 @@ export class SubagentTool implements BaseTool {
       return `子智能体执行失败: ${errMsg}`;
     }
 
-    console.log(`[Subagent] ✅ 子智能体任务结束。报告返回给主干...`);
+    logger.info(`[Subagent] ✅ 子智能体任务结束。报告返回给主干...`);
     // 几万字的代码探索,化作轻量级 Summary,像普通 API 调用返回给主 Agent
     return `【子智能体探索报告】:\n${summary}`;
   }

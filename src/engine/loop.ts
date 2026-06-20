@@ -20,6 +20,7 @@ import { RecoveryManager } from "../context/recovery.js";
 import { SilentReporter, type Reporter } from "./reporter.js";
 import { ReminderInjector } from "./reminder.js";
 import { Tracer, exportTraceToFile, truncate, type Span } from "../observability/trace.js";
+import { logger } from "../observability/logger.js";
 import type { Session } from "./session.js";
 
 /** WorkingMemory 滑动窗口大小:截取最近 N 条消息供压缩器判断(含远期历史) */
@@ -145,9 +146,7 @@ export class AgentEngine implements AgentRunner {
       enableThinking: this.enableThinking,
     });
     reporter.onStart(this.workDir, this.enableThinking);
-    console.log(
-      `[Engine] 唤醒会话 [${session.id}],锁定工作区: ${session.workDir} (PlanMode: ${this.planMode})`,
-    );
+    logger.info({ sessionId: session.id, workDir: session.workDir, planMode: this.planMode }, `[Engine] 唤醒会话 [${session.id}],锁定工作区: ${session.workDir} (PlanMode: ${this.planMode})`);
 
     // Plan Mode 开启时,每次 run 动态组装 System Prompt(反映最新工作区状态)
     const systemPrompt = await this.buildSystemPrompt();
@@ -321,7 +320,7 @@ export class AgentEngine implements AgentRunner {
       rootSpan?.end();
       if (rootSpan) {
         const tracePath = exportTraceToFile(rootSpan, session.workDir, session.id);
-        console.log(`[Tracing] 本次任务的执行回放链路已保存: ${tracePath}`);
+        logger.info({ tracePath }, `[Tracing] 执行回放链路已保存: ${tracePath}`);
       }
     }
 
@@ -350,7 +349,7 @@ export class AgentEngine implements AgentRunner {
       let finalOutput = result.output;
       if (result.isError) {
         finalOutput = this.recovery.analyzeAndInject(toolCall.name, result.output);
-        console.warn(`  -> [Recovery] ❌ 注入救援指南: ${toolCall.name}`);
+      logger.warn({ tool: toolCall.name }, `-> [Recovery] ❌ 注入救援指南: ${toolCall.name}`);
       }
 
       toolSpan?.addAttributes({
@@ -398,7 +397,7 @@ export class AgentEngine implements AgentRunner {
     reporter?: Reporter,
   ): Promise<string> {
     const rep = reporter ?? new SilentReporter();
-    console.log(`[Subagent] 🚀 拉起探路者,任务: ${taskPrompt.slice(0, 100)}`);
+    logger.info({ task: taskPrompt.slice(0, 100) }, `[Subagent] 🚀 拉起探路者,任务: ${taskPrompt.slice(0, 100)}`);
 
     // 子智能体专属 System Prompt:严厉警告必须用工具,不许凭空猜测
     const subSystemPrompt = `你是专门负责深度探索的探路者 (Explorer Subagent)。
@@ -444,7 +443,7 @@ export class AgentEngine implements AgentRunner {
       // 【核心退出条件】子智能体不调工具了,说明做好了总结汇报
       const toolCalls = actionResp.toolCalls ?? [];
       if (toolCalls.length === 0) {
-        console.log(`[Subagent] ✅ 探路者完成 ${turnCount} 轮探索,返回总结。`);
+        logger.info({ turns: turnCount }, `[Subagent] ✅ 探路者完成 ${turnCount} 轮探索,返回总结。`);
         return actionResp.content;
       }
 

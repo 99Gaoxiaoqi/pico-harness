@@ -17,6 +17,7 @@
 // 掩码替换(而非删除)既释放内存又保住意图连贯。
 
 import type { Message } from "../schema/message.js";
+import { logger } from "../observability/logger.js";
 
 /** 远期 ToolResult 触发全量掩码的字符阈值(短于阈值的小输出保留原样) */
 const REMOTE_MASK_THRESHOLD = 200;
@@ -75,7 +76,7 @@ export class Compactor {
       return msgs.map((m) => ({ ...m }));
     }
 
-    console.warn(
+    logger.warn(
       `[Compactor] ⚠ 内存告警:当前上下文长度 (${currentLength} 字符) 超过阈值 (${this.maxChars}),触发压缩`,
     );
 
@@ -122,7 +123,7 @@ export class Compactor {
     }
 
     const newLength = this.estimateLength(compacted);
-    console.warn(`[Compactor] ✅ 压缩完成。上下文长度从 ${currentLength} 降至 ${newLength} 字符。`);
+    logger.warn(`[Compactor] ✅ 压缩完成。上下文长度从 ${currentLength} 降至 ${newLength} 字符。`);
     return compacted;
   }
 

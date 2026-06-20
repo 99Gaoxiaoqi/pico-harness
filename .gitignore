@@ -1,6 +1,25 @@
+# Dependencies
 node_modules/
+
+# Build output
 dist/
-*.log
+
+# Environment variables(含密钥,绝不提交)
 .env
 .env.local
-workspace/.sessions/
+.env.*.local
+
+# Agent 运行时产物(traces/sessions/permissions 等)
+.claw/
+
+# Logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+*.swp
+*.swo

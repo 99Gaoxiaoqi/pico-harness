@@ -5,6 +5,7 @@ import { ClaudeProvider } from "./claude.js";
 import { OpenAIProvider } from "./openai.js";
 import type { LLMProvider } from "./interface.js";
 import type { Message, ToolDefinition } from "../schema/message.js";
+import { logger } from "../observability/logger.js";
 
 export type ProviderKind = "openai" | "claude";
 
@@ -68,7 +69,7 @@ class ModelFallbackProvider implements LLMProvider {
         throw err;
       }
 
-      console.warn(`[Provider] ${this.activeModel} 不可用,自动切换到 ${this.fallbackModel}`);
+      logger.warn(`[Provider] ${this.activeModel} 不可用,自动切换到 ${this.fallbackModel}`);
       this.activeModel = this.fallbackModel;
       this.activeProvider = this.create({
         ...this.primaryConfig,

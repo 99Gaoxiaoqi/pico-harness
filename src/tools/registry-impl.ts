@@ -7,6 +7,7 @@ import { isAbsolute, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 import type { BaseTool, MiddlewareFunc, Registry } from "./registry.js";
 import type { ToolCall, ToolDefinition, ToolResult } from "../schema/message.js";
+import { logger } from "../observability/logger.js";
 
 const execAsync = promisify(exec);
 
@@ -37,16 +38,16 @@ export class ToolRegistry implements Registry {
   register(tool: BaseTool): void {
     const name = tool.name();
     if (this.tools.has(name)) {
-      console.warn(`[Warning] 工具 '${name}' 已被注册,将被覆盖。`);
+      logger.warn({ tool: name }, `[Warning] 工具 '${name}' 已被注册,将被覆盖。`);
     }
     this.tools.set(name, tool);
-    console.log(`[Registry] 成功挂载工具: ${name}`);
+    logger.info({ tool: name }, `[Registry] 成功挂载工具: ${name}`);
   }
 
   /** 挂载一个安全拦截中间件 (第 16 讲) */
   use(mw: MiddlewareFunc): void {
     this.middlewares.push(mw);
-    console.log(`[Registry] 已挂载 Middleware (共 ${this.middlewares.length} 个)`);
+    logger.info({ count: this.middlewares.length }, `[Registry] 已挂载 Middleware (共 ${this.middlewares.length} 个)`);
   }
 
   getAvailableTools(): ToolDefinition[] {
@@ -75,7 +76,7 @@ export class ToolRegistry implements Registry {
     for (const mw of this.middlewares) {
       const { allowed, reason } = await mw(call);
       if (!allowed) {
-        console.warn(`[Registry] ⚠ 工具 ${call.name} 被 Middleware 拦截: ${reason}`);
+        logger.warn({ tool: call.name, reason }, `[Registry] ⚠ 工具 ${call.name} 被 Middleware 拦截: ${reason}`);
         return {
           toolCallId: call.id,
           output: `执行被系统拦截。原因: ${reason}`,

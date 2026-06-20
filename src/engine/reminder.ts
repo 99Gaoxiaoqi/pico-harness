@@ -18,6 +18,7 @@
 
 import { createHash } from "node:crypto";
 import type { Message, ToolCall, ToolResult } from "../schema/message.js";
+import { logger } from "../observability/logger.js";
 
 /** 连续同参数失败多少次触发死循环干预 */
 const DOOM_LOOP_THRESHOLD = 3;
@@ -59,13 +60,13 @@ export class ReminderInjector {
     // 失败 → 累加该特征的失败次数
     const failCount = (this.consecutiveFailures.get(fp) ?? 0) + 1;
     this.consecutiveFailures.set(fp, failCount);
-    console.warn(
+    logger.warn(
       `[Reminder] 监控到工具 ${lastToolCall.name} 执行失败,该参数特征连续失败次数: ${failCount}`,
     );
 
     // 【驾驭底线】触发死循环打断!连续 3 次同参数失败,强行打断局部执念
     if (failCount >= DOOM_LOOP_THRESHOLD) {
-      console.warn("[Reminder] ⚠ 触发死循环干预!注入强力修正指令。");
+      logger.warn("[Reminder] ⚠ 触发死循环干预!注入强力修正指令。");
       const nudgeMsg = `[SYSTEM REMINDER 警告]
 你似乎陷入了死循环。你刚刚连续 ${failCount} 次使用相同的参数调用了 '${lastToolCall.name}' 工具,并且都失败了。
 请立即停止这种无效的重试!你的注意力被当前的报错过度吸引了。
