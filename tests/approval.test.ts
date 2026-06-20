@@ -43,6 +43,19 @@ describe("isDangerousCommand", () => {
     expect(isDangerousCommand("bash", '{"command":"rm --recursive old"}')).toBe(true);
   });
 
+  it("bash 命中所有 rm 变体(单文件/不带 f)", () => {
+    expect(isDangerousCommand("bash", '{"command":"rm /tmp/x"}')).toBe(true);
+    expect(isDangerousCommand("bash", '{"command":"rm -f /tmp/x"}')).toBe(true);
+    expect(isDangerousCommand("bash", '{"command":"rm -fr /tmp/x"}')).toBe(true);
+  });
+
+  it("bash 命中 rmdir / find -delete / unlink", () => {
+    expect(isDangerousCommand("bash", '{"command":"rmdir /tmp/olddir"}')).toBe(true);
+    expect(isDangerousCommand("bash", '{"command":"find /tmp -delete"}')).toBe(true);
+    expect(isDangerousCommand("bash", '{"command":"find . -exec rm {} +"}')).toBe(true);
+    expect(isDangerousCommand("bash", '{"command":"unlink /tmp/file"}')).toBe(true);
+  });
+
   it("bash 命中 sudo 提权", () => {
     expect(isDangerousCommand("bash", '{"command":"sudo apt install x"}')).toBe(true);
   });

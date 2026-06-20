@@ -136,24 +136,46 @@ Agent 试图执行以下动作:
 export const globalApprovalManager = new ApprovalManager();
 
 /**
- * 高危命令检测:简单的正则黑名单。
+ * 高危命令检测:正则黑名单。
  * 纯读取工具默认 YOLO 放行;bash/write_file/edit_file 命中危险模式则需审批。
  *
  * 【架构师注】本实现为硬编码演示。生产环境应改造为支持外部配置
  * (.claw/permissions.yaml)+ 运行时热更新 (Hot-Reload) 的动态权限判定引擎,
  * 参考 Claude Code 的 allow/ask/deny 三态分类。
+ *
+ * 黑名单设计原则:宁可误拦(让用户审批),不可漏放(不可逆破坏)。
+ * 覆盖所有已知删除/破坏/提权/覆盖变体。
  */
 const DANGEROUS_PATTERNS: RegExp[] = [
-  /rm\s+(-[a-z]*r|--recursive)/i, // 级联删除
-  /sudo\s+/i, // 提权
-  /\bdrop\s+/i, // 数据库删除
-  /mkfs/i, // 格式化
-  /dd\s+if=/i, // 磁盘镜像写入
-  /:\(\)\s*\{/i, // fork 炸弹
-  /chmod\s+(-R\s+)?0?777/i, // 全权限开放
-  />(?=.*\.(ts|js|go|py|rs|java)$)/i, // 恶意覆盖源代码
-  /\bkubectl\s+delete\b/i, // k8s 资源删除
-  /\bgit\s+push\s+(-f|--force)/i, // 强制推送覆盖远程
+  // 所有 rm 命令(删除即高危,无论单文件还是级联,宁可误拦)
+  /\brm\b/i,
+  // rmdir 删除目录
+  /\brmdir\b/i,
+  // find -delete / find -exec rm
+  /\bfind\b.*(-delete|-exec\s+rm)/i,
+  // unlink 删除文件
+  /\bunlink\b/i,
+  // sudo 提权
+  /\bsudo\b/i,
+  // 数据库删除/清表
+  /\b(drop|truncate)\s+/i,
+  // 格式化 / 磁盘镜像写入
+  /\bmkfs\b/i,
+  /\bdd\s+if=/i,
+  // fork 炸弹
+  /:\(\)\s*\{/,
+  // 全权限开放
+  /\bchmod\s+(-R\s+)?0?777\b/i,
+  // 恶意覆盖源代码(bash 重定向 > file.ts)
+  />\s*[^|]*\.(ts|js|go|py|rs|java|c|cpp|h)\s*$/i,
+  // k8s 资源删除
+  /\bkubectl\s+delete\b/i,
+  // 强制推送覆盖远程
+  /\bgit\s+push\s+(-f|--force)\b/i,
+  // 杀进程
+  /\bkill(all|-9)?\s+-?9?\b/i,
+  // 危险的 shell 写入覆盖系统文件
+  /\bcat\s+.*\s*>\s*\/(etc|usr|bin|boot|sys|proc)\b/i,
 ];
 
 export function isDangerousCommand(toolName: string, args: string): boolean {

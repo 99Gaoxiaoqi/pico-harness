@@ -47,7 +47,9 @@ export class OpenAIProvider implements LLMProvider {
           break;
         case "assistant": {
           const ast: Record<string, unknown> = { role: "assistant" };
-          if (msg.content) ast.content = msg.content;
+          // 部分模型(如 glm-5.2)要求 assistant 消息必须显式带 content 字段
+          // (即使为 null),否则 400 "A parameter specified is not valid"
+          ast.content = msg.content || null;
           // 历史的 ToolCalls 必须原样放回,维系大模型逻辑链
           if (msg.toolCalls && msg.toolCalls.length > 0) {
             ast.tool_calls = msg.toolCalls.map((tc) => ({
@@ -80,17 +82,21 @@ export class OpenAIProvider implements LLMProvider {
     }
 
     // 3. 构建请求并发送
+    const bodyJson = JSON.stringify(body);
+    console.log(`[OpenAI] POST /chat/completions (model=${this.config.model}, msgs=${openaiMsgs.length}, tools=${availableTools.length})`);
     const resp = await fetch(`${this.config.baseURL}/chat/completions`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${this.config.apiKey}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify(body),
+      body: bodyJson,
     });
 
     if (!resp.ok) {
       const text = await resp.text();
+      console.error(`[OpenAI] ❌ ${resp.status} 响应: ${text}`);
+      console.error(`[OpenAI] 请求体(前 2000 字符): ${bodyJson.slice(0, 2000)}`);
       throw new Error(`OpenAI API 请求失败 [${resp.status}]: ${text}`);
     }
 

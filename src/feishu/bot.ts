@@ -17,6 +17,7 @@ import type { Reporter } from "../engine/reporter.js";
 import {
   globalApprovalManager,
   isDangerousCommand,
+  type ApprovalNotice,
   type ApprovalNotifier,
 } from "../approval/manager.js";
 import type { Registry, MiddlewareFunc } from "../tools/registry.js";
@@ -44,6 +45,15 @@ export function loadFeishuConfig(): FeishuConfig {
     encryptKey: process.env.FEISHU_ENCRYPT_KEY || undefined,
     verifyToken: process.env.FEISHU_VERIFY_TOKEN || undefined,
   };
+}
+
+/** 卡片按钮点击回调事件 (card.action.trigger) 的载荷 */
+interface CardActionPayload {
+  action?: {
+    value?: unknown;
+    tag?: string;
+  };
+  operator?: { openId?: string; name?: string };
 }
 
 /** 工具结果汇报截断长度 (防飞书消息超长) */
@@ -82,13 +92,12 @@ export class FeishuBot {
     }
   }
 
-  /** 构建审批中间件:命中高危命令 → 发飞书审批请求 → 挂起等待 approve/reject */
+  /** 构建审批中间件:命中高危命令 → 发飞书审批卡片 → 挂起等待按钮回调/approve-reject 口令 */
   private buildApprovalMiddleware(): MiddlewareFunc {
     const notify: ApprovalNotifier = (notice) => {
-      // 审批请求发到当前活跃会话
+      // 审批卡片发到当前活跃会话
       if (this.activeChatId) {
-        const reporter = new FeishuReporter(this.client, this.activeChatId);
-        void reporter.onMessage(notice.message);
+        void this.sendApprovalCard(this.activeChatId, notice);
       } else {
         console.warn(notice.message);
       }
@@ -107,6 +116,73 @@ export class FeishuBot {
     };
   }
 
+  /**
+   * 发送交互式审批卡片(带"同意"/"拒绝"按钮)。
+   * 按钮点击触发 card.action.trigger 回调,value 携带 {taskId, action}。
+   * 用户也可不发卡片直接回复 "approve <taskId>" / "reject <taskId>" 口令。
+   */
+  private async sendApprovalCard(chatId: string, notice: ApprovalNotice): Promise<void> {
+    const card = {
+      config: { wide_screen_mode: true },
+      header: {
+        title: { tag: "plain_text", content: "⚠ 高危操作审批请求" },
+        template: "red",
+      },
+      elements: [
+        {
+          tag: "div",
+          fields: [
+            { is_short: true, text: { tag: "lark_md", content: `**工具**\n${notice.toolName}` } },
+            { is_short: true, text: { tag: "lark_md", content: `**任务 ID**\n${notice.taskId}` } },
+          ],
+        },
+        {
+          tag: "div",
+          text: { tag: "lark_md", content: `**参数**\n\`${notice.args}\`` },
+        },
+        { tag: "hr" },
+        {
+          tag: "action",
+          actions: [
+            {
+              tag: "button",
+              text: { tag: "plain_text", content: "✅ 同意执行" },
+              type: "primary",
+              value: { taskId: notice.taskId, action: "approve" },
+            },
+            {
+              tag: "button",
+              text: { tag: "plain_text", content: "🚫 拒绝执行" },
+              type: "danger",
+              value: { taskId: notice.taskId, action: "reject" },
+            },
+          ],
+        },
+        {
+          tag: "note",
+          elements: [
+            { tag: "plain_text", content: "也可回复 approve/reject + 任务ID 文字指令" },
+          ],
+        },
+      ],
+    };
+    try {
+      await this.client.im.message.create({
+        params: { receive_id_type: "chat_id" },
+        data: {
+          receive_id: chatId,
+          msg_type: "interactive",
+          content: JSON.stringify(card),
+        },
+      });
+    } catch (err) {
+      console.error("[Feishu] 发送审批卡片失败,回退到文本:", err);
+      // 回退:发纯文本通知
+      const reporter = new FeishuReporter(this.client, chatId);
+      void reporter.onMessage(notice.message);
+    }
+  }
+
   /** 启动 WSClient 长连接,接收飞书事件 (无需公网回调地址) */
   start(): void {
     const dispatcher = new EventDispatcher({}).register({
@@ -116,6 +192,16 @@ export class FeishuBot {
           await this.handleMessage(data as unknown as MessageEvent);
         } catch (err) {
           console.error("[Feishu] 处理消息失败:", err);
+        }
+      },
+      // 第 16 讲:卡片按钮回调 (card.action.trigger)。
+      // 用户点击审批卡片的"同意"/"拒绝"按钮时触发,value 携带 {taskId, action}。
+      // 前提:飞书后台「事件与回调」需开启卡片回调通过长连接接收。
+      "card.action.trigger": async (data: unknown) => {
+        try {
+          await this.handleCardAction(data as CardActionPayload);
+        } catch (err) {
+          console.error("[Feishu] 处理卡片回调失败:", err);
         }
       },
     });
@@ -191,9 +277,35 @@ export class FeishuBot {
       session.append({ role: "user", content: prompt });
       await this.engine.run(session, reporter);
     } catch (err) {
-      await reporter.onMessage(`❌ 任务执行失败: ${err instanceof Error ? err.message : String(err)}`);
+      const errMsg = err instanceof Error ? err.message : String(err);
+      console.error(`[Feishu] 会话 ${chatId} 任务失败:`, errMsg);
+      await reporter.onMessage(`❌ 任务执行失败: ${errMsg}`);
     } finally {
       this.activeChatId = null;
+    }
+  }
+
+  /**
+   * 处理审批卡片的按钮点击回调。
+   * 卡片按钮 value = { taskId: string; action: "approve" | "reject" }
+   */
+  private async handleCardAction(data: CardActionPayload): Promise<void> {
+    const value = data?.action?.value as { taskId?: string; action?: string } | undefined;
+    if (!value?.taskId || !value.action) {
+      console.warn("[Feishu] 卡片回调缺少 taskId/action:", value);
+      return;
+    }
+    const { taskId, action } = value;
+    if (action === "approve") {
+      const ok = globalApprovalManager.resolveApproval(taskId, true, "人类管理员已批准操作(点击卡片按钮)");
+      console.log(`[Feishu] 卡片回调: ${ok ? "✅" : "⚠"} approve ${taskId}`);
+    } else if (action === "reject") {
+      const ok = globalApprovalManager.resolveApproval(
+        taskId,
+        false,
+        "人类管理员认为该操作过于危险,已拒绝(点击卡片按钮)",
+      );
+      console.log(`[Feishu] 卡片回调: ${ok ? "🚫" : "⚠"} reject ${taskId}`);
     }
   }
 }
