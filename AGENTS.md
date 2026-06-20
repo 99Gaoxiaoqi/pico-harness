@@ -42,4 +42,5 @@
 - [x] 第 17 讲:Subagent 任务委派与上下文隔离
 - [x] 第 18 讲:Token 成本与耗时追踪
 - [x] 第 19 讲:Tracing 决策路径复盘,导出 .claw/traces JSON
-- [ ] 第 20 讲:Benchmark 自动化评估脚本
+- [x] 第 20 讲:Benchmark 自动化评估脚本
+- [ ] 第 21 讲:实战串讲(上),完整 CLI 引擎文件探索与重构

@@ -9,6 +9,7 @@
   },
   "scripts": {
     "dev": "tsx src/cli/main.ts",
+    "bench": "tsx src/cli/bench.ts",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
