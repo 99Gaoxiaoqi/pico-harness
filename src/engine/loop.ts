@@ -15,6 +15,7 @@ import type { Message, ToolCall } from "../schema/message.js";
 import type { Registry } from "../tools/registry.js";
 import type { Compactor } from "../context/compactor.js";
 import { PromptComposer } from "../context/composer.js";
+import { RecoveryManager } from "../context/recovery.js";
 import { SilentReporter, type Reporter } from "./reporter.js";
 import type { Session } from "./session.js";
 
@@ -46,6 +47,11 @@ export interface AgentEngineOptions {
    * 未提供则不压缩(纯靠 WorkingMemory 条数截断)。
    */
   compactor?: Compactor;
+  /**
+   * 错误自愈管理器:工具执行失败时注入锦囊妙计 (第 14 讲)。
+   * 未提供则默认创建一个,对所有工具报错都尝试匹配恢复建议。
+   */
+  recovery?: RecoveryManager;
   /** 可选的轮次日志回调,便于第 19 讲 Tracing 接入 */
   onTurn?: (info: { turn: number; message: Message }) => void;
   /** 输出 Reporter;默认静默 (第 09 讲) */
@@ -62,6 +68,7 @@ export class AgentEngine {
   private readonly planMode: boolean;
   private readonly workingMemoryLimit: number;
   private readonly compactor?: Compactor;
+  private readonly recovery: RecoveryManager;
   private readonly onTurn?: (info: { turn: number; message: Message }) => void;
   private readonly reporter: Reporter;
 
@@ -77,6 +84,7 @@ export class AgentEngine {
     this.planMode = opts.planMode ?? false;
     this.workingMemoryLimit = opts.workingMemoryLimit ?? DEFAULT_WORKING_MEMORY_LIMIT;
     this.compactor = opts.compactor;
+    this.recovery = opts.recovery ?? new RecoveryManager();
     this.onTurn = opts.onTurn;
     this.reporter = opts.reporter ?? new SilentReporter();
   }
@@ -218,15 +226,25 @@ export class AgentEngine {
     return session.getHistory().slice(beforeLen);
   }
 
-  /** 执行单个工具调用并返回观察结果消息 (带日志) */
+  /** 执行单个工具调用并返回观察结果消息 (带日志 + 错误自愈注入) */
   private async runOneTool(toolCall: ToolCall, reporter: Reporter): Promise<Message> {
     reporter.onToolCall(toolCall.name, toolCall.arguments);
     const result = await this.registry.execute(toolCall);
-    reporter.onToolResult(toolCall.name, result.output, result.isError);
+
+    // 【核心拦截与注入】工具执行失败时,交由 RecoveryManager 诊断并注入"锦囊妙计"。
+    // 化被动为主动:不再冷冰冰陈述报错,而是给出带强烈倾向性的行动指南,
+    // 引导大模型进入标准排障 SOP(如"请先使用 read_file 重新查看文件")。
+    let finalOutput = result.output;
+    if (result.isError) {
+      finalOutput = this.recovery.analyzeAndInject(toolCall.name, result.output);
+      console.warn(`  -> [Recovery] ❌ 注入救援指南: ${toolCall.name}`);
+    }
+
+    reporter.onToolResult(toolCall.name, finalOutput, result.isError);
     // ToolCallId 必须携带!这是维系大模型推理链条的关键
     return {
       role: "user",
-      content: result.output,
+      content: finalOutput,
       toolCallId: toolCall.id,
     };
   }
