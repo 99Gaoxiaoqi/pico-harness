@@ -93,7 +93,7 @@ export class AgentEngine implements AgentRunner {
     this.workDir = opts.workDir;
     this.systemPrompt =
       opts.systemPrompt ??
-      "You are tiny-claw, an expert coding assistant running in a Harness engine. " +
+      "You are pico, an expert coding assistant running in a Harness engine. " +
         "You have tools to read, write, edit files and run bash. Think step by step.";
     this.enableThinking = opts.enableThinking ?? false;
     this.planMode = opts.planMode ?? false;

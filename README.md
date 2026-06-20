@@ -1,6 +1,6 @@
-# tiny-claw-harness
+# pico-harness
 
-用 TypeScript 从零实现的工业级 Agent Harness 引擎,对标课程《从 0 开始构建 Agent Harness》中的 `go-tiny-claw`。
+用 TypeScript 从零实现的工业级 Agent Harness 引擎,对标课程《从 0 开始构建 Agent Harness》中的 `go-pico`。
 
 ## 定位
 
@@ -10,7 +10,7 @@
 ## 架构分层(第 01 讲)
 
 ```
-tiny-claw-harness/
+pico-harness/
 ├── src/
 │   ├── cli/          # 入口交互层:命令行入口
 │   ├── engine/       # 核心引擎层:Main Loop (ReAct)

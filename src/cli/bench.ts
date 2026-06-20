@@ -62,7 +62,7 @@ const DEFAULT_CASES: BenchmarkCase[] = [
   {
     id: "test_001_edit",
     name: "测试模糊替换工具的准确性",
-    setupScript: `printf '{"name": "tiny-claw", "version": "v1.0.0"}\\n' > config.json`,
+    setupScript: `printf '{"name": "pico", "version": "v1.0.0"}\\n' > config.json`,
     prompt:
       "当前目录下有一个 config.json。请你使用 edit_file 工具，将其中的 version 从 v1.0.0 修改为 v2.0.0。",
     validateScript: `grep '"version": "v2.0.0"' config.json`,

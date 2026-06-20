@@ -103,10 +103,10 @@ describe("ReadFileTool 防御底线", () => {
   });
 
   it("读取工作区内文件内容", async () => {
-    await writeFile(join(workDir, "hello.txt"), "Hello, tiny-claw!");
+    await writeFile(join(workDir, "hello.txt"), "Hello, pico!");
     const tool = new ReadFileTool(workDir);
     const out = await tool.execute(JSON.stringify({ path: "hello.txt" }));
-    expect(out).toBe("Hello, tiny-claw!");
+    expect(out).toBe("Hello, pico!");
   });
 
   it("超过 8000 字节时触发截断保护", async () => {

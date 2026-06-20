@@ -1,7 +1,7 @@
 // 统一的数据结构 (Schema):整个微型 OS 各组件之间传递的"血液"。
 // 对应课程第 02 讲 internal/schema/message.go。
 // 由于不同大模型 (Claude / OpenAI) 的 API 格式千差万别,
-// 我们定义一套 tiny-claw 自己的标准结构,承载 ReAct 的"思考"与"行动"。
+// 我们定义一套 pico 自己的标准结构,承载 ReAct 的"思考"与"行动"。
 
 /** 消息角色:与大模型沟通的基石 */
 export type Role = "system" | "user" | "assistant";

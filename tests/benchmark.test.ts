@@ -6,7 +6,7 @@ import { BenchmarkRunner, type BenchmarkAgentRunner } from "../src/eval/benchmar
 
 describe("BenchmarkRunner", () => {
   it("在隔离工作区执行用例并汇总 usage", async () => {
-    const rootDir = await mkdtemp(join(tmpdir(), "tiny-claw-benchmark-"));
+    const rootDir = await mkdtemp(join(tmpdir(), "pico-benchmark-"));
     const runAgent: BenchmarkAgentRunner = async (prompt, context) => {
       context.session.recordUsage(100, 25, 0.001);
       const input = await readFile(join(context.workDir, "input.txt"), "utf8");
@@ -58,7 +58,7 @@ describe("BenchmarkRunner", () => {
   });
 
   it("记录失败用例并继续执行后续用例", async () => {
-    const rootDir = await mkdtemp(join(tmpdir(), "tiny-claw-benchmark-"));
+    const rootDir = await mkdtemp(join(tmpdir(), "pico-benchmark-"));
     const calls: string[] = [];
     const runner = new BenchmarkRunner({
       rootDir,

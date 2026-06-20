@@ -1,4 +1,4 @@
-// cmd 入口:tiny-claw 引擎启动序列。
+// cmd 入口:pico 引擎启动序列。
 // 第 09 讲:引擎 I/O 解耦,支持 CLI 与 HTTP Server 两种入口。
 // 第 13 讲:新增 --plan 开关,开启 Plan Mode 引导长程任务读写 PLAN.md/TODO.md。
 // 用法:
@@ -160,7 +160,7 @@ async function serve(
   });
 
   server.listen(port, () => {
-    console.log(`🚀 tiny-claw HTTP 模式监听 http://localhost:${port}/ask`);
+    console.log(`🚀 pico HTTP 模式监听 http://localhost:${port}/ask`);
     console.log(
       `试试: curl -X POST localhost:${port}/ask -H 'Content-Type: application/json' -d '{"prompt":"你好"}'`,
     );
@@ -203,7 +203,7 @@ async function main() {
   const planMode = values.plan;
   const traceEnabled = values.trace;
 
-  console.log("🚀 欢迎来到 tiny-claw-harness 引擎启动序列");
+  console.log("🚀 欢迎来到 pico-harness 引擎启动序列");
   console.log(
     `[Provider] ${kind} 协议 | [Thinking] ${enableThinking} | [PlanMode] ${planMode} | [Trace] ${traceEnabled}`,
   );

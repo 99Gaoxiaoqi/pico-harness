@@ -31,7 +31,7 @@ export class PromptComposer {
 
     // 1. 极简内核:仅确立基本身份与最底线红线纪律
     parts.push(`# 核心身份
-你名叫 tiny-claw,一个由驾驭工程 (Harness Engineering) 驱动的骨灰级研发助手。
+你名叫 pico,一个由驾驭工程 (Harness Engineering) 驱动的骨灰级研发助手。
 你具备极简主义哲学,拒绝废话。你能通过系统提供的内置工具,创建、读取、修改和执行工作区中的代码。
 
 # 核心纪律 (CRITICAL)

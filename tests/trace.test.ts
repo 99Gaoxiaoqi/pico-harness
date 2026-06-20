@@ -62,7 +62,7 @@ class RecordingRegistry implements Registry {
 
 describe("Tracing", () => {
   it("导出文件时清洗 sessionId,避免路径字符破坏 trace 文件名", async () => {
-    const workDir = await mkdtemp(join(tmpdir(), "tiny-claw-trace-export-"));
+    const workDir = await mkdtemp(join(tmpdir(), "pico-trace-export-"));
     const root = new Span("Agent.Run", null);
     root.end();
 
@@ -80,7 +80,7 @@ describe("Tracing", () => {
   });
 
   it("AgentEngine 记录 Run/Turn/LLM/Tool 的 trace tree 并写入 .claw/traces", async () => {
-    const workDir = await mkdtemp(join(tmpdir(), "tiny-claw-trace-run-"));
+    const workDir = await mkdtemp(join(tmpdir(), "pico-trace-run-"));
     const session = new Session("trace:session/001", workDir);
     const tracer = new Tracer();
     session.append({ role: "user", content: "追踪这次运行" });

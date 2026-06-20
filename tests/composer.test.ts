@@ -98,7 +98,7 @@ describe("PromptComposer", () => {
 
     const prompt = await new PromptComposer(workDir).build();
     // 极简内核
-    expect(prompt).toContain("tiny-claw");
+    expect(prompt).toContain("pico");
     expect(prompt).toContain("核心纪律");
     // AGENTS.md
     expect(prompt).toContain("项目专属指南");
@@ -111,7 +111,7 @@ describe("PromptComposer", () => {
 
   it("无 AGENTS.md 和 Skills 时仍包含极简内核", async () => {
     const prompt = await new PromptComposer(workDir).build();
-    expect(prompt).toContain("tiny-claw");
+    expect(prompt).toContain("pico");
     expect(prompt).toContain("核心纪律");
     expect(prompt).not.toContain("项目专属指南");
     expect(prompt).not.toContain("可用专业技能");
@@ -139,7 +139,7 @@ describe("PromptComposer", () => {
     expect(prompt).toContain("- [ ]");
     expect(prompt).toContain("- [x]");
     // 仍包含极简内核(规范追加在内核之后)
-    expect(prompt).toContain("tiny-claw");
+    expect(prompt).toContain("pico");
     expect(prompt).toContain("核心纪律");
   });
 

@@ -28,7 +28,7 @@ class ScriptedProvider implements LLMProvider {
 
 describe("runAgentFromCli", () => {
   it("拼装完整 CLI Harness 并在指定工作区执行工具闭环", async () => {
-    const workDir = await mkdtemp(join(tmpdir(), "tiny-claw-cli-"));
+    const workDir = await mkdtemp(join(tmpdir(), "pico-cli-"));
     const provider = new ScriptedProvider([
       {
         role: "assistant",
@@ -92,7 +92,7 @@ describe("runAgentFromCli", () => {
   });
 
   it("从环境与参数解析 Provider 配置并允许命令行覆盖模型", async () => {
-    const workDir = await mkdtemp(join(tmpdir(), "tiny-claw-cli-"));
+    const workDir = await mkdtemp(join(tmpdir(), "pico-cli-"));
     const created: unknown[] = [];
 
     const result = await runAgentFromCli(
@@ -137,7 +137,7 @@ describe("runAgentFromCli", () => {
   });
 
   it("glm-5.2 不可用时自动切到 kimi-k2.5", async () => {
-    const workDir = await mkdtemp(join(tmpdir(), "tiny-claw-cli-"));
+    const workDir = await mkdtemp(join(tmpdir(), "pico-cli-"));
     const created: string[] = [];
 
     const result = await runAgentFromCli(

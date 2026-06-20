@@ -1,11 +1,11 @@
 {
-  "name": "tiny-claw-harness",
+  "name": "pico-harness",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "description": "A TypeScript Agent Harness built lesson by lesson from the《从0开始构建Agent Harness》course.",
   "bin": {
-    "tiny-claw": "./dist/cli/main.js"
+    "pico": "./dist/cli/main.js"
   },
   "scripts": {
     "dev": "tsx src/cli/main.ts",

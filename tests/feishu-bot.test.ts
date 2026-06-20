@@ -10,7 +10,7 @@ import { FeishuBot, type FeishuAgentRunContext } from "../src/feishu/bot.js";
 
 describe("FeishuBot AgentOps 调度", () => {
   it("每个 chat 使用独立 Session、Reporter 和动态 Engine", async () => {
-    const workDir = await mkdtemp(join(tmpdir(), "tiny-claw-feishu-"));
+    const workDir = await mkdtemp(join(tmpdir(), "pico-feishu-"));
     const sent: Array<{ receiveId: string; text: string }> = [];
     const fakeClient = {
       im: {
