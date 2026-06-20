@@ -4,10 +4,15 @@ import { AgentEngine } from "../engine/loop.js";
 import { globalSessionManager, type Session } from "../engine/session.js";
 import { TerminalReporter, type Reporter } from "../engine/reporter.js";
 import { Compactor } from "../context/compactor.js";
-import { createProvider, type ProviderKind } from "../provider/factory.js";
+import {
+  createRawProvider,
+  fallbackModelFor,
+  isModelUnavailableError,
+  type ProviderKind,
+} from "../provider/factory.js";
 import type { ProviderConfig } from "../provider/config.js";
 import type { LLMProvider } from "../provider/interface.js";
-import type { Message } from "../schema/message.js";
+import type { Message, ToolDefinition } from "../schema/message.js";
 import {
   BashTool,
   EditFileTool,
@@ -83,9 +88,15 @@ export async function runAgentFromCli(
     options.session ?? consoleSessionId(workDir),
     workDir,
   );
-  const provider =
-    dependencies.provider ?? (dependencies.providerFactory ?? createProvider)(kind, providerConfig);
-  const trackedProvider = new CostTracker(provider, providerConfig.model, session);
+  const trackedProvider =
+    dependencies.provider !== undefined
+      ? new CostTracker(dependencies.provider, providerConfig.model, session)
+      : createTrackedProviderWithFallback(
+          kind,
+          providerConfig,
+          dependencies.providerFactory ?? createRawProvider,
+          session,
+        );
   const registry = buildRegistry(workDir);
   const engine = new AgentEngine({
     provider: trackedProvider,
@@ -125,6 +136,66 @@ function buildRegistry(workDir: string): ToolRegistry {
   registry.register(new EditFileTool(workDir));
   registry.register(new BashTool(workDir));
   return registry;
+}
+
+function createTrackedProviderWithFallback(
+  kind: ProviderKind,
+  config: ProviderConfig,
+  providerFactory: RunAgentProviderFactory,
+  session: Session,
+): LLMProvider {
+  const fallbackModel = fallbackModelFor(config.model);
+  if (!fallbackModel) {
+    return new CostTracker(providerFactory(kind, config), config.model, session);
+  }
+
+  return new CostTrackedModelFallbackProvider(
+    kind,
+    config,
+    fallbackModel,
+    providerFactory,
+    session,
+  );
+}
+
+class CostTrackedModelFallbackProvider implements LLMProvider {
+  private activeProvider: LLMProvider;
+  private activeModel: string;
+  private switched = false;
+
+  constructor(
+    private readonly kind: ProviderKind,
+    private readonly primaryConfig: ProviderConfig,
+    private readonly fallbackModel: string,
+    private readonly providerFactory: RunAgentProviderFactory,
+    private readonly session: Session,
+  ) {
+    this.activeModel = primaryConfig.model;
+    this.activeProvider = this.createTrackedProvider(primaryConfig);
+  }
+
+  async generate(messages: Message[], availableTools: ToolDefinition[]): Promise<Message> {
+    try {
+      return await this.activeProvider.generate(messages, availableTools);
+    } catch (err) {
+      if (this.switched || !isModelUnavailableError(err, this.activeModel)) {
+        throw err;
+      }
+
+      console.warn(`[Provider] ${this.activeModel} 不可用,自动切换到 ${this.fallbackModel}`);
+      this.activeModel = this.fallbackModel;
+      this.activeProvider = this.createTrackedProvider({
+        ...this.primaryConfig,
+        model: this.fallbackModel,
+      });
+      this.switched = true;
+      return this.activeProvider.generate(messages, availableTools);
+    }
+  }
+
+  private createTrackedProvider(config: ProviderConfig): LLMProvider {
+    return new CostTracker(this.providerFactory(this.kind, config), config.model, this.session);
+  }
 }
 
 function buildReadOnlyRegistry(workDir: string): ToolRegistry {

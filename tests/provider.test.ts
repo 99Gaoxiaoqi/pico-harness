@@ -4,6 +4,7 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ClaudeProvider } from "../src/provider/claude.js";
+import { createProvider, isModelUnavailableError } from "../src/provider/factory.js";
 import { OpenAIProvider } from "../src/provider/openai.js";
 import type { Message, ToolDefinition } from "../src/schema/message.js";
 
@@ -115,6 +116,48 @@ describe("OpenAIProvider 翻译层", () => {
     const last = msgs[msgs.length - 1]!;
     expect(last.role).toBe("tool");
     expect(last.tool_call_id).toBe("c1");
+  });
+
+  it("工厂在 glm-5.2 不可用时用 kimi-k2.5 重试", async () => {
+    const calls: { body: Record<string, unknown> }[] = [];
+    globalThis.fetch = vi.fn(async (_url: string | URL, init?: RequestInit) => {
+      const body = JSON.parse(init?.body as string) as Record<string, unknown>;
+      calls.push({ body });
+
+      if (body.model === "glm-5.2") {
+        return new Response(JSON.stringify({ error: { message: "model glm-5.2 unavailable" } }), {
+          status: 404,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { role: "assistant", content: "fallback ok" } }],
+        }),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+    }) as unknown as typeof fetch;
+
+    const p = createProvider("openai", cfg);
+    const msg = await p.generate(history, []);
+
+    expect(calls.map((call) => call.body.model)).toEqual(["glm-5.2", "kimi-k2.5"]);
+    expect(msg.content).toBe("fallback ok");
+  });
+
+  it("把 glm-5.2 额度耗尽视为当前模型不可用", () => {
+    expect(
+      isModelUnavailableError(
+        new Error(
+          "429 RateLimitError: You have exceeded the 5-hour usage quota. Received Model Group=glm-5.2",
+        ),
+        "glm-5.2",
+      ),
+    ).toBe(true);
   });
 });
 

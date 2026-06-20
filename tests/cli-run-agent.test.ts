@@ -135,4 +135,51 @@ describe("runAgentFromCli", () => {
     ]);
     expect(result.finalMessage).toBe("Anthropic route works.");
   });
+
+  it("glm-5.2 不可用时自动切到 kimi-k2.5", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "tiny-claw-cli-"));
+    const created: string[] = [];
+
+    const result = await runAgentFromCli(
+      {
+        prompt: "Say done",
+        dir: workDir,
+        provider: "openai",
+        model: "glm-5.2",
+        enableThinking: false,
+      },
+      {
+        env: {
+          LLM_BASE_URL: "https://llm.example/v1",
+          LLM_API_KEY: "test-key",
+          LLM_MODEL: "glm-5.2",
+        },
+        providerFactory: (_kind, config) => {
+          created.push(config.model);
+          if (config.model === "glm-5.2") {
+            return {
+              generate: async () => {
+                throw new Error("model glm-5.2 is unavailable");
+              },
+            };
+          }
+          return new ScriptedProvider([
+            {
+              role: "assistant",
+              content: "Kimi fallback works.",
+              usage: { promptTokens: 5, completionTokens: 2 },
+            },
+          ]);
+        },
+        write: () => undefined,
+      },
+    );
+
+    expect(created).toEqual(["glm-5.2", "kimi-k2.5"]);
+    expect(result.finalMessage).toBe("Kimi fallback works.");
+    expect(result.usage).toMatchObject({
+      promptTokens: 5,
+      completionTokens: 2,
+    });
+  });
 });
