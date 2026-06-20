@@ -30,6 +30,7 @@ import {
   type ApprovalNotifier,
 } from "../approval/manager.js";
 import type { MiddlewareFunc } from "../tools/registry.js";
+import { SubagentTool } from "../tools/subagent.js";
 
 function buildRegistry(workDir: string): ToolRegistry {
   const registry = new ToolRegistry();
@@ -37,6 +38,17 @@ function buildRegistry(workDir: string): ToolRegistry {
   registry.register(new ReadFileTool(workDir));
   registry.register(new WriteFileTool(workDir));
   registry.register(new EditFileTool(workDir));
+  registry.register(new BashTool(workDir));
+  return registry;
+}
+
+/**
+ * 构建子智能体专属的只读注册表(爆炸半径限制)。
+ * 子智能体只能读文件/执行只读 bash 搜索,绝对不能 write/edit,防莽夫瞎改。
+ */
+function buildReadOnlyRegistry(workDir: string): ToolRegistry {
+  const registry = new ToolRegistry();
+  registry.register(new ReadFileTool(workDir));
   registry.register(new BashTool(workDir));
   return registry;
 }
@@ -105,6 +117,8 @@ async function runOnce(
     compactor: buildCompactor(),
     reporter: new TerminalReporter(),
   });
+  // 第 17 讲:注册子智能体工具,让主 Agent 能派出探路者干脏活(仅只读工具)
+  registry.register(new SubagentTool(engine, buildReadOnlyRegistry(workDir)));
   // 从全局 SessionManager 取/建会话:CLI 模式以工作目录为 sessionId
   const session = globalSessionManager.getOrCreate(consoleSessionId(workDir), workDir);
   session.append({ role: "user", content: task });
@@ -158,6 +172,7 @@ async function serve(
         compactor: buildCompactor(),
         reporter,
       });
+      registry.register(new SubagentTool(engine, buildReadOnlyRegistry(workDir)));
 
       // HTTP 入口:可选传入 sessionId 实现多会话隔离,缺省用单一控制台会话
       const sessionId = parsed.sessionId ?? `http:${workDir}`;
@@ -227,6 +242,8 @@ async function main() {
       compactor: buildCompactor(),
       reporter: new SilentReporter(), // 实际回写由运行时 FeishuReporter 负责
     });
+    // 第 17 讲:注册子智能体工具(仅只读工具,爆炸半径限制)
+    registry.register(new SubagentTool(engine, buildReadOnlyRegistry(workDir)));
     // 飞书每个 chatId 对应独立 Session,实现多群物理隔离
     const bot = new FeishuBot(engine, loadFeishuConfig(), workDir, registry);
     bot.start();

@@ -13,6 +13,7 @@
 import type { LLMProvider } from "../provider/interface.js";
 import type { Message, ToolCall, ToolResult } from "../schema/message.js";
 import type { Registry } from "../tools/registry.js";
+import type { AgentRunner } from "../tools/subagent.js";
 import type { Compactor } from "../context/compactor.js";
 import { PromptComposer } from "../context/composer.js";
 import { RecoveryManager } from "../context/recovery.js";
@@ -65,7 +66,7 @@ export interface AgentEngineOptions {
 }
 
 /** 微型 OS 的核心驱动 */
-export class AgentEngine {
+export class AgentEngine implements AgentRunner {
   private readonly provider: LLMProvider;
   private readonly registry: Registry;
   private readonly workDir: string;
@@ -286,5 +287,109 @@ export class AgentEngine {
       },
       result,
     };
+  }
+
+  /**
+   * RunSub:专为 Subagent 拉起的一次性受限循环 (第 17 讲)。
+   *
+   * 不依赖外部 Session,打完就跑。子智能体拥有全新纯净上下文,
+   * 无论怎么折腾犯错,主干 contextHistory 依然纯洁如初。
+   *
+   * 防污染机制:
+   * - 仅传入 readOnlyRegistry(只读工具,爆炸半径限制)
+   * - 专属 System Prompt 严厉警告必须用工具不许偷懒
+   * - maxSubTurns=10 防卡死
+   * - 强制关闭慢思考(子任务急速响应)
+   * - 退出条件:不调工具 = 做好总结,返回 content
+   *
+   * @returns 子智能体的纯文本总结汇报
+   */
+  async runSub(
+    taskPrompt: string,
+    readOnlyRegistry: Registry,
+    reporter?: Reporter,
+  ): Promise<string> {
+    const rep = reporter ?? new SilentReporter();
+    console.log(`[Subagent] 🚀 拉起探路者,任务: ${taskPrompt.slice(0, 100)}`);
+
+    // 子智能体专属 System Prompt:严厉警告必须用工具,不许凭空猜测
+    const subSystemPrompt = `你是专门负责深度探索的探路者 (Explorer Subagent)。
+你的任务是根据主架构师的指令,在当前工作区内仔细阅读代码、查阅日志,搜集足够的信息。
+【核心纪律】
+1. 你必须、且只能依靠内置工具(如 bash 的 find/grep,或 read_file)去寻找答案。绝对不允许凭空猜测。
+2. 如果你没有找到确切的答案,你必须继续使用工具深入搜索。
+3. 当且仅当你找到了确切的线索后,停止调用工具,直接输出一段纯文本作为你的终极汇报。主架构师会根据你的汇报决定下一步。`;
+
+    // 全新纯净上下文:不共享主 Agent 的 Session
+    let contextHistory: Message[] = [
+      { role: "system", content: subSystemPrompt },
+      { role: "user", content: taskPrompt },
+    ];
+
+    const maxSubTurns = 10;
+    let turnCount = 0;
+
+    for (;;) {
+      turnCount++;
+      if (turnCount > maxSubTurns) {
+        throw new Error(
+          `子智能体探索过于深入,超过 ${maxSubTurns} 轮被强制召回,请主 Agent 缩小探索范围或拆分任务。`,
+        );
+      }
+
+      // 【驾驭底线】子智能体仅能获取传入的只读工具注册表
+      const availableTools = readOnlyRegistry.getAvailableTools();
+
+      // Compactor 仍生效(子智能体也可能读大文件触发 OOM)
+      const compactedContext = this.compactor
+        ? this.compactor.compact(contextHistory)
+        : contextHistory;
+
+      // 子任务急速响应:强制关闭慢思考,直接预测行动
+      const actionResp = await this.provider.generate(compactedContext, availableTools);
+      contextHistory.push(actionResp);
+
+      if (actionResp.content) {
+        rep.onMessage(`[Subagent] ${actionResp.content}`);
+      }
+
+      // 【核心退出条件】子智能体不调工具了,说明做好了总结汇报
+      const toolCalls = actionResp.toolCalls ?? [];
+      if (toolCalls.length === 0) {
+        console.log(`[Subagent] ✅ 探路者完成 ${turnCount} 轮探索,返回总结。`);
+        return actionResp.content;
+      }
+
+      // 执行只读工具的并发循环(Fork-Join,复用主循环的并发策略)
+      const isReadOnly = readOnlyRegistry.isReadOnlyTool;
+      const allReadOnly =
+        isReadOnly !== undefined && toolCalls.every((tc) => isReadOnly.call(readOnlyRegistry, tc.name));
+
+      const observations: Message[] = new Array(toolCalls.length);
+      const execSubTool = async (toolCall: ToolCall, i: number): Promise<void> => {
+        rep.onToolCall(`[Subagent] ${toolCall.name}`, toolCall.arguments);
+        const result = await readOnlyRegistry.execute(toolCall);
+        let finalOutput = result.output;
+        if (result.isError) {
+          finalOutput = this.recovery.analyzeAndInject(toolCall.name, result.output);
+        }
+        rep.onToolResult(`[Subagent] ${toolCall.name}`, finalOutput, result.isError);
+        observations[i] = {
+          role: "user",
+          content: finalOutput,
+          toolCallId: toolCall.id,
+        };
+      };
+
+      if (allReadOnly) {
+        await Promise.all(toolCalls.map((tc, i) => execSubTool(tc, i)));
+      } else {
+        for (let i = 0; i < toolCalls.length; i++) {
+          await execSubTool(toolCalls[i]!, i);
+        }
+      }
+
+      contextHistory.push(...observations);
+    }
   }
 }
