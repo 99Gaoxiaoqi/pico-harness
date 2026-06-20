@@ -3,6 +3,7 @@
 // 第 13 讲:新增 --plan 开关,开启 Plan Mode 引导长程任务读写 PLAN.md/TODO.md。
 // 用法:
 //   CLI 模式:tsx --env-file=.env src/cli/main.ts --provider openai "你的任务"
+//   指定目录:tsx --env-file=.env src/cli/main.ts --dir ./workspace --prompt "探索并修复问题"
 //   Trace 模式:tsx --env-file=.env src/cli/main.ts --trace "你的任务"
 //   Plan 模式:tsx --env-file=.env src/cli/main.ts --plan "搭建一个极简 Web Server 项目"
 //   HTTP 模式:tsx --env-file=.env src/cli/main.ts --serve --port 3000
@@ -32,8 +33,8 @@ import {
 } from "../approval/manager.js";
 import type { MiddlewareFunc } from "../tools/registry.js";
 import { SubagentTool } from "../tools/subagent.js";
-import { CostTracker } from "../observability/tracker.js";
 import { Tracer } from "../observability/trace.js";
+import { runAgentFromCli } from "./run-agent.js";
 
 function buildRegistry(workDir: string): ToolRegistry {
   const registry = new ToolRegistry();
@@ -91,61 +92,6 @@ function buildApprovalMiddleware(notifier: ApprovalNotifier): MiddlewareFunc {
 const terminalNotifier: ApprovalNotifier = (notice) => {
   console.warn(`\n\x1b[31m[需要审批 TaskID: ${notice.taskId}]\x1b[0m ${notice.message}\n`);
 };
-
-/** 控制台入口的 SessionId:以工作目录路径为标识,重启后可恢复 */
-function consoleSessionId(workDir: string): string {
-  return `console:${workDir}`;
-}
-
-async function runOnce(
-  kind: ProviderKind,
-  enableThinking: boolean,
-  planMode: boolean,
-  traceEnabled: boolean,
-  task: string,
-): Promise<void> {
-  const workDir = process.cwd();
-  // 先取/建会话,以便 CostTracker 持有 session 引用做累计统计
-  const session = globalSessionManager.getOrCreate(consoleSessionId(workDir), workDir);
-
-  const provider = createProvider(kind);
-  // 第 18 讲:用 CostTracker 装饰 provider,追踪每轮 Token 成本与耗时(对引擎透明)
-  const trackedProvider = new CostTracker(
-    provider,
-    kind === "openai" ? "glm-5.2" : "claude-3-5-sonnet",
-    session,
-  );
-
-  const registry = buildRegistry(workDir);
-  registry.use(buildApprovalMiddleware(terminalNotifier));
-  // Plan Mode 开启时由引擎每次 run 动态组装 System Prompt(反映最新工作区状态);
-  // 关闭时预构建一次,避免每轮重复读盘。
-  const systemPrompt = planMode ? undefined : await new PromptComposer(workDir).build();
-  const engine = new AgentEngine({
-    provider: trackedProvider,
-    registry,
-    workDir,
-    enableThinking,
-    planMode,
-    systemPrompt,
-    compactor: buildCompactor(),
-    reporter: new TerminalReporter(),
-    tracer: traceEnabled ? new Tracer() : undefined,
-  });
-  // 第 17 讲:注册子智能体工具,让主 Agent 能派出探路者干脏活(仅只读工具)
-  registry.register(new SubagentTool(engine, buildReadOnlyRegistry(workDir)));
-  session.append({ role: "user", content: task });
-  console.log("开始执行任务...\n");
-  await engine.run(session);
-
-  // 第 18 讲:任务结束打印财务报表
-  console.log("\n================ 财务报表 ================");
-  console.log(`会话 ID: ${session.id}`);
-  console.log(`总消耗 Input Tokens: ${session.totalPromptTokens}`);
-  console.log(`总消耗 Output Tokens: ${session.totalCompletionTokens}`);
-  console.log(`总计费用 (CNY): ¥${session.totalCostCNY.toFixed(6)}`);
-  console.log("==========================================");
-}
 
 /** HTTP Server 模式:接收外部事件流触发 Agent (等价于飞书 webhook 入口) */
 async function serve(
@@ -238,6 +184,12 @@ async function main() {
       thinking: { type: "string", default: "true" },
       plan: { type: "boolean", default: false },
       trace: { type: "boolean", default: false },
+      dir: { type: "string" },
+      session: { type: "string" },
+      prompt: { type: "string" },
+      model: { type: "string" },
+      "api-key": { type: "string" },
+      "base-url": { type: "string" },
       serve: { type: "boolean", default: false },
       port: { type: "string", default: "3000" },
       feishu: { type: "boolean", default: false },
@@ -286,8 +238,21 @@ async function main() {
   }
 
   const task =
-    positionals[0] ?? "请用 read_file 工具读取 README.md,然后用一句话总结这个项目是做什么的。";
-  await runOnce(kind, enableThinking, planMode, traceEnabled, task);
+    values.prompt ??
+    positionals[0] ??
+    "请用 read_file 工具读取 README.md,然后用一句话总结这个项目是做什么的。";
+  await runAgentFromCli({
+    prompt: task,
+    provider: kind,
+    ...(values.dir ? { dir: values.dir } : {}),
+    ...(values.session ? { session: values.session } : {}),
+    ...(values.model ? { model: values.model } : {}),
+    ...(values["api-key"] ? { apiKey: values["api-key"] } : {}),
+    ...(values["base-url"] ? { baseURL: values["base-url"] } : {}),
+    enableThinking,
+    planMode,
+    trace: traceEnabled,
+  });
 }
 
 main().catch((err) => {
