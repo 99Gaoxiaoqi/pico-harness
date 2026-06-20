@@ -10,8 +10,5 @@ export interface LLMProvider {
    * 接收当前上下文历史与可用工具列表,发起一次大模型推理。
    * @returns 模型的响应消息 (可能含 toolCalls,也可能只有纯文本最终答案)
    */
-  generate(
-    messages: Message[],
-    availableTools: ToolDefinition[],
-  ): Promise<Message>;
+  generate(messages: Message[], availableTools: ToolDefinition[]): Promise<Message>;
 }

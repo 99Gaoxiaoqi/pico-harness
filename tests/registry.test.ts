@@ -5,7 +5,13 @@ import { mkdtemp, mkdir, rm, writeFile, readFile, realpath } from "node:fs/promi
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { BashTool, EditFileTool, ReadFileTool, ToolRegistry, WriteFileTool } from "../src/tools/registry-impl.js";
+import {
+  BashTool,
+  EditFileTool,
+  ReadFileTool,
+  ToolRegistry,
+  WriteFileTool,
+} from "../src/tools/registry-impl.js";
 import type { BaseTool } from "../src/tools/registry.js";
 import type { ToolDefinition } from "../src/schema/message.js";
 
@@ -30,10 +36,18 @@ describe("ToolRegistry 路由分发", () => {
   it("getAvailableTools 返回所有已挂载工具的 Schema", () => {
     const r = new ToolRegistry();
     r.register(
-      new FakeTool("a", { name: "a", description: "A", inputSchema: { type: "object" } }, async () => ""),
+      new FakeTool(
+        "a",
+        { name: "a", description: "A", inputSchema: { type: "object" } },
+        async () => "",
+      ),
     );
     r.register(
-      new FakeTool("b", { name: "b", description: "B", inputSchema: { type: "object" } }, async () => ""),
+      new FakeTool(
+        "b",
+        { name: "b", description: "B", inputSchema: { type: "object" } },
+        async () => "",
+      ),
     );
     const tools = r.getAvailableTools();
     expect(tools.map((t) => t.name).sort()).toEqual(["a", "b"]);
@@ -108,9 +122,9 @@ describe("ReadFileTool 防御底线", () => {
     await mkdir(join(workDir, "sub"), { recursive: true });
     await writeFile(join(workDir, "sub", "real.txt"), "ok");
     const tool = new ReadFileTool(workDir);
-    await expect(
-      tool.execute(JSON.stringify({ path: "../../../etc/passwd" })),
-    ).rejects.toThrow(/路径越界/);
+    await expect(tool.execute(JSON.stringify({ path: "../../../etc/passwd" }))).rejects.toThrow(
+      /路径越界/,
+    );
   });
 
   it("参数格式错误时抛出解析错误", async () => {
@@ -192,9 +206,7 @@ describe("BashTool", () => {
 
   it("支持管道与链式命令", async () => {
     const tool = new BashTool(workDir);
-    const out = await tool.execute(
-      JSON.stringify({ command: "echo 'a\\nb\\nc' | grep b" }),
-    );
+    const out = await tool.execute(JSON.stringify({ command: "echo 'a\\nb\\nc' | grep b" }));
     expect(out.trim()).toBe("b");
   });
 
@@ -248,7 +260,10 @@ describe("EditFileTool 多级模糊匹配", () => {
 
   it("L4 逐行去缩进:old_text 缺少缩进仍能匹配 (缩进幻觉容错)", async () => {
     // 原文件带 8 空格缩进
-    await writeFile(join(workDir, "f.txt"), "func main() {\n        if err != nil {\n            return err\n        }\n}");
+    await writeFile(
+      join(workDir, "f.txt"),
+      "func main() {\n        if err != nil {\n            return err\n        }\n}",
+    );
     const tool = new EditFileTool(workDir);
     // old_text 无缩进 (模拟模型幻觉)
     const out = await tool.execute(
@@ -282,9 +297,7 @@ describe("EditFileTool 多级模糊匹配", () => {
   it("路径穿越被拒绝", async () => {
     const tool = new EditFileTool(workDir);
     await expect(
-      tool.execute(
-        JSON.stringify({ path: "../../x.txt", old_text: "a", new_text: "b" }),
-      ),
+      tool.execute(JSON.stringify({ path: "../../x.txt", old_text: "a", new_text: "b" })),
     ).rejects.toThrow(/路径越界/);
   });
 });
@@ -338,12 +351,12 @@ describe("EditFileTool 多级模糊匹配", () => {
       JSON.stringify({
         path: "d.txt",
         old_text: "if user == nil {\nreturn err\n}",
-        new_text: "if user == nil {\n    return fmt.Errorf(\"nil\")\n}",
+        new_text: 'if user == nil {\n    return fmt.Errorf("nil")\n}',
       }),
     );
     expect(out).toContain("L4");
     const result = await readFile(join(workDir, "d.txt"), "utf8");
-    expect(result).toContain('fmt.Errorf');
+    expect(result).toContain("fmt.Errorf");
   });
 
   it("唯一性校验:精确匹配多处时拒绝替换", async () => {
@@ -365,9 +378,7 @@ describe("EditFileTool 多级模糊匹配", () => {
   it("路径穿越被拒绝", async () => {
     const tool = new EditFileTool(workDir);
     await expect(
-      tool.execute(
-        JSON.stringify({ path: "../../x", old_text: "a", new_text: "b" }),
-      ),
+      tool.execute(JSON.stringify({ path: "../../x", old_text: "a", new_text: "b" })),
     ).rejects.toThrow(/路径越界/);
   });
 });

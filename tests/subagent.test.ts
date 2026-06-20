@@ -46,7 +46,11 @@ function mockReadOnlyRegistry(executed: ToolCall[] = []): Registry {
 
 describe("SubagentTool", () => {
   it("name 和 definition 正确暴露", () => {
-    const runner: AgentRunner = { async runSub() { return ""; } };
+    const runner: AgentRunner = {
+      async runSub() {
+        return "";
+      },
+    };
     const tool = new SubagentTool(runner, mockReadOnlyRegistry());
     expect(tool.name()).toBe("spawn_subagent");
     const def = tool.definition();
@@ -68,7 +72,11 @@ describe("SubagentTool", () => {
   });
 
   it("execute 参数缺失时报错", async () => {
-    const runner: AgentRunner = { async runSub() { return ""; } };
+    const runner: AgentRunner = {
+      async runSub() {
+        return "";
+      },
+    };
     const tool = new SubagentTool(runner, mockReadOnlyRegistry());
     await expect(tool.execute("{}")).rejects.toThrow("task_prompt");
   });
@@ -236,7 +244,9 @@ describe("SubagentTool + AgentEngine 端到端委派", () => {
           return {
             role: "assistant",
             content: "我派出子智能体去探索",
-            toolCalls: [{ id: "main-c1", name: "spawn_subagent", arguments: '{"task_prompt":"找密码"}' }],
+            toolCalls: [
+              { id: "main-c1", name: "spawn_subagent", arguments: '{"task_prompt":"找密码"}' },
+            ],
           };
         }
         // 主 Agent 收到子报告后给最终答案

@@ -120,7 +120,7 @@ export class EchoTool implements BaseTool {
     };
   }
   async execute(args: string): Promise<string> {
-    let text = "";
+    let text: string;
     try {
       const input = JSON.parse(args) as { text?: string };
       text = input.text ?? "";
@@ -284,7 +284,7 @@ export class BashTool implements BaseTool {
 
     // 驾驭底线 1+2:超时控制 + 工作区绑定
     // 注意:命令执行失败时绝不抛异常,而是原样回传(底线 3),交给模型自纠。
-    let stdout = "";
+    let stdout: string;
     let timedOut = false;
     try {
       const { stdout: out } = await execAsync(command, {
@@ -294,7 +294,13 @@ export class BashTool implements BaseTool {
       });
       stdout = out;
     } catch (err) {
-      const e = err as { killed?: boolean; signal?: string; stdout?: string; stderr?: string; message?: string };
+      const e = err as {
+        killed?: boolean;
+        signal?: string;
+        stdout?: string;
+        stderr?: string;
+        message?: string;
+      };
       // 判断是否超时
       if (e.killed && e.signal === "SIGTERM") {
         timedOut = true;
@@ -315,7 +321,10 @@ export class BashTool implements BaseTool {
 
     // 驾驭底线 4:长度截断保护
     if (stdout.length > BASH_MAX_BYTES) {
-      return stdout.slice(0, BASH_MAX_BYTES) + `\n\n...[终端输出过长,已截断至前 ${BASH_MAX_BYTES} 字节]...`;
+      return (
+        stdout.slice(0, BASH_MAX_BYTES) +
+        `\n\n...[终端输出过长,已截断至前 ${BASH_MAX_BYTES} 字节]...`
+      );
     }
 
     return stdout;
@@ -418,7 +427,9 @@ function lineByLineReplace(content: string, oldText: string, newText: string): s
 
   const matchEnd = matchStart + oldLines.length;
   // 将匹配到的原始行范围替换为 newText
-  return [...contentLines.slice(0, matchStart), newText, ...contentLines.slice(matchEnd)].join("\n");
+  return [...contentLines.slice(0, matchStart), newText, ...contentLines.slice(matchEnd)].join(
+    "\n",
+  );
 }
 
 export class EditFileTool implements BaseTool {

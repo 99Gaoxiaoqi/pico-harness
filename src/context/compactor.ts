@@ -122,9 +122,7 @@ export class Compactor {
     }
 
     const newLength = this.estimateLength(compacted);
-    console.warn(
-      `[Compactor] ✅ 压缩完成。上下文长度从 ${currentLength} 降至 ${newLength} 字符。`,
-    );
+    console.warn(`[Compactor] ✅ 压缩完成。上下文长度从 ${currentLength} 降至 ${newLength} 字符。`);
     return compacted;
   }
 

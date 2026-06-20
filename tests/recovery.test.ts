@@ -32,7 +32,10 @@ describe("RecoveryManager", () => {
 
   describe("read_file / write_file", () => {
     it("文件不存在(POSIX):注入 ls/find 确认路径建议", () => {
-      const out = rm.analyzeAndInject("read_file", "Error: no such file or directory, open 'foo.txt'");
+      const out = rm.analyzeAndInject(
+        "read_file",
+        "Error: no such file or directory, open 'foo.txt'",
+      );
       expect(out).toContain("[系统救援指南]");
       expect(out).toContain("ls -la");
       expect(out).toContain("凭空猜测");
@@ -51,7 +54,10 @@ describe("RecoveryManager", () => {
     });
 
     it("EISDIR 路径是目录:注入 ls 建议", () => {
-      const out = rm.analyzeAndInject("read_file", "EISDIR: illegal operation on a directory, read");
+      const out = rm.analyzeAndInject(
+        "read_file",
+        "EISDIR: illegal operation on a directory, read",
+      );
       expect(out).toContain("[系统救援指南]");
       expect(out).toContain("目录");
       expect(out).toContain("ls");

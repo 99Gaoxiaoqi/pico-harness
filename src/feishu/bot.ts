@@ -72,12 +72,7 @@ export class FeishuBot {
   /** 当前正在跑 Agent 的会话(审批通知发到这里);同一 bot 同时只处理一个活跃会话 */
   private activeChatId: string | null = null;
 
-  constructor(
-    engine: AgentEngine,
-    config: FeishuConfig,
-    workDir: string,
-    registry?: Registry,
-  ) {
+  constructor(engine: AgentEngine, config: FeishuConfig, workDir: string, registry?: Registry) {
     this.engine = engine;
     this.config = config;
     this.workDir = workDir;
@@ -160,9 +155,7 @@ export class FeishuBot {
         },
         {
           tag: "note",
-          elements: [
-            { tag: "plain_text", content: "也可回复 approve/reject + 任务ID 文字指令" },
-          ],
+          elements: [{ tag: "plain_text", content: "也可回复 approve/reject + 任务ID 文字指令" }],
         },
       ],
     };
@@ -227,7 +220,7 @@ export class FeishuBot {
     }
 
     // 飞书消息体是 JSON,如 {"text":"@_user_1 你好"},提取 text
-    let text = "";
+    let text: string;
     try {
       const parsed = JSON.parse(contentStr) as { text?: string };
       text = parsed.text ?? "";
@@ -297,7 +290,11 @@ export class FeishuBot {
     }
     const { taskId, action } = value;
     if (action === "approve") {
-      const ok = globalApprovalManager.resolveApproval(taskId, true, "人类管理员已批准操作(点击卡片按钮)");
+      const ok = globalApprovalManager.resolveApproval(
+        taskId,
+        true,
+        "人类管理员已批准操作(点击卡片按钮)",
+      );
       console.log(`[Feishu] 卡片回调: ${ok ? "✅" : "⚠"} approve ${taskId}`);
     } else if (action === "reject") {
       const ok = globalApprovalManager.resolveApproval(
@@ -333,7 +330,8 @@ export class FeishuReporter implements Reporter {
   }
 
   onToolCall(toolName: string, args: string): void {
-    const display = args.length > REPORT_MAX_LEN ? args.slice(0, REPORT_MAX_LEN) + "...(已截断)" : args;
+    const display =
+      args.length > REPORT_MAX_LEN ? args.slice(0, REPORT_MAX_LEN) + "...(已截断)" : args;
     void this.send(`🛠️ 调用工具: ${toolName}\n参数: ${display}`);
   }
 

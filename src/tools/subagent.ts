@@ -85,7 +85,9 @@ export class SubagentTool implements BaseTool {
       throw new Error("spawn_subagent 缺少 task_prompt 参数");
     }
 
-    console.log(`[Subagent] 🚀 主 Agent 发起委派!正在拉起探路者: [${input.task_prompt.slice(0, 80)}...]`);
+    console.log(
+      `[Subagent] 🚀 主 Agent 发起委派!正在拉起探路者: [${input.task_prompt.slice(0, 80)}...]`,
+    );
 
     let summary: string;
     try {

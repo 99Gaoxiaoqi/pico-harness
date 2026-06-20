@@ -79,9 +79,7 @@ Agent 试图执行以下动作:
       const timer = setTimeout(() => {
         if (this.pendingTasks.has(taskId)) {
           this.pendingTasks.delete(taskId);
-          console.warn(
-            `[Approval] 任务 ${taskId} 审批超时(${this.timeoutMs}ms),自动拒绝。`,
-          );
+          console.warn(`[Approval] 任务 ${taskId} 审批超时(${this.timeoutMs}ms),自动拒绝。`);
           resolve({
             allowed: false,
             reason: `审批超时(${Math.floor(this.timeoutMs / 60000)} 分钟无人响应),系统自动拒绝。`,
@@ -108,9 +106,7 @@ Agent 试图执行以下动作:
     }
     clearTimeout(entry.timer);
     this.pendingTasks.delete(taskId);
-    console.log(
-      `[Approval] 收到审批结果 (TaskID: ${taskId}, Allowed: ${allowed}): ${reason}`,
-    );
+    console.log(`[Approval] 收到审批结果 (TaskID: ${taskId}, Allowed: ${allowed}): ${reason}`);
     entry.resolve({ allowed, reason });
     return true;
   }

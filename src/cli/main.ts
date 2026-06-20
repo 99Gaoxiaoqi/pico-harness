@@ -3,6 +3,7 @@
 // 第 13 讲:新增 --plan 开关,开启 Plan Mode 引导长程任务读写 PLAN.md/TODO.md。
 // 用法:
 //   CLI 模式:tsx --env-file=.env src/cli/main.ts --provider openai "你的任务"
+//   Trace 模式:tsx --env-file=.env src/cli/main.ts --trace "你的任务"
 //   Plan 模式:tsx --env-file=.env src/cli/main.ts --plan "搭建一个极简 Web Server 项目"
 //   HTTP 模式:tsx --env-file=.env src/cli/main.ts --serve --port 3000
 //             然后:curl -X POST localhost:3000/ask -H 'Content-Type: application/json' -d '{"prompt":"..."}'
@@ -32,6 +33,7 @@ import {
 import type { MiddlewareFunc } from "../tools/registry.js";
 import { SubagentTool } from "../tools/subagent.js";
 import { CostTracker } from "../observability/tracker.js";
+import { Tracer } from "../observability/trace.js";
 
 function buildRegistry(workDir: string): ToolRegistry {
   const registry = new ToolRegistry();
@@ -99,6 +101,7 @@ async function runOnce(
   kind: ProviderKind,
   enableThinking: boolean,
   planMode: boolean,
+  traceEnabled: boolean,
   task: string,
 ): Promise<void> {
   const workDir = process.cwd();
@@ -127,6 +130,7 @@ async function runOnce(
     systemPrompt,
     compactor: buildCompactor(),
     reporter: new TerminalReporter(),
+    tracer: traceEnabled ? new Tracer() : undefined,
   });
   // 第 17 讲:注册子智能体工具,让主 Agent 能派出探路者干脏活(仅只读工具)
   registry.register(new SubagentTool(engine, buildReadOnlyRegistry(workDir)));
@@ -148,6 +152,7 @@ async function serve(
   kind: ProviderKind,
   enableThinking: boolean,
   planMode: boolean,
+  traceEnabled: boolean,
   port: number,
 ): Promise<void> {
   const workDir = process.cwd();
@@ -155,7 +160,7 @@ async function serve(
   const server = createServer(async (req, res) => {
     if (req.method !== "POST" || req.url !== "/ask") {
       res.writeHead(404, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: "请 POST 到 /ask,body: {\"prompt\":\"...\"}" }));
+      res.end(JSON.stringify({ error: '请 POST 到 /ask,body: {"prompt":"..."}' }));
       return;
     }
 
@@ -188,6 +193,7 @@ async function serve(
         systemPrompt,
         compactor: buildCompactor(),
         reporter,
+        tracer: traceEnabled ? new Tracer() : undefined,
       });
       registry.register(new SubagentTool(engine, buildReadOnlyRegistry(workDir)));
 
@@ -208,7 +214,9 @@ async function serve(
 
   server.listen(port, () => {
     console.log(`🚀 tiny-claw HTTP 模式监听 http://localhost:${port}/ask`);
-    console.log(`试试: curl -X POST localhost:${port}/ask -H 'Content-Type: application/json' -d '{"prompt":"你好"}'`);
+    console.log(
+      `试试: curl -X POST localhost:${port}/ask -H 'Content-Type: application/json' -d '{"prompt":"你好"}'`,
+    );
   });
 }
 
@@ -229,6 +237,7 @@ async function main() {
       provider: { type: "string", default: "openai" },
       thinking: { type: "string", default: "true" },
       plan: { type: "boolean", default: false },
+      trace: { type: "boolean", default: false },
       serve: { type: "boolean", default: false },
       port: { type: "string", default: "3000" },
       feishu: { type: "boolean", default: false },
@@ -239,9 +248,12 @@ async function main() {
   const kind = values.provider as ProviderKind;
   const enableThinking = values.thinking !== "false";
   const planMode = values.plan;
+  const traceEnabled = values.trace;
 
   console.log("🚀 欢迎来到 tiny-claw-harness 引擎启动序列");
-  console.log(`[Provider] ${kind} 协议 | [Thinking] ${enableThinking} | [PlanMode] ${planMode}`);
+  console.log(
+    `[Provider] ${kind} 协议 | [Thinking] ${enableThinking} | [PlanMode] ${planMode} | [Trace] ${traceEnabled}`,
+  );
 
   if (values.feishu) {
     // 飞书模式:启动 WSClient 长连接,群里 @机器人 触发 Agent,状态发回会话
@@ -258,6 +270,7 @@ async function main() {
       systemPrompt,
       compactor: buildCompactor(),
       reporter: new SilentReporter(), // 实际回写由运行时 FeishuReporter 负责
+      tracer: traceEnabled ? new Tracer() : undefined,
     });
     // 第 17 讲:注册子智能体工具(仅只读工具,爆炸半径限制)
     registry.register(new SubagentTool(engine, buildReadOnlyRegistry(workDir)));
@@ -268,13 +281,13 @@ async function main() {
   }
 
   if (values.serve) {
-    await serve(kind, enableThinking, planMode, Number(values.port));
+    await serve(kind, enableThinking, planMode, traceEnabled, Number(values.port));
     return;
   }
 
   const task =
     positionals[0] ?? "请用 read_file 工具读取 README.md,然后用一句话总结这个项目是做什么的。";
-  await runOnce(kind, enableThinking, planMode, task);
+  await runOnce(kind, enableThinking, planMode, traceEnabled, task);
 }
 
 main().catch((err) => {

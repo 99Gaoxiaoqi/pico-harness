@@ -43,9 +43,7 @@ export class ClaudeProvider implements LLMProvider {
             // 工具观察结果:user 消息里的 tool_result block
             anthropicMsgs.push({
               role: "user",
-              content: [
-                { type: "tool_result", tool_use_id: msg.toolCallId, content: msg.content },
-              ],
+              content: [{ type: "tool_result", tool_use_id: msg.toolCallId, content: msg.content }],
             });
           } else {
             anthropicMsgs.push({
@@ -62,7 +60,7 @@ export class ClaudeProvider implements LLMProvider {
           }
           // 历史工具调用 → tool_use block,input 需解析成对象
           for (const tc of msg.toolCalls ?? []) {
-            let input: unknown = {};
+            let input: unknown;
             try {
               input = JSON.parse(tc.arguments);
             } catch {
@@ -142,8 +140,7 @@ export class ClaudeProvider implements LLMProvider {
 
     const usage =
       data.usage &&
-      (typeof data.usage.input_tokens === "number" ||
-        typeof data.usage.output_tokens === "number")
+      (typeof data.usage.input_tokens === "number" || typeof data.usage.output_tokens === "number")
         ? {
             promptTokens: data.usage.input_tokens ?? 0,
             completionTokens: data.usage.output_tokens ?? 0,

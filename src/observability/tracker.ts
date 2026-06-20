@@ -46,8 +46,7 @@ export class CostTracker implements LLMProvider {
     if (resp.usage) {
       const { promptTokens, completionTokens } = resp.usage;
       const price = PRICING[this.modelName] ?? { input: 0.5, output: 0.5 };
-      const costUSD =
-        (promptTokens * price.input + completionTokens * price.output) / 1_000_000;
+      const costUSD = (promptTokens * price.input + completionTokens * price.output) / 1_000_000;
       const costCNY = costUSD * USD_TO_CNY;
       console.log(
         `[Tracker] 📊 API 完成 | 耗时: ${latencyMs}ms | 输入: ${promptTokens} tk | 输出: ${completionTokens} tk | 花费: ¥${costCNY.toFixed(6)}`,

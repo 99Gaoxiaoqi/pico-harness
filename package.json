@@ -26,10 +26,18 @@
     "pino": "^10.1.0",
     "zod": "^4.2.0"
   },
+  "overrides": {
+    "axios": "^1.18.0"
+  },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/node": "^25.0.3",
+    "eslint": "^10.5.0",
+    "globals": "^17.6.0",
+    "prettier": "^3.8.4",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
+    "typescript-eslint": "^8.61.1",
     "vitest": "^4.0.16"
   }
 }

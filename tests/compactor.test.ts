@@ -28,11 +28,7 @@ function toolResultMsg(toolCallId: string, output: string): Message {
 describe("Compactor", () => {
   it("未超水位线时直通返回,且为深拷贝", () => {
     const c = new Compactor({ maxChars: 10000, retainLastMsgs: 6 });
-    const msgs = [
-      systemMsg("sys"),
-      userMsg("hi"),
-      assistantMsg("hello"),
-    ];
+    const msgs = [systemMsg("sys"), userMsg("hi"), assistantMsg("hello")];
     const out = c.compact(msgs);
     expect(out).toHaveLength(3);
     // 深拷贝:修改 out 不影响原数组

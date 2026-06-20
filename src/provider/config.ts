@@ -12,9 +12,7 @@ export function loadProviderConfig(): ProviderConfig {
   const apiKey = process.env.LLM_API_KEY;
   const model = process.env.LLM_MODEL;
   if (!baseURL || !apiKey || !model) {
-    throw new Error(
-      "缺少环境变量 LLM_BASE_URL / LLM_API_KEY / LLM_MODEL,请检查 .env 是否已加载",
-    );
+    throw new Error("缺少环境变量 LLM_BASE_URL / LLM_API_KEY / LLM_MODEL,请检查 .env 是否已加载");
   }
   return { baseURL, apiKey, model };
 }

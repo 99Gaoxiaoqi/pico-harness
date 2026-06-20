@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { CostTracker } from "../src/observability/tracker.js";
 import { Session } from "../src/engine/session.js";
 import type { LLMProvider } from "../src/provider/interface.js";
-import type { Message, ToolDefinition } from "../src/schema/message.js";
+import type { Message } from "../src/schema/message.js";
 
 /** Mock Provider:返回预设的 Message(含 usage) */
 class MockProvider implements LLMProvider {

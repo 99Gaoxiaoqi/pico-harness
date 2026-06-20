@@ -19,6 +19,7 @@ import { PromptComposer } from "../context/composer.js";
 import { RecoveryManager } from "../context/recovery.js";
 import { SilentReporter, type Reporter } from "./reporter.js";
 import { ReminderInjector } from "./reminder.js";
+import { Tracer, exportTraceToFile, truncate, type Span } from "../observability/trace.js";
 import type { Session } from "./session.js";
 
 /** WorkingMemory 滑动窗口大小:截取最近 N 条消息供压缩器判断(含远期历史) */
@@ -63,6 +64,11 @@ export interface AgentEngineOptions {
   onTurn?: (info: { turn: number; message: Message }) => void;
   /** 输出 Reporter;默认静默 (第 09 讲) */
   reporter?: Reporter;
+  /**
+   * 链路追踪器:记录决策树到 .claw/traces/ (第 19 讲)。
+   * 未提供则不追踪。
+   */
+  tracer?: Tracer;
 }
 
 /** 微型 OS 的核心驱动 */
@@ -79,6 +85,7 @@ export class AgentEngine implements AgentRunner {
   private readonly reminderInjector: ReminderInjector;
   private readonly onTurn?: (info: { turn: number; message: Message }) => void;
   private readonly reporter: Reporter;
+  private readonly tracer?: Tracer;
 
   constructor(opts: AgentEngineOptions) {
     this.provider = opts.provider;
@@ -96,6 +103,7 @@ export class AgentEngine implements AgentRunner {
     this.reminderInjector = opts.reminderInjector ?? new ReminderInjector();
     this.onTurn = opts.onTurn;
     this.reporter = opts.reporter ?? new SilentReporter();
+    this.tracer = opts.tracer;
   }
 
   /**
@@ -123,8 +131,19 @@ export class AgentEngine implements AgentRunner {
    *                        (第 09 讲:飞书每次会话用独立 reporter 回写)
    * @returns 本轮新增的消息序列(从用户输入起)
    */
-  async run(session: Session, runtimeReporter?: Reporter): Promise<Message[]> {
+  async run(
+    session: Session,
+    runtimeReporter?: Reporter,
+    runtimeTracer?: Tracer,
+  ): Promise<Message[]> {
     const reporter = runtimeReporter ?? this.reporter;
+    const tracer = runtimeTracer ?? this.tracer;
+    const rootSpan = tracer?.startRoot("Agent.Run", {
+      sessionId: session.id,
+      workDir: session.workDir,
+      planMode: this.planMode,
+      enableThinking: this.enableThinking,
+    });
     reporter.onStart(this.workDir, this.enableThinking);
     console.log(
       `[Engine] 唤醒会话 [${session.id}],锁定工作区: ${session.workDir} (PlanMode: ${this.planMode})`,
@@ -137,122 +156,172 @@ export class AgentEngine implements AgentRunner {
     let turnCount = 0;
 
     // The Main Loop:心跳开始 (Two-Stage ReAct 循环)
-    for (;;) {
-      turnCount++;
-      reporter.onTurnStart(turnCount);
+    try {
+      for (;;) {
+        turnCount++;
+        reporter.onTurnStart(turnCount);
+        const turnSpan = rootSpan?.startChild(`Turn-${turnCount}`);
 
-      // 获取当前挂载的所有工具定义
-      const availableTools = this.registry.getAvailableTools();
+        try {
+          // 获取当前挂载的所有工具定义
+          const availableTools = this.registry.getAvailableTools();
 
-      // ====================================================================
-      // 1. 上下文组装:System Prompt + 截取最近 N 条作为 WorkingMemory
-      // 无论聊多久,发给大模型的 Context 规模始终被严格控制。
-      // ====================================================================
-      const workingMemory = session.getWorkingMemory(this.workingMemoryLimit);
-      const contextHistory: Message[] = [
-        { role: "system", content: systemPrompt },
-        ...workingMemory,
-      ];
+          // ====================================================================
+          // 1. 上下文组装:System Prompt + 截取最近 N 条作为 WorkingMemory
+          // 无论聊多久,发给大模型的 Context 规模始终被严格控制。
+          // ====================================================================
+          const workingMemory = session.getWorkingMemory(this.workingMemoryLimit);
+          const contextHistory: Message[] = [
+            { role: "system", content: systemPrompt },
+            ...workingMemory,
+          ];
 
-      // ====================================================================
-      // 2. 【核心注入点】:在向 Provider 发起推理前,过一遍内存压缩器!
-      // 无论带出多少上下文,若字符总数超标,早期日志将被掩码化,
-      // 超大日志将被掐头去尾。Compact 只作用于本轮发给大模型的临时 Context,
-      // 写入 Session 的永远是全量真实数据。
-      // ====================================================================
-      const compactedContext = this.compactor
-        ? this.compactor.compact(contextHistory)
-        : contextHistory;
+          // ====================================================================
+          // 2. 【核心注入点】:在向 Provider 发起推理前,过一遍内存压缩器!
+          // 无论带出多少上下文,若字符总数超标,早期日志将被掩码化,
+          // 超大日志将被掐头去尾。Compact 只作用于本轮发给大模型的临时 Context,
+          // 写入 Session 的永远是全量真实数据。
+          // ====================================================================
+          const contextChars = estimateTraceLength(contextHistory);
+          const compactedContext = this.compactor
+            ? this.compactor.compact(contextHistory)
+            : contextHistory;
+          const compactedChars = estimateTraceLength(compactedContext);
+          turnSpan?.addAttributes({
+            contextMessageCount: contextHistory.length,
+            compactedMessageCount: compactedContext.length,
+            contextChars,
+            compactedChars,
+            availableToolCount: availableTools.length,
+          });
+          recordCompaction(turnSpan, contextChars, compactedChars);
 
-      // ====================================================================
-      // Phase 1: 慢思考阶段 (Thinking) —— 剥夺工具,强制规划 (第 03 讲)
-      // ====================================================================
-      if (this.enableThinking) {
-        reporter.onThinking();
+          // ====================================================================
+          // Phase 1: 慢思考阶段 (Thinking) —— 剥夺工具,强制规划 (第 03 讲)
+          // ====================================================================
+          if (this.enableThinking) {
+            reporter.onThinking();
 
-        // 核心机制:传入空的 tools 数组!
-        // 大模型看不到任何 JSON Schema,被迫只能输出纯文本的思考过程。
-        const thinkResp = await this.provider.generate(compactedContext, []);
-
-        if (thinkResp.content) {
-          // 将思考过程持久化到 Session,并追加到本轮临时上下文供 Action 使用
-          session.append(thinkResp);
-          compactedContext.push(thinkResp);
-        }
-      }
-
-      // ====================================================================
-      // Phase 2: 行动阶段 (Action) —— 恢复工具,顺着规划执行
-      // ====================================================================
-      // 此时 compactedContext 已包含 Phase 1 模型自己的 Thinking Trace。
-      // 自回归特性:模型看到自己刚才的规划,会顺理成章生成对应的工具调用。
-      const responseMsg = await this.provider.generate(compactedContext, availableTools);
-
-      // 将大模型的行动响应持久化到 Session
-      session.append(responseMsg);
-      compactedContext.push(responseMsg);
-      this.onTurn?.({ turn: turnCount, message: responseMsg });
-
-      // 模型回复纯文本时广播 (通常是思考过程或最终结果)
-      if (responseMsg.content) {
-        reporter.onMessage(responseMsg.content);
-      }
-
-      // 3. 退出条件:模型没有请求任何工具调用,说明任务完成,挂起等待下一条指令
-      const toolCalls = responseMsg.toolCalls ?? [];
-      if (toolCalls.length === 0) {
-        reporter.onFinish();
-        break;
-      }
-
-      // 4. 执行行动 (Action) 与 获取观察结果 (Observation)
-      // 第 08 讲:Fork-Join 并发执行。
-      // 策略:批次全只读则并行 (Promise.all),含写操作则串行。
-      // 预分配结果数组按原索引写入,既并发安全又保留工具调用原始顺序。
-      const isReadOnly = this.registry.isReadOnlyTool;
-      const allReadOnly =
-        isReadOnly !== undefined && toolCalls.every((tc) => isReadOnly.call(this.registry, tc.name));
-
-      const observations: Message[] = new Array(toolCalls.length);
-      // 收集本轮最后一个工具调用 + 结果,供 Reminder 探测器分析
-      // (并发场景下取索引 0;真实工业级可逐个分析报错的那个)
-      let lastToolCall: ToolCall | null = null;
-      let lastToolResult: ToolResult | null = null;
-
-      if (allReadOnly) {
-        await Promise.all(
-          toolCalls.map(async (toolCall, i) => {
-            const { message, result } = await this.runOneTool(toolCall, reporter);
-            observations[i] = message;
-            if (i === 0) {
-              lastToolCall = toolCall;
-              lastToolResult = result;
+            // 核心机制:传入空的 tools 数组!
+            // 大模型看不到任何 JSON Schema,被迫只能输出纯文本的思考过程。
+            const thinkingSpan = turnSpan?.startChild("LLM.Thinking", {
+              inputMessageCount: compactedContext.length,
+              availableToolCount: 0,
+            });
+            let thinkResp: Message;
+            try {
+              thinkResp = await this.provider.generate(compactedContext, []);
+              recordLlmResponse(thinkingSpan, thinkResp);
+            } catch (err) {
+              recordTraceError(thinkingSpan, err);
+              throw err;
+            } finally {
+              thinkingSpan?.end();
             }
-          }),
-        );
-      } else {
-        for (let i = 0; i < toolCalls.length; i++) {
-          const { message, result } = await this.runOneTool(toolCalls[i]!, reporter);
-          observations[i] = message;
-          if (i === 0) {
-            lastToolCall = toolCalls[i]!;
-            lastToolResult = result;
+
+            if (thinkResp.content) {
+              // 将思考过程持久化到 Session,并追加到本轮临时上下文供 Action 使用
+              session.append(thinkResp);
+              compactedContext.push(thinkResp);
+            }
           }
+
+          // ====================================================================
+          // Phase 2: 行动阶段 (Action) —— 恢复工具,顺着规划执行
+          // ====================================================================
+          // 此时 compactedContext 已包含 Phase 1 模型自己的 Thinking Trace。
+          // 自回归特性:模型看到自己刚才的规划,会顺理成章生成对应的工具调用。
+          const actionSpan = turnSpan?.startChild("LLM.Action", {
+            inputMessageCount: compactedContext.length,
+            availableToolCount: availableTools.length,
+          });
+          let responseMsg: Message;
+          try {
+            responseMsg = await this.provider.generate(compactedContext, availableTools);
+            recordLlmResponse(actionSpan, responseMsg);
+          } catch (err) {
+            recordTraceError(actionSpan, err);
+            throw err;
+          } finally {
+            actionSpan?.end();
+          }
+
+          // 将大模型的行动响应持久化到 Session
+          session.append(responseMsg);
+          compactedContext.push(responseMsg);
+          this.onTurn?.({ turn: turnCount, message: responseMsg });
+
+          // 模型回复纯文本时广播 (通常是思考过程或最终结果)
+          if (responseMsg.content) {
+            reporter.onMessage(responseMsg.content);
+          }
+
+          // 3. 退出条件:模型没有请求任何工具调用,说明任务完成,挂起等待下一条指令
+          const toolCalls = responseMsg.toolCalls ?? [];
+          if (toolCalls.length === 0) {
+            reporter.onFinish();
+            break;
+          }
+
+          // 4. 执行行动 (Action) 与 获取观察结果 (Observation)
+          // 第 08 讲:Fork-Join 并发执行。
+          // 策略:批次全只读则并行 (Promise.all),含写操作则串行。
+          // 预分配结果数组按原索引写入,既并发安全又保留工具调用原始顺序。
+          const isReadOnly = this.registry.isReadOnlyTool;
+          const allReadOnly =
+            isReadOnly !== undefined &&
+            toolCalls.every((tc) => isReadOnly.call(this.registry, tc.name));
+
+          const observations: Message[] = new Array(toolCalls.length);
+          // 收集本轮最后一个工具调用 + 结果,供 Reminder 探测器分析
+          // (并发场景下取索引 0;真实工业级可逐个分析报错的那个)
+          let lastToolCall: ToolCall | null = null;
+          let lastToolResult: ToolResult | null = null;
+
+          if (allReadOnly) {
+            await Promise.all(
+              toolCalls.map(async (toolCall, i) => {
+                const { message, result } = await this.runOneTool(toolCall, reporter, turnSpan);
+                observations[i] = message;
+                if (i === 0) {
+                  lastToolCall = toolCall;
+                  lastToolResult = result;
+                }
+              }),
+            );
+          } else {
+            for (let i = 0; i < toolCalls.length; i++) {
+              const { message, result } = await this.runOneTool(toolCalls[i]!, reporter, turnSpan);
+              observations[i] = message;
+              if (i === 0) {
+                lastToolCall = toolCalls[i]!;
+                lastToolResult = result;
+              }
+            }
+          }
+
+          // 将所有 Observation 持久化到 Session,开启下一轮复盘与推理
+          session.append(...observations);
+
+          // 【核心防线】第 15 讲:在准备进入下一轮之前,进行死循环探测!
+          // 大模型"思考完毕、行动受挫"和"重燃执念再次思考"的空隙处安插安全阀。
+          // 若检测到连续同参数失败,注入 [SYSTEM REMINDER 警告] 作为 User 消息
+          // 追加到 Session 最末尾,凭最高近因效应击碎局部执念。
+          if (lastToolCall && lastToolResult) {
+            const reminderMsg = this.reminderInjector.checkAndInject(lastToolCall, lastToolResult);
+            if (reminderMsg) {
+              session.append(reminderMsg);
+            }
+          }
+        } finally {
+          turnSpan?.end();
         }
       }
-
-      // 将所有 Observation 持久化到 Session,开启下一轮复盘与推理
-      session.append(...observations);
-
-      // 【核心防线】第 15 讲:在准备进入下一轮之前,进行死循环探测!
-      // 大模型"思考完毕、行动受挫"和"重燃执念再次思考"的空隙处安插安全阀。
-      // 若检测到连续同参数失败,注入 [SYSTEM REMINDER 警告] 作为 User 消息
-      // 追加到 Session 最末尾,凭最高近因效应击碎局部执念。
-      if (lastToolCall && lastToolResult) {
-        const reminderMsg = this.reminderInjector.checkAndInject(lastToolCall, lastToolResult);
-        if (reminderMsg) {
-          session.append(reminderMsg);
-        }
+    } finally {
+      rootSpan?.end();
+      if (rootSpan) {
+        const tracePath = exportTraceToFile(rootSpan, session.workDir, session.id);
+        console.log(`[Tracing] 本次任务的执行回放链路已保存: ${tracePath}`);
       }
     }
 
@@ -264,29 +333,48 @@ export class AgentEngine implements AgentRunner {
   private async runOneTool(
     toolCall: ToolCall,
     reporter: Reporter,
+    parentSpan?: Span,
   ): Promise<{ message: Message; result: ToolResult }> {
-    reporter.onToolCall(toolCall.name, toolCall.arguments);
-    const result = await this.registry.execute(toolCall);
+    const toolSpan = parentSpan?.startChild("Tool.Execute", {
+      toolName: toolCall.name,
+      toolCallId: toolCall.id,
+      arguments: toolCall.arguments,
+    });
+    try {
+      reporter.onToolCall(toolCall.name, toolCall.arguments);
+      const result = await this.registry.execute(toolCall);
 
-    // 【核心拦截与注入】工具执行失败时,交由 RecoveryManager 诊断并注入"锦囊妙计"。
-    // 化被动为主动:不再冷冰冰陈述报错,而是给出带强烈倾向性的行动指南,
-    // 引导大模型进入标准排障 SOP(如"请先使用 read_file 重新查看文件")。
-    let finalOutput = result.output;
-    if (result.isError) {
-      finalOutput = this.recovery.analyzeAndInject(toolCall.name, result.output);
-      console.warn(`  -> [Recovery] ❌ 注入救援指南: ${toolCall.name}`);
+      // 【核心拦截与注入】工具执行失败时,交由 RecoveryManager 诊断并注入"锦囊妙计"。
+      // 化被动为主动:不再冷冰冰陈述报错,而是给出带强烈倾向性的行动指南,
+      // 引导大模型进入标准排障 SOP(如"请先使用 read_file 重新查看文件")。
+      let finalOutput = result.output;
+      if (result.isError) {
+        finalOutput = this.recovery.analyzeAndInject(toolCall.name, result.output);
+        console.warn(`  -> [Recovery] ❌ 注入救援指南: ${toolCall.name}`);
+      }
+
+      toolSpan?.addAttributes({
+        isError: result.isError,
+        outputPreview: truncate(finalOutput, 500),
+        rawOutputPreview: finalOutput === result.output ? undefined : truncate(result.output, 500),
+      });
+
+      reporter.onToolResult(toolCall.name, finalOutput, result.isError);
+      // ToolCallId 必须携带!这是维系大模型推理链条的关键
+      return {
+        message: {
+          role: "user",
+          content: finalOutput,
+          toolCallId: toolCall.id,
+        },
+        result,
+      };
+    } catch (err) {
+      recordTraceError(toolSpan, err);
+      throw err;
+    } finally {
+      toolSpan?.end();
     }
-
-    reporter.onToolResult(toolCall.name, finalOutput, result.isError);
-    // ToolCallId 必须携带!这是维系大模型推理链条的关键
-    return {
-      message: {
-        role: "user",
-        content: finalOutput,
-        toolCallId: toolCall.id,
-      },
-      result,
-    };
   }
 
   /**
@@ -321,7 +409,7 @@ export class AgentEngine implements AgentRunner {
 3. 当且仅当你找到了确切的线索后,停止调用工具,直接输出一段纯文本作为你的终极汇报。主架构师会根据你的汇报决定下一步。`;
 
     // 全新纯净上下文:不共享主 Agent 的 Session
-    let contextHistory: Message[] = [
+    const contextHistory: Message[] = [
       { role: "system", content: subSystemPrompt },
       { role: "user", content: taskPrompt },
     ];
@@ -363,7 +451,8 @@ export class AgentEngine implements AgentRunner {
       // 执行只读工具的并发循环(Fork-Join,复用主循环的并发策略)
       const isReadOnly = readOnlyRegistry.isReadOnlyTool;
       const allReadOnly =
-        isReadOnly !== undefined && toolCalls.every((tc) => isReadOnly.call(readOnlyRegistry, tc.name));
+        isReadOnly !== undefined &&
+        toolCalls.every((tc) => isReadOnly.call(readOnlyRegistry, tc.name));
 
       const observations: Message[] = new Array(toolCalls.length);
       const execSubTool = async (toolCall: ToolCall, i: number): Promise<void> => {
@@ -392,4 +481,44 @@ export class AgentEngine implements AgentRunner {
       contextHistory.push(...observations);
     }
   }
+}
+
+function estimateTraceLength(messages: Message[]): number {
+  let length = 0;
+  for (const message of messages) {
+    length += message.content.length;
+    if (message.toolCalls) {
+      for (const toolCall of message.toolCalls) {
+        length += toolCall.name.length + toolCall.arguments.length;
+      }
+    }
+  }
+  return length;
+}
+
+function recordCompaction(span: Span | undefined, beforeChars: number, afterChars: number): void {
+  if (!span || beforeChars === afterChars) {
+    return;
+  }
+  const compactionSpan = span.startChild("Context.Compaction", {
+    beforeChars,
+    afterChars,
+  });
+  compactionSpan.end();
+}
+
+function recordLlmResponse(span: Span | undefined, response: Message): void {
+  span?.addAttributes({
+    outputContentLength: response.content.length,
+    toolCallCount: response.toolCalls?.length ?? 0,
+    promptTokens: response.usage?.promptTokens,
+    completionTokens: response.usage?.completionTokens,
+  });
+}
+
+function recordTraceError(span: Span | undefined, error: unknown): void {
+  span?.addAttributes({
+    isError: true,
+    outputPreview: truncate(error instanceof Error ? error.message : String(error), 500),
+  });
 }

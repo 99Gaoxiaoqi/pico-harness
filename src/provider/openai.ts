@@ -84,7 +84,9 @@ export class OpenAIProvider implements LLMProvider {
 
     // 3. 构建请求并发送
     const bodyJson = JSON.stringify(body);
-    console.log(`[OpenAI] POST /chat/completions (model=${this.config.model}, msgs=${openaiMsgs.length}, tools=${availableTools.length})`);
+    console.log(
+      `[OpenAI] POST /chat/completions (model=${this.config.model}, msgs=${openaiMsgs.length}, tools=${availableTools.length})`,
+    );
     const resp = await fetch(`${this.config.baseURL}/chat/completions`, {
       method: "POST",
       headers: {

@@ -90,12 +90,8 @@ describe("isDangerousCommand", () => {
   it("write_file 不命中普通文件(bash 重定向模式仅对 bash 生效)", () => {
     // write_file 的危险检测目前与 bash 共用同一批正则,
     // 其中 >.*\.(ts|js...)$ 是针对 bash 重定向的,write_file 路径不触发
-    expect(
-      isDangerousCommand("write_file", '{"path":"notes.txt","content":"x"}'),
-    ).toBe(false);
-    expect(
-      isDangerousCommand("write_file", '{"path":"src/index.ts","content":"x"}'),
-    ).toBe(false);
+    expect(isDangerousCommand("write_file", '{"path":"notes.txt","content":"x"}')).toBe(false);
+    expect(isDangerousCommand("write_file", '{"path":"src/index.ts","content":"x"}')).toBe(false);
   });
 });
 

@@ -91,12 +91,7 @@ describe("Session", () => {
 
   it("getWorkingMemory:首条是普通 user 时不丢弃", () => {
     const sess = new Session("s1", "/tmp");
-    sess.append(
-      userMsg("任务"),
-      assistantMsg("回复"),
-      userMsg("追问"),
-      assistantMsg("再回复"),
-    );
+    sess.append(userMsg("任务"), assistantMsg("回复"), userMsg("追问"), assistantMsg("再回复"));
     const wm = sess.getWorkingMemory(2);
     expect(wm).toHaveLength(2);
     expect(wm[0]!.content).toBe("追问");

@@ -72,7 +72,11 @@ describe("OpenAIProvider 翻译层", () => {
             role: "assistant",
             content: "好的",
             tool_calls: [
-              { id: "c1", type: "function", function: { name: "echo", arguments: '{"text":"hi"}' } },
+              {
+                id: "c1",
+                type: "function",
+                function: { name: "echo", arguments: '{"text":"hi"}' },
+              },
             ],
           },
         },
@@ -82,9 +86,7 @@ describe("OpenAIProvider 翻译层", () => {
     const msg = await p.generate(history, [echoTool]);
     expect(msg.role).toBe("assistant");
     expect(msg.content).toBe("好的");
-    expect(msg.toolCalls).toEqual([
-      { id: "c1", name: "echo", arguments: '{"text":"hi"}' },
-    ]);
+    expect(msg.toolCalls).toEqual([{ id: "c1", name: "echo", arguments: '{"text":"hi"}' }]);
   });
 
   it("慢思考:空 tools 时不挂载 tools 字段", async () => {
@@ -145,9 +147,7 @@ describe("ClaudeProvider 翻译层", () => {
     const p = new ClaudeProvider(cfg);
     const msg = await p.generate(history, [echoTool]);
     expect(msg.content).toBe("好的");
-    expect(msg.toolCalls).toEqual([
-      { id: "c1", name: "echo", arguments: '{"text":"hi"}' },
-    ]);
+    expect(msg.toolCalls).toEqual([{ id: "c1", name: "echo", arguments: '{"text":"hi"}' }]);
   });
 
   it("历史工具结果翻译为 tool_result block", async () => {
