@@ -13,14 +13,14 @@
 import { Client, EventDispatcher, WSClient } from "@larksuiteoapi/node-sdk";
 import type { AgentEngine } from "../engine/loop.js";
 import { globalSessionManager } from "../engine/session.js";
+import type { Session } from "../engine/session.js";
 import type { Reporter } from "../engine/reporter.js";
 import {
   globalApprovalManager,
-  isDangerousCommand,
+  isAgentOpsDangerousCommand,
   type ApprovalNotice,
-  type ApprovalNotifier,
 } from "../approval/manager.js";
-import type { Registry, MiddlewareFunc } from "../tools/registry.js";
+import type { MiddlewareFunc } from "../tools/registry.js";
 
 /** 飞书机器人配置 */
 export interface FeishuConfig {
@@ -59,121 +59,42 @@ interface CardActionPayload {
 /** 工具结果汇报截断长度 (防飞书消息超长) */
 const REPORT_MAX_LEN = 200;
 
+export interface FeishuAgentRunContext {
+  chatId: string;
+  prompt: string;
+  session: Session;
+  reporter: FeishuReporter;
+  workDir: string;
+}
+
+export type FeishuAgentEngineFactory = (context: FeishuAgentRunContext) => AgentEngine;
+
 /**
  * FeishuBot:封装飞书机器人的配置与核心业务流。
- * 持有引擎引用,收到消息后跑 Agent,通过 FeishuReporter 回写状态。
+ * 持有引擎工厂,收到消息后为当前 chat 动态组装 Agent,通过 FeishuReporter 回写状态。
  * 每个 chatId 对应独立 Session,实现多群物理隔离(第 11 讲)。
  */
 export class FeishuBot {
   private readonly client: Client;
-  private readonly engine: AgentEngine;
+  private readonly engineFactory: FeishuAgentEngineFactory;
   private readonly config: FeishuConfig;
   private readonly workDir: string;
-  /** 当前正在跑 Agent 的会话(审批通知发到这里);同一 bot 同时只处理一个活跃会话 */
-  private activeChatId: string | null = null;
 
-  constructor(engine: AgentEngine, config: FeishuConfig, workDir: string, registry?: Registry) {
-    this.engine = engine;
+  constructor(
+    engineFactory: FeishuAgentEngineFactory,
+    config: FeishuConfig,
+    workDir: string,
+    client?: Client,
+  ) {
+    this.engineFactory = engineFactory;
     this.config = config;
     this.workDir = workDir;
-    this.client = new Client({
-      appId: config.appId,
-      appSecret: config.appSecret,
-    });
-    // 第 16 讲:挂载高危命令审批中间件。
-    // 通知通过当前活跃会话的 FeishuReporter 发送。
-    if (registry) {
-      registry.use(this.buildApprovalMiddleware());
-    }
-  }
-
-  /** 构建审批中间件:命中高危命令 → 发飞书审批卡片 → 挂起等待按钮回调/approve-reject 口令 */
-  private buildApprovalMiddleware(): MiddlewareFunc {
-    const notify: ApprovalNotifier = (notice) => {
-      // 审批卡片发到当前活跃会话
-      if (this.activeChatId) {
-        void this.sendApprovalCard(this.activeChatId, notice);
-      } else {
-        console.warn(notice.message);
-      }
-    };
-    return async (call) => {
-      if (!isDangerousCommand(call.name, call.arguments)) {
-        return { allowed: true, reason: "" };
-      }
-      const { allowed, reason } = await globalApprovalManager.waitForApproval(
-        call.id,
-        call.name,
-        call.arguments,
-        notify,
-      );
-      return { allowed, reason };
-    };
-  }
-
-  /**
-   * 发送交互式审批卡片(带"同意"/"拒绝"按钮)。
-   * 按钮点击触发 card.action.trigger 回调,value 携带 {taskId, action}。
-   * 用户也可不发卡片直接回复 "approve <taskId>" / "reject <taskId>" 口令。
-   */
-  private async sendApprovalCard(chatId: string, notice: ApprovalNotice): Promise<void> {
-    const card = {
-      config: { wide_screen_mode: true },
-      header: {
-        title: { tag: "plain_text", content: "⚠ 高危操作审批请求" },
-        template: "red",
-      },
-      elements: [
-        {
-          tag: "div",
-          fields: [
-            { is_short: true, text: { tag: "lark_md", content: `**工具**\n${notice.toolName}` } },
-            { is_short: true, text: { tag: "lark_md", content: `**任务 ID**\n${notice.taskId}` } },
-          ],
-        },
-        {
-          tag: "div",
-          text: { tag: "lark_md", content: `**参数**\n\`${notice.args}\`` },
-        },
-        { tag: "hr" },
-        {
-          tag: "action",
-          actions: [
-            {
-              tag: "button",
-              text: { tag: "plain_text", content: "✅ 同意执行" },
-              type: "primary",
-              value: { taskId: notice.taskId, action: "approve" },
-            },
-            {
-              tag: "button",
-              text: { tag: "plain_text", content: "🚫 拒绝执行" },
-              type: "danger",
-              value: { taskId: notice.taskId, action: "reject" },
-            },
-          ],
-        },
-        {
-          tag: "note",
-          elements: [{ tag: "plain_text", content: "也可回复 approve/reject + 任务ID 文字指令" }],
-        },
-      ],
-    };
-    try {
-      await this.client.im.message.create({
-        params: { receive_id_type: "chat_id" },
-        data: {
-          receive_id: chatId,
-          msg_type: "interactive",
-          content: JSON.stringify(card),
-        },
+    this.client =
+      client ??
+      new Client({
+        appId: config.appId,
+        appSecret: config.appSecret,
       });
-    } catch (err) {
-      console.error("[Feishu] 发送审批卡片失败,回退到文本:", err);
-      // 回退:发纯文本通知
-      const reporter = new FeishuReporter(this.client, chatId);
-      void reporter.onMessage(notice.message);
-    }
   }
 
   /** 启动 WSClient 长连接,接收飞书事件 (无需公网回调地址) */
@@ -261,20 +182,23 @@ export class FeishuBot {
   /** 跑 Agent,用 FeishuReporter 把状态发回指定会话 */
   private async runAgentAndReport(chatId: string, prompt: string): Promise<void> {
     const reporter = new FeishuReporter(this.client, chatId);
-    // 记录当前活跃会话,供审批中间件发通知
-    this.activeChatId = chatId;
     try {
       // 第 11 讲:每个 chatId 对应独立 Session,实现多群物理隔离。
       // 同一群的连续消息复用同一 Session,跨群互不干扰。
       const session = globalSessionManager.getOrCreate(`feishu:${chatId}`, this.workDir);
       session.append({ role: "user", content: prompt });
-      await this.engine.run(session, reporter);
+      const engine = this.engineFactory({
+        chatId,
+        prompt,
+        session,
+        reporter,
+        workDir: this.workDir,
+      });
+      await engine.run(session, reporter);
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
       console.error(`[Feishu] 会话 ${chatId} 任务失败:`, errMsg);
       await reporter.onMessage(`❌ 任务执行失败: ${errMsg}`);
-    } finally {
-      this.activeChatId = null;
     }
   }
 
@@ -350,6 +274,69 @@ export class FeishuReporter implements Reporter {
     void this.send("✅ 任务完成。");
   }
 
+  /**
+   * 发送交互式审批卡片(带"同意"/"拒绝"按钮)。
+   * 按钮点击触发 card.action.trigger 回调,value 携带 {taskId, action}。
+   * 用户也可直接回复 "approve <taskId>" / "reject <taskId>" 口令。
+   */
+  async sendApprovalCard(notice: ApprovalNotice): Promise<void> {
+    const card = {
+      config: { wide_screen_mode: true },
+      header: {
+        title: { tag: "plain_text", content: "⚠ 高危操作审批请求" },
+        template: "red",
+      },
+      elements: [
+        {
+          tag: "div",
+          fields: [
+            { is_short: true, text: { tag: "lark_md", content: `**工具**\n${notice.toolName}` } },
+            { is_short: true, text: { tag: "lark_md", content: `**任务 ID**\n${notice.taskId}` } },
+          ],
+        },
+        {
+          tag: "div",
+          text: { tag: "lark_md", content: `**参数**\n\`${notice.args}\`` },
+        },
+        { tag: "hr" },
+        {
+          tag: "action",
+          actions: [
+            {
+              tag: "button",
+              text: { tag: "plain_text", content: "✅ 同意执行" },
+              type: "primary",
+              value: { taskId: notice.taskId, action: "approve" },
+            },
+            {
+              tag: "button",
+              text: { tag: "plain_text", content: "🚫 拒绝执行" },
+              type: "danger",
+              value: { taskId: notice.taskId, action: "reject" },
+            },
+          ],
+        },
+        {
+          tag: "note",
+          elements: [{ tag: "plain_text", content: "也可回复 approve/reject + 任务ID 文字指令" }],
+        },
+      ],
+    };
+    try {
+      await this.client.im.message.create({
+        params: { receive_id_type: "chat_id" },
+        data: {
+          receive_id: this.chatId,
+          msg_type: "interactive",
+          content: JSON.stringify(card),
+        },
+      });
+    } catch (err) {
+      console.error("[Feishu] 发送审批卡片失败,回退到文本:", err);
+      await this.send(notice.message);
+    }
+  }
+
   /** 调用飞书消息 API 发送文本到指定会话 */
   private async send(text: string): Promise<void> {
     try {
@@ -380,5 +367,24 @@ interface MessageEvent {
   sender?: {
     sender_id?: { open_id?: string };
     sender_type?: string;
+  };
+}
+
+/** 构建 AgentOps 审批中间件:命中高危命令 → 当前 chat 的飞书 Reporter 发卡片 → 挂起等待审批 */
+export function createFeishuApprovalMiddleware(reporter: FeishuReporter): MiddlewareFunc {
+  return async (call) => {
+    if (!isAgentOpsDangerousCommand(call.name, call.arguments)) {
+      return { allowed: true, reason: "" };
+    }
+
+    const { allowed, reason } = await globalApprovalManager.waitForApproval(
+      call.id,
+      call.name,
+      call.arguments,
+      (notice) => {
+        void reporter.sendApprovalCard(notice);
+      },
+    );
+    return { allowed, reason };
   };
 }

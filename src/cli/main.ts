@@ -24,7 +24,7 @@ import {
   ToolRegistry,
   WriteFileTool,
 } from "../tools/registry-impl.js";
-import { FeishuBot, loadFeishuConfig } from "../feishu/bot.js";
+import { createFeishuApprovalMiddleware, FeishuBot, loadFeishuConfig } from "../feishu/bot.js";
 import { PromptComposer } from "../context/composer.js";
 import {
   globalApprovalManager,
@@ -33,6 +33,7 @@ import {
 } from "../approval/manager.js";
 import type { MiddlewareFunc } from "../tools/registry.js";
 import { SubagentTool } from "../tools/subagent.js";
+import { CostTracker } from "../observability/tracker.js";
 import { Tracer } from "../observability/trace.js";
 import { runAgentFromCli } from "./run-agent.js";
 
@@ -210,24 +211,33 @@ async function main() {
   if (values.feishu) {
     // 飞书模式:启动 WSClient 长连接,群里 @机器人 触发 Agent,状态发回会话
     const workDir = process.cwd();
-    const provider = createProvider(kind);
-    const registry = buildRegistry(workDir);
     const systemPrompt = planMode ? undefined : await new PromptComposer(workDir).build();
-    const engine = new AgentEngine({
-      provider,
-      registry,
+    const modelName =
+      process.env.LLM_MODEL ?? (kind === "openai" ? "glm-5.2" : "claude-3-5-sonnet");
+    const bot = new FeishuBot(
+      ({ session, reporter }) => {
+        const provider = createProvider(kind);
+        const trackedProvider = new CostTracker(provider, modelName, session);
+        const registry = buildRegistry(workDir);
+        registry.use(createFeishuApprovalMiddleware(reporter));
+        const engine = new AgentEngine({
+          provider: trackedProvider,
+          registry,
+          workDir,
+          enableThinking,
+          planMode,
+          systemPrompt,
+          compactor: buildCompactor(),
+          reporter: new SilentReporter(), // 实际回写由运行时 FeishuReporter 负责
+          tracer: traceEnabled ? new Tracer() : undefined,
+        });
+        // 第 17 讲:注册子智能体工具(仅只读工具,爆炸半径限制)
+        registry.register(new SubagentTool(engine, buildReadOnlyRegistry(workDir)));
+        return engine;
+      },
+      loadFeishuConfig(),
       workDir,
-      enableThinking,
-      planMode,
-      systemPrompt,
-      compactor: buildCompactor(),
-      reporter: new SilentReporter(), // 实际回写由运行时 FeishuReporter 负责
-      tracer: traceEnabled ? new Tracer() : undefined,
-    });
-    // 第 17 讲:注册子智能体工具(仅只读工具,爆炸半径限制)
-    registry.register(new SubagentTool(engine, buildReadOnlyRegistry(workDir)));
-    // 飞书每个 chatId 对应独立 Session,实现多群物理隔离
-    const bot = new FeishuBot(engine, loadFeishuConfig(), workDir, registry);
+    );
     bot.start();
     return;
   }

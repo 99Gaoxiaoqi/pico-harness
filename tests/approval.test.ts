@@ -4,6 +4,7 @@
 import { describe, expect, it, vi, afterEach } from "vitest";
 import {
   ApprovalManager,
+  isAgentOpsDangerousCommand,
   isDangerousCommand,
   type ApprovalNotice,
 } from "../src/approval/manager.js";
@@ -92,6 +93,20 @@ describe("isDangerousCommand", () => {
     // 其中 >.*\.(ts|js...)$ 是针对 bash 重定向的,write_file 路径不触发
     expect(isDangerousCommand("write_file", '{"path":"notes.txt","content":"x"}')).toBe(false);
     expect(isDangerousCommand("write_file", '{"path":"src/index.ts","content":"x"}')).toBe(false);
+  });
+
+  it("AgentOps 场景把写文件、编辑文件与 nginx reload 视为高危", () => {
+    expect(isAgentOpsDangerousCommand("write_file", '{"path":"nginx.conf","content":"x"}')).toBe(
+      true,
+    );
+    expect(
+      isAgentOpsDangerousCommand(
+        "edit_file",
+        '{"path":"nginx.conf","old_text":"locat","new_text":"location"}',
+      ),
+    ).toBe(true);
+    expect(isAgentOpsDangerousCommand("bash", '{"command":"nginx -s reload"}')).toBe(true);
+    expect(isAgentOpsDangerousCommand("bash", '{"command":"tail -n 50 error.log"}')).toBe(false);
   });
 });
 

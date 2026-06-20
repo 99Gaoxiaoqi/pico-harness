@@ -170,6 +170,10 @@ const DANGEROUS_PATTERNS: RegExp[] = [
   /\bgit\s+push\s+(-f|--force)\b/i,
   // 杀进程
   /\bkill(all|-9)?\s+-?9?\b/i,
+  // Nginx 服务重载/停止等运行态变更
+  /\bnginx\s+-s\b/i,
+  // systemd 服务管理
+  /\bsystemctl\b/i,
   // 危险的 shell 写入覆盖系统文件
   /\bcat\s+.*\s*>\s*\/(etc|usr|bin|boot|sys|proc)\b/i,
 ];
@@ -187,4 +191,18 @@ export function isDangerousCommand(toolName: string, args: string): boolean {
     }
   }
   return false;
+}
+
+/**
+ * AgentOps 生产运维策略:
+ * - 读操作继续 YOLO 放行
+ * - 任意 write/edit 都必须审批
+ * - bash 复用通用危险命令黑名单
+ */
+export function isAgentOpsDangerousCommand(toolName: string, args: string): boolean {
+  if (toolName === "write_file" || toolName === "edit_file") {
+    return true;
+  }
+
+  return isDangerousCommand(toolName, args);
 }

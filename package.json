@@ -10,6 +10,7 @@
   "scripts": {
     "dev": "tsx src/cli/main.ts",
     "bench": "tsx src/cli/bench.ts",
+    "agentops": "tsx src/cli/main.ts --feishu --plan --trace",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
