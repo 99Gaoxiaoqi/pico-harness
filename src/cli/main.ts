@@ -24,6 +24,12 @@ import {
 } from "../tools/registry-impl.js";
 import { FeishuBot, loadFeishuConfig } from "../feishu/bot.js";
 import { PromptComposer } from "../context/composer.js";
+import {
+  globalApprovalManager,
+  isDangerousCommand,
+  type ApprovalNotifier,
+} from "../approval/manager.js";
+import type { MiddlewareFunc } from "../tools/registry.js";
 
 function buildRegistry(workDir: string): ToolRegistry {
   const registry = new ToolRegistry();
@@ -43,6 +49,34 @@ function buildCompactor(): Compactor {
   return new Compactor({ maxChars: 20000, retainLastMsgs: 6 });
 }
 
+/**
+ * 构建安全拦截中间件:高危命令审批 (Human-in-the-loop)。
+ * 命中黑名单的命令挂起执行流,通过 notifier 发审批请求,等待人类 approve/reject。
+ * 未命中则 YOLO 放行。
+ *
+ * @param notifier 通知通道:飞书发卡片 / 终端打印 / HTTP 推送
+ */
+function buildApprovalMiddleware(notifier: ApprovalNotifier): MiddlewareFunc {
+  return async (call) => {
+    if (!isDangerousCommand(call.name, call.arguments)) {
+      return { allowed: true, reason: "" }; // 未命中黑名单,YOLO 放行
+    }
+    // 命中高危特征 → 挂起执行流,等待人类审批
+    const { allowed, reason } = await globalApprovalManager.waitForApproval(
+      call.id,
+      call.name,
+      call.arguments,
+      notifier,
+    );
+    return { allowed, reason };
+  };
+}
+
+/** 终端通知器:CLI/HTTP 模式回退,打印审批请求到控制台 */
+const terminalNotifier: ApprovalNotifier = (notice) => {
+  console.warn(`\n\x1b[31m[需要审批 TaskID: ${notice.taskId}]\x1b[0m ${notice.message}\n`);
+};
+
 /** 控制台入口的 SessionId:以工作目录路径为标识,重启后可恢复 */
 function consoleSessionId(workDir: string): string {
   return `console:${workDir}`;
@@ -57,6 +91,7 @@ async function runOnce(
   const provider = createProvider(kind);
   const workDir = process.cwd();
   const registry = buildRegistry(workDir);
+  registry.use(buildApprovalMiddleware(terminalNotifier));
   // Plan Mode 开启时由引擎每次 run 动态组装 System Prompt(反映最新工作区状态);
   // 关闭时预构建一次,避免每轮重复读盘。
   const systemPrompt = planMode ? undefined : await new PromptComposer(workDir).build();
@@ -112,6 +147,7 @@ async function serve(
 
       const provider = createProvider(kind);
       const registry = buildRegistry(workDir);
+      registry.use(buildApprovalMiddleware(terminalNotifier));
       const engine = new AgentEngine({
         provider,
         registry,
@@ -192,7 +228,7 @@ async function main() {
       reporter: new SilentReporter(), // 实际回写由运行时 FeishuReporter 负责
     });
     // 飞书每个 chatId 对应独立 Session,实现多群物理隔离
-    const bot = new FeishuBot(engine, loadFeishuConfig(), workDir);
+    const bot = new FeishuBot(engine, loadFeishuConfig(), workDir, registry);
     bot.start();
     return;
   }

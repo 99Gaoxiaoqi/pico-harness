@@ -14,6 +14,12 @@ import { Client, EventDispatcher, WSClient } from "@larksuiteoapi/node-sdk";
 import type { AgentEngine } from "../engine/loop.js";
 import { globalSessionManager } from "../engine/session.js";
 import type { Reporter } from "../engine/reporter.js";
+import {
+  globalApprovalManager,
+  isDangerousCommand,
+  type ApprovalNotifier,
+} from "../approval/manager.js";
+import type { Registry, MiddlewareFunc } from "../tools/registry.js";
 
 /** 飞书机器人配置 */
 export interface FeishuConfig {
@@ -53,8 +59,15 @@ export class FeishuBot {
   private readonly engine: AgentEngine;
   private readonly config: FeishuConfig;
   private readonly workDir: string;
+  /** 当前正在跑 Agent 的会话(审批通知发到这里);同一 bot 同时只处理一个活跃会话 */
+  private activeChatId: string | null = null;
 
-  constructor(engine: AgentEngine, config: FeishuConfig, workDir: string) {
+  constructor(
+    engine: AgentEngine,
+    config: FeishuConfig,
+    workDir: string,
+    registry?: Registry,
+  ) {
     this.engine = engine;
     this.config = config;
     this.workDir = workDir;
@@ -62,6 +75,36 @@ export class FeishuBot {
       appId: config.appId,
       appSecret: config.appSecret,
     });
+    // 第 16 讲:挂载高危命令审批中间件。
+    // 通知通过当前活跃会话的 FeishuReporter 发送。
+    if (registry) {
+      registry.use(this.buildApprovalMiddleware());
+    }
+  }
+
+  /** 构建审批中间件:命中高危命令 → 发飞书审批请求 → 挂起等待 approve/reject */
+  private buildApprovalMiddleware(): MiddlewareFunc {
+    const notify: ApprovalNotifier = (notice) => {
+      // 审批请求发到当前活跃会话
+      if (this.activeChatId) {
+        const reporter = new FeishuReporter(this.client, this.activeChatId);
+        void reporter.onMessage(notice.message);
+      } else {
+        console.warn(notice.message);
+      }
+    };
+    return async (call) => {
+      if (!isDangerousCommand(call.name, call.arguments)) {
+        return { allowed: true, reason: "" };
+      }
+      const { allowed, reason } = await globalApprovalManager.waitForApproval(
+        call.id,
+        call.name,
+        call.arguments,
+        notify,
+      );
+      return { allowed, reason };
+    };
   }
 
   /** 启动 WSClient 长连接,接收飞书事件 (无需公网回调地址) */
@@ -111,6 +154,26 @@ export class FeishuBot {
 
     console.log(`[Feishu] 收到会话 ${chatId} 消息: ${text}`);
 
+    // 第 16 讲:拦截人工审批特殊口令 approve/reject
+    const approveMatch = text.match(/^approve\s+(\S+)/i);
+    if (approveMatch) {
+      const taskId = approveMatch[1]!;
+      const ok = globalApprovalManager.resolveApproval(taskId, true, "人类管理员已批准操作");
+      console.log(`[Feishu] 会话 ${chatId}: ${ok ? "✅" : "⚠"} approve ${taskId}`);
+      return;
+    }
+    const rejectMatch = text.match(/^reject\s+(\S+)/i);
+    if (rejectMatch) {
+      const taskId = rejectMatch[1]!;
+      const ok = globalApprovalManager.resolveApproval(
+        taskId,
+        false,
+        "人类管理员认为该操作过于危险,已拒绝",
+      );
+      console.log(`[Feishu] 会话 ${chatId}: ${ok ? "🚫" : "⚠"} reject ${taskId}`);
+      return;
+    }
+
     // 驾驭并发:绝不阻塞事件回调,为每个请求开独立任务
     // (这里用 void 放后台跑,飞书会持续接收新消息)
     void this.runAgentAndReport(chatId, text);
@@ -119,6 +182,8 @@ export class FeishuBot {
   /** 跑 Agent,用 FeishuReporter 把状态发回指定会话 */
   private async runAgentAndReport(chatId: string, prompt: string): Promise<void> {
     const reporter = new FeishuReporter(this.client, chatId);
+    // 记录当前活跃会话,供审批中间件发通知
+    this.activeChatId = chatId;
     try {
       // 第 11 讲:每个 chatId 对应独立 Session,实现多群物理隔离。
       // 同一群的连续消息复用同一 Session,跨群互不干扰。
@@ -127,6 +192,8 @@ export class FeishuBot {
       await this.engine.run(session, reporter);
     } catch (err) {
       await reporter.onMessage(`❌ 任务执行失败: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      this.activeChatId = null;
     }
   }
 }

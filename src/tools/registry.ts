@@ -6,6 +6,17 @@
 import type { ToolCall, ToolDefinition, ToolResult } from "../schema/message.js";
 
 /**
+ * Middleware 中间件签名 (第 16 讲)。
+ * 在 Registry 收到 ToolCall 后、真正调用 tool.execute() 之前运行。
+ * 返回 allowed=false 则拦截,reason 作为 Error 反馈给大模型;
+ * 返回 allowed=true 则放行,继续下一个中间件或执行工具。
+ *
+ * 异步签名以支持人工审批挂起 (Human-in-the-loop):中间件可阻塞等待
+ * 飞书审批结果,大模型甚至不知道自己被挂起了。
+ */
+export type MiddlewareFunc = (call: ToolCall) => Promise<{ allowed: boolean; reason: string }>;
+
+/**
  * BaseTool:所有具体工具必须实现的通用接口。
  * 一个工具必须能说出自己的名字、给出参数 Schema,并接收原始 JSON 参数执行。
  * 参数是原始 JSON 字符串,反序列化由各工具内部自行处理 —— 延迟解析、极致解耦。
@@ -29,6 +40,8 @@ export interface BaseTool {
 export interface Registry {
   /** 挂载一个新的工具到系统中 */
   register(tool: BaseTool): void;
+  /** 【第 16 讲】全局挂载一个安全拦截中间件 */
+  use(mw: MiddlewareFunc): void;
   /** 返回当前系统挂载的所有工具的 Schema,供 Main Loop 交给 Provider */
   getAvailableTools(): ToolDefinition[];
   /** 实际路由并执行模型请求的工具调用 */

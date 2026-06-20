@@ -5,7 +5,7 @@ import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { exec } from "node:child_process";
 import { isAbsolute, relative, resolve } from "node:path";
 import { promisify } from "node:util";
-import type { BaseTool, Registry } from "./registry.js";
+import type { BaseTool, MiddlewareFunc, Registry } from "./registry.js";
 import type { ToolCall, ToolDefinition, ToolResult } from "../schema/message.js";
 
 const execAsync = promisify(exec);
@@ -31,6 +31,8 @@ function safeResolve(workDir: string, path: string): string {
  */
 export class ToolRegistry implements Registry {
   private readonly tools = new Map<string, BaseTool>();
+  /** 第 16 讲:全局挂载的安全拦截中间件链 */
+  private readonly middlewares: MiddlewareFunc[] = [];
 
   register(tool: BaseTool): void {
     const name = tool.name();
@@ -39,6 +41,12 @@ export class ToolRegistry implements Registry {
     }
     this.tools.set(name, tool);
     console.log(`[Registry] 成功挂载工具: ${name}`);
+  }
+
+  /** 挂载一个安全拦截中间件 (第 16 讲) */
+  use(mw: MiddlewareFunc): void {
+    this.middlewares.push(mw);
+    console.log(`[Registry] 已挂载 Middleware (共 ${this.middlewares.length} 个)`);
   }
 
   getAvailableTools(): ToolDefinition[] {
@@ -61,12 +69,27 @@ export class ToolRegistry implements Registry {
       };
     }
 
-    // 2. 执行工具逻辑:把原始 JSON 字符串直接丢给具体工具
+    // 2. 【核心防御】第 16 讲:在执行底层逻辑前,依次运行所有 Middleware。
+    //    任一中间件返回 allowed=false,工具的底层 execute 就绝对不会被触发。
+    //    异步签名以支持人工审批挂起 (Human-in-the-loop)。
+    for (const mw of this.middlewares) {
+      const { allowed, reason } = await mw(call);
+      if (!allowed) {
+        console.warn(`[Registry] ⚠ 工具 ${call.name} 被 Middleware 拦截: ${reason}`);
+        return {
+          toolCallId: call.id,
+          output: `执行被系统拦截。原因: ${reason}`,
+          isError: true, // 必须返回 Error,强制大模型阅读拒绝理由
+        };
+      }
+    }
+
+    // 3. 执行工具逻辑:所有 Middleware 都放行了
     try {
       const output = await tool.execute(call.arguments);
       return { toolCallId: call.id, output, isError: false };
     } catch (err) {
-      // 3. 封装:底层物理错误也封成 isError 的 ToolResult
+      // 4. 封装:底层物理错误也封成 isError 的 ToolResult
       const errMsg = err instanceof Error ? err.message : String(err);
       return {
         toolCallId: call.id,

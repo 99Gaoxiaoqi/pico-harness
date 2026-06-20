@@ -55,6 +55,9 @@ class MockRegistry implements Registry {
   register(_tool: BaseTool): void {
     // 测试用:直接实现 Registry,不走 BaseTool 注册
   }
+  use(): void {
+    // 测试用:不挂载中间件
+  }
   getAvailableTools(): ToolDefinition[] {
     // 必须返回非空,否则 Phase 2 会被误判为 Thinking 阶段
     return [
@@ -201,6 +204,7 @@ describe("AgentEngine Main Loop", () => {
     const registry = new (class implements Registry {
       readonly executed: ToolCall[] = [];
       register(): void {}
+      use(): void {}
       getAvailableTools(): ToolDefinition[] {
         return [{ name: "read", description: "", inputSchema: { type: "object" } }];
       }
@@ -247,6 +251,7 @@ describe("AgentEngine Main Loop", () => {
     const registry = new (class implements Registry {
       readonly executed: ToolCall[] = [];
       register(): void {}
+      use(): void {}
       getAvailableTools(): ToolDefinition[] {
         return [
           { name: "write", description: "", inputSchema: { type: "object" } },
