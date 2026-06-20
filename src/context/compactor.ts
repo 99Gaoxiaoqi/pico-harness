@@ -41,11 +41,20 @@ function truncateProtectedContent(content: string): string {
   return `${head}\n\n...[内容过长,中间 ${dropped} 字节已被系统截断]...\n${tail}`;
 }
 
+/** 摘要器函数:把一批远期消息浓缩成一段"剧情提要"(第 12 讲前沿升级) */
+export type Summarizer = (msgs: Message[]) => Promise<string>;
+
 export interface CompactorOptions {
   /** 触发压缩的最大字符数阈值(水位线,可参考模型的 token 窗口大小折算) */
   maxChars: number;
   /** WorkingMemory 保护区:最近的 N 条消息 */
   retainLastMsgs: number;
+  /**
+   * 可选的 LLM 摘要器(第 12 讲前沿升级)。
+   * 提供时,远期历史不再粗暴掩码,而是异步调小模型浓缩成"剧情提要"替换。
+   * 未提供时退回字符级掩码(极简模式)。
+   */
+  summarizer?: Summarizer;
 }
 
 /**
@@ -58,10 +67,12 @@ export interface CompactorOptions {
 export class Compactor {
   readonly maxChars: number;
   readonly retainLastMsgs: number;
+  private readonly summarizer?: Summarizer;
 
   constructor(opts: CompactorOptions) {
     this.maxChars = opts.maxChars;
     this.retainLastMsgs = opts.retainLastMsgs;
+    this.summarizer = opts.summarizer;
   }
 
   /**
@@ -125,6 +136,58 @@ export class Compactor {
     const newLength = this.estimateLength(compacted);
     logger.warn(`[Compactor] ✅ 压缩完成。上下文长度从 ${currentLength} 降至 ${newLength} 字符。`);
     return compacted;
+  }
+
+  /**
+   * 带摘要的异步压缩(第 12 讲前沿升级)。
+   *
+   * 当总长度超标且提供了 summarizer 时,把远期历史(保护区之前的消息)
+   * 异步调小模型浓缩成一段"剧情提要",替换掉粗暴的字符级掩码。
+   * 保护区内的消息仍走 compact() 的掐头去尾逻辑。
+   *
+   * 未提供 summarizer 时,直接退化为同步 compact()。
+   *
+   * @returns 压缩后的消息数组
+   */
+  async compactWithSummary(msgs: Message[]): Promise<Message[]> {
+    // 无 summarizer 或未超标:退化为同步 compact
+    if (!this.summarizer) {
+      return this.compact(msgs);
+    }
+    const currentLength = this.estimateLength(msgs);
+    if (currentLength < this.maxChars) {
+      return this.compact(msgs);
+    }
+
+    // 分割:远期历史 + 保护区
+    const msgCount = msgs.length;
+    const protectStartIndex = Math.max(0, msgCount - this.retainLastMsgs);
+    const remoteMsgs = msgs.slice(0, protectStartIndex);
+    const protectedMsgs = msgs.slice(protectStartIndex);
+
+    // 远期历史调小模型摘要
+    let summaryText: string;
+    try {
+      logger.info({ remoteCount: remoteMsgs.length }, `[Compactor] 调用 LLM 摘要 ${remoteMsgs.length} 条远期历史...`);
+      summaryText = await this.summarizer(remoteMsgs);
+    } catch (err) {
+      logger.warn({ err }, `[Compactor] LLM 摘要失败,退回字符级掩码`);
+      return this.compact(msgs);
+    }
+
+    // 摘要消息替换远期历史,保护区走 compact 逻辑
+    const summaryMsg: Message = {
+      role: "system",
+      content: `[历史摘要]: ${summaryText}`,
+    };
+    const protectedCompacted = this.compact([
+      ...protectedMsgs.filter((m) => m.role !== "system"),
+    ]);
+
+    const result = [summaryMsg, ...protectedCompacted];
+    const newLength = this.estimateLength(result);
+    logger.warn(`[Compactor] ✅ LLM 摘要压缩完成。${currentLength} → ${newLength} 字符(远期 ${remoteMsgs.length} 条 → 摘要)。`);
+    return result;
   }
 
   /** 粗略计算当前上下文的总字符长度(用 char count 代替 token) */

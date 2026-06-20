@@ -174,6 +174,14 @@ export class FeishuBot {
       return;
     }
 
+    // 第 22 讲:意图拦截过滤器 (Intent Filter)。
+    // 群员聊无关天("今天中午吃什么")不应触发昂贵的 Main Loop。
+    // 只有明确需要 Agent 介入意图才唤醒:命令前缀 / 自然语言请求关键词。
+    if (!shouldWakeAgent(text)) {
+      console.log(`[Feishu] 会话 ${chatId}: 非 Agent 意图,忽略: "${text.slice(0, 50)}"`);
+      return;
+    }
+
     // 驾驭并发:绝不阻塞事件回调,为每个请求开独立任务
     // (这里用 void 放后台跑,飞书会持续接收新消息)
     void this.runAgentAndReport(chatId, text);
@@ -194,7 +202,8 @@ export class FeishuBot {
         reporter,
         workDir: this.workDir,
       });
-      await engine.run(session, reporter);
+      // P0:per-session 串行队列,防止并发读写 history 竞态
+      await session.serialize(() => engine.run(session, reporter));
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
       console.error(`[Feishu] 会话 ${chatId} 任务失败:`, errMsg);
@@ -387,4 +396,32 @@ export function createFeishuApprovalMiddleware(reporter: FeishuReporter): Middle
     );
     return { allowed, reason };
   };
+}
+
+/**
+ * 意图拦截过滤器 (Intent Filter):判断用户消息是否需要唤醒 Main Loop。
+ * 避免群员闲聊("今天中午吃什么")触发昂贵的大模型调用。
+ *
+ * 唤醒条件(满足任一):
+ * - 命令前缀:/agent、/help、/usage、/task
+ * - 包含明确的行动意图关键词:帮、请、执行、修复、检查、查找、分析、
+ *   重构、部署、删除、创建、运行、读取、修改、总结、解释
+ * - 包含代码/技术相关词:bug、error、报错、文件、代码、配置、日志、
+ *   测试、部署、编译、端口、服务
+ */
+const WAKE_KEYWORDS = [
+  // 行动意图
+  "帮", "请", "执行", "修复", "检查", "查找", "分析", "重构", "部署",
+  "删除", "创建", "运行", "读取", "修改", "总结", "解释", "排查",
+  // 技术词
+  "bug", "error", "报错", "文件", "代码", "配置", "日志", "测试",
+  "编译", "端口", "服务", "函数", "变量", "接口", "数据库", "git",
+];
+
+export function shouldWakeAgent(text: string): boolean {
+  const lower = text.toLowerCase();
+  // 命令前缀直接唤醒
+  if (/^(\/agent|\/help|\/usage|\/task)\b/i.test(lower)) return true;
+  // 关键词匹配
+  return WAKE_KEYWORDS.some((kw) => lower.includes(kw));
 }

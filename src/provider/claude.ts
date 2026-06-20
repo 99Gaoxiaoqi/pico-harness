@@ -111,6 +111,7 @@ export class ClaudeProvider implements LLMProvider {
         "Content-Type": "application/json",
       },
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(120_000), // 2 分钟超时,防网络挂起永久阻塞
     });
 
     if (!resp.ok) {

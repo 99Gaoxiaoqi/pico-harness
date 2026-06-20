@@ -34,11 +34,34 @@ export class Session {
 
   private history: Message[] = [];
 
+  /**
+   * 并发安全:per-session 串行执行队列。
+   * 飞书多群/连发消息时,同一 Session 的 engine.run 必须串行,
+   * 否则并发读写 history 导致上下文错乱、孤儿 ToolResult、API 400。
+   * 通过 Promise 链实现:每个 run 排队等前一个完成。
+   */
+  private runQueue: Promise<unknown> = Promise.resolve();
+
   constructor(id: string, workDir: string) {
     this.id = id;
     this.workDir = workDir;
     this.createdAt = new Date();
     this.updatedAt = new Date();
+  }
+
+  /**
+   * 串行执行一个任务:同一 Session 的多个调用自动排队,
+   * 保证同一时刻只有一个 engine.run 在操作 history。
+   * 返回任务的 Promise(结果需调用方 await)。
+   */
+  serialize<T>(task: () => Promise<T>): Promise<T> {
+    const result = this.runQueue.then(task, task);
+    // 无论成功失败,都更新队列链;吞掉错误让调用方自己的 catch 处理
+    this.runQueue = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
   }
 
   /** 记录一次推理的 Token 用量与花费(供 CostTracker 调用) */

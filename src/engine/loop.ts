@@ -46,6 +46,8 @@ export interface AgentEngineOptions {
   planMode?: boolean;
   /** WorkingMemory 滑动窗口大小(默认 20 条,给压缩器留判断空间) */
   workingMemoryLimit?: number;
+  /** 主循环最大轮次兜底(默认 50,防止失控烧穿 Token) */
+  maxTurns?: number;
   /**
    * 上下文压缩器:在向 Provider 发起推理前过一遍,防 OOM (第 12 讲)。
    * 未提供则不压缩(纯靠 WorkingMemory 条数截断)。
@@ -81,6 +83,7 @@ export class AgentEngine implements AgentRunner {
   private readonly enableThinking: boolean;
   private readonly planMode: boolean;
   private readonly workingMemoryLimit: number;
+  private readonly maxTurns: number;
   private readonly compactor?: Compactor;
   private readonly recovery: RecoveryManager;
   private readonly reminderInjector: ReminderInjector;
@@ -99,6 +102,7 @@ export class AgentEngine implements AgentRunner {
     this.enableThinking = opts.enableThinking ?? false;
     this.planMode = opts.planMode ?? false;
     this.workingMemoryLimit = opts.workingMemoryLimit ?? DEFAULT_WORKING_MEMORY_LIMIT;
+    this.maxTurns = opts.maxTurns ?? 50;
     this.compactor = opts.compactor;
     this.recovery = opts.recovery ?? new RecoveryManager();
     this.reminderInjector = opts.reminderInjector ?? new ReminderInjector();
@@ -158,6 +162,10 @@ export class AgentEngine implements AgentRunner {
     try {
       for (;;) {
         turnCount++;
+        if (turnCount > this.maxTurns) {
+          logger.warn({ turnCount, maxTurns: this.maxTurns }, `[Engine] 达到最大轮次 ${this.maxTurns},强制退出防止 Token 烧穿`);
+          break;
+        }
         reporter.onTurnStart(turnCount);
         const turnSpan = rootSpan?.startChild(`Turn-${turnCount}`);
 
