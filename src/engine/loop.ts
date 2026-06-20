@@ -11,12 +11,13 @@
 // 每轮组装 = SystemPrompt + Session.GetWorkingMemory(N),严格限制 Context 规模。
 
 import type { LLMProvider } from "../provider/interface.js";
-import type { Message, ToolCall } from "../schema/message.js";
+import type { Message, ToolCall, ToolResult } from "../schema/message.js";
 import type { Registry } from "../tools/registry.js";
 import type { Compactor } from "../context/compactor.js";
 import { PromptComposer } from "../context/composer.js";
 import { RecoveryManager } from "../context/recovery.js";
 import { SilentReporter, type Reporter } from "./reporter.js";
+import { ReminderInjector } from "./reminder.js";
 import type { Session } from "./session.js";
 
 /** WorkingMemory 滑动窗口大小:截取最近 N 条消息供压缩器判断(含远期历史) */
@@ -52,6 +53,11 @@ export interface AgentEngineOptions {
    * 未提供则默认创建一个,对所有工具报错都尝试匹配恢复建议。
    */
   recovery?: RecoveryManager;
+  /**
+   * 死循环探测器:连续同参数失败时注入 [SYSTEM REMINDER] 强行打断 (第 15 讲)。
+   * 未提供则默认创建一个,阈值 3 次同参数失败触发干预。
+   */
+  reminderInjector?: ReminderInjector;
   /** 可选的轮次日志回调,便于第 19 讲 Tracing 接入 */
   onTurn?: (info: { turn: number; message: Message }) => void;
   /** 输出 Reporter;默认静默 (第 09 讲) */
@@ -69,6 +75,7 @@ export class AgentEngine {
   private readonly workingMemoryLimit: number;
   private readonly compactor?: Compactor;
   private readonly recovery: RecoveryManager;
+  private readonly reminderInjector: ReminderInjector;
   private readonly onTurn?: (info: { turn: number; message: Message }) => void;
   private readonly reporter: Reporter;
 
@@ -85,6 +92,7 @@ export class AgentEngine {
     this.workingMemoryLimit = opts.workingMemoryLimit ?? DEFAULT_WORKING_MEMORY_LIMIT;
     this.compactor = opts.compactor;
     this.recovery = opts.recovery ?? new RecoveryManager();
+    this.reminderInjector = opts.reminderInjector ?? new ReminderInjector();
     this.onTurn = opts.onTurn;
     this.reporter = opts.reporter ?? new SilentReporter();
   }
@@ -205,29 +213,57 @@ export class AgentEngine {
         isReadOnly !== undefined && toolCalls.every((tc) => isReadOnly.call(this.registry, tc.name));
 
       const observations: Message[] = new Array(toolCalls.length);
+      // 收集本轮最后一个工具调用 + 结果,供 Reminder 探测器分析
+      // (并发场景下取索引 0;真实工业级可逐个分析报错的那个)
+      let lastToolCall: ToolCall | null = null;
+      let lastToolResult: ToolResult | null = null;
 
       if (allReadOnly) {
         await Promise.all(
           toolCalls.map(async (toolCall, i) => {
-            observations[i] = await this.runOneTool(toolCall, reporter);
+            const { message, result } = await this.runOneTool(toolCall, reporter);
+            observations[i] = message;
+            if (i === 0) {
+              lastToolCall = toolCall;
+              lastToolResult = result;
+            }
           }),
         );
       } else {
         for (let i = 0; i < toolCalls.length; i++) {
-          observations[i] = await this.runOneTool(toolCalls[i]!, reporter);
+          const { message, result } = await this.runOneTool(toolCalls[i]!, reporter);
+          observations[i] = message;
+          if (i === 0) {
+            lastToolCall = toolCalls[i]!;
+            lastToolResult = result;
+          }
         }
       }
 
       // 将所有 Observation 持久化到 Session,开启下一轮复盘与推理
       session.append(...observations);
+
+      // 【核心防线】第 15 讲:在准备进入下一轮之前,进行死循环探测!
+      // 大模型"思考完毕、行动受挫"和"重燃执念再次思考"的空隙处安插安全阀。
+      // 若检测到连续同参数失败,注入 [SYSTEM REMINDER 警告] 作为 User 消息
+      // 追加到 Session 最末尾,凭最高近因效应击碎局部执念。
+      if (lastToolCall && lastToolResult) {
+        const reminderMsg = this.reminderInjector.checkAndInject(lastToolCall, lastToolResult);
+        if (reminderMsg) {
+          session.append(reminderMsg);
+        }
+      }
     }
 
     // 返回本轮新增的消息序列(从用户输入起到最终答案止)
     return session.getHistory().slice(beforeLen);
   }
 
-  /** 执行单个工具调用并返回观察结果消息 (带日志 + 错误自愈注入) */
-  private async runOneTool(toolCall: ToolCall, reporter: Reporter): Promise<Message> {
+  /** 执行单个工具调用并返回观察结果消息 + 原始结果 (带日志 + 错误自愈注入) */
+  private async runOneTool(
+    toolCall: ToolCall,
+    reporter: Reporter,
+  ): Promise<{ message: Message; result: ToolResult }> {
     reporter.onToolCall(toolCall.name, toolCall.arguments);
     const result = await this.registry.execute(toolCall);
 
@@ -243,9 +279,12 @@ export class AgentEngine {
     reporter.onToolResult(toolCall.name, finalOutput, result.isError);
     // ToolCallId 必须携带!这是维系大模型推理链条的关键
     return {
-      role: "user",
-      content: finalOutput,
-      toolCallId: toolCall.id,
+      message: {
+        role: "user",
+        content: finalOutput,
+        toolCallId: toolCall.id,
+      },
+      result,
     };
   }
 }
