@@ -4,6 +4,7 @@ import { AgentEngine } from "../engine/loop.js";
 import { globalSessionManager, type Session } from "../engine/session.js";
 import { TerminalReporter, type Reporter } from "../engine/reporter.js";
 import { Compactor } from "../context/compactor.js";
+import { SkillLoader, SkillViewTool } from "../context/skill.js";
 import {
   createRawProvider,
   fallbackModelFor,
@@ -26,7 +27,7 @@ import { CostTracker } from "../observability/tracker.js";
 import { Tracer } from "../observability/trace.js";
 import {
   globalApprovalManager,
-  isDangerousCommand,
+  globalApprovalPolicy,
   type ApprovalNotifier,
 } from "../approval/manager.js";
 import type { MiddlewareFunc } from "../tools/registry.js";
@@ -135,6 +136,7 @@ function buildRegistry(workDir: string): ToolRegistry {
   registry.register(new WriteFileTool(workDir));
   registry.register(new EditFileTool(workDir));
   registry.register(new BashTool(workDir));
+  registry.register(new SkillViewTool(new SkillLoader(workDir)));
   return registry;
 }
 
@@ -211,17 +213,9 @@ function buildCompactor(): Compactor {
 
 function buildApprovalMiddleware(notifier: ApprovalNotifier): MiddlewareFunc {
   return async (call) => {
-    if (!isDangerousCommand(call.name, call.arguments)) {
-      return { allowed: true, reason: "" };
-    }
-
-    const { allowed, reason } = await globalApprovalManager.waitForApproval(
-      call.id,
-      call.name,
-      call.arguments,
-      notifier,
+    return globalApprovalPolicy.decide("cli", call, () =>
+      globalApprovalManager.waitForApproval(call.id, call.name, call.arguments, notifier),
     );
-    return { allowed, reason };
   };
 }
 

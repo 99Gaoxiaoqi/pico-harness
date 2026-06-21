@@ -8,6 +8,7 @@
 import { describe, expect, it } from "vitest";
 import { AgentEngine } from "../src/engine/loop.js";
 import { Session } from "../src/engine/session.js";
+import { IterationBudget } from "../src/engine/budget.js";
 import type { LLMProvider } from "../src/provider/interface.js";
 import type { Message, ToolCall, ToolDefinition, ToolResult } from "../src/schema/message.js";
 import type { BaseTool, Registry } from "../src/tools/registry.js";
@@ -323,5 +324,105 @@ describe("AgentEngine Main Loop", () => {
     expect(contents).toContain("result-of-bash");
     expect(contents).toContain("第一轮完成");
     expect(contents).toContain("第二轮任务");
+  });
+
+  it("达到 maxTurns 后触发无工具 Grace Call 收尾", async () => {
+    const calls: { toolsCount: number; lastUser?: string }[] = [];
+    const provider = new (class implements LLMProvider {
+      private n = 0;
+      async generate(msgs: Message[], tools: ToolDefinition[]): Promise<Message> {
+        calls.push({
+          toolsCount: tools.length,
+          lastUser: [...msgs].reverse().find((m) => m.role === "user")?.content,
+        });
+        this.n++;
+        if (this.n === 1) {
+          return {
+            role: "assistant",
+            content: "继续调用",
+            toolCalls: [{ id: "c1", name: "read", arguments: "{}" }],
+          };
+        }
+        return { role: "assistant", content: "收尾总结" };
+      }
+    })();
+    const engine = new AgentEngine({
+      provider,
+      registry: new MockRegistry(),
+      workDir: "/tmp",
+      maxTurns: 1,
+    });
+
+    const session = newSession("做一个长任务");
+    await engine.run(session);
+
+    expect(calls).toHaveLength(2);
+    expect(calls[1]!.toolsCount).toBe(0);
+    expect(calls[1]!.lastUser).toContain("已达执行预算");
+    expect(session.getHistory().at(-1)?.content).toBe("收尾总结");
+  });
+
+  it("IterationBudget 同时支持轮次、Token、成本三闸", () => {
+    const budget = new IterationBudget({
+      maxTurns: 2,
+      maxTokens: 100,
+      maxCostCNY: 0.01,
+    });
+
+    expect(budget.canStartTurn(1).allowed).toBe(true);
+    expect(budget.canStartTurn(3).allowed).toBe(false);
+
+    budget.consumeUsage({
+      promptTokens: 70,
+      completionTokens: 20,
+    });
+    expect(budget.consumeUsage({ promptTokens: 20, completionTokens: 0 }).allowed).toBe(false);
+
+    const costBudget = new IterationBudget({ maxCostCNY: 0.01 });
+    expect(costBudget.consumeCost(0.02).allowed).toBe(false);
+  });
+
+  it("Guardrail 会逐个分析并发批次里的每个工具结果", async () => {
+    const provider = new ScriptedProvider([
+      {
+        role: "assistant",
+        content: "并发读取",
+        toolCalls: [
+          { id: "c1", name: "read", arguments: '{"path":"a"}' },
+          { id: "c2", name: "read", arguments: '{"path":"b"}' },
+        ],
+      },
+      {
+        role: "assistant",
+        content: "继续并发读取",
+        toolCalls: [
+          { id: "c3", name: "read", arguments: '{"path":"a"}' },
+          { id: "c4", name: "read", arguments: '{"path":"b"}' },
+        ],
+      },
+      { role: "assistant", content: "完成" },
+    ]);
+    const registry = new (class extends MockRegistry {
+      override isReadOnlyTool(): boolean {
+        return true;
+      }
+      override async execute(call: ToolCall): Promise<ToolResult> {
+        this.executed.push(call);
+        return { toolCallId: call.id, output: `same-${call.arguments}`, isError: false };
+      }
+    })();
+    const engine = new AgentEngine({
+      provider,
+      registry,
+      workDir: "/tmp",
+      guardrailOptions: { noProgressWarnAt: 2, noProgressBlockAt: 5 },
+    });
+
+    const session = newSession("读两份文件");
+    await engine.run(session);
+
+    const reminders = session.getHistory().filter((m) => m.content.includes("SYSTEM REMINDER"));
+    expect(reminders).toHaveLength(2);
+    expect(reminders.map((m) => m.content).join("\n")).toContain("无进展");
   });
 });

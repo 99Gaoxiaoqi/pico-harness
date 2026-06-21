@@ -21,8 +21,50 @@ export interface ToolCall {
 
 /** 单次推理的 Token 用量(由 Provider 从厂商响应中填充) */
 export interface Usage {
+  /** 兼容旧字段:厂商报告的总输入 token,可能包含 cache read/write */
   promptTokens: number;
+  /** 兼容旧字段:厂商报告的总输出 token,可能包含 reasoning token */
   completionTokens: number;
+  /** 归一化后的真实新输入 token,不含 cache read/write */
+  inputTokens?: number;
+  /** 命中 prompt cache 的输入 token */
+  cacheReadTokens?: number;
+  /** 创建 prompt cache 的输入 token */
+  cacheWriteTokens?: number;
+  /** reasoning / thinking token */
+  reasoningTokens?: number;
+}
+
+/** 计费与油耗分析使用的规范化五桶 Usage */
+export interface CanonicalUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  reasoningTokens: number;
+  totalPromptTokens: number;
+  totalCompletionTokens: number;
+}
+
+/** 把不同 Provider 的 usage 字段统一成五桶模型 */
+export function toCanonicalUsage(usage: Usage): CanonicalUsage {
+  const cacheReadTokens = Math.max(0, usage.cacheReadTokens ?? 0);
+  const cacheWriteTokens = Math.max(0, usage.cacheWriteTokens ?? 0);
+  const reasoningTokens = Math.max(0, usage.reasoningTokens ?? 0);
+  const inputTokens = Math.max(
+    0,
+    usage.inputTokens ?? usage.promptTokens - cacheReadTokens - cacheWriteTokens,
+  );
+  const outputTokens = Math.max(0, usage.completionTokens - reasoningTokens);
+  return {
+    inputTokens,
+    outputTokens,
+    cacheReadTokens,
+    cacheWriteTokens,
+    reasoningTokens,
+    totalPromptTokens: usage.promptTokens,
+    totalCompletionTokens: usage.completionTokens,
+  };
 }
 
 /** 上下文中传递的单条消息 */
@@ -36,6 +78,10 @@ export interface Message {
   toolCallId?: string;
   /** 本条助手消息的 Token 用量(仅模型响应填充,用于成本追踪) */
   usage?: Usage;
+  /** Provider 返回的 reasoning/thinking 摘要字段(不要求模型重放完整思维链) */
+  reasoning?: string;
+  /** Provider 特定透传数据,用于保留不进入 pico 核心语义的扩展字段 */
+  providerData?: Record<string, unknown>;
 }
 
 /** 工具执行完毕后返回的物理结果 */

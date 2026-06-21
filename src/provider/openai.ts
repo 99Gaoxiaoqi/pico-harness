@@ -8,6 +8,7 @@
 import type { LLMProvider } from "./interface.js";
 import type { Message, ToolCall, ToolDefinition } from "../schema/message.js";
 import type { ProviderConfig } from "./config.js";
+import { resolveProviderProfile, type ProviderProfile } from "./profile.js";
 
 interface OpenAIToolCall {
   id: string;
@@ -18,17 +19,30 @@ interface OpenAIToolCall {
 interface OpenAIChoiceMessage {
   role: string;
   content: string | null;
+  reasoning_content?: string | null;
   tool_calls?: OpenAIToolCall[];
 }
 
 interface OpenAIChatResponse {
   choices?: { message: OpenAIChoiceMessage }[];
-  usage?: { prompt_tokens?: number; completion_tokens?: number };
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    prompt_tokens_details?: { cached_tokens?: number };
+    completion_tokens_details?: { reasoning_tokens?: number };
+  };
 }
 
 /** OpenAI 兼容协议适配器 */
 export class OpenAIProvider implements LLMProvider {
-  constructor(private readonly config: ProviderConfig) {}
+  private readonly profile: ProviderProfile;
+
+  constructor(
+    private readonly config: ProviderConfig,
+    profile?: ProviderProfile,
+  ) {
+    this.profile = profile ?? resolveProviderProfile("openai", config.model);
+  }
 
   async generate(messages: Message[], availableTools: ToolDefinition[]): Promise<Message> {
     // 1. 翻译上下文消息
@@ -48,9 +62,11 @@ export class OpenAIProvider implements LLMProvider {
           break;
         case "assistant": {
           const ast: Record<string, unknown> = { role: "assistant" };
-          // 部分模型(如 glm-5.2)要求 assistant 消息必须显式带 content 字段
-          // (即使为 null),否则 400 "A parameter specified is not valid"
-          ast.content = msg.content || null;
+          ast.content =
+            this.profile.assistantContent === "null_when_empty" ? msg.content || null : msg.content;
+          if (msg.reasoning && this.profile.supportsReasoningContent) {
+            ast.reasoning_content = msg.reasoning;
+          }
           // 历史的 ToolCalls 必须原样放回,维系大模型逻辑链
           if (msg.toolCalls && msg.toolCalls.length > 0) {
             ast.tool_calls = msg.toolCalls.map((tc) => ({
@@ -124,6 +140,8 @@ export class OpenAIProvider implements LLMProvider {
         ? {
             promptTokens: data.usage.prompt_tokens ?? 0,
             completionTokens: data.usage.completion_tokens ?? 0,
+            cacheReadTokens: data.usage.prompt_tokens_details?.cached_tokens ?? 0,
+            reasoningTokens: data.usage.completion_tokens_details?.reasoning_tokens ?? 0,
           }
         : undefined;
 
@@ -132,6 +150,7 @@ export class OpenAIProvider implements LLMProvider {
       content: choice.content ?? "",
       toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
       usage,
+      reasoning: choice.reasoning_content ?? undefined,
     };
   }
 }

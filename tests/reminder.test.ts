@@ -2,7 +2,7 @@
 // 覆盖:指纹生成 / 成功清零 / 失败累加 / 阈值3触发 / 不同参数不累计 / 触发消息格式。
 
 import { describe, expect, it } from "vitest";
-import { ReminderInjector } from "../src/engine/reminder.js";
+import { ReminderInjector, ToolGuardrailController } from "../src/engine/reminder.js";
 import type { ToolCall, ToolResult } from "../src/schema/message.js";
 
 function toolCall(name: string, args: string): ToolCall {
@@ -131,5 +131,54 @@ describe("ReminderInjector.checkAndInject", () => {
     inj.reset();
     // reset 后从 1 开始
     expect(inj.checkAndInject(tc, errResult())).toBeNull();
+  });
+});
+
+describe("ToolGuardrailController", () => {
+  it("同一只读工具连续成功但输出不变时,按无进展循环注入提醒", () => {
+    const guardrail = new ToolGuardrailController({
+      noProgressWarnAt: 2,
+      noProgressBlockAt: 4,
+    });
+    const tc = toolCall("read_file", '{"path":"a.ts"}');
+
+    expect(guardrail.afterCall(tc, okResult("same"), { readOnly: true })).toBeNull();
+    const msg = guardrail.afterCall(tc, okResult("same"), { readOnly: true });
+
+    expect(msg).not.toBeNull();
+    expect(msg!.content).toContain("SYSTEM REMINDER");
+    expect(msg!.content).toContain("无进展");
+    expect(msg!.content).toContain("read_file");
+  });
+
+  it("同一工具不同参数连续失败时,按 same_tool_failure 注入提醒", () => {
+    const guardrail = new ToolGuardrailController({
+      sameToolFailureWarnAt: 3,
+      sameToolFailureBlockAt: 8,
+    });
+
+    expect(guardrail.afterCall(toolCall("bash", '{"command":"grep a"}'), errResult())).toBeNull();
+    expect(guardrail.afterCall(toolCall("bash", '{"command":"grep b"}'), errResult())).toBeNull();
+    const msg = guardrail.afterCall(toolCall("bash", '{"command":"grep c"}'), errResult());
+
+    expect(msg).not.toBeNull();
+    expect(msg!.content).toContain("同一工具");
+    expect(msg!.content).toContain("bash");
+  });
+
+  it("达到 block 阈值后 beforeCall 阻断后续同类调用", () => {
+    const guardrail = new ToolGuardrailController({
+      exactFailureWarnAt: 2,
+      exactFailureBlockAt: 3,
+    });
+    const tc = toolCall("read_file", '{"path":"missing.ts"}');
+
+    guardrail.afterCall(tc, errResult("not found"));
+    guardrail.afterCall(tc, errResult("not found"));
+    guardrail.afterCall(tc, errResult("not found"));
+    const decision = guardrail.beforeCall(tc);
+
+    expect(decision.allowed).toBe(false);
+    expect(decision.reason).toContain("重复失败");
   });
 });

@@ -2,10 +2,11 @@
 // 覆盖:Token 提取/计费/Session 累加/无 Usage 兜底/耗时记录/装饰器透明性。
 
 import { describe, expect, it, vi } from "vitest";
+import { estimateCost, getPricingEntry } from "../src/observability/pricing.js";
 import { CostTracker } from "../src/observability/tracker.js";
 import { Session } from "../src/engine/session.js";
 import type { LLMProvider } from "../src/provider/interface.js";
-import type { Message } from "../src/schema/message.js";
+import { toCanonicalUsage, type Message } from "../src/schema/message.js";
 
 /** Mock Provider:返回预设的 Message(含 usage) */
 class MockProvider implements LLMProvider {
@@ -87,7 +88,7 @@ describe("CostTracker", () => {
     expect(session.totalCostCNY).toBe(0);
   });
 
-  it("未知模型走兜底计价", async () => {
+  it("未知模型不再伪造兜底价,成本状态为 unknown 且不累计费用", async () => {
     const session = new Session("s1", "/tmp");
     const inner = new MockProvider({
       role: "assistant",
@@ -97,9 +98,10 @@ describe("CostTracker", () => {
     const tracker = new CostTracker(inner, "unknown-model", session);
 
     await tracker.generate([], []);
-    // 兜底价 input 0.5, output 0.5
-    // cost = (1000*0.5 + 1000*0.5) / 1e6 * 7.2 = 0.001 * 7.2 = 0.0072
-    expect(session.totalCostCNY).toBeCloseTo(0.0072, 5);
+    expect(session.totalPromptTokens).toBe(1000);
+    expect(session.totalCompletionTokens).toBe(1000);
+    expect(session.totalCostCNY).toBe(0);
+    expect(session.lastCostStatus).toBe("unknown");
   });
 
   it("无 Session 时不崩溃(仅打印日志)", async () => {
@@ -146,5 +148,62 @@ describe("CostTracker", () => {
     const calls = logSpy.mock.calls.flat().join(" ");
     expect(calls).toMatch(/耗时: \d+ms/);
     logSpy.mockRestore();
+  });
+
+  it("CanonicalUsage 将 cache/reasoning 拆成独立油耗桶", () => {
+    const usage = toCanonicalUsage({
+      promptTokens: 1000,
+      completionTokens: 300,
+      cacheReadTokens: 200,
+      cacheWriteTokens: 50,
+      reasoningTokens: 80,
+    });
+
+    expect(usage.inputTokens).toBe(750);
+    expect(usage.outputTokens).toBe(220);
+    expect(usage.cacheReadTokens).toBe(200);
+    expect(usage.cacheWriteTokens).toBe(50);
+    expect(usage.reasoningTokens).toBe(80);
+  });
+
+  it("BillingRoute 支持 included 和 unknown 两种非估算状态", () => {
+    expect(
+      getPricingEntry({
+        provider: "local",
+        model: "included-model",
+        billingMode: "subscription_included",
+      })?.source,
+    ).toBe("included");
+
+    const unknown = estimateCost("not-in-price-table", {
+      promptTokens: 1000,
+      completionTokens: 1000,
+    });
+    expect(unknown.status).toBe("unknown");
+    expect(unknown.costCNY).toBe(0);
+  });
+
+  it("CostTracker 记录 cache/reasoning 油耗桶到 Session", async () => {
+    const session = new Session("s1", "/tmp");
+    const inner = new MockProvider({
+      role: "assistant",
+      content: "x",
+      usage: {
+        promptTokens: 1000,
+        completionTokens: 300,
+        cacheReadTokens: 200,
+        cacheWriteTokens: 50,
+        reasoningTokens: 80,
+      },
+    });
+    const tracker = new CostTracker(inner, "glm-5.2", session);
+
+    await tracker.generate([], []);
+
+    expect(session.totalInputTokens).toBe(750);
+    expect(session.totalCacheReadTokens).toBe(200);
+    expect(session.totalCacheWriteTokens).toBe(50);
+    expect(session.totalReasoningTokens).toBe(80);
+    expect(session.lastCostStatus).toBe("estimated");
   });
 });

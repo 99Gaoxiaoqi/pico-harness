@@ -92,6 +92,45 @@ describe("SubagentTool", () => {
     expect(output).toContain("子智能体执行失败");
     expect(output).toContain("子智能体崩溃");
   });
+
+  it("达到 maxSpawnDepth 时拒绝继续委派", async () => {
+    let called = false;
+    const runner: AgentRunner = {
+      async runSub() {
+        called = true;
+        return "不应执行";
+      },
+    };
+    const tool = new SubagentTool(runner, mockReadOnlyRegistry(), {
+      depth: 2,
+      maxSpawnDepth: 2,
+      role: "orchestrator",
+    });
+
+    const output = await tool.execute(JSON.stringify({ task_prompt: "继续套娃" }));
+
+    expect(called).toBe(false);
+    expect(output).toContain("超过最大委派深度");
+  });
+
+  it("orchestrator 委派时向 runSub 透传 depth+1 与角色配置", async () => {
+    const seen: unknown[] = [];
+    const runner: AgentRunner = {
+      async runSub(_task, _registry, _reporter, opts) {
+        seen.push(opts);
+        return "ok";
+      },
+    };
+    const tool = new SubagentTool(runner, mockReadOnlyRegistry(), {
+      depth: 0,
+      maxSpawnDepth: 2,
+      role: "orchestrator",
+    });
+
+    await tool.execute(JSON.stringify({ task_prompt: "探索" }));
+
+    expect(seen).toEqual([{ depth: 1, maxSpawnDepth: 2, role: "leaf" }]);
+  });
 });
 
 describe("AgentEngine.runSub", () => {

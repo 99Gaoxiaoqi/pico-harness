@@ -5,11 +5,18 @@ import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { exec } from "node:child_process";
 import { isAbsolute, relative, resolve } from "node:path";
 import { promisify } from "node:util";
-import type { BaseTool, MiddlewareFunc, Registry } from "./registry.js";
+import type {
+  BaseTool,
+  ExecutionMiddleware,
+  MiddlewareFunc,
+  Registry,
+  RequestMiddleware,
+} from "./registry.js";
 import type { ToolCall, ToolDefinition, ToolResult } from "../schema/message.js";
 import { logger } from "../observability/logger.js";
 
 const execAsync = promisify(exec);
+const DEFAULT_RESULT_SIZE_CHARS = 8000;
 
 /**
  * 路径安全检查:确保路径在 workDir 之内,防路径穿越。
@@ -33,7 +40,8 @@ function safeResolve(workDir: string, path: string): string {
 export class ToolRegistry implements Registry {
   private readonly tools = new Map<string, BaseTool>();
   /** 第 16 讲:全局挂载的安全拦截中间件链 */
-  private readonly middlewares: MiddlewareFunc[] = [];
+  private readonly requestMiddlewares: RequestMiddleware[] = [];
+  private readonly executionMiddlewares: ExecutionMiddleware[] = [];
 
   register(tool: BaseTool): void {
     const name = tool.name();
@@ -46,8 +54,17 @@ export class ToolRegistry implements Registry {
 
   /** 挂载一个安全拦截中间件 (第 16 讲) */
   use(mw: MiddlewareFunc): void {
-    this.middlewares.push(mw);
-    logger.info({ count: this.middlewares.length }, `[Registry] 已挂载 Middleware (共 ${this.middlewares.length} 个)`);
+    this.useRequest(mw);
+  }
+
+  useRequest(mw: RequestMiddleware): void {
+    this.requestMiddlewares.push(mw);
+    logger.info({ count: this.requestMiddlewares.length }, `[Registry] 已挂载 Request Middleware (共 ${this.requestMiddlewares.length} 个)`);
+  }
+
+  useExecution(mw: ExecutionMiddleware): void {
+    this.executionMiddlewares.push(mw);
+    logger.info({ count: this.executionMiddlewares.length }, `[Registry] 已挂载 Execution Middleware (共 ${this.executionMiddlewares.length} 个)`);
   }
 
   getAvailableTools(): ToolDefinition[] {
@@ -61,11 +78,12 @@ export class ToolRegistry implements Registry {
 
   async execute(call: ToolCall): Promise<ToolResult> {
     // 1. 路由查找:找不到说明模型幻觉,返回 isError 让模型自纠
-    const tool = this.tools.get(call.name);
+    let currentCall = call;
+    const tool = this.tools.get(currentCall.name);
     if (!tool) {
       return {
-        toolCallId: call.id,
-        output: `Error: 系统中不存在名为 '${call.name}' 的工具。`,
+        toolCallId: currentCall.id,
+        output: `Error: 系统中不存在名为 '${currentCall.name}' 的工具。`,
         isError: true,
       };
     }
@@ -73,32 +91,53 @@ export class ToolRegistry implements Registry {
     // 2. 【核心防御】第 16 讲:在执行底层逻辑前,依次运行所有 Middleware。
     //    任一中间件返回 allowed=false,工具的底层 execute 就绝对不会被触发。
     //    异步签名以支持人工审批挂起 (Human-in-the-loop)。
-    for (const mw of this.middlewares) {
-      const { allowed, reason } = await mw(call);
+    for (const mw of this.requestMiddlewares) {
+      const { allowed, reason, call: rewrittenCall } = await mw(currentCall);
       if (!allowed) {
-        logger.warn({ tool: call.name, reason }, `[Registry] ⚠ 工具 ${call.name} 被 Middleware 拦截: ${reason}`);
+        logger.warn({ tool: currentCall.name, reason }, `[Registry] ⚠ 工具 ${currentCall.name} 被 Middleware 拦截: ${reason}`);
         return {
-          toolCallId: call.id,
+          toolCallId: currentCall.id,
           output: `执行被系统拦截。原因: ${reason}`,
           isError: true, // 必须返回 Error,强制大模型阅读拒绝理由
         };
+      }
+      if (rewrittenCall) {
+        currentCall = rewrittenCall;
       }
     }
 
     // 3. 执行工具逻辑:所有 Middleware 都放行了
     try {
-      const output = await tool.execute(call.arguments);
-      return { toolCallId: call.id, output, isError: false };
+      let chain: (nextCall: ToolCall) => Promise<string> = async (nextCall) =>
+        tool.execute(nextCall.arguments);
+      for (let i = this.executionMiddlewares.length - 1; i >= 0; i--) {
+        const mw = this.executionMiddlewares[i]!;
+        const next = chain;
+        chain = (nextCall) => mw(nextCall, next);
+      }
+      const output = await chain(currentCall);
+      return {
+        toolCallId: currentCall.id,
+        output: truncateToolOutput(output, tool.maxResultSizeChars ?? DEFAULT_RESULT_SIZE_CHARS),
+        isError: false,
+      };
     } catch (err) {
       // 4. 封装:底层物理错误也封成 isError 的 ToolResult
       const errMsg = err instanceof Error ? err.message : String(err);
       return {
-        toolCallId: call.id,
-        output: `Error executing ${call.name}: ${errMsg}`,
+        toolCallId: currentCall.id,
+        output: `Error executing ${currentCall.name}: ${errMsg}`,
         isError: true,
       };
     }
   }
+}
+
+function truncateToolOutput(output: string, limit: number): string {
+  if (output.length <= limit) {
+    return output;
+  }
+  return `${output.slice(0, limit)}\n\n...[工具输出过长,已截断至前 ${limit} 字符]...`;
 }
 
 // ==========================================

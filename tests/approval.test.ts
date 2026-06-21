@@ -4,8 +4,10 @@
 import { describe, expect, it, vi, afterEach } from "vitest";
 import {
   ApprovalManager,
+  ApprovalPolicy,
   isAgentOpsDangerousCommand,
   isDangerousCommand,
+  isHardlineCommand,
   type ApprovalNotice,
 } from "../src/approval/manager.js";
 import { ToolRegistry, EchoTool } from "../src/tools/registry-impl.js";
@@ -108,6 +110,13 @@ describe("isDangerousCommand", () => {
     expect(isAgentOpsDangerousCommand("bash", '{"command":"nginx -s reload"}')).toBe(true);
     expect(isAgentOpsDangerousCommand("bash", '{"command":"tail -n 50 error.log"}')).toBe(false);
   });
+
+  it("Hardline 命令不可审批绕过,普通 rm 只是 dangerous", () => {
+    expect(isHardlineCommand("bash", '{"command":"rm -rf /"}')).toBe(true);
+    expect(isHardlineCommand("bash", '{"command":"mkfs.ext4 /dev/sda"}')).toBe(true);
+    expect(isHardlineCommand("bash", '{"command":"rm tmp.log"}')).toBe(false);
+    expect(isDangerousCommand("bash", '{"command":"rm tmp.log"}')).toBe(true);
+  });
 });
 
 describe("ApprovalManager", () => {
@@ -169,6 +178,56 @@ describe("ApprovalManager", () => {
     expect(mgr.pendingCount).toBe(2);
     mgr.clear();
     expect(mgr.pendingCount).toBe(0);
+  });
+});
+
+describe("ApprovalPolicy", () => {
+  const dangerousCall: ToolCall = {
+    id: "c1",
+    name: "bash",
+    arguments: '{"command":"rm tmp.log"}',
+  };
+
+  it("hardline 命令直接拒绝,不进入人工审批", async () => {
+    const policy = new ApprovalPolicy();
+    const decision = await policy.decide(
+      "s1",
+      { id: "c-hard", name: "bash", arguments: '{"command":"rm -rf /"}' },
+      async () => ({ allowed: true, reason: "人工批准" }),
+    );
+
+    expect(decision.allowed).toBe(false);
+    expect(decision.reason).toContain("Hardline");
+  });
+
+  it("session allowlist 只放行当前会话的同类命令", async () => {
+    const policy = new ApprovalPolicy();
+    policy.allowForSession("s1", dangerousCall);
+
+    await expect(
+      policy.decide("s1", dangerousCall, async () => ({ allowed: false, reason: "不应审批" })),
+    ).resolves.toMatchObject({ allowed: true });
+
+    await expect(
+      policy.decide("s2", dangerousCall, async () => ({ allowed: false, reason: "需要审批" })),
+    ).resolves.toMatchObject({ allowed: false, reason: "需要审批" });
+  });
+
+  it("YOLO 模式放行 dangerous 但不放行 hardline", async () => {
+    const policy = new ApprovalPolicy();
+    policy.setYoloMode("s1", true);
+
+    await expect(
+      policy.decide("s1", dangerousCall, async () => ({ allowed: false, reason: "不应审批" })),
+    ).resolves.toMatchObject({ allowed: true });
+
+    await expect(
+      policy.decide(
+        "s1",
+        { id: "c-hard", name: "bash", arguments: '{"command":"rm -rf /"}' },
+        async () => ({ allowed: true, reason: "不应批准" }),
+      ),
+    ).resolves.toMatchObject({ allowed: false });
   });
 });
 

@@ -180,6 +180,17 @@ const DANGEROUS_PATTERNS: RegExp[] = [
   /\bcat\s+.*\s*>\s*\/(etc|usr|bin|boot|sys|proc)\b/i,
 ];
 
+const HARDLINE_PATTERNS: RegExp[] = [
+  /\brm\s+-[a-z]*r[a-z]*f[a-z]*\s+\/(?:["'\s}]|$)/i,
+  /\brm\s+-[a-z]*f[a-z]*r[a-z]*\s+\/(?:["'\s}]|$)/i,
+  /\bmkfs(\.[a-z0-9]+)?\s+\/dev\//i,
+  /\bdd\s+if=.*\bof=\/dev\//i,
+  /:\(\)\s*\{/,
+  /\bshutdown\b/i,
+  /\breboot\b/i,
+  /\bgit\s+push\s+(-f|--force)\s+.*\b(main|master)\b/i,
+];
+
 export function isDangerousCommand(toolName: string, args: string): boolean {
   // 纯读取工具默认 YOLO 模式,全部放行
   if (toolName !== "bash" && toolName !== "write_file" && toolName !== "edit_file") {
@@ -194,6 +205,72 @@ export function isDangerousCommand(toolName: string, args: string): boolean {
   }
   return false;
 }
+
+export function isHardlineCommand(toolName: string, args: string): boolean {
+  if (toolName !== "bash") {
+    return false;
+  }
+  return HARDLINE_PATTERNS.some((pattern) => pattern.test(args));
+}
+
+export class ApprovalPolicy {
+  private readonly sessionAllowlist = new Map<string, Set<string>>();
+  private readonly permanentAllowlist = new Set<string>();
+  private readonly yoloSessions = new Set<string>();
+
+  async decide(
+    sessionId: string,
+    call: { id: string; name: string; arguments: string },
+    askHuman: () => Promise<ApprovalResult>,
+    isDangerous: (toolName: string, args: string) => boolean = isDangerousCommand,
+  ): Promise<ApprovalResult> {
+    if (isHardlineCommand(call.name, call.arguments)) {
+      return {
+        allowed: false,
+        reason: "Hardline 高危命令不可审批绕过,系统直接拒绝。",
+      };
+    }
+    if (!isDangerous(call.name, call.arguments)) {
+      return { allowed: true, reason: "安全命令自动放行" };
+    }
+    const key = this.patternKey(call.name, call.arguments);
+    if (this.permanentAllowlist.has(key)) {
+      return { allowed: true, reason: "永久 allowlist 放行" };
+    }
+    if (this.sessionAllowlist.get(sessionId)?.has(key)) {
+      return { allowed: true, reason: "会话 allowlist 放行" };
+    }
+    if (this.yoloSessions.has(sessionId)) {
+      return { allowed: true, reason: "YOLO 模式放行" };
+    }
+    return askHuman();
+  }
+
+  allowForSession(sessionId: string, call: { name: string; arguments: string }): void {
+    const key = this.patternKey(call.name, call.arguments);
+    const set = this.sessionAllowlist.get(sessionId) ?? new Set<string>();
+    set.add(key);
+    this.sessionAllowlist.set(sessionId, set);
+  }
+
+  allowPermanently(call: { name: string; arguments: string }): void {
+    this.permanentAllowlist.add(this.patternKey(call.name, call.arguments));
+  }
+
+  setYoloMode(sessionId: string, enabled: boolean): void {
+    if (enabled) {
+      this.yoloSessions.add(sessionId);
+    } else {
+      this.yoloSessions.delete(sessionId);
+    }
+  }
+
+  private patternKey(toolName: string, args: string): string {
+    return `${toolName}:${args}`;
+  }
+}
+
+export const globalApprovalPolicy = new ApprovalPolicy();
 
 /**
  * AgentOps 生产运维策略:

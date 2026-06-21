@@ -6,6 +6,7 @@ import { OpenAIProvider } from "./openai.js";
 import type { LLMProvider } from "./interface.js";
 import type { Message, ToolDefinition } from "../schema/message.js";
 import { logger } from "../observability/logger.js";
+import { resolveProviderProfile } from "./profile.js";
 
 export type ProviderKind = "openai" | "claude";
 
@@ -82,11 +83,7 @@ class ModelFallbackProvider implements LLMProvider {
 }
 
 export function fallbackModelFor(model: string): string | undefined {
-  const normalized = model.replaceAll("-", "").toLowerCase();
-  if (normalized === "glm5.2") {
-    return GLM_52_FALLBACK_MODEL;
-  }
-  return undefined;
+  return resolveProviderProfile("openai", model).fallbackModel;
 }
 
 export function isModelUnavailableError(error: unknown, model: string): boolean {

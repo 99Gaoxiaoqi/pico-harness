@@ -28,7 +28,20 @@ export interface AgentRunner {
    * @param readOnlyRegistry 子智能体专属受限只读注册表(爆炸半径限制)
    * @param reporter 可选 Reporter,透传子智能体工作轨迹(打 [Subagent] 前缀)
    */
-  runSub(taskPrompt: string, readOnlyRegistry: Registry, reporter?: Reporter): Promise<string>;
+  runSub(
+    taskPrompt: string,
+    readOnlyRegistry: Registry,
+    reporter?: Reporter,
+    opts?: SubagentRunOptions,
+  ): Promise<string>;
+}
+
+export type SubagentRole = "leaf" | "orchestrator";
+
+export interface SubagentRunOptions {
+  depth?: number;
+  maxSpawnDepth?: number;
+  role?: SubagentRole;
 }
 
 /** spawn_subagent 工具的参数 */
@@ -47,6 +60,7 @@ export class SubagentTool implements BaseTool {
   constructor(
     private readonly runner: AgentRunner,
     private readonly readOnlyRegistry: Registry,
+    private readonly options: SubagentRunOptions = {},
   ) {}
 
   name(): string {
@@ -90,9 +104,19 @@ export class SubagentTool implements BaseTool {
       `[Subagent] 🚀 主 Agent 发起委派!正在拉起探路者: [${input.task_prompt.slice(0, 80)}...]`,
     );
 
+    const depth = this.options.depth ?? 0;
+    const maxSpawnDepth = this.options.maxSpawnDepth ?? 2;
+    if (depth >= maxSpawnDepth) {
+      return `子智能体执行失败: 超过最大委派深度 ${maxSpawnDepth},拒绝继续 spawn_subagent。`;
+    }
+
     let summary: string;
     try {
-      summary = await this.runner.runSub(input.task_prompt, this.readOnlyRegistry);
+      summary = await this.runner.runSub(input.task_prompt, this.readOnlyRegistry, undefined, {
+        depth: depth + 1,
+        maxSpawnDepth,
+        role: "leaf",
+      });
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
       return `子智能体执行失败: ${errMsg}`;

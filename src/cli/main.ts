@@ -26,9 +26,10 @@ import {
 } from "../tools/registry-impl.js";
 import { createFeishuApprovalMiddleware, FeishuBot, loadFeishuConfig } from "../feishu/bot.js";
 import { PromptComposer } from "../context/composer.js";
+import { SkillLoader, SkillViewTool } from "../context/skill.js";
 import {
   globalApprovalManager,
-  isDangerousCommand,
+  globalApprovalPolicy,
   type ApprovalNotifier,
 } from "../approval/manager.js";
 import type { MiddlewareFunc } from "../tools/registry.js";
@@ -44,6 +45,7 @@ function buildRegistry(workDir: string): ToolRegistry {
   registry.register(new WriteFileTool(workDir));
   registry.register(new EditFileTool(workDir));
   registry.register(new BashTool(workDir));
+  registry.register(new SkillViewTool(new SkillLoader(workDir)));
   return registry;
 }
 
@@ -75,17 +77,9 @@ function buildCompactor(): Compactor {
  */
 function buildApprovalMiddleware(notifier: ApprovalNotifier): MiddlewareFunc {
   return async (call) => {
-    if (!isDangerousCommand(call.name, call.arguments)) {
-      return { allowed: true, reason: "" }; // 未命中黑名单,YOLO 放行
-    }
-    // 命中高危特征 → 挂起执行流,等待人类审批
-    const { allowed, reason } = await globalApprovalManager.waitForApproval(
-      call.id,
-      call.name,
-      call.arguments,
-      notifier,
+    return globalApprovalPolicy.decide("cli", call, () =>
+      globalApprovalManager.waitForApproval(call.id, call.name, call.arguments, notifier),
     );
-    return { allowed, reason };
   };
 }
 

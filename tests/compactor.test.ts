@@ -9,7 +9,7 @@
 // 7. estimateLength 累加 content + toolCalls
 
 import { describe, expect, it } from "vitest";
-import { Compactor } from "../src/context/compactor.js";
+import { Compactor, sanitizeToolPairs } from "../src/context/compactor.js";
 import type { Message } from "../src/schema/message.js";
 
 function systemMsg(content: string): Message {
@@ -193,5 +193,82 @@ describe("Compactor", () => {
     expect(out[1]!.toolCallId).toBe("c1");
     expect(out[2]!.toolCallId).toBe("c2");
     expect(out[3]!.toolCallId).toBe("c3");
+  });
+
+  it("sanitizeToolPairs 删除孤儿工具结果并补齐缺失结果 stub", () => {
+    const msgs: Message[] = [
+      toolResultMsg("ghost", "orphan"),
+      assistantMsg("call", [
+        { id: "c1", name: "read", arguments: "{}" },
+        { id: "c2", name: "read", arguments: "{}" },
+      ]),
+      toolResultMsg("c1", "ok"),
+      userMsg("next"),
+    ];
+
+    const out = sanitizeToolPairs(msgs);
+
+    expect(out.some((m) => m.toolCallId === "ghost")).toBe(false);
+    expect(out.some((m) => m.toolCallId === "c1" && m.content === "ok")).toBe(true);
+    const stub = out.find((m) => m.toolCallId === "c2");
+    expect(stub?.content).toContain("工具结果已归档");
+  });
+
+  it("连续两次压缩收益不足时触发反抖守卫,跳过后续压缩", () => {
+    const c = new Compactor({ maxChars: 10, retainLastMsgs: 10 });
+    const msgs = [systemMsg("S".repeat(1000)), userMsg("recent")];
+
+    const first = c.compact(msgs);
+    const second = c.compact(msgs);
+    const third = c.compact(msgs);
+
+    expect(c.ineffectiveCompressionCount).toBe(2);
+    expect(first[0]!.content).toBe("S".repeat(1000));
+    expect(second[0]!.content).toBe("S".repeat(1000));
+    expect(third[0]!.content).toBe("S".repeat(1000));
+  });
+
+  it("retainLastTokens 按近似 token 预算保护尾部,不再只按消息条数", () => {
+    const c = new Compactor({ maxChars: 10, retainLastMsgs: 100, retainLastTokens: 20 });
+    const oldBig = toolResultMsg("old", "O".repeat(2000));
+    const recentSmall = toolResultMsg("recent", "R".repeat(80));
+    const msgs: Message[] = [
+      assistantMsg("old-call", [{ id: "old", name: "read", arguments: "{}" }]),
+      oldBig,
+      assistantMsg("recent-call", [{ id: "recent", name: "read", arguments: "{}" }]),
+      recentSmall,
+    ];
+
+    const out = c.compact(msgs);
+
+    expect(out.find((m) => m.toolCallId === "old")?.content).toContain("已被系统清理");
+    expect(out.find((m) => m.toolCallId === "recent")?.content).toBe("R".repeat(80));
+  });
+
+  it("compactWithSummary 基于 previousSummary 做增量摘要", async () => {
+    const seen: { previousSummary?: string; newCount: number }[] = [];
+    const c = new Compactor({
+      maxChars: 50,
+      retainLastMsgs: 1,
+      summarizer: async ({ previousSummary, newMessages }) => {
+        seen.push({ previousSummary, newCount: newMessages.length });
+        return previousSummary ? `${previousSummary} + 增量${newMessages.length}` : `初次${newMessages.length}`;
+      },
+    });
+
+    await c.compactWithSummary([
+      userMsg("a".repeat(100)),
+      assistantMsg("b".repeat(100)),
+      userMsg("recent"),
+    ]);
+    await c.compactWithSummary([
+      userMsg("a".repeat(100)),
+      assistantMsg("b".repeat(100)),
+      userMsg("c".repeat(100)),
+      userMsg("recent"),
+    ]);
+
+    expect(seen[0]).toEqual({ previousSummary: undefined, newCount: 2 });
+    expect(seen[1]).toEqual({ previousSummary: "初次2", newCount: 1 });
   });
 });

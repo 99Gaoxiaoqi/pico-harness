@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { PromptComposer } from "../src/context/composer.js";
-import { parseSkillMD, SkillLoader } from "../src/context/skill.js";
+import { parseSkillMD, SkillLoader, SkillViewTool } from "../src/context/skill.js";
 
 describe("parseSkillMD", () => {
   it("解析 YAML frontmatter 的 name 和 description", () => {
@@ -31,6 +31,19 @@ description: 提取 PDF 文本、填充表单。当用户需要处理 PDF 文件
     const skill = parseSkillMD(content);
     expect(skill.name).toBe("Unknown Skill");
     expect(skill.body).toContain("普通文档");
+  });
+
+  it("frontmatter 解析只匹配开头边界,正文中的 --- 不会截断", () => {
+    const content = `---
+name: demo
+description: 测试
+---
+
+# 正文
+
+中间有 --- 分隔线,但仍属于正文。`;
+    const skill = parseSkillMD(content);
+    expect(skill.body).toContain("中间有 --- 分隔线");
   });
 });
 
@@ -62,6 +75,33 @@ describe("SkillLoader", () => {
     expect(result).toContain("处理 PDF");
     expect(result).toContain("git");
     expect(result).toContain("Git 操作");
+    expect(result).not.toContain("PDF 指南");
+    expect(result).not.toContain("Git 指南");
+  });
+
+  it("listSummaries 只返回技能元数据,viewBody 按需返回正文", async () => {
+    await mkdir(join(workDir, ".claw", "skills", "deploy"), { recursive: true });
+    await writeFile(
+      join(workDir, ".claw", "skills", "deploy", "SKILL.md"),
+      "---\nname: deploy\ndescription: 部署到生产\n---\n\n# 部署指南\n跑 npm run build",
+    );
+
+    const loader = new SkillLoader(workDir);
+    const summaries = await loader.listSummaries();
+    expect(summaries).toEqual([{ name: "deploy", description: "部署到生产" }]);
+    await expect(loader.viewBody("deploy")).resolves.toContain("部署指南");
+  });
+
+  it("SkillViewTool 暴露 skill_view 按名称读取技能正文", async () => {
+    await mkdir(join(workDir, ".claw", "skills", "deploy"), { recursive: true });
+    await writeFile(
+      join(workDir, ".claw", "skills", "deploy", "SKILL.md"),
+      "---\nname: deploy\ndescription: 部署到生产\n---\n\n# 部署指南\n跑 npm run build",
+    );
+
+    const tool = new SkillViewTool(new SkillLoader(workDir));
+    const out = await tool.execute(JSON.stringify({ name: "deploy" }));
+    expect(out).toContain("部署指南");
   });
 
   it("无 .claw/skills 目录时返回空", async () => {

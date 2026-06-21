@@ -14,7 +14,18 @@ import type { ToolCall, ToolDefinition, ToolResult } from "../schema/message.js"
  * 异步签名以支持人工审批挂起 (Human-in-the-loop):中间件可阻塞等待
  * 飞书审批结果,大模型甚至不知道自己被挂起了。
  */
-export type MiddlewareFunc = (call: ToolCall) => Promise<{ allowed: boolean; reason: string }>;
+export interface RequestMiddlewareResult {
+  allowed: boolean;
+  reason?: string;
+  call?: ToolCall;
+}
+
+export type RequestMiddleware = (call: ToolCall) => Promise<RequestMiddlewareResult>;
+export type ExecutionMiddleware = (
+  call: ToolCall,
+  next: (call: ToolCall) => Promise<string>,
+) => Promise<string>;
+export type MiddlewareFunc = RequestMiddleware;
 
 /**
  * BaseTool:所有具体工具必须实现的通用接口。
@@ -34,6 +45,10 @@ export interface BaseTool {
    * 默认 false (保守视为写操作)。
    */
   readOnly?: boolean;
+  /** 该工具单次返回的最大字符数;未设置时使用 Registry 默认值 */
+  maxResultSizeChars?: number;
+  /** 工具所属工具集,供未来 subagent/MCP 分组授权 */
+  toolset?: string;
 }
 
 /** 工具的注册与分发接口 */
@@ -42,6 +57,10 @@ export interface Registry {
   register(tool: BaseTool): void;
   /** 【第 16 讲】全局挂载一个安全拦截中间件 */
   use(mw: MiddlewareFunc): void;
+  /** request 阶段中间件:可拦截或改写参数 */
+  useRequest?(mw: RequestMiddleware): void;
+  /** execution 阶段中间件:可包裹实际执行 */
+  useExecution?(mw: ExecutionMiddleware): void;
   /** 返回当前系统挂载的所有工具的 Schema,供 Main Loop 交给 Provider */
   getAvailableTools(): ToolDefinition[];
   /** 实际路由并执行模型请求的工具调用 */

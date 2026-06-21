@@ -14,16 +14,7 @@
 import type { LLMProvider } from "../provider/interface.js";
 import type { Message, ToolDefinition } from "../schema/message.js";
 import type { Session } from "../engine/session.js";
-
-/** 模型计费表(美元/1M Tokens) */
-const PRICING: Record<string, { input: number; output: number }> = {
-  "glm-5.2": { input: 0.5, output: 0.5 },
-  "glm-4.5-air": { input: 0.15, output: 0.15 },
-  "claude-3-5-sonnet": { input: 3.0, output: 15.0 },
-  // 默认兜底价
-};
-
-const USD_TO_CNY = 7.2;
+import { estimateCost, type BillingRoute } from "./pricing.js";
 
 /**
  * CostTracker:包装了真实 LLMProvider 的装饰器中间件。
@@ -34,7 +25,7 @@ const USD_TO_CNY = 7.2;
 export class CostTracker implements LLMProvider {
   constructor(
     private readonly next: LLMProvider,
-    private readonly modelName: string,
+    private readonly modelName: string | BillingRoute,
     private readonly session?: Session,
   ) {}
 
@@ -45,14 +36,20 @@ export class CostTracker implements LLMProvider {
 
     if (resp.usage) {
       const { promptTokens, completionTokens } = resp.usage;
-      const price = PRICING[this.modelName] ?? { input: 0.5, output: 0.5 };
-      const costUSD = (promptTokens * price.input + completionTokens * price.output) / 1_000_000;
-      const costCNY = costUSD * USD_TO_CNY;
+      const cost = estimateCost(this.modelName, resp.usage);
       console.log(
-        `[Tracker] 📊 API 完成 | 耗时: ${latencyMs}ms | 输入: ${promptTokens} tk | 输出: ${completionTokens} tk | 花费: ¥${costCNY.toFixed(6)}`,
+        `[Tracker] 📊 API 完成 | 耗时: ${latencyMs}ms | 输入: ${promptTokens} tk | 输出: ${completionTokens} tk | ` +
+          `cache_read: ${cost.usage.cacheReadTokens} tk | cache_write: ${cost.usage.cacheWriteTokens} tk | ` +
+          `reasoning: ${cost.usage.reasoningTokens} tk | 成本状态: ${cost.status} | 花费: ¥${cost.costCNY.toFixed(6)}`,
       );
       if (this.session) {
-        this.session.recordUsage(promptTokens, completionTokens, costCNY);
+        this.session.recordUsage(
+          promptTokens,
+          completionTokens,
+          cost.costCNY,
+          cost.usage,
+          cost.status,
+        );
         console.log(
           `[Tracker] 💰 会话 (${this.session.id}) 累计: 输入 ${this.session.totalPromptTokens} tk | 输出 ${this.session.totalCompletionTokens} tk | ¥${this.session.totalCostCNY.toFixed(6)}`,
         );

@@ -10,6 +10,7 @@
 import type { LLMProvider } from "./interface.js";
 import type { Message, ToolCall, ToolDefinition } from "../schema/message.js";
 import type { ProviderConfig } from "./config.js";
+import { resolveProviderProfile, type ProviderProfile } from "./profile.js";
 
 /** Anthropic content block: 文本或工具调用 */
 type Block =
@@ -20,12 +21,24 @@ type Block =
 interface AnthropicResponse {
   content?: Block[];
   stop_reason?: string;
-  usage?: { input_tokens?: number; output_tokens?: number };
+  usage?: {
+    input_tokens?: number;
+    output_tokens?: number;
+    cache_creation_input_tokens?: number;
+    cache_read_input_tokens?: number;
+  };
 }
 
 /** Anthropic (Claude) 兼容协议适配器 */
 export class ClaudeProvider implements LLMProvider {
-  constructor(private readonly config: ProviderConfig) {}
+  private readonly profile: ProviderProfile;
+
+  constructor(
+    private readonly config: ProviderConfig,
+    profile?: ProviderProfile,
+  ) {
+    this.profile = profile ?? resolveProviderProfile("claude", config.model);
+  }
 
   async generate(messages: Message[], availableTools: ToolDefinition[]): Promise<Message> {
     let systemPrompt = "";
@@ -79,7 +92,7 @@ export class ClaudeProvider implements LLMProvider {
     // 2. 工具 Schema 翻译:properties / required 分别填充
     const body: Record<string, unknown> = {
       model: this.config.model,
-      max_tokens: 4096,
+      max_tokens: this.profile.maxOutputTokens,
       messages: anthropicMsgs,
     };
     if (systemPrompt) body.system = systemPrompt;
@@ -145,6 +158,8 @@ export class ClaudeProvider implements LLMProvider {
         ? {
             promptTokens: data.usage.input_tokens ?? 0,
             completionTokens: data.usage.output_tokens ?? 0,
+            cacheWriteTokens: data.usage.cache_creation_input_tokens ?? 0,
+            cacheReadTokens: data.usage.cache_read_input_tokens ?? 0,
           }
         : undefined;
 

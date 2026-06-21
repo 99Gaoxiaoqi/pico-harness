@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ClaudeProvider } from "../src/provider/claude.js";
 import { createProvider, isModelUnavailableError } from "../src/provider/factory.js";
 import { OpenAIProvider } from "../src/provider/openai.js";
+import { resolveProviderProfile } from "../src/provider/profile.js";
 import type { Message, ToolDefinition } from "../src/schema/message.js";
 
 const cfg = { baseURL: "https://test.local/v1", apiKey: "sk-test", model: "glm-5.2" };
@@ -159,6 +160,42 @@ describe("OpenAIProvider 翻译层", () => {
       ),
     ).toBe(true);
   });
+
+  it("解析 OpenAI cache/reasoning usage 与 reasoning_content", async () => {
+    mockFetch({
+      choices: [
+        {
+          message: {
+            role: "assistant",
+            content: "答案",
+            reasoning_content: "内部推理摘要",
+          },
+        },
+      ],
+      usage: {
+        prompt_tokens: 1000,
+        completion_tokens: 300,
+        prompt_tokens_details: { cached_tokens: 200 },
+        completion_tokens_details: { reasoning_tokens: 80 },
+      },
+    });
+    const p = new OpenAIProvider(cfg);
+    const msg = await p.generate(history, []);
+
+    expect(msg.reasoning).toBe("内部推理摘要");
+    expect(msg.usage).toMatchObject({
+      promptTokens: 1000,
+      completionTokens: 300,
+      cacheReadTokens: 200,
+      reasoningTokens: 80,
+    });
+  });
+
+  it("ProviderProfile 声明 glm-5.2 的 fallback 与消息怪癖", () => {
+    const profile = resolveProviderProfile("openai", "glm-5.2");
+    expect(profile.fallbackModel).toBe("kimi-k2.5");
+    expect(profile.assistantContent).toBe("null_when_empty");
+  });
 });
 
 describe("ClaudeProvider 翻译层", () => {
@@ -212,5 +249,26 @@ describe("ClaudeProvider 翻译层", () => {
     const last = msgs[msgs.length - 1]!;
     expect(last.role).toBe("user");
     expect(last.content.some((b) => b.type === "tool_result")).toBe(true);
+  });
+
+  it("解析 Claude cache creation/read usage", async () => {
+    mockFetch({
+      content: [{ type: "text", text: "ok" }],
+      usage: {
+        input_tokens: 1000,
+        output_tokens: 200,
+        cache_creation_input_tokens: 100,
+        cache_read_input_tokens: 300,
+      },
+    });
+    const p = new ClaudeProvider(cfg);
+    const msg = await p.generate(history, []);
+
+    expect(msg.usage).toMatchObject({
+      promptTokens: 1000,
+      completionTokens: 200,
+      cacheWriteTokens: 100,
+      cacheReadTokens: 300,
+    });
   });
 });

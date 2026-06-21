@@ -11,7 +11,8 @@
 // 经此改造,engine.Run 沦为纯"打工执行器":不内部维护状态,
 // 依靠喂给它的 Session 推理 —— 随时休眠、随时被唤醒的记忆连续体。
 
-import type { Message } from "../schema/message.js";
+import type { CanonicalUsage, Message } from "../schema/message.js";
+import type { CostStatus } from "../observability/pricing.js";
 
 /**
  * Session:一次持续的人机交互过程。
@@ -29,8 +30,18 @@ export class Session {
   totalPromptTokens = 0;
   /** 累计输出 Token */
   totalCompletionTokens = 0;
+  /** 累计真实新输入 Token(不含 cache) */
+  totalInputTokens = 0;
+  /** 累计 cache read Token */
+  totalCacheReadTokens = 0;
+  /** 累计 cache write Token */
+  totalCacheWriteTokens = 0;
+  /** 累计 reasoning Token */
+  totalReasoningTokens = 0;
   /** 累计花费(人民币元) */
   totalCostCNY = 0;
+  /** 最近一次成本状态 */
+  lastCostStatus: CostStatus | null = null;
 
   private history: Message[] = [];
 
@@ -65,10 +76,25 @@ export class Session {
   }
 
   /** 记录一次推理的 Token 用量与花费(供 CostTracker 调用) */
-  recordUsage(promptTokens: number, completionTokens: number, costCNY: number): void {
+  recordUsage(
+    promptTokens: number,
+    completionTokens: number,
+    costCNY: number,
+    canonical?: CanonicalUsage,
+    costStatus?: CostStatus,
+  ): void {
     this.totalPromptTokens += promptTokens;
     this.totalCompletionTokens += completionTokens;
+    if (canonical) {
+      this.totalInputTokens += canonical.inputTokens;
+      this.totalCacheReadTokens += canonical.cacheReadTokens;
+      this.totalCacheWriteTokens += canonical.cacheWriteTokens;
+      this.totalReasoningTokens += canonical.reasoningTokens;
+    }
     this.totalCostCNY += costCNY;
+    if (costStatus) {
+      this.lastCostStatus = costStatus;
+    }
   }
 
   /** 向 Session 追加消息(可批量) */

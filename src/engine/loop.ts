@@ -14,11 +14,17 @@ import type { LLMProvider } from "../provider/interface.js";
 import type { Message, ToolCall, ToolResult } from "../schema/message.js";
 import type { Registry } from "../tools/registry.js";
 import type { AgentRunner } from "../tools/subagent.js";
+import type { SubagentRunOptions } from "../tools/subagent.js";
 import type { Compactor } from "../context/compactor.js";
 import { PromptComposer } from "../context/composer.js";
 import { RecoveryManager } from "../context/recovery.js";
 import { SilentReporter, type Reporter } from "./reporter.js";
-import { ReminderInjector } from "./reminder.js";
+import {
+  ReminderInjector,
+  ToolGuardrailController,
+  type GuardrailOptions,
+} from "./reminder.js";
+import { IterationBudget, type BudgetConfig } from "./budget.js";
 import { Tracer, exportTraceToFile, truncate, type Span } from "../observability/trace.js";
 import { logger } from "../observability/logger.js";
 import type { Session } from "./session.js";
@@ -63,6 +69,10 @@ export interface AgentEngineOptions {
    * 未提供则默认创建一个,阈值 3 次同参数失败触发干预。
    */
   reminderInjector?: ReminderInjector;
+  /** 工具级 Guardrail 配置:失败循环、同工具失败、只读无进展 */
+  guardrailOptions?: GuardrailOptions;
+  /** 轮次/token/成本预算配置 */
+  budgetConfig?: BudgetConfig;
   /** 可选的轮次日志回调,便于第 19 讲 Tracing 接入 */
   onTurn?: (info: { turn: number; message: Message }) => void;
   /** 输出 Reporter;默认静默 (第 09 讲) */
@@ -86,7 +96,8 @@ export class AgentEngine implements AgentRunner {
   private readonly maxTurns: number;
   private readonly compactor?: Compactor;
   private readonly recovery: RecoveryManager;
-  private readonly reminderInjector: ReminderInjector;
+  private readonly guardrail: ToolGuardrailController;
+  private readonly budget: IterationBudget;
   private readonly onTurn?: (info: { turn: number; message: Message }) => void;
   private readonly reporter: Reporter;
   private readonly tracer?: Tracer;
@@ -105,7 +116,11 @@ export class AgentEngine implements AgentRunner {
     this.maxTurns = opts.maxTurns ?? 50;
     this.compactor = opts.compactor;
     this.recovery = opts.recovery ?? new RecoveryManager();
-    this.reminderInjector = opts.reminderInjector ?? new ReminderInjector();
+    this.guardrail = new ToolGuardrailController(opts.guardrailOptions);
+    this.budget = new IterationBudget({
+      ...opts.budgetConfig,
+      maxTurns: opts.budgetConfig?.maxTurns ?? this.maxTurns,
+    });
     this.onTurn = opts.onTurn;
     this.reporter = opts.reporter ?? new SilentReporter();
     this.tracer = opts.tracer;
@@ -157,13 +172,16 @@ export class AgentEngine implements AgentRunner {
 
     const beforeLen = session.length;
     let turnCount = 0;
+    let exhaustedReason: string | undefined;
 
     // The Main Loop:心跳开始 (Two-Stage ReAct 循环)
     try {
       for (;;) {
         turnCount++;
-        if (turnCount > this.maxTurns) {
-          logger.warn({ turnCount, maxTurns: this.maxTurns }, `[Engine] 达到最大轮次 ${this.maxTurns},强制退出防止 Token 烧穿`);
+        const turnBudget = this.budget.canStartTurn(turnCount);
+        if (!turnBudget.allowed) {
+          exhaustedReason = turnBudget.reason ?? `已达到最大轮次 ${this.maxTurns}`;
+          logger.warn({ turnCount, maxTurns: this.maxTurns }, `[Engine] ${exhaustedReason},准备触发 Grace Call 收尾`);
           break;
         }
         reporter.onTurnStart(turnCount);
@@ -219,6 +237,12 @@ export class AgentEngine implements AgentRunner {
             try {
               thinkResp = await this.provider.generate(compactedContext, []);
               recordLlmResponse(thinkingSpan, thinkResp);
+              const budgetDecision = thinkResp.usage
+                ? this.budget.consumeUsage(thinkResp.usage)
+                : { allowed: true };
+              if (!budgetDecision.allowed) {
+                exhaustedReason = budgetDecision.reason;
+              }
             } catch (err) {
               recordTraceError(thinkingSpan, err);
               throw err;
@@ -230,6 +254,9 @@ export class AgentEngine implements AgentRunner {
               // 将思考过程持久化到 Session,并追加到本轮临时上下文供 Action 使用
               session.append(thinkResp);
               compactedContext.push(thinkResp);
+            }
+            if (exhaustedReason) {
+              break;
             }
           }
 
@@ -246,6 +273,12 @@ export class AgentEngine implements AgentRunner {
           try {
             responseMsg = await this.provider.generate(compactedContext, availableTools);
             recordLlmResponse(actionSpan, responseMsg);
+            const budgetDecision = responseMsg.usage
+              ? this.budget.consumeUsage(responseMsg.usage)
+              : { allowed: true };
+            if (!budgetDecision.allowed) {
+              exhaustedReason = budgetDecision.reason;
+            }
           } catch (err) {
             recordTraceError(actionSpan, err);
             throw err;
@@ -257,6 +290,9 @@ export class AgentEngine implements AgentRunner {
           session.append(responseMsg);
           compactedContext.push(responseMsg);
           this.onTurn?.({ turn: turnCount, message: responseMsg });
+          if (exhaustedReason) {
+            break;
+          }
 
           // 模型回复纯文本时广播 (通常是思考过程或最终结果)
           if (responseMsg.content) {
@@ -280,49 +316,43 @@ export class AgentEngine implements AgentRunner {
             toolCalls.every((tc) => isReadOnly.call(this.registry, tc.name));
 
           const observations: Message[] = new Array(toolCalls.length);
-          // 收集本轮最后一个工具调用 + 结果,供 Reminder 探测器分析
-          // (并发场景下取索引 0;真实工业级可逐个分析报错的那个)
-          let lastToolCall: ToolCall | null = null;
-          let lastToolResult: ToolResult | null = null;
+          const reminderMessages: Message[] = [];
 
           if (allReadOnly) {
             await Promise.all(
               toolCalls.map(async (toolCall, i) => {
-                const { message, result } = await this.runOneTool(toolCall, reporter, turnSpan);
+                const { message, reminder } = await this.runOneTool(toolCall, reporter, turnSpan);
                 observations[i] = message;
-                if (i === 0) {
-                  lastToolCall = toolCall;
-                  lastToolResult = result;
+                if (reminder) {
+                  reminderMessages.push(reminder);
                 }
               }),
             );
           } else {
             for (let i = 0; i < toolCalls.length; i++) {
-              const { message, result } = await this.runOneTool(toolCalls[i]!, reporter, turnSpan);
+              const { message, reminder } = await this.runOneTool(
+                toolCalls[i]!,
+                reporter,
+                turnSpan,
+              );
               observations[i] = message;
-              if (i === 0) {
-                lastToolCall = toolCalls[i]!;
-                lastToolResult = result;
+              if (reminder) {
+                reminderMessages.push(reminder);
               }
             }
           }
 
           // 将所有 Observation 持久化到 Session,开启下一轮复盘与推理
           session.append(...observations);
-
-          // 【核心防线】第 15 讲:在准备进入下一轮之前,进行死循环探测!
-          // 大模型"思考完毕、行动受挫"和"重燃执念再次思考"的空隙处安插安全阀。
-          // 若检测到连续同参数失败,注入 [SYSTEM REMINDER 警告] 作为 User 消息
-          // 追加到 Session 最末尾,凭最高近因效应击碎局部执念。
-          if (lastToolCall && lastToolResult) {
-            const reminderMsg = this.reminderInjector.checkAndInject(lastToolCall, lastToolResult);
-            if (reminderMsg) {
-              session.append(reminderMsg);
-            }
+          if (reminderMessages.length > 0) {
+            session.append(...reminderMessages);
           }
         } finally {
           turnSpan?.end();
         }
+      }
+      if (exhaustedReason) {
+        await this.runGraceCall(session, systemPrompt, exhaustedReason, reporter, rootSpan);
       }
     } finally {
       rootSpan?.end();
@@ -341,7 +371,7 @@ export class AgentEngine implements AgentRunner {
     toolCall: ToolCall,
     reporter: Reporter,
     parentSpan?: Span,
-  ): Promise<{ message: Message; result: ToolResult }> {
+  ): Promise<{ message: Message; result: ToolResult; reminder?: Message }> {
     const toolSpan = parentSpan?.startChild("Tool.Execute", {
       toolName: toolCall.name,
       toolCallId: toolCall.id,
@@ -349,7 +379,17 @@ export class AgentEngine implements AgentRunner {
     });
     try {
       reporter.onToolCall(toolCall.name, toolCall.arguments);
-      const result = await this.registry.execute(toolCall);
+      const guardDecision = this.guardrail.beforeCall(toolCall);
+      let result: ToolResult;
+      if (!guardDecision.allowed) {
+        result = {
+          toolCallId: toolCall.id,
+          output: `执行被 Guardrail 阻断。原因: ${guardDecision.reason ?? "未知"}`,
+          isError: true,
+        };
+      } else {
+        result = await this.registry.execute(toolCall);
+      }
 
       // 【核心拦截与注入】工具执行失败时,交由 RecoveryManager 诊断并注入"锦囊妙计"。
       // 化被动为主动:不再冷冰冰陈述报错,而是给出带强烈倾向性的行动指南,
@@ -367,6 +407,8 @@ export class AgentEngine implements AgentRunner {
       });
 
       reporter.onToolResult(toolCall.name, finalOutput, result.isError);
+      const readOnly = this.registry.isReadOnlyTool?.(toolCall.name) ?? false;
+      const reminder = this.guardrail.afterCall(toolCall, result, { readOnly });
       // ToolCallId 必须携带!这是维系大模型推理链条的关键
       return {
         message: {
@@ -375,12 +417,46 @@ export class AgentEngine implements AgentRunner {
           toolCallId: toolCall.id,
         },
         result,
+        ...(reminder ? { reminder } : {}),
       };
     } catch (err) {
       recordTraceError(toolSpan, err);
       throw err;
     } finally {
       toolSpan?.end();
+    }
+  }
+
+  private async runGraceCall(
+    session: Session,
+    systemPrompt: string,
+    reason: string,
+    reporter: Reporter,
+    parentSpan?: Span,
+  ): Promise<void> {
+    const gracePrompt = `[SYSTEM] 已达执行预算: ${reason}。立即停止工具调用,用纯文本总结:1)已完成 2)未完成 3)下一步建议。`;
+    session.append({ role: "user", content: gracePrompt });
+    const graceSpan = parentSpan?.startChild("LLM.GraceCall", {
+      reason,
+      availableToolCount: 0,
+    });
+    try {
+      const context: Message[] = [
+        { role: "system", content: systemPrompt },
+        ...session.getWorkingMemory(this.workingMemoryLimit),
+      ];
+      const response = await this.provider.generate(context, []);
+      recordLlmResponse(graceSpan, response);
+      session.append(response);
+      if (response.content) {
+        reporter.onMessage(response.content);
+      }
+      reporter.onFinish();
+    } catch (err) {
+      recordTraceError(graceSpan, err);
+      throw err;
+    } finally {
+      graceSpan?.end();
     }
   }
 
@@ -403,6 +479,7 @@ export class AgentEngine implements AgentRunner {
     taskPrompt: string,
     readOnlyRegistry: Registry,
     reporter?: Reporter,
+    opts: SubagentRunOptions = {},
   ): Promise<string> {
     const rep = reporter ?? new SilentReporter();
     logger.info({ task: taskPrompt.slice(0, 100) }, `[Subagent] 🚀 拉起探路者,任务: ${taskPrompt.slice(0, 100)}`);
@@ -422,6 +499,8 @@ export class AgentEngine implements AgentRunner {
     ];
 
     const maxSubTurns = 10;
+    const depth = opts.depth ?? 0;
+    const maxSpawnDepth = opts.maxSpawnDepth ?? 2;
     let turnCount = 0;
 
     for (;;) {
@@ -430,6 +509,9 @@ export class AgentEngine implements AgentRunner {
         throw new Error(
           `子智能体探索过于深入,超过 ${maxSubTurns} 轮被强制召回,请主 Agent 缩小探索范围或拆分任务。`,
         );
+      }
+      if (depth > maxSpawnDepth) {
+        throw new Error(`子智能体超过最大委派深度 ${maxSpawnDepth}`);
       }
 
       // 【驾驭底线】子智能体仅能获取传入的只读工具注册表

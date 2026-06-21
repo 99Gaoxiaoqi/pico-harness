@@ -41,14 +41,24 @@ function truncateProtectedContent(content: string): string {
   return `${head}\n\n...[内容过长,中间 ${dropped} 字节已被系统截断]...\n${tail}`;
 }
 
+export interface SummaryInput {
+  newMessages: Message[];
+  previousSummary?: string;
+  focusTopic?: string;
+}
+
 /** 摘要器函数:把一批远期消息浓缩成一段"剧情提要"(第 12 讲前沿升级) */
-export type Summarizer = (msgs: Message[]) => Promise<string>;
+export type Summarizer = (input: SummaryInput) => Promise<string>;
 
 export interface CompactorOptions {
   /** 触发压缩的最大字符数阈值(水位线,可参考模型的 token 窗口大小折算) */
   maxChars: number;
   /** WorkingMemory 保护区:最近的 N 条消息 */
   retainLastMsgs: number;
+  /** WorkingMemory 保护区:最近约 N 个 token,优先级高于 retainLastMsgs */
+  retainLastTokens?: number;
+  /** 摘要时希望保留的主题 */
+  focusTopic?: string;
   /**
    * 可选的 LLM 摘要器(第 12 讲前沿升级)。
    * 提供时,远期历史不再粗暴掩码,而是异步调小模型浓缩成"剧情提要"替换。
@@ -67,12 +77,23 @@ export interface CompactorOptions {
 export class Compactor {
   readonly maxChars: number;
   readonly retainLastMsgs: number;
+  readonly retainLastTokens?: number;
   private readonly summarizer?: Summarizer;
+  private readonly focusTopic?: string;
+  private ineffectiveCount = 0;
+  private previousSummary: string | undefined;
+  private summarizedRemoteCount = 0;
 
   constructor(opts: CompactorOptions) {
     this.maxChars = opts.maxChars;
     this.retainLastMsgs = opts.retainLastMsgs;
+    this.retainLastTokens = opts.retainLastTokens;
     this.summarizer = opts.summarizer;
+    this.focusTopic = opts.focusTopic;
+  }
+
+  get ineffectiveCompressionCount(): number {
+    return this.ineffectiveCount;
   }
 
   /**
@@ -84,7 +105,12 @@ export class Compactor {
 
     // 未超水位线:正常路径,直接返回深拷贝
     if (currentLength < this.maxChars) {
-      return msgs.map((m) => ({ ...m }));
+      return sanitizeToolPairs(msgs);
+    }
+
+    if (this.ineffectiveCount >= 2) {
+      logger.warn("[Compactor] 连续压缩收益不足,本轮跳过压缩以避免反复抖动。");
+      return sanitizeToolPairs(msgs);
     }
 
     logger.warn(
@@ -93,7 +119,7 @@ export class Compactor {
 
     const msgCount = msgs.length;
     // 受保护的 WorkingMemory 起始索引
-    const protectStartIndex = Math.max(0, msgCount - this.retainLastMsgs);
+    const protectStartIndex = this.protectStartIndex(msgs);
 
     const compacted: Message[] = [];
     for (let i = 0; i < msgCount; i++) {
@@ -133,9 +159,11 @@ export class Compactor {
       compacted.push(newMsg);
     }
 
-    const newLength = this.estimateLength(compacted);
+    const sanitized = sanitizeToolPairs(compacted);
+    const newLength = this.estimateLength(sanitized);
+    this.recordCompressionEffect(currentLength, newLength);
     logger.warn(`[Compactor] ✅ 压缩完成。上下文长度从 ${currentLength} 降至 ${newLength} 字符。`);
-    return compacted;
+    return sanitized;
   }
 
   /**
@@ -160,20 +188,26 @@ export class Compactor {
     }
 
     // 分割:远期历史 + 保护区
-    const msgCount = msgs.length;
-    const protectStartIndex = Math.max(0, msgCount - this.retainLastMsgs);
+    const protectStartIndex = this.protectStartIndex(msgs);
     const remoteMsgs = msgs.slice(0, protectStartIndex);
     const protectedMsgs = msgs.slice(protectStartIndex);
+    const newMessages = remoteMsgs.slice(this.summarizedRemoteCount);
 
     // 远期历史调小模型摘要
     let summaryText: string;
     try {
-      logger.info({ remoteCount: remoteMsgs.length }, `[Compactor] 调用 LLM 摘要 ${remoteMsgs.length} 条远期历史...`);
-      summaryText = await this.summarizer(remoteMsgs);
+      logger.info({ remoteCount: newMessages.length }, `[Compactor] 调用 LLM 摘要 ${newMessages.length} 条远期历史...`);
+      summaryText = await this.summarizer({
+        newMessages,
+        ...(this.previousSummary ? { previousSummary: this.previousSummary } : {}),
+        ...(this.focusTopic ? { focusTopic: this.focusTopic } : {}),
+      });
     } catch (err) {
       logger.warn({ err }, `[Compactor] LLM 摘要失败,退回字符级掩码`);
       return this.compact(msgs);
     }
+    this.previousSummary = summaryText;
+    this.summarizedRemoteCount = remoteMsgs.length;
 
     // 摘要消息替换远期历史,保护区走 compact 逻辑
     const summaryMsg: Message = {
@@ -184,8 +218,9 @@ export class Compactor {
       ...protectedMsgs.filter((m) => m.role !== "system"),
     ]);
 
-    const result = [summaryMsg, ...protectedCompacted];
+    const result = sanitizeToolPairs([summaryMsg, ...protectedCompacted]);
     const newLength = this.estimateLength(result);
+    this.recordCompressionEffect(currentLength, newLength);
     logger.warn(`[Compactor] ✅ LLM 摘要压缩完成。${currentLength} → ${newLength} 字符(远期 ${remoteMsgs.length} 条 → 摘要)。`);
     return result;
   }
@@ -203,4 +238,80 @@ export class Compactor {
     }
     return length;
   }
+
+  private protectStartIndex(msgs: Message[]): number {
+    if (this.retainLastTokens === undefined) {
+      return Math.max(0, msgs.length - this.retainLastMsgs);
+    }
+    let tokens = 0;
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      tokens += estimateTokens(msgs[i]!);
+      if (tokens > this.retainLastTokens) {
+        return Math.min(msgs.length, i + 1);
+      }
+    }
+    return 0;
+  }
+
+  private recordCompressionEffect(before: number, after: number): void {
+    const savingPct = before === 0 ? 100 : ((before - after) / before) * 100;
+    this.ineffectiveCount = savingPct < 10 ? this.ineffectiveCount + 1 : 0;
+  }
+}
+
+export function sanitizeToolPairs(msgs: Message[]): Message[] {
+  const callIds = new Set<string>();
+  for (const msg of msgs) {
+    for (const toolCall of msg.toolCalls ?? []) {
+      callIds.add(toolCall.id);
+    }
+  }
+
+  const resultIds = new Set<string>();
+  const withoutOrphanResults: Message[] = [];
+  for (const msg of msgs) {
+    if (msg.role === "user" && msg.toolCallId) {
+      if (!callIds.has(msg.toolCallId)) {
+        continue;
+      }
+      resultIds.add(msg.toolCallId);
+    }
+    withoutOrphanResults.push({ ...msg });
+  }
+
+  const out: Message[] = [];
+  for (let i = 0; i < withoutOrphanResults.length; i++) {
+    const msg = withoutOrphanResults[i]!;
+    out.push(msg);
+    if (msg.role !== "assistant" || !msg.toolCalls || msg.toolCalls.length === 0) {
+      continue;
+    }
+    const ids = new Set(msg.toolCalls.map((toolCall) => toolCall.id));
+    while (i + 1 < withoutOrphanResults.length) {
+      const nextMsg = withoutOrphanResults[i + 1]!;
+      if (nextMsg.role !== "user" || !nextMsg.toolCallId || !ids.has(nextMsg.toolCallId)) {
+        break;
+      }
+      i++;
+      out.push(withoutOrphanResults[i]!);
+    }
+    for (const toolCall of msg.toolCalls) {
+      if (!resultIds.has(toolCall.id)) {
+        out.push({
+          role: "user",
+          toolCallId: toolCall.id,
+          content: `[早期工具结果已归档] 工具 ${toolCall.name} 的结果已被上下文压缩器替换为占位符。`,
+        });
+      }
+    }
+  }
+  return out;
+}
+
+function estimateTokens(msg: Message): number {
+  let chars = msg.content.length;
+  for (const toolCall of msg.toolCalls ?? []) {
+    chars += toolCall.name.length + toolCall.arguments.length;
+  }
+  return Math.max(1, Math.ceil(chars / 4));
 }

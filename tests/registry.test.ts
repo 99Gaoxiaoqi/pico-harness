@@ -16,6 +16,8 @@ import type { BaseTool } from "../src/tools/registry.js";
 import type { ToolDefinition } from "../src/schema/message.js";
 
 class FakeTool implements BaseTool {
+  maxResultSizeChars?: number;
+
   constructor(
     private readonly n: string,
     private readonly def: ToolDefinition,
@@ -89,6 +91,55 @@ describe("ToolRegistry 路由分发", () => {
     const result = await r.execute({ id: "c1", name: "boom", arguments: "{}" });
     expect(result.isError).toBe(true);
     expect(result.output).toContain("炸了");
+  });
+
+  it("RequestMiddleware 可以改写工具调用参数", async () => {
+    const r = new ToolRegistry();
+    r.register(
+      new FakeTool(
+        "say",
+        { name: "say", description: "", inputSchema: { type: "object" } },
+        async (args) => `said:${JSON.parse(args).msg}`,
+      ),
+    );
+    r.useRequest(async (call) => ({
+      allowed: true,
+      call: { ...call, arguments: '{"msg":"rewritten"}' },
+    }));
+
+    const result = await r.execute({ id: "c1", name: "say", arguments: '{"msg":"original"}' });
+    expect(result.output).toBe("said:rewritten");
+  });
+
+  it("ExecutionMiddleware 可以包裹工具执行结果", async () => {
+    const r = new ToolRegistry();
+    r.register(
+      new FakeTool(
+        "say",
+        { name: "say", description: "", inputSchema: { type: "object" } },
+        async () => "inner",
+      ),
+    );
+    r.useExecution(async (call, next) => `before:${await next(call)}:after`);
+
+    const result = await r.execute({ id: "c1", name: "say", arguments: "{}" });
+    expect(result.output).toBe("before:inner:after");
+  });
+
+  it("工具可声明 maxResultSizeChars,Registry 统一截断返回", async () => {
+    const r = new ToolRegistry();
+    const tool = new FakeTool(
+      "big",
+      { name: "big", description: "", inputSchema: { type: "object" } },
+      async () => "X".repeat(100),
+    );
+    tool.maxResultSizeChars = 20;
+    r.register(tool);
+
+    const result = await r.execute({ id: "c1", name: "big", arguments: "{}" });
+
+    expect(result.output.length).toBeLessThan(100);
+    expect(result.output).toContain("工具输出过长");
   });
 });
 

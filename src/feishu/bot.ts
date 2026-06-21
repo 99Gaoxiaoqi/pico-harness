@@ -17,6 +17,7 @@ import type { Session } from "../engine/session.js";
 import type { Reporter } from "../engine/reporter.js";
 import {
   globalApprovalManager,
+  globalApprovalPolicy,
   isAgentOpsDangerousCommand,
   type ApprovalNotice,
 } from "../approval/manager.js";
@@ -382,19 +383,12 @@ interface MessageEvent {
 /** 构建 AgentOps 审批中间件:命中高危命令 → 当前 chat 的飞书 Reporter 发卡片 → 挂起等待审批 */
 export function createFeishuApprovalMiddleware(reporter: FeishuReporter): MiddlewareFunc {
   return async (call) => {
-    if (!isAgentOpsDangerousCommand(call.name, call.arguments)) {
-      return { allowed: true, reason: "" };
-    }
-
-    const { allowed, reason } = await globalApprovalManager.waitForApproval(
-      call.id,
-      call.name,
-      call.arguments,
-      (notice) => {
+    return globalApprovalPolicy.decide("feishu", call, () =>
+      globalApprovalManager.waitForApproval(call.id, call.name, call.arguments, (notice) => {
         void reporter.sendApprovalCard(notice);
-      },
+      }),
+      isAgentOpsDangerousCommand,
     );
-    return { allowed, reason };
   };
 }
 
