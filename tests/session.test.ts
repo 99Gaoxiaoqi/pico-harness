@@ -158,6 +158,32 @@ describe("SessionManager", () => {
     expect(mgr.get("exists")).toBeDefined();
   });
 
+  it("delete:删除已存在会话并返回被删除的 Session", () => {
+    const mgr = new SessionManager();
+    const keep = mgr.getOrCreate("keep", "/tmp/keep");
+    const removed = mgr.getOrCreate("remove-me", "/tmp/remove-me");
+    removed.append(userMsg("需要保留在返回值里的历史"));
+
+    const deleted = mgr.delete("remove-me");
+
+    expect(deleted).toBe(removed);
+    expect(deleted?.id).toBe("remove-me");
+    expect(deleted?.workDir).toBe("/tmp/remove-me");
+    expect(deleted?.getHistory()).toEqual([userMsg("需要保留在返回值里的历史")]);
+    expect(mgr.size).toBe(1);
+    expect(mgr.get("remove-me")).toBeUndefined();
+    expect(mgr.get("keep")).toBe(keep);
+  });
+
+  it("delete:删除不存在会话时返回 undefined", () => {
+    const mgr = new SessionManager();
+    mgr.getOrCreate("exists", "/tmp");
+
+    expect(mgr.delete("missing")).toBeUndefined();
+    expect(mgr.size).toBe(1);
+    expect(mgr.get("exists")).toBeDefined();
+  });
+
   it("clear:清空所有会话", () => {
     const mgr = new SessionManager();
     mgr.getOrCreate("a", "/tmp");

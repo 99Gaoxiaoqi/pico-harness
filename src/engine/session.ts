@@ -170,6 +170,15 @@ export class SessionManager {
     return this.sessions.get(id);
   }
 
+  /** 删除已存在的会话并返回被删除实例;不存在时返回 undefined */
+  delete(id: string): Session | undefined {
+    const sess = this.sessions.get(id);
+    if (sess) {
+      this.sessions.delete(id);
+    }
+    return sess;
+  }
+
   /** 当前管理的会话总数 */
   get size(): number {
     return this.sessions.size;
