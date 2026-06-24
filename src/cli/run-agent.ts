@@ -4,6 +4,8 @@ import { AgentEngine } from "../engine/loop.js";
 import { globalSessionManager, type Session } from "../engine/session.js";
 import { TerminalReporter, type Reporter } from "../engine/reporter.js";
 import { Compactor } from "../context/compactor.js";
+import { ToolResultArtifactStore } from "../context/artifact-store.js";
+import { createContextBudget, estimateTokenBudgetAsChars } from "../context/context-budget.js";
 import { SkillLoader, SkillViewTool } from "../context/skill.js";
 import {
   createRawProvider,
@@ -13,6 +15,7 @@ import {
 } from "../provider/factory.js";
 import type { ProviderConfig } from "../provider/config.js";
 import type { LLMProvider } from "../provider/interface.js";
+import { resolveProviderProfile } from "../provider/profile.js";
 import type { Message, ToolDefinition } from "../schema/message.js";
 import {
   BashTool,
@@ -22,7 +25,10 @@ import {
   ToolRegistry,
   WriteFileTool,
 } from "../tools/registry-impl.js";
-import { SubagentTool } from "../tools/subagent.js";
+import { DelegationManager, DelegateStatusTool } from "../tools/delegation-manager.js";
+import { createSubagentRegistryFactory } from "../tools/delegation-registry.js";
+import { DelegateTaskTool, SpawnSubagentTool } from "../tools/subagent.js";
+import { createToolResultObservationProcessor } from "../tools/tool-result-observation.js";
 import { CostTracker } from "../observability/tracker.js";
 import { Tracer } from "../observability/trace.js";
 import {
@@ -99,19 +105,21 @@ export async function runAgentFromCli(
           session,
         );
   const registry = buildRegistry(workDir);
+  const observationProcessor = buildObservationProcessor(workDir);
   const engine = new AgentEngine({
     provider: trackedProvider,
     registry,
     workDir,
     enableThinking: options.enableThinking ?? true,
     planMode: options.planMode ?? false,
-    compactor: buildCompactor(),
+    compactor: buildCompactor(kind, providerConfig.model),
+    observationProcessor,
     reporter: dependencies.reporter ?? new TerminalReporter(),
     tracer: options.trace === true ? new Tracer() : undefined,
   });
 
   registry.use(buildApprovalMiddleware(dependencies.approvalNotifier ?? terminalNotifier));
-  registry.register(new SubagentTool(engine, buildReadOnlyRegistry(workDir)));
+  registerDelegationTools(registry, engine, workDir);
   session.append({ role: "user", content: prompt });
 
   const messages = await engine.run(session);
@@ -130,7 +138,7 @@ export async function runAgentFromCli(
 }
 
 function buildRegistry(workDir: string): ToolRegistry {
-  const registry = new ToolRegistry();
+  const registry = new ToolRegistry({ truncateResults: false });
   registry.register(new EchoTool());
   registry.register(new ReadFileTool(workDir));
   registry.register(new WriteFileTool(workDir));
@@ -201,14 +209,43 @@ class CostTrackedModelFallbackProvider implements LLMProvider {
 }
 
 function buildReadOnlyRegistry(workDir: string): ToolRegistry {
-  const registry = new ToolRegistry();
+  const registry = new ToolRegistry({ truncateResults: false });
   registry.register(new ReadFileTool(workDir));
   registry.register(new BashTool(workDir));
   return registry;
 }
 
-function buildCompactor(): Compactor {
-  return new Compactor({ maxChars: 20000, retainLastMsgs: 6 });
+function registerDelegationTools(
+  registry: ToolRegistry,
+  engine: AgentEngine,
+  workDir: string,
+): void {
+  const manager = new DelegationManager();
+  const registryFactory = createSubagentRegistryFactory({
+    workDir,
+    runner: engine,
+    manager,
+  });
+  registry.register(new DelegateTaskTool(engine, registryFactory, manager));
+  registry.register(new DelegateStatusTool(manager));
+  registry.register(new SpawnSubagentTool(engine, buildReadOnlyRegistry(workDir)));
+}
+
+function buildCompactor(kind: ProviderKind, model: string): Compactor {
+  const protocol = kind === "claude" ? "claude" : "openai";
+  const profile = resolveProviderProfile(protocol, model);
+  const budget = createContextBudget(profile);
+  return new Compactor({
+    maxChars: estimateTokenBudgetAsChars(budget.inputBudgetTokens),
+    retainLastMsgs: 6,
+  });
+}
+
+function buildObservationProcessor(workDir: string) {
+  const store = new ToolResultArtifactStore({
+    baseDir: join(workDir, ".claw", "artifacts"),
+  });
+  return createToolResultObservationProcessor({ store });
 }
 
 function buildApprovalMiddleware(notifier: ApprovalNotifier): MiddlewareFunc {

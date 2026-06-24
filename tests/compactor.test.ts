@@ -9,7 +9,7 @@
 // 7. estimateLength 累加 content + toolCalls
 
 import { describe, expect, it } from "vitest";
-import { Compactor, sanitizeToolPairs } from "../src/context/compactor.js";
+import { Compactor, ContextCompactionError, sanitizeToolPairs } from "../src/context/compactor.js";
 import type { Message } from "../src/schema/message.js";
 
 function systemMsg(content: string): Message {
@@ -252,7 +252,9 @@ describe("Compactor", () => {
       retainLastMsgs: 1,
       summarizer: async ({ previousSummary, newMessages }) => {
         seen.push({ previousSummary, newCount: newMessages.length });
-        return previousSummary ? `${previousSummary} + 增量${newMessages.length}` : `初次${newMessages.length}`;
+        return previousSummary
+          ? `${previousSummary} + 增量${newMessages.length}`
+          : `初次${newMessages.length}`;
       },
     });
 
@@ -270,5 +272,62 @@ describe("Compactor", () => {
 
     expect(seen[0]).toEqual({ previousSummary: undefined, newCount: 2 });
     expect(seen[1]).toEqual({ previousSummary: "初次2", newCount: 1 });
+  });
+
+  it("compactToBudget 在普通压缩后仍超限时进一步压缩保护区 ToolResult", () => {
+    const c = new Compactor({ maxChars: 300, retainLastMsgs: 2 });
+    const msgs: Message[] = [
+      systemMsg("sys"),
+      assistantMsg("call", [{ id: "c1", name: "read", arguments: "{}" }]),
+      toolResultMsg("c1", "P".repeat(5000)),
+      userMsg("继续处理这个结果"),
+    ];
+
+    const normallyCompacted = c.compact(msgs);
+    expect(c.estimateLength(normallyCompacted)).toBeGreaterThan(300);
+
+    const out = c.compactToBudget(msgs);
+
+    expect(c.estimateLength(out)).toBeLessThanOrEqual(300);
+    expect(out.find((m) => m.toolCallId === "c1")?.content).toContain("工具输出已被预算压缩");
+    expect(out.at(-1)?.content).toBe("继续处理这个结果");
+  });
+
+  it("compactToBudget 仍保留 toolCalls/toolCallId 配对,不产生孤儿 result", () => {
+    const c = new Compactor({ maxChars: 500, retainLastMsgs: 3 });
+    const msgs: Message[] = [
+      toolResultMsg("ghost", "orphan".repeat(100)),
+      assistantMsg("call", [
+        { id: "c1", name: "read", arguments: "{}" },
+        { id: "c2", name: "bash", arguments: "{}" },
+      ]),
+      toolResultMsg("c1", "R".repeat(5000)),
+      userMsg("recent"),
+    ];
+
+    const out = c.compactToBudget(msgs);
+    const callIds = new Set(out.flatMap((m) => m.toolCalls?.map((tc) => tc.id) ?? []));
+    const resultIds = out.filter((m) => m.toolCallId).map((m) => m.toolCallId!);
+
+    expect(out[0]!.toolCalls?.map((tc) => tc.id)).toEqual(["c1", "c2"]);
+    expect(resultIds).toEqual(["c1", "c2"]);
+    expect(resultIds.every((id) => callIds.has(id))).toBe(true);
+    expect(out.some((m) => m.toolCallId === "ghost")).toBe(false);
+  });
+
+  it("compactToBudget 在 system prompt 单独超过预算且无法压缩时抛出明确错误", () => {
+    const c = new Compactor({ maxChars: 100, retainLastMsgs: 1 });
+    const msgs = [systemMsg("S".repeat(5000))];
+
+    expect(() => c.compactToBudget(msgs)).toThrow(ContextCompactionError);
+
+    try {
+      c.compactToBudget(msgs);
+    } catch (err) {
+      expect(err).toBeInstanceOf(ContextCompactionError);
+      expect((err as ContextCompactionError).beforeChars).toBe(5000);
+      expect((err as ContextCompactionError).afterChars).toBe(5000);
+      expect((err as ContextCompactionError).maxChars).toBe(100);
+    }
   });
 });

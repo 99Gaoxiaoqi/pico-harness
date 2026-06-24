@@ -19,15 +19,12 @@ import type { Compactor } from "../context/compactor.js";
 import { PromptComposer } from "../context/composer.js";
 import { RecoveryManager } from "../context/recovery.js";
 import { SilentReporter, type Reporter } from "./reporter.js";
-import {
-  ReminderInjector,
-  ToolGuardrailController,
-  type GuardrailOptions,
-} from "./reminder.js";
+import { ReminderInjector, ToolGuardrailController, type GuardrailOptions } from "./reminder.js";
 import { IterationBudget, type BudgetConfig } from "./budget.js";
 import { Tracer, exportTraceToFile, truncate, type Span } from "../observability/trace.js";
 import { logger } from "../observability/logger.js";
 import type { Session } from "./session.js";
+import type { ToolObservationProcessor } from "../tools/tool-result-observation.js";
 
 /** WorkingMemory 滑动窗口大小:截取最近 N 条消息供压缩器判断(含远期历史) */
 const DEFAULT_WORKING_MEMORY_LIMIT = 20;
@@ -77,6 +74,8 @@ export interface AgentEngineOptions {
   onTurn?: (info: { turn: number; message: Message }) => void;
   /** 输出 Reporter;默认静默 (第 09 讲) */
   reporter?: Reporter;
+  /** 工具 Observation 入上下文前的处理器,用于大输出摘要与 artifact 外部化 */
+  observationProcessor?: ToolObservationProcessor;
   /**
    * 链路追踪器:记录决策树到 .claw/traces/ (第 19 讲)。
    * 未提供则不追踪。
@@ -100,6 +99,7 @@ export class AgentEngine implements AgentRunner {
   private readonly budget: IterationBudget;
   private readonly onTurn?: (info: { turn: number; message: Message }) => void;
   private readonly reporter: Reporter;
+  private readonly observationProcessor?: ToolObservationProcessor;
   private readonly tracer?: Tracer;
 
   constructor(opts: AgentEngineOptions) {
@@ -123,6 +123,7 @@ export class AgentEngine implements AgentRunner {
     });
     this.onTurn = opts.onTurn;
     this.reporter = opts.reporter ?? new SilentReporter();
+    this.observationProcessor = opts.observationProcessor;
     this.tracer = opts.tracer;
   }
 
@@ -165,7 +166,10 @@ export class AgentEngine implements AgentRunner {
       enableThinking: this.enableThinking,
     });
     reporter.onStart(this.workDir, this.enableThinking);
-    logger.info({ sessionId: session.id, workDir: session.workDir, planMode: this.planMode }, `[Engine] 唤醒会话 [${session.id}],锁定工作区: ${session.workDir} (PlanMode: ${this.planMode})`);
+    logger.info(
+      { sessionId: session.id, workDir: session.workDir, planMode: this.planMode },
+      `[Engine] 唤醒会话 [${session.id}],锁定工作区: ${session.workDir} (PlanMode: ${this.planMode})`,
+    );
 
     // Plan Mode 开启时,每次 run 动态组装 System Prompt(反映最新工作区状态)
     const systemPrompt = await this.buildSystemPrompt();
@@ -181,7 +185,10 @@ export class AgentEngine implements AgentRunner {
         const turnBudget = this.budget.canStartTurn(turnCount);
         if (!turnBudget.allowed) {
           exhaustedReason = turnBudget.reason ?? `已达到最大轮次 ${this.maxTurns}`;
-          logger.warn({ turnCount, maxTurns: this.maxTurns }, `[Engine] ${exhaustedReason},准备触发 Grace Call 收尾`);
+          logger.warn(
+            { turnCount, maxTurns: this.maxTurns },
+            `[Engine] ${exhaustedReason},准备触发 Grace Call 收尾`,
+          );
           break;
         }
         reporter.onTurnStart(turnCount);
@@ -209,7 +216,7 @@ export class AgentEngine implements AgentRunner {
           // ====================================================================
           const contextChars = estimateTraceLength(contextHistory);
           const compactedContext = this.compactor
-            ? this.compactor.compact(contextHistory)
+            ? this.compactor.compactToBudget(contextHistory)
             : contextHistory;
           const compactedChars = estimateTraceLength(compactedContext);
           turnSpan?.addAttributes({
@@ -321,7 +328,12 @@ export class AgentEngine implements AgentRunner {
           if (allReadOnly) {
             await Promise.all(
               toolCalls.map(async (toolCall, i) => {
-                const { message, reminder } = await this.runOneTool(toolCall, reporter, turnSpan);
+                const { message, reminder } = await this.runOneTool(
+                  toolCall,
+                  reporter,
+                  session.id,
+                  turnSpan,
+                );
                 observations[i] = message;
                 if (reminder) {
                   reminderMessages.push(reminder);
@@ -333,6 +345,7 @@ export class AgentEngine implements AgentRunner {
               const { message, reminder } = await this.runOneTool(
                 toolCalls[i]!,
                 reporter,
+                session.id,
                 turnSpan,
               );
               observations[i] = message;
@@ -370,6 +383,7 @@ export class AgentEngine implements AgentRunner {
   private async runOneTool(
     toolCall: ToolCall,
     reporter: Reporter,
+    sessionId?: string,
     parentSpan?: Span,
   ): Promise<{ message: Message; result: ToolResult; reminder?: Message }> {
     const toolSpan = parentSpan?.startChild("Tool.Execute", {
@@ -397,23 +411,29 @@ export class AgentEngine implements AgentRunner {
       let finalOutput = result.output;
       if (result.isError) {
         finalOutput = this.recovery.analyzeAndInject(toolCall.name, result.output);
-      logger.warn({ tool: toolCall.name }, `-> [Recovery] ❌ 注入救援指南: ${toolCall.name}`);
+        logger.warn({ tool: toolCall.name }, `-> [Recovery] ❌ 注入救援指南: ${toolCall.name}`);
       }
+      const observationOutput = await this.processObservation(
+        toolCall,
+        result,
+        finalOutput,
+        sessionId,
+      );
 
       toolSpan?.addAttributes({
         isError: result.isError,
-        outputPreview: truncate(finalOutput, 500),
+        outputPreview: truncate(observationOutput, 500),
         rawOutputPreview: finalOutput === result.output ? undefined : truncate(result.output, 500),
       });
 
-      reporter.onToolResult(toolCall.name, finalOutput, result.isError);
+      reporter.onToolResult(toolCall.name, observationOutput, result.isError);
       const readOnly = this.registry.isReadOnlyTool?.(toolCall.name) ?? false;
       const reminder = this.guardrail.afterCall(toolCall, result, { readOnly });
       // ToolCallId 必须携带!这是维系大模型推理链条的关键
       return {
         message: {
           role: "user",
-          content: finalOutput,
+          content: observationOutput,
           toolCallId: toolCall.id,
         },
         result,
@@ -424,6 +444,30 @@ export class AgentEngine implements AgentRunner {
       throw err;
     } finally {
       toolSpan?.end();
+    }
+  }
+
+  private async processObservation(
+    toolCall: ToolCall,
+    result: ToolResult,
+    output: string,
+    sessionId?: string,
+  ): Promise<string> {
+    if (!this.observationProcessor) {
+      return output;
+    }
+    try {
+      return await this.observationProcessor({ toolCall, result, output, sessionId });
+    } catch (err) {
+      logger.warn({ err, tool: toolCall.name }, "[ToolResult] observation processor failed");
+      return [
+        "[工具输出处理失败,已回退为截断观察结果]",
+        `tool: ${toolCall.name}`,
+        `toolCallId: ${toolCall.id}`,
+        `originalChars: ${output.length}`,
+        "preview:",
+        truncate(output, 4000),
+      ].join("\n");
     }
   }
 
@@ -482,7 +526,10 @@ export class AgentEngine implements AgentRunner {
     opts: SubagentRunOptions = {},
   ): Promise<string> {
     const rep = reporter ?? new SilentReporter();
-    logger.info({ task: taskPrompt.slice(0, 100) }, `[Subagent] 🚀 拉起探路者,任务: ${taskPrompt.slice(0, 100)}`);
+    logger.info(
+      { task: taskPrompt.slice(0, 100) },
+      `[Subagent] 🚀 拉起探路者,任务: ${taskPrompt.slice(0, 100)}`,
+    );
 
     // 子智能体专属 System Prompt:严厉警告必须用工具,不许凭空猜测
     const subSystemPrompt = `你是专门负责深度探索的探路者 (Explorer Subagent)。
@@ -519,7 +566,7 @@ export class AgentEngine implements AgentRunner {
 
       // Compactor 仍生效(子智能体也可能读大文件触发 OOM)
       const compactedContext = this.compactor
-        ? this.compactor.compact(contextHistory)
+        ? this.compactor.compactToBudget(contextHistory)
         : contextHistory;
 
       // 子任务急速响应:强制关闭慢思考,直接预测行动
@@ -533,7 +580,10 @@ export class AgentEngine implements AgentRunner {
       // 【核心退出条件】子智能体不调工具了,说明做好了总结汇报
       const toolCalls = actionResp.toolCalls ?? [];
       if (toolCalls.length === 0) {
-        logger.info({ turns: turnCount }, `[Subagent] ✅ 探路者完成 ${turnCount} 轮探索,返回总结。`);
+        logger.info(
+          { turns: turnCount },
+          `[Subagent] ✅ 探路者完成 ${turnCount} 轮探索,返回总结。`,
+        );
         return actionResp.content;
       }
 
@@ -551,10 +601,16 @@ export class AgentEngine implements AgentRunner {
         if (result.isError) {
           finalOutput = this.recovery.analyzeAndInject(toolCall.name, result.output);
         }
-        rep.onToolResult(`[Subagent] ${toolCall.name}`, finalOutput, result.isError);
+        const observationOutput = await this.processObservation(
+          toolCall,
+          result,
+          finalOutput,
+          `subagent:${toolCall.id}`,
+        );
+        rep.onToolResult(`[Subagent] ${toolCall.name}`, observationOutput, result.isError);
         observations[i] = {
           role: "user",
-          content: finalOutput,
+          content: observationOutput,
           toolCallId: toolCall.id,
         };
       };

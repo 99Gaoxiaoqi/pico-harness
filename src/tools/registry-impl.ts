@@ -18,6 +18,11 @@ import { logger } from "../observability/logger.js";
 const execAsync = promisify(exec);
 const DEFAULT_RESULT_SIZE_CHARS = 8000;
 
+export interface ToolRegistryOptions {
+  defaultResultSizeChars?: number;
+  truncateResults?: boolean;
+}
+
 /**
  * 路径安全检查:确保路径在 workDir 之内,防路径穿越。
  * 返回规范化的绝对路径;越界则抛错。
@@ -39,9 +44,16 @@ function safeResolve(workDir: string, path: string): string {
  */
 export class ToolRegistry implements Registry {
   private readonly tools = new Map<string, BaseTool>();
+  private readonly defaultResultSizeChars: number;
+  private readonly truncateResults: boolean;
   /** 第 16 讲:全局挂载的安全拦截中间件链 */
   private readonly requestMiddlewares: RequestMiddleware[] = [];
   private readonly executionMiddlewares: ExecutionMiddleware[] = [];
+
+  constructor(opts: ToolRegistryOptions = {}) {
+    this.defaultResultSizeChars = opts.defaultResultSizeChars ?? DEFAULT_RESULT_SIZE_CHARS;
+    this.truncateResults = opts.truncateResults ?? true;
+  }
 
   register(tool: BaseTool): void {
     const name = tool.name();
@@ -59,12 +71,18 @@ export class ToolRegistry implements Registry {
 
   useRequest(mw: RequestMiddleware): void {
     this.requestMiddlewares.push(mw);
-    logger.info({ count: this.requestMiddlewares.length }, `[Registry] 已挂载 Request Middleware (共 ${this.requestMiddlewares.length} 个)`);
+    logger.info(
+      { count: this.requestMiddlewares.length },
+      `[Registry] 已挂载 Request Middleware (共 ${this.requestMiddlewares.length} 个)`,
+    );
   }
 
   useExecution(mw: ExecutionMiddleware): void {
     this.executionMiddlewares.push(mw);
-    logger.info({ count: this.executionMiddlewares.length }, `[Registry] 已挂载 Execution Middleware (共 ${this.executionMiddlewares.length} 个)`);
+    logger.info(
+      { count: this.executionMiddlewares.length },
+      `[Registry] 已挂载 Execution Middleware (共 ${this.executionMiddlewares.length} 个)`,
+    );
   }
 
   getAvailableTools(): ToolDefinition[] {
@@ -94,7 +112,10 @@ export class ToolRegistry implements Registry {
     for (const mw of this.requestMiddlewares) {
       const { allowed, reason, call: rewrittenCall } = await mw(currentCall);
       if (!allowed) {
-        logger.warn({ tool: currentCall.name, reason }, `[Registry] ⚠ 工具 ${currentCall.name} 被 Middleware 拦截: ${reason}`);
+        logger.warn(
+          { tool: currentCall.name, reason },
+          `[Registry] ⚠ 工具 ${currentCall.name} 被 Middleware 拦截: ${reason}`,
+        );
         return {
           toolCallId: currentCall.id,
           output: `执行被系统拦截。原因: ${reason}`,
@@ -116,9 +137,12 @@ export class ToolRegistry implements Registry {
         chain = (nextCall) => mw(nextCall, next);
       }
       const output = await chain(currentCall);
+      const finalOutput = this.truncateResults
+        ? truncateToolOutput(output, tool.maxResultSizeChars ?? this.defaultResultSizeChars)
+        : output;
       return {
         toolCallId: currentCall.id,
-        output: truncateToolOutput(output, tool.maxResultSizeChars ?? DEFAULT_RESULT_SIZE_CHARS),
+        output: finalOutput,
         isError: false,
       };
     } catch (err) {

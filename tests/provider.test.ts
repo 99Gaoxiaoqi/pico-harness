@@ -195,6 +195,7 @@ describe("OpenAIProvider 翻译层", () => {
     const profile = resolveProviderProfile("openai", "glm-5.2");
     expect(profile.fallbackModel).toBe("kimi-k2.5");
     expect(profile.assistantContent).toBe("null_when_empty");
+    expect(profile.contextWindowTokens).toBeGreaterThan(0);
   });
 });
 
@@ -270,5 +271,10 @@ describe("ClaudeProvider 翻译层", () => {
       cacheWriteTokens: 100,
       cacheReadTokens: 300,
     });
+  });
+
+  it("ProviderProfile 返回 Claude contextWindowTokens", () => {
+    const profile = resolveProviderProfile("claude", "claude-3-5-sonnet");
+    expect(profile.contextWindowTokens).toBeGreaterThan(0);
   });
 });

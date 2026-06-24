@@ -15,6 +15,8 @@ import type { ToolDefinition } from "../schema/message.js";
 import type { Registry } from "./registry.js";
 import type { Reporter } from "../engine/reporter.js";
 import { logger } from "../observability/logger.js";
+import type { DelegationBatchResult } from "./delegation-manager.js";
+import { DelegationManager } from "./delegation-manager.js";
 
 /**
  * AgentRunner:打破循环依赖的抽象接口。
@@ -37,6 +39,7 @@ export interface AgentRunner {
 }
 
 export type SubagentRole = "leaf" | "orchestrator";
+export type SubagentMode = "explore" | "worker";
 
 export interface SubagentRunOptions {
   depth?: number;
@@ -44,9 +47,37 @@ export interface SubagentRunOptions {
   role?: SubagentRole;
 }
 
+export interface SubagentRegistryRequest {
+  mode: SubagentMode;
+  role: SubagentRole;
+  depth: number;
+  maxSpawnDepth: number;
+}
+
+export type SubagentRegistryFactory = (request: SubagentRegistryRequest) => Registry;
+
 /** spawn_subagent 工具的参数 */
 interface SubagentArgs {
   task_prompt: string;
+}
+
+interface DelegateTaskInput {
+  goal?: string;
+  context?: string;
+  mode?: SubagentMode;
+  role?: SubagentRole;
+}
+
+interface DelegateTaskArgs extends DelegateTaskInput {
+  tasks?: DelegateTaskInput[];
+  background?: boolean;
+}
+
+interface NormalizedDelegateTask {
+  goal: string;
+  context?: string;
+  mode: SubagentMode;
+  role: SubagentRole;
 }
 
 /**
@@ -56,7 +87,7 @@ interface SubagentArgs {
  * 在后台跑完一个完整受限 ReAct 子循环。子循环用全新纯净上下文,
  * 几万字的探索化作轻量 Summary,像普通 API 调用返回给主 Agent。
  */
-export class SubagentTool implements BaseTool {
+export class SpawnSubagentTool implements BaseTool {
   constructor(
     private readonly runner: AgentRunner,
     private readonly readOnlyRegistry: Registry,
@@ -126,4 +157,216 @@ export class SubagentTool implements BaseTool {
     // 几万字的代码探索,化作轻量级 Summary,像普通 API 调用返回给主 Agent
     return `【子智能体探索报告】:\n${summary}`;
   }
+}
+
+/**
+ * DelegateTaskTool:Hermes 风格的任务委派入口。
+ *
+ * 相比旧的 spawn_subagent,它支持:
+ * - explore/worker 两种工具集,worker 可以在受控边界内写文件
+ * - tasks 批量并行委派,适合拆分互不依赖的开发任务
+ * - background 后台句柄,长任务可由 delegate_status 查询
+ * - role + depth 约束,防止无限递归委派
+ */
+export class DelegateTaskTool implements BaseTool {
+  constructor(
+    private readonly runner: AgentRunner,
+    private readonly registryFactory: SubagentRegistryFactory,
+    private readonly manager: DelegationManager = new DelegationManager(),
+    private readonly options: SubagentRunOptions = {},
+  ) {}
+
+  name(): string {
+    return "delegate_task";
+  }
+
+  definition(): ToolDefinition {
+    return {
+      name: "delegate_task",
+      description:
+        "把一个或多个互不依赖的任务委派给隔离子智能体执行。默认 explore 模式只读分析;" +
+        "mode=worker 时子智能体可使用受控 write_file/edit_file/bash 完成局部开发;" +
+        "tasks 可批量并行执行;background=true 会立即返回 delegationId,之后用 delegate_status 查询。",
+      inputSchema: {
+        type: "object",
+        properties: {
+          goal: {
+            type: "string",
+            description: "单个子任务目标。使用 tasks 批量委派时可省略。",
+          },
+          context: {
+            type: "string",
+            description: "补充上下文,会随任务目标一起交给子智能体。",
+          },
+          tasks: {
+            type: "array",
+            description: "多个互不依赖的子任务。每项可单独指定 goal/context/mode/role。",
+            items: {
+              type: "object",
+              properties: {
+                goal: { type: "string" },
+                context: { type: "string" },
+                mode: { type: "string", enum: ["explore", "worker"] },
+                role: { type: "string", enum: ["leaf", "orchestrator"] },
+              },
+              required: ["goal"],
+            },
+          },
+          mode: {
+            type: "string",
+            enum: ["explore", "worker"],
+            description: "子智能体工具集。explore=只读探索,worker=受控读写开发。",
+          },
+          role: {
+            type: "string",
+            enum: ["leaf", "orchestrator"],
+            description: "leaf 不再继续委派;orchestrator 在深度允许时可继续拆分任务。",
+          },
+          background: {
+            type: "boolean",
+            description: "是否后台运行。true 时立即返回 delegationId,后续用 delegate_status 查询。",
+          },
+        },
+      },
+    };
+  }
+
+  async execute(args: string): Promise<string> {
+    const input = parseDelegateArgs(args);
+    const depth = this.options.depth ?? 0;
+    const maxSpawnDepth = this.options.maxSpawnDepth ?? 2;
+    if (depth >= maxSpawnDepth) {
+      return JSON.stringify({
+        error: `达到最大委派深度 ${maxSpawnDepth},拒绝继续 delegate_task。`,
+      });
+    }
+
+    const tasks = normalizeDelegateTasks(input);
+    if (tasks.length === 0) {
+      return JSON.stringify({ error: "delegate_task 需要 goal 或 tasks[].goal。" });
+    }
+
+    if (input.background === true) {
+      return JSON.stringify(
+        this.manager.dispatch(() => this.runBatch(tasks, depth, maxSpawnDepth)),
+      );
+    }
+
+    return JSON.stringify(await this.runBatch(tasks, depth, maxSpawnDepth));
+  }
+
+  private async runBatch(
+    tasks: NormalizedDelegateTask[],
+    depth: number,
+    maxSpawnDepth: number,
+  ): Promise<DelegationBatchResult> {
+    const startedAt = Date.now();
+    const results = await mapLimit(tasks, this.manager.maxConcurrentChildren, (task, index) =>
+      this.runOne(task, index, depth, maxSpawnDepth),
+    );
+    return {
+      results,
+      totalDurationMs: Date.now() - startedAt,
+    };
+  }
+
+  private async runOne(
+    task: NormalizedDelegateTask,
+    taskIndex: number,
+    depth: number,
+    maxSpawnDepth: number,
+  ): Promise<DelegationBatchResult["results"][number]> {
+    const startedAt = Date.now();
+    const childDepth = depth + 1;
+    const prompt = task.context ? `${task.context}\n\n任务: ${task.goal}` : task.goal;
+    const registry = this.registryFactory({
+      mode: task.mode,
+      role: task.role,
+      depth: childDepth,
+      maxSpawnDepth,
+    });
+
+    try {
+      const summary = await this.runner.runSub(prompt, registry, undefined, {
+        depth: childDepth,
+        maxSpawnDepth,
+        role: task.role,
+      });
+      return {
+        taskIndex,
+        status: "completed",
+        summary,
+        durationMs: Date.now() - startedAt,
+      };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return {
+        taskIndex,
+        status: "error",
+        error: message,
+        durationMs: Date.now() - startedAt,
+      };
+    }
+  }
+}
+
+export { SpawnSubagentTool as SubagentTool };
+
+function parseDelegateArgs(args: string): DelegateTaskArgs {
+  try {
+    return JSON.parse(args) as DelegateTaskArgs;
+  } catch {
+    throw new Error("解析 delegate_task 参数失败:需 JSON 格式");
+  }
+}
+
+function normalizeDelegateTasks(input: DelegateTaskArgs): NormalizedDelegateTask[] {
+  const defaultMode = normalizeMode(input.mode);
+  const defaultRole = normalizeRole(input.role);
+  const rawTasks =
+    input.tasks && input.tasks.length > 0
+      ? input.tasks
+      : [{ goal: input.goal, context: input.context, mode: input.mode, role: input.role }];
+
+  return rawTasks
+    .filter((task): task is DelegateTaskInput & { goal: string } => Boolean(task.goal?.trim()))
+    .map((task) => ({
+      goal: task.goal.trim(),
+      ...(task.context ? { context: task.context } : {}),
+      mode: normalizeMode(task.mode, defaultMode),
+      role: normalizeRole(task.role, defaultRole),
+    }));
+}
+
+function normalizeMode(
+  value: string | undefined,
+  fallback: SubagentMode = "explore",
+): SubagentMode {
+  return value === "worker" || value === "explore" ? value : fallback;
+}
+
+function normalizeRole(value: string | undefined, fallback: SubagentRole = "leaf"): SubagentRole {
+  return value === "orchestrator" || value === "leaf" ? value : fallback;
+}
+
+async function mapLimit<T, R>(
+  items: T[],
+  limit: number,
+  worker: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let cursor = 0;
+  const workerCount = Math.min(Math.max(1, limit), items.length);
+
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      while (cursor < items.length) {
+        const index = cursor;
+        cursor++;
+        results[index] = await worker(items[index]!, index);
+      }
+    }),
+  );
+
+  return results;
 }

@@ -139,6 +139,33 @@ describe("AgentEngine Main Loop", () => {
     expect(observation.content).toBe("result-of-bash");
   });
 
+  it("Observation Processor 失败时回退为截断观察结果,不中断主循环", async () => {
+    const provider = new ScriptedProvider([
+      {
+        role: "assistant",
+        content: "调工具",
+        toolCalls: [{ id: "c1", name: "bash", arguments: "{}" }],
+      },
+      { role: "assistant", content: "ok" },
+    ]);
+    const registry = new MockRegistry();
+    const engine = new AgentEngine({
+      provider,
+      registry,
+      workDir: "/tmp",
+      observationProcessor: async () => {
+        throw new Error("artifact disk failed");
+      },
+    });
+
+    const session = newSession("hi");
+    await engine.run(session);
+
+    const observation = session.getHistory().find((msg) => msg.toolCallId === "c1");
+    expect(observation?.content).toContain("工具输出处理失败");
+    expect(session.getHistory().at(-1)?.content).toBe("ok");
+  });
+
   it("开启 enableThinking 后,每轮行动前先发起空 tools 的慢思考", async () => {
     const provider = new ThinkingAwareProvider();
     const registry = new MockRegistry();

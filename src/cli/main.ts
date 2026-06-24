@@ -11,11 +11,15 @@
 
 import { parseArgs } from "node:util";
 import { createServer } from "node:http";
+import { join } from "node:path";
 import { AgentEngine } from "../engine/loop.js";
 import { globalSessionManager } from "../engine/session.js";
 import { Compactor } from "../context/compactor.js";
+import { ToolResultArtifactStore } from "../context/artifact-store.js";
+import { createContextBudget, estimateTokenBudgetAsChars } from "../context/context-budget.js";
 import { SilentReporter, TerminalReporter } from "../engine/reporter.js";
 import { createProvider, type ProviderKind } from "../provider/factory.js";
+import { resolveProviderProfile } from "../provider/profile.js";
 import {
   BashTool,
   EditFileTool,
@@ -33,13 +37,16 @@ import {
   type ApprovalNotifier,
 } from "../approval/manager.js";
 import type { MiddlewareFunc } from "../tools/registry.js";
-import { SubagentTool } from "../tools/subagent.js";
+import { DelegationManager, DelegateStatusTool } from "../tools/delegation-manager.js";
+import { createSubagentRegistryFactory } from "../tools/delegation-registry.js";
+import { DelegateTaskTool, SpawnSubagentTool } from "../tools/subagent.js";
+import { createToolResultObservationProcessor } from "../tools/tool-result-observation.js";
 import { CostTracker } from "../observability/tracker.js";
 import { Tracer } from "../observability/trace.js";
 import { runAgentFromCli } from "./run-agent.js";
 
 function buildRegistry(workDir: string): ToolRegistry {
-  const registry = new ToolRegistry();
+  const registry = new ToolRegistry({ truncateResults: false });
   registry.register(new EchoTool());
   registry.register(new ReadFileTool(workDir));
   registry.register(new WriteFileTool(workDir));
@@ -54,18 +61,47 @@ function buildRegistry(workDir: string): ToolRegistry {
  * 子智能体只能读文件/执行只读 bash 搜索,绝对不能 write/edit,防莽夫瞎改。
  */
 function buildReadOnlyRegistry(workDir: string): ToolRegistry {
-  const registry = new ToolRegistry();
+  const registry = new ToolRegistry({ truncateResults: false });
   registry.register(new ReadFileTool(workDir));
   registry.register(new BashTool(workDir));
   return registry;
+}
+
+function registerDelegationTools(
+  registry: ToolRegistry,
+  engine: AgentEngine,
+  workDir: string,
+): void {
+  const manager = new DelegationManager();
+  const registryFactory = createSubagentRegistryFactory({
+    workDir,
+    runner: engine,
+    manager,
+  });
+  registry.register(new DelegateTaskTool(engine, registryFactory, manager));
+  registry.register(new DelegateStatusTool(manager));
+  registry.register(new SpawnSubagentTool(engine, buildReadOnlyRegistry(workDir)));
 }
 
 /**
  * 构建上下文压缩器:防 OOM 的物理防线。
  * 水位线 20000 字符(约 5K token,留足模型输出空间),保护区最近 6 条消息。
  */
-function buildCompactor(): Compactor {
-  return new Compactor({ maxChars: 20000, retainLastMsgs: 6 });
+function buildCompactor(kind: ProviderKind, model: string): Compactor {
+  const protocol = kind === "claude" ? "claude" : "openai";
+  const profile = resolveProviderProfile(protocol, model);
+  const budget = createContextBudget(profile);
+  return new Compactor({
+    maxChars: estimateTokenBudgetAsChars(budget.inputBudgetTokens),
+    retainLastMsgs: 6,
+  });
+}
+
+function buildObservationProcessor(workDir: string) {
+  const store = new ToolResultArtifactStore({
+    baseDir: join(workDir, ".claw", "artifacts"),
+  });
+  return createToolResultObservationProcessor({ store });
 }
 
 /**
@@ -97,6 +133,7 @@ async function serve(
   port: number,
 ): Promise<void> {
   const workDir = process.cwd();
+  const modelName = process.env.LLM_MODEL ?? (kind === "openai" ? "glm-5.2" : "claude-3-5-sonnet");
   const systemPrompt = planMode ? undefined : await new PromptComposer(workDir).build();
   const server = createServer(async (req, res) => {
     if (req.method !== "POST" || req.url !== "/ask") {
@@ -132,11 +169,12 @@ async function serve(
         enableThinking,
         planMode,
         systemPrompt,
-        compactor: buildCompactor(),
+        compactor: buildCompactor(kind, modelName),
+        observationProcessor: buildObservationProcessor(workDir),
         reporter,
         tracer: traceEnabled ? new Tracer() : undefined,
       });
-      registry.register(new SubagentTool(engine, buildReadOnlyRegistry(workDir)));
+      registerDelegationTools(registry, engine, workDir);
 
       // HTTP 入口:可选传入 sessionId 实现多会话隔离,缺省用单一控制台会话
       const sessionId = parsed.sessionId ?? `http:${workDir}`;
@@ -221,12 +259,13 @@ async function main() {
           enableThinking,
           planMode,
           systemPrompt,
-          compactor: buildCompactor(),
+          compactor: buildCompactor(kind, modelName),
+          observationProcessor: buildObservationProcessor(workDir),
           reporter: new SilentReporter(), // 实际回写由运行时 FeishuReporter 负责
           tracer: traceEnabled ? new Tracer() : undefined,
         });
-        // 第 17 讲:注册子智能体工具(仅只读工具,爆炸半径限制)
-        registry.register(new SubagentTool(engine, buildReadOnlyRegistry(workDir)));
+        // 注册 Hermes 风格委派工具,并保留 spawn_subagent 兼容入口。
+        registerDelegationTools(registry, engine, workDir);
         return engine;
       },
       loadFeishuConfig(),

@@ -2,10 +2,15 @@
 // 覆盖:SubagentTool execute / RunSub 受限循环 / maxSubTurns 强制召回 /
 // 只读工具隔离 / 物理隔离(子探索不污染主) / 退出条件。
 
+import { mkdtemp, readFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { AgentEngine } from "../src/engine/loop.js";
 import { Session } from "../src/engine/session.js";
-import { SubagentTool, type AgentRunner } from "../src/tools/subagent.js";
+import { DelegateTaskTool, SpawnSubagentTool, type AgentRunner } from "../src/tools/subagent.js";
+import { DelegationManager, DelegateStatusTool } from "../src/tools/delegation-manager.js";
+import { createSubagentRegistryFactory } from "../src/tools/delegation-registry.js";
 import { ToolRegistry, ReadFileTool, BashTool } from "../src/tools/registry-impl.js";
 import type { LLMProvider } from "../src/provider/interface.js";
 import type { Message, ToolDefinition, ToolCall, ToolResult } from "../src/schema/message.js";
@@ -51,7 +56,7 @@ describe("SubagentTool", () => {
         return "";
       },
     };
-    const tool = new SubagentTool(runner, mockReadOnlyRegistry());
+    const tool = new SpawnSubagentTool(runner, mockReadOnlyRegistry());
     expect(tool.name()).toBe("spawn_subagent");
     const def = tool.definition();
     expect(def.name).toBe("spawn_subagent");
@@ -65,7 +70,7 @@ describe("SubagentTool", () => {
         return `已探索: ${taskPrompt}`;
       },
     };
-    const tool = new SubagentTool(runner, mockReadOnlyRegistry());
+    const tool = new SpawnSubagentTool(runner, mockReadOnlyRegistry());
     const output = await tool.execute(JSON.stringify({ task_prompt: "找密码" }));
     expect(output).toContain("子智能体探索报告");
     expect(output).toContain("已探索: 找密码");
@@ -77,7 +82,7 @@ describe("SubagentTool", () => {
         return "";
       },
     };
-    const tool = new SubagentTool(runner, mockReadOnlyRegistry());
+    const tool = new SpawnSubagentTool(runner, mockReadOnlyRegistry());
     await expect(tool.execute("{}")).rejects.toThrow("task_prompt");
   });
 
@@ -87,7 +92,7 @@ describe("SubagentTool", () => {
         throw new Error("子智能体崩溃");
       },
     };
-    const tool = new SubagentTool(runner, mockReadOnlyRegistry());
+    const tool = new SpawnSubagentTool(runner, mockReadOnlyRegistry());
     const output = await tool.execute(JSON.stringify({ task_prompt: "x" }));
     expect(output).toContain("子智能体执行失败");
     expect(output).toContain("子智能体崩溃");
@@ -101,7 +106,7 @@ describe("SubagentTool", () => {
         return "不应执行";
       },
     };
-    const tool = new SubagentTool(runner, mockReadOnlyRegistry(), {
+    const tool = new SpawnSubagentTool(runner, mockReadOnlyRegistry(), {
       depth: 2,
       maxSpawnDepth: 2,
       role: "orchestrator",
@@ -121,7 +126,7 @@ describe("SubagentTool", () => {
         return "ok";
       },
     };
-    const tool = new SubagentTool(runner, mockReadOnlyRegistry(), {
+    const tool = new SpawnSubagentTool(runner, mockReadOnlyRegistry(), {
       depth: 0,
       maxSpawnDepth: 2,
       role: "orchestrator",
@@ -130,6 +135,167 @@ describe("SubagentTool", () => {
     await tool.execute(JSON.stringify({ task_prompt: "探索" }));
 
     expect(seen).toEqual([{ depth: 1, maxSpawnDepth: 2, role: "leaf" }]);
+  });
+});
+
+describe("DelegateTaskTool", () => {
+  it("暴露 Hermes 风格 delegate_task 主接口", () => {
+    const runner: AgentRunner = {
+      async runSub() {
+        return "";
+      },
+    };
+    const manager = new DelegationManager();
+    const tool = new DelegateTaskTool(runner, () => mockReadOnlyRegistry(), manager);
+
+    const def = tool.definition();
+
+    expect(tool.name()).toBe("delegate_task");
+    expect(def.name).toBe("delegate_task");
+    expect(def.inputSchema.properties).toHaveProperty("goal");
+    expect(def.inputSchema.properties).toHaveProperty("tasks");
+    expect(def.inputSchema.properties).toHaveProperty("background");
+  });
+
+  it("worker 模式子代理可以通过受控工具集写文件", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-subagent-worker-"));
+    const runner: AgentRunner = {
+      async runSub(_task, registry) {
+        const toolNames = registry.getAvailableTools().map((tool) => tool.name);
+        expect(toolNames).toContain("write_file");
+        const result = await registry.execute({
+          id: "write-1",
+          name: "write_file",
+          arguments: JSON.stringify({ path: "worker.txt", content: "from worker" }),
+        });
+        expect(result.isError).toBe(false);
+        return "worker wrote file";
+      },
+    };
+    const manager = new DelegationManager();
+    const registryFactory = createSubagentRegistryFactory({
+      workDir,
+      runner,
+      manager,
+    });
+    const tool = new DelegateTaskTool(runner, registryFactory, manager);
+
+    const output = await tool.execute(JSON.stringify({ goal: "写文件", mode: "worker" }));
+    const parsed = JSON.parse(output) as { results: Array<{ summary: string }> };
+
+    expect(parsed.results[0]!.summary).toBe("worker wrote file");
+    expect(await readFile(join(workDir, "worker.txt"), "utf8")).toBe("from worker");
+  });
+
+  it("explore 模式子代理的 bash 写入命令会被拒绝", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-subagent-explore-"));
+    const runner: AgentRunner = {
+      async runSub(_task, registry) {
+        const result = await registry.execute({
+          id: "bash-1",
+          name: "bash",
+          arguments: JSON.stringify({ command: "echo unsafe > should-not-exist.txt" }),
+        });
+        expect(result.isError).toBe(true);
+        return result.output;
+      },
+    };
+    const manager = new DelegationManager();
+    const registryFactory = createSubagentRegistryFactory({
+      workDir,
+      runner,
+      manager,
+    });
+    const tool = new DelegateTaskTool(runner, registryFactory, manager);
+
+    const output = await tool.execute(JSON.stringify({ goal: "尝试写文件", mode: "explore" }));
+    const parsed = JSON.parse(output) as { results: Array<{ summary: string }> };
+
+    expect(parsed.results[0]!.summary).toContain("只读");
+  });
+
+  it("tasks 批量委派会并行执行并保持结果顺序", async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const runner: AgentRunner = {
+      async runSub(taskPrompt) {
+        inFlight++;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        inFlight--;
+        return `done:${taskPrompt}`;
+      },
+    };
+    const manager = new DelegationManager({ maxConcurrentChildren: 3 });
+    const tool = new DelegateTaskTool(runner, () => mockReadOnlyRegistry(), manager);
+
+    const output = await tool.execute(
+      JSON.stringify({
+        tasks: [{ goal: "a" }, { goal: "b" }, { goal: "c" }],
+      }),
+    );
+    const parsed = JSON.parse(output) as { results: Array<{ summary: string }> };
+
+    expect(maxInFlight).toBeGreaterThan(1);
+    expect(parsed.results.map((result) => result.summary)).toEqual(["done:a", "done:b", "done:c"]);
+  });
+
+  it("background=true 立即返回 handle,delegate_status 可查询完成结果", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const runner: AgentRunner = {
+      async runSub() {
+        await gate;
+        return "background complete";
+      },
+    };
+    const manager = new DelegationManager();
+    const tool = new DelegateTaskTool(runner, () => mockReadOnlyRegistry(), manager);
+    const statusTool = new DelegateStatusTool(manager);
+
+    const dispatched = JSON.parse(
+      await tool.execute(JSON.stringify({ goal: "后台任务", background: true })),
+    ) as { status: string; delegationId: string };
+
+    expect(dispatched.status).toBe("dispatched");
+    expect(
+      JSON.parse(
+        await statusTool.execute(JSON.stringify({ delegation_id: dispatched.delegationId })),
+      ).status,
+    ).toBe("running");
+
+    release();
+    await manager.wait(dispatched.delegationId);
+
+    const completed = JSON.parse(
+      await statusTool.execute(JSON.stringify({ delegation_id: dispatched.delegationId })),
+    ) as { status: string; result: { results: Array<{ summary: string }> } };
+    expect(completed.status).toBe("completed");
+    expect(completed.result.results[0]!.summary).toBe("background complete");
+  });
+
+  it("达到 maxSpawnDepth 时拒绝继续 delegate_task", async () => {
+    let called = false;
+    const runner: AgentRunner = {
+      async runSub() {
+        called = true;
+        return "不应执行";
+      },
+    };
+    const manager = new DelegationManager();
+    const tool = new DelegateTaskTool(runner, () => mockReadOnlyRegistry(), manager, {
+      depth: 2,
+      maxSpawnDepth: 2,
+    });
+
+    const output = JSON.parse(await tool.execute(JSON.stringify({ goal: "继续套娃" }))) as {
+      error: string;
+    };
+
+    expect(called).toBe(false);
+    expect(output.error).toContain("最大委派深度");
   });
 });
 
@@ -177,6 +343,19 @@ describe("AgentEngine.runSub", () => {
     const engine = makeEngine(provider, registry);
 
     await expect(engine.runSub("无尽探索", registry)).rejects.toThrow("超过 10 轮");
+  });
+
+  it("depth 等于 maxSpawnDepth 的子代理仍可执行但不能再委派", async () => {
+    const provider = new ScriptedProvider([{ role: "assistant", content: "leaf summary" }]);
+    const registry = mockReadOnlyRegistry();
+    const engine = makeEngine(provider, registry);
+
+    const summary = await engine.runSub("叶子任务", registry, undefined, {
+      depth: 2,
+      maxSpawnDepth: 2,
+    });
+
+    expect(summary).toBe("leaf summary");
   });
 
   it("子智能体探索不污染主 Session(物理隔离核心)", async () => {
@@ -308,7 +487,7 @@ describe("SubagentTool + AgentEngine 端到端委派", () => {
     const readOnlyReg = new ToolRegistry();
     readOnlyReg.register(new ReadFileTool("/tmp"));
     readOnlyReg.register(new BashTool("/tmp"));
-    mainRegistry.register(new SubagentTool(engine, readOnlyReg));
+    mainRegistry.register(new SpawnSubagentTool(engine, readOnlyReg));
 
     // 但 runSub 会调 mainProvider,而 mainProvider 的 turn 逻辑是给主用的…
     // 需要分离:用一个能区分主/子调用的 provider
@@ -319,7 +498,7 @@ describe("SubagentTool + AgentEngine 端到端委派", () => {
         return `子智能体汇报:探索了 ${taskPrompt},密码是 42`;
       },
     };
-    const tool = new SubagentTool(mockRunner, readOnlyReg);
+    const tool = new SpawnSubagentTool(mockRunner, readOnlyReg);
     const report = await tool.execute(JSON.stringify({ task_prompt: "找密码" }));
     expect(subCalled).toBe(true);
     expect(report).toContain("密码是 42");

@@ -6,6 +6,7 @@ export interface ProviderProfile {
   model: string;
   fallbackModel?: string;
   assistantContent: AssistantContentMode;
+  contextWindowTokens: number;
   maxOutputTokens: number;
   supportsReasoningContent: boolean;
   supportsPromptCache: boolean;
@@ -15,6 +16,7 @@ const DEFAULTS: Record<ProviderProtocol, Omit<ProviderProfile, "model">> = {
   openai: {
     protocol: "openai",
     assistantContent: "empty_string",
+    contextWindowTokens: 128_000,
     maxOutputTokens: 4096,
     supportsReasoningContent: true,
     supportsPromptCache: false,
@@ -22,6 +24,7 @@ const DEFAULTS: Record<ProviderProtocol, Omit<ProviderProfile, "model">> = {
   claude: {
     protocol: "claude",
     assistantContent: "empty_string",
+    contextWindowTokens: 128_000,
     maxOutputTokens: 4096,
     supportsReasoningContent: false,
     supportsPromptCache: true,
@@ -43,10 +46,7 @@ const MODEL_PROFILES: Record<string, Partial<ProviderProfile>> = {
   },
 };
 
-export function resolveProviderProfile(
-  protocol: ProviderProtocol,
-  model: string,
-): ProviderProfile {
+export function resolveProviderProfile(protocol: ProviderProtocol, model: string): ProviderProfile {
   const defaults = DEFAULTS[protocol];
   const normalized = normalizeModel(model);
   const exact = MODEL_PROFILES[normalized] ?? {};

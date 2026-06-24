@@ -84,7 +84,15 @@ describe("runAgentFromCli", () => {
     expect(result.tracePath).toContain(join(".claw", "traces"));
     expect(await readdir(join(workDir, ".claw", "traces"))).toHaveLength(1);
     expect(provider.calls[0]?.toolNames).toEqual(
-      expect.arrayContaining(["bash", "read_file", "write_file", "edit_file", "spawn_subagent"]),
+      expect.arrayContaining([
+        "bash",
+        "read_file",
+        "write_file",
+        "edit_file",
+        "delegate_task",
+        "delegate_status",
+        "spawn_subagent",
+      ]),
     );
     expect(provider.calls[0]?.messages[0]?.content).toContain("PLAN.md");
     expect(output.join("")).toContain("Session: cli_session");

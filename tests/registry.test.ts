@@ -141,6 +141,21 @@ describe("ToolRegistry 路由分发", () => {
     expect(result.output.length).toBeLessThan(100);
     expect(result.output).toContain("工具输出过长");
   });
+
+  it("可关闭 Registry 截断,把大输出交给上层 Observation Processor", async () => {
+    const r = new ToolRegistry({ truncateResults: false });
+    r.register(
+      new FakeTool(
+        "big",
+        { name: "big", description: "", inputSchema: { type: "object" } },
+        async () => "X".repeat(100),
+      ),
+    );
+
+    const result = await r.execute({ id: "c1", name: "big", arguments: "{}" });
+
+    expect(result.output).toBe("X".repeat(100));
+  });
 });
 
 describe("ReadFileTool 防御底线", () => {

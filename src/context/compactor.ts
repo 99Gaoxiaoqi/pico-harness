@@ -27,6 +27,14 @@ const PROTECT_TRUNCATE_THRESHOLD = 1000;
 const HEAD_TAIL_KEEP = 500;
 /** 远期 Assistant 冗长 Thinking Trace 触发折叠的字符阈值 */
 const REMOTE_THINKING_FOLD_THRESHOLD = 200;
+/** 预算闭环压缩时替换 ToolResult 的短占位符 */
+const BUDGET_TOOL_RESULT_PLACEHOLDER = "[工具输出已被预算压缩";
+/** 预算闭环压缩时折叠助手正文,但保留 toolCalls */
+const BUDGET_ASSISTANT_TOOL_CONTENT = "[助手正文已被预算压缩,toolCalls 已保留]";
+/** 预算闭环压缩时折叠远期普通对话 */
+const BUDGET_OLD_MESSAGE_CONTENT = "[早期消息已被预算压缩]";
+/** 预算闭环压缩最后一条普通消息时使用的中间标记 */
+const BUDGET_CONTENT_MARKER = "\n...[预算压缩]...\n";
 
 /** 掩码占位符 */
 function maskRemoteToolResult(originalLen: number): string {
@@ -39,6 +47,67 @@ function truncateProtectedContent(content: string): string {
   const tail = content.slice(content.length - HEAD_TAIL_KEEP);
   const dropped = content.length - HEAD_TAIL_KEEP * 2;
   return `${head}\n\n...[内容过长,中间 ${dropped} 字节已被系统截断]...\n${tail}`;
+}
+
+function budgetToolResultPlaceholder(originalLen: number): string {
+  return `${BUDGET_TOOL_RESULT_PLACEHOLDER}:${originalLen}]`;
+}
+
+function hasToolCalls(msg: Message): boolean {
+  return msg.toolCalls !== undefined && msg.toolCalls.length > 0;
+}
+
+function isToolResult(msg: Message): boolean {
+  return msg.role === "user" && msg.toolCallId !== undefined;
+}
+
+function isOrdinaryConversationMessage(msg: Message): boolean {
+  return (
+    (msg.role === "user" && msg.toolCallId === undefined) ||
+    (msg.role === "assistant" && !hasToolCalls(msg))
+  );
+}
+
+function findLastOrdinaryMessageIndex(msgs: Message[]): number {
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    if (isOrdinaryConversationMessage(msgs[i]!)) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+function trimContentToLength(content: string, maxLength: number): string {
+  if (maxLength <= 0) {
+    return "";
+  }
+  if (content.length <= maxLength) {
+    return content;
+  }
+  if (maxLength <= BUDGET_CONTENT_MARKER.length + 2) {
+    return content.slice(0, maxLength);
+  }
+  const keep = maxLength - BUDGET_CONTENT_MARKER.length;
+  const headLen = Math.ceil(keep / 2);
+  const tailLen = Math.floor(keep / 2);
+  return `${content.slice(0, headLen)}${BUDGET_CONTENT_MARKER}${content.slice(content.length - tailLen)}`;
+}
+
+export class ContextCompactionError extends Error {
+  readonly beforeChars: number;
+  readonly afterChars: number;
+  readonly maxChars: number;
+
+  constructor(beforeChars: number, afterChars: number, maxChars: number) {
+    super(
+      `Context compaction failed: ${beforeChars} chars -> ${afterChars} chars still exceeds budget ${maxChars}.`,
+    );
+    this.name = "ContextCompactionError";
+    this.beforeChars = beforeChars;
+    this.afterChars = afterChars;
+    this.maxChars = maxChars;
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
 }
 
 export interface SummaryInput {
@@ -167,6 +236,31 @@ export class Compactor {
   }
 
   /**
+   * 闭环压缩:先保持 compact() 的旧行为,若仍超过预算再执行更强降级。
+   * 如果 system/toolCalls 等不可压缩部分本身已超过预算,抛出明确错误。
+   */
+  compactToBudget(msgs: Message[], maxChars = this.maxChars): Message[] {
+    const beforeChars = this.estimateLength(msgs);
+    const compacted = this.compact(msgs);
+    const compactedChars = this.estimateLength(compacted);
+    if (compactedChars <= maxChars) {
+      return compacted;
+    }
+
+    const strongerCompacted = this.strongerCompact(compacted, maxChars);
+    const afterChars = this.estimateLength(strongerCompacted);
+    if (afterChars <= maxChars) {
+      this.recordCompressionEffect(beforeChars, afterChars);
+      logger.warn(
+        `[Compactor] ✅ 预算闭环压缩完成。上下文长度从 ${beforeChars} 降至 ${afterChars} 字符。`,
+      );
+      return strongerCompacted;
+    }
+
+    throw new ContextCompactionError(beforeChars, afterChars, maxChars);
+  }
+
+  /**
    * 带摘要的异步压缩(第 12 讲前沿升级)。
    *
    * 当总长度超标且提供了 summarizer 时,把远期历史(保护区之前的消息)
@@ -196,7 +290,10 @@ export class Compactor {
     // 远期历史调小模型摘要
     let summaryText: string;
     try {
-      logger.info({ remoteCount: newMessages.length }, `[Compactor] 调用 LLM 摘要 ${newMessages.length} 条远期历史...`);
+      logger.info(
+        { remoteCount: newMessages.length },
+        `[Compactor] 调用 LLM 摘要 ${newMessages.length} 条远期历史...`,
+      );
       summaryText = await this.summarizer({
         newMessages,
         ...(this.previousSummary ? { previousSummary: this.previousSummary } : {}),
@@ -214,14 +311,14 @@ export class Compactor {
       role: "system",
       content: `[历史摘要]: ${summaryText}`,
     };
-    const protectedCompacted = this.compact([
-      ...protectedMsgs.filter((m) => m.role !== "system"),
-    ]);
+    const protectedCompacted = this.compact([...protectedMsgs.filter((m) => m.role !== "system")]);
 
     const result = sanitizeToolPairs([summaryMsg, ...protectedCompacted]);
     const newLength = this.estimateLength(result);
     this.recordCompressionEffect(currentLength, newLength);
-    logger.warn(`[Compactor] ✅ LLM 摘要压缩完成。${currentLength} → ${newLength} 字符(远期 ${remoteMsgs.length} 条 → 摘要)。`);
+    logger.warn(
+      `[Compactor] ✅ LLM 摘要压缩完成。${currentLength} → ${newLength} 字符(远期 ${remoteMsgs.length} 条 → 摘要)。`,
+    );
     return result;
   }
 
@@ -256,6 +353,64 @@ export class Compactor {
   private recordCompressionEffect(before: number, after: number): void {
     const savingPct = before === 0 ? 100 : ((before - after) / before) * 100;
     this.ineffectiveCount = savingPct < 10 ? this.ineffectiveCount + 1 : 0;
+  }
+
+  private strongerCompact(msgs: Message[], maxChars: number): Message[] {
+    const lastOrdinaryIndex = findLastOrdinaryMessageIndex(msgs);
+    const compacted = msgs.map((msg, index): Message => {
+      const newMsg: Message = { ...msg };
+      if (msg.role === "system") {
+        return newMsg;
+      }
+      if (isToolResult(msg)) {
+        newMsg.content = budgetToolResultPlaceholder(msg.content.length);
+        return newMsg;
+      }
+      if (msg.role === "assistant" && hasToolCalls(msg)) {
+        newMsg.content = msg.content.length > 0 ? BUDGET_ASSISTANT_TOOL_CONTENT : "";
+        return newMsg;
+      }
+      if (
+        isOrdinaryConversationMessage(msg) &&
+        index !== lastOrdinaryIndex &&
+        msg.content.length > 0
+      ) {
+        newMsg.content = BUDGET_OLD_MESSAGE_CONTENT;
+      }
+      return newMsg;
+    });
+
+    const sanitized = sanitizeToolPairs(compacted);
+    return this.trimLastOrdinaryToFitBudget(sanitized, maxChars);
+  }
+
+  private trimLastOrdinaryToFitBudget(msgs: Message[], maxChars: number): Message[] {
+    const currentLength = this.estimateLength(msgs);
+    if (currentLength <= maxChars) {
+      return msgs;
+    }
+
+    const targetIndex = findLastOrdinaryMessageIndex(msgs);
+    if (targetIndex < 0) {
+      return msgs;
+    }
+
+    const target = msgs[targetIndex]!;
+    const fixedLength = currentLength - target.content.length;
+    const availableForContent = maxChars - fixedLength;
+    if (target.content.length <= availableForContent) {
+      return msgs;
+    }
+
+    return msgs.map((msg, index) => {
+      if (index !== targetIndex) {
+        return { ...msg };
+      }
+      return {
+        ...msg,
+        content: trimContentToLength(msg.content, availableForContent),
+      };
+    });
   }
 }
 
