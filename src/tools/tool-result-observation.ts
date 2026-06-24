@@ -1,10 +1,10 @@
 import { logger } from "../observability/logger.js";
 import type { ToolCall, ToolResult } from "../schema/message.js";
-import type { ToolResultArtifactStore } from "../context/artifact-store.js";
 import { summarizeToolResult } from "./result-summarizer.js";
 
 const DEFAULT_EXTERNALIZE_THRESHOLD_CHARS = 4000;
 const DEFAULT_SUMMARY_MAX_CHARS = 1600;
+const DEFAULT_ARTIFACT_SESSION_ID = "default";
 
 export interface ToolObservationProcessorInput {
   toolCall: ToolCall;
@@ -17,10 +17,32 @@ export type ToolObservationProcessor = (
   input: ToolObservationProcessorInput,
 ) => Promise<string> | string;
 
+export interface ToolResultObservationArtifactStore {
+  write(input: WriteToolResultObservationArtifactInput): Promise<ToolResultObservationArtifactMeta>;
+  cleanup(): Promise<unknown>;
+}
+
+export interface WriteToolResultObservationArtifactInput {
+  sessionId?: string;
+  toolName: string;
+  args: unknown;
+  output: string;
+  summary?: string;
+  ttlHours?: number;
+  pinned?: boolean;
+}
+
+export interface ToolResultObservationArtifactMeta {
+  id: string;
+  path?: string;
+}
+
 export interface ToolResultObservationProcessorOptions {
-  store: ToolResultArtifactStore;
+  store: ToolResultObservationArtifactStore;
   externalizeThresholdChars?: number;
   summaryMaxChars?: number;
+  cleanupAfterWrite?: boolean;
+  /** @deprecated Use cleanupAfterWrite. */
   cleanup?: boolean;
   ttlHours?: number;
 }
@@ -30,10 +52,10 @@ export function createToolResultObservationProcessor(
 ): ToolObservationProcessor {
   const threshold = opts.externalizeThresholdChars ?? DEFAULT_EXTERNALIZE_THRESHOLD_CHARS;
   const summaryMaxChars = opts.summaryMaxChars ?? DEFAULT_SUMMARY_MAX_CHARS;
-  const cleanup = opts.cleanup ?? true;
+  const cleanupAfterWrite = opts.cleanupAfterWrite ?? opts.cleanup ?? true;
 
   return async ({ toolCall, result, output, sessionId }) => {
-    if (output.length < threshold) {
+    if (output.length <= threshold) {
       return output;
     }
 
@@ -54,7 +76,7 @@ export function createToolResultObservationProcessor(
       pinned: result.isError,
     });
 
-    if (cleanup) {
+    if (cleanupAfterWrite) {
       try {
         await opts.store.cleanup();
       } catch (err) {
@@ -66,14 +88,20 @@ export function createToolResultObservationProcessor(
       "[大型工具输出已外部化]",
       `tool: ${toolCall.name}`,
       `toolCallId: ${toolCall.id}`,
+      `artifactUri: ${buildArtifactUri(sessionId, meta.id)}`,
       `artifactId: ${meta.id}`,
-      `artifactPath: ${meta.path}`,
+      ...(meta.path !== undefined ? [`artifactPath: ${meta.path}`] : []),
       `originalChars: ${summary.originalChars}`,
       `summaryStrategy: ${summary.strategy}`,
       "summary:",
       summary.text,
     ].join("\n");
   };
+}
+
+function buildArtifactUri(sessionId: string | undefined, artifactId: string): string {
+  const scopedSessionId = sessionId && sessionId.length > 0 ? sessionId : DEFAULT_ARTIFACT_SESSION_ID;
+  return `artifact://${encodeURIComponent(scopedSessionId)}/${encodeURIComponent(artifactId)}`;
 }
 
 function parseArgs(args: string): unknown {

@@ -186,11 +186,16 @@ describe("large ToolResult artifact externalization", () => {
 
     const observation = session.getHistory().find((msg) => msg.toolCallId === "c1");
     expect(observation?.content).toContain("[大型工具输出已外部化]");
+    expect(observation?.content).toContain("artifactUri:");
     expect(observation?.content).toContain("artifactPath:");
     expect(observation?.content).toContain(middleError.trim());
     expect(observation!.content.length).toBeLessThan(log.length);
 
+    const artifactId = observation!.content.match(/^artifactId: (.+)$/m)?.[1];
+    const artifactUri = observation!.content.match(/^artifactUri: (.+)$/m)?.[1];
     const artifactPath = observation!.content.match(/^artifactPath: (.+)$/m)?.[1];
+    expect(artifactId).toBeDefined();
+    expect(artifactUri).toBe(`artifact://large-output/${artifactId}`);
     expect(artifactPath).toBeDefined();
     const raw = await readFile(artifactPath!, "utf8");
     expect(raw).toBe(log);
