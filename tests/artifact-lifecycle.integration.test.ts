@@ -3,52 +3,8 @@ import { access, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-
-interface FutureArtifactLifecycleOptions {
-  baseDir: string;
-  maxTotalBytes?: number;
-  cleanupAfterWrite?: boolean;
-}
-
-interface FutureWriteToolResultInput {
-  sessionId: string;
-  artifactId: string;
-  toolName: string;
-  args: unknown;
-  output: string;
-  summary?: string;
-  createdAt?: Date;
-  ttlHours?: number;
-  pinned?: boolean;
-}
-
-interface FutureArtifactMeta {
-  id: string;
-  sessionId: string;
-  path: string;
-  createdAt: string;
-  sizeBytes: number;
-  pinned: boolean;
-}
-
-interface FutureCleanupResult {
-  deleted: string[];
-  retained: string[];
-}
-
-interface FutureArtifactLifecycle {
-  writeToolResult(input: FutureWriteToolResultInput): Promise<FutureArtifactMeta>;
-  readToolResult(input: { sessionId: string; artifactId: string }): Promise<string | undefined>;
-  cleanupSession(sessionId: string): Promise<FutureCleanupResult>;
-  deleteSession(sessionId: string): Promise<FutureCleanupResult>;
-  sweepGlobalQuota(): Promise<FutureCleanupResult>;
-}
-
-function createFutureArtifactLifecycle(
-  _opts: FutureArtifactLifecycleOptions,
-): FutureArtifactLifecycle {
-  throw new Error("Wire this draft to the final session-scoped artifact lifecycle API.");
-}
+import { ToolResultArtifactStore } from "../src/context/artifact-store.js";
+import { SessionManager } from "../src/engine/session.js";
 
 async function pathExists(path: string): Promise<boolean> {
   try {
@@ -62,27 +18,34 @@ async function pathExists(path: string): Promise<boolean> {
   }
 }
 
-describe.skip("Session-scoped artifact lifecycle (future API)", () => {
+function waitForClockTick(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 2));
+}
+
+describe("Session-scoped artifact lifecycle", () => {
   let workDir: string;
-  let lifecycle: FutureArtifactLifecycle;
+  let store: ToolResultArtifactStore;
+  let sessions: SessionManager;
 
   beforeEach(async () => {
     workDir = await mkdtemp(join(tmpdir(), "pico-artifact-lifecycle-"));
-    lifecycle = createFutureArtifactLifecycle({
+    store = new ToolResultArtifactStore({
       baseDir: join(workDir, ".claw", "artifacts"),
       maxTotalBytes: 8,
-      cleanupAfterWrite: false,
     });
+    sessions = new SessionManager();
   });
 
   afterEach(async () => {
     await rm(workDir, { recursive: true, force: true });
   });
 
-  it("deleteSession 删除 session 后 artifact 文件消失", async () => {
-    const meta = await lifecycle.writeToolResult({
-      sessionId: "feishu/chat-A",
-      artifactId: "result-a",
+  it("删除 session 后显式删除该 session 的 artifact 文件", async () => {
+    const session = sessions.getOrCreate("feishu/chat-A", workDir);
+    session.append({ role: "user", content: "run tests" });
+    const meta = await store.write({
+      id: "result-a",
+      sessionId: session.id,
       toolName: "bash",
       args: { command: "npm test" },
       output: "raw-a",
@@ -96,72 +59,72 @@ describe.skip("Session-scoped artifact lifecycle (future API)", () => {
     expect(meta.path).toContain("/tool-results/");
     await expect(pathExists(meta.path)).resolves.toBe(true);
 
-    const result = await lifecycle.deleteSession("feishu/chat-A");
+    const deletedSession = sessions.delete("feishu/chat-A");
+    expect(deletedSession).toBe(session);
+    const result = await store.deleteSessionArtifacts(deletedSession!.id);
 
     expect(result.deleted).toEqual(expect.arrayContaining(["result-a"]));
+    expect(sessions.get("feishu/chat-A")).toBeUndefined();
     await expect(pathExists(meta.path)).resolves.toBe(false);
-    await expect(
-      lifecycle.readToolResult({ sessionId: "feishu/chat-A", artifactId: "result-a" }),
-    ).resolves.toBeUndefined();
+    await expect(store.read(meta)).resolves.toBeUndefined();
   });
 
-  it("cleanupSession 只清理目标 session,不影响其它 session", async () => {
-    const sessionA = await lifecycle.writeToolResult({
+  it("session cleanup 只清理目标 session,不影响其它 session", async () => {
+    const sessionA = await store.write({
+      id: "a-1",
       sessionId: "session-A",
-      artifactId: "a-1",
       toolName: "bash",
       args: { command: "cat a.log" },
       output: "raw-a",
+      ttlHours: 1,
     });
-    const sessionB = await lifecycle.writeToolResult({
+    const sessionB = await store.write({
+      id: "b-1",
       sessionId: "session-B",
-      artifactId: "b-1",
       toolName: "bash",
       args: { command: "cat b.log" },
       output: "raw-b",
+      ttlHours: 1,
     });
 
-    const result = await lifecycle.cleanupSession("session-A");
+    const result = await store.cleanup("session-A", new Date(Date.now() + 2 * 60 * 60 * 1000));
 
     expect(result.deleted).toEqual(expect.arrayContaining(["a-1"]));
     expect(result.deleted).not.toContain("b-1");
     await expect(pathExists(sessionA.path)).resolves.toBe(false);
     await expect(pathExists(sessionB.path)).resolves.toBe(true);
-    await expect(
-      lifecycle.readToolResult({ sessionId: "session-B", artifactId: "b-1" }),
-    ).resolves.toBe("raw-b");
+    await expect(store.read(sessionB)).resolves.toBe("raw-b");
   });
 
   it("global sweep 在总 quota 超限时跨 session 删除最旧的未 pinned artifact", async () => {
-    const oldUnpinned = await lifecycle.writeToolResult({
+    const oldUnpinned = await store.write({
+      id: "old-unpinned",
       sessionId: "session-A",
-      artifactId: "old-unpinned",
       toolName: "bash",
       args: { command: "cat old.log" },
       output: "aaaa",
-      createdAt: new Date("2026-01-01T00:00:00.000Z"),
     });
-    const oldPinned = await lifecycle.writeToolResult({
+    await waitForClockTick();
+    const oldPinned = await store.write({
+      id: "old-pinned",
       sessionId: "session-B",
-      artifactId: "old-pinned",
       toolName: "bash",
       args: { command: "cat pinned.log" },
       output: "bbbb",
-      createdAt: new Date("2026-01-01T00:00:01.000Z"),
       pinned: true,
     });
-    const newUnpinned = await lifecycle.writeToolResult({
+    await waitForClockTick();
+    const newUnpinned = await store.write({
+      id: "new-unpinned",
       sessionId: "session-C",
-      artifactId: "new-unpinned",
       toolName: "bash",
       args: { command: "cat new.log" },
       output: "cccc",
-      createdAt: new Date("2026-01-01T00:00:02.000Z"),
     });
 
     expect(oldUnpinned.sizeBytes + oldPinned.sizeBytes + newUnpinned.sizeBytes).toBeGreaterThan(8);
 
-    const result = await lifecycle.sweepGlobalQuota();
+    const result = await store.cleanup();
 
     expect(result.deleted).toEqual(["old-unpinned"]);
     expect(result.retained).toEqual(expect.arrayContaining(["old-pinned", "new-unpinned"]));

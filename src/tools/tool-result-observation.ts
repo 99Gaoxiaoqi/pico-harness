@@ -19,7 +19,7 @@ export type ToolObservationProcessor = (
 
 export interface ToolResultObservationArtifactStore {
   write(input: WriteToolResultObservationArtifactInput): Promise<ToolResultObservationArtifactMeta>;
-  cleanup(): Promise<unknown>;
+  cleanup(sessionId?: string): Promise<unknown>;
 }
 
 export interface WriteToolResultObservationArtifactInput {
@@ -34,6 +34,7 @@ export interface WriteToolResultObservationArtifactInput {
 
 export interface ToolResultObservationArtifactMeta {
   id: string;
+  sessionId?: string;
   path?: string;
 }
 
@@ -78,7 +79,7 @@ export function createToolResultObservationProcessor(
 
     if (cleanupAfterWrite) {
       try {
-        await opts.store.cleanup();
+        await opts.store.cleanup(meta.sessionId ?? sessionId ?? DEFAULT_ARTIFACT_SESSION_ID);
       } catch (err) {
         logger.warn({ err }, "[ToolResult] artifact cleanup failed");
       }
@@ -88,7 +89,7 @@ export function createToolResultObservationProcessor(
       "[大型工具输出已外部化]",
       `tool: ${toolCall.name}`,
       `toolCallId: ${toolCall.id}`,
-      `artifactUri: ${buildArtifactUri(sessionId, meta.id)}`,
+      `artifactUri: ${buildArtifactUri(meta.sessionId ?? sessionId, meta.id)}`,
       `artifactId: ${meta.id}`,
       ...(meta.path !== undefined ? [`artifactPath: ${meta.path}`] : []),
       `originalChars: ${summary.originalChars}`,
@@ -100,7 +101,8 @@ export function createToolResultObservationProcessor(
 }
 
 function buildArtifactUri(sessionId: string | undefined, artifactId: string): string {
-  const scopedSessionId = sessionId && sessionId.length > 0 ? sessionId : DEFAULT_ARTIFACT_SESSION_ID;
+  const scopedSessionId =
+    sessionId && sessionId.length > 0 ? sessionId : DEFAULT_ARTIFACT_SESSION_ID;
   return `artifact://${encodeURIComponent(scopedSessionId)}/${encodeURIComponent(artifactId)}`;
 }
 

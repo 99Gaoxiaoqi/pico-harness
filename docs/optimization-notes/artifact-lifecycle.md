@@ -4,7 +4,7 @@
 
 `ToolResult` 外部化的目标不是把上下文压力转移成磁盘压力，而是把“大段原文”从模型上下文中拿出来，同时保留可追溯、可清理的生命周期。
 
-当前实现已经能把大输出写入 artifact store，并在上下文中留下 typed observation。下一步需要补齐 session-scoped lifecycle，避免多个会话共用同一个 artifact 池后产生残留、串读或磁盘膨胀。
+当前实现已经能把大输出写入 session-scoped artifact store，并在上下文中留下 typed observation。session-scoped lifecycle 用来避免多个会话共用同一个 artifact 池后产生残留、串读或磁盘膨胀。
 
 ## 当前问题
 
@@ -43,7 +43,7 @@
 - session 删除很难通过目录边界完成，只能全局扫描 metadata。
 - 不同 session 的 artifact 文件混在一起，调试和人工清理成本高。
 
-未来应把 artifact 也纳入物理 session 隔离，让每个 session 拥有自己的 artifact 子树。
+当前 artifact 也纳入物理 session 隔离，让每个 session 拥有自己的 artifact 子树。
 
 ## 建议目录结构
 
@@ -62,8 +62,8 @@
 
 约定：
 
-- `<safeSessionId>` 必须是文件系统安全 ID。可以由原始 sessionId 做 hash、base64url 或严格字符白名单映射得到。
-- metadata 里仍保留原始 `sessionId`，方便追踪和审计。
+- `<safeSessionId>` 必须是文件系统安全 ID。当前实现对安全字符保持可读原值；包含不安全字符时使用清洗名加 hash 后缀，避免路径穿越和常见碰撞。
+- metadata 里同时保留原始 `sessionId` 和物理路径使用的 `safeSessionId`，方便追踪和审计。
 - `artifactId` 继续使用安全 ID，不允许路径穿越。
 - session 目录是 cleanupSession / deleteSession 的物理边界。
 
@@ -163,7 +163,7 @@ global quota sweep 是磁盘兜底机制，不是上下文策略。
 
 ## 集成测试草案
 
-新增 `tests/artifact-lifecycle.integration.test.ts` 作为最终 API 草案。当前先用 `describe.skip` 固定预期，不要求已有实现立即满足。
+新增 `tests/artifact-lifecycle.integration.test.ts` 覆盖当前 session-scoped artifact lifecycle API。
 
 测试覆盖：
 
@@ -171,4 +171,4 @@ global quota sweep 是磁盘兜底机制，不是上下文策略。
 - `cleanupSession` 只影响目标 session，不影响其它 session。
 - global sweep 在总 quota 超限时跨 session 删除最旧的未 pinned artifact，并保留 pinned artifact。
 
-当 artifact-store/session/observation 实现完成后，应把该测试从 `describe.skip` 改为正常执行，并把草案接口替换为真实 API。
+这些测试应随 artifact-store/session/observation 的生命周期语义变化同步更新。

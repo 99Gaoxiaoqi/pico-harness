@@ -14,22 +14,25 @@ interface FakeWriteInput {
 
 interface FakeArtifactMeta {
   id: string;
+  sessionId?: string;
   path: string;
 }
 
 class FakeArtifactStore {
   readonly writes: FakeWriteInput[] = [];
-  cleanupCalls = 0;
+  readonly cleanupSessionIds: Array<string | undefined> = [];
 
-  constructor(private readonly meta: FakeArtifactMeta = { id: "artifact-123", path: "/tmp/a.txt" }) {}
+  constructor(
+    private readonly meta: FakeArtifactMeta = { id: "artifact-123", path: "/tmp/a.txt" },
+  ) {}
 
   async write(input: FakeWriteInput): Promise<FakeArtifactMeta> {
     this.writes.push(input);
     return this.meta;
   }
 
-  async cleanup(): Promise<void> {
-    this.cleanupCalls++;
+  async cleanup(sessionId?: string): Promise<void> {
+    this.cleanupSessionIds.push(sessionId);
   }
 }
 
@@ -64,7 +67,7 @@ describe("createToolResultObservationProcessor", () => {
 
     expect(observation).toBe("tiny");
     expect(store.writes).toHaveLength(0);
-    expect(store.cleanupCalls).toBe(0);
+    expect(store.cleanupSessionIds).toHaveLength(0);
   });
 
   it("does not externalize output equal to the threshold", async () => {
@@ -86,7 +89,11 @@ describe("createToolResultObservationProcessor", () => {
   });
 
   it("externalizes large outputs with session-scoped artifact URI and write metadata", async () => {
-    const store = new FakeArtifactStore({ id: "artifact-abc", path: "/tmp/artifact-abc.txt" });
+    const store = new FakeArtifactStore({
+      id: "artifact-abc",
+      sessionId: "session/with space",
+      path: "/tmp/artifact-abc.txt",
+    });
     const processor = createToolResultObservationProcessor({
       store,
       externalizeThresholdChars: 5,
@@ -111,7 +118,7 @@ describe("createToolResultObservationProcessor", () => {
       pinned: true,
     });
     expect(store.writes[0]?.summary).toContain("FAIL expected one thing");
-    expect(store.cleanupCalls).toBe(1);
+    expect(store.cleanupSessionIds).toEqual(["session/with space"]);
 
     expect(observation).toContain("artifactId: artifact-abc");
     expect(observation).toContain("artifactUri: artifact://session%2Fwith%20space/artifact-abc");
@@ -122,7 +129,11 @@ describe("createToolResultObservationProcessor", () => {
   });
 
   it("uses a stable fallback session id in artifact URI when sessionId is missing", async () => {
-    const store = new FakeArtifactStore({ id: "artifact-default", path: "/tmp/default.txt" });
+    const store = new FakeArtifactStore({
+      id: "artifact-default",
+      sessionId: "default",
+      path: "/tmp/default.txt",
+    });
     const processor = createToolResultObservationProcessor({
       store,
       externalizeThresholdChars: 1,
@@ -154,7 +165,7 @@ describe("createToolResultObservationProcessor", () => {
       sessionId: "session-1",
     });
 
-    expect(store.cleanupCalls).toBe(0);
+    expect(store.cleanupSessionIds).toHaveLength(0);
   });
 
   it("lets cleanupAfterWrite take precedence over the deprecated cleanup alias", async () => {
@@ -173,6 +184,6 @@ describe("createToolResultObservationProcessor", () => {
       sessionId: "session-1",
     });
 
-    expect(store.cleanupCalls).toBe(1);
+    expect(store.cleanupSessionIds).toEqual(["session-1"]);
   });
 });

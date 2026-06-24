@@ -31,11 +31,13 @@ describe("ToolResultArtifactStore", () => {
     expect(meta.sizeBytes).toBe(5);
     expect(await store.read(meta)).toBe("hello");
     expect(meta.sessionId).toBe("s1");
+    expect(meta.safeSessionId).toBe("s1");
     expect(meta.path).toBe(join(dir, "sessions", "s1", "tool-results", "result-a.txt"));
     expect(await readFile(meta.path, "utf8")).toBe("hello");
     expect(await store.readMeta("result-a", "s1")).toMatchObject({
       id: "result-a",
       sessionId: "s1",
+      safeSessionId: "s1",
       toolName: "bash",
       summary: "short",
       pinned: false,
@@ -53,6 +55,7 @@ describe("ToolResultArtifactStore", () => {
 
     expect(meta.id).toMatch(/^tool-result-\d+-\d+$/);
     expect(meta.sessionId).toBe("default");
+    expect(meta.safeSessionId).toBe("default");
     expect(await store.read(meta.id)).toBe("hello");
   });
 
@@ -74,20 +77,24 @@ describe("ToolResultArtifactStore", () => {
       output: "right",
     });
 
-    expect(left.sessionId).toBe("session_a");
-    expect(right.sessionId).toBe("session_b");
-    expect(left.path).toBe(join(dir, "sessions", "session_a", "tool-results", "same.txt"));
-    expect(right.path).toBe(join(dir, "sessions", "session_b", "tool-results", "same.txt"));
+    expect(left.sessionId).toBe("session/a");
+    expect(right.sessionId).toBe("session:b");
+    expect(left.safeSessionId).toMatch(/^session_a-[a-f0-9]{12}$/);
+    expect(right.safeSessionId).toMatch(/^session_b-[a-f0-9]{12}$/);
+    expect(left.path).toBe(join(dir, "sessions", left.safeSessionId, "tool-results", "same.txt"));
+    expect(right.path).toBe(join(dir, "sessions", right.safeSessionId, "tool-results", "same.txt"));
     expect(await store.read(left)).toBe("left");
     expect(await store.read(right)).toBe("right");
     expect(await store.readMeta("same", "session/a")).toMatchObject({
       id: "same",
-      sessionId: "session_a",
+      sessionId: "session/a",
+      safeSessionId: left.safeSessionId,
       path: left.path,
     });
     expect(await store.readMeta("same", "session:b")).toMatchObject({
       id: "same",
-      sessionId: "session_b",
+      sessionId: "session:b",
+      safeSessionId: right.safeSessionId,
       path: right.path,
     });
   });
