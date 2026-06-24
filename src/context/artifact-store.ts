@@ -1,16 +1,18 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, readdir, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rmdir, unlink, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 const DEFAULT_TTL_HOURS = 168;
 const DEFAULT_MAX_TOTAL_BYTES = 200 * 1024 * 1024;
+const DEFAULT_SESSION_ID = "default";
 const SAFE_ID_RE = /^[A-Za-z0-9._-]+$/;
+const UNSAFE_SESSION_CHAR_RE = /[^A-Za-z0-9._-]/g;
 
 let generatedIdCounter = 0;
 
 export interface ToolResultArtifactMeta {
   id: string;
-  sessionId?: string;
+  sessionId: string;
   toolName: string;
   argsHash?: string;
   createdAt: string;
@@ -44,29 +46,32 @@ export interface CleanupResult {
 }
 
 interface StoredArtifact {
+  key: string;
   meta: ToolResultArtifactMeta;
   createdAtMs: number;
 }
 
 export class ToolResultArtifactStore {
-  private readonly artifactDir: string;
+  private readonly sessionsDir: string;
   private readonly ttlHours: number;
   private readonly maxTotalBytes: number;
 
   constructor(opts: ToolResultArtifactStoreOptions) {
-    this.artifactDir = join(resolve(opts.baseDir), "tool-results");
+    this.sessionsDir = join(resolve(opts.baseDir), "sessions");
     this.ttlHours = opts.ttlHours ?? DEFAULT_TTL_HOURS;
     this.maxTotalBytes = opts.maxTotalBytes ?? DEFAULT_MAX_TOTAL_BYTES;
   }
 
   async write(input: WriteToolResultArtifactInput): Promise<ToolResultArtifactMeta> {
     const id = input.id ? assertSafeId(input.id) : generateId();
-    const path = this.contentPath(id);
+    const sessionId = sanitizeSessionId(input.sessionId);
+    const artifactDir = this.sessionArtifactDir(sessionId);
+    const path = this.contentPath(id, sessionId);
     const createdAt = new Date().toISOString();
     const ttlHours = input.ttlHours ?? this.ttlHours;
     const meta: ToolResultArtifactMeta = {
       id,
-      ...(input.sessionId !== undefined ? { sessionId: input.sessionId } : {}),
+      sessionId,
       toolName: input.toolName,
       argsHash: hashArgs(input.args),
       createdAt,
@@ -77,18 +82,20 @@ export class ToolResultArtifactStore {
       path,
     };
 
-    await mkdir(this.artifactDir, { recursive: true });
+    await mkdir(artifactDir, { recursive: true });
     await writeFile(path, input.output, "utf8");
-    await writeFile(this.metaPath(id), `${JSON.stringify(meta, null, 2)}\n`, "utf8");
+    await writeFile(this.metaPath(id, sessionId), `${JSON.stringify(meta, null, 2)}\n`, "utf8");
 
     return meta;
   }
 
   async read(metaOrId: ToolResultArtifactMeta | string): Promise<string | undefined> {
     const id = typeof metaOrId === "string" ? metaOrId : metaOrId.id;
+    const sessionId =
+      typeof metaOrId === "string" ? DEFAULT_SESSION_ID : sanitizeSessionId(metaOrId.sessionId);
 
     try {
-      return await readFile(this.contentPath(assertSafeId(id)), "utf8");
+      return await readFile(this.contentPath(assertSafeId(id), sessionId), "utf8");
     } catch (err) {
       if (isNodeError(err) && err.code === "ENOENT") {
         return undefined;
@@ -97,10 +104,12 @@ export class ToolResultArtifactStore {
     }
   }
 
-  async readMeta(id: string): Promise<ToolResultArtifactMeta | undefined> {
+  async readMeta(id: string, sessionId?: string): Promise<ToolResultArtifactMeta | undefined> {
+    const safeSessionId = sanitizeSessionId(sessionId);
+
     try {
-      const raw = await readFile(this.metaPath(assertSafeId(id)), "utf8");
-      return parseMeta(raw);
+      const raw = await readFile(this.metaPath(assertSafeId(id), safeSessionId), "utf8");
+      return parseMeta(raw, safeSessionId);
     } catch (err) {
       if (isNodeError(err) && err.code === "ENOENT") {
         return undefined;
@@ -109,21 +118,27 @@ export class ToolResultArtifactStore {
     }
   }
 
-  async cleanup(now = new Date()): Promise<CleanupResult> {
-    await mkdir(this.artifactDir, { recursive: true });
+  async cleanup(sessionId: string, now?: Date): Promise<CleanupResult>;
+  async cleanup(now?: Date): Promise<CleanupResult>;
+  async cleanup(sessionIdOrNow?: string | Date, now?: Date): Promise<CleanupResult> {
+    const targetSessionId =
+      typeof sessionIdOrNow === "string" ? sanitizeSessionId(sessionIdOrNow) : undefined;
+    const cleanupNow = sessionIdOrNow instanceof Date ? sessionIdOrNow : (now ?? new Date());
 
-    const artifacts = await this.listArtifacts();
+    const artifacts = await this.listArtifacts(targetSessionId);
     const ordered = artifacts.toSorted(compareArtifactAge);
-    const deleted = new Set<string>();
+    const deletedKeys = new Set<string>();
+    const deleted: string[] = [];
     let totalBytes = ordered.reduce((sum, artifact) => sum + artifact.meta.sizeBytes, 0);
 
     for (const artifact of ordered) {
-      if (artifact.meta.pinned || !isExpired(artifact.meta, now)) {
+      if (artifact.meta.pinned || !isExpired(artifact.meta, cleanupNow)) {
         continue;
       }
 
-      await this.deleteArtifact(artifact.meta.id);
-      deleted.add(artifact.meta.id);
+      await this.deleteArtifact(artifact.meta.id, artifact.meta.sessionId);
+      deletedKeys.add(artifact.key);
+      deleted.push(artifact.meta.id);
       totalBytes -= artifact.meta.sizeBytes;
     }
 
@@ -132,62 +147,115 @@ export class ToolResultArtifactStore {
         if (totalBytes <= this.maxTotalBytes) {
           break;
         }
-        if (artifact.meta.pinned || deleted.has(artifact.meta.id)) {
+        if (artifact.meta.pinned || deletedKeys.has(artifact.key)) {
           continue;
         }
 
-        await this.deleteArtifact(artifact.meta.id);
-        deleted.add(artifact.meta.id);
+        await this.deleteArtifact(artifact.meta.id, artifact.meta.sessionId);
+        deletedKeys.add(artifact.key);
+        deleted.push(artifact.meta.id);
         totalBytes -= artifact.meta.sizeBytes;
       }
     }
 
     return {
-      deleted: [...deleted],
-      retained: ordered.map((artifact) => artifact.meta.id).filter((id) => !deleted.has(id)),
+      deleted,
+      retained: ordered
+        .filter((artifact) => !deletedKeys.has(artifact.key))
+        .map((artifact) => artifact.meta.id),
     };
   }
 
-  private async listArtifacts(): Promise<StoredArtifact[]> {
-    const entries = await readdir(this.artifactDir);
-    const artifacts: StoredArtifact[] = [];
+  async deleteSessionArtifacts(sessionId: string): Promise<CleanupResult> {
+    const safeSessionId = sanitizeSessionId(sessionId);
+    const artifactDir = this.sessionArtifactDir(safeSessionId);
+    const entries = await readDirIfExists(artifactDir);
+    const ids = new Set<string>();
 
     for (const entry of entries.toSorted()) {
-      if (!entry.endsWith(".json")) {
+      const id = artifactIdFromFilename(entry);
+      if (id === undefined) {
         continue;
       }
 
-      const id = entry.slice(0, -".json".length);
-      if (!SAFE_ID_RE.test(id)) {
-        continue;
-      }
+      await unlinkIfExists(join(artifactDir, entry));
+      ids.add(id);
+    }
 
-      const meta = await this.readMeta(id);
-      if (!meta) {
-        continue;
-      }
+    await rmdirIfEmpty(artifactDir);
+    await rmdirIfEmpty(this.sessionDir(safeSessionId));
 
-      artifacts.push({
-        meta,
-        createdAtMs: toTime(meta.createdAt),
-      });
+    return {
+      deleted: [...ids].toSorted(),
+      retained: [],
+    };
+  }
+
+  private async listArtifacts(sessionId?: string): Promise<StoredArtifact[]> {
+    const sessionIds = sessionId === undefined ? await this.listSessionIds() : [sessionId];
+    const artifacts: StoredArtifact[] = [];
+
+    for (const currentSessionId of sessionIds) {
+      const entries = await readDirIfExists(this.sessionArtifactDir(currentSessionId));
+
+      for (const entry of entries.toSorted()) {
+        if (!entry.endsWith(".json")) {
+          continue;
+        }
+
+        const id = entry.slice(0, -".json".length);
+        if (!SAFE_ID_RE.test(id)) {
+          continue;
+        }
+
+        const meta = await this.readMeta(id, currentSessionId);
+        if (!meta) {
+          continue;
+        }
+
+        artifacts.push({
+          key: artifactKey(meta),
+          meta,
+          createdAtMs: toTime(meta.createdAt),
+        });
+      }
     }
 
     return artifacts;
   }
 
-  private async deleteArtifact(id: string): Promise<void> {
+  private async listSessionIds(): Promise<string[]> {
+    const entries = await readDirIfExists(this.sessionsDir, { withFileTypes: true });
+    return entries
+      .filter((entry) => entry.isDirectory() && SAFE_ID_RE.test(entry.name))
+      .map((entry) => entry.name)
+      .toSorted();
+  }
+
+  private async deleteArtifact(id: string, sessionId: string): Promise<void> {
     const safeId = assertSafeId(id);
-    await unlinkIfExists(this.contentPath(safeId));
-    await unlinkIfExists(this.metaPath(safeId));
+    const safeSessionId = sanitizeSessionId(sessionId);
+    const artifactDir = this.sessionArtifactDir(safeSessionId);
+    await unlinkIfExists(this.contentPath(safeId, safeSessionId));
+    await unlinkIfExists(this.metaPath(safeId, safeSessionId));
+    await rmdirIfEmpty(artifactDir);
+    await rmdirIfEmpty(this.sessionDir(safeSessionId));
   }
 
-  private contentPath(id: string): string {
-    return join(this.artifactDir, `${id}.txt`);
+  private contentPath(id: string, sessionId: string): string {
+    return join(this.sessionArtifactDir(sessionId), `${id}.txt`);
   }
 
-  private metaPath(id: string): string {
-    return join(this.artifactDir, `${id}.json`);
+  private metaPath(id: string, sessionId: string): string {
+    return join(this.sessionArtifactDir(sessionId), `${id}.json`);
+  }
+
+  private sessionArtifactDir(sessionId: string): string {
+    return join(this.sessionDir(sessionId), "tool-results");
+  }
+
+  private sessionDir(sessionId: string): string {
+    return join(this.sessionsDir, sessionId);
   }
 }
 
@@ -201,6 +269,20 @@ function assertSafeId(id: string): string {
     throw new Error(`Invalid artifact id: ${id}`);
   }
   return id;
+}
+
+function sanitizeSessionId(sessionId: string | undefined): string {
+  const sanitized = (sessionId ?? DEFAULT_SESSION_ID).replace(UNSAFE_SESSION_CHAR_RE, "_");
+
+  if (sanitized === "" || sanitized === "." || sanitized === "..") {
+    return "_";
+  }
+
+  return sanitized;
+}
+
+function artifactKey(meta: ToolResultArtifactMeta): string {
+  return `${meta.sessionId}/${meta.id}`;
 }
 
 function hashArgs(args: unknown): string {
@@ -232,7 +314,7 @@ function toStableJsonValue(value: unknown): unknown {
   return value;
 }
 
-function parseMeta(raw: string): ToolResultArtifactMeta | undefined {
+function parseMeta(raw: string, sessionId: string): ToolResultArtifactMeta | undefined {
   const parsed = JSON.parse(raw) as unknown;
 
   if (!isRecord(parsed)) {
@@ -240,7 +322,6 @@ function parseMeta(raw: string): ToolResultArtifactMeta | undefined {
   }
 
   const id = parsed.id;
-  const sessionId = parsed.sessionId;
   const toolName = parsed.toolName;
   const argsHash = parsed.argsHash;
   const createdAt = parsed.createdAt;
@@ -265,7 +346,7 @@ function parseMeta(raw: string): ToolResultArtifactMeta | undefined {
 
   return {
     id,
-    ...(typeof sessionId === "string" ? { sessionId } : {}),
+    sessionId,
     toolName,
     ...(typeof argsHash === "string" ? { argsHash } : {}),
     createdAt,
@@ -285,7 +366,10 @@ function compareArtifactAge(left: StoredArtifact, right: StoredArtifact): number
   if (left.createdAtMs !== right.createdAtMs) {
     return left.createdAtMs - right.createdAtMs;
   }
-  return left.meta.id.localeCompare(right.meta.id);
+  if (left.meta.id !== right.meta.id) {
+    return left.meta.id.localeCompare(right.meta.id);
+  }
+  return left.meta.sessionId.localeCompare(right.meta.sessionId);
 }
 
 function toTime(value: string): number {
@@ -302,6 +386,51 @@ async function unlinkIfExists(path: string): Promise<void> {
     }
     throw err;
   }
+}
+
+async function rmdirIfEmpty(path: string): Promise<void> {
+  try {
+    await rmdir(path);
+  } catch (err) {
+    if (isNodeError(err) && (err.code === "ENOENT" || err.code === "ENOTEMPTY")) {
+      return;
+    }
+    throw err;
+  }
+}
+
+async function readDirIfExists(path: string): Promise<string[]>;
+async function readDirIfExists(
+  path: string,
+  options: { withFileTypes: true },
+): Promise<Array<{ name: string; isDirectory(): boolean }>>;
+async function readDirIfExists(
+  path: string,
+  options?: { withFileTypes: true },
+): Promise<string[] | Array<{ name: string; isDirectory(): boolean }>> {
+  try {
+    return options ? await readdir(path, options) : await readdir(path);
+  } catch (err) {
+    if (isNodeError(err) && err.code === "ENOENT") {
+      return [];
+    }
+    throw err;
+  }
+}
+
+function artifactIdFromFilename(filename: string): string | undefined {
+  if (filename.endsWith(".txt")) {
+    return safeArtifactIdFromFilename(filename, ".txt");
+  }
+  if (filename.endsWith(".json")) {
+    return safeArtifactIdFromFilename(filename, ".json");
+  }
+  return undefined;
+}
+
+function safeArtifactIdFromFilename(filename: string, ext: ".txt" | ".json"): string | undefined {
+  const id = filename.slice(0, -ext.length);
+  return SAFE_ID_RE.test(id) ? id : undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
