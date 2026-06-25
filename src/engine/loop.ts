@@ -14,7 +14,7 @@ import type { LLMProvider } from "../provider/interface.js";
 import type { Message, ToolCall, ToolResult } from "../schema/message.js";
 import type { Registry } from "../tools/registry.js";
 import type { AgentRunner } from "../tools/subagent.js";
-import type { SubagentRunOptions } from "../tools/subagent.js";
+import type { SubagentRunOptions, SubagentResult } from "../tools/subagent.js";
 import type { Compactor } from "../context/compactor.js";
 import { PromptComposer } from "../context/composer.js";
 import { RecoveryManager } from "../context/recovery.js";
@@ -28,6 +28,12 @@ import type { ToolObservationProcessor } from "../tools/tool-result-observation.
 
 /** WorkingMemory 滑动窗口大小:截取最近 N 条消息供压缩器判断(含远期历史) */
 const DEFAULT_WORKING_MEMORY_LIMIT = 20;
+
+/** 子代理 summary 低于此字数则触发一轮扩写(对齐 Kimi Code SUMMARY_MIN_LENGTH) */
+const SUBAGENT_SUMMARY_MIN_CHARS = 200;
+/** summary 续写提示词:要求子代理把过短的总结扩写成完整汇报 */
+const SUBAGENT_SUMMARY_CONTINUATION_PROMPT =
+  "你上一轮的总结过于简短,主架构师无法据此决策。请重新输出一份结构完整、细节充分的总结汇报:包括你探索了哪些文件/发现了什么、关键结论、以及尚存的不确定点。不要调用任何工具,直接用纯文本回答。";
 
 export interface AgentEngineOptions {
   provider: LLMProvider;
@@ -517,14 +523,14 @@ export class AgentEngine implements AgentRunner {
    * - 强制关闭慢思考(子任务急速响应)
    * - 退出条件:不调工具 = 做好总结,返回 content
    *
-   * @returns 子智能体的纯文本总结汇报
+   * @returns 子智能体的纯文本总结汇报及外部化产物引用
    */
   async runSub(
     taskPrompt: string,
     readOnlyRegistry: Registry,
     reporter?: Reporter,
     opts: SubagentRunOptions = {},
-  ): Promise<string> {
+  ): Promise<SubagentResult> {
     const rep = reporter ?? new SilentReporter();
     logger.info(
       { task: taskPrompt.slice(0, 100) },
@@ -549,6 +555,8 @@ export class AgentEngine implements AgentRunner {
     const depth = opts.depth ?? 0;
     const maxSpawnDepth = opts.maxSpawnDepth ?? 2;
     let turnCount = 0;
+    // 收集子代理探索期间被外部化的大型工具输出磁盘路径,回传给主 Agent 供回查。
+    const artifactPaths: string[] = [];
 
     for (;;) {
       turnCount++;
@@ -580,11 +588,34 @@ export class AgentEngine implements AgentRunner {
       // 【核心退出条件】子智能体不调工具了,说明做好了总结汇报
       const toolCalls = actionResp.toolCalls ?? [];
       if (toolCalls.length === 0) {
+        // 【改动 B】summary 续写:子代理最终汇报过短(< 200 字)时,
+        // 再给一轮强制扩写,防止主 Agent 因信息不足而"失忆"。
+        // 对齐 Kimi Code 的 SUMMARY_MIN_LENGTH / SUMMARY_CONTINUATION_ATTEMPTS 设计。
+        // 约束:最多续写 1 次,且复用 turnCount 预算,不会无限循环。
+        let summary = actionResp.content;
+        if (summary.length < SUBAGENT_SUMMARY_MIN_CHARS && turnCount < maxSubTurns) {
+          contextHistory.push({
+            role: "user",
+            content: SUBAGENT_SUMMARY_CONTINUATION_PROMPT,
+          });
+          logger.info(
+            { turns: turnCount, summaryLen: summary.length },
+            `[Subagent] 📝 探路者总结过短,追加一轮扩写。`,
+          );
+          const continuationResp = await this.provider.generate(
+            this.compactor ? this.compactor.compactToBudget(contextHistory) : contextHistory,
+            [],
+          );
+          contextHistory.push(continuationResp);
+          if (continuationResp.content && continuationResp.content.trim().length > 0) {
+            summary = continuationResp.content;
+          }
+        }
         logger.info(
           { turns: turnCount },
           `[Subagent] ✅ 探路者完成 ${turnCount} 轮探索,返回总结。`,
         );
-        return actionResp.content;
+        return { summary, artifacts: artifactPaths };
       }
 
       // 执行只读工具的并发循环(Fork-Join,复用主循环的并发策略)
@@ -607,6 +638,11 @@ export class AgentEngine implements AgentRunner {
           finalOutput,
           `subagent:${toolCall.id}`,
         );
+        // 从外部化占位文��中提取磁盘路径,回传给主 Agent 供其用 read_file 回查。
+        const artifactPath = extractArtifactPath(observationOutput);
+        if (artifactPath !== undefined) {
+          artifactPaths.push(artifactPath);
+        }
         rep.onToolResult(`[Subagent] ${toolCall.name}`, observationOutput, result.isError);
         observations[i] = {
           role: "user",
@@ -626,6 +662,21 @@ export class AgentEngine implements AgentRunner {
       contextHistory.push(...observations);
     }
   }
+}
+
+/**
+ * 从 observationProcessor 返回的"已外部化"占位文本中提取 artifactPath。
+ * 该文本形如(tool-result-observation.ts 产物):
+ *   [大型工具输出已外部化]
+ *   tool: bash
+ *   ...
+ *   artifactPath: <绝对磁盘路径>
+ *   ...
+ * 提取出 path 行的值返回;无则返回 undefined。
+ */
+function extractArtifactPath(observation: string): string | undefined {
+  const match = /^artifactPath:\s*(.+)$/m.exec(observation);
+  return match?.[1]?.trim() || undefined;
 }
 
 function estimateTraceLength(messages: Message[]): number {
