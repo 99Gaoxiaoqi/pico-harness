@@ -18,6 +18,7 @@ import type { SubagentRunOptions, SubagentResult } from "../tools/subagent.js";
 import type { Compactor } from "../context/compactor.js";
 import type { ThinkingEffort } from "../provider/thinking.js";
 import { PromptComposer } from "../context/composer.js";
+import { SkillLoader } from "../context/skill.js";
 import { RecoveryManager } from "../context/recovery.js";
 import { SilentReporter, type Reporter } from "./reporter.js";
 import { ReminderInjector, ToolGuardrailController, type GuardrailOptions } from "./reminder.js";
@@ -527,8 +528,8 @@ export class AgentEngine implements AgentRunner {
    * 无论怎么折腾犯错,主干 contextHistory 依然纯洁如初。
    *
    * 防污染机制:
-   * - 仅传入 readOnlyRegistry(只读工具,爆炸半径限制)
-   * - 专属 System Prompt 严厉警告必须用工具不许偷懒
+   * - 仅传入受限 Registry(只读/受控工具,爆炸半径限制)
+   * - 专属 System Prompt 严厉警告必须用工具不许偷懒,并暴露项目 Skill 索引
    * - maxSubTurns=10 防卡死
    * - 强制关闭慢思考(子任务急速响应)
    * - 退出条件:不调工具 = 做好总结,返回 content
@@ -547,13 +548,23 @@ export class AgentEngine implements AgentRunner {
       `[Subagent] 🚀 拉起探路者,任务: ${taskPrompt.slice(0, 100)} (thinkingEffort: ${this.thinkingEffort},继承自主 Agent)`,
     );
 
-    // 子智能体专属 System Prompt:严厉警告必须用工具,不许凭空猜测
+    const initialToolNames = new Set(readOnlyRegistry.getAvailableTools().map((tool) => tool.name));
+    const canViewSkills = initialToolNames.has("skill_view");
+    const skillIndex = canViewSkills ? await new SkillLoader(this.workDir).loadAll() : "";
+    const toolExamples = canViewSkills
+      ? "bash 的 find/grep、read_file、skill_view"
+      : "bash 的 find/grep、read_file";
+
+    // 子智能体专属 System Prompt:严厉警告必须用工具,不许凭空猜测。
+    // 若工作区配置了 Skills,只注入 name/description 索引;正文仍由 skill_view 按需读取。
     const subSystemPrompt = `你是专门负责深度探索的探路者 (Explorer Subagent)。
 你的任务是根据主架构师的指令,在当前工作区内仔细阅读代码、查阅日志,搜集足够的信息。
 【核心纪律】
-1. 你必须、且只能依靠内置工具(如 bash 的 find/grep,或 read_file)去寻找答案。绝对不允许凭空猜测。
+1. 你必须、且只能依靠内置工具(如 ${toolExamples})去寻找答案。绝对不允许凭空猜测。
 2. 如果你没有找到确切的答案,你必须继续使用工具深入搜索。
-3. 当且仅当你找到了确切的线索后,停止调用工具,直接输出一段纯文本作为你的终极汇报。主架构师会根据你的汇报决定下一步。`;
+3. 当且仅当你找到了确切的线索后,停止调用工具,直接输出一段纯文本作为你的终极汇报。主架构师会根据你的汇报决定下一步。${
+      skillIndex ? `\n\n${skillIndex}` : ""
+    }`;
 
     // 全新纯净上下文:不共享主 Agent 的 Session
     const contextHistory: Message[] = [
@@ -648,7 +659,7 @@ export class AgentEngine implements AgentRunner {
           finalOutput,
           `subagent:${toolCall.id}`,
         );
-        // 从外部化占位文��中提取磁盘路径,回传给主 Agent 供其用 read_file 回查。
+        // 从外部化占位文本中提取磁盘路径,回传给主 Agent 供其用 read_file 回查。
         const artifactPath = extractArtifactPath(observationOutput);
         if (artifactPath !== undefined) {
           artifactPaths.push(artifactPath);

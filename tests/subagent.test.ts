@@ -2,7 +2,7 @@
 // 覆盖:SubagentTool execute / RunSub 受限循环 / maxSubTurns 强制召回 /
 // 只读工具隔离 / 物理隔离(子探索不污染主) / 退出条件。
 
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -14,6 +14,7 @@ import {
   type AgentRunner,
   type SubagentResult,
 } from "../src/tools/subagent.js";
+import { SkillLoader, SkillViewTool } from "../src/context/skill.js";
 import { DelegationManager, DelegateStatusTool } from "../src/tools/delegation-manager.js";
 import { createSubagentRegistryFactory } from "../src/tools/delegation-registry.js";
 import { ToolRegistry, ReadFileTool, BashTool } from "../src/tools/registry-impl.js";
@@ -224,6 +225,41 @@ describe("DelegateTaskTool", () => {
     expect(parsed.results[0]!.summary).toContain("只读");
   });
 
+  it("子代理注册表包含 skill_view 并可按需读取项目 Skill", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-subagent-skill-"));
+    await mkdir(join(workDir, ".claw", "skills", "deploy"), { recursive: true });
+    await writeFile(
+      join(workDir, ".claw", "skills", "deploy", "SKILL.md"),
+      "---\nname: deploy\ndescription: 部署到生产时使用\n---\n\n# 部署指南\n先跑 npm run build",
+    );
+
+    const runner: AgentRunner = {
+      async runSub(_task, registry) {
+        const toolNames = registry.getAvailableTools().map((tool) => tool.name);
+        expect(toolNames).toContain("skill_view");
+        const result = await registry.execute({
+          id: "skill-1",
+          name: "skill_view",
+          arguments: JSON.stringify({ name: "deploy" }),
+        });
+        expect(result.isError).toBe(false);
+        return subResult(result.output);
+      },
+    };
+    const manager = new DelegationManager();
+    const registryFactory = createSubagentRegistryFactory({
+      workDir,
+      runner,
+      manager,
+    });
+    const tool = new DelegateTaskTool(runner, registryFactory, manager);
+
+    const output = await tool.execute(JSON.stringify({ goal: "查看部署技能", mode: "explore" }));
+    const parsed = JSON.parse(output) as { results: Array<{ summary: string }> };
+
+    expect(parsed.results[0]!.summary).toContain("部署指南");
+  });
+
   it("tasks 批量委派会并行执行并保持结果顺序", async () => {
     let inFlight = 0;
     let maxInFlight = 0;
@@ -328,7 +364,11 @@ describe("AgentEngine.runSub", () => {
       },
       { role: "assistant", content: "找到了密码是 42" },
       // summary < 200 字,触发一轮续写扩写
-      { role: "assistant", content: "找到了密码是 42。通过 read_file 读取 a.txt 后确认目标值,无需进一步探索,任务完成。" },
+      {
+        role: "assistant",
+        content:
+          "找到了密码是 42。通过 read_file 读取 a.txt 后确认目标值,无需进一步探索,任务完成。",
+      },
     ]);
     const executed: ToolCall[] = [];
     const registry = mockReadOnlyRegistry(executed);
@@ -338,6 +378,46 @@ describe("AgentEngine.runSub", () => {
     expect(summary).toContain("找到了密码是 42");
     expect(executed).toHaveLength(1);
     expect(executed[0]!.name).toBe("read_file");
+  });
+
+  it("子智能体 System Prompt 注入 Skill 摘要但不常驻完整正文", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-runsub-skill-"));
+    await mkdir(join(workDir, ".claw", "skills", "deploy"), { recursive: true });
+    await writeFile(
+      join(workDir, ".claw", "skills", "deploy", "SKILL.md"),
+      "---\nname: deploy\ndescription: 部署到生产时使用\n---\n\n# 部署指南\n先跑 npm run build",
+    );
+
+    let firstMessages: Message[] = [];
+    const provider = new (class implements LLMProvider {
+      async generate(messages: Message[]): Promise<Message> {
+        firstMessages = messages;
+        return {
+          role: "assistant",
+          content:
+            "已确认子代理启动时能看到项目 Skill 摘要,并保持正文按需读取,避免把完整操作指南常驻注入上下文。",
+        };
+      }
+    })();
+    const registry = new ToolRegistry();
+    registry.register(new ReadFileTool(workDir));
+    registry.register(new BashTool(workDir));
+    registry.register(new SkillViewTool(new SkillLoader(workDir)));
+    const engine = new AgentEngine({
+      provider,
+      registry,
+      workDir,
+      enableThinking: false,
+    });
+
+    await engine.runSub("查看项目技能", registry);
+
+    const systemPrompt = firstMessages[0]!.content;
+    expect(systemPrompt).toContain("可用专业技能");
+    expect(systemPrompt).toContain("deploy");
+    expect(systemPrompt).toContain("部署到生产时使用");
+    expect(systemPrompt).not.toContain("部署指南");
+    expect(systemPrompt).not.toContain("npm run build");
   });
 
   it("超过 maxSubTurns(10) 被强制召回", async () => {
@@ -361,7 +441,11 @@ describe("AgentEngine.runSub", () => {
     const provider = new ScriptedProvider([
       { role: "assistant", content: "leaf summary" },
       // summary < 200 字,触发一轮续写扩写
-      { role: "assistant", content: "leaf summary:作为叶子节点完成任务,因 depth 已达 maxSpawnDepth 上限,不再继续向下委派,直接返回结论。" },
+      {
+        role: "assistant",
+        content:
+          "leaf summary:作为叶子节点完成任务,因 depth 已达 maxSpawnDepth 上限,不再继续向下委派,直接返回结论。",
+      },
     ]);
     const registry = mockReadOnlyRegistry();
     const engine = makeEngine(provider, registry);
@@ -384,7 +468,10 @@ describe("AgentEngine.runSub", () => {
       },
       { role: "assistant", content: "子总结:密码是 42" },
       // summary < 200 字,触发一轮续写扩写
-      { role: "assistant", content: "子总结:密码是 42。已通过 bash 工具完成探索并定位目标值,任务完成。" },
+      {
+        role: "assistant",
+        content: "子总结:密码是 42。已通过 bash 工具完成探索并定位目标值,任务完成。",
+      },
     ]);
     const registry = mockReadOnlyRegistry();
     const engine = makeEngine(provider, registry);
@@ -410,7 +497,11 @@ describe("AgentEngine.runSub", () => {
       },
       { role: "assistant", content: "写不了,我汇报" },
       // summary < 200 字,触发一轮续写扩写
-      { role: "assistant", content: "写不了,我汇报。当前只读注册表不含 write_file 工具,尝试调用时返回工具不存在,无法执行写操作,任务结束。" },
+      {
+        role: "assistant",
+        content:
+          "写不了,我汇报。当前只读注册表不含 write_file 工具,尝试调用时返回工具不存在,无法执行写操作,任务结束。",
+      },
     ]);
     const registry = mockReadOnlyRegistry();
     const engine = makeEngine(provider, registry);
@@ -425,7 +516,11 @@ describe("AgentEngine.runSub", () => {
     const provider = new ScriptedProvider([
       { role: "assistant", content: "我凭已知信息直接汇报:答案是 42" },
       // summary < 200 字,触发一轮续写扩写
-      { role: "assistant", content: "我凭已知信息直接汇报:答案是 42。本任务无需调用任何工具,基于既有上下文即可给出确定结论。" },
+      {
+        role: "assistant",
+        content:
+          "我凭已知信息直接汇报:答案是 42。本任务无需调用任何工具,基于既有上下文即可给出确定结论。",
+      },
     ]);
     const registry = mockReadOnlyRegistry();
     const engine = makeEngine(provider, registry);
@@ -443,7 +538,11 @@ describe("AgentEngine.runSub", () => {
       },
       { role: "assistant", content: "重读后找到了" },
       // summary < 200 字,触发一轮续写扩写
-      { role: "assistant", content: "重读后找到了目标信息。首次读取 missing.txt 时报错,经 Recovery 锦囊引导后重新定位并成功读取,任务完成。" },
+      {
+        role: "assistant",
+        content:
+          "重读后找到了目标信息。首次读取 missing.txt 时报错,经 Recovery 锦囊引导后重新定位并成功读取,任务完成。",
+      },
     ]);
     // 这个 registry 的 execute 返回错误
     const errorRegistry: Registry = {

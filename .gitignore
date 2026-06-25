@@ -10,7 +10,13 @@ dist/
 .env.*.local
 
 # Agent 运行时产物(traces/sessions/permissions 等)
-.claw/
+.claw/*
+!.claw/skills/
+!.claw/skills/**
+.claw/artifacts/
+.claw/traces/
+.claw/sessions/
+.claw/permissions*
 
 # Logs
 *.log

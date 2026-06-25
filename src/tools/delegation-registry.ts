@@ -7,6 +7,7 @@ import {
 } from "./registry-impl.js";
 import type { RequestMiddleware } from "./registry.js";
 import { isDangerousCommand, isHardlineCommand } from "../approval/manager.js";
+import { SkillLoader, SkillViewTool } from "../context/skill.js";
 import type { AgentRunner, SubagentRegistryFactory, SubagentRegistryRequest } from "./subagent.js";
 import { DelegateTaskTool } from "./subagent.js";
 import { DelegateStatusTool, type DelegationManager } from "./delegation-manager.js";
@@ -24,6 +25,7 @@ export function createSubagentRegistryFactory(
   return (request: SubagentRegistryRequest) => {
     const registry = new ToolRegistry();
     registry.register(new ReadFileTool(config.workDir));
+    registry.register(new SkillViewTool(new SkillLoader(config.workDir)));
 
     const bash = new BashTool(config.workDir);
     if (request.mode === "explore") {

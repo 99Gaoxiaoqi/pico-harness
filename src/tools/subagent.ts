@@ -328,7 +328,7 @@ export class DelegateTaskTool implements BaseTool {
 export { SpawnSubagentTool as SubagentTool };
 
 /**
- * 把子智能体执行结果��式化为回传给主 Agent 的文本。
+ * 把子智能体执行结果格式化为回传给主 Agent 的文本。
  * summary 是轻量总结;若有被外部化的大型工具输出,附上其磁盘路径,
  * 提示主 Agent 可用 read_file 回查原文(路径均在 workDir 内)。
  */

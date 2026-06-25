@@ -61,7 +61,7 @@ describe("anthropicBudgetTokens", () => {
   });
 });
 
-// ── CLI 解析兼容 ──────────���───────────────────────────────────────
+// ── CLI 解析兼容 ──────────────────────────────────────────────────
 
 describe("resolveThinkingEffort", () => {
   it("undefined → off", () => {
@@ -154,7 +154,9 @@ describe("OpenAIProvider body 注入 reasoning_effort", () => {
     fetchSpy.mockRestore();
   });
 
-  async function captureBody(thinkingEffort: ThinkingEffort | undefined): Promise<Record<string, unknown>> {
+  async function captureBody(
+    thinkingEffort: ThinkingEffort | undefined,
+  ): Promise<Record<string, unknown>> {
     const { OpenAIProvider } = await import("../src/provider/openai.js");
     const provider = new OpenAIProvider({
       baseURL: "http://localhost",
@@ -206,7 +208,9 @@ describe("ClaudeProvider body 注入 thinking.budget_tokens", () => {
     fetchSpy.mockRestore();
   });
 
-  async function captureBody(thinkingEffort: ThinkingEffort | undefined): Promise<Record<string, unknown>> {
+  async function captureBody(
+    thinkingEffort: ThinkingEffort | undefined,
+  ): Promise<Record<string, unknown>> {
     const { ClaudeProvider } = await import("../src/provider/claude.js");
     const provider = new ClaudeProvider({
       baseURL: "http://localhost",

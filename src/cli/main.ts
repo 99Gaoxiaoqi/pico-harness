@@ -65,6 +65,7 @@ function buildReadOnlyRegistry(workDir: string): ToolRegistry {
   const registry = new ToolRegistry({ truncateResults: false });
   registry.register(new ReadFileTool(workDir));
   registry.register(new BashTool(workDir));
+  registry.register(new SkillViewTool(new SkillLoader(workDir)));
   return registry;
 }
 
