@@ -6,6 +6,7 @@ import { TerminalReporter, type Reporter } from "../engine/reporter.js";
 import { Compactor } from "../context/compactor.js";
 import { ToolResultArtifactStore } from "../context/artifact-store.js";
 import { createContextBudget, estimateTokenBudgetAsChars } from "../context/context-budget.js";
+import { PromptComposer } from "../context/composer.js";
 import { SkillLoader, SkillViewTool } from "../context/skill.js";
 import {
   createRawProvider,
@@ -109,6 +110,11 @@ export async function runAgentFromCli(
         );
   const registry = buildRegistry(workDir);
   const observationProcessor = buildObservationProcessor(workDir);
+  // 默认(非 Plan Mode)路径预组装 System Prompt:加载 AGENTS.md + Skills 清单,
+  // 避免 loop.ts 退化到硬编码英文兜底。Plan Mode 下由 buildSystemPrompt() 每轮动态重组,故此处不传。
+  const systemPrompt = options.planMode
+    ? undefined
+    : await new PromptComposer(workDir).build();
   const engine = new AgentEngine({
     provider: trackedProvider,
     registry,
@@ -116,6 +122,7 @@ export async function runAgentFromCli(
     enableThinking: options.enableThinking ?? true,
     ...(options.thinkingEffort !== undefined ? { thinkingEffort: options.thinkingEffort } : {}),
     planMode: options.planMode ?? false,
+    systemPrompt,
     compactor: buildCompactor(kind, providerConfig.model),
     observationProcessor,
     reporter: dependencies.reporter ?? new TerminalReporter(),

@@ -1,4 +1,4 @@
-// Skill 加载器:扫描 .claw/skills/*/SKILL.md,解析 YAML frontmatter + Markdown 正文。
+// Skill 加载器:扫描 .claw/skills/**/SKILL.md,解析 YAML frontmatter + Markdown 正文。
 // 对应课程第 10 讲 internal/context/skill.go。
 //
 // 遵循 Agent Skills 规范 (agentskills.io):
@@ -6,11 +6,31 @@
 // 随后是 Markdown 格式的执行指令正文。
 // 渐进式暴露:启动时只加载元数据与正文,按需提供给智能体。
 
-import { readFile, readdir } from "node:fs/promises";
-import { join } from "node:path";
-import type { Dirent } from "node:fs";
+import { readFile, readdir, stat } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
+import type { Dirent, Stats } from "node:fs";
+import * as yaml from "js-yaml";
 import type { BaseTool } from "../tools/registry.js";
 import type { ToolDefinition } from "../schema/message.js";
+import { logger } from "../observability/logger.js";
+
+// agentskills.io 规范的元数据长度上限,超长截断避免撑爆渐进式暴露清单
+const MAX_NAME_LENGTH = 64;
+const MAX_DESCRIPTION_LENGTH = 1024;
+
+// 递归扫描时跳过的目录:VCS、依赖、虚拟环境、缓存、构建产物。
+// 与 Hermes EXCLUDED_SKILL_DIRS 对齐,避免误扫 node_modules 等巨型目录。
+const EXCLUDED_SKILL_DIRS: ReadonlySet<string> = new Set([
+  ".git",
+  ".github",
+  "node_modules",
+  ".venv",
+  "venv",
+  "__pycache__",
+  ".cache",
+  "dist",
+  "build",
+]);
 
 /** 从 SKILL.md 中解析出的标准化技能结构 */
 export interface Skill {
@@ -27,6 +47,11 @@ export interface SkillSummary {
 
 /** 负责从本地文件系统中加载并解析符合规范的技能模板 */
 export class SkillLoader {
+  // mtime+size 缓存:父目录元数据未变则复用上次解析结果,避免全量扫描+读取。
+  // 简化约定:单个 SKILL.md 的内容编辑不会改变父目录 mtime,这类变更不感知,
+  // 仅新增/删除技能目录时失效——对技能低频变更场景可接受。
+  private cache?: { skills: Skill[]; mtimeMs: number; size: number };
+
   constructor(private readonly workDir: string) {}
 
   /**
@@ -58,26 +83,48 @@ export class SkillLoader {
 
   private async loadSkillFiles(): Promise<Skill[]> {
     const skillBaseDir = join(this.workDir, ".claw", "skills");
-    let entries: Dirent[];
+
+    // 先取父目录 stat:mtime+size 未变则直接复用缓存
+    let dirStat: Stats;
     try {
-      entries = await readdir(skillBaseDir, { withFileTypes: true });
-    } catch {
-      // 目录不存在,静默返回
+      dirStat = await stat(skillBaseDir);
+    } catch (err) {
+      // ENOENT:工作区未配置技能目录,静默返回空
+      if (isErrnoException(err, "ENOENT")) return [];
+      // 其他错误(权限等)记 warn 后返回空,不让技能加载阻断主流程
+      logger.warn({ err }, "读取技能目录失败");
       return [];
     }
 
+    if (
+      this.cache &&
+      this.cache.mtimeMs === dirStat.mtimeMs &&
+      this.cache.size === dirStat.size
+    ) {
+      return this.cache.skills;
+    }
+
+    const skillFiles = await walkForSkillMd(skillBaseDir);
     const skills: Skill[] = [];
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
-      const skillFile = join(skillBaseDir, entry.name, "SKILL.md");
+    for (const file of skillFiles) {
       try {
-        const content = await readFile(skillFile, "utf8");
-        skills.push(parseSkillMD(content));
-      } catch {
-        // 该技能目录无 SKILL.md,跳过
+        const content = await readFile(file, "utf8");
+        // frontmatter 无 name 时回退到 SKILL.md 所在目录名(对齐 Hermes)
+        const fallbackName = basename(dirname(file));
+        skills.push(parseSkillMD(content, fallbackName));
+      } catch (err) {
+        // 区分权限/编码类可预期错误(debug 跳过)与其他异常(warn 跳过)
+        if (isErrnoException(err, "EACCES") || isErrnoException(err, "EISDIR")) {
+          logger.debug({ err, file }, "跳过不可读的 SKILL.md");
+        } else {
+          logger.warn({ err, file }, "解析 SKILL.md 失败,跳过");
+        }
       }
     }
-    return skills.sort((a, b) => a.name.localeCompare(b.name));
+
+    const sorted = skills.sort((a, b) => a.name.localeCompare(b.name));
+    this.cache = { skills: sorted, mtimeMs: dirStat.mtimeMs, size: dirStat.size };
+    return sorted;
   }
 }
 
@@ -105,47 +152,164 @@ export class SkillViewTool implements BaseTool {
   }
 
   async execute(args: string): Promise<string> {
-    let parsed: { name?: string };
+    let parsed: { name?: unknown };
     try {
-      parsed = JSON.parse(args) as { name?: string };
+      parsed = JSON.parse(args) as { name?: unknown };
     } catch {
       throw new Error("参数解析失败:期望 JSON 含 name 字段");
     }
-    const name = parsed.name ?? "";
+    // 类型校验:name 必须是字符串,拒绝 null/数字等畸形入参
+    if (typeof parsed.name !== "string") {
+      throw new Error("skill_view 缺少 name 参数或 name 非字符串");
+    }
+    const name = parsed.name.trim();
     if (!name) {
       throw new Error("skill_view 缺少 name 参数");
     }
     const body = await this.loader.viewBody(name);
     if (!body) {
-      throw new Error(`未找到技能: ${name}`);
+      // 报错时附带可用技能清单,便于调用方自我纠偏(对齐 Hermes skill_view)
+      const all = await this.loader.listSummaries();
+      const names = all.map((s) => s.name).join(", ");
+      throw new Error(`未找到技能: ${name}。可用技能: ${names}`);
     }
     return body;
   }
 }
 
-/** 极简解析带有 YAML Frontmatter 的 Markdown 内容 */
-export function parseSkillMD(content: string): Skill {
-  const skill: Skill = {
-    name: "Unknown Skill",
-    description: "No description provided.",
-    body: content, // 默认全量作为 body
-  };
-
-  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n([\s\S]*)$/);
-  if (match) {
-    const frontmatter = match[1] ?? "";
-    skill.body = (match[2] ?? "").trim();
-
-    // 逐行提取 metadata
-    for (const rawLine of frontmatter.split("\n")) {
-      const line = rawLine.trim();
-      if (line.startsWith("name:")) {
-        skill.name = line.slice("name:".length).trim();
-      } else if (line.startsWith("description:")) {
-        skill.description = line.slice("description:".length).trim();
-      }
-    }
+/**
+ * 递归扫描技能目录,返回所有 SKILL.md 的绝对路径(已排除依赖/缓存等目录)。
+ * 跟随符号链接:对 Dirent.isSymbolicLink 用 stat 确认真实目标是否目录,
+ * 与 Hermes os.walk(followlinks=True) 行为一致。
+ */
+async function walkForSkillMd(dir: string): Promise<string[]> {
+  let entries: Dirent[];
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch (err) {
+    // 权限不足或竞态消失:静默跳过该子树
+    if (isErrnoException(err, "EACCES") || isErrnoException(err, "ENOENT")) return [];
+    logger.warn({ err, dir }, "扫描技能子目录失败");
+    return [];
   }
 
-  return skill;
+  const results: string[] = [];
+  for (const entry of entries) {
+    if (entry.name === "SKILL.md" && entry.isFile()) {
+      results.push(join(dir, entry.name));
+      continue;
+    }
+    // 跳过 VCS/依赖/缓存等目录,避免误入 node_modules 等巨型子树
+    if (EXCLUDED_SKILL_DIRS.has(entry.name)) continue;
+
+    let isDir = entry.isDirectory();
+    // 符号链接用 stat 跟随确认真实目标类型,避免漏掉链接形式的技能目录
+    if (!isDir && entry.isSymbolicLink()) {
+      try {
+        const s = await stat(join(dir, entry.name));
+        isDir = s.isDirectory();
+      } catch {
+        // 断链或不可访问的符号链接,跳过
+        continue;
+      }
+    }
+    if (isDir) {
+      const nested = await walkForSkillMd(join(dir, entry.name));
+      for (const p of nested) results.push(p);
+    }
+  }
+  return results;
+}
+
+/** 判断异常是否为指定 code 的 Node ErrnoException */
+function isErrnoException(err: unknown, code: string): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    "code" in err &&
+    (err as { code: unknown }).code === code
+  );
+}
+
+/**
+ * 解析带有 YAML Frontmatter 的 SKILL.md 内容。
+ *
+ * 用 js-yaml 做真正的 frontmatter 解析(支持多行 block scalar、列表等),
+ * 解析失败时降级为逐行 key:value 容错(对齐 Hermes parse_frontmatter 的 try/fallback)。
+ * fallbackName 在 frontmatter 缺少 name 时使用,通常传入 SKILL.md 所在目录名。
+ */
+export function parseSkillMD(content: string, fallbackName = "Unknown Skill"): Skill {
+  // 剥离 BOM,避免某些编辑器写入的 BOM 破坏 YAML 解析与边界匹配
+  const stripped = content.replace(/^\uFEFF/, "");
+
+  // 匹配 frontmatter 块:开头 --- ... 闭合 ---。
+  // 闭合 --- 后的换行与 body 均可选,支持只有 frontmatter 无正文的文件。
+  const match = stripped.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n([\s\S]*))?$/);
+
+  if (!match) {
+    return {
+      name: fallbackName,
+      description: "",
+      body: stripped,
+    };
+  }
+
+  const frontmatterText = match[1] ?? "";
+  const body = (match[2] ?? "").trim();
+
+  let fm: Record<string, unknown> = {};
+  try {
+    const parsed = yaml.load(frontmatterText);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      fm = parsed as Record<string, unknown>;
+    }
+  } catch {
+    // 降级:畸形 YAML 用逐行 key:value 解析,保住 name/description 两个关键字段
+    fm = parseSimpleFrontmatter(frontmatterText);
+  }
+
+  const rawName = fm["name"];
+  const name =
+    typeof rawName === "string" && rawName.trim()
+      ? truncate(rawName.trim(), MAX_NAME_LENGTH)
+      : fallbackName;
+
+  return {
+    name,
+    description: normalizeDescription(fm["description"]),
+    body,
+  };
+}
+
+/** 降级 frontmatter 解析:逐行按首个冒号切分 key:value */
+function parseSimpleFrontmatter(text: string): Record<string, unknown> {
+  const fm: Record<string, unknown> = {};
+  for (const rawLine of text.split("\n")) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+    const idx = line.indexOf(":");
+    if (idx === -1) continue;
+    const key = line.slice(0, idx).trim();
+    const value = line.slice(idx + 1).trim();
+    if (key) fm[key] = value;
+  }
+  return fm;
+}
+
+/** 按 agentskills.io 规范截断 name */
+function truncate(s: string, max: number): string {
+  return s.length <= max ? s : s.slice(0, max);
+}
+
+/**
+ * 规范化 description:去空白、剥首尾引号、超长截断。
+ * 对齐 Hermes extract_skill_description 的 strip().strip("'\"") + 截断逻辑。
+ */
+function normalizeDescription(raw: unknown): string {
+  if (raw == null) return "";
+  let desc = String(raw).trim().replace(/^['"]+|['"]+$/g, "");
+  if (desc.length > MAX_DESCRIPTION_LENGTH) {
+    desc = desc.slice(0, MAX_DESCRIPTION_LENGTH - 3) + "...";
+  }
+  return desc;
 }
