@@ -8,7 +8,12 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { AgentEngine } from "../src/engine/loop.js";
 import { Session } from "../src/engine/session.js";
-import { DelegateTaskTool, SpawnSubagentTool, type AgentRunner } from "../src/tools/subagent.js";
+import {
+  DelegateTaskTool,
+  SpawnSubagentTool,
+  type AgentRunner,
+  type SubagentResult,
+} from "../src/tools/subagent.js";
 import { DelegationManager, DelegateStatusTool } from "../src/tools/delegation-manager.js";
 import { createSubagentRegistryFactory } from "../src/tools/delegation-registry.js";
 import { ToolRegistry, ReadFileTool, BashTool } from "../src/tools/registry-impl.js";
@@ -17,6 +22,11 @@ import type { Message, ToolDefinition, ToolCall, ToolResult } from "../src/schem
 import type { Registry } from "../src/tools/registry.js";
 
 /** 可编程的 Mock Provider:按预设响应序列依次返回 */
+/** Wrap a plain summary into a SubagentResult for mock runners. */
+function subResult(summary: string, artifacts: string[] = []): SubagentResult {
+  return { summary, artifacts };
+}
+
 class ScriptedProvider implements LLMProvider {
   constructor(private readonly responses: Message[]) {}
   private i = 0;
@@ -53,7 +63,7 @@ describe("SubagentTool", () => {
   it("name 和 definition 正确暴露", () => {
     const runner: AgentRunner = {
       async runSub() {
-        return "";
+        return subResult("");
       },
     };
     const tool = new SpawnSubagentTool(runner, mockReadOnlyRegistry());
@@ -67,7 +77,7 @@ describe("SubagentTool", () => {
   it("execute 调用 runner.runSub 并返回探索报告", async () => {
     const runner: AgentRunner = {
       async runSub(taskPrompt: string) {
-        return `已探索: ${taskPrompt}`;
+        return subResult(`已探索: ${taskPrompt}`);
       },
     };
     const tool = new SpawnSubagentTool(runner, mockReadOnlyRegistry());
@@ -79,7 +89,7 @@ describe("SubagentTool", () => {
   it("execute 参数缺失时报错", async () => {
     const runner: AgentRunner = {
       async runSub() {
-        return "";
+        return subResult("");
       },
     };
     const tool = new SpawnSubagentTool(runner, mockReadOnlyRegistry());
@@ -103,7 +113,7 @@ describe("SubagentTool", () => {
     const runner: AgentRunner = {
       async runSub() {
         called = true;
-        return "不应执行";
+        return subResult("不应执行");
       },
     };
     const tool = new SpawnSubagentTool(runner, mockReadOnlyRegistry(), {
@@ -123,7 +133,7 @@ describe("SubagentTool", () => {
     const runner: AgentRunner = {
       async runSub(_task, _registry, _reporter, opts) {
         seen.push(opts);
-        return "ok";
+        return subResult("ok");
       },
     };
     const tool = new SpawnSubagentTool(runner, mockReadOnlyRegistry(), {
@@ -142,7 +152,7 @@ describe("DelegateTaskTool", () => {
   it("暴露 Hermes 风格 delegate_task 主接口", () => {
     const runner: AgentRunner = {
       async runSub() {
-        return "";
+        return subResult("");
       },
     };
     const manager = new DelegationManager();
@@ -169,7 +179,7 @@ describe("DelegateTaskTool", () => {
           arguments: JSON.stringify({ path: "worker.txt", content: "from worker" }),
         });
         expect(result.isError).toBe(false);
-        return "worker wrote file";
+        return subResult("worker wrote file");
       },
     };
     const manager = new DelegationManager();
@@ -197,7 +207,7 @@ describe("DelegateTaskTool", () => {
           arguments: JSON.stringify({ command: "echo unsafe > should-not-exist.txt" }),
         });
         expect(result.isError).toBe(true);
-        return result.output;
+        return subResult(result.output);
       },
     };
     const manager = new DelegationManager();
@@ -223,7 +233,7 @@ describe("DelegateTaskTool", () => {
         maxInFlight = Math.max(maxInFlight, inFlight);
         await new Promise((resolve) => setTimeout(resolve, 20));
         inFlight--;
-        return `done:${taskPrompt}`;
+        return subResult(`done:${taskPrompt}`);
       },
     };
     const manager = new DelegationManager({ maxConcurrentChildren: 3 });
@@ -248,7 +258,7 @@ describe("DelegateTaskTool", () => {
     const runner: AgentRunner = {
       async runSub() {
         await gate;
-        return "background complete";
+        return subResult("background complete");
       },
     };
     const manager = new DelegationManager();
@@ -281,7 +291,7 @@ describe("DelegateTaskTool", () => {
     const runner: AgentRunner = {
       async runSub() {
         called = true;
-        return "不应执行";
+        return subResult("不应执行");
       },
     };
     const manager = new DelegationManager();
@@ -317,13 +327,15 @@ describe("AgentEngine.runSub", () => {
         toolCalls: [{ id: "c1", name: "read_file", arguments: '{"path":"a.txt"}' }],
       },
       { role: "assistant", content: "找到了密码是 42" },
+      // summary < 200 字,触发一轮续写扩写
+      { role: "assistant", content: "找到了密码是 42。通过 read_file 读取 a.txt 后确认目标值,无需进一步探索,任务完成。" },
     ]);
     const executed: ToolCall[] = [];
     const registry = mockReadOnlyRegistry(executed);
     const engine = makeEngine(provider, registry);
 
-    const summary = await engine.runSub("找密码", registry);
-    expect(summary).toBe("找到了密码是 42");
+    const { summary } = await engine.runSub("找密码", registry);
+    expect(summary).toContain("找到了密码是 42");
     expect(executed).toHaveLength(1);
     expect(executed[0]!.name).toBe("read_file");
   });
@@ -346,16 +358,20 @@ describe("AgentEngine.runSub", () => {
   });
 
   it("depth 等于 maxSpawnDepth 的子代理仍可执行但不能再委派", async () => {
-    const provider = new ScriptedProvider([{ role: "assistant", content: "leaf summary" }]);
+    const provider = new ScriptedProvider([
+      { role: "assistant", content: "leaf summary" },
+      // summary < 200 字,触发一轮续写扩写
+      { role: "assistant", content: "leaf summary:作为叶子节点完成任务,因 depth 已达 maxSpawnDepth 上限,不再继续向下委派,直接返回结论。" },
+    ]);
     const registry = mockReadOnlyRegistry();
     const engine = makeEngine(provider, registry);
 
-    const summary = await engine.runSub("叶子任务", registry, undefined, {
+    const { summary } = await engine.runSub("叶子任务", registry, undefined, {
       depth: 2,
       maxSpawnDepth: 2,
     });
 
-    expect(summary).toBe("leaf summary");
+    expect(summary).toContain("leaf summary");
   });
 
   it("子智能体探索不污染主 Session(物理隔离核心)", async () => {
@@ -367,6 +383,8 @@ describe("AgentEngine.runSub", () => {
         toolCalls: [{ id: "c1", name: "bash", arguments: "{}" }],
       },
       { role: "assistant", content: "子总结:密码是 42" },
+      // summary < 200 字,触发一轮续写扩写
+      { role: "assistant", content: "子总结:密码是 42。已通过 bash 工具完成探索并定位目标值,任务完成。" },
     ]);
     const registry = mockReadOnlyRegistry();
     const engine = makeEngine(provider, registry);
@@ -391,12 +409,14 @@ describe("AgentEngine.runSub", () => {
         toolCalls: [{ id: "c1", name: "write_file", arguments: '{"path":"x","content":"y"}' }],
       },
       { role: "assistant", content: "写不了,我汇报" },
+      // summary < 200 字,触发一轮续写扩写
+      { role: "assistant", content: "写不了,我汇报。当前只读注册表不含 write_file 工具,尝试调用时返回工具不存在,无法执行写操作,任务结束。" },
     ]);
     const registry = mockReadOnlyRegistry();
     const engine = makeEngine(provider, registry);
 
-    const summary = await engine.runSub("写文件试试", registry);
-    expect(summary).toBe("写不了,我汇报");
+    const { summary } = await engine.runSub("写文件试试", registry);
+    expect(summary).toContain("写不了,我汇报");
     // write_file 不在只读注册表里,execute 会返回"工具不存在"错误
     // (mockReadOnlyRegistry 的 execute 不区分,但真实 Registry 会拦截)
   });
@@ -404,11 +424,13 @@ describe("AgentEngine.runSub", () => {
   it("子智能体首个响应就给总结(无需工具)直接返回", async () => {
     const provider = new ScriptedProvider([
       { role: "assistant", content: "我凭已知信息直接汇报:答案是 42" },
+      // summary < 200 字,触发一轮续写扩写
+      { role: "assistant", content: "我凭已知信息直接汇报:答案是 42。本任务无需调用任何工具,基于既有上下文即可给出确定结论。" },
     ]);
     const registry = mockReadOnlyRegistry();
     const engine = makeEngine(provider, registry);
 
-    const summary = await engine.runSub("简单问题", registry);
+    const { summary } = await engine.runSub("简单问题", registry);
     expect(summary).toContain("答案是 42");
   });
 
@@ -420,6 +442,8 @@ describe("AgentEngine.runSub", () => {
         toolCalls: [{ id: "c1", name: "read_file", arguments: '{"path":"missing.txt"}' }],
       },
       { role: "assistant", content: "重读后找到了" },
+      // summary < 200 字,触发一轮续写扩写
+      { role: "assistant", content: "重读后找到了目标信息。首次读取 missing.txt 时报错,经 Recovery 锦囊引导后重新定位并成功读取,任务完成。" },
     ]);
     // 这个 registry 的 execute 返回错误
     const errorRegistry: Registry = {
@@ -441,8 +465,8 @@ describe("AgentEngine.runSub", () => {
     };
     const engine = makeEngine(provider, errorRegistry);
 
-    const summary = await engine.runSub("读不存在的文件", errorRegistry);
-    expect(summary).toBe("重读后找到了");
+    const { summary } = await engine.runSub("读不存在的文件", errorRegistry);
+    expect(summary).toContain("重读后找到了");
     // Recovery 注入了锦囊(子智能体看到了救援指南)
     // 验证方式:子智能体第二轮没再报错,说明它被引导重读了
   });
@@ -495,7 +519,7 @@ describe("SubagentTool + AgentEngine 端到端委派", () => {
     const mockRunner: AgentRunner = {
       async runSub(taskPrompt: string) {
         subCalled = true;
-        return `子智能体汇报:探索了 ${taskPrompt},密码是 42`;
+        return subResult(`子智能体汇报:探索了 ${taskPrompt},密码是 42`);
       },
     };
     const tool = new SpawnSubagentTool(mockRunner, readOnlyReg);

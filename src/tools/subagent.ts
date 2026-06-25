@@ -23,9 +23,21 @@ import { DelegationManager } from "./delegation-manager.js";
  * SubagentTool 在 tools 包,完整 AgentEngine 在 engine 包。
  * 为让 Tool 能拉起 Engine,定义接口供外部注入。
  */
+/**
+ * 子智能体执行结果。
+ * - summary: 最终纯文本总结汇报(主 Agent 直接可见)
+ * - artifacts: 探索期间被外部化的大型工具输出磁盘路径(相对 workDir)。
+ *   这些文件落在 workDir/.claw/artifacts/ 内,主 Agent 可用 read_file 直接回查,
+ *   避免子代理读过大文件后,主 Agent 既看不到原文也无法定位。
+ */
+export interface SubagentResult {
+  summary: string;
+  artifacts: string[];
+}
+
 export interface AgentRunner {
   /**
-   * RunSub:启动一个匿名的、一次性子智能体任务,返回其最终梳理的纯文本总结。
+   * RunSub:启动一个匿名的、一次性子智能体任务,返回其最终梳理的总结及外部化产物引用。
    * @param taskPrompt 主 Agent 下达的明确指令
    * @param readOnlyRegistry 子智能体专属受限只读注册表(爆炸半径限制)
    * @param reporter 可选 Reporter,透传子智能体工作轨迹(打 [Subagent] 前缀)
@@ -35,7 +47,7 @@ export interface AgentRunner {
     readOnlyRegistry: Registry,
     reporter?: Reporter,
     opts?: SubagentRunOptions,
-  ): Promise<string>;
+  ): Promise<SubagentResult>;
 }
 
 export type SubagentRole = "leaf" | "orchestrator";
@@ -141,9 +153,9 @@ export class SpawnSubagentTool implements BaseTool {
       return `子智能体执行失败: 超过最大委派深度 ${maxSpawnDepth},拒绝继续 spawn_subagent。`;
     }
 
-    let summary: string;
+    let result: SubagentResult;
     try {
-      summary = await this.runner.runSub(input.task_prompt, this.readOnlyRegistry, undefined, {
+      result = await this.runner.runSub(input.task_prompt, this.readOnlyRegistry, undefined, {
         depth: depth + 1,
         maxSpawnDepth,
         role: "leaf",
@@ -154,8 +166,10 @@ export class SpawnSubagentTool implements BaseTool {
     }
 
     logger.info(`[Subagent] ✅ 子智能体任务结束。报告返回给主干...`);
-    // 几万字的代码探索,化作轻量级 Summary,像普通 API 调用返回给主 Agent
-    return `【子智能体探索报告】:\n${summary}`;
+    // 几万字的代码探索,化作轻量级 Summary,像普通 API 调用返回给主 Agent。
+    // 附带被外部化的大型工具输出磁盘路径:主 Agent 可用 read_file 回查原文,
+    // 避免子代理读过大文件后,主 Agent 既看不到原文也无法定位。
+    return formatSubagentReport("【子智能体探索报告】", result);
   }
 }
 
@@ -287,7 +301,7 @@ export class DelegateTaskTool implements BaseTool {
     });
 
     try {
-      const summary = await this.runner.runSub(prompt, registry, undefined, {
+      const subResult = await this.runner.runSub(prompt, registry, undefined, {
         depth: childDepth,
         maxSpawnDepth,
         role: task.role,
@@ -295,7 +309,8 @@ export class DelegateTaskTool implements BaseTool {
       return {
         taskIndex,
         status: "completed",
-        summary,
+        summary: subResult.summary,
+        ...(subResult.artifacts.length > 0 ? { artifacts: subResult.artifacts } : {}),
         durationMs: Date.now() - startedAt,
       };
     } catch (err) {
@@ -311,6 +326,23 @@ export class DelegateTaskTool implements BaseTool {
 }
 
 export { SpawnSubagentTool as SubagentTool };
+
+/**
+ * 把子智能体执行结果��式化为回传给主 Agent 的文本。
+ * summary 是轻量总结;若有被外部化的大型工具输出,附上其磁盘路径,
+ * 提示主 Agent 可用 read_file 回查原文(路径均在 workDir 内)。
+ */
+function formatSubagentReport(header: string, result: SubagentResult): string {
+  const lines = [`${header}:`, result.summary];
+  if (result.artifacts.length > 0) {
+    lines.push(
+      "",
+      `[大型探索输出已外部化,可用 read_file 回查原文]:`,
+      ...result.artifacts.map((path) => `  - ${path}`),
+    );
+  }
+  return lines.join("\n");
+}
 
 function parseDelegateArgs(args: string): DelegateTaskArgs {
   try {

@@ -5,6 +5,8 @@ export interface DelegationResult {
   taskIndex: number;
   status: "completed" | "error";
   summary?: string;
+  /** 子任务探索期间被外部化的大型工具输出磁盘路径(均在 workDir 内,主 Agent 可 read_file 回查) */
+  artifacts?: string[];
   error?: string;
   durationMs: number;
 }
