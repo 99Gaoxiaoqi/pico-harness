@@ -7,15 +7,30 @@ import type { LLMProvider } from "./interface.js";
 import type { Message, ToolDefinition } from "../schema/message.js";
 import { logger } from "../observability/logger.js";
 import { resolveProviderProfile } from "./profile.js";
+import type { ThinkingEffort } from "./thinking.js";
 
 export type ProviderKind = "openai" | "claude";
 
 export const GLM_52_MODEL = "glm-5.2";
 export const GLM_52_FALLBACK_MODEL = "kimi-k2.5";
 
-/** 按协议类型创建 Provider;不传 config 时从环境变量读取 */
-export function createProvider(kind: ProviderKind, config?: ProviderConfig): LLMProvider {
+/** 把可选 thinkingEffort 合并进 config(无 config 时从环境变量加载) */
+function resolveConfig(
+  config: ProviderConfig | undefined,
+  thinkingEffort: ThinkingEffort | undefined,
+): ProviderConfig {
   const cfg = config ?? loadProviderConfig();
+  if (thinkingEffort === undefined) return cfg;
+  return { ...cfg, thinkingEffort };
+}
+
+/** 按协议类型创建 Provider;不传 config 时从环境变量读取;thinkingEffort 可单独覆盖 */
+export function createProvider(
+  kind: ProviderKind,
+  config?: ProviderConfig,
+  thinkingEffort?: ThinkingEffort,
+): LLMProvider {
+  const cfg = resolveConfig(config, thinkingEffort);
   switch (kind) {
     case "openai":
       return createOpenAIProviderWithFallback(cfg);
@@ -25,8 +40,12 @@ export function createProvider(kind: ProviderKind, config?: ProviderConfig): LLM
 }
 
 /** 创建不带模型 fallback 的原始 Provider,供外层需要自行处理 fallback/计费时使用 */
-export function createRawProvider(kind: ProviderKind, config?: ProviderConfig): LLMProvider {
-  const cfg = config ?? loadProviderConfig();
+export function createRawProvider(
+  kind: ProviderKind,
+  config?: ProviderConfig,
+  thinkingEffort?: ThinkingEffort,
+): LLMProvider {
+  const cfg = resolveConfig(config, thinkingEffort);
   switch (kind) {
     case "openai":
       return new OpenAIProvider(cfg);

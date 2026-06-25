@@ -11,6 +11,7 @@ import type { LLMProvider } from "./interface.js";
 import type { Message, ToolCall, ToolDefinition } from "../schema/message.js";
 import type { ProviderConfig } from "./config.js";
 import { resolveProviderProfile, type ProviderProfile } from "./profile.js";
+import { toAnthropicThinkingConfig, anthropicBudgetTokens, type ThinkingEffort } from "./thinking.js";
 
 /** Anthropic content block: 文本或工具调用 */
 type Block =
@@ -32,12 +33,14 @@ interface AnthropicResponse {
 /** Anthropic (Claude) 兼容协议适配器 */
 export class ClaudeProvider implements LLMProvider {
   private readonly profile: ProviderProfile;
+  private readonly thinkingEffort: ThinkingEffort;
 
   constructor(
     private readonly config: ProviderConfig,
     profile?: ProviderProfile,
   ) {
     this.profile = profile ?? resolveProviderProfile("claude", config.model);
+    this.thinkingEffort = config.thinkingEffort ?? "off";
   }
 
   async generate(messages: Message[], availableTools: ToolDefinition[]): Promise<Message> {
@@ -90,12 +93,20 @@ export class ClaudeProvider implements LLMProvider {
     }
 
     // 2. 工具 Schema 翻译:properties / required 分别填充
+    // 统一思考强度:先算 budget,再据此保护 max_tokens(Anthropic 要求 max_tokens > budget_tokens)
+    const thinkingConfig = toAnthropicThinkingConfig(this.thinkingEffort);
+    const budgetTokens = anthropicBudgetTokens(this.thinkingEffort);
+    const maxTokens = thinkingConfig
+      ? Math.max(this.profile.maxOutputTokens, budgetTokens + 1024)
+      : this.profile.maxOutputTokens;
+
     const body: Record<string, unknown> = {
       model: this.config.model,
-      max_tokens: this.profile.maxOutputTokens,
+      max_tokens: maxTokens,
       messages: anthropicMsgs,
     };
     if (systemPrompt) body.system = systemPrompt;
+    if (thinkingConfig) body.thinking = thinkingConfig;
     // 慢思考支撑:availableTools 为空时不挂载 tools
     if (availableTools.length > 0) {
       body.tools = availableTools.map((t) => {

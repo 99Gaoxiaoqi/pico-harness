@@ -9,6 +9,7 @@ import type { LLMProvider } from "./interface.js";
 import type { Message, ToolCall, ToolDefinition } from "../schema/message.js";
 import type { ProviderConfig } from "./config.js";
 import { resolveProviderProfile, type ProviderProfile } from "./profile.js";
+import { toOpenAIReasoningEffort, type ThinkingEffort } from "./thinking.js";
 
 interface OpenAIToolCall {
   id: string;
@@ -36,12 +37,14 @@ interface OpenAIChatResponse {
 /** OpenAI 兼容协议适配器 */
 export class OpenAIProvider implements LLMProvider {
   private readonly profile: ProviderProfile;
+  private readonly thinkingEffort: ThinkingEffort;
 
   constructor(
     private readonly config: ProviderConfig,
     profile?: ProviderProfile,
   ) {
     this.profile = profile ?? resolveProviderProfile("openai", config.model);
+    this.thinkingEffort = config.thinkingEffort ?? "off";
   }
 
   async generate(messages: Message[], availableTools: ToolDefinition[]): Promise<Message> {
@@ -96,6 +99,11 @@ export class OpenAIProvider implements LLMProvider {
           parameters: t.inputSchema,
         },
       }));
+    }
+    // 统一思考强度:模型原生 reasoning_effort(off 时不发送,与旧行为一致)
+    const reasoningEffort = toOpenAIReasoningEffort(this.thinkingEffort);
+    if (reasoningEffort !== undefined) {
+      body.reasoning_effort = reasoningEffort;
     }
 
     // 3. 构建请求并发送

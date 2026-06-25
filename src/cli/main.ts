@@ -20,6 +20,7 @@ import { createContextBudget, estimateTokenBudgetAsChars } from "../context/cont
 import { SilentReporter, TerminalReporter } from "../engine/reporter.js";
 import { createProvider, type ProviderKind } from "../provider/factory.js";
 import { resolveProviderProfile } from "../provider/profile.js";
+import { resolveThinkingEffort, type ThinkingEffort } from "../provider/thinking.js";
 import {
   BashTool,
   EditFileTool,
@@ -128,6 +129,7 @@ const terminalNotifier: ApprovalNotifier = (notice) => {
 async function serve(
   kind: ProviderKind,
   enableThinking: boolean,
+  thinkingEffort: ThinkingEffort,
   planMode: boolean,
   traceEnabled: boolean,
   port: number,
@@ -144,12 +146,20 @@ async function serve(
 
     try {
       const body = await readBody(req);
-      const parsed = JSON.parse(body) as { prompt?: string; sessionId?: string };
+      const parsed = JSON.parse(body) as {
+        prompt?: string;
+        sessionId?: string;
+        thinkingEffort?: string;
+      };
       if (!parsed.prompt) {
         res.writeHead(400, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "缺少 prompt 字段" }));
         return;
       }
+      // HTTP 请求可选覆盖进程级默认的 thinkingEffort(参考 Kimi createSession 的 options.thinking)
+      const requestThinkingEffort = parsed.thinkingEffort
+        ? resolveThinkingEffort(parsed.thinkingEffort)
+        : thinkingEffort;
 
       // 每个请求独立引擎实例,收集最终消息回写
       const collected: string[] = [];
@@ -159,7 +169,7 @@ async function serve(
         }
       })();
 
-      const provider = createProvider(kind);
+      const provider = createProvider(kind, undefined, requestThinkingEffort);
       const registry = buildRegistry(workDir);
       registry.use(buildApprovalMiddleware(terminalNotifier));
       const engine = new AgentEngine({
@@ -167,6 +177,7 @@ async function serve(
         registry,
         workDir,
         enableThinking,
+        thinkingEffort: requestThinkingEffort,
         planMode,
         systemPrompt,
         compactor: buildCompactor(kind, modelName),
@@ -214,6 +225,7 @@ async function main() {
   const { values, positionals } = parseArgs({
     options: {
       provider: { type: "string", default: "openai" },
+      // 思考强度:off/low/medium/high(模型原生 reasoning_effort);兼容老的 true/false 布尔
       thinking: { type: "string", default: "true" },
       plan: { type: "boolean", default: false },
       trace: { type: "boolean", default: false },
@@ -231,13 +243,16 @@ async function main() {
   });
 
   const kind = values.provider as ProviderKind;
+  // thinking 参数升级为统一枚举:off/low/medium/high(兼容老 true/false)
+  const thinkingEffort = resolveThinkingEffort(values.thinking);
+  // enableThinking(应用层两阶段)保持老逻辑向后兼容:仅 "false" 时关闭
   const enableThinking = values.thinking !== "false";
   const planMode = values.plan;
   const traceEnabled = values.trace;
 
   console.log("🚀 欢迎来到 pico-harness 引擎启动序列");
   console.log(
-    `[Provider] ${kind} 协议 | [Thinking] ${enableThinking} | [PlanMode] ${planMode} | [Trace] ${traceEnabled}`,
+    `[Provider] ${kind} 协议 | [ThinkingEffort] ${thinkingEffort} | [EnableThinking] ${enableThinking} | [PlanMode] ${planMode} | [Trace] ${traceEnabled}`,
   );
 
   if (values.feishu) {
@@ -248,7 +263,7 @@ async function main() {
       process.env.LLM_MODEL ?? (kind === "openai" ? "glm-5.2" : "claude-3-5-sonnet");
     const bot = new FeishuBot(
       ({ session, reporter }) => {
-        const provider = createProvider(kind);
+        const provider = createProvider(kind, undefined, thinkingEffort);
         const trackedProvider = new CostTracker(provider, modelName, session);
         const registry = buildRegistry(workDir);
         registry.use(createFeishuApprovalMiddleware(reporter));
@@ -257,6 +272,7 @@ async function main() {
           registry,
           workDir,
           enableThinking,
+          thinkingEffort,
           planMode,
           systemPrompt,
           compactor: buildCompactor(kind, modelName),
@@ -276,7 +292,7 @@ async function main() {
   }
 
   if (values.serve) {
-    await serve(kind, enableThinking, planMode, traceEnabled, Number(values.port));
+    await serve(kind, enableThinking, thinkingEffort, planMode, traceEnabled, Number(values.port));
     return;
   }
 
@@ -293,6 +309,7 @@ async function main() {
     ...(values["api-key"] ? { apiKey: values["api-key"] } : {}),
     ...(values["base-url"] ? { baseURL: values["base-url"] } : {}),
     enableThinking,
+    thinkingEffort,
     planMode,
     trace: traceEnabled,
   });

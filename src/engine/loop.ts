@@ -16,6 +16,7 @@ import type { Registry } from "../tools/registry.js";
 import type { AgentRunner } from "../tools/subagent.js";
 import type { SubagentRunOptions, SubagentResult } from "../tools/subagent.js";
 import type { Compactor } from "../context/compactor.js";
+import type { ThinkingEffort } from "../provider/thinking.js";
 import { PromptComposer } from "../context/composer.js";
 import { RecoveryManager } from "../context/recovery.js";
 import { SilentReporter, type Reporter } from "./reporter.js";
@@ -47,6 +48,13 @@ export interface AgentEngineOptions {
    * 开启后,每轮行动前先发起一次不带工具的纯文本请求,强制模型规划。
    */
   enableThinking?: boolean;
+  /**
+   * 模型原生思考强度(off/low/medium/high)。
+   * 控制 provider 向模型发送 reasoning_effort / thinking.budget_tokens 参数。
+   * 与 enableThinking(应用层两阶段)正交独立,二者可同时开启。
+   * 此字段在 engine 层仅用于子代理继承;provider 的实际参数注入在构造时已完成。
+   */
+  thinkingEffort?: ThinkingEffort;
   /**
    * 计划模式开关 (第 13 讲)。
    * 开启后,每次 run 动态用 PromptComposer 组装 System Prompt,
@@ -96,6 +104,7 @@ export class AgentEngine implements AgentRunner {
   private readonly workDir: string;
   private readonly systemPrompt: string;
   private readonly enableThinking: boolean;
+  private readonly thinkingEffort: ThinkingEffort;
   private readonly planMode: boolean;
   private readonly workingMemoryLimit: number;
   private readonly maxTurns: number;
@@ -117,6 +126,7 @@ export class AgentEngine implements AgentRunner {
       "You are pico, an expert coding assistant running in a Harness engine. " +
         "You have tools to read, write, edit files and run bash. Think step by step.";
     this.enableThinking = opts.enableThinking ?? false;
+    this.thinkingEffort = opts.thinkingEffort ?? "off";
     this.planMode = opts.planMode ?? false;
     this.workingMemoryLimit = opts.workingMemoryLimit ?? DEFAULT_WORKING_MEMORY_LIMIT;
     this.maxTurns = opts.maxTurns ?? 50;
@@ -533,8 +543,8 @@ export class AgentEngine implements AgentRunner {
   ): Promise<SubagentResult> {
     const rep = reporter ?? new SilentReporter();
     logger.info(
-      { task: taskPrompt.slice(0, 100) },
-      `[Subagent] 🚀 拉起探路者,任务: ${taskPrompt.slice(0, 100)}`,
+      { task: taskPrompt.slice(0, 100), thinkingEffort: this.thinkingEffort },
+      `[Subagent] 🚀 拉起探路者,任务: ${taskPrompt.slice(0, 100)} (thinkingEffort: ${this.thinkingEffort},继承自主 Agent)`,
     );
 
     // 子智能体专属 System Prompt:严厉警告必须用工具,不许凭空猜测

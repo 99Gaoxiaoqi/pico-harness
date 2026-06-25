@@ -16,6 +16,7 @@ import {
 import type { ProviderConfig } from "../provider/config.js";
 import type { LLMProvider } from "../provider/interface.js";
 import { resolveProviderProfile } from "../provider/profile.js";
+import type { ThinkingEffort } from "../provider/thinking.js";
 import type { Message, ToolDefinition } from "../schema/message.js";
 import {
   BashTool,
@@ -47,6 +48,8 @@ export interface RunAgentCliOptions {
   apiKey?: string;
   model?: string;
   enableThinking?: boolean;
+  /** 模型原生思考强度(off/low/medium/high),控制 reasoning_effort / thinking.budget_tokens */
+  thinkingEffort?: ThinkingEffort;
   planMode?: boolean;
   trace?: boolean;
 }
@@ -111,6 +114,7 @@ export async function runAgentFromCli(
     registry,
     workDir,
     enableThinking: options.enableThinking ?? true,
+    ...(options.thinkingEffort !== undefined ? { thinkingEffort: options.thinkingEffort } : {}),
     planMode: options.planMode ?? false,
     compactor: buildCompactor(kind, providerConfig.model),
     observationProcessor,
@@ -277,6 +281,7 @@ function resolveProviderConfig(
     baseURL: baseURL ?? "",
     apiKey: apiKey ?? "",
     model,
+    ...(options.thinkingEffort !== undefined ? { thinkingEffort: options.thinkingEffort } : {}),
   };
 }
 

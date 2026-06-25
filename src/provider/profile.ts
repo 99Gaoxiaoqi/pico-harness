@@ -10,6 +10,10 @@ export interface ProviderProfile {
   maxOutputTokens: number;
   supportsReasoningContent: boolean;
   supportsPromptCache: boolean;
+  /** 是否支持通过 reasoning_effort / thinking.budget_tokens 控制思考强度 */
+  supportsThinkingControl: boolean;
+  /** 某些推理模型无法关闭思考(always-thinking),设 off 时会被钳位到开启 */
+  alwaysThinking?: boolean;
 }
 
 const DEFAULTS: Record<ProviderProtocol, Omit<ProviderProfile, "model">> = {
@@ -20,6 +24,7 @@ const DEFAULTS: Record<ProviderProtocol, Omit<ProviderProfile, "model">> = {
     maxOutputTokens: 4096,
     supportsReasoningContent: true,
     supportsPromptCache: false,
+    supportsThinkingControl: false,
   },
   claude: {
     protocol: "claude",
@@ -28,6 +33,7 @@ const DEFAULTS: Record<ProviderProtocol, Omit<ProviderProfile, "model">> = {
     maxOutputTokens: 4096,
     supportsReasoningContent: false,
     supportsPromptCache: true,
+    supportsThinkingControl: false,
   },
 };
 
@@ -36,9 +42,15 @@ const MODEL_PROFILES: Record<string, Partial<ProviderProfile>> = {
     fallbackModel: "kimi-k2.5",
     assistantContent: "null_when_empty",
     supportsReasoningContent: true,
+    supportsThinkingControl: true,
   },
   "kimi-k2.5": {
     supportsReasoningContent: true,
+    supportsThinkingControl: true,
+  },
+  "deepseek-v4-pro": {
+    supportsReasoningContent: true,
+    supportsThinkingControl: true,
   },
   "claude-3-5-sonnet": {
     supportsPromptCache: true,
