@@ -12,6 +12,7 @@ import type { Message, ToolCall, ToolDefinition } from "../schema/message.js";
 import type { ProviderConfig } from "./config.js";
 import { resolveProviderProfile, type ProviderProfile } from "./profile.js";
 import { toAnthropicThinkingConfig, anthropicBudgetTokens, type ThinkingEffort } from "./thinking.js";
+import { ContextOverflowError, isContextOverflowStatus, LLMStatusError } from "./errors.js";
 
 /** Anthropic content block: 文本或工具调用 */
 type Block =
@@ -41,6 +42,10 @@ export class ClaudeProvider implements LLMProvider {
   ) {
     this.profile = profile ?? resolveProviderProfile("claude", config.model);
     this.thinkingEffort = config.thinkingEffort ?? "off";
+  }
+
+  get modelName(): string {
+    return this.config.model;
   }
 
   async generate(messages: Message[], availableTools: ToolDefinition[]): Promise<Message> {
@@ -140,7 +145,10 @@ export class ClaudeProvider implements LLMProvider {
 
     if (!resp.ok) {
       const text = await resp.text();
-      throw new Error(`Claude API 请求失败 [${resp.status}]: ${text}`);
+      if (isContextOverflowStatus(resp.status, text)) {
+        throw new ContextOverflowError(`Claude API 上下文溢出 [${resp.status}]: ${text}`);
+      }
+      throw new LLMStatusError(resp.status, `Claude API 请求失败 [${resp.status}]: ${text}`);
     }
 
     const data = (await resp.json()) as AnthropicResponse;

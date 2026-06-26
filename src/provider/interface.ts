@@ -11,4 +11,8 @@ export interface LLMProvider {
    * @returns 模型的响应消息 (可能含 toolCalls,也可能只有纯文本最终答案)
    */
   generate(messages: Message[], availableTools: ToolDefinition[]): Promise<Message>;
+  /** 可选:provider 自治判定哪些错误可重试。未实现则由 retry 层用默认兜底判定。 */
+  isRetryableError?(error: unknown): boolean;
+  /** 可选:模型名,供重试 / 计费日志打点。 */
+  readonly modelName?: string;
 }
