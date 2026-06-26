@@ -12,6 +12,7 @@ import type {
 } from "./registry.js";
 import type { ToolCall, ToolDefinition, ToolResult } from "../schema/message.js";
 import { logger } from "../observability/logger.js";
+import { ToolAccesses } from "./tool-access.js";
 // 跨平台 shell:Windows 上统一走 Git Bash,避免 cmd.exe 不识别 POSIX 语义。
 import { execAsync, execOptions } from "../os/shell.js";
 
@@ -93,6 +94,22 @@ export class ToolRegistry implements Registry {
     return this.tools.get(name)?.readOnly ?? false;
   }
 
+  /**
+   * 按 ToolCall 计算资源访问集(资源冲突图调度用)。
+   * 委托给工具自报的 accesses() 方法;工具未实现或参数解析失败时,
+   * 保守返回 ToolAccesses.all()(全局互斥),宁可损失并发不可错判冲突。
+   */
+  getAccesses(call: ToolCall): ToolAccesses {
+    const tool = this.tools.get(call.name);
+    if (!tool?.accesses) return ToolAccesses.all();
+    try {
+      return tool.accesses(call.arguments);
+    } catch (err) {
+      logger.warn({ tool: call.name, err }, `[Registry] accesses 声明失败,降级为 all() 保守`);
+      return ToolAccesses.all();
+    }
+  }
+
   async execute(call: ToolCall): Promise<ToolResult> {
     // 1. 路由查找:找不到说明模型幻觉,返回 isError 让模型自纠
     let currentCall = call;
@@ -171,6 +188,10 @@ export class EchoTool implements BaseTool {
   name(): string {
     return "echo";
   }
+  /** 原样回显,无任何副作用 —— 不与任何工具冲突 */
+  accesses(): ToolAccesses {
+    return ToolAccesses.none();
+  }
   definition(): ToolDefinition {
     return {
       name: "echo",
@@ -208,6 +229,12 @@ export class ReadFileTool implements BaseTool {
 
   name(): string {
     return "read_file";
+  }
+
+  /** 声明读 path 归一化后的绝对路径(与 execute 的 safeResolve 一致) */
+  accesses(args: string): ToolAccesses {
+    const { path } = JSON.parse(args) as { path?: string };
+    return ToolAccesses.readFile(safeResolve(this.workDir, path ?? ""));
   }
 
   definition(): ToolDefinition {
@@ -262,6 +289,12 @@ export class WriteFileTool implements BaseTool {
 
   name(): string {
     return "write_file";
+  }
+
+  /** 声明写 path 归一化后的绝对路径 —— 不同文件的写可并行 */
+  accesses(args: string): ToolAccesses {
+    const { path } = JSON.parse(args) as { path?: string };
+    return ToolAccesses.writeFile(safeResolve(this.workDir, path ?? ""));
   }
 
   definition(): ToolDefinition {
@@ -319,6 +352,15 @@ export class BashTool implements BaseTool {
 
   name(): string {
     return "bash";
+  }
+
+  /**
+   * bash 命令是任意 shell 文本,无法静态分析出访问哪些文件。
+   * 保守策略:声明全资源互斥(kind:"all"),与同批次任何工具都串行。
+   * 宁可损失并发,不可错判冲突。
+   */
+  accesses(): ToolAccesses {
+    return ToolAccesses.all();
   }
 
   definition(): ToolDefinition {
@@ -503,6 +545,12 @@ export class EditFileTool implements BaseTool {
 
   name(): string {
     return "edit_file";
+  }
+
+  /** 声明对 path 的读改写(Edit 必须先读后写,与并发写同文件冲突) */
+  accesses(args: string): ToolAccesses {
+    const { path } = JSON.parse(args) as { path?: string };
+    return ToolAccesses.readWriteFile(safeResolve(this.workDir, path ?? ""));
   }
 
   definition(): ToolDefinition {

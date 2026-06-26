@@ -12,6 +12,8 @@ import { IterationBudget } from "../src/engine/budget.js";
 import type { LLMProvider } from "../src/provider/interface.js";
 import type { Message, ToolCall, ToolDefinition, ToolResult } from "../src/schema/message.js";
 import type { BaseTool, Registry } from "../src/tools/registry.js";
+import { ToolAccesses } from "../src/tools/tool-access.js";
+import { resolve } from "node:path";
 
 /** 可编程的 Mock Provider:按预设的响应序列依次返回 */
 class ScriptedProvider implements LLMProvider {
@@ -213,16 +215,16 @@ describe("AgentEngine Main Loop", () => {
     expect(provider.calls.every((c) => c.toolsCount > 0)).toBe(true);
   });
 
-  it("全只读批次并行执行,且观察结果按原始顺序保留", async () => {
-    // 一次返回 3 个只读工具调用,然后给最终答案
+  it("资源不冲突的工具并行执行(如读不同文件),且结果按原始顺序保留", async () => {
+    // 一次返回 3 个读不同文件路径的工具调用 —— 不冲突,应并行
     const provider = new ScriptedProvider([
       {
         role: "assistant",
-        content: "并发读三个文件",
+        content: "并发读三个不同文件",
         toolCalls: [
-          { id: "c1", name: "read", arguments: "{}" },
-          { id: "c2", name: "read", arguments: "{}" },
-          { id: "c3", name: "read", arguments: "{}" },
+          { id: "c1", name: "read", arguments: JSON.stringify({ path: "a.ts" }) },
+          { id: "c2", name: "read", arguments: JSON.stringify({ path: "b.ts" }) },
+          { id: "c3", name: "read", arguments: JSON.stringify({ path: "c.ts" }) },
         ],
       },
       { role: "assistant", content: "完成" },
@@ -241,8 +243,10 @@ describe("AgentEngine Main Loop", () => {
         await new Promise((r) => setTimeout(r, 50));
         return { toolCallId: call.id, output: `out-${call.id}`, isError: false };
       }
-      isReadOnlyTool(_name: string): boolean {
-        return true;
+      // 资源冲突图调度:read 不同路径 → 不冲突 → 并行
+      getAccesses(call: ToolCall): ToolAccesses {
+        const { path } = JSON.parse(call.arguments) as { path?: string };
+        return ToolAccesses.readFile(resolve("/tmp", path ?? ""));
       }
     })();
 
@@ -256,26 +260,25 @@ describe("AgentEngine Main Loop", () => {
     expect(registry.executed).toHaveLength(3);
     // 并行:总耗时应明显小于 3*50=150ms (留余量取 120ms)
     expect(elapsed).toBeLessThan(120);
-    // 观察结果按原始顺序 c1/c2/c3 保留
+    // 观察结果按原始顺序 c1/c2/c3 保留(调度器保证 provider order)
     const obs = session.getHistory().filter((m) => m.toolCallId);
     expect(obs.map((m) => m.toolCallId)).toEqual(["c1", "c2", "c3"]);
     expect(obs.map((m) => m.content)).toEqual(["out-c1", "out-c2", "out-c3"]);
   });
 
-  it("含写操作的批次退化为顺序执行", async () => {
+  it("资源冲突的工具串行执行(如写与读同一文件)", async () => {
     const provider = new ScriptedProvider([
       {
         role: "assistant",
-        content: "先写后读",
+        content: "写与读同一个文件",
         toolCalls: [
-          { id: "c1", name: "write", arguments: "{}" },
-          { id: "c2", name: "read", arguments: "{}" },
+          { id: "c1", name: "write", arguments: JSON.stringify({ path: "same.ts" }) },
+          { id: "c2", name: "read", arguments: JSON.stringify({ path: "same.ts" }) },
         ],
       },
       { role: "assistant", content: "完成" },
     ]);
 
-    // write 标记为非只读,read 为只读 → 批次含写操作,应串行
     const registry = new (class implements Registry {
       readonly executed: ToolCall[] = [];
       register(): void {}
@@ -291,18 +294,64 @@ describe("AgentEngine Main Loop", () => {
         await new Promise((r) => setTimeout(r, 50));
         return { toolCallId: call.id, output: `out-${call.name}`, isError: false };
       }
-      isReadOnlyTool(name: string): boolean {
-        return name === "read";
+      // 同一文件:write + read 冲突 → 串行
+      getAccesses(call: ToolCall): ToolAccesses {
+        const { path } = JSON.parse(call.arguments) as { path?: string };
+        const op = call.name === "write" ? "write" : "read";
+        const abs = resolve("/tmp", path ?? "");
+        return op === "write" ? ToolAccesses.writeFile(abs) : ToolAccesses.readFile(abs);
       }
     })();
 
     const engine = new AgentEngine({ provider, registry, workDir: "/tmp", enableThinking: false });
     const start = Date.now();
-    await engine.run(newSession("写读"));
+    await engine.run(newSession("写读同文件"));
     const elapsed = Date.now() - start;
 
     // 串行:总耗时应接近 2*50=100ms (大于 90ms)
     expect(elapsed).toBeGreaterThanOrEqual(90);
+    expect(registry.executed).toHaveLength(2);
+  });
+
+  it("写不同文件可并行(旧二元模型做不到的并发度)", async () => {
+    // 两个 write 不同路径 —— 旧模型会串行,冲突图调度应判定不冲突而并行
+    const provider = new ScriptedProvider([
+      {
+        role: "assistant",
+        content: "并发写两个不同文件",
+        toolCalls: [
+          { id: "c1", name: "write", arguments: JSON.stringify({ path: "a.ts" }) },
+          { id: "c2", name: "write", arguments: JSON.stringify({ path: "b.ts" }) },
+        ],
+      },
+      { role: "assistant", content: "完成" },
+    ]);
+
+    const registry = new (class implements Registry {
+      readonly executed: ToolCall[] = [];
+      register(): void {}
+      use(): void {}
+      getAvailableTools(): ToolDefinition[] {
+        return [{ name: "write", description: "", inputSchema: { type: "object" } }];
+      }
+      async execute(call: ToolCall): Promise<ToolResult> {
+        this.executed.push(call);
+        await new Promise((r) => setTimeout(r, 50));
+        return { toolCallId: call.id, output: `out-${call.id}`, isError: false };
+      }
+      getAccesses(call: ToolCall): ToolAccesses {
+        const { path } = JSON.parse(call.arguments) as { path?: string };
+        return ToolAccesses.writeFile(resolve("/tmp", path ?? ""));
+      }
+    })();
+
+    const engine = new AgentEngine({ provider, registry, workDir: "/tmp", enableThinking: false });
+    const start = Date.now();
+    await engine.run(newSession("并发写不同文件"));
+    const elapsed = Date.now() - start;
+
+    // 并行:两个写不同文件不冲突,耗时约 50ms (远小于串行的 100ms)
+    expect(elapsed).toBeLessThan(120);
     expect(registry.executed).toHaveLength(2);
   });
 
@@ -432,6 +481,11 @@ describe("AgentEngine Main Loop", () => {
     const registry = new (class extends MockRegistry {
       override isReadOnlyTool(): boolean {
         return true;
+      }
+      getAccesses(call: ToolCall): ToolAccesses {
+        // read 不同路径 → 不冲突 → 并发,保持原测试意图
+        const { path } = JSON.parse(call.arguments) as { path?: string };
+        return ToolAccesses.readFile(resolve("/tmp", path ?? ""));
       }
       override async execute(call: ToolCall): Promise<ToolResult> {
         this.executed.push(call);
