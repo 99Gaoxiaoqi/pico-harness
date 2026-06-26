@@ -13,6 +13,8 @@ import type {
 import type { ToolCall, ToolDefinition, ToolResult } from "../schema/message.js";
 import { logger } from "../observability/logger.js";
 import { ToolAccesses } from "./tool-access.js";
+import { toModelTextView, materializeModelText, makeCarriageReturnsVisible } from "./line-endings.js";
+import { findClosestLines, formatCandidateHint } from "./edit-hint.js";
 // 跨平台 shell:Windows 上统一走 Git Bash,避免 cmd.exe 不识别 POSIX 语义。
 import { execAsync, execOptions } from "../os/shell.js";
 
@@ -220,8 +222,16 @@ export class EchoTool implements BaseTool {
 // 防御底线:WorkDir 边界限制 + 路径穿越防护 + 长度截断保护
 // ==========================================
 
-/** 读取文件的最大字节数,防止超大文件撑爆 Context (OOM) */
-const READ_FILE_MAX_BYTES = 8000;
+/** 读取文件的最大字节数,防止超大文件撑爆 Context (OOM)。
+ *  加行号前缀后同样信息量字节数增加,阈值从 8000 放宽到 12000。 */
+const READ_FILE_MAX_BYTES = 12000;
+
+/** 行尾风格 → 展示标签(供状态行输出,帮模型识别文件格式) */
+function lineEndingStyleLabel(style: "lf" | "crlf" | "mixed"): string {
+  if (style === "crlf") return "CRLF";
+  if (style === "mixed") return "MIXED";
+  return "LF";
+}
 
 export class ReadFileTool implements BaseTool {
   readonly readOnly = true;
@@ -265,18 +275,40 @@ export class ReadFileTool implements BaseTool {
     const fullPath = safeResolve(this.workDir, path);
 
     // 3. 物理 IO
-    const content = await readFile(fullPath, "utf8");
+    const raw = await readFile(fullPath, "utf8");
 
-    // 4. 【核心防线】长度截断保护
-    // 绝不把系统安全寄希望于大模型理智,底层工具强制兜底。
-    // Token 是金钱,Context 是生命线。
-    if (content.length > READ_FILE_MAX_BYTES) {
-      return (
-        content.slice(0, READ_FILE_MAX_BYTES) +
-        `\n\n...[由于内容过长,已被系统截断至前 ${READ_FILE_MAX_BYTES} 字节]`
-      );
+    // 4. 模型视图归一化:纯 CRLF → LF(模型只处理一种行尾,Edit 匹配才稳定);
+    //    lf/mixed 原样返回,并记录原始行尾风格供 Edit 写回还原。
+    const { text, lineEndingStyle } = toModelTextView(raw);
+
+    // 5. 空文件:只返回状态行,不输出空行号
+    if (text.length === 0) {
+      return `共 0 行,行尾: ${lineEndingStyleLabel(lineEndingStyle)}`;
     }
-    return content;
+
+    // 6. 按行分割并加行号前缀(对齐 kimi-code renderLine: "行号\t内容",行号从 1 开始)。
+    //    末尾换行不产生空行号:先剥掉尾部 \n 再 split。
+    const lines = text.endsWith("\n") ? text.slice(0, -1).split("\n") : text.split("\n");
+    const renderedLines = lines.map((line, i) => {
+      // mixed 行尾:每行 \r 显形为字面 "\r",提醒模型该文件含杂散 CR,Edit 匹配可能失败。
+      const content =
+        lineEndingStyle === "mixed" ? makeCarriageReturnsVisible(line) : line;
+      return `${i + 1}\t${content}`;
+    });
+    let output = renderedLines.join("\n");
+
+    // 7. 【核心防线】长度截断保护(作用于渲染后文本)。
+    //    绝不把系统安全寄希望于大模型理智,底层工具强制兜底。
+    //    Token 是金钱,Context 是生命线。
+    if (output.length > READ_FILE_MAX_BYTES) {
+      output =
+        output.slice(0, READ_FILE_MAX_BYTES) +
+        `\n\n...[由于内容过长,已被系统截断至前 ${READ_FILE_MAX_BYTES} 字节]`;
+    }
+
+    // 8. 末尾状态行:帮助模型了解文件行数与行尾格式
+    output += `\n共 ${lines.length} 行,行尾: ${lineEndingStyleLabel(lineEndingStyle)}`;
+    return output;
   }
 }
 
@@ -497,6 +529,72 @@ function countOccurrences(haystack: string, needle: string): number {
   return count;
 }
 
+/** 取行首空白前缀 (空格/制表符) */
+function leadingWhitespace(line: string): string {
+  let i = 0;
+  while (i < line.length && (line[i] === " " || line[i] === "\t")) {
+    i++;
+  }
+  return line.slice(0, i);
+}
+
+/** 取文本中第一个非空行 (含原始缩进);全空白返回 null */
+function firstMeaningfulLine(text: string): string | null {
+  for (const line of text.split("\n")) {
+    if (line.trim()) return line;
+  }
+  return null;
+}
+
+/**
+ * L4 缩进重对齐 (对标 hermes _reindent_replacement)。
+ * 非精确匹配命中后,模型 old_text/new_text 的缩进可能与文件实际缩进不一致
+ * (如模型用 2 空格、文件用 4 空格)。直接写 new_text 会破坏文件缩进风格。
+ *
+ * 策略:以 old_text 第一个非空行的缩进为"模型基准缩进",
+ *      以 fileRegion(文件中匹配到的实际区域)第一个非空行的缩进为"文件基准缩进"。
+ * 两者相同 → 无需调整,原样返回 new_text。
+ * 两者不同 → 遍历 new_text 每行:
+ *   - 空行:保留原样(含纯空白行)
+ *   - 行缩进以模型基准开头:替换基准前缀为文件基准前缀,保留额外嵌套
+ *     (fileBaseIndent + line.slice(llmBaseIndent.length))
+ *   - 行缩进不以模型基准开头(dedent 行):锚定到文件基准
+ *     (fileBaseIndent + line 去首空白)
+ */
+function reindentReplacement(fileRegion: string, oldText: string, newText: string): string {
+  if (!newText) return newText;
+
+  const oldFirst = firstMeaningfulLine(oldText);
+  const fileFirst = firstMeaningfulLine(fileRegion);
+  if (oldFirst === null || fileFirst === null) return newText;
+
+  const llmBaseIndent = leadingWhitespace(oldFirst);
+  const fileBaseIndent = leadingWhitespace(fileFirst);
+
+  // 缩进一致,无需重对齐
+  if (llmBaseIndent === fileBaseIndent) return newText;
+
+  const outLines: string[] = [];
+  for (const line of newText.split("\n")) {
+    if (!line.trim()) {
+      // 空行:保留原样(含纯空白行)
+      outLines.push(line);
+      continue;
+    }
+    const lineIndent = leadingWhitespace(line);
+    if (lineIndent.startsWith(llmBaseIndent)) {
+      // 常见情况:行带有模型基准缩进(可能还有额外嵌套)。
+      // 把基准前缀换成文件基准前缀,保留额外嵌套。
+      const remainder = line.slice(llmBaseIndent.length);
+      outLines.push(fileBaseIndent + remainder);
+    } else {
+      // dedent 行:比模型基准缩进更少。锚定到文件基准。
+      outLines.push(fileBaseIndent + line.replace(/^[ \t]+/, ""));
+    }
+  }
+  return outLines.join("\n");
+}
+
 /** L4: 按行切割,去除每行首尾空白后滑动窗口匹配 */
 function lineByLineReplace(content: string, oldText: string, newText: string): string {
   const contentLines = content.split("\n");
@@ -534,8 +632,11 @@ function lineByLineReplace(content: string, oldText: string, newText: string): s
   }
 
   const matchEnd = matchStart + oldLines.length;
-  // 将匹配到的原始行范围替换为 newText
-  return [...contentLines.slice(0, matchStart), newText, ...contentLines.slice(matchEnd)].join(
+  // 提取文件中实际匹配到的原始行区域(保留真实缩进),供缩进重对齐使用
+  const fileRegion = contentLines.slice(matchStart, matchEnd).join("\n");
+  // 缩进重对齐:把 new_text 的缩进对齐到文件实际风格,而非直接写模型缩进
+  const adjustedNewText = reindentReplacement(fileRegion, oldText, newText);
+  return [...contentLines.slice(0, matchStart), adjustedNewText, ...contentLines.slice(matchEnd)].join(
     "\n",
   );
 }
@@ -557,14 +658,15 @@ export class EditFileTool implements BaseTool {
     return {
       name: "edit_file",
       description:
-        "对现有文件进行局部的字符串替换。比重写整个文件更安全、更快速。请提供足够的上下文(建议上下各多包含几行)以确保 old_text 在文件中唯一。",
+        "对现有文件进行局部的字符串替换。比重写整个文件更安全、更快速。请提供足够的上下文(建议上下各多包含几行)以确保 old_text 在文件中唯一。请先使用 read_file 读取文件,old_text 应取自 read_file 的输出(含行号前缀需去掉)。",
       inputSchema: {
         type: "object",
         properties: {
           path: { type: "string", description: "要修改的文件路径" },
           old_text: {
             type: "string",
-            description: "文件中原有的文本。必须包含足够的上下文以确保唯一匹配。",
+            description:
+              "文件中原有的文本,取自 read_file 输出(去掉行号前缀)。必须包含足够的上下文以确保唯一匹配。",
           },
           new_text: { type: "string", description: "要替换成的新文本" },
         },
@@ -588,15 +690,42 @@ export class EditFileTool implements BaseTool {
 
     const fullPath = safeResolve(this.workDir, path);
 
-    // 1. 读取原文件
-    const originalContent = await readFile(fullPath, "utf8");
+    // 1. 读取原文件(原始字节流)
+    const raw = await readFile(fullPath, "utf8");
 
-    // 2. 多级模糊替换
-    const { content: newContent, level } = fuzzyReplace(originalContent, oldText, newText);
+    // 2. 模型视图归一化:纯 CRLF → LF 视图(模型只处理一种行尾,匹配才稳定);
+    //    lf/mixed 原样返回,并记录原始行尾风格供写回还原。
+    const modelView = toModelTextView(raw);
+    const content = modelView.text;
 
-    // 3. 写回磁盘
-    await writeFile(fullPath, newContent, "utf8");
+    // 3. 多级模糊替换(在 LF 视图上操作)
+    try {
+      const { content: newContent, level } = fuzzyReplace(content, oldText, newText);
 
-    return `✅ 成功修改文件: ${path} (匹配级别 L${level})`;
+      // 4. 写回磁盘:按记录的原始行尾风格还原(CRLF 文件写回仍是 CRLF)
+      await writeFile(fullPath, materializeModelText(newContent, modelView.lineEndingStyle), "utf8");
+
+      return `✅ 成功修改文件: ${path} (匹配级别 L${level})`;
+    } catch (err) {
+      // 匹配全失败时附候选上下文,帮模型重定位(仅对"未找到"类错误生效)
+      throw this.enrichNotFoundError(err, content, oldText);
+    }
+  }
+
+  /**
+   * 匹配失败时增强错误信息:对"未找到 old_text / 找不到该代码片段"类错误,
+   * 用 findClosestLines 在文件里找最相似的几段,附在错误信息末尾帮模型重定位。
+   * 其他错误(如 IO 失败、多处匹配、参数解析失败)原样返回,不附候选。
+   */
+  private enrichNotFoundError(err: unknown, content: string, oldText: string): Error {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    if (!/未找到|找不到|not found/i.test(errMsg)) {
+      return err instanceof Error ? err : new Error(String(err));
+    }
+    const hints = findClosestLines(content, oldText);
+    if (hints.length === 0) {
+      return err instanceof Error ? err : new Error(String(err));
+    }
+    return new Error(`${errMsg}${formatCandidateHint(hints)}`);
   }
 }
