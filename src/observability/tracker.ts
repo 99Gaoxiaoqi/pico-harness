@@ -25,9 +25,14 @@ import { estimateCost, type BillingRoute } from "./pricing.js";
 export class CostTracker implements LLMProvider {
   constructor(
     private readonly next: LLMProvider,
-    private readonly modelName: string | BillingRoute,
+    private readonly modelRoute: string | BillingRoute,
     private readonly session?: Session,
   ) {}
+
+  /** 暴露模型名供重试/日志打点;计费路由可能是 BillingRoute 对象,取其 model 字段。 */
+  get modelName(): string {
+    return typeof this.modelRoute === "string" ? this.modelRoute : this.modelRoute.model;
+  }
 
   async generate(messages: Message[], availableTools: ToolDefinition[]): Promise<Message> {
     const start = Date.now();
@@ -36,7 +41,7 @@ export class CostTracker implements LLMProvider {
 
     if (resp.usage) {
       const { promptTokens, completionTokens } = resp.usage;
-      const cost = estimateCost(this.modelName, resp.usage);
+      const cost = estimateCost(this.modelRoute, resp.usage);
       console.log(
         `[Tracker] 📊 API 完成 | 耗时: ${latencyMs}ms | 输入: ${promptTokens} tk | 输出: ${completionTokens} tk | ` +
           `cache_read: ${cost.usage.cacheReadTokens} tk | cache_write: ${cost.usage.cacheWriteTokens} tk | ` +

@@ -10,6 +10,7 @@ import type { Message, ToolCall, ToolDefinition } from "../schema/message.js";
 import type { ProviderConfig } from "./config.js";
 import { resolveProviderProfile, type ProviderProfile } from "./profile.js";
 import { toOpenAIReasoningEffort, type ThinkingEffort } from "./thinking.js";
+import { ContextOverflowError, isContextOverflowStatus, LLMStatusError } from "./errors.js";
 
 interface OpenAIToolCall {
   id: string;
@@ -45,6 +46,10 @@ export class OpenAIProvider implements LLMProvider {
   ) {
     this.profile = profile ?? resolveProviderProfile("openai", config.model);
     this.thinkingEffort = config.thinkingEffort ?? "off";
+  }
+
+  get modelName(): string {
+    return this.config.model;
   }
 
   async generate(messages: Message[], availableTools: ToolDefinition[]): Promise<Message> {
@@ -125,7 +130,10 @@ export class OpenAIProvider implements LLMProvider {
       const text = await resp.text();
       console.error(`[OpenAI] ❌ ${resp.status} 响应: ${text}`);
       console.error(`[OpenAI] 请求体(前 2000 字符): ${bodyJson.slice(0, 2000)}`);
-      throw new Error(`OpenAI API 请求失败 [${resp.status}]: ${text}`);
+      if (isContextOverflowStatus(resp.status, text)) {
+        throw new ContextOverflowError(`OpenAI API 上下文溢出 [${resp.status}]: ${text}`);
+      }
+      throw new LLMStatusError(resp.status, `OpenAI API 请求失败 [${resp.status}]: ${text}`);
     }
 
     const data = (await resp.json()) as OpenAIChatResponse;

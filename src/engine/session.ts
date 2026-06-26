@@ -106,6 +106,23 @@ export class Session {
     // 第 13 讲将补齐文件系统持久化记忆。
   }
 
+  /**
+   * 硬重置兜底:截断历史,只保留 fromIndex 起的消息(含)。
+   * 用于 loop.ts 捕获 ContextCompactionError 后,丢弃爆掉的历史,
+   * 仅保留本轮用户输入(history[beforeLen])让模型重新规划。
+   * 累计成本统计保留(对齐 kimi-code clear 不碰 usage 的语义)。
+   */
+  truncateTo(fromIndex: number): void {
+    if (fromIndex < 0) fromIndex = 0;
+    if (fromIndex >= this.history.length) {
+      this.history = [];
+      this.updatedAt = new Date();
+      return;
+    }
+    this.history = this.history.slice(fromIndex);
+    this.updatedAt = new Date();
+  }
+
   /** 返回全量历史的深拷贝(仅供调试 / 测试,不参与推理) */
   getHistory(): Message[] {
     return this.history.map((m) => ({ ...m }));
