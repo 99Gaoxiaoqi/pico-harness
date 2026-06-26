@@ -4,6 +4,7 @@
 // Registry 是集线器(Hub)+ 路由器(Router):动态挂载、暴露 Schema、路由分发。
 
 import type { ToolCall, ToolDefinition, ToolResult } from "../schema/message.js";
+import type { ToolAccesses } from "./tool-access.js";
 
 /**
  * Middleware 中间件签名 (第 16 讲)。
@@ -45,6 +46,18 @@ export interface BaseTool {
    * 默认 false (保守视为写操作)。
    */
   readOnly?: boolean;
+  /**
+   * 声明本次调用要访问的资源(资源冲突图调度用,对标 kimi-code ToolAccesses)。
+   *
+   * 接收原始 JSON 参数字符串(与 execute 一致,延迟解析),返回资���访问集。
+   * 调度器据此判定同批次工具能否并行:
+   *   - 不冲突(read+read / write 不同文件)→ 并行
+   *   - 冲突(同文件含写 / kind:"all")→ 串行
+   *
+   * 未实现此方法的工具按 ToolAccesses.all() 保守处理(全局互斥)。
+   * readOnly 字段仍保留,供 Guardrail 无进展告警等布尔语义场景使用。
+   */
+  accesses?(args: string): ToolAccesses;
   /** 该工具单次返回的最大字符数;未设置时使用 Registry 默认值 */
   maxResultSizeChars?: number;
   /** 工具所属工具集,供未来 subagent/MCP 分组授权 */
@@ -71,6 +84,12 @@ export interface Registry {
    * 默认返回 false (保守视为写操作)。
    */
   isReadOnlyTool?(name: string): boolean;
+  /**
+   * 按 ToolCall 计算资源访问集(资源冲突图调度用)。
+   * 带完整 call 而非仅 name,因为路径信息在 call.arguments 里。
+   * 未实现则调度器按 ToolAccesses.all() 保守处理。
+   */
+  getAccesses?(call: ToolCall): ToolAccesses;
 }
 
 /**

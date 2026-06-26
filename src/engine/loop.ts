@@ -27,6 +27,8 @@ import { Tracer, exportTraceToFile, truncate, type Span } from "../observability
 import { logger } from "../observability/logger.js";
 import type { Session } from "./session.js";
 import type { ToolObservationProcessor } from "../tools/tool-result-observation.js";
+import { ToolAccesses } from "../tools/tool-access.js";
+import { ToolScheduler } from "../tools/tool-scheduler.js";
 
 /** WorkingMemory 滑动窗口大小:截取最近 N 条消息供压缩器判断(含远期历史) */
 const DEFAULT_WORKING_MEMORY_LIMIT = 20;
@@ -331,44 +333,28 @@ export class AgentEngine implements AgentRunner {
           }
 
           // 4. 执行行动 (Action) 与 获取观察结果 (Observation)
-          // 第 08 讲:Fork-Join 并发执行。
-          // 策略:批次全只读则并行 (Promise.all),含写操作则串行。
-          // 预分配结果数组按原索引写入,既并发安全又保留工具调用原始顺序。
-          const isReadOnly = this.registry.isReadOnlyTool;
-          const allReadOnly =
-            isReadOnly !== undefined &&
-            toolCalls.every((tc) => isReadOnly.call(this.registry, tc.name));
+          // 资源冲突图调度(对标 kimi-code ToolScheduler):工具按文件路径 × 操作类型
+          // 声明访问意图,调度器在冲突图上做最大独立集贪心并行。
+          //   - 不冲突(read+read / write 不同文件)→ 并行
+          //   - 冲突(同文件含写 / kind:"all")→ 串行
+          // 结果按 provider 原始顺序回传(add 顺序即 resolve 顺序)。
+          const getAccesses = this.registry.getAccesses;
+          const scheduler = new ToolScheduler<{ message: Message; reminder?: Message }>();
+          const scheduled = toolCalls.map((tc) =>
+            scheduler.add({
+              accesses: getAccesses ? getAccesses.call(this.registry, tc) : ToolAccesses.all(),
+              start: async () => this.runOneTool(tc, reporter, session.id, turnSpan),
+            }),
+          );
+          const results = await Promise.all(scheduled);
 
           const observations: Message[] = new Array(toolCalls.length);
           const reminderMessages: Message[] = [];
-
-          if (allReadOnly) {
-            await Promise.all(
-              toolCalls.map(async (toolCall, i) => {
-                const { message, reminder } = await this.runOneTool(
-                  toolCall,
-                  reporter,
-                  session.id,
-                  turnSpan,
-                );
-                observations[i] = message;
-                if (reminder) {
-                  reminderMessages.push(reminder);
-                }
-              }),
-            );
-          } else {
-            for (let i = 0; i < toolCalls.length; i++) {
-              const { message, reminder } = await this.runOneTool(
-                toolCalls[i]!,
-                reporter,
-                session.id,
-                turnSpan,
-              );
-              observations[i] = message;
-              if (reminder) {
-                reminderMessages.push(reminder);
-              }
+          for (let i = 0; i < results.length; i++) {
+            const { message, reminder } = results[i]!;
+            observations[i] = message;
+            if (reminder) {
+              reminderMessages.push(reminder);
             }
           }
 
@@ -639,44 +625,47 @@ export class AgentEngine implements AgentRunner {
         return { summary, artifacts: artifactPaths };
       }
 
-      // 执行只读工具的并发循环(Fork-Join,复用主循环的并发策略)
-      const isReadOnly = readOnlyRegistry.isReadOnlyTool;
-      const allReadOnly =
-        isReadOnly !== undefined &&
-        toolCalls.every((tc) => isReadOnly.call(readOnlyRegistry, tc.name));
+      // 执行只读工具的并发循环(资源冲突图调度,复用主循环的调度策略)
+      const getAccesses = readOnlyRegistry.getAccesses;
+      const scheduler = new ToolScheduler<{ message: Message; artifactPath?: string }>();
+      const scheduled = toolCalls.map((tc) =>
+        scheduler.add({
+          accesses: getAccesses ? getAccesses.call(readOnlyRegistry, tc) : ToolAccesses.all(),
+          start: async () => {
+            rep.onToolCall(`[Subagent] ${tc.name}`, tc.arguments);
+            const result = await readOnlyRegistry.execute(tc);
+            let finalOutput = result.output;
+            if (result.isError) {
+              finalOutput = this.recovery.analyzeAndInject(tc.name, result.output);
+            }
+            const observationOutput = await this.processObservation(
+              tc,
+              result,
+              finalOutput,
+              `subagent:${tc.id}`,
+            );
+            // 从外部化占位文本中提取磁盘路径,回传给主 Agent 供其用 read_file 回查。
+            const artifactPath = extractArtifactPath(observationOutput);
+            rep.onToolResult(`[Subagent] ${tc.name}`, observationOutput, result.isError);
+            return {
+              message: {
+                role: "user" as const,
+                content: observationOutput,
+                toolCallId: tc.id,
+              },
+              ...(artifactPath !== undefined ? { artifactPath } : {}),
+            };
+          },
+        }),
+      );
+      const subResults = await Promise.all(scheduled);
 
       const observations: Message[] = new Array(toolCalls.length);
-      const execSubTool = async (toolCall: ToolCall, i: number): Promise<void> => {
-        rep.onToolCall(`[Subagent] ${toolCall.name}`, toolCall.arguments);
-        const result = await readOnlyRegistry.execute(toolCall);
-        let finalOutput = result.output;
-        if (result.isError) {
-          finalOutput = this.recovery.analyzeAndInject(toolCall.name, result.output);
-        }
-        const observationOutput = await this.processObservation(
-          toolCall,
-          result,
-          finalOutput,
-          `subagent:${toolCall.id}`,
-        );
-        // 从外部化占位文本中提取磁盘路径,回传给主 Agent 供其用 read_file 回查。
-        const artifactPath = extractArtifactPath(observationOutput);
+      for (let i = 0; i < subResults.length; i++) {
+        const { message, artifactPath } = subResults[i]!;
+        observations[i] = message;
         if (artifactPath !== undefined) {
           artifactPaths.push(artifactPath);
-        }
-        rep.onToolResult(`[Subagent] ${toolCall.name}`, observationOutput, result.isError);
-        observations[i] = {
-          role: "user",
-          content: observationOutput,
-          toolCallId: toolCall.id,
-        };
-      };
-
-      if (allReadOnly) {
-        await Promise.all(toolCalls.map((tc, i) => execSubTool(tc, i)));
-      } else {
-        for (let i = 0; i < toolCalls.length; i++) {
-          await execSubTool(toolCalls[i]!, i);
         }
       }
 
