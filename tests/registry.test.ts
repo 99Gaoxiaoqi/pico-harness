@@ -168,19 +168,47 @@ describe("ReadFileTool 防御底线", () => {
     await rm(workDir, { recursive: true, force: true });
   });
 
-  it("读取工作区内文件内容", async () => {
+  it("读取工作区内文件内容(加行号前缀)", async () => {
     await writeFile(join(workDir, "hello.txt"), "Hello, pico!");
     const tool = new ReadFileTool(workDir);
     const out = await tool.execute(JSON.stringify({ path: "hello.txt" }));
-    expect(out).toBe("Hello, pico!");
+    expect(out).toBe("1\tHello, pico!\n共 1 行,行尾: LF");
   });
 
-  it("超过 8000 字节时触发截断保护", async () => {
-    const big = "x".repeat(9000);
+  it("CRLF 文件归一化为 LF 并加行号前缀", async () => {
+    await writeFile(join(workDir, "crlf.txt"), "a\r\nb\r\nc\r\n");
+    const tool = new ReadFileTool(workDir);
+    const out = await tool.execute(JSON.stringify({ path: "crlf.txt" }));
+    expect(out).not.toContain("\r\n");
+    expect(out).toContain("1\ta\n2\tb\n3\tc");
+    expect(out).toContain("行尾: CRLF");
+  });
+
+  it("LF 文件加行号前缀", async () => {
+    await writeFile(join(workDir, "lf.txt"), "foo\nbar\nbaz\n");
+    const tool = new ReadFileTool(workDir);
+    const out = await tool.execute(JSON.stringify({ path: "lf.txt" }));
+    expect(out).toContain("1\tfoo\n2\tbar\n3\tbaz");
+    expect(out).toContain("行尾: LF");
+  });
+
+  it("mixed 行尾 \\r 显形为字面 \\\\r", async () => {
+    // CRLF 与 lone LF 混杂 → mixed,不归一化,\r 显示成字面量提醒用户
+    await writeFile(join(workDir, "mixed.txt"), "a\r\nb\nc");
+    const tool = new ReadFileTool(workDir);
+    const out = await tool.execute(JSON.stringify({ path: "mixed.txt" }));
+    expect(out).toContain("行尾: MIXED");
+    // \r 显形为字面量 "\r"(反斜杠 + r 两个字符)
+    expect(out).toContain("\\r");
+    expect(out).toContain("1\ta\\r");
+  });
+
+  it("超过 12000 字节时触发截断保护", async () => {
+    const big = "x".repeat(20000);
     await writeFile(join(workDir, "big.txt"), big);
     const tool = new ReadFileTool(workDir);
     const out = await tool.execute(JSON.stringify({ path: "big.txt" }));
-    expect(out.length).toBeLessThan(9000);
+    expect(out.length).toBeLessThan(20000);
     expect(out).toContain("已被系统截断");
   });
 
@@ -457,5 +485,123 @@ describe("EditFileTool 多级模糊匹配", () => {
     await expect(
       tool.execute(JSON.stringify({ path: "../../x", old_text: "a", new_text: "b" })),
     ).rejects.toThrow(/路径越界/);
+  });
+});
+
+describe("EditFileTool 模型视图与缩进重对齐", () => {
+  let workDir: string;
+
+  beforeEach(async () => {
+    workDir = await mkdtemp(join(tmpdir(), "claw-test-"));
+  });
+  afterEach(async () => {
+    await rm(workDir, { recursive: true, force: true });
+  });
+
+  it("CRLF 文件精确匹配,写回仍是 CRLF(视图往返)", async () => {
+    // 磁盘 CRLF;模型在 LF 视图里匹配;写回 materialize 还原 CRLF
+    await writeFile(join(workDir, "crlf.txt"), "line1\r\nold\r\nline3");
+    const tool = new EditFileTool(workDir);
+    const out = await tool.execute(
+      JSON.stringify({ path: "crlf.txt", old_text: "old", new_text: "new" }),
+    );
+    expect(out).toContain("L1");
+    const result = await readFile(join(workDir, "crlf.txt"), "utf8");
+    // 格式不变:仍是 CRLF
+    expect(result).toBe("line1\r\nnew\r\nline3");
+    expect(result).not.toBe("line1\nnew\nline3");
+  });
+
+  it("LF 文件编辑后仍是 LF(不引入 CR)", async () => {
+    await writeFile(join(workDir, "lf.txt"), "line1\nold\nline3");
+    const tool = new EditFileTool(workDir);
+    await tool.execute(
+      JSON.stringify({ path: "lf.txt", old_text: "old", new_text: "new" }),
+    );
+    const result = await readFile(join(workDir, "lf.txt"), "utf8");
+    expect(result).toBe("line1\nnew\nline3");
+    expect(result).not.toContain("\r");
+  });
+
+  it("L4 缩进重对齐:文件 4 空格、模型 2 空格,写回对齐文件风格", async () => {
+    // 文件用 4 空格缩进
+    await writeFile(
+      join(workDir, "indent.ts"),
+      "function foo() {\n    bar();\n    baz();\n}",
+    );
+    const tool = new EditFileTool(workDir);
+    // 模型幻觉:用 2 空格缩进
+    const out = await tool.execute(
+      JSON.stringify({
+        path: "indent.ts",
+        old_text: "  bar();\n  baz();",
+        new_text: "  barNew();\n  bazNew();",
+      }),
+    );
+    expect(out).toContain("L4");
+    const result = await readFile(join(workDir, "indent.ts"), "utf8");
+    // new_text 被重对齐到文件实际缩进(4 空格),而非模型的 2 空格
+    expect(result).toBe("function foo() {\n    barNew();\n    bazNew();\n}");
+  });
+
+  it("L4 缩进相同:文件与模型都是 2 空格,new_text 原样写入", async () => {
+    // 文件 2 空格;old_text 带 trailing 空格强制走 L4
+    await writeFile(join(workDir, "same.ts"), "  bar();\n  baz();");
+    const tool = new EditFileTool(workDir);
+    const out = await tool.execute(
+      JSON.stringify({
+        path: "same.ts",
+        old_text: "  bar(); \n  baz(); ",
+        new_text: "  barNew();\n  bazNew();",
+      }),
+    );
+    expect(out).toContain("L4");
+    const result = await readFile(join(workDir, "same.ts"), "utf8");
+    // 缩进一致,new_text 原样写入(仍是 2 空格)
+    expect(result).toBe("  barNew();\n  bazNew();");
+  });
+
+  it("L4 dedent 行:比模型基准缩进更少的行锚定到文件基准", async () => {
+    // 文件 4 空格
+    await writeFile(
+      join(workDir, "dedent.ts"),
+      "wrapper {\n    line1();\n    line2();\n}",
+    );
+    const tool = new EditFileTool(workDir);
+    // 模型基准 2 空格;new_text 首行 dedent(0 缩进注释)
+    const out = await tool.execute(
+      JSON.stringify({
+        path: "dedent.ts",
+        old_text: "  line1();\n  line2();",
+        new_text: "// comment\n  line1New();\n  line2New();",
+      }),
+    );
+    expect(out).toContain("L4");
+    const result = await readFile(join(workDir, "dedent.ts"), "utf8");
+    // dedent 行锚定到文件基准(4 空格),其余行按模型相对嵌套对齐
+    expect(result).toBe(
+      "wrapper {\n    // comment\n    line1New();\n    line2New();\n}",
+    );
+  });
+
+  it("CRLF 文件 + L4 缩进重对齐:两个特性组合(视图往返 + 缩进对齐)", async () => {
+    // 磁盘 CRLF + 4 空格缩进
+    await writeFile(
+      join(workDir, "combo.ts"),
+      "function foo() {\r\n    bar();\r\n    baz();\r\n}",
+    );
+    const tool = new EditFileTool(workDir);
+    // 模型 LF 视图 + 2 空格缩进
+    const out = await tool.execute(
+      JSON.stringify({
+        path: "combo.ts",
+        old_text: "  bar();\n  baz();",
+        new_text: "  barNew();\n  bazNew();",
+      }),
+    );
+    expect(out).toContain("L4");
+    const result = await readFile(join(workDir, "combo.ts"), "utf8");
+    // 写回仍是 CRLF,且缩进对齐到 4 空格
+    expect(result).toBe("function foo() {\r\n    barNew();\r\n    bazNew();\r\n}");
   });
 });
