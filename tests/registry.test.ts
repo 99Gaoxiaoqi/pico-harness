@@ -3,7 +3,7 @@
 
 import { mkdtemp, mkdir, rm, writeFile, readFile, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   BashTool,
@@ -258,8 +258,17 @@ describe("BashTool", () => {
   it("命令在工作区目录下执行", async () => {
     const tool = new BashTool(workDir);
     const out = await tool.execute(JSON.stringify({ command: "pwd" }));
-    // macOS 下 /var 是 /private/var 的符号链接,用 realpath 解析真实路径后比较
-    expect(await realpath(out.trim())).toBe(await realpath(workDir));
+    // 不同 shell 输出的路径格式不同:
+    // - macOS/Linux bash:/var/... 或 /private/var/...(realpath 归一)
+    // - Windows Git Bash:/d/.../claw-test-xxx(Node realpath 不认 POSIX 风格)
+    // 统一用 realpath 解析真实路径后比较;realpath 失败时(Git Bash POSIX 路径)
+    // 退化为比较 basename,因为 workDir 是 mkdtemp 产生的唯一随机目录名。
+    const pwdOut = out.trim();
+    try {
+      expect(await realpath(pwdOut)).toBe(await realpath(workDir));
+    } catch {
+      expect(basename(pwdOut)).toBe(basename(workDir));
+    }
   });
 
   it("命令失败时原样回传错误,不抛异常 (自愈机制)", async () => {
@@ -272,7 +281,9 @@ describe("BashTool", () => {
 
   it("支持管道与链式命令", async () => {
     const tool = new BashTool(workDir);
-    const out = await tool.execute(JSON.stringify({ command: "echo 'a\\nb\\nc' | grep b" }));
+    // 用 printf 而非 echo:POSIX 单引号下 echo 不解释 \n,printf 才会真正换行,
+    // 这样 `grep b` 才能从多行输出中匹配到 "b"。对 bash/sh 均成立。
+    const out = await tool.execute(JSON.stringify({ command: "printf 'a\\nb\\nc\\n' | grep b" }));
     expect(out.trim()).toBe("b");
   });
 

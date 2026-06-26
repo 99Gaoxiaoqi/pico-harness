@@ -13,7 +13,9 @@
 // 最终导出 JSON 决策树到 .claw/traces/,像读病历一样逐帧复盘。
 
 import { writeFileSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
+// 用 pathe 替代 node:path:全平台产出正斜杠路径,
+// 让导出路径在断言/跨平台对比时统一为 POSIX 风格(.claw/traces)。
+import { join } from "pathe";
 
 export type TraceAttributes = Record<string, unknown>;
 
