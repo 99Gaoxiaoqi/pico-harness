@@ -2,9 +2,7 @@
 // 对应课程第 05 讲:registryImpl + read_file 工具。
 
 import { readFile, writeFile, mkdir } from "node:fs/promises";
-import { exec } from "node:child_process";
 import { isAbsolute, relative, resolve } from "node:path";
-import { promisify } from "node:util";
 import type {
   BaseTool,
   ExecutionMiddleware,
@@ -14,8 +12,9 @@ import type {
 } from "./registry.js";
 import type { ToolCall, ToolDefinition, ToolResult } from "../schema/message.js";
 import { logger } from "../observability/logger.js";
+// 跨平台 shell:Windows 上统一走 Git Bash,避免 cmd.exe 不识别 POSIX 语义。
+import { execAsync, execOptions } from "../os/shell.js";
 
-const execAsync = promisify(exec);
 const DEFAULT_RESULT_SIZE_CHARS = 8000;
 
 export interface ToolRegistryOptions {
@@ -351,11 +350,14 @@ export class BashTool implements BaseTool {
     let stdout: string;
     let timedOut = false;
     try {
-      const { stdout: out } = await execAsync(command, {
-        cwd: this.workDir,
-        maxBuffer: 1024 * 1024,
-        timeout: BASH_TIMEOUT_MS,
-      });
+      const { stdout: out } = await execAsync(
+        command,
+        execOptions({
+          cwd: this.workDir,
+          maxBuffer: 1024 * 1024,
+          timeout: BASH_TIMEOUT_MS,
+        }),
+      );
       stdout = out;
     } catch (err) {
       const e = err as {

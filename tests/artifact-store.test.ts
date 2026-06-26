@@ -1,6 +1,7 @@
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+// 测试侧也用 pathe,与 artifact-store 的 meta.path(正斜杠)保持一致。
+import { join } from "pathe";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ToolResultArtifactStore } from "../src/context/artifact-store.js";
 

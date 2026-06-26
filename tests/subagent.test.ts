@@ -350,7 +350,7 @@ describe("AgentEngine.runSub", () => {
     return new AgentEngine({
       provider,
       registry: readOnlyRegistry,
-      workDir: "/tmp",
+      workDir: tmpdir(),
       enableThinking: false,
     });
   }
@@ -476,7 +476,7 @@ describe("AgentEngine.runSub", () => {
     const registry = mockReadOnlyRegistry();
     const engine = makeEngine(provider, registry);
 
-    const mainSession = new Session("main", "/tmp");
+    const mainSession = new Session("main", tmpdir());
     mainSession.append({ role: "user", content: "主任务" });
 
     const beforeLen = mainSession.length;
@@ -596,20 +596,20 @@ describe("SubagentTool + AgentEngine 端到端委派", () => {
     })();
 
     const mainRegistry = new ToolRegistry();
-    mainRegistry.register(new ReadFileTool("/tmp"));
-    mainRegistry.register(new BashTool("/tmp"));
+    mainRegistry.register(new ReadFileTool(tmpdir()));
+    mainRegistry.register(new BashTool(tmpdir()));
 
     const engine = new AgentEngine({
       provider: mainProvider,
       registry: mainRegistry,
-      workDir: "/tmp",
+      workDir: tmpdir(),
       enableThinking: false,
     });
 
     // 注册 SubagentTool,其 runner 就是 engine 自身
     const readOnlyReg = new ToolRegistry();
-    readOnlyReg.register(new ReadFileTool("/tmp"));
-    readOnlyReg.register(new BashTool("/tmp"));
+    readOnlyReg.register(new ReadFileTool(tmpdir()));
+    readOnlyReg.register(new BashTool(tmpdir()));
     mainRegistry.register(new SpawnSubagentTool(engine, readOnlyReg));
 
     // 但 runSub 会调 mainProvider,而 mainProvider 的 turn 逻辑是给主用的…

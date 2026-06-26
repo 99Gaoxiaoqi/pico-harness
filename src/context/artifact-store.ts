@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { mkdir, readFile, readdir, rmdir, unlink, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+// 用 pathe 替代 node:path:artifact 的 meta.path 会被持久化并跨平台对比,
+// 统一正斜杠后断言 .claw/artifacts/sessions/ / tool-results/ 才能稳定成立。
+import { join, resolve } from "pathe";
 
 const DEFAULT_TTL_HOURS = 168;
 const DEFAULT_MAX_TOTAL_BYTES = 200 * 1024 * 1024;
@@ -395,7 +397,7 @@ async function unlinkIfExists(path: string): Promise<void> {
   try {
     await unlink(path);
   } catch (err) {
-    if (isNodeError(err) && err.code === "ENOENT") {
+    if (isNodeError(err) && (err.code === "ENOENT" || isWindowsTransientLock(err))) {
       return;
     }
     throw err;
@@ -406,11 +408,23 @@ async function rmdirIfEmpty(path: string): Promise<void> {
   try {
     await rmdir(path);
   } catch (err) {
-    if (isNodeError(err) && (err.code === "ENOENT" || err.code === "ENOTEMPTY")) {
+    if (
+      isNodeError(err) &&
+      (err.code === "ENOENT" || err.code === "ENOTEMPTY" || isWindowsTransientLock(err))
+    ) {
       return;
     }
     throw err;
   }
+}
+
+/**
+ * Windows 上删除操作偶发 EPERM:文件被杀软扫描、句柄未释放等瞬时占用。
+ * 这种锁会在重试或稍后自行消失,不应让 session 清理整体失败。
+ * 仅在 Windows 上把 EPERM 视为瞬时锁吞掉;POSIX 上的 EPERM 多为真实权限问题,继续抛出。
+ */
+function isWindowsTransientLock(err: NodeJS.ErrnoException): boolean {
+  return process.platform === "win32" && err.code === "EPERM";
 }
 
 async function readDirIfExists(path: string): Promise<string[]>;

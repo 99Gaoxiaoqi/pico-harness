@@ -1,10 +1,9 @@
-import { exec } from "node:child_process";
 import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { promisify } from "node:util";
 import { Session } from "../engine/session.js";
-
-const execAsync = promisify(exec);
+// 跨平台 shell:setupScript/validateScript 多为 POSIX 写法(printf/$()/test),
+// 在 Windows 上必须走 Git Bash 才能正确执行。
+import { execAsync, execOptions } from "../os/shell.js";
 
 export interface BenchmarkUsage {
   promptTokens: number;
@@ -169,10 +168,13 @@ export class BenchmarkRunner {
 
 async function runShell(script: string, cwd: string, failurePrefix: string): Promise<void> {
   try {
-    await execAsync(script, {
-      cwd,
-      maxBuffer: 1024 * 1024,
-    });
+    await execAsync(
+      script,
+      execOptions({
+        cwd,
+        maxBuffer: 1024 * 1024,
+      }),
+    );
   } catch (err) {
     const e = err as { stdout?: string; stderr?: string; message?: string };
     const output = [e.stdout ?? "", e.stderr ?? ""].filter(Boolean).join("\n").trim();
