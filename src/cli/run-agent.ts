@@ -95,7 +95,7 @@ export async function runAgentFromCli(
     dependencies.provider !== undefined,
   );
   const workDir = await resolveWorkDir(options.dir);
-  const session = globalSessionManager.getOrCreate(
+  const session = await globalSessionManager.getOrCreate(
     options.session ?? consoleSessionId(workDir),
     workDir,
   );
