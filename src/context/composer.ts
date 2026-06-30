@@ -14,6 +14,30 @@ import { join } from "node:path";
 import { logger } from "../observability/logger.js";
 import { PlanStore } from "./plan-store.js";
 import { SkillLoader } from "./skill.js";
+import type { LearnedSkill } from "../memory/skill-schema.js";
+
+// 动态导入：SkillRegistry 和 MemoryNudger 尚未实现时使用 mock
+// 真实实现完成后，替换为实际类
+interface ISkillRegistry {
+  init(): Promise<void>;
+  getTopSkills(limit: number): LearnedSkill[];
+  search(query: string): LearnedSkill[];
+}
+
+interface IMemoryNudger {
+  generate(sessionId: string, turnCount: number): Promise<string | null>;
+}
+
+// 临时 mock（真实实现在子代理2和3完成后替换）
+class SkillRegistryStub implements ISkillRegistry {
+  async init(): Promise<void> {}
+  getTopSkills(): LearnedSkill[] {
+    return [];
+  }
+  search(): LearnedSkill[] {
+    return [];
+  }
+}
 
 /** 负责根据工作区环境动态生成 System Prompt */
 export class PromptComposer {
@@ -21,17 +45,46 @@ export class PromptComposer {
   private readonly skillLoader: SkillLoader;
   private readonly planMode: boolean;
   private readonly planStore: PlanStore;
+  private readonly skillRegistry: ISkillRegistry;
+  private readonly nudger?: IMemoryNudger;
+  private readonly sessionId?: string;
 
-  constructor(workDir: string, planMode = false) {
+  /**
+   * @param workDir 工作目录
+   * @param planMode 是否启用 Plan Mode
+   * @param options 可选配置
+   *   - sessionId: 会话 ID（用于 Nudger）
+   *   - skillRegistry: 技能注册表实例（测试时可注入 mock）
+   *   - memoryNudger: 记忆提示器实例（测试时可注入 mock）
+   */
+  constructor(
+    workDir: string,
+    planMode = false,
+    options?: {
+      sessionId?: string;
+      skillRegistry?: ISkillRegistry;
+      memoryNudger?: IMemoryNudger;
+    },
+  ) {
     this.workDir = workDir;
     this.skillLoader = new SkillLoader(workDir);
     this.planMode = planMode;
-    // PlanStore 路径在构造时绑定,Plan Mode 唤醒时主动嗅探磁盘状态
     this.planStore = new PlanStore(workDir);
+    this.sessionId = options?.sessionId;
+
+    // 初始化技能注册表（支持注入，默认使用 stub）
+    this.skillRegistry = options?.skillRegistry ?? new SkillRegistryStub();
+    void this.skillRegistry.init(); // 异步初始化，不阻塞构造
+
+    // 初始化 Nudger（可选）
+    this.nudger = options?.memoryNudger;
   }
 
-  /** 组装并返回完整的系统提示词字符串 */
-  async build(): Promise<string> {
+  /**
+   * 组装并返回完整的系统提示词字符串
+   * @param turnCount 当前轮次（用于触发 Periodic Nudge）
+   */
+  async build(turnCount = 0): Promise<string> {
     const parts: string[] = [];
 
     // 1. 极简内核:仅确立基本身份与最底线红线纪律
@@ -79,7 +132,79 @@ ${agentsContent}
       parts.push(skillsContent);
     }
 
+    // 5. 技能记忆（新增）
+    const skillContext = await this.buildSkillContext();
+    if (skillContext) {
+      parts.push(skillContext);
+    }
+
+    // 6. Periodic Nudge（新增）
+    if (this.nudger && this.sessionId && turnCount > 0) {
+      try {
+        const nudge = await this.nudger.generate(this.sessionId, turnCount);
+        if (nudge) {
+          parts.push(nudge);
+        }
+      } catch (err) {
+        logger.warn({ err }, "[composer] Nudge 生成失败");
+      }
+    }
+
     return parts.join("\n\n");
+  }
+
+  /**
+   * 构建技能记忆上下文（格式化为 Markdown）
+   */
+  private async buildSkillContext(): Promise<string | null> {
+    try {
+      const topSkills = this.skillRegistry.getTopSkills(5);
+      if (topSkills.length === 0) {
+        return null;
+      }
+
+      const parts = ["# 已掌握的技能 (来自 .claw/skills/)"];
+
+      for (const skill of topSkills) {
+        const { successCount, failCount } = skill.stats;
+        const total = successCount + failCount || 1;
+        const successRate = ((successCount / total) * 100).toFixed(0);
+
+        parts.push(`\n## ${skill.name} (成功率 ${successRate}%)`);
+        parts.push(`- **触发条件**: ${skill.trigger}`);
+        parts.push(`- **执行步骤**:`);
+        // 缩进 instructions
+        const indented = skill.instructions.split("\n").map((line) => `  ${line}`).join("\n");
+        parts.push(indented);
+
+      // 展示第一个已知问题（如果有）
+      if (skill.knownFailures.length > 0) {
+        const firstFailure = skill.knownFailures[0];
+        if (firstFailure) {
+          parts.push(
+            `- **已知问题** (出现 ${firstFailure.occurrences} 次): ${firstFailure.errorPattern.slice(0, 100)}`,
+          );
+          if (firstFailure.solution) {
+            parts.push(`  解决方案: ${firstFailure.solution}`);
+          }
+        }
+      }
+
+        parts.push(`- **统计**: 成功 ${successCount} 次，失败 ${failCount} 次`);
+      }
+
+      parts.push("\n💡 提示: 遇到匹配的触发条件时，优先使用已掌握的技能。");
+
+      return parts.join("\n");
+    } catch (err) {
+      logger.warn({ err }, "[composer] 构建技能记忆失败");
+      return null;
+    }
+  }
+
+  /** 获取 SkillRegistry 实例（用于外部记录技能执行） */
+  getSkillRegistry(): ISkillRegistry {
+    return this.skillRegistry;
   }
 }
 

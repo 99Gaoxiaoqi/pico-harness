@@ -17,6 +17,7 @@ import type { CanonicalUsage, Message } from "../schema/message.js";
 import type { CostStatus } from "../observability/pricing.js";
 import { logger } from "../observability/logger.js";
 import { SessionStore } from "./session-store.js";
+import { FTS5Store } from "../memory/fts5-store.js";
 
 /** 清洗 sessionId 为安全文件名片段(/、: 等破坏路径的字符替换为 _) */
 function sanitizeFilePart(value: string): string {
@@ -77,12 +78,19 @@ export class Session {
    */
   private runQueue: Promise<unknown> = Promise.resolve();
 
+  /**
+   * FTS5 全文检索存储。可选,初始化失败降级为 undefined。
+   * 用于对话历史的语义检索和周期性记忆提醒。
+   */
+  private fts5?: FTS5Store;
+
   constructor(id: string, workDir: string, options?: { persistence?: boolean }) {
     this.id = id;
     this.workDir = workDir;
     this.createdAt = new Date();
     this.updatedAt = new Date();
     this.initPersistence(options?.persistence);
+    this.initFTS5();
   }
 
   /**
@@ -106,6 +114,19 @@ export class Session {
       // 持久化初始化失败不应阻断会话本身,降级为纯内存
       logger.warn({ error: String(error) }, "[session] 持久化初始化失败,降级为纯内存");
       this.store = undefined;
+    }
+  }
+
+  /**
+   * 初始化 FTS5 全文检索存储。
+   * 失败时降级为 undefined,不影响主流程(记忆提醒功能可选)。
+   */
+  private initFTS5(): void {
+    try {
+      this.fts5 = new FTS5Store(this.workDir);
+    } catch (err) {
+      logger.warn({ err }, '[session] FTS5 初始化失败,降级为纯内存');
+      this.fts5 = undefined;
     }
   }
 
@@ -178,8 +199,21 @@ export class Session {
 
   /** 向 Session 追加消息(可批量)。内存写后追加事件到 JSONL(对标 kimi-code wire.jsonl) */
   append(...msgs: Message[]): void {
+    const beforeLen = this.history.length;
     this.history.push(...msgs);
     this.updatedAt = new Date();
+
+    // FTS5 索引:为每条消息建立全文检索索引(用于记忆提醒和语义检索)
+    if (this.fts5) {
+      for (let i = 0; i < msgs.length; i++) {
+        try {
+          this.fts5.insert(this.id, beforeLen + i, msgs[i]!);
+        } catch (err) {
+          logger.warn({ err }, '[session] FTS5 索引失败');
+        }
+      }
+    }
+
     // 事件追加落盘:fire-and-forget,失败仅 warn 不阻塞主循环(对标 kimi-code append)。
     // Promise 收集到 pendingWrites,供 persistTruncate 落盘前 await,避免 truncate
     // 抢先写入导致重放时 message 缺失(C1 竞态修复)。
@@ -355,6 +389,38 @@ export class Session {
       }
     }
     return res;
+  }
+
+  /**
+   * 全文检索历史对话(基于 FTS5)。
+   * 用于 MemoryNudger 生成记忆提醒时查询相关历史。
+   * @param query - 搜索关键词
+   * @param limit - 返回结果数(默认 10)
+   * @returns 匹配的对话片段(按相关性排序,仅返回当前 Session 的消息)
+   */
+  search(query: string, limit = 10): Array<{ content: string; turnIndex: number; sessionId: string }> {
+    if (!this.fts5) {
+      logger.warn('[session] FTS5 未初始化,无法检索');
+      return [];
+    }
+
+    try {
+      // 传入 sessionId 过滤,只返回当前 Session 的消息
+      const results = this.fts5.search(query, limit, this.id);
+      return results.map((r) => ({
+        content: r.content,
+        turnIndex: r.turnIndex,
+        sessionId: r.sessionId,
+      }));
+    } catch (err) {
+      logger.warn({ err, query }, '[session] FTS5 检索失败');
+      return [];
+    }
+  }
+
+  /** 获取 FTS5Store 实例(用于 MemoryNudger) */
+  get fts5Store(): FTS5Store | undefined {
+    return this.fts5;
   }
 }
 
