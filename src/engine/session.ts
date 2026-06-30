@@ -15,6 +15,7 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import type { CanonicalUsage, Message } from "../schema/message.js";
 import type { CostStatus } from "../observability/pricing.js";
+import { logger } from "../observability/logger.js";
 import { SessionStore } from "./session-store.js";
 
 /** 清洗 sessionId 为安全文件名片段(/、: 等破坏路径的字符替换为 _) */
@@ -60,6 +61,13 @@ export class Session {
   private store?: SessionStore;
   /** 下一条 record 的序列号(单调递增,保证重放顺序与幂等) */
   private nextSeq = 0;
+  /**
+   * 未落盘的 append 写入 Promise 集合。
+   * truncate 落盘前必须先 await 这些 Promise,否则 fire-and-forget 乱序可能
+   * 让 truncate record 先于 earlier appends 写入磁盘,崩溃恢复重放时
+   * 会因缺失 message 导致历史丢失(对标 C1 竞态修复)。
+   */
+  private pendingWrites: Promise<void>[] = [];
 
   /**
    * 并发安全:per-session 串行执行队列。
@@ -96,7 +104,7 @@ export class Session {
       this.store = new SessionStore(join(dir, `${sanitizeFilePart(this.id)}.jsonl`));
     } catch (error) {
       // 持久化初始化失败不应阻断会话本身,降级为纯内存
-      console.warn(`[session] 持久化初始化失败,降级为纯内存: ${String(error)}`);
+      logger.warn({ error: String(error) }, "[session] 持久化初始化失败,降级为纯内存");
       this.store = undefined;
     }
   }
@@ -112,8 +120,8 @@ export class Session {
     try {
       records = await this.store.load();
     } catch (error) {
-      // 中间行损坏(非末行撕裂):不静默吞,降级为空 history 从头开始
-      console.warn(`[session] 日志重放失败,降级为空历史: ${String(error)}`);
+      // 兜底:load 内部已对中间行损坏改为跳过+warn,这里只会捕获未预期的致命错误
+      logger.warn({ error: String(error) }, "[session] 日志重放失败,降级为空历史");
       return;
     }
     if (records.length === 0) return;
@@ -172,13 +180,18 @@ export class Session {
   append(...msgs: Message[]): void {
     this.history.push(...msgs);
     this.updatedAt = new Date();
-    // 事件追加落盘:fire-and-forget,失败仅 warn 不阻塞主循环(对标 kimi-code append)
+    // 事件追加落盘:fire-and-forget,失败仅 warn 不阻塞主循环(对标 kimi-code append)。
+    // Promise 收集到 pendingWrites,供 persistTruncate 落盘前 await,避免 truncate
+    // 抢先写入导致重放时 message 缺失(C1 竞态修复)。
     if (this.store) {
       for (const m of msgs) {
         const seq = this.nextSeq++;
-        this.store.appendMessage(seq, m).catch((err) =>
-          console.warn(`[session] 持久化写入失败(seq=${seq}): ${String(err)}`),
-        );
+        const writePromise = this.store
+          .appendMessage(seq, m)
+          .catch((err) =>
+            logger.warn({ seq }, `[session] 持久化写入失败: ${String(err)}`),
+          );
+        this.pendingWrites.push(writePromise);
       }
     }
   }
@@ -195,20 +208,31 @@ export class Session {
       this.history = [];
       this.updatedAt = new Date();
       // 追加 truncate 事件(fromIndex = 历史长度 → 重放后为空)
-      this.persistTruncate(fromIndex);
+      void this.persistTruncate(fromIndex);
       return;
     }
     this.history = this.history.slice(fromIndex);
     this.updatedAt = new Date();
-    this.persistTruncate(fromIndex);
+    void this.persistTruncate(fromIndex);
   }
 
-  /** 追加 truncate 事件到 JSONL(fire-and-forget)。重放时据此折叠历史。 */
-  private persistTruncate(fromIndex: number): void {
+  /**
+   * 追加 truncate 事件到 JSONL。重放时据此折叠历史。
+   * 关键:落盘前必须先 await earlier appends(pendingWrites),保证 truncate record
+   * 在文件中位于所有 prior message records 之后;否则 fire-and-forget 乱序会让
+   * truncate 先写完,崩溃恢复重放时因缺失 message 导致折叠后历史丢失(C1 修复)。
+   * truncateTo 同步调用,内部用 void 触发本异步方法;调用方靠 flush/重启等落盘。
+   */
+  private async persistTruncate(fromIndex: number): Promise<void> {
     if (!this.store) return;
+    // 先捕获并清空当前 pending,再 await。避免 await 期间新 append push 的 promise
+    // 被错误清空(truncateTo 之后继续 append 是合法的续接场景)。
+    const pending = this.pendingWrites;
+    this.pendingWrites = [];
+    await Promise.all(pending);
     const seq = this.nextSeq++;
     this.store.appendTruncate(seq, fromIndex).catch((err) =>
-      console.warn(`[session] truncate 落盘失败(seq=${seq}): ${String(err)}`),
+      logger.warn({ seq }, `[session] truncate 落盘失败: ${String(err)}`),
     );
   }
 

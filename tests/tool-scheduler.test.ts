@@ -255,3 +255,13 @@ describe("ToolScheduler 执行器韧性(maxConcurrency + signal)", () => {
     expect(spread).toBeLessThan(DELAY); // 无上限 → 全部同时启动
   });
 });
+
+describe("ToolScheduler maxConcurrency 校验(fail-fast 不死锁)", () => {
+  it("maxConcurrency=0 构造时抛错(fail-fast 不死锁)", () => {
+    expect(() => new ToolScheduler<string>({ maxConcurrency: 0 })).toThrow(/maxConcurrency/);
+  });
+
+  it("maxConcurrency=-1 构造时抛错", () => {
+    expect(() => new ToolScheduler<string>({ maxConcurrency: -1 })).toThrow(/maxConcurrency/);
+  });
+});

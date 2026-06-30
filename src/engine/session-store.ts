@@ -15,6 +15,7 @@
 
 import { appendFile, readFile } from "node:fs/promises";
 import type { Message } from "../schema/message.js";
+import { logger } from "../observability/logger.js";
 
 /** 持久化的事件记录:每行一个,带 type 判别联合 */
 export type SessionRecord =
@@ -42,7 +43,8 @@ export class SessionStore {
 
   /**
    * 读取全部记录。逐行解析,容忍末行撕裂(最后一行 JSON.parse 失败则跳过)。
-   * 中间行损坏会直接抛错 —— 那是真正的文件损坏,不该静默吞掉。
+   * 中间行损坏改为"跳过该行继续解析"并 warn,保住其余有效记录(M2 修复);
+   * 旧实现直接抛错会导致 recover 全量丢弃,前 N 条有效记录一并丢失。
    *
    * 返回结果按 seq 升序排序:append 是 fire-and-forget,不保证落盘顺序,
    * 但 seq 单调递增(调用方分配),重放必须按 seq 才能还原正确的历史顺序。
@@ -72,8 +74,13 @@ export class SessionStore {
           // 末行撕裂:append 写一半的典型表现,容忍跳过
           break;
         }
-        // 中间行损坏:文件真的坏了,抛错让上层决策
-        throw new Error(`session 日志第 ${i + 1} 行损坏,无法解析: ${String(error)}`);
+        // 中间行损坏:跳过该行继续解析(warn 不 throw),保住其余有效记录。
+        // 旧实现 throw 会让 recover 全量丢弃,第 50 行损坏 → 前 49 条有效记录丢失(M2)。
+        logger.warn(
+          { line: i + 1 },
+          `[session] 第 ${i + 1} 行损坏,跳过: ${String(error)}`,
+        );
+        continue;
       }
     }
     // 关键:按 seq 排序,消除 fire-and-forget 落盘乱序的影响

@@ -85,7 +85,13 @@ export class ToolScheduler<R> {
   private aborted = false;
 
   constructor(options: ToolSchedulerOptions = {}) {
-    this.maxConcurrency = options.maxConcurrency ?? DEFAULT_MAX_CONCURRENCY;
+    const maxConcurrency = options.maxConcurrency ?? DEFAULT_MAX_CONCURRENCY;
+    // fail-fast:无效并发上限立即抛错,避免 isBlocked 恒真导致所有任务进 queued、
+    // Promise.all 静默死锁(参考 compactor 的 ContextCompactionError 哲学:宁可崩溃不可静默错)
+    if (maxConcurrency < 1) {
+      throw new Error(`maxConcurrency must be >= 1, got: ${maxConcurrency}`);
+    }
+    this.maxConcurrency = maxConcurrency;
     this.signal = options.signal;
     // 启动即监听;若信号已被 abort(常见于复用),attachAbort 内部会立即触发
     if (this.signal) this.attachAbort(this.signal);
