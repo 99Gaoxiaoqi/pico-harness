@@ -128,18 +128,18 @@ describe("Session", () => {
 });
 
 describe("SessionManager", () => {
-  it("getOrCreate:同 id 复用同一 Session 实例", () => {
+  it("getOrCreate:同 id 复用同一 Session 实例", async () => {
     const mgr = new SessionManager();
-    const s1 = mgr.getOrCreate("chat-A", "/tmp/a");
-    const s2 = mgr.getOrCreate("chat-A", "/tmp/a");
+    const s1 = await mgr.getOrCreate("chat-A", "/tmp/a");
+    const s2 = await mgr.getOrCreate("chat-A", "/tmp/a");
     expect(s1).toBe(s2);
     expect(mgr.size).toBe(1);
   });
 
-  it("getOrCreate:不同 id 物理隔离,各自独立", () => {
+  it("getOrCreate:不同 id 物理隔离,各自独立", async () => {
     const mgr = new SessionManager();
-    const sA = mgr.getOrCreate("chat-A", "/tmp/a");
-    const sB = mgr.getOrCreate("chat-B", "/tmp/b");
+    const sA = await mgr.getOrCreate("chat-A", "/tmp/a");
+    const sB = await mgr.getOrCreate("chat-B", "/tmp/b");
     expect(sA).not.toBe(sB);
     expect(mgr.size).toBe(2);
 
@@ -151,17 +151,17 @@ describe("SessionManager", () => {
     expect(sB.getWorkingMemory(10).some((m) => m.content === "A 的消息")).toBe(false);
   });
 
-  it("get:获取已存在会话,不存在时返回 undefined", () => {
+  it("get:获取已存在会话,不存在时返回 undefined", async () => {
     const mgr = new SessionManager();
     expect(mgr.get("nope")).toBeUndefined();
-    mgr.getOrCreate("exists", "/tmp");
+    await mgr.getOrCreate("exists", "/tmp");
     expect(mgr.get("exists")).toBeDefined();
   });
 
-  it("delete:删除已存在会话并返回被删除的 Session", () => {
+  it("delete:删除已存在会话并返回被删除的 Session", async () => {
     const mgr = new SessionManager();
-    const keep = mgr.getOrCreate("keep", "/tmp/keep");
-    const removed = mgr.getOrCreate("remove-me", "/tmp/remove-me");
+    const keep = await mgr.getOrCreate("keep", "/tmp/keep");
+    const removed = await mgr.getOrCreate("remove-me", "/tmp/remove-me");
     removed.append(userMsg("需要保留在返回值里的历史"));
 
     const deleted = mgr.delete("remove-me");
@@ -175,28 +175,28 @@ describe("SessionManager", () => {
     expect(mgr.get("keep")).toBe(keep);
   });
 
-  it("delete:删除不存在会话时返回 undefined", () => {
+  it("delete:删除不存在会话时返回 undefined", async () => {
     const mgr = new SessionManager();
-    mgr.getOrCreate("exists", "/tmp");
+    await mgr.getOrCreate("exists", "/tmp");
 
     expect(mgr.delete("missing")).toBeUndefined();
     expect(mgr.size).toBe(1);
     expect(mgr.get("exists")).toBeDefined();
   });
 
-  it("clear:清空所有会话", () => {
+  it("clear:清空所有会话", async () => {
     const mgr = new SessionManager();
-    mgr.getOrCreate("a", "/tmp");
-    mgr.getOrCreate("b", "/tmp");
+    await mgr.getOrCreate("a", "/tmp");
+    await mgr.getOrCreate("b", "/tmp");
     expect(mgr.size).toBe(2);
     mgr.clear();
     expect(mgr.size).toBe(0);
   });
 
-  it("多会话并发追加互不干扰(物理隔离核心验证)", () => {
+  it("多会话并发追加互不干扰(物理隔离核心验证)", async () => {
     const mgr = new SessionManager();
-    const sessions = ["feishu:群1", "feishu:群2", "wechat:用户C"].map((id) =>
-      mgr.getOrCreate(id, "/tmp"),
+    const sessions = await Promise.all(
+      ["feishu:群1", "feishu:群2", "wechat:用户C"].map((id) => mgr.getOrCreate(id, "/tmp")),
     );
 
     // 各自追加不同内容
