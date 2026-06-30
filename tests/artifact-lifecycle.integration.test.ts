@@ -41,7 +41,7 @@ describe("Session-scoped artifact lifecycle", () => {
   });
 
   it("删除 session 后显式删除该 session 的 artifact 文件", async () => {
-    const session = sessions.getOrCreate("feishu/chat-A", workDir);
+    const session = await sessions.getOrCreate("feishu/chat-A", workDir);
     session.append({ role: "user", content: "run tests" });
     const meta = await store.write({
       id: "result-a",
