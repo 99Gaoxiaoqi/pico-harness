@@ -11,8 +11,16 @@
 // 经此改造,engine.Run 沦为纯"打工执行器":不内部维护状态,
 // 依靠喂给它的 Session 推理 —— 随时休眠、随时被唤醒的记忆连续体。
 
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
 import type { CanonicalUsage, Message } from "../schema/message.js";
 import type { CostStatus } from "../observability/pricing.js";
+import { SessionStore } from "./session-store.js";
+
+/** 清洗 sessionId 为安全文件名片段(/、: 等破坏路径的字符替换为 _) */
+function sanitizeFilePart(value: string): string {
+  return value.replaceAll(/[^a-zA-Z0-9_-]/gu, "_");
+}
 
 /**
  * Session:一次持续的人机交互过程。
@@ -46,6 +54,14 @@ export class Session {
   private history: Message[] = [];
 
   /**
+   * 持久化:事件溯源 JSONL。undefined 表示持久化关闭(环境变量门控)。
+   * 默认开启(对标 kimi-code wire.jsonl);PICO_PERSISTENCE=0 关闭。
+   */
+  private store?: SessionStore;
+  /** 下一条 record 的序列号(单调递增,保证重放顺序与幂等) */
+  private nextSeq = 0;
+
+  /**
    * 并发安全:per-session 串行执行队列。
    * 飞书多群/连发消息时,同一 Session 的 engine.run 必须串行,
    * 否则并发读写 history 导致上下文错乱、孤儿 ToolResult、API 400。
@@ -53,11 +69,66 @@ export class Session {
    */
   private runQueue: Promise<unknown> = Promise.resolve();
 
-  constructor(id: string, workDir: string) {
+  constructor(id: string, workDir: string, options?: { persistence?: boolean }) {
     this.id = id;
     this.workDir = workDir;
     this.createdAt = new Date();
     this.updatedAt = new Date();
+    this.initPersistence(options?.persistence);
+  }
+
+  /**
+   * 初始化持久化。开关优先级:
+   *   1. 构造参数 persistence(显式,优先级最高)—— 测试用它精确控制,避免环境变量在
+   *      并行测试间相互污染(vitest 默认并行跑文件,共享 process.env 不安全)。
+   *   2. 环境变量 PICO_PERSISTENCE —— 生产入口的全局默认,=0 关闭。
+   *   3. 默认开启。
+   * 文件落点复用 .claw/ 约定:<workDir>/.claw/sessions/<id>.jsonl,
+   * 与 traces/、artifacts/、skills/ 同级。
+   */
+  private initPersistence(explicit?: boolean): void {
+    // 显式参数优先;未传时回落到环境变量,再回落到默认开启
+    const enabled = explicit ?? (process.env.PICO_PERSISTENCE !== "0");
+    if (!enabled) return;
+    try {
+      const dir = join(this.workDir, ".claw", "sessions");
+      mkdirSync(dir, { recursive: true });
+      this.store = new SessionStore(join(dir, `${sanitizeFilePart(this.id)}.jsonl`));
+    } catch (error) {
+      // 持久化初始化失败不应阻断会话本身,降级为纯内存
+      console.warn(`[session] 持久化初始化失败,降级为纯内存: ${String(error)}`);
+      this.store = undefined;
+    }
+  }
+
+  /**
+   * 重启后重放事件日志,重建内存 history(对标 kimi-code AgentRecords.replay)。
+   * 在 SessionManager.getOrCreate 新建实例时自动调用一次。
+   * 持久化关闭时为空操作。
+   */
+  async recover(): Promise<void> {
+    if (!this.store) return;
+    let records;
+    try {
+      records = await this.store.load();
+    } catch (error) {
+      // 中间行损坏(非末行撕裂):不静默吞,降级为空 history 从头开始
+      console.warn(`[session] 日志重放失败,降级为空历史: ${String(error)}`);
+      return;
+    }
+    if (records.length === 0) return;
+
+    // 重放:message 累积进 pending,truncate 则截断 pending(对标 wire 折叠语义)
+    let pending: Message[] = [];
+    for (const r of records) {
+      if (r.type === "message") {
+        pending.push(r.message);
+      } else if (r.type === "truncate") {
+        pending = pending.slice(r.fromIndex);
+      }
+    }
+    this.history = pending;
+    this.nextSeq = (records[records.length - 1]?.seq ?? -1) + 1;
   }
 
   /**
@@ -97,13 +168,19 @@ export class Session {
     }
   }
 
-  /** 向 Session 追加消息(可批量) */
+  /** 向 Session 追加消息(可批量)。内存写后追加事件到 JSONL(对标 kimi-code wire.jsonl) */
   append(...msgs: Message[]): void {
     this.history.push(...msgs);
     this.updatedAt = new Date();
-    // 【持久化预留点】:真实工业级实现(如 Claude Code)会在此把 history
-    // 以 JSONL 格式追加落盘到 workDir/.claw/sessions/<id>.jsonl,以支持重启恢复。
-    // 第 13 讲将补齐文件系统持久化记忆。
+    // 事件追加落盘:fire-and-forget,失败仅 warn 不阻塞主循环(对标 kimi-code append)
+    if (this.store) {
+      for (const m of msgs) {
+        const seq = this.nextSeq++;
+        this.store.appendMessage(seq, m).catch((err) =>
+          console.warn(`[session] 持久化写入失败(seq=${seq}): ${String(err)}`),
+        );
+      }
+    }
   }
 
   /**
@@ -117,10 +194,22 @@ export class Session {
     if (fromIndex >= this.history.length) {
       this.history = [];
       this.updatedAt = new Date();
+      // 追加 truncate 事件(fromIndex = 历史长度 → 重放后为空)
+      this.persistTruncate(fromIndex);
       return;
     }
     this.history = this.history.slice(fromIndex);
     this.updatedAt = new Date();
+    this.persistTruncate(fromIndex);
+  }
+
+  /** 追加 truncate 事件到 JSONL(fire-and-forget)。重放时据此折叠历史。 */
+  private persistTruncate(fromIndex: number): void {
+    if (!this.store) return;
+    const seq = this.nextSeq++;
+    this.store.appendTruncate(seq, fromIndex).catch((err) =>
+      console.warn(`[session] truncate 落盘失败(seq=${seq}): ${String(err)}`),
+    );
   }
 
   /** 返回全量历史的深拷贝(仅供调试 / 测试,不参与推理) */
@@ -172,11 +261,20 @@ export class Session {
 export class SessionManager {
   private readonly sessions = new Map<string, Session>();
 
-  /** 获取或创建一个会话(同 id 复用,不同 id 物理隔离) */
-  getOrCreate(id: string, workDir: string): Session {
+  /**
+   * 获取或创建一个会话(同 id 复用,不同 id 物理隔离)。
+   * 新建时自动重放磁盘日志恢复历史(recover)。返回 Promise 以支持异步恢复。
+   * persistence 显式透传给 Session(测试场景精确控制,避免环境变量并行污染)。
+   */
+  async getOrCreate(
+    id: string,
+    workDir: string,
+    options?: { persistence?: boolean },
+  ): Promise<Session> {
     let sess = this.sessions.get(id);
     if (!sess) {
-      sess = new Session(id, workDir);
+      sess = new Session(id, workDir, options);
+      await sess.recover();
       this.sessions.set(id, sess);
     }
     return sess;

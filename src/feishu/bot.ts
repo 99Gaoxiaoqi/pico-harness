@@ -194,7 +194,7 @@ export class FeishuBot {
     try {
       // 第 11 讲:每个 chatId 对应独立 Session,实现多群物理隔离。
       // 同一群的连续消息复用同一 Session,跨群互不干扰。
-      const session = globalSessionManager.getOrCreate(`feishu:${chatId}`, this.workDir);
+      const session = await globalSessionManager.getOrCreate(`feishu:${chatId}`, this.workDir);
       session.append({ role: "user", content: prompt });
       const engine = this.engineFactory({
         chatId,

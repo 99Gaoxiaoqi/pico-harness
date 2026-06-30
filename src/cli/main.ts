@@ -190,7 +190,7 @@ async function serve(
 
       // HTTP 入口:可选传入 sessionId 实现多会话隔离,缺省用单一控制台会话
       const sessionId = parsed.sessionId ?? `http:${workDir}`;
-      const session = globalSessionManager.getOrCreate(sessionId, workDir);
+      const session = await globalSessionManager.getOrCreate(sessionId, workDir);
       session.append({ role: "user", content: parsed.prompt });
       await engine.run(session);
 
