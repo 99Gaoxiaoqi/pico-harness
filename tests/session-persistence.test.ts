@@ -189,3 +189,88 @@ describe("SessionStore 末行撕裂容忍", () => {
     expect(s.length).toBe(0);
   });
 });
+
+describe("truncate 竞态保护(pendingWrites 顺序保证)", () => {
+  let workDir: string;
+
+  beforeEach(async () => {
+    workDir = await mkdtemp(join(tmpdir(), "pico-race-"));
+  });
+
+  afterEach(async () => {
+    await rm(workDir, { recursive: true, force: true });
+  });
+
+  async function flush(): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, 60));
+  }
+
+  it("truncate 前的 appends 已落盘,truncate 不会抢跑导致 message 丢失", async () => {
+    const mgr1 = new SessionManager();
+    const s1 = await mgr1.getOrCreate("race-chat", workDir, ON);
+    s1.append(userMsg("m0"), userMsg("m1"), userMsg("m2"), userMsg("m3"));
+    // 不 flush!立即 truncate(模拟连续快速调用)
+    s1.truncateTo(2);
+    await flush(); // 现在等所有落盘完成
+    expect(s1.length).toBe(2);
+
+    // 重启恢复:应得到 m2, m3(证明 appends 先于 truncate 落盘)
+    const mgr2 = new SessionManager();
+    const s2 = await mgr2.getOrCreate("race-chat", workDir, ON);
+    expect(s2.length).toBe(2);
+    expect(s2.getHistory()[0]!.content).toBe("m2");
+    expect(s2.getHistory()[1]!.content).toBe("m3");
+  });
+
+  it("truncate 后再 append,seq 正常续接", async () => {
+    const mgr1 = new SessionManager();
+    const s1 = await mgr1.getOrCreate("race-seq", workDir, ON);
+    s1.append(userMsg("a0"), userMsg("a1"));
+    s1.truncateTo(1); // 只保留 a1
+    await flush();
+    // truncate 后再 append
+    s1.append(userMsg("a2"));
+    await flush();
+    expect(s1.length).toBe(2);
+
+    const mgr2 = new SessionManager();
+    const s2 = await mgr2.getOrCreate("race-seq", workDir, ON);
+    expect(s2.length).toBe(2);
+    expect(s2.getHistory()[0]!.content).toBe("a1");
+    expect(s2.getHistory()[1]!.content).toBe("a2");
+  });
+
+  it("truncate record 在 JSONL 文件中物理位于所有 prior message records 之后", async () => {
+    // 直接验证 pendingWrites 顺序保证的核心不变量:
+    // persistTruncate 先 await Promise.all(pendingWrites) 再写 truncate record,
+    // 因此磁盘上 truncate 行一定排在所有 prior message 行之后。
+    // 若无此修复(fire-and-forget 不 await),truncate 可能抢跑先落盘,出现在文件中间。
+    //
+    // 注意:仅靠 recover 后的历史无法区分有无修复 —— SessionStore.load() 会按 seq
+    // 排序(session-store.ts:87),掩盖磁盘乱序。只有检查原始文件物理行顺序才能
+    // 暴露竞态。这是本 describe 块中唯一能真正区分"修复前/后"的测试。
+    const { readFile } = await import("node:fs/promises");
+    const mgr = new SessionManager();
+    const s = await mgr.getOrCreate("race-order", workDir, ON);
+    s.append(userMsg("m0"), userMsg("m1"), userMsg("m2"), userMsg("m3"));
+    // 不 flush!立即 truncate —— 触发 pendingWrites await 路径
+    s.truncateTo(2);
+    await flush();
+
+    // 直接读原始 JSONL,检查物理行顺序(不依赖 load() 的 seq 排序)
+    const file = join(workDir, ".claw", "sessions", "race-order.jsonl");
+    const content = await readFile(file, "utf8");
+    const lines = content.trim().split("\n");
+    expect(lines.length).toBe(5); // 4 messages + 1 truncate
+
+    // 前 4 行必须全是 message(证明 appends 先落盘)
+    for (let i = 0; i < 4; i++) {
+      const rec = JSON.parse(lines[i]!) as { type: string };
+      expect(rec.type).toBe("message");
+    }
+    // 最后一行必须是 truncate(证明 truncate 没有抢跑到 message 前面)
+    const last = JSON.parse(lines[4]!) as { type: string; fromIndex: number };
+    expect(last.type).toBe("truncate");
+    expect(last.fromIndex).toBe(2);
+  });
+});
