@@ -166,3 +166,92 @@ describe("ToolScheduler 资源冲突调度", () => {
     expect(results).toEqual(["slow", "fast"]);
   });
 });
+
+describe("ToolScheduler 执行器韧性(maxConcurrency + signal)", () => {
+  it("并发上限触发:超出的任务排队,名额释放后依次启动", async () => {
+    // 6 个互不冲突(none)任务,上限 2 → 应分 3 波,每波 2 个
+    const timeline: Array<{ name: string; t: number }> = [];
+    const T0 = Date.now();
+    const wave = (name: string): ToolCallTask<string> => ({
+      accesses: ToolAccesses.none(),
+      start: async () => {
+        timeline.push({ name, t: Date.now() - T0 });
+        await new Promise((r) => setTimeout(r, DELAY));
+        return name;
+      },
+    });
+
+    const scheduler = new ToolScheduler<string>({ maxConcurrency: 2 });
+    const promises = ["t1", "t2", "t3", "t4", "t5", "t6"].map((n) => scheduler.add(wave(n)));
+    const results = await Promise.all(promises);
+
+    expect(results).toEqual(["t1", "t2", "t3", "t4", "t5", "t6"]);
+    // t1、t2 第一波(几乎同时),t3、t4 第二波(晚 ~DELAY),t5、t6 第三波(晚 ~2*DELAY)
+    const t3 = timeline.find((x) => x.name === "t3")!.t;
+    const t1 = timeline.find((x) => x.name === "t1")!.t;
+    expect(t3 - t1).toBeGreaterThanOrEqual(DELAY - 15); // t3 必须在 t1 完成后才启动
+  });
+
+  it("中断信号:排队的任务被 reject,不永久 pending", async () => {
+    // 上限 1,第一个任务占住名额,第二个排队;触发 abort → 第二个应 reject
+    const ctrl = new AbortController();
+    const scheduler = new ToolScheduler<string>({ maxConcurrency: 1, signal: ctrl.signal });
+    const longRunning: ToolCallTask<string> = {
+      accesses: ToolAccesses.none(),
+      start: async () => {
+        await new Promise((r) => setTimeout(r, 500));
+        return "slow";
+      },
+    };
+    const queued: ToolCallTask<string> = {
+      accesses: ToolAccesses.none(),
+      start: async () => "queued",
+    };
+
+    const p1 = scheduler.add(longRunning);
+    const p2 = scheduler.add(queued);
+    // 触发中断:排队的 p2 必须被 reject(否则 await 会永久卡住)
+    ctrl.abort();
+
+    await expect(p2).rejects.toThrow(); // 中止错误,具体文案不绑死
+    // 正在跑的 p1 也会被 reject 外部句柄,让 Promise.all 能快速收口
+    await expect(p1).rejects.toThrow();
+  });
+
+  it("已 abort 的信号传入:所有任务立即 reject", async () => {
+    const ctrl = new AbortController();
+    ctrl.abort(); // 传入前就已是 aborted 态
+    const scheduler = new ToolScheduler<string>({ signal: ctrl.signal });
+    const task: ToolCallTask<string> = {
+      accesses: ToolAccesses.none(),
+      start: async () => "should-not-run",
+    };
+
+    // add 时短路 reject,任务根本不会 start
+    await expect(scheduler.add(task)).rejects.toThrow();
+    // 中止后续 add 也直接 reject
+    await expect(scheduler.add(task)).rejects.toThrow();
+  });
+
+  it("无参构造向后兼容:maxConcurrency 默认 Infinity,全并行", async () => {
+    const timeline: Array<{ name: string; t: number }> = [];
+    const T0 = Date.now();
+    const wave = (name: string): ToolCallTask<string> => ({
+      accesses: ToolAccesses.none(),
+      start: async () => {
+        timeline.push({ name, t: Date.now() - T0 });
+        await new Promise((r) => setTimeout(r, DELAY));
+        return name;
+      },
+    });
+
+    const scheduler = new ToolScheduler<string>(); // 无参
+    const promises = ["a", "b", "c", "d", "e"].map((n) => scheduler.add(wave(n)));
+    const results = await Promise.all(promises);
+
+    expect(results).toEqual(["a", "b", "c", "d", "e"]);
+    const times = ["a", "b", "c", "d", "e"].map((n) => timeline.find((x) => x.name === n)!.t);
+    const spread = Math.max(...times) - Math.min(...times);
+    expect(spread).toBeLessThan(DELAY); // 无上限 → 全部同时启动
+  });
+});
