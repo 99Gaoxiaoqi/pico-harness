@@ -4,6 +4,7 @@ import { AgentEngine } from "../engine/loop.js";
 import { globalSessionManager, type Session } from "../engine/session.js";
 import { TerminalReporter, type Reporter } from "../engine/reporter.js";
 import { Compactor } from "../context/compactor.js";
+import { FullCompactor } from "../context/full-compactor.js";
 import { ToolResultArtifactStore } from "../context/artifact-store.js";
 import { createContextBudget, estimateTokenBudgetAsChars } from "../context/context-budget.js";
 import { PromptComposer } from "../context/composer.js";
@@ -124,6 +125,8 @@ export async function runAgentFromCli(
     planMode: options.planMode ?? false,
     systemPrompt,
     compactor: buildCompactor(kind, providerConfig.model),
+    // 模型摘要压缩:provider 存在即启用,作为字符级降级用尽后的最后防线
+    fullCompactor: new FullCompactor({ provider: trackedProvider }),
     observationProcessor,
     reporter: dependencies.reporter ?? new TerminalReporter(),
     tracer: options.trace === true ? new Tracer() : undefined,

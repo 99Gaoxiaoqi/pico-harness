@@ -9,7 +9,8 @@
 //
 // 双重降级策略(放弃昂贵的 LLM 摘要,采用轻量字符级截断):
 // 1. System Prompt:永远保留,神圣不可侵犯
-// 2. 远期历史(超出保护区):ToolCall 意图保留,ToolResult 全量掩码
+// 2. 远期历史(超出保护区):ToolCall 意图保留,ToolResult 先温和摘要(MicroCompaction),
+//    strongerCompact 触发后再全量掩码
 // 3. WorkingMemory(保护区):期望完整,但单条超长则掐头去尾(前 500 + 后 500)
 //
 // 关键:绝不触碰 msg.toolCalls —— 这是模型行动的证据,维系逻辑链的关键!
@@ -51,6 +52,44 @@ function truncateProtectedContent(content: string): string {
 
 function budgetToolResultPlaceholder(originalLen: number): string {
   return `${BUDGET_TOOL_RESULT_PLACEHOLDER}:${originalLen}]`;
+}
+
+/**
+ * 把旧 ToolResult 内容浓缩成 1 行温和摘要(保留语义,释放空间)。
+ * 对标 hermes tool output pruning + kimi-code MicroCompaction:
+ * 不再粗暴全量掩码,而是提取工具名/退出码/规模,生成 1 行可读摘要。
+ *
+ * - 找得到对应 ToolCall: `[工具 {name} 输出已清理,exit {code},原始 {N} 字符,{M} 行]`
+ *   (无退出码时省略 exit 段)
+ * - 找不到 ToolCall(向前无匹配 assistant): `[早期工具输出已清理,原始 {N} 字符]`
+ */
+export function makeToolResultSummary(
+  msg: Message,
+  allMsgs: Message[],
+  index: number,
+): string {
+  const content = msg.content;
+  const lineCount = content.split("\n").length;
+  // 向前找最近的 assistant toolCalls,匹配本条 toolCallId,提取工具名
+  let toolName: string | undefined;
+  for (let j = index - 1; j >= 0; j--) {
+    const prev = allMsgs[j];
+    if (prev?.role === "assistant" && prev.toolCalls) {
+      const call = prev.toolCalls.find((tc) => tc.id === msg.toolCallId);
+      if (call) {
+        toolName = call.name;
+        break;
+      }
+    }
+  }
+  // 从输出文本里提取退出码(bash 常见模式:exit 0 / exit code 1)
+  const exitMatch = /exit (?:code )?(\d+)/i.exec(content);
+  const exitPart = exitMatch ? `,exit ${exitMatch[1]}` : "";
+  if (!toolName) {
+    // 找不到工具名:退化为通用格式(仅保留规模信息)
+    return `[早期工具输出已清理${exitPart},原始 ${content.length} 字符]`;
+  }
+  return `[工具 ${toolName} 输出已清理${exitPart},原始 ${content.length} 字符,${lineCount} 行]`;
 }
 
 function hasToolCalls(msg: Message): boolean {
@@ -150,6 +189,7 @@ export class Compactor {
   private readonly summarizer?: Summarizer;
   private readonly focusTopic?: string;
   private ineffectiveCount = 0;
+  private usedStrongerCompact = false;
   private previousSummary: string | undefined;
   private summarizedRemoteCount = 0;
 
@@ -207,9 +247,14 @@ export class Compactor {
       if (msg.role === "user" && msg.toolCallId) {
         // 工具返回结果 (Observation/ToolResult)
         if (!isInWorkingMemory) {
-          // 【第一道防线:远期历史】全量掩码 (Full Masking)
+          // 【第一道防线:远期历史】
+          // 第一档(温和):浓缩成 1 行摘要,保留工具名/退出码/规模语义
+          //   对标 hermes tool pruning + kimi-code MicroCompaction
+          // 第二档(激进):strongerCompact 已触发过 → 全量掩码,释放更多空间
           if (msg.content.length > REMOTE_MASK_THRESHOLD) {
-            newMsg.content = maskRemoteToolResult(msg.content.length);
+            newMsg.content = this.usedStrongerCompact
+              ? maskRemoteToolResult(msg.content.length)
+              : makeToolResultSummary(msg, msgs, i);
           }
         } else {
           // 【第二道防线:短期记忆】即使处于保护区,单条过大也掐头去尾
@@ -356,6 +401,8 @@ export class Compactor {
   }
 
   private strongerCompact(msgs: Message[], maxChars: number): Message[] {
+    // 温和摘要已被证明不足以压进预算,后续 compact 直接采用全量掩码
+    this.usedStrongerCompact = true;
     const lastOrdinaryIndex = findLastOrdinaryMessageIndex(msgs);
     const compacted = msgs.map((msg, index): Message => {
       const newMsg: Message = { ...msg };

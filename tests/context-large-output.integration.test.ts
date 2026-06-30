@@ -143,7 +143,7 @@ describe("Compactor large ToolResult stress baseline", () => {
     if (!masked) {
       throw new Error("expected remote ToolResult to remain as a masked observation");
     }
-    expect(masked.content).toContain("早期的工具输出已被系统清理");
+    expect(masked.content).toContain("工具 bash 输出已清理");
     expect(masked.content).toContain(String(log.length));
     expect(masked.content.length).toBeLessThan(300);
     expect(masked.content).not.toContain(middleError);
