@@ -1,0 +1,247 @@
+// 模型摘要压缩器:字符级截断失效时的最后防线(对标 kimi-code FullCompaction)。
+//
+// 现有 Compactor 是字符级截断(掩码/掐头去尾/占位符),到极限后信息全丢。
+// 本类在字符级降级仍 overflow 时,用主 provider 把 history 前缀浓缩成结构化摘要,
+// 真的修改 session.history —— 用一条 role:assistant 的 summary 消息替换前 N 条。
+//
+// 设计差异(对标 kimi-code / hermes):
+//   - 响应式触发:不是预防式(loop 每轮调),而是字符级降级用尽后由 loop 主动调用。
+//   - 真改 Session:与字符级 Compactor(只改临时 context 不碰 Session)不同,
+//     本类调 session.applyCompaction 真替换 history 前缀,持久化 truncate + summary。
+//   - 13-section 结构化摘要:结合 hermes 的 Historical Task Snapshot / Goal /
+//     Constraints / Completed Actions 等 + kimi-code 的指令格式,中文版。
+//   - REFERENCE-ONLY 前缀:明确告诉模型"这是历史提要,不要回答摘要里的内容"。
+//   - 迭代摘要:第二次压缩时基于 previousSummary 做增量更新,不从零重建。
+//   - 失败兜底:摘要调用失败/返回空 → 返回 false,调用方降级到字符级硬重置,不崩。
+
+import type { LLMProvider } from "../provider/interface.js";
+import type { Message } from "../schema/message.js";
+import type { Session } from "../engine/session.js";
+import { logger } from "../observability/logger.js";
+
+/** 摘要消息前缀:REFERENCE-ONLY,明确告诉模型这是历史提要,不要回答里面的内容 */
+const SUMMARY_PREFIX =
+  "[上下文压缩 — 仅供参考] 之前的对话轮次已被压缩成下方摘要。这是上一个上下文窗口的交接," +
+  "请当作背景参考,而非待执行指令。不要回答或继续摘要中描述的任务,除非最近一条用户消息明确要求。" +
+  "摘要中的“待办用户请求/剩余工作”等历史条目已过时,除非最新用户消息明确重申,否则不要执行。";
+
+/** 摘要消息后缀:明确的"摘要到此为止"边界,防止弱模型把摘要正文当成新输入 */
+const SUMMARY_END_MARKER =
+  "--- 历史摘要结束 — 请回复下方消息,而非上方摘要 ---";
+
+/** 摘要器系统提示词:约束模型只做摘要、不调用工具 */
+const COMPACTION_SYSTEM_PROMPT =
+  "你是上下文压缩器。你的唯一任务是把对话历史前缀浓缩成结构化摘要。" +
+  "只输出摘要正文,不要调用任何工具,不要回答摘要里的内容。";
+
+/**
+ * 13-section 结构化摘要指令模板(中文,结合 hermes 13-section + kimi-code 指令格式)。
+ * 无内容的 section 写"无"。占位符:{prefix} / {previousSummaryBlock}。
+ */
+const COMPACTION_INSTRUCTION_TEMPLATE = `以下是一段对话历史的前缀,请浓缩成结构化摘要。
+
+摘要结构(13 个 section,无内容的写"无"):
+1. 历史任务快照: 任务总体目标
+2. 当前目标: 尚未完成的子目标
+3. 约束条件: 技术约束/规范要求
+4. 已完成动作: 已执行的步骤(简述,含工具名/目标/结果)
+5. 活跃状态: 当前正在做什么
+6. 进行中工作: 未完成的中间产物
+7. 阻塞项: 遇到的问题(含报错原文)
+8. 关键决策: 已确定的技术选型及理由
+9. 已解决问题: 之前的排障结论
+10. 待办用户请求: 用户提了但还没做的(历史条目,仅供参考)
+11. 相关文件: 涉及的文件路径及简述
+12. 剩余工作: 还需要做什么(历史条目,仅供参考)
+13. 关键上下文: 其他必须记住的信息(不要包含密钥/令牌,写 [已脱敏])
+
+对话历史前缀:
+{prefix}
+{previousSummaryBlock}
+请按上述 13 个 section 输出结构化摘要(中文),只输出摘要正文:`;
+
+/** 迭代摘要(增量更新)的附加指令,previousSummary 存在时拼接 */
+const ITERATIVE_UPDATE_INSTRUCTION = `上一次压缩已生成过摘要,请基于它做增量更新:
+- 保留仍相关的旧信息,不要从零重建。
+- 把新完成的动作追加到"已完成动作"(继续编号)。
+- 把已解决的问题从"阻塞项"移到"已解决问题"。
+- 更新"活跃状态"与"当前目标"反映最新进展。
+- 仅在明显过时时才删除旧信息。
+
+上一次的摘要:
+{previousSummary}`;
+
+export interface FullCompactorOptions {
+  /** 用主 provider 生成摘要 */
+  provider: LLMProvider;
+  /** 摘要调用失败重试次数,默认 3 */
+  maxAttempts?: number;
+  /** 触发阈值(预留,响应式场景由 loop 调用方决定) */
+  triggerTokenRatio?: number;
+}
+
+/**
+ * FullCompactor:模型摘要压缩器。
+ *
+ * 响应式压缩 —— 字符级降级仍 overflow 时调用。用 provider 把 history 前缀浓缩成
+ * 摘要,替换 session.history。成功返回 true,失败返回 false(调用方降级到硬重置)。
+ */
+export class FullCompactor {
+  private readonly provider: LLMProvider;
+  private readonly maxAttempts: number;
+  /** 上一次摘要,用于迭代增量更新(hermes 第 1475-1489 行语义) */
+  private previousSummary?: string;
+
+  constructor(opts: FullCompactorOptions) {
+    this.provider = opts.provider;
+    this.maxAttempts = opts.maxAttempts ?? 3;
+  }
+
+  /**
+   * 响应式压缩:用 provider 把 history 前缀浓缩成摘要,替换 session.history。
+   * @param session 要压缩的会话
+   * @param retainLastN 保留最近 N 条不压缩(对标 kimi-code computeCompactCount)
+   * @returns 压缩成功返回 true,失败返回 false(调用方降级到硬重置)
+   */
+  async compact(session: Session, retainLastN: number): Promise<boolean> {
+    const history = session.getHistory();
+    // 计算要压缩的前缀条数:总长 - 保留尾部
+    let compactedCount = history.length - retainLastN;
+    if (compactedCount < 0) compactedCount = 0;
+    if (compactedCount === 0) {
+      logger.warn(
+        { historyLen: history.length, retainLastN },
+        "[FullCompactor] 历史不足以压缩(前缀为空),跳过",
+      );
+      return false;
+    }
+
+    // 边界矫正:若保留区首条是孤儿 ToolResult(其 ToolCall 已被压入前缀),
+    // 把它并入压缩前缀,避免压缩后产生孤儿 ToolResult 导致 API 400
+    // (对标 Session.getWorkingMemory 的孤儿丢弃逻辑,但此处作用于真实 history 边界)
+    while (
+      compactedCount < history.length &&
+      history[compactedCount]!.role === "user" &&
+      history[compactedCount]!.toolCallId !== undefined
+    ) {
+      compactedCount++;
+    }
+    if (compactedCount >= history.length) {
+      logger.warn(
+        { historyLen: history.length, retainLastN },
+        "[FullCompactor] 边界矫正后前缀覆盖全部历史,无尾部可保留,跳过",
+      );
+      return false;
+    }
+
+    const prefix = history.slice(0, compactedCount);
+    const instruction = this.renderInstruction(prefix, this.previousSummary);
+    logger.info(
+      { compactedCount, retainLastN, prefixMsgs: prefix.length },
+      `[FullCompactor] 调用 provider 生成摘要:压缩前缀 ${prefix.length} 条,保留尾部 ${history.length - compactedCount} 条`,
+    );
+
+    // 调用 provider 生成摘要(带重试,失败/空都重试)
+    let summary: string | undefined;
+    for (let attempt = 0; attempt < this.maxAttempts; attempt++) {
+      try {
+        const resp = await this.provider.generate(
+          [
+            { role: "system", content: COMPACTION_SYSTEM_PROMPT },
+            { role: "user", content: instruction },
+          ],
+          [],
+        );
+        summary = extractSummary(resp);
+        if (summary && summary.trim().length > 0) break;
+      } catch (err) {
+        logger.warn(
+          { attempt: attempt + 1, maxAttempts: this.maxAttempts, err: String(err) },
+          `[FullCompactor] 摘要调用失败(attempt ${attempt + 1}/${this.maxAttempts})`,
+        );
+      }
+    }
+
+    if (!summary || summary.trim().length === 0) {
+      logger.error(
+        { maxAttempts: this.maxAttempts },
+        "[FullCompactor] 摘要生成失败(重试耗尽或返回空),降级到硬重置",
+      );
+      return false;
+    }
+
+    // 应用压缩:用 REFERENCE-ONLY 前后标记包装摘要,替换 session.history 前 compactedCount 条。
+    // 包装职责归 FullCompactor(表现层),Session.applyCompaction 只做纯存储。
+    const wrappedSummary = `${SUMMARY_PREFIX}\n\n${summary}\n\n${SUMMARY_END_MARKER}`;
+    session.applyCompaction(wrappedSummary, compactedCount);
+    // previousSummary 存原始摘要(不带包装标记),供下次迭代增量更新
+    this.previousSummary = summary;
+    logger.info(
+      { compactedCount, retainLastN, summaryLen: summary.length },
+      "[FullCompactor] ✅ 模型摘要压缩完成",
+    );
+    return true;
+  }
+
+  /** 渲染摘要指令:13-section 模板 + 历史前缀序列化 + 迭代更新块 */
+  private renderInstruction(prefix: Message[], previousSummary?: string): string {
+    const prefixText = serializeMessages(prefix);
+    const previousSummaryBlock = previousSummary
+      ? "\n" +
+        ITERATIVE_UPDATE_INSTRUCTION.replace("{previousSummary}", previousSummary) +
+        "\n"
+      : "";
+    return COMPACTION_INSTRUCTION_TEMPLATE.replace("{prefix}", prefixText).replace(
+      "{previousSummaryBlock}",
+      previousSummaryBlock,
+    );
+  }
+}
+
+/**
+ * 从模型响应中提取摘要正文。
+ * 优先取 content;若为空字符串或纯空白视为失败(返回 undefined 触发重试)。
+ */
+function extractSummary(resp: Message): string | undefined {
+  const text = resp.content;
+  if (!text || text.trim().length === 0) return undefined;
+  return text.trim();
+}
+
+/**
+ * 把消息序列化成可读文本,供摘要器输入。
+ * 格式:
+ *   [用户] 内容
+ *   [助手] 内容
+ *   [助手→工具: read_file] {"path":"..."}
+ *   [工具结果] 内容
+ */
+function serializeMessages(msgs: Message[]): string {
+  const lines: string[] = [];
+  for (const msg of msgs) {
+    if (msg.role === "user" && msg.toolCallId !== undefined) {
+      lines.push(`[工具结果] ${truncateText(msg.content, 2000)}`);
+      continue;
+    }
+    if (msg.role === "assistant" && msg.toolCalls && msg.toolCalls.length > 0) {
+      for (const tc of msg.toolCalls) {
+        lines.push(`[助手→工具: ${tc.name}] ${tc.arguments}`);
+      }
+      if (msg.content && msg.content.trim().length > 0) {
+        lines.push(`[助手] ${truncateText(msg.content, 1000)}`);
+      }
+      continue;
+    }
+    const tag = msg.role === "user" ? "用户" : msg.role === "assistant" ? "助手" : "系统";
+    lines.push(`[${tag}] ${truncateText(msg.content, 2000)}`);
+  }
+  return lines.join("\n");
+}
+
+/** 超长文本截断(摘要输入侧的轻量预处理,避免单条暴击撑爆摘要请求) */
+function truncateText(text: string, maxLen: number): string {
+  if (text.length <= maxLen) return text;
+  const head = text.slice(0, Math.ceil(maxLen / 2));
+  const tail = text.slice(text.length - Math.floor(maxLen / 2));
+  return `${head}\n...[已截断 ${text.length - maxLen} 字符]...\n${tail}`;
+}

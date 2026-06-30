@@ -2,14 +2,19 @@
 // 覆盖双重降级策略的各条防线:
 // 1. 未超水位线:直通(深拷贝,不修改原数组)
 // 2. System Prompt:永远保留,神圣不可侵犯
-// 3. 远期 ToolResult:全量掩码(保留意图,释放内存)
+// 3. 远期 ToolResult:温和摘要(保留工具名/退出码/规模,1 行)—— strongerCompact 后才全量掩码
 // 4. 保护区 ToolResult 超长:掐头去尾(前 500 + 后 500)
 // 5. 远期 Assistant Thinking Trace:折叠
 // 6. ToolCalls 字段绝不被触碰(维系逻辑链)
 // 7. estimateLength 累加 content + toolCalls
 
 import { describe, expect, it } from "vitest";
-import { Compactor, ContextCompactionError, sanitizeToolPairs } from "../src/context/compactor.js";
+import {
+  Compactor,
+  ContextCompactionError,
+  makeToolResultSummary,
+  sanitizeToolPairs,
+} from "../src/context/compactor.js";
 import type { Message } from "../src/schema/message.js";
 
 function systemMsg(content: string): Message {
@@ -57,22 +62,23 @@ describe("Compactor", () => {
     expect(out[0]!.content).toBe("X".repeat(5000));
   });
 
-  it("远期 ToolResult 超长时全量掩码,保留 toolCallId", () => {
+  it("远期 ToolResult 超长时温和摘要,保留 toolCallId", () => {
     // retainLastMsgs=1:只有最后 1 条受保护,前面的 ToolResult 属远期
     const c = new Compactor({ maxChars: 10, retainLastMsgs: 1 });
     const bigOutput = "Y".repeat(5000);
     const msgs: Message[] = [
       userMsg("task"),
       assistantMsg("call", [{ id: "c1", name: "read", arguments: "{}" }]),
-      toolResultMsg("c1", bigOutput), // 远期 ToolResult,应被掩码
+      toolResultMsg("c1", bigOutput), // 远期 ToolResult,应被温和摘要
       userMsg("recent"), // 受保护的最近 1 条
     ];
     const out = c.compact(msgs);
     const masked = out[2]!;
     expect(masked.role).toBe("user");
     expect(masked.toolCallId).toBe("c1"); // toolCallId 保留
-    expect(masked.content).toContain("早期的工具输出已被系统清理");
+    expect(masked.content).toContain("工具 read 输出已清理");
     expect(masked.content).toContain("5000");
+    expect(masked.content).toContain("1 行");
     expect(masked.content.length).toBeLessThan(bigOutput.length);
   });
 
@@ -150,9 +156,9 @@ describe("Compactor", () => {
     const out = c.compact(msgs);
     // assistant 的 toolCalls 完整保留
     expect(out[0]!.toolCalls).toEqual(toolCalls);
-    // ToolResult 被掩码,但 toolCallId 保留(关联到 c1)
+    // ToolResult 被温和摘要,但 toolCallId 保留(关联到 c1)
     expect(out[1]!.toolCallId).toBe("c1");
-    expect(out[1]!.content).toContain("已被系统清理");
+    expect(out[1]!.content).toContain("输出已清理");
   });
 
   it("压缩后总长度显著下降,低于原长度", () => {
@@ -185,10 +191,10 @@ describe("Compactor", () => {
       userMsg("recent"), // 唯一受保护
     ];
     const out = c.compact(msgs);
-    // 三个远期 ToolResult 都被掩码
-    expect(out[1]!.content).toContain("已被系统清理");
-    expect(out[2]!.content).toContain("已被系统清理");
-    expect(out[3]!.content).toContain("已被系统清理");
+    // 三个远期 ToolResult 都被温和摘要
+    expect(out[1]!.content).toContain("输出已清理");
+    expect(out[2]!.content).toContain("输出已清理");
+    expect(out[3]!.content).toContain("输出已清理");
     // toolCallId 各自保留
     expect(out[1]!.toolCallId).toBe("c1");
     expect(out[2]!.toolCallId).toBe("c2");
@@ -241,7 +247,7 @@ describe("Compactor", () => {
 
     const out = c.compact(msgs);
 
-    expect(out.find((m) => m.toolCallId === "old")?.content).toContain("已被系统清理");
+    expect(out.find((m) => m.toolCallId === "old")?.content).toContain("输出已清理");
     expect(out.find((m) => m.toolCallId === "recent")?.content).toBe("R".repeat(80));
   });
 
@@ -329,5 +335,72 @@ describe("Compactor", () => {
       expect((err as ContextCompactionError).afterChars).toBe(5000);
       expect((err as ContextCompactionError).maxChars).toBe(100);
     }
+  });
+
+  // ---- MicroCompaction 温和清理档(对标 hermes tool pruning + kimi-code micro) ----
+
+  it("远期 ToolResult 温和摘要精确格式:工具名 + 原始字符数 + 行数", () => {
+    const c = new Compactor({ maxChars: 10, retainLastMsgs: 1 });
+    const output = "header line\n" + "X".repeat(300); // 2 行,总长 > 200
+    const lineCount = output.split("\n").length;
+    const msgs: Message[] = [
+      assistantMsg("call", [{ id: "c1", name: "bash", arguments: "{}" }]),
+      toolResultMsg("c1", output),
+      userMsg("recent"),
+    ];
+    const out = c.compact(msgs);
+    const summary = out.find((m) => m.toolCallId === "c1")!;
+    expect(summary.content).toBe(
+      `[工具 bash 输出已清理,原始 ${output.length} 字符,${lineCount} 行]`,
+    );
+    expect(summary.content.length).toBeLessThan(output.length);
+  });
+
+  it("makeToolResultSummary 找不到对应 toolCall 时退化为通用格式", () => {
+    const output = "X".repeat(500);
+    const msg = toolResultMsg("no-such-call", output);
+    // 向前无 assistant toolCalls,toolName 解析失败
+    const summary = makeToolResultSummary(msg, [msg], 0);
+    expect(summary).toBe(`[早期工具输出已清理,原始 ${output.length} 字符]`);
+    expect(summary).not.toContain("工具 ");
+  });
+
+  it("makeToolResultSummary 从 bash 输出中提取 exit code", () => {
+    const output = "running tests...\nexit code 0\n" + "X".repeat(300);
+    const lineCount = output.split("\n").length;
+    const msgs: Message[] = [
+      assistantMsg("call", [{ id: "c1", name: "bash", arguments: "{}" }]),
+      toolResultMsg("c1", output),
+    ];
+    const summary = makeToolResultSummary(msgs[1]!, msgs, 1);
+    expect(summary).toBe(
+      `[工具 bash 输出已清理,exit 0,原始 ${output.length} 字符,${lineCount} 行]`,
+    );
+  });
+
+  it("strongerCompact 触发后,后续 compact 远期 ToolResult 改用全量掩码(温和档仅在第一轮)", () => {
+    const c = new Compactor({ maxChars: 80, retainLastMsgs: 1 });
+
+    // 第一轮 standalone compact:远期 ToolResult 应得温和摘要
+    const firstMsgs: Message[] = [
+      assistantMsg("A".repeat(100), [{ id: "c1", name: "read", arguments: "{}" }]),
+      toolResultMsg("c1", "X".repeat(5000)),
+      userMsg("r"),
+    ];
+    const firstOut = c.compact(firstMsgs);
+    expect(firstOut.find((m) => m.toolCallId === "c1")!.content).toContain("输出已清理,");
+
+    // 触发 compactToBudget -> strongerCompact(温和摘要 137 > 80,升级后 48 <= 80)
+    c.compactToBudget(firstMsgs, 80);
+
+    // 第二轮 compact:同一 Compactor,远期 ToolResult 改用全量掩码
+    const secondMsgs: Message[] = [
+      assistantMsg("call2", [{ id: "c2", name: "read", arguments: "{}" }]),
+      toolResultMsg("c2", "Y".repeat(5000)),
+      userMsg("recent"),
+    ];
+    const secondMasked = c.compact(secondMsgs).find((m) => m.toolCallId === "c2")!;
+    expect(secondMasked.content).toContain("早期的工具输出已被系统清理"); // 全量掩码标记
+    expect(secondMasked.content).not.toContain("输出已清理,"); // 不再是温和摘要
   });
 });

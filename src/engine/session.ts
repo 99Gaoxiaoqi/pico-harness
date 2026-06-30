@@ -236,6 +236,86 @@ export class Session {
     );
   }
 
+  /**
+   * 模型摘要压缩:用一条 role:assistant 的 summary 消息替换 history 前 compactedCount 条。
+   * 对标 kimi-code applyCompaction —— 真改 Session.history(与字符级 Compactor 不同,
+   * 字符级只改临时 context 不碰 Session)。
+   *
+   * 内存语义:history = [summaryMsg, ...history.slice(compactedCount)]。
+   * 保留尾部(从 compactedCount 起的消息)不动,前缀浓缩成一条摘要。
+   *
+   * 持久化顺序(复用 pendingWrites 机制,保证重放正确):
+   *   1. 先 await earlier appends(让 prior message records 先落盘)
+   *   2. append truncate(beforeLen) —— 丢弃当前累积的全部 beforeLen 条
+   *   3. append summary message —— 重放后成为新 history 的第一条
+   *   4. append retained tail —— 重放后跟在 summary 之后
+   * 重放结果:[summary, ...retained],与内存一致。
+   *
+   * 用 truncate + 重写尾部而非"前插 summary",因为本 JSONL 只支持
+   * message(push)+ truncate(slice)两种 record,无法表达"在头部插入"。
+   * 压缩是低频事件,重写尾部(retainLastN 通常很小)开销可接受。
+   *
+   * 本方法只做纯存储,summary 内容的 REFERENCE-ONLY 包装由调用方(FullCompactor)负责。
+   *
+   * @param summary 摘要消息正文(已由调用方套上 REFERENCE-ONLY 前后标记)
+   * @param compactedCount 被压缩的前缀条数(0..history.length)
+   */
+  applyCompaction(summary: string, compactedCount: number): void {
+    if (compactedCount < 0) compactedCount = 0;
+    if (compactedCount > this.history.length) compactedCount = this.history.length;
+    const beforeLen = this.history.length;
+    const retained = this.history.slice(compactedCount);
+    // 摘要消息:role=assistant(对标 kimi-code compaction_summary)
+    const summaryMsg: Message = {
+      role: "assistant",
+      content: summary,
+    };
+    // 内存:用 summary 替换前 compactedCount 条
+    this.history = [summaryMsg, ...retained];
+    this.updatedAt = new Date();
+    void this.persistCompaction(beforeLen, summaryMsg, retained);
+  }
+
+  /**
+   * 持久化模型摘要压缩事件:truncate(清空当前累积)→ summary → retained tail。
+   * 关键顺序:truncate 必须在 summary/tail 之前落盘,重放才正确(drop all → rebuild)。
+   * 复用 pendingWrites:先 await earlier appends,再 await truncate 写入,
+   * 最后把 summary/tail 作为 fire-and-forget 收集进 pendingWrites 供后续 await。
+   */
+  private async persistCompaction(
+    beforeLen: number,
+    summaryMsg: Message,
+    retained: Message[],
+  ): Promise<void> {
+    if (!this.store) return;
+    const pending = this.pendingWrites;
+    this.pendingWrites = [];
+    await Promise.all(pending);
+    // 1. truncate:丢弃当前累积的全部 beforeLen 条(必须先于 summary/tail 落盘)
+    const truncSeq = this.nextSeq++;
+    try {
+      await this.store.appendTruncate(truncSeq, beforeLen);
+    } catch (err) {
+      logger.warn({ seq: truncSeq }, `[session] compaction truncate 落盘失败: ${String(err)}`);
+    }
+    // 2. summary message(重放后成为新 history 头部)
+    const sumSeq = this.nextSeq++;
+    this.pendingWrites.push(
+      this.store.appendMessage(sumSeq, summaryMsg).catch((err) =>
+        logger.warn({ seq: sumSeq }, `[session] compaction summary 落盘失败: ${String(err)}`),
+      ),
+    );
+    // 3. retained tail(重放后跟在 summary 之后,保持原顺序)
+    for (const m of retained) {
+      const seq = this.nextSeq++;
+      this.pendingWrites.push(
+        this.store.appendMessage(seq, m).catch((err) =>
+          logger.warn({ seq }, `[session] compaction retained 落盘失败: ${String(err)}`),
+        ),
+      );
+    }
+  }
+
   /** 返回全量历史的深拷贝(仅供调试 / 测试,不参与推理) */
   getHistory(): Message[] {
     return this.history.map((m) => ({ ...m }));

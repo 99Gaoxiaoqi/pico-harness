@@ -19,6 +19,7 @@ import type { AgentRunner } from "../tools/subagent.js";
 import type { SubagentRunOptions, SubagentResult } from "../tools/subagent.js";
 import type { Compactor } from "../context/compactor.js";
 import { ContextCompactionError } from "../context/compactor.js";
+import type { FullCompactor } from "../context/full-compactor.js";
 import type { ThinkingEffort } from "../provider/thinking.js";
 import { PromptComposer } from "../context/composer.js";
 import { SkillLoader } from "../context/skill.js";
@@ -77,6 +78,14 @@ export interface AgentEngineOptions {
    */
   compactor?: Compactor;
   /**
+   * 模型摘要压缩器:字符级降级用尽后的最后防线(对标 kimi-code FullCompaction)。
+   * 当 generateWithOverflowRetry 的字符级降级(MAX_OVERFLOW_RETRY 次)仍 overflow 时,
+   * 在抛错前调用本压缩器,用 provider 把 history 前缀浓缩成摘要替换,
+   * 成功后用新 history 重新组装 context 重试。未提供则直接抛 ContextOverflowError
+   * (由 run() 的硬重置兜底处理)。
+   */
+  fullCompactor?: FullCompactor;
+  /**
    * 错误自愈管理器:工具执行失败时注入锦囊妙计 (第 14 讲)。
    * 未提供则默认创建一个,对所有工具报错都尝试匹配恢复建议。
    */
@@ -115,6 +124,7 @@ export class AgentEngine implements AgentRunner {
   private readonly workingMemoryLimit: number;
   private readonly maxTurns: number;
   private readonly compactor?: Compactor;
+  private readonly fullCompactor?: FullCompactor;
   private readonly recovery: RecoveryManager;
   private readonly guardrail: ToolGuardrailController;
   private readonly budget: IterationBudget;
@@ -137,6 +147,7 @@ export class AgentEngine implements AgentRunner {
     this.workingMemoryLimit = opts.workingMemoryLimit ?? DEFAULT_WORKING_MEMORY_LIMIT;
     this.maxTurns = opts.maxTurns ?? 50;
     this.compactor = opts.compactor;
+    this.fullCompactor = opts.fullCompactor;
     this.recovery = opts.recovery ?? new RecoveryManager();
     this.guardrail = new ToolGuardrailController(opts.guardrailOptions);
     this.budget = new IterationBudget({
@@ -228,6 +239,8 @@ export class AgentEngine implements AgentRunner {
   ): Promise<Message> {
     // attempt 0:直接用调用方已压缩好的 baseContext,避免重复压缩
     let context = baseContext;
+    // 模型摘要压缩最多触发 1 次/调用,防止压缩后仍 overflow → 再压缩 → 死循环
+    let compactionDone = false;
     for (let attempt = 0; ; attempt++) {
       try {
         // 【集成点】普通重试层(generateWithRetry)在内,响应式压缩在外:
@@ -242,6 +255,44 @@ export class AgentEngine implements AgentRunner {
           throw err;
         }
         if (attempt >= AgentEngine.MAX_OVERFLOW_RETRY) {
+          // 最后兜底:尝试模型摘要压缩(对标 kimi-code handleOverflowError)
+          // 字符级降级用尽仍 overflow,在抛错前用 provider 把 history 前缀浓缩成摘要替换,
+          // 成功后用新 history 重新组装 context 从默认预算重试。仅触发 1 次,防死循环。
+          if (this.fullCompactor && !compactionDone) {
+            compactionDone = true;
+            // 保留尾部:最近约半个最降级窗口的消息(对标 kimi-code computeCompactCount)
+            const lastMemoryFactor = AgentEngine.OVERFLOW_MEMORY_FACTORS[attempt]!;
+            const retainLastN = Math.max(
+              2,
+              Math.floor(this.workingMemoryLimit * lastMemoryFactor * 0.5),
+            );
+            logger.warn(
+              { retainLastN },
+              `[Engine] ⚠ 字符级降级用尽,触发模型摘要压缩(FullCompactor),保留尾部 ${retainLastN} 条`,
+            );
+            const compacted = await this.fullCompactor.compact(session, retainLastN);
+            if (compacted) {
+              // 压缩成功:用新 history 重新组装 context,从默认预算重试
+              const newWorkingMemory = session.getWorkingMemory(this.workingMemoryLimit);
+              const newContextHistory: Message[] = [
+                { role: "system", content: systemPrompt },
+                ...newWorkingMemory,
+              ];
+              context = this.compactor
+                ? this.compactor.compactToBudget(newContextHistory)
+                : newContextHistory;
+              span?.addAttributes({
+                fullCompaction: true,
+                fullCompactionRetainLastN: retainLastN,
+              });
+              attempt = -1; // 下次 ++attempt = 0,从默认预算重试
+              continue;
+            }
+            // 压缩失败(返回 false):降级到抛错,由 run() 的硬重置兜底
+            logger.error(
+              `[Engine] 模型摘要压缩失败,降级到抛出 ContextOverflowError(由硬重置兜底)`,
+            );
+          }
           logger.error(
             { attempt, maxRetry: AgentEngine.MAX_OVERFLOW_RETRY },
             `[Engine] 响应式压缩已用尽 ${AgentEngine.MAX_OVERFLOW_RETRY} 次降级仍溢出,抛出 ContextOverflowError`,
@@ -423,6 +474,11 @@ export class AgentEngine implements AgentRunner {
                 compactedContext,
                 thinkingSpan,
               );
+              // 若本轮内部触发了模型摘要压缩(session.history 被缩短),调整 beforeLen
+              // 让返回切片包含摘要起的所有消息(对标硬重置路径的 beforeLen 调整)
+              if (session.length < beforeLen) {
+                beforeLen = 0;
+              }
               recordLlmResponse(thinkingSpan, thinkResp);
               const budgetDecision = thinkResp.usage
                 ? this.budget.consumeUsage(thinkResp.usage)
@@ -465,6 +521,11 @@ export class AgentEngine implements AgentRunner {
               compactedContext,
               actionSpan,
             );
+            // 若本轮内部触发了模型摘要压缩(session.history 被缩短),调整 beforeLen
+            // 让返回切片包含摘要起的所有消息(对标硬重置路径的 beforeLen 调整)
+            if (session.length < beforeLen) {
+              beforeLen = 0;
+            }
             recordLlmResponse(actionSpan, responseMsg);
             const budgetDecision = responseMsg.usage
               ? this.budget.consumeUsage(responseMsg.usage)

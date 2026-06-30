@@ -355,23 +355,34 @@ describe("PromptComposer", () => {
     expect(prompt).not.toContain("断点续传");
   });
 
-  it("planMode=true 注入长程任务状态外部化规范", async () => {
+  it("planMode=true 在空工作区注入全新任务的 Plan Mode 规范", async () => {
     const prompt = await new PromptComposer(workDir, true).build();
-    // 标题与三步强制流程
+    // 标题与全新任务三步强制流程
     expect(prompt).toContain("Plan Mode: ON");
-    expect(prompt).toContain("STEP 1: 强制环境嗅探");
-    expect(prompt).toContain("STEP 2: 严格的单步执行与实时打勾");
-    expect(prompt).toContain("STEP 3: 迷失时的自救");
-    // 关键约束:分支 A 全新任务 / 分支 B 断点续传不覆盖
-    expect(prompt).toContain("分支 A (全新任务)");
-    expect(prompt).toContain("分支 B (断点续传 / 任务唤醒)");
-    expect(prompt).toContain("绝对不要覆盖");
-    // 单步打勾约束
-    expect(prompt).toContain("- [ ]");
-    expect(prompt).toContain("- [x]");
+    expect(prompt).toContain("全新任务");
+    expect(prompt).toContain("write_file 创建 PLAN.md");
+    expect(prompt).toContain("write_file 创建 TODO.md");
+    expect(prompt).toContain("edit_file 把 TODO.md 对应条目改成 [x]");
+    // 全新任务分支不应出现断点续传专属文案
+    expect(prompt).not.toContain("断点续传");
+    expect(prompt).not.toContain("绝对不要覆盖");
     // 仍包含极简内核(规范追加在内核之后)
     expect(prompt).toContain("pico");
     expect(prompt).toContain("核心纪律");
+  });
+
+  it("planMode=true 在已存在 PLAN.md/TODO.md 的工作区注入断点续传上下文", async () => {
+    await writeFile(join(workDir, "PLAN.md"), "# 架构设计\n采用 TypeScript");
+    await writeFile(join(workDir, "TODO.md"), "- [ ] 第一步\n- [x] 第二步");
+    const prompt = await new PromptComposer(workDir, true).build();
+    // 断点续传分支:注入文件内容 + 强制不覆盖
+    expect(prompt).toContain("Plan Mode: ON");
+    expect(prompt).toContain("断点续传");
+    expect(prompt).toContain("采用 TypeScript");
+    expect(prompt).toContain("- [ ] 第一步");
+    expect(prompt).toContain("绝对不要覆盖 PLAN.md / TODO.md");
+    // 不应出现全新任务文案
+    expect(prompt).not.toContain("全新任务");
   });
 
   it("planMode=true 与 AGENTS.md/Skills 可共存,三层齐全", async () => {
