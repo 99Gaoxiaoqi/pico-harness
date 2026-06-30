@@ -192,6 +192,11 @@ export class AgentEngine implements AgentRunner {
   private static readonly OVERFLOW_BUDGET_FACTORS = [1.0, 0.6, 0.4, 0.25] as const;
   /** 每轮重试的 WorkingMemory 条数降级系数(1.0 → 0.7 → 0.5 → 0.3) */
   private static readonly OVERFLOW_MEMORY_FACTORS = [1.0, 0.7, 0.5, 0.3] as const;
+  /**
+   * 单轮工具并发上限(对齐 hermes _MAX_TOOL_WORKERS=8)。
+   * 超出的任务进 queued 等名额释放,不报错不丢弃,保序返回。
+   */
+  private static readonly MAX_TOOL_CONCURRENCY = 8;
 
   /**
    * 响应式溢出重试:catch 到 ContextOverflowError 后,用更小的 WorkingMemory limit
@@ -501,7 +506,11 @@ export class AgentEngine implements AgentRunner {
           //   - 冲突(同文件含写 / kind:"all")→ 串行
           // 结果按 provider 原始顺序回传(add 顺序即 resolve 顺序)。
           const getAccesses = this.registry.getAccesses;
-          const scheduler = new ToolScheduler<{ message: Message; reminder?: Message }>();
+          // maxConcurrency 限制并发执行的工具数(对齐 hermes _MAX_TOOL_WORKERS=8),
+          // 防止一批大量不冲突只读工具同时打 IO 把系统压垮。
+          const scheduler = new ToolScheduler<{ message: Message; reminder?: Message }>({
+            maxConcurrency: AgentEngine.MAX_TOOL_CONCURRENCY,
+          });
           const scheduled = toolCalls.map((tc) =>
             scheduler.add({
               accesses: getAccesses ? getAccesses.call(this.registry, tc) : ToolAccesses.all(),
@@ -870,7 +879,9 @@ export class AgentEngine implements AgentRunner {
 
       // 执行只读工具的并发循环(资源冲突图调度,复用主循环的调度策略)
       const getAccesses = readOnlyRegistry.getAccesses;
-      const scheduler = new ToolScheduler<{ message: Message; artifactPath?: string }>();
+      const scheduler = new ToolScheduler<{ message: Message; artifactPath?: string }>({
+        maxConcurrency: AgentEngine.MAX_TOOL_CONCURRENCY,
+      });
       const scheduled = toolCalls.map((tc) =>
         scheduler.add({
           accesses: getAccesses ? getAccesses.call(readOnlyRegistry, tc) : ToolAccesses.all(),
