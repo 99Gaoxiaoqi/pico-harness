@@ -1,0 +1,346 @@
+// FTS5Store: SQLite FTS5 全文检索存储层,为 pico-harness 提供历史对话检索能力。
+//
+// 解决痛点:长程对话历史滚雪球后,Agent 需要快速定位过去的关键决策、错误教训、
+// 技能使用模式等信息。通过 FTS5 虚拟表索引全部对话片段,实现毫秒级语义检索。
+//
+// 架构设计借鉴 Hermes Agent 的四层记忆:
+// 1. conversation_chunks: FTS5 虚拟表,索引每轮对话的 content(role/timestamp 不参与分词)
+// 2. session_summaries: 会话摘要表,存储每个 session 的浓缩总结
+// 3. skill_usage: 技能使用记录表,追踪哪些 skill 成功/失败,供自愈参考
+//
+// 路径约定:<workDir>/.claw/sessions.db(与 session-store.jsonl 同级,数据集中化)
+// 错误处理:初始化/插入/查询失败时降级,记 warn 不抛异常,不阻断主流程。
+
+import Database from "better-sqlite3";
+import { mkdirSync } from "node:fs";
+import { dirname } from "pathe";
+import { logger } from "../observability/logger.js";
+import type { Message } from "../schema/message.js";
+
+/** 全文检索结果(带相关性打分) */
+export interface SearchResult {
+  sessionId: string;
+  turnIndex: number;
+  role: string;
+  content: string;
+  timestamp: string;
+  relevance: number; // FTS5 rank (负数,越接近 0 越相关)
+}
+
+/** 会话摘要(对标 Hermes 的 Long-term Memory) */
+export interface SessionSummary {
+  sessionId: string;
+  summary: string;
+  messageCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** 技能使用统计(对标 Hermes 的 Skill Memory) */
+export interface SkillStats {
+  skillId: string;
+  totalCalls: number;
+  successCount: number;
+  failureCount: number;
+  successRate: number;
+  recentErrors: string[]; // 最近 5 条错误消息
+}
+
+/**
+ * FTS5Store: SQLite FTS5 全文检索存储层。
+ * 
+ * 线程安全:better-sqlite3 默认串行化所有操作(WAL mode + NORMAL synchronous),
+ * 单进程多 Session 并发写入安全。跨进程并发需额外加锁(当前不支持)。
+ */
+export class FTS5Store {
+  private db: Database.Database | null = null;
+  private readonly dbPath: string;
+
+  constructor(workDir: string) {
+    this.dbPath = `${workDir}/.claw/sessions.db`;
+    try {
+      // 确保 .claw/ 目录存在
+      mkdirSync(dirname(this.dbPath), { recursive: true });
+      this.db = new Database(this.dbPath);
+      // 启用 WAL 模式(并发读写性能更好,断电恢复更安全)
+      this.db.pragma("journal_mode = WAL");
+      this.initSchema();
+      logger.info({ dbPath: this.dbPath }, "[fts5] 数据库初始化成功");
+    } catch (err) {
+      // 降级:数据库初始化失败不抛异常,仅 warn,后续操作变为空操作
+      logger.warn({ err, dbPath: this.dbPath }, "[fts5] 数据库初始化失败,检索功能降级");
+      this.db = null;
+    }
+  }
+
+  /** 初始化数据库 schema(幂等:IF NOT EXISTS) */
+  private initSchema(): void {
+    if (!this.db) return;
+    
+    // FTS5 虚拟表:对话片段全文检索
+    // tokenize='trigram' 使用 3-gram 分词,对中文/日文等无空格语言友好
+    // 性能开销略高,但索引准确度更好(支持子串匹配)
+    this.db.exec(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS conversation_chunks USING fts5(
+        session_id UNINDEXED,
+        turn_index UNINDEXED,
+        role UNINDEXED,
+        content,
+        timestamp UNINDEXED,
+        tokenize='trigram'
+      );
+    `);
+
+    // 会话摘要表
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS session_summaries (
+        session_id TEXT PRIMARY KEY,
+        summary TEXT NOT NULL,
+        message_count INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+    `);
+
+    // 技能使用记录表
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS skill_usage (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        skill_id TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        success BOOLEAN NOT NULL,
+        error_message TEXT,
+        timestamp TEXT NOT NULL
+      );
+    `);
+
+    // 索引:加速技能统计查询
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_skill_usage_skill 
+      ON skill_usage(skill_id, success);
+    `);
+  }
+
+  /**
+   * 索引一条消息到 FTS5(供 Session.append 调用)。
+   * 降级处理:插入失败时仅 warn,不抛异常,不影响主流程。
+   */
+  insert(sessionId: string, turnIndex: number, message: Message): void {
+    if (!this.db) return;
+    try {
+      const stmt = this.db.prepare(`
+        INSERT INTO conversation_chunks (session_id, turn_index, role, content, timestamp)
+        VALUES (?, ?, ?, ?, ?)
+      `);
+      stmt.run(
+        sessionId,
+        turnIndex,
+        message.role,
+        typeof message.content === "string" ? message.content : JSON.stringify(message.content),
+        new Date().toISOString(),
+      );
+    } catch (err) {
+      logger.warn({ err, sessionId, turnIndex }, "[fts5] 插入消息失败");
+    }
+  }
+
+  /**
+   * 全文检索对话历史(FTS5 MATCH 语法)。
+   * 
+   * @param query - 搜索关键词(支持 FTS5 查询语法:AND/OR/NOT/"短语")
+   * @param limit - 返回结果数上限(默认 10)
+   * @param sessionId - 可选的 Session ID 过滤(不传则全局检索)
+   * @returns 按相关性排序的结果数组(relevance 越接近 0 越相关)
+   * 
+   * 示例:
+   * - search("驾驭工程") → trigram 自动匹配子串(≥3 字符)
+   * - search("FTS5 全文检索") → 匹配包含这些关键词的文档
+   * - search("Session AND WorkingMemory") → 必须同时包含
+   * - search('"Session 物理隔离"') → 精确短语匹配
+   * 
+   * 中文支持:trigram tokenizer 要求查询长度 ≥3 字符。
+   * 对于短查询(<3 字符,如"驾驭"),降级为 LIKE 模糊匹配。
+   */
+  search(query: string, limit = 10, sessionId?: string): SearchResult[] {
+    if (!this.db) return [];
+    try {
+      // trigram tokenizer 要求查询长度 ≥3,对于短查询降级为 LIKE
+      if (query.length < 3 && !/\b(AND|OR|NOT)\b|["()]/.test(query)) {
+        // 短查询:用 LIKE 模糊匹配(性能略差,但能覆盖短词)
+        const whereClause = sessionId 
+          ? 'WHERE content LIKE ? AND session_id = ?' 
+          : 'WHERE content LIKE ?';
+        const stmt = this.db.prepare(`
+          SELECT 
+            session_id AS sessionId,
+            turn_index AS turnIndex,
+            role,
+            content,
+            timestamp,
+            0 AS relevance
+          FROM conversation_chunks
+          ${whereClause}
+          LIMIT ?
+        `);
+        const params = sessionId 
+          ? [`%${query}%`, sessionId, limit] 
+          : [`%${query}%`, limit];
+        return stmt.all(...params) as SearchResult[];
+      }
+
+      // 标准 FTS5 查询(trigram ≥3 字符)
+      const whereClause = sessionId 
+        ? 'WHERE conversation_chunks MATCH ? AND session_id = ?' 
+        : 'WHERE conversation_chunks MATCH ?';
+      const stmt = this.db.prepare(`
+        SELECT 
+          session_id AS sessionId,
+          turn_index AS turnIndex,
+          role,
+          content,
+          timestamp,
+          rank AS relevance
+        FROM conversation_chunks
+        ${whereClause}
+        ORDER BY rank
+        LIMIT ?
+      `);
+      const params = sessionId 
+        ? [query, sessionId, limit] 
+        : [query, limit];
+      return stmt.all(...params) as SearchResult[];
+    } catch (err) {
+      logger.warn({ err, query }, "[fts5] 搜索失败");
+      return [];
+    }
+  }
+
+  /**
+   * 保存会话摘要(UPSERT:存在则更新,不存在则插入)。
+   * 供 ContextCompactor 调用,把压缩后的 summary 持久化到长期记忆。
+   */
+  saveSummary(sessionId: string, summary: string, messageCount: number): void {
+    if (!this.db) return;
+    try {
+      const now = new Date().toISOString();
+      const stmt = this.db.prepare(`
+        INSERT INTO session_summaries (session_id, summary, message_count, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(session_id) DO UPDATE SET
+          summary = excluded.summary,
+          message_count = excluded.message_count,
+          updated_at = excluded.updated_at
+      `);
+      stmt.run(sessionId, summary, messageCount, now, now);
+    } catch (err) {
+      logger.warn({ err, sessionId }, "[fts5] 保存摘要失败");
+    }
+  }
+
+  /** 获取会话摘要(不存在返回 null) */
+  getSummary(sessionId: string): SessionSummary | null {
+    if (!this.db) return null;
+    try {
+      const stmt = this.db.prepare(`
+        SELECT 
+          session_id AS sessionId, 
+          summary, 
+          message_count AS messageCount, 
+          created_at AS createdAt, 
+          updated_at AS updatedAt
+        FROM session_summaries
+        WHERE session_id = ?
+      `);
+      const row = stmt.get(sessionId) as SessionSummary | undefined;
+      return row ?? null;
+    } catch (err) {
+      logger.warn({ err, sessionId }, "[fts5] 获取摘要失败");
+      return null;
+    }
+  }
+
+  /**
+   * 记录技能使用(供 ToolRegistry 调用)。
+   * 每次执行 skill 后记录成功/失败,供后续统计分析。
+   */
+  recordSkillUsage(
+    skillId: string,
+    sessionId: string,
+    success: boolean,
+    errorMessage?: string,
+  ): void {
+    if (!this.db) return;
+    try {
+      const stmt = this.db.prepare(`
+        INSERT INTO skill_usage (skill_id, session_id, success, error_message, timestamp)
+        VALUES (?, ?, ?, ?, ?)
+      `);
+      stmt.run(skillId, sessionId, success ? 1 : 0, errorMessage ?? null, new Date().toISOString());
+    } catch (err) {
+      logger.warn({ err, skillId }, "[fts5] 记录技能使用失败");
+    }
+  }
+
+  /**
+   * 获取技能统计信息(成功率、最近错误等)。
+   * 供 SystemReminders 调用,判断是否需要提示"该 skill 近期失败率高,谨慎使用"。
+   */
+  getSkillStats(skillId: string): SkillStats | null {
+    if (!this.db) return null;
+    try {
+      // 统计总次数、成功/失败数
+      const countStmt = this.db.prepare(`
+        SELECT 
+          COUNT(*) AS total_calls,
+          SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) AS success_count,
+          SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) AS failure_count
+        FROM skill_usage
+        WHERE skill_id = ?
+      `);
+      const counts = countStmt.get(skillId) as {
+        total_calls: number;
+        success_count: number;
+        failure_count: number;
+      };
+
+      if (counts.total_calls === 0) return null;
+
+      // 获取最近 5 条错误消息
+      const errorsStmt = this.db.prepare(`
+        SELECT error_message
+        FROM skill_usage
+        WHERE skill_id = ? AND success = 0 AND error_message IS NOT NULL
+        ORDER BY timestamp DESC
+        LIMIT 5
+      `);
+      const errors = (errorsStmt.all(skillId) as { error_message: string }[]).map(
+        (row) => row.error_message,
+      );
+
+      return {
+        skillId,
+        totalCalls: counts.total_calls,
+        successCount: counts.success_count,
+        failureCount: counts.failure_count,
+        successRate: counts.total_calls > 0 ? counts.success_count / counts.total_calls : 0,
+        recentErrors: errors,
+      };
+    } catch (err) {
+      logger.warn({ err, skillId }, "[fts5] 获取技能统计失败");
+      return null;
+    }
+  }
+
+  /** 关闭数据库连接(进程退出前调用,或测试清理) */
+  close(): void {
+    if (this.db) {
+      try {
+        this.db.close();
+        logger.info("[fts5] 数据库连接已关闭");
+      } catch (err) {
+        logger.warn({ err }, "[fts5] 关闭数据库失败");
+      }
+      this.db = null;
+    }
+  }
+}
