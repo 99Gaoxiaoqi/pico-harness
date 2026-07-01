@@ -1,12 +1,38 @@
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { BenchmarkRunner, type BenchmarkAgentRunner } from "../src/eval/benchmark.js";
+
+/** 跨平台安全删除:Windows 上 SQLite 句柄未释放时 rm 触发 EBUSY,退避重试兜底 */
+async function safeRm(path: string): Promise<void> {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      await rm(path, { recursive: true, force: true });
+      return;
+    } catch (err) {
+      if (String(err).includes("EBUSY") || String(err).includes("EPERM") || String(err).includes("ENOTEMPTY")) {
+        await new Promise((r) => setTimeout(r, 50 * (attempt + 1)));
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+
+// 收集每个测试创建的 rootDir,afterEach 统一安全清理(FTS5 句柄退避释放)
+const createdDirs: string[] = [];
+afterEach(async () => {
+  while (createdDirs.length > 0) {
+    const dir = createdDirs.pop()!;
+    await safeRm(dir);
+  }
+});
 
 describe("BenchmarkRunner", () => {
   it("在隔离工作区执行用例并汇总 usage", async () => {
     const rootDir = await mkdtemp(join(tmpdir(), "pico-benchmark-"));
+    createdDirs.push(rootDir);
     const runAgent: BenchmarkAgentRunner = async (prompt, context) => {
       context.session.recordUsage(100, 25, 0.001);
       const input = await readFile(join(context.workDir, "input.txt"), "utf8");
@@ -59,6 +85,7 @@ describe("BenchmarkRunner", () => {
 
   it("记录失败用例并继续执行后续用例", async () => {
     const rootDir = await mkdtemp(join(tmpdir(), "pico-benchmark-"));
+    createdDirs.push(rootDir);
     const calls: string[] = [];
     const runner = new BenchmarkRunner({
       rootDir,

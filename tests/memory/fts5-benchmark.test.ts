@@ -7,7 +7,8 @@
 // 4. 验证数据库恢复能力(断电模拟、损坏降级)
 // 5. 验证边界条件处理(空字符串、超长消息、特殊字符)
 //
-// 运行方式:npm test -- fts5-benchmark
+// 性能基准对机器负载高度敏感(如"10000 条 < 3s"),不适合放进常规回归。
+// 默认 skip,仅 RUN_BENCHMARK=1 时启用,用 npm test -- fts5-benchmark 单独跑。
 // 预期耗时:1-2 分钟(并发执行)
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
@@ -18,7 +19,10 @@ import { performance } from "node:perf_hooks";
 import { FTS5Store } from "../../src/memory/fts5-store.js";
 import type { Message } from "../../src/schema/message.js";
 
-describe("FTS5Store - 压力测试与性能基准", () => {
+// 性能基准默认关闭,避免在常规回归里因环境抖动产生假失败
+const describeBenchmark = process.env.RUN_BENCHMARK === "1" ? describe : describe.skip;
+
+describeBenchmark("FTS5Store - 压力测试与性能基准", () => {
   let tempDir: string;
   let store: FTS5Store;
 

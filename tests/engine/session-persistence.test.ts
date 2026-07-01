@@ -9,18 +9,16 @@
 // 6. 并发 Session 安全性
 // 7. 真实场景模拟(飞书多群、崩溃恢复)
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionManager } from "../../src/engine/session.js";
 import type { Message } from "../../src/schema/message.js";
 import { corruptDatabase, simulateDiskFull, restorePermissions } from "../helpers/fault-injection.js";
-import { logger } from "../../src/observability/logger.js";
 
 /** 显式开启持久化的 getOrCreate 选项 */
 const ON = { persistence: true } as const;
-const OFF = { persistence: false } as const;
 
 function userMsg(content: string): Message {
   return { role: "user", content };
@@ -56,6 +54,29 @@ async function flush(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 80));
 }
 
+/**
+ * 跨平台安全删除:带退避重试。
+ * Windows 上 SQLite(better-sqlite3)的 sessions.db / .db-wal / .db-shm 句柄
+ * 在 Session 被 GC 前可能仍占用,rm 立即触发 EBUSY。重试几次给句柄释放时间。
+ * Session.close() 是首选清理方式,但本测试文件 Session 都是局部变量、出作用域
+ * 等 GC,此 helper 作为兜底保证测试目录被清掉。
+ */
+async function safeRm(path: string): Promise<void> {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      await rm(path, { recursive: true, force: true });
+      return;
+    } catch (err) {
+      if (String(err).includes("EBUSY") || String(err).includes("EPERM") || String(err).includes("ENOTEMPTY")) {
+        // 句柄未释放,退避后重试
+        await new Promise((r) => setTimeout(r, 50 * (attempt + 1)));
+        continue;
+      }
+      throw err; // 其他错误直接抛
+    }
+  }
+}
+
 describe("Session + FTS5 断点续传", () => {
   let workDir: string;
 
@@ -64,7 +85,7 @@ describe("Session + FTS5 断点续传", () => {
   });
 
   afterEach(async () => {
-    await rm(workDir, { recursive: true, force: true });
+    await safeRm(workDir);
   });
 
   it("Session 1: 插入 5 条消息 → 关闭, Session 2: 重建 → 检索到全部 5 条", async () => {
@@ -165,7 +186,7 @@ describe("跨 Session 全文检索", () => {
   });
 
   afterEach(async () => {
-    await rm(workDir, { recursive: true, force: true });
+    await safeRm(workDir);
   });
 
   it("Session A 插入'添加工具', Session B 插入'修复 bug', Session C 分别检索", async () => {
@@ -233,7 +254,7 @@ describe("WorkingMemory 与 FTS5 数据一致性", () => {
   });
 
   afterEach(async () => {
-    await rm(workDir, { recursive: true, force: true });
+    await safeRm(workDir);
   });
 
   it("Session.append() 后 WorkingMemory 和 FTS5 都包含该消息", async () => {
@@ -329,30 +350,27 @@ describe("持久化失败降级逻辑", () => {
   });
 
   afterEach(async () => {
-    await rm(workDir, { recursive: true, force: true });
+    await safeRm(workDir);
   });
 
   it("FTS5 初始化失败 → Session 正常工作, search() 返回空数组", async () => {
-    // 先损坏数据库目录，再创建 Session（FTS5 初始化会失败）
-    const dbDir = join(workDir, ".claw");
-    const { mkdirSync, chmodSync } = await import("node:fs");
-    mkdirSync(dbDir, { recursive: true });
-    // 让目录只读，FTS5 无法创建数据库文件
-    chmodSync(dbDir, 0o444);
+    // 跨平台注入:把 .claw 占用一个普通文件(非目录),使 FTS5Store 构造时
+    // new Database("<workDir>/.claw/sessions.db") 抛 ENOTDIR(父路径非目录)。
+    // 旧的 chmod(0o444) 在 Windows 上对目录无效(只读位只阻止删目录,不阻止建文件),
+    // 用"文件占位"是 POSIX/Windows 都确定能触发降级 catch 的方案。
+    const { writeFileSync } = await import("node:fs");
+    writeFileSync(join(workDir, ".claw"), "blocker");
 
     const mgr = new SessionManager();
     const s = await mgr.getOrCreate("chat_fault", workDir, ON);
-    
+
     // Session 正常工作(降级为纯内存)
     s.append(userMsg("test message"));
     expect(s.length).toBe(1);
 
-    // search() 返回空数组(FTS5 未初始化)
+    // search() 返回空数组(FTS5 未初始化,this.fts5 被降级为 db=null)
     const results = s.search("test");
     expect(results).toEqual([]);
-
-    // 恢复权限
-    chmodSync(dbDir, 0o755);
   });
 
   it("FTS5 插入失败(磁盘满) → Session.append() 继续成功, 只记录 warn", async () => {
@@ -387,25 +405,29 @@ describe("持久化失败降级逻辑", () => {
   it("FTS5 检索失败 → Session.search() 返回空数组, 不抛异常", async () => {
     const mgr = new SessionManager();
     const s = await mgr.getOrCreate("chat_search_fail", workDir, ON);
-    
+
     s.append(userMsg("test data"));
     await flush();
 
-    // 损坏数据库文件（关闭当前数据库连接后再损坏）
+    // 损坏前先关闭当前 Session 的 SQLite 连接,避免句柄占用 + 防止它的连接
+    // 通过 checkpoint 把数据写回主 db(那样 corrupt 就白做了)。
+    s.close();
+
+    // 删除 WAL 三件套的全部附属文件,再损坏主 db。
+    // 只删 -wal 不够:-shm 还在时 SQLite 可能用共享内存恢复;必须连同删掉。
     const dbPath = join(workDir, ".claw", "sessions.db");
-    // 直接删除 WAL 文件，破坏 WAL 模式的完整性
     const { unlinkSync, existsSync } = await import("node:fs");
-    const walPath = `${dbPath}-wal`;
-    if (existsSync(walPath)) {
-      unlinkSync(walPath);
+    for (const suffix of ["-wal", "-shm"]) {
+      const p = `${dbPath}${suffix}`;
+      if (existsSync(p)) unlinkSync(p);
     }
     corruptDatabase(dbPath);
 
-    // 创建新 Session，数据库损坏应导致 FTS5 初始化失败
+    // 创建新 Session,数据库损坏应导致 FTS5 初始化失败(this.db=null 降级)
     const mgr2 = new SessionManager();
     const s2 = await mgr2.getOrCreate("chat_search_fail2", workDir, ON);
-    
-    // search() 应降级返回空数组（FTS5 未初始化）
+
+    // search() 应降级返回空数组(FTS5 未初始化)
     const results = s2.search("test");
     expect(results).toEqual([]);
   });
@@ -440,7 +462,7 @@ describe("多 Session 隔离", () => {
   });
 
   afterEach(async () => {
-    await rm(workDir, { recursive: true, force: true });
+    await safeRm(workDir);
   });
 
   it("Session A 插入消息, Session B 检索时只返回 B 的消息", async () => {
@@ -493,7 +515,7 @@ describe("并发 Session 测试", () => {
   });
 
   afterEach(async () => {
-    await rm(workDir, { recursive: true, force: true });
+    await safeRm(workDir);
   });
 
   it("10 个 Session 同时创建并插入消息", async () => {
@@ -568,7 +590,7 @@ describe("真实场景模拟", () => {
   });
 
   afterEach(async () => {
-    await rm(workDir, { recursive: true, force: true });
+    await safeRm(workDir);
   });
 
   it("飞书多群对话隔离", async () => {

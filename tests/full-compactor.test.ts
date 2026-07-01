@@ -206,12 +206,28 @@ describe("FullCompactor 持久化(applyCompaction 落盘 + recover 重放)", () 
   });
 
   afterEach(async () => {
-    await rm(workDir, { recursive: true, force: true });
+    await safeRm(workDir);
   });
 
   /** 等待 fire-and-forget 落盘走完(appendFile 经 libuv 线程池) */
   async function flush(): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 60));
+  }
+
+  /** 跨平台安全删除:Windows 上 SQLite 句柄未释放时 rm 触发 EBUSY,退避重试兜底 */
+  async function safeRm(path: string): Promise<void> {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        await rm(path, { recursive: true, force: true });
+        return;
+      } catch (err) {
+        if (String(err).includes("EBUSY") || String(err).includes("EPERM") || String(err).includes("ENOTEMPTY")) {
+          await new Promise((r) => setTimeout(r, 50 * (attempt + 1)));
+          continue;
+        }
+        throw err;
+      }
+    }
   }
 
   it("applyCompaction 后重启 recover,history 与内存一致(truncate→summary→retained 顺序)", async () => {
