@@ -422,6 +422,18 @@ export class Session {
   get fts5Store(): FTS5Store | undefined {
     return this.fts5;
   }
+
+  /**
+   * 关闭底层资源(FTS5 SQLite 连接)。进程退出或测试清理前调用。
+   * 关键:Windows 上 SQLite 文件未释放句柄时删除会触发 EBUSY,
+   * 必须 close() 后才能 rm 工作目录。幂等(重复调用安全)。
+   */
+  close(): void {
+    if (this.fts5) {
+      this.fts5.close();
+      this.fts5 = undefined;
+    }
+  }
 }
 
 /**
