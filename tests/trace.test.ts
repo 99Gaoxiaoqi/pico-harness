@@ -10,6 +10,22 @@ import { Session } from "../src/engine/session.js";
 import { Span, Tracer, exportTraceToFile } from "../src/observability/trace.js";
 import type { LLMProvider } from "../src/provider/interface.js";
 import type { Message, ToolCall, ToolDefinition, ToolResult } from "../src/schema/message.js";
+
+/** 跨平台安全删除:Windows 上 SQLite 句柄未释放时 rm 触发 EBUSY,退避重试兜底 */
+async function safeRm(path: string): Promise<void> {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      await rm(path, { recursive: true, force: true });
+      return;
+    } catch (err) {
+      if (String(err).includes("EBUSY") || String(err).includes("EPERM") || String(err).includes("ENOTEMPTY")) {
+        await new Promise((r) => setTimeout(r, 50 * (attempt + 1)));
+        continue;
+      }
+      throw err;
+    }
+  }
+}
 import type { BaseTool, Registry } from "../src/tools/registry.js";
 
 class ScriptedProvider implements LLMProvider {
@@ -75,7 +91,7 @@ describe("Tracing", () => {
         name: "Agent.Run",
       });
     } finally {
-      await rm(workDir, { recursive: true, force: true });
+      await safeRm(workDir);
     }
   });
 
@@ -154,7 +170,7 @@ describe("Tracing", () => {
         },
       });
     } finally {
-      await rm(workDir, { recursive: true, force: true });
+      await safeRm(workDir);
     }
   });
 });

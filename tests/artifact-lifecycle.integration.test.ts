@@ -6,6 +6,22 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ToolResultArtifactStore } from "../src/context/artifact-store.js";
 import { SessionManager } from "../src/engine/session.js";
 
+/** 跨平台安全删除:Windows 上 SQLite 句柄未释放时 rm 触发 EBUSY,退避重试兜底 */
+async function safeRm(path: string): Promise<void> {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      await rm(path, { recursive: true, force: true });
+      return;
+    } catch (err) {
+      if (String(err).includes("EBUSY") || String(err).includes("EPERM") || String(err).includes("ENOTEMPTY")) {
+        await new Promise((r) => setTimeout(r, 50 * (attempt + 1)));
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+
 async function pathExists(path: string): Promise<boolean> {
   try {
     await access(path, constants.F_OK);
@@ -37,7 +53,7 @@ describe("Session-scoped artifact lifecycle", () => {
   });
 
   afterEach(async () => {
-    await rm(workDir, { recursive: true, force: true });
+    await safeRm(workDir);
   });
 
   it("删除 session 后显式删除该 session 的 artifact 文件", async () => {

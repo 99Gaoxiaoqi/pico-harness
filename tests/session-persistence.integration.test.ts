@@ -19,6 +19,22 @@ import { join } from "node:path";
 import { AgentEngine } from "../src/engine/loop.js";
 import { SessionManager } from "../src/engine/session.js";
 import type { LLMProvider } from "../src/provider/interface.js";
+
+/** 跨平台安全删除:Windows 上 SQLite 句柄未释放时 rm 触发 EBUSY,退避重试兜底 */
+async function safeRm(path: string): Promise<void> {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      await rm(path, { recursive: true, force: true });
+      return;
+    } catch (err) {
+      if (String(err).includes("EBUSY") || String(err).includes("EPERM") || String(err).includes("ENOTEMPTY")) {
+        await new Promise((r) => setTimeout(r, 50 * (attempt + 1)));
+        continue;
+      }
+      throw err;
+    }
+  }
+}
 import type { Message, ToolCall, ToolDefinition, ToolResult } from "../src/schema/message.js";
 import type { BaseTool, Registry } from "../src/tools/registry.js";
 
@@ -79,7 +95,7 @@ describe("Session 持久化端到端集成", () => {
   });
 
   afterEach(async () => {
-    await rm(workDir, { recursive: true, force: true });
+    await safeRm(workDir);
   });
 
   it("引擎跑完后历史落盘;重启后新引擎基于恢复历史继续对话", async () => {
