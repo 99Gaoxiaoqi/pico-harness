@@ -8,6 +8,22 @@ import { AgentEngine } from "../src/engine/loop.js";
 import { Session } from "../src/engine/session.js";
 import type { LLMProvider } from "../src/provider/interface.js";
 import type { Message, ToolCall, ToolDefinition, ToolResult } from "../src/schema/message.js";
+
+/** 跨平台安全删除:Windows 上 SQLite 句柄未释放时 rm 触发 EBUSY,退避重试兜底 */
+async function safeRm(path: string): Promise<void> {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      await rm(path, { recursive: true, force: true });
+      return;
+    } catch (err) {
+      if (String(err).includes("EBUSY") || String(err).includes("EPERM") || String(err).includes("ENOTEMPTY")) {
+        await new Promise((r) => setTimeout(r, 50 * (attempt + 1)));
+        continue;
+      }
+      throw err;
+    }
+  }
+}
 import type { Registry } from "../src/tools/registry.js";
 import { createToolResultObservationProcessor } from "../src/tools/tool-result-observation.js";
 
@@ -158,7 +174,7 @@ describe("large ToolResult artifact externalization", () => {
   });
 
   afterEach(async () => {
-    await rm(workDir, { recursive: true, force: true });
+    await safeRm(workDir);
   });
 
   it("Engine 把大 ToolResult 外部化,上下文保留 artifact path 与中间错误摘要", async () => {

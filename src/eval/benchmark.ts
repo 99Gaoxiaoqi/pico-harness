@@ -115,6 +115,12 @@ export class BenchmarkRunner {
   private async runCase(testCase: BenchmarkCase): Promise<BenchmarkCaseResult> {
     const id = sanitizeCaseId(testCase.id);
     const workDir = join(this.rootDir, id);
+    // 先清空重建 workDir,再 new Session。顺序很关键:Session 构造函数会立即
+    // 打开 workDir/.claw/sessions.db(SQLite),若先 new Session 再 rm(workDir),
+    // Windows 上 rm 会因 db 句柄占用而 EBUSY。
+    await rm(workDir, { recursive: true, force: true });
+    await mkdir(workDir, { recursive: true });
+
     const session = new Session(`bench:${id}`, workDir);
     const context: BenchmarkCaseContext = {
       case: testCase,
@@ -126,9 +132,6 @@ export class BenchmarkRunner {
     let passed: boolean;
     let message: string | undefined;
     let error: string | undefined;
-
-    await rm(workDir, { recursive: true, force: true });
-    await mkdir(workDir, { recursive: true });
 
     try {
       if (testCase.setupScript) {
@@ -150,6 +153,11 @@ export class BenchmarkRunner {
     } catch (caught) {
       passed = false;
       error = formatError(caught);
+    } finally {
+      // 关闭 Session 的 SQLite(FTS5)句柄。关键:Windows 下不关闭会导致后续
+      // rm(workDir) 删 sessions.db 时 EBUSY(better-sqlite3 句柄未释放)。
+      // snapshotUsage 只读纯内存字段,close 后仍安全。幂等。
+      session.close();
     }
 
     return {
