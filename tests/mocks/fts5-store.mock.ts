@@ -76,4 +76,24 @@ export class MockFTS5Store {
     this.index.clear();
     this.summaries.clear();
   }
+
+  // ── 连接池化静态接口(与真实 FTS5Store 对齐)──
+  // mock 实现:每次 acquire new 一个内存实例,不做真正共享(测试无需验证池语义)。
+  private static instances = new Map<string, MockFTS5Store>();
+
+  static acquire(workDir: string): MockFTS5Store | null {
+    const existing = MockFTS5Store.instances.get(workDir);
+    if (existing) return existing;
+    const store = new MockFTS5Store();
+    MockFTS5Store.instances.set(workDir, store);
+    return store;
+  }
+
+  static release(_workDir: string): void {
+    // mock 不做引用计数,release 为空操作(实例仍可被测试持有)
+  }
+
+  static closeAll(): void {
+    MockFTS5Store.instances.clear();
+  }
 }

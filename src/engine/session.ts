@@ -119,11 +119,13 @@ export class Session {
 
   /**
    * 初始化 FTS5 全文检索存储。
-   * 失败时降级为 undefined,不影响主流程(记忆提醒功能可选)。
+   * 【连接池化】通过 FTS5Store.acquire 复用 workDir 级单例,避免每 Session 开一个
+   * SQLite 连接。失败时降级为 undefined,不影响主流程(记忆提醒功能可选)。
    */
   private initFTS5(): void {
     try {
-      this.fts5 = new FTS5Store(this.workDir);
+      const store = FTS5Store.acquire(this.workDir);
+      this.fts5 = store ?? undefined;
     } catch (err) {
       logger.warn({ err }, '[session] FTS5 初始化失败,降级为纯内存');
       this.fts5 = undefined;
@@ -424,20 +426,21 @@ export class Session {
   }
 
   /**
-   * 关闭底层资源(FTS5 SQLite 连接)。进程退出或测试清理前调用。
-   * 关键:Windows 上 SQLite 文件未释放句柄时删除会触发 EBUSY,
-   * 必须 close() 后才能 rm 工作目录。幂等(重复调用安全)。
+   * 关闭底层资源(FTS5 SQLite 连接引用)。进程退出或测试清理前调用。
+   * 【连接池化】只释放本 Session 持有的引用(FTS5Store.release),引用计数归零
+   * 才真正关闭共享的 sessions.db。关键:Windows 上 SQLite 文件未释放句柄时删除会
+   * 触发 EBUSY,必须释放后才能 rm 工作目录。幂等(重复调用安全)。
    */
   close(): void {
     if (this.fts5) {
-      this.fts5.close();
+      FTS5Store.release(this.workDir);
       this.fts5 = undefined;
     }
   }
 }
 
 /**
- * SessionManager:全局会话管理器,负责多用户 / 多终端的物理隔离。
+ * SessionManager:全局会话管理器,负责多用户 / 多终���的物理隔离。
  * 以 sessionId 为 key,O(1) 路由到对应 Session 实例。
  *
  * 【内存治理】LRU + TTL 双重驱逐,防长跑内存膨胀:
