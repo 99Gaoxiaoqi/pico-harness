@@ -208,7 +208,10 @@ describe("ClaudeProvider 翻译层", () => {
     await p.generate(history, [echoTool]);
 
     const body = calls[0]!.body as Record<string, unknown>;
-    expect(body.system).toBe("你是助手");
+    // Claude profile 默认 supportsPromptCache=true:system 会被转成带 cache_control 的 block 数组。
+    // 断言语义不变(内容仍是 "你是助手"),只是结构升级为数组。
+    const systemBlocks = body.system as { type: string; text: string; cache_control?: unknown }[];
+    expect(systemBlocks[0]!.text).toBe("你是助手");
     const msgs = body.messages as { role: string; content: unknown[] }[];
     expect(msgs[0]!.role).toBe("user");
     // 鉴权用 x-api-key + anthropic-version
@@ -276,5 +279,65 @@ describe("ClaudeProvider 翻译层", () => {
   it("ProviderProfile 返回 Claude contextWindowTokens", () => {
     const profile = resolveProviderProfile("claude", "claude-3-5-sonnet");
     expect(profile.contextWindowTokens).toBeGreaterThan(0);
+  });
+
+  it("prompt cache:supportsPromptCache 模型在 system/tools/历史前缀尾注入断点", async () => {
+    const calls = mockFetch({ content: [{ type: "text", text: "ok" }] });
+    const p = new ClaudeProvider(cfg); // claude profile 默认 supportsPromptCache=true
+    const hist: Message[] = [
+      { role: "system", content: "你是助手" },
+      { role: "user", content: "第一轮" },
+      { role: "assistant", content: "答1" },
+      { role: "user", content: "第二轮" },
+      { role: "assistant", content: "答2" },
+      { role: "user", content: "本轮新输入" },
+    ];
+    await p.generate(hist, [echoTool]);
+
+    const body = calls[0]!.body as Record<string, unknown>;
+    // 断点① system:字符串转数组并打 cache_control
+    const systemBlocks = body.system as { cache_control?: { type: string } }[];
+    expect(systemBlocks[0]!.cache_control?.type).toBe("ephemeral");
+    // 断点② tools 尾:最后一个 tool 带 cache_control
+    const tools = body.tools as { cache_control?: { type: string } }[];
+    expect(tools[tools.length - 1]!.cache_control?.type).toBe("ephemeral");
+    // 断点③ 历史前缀尾:倒数第二条消息(答2)的末 block 带 cache_control,
+    // 最后一条(本轮新输入)不带——它在每轮都变,不进缓存边界。
+    const msgs = body.messages as {
+      role: string;
+      content: { cache_control?: { type: string } }[];
+    }[];
+    const prefixTail = msgs[msgs.length - 2]!;
+    expect(prefixTail.content.at(-1)!.cache_control?.type).toBe("ephemeral");
+    const lastMsg = msgs[msgs.length - 1]!;
+    expect(lastMsg.content.at(-1)!.cache_control).toBeUndefined();
+  });
+
+  it("prompt cache:断点总数不超过 Anthropic 上限 4", async () => {
+    const calls = mockFetch({ content: [{ type: "text", text: "ok" }] });
+    const p = new ClaudeProvider(cfg);
+    // 构造超长历史,确保注入逻辑不会越界产生 >4 个断点。
+    const hist: Message[] = [{ role: "system", content: "你是助手" }];
+    for (let i = 0; i < 20; i++) {
+      hist.push({ role: "user", content: `第${i}轮问题` });
+      hist.push({ role: "assistant", content: `第${i}轮回答` });
+    }
+    hist.push({ role: "user", content: "最新输入" });
+    await p.generate(hist, [echoTool]);
+
+    const body = calls[0]!.body as Record<string, unknown>;
+    let count = 0;
+    for (const block of body.system as { cache_control?: unknown }[]) {
+      if (block.cache_control) count++;
+    }
+    for (const tool of body.tools as { cache_control?: unknown }[]) {
+      if (tool.cache_control) count++;
+    }
+    for (const msg of body.messages as { content: { cache_control?: unknown }[] }[]) {
+      for (const block of msg.content) {
+        if (block.cache_control) count++;
+      }
+    }
+    expect(count).toBeLessThanOrEqual(4);
   });
 });
