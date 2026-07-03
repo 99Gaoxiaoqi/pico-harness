@@ -40,6 +40,7 @@ import {
 import type { MiddlewareFunc } from "../tools/registry.js";
 import { DelegationManager, DelegateStatusTool } from "../tools/delegation-manager.js";
 import { createSubagentRegistryFactory } from "../tools/delegation-registry.js";
+import { AgentProfileLoader, type AgentProfile } from "../tools/agent-profile.js";
 import { DelegateTaskTool, SpawnSubagentTool } from "../tools/subagent.js";
 import { createToolResultObservationProcessor } from "../tools/tool-result-observation.js";
 import { CostTracker } from "../observability/tracker.js";
@@ -69,18 +70,33 @@ function buildReadOnlyRegistry(workDir: string): ToolRegistry {
   return registry;
 }
 
+/** 加载工作区的自定义子代理角色(.claw/agents.yaml)。失败静默返回空。 */
+async function loadProfiles(workDir: string): Promise<AgentProfile[]> {
+  try {
+    return await new AgentProfileLoader(workDir).load();
+  } catch {
+    return [];
+  }
+}
+
 function registerDelegationTools(
   registry: ToolRegistry,
   engine: AgentEngine,
   workDir: string,
+  profiles: AgentProfile[],
 ): void {
   const manager = new DelegationManager();
   const registryFactory = createSubagentRegistryFactory({
     workDir,
     runner: engine,
     manager,
+    ...(profiles.length > 0 ? { profiles } : {}),
   });
-  registry.register(new DelegateTaskTool(engine, registryFactory, manager));
+  registry.register(
+    new DelegateTaskTool(engine, registryFactory, manager, {
+      ...(profiles.length > 0 ? { profiles } : {}),
+    }),
+  );
   registry.register(new DelegateStatusTool(manager));
   registry.register(new SpawnSubagentTool(engine, buildReadOnlyRegistry(workDir)));
 }
@@ -186,7 +202,7 @@ async function serve(
         reporter,
         tracer: traceEnabled ? new Tracer() : undefined,
       });
-      registerDelegationTools(registry, engine, workDir);
+      registerDelegationTools(registry, engine, workDir, await loadProfiles(workDir));
 
       // HTTP 入口:可选传入 sessionId 实现多会话隔离,缺省用单一控制台会话
       const sessionId = parsed.sessionId ?? `http:${workDir}`;
@@ -262,6 +278,8 @@ async function main() {
     const systemPrompt = planMode ? undefined : await new PromptComposer(workDir).build();
     const modelName =
       process.env.LLM_MODEL ?? (kind === "openai" ? "glm-5.2" : "claude-3-5-sonnet");
+    // 预加载自定义角色:飞书 engineFactory 回调是同步的,await 必须提前到这里
+    const feishuProfiles = await loadProfiles(workDir);
     const bot = new FeishuBot(
       ({ session, reporter }) => {
         const provider = createProvider(kind, undefined, thinkingEffort);
@@ -282,7 +300,7 @@ async function main() {
           tracer: traceEnabled ? new Tracer() : undefined,
         });
         // 注册 Hermes 风格委派工具,并保留 spawn_subagent 兼容入口。
-        registerDelegationTools(registry, engine, workDir);
+        registerDelegationTools(registry, engine, workDir, feishuProfiles);
         return engine;
       },
       loadFeishuConfig(),

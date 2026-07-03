@@ -862,14 +862,9 @@ export class AgentEngine implements AgentRunner {
 
     // 子智能体专属 System Prompt:严厉警告必须用工具,不许凭空猜测。
     // 若工作区配置了 Skills,只注入 name/description 索引;正文仍由 skill_view 按需读取。
-    const subSystemPrompt = `你是专门负责深度探索的探路者 (Explorer Subagent)。
-你的任务是根据主架构师的指令,在当前工作区内仔细阅读代码、查阅日志,搜集足够的信息。
-【核心纪律】
-1. 你必须、且只能依靠内置工具(如 ${toolExamples})去寻找答案。绝对不允许凭空猜测。
-2. 如果你没有找到确切的答案,你必须继续使用工具深入搜索。
-3. 当且仅当你找到了确切的线索后,停止调用工具,直接输出一段纯文本作为你的终极汇报。主架构师会根据你的汇报决定下一步。${
-      skillIndex ? `\n\n${skillIndex}` : ""
-    }`;
+    // 支持调用方自定义:默认追加拼接(对标 kimi-code ROLE_ADDITIONAL),
+    // systemPromptOverride=true 时完全覆盖(对标 hermes ephemeral_system_prompt)。
+    const subSystemPrompt = buildSubagentSystemPrompt(toolExamples, skillIndex, opts);
 
     // 全新纯净上下文:不共享主 Agent 的 Session
     const contextHistory: Message[] = [
@@ -877,7 +872,8 @@ export class AgentEngine implements AgentRunner {
       { role: "user", content: taskPrompt },
     ];
 
-    const maxSubTurns = 10;
+    // maxTurns 可由调用方覆盖(默认 10),子代理跑满此轮次仍没总结会被强制召回
+    const maxSubTurns = opts.maxTurns ?? 10;
     const depth = opts.depth ?? 0;
     const maxSpawnDepth = opts.maxSpawnDepth ?? 2;
     let turnCount = 0;
@@ -987,6 +983,40 @@ export class AgentEngine implements AgentRunner {
       contextHistory.push(...observations);
     }
   }
+}
+
+/**
+ * 构造子代理的 system prompt。
+ *
+ * 自定义语义(对标 kimi-code ROLE_ADDITIONAL + hermes ephemeral_system_prompt):
+ * - 未传 opts.systemPrompt:返回默认的"探路者"骨架(向后兼容)。
+ * - 传 opts.systemPrompt 且 opts.systemPromptOverride !== true:默认骨架 + 追加拼接
+ *   自定义片段。保留基本纪律 + 调用方追加要求(对标 kimi-code 的 ROLE_ADDITIONAL)。
+ * - opts.systemPromptOverride === true 且有 systemPrompt:完全覆盖默认骨架
+ *   (对标 hermes 的 ephemeral_system_prompt 替换语义),给需要完全定制的场景。
+ */
+function buildSubagentSystemPrompt(
+  toolExamples: string,
+  skillIndex: string,
+  opts: SubagentRunOptions,
+): string {
+  // 完全覆盖模式:调用方显式声明,直接用自定义 prompt 替换默认骨架
+  if (opts.systemPromptOverride && opts.systemPrompt) {
+    return opts.systemPrompt;
+  }
+
+  // 默认骨架(与原硬编码逐字一致,保证向后兼容)
+  const base = `你是专门负责深度探索的探路者 (Explorer Subagent)。
+你的任务是根据主架构师的指令,在当前工作区内仔细阅读代码、查阅日志,搜集足够的信息。
+【核心纪律】
+1. 你必须、且只能依靠内置工具(如 ${toolExamples})去寻找答案。绝对不允许凭空猜测。
+2. 如果你没有找到确切的答案,你必须继续使用工具深入搜索。
+3. 当且仅当你找到了确切的线索后,停止调用工具,直接输出一段纯文本作为你的终极汇报。主架构师会根据你的汇报决定下一步。${
+    skillIndex ? `\n\n${skillIndex}` : ""
+  }`;
+
+  // 追加模式:默认骨架 + 自定义片段
+  return opts.systemPrompt ? `${base}\n\n${opts.systemPrompt}` : base;
 }
 
 /**

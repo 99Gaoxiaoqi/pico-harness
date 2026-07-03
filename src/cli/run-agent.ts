@@ -30,6 +30,7 @@ import {
 } from "../tools/registry-impl.js";
 import { DelegationManager, DelegateStatusTool } from "../tools/delegation-manager.js";
 import { createSubagentRegistryFactory } from "../tools/delegation-registry.js";
+import { AgentProfileLoader, type AgentProfile } from "../tools/agent-profile.js";
 import { DelegateTaskTool, SpawnSubagentTool } from "../tools/subagent.js";
 import { createToolResultObservationProcessor } from "../tools/tool-result-observation.js";
 import { CostTracker } from "../observability/tracker.js";
@@ -133,7 +134,7 @@ export async function runAgentFromCli(
   });
 
   registry.use(buildApprovalMiddleware(dependencies.approvalNotifier ?? terminalNotifier));
-  registerDelegationTools(registry, engine, workDir);
+  registerDelegationTools(registry, engine, workDir, await loadProfiles(workDir));
   session.append({ role: "user", content: prompt });
 
   const messages = await engine.run(session);
@@ -230,18 +231,33 @@ function buildReadOnlyRegistry(workDir: string): ToolRegistry {
   return registry;
 }
 
+/** 加载工作区的自定义子代理角色(.claw/agents.yaml)。失败静默返回空。 */
+async function loadProfiles(workDir: string): Promise<AgentProfile[]> {
+  try {
+    return await new AgentProfileLoader(workDir).load();
+  } catch {
+    return [];
+  }
+}
+
 function registerDelegationTools(
   registry: ToolRegistry,
   engine: AgentEngine,
   workDir: string,
+  profiles: AgentProfile[],
 ): void {
   const manager = new DelegationManager();
   const registryFactory = createSubagentRegistryFactory({
     workDir,
     runner: engine,
     manager,
+    ...(profiles.length > 0 ? { profiles } : {}),
   });
-  registry.register(new DelegateTaskTool(engine, registryFactory, manager));
+  registry.register(
+    new DelegateTaskTool(engine, registryFactory, manager, {
+      ...(profiles.length > 0 ? { profiles } : {}),
+    }),
+  );
   registry.register(new DelegateStatusTool(manager));
   registry.register(new SpawnSubagentTool(engine, buildReadOnlyRegistry(workDir)));
 }

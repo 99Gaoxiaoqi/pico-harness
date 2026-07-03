@@ -458,6 +458,92 @@ describe("AgentEngine.runSub", () => {
     expect(summary).toContain("leaf summary");
   });
 
+  it("自定义 systemPrompt 默认追加到探路者 prompt 之后", async () => {
+    // 记录型 provider:捕获 runSub 第一次调 generate 时收到的 messages
+    let firstMessages: Message[] = [];
+    const provider = new (class implements LLMProvider {
+      async generate(messages: Message[]): Promise<Message> {
+        if (firstMessages.length === 0) firstMessages = messages;
+        return { role: "assistant", content: "完成探索" };
+      }
+    })();
+    const registry = mockReadOnlyRegistry();
+    const engine = makeEngine(provider, registry);
+
+    await engine.runSub("任务", registry, undefined, {
+      systemPrompt: "【额外要求】你必须用中文汇报。",
+    });
+
+    const sys = firstMessages[0]!.content;
+    // 默认追加:探路者骨架仍在(含"探路者"和核心纪律)
+    expect(sys).toContain("探路者");
+    expect(sys).toContain("核心纪律");
+    // 自定义片段被追加在后面
+    expect(sys).toContain("【额外要求】你必须用中文汇报。");
+  });
+
+  it("systemPromptOverride=true 时完全覆盖默认 prompt", async () => {
+    let firstMessages: Message[] = [];
+    const provider = new (class implements LLMProvider {
+      async generate(messages: Message[]): Promise<Message> {
+        if (firstMessages.length === 0) firstMessages = messages;
+        return { role: "assistant", content: "完成" };
+      }
+    })();
+    const registry = mockReadOnlyRegistry();
+    const engine = makeEngine(provider, registry);
+
+    await engine.runSub("任务", registry, undefined, {
+      systemPrompt: "你是代码审查员,只做 review 不做修改。",
+      systemPromptOverride: true,
+    });
+
+    const sys = firstMessages[0]!.content;
+    // 完全覆盖:不含默认的"探路者"骨架
+    expect(sys).not.toContain("探路者");
+    expect(sys).not.toContain("核心纪律");
+    // 只含自定义内容
+    expect(sys).toBe("你是代码审查员,只做 review 不做修改。");
+  });
+
+  it("maxTurns 覆盖默认的 10", async () => {
+    // 每轮都调工具永不退出,用 maxTurns=2 让它第 3 轮强制召回
+    const provider = new (class implements LLMProvider {
+      async generate(): Promise<Message> {
+        return {
+          role: "assistant",
+          content: "继续",
+          toolCalls: [{ id: "c1", name: "bash", arguments: "{}" }],
+        };
+      }
+    })();
+    const registry = mockReadOnlyRegistry();
+    const engine = makeEngine(provider, registry);
+
+    await expect(
+      engine.runSub("无尽探索", registry, undefined, { maxTurns: 2 }),
+    ).rejects.toThrow("超过 2 轮");
+  });
+
+  it("不传新参数时行为不变(回归保护)", async () => {
+    let firstMessages: Message[] = [];
+    const provider = new (class implements LLMProvider {
+      async generate(messages: Message[]): Promise<Message> {
+        if (firstMessages.length === 0) firstMessages = messages;
+        return { role: "assistant", content: "完成" };
+      }
+    })();
+    const registry = mockReadOnlyRegistry();
+    const engine = makeEngine(provider, registry);
+
+    await engine.runSub("任务", registry);
+
+    const sys = firstMessages[0]!.content;
+    // 默认行为:含完整探路者骨架,无自定义追加
+    expect(sys).toContain("探路者");
+    expect(sys).toContain("核心纪律");
+  });
+
   it("子智能体探索不污染主 Session(物理隔离核心)", async () => {
     // 主引擎用一个 Session,子智能体用 runSub(不碰主 Session)
     const provider = new ScriptedProvider([
