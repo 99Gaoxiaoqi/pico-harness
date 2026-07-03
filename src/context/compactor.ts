@@ -19,6 +19,7 @@
 
 import type { Message } from "../schema/message.js";
 import { logger } from "../observability/logger.js";
+import { countTokens } from "./token-counter.js";
 
 /** 远期 ToolResult 触发全量掩码的字符阈值(短于阈值的小输出保留原样) */
 const REMOTE_MASK_THRESHOLD = 200;
@@ -511,9 +512,9 @@ export function sanitizeToolPairs(msgs: Message[]): Message[] {
 }
 
 function estimateTokens(msg: Message): number {
-  let chars = msg.content.length;
+  let text = msg.content;
   for (const toolCall of msg.toolCalls ?? []) {
-    chars += toolCall.name.length + toolCall.arguments.length;
+    text += toolCall.name + toolCall.arguments;
   }
-  return Math.max(1, Math.ceil(chars / 4));
+  return Math.max(1, countTokens(text));
 }

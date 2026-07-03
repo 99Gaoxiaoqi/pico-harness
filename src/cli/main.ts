@@ -46,6 +46,7 @@ import { createToolResultObservationProcessor } from "../tools/tool-result-obser
 import { CostTracker } from "../observability/tracker.js";
 import { Tracer } from "../observability/trace.js";
 import { runAgentFromCli } from "./run-agent.js";
+import { primeTokenizer } from "../context/token-counter.js";
 
 function buildRegistry(workDir: string): ToolRegistry {
   const registry = new ToolRegistry({ truncateResults: false });
@@ -239,6 +240,10 @@ function readBody(req: import("node:http").IncomingMessage): Promise<string> {
 }
 
 async function main() {
+  // 预加载 BPE 词表,抹平首次 token 估算的加载延迟(精确计数 cl100k_base)。
+  // 失败静默:token-counter 会自动降级为 chars/4 兜底,不阻断启动。
+  await primeTokenizer();
+
   const { values, positionals } = parseArgs({
     options: {
       provider: { type: "string", default: "openai" },
