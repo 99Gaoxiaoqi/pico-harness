@@ -439,51 +439,124 @@ export class Session {
 /**
  * SessionManager:全局会话管理器,负责多用户 / 多终端的物理隔离。
  * 以 sessionId 为 key,O(1) 路由到对应 Session 实例。
+ *
+ * 【内存治理】LRU + TTL 双重驱逐,防长跑内存膨胀:
+ * - LRU:maxSessions 上限(默认 128)。超出时驱逐"最近最少使用"的 Session,
+ *   驱逐前调 session.close() 释放 SQLite 句柄(防 fd 泄漏)。
+ * - TTL:空闲超时(默认 24h)。每次 getOrCreate 惰性扫描,驱逐长期闲置 Session。
+ *   飞书多群场景下,沉默群的历史不再常驻内存,被再次唤醒时从 JSONL recover 重建。
+ * - MRU 提升:get/getOrCreate/delete+set 把目标提到 Map 末尾(最近使用),
+ *   Map 的迭代序即 LRU 序,首个元素即最旧。对标 hermes GatewaySession 的容量管理。
+ *
+ * 注意:驱逐只释放内存实例 + SQLite 句柄;持久化在磁盘的 JSONL 不删,
+ * 被 recover 唤醒即可续传。
  */
 export class SessionManager {
-  private readonly sessions = new Map<string, Session>();
+  /** 默认最大常驻会话数(对标 hermes gateway 的会话池上限量级) */
+  static readonly DEFAULT_MAX_SESSIONS = 128;
+  /** 默认空闲超时 24h:超过未访问的会话被惰性驱逐 */
+  static readonly DEFAULT_TTL_MS = 24 * 60 * 60 * 1000;
+
+  private readonly entries = new Map<string, { session: Session; lastAccessMs: number }>();
+  private readonly maxSessions: number;
+  private readonly ttlMs: number;
+
+  constructor(options?: { maxSessions?: number; ttlMs?: number }) {
+    this.maxSessions = options?.maxSessions ?? SessionManager.DEFAULT_MAX_SESSIONS;
+    this.ttlMs = options?.ttlMs ?? SessionManager.DEFAULT_TTL_MS;
+  }
 
   /**
    * 获取或创建一个会话(同 id 复用,不同 id 物理隔离)。
    * 新建时自动重放磁盘日志恢复历史(recover)。返回 Promise 以支持异步恢复。
    * persistence 显式透传给 Session(测试场景精确控制,避免环境变量并行污染)。
+   *
+   * 命中时做 MRU 提升(删除后重新 set 到末尾);新建后触发 LRU 驱赶 + TTL 惰性清理。
    */
   async getOrCreate(
     id: string,
     workDir: string,
     options?: { persistence?: boolean },
   ): Promise<Session> {
-    let sess = this.sessions.get(id);
-    if (!sess) {
-      sess = new Session(id, workDir, options);
-      await sess.recover();
-      this.sessions.set(id, sess);
+    // TTL 惰性清理:借这次访问顺带扫一遍过期项(低频,不阻塞主流程)。
+    this.evictExpired();
+
+    const existing = this.entries.get(id);
+    if (existing) {
+      existing.lastAccessMs = Date.now();
+      this.touch(id); // MRU 提升
+      return existing.session;
     }
+
+    const sess = new Session(id, workDir, options);
+    await sess.recover();
+    this.entries.set(id, { session: sess, lastAccessMs: Date.now() });
+    // LRU 驱赶:新增后若超 maxSessions,驱逐最旧(刚 set 的不会是最旧)。
+    this.evictLru();
     return sess;
   }
 
-  /** 获取已存在的会话(不创建) */
+  /**
+   * 获取已存在的会话(不创建)。命中时做 MRU 提升与 lastAccess 更新。
+   * 不触发 TTL 清理(get 应轻量;清理在 getOrCreate 路径做)。
+   */
   get(id: string): Session | undefined {
-    return this.sessions.get(id);
+    const entry = this.entries.get(id);
+    if (!entry) return undefined;
+    entry.lastAccessMs = Date.now();
+    this.touch(id);
+    return entry.session;
   }
 
-  /** 删除已存在的会话并返回被删除实例;不存在时返回 undefined */
+  /** 删除已存在的会话并返回被删除实例;不存在时返回 undefined。释放底层资源。 */
   delete(id: string): Session | undefined {
-    const sess = this.sessions.get(id);
-    if (sess) {
-      this.sessions.delete(id);
-    }
-    return sess;
+    const entry = this.entries.get(id);
+    if (!entry) return undefined;
+    this.entries.delete(id);
+    entry.session.close();
+    return entry.session;
   }
 
   /** 当前管理的会话总数 */
   get size(): number {
-    return this.sessions.size;
+    return this.entries.size;
   }
 
-  /** 清空所有会话(主要用于测试) */
+  /** 清空所有会话(主要用于测试)。释放每个 Session 的底层资源。 */
   clear(): void {
-    this.sessions.clear();
+    for (const { session } of this.entries.values()) {
+      session.close();
+    }
+    this.entries.clear();
+  }
+
+  /** MRU 提升:把 key 移到 Map 末尾(最近使用),保持迭代序 = LRU 序。 */
+  private touch(id: string): void {
+    const entry = this.entries.get(id);
+    if (!entry) return;
+    this.entries.delete(id);
+    this.entries.set(id, entry);
+  }
+
+  /** LRU 驱赶:超出 maxSessions 时驱逐最旧项,直到回到上限内。 */
+  private evictLru(): void {
+    while (this.entries.size > this.maxSessions) {
+      const oldest = this.entries.keys().next().value;
+      if (oldest === undefined) break;
+      this.delete(oldest);
+    }
+  }
+
+  /** TTL 惰性清理:驱逐空闲超过 ttlMs 的会话。每次 getOrCreate 调一次。 */
+  private evictExpired(): void {
+    const now = Date.now();
+    for (const [id, entry] of this.entries) {
+      if (now - entry.lastAccessMs > this.ttlMs) {
+        // 复用 delete:从 entries 移除并 close()
+        this.entries.delete(id);
+        entry.session.close();
+      }
+    }
   }
 }
 
