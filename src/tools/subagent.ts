@@ -17,6 +17,7 @@ import type { Reporter } from "../engine/reporter.js";
 import { logger } from "../observability/logger.js";
 import type { DelegationBatchResult } from "./delegation-manager.js";
 import { DelegationManager } from "./delegation-manager.js";
+import type { AgentProfile } from "./agent-profile.js";
 
 /**
  * AgentRunner:打破循环依赖的抽象接口。
@@ -57,6 +58,22 @@ export interface SubagentRunOptions {
   depth?: number;
   maxSpawnDepth?: number;
   role?: SubagentRole;
+  /**
+   * 覆盖默认的子代理最大轮次(默认 10)。
+   * 子代理跑满此轮次仍没给出总结会被强制召回。
+   */
+  maxTurns?: number;
+  /**
+   * 自定义 system prompt 片段。
+   * - systemPromptOverride 未设或 false(默认):此内容**追加拼接**到默认探路者
+   *   prompt 之后(对标 kimi-code 的 ROLE_ADDITIONAL 模式),保留基本纪律 +
+   *   你的自定义要求。
+   * - systemPromptOverride = true:此内容**完全覆盖**默认骨架(对标 hermes 的
+   *   ephemeral_system_prompt 替换语义)。用于需要完全定制子代理身份的场景。
+   */
+  systemPrompt?: string;
+  /** true 时 systemPrompt 完全覆盖默认 prompt,而非追加。默认 false(追加)。 */
+  systemPromptOverride?: boolean;
 }
 
 export interface SubagentRegistryRequest {
@@ -64,6 +81,8 @@ export interface SubagentRegistryRequest {
   role: SubagentRole;
   depth: number;
   maxSpawnDepth: number;
+  /** 自定义角色名(来自 .claw/agents.yaml)。命中时用该角色的工具集和 prompt。 */
+  agentName?: string;
 }
 
 export type SubagentRegistryFactory = (request: SubagentRegistryRequest) => Registry;
@@ -78,6 +97,8 @@ interface DelegateTaskInput {
   context?: string;
   mode?: SubagentMode;
   role?: SubagentRole;
+  /** 指定自定义子代理角色(来自 .claw/agents.yaml)。命中时用该角色的 prompt 和工具集。 */
+  agent_name?: string;
 }
 
 interface DelegateTaskArgs extends DelegateTaskInput {
@@ -90,6 +111,7 @@ interface NormalizedDelegateTask {
   context?: string;
   mode: SubagentMode;
   role: SubagentRole;
+  agentName?: string;
 }
 
 /**
@@ -159,6 +181,12 @@ export class SpawnSubagentTool implements BaseTool {
         depth: depth + 1,
         maxSpawnDepth,
         role: "leaf",
+        // 透传调用方注入的自定义参数(程序化扩展点,非 LLM 可控)
+        ...pickDefined({
+          maxTurns: this.options.maxTurns,
+          systemPrompt: this.options.systemPrompt,
+          systemPromptOverride: this.options.systemPromptOverride,
+        }),
       });
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
@@ -183,12 +211,17 @@ export class SpawnSubagentTool implements BaseTool {
  * - role + depth 约束,防止无限递归委派
  */
 export class DelegateTaskTool implements BaseTool {
+  /** 用户自定义角色库(来自 .claw/agents.yaml),按 agent_name 查询。空=无自定义角色。 */
+  private readonly profiles: AgentProfile[];
+
   constructor(
     private readonly runner: AgentRunner,
     private readonly registryFactory: SubagentRegistryFactory,
     private readonly manager: DelegationManager = new DelegationManager(),
-    private readonly options: SubagentRunOptions = {},
-  ) {}
+    private readonly options: SubagentRunOptions & { profiles?: AgentProfile[] } = {},
+  ) {
+    this.profiles = options.profiles ?? [];
+  }
 
   name(): string {
     return "delegate_task";
@@ -230,6 +263,12 @@ export class DelegateTaskTool implements BaseTool {
             type: "string",
             enum: ["explore", "worker"],
             description: "子智能体工具集。explore=只读探索,worker=受控读写开发。",
+          },
+          agent_name: {
+            type: "string",
+            description:
+              "自定义子代理角色名(来自工作区 .claw/agents.yaml 配置)。" +
+              "指定后使用该角色的 systemPrompt 和工具集,覆盖 mode 的默认工具集分配。",
           },
           role: {
             type: "string",
@@ -293,18 +332,39 @@ export class DelegateTaskTool implements BaseTool {
     const startedAt = Date.now();
     const childDepth = depth + 1;
     const prompt = task.context ? `${task.context}\n\n任务: ${task.goal}` : task.goal;
+
+    // 自定义角色查询:agent_name 命中 profile 时,用其 prompt/maxTurns 覆盖 Tool 级默认
+    const profile = task.agentName
+      ? this.profiles.find((p) => p.name === task.agentName)
+      : undefined;
+
     const registry = this.registryFactory({
       mode: task.mode,
       role: task.role,
       depth: childDepth,
       maxSpawnDepth,
+      ...(task.agentName ? { agentName: task.agentName } : {}),
     });
 
     try {
+      // 自定义角色命中时,用 profile 的 prompt/maxTurns;否则用 Tool 级 options
+      const customization = profile
+        ? pickDefined({
+            systemPrompt: profile.systemPrompt,
+            systemPromptOverride: profile.systemPromptOverride,
+            maxTurns: profile.maxTurns,
+          })
+        : pickDefined({
+            maxTurns: this.options.maxTurns,
+            systemPrompt: this.options.systemPrompt,
+            systemPromptOverride: this.options.systemPromptOverride,
+          });
+
       const subResult = await this.runner.runSub(prompt, registry, undefined, {
         depth: childDepth,
         maxSpawnDepth,
         role: task.role,
+        ...customization,
       });
       return {
         taskIndex,
@@ -358,7 +418,15 @@ function normalizeDelegateTasks(input: DelegateTaskArgs): NormalizedDelegateTask
   const rawTasks =
     input.tasks && input.tasks.length > 0
       ? input.tasks
-      : [{ goal: input.goal, context: input.context, mode: input.mode, role: input.role }];
+      : [
+          {
+            goal: input.goal,
+            context: input.context,
+            mode: input.mode,
+            role: input.role,
+            agent_name: input.agent_name,
+          },
+        ];
 
   return rawTasks
     .filter((task): task is DelegateTaskInput & { goal: string } => Boolean(task.goal?.trim()))
@@ -367,6 +435,7 @@ function normalizeDelegateTasks(input: DelegateTaskArgs): NormalizedDelegateTask
       ...(task.context ? { context: task.context } : {}),
       mode: normalizeMode(task.mode, defaultMode),
       role: normalizeRole(task.role, defaultRole),
+      ...(task.agent_name?.trim() ? { agentName: task.agent_name.trim() } : {}),
     }));
 }
 
@@ -379,6 +448,18 @@ function normalizeMode(
 
 function normalizeRole(value: string | undefined, fallback: SubagentRole = "leaf"): SubagentRole {
   return value === "orchestrator" || value === "leaf" ? value : fallback;
+}
+
+/**
+ * 从对象中挑出值不为 undefined 的字段,用于构造可选 opts(避免重复的
+ * `...(x !== undefined ? { x } : {})` 模式)。
+ */
+function pickDefined<T extends Record<string, unknown>>(obj: T): Partial<T> {
+  const result: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(obj)) {
+    if (value !== undefined) result[key] = value;
+  }
+  return result as Partial<T>;
 }
 
 async function mapLimit<T, R>(
