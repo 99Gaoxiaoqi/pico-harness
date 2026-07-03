@@ -13,10 +13,12 @@ import type { ProviderConfig } from "./config.js";
 import { resolveProviderProfile, type ProviderProfile } from "./profile.js";
 import { toAnthropicThinkingConfig, anthropicBudgetTokens, type ThinkingEffort } from "./thinking.js";
 import { ContextOverflowError, isContextOverflowStatus, LLMStatusError } from "./errors.js";
+import { applyAnthropicCacheControl } from "./anthropic-cache.js";
+import { logger } from "../observability/logger.js";
 
 /** Anthropic content block: 文本或工具调用 */
 type Block =
-  | { type: "text"; text: string }
+  | { type: "text"; text: string; cache_control?: unknown }
   | { type: "tool_use"; id: string; name: string; input: unknown }
   | { type: "tool_result"; tool_use_id: string; content: string };
 
@@ -132,6 +134,19 @@ export class ClaudeProvider implements LLMProvider {
     }
 
     // 3. 构建请求并发送
+    // Anthropic Prompt Cache:在 system/tools/历史前缀尾注入 cache_control 断点,
+    // 命中后 cache_read 输入单价降至约 1/10,长会话输入成本可降 ~75%(对标 hermes)。
+    // 仅当模型 profile 声明支持 prompt cache 时启用,避免不支持该特性的兼容端点报错。
+    if (this.profile.supportsPromptCache) {
+      const breakpoints = applyAnthropicCacheControl(body, true);
+      if (breakpoints > 0) {
+        logger.debug(
+          { model: this.config.model, breakpoints },
+          `[Claude] 注入 ${breakpoints} 个 prompt cache 断点`,
+        );
+      }
+    }
+
     const resp = await fetch(`${this.config.baseURL}/messages`, {
       method: "POST",
       headers: {
