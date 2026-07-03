@@ -47,6 +47,12 @@ import { CostTracker } from "../observability/tracker.js";
 import { Tracer } from "../observability/trace.js";
 import { runAgentFromCli } from "./run-agent.js";
 import { primeTokenizer } from "../context/token-counter.js";
+import { FTS5Store } from "../memory/fts5-store.js";
+
+// 进程退出时统一释放共享的 FTS5 SQLite 连接池,避免句柄泄漏(尤其 Windows)。
+;["SIGINT", "SIGTERM", "beforeExit", "exit"].forEach((evt) => {
+  process.on(evt, () => FTS5Store.closeAll());
+});
 
 function buildRegistry(workDir: string): ToolRegistry {
   const registry = new ToolRegistry({ truncateResults: false });

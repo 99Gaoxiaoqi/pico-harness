@@ -5,3 +5,12 @@
 //
 // 持久化本身的正确性由 tests/session-persistence.test.ts 显式开启(临时目录)单独覆盖。
 process.env.PICO_PERSISTENCE = "0";
+
+// FTS5Store 连接池是模块级单例,测试间若复用同一 workDir(如 /tmp)会跨用例泄漏实例。
+// 每个测试结束后清空池 + 关闭所有 SQLite 句柄,保证完全隔离(并释放 Windows 句柄)。
+import { afterEach } from "vitest";
+import { FTS5Store } from "../src/memory/fts5-store.js";
+
+afterEach(() => {
+  FTS5Store.closeAll();
+});

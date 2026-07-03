@@ -48,11 +48,58 @@ export interface SkillStats {
 
 /**
  * FTS5Store: SQLite FTS5 全文检索存储层。
- * 
+ *
  * 线程安全:better-sqlite3 默认串行化所有操作(WAL mode + NORMAL synchronous),
  * 单进程多 Session 并发写入安全。跨进程并发需额外加锁(当前不支持)。
+ *
+ * 【连接池化】同一 workDir 的多个 Session 共享同一个 FTS5Store 实例(单例 + 引用计数),
+ * 避免"每 Session new 一个 Database"导致连接数随会话数线性增长(原先 N 个 Session =
+ * N 个连接指向同一 sessions.db 文件,争抢文件锁且浪费 fd)。改造后连接数 O(workDir),
+ * 通常 O(1)。Session.close() 调 release(),引用计数归零才真正 close db。
  */
 export class FTS5Store {
+  /** workDir → 共享实例 + 引用计数 */
+  private static readonly pool = new Map<string, { store: FTS5Store; refCount: number }>();
+
+  /**
+   * 按 workDir 获取共享 FTS5Store 实例(引用计数 +1)。
+   * 同一 workDir 的所有 Session 复用同一个 SQLite 连接,连接数从 O(sessions) 降到 O(1)。
+   * 初始化失败(workDir 不可写等)返回 null,降级为纯内存模式。
+   */
+  static acquire(workDir: string): FTS5Store | null {
+    const entry = FTS5Store.pool.get(workDir);
+    if (entry) {
+      entry.refCount++;
+      return entry.store;
+    }
+    const store = new FTS5Store(workDir);
+    // 初始化失败(db 为 null)不进池,直接返回该实例(其内部操作均为空操作)
+    FTS5Store.pool.set(workDir, { store, refCount: 1 });
+    return store;
+  }
+
+  /**
+   * 释放引用(计数 -1)。归零时真正 close db 并从池移除。
+   * 幂等:重复 release 不使 refCount 变负。
+   */
+  static release(workDir: string): void {
+    const entry = FTS5Store.pool.get(workDir);
+    if (!entry) return;
+    entry.refCount = Math.max(0, entry.refCount - 1);
+    if (entry.refCount === 0) {
+      entry.store.closeInternal();
+      FTS5Store.pool.delete(workDir);
+    }
+  }
+
+  /** 关闭所有 workDir 的连接(进程退出前调用) */
+  static closeAll(): void {
+    for (const { store } of FTS5Store.pool.values()) {
+      store.closeInternal();
+    }
+    FTS5Store.pool.clear();
+  }
+
   private db: Database.Database | null = null;
   private readonly dbPath: string;
 
@@ -331,8 +378,22 @@ export class FTS5Store {
     }
   }
 
-  /** 关闭数据库连接(进程退出前调用,或测试清理) */
+  /**
+   * 关闭本实例的数据库连接。
+   *
+   * 语义:
+   * - 直接 new 的实例(测试/旧代码):关闭自己的 db 句柄。
+   * - 池化 acquire 的实例:通常应通过 FTS5Store.release(workDir) 释放引用;
+   *   直接调 close() 会强制关闭共享句柄(供测试精确控制,生产路径勿用)。
+   *
+   * 幂等:已关闭再调不报错。
+   */
   close(): void {
+    this.closeInternal();
+  }
+
+  /** 关闭数据库连接(内部实现,幂等)。 */
+  private closeInternal(): void {
     if (this.db) {
       try {
         this.db.close();
