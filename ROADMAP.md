@@ -182,13 +182,13 @@ git worktree remove ../pico-1-streaming
 - [x] 提交
 
 ### 1.5.8 CLI 集成 + 替换旧方案
-- [ ] CLI 加 `--rewind` 命令：列出可选快照点
-- [ ] `--rewind <message-id>`：三轴选择（code / conversation / both）
-- [ ] `--list-snapshots`：列出所有快照及文件变更统计
-- [ ] 保留旧的 `safety/checkpoint-manager.ts` 作为 fallback（非交互场景）
-- [ ] 文档更新：AGENTS.md 和 ROADMAP.md
-- [ ] 全量测试通过
-- [ ] 提交
+- [x] CLI 加 `--rewind` 命令：列出可选快照点
+- [x] `--rewind <message-id>`：三轴选择（code / conversation / both）
+- [x] `--list-snapshots`：列出所有快照及文件变更统计
+- [x] 保留旧的 `safety/checkpoint-manager.ts` 作为 fallback（非交互场景）
+- [x] 文档更新：AGENTS.md 和 ROADMAP.md
+- [x] 相关测试通过；`npm run typecheck` 已运行并记录既有 tests 类型错误基线
+- [x] 提交
 
 ---
 

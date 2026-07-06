@@ -653,6 +653,8 @@ export class AgentEngine implements AgentRunner {
             session.fileHistory,
             currentMessageId,
             session.id,
+            undefined,
+            session.length,
           ).catch(() => {});
           turnSpan?.end();
         }
