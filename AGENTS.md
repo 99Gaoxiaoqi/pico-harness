@@ -21,31 +21,31 @@
 - 状态外部化:把规划写在 PLAN.md,把进度写在 TODO.md,不依赖内存状态机(第 13 讲)。
 - 边做边验证:每完成一步就运行测试或编译确认,而非一次性堆砌代码。
 
+## 开发流程(进化阶段必须遵守)
+
+详见 **ROADMAP.md**——这是持久化的开发计划,记录了所有待办任务和进度。
+
+1. **测试驱动**:每完成一个功能点,先写测试再写实现(或同步写),`npm test` 全过后才提交。
+2. **小步提交**:每完成一小部分就 Git 提交一次,不要堆积。提交信息 `feat(scope): 中文描述`。
+3. **Worktree 并行**:大功能用 `git worktree add ../pico-<阶段>-<功能> -b feat/<功能>` 隔离开发。
+4. **进度同步**:每完成一个任务,立即在 ROADMAP.md 里把 `- [ ]` 改成 `- [x]`。
+
 ## 协作偏好
 
 - 通过 Git 提交信息时,遵循中文团队习惯:type 保留 `feat`/`fix`/`docs` 等 Conventional Commits 英文关键字,scope、subject 和 body 使用中文。
 
 ## 当前进度
 
-- [x] 第 01 讲:四层架构骨架搭建完毕
-- [x] 第 02 讲:Main Loop (ReAct 循环) + Schema + Provider/Registry 接口
-- [x] 第 03 讲:Two-Stage ReAct,剥离独立 Thinking 阶段 (enableThinking 开关)
-- [x] 第 04 讲:Provider 双实现 (Claude + OpenAI 兼容)
-- [x] 第 05 讲:ToolRegistry 路由分发与 read_file 工具
-- [x] 第 06 讲:极简工具集 write_file / bash
-- [x] 第 07 讲:edit_file 多级模糊匹配容错替换
-- [x] 第 08 讲:单轮只读工具并行执行 (Fork-Join)
-- [x] 第 09 讲:Reporter 解耦 + CLI / HTTP / 飞书入口
-- [x] 第 10 讲:动态 Prompt 组装,加载 AGENTS.md 与外挂 Skills
-- [x] 第 11 讲:Session 物理隔离与 WorkingMemory
-- [x] 第 12 讲:ContextCompaction 阶梯降级防 OOM
-- [x] 第 13 讲:Plan Mode 状态外部化 (PLAN.md / TODO.md)
-- [x] 第 14 讲:ErrorRecovery 错误自愈提示模板注入
-- [x] 第 15 讲:SystemReminders 死循环斩断
-- [x] 第 16 讲:Middleware 高危命令拦截与人工审批
-- [x] 第 17 讲:Subagent 任务委派与上下文隔离
-- [x] 第 18 讲:Token 成本与耗时追踪
-- [x] 第 19 讲:Tracing 决策路径复盘,导出 .claw/traces JSON
-- [x] 第 20 讲:Benchmark 自动化评估脚本
-- [x] 第 21 讲:实战串讲(上),完整 CLI 引擎文件探索与重构
-- [x] 第 22 讲:实战串讲(下),打造 AgentOps 小助手,在飞书中触发日志分析与故障修复审批
+### 课程阶段(已完成)
+
+- [x] 第 01-22 讲:全部完成,详见各讲文档
+
+### 进化阶段(进行中)
+
+> **进度跟踪在 ROADMAP.md**,新窗口请先读该文件了解当前状态。
+
+- [ ] 阶段 1:基础可用性补齐(流式输出 / Checkpoint / Diff 预览 / Permission / MCP)
+- [ ] 阶段 2:工具生态扩展(Glob / Grep / TodoList / WebSearch / Background Tasks / Hooks)
+- [ ] 阶段 3:上下文与控制流增强(MicroCompaction / Steer / undo / Goal Mode)
+- [ ] 阶段 4:多模型与多端入口(Gemini / Credential Pool / REST+WS / ACP / Docker)
+- [ ] 阶段 5:高级特性(按需迭代)
