@@ -6,7 +6,7 @@
 // 不引入重型 SDK,直接用原生 fetch,更贴合"手写翻译层"的精神。
 
 import type { LLMProvider } from "./interface.js";
-import type { Message, ToolCall, ToolDefinition } from "../schema/message.js";
+import type { Message, ToolCall, ToolDefinition, Usage } from "../schema/message.js";
 import type { ProviderConfig } from "./config.js";
 import { resolveProviderProfile, type ProviderProfile } from "./profile.js";
 import { toOpenAIReasoningEffort, type ThinkingEffort } from "./thinking.js";
@@ -167,6 +167,173 @@ export class OpenAIProvider implements LLMProvider {
       toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
       usage,
       reasoning: choice.reasoning_content ?? undefined,
+    };
+  }
+
+  /**
+   * 流式生成:与非流式 generate 行为一致,但每收到一段文本就调 onDelta。
+   * 通过 SSE (Server-Sent Events) 解析 OpenAI 的流式响应。
+   */
+  async generateStream(
+    messages: Message[],
+    availableTools: ToolDefinition[],
+    onDelta: (delta: string) => void,
+  ): Promise<Message> {
+    // 复用 generate 的消息翻译逻辑
+    const openaiMsgs: unknown[] = [];
+    for (const msg of messages) {
+      switch (msg.role) {
+        case "system":
+          openaiMsgs.push({ role: "system", content: msg.content });
+          break;
+        case "user":
+          if (msg.toolCallId) {
+            openaiMsgs.push({ role: "tool", content: msg.content, tool_call_id: msg.toolCallId });
+          } else {
+            openaiMsgs.push({ role: "user", content: msg.content });
+          }
+          break;
+        case "assistant": {
+          const ast: Record<string, unknown> = { role: "assistant" };
+          ast.content =
+            this.profile.assistantContent === "null_when_empty" ? msg.content || null : msg.content;
+          if (msg.toolCalls && msg.toolCalls.length > 0) {
+            ast.tool_calls = msg.toolCalls.map((tc) => ({
+              id: tc.id,
+              type: "function" as const,
+              function: { name: tc.name, arguments: tc.arguments },
+            }));
+          }
+          openaiMsgs.push(ast);
+          break;
+        }
+      }
+    }
+
+    const body: Record<string, unknown> = {
+      model: this.config.model,
+      messages: openaiMsgs,
+      stream: true, // 关键:启用流式
+    };
+    if (availableTools.length > 0) {
+      body.tools = availableTools.map((t) => ({
+        type: "function",
+        function: { name: t.name, description: t.description, parameters: t.inputSchema },
+      }));
+    }
+    const reasoningEffort = toOpenAIReasoningEffort(this.thinkingEffort);
+    if (reasoningEffort !== undefined) {
+      body.reasoning_effort = reasoningEffort;
+    }
+
+    const resp = await fetch(`${this.config.baseURL}/chat/completions`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${this.config.apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(120_000),
+    });
+
+    if (!resp.ok) {
+      const text = await resp.text();
+      if (isContextOverflowStatus(resp.status, text)) {
+        throw new ContextOverflowError(`OpenAI API 上下文溢出 [${resp.status}]: ${text}`);
+      }
+      throw new LLMStatusError(resp.status, `OpenAI API 流式请求失败 [${resp.status}]: ${text}`);
+    }
+
+    if (!resp.body) {
+      throw new Error("流式响应没有 body");
+    }
+
+    // 解析 SSE 流
+    let fullContent = "";
+    const toolCallAccumulator = new Map<number, { id: string; name: string; arguments: string }>();
+    let usage: Usage | undefined;
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+
+      // SSE 以 \n\n 分隔事件
+      const events = buffer.split("\n\n");
+      buffer = events.pop() ?? ""; // 最后一个可能不完整,留到下次
+
+      for (const event of events) {
+        const lines = event.split("\n");
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          const data = line.slice(6);
+          if (data === "[DONE]") continue;
+
+          try {
+            const chunk = JSON.parse(data) as {
+              choices?: { delta?: { content?: string; tool_calls?: Array<{ index: number; id?: string; function?: { name?: string; arguments?: string } }> }; finish_reason?: string }[];
+              usage?: { prompt_tokens?: number; completion_tokens?: number };
+            };
+
+            const delta = chunk.choices?.[0]?.delta;
+            if (!delta) continue;
+
+            // 文本 delta
+            if (delta.content) {
+              fullContent += delta.content;
+              onDelta(delta.content);
+            }
+
+            // 工具调用 delta(分片累积)
+            if (delta.tool_calls) {
+              for (const tc of delta.tool_calls) {
+                const existing = toolCallAccumulator.get(tc.index);
+                if (existing) {
+                  // 后续分片:追加 arguments
+                  if (tc.function?.arguments) {
+                    existing.arguments += tc.function.arguments;
+                  }
+                } else {
+                  // 第一个分片:带 id 和 name
+                  toolCallAccumulator.set(tc.index, {
+                    id: tc.id ?? "",
+                    name: tc.function?.name ?? "",
+                    arguments: tc.function?.arguments ?? "",
+                  });
+                }
+              }
+            }
+
+            // usage 在最后一个 chunk 中
+            if (chunk.usage) {
+              usage = {
+                promptTokens: chunk.usage.prompt_tokens ?? 0,
+                completionTokens: chunk.usage.completion_tokens ?? 0,
+              };
+            }
+          } catch {
+            // 跳过无法解析的行
+          }
+        }
+      }
+    }
+
+    const toolCalls: ToolCall[] = [...toolCallAccumulator.values()].map((tc) => ({
+      id: tc.id,
+      name: tc.name,
+      arguments: tc.arguments,
+    }));
+
+    return {
+      role: "assistant",
+      content: fullContent,
+      toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+      usage,
     };
   }
 }

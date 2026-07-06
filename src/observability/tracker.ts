@@ -64,4 +64,37 @@ export class CostTracker implements LLMProvider {
     }
     return resp;
   }
+
+  /** 转发流式生成（透传 onDelta，同时用 generate 的成本追踪逻辑） */
+  async generateStream(
+    messages: Message[],
+    availableTools: ToolDefinition[],
+    onDelta: (delta: string) => void,
+  ): Promise<Message> {
+    // 内部 provider 不支持流式时，降级到非流式 generate
+    if (!this.next.generateStream) {
+      return this.generate(messages, availableTools);
+    }
+
+    const start = Date.now();
+    const resp = await this.next.generateStream(messages, availableTools, onDelta);
+    const latencyMs = Date.now() - start;
+
+    if (resp.usage) {
+      const cost = estimateCost(this.modelRoute, resp.usage);
+      if (this.session) {
+        this.session.recordUsage(
+          resp.usage.promptTokens,
+          resp.usage.completionTokens,
+          cost.costCNY,
+          cost.usage,
+          cost.status,
+        );
+      }
+      console.log(
+        `[Tracker] 📊 流式API完成 | 耗时: ${latencyMs}ms | 成本: ¥${cost.costCNY.toFixed(6)}`,
+      );
+    }
+    return resp;
+  }
 }

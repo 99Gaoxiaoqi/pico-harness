@@ -15,4 +15,14 @@ export interface LLMProvider {
   isRetryableError?(error: unknown): boolean;
   /** 可选:模型名,供重试 / 计费日志打点。 */
   readonly modelName?: string;
+  /**
+   * 可选:流式生成。与非流式 generate 行为一致,但每收到一段文本就调 onDelta 回调。
+   * 如果 Provider 未实现此方法,loop.ts 自动降级到非流式 generate。
+   * @returns 最终的完整 Message(和 generate 一样,含 toolCalls + usage)
+   */
+  generateStream?(
+    messages: Message[],
+    availableTools: ToolDefinition[],
+    onDelta: (delta: string) => void,
+  ): Promise<Message>;
 }
