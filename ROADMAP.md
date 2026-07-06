@@ -64,14 +64,14 @@ git worktree remove ../pico-1-streaming
 - [ ] 测试：mock provider 返回流式数据，验证回调顺序
 - [ ] 提交
 
-### 1.2 Checkpoint（git 快照）
-- [ ] 新建 `safety/checkpoint-manager.ts`
-- [ ] 在文件变动工具（Write/Edit/Bash 含写）执行前，用 `git stash create` 创建快照
-- [ ] 每个 turn dedup（同一 turn 多次写操作只快照一次）
-- [ ] 提供 `rollback(checkpointId)` 方法
+### 1.2 Checkpoint（git 快照）✅
+- [x] 新建 `safety/checkpoint-manager.ts`
+- [x] 在文件变动工具（Write/Edit/Bash 含写）执行前，用 `git stash create` 创建快照
+- [x] 每个 turn dedup（同一 turn 多次写操作只快照一次）
+- [x] 提供 `rollback(checkpointId)` 方法
 - [ ] CLI 加 `--rollback <id>` 命令
-- [ ] 测试：写文件 → 回滚 → 确认内容恢复
-- [ ] 提交
+- [x] 测试：写文件 → 回滚 → 确认内容恢复（8 个测试全通过）
+- [x] 提交
 
 ### 1.3 Diff 预览
 - [ ] `tools/registry-impl.ts` 的 EditFileTool 返回 before/after diff
@@ -261,7 +261,7 @@ git worktree remove ../pico-1-streaming
 
 | 阶段 | 总任务数 | 完成 | 状态 |
 |------|---------|------|------|
-| 阶段 1 | 5 | 2 | 🟡 进行中 |
+| 阶段 1 | 5 | 3 | 🟡 进行中 |
 | 阶段 2 | 7 | 0 | 🔴 未开始 |
 | 阶段 3 | 7 | 0 | 🔴 未开始 |
 | 阶段 4 | 5 | 0 | 🔴 未开始 |
