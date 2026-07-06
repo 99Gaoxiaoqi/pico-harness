@@ -221,11 +221,11 @@ git worktree remove ../pico-1-streaming
 - [ ] 测试 + 提交
 
 ### 2.5 Background Tasks（bash 后台化）
-- [ ] 新建 `tools/background-manager.ts`
-- [ ] BashTool 支持 `background: true` 参数
-- [ ] 后台任务有唯一 ID + stdout/stderr 环形缓冲
-- [ ] 新增 TaskList / TaskOutput / TaskStop 工具
-- [ ] 测试 + 提交
+- [x] 新建 `tools/background-manager.ts`
+- [x] BashTool 支持 `background: true` 参数
+- [x] 后台任务有唯一 ID + stdout/stderr 环形缓冲
+- [x] 新增 TaskList / TaskOutput / TaskStop 工具
+- [x] 测试 + 提交
 
 ### 2.6 PreToolUse / PostToolUse Hooks
 - [ ] `tools/registry.ts` 加 `PreToolUseHook` 和 `PostToolUseHook` 接口
