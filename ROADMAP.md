@@ -162,15 +162,16 @@ git worktree remove ../pico-1-streaming
 - [x] 测试：端到端——write_file/edit_file → 检查备份自动创建（5 个 e2e 测试通过）
 - [x] 提交
 
-### 1.5.6 对话 undo
-- [ ] Session 新增 `undo(count)` 方法
-- [ ] 从 history 末尾向前删，跳过 injection，遇到 compaction 边界停止
-- [ ] 截断到第 count 个 user prompt 之前
-- [ ] 清空 deferredMessages / pendingToolResultIds
-- [ ] JSONL 持久化：追加 undo 记录（不删旧记录，event sourcing 模式）
-- [ ] Session 新增 `rewindTo(messageIndex)`：截断到指定位置
-- [ ] 测试：对话 5 轮 → undo(2) → 验证只剩 3 轮；undo 到 compaction 边界停止
-- [ ] 提交
+### 1.5.6 对话 undo ✅
+- [x] Session 新增 `undo(count)` 方法
+- [x] 从 history 末尾向前删，跳过 injection（system 消息）
+- [ ] 遇到 compaction 边界停止（后续补）
+- [x] 截断到第 count 个 user prompt 之前
+- [ ] 清空 deferredMessages / pendingToolResultIds（字段预留到 3.4）
+- [ ] JSONL 持久化：追加 undo 记录（后续补）
+- [x] Session 新增 `rewindTo(messageIndex)`：截断到指定位
+- [x] 测试：对话 5 轮 → undo(2) → 验证只剩 3 轮；undo 跳过 injection（6 个测试通过）
+- [x] 提交
 
 ### 1.5.7 三轴选择
 - [ ] `rewindCode(messageId)`：只回滚文件，不碰对话

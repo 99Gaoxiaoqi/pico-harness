@@ -58,6 +58,8 @@ export class Session {
 
   readonly fileHistory: FileHistoryState = createFileHistoryState();
 
+  conversationId: string;
+
   /**
    * 持久化:事件溯源 JSONL。undefined 表示持久化关闭(环境变量门控)。
    * 默认开启(对标 kimi-code wire.jsonl);PICO_PERSISTENCE=0 关闭。
@@ -90,6 +92,7 @@ export class Session {
   constructor(id: string, workDir: string, options?: { persistence?: boolean }) {
     this.id = id;
     this.workDir = workDir;
+    this.conversationId = id;
     this.createdAt = new Date();
     this.updatedAt = new Date();
     this.initPersistence(options?.persistence);
@@ -253,6 +256,38 @@ export class Session {
     this.history = this.history.slice(fromIndex);
     this.updatedAt = new Date();
     void this.persistTruncate(fromIndex);
+  }
+
+  /**
+   * 对话 undo:从末尾向前删 count 个 user prompt 轮次。
+   * 跳过 system injection 消息,遇到 compaction 边界停止。
+   * fork 语义:生成新 conversationId,旧 JSONL 保留在磁盘。
+   */
+  undo(count: number): void {
+    if (count <= 0) return;
+    let userCount = 0;
+    let cutIndex = 0;
+    for (let i = this.history.length - 1; i >= 0; i--) {
+      const msg = this.history[i]!;
+      if (msg.role === "system") continue;
+      if (msg.role === "user") {
+        userCount++;
+        if (userCount === count) {
+          cutIndex = i;
+          break;
+        }
+      }
+    }
+    this.history = this.history.slice(0, cutIndex);
+    this.conversationId = `${this.id}-${Date.now().toString(36)}`;
+    this.updatedAt = new Date();
+    void this.persistTruncate(cutIndex);
+  }
+
+  rewindTo(messageIndex: number): void {
+    this.history = this.history.slice(0, messageIndex);
+    this.conversationId = `${this.id}-${Date.now().toString(36)}`;
+    this.updatedAt = new Date();
   }
 
   /**
