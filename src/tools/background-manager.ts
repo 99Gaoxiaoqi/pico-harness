@@ -25,6 +25,8 @@ export interface BackgroundTaskOutput {
 
 export interface BackgroundManagerOptions {
   maxOutputChars?: number;
+  stopTimeoutMs?: number;
+  maxCompletedTasks?: number;
 }
 
 interface ManagedTask {
@@ -37,14 +39,20 @@ interface ManagedTask {
 }
 
 const DEFAULT_MAX_OUTPUT_CHARS = 64_000;
+const DEFAULT_STOP_TIMEOUT_MS = 1_000;
+const DEFAULT_MAX_COMPLETED_TASKS = 100;
 
 export class BackgroundManager {
   private readonly tasks = new Map<string, ManagedTask>();
   private readonly maxOutputChars: number;
+  private readonly stopTimeoutMs: number;
+  private readonly maxCompletedTasks: number;
   private nextId = 1;
 
   constructor(options: BackgroundManagerOptions = {}) {
     this.maxOutputChars = options.maxOutputChars ?? DEFAULT_MAX_OUTPUT_CHARS;
+    this.stopTimeoutMs = options.stopTimeoutMs ?? DEFAULT_STOP_TIMEOUT_MS;
+    this.maxCompletedTasks = options.maxCompletedTasks ?? DEFAULT_MAX_COMPLETED_TASKS;
   }
 
   start(command: string, cwd: string): BackgroundTaskRecord {
@@ -52,6 +60,7 @@ export class BackgroundManager {
     const shell = resolveShell();
     const child = spawn(shell, shellArgs(shell, command), {
       cwd,
+      detached: !isWindows,
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -102,6 +111,7 @@ export class BackgroundManager {
       record.exitCode = code;
       record.signal = signal;
       record.endedAt = new Date();
+      this.pruneCompletedTasks();
       resolveClose({ ...record });
     });
 
@@ -129,8 +139,13 @@ export class BackgroundManager {
     }
 
     task.stopping = true;
-    task.child.kill("SIGTERM");
-    return task.closePromise;
+    this.killTask(task, "SIGTERM");
+    return this.withTimeout(task.closePromise, this.stopTimeoutMs, async () => {
+      this.killTask(task, "SIGKILL");
+      return this.withTimeout(task.closePromise, this.stopTimeoutMs, () =>
+        this.forceStopRecord(task, "SIGKILL"),
+      );
+    });
   }
 
   private createTaskId(): string {
@@ -143,6 +158,68 @@ export class BackgroundManager {
       throw new Error(`未知后台任务: ${taskId}`);
     }
     return task;
+  }
+
+  private killTask(task: ManagedTask, signal: NodeJS.Signals): void {
+    const pid = task.child.pid;
+    if (!pid) return;
+    try {
+      if (isWindows) {
+        task.child.kill(signal);
+      } else {
+        process.kill(-pid, signal);
+      }
+    } catch {
+      try {
+        task.child.kill(signal);
+      } catch {
+      }
+    }
+  }
+
+  private forceStopRecord(task: ManagedTask, signal: NodeJS.Signals): BackgroundTaskRecord {
+    if (task.record.status === "running") {
+      task.record.status = "stopped";
+      task.record.signal = signal;
+      task.record.endedAt = new Date();
+      this.pruneCompletedTasks();
+    }
+    return { ...task.record };
+  }
+
+  private async withTimeout(
+    promise: Promise<BackgroundTaskRecord>,
+    timeoutMs: number,
+    onTimeout: () => Promise<BackgroundTaskRecord> | BackgroundTaskRecord,
+  ): Promise<BackgroundTaskRecord> {
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise<BackgroundTaskRecord>((resolve) => {
+          timer = setTimeout(() => {
+            Promise.resolve(onTimeout()).then(resolve);
+          }, timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  private pruneCompletedTasks(): void {
+    const completed = [...this.tasks.values()]
+      .filter((task) => task.record.status !== "running")
+      .sort(
+        (a, b) =>
+          (a.record.endedAt?.getTime() ?? a.record.startedAt.getTime()) -
+          (b.record.endedAt?.getTime() ?? b.record.startedAt.getTime()),
+      );
+
+    while (completed.length > this.maxCompletedTasks) {
+      const oldest = completed.shift();
+      if (oldest) this.tasks.delete(oldest.record.taskId);
+    }
   }
 }
 

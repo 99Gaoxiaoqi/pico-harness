@@ -421,6 +421,7 @@ export class BashTool implements BaseTool {
   constructor(
     private readonly workDir: string,
     private readonly backgroundManager = new BackgroundManager(),
+    private readonly options: { allowBackground?: boolean } = {},
   ) {}
 
   name(): string {
@@ -467,6 +468,9 @@ export class BashTool implements BaseTool {
     }
 
     if (background) {
+      if (this.options.allowBackground === false) {
+        throw new Error("当前 bash 工具不允许后台执行");
+      }
       const task = this.backgroundManager.start(command, this.workDir);
       return JSON.stringify({
         taskId: task.taskId,

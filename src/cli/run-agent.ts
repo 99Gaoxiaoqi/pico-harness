@@ -40,6 +40,9 @@ import {
 } from "../approval/manager.js";
 import type { MiddlewareFunc } from "../tools/registry.js";
 import { McpConnectionManager } from "../mcp/manager.js";
+import { BackgroundManager } from "../tools/background-manager.js";
+
+const cliBackgroundManager = new BackgroundManager();
 
 export interface RunAgentCliOptions {
   prompt: string;
@@ -170,8 +173,14 @@ export async function runAgentFromCli(
   }
 }
 
-function buildRegistry(workDir: string): ToolRegistry {
-  return buildDefaultToolRegistry(workDir, { truncateResults: false });
+function buildRegistry(
+  workDir: string,
+  backgroundManager: BackgroundManager = cliBackgroundManager,
+): ToolRegistry {
+  return buildDefaultToolRegistry(workDir, {
+    truncateResults: false,
+    backgroundManager,
+  });
 }
 
 function createTrackedProviderWithFallback(
@@ -237,7 +246,7 @@ class CostTrackedModelFallbackProvider implements LLMProvider {
 function buildReadOnlyRegistry(workDir: string): ToolRegistry {
   const registry = new ToolRegistry({ truncateResults: false });
   registry.register(new ReadFileTool(workDir));
-  registry.register(new BashTool(workDir));
+  registry.register(new BashTool(workDir, undefined, { allowBackground: false }));
   registry.register(new SkillViewTool(new SkillLoader(workDir)));
   return registry;
 }
