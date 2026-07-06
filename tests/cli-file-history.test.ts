@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir, tmpdir } from "node:os";
-import { Session } from "../src/engine/session.js";
+import { Session, SessionManager } from "../src/engine/session.js";
 import {
   fileHistoryMakeSnapshot,
   fileHistoryTrackEdit,
@@ -154,5 +154,22 @@ describe("CLI FileHistory 1.5.8", () => {
 
     expect(existsSync(filePath)).toBe(false);
     expect(session.length).toBe(2);
+  });
+
+  it("--list-snapshots 可在新进程式 session 恢复后读取指定 session 快照", async () => {
+    await createSnapshot("turn-1");
+    session.close();
+
+    const recovered = await new SessionManager().getOrCreate(session.id, workDir);
+    const summaries = listFileHistorySnapshotSummaries(recovered);
+
+    expect(summaries).toEqual([
+      expect.objectContaining({
+        messageId: "turn-1",
+        trackedFileCount: 1,
+        backedUpFileCount: 1,
+      }),
+    ]);
+    recovered.close();
   });
 });
