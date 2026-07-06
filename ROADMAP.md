@@ -81,26 +81,26 @@ git worktree remove ../pico-1-streaming
 - [ ] 测试：edit_file 触发审批 → 卡片含 diff
 - [ ] 提交
 
-### 1.4 细粒度 Permission 系统
-- [ ] 重写 `approval/manager.ts` 为 Policy 链模式
-- [ ] Policy 1：高危命令检测（保留现有正则）
-- [ ] Policy 2：敏感文件保护（`.env`、`id_rsa`、`credentials`、`.aws/credentials`）
-- [ ] Policy 3：Git 控制目录保护（`.git/` 写入需审批）
-- [ ] Policy 4：Plan Mode 守卫（Plan 模式下非计划文件写操作拒绝）
-- [ ] "approve for session" 记忆（同类操作不再询问）
-- [ ] 测试：每种 policy 的 allow/deny/ask 场景
-- [ ] 提交
+### 1.4 细粒度 Permission 系统 ✅
+- [x] 重写 `approval/manager.ts` 为 Policy 链模式
+- [x] Policy 1：高危命令检测（保留现有正则）
+- [x] Policy 2：敏感文件保护（`.env`、`id_rsa`、`credentials`、`.aws/credentials`）
+- [x] Policy 3：Git 控制目录保护（`.git/` 写入需审批）
+- [x] Policy 4：Plan Mode 守卫（Plan 模式下非计划文件写操作拒绝）
+- [x] "approve for session" 记忆（同类操作不再询问）
+- [x] 测试：每种 policy 的 allow/deny/ask 场景（40 个测试全通过）
+- [x] 提交
 
-### 1.5 MCP 客户端
-- [ ] 新建 `mcp/` 目录
-- [ ] `mcp/client.ts`：stdio transport 连接 MCP server
-- [ ] `mcp/client.ts`：http/SSE transport
-- [ ] MCP server 工具自动注册到 ToolRegistry
-- [ ] 工具名限定（`mcp__<server>__<tool>`）防冲突
-- [ ] MCP server 配置文件（`.claw/mcp.json`）
-- [ ] CLI 加 `--mcp-config <path>` 参数
-- [ ] 测试：mock MCP server，验证工具注册和调用
-- [ ] 提交
+### 1.5 MCP 客户端 ✅
+- [x] 新建 `mcp/` 目录
+- [x] `mcp/stdio-client.ts`：stdio transport 连接 MCP server
+- [x] `mcp/http-client.ts`：http/SSE transport
+- [x] MCP server 工具自动注册到 ToolRegistry
+- [x] 工具名限定（`mcp__<server>__<tool>`）防冲突
+- [x] MCP server 配置文件（`mcp.json.example`）
+- [x] CLI 加 `--mcp-config <path>` 参数
+- [x] 测试：mock MCP server，验证工具注册和调用（22 个测试全通过）
+- [x] 提交
 
 ---
 
@@ -261,7 +261,7 @@ git worktree remove ../pico-1-streaming
 
 | 阶段 | 总任务数 | 完成 | 状态 |
 |------|---------|------|------|
-| 阶段 1 | 5 | 0 | 🔴 未开始 |
+| 阶段 1 | 5 | 2 | 🟡 进行中 |
 | 阶段 2 | 7 | 0 | 🔴 未开始 |
 | 阶段 3 | 7 | 0 | 🔴 未开始 |
 | 阶段 4 | 5 | 0 | 🔴 未开始 |
