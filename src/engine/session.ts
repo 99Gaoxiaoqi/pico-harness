@@ -278,16 +278,19 @@ export class Session {
         }
       }
     }
+    if (userCount === 0) return;
     this.history = this.history.slice(0, cutIndex);
     this.conversationId = `${this.id}-${Date.now().toString(36)}`;
     this.updatedAt = new Date();
-    void this.persistTruncate(cutIndex);
+    void this.persistUndoEvent(userCount);
   }
 
   rewindTo(messageIndex: number): void {
+    const removedUserCount = this.countUserPrompts(this.history.slice(messageIndex));
     this.history = this.history.slice(0, messageIndex);
     this.conversationId = `${this.id}-${Date.now().toString(36)}`;
     this.updatedAt = new Date();
+    if (removedUserCount > 0) void this.persistUndoEvent(removedUserCount);
   }
 
   async rewindCode(messageId: string): Promise<void> {
@@ -321,6 +324,21 @@ export class Session {
     this.store.appendTruncate(seq, fromIndex).catch((err) =>
       logger.warn({ seq }, `[session] truncate 落盘失败: ${String(err)}`),
     );
+  }
+
+  private async persistUndoEvent(count: number): Promise<void> {
+    if (!this.store) return;
+    const pending = this.pendingWrites;
+    this.pendingWrites = [];
+    await Promise.all(pending);
+    const seq = this.nextSeq++;
+    this.store.appendUndoEvent(seq, count).catch((err) =>
+      logger.warn({ seq }, `[session] undo 落盘失败: ${String(err)}`),
+    );
+  }
+
+  private countUserPrompts(messages: Message[]): number {
+    return messages.reduce((count, message) => count + (message.role === "user" ? 1 : 0), 0);
   }
 
   /**
