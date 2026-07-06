@@ -12,7 +12,8 @@
 
 import { parseArgs } from "node:util";
 import { createServer } from "node:http";
-import { join } from "node:path";
+import { mkdir, realpath } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import { AgentEngine } from "../engine/loop.js";
 import { globalSessionManager } from "../engine/session.js";
 import { Compactor } from "../context/compactor.js";
@@ -47,6 +48,14 @@ import { createToolResultObservationProcessor } from "../tools/tool-result-obser
 import { CostTracker } from "../observability/tracker.js";
 import { Tracer } from "../observability/trace.js";
 import { runAgentFromCli } from "./run-agent.js";
+import {
+  assertFileHistoryCliFlags,
+  defaultCliSessionId,
+  formatFileHistorySnapshots,
+  listFileHistorySnapshotSummaries,
+  parseRewindMode,
+  rewindFileHistoryFromCli,
+} from "./file-history.js";
 import { primeTokenizer } from "../context/token-counter.js";
 import { FTS5Store } from "../memory/fts5-store.js";
 
@@ -268,6 +277,9 @@ async function main() {
       port: { type: "string", default: "3000" },
       feishu: { type: "boolean", default: false },
       "mcp-config": { type: "string" },
+      "list-snapshots": { type: "boolean", default: false },
+      rewind: { type: "boolean", default: false },
+      "rewind-mode": { type: "string", default: "both" },
     },
     allowPositionals: true,
   });
@@ -279,6 +291,30 @@ async function main() {
   const enableThinking = values.thinking !== "false";
   const planMode = values.plan;
   const traceEnabled = values.trace;
+
+  assertFileHistoryCliFlags({
+    listSnapshots: values["list-snapshots"],
+    rewind: values.rewind,
+  });
+
+  if (values["list-snapshots"] || values.rewind) {
+    const workDir = await resolveCliWorkDir(values.dir);
+    const sessionId = values.session ?? defaultCliSessionId(workDir);
+    const session = await globalSessionManager.getOrCreate(sessionId, workDir);
+
+    if (values["list-snapshots"]) {
+      console.log(formatFileHistorySnapshots(session.id, listFileHistorySnapshotSummaries(session)));
+      return;
+    }
+
+    const result = await rewindFileHistoryFromCli(
+      session,
+      positionals[0],
+      parseRewindMode(values["rewind-mode"]),
+    );
+    console.log(result.output);
+    return;
+  }
 
   console.log("🚀 欢迎来到 pico-harness 引擎启动序列");
   console.log(
@@ -346,6 +382,12 @@ async function main() {
     trace: traceEnabled,
     ...(values["mcp-config"] ? { mcpConfigPath: values["mcp-config"] } : {}),
   });
+}
+
+async function resolveCliWorkDir(dir: string | undefined): Promise<string> {
+  const target = resolve(dir ?? process.cwd());
+  await mkdir(target, { recursive: true });
+  return realpath(target);
 }
 
 main().catch((err) => {

@@ -124,7 +124,7 @@ git worktree remove ../pico-1-streaming
 
 ### 1.5.2 写前备份（trackEdit）✅
 - [x] `fileHistoryTrackEdit(state, filePath, messageId)` 函数
-- [ ] 在 EditTool/WriteTool 执行**前**调用，保存修改前的原始内容（→ 1.5.5）
+- [x] 在 EditTool/WriteTool 执行**前**调用，保存修改前的原始内容（已由 1.5.5 集成）
 - [x] 去重：同一文件在同一轮已跟踪则跳过（不覆盖 v1 备份）
 - [x] 文件不存在时标记 `backupFileName: null`
 - [x] 三阶段设计：Phase 1 读状态 → Phase 2 async 备份 → Phase 3 提交状态
@@ -133,7 +133,7 @@ git worktree remove ../pico-1-streaming
 
 ### 1.5.3 每轮快照（makeSnapshot）✅
 - [x] `fileHistoryMakeSnapshot(state, messageId)` 函数
-- [ ] 每个用户消息结束时调用（→ 1.5.5）
+- [x] 每个用户消息结束时调用（已由 1.5.5 集成）
 - [x] 遍历所有 trackedFiles，用 `stat` 的 mtime+size 判断是否变化
 - [x] 未变 → 复用旧备份（不做 copyFile）
 - [x] 变了 → createBackup 新版本
@@ -156,7 +156,7 @@ git worktree remove ../pico-1-streaming
 ### 1.5.5 集成到工具系统 ✅
 - [x] EditFileTool.execute 前调 `fileHistoryTrackEdit`（通过 preWriteHook）
 - [x] WriteFileTool.execute 前调 `fileHistoryTrackEdit`（通过 preWriteHook）
-- [x] BashTool：检测 `>` 重定向时备份目标文件（后续补）
+- [x] BashTool：检测 `>` 重定向时备份目标文件
 - [x] loop.ts 每轮结束时调 `fileHistoryMakeSnapshot`
 - [x] Session 构造时初始化 FileHistoryState
 - [x] 测试：端到端——write_file/edit_file → 检查备份自动创建（5 个 e2e 测试通过）
@@ -167,7 +167,7 @@ git worktree remove ../pico-1-streaming
 - [x] 从 history 末尾向前删，跳过 injection（system 消息）
 - [x] 遇到 compaction 边界停止
 - [x] 截断到第 count 个 user prompt 之前
-- [ ] 清空 deferredMessages / pendingToolResultIds（字段预留到 3.4）
+- [ ] 清空 deferredMessages / pendingToolResultIds（字段预留到 3.4，不在阶段 1.5 实现）
 - [x] JSONL 持久化：追加 undo 记录
 - [x] Session 新增 `rewindTo(messageIndex)`：截断到指定位
 - [x] 测试：对话 5 轮 → undo(2) → 验证只剩 3 轮；undo 跳过 injection（6 个测试通过）
@@ -182,13 +182,13 @@ git worktree remove ../pico-1-streaming
 - [x] 提交
 
 ### 1.5.8 CLI 集成 + 替换旧方案
-- [ ] CLI 加 `--rewind` 命令：列出可选快照点
-- [ ] `--rewind <message-id>`：三轴选择（code / conversation / both）
-- [ ] `--list-snapshots`：列出所有快照及文件变更统计
-- [ ] 保留旧的 `safety/checkpoint-manager.ts` 作为 fallback（非交互场景）
-- [ ] 文档更新：AGENTS.md 和 ROADMAP.md
-- [ ] 全量测试通过
-- [ ] 提交
+- [x] CLI 加 `--rewind` 命令：列出可选快照点
+- [x] `--rewind <message-id>`：三轴选择（code / conversation / both）
+- [x] `--list-snapshots`：列出所有快照及文件变更统计
+- [x] 保留旧的 `safety/checkpoint-manager.ts` 作为 fallback（非交互场景）
+- [x] 文档更新：AGENTS.md 和 ROADMAP.md
+- [x] 相关测试通过；`npm run typecheck` 已运行并记录既有 tests 类型错误基线
+- [x] 提交
 
 ---
 
