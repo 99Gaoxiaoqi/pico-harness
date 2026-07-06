@@ -6,6 +6,14 @@ import { Session } from "../../src/engine/session.js";
 import { SessionStore } from "../../src/engine/session-store.js";
 import { fileHistoryTrackEdit, fileHistoryMakeSnapshot } from "../../src/safety/file-history.js";
 
+async function flushPersistence(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 80));
+}
+
+function sessionJsonlPath(workDir: string, id: string): string {
+  return join(workDir, ".claw", "sessions", `${id}.jsonl`);
+}
+
 describe("SessionStore 1.5.6 undo event sourcing", () => {
   let workDir: string;
 
@@ -108,6 +116,36 @@ describe("FileHistory 1.5.6 对话 undo", () => {
     session.undo(1);
 
     expect(session.conversationId).not.toBe(originalConvId);
+  });
+
+  it("undo 后追加 undo 事件且保留旧 message 记录", async () => {
+    const persisted = new Session("undo-persist", workDir, { persistence: true });
+    persisted.append({ role: "user", content: "u1" }, { role: "assistant", content: "a1" });
+    persisted.append({ role: "user", content: "u2" }, { role: "assistant", content: "a2" });
+    await flushPersistence();
+
+    persisted.undo(1);
+    await flushPersistence();
+
+    const lines = readFileSync(sessionJsonlPath(workDir, "undo-persist"), "utf8").trim().split("\n");
+    const records = lines.map((line) => JSON.parse(line) as { type: string; count?: number });
+    expect(records.filter((r) => r.type === "message")).toHaveLength(4);
+    expect(records.at(-1)).toMatchObject({ type: "undo", count: 1 });
+  });
+
+  it("rewindTo 后按移除的 user 轮次数追加 undo 事件", async () => {
+    const persisted = new Session("rewind-persist", workDir, { persistence: true });
+    persisted.append({ role: "user", content: "u1" }, { role: "assistant", content: "a1" });
+    persisted.append({ role: "user", content: "u2" }, { role: "assistant", content: "a2" });
+    await flushPersistence();
+
+    persisted.rewindTo(2);
+    await flushPersistence();
+
+    const lines = readFileSync(sessionJsonlPath(workDir, "rewind-persist"), "utf8").trim().split("\n");
+    const records = lines.map((line) => JSON.parse(line) as { type: string; count?: number });
+    expect(records.filter((r) => r.type === "message")).toHaveLength(4);
+    expect(records.at(-1)).toMatchObject({ type: "undo", count: 1 });
   });
 });
 
