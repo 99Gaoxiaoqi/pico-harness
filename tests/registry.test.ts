@@ -356,6 +356,19 @@ describe("BashTool", () => {
     expect(parsed.status).toBe("running");
     expect(backgroundManager.list().map((task) => task.taskId)).toContain(parsed.taskId);
   });
+
+  it("可在只读场景禁用 background=true", async () => {
+    const tool = new BashTool(workDir, backgroundManager, { allowBackground: false });
+
+    await expect(
+      tool.execute(
+        JSON.stringify({
+          command: "node -e \"setTimeout(() => {}, 1000)\"",
+          background: true,
+        }),
+      ),
+    ).rejects.toThrow("不允许后台执行");
+  });
 });
 
 describe("EditFileTool 多级模糊匹配", () => {

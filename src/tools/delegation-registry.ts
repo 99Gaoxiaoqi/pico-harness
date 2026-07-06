@@ -32,7 +32,7 @@ const TOOL_CONSTRUCTORS: Record<string, ToolCtor> = {
   read_file: (wd) => new ReadFileTool(wd),
   write_file: (wd) => new WriteFileTool(wd),
   edit_file: (wd) => new EditFileTool(wd),
-  bash: (wd) => new BashTool(wd),
+  bash: (wd) => new BashTool(wd, undefined, { allowBackground: false }),
   skill_view: (wd) => new SkillViewTool(new SkillLoader(wd)),
 };
 
@@ -87,7 +87,7 @@ function buildModeRegistry(
   registry.register(new ReadFileTool(config.workDir));
   registry.register(new SkillViewTool(new SkillLoader(config.workDir)));
 
-  const bash = new BashTool(config.workDir);
+  const bash = new BashTool(config.workDir, undefined, { allowBackground: false });
   if (request.mode === "explore") {
     (bash as BashTool & { readOnly?: boolean }).readOnly = true;
   }

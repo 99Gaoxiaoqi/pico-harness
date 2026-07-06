@@ -76,6 +76,23 @@ describe("BackgroundManager", () => {
     expect(stopped.endedAt).toBeInstanceOf(Date);
   });
 
+  it("stop 对忽略 SIGTERM 的任务有超时兜底,不会永久挂起", async () => {
+    manager = new BackgroundManager({ maxOutputChars: 80, stopTimeoutMs: 100 });
+    const started = manager.start(
+      "node -e \"process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)\"",
+      workDir,
+    );
+    const startedAt = Date.now();
+
+    const stopped = await manager.stop(started.taskId);
+
+    expect(Date.now() - startedAt).toBeLessThan(1000);
+    expect(["stopped", "failed"]).toContain(stopped.status);
+    expect(manager.list().find((task) => task.taskId === started.taskId)?.status).not.toBe(
+      "running",
+    );
+  });
+
   it("未知 taskId 会返回明确错误", async () => {
     expect(() => manager.output("missing")).toThrow(/未知后台任务/);
     await expect(manager.stop("missing")).rejects.toThrow(/未知后台任务/);
@@ -102,5 +119,21 @@ describe("BackgroundManager", () => {
     await waitFor(() => manager.list()[0]?.status === "exited");
 
     expect(manager.output(started.taskId, 3).stdout).toBe("def");
+  });
+
+  it("限制已完成任务数量,避免记录无限增长", async () => {
+    manager = new BackgroundManager({ maxOutputChars: 80, maxCompletedTasks: 2 });
+    const first = manager.start("printf 'one'", workDir);
+    const second = manager.start("printf 'two'", workDir);
+    const third = manager.start("printf 'three'", workDir);
+
+    await waitFor(
+      () =>
+        manager.list().some((task) => task.taskId === third.taskId && task.status === "exited"),
+    );
+
+    const tasks = manager.list();
+    expect(tasks.map((task) => task.taskId)).not.toContain(first.taskId);
+    expect(tasks.map((task) => task.taskId)).toEqual([second.taskId, third.taskId]);
   });
 });
