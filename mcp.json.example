@@ -1,0 +1,31 @@
+{
+  "mcpServers": {
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "transport": "stdio",
+      "env": { "GITHUB_TOKEN": "your-token" }
+    },
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/allowed/dir"],
+      "transport": "stdio"
+    },
+    "remote-api": {
+      "url": "https://mcp.example.com/sse",
+      "transport": "sse",
+      "headers": { "Authorization": "Bearer your-token" }
+    },
+    "http-api": {
+      "url": "https://mcp.example.com/mcp",
+      "transport": "http",
+      "headers": { "Authorization": "Bearer your-token" }
+    },
+    "disabled-server": {
+      "command": "npx",
+      "args": ["-y", "@some/unused-server"],
+      "transport": "stdio",
+      "enabled": false
+    }
+  }
+}

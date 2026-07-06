@@ -41,6 +41,7 @@ import {
   type ApprovalNotifier,
 } from "../approval/manager.js";
 import type { MiddlewareFunc } from "../tools/registry.js";
+import { McpConnectionManager } from "../mcp/manager.js";
 
 export interface RunAgentCliOptions {
   prompt: string;
@@ -55,6 +56,8 @@ export interface RunAgentCliOptions {
   thinkingEffort?: ThinkingEffort;
   planMode?: boolean;
   trace?: boolean;
+  /** MCP 配置文件路径(--mcp-config)。提供则启动时连接所有 MCP server 并注册工具 */
+  mcpConfigPath?: string;
 }
 
 export interface RunAgentUsage {
@@ -135,21 +138,38 @@ export async function runAgentFromCli(
 
   registry.use(buildApprovalMiddleware(dependencies.approvalNotifier ?? terminalNotifier));
   registerDelegationTools(registry, engine, workDir, await loadProfiles(workDir));
-  session.append({ role: "user", content: prompt });
 
-  const messages = await engine.run(session);
-  const result: RunAgentCliResult = {
-    sessionId: session.id,
-    workDir,
-    finalMessage: findFinalMessage(messages),
-    usage: snapshotUsage(session),
-    messages,
-    ...(options.trace === true ? { tracePath: await findTracePath(workDir, session.id) } : {}),
-  };
+  // MCP 服务器:加载配置 → 并行连接 → 自动注册工具到 registry。
+  // per-server 失败隔离,一个 server 挂了不影响其他。
+  const mcpConfigPath = options.mcpConfigPath;
+  const mcpManager = mcpConfigPath ? new McpConnectionManager(registry) : undefined;
+  if (mcpManager && mcpConfigPath) {
+    await mcpManager.loadConfig(mcpConfigPath);
+    await mcpManager.connectAll();
+  }
 
-  await writeRunSummary(dependencies.write, result);
+  try {
+    session.append({ role: "user", content: prompt });
 
-  return result;
+    const messages = await engine.run(session);
+    const result: RunAgentCliResult = {
+      sessionId: session.id,
+      workDir,
+      finalMessage: findFinalMessage(messages),
+      usage: snapshotUsage(session),
+      messages,
+      ...(options.trace === true ? { tracePath: await findTracePath(workDir, session.id) } : {}),
+    };
+
+    await writeRunSummary(dependencies.write, result);
+
+    return result;
+  } finally {
+    // 进程退出前优雅关闭所有 MCP 连接(杀子进程/关 HTTP 连接)
+    if (mcpManager) {
+      await mcpManager.closeAll();
+    }
+  }
 }
 
 function buildRegistry(workDir: string): ToolRegistry {

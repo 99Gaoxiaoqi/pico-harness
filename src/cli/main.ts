@@ -6,6 +6,7 @@
 //   指定目录:tsx --env-file=.env src/cli/main.ts --dir ./workspace --prompt "探索并修复问题"
 //   Trace 模式:tsx --env-file=.env src/cli/main.ts --trace "你的任务"
 //   Plan 模式:tsx --env-file=.env src/cli/main.ts --plan "搭建一个极简 Web Server 项目"
+//   MCP 模式:tsx --env-file=.env src/cli/main.ts --mcp-config .claw/mcp.json "用 GitHub 工具列出我的仓库"
 //   HTTP 模式:tsx --env-file=.env src/cli/main.ts --serve --port 3000
 //             然后:curl -X POST localhost:3000/ask -H 'Content-Type: application/json' -d '{"prompt":"..."}'
 
@@ -266,6 +267,7 @@ async function main() {
       serve: { type: "boolean", default: false },
       port: { type: "string", default: "3000" },
       feishu: { type: "boolean", default: false },
+      "mcp-config": { type: "string" },
     },
     allowPositionals: true,
   });
@@ -342,6 +344,7 @@ async function main() {
     thinkingEffort,
     planMode,
     trace: traceEnabled,
+    ...(values["mcp-config"] ? { mcpConfigPath: values["mcp-config"] } : {}),
   });
 }
 
