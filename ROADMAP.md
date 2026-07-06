@@ -153,14 +153,14 @@ git worktree remove ../pico-1-streaming
 - [x] 测试：改 3 个文件 → 回滚 → 验证全部恢复；新建文件回滚后验证删除（5 个测试通过）
 - [x] 提交
 
-### 1.5.5 集成到工具系统
-- [ ] EditFileTool.execute 前调 `fileHistoryTrackEdit`
-- [ ] WriteFileTool.execute 前调 `fileHistoryTrackEdit`
-- [ ] BashTool：检测 `>` 重定向时备份目标文件
-- [ ] loop.ts 每轮结束时调 `fileHistoryMakeSnapshot`
-- [ ] Session 构造时初始化 FileHistoryState
-- [ ] 测试：端到端——Agent 调 edit_file → 检查备份自动创建
-- [ ] 提交
+### 1.5.5 集成到工具系统 ✅
+- [x] EditFileTool.execute 前调 `fileHistoryTrackEdit`（通过 preWriteHook）
+- [x] WriteFileTool.execute 前调 `fileHistoryTrackEdit`（通过 preWriteHook）
+- [ ] BashTool：检测 `>` 重定向时备份目标文件（后续补）
+- [x] loop.ts 每轮结束时调 `fileHistoryMakeSnapshot`
+- [x] Session 构造时初始化 FileHistoryState
+- [x] 测试：端到端——write_file/edit_file → 检查备份自动创建（5 个 e2e 测试通过）
+- [x] 提交
 
 ### 1.5.6 对话 undo
 - [ ] Session 新增 `undo(count)` 方法

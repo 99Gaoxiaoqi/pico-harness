@@ -51,10 +51,15 @@ export class ToolRegistry implements Registry {
   /** 第 16 讲:全局挂载的安全拦截中间件链 */
   private readonly requestMiddlewares: RequestMiddleware[] = [];
   private readonly executionMiddlewares: ExecutionMiddleware[] = [];
+  private preWriteHook?: (toolName: string, args: string) => Promise<void>;
 
   constructor(opts: ToolRegistryOptions = {}) {
     this.defaultResultSizeChars = opts.defaultResultSizeChars ?? DEFAULT_RESULT_SIZE_CHARS;
     this.truncateResults = opts.truncateResults ?? true;
+  }
+
+  setPreWriteHook(hook: (toolName: string, args: string) => Promise<void>): void {
+    this.preWriteHook = hook;
   }
 
   register(tool: BaseTool): void {
@@ -146,6 +151,16 @@ export class ToolRegistry implements Registry {
     }
 
     // 3. 执行工具逻辑:所有 Middleware 都放行了
+    if (this.preWriteHook) {
+      try {
+        await this.preWriteHook(currentCall.name, currentCall.arguments);
+      } catch (err) {
+        logger.warn(
+          { err: String(err), tool: currentCall.name },
+          `[Registry] preWriteHook 失败,继续执行工具 ${currentCall.name}`,
+        );
+      }
+    }
     try {
       let chain: (nextCall: ToolCall) => Promise<string> = async (nextCall) =>
         tool.execute(nextCall.arguments);

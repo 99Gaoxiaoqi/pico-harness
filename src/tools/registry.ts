@@ -90,6 +90,7 @@ export interface Registry {
    * 未实现则调度器按 ToolAccesses.all() 保守处理。
    */
   getAccesses?(call: ToolCall): ToolAccesses;
+  setPreWriteHook?(hook: (toolName: string, args: string) => Promise<void>): void;
 }
 
 /**

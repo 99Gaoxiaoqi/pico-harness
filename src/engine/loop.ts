@@ -33,6 +33,8 @@ import type { Session } from "./session.js";
 import type { ToolObservationProcessor } from "../tools/tool-result-observation.js";
 import { ToolAccesses } from "../tools/tool-access.js";
 import { ToolScheduler } from "../tools/tool-scheduler.js";
+import { fileHistoryTrackEdit, fileHistoryMakeSnapshot } from "../safety/file-history.js";
+import { resolve } from "node:path";
 
 /** WorkingMemory 滑动窗口大小:截取最近 N 条消息供压缩器判断(含远期历史) */
 const DEFAULT_WORKING_MEMORY_LIMIT = 20;
@@ -417,6 +419,21 @@ export class AgentEngine implements AgentRunner {
         }
         reporter.onTurnStart(turnCount);
         const turnSpan = rootSpan?.startChild(`Turn-${turnCount}`);
+        const currentMessageId = `turn-${turnCount}`;
+        this.registry.setPreWriteHook?.(async (toolName, args) => {
+          if (toolName !== "write_file" && toolName !== "edit_file") return;
+          try {
+            const { path } = JSON.parse(args) as { path?: string };
+            if (!path) return;
+            await fileHistoryTrackEdit(
+              session.fileHistory,
+              resolve(this.workDir, path),
+              currentMessageId,
+              session.id,
+            );
+          } catch {
+          }
+        });
 
         try {
           // 获取当前挂载的所有工具定义
@@ -616,6 +633,11 @@ export class AgentEngine implements AgentRunner {
             session.append(...reminderMessages);
           }
         } finally {
+          await fileHistoryMakeSnapshot(
+            session.fileHistory,
+            currentMessageId,
+            session.id,
+          ).catch(() => {});
           turnSpan?.end();
         }
       }

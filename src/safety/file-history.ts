@@ -139,7 +139,7 @@ export async function fileHistoryTrackEdit(
 
 function findLastBackup(state: FileHistoryState, filePath: string): FileHistoryBackup | undefined {
   for (let i = state.snapshots.length - 1; i >= 0; i--) {
-    const b = state.snapshots[i].trackedFileBackups.get(filePath);
+    const b = state.snapshots[i]!.trackedFileBackups.get(filePath);
     if (b) return b;
   }
   return undefined;
@@ -250,7 +250,7 @@ export async function fileHistoryRewind(
   if (targetIdx === -1) {
     throw new Error(`FileHistory: 找不到 messageId=${messageId} 的快照`);
   }
-  const target = state.snapshots[targetIdx];
+  const target = state.snapshots[targetIdx]!;
 
   for (const [filePath, backup] of target.trackedFileBackups) {
     if (backup.backupFileName === null) {
