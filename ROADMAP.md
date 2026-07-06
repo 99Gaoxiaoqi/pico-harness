@@ -131,17 +131,17 @@ git worktree remove ../pico-1-streaming
 - [x] 测试：写文件前备份 → 验证备份是修改前内容；同文件第二次跳过（5 个测试通过）
 - [x] 提交
 
-### 1.5.3 每轮快照（makeSnapshot）
-- [ ] `fileHistoryMakeSnapshot(state, messageId)` 函数
-- [ ] 每个用户消息结束时调用
-- [ ] 遍历所有 trackedFiles，用 `stat` 的 mtime+size 判断是否变化
-- [ ] 未变 → 复用旧备份（不做 copyFile）
-- [ ] 变了 → createBackup 新版本
-- [ ] 文件被删 → 标记 null
-- [ ] `checkOriginFileChanged(filePath, backupFileName, stats?)`：mtime+size 比较
-- [ ] 100 个快照上限：滚动窗口，超限时删最老的
-- [ ] 测试：改文件 → 快照 → 再改 → 快照；未变的文件验证复用
-- [ ] 提交
+### 1.5.3 每轮快照（makeSnapshot）✅
+- [x] `fileHistoryMakeSnapshot(state, messageId)` 函数
+- [ ] 每个用户消息结束时调用（→ 1.5.5）
+- [x] 遍历所有 trackedFiles，用 `stat` 的 mtime+size 判断是否变化
+- [x] 未变 → 复用旧备份（不做 copyFile）
+- [x] 变了 → createBackup 新版本
+- [x] 文件被删 → 标记 null
+- [x] `checkOriginFileChanged(filePath, backupFileName, stats?)`：mtime+size 比较（内联实现）
+- [x] 100 个快照上限：滚动窗口，超限时删最老的
+- [x] 测试：改文件 → 快照 → 再改 → 快照；未变的文件验证复用（6 个测试通过）
+- [x] 提交
 
 ### 1.5.4 回滚（rewind）
 - [ ] `fileHistoryRewind(state, messageId)` 函数
