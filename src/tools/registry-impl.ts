@@ -17,6 +17,7 @@ import { toModelTextView, materializeModelText, makeCarriageReturnsVisible } fro
 import { findClosestLines, formatCandidateHint } from "./edit-hint.js";
 // 跨平台 shell:Windows 上统一走 Git Bash,避免 cmd.exe 不识别 POSIX 语义。
 import { execAsync, execOptions } from "../os/shell.js";
+import { BackgroundManager } from "./background-manager.js";
 
 const DEFAULT_RESULT_SIZE_CHARS = 8000;
 
@@ -206,7 +207,7 @@ export class EchoTool implements BaseTool {
     return "echo";
   }
   /** 原样回显,无任何副作用 —— 不与任何工具冲突 */
-  accesses(): ToolAccesses {
+  accesses(_args?: string): ToolAccesses {
     return ToolAccesses.none();
   }
   definition(): ToolDefinition {
@@ -417,7 +418,11 @@ export function extractBashRedirectTargets(workDir: string, command: string): st
 }
 
 export class BashTool implements BaseTool {
-  constructor(private readonly workDir: string) {}
+  constructor(
+    private readonly workDir: string,
+    private readonly backgroundManager = new BackgroundManager(),
+    private readonly options: { allowBackground?: boolean } = {},
+  ) {}
 
   name(): string {
     return "bash";
@@ -441,6 +446,10 @@ export class BashTool implements BaseTool {
         type: "object",
         properties: {
           command: { type: "string", description: "要执行的 bash 命令,例如: ls -la 或 npm test" },
+          background: {
+            type: "boolean",
+            description: "为 true 时后台启动命令并立即返回 taskId/pid/status,不等待命令结束。",
+          },
         },
         required: ["command"],
       },
@@ -449,11 +458,28 @@ export class BashTool implements BaseTool {
 
   async execute(args: string): Promise<string> {
     let command: string;
+    let background = false;
     try {
-      const input = JSON.parse(args) as { command?: string };
+      const input = JSON.parse(args) as { command?: string; background?: boolean };
       command = input.command ?? "";
+      background = input.background === true;
     } catch {
       throw new Error("参数解析失败: 期望 JSON 含 command 字段");
+    }
+
+    if (background) {
+      if (this.options.allowBackground === false) {
+        throw new Error("当前 bash 工具不允许后台执行");
+      }
+      const task = this.backgroundManager.start(command, this.workDir);
+      return JSON.stringify({
+        taskId: task.taskId,
+        pid: task.pid,
+        status: task.status,
+        command: task.command,
+        cwd: task.cwd,
+        startedAt: task.startedAt.toISOString(),
+      });
     }
 
     // 驾驭底线 1+2:超时控制 + 工作区绑定
@@ -505,6 +531,135 @@ export class BashTool implements BaseTool {
     }
 
     return stdout;
+  }
+}
+
+// ==========================================
+// 内置工具 4.5:后台任务控制工具
+// ==========================================
+
+export class TaskListTool implements BaseTool {
+  readonly readOnly = true;
+
+  constructor(private readonly backgroundManager: BackgroundManager) {}
+
+  name(): string {
+    return "task_list";
+  }
+
+  accesses(_args?: string): ToolAccesses {
+    return ToolAccesses.none();
+  }
+
+  definition(): ToolDefinition {
+    return {
+      name: "task_list",
+      description: "列出当前会话中由 bash background=true 启动的后台任务。",
+      inputSchema: {
+        type: "object",
+        properties: {},
+      },
+    };
+  }
+
+  async execute(_args: string): Promise<string> {
+    return JSON.stringify(
+      this.backgroundManager.list().map((task) => ({
+        ...task,
+        startedAt: task.startedAt.toISOString(),
+        endedAt: task.endedAt?.toISOString() ?? null,
+      })),
+    );
+  }
+}
+
+export class TaskOutputTool implements BaseTool {
+  readonly readOnly = true;
+
+  constructor(private readonly backgroundManager: BackgroundManager) {}
+
+  name(): string {
+    return "task_output";
+  }
+
+  accesses(_args?: string): ToolAccesses {
+    return ToolAccesses.none();
+  }
+
+  definition(): ToolDefinition {
+    return {
+      name: "task_output",
+      description: "读取指定后台任务的 stdout/stderr 环形缓冲输出。",
+      inputSchema: {
+        type: "object",
+        properties: {
+          taskId: { type: "string", description: "后台任务 ID。" },
+          tail: { type: "number", description: "可选,只返回 stdout/stderr 末尾 N 个字符。" },
+        },
+        required: ["taskId"],
+      },
+    };
+  }
+
+  async execute(args: string): Promise<string> {
+    const input = parseTaskIdArgs(args);
+    return JSON.stringify(this.backgroundManager.output(input.taskId, input.tail));
+  }
+}
+
+export class TaskStopTool implements BaseTool {
+  readonly readOnly = false;
+
+  constructor(private readonly backgroundManager: BackgroundManager) {}
+
+  name(): string {
+    return "task_stop";
+  }
+
+  accesses(_args?: string): ToolAccesses {
+    return ToolAccesses.all();
+  }
+
+  definition(): ToolDefinition {
+    return {
+      name: "task_stop",
+      description: "停止指定后台任务。",
+      inputSchema: {
+        type: "object",
+        properties: {
+          taskId: { type: "string", description: "后台任务 ID。" },
+        },
+        required: ["taskId"],
+      },
+    };
+  }
+
+  async execute(args: string): Promise<string> {
+    const input = parseTaskIdArgs(args);
+    const task = await this.backgroundManager.stop(input.taskId);
+    return JSON.stringify({
+      ...task,
+      startedAt: task.startedAt.toISOString(),
+      endedAt: task.endedAt?.toISOString() ?? null,
+    });
+  }
+}
+
+function parseTaskIdArgs(args: string): { taskId: string; tail?: number } {
+  try {
+    const input = JSON.parse(args) as { taskId?: string; tail?: number };
+    if (!input.taskId) {
+      throw new Error("缺少 taskId 字段");
+    }
+    return {
+      taskId: input.taskId,
+      ...(input.tail !== undefined ? { tail: input.tail } : {}),
+    };
+  } catch (err) {
+    if (err instanceof Error && err.message === "缺少 taskId 字段") {
+      throw err;
+    }
+    throw new Error("参数解析失败: 期望 JSON 含 taskId 字段");
   }
 }
 
