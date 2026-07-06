@@ -201,5 +201,145 @@ describe("FileHistory 1.5.5 集成到工具系统", () => {
       expect(readFileSync(firstPath, "utf8")).toBe("replaced");
       expect(readFileSync(secondPath, "utf8")).toBe("original secondappended");
     });
+
+    it("write_file 路径越界被拒绝后不会跟踪或回滚工作区外文件", async () => {
+      const outsidePath = join(workDir, "..", "outside-write.txt");
+      writeFileSync(outsidePath, "outside original");
+
+      const registry = new ToolRegistry();
+      registry.register(new WriteFileTool(workDir));
+      let calls = 0;
+      const provider: LLMProvider = {
+        async generate() {
+          calls++;
+          if (calls === 1) {
+            return {
+              role: "assistant",
+              content: "",
+              toolCalls: [
+                {
+                  id: "write-outside",
+                  name: "write_file",
+                  arguments: JSON.stringify({
+                    path: "../outside-write.txt",
+                    content: "should not write",
+                  }),
+                },
+              ],
+            };
+          }
+          return { role: "assistant", content: "done" };
+        },
+      };
+      const session = new Session(`${sessionId}-outside-write`, workDir, { persistence: false });
+      session.append({ role: "user", content: "try outside write" });
+      const engine = new AgentEngine({ provider, registry, workDir, maxTurns: 3 });
+
+      await engine.run(session);
+      writeFileSync(outsidePath, "outside changed after denied tool");
+      const firstSnapshotId = session.fileHistory.snapshots[0]?.messageId;
+      if (firstSnapshotId) {
+        await session.rewindCode(firstSnapshotId);
+      }
+
+      expect(session.fileHistory.trackedFiles.has(outsidePath)).toBe(false);
+      expect(readFileSync(outsidePath, "utf8")).toBe("outside changed after denied tool");
+      rmSync(outsidePath, { force: true });
+    });
+
+    it("edit_file 路径越界被拒绝后不会跟踪或回滚工作区外文件", async () => {
+      const outsidePath = join(workDir, "..", "outside-edit.txt");
+      writeFileSync(outsidePath, "outside original");
+
+      const registry = new ToolRegistry();
+      registry.register(new EditFileTool(workDir));
+      let calls = 0;
+      const provider: LLMProvider = {
+        async generate() {
+          calls++;
+          if (calls === 1) {
+            return {
+              role: "assistant",
+              content: "",
+              toolCalls: [
+                {
+                  id: "edit-outside",
+                  name: "edit_file",
+                  arguments: JSON.stringify({
+                    path: "../outside-edit.txt",
+                    old_text: "outside",
+                    new_text: "inside",
+                  }),
+                },
+              ],
+            };
+          }
+          return { role: "assistant", content: "done" };
+        },
+      };
+      const session = new Session(`${sessionId}-outside-edit`, workDir, { persistence: false });
+      session.append({ role: "user", content: "try outside edit" });
+      const engine = new AgentEngine({ provider, registry, workDir, maxTurns: 3 });
+
+      await engine.run(session);
+      writeFileSync(outsidePath, "outside changed after denied edit");
+      const firstSnapshotId = session.fileHistory.snapshots[0]?.messageId;
+      if (firstSnapshotId) {
+        await session.rewindCode(firstSnapshotId);
+      }
+
+      expect(session.fileHistory.trackedFiles.has(outsidePath)).toBe(false);
+      expect(readFileSync(outsidePath, "utf8")).toBe("outside changed after denied edit");
+      rmSync(outsidePath, { force: true });
+    });
+
+    it("同一 session 多次 engine.run 生成唯一快照 id", async () => {
+      const registry = new ToolRegistry();
+      registry.register(new WriteFileTool(workDir));
+      let calls = 0;
+      const provider: LLMProvider = {
+        async generate() {
+          calls++;
+          if (calls === 1) {
+            return {
+              role: "assistant",
+              content: "",
+              toolCalls: [
+                {
+                  id: "write-a",
+                  name: "write_file",
+                  arguments: JSON.stringify({ path: "a.txt", content: "a" }),
+                },
+              ],
+            };
+          }
+          if (calls === 3) {
+            return {
+              role: "assistant",
+              content: "",
+              toolCalls: [
+                {
+                  id: "write-b",
+                  name: "write_file",
+                  arguments: JSON.stringify({ path: "b.txt", content: "b" }),
+                },
+              ],
+            };
+          }
+          return { role: "assistant", content: "done" };
+        },
+      };
+      const session = new Session(`${sessionId}-unique`, workDir, { persistence: false });
+      const engine = new AgentEngine({ provider, registry, workDir, maxTurns: 3 });
+
+      session.append({ role: "user", content: "first run" });
+      await engine.run(session);
+      session.append({ role: "user", content: "second run" });
+      await engine.run(session);
+
+      const ids = session.fileHistory.snapshots.map((snapshot) => snapshot.messageId);
+      expect(new Set(ids).size).toBe(ids.length);
+      expect(ids).toEqual(["turn-1", "turn-2", "turn-3", "turn-4"]);
+    });
   });
 });

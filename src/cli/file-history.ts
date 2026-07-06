@@ -27,6 +27,15 @@ export function parseRewindMode(value: string | undefined): RewindMode {
   throw new Error(`不支持的 rewind mode: ${value}。可选值: code / conversation / both`);
 }
 
+export function assertFileHistoryCliFlags(input: {
+  listSnapshots?: boolean;
+  rewind?: boolean;
+}): void {
+  if (input.listSnapshots && input.rewind) {
+    throw new Error("--list-snapshots 不能和 --rewind 同时使用");
+  }
+}
+
 export function listFileHistorySnapshotSummaries(
   session: Session,
 ): FileHistorySnapshotSummary[] {

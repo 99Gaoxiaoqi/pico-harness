@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { copyFile, mkdir, stat, chmod, unlink, readFile, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, stat, chmod, unlink, readFile, writeFile, rename } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 
@@ -330,8 +330,10 @@ async function saveFileHistoryState(
   };
 
   const manifestPath = resolveManifestPath(sessionId, baseDir);
+  const tempPath = `${manifestPath}.${process.pid}.${Date.now()}.tmp`;
   await mkdir(dirname(manifestPath), { recursive: true });
-  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+  await writeFile(tempPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+  await rename(tempPath, manifestPath);
 }
 
 export async function fileHistoryLoadState(

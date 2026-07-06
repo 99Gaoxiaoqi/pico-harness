@@ -170,6 +170,8 @@ export class Session {
         pending = pending.slice(r.fromIndex);
       } else if (r.type === "undo") {
         pending = this.applyUndoToHistory(pending, r.count);
+      } else if (r.type === "rewind_to") {
+        pending = pending.slice(0, r.messageIndex);
       }
     }
     this.history = pending;
@@ -294,7 +296,11 @@ export class Session {
     this.history = this.history.slice(0, messageIndex);
     this.conversationId = `${this.id}-${Date.now().toString(36)}`;
     this.updatedAt = new Date();
-    if (removedUserCount > 0) void this.persistUndoEvent(removedUserCount);
+    if (removedUserCount > 0) {
+      void this.persistUndoEvent(removedUserCount);
+    } else {
+      void this.persistRewindTo(messageIndex);
+    }
   }
 
   async rewindCode(messageId: string): Promise<void> {
@@ -338,6 +344,17 @@ export class Session {
     const seq = this.nextSeq++;
     this.store.appendUndoEvent(seq, count).catch((err) =>
       logger.warn({ seq }, `[session] undo 落盘失败: ${String(err)}`),
+    );
+  }
+
+  private async persistRewindTo(messageIndex: number): Promise<void> {
+    if (!this.store) return;
+    const pending = this.pendingWrites;
+    this.pendingWrites = [];
+    await Promise.all(pending);
+    const seq = this.nextSeq++;
+    this.store.appendRewindTo(seq, messageIndex).catch((err) =>
+      logger.warn({ seq }, `[session] rewind_to 落盘失败: ${String(err)}`),
     );
   }
 
