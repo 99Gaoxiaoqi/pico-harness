@@ -104,7 +104,92 @@ git worktree remove ../pico-1-streaming
 
 ---
 
-## 阶段 2：工具生态扩展（P1）
+## 阶段 1.5：文件历史系统（对标 Claude Code）
+
+> **目标**：把 1.2 的 git stash 方案替换为 Claude Code 式的纯 copyFile 备份。
+> 不依赖用户项目的 git，文件回滚和对话回滚解耦，三轴可选。
+
+### 1.5.1 数据结构与存储层
+- [ ] 新建 `safety/file-history.ts`
+- [ ] 定义 `FileHistoryBackup`（backupFileName: string | null, version, backupTime）
+- [ ] 定义 `FileHistorySnapshot`（messageId, trackedFileBackups, timestamp）
+- [ ] 定义 `FileHistoryState`（snapshots[], trackedFiles: Set, snapshotSequence）
+- [ ] 备份存储路径：`~/.pico/file-history/{sessionId}/{sha256(path)[:16]}@v{version}`
+- [ ] `createBackup(filePath, version)`：copyFile + chmod 保留权限
+- [ ] `resolveBackupPath(fileName)`：解析备份路径
+- [ ] `getBackupFileName(filePath, version)`：生成 sha256 哈希文件名
+- [ ] lazy mkdir（99% 命中已有目录，ENOENT 时才 mkdir + 重试）
+- [ ] 测试：创建备份 → 验证文件内容和权限一致
+- [ ] 提交
+
+### 1.5.2 写前备份（trackEdit）
+- [ ] `fileHistoryTrackEdit(state, filePath, messageId)` 函数
+- [ ] 在 EditTool/WriteTool 执行**前**调用，保存修改前的原始内容
+- [ ] 去重：同一文件在同一轮已跟踪则跳过（不覆盖 v1 备份）
+- [ ] 文件不存在时标记 `backupFileName: null`
+- [ ] 三阶段设计：Phase 1 读状态 → Phase 2 async 备份 → Phase 3 提交状态
+- [ ] 测试：写文件前备份 → 验证备份是修改前内容；同文件第二次跳过
+- [ ] 提交
+
+### 1.5.3 每轮快照（makeSnapshot）
+- [ ] `fileHistoryMakeSnapshot(state, messageId)` 函数
+- [ ] 每个用户消息结束时调用
+- [ ] 遍历所有 trackedFiles，用 `stat` 的 mtime+size 判断是否变化
+- [ ] 未变 → 复用旧备份（不做 copyFile）
+- [ ] 变了 → createBackup 新版本
+- [ ] 文件被删 → 标记 null
+- [ ] `checkOriginFileChanged(filePath, backupFileName, stats?)`：mtime+size 比较
+- [ ] 100 个快照上限：滚动窗口，超限时删最老的
+- [ ] 测试：改文件 → 快照 → 再改 → 快照；未变的文件验证复用
+- [ ] 提交
+
+### 1.5.4 回滚（rewind）
+- [ ] `fileHistoryRewind(state, messageId)` 函数
+- [ ] `applySnapshot(state, targetSnapshot)`：遍历所有 trackedFiles
+  - null → `unlink` 删除（Agent 新建的文件被撤销）
+  - 有变化 → `restoreBackup`（copyFile 从备份恢复）
+  - 无变化 → 跳过
+- [ ] `restoreBackup(filePath, backupFileName)`：copyFile + lazy mkdir
+- [ ] 测试：改 3 个文件 → 回滚 → 验证全部恢复；新建文件回滚后验证删除
+- [ ] 提交
+
+### 1.5.5 集成到工具系统
+- [ ] EditFileTool.execute 前调 `fileHistoryTrackEdit`
+- [ ] WriteFileTool.execute 前调 `fileHistoryTrackEdit`
+- [ ] BashTool：检测 `>` 重定向时备份目标文件
+- [ ] loop.ts 每轮结束时调 `fileHistoryMakeSnapshot`
+- [ ] Session 构造时初始化 FileHistoryState
+- [ ] 测试：端到端——Agent 调 edit_file → 检查备份自动创建
+- [ ] 提交
+
+### 1.5.6 对话 undo
+- [ ] Session 新增 `undo(count)` 方法
+- [ ] 从 history 末尾向前删，跳过 injection，遇到 compaction 边界停止
+- [ ] 截断到第 count 个 user prompt 之前
+- [ ] 清空 deferredMessages / pendingToolResultIds
+- [ ] JSONL 持久化：追加 undo 记录（不删旧记录，event sourcing 模式）
+- [ ] Session 新增 `rewindTo(messageIndex)`：截断到指定位置
+- [ ] 测试：对话 5 轮 → undo(2) → 验证只剩 3 轮；undo 到 compaction 边界停止
+- [ ] 提交
+
+### 1.5.7 三轴选择
+- [ ] `rewindCode(messageId)`：只回滚文件，不碰对话
+- [ ] `rewindConversation(messageIndex)`：只截断对话，不碰文件
+- [ ] `rewindBoth(messageId)`：两者都回滚
+- [ ] 回滚对话时生成新 conversationId（fork 语义，保留原历史在磁盘）
+- [ ] 测试：三轴各自独立 + 组合
+- [ ] 提交
+
+### 1.5.8 CLI 集成 + 替换旧方案
+- [ ] CLI 加 `--rewind` 命令：列出可选快照点
+- [ ] `--rewind <message-id>`：三轴选择（code / conversation / both）
+- [ ] `--list-snapshots`：列出所有快照及文件变更统计
+- [ ] 保留旧的 `safety/checkpoint-manager.ts` 作为 fallback（非交互场景）
+- [ ] 文档更新：AGENTS.md 和 ROADMAP.md
+- [ ] 全量测试通过
+- [ ] 提交
+
+---
 
 > **目标**：从 4 个工具扩展到"够用的工具集"。
 
