@@ -156,7 +156,7 @@ git worktree remove ../pico-1-streaming
 ### 1.5.5 集成到工具系统 ✅
 - [x] EditFileTool.execute 前调 `fileHistoryTrackEdit`（通过 preWriteHook）
 - [x] WriteFileTool.execute 前调 `fileHistoryTrackEdit`（通过 preWriteHook）
-- [ ] BashTool：检测 `>` 重定向时备份目标文件（后续补）
+- [x] BashTool：检测 `>` 重定向时备份目标文件（后续补）
 - [x] loop.ts 每轮结束时调 `fileHistoryMakeSnapshot`
 - [x] Session 构造时初始化 FileHistoryState
 - [x] 测试：端到端——write_file/edit_file → 检查备份自动创建（5 个 e2e 测试通过）
