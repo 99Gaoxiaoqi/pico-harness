@@ -1,7 +1,7 @@
 // Registry 默认实现 + 内置工具。
 // 对应课程第 05 讲:registryImpl + read_file 工具。
 
-import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { readFile, writeFile, mkdir, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import type {
   BaseTool,
@@ -361,10 +361,20 @@ export class WriteFileTool implements BaseTool {
     // 自动创建缺失的父级目录
     await mkdir(resolve(fullPath, ".."), { recursive: true });
 
-    // 写入文件,权限 0644
+    // 检查是新建还是覆盖
+    let isNewFile = false;
+    try {
+      await stat(fullPath);
+    } catch {
+      isNewFile = true; // 文件不存在 → 新建
+    }
+
+    // 写入文件
     await writeFile(fullPath, content, "utf8");
 
-    return `成功将内容写入到文件: ${path}`;
+    const action = isNewFile ? "新建" : "覆盖";
+    const sizeInfo = `(${content.length} 字符)`;
+    return `✅ ${action}文件: ${path} ${sizeInfo}`;
   }
 }
 
@@ -705,7 +715,9 @@ export class EditFileTool implements BaseTool {
       // 4. 写回磁盘:按记录的原始行尾风格还原(CRLF 文件写回仍是 CRLF)
       await writeFile(fullPath, materializeModelText(newContent, modelView.lineEndingStyle), "utf8");
 
-      return `✅ 成功修改文件: ${path} (匹配级别 L${level})`;
+      // 5. 生成 diff 预览(简单 before/after 对比,供用户审批时查看)
+      const diffPreview = generateSimpleDiff(oldText, newText);
+      return `✅ 成功修改文件: ${path} (匹配级别 L${level})\n\n${diffPreview}`;
     } catch (err) {
       // 匹配全失败时附候选上下文,帮模型重定位(仅对"未找到"类错误生效)
       throw this.enrichNotFoundError(err, content, oldText);
@@ -728,4 +740,70 @@ export class EditFileTool implements BaseTool {
     }
     return new Error(`${errMsg}${formatCandidateHint(hints)}`);
   }
+}
+
+// ==========================================
+// Diff 预览生成 (第 1.3 讲: Diff 预览)
+// 简单的 before/after 对比,不做完整 diff 算法。
+// 用于 edit_file 返回结果和审批通知,让用户看到改了什么。
+// ==========================================
+
+/** diff 预览最大行数,超出截断 */
+const DIFF_MAX_LINES = 30;
+
+/**
+ * 生成简单的 before/after diff 预览。
+ * 格式类似 unified diff 但更简化:
+ *   --- 修改前 (N 行)
+ *   +++ 修改后 (M 行)
+ *   - 旧行
+ *   + 新行
+ */
+export function generateSimpleDiff(oldText: string, newText: string): string {
+  const oldLines = oldText.split("\n");
+  const newLines = newText.split("\n");
+
+  // 找到公共前缀
+  let prefixLen = 0;
+  while (
+    prefixLen < oldLines.length &&
+    prefixLen < newLines.length &&
+    oldLines[prefixLen] === newLines[prefixLen]
+  ) {
+    prefixLen++;
+  }
+
+  // 找到公共后缀
+  let suffixLen = 0;
+  while (
+    suffixLen < oldLines.length - prefixLen &&
+    suffixLen < newLines.length - prefixLen &&
+    oldLines[oldLines.length - 1 - suffixLen] === newLines[newLines.length - 1 - suffixLen]
+  ) {
+    suffixLen++;
+  }
+
+  const oldChanged = oldLines.slice(prefixLen, oldLines.length - suffixLen);
+  const newChanged = newLines.slice(prefixLen, newLines.length - suffixLen);
+
+  const lines: string[] = [
+    `--- 修改前 (${oldChanged.length} 行变更)`,
+    `+++ 修改后 (${newChanged.length} 行变更)`,
+  ];
+
+  for (const line of oldChanged) {
+    lines.push(`- ${line}`);
+  }
+  for (const line of newChanged) {
+    lines.push(`+ ${line}`);
+  }
+
+  // 截断过长的 diff
+  if (lines.length > DIFF_MAX_LINES) {
+    const kept = lines.slice(0, DIFF_MAX_LINES);
+    kept.push(`... (共 ${lines.length} 行,已截断)`);
+    return kept.join("\n");
+  }
+
+  return lines.join("\n");
 }
