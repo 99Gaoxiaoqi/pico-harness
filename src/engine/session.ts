@@ -267,24 +267,12 @@ export class Session {
    */
   undo(count: number): void {
     if (count <= 0) return;
-    let userCount = 0;
-    let cutIndex = 0;
-    for (let i = this.history.length - 1; i >= 0; i--) {
-      const msg = this.history[i]!;
-      if (msg.role === "system") continue;
-      if (msg.role === "user") {
-        userCount++;
-        if (userCount === count) {
-          cutIndex = i;
-          break;
-        }
-      }
-    }
-    if (userCount === 0) return;
+    const { cutIndex, removedCount } = this.findUndoCut(this.history, count);
+    if (removedCount === 0) return;
     this.history = this.history.slice(0, cutIndex);
     this.conversationId = `${this.id}-${Date.now().toString(36)}`;
     this.updatedAt = new Date();
-    void this.persistUndoEvent(userCount);
+    void this.persistUndoEvent(removedCount);
   }
 
   rewindTo(messageIndex: number): void {
@@ -341,22 +329,39 @@ export class Session {
 
   private applyUndoToHistory(history: Message[], count: number): Message[] {
     if (count <= 0) return history;
-    let userCount = 0;
-    let cutIndex = history.length;
+    const { cutIndex, removedCount } = this.findUndoCut(history, count);
+    if (removedCount === 0) return history;
+    return history.slice(0, cutIndex);
+  }
+
+  private findUndoCut(history: Message[], count: number): { cutIndex: number; removedCount: number } {
+    let removedCount = 0;
+    let cutIndex = 0;
     for (let i = history.length - 1; i >= 0; i--) {
       const msg = history[i]!;
+      if (this.isCompactionSummaryMessage(msg)) {
+        return { cutIndex: i + 1, removedCount };
+      }
       if (msg.role === "system") continue;
       if (msg.role === "user") {
-        userCount++;
-        if (userCount === count) {
+        removedCount++;
+        if (removedCount === count) {
           cutIndex = i;
           break;
         }
       }
     }
-    if (userCount === 0) return history;
-    if (userCount < count) return [];
-    return history.slice(0, cutIndex);
+    return { cutIndex, removedCount };
+  }
+
+  private isCompactionSummaryMessage(message: Message): boolean {
+    if (message.role !== "assistant") return false;
+    const marker = message.providerData?.["picoKind"];
+    return (
+      marker === "compaction_summary" ||
+      message.content.startsWith("[上下文压缩") ||
+      message.content.includes("--- 历史摘要结束")
+    );
   }
 
   private countUserPrompts(messages: Message[]): number {
@@ -396,6 +401,7 @@ export class Session {
     const summaryMsg: Message = {
       role: "assistant",
       content: summary,
+      providerData: { picoKind: "compaction_summary" },
     };
     // 内存:用 summary 替换前 compactedCount 条
     this.history = [summaryMsg, ...retained];
