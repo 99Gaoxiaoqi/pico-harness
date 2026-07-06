@@ -162,6 +162,8 @@ export class Session {
         pending.push(r.message);
       } else if (r.type === "truncate") {
         pending = pending.slice(r.fromIndex);
+      } else if (r.type === "undo") {
+        pending = this.applyUndoToHistory(pending, r.count);
       }
     }
     this.history = pending;
@@ -335,6 +337,26 @@ export class Session {
     this.store.appendUndoEvent(seq, count).catch((err) =>
       logger.warn({ seq }, `[session] undo 落盘失败: ${String(err)}`),
     );
+  }
+
+  private applyUndoToHistory(history: Message[], count: number): Message[] {
+    if (count <= 0) return history;
+    let userCount = 0;
+    let cutIndex = history.length;
+    for (let i = history.length - 1; i >= 0; i--) {
+      const msg = history[i]!;
+      if (msg.role === "system") continue;
+      if (msg.role === "user") {
+        userCount++;
+        if (userCount === count) {
+          cutIndex = i;
+          break;
+        }
+      }
+    }
+    if (userCount === 0) return history;
+    if (userCount < count) return [];
+    return history.slice(0, cutIndex);
   }
 
   private countUserPrompts(messages: Message[]): number {
