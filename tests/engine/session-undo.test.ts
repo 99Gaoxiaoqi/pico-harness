@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { Session } from "../../src/engine/session.js";
+import { Session, SessionManager } from "../../src/engine/session.js";
 import { SessionStore } from "../../src/engine/session-store.js";
 import { fileHistoryTrackEdit, fileHistoryMakeSnapshot } from "../../src/safety/file-history.js";
 
@@ -146,6 +146,20 @@ describe("FileHistory 1.5.6 对话 undo", () => {
     const records = lines.map((line) => JSON.parse(line) as { type: string; count?: number });
     expect(records.filter((r) => r.type === "message")).toHaveLength(4);
     expect(records.at(-1)).toMatchObject({ type: "undo", count: 1 });
+  });
+
+  it("recover 重放 undo 事件后截断末尾 user 轮次", async () => {
+    const persisted = new Session("undo-recover", workDir, { persistence: true });
+    persisted.append({ role: "user", content: "u1" }, { role: "assistant", content: "a1" });
+    persisted.append({ role: "user", content: "u2" }, { role: "assistant", content: "a2" });
+    await flushPersistence();
+    persisted.undo(1);
+    await flushPersistence();
+
+    const recovered = await new SessionManager().getOrCreate("undo-recover", workDir, { persistence: true });
+
+    expect(recovered.length).toBe(2);
+    expect(recovered.getHistory().map((m) => m.content)).toEqual(["u1", "a1"]);
   });
 });
 
