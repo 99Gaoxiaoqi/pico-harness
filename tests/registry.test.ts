@@ -331,7 +331,9 @@ describe("BashTool", () => {
 
   it("schema 声明 background 参数", () => {
     const tool = new BashTool(workDir, backgroundManager);
-    const schema = tool.definition().inputSchema;
+    const schema = tool.definition().inputSchema as {
+      properties?: Record<string, unknown>;
+    };
 
     expect(schema.properties?.background).toMatchObject({ type: "boolean" });
   });
