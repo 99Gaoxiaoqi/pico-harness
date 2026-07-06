@@ -3,7 +3,32 @@ import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Session } from "../../src/engine/session.js";
+import { SessionStore } from "../../src/engine/session-store.js";
 import { fileHistoryTrackEdit, fileHistoryMakeSnapshot } from "../../src/safety/file-history.js";
+
+describe("SessionStore 1.5.6 undo event sourcing", () => {
+  let workDir: string;
+
+  beforeEach(() => {
+    workDir = mkdtempSync(join(tmpdir(), "pico-undo-store-"));
+  });
+
+  afterEach(() => {
+    rmSync(workDir, { recursive: true, force: true });
+  });
+
+  it("appendUndoEvent 追加 undo JSONL 记录", async () => {
+    const filePath = join(workDir, "session.jsonl");
+    const store = new SessionStore(filePath);
+
+    await store.appendUndoEvent(7, 2);
+
+    const records = await store.load();
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({ type: "undo", seq: 7, count: 2 });
+    expect(records[0]).toHaveProperty("at");
+  });
+});
 
 describe("FileHistory 1.5.6 对话 undo", () => {
   let workDir: string;
