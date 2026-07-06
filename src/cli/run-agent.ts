@@ -22,12 +22,10 @@ import type { ThinkingEffort } from "../provider/thinking.js";
 import type { Message, ToolDefinition } from "../schema/message.js";
 import {
   BashTool,
-  EditFileTool,
-  EchoTool,
   ReadFileTool,
   ToolRegistry,
-  WriteFileTool,
 } from "../tools/registry-impl.js";
+import { buildDefaultToolRegistry } from "../tools/default-registry.js";
 import { DelegationManager, DelegateStatusTool } from "../tools/delegation-manager.js";
 import { createSubagentRegistryFactory } from "../tools/delegation-registry.js";
 import { AgentProfileLoader, type AgentProfile } from "../tools/agent-profile.js";
@@ -173,14 +171,7 @@ export async function runAgentFromCli(
 }
 
 function buildRegistry(workDir: string): ToolRegistry {
-  const registry = new ToolRegistry({ truncateResults: false });
-  registry.register(new EchoTool());
-  registry.register(new ReadFileTool(workDir));
-  registry.register(new WriteFileTool(workDir));
-  registry.register(new EditFileTool(workDir));
-  registry.register(new BashTool(workDir));
-  registry.register(new SkillViewTool(new SkillLoader(workDir)));
-  return registry;
+  return buildDefaultToolRegistry(workDir, { truncateResults: false });
 }
 
 function createTrackedProviderWithFallback(

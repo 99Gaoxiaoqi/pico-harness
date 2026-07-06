@@ -531,6 +531,135 @@ export class BashTool implements BaseTool {
 }
 
 // ==========================================
+// 内置工具 4.5:后台任务控制工具
+// ==========================================
+
+export class TaskListTool implements BaseTool {
+  readonly readOnly = true;
+
+  constructor(private readonly backgroundManager: BackgroundManager) {}
+
+  name(): string {
+    return "task_list";
+  }
+
+  accesses(): ToolAccesses {
+    return ToolAccesses.none();
+  }
+
+  definition(): ToolDefinition {
+    return {
+      name: "task_list",
+      description: "列出当前会话中由 bash background=true 启动的后台任务。",
+      inputSchema: {
+        type: "object",
+        properties: {},
+      },
+    };
+  }
+
+  async execute(): Promise<string> {
+    return JSON.stringify(
+      this.backgroundManager.list().map((task) => ({
+        ...task,
+        startedAt: task.startedAt.toISOString(),
+        endedAt: task.endedAt?.toISOString() ?? null,
+      })),
+    );
+  }
+}
+
+export class TaskOutputTool implements BaseTool {
+  readonly readOnly = true;
+
+  constructor(private readonly backgroundManager: BackgroundManager) {}
+
+  name(): string {
+    return "task_output";
+  }
+
+  accesses(): ToolAccesses {
+    return ToolAccesses.none();
+  }
+
+  definition(): ToolDefinition {
+    return {
+      name: "task_output",
+      description: "读取指定后台任务的 stdout/stderr 环形缓冲输出。",
+      inputSchema: {
+        type: "object",
+        properties: {
+          taskId: { type: "string", description: "后台任务 ID。" },
+          tail: { type: "number", description: "可选,只返回 stdout/stderr 末尾 N 个字符。" },
+        },
+        required: ["taskId"],
+      },
+    };
+  }
+
+  async execute(args: string): Promise<string> {
+    const input = parseTaskIdArgs(args);
+    return JSON.stringify(this.backgroundManager.output(input.taskId, input.tail));
+  }
+}
+
+export class TaskStopTool implements BaseTool {
+  readonly readOnly = false;
+
+  constructor(private readonly backgroundManager: BackgroundManager) {}
+
+  name(): string {
+    return "task_stop";
+  }
+
+  accesses(): ToolAccesses {
+    return ToolAccesses.all();
+  }
+
+  definition(): ToolDefinition {
+    return {
+      name: "task_stop",
+      description: "停止指定后台任务。",
+      inputSchema: {
+        type: "object",
+        properties: {
+          taskId: { type: "string", description: "后台任务 ID。" },
+        },
+        required: ["taskId"],
+      },
+    };
+  }
+
+  async execute(args: string): Promise<string> {
+    const input = parseTaskIdArgs(args);
+    const task = await this.backgroundManager.stop(input.taskId);
+    return JSON.stringify({
+      ...task,
+      startedAt: task.startedAt.toISOString(),
+      endedAt: task.endedAt?.toISOString() ?? null,
+    });
+  }
+}
+
+function parseTaskIdArgs(args: string): { taskId: string; tail?: number } {
+  try {
+    const input = JSON.parse(args) as { taskId?: string; tail?: number };
+    if (!input.taskId) {
+      throw new Error("缺少 taskId 字段");
+    }
+    return {
+      taskId: input.taskId,
+      ...(input.tail !== undefined ? { tail: input.tail } : {}),
+    };
+  } catch (err) {
+    if (err instanceof Error && err.message === "缺少 taskId 字段") {
+      throw err;
+    }
+    throw new Error("参数解析失败: 期望 JSON 含 taskId 字段");
+  }
+}
+
+// ==========================================
 // 内置工具 5:EditFileTool (第 07 讲)
 // 极简工具集原语之一:外科手术式局部替换。
 // 核心:多级模糊匹配链,吸收大模型的"缩进幻觉"格式误差。
