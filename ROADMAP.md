@@ -348,7 +348,7 @@ git worktree remove ../pico-1-streaming
 | 阶段 | 总任务数 | 完成 | 状态 |
 |------|---------|------|------|
 | 阶段 1 | 5 | 5 | ✅ 完成 |
-| 阶段 1.5 | 8 | 7 | 🟡 核心完成,1.5.8 CLI 待持久化补齐 |
+| 阶段 1.5 | 8 | 7 | 🟡 1.5.8 CLI 待后续 session 实现 |
 | 阶段 2 | 7 | 0 | 🔴 未开始 |
 | 阶段 3 | 7 | 0 | 🔴 未开始 |
 | 阶段 4 | 5 | 0 | 🔴 未开始 |
@@ -365,10 +365,13 @@ git worktree remove ../pico-1-streaming
 
 ## 📅 变更记录
 
+- 2026-07-07：1.5.6 JSONL 持久化 + compaction 边界 + BashTool 重定向检测完成（subagent 执行，已合并）
+  - undo 事件 JSONL 持久化 + recover 重放（+14 测试）
+  - BashTool `>`/`>>` 重定向目标备份（+10 测试）
+  - 全量 805 测试通过
 - 2026-07-07：阶段 1.5 核心完成（1.5.1~1.5.7，44 个测试，9 次提交）
   - 文件历史系统：纯 copyFile 备份替换 git stash，不依赖用户项目 git
   - 三轴 rewind：code（文件）/ conversation（对话）/ both，fork 语义
-  - 1.5.8 CLI 集成待 1.5.6 JSONL 持久化补齐后实现
-  - 1.5.6 JSONL event sourcing、compaction 边界检测、BashTool 重定向检测为后续补齐项
+  - 1.5.8 CLI 集成（fileHistory.snapshots 持久化 + --rewind/--list-snapshots）待后续 session 实现
 - 2026-07-06：阶段 1 全部完成（流式输出 + Checkpoint + Diff 预览 + Permission + MCP，共 80 个测试）
 - 2026-07-06：初始计划创建，基于 Kimi Code + Hermes Agent 调研对比
