@@ -24,12 +24,10 @@ import { resolveProviderProfile } from "../provider/profile.js";
 import { resolveThinkingEffort, type ThinkingEffort } from "../provider/thinking.js";
 import {
   BashTool,
-  EditFileTool,
-  EchoTool,
   ReadFileTool,
   ToolRegistry,
-  WriteFileTool,
 } from "../tools/registry-impl.js";
+import { buildDefaultToolRegistry } from "../tools/default-registry.js";
 import { createFeishuApprovalMiddleware, FeishuBot, loadFeishuConfig } from "../feishu/bot.js";
 import { PromptComposer } from "../context/composer.js";
 import { SkillLoader, SkillViewTool } from "../context/skill.js";
@@ -56,14 +54,7 @@ import { FTS5Store } from "../memory/fts5-store.js";
 });
 
 function buildRegistry(workDir: string): ToolRegistry {
-  const registry = new ToolRegistry({ truncateResults: false });
-  registry.register(new EchoTool());
-  registry.register(new ReadFileTool(workDir));
-  registry.register(new WriteFileTool(workDir));
-  registry.register(new EditFileTool(workDir));
-  registry.register(new BashTool(workDir));
-  registry.register(new SkillViewTool(new SkillLoader(workDir)));
-  return registry;
+  return buildDefaultToolRegistry(workDir, { truncateResults: false });
 }
 
 /**
