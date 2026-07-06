@@ -18,7 +18,12 @@ import type { CostStatus } from "../observability/pricing.js";
 import { logger } from "../observability/logger.js";
 import { SessionStore } from "./session-store.js";
 import { FTS5Store } from "../memory/fts5-store.js";
-import { createFileHistoryState, type FileHistoryState, fileHistoryRewind } from "../safety/file-history.js";
+import {
+  createFileHistoryState,
+  type FileHistoryState,
+  fileHistoryLoadState,
+  fileHistoryRewind,
+} from "../safety/file-history.js";
 
 /** 清洗 sessionId 为安全文件名片段(/、: 等破坏路径的字符替换为 _) */
 function sanitizeFilePart(value: string): string {
@@ -144,6 +149,7 @@ export class Session {
    * 持久化关闭时为空操作。
    */
   async recover(): Promise<void> {
+    await this.recoverFileHistory();
     if (!this.store) return;
     let records;
     try {
@@ -168,6 +174,14 @@ export class Session {
     }
     this.history = pending;
     this.nextSeq = (records[records.length - 1]?.seq ?? -1) + 1;
+  }
+
+  private async recoverFileHistory(): Promise<void> {
+    try {
+      await fileHistoryLoadState(this.fileHistory, this.id);
+    } catch (error) {
+      logger.warn({ error: String(error) }, "[session] 文件历史恢复失败,降级为空快照");
+    }
   }
 
   /**
