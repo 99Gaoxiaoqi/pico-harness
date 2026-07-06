@@ -109,18 +109,18 @@ git worktree remove ../pico-1-streaming
 > **目标**：把 1.2 的 git stash 方案替换为 Claude Code 式的纯 copyFile 备份。
 > 不依赖用户项目的 git，文件回滚和对话回滚解耦，三轴可选。
 
-### 1.5.1 数据结构与存储层
-- [ ] 新建 `safety/file-history.ts`
-- [ ] 定义 `FileHistoryBackup`（backupFileName: string | null, version, backupTime）
-- [ ] 定义 `FileHistorySnapshot`（messageId, trackedFileBackups, timestamp）
-- [ ] 定义 `FileHistoryState`（snapshots[], trackedFiles: Set, snapshotSequence）
-- [ ] 备份存储路径：`~/.pico/file-history/{sessionId}/{sha256(path)[:16]}@v{version}`
-- [ ] `createBackup(filePath, version)`：copyFile + chmod 保留权限
-- [ ] `resolveBackupPath(fileName)`：解析备份路径
-- [ ] `getBackupFileName(filePath, version)`：生成 sha256 哈希文件名
-- [ ] lazy mkdir（99% 命中已有目录，ENOENT 时才 mkdir + 重试）
-- [ ] 测试：创建备份 → 验证文件内容和权限一致
-- [ ] 提交
+### 1.5.1 数据结构与存储层 ✅
+- [x] 新建 `safety/file-history.ts`
+- [x] 定义 `FileHistoryBackup`（backupFileName: string | null, version, backupTime）
+- [x] 定义 `FileHistorySnapshot`（messageId, trackedFileBackups, timestamp）
+- [x] 定义 `FileHistoryState`（snapshots[], trackedFiles: Set, snapshotSequence）
+- [x] 备份存储路径：`~/.pico/file-history/{sessionId}/{sha256(path)[:16]}@v{version}`
+- [x] `createBackup(filePath, version)`：copyFile + chmod 保留权限
+- [x] `resolveBackupPath(fileName)`：解析备份路径
+- [x] `getBackupFileName(filePath, version)`：生成 sha256 哈希文件名
+- [x] lazy mkdir（99% 命中已有目录，ENOENT 时才 mkdir + 重试）
+- [x] 测试：创建备份 → 验证文件内容和权限一致（14 个测试全通过）
+- [x] 提交
 
 ### 1.5.2 写前备份（trackEdit）
 - [ ] `fileHistoryTrackEdit(state, filePath, messageId)` 函数
