@@ -29,6 +29,7 @@ import { ReminderInjector, ToolGuardrailController, type GuardrailOptions } from
 import { IterationBudget, type BudgetConfig } from "./budget.js";
 import { Tracer, exportTraceToFile, truncate, type Span } from "../observability/trace.js";
 import { logger } from "../observability/logger.js";
+import { extractBashRedirectTargets } from "../tools/registry-impl.js";
 import type { Session } from "./session.js";
 import type { ToolObservationProcessor } from "../tools/tool-result-observation.js";
 import { ToolAccesses } from "../tools/tool-access.js";
@@ -421,16 +422,31 @@ export class AgentEngine implements AgentRunner {
         const turnSpan = rootSpan?.startChild(`Turn-${turnCount}`);
         const currentMessageId = `turn-${turnCount}`;
         this.registry.setPreWriteHook?.(async (toolName, args) => {
-          if (toolName !== "write_file" && toolName !== "edit_file") return;
           try {
-            const { path } = JSON.parse(args) as { path?: string };
-            if (!path) return;
-            await fileHistoryTrackEdit(
-              session.fileHistory,
-              resolve(this.workDir, path),
-              currentMessageId,
-              session.id,
-            );
+            if (toolName === "write_file" || toolName === "edit_file") {
+              const { path } = JSON.parse(args) as { path?: string };
+              if (!path) return;
+              await fileHistoryTrackEdit(
+                session.fileHistory,
+                resolve(this.workDir, path),
+                currentMessageId,
+                session.id,
+              );
+              return;
+            }
+            if (toolName === "bash") {
+              const { command } = JSON.parse(args) as { command?: string };
+              if (!command) return;
+              const targets = extractBashRedirectTargets(this.workDir, command);
+              for (const target of targets) {
+                await fileHistoryTrackEdit(
+                  session.fileHistory,
+                  target,
+                  currentMessageId,
+                  session.id,
+                );
+              }
+            }
           } catch {
           }
         });
