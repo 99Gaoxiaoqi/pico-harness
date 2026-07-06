@@ -1,5 +1,6 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawn, type ChildProcessByStdio } from "node:child_process";
 import { basename } from "node:path";
+import type { Readable } from "node:stream";
 import { isWindows, resolveShell } from "../os/shell.js";
 
 export type BackgroundTaskStatus = "running" | "exited" | "failed" | "stopped";
@@ -28,7 +29,7 @@ export interface BackgroundManagerOptions {
 
 interface ManagedTask {
   record: BackgroundTaskRecord;
-  child: ChildProcessWithoutNullStreams;
+  child: ChildProcessByStdio<null, Readable, Readable>;
   stdout: string;
   stderr: string;
   stopping: boolean;

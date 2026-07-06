@@ -207,7 +207,7 @@ export class EchoTool implements BaseTool {
     return "echo";
   }
   /** 原样回显,无任何副作用 —— 不与任何工具冲突 */
-  accesses(): ToolAccesses {
+  accesses(_args?: string): ToolAccesses {
     return ToolAccesses.none();
   }
   definition(): ToolDefinition {
@@ -543,7 +543,7 @@ export class TaskListTool implements BaseTool {
     return "task_list";
   }
 
-  accesses(): ToolAccesses {
+  accesses(_args?: string): ToolAccesses {
     return ToolAccesses.none();
   }
 
@@ -558,7 +558,7 @@ export class TaskListTool implements BaseTool {
     };
   }
 
-  async execute(): Promise<string> {
+  async execute(_args: string): Promise<string> {
     return JSON.stringify(
       this.backgroundManager.list().map((task) => ({
         ...task,
@@ -578,7 +578,7 @@ export class TaskOutputTool implements BaseTool {
     return "task_output";
   }
 
-  accesses(): ToolAccesses {
+  accesses(_args?: string): ToolAccesses {
     return ToolAccesses.none();
   }
 
@@ -612,7 +612,7 @@ export class TaskStopTool implements BaseTool {
     return "task_stop";
   }
 
-  accesses(): ToolAccesses {
+  accesses(_args?: string): ToolAccesses {
     return ToolAccesses.all();
   }
 
