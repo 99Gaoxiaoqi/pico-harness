@@ -122,14 +122,14 @@ git worktree remove ../pico-1-streaming
 - [x] 测试：创建备份 → 验证文件内容和权限一致（14 个测试全通过）
 - [x] 提交
 
-### 1.5.2 写前备份（trackEdit）
-- [ ] `fileHistoryTrackEdit(state, filePath, messageId)` 函数
-- [ ] 在 EditTool/WriteTool 执行**前**调用，保存修改前的原始内容
-- [ ] 去重：同一文件在同一轮已跟踪则跳过（不覆盖 v1 备份）
-- [ ] 文件不存在时标记 `backupFileName: null`
-- [ ] 三阶段设计：Phase 1 读状态 → Phase 2 async 备份 → Phase 3 提交状态
-- [ ] 测试：写文件前备份 → 验证备份是修改前内容；同文件第二次跳过
-- [ ] 提交
+### 1.5.2 写前备份（trackEdit）✅
+- [x] `fileHistoryTrackEdit(state, filePath, messageId)` 函数
+- [ ] 在 EditTool/WriteTool 执行**前**调用，保存修改前的原始内容（→ 1.5.5）
+- [x] 去重：同一文件在同一轮已跟踪则跳过（不覆盖 v1 备份）
+- [x] 文件不存在时标记 `backupFileName: null`
+- [x] 三阶段设计：Phase 1 读状态 → Phase 2 async 备份 → Phase 3 提交状态
+- [x] 测试：写文件前备份 → 验证备份是修改前内容；同文件第二次跳过（5 个测试通过）
+- [x] 提交
 
 ### 1.5.3 每轮快照（makeSnapshot）
 - [ ] `fileHistoryMakeSnapshot(state, messageId)` 函数

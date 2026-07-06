@@ -21,6 +21,20 @@ export interface FileHistoryState {
   snapshots: FileHistorySnapshot[];
   trackedFiles: Set<string>;
   snapshotSequence: number;
+  pendingTrackEdits: Map<string, FileHistoryBackup>;
+  currentMessageId?: string;
+  fileVersions: Map<string, number>;
+}
+
+export function createFileHistoryState(): FileHistoryState {
+  return {
+    snapshots: [],
+    trackedFiles: new Set(),
+    snapshotSequence: 0,
+    pendingTrackEdits: new Map(),
+    currentMessageId: undefined,
+    fileVersions: new Map(),
+  };
 }
 
 export function getBackupFileName(filePath: string, version: number): string {
@@ -78,4 +92,37 @@ export async function restoreBackup(
   }
 
   await chmod(filePath, backupStat.mode & 0o777);
+}
+
+export async function fileHistoryTrackEdit(
+  state: FileHistoryState,
+  filePath: string,
+  messageId: string,
+  sessionId: string,
+  baseDir: string = DEFAULT_BASE_DIR,
+): Promise<void> {
+  if (state.currentMessageId !== messageId) {
+    state.pendingTrackEdits = new Map();
+    state.currentMessageId = messageId;
+  }
+
+  if (state.pendingTrackEdits.has(filePath)) {
+    return;
+  }
+
+  const version = (state.fileVersions.get(filePath) ?? 0) + 1;
+
+  let backup: FileHistoryBackup;
+  try {
+    const backupFileName = await createBackup(filePath, version, sessionId, baseDir);
+    backup = { backupFileName, version, backupTime: new Date() };
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code !== "ENOENT") throw err;
+    backup = { backupFileName: null, version, backupTime: new Date() };
+  }
+
+  state.fileVersions.set(filePath, version);
+  state.trackedFiles.add(filePath);
+  state.pendingTrackEdits.set(filePath, backup);
 }
