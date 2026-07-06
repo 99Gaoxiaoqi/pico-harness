@@ -20,7 +20,8 @@ import { logger } from "../observability/logger.js";
 /** 持久化的事件记录:每行一个,带 type 判别联合 */
 export type SessionRecord =
   | { readonly type: "message"; readonly seq: number; readonly message: Message }
-  | { readonly type: "truncate"; readonly seq: number; readonly fromIndex: number };
+  | { readonly type: "truncate"; readonly seq: number; readonly fromIndex: number }
+  | { readonly type: "undo"; readonly seq: number; readonly count: number; readonly at: string };
 
 /**
  * 单个 Session 的 JSONL 事件日志读写器。
@@ -38,6 +39,11 @@ export class SessionStore {
   /** 追加一条 truncate 事件(fromIndex 之前的 message 在重放时被丢弃)。 */
   async appendTruncate(seq: number, fromIndex: number): Promise<void> {
     const record: SessionRecord = { type: "truncate", seq, fromIndex };
+    await this.appendLine(JSON.stringify(record));
+  }
+
+  async appendUndoEvent(seq: number, count: number): Promise<void> {
+    const record: SessionRecord = { type: "undo", seq, count, at: new Date().toISOString() };
     await this.appendLine(JSON.stringify(record));
   }
 
