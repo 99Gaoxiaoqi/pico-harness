@@ -18,6 +18,7 @@ export interface FileHistorySnapshot {
   messageId: string;
   trackedFileBackups: Map<string, FileHistoryBackup>;
   timestamp: Date;
+  messageIndex?: number;
 }
 
 export interface FileHistoryState {
@@ -178,11 +179,13 @@ export async function fileHistoryMakeSnapshot(
   messageId: string,
   sessionId: string,
   baseDir: string = DEFAULT_BASE_DIR,
+  messageIndex?: number,
 ): Promise<void> {
   const snapshot: FileHistorySnapshot = {
     messageId,
     trackedFileBackups: new Map(),
     timestamp: new Date(),
+    ...(messageIndex !== undefined ? { messageIndex } : {}),
   };
 
   for (const filePath of state.trackedFiles) {
