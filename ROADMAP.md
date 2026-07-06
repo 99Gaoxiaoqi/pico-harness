@@ -192,6 +192,8 @@ git worktree remove ../pico-1-streaming
 
 ---
 
+## 阶段 2：工具生态扩展（P0）
+
 > **目标**：从 4 个工具扩展到"够用的工具集"。
 
 ### 2.1 Glob 工具（文件匹配）
@@ -348,12 +350,12 @@ git worktree remove ../pico-1-streaming
 | 阶段 | 总任务数 | 完成 | 状态 |
 |------|---------|------|------|
 | 阶段 1 | 5 | 5 | ✅ 完成 |
-| 阶段 1.5 | 8 | 7 | 🟡 1.5.8 CLI 待后续 session 实现 |
-| 阶段 2 | 7 | 0 | 🔴 未开始 |
+| 阶段 1.5 | 8 | 8 | ✅ 完成 |
+| 阶段 2 | 7 | 1 | 🟡 2.5 Background Tasks 已完成 |
 | 阶段 3 | 7 | 0 | 🔴 未开始 |
 | 阶段 4 | 5 | 0 | 🔴 未开始 |
 | 阶段 5 | 8 | 0 | 🔴 未开始 |
-| **总计** | **40** | **12** | — |
+| **总计** | **40** | **14** | — |
 
 ---
 
@@ -365,6 +367,12 @@ git worktree remove ../pico-1-streaming
 
 ## 📅 变更记录
 
+- 2026-07-07：阶段 1.5.8 CLI 集成与阶段 2.5 Background Tasks 完成
+  - CLI 支持 `--list-snapshots`、`--rewind <message-id>` 和 `--rewind-mode code|conversation|both`
+  - 文件历史快照 manifest 持久化，支持跨 CLI 进程列点和回滚
+  - BashTool 支持 `background: true`，新增 `task_list` / `task_output` / `task_stop`
+  - 后台任务支持 stdout/stderr 环形缓冲、停止超时兜底和已完成任务裁剪
+  - 验证：目标测试 97 个通过，全量 `npm test` 835 个通过，真实模型 CLI / 流式 / 子代理集成通过
 - 2026-07-07：1.5.6 JSONL 持久化 + compaction 边界 + BashTool 重定向检测完成（subagent 执行，已合并）
   - undo 事件 JSONL 持久化 + recover 重放（+14 测试）
   - BashTool `>`/`>>` 重定向目标备份（+10 测试）
