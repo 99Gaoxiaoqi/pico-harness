@@ -240,7 +240,7 @@ describe("WriteFileTool", () => {
   it("写入新文件并可被读回", async () => {
     const tool = new WriteFileTool(workDir);
     const out = await tool.execute(JSON.stringify({ path: "a.txt", content: "hello" }));
-    expect(out).toContain("成功");
+    expect(out).toContain("新建");
     const readBack = await readFile(join(workDir, "a.txt"), "utf8");
     expect(readBack).toBe("hello");
   });
