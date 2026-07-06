@@ -161,6 +161,23 @@ describe("FileHistory 1.5.6 对话 undo", () => {
     expect(recovered.length).toBe(2);
     expect(recovered.getHistory().map((m) => m.content)).toEqual(["u1", "a1"]);
   });
+
+  it("undo 超过 compaction 后用户轮次数时保留 summary 边界", async () => {
+    const persisted = new Session("undo-compaction", workDir, { persistence: true });
+    persisted.append({ role: "user", content: "u1" }, { role: "assistant", content: "a1" });
+    persisted.append({ role: "user", content: "u2" }, { role: "assistant", content: "a2" });
+    persisted.append({ role: "user", content: "u3" }, { role: "assistant", content: "a3" });
+    await flushPersistence();
+    persisted.applyCompaction("summary", 4);
+    await flushPersistence();
+
+    persisted.undo(10);
+    await flushPersistence();
+
+    expect(persisted.getHistory().map((m) => m.content)).toEqual(["summary"]);
+    const recovered = await new SessionManager().getOrCreate("undo-compaction", workDir, { persistence: true });
+    expect(recovered.getHistory().map((m) => m.content)).toEqual(["summary"]);
+  });
 });
 
 describe("FileHistory 1.5.7 三轴 rewind", () => {
