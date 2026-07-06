@@ -8,6 +8,7 @@ import {
   fileHistoryTrackEdit,
 } from "../src/safety/file-history.js";
 import {
+  assertFileHistoryCliFlags,
   formatFileHistorySnapshots,
   listFileHistorySnapshotSummaries,
   rewindFileHistoryFromCli,
@@ -171,5 +172,11 @@ describe("CLI FileHistory 1.5.8", () => {
       }),
     ]);
     recovered.close();
+  });
+
+  it("--list-snapshots 与 --rewind 同时提供时明确拒绝", () => {
+    expect(() =>
+      assertFileHistoryCliFlags({ listSnapshots: true, rewind: true }),
+    ).toThrow("--list-snapshots 不能和 --rewind 同时使用");
   });
 });

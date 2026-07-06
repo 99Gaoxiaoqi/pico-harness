@@ -29,13 +29,12 @@ import { ReminderInjector, ToolGuardrailController, type GuardrailOptions } from
 import { IterationBudget, type BudgetConfig } from "./budget.js";
 import { Tracer, exportTraceToFile, truncate, type Span } from "../observability/trace.js";
 import { logger } from "../observability/logger.js";
-import { extractBashRedirectTargets } from "../tools/registry-impl.js";
+import { extractBashRedirectTargets, safeResolve } from "../tools/registry-impl.js";
 import type { Session } from "./session.js";
 import type { ToolObservationProcessor } from "../tools/tool-result-observation.js";
 import { ToolAccesses } from "../tools/tool-access.js";
 import { ToolScheduler } from "../tools/tool-scheduler.js";
 import { fileHistoryTrackEdit, fileHistoryMakeSnapshot } from "../safety/file-history.js";
-import { resolve } from "node:path";
 
 /** WorkingMemory 滑动窗口大小:截取最近 N 条消息供压缩器判断(含远期历史) */
 const DEFAULT_WORKING_MEMORY_LIMIT = 20;
@@ -420,7 +419,7 @@ export class AgentEngine implements AgentRunner {
         }
         reporter.onTurnStart(turnCount);
         const turnSpan = rootSpan?.startChild(`Turn-${turnCount}`);
-        const currentMessageId = `turn-${turnCount}`;
+        const currentMessageId = `turn-${session.fileHistory.snapshotSequence + 1}`;
         this.registry.setPreWriteHook?.(async (toolName, args) => {
           try {
             if (toolName === "write_file" || toolName === "edit_file") {
@@ -428,7 +427,7 @@ export class AgentEngine implements AgentRunner {
               if (!path) return;
               await fileHistoryTrackEdit(
                 session.fileHistory,
-                resolve(this.workDir, path),
+                safeResolve(this.workDir, path),
                 currentMessageId,
                 session.id,
               );
@@ -655,7 +654,9 @@ export class AgentEngine implements AgentRunner {
             session.id,
             undefined,
             session.length,
-          ).catch(() => {});
+          ).catch((err) =>
+            logger.warn({ err: String(err) }, "[FileHistory] 每轮快照创建失败"),
+          );
           turnSpan?.end();
         }
       }

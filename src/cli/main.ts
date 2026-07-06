@@ -49,6 +49,7 @@ import { CostTracker } from "../observability/tracker.js";
 import { Tracer } from "../observability/trace.js";
 import { runAgentFromCli } from "./run-agent.js";
 import {
+  assertFileHistoryCliFlags,
   defaultCliSessionId,
   formatFileHistorySnapshots,
   listFileHistorySnapshotSummaries,
@@ -290,6 +291,11 @@ async function main() {
   const enableThinking = values.thinking !== "false";
   const planMode = values.plan;
   const traceEnabled = values.trace;
+
+  assertFileHistoryCliFlags({
+    listSnapshots: values["list-snapshots"],
+    rewind: values.rewind,
+  });
 
   if (values["list-snapshots"] || values.rewind) {
     const workDir = await resolveCliWorkDir(values.dir);

@@ -29,7 +29,7 @@ export interface ToolRegistryOptions {
  * 路径安全检查:确保路径在 workDir 之内,防路径穿越。
  * 返回规范化的绝对路径;越界则抛错。
  */
-function safeResolve(workDir: string, path: string): string {
+export function safeResolve(workDir: string, path: string): string {
   const base = resolve(workDir);
   const fullPath = isAbsolute(path) ? resolve(path) : resolve(base, path);
   const rel = relative(base, fullPath);
