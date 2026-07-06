@@ -165,10 +165,10 @@ git worktree remove ../pico-1-streaming
 ### 1.5.6 对话 undo ✅
 - [x] Session 新增 `undo(count)` 方法
 - [x] 从 history 末尾向前删，跳过 injection（system 消息）
-- [ ] 遇到 compaction 边界停止（后续补）
+- [x] 遇到 compaction 边界停止
 - [x] 截断到第 count 个 user prompt 之前
 - [ ] 清空 deferredMessages / pendingToolResultIds（字段预留到 3.4）
-- [ ] JSONL 持久化：追加 undo 记录（后续补）
+- [x] JSONL 持久化：追加 undo 记录
 - [x] Session 新增 `rewindTo(messageIndex)`：截断到指定位
 - [x] 测试：对话 5 轮 → undo(2) → 验证只剩 3 轮；undo 跳过 injection（6 个测试通过）
 - [x] 提交
