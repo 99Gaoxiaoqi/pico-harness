@@ -158,6 +158,26 @@ export class AgentEngine implements AgentRunner {
     this.reporter = opts.reporter ?? new SilentReporter();
     this.observationProcessor = opts.observationProcessor;
     this.tracer = opts.tracer;
+
+    // 流式 provider 包装:如果 provider 支持 generateStream,
+    // 把 generate() 替换为 generateStream(),同时把 delta 转发给 reporter.onTextDelta。
+    // 这样 generateWithRetry / generateWithOverflowRetry 无需改动,自动获得流式能力。
+    const generateStreamFn = this.provider.generateStream;
+    if (generateStreamFn) {
+      const realProvider = this.provider;
+      const reporter = this.reporter;
+      this.provider = {
+        generate: (msgs: Message[], tools: ToolDefinition[]) =>
+          generateStreamFn.call(realProvider, msgs, tools, (delta: string) => {
+            reporter.onTextDelta?.(delta);
+          }),
+        get modelName() {
+          return realProvider.modelName;
+        },
+        isRetryableError: realProvider.isRetryableError,
+        generateStream: generateStreamFn.bind(realProvider),
+      };
+    }
   }
 
   /**

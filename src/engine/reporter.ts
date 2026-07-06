@@ -21,6 +21,8 @@ export interface Reporter {
   onTurnStart(turn: number): void;
   /** 任务完成退出循环时调用 */
   onFinish(): void;
+  /** 流式输出:模型每生成一段文本就调用(仅 generateStream 时触发) */
+  onTextDelta?(delta: string): void;
 }
 
 /** 默认终端 Reporter:把所有事件打印到控制台 */
@@ -57,6 +59,10 @@ export class TerminalReporter implements Reporter {
 
   onFinish(): void {
     console.log("[Engine] 模型未请求调用工具,任务宣告完成。");
+  }
+
+  onTextDelta(delta: string): void {
+    process.stdout.write(delta);
   }
 }
 
