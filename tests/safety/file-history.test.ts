@@ -274,7 +274,7 @@ describe("FileHistory 1.5.3 每轮快照 makeSnapshot", () => {
     await fileHistoryMakeSnapshot(state, "m1", sessionId, baseDir);
 
     expect(state.snapshots).toHaveLength(1);
-    const snap = state.snapshots[0];
+    const snap = state.snapshots[0]!;
     const backup = snap.trackedFileBackups.get(src);
     expect(backup).toBeDefined();
     expect(backup!.backupFileName).not.toBeNull();
@@ -293,7 +293,7 @@ describe("FileHistory 1.5.3 每轮快照 makeSnapshot", () => {
     writeFileSync(src, "v2\n");
     await fileHistoryMakeSnapshot(state, "m2", sessionId, baseDir);
 
-    const snap2 = state.snapshots[1];
+    const snap2 = state.snapshots[1]!;
     const backup = snap2.trackedFileBackups.get(src);
     expect(backup).toBeDefined();
     expect(backup!.version).toBe(2);
@@ -309,11 +309,11 @@ describe("FileHistory 1.5.3 每轮快照 makeSnapshot", () => {
     await fileHistoryTrackEdit(state, src, "m1", sessionId, baseDir);
     await fileHistoryMakeSnapshot(state, "m1", sessionId, baseDir);
 
-    const v1Backup = state.snapshots[0].trackedFileBackups.get(src)!;
+    const v1Backup = state.snapshots[0]!.trackedFileBackups.get(src)!;
 
     await fileHistoryMakeSnapshot(state, "m2", sessionId, baseDir);
 
-    const v2Backup = state.snapshots[1].trackedFileBackups.get(src)!;
+    const v2Backup = state.snapshots[1]!.trackedFileBackups.get(src)!;
     expect(v2Backup.backupFileName).toBe(v1Backup.backupFileName);
     expect(v2Backup.version).toBe(v1Backup.version);
 
@@ -331,7 +331,7 @@ describe("FileHistory 1.5.3 每轮快照 makeSnapshot", () => {
     rmSync(src, { force: true });
     await fileHistoryMakeSnapshot(state, "m2", sessionId, baseDir);
 
-    const snap2 = state.snapshots[1];
+    const snap2 = state.snapshots[1]!;
     const backup = snap2.trackedFileBackups.get(src);
     expect(backup).toBeDefined();
     expect(backup!.backupFileName).toBeNull();
@@ -441,7 +441,7 @@ describe("FileHistory 1.5.4 回滚 rewind", () => {
     await fileHistoryRewind(state, "m1", sessionId, baseDir);
 
     expect(state.snapshots).toHaveLength(1);
-    expect(state.snapshots[0].messageId).toBe("m1");
+    expect(state.snapshots[0]!.messageId).toBe("m1");
   });
 
   it("rewind 后可继续 makeSnapshot", async () => {
@@ -461,6 +461,6 @@ describe("FileHistory 1.5.4 回滚 rewind", () => {
     await fileHistoryMakeSnapshot(state, "m3", sessionId, baseDir);
 
     expect(state.snapshots).toHaveLength(2);
-    expect(state.snapshots[1].messageId).toBe("m3");
+    expect(state.snapshots[1]!.messageId).toBe("m3");
   });
 });

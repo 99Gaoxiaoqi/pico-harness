@@ -18,6 +18,7 @@ import type { CostStatus } from "../observability/pricing.js";
 import { logger } from "../observability/logger.js";
 import { SessionStore } from "./session-store.js";
 import { FTS5Store } from "../memory/fts5-store.js";
+import { createFileHistoryState, type FileHistoryState } from "../safety/file-history.js";
 
 /** 清洗 sessionId 为安全文件名片段(/、: 等破坏路径的字符替换为 _) */
 function sanitizeFilePart(value: string): string {
@@ -54,6 +55,8 @@ export class Session {
   lastCostStatus: CostStatus | null = null;
 
   private history: Message[] = [];
+
+  readonly fileHistory: FileHistoryState = createFileHistoryState();
 
   /**
    * 持久化:事件溯源 JSONL。undefined 表示持久化关闭(环境变量门控)。
