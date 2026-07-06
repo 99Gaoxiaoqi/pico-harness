@@ -239,3 +239,32 @@ export async function fileHistoryMakeSnapshot(
     }
   }
 }
+
+export async function fileHistoryRewind(
+  state: FileHistoryState,
+  messageId: string,
+  sessionId: string,
+  baseDir: string = DEFAULT_BASE_DIR,
+): Promise<void> {
+  const targetIdx = state.snapshots.findIndex((s) => s.messageId === messageId);
+  if (targetIdx === -1) {
+    throw new Error(`FileHistory: 找不到 messageId=${messageId} 的快照`);
+  }
+  const target = state.snapshots[targetIdx];
+
+  for (const [filePath, backup] of target.trackedFileBackups) {
+    if (backup.backupFileName === null) {
+      await unlink(filePath).catch(() => {});
+    } else {
+      await restoreBackup(filePath, backup.backupFileName, sessionId, baseDir);
+    }
+  }
+
+  for (const filePath of state.trackedFiles) {
+    if (!target.trackedFileBackups.has(filePath)) {
+      await unlink(filePath).catch(() => {});
+    }
+  }
+
+  state.snapshots = state.snapshots.slice(0, targetIdx + 1);
+}

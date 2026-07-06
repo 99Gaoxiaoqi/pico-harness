@@ -10,6 +10,7 @@ import {
   createFileHistoryState,
   fileHistoryTrackEdit,
   fileHistoryMakeSnapshot,
+  fileHistoryRewind,
   type FileHistoryState,
 } from "../../src/safety/file-history.js";
 
@@ -359,5 +360,107 @@ describe("FileHistory 1.5.3 每轮快照 makeSnapshot", () => {
     }
 
     expect(state.snapshots.length).toBeLessThanOrEqual(100);
+  });
+});
+
+describe("FileHistory 1.5.4 回滚 rewind", () => {
+  let workDir: string;
+  let baseDir: string;
+  const sessionId = "test-session-004";
+  let state: FileHistoryState;
+
+  beforeEach(() => {
+    workDir = mkdtempSync(join(tmpdir(), "pico-fh-src-"));
+    baseDir = mkdtempSync(join(tmpdir(), "pico-fh-base-"));
+    state = createFileHistoryState();
+  });
+
+  afterEach(() => {
+    rmSync(workDir, { recursive: true, force: true });
+    rmSync(baseDir, { recursive: true, force: true });
+  });
+
+  it("改 3 个文件后 rewind 全部恢复", async () => {
+    const files = ["a.ts", "b.ts", "c.ts"].map(f => join(workDir, f));
+    for (const f of files) writeFileSync(f, "original\n");
+
+    for (const f of files) {
+      await fileHistoryTrackEdit(state, f, "m1", sessionId, baseDir);
+    }
+    await fileHistoryMakeSnapshot(state, "m1", sessionId, baseDir);
+
+    for (const f of files) writeFileSync(f, "modified\n");
+
+    await fileHistoryRewind(state, "m1", sessionId, baseDir);
+
+    for (const f of files) {
+      expect(readFileSync(f, "utf8")).toBe("original\n");
+    }
+  });
+
+  it("新建文件 rewind 后被 unlink", async () => {
+    const existing = join(workDir, "existing.ts");
+    const newFile = join(workDir, "new.ts");
+    writeFileSync(existing, "v1\n");
+
+    await fileHistoryTrackEdit(state, existing, "m1", sessionId, baseDir);
+    await fileHistoryTrackEdit(state, newFile, "m1", sessionId, baseDir);
+    await fileHistoryMakeSnapshot(state, "m1", sessionId, baseDir);
+
+    writeFileSync(newFile, "created by agent\n");
+
+    await fileHistoryRewind(state, "m1", sessionId, baseDir);
+
+    expect(existsSync(newFile)).toBe(false);
+    expect(readFileSync(existing, "utf8")).toBe("v1\n");
+  });
+
+  it("rewind 到不存在的 messageId 抛错", async () => {
+    const src = join(workDir, "file.ts");
+    writeFileSync(src, "content\n");
+
+    await fileHistoryTrackEdit(state, src, "m1", sessionId, baseDir);
+    await fileHistoryMakeSnapshot(state, "m1", sessionId, baseDir);
+
+    await expect(fileHistoryRewind(state, "no-such-msg", sessionId, baseDir)).rejects.toThrow();
+  });
+
+  it("rewind 后 snapshots 截断到 target", async () => {
+    const src = join(workDir, "file.ts");
+    writeFileSync(src, "v1\n");
+
+    await fileHistoryTrackEdit(state, src, "m1", sessionId, baseDir);
+    await fileHistoryMakeSnapshot(state, "m1", sessionId, baseDir);
+
+    writeFileSync(src, "v2\n");
+    await fileHistoryMakeSnapshot(state, "m2", sessionId, baseDir);
+
+    writeFileSync(src, "v3\n");
+    await fileHistoryMakeSnapshot(state, "m3", sessionId, baseDir);
+
+    await fileHistoryRewind(state, "m1", sessionId, baseDir);
+
+    expect(state.snapshots).toHaveLength(1);
+    expect(state.snapshots[0].messageId).toBe("m1");
+  });
+
+  it("rewind 后可继续 makeSnapshot", async () => {
+    const src = join(workDir, "file.ts");
+    writeFileSync(src, "v1\n");
+
+    await fileHistoryTrackEdit(state, src, "m1", sessionId, baseDir);
+    await fileHistoryMakeSnapshot(state, "m1", sessionId, baseDir);
+
+    writeFileSync(src, "v2\n");
+    await fileHistoryMakeSnapshot(state, "m2", sessionId, baseDir);
+
+    await fileHistoryRewind(state, "m1", sessionId, baseDir);
+    expect(readFileSync(src, "utf8")).toBe("v1\n");
+
+    writeFileSync(src, "v3\n");
+    await fileHistoryMakeSnapshot(state, "m3", sessionId, baseDir);
+
+    expect(state.snapshots).toHaveLength(2);
+    expect(state.snapshots[1].messageId).toBe("m3");
   });
 });

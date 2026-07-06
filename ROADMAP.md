@@ -143,15 +143,15 @@ git worktree remove ../pico-1-streaming
 - [x] 测试：改文件 → 快照 → 再改 → 快照；未变的文件验证复用（6 个测试通过）
 - [x] 提交
 
-### 1.5.4 回滚（rewind）
-- [ ] `fileHistoryRewind(state, messageId)` 函数
-- [ ] `applySnapshot(state, targetSnapshot)`：遍历所有 trackedFiles
+### 1.5.4 回滚（rewind）✅
+- [x] `fileHistoryRewind(state, messageId)` 函数
+- [x] `applySnapshot(state, targetSnapshot)`：遍历所有 trackedFiles（内联实现）
   - null → `unlink` 删除（Agent 新建的文件被撤销）
   - 有变化 → `restoreBackup`（copyFile 从备份恢复）
   - 无变化 → 跳过
-- [ ] `restoreBackup(filePath, backupFileName)`：copyFile + lazy mkdir
-- [ ] 测试：改 3 个文件 → 回滚 → 验证全部恢复；新建文件回滚后验证删除
-- [ ] 提交
+- [x] `restoreBackup(filePath, backupFileName)`：copyFile + lazy mkdir（1.5.1 已实现）
+- [x] 测试：改 3 个文件 → 回滚 → 验证全部恢复；新建文件回滚后验证删除（5 个测试通过）
+- [x] 提交
 
 ### 1.5.5 集成到工具系统
 - [ ] EditFileTool.execute 前调 `fileHistoryTrackEdit`
