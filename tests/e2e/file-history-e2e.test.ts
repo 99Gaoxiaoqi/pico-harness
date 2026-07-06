@@ -1,8 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
-import { ToolRegistry, WriteFileTool, EditFileTool } from "../../src/tools/registry-impl.js";
+import { tmpdir, homedir } from "node:os";
+import type { LLMProvider } from "../../src/provider/interface.js";
+import { AgentEngine } from "../../src/engine/loop.js";
+import { Session } from "../../src/engine/session.js";
+import { ToolRegistry, WriteFileTool, EditFileTool, BashTool } from "../../src/tools/registry-impl.js";
 import {
   createFileHistoryState,
   fileHistoryTrackEdit,
@@ -13,16 +16,18 @@ import {
 describe("FileHistory 1.5.5 集成到工具系统", () => {
   let workDir: string;
   let baseDir: string;
-  const sessionId = "test-session-005";
+  let sessionId: string;
 
   beforeEach(() => {
     workDir = mkdtempSync(join(tmpdir(), "pico-fh-e2e-"));
     baseDir = mkdtempSync(join(tmpdir(), "pico-fh-base-"));
+    sessionId = `test-session-005-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   });
 
   afterEach(() => {
     rmSync(workDir, { recursive: true, force: true });
     rmSync(baseDir, { recursive: true, force: true });
+    rmSync(join(homedir(), ".pico", "file-history", sessionId), { recursive: true, force: true });
   });
 
   describe("ToolRegistry preWriteHook", () => {
@@ -139,6 +144,62 @@ describe("FileHistory 1.5.5 集成到工具系统", () => {
 
       expect(result.isError).toBe(false);
       expect(readFileSync(join(workDir, "test.txt"), "utf8")).toBe("hello");
+    });
+
+    it("bash 重定向通过 loop preWriteHook 备份所有目标", async () => {
+      const firstPath = join(workDir, "first.txt");
+      const secondPath = join(workDir, "second.txt");
+      writeFileSync(firstPath, "original first");
+      writeFileSync(secondPath, "original second");
+
+      const registry = new ToolRegistry();
+      registry.register(new BashTool(workDir));
+      let calls = 0;
+      const provider: LLMProvider = {
+        async generate() {
+          calls++;
+          if (calls === 1) {
+            return {
+              role: "assistant",
+              content: "",
+              toolCalls: [
+                {
+                  id: "bash-1",
+                  name: "bash",
+                  arguments: JSON.stringify({
+                    command: "printf replaced > first.txt; printf appended >> second.txt",
+                  }),
+                },
+              ],
+            };
+          }
+          return { role: "assistant", content: "done" };
+        },
+      };
+      const session = new Session(sessionId, workDir, { persistence: false });
+      session.append({ role: "user", content: "run bash redirects" });
+      const engine = new AgentEngine({ provider, registry, workDir, maxTurns: 3 });
+
+      await engine.run(session);
+
+      expect(session.fileHistory.trackedFiles.has(firstPath)).toBe(true);
+      expect(session.fileHistory.trackedFiles.has(secondPath)).toBe(true);
+      const firstSnapshot = session.fileHistory.snapshots.find((snapshot) =>
+        snapshot.trackedFileBackups.has(firstPath),
+      );
+      expect(firstSnapshot).toBeDefined();
+      const firstBackup = firstSnapshot!.trackedFileBackups.get(firstPath);
+      const secondBackup = firstSnapshot!.trackedFileBackups.get(secondPath);
+      expect(firstBackup?.backupFileName).toBeDefined();
+      expect(secondBackup?.backupFileName).toBeDefined();
+      expect(readFileSync(resolveBackupPath(sessionId, firstBackup!.backupFileName!), "utf8")).toBe(
+        "original first",
+      );
+      expect(readFileSync(resolveBackupPath(sessionId, secondBackup!.backupFileName!), "utf8")).toBe(
+        "original second",
+      );
+      expect(readFileSync(firstPath, "utf8")).toBe("replaced");
+      expect(readFileSync(secondPath, "utf8")).toBe("original secondappended");
     });
   });
 });

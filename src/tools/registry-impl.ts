@@ -403,6 +403,18 @@ export class WriteFileTool implements BaseTool {
 const BASH_TIMEOUT_MS = 30_000;
 /** bash 输出截断长度,防 OOM */
 const BASH_MAX_BYTES = 8000;
+const REDIRECT_RE = /(?:>>|>)\s*(\S+)/g;
+
+export function extractBashRedirectTargets(workDir: string, command: string): string[] {
+  const targets: string[] = [];
+  REDIRECT_RE.lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = REDIRECT_RE.exec(command)) !== null) {
+    const target = match[1]!.replace(/[;|&]+$/u, "");
+    if (target) targets.push(safeResolve(workDir, target));
+  }
+  return targets;
+}
 
 export class BashTool implements BaseTool {
   constructor(private readonly workDir: string) {}
