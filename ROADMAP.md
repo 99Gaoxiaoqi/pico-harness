@@ -173,13 +173,13 @@ git worktree remove ../pico-1-streaming
 - [x] 测试：对话 5 轮 → undo(2) → 验证只剩 3 轮；undo 跳过 injection（6 个测试通过）
 - [x] 提交
 
-### 1.5.7 三轴选择
-- [ ] `rewindCode(messageId)`：只回滚文件，不碰对话
-- [ ] `rewindConversation(messageIndex)`：只截断对话，不碰文件
-- [ ] `rewindBoth(messageId)`：两者都回滚
-- [ ] 回滚对话时生成新 conversationId（fork 语义，保留原历史在磁盘）
-- [ ] 测试：三轴各自独立 + 组合
-- [ ] 提交
+### 1.5.7 三轴选择 ✅
+- [x] `rewindCode(messageId)`：只回滚文件，不碰对话
+- [x] `rewindConversation(messageIndex)`：只截断对话，不碰文件
+- [x] `rewindBoth(messageId, messageIndex)`：两者都回滚
+- [x] 回滚对话时生成新 conversationId（fork 语义，保留原历史在磁盘）
+- [x] 测试：三轴各自独立 + 组合（3 个测试通过，累计 44）
+- [x] 提交
 
 ### 1.5.8 CLI 集成 + 替换旧方案
 - [ ] CLI 加 `--rewind` 命令：列出可选快照点
