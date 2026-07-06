@@ -9,6 +9,7 @@ import {
   restoreBackup,
   createFileHistoryState,
   fileHistoryTrackEdit,
+  fileHistoryMakeSnapshot,
   type FileHistoryState,
 } from "../../src/safety/file-history.js";
 
@@ -241,5 +242,122 @@ describe("FileHistory 1.5.2 写前备份 trackEdit", () => {
     await fileHistoryTrackEdit(state, src, "m1", sessionId, baseDir);
 
     expect(state.trackedFiles.has(src)).toBe(true);
+  });
+});
+
+describe("FileHistory 1.5.3 每轮快照 makeSnapshot", () => {
+  let workDir: string;
+  let baseDir: string;
+  const sessionId = "test-session-003";
+  let state: FileHistoryState;
+
+  beforeEach(() => {
+    workDir = mkdtempSync(join(tmpdir(), "pico-fh-src-"));
+    baseDir = mkdtempSync(join(tmpdir(), "pico-fh-base-"));
+    state = createFileHistoryState();
+  });
+
+  afterEach(() => {
+    rmSync(workDir, { recursive: true, force: true });
+    rmSync(baseDir, { recursive: true, force: true });
+  });
+
+  it("trackEdit 过的文件用 pendingTrackEdits 的修改前备份", async () => {
+    const src = join(workDir, "file.ts");
+    writeFileSync(src, "original\n");
+
+    await fileHistoryTrackEdit(state, src, "m1", sessionId, baseDir);
+
+    writeFileSync(src, "modified\n");
+
+    await fileHistoryMakeSnapshot(state, "m1", sessionId, baseDir);
+
+    expect(state.snapshots).toHaveLength(1);
+    const snap = state.snapshots[0];
+    const backup = snap.trackedFileBackups.get(src);
+    expect(backup).toBeDefined();
+    expect(backup!.backupFileName).not.toBeNull();
+
+    const backupPath = resolveBackupPath(sessionId, backup!.backupFileName!, baseDir);
+    expect(readFileSync(backupPath, "utf8")).toBe("original\n");
+  });
+
+  it("未 trackEdit 但变化的文件创建新版本备份", async () => {
+    const src = join(workDir, "file.ts");
+    writeFileSync(src, "v1\n");
+
+    await fileHistoryTrackEdit(state, src, "m1", sessionId, baseDir);
+    await fileHistoryMakeSnapshot(state, "m1", sessionId, baseDir);
+
+    writeFileSync(src, "v2\n");
+    await fileHistoryMakeSnapshot(state, "m2", sessionId, baseDir);
+
+    const snap2 = state.snapshots[1];
+    const backup = snap2.trackedFileBackups.get(src);
+    expect(backup).toBeDefined();
+    expect(backup!.version).toBe(2);
+
+    const backupPath = resolveBackupPath(sessionId, backup!.backupFileName!, baseDir);
+    expect(readFileSync(backupPath, "utf8")).toBe("v2\n");
+  });
+
+  it("未变文件复用旧备份不创建新 copyFile", async () => {
+    const src = join(workDir, "file.ts");
+    writeFileSync(src, "stable\n");
+
+    await fileHistoryTrackEdit(state, src, "m1", sessionId, baseDir);
+    await fileHistoryMakeSnapshot(state, "m1", sessionId, baseDir);
+
+    const v1Backup = state.snapshots[0].trackedFileBackups.get(src)!;
+
+    await fileHistoryMakeSnapshot(state, "m2", sessionId, baseDir);
+
+    const v2Backup = state.snapshots[1].trackedFileBackups.get(src)!;
+    expect(v2Backup.backupFileName).toBe(v1Backup.backupFileName);
+    expect(v2Backup.version).toBe(v1Backup.version);
+
+    const v2Path = resolveBackupPath(sessionId, getBackupFileName(src, 2), baseDir);
+    expect(existsSync(v2Path)).toBe(false);
+  });
+
+  it("文件被删时标记 backupFileName=null", async () => {
+    const src = join(workDir, "file.ts");
+    writeFileSync(src, "content\n");
+
+    await fileHistoryTrackEdit(state, src, "m1", sessionId, baseDir);
+    await fileHistoryMakeSnapshot(state, "m1", sessionId, baseDir);
+
+    rmSync(src, { force: true });
+    await fileHistoryMakeSnapshot(state, "m2", sessionId, baseDir);
+
+    const snap2 = state.snapshots[1];
+    const backup = snap2.trackedFileBackups.get(src);
+    expect(backup).toBeDefined();
+    expect(backup!.backupFileName).toBeNull();
+  });
+
+  it("makeSnapshot 后 pendingTrackEdits 清空", async () => {
+    const src = join(workDir, "file.ts");
+    writeFileSync(src, "content\n");
+
+    await fileHistoryTrackEdit(state, src, "m1", sessionId, baseDir);
+    expect(state.pendingTrackEdits.size).toBeGreaterThan(0);
+
+    await fileHistoryMakeSnapshot(state, "m1", sessionId, baseDir);
+
+    expect(state.pendingTrackEdits.size).toBe(0);
+  });
+
+  it("100 个快照上限:推 101 个后只剩 100", async () => {
+    const src = join(workDir, "file.ts");
+    writeFileSync(src, "stable\n");
+
+    await fileHistoryTrackEdit(state, src, "m0", sessionId, baseDir);
+
+    for (let i = 0; i < 101; i++) {
+      await fileHistoryMakeSnapshot(state, `m${i}`, sessionId, baseDir);
+    }
+
+    expect(state.snapshots.length).toBeLessThanOrEqual(100);
   });
 });
