@@ -86,6 +86,9 @@ describe("runAgentFromCli", () => {
     expect(provider.calls[0]?.toolNames).toEqual(
       expect.arrayContaining([
         "bash",
+        "task_list",
+        "task_output",
+        "task_stop",
         "read_file",
         "write_file",
         "edit_file",

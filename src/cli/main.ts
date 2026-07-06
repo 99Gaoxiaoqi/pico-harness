@@ -25,12 +25,11 @@ import { resolveProviderProfile } from "../provider/profile.js";
 import { resolveThinkingEffort, type ThinkingEffort } from "../provider/thinking.js";
 import {
   BashTool,
-  EditFileTool,
-  EchoTool,
   ReadFileTool,
   ToolRegistry,
-  WriteFileTool,
 } from "../tools/registry-impl.js";
+import { buildDefaultToolRegistry } from "../tools/default-registry.js";
+import { BackgroundManager } from "../tools/background-manager.js";
 import { createFeishuApprovalMiddleware, FeishuBot, loadFeishuConfig } from "../feishu/bot.js";
 import { PromptComposer } from "../context/composer.js";
 import { SkillLoader, SkillViewTool } from "../context/skill.js";
@@ -64,15 +63,16 @@ import { FTS5Store } from "../memory/fts5-store.js";
   process.on(evt, () => FTS5Store.closeAll());
 });
 
-function buildRegistry(workDir: string): ToolRegistry {
-  const registry = new ToolRegistry({ truncateResults: false });
-  registry.register(new EchoTool());
-  registry.register(new ReadFileTool(workDir));
-  registry.register(new WriteFileTool(workDir));
-  registry.register(new EditFileTool(workDir));
-  registry.register(new BashTool(workDir));
-  registry.register(new SkillViewTool(new SkillLoader(workDir)));
-  return registry;
+const cliBackgroundManager = new BackgroundManager();
+
+function buildRegistry(
+  workDir: string,
+  backgroundManager: BackgroundManager = cliBackgroundManager,
+): ToolRegistry {
+  return buildDefaultToolRegistry(workDir, {
+    truncateResults: false,
+    backgroundManager,
+  });
 }
 
 /**
@@ -82,7 +82,7 @@ function buildRegistry(workDir: string): ToolRegistry {
 function buildReadOnlyRegistry(workDir: string): ToolRegistry {
   const registry = new ToolRegistry({ truncateResults: false });
   registry.register(new ReadFileTool(workDir));
-  registry.register(new BashTool(workDir));
+  registry.register(new BashTool(workDir, undefined, { allowBackground: false }));
   registry.register(new SkillViewTool(new SkillLoader(workDir)));
   return registry;
 }
@@ -171,6 +171,7 @@ async function serve(
   const workDir = process.cwd();
   const modelName = process.env.LLM_MODEL ?? (kind === "openai" ? "glm-5.2" : "claude-3-5-sonnet");
   const systemPrompt = planMode ? undefined : await new PromptComposer(workDir).build();
+  const backgroundManager = new BackgroundManager();
   const server = createServer(async (req, res) => {
     if (req.method !== "POST" || req.url !== "/ask") {
       res.writeHead(404, { "Content-Type": "application/json" });
@@ -204,7 +205,7 @@ async function serve(
       })();
 
       const provider = createProvider(kind, undefined, requestThinkingEffort);
-      const registry = buildRegistry(workDir);
+      const registry = buildRegistry(workDir, backgroundManager);
       registry.use(buildApprovalMiddleware(terminalNotifier));
       const engine = new AgentEngine({
         provider,
@@ -329,11 +330,12 @@ async function main() {
       process.env.LLM_MODEL ?? (kind === "openai" ? "glm-5.2" : "claude-3-5-sonnet");
     // 预加载自定义角色:飞书 engineFactory 回调是同步的,await 必须提前到这里
     const feishuProfiles = await loadProfiles(workDir);
+    const backgroundManager = new BackgroundManager();
     const bot = new FeishuBot(
       ({ session, reporter }) => {
         const provider = createProvider(kind, undefined, thinkingEffort);
         const trackedProvider = new CostTracker(provider, modelName, session);
-        const registry = buildRegistry(workDir);
+        const registry = buildRegistry(workDir, backgroundManager);
         registry.use(createFeishuApprovalMiddleware(reporter));
         const engine = new AgentEngine({
           provider: trackedProvider,

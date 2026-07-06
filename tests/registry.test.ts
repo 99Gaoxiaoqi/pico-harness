@@ -12,6 +12,7 @@ import {
   ToolRegistry,
   WriteFileTool,
 } from "../src/tools/registry-impl.js";
+import { BackgroundManager } from "../src/tools/background-manager.js";
 import type { BaseTool } from "../src/tools/registry.js";
 import type { ToolDefinition } from "../src/schema/message.js";
 
@@ -269,11 +270,18 @@ describe("WriteFileTool", () => {
 
 describe("BashTool", () => {
   let workDir: string;
+  let backgroundManager: BackgroundManager;
 
   beforeEach(async () => {
     workDir = await mkdtemp(join(tmpdir(), "claw-test-"));
+    backgroundManager = new BackgroundManager();
   });
   afterEach(async () => {
+    for (const task of backgroundManager.list()) {
+      if (task.status === "running") {
+        await backgroundManager.stop(task.taskId);
+      }
+    }
     await rm(workDir, { recursive: true, force: true });
   });
 
@@ -319,6 +327,47 @@ describe("BashTool", () => {
     const tool = new BashTool(workDir);
     const out = await tool.execute(JSON.stringify({ command: "true" }));
     expect(out).toContain("执行成功");
+  });
+
+  it("schema 声明 background 参数", () => {
+    const tool = new BashTool(workDir, backgroundManager);
+    const schema = tool.definition().inputSchema as {
+      properties?: Record<string, unknown>;
+    };
+
+    expect(schema.properties?.background).toMatchObject({ type: "boolean" });
+  });
+
+  it("background=true 时立即返回 taskId 且不等待命令结束", async () => {
+    const tool = new BashTool(workDir, backgroundManager);
+    const startedAt = Date.now();
+
+    const out = await tool.execute(
+      JSON.stringify({
+        command: "node -e \"setTimeout(() => console.log('late'), 500)\"",
+        background: true,
+      }),
+    );
+
+    expect(Date.now() - startedAt).toBeLessThan(200);
+    const parsed = JSON.parse(out) as { taskId: string; pid: number; status: string };
+    expect(parsed.taskId).toMatch(/^bg-/);
+    expect(parsed.pid).toBeGreaterThan(0);
+    expect(parsed.status).toBe("running");
+    expect(backgroundManager.list().map((task) => task.taskId)).toContain(parsed.taskId);
+  });
+
+  it("可在只读场景禁用 background=true", async () => {
+    const tool = new BashTool(workDir, backgroundManager, { allowBackground: false });
+
+    await expect(
+      tool.execute(
+        JSON.stringify({
+          command: "node -e \"setTimeout(() => {}, 1000)\"",
+          background: true,
+        }),
+      ),
+    ).rejects.toThrow("不允许后台执行");
   });
 });
 
