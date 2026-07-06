@@ -18,7 +18,7 @@ import type { CostStatus } from "../observability/pricing.js";
 import { logger } from "../observability/logger.js";
 import { SessionStore } from "./session-store.js";
 import { FTS5Store } from "../memory/fts5-store.js";
-import { createFileHistoryState, type FileHistoryState } from "../safety/file-history.js";
+import { createFileHistoryState, type FileHistoryState, fileHistoryRewind } from "../safety/file-history.js";
 
 /** 清洗 sessionId 为安全文件名片段(/、: 等破坏路径的字符替换为 _) */
 function sanitizeFilePart(value: string): string {
@@ -288,6 +288,19 @@ export class Session {
     this.history = this.history.slice(0, messageIndex);
     this.conversationId = `${this.id}-${Date.now().toString(36)}`;
     this.updatedAt = new Date();
+  }
+
+  async rewindCode(messageId: string): Promise<void> {
+    await fileHistoryRewind(this.fileHistory, messageId, this.id);
+  }
+
+  rewindConversation(messageIndex: number): void {
+    this.rewindTo(messageIndex);
+  }
+
+  async rewindBoth(messageId: string, messageIndex: number): Promise<void> {
+    await fileHistoryRewind(this.fileHistory, messageId, this.id);
+    this.rewindTo(messageIndex);
   }
 
   /**

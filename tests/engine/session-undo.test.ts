@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Session } from "../../src/engine/session.js";
+import { fileHistoryTrackEdit, fileHistoryMakeSnapshot } from "../../src/safety/file-history.js";
 
 describe("FileHistory 1.5.6 对话 undo", () => {
   let workDir: string;
@@ -82,5 +83,76 @@ describe("FileHistory 1.5.6 对话 undo", () => {
     session.undo(1);
 
     expect(session.conversationId).not.toBe(originalConvId);
+  });
+});
+
+describe("FileHistory 1.5.7 三轴 rewind", () => {
+  let workDir: string;
+  let session: Session;
+
+  beforeEach(() => {
+    workDir = mkdtempSync(join(tmpdir(), "pico-tri-"));
+    session = new Session("tri-test", workDir);
+  });
+
+  afterEach(() => {
+    rmSync(workDir, { recursive: true, force: true });
+  });
+
+  it("rewindCode 只回滚文件,对话不变", async () => {
+    const src = join(workDir, "file.ts");
+    writeFileSync(src, "original\n");
+    session.append({ role: "user", content: "msg1" });
+    session.append({ role: "assistant", content: "resp1" });
+
+    await fileHistoryTrackEdit(session.fileHistory, src, "turn-1", session.id);
+    await fileHistoryMakeSnapshot(session.fileHistory, "turn-1", session.id);
+
+    writeFileSync(src, "modified\n");
+    const historyLenBefore = session.length;
+
+    await session.rewindCode("turn-1");
+
+    expect(readFileSync(src, "utf8")).toBe("original\n");
+    expect(session.length).toBe(historyLenBefore);
+  });
+
+  it("rewindConversation 只截断对话,文件不变", async () => {
+    const src = join(workDir, "file.ts");
+    writeFileSync(src, "v1\n");
+    session.append({ role: "user", content: "msg1" });
+    session.append({ role: "assistant", content: "resp1" });
+    session.append({ role: "user", content: "msg2" });
+    session.append({ role: "assistant", content: "resp2" });
+
+    await fileHistoryTrackEdit(session.fileHistory, src, "turn-1", session.id);
+    await fileHistoryMakeSnapshot(session.fileHistory, "turn-1", session.id);
+    writeFileSync(src, "v2\n");
+
+    const originalConvId = session.conversationId;
+
+    session.rewindConversation(2);
+
+    expect(session.length).toBe(2);
+    expect(readFileSync(src, "utf8")).toBe("v2\n");
+    expect(session.conversationId).not.toBe(originalConvId);
+  });
+
+  it("rewindBoth 同时回滚文件和对话", async () => {
+    const src = join(workDir, "file.ts");
+    writeFileSync(src, "original\n");
+    session.append({ role: "user", content: "msg1" });
+    session.append({ role: "assistant", content: "resp1" });
+    session.append({ role: "user", content: "msg2" });
+    session.append({ role: "assistant", content: "resp2" });
+
+    await fileHistoryTrackEdit(session.fileHistory, src, "turn-1", session.id);
+    await fileHistoryMakeSnapshot(session.fileHistory, "turn-1", session.id);
+    writeFileSync(src, "modified\n");
+
+    await session.rewindBoth("turn-1", 2);
+
+    expect(readFileSync(src, "utf8")).toBe("original\n");
+    expect(session.length).toBe(2);
   });
 });
