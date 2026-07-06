@@ -17,6 +17,7 @@ import { toModelTextView, materializeModelText, makeCarriageReturnsVisible } fro
 import { findClosestLines, formatCandidateHint } from "./edit-hint.js";
 // 跨平台 shell:Windows 上统一走 Git Bash,避免 cmd.exe 不识别 POSIX 语义。
 import { execAsync, execOptions } from "../os/shell.js";
+import { BackgroundManager } from "./background-manager.js";
 
 const DEFAULT_RESULT_SIZE_CHARS = 8000;
 
@@ -417,7 +418,10 @@ export function extractBashRedirectTargets(workDir: string, command: string): st
 }
 
 export class BashTool implements BaseTool {
-  constructor(private readonly workDir: string) {}
+  constructor(
+    private readonly workDir: string,
+    private readonly backgroundManager = new BackgroundManager(),
+  ) {}
 
   name(): string {
     return "bash";
@@ -441,6 +445,10 @@ export class BashTool implements BaseTool {
         type: "object",
         properties: {
           command: { type: "string", description: "要执行的 bash 命令,例如: ls -la 或 npm test" },
+          background: {
+            type: "boolean",
+            description: "为 true 时后台启动命令并立即返回 taskId/pid/status,不等待命令结束。",
+          },
         },
         required: ["command"],
       },
@@ -449,11 +457,25 @@ export class BashTool implements BaseTool {
 
   async execute(args: string): Promise<string> {
     let command: string;
+    let background = false;
     try {
-      const input = JSON.parse(args) as { command?: string };
+      const input = JSON.parse(args) as { command?: string; background?: boolean };
       command = input.command ?? "";
+      background = input.background === true;
     } catch {
       throw new Error("参数解析失败: 期望 JSON 含 command 字段");
+    }
+
+    if (background) {
+      const task = this.backgroundManager.start(command, this.workDir);
+      return JSON.stringify({
+        taskId: task.taskId,
+        pid: task.pid,
+        status: task.status,
+        command: task.command,
+        cwd: task.cwd,
+        startedAt: task.startedAt.toISOString(),
+      });
     }
 
     // 驾驭底线 1+2:超时控制 + 工作区绑定
