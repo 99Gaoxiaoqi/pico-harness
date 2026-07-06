@@ -7,6 +7,9 @@ import {
   resolveBackupPath,
   createBackup,
   restoreBackup,
+  createFileHistoryState,
+  fileHistoryTrackEdit,
+  type FileHistoryState,
 } from "../../src/safety/file-history.js";
 
 describe("FileHistory 1.5.1 数据结构与存储层", () => {
@@ -159,5 +162,84 @@ describe("FileHistory 1.5.1 数据结构与存储层", () => {
       expect(existsSync(src)).toBe(true);
       expect(readFileSync(src, "utf8")).toBe("nested content\n");
     });
+  });
+});
+
+describe("FileHistory 1.5.2 写前备份 trackEdit", () => {
+  let workDir: string;
+  let baseDir: string;
+  const sessionId = "test-session-002";
+  let state: FileHistoryState;
+
+  beforeEach(() => {
+    workDir = mkdtempSync(join(tmpdir(), "pico-fh-src-"));
+    baseDir = mkdtempSync(join(tmpdir(), "pico-fh-base-"));
+    state = createFileHistoryState();
+  });
+
+  afterEach(() => {
+    rmSync(workDir, { recursive: true, force: true });
+    rmSync(baseDir, { recursive: true, force: true });
+  });
+
+  it("文件存在时备份修改前内容", async () => {
+    const src = join(workDir, "file.ts");
+    writeFileSync(src, "original\n");
+
+    await fileHistoryTrackEdit(state, src, "m1", sessionId, baseDir);
+
+    const backupName = getBackupFileName(src, 1);
+    const backupPath = resolveBackupPath(sessionId, backupName, baseDir);
+    expect(existsSync(backupPath)).toBe(true);
+    expect(readFileSync(backupPath, "utf8")).toBe("original\n");
+  });
+
+  it("同文件同 messageId 第二次跳过", async () => {
+    const src = join(workDir, "file.ts");
+    writeFileSync(src, "v1\n");
+
+    await fileHistoryTrackEdit(state, src, "m1", sessionId, baseDir);
+
+    writeFileSync(src, "v2\n");
+    await fileHistoryTrackEdit(state, src, "m1", sessionId, baseDir);
+
+    const v1 = resolveBackupPath(sessionId, getBackupFileName(src, 1), baseDir);
+    const v2 = resolveBackupPath(sessionId, getBackupFileName(src, 2), baseDir);
+    expect(existsSync(v1)).toBe(true);
+    expect(existsSync(v2)).toBe(false);
+  });
+
+  it("不同 messageId 创建新版本", async () => {
+    const src = join(workDir, "file.ts");
+    writeFileSync(src, "v1\n");
+
+    await fileHistoryTrackEdit(state, src, "m1", sessionId, baseDir);
+
+    writeFileSync(src, "v2\n");
+    await fileHistoryTrackEdit(state, src, "m2", sessionId, baseDir);
+
+    const v1 = resolveBackupPath(sessionId, getBackupFileName(src, 1), baseDir);
+    const v2 = resolveBackupPath(sessionId, getBackupFileName(src, 2), baseDir);
+    expect(existsSync(v1)).toBe(true);
+    expect(readFileSync(v1, "utf8")).toBe("v1\n");
+    expect(existsSync(v2)).toBe(true);
+    expect(readFileSync(v2, "utf8")).toBe("v2\n");
+  });
+
+  it("文件不存在时不报错且加入 trackedFiles", async () => {
+    const missing = join(workDir, "no-such-file.ts");
+
+    await expect(fileHistoryTrackEdit(state, missing, "m1", sessionId, baseDir)).resolves.toBeUndefined();
+
+    expect(state.trackedFiles.has(missing)).toBe(true);
+  });
+
+  it("加入 trackedFiles", async () => {
+    const src = join(workDir, "file.ts");
+    writeFileSync(src, "content\n");
+
+    await fileHistoryTrackEdit(state, src, "m1", sessionId, baseDir);
+
+    expect(state.trackedFiles.has(src)).toBe(true);
   });
 });
