@@ -148,6 +148,22 @@ describe("FileHistory 1.5.6 对话 undo", () => {
     expect(records.at(-1)).toMatchObject({ type: "undo", count: 1 });
   });
 
+  it("rewindConversation 截掉仅 assistant 后缀后可精确恢复", async () => {
+    const persisted = new Session("rewind-assistant-only", workDir, { persistence: true });
+    persisted.append({ role: "user", content: "u1" });
+    persisted.append({ role: "assistant", content: "a1" });
+    await flushPersistence();
+
+    persisted.rewindConversation(1);
+    await flushPersistence();
+
+    const recovered = await new SessionManager().getOrCreate("rewind-assistant-only", workDir, {
+      persistence: true,
+    });
+
+    expect(recovered.getHistory().map((m) => m.content)).toEqual(["u1"]);
+  });
+
   it("recover 重放 undo 事件后截断末尾 user 轮次", async () => {
     const persisted = new Session("undo-recover", workDir, { persistence: true });
     persisted.append({ role: "user", content: "u1" }, { role: "assistant", content: "a1" });

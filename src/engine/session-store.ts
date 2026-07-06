@@ -21,7 +21,8 @@ import { logger } from "../observability/logger.js";
 export type SessionRecord =
   | { readonly type: "message"; readonly seq: number; readonly message: Message }
   | { readonly type: "truncate"; readonly seq: number; readonly fromIndex: number }
-  | { readonly type: "undo"; readonly seq: number; readonly count: number; readonly at: string };
+  | { readonly type: "undo"; readonly seq: number; readonly count: number; readonly at: string }
+  | { readonly type: "rewind_to"; readonly seq: number; readonly messageIndex: number; readonly at: string };
 
 /**
  * 单个 Session 的 JSONL 事件日志读写器。
@@ -44,6 +45,16 @@ export class SessionStore {
 
   async appendUndoEvent(seq: number, count: number): Promise<void> {
     const record: SessionRecord = { type: "undo", seq, count, at: new Date().toISOString() };
+    await this.appendLine(JSON.stringify(record));
+  }
+
+  async appendRewindTo(seq: number, messageIndex: number): Promise<void> {
+    const record: SessionRecord = {
+      type: "rewind_to",
+      seq,
+      messageIndex,
+      at: new Date().toISOString(),
+    };
     await this.appendLine(JSON.stringify(record));
   }
 

@@ -34,6 +34,12 @@
 
 - 通过 Git 提交信息时,遵循中文团队习惯:type 保留 `feat`/`fix`/`docs` 等 Conventional Commits 英文关键字,scope、subject 和 body 使用中文。
 
+## 文件历史 CLI
+
+- 阶段 1.5.8 起,CLI 通过 `--list-snapshots` 查看当前/指定 session 的文件历史快照。
+- `--rewind [message-id] --rewind-mode code|conversation|both` 使用文件历史执行代码、对话或二者同时回滚；省略 `message-id` 时只列出可选快照。
+- 旧的 `safety/checkpoint-manager.ts` 保留为 fallback,不要删除。
+
 ## 当前进度
 
 ### 课程阶段(已完成)

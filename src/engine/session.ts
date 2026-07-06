@@ -18,7 +18,12 @@ import type { CostStatus } from "../observability/pricing.js";
 import { logger } from "../observability/logger.js";
 import { SessionStore } from "./session-store.js";
 import { FTS5Store } from "../memory/fts5-store.js";
-import { createFileHistoryState, type FileHistoryState, fileHistoryRewind } from "../safety/file-history.js";
+import {
+  createFileHistoryState,
+  type FileHistoryState,
+  fileHistoryLoadState,
+  fileHistoryRewind,
+} from "../safety/file-history.js";
 
 /** 清洗 sessionId 为安全文件名片段(/、: 等破坏路径的字符替换为 _) */
 function sanitizeFilePart(value: string): string {
@@ -144,6 +149,7 @@ export class Session {
    * 持久化关闭时为空操作。
    */
   async recover(): Promise<void> {
+    await this.recoverFileHistory();
     if (!this.store) return;
     let records;
     try {
@@ -164,10 +170,20 @@ export class Session {
         pending = pending.slice(r.fromIndex);
       } else if (r.type === "undo") {
         pending = this.applyUndoToHistory(pending, r.count);
+      } else if (r.type === "rewind_to") {
+        pending = pending.slice(0, r.messageIndex);
       }
     }
     this.history = pending;
     this.nextSeq = (records[records.length - 1]?.seq ?? -1) + 1;
+  }
+
+  private async recoverFileHistory(): Promise<void> {
+    try {
+      await fileHistoryLoadState(this.fileHistory, this.id);
+    } catch (error) {
+      logger.warn({ error: String(error) }, "[session] 文件历史恢复失败,降级为空快照");
+    }
   }
 
   /**
@@ -280,7 +296,11 @@ export class Session {
     this.history = this.history.slice(0, messageIndex);
     this.conversationId = `${this.id}-${Date.now().toString(36)}`;
     this.updatedAt = new Date();
-    if (removedUserCount > 0) void this.persistUndoEvent(removedUserCount);
+    if (removedUserCount > 0) {
+      void this.persistUndoEvent(removedUserCount);
+    } else {
+      void this.persistRewindTo(messageIndex);
+    }
   }
 
   async rewindCode(messageId: string): Promise<void> {
@@ -324,6 +344,17 @@ export class Session {
     const seq = this.nextSeq++;
     this.store.appendUndoEvent(seq, count).catch((err) =>
       logger.warn({ seq }, `[session] undo 落盘失败: ${String(err)}`),
+    );
+  }
+
+  private async persistRewindTo(messageIndex: number): Promise<void> {
+    if (!this.store) return;
+    const pending = this.pendingWrites;
+    this.pendingWrites = [];
+    await Promise.all(pending);
+    const seq = this.nextSeq++;
+    this.store.appendRewindTo(seq, messageIndex).catch((err) =>
+      logger.warn({ seq }, `[session] rewind_to 落盘失败: ${String(err)}`),
     );
   }
 

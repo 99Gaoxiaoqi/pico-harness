@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { copyFile, mkdir, stat, chmod, unlink } from "node:fs/promises";
+import { copyFile, mkdir, stat, chmod, unlink, readFile, writeFile, rename } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 
@@ -18,6 +18,7 @@ export interface FileHistorySnapshot {
   messageId: string;
   trackedFileBackups: Map<string, FileHistoryBackup>;
   timestamp: Date;
+  messageIndex?: number;
 }
 
 export interface FileHistoryState {
@@ -51,6 +52,10 @@ export function resolveBackupPath(
   baseDir: string = DEFAULT_BASE_DIR,
 ): string {
   return join(baseDir, sessionId, backupFileName);
+}
+
+function resolveManifestPath(sessionId: string, baseDir: string = DEFAULT_BASE_DIR): string {
+  return join(baseDir, sessionId, "manifest.json");
 }
 
 export async function createBackup(
@@ -178,11 +183,13 @@ export async function fileHistoryMakeSnapshot(
   messageId: string,
   sessionId: string,
   baseDir: string = DEFAULT_BASE_DIR,
+  messageIndex?: number,
 ): Promise<void> {
   const snapshot: FileHistorySnapshot = {
     messageId,
     trackedFileBackups: new Map(),
     timestamp: new Date(),
+    ...(messageIndex !== undefined ? { messageIndex } : {}),
   };
 
   for (const filePath of state.trackedFiles) {
@@ -238,6 +245,8 @@ export async function fileHistoryMakeSnapshot(
       await cleanupExclusiveBackups(state, removed, sessionId, baseDir);
     }
   }
+
+  await saveFileHistoryState(state, sessionId, baseDir);
 }
 
 export async function fileHistoryRewind(
@@ -267,4 +276,102 @@ export async function fileHistoryRewind(
   }
 
   state.snapshots = state.snapshots.slice(0, targetIdx + 1);
+  await saveFileHistoryState(state, sessionId, baseDir);
+}
+
+interface PersistedFileHistoryBackup {
+  backupFileName: string | null;
+  version: number;
+  backupTime: string;
+  originMtimeMs?: number;
+  originSize?: number;
+}
+
+interface PersistedFileHistorySnapshot {
+  messageId: string;
+  trackedFileBackups: Array<[string, PersistedFileHistoryBackup]>;
+  timestamp: string;
+  messageIndex?: number;
+}
+
+interface PersistedFileHistoryState {
+  snapshots: PersistedFileHistorySnapshot[];
+  trackedFiles: string[];
+  snapshotSequence: number;
+  fileVersions: Array<[string, number]>;
+}
+
+async function saveFileHistoryState(
+  state: FileHistoryState,
+  sessionId: string,
+  baseDir: string,
+): Promise<void> {
+  const manifest: PersistedFileHistoryState = {
+    snapshots: state.snapshots.map((snapshot) => ({
+      messageId: snapshot.messageId,
+      trackedFileBackups: Array.from(snapshot.trackedFileBackups.entries()).map(
+        ([filePath, backup]) => [
+          filePath,
+          {
+            backupFileName: backup.backupFileName,
+            version: backup.version,
+            backupTime: backup.backupTime.toISOString(),
+            ...(backup.originMtimeMs !== undefined ? { originMtimeMs: backup.originMtimeMs } : {}),
+            ...(backup.originSize !== undefined ? { originSize: backup.originSize } : {}),
+          },
+        ],
+      ),
+      timestamp: snapshot.timestamp.toISOString(),
+      ...(snapshot.messageIndex !== undefined ? { messageIndex: snapshot.messageIndex } : {}),
+    })),
+    trackedFiles: Array.from(state.trackedFiles),
+    snapshotSequence: state.snapshotSequence,
+    fileVersions: Array.from(state.fileVersions.entries()),
+  };
+
+  const manifestPath = resolveManifestPath(sessionId, baseDir);
+  const tempPath = `${manifestPath}.${process.pid}.${Date.now()}.tmp`;
+  await mkdir(dirname(manifestPath), { recursive: true });
+  await writeFile(tempPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+  await rename(tempPath, manifestPath);
+}
+
+export async function fileHistoryLoadState(
+  state: FileHistoryState,
+  sessionId: string,
+  baseDir: string = DEFAULT_BASE_DIR,
+): Promise<boolean> {
+  let raw: string;
+  try {
+    raw = await readFile(resolveManifestPath(sessionId, baseDir), "utf8");
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return false;
+    throw err;
+  }
+
+  const manifest = JSON.parse(raw) as PersistedFileHistoryState;
+  state.snapshots = manifest.snapshots.map((snapshot) => ({
+    messageId: snapshot.messageId,
+    trackedFileBackups: new Map(
+      snapshot.trackedFileBackups.map(([filePath, backup]) => [
+        filePath,
+        {
+          backupFileName: backup.backupFileName,
+          version: backup.version,
+          backupTime: new Date(backup.backupTime),
+          ...(backup.originMtimeMs !== undefined ? { originMtimeMs: backup.originMtimeMs } : {}),
+          ...(backup.originSize !== undefined ? { originSize: backup.originSize } : {}),
+        },
+      ]),
+    ),
+    timestamp: new Date(snapshot.timestamp),
+    ...(snapshot.messageIndex !== undefined ? { messageIndex: snapshot.messageIndex } : {}),
+  }));
+  state.trackedFiles = new Set(manifest.trackedFiles);
+  state.snapshotSequence = manifest.snapshotSequence;
+  state.fileVersions = new Map(manifest.fileVersions);
+  state.pendingTrackEdits = new Map();
+  state.currentMessageId = undefined;
+  return true;
 }
