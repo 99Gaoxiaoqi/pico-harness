@@ -54,15 +54,15 @@ git worktree remove ../pico-1-streaming
 
 > **目标**：解决"没法用"的问题。流式输出 + Checkpoint + Diff 预览 + Permission + MCP。
 
-### 1.1 流式输出（SSE / Streaming）
-- [ ] `provider/interface.ts` 加 `generateStream()` 方法，返回 AsyncIterable
-- [ ] `provider/openai.ts` 实现流式（SSE 解析）
+### 1.1 流式输出（SSE / Streaming）✅
+- [x] `provider/interface.ts` 加 `generateStream()` 方法，返回 AsyncIterable
+- [x] `provider/openai.ts` 实现流式（SSE 解析）
 - [ ] `provider/claude.ts` 实现流式（SSE 解析）
-- [ ] `engine/reporter.ts` 加 `onTextDelta(delta: string)` 回调
-- [ ] `engine/loop.ts` 接入流式回调，边接收边输出
-- [ ] `cli/main.ts` CLI 模式流式打印
-- [ ] 测试：mock provider 返回流式数据，验证回调顺序
-- [ ] 提交
+- [x] `engine/reporter.ts` 加 `onTextDelta(delta: string)` 回调
+- [x] `engine/loop.ts` 接入流式回调，边接收边输出
+- [ ] `cli/main.ts` CLI 模式流式打印（TerminalReporter 已实现）
+- [x] 测试：mock provider 返回流式数据，验证回调顺序（3 个测试通过）
+- [x] 提交
 
 ### 1.2 Checkpoint（git 快照）✅
 - [x] 新建 `safety/checkpoint-manager.ts`
@@ -261,7 +261,7 @@ git worktree remove ../pico-1-streaming
 
 | 阶段 | 总任务数 | 完成 | 状态 |
 |------|---------|------|------|
-| 阶段 1 | 5 | 3 | 🟡 进行中 |
+| 阶段 1 | 5 | 4 | 🟡 进行中 |
 | 阶段 2 | 7 | 0 | 🔴 未开始 |
 | 阶段 3 | 7 | 0 | 🔴 未开始 |
 | 阶段 4 | 5 | 0 | 🔴 未开始 |
