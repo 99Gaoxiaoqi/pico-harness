@@ -23,11 +23,13 @@
   },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.67.0",
+    "@types/ws": "^8.18.1",
     "better-sqlite3": "^12.11.1",
     "gpt-tokenizer": "^3.4.0",
     "js-yaml": "^5.1.0",
     "pathe": "^2.0.3",
-    "pino": "^10.1.0"
+    "pino": "^10.1.0",
+    "ws": "^8.21.0"
   },
   "overrides": {
     "axios": "^1.18.0"
