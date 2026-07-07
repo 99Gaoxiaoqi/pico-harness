@@ -654,3 +654,134 @@ describe("EditFileTool 模型视图与缩进重对齐", () => {
     expect(result).toBe("function foo() {\r\n    barNew();\r\n    bazNew();\r\n}");
   });
 });
+
+describe("EditFileTool replace_all 全替换", () => {
+  let workDir: string;
+
+  beforeEach(async () => {
+    workDir = await mkdtemp(join(tmpdir(), "claw-test-"));
+  });
+  afterEach(async () => {
+    await rm(workDir, { recursive: true, force: true });
+  });
+
+  it("L1 多处 + replace_all=true:全部替换", async () => {
+    // 文件有 3 处 "foo"
+    await writeFile(join(workDir, "a.txt"), "foo\nbar\nfoo\nbaz\nfoo");
+    const tool = new EditFileTool(workDir);
+    const out = await tool.execute(
+      JSON.stringify({
+        path: "a.txt",
+        old_text: "foo",
+        new_text: "qux",
+        replace_all: true,
+      }),
+    );
+    expect(out).toContain("L1");
+    expect(out).toContain("全部替换");
+    // 3 处 foo 全部变成 qux
+    expect(await readFile(join(workDir, "a.txt"), "utf8")).toBe("qux\nbar\nqux\nbaz\nqux");
+  });
+
+  it("L1 多处 + 默认 false(不传):仍抛唯一性错误(行为不变)", async () => {
+    await writeFile(join(workDir, "b.txt"), "foo\nbar\nfoo\nbaz\nfoo");
+    const tool = new EditFileTool(workDir);
+    await expect(
+      tool.execute(
+        JSON.stringify({ path: "b.txt", old_text: "foo", new_text: "qux" }),
+      ),
+    ).rejects.toThrow(/匹配到了.*处/);
+    // 文件内容未改
+    expect(await readFile(join(workDir, "b.txt"), "utf8")).toBe("foo\nbar\nfoo\nbaz\nfoo");
+  });
+
+  it("L1 单处 + replace_all=true:行为与 false 一致(单处替换)", async () => {
+    await writeFile(join(workDir, "c.txt"), "foo\nbar");
+    const tool = new EditFileTool(workDir);
+    const out = await tool.execute(
+      JSON.stringify({
+        path: "c.txt",
+        old_text: "foo",
+        new_text: "baz",
+        replace_all: true,
+      }),
+    );
+    expect(out).toContain("L1");
+    expect(await readFile(join(workDir, "c.txt"), "utf8")).toBe("baz\nbar");
+  });
+
+  it("L4 多处 + replace_all=true:各区间独立缩进重对齐后全替换", async () => {
+    // 文件中两段相似代码,缩进不同(4 空格与 2 空格),L4 逐行去缩进后两处都会匹配
+    await writeFile(
+      join(workDir, "d.ts"),
+      "function a() {\n    bar();\n    baz();\n}\nfunction b() {\n  bar();\n  baz();\n}\n",
+    );
+    const tool = new EditFileTool(workDir);
+    // old_text 无缩进(模型幻觉),触发 L4
+    const out = await tool.execute(
+      JSON.stringify({
+        path: "d.ts",
+        old_text: "bar();\nbaz();",
+        new_text: "barNew();\nbazNew();",
+        replace_all: true,
+      }),
+    );
+    expect(out).toContain("L4");
+    expect(out).toContain("全部替换");
+    const result = await readFile(join(workDir, "d.ts"), "utf8");
+    // 第一段保持 4 空格缩进
+    expect(result).toContain("    barNew();\n    bazNew();");
+    // 第二段保持 2 空格缩进(各自独立重对齐)
+    expect(result).toContain("  barNew();\n  bazNew();");
+    // 不应残留旧代码
+    expect(result).not.toContain("bar();");
+    expect(result).not.toContain("baz();");
+  });
+
+  it("L4 多处 + 默认 false:仍抛模糊匹配错误(行为不变)", async () => {
+    // 两段缩进不同的相似代码,L4 逐行去缩进后两处都匹配
+    await writeFile(
+      join(workDir, "e.ts"),
+      "function a() {\n    bar();\n    baz();\n}\nfunction b() {\n  bar();\n  baz();\n}\n",
+    );
+    const tool = new EditFileTool(workDir);
+    // old_text 无缩进(模型幻觉),L1/L2/L3 不命中,降级到 L4,两处匹配
+    await expect(
+      tool.execute(
+        JSON.stringify({ path: "e.ts", old_text: "bar();\nbaz();", new_text: "barNew();\nbazNew();" }),
+      ),
+    ).rejects.toThrow(/模糊匹配.*处/);
+    // 文件内容未改
+    const result = await readFile(join(workDir, "e.ts"), "utf8");
+    expect(result).toContain("bar();");
+  });
+
+  it("inputSchema 含 replace_all 字段(可选,默认 false)", () => {
+    const tool = new EditFileTool(workDir);
+    const props = tool.definition().inputSchema.properties as Record<string, unknown>;
+    expect(props.replace_all).toBeDefined();
+    expect((props.replace_all as { type: string }).type).toBe("boolean");
+    // required 不含 replace_all
+    const required = tool.definition().inputSchema.required ?? [];
+    expect(required).not.toContain("replace_all");
+  });
+
+  it("经 ToolRegistry execute 端到端跑 replace_all=true", async () => {
+    await writeFile(join(workDir, "f.txt"), "foo\nfoo\nfoo");
+    const registry = new ToolRegistry();
+    registry.register(new EditFileTool(workDir));
+    const result = await registry.execute({
+      id: "call-1",
+      name: "edit_file",
+      arguments: JSON.stringify({
+        path: "f.txt",
+        old_text: "foo",
+        new_text: "bar",
+        replace_all: true,
+      }),
+    });
+    expect(result.isError).toBeFalsy();
+    expect(result.output).toContain("全部替换");
+    expect(await readFile(join(workDir, "f.txt"), "utf8")).toBe("bar\nbar\nbar");
+  });
+});

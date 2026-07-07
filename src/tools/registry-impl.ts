@@ -678,13 +678,15 @@ function fuzzyReplace(
   originalContent: string,
   oldText: string,
   newText: string,
+  replaceAll?: boolean,
 ): { content: string; level: number } {
   // L1: 精确匹配
   const exactCount = countOccurrences(originalContent, oldText);
-  if (exactCount === 1) {
-    return { content: originalContent.replace(oldText, newText), level: 1 };
-  }
-  if (exactCount > 1) {
+  if (exactCount >= 1) {
+    if (exactCount === 1 || replaceAll) {
+      // split/join 全替换:replaceAll 时换所有,单处时也只换一处(等价)
+      return { content: originalContent.split(oldText).join(newText), level: 1 };
+    }
     throw new Error(`old_text 精确匹配到了 ${exactCount} 处,请提供更多的上下文代码以确保唯一性`);
   }
 
@@ -692,21 +694,25 @@ function fuzzyReplace(
   const normalizedContent = originalContent.replaceAll("\r\n", "\n");
   const normalizedOld = oldText.replaceAll("\r\n", "\n");
   const l2Count = countOccurrences(normalizedContent, normalizedOld);
-  if (l2Count === 1) {
-    return { content: normalizedContent.replace(normalizedOld, newText), level: 2 };
+  if (l2Count >= 1) {
+    if (l2Count === 1 || replaceAll) {
+      return { content: normalizedContent.split(normalizedOld).join(newText), level: 2 };
+    }
   }
 
   // L3: Trim Space 匹配 (忽略首尾空行和空格)
   const trimmedOld = normalizedOld.trim();
   if (trimmedOld !== "") {
     const l3Count = countOccurrences(normalizedContent, trimmedOld);
-    if (l3Count === 1) {
-      return { content: normalizedContent.replace(trimmedOld, newText), level: 3 };
+    if (l3Count >= 1) {
+      if (l3Count === 1 || replaceAll) {
+        return { content: normalizedContent.split(trimmedOld).join(newText), level: 3 };
+      }
     }
   }
 
   // L4: 逐行去缩进匹配 (最强容错,消除模型遗漏缩进的幻觉)
-  return { content: lineByLineReplace(normalizedContent, normalizedOld, newText), level: 4 };
+  return { content: lineByLineReplace(normalizedContent, normalizedOld, newText, replaceAll), level: 4 };
 }
 
 /** 统计子串出现次数 (不重叠) */
@@ -787,8 +793,34 @@ function reindentReplacement(fileRegion: string, oldText: string, newText: strin
   return outLines.join("\n");
 }
 
-/** L4: 按行切割,去除每行首尾空白后滑动窗口匹配 */
-function lineByLineReplace(content: string, oldText: string, newText: string): string {
+/** L4: 按行切割,去除每行首尾空白后滑动窗口匹配
+ *  返回所有匹配区间(每段 [startLine, endLine))的起始行索引列表 */
+function findAllMatchRanges(contentLines: string[], oldLines: string[]): number[] {
+  const starts: number[] = [];
+  if (oldLines.length === 0 || contentLines.length < oldLines.length) return starts;
+  for (let i = 0; i <= contentLines.length - oldLines.length; i++) {
+    let isMatch = true;
+    for (let j = 0; j < oldLines.length; j++) {
+      if (contentLines[i + j]!.trim() !== oldLines[j]) {
+        isMatch = false;
+        break;
+      }
+    }
+    if (isMatch) starts.push(i);
+  }
+  return starts;
+}
+
+/** L4: 按行切割,去除每行首尾空白后滑动窗口匹配。
+ *  replaceAll=false(默认):仅当唯一匹配时替换,多处抛错(唯一性保护)。
+ *  replaceAll=true:收集所有匹配区间,从后往前逐个替换,
+ *  每个区间分别调 reindentReplacement 做缩进重对齐(基于该区间所在行的缩进)。 */
+function lineByLineReplace(
+  content: string,
+  oldText: string,
+  newText: string,
+  replaceAll?: boolean,
+): string {
   const contentLines = content.split("\n");
   const oldLines = oldText
     .trim()
@@ -799,38 +831,37 @@ function lineByLineReplace(content: string, oldText: string, newText: string): s
     throw new Error("找不到该代码片段");
   }
 
-  let matchCount = 0;
-  let matchStart = -1;
-  // 滑动窗口在原文件中寻找匹配块
-  for (let i = 0; i <= contentLines.length - oldLines.length; i++) {
-    let isMatch = true;
-    for (let j = 0; j < oldLines.length; j++) {
-      if (contentLines[i + j]!.trim() !== oldLines[j]) {
-        isMatch = false;
-        break;
-      }
-    }
-    if (isMatch) {
-      matchCount++;
-      matchStart = i;
-    }
-  }
+  const matchStarts = findAllMatchRanges(contentLines, oldLines);
+  const matchCount = matchStarts.length;
 
   if (matchCount === 0) {
     throw new Error("在文件中未找到 old_text,请先调用 read_file 仔细确认要替换的内容");
   }
-  if (matchCount > 1) {
+  if (matchCount > 1 && !replaceAll) {
     throw new Error(`模糊匹配到了 ${matchCount} 处相似代码,请提供更多上下文行代码以精确定位`);
   }
 
-  const matchEnd = matchStart + oldLines.length;
-  // 提取文件中实际匹配到的原始行区域(保留真实缩进),供缩进重对齐使用
-  const fileRegion = contentLines.slice(matchStart, matchEnd).join("\n");
-  // 缩进重对齐:把 new_text 的缩进对齐到文件实际风格,而非直接写模型缩进
-  const adjustedNewText = reindentReplacement(fileRegion, oldText, newText);
-  return [...contentLines.slice(0, matchStart), adjustedNewText, ...contentLines.slice(matchEnd)].join(
-    "\n",
-  );
+  if (!replaceAll) {
+    // 唯一匹配:原逻辑
+    const matchStart = matchStarts[0]!;
+    const matchEnd = matchStart + oldLines.length;
+    const fileRegion = contentLines.slice(matchStart, matchEnd).join("\n");
+    const adjustedNewText = reindentReplacement(fileRegion, oldText, newText);
+    return [...contentLines.slice(0, matchStart), adjustedNewText, ...contentLines.slice(matchEnd)].join(
+      "\n",
+    );
+  }
+
+  // replaceAll:从后往前逐区间替换(倒序避免行号偏移),每个区间独立缩进重对齐
+  let lines = [...contentLines];
+  for (let k = matchStarts.length - 1; k >= 0; k--) {
+    const matchStart = matchStarts[k]!;
+    const matchEnd = matchStart + oldLines.length;
+    const fileRegion = lines.slice(matchStart, matchEnd).join("\n");
+    const adjustedNewText = reindentReplacement(fileRegion, oldText, newText);
+    lines = [...lines.slice(0, matchStart), adjustedNewText, ...lines.slice(matchEnd)];
+  }
+  return lines.join("\n");
 }
 
 export class EditFileTool implements BaseTool {
@@ -861,6 +892,11 @@ export class EditFileTool implements BaseTool {
               "文件中原有的文本,取自 read_file 输出(去掉行号前缀)。必须包含足够的上下文以确保唯一匹配。",
           },
           new_text: { type: "string", description: "要替换成的新文本" },
+          replace_all: {
+            type: "boolean",
+            description:
+              "是否替换所有匹配处(默认 false,仅替换唯一匹配)。多处匹配且此项为 false 时会报错,设为 true 则全部替换。",
+          },
         },
         required: ["path", "old_text", "new_text"],
       },
@@ -871,11 +907,18 @@ export class EditFileTool implements BaseTool {
     let path: string;
     let oldText: string;
     let newText: string;
+    let replaceAll: boolean;
     try {
-      const input = JSON.parse(args) as { path?: string; old_text?: string; new_text?: string };
+      const input = JSON.parse(args) as {
+        path?: string;
+        old_text?: string;
+        new_text?: string;
+        replace_all?: boolean;
+      };
       path = input.path ?? "";
       oldText = input.old_text ?? "";
       newText = input.new_text ?? "";
+      replaceAll = input.replace_all === true;
     } catch {
       throw new Error("参数解析失败: 期望 JSON 含 path、old_text、new_text 字段");
     }
@@ -892,14 +935,15 @@ export class EditFileTool implements BaseTool {
 
     // 3. 多级模糊替换(在 LF 视图上操作)
     try {
-      const { content: newContent, level } = fuzzyReplace(content, oldText, newText);
+      const { content: newContent, level } = fuzzyReplace(content, oldText, newText, replaceAll);
 
       // 4. 写回磁盘:按记录的原始行尾风格还原(CRLF 文件写回仍是 CRLF)
       await writeFile(fullPath, materializeModelText(newContent, modelView.lineEndingStyle), "utf8");
 
       // 5. 生成 diff 预览(简单 before/after 对比,供用户审批时查看)
       const diffPreview = generateSimpleDiff(oldText, newText);
-      return `✅ 成功修改文件: ${path} (匹配级别 L${level})\n\n${diffPreview}`;
+      const allNote = replaceAll ? ", 全部替换" : "";
+      return `✅ 成功修改文件: ${path} (匹配级别 L${level}${allNote})\n\n${diffPreview}`;
     } catch (err) {
       // 匹配全失败时附候选上下文,帮模型重定位(仅对"未找到"类错误生效)
       throw this.enrichNotFoundError(err, content, oldText);
