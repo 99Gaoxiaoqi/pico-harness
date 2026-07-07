@@ -242,7 +242,17 @@ export class GeminiProvider implements LLMProvider {
               parts: [{ functionResponse: { name: msg.toolCallId, response: { result: msg.content } } }],
             });
           } else {
-            contents.push({ role: "user", parts: [{ text: msg.content }] });
+            // 5.5d 多模态:user 消息可携带 images → Gemini inlineData(仅 base64)
+            const parts: GeminiPart[] = [];
+            for (const img of msg.images ?? []) {
+              if (img.type === "image_base64") {
+                parts.push({ inlineData: { mimeType: img.mimeType, data: img.data } } as never);
+              } else {
+                throw new Error("Gemini inlineData 不支持 image_url,请用 image_base64");
+              }
+            }
+            parts.push({ text: msg.content });
+            contents.push({ role: "user", parts });
           }
           break;
         }
