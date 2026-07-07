@@ -12,6 +12,9 @@ import type { AgentRunner, SubagentRegistryFactory, SubagentRegistryRequest } fr
 import { DelegateTaskTool } from "./subagent.js";
 import { DelegateStatusTool, type DelegationManager } from "./delegation-manager.js";
 import type { AgentProfile } from "./agent-profile.js";
+import { GlobTool } from "./glob.js";
+import { GrepTool } from "./grep.js";
+import { FetchURLTool, WebSearchTool } from "./web.js";
 
 export interface SubagentRegistryFactoryConfig {
   workDir: string;
@@ -28,12 +31,17 @@ export interface SubagentRegistryFactoryConfig {
  * 白名单由 agent-profile.ts 的 KNOWN_TOOL_NAMES 约束,这里只列已知的。
  */
 type ToolCtor = (workDir: string) => BaseTool;
-const TOOL_CONSTRUCTORS: Record<string, ToolCtor> = {
+// exported 供测试按名字断言实例化结果;自定义角色按 profile.tools 实例化时查此 map。
+export const TOOL_CONSTRUCTORS: Record<string, ToolCtor> = {
   read_file: (wd) => new ReadFileTool(wd),
   write_file: (wd) => new WriteFileTool(wd),
   edit_file: (wd) => new EditFileTool(wd),
   bash: (wd) => new BashTool(wd, undefined, { allowBackground: false }),
   skill_view: (wd) => new SkillViewTool(new SkillLoader(wd)),
+  glob: (wd) => new GlobTool(wd),
+  grep: (wd) => new GrepTool(wd),
+  fetch_url: () => new FetchURLTool(),
+  web_search: () => new WebSearchTool(),
 };
 
 export function createSubagentRegistryFactory(
@@ -92,6 +100,16 @@ function buildModeRegistry(
     (bash as BashTool & { readOnly?: boolean }).readOnly = true;
   }
   registry.register(bash);
+
+  // 阶段 2 只读工具:explore/worker 都需要搜文件,worker 写代码也要先定位文件
+  registry.register(new GlobTool(config.workDir));
+  registry.register(new GrepTool(config.workDir));
+
+  if (request.mode === "explore") {
+    // 探索语义:联网搜索是 explore 的合理扩展(全只读,无副作用)
+    registry.register(new FetchURLTool());
+    registry.register(new WebSearchTool());
+  }
 
   if (request.mode === "worker") {
     registry.register(new WriteFileTool(config.workDir));

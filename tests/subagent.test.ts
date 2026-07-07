@@ -2,7 +2,7 @@
 // 覆盖:SubagentTool execute / RunSub 受限循环 / maxSubTurns 强制召回 /
 // 只读工具隔离 / 物理隔离(子探索不污染主) / 退出条件。
 
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -16,7 +16,7 @@ import {
 } from "../src/tools/subagent.js";
 import { SkillLoader, SkillViewTool } from "../src/context/skill.js";
 import { DelegationManager, DelegateStatusTool } from "../src/tools/delegation-manager.js";
-import { createSubagentRegistryFactory } from "../src/tools/delegation-registry.js";
+import { createSubagentRegistryFactory, TOOL_CONSTRUCTORS } from "../src/tools/delegation-registry.js";
 import { ToolRegistry, ReadFileTool, BashTool } from "../src/tools/registry-impl.js";
 import type { LLMProvider } from "../src/provider/interface.js";
 import type { Message, ToolDefinition, ToolCall, ToolResult } from "../src/schema/message.js";
@@ -342,6 +342,86 @@ describe("DelegateTaskTool", () => {
 
     expect(called).toBe(false);
     expect(output.error).toContain("最大委派深度");
+  });
+});
+
+describe("子代理注册表接通阶段 2 只读工具", () => {
+  // 直接驱动 createSubagentRegistryFactory,检查各模式注册的工具名集合。
+  // 这层断言绕开 runSub,聚焦"工具是否挂上",不受 Mock Provider 行为影响。
+  function makeFactory(workDir: string) {
+    const runner: AgentRunner = {
+      async runSub() {
+        return subResult("");
+      },
+    };
+    const manager = new DelegationManager();
+    return createSubagentRegistryFactory({ workDir, runner, manager });
+  }
+
+  it("explore 模式注册 glob/grep/fetch_url/web_search(探索语义)", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-reg-explore-"));
+    try {
+      const factory = makeFactory(workDir);
+      const registry = factory({
+        mode: "explore",
+        role: "leaf",
+        depth: 1,
+        maxSpawnDepth: 2,
+      });
+      const toolNames = registry.getAvailableTools().map((t) => t.name);
+
+      expect(toolNames).toContain("glob");
+      expect(toolNames).toContain("grep");
+      expect(toolNames).toContain("fetch_url");
+      expect(toolNames).toContain("web_search");
+      // 探索只读:仍不应含写工具
+      expect(toolNames).not.toContain("write_file");
+      expect(toolNames).not.toContain("edit_file");
+    } finally {
+      await rm(workDir, { recursive: true, force: true });
+    }
+  });
+
+  it("worker 模式注册 glob/grep(写代码也要搜文件)", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-reg-worker-"));
+    try {
+      const factory = makeFactory(workDir);
+      const registry = factory({
+        mode: "worker",
+        role: "leaf",
+        depth: 1,
+        maxSpawnDepth: 2,
+      });
+      const toolNames = registry.getAvailableTools().map((t) => t.name);
+
+      expect(toolNames).toContain("glob");
+      expect(toolNames).toContain("grep");
+      // worker 保留写工具
+      expect(toolNames).toContain("write_file");
+      expect(toolNames).toContain("edit_file");
+      // web 工具不给 worker(联网搜索非 worker 核心职责)
+      expect(toolNames).not.toContain("fetch_url");
+      expect(toolNames).not.toContain("web_search");
+    } finally {
+      await rm(workDir, { recursive: true, force: true });
+    }
+  });
+
+  it("TOOL_CONSTRUCTORS 能按名字实例化四个新工具", () => {
+    // 自定义角色 profile.tools 含 glob/grep/fetch_url/web_search 时,查 map 调构造器
+    // 应返回 name() 正确的工具实例
+    const cases: Array<[string, string]> = [
+      ["glob", "glob"],
+      ["grep", "grep"],
+      ["fetch_url", "fetch_url"],
+      ["web_search", "web_search"],
+    ];
+    for (const [key, expectedName] of cases) {
+      const ctor = TOOL_CONSTRUCTORS[key];
+      expect(ctor).toBeDefined();
+      const tool = ctor!(tmpdir());
+      expect(tool.name()).toBe(expectedName);
+    }
   });
 });
 
