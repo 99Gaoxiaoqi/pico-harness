@@ -22,6 +22,11 @@ export const KNOWN_TOOL_NAMES: ReadonlySet<string> = new Set([
   "edit_file",
   "bash",
   "skill_view",
+  "glob",
+  "grep",
+  "todo",
+  "fetch_url",
+  "web_search",
 ]);
 
 /** maxTurns 上限:防止配置错误导致子代理无限跑 */
