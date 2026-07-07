@@ -146,6 +146,15 @@ export interface AgentEngineOptions {
     turn: number;
     lastMessage: Message;
   }) => Promise<{ continue: boolean; continuePrompt?: string } | void> | void;
+  /**
+   * 凭证轮换回调(可选,4.2 Credential Pool)。
+   * generateWithRetry 遇到 429 限流时触发:标记当前 key 限流、
+   * 切换到下一个可用 key 重建 provider。返回新 provider(已切 key),
+   * 或返回 undefined 表示无多凭证可轮换(回退同 key 指数退避)。
+   * 仅当配置了 LLM_API_KEYS(多 key)时由调用方注入;单 key 时为 undefined,
+   * 重试行为与原有一致(向后兼容)。
+   */
+  rebuildProvider?: () => LLMProvider | undefined;
 }
 
 /** 微型 OS 的核心驱动 */
@@ -180,6 +189,8 @@ export class AgentEngine implements AgentRunner {
   private steerQueue?: SteerQueue;
   /** 非工具停止后续接回调(ROADMAP 3.7):host 可决定让 Agent 接着跑 */
   private readonly shouldContinueAfterStop?: AgentEngineOptions["shouldContinueAfterStop"];
+  /** 凭证轮换回调(4.2):429 时切换 key 重建 provider;无多 key 时为 undefined */
+  private readonly rebuildProvider?: () => LLMProvider | undefined;
 
   constructor(opts: AgentEngineOptions) {
     this.provider = opts.provider;
@@ -210,6 +221,7 @@ export class AgentEngine implements AgentRunner {
     this.tracer = opts.tracer;
     this.steerQueue = opts.steerQueue;
     this.shouldContinueAfterStop = opts.shouldContinueAfterStop;
+    this.rebuildProvider = opts.rebuildProvider;
 
     // 流式 provider 包装:如果 provider 支持 generateStream,
     // 把 generate() 替换为 generateStream(),同时把 delta 转发给 reporter.onTextDelta。
@@ -355,6 +367,7 @@ export class AgentEngine implements AgentRunner {
         // (defaultIsRetryableError 已排除),冒泡到本方法 catch 做响应式降级。
         return await generateWithRetry(this.provider, context, tools, {
           onRetry: this.makeRetryReporter(span),
+          onRateLimited: this.rebuildProvider,
         });
       } catch (err) {
         // 非 overflow 错误直接抛(429/5xx 等普通重试已由 generateWithRetry 处理)
@@ -910,6 +923,7 @@ export class AgentEngine implements AgentRunner {
       ];
       const response = await generateWithRetry(this.provider, context, [], {
         onRetry: this.makeRetryReporter(graceSpan),
+        onRateLimited: this.rebuildProvider,
       });
       recordLlmResponse(graceSpan, response);
       session.append(response);
@@ -949,6 +963,7 @@ export class AgentEngine implements AgentRunner {
       // 无 Compactor:子代理无法降级,叠加普通重试层(溢出则原样抛出)
       return generateWithRetry(this.provider, contextHistory, tools, {
         onRetry: this.makeRetryReporter(),
+        onRateLimited: this.rebuildProvider,
       });
     }
     // 首轮:用默认预算压缩(attempt 0,系数 1.0)
@@ -959,6 +974,7 @@ export class AgentEngine implements AgentRunner {
         // 响应式压缩在外(子代理版仅降字符预算,不改 WorkingMemory 条数)。
         return await generateWithRetry(this.provider, context, tools, {
           onRetry: this.makeRetryReporter(),
+          onRateLimited: this.rebuildProvider,
         });
       } catch (err) {
         if (!(err instanceof ContextOverflowError)) {

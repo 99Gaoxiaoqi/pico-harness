@@ -15,12 +15,35 @@ export interface ProviderConfig {
   thinkingEffort?: ThinkingEffort;
 }
 
+/**
+ * 读取所有可用 API key:
+ * - 优先读 LLM_API_KEYS(逗号分隔,复数,支持多凭证轮换);
+ * - 回退到 LLM_API_KEY(单数,向后兼容单 key);
+ * - 过滤空段(逗号分隔可能产生空字符串)。
+ * 返回值:无 key 时返回空数组。
+ */
+export function loadApiKeys(): string[] {
+  const multi = process.env.LLM_API_KEYS;
+  if (multi && multi.trim().length > 0) {
+    const keys = multi
+      .split(",")
+      .map((k) => k.trim())
+      .filter((k) => k.length > 0);
+    if (keys.length > 0) return keys;
+  }
+  const single = process.env.LLM_API_KEY;
+  return single && single.trim().length > 0 ? [single.trim()] : [];
+}
+
 export function loadProviderConfig(): ProviderConfig {
   const baseURL = process.env.LLM_BASE_URL;
-  const apiKey = process.env.LLM_API_KEY;
   const model = process.env.LLM_MODEL;
+  const keys = loadApiKeys();
+  // apiKey 取第一个(向后兼容:ProviderConfig.apiKey 仍是单个 key)。
+  // 多 key 轮换由 CredentialPool 在 factory 层接管,见 credential-pool.ts。
+  const apiKey = keys[0];
   if (!baseURL || !apiKey || !model) {
-    throw new Error("缺少环境变量 LLM_BASE_URL / LLM_API_KEY / LLM_MODEL,请检查 .env 是否已加载");
+    throw new Error("缺少环境变量 LLM_BASE_URL / LLM_API_KEY[S] / LLM_MODEL,请检查 .env 是否已加载");
   }
   return { baseURL, apiKey, model };
 }

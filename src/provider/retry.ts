@@ -29,6 +29,13 @@ export interface RetryOptions {
   signal?: AbortSignal;
   /** 重试事件回调:每次决定重试时触发,供上层打点 / Tracing */
   onRetry?: (info: RetryInfo) => void;
+  /**
+   * 凭证轮换回调(可选):遇到 429 限流时触发,供上层标记当前 key 限流、
+   * 切换到下一个 key 重建 provider。返回新的 provider(已切换 key),
+   * 或返回 undefined 表示无多凭证可轮换(回退到同 key 指数退避)。
+   * 仅当配置了多 key(CredentialPool)时由调用方注入。
+   */
+  onRateLimited?: () => LLMProvider | undefined;
 }
 
 export interface RetryInfo {
@@ -67,6 +74,7 @@ export async function generateWithRetry(
   const maxAttempts = Math.max(options?.maxAttempts ?? DEFAULT_MAX_RETRY_ATTEMPTS, 1);
   const signal = options?.signal;
   const onRetry = options?.onRetry;
+  const onRateLimited = options?.onRateLimited;
   const hasCustomRetryable = typeof provider.isRetryableError === "function";
 
   // 快路径:只允许调用一次,失败即抛(兜底失败日志仍记录)
@@ -80,20 +88,38 @@ export async function generateWithRetry(
   }
 
   const delays = backoffDelays(maxAttempts);
+  // 当前活跃 provider(凭证轮换时可能被替换);初始为传入的 provider
+  let activeProvider = provider;
 
   // 主循环:尝试 → 失败 → 判定可重试 → 退避 → 再尝试
   for (let attempt = 1; ; attempt++) {
     try {
-      return await provider.generate(messages, tools);
+      return await activeProvider.generate(messages, tools);
     } catch (error) {
       const retryable = hasCustomRetryable
-        ? provider.isRetryableError!(error)
+        ? activeProvider.isRetryableError!(error)
         : defaultIsRetryableError(error);
 
       // 不可重试或已达上限:记失败日志后抛出
       if (attempt >= maxAttempts || !retryable) {
-        logRequestFailure(error, attempt, maxAttempts, provider.modelName, signal);
+        logRequestFailure(error, attempt, maxAttempts, activeProvider.modelName, signal);
         throw error;
+      }
+
+      // 凭证轮换(429 限流特化):若错误是 429 且注入了 onRateLimited,
+      // 标记当前 key 限流、切换到下一个可用 key 重建 provider 重试。
+      // 切换成功后跳过退避(新 key 通常立即可用),直接重试;
+      // 切换失败(无多 key / 全限流)→ 回退到同 key 指数退避。
+      if (maybeStatusCode(error) === 429 && onRateLimited) {
+        const rotated = onRateLimited();
+        if (rotated && rotated !== activeProvider) {
+          logger.warn(
+            { attempt: `${attempt}/${maxAttempts}`, keyRotated: true },
+            `[Retry] 429 限流,已切换凭证重试`,
+          );
+          activeProvider = rotated;
+          continue; // 新 key 立即可用,跳过退避
+        }
       }
 
       const delayMs = delays[attempt - 1] ?? 0;
