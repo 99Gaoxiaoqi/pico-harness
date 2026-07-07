@@ -2,6 +2,7 @@
 // Node 22 通过 `node --env-file=.env` 或 `tsx --env-file=.env` 加载 .env。
 
 import type { ThinkingEffort } from "./thinking.js";
+import type { RateLimitInfo } from "./ratelimit.js";
 
 export interface ProviderConfig {
   baseURL: string;
@@ -13,6 +14,12 @@ export interface ProviderConfig {
    * 未提供(off)时 provider 不发送任何 reasoning/thinking 参数,与旧行为一致。
    */
   thinkingEffort?: ThinkingEffort;
+  /**
+   * 限流信息回传回调(第 N 讲:RateLimit header 回传)。
+   * provider 在每次响应(resp.ok)成功后解析 RateLimit header,命中即回调。
+   * 可选:未提供时 provider 不解析 header,行为与旧版一致。
+   */
+  onRateLimitInfo?: (info: RateLimitInfo) => void;
 }
 
 /**
