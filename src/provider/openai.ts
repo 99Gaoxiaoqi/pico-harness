@@ -11,6 +11,7 @@ import type { ProviderConfig } from "./config.js";
 import { resolveProviderProfile, type ProviderProfile } from "./profile.js";
 import { toOpenAIReasoningEffort, type ThinkingEffort } from "./thinking.js";
 import { ContextOverflowError, isContextOverflowStatus, LLMStatusError } from "./errors.js";
+import { parseRateLimitHeaders } from "./ratelimit.js";
 
 interface OpenAIToolCall {
   id: string;
@@ -136,6 +137,12 @@ export class OpenAIProvider implements LLMProvider {
       throw new LLMStatusError(resp.status, `OpenAI API 请求失败 [${resp.status}]: ${text}`);
     }
 
+    // 限流信息回传:resp.ok 成功后解析 RateLimit header,命中即回调
+    if (this.config.onRateLimitInfo) {
+      const info = parseRateLimitHeaders(resp.headers);
+      if (info) this.config.onRateLimitInfo(info);
+    }
+
     const data = (await resp.json()) as OpenAIChatResponse;
     if (!data.choices || data.choices.length === 0) {
       throw new Error("API 返回了空的 choices");
@@ -242,6 +249,12 @@ export class OpenAIProvider implements LLMProvider {
         throw new ContextOverflowError(`OpenAI API 上下文溢出 [${resp.status}]: ${text}`);
       }
       throw new LLMStatusError(resp.status, `OpenAI API 流式请求失败 [${resp.status}]: ${text}`);
+    }
+
+    // 限流信息回传:resp.ok 成功后解析 RateLimit header,命中即回调
+    if (this.config.onRateLimitInfo) {
+      const info = parseRateLimitHeaders(resp.headers);
+      if (info) this.config.onRateLimitInfo(info);
     }
 
     if (!resp.body) {
