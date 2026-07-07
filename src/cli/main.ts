@@ -54,6 +54,13 @@ import {
 } from "./file-history.js";
 import { primeTokenizer } from "../context/token-counter.js";
 import { FTS5Store } from "../memory/fts5-store.js";
+import { AcpStdioServer } from "../acp/stdio-server.js";
+import {
+  AcpServer,
+  normalizeMode,
+  type AcpEngineFactory,
+} from "../acp/server.js";
+import type { AcpMode } from "../acp/protocol.js";
 
 // 进程退出时统一释放共享的 FTS5 SQLite 连接池,避免句柄泄漏(尤其 Windows)。
 ;["SIGINT", "SIGTERM", "beforeExit", "exit"].forEach((evt) => {
@@ -201,6 +208,10 @@ async function main() {
       rewind: { type: "boolean", default: false },
       "rewind-mode": { type: "string", default: "both" },
       steer: { type: "string" },
+      // ACP 模式:启动 stdio JSON-RPC server,供 IDE(VSCode 插件等)驱动 Agent
+      acp: { type: "boolean", default: false },
+      // 运行模式:default | plan | auto | yolo(ACP 模式下使用)
+      mode: { type: "string", default: "default" },
     },
     allowPositionals: true,
   });
@@ -241,6 +252,57 @@ async function main() {
   console.log(
     `[Provider] ${kind} 协议 | [ThinkingEffort] ${thinkingEffort} | [EnableThinking] ${enableThinking} | [PlanMode] ${planMode} | [Trace] ${traceEnabled}`,
   );
+
+  if (values.acp) {
+    // ACP 模式:启动 stdio JSON-RPC server,不跑 CLI 交互。
+    // IDE(VSCode 插件)通过 stdin/stdout 收发 ACP 消息驱动 Agent。
+    // --mode 控制默认运行模式(default/plan/auto/yolo),prompt 可逐条覆盖。
+    const acpMode = normalizeMode(values.mode) as AcpMode;
+    console.log(
+      `[ACP] 启动 stdio server | [Provider] ${kind} | [DefaultMode] ${acpMode} | [ThinkingEffort] ${thinkingEffort}`,
+    );
+    const workDir = process.cwd();
+    const modelName = process.env.LLM_MODEL ?? (kind === "openai" ? "glm-5.2" : "claude-3-5-sonnet");
+    const goalManager = new GoalManager();
+    const backgroundManager = new BackgroundManager();
+    // 非 plan 模式预组装 system prompt(plan 模式由 engine 每轮动态重组,故不预生成)
+    const acpSystemPrompt = await new PromptComposer(workDir, false, { goalManager }).build();
+
+    // Engine 工厂:每个 prompt 装配一个独立 engine(按 mode 映射 planMode/approval)。
+    // auto / yolo 模式开启 YOLO 放行(跳过审批);default / plan 走人工审批中间件。
+    const engineFactory: AcpEngineFactory = ({ session, mode, reporter }) => {
+      const provider = createProvider(kind, undefined, thinkingEffort);
+      const trackedProvider = new CostTracker(provider, modelName, session);
+      const registry = buildRegistry(workDir, backgroundManager, goalManager);
+      const usePlanMode = mode === "plan";
+      if (mode === "auto" || mode === "yolo") {
+        globalApprovalPolicy.setYoloMode(session.id, true);
+      }
+      registry.use(buildApprovalMiddleware(terminalNotifier, workDir));
+      const engine = new AgentEngine({
+        provider: trackedProvider,
+        registry,
+        workDir,
+        enableThinking,
+        thinkingEffort,
+        planMode: usePlanMode,
+        systemPrompt: usePlanMode ? undefined : acpSystemPrompt,
+        goalManager,
+        compactor: buildCompactor(kind, modelName),
+        observationProcessor: buildObservationProcessor(workDir),
+        reporter,
+        tracer: traceEnabled ? new Tracer() : undefined,
+      });
+      return engine;
+    };
+
+    const stdio = new AcpStdioServer();
+    const acpServer = new AcpServer(engineFactory, stdio, { defaultMode: acpMode });
+    void acpServer; // 已在构造时把 handler 注册进 stdio
+    stdio.start();
+    // stdio server 持续监听 stdin,进程常驻;由 stdin 关闭(SIGINT/客户端断开)退出
+    return;
+  }
 
   if (values.feishu) {
     // 飞书模式:启动 WSClient 长连接,群里 @机器人 触发 Agent,状态发回会话
