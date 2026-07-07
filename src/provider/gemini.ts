@@ -1,0 +1,318 @@
+// Google (Gemini) 原生协议适配器 (同声传译员)。
+//
+// 与 OpenAI / Claude 协议的关键差异:
+// 1. API key 在 query param,不在 header
+// 2. 端点形如 {baseURL}/v1beta/models/{model}:generateContent?key=...
+//    流式端点 :streamGenerateContent?key=...&alt=sse
+// 3. system 是顶层 system_instruction.parts[{text}],不在 contents 里
+// 4. 消息用 contents: [{role: "user"/"model", parts: [...]}]
+//    (Gemini 用 "model" 不用 "assistant")
+// 5. 工具用 tools: [{functionDeclarations: [{name, description, parameters}]}]
+//    parameters 即标准 JSON Schema
+// 6. 工具调用响应:candidate 的 content.parts 里含 {functionCall: {name, args}}
+//    args 是对象,不是 JSON 字符串
+// 7. 工具结果回传:user 消息的 parts 里含 {functionResponse: {name, response: {...}}}
+
+import type { LLMProvider } from "./interface.js";
+import type { Message, ToolCall, ToolDefinition, Usage } from "../schema/message.js";
+import type { ProviderConfig } from "./config.js";
+import { resolveProviderProfile, type ProviderProfile } from "./profile.js";
+import { ContextOverflowError, isContextOverflowStatus, LLMStatusError } from "./errors.js";
+
+/** Gemini content part:文本 / 工具调用 / 工具响应 */
+interface GeminiPart {
+  text?: string;
+  functionCall?: { name: string; args: Record<string, unknown> };
+  functionResponse?: { name: string; response: Record<string, unknown> };
+}
+
+interface GeminiContent {
+  role: "user" | "model";
+  parts: GeminiPart[];
+}
+
+interface GeminiCandidate {
+  content?: { parts?: GeminiPart[] };
+  finishReason?: string;
+}
+
+interface GeminiResponse {
+  candidates?: GeminiCandidate[];
+  usageMetadata?: {
+    promptTokenCount?: number;
+    candidatesTokenCount?: number;
+    cachedContentTokenCount?: number;
+    thoughtsTokenCount?: number;
+  };
+}
+
+/** Google (Gemini) 原生协议适配器 */
+export class GeminiProvider implements LLMProvider {
+  private readonly profile: ProviderProfile;
+
+  constructor(
+    private readonly config: ProviderConfig,
+    profile?: ProviderProfile,
+  ) {
+    this.profile = profile ?? resolveProviderProfile("gemini", config.model);
+  }
+
+  get modelName(): string {
+    return this.config.model;
+  }
+
+  /** 拼装非流式 generateContent 端点(key 在 query) */
+  private generateUrl(): string {
+    const base = this.config.baseURL.replace(/\/+$/, "");
+    return `${base}/v1beta/models/${this.config.model}:generateContent?key=${this.config.apiKey}`;
+  }
+
+  /** 拼装流式 streamGenerateContent 端点(key 在 query,alt=sse) */
+  private streamUrl(): string {
+    const base = this.config.baseURL.replace(/\/+$/, "");
+    return `${base}/v1beta/models/${this.config.model}:streamGenerateContent?key=${this.config.apiKey}&alt=sse`;
+  }
+
+  async generate(messages: Message[], availableTools: ToolDefinition[]): Promise<Message> {
+    const body = this.buildRequestBody(messages, availableTools);
+
+    const resp = await fetch(this.generateUrl(), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(120_000),
+    });
+
+    if (!resp.ok) {
+      const text = await resp.text();
+      if (isContextOverflowStatus(resp.status, text)) {
+        throw new ContextOverflowError(`Gemini API 上下文溢出 [${resp.status}]: ${text}`);
+      }
+      throw new LLMStatusError(resp.status, `Gemini API 请求失败 [${resp.status}]: ${text}`);
+    }
+
+    const data = (await resp.json()) as GeminiResponse;
+    const parts = data.candidates?.[0]?.content?.parts;
+    if (!parts || parts.length === 0) {
+      throw new Error("Gemini API 返回了空的 candidates/parts");
+    }
+    return this.translateParts(parts, data.usageMetadata);
+  }
+
+  /**
+   * 流式生成:请求 streamGenerateContent(alt=sse),解析 SSE。
+   * Gemini 流式协议:每条 data 是一个 candidate 增量,
+   * candidate.content.parts 里含 text / functionCall。text 即时转发 onDelta,
+   * functionCall 累积(同名合并)。
+   */
+  async generateStream(
+    messages: Message[],
+    availableTools: ToolDefinition[],
+    onDelta: (delta: string) => void,
+  ): Promise<Message> {
+    const body = this.buildRequestBody(messages, availableTools);
+
+    const resp = await fetch(this.streamUrl(), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(120_000),
+    });
+
+    if (!resp.ok) {
+      const text = await resp.text();
+      if (isContextOverflowStatus(resp.status, text)) {
+        throw new ContextOverflowError(`Gemini API 上下文溢出 [${resp.status}]: ${text}`);
+      }
+      throw new LLMStatusError(resp.status, `Gemini API 流式请求失败 [${resp.status}]: ${text}`);
+    }
+
+    if (!resp.body) {
+      throw new Error("流式响应没有 body");
+    }
+
+    // 解析 SSE 流
+    let fullContent = "";
+    const toolCallMap = new Map<string, Record<string, unknown>>();
+    let usage: Usage | undefined;
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+
+      // SSE 以 \n\n 分隔事件
+      const events = buffer.split("\n\n");
+      buffer = events.pop() ?? "";
+
+      for (const event of events) {
+        const lines = event.split("\n");
+        for (const line of lines) {
+          const data = line.startsWith("data: ") ? line.slice(6) : line.startsWith("data:") ? line.slice(5) : null;
+          if (!data || data === "[DONE]") continue;
+
+          let chunk: GeminiResponse;
+          try {
+            chunk = JSON.parse(data) as GeminiResponse;
+          } catch {
+            continue;
+          }
+
+          // usageMetadata 通常在最后一个 chunk,优先取
+          if (chunk.usageMetadata) {
+            usage = this.translateUsage(chunk.usageMetadata);
+          }
+
+          const parts = chunk.candidates?.[0]?.content?.parts;
+          if (!parts) continue;
+          for (const part of parts) {
+            if (part.text) {
+              fullContent += part.text;
+              onDelta(part.text);
+            } else if (part.functionCall?.name) {
+              // 累积同名工具调用(args 是对象,直接合并;新 args 字段覆盖旧字段)
+              const prev = toolCallMap.get(part.functionCall.name) ?? {};
+              toolCallMap.set(part.functionCall.name, { ...prev, ...part.functionCall.args });
+            }
+          }
+        }
+      }
+    }
+
+    const toolCalls: ToolCall[] = [];
+    let i = 0;
+    for (const [name, args] of toolCallMap) {
+      toolCalls.push({
+        // Gemini 流式不返回 functionCall id,这里生成稳定的占位 id 供 toolCallId 关联
+        id: `gemini-call-${i++}`,
+        name,
+        arguments: JSON.stringify(args),
+      });
+    }
+
+    return {
+      role: "assistant",
+      content: fullContent,
+      toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+      usage,
+    };
+  }
+
+  /**
+   * 构建 Gemini 请求体(contents 翻译 + tools + system_instruction + generationConfig)。
+   * generate 与 generateStream 共用。
+   */
+  private buildRequestBody(
+    messages: Message[],
+    availableTools: ToolDefinition[],
+  ): Record<string, unknown> {
+    let systemPrompt = "";
+    const contents: GeminiContent[] = [];
+
+    for (const msg of messages) {
+      switch (msg.role) {
+        case "system":
+          systemPrompt = msg.content;
+          break;
+        case "user": {
+          if (msg.toolCallId) {
+            // 工具观察结果:user 消息里的 functionResponse part
+            // 注:Gemini 的 functionResponse.response 是对象,这里把工具输出字符串包成 {result}
+            // (Gemini 不要求 response 一定匹配工具 schema,任意对象均可)
+            contents.push({
+              role: "user",
+              parts: [{ functionResponse: { name: msg.toolCallId, response: { result: msg.content } } }],
+            });
+          } else {
+            contents.push({ role: "user", parts: [{ text: msg.content }] });
+          }
+          break;
+        }
+        case "assistant": {
+          // assistant → role: "model"
+          const parts: GeminiPart[] = [];
+          if (msg.content) {
+            parts.push({ text: msg.content });
+          }
+          // 历史工具调用 → functionCall part(args 是对象)
+          for (const tc of msg.toolCalls ?? []) {
+            let args: Record<string, unknown>;
+            try {
+              args = JSON.parse(tc.arguments) as Record<string, unknown>;
+            } catch {
+              args = {};
+            }
+            parts.push({ functionCall: { name: tc.name, args } });
+          }
+          if (parts.length > 0) {
+            contents.push({ role: "model", parts });
+          }
+          break;
+        }
+      }
+    }
+
+    const body: Record<string, unknown> = { contents };
+    if (systemPrompt) {
+      body.system_instruction = { parts: [{ text: systemPrompt }] };
+    }
+    // 慢思考支撑:availableTools 为空时不挂载 tools
+    if (availableTools.length > 0) {
+      body.tools = [
+        {
+          functionDeclarations: availableTools.map((t) => ({
+            name: t.name,
+            description: t.description,
+            parameters: t.inputSchema,
+          })),
+        },
+      ];
+    }
+    body.generationConfig = { maxOutputTokens: this.profile.maxOutputTokens };
+    return body;
+  }
+
+  /** 反向翻译:candidate.parts → 内部 schema.Message(非流式用) */
+  private translateParts(
+    parts: GeminiPart[],
+    usageMetadata?: GeminiResponse["usageMetadata"],
+  ): Message {
+    let textContent = "";
+    const toolCalls: ToolCall[] = [];
+    let callIdx = 0;
+    for (const part of parts) {
+      if (part.text) {
+        textContent += part.text;
+      } else if (part.functionCall?.name) {
+        toolCalls.push({
+          id: part.functionCall.name, // Gemini 非流式 functionCall 通常不带 id,用 name 占位
+          name: part.functionCall.name,
+          arguments: JSON.stringify(part.functionCall.args ?? {}),
+        });
+        callIdx++;
+      }
+    }
+
+    return {
+      role: "assistant",
+      content: textContent,
+      toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+      usage: usageMetadata ? this.translateUsage(usageMetadata) : undefined,
+    };
+  }
+
+  /** Gemini usageMetadata → 内部 Usage 五桶 */
+  private translateUsage(meta: NonNullable<GeminiResponse["usageMetadata"]>): Usage {
+    return {
+      promptTokens: meta.promptTokenCount ?? 0,
+      completionTokens: meta.candidatesTokenCount ?? 0,
+      cacheReadTokens: meta.cachedContentTokenCount ?? 0,
+      reasoningTokens: meta.thoughtsTokenCount ?? 0,
+    };
+  }
+}

@@ -3,13 +3,14 @@
 import { loadProviderConfig, type ProviderConfig } from "./config.js";
 import { ClaudeProvider } from "./claude.js";
 import { OpenAIProvider } from "./openai.js";
+import { GeminiProvider } from "./gemini.js";
 import type { LLMProvider } from "./interface.js";
 import type { Message, ToolDefinition } from "../schema/message.js";
 import { logger } from "../observability/logger.js";
 import { resolveProviderProfile } from "./profile.js";
 import type { ThinkingEffort } from "./thinking.js";
 
-export type ProviderKind = "openai" | "claude";
+export type ProviderKind = "openai" | "claude" | "gemini";
 
 export const GLM_52_MODEL = "glm-5.2";
 export const GLM_52_FALLBACK_MODEL = "kimi-k2.5";
@@ -36,6 +37,8 @@ export function createProvider(
       return createOpenAIProviderWithFallback(cfg);
     case "claude":
       return new ClaudeProvider(cfg);
+    case "gemini":
+      return new GeminiProvider(cfg);
   }
 }
 
@@ -51,6 +54,8 @@ export function createRawProvider(
       return new OpenAIProvider(cfg);
     case "claude":
       return new ClaudeProvider(cfg);
+    case "gemini":
+      return new GeminiProvider(cfg);
   }
 }
 
