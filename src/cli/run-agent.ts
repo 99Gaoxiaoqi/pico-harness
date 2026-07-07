@@ -1,6 +1,7 @@
 import { mkdir, readdir, realpath } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { AgentEngine } from "../engine/loop.js";
+import { SteerQueue } from "../engine/steer-queue.js";
 import { globalSessionManager, type Session } from "../engine/session.js";
 import { TerminalReporter, type Reporter } from "../engine/reporter.js";
 import { Compactor } from "../context/compactor.js";
@@ -61,6 +62,12 @@ export interface RunAgentCliOptions {
   trace?: boolean;
   /** MCP 配置文件路径(--mcp-config)。提供则启动时连接所有 MCP server 并注册工具 */
   mcpConfigPath?: string;
+  /**
+   * Steer 文本(ROADMAP 3.2,--steer):run 前一次性注入队列。
+   * engine 第一轮(A 点)peek 即可见,第一轮工具执行后(C 点)落 session 永久浮现。
+   * 运行中动态注入靠 HTTP / 飞书入口,CLI 单次阻塞模式仅支持启动注入。
+   */
+  steer?: string;
 }
 
 export interface RunAgentUsage {
@@ -118,6 +125,12 @@ export async function runAgentFromCli(
         );
   const registry = buildRegistry(workDir);
   const observationProcessor = buildObservationProcessor(workDir);
+  // Steer 队列(ROADMAP 3.2):CLI --steer 启动注入。run 前一次性 push,
+  // engine 第一轮 A 点 peek 即可见。运行中动态注入靠 HTTP / 飞书。
+  const steerQueue = new SteerQueue();
+  if (options.steer) {
+    steerQueue.push(options.steer);
+  }
   // 默认(非 Plan Mode)路径预组装 System Prompt:加载 AGENTS.md + Skills 清单,
   // 避免 loop.ts 退化到硬编码英文兜底。Plan Mode 下由 buildSystemPrompt() 每轮动态重组,故此处不传。
   const systemPrompt = options.planMode
@@ -137,6 +150,7 @@ export async function runAgentFromCli(
     observationProcessor,
     reporter: dependencies.reporter ?? new TerminalReporter(),
     tracer: options.trace === true ? new Tracer() : undefined,
+    steerQueue,
   });
 
   registry.use(buildApprovalMiddleware(dependencies.approvalNotifier ?? terminalNotifier, workDir));

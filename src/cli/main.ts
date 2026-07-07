@@ -293,6 +293,7 @@ async function main() {
       "list-snapshots": { type: "boolean", default: false },
       rewind: { type: "boolean", default: false },
       "rewind-mode": { type: "string", default: "both" },
+      steer: { type: "string" },
     },
     allowPositionals: true,
   });
@@ -395,6 +396,7 @@ async function main() {
     planMode,
     trace: traceEnabled,
     ...(values["mcp-config"] ? { mcpConfigPath: values["mcp-config"] } : {}),
+    ...(values.steer ? { steer: values.steer } : {}),
   });
 }
 
