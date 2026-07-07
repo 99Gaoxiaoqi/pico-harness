@@ -97,6 +97,15 @@ export class ToolRegistry implements Registry {
     return [...this.tools.values()].map((t) => t.definition());
   }
 
+  /**
+   * 按名称获取已注册的工具实例(可能为 undefined)。
+   * 供 host 注入运行时依赖(如 ExitPlanModeTool 的 onExit 回调),
+   * 工具实例本身的修改不影响 registry 路由。
+   */
+  getTool(name: string): BaseTool | undefined {
+    return this.tools.get(name);
+  }
+
   /** 判断工具是否只读 (默认 false,保守视为写操作) */
   isReadOnlyTool(name: string): boolean {
     return this.tools.get(name)?.readOnly ?? false;

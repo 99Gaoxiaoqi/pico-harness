@@ -175,6 +175,20 @@ export class FeishuBot {
       console.log(`[Feishu] 会话 ${chatId}: ${ok ? "🚫" : "⚠"} reject ${taskId}`);
       return;
     }
+    // 3.6 Plan Review:modify 口令——"modify <taskId> <新plan内容>" 修改后通过。
+    // 把后续整段文本作为修改后的 PLAN.md 写回,allowed=true 放行退出 Plan Mode。
+    const modifyMatch = text.match(/^modify\s+(\S+)\s+([\s\S]+)/i);
+    if (modifyMatch) {
+      const taskId = modifyMatch[1]!;
+      const newPlan = modifyMatch[2]!.trim();
+      const ok = globalApprovalManager.resolveApprovalWithModify(
+        taskId,
+        "人类管理员修改了 plan 内容,修改后通过",
+        newPlan,
+      );
+      console.log(`[Feishu] 会话 ${chatId}: ${ok ? "✏️" : "⚠"} modify ${taskId}`);
+      return;
+    }
 
     // 第 22 讲:意图拦截过滤器 (Intent Filter)。
     // 群员聊无关天("今天中午吃什么")不应触发昂贵的 Main Loop。
@@ -291,11 +305,16 @@ export class FeishuReporter implements Reporter {
    * 用户也可直接回复 "approve <taskId>" / "reject <taskId>" 口令。
    */
   async sendApprovalCard(notice: ApprovalNotice): Promise<void> {
+    // exit_plan_mode 是 Plan 审批,改用中性色调与标题;其余为高危操作审批(红色)。
+    const isPlanReview = notice.toolName === "exit_plan_mode";
+    const headerTitle = isPlanReview ? "📋 Plan 审批请求" : "⚠ 高危操作审批请求";
+    const headerTemplate = isPlanReview ? "blue" : "red";
+    const diffLabel = isPlanReview ? "PLAN.md 内容" : "变更预览";
     const card = {
       config: { wide_screen_mode: true },
       header: {
-        title: { tag: "plain_text", content: "⚠ 高危操作审批请求" },
-        template: "red",
+        title: { tag: "plain_text", content: headerTitle },
+        template: headerTemplate,
       },
       elements: [
         {
@@ -318,7 +337,7 @@ export class FeishuReporter implements Reporter {
                 tag: "div",
                 text: {
                   tag: "lark_md",
-                  content: `**变更预览**\n\`\`\`\n${notice.diff}\n\`\`\``,
+                  content: `**${diffLabel}**\n\`\`\`\n${notice.diff}\n\`\`\``,
                 },
               },
             ]
@@ -343,7 +362,14 @@ export class FeishuReporter implements Reporter {
         },
         {
           tag: "note",
-          elements: [{ tag: "plain_text", content: "也可回复 approve/reject + 任务ID 文字指令" }],
+          elements: [
+            {
+              tag: "plain_text",
+              content: isPlanReview
+                ? "也可回复文字指令:approve/reject/modify + 任务ID(modify 后附上新 plan 内容)"
+                : "也可回复 approve/reject + 任务ID 文字指令",
+            },
+          ],
         },
       ],
     };
