@@ -61,6 +61,25 @@ export class Session {
 
   private history: Message[] = [];
 
+  /**
+   * ToolResult 外挂元数据(按 toolCallId 索引),供 MicroCompaction 判断
+   * 缓存年龄 + 使用率。不改 Message schema,只在 Session 层维护。
+   * - cachedAt:首次 append 该 ToolResult 的时间戳
+   * - accessCount:被 getWorkingMemory 读出的次数
+   */
+  private toolResultMeta = new Map<string, { cachedAt: number; accessCount: number }>();
+
+  /**
+   * deferredMessages:tool 调用顺序完整性保证(3.4)。
+   * 当 assistant 发出 toolCalls 但 results 尚未到齐时,后续到达的非 ToolResult 消息
+   * 暂存于此,不入 history;待 pendingToolCallIds 清空后逐条重新走 append 入 history。
+   * 避免出现"assistant 发起 toolCalls → user 闲聊 → toolResult"的乱序,
+   * 模型 API 要求 toolCalls 紧跟 toolResults。
+   */
+  private deferredMessages: Message[] = [];
+  /** 正在等待 ToolResult 的 toolCallId 集合。非空表示有 toolCalls 尚未配对。 */
+  private pendingToolCallIds: Set<string> = new Set();
+
   readonly fileHistory: FileHistoryState = createFileHistoryState();
 
   conversationId: string;
@@ -175,7 +194,42 @@ export class Session {
       }
     }
     this.history = pending;
+    // 3.1:重放后从 history 重建 toolResultMeta(cachedAt 未知,用当前时间;
+    // accessCount 归零)。避免恢复后已有 ToolResult 丢失年龄追踪。
+    this.rebuildToolResultMeta();
     this.nextSeq = (records[records.length - 1]?.seq ?? -1) + 1;
+  }
+
+  /**
+   * 从当前 history 重建 toolResultMeta 表(用于 recover 后或需要重置时)。
+   * cachedAt 用当前时间(原始时间未持久化),accessCount 归零。
+   */
+  private rebuildToolResultMeta(): void {
+    this.toolResultMeta = new Map();
+    const now = Date.now();
+    for (const msg of this.history) {
+      if (msg.role === "user" && msg.toolCallId) {
+        if (!this.toolResultMeta.has(msg.toolCallId)) {
+          this.toolResultMeta.set(msg.toolCallId, { cachedAt: now, accessCount: 0 });
+        }
+      }
+    }
+  }
+
+  /**
+   * 清理 history 中已不存在的 ToolResult 对应的 meta 条目。
+   * 在 truncate / undo / rewind / compaction 等缩短 history 的操作后调用,
+   * 防止 toolResultMeta 无限增长。
+   */
+  private pruneToolResultMeta(): void {
+    if (this.toolResultMeta.size === 0) return;
+    const live = new Set<string>();
+    for (const msg of this.history) {
+      if (msg.role === "user" && msg.toolCallId) live.add(msg.toolCallId);
+    }
+    for (const id of this.toolResultMeta.keys()) {
+      if (!live.has(id)) this.toolResultMeta.delete(id);
+    }
   }
 
   private async recoverFileHistory(): Promise<void> {
@@ -223,20 +277,81 @@ export class Session {
     }
   }
 
-  /** 向 Session 追加消息(可批量)。内存写后追加事件到 JSONL(对标 kimi-code wire.jsonl) */
+  /**
+   * 向 Session 追加消息(可批量)。内存写后追加事件到 JSONL(对标 kimi-code wire.jsonl)
+   *
+   * 3.4 deferredMessages:tool 调用顺序完整性保证。
+   * - assistant 带 toolCalls:登记 pendingToolCallIds(等待对应 ToolResult)
+   * - ToolResult 到达:从 pendingToolCallIds 删除;若清空,把 deferredMessages flush 入 history
+   * - 其他消息:若 pendingToolCallIds 非空,暂存到 deferredMessages 不入 history;
+   *   否则正常入 history
+   */
   append(...msgs: Message[]): void {
+    for (const msg of msgs) {
+      this.appendOne(msg);
+    }
+  }
+
+  /** 单条消息追加:核心逻辑,处理 deferred + toolResultMeta 登记 */
+  private appendOne(msg: Message): void {
+    const hasToolCalls = msg.role === "assistant" && msg.toolCalls !== undefined && msg.toolCalls.length > 0;
+    const isToolResult = msg.role === "user" && msg.toolCallId !== undefined;
+
+    // 1. assistant 带 toolCalls:登记 pendingToolCallIds,然后正常入 history
+    //    (toolCalls 消息是配对的源头,绝不能延迟,否则 ToolResult 变孤儿)
+    if (hasToolCalls && msg.toolCalls) {
+      for (const tc of msg.toolCalls) {
+        this.pendingToolCallIds.add(tc.id);
+      }
+    }
+
+    // 2. ToolResult 到达:从 pending 删除;记录 toolResultMeta
+    if (isToolResult && msg.toolCallId) {
+      this.pendingToolCallIds.delete(msg.toolCallId);
+      // 记录元数据(cachedAt = 当前时间,accessCount 后续 bump)
+      if (!this.toolResultMeta.has(msg.toolCallId)) {
+        this.toolResultMeta.set(msg.toolCallId, {
+          cachedAt: Date.now(),
+          accessCount: 0,
+        });
+      }
+    }
+
+    // 3. 决定是否暂存:普通消息(非 ToolResult、非带 toolCalls 的 assistant)
+    //    且 pendingToolCallIds 非空 → 暂存,不入 history
+    //    ToolResult 与 带 toolCalls 的 assistant 永远直接入 history
+    const isDeferredCandidate = !isToolResult && !hasToolCalls;
+    if (isDeferredCandidate && this.pendingToolCallIds.size > 0) {
+      this.deferredMessages.push(msg);
+      return;
+    }
+
+    // 4. 正常入 history
+    this.doAppend(msg);
+
+    // 5. 若 pending 刚清空且有 deferred 待 flush,逐条重新走 append 正常路径
+    //    (此时 pendingToolCallIds.size === 0,新消息会直接入 history)
+    if (isToolResult && this.pendingToolCallIds.size === 0 && this.deferredMessages.length > 0) {
+      const pending = this.deferredMessages;
+      this.deferredMessages = [];
+      for (const deferred of pending) {
+        this.appendOne(deferred);
+      }
+    }
+  }
+
+  /** 实际写入 history + FTS5 + JSONL 落盘 */
+  private doAppend(msg: Message): void {
     const beforeLen = this.history.length;
-    this.history.push(...msgs);
+    this.history.push(msg);
     this.updatedAt = new Date();
 
-    // FTS5 索引:为每条消息建立全文检索索引(用于记忆提醒和语义检索)
+    // FTS5 索引:为消息建立全文检索索引(用于记忆提醒和语义检索)
     if (this.fts5) {
-      for (let i = 0; i < msgs.length; i++) {
-        try {
-          this.fts5.insert(this.id, beforeLen + i, msgs[i]!);
-        } catch (err) {
-          logger.warn({ err }, '[session] FTS5 索引失败');
-        }
+      try {
+        this.fts5.insert(this.id, beforeLen, msg);
+      } catch (err) {
+        logger.warn({ err }, '[session] FTS5 索引失败');
       }
     }
 
@@ -244,15 +359,13 @@ export class Session {
     // Promise 收集到 pendingWrites,供 persistTruncate 落盘前 await,避免 truncate
     // 抢先写入导致重放时 message 缺失(C1 竞态修复)。
     if (this.store) {
-      for (const m of msgs) {
-        const seq = this.nextSeq++;
-        const writePromise = this.store
-          .appendMessage(seq, m)
-          .catch((err) =>
-            logger.warn({ seq }, `[session] 持久化写入失败: ${String(err)}`),
-          );
-        this.pendingWrites.push(writePromise);
-      }
+      const seq = this.nextSeq++;
+      const writePromise = this.store
+        .appendMessage(seq, msg)
+        .catch((err) =>
+          logger.warn({ seq }, `[session] 持久化写入失败: ${String(err)}`),
+        );
+      this.pendingWrites.push(writePromise);
     }
   }
 
@@ -272,6 +385,7 @@ export class Session {
       return;
     }
     this.history = this.history.slice(fromIndex);
+    this.pruneToolResultMeta();
     this.updatedAt = new Date();
     void this.persistTruncate(fromIndex);
   }
@@ -286,6 +400,10 @@ export class Session {
     const { cutIndex, removedCount } = this.findUndoCut(this.history, count);
     if (removedCount === 0) return;
     this.history = this.history.slice(0, cutIndex);
+    this.pruneToolResultMeta();
+    // 3.4: undo 时清空 deferred 与 pending,避免遗留半截 tool 配对状态
+    this.deferredMessages = [];
+    this.pendingToolCallIds.clear();
     this.conversationId = `${this.id}-${Date.now().toString(36)}`;
     this.updatedAt = new Date();
     void this.persistUndoEvent(removedCount);
@@ -294,6 +412,7 @@ export class Session {
   rewindTo(messageIndex: number): void {
     const removedUserCount = this.countUserPrompts(this.history.slice(messageIndex));
     this.history = this.history.slice(0, messageIndex);
+    this.pruneToolResultMeta();
     this.conversationId = `${this.id}-${Date.now().toString(36)}`;
     this.updatedAt = new Date();
     if (removedUserCount > 0) {
@@ -436,6 +555,8 @@ export class Session {
     };
     // 内存:用 summary 替换前 compactedCount 条
     this.history = [summaryMsg, ...retained];
+    // 压缩后清理已消失 ToolResult 的 meta(被摘要吞掉的前缀条目)
+    this.pruneToolResultMeta();
     this.updatedAt = new Date();
     void this.persistCompaction(beforeLen, summaryMsg, retained);
   }
@@ -501,24 +622,42 @@ export class Session {
    */
   getWorkingMemory(limit: number): Message[] {
     const total = this.history.length;
+    let res: Message[];
     if (total <= limit || limit <= 0) {
       // 历史总量小于限制或不设限:全量返回(深拷贝以防外部修改污染内部)
-      return this.history.map((m) => ({ ...m }));
+      res = this.history.map((m) => ({ ...m }));
+    } else {
+      // 截取最近的 limit 条
+      res = this.history.slice(total - limit).map((m) => ({ ...m }));
+
+      // 丢弃断头的孤儿 ToolResult,保证历史连续性
+      while (res.length > 0) {
+        const first = res[0]!;
+        if (first.role === "user" && first.toolCallId) {
+          res = res.slice(1);
+        } else {
+          break;
+        }
+      }
     }
 
-    // 截取最近的 limit 条
-    let res = this.history.slice(total - limit).map((m) => ({ ...m }));
-
-    // 丢弃断头的孤儿 ToolResult,保证历史连续性
-    while (res.length > 0) {
-      const first = res[0]!;
-      if (first.role === "user" && first.toolCallId) {
-        res = res.slice(1);
-      } else {
-        break;
+    // 3.1 MicroCompaction:对本次返回的 ToolResult bump accessCount
+    // (bump 只对本次返回的算一次访问,反映"近期被读过")
+    for (const msg of res) {
+      if (msg.role === "user" && msg.toolCallId) {
+        const meta = this.toolResultMeta.get(msg.toolCallId);
+        if (meta) meta.accessCount++;
       }
     }
     return res;
+  }
+
+  /**
+   * 暴露 ToolResult 外挂元数据(按 toolCallId 索引),供 MicroCompaction
+   * 读取缓存年龄与使用率。返回只读视图。
+   */
+  getToolResultMeta(): ReadonlyMap<string, { cachedAt: number; accessCount: number }> {
+    return this.toolResultMeta;
   }
 
   /**
