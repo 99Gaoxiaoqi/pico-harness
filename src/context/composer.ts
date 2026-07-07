@@ -16,6 +16,9 @@ import { PlanStore } from "./plan-store.js";
 import { SkillLoader } from "./skill.js";
 import { TodoStore } from "./todo-store.js";
 import type { LearnedSkill } from "../memory/skill-schema.js";
+// GoalManager 用 import type:只取类型签名,避免 context → engine 的循环依赖
+// (engine/loop.ts 反向 import composer)。单例实例由 host 注入,本类不 new。
+import type { GoalManager } from "../engine/goal-manager.js";
 
 // 动态导入：SkillRegistry 和 MemoryNudger 尚未实现时使用 mock
 // 真实实现完成后，替换为实际类
@@ -50,14 +53,17 @@ export class PromptComposer {
   private readonly skillRegistry: ISkillRegistry;
   private readonly nudger?: IMemoryNudger;
   private readonly sessionId?: string;
+  /** GoalManager 单例(可选):由 host 注入,注入后把 active goal 渲染进 prompt */
+  private readonly goalManager?: GoalManager;
 
   /**
-   * @param workDir 工作目录
+   * @param workDir 工作目���
    * @param planMode 是否启用 Plan Mode
    * @param options 可选配置
    *   - sessionId: 会话 ID（用于 Nudger）
    *   - skillRegistry: 技能注册表实例（测试时可注入 mock）
    *   - memoryNudger: 记忆提示器实例（测试时可注入 mock）
+   *   - goalManager: GoalManager 单例（注入后把 active goal 注入 prompt）
    */
   constructor(
     workDir: string,
@@ -66,6 +72,7 @@ export class PromptComposer {
       sessionId?: string;
       skillRegistry?: ISkillRegistry;
       memoryNudger?: IMemoryNudger;
+      goalManager?: GoalManager;
     },
   ) {
     this.workDir = workDir;
@@ -81,6 +88,9 @@ export class PromptComposer {
 
     // 初始化 Nudger（可选）
     this.nudger = options?.memoryNudger;
+
+    // GoalManager（可选注入）
+    this.goalManager = options?.goalManager;
   }
 
   /**
@@ -150,6 +160,20 @@ ${agentsContent}
       }
     } catch (err) {
       logger.warn({ err }, "[composer] 构建 TodoList 上下文失败,降级跳过");
+    }
+
+    // 5.6 Goal Mode:注入当前激活目标状态(无 active goal 不注入)
+    // 对标 todo 注入,让模型每轮"看到"自己追的长程目标与 budget 约束。
+    // GoalManager 单例由 host 注入;未注入(goalManager=undefined)则跳过。
+    try {
+      if (this.goalManager) {
+        const goalCtx = this.goalManager.buildGoalContext();
+        if (goalCtx) {
+          parts.push(goalCtx);
+        }
+      }
+    } catch (err) {
+      logger.warn({ err }, "[composer] 构建 Goal 上下文失败,降级跳过");
     }
 
     // 6. Periodic Nudge（新增）

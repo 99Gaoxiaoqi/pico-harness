@@ -15,6 +15,7 @@ import { createServer } from "node:http";
 import { mkdir, realpath } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { AgentEngine } from "../engine/loop.js";
+import { GoalManager } from "../engine/goal-manager.js";
 import { globalSessionManager } from "../engine/session.js";
 import { Compactor } from "../context/compactor.js";
 import { ToolResultArtifactStore } from "../context/artifact-store.js";
@@ -69,10 +70,12 @@ const cliBackgroundManager = new BackgroundManager();
 function buildRegistry(
   workDir: string,
   backgroundManager: BackgroundManager = cliBackgroundManager,
+  goalManager?: GoalManager,
 ): ToolRegistry {
   return buildDefaultToolRegistry(workDir, {
     truncateResults: false,
     backgroundManager,
+    ...(goalManager !== undefined ? { goalManager } : {}),
   });
 }
 
@@ -182,7 +185,11 @@ async function serve(
 ): Promise<void> {
   const workDir = process.cwd();
   const modelName = process.env.LLM_MODEL ?? (kind === "openai" ? "glm-5.2" : "claude-3-5-sonnet");
-  const systemPrompt = planMode ? undefined : await new PromptComposer(workDir).build();
+  // GoalManager 单例:serve 进程级共享,registry(3 工具)与 engine(prompt 注入 + Grace Call)用同一实例。
+  const goalManager = new GoalManager();
+  const systemPrompt = planMode
+    ? undefined
+    : await new PromptComposer(workDir, false, { goalManager }).build();
   const backgroundManager = new BackgroundManager();
   const server = createServer(async (req, res) => {
     if (req.method !== "POST" || req.url !== "/ask") {
@@ -217,7 +224,7 @@ async function serve(
       })();
 
       const provider = createProvider(kind, undefined, requestThinkingEffort);
-      const registry = buildRegistry(workDir, backgroundManager);
+      const registry = buildRegistry(workDir, backgroundManager, goalManager);
       registry.use(buildApprovalMiddleware(terminalNotifier, workDir));
       const engine = new AgentEngine({
         provider,
@@ -227,6 +234,7 @@ async function serve(
         thinkingEffort: requestThinkingEffort,
         planMode,
         systemPrompt,
+        goalManager,
         compactor: buildCompactor(kind, modelName),
         observationProcessor: buildObservationProcessor(workDir),
         reporter,
@@ -338,7 +346,11 @@ async function main() {
   if (values.feishu) {
     // 飞书模式:启动 WSClient 长连接,群里 @机器人 触发 Agent,状态发回会话
     const workDir = process.cwd();
-    const systemPrompt = planMode ? undefined : await new PromptComposer(workDir).build();
+    // GoalManager 单例:飞书进程级共享,registry(3 工具)与 engine 用同一实例。
+    const goalManager = new GoalManager();
+    const systemPrompt = planMode
+      ? undefined
+      : await new PromptComposer(workDir, false, { goalManager }).build();
     const modelName =
       process.env.LLM_MODEL ?? (kind === "openai" ? "glm-5.2" : "claude-3-5-sonnet");
     // 预加载自定义角色:飞书 engineFactory 回调是同步的,await 必须提前到这里
@@ -348,7 +360,7 @@ async function main() {
       ({ session, reporter }) => {
         const provider = createProvider(kind, undefined, thinkingEffort);
         const trackedProvider = new CostTracker(provider, modelName, session);
-        const registry = buildRegistry(workDir, backgroundManager);
+        const registry = buildRegistry(workDir, backgroundManager, goalManager);
         registry.use(createFeishuApprovalMiddleware(reporter, workDir));
         const engine = new AgentEngine({
           provider: trackedProvider,
@@ -358,6 +370,7 @@ async function main() {
           thinkingEffort,
           planMode,
           systemPrompt,
+          goalManager,
           compactor: buildCompactor(kind, modelName),
           observationProcessor: buildObservationProcessor(workDir),
           reporter: new SilentReporter(), // 实际回写由运行时 FeishuReporter 负责

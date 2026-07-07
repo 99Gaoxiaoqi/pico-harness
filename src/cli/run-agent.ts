@@ -1,6 +1,7 @@
 import { mkdir, readdir, realpath } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { AgentEngine } from "../engine/loop.js";
+import { GoalManager } from "../engine/goal-manager.js";
 import { SteerQueue } from "../engine/steer-queue.js";
 import { globalSessionManager, type Session } from "../engine/session.js";
 import { TerminalReporter, type Reporter } from "../engine/reporter.js";
@@ -123,7 +124,10 @@ export async function runAgentFromCli(
           dependencies.providerFactory ?? createRawProvider,
           session,
         );
-  const registry = buildRegistry(workDir);
+  // GoalManager 单例:registry(3 工具)与 engine(prompt 注入 + Grace Call)共享同一实例,
+  // 确保工具改的状态引擎侧立即可见(对标 TodoStore 跨实例 bug 的教训)。
+  const goalManager = new GoalManager();
+  const registry = buildRegistry(workDir, cliBackgroundManager, goalManager);
   const observationProcessor = buildObservationProcessor(workDir);
   // Steer 队列(ROADMAP 3.2):CLI --steer 启动注入。run 前一次性 push,
   // engine 第一轮 A 点 peek 即可见。运行中动态注入靠 HTTP / 飞书。
@@ -131,11 +135,11 @@ export async function runAgentFromCli(
   if (options.steer) {
     steerQueue.push(options.steer);
   }
-  // 默认(非 Plan Mode)路径预组装 System Prompt:加载 AGENTS.md + Skills 清单,
+  // 默认(非 Plan Mode)路径预组装 System Prompt:加载 AGENTS.md + Skills 清单 + Goal 状态,
   // 避免 loop.ts 退化到硬编码英文兜底。Plan Mode 下由 buildSystemPrompt() 每轮动态重组,故此处不传。
   const systemPrompt = options.planMode
     ? undefined
-    : await new PromptComposer(workDir).build();
+    : await new PromptComposer(workDir, false, { goalManager }).build();
   const engine = new AgentEngine({
     provider: trackedProvider,
     registry,
@@ -144,6 +148,7 @@ export async function runAgentFromCli(
     ...(options.thinkingEffort !== undefined ? { thinkingEffort: options.thinkingEffort } : {}),
     planMode: options.planMode ?? false,
     systemPrompt,
+    goalManager,
     compactor: buildCompactor(kind, providerConfig.model),
     // 模型摘要压缩:provider 存在即启用,作为字符级降级用尽后的最后防线
     fullCompactor: new FullCompactor({ provider: trackedProvider }),
@@ -201,10 +206,12 @@ export async function runAgentFromCli(
 function buildRegistry(
   workDir: string,
   backgroundManager: BackgroundManager = cliBackgroundManager,
+  goalManager?: GoalManager,
 ): ToolRegistry {
   return buildDefaultToolRegistry(workDir, {
     truncateResults: false,
     backgroundManager,
+    ...(goalManager !== undefined ? { goalManager } : {}),
   });
 }
 
