@@ -28,6 +28,7 @@ import { SilentReporter, type Reporter } from "./reporter.js";
 import { SteerQueue } from "./steer-queue.js";
 import { ReminderInjector, ToolGuardrailController, type GuardrailOptions } from "./reminder.js";
 import { IterationBudget, type BudgetConfig } from "./budget.js";
+import type { GoalManager } from "./goal-manager.js";
 import { Tracer, exportTraceToFile, truncate, type Span } from "../observability/trace.js";
 import { logger } from "../observability/logger.js";
 import { extractBashRedirectTargets, safeResolve } from "../tools/registry-impl.js";
@@ -102,6 +103,14 @@ export interface AgentEngineOptions {
   guardrailOptions?: GuardrailOptions;
   /** 轮次/token/成本预算配置 */
   budgetConfig?: BudgetConfig;
+  /**
+   * Goal Manager 单例(ROADMAP 3.5 Goal Mode)。
+   * 注入后:planMode 时 PromptComposer 会把 active goal 注入 system prompt;
+   * Grace Call 收尾总结会拼上 goal 状态,让收尾对齐目标。
+   * 必须与 buildDefaultToolRegistry 传入的是同一实例,确保工具与引擎状态一致。
+   * 未提供则 Goal Mode 不生效,行为不变。
+   */
+  goalManager?: GoalManager;
   /** 可选的轮次日志回调,便于第 19 讲 Tracing 接入 */
   onTurn?: (info: { turn: number; message: Message }) => void;
   /**
@@ -156,6 +165,8 @@ export class AgentEngine implements AgentRunner {
   private readonly recovery: RecoveryManager;
   private readonly guardrail: ToolGuardrailController;
   private readonly budget: IterationBudget;
+  /** Goal Manager 单例(可选);planMode 注入 prompt + Grace Call 收尾对齐目标 */
+  private readonly goalManager?: GoalManager;
   private readonly onTurn?: (info: { turn: number; message: Message }) => void;
   /** Plan Mode 退出回调(ExitPlanMode 审批通过后触发),供 host 监听 */
   private readonly onPlanExit?: () => void;
@@ -191,6 +202,7 @@ export class AgentEngine implements AgentRunner {
       ...opts.budgetConfig,
       maxTurns: opts.budgetConfig?.maxTurns ?? this.maxTurns,
     });
+    this.goalManager = opts.goalManager;
     this.onTurn = opts.onTurn;
     this.onPlanExit = opts.onPlanExit;
     this.reporter = opts.reporter ?? new SilentReporter();
@@ -228,7 +240,12 @@ export class AgentEngine implements AgentRunner {
    */
   private async buildSystemPrompt(): Promise<string> {
     if (this.planMode) {
-      return new PromptComposer(this.workDir, true).build();
+      // planMode 时用 PromptComposer 动态组装;goalManager 单例注入,
+      // 让 active goal 在每轮 prompt 中浮现(对齐 plan/todo 都走 composer 的模式)。
+      const composer = this.goalManager
+        ? new PromptComposer(this.workDir, true, { goalManager: this.goalManager })
+        : new PromptComposer(this.workDir, true);
+      return composer.build();
     }
     return this.systemPrompt;
   }
@@ -876,7 +893,11 @@ export class AgentEngine implements AgentRunner {
     reporter: Reporter,
     parentSpan?: Span,
   ): Promise<void> {
-    const gracePrompt = `[SYSTEM] 已达执行预算: ${reason}。立即停止工具调用,用纯文本总结:1)已完成 2)未完成 3)下一步建议。`;
+    // Goal Mode(可选):把 active goal 状态拼进收尾提示,让总结对齐目标。
+    // 无 goalManager 或无 active goal 时 goalSection 为空,gracePrompt 保持原样。
+    const goalContext = this.goalManager?.buildGoalContext() ?? "";
+    const goalSection = goalContext ? `\n\n${goalContext}\n请在总结中明确:当前目标达成到什么程度。` : "";
+    const gracePrompt = `[SYSTEM] 已达执行预算: ${reason}。立即停止工具调用,用纯文本总结:1)已完成 2)未完成 3)下一步建议。${goalSection}`;
     session.append({ role: "user", content: gracePrompt });
     const graceSpan = parentSpan?.startChild("LLM.GraceCall", {
       reason,
