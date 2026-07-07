@@ -17,35 +17,111 @@ import { appendFile, readFile } from "node:fs/promises";
 import type { Message } from "../schema/message.js";
 import { logger } from "../observability/logger.js";
 
-/** 持久化的事件记录:每行一个,带 type 判别联合 */
+/** 持久化的事件记录:每行一个,带 type 判别联合。 */
+/**
+ * message record 的可选 `volatile` 字段(4.3 cursor 多端同步):
+ *   - true:易失事件(如流式片段 text-delta),仅用于 WS 实时推送,
+ *     不推进 cursor seq,重放时被丢弃(不重建进 history)。
+ *   - false/缺省:持久事件,推进 seq,重放时进入 history。
+ *   向后兼容:旧 JSONL 无此字段,load/recover 时按 false 处理(即全部当作持久)。
+ */
 export type SessionRecord =
-  | { readonly type: "message"; readonly seq: number; readonly message: Message }
+  | {
+      readonly type: "message";
+      readonly seq: number;
+      readonly message: Message;
+      readonly volatile?: boolean;
+    }
   | { readonly type: "truncate"; readonly seq: number; readonly fromIndex: number }
   | { readonly type: "undo"; readonly seq: number; readonly count: number; readonly at: string }
   | { readonly type: "rewind_to"; readonly seq: number; readonly messageIndex: number; readonly at: string };
+
+/**
+ * record 落盘监听器(4.3 cursor 多端同步)。
+ *
+ * SessionStore 在每条 record 追加后(无论 volatile 与否)向监听器广播
+ * (record, seq, epoch)。WS 层订阅它,据此向连接的 client 推送事件流:
+ *   - 持久事件(message with volatile!=true)/ truncate / undo / rewind_to 推进 seq
+ *   - 易失事件(message with volatile===true)不推进 seq
+ *   - epoch 用于 fork/rewind 后让旧 cursor 的 client 感知"世代已变"
+ *
+ * 监听器同步触发(appendLine 之后),保证 seq 单调与推送顺序一致。
+ */
+export type SessionRecordListener = (
+  record: SessionRecord,
+  seq: number,
+  epoch: number,
+) => void;
 
 /**
  * 单个 Session 的 JSONL 事件日志读写器。
  * 文件路径由调用方决定(通常是 workDir/.claw/sessions/<id>.jsonl)。
  */
 export class SessionStore {
+  /**
+   * epoch(4.3 cursor 多端同步):fork/rewind 时 bumpEpoch() 递增。
+   * 同 sessionId 在 fork/rewind 后世代不同,旧 cursor 的 client 据此感知
+   * 历史已被改写,需重新拉全量而非增量。纯私有字段,不影响 Session 类语义。
+   */
+  private epoch = 0;
+  /** record 落盘监听器集合(WS 层订阅) */
+  private readonly listeners = new Set<SessionRecordListener>();
+
   constructor(private readonly filePath: string) {}
 
+  /** 递增 epoch(fork/rewind 时调用)。纯游标概念,不改写已落盘的 JSONL。 */
+  bumpEpoch(): void {
+    this.epoch++;
+  }
+
+  /** 读取当前 epoch(WS 层连接握手时回传给 client)。 */
+  getEpoch(): number {
+    return this.epoch;
+  }
+
+  /** 订阅 record 落盘事件。返回取消订阅函数。 */
+  onRecord(listener: SessionRecordListener): () => void {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  }
+
+  /** 向所有监听器广播(record, seq, epoch)。appendLine 成功后同步调用。 */
+  private emit(record: SessionRecord, seq: number): void {
+    for (const listener of this.listeners) {
+      try {
+        listener(record, seq, this.epoch);
+      } catch (err) {
+        // 监听器异常不应影响落盘主流程
+        logger.warn({ err: String(err) }, "[session] record 监听器抛错,已忽略");
+      }
+    }
+  }
+
   /** 追加一条 message 事件。失败由调用方 catch(fire-and-forget)。 */
-  async appendMessage(seq: number, message: Message): Promise<void> {
-    const record: SessionRecord = { type: "message", seq, message };
+  async appendMessage(seq: number, message: Message, volatile?: boolean): Promise<void> {
+    const record: SessionRecord = {
+      type: "message",
+      seq,
+      message,
+      ...(volatile ? { volatile: true } : {}),
+    };
     await this.appendLine(JSON.stringify(record));
+    this.emit(record, seq);
   }
 
   /** 追加一条 truncate 事件(fromIndex 之前的 message 在重放时被丢弃)。 */
   async appendTruncate(seq: number, fromIndex: number): Promise<void> {
     const record: SessionRecord = { type: "truncate", seq, fromIndex };
     await this.appendLine(JSON.stringify(record));
+    this.emit(record, seq);
   }
 
   async appendUndoEvent(seq: number, count: number): Promise<void> {
     const record: SessionRecord = { type: "undo", seq, count, at: new Date().toISOString() };
     await this.appendLine(JSON.stringify(record));
+    this.emit(record, seq);
   }
 
   async appendRewindTo(seq: number, messageIndex: number): Promise<void> {
@@ -56,6 +132,7 @@ export class SessionStore {
       at: new Date().toISOString(),
     };
     await this.appendLine(JSON.stringify(record));
+    this.emit(record, seq);
   }
 
   /**
