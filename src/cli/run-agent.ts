@@ -14,6 +14,7 @@ import { SkillLoader, SkillViewTool } from "../context/skill.js";
 import {
   createRawProvider,
   fallbackModelFor,
+  getCredentialPool,
   isModelUnavailableError,
   type ProviderKind,
 } from "../provider/factory.js";
@@ -115,15 +116,41 @@ export async function runAgentFromCli(
     options.session ?? consoleSessionId(workDir),
     workDir,
   );
+  // 凭证轮换(4.2):多 key 时从池取首个 key 覆盖 config.apiKey,并构建轮换回调。
+  // 单 key / 注入 provider 时跳过(向后兼容)。pool 注入点集中在此,便于追踪 currentKey。
+  const credentialPool = getCredentialPool();
+  let currentConfig: ProviderConfig = providerConfig;
+  let rebuildProvider: (() => LLMProvider | undefined) | undefined;
+  if (credentialPool && credentialPool.size > 1 && dependencies.provider === undefined) {
+    currentConfig = { ...providerConfig, apiKey: credentialPool.getNext() };
+  }
   const trackedProvider =
     dependencies.provider !== undefined
       ? new CostTracker(dependencies.provider, providerConfig.model, session)
       : createTrackedProviderWithFallback(
           kind,
-          providerConfig,
+          currentConfig,
           dependencies.providerFactory ?? createRawProvider,
           session,
         );
+  if (credentialPool && credentialPool.size > 1 && dependencies.provider === undefined) {
+    rebuildProvider = (): LLMProvider | undefined => {
+      // 标记当前 key 限流 → 取下一个可用 key → 重建整条包装链
+      credentialPool.markRateLimited(currentConfig.apiKey);
+      const nextKey = credentialPool.getNext();
+      if (nextKey === currentConfig.apiKey) {
+        // 轮换无可用 key(全限流兜底返回同 key)→ 交给 retry 层指数退避
+        return undefined;
+      }
+      currentConfig = { ...currentConfig, apiKey: nextKey };
+      return createTrackedProviderWithFallback(
+        kind,
+        currentConfig,
+        dependencies.providerFactory ?? createRawProvider,
+        session,
+      );
+    };
+  }
   // GoalManager 单例:registry(3 工具)与 engine(prompt 注入 + Grace Call)共享同一实例,
   // 确保工具改的状态引擎侧立即可见(对标 TodoStore 跨实例 bug 的教训)。
   const goalManager = new GoalManager();
@@ -156,6 +183,7 @@ export async function runAgentFromCli(
     reporter: dependencies.reporter ?? new TerminalReporter(),
     tracer: options.trace === true ? new Tracer() : undefined,
     steerQueue,
+    ...(rebuildProvider ? { rebuildProvider } : {}),
   });
 
   registry.use(buildApprovalMiddleware(dependencies.approvalNotifier ?? terminalNotifier, workDir));
