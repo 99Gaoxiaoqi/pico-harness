@@ -38,6 +38,7 @@ import {
   globalApprovalPolicy,
   type ApprovalNotifier,
 } from "../approval/manager.js";
+import { computeApprovalDiff } from "../approval/diff.js";
 import type { MiddlewareFunc } from "../tools/registry.js";
 import { McpConnectionManager } from "../mcp/manager.js";
 import { BackgroundManager } from "../tools/background-manager.js";
@@ -137,7 +138,7 @@ export async function runAgentFromCli(
     tracer: options.trace === true ? new Tracer() : undefined,
   });
 
-  registry.use(buildApprovalMiddleware(dependencies.approvalNotifier ?? terminalNotifier));
+  registry.use(buildApprovalMiddleware(dependencies.approvalNotifier ?? terminalNotifier, workDir));
   registerDelegationTools(registry, engine, workDir, await loadProfiles(workDir));
 
   // MCP 服务器:加载配置 → 并行连接 → 自动注册工具到 registry。
@@ -299,16 +300,27 @@ function buildObservationProcessor(workDir: string) {
   return createToolResultObservationProcessor({ store });
 }
 
-function buildApprovalMiddleware(notifier: ApprovalNotifier): MiddlewareFunc {
+function buildApprovalMiddleware(notifier: ApprovalNotifier, workDir: string): MiddlewareFunc {
   return async (call) => {
-    return globalApprovalPolicy.decide("cli", call, () =>
-      globalApprovalManager.waitForApproval(call.id, call.name, call.arguments, notifier),
-    );
+    return globalApprovalPolicy.decide("cli", call, async () => {
+      // 拦截时计算 before/after diff,失败返回 undefined 不阻断审批
+      const diff = await computeApprovalDiff(call.name, call.arguments, workDir);
+      return globalApprovalManager.waitForApproval(
+        call.id,
+        call.name,
+        call.arguments,
+        notifier,
+        diff,
+      );
+    });
   };
 }
 
 const terminalNotifier: ApprovalNotifier = (notice) => {
   console.warn(`\n\x1b[31m[需要审批 TaskID: ${notice.taskId}]\x1b[0m ${notice.message}\n`);
+  if (notice.diff) {
+    console.warn(`\x1b[33m${notice.diff}\x1b[0m\n`);
+  }
 };
 
 function resolveProviderConfig(

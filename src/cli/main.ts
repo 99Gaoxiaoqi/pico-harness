@@ -38,6 +38,7 @@ import {
   globalApprovalPolicy,
   type ApprovalNotifier,
 } from "../approval/manager.js";
+import { computeApprovalDiff } from "../approval/diff.js";
 import type { MiddlewareFunc } from "../tools/registry.js";
 import { DelegationManager, DelegateStatusTool } from "../tools/delegation-manager.js";
 import { createSubagentRegistryFactory } from "../tools/delegation-registry.js";
@@ -146,17 +147,28 @@ function buildObservationProcessor(workDir: string) {
  *
  * @param notifier 通知通道:飞书发卡片 / 终端打印 / HTTP 推送
  */
-function buildApprovalMiddleware(notifier: ApprovalNotifier): MiddlewareFunc {
+function buildApprovalMiddleware(notifier: ApprovalNotifier, workDir: string): MiddlewareFunc {
   return async (call) => {
-    return globalApprovalPolicy.decide("cli", call, () =>
-      globalApprovalManager.waitForApproval(call.id, call.name, call.arguments, notifier),
-    );
+    return globalApprovalPolicy.decide("cli", call, async () => {
+      // 拦截时计算 before/after diff,失败返回 undefined 不阻断审批
+      const diff = await computeApprovalDiff(call.name, call.arguments, workDir);
+      return globalApprovalManager.waitForApproval(
+        call.id,
+        call.name,
+        call.arguments,
+        notifier,
+        diff,
+      );
+    });
   };
 }
 
 /** 终端通知器:CLI/HTTP 模式回退,打印审批请求到控制台 */
 const terminalNotifier: ApprovalNotifier = (notice) => {
   console.warn(`\n\x1b[31m[需要审批 TaskID: ${notice.taskId}]\x1b[0m ${notice.message}\n`);
+  if (notice.diff) {
+    console.warn(`\x1b[33m${notice.diff}\x1b[0m\n`);
+  }
 };
 
 /** HTTP Server 模式:接收外部事件流触发 Agent (等价于飞书 webhook 入口) */
@@ -206,7 +218,7 @@ async function serve(
 
       const provider = createProvider(kind, undefined, requestThinkingEffort);
       const registry = buildRegistry(workDir, backgroundManager);
-      registry.use(buildApprovalMiddleware(terminalNotifier));
+      registry.use(buildApprovalMiddleware(terminalNotifier, workDir));
       const engine = new AgentEngine({
         provider,
         registry,
@@ -336,7 +348,7 @@ async function main() {
         const provider = createProvider(kind, undefined, thinkingEffort);
         const trackedProvider = new CostTracker(provider, modelName, session);
         const registry = buildRegistry(workDir, backgroundManager);
-        registry.use(createFeishuApprovalMiddleware(reporter));
+        registry.use(createFeishuApprovalMiddleware(reporter, workDir));
         const engine = new AgentEngine({
           provider: trackedProvider,
           registry,

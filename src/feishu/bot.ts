@@ -22,6 +22,7 @@ import {
   type ApprovalNotice,
 } from "../approval/manager.js";
 import type { MiddlewareFunc } from "../tools/registry.js";
+import { computeApprovalDiff } from "../approval/diff.js";
 
 /** 飞书机器人配置 */
 export interface FeishuConfig {
@@ -308,6 +309,20 @@ export class FeishuReporter implements Reporter {
           tag: "div",
           text: { tag: "lark_md", content: `**参数**\n\`${notice.args}\`` },
         },
+        // diff 预览:放在参数之后、按钮之前,用代码块包裹便于阅读。
+        // 复用 generateSimpleDiff 内置截断(DIFF_MAX_LINES=30),此处不重复截断。
+        ...(notice.diff
+          ? [
+              { tag: "hr" },
+              {
+                tag: "div",
+                text: {
+                  tag: "lark_md",
+                  content: `**变更预览**\n\`\`\`\n${notice.diff}\n\`\`\``,
+                },
+              },
+            ]
+          : []),
         { tag: "hr" },
         {
           tag: "action",
@@ -381,12 +396,18 @@ interface MessageEvent {
 }
 
 /** 构建 AgentOps 审批中间件:命中高危命令 → 当前 chat 的飞书 Reporter 发卡片 → 挂起等待审批 */
-export function createFeishuApprovalMiddleware(reporter: FeishuReporter): MiddlewareFunc {
+export function createFeishuApprovalMiddleware(reporter: FeishuReporter, workDir: string): MiddlewareFunc {
   return async (call) => {
-    return globalApprovalPolicy.decide("feishu", call, () =>
-      globalApprovalManager.waitForApproval(call.id, call.name, call.arguments, (notice) => {
-        void reporter.sendApprovalCard(notice);
-      }),
+    return globalApprovalPolicy.decide(
+      "feishu",
+      call,
+      async () => {
+        // 拦截时计算 before/after diff,失败返回 undefined 不阻断审批
+        const diff = await computeApprovalDiff(call.name, call.arguments, workDir);
+        return globalApprovalManager.waitForApproval(call.id, call.name, call.arguments, (notice) => {
+          void reporter.sendApprovalCard(notice);
+        }, diff);
+      },
       isAgentOpsDangerousCommand,
     );
   };
