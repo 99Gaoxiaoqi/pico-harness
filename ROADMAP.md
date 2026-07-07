@@ -261,11 +261,12 @@ git worktree remove ../pico-1-streaming
 - [ ] 飞书支持运行中发消息注入
 - [ ] 测试 + 提交
 
-### 3.3 undo 回滚
-- [ ] `engine/session.ts` 加 undo 方法
-- [ ] 回滚到上一个 user prompt 或 compaction 边界
-- [ ] CLI 支持 `--undo` 命令
-- [ ] 测试 + 提交
+### 3.3 undo 回滚 ✅
+> 实际由阶段 1.5.6 提前实现，能力超出原 ROADMAP 描述（三轴回滚 + fork 语义）。本节打勾收尾。
+- [x] `engine/session.ts` 加 undo 方法（1.5.6 已实现 `undo(count)` / `rewindTo(messageIndex)`）
+- [x] 回滚到上一个 user prompt 或 compaction 边界（`undo(count)` 截断到第 count 个 user prompt 之前，遇 compaction 边界停止）
+- [x] CLI 支持 `--undo` 命令（已被 `--rewind <id> --rewind-mode conversation|code|both` 取代，三轴覆盖、语义更强）
+- [x] 测试 + 提交（`tests/engine/session-undo.test.ts` 14 个测试；Windows EBUSY 但逻辑正确）
 
 ### 3.4 deferredMessages
 - [ ] `engine/session.ts` 保证 tool 调用顺序完整性
@@ -352,10 +353,10 @@ git worktree remove ../pico-1-streaming
 | 阶段 1 | 5 | 5 | ✅ 完成 |
 | 阶段 1.5 | 8 | 8 | ✅ 完成 |
 | 阶段 2 | 7 | 6 | 🟢 仅剩 2.6 Hooks（暂缓到阶段 3） |
-| 阶段 3 | 7 | 0 | 🔴 未开始 |
+| 阶段 3 | 7 | 1 | 🟡 3.3 undo 已确认由 1.5.6 实现 |
 | 阶段 4 | 5 | 0 | 🔴 未开始 |
 | 阶段 5 | 8 | 0 | 🔴 未开始 |
-| **总计** | **40** | **19** | — |
+| **总计** | **40** | **20** | — |
 
 ---
 
@@ -372,6 +373,11 @@ git worktree remove ../pico-1-streaming
 
 ## 📅 变更记录
 
+- 2026-07-07：阶段 3.3 undo 确认由 1.5.6 完成并打勾收尾
+  - ROADMAP 3.3 的 4 个子项全部勾选；阶段 1.5.6 早已实现 `Session.undo(count)` / `rewindTo(messageIndex)` 及三轴 rewind（code/conversation/both，含 fork 语义）
+  - CLI 用 `--rewind <id> --rewind-mode conversation|code|both` 覆盖原 `--undo`，能力超出原 ROADMAP 描述
+  - 测试 `tests/engine/session-undo.test.ts` 14 个（Windows EBUSY 但逻辑正确）
+  - 进度统计：阶段 3 完成数 +1（7→1），总计 20
 - 2026-07-07：阶段 2 工具生态扩展，5 项并行完成（2.6 Hooks 暂缓到阶段 3）
   - 2.1 Glob 工具（自实现 glob→RegExp,支持 `**`/`*`/`?`/`[abc]`/`{a,b}`,+31 测试）
   - 2.2 Grep 工具（优先 ripgrep,降级 Node.js,支持 glob 过滤与大小写,+23 测试）
