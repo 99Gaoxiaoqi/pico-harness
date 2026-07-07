@@ -335,14 +335,14 @@ git worktree remove ../pico-1-streaming
 
 > **目标**：从"能用"到"好用"。按实际需求挑着做。
 
-- [ ] 5.1 AgentSwarm（批量子代理）
-- [ ] 5.2 Cron 调度
-- [ ] 5.3 Auxiliary Client（辅助模型做压缩/标题）
-- [ ] 5.4 Tool Search 渐进披露
-- [ ] 5.5 Image / Media 支持
-- [ ] 5.6 TUI 界面（Ink/React）
-- [ ] 5.7 Rate Limit Tracking
-- [ ] 5.8 版本化迁移（JSONL schema 版本号）
+- [x] 5.1 AgentSwarm（批量子代理）— delegate_task 已支持 tasks[] 批量 + 并发池，远超原始设想
+- [ ] 5.2 Cron 调度（P2，偏离交互式 Agent 定位，暂不做）
+- [x] 5.3 Auxiliary Client（辅助模型做压缩/标题）— AUX_LLM_* 配置 + FullCompactor 用 aux + Compactor summarizer 工厂
+- [ ] 5.4 Tool Search 渐进披露（P2，工具还少，过早优化）
+- [ ] 5.5 Image / Media 支持（P1，需 Message schema 大改造，依赖 5.8 先做）
+- [ ] 5.6 TUI 界面（P2，与 HTTP+WS 路线重复，暂不做）
+- [x] 5.7 Rate Limit Tracking — header 解析 + CredentialPool 精确冷却 + 3 provider 回传
+- [x] 5.8 版本化迁移（JSONL schema 版本号）— meta record + migration 框架
 
 ---
 
@@ -355,8 +355,8 @@ git worktree remove ../pico-1-streaming
 | 阶段 2 | 7 | 6 | 🟢 仅剩 2.6 Hooks（暂缓到阶段 3） |
 | 阶段 3 | 7 | 7 | ✅ 完成 |
 | 阶段 4 | 5 | 5 | ✅ 完成 |
-| 阶段 5 | 8 | 0 | 🔴 未开始 |
-| **总计** | **40** | **31** | — |
+| 阶段 5 | 8 | 4 | 🟡 5.1/5.3/5.7/5.8 完成，5.5 待做 |
+| **总计** | **40** | **35** | — |
 
 ---
 
