@@ -17,9 +17,10 @@ import { applyAnthropicCacheControl } from "./anthropic-cache.js";
 import { parseRateLimitHeaders } from "./ratelimit.js";
 import { logger } from "../observability/logger.js";
 
-/** Anthropic content block: 文本或工具调用 */
+/** Anthropic content block: 文本、图片或工具调用 */
 type Block =
   | { type: "text"; text: string; cache_control?: unknown }
+  | { type: "image"; source: { type: "base64"; media_type: string; data: string } }
   | { type: "tool_use"; id: string; name: string; input: unknown }
   | { type: "tool_result"; tool_use_id: string; content: string };
 
@@ -256,10 +257,22 @@ export class ClaudeProvider implements LLMProvider {
               content: [{ type: "tool_result", tool_use_id: msg.toolCallId, content: msg.content }],
             });
           } else {
-            anthropicMsgs.push({
-              role: "user",
-              content: [{ type: "text", text: msg.content }],
-            });
+            // 5.5 Image/Media:图片翻译为 Anthropic image block(Claude 仅支持 base64,不支持 URL)。
+            // 多模态约定:image block 在前、text block 在后,符合 Claude 文档推荐顺序。
+            const blocks: Block[] = [];
+            for (const img of msg.images ?? []) {
+              if (img.type === "image_base64") {
+                blocks.push({
+                  type: "image",
+                  source: { type: "base64", media_type: img.mimeType, data: img.data },
+                });
+              } else {
+                // Claude 不支持纯 URL 图片,极简处理:报错提示用 base64。
+                throw new Error("Claude 不支持 image_url,请用 image_base64");
+              }
+            }
+            blocks.push({ type: "text", text: msg.content });
+            anthropicMsgs.push({ role: "user", content: blocks });
           }
           break;
         }
