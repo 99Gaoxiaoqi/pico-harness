@@ -43,6 +43,7 @@ import {
   type StopReason,
 } from "./protocol.js";
 import type { AcpStdioServer, AcpMethodHandler } from "./stdio-server.js";
+import type { ImagePart } from "../schema/message.js";
 
 /**
  * Engine 工厂签名:给定会话 + 模式 + reporter,构造一个 AgentEngine。
@@ -199,7 +200,17 @@ export class AcpServer {
     let stopReason: StopReason = "end_turn";
     let finalText = "";
     try {
-      session.append({ role: "user", content: message });
+      // 5.5e 图片入口:req.images(base64 内联)→ ImagePart[],透传到 user 消息
+      const images: ImagePart[] | undefined = req.images?.map((img) => ({
+        type: "image_base64",
+        mimeType: img.mimeType,
+        data: img.data,
+      }));
+      session.append({
+        role: "user",
+        content: message,
+        ...(images ? { images } : {}),
+      });
       const newMessages = await engine.run(session);
       finalText = findFinalAssistantText(newMessages);
       if (state.interrupted) {
