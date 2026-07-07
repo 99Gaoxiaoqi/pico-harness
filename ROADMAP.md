@@ -247,19 +247,19 @@ git worktree remove ../pico-1-streaming
 
 > **目标**：让 Agent 更聪明地管理上下文、更可控地执行任务。
 
-### 3.1 MicroCompaction
-- [ ] `context/compactor.ts` 增加旧 tool result 渐进清理策略
-- [ ] 按缓存年龄（>1 小时）+ 使用率（≥0.5）触发
-- [ ] 旧 tool result 替换为 `[Old tool result cleared]` 标记
-- [ ] 保留近 20 条消息完整
-- [ ] 测试 + 提交
+### 3.1 MicroCompaction ✅
+- [x] `context/compactor.ts` 增加旧 tool result 渐进清理策略
+- [x] 按缓存年龄（>1 小时）+ 使用率（≥0.5）触发
+- [x] 旧 tool result 替换为 `[Old tool result cleared]` 标记
+- [x] 保留近 20 条消息完整（retainLastMsgsMicro 独立保护区，不改原 retainLastMsgs）
+- [x] 测试 + 提交（compactor-micro 10 个测试）
 
-### 3.2 Steer 机制（运行时注入）
-- [ ] `engine/loop.ts` 加 steer queue
-- [ ] API call 期间可注入文本，drain 到下一个 tool message
-- [ ] CLI 支持 `--steer <text>` 在运行中注入
-- [ ] 飞书支持运行中发消息注入
-- [ ] 测试 + 提交
+### 3.2 Steer 机制（运行时注入）✅
+- [x] `engine/loop.ts` 加 steer queue（`src/engine/steer-queue.ts`）
+- [x] API call 期间可注入文本，drain 到下一个 tool message（A 点 peek 临时注入、C 点 drain 落 session）
+- [x] CLI 支持 `--steer <text>` 在运行中注入（启动时 push 一次）
+- [x] 飞书支持运行中发消息注入（chatId→SteerQueue 映射）
+- [x] 测试 + 提交（steer 9 个测试）
 
 ### 3.3 undo 回滚 ✅
 > 实际由阶段 1.5.6 提前实现，能力超出原 ROADMAP 描述（三轴回滚 + fork 语义）。本节打勾收尾。
@@ -268,28 +268,28 @@ git worktree remove ../pico-1-streaming
 - [x] CLI 支持 `--undo` 命令（已被 `--rewind <id> --rewind-mode conversation|code|both` 取代，三轴覆盖、语义更强）
 - [x] 测试 + 提交（`tests/engine/session-undo.test.ts` 14 个测试；Windows EBUSY 但逻辑正确）
 
-### 3.4 deferredMessages
-- [ ] `engine/session.ts` 保证 tool 调用顺序完整性
-- [ ] tool result 到齐前暂存后续消息
-- [ ] 测试 + 提交
+### 3.4 deferredMessages ✅
+- [x] `engine/session.ts` 保证 tool 调用顺序完整性（pendingToolCallIds 跟踪）
+- [x] tool result 到齐前暂存后续消息（deferredMessages 队列，flush 顺序回放）
+- [x] 测试 + 提交（session-deferred 10 个测试）
 
-### 3.5 Goal Mode
-- [ ] 新建 `engine/goal-manager.ts`
-- [ ] 状态机：active / paused / blocked / complete
-- [ ] budget 支持（tokens / turns / wall-clock）
-- [ ] 新增 CreateGoal / GetGoal / UpdateGoal 工具
-- [ ] Goal context 在 continuation boundary 注入
-- [ ] 测试 + 提交
+### 3.5 Goal Mode ✅
+- [x] 新建 `engine/goal-manager.ts`（单例，避免 TodoStore 跨实例 bug）
+- [x] 状态机：active / paused / blocked / complete
+- [x] budget 支持（tokens / turns / wall-clock，复用 IterationBudget）
+- [x] 新增 CreateGoal / GetGoal / UpdateGoal 工具（`src/tools/goal.ts` 跨文件模式）
+- [x] Goal context 在 continuation boundary 注入（PromptComposer + Grace Call）
+- [x] 测试 + 提交（goal-manager 24 + goal 28，共 52 个测试）
 
-### 3.6 Plan Review 审批
-- [ ] `context/plan-store.ts` 加 ExitPlanMode 触发审批流
-- [ ] 审批卡片展示 plan 内容
-- [ ] 用户可选 approve / reject / modify
-- [ ] 测试 + 提交
+### 3.6 Plan Review 审批 ✅
+- [x] `context/plan-store.ts` 加 ExitPlanMode 触发审批流（`src/tools/plan-exit.ts` 走工具路径自动挂审批）
+- [x] 审批卡片展示 plan 内容（飞书卡片 + 终端 notifier 展示 PLAN.md）
+- [x] 用户可选 approve / reject / modify（ApprovalResult 加 modifiedContent 三态）
+- [x] 测试 + 提交（plan-exit 10 个测试）
 
-### 3.7 shouldContinueAfterStop
-- [ ] `engine/loop.ts` 非工具停止后 host 可决定续接
-- [ ] 测试 + 提交
+### 3.7 shouldContinueAfterStop ✅
+- [x] `engine/loop.ts` 非工具停止后 host 可决定续接（回调 `{continue, continuePrompt?}`）
+- [x] 测试 + 提交（continue-after-stop 7 个测试）
 
 ---
 
@@ -353,10 +353,10 @@ git worktree remove ../pico-1-streaming
 | 阶段 1 | 5 | 5 | ✅ 完成 |
 | 阶段 1.5 | 8 | 8 | ✅ 完成 |
 | 阶段 2 | 7 | 6 | 🟢 仅剩 2.6 Hooks（暂缓到阶段 3） |
-| 阶段 3 | 7 | 1 | 🟡 3.3 undo 已确认由 1.5.6 实现 |
+| 阶段 3 | 7 | 7 | ✅ 完成 |
 | 阶段 4 | 5 | 0 | 🔴 未开始 |
 | 阶段 5 | 8 | 0 | 🔴 未开始 |
-| **总计** | **40** | **20** | — |
+| **总计** | **40** | **26** | — |
 
 ---
 
@@ -373,6 +373,16 @@ git worktree remove ../pico-1-streaming
 
 ## 📅 变更记录
 
+- 2026-07-07：阶段 3 上下文与控制流增强全部完成（7/7）
+  - 3.1 MicroCompaction：年龄>1h+使用率≥0.5 触发渐进清理，`[Old tool result cleared]` 标记，近 20 条保护区（+10 测试）
+  - 3.2 Steer 运行时注入：SteerQueue + A 点 peek/C 点 drain，CLI `--steer` + 飞书运行中注入（+9 测试）
+  - 3.3 undo：确认由 1.5.6 实现（三轴 rewind + fork 语义），打勾收尾
+  - 3.4 deferredMessages：pendingToolCallIds 跟踪 + deferredMessages 暂存，保证 tool result 顺序完整（+10 测试）
+  - 3.5 Goal Mode：GoalManager 单例 + 状态机 + 3 工具 + PromptComposer/Grace Call 注入，budget 复用 IterationBudget（含 wall-clock）（+52 测试）
+  - 3.6 Plan Review 审批：ExitPlanMode 工具走审批 middleware，支持 approve/reject/modify 三态，飞书卡片展示 plan（+10 测试）
+  - 3.7 shouldContinueAfterStop：非工具停止后 host 回调续接（+7 测试）
+  - Batch 1（4 worktree 并行不碰 loop.ts）+ Batch 2（3 worktree 串行改 loop.ts）两批策略规避 loop.ts 冲突
+  - 验证：全量 npm test 1068 passed（净增 109 测试），失败项均为 Windows baseline
 - 2026-07-07：阶段 3.3 undo 确认由 1.5.6 完成并打勾收尾
   - ROADMAP 3.3 的 4 个子项全部勾选；阶段 1.5.6 早已实现 `Session.undo(count)` / `rewindTo(messageIndex)` 及三轴 rewind（code/conversation/both，含 fork 语义）
   - CLI 用 `--rewind <id> --rewind-mode conversation|code|both` 覆盖原 `--undo`，能力超出原 ROADMAP 描述
