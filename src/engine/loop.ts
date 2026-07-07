@@ -125,6 +125,18 @@ export interface AgentEngineOptions {
    * 未提供则引擎无 steer 能力,行为不变。
    */
   steerQueue?: SteerQueue;
+  /**
+   * 非工具停止后,host 可决定是否续接(ROADMAP 3.7)。
+   * 模型跑完一轮没调工具(toolCalls.length === 0)时,正常是 onFinish + break 退出。
+   * host 可借此回调让 Agent 继续(如"任务还没完,接着干"):
+   * 返回 {continue:true, continuePrompt?} 则不退出循环,append 续接消息继续下一轮;
+   * 返回 void 或 {continue:false} 表示正常退出。
+   * 防无限循环是 host 的职责(回调内部自行计数限制)。
+   */
+  shouldContinueAfterStop?: (info: {
+    turn: number;
+    lastMessage: Message;
+  }) => Promise<{ continue: boolean; continuePrompt?: string } | void> | void;
 }
 
 /** 微型 OS 的核心驱动 */
@@ -155,6 +167,8 @@ export class AgentEngine implements AgentRunner {
    * 非 readonly:飞书等 host 由 factory 构造 engine 后,经 setSteerQueue 挂载。
    */
   private steerQueue?: SteerQueue;
+  /** 非工具停止后续接回调(ROADMAP 3.7):host 可决定让 Agent 接着跑 */
+  private readonly shouldContinueAfterStop?: AgentEngineOptions["shouldContinueAfterStop"];
 
   constructor(opts: AgentEngineOptions) {
     this.provider = opts.provider;
@@ -183,6 +197,7 @@ export class AgentEngine implements AgentRunner {
     this.observationProcessor = opts.observationProcessor;
     this.tracer = opts.tracer;
     this.steerQueue = opts.steerQueue;
+    this.shouldContinueAfterStop = opts.shouldContinueAfterStop;
 
     // 流式 provider 包装:如果 provider 支持 generateStream,
     // 把 generate() 替换为 generateStream(),同时把 delta 转发给 reporter.onTextDelta。
@@ -672,6 +687,18 @@ export class AgentEngine implements AgentRunner {
           // 3. 退出条件:模型没有请求任何工具调用,说明任务完成,挂起等待下一条指令
           const toolCalls = responseMsg.toolCalls ?? [];
           if (toolCalls.length === 0) {
+            // 3.7: host 可决定续接(返回 {continue:true} 则不退出,append 续接消息继续)
+            const decision = await this.shouldContinueAfterStop?.({
+              turn: turnCount,
+              lastMessage: responseMsg,
+            });
+            if (decision?.continue) {
+              session.append({
+                role: "user",
+                content: decision.continuePrompt ?? "请继续推进任务。",
+              });
+              continue; // 不 break,回 for(;;) 顶部继续下一轮
+            }
             reporter.onFinish();
             break;
           }
