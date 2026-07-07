@@ -127,7 +127,7 @@ function registerDelegationTools(
  * 水位线 20000 字符(约 5K token,留足模型输出空间),保护区最近 6 条消息。
  */
 function buildCompactor(kind: ProviderKind, model: string): Compactor {
-  const protocol = kind === "claude" ? "claude" : "openai";
+  const protocol = kind === "openai" ? "openai" : kind;
   const profile = resolveProviderProfile(protocol, model);
   const budget = createContextBudget(profile);
   return new Compactor({
@@ -184,7 +184,7 @@ async function serve(
   port: number,
 ): Promise<void> {
   const workDir = process.cwd();
-  const modelName = process.env.LLM_MODEL ?? (kind === "openai" ? "glm-5.2" : "claude-3-5-sonnet");
+  const modelName = process.env.LLM_MODEL ?? defaultModelForKind(kind);
   // GoalManager 单例:serve 进程级共享,registry(3 工具)与 engine(prompt 注入 + Grace Call)用同一实例。
   const goalManager = new GoalManager();
   const systemPrompt = planMode
@@ -351,8 +351,7 @@ async function main() {
     const systemPrompt = planMode
       ? undefined
       : await new PromptComposer(workDir, false, { goalManager }).build();
-    const modelName =
-      process.env.LLM_MODEL ?? (kind === "openai" ? "glm-5.2" : "claude-3-5-sonnet");
+    const modelName = process.env.LLM_MODEL ?? defaultModelForKind(kind);
     // 预加载自定义角色:飞书 engineFactory 回调是同步的,await 必须提前到这里
     const feishuProfiles = await loadProfiles(workDir);
     const backgroundManager = new BackgroundManager();
@@ -417,6 +416,18 @@ async function resolveCliWorkDir(dir: string | undefined): Promise<string> {
   const target = resolve(dir ?? process.cwd());
   await mkdir(target, { recursive: true });
   return realpath(target);
+}
+
+/** 各 provider 的默认模型名(未设 LLM_MODEL 时兜底)。 */
+function defaultModelForKind(kind: ProviderKind): string {
+  switch (kind) {
+    case "openai":
+      return "glm-5.2";
+    case "claude":
+      return "claude-3-5-sonnet";
+    case "gemini":
+      return "gemini-2.0-flash";
+  }
 }
 
 main().catch((err) => {
