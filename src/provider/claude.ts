@@ -8,7 +8,7 @@
 // 4. 工具 Schema 需把 properties / required 分别填充进 input_schema
 
 import type { LLMProvider } from "./interface.js";
-import type { Message, ToolCall, ToolDefinition } from "../schema/message.js";
+import type { Message, ToolCall, ToolDefinition, Usage } from "../schema/message.js";
 import type { ProviderConfig } from "./config.js";
 import { resolveProviderProfile, type ProviderProfile } from "./profile.js";
 import { toAnthropicThinkingConfig, anthropicBudgetTokens, type ThinkingEffort } from "./thinking.js";
@@ -51,6 +51,180 @@ export class ClaudeProvider implements LLMProvider {
   }
 
   async generate(messages: Message[], availableTools: ToolDefinition[]): Promise<Message> {
+    // 1. 构建请求体(消息翻译 + 工具 schema + thinking + cache 注入)
+    const body = this.buildRequestBody(messages, availableTools);
+
+    // 2. 构建请求并发送
+    const resp = await fetch(`${this.config.baseURL}/messages`, {
+      method: "POST",
+      headers: {
+        "x-api-key": this.config.apiKey,
+        "anthropic-version": "2023-06-01",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(120_000), // 2 分钟超时,防网络挂起永久阻塞
+    });
+
+    if (!resp.ok) {
+      const text = await resp.text();
+      if (isContextOverflowStatus(resp.status, text)) {
+        throw new ContextOverflowError(`Claude API 上下文溢出 [${resp.status}]: ${text}`);
+      }
+      throw new LLMStatusError(resp.status, `Claude API 请求失败 [${resp.status}]: ${text}`);
+    }
+
+    const data = (await resp.json()) as AnthropicResponse;
+    if (!data.content || data.content.length === 0) {
+      throw new Error("API 返回了空的 content");
+    }
+
+    // 3. 反向翻译:content blocks → 内部 schema.Message
+    return this.translateContentBlocks(data.content, data.usage);
+  }
+
+  /**
+   * 流式生成:与非流式 generate 行为一致,但每收到一段文本就调 onDelta 回调。
+   * 通过 SSE (Server-Sent Events) 解析 Anthropic 的流式响应。
+   *
+   * Anthropic 流式协议关键事件:
+   * - message_start:含初始 message 对象(usage.input_tokens)
+   * - content_block_start:开始一个 content block(text / tool_use 带 id+name)
+   * - content_block_delta:block 增量(text_delta → onDelta;input_json_delta → 累积 tool input)
+   * - content_block_stop:block 结束
+   * - message_delta:消息级更新(usage.output_tokens + stop_reason)
+   * - message_stop:流结束
+   * - ping:心跳,忽略
+   * - error:服务端错误
+   */
+  async generateStream(
+    messages: Message[],
+    availableTools: ToolDefinition[],
+    onDelta: (delta: string) => void,
+  ): Promise<Message> {
+    // 1. 构建请求体(与 generate 共用,加 stream: true)
+    const body = this.buildRequestBody(messages, availableTools);
+    body.stream = true;
+
+    // 2. 构建请求并发送
+    const resp = await fetch(`${this.config.baseURL}/messages`, {
+      method: "POST",
+      headers: {
+        "x-api-key": this.config.apiKey,
+        "anthropic-version": "2023-06-01",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(120_000),
+    });
+
+    if (!resp.ok) {
+      const text = await resp.text();
+      if (isContextOverflowStatus(resp.status, text)) {
+        throw new ContextOverflowError(`Claude API 上下文溢出 [${resp.status}]: ${text}`);
+      }
+      throw new LLMStatusError(resp.status, `Claude API 流式请求失败 [${resp.status}]: ${text}`);
+    }
+
+    if (!resp.body) {
+      throw new Error("流式响应没有 body");
+    }
+
+    // 3. 解析 SSE 流
+    // tool_use block 累积器:按 content_block 的 index 存 { id, name, input 累积字符串 }
+    const toolUseAccumulator = new Map<
+      number,
+      { id: string; name: string; inputParts: string[] }
+    >();
+    let fullContent = "";
+    let inputTokens = 0;
+    let outputTokens = 0;
+    let cacheWriteTokens = 0;
+    let cacheReadTokens = 0;
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+
+      // SSE 以 \n\n 分隔事件
+      const events = buffer.split("\n\n");
+      buffer = events.pop() ?? ""; // 最后一个可能不完整,留到下次
+
+      for (const event of events) {
+        this.handleSseEvent(event, {
+          onDelta,
+          toolUseAccumulator,
+          onText: (text) => {
+            fullContent += text;
+          },
+          onInputTokens: (n) => {
+            inputTokens = n;
+          },
+          onOutputTokens: (n) => {
+            outputTokens = n;
+          },
+          onCacheWrite: (n) => {
+            cacheWriteTokens = n;
+          },
+          onCacheRead: (n) => {
+            cacheReadTokens = n;
+          },
+        });
+      }
+    }
+
+    // 4. 组装最终 Message:tool_use block 按 index 顺序还原为 ToolCall
+    const toolCalls: ToolCall[] = [];
+    const sortedIndices = [...toolUseAccumulator.keys()].sort((a, b) => a - b);
+    for (const idx of sortedIndices) {
+      const acc = toolUseAccumulator.get(idx)!;
+      const rawInput = acc.inputParts.join("");
+      // input 累积可能为空(模型只发了 content_block_start 没发 delta),兜底 {}
+      let inputObj: unknown;
+      try {
+        inputObj = rawInput === "" ? {} : JSON.parse(rawInput);
+      } catch {
+        inputObj = {};
+      }
+      toolCalls.push({
+        id: acc.id,
+        name: acc.name,
+        arguments: JSON.stringify(inputObj),
+      });
+    }
+
+    const usage: Usage | undefined =
+      inputTokens > 0 || outputTokens > 0 || cacheWriteTokens > 0 || cacheReadTokens > 0
+        ? {
+            promptTokens: inputTokens,
+            completionTokens: outputTokens,
+            cacheWriteTokens,
+            cacheReadTokens,
+          }
+        : undefined;
+
+    return {
+      role: "assistant",
+      content: fullContent,
+      toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+      usage,
+    };
+  }
+
+  /**
+   * 构建 Anthropic 请求体(消息翻译 + 工具 schema + thinking + prompt cache 注入)。
+   * generate 与 generateStream 共用,避免两份重复代码。
+   */
+  private buildRequestBody(
+    messages: Message[],
+    availableTools: ToolDefinition[],
+  ): Record<string, unknown> {
     let systemPrompt = "";
     const anthropicMsgs: { role: "user" | "assistant"; content: Block[] }[] = [];
 
@@ -133,8 +307,7 @@ export class ClaudeProvider implements LLMProvider {
       });
     }
 
-    // 3. 构建请求并发送
-    // Anthropic Prompt Cache:在 system/tools/历史前缀尾注入 cache_control 断点,
+    // 3. Anthropic Prompt Cache:在 system/tools/历史前缀尾注入 cache_control 断点,
     // 命中后 cache_read 输入单价降至约 1/10,长会话输入成本可降 ~75%(对标 hermes)。
     // 仅当模型 profile 声明支持 prompt cache 时启用,避免不支持该特性的兼容端点报错。
     if (this.profile.supportsPromptCache) {
@@ -147,34 +320,20 @@ export class ClaudeProvider implements LLMProvider {
       }
     }
 
-    const resp = await fetch(`${this.config.baseURL}/messages`, {
-      method: "POST",
-      headers: {
-        "x-api-key": this.config.apiKey,
-        "anthropic-version": "2023-06-01",
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(120_000), // 2 分钟超时,防网络挂起永久阻塞
-    });
+    return body;
+  }
 
-    if (!resp.ok) {
-      const text = await resp.text();
-      if (isContextOverflowStatus(resp.status, text)) {
-        throw new ContextOverflowError(`Claude API 上下文溢出 [${resp.status}]: ${text}`);
-      }
-      throw new LLMStatusError(resp.status, `Claude API 请求失败 [${resp.status}]: ${text}`);
-    }
-
-    const data = (await resp.json()) as AnthropicResponse;
-    if (!data.content || data.content.length === 0) {
-      throw new Error("API 返回了空的 content");
-    }
-
-    // 4. 反向翻译:content blocks → 内部 schema.Message
+  /**
+   * 反向翻译:Anthropic content blocks → 内部 schema.Message。
+   * generate(非流式)使用,流式则在解析过程中增量累积。
+   */
+  private translateContentBlocks(
+    content: Block[],
+    usage?: AnthropicResponse["usage"],
+  ): Message {
     let textContent = "";
     const toolCalls: ToolCall[] = [];
-    for (const block of data.content) {
+    for (const block of content) {
       if (block.type === "text") {
         textContent += block.text;
       } else if (block.type === "tool_use") {
@@ -186,14 +345,14 @@ export class ClaudeProvider implements LLMProvider {
       }
     }
 
-    const usage =
-      data.usage &&
-      (typeof data.usage.input_tokens === "number" || typeof data.usage.output_tokens === "number")
+    const normalizedUsage =
+      usage &&
+      (typeof usage.input_tokens === "number" || typeof usage.output_tokens === "number")
         ? {
-            promptTokens: data.usage.input_tokens ?? 0,
-            completionTokens: data.usage.output_tokens ?? 0,
-            cacheWriteTokens: data.usage.cache_creation_input_tokens ?? 0,
-            cacheReadTokens: data.usage.cache_read_input_tokens ?? 0,
+            promptTokens: usage.input_tokens ?? 0,
+            completionTokens: usage.output_tokens ?? 0,
+            cacheWriteTokens: usage.cache_creation_input_tokens ?? 0,
+            cacheReadTokens: usage.cache_read_input_tokens ?? 0,
           }
         : undefined;
 
@@ -201,7 +360,124 @@ export class ClaudeProvider implements LLMProvider {
       role: "assistant",
       content: textContent,
       toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
-      usage,
+      usage: normalizedUsage,
     };
+  }
+
+  /**
+   * 处理单个 SSE 事件块(已被 \n\n 切分)。
+   * 解析 event 类型行 + data 行,按 Anthropic 流式协议分发到回调。
+   */
+  private handleSseEvent(
+    event: string,
+    handlers: {
+      onDelta: (delta: string) => void;
+      toolUseAccumulator: Map<number, { id: string; name: string; inputParts: string[] }>;
+      onText: (text: string) => void;
+      onInputTokens: (n: number) => void;
+      onOutputTokens: (n: number) => void;
+      onCacheWrite: (n: number) => void;
+      onCacheRead: (n: number) => void;
+    },
+  ): void {
+    // 一个事件块可能含多行(event: / data:),提取出 data JSON 与 event 类型
+    const lines = event.split("\n");
+    let dataJson = "";
+    let eventType = "";
+    for (const line of lines) {
+      if (line.startsWith("event: ")) {
+        eventType = line.slice(7).trim();
+      } else if (line.startsWith("data: ")) {
+        dataJson = line.slice(6);
+      } else if (line.startsWith("data:")) {
+        // 容错:无空格前缀
+        dataJson = line.slice(5);
+      }
+    }
+
+    if (!dataJson) return;
+
+    let payload: Record<string, unknown>;
+    try {
+      payload = JSON.parse(dataJson) as Record<string, unknown>;
+    } catch {
+      // 无法解析的数据行,跳过
+      return;
+    }
+
+    // 兼容:优先用 payload.type(event 行缺失时),再用 event 行
+    const type = (payload.type as string) || eventType;
+
+    switch (type) {
+      case "message_start": {
+        const message = payload.message as
+          | { usage?: { input_tokens?: number; cache_creation_input_tokens?: number; cache_read_input_tokens?: number } }
+          | undefined;
+        const u = message?.usage;
+        if (u) {
+          if (typeof u.input_tokens === "number") handlers.onInputTokens(u.input_tokens);
+          if (typeof u.cache_creation_input_tokens === "number")
+            handlers.onCacheWrite(u.cache_creation_input_tokens);
+          if (typeof u.cache_read_input_tokens === "number")
+            handlers.onCacheRead(u.cache_read_input_tokens);
+        }
+        break;
+      }
+      case "content_block_start": {
+        const index = payload.index as number;
+        const block = payload.content_block as
+          | { type: string; id?: string; name?: string }
+          | undefined;
+        if (block?.type === "tool_use" && block.id && block.name) {
+          handlers.toolUseAccumulator.set(index, {
+            id: block.id,
+            name: block.name,
+            inputParts: [],
+          });
+        }
+        break;
+      }
+      case "content_block_delta": {
+        const index = payload.index as number;
+        const delta = payload.delta as
+          | { type: string; text?: string; partial_json?: string }
+          | undefined;
+        if (!delta) break;
+        if (delta.type === "text_delta" && delta.text) {
+          handlers.onText(delta.text);
+          handlers.onDelta(delta.text);
+        } else if (delta.type === "input_json_delta" && typeof delta.partial_json === "string") {
+          const acc = handlers.toolUseAccumulator.get(index);
+          if (acc) {
+            acc.inputParts.push(delta.partial_json);
+          }
+        }
+        break;
+      }
+      case "content_block_stop":
+        // block 结束,无需特殊处理(累积在 content_block_delta 完成)
+        break;
+      case "message_delta": {
+        const usage = payload.usage as { output_tokens?: number } | undefined;
+        if (typeof usage?.output_tokens === "number") {
+          handlers.onOutputTokens(usage.output_tokens);
+        }
+        break;
+      }
+      case "message_stop":
+        // 流结束,无需特殊处理
+        break;
+      case "ping":
+        // 心跳,忽略
+        break;
+      case "error": {
+        const err = payload.error as { message?: string; type?: string } | undefined;
+        const errMsg = err?.message ?? err?.type ?? "未知 Anthropic 流式错误";
+        throw new Error(`Claude 流式错误: ${errMsg}`);
+      }
+      default:
+        // 未知事件类型,忽略(向前兼容未来新增事件)
+        break;
+    }
   }
 }
