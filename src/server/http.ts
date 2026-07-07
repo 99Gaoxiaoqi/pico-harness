@@ -44,6 +44,7 @@ import { ToolRegistry } from "../tools/registry-impl.js";
 import { ReadFileTool, BashTool } from "../tools/registry-impl.js";
 import { SkillLoader, SkillViewTool } from "../context/skill.js";
 import { Tracer } from "../observability/trace.js";
+import type { ImagePart } from "../schema/message.js";
 
 /** HTTP 入口共享的引擎装配配置(由 main.ts --serve 注入) */
 export interface ServerOptions {
@@ -293,6 +294,7 @@ export async function startHttpServer(opts: ServerOptions): Promise<Server> {
             planMode?: boolean;
             maxTurns?: number;
             thinkingEffort?: string;
+            images?: { data: string; mimeType: string }[];
           };
           if (!parsed.prompt) {
             sendJson(res, 400, { error: "缺少 prompt 字段" });
@@ -309,7 +311,17 @@ export async function startHttpServer(opts: ServerOptions): Promise<Server> {
             ...(parsed.planMode !== undefined ? { requestPlanMode: parsed.planMode } : {}),
             ...(parsed.maxTurns !== undefined ? { maxTurns: parsed.maxTurns } : {}),
           });
-          session.append({ role: "user", content: parsed.prompt });
+          // 5.5e 图片入口:body.images(base64 内联)→ ImagePart[],透传到 session.append
+          const images: ImagePart[] | undefined = parsed.images?.map((img) => ({
+            type: "image_base64",
+            mimeType: img.mimeType,
+            data: img.data,
+          }));
+          session.append({
+            role: "user",
+            content: parsed.prompt,
+            ...(images ? { images } : {}),
+          });
           const newMessages = await session.serialize(() => engine.run(session));
           // collected 仅含 onMessage 回调的纯文本;补上新增消息总数
           sendJson(res, 200, {
