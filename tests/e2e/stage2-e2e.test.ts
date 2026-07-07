@@ -21,6 +21,7 @@ import { SilentReporter } from "../../src/engine/reporter.js";
 import { buildDefaultToolRegistry } from "../../src/tools/default-registry.js";
 import { TodoStore } from "../../src/context/todo-store.js";
 import { PromptComposer } from "../../src/context/composer.js";
+import { FetchURLTool, WebSearchTool } from "../../src/tools/web.js";
 import type { Message } from "../../src/schema/message.js";
 
 // ─── 加载 .env(与 stage1-e2e 同模式)───
@@ -269,6 +270,40 @@ describeOrSkip("���段 2 端到端测试(真实大模型)", { timeout: 180
       console.log(`[E2E chain] util.ts 最终内容:\n${util}`);
       expect(util).toContain("'2.0.0'");
       expect(util).not.toContain("'1.0.0'");
+    });
+  });
+});
+
+// ─── web 工具真实抓取/搜索(不依赖 LLM,直接测工具)───
+// fetch_url 不走模型,几秒即可,但依赖网络。无网络时会失败 —— e2e 本就依赖外部环境。
+// web_search 仅在配置了 SEARCH_API_BASE 时执行,否则整体 skip。
+
+describe("fetch_url 真实抓取", { timeout: 60000 }, () => {
+  it("抓 example.com 并 HTML strip", async () => {
+    const tool = new FetchURLTool();
+    const result = await tool.execute(
+      JSON.stringify({ url: "https://example.com", max_chars: 2000 }),
+    );
+    console.log(`[E2E fetch_url] 结果:\n${result.slice(0, 300)}`);
+    // example.com 的正文标题就是 "Example Domain"(ICANN 保留稳定测试域名,内容固定)
+    expect(result).toContain("Example Domain");
+  });
+});
+
+describe("web_search 真实搜索(条件)", { timeout: 60000 }, () => {
+  // 无 SEARCH_API_BASE 配置时整体 skip,不强造(极简:依赖外部搜索 API)
+  const hasSearchApi = !!process.env.SEARCH_API_BASE && !!process.env.SEARCH_API_KEY;
+  const describeSearch = hasSearchApi ? describe : describe.skip;
+
+  describeSearch("有 SEARCH_API 配置时", () => {
+    it("执行真实搜索返回结果列表", async () => {
+      const tool = new WebSearchTool();
+      const result = await tool.execute(
+        JSON.stringify({ query: "pico-harness TypeScript", max_results: 3 }),
+      );
+      console.log(`[E2E web_search] 结果:\n${result.slice(0, 300)}`);
+      // 配置存在时应返回结果列表(含编号或标题),而非"未配置"提示
+      expect(result).not.toContain("未配置");
     });
   });
 });
