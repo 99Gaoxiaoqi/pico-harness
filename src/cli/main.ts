@@ -235,6 +235,8 @@ async function main() {
       rewind: { type: "boolean", default: false },
       "rewind-mode": { type: "string", default: "both" },
       steer: { type: "string" },
+      // 5.5e 图片入口:--image <path> 读取图片转 base64 注入 user 消息(parseArgs 不支持数组,故仅单个)
+      image: { type: "string" },
       // ACP 模式:启动 stdio JSON-RPC server,供 IDE(VSCode 插件等)驱动 Agent
       acp: { type: "boolean", default: false },
       // 运行模式:default | plan | auto | yolo(ACP 模式下使用)
@@ -397,6 +399,7 @@ async function main() {
     trace: traceEnabled,
     ...(values["mcp-config"] ? { mcpConfigPath: values["mcp-config"] } : {}),
     ...(values.steer ? { steer: values.steer } : {}),
+    ...(values.image ? { imagePath: values.image } : {}),
   });
 }
 

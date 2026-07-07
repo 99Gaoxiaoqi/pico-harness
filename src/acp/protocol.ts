@@ -112,6 +112,11 @@ export interface PromptRequest {
   message: string;
   /** 覆盖本会话默认模式 */
   mode?: AcpMode;
+  /**
+   * 图片附件(5.5e Image/Media):base64 内联,透传到 session.append 的 user 消息。
+   * 与 HTTP 入口的 body.images 结构一致(data + mimeType)。
+   */
+  images?: { data: string; mimeType: string }[];
 }
 
 /** prompt 的最终响应(在流式 notification 之后返回) */

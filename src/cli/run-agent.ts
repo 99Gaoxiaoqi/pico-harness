@@ -1,4 +1,5 @@
 import { mkdir, readdir, realpath } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { AgentEngine } from "../engine/loop.js";
 import { GoalManager } from "../engine/goal-manager.js";
@@ -23,7 +24,7 @@ import type { ProviderConfig } from "../provider/config.js";
 import type { LLMProvider } from "../provider/interface.js";
 import { resolveProviderProfile } from "../provider/profile.js";
 import type { ThinkingEffort } from "../provider/thinking.js";
-import type { Message, ToolDefinition } from "../schema/message.js";
+import type { ImagePart, Message, ToolDefinition } from "../schema/message.js";
 import {
   BashTool,
   ReadFileTool,
@@ -71,6 +72,31 @@ export interface RunAgentCliOptions {
    * 运行中动态注入靠 HTTP / 飞书入口,CLI 单次阻塞模式仅支持启动注入。
    */
   steer?: string;
+  /**
+   * 图片附件路径(5.5e Image/Media):--image <path> 启动注入。
+   * 读取文件转 base64 + 推断 mimeType,作为 ImagePart 附到首条 user 消息。
+   * parseArgs 不支持数组,故仅支持单个图片。
+   */
+  imagePath?: string;
+}
+
+/**
+ * 把本地图片文件加载成 ImagePart(5.5e 图片入口)。
+ * 按后缀推断 mimeType,缺省回落 image/png;base64 内联,所有 provider 通用。
+ */
+export function loadImage(path: string): ImagePart {
+  const data = readFileSync(path).toString("base64");
+  const lower = path.toLowerCase();
+  const mimeType = lower.endsWith(".png")
+    ? "image/png"
+    : lower.endsWith(".jpg") || lower.endsWith(".jpeg")
+      ? "image/jpeg"
+      : lower.endsWith(".gif")
+        ? "image/gif"
+        : lower.endsWith(".webp")
+          ? "image/webp"
+          : "image/png";
+  return { type: "image_base64", mimeType, data };
 }
 
 export interface RunAgentUsage {
@@ -216,7 +242,15 @@ export async function runAgentFromCli(
   }
 
   try {
-    session.append({ role: "user", content: prompt });
+    // 5.5e 图片入口:--image <path> 转成 ImagePart 附到首条 user 消息
+    const images: ImagePart[] | undefined = options.imagePath
+      ? [loadImage(options.imagePath)]
+      : undefined;
+    session.append({
+      role: "user",
+      content: prompt,
+      ...(images ? { images } : {}),
+    });
 
     const messages = await engine.run(session);
     const result: RunAgentCliResult = {
