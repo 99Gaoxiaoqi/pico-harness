@@ -315,7 +315,7 @@ function registerDelegationTools(
 }
 
 function buildCompactor(kind: ProviderKind, model: string): Compactor {
-  const protocol = kind === "claude" ? "claude" : "openai";
+  const protocol = kind === "openai" ? "openai" : kind;
   const profile = resolveProviderProfile(protocol, model);
   const budget = createContextBudget(profile);
   return new Compactor({
@@ -402,7 +402,14 @@ function consoleSessionId(workDir: string): string {
 }
 
 function defaultModel(kind: ProviderKind): string {
-  return kind === "openai" ? "glm-5.2" : "claude-3-5-sonnet";
+  switch (kind) {
+    case "openai":
+      return "glm-5.2";
+    case "claude":
+      return "claude-3-5-sonnet";
+    case "gemini":
+      return "gemini-2.0-flash";
+  }
 }
 
 function findFinalMessage(messages: readonly Message[]): string {

@@ -1,4 +1,4 @@
-export type ProviderProtocol = "openai" | "claude";
+export type ProviderProtocol = "openai" | "claude" | "gemini";
 export type AssistantContentMode = "empty_string" | "null_when_empty";
 
 export interface ProviderProfile {
@@ -35,6 +35,15 @@ const DEFAULTS: Record<ProviderProtocol, Omit<ProviderProfile, "model">> = {
     supportsPromptCache: true,
     supportsThinkingControl: false,
   },
+  gemini: {
+    protocol: "gemini",
+    assistantContent: "empty_string",
+    contextWindowTokens: 1_000_000,
+    maxOutputTokens: 8192,
+    supportsReasoningContent: false,
+    supportsPromptCache: false,
+    supportsThinkingControl: false,
+  },
 };
 
 const MODEL_PROFILES: Record<string, Partial<ProviderProfile>> = {
@@ -55,6 +64,18 @@ const MODEL_PROFILES: Record<string, Partial<ProviderProfile>> = {
   "claude-3-5-sonnet": {
     supportsPromptCache: true,
     maxOutputTokens: 4096,
+  },
+  "gemini-1.5-pro": {
+    contextWindowTokens: 2_097_152,
+    maxOutputTokens: 8192,
+  },
+  "gemini-1.5-flash": {
+    contextWindowTokens: 1_048_576,
+    maxOutputTokens: 8192,
+  },
+  "gemini-2.0-flash": {
+    contextWindowTokens: 1_048_576,
+    maxOutputTokens: 8192,
   },
 };
 
