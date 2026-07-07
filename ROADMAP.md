@@ -297,37 +297,37 @@ git worktree remove ../pico-1-streaming
 
 > **目标**：从"CLI + 飞书"到"多端可用"。
 
-### 4.1 Gemini Provider
-- [ ] 新建 `provider/gemini.ts`
-- [ ] factory.ts 加 gemini 分发
-- [ ] Gemini 原生协议适配（非 OpenAI 兼容）
-- [ ] 测试 + 提交
+### 4.1 Gemini Provider ✅
+- [x] 新建 `provider/gemini.ts`（GeminiProvider 实现 generate + generateStream）
+- [x] factory.ts 加 gemini 分发（ProviderKind + createProvider/createRawProvider switch）
+- [x] Gemini 原生协议适配（generateContent/streamGenerateContent、system_instruction 顶层、parts 结构、functionCall）
+- [x] 测试 + 提交（13 mock 测试 + 1 e2e skip）
 
-### 4.2 Credential Pool
-- [ ] 新建 `provider/credential-pool.ts`
-- [ ] 多凭证配置（环境变量或配置文件）
-- [ ] 限流时自动轮换
-- [ ] 测试 + 提交
+### 4.2 Credential Pool ✅
+- [x] 新建 `provider/credential-pool.ts`（round-robin 轮询 + 60s 冷却 + 全限流兜底）
+- [x] 多凭证配置（LLM_API_KEYS 复数优先于 LLM_API_KEY 单数）
+- [x] 限流时自动轮换（retry.ts 遇 429 标记限流 + 切 key 重试）
+- [x] 测试 + 提交（pool 10 + rotation 4，共 14 测试）
 
-### 4.3 REST + WebSocket 协议
-- [ ] 新建 `server/` 目录
-- [ ] REST API：session / message / approval / tool
-- [ ] WebSocket：流式 text-delta + cursor {seq, epoch}
-- [ ] 多端同步：volatile 事件不推进 seq
-- [ ] 测试 + 提交
+### 4.3 REST + WebSocket 协议 ✅
+- [x] 新建 `server/` 目录（http.ts + ws.ts）
+- [x] REST API：POST /sessions、GET /sessions/:id、POST /sessions/:id/messages、POST /approvals/:taskId、GET /tools
+- [x] WebSocket：流式 text-delta + cursor {seq, epoch}
+- [x] 多端同步：volatile 事件不推进 seq（session-store 加 volatile 字段 + epoch）
+- [x] 测试 + 提交（http 12 + ws 8 + epoch 12，共 32 测试）
 
-### 4.4 ACP 协议适配器
-- [ ] 新建 `acp/` 目录
-- [ ] stdio 驱动 + initialize/session/prompt 方法
-- [ ] IDE 文件桥接（fs/readTextFile / fs/writeTextFile）
-- [ ] 4 模式映射（default/plan/auto/yolo）
-- [ ] 测试 + 提交
+### 4.4 ACP 协议适配器 ✅
+- [x] 新建 `acp/` 目录（protocol.ts + stdio-server.ts + server.ts）
+- [x] stdio 驱动 + initialize/session/prompt 方法（复用 MCP stdio 骨架，方向相反）
+- [x] IDE 文件桥接（fs/readTextFile / fs/writeTextFile，路径锚定防穿越）
+- [x] 4 模式映射（default/plan/auto/yolo → planMode + YOLO approval）
+- [x] 测试 + 提交（24 测试）
 
-### 4.5 Docker 部署
-- [ ] `Dockerfile`
-- [ ] `docker-compose.yml`
-- [ ] 环境变量配置文档
-- [ ] 测试 + 提交
+### 4.5 Docker 部署 ✅
+- [x] `Dockerfile`（多阶段构建：builder 编译 better-sqlite3 + prod 干净运行时）
+- [x] `docker-compose.yml`（环境变量透传 + workspace 卷挂载 + 端口映射）
+- [x] 环境变量配置文档（`docs/deployment.md`，env 矩阵 + 4 入口模式 + 排障）
+- [x] 测试 + 提交（沙箱无 Docker，纯 lint + 人工 review）
 
 ---
 
@@ -354,9 +354,9 @@ git worktree remove ../pico-1-streaming
 | 阶段 1.5 | 8 | 8 | ✅ 完成 |
 | 阶段 2 | 7 | 6 | 🟢 仅剩 2.6 Hooks（暂缓到阶段 3） |
 | 阶段 3 | 7 | 7 | ✅ 完成 |
-| 阶段 4 | 5 | 0 | 🔴 未开始 |
+| 阶段 4 | 5 | 5 | ✅ 完成 |
 | 阶段 5 | 8 | 0 | 🔴 未开始 |
-| **总计** | **40** | **26** | — |
+| **总计** | **40** | **31** | — |
 
 ---
 
@@ -373,6 +373,14 @@ git worktree remove ../pico-1-streaming
 
 ## 📅 变更记录
 
+- 2026-07-07：阶段 4 多模型与多端入口全部完成（5/5）
+  - 4.1 Gemini Provider：原生协议适配（generateContent API、system_instruction 顶层、parts 结构），factory/profile 加 gemini 分发（+13 测试）
+  - 4.2 Credential Pool：round-robin 轮换 + 60s 冷却 + 全限流兜底，429 自动切 key 重试（+14 测试）
+  - 4.3 REST + WebSocket：server/ 模块（REST 端点矩阵 + WS 流式），cursor {seq, epoch} 多端同步，volatile 事件不推进 seq（+32 测试）
+  - 4.4 ACP 协议：acp/ 三件套（protocol + stdio-server + server），initialize/session/prompt/fs 桥接，4 模式映射（+24 测试）
+  - 4.5 Docker：多阶段构建处理 better-sqlite3 + compose + 部署文档
+  - 三批策略：Batch 1（gemini/rest-ws/acp 并行）+ Batch 2（credential-pool 共用 factory）+ Batch 3（docker 压轴）
+  - 验证：全量 npm test 1154 passed（净增 86 测试），失败项均为 Windows baseline
 - 2026-07-07：阶段 3 上下文与控制流增强全部完成（7/7）
   - 3.1 MicroCompaction：年龄>1h+使用率≥0.5 触发渐进清理，`[Old tool result cleared]` 标记，近 20 条保护区（+10 测试）
   - 3.2 Steer 运行时注入：SteerQueue + A 点 peek/C 点 drain，CLI `--steer` + 飞书运行中注入（+9 测试）
