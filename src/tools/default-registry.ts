@@ -13,7 +13,10 @@ import {
   type ToolRegistryOptions,
   WriteFileTool,
 } from "./registry-impl.js";
+import { GlobTool } from "./glob.js";
+import { GrepTool } from "./grep.js";
 import { TodoTool } from "./todo.js";
+import { FetchURLTool, WebSearchTool } from "./web.js";
 
 export interface DefaultToolRegistryOptions extends ToolRegistryOptions {
   backgroundManager?: BackgroundManager;
@@ -34,6 +37,10 @@ export function buildDefaultToolRegistry(
   registry.register(new TaskOutputTool(backgroundManager));
   registry.register(new TaskStopTool(backgroundManager));
   registry.register(new SkillViewTool(new SkillLoader(workDir)));
+  registry.register(new GlobTool(workDir));
+  registry.register(new GrepTool(workDir));
   registry.register(new TodoTool(new TodoStore(workDir)));
+  registry.register(new FetchURLTool());
+  registry.register(new WebSearchTool());
   return registry;
 }
