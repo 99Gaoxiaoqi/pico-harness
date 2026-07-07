@@ -103,6 +103,11 @@ export interface AgentEngineOptions {
   budgetConfig?: BudgetConfig;
   /** 可选的轮次日志回调,便于第 19 讲 Tracing 接入 */
   onTurn?: (info: { turn: number; message: Message }) => void;
+  /**
+   * Plan Mode 退出回调(ROADMAP 3.6)。
+   * ExitPlanModeTool 审批通过、engine.exitPlanMode() 触发后调用,供 host 监听。
+   */
+  onPlanExit?: () => void;
   /** 输出 Reporter;默认静默 (第 09 讲) */
   reporter?: Reporter;
   /** 工具 Observation 入上下文前的处理器,用于大输出摘要与 artifact 外部化 */
@@ -122,7 +127,8 @@ export class AgentEngine implements AgentRunner {
   private readonly systemPrompt: string;
   private readonly enableThinking: boolean;
   private readonly thinkingEffort: ThinkingEffort;
-  private readonly planMode: boolean;
+  // planMode 非 readonly:ExitPlanMode 审批通过后由 exitPlanMode() 置 false。
+  private planMode: boolean;
   private readonly workingMemoryLimit: number;
   private readonly maxTurns: number;
   private readonly compactor?: Compactor;
@@ -131,6 +137,8 @@ export class AgentEngine implements AgentRunner {
   private readonly guardrail: ToolGuardrailController;
   private readonly budget: IterationBudget;
   private readonly onTurn?: (info: { turn: number; message: Message }) => void;
+  /** Plan Mode 退出回调(ExitPlanMode 审批通过后触发),供 host 监听 */
+  private readonly onPlanExit?: () => void;
   private readonly reporter: Reporter;
   private readonly observationProcessor?: ToolObservationProcessor;
   private readonly tracer?: Tracer;
@@ -157,6 +165,7 @@ export class AgentEngine implements AgentRunner {
       maxTurns: opts.budgetConfig?.maxTurns ?? this.maxTurns,
     });
     this.onTurn = opts.onTurn;
+    this.onPlanExit = opts.onPlanExit;
     this.reporter = opts.reporter ?? new SilentReporter();
     this.observationProcessor = opts.observationProcessor;
     this.tracer = opts.tracer;
@@ -193,6 +202,16 @@ export class AgentEngine implements AgentRunner {
       return new PromptComposer(this.workDir, true).build();
     }
     return this.systemPrompt;
+  }
+
+  /**
+   * 退出 Plan Mode(ROADMAP 3.6)。
+   * 由 ExitPlanModeTool 审批通过后经 onExit 回调间接触发。
+   * 置 planMode=false,并通知 host 注入的 onPlanExit 监听者。
+   */
+  exitPlanMode(): void {
+    this.planMode = false;
+    this.onPlanExit?.();
   }
 
   /**
