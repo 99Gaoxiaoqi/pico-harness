@@ -28,6 +28,12 @@ export interface ApprovalNotice {
   toolName: string;
   args: string;
   message: string;
+  /**
+   * 工具执行前的 before/after diff 预览(可选)。
+   * 由 computeApprovalDiff 在拦截时计算,供通知卡片展示具体改动。
+   * 计算失败或工具不产生 diff 时为 undefined,审批照常进行。
+   */
+  diff?: string;
 }
 
 /** 通知回调:由调用方注入(飞书发卡片 / 终端打印 / HTTP 推送) */
@@ -61,6 +67,7 @@ export class ApprovalManager {
 
   /**
    * 发送审批通知,并阻塞当前执行流等待回调结果。
+   * @param diff 可选 before/after diff 预览,展示具体改动(向后兼容:不传也行)
    * @returns 审批结果(allowed + reason)
    */
   waitForApproval(
@@ -68,6 +75,7 @@ export class ApprovalManager {
     toolName: string,
     args: string,
     notify: ApprovalNotifier,
+    diff?: string,
   ): Promise<ApprovalResult> {
     const message = `⚠ **高危操作审批请求**
 Agent 试图执行以下动作:
@@ -91,8 +99,8 @@ Agent 试图执行以下动作:
 
       this.pendingTasks.set(taskId, { resolve, timer });
 
-      // 通过通知通道发送审批请求
-      notify({ taskId, toolName, args, message });
+      // 通过通知通道发送审批请求(diff 可选,计算失败时为 undefined)
+      notify({ taskId, toolName, args, message, ...(diff !== undefined ? { diff } : {}) });
       logger.info({ taskId }, `[Approval] 已发送审批请求,执行流挂起等待...`);
     });
   }
