@@ -44,6 +44,9 @@ import { createToolResultObservationProcessor } from "../tools/tool-result-obser
 import { CostTracker } from "../observability/tracker.js";
 import { Tracer } from "../observability/trace.js";
 import { runAgentFromCli } from "./run-agent.js";
+import { globalApprovalPolicy, globalApprovalManager, type ApprovalNotifier } from "../approval/manager.js";
+import { computeApprovalDiff } from "../approval/diff.js";
+import type { MiddlewareFunc } from "../tools/registry.js";
 import {
   assertFileHistoryCliFlags,
   defaultCliSessionId,
@@ -143,6 +146,30 @@ function buildObservationProcessor(workDir: string) {
     baseDir: join(workDir, ".claw", "artifacts"),
   });
   return createToolResultObservationProcessor({ store });
+}
+
+/** 终端审批通知器:打印审批请求到控制台(与 server/http.ts 的 terminalNotifier 等价)。 */
+const terminalNotifier: ApprovalNotifier = (notice) => {
+  console.warn(`\n\x1b[31m[需要审批 TaskID: ${notice.taskId}]\x1b[0m ${notice.message}\n`);
+  if (notice.diff) {
+    console.warn(`\x1b[33m${notice.diff}\x1b[0m\n`);
+  }
+};
+
+/** 构建审批中间件:与 run-agent.ts / server/http.ts 的 buildApprovalMiddleware 等价。 */
+function buildApprovalMiddleware(notifier: ApprovalNotifier, workDir: string): MiddlewareFunc {
+  return async (call) => {
+    return globalApprovalPolicy.decide("acp", call, async () => {
+      const diff = await computeApprovalDiff(call.name, call.arguments, workDir);
+      return globalApprovalManager.waitForApproval(
+        call.id,
+        call.name,
+        call.arguments,
+        notifier,
+        diff,
+      );
+    });
+  };
 }
 
 /**
