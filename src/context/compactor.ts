@@ -17,6 +17,7 @@
 // 删掉 ToolResult 而保留 ToolCall,大模型会困惑"命令没发出去"而陷入死循环;
 // 掩码替换(而非删除)既释放内存又保住意图连贯。
 
+import type { LLMProvider } from "../provider/interface.js";
 import type { Message } from "../schema/message.js";
 import { logger } from "../observability/logger.js";
 import { countTokens } from "./token-counter.js";
@@ -173,6 +174,63 @@ export interface SummaryInput {
 
 /** 摘要器函数:把一批远期消息浓缩成一段"剧情提要"(第 12 讲前沿升级) */
 export type Summarizer = (input: SummaryInput) => Promise<string>;
+
+/**
+ * 用辅助 provider 创建 Summarizer(供 Compactor.compactWithSummary 使用)。
+ * 让压缩摘要走廉价模型而非主模型,降低成本。
+ *
+ * SummaryInput 没有 historyText 字段,这里把 newMessages 序列化成可读文本喂给小模型;
+ * previousSummary / focusTopic 拼进 user prompt,便于做增量摘要与主题聚焦。
+ */
+export function createAuxSummarizer(provider: LLMProvider): Summarizer {
+  return async (input: SummaryInput): Promise<string> => {
+    const historyText = serializeForSummary(input.newMessages);
+    const previousSummaryBlock = input.previousSummary
+      ? `\n\n上一次的摘要(请基于它做增量更新,保留仍相关的旧信息):\n${input.previousSummary}`
+      : "";
+    const focusTopicBlock = input.focusTopic
+      ? `\n\n请重点关注以下主题:\n${input.focusTopic}`
+      : "";
+    const messages: Message[] = [
+      {
+        role: "system",
+        content: "你是上下文压缩器。把对话历史浓缩成简洁摘要,保留关键信息。",
+      },
+      {
+        role: "user",
+        content: `请压缩以下对话历史:\n\n${historyText}${previousSummaryBlock}${focusTopicBlock}`,
+      },
+    ];
+    const result = await provider.generate(messages, []);
+    return result.content;
+  };
+}
+
+/**
+ * 把远期消息序列化成可读文本,供辅助摘要器输入。
+ * 复用 FullCompactor 的格式约定(role 标签 + 截断防单条暴击)。
+ */
+function serializeForSummary(msgs: Message[]): string {
+  const lines: string[] = [];
+  for (const msg of msgs) {
+    if (msg.role === "user" && msg.toolCallId !== undefined) {
+      lines.push(`[工具结果] ${msg.content}`);
+      continue;
+    }
+    if (msg.role === "assistant" && msg.toolCalls && msg.toolCalls.length > 0) {
+      for (const tc of msg.toolCalls) {
+        lines.push(`[助手→工具: ${tc.name}] ${tc.arguments}`);
+      }
+      if (msg.content && msg.content.trim().length > 0) {
+        lines.push(`[助手] ${msg.content}`);
+      }
+      continue;
+    }
+    const tag = msg.role === "user" ? "用户" : msg.role === "assistant" ? "助手" : "系统";
+    lines.push(`[${tag}] ${msg.content}`);
+  }
+  return lines.join("\n");
+}
 
 /**
  * ToolResult 外挂元数据(按 toolCallId 索引),供 MicroCompaction 3.1 判断
