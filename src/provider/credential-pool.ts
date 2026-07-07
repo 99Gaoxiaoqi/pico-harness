@@ -1,0 +1,115 @@
+// 多凭证轮换池:把"单个 LLM_API_KEY"升级为"多个 key 轮询 + 限流冷却"。
+//
+// 解决问题:retry.ts 原本只对同一个 key 指数退避重试,key 用光后 429 不停。
+// CredentialPool 让 429 时标记当前 key 限流、切到下一个未限流 key 重试,
+// 多账号轮换绕开单 key 的速率配额。
+//
+// 设计原则(极简):
+// - 轮询策略:简单 round-robin,不搞权重 / 健康分。
+// - 冷却期:默认 60 秒(对齐常见 API 限流恢复窗口),到期自动恢复。
+// - 全限流兜底:所有 key 都在限流期 → 取最早到期的那个,不抛错,
+//   让上层 retry 层根据退避时长决定等多久。
+// - 单 key 兼容:keys.length <= 1 时 getNext 总返回那一个(行为等同现有单 key)。
+
+/** 默认限流冷却时间(ms),对齐常见 API 限流恢复窗口。 */
+const DEFAULT_COOLDOWN_MS = 60_000;
+
+/**
+ * 多凭证轮换池。
+ *
+ * now() 默认读 Date.now(),测试时可注入虚拟时钟验证冷却恢复。
+ */
+export class CredentialPool {
+  private readonly keys: string[];
+  private index = 0; // 轮询位置
+  private readonly rateLimited = new Map<string, number>(); // key → 限流到期时间戳(ms)
+  private readonly now: () => number;
+
+  constructor(keys: string[] = [], now: () => number = Date.now) {
+    // 过滤掉空字符串(逗号分隔可能产生空段)
+    this.keys = keys.filter((k) => k.length > 0);
+    this.now = now;
+  }
+
+  /**
+   * 轮询取下一个可用 key。
+   *
+   * - 跳过仍在限流期的 key。
+   * - 单 key / 空池:总返回那���个(空池返回空串,保留单 key 兼容语义)。
+   * - 全限流:取最早到期的那个(不抛错,让 retry 层决定退避多久)。
+   */
+  getNext(): string {
+    // 单 key / 空池快路径:无轮换可言,直接返回(行为等同现有单 key 流程)
+    if (this.keys.length <= 1) {
+      return this.keys[0] ?? "";
+    }
+
+    // 清理已过期的限流标记(顺带精确化 available 判定)
+    this.sweepExpired();
+
+    // 从当前 index 起,最多轮一圈找未限流的 key
+    for (let i = 0; i < this.keys.length; i++) {
+      const key = this.keys[(this.index + i) % this.keys.length]!;
+      if (!this.rateLimited.has(key)) {
+        // 命中:推进 index 到命中位的下一个,下次从下一位起轮
+        this.index = (this.index + i + 1) % this.keys.length;
+        return key;
+      }
+    }
+
+    // 全限流兜底:取最早到期的那个(retry 层会据退避时长等待)
+    const earliestKey = this.earliestExpiryKey();
+    if (earliestKey !== undefined) {
+      // 推进 index,避免全限流时一直卡在同一 key
+      const pos = this.keys.indexOf(earliestKey);
+      this.index = (pos + 1) % this.keys.length;
+      return earliestKey;
+    }
+
+    // 理论不可达(sweepExpired 后若无标记,上面 for 必命中),保险兜底
+    const key = this.keys[this.index] ?? "";
+    this.index = (this.index + 1) % this.keys.length;
+    return key;
+  }
+
+  /** 标记某 key 限流,冷却 cooldownMs(默认 60s)后自动恢复。 */
+  markRateLimited(key: string, cooldownMs: number = DEFAULT_COOLDOWN_MS): void {
+    if (!this.keys.includes(key)) return; // 非池内 key,忽略
+    this.rateLimited.set(key, this.now() + cooldownMs);
+  }
+
+  /** 池内 key 总数。 */
+  get size(): number {
+    return this.keys.length;
+  }
+
+  /** 当前未限流(可用)的 key 数量。 */
+  get available(): number {
+    this.sweepExpired();
+    return this.keys.filter((k) => !this.rateLimited.has(k)).length;
+  }
+
+  /** 移除已过期的限流标记。 */
+  private sweepExpired(): void {
+    if (this.rateLimited.size === 0) return;
+    const now = this.now();
+    for (const [key, expiry] of this.rateLimited) {
+      if (expiry <= now) {
+        this.rateLimited.delete(key);
+      }
+    }
+  }
+
+  /** 取限流到期时间最早的 key(全限流兜底用)。 */
+  private earliestExpiryKey(): string | undefined {
+    let earliestKey: string | undefined;
+    let earliestExpiry = Infinity;
+    for (const [key, expiry] of this.rateLimited) {
+      if (expiry < earliestExpiry) {
+        earliestExpiry = expiry;
+        earliestKey = key;
+      }
+    }
+    return earliestKey;
+  }
+}
