@@ -78,6 +78,44 @@ export class CredentialPool {
     this.rateLimited.set(key, this.now() + cooldownMs);
   }
 
+  /**
+   * 用 RateLimit 信息精确冷却。
+   *
+   * 优先级:
+   * - retryAfterMs > 0 → 按 retryAfterMs 冷却(Retry-After header)
+   * - resetAt > now    → 按 (resetAt - now) 冷却(X-RateLimit-Reset header)
+   * - 否则             → 默认 60s
+   *
+   * 注:此处只取 resetAt / retryAfterMs 两个字段,避免引入 RateLimitInfo 类型
+   * 的耦合;5.7a 的 ratelimit.ts 会提供正式类型,合并时调用方自行映射即可。
+   */
+  markRateLimitedWithInfo(key: string, info: { resetAt?: number; retryAfterMs?: number }): void {
+    let cooldown = DEFAULT_COOLDOWN_MS;
+    if (info.retryAfterMs !== undefined && info.retryAfterMs > 0) {
+      cooldown = info.retryAfterMs;
+    } else if (info.resetAt !== undefined) {
+      const diff = info.resetAt - this.now();
+      if (diff > 0) cooldown = diff;
+    }
+    this.markRateLimited(key, cooldown);
+  }
+
+  /**
+   * 查询某 key 的限流状态。
+   *
+   * - rateLimited:false 表示当前可用(未标记或已过期)
+   * - resetsAt:限流到期时间戳(ms);rateLimited=false 时为 undefined
+   * - 非池内 key 视为未限流(rateLimited=false)
+   */
+  getRateLimitStatus(key: string): { rateLimited: boolean; resetsAt?: number } {
+    this.sweepExpired();
+    const resetsAt = this.rateLimited.get(key);
+    if (resetsAt === undefined) {
+      return { rateLimited: false };
+    }
+    return { rateLimited: true, resetsAt };
+  }
+
   /** 池内 key 总数。 */
   get size(): number {
     return this.keys.length;

@@ -145,3 +145,126 @@ describe("CredentialPool markRateLimited 边界", () => {
     expect(pool.getNext()).toBe("k1");
   });
 });
+
+describe("CredentialPool markRateLimitedWithInfo(精确冷却)", () => {
+  it("retryAfterMs=5000 → 冷却 5000ms", () => {
+    const clock = makeClock(1000);
+    const pool = new CredentialPool(["k1", "k2"], clock.now);
+
+    pool.markRateLimitedWithInfo("k1", { retryAfterMs: 5_000 });
+    // k1 限流 5s
+    clock.advance(4_999);
+    expect(pool.available).toBe(1); // 未到期
+    clock.advance(1);
+    expect(pool.available).toBe(2); // 5000ms 到期恢复
+  });
+
+  it("resetAt=now+10000 → 冷却约 10000ms", () => {
+    const clock = makeClock(1000);
+    const pool = new CredentialPool(["k1", "k2"], clock.now);
+
+    pool.markRateLimitedWithInfo("k1", { resetAt: 1000 + 10_000 });
+    // diff = 11000 - 1000 = 10000 → 冷却到 now+10000 = 11000
+    expect(pool.available).toBe(1);
+    clock.advance(9_999);
+    expect(pool.available).toBe(1); // now=10999,未到期
+    clock.advance(1);
+    expect(pool.available).toBe(2); // now=11000,到期恢复
+  });
+
+  it("resetAt 已过期(diff<=0)→ 回退默认 60s", () => {
+    const clock = makeClock(1000);
+    const pool = new CredentialPool(["k1", "k2"], clock.now);
+
+    // resetAt < now → diff<=0,使用默认 60s
+    pool.markRateLimitedWithInfo("k1", { resetAt: 500 });
+    expect(pool.available).toBe(1);
+    clock.advance(59_000);
+    expect(pool.available).toBe(1); // 60s 冷却未到期
+    clock.advance(2_000);
+    expect(pool.available).toBe(2); // 60s+ 到期
+  });
+
+  it("retryAfterMs 优先于 resetAt", () => {
+    const clock = makeClock(1000);
+    const pool = new CredentialPool(["k1", "k2"], clock.now);
+
+    // 两者都给:retryAfterMs 优先
+    pool.markRateLimitedWithInfo("k1", { retryAfterMs: 3_000, resetAt: 1000 + 60_000 });
+    expect(pool.available).toBe(1);
+    clock.advance(2_999);
+    expect(pool.available).toBe(1); // 按 3s 冷却,未到期
+    clock.advance(1);
+    expect(pool.available).toBe(2); // 3s 到期恢复
+  });
+
+  it("都没有 → 默认 60s(回归)", () => {
+    const clock = makeClock(1000);
+    const pool = new CredentialPool(["k1", "k2"], clock.now);
+
+    pool.markRateLimitedWithInfo("k1", {});
+    expect(pool.available).toBe(1);
+    clock.advance(59_000);
+    expect(pool.available).toBe(1);
+    clock.advance(2_000);
+    expect(pool.available).toBe(2); // 60s+ 恢复
+  });
+
+  it("retryAfterMs<=0 → 跳过,走 resetAt 或默认", () => {
+    const clock = makeClock(1000);
+    const pool = new CredentialPool(["k1", "k2"], clock.now);
+
+    pool.markRateLimitedWithInfo("k1", { retryAfterMs: 0 });
+    // retryAfterMs<=0 被忽略 → 默认 60s
+    expect(pool.available).toBe(1);
+    clock.advance(59_000);
+    expect(pool.available).toBe(1);
+    clock.advance(2_000);
+    expect(pool.available).toBe(2);
+  });
+
+  it("非池内 key 被忽略", () => {
+    const clock = makeClock();
+    const pool = new CredentialPool(["k1", "k2"], clock.now);
+
+    pool.markRateLimitedWithInfo("not-in-pool", { retryAfterMs: 5_000 });
+    expect(pool.available).toBe(2); // 无影响
+  });
+});
+
+describe("CredentialPool getRateLimitStatus", () => {
+  it("未限流 → rateLimited=false,无 resetsAt", () => {
+    const clock = makeClock();
+    const pool = new CredentialPool(["k1", "k2"], clock.now);
+
+    expect(pool.getRateLimitStatus("k1")).toEqual({ rateLimited: false });
+  });
+
+  it("限流中 → rateLimited=true,resetsAt 为到期时间戳", () => {
+    const clock = makeClock(1000);
+    const pool = new CredentialPool(["k1", "k2"], clock.now);
+
+    pool.markRateLimited("k1", 10_000);
+    expect(pool.getRateLimitStatus("k1")).toEqual({
+      rateLimited: true,
+      resetsAt: 11_000,
+    });
+  });
+
+  it("过期后 → 自动清标记,rateLimited=false", () => {
+    const clock = makeClock(1000);
+    const pool = new CredentialPool(["k1", "k2"], clock.now);
+
+    pool.markRateLimited("k1", 10_000);
+    clock.advance(10_001);
+    expect(pool.getRateLimitStatus("k1")).toEqual({ rateLimited: false });
+  });
+
+  it("非池内 key → rateLimited=false", () => {
+    const clock = makeClock();
+    const pool = new CredentialPool(["k1", "k2"], clock.now);
+
+    pool.markRateLimited("k1", 10_000);
+    expect(pool.getRateLimitStatus("unknown")).toEqual({ rateLimited: false });
+  });
+});
