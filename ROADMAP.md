@@ -196,31 +196,31 @@ git worktree remove ../pico-1-streaming
 
 > **目标**：从 4 个工具扩展到"够用的工具集"。
 
-### 2.1 Glob 工具（文件匹配）
-- [ ] `tools/registry-impl.ts` 新增 GlobTool
-- [ ] 支持 glob pattern（`**/*.ts`、`src/**/*.test.ts`）
-- [ ] readOnly + accesses 声明
-- [ ] 测试 + 提交
+### 2.1 Glob 工具（文件匹配）✅
+- [x] 新建 `tools/glob.ts`（GlobTool 独立文件,跨文件工具模式）
+- [x] 支持 glob pattern（`**/*.ts`、`src/**/*.test.ts`、`*.{ts,js}`、`[abc]`）
+- [x] readOnly + accesses（none）声明
+- [x] 测试 + 提交（31 个测试通过）
 
-### 2.2 Grep 工具（ripgrep 封装）
-- [ ] `tools/registry-impl.ts` 新增 GrepTool
-- [ ] 封装 ripgrep（如未安装则降级到 Node.js 实现）
-- [ ] 支持 -i / -n / --type 等常用参数
-- [ ] readOnly + accesses 声明
-- [ ] 测试 + 提交
+### 2.2 Grep 工具（ripgrep 封装）✅
+- [x] 新建 `tools/grep.ts`（GrepTool 独立文件）
+- [x] 封装 ripgrep（如未安装则降级到 Node.js 实现）
+- [x] 支持 -i / -n / --type 等常用参数（case_sensitive / line_number / glob）
+- [x] readOnly + accesses（none）声明
+- [x] 测试 + 提交（23 个测试通过）
 
-### 2.3 TodoList 工具
-- [ ] 新建 `context/todo-store.ts`（持久化到 `.claw/todo.json`）
-- [ ] `tools/registry-impl.ts` 新增 TodoTool（add/update/toggle/list）
-- [ ] Prompt Composer 注入当前 Todo 状态
-- [ ] 测试 + 提交
+### 2.3 TodoList 工具 ✅
+- [x] 新建 `context/todo-store.ts`（持久化到 `.claw/todo.json`）
+- [x] 新建 `tools/todo.ts`（TodoTool add/update/toggle/remove/list）
+- [x] Prompt Composer 注入当前 Todo 状态
+- [x] 测试 + 提交（todo-store 19 + todo 23,共 42 个测试通过）
 
-### 2.4 WebSearch + FetchURL
-- [ ] `tools/registry-impl.ts` 新增 WebSearchTool
-- [ ] `tools/registry-impl.ts` 新增 FetchURLTool
-- [ ] 支持配置搜索 API（默认用免费 API 或浏览器抓取）
-- [ ] readOnly + accesses 声明（none）
-- [ ] 测试 + 提交
+### 2.4 WebSearch + FetchURL ✅
+- [x] 新建 `tools/web.ts`（WebSearchTool + FetchURLTool 独立文件）
+- [x] FetchURLTool 原生 fetch + HTML strip + 截断
+- [x] WebSearchTool 支持配置搜索 API（SEARCH_API_BASE/KEY 环境变量）
+- [x] readOnly + accesses（none）声明
+- [x] 测试 + 提交（20 个测试通过）
 
 ### 2.5 Background Tasks（bash 后台化）
 - [x] 新建 `tools/background-manager.ts`
@@ -236,10 +236,10 @@ git worktree remove ../pico-1-streaming
 - [ ] PostToolUse 可修改输出
 - [ ] 测试 + 提交
 
-### 2.7 edit_file 加 replace_all
-- [ ] `tools/registry-impl.ts` fuzzyReplace 增加 `replaceAll` 选项
-- [ ] ToolDefinition 更新参数 schema
-- [ ] 测试 + 提交
+### 2.7 edit_file 加 replace_all ✅
+- [x] `tools/registry-impl.ts` fuzzyReplace 增加 `replaceAll` 选项（L1-L4 各级）
+- [x] ToolDefinition 更新参数 schema
+- [x] 测试 + 提交（7 个新测试,默认 false 行为不变）
 
 ---
 
@@ -351,11 +351,11 @@ git worktree remove ../pico-1-streaming
 |------|---------|------|------|
 | 阶段 1 | 5 | 5 | ✅ 完成 |
 | 阶段 1.5 | 8 | 8 | ✅ 完成 |
-| 阶段 2 | 7 | 1 | 🟡 2.5 Background Tasks 已完成 |
+| 阶段 2 | 7 | 6 | 🟢 仅剩 2.6 Hooks（暂缓到阶段 3） |
 | 阶段 3 | 7 | 0 | 🔴 未开始 |
 | 阶段 4 | 5 | 0 | 🔴 未开始 |
 | 阶段 5 | 8 | 0 | 🔴 未开始 |
-| **总计** | **40** | **14** | — |
+| **总计** | **40** | **19** | — |
 
 ---
 
@@ -367,6 +367,15 @@ git worktree remove ../pico-1-streaming
 
 ## 📅 变更记录
 
+- 2026-07-07：阶段 2 工具生态扩展，5 项并行完成（2.6 Hooks 暂缓到阶段 3）
+  - 2.1 Glob 工具（自实现 glob→RegExp,支持 `**`/`*`/`?`/`[abc]`/`{a,b}`,+31 测试）
+  - 2.2 Grep 工具（优先 ripgrep,降级 Node.js,支持 glob 过滤与大小写,+23 测试）
+  - 2.3 TodoList 工具（TodoStore 持久化 `.claw/todo.json`,composer 注入,+42 测试）
+  - 2.4 WebSearch + FetchURL（原生 fetch + HTML strip,环境变量配置搜索 API,+20 测试）
+  - 2.7 edit_file replace_all（fuzzyReplace L1-L4 全替换,L4 逐区间缩进重对齐,+7 测试）
+  - 跨文件工具模式（对标 SkillViewTool）从根源消除 registry-impl.ts 并行冲突
+  - agent-profile KNOWN_TOOL_NAMES 白名单扩充 5 个新工具
+  - 验证：合并后全量 `npm test` 950 passed（净增 123 测试,失败项为 Windows baseline）
 - 2026-07-07：阶段 1 全部收尾，1.1 / 1.2 / 1.3 子项 100% 闭环
   - Claude 流式输出（`generateStream`，9 个测试）；复用 `buildRequestBody` / `translateContentBlocks`
   - 审批通知附带 before/after diff（`computeApprovalDiff` 复用 `generateSimpleDiff`，10 个测试）
