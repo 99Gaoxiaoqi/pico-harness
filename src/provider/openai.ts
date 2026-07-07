@@ -53,6 +53,30 @@ export class OpenAIProvider implements LLMProvider {
     return this.config.model;
   }
 
+  /**
+   * 把 user 消息内容翻译为 OpenAI Chat Completions 的 content 字段。
+   * - 无图片:返回纯字符串(向后兼容)。
+   * - 有图片:返回 [text, image_url...] 数组,走多模态格式。
+   * generate 与 generateStream 复用此方法,避免两处重复实现。
+   */
+  private translateUserContent(msg: Message): unknown {
+    if (!msg.images || msg.images.length === 0) {
+      return msg.content;
+    }
+    const content: unknown[] = [{ type: "text", text: msg.content }];
+    for (const img of msg.images) {
+      if (img.type === "image_base64") {
+        content.push({
+          type: "image_url",
+          image_url: { url: `data:${img.mimeType};base64,${img.data}` },
+        });
+      } else {
+        content.push({ type: "image_url", image_url: { url: img.url } });
+      }
+    }
+    return content;
+  }
+
   async generate(messages: Message[], availableTools: ToolDefinition[]): Promise<Message> {
     // 1. 翻译上下文消息
     const openaiMsgs: unknown[] = [];
@@ -66,7 +90,7 @@ export class OpenAIProvider implements LLMProvider {
             // 工具观察结果:role=tool + tool_call_id
             openaiMsgs.push({ role: "tool", content: msg.content, tool_call_id: msg.toolCallId });
           } else {
-            openaiMsgs.push({ role: "user", content: msg.content });
+            openaiMsgs.push({ role: "user", content: this.translateUserContent(msg) });
           }
           break;
         case "assistant": {
@@ -197,7 +221,7 @@ export class OpenAIProvider implements LLMProvider {
           if (msg.toolCallId) {
             openaiMsgs.push({ role: "tool", content: msg.content, tool_call_id: msg.toolCallId });
           } else {
-            openaiMsgs.push({ role: "user", content: msg.content });
+            openaiMsgs.push({ role: "user", content: this.translateUserContent(msg) });
           }
           break;
         case "assistant": {
