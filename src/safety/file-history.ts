@@ -46,16 +46,24 @@ export function getBackupFileName(filePath: string, version: number): string {
   return `${hash}@v${version}`;
 }
 
+/**
+ * 把 sessionId 转为跨平台安全的目录名。
+ * 用 sha256 hash 避免 Windows 冒号/特殊字符问题,定长,与 getBackupFileName 风格一致。
+ */
+function getSessionDirName(sessionId: string): string {
+  return createHash("sha256").update(sessionId).digest("hex").slice(0, 32);
+}
+
 export function resolveBackupPath(
   sessionId: string,
   backupFileName: string,
   baseDir: string = DEFAULT_BASE_DIR,
 ): string {
-  return join(baseDir, sessionId, backupFileName);
+  return join(baseDir, getSessionDirName(sessionId), backupFileName);
 }
 
 function resolveManifestPath(sessionId: string, baseDir: string = DEFAULT_BASE_DIR): string {
-  return join(baseDir, sessionId, "manifest.json");
+  return join(baseDir, getSessionDirName(sessionId), "manifest.json");
 }
 
 export async function createBackup(
@@ -73,7 +81,7 @@ export async function createBackup(
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
     if (code !== "ENOENT") throw err;
-    await mkdir(join(baseDir, sessionId), { recursive: true });
+    await mkdir(join(baseDir, getSessionDirName(sessionId)), { recursive: true });
     await copyFile(filePath, backupPath);
   }
 
