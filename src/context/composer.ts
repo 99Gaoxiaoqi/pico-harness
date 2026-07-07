@@ -14,6 +14,7 @@ import { join } from "node:path";
 import { logger } from "../observability/logger.js";
 import { PlanStore } from "./plan-store.js";
 import { SkillLoader } from "./skill.js";
+import { TodoStore } from "./todo-store.js";
 import type { LearnedSkill } from "../memory/skill-schema.js";
 
 // 动态导入：SkillRegistry 和 MemoryNudger 尚未实现时使用 mock
@@ -45,6 +46,7 @@ export class PromptComposer {
   private readonly skillLoader: SkillLoader;
   private readonly planMode: boolean;
   private readonly planStore: PlanStore;
+  private readonly todoStore: TodoStore;
   private readonly skillRegistry: ISkillRegistry;
   private readonly nudger?: IMemoryNudger;
   private readonly sessionId?: string;
@@ -70,6 +72,7 @@ export class PromptComposer {
     this.skillLoader = new SkillLoader(workDir);
     this.planMode = planMode;
     this.planStore = new PlanStore(workDir);
+    this.todoStore = new TodoStore(workDir);
     this.sessionId = options?.sessionId;
 
     // 初始化技能注册表（支持注入，默认使用 stub）
@@ -136,6 +139,17 @@ ${agentsContent}
     const skillContext = await this.buildSkillContext();
     if (skillContext) {
       parts.push(skillContext);
+    }
+
+    // 5.5 结构化 TodoList:注入当前任务清单状态(空清单不注入)
+    // todo 失败不阻断 prompt 组装,降级为跳过
+    try {
+      const todoContext = await this.todoStore.buildTodoContext();
+      if (todoContext) {
+        parts.push(todoContext);
+      }
+    } catch (err) {
+      logger.warn({ err }, "[composer] 构建 TodoList 上下文失败,降级跳过");
     }
 
     // 6. Periodic Nudge（新增）
