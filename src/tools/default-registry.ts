@@ -1,4 +1,5 @@
 import { SkillLoader, SkillViewTool } from "../context/skill.js";
+import { PlanStore } from "../context/plan-store.js";
 import { TodoStore } from "../context/todo-store.js";
 import { BackgroundManager } from "./background-manager.js";
 import {
@@ -15,6 +16,7 @@ import {
 } from "./registry-impl.js";
 import { GlobTool } from "./glob.js";
 import { GrepTool } from "./grep.js";
+import { ExitPlanModeTool } from "./plan-exit.js";
 import { TodoTool } from "./todo.js";
 import { FetchURLTool, WebSearchTool } from "./web.js";
 
@@ -40,6 +42,10 @@ export function buildDefaultToolRegistry(
   registry.register(new GlobTool(workDir));
   registry.register(new GrepTool(workDir));
   registry.register(new TodoTool(new TodoStore(workDir)));
+  // ExitPlanModeTool:onExit 回调在 default-registry 构造时无法注入(无 engine 引用)。
+  // host(run-agent.ts / main.ts)构造 engine 后需遍历工具调 setExitCallback 注入,
+  // 否则审批通过也不会真正切换 planMode。Plan Mode 关闭时该工具不被模型调用。
+  registry.register(new ExitPlanModeTool(new PlanStore(workDir)));
   registry.register(new FetchURLTool());
   registry.register(new WebSearchTool());
   return registry;
