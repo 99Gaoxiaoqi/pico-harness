@@ -57,11 +57,11 @@ git worktree remove ../pico-1-streaming
 ### 1.1 流式输出（SSE / Streaming）✅
 - [x] `provider/interface.ts` 加 `generateStream()` 方法，返回 AsyncIterable
 - [x] `provider/openai.ts` 实现流式（SSE 解析）
-- [ ] `provider/claude.ts` 实现流式（SSE 解析）
+- [x] `provider/claude.ts` 实现流式（SSE 解析）
 - [x] `engine/reporter.ts` 加 `onTextDelta(delta: string)` 回调
 - [x] `engine/loop.ts` 接入流式回调，边接收边输出
-- [ ] `cli/main.ts` CLI 模式流式打印（TerminalReporter 已实现）
-- [x] 测试：mock provider 返回流式数据，验证回调顺序（3 个测试通过）
+- [x] `cli/main.ts` CLI 模式流式打印（TerminalReporter.onTextDelta 输出到 stdout）
+- [x] 测试：mock provider 返回流式数据，验证回调顺序（openai 3 个 + claude 9 个测试通过）
 - [x] 提交
 
 ### 1.2 Checkpoint（git 快照）✅
@@ -69,16 +69,16 @@ git worktree remove ../pico-1-streaming
 - [x] 在文件变动工具（Write/Edit/Bash 含写）执行前，用 `git stash create` 创建快照
 - [x] 每个 turn dedup（同一 turn 多次写操作只快照一次）
 - [x] 提供 `rollback(checkpointId)` 方法
-- [ ] CLI 加 `--rollback <id>` 命令
+- [x] CLI 加 `--rollback <id>` 命令（已由 1.5.8 的 `--rewind` 三轴回滚取代，语义更强）
 - [x] 测试：写文件 → 回滚 → 确认内容恢复（8 个测试全通过）
 - [x] 提交
 
 ### 1.3 Diff 预览 ✅
 - [x] `tools/registry-impl.ts` 的 EditFileTool 返回 before/after diff
 - [x] WriteFileTool 返回新建文件标记
-- [ ] `approval/manager.ts` 审批通知附带 diff
-- [ ] 飞书审批卡片展示 diff（截断长 diff）
-- [x] 测试：edit_file 触发审批 → 卡片含 diff（7 个测试全通过）
+- [x] `approval/manager.ts` 审批通知附带 diff（`ApprovalNotice.diff` 字段 + `computeApprovalDiff`）
+- [x] 飞书审批卡片展示 diff（截断长 diff）
+- [x] 测试：edit_file 触发审批 → 卡片含 diff（原 7 个 + 新增 10 个 diff 计算测试通过）
 - [x] 提交
 
 ### 1.4 细粒度 Permission 系统 ✅
@@ -367,6 +367,12 @@ git worktree remove ../pico-1-streaming
 
 ## 📅 变更记录
 
+- 2026-07-07：阶段 1 全部收尾，1.1 / 1.2 / 1.3 子项 100% 闭环
+  - Claude 流式输出（`generateStream`，9 个测试）；复用 `buildRequestBody` / `translateContentBlocks`
+  - 审批通知附带 before/after diff（`computeApprovalDiff` 复用 `generateSimpleDiff`，10 个测试）
+  - 飞书审批卡片与终端 notifier 展示变更预览，bash 重定向也识别目标文件
+  - 文档收尾：CLI 流式打印、`--rollback` 已被 `--rewind` 取代全部打勾
+  - 验证：���并后全量 `npm test` 827 passed（失败项为 Windows EBUSY baseline，无新增回归）
 - 2026-07-07：阶段 1.5.8 CLI 集成与阶段 2.5 Background Tasks 完成
   - CLI 支持 `--list-snapshots`、`--rewind <message-id>` 和 `--rewind-mode code|conversation|both`
   - 文件历史快照 manifest 持久化，支持跨 CLI 进程列点和回滚
