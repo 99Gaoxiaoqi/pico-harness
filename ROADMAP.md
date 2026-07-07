@@ -363,6 +363,11 @@ git worktree remove ../pico-1-streaming
 
 <!-- 开发过程中发现的新需求，追加到这里，注明发现日期 -->
 
+- 2026-07-07（阶段 2 真实模型 e2e 发现）：`TodoStore.load()` 幂等性导致跨实例不可见
+  - 现象：`load()` 首次加载后置 `loaded=true`，后续调用直接返回内存缓存，不再重读磁盘。多个 `TodoStore` 实例（如 PromptComposer 的、TodoTool 的、CLI 新进程的）各自维护独立内存缓存，互相看不到对方的写入。
+  - 影响：单实例内一致，但跨实例/跨进程读取时拿不到最新 todo.json。目前尚未在真实使用中暴露问题（主流程只读用 `buildTodoContext` 也能容忍短暂延迟），但对 CLI `--list-snapshots` 这类新进程读取场景是隐患。
+  - 候选方案：(a) `load()` 去掉幂等、每次重读；(b) 保留幂等但暴露 `reload()`；(c) 加文件 mtime 比较决定是否重读。优先级低，留到后续迭代。
+
 ---
 
 ## 📅 变更记录
