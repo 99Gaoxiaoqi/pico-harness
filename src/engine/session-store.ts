@@ -17,6 +17,17 @@ import { appendFile, readFile } from "node:fs/promises";
 import type { Message } from "../schema/message.js";
 import { logger } from "../observability/logger.js";
 
+/**
+ * 当前 JSONL schema 版本号(5.8a)。
+ *
+ * meta 行({"type":"meta","schemaVersion":N})写在每个文件首行,
+ * 作为头标记携带版本信息。旧文件(无 meta 行)视为 version 0。
+ * 未来结构变更时 bump 此常量,并在 migrate() 加对应 case 分支。
+ *
+ * v0→v1:无结构变化(仅引入 meta 头与版本号机制本身),migrate 原样返回。
+ */
+const CURRENT_SCHEMA_VERSION = 1;
+
 /** 持久化的事件记录:每行一个,带 type 判别联合。 */
 /**
  * message record 的可选 `volatile` 字段(4.3 cursor 多端同步):
@@ -34,7 +45,8 @@ export type SessionRecord =
     }
   | { readonly type: "truncate"; readonly seq: number; readonly fromIndex: number }
   | { readonly type: "undo"; readonly seq: number; readonly count: number; readonly at: string }
-  | { readonly type: "rewind_to"; readonly seq: number; readonly messageIndex: number; readonly at: string };
+  | { readonly type: "rewind_to"; readonly seq: number; readonly messageIndex: number; readonly at: string }
+  | { readonly type: "meta"; readonly schemaVersion: number };
 
 /**
  * record 落盘监听器(4.3 cursor 多端同步)。
@@ -66,6 +78,12 @@ export class SessionStore {
   private epoch = 0;
   /** record 落盘监听器集合(WS 层订阅) */
   private readonly listeners = new Set<SessionRecordListener>();
+  /**
+   * 首次写入标志(5.8a schema 版本号)。
+   * 第一次 appendLine 时先写 meta 头行,之后置 true。
+   * 仅内存标志,不感知外部对文件的改动(每次新 SessionStore 实例默认未初始化)。
+   */
+  private initialized = false;
 
   constructor(private readonly filePath: string) {}
 
@@ -161,8 +179,9 @@ export class SessionStore {
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
       if (!line) continue;
+      let parsed: SessionRecord;
       try {
-        records.push(JSON.parse(line) as SessionRecord);
+        parsed = JSON.parse(line) as SessionRecord;
       } catch (error) {
         if (i === lines.length - 1) {
           // 末行撕裂:append 写一半的典型表现,容忍跳过
@@ -176,13 +195,71 @@ export class SessionStore {
         );
         continue;
       }
+      // meta 头行(5.8a schema 版本号):不参与重放,跳过(版本信息由 getSchemaVersion 另读)。
+      if (parsed.type === "meta") continue;
+      records.push(parsed);
     }
-    // 关键:按 seq 排序,消除 fire-and-forget 落盘乱序的影响
-    records.sort((a, b) => a.seq - b.seq);
+    // 关键:按 seq 排序,消除 fire-and-forget 落盘乱序的影响。
+    // meta 行已在上一步跳过,这里剩余元素都带 seq。
+    records.sort((a, b) => (a as { seq: number }).seq - (b as { seq: number }).seq);
     return records;
   }
 
   private async appendLine(line: string): Promise<void> {
+    // 5.8a:首次写入时先落 meta 头行(携带 schema 版本号),保证 load 可识别版本。
+    // 之后置 initialized,后续 append 仅写数据行。
+    if (!this.initialized) {
+      const meta = JSON.stringify({ type: "meta", schemaVersion: CURRENT_SCHEMA_VERSION });
+      await appendFile(this.filePath, meta + "\n", "utf8");
+      this.initialized = true;
+    }
     await appendFile(this.filePath, line + "\n", "utf8");
   }
+}
+
+/**
+ * Schema 迁移(5.8a)。
+ *
+ * 将 records 从 fromVersion 升级到 CURRENT_SCHEMA_VERSION。
+ * records 应是 load() 的结果(已剥离 meta 行)。
+ *
+ * 目前 v0→v1 无结构变化(仅引入 meta 头机制本身),原样返回。
+ * 未来 schema 变更时在此加 case 分支,按序应用每个版本的转换。
+ *
+ * 设计为纯函数:不碰磁盘,不修改入参数组,返回(可能新的)records 数组。
+ * 调用方负责持久化迁移结果(若需要)。
+ */
+export function migrate(records: SessionRecord[], fromVersion: number): SessionRecord[] {
+  let current = fromVersion;
+  let out = records;
+  // 按版本号顺序应用每个迁移步骤,直到达到 CURRENT_SCHEMA_VERSION。
+  while (current < CURRENT_SCHEMA_VERSION) {
+    switch (current) {
+      case 0:
+        // v0→v1:结构未变(仅引入 meta 头),原样返回。
+        break;
+      default:
+        // 未知中间版本:停止迁移,保住现有数据。
+        logger.warn({ version: current }, `[session] migrate 遇到未知 schema 版本,停止迁移`);
+        return out;
+    }
+    current++;
+  }
+  return out;
+}
+
+/**
+ * 判断 records 数组(load 结果,含或不含 meta 行)的 schema 版本(5.8a)。
+ *
+ * - 若首条是 meta record,返回其 schemaVersion。
+ * - 否则(旧文件,无 meta 头)视为 version 0。
+ *
+ * 注意:load() 返回的 records 已剥离 meta,这里同时兼容"未剥离"的原始读取。
+ */
+export function getSchemaVersion(records: SessionRecord[]): number {
+  const first = records[0];
+  if (first && first.type === "meta") {
+    return first.schemaVersion;
+  }
+  return 0;
 }
