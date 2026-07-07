@@ -38,6 +38,21 @@ const BUDGET_OLD_MESSAGE_CONTENT = "[早期消息已被预算压缩]";
 /** 预算闭环压缩最后一条普通消息时使用的中间标记 */
 const BUDGET_CONTENT_MARKER = "\n...[预算压缩]...\n";
 
+/**
+ * MicroCompaction 3.1 增强:按缓存年龄触发远期 ToolResult 清理。
+ * ToolResult 缓存时间超过此阈值(默认 1 小时),且使用率达标,即替换为 cleared 标记。
+ */
+const MICRO_CACHE_AGE_MS = 60 * 60 * 1000;
+/**
+ * MicroCompaction 3.1:ToolResult 被读取次数达到此阈值,视为"被读过多次"(高使用率)。
+ * 与年龄共同触发清理(简化:不维护调用总次数分母,直接用绝对 accessCount 阈值)。
+ */
+const MICRO_ACCESS_COUNT_THRESHOLD = 2;
+/** MicroCompaction 3.1:远期 ToolResult 清理后的标记 */
+const MICRO_CLEARED_MARKER = "[Old tool result cleared]";
+/** MicroCompaction 3.1:保护区内最近消息条数(默认 20),其中的 ToolResult 不被清理 */
+const MICRO_RETAIN_LAST_MSGS_DEFAULT = 20;
+
 /** 掩码占位符 */
 function maskRemoteToolResult(originalLen: number): string {
   return `...[为了节省内存,早期的工具输出已被系统清理。原始长度: ${originalLen} 字节]...`;
@@ -159,6 +174,17 @@ export interface SummaryInput {
 /** 摘要器函数:把一批远期消息浓缩成一段"剧情提要"(第 12 讲前沿升级) */
 export type Summarizer = (input: SummaryInput) => Promise<string>;
 
+/**
+ * ToolResult 外挂元数据(按 toolCallId 索引),供 MicroCompaction 3.1 判断
+ * 缓存年龄与使用率。由 Session.getToolResultMeta() 提供。
+ */
+export interface ToolResultMetaEntry {
+  /** 首次缓存(append)的时间戳 */
+  cachedAt: number;
+  /** 被 getWorkingMemory 读出的次数 */
+  accessCount: number;
+}
+
 export interface CompactorOptions {
   /** 触发压缩的最大字符数阈值(水位线,可参考模型的 token 窗口大小折算) */
   maxChars: number;
@@ -174,6 +200,18 @@ export interface CompactorOptions {
    * 未提供时退回字符级掩码(极简模式)。
    */
   summarizer?: Summarizer;
+  /**
+   * MicroCompaction 3.1:ToolResult 元数据提供者(按 toolCallId 索引)。
+   * 提供 cachedAt(缓存时间)+ accessCount(被读次数),用于按年龄 + 使用率
+   * 触发远期 ToolResult 清理。未提供时退回纯字符阈值触发(旧行为)。
+   */
+  toolResultMetaProvider?: () => ReadonlyMap<string, ToolResultMetaEntry>;
+  /**
+   * MicroCompaction 3.1:保护区内最近消息条数(默认 20),其中的 ToolResult 不被清理。
+   * 与 retainLastMsgs 独立(micro 保护区 = max(retainLastMsgs, retainLastMsgsMicro))。
+   * 不影响现有 retainLastMsgs 的生产配置(6 条)。
+   */
+  retainLastMsgsMicro?: number;
 }
 
 /**
@@ -189,6 +227,10 @@ export class Compactor {
   readonly retainLastTokens?: number;
   private readonly summarizer?: Summarizer;
   private readonly focusTopic?: string;
+  /** MicroCompaction 3.1:ToolResult 元数据提供者 */
+  private readonly toolResultMetaProvider?: () => ReadonlyMap<string, ToolResultMetaEntry>;
+  /** MicroCompaction 3.1:保护区最近消息条数(默认 20) */
+  private readonly retainLastMsgsMicro: number;
   private ineffectiveCount = 0;
   private usedStrongerCompact = false;
   private previousSummary: string | undefined;
@@ -200,6 +242,8 @@ export class Compactor {
     this.retainLastTokens = opts.retainLastTokens;
     this.summarizer = opts.summarizer;
     this.focusTopic = opts.focusTopic;
+    this.toolResultMetaProvider = opts.toolResultMetaProvider;
+    this.retainLastMsgsMicro = opts.retainLastMsgsMicro ?? MICRO_RETAIN_LAST_MSGS_DEFAULT;
   }
 
   get ineffectiveCompressionCount(): number {
@@ -228,8 +272,11 @@ export class Compactor {
     );
 
     const msgCount = msgs.length;
-    // 受保护的 WorkingMemory 起始索引
+    // 受保护的 WorkingMemory 起始索引(基于 retainLastMsgs,控制摘要/掩码防线)
     const protectStartIndex = this.protectStartIndex(msgs);
+    // MicroCompaction 3.1:独立的 micro 保护区起始索引 = max(retainLastMsgs, retainLastMsgsMicro)
+    // 最后 microProtectStartIndex..末尾 的 ToolResult 不被 age+usage 清理
+    const microProtectStartIndex = this.microProtectStartIndex(msgs);
 
     const compacted: Message[] = [];
     for (let i = 0; i < msgCount; i++) {
@@ -249,10 +296,16 @@ export class Compactor {
         // 工具返回结果 (Observation/ToolResult)
         if (!isInWorkingMemory) {
           // 【第一道防线:远期历史】
-          // 第一档(温和):浓缩成 1 行摘要,保留工具名/退出码/规模语义
-          //   对标 hermes tool pruning + kimi-code MicroCompaction
-          // 第二档(激进):strongerCompact 已触发过 → 全量掩码,释放更多空间
-          if (msg.content.length > REMOTE_MASK_THRESHOLD) {
+          // MicroCompaction 3.1 新增触发:缓存年龄 > 1h 且使用率高(被读过多次)
+          //   且不在 micro 保护区(最后 retainLastMsgsMicro 条)内
+          //   → 替换为 [Old tool result cleared] 标记(语义:旧且已消化,无保留价值)
+          //   优先于字符阈值(更彻底的清理,语义上"已归档")
+          if (i < microProtectStartIndex && this.shouldClearByAgeUsage(msg.toolCallId)) {
+            newMsg.content = MICRO_CLEARED_MARKER;
+          } else if (msg.content.length > REMOTE_MASK_THRESHOLD) {
+            // 第一档(温和):浓缩成 1 行摘要,保留工具名/退出码/规模语义
+            //   对标 hermes tool pruning + kimi-code MicroCompaction
+            // 第二档(激进):strongerCompact 已触发过 → 全量掩码,释放更多空间
             newMsg.content = this.usedStrongerCompact
               ? maskRemoteToolResult(msg.content.length)
               : makeToolResultSummary(msg, msgs, i);
@@ -394,6 +447,35 @@ export class Compactor {
       }
     }
     return 0;
+  }
+
+  /**
+   * MicroCompaction 3.1:独立的 micro 保护区起始索引。
+   * 取 max(retainLastMsgs, retainLastMsgsMicro):既不缩小现有保护区,
+   * 又保证最近 retainLastMsgsMicro(默认 20)条不受 age+usage 清理。
+   * (retainLastTokens 模式下退化为 retainLastMsgsMicro,与字符阈值防线解耦)
+   */
+  private microProtectStartIndex(msgs: Message[]): number {
+    const protectCount = Math.max(this.retainLastMsgs, this.retainLastMsgsMicro);
+    return Math.max(0, msgs.length - protectCount);
+  }
+
+  /**
+   * MicroCompaction 3.1:判断远期 ToolResult 是否应按"缓存年龄 + 使用率"清理。
+   * 触发条件(三选一中的新增项):age > 1 小时 且 accessCount >= 阈值(被读过多次)。
+   * 无 toolResultMetaProvider 或无该 id 的 meta → 不触发(回退纯字符阈值)。
+   */
+  private shouldClearByAgeUsage(toolCallId: string): boolean {
+    if (!this.toolResultMetaProvider) return false;
+    let meta: Readonly<ToolResultMetaEntry> | undefined;
+    try {
+      meta = this.toolResultMetaProvider().get(toolCallId);
+    } catch {
+      return false;
+    }
+    if (!meta) return false;
+    const age = Date.now() - meta.cachedAt;
+    return age > MICRO_CACHE_AGE_MS && meta.accessCount >= MICRO_ACCESS_COUNT_THRESHOLD;
   }
 
   private recordCompressionEffect(before: number, after: number): void {
