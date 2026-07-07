@@ -134,7 +134,9 @@ describe("SessionStore volatile 字段序列化", () => {
     await store.appendMessage(0, userMsg("normal"));
     const { readFile } = await import("node:fs/promises");
     const content = await readFile(storePath, "utf8");
-    const line = content.trim()!;
+    // 5.8a:文件首行是 meta 头,取最后一行(message 行)解析
+    const lines = content.split("\n").filter((l) => l.length > 0);
+    const line = lines[lines.length - 1]!;
     expect(line).not.toContain("volatile");
     const parsed = JSON.parse(line) as SessionRecord;
     expect(parsed.type).toBe("message");
@@ -146,7 +148,9 @@ describe("SessionStore volatile 字段序列化", () => {
     await store.appendMessage(0, userMsg("stream-chunk"), true);
     const { readFile } = await import("node:fs/promises");
     const content = await readFile(storePath, "utf8");
-    const parsed = JSON.parse(content.trim()!) as SessionRecord;
+    // 5.8a:文件首行是 meta 头,取最后一行(message 行)解析
+    const lines = content.split("\n").filter((l) => l.length > 0);
+    const parsed = JSON.parse(lines[lines.length - 1]!) as SessionRecord;
     expect(parsed.type).toBe("message");
     expect((parsed as { volatile?: boolean }).volatile).toBe(true);
   });
