@@ -11,6 +11,7 @@ import {
   fileHistoryTrackEdit,
   fileHistoryMakeSnapshot,
   fileHistoryRewind,
+  fileHistoryLoadState,
   type FileHistoryState,
 } from "../../src/safety/file-history.js";
 
@@ -57,12 +58,16 @@ describe("FileHistory 1.5.1 数据结构与存储层", () => {
   });
 
   describe("resolveBackupPath", () => {
-    it("路径含 sessionId 和 backupFileName 且以 baseDir 开头", () => {
+    it("路径含 backupFileName 且以 baseDir 开头,sessionId 段为 hash 目录名", () => {
       const name = "abc123def456ghi7@v1";
       const p = resolveBackupPath(sessionId, name, baseDir);
-      expect(p).toContain(sessionId);
       expect(p).toContain(name);
       expect(p.startsWith(baseDir)).toBe(true);
+      // sessionId 经 hash 落盘,原始 sessionId 不应出现在路径中(避免特殊字符问题)
+      expect(p).not.toContain(sessionId);
+      // 目录段为 32 位 hex(跨平台安全)
+      const rel = p.slice(baseDir.length + 1).split(/[\\/]/)[0]!;
+      expect(rel).toMatch(/^[0-9a-f]{32}$/);
     });
 
     it("默认 baseDir 为 ~/.pico/file-history", () => {
@@ -462,5 +467,73 @@ describe("FileHistory 1.5.4 回滚 rewind", () => {
 
     expect(state.snapshots).toHaveLength(2);
     expect(state.snapshots[1]!.messageId).toBe("m3");
+  });
+});
+
+describe("FileHistory sessionId 跨平台目录名(hash)", () => {
+  let workDir: string;
+  let baseDir: string;
+
+  beforeEach(() => {
+    workDir = mkdtempSync(join(tmpdir(), "pico-fh-src-"));
+    baseDir = mkdtempSync(join(tmpdir(), "pico-fh-base-"));
+  });
+
+  afterEach(() => {
+    rmSync(workDir, { recursive: true, force: true });
+    rmSync(baseDir, { recursive: true, force: true });
+  });
+
+  it("含冒号的 sessionId(CLI 默认 console:<path>)能正常创建备份不抛错", async () => {
+    // Windows 不允许冒号出现在目录名,默认 session ID `console:D:\...` 会触发 ENOENT
+    const sessionId = "console:D:\\work\\test";
+    const src = join(workDir, "hello.ts");
+    writeFileSync(src, "export const x = 1;\n");
+
+    const backupName = await createBackup(src, 1, sessionId, baseDir);
+    expect(backupName).toMatch(/^[0-9a-f]{16}@v1$/);
+
+    const backupPath = resolveBackupPath(sessionId, backupName, baseDir);
+    expect(existsSync(backupPath)).toBe(true);
+    expect(readFileSync(backupPath, "utf8")).toBe("export const x = 1;\n");
+  });
+
+  it("含冒号的 sessionId 写入后 load 能读回 manifest(读写目录名一致)", async () => {
+    const sessionId = "console:D:\\work\\pico-harness";
+    const state = createFileHistoryState();
+    const src = join(workDir, "file.ts");
+    writeFileSync(src, "original\n");
+
+    await fileHistoryTrackEdit(state, src, "m1", sessionId, baseDir);
+    await fileHistoryMakeSnapshot(state, "m1", sessionId, baseDir);
+    expect(state.snapshots).toHaveLength(1);
+
+    // 新空 state,用同一 sessionId load,应该能读回之前写的 manifest
+    const reloaded = createFileHistoryState();
+    const loaded = await fileHistoryLoadState(reloaded, sessionId, baseDir);
+    expect(loaded).toBe(true);
+    expect(reloaded.snapshots).toHaveLength(1);
+    expect(reloaded.snapshots[0]!.messageId).toBe("m1");
+  });
+
+  it("不同 sessionId 产生不同的备份目录前缀", () => {
+    const a = resolveBackupPath("console:D:\\work\\a", "abc@v1", baseDir);
+    const b = resolveBackupPath("console:D:\\work\\b", "abc@v1", baseDir);
+
+    // 同 backupFileName,但 sessionId 不同 -> 目录段不同 -> 整体路径���同
+    expect(a).not.toBe(b);
+    // 二者都以 baseDir 开头
+    expect(a.startsWith(baseDir)).toBe(true);
+    expect(b.startsWith(baseDir)).toBe(true);
+    // 目录名段(去 baseDir 前缀后)是 32 位 hex,不含冒号/反斜杠等非法字符
+    const relA = a.slice(baseDir.length + 1).split(/[\\/]/)[0]!;
+    expect(relA).toMatch(/^[0-9a-f]{32}$/);
+  });
+
+  it("同一 sessionId 多次解析路径一致(确定性 hash)", () => {
+    const sessionId = "console:D:\\work\\test";
+    const a = resolveBackupPath(sessionId, "name@v1", baseDir);
+    const b = resolveBackupPath(sessionId, "name@v1", baseDir);
+    expect(a).toBe(b);
   });
 });
