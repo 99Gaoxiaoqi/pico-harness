@@ -12,6 +12,7 @@ import { createContextBudget, estimateTokenBudgetAsChars } from "../context/cont
 import { PromptComposer } from "../context/composer.js";
 import { SkillLoader, SkillViewTool } from "../context/skill.js";
 import {
+  createProvider,
   createRawProvider,
   fallbackModelFor,
   getCredentialPool,
@@ -167,6 +168,9 @@ export async function runAgentFromCli(
   const systemPrompt = options.planMode
     ? undefined
     : await new PromptComposer(workDir, false, { goalManager }).build();
+  // 辅助(廉价)模型:用于 FullCompactor 生成摘要,省主模型成本。
+  // 配齐 AUX_LLM_BASE_URL / AUX_LLM_API_KEY / AUX_LLM_MODEL 才启用;缺则用主 provider。
+  const auxProvider = loadAuxProvider(dependencies.env ?? process.env);
   const engine = new AgentEngine({
     provider: trackedProvider,
     registry,
@@ -177,8 +181,12 @@ export async function runAgentFromCli(
     systemPrompt,
     goalManager,
     compactor: buildCompactor(kind, providerConfig.model),
-    // 模型摘要压缩:provider 存在即启用,作为字符级降级用尽后的最后防线
-    fullCompactor: new FullCompactor({ provider: trackedProvider }),
+    // 模型摘要压缩:provider 存在即启用,作为字符级降级用尽后的最后防线。
+    // 优先用辅助廉价模型(AUX_LLM_*)生成摘要省主模型成本;未配置则用主 provider。
+    fullCompactor: new FullCompactor({
+      provider: trackedProvider,
+      ...(auxProvider ? { auxProvider } : {}),
+    }),
     observationProcessor,
     reporter: dependencies.reporter ?? new TerminalReporter(),
     tracer: options.trace === true ? new Tracer() : undefined,
@@ -350,6 +358,20 @@ function buildCompactor(kind: ProviderKind, model: string): Compactor {
     maxChars: estimateTokenBudgetAsChars(budget.inputBudgetTokens),
     retainLastMsgs: 6,
   });
+}
+
+/**
+ * 加载辅助(廉价)模型 provider,供 FullCompactor 生成摘要。
+ * 配齐 AUX_LLM_BASE_URL / AUX_LLM_API_KEY / AUX_LLM_MODEL 三项才启用;
+ * 缺任意一项则返回 undefined(FullCompactor 回退到主 provider)。
+ */
+function loadAuxProvider(env: RunAgentEnv): LLMProvider | undefined {
+  const baseURL = env.AUX_LLM_BASE_URL;
+  const apiKey = env.AUX_LLM_API_KEY;
+  const model = env.AUX_LLM_MODEL;
+  if (!baseURL || !apiKey || !model) return undefined;
+  const kind = (env.AUX_LLM_PROVIDER as ProviderKind | undefined) ?? "openai";
+  return createProvider(kind, { baseURL, apiKey, model });
 }
 
 function buildObservationProcessor(workDir: string) {
