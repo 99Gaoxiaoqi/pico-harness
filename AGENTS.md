@@ -26,9 +26,10 @@
 详见 **ROADMAP.md**——这是持久化的开发计划,记录了所有待办任务和进度。
 
 1. **测试驱动**:每完成一个功能点,先写测试再写实现(或同步写),`npm test` 全过后才提交。
-2. **小步提交**:每完成一小部分就 Git 提交一次,不要堆积。提交信息 `feat(scope): 中文描述`。
-3. **Worktree 并行**:大功能用 `git worktree add ../pico-<阶段>-<功能> -b feat/<功能>` 隔离开发。
-4. **进度同步**:每完成一个任务,立即在 ROADMAP.md 里把 `- [ ]` 改成 `- [x]`。
+2. **真实大模型���证(强制)**:mock 单元测试不够,所有功能必须补真实大模型 e2e(`tests/e2e/`)验证端到端可用。mock 证明"机制对",e2e 证明"模型真会用"。e2e 暴露的 bug 往往是 mock 永远发现不了的(如 4.4 ACP 的 `buildApprovalMiddleware` 未 import 在 24 个 mock 全绿下隐藏,真实模型 e2e 才暴露)。
+3. **小步提交**:每完成一小部分就 Git 提交一次,不要堆积。提交信息 `feat(scope): 中文描述`。
+4. **Worktree 并行**:大功能用 `git worktree add ../pico-<阶段>-<功能> -b feat/<功能>` 隔离开发。
+5. **进度同步**:每完成一个任务,立即在 ROADMAP.md 里把 `- [ ]` 改成 `- [x]`。
 
 ## 协作偏好
 
@@ -50,8 +51,9 @@
 
 > **进度跟踪在 ROADMAP.md**,新窗口请先读该文件了解当前状态。
 
-- [ ] 阶段 1:基础可用性补齐(流式输出 / Checkpoint / Diff 预览 / Permission / MCP)
-- [ ] 阶段 2:工具生态扩展(Glob / Grep / TodoList / WebSearch / Background Tasks / Hooks)
-- [ ] 阶段 3:上下文与控制流增强(MicroCompaction / Steer / undo / Goal Mode)
-- [ ] 阶段 4:多模型与多端入口(Gemini / Credential Pool / REST+WS / ACP / Docker)
+- [x] 阶段 1:基础可用性补齐(流式输出 / Checkpoint / Diff 预览 / Permission / MCP)
+- [x] 阶段 1.5:文件历史系统(纯 copyFile 备份 + 三轴 rewind)
+- [x] 阶段 2:工具生态扩展(Glob / Grep / TodoList / WebSearch / Background Tasks / replace_all)
+- [x] 阶段 3:上下文与控制流增强(MicroCompaction / Steer / undo / Goal Mode / Plan Review / shouldContinueAfterStop)
+- [x] 阶段 4:多模型与多端入口(Gemini / Credential Pool / REST+WS / ACP / Docker)
 - [ ] 阶段 5:高级特性(按需迭代)
