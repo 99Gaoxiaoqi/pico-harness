@@ -82,7 +82,17 @@ export interface Message {
   reasoning?: string;
   /** Provider 特定透传数据,用于保留不进入 pico 核心语义的扩展字段 */
   providerData?: Record<string, unknown>;
+  /** 图片附件(5.5 Image/Media):user 消息可携带图片,provider 翻译为各端的多模态 block */
+  images?: ImagePart[];
 }
+
+/**
+ * 图片附件类型(5.5 Image/Media)。
+ * 两种形式:base64 内联(通用,所有 provider 都支持)或 URL 引用(部分 provider 支持)。
+ */
+export type ImagePart =
+  | { type: "image_base64"; mimeType: string; data: string }
+  | { type: "image_url"; url: string };
 
 /** 工具执行完毕后返回的物理结果 */
 export interface ToolResult {
