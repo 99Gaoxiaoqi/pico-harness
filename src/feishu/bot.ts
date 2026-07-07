@@ -15,6 +15,7 @@ import type { AgentEngine } from "../engine/loop.js";
 import { globalSessionManager } from "../engine/session.js";
 import type { Session } from "../engine/session.js";
 import type { Reporter } from "../engine/reporter.js";
+import { SteerQueue } from "../engine/steer-queue.js";
 import {
   globalApprovalManager,
   globalApprovalPolicy,
@@ -81,6 +82,12 @@ export class FeishuBot {
   private readonly engineFactory: FeishuAgentEngineFactory;
   private readonly config: FeishuConfig;
   private readonly workDir: string;
+  /**
+   * Steer 队列映射(ROADMAP 3.2):chatId → 当前运行中 session 的 SteerQueue。
+   * runAgentAndReport 创建队列存这里并把同一实例传给 engine;run 结束后删除。
+   * 运行中收到该 chat 的新消息时,push 进队列,engine 下一轮 drain 给模型。
+   */
+  private readonly steerQueues = new Map<string, SteerQueue>();
 
   constructor(
     engineFactory: FeishuAgentEngineFactory,
@@ -198,6 +205,18 @@ export class FeishuBot {
       return;
     }
 
+    // 【Steer 运行时注入】(ROADMAP 3.2):若该 chat 当前有运行中的 Agent
+    // (steerQueues 命中),把消息 push 进队列作为引导,而非起一条新 run。
+    // engine 下一轮 A 点 peek 本轮可见、C 点 drain 落 session 永久浮现。
+    const steerQueue = this.steerQueues.get(chatId);
+    if (steerQueue) {
+      steerQueue.push(text);
+      console.log(
+        `[Feishu] 会话 ${chatId}: 🎯 运行中注入 steer(已排队,下一轮浮现): "${text.slice(0, 50)}"`,
+      );
+      return;
+    }
+
     // 驾驭并发:绝不阻塞事件回调,为每个请求开独立任务
     // (这里用 void 放后台跑,飞书会持续接收新消息)
     void this.runAgentAndReport(chatId, text);
@@ -218,12 +237,21 @@ export class FeishuBot {
         reporter,
         workDir: this.workDir,
       });
+      // Steer(ROADMAP 3.2):创建队列挂到 engine 并登记到 map。
+      // 运行中该 chat 收到的新消息(handleMessage 检测到 steerQueues 命中)
+      // 会 push 进来,engine 下一轮 drain 给模型。run 结束后注销。
+      const steerQueue = new SteerQueue();
+      engine.setSteerQueue?.(steerQueue);
+      this.steerQueues.set(chatId, steerQueue);
       // P0:per-session 串行队列,防止并发读写 history 竞态
       await session.serialize(() => engine.run(session, reporter));
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
       console.error(`[Feishu] 会话 ${chatId} 任务失败:`, errMsg);
       await reporter.onMessage(`❌ 任务执行失败: ${errMsg}`);
+    } finally {
+      // run 结束(无论成败)注销队列:此后该 chat 的新消息走正常 run 路径
+      this.steerQueues.delete(chatId);
     }
   }
 
