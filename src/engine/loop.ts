@@ -25,6 +25,7 @@ import { PromptComposer } from "../context/composer.js";
 import { SkillLoader } from "../context/skill.js";
 import { RecoveryManager } from "../context/recovery.js";
 import { SilentReporter, type Reporter } from "./reporter.js";
+import { SteerQueue } from "./steer-queue.js";
 import { ReminderInjector, ToolGuardrailController, type GuardrailOptions } from "./reminder.js";
 import { IterationBudget, type BudgetConfig } from "./budget.js";
 import { Tracer, exportTraceToFile, truncate, type Span } from "../observability/trace.js";
@@ -117,6 +118,13 @@ export interface AgentEngineOptions {
    * 未提供则不追踪。
    */
   tracer?: Tracer;
+  /**
+   * Steer 队列(ROADMAP 3.2):host 在 Agent 运行期间注入的引导文本。
+   * loop 在 provider 调用前 peek 临时拼进上下文(本轮可见),
+   * 工具结果落地后 drain 写进 session(下轮浮现)。
+   * 未提供则引擎无 steer 能力,行为不变。
+   */
+  steerQueue?: SteerQueue;
 }
 
 /** 微型 OS 的核心驱动 */
@@ -142,6 +150,11 @@ export class AgentEngine implements AgentRunner {
   private readonly reporter: Reporter;
   private readonly observationProcessor?: ToolObservationProcessor;
   private readonly tracer?: Tracer;
+  /**
+   * Steer 队列(运行时注入引导文本)。host 持有同一实例在 run 期间 push。
+   * 非 readonly:飞书等 host 由 factory 构造 engine 后,经 setSteerQueue 挂载。
+   */
+  private steerQueue?: SteerQueue;
 
   constructor(opts: AgentEngineOptions) {
     this.provider = opts.provider;
@@ -169,6 +182,7 @@ export class AgentEngine implements AgentRunner {
     this.reporter = opts.reporter ?? new SilentReporter();
     this.observationProcessor = opts.observationProcessor;
     this.tracer = opts.tracer;
+    this.steerQueue = opts.steerQueue;
 
     // 流式 provider 包装:如果 provider 支持 generateStream,
     // 把 generate() 替换为 generateStream(),同时把 delta 转发给 reporter.onTextDelta。
@@ -212,6 +226,26 @@ export class AgentEngine implements AgentRunner {
   exitPlanMode(): void {
     this.planMode = false;
     this.onPlanExit?.();
+  }
+
+  /**
+   * 暴露 steer 队列给 host(ROADMAP 3.2)。
+   * host 在 run 期间调用 queue.push(text) 注入引导文本,
+   * engine 在下一轮把文本浮现给模型。未配置 steerQueue 时返回 undefined。
+   */
+  getSteerQueue(): SteerQueue | undefined {
+    return this.steerQueue;
+  }
+
+  /**
+   * 运行时挂载 steer 队列(ROADMAP 3.2)。
+   * 供 host(如飞书 bot)在 engine 由 factory 构造后注入队列,避免改 factory 签名。
+   * 仅在构造时未提供时生效(已配置的不覆盖)。
+   */
+  setSteerQueue(queue: SteerQueue): void {
+    if (!this.steerQueue) {
+      this.steerQueue = queue;
+    }
   }
 
   /**
@@ -525,6 +559,17 @@ export class AgentEngine implements AgentRunner {
           recordCompaction(turnSpan, contextChars, compactedChars);
 
           // ====================================================================
+          // 【Steer A 点】(ROADMAP 3.2):provider 调用前,把 pending steer 文本
+          // 临时拼进 compactedContext 末尾。本轮模型(Thinking + Action)立即看到,
+          // 不落 session;真正的落盘在下方 C 点(工具结果 append 后)。
+          // 用 peek 而非 drain:让本轮先"瞥见",待本轮工具执行完再正式入 session。
+          // ====================================================================
+          const pendingSteer = this.steerQueue?.peek();
+          if (pendingSteer) {
+            compactedContext.push({ role: "user", content: `[STEER] ${pendingSteer}` });
+          }
+
+          // ====================================================================
           // Phase 1: 慢思考阶段 (Thinking) —— 剥夺工具,强制规划 (第 03 讲)
           // ====================================================================
           if (this.enableThinking) {
@@ -665,6 +710,17 @@ export class AgentEngine implements AgentRunner {
           session.append(...observations);
           if (reminderMessages.length > 0) {
             session.append(...reminderMessages);
+          }
+
+          // ====================================================================
+          // 【Steer C 点】(ROADMAP 3.2):工具结果落地后,drain 整个 steer 队列,
+          // 把每条引导文本落成一条 user 消息写进 session。
+          // 下一轮 getWorkingMemory 自动浮现 → 永久可见。drain 清空队列,
+          // 避免重复注入。与上方 A 点(本轮临时 peek)配合形成"先瞥见后落盘"。
+          // ====================================================================
+          const steerTexts = this.steerQueue?.drain() ?? [];
+          for (const text of steerTexts) {
+            session.append({ role: "user", content: text });
           }
         } finally {
           await fileHistoryMakeSnapshot(
