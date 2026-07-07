@@ -20,6 +20,17 @@ import { logger } from "../observability/logger.js";
 export interface ApprovalResult {
   allowed: boolean;
   reason: string;
+  /**
+   * 用户"修改后通过"时携带的修改后内容(可选)。
+   *
+   * 三态语义:
+   * - approve:allowed=true,modifiedContent=undefined
+   * - reject:allowed=false,modifiedContent=undefined
+   * - modify:allowed=true,modifiedContent=<新内容>
+   *
+   * 由 ExitPlanMode 等场景使用:审批通过且携带新内容时,调用方写回 PLAN.md 再放行。
+   */
+  modifiedContent?: string;
 }
 
 /** 审批请求的通知信息(供通知通道发送给人类) */
@@ -118,6 +129,25 @@ Agent 试图执行以下动作:
     this.pendingTasks.delete(taskId);
     logger.info({ taskId, allowed, reason }, `[Approval] 收到审批结果 (TaskID: ${taskId}, Allowed: ${allowed}): ${reason}`);
     entry.resolve({ allowed, reason });
+    return true;
+  }
+
+  /**
+   * "修改后通过"回调:唤醒挂起的执行流,携带用户修改后的内容。
+   *
+   * 用于 Plan Review 等场景:用户在审批时编辑了 PLAN.md 内容,选择"修改后通过"。
+   * 此时 allowed=true(放行退出 Plan Mode),但 modifiedContent 非 undefined(写回后再放行)。
+   */
+  resolveApprovalWithModify(taskId: string, reason: string, modifiedContent: string): boolean {
+    const entry = this.pendingTasks.get(taskId);
+    if (!entry) {
+      logger.warn({ taskId }, `[Approval] 找不到对应的 TaskID: ${taskId},可能已超时或处理完毕。`);
+      return false;
+    }
+    clearTimeout(entry.timer);
+    this.pendingTasks.delete(taskId);
+    logger.info({ taskId, reason, modified: true }, `[Approval] 收到审批结果 (TaskID: ${taskId}, Modified): ${reason}`);
+    entry.resolve({ allowed: true, reason, modifiedContent });
     return true;
   }
 

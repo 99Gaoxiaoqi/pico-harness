@@ -26,6 +26,7 @@ import {
   ToolRegistry,
 } from "../tools/registry-impl.js";
 import { buildDefaultToolRegistry } from "../tools/default-registry.js";
+import { ExitPlanModeTool } from "../tools/plan-exit.js";
 import { DelegationManager, DelegateStatusTool } from "../tools/delegation-manager.js";
 import { createSubagentRegistryFactory } from "../tools/delegation-registry.js";
 import { AgentProfileLoader, type AgentProfile } from "../tools/agent-profile.js";
@@ -140,6 +141,15 @@ export async function runAgentFromCli(
 
   registry.use(buildApprovalMiddleware(dependencies.approvalNotifier ?? terminalNotifier, workDir));
   registerDelegationTools(registry, engine, workDir, await loadProfiles(workDir));
+
+  // 3.6 Plan Review:把 ExitPlanModeTool 的退出回调接到 engine.exitPlanMode,
+  // 并把审批通知路由到 host 注入的 notifier(终端/飞书),使审批通过后真正切换 planMode。
+  const notifier = dependencies.approvalNotifier ?? terminalNotifier;
+  const exitTool = registry.getTool("exit_plan_mode");
+  if (exitTool instanceof ExitPlanModeTool) {
+    exitTool.setExitCallback(() => engine.exitPlanMode());
+    exitTool.setNotify(notifier);
+  }
 
   // MCP 服务器:加载配置 → 并行连接 → 自动注册工具到 registry。
   // per-server 失败隔离,一个 server 挂了不影响其他。
@@ -320,6 +330,12 @@ const terminalNotifier: ApprovalNotifier = (notice) => {
   console.warn(`\n\x1b[31m[需要审批 TaskID: ${notice.taskId}]\x1b[0m ${notice.message}\n`);
   if (notice.diff) {
     console.warn(`\x1b[33m${notice.diff}\x1b[0m\n`);
+  }
+  // exit_plan_mode 的审批支持 modify:提示用户可输入 modify 口令带新 plan 通过。
+  if (notice.toolName === "exit_plan_mode") {
+    console.warn(
+      `\x1b[2m回复:approve ${notice.taskId} 通过 / reject ${notice.taskId} 拒绝 / modify ${notice.taskId} <新plan内容> 修改后通过\x1b[0m\n`,
+    );
   }
 };
 
