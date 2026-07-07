@@ -11,7 +11,6 @@
 //             然后:curl -X POST localhost:3000/ask -H 'Content-Type: application/json' -d '{"prompt":"..."}'
 
 import { parseArgs } from "node:util";
-import { createServer } from "node:http";
 import { mkdir, realpath } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { AgentEngine } from "../engine/loop.js";
@@ -20,10 +19,13 @@ import { globalSessionManager } from "../engine/session.js";
 import { Compactor } from "../context/compactor.js";
 import { ToolResultArtifactStore } from "../context/artifact-store.js";
 import { createContextBudget, estimateTokenBudgetAsChars } from "../context/context-budget.js";
-import { SilentReporter, TerminalReporter } from "../engine/reporter.js";
+import { SilentReporter } from "../engine/reporter.js";
 import { createProvider, type ProviderKind } from "../provider/factory.js";
 import { resolveProviderProfile } from "../provider/profile.js";
 import { resolveThinkingEffort, type ThinkingEffort } from "../provider/thinking.js";
+// 4.3:--serve 抽到 src/server/,REST 端点矩阵 + WebSocket 流式推送。
+import { startHttpServer } from "../server/http.js";
+import { startWebSocketServer } from "../server/ws.js";
 import {
   BashTool,
   ReadFileTool,
@@ -34,13 +36,6 @@ import { BackgroundManager } from "../tools/background-manager.js";
 import { createFeishuApprovalMiddleware, FeishuBot, loadFeishuConfig } from "../feishu/bot.js";
 import { PromptComposer } from "../context/composer.js";
 import { SkillLoader, SkillViewTool } from "../context/skill.js";
-import {
-  globalApprovalManager,
-  globalApprovalPolicy,
-  type ApprovalNotifier,
-} from "../approval/manager.js";
-import { computeApprovalDiff } from "../approval/diff.js";
-import type { MiddlewareFunc } from "../tools/registry.js";
 import { DelegationManager, DelegateStatusTool } from "../tools/delegation-manager.js";
 import { createSubagentRegistryFactory } from "../tools/delegation-registry.js";
 import { AgentProfileLoader, type AgentProfile } from "../tools/agent-profile.js";
@@ -144,37 +139,10 @@ function buildObservationProcessor(workDir: string) {
 }
 
 /**
- * 构建安全拦截中间件:高危命令审批 (Human-in-the-loop)。
- * 命中黑名单的命令挂起执行流,通过 notifier 发审批请求,等待人类 approve/reject。
- * 未命中则 YOLO 放行。
- *
- * @param notifier 通知通道:飞书发卡片 / 终端打印 / HTTP 推送
+ * HTTP Server 模式(4.3):启动 REST 端点矩阵 + WebSocket 流式推送。
+ * 把原本内联的 serve() 抽到 src/server/,main.ts 只负责装配与启动。
+ * REST 端点见 src/server/http.ts;WS cursor 多端同步见 src/server/ws.ts。
  */
-function buildApprovalMiddleware(notifier: ApprovalNotifier, workDir: string): MiddlewareFunc {
-  return async (call) => {
-    return globalApprovalPolicy.decide("cli", call, async () => {
-      // 拦截时计算 before/after diff,失败返回 undefined 不阻断审批
-      const diff = await computeApprovalDiff(call.name, call.arguments, workDir);
-      return globalApprovalManager.waitForApproval(
-        call.id,
-        call.name,
-        call.arguments,
-        notifier,
-        diff,
-      );
-    });
-  };
-}
-
-/** 终端通知器:CLI/HTTP 模式回退,打印审批请求到控制台 */
-const terminalNotifier: ApprovalNotifier = (notice) => {
-  console.warn(`\n\x1b[31m[需要审批 TaskID: ${notice.taskId}]\x1b[0m ${notice.message}\n`);
-  if (notice.diff) {
-    console.warn(`\x1b[33m${notice.diff}\x1b[0m\n`);
-  }
-};
-
-/** HTTP Server 模式:接收外部事件流触发 Agent (等价于飞书 webhook 入口) */
 async function serve(
   kind: ProviderKind,
   enableThinking: boolean,
@@ -184,96 +152,26 @@ async function serve(
   port: number,
 ): Promise<void> {
   const workDir = process.cwd();
-  const modelName = process.env.LLM_MODEL ?? (kind === "openai" ? "glm-5.2" : "claude-3-5-sonnet");
-  // GoalManager 单例:serve 进程级共享,registry(3 工具)与 engine(prompt 注入 + Grace Call)用同一实例。
+  // 进程级共享单例:跨请求/WS 连接复用同一个 GoalManager / BackgroundManager。
   const goalManager = new GoalManager();
-  const systemPrompt = planMode
-    ? undefined
-    : await new PromptComposer(workDir, false, { goalManager }).build();
   const backgroundManager = new BackgroundManager();
-  const server = createServer(async (req, res) => {
-    if (req.method !== "POST" || req.url !== "/ask") {
-      res.writeHead(404, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: '请 POST 到 /ask,body: {"prompt":"..."}' }));
-      return;
-    }
-
-    try {
-      const body = await readBody(req);
-      const parsed = JSON.parse(body) as {
-        prompt?: string;
-        sessionId?: string;
-        thinkingEffort?: string;
-      };
-      if (!parsed.prompt) {
-        res.writeHead(400, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "缺少 prompt 字段" }));
-        return;
-      }
-      // HTTP 请求可选覆盖进程级默认的 thinkingEffort(参考 Kimi createSession 的 options.thinking)
-      const requestThinkingEffort = parsed.thinkingEffort
-        ? resolveThinkingEffort(parsed.thinkingEffort)
-        : thinkingEffort;
-
-      // 每个请求独立引擎实例,收集最终消息回写
-      const collected: string[] = [];
-      const reporter = new (class extends TerminalReporter {
-        override onMessage(content: string): void {
-          collected.push(content);
-        }
-      })();
-
-      const provider = createProvider(kind, undefined, requestThinkingEffort);
-      const registry = buildRegistry(workDir, backgroundManager, goalManager);
-      registry.use(buildApprovalMiddleware(terminalNotifier, workDir));
-      const engine = new AgentEngine({
-        provider,
-        registry,
-        workDir,
-        enableThinking,
-        thinkingEffort: requestThinkingEffort,
-        planMode,
-        systemPrompt,
-        goalManager,
-        compactor: buildCompactor(kind, modelName),
-        observationProcessor: buildObservationProcessor(workDir),
-        reporter,
-        tracer: traceEnabled ? new Tracer() : undefined,
-      });
-      registerDelegationTools(registry, engine, workDir, await loadProfiles(workDir));
-
-      // HTTP 入口:可选传入 sessionId 实现多会话隔离,缺省用单一控制台会话
-      const sessionId = parsed.sessionId ?? `http:${workDir}`;
-      const session = await globalSessionManager.getOrCreate(sessionId, workDir);
-      session.append({ role: "user", content: parsed.prompt });
-      await engine.run(session);
-
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ reply: collected.join("\n") }));
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      res.writeHead(500, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: msg }));
-    }
+  const httpServer = await startHttpServer({
+    kind,
+    enableThinking,
+    thinkingEffort,
+    planMode,
+    traceEnabled,
+    port,
+    workDir,
+    goalManager,
+    backgroundManager,
   });
-
-  server.listen(port, () => {
-    console.log(`🚀 pico HTTP 模式监听 http://localhost:${port}/ask`);
-    console.log(
-      `试试: curl -X POST localhost:${port}/ask -H 'Content-Type: application/json' -d '{"prompt":"你好"}'`,
-    );
-  });
-}
-
-function readBody(req: import("node:http").IncomingMessage): Promise<string> {
-  return new Promise((resolve, reject) => {
-    let data = "";
-    req.on("data", (chunk) => {
-      data += chunk;
-    });
-    req.on("end", () => resolve(data));
-    req.on("error", reject);
-  });
+  // WebSocket 挂载到同一个 http.Server,共享端口(/?sessionId=...&lastSeq=...)
+  startWebSocketServer(httpServer);
+  console.log(`🚀 pico HTTP+WS 模式监听 http://localhost:${port}`);
+  console.log(`   REST:  POST /sessions, GET /sessions/:id, POST /sessions/:id/messages,`);
+  console.log(`          POST /approvals/:taskId, GET /tools`);
+  console.log(`   WS:    ws://localhost:${port}/?sessionId=<id>&lastSeq=<n>&epoch=<e>`);
 }
 
 async function main() {

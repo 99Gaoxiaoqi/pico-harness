@@ -181,9 +181,12 @@ export class Session {
     if (records.length === 0) return;
 
     // 重放:message 累积进 pending,truncate 则截断 pending(对标 wire 折叠语义)
+    // volatile message(易失事件,如流式片段)不重建进 history —— 4.3 cursor
+    // 多端同步:它们仅用于 WS 实时推送,重放时丢弃。旧 JSONL 无此字段(按 false 处理)。
     let pending: Message[] = [];
     for (const r of records) {
       if (r.type === "message") {
+        if (r.volatile === true) continue;
         pending.push(r.message);
       } else if (r.type === "truncate") {
         pending = pending.slice(r.fromIndex);
@@ -406,6 +409,8 @@ export class Session {
     this.pendingToolCallIds.clear();
     this.conversationId = `${this.id}-${Date.now().toString(36)}`;
     this.updatedAt = new Date();
+    // 4.3: undo 重写历史,递增 epoch 让旧 cursor 的 WS client 感知世代已变。
+    this.store?.bumpEpoch();
     void this.persistUndoEvent(removedCount);
   }
 
@@ -415,6 +420,8 @@ export class Session {
     this.pruneToolResultMeta();
     this.conversationId = `${this.id}-${Date.now().toString(36)}`;
     this.updatedAt = new Date();
+    // 4.3: rewind 重写历史,递增 epoch 让旧 cursor 的 WS client 感知世代已变。
+    this.store?.bumpEpoch();
     if (removedUserCount > 0) {
       void this.persistUndoEvent(removedUserCount);
     } else {
@@ -690,6 +697,15 @@ export class Session {
   /** 获取 FTS5Store 实例(用于 MemoryNudger) */
   get fts5Store(): FTS5Store | undefined {
     return this.fts5;
+  }
+
+  /**
+   * 获取底层 SessionStore(4.3 cursor 多端同步)。
+   * WS 层通过它订阅 onRecord 推送事件流、读取 epoch 判断世代。
+   * 持久化关闭时返回 undefined,WS 层据此降级为无推送模式。
+   */
+  get recordStore(): SessionStore | undefined {
+    return this.store;
   }
 
   /**
