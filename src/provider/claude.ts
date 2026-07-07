@@ -14,6 +14,7 @@ import { resolveProviderProfile, type ProviderProfile } from "./profile.js";
 import { toAnthropicThinkingConfig, anthropicBudgetTokens, type ThinkingEffort } from "./thinking.js";
 import { ContextOverflowError, isContextOverflowStatus, LLMStatusError } from "./errors.js";
 import { applyAnthropicCacheControl } from "./anthropic-cache.js";
+import { parseRateLimitHeaders } from "./ratelimit.js";
 import { logger } from "../observability/logger.js";
 
 /** Anthropic content block: 文本或工具调用 */
@@ -74,6 +75,12 @@ export class ClaudeProvider implements LLMProvider {
       throw new LLMStatusError(resp.status, `Claude API 请求失败 [${resp.status}]: ${text}`);
     }
 
+    // 限流信息回传:resp.ok 成功后解析 RateLimit header,命中即回调
+    if (this.config.onRateLimitInfo) {
+      const info = parseRateLimitHeaders(resp.headers);
+      if (info) this.config.onRateLimitInfo(info);
+    }
+
     const data = (await resp.json()) as AnthropicResponse;
     if (!data.content || data.content.length === 0) {
       throw new Error("API 返回了空的 content");
@@ -124,6 +131,12 @@ export class ClaudeProvider implements LLMProvider {
         throw new ContextOverflowError(`Claude API 上下文溢出 [${resp.status}]: ${text}`);
       }
       throw new LLMStatusError(resp.status, `Claude API 流式请求失败 [${resp.status}]: ${text}`);
+    }
+
+    // 限流信息回传:resp.ok 成功后解析 RateLimit header,命中即回调
+    if (this.config.onRateLimitInfo) {
+      const info = parseRateLimitHeaders(resp.headers);
+      if (info) this.config.onRateLimitInfo(info);
     }
 
     if (!resp.body) {
