@@ -12,6 +12,7 @@ import {
   type ToolRegistryOptions,
   WriteFileTool,
 } from "./registry-impl.js";
+import { FetchURLTool, WebSearchTool } from "./web.js";
 
 export interface DefaultToolRegistryOptions extends ToolRegistryOptions {
   backgroundManager?: BackgroundManager;
@@ -32,5 +33,7 @@ export function buildDefaultToolRegistry(
   registry.register(new TaskOutputTool(backgroundManager));
   registry.register(new TaskStopTool(backgroundManager));
   registry.register(new SkillViewTool(new SkillLoader(workDir)));
+  registry.register(new FetchURLTool());
+  registry.register(new WebSearchTool());
   return registry;
 }
