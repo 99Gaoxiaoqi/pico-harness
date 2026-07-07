@@ -16,7 +16,9 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "eslint .",
-    "format": "prettier --check ."
+    "format": "prettier --check .",
+    "docker:build": "docker build -t pico-harness .",
+    "docker:run": "docker run -it --rm -v $(pwd):/workspace --env-file .env pico-harness"
   },
   "engines": {
     "node": ">=22.0.0"
