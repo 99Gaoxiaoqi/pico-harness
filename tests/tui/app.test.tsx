@@ -22,8 +22,28 @@ describe("App", () => {
 
     expect(output).toContain("你好");
     expect(output).toContain("你好！");
-    expect(countOccurrences(output, "Enter 发送")).toBe(1);
-    expect(countOccurrences(output, "Tab 补全")).toBe(1);
+    expect(countOccurrences(output, 'Try "fix this" or / for commands')).toBe(1);
+    expect(countOccurrences(output, "Enter 发送")).toBe(0);
+    expect(countOccurrences(output, "Tab 补全")).toBe(0);
+  });
+
+  it("renders a single disabled input state while running", () => {
+    const output = renderToString(
+      <App
+        model="glm-5.2"
+        provider="openai"
+        workDir="/workspace/demo"
+        sessionMode="new"
+        entries={[{ kind: "assistant", content: "处理中" }]}
+        running
+        onSubmit={vi.fn()}
+      />,
+    );
+
+    expect(output).toContain("处理中");
+    expect(countOccurrences(output, "Running")).toBe(1);
+    expect(countOccurrences(output, 'Try "fix this" or / for commands')).toBe(0);
+    expect(countOccurrences(output, "Enter 发送")).toBe(0);
   });
 });
 

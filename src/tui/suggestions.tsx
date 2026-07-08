@@ -2,8 +2,8 @@ import React from "react";
 import { Box, Text } from "ink";
 
 export const MAX_SUGGESTIONS = 5;
-export const SUGGESTION_LABEL_WIDTH = 35;
-export const SUGGESTION_DESCRIPTION_WIDTH = 51;
+export const SUGGESTION_LABEL_WIDTH = 32;
+export const SUGGESTION_DESCRIPTION_WIDTH = 38;
 
 export type SuggestionKind = "slash" | "mention";
 
@@ -82,6 +82,37 @@ export function stripMarker(value: string, kind: SuggestionKind): string {
 
 function truncateInline(value: string, maxLength: number): string {
   const inline = value.replace(/\s+/g, " ").trim();
-  if (inline.length <= maxLength) return inline;
-  return `${inline.slice(0, Math.max(0, maxLength - 1))}…`;
+  if (displayWidth(inline) <= maxLength) return inline;
+
+  let result = "";
+  let width = 0;
+  const maxTextWidth = Math.max(0, maxLength - 1);
+  for (const char of inline) {
+    const charWidth = displayWidth(char);
+    if (width + charWidth > maxTextWidth) break;
+    result += char;
+    width += charWidth;
+  }
+
+  return `${result}…`;
+}
+
+function displayWidth(value: string): number {
+  let width = 0;
+  for (const char of value) {
+    width += isWideCharacter(char) ? 2 : 1;
+  }
+  return width;
+}
+
+function isWideCharacter(char: string): boolean {
+  const codePoint = char.codePointAt(0) ?? 0;
+  return (
+    (codePoint >= 0x1100 && codePoint <= 0x115f) ||
+    (codePoint >= 0x2e80 && codePoint <= 0xa4cf) ||
+    (codePoint >= 0xac00 && codePoint <= 0xd7a3) ||
+    (codePoint >= 0xf900 && codePoint <= 0xfaff) ||
+    (codePoint >= 0xff01 && codePoint <= 0xff60) ||
+    (codePoint >= 0xffe0 && codePoint <= 0xffe6)
+  );
 }
