@@ -14,6 +14,19 @@ import type { ToolAccesses } from "./tool-access.js";
 import { ToolAccesses as ToolAccessesNs } from "./tool-access.js";
 import { ToolDisclosure } from "./tool-disclosure.js";
 
+export function findMatchingTools(
+  extendedTools: readonly ToolDefinition[],
+  query: string,
+): ToolDefinition[] {
+  const tokens = query.trim().toLowerCase().split(/\s+/).filter((t) => t.length > 0);
+  if (tokens.length === 0) return [];
+
+  return extendedTools.filter((tool) => {
+    const haystack = `${tool.name} ${tool.description}`.toLowerCase();
+    return tokens.some((tok) => haystack.includes(tok));
+  });
+}
+
 /**
  * 元工具:模型用它检索并激活扩展工具。
  *
@@ -69,16 +82,8 @@ export class SearchToolsTool implements BaseTool {
       throw new Error("参数解析失败:query 必须是非空字符串");
     }
 
-    // 2. 切分为分词,任意分词命中即纳入(name 或 description 含分词,不分大小写)
-    const tokens = query.trim().toLowerCase().split(/\s+/).filter((t) => t.length > 0);
-
-    const hits: ToolDefinition[] = [];
-    for (const tool of this.extendedTools) {
-      const haystack = `${tool.name} ${tool.description}`.toLowerCase();
-      if (tokens.some((tok) => haystack.includes(tok))) {
-        hits.push(tool);
-      }
-    }
+    // 2. 任意分词命中即纳入(name 或 description 含分词,不分大小写)
+    const hits = findMatchingTools(this.extendedTools, query);
 
     // 3. 无命中提示
     if (hits.length === 0) {

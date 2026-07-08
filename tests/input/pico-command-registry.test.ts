@@ -14,6 +14,7 @@ import {
   fileHistoryMakeSnapshot,
   fileHistoryTrackEdit,
 } from "../../src/safety/file-history.js";
+import { ToolDisclosure } from "../../src/tools/tool-disclosure.js";
 
 describe("Pico command registry", () => {
   const cleanup: Array<() => void> = [];
@@ -159,14 +160,19 @@ describe("Pico command registry", () => {
     expect(getStoredSessionSettings("session-gemini")?.thinkingEffort).toBe("off");
   });
 
-  it("/tools lists tool read/write attributes", async () => {
+  it("/tools groups core disclosed and searchable tools with stable risk labels", async () => {
+    const disclosure = new ToolDisclosure();
+    disclosure.disclose(["web_search"]);
     const registry = await createPicoCommandRegistry({
       workDir: process.cwd(),
       provider: "openai",
       model: "glm-5.2",
+      toolDisclosure: disclosure,
       tools: [
         { name: "read_file", readOnly: true },
         { name: "write_file", readOnly: false },
+        { name: "web_search", readOnly: true },
+        { name: "fetch_url", readOnly: true },
       ],
     });
 
@@ -174,8 +180,14 @@ describe("Pico command registry", () => {
 
     expect(result.type).toBe("local-command");
     if (result.type !== "local-command") return;
-    expect(result.result.message).toContain("read_file - read-only");
-    expect(result.result.message).toContain("write_file - write");
+    expect(result.result.message).toContain("Core tools");
+    expect(result.result.message).toContain("Disclosed tools");
+    expect(result.result.message).toContain("Searchable tools");
+    expect(result.result.message).toContain("- read_file - read-only - risk: low");
+    expect(result.result.message).toContain("- write_file - write - risk: write");
+    expect(result.result.message).toContain("- web_search - read-only - risk: low");
+    expect(result.result.message).toContain("- fetch_url - read-only - risk: low");
+    expect(result.result.message).toContain("Use /tools <query> to search");
   });
 
   it("/tools uses default tool status when no snapshot is provided", async () => {
@@ -191,6 +203,48 @@ describe("Pico command registry", () => {
     if (result.type !== "local-command") return;
     expect(result.result.message).toContain("read_file - read-only");
     expect(result.result.message).toContain("write_file - write");
+    expect(result.result.message).toContain("risk: low");
+    expect(result.result.message).toContain("risk: write");
+  });
+
+  it("/tools <query> searches searchable tools with search_tools matching", async () => {
+    const registry = await createPicoCommandRegistry({
+      workDir: process.cwd(),
+      provider: "openai",
+      model: "glm-5.2",
+      tools: [
+        { name: "read_file", readOnly: true },
+        { name: "web_search", readOnly: true },
+        { name: "task_create", readOnly: false },
+      ],
+    });
+
+    const result = await processUserInput("/tools web", { registry });
+
+    expect(result.type).toBe("local-command");
+    if (result.type !== "local-command") return;
+    expect(result.result.message).toContain('Search results for "web"');
+    expect(result.result.message).toContain("- web_search - read-only - risk: low");
+    expect(result.result.message).not.toContain("task_create");
+  });
+
+  it("/tools explains how to search when no extension tools are loaded", async () => {
+    const registry = await createPicoCommandRegistry({
+      workDir: process.cwd(),
+      provider: "openai",
+      model: "glm-5.2",
+      tools: [
+        { name: "read_file", readOnly: true },
+        { name: "write_file", readOnly: false },
+      ],
+    });
+
+    const result = await processUserInput("/tools", { registry });
+
+    expect(result.type).toBe("local-command");
+    if (result.type !== "local-command") return;
+    expect(result.result.message).toContain("No searchable tools are loaded");
+    expect(result.result.message).toContain("Use /tools <query> to search");
   });
 
   it("/status summarizes mode permission mode model and thinking effort", async () => {
