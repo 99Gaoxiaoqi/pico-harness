@@ -47,6 +47,7 @@ import {
   type ApprovalNotifier,
 } from "../approval/manager.js";
 import { computeApprovalDiff } from "../approval/diff.js";
+import { formatApprovalPanel } from "../tui/approval-panel.js";
 import type { MiddlewareFunc } from "../tools/registry.js";
 import { McpConnectionManager } from "../mcp/manager.js";
 import { BackgroundManager } from "../tools/background-manager.js";
@@ -177,6 +178,10 @@ export async function runUserInputFromCli(
       ...(options.forkSession ? { forkSession: options.forkSession } : {}),
     }));
   const model = options.model ?? dependencies.env?.LLM_MODEL ?? process.env.LLM_MODEL ?? defaultModel(provider);
+  const session = await globalSessionManager.getOrCreate(sessionSelection.sessionId, workDir);
+  if (sessionSelection.mode === "fork" && sessionSelection.sourceSessionId) {
+    await seedForkedSession(session, sessionSelection.sourceSessionId, workDir);
+  }
   const toolRegistry = buildRegistry(workDir, cliBackgroundManager, new GoalManager(), new TodoStore(workDir), new ToolDisclosure());
   const settings = getOrCreateSessionSettings({
     sessionId: sessionSelection.sessionId,
@@ -191,6 +196,7 @@ export async function runUserInputFromCli(
     workDir,
     provider,
     model: settings.model,
+    session,
     sessionId: sessionSelection.sessionId,
     ...(settings.thinkingEffortExplicit ? { thinkingEffort: settings.thinkingEffort } : {}),
     permissionMode: settings.permissionMode,
@@ -612,16 +618,7 @@ function buildApprovalMiddleware(notifier: ApprovalNotifier, workDir: string): M
 }
 
 const terminalNotifier: ApprovalNotifier = (notice) => {
-  console.warn(`\n\x1b[31m[需要审批 TaskID: ${notice.taskId}]\x1b[0m ${notice.message}\n`);
-  if (notice.diff) {
-    console.warn(`\x1b[33m${notice.diff}\x1b[0m\n`);
-  }
-  // exit_plan_mode 的审批支持 modify:提示用户可输入 modify 口令带新 plan 通过。
-  if (notice.toolName === "exit_plan_mode") {
-    console.warn(
-      `\x1b[2m回复:approve ${notice.taskId} 通过 / reject ${notice.taskId} 拒绝 / modify ${notice.taskId} <新plan内容> 修改后通过\x1b[0m\n`,
-    );
-  }
+  console.warn(`\n${formatApprovalPanel(notice)}\n`);
 };
 
 function resolveProviderConfig(
