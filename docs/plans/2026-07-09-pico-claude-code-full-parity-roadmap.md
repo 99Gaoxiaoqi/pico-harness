@@ -52,10 +52,10 @@ git diff --check
 - 修改：`tests/tui/status-bar.test.tsx`
 
 **任务：**
-- [ ] 调整 LogoPanel，使 `pico · model · cwd` 成为第一屏强信号。
-- [ ] 状态区增加 session 模式、权限模式、思考强度的紧凑展示。
-- [ ] 确保 cwd 过长时中间截断，不撑爆终端宽度。
-- [ ] 补测试覆盖长路径、缺 provider、不同 sessionMode。
+- [x] 调整 LogoPanel，使 `pico · model · cwd` 成为第一屏强信号。
+- [x] 状态区增加 session 模式、权限模式、思考强度的紧凑展示。
+- [x] 确保 cwd 过长时中间截断，不撑爆终端宽度。
+- [x] 补测试覆盖长路径、缺 provider、不同 sessionMode。
 
 **验收命令：**
 
@@ -77,10 +77,10 @@ git diff --check
 - 修改：`tests/tui/should-render-statically.test.ts`
 
 **任务：**
-- [ ] 统一 user / assistant / system / error 的行首符号与缩进。
-- [ ] 工具调用默认显示一行摘要，展开时显示参数和结果摘要。
-- [ ] 错误行使用醒目但不刺眼的样式，并保留原始错误信息。
-- [ ] 确保流式 assistant 文本不导致历史行重复渲染。
+- [x] 统一 user / assistant / system / error 的行首符号与缩进。
+- [x] 工具调用默认显示一行摘要，展开时显示参数和结果摘要。
+- [x] 错误行使用醒目但不刺眼的样式，并保留原始错误信息。
+- [x] 确保流式 assistant 文本不导致历史行重复渲染。
 
 **验收命令：**
 
@@ -102,10 +102,10 @@ git diff --check
 - 修改：`tests/tui/suggestions.test.tsx`
 
 **任务：**
-- [ ] 输入框提示文案对齐 Claude Code 风格，避免重复底部帮助行。
-- [ ] 候选面板限制高度，支持当前选中项高亮和描述截断。
-- [ ] 输入区在 running 状态下只显示禁用态，不吞掉历史内容。
-- [ ] 覆盖中文、多行、长命令候选的渲染测试。
+- [x] 输入框提示文案对齐 Claude Code 风格，避免重复底部帮助行。
+- [x] 候选面板限制高度，支持当前选中项高亮和描述截断。
+- [x] 输入区在 running 状态下只显示禁用态，不吞掉历史内容。
+- [x] 覆盖中文、多行、长命令候选的渲染测试。
 
 **验收命令：**
 
@@ -117,10 +117,10 @@ git diff --check
 
 **阶段 2 集成验收：**
 
-- [ ] 合并 2A、2B、2C。
-- [ ] 运行阶段最低门槛命令。
-- [ ] 真实 TUI 冒烟：`npm run dev -- --prompt /status`。
-- [ ] 提交：`feat(tui): 精修 Claude 风格视觉交互`。
+- [x] 合并 2A、2B、2C。
+- [x] 运行阶段最低门槛命令。
+- [x] 真实 TUI 冒烟：`npm run dev -- --prompt /status`。
+- [x] 提交：`feat(tui): 精修 Claude 风格视觉交互`。
 
 ---
 
@@ -571,7 +571,7 @@ npm run smoke:tui
 
 ## 阶段推进顺序
 
-- [ ] 阶段 2：视觉和交互精修。
+- [x] 阶段 2：视觉和交互精修。
 - [ ] 阶段 3：命令体系补全。
 - [ ] 阶段 4：权限与工具体验。
 - [ ] 阶段 5：回滚与会话管理增强。
