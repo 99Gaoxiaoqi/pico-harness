@@ -8,10 +8,6 @@
 //            结果 <完整 summary>
 //
 // 折叠/展开:组件自维护 expanded state,用 useInput 监听 `e` 键切换。
-//   多个 tool-card 同时监听 `e` 会冲突——按 isLast 区分响应:
-//     - 非末条(默认折叠):响应 `e` 切换自身状态(展开↔折叠)
-//     - 末条:默认展开(查看最新结果),且不抢 `e` 键(让前面的卡片能切)
-//   这样任意时刻按 `e`,只有"被关注"的卡片(非末条/已展开)响应,行为可预期。
 //
 // 参数高亮:尝试 JSON.parse,成功则提取 path/command/url/query 等关键字段着色显示;
 // 失败降级为原始字符串(截断)。
@@ -27,7 +23,7 @@ export function ToolCard(props: {
   args: string;
   status: "running" | "done" | "error";
   summary?: string;
-  /** 是否为消息列表中最后一条:决定树形符号 + 是否响应 `e` 键 */
+  /** 是否为消息列表中最后一条:决定树形符号 */
   isLast?: boolean;
   /** 初始展开状态;未传时默认折叠 */
   initialExpanded?: boolean;
@@ -52,7 +48,6 @@ export function ToolCard(props: {
       args={args}
       status={status}
       summary={summary}
-      isLast={isLast}
       initialExpanded={initialExpanded}
     />
   );
@@ -63,21 +58,19 @@ function StandardToolCard({
   args,
   status,
   summary,
-  isLast,
   initialExpanded,
 }: {
   name: string;
   args: string;
   status: "running" | "done" | "error";
   summary?: string;
-  isLast: boolean;
   initialExpanded?: boolean;
 }): React.ReactNode {
   const [expanded, setExpanded] = useState(initialExpanded ?? false);
 
   useInput((_input, key) => {
     if (key.return) return;
-    if (_input === "e" && !key.ctrl && !key.meta && !isLast) {
+    if (_input === "e" && !key.ctrl && !key.meta) {
       setExpanded((open) => !open);
     }
   });
@@ -97,7 +90,7 @@ function StandardToolCard({
             </Text>
           </>
         )}
-        {!isLast && <Text dimColor> {expanded ? "[e 折叠]" : "[e 展开]"}</Text>}
+        <Text dimColor> {expanded ? "[e 折叠]" : "[e 展开]"}</Text>
       </Box>
       {expanded && (
         <Box flexDirection="column" marginLeft={2}>
@@ -141,7 +134,7 @@ function AgentToolProgressLine({
 
   useInput((_input, key) => {
     if (key.return) return;
-    if (_input === "e" && !key.ctrl && !key.meta && !isLast) {
+    if (_input === "e" && !key.ctrl && !key.meta) {
       setExpanded((open) => !open);
     }
   });
@@ -169,7 +162,7 @@ function AgentToolProgressLine({
             </Text>
           </>
         )}
-        {!isLast && <Text dimColor> {expanded ? "[e 折叠]" : "[e 展开]"}</Text>}
+        <Text dimColor> {expanded ? "[e 折叠]" : "[e 展开]"}</Text>
       </Box>
       {expanded && (
         <>
