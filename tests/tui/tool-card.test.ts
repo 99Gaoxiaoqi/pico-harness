@@ -32,18 +32,20 @@ describe("ToolCard agent tool detection", () => {
     expect(output).toContain("⎿ read_file");
     expect(output).toContain("Done");
     expect(output).toContain("120 字节");
+    expect(output).toContain("[e 展开]");
     expect(output).not.toContain("参数");
     expect(output).not.toContain("结果");
     expect(output.split("\n")).toHaveLength(1);
   });
 
-  it("展开时显示参数和结果摘要,错误结果保留原始摘要", () => {
+  it("最后一条展开时显示参数和结果摘要,错误结果保留原始摘要", () => {
     const output = renderToString(
       React.createElement(ToolCard, {
         name: "bash",
         args: JSON.stringify({ command: "npm test" }),
         status: "error",
         summary: "执行失败: missing script test",
+        isLast: true,
         initialExpanded: true,
       }),
     );
