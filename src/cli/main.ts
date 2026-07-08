@@ -404,11 +404,7 @@ async function main() {
   if (values.tui) {
     // TUI 模式:启动 ink REPL 交互界面(顶栏 + 消息列表 + 输入框),
     // 每轮用户输入复用 runAgentFromCli 装配 engine,与 feishu/acp/serve 平级。
-    // 静默日志:ink 全屏接管终端,任何 stdout/stderr 输出都会破坏画面。
-    // 默认降到 warn(只显示警告/错误,极少);用户显式设 LOG_LEVEL 时尊重用户。
-    if (!process.env.LOG_LEVEL) {
-      process.env.LOG_LEVEL = "warn";
-    }
+    // 日志静默靠 preload-env.ts(--import 预加载,在 logger 初始化前设 LOG_LEVEL=warn)。
     const workDir = process.cwd();
     const modelName = process.env.LLM_MODEL ?? (kind === "openai" ? "glm-5.2" : "claude-3-5-sonnet");
     await startTuiRepl({

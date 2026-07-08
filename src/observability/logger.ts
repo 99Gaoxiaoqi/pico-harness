@@ -9,8 +9,9 @@
 // pino 是 Node.js 最快 JSON 日志库。transport 使用 pino-pretty 做彩色格式化输出;
 // 若 transport 加载失败(如测试环境 worker thread 限制),自动降级为 plain pino。
 //
-// 日志走 stderr(destination=2):stdout 留给 ink TUI 全屏渲染,互不干扰。
-// 非 TUI 模式下 stdout/stderr 在终端都会显示,行为不变。
+// 重要:pino transport 模式下 logger.level 动态修改对 transport 不生效
+// (transport 在 worker thread 里)。TUI 模式必须在 logger 初始化前就用
+// LOG_LEVEL 环境变量压低级别,这由 main.ts 在最开头检测 --tui 参数完成。
 
 import pino from "pino";
 
@@ -19,8 +20,6 @@ const level = process.env.LOG_LEVEL ?? "info";
 export const logger = pino({
   level,
   base: undefined, // 不附加 pid/hostname(教学项目精简输出)
-  // 生产环境可用 pino-pretty 彩色格式化;测试环境可能不支持 worker transport,
-  // 用 try-catch 保护,失败时降级为无 transport 的 plain JSON 输出
   ...(process.env.NODE_ENV !== "test"
     ? {
         transport: {
@@ -29,9 +28,7 @@ export const logger = pino({
             colorize: true,
             translateTime: "HH:MM:ss",
             ignore: "pid,hostname",
-            // 日志输出到 stderr(fd=2),把 stdout 让给 ink TUI 渲染,避免互相破坏画面。
-            // 非 TUI 模式下终端同样显示 stderr,行为不变。
-            destination: 2,
+            destination: 2, // stderr
           },
         },
       }
