@@ -18,6 +18,7 @@ import { findClosestLines, formatCandidateHint } from "./edit-hint.js";
 // 跨平台 shell:Windows 上统一走 Git Bash,避免 cmd.exe 不识别 POSIX 语义。
 import { execAsync, execOptions } from "../os/shell.js";
 import { BackgroundManager } from "./background-manager.js";
+import type { HookRunner } from "../hooks/runner.js";
 
 const DEFAULT_RESULT_SIZE_CHARS = 8000;
 
@@ -53,6 +54,19 @@ export class ToolRegistry implements Registry {
   private readonly requestMiddlewares: RequestMiddleware[] = [];
   private readonly executionMiddlewares: ExecutionMiddleware[] = [];
   private preWriteHook?: (toolName: string, args: string) => Promise<void>;
+  /**
+   * 用户可配置 Shell Hooks 执行器(任务 2.6)。
+   * 挂载后:PreToolUse 在工具执行前判定 allow/deny(+可改写参数);
+   * PostToolUse 在工具执行后 fire-and-forget 通知。
+   * 未挂载(undefined)时跳过所有 hook 逻辑,零开销。
+   */
+  private hookRunner?: HookRunner;
+  /**
+   * 传给 hook stdin 的 session_id。
+   * execute(call) 签名无 sessionId 入参,故由 host 在装配时 setSessionId 注入,
+   * 默认空串(hook 仍可用 cwd 做识别)。
+   */
+  private sessionId = "";
 
   constructor(opts: ToolRegistryOptions = {}) {
     this.defaultResultSizeChars = opts.defaultResultSizeChars ?? DEFAULT_RESULT_SIZE_CHARS;
@@ -61,6 +75,17 @@ export class ToolRegistry implements Registry {
 
   setPreWriteHook(hook: (toolName: string, args: string) => Promise<void>): void {
     this.preWriteHook = hook;
+  }
+
+  /** 挂载 HookRunner,启用 PreToolUse/PostToolUse 钩子(任务 2.6) */
+  setHookRunner(runner: HookRunner): void {
+    this.hookRunner = runner;
+    logger.info("[Registry] 已挂载 HookRunner (PreToolUse/PostToolUse)");
+  }
+
+  /** 设置传给 hook stdin 的 session_id(无则默认空串) */
+  setSessionId(sessionId: string): void {
+    this.sessionId = sessionId;
   }
 
   register(tool: BaseTool): void {
@@ -160,7 +185,46 @@ export class ToolRegistry implements Registry {
       }
     }
 
-    // 3. 执行工具逻辑:所有 Middleware 都放行了
+    // 3. 【任务 2.6】PreToolUse hook:在工具执行前判定 allow/deny。
+    //    放在 requestMiddlewares 之后(审批先于用户 hook),preWriteHook/tool.execute 之前。
+    //    hook 任何故障均 fail-open(由 HookRunner 内部兜底),不会阻断工具。
+    let toolInput: unknown;
+    try {
+      toolInput = JSON.parse(currentCall.arguments);
+    } catch {
+      toolInput = {};
+    }
+    if (this.hookRunner) {
+      let hookResult;
+      try {
+        hookResult = await this.hookRunner.runPreToolUse(currentCall.name, toolInput, this.sessionId);
+      } catch (err) {
+        // HookRunner 内部已 fail-open,此处防御性兜底:绝不阻断
+        logger.warn(
+          { err: String(err), tool: currentCall.name },
+          `[Registry] PreToolUse hook 异常,fail-open 放行`,
+        );
+        hookResult = { decision: "allow" as const };
+      }
+      if (hookResult.decision === "deny") {
+        logger.warn(
+          { tool: currentCall.name, reason: hookResult.reason },
+          `[Registry] 🚫 工具 ${currentCall.name} 被 PreToolUse hook 阻断`,
+        );
+        return {
+          toolCallId: currentCall.id,
+          output: `🚫 被 PreToolUse hook 阻断: ${hookResult.reason ?? "(无原因)"}`,
+          isError: true,
+        };
+      }
+      // modifiedInput:hook 改写了工具输入 → 替换 arguments
+      if (hookResult.modifiedInput !== undefined) {
+        currentCall = { ...currentCall, arguments: JSON.stringify(hookResult.modifiedInput) };
+        toolInput = hookResult.modifiedInput;
+      }
+    }
+
+    // 4. 执行工具逻辑:所有 Middleware + PreToolUse hook 都放行了
     if (this.preWriteHook) {
       try {
         await this.preWriteHook(currentCall.name, currentCall.arguments);
@@ -183,13 +247,28 @@ export class ToolRegistry implements Registry {
       const finalOutput = this.truncateResults
         ? truncateToolOutput(output, tool.maxResultSizeChars ?? this.defaultResultSizeChars)
         : output;
+
+      // 5. 【任务 2.6】PostToolUse hook:工具执行成功后 fire-and-forget 通知。
+      //    不阻断、不影响返回值;任何故障静默忽略。
+      if (this.hookRunner) {
+        try {
+          this.hookRunner
+            .runPostToolUse(currentCall.name, toolInput, finalOutput, this.sessionId)
+            .catch(() => {
+              /* fire-and-forget */
+            });
+        } catch {
+          /* fire-and-forget */
+        }
+      }
+
       return {
         toolCallId: currentCall.id,
         output: finalOutput,
         isError: false,
       };
     } catch (err) {
-      // 4. 封装:底层物理错误也封成 isError 的 ToolResult
+      // 6. 封装:底层物理错误也封成 isError 的 ToolResult
       const errMsg = err instanceof Error ? err.message : String(err);
       return {
         toolCallId: currentCall.id,

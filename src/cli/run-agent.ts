@@ -48,6 +48,8 @@ import { computeApprovalDiff } from "../approval/diff.js";
 import type { MiddlewareFunc } from "../tools/registry.js";
 import { McpConnectionManager } from "../mcp/manager.js";
 import { BackgroundManager } from "../tools/background-manager.js";
+import { loadHooksConfig } from "../hooks/config.js";
+import { HookRunner } from "../hooks/runner.js";
 
 const cliBackgroundManager = new BackgroundManager();
 
@@ -182,6 +184,13 @@ export async function runAgentFromCli(
   // 确保工具改的状态引擎侧立即可见(对标 TodoStore 跨实例 bug 的教训)。
   const goalManager = new GoalManager();
   const registry = buildRegistry(workDir, cliBackgroundManager, goalManager);
+  // 【任务 2.6】用户可配置 Shell Hooks:加载 .claw/settings.json 的 hooks 配置,
+  // 存在则挂载 HookRunner 到 registry。fail-open:配置缺失/畸形均不启用 hook,零影响。
+  registry.setSessionId?.(session.id);
+  const hooksConfig = await loadHooksConfig(workDir);
+  if (hooksConfig) {
+    registry.setHookRunner?.(new HookRunner(workDir, hooksConfig));
+  }
   const observationProcessor = buildObservationProcessor(workDir);
   // Steer 队列(ROADMAP 3.2):CLI --steer 启动注入。run 前一次性 push,
   // engine 第一轮 A 点 peek 即可见。运行中动态注入靠 HTTP / 飞书。
