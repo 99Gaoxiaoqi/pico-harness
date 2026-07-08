@@ -91,6 +91,10 @@ export interface Registry {
    */
   getAccesses?(call: ToolCall): ToolAccesses;
   setPreWriteHook?(hook: (toolName: string, args: string) => Promise<void>): void;
+  /** 【任务 2.6】挂载 HookRunner,启用 PreToolUse/PostToolUse 钩子 */
+  setHookRunner?(runner: import("../hooks/runner.js").HookRunner): void;
+  /** 【任务 2.6】设置传给 hook stdin 的 session_id */
+  setSessionId?(sessionId: string): void;
 }
 
 /**
