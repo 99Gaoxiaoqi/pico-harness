@@ -127,10 +127,10 @@ git diff --check
 
 **任务：**
 
-- [ ] `/model` 不只展示，还能切换当前 session 后续请求使用的模型。
-- [ ] `/thinking` 与 `/effort` 设置思考强度，保持 provider 不支持时清晰提示。
-- [ ] `/tools` 展示可用工具和只读/写入属性。
-- [ ] `/status` 汇总 model、effort、session、cwd、权限模式。
+- [x] `/model` 不只展示，还能切换当前 session 后续请求使用的模型。
+- [x] `/thinking` 与 `/effort` 设置思考强度，保持 provider 不支持时清晰提示。
+- [x] `/tools` 展示可用工具和只读/写入属性。
+- [x] `/status` 汇总 model、effort、session、cwd、权限模式。
 
 **验收命令：**
 
@@ -207,7 +207,7 @@ git diff --check
 ## 集成顺序
 
 - [x] 合并 Worker A：先稳定 session id 和启动语义。
-- [ ] 合并 Worker D：在稳定 session 语义上接入模型/思考状态。
+- [x] 合并 Worker D：在稳定 session 语义上接入模型/思考状态。
 - [x] 合并 Worker E：接入 Claude commands/agents 资源。
 - [x] 合并 Worker B：接入外壳与状态区。
 - [x] 合并 Worker C：接入输入编辑体验。
