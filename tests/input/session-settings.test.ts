@@ -3,6 +3,7 @@ import {
   createDefaultSessionSettings,
   formatSessionStatus,
   formatToolStatus,
+  setSessionMode,
   setSessionThinkingEffort,
 } from "../../src/input/session-settings.js";
 
@@ -17,11 +18,42 @@ describe("session settings", () => {
       permissionMode: "ask",
     });
 
+    expect(formatSessionStatus(settings)).toContain("Mode: default");
     expect(formatSessionStatus(settings)).toContain("Model: glm-5.2");
-    expect(formatSessionStatus(settings)).toContain("Effort: medium");
+    expect(formatSessionStatus(settings)).toContain("Thinking effort: medium");
     expect(formatSessionStatus(settings)).toContain("Session: session-a");
     expect(formatSessionStatus(settings)).toContain("CWD: /workspace/app");
-    expect(formatSessionStatus(settings)).toContain("Permission: ask");
+    expect(formatSessionStatus(settings)).toContain("Permission mode: ask");
+  });
+
+  it("updates session mode for supported interaction modes", () => {
+    const settings = createDefaultSessionSettings({
+      sessionId: "session-mode",
+      cwd: "/workspace/app",
+      provider: "openai",
+      model: "glm-5.2",
+    });
+
+    const result = setSessionMode(settings, "plan");
+
+    expect(result.ok).toBe(true);
+    expect(settings.mode).toBe("plan");
+    expect(result.message).toContain("Mode set to plan");
+  });
+
+  it("keeps the previous mode for unsupported interaction modes", () => {
+    const settings = createDefaultSessionSettings({
+      sessionId: "session-mode-invalid",
+      cwd: "/workspace/app",
+      provider: "openai",
+      model: "glm-5.2",
+    });
+
+    const result = setSessionMode(settings, "fast");
+
+    expect(result.ok).toBe(false);
+    expect(settings.mode).toBe("default");
+    expect(result.message).toContain("Usage: /mode <default|plan|auto|yolo>");
   });
 
   it("updates thinking effort only when the provider profile supports it", () => {

@@ -41,7 +41,7 @@ export function createBuiltinCommands(): readonly SlashCommand[] {
     }),
     localCommand({
       name: "model",
-      aliases: ["models", "mode"],
+      aliases: ["models"],
       description: "Show or change the active model",
       usage: "/model [name]",
       action: "model",
@@ -54,6 +54,13 @@ export function createBuiltinCommands(): readonly SlashCommand[] {
             : `Model change requested: ${input.args}`,
         data: input.args.length === 0 ? undefined : { model: input.args },
       }),
+    }),
+    localCommand({
+      name: "mode",
+      description: "Show or change the current interaction mode",
+      usage: "/mode <default|plan|auto|yolo>",
+      action: "message",
+      message: "Mode command is not connected yet.",
     }),
     localCommand({
       name: "tools",
