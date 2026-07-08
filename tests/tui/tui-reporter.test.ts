@@ -47,6 +47,14 @@ describe("TuiReporter", () => {
     expect(entries[0]).toMatchObject({ kind: "tool", name: "bash", status: "error" });
   });
 
+  it("被系统或 hook 拒绝的工具结果标记为 denied", () => {
+    const { reporter, last } = harness();
+    reporter.onToolCall("bash", '{"command":"rm -rf /"}');
+    reporter.onToolResult("bash", "执行被系统拦截。原因: dangerous command", true);
+    const entries = last()!;
+    expect(entries[0]).toMatchObject({ kind: "tool", name: "bash", status: "denied" });
+  });
+
   it("onTextDelta 流式累积成 assistant 条目", () => {
     const { reporter, last } = harness();
     reporter.onTextDelta("你好");
@@ -128,6 +136,28 @@ describe("TuiReporter", () => {
     reporter.onToolResult("bash", longResult, false);
     const entry = last()![0]!;
     expect(entry.kind === "tool" && entry.summary!.length).toBeLessThan(200);
+  });
+
+  it("edit/write/bash 摘要保留路径或命令上下文", () => {
+    const { reporter, last } = harness();
+    reporter.onToolCall("edit_file", '{"path":"src/a.ts"}');
+    reporter.onToolResult("edit_file", "✅ 成功修改文件: src/a.ts\n\n@@\n-old\n+new", false);
+    reporter.onToolCall("bash", '{"command":"npm test"}');
+    reporter.onToolResult("bash", "tests passed", false);
+
+    const entries = last()!;
+    expect(entries[0]).toMatchObject({ kind: "tool", summary: expect.stringContaining("src/a.ts") });
+    expect(entries[0]).toMatchObject({ kind: "tool", summary: expect.stringContaining("@@") });
+    expect(entries[1]).toMatchObject({ kind: "tool", summary: expect.stringContaining("npm test") });
+  });
+
+  it("失败摘要保留可复制错误", () => {
+    const { reporter, last } = harness();
+    reporter.onToolCall("bash", '{"command":"bad"}');
+    reporter.onToolResult("bash", "Error: command failed\nstack trace", true);
+    const entry = last()![0]!;
+    expect(entry.kind === "tool" ? entry.summary : "").toContain("可复制错误:");
+    expect(entry.kind === "tool" ? entry.summary : "").toContain("Error: command failed");
   });
 
   describe("getMode(SpinnerMode 追踪)", () => {
