@@ -14,7 +14,7 @@
 
 - [x] 第一轮基础集成完成：session 启动语义、单一底部输入框、基础 slash/@、`.claude/commands`、`.claude/agents`、`/status`、`/model`、`/thinking`、`/tools`、`/snapshots`、`/rewind`、`/undo`。
 - [x] 第二轮开始前先固定任务边界：本文件即为后续阶段总控任务单。
-- [ ] 后续每个阶段完成后，更新本文件与 `PLAN.md` 状态。
+- [x] 后续每个阶段完成后，更新本文件与 `PLAN.md` 状态。
 
 ---
 
@@ -502,10 +502,10 @@ git diff --check
 - 修改：`package.json`
 
 **任务：**
-- [ ] 新增 `npm run smoke:tui`，依次执行 `/status`、`/mode`、`/tools`、`/help`。
-- [ ] 脚本读取 `.env`，缺 provider 配置时输出 skip 原因并成功退出。
-- [ ] 测试覆盖有配置和无配置两种路径。
-- [ ] 输出包含命令、退出码、关键摘要。
+- [x] 新增 `npm run smoke:tui`，依次执行 `/status`、`/mode`、`/tools`、`/help`。
+- [x] 脚本读取 `.env`，缺 provider 配置时输出 skip 原因并成功退出。
+- [x] 测试覆盖有配置和无配置两种路径。
+- [x] 输出包含命令、退出码、关键摘要。
 
 **验收命令：**
 
@@ -525,10 +525,10 @@ git diff --check
 - 修改：`README.md`
 
 **任务：**
-- [ ] 说明在任意项目目录启动 Pico 的推荐方式。
-- [ ] 说明 session：new / continue / resume / fork。
-- [ ] 列出支持的 slash commands、`.claude/commands`、`.claude/agents`。
-- [ ] 列出常见错误：`.env` 缺失、provider 配置缺失、未知命令。
+- [x] 说明在任意项目目录启动 Pico 的推荐方式。
+- [x] 说明 session：new / continue / resume / fork。
+- [x] 列出支持的 slash commands、`.claude/commands`、`.claude/agents`。
+- [x] 列出常见错误：`.env` 缺失、provider 配置缺失、未知命令。
 
 **验收命令：**
 
@@ -543,12 +543,12 @@ git diff --check
 **分支/worktree：** 不写代码，只在 `main` 集成后运行。
 
 **任务：**
-- [ ] 运行完整目标测试。
-- [ ] 运行 lint。
-- [ ] 运行 `git diff --check`。
-- [ ] 运行 `npm run smoke:tui`。
-- [ ] 手工抽查命令：`/mode`、`/permissions`、`/sessions`、`/agents`、`/rewind`。
-- [ ] 输出最终验证报告，列出仍未覆盖的真实交互风险。
+- [x] 运行完整目标测试。
+- [x] 运行 lint。
+- [x] 运行 `git diff --check`。
+- [x] 运行 `npm run smoke:tui`。
+- [x] 手工抽查命令：`/mode`、`/permissions`、`/sessions`、`/agents`、`/rewind`。
+- [x] 输出最终验证报告，列出仍未覆盖的真实交互风险。
 
 **最终验收命令：**
 
@@ -561,11 +561,11 @@ npm run smoke:tui
 
 **阶段 7 集成验收：**
 
-- [ ] 合并 7A、7B。
-- [ ] 启动 7C 验证子代理。
-- [ ] 修复最终验证发现的问题。
-- [ ] 提交：`docs(tui): 补充 Claude 风格交互启动指南`。
-- [ ] 总控任务单全部勾选，目标完成。
+- [x] 合并 7A、7B。
+- [x] 启动 7C 验证子代理。
+- [x] 修复最终验证发现的问题。
+- [x] 提交：`docs(tui): 补充 Claude 风格交互启动指南`。
+- [x] 总控任务单全部勾选，目标完成。
 
 ---
 
@@ -576,7 +576,7 @@ npm run smoke:tui
 - [x] 阶段 4：权限与工具体验。
 - [x] 阶段 5：回滚与会话管理增强。
 - [x] 阶段 6：子代理与 Agent 体验。
-- [ ] 阶段 7：真实项目验证与发布收口。
+- [x] 阶段 7：真实项目验证与发布收口。
 
 ---
 
