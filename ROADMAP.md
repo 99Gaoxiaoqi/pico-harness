@@ -342,7 +342,7 @@ git worktree remove ../pico-1-streaming
 - [x] 5.3 Auxiliary Client（辅助模型做压缩/标题）— AUX_LLM_* 配置 + FullCompactor 用 aux + Compactor summarizer 工厂
 - [x] 5.4 Tool Search 渐进披露 — 工具分组分层(核心组始终加载 + 扩展组按需披露)；search_tools 元工具检索激活；loop.ts 拦截点 + 所有 host 入口注入 ToolDisclosure 单例（2026-07-08 实现，详见变更记录）
 - [x] 5.5 Image / Media 支持 — 方案 B(加 images 字段,content 保持 string),3 provider 多模态翻译 + HTTP/ACP/CLI 入口传图
-- [x] 5.6 TUI 界面 — 不做（与 HTTP+WS 路线重复，暂不做）
+- [x] 5.6 TUI 界面 — ink + React 19 (对标 Claude Code) 交互 REPL + 流式渲染 + 工具卡片；--tui flag 启动（2026-07-08 实现，详见变更记录）
 - [x] 5.7 Rate Limit Tracking — header 解析 + CredentialPool 精确冷却 + 3 provider 回传
 - [x] 5.8 版本化迁移（JSONL schema 版本号）— meta record + migration 框架
 
@@ -380,6 +380,21 @@ git worktree remove ../pico-1-streaming
 
 ## 📅 变更记录
 
+- 2026-07-08：阶段 5.6 TUI 界面实现（修订原"不做"决策）
+  - 原 ROADMAP 标 5.6"不做（与 HTTP+WS 路线重复）"；经 Claude Code 源码调研确认其用 ink+React，决定采用同款技术栈实现交互 REPL
+  - **技术栈**（对标 `/d/work/claude-code-main` 源码确认）：ink 7 + React 19 + TSX；Claude Code 用 `@anthropic/ink`（内部 fork），公开版 ink API 一致
+  - **核心组件**（`src/tui/`）：
+    - `tui-reporter.ts`：TuiReporter implements Reporter，8 个 engine 事件→TuiEntry 状态映射（onTextDelta 流式累积、onToolCall/Result 工具卡片、onThinking spinner）
+    - `app.tsx`：顶层布局（顶栏 model/workDir + 消息列表 + 输入框），Ctrl+C 退出，状态机 idle/thinking
+    - `message-list.tsx`：对话流渲染，轮次分隔线，assistant 代码块着色
+    - `tool-card.tsx`：工具卡片（树形缩进 ⎿ + 参数 JSON 关键字段高亮 + 状态图标 ✓✗⠋ + 摘要着色）
+    - `input-box.tsx`：useInput 自实现极简输入框（免装 ink-text-input 依赖）
+    - `spinner.tsx`：思考动画（useEffect 80ms 切帧）
+    - `repl.tsx`：REPL 启动器，复用 runAgentFromCli + 共享 TuiReporter，固定 sessionId 复用 session
+  - **入口**：`src/cli/main.ts` 加 `--tui` flag，与 feishu/acp/serve 平级，opt-in 不影响现有入口
+  - **极简哲学**：TuiReporter 经依赖注入接入 engine（零改动 engine）；每轮调 runAgentFromCli 复用既有装配链（零改动 run-agent.ts）
+  - 验证：TuiReporter 11 单测全过（事件→状态映射）；typecheck 零新增错误；冒烟测试进程能启动（ink 成功挂载）
+  - 策略：worktree 两波并行（第一波串行建 MVP 骨架，第二波 components/entry 两个子代理并行因文件集不相交）
 - 2026-07-08：阶段 5.4 Tool Search 渐进披露实现（修订原"不做"决策）
   - 原 ROADMAP 标 5.4"不做（15 工具 << 50 阈值）"；经重新评估决定采用**工具分组分层**方案实现（非全量检索披露，避免过度设计）
   - **核心三件套**（`src/tools/`）：
