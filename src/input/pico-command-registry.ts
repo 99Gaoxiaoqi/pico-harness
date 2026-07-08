@@ -27,6 +27,12 @@ import {
   renderSkillCommand,
   renderSkillListCommand,
 } from "./skill-commands.js";
+import {
+  loadClaudeAgents,
+  summarizeClaudeAgents,
+  type ClaudeAgentSummary,
+  type ClaudeAgentSource,
+} from "./agent-loader.js";
 import type { LocalCommandResult, PromptCommandResult, SlashCommand } from "./types.js";
 import { createProvider, type ProviderKind } from "../provider/factory.js";
 import { loadApiKeys } from "../provider/config.js";
@@ -98,7 +104,8 @@ export async function createPicoCommandRegistry(
       command.name !== "init" &&
       command.name !== "doctor" &&
       command.name !== "tools" &&
-      command.name !== "thinking",
+      command.name !== "thinking" &&
+      command.name !== "agents",
   );
   const registry = new CommandRegistry([
     ...builtins,
@@ -111,6 +118,7 @@ export async function createPicoCommandRegistry(
     createModelCommand(settings),
     createThinkingCommand(settings),
     createToolsCommand(settings, options.toolDisclosure),
+    createAgentsCommand(options),
     createSessionsCommand(options),
     createResumeCommand(),
     createSnapshotsCommand(options),
@@ -376,6 +384,49 @@ function createToolsCommand(
       };
     },
   };
+}
+
+function createAgentsCommand(options: PicoCommandRegistryOptions): SlashCommand {
+  return {
+    name: "agents",
+    aliases: ["agent"],
+    description: "List available subagents",
+    usage: "/agents",
+    kind: "local",
+    execute: async (): Promise<LocalCommandResult> => {
+      const agents = summarizeClaudeAgents(
+        await loadClaudeAgents({ workDir: options.workDir, includeBuiltins: true }),
+        { includeSource: true },
+      );
+      return {
+        type: "local",
+        action: "agents",
+        message: formatAgentSummaries(agents),
+        data: agents,
+      };
+    },
+  };
+}
+
+function formatAgentSummaries(agents: readonly ClaudeAgentSummary[]): string {
+  if (agents.length === 0) return "No agents available.";
+
+  return [
+    "Available Agents:",
+    ...agents.map((agent) => {
+      const description = agent.description ? `: ${agent.description}` : "";
+      const tools =
+        agent.tools && agent.tools.length > 0
+          ? ` (tools: ${agent.tools.join(", ")})`
+          : "";
+      return `- ${agent.name} [${formatAgentSource(agent.source)}]${description}${tools}`;
+    }),
+  ].join("\n");
+}
+
+function formatAgentSource(source: ClaudeAgentSource | undefined): string {
+  if (source === undefined) return "unknown";
+  return source === "builtin" ? "built-in" : source;
 }
 
 function formatToolsByDisclosure(
