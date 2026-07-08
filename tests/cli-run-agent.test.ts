@@ -191,6 +191,47 @@ describe("runAgentFromCli", () => {
     });
   });
 
+  it("未指定 session 时默认每次 CLI 启动使用新 session", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-cli-"));
+    const provider = () =>
+      new ScriptedProvider([
+        {
+          role: "assistant",
+          content: "Done.",
+          usage: { promptTokens: 1, completionTokens: 1 },
+        },
+      ]);
+
+    const first = await runAgentFromCli(
+      {
+        prompt: "Say done",
+        dir: workDir,
+        provider: "openai",
+        enableThinking: false,
+      },
+      {
+        provider: provider(),
+        write: () => undefined,
+      },
+    );
+    const second = await runAgentFromCli(
+      {
+        prompt: "Say done again",
+        dir: workDir,
+        provider: "openai",
+        enableThinking: false,
+      },
+      {
+        provider: provider(),
+        write: () => undefined,
+      },
+    );
+
+    expect(first.sessionId).toMatch(/^cli-/);
+    expect(second.sessionId).toMatch(/^cli-/);
+    expect(second.sessionId).not.toBe(first.sessionId);
+  });
+
   it("CLI 单轮本地命令写 stdout 且不调用模型", async () => {
     const provider = new ScriptedProvider([
       {
