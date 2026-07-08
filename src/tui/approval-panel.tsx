@@ -27,10 +27,10 @@ export function formatApprovalPanel(
     `[审批] ${notice.toolName}`,
     `目标: ${target}`,
     `任务: ${notice.taskId}`,
-    `允许一次: approve ${notice.taskId}`,
-    `本 session: approve-session ${notice.taskId}`,
-    `拒绝: reject ${notice.taskId}`,
-    `修改: modify ${notice.taskId} <内容>`,
+    `allow once: approve ${notice.taskId}`,
+    `allow session: approve-session ${notice.taskId}`,
+    `deny: reject ${notice.taskId}`,
+    `edit: modify ${notice.taskId} <content>`,
   ];
   if (options.includeDiff !== false && notice.diff) {
     const diff = formatDiffPreview(notice.diff, { maxLines: 40 });

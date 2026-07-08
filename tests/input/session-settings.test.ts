@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   createDefaultSessionSettings,
+  formatPermissionStatus,
   formatSessionStatus,
   formatToolStatus,
   setSessionMode,
+  setSessionPermissionMode,
   setSessionThinkingEffort,
 } from "../../src/input/session-settings.js";
 
@@ -54,6 +56,52 @@ describe("session settings", () => {
     expect(result.ok).toBe(false);
     expect(settings.mode).toBe("default");
     expect(result.message).toContain("Usage: /mode <default|plan|auto|yolo>");
+  });
+
+  it("updates permission mode for supported permission modes", () => {
+    const settings = createDefaultSessionSettings({
+      sessionId: "session-permissions",
+      cwd: "/workspace/app",
+      provider: "openai",
+      model: "glm-5.2",
+    });
+
+    const result = setSessionPermissionMode(settings, "yolo");
+
+    expect(result.ok).toBe(true);
+    expect(settings.permissionMode).toBe("yolo");
+    expect(result.message).toContain("Permission mode set to yolo");
+  });
+
+  it("keeps the previous permission mode for unsupported permission modes", () => {
+    const settings = createDefaultSessionSettings({
+      sessionId: "session-permissions-invalid",
+      cwd: "/workspace/app",
+      provider: "openai",
+      model: "glm-5.2",
+      permissionMode: "auto",
+    });
+
+    const result = setSessionPermissionMode(settings, "fast");
+
+    expect(result.ok).toBe(false);
+    expect(settings.permissionMode).toBe("auto");
+    expect(result.message).toContain("Usage: /permissions <default|auto|yolo|plan>");
+  });
+
+  it("formats permission mode and unavailable session approvals", () => {
+    const settings = createDefaultSessionSettings({
+      sessionId: "session-permissions-status",
+      cwd: "/workspace/app",
+      provider: "openai",
+      model: "glm-5.2",
+      permissionMode: "plan",
+    });
+
+    const message = formatPermissionStatus(settings);
+
+    expect(message).toContain("Permission mode: plan");
+    expect(message).toContain("Session approvals: unavailable");
   });
 
   it("updates thinking effort only when the provider profile supports it", () => {

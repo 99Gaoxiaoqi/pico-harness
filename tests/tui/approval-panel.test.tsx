@@ -12,10 +12,10 @@ describe("ApprovalPanel", () => {
 
     expect(output).toContain("bash");
     expect(output).toContain("rm -rf dist");
-    expect(output).toContain("允许一次");
-    expect(output).toContain("本 session");
-    expect(output).toContain("拒绝");
-    expect(output).toContain("修改");
+    expect(output).toContain("allow once");
+    expect(output).toContain("allow session");
+    expect(output).toContain("deny");
+    expect(output).toContain("edit");
     expect(output).toContain("approve task-1");
     expect(output).toContain("reject task-1");
     expect(output).toContain("modify task-1");
