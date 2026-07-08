@@ -18,7 +18,6 @@ import { render } from "ink";
 import { App } from "./app.js";
 import { TuiReporter, type TuiEntry } from "./tui-reporter.js";
 import { QueryGuard } from "./query-guard.js";
-import { logger } from "../observability/logger.js";
 import type { RunAgentCliOptions } from "../cli/run-agent.js";
 import { runAgentFromCli } from "../cli/run-agent.js";
 import type { ProviderKind } from "../provider/factory.js";
@@ -38,12 +37,8 @@ export interface ReplOptions {
 
 /** 启动 TUI REPL 循环 */
 export async function startTuiRepl(opts: ReplOptions): Promise<void> {
-  // 静默日志:ink 全屏接管终端,info 级日志会破坏画面。
-  // 降到 warn(除非用户显式设了 LOG_LEVEL=debug/info 等更低级别)。
-  // pino 支持运行时改 level(立即生效,无需重建实例)。
-  if ((process.env.LOG_LEVEL ?? "info") === "info") {
-    logger.level = "warn";
-  }
+  // 日志静默由 preload-env.ts 在模块加载前设 LOG_LEVEL=warn 完成
+  // (pino transport 是 worker thread,运行时改 logger.level 无效)。
 
   // 共享状态:TuiReporter 和 App 共用同一个 entries 数组引用
   const entries: TuiEntry[] = [];
