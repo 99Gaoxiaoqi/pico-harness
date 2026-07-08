@@ -104,4 +104,42 @@ describe("TuiReporter", () => {
     const entry = last()![0]!;
     expect(entry.kind === "tool" && entry.summary!.length).toBeLessThan(200);
   });
+
+  describe("getMode(SpinnerMode 追踪)", () => {
+    it("初始为 idle", () => {
+      const { reporter } = harness();
+      expect(reporter.getMode()).toBe("idle");
+    });
+
+    it("onTurnStart/onStart → requesting(等首包)", () => {
+      const { reporter } = harness();
+      reporter.onTurnStart(1);
+      expect(reporter.getMode()).toBe("requesting");
+    });
+
+    it("onThinking → thinking", () => {
+      const { reporter } = harness();
+      reporter.onThinking();
+      expect(reporter.getMode()).toBe("thinking");
+    });
+
+    it("onToolCall → tool-use", () => {
+      const { reporter } = harness();
+      reporter.onToolCall("bash", "{}");
+      expect(reporter.getMode()).toBe("tool-use");
+    });
+
+    it("onTextDelta → responding", () => {
+      const { reporter } = harness();
+      reporter.onTextDelta("hi");
+      expect(reporter.getMode()).toBe("responding");
+    });
+
+    it("onFinish → idle", () => {
+      const { reporter } = harness();
+      reporter.onThinking();
+      reporter.onFinish();
+      expect(reporter.getMode()).toBe("idle");
+    });
+  });
 });
