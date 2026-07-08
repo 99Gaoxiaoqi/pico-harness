@@ -54,7 +54,7 @@ async function main(): Promise<void> {
   await writeFile(indentPath, indentContent, "utf8");
   console.log(`[setup] indent-code.py 写入 4 空格缩进`);
 
-  const resultB = await runAgentFromCli(
+  await runAgentFromCli(
     {
       prompt:
         "请先 read_file 读取 indent-code.py,然后用 edit_file 把 'total = 0' 改成 'total = 0  # 初始化'。" +

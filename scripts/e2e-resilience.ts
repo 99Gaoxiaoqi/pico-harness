@@ -66,7 +66,7 @@ async function main(): Promise<void> {
     { write: () => undefined },
   );
 
-  let passB = false;
+  let passB: boolean;
   try {
     const content = await import("node:fs/promises").then((fs) => fs.readFile(join(workDirB, "subagent-test.txt"), "utf8"));
     passB = content.trim() === "SUBAGENT_OK";

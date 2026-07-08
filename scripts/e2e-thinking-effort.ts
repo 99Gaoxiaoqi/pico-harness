@@ -96,8 +96,8 @@ async function main() {
   // === 验证 D: 子代理继承 thinkingEffort(用 createProvider 三参数) ===
   console.log("\n--- 验证 D: createProvider 三参数签名 ---");
   try {
-    const p1 = createRawProvider("openai", undefined, "high");
-    const p2 = createRawProvider("openai", undefined, "off");
+    createRawProvider("openai", undefined, "high");
+    createRawProvider("openai", undefined, "off");
     // 如果能正常创建,签名正确
     console.log(`  创建 high 档 provider: ✅`);
     console.log(`  创建 off 档 provider: ✅`);
