@@ -286,11 +286,6 @@ async function main() {
     return;
   }
 
-  console.log("🚀 欢迎来到 pico-harness 引擎启动序列");
-  console.log(
-    `[Provider] ${kind} 协议 | [ThinkingEffort] ${thinkingEffort} | [EnableThinking] ${enableThinking} | [PlanMode] ${planMode} | [Trace] ${traceEnabled}`,
-  );
-
   if (values.acp) {
     // ACP 模式:启动 stdio JSON-RPC server,不跑 CLI 交互。
     // IDE(VSCode 插件)通过 stdin/stdout 收发 ACP 消息驱动 Agent。
@@ -416,6 +411,12 @@ async function main() {
     });
     return;
   }
+
+  // 默认 CLI 模式 banner(TUI/ACP/飞书/HTTP 模式已提前 return,不打 banner)
+  console.log("🚀 欢迎来到 pico-harness 引擎启动序列");
+  console.log(
+    `[Provider] ${kind} 协议 | [ThinkingEffort] ${thinkingEffort} | [EnableThinking] ${enableThinking} | [PlanMode] ${planMode} | [Trace] ${traceEnabled}`,
+  );
 
   const task =
     values.prompt ??
