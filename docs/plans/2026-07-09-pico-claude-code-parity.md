@@ -68,10 +68,10 @@ git diff --check
 
 **任务：**
 
-- [ ] 启动首屏显示简洁 Logo/名称，不重复渲染历史输入框。
-- [ ] 顶部或底部状态区显示 model、provider、cwd、session 模式。
-- [ ] 输入框只在底部保留一个当前框，历史区只显示 user/assistant 消息。
-- [ ] 系统提示、命令输出、错误用轻量状态行呈现。
+- [x] 启动首屏显示简洁 Logo/名称，不重复渲染历史输入框。
+- [x] 顶部或底部状态区显示 model、provider、cwd、session 模式。
+- [x] 输入框只在底部保留一个当前框，历史区只显示 user/assistant 消息。
+- [x] 系统提示、命令输出、错误用轻量状态行呈现。
 
 **验收命令：**
 
@@ -209,7 +209,7 @@ git diff --check
 - [x] 合并 Worker A：先稳定 session id 和启动语义。
 - [ ] 合并 Worker D：在稳定 session 语义上接入模型/思考状态。
 - [ ] 合并 Worker E：接入 Claude commands/agents 资源。
-- [ ] 合并 Worker B：接入外壳与状态区。
+- [x] 合并 Worker B：接入外壳与状态区。
 - [ ] 合并 Worker C：接入输入编辑体验。
 - [ ] 合并 Worker F：接入 rewind/approval UI。
 
