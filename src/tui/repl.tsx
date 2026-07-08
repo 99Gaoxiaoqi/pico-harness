@@ -30,6 +30,7 @@ import { processUserInput } from "../input/process-user-input.js";
 import type { CommandRegistry } from "../input/command-registry.js";
 import type { InputProcessResult, LocalCommandResult } from "../input/types.js";
 import type { ProviderKind } from "../provider/factory.js";
+import type { ThinkingEffort } from "../provider/thinking.js";
 
 export interface ReplOptions {
   /** 工作区 */
@@ -40,6 +41,8 @@ export interface ReplOptions {
   model: string;
   /** 慢思考 */
   enableThinking?: boolean;
+  /** Provider 原生思考强度 */
+  thinkingEffort?: ThinkingEffort;
   /** MCP 配置路径(可选,首轮传入) */
   mcpConfigPath?: string;
 }
@@ -186,7 +189,9 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     return (
       <App
         model={opts.model}
+        provider={provider}
         workDir={opts.workDir}
+        thinkingEffort={opts.thinkingEffort ?? (opts.enableThinking === false ? "off" : "medium")}
         entries={stateEntries}
         running={running}
         slashCommandSuggestions={(query) => commandSuggestions(registry, query)}

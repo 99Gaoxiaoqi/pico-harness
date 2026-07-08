@@ -40,6 +40,10 @@ export interface AppProps {
   workDir: string;
   /** Session 选择模式(状态区展示) */
   sessionMode?: string;
+  /** Permission 模式(状态区展示) */
+  permissionMode?: string;
+  /** 思考强度(状态区展示) */
+  thinkingEffort?: string;
   /** 当前对话流条目(reporter 增量更新) */
   entries: TuiEntry[];
   /** 是否正在运行(idle 时聚焦输入框) */
@@ -57,6 +61,8 @@ export function App({
   provider = "openai",
   workDir,
   sessionMode = "new",
+  permissionMode = "ask",
+  thinkingEffort = "off",
   entries,
   running,
   slashCommandSuggestions,
@@ -87,8 +93,15 @@ export function App({
   return (
     <Box flexDirection="column">
       {/* Claude Code 风格:Logo 与状态区是稳定首块,不随 messages 数组变化而重新脏化整棵消息树。 */}
-      <StableLogoPanel />
-      <StatusBar model={model} provider={provider} cwd={workDir} sessionMode={sessionMode} />
+      <StableLogoPanel model={model} cwd={workDir} />
+      <StatusBar
+        model={model}
+        provider={provider}
+        cwd={workDir}
+        sessionMode={sessionMode}
+        permissionMode={permissionMode}
+        thinkingEffort={thinkingEffort}
+      />
 
       {/* 消息列表:统一走 MessageList,由 shouldRenderStatically + MessageRow.memo 控制静态行。 */}
       <Box flexDirection="column" paddingX={1}>

@@ -20,7 +20,7 @@ export function buildStatusItems({
   sessionMode = "new",
   permissionMode = "ask",
   thinkingEffort = "off",
-  cwdMaxLength = 48,
+  cwdMaxLength = 32,
 }: StatusBarProps): StatusItem[] {
   return [
     ["model", model],
@@ -40,17 +40,15 @@ export function StatusBar(props: StatusBarProps): React.ReactNode {
   const providerText = provider === "auto" ? "provider auto" : provider;
   const text = [
     `${model}/${providerText}`,
-    cwd,
     `mode ${sessionMode}`,
     `perm ${permissionMode}`,
     `think ${thinkingEffort}`,
+    cwd,
   ].join(" · ");
 
   return (
     <Box paddingX={1}>
-      <Text dimColor wrap="truncate">
-        {text}
-      </Text>
+      <Text dimColor>{text}</Text>
     </Box>
   );
 }
