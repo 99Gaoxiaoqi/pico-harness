@@ -11,10 +11,13 @@ export interface SessionToolStatus {
   readOnly: boolean;
 }
 
+export type SessionMode = "default" | "plan" | "auto" | "yolo";
+
 export interface SessionSettings {
   sessionId: string;
   cwd: string;
   provider: ProviderKind;
+  mode: SessionMode;
   model: string;
   thinkingEffort: ThinkingEffort;
   thinkingEffortExplicit: boolean;
@@ -26,6 +29,7 @@ export interface SessionSettingsDefaults {
   sessionId: string;
   cwd: string;
   provider: ProviderKind;
+  mode?: SessionMode;
   model: string;
   thinkingEffort?: ThinkingEffort;
   permissionMode?: string;
@@ -44,6 +48,7 @@ export function createDefaultSessionSettings(defaults: SessionSettingsDefaults):
     sessionId: defaults.sessionId,
     cwd: defaults.cwd,
     provider: defaults.provider,
+    mode: defaults.mode ?? "default",
     model: defaults.model,
     thinkingEffort: defaults.thinkingEffort ?? "off",
     thinkingEffortExplicit: defaults.thinkingEffort !== undefined,
@@ -57,6 +62,7 @@ export function getOrCreateSessionSettings(defaults: SessionSettingsDefaults): S
   if (existing !== undefined) {
     existing.cwd = defaults.cwd;
     existing.provider = defaults.provider;
+    existing.mode = defaults.mode ?? existing.mode;
     existing.permissionMode = defaults.permissionMode ?? existing.permissionMode;
     existing.tools = defaults.tools ?? existing.tools;
     if (defaults.thinkingEffort !== undefined) {
@@ -89,6 +95,19 @@ export function setSessionModel(settings: SessionSettings, model: string): Sessi
   return { ok: true, message: `Model set to ${settings.model}` };
 }
 
+export function setSessionMode(settings: SessionSettings, mode: string): SessionSettingResult {
+  const normalized = mode.trim().toLowerCase();
+  if (!isSessionMode(normalized)) {
+    return {
+      ok: false,
+      message: `Current mode: ${settings.mode}\nUsage: /mode <default|plan|auto|yolo>`,
+    };
+  }
+
+  settings.mode = normalized;
+  return { ok: true, message: `Mode set to ${settings.mode}` };
+}
+
 export function setSessionThinkingEffort(
   settings: SessionSettings,
   effort: ThinkingEffort,
@@ -114,11 +133,12 @@ export function parseThinkingEffortArg(raw: string): ThinkingEffort | undefined 
 
 export function formatSessionStatus(settings: SessionSettings): string {
   return [
+    `Mode: ${settings.mode}`,
+    `Permission mode: ${settings.permissionMode}`,
     `Model: ${settings.model}`,
-    `Effort: ${settings.thinkingEffort}`,
+    `Thinking effort: ${settings.thinkingEffort}`,
     `Session: ${settings.sessionId}`,
     `CWD: ${settings.cwd}`,
-    `Permission: ${settings.permissionMode}`,
   ].join("\n");
 }
 
@@ -141,4 +161,8 @@ export function toolStatusFromRegistry(registry: Registry): SessionToolStatus[] 
 
 function toProfileProtocol(provider: ProviderKind): "openai" | "claude" | "gemini" {
   return provider === "openai" ? "openai" : provider;
+}
+
+function isSessionMode(mode: string): mode is SessionMode {
+  return mode === "default" || mode === "plan" || mode === "auto" || mode === "yolo";
 }

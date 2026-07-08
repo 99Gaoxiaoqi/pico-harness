@@ -57,20 +57,54 @@ describe("Pico command registry", () => {
     return { registry, filePath };
   }
 
-  it("/mode is accepted as an alias for the current model command", async () => {
+  it("/mode shows the current interaction mode", async () => {
     const registry = await createPicoCommandRegistry({
       workDir: process.cwd(),
       provider: "openai",
       model: "glm-5.2",
+      sessionId: "session-mode-show",
     });
 
     const result = await processUserInput("/mode", { registry });
 
     expect(result.type).toBe("local-command");
     if (result.type !== "local-command") return;
-    expect(result.command).toBe("model");
-    expect(result.result.action).toBe("model");
-    expect(result.result.message).toContain("glm-5.2");
+    expect(result.command).toBe("mode");
+    expect(result.result.message).toContain("Current mode: default");
+  });
+
+  it("/mode updates the current interaction mode", async () => {
+    const registry = await createPicoCommandRegistry({
+      workDir: process.cwd(),
+      provider: "openai",
+      model: "glm-5.2",
+      sessionId: "session-mode-update",
+    });
+
+    const result = await processUserInput("/mode plan", { registry });
+
+    expect(result.type).toBe("local-command");
+    if (result.type !== "local-command") return;
+    expect(result.command).toBe("mode");
+    expect(result.result.message).toContain("Mode set to plan");
+    expect(getStoredSessionSettings("session-mode-update")?.mode).toBe("plan");
+  });
+
+  it("/mode rejects unsupported interaction modes", async () => {
+    const registry = await createPicoCommandRegistry({
+      workDir: process.cwd(),
+      provider: "openai",
+      model: "glm-5.2",
+      sessionId: "session-mode-reject",
+    });
+
+    const result = await processUserInput("/mode fast", { registry });
+
+    expect(result.type).toBe("local-command");
+    if (result.type !== "local-command") return;
+    expect(result.command).toBe("mode");
+    expect(result.result.message).toContain("Usage: /mode <default|plan|auto|yolo>");
+    expect(getStoredSessionSettings("session-mode-reject")?.mode).toBe("default");
   });
 
   it("/model switches the session model used by later requests", async () => {
@@ -157,7 +191,7 @@ describe("Pico command registry", () => {
     expect(result.result.message).toContain("write_file - write");
   });
 
-  it("/status summarizes model effort session cwd and permission mode", async () => {
+  it("/status summarizes mode permission mode model and thinking effort", async () => {
     const registry = await createPicoCommandRegistry({
       workDir: "/tmp/pico-work",
       provider: "openai",
@@ -171,22 +205,23 @@ describe("Pico command registry", () => {
 
     expect(result.type).toBe("local-command");
     if (result.type !== "local-command") return;
+    expect(result.result.message).toContain("Mode: default");
+    expect(result.result.message).toContain("Permission mode: ask");
     expect(result.result.message).toContain("Model: glm-5.2");
-    expect(result.result.message).toContain("Effort: medium");
+    expect(result.result.message).toContain("Thinking effort: medium");
     expect(result.result.message).toContain("Session: session-status");
     expect(result.result.message).toContain("CWD: /tmp/pico-work");
-    expect(result.result.message).toContain("Permission: ask");
   });
 
-  it("builtin registry also accepts /mode as a model alias", async () => {
+  it("builtin registry exposes /mode as its own command", async () => {
     const result = await processUserInput("/mode", {
       registry: createBuiltinCommandRegistry(),
     });
 
     expect(result.type).toBe("local-command");
     if (result.type !== "local-command") return;
-    expect(result.command).toBe("model");
-    expect(result.result.action).toBe("model");
+    expect(result.command).toBe("mode");
+    expect(result.result.message).toContain("Mode command is not connected yet.");
   });
 
   it("/snapshots 展示当前 session 可回滚点", async () => {
