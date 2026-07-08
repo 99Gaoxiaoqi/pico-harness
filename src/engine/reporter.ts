@@ -5,6 +5,8 @@
 // 引擎不该关心自己在哪运行,只在生命周期节点向外"广播"事件。
 // 注入不同实现即可切换展现层:TerminalReporter(CLI)/ WebReporter(HTTP)等。
 
+import pc from "picocolors";
+
 /** Agent 引擎向外界输出信息的规范 */
 export interface Reporter {
   /** 当模型开始进行慢思考 (Reasoning) 时调用 */
@@ -27,6 +29,11 @@ export interface Reporter {
 
 /** 默认终端 Reporter:把所有事件打印到控制台 */
 export class TerminalReporter implements Reporter {
+  // spinner:模型思考时显示动画,给用户"还在转"的反馈。
+  private spinnerTimer?: NodeJS.Timeout;
+  private spinnerFrames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+  private spinnerIdx = 0;
+
   onStart(workDir: string, enableThinking: boolean): void {
     console.log(`[Engine] 引擎启动,锁定工作区: ${workDir}`);
     console.log(`[Engine] 慢思考模式 (Thinking Phase): ${enableThinking}`);
@@ -37,33 +44,81 @@ export class TerminalReporter implements Reporter {
   }
 
   onThinking(): void {
-    console.log("[Engine][Phase 1] 剥夺工具访问权,强制进入慢思考与规划阶段...");
+    console.log("[Engine][Phase 1] 慢思考模式...");
+    this.startSpinner();
   }
 
   onToolCall(toolName: string, args: string): void {
+    this.stopSpinner();
     console.log(`    -> 🛠️ 执行工具: ${toolName}, 参数: ${args}`);
   }
 
   onToolResult(toolName: string, result: string, isError: boolean): void {
-    void toolName;
+    this.stopSpinner();
     if (isError) {
-      console.log(`    -> ❌ 工具执行报错: ${result}`);
-    } else {
-      console.log(`    -> ✅ 工具执行成功 (返回 ${result.length} 字节)`);
+      console.log(pc.red(`    -> ❌ 工具执行报错: ${result.slice(0, 200)}`));
+      return;
     }
+    // 摘要:前 3 行(每行截断 100 字符),让用户知道工具读了啥。
+    const allLines = result.split("\n");
+    const lines = allLines.slice(0, 3).map((l) => l.slice(0, 100));
+    const summary = lines.join("\n    | ");
+    const more =
+      allLines.length > 3 ? `\n    | ... (共 ${allLines.length} 行)` : "";
+    console.log(pc.green(`    -> ✅ ${toolName}`) + ` (返回 ${result.length} 字节)`);
+    if (summary.trim()) console.log(pc.dim(`    | ${summary}${more}`));
   }
 
   onMessage(content: string): void {
+    this.stopSpinner();
     console.log(`🤖 [对外回复]: ${content}`);
   }
 
   onFinish(): void {
+    this.stopSpinner();
     console.log("[Engine] 模型未请求调用工具,任务宣告完成。");
   }
 
   onTextDelta(delta: string): void {
+    this.stopSpinner();
     process.stdout.write(delta);
   }
+
+  /** 启动 spinner:每 80ms 刷一帧,思考时给视觉反馈。 */
+  private startSpinner(): void {
+    if (this.spinnerTimer) return; // 已在转就不重复启动
+    this.spinnerIdx = 0;
+    this.spinnerTimer = setInterval(() => {
+      const frame = this.spinnerFrames[this.spinnerIdx % this.spinnerFrames.length]!;
+      process.stdout.write(`\r${pc.cyan(frame)} 思考中...`);
+      this.spinnerIdx++;
+    }, 80);
+  }
+
+  /** 停止 spinner:清掉定时器 + 擦除当前行的动画残留。 */
+  private stopSpinner(): void {
+    if (this.spinnerTimer) {
+      clearInterval(this.spinnerTimer);
+      this.spinnerTimer = undefined;
+      process.stdout.write("\r\x1b[K"); // \r 回行首,\x1b[K 清整行
+    }
+  }
+}
+
+/**
+ * diff 文本按行着色:+绿 -红 @@青 其他 dim。
+ * 导出函数,供 run-agent.ts 的 terminalNotifier 复用(本 worktree 暂不调用,留给合并后)。
+ */
+export function colorizeDiff(diff: string): string {
+  return diff
+    .split("\n")
+    .map((line) => {
+      if (line.startsWith("+")) return pc.green(line);
+      if (line.startsWith("-")) return pc.red(line);
+      if (line.startsWith("@@")) return pc.cyan(line);
+      return pc.dim(line);
+    })
+    .join("\n");
 }
 
 /** 静默 Reporter:不输出任何内容 (用于测试或后台静默运行) */
