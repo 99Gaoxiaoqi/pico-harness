@@ -1,23 +1,22 @@
 // TUI 顶层组件:对标 Claude Code 的 App.tsx(ink + React 19)。
-// 布局:LogoHeader(消息流首项) → <Static 历史消息> → 动态区(流式输出/spinner/输入框)。
+// 布局:LogoHeader(首项) → 消息列表(全部条目,React.memo 跳过静态) → spinner → 输入框。
 //
-// 关键架构(对标 Claude Code):用 ink 的 <Static> 组件渲染已完成的历史消息,
-// 这些内容被一次性输出到 stdout 并固定(像 console.log 一样滚动出去),
-// 不参与 ink 的重渲染区域——因此无论对话多长都不会被截断。
-// 动态区只保留"正在进行中"的内容(当前流式回复/running 工具/spinner/输入框),
-// 高度很小,不会被终端高度截断。
+// 关键架构(对标 Claude Code):
+//   不用 ink 的 <Static> 组件——它会让条目从 live 区"毕业"到 static 区时,
+//   在终端产生重复(动态区残留 + static 新行)。Claude Code 同款不用 Static,
+//   而是把所有条目留在同一渲染树,用 React.memo(isStatic 时跳过重渲染)。
+//   性能靠"静态条目 memo 后零 diff"保证,不靠 Static 输出到 scrollback。
 //
-// 对标改动(深度对标 Claude Code):
-//   1. 去掉固定 borderStyle="round" 顶栏 → LogoHeader 作为消息流首项(非常驻)
-//   2. Static/live 分割改用 shouldRenderStatically(按 tool resolve 状态判,
-//      而非末尾连续切分),逐条判 isStatic
-//   3. Spinner 用新的 SpinnerMode:据动态区末尾状态切 mode
-//   4. 输入框改为 borderBottom only(对标 PromptInput)
+// 对标改动:
+//   1. 去掉 <Static>,所有条目在同一 <Box>,isStatic 仅作 memo 提示
+//   2. 去固定顶栏 → LogoHeader 作为消息流首项
+//   3. Spinner 用 SpinnerMode:据末尾条目状态切阶段
+//   4. 输入框 borderBottom only(对标 PromptInput)
 //
 // 状态机:idle(可输入) | running(模型运行中,输入框禁用)。
 
 import React from "react";
-import { Box, Static, Text, useApp, useInput } from "ink";
+import { Box, Text, useApp, useInput } from "ink";
 import { InputBox } from "./input-box.js";
 import { Spinner } from "./spinner.js";
 import type { SpinnerMode } from "./spinner.js";
@@ -38,11 +37,6 @@ export interface AppProps {
   onSubmit: (text: string) => void;
 }
 
-/** 进 <Static> 的条目:首项固定是 Logo,其后是 TuiEntry。logo 用标记字段区分。 */
-type StaticItem =
-  | { kind: "logo"; model: string; workDir: string }
-  | (TuiEntry & { kind: Exclude<TuiEntry["kind"], "logo"> });
-
 export function App({ model, workDir, entries, running, onSubmit }: AppProps): React.ReactNode {
   const { exit } = useApp();
 
@@ -55,44 +49,33 @@ export function App({ model, workDir, entries, running, onSubmit }: AppProps): R
 
   // 是否仍有"主动流式":running 且末尾是流式 assistant / thinking / running tool
   const isStreaming = running && isActivelyStreaming(entries);
-  // 逐条判 isStatic,分割成 static(进 <Static>)和 live(动态区)两组
-  const { staticEntries, liveEntries } = partitionByStatic(entries, isStreaming);
-  // Logo 作为 Static 首项(非常驻,只在历史区出现一次)
-  const staticItems: StaticItem[] = [{ kind: "logo", model, workDir }, ...staticEntries];
-  // 据动态区末尾状态选 SpinnerMode
-  const spinnerMode = pickSpinnerMode(liveEntries, isStreaming);
+  // spinner 阶段:据末尾条目状态选
+  const spinnerMode = pickSpinnerMode(entries, isStreaming);
 
   return (
     <Box flexDirection="column">
-      {/* 历史消息:Static 一次性输出到 stdout,滚动出去,不占重渲染区,不被截断。
-          items[0] 是 LogoHeader(消息流首项,对标 Claude Code 无常驻顶栏)。 */}
-      <Static items={staticItems}>
-        {(item, i) => {
-          if (item.kind === "logo") {
-            return <LogoHeader key="logo" model={item.model} workDir={item.workDir} />;
-          }
-          // isLast 仅对动态区为空时的 Static 末条生效(供 ToolCard 默认折叠判断)
-          const isLast = liveEntries.length === 0 && i === staticItems.length - 1;
-          return <MessageRow key={i} entry={item} isStatic={true} isLast={isLast} />;
-        }}
-      </Static>
+      {/* Logo(消息流首项,对标 Claude Code 无常驻顶栏) */}
+      <LogoHeader model={model} workDir={workDir} />
 
-      {/* 动态区:进行中的内容(高度小,不会被终端高度截断) */}
-      {liveEntries.length > 0 && (
-        <Box flexDirection="column" paddingX={1}>
-          <MessageList entries={liveEntries} isStreaming={isStreaming} />
-        </Box>
-      )}
+      {/* 消息列表:全部条目在同一渲染树。
+          isStatic 的条目由 MessageRow 的 React.memo 跳过重渲染(零 diff)。
+          不用 <Static>(会导致条目毕业时终端重复渲染)。 */}
+      <Box flexDirection="column" paddingX={1}>
+        {entries.map((entry, i) => {
+          const isLast = i === entries.length - 1;
+          const isStatic = shouldRenderStatically(entry, isLast, isStreaming);
+          return <MessageRow key={i} entry={entry} isStatic={isStatic} isLast={isLast} />;
+        })}
+      </Box>
 
-      {/* 思考/spinner:据 liveEntries 末尾状态显示对应 mode(对标 Claude Code SpinnerAnimationRow) */}
+      {/* 思考/spinner:据末尾状态显示对应 mode */}
       {running && (
         <Box paddingX={1}>
           <Spinner mode={spinnerMode} />
         </Box>
       )}
 
-      {/* 输入框:仅底边(对标 PromptInput),running 时禁用。
-          ink 部分边框需先设 borderStyle,再用 borderTop/Left/Right=false 关掉其余三边。 */}
+      {/* 输入框:仅底边(对标 PromptInput),running 时禁用。 */}
       <Box
         flexDirection="column"
         borderStyle="single"
@@ -109,29 +92,6 @@ export function App({ model, workDir, entries, running, onSubmit }: AppProps): R
       <Text dimColor> Enter 发送 · Ctrl+C 退出</Text>
     </Box>
   );
-}
-
-/**
- * 按 shouldRenderStatically 把 entries 分成 static / live 两组。
- * 与原 splitStatic 不同:这里是"逐条判",而非"末尾连续切分",
- * 与 Claude Code shouldRenderStatically 的逐条 resolve 判定一致。
- */
-function partitionByStatic(
-  entries: TuiEntry[],
-  isStreaming: boolean,
-): { staticEntries: TuiEntry[]; liveEntries: TuiEntry[] } {
-  const staticItems: TuiEntry[] = [];
-  const live: TuiEntry[] = [];
-  for (let i = 0; i < entries.length; i++) {
-    const e = entries[i]!;
-    const isLast = i === entries.length - 1;
-    if (shouldRenderStatically(e, isLast, isStreaming)) {
-      staticItems.push(e);
-    } else {
-      live.push(e);
-    }
-  }
-  return { staticEntries: staticItems, liveEntries: live };
 }
 
 /**
