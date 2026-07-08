@@ -37,11 +37,11 @@
 
 **任务：**
 
-- [ ] 默认启动时创建新的 session id，不再按工作目录固定复用同一个 session。
-- [ ] 增加 `--continue` / `-c`：继续当前项目最近一次 session。
-- [ ] 增加 `--resume <session-id>` / `-r <session-id>`：恢复指定 session。
-- [ ] 增加 `--fork-session <session-id>`：从指定 session 派生新 session id。
-- [ ] 把 session 选择结果显示给 TUI header/status 使用。
+- [x] 默认启动时创建新的 session id，不再按工作目录固定复用同一个 session。
+- [x] 增加 `--continue` / `-c`：继续当前项目最近一次 session。
+- [x] 增加 `--resume <session-id>` / `-r <session-id>`：恢复指定 session。
+- [x] 增加 `--fork-session <session-id>`：从指定 session 派生新 session id。
+- [x] 把 session 选择结果显示给 TUI header/status 使用。
 
 **验收命令：**
 
@@ -206,7 +206,7 @@ git diff --check
 
 ## 集成顺序
 
-- [ ] 合并 Worker A：先稳定 session id 和启动语义。
+- [x] 合并 Worker A：先稳定 session id 和启动语义。
 - [ ] 合并 Worker D：在稳定 session 语义上接入模型/思考状态。
 - [ ] 合并 Worker E：接入 Claude commands/agents 资源。
 - [ ] 合并 Worker B：接入外壳与状态区。
