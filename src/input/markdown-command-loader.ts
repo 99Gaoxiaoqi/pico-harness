@@ -1,8 +1,9 @@
 import { readdir, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, join } from "node:path";
+import { join, relative, sep } from "node:path";
 import * as yaml from "js-yaml";
 import { SkillLoader } from "../context/skill.js";
+import { parseCommandArgs } from "./slash-parser.js";
 
 export type MarkdownCommandSource = "project" | "user" | "skill" | "builtin";
 
@@ -35,17 +36,23 @@ const COMMAND_PRIORITIES: Record<MarkdownCommandSource, number> = {
 };
 
 const COMMAND_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
+const COMMAND_PATH_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]*(?::[A-Za-z0-9][A-Za-z0-9_-]*)*$/;
 
 export async function loadMarkdownCommands(
   options: LoadMarkdownCommandsOptions,
 ): Promise<MarkdownPromptCommand[]> {
-  const projectCommandsDir = join(options.workDir, ".pico", "commands");
-  const userCommandsDir =
-    options.userCommandsDir ?? join(options.homeDir ?? homedir(), ".pico", "commands");
+  const home = options.homeDir ?? homedir();
+  const projectCommandsDirs = [
+    join(options.workDir, ".pico", "commands"),
+    join(options.workDir, ".claude", "commands"),
+  ];
+  const userCommandsDirs = options.userCommandsDir
+    ? [options.userCommandsDir, ...(options.homeDir ? [join(home, ".claude", "commands")] : [])]
+    : [join(home, ".pico", "commands"), join(home, ".claude", "commands")];
 
   const commandGroups = await Promise.all([
-    loadCommandsFromDir(projectCommandsDir, "project"),
-    loadCommandsFromDir(userCommandsDir, "user"),
+    loadCommandsFromDirs(projectCommandsDirs, "project"),
+    loadCommandsFromDirs(userCommandsDirs, "user"),
     options.includeSkillCommands ? loadSkillProjectionCommands(options) : Promise.resolve([]),
   ]);
 
@@ -89,7 +96,11 @@ export function renderMarkdownCommandPrompt(
   command: Pick<MarkdownPromptCommand, "prompt">,
   args: string,
 ): string {
-  return command.prompt.replaceAll("$ARGUMENTS", args.trim());
+  const trimmedArgs = args.trim();
+  const argv = parseCommandArgs(trimmedArgs);
+  return command.prompt
+    .replace(/\$(\d+)/g, (_match, rawIndex: string) => argv[Number(rawIndex) - 1] ?? "")
+    .replaceAll("$ARGUMENTS", trimmedArgs);
 }
 
 export function resolveMarkdownCommandConflicts(
@@ -108,28 +119,54 @@ export function resolveMarkdownCommandConflicts(
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
+async function loadCommandsFromDirs(
+  commandsDirs: string[],
+  source: MarkdownCommandSource,
+): Promise<MarkdownPromptCommand[]> {
+  const groups = await Promise.all(commandsDirs.map((dir) => loadCommandsFromDir(dir, source)));
+  return groups.flat();
+}
+
 async function loadCommandsFromDir(
   commandsDir: string,
   source: MarkdownCommandSource,
 ): Promise<MarkdownPromptCommand[]> {
-  let entries: string[];
+  const files = await walkMarkdownFiles(commandsDir);
+  const commands: MarkdownPromptCommand[] = [];
+  for (const sourcePath of files) {
+    const name = commandNameFromPath(commandsDir, sourcePath);
+    if (!COMMAND_PATH_PATTERN.test(name)) continue;
+    const content = await readFile(sourcePath, "utf8");
+    commands.push(parseMarkdownCommand(content, name, source, sourcePath));
+  }
+  return commands;
+}
+
+async function walkMarkdownFiles(dir: string): Promise<string[]> {
+  let entries: Awaited<ReturnType<typeof readdir>>;
   try {
-    entries = await readdir(commandsDir);
+    entries = await readdir(dir, { withFileTypes: true });
   } catch (err) {
     if (isErrnoException(err, "ENOENT")) return [];
     throw err;
   }
 
-  const commands: MarkdownPromptCommand[] = [];
-  for (const entry of entries.sort()) {
-    if (!entry.endsWith(".md")) continue;
-    const name = basename(entry, ".md");
-    if (!COMMAND_NAME_PATTERN.test(name)) continue;
-    const sourcePath = join(commandsDir, entry);
-    const content = await readFile(sourcePath, "utf8");
-    commands.push(parseMarkdownCommand(content, name, source, sourcePath));
+  const files: string[] = [];
+  for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...(await walkMarkdownFiles(path)));
+    } else if (entry.isFile() && entry.name.endsWith(".md")) {
+      files.push(path);
+    }
   }
-  return commands;
+  return files;
+}
+
+function commandNameFromPath(commandsDir: string, sourcePath: string): string {
+  const rel = relative(commandsDir, sourcePath);
+  const withoutExt = rel.slice(0, -".md".length);
+  return withoutExt.split(sep).join(":");
 }
 
 async function loadSkillProjectionCommands(

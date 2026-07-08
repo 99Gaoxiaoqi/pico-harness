@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { SkillLoader } from "../../src/context/skill.js";
 import {
+  renderAgentListCommand,
   renderSkillCommand,
   renderSkillListCommand,
   resolveSkillCommand,
@@ -67,6 +68,43 @@ describe("skill command helpers", () => {
       available: [{ name: "review", description: "审查代码" }],
       found: false,
       name: "missing",
+    });
+  });
+
+  it("renders /agents with Claude agent summaries and data", async () => {
+    await mkdir(join(workDir, ".claude", "agents"), { recursive: true });
+    await writeFile(
+      join(workDir, ".claude", "agents", "reviewer.md"),
+      "---\ndescription: 审查代码\n---\n\n# Reviewer",
+    );
+    await writeFile(
+      join(workDir, ".claude", "agents", "writer.md"),
+      "---\ndescription: 撰写文档\n---\n\n# Writer",
+    );
+
+    const output = await renderAgentListCommand({ workDir });
+
+    expect(output.message).toContain("可用 Agents");
+    expect(output.message).toContain("- reviewer: 审查代码");
+    expect(output.message).toContain("- writer: 撰写文档");
+    expect(output.data).toEqual([
+      {
+        description: "审查代码",
+        name: "reviewer",
+        sourcePath: join(workDir, ".claude", "agents", "reviewer.md"),
+      },
+      {
+        description: "撰写文档",
+        name: "writer",
+        sourcePath: join(workDir, ".claude", "agents", "writer.md"),
+      },
+    ]);
+  });
+
+  it("renders /agents empty state when no Claude agents exist", async () => {
+    await expect(renderAgentListCommand({ workDir })).resolves.toEqual({
+      data: [],
+      message: "当前没有可用 Agents。",
     });
   });
 
