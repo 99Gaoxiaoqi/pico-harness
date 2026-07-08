@@ -14,12 +14,21 @@
 // 跳过 cleanup,避免竞态。running 由 status !== "idle" 派生(同步,无 React batch 延迟)。
 
 import { useRef, useState, useSyncExternalStore } from "react";
-import { render } from "ink";
+import { render, useApp } from "ink";
 import { App } from "./app.js";
 import { TuiReporter, type TuiEntry } from "./tui-reporter.js";
 import { QueryGuard } from "./query-guard.js";
-import type { RunAgentCliOptions } from "../cli/run-agent.js";
+import type { RunAgentCliOptions, RunAgentWriter } from "../cli/run-agent.js";
 import { runAgentFromCli } from "../cli/run-agent.js";
+import { listFileSuggestions } from "../input/file-suggestions.js";
+import {
+  commandSuggestions,
+  createPicoCommandRegistry,
+} from "../input/pico-command-registry.js";
+import { preparePromptWithMentions } from "../input/prepare-prompt.js";
+import { processUserInput } from "../input/process-user-input.js";
+import type { CommandRegistry } from "../input/command-registry.js";
+import type { InputProcessResult, LocalCommandResult } from "../input/types.js";
 import type { ProviderKind } from "../provider/factory.js";
 
 export interface ReplOptions {
@@ -33,6 +42,47 @@ export interface ReplOptions {
   enableThinking?: boolean;
   /** MCP 配置路径(可选,首轮传入) */
   mcpConfigPath?: string;
+}
+
+const suppressCliSummary: RunAgentWriter = () => undefined;
+
+export type TuiInputProcessResult = InputProcessResult;
+
+export interface HandleTuiInputSubmissionDeps {
+  reporter: TuiReporter;
+  registry: CommandRegistry;
+  workDir: string;
+  runAgent: (prompt: string) => Promise<void>;
+  exit: () => void;
+  processInput?: (text: string) => Promise<TuiInputProcessResult>;
+}
+
+export async function handleTuiInputSubmission(
+  text: string,
+  deps: HandleTuiInputSubmissionDeps,
+): Promise<void> {
+  const processed = await (deps.processInput ?? ((input) => processUserInput(input, { registry: deps.registry })))(text);
+
+  switch (processed.type) {
+    case "empty":
+      return;
+    case "prompt": {
+      deps.reporter.pushUserMessage(processed.raw);
+      await deps.runAgent(await preparePromptWithMentions(processed.prompt, deps.workDir));
+      return;
+    }
+    case "prompt-command": {
+      deps.reporter.pushUserMessage(processed.raw);
+      await deps.runAgent(await preparePromptWithMentions(processed.result.prompt, deps.workDir));
+      return;
+    }
+    case "local-command":
+      handleLocalTuiCommand(processed.result, deps);
+      return;
+    case "unknown-command":
+      deps.reporter.pushSystemMessage(formatUnknownCommand(processed));
+      return;
+  }
 }
 
 /** 启动 TUI REPL 循环 */
@@ -51,7 +101,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     stdoutAny.write = (chunk: unknown, ...args: unknown[]) => {
       const str = typeof chunk === "string" ? chunk : String(chunk);
       if (str.includes("\x1b[") || frame < 5) {
-        const visible = str.replace(/\x1b\[/g, "ESC[").replace(/\x1b/g, "ESC").slice(0, 200);
+        const visible = str.replaceAll("\x1b[", "ESC[").replaceAll("\x1b", "ESC").slice(0, 200);
         appendFileSync(".claw/tui-debug.log", `[stdout f${frame}] ${visible}\n`);
       }
       frame++;
@@ -59,6 +109,17 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     };
     /* eslint-enable @typescript-eslint/no-explicit-any */
   }
+
+  const provider = opts.provider ?? "openai";
+  const registry = await createPicoCommandRegistry({
+    workDir: opts.workDir,
+    provider,
+    model: opts.model,
+  });
+  const initialFileSuggestions = await listFileSuggestions({
+    cwd: opts.workDir,
+    limit: 500,
+  }).catch(() => []);
 
   // 共享状态:TuiReporter 和 App 共用同一个 entries 数组引用
   const entries: TuiEntry[] = [];
@@ -71,6 +132,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
 
   // 包装组件:管理 entries 状态 + QueryGuard 派生 running,把 setter 暴露给外部
   function ReplApp() {
+    const { exit } = useApp();
     const [stateEntries, setStateEntries] = useState<TuiEntry[]>([]);
     setEntries = setStateEntries;
 
@@ -87,17 +149,24 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
       const gen = guard.tryStart();
       if (gen === null) return;
 
-      reporter.pushUserMessage(text);
       try {
-        const cliOpts: RunAgentCliOptions = {
-          prompt: text,
-          provider: opts.provider ?? "openai",
-          dir: opts.workDir,
-          enableThinking: opts.enableThinking ?? true,
-          ...(opts.mcpConfigPath ? { mcpConfigPath: opts.mcpConfigPath } : {}),
-        };
-        // 复用 session(consoleSessionId 固定),reporter 是 TuiReporter 实例(共享 entries)
-        await runAgentFromCli(cliOpts, { reporter });
+        await handleTuiInputSubmission(text, {
+          reporter,
+          registry,
+          workDir: opts.workDir,
+          exit,
+          runAgent: async (prompt) => {
+            const cliOpts: RunAgentCliOptions = {
+              prompt,
+              provider,
+              dir: opts.workDir,
+              enableThinking: opts.enableThinking ?? true,
+              ...(opts.mcpConfigPath ? { mcpConfigPath: opts.mcpConfigPath } : {}),
+            };
+            // 复用 session(consoleSessionId 固定),reporter 是 TuiReporter 实例(共享 entries)
+            await runAgentFromCli(cliOpts, { reporter, write: suppressCliSummary });
+          },
+        });
       } catch (err) {
         // 错误以 assistant 条目形式展示(不入侵 ink 渲染层)
         entries.push({
@@ -120,13 +189,55 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         workDir={opts.workDir}
         entries={stateEntries}
         running={running}
+        slashCommandSuggestions={(query) => commandSuggestions(registry, query)}
+        fileMentionSuggestions={(query) =>
+          initialFileSuggestions
+            .filter((file) => !query || file.includes(query))
+            .slice(0, 20)
+            .map((file) => ({ value: file }))
+        }
         onSubmit={(text) => void handleSubmit(text)}
       />
     );
   }
 
+  // 启动前清掉当前可视区,避免上一次未正常退出的 TUI 帧或 shell scrollback
+  // 留在首屏,造成 Logo/Header 看起来重复。
+  if (process.stdout.isTTY) {
+    process.stdout.write("\x1b[2J\x1b[H");
+  }
+
   // alternateScreen:true 进 alt buffer。alt buffer 下 ink 走 clearTerminal 全量重绘
   // (而非 eraseLines 逐行擦除),绕过行数计算 bug(中文字符宽度导致行数不匹配)。
   // patchConsole:false 让 stderr 不被劫持。
-  render(<ReplApp />, { alternateScreen: true, patchConsole: false });
+  const instance = render(<ReplApp />, {
+    alternateScreen: true,
+    patchConsole: false,
+    exitOnCtrlC: false,
+  });
+  await instance.waitUntilExit();
+}
+
+function handleLocalTuiCommand(
+  result: LocalCommandResult,
+  deps: Pick<HandleTuiInputSubmissionDeps, "reporter" | "exit">,
+): void {
+  switch (result.action) {
+    case "clear":
+      deps.reporter.clear();
+      return;
+    case "exit":
+      deps.exit();
+      return;
+    default:
+      deps.reporter.pushSystemMessage(result.message ?? "");
+      return;
+  }
+}
+
+function formatUnknownCommand(
+  input: Extract<TuiInputProcessResult, { type: "unknown-command" }>,
+): string {
+  const suffix = input.suggestions.length > 0 ? `\nSuggestions: ${input.suggestions.join(", ")}` : "";
+  return `${input.message}${suffix}`;
 }

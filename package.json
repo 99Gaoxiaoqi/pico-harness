@@ -8,9 +8,9 @@
     "pico": "./dist/cli/main.js"
   },
   "scripts": {
-    "dev": "tsx src/cli/main.ts",
-    "bench": "tsx src/cli/bench.ts",
-    "agentops": "tsx src/cli/main.ts --feishu --plan --trace",
+    "dev": "tsx --env-file=.env --import ./src/tui/preload-env.ts src/cli/main.ts",
+    "bench": "tsx --env-file=.env src/cli/bench.ts",
+    "agentops": "tsx --env-file=.env src/cli/main.ts --feishu --plan --trace",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",

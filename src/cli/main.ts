@@ -45,7 +45,7 @@ import { DelegateTaskTool, SpawnSubagentTool } from "../tools/subagent.js";
 import { createToolResultObservationProcessor } from "../tools/tool-result-observation.js";
 import { CostTracker } from "../observability/tracker.js";
 import { Tracer } from "../observability/trace.js";
-import { runAgentFromCli } from "./run-agent.js";
+import { runUserInputFromCli } from "./run-agent.js";
 import { startTuiRepl } from "../tui/repl.js";
 import { globalApprovalPolicy, globalApprovalManager, type ApprovalNotifier } from "../approval/manager.js";
 import { computeApprovalDiff } from "../approval/diff.js";
@@ -193,7 +193,6 @@ async function serve(
   port: number,
 ): Promise<void> {
   const workDir = process.cwd();
-  const modelName = process.env.LLM_MODEL ?? defaultModelForKind(kind);
   // 进程级共享单例:跨请求/WS 连接复用同一个 GoalManager / BackgroundManager。
   const goalManager = new GoalManager();
   const backgroundManager = new BackgroundManager();
@@ -422,7 +421,7 @@ async function main() {
     values.prompt ??
     positionals[0] ??
     "请用 read_file 工具读取 README.md,然后用一句话总结这个项目是做什么的。";
-  await runAgentFromCli({
+  await runUserInputFromCli({
     prompt: task,
     provider: kind,
     ...(values.dir ? { dir: values.dir } : {}),

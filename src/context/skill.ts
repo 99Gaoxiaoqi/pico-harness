@@ -38,6 +38,8 @@ export interface Skill {
   description: string;
   /** Markdown 正文指令 */
   body: string;
+  /** SKILL.md 绝对路径。由 SkillLoader 扫描文件时填充,parseSkillMD 直接调用时为空。 */
+  sourcePath?: string;
 }
 
 export interface SkillSummary {
@@ -81,6 +83,11 @@ export class SkillLoader {
     return skills.find((skill) => skill.name === name)?.body;
   }
 
+  async viewSourcePath(name: string): Promise<string | undefined> {
+    const skills = await this.loadSkillFiles();
+    return skills.find((skill) => skill.name === name)?.sourcePath;
+  }
+
   private async loadSkillFiles(): Promise<Skill[]> {
     const skillBaseDir = join(this.workDir, ".claw", "skills");
 
@@ -111,7 +118,7 @@ export class SkillLoader {
         const content = await readFile(file, "utf8");
         // frontmatter 无 name 时回退到 SKILL.md 所在目录名(对齐 Hermes)
         const fallbackName = basename(dirname(file));
-        skills.push(parseSkillMD(content, fallbackName));
+        skills.push({ ...parseSkillMD(content, fallbackName), sourcePath: file });
       } catch (err) {
         // 区分权限/编码类可预期错误(debug 跳过)与其他异常(warn 跳过)
         if (isErrnoException(err, "EACCES") || isErrnoException(err, "EISDIR")) {

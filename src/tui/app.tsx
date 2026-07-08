@@ -12,14 +12,14 @@
 //   退出时恢复主屏),彻底杜绝重复输出。
 //   alt buffer 下 ink 只重绘可视区域(差分渲染),历史条目靠 React.memo 零 diff。
 
-import React from "react";
-import { Box, Text, useApp, useInput } from "ink";
+import React, { memo } from "react";
+import { Box, useApp, useInput } from "ink";
 import { appendFileSync } from "node:fs";
 import { InputBox } from "./input-box.js";
+import type { SuggestionSource } from "./input-controller.js";
 import { Spinner } from "./spinner.js";
 import type { SpinnerMode } from "./spinner.js";
-import { LogoHeader, shouldRenderStatically } from "./message-list.js";
-import { MessageRow } from "./message-row.js";
+import { LogoHeader, MessageList } from "./message-list.js";
 import type { TuiEntry } from "./tui-reporter.js";
 
 /** 诊断日志:写文件(绕过 ink patchConsole 劫持),只在 TUI_DEBUG 时 */
@@ -38,11 +38,23 @@ export interface AppProps {
   entries: TuiEntry[];
   /** 是否正在运行(idle 时聚焦输入框) */
   running: boolean;
+  /** Slash command 候选源 */
+  slashCommandSuggestions?: SuggestionSource;
+  /** @ 文件候选源 */
+  fileMentionSuggestions?: SuggestionSource;
   /** 用户提交一条消息时触发(repl 调 engine.run) */
   onSubmit: (text: string) => void;
 }
 
-export function App({ model, workDir, entries, running, onSubmit }: AppProps): React.ReactNode {
+export function App({
+  model,
+  workDir,
+  entries,
+  running,
+  slashCommandSuggestions,
+  fileMentionSuggestions,
+  onSubmit,
+}: AppProps): React.ReactNode {
   const { exit } = useApp();
 
   // Ctrl+C 退出(ink 默认不���,需手动)
@@ -66,18 +78,12 @@ export function App({ model, workDir, entries, running, onSubmit }: AppProps): R
 
   return (
     <Box flexDirection="column">
-      {/* Logo(消息流首项)。alt screen 模式下它随每帧重绘,但差分渲染只写变化 cell,不重复 */}
-      <LogoHeader model={model} workDir={workDir} />
+      {/* Claude Code 风格:Logo/Header 是稳定首块,不随 messages 数组变化而重新脏化整棵消息树。 */}
+      <StableLogoHeader model={model} workDir={workDir} />
 
-      {/* 消息列表:全部条目在同一渲染树(不用 <Static>)。
-          React.memo(MessageRow) 跳过静态条目的重渲染(零 diff)。
-          稳定 key:用 entries 的索引(条目只追加不重排,索引天然稳定)。 */}
+      {/* 消息列表:统一走 MessageList,由 shouldRenderStatically + MessageRow.memo 控制静态行。 */}
       <Box flexDirection="column" paddingX={1}>
-        {entries.map((entry, i) => {
-          const isLast = i === entries.length - 1;
-          const isStatic = shouldRenderStatically(entry, isLast, isStreaming);
-          return <MessageRow key={i} entry={entry} isStatic={isStatic} isLast={isLast} />;
-        })}
+        <MessageList entries={entries} isStreaming={isStreaming} />
       </Box>
 
       {/* 思考/spinner:据末尾状态显示对应 mode */}
@@ -97,14 +103,18 @@ export function App({ model, workDir, entries, running, onSubmit }: AppProps): R
         borderColor={running ? "gray" : "green"}
         paddingX={1}
       >
-        <InputBox disabled={running} onSubmit={onSubmit} />
+        <InputBox
+          disabled={running}
+          slashCommandSuggestions={slashCommandSuggestions}
+          fileMentionSuggestions={fileMentionSuggestions}
+          onSubmit={onSubmit}
+        />
       </Box>
-
-      {/* 底部提示 */}
-      <Text dimColor> Enter 发送 · Ctrl+C 退出</Text>
     </Box>
   );
 }
+
+const StableLogoHeader = memo(LogoHeader);
 
 /**
  * 判断当前是否"主动流式":末尾是流式 assistant,或 thinking/running tool 占位。

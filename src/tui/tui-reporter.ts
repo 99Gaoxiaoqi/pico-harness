@@ -57,6 +57,21 @@ export class TuiReporter implements Reporter {
     this.emit();
   }
 
+  /** 本地输入命令的系统反馈。渲染层尚无 system kind,先复用 assistant 气泡承载。 */
+  pushSystemMessage(content: string): void {
+    this.entries.push({ kind: "assistant", content });
+    this.emit();
+  }
+
+  /** 清空 TUI 当前可见 transcript,不影响底层 session 历史。 */
+  clear(): void {
+    this.entries.splice(0, this.entries.length);
+    this.resetTurnBuffer();
+    this.pendingTools.clear();
+    this.spinnerMode = "idle";
+    this.emit();
+  }
+
   /** 读当前 UI 模式,供 app.tsx 的 spinner 用(repl 每次 onUpdate 后调一次,极简)。 */
   getMode(): UiMode {
     return this.spinnerMode;

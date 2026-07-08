@@ -45,7 +45,7 @@ function MessageRowImpl({ entry, isStatic, isLast }: MessageRowProps): React.Rea
       // isStatic:已固化走 CompletedText(代码块着色,整体 memo);
       // 否则(末条流式中)走 StreamingText(按行 stable/unstable 增量渲染)
       return (
-        <Box marginTop={1}>
+        <Box>
           {isStatic ? <CompletedText content={entry.content} /> : <StreamingText content={entry.content} />}
         </Box>
       );
