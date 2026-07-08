@@ -34,6 +34,20 @@ export function formatDiffPreview(diff: string | undefined, options: { maxLines?
     .join("\n");
 }
 
+export function formatOutputPreview(
+  output: string | undefined,
+  options: { maxLines?: number; expanded?: boolean } = {},
+): string {
+  if (!output) return "";
+
+  const lines = output.split("\n");
+  const maxLines = options.maxLines ?? (options.expanded ? 40 : 3);
+  const visible = lines.slice(0, maxLines);
+  const hidden = lines.length - visible.length;
+  if (hidden > 0) visible.push(`... 已截断 ${hidden} 行`);
+  return visible.join("\n");
+}
+
 export function splitDiffPreviewLines(
   diff: string | undefined,
   options: { maxLines?: number } = {},
