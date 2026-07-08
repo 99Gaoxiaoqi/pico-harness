@@ -15,6 +15,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "smoke:tui": "node scripts/tui-smoke.mjs",
     "lint": "eslint .",
     "format": "prettier --check .",
     "docker:build": "docker build -t pico-harness .",
