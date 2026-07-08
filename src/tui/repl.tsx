@@ -40,6 +40,26 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
   // 日志静默由 preload-env.ts 在模块加载前设 LOG_LEVEL=warn 完成
   // (pino transport 是 worker thread,运行时改 logger.level 无效)。
 
+  // 诊断:hook process.stdout.write,记录 ink 实际输出的 ANSI(看擦除行为)
+  if (process.env.TUI_DEBUG) {
+    const { appendFileSync } = await import("node:fs");
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    const origWrite = process.stdout.write.bind(process.stdout) as any;
+    let frame = 0;
+    const stdoutAny = process.stdout as any;
+    stdoutAny._origWrite = origWrite;
+    stdoutAny.write = (chunk: unknown, ...args: unknown[]) => {
+      const str = typeof chunk === "string" ? chunk : String(chunk);
+      if (str.includes("\x1b[") || frame < 5) {
+        const visible = str.replace(/\x1b\[/g, "ESC[").replace(/\x1b/g, "ESC").slice(0, 200);
+        appendFileSync(".claw/tui-debug.log", `[stdout f${frame}] ${visible}\n`);
+      }
+      frame++;
+      return origWrite(chunk, ...args);
+    };
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  }
+
   // 共享状态:TuiReporter 和 App 共用同一个 entries 数组引用
   const entries: TuiEntry[] = [];
 
@@ -105,9 +125,8 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     );
   }
 
-  // alternateScreen:true 进入终端 alt buffer(\x1b[?1049h)——内容不进 scrollback,
-  // 退出时恢复主屏,彻底杜绝"历史内容被重复输出到 scrollback"的滚雪球 bug。
-  // patchConsole:false 让 process.stderr.write 不被 ink 劫持(诊断日志能正常输出)。
-  // alt buffer 下 ink 差分渲染只重绘可视区域,历史条目靠 React.memo 零 diff。
+  // alternateScreen:true 进 alt buffer。alt buffer 下 ink 走 clearTerminal 全量重绘
+  // (而非 eraseLines 逐行擦除),绕过行数计算 bug(中文字符宽度导致行数不匹配)。
+  // patchConsole:false 让 stderr 不被劫持。
   render(<ReplApp />, { alternateScreen: true, patchConsole: false });
 }

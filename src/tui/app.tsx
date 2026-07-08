@@ -14,12 +14,20 @@
 
 import React from "react";
 import { Box, Text, useApp, useInput } from "ink";
+import { appendFileSync } from "node:fs";
 import { InputBox } from "./input-box.js";
 import { Spinner } from "./spinner.js";
 import type { SpinnerMode } from "./spinner.js";
 import { LogoHeader, shouldRenderStatically } from "./message-list.js";
 import { MessageRow } from "./message-row.js";
 import type { TuiEntry } from "./tui-reporter.js";
+
+/** 诊断日志:写文件(绕过 ink patchConsole 劫持),只在 TUI_DEBUG 时 */
+function dbg(msg: string): void {
+  if (process.env.TUI_DEBUG) {
+    appendFileSync(".claw/tui-debug.log", `${new Date().toISOString()} ${msg}\n`);
+  }
+}
 
 export interface AppProps {
   /** 模型名(Logo 展示) */
@@ -48,6 +56,13 @@ export function App({ model, workDir, entries, running, onSubmit }: AppProps): R
   const isStreaming = running && isActivelyStreaming(entries);
   // spinner 阶段:据末尾条目状态选
   const spinnerMode = pickSpinnerMode(entries, isStreaming);
+
+  // 诊断:记录每次渲染的 entries 状态
+  dbg(`render: entries=${entries.length} running=${running} streaming=${isStreaming}`);
+  entries.forEach((e, i) => {
+    const c = e.kind === "user" || e.kind === "assistant" ? e.content.slice(0, 40) : e.kind;
+    dbg(`  [${i}] ${e.kind}: ${c}`);
+  });
 
   return (
     <Box flexDirection="column">
