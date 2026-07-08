@@ -367,10 +367,15 @@ git worktree remove ../pico-1-streaming
 
 <!-- 开发过程中发现的新需求，追加到这里，注明发现日期 -->
 
-- 2026-07-07（阶段 2 真实模型 e2e 发现）：`TodoStore.load()` 幂等性导致跨实例不可见
+- 2026-07-07（阶段 2 真实模型 e2e 发现）：`TodoStore.load()` 幂等性导致跨实例不可见 ✅ 已修复（2026-07-08）
   - 现象：`load()` 首次加载后置 `loaded=true`，后续调用直接返回内存缓存，不再重读磁盘。多个 `TodoStore` 实例（如 PromptComposer 的、TodoTool 的、CLI 新进程的）各自维护独立内存缓存，互相看不到对方的写入。
-  - 影响：单实例内一致，但跨实例/跨进程读取时拿不到最新 todo.json。目前尚未在真实使用中暴露问题（主流程只读用 `buildTodoContext` 也能容忍短暂延迟），但对 CLI `--list-snapshots` 这类新进程读取场景是隐患。
-  - 候选方案：(a) `load()` 去掉幂等、每次重读；(b) 保留幂等但暴露 `reload()`；(c) 加文件 mtime 比较决定是否重读。优先级低，留到后续迭代。
+  - 影响：单实例内一致，但跨实例/跨进程读取时拿不到最新 todo.json。对 CLI `--list-snapshots` 这类新进程读取场景是隐患。
+  - 根因：TodoTool（`default-registry.ts`）和 PromptComposer（`composer.ts`）各自 `new TodoStore(workDir)`，两个独立实例。
+  - 修复方案：对齐 GoalManager 单例注入范式（项目既有最佳实践，`goal-manager.ts:11` 注释早已点明）：
+    - `TodoStore` 新增 `reload()` 方法（强制重读盘，跨进程兜底）；
+    - `default-registry.ts` / `composer.ts` / `loop.ts`（`AgentEngineOptions`）均加 `todoStore?` 注入参数，未注入则内部 new（向后兼容）；
+    - 所有 host 入口（`run-agent.ts` / `main.ts` 的 ACP+飞书 / `http.ts`）创建唯一 `TodoStore` 单例，同时传给 registry + Composer + engine。
+  - 验证：新增 2 个测试（reload 强制重读 + 单例注入回归），todo-store 21 + todo 23 + composer 33 + integration 9 + memory 9 + loop-goal + http 全过；全量 mock 测试无新增回归（失败项均为 Windows EBUSY/CRLF baseline）。
 
 ---
 

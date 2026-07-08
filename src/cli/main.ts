@@ -36,6 +36,7 @@ import { BackgroundManager } from "../tools/background-manager.js";
 import { createFeishuApprovalMiddleware, FeishuBot, loadFeishuConfig } from "../feishu/bot.js";
 import { PromptComposer } from "../context/composer.js";
 import { SkillLoader, SkillViewTool } from "../context/skill.js";
+import { TodoStore } from "../context/todo-store.js";
 import { DelegationManager, DelegateStatusTool } from "../tools/delegation-manager.js";
 import { createSubagentRegistryFactory } from "../tools/delegation-registry.js";
 import { AgentProfileLoader, type AgentProfile } from "../tools/agent-profile.js";
@@ -76,11 +77,13 @@ function buildRegistry(
   workDir: string,
   backgroundManager: BackgroundManager = cliBackgroundManager,
   goalManager?: GoalManager,
+  todoStore?: TodoStore,
 ): ToolRegistry {
   return buildDefaultToolRegistry(workDir, {
     truncateResults: false,
     backgroundManager,
     ...(goalManager !== undefined ? { goalManager } : {}),
+    ...(todoStore !== undefined ? { todoStore } : {}),
   });
 }
 
@@ -293,16 +296,17 @@ async function main() {
     const workDir = process.cwd();
     const modelName = process.env.LLM_MODEL ?? (kind === "openai" ? "glm-5.2" : "claude-3-5-sonnet");
     const goalManager = new GoalManager();
+    const todoStore = new TodoStore(workDir);
     const backgroundManager = new BackgroundManager();
     // 非 plan 模式预组装 system prompt(plan 模式由 engine 每轮动态重组,故不预生成)
-    const acpSystemPrompt = await new PromptComposer(workDir, false, { goalManager }).build();
+    const acpSystemPrompt = await new PromptComposer(workDir, false, { goalManager, todoStore }).build();
 
     // Engine 工厂:每个 prompt 装配一个独立 engine(按 mode 映射 planMode/approval)。
     // auto / yolo 模式开启 YOLO 放行(跳过审批);default / plan 走人工审批中间件。
     const engineFactory: AcpEngineFactory = ({ session, mode, reporter }) => {
       const provider = createProvider(kind, undefined, thinkingEffort);
       const trackedProvider = new CostTracker(provider, modelName, session);
-      const registry = buildRegistry(workDir, backgroundManager, goalManager);
+      const registry = buildRegistry(workDir, backgroundManager, goalManager, todoStore);
       const usePlanMode = mode === "plan";
       if (mode === "auto" || mode === "yolo") {
         globalApprovalPolicy.setYoloMode(session.id, true);
@@ -317,6 +321,7 @@ async function main() {
         planMode: usePlanMode,
         systemPrompt: usePlanMode ? undefined : acpSystemPrompt,
         goalManager,
+        todoStore,
         compactor: buildCompactor(kind, modelName),
         observationProcessor: buildObservationProcessor(workDir),
         reporter,
@@ -338,9 +343,11 @@ async function main() {
     const workDir = process.cwd();
     // GoalManager 单例:飞书进程级共享,registry(3 工具)与 engine 用同一实例。
     const goalManager = new GoalManager();
+    // TodoStore 单例:飞书进程级共享,registry(TodoTool)与 Composer 用同一实例。
+    const todoStore = new TodoStore(workDir);
     const systemPrompt = planMode
       ? undefined
-      : await new PromptComposer(workDir, false, { goalManager }).build();
+      : await new PromptComposer(workDir, false, { goalManager, todoStore }).build();
     const modelName = process.env.LLM_MODEL ?? defaultModelForKind(kind);
     // 预加载自定义角色:飞书 engineFactory 回调是同步的,await 必须提前到这里
     const feishuProfiles = await loadProfiles(workDir);
@@ -349,7 +356,7 @@ async function main() {
       ({ session, reporter }) => {
         const provider = createProvider(kind, undefined, thinkingEffort);
         const trackedProvider = new CostTracker(provider, modelName, session);
-        const registry = buildRegistry(workDir, backgroundManager, goalManager);
+        const registry = buildRegistry(workDir, backgroundManager, goalManager, todoStore);
         registry.use(createFeishuApprovalMiddleware(reporter, workDir));
         const engine = new AgentEngine({
           provider: trackedProvider,
@@ -360,6 +367,7 @@ async function main() {
           planMode,
           systemPrompt,
           goalManager,
+          todoStore,
           compactor: buildCompactor(kind, modelName),
           observationProcessor: buildObservationProcessor(workDir),
           reporter: new SilentReporter(), // 实际回写由运行时 FeishuReporter 负责

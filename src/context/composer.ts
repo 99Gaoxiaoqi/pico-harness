@@ -57,13 +57,14 @@ export class PromptComposer {
   private readonly goalManager?: GoalManager;
 
   /**
-   * @param workDir 工作目���
+   * @param workDir 工作目录
    * @param planMode 是否启用 Plan Mode
    * @param options 可选配置
    *   - sessionId: 会话 ID（用于 Nudger）
    *   - skillRegistry: 技能注册表实例（测试时可注入 mock）
    *   - memoryNudger: 记忆提示器实例（测试时可注入 mock）
    *   - goalManager: GoalManager 单例（注入后把 active goal 注入 prompt）
+   *   - todoStore: TodoStore 单例（注入后与 TodoTool 共享,根治跨实例不可见 bug）
    */
   constructor(
     workDir: string,
@@ -73,13 +74,16 @@ export class PromptComposer {
       skillRegistry?: ISkillRegistry;
       memoryNudger?: IMemoryNudger;
       goalManager?: GoalManager;
+      todoStore?: TodoStore;
     },
   ) {
     this.workDir = workDir;
     this.skillLoader = new SkillLoader(workDir);
     this.planMode = planMode;
     this.planStore = new PlanStore(workDir);
-    this.todoStore = new TodoStore(workDir);
+    // host 注入 TodoStore 单例,与 TodoTool 共享同一实例(对标 GoalManager 范式)。
+    // 未注入则内部 new,保持向后兼容;单实例场景不受跨实例 bug 影响。
+    this.todoStore = options?.todoStore ?? new TodoStore(workDir);
     this.sessionId = options?.sessionId;
 
     // 初始化技能注册表（支持注入，默认使用 stub）

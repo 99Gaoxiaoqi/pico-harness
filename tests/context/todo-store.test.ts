@@ -180,6 +180,44 @@ describe("TodoStore", () => {
       const b = await store.load();
       expect(a).toBe(b);
     });
+
+    it("reload 强制重读磁盘,能看到其他实例的写入", async () => {
+      // 实例 A(TodoTool 侧)写入
+      const storeA = new TodoStore(workDir);
+      await storeA.add("任务 A");
+
+      // 实例 B(Composer 侧)首次 load,缓存被冻结
+      const storeB = new TodoStore(workDir);
+      await storeB.load();
+      expect(storeB.list()).toHaveLength(1);
+
+      // A 再追加一条
+      await storeA.add("任务 B");
+
+      // B 的 load 幂等,看不到新增
+      await storeB.load();
+      expect(storeB.list()).toHaveLength(1);
+
+      // B 调 reload 强制重读,看到磁盘最新
+      await storeB.reload();
+      expect(storeB.list()).toHaveLength(2);
+      expect(storeB.list().map((it) => it.content)).toEqual(["任务 A", "任务 B"]);
+    });
+
+    it("同一单例:共享实例的两个调用方互相可见(注入范式回归)", async () => {
+      // 模拟 run-agent 注入范式:host 创建��一实例,工具侧与 composer 侧共享
+      const shared = new TodoStore(workDir);
+
+      // 工具侧(等同 TodoTool 内部):经 add/update 改状态
+      await shared.add("写代码", "high");
+      await shared.add("写测试", "medium");
+      await shared.update(1, { status: "in_progress" });
+
+      // composer 侧:同一实例 buildTodoContext,立即看到工具侧改动
+      const ctx = await shared.buildTodoContext();
+      expect(ctx).toContain("- [~] #1 (high) 写代码");
+      expect(ctx).toContain("- [ ] #2 (medium) 写测试");
+    });
   });
 
   describe("降级", () => {

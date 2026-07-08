@@ -24,6 +24,7 @@ import type { ThinkingEffort } from "../provider/thinking.js";
 import { PromptComposer } from "../context/composer.js";
 import { SkillLoader } from "../context/skill.js";
 import { RecoveryManager } from "../context/recovery.js";
+import { TodoStore } from "../context/todo-store.js";
 import { SilentReporter, type Reporter } from "./reporter.js";
 import { SteerQueue } from "./steer-queue.js";
 import { ReminderInjector, ToolGuardrailController, type GuardrailOptions } from "./reminder.js";
@@ -111,6 +112,14 @@ export interface AgentEngineOptions {
    * 未提供则 Goal Mode 不生效,行为不变。
    */
   goalManager?: GoalManager;
+  /**
+   * TodoStore 单例(ROADMAP 补充任务 2026-07-07)。
+   * 注入后:planMode 时 PromptComposer 每轮动态重组会复用此实例,
+   * 与 TodoTool 共享同一实例,确保工具改的状态 prompt 立即可见。
+   * 必须与 buildDefaultToolRegistry 传入的是同一实例(根治跨实例不可见 bug)。
+   * 未提供则行为不变(单进程单实例场景不受影响)。
+   */
+  todoStore?: TodoStore;
   /** 可选的轮次日志回调,便于第 19 讲 Tracing 接入 */
   onTurn?: (info: { turn: number; message: Message }) => void;
   /**
@@ -176,6 +185,8 @@ export class AgentEngine implements AgentRunner {
   private readonly budget: IterationBudget;
   /** Goal Manager 单例(可选);planMode 注入 prompt + Grace Call 收尾对齐目标 */
   private readonly goalManager?: GoalManager;
+  /** TodoStore 单例(可选);planMode 下 PromptComposer 复用,与 TodoTool 共享 */
+  private readonly todoStore?: TodoStore;
   private readonly onTurn?: (info: { turn: number; message: Message }) => void;
   /** Plan Mode 退出回调(ExitPlanMode 审批通过后触发),供 host 监听 */
   private readonly onPlanExit?: () => void;
@@ -214,6 +225,7 @@ export class AgentEngine implements AgentRunner {
       maxTurns: opts.budgetConfig?.maxTurns ?? this.maxTurns,
     });
     this.goalManager = opts.goalManager;
+    this.todoStore = opts.todoStore;
     this.onTurn = opts.onTurn;
     this.onPlanExit = opts.onPlanExit;
     this.reporter = opts.reporter ?? new SilentReporter();
@@ -252,11 +264,12 @@ export class AgentEngine implements AgentRunner {
    */
   private async buildSystemPrompt(): Promise<string> {
     if (this.planMode) {
-      // planMode 时用 PromptComposer 动态组装;goalManager 单例注入,
-      // 让 active goal 在每轮 prompt 中浮现(对齐 plan/todo 都走 composer 的模式)。
-      const composer = this.goalManager
-        ? new PromptComposer(this.workDir, true, { goalManager: this.goalManager })
-        : new PromptComposer(this.workDir, true);
+      // planMode 时用 PromptComposer 动态组装;goalManager / todoStore 单例注入,
+      // 让 active goal 与最新 todo 状态在每轮 prompt 中浮现(对齐 host 注入范式)。
+      const opts: ConstructorParameters<typeof PromptComposer>[2] = {};
+      if (this.goalManager) opts.goalManager = this.goalManager;
+      if (this.todoStore) opts.todoStore = this.todoStore;
+      const composer = new PromptComposer(this.workDir, true, opts);
       return composer.build();
     }
     return this.systemPrompt;
