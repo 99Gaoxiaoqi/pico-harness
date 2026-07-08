@@ -94,6 +94,7 @@ describe("resolveCliSession", () => {
 
   it("--resume 恢复指定 session", async () => {
     const workDir = await mkdtemp(join(tmpdir(), "pico-session-resolver-"));
+    await touchSessionFile(workDir, "cli-known", "2026-07-09T01:00:00.000Z");
 
     await expect(resolveCliSession({ workDir, resumeSession: "cli-known" })).resolves.toEqual({
       mode: "resume",
@@ -101,8 +102,26 @@ describe("resolveCliSession", () => {
     });
   });
 
+  it("--resume 找不到指定 session 时给出明确错误", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-session-resolver-"));
+
+    await expect(resolveCliSession({ workDir, resumeSession: "cli-missing" })).rejects.toThrow(
+      "无法恢复 session cli-missing",
+    );
+  });
+
+  it("legacy --session keeps allowing an explicit id without pre-existing history", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-session-resolver-"));
+
+    await expect(resolveCliSession({ workDir, session: "cli-explicit" })).resolves.toEqual({
+      mode: "resume",
+      sessionId: "cli-explicit",
+    });
+  });
+
   it("--fork-session 从指定 session 派生新 session id", async () => {
     const workDir = await mkdtemp(join(tmpdir(), "pico-session-resolver-"));
+    await touchSessionFile(workDir, "cli-source", "2026-07-09T01:00:00.000Z");
 
     const selection = await resolveCliSession({ workDir, forkSession: "cli-source" });
 
@@ -110,6 +129,14 @@ describe("resolveCliSession", () => {
     expect(selection.sourceSessionId).toBe("cli-source");
     expect(selection.sessionId).toMatch(/^cli-/);
     expect(selection.sessionId).not.toBe("cli-source");
+  });
+
+  it("--fork-session 找不到来源 session 时给出明确错误", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-session-resolver-"));
+
+    await expect(resolveCliSession({ workDir, forkSession: "cli-missing" })).rejects.toThrow(
+      "无法 fork session cli-missing",
+    );
   });
 
   it("互斥的 session 启动参数会被拒绝", async () => {

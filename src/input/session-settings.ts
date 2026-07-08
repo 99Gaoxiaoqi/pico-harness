@@ -11,13 +11,16 @@ export interface SessionToolStatus {
   readOnly: boolean;
 }
 
-export type SessionMode = "default" | "plan" | "auto" | "yolo";
+export type InteractionMode = "default" | "plan" | "auto" | "yolo";
+export type SessionMode = "new" | "continue" | "resume" | "fork";
 
 export interface SessionSettings {
   sessionId: string;
+  sessionMode: SessionMode;
+  forkFrom?: string;
   cwd: string;
   provider: ProviderKind;
-  mode: SessionMode;
+  mode: InteractionMode;
   model: string;
   thinkingEffort: ThinkingEffort;
   thinkingEffortExplicit: boolean;
@@ -27,9 +30,11 @@ export interface SessionSettings {
 
 export interface SessionSettingsDefaults {
   sessionId: string;
+  sessionMode?: SessionMode;
+  forkFrom?: string;
   cwd: string;
   provider: ProviderKind;
-  mode?: SessionMode;
+  mode?: InteractionMode;
   model: string;
   thinkingEffort?: ThinkingEffort;
   permissionMode?: string;
@@ -42,11 +47,19 @@ export interface SessionSettingResult {
 }
 
 const settingsBySession = new Map<string, SessionSettings>();
+const resolvedCliSessionSemantics = new Map<
+  string,
+  { sessionMode: SessionMode; forkFrom?: string }
+>();
 const permissionCommandModes = new Set(["default", "auto", "yolo", "plan"]);
 
 export function createDefaultSessionSettings(defaults: SessionSettingsDefaults): SessionSettings {
+  const resolvedSemantics = resolvedCliSessionSemantics.get(defaults.sessionId);
+  const forkFrom = defaults.forkFrom ?? resolvedSemantics?.forkFrom;
   return {
     sessionId: defaults.sessionId,
+    sessionMode: defaults.sessionMode ?? resolvedSemantics?.sessionMode ?? "new",
+    ...(forkFrom !== undefined ? { forkFrom } : {}),
     cwd: defaults.cwd,
     provider: defaults.provider,
     mode: defaults.mode ?? "default",
@@ -61,6 +74,17 @@ export function createDefaultSessionSettings(defaults: SessionSettingsDefaults):
 export function getOrCreateSessionSettings(defaults: SessionSettingsDefaults): SessionSettings {
   const existing = settingsBySession.get(defaults.sessionId);
   if (existing !== undefined) {
+    const resolvedSemantics = resolvedCliSessionSemantics.get(defaults.sessionId);
+    const sessionMode = defaults.sessionMode ?? resolvedSemantics?.sessionMode;
+    const forkFrom = defaults.forkFrom ?? resolvedSemantics?.forkFrom;
+    if (sessionMode !== undefined) {
+      existing.sessionMode = sessionMode;
+    }
+    if (forkFrom !== undefined) {
+      existing.forkFrom = forkFrom;
+    } else if (sessionMode !== "fork" && defaults.sessionMode !== undefined) {
+      delete existing.forkFrom;
+    }
     existing.cwd = defaults.cwd;
     existing.provider = defaults.provider;
     existing.mode = defaults.mode ?? existing.mode;
@@ -80,12 +104,26 @@ export function getOrCreateSessionSettings(defaults: SessionSettingsDefaults): S
   return created;
 }
 
+export function rememberResolvedCliSession(selection: {
+  sessionId: string;
+  mode: SessionMode;
+  sourceSessionId?: string;
+}): void {
+  resolvedCliSessionSemantics.set(selection.sessionId, {
+    sessionMode: selection.mode,
+    ...(selection.sourceSessionId !== undefined
+      ? { forkFrom: selection.sourceSessionId }
+      : {}),
+  });
+}
+
 export function getStoredSessionSettings(sessionId: string): SessionSettings | undefined {
   return settingsBySession.get(sessionId);
 }
 
 export function resetSessionSettingsForTests(): void {
   settingsBySession.clear();
+  resolvedCliSessionSemantics.clear();
 }
 
 export function setSessionModel(settings: SessionSettings, model: string): SessionSettingResult {
@@ -100,7 +138,7 @@ export function setSessionModel(settings: SessionSettings, model: string): Sessi
 
 export function setSessionMode(settings: SessionSettings, mode: string): SessionSettingResult {
   const normalized = mode.trim().toLowerCase();
-  if (!isSessionMode(normalized)) {
+  if (!isInteractionMode(normalized)) {
     return {
       ok: false,
       message: `Current mode: ${settings.mode}\nUsage: /mode <default|plan|auto|yolo>`,
@@ -154,6 +192,9 @@ export function formatSessionStatus(settings: SessionSettings): string {
     `Model: ${settings.model}`,
     `Thinking effort: ${settings.thinkingEffort}`,
     `Session: ${settings.sessionId}`,
+    `sessionId: ${settings.sessionId}`,
+    `sessionMode: ${settings.sessionMode}`,
+    `forkFrom: ${settings.forkFrom ?? "-"}`,
     `CWD: ${settings.cwd}`,
   ].join("\n");
 }
@@ -187,7 +228,7 @@ function toProfileProtocol(provider: ProviderKind): "openai" | "claude" | "gemin
   return provider === "openai" ? "openai" : provider;
 }
 
-function isSessionMode(mode: string): mode is SessionMode {
+function isInteractionMode(mode: string): mode is InteractionMode {
   return mode === "default" || mode === "plan" || mode === "auto" || mode === "yolo";
 }
 
