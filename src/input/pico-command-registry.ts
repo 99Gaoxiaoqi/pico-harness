@@ -38,6 +38,7 @@ import {
   setSessionPermissionMode,
   setSessionThinkingEffort,
   toolStatusFromRegistry,
+  type SessionMode,
   type SessionSettings,
   type SessionToolStatus,
 } from "./session-settings.js";
@@ -57,6 +58,8 @@ export interface PicoCommandRegistryOptions {
   provider: ProviderKind;
   session?: Session;
   sessionId?: string;
+  sessionMode?: SessionMode;
+  forkFrom?: string;
   thinkingEffort?: ThinkingEffort;
   permissionMode?: string;
   tools?: readonly SessionToolStatus[];
@@ -71,6 +74,8 @@ export async function createPicoCommandRegistry(
     options.tools ?? toolStatusFromRegistry(buildDefaultToolRegistry(options.workDir));
   const settings = getOrCreateSessionSettings({
     sessionId: options.sessionId ?? `cwd:${options.workDir}`,
+    ...(options.sessionMode !== undefined ? { sessionMode: options.sessionMode } : {}),
+    ...(options.forkFrom !== undefined ? { forkFrom: options.forkFrom } : {}),
     cwd: options.workDir,
     provider: options.provider,
     model: options.model,
