@@ -258,6 +258,107 @@ describe("Pico command registry", () => {
     expect(result.result.message).toContain("Use /tools <query> to search");
   });
 
+  it("/agents lists Claude Code compatible agents", async () => {
+    const workDir = mkdtempSync(join(tmpdir(), "pico-command-agents-"));
+    cleanup.push(() => rmSync(workDir, { recursive: true, force: true }));
+    mkdirSync(join(workDir, ".claude", "agents"), { recursive: true });
+    writeFileSync(
+      join(workDir, ".claude", "agents", "reviewer.md"),
+      "---\ndescription: 审查代码\n---\n\n# Reviewer\n检查风险。",
+    );
+
+    const registry = await createPicoCommandRegistry({
+      workDir,
+      provider: "openai",
+      model: "glm-5.2",
+    });
+
+    const result = await processUserInput("/agents", { registry });
+
+    expect(result.type).toBe("local-command");
+    if (result.type !== "local-command") return;
+    expect(result.command).toBe("agents");
+    expect(result.result.action).toBe("agents");
+    expect(result.result.message).toContain("可用 Agents");
+    expect(result.result.message).toContain("- reviewer: 审查代码");
+  });
+
+  it("/agent <name> <task> dispatches through delegate_task intent", async () => {
+    const workDir = mkdtempSync(join(tmpdir(), "pico-command-agent-"));
+    cleanup.push(() => rmSync(workDir, { recursive: true, force: true }));
+    mkdirSync(join(workDir, ".claude", "agents"), { recursive: true });
+    const sourcePath = join(workDir, ".claude", "agents", "reviewer.md");
+    writeFileSync(
+      sourcePath,
+      "---\ndescription: 审查代码\ntools: read_file, grep\n---\n\n# Reviewer\n只输出高风险问题。",
+    );
+
+    const registry = await createPicoCommandRegistry({
+      workDir,
+      provider: "openai",
+      model: "glm-5.2",
+    });
+
+    const result = await processUserInput("/agent reviewer 检查 src/input", { registry });
+
+    expect(result.type).toBe("prompt-command");
+    if (result.type !== "prompt-command") return;
+    expect(result.command).toBe("agent");
+    expect(result.result.prompt).toContain("delegate_task");
+    expect(result.result.prompt).toContain('"agent_name": "reviewer"');
+    expect(result.result.prompt).toContain('"goal": "检查 src/input"');
+    expect(result.result.prompt).toContain("只输出高风险问题。");
+    expect(result.result.metadata).toEqual({
+      agentName: "reviewer",
+      sourcePath,
+      task: "检查 src/input",
+      toolName: "delegate_task",
+    });
+  });
+
+  it("/agent missing arguments shows usage", async () => {
+    const registry = await createPicoCommandRegistry({
+      workDir: process.cwd(),
+      provider: "openai",
+      model: "glm-5.2",
+    });
+
+    const noName = await processUserInput("/agent", { registry });
+    const noTask = await processUserInput("/agent reviewer", { registry });
+
+    expect(noName.type).toBe("local-command");
+    expect(noTask.type).toBe("local-command");
+    if (noName.type !== "local-command" || noTask.type !== "local-command") return;
+    expect(noName.result.message).toContain("Usage: /agent <name> <task>");
+    expect(noTask.result.message).toContain("Usage: /agent <name> <task>");
+  });
+
+  it("/agent suggests the closest existing agent when name is unknown", async () => {
+    const workDir = mkdtempSync(join(tmpdir(), "pico-command-agent-suggest-"));
+    cleanup.push(() => rmSync(workDir, { recursive: true, force: true }));
+    mkdirSync(join(workDir, ".claude", "agents"), { recursive: true });
+    writeFileSync(
+      join(workDir, ".claude", "agents", "reviewer.md"),
+      "---\ndescription: 审查代码\n---\n\n# Reviewer",
+    );
+    writeFileSync(
+      join(workDir, ".claude", "agents", "writer.md"),
+      "---\ndescription: 撰写文档\n---\n\n# Writer",
+    );
+    const registry = await createPicoCommandRegistry({
+      workDir,
+      provider: "openai",
+      model: "glm-5.2",
+    });
+
+    const result = await processUserInput("/agent reviwer 检查 src", { registry });
+
+    expect(result.type).toBe("local-command");
+    if (result.type !== "local-command") return;
+    expect(result.result.message).toContain("未找到 Agent: reviwer");
+    expect(result.result.message).toContain("Did you mean: reviewer");
+  });
+
   it("/status summarizes mode permission mode model and thinking effort", async () => {
     const registry = await createPicoCommandRegistry({
       workDir: "/tmp/pico-work",

@@ -25,8 +25,10 @@ import {
 } from "./markdown-command-loader.js";
 import {
   renderSkillCommand,
+  renderAgentListCommand,
   renderSkillListCommand,
 } from "./skill-commands.js";
+import { loadClaudeAgents, type ClaudeAgent } from "./agent-loader.js";
 import type { LocalCommandResult, PromptCommandResult, SlashCommand } from "./types.js";
 import { createProvider, type ProviderKind } from "../provider/factory.js";
 import { loadApiKeys } from "../provider/config.js";
@@ -98,7 +100,8 @@ export async function createPicoCommandRegistry(
       command.name !== "init" &&
       command.name !== "doctor" &&
       command.name !== "tools" &&
-      command.name !== "thinking",
+      command.name !== "thinking" &&
+      command.name !== "agents",
   );
   const registry = new CommandRegistry([
     ...builtins,
@@ -116,6 +119,8 @@ export async function createPicoCommandRegistry(
     createSnapshotsCommand(options),
     createRewindCommand(options),
     createUndoCommand(options),
+    createAgentsCommand(options),
+    createAgentCommand(options),
     createSkillsCommand(skillLoader),
     createSkillCommand(skillLoader),
   ]);
@@ -653,6 +658,145 @@ function createSkillCommand(loader: SkillLoader): SlashCommand {
       message: input.args ? await renderSkillCommand(loader, input.args) : "Usage: /skill <name>",
     }),
   };
+}
+
+function createAgentsCommand(options: PicoCommandRegistryOptions): SlashCommand {
+  return {
+    name: "agents",
+    description: "List available subagents",
+    usage: "/agents",
+    kind: "local",
+    execute: async (): Promise<LocalCommandResult> => {
+      const result = await renderAgentListCommand({ workDir: options.workDir });
+      return {
+        type: "local",
+        action: "agents",
+        message: result.message,
+        data: result.data,
+      };
+    },
+  };
+}
+
+function createAgentCommand(options: PicoCommandRegistryOptions): SlashCommand {
+  return {
+    name: "agent",
+    description: "Dispatch a task to a named subagent",
+    usage: "/agent <name> <task>",
+    kind: "prompt",
+    execute: async (input): Promise<PromptCommandResult | LocalCommandResult> => {
+      const agentName = input.argv[0]?.trim();
+      const task = input.argv.slice(1).join(" ").trim();
+      if (!agentName || !task) {
+        return {
+          type: "local",
+          action: "message",
+          message: formatAgentUsage(),
+        };
+      }
+
+      const agents = await loadClaudeAgents({ workDir: options.workDir });
+      const agent = findAgentByName(agents, agentName);
+      if (!agent) {
+        return {
+          type: "local",
+          action: "message",
+          message: formatAgentNotFound(agentName, agents),
+        };
+      }
+
+      return {
+        type: "prompt",
+        prompt: renderAgentDispatchPrompt(agent, task),
+        metadata: {
+          agentName: agent.name,
+          sourcePath: agent.sourcePath,
+          task,
+          toolName: "delegate_task",
+        },
+      };
+    },
+  };
+}
+
+function formatAgentUsage(): string {
+  return "Usage: /agent <name> <task>\n先用 /agents 查看可用 Agent。";
+}
+
+function findAgentByName(agents: readonly ClaudeAgent[], name: string): ClaudeAgent | undefined {
+  return (
+    agents.find((agent) => agent.name === name) ??
+    agents.find((agent) => agent.name.toLowerCase() === name.toLowerCase())
+  );
+}
+
+function formatAgentNotFound(name: string, agents: readonly ClaudeAgent[]): string {
+  if (agents.length === 0) {
+    return `未找到 Agent: ${name}\n当前没有可用 Agents。\n${formatAgentUsage()}`;
+  }
+
+  const suggestion = closestAgentName(name, agents.map((agent) => agent.name));
+  const lines = [
+    `未找到 Agent: ${name}`,
+    suggestion ? `Did you mean: ${suggestion}` : `可用 Agents: ${agents.map((agent) => agent.name).join(", ")}`,
+    formatAgentUsage(),
+  ];
+  return lines.join("\n");
+}
+
+function closestAgentName(name: string, candidates: readonly string[]): string | undefined {
+  let best: { name: string; distance: number } | undefined;
+  for (const candidate of candidates) {
+    const distance = editDistance(name.toLowerCase(), candidate.toLowerCase());
+    if (!best || distance < best.distance) {
+      best = { name: candidate, distance };
+    }
+  }
+  return best?.name;
+}
+
+function renderAgentDispatchPrompt(agent: ClaudeAgent, task: string): string {
+  const context = [
+    `Claude agent profile: ${agent.name}`,
+    agent.description ? `Description: ${agent.description}` : undefined,
+    `Source: ${agent.sourcePath}`,
+    agent.tools && agent.tools.length > 0 ? `Declared tools: ${agent.tools.join(", ")}` : undefined,
+    "",
+    "Agent instructions:",
+    agent.prompt || "(empty)",
+  ]
+    .filter((line): line is string => line !== undefined)
+    .join("\n");
+  const args = {
+    agent_name: agent.name,
+    goal: task,
+    context,
+  };
+
+  return [
+    "请把下面任务委派给指定 Agent 执行,不要由主 Agent 直接完成。",
+    "必须调用工具: delegate_task",
+    "",
+    "建议调用参数:",
+    JSON.stringify(args, null, 2),
+  ].join("\n");
+}
+
+function editDistance(left: string, right: string): number {
+  const previous = Array.from({ length: right.length + 1 }, (_, index) => index);
+  for (let leftIndex = 1; leftIndex <= left.length; leftIndex++) {
+    const current = [leftIndex];
+    for (let rightIndex = 1; rightIndex <= right.length; rightIndex++) {
+      const cost = left[leftIndex - 1] === right[rightIndex - 1] ? 0 : 1;
+      current[rightIndex] = Math.min(
+        (current[rightIndex - 1] ?? 0) + 1,
+        (previous[rightIndex] ?? 0) + 1,
+        (previous[rightIndex - 1] ?? 0) + cost,
+      );
+    }
+    previous.splice(0, previous.length, ...current);
+  }
+  return previous[right.length] ?? 0;
 }
 
 function createMarkdownPromptCommand(command: MarkdownPromptCommand): SlashCommand {
