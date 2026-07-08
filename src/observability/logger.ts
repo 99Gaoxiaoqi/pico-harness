@@ -3,11 +3,14 @@
 // 设计原则:
 // - 引擎内部日志(loop/registry/approval/compactor/reminder 等核心逻辑)走 pino,
 //   可通过 LOG_LEVEL 环境变量控制级别,生产环境关闭 debug 减少噪音
-// - 面向用户输出的文件(reporter/cli/feishu/tracker)保留 console,
+// - 面向用户输出的文件(reporter/cli/feishu/tracer)保留 console,
 //   确保用户始终能看到关键信息
 //
 // pino 是 Node.js 最快 JSON 日志库。transport 使用 pino-pretty 做彩色格式化输出;
 // 若 transport 加载失败(如测试环境 worker thread 限制),自动降级为 plain pino。
+//
+// 日志走 stderr(destination=2):stdout 留给 ink TUI 全屏渲染,互不干扰。
+// 非 TUI 模式下 stdout/stderr 在终端都会显示,行为不变。
 
 import pino from "pino";
 
@@ -26,6 +29,9 @@ export const logger = pino({
             colorize: true,
             translateTime: "HH:MM:ss",
             ignore: "pid,hostname",
+            // 日志输出到 stderr(fd=2),把 stdout 让给 ink TUI 渲染,避免互相破坏画面。
+            // 非 TUI 模式下终端同样显示 stderr,行为不变。
+            destination: 2,
           },
         },
       }
