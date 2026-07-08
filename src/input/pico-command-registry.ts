@@ -13,6 +13,8 @@ import {
   formatRewindSelector,
   latestSnapshotMessageId,
 } from "../tui/rewind-selector.js";
+import { listCliSessionSummaries } from "../cli/session-resolver.js";
+import { formatSessionSelector } from "../tui/session-selector.js";
 import { createBuiltinCommands } from "./builtin-commands.js";
 import { CommandRegistry } from "./command-registry.js";
 import {
@@ -103,6 +105,8 @@ export async function createPicoCommandRegistry(
     createModelCommand(settings),
     createThinkingCommand(settings),
     createToolsCommand(settings, options.toolDisclosure),
+    createSessionsCommand(options),
+    createResumeCommand(),
     createSnapshotsCommand(options),
     createRewindCommand(options),
     createUndoCommand(options),
@@ -458,6 +462,57 @@ function toolStatusToDefinition(tool: SessionToolStatus): ToolDefinition {
     name: tool.name,
     description: "",
     inputSchema: { type: "object", properties: {} },
+  };
+}
+
+function createSessionsCommand(options: PicoCommandRegistryOptions): SlashCommand {
+  return {
+    name: "sessions",
+    aliases: ["session-list"],
+    description: "List resumable sessions for this project",
+    usage: "/sessions",
+    kind: "local",
+    execute: async (): Promise<LocalCommandResult> => {
+      const summaries = await listCliSessionSummaries(options.workDir);
+      return {
+        type: "local",
+        action: "message",
+        message: formatSessionSelector(summaries, {
+          currentSessionId: options.sessionId ?? options.session?.id,
+        }),
+        data: summaries,
+      };
+    },
+  };
+}
+
+function createResumeCommand(): SlashCommand {
+  return {
+    name: "resume",
+    description: "Show how to resume a saved session",
+    usage: "/resume <session-id>",
+    kind: "local",
+    execute: (input): LocalCommandResult => {
+      const sessionId = input.argv[0];
+      if (!sessionId) {
+        return {
+          type: "local",
+          action: "message",
+          message: "Usage: /resume <session-id>\n先用 /sessions 查看可恢复 session。",
+        };
+      }
+
+      return {
+        type: "local",
+        action: "message",
+        message: [
+          `准备恢复 session: ${sessionId}`,
+          `请重启入口并传入启动参数: --resume ${sessionId}`,
+          "当前会话不会热切换 running engine。",
+        ].join("\n"),
+        data: { sessionId },
+      };
+    },
   };
 }
 
