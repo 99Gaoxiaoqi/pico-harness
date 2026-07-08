@@ -2,7 +2,11 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { loadClaudeAgents, parseClaudeAgent } from "../../src/input/agent-loader.js";
+import {
+  loadClaudeAgents,
+  parseClaudeAgent,
+  summarizeClaudeAgents,
+} from "../../src/input/agent-loader.js";
 
 describe("Claude agent loader", () => {
   let workDir: string;
@@ -52,6 +56,26 @@ describe("Claude agent loader", () => {
     ]);
   });
 
+  it("loads built-in agents below project priority", async () => {
+    await mkdir(join(workDir, ".claude", "agents"), { recursive: true });
+    await writeFile(
+      join(workDir, ".claude", "agents", "Explore.md"),
+      "---\ndescription: Project explorer\ntools: Read\n---\n\nProject prompt",
+    );
+
+    const agents = await loadClaudeAgents({ workDir, includeBuiltins: true });
+
+    expect(agents.some((agent) => agent.source === "builtin")).toBe(true);
+    expect(agents.find((agent) => agent.name === "Explore")).toMatchObject({
+      description: "Project explorer",
+      prompt: "Project prompt",
+      source: "project",
+      tools: ["Read"],
+    });
+    expect(agents.map((agent) => agent.name)).toContain("Plan");
+    expect(agents.map((agent) => agent.name)).toContain("general-purpose");
+  });
+
   it("loads user Claude agents below project priority", async () => {
     const fakeHome = await mkdtemp(join(tmpdir(), "pico-agent-home-"));
     await mkdir(join(workDir, ".claude", "agents"), { recursive: true });
@@ -71,10 +95,63 @@ describe("Claude agent loader", () => {
 
     const agents = await loadClaudeAgents({ homeDir: fakeHome, workDir });
 
-    expect(agents.map((agent) => [agent.name, agent.description, agent.prompt])).toEqual([
+    expect(
+      agents
+        .filter((agent) => agent.source !== "builtin")
+        .map((agent) => [agent.name, agent.description, agent.prompt]),
+    ).toEqual([
       ["reviewer", "Project reviewer", "Project prompt"],
       ["writer", "User writer", "Writer prompt"],
     ]);
     await rm(fakeHome, { recursive: true, force: true });
+  });
+
+  it("summarizes agents with tools and source", () => {
+    const agent = parseClaudeAgent(
+      "---\nname: reviewer\ndescription: Review code\ntools: Read, Grep\n---\n\nPrompt",
+      "fallback",
+      "/tmp/reviewer.md",
+    );
+
+    expect(summarizeClaudeAgents([agent], { includeSource: true })).toEqual([
+      {
+        description: "Review code",
+        name: "reviewer",
+        source: "project",
+        sourcePath: "/tmp/reviewer.md",
+        tools: ["Read", "Grep"],
+      },
+    ]);
+  });
+
+  it("does not let invalid frontmatter block other agents", async () => {
+    await mkdir(join(workDir, ".claude", "agents"), { recursive: true });
+    await writeFile(
+      join(workDir, ".claude", "agents", "broken.md"),
+      "---\nname: [broken\ndescription: Broken\n---\n\nBroken prompt",
+    );
+    await writeFile(
+      join(workDir, ".claude", "agents", "reviewer.md"),
+      "---\ndescription: Review code\n---\n\nReview prompt",
+    );
+
+    const agents = await loadClaudeAgents({ workDir });
+
+    expect(agents).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          description: "",
+          name: "broken",
+          prompt: "Broken prompt",
+          source: "project",
+        }),
+        expect.objectContaining({
+          description: "Review code",
+          name: "reviewer",
+          prompt: "Review prompt",
+          source: "project",
+        }),
+      ]),
+    );
   });
 });

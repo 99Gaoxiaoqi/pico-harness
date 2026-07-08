@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import * as yaml from "js-yaml";
 
-export type ClaudeAgentSource = "project" | "user";
+export type ClaudeAgentSource = "builtin" | "project" | "user";
 
 export interface ClaudeAgent {
   name: string;
@@ -18,18 +18,52 @@ export interface ClaudeAgentSummary {
   name: string;
   description: string;
   sourcePath: string;
+  source?: ClaudeAgentSource;
   tools?: string[];
 }
 
 export interface LoadClaudeAgentsOptions {
   workDir: string;
   homeDir?: string;
+  includeBuiltins?: boolean;
+}
+
+export interface SummarizeClaudeAgentsOptions {
+  includeSource?: boolean;
 }
 
 const AGENT_PRIORITIES: Record<ClaudeAgentSource, number> = {
+  builtin: 0,
   user: 10,
   project: 20,
 };
+
+const BUILTIN_AGENTS: readonly ClaudeAgent[] = [
+  {
+    name: "Explore",
+    description: "Search and understand codebases without making edits.",
+    prompt: "Explore the codebase and report findings without changing files.",
+    source: "builtin",
+    sourcePath: "builtin:Explore",
+    tools: ["Read", "Grep", "Glob"],
+  },
+  {
+    name: "Plan",
+    description: "Break down implementation work into a clear plan before edits.",
+    prompt: "Create a concise implementation plan without changing files.",
+    source: "builtin",
+    sourcePath: "builtin:Plan",
+    tools: ["Read", "Grep", "Glob"],
+  },
+  {
+    name: "general-purpose",
+    description: "Handle complex multi-step tasks that need exploration and action.",
+    prompt: "Complete a complex multi-step task and summarize the result.",
+    source: "builtin",
+    sourcePath: "builtin:general-purpose",
+    tools: ["*"],
+  },
+];
 
 export async function loadClaudeAgents(
   options: LoadClaudeAgentsOptions,
@@ -42,7 +76,10 @@ export async function loadClaudeAgents(
     ...userDir.map((dir) => loadAgentsFromDir(dir, "user")),
   ]);
 
-  return resolveAgentConflicts(groups.flat());
+  return resolveAgentConflicts([
+    ...(options.includeBuiltins ? BUILTIN_AGENTS : []),
+    ...groups.flat(),
+  ]);
 }
 
 export function parseClaudeAgent(
@@ -67,11 +104,15 @@ export function parseClaudeAgent(
   };
 }
 
-export function summarizeClaudeAgents(agents: ClaudeAgent[]): ClaudeAgentSummary[] {
-  return agents.map(({ description, name, sourcePath, tools }) => ({
+export function summarizeClaudeAgents(
+  agents: ClaudeAgent[],
+  options: SummarizeClaudeAgentsOptions = {},
+): ClaudeAgentSummary[] {
+  return agents.map(({ description, name, source, sourcePath, tools }) => ({
     description,
     name,
     sourcePath,
+    ...(options.includeSource ? { source } : {}),
     ...(tools !== undefined ? { tools } : {}),
   }));
 }
@@ -117,21 +158,9 @@ function parseFrontmatter(text: string): Record<string, unknown> {
       return parsed as Record<string, unknown>;
     }
   } catch {
-    return parseSimpleFrontmatter(text);
+    return {};
   }
   return {};
-}
-
-function parseSimpleFrontmatter(text: string): Record<string, unknown> {
-  const frontmatter: Record<string, unknown> = {};
-  for (const rawLine of text.split("\n")) {
-    const line = rawLine.trim();
-    if (!line || line.startsWith("#")) continue;
-    const idx = line.indexOf(":");
-    if (idx === -1) continue;
-    frontmatter[line.slice(0, idx).trim()] = line.slice(idx + 1).trim();
-  }
-  return frontmatter;
 }
 
 function optionalTools(value: unknown): Partial<ClaudeAgent> {
