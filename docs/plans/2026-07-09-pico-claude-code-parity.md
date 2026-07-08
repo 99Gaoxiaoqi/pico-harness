@@ -18,7 +18,7 @@
 - [x] 基线提交：第一阶段 slash command、@ mention、skill command、TUI 候选与 `.env` 启动修复已合入 `main`。
 - [x] 第二阶段 worktree 已创建。
 - [x] 子代理已启动并拿到各自写入范围。
-- [ ] 子代理开发结果已全部集成回 `main`。
+- [x] 子代理开发结果已全部集成回 `main`。
 - [ ] 集成测试子代理完成最终验证。
 
 ---
@@ -189,10 +189,10 @@ git diff --check
 
 **任务：**
 
-- [ ] `/snapshots` 展示当前 session 可回滚点。
-- [ ] `/rewind` 与 `/undo` 接到既有文件历史能力，先做文本交互，不做复杂弹窗。
-- [ ] ApprovalPanel 展示工具名、命令/路径、允许一次/本 session/拒绝/修改。
-- [ ] DiffPreview 复用现有 diff 字符串，做最小高亮和截断。
+- [x] `/snapshots` 展示当前 session 可回滚点。
+- [x] `/rewind` 与 `/undo` 接到既有文件历史能力，先做文本交互，不做复杂弹窗。
+- [x] ApprovalPanel 展示工具名、命令/路径、允许一次/本 session/拒绝/修改。
+- [x] DiffPreview 复用现有 diff 字符串，做最小高亮和截断。
 
 **验收命令：**
 
@@ -211,7 +211,7 @@ git diff --check
 - [x] 合并 Worker E：接入 Claude commands/agents 资源。
 - [x] 合并 Worker B：接入外壳与状态区。
 - [x] 合并 Worker C：接入输入编辑体验。
-- [ ] 合并 Worker F：接入 rewind/approval UI。
+- [x] 合并 Worker F：接入 rewind/approval UI。
 
 ---
 
