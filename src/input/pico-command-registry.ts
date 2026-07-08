@@ -11,6 +11,7 @@ import {
 } from "../cli/file-history.js";
 import {
   formatRewindSelector,
+  formatRewindUsage,
   latestSnapshotMessageId,
 } from "../tui/rewind-selector.js";
 import { createBuiltinCommands } from "./builtin-commands.js";
@@ -490,14 +491,20 @@ function createRewindCommand(options: PicoCommandRegistryOptions): SlashCommand 
     execute: async (input): Promise<LocalCommandResult> => {
       const session = await resolveCommandSession(options);
       const messageId = input.argv[0];
-      const mode = parseRewindMode(input.argv[1]);
-      const result = await rewindFileHistoryFromCli(session, messageId, mode);
+      const summaries = listFileHistorySnapshotSummaries(session);
+      if (messageId === undefined) {
+        return {
+          type: "local",
+          action: "message",
+          message: formatRewindUsage(session.id, summaries),
+        };
+      }
+
+      const message = await tryRewindCommand(session, messageId, input.argv[1]);
       return {
         type: "local",
         action: "message",
-        message: result.changed
-          ? result.output
-          : formatRewindSelector(session.id, listFileHistorySnapshotSummaries(session)),
+        message,
       };
     },
   };
@@ -538,6 +545,24 @@ async function resolveCommandSession(options: PicoCommandRegistryOptions): Promi
     options.sessionId ?? defaultCliSessionId(options.workDir),
     options.workDir,
   );
+}
+
+async function tryRewindCommand(
+  session: Session,
+  messageId: string,
+  modeInput: string | undefined,
+): Promise<string> {
+  try {
+    const mode = parseRewindMode(modeInput);
+    const result = await rewindFileHistoryFromCli(session, messageId, mode);
+    return result.output;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.startsWith(`找不到 messageId=${messageId}`)) {
+      return `找不到 messageId=${messageId} 的文件历史快照。请运行 /snapshots 查看可用快照，或使用 /rewind <messageId> code|conversation|both。`;
+    }
+    return `${message}\n用法: /rewind <messageId> code|conversation|both`;
+  }
 }
 
 function createSkillsCommand(loader: SkillLoader): SlashCommand {

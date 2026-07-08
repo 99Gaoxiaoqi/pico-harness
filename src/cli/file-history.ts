@@ -9,6 +9,7 @@ export interface FileHistorySnapshotSummary {
   trackedFileCount: number;
   backedUpFileCount: number;
   deletedFileCount: number;
+  changeSummary?: string;
   messageIndex?: number;
 }
 
@@ -56,6 +57,11 @@ export function listFileHistorySnapshotSummaries(
       trackedFileCount: snapshot.trackedFileBackups.size,
       backedUpFileCount,
       deletedFileCount,
+      changeSummary: formatSnapshotChangeSummary({
+        trackedFileCount: snapshot.trackedFileBackups.size,
+        backedUpFileCount,
+        deletedFileCount,
+      }),
       ...(snapshot.messageIndex !== undefined ? { messageIndex: snapshot.messageIndex } : {}),
     };
   });
@@ -75,9 +81,11 @@ export function formatFileHistorySnapshots(
       [
         `- messageId=${summary.messageId}`,
         `timestamp=${summary.timestamp}`,
+        `files=${summary.trackedFileCount}`,
         `tracked=${summary.trackedFileCount}`,
         `backups=${summary.backedUpFileCount}`,
         `deleted=${summary.deletedFileCount}`,
+        `summary=${summary.changeSummary ?? formatSnapshotChangeSummary(summary)}`,
       ].join(" "),
     );
   }
@@ -93,10 +101,7 @@ export async function rewindFileHistoryFromCli(
     const summaries = listFileHistorySnapshotSummaries(session);
     return {
       changed: false,
-      output:
-        summaries.length === 0
-          ? formatFileHistorySnapshots(session.id, summaries)
-          : `可回滚快照:\n${formatFileHistorySnapshots(session.id, summaries)}`,
+      output: formatCliRewindUsage(session.id, summaries),
     };
   }
 
@@ -114,16 +119,62 @@ export async function rewindFileHistoryFromCli(
 
   return {
     changed: true,
-    output: `已回滚 session ${session.id}: messageId=${messageId} mode=${mode}`,
+    output: `已回滚 session ${session.id}: messageId=${messageId} mode=${mode} (${describeRewindMode(mode)})`,
   };
 }
 
 function findSnapshot(session: Session, messageId: string): FileHistorySnapshot {
   const snapshot = session.fileHistory.snapshots.find((item) => item.messageId === messageId);
   if (!snapshot) {
-    throw new Error(`找不到 messageId=${messageId} 的文件历史快照`);
+    throw new Error(
+      `找不到 messageId=${messageId} 的文件历史快照。请先运行 --list-snapshots 查看可用快照。`,
+    );
   }
   return snapshot;
+}
+
+export function formatSnapshotChangeSummary(input: {
+  trackedFileCount: number;
+  backedUpFileCount: number;
+  deletedFileCount: number;
+}): string {
+  const unchangedFileCount =
+    input.trackedFileCount - input.backedUpFileCount - input.deletedFileCount;
+  const parts: string[] = [];
+  if (input.backedUpFileCount > 0) {
+    parts.push(`${input.backedUpFileCount} 个文件有备份`);
+  }
+  if (input.deletedFileCount > 0) {
+    parts.push(`${input.deletedFileCount} 个文件将在 rewind 时删除`);
+  }
+  if (unchangedFileCount > 0) {
+    parts.push(`${unchangedFileCount} 个文件沿用上一版`);
+  }
+  return parts.length === 0 ? "无文件变更" : parts.join(", ");
+}
+
+function formatCliRewindUsage(
+  sessionId: string,
+  summaries: readonly FileHistorySnapshotSummary[],
+): string {
+  const lines = [
+    "请提供 messageId 和 rewind mode。",
+    "用法: --rewind <message-id> --rewind-mode code|conversation|both",
+    "mode: code=只回滚文件, conversation=只回滚对话, both=同时回滚文件和对话",
+  ];
+  const latest = summaries.at(-1);
+  if (latest) {
+    lines.push(`最近快照: ${latest.messageId}`, "可回滚快照:", formatFileHistorySnapshots(sessionId, summaries));
+  } else {
+    lines.push(formatFileHistorySnapshots(sessionId, summaries));
+  }
+  return lines.join("\n");
+}
+
+function describeRewindMode(mode: RewindMode): string {
+  if (mode === "code") return "只回滚文件";
+  if (mode === "conversation") return "只回滚对话";
+  return "同时回滚文件和对话";
 }
 
 function resolveSnapshotMessageIndex(session: Session, snapshot: FileHistorySnapshot): number {
