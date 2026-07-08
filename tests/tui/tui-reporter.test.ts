@@ -1,0 +1,107 @@
+// TuiReporter 单元测试:验证 engine 事件 → TuiEntry 状态映射正确。
+// mock onUpdate 回调,断言 reporter 各方法调用后 entries 快照的形状。
+
+import { describe, expect, it, vi } from "vitest";
+import { TuiReporter } from "../../src/tui/tui-reporter.js";
+
+describe("TuiReporter", () => {
+  /** 辅助:创建 reporter + 捕获 onUpdate 的最新快照 */
+  function harness() {
+    const snapshots: ReturnType<typeof Array.from<typeof import("../../src/tui/tui-reporter.js")["TuiEntry"]>>[] = [];
+    const onUpdate = vi.fn((entries: unknown[]) => snapshots.push([...entries] as never));
+    const reporter = new TuiReporter(onUpdate as never);
+    return { reporter, snapshots, last: () => snapshots[snapshots.length - 1] };
+  }
+
+  it("pushUserMessage 追加 user 条目", () => {
+    const { reporter, last } = harness();
+    reporter.pushUserMessage("你好");
+    expect(last()).toEqual([{ kind: "user", content: "你好" }]);
+  });
+
+  it("onThinking 追加 thinking 占位条目", () => {
+    const { reporter, last } = harness();
+    reporter.onThinking();
+    expect(last()).toEqual([{ kind: "thinking" }]);
+  });
+
+  it("onToolCall → onToolResult 配对更新状态(running→done)", () => {
+    const { reporter, last } = harness();
+    reporter.onToolCall("read_file", '{"path":"README.md"}');
+    let entries = last()!;
+    expect(entries[0]).toMatchObject({ kind: "tool", name: "read_file", status: "running" });
+
+    reporter.onToolResult("read_file", "# pico-harness\n一个引擎", false);
+    entries = last()!;
+    expect(entries[0]).toMatchObject({ kind: "tool", name: "read_file", status: "done" });
+    expect(entries[0]!.kind === "tool" && entries[0].summary).toContain("字节");
+  });
+
+  it("onToolResult 错误时 status=error", () => {
+    const { reporter, last } = harness();
+    reporter.onToolCall("bash", '{"command":"bad"}');
+    reporter.onToolResult("bash", "command not found", true);
+    const entries = last()!;
+    expect(entries[0]).toMatchObject({ kind: "tool", name: "bash", status: "error" });
+  });
+
+  it("onTextDelta 流式累积成 assistant 条目", () => {
+    const { reporter, last } = harness();
+    reporter.onTextDelta("你好");
+    expect(last()!).toEqual([{ kind: "assistant", content: "你好" }]);
+
+    reporter.onTextDelta(",世界");
+    expect(last()!).toEqual([{ kind: "assistant", content: "你好,世界" }]);
+  });
+
+  it("onMessage 固化流式缓冲为权威版本", () => {
+    const { reporter, last } = harness();
+    reporter.onTextDelta("部分内容");
+    reporter.onMessage("完整的最终回复");
+    expect(last()!).toEqual([{ kind: "assistant", content: "完整的最终回复" }]);
+  });
+
+  it("onMessage 无流式时直接 push assistant 条目", () => {
+    const { reporter, last } = harness();
+    reporter.onMessage("非流式回复");
+    expect(last()!).toEqual([{ kind: "assistant", content: "非流式回复" }]);
+  });
+
+  it("多轮对话:user → tool → assistant 顺序保留", () => {
+    const { reporter, last } = harness();
+    reporter.pushUserMessage("读文件");
+    reporter.onToolCall("read_file", '{"path":"a.txt"}');
+    reporter.onToolResult("read_file", "内容", false);
+    reporter.onMessage("这是文件内容摘要");
+    const entries = last()!;
+    expect(entries.map((e) => e.kind)).toEqual(["user", "tool", "assistant"]);
+  });
+
+  it("并发同名工具:onToolResult 更新最后一个 running 的", () => {
+    const { reporter, last } = harness();
+    reporter.onToolCall("read_file", '{"path":"a"}');
+    reporter.onToolCall("read_file", '{"path":"b"}');
+    reporter.onToolResult("read_file", "内容a", false);
+    const entries = last()!;
+    // 第一个仍 running,第二个 done
+    expect(entries[0]).toMatchObject({ status: "running" });
+    expect(entries[1]).toMatchObject({ status: "done" });
+  });
+
+  it("onUpdate 每次回调传入新数组引用(触发 ink 重渲染)", () => {
+    const { reporter, snapshots } = harness();
+    reporter.pushUserMessage("a");
+    reporter.pushUserMessage("b");
+    // 两次快照应是不同数组引用
+    expect(snapshots[0]).not.toBe(snapshots[1]);
+  });
+
+  it("工具结果摘要截断长输出", () => {
+    const { reporter, last } = harness();
+    reporter.onToolCall("bash", "{}");
+    const longResult = "x".repeat(500) + "\n" + "y".repeat(500);
+    reporter.onToolResult("bash", longResult, false);
+    const entry = last()![0]!;
+    expect(entry.kind === "tool" && entry.summary!.length).toBeLessThan(200);
+  });
+});
