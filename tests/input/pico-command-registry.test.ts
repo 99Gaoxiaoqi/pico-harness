@@ -289,7 +289,21 @@ describe("Pico command registry", () => {
     if (result.type !== "local-command") return;
     expect(result.command).toBe("snapshots");
     expect(result.result.message).toContain("turn-1");
-    expect(result.result.message).toContain("/rewind turn-1");
+    expect(result.result.message).toContain("files=1");
+    expect(result.result.message).toContain("summary=1 个文件有备份");
+    expect(result.result.message).toContain("/rewind turn-1 both");
+  });
+
+  it("/rewind 无参数展示最近快照和 mode 使用说明", async () => {
+    const { registry } = await registryWithSnapshot("turn-1");
+
+    const result = await processUserInput("/rewind", { registry });
+
+    expect(result.type).toBe("local-command");
+    if (result.type !== "local-command") return;
+    expect(result.result.message).toContain("最近快照: turn-1");
+    expect(result.result.message).toContain("用法: /rewind <messageId> code|conversation|both");
+    expect(result.result.message).toContain("code: 只回滚文件");
   });
 
   it("/rewind <message-id> 接到既有文件历史回滚", async () => {
@@ -300,7 +314,20 @@ describe("Pico command registry", () => {
     expect(result.type).toBe("local-command");
     if (result.type !== "local-command") return;
     expect(result.result.message).toContain("已回滚");
+    expect(result.result.message).toContain("mode=code");
+    expect(result.result.message).toContain("只回滚文件");
     expect(readFileSync(filePath, "utf8")).toBe("before\n");
+  });
+
+  it("/rewind 找不到快照时给出可行动提示", async () => {
+    const { registry } = await registryWithSnapshot("turn-1");
+
+    const result = await processUserInput("/rewind missing code", { registry });
+
+    expect(result.type).toBe("local-command");
+    if (result.type !== "local-command") return;
+    expect(result.result.message).toContain("找不到 messageId=missing");
+    expect(result.result.message).toContain("请运行 /snapshots 查看可用快照");
   });
 
   it("/undo 默认回滚最后一个文件历史快照", async () => {

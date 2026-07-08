@@ -61,12 +61,13 @@ describe("CLI FileHistory 1.5.8", () => {
         trackedFileCount: 1,
         backedUpFileCount: 1,
         deletedFileCount: 0,
+        changeSummary: "1 个文件有备份",
       }),
     ]);
     expect(output).toContain("turn-1");
-    expect(output).toContain("tracked=1");
-    expect(output).toContain("backups=1");
+    expect(output).toContain("files=1");
     expect(output).toContain("timestamp=");
+    expect(output).toContain("summary=1 个文件有备份");
   });
 
   it("--list-snapshots 空快照时给出清晰提示并视为成功", () => {
@@ -82,6 +83,8 @@ describe("CLI FileHistory 1.5.8", () => {
     const result = await rewindFileHistoryFromCli(session, undefined, "both");
 
     expect(result.changed).toBe(false);
+    expect(result.output).toContain("最近快照: turn-1");
+    expect(result.output).toContain("用法: --rewind <message-id> --rewind-mode code|conversation|both");
     expect(result.output).toContain("可回滚快照");
     expect(result.output).toContain("turn-1");
   });
@@ -95,6 +98,8 @@ describe("CLI FileHistory 1.5.8", () => {
     const result = await rewindFileHistoryFromCli(session, "turn-1", "code");
 
     expect(result.changed).toBe(true);
+    expect(result.output).toContain("mode=code");
+    expect(result.output).toContain("只回滚文件");
     expect(readFileSync(filePath, "utf8")).toBe("original\n");
     expect(session.length).toBe(beforeLength);
   });
@@ -120,6 +125,8 @@ describe("CLI FileHistory 1.5.8", () => {
     const result = await rewindFileHistoryFromCli(session, "turn-1", "conversation");
 
     expect(result.changed).toBe(true);
+    expect(result.output).toContain("mode=conversation");
+    expect(result.output).toContain("只回滚对话");
     expect(readFileSync(filePath, "utf8")).toBe("after snapshot\n");
     expect(session.getHistory().map((msg) => msg.content)).toEqual(["改文件", "已修改"]);
   });
@@ -132,8 +139,18 @@ describe("CLI FileHistory 1.5.8", () => {
     const result = await rewindFileHistoryFromCli(session, "turn-1", "both");
 
     expect(result.changed).toBe(true);
+    expect(result.output).toContain("mode=both");
+    expect(result.output).toContain("同时回滚文件和对话");
     expect(readFileSync(filePath, "utf8")).toBe("original\n");
     expect(session.getHistory().map((msg) => msg.content)).toEqual(["改文件", "已修改"]);
+  });
+
+  it("--rewind 找不到快照时输出可行动提示", async () => {
+    await createSnapshot("turn-1");
+
+    await expect(rewindFileHistoryFromCli(session, "missing", "code")).rejects.toThrow(
+      "请先运行 --list-snapshots 查看可用快照",
+    );
   });
 
   it("--rewind both 回滚到新建文件快照时删除文件", async () => {
