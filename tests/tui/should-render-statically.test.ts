@@ -2,7 +2,9 @@
 // 覆盖:user/tool-done/tool-running/assistant-static/assistant-streaming/thinking。
 
 import { describe, expect, it } from "vitest";
-import { shouldRenderStatically } from "../../src/tui/message-list.js";
+import React from "react";
+import { renderToString } from "ink";
+import { MessageList, shouldRenderStatically } from "../../src/tui/message-list.js";
 import type { TuiEntry } from "../../src/tui/tui-reporter.js";
 
 describe("shouldRenderStatically", () => {
@@ -50,4 +52,42 @@ describe("shouldRenderStatically", () => {
     expect(shouldRenderStatically(e, false, false)).toBe(false);
     expect(shouldRenderStatically(e, true, true)).toBe(false);
   });
+
+  it("消息列表统一 user/assistant/system/error 行首符号与缩进", () => {
+    const output = renderToString(
+      React.createElement(MessageList, {
+        entries: [
+          { kind: "user", content: "帮我检查" },
+          { kind: "assistant", content: "正在检查" },
+          { kind: "assistant", content: "Unknown command: /wat" },
+          { kind: "assistant", content: "⚠️ 执行出错: boom" },
+        ],
+      }),
+    );
+
+    expect(output).toContain("❯ 帮我检查");
+    expect(output).toContain("✦ 正在检查");
+    expect(output).toContain("• Unknown command: /wat");
+    expect(output).toContain("! ⚠️ 执行出错: boom");
+  });
+
+  it("流式 assistant 只让末条动态渲染,历史行不重复出现", () => {
+    const output = renderToString(
+      React.createElement(MessageList, {
+        isStreaming: true,
+        entries: [
+          { kind: "assistant", content: "历史回复" },
+          { kind: "tool", name: "read_file", args: "{}", status: "done", summary: "10 字节 · ok" },
+          { kind: "assistant", content: "正在流式输出" },
+        ],
+      }),
+    );
+
+    expect(countOccurrences(output, "历史回复")).toBe(1);
+    expect(countOccurrences(output, "正在流式输出")).toBe(1);
+  });
 });
+
+function countOccurrences(text: string, needle: string): number {
+  return text.split(needle).length - 1;
+}
