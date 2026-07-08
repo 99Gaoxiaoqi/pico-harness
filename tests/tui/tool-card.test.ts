@@ -120,6 +120,42 @@ describe("ToolCard agent tool detection", () => {
     expect(summary).toContain("Error: command failed");
     expect(summary.length).toBeLessThanOrEqual(180);
   });
+
+  it("delegate_task 运行态显示 agent name 和任务摘要", () => {
+    const output = renderToString(
+      React.createElement(ToolCard, {
+        name: "delegate_task",
+        args: JSON.stringify({
+          agent_name: "reviewer",
+          goal: "检查子代理状态展示是否接近 Claude Code",
+        }),
+        status: "running",
+      }),
+    );
+
+    expect(output).toContain("reviewer");
+    expect(output).toContain("Running");
+    expect(output).toContain("检查子代理状态展示");
+  });
+
+  it("delegate_task 批量运行态显示 total 和折叠后的首个任务摘要", () => {
+    const longGoal = "分析很长很长的任务描述".repeat(12);
+    const output = renderToString(
+      React.createElement(ToolCard, {
+        name: "delegate_task",
+        args: JSON.stringify({
+          tasks: [{ goal: longGoal }, { goal: "运行测试" }, { goal: "整理报告" }],
+        }),
+        status: "running",
+      }),
+    );
+
+    expect(output).toContain("3 agents");
+    expect(output).toContain("1/3 queued");
+    expect(output).toContain("分析很长很长");
+    expect(output).not.toContain(longGoal);
+    expect(output.split("\n")).toHaveLength(1);
+  });
 });
 
 function renderToolStatus(status: React.ComponentProps<typeof ToolCard>["status"]): string {
