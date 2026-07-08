@@ -29,6 +29,7 @@ import {
   formatToolStatus,
   getOrCreateSessionSettings,
   parseThinkingEffortArg,
+  setSessionMode,
   setSessionModel,
   setSessionThinkingEffort,
   toolStatusFromRegistry,
@@ -68,6 +69,7 @@ export async function createPicoCommandRegistry(
       command.name !== "skills" &&
       command.name !== "skill" &&
       command.name !== "model" &&
+      command.name !== "mode" &&
       command.name !== "status" &&
       command.name !== "tools" &&
       command.name !== "thinking",
@@ -75,6 +77,7 @@ export async function createPicoCommandRegistry(
   const registry = new CommandRegistry([
     ...builtins,
     createStatusCommand(settings),
+    createModeCommand(settings),
     createModelCommand(settings),
     createThinkingCommand(settings),
     createToolsCommand(settings),
@@ -139,7 +142,7 @@ function createStatusCommand(settings: SessionSettings): SlashCommand {
 function createModelCommand(settings: SessionSettings): SlashCommand {
   return {
     name: "model",
-    aliases: ["models", "mode"],
+    aliases: ["models"],
     description: "Show or change the active model",
     usage: "/model [name]",
     kind: "local",
@@ -150,6 +153,33 @@ function createModelCommand(settings: SessionSettings): SlashCommand {
         action: "model",
         message: result.message,
         data: { model: settings.model },
+      };
+    },
+  };
+}
+
+function createModeCommand(settings: SessionSettings): SlashCommand {
+  return {
+    name: "mode",
+    description: "Show or change the current interaction mode",
+    usage: "/mode <default|plan|auto|yolo>",
+    kind: "local",
+    execute: (input): LocalCommandResult => {
+      if (input.args.trim().length === 0) {
+        return {
+          type: "local",
+          action: "message",
+          message: `Current mode: ${settings.mode}`,
+          data: { mode: settings.mode },
+        };
+      }
+
+      const result = setSessionMode(settings, input.args);
+      return {
+        type: "local",
+        action: "message",
+        message: result.message,
+        data: { ok: result.ok, mode: settings.mode },
       };
     },
   };
