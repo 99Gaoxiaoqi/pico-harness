@@ -37,6 +37,7 @@ import { createFeishuApprovalMiddleware, FeishuBot, loadFeishuConfig } from "../
 import { PromptComposer } from "../context/composer.js";
 import { SkillLoader, SkillViewTool } from "../context/skill.js";
 import { TodoStore } from "../context/todo-store.js";
+import { ToolDisclosure } from "../tools/tool-disclosure.js";
 import { DelegationManager, DelegateStatusTool } from "../tools/delegation-manager.js";
 import { createSubagentRegistryFactory } from "../tools/delegation-registry.js";
 import { AgentProfileLoader, type AgentProfile } from "../tools/agent-profile.js";
@@ -78,12 +79,14 @@ function buildRegistry(
   backgroundManager: BackgroundManager = cliBackgroundManager,
   goalManager?: GoalManager,
   todoStore?: TodoStore,
+  toolDisclosure?: ToolDisclosure,
 ): ToolRegistry {
   return buildDefaultToolRegistry(workDir, {
     truncateResults: false,
     backgroundManager,
     ...(goalManager !== undefined ? { goalManager } : {}),
     ...(todoStore !== undefined ? { todoStore } : {}),
+    ...(toolDisclosure !== undefined ? { toolDisclosure } : {}),
   });
 }
 
@@ -298,6 +301,8 @@ async function main() {
     const goalManager = new GoalManager();
     const todoStore = new TodoStore(workDir);
     const backgroundManager = new BackgroundManager();
+    // 工具渐进披露状态机(ROADMAP 5.4):registry(search_tools)与 engine(pickForLLM)共享同一实例。
+    const toolDisclosure = new ToolDisclosure();
     // 非 plan 模式预组装 system prompt(plan 模式由 engine 每轮动态重组,故不预生成)
     const acpSystemPrompt = await new PromptComposer(workDir, false, { goalManager, todoStore }).build();
 
@@ -306,7 +311,7 @@ async function main() {
     const engineFactory: AcpEngineFactory = ({ session, mode, reporter }) => {
       const provider = createProvider(kind, undefined, thinkingEffort);
       const trackedProvider = new CostTracker(provider, modelName, session);
-      const registry = buildRegistry(workDir, backgroundManager, goalManager, todoStore);
+      const registry = buildRegistry(workDir, backgroundManager, goalManager, todoStore, toolDisclosure);
       const usePlanMode = mode === "plan";
       if (mode === "auto" || mode === "yolo") {
         globalApprovalPolicy.setYoloMode(session.id, true);
@@ -322,6 +327,8 @@ async function main() {
         systemPrompt: usePlanMode ? undefined : acpSystemPrompt,
         goalManager,
         todoStore,
+        // TODO: loop 端会加此字段,合并后即消(toolDisclosure?: ToolDisclosure on AgentEngineOptions)。
+        ...(toolDisclosure ? { toolDisclosure } : {}),
         compactor: buildCompactor(kind, modelName),
         observationProcessor: buildObservationProcessor(workDir),
         reporter,
@@ -345,6 +352,8 @@ async function main() {
     const goalManager = new GoalManager();
     // TodoStore 单例:飞书进程级共享,registry(TodoTool)与 Composer 用同一实例。
     const todoStore = new TodoStore(workDir);
+    // 工具渐进披露状态机(ROADMAP 5.4):registry(search_tools)与 engine(pickForLLM)共享同一实例。
+    const toolDisclosure = new ToolDisclosure();
     const systemPrompt = planMode
       ? undefined
       : await new PromptComposer(workDir, false, { goalManager, todoStore }).build();
@@ -356,7 +365,7 @@ async function main() {
       ({ session, reporter }) => {
         const provider = createProvider(kind, undefined, thinkingEffort);
         const trackedProvider = new CostTracker(provider, modelName, session);
-        const registry = buildRegistry(workDir, backgroundManager, goalManager, todoStore);
+        const registry = buildRegistry(workDir, backgroundManager, goalManager, todoStore, toolDisclosure);
         registry.use(createFeishuApprovalMiddleware(reporter, workDir));
         const engine = new AgentEngine({
           provider: trackedProvider,
@@ -368,6 +377,8 @@ async function main() {
           systemPrompt,
           goalManager,
           todoStore,
+          // TODO: loop 端会加此字段,合并后即消(toolDisclosure?: ToolDisclosure on AgentEngineOptions)。
+          ...(toolDisclosure ? { toolDisclosure } : {}),
           compactor: buildCompactor(kind, modelName),
           observationProcessor: buildObservationProcessor(workDir),
           reporter: new SilentReporter(), // 实际回写由运行时 FeishuReporter 负责
