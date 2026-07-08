@@ -389,7 +389,6 @@ function createToolsCommand(
 function createAgentsCommand(options: PicoCommandRegistryOptions): SlashCommand {
   return {
     name: "agents",
-    aliases: ["agent"],
     description: "List available subagents",
     usage: "/agents",
     kind: "local",
