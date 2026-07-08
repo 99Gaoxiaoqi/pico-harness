@@ -1,10 +1,21 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { Session } from "../../src/engine/session.js";
 import { createBuiltinCommandRegistry } from "../../src/input/builtin-commands.js";
-import { createPicoCommandRegistry } from "../../src/input/pico-command-registry.js";
+import {
+  commandSuggestions,
+  createPicoCommandRegistry,
+} from "../../src/input/pico-command-registry.js";
 import { processUserInput } from "../../src/input/process-user-input.js";
 import {
   getStoredSessionSettings,
@@ -269,6 +280,67 @@ describe("Pico command registry", () => {
     expect(result.result.message).toContain("CWD: /tmp/pico-work");
   });
 
+  it("/sessions lists resumable sessions for the current project", async () => {
+    const workDir = mkdtempSync(join(tmpdir(), "pico-command-sessions-"));
+    cleanup.push(() => rmSync(workDir, { recursive: true, force: true }));
+    writeSessionLog(workDir, "cli-current", "2026-07-09T03:00:00.000Z", [
+      { type: "message", seq: 0, message: { role: "user", content: "hi" } },
+      { type: "message", seq: 1, message: { role: "assistant", content: "hello" } },
+    ]);
+    const registry = await createPicoCommandRegistry({
+      workDir,
+      provider: "openai",
+      model: "glm-5.2",
+      sessionId: "cli-current",
+    });
+
+    const result = await processUserInput("/sessions", { registry });
+
+    expect(result.type).toBe("local-command");
+    if (result.type !== "local-command") return;
+    expect(result.command).toBe("sessions");
+    expect(result.result.message).toContain("cli-current");
+    expect(result.result.message).toContain("messages=2");
+    expect(result.result.message).toContain("current");
+    expect(result.result.message).toContain("/resume cli-current");
+  });
+
+  it("/resume gives a restart hint instead of hot-switching the running engine", async () => {
+    const registry = await createPicoCommandRegistry({
+      workDir: process.cwd(),
+      provider: "openai",
+      model: "glm-5.2",
+      sessionId: "cli-active",
+    });
+
+    const result = await processUserInput("/resume cli-known", { registry });
+
+    expect(result.type).toBe("local-command");
+    if (result.type !== "local-command") return;
+    expect(result.command).toBe("resume");
+    expect(result.result.message).toContain("cli-known");
+    expect(result.result.message).toContain("--resume cli-known");
+    expect(result.result.message).toContain("当前会话不会热切换");
+  });
+
+  it("/sessions and /resume are discoverable from help and suggestions", async () => {
+    const registry = await createPicoCommandRegistry({
+      workDir: process.cwd(),
+      provider: "openai",
+      model: "glm-5.2",
+      sessionId: "session-discovery",
+    });
+
+    const help = await processUserInput("/help", { registry });
+
+    expect(help.type).toBe("local-command");
+    if (help.type !== "local-command") return;
+    expect(help.result.message).toContain("/sessions");
+    expect(help.result.message).toContain("/resume");
+    expect(commandSuggestions(registry, "sess").map((item) => item.value)).toContain("sessions");
+    expect(commandSuggestions(registry, "res").map((item) => item.value)).toContain("resume");
+  });
+
   it("builtin registry exposes /mode as its own command", async () => {
     const result = await processUserInput("/mode", {
       registry: createBuiltinCommandRegistry(),
@@ -403,3 +475,24 @@ describe("Pico command registry", () => {
     expect(result.result.message).toContain("Node:");
   });
 });
+
+function writeSessionLog(
+  workDir: string,
+  sessionId: string,
+  timestamp: string,
+  records: readonly unknown[],
+): void {
+  const dir = join(workDir, ".claw", "sessions");
+  const path = join(dir, `${sessionId}.jsonl`);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    path,
+    [
+      JSON.stringify({ type: "meta", schemaVersion: 1 }),
+      ...records.map((record) => JSON.stringify(record)),
+    ].join("\n") + "\n",
+    "utf8",
+  );
+  const time = new Date(timestamp);
+  utimesSync(path, time, time);
+}

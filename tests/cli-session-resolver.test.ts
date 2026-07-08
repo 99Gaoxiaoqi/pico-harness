@@ -3,7 +3,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  listCliSessionSummaries,
   resolveCliSession,
+  type CliSessionSummary,
   type CliSessionSelection,
 } from "../src/cli/session-resolver.js";
 
@@ -32,6 +34,53 @@ describe("resolveCliSession", () => {
       mode: "continue",
       sessionId: "cli-new",
     });
+  });
+
+  it("列出当前项目可恢复 session 摘要并按更新时间倒序排列", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-session-resolver-"));
+    await writeSessionFile(workDir, "cli-old", "2026-07-09T01:00:00.000Z", [
+      { type: "meta", schemaVersion: 1 },
+      { type: "message", seq: 0, message: { role: "user", content: "old" } },
+    ]);
+    await writeSessionFile(workDir, "cli-new", "2026-07-09T02:00:00.000Z", [
+      { type: "meta", schemaVersion: 1 },
+      { type: "message", seq: 0, message: { role: "user", content: "hi" } },
+      { type: "message", seq: 1, message: { role: "assistant", content: "hello" } },
+    ]);
+
+    const summaries = await listCliSessionSummaries(workDir);
+
+    expect(summaries).toMatchObject<CliSessionSummary[]>([
+      {
+        id: "cli-new",
+        cwd: workDir,
+        createdAt: expect.any(Date) as Date,
+        updatedAt: new Date("2026-07-09T02:00:00.000Z"),
+        messageCount: 2,
+      },
+      {
+        id: "cli-old",
+        cwd: workDir,
+        createdAt: expect.any(Date) as Date,
+        updatedAt: new Date("2026-07-09T01:00:00.000Z"),
+        messageCount: 1,
+      },
+    ]);
+    expect(summaries[0]?.createdAt).toBeInstanceOf(Date);
+  });
+
+  it("session 摘要按事件折叠后的历史计算 messageCount", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-session-resolver-"));
+    await writeSessionFile(workDir, "cli-truncated", "2026-07-09T03:00:00.000Z", [
+      { type: "meta", schemaVersion: 1 },
+      { type: "message", seq: 0, message: { role: "user", content: "drop me" } },
+      { type: "message", seq: 1, message: { role: "assistant", content: "drop me too" } },
+      { type: "truncate", seq: 2, fromIndex: 1 },
+    ]);
+
+    await expect(listCliSessionSummaries(workDir)).resolves.toMatchObject([
+      { id: "cli-truncated", messageCount: 1 },
+    ]);
   });
 
   it("--continue 在当前项目没有 session 时创建新 session", async () => {
@@ -86,4 +135,18 @@ async function touchSessionFile(
   await writeFile(join(dir, `${sessionId}.jsonl`), `{"type":"meta","schemaVersion":1}\n`, "utf8");
   const time = new Date(timestamp);
   await utimes(join(dir, `${sessionId}.jsonl`), time, time);
+}
+
+async function writeSessionFile(
+  workDir: string,
+  sessionId: string,
+  timestamp: string,
+  records: readonly unknown[],
+): Promise<void> {
+  const dir = join(workDir, ".claw", "sessions");
+  const path = join(dir, `${sessionId}.jsonl`);
+  await mkdir(dir, { recursive: true });
+  await writeFile(path, `${records.map((record) => JSON.stringify(record)).join("\n")}\n`, "utf8");
+  const time = new Date(timestamp);
+  await utimes(path, time, time);
 }
