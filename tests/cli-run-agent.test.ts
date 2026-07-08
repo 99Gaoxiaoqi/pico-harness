@@ -1,8 +1,8 @@
-import { mkdtemp, readFile, readdir, realpath } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { runAgentFromCli } from "../src/cli/run-agent.js";
+import { runAgentFromCli, runUserInputFromCli } from "../src/cli/run-agent.js";
 import type { Message, ToolDefinition } from "../src/schema/message.js";
 import type { LLMProvider } from "../src/provider/interface.js";
 
@@ -86,17 +86,14 @@ describe("runAgentFromCli", () => {
     expect(provider.calls[0]?.toolNames).toEqual(
       expect.arrayContaining([
         "bash",
-        "task_list",
-        "task_output",
-        "task_stop",
         "read_file",
         "write_file",
         "edit_file",
-        "delegate_task",
-        "delegate_status",
-        "spawn_subagent",
+        "search_tools",
       ]),
     );
+    expect(provider.calls[0]?.toolNames).not.toContain("delegate_task");
+    expect(provider.calls[0]?.toolNames).not.toContain("task_list");
     expect(provider.calls[0]?.messages[0]?.content).toContain("PLAN.md");
     expect(output.join("")).toContain("Session: cli_session");
     expect(output.join("")).toContain("Trace:");
@@ -192,5 +189,62 @@ describe("runAgentFromCli", () => {
       promptTokens: 5,
       completionTokens: 2,
     });
+  });
+
+  it("CLI 单轮本地命令写 stdout 且不调用模型", async () => {
+    const provider = new ScriptedProvider([
+      {
+        role: "assistant",
+        content: "should not be used",
+      },
+    ]);
+    const output: string[] = [];
+
+    const result = await runUserInputFromCli(
+      { prompt: "/help", provider: "openai" },
+      {
+        provider,
+        write: (chunk) => {
+          output.push(chunk);
+        },
+      },
+    );
+
+    expect(result.type).toBe("local-command");
+    expect(provider.calls).toHaveLength(0);
+    expect(output.join("")).toContain("/clear");
+  });
+
+  it("CLI 单轮 prompt command 调用模型", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-cli-"));
+    await mkdir(join(workDir, ".pico", "commands"), { recursive: true });
+    await writeFile(
+      join(workDir, ".pico", "commands", "review.md"),
+      "---\ndescription: Review changes\n---\nReview the current changes: $ARGUMENTS",
+      "utf8",
+    );
+    const provider = new ScriptedProvider([
+      {
+        role: "assistant",
+        content: "Review prompt received.",
+        usage: { promptTokens: 3, completionTokens: 2 },
+      },
+    ]);
+
+    const result = await runUserInputFromCli(
+      {
+        prompt: "/review src",
+        dir: workDir,
+        provider: "openai",
+        enableThinking: false,
+      },
+      {
+        provider,
+        write: () => undefined,
+      },
+    );
+
+    expect(result.type).toBe("agent");
+    expect(provider.calls[0]?.messages.at(-1)?.content).toBe("Review the current changes: src");
   });
 });

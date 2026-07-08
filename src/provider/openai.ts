@@ -12,6 +12,7 @@ import { resolveProviderProfile, type ProviderProfile } from "./profile.js";
 import { toOpenAIReasoningEffort, type ThinkingEffort } from "./thinking.js";
 import { ContextOverflowError, isContextOverflowStatus, LLMStatusError } from "./errors.js";
 import { parseRateLimitHeaders } from "./ratelimit.js";
+import { logger } from "../observability/logger.js";
 
 interface OpenAIToolCall {
   id: string;
@@ -138,8 +139,9 @@ export class OpenAIProvider implements LLMProvider {
 
     // 3. 构建请求并发送
     const bodyJson = JSON.stringify(body);
-    console.log(
-      `[OpenAI] POST /chat/completions (model=${this.config.model}, msgs=${openaiMsgs.length}, tools=${availableTools.length})`,
+    logger.debug(
+      { model: this.config.model, messages: openaiMsgs.length, tools: availableTools.length },
+      "[OpenAI] POST /chat/completions",
     );
     const resp = await fetch(`${this.config.baseURL}/chat/completions`, {
       method: "POST",

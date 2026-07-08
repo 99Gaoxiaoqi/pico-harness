@@ -52,6 +52,10 @@ import { McpConnectionManager } from "../mcp/manager.js";
 import { BackgroundManager } from "../tools/background-manager.js";
 import { loadHooksConfig } from "../hooks/config.js";
 import { HookRunner } from "../hooks/runner.js";
+import { createPicoCommandRegistry } from "../input/pico-command-registry.js";
+import { preparePromptWithMentions } from "../input/prepare-prompt.js";
+import { processUserInput } from "../input/process-user-input.js";
+import type { InputProcessResult } from "../input/types.js";
 
 const cliBackgroundManager = new BackgroundManager();
 
@@ -118,6 +122,14 @@ export interface RunAgentCliResult {
   tracePath?: string;
 }
 
+export type RunUserInputCliResult =
+  | {
+      type: "agent";
+      input: Extract<InputProcessResult, { type: "prompt" | "prompt-command" }>;
+      result: RunAgentCliResult;
+    }
+  | Exclude<InputProcessResult, { type: "prompt" | "prompt-command" }>;
+
 export type RunAgentEnv = Record<string, string | undefined>;
 export type RunAgentWriter = (chunk: string) => Promise<void> | void;
 export type RunAgentProviderFactory = (kind: ProviderKind, config: ProviderConfig) => LLMProvider;
@@ -129,6 +141,30 @@ export interface RunAgentCliDependencies {
   reporter?: Reporter;
   approvalNotifier?: ApprovalNotifier;
   write?: RunAgentWriter;
+}
+
+export async function runUserInputFromCli(
+  options: RunAgentCliOptions,
+  dependencies: RunAgentCliDependencies = {},
+): Promise<RunUserInputCliResult> {
+  const workDir = await resolveWorkDir(options.dir);
+  const provider = options.provider ?? "openai";
+  const model = options.model ?? dependencies.env?.LLM_MODEL ?? process.env.LLM_MODEL ?? "(default)";
+  const registry = await createPicoCommandRegistry({ workDir, provider, model });
+  const input = await processUserInput(options.prompt, { registry });
+
+  if (input.type === "prompt" || input.type === "prompt-command") {
+    const rawPrompt = input.type === "prompt" ? input.prompt : input.result.prompt;
+    const prompt = await preparePromptWithMentions(rawPrompt, workDir);
+    return {
+      type: "agent",
+      input,
+      result: await runAgentFromCli({ ...options, dir: workDir, prompt }, dependencies),
+    };
+  }
+
+  await writeLocalInputResult(input, dependencies.write);
+  return input;
 }
 
 export async function runAgentFromCli(
@@ -290,6 +326,25 @@ export async function runAgentFromCli(
       await mcpManager.closeAll();
     }
   }
+}
+
+async function writeLocalInputResult(
+  input: Exclude<InputProcessResult, { type: "prompt" | "prompt-command" }>,
+  write: RunAgentWriter | undefined,
+): Promise<void> {
+  const emit =
+    write ??
+    ((chunk: string) => {
+      process.stdout.write(chunk);
+    });
+  if (input.type === "empty") return;
+  if (input.type === "unknown-command") {
+    const suffix = input.suggestions.length > 0 ? `\nSuggestions: ${input.suggestions.join(", ")}` : "";
+    await emit(`${input.message}${suffix}\n`);
+    return;
+  }
+  const message = input.result.message ?? "";
+  if (message) await emit(`${message}\n`);
 }
 
 function buildRegistry(

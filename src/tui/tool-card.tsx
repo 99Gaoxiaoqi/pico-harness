@@ -30,6 +30,26 @@ export function ToolCard(props: {
   isLast?: boolean;
 }): React.ReactNode {
   const { name, args, status, summary, isLast = false } = props;
+  if (isAgentToolName(name)) {
+    return <AgentToolProgressLine name={name} args={args} status={status} summary={summary} isLast={isLast} />;
+  }
+
+  return <StandardToolCard name={name} args={args} status={status} summary={summary} isLast={isLast} />;
+}
+
+function StandardToolCard({
+  name,
+  args,
+  status,
+  summary,
+  isLast,
+}: {
+  name: string;
+  args: string;
+  status: "running" | "done" | "error";
+  summary?: string;
+  isLast: boolean;
+}): React.ReactNode {
   // 默认折叠:非末条折叠;末条展开(方便看最新结果)
   const [collapsed, setCollapsed] = useState(!isLast);
 
@@ -69,6 +89,143 @@ export function ToolCard(props: {
       )}
     </Box>
   );
+}
+
+function AgentToolProgressLine({
+  name,
+  args,
+  status,
+  summary,
+  isLast,
+}: {
+  name: string;
+  args: string;
+  status: "running" | "done" | "error";
+  summary?: string;
+  isLast: boolean;
+}): React.ReactNode {
+  const treeChar = isLast ? "└─" : "├─";
+  const branchChar = isLast ? "   ⎿  " : "│  ⎿  ";
+  const meta = agentToolMeta(name, args);
+  const statusColor = status === "error" ? "red" : status === "done" ? "green" : "yellow";
+
+  return (
+    <Box flexDirection="column" marginLeft={1}>
+      <Box>
+        <Text dimColor>{treeChar} </Text>
+        <Text bold color={meta.color}>
+          {meta.label}
+        </Text>
+        {meta.detail && (
+          <Text dimColor>
+            {" "}
+            ({meta.detail})
+          </Text>
+        )}
+        <Text dimColor> · </Text>
+        <Text color={statusColor}>{agentStatusText(status)}</Text>
+      </Box>
+      <Box>
+        <Text dimColor>{branchChar}</Text>
+        <Text dimColor wrap="truncate">
+          {status === "running" ? meta.task : agentResultText(status, summary)}
+        </Text>
+      </Box>
+    </Box>
+  );
+}
+
+export function isAgentToolName(name: string): boolean {
+  return (
+    name === "spawn_subagent" ||
+    name === "delegate_task" ||
+    name === "delegate_status" ||
+    name.startsWith("[Subagent]")
+  );
+}
+
+function agentToolMeta(name: string, args: string): {
+  label: string;
+  detail?: string;
+  task: string;
+  color: "cyan" | "magenta";
+} {
+  const parsed = parseArgs(args);
+
+  if (name.startsWith("[Subagent]")) {
+    return {
+      label: "Subagent",
+      detail: name.replace(/^\[Subagent\]\s*/, "") || undefined,
+      task: firstString(parsed, ["path", "command", "query", "task_prompt", "goal"]) ?? "Working…",
+      color: "magenta",
+    };
+  }
+
+  if (name === "delegate_task") {
+    return {
+      label: "Agents",
+      detail: firstString(parsed, ["agent_name", "mode"]) ?? taskCountDetail(parsed),
+      task: firstString(parsed, ["goal", "task", "description"]) ?? "Delegating tasks…",
+      color: "cyan",
+    };
+  }
+
+  if (name === "delegate_status") {
+    return {
+      label: "Agents",
+      detail: "status",
+      task: firstString(parsed, ["delegationId", "delegation_id"]) ?? "Checking progress…",
+      color: "cyan",
+    };
+  }
+
+  return {
+    label: "Agent",
+    detail: firstString(parsed, ["agent_name", "mode"]),
+    task: firstString(parsed, ["task_prompt", "goal", "task", "description"]) ?? "Starting subagent…",
+    color: "cyan",
+  };
+}
+
+function parseArgs(args: string): unknown {
+  try {
+    return JSON.parse(args);
+  } catch {
+    return undefined;
+  }
+}
+
+function firstString(value: unknown, keys: string[]): string | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const obj = value as Record<string, unknown>;
+  for (const key of keys) {
+    const raw = obj[key];
+    if (typeof raw === "string" && raw.trim()) return compactText(raw.trim(), 88);
+  }
+  return undefined;
+}
+
+function taskCountDetail(value: unknown): string | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const tasks = (value as Record<string, unknown>)["tasks"];
+  if (Array.isArray(tasks)) return `${tasks.length} tasks`;
+  return undefined;
+}
+
+function agentStatusText(status: "running" | "done" | "error"): string {
+  if (status === "running") return "Running";
+  if (status === "error") return "Failed";
+  return "Done";
+}
+
+function agentResultText(status: "running" | "done" | "error", summary: string | undefined): string {
+  if (status === "error") return summary ? compactText(summary, 110) : "Subagent failed";
+  return summary ? compactText(summary, 110) : "Done";
+}
+
+function compactText(text: string, max: number): string {
+  const oneLine = text.replace(/\s+/g, " ").trim();
+  return oneLine.length > max ? `${oneLine.slice(0, max - 1)}…` : oneLine;
 }
 
 /**

@@ -83,11 +83,3 @@ export class QueryGuard {
     this._changed.emit();
   }
 }
-
-// 在原型上绑定 subscribe/getSnapshot(实例共享,避免每帧重建函数引用)
-QueryGuard.prototype.subscribe = function (this: QueryGuard, fn: () => void) {
-  return this._changed.subscribe(fn);
-};
-QueryGuard.prototype.getSnapshot = function (this: QueryGuard) {
-  return this._status;
-};

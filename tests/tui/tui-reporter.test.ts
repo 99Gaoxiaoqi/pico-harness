@@ -3,13 +3,14 @@
 
 import { describe, expect, it, vi } from "vitest";
 import { TuiReporter } from "../../src/tui/tui-reporter.js";
+import type { TuiEntry } from "../../src/tui/tui-reporter.js";
 
 describe("TuiReporter", () => {
   /** 辅助:创建 reporter + 捕获 onUpdate 的最新快照 */
   function harness() {
-    const snapshots: ReturnType<typeof Array.from<typeof import("../../src/tui/tui-reporter.js")["TuiEntry"]>>[] = [];
-    const onUpdate = vi.fn((entries: unknown[]) => snapshots.push([...entries] as never));
-    const reporter = new TuiReporter(onUpdate as never);
+    const snapshots: TuiEntry[][] = [];
+    const onUpdate = vi.fn((entries: TuiEntry[]) => snapshots.push([...entries]));
+    const reporter = new TuiReporter(onUpdate);
     return { reporter, snapshots, last: () => snapshots[snapshots.length - 1] };
   }
 
@@ -34,7 +35,8 @@ describe("TuiReporter", () => {
     reporter.onToolResult("read_file", "# pico-harness\n一个引擎", false);
     entries = last()!;
     expect(entries[0]).toMatchObject({ kind: "tool", name: "read_file", status: "done" });
-    expect(entries[0]!.kind === "tool" && entries[0].summary).toContain("字节");
+    const entry = entries[0]!;
+    expect(entry.kind === "tool" ? entry.summary : undefined).toContain("字节");
   });
 
   it("onToolResult 错误时 status=error", () => {
