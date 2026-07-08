@@ -49,6 +49,21 @@ describe("buildDefaultToolRegistry", () => {
     });
   });
 
+  it("注册 delegate_task 工具名供 /agent 分派提示使用", () => {
+    const registry = buildDefaultToolRegistry(workDir);
+    const tool = registry.getAvailableTools().find((item) => item.name === "delegate_task");
+
+    expect(tool).toBeDefined();
+    expect(tool?.description).toContain("delegate_task");
+    expect(tool?.inputSchema).toMatchObject({
+      type: "object",
+      properties: {
+        goal: { type: "string" },
+        agent_name: { type: "string" },
+      },
+    });
+  });
+
   it("显式传入同一个 BackgroundManager 时多个 registry 共享任务", async () => {
     const manager = new BackgroundManager();
     const firstRegistry = buildDefaultToolRegistry(workDir, { backgroundManager: manager });
