@@ -56,13 +56,26 @@ import { createPicoCommandRegistry } from "../input/pico-command-registry.js";
 import { preparePromptWithMentions } from "../input/prepare-prompt.js";
 import { processUserInput } from "../input/process-user-input.js";
 import type { InputProcessResult } from "../input/types.js";
+import {
+  resolveCliSession,
+  type CliSessionSelection,
+} from "./session-resolver.js";
 
 const cliBackgroundManager = new BackgroundManager();
 
 export interface RunAgentCliOptions {
   prompt: string;
   dir?: string;
+  /** 兼容旧 --session:按指定 id 恢复会话 */
   session?: string;
+  /** Claude Code 风格 -c/--continue:继续当前项目最近一次会话 */
+  continueSession?: boolean;
+  /** Claude Code 风格 -r/--resume:恢复指定会话 */
+  resumeSession?: string;
+  /** 从指定会话派生一个新会话 */
+  forkSession?: string;
+  /** 已解析的 session 选择结果(TUI/宿主可复用,避免每轮重新生成 id) */
+  sessionSelection?: CliSessionSelection;
   provider?: ProviderKind;
   baseURL?: string;
   apiKey?: string;
@@ -115,6 +128,7 @@ export interface RunAgentUsage {
 
 export interface RunAgentCliResult {
   sessionId: string;
+  sessionSelection: CliSessionSelection;
   workDir: string;
   finalMessage: string;
   usage: RunAgentUsage;
@@ -179,10 +193,22 @@ export async function runAgentFromCli(
     dependencies.provider !== undefined,
   );
   const workDir = await resolveWorkDir(options.dir);
+  const sessionSelection =
+    options.sessionSelection ??
+    (await resolveCliSession({
+      workDir,
+      ...(options.session ? { session: options.session } : {}),
+      ...(options.continueSession ? { continueSession: true } : {}),
+      ...(options.resumeSession ? { resumeSession: options.resumeSession } : {}),
+      ...(options.forkSession ? { forkSession: options.forkSession } : {}),
+    }));
   const session = await globalSessionManager.getOrCreate(
-    options.session ?? consoleSessionId(workDir),
+    sessionSelection.sessionId,
     workDir,
   );
+  if (sessionSelection.mode === "fork" && sessionSelection.sourceSessionId) {
+    await seedForkedSession(session, sessionSelection.sourceSessionId, workDir);
+  }
   // 凭证轮换(4.2):多 key 时从池取首个 key 覆盖 config.apiKey,并构建轮换回调。
   // 单 key / 注入 provider 时跳过(向后兼容)。pool 注入点集中在此,便于追踪 currentKey。
   const credentialPool = getCredentialPool();
@@ -310,6 +336,7 @@ export async function runAgentFromCli(
     const messages = await engine.run(session);
     const result: RunAgentCliResult = {
       sessionId: session.id,
+      sessionSelection,
       workDir,
       finalMessage: findFinalMessage(messages),
       usage: snapshotUsage(session),
@@ -559,8 +586,18 @@ function normalizePrompt(prompt: string): string {
   return prompt;
 }
 
-function consoleSessionId(workDir: string): string {
-  return `console:${workDir}`;
+async function seedForkedSession(
+  target: Session,
+  sourceSessionId: string,
+  workDir: string,
+): Promise<void> {
+  if (target.length > 0) return;
+
+  const source = await globalSessionManager.getOrCreate(sourceSessionId, workDir);
+  const history = source.getHistory();
+  if (history.length === 0) return;
+
+  target.append(...history);
 }
 
 function defaultModel(kind: ProviderKind): string {
@@ -628,6 +665,7 @@ async function writeRunSummary(
   const lines = [
     "",
     `Session: ${result.sessionId}`,
+    `SessionMode: ${formatSessionSelection(result.sessionSelection)}`,
     `WorkDir: ${result.workDir}`,
     `Final: ${result.finalMessage}`,
     `Usage: input ${result.usage.promptTokens} tk, output ${result.usage.completionTokens} tk, ¥${result.usage.costCNY.toFixed(6)}`,
@@ -635,4 +673,11 @@ async function writeRunSummary(
   ];
 
   await emit(`${lines.join("\n")}\n`);
+}
+
+function formatSessionSelection(selection: CliSessionSelection): string {
+  if (selection.mode === "fork" && selection.sourceSessionId) {
+    return `fork from ${selection.sourceSessionId}`;
+  }
+  return selection.mode;
 }
