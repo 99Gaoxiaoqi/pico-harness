@@ -4,13 +4,31 @@
 import React from "react";
 import { Box, Text } from "ink";
 import type { TuiEntry } from "./tui-reporter.js";
+import { ToolCard } from "./tool-card.js";
 
 export function MessageList({ entries }: { entries: TuiEntry[] }): React.ReactNode {
   return (
     <Box flexDirection="column">
-      {entries.map((entry, i) => (
-        <EntryView key={i} entry={entry} />
-      ))}
+      {entries.map((entry, i) => {
+        const prev = entries[i - 1];
+        // 轮次分隔:遇到新的 user 消息,且前面已有内容时,加一条淡色分隔线
+        const showSeparator = entry.kind === "user" && prev !== undefined;
+        return (
+          <React.Fragment key={i}>
+            {showSeparator && <Separator />}
+            <EntryView entry={entry} />
+          </React.Fragment>
+        );
+      })}
+    </Box>
+  );
+}
+
+/** 轮次分隔:淡色虚线,让多轮对话结构清晰 */
+function Separator(): React.ReactNode {
+  return (
+    <Box marginTop={1}>
+      <Text dimColor>─</Text>
     </Box>
   );
 }
@@ -30,7 +48,7 @@ function EntryView({ entry }: { entry: TuiEntry }): React.ReactNode {
     case "assistant":
       return (
         <Box marginTop={1}>
-          <Text wrap="wrap">{entry.content}</Text>
+          <AssistantText content={entry.content} />
         </Box>
       );
 
@@ -46,38 +64,58 @@ function EntryView({ entry }: { entry: TuiEntry }): React.ReactNode {
   }
 }
 
-/** 工具调用卡片:⎿ tool_name(args) → ✓/✗ 摘要 */
-function ToolCard({
-  name,
-  args,
-  status,
-  summary,
-}: {
-  name: string;
-  args: string;
-  status: "running" | "done" | "error";
-  summary?: string;
-}): React.ReactNode {
-  // 参数摘要:JSON 太长时只显示前 80 字符
-  const argsPreview = args.length > 80 ? `${args.slice(0, 80)}…` : args;
-
+/**
+ * assistant 文本:wrap + 极简代码块检测。
+ * 检测到 ``` 包裹的代码块时,用青色 + 左侧缩进渲染;其余普通文本。
+ * 保持极简:不做完整 markdown,仅代码块着色。
+ */
+function AssistantText({ content }: { content: string }): React.ReactNode {
+  const segments = splitCodeBlocks(content);
   return (
-    <Box flexDirection="column" marginLeft={2}>
-      <Box>
-        <Text dimColor>⎿ </Text>
-        <Text color="cyan">{name}</Text>
-        <Text dimColor>(</Text>
-        <Text dimColor>{argsPreview}</Text>
-        <Text dimColor>) </Text>
-        {status === "running" && <Text color="yellow">⠋</Text>}
-        {status === "done" && <Text color="green">✓</Text>}
-        {status === "error" && <Text color="red">✗</Text>}
-      </Box>
-      {summary && (
-        <Box marginLeft={2}>
-          <Text dimColor>{summary}</Text>
-        </Box>
+    <Box flexDirection="column">
+      {segments.map((seg, i) =>
+        seg.code ? (
+          <Box key={i} marginLeft={2}>
+            <Text color="cyan" wrap="wrap">
+              {seg.text}
+            </Text>
+          </Box>
+        ) : (
+          <Text key={i} wrap="wrap">
+            {seg.text}
+          </Text>
+        ),
       )}
     </Box>
   );
+}
+
+type Segment = { text: string; code: boolean };
+
+/**
+ * 把文本按 ``` 代码围栏拆段。
+ * 极简实现:按 ``` 分割,奇数下标(第 2、4、… 段)为代码块内容。
+ */
+function splitCodeBlocks(text: string): Segment[] {
+  if (!text.includes("```")) {
+    return [{ text, code: false }];
+  }
+  const parts = text.split("```");
+  return parts.map((part, i) => {
+    // 跳过首行可能的语言标识(如 ```ts)后的空行,保留代码体
+    const body = i % 2 === 1 ? stripFenceLang(part) : part;
+    return { text: body, code: i % 2 === 1 };
+  });
+}
+
+/** 去掉代码块开头的语言标识行(如 "ts\n…"),只保留代码体 */
+function stripFenceLang(code: string): string {
+  // 首行若只是单个单词语言标识(无空格、短),整行去掉
+  const nl = code.indexOf("\n");
+  if (nl === -1) return code;
+  const firstLine = code.slice(0, nl).trim();
+  if (/^[a-zA-Z0-9+#.-]{1,15}$/.test(firstLine)) {
+    return code.slice(nl + 1);
+  }
+  return code;
 }
