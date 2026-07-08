@@ -2,6 +2,8 @@ import React from "react";
 import { Box, Text } from "ink";
 
 export const MAX_SUGGESTIONS = 5;
+export const SUGGESTION_LABEL_WIDTH = 32;
+export const SUGGESTION_DESCRIPTION_WIDTH = 38;
 
 export type SuggestionKind = "slash" | "mention";
 
@@ -42,7 +44,7 @@ export function SuggestionList({ session }: SuggestionListProps): React.ReactNod
     <Box flexDirection="column" marginLeft={2}>
       {rows.map((row) => (
         <Box key={row.key}>
-          <Text color={row.selected ? "green" : "gray"}>
+          <Text color={row.selected ? "green" : "gray"} bold={row.selected}>
             {row.selected ? "› " : "  "}
             {row.left}
           </Text>
@@ -62,8 +64,8 @@ export function formatSuggestionRows(
     const value = stripMarker(item.value, session.kind);
     return {
       key: `${session.kind}:${value}:${index}`,
-      left: `${markerForKind(session.kind)}${value}`,
-      description: item.description ?? "",
+      left: truncateInline(`${markerForKind(session.kind)}${value}`, SUGGESTION_LABEL_WIDTH),
+      description: truncateInline(item.description ?? "", SUGGESTION_DESCRIPTION_WIDTH),
       selected: index === session.selectedIndex,
     };
   });
@@ -76,4 +78,41 @@ export function markerForKind(kind: SuggestionKind): "/" | "@" {
 export function stripMarker(value: string, kind: SuggestionKind): string {
   const marker = markerForKind(kind);
   return value.startsWith(marker) ? value.slice(1) : value;
+}
+
+function truncateInline(value: string, maxLength: number): string {
+  const inline = value.replace(/\s+/g, " ").trim();
+  if (displayWidth(inline) <= maxLength) return inline;
+
+  let result = "";
+  let width = 0;
+  const maxTextWidth = Math.max(0, maxLength - 1);
+  for (const char of inline) {
+    const charWidth = displayWidth(char);
+    if (width + charWidth > maxTextWidth) break;
+    result += char;
+    width += charWidth;
+  }
+
+  return `${result}…`;
+}
+
+function displayWidth(value: string): number {
+  let width = 0;
+  for (const char of value) {
+    width += isWideCharacter(char) ? 2 : 1;
+  }
+  return width;
+}
+
+function isWideCharacter(char: string): boolean {
+  const codePoint = char.codePointAt(0) ?? 0;
+  return (
+    (codePoint >= 0x1100 && codePoint <= 0x115f) ||
+    (codePoint >= 0x2e80 && codePoint <= 0xa4cf) ||
+    (codePoint >= 0xac00 && codePoint <= 0xd7a3) ||
+    (codePoint >= 0xf900 && codePoint <= 0xfaff) ||
+    (codePoint >= 0xff01 && codePoint <= 0xff60) ||
+    (codePoint >= 0xffe0 && codePoint <= 0xffe6)
+  );
 }
