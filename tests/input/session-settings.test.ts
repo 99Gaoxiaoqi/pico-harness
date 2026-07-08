@@ -24,8 +24,27 @@ describe("session settings", () => {
     expect(formatSessionStatus(settings)).toContain("Model: glm-5.2");
     expect(formatSessionStatus(settings)).toContain("Thinking effort: medium");
     expect(formatSessionStatus(settings)).toContain("Session: session-a");
+    expect(formatSessionStatus(settings)).toContain("sessionId: session-a");
+    expect(formatSessionStatus(settings)).toContain("sessionMode: new");
+    expect(formatSessionStatus(settings)).toContain("forkFrom: -");
     expect(formatSessionStatus(settings)).toContain("CWD: /workspace/app");
     expect(formatSessionStatus(settings)).toContain("Permission mode: ask");
+  });
+
+  it("stores and formats fork session semantics", () => {
+    const settings = createDefaultSessionSettings({
+      sessionId: "session-fork",
+      cwd: "/workspace/app",
+      provider: "openai",
+      model: "glm-5.2",
+      sessionMode: "fork",
+      forkFrom: "session-source",
+    });
+
+    expect(settings.sessionMode).toBe("fork");
+    expect(settings.forkFrom).toBe("session-source");
+    expect(formatSessionStatus(settings)).toContain("sessionMode: fork");
+    expect(formatSessionStatus(settings)).toContain("forkFrom: session-source");
   });
 
   it("updates session mode for supported interaction modes", () => {
