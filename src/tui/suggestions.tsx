@@ -2,6 +2,8 @@ import React from "react";
 import { Box, Text } from "ink";
 
 export const MAX_SUGGESTIONS = 5;
+export const SUGGESTION_LABEL_WIDTH = 35;
+export const SUGGESTION_DESCRIPTION_WIDTH = 51;
 
 export type SuggestionKind = "slash" | "mention";
 
@@ -42,7 +44,7 @@ export function SuggestionList({ session }: SuggestionListProps): React.ReactNod
     <Box flexDirection="column" marginLeft={2}>
       {rows.map((row) => (
         <Box key={row.key}>
-          <Text color={row.selected ? "green" : "gray"}>
+          <Text color={row.selected ? "green" : "gray"} bold={row.selected}>
             {row.selected ? "› " : "  "}
             {row.left}
           </Text>
@@ -62,8 +64,8 @@ export function formatSuggestionRows(
     const value = stripMarker(item.value, session.kind);
     return {
       key: `${session.kind}:${value}:${index}`,
-      left: `${markerForKind(session.kind)}${value}`,
-      description: item.description ?? "",
+      left: truncateInline(`${markerForKind(session.kind)}${value}`, SUGGESTION_LABEL_WIDTH),
+      description: truncateInline(item.description ?? "", SUGGESTION_DESCRIPTION_WIDTH),
       selected: index === session.selectedIndex,
     };
   });
@@ -76,4 +78,10 @@ export function markerForKind(kind: SuggestionKind): "/" | "@" {
 export function stripMarker(value: string, kind: SuggestionKind): string {
   const marker = markerForKind(kind);
   return value.startsWith(marker) ? value.slice(1) : value;
+}
+
+function truncateInline(value: string, maxLength: number): string {
+  const inline = value.replace(/\s+/g, " ").trim();
+  if (inline.length <= maxLength) return inline;
+  return `${inline.slice(0, Math.max(0, maxLength - 1))}…`;
 }
