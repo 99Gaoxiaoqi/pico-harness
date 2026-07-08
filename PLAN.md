@@ -1,6 +1,6 @@
 # 当前计划索引
 
-- [ ] **Pico Claude Code 风格启动与交互复刻**：详见 `docs/plans/2026-07-09-pico-claude-code-parity.md`。按极简边界拆为 6 个并行 worktree 子任务：session 启动、TUI 外壳、输入编辑、命令状态、Claude 资源兼容、回滚/权限 UI。
+- [x] **Pico Claude Code 风格启动与交互复刻**：详见 `docs/plans/2026-07-09-pico-claude-code-parity.md`。按极简边界拆为 6 个并行 worktree 子任务：session 启动、TUI 外壳、输入编辑、命令状态、Claude 资源兼容、回滚/权限 UI。
 - [x] **Pico TUI Slash Command 与 @ Mention 改造**：详见 `docs/plans/2026-07-08-pico-tui-slash-mention.md`。已拆分为 5 个可并行 worktree 子任务：命令核心、mention 附件、skills/markdown commands、TUI 候选面板、TUI/CLI 集成。
 
 ---
