@@ -194,8 +194,7 @@ export async function assembleEngine(
     systemPrompt,
     goalManager,
     ...(todoStore ? { todoStore } : {}),
-    // TODO: loop 端会加此字段,合并后即消(toolDisclosure?: ToolDisclosure on AgentEngineOptions)。
-    ...(toolDisclosure ? { toolDisclosure } : {}),
+    toolDisclosure,
     compactor: buildCompactor(opts.kind, modelName),
     observationProcessor: buildObservationProcessor(workDir),
     reporter,
