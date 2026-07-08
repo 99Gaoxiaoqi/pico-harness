@@ -72,6 +72,10 @@ export class TodoStore {
    * - 权限不足(EACCES):返回空 state,不抛
    * - 畸形 JSON:返回空 state,不抛
    * 幂等:多次调用安全,仅首次真正读盘。
+   *
+   * 注意:首次加载后内存缓存被冻结,本实例看不到磁盘上的后续变化。
+   * 跨实例实时可见性靠 host 注入同一 TodoStore 单例(对标 GoalManager),
+   * 本类的 reload() 仅作跨进程/兜底场景的强制重读入口。
    */
   async load(): Promise<TodoState> {
     if (this.loaded) return this.state;
@@ -110,6 +114,20 @@ export class TodoStore {
 
     this.loaded = true;
     return this.state;
+  }
+
+  /**
+   * 强制重读磁盘,忽略已加载的内存缓存。
+   *
+   * 用途:跨进程读取场景(如 CLI 新进程读取旧 todo.json)或兜底排查。
+   * 单进程内的实时可见性应由 host 注入同一 TodoStore 单例保证(对标 GoalManager),
+   * 不应依赖 reload 轮询——否则并发写存在竞态窗口。
+   *
+   * 副作用:丢弃当前内存缓存中未落盘的改动(正常运行链路里 save 先于 reload,故无影响)。
+   */
+  async reload(): Promise<TodoState> {
+    this.loaded = false;
+    return this.load();
   }
 
   /**

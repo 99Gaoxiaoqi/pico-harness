@@ -26,6 +26,7 @@ import { resolveThinkingEffort, type ThinkingEffort } from "../provider/thinking
 import { buildDefaultToolRegistry } from "../tools/default-registry.js";
 import { BackgroundManager } from "../tools/background-manager.js";
 import { PromptComposer } from "../context/composer.js";
+import { TodoStore } from "../context/todo-store.js";
 import {
   globalApprovalManager,
   globalApprovalPolicy,
@@ -66,6 +67,8 @@ export interface ServerOptions {
   backgroundManager?: BackgroundManager;
   /** 进程级共享 GoalManager(可选;不传则自建) */
   goalManager?: GoalManager;
+  /** 进程级共享 TodoStore(可选;不传则自建),registry 与 Composer 共享同一实例 */
+  todoStore?: TodoStore;
 }
 
 /**
@@ -133,19 +136,29 @@ export async function assembleEngine(
     workDir: string;
     goalManager: GoalManager;
     backgroundManager: BackgroundManager;
+    todoStore?: TodoStore;
     requestThinkingEffort: ThinkingEffort;
     requestPlanMode?: boolean;
     maxTurns?: number;
   },
 ): Promise<{ engine: AgentEngine; collected: string[] }> {
-  const { workDir, goalManager, backgroundManager, requestThinkingEffort, requestPlanMode, maxTurns } =
-    options;
+  const {
+    workDir,
+    goalManager,
+    backgroundManager,
+    todoStore,
+    requestThinkingEffort,
+    requestPlanMode,
+    maxTurns,
+  } = options;
   const effectivePlanMode = requestPlanMode ?? opts.planMode;
   const modelName =
     process.env.LLM_MODEL ?? (opts.kind === "openai" ? "glm-5.2" : "claude-3-5-sonnet");
+  const composerOpts: ConstructorParameters<typeof PromptComposer>[2] = { goalManager };
+  if (todoStore) composerOpts.todoStore = todoStore;
   const systemPrompt = effectivePlanMode
     ? undefined
-    : await new PromptComposer(workDir, false, { goalManager }).build();
+    : await new PromptComposer(workDir, false, composerOpts).build();
 
   const collected: string[] = [];
   const reporter = new (class extends TerminalReporter {
@@ -155,7 +168,11 @@ export async function assembleEngine(
   })();
 
   const provider = createProvider(opts.kind, undefined, requestThinkingEffort);
-  const registry = buildDefaultToolRegistry(workDir, { backgroundManager, goalManager });
+  const registry = buildDefaultToolRegistry(workDir, {
+    backgroundManager,
+    goalManager,
+    ...(todoStore ? { todoStore } : {}),
+  });
   registry.use(buildApprovalMiddleware(terminalNotifier, workDir));
   const engine = new AgentEngine({
     provider,
@@ -166,6 +183,7 @@ export async function assembleEngine(
     planMode: effectivePlanMode,
     systemPrompt,
     goalManager,
+    ...(todoStore ? { todoStore } : {}),
     compactor: buildCompactor(opts.kind, modelName),
     observationProcessor: buildObservationProcessor(workDir),
     reporter,
@@ -234,6 +252,7 @@ export async function startHttpServer(opts: ServerOptions): Promise<Server> {
   const workDir = opts.workDir ?? process.cwd();
   const goalManager = opts.goalManager ?? new GoalManager();
   const backgroundManager = opts.backgroundManager ?? new BackgroundManager();
+  const todoStore = opts.todoStore ?? new TodoStore(workDir);
   // 自增计数器:生成 URL 安全的 sessionId(无 / : \ 等破坏路由的字符)
   let sessionCounter = 0;
 
@@ -307,6 +326,7 @@ export async function startHttpServer(opts: ServerOptions): Promise<Server> {
             workDir,
             goalManager,
             backgroundManager,
+            todoStore,
             requestThinkingEffort,
             ...(parsed.planMode !== undefined ? { requestPlanMode: parsed.planMode } : {}),
             ...(parsed.maxTurns !== undefined ? { maxTurns: parsed.maxTurns } : {}),
@@ -373,7 +393,11 @@ export async function startHttpServer(opts: ServerOptions): Promise<Server> {
         // GET /tools → 可用工具列表
         // ----------------------------------------------------------------
         case "tools": {
-          const registry = buildDefaultToolRegistry(workDir, { backgroundManager, goalManager });
+          const registry = buildDefaultToolRegistry(workDir, {
+            backgroundManager,
+            goalManager,
+            todoStore,
+          });
           sendJson(res, 200, { tools: registry.getAvailableTools() });
           return;
         }

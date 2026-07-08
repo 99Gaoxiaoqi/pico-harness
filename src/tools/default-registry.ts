@@ -31,13 +31,22 @@ export interface DefaultToolRegistryOptions extends ToolRegistryOptions {
    * 未提供则不注册 Goal 工具(向后兼容:无 Goal Mode 能力)。
    */
   goalManager?: GoalManager;
+  /**
+   * TodoStore 单例(ROADMAP 补充任务 2026-07-07)。
+   * host 创建后同时传给 registry(TodoTool)与 PromptComposer,
+   * 确保工具改的状态与 Composer 注入 prompt 时看到的一致——
+   * 对标 GoalManager 注入范式,根治历史上 TodoTool/Composer 各 new 各的跨实例不可见 bug。
+   * 未提供则内部 new(向后兼容,单实例场景仍可用)。
+   */
+  todoStore?: TodoStore;
 }
 
 export function buildDefaultToolRegistry(
   workDir: string,
   options: DefaultToolRegistryOptions = {},
 ): ToolRegistry {
-  const { backgroundManager = new BackgroundManager(), goalManager, ...registryOptions } = options;
+  const { backgroundManager = new BackgroundManager(), goalManager, todoStore, ...registryOptions } =
+    options;
   const registry = new ToolRegistry(registryOptions);
   registry.register(new EchoTool());
   registry.register(new ReadFileTool(workDir));
@@ -50,14 +59,17 @@ export function buildDefaultToolRegistry(
   registry.register(new SkillViewTool(new SkillLoader(workDir)));
   registry.register(new GlobTool(workDir));
   registry.register(new GrepTool(workDir));
-  registry.register(new TodoTool(new TodoStore(workDir)));
+  // TodoTool 持有 host 注入的 TodoStore 单例,与 PromptComposer 共享同一实例。
+  // 未注入时降级为内部 new,保持向后兼容(单实例场景不受跨实例 bug 影响)。
+  registry.register(new TodoTool(todoStore ?? new TodoStore(workDir)));
   // ExitPlanModeTool:onExit 回调在 default-registry 构造时无法注入(无 engine 引用)。
   // host(run-agent.ts / main.ts)构造 engine 后需遍历工具调 setExitCallback 注入,
   // 否则审批通过也不会真正切换 planMode。Plan Mode 关闭时该工具不被模型调用。
   registry.register(new ExitPlanModeTool(new PlanStore(workDir)));
   // Goal Mode 工具:三工具共享同一个 goalManager 单例(由 host 注入)。
   // 单例约束:goalManager 必须与传给 AgentEngine 的是同一实例,
-  // 否则工具改的状态 PromptComposer/Grace Call 看不到(对标 TodoStore 跨实例 bug 的教训)。
+  // 否则工具改的状态 PromptComposer/Grace Call 看不到。
+  // 注:TodoStore 自 2026-07-07 起也走 host 注入单例,同一问题已根治。
   if (goalManager) {
     registry.register(new CreateGoalTool(goalManager));
     registry.register(new GetGoalTool(goalManager));

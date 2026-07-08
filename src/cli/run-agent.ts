@@ -12,6 +12,7 @@ import { ToolResultArtifactStore } from "../context/artifact-store.js";
 import { createContextBudget, estimateTokenBudgetAsChars } from "../context/context-budget.js";
 import { PromptComposer } from "../context/composer.js";
 import { SkillLoader, SkillViewTool } from "../context/skill.js";
+import { TodoStore } from "../context/todo-store.js";
 import {
   createProvider,
   createRawProvider,
@@ -181,9 +182,12 @@ export async function runAgentFromCli(
     };
   }
   // GoalManager 单例:registry(3 工具)与 engine(prompt 注入 + Grace Call)共享同一实例,
-  // 确保工具改的状态引擎侧立即可见(对标 TodoStore 跨实例 bug 的教训)。
+  // 确保工具改的状态引擎侧立即可见。
   const goalManager = new GoalManager();
-  const registry = buildRegistry(workDir, cliBackgroundManager, goalManager);
+  // TodoStore 单例:registry(TodoTool)与 PromptComposer 共享同一实例,
+  // 根治历史上 TodoTool/Composer 各 new 各的跨实例不可见 bug(对标 GoalManager 范式)。
+  const todoStore = new TodoStore(workDir);
+  const registry = buildRegistry(workDir, cliBackgroundManager, goalManager, todoStore);
   // 【任务 2.6】用户可配置 Shell Hooks:加载 .claw/settings.json 的 hooks 配置,
   // 存在则挂载 HookRunner 到 registry。fail-open:配置缺失/畸形均不启用 hook,零影响。
   registry.setSessionId?.(session.id);
@@ -202,7 +206,7 @@ export async function runAgentFromCli(
   // 避免 loop.ts 退化到硬编码英文兜底。Plan Mode 下由 buildSystemPrompt() 每轮动态重组,故此处不传。
   const systemPrompt = options.planMode
     ? undefined
-    : await new PromptComposer(workDir, false, { goalManager }).build();
+    : await new PromptComposer(workDir, false, { goalManager, todoStore }).build();
   // 辅助(廉价)模型:用于 FullCompactor 生成摘要,省主模型成本。
   // 配齐 AUX_LLM_BASE_URL / AUX_LLM_API_KEY / AUX_LLM_MODEL 才启用;缺则用主 provider。
   const auxProvider = loadAuxProvider(dependencies.env ?? process.env);
@@ -215,6 +219,7 @@ export async function runAgentFromCli(
     planMode: options.planMode ?? false,
     systemPrompt,
     goalManager,
+    todoStore,
     compactor: buildCompactor(kind, providerConfig.model),
     // 模型摘要压缩:provider 存在即启用,作为字符级降级用尽后的最后防线。
     // 优先用辅助廉价模型(AUX_LLM_*)生成摘要省主模型成本;未配置则用主 provider。
@@ -286,11 +291,13 @@ function buildRegistry(
   workDir: string,
   backgroundManager: BackgroundManager = cliBackgroundManager,
   goalManager?: GoalManager,
+  todoStore?: TodoStore,
 ): ToolRegistry {
   return buildDefaultToolRegistry(workDir, {
     truncateResults: false,
     backgroundManager,
     ...(goalManager !== undefined ? { goalManager } : {}),
+    ...(todoStore !== undefined ? { todoStore } : {}),
   });
 }
 
