@@ -159,6 +159,7 @@ export interface RunAgentCliDependencies {
   providerFactory?: RunAgentProviderFactory;
   reporter?: Reporter;
   approvalNotifier?: ApprovalNotifier;
+  toolDisclosure?: ToolDisclosure;
   write?: RunAgentWriter;
 }
 
@@ -182,7 +183,14 @@ export async function runUserInputFromCli(
   if (sessionSelection.mode === "fork" && sessionSelection.sourceSessionId) {
     await seedForkedSession(session, sessionSelection.sourceSessionId, workDir);
   }
-  const toolRegistry = buildRegistry(workDir, cliBackgroundManager, new GoalManager(), new TodoStore(workDir), new ToolDisclosure());
+  const toolDisclosure = dependencies.toolDisclosure ?? new ToolDisclosure();
+  const toolRegistry = buildRegistry(
+    workDir,
+    cliBackgroundManager,
+    new GoalManager(),
+    new TodoStore(workDir),
+    toolDisclosure,
+  );
   const settings = getOrCreateSessionSettings({
     sessionId: sessionSelection.sessionId,
     cwd: workDir,
@@ -201,6 +209,7 @@ export async function runUserInputFromCli(
     ...(settings.thinkingEffortExplicit ? { thinkingEffort: settings.thinkingEffort } : {}),
     permissionMode: settings.permissionMode,
     tools: settings.tools,
+    toolDisclosure,
   });
   const input = await processUserInput(options.prompt, { registry });
 
@@ -333,7 +342,7 @@ export async function runAgentFromCli(
   const todoStore = new TodoStore(workDir);
   // 工具渐进披露状态机(ROADMAP 5.4):registry(search_tools 元工具)与 engine(pickForLLM)共享同一实例,
   // 确保扩展工具被披露后下一轮即进入 LLM 工具列表。对标 GoalManager/TodoStore 注入范式。
-  const toolDisclosure = new ToolDisclosure();
+  const toolDisclosure = dependencies.toolDisclosure ?? new ToolDisclosure();
   const registry = buildRegistry(workDir, cliBackgroundManager, goalManager, todoStore, toolDisclosure);
   // 【任务 2.6】用户可配置 Shell Hooks:加载 .claw/settings.json 的 hooks 配置,
   // 存在则挂载 HookRunner 到 registry。fail-open:配置缺失/畸形均不启用 hook,零影响。

@@ -6,6 +6,7 @@ import { runAgentFromCli, runUserInputFromCli } from "../src/cli/run-agent.js";
 import type { Message, ToolDefinition } from "../src/schema/message.js";
 import type { LLMProvider } from "../src/provider/interface.js";
 import { resetSessionSettingsForTests } from "../src/input/session-settings.js";
+import { ToolDisclosure } from "../src/tools/tool-disclosure.js";
 
 class ScriptedProvider implements LLMProvider {
   readonly calls: Array<{ messages: Message[]; toolNames: string[] }> = [];
@@ -259,6 +260,32 @@ describe("runAgentFromCli", () => {
     expect(result.type).toBe("local-command");
     expect(provider.calls).toHaveLength(0);
     expect(output.join("")).toContain("/clear");
+  });
+
+  it("CLI /tools 使用注入的工具披露状态", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-cli-tools-"));
+    const disclosure = new ToolDisclosure();
+    disclosure.disclose(["web_search"]);
+    const output: string[] = [];
+
+    const result = await runUserInputFromCli(
+      {
+        prompt: "/tools",
+        dir: workDir,
+        provider: "openai",
+        model: "glm-5.2",
+      },
+      {
+        toolDisclosure: disclosure,
+        write: (chunk) => {
+          output.push(chunk);
+        },
+      },
+    );
+
+    expect(result.type).toBe("local-command");
+    expect(output.join("")).toContain("Disclosed tools");
+    expect(output.join("")).toContain("- web_search - read-only - risk: low");
   });
 
   it("CLI 单轮 prompt command 调用模型", async () => {

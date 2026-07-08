@@ -31,6 +31,9 @@ import type { CommandRegistry } from "../input/command-registry.js";
 import type { InputProcessResult, LocalCommandResult } from "../input/types.js";
 import type { ProviderKind } from "../provider/factory.js";
 import type { ThinkingEffort } from "../provider/thinking.js";
+import { buildDefaultToolRegistry } from "../tools/default-registry.js";
+import { ToolDisclosure } from "../tools/tool-disclosure.js";
+import { toolStatusFromRegistry } from "../input/session-settings.js";
 
 export interface ReplOptions {
   /** 工作区 */
@@ -114,10 +117,14 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
   }
 
   const provider = opts.provider ?? "openai";
+  const toolDisclosure = new ToolDisclosure();
+  const toolRegistry = buildDefaultToolRegistry(opts.workDir, { toolDisclosure });
   const registry = await createPicoCommandRegistry({
     workDir: opts.workDir,
     provider,
     model: opts.model,
+    tools: toolStatusFromRegistry(toolRegistry),
+    toolDisclosure,
   });
   const initialFileSuggestions = await listFileSuggestions({
     cwd: opts.workDir,
@@ -167,7 +174,11 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
               ...(opts.mcpConfigPath ? { mcpConfigPath: opts.mcpConfigPath } : {}),
             };
             // 复用 session(consoleSessionId 固定),reporter 是 TuiReporter 实例(共享 entries)
-            await runAgentFromCli(cliOpts, { reporter, write: suppressCliSummary });
+            await runAgentFromCli(cliOpts, {
+              reporter,
+              toolDisclosure,
+              write: suppressCliSummary,
+            });
           },
         });
       } catch (err) {
