@@ -64,6 +64,14 @@ export function createBuiltinCommands(): readonly SlashCommand[] {
       message: "Tools command is not connected yet.",
     }),
     localCommand({
+      name: "thinking",
+      aliases: ["effort"],
+      description: "Show or change thinking effort",
+      usage: "/thinking <off|low|medium|high>",
+      action: "thinking",
+      message: "Thinking command is not connected yet.",
+    }),
+    localCommand({
       name: "skills",
       aliases: ["skill-list"],
       description: "List available skills",
