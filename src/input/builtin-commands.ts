@@ -40,6 +40,27 @@ export function createBuiltinCommands(): readonly SlashCommand[] {
       message: "Status is not connected yet.",
     }),
     localCommand({
+      name: "compact",
+      description: "Compact current session context",
+      usage: "/compact",
+      action: "message",
+      message: "Compact command is not connected yet.",
+    }),
+    localCommand({
+      name: "init",
+      description: "Create lightweight Pico project entry files",
+      usage: "/init",
+      action: "message",
+      message: "Init command is not connected yet.",
+    }),
+    localCommand({
+      name: "doctor",
+      description: "Diagnose local Pico configuration",
+      usage: "/doctor",
+      action: "message",
+      message: "Doctor command is not connected yet.",
+    }),
+    localCommand({
       name: "model",
       aliases: ["models", "mode"],
       description: "Show or change the active model",

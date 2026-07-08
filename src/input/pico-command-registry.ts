@@ -1,4 +1,7 @@
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { SkillLoader } from "../context/skill.js";
+import { FullCompactor } from "../context/full-compactor.js";
 import { globalSessionManager, type Session } from "../engine/session.js";
 import {
   defaultCliSessionId,
@@ -22,7 +25,8 @@ import {
   renderSkillListCommand,
 } from "./skill-commands.js";
 import type { LocalCommandResult, PromptCommandResult, SlashCommand } from "./types.js";
-import type { ProviderKind } from "../provider/factory.js";
+import { createProvider, type ProviderKind } from "../provider/factory.js";
+import { loadApiKeys } from "../provider/config.js";
 import { buildDefaultToolRegistry } from "../tools/default-registry.js";
 import {
   formatSessionStatus,
@@ -69,12 +73,18 @@ export async function createPicoCommandRegistry(
       command.name !== "skill" &&
       command.name !== "model" &&
       command.name !== "status" &&
+      command.name !== "compact" &&
+      command.name !== "init" &&
+      command.name !== "doctor" &&
       command.name !== "tools" &&
       command.name !== "thinking",
   );
   const registry = new CommandRegistry([
     ...builtins,
     createStatusCommand(settings),
+    createCompactCommand(options),
+    createInitCommand(options),
+    createDoctorCommand(options),
     createModelCommand(settings),
     createThinkingCommand(settings),
     createToolsCommand(settings),
@@ -132,6 +142,96 @@ function createStatusCommand(settings: SessionSettings): SlashCommand {
       type: "local",
       action: "status",
       message: formatSessionStatus(settings),
+    }),
+  };
+}
+
+function createCompactCommand(options: PicoCommandRegistryOptions): SlashCommand {
+  return {
+    name: "compact",
+    description: "Compact current session context",
+    usage: "/compact",
+    kind: "local",
+    execute: async (): Promise<LocalCommandResult> => {
+      if (!options.session) {
+        return {
+          type: "local",
+          action: "message",
+          message:
+            "Compact unavailable: no live session was provided to the command registry.",
+        };
+      }
+
+      const retainLastN = 6;
+      if (options.session.length <= retainLastN) {
+        return {
+          type: "local",
+          action: "message",
+          message: `Compact skipped: session has ${options.session.length} messages; keeping the last ${retainLastN} would leave no history prefix to compact.`,
+        };
+      }
+
+      const baseURL = process.env.LLM_BASE_URL;
+      const apiKey = loadApiKeys()[0];
+      if (!baseURL || !apiKey) {
+        return {
+          type: "local",
+          action: "message",
+          message:
+            "Compact unavailable: missing LLM_BASE_URL or LLM_API_KEY[S], so FullCompactor cannot call the summary model.",
+        };
+      }
+
+      try {
+        const before = options.session.length;
+        const provider = createProvider(options.provider, {
+          baseURL,
+          apiKey,
+          model: options.model,
+        });
+        const ok = await new FullCompactor({ provider }).compact(options.session, retainLastN);
+        return {
+          type: "local",
+          action: "message",
+          message: ok
+            ? `Compact complete: session history ${before} -> ${options.session.length} messages.`
+            : "Compact unavailable: FullCompactor could not produce a valid summary.",
+        };
+      } catch (error) {
+        return {
+          type: "local",
+          action: "message",
+          message: `Compact failed: ${error instanceof Error ? error.message : String(error)}`,
+        };
+      }
+    },
+  };
+}
+
+function createInitCommand(options: PicoCommandRegistryOptions): SlashCommand {
+  return {
+    name: "init",
+    description: "Create lightweight Pico project entry files",
+    usage: "/init",
+    kind: "local",
+    execute: (): LocalCommandResult => ({
+      type: "local",
+      action: "message",
+      message: initializeProjectEntrypoints(options.workDir),
+    }),
+  };
+}
+
+function createDoctorCommand(options: PicoCommandRegistryOptions): SlashCommand {
+  return {
+    name: "doctor",
+    description: "Diagnose local Pico configuration",
+    usage: "/doctor",
+    kind: "local",
+    execute: (): LocalCommandResult => ({
+      type: "local",
+      action: "message",
+      message: formatDoctorReport(options),
     }),
   };
 }
@@ -324,4 +424,68 @@ function createMarkdownPromptCommand(command: MarkdownPromptCommand): SlashComma
       },
     }),
   };
+}
+
+function initializeProjectEntrypoints(workDir: string): string {
+  const messages: string[] = [];
+  const agentsPath = join(workDir, "AGENTS.md");
+  const picoDir = join(workDir, ".pico");
+  const configPath = join(picoDir, "config.json");
+
+  if (existsSync(agentsPath)) {
+    messages.push("AGENTS.md already exists");
+  } else {
+    writeFileSync(
+      agentsPath,
+      [
+        "# AGENTS.md",
+        "",
+        "## Project Guidance",
+        "",
+        "- Keep changes small and easy to review.",
+        "- Prefer existing project conventions before adding new patterns.",
+        "",
+      ].join("\n"),
+    );
+    messages.push("Created AGENTS.md");
+  }
+
+  mkdirSync(picoDir, { recursive: true });
+  if (existsSync(configPath)) {
+    messages.push(".pico/config.json already exists");
+  } else {
+    writeFileSync(
+      configPath,
+      `${JSON.stringify(
+        {
+          version: 1,
+          commandsDir: ".pico/commands",
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    messages.push("Created .pico/config.json");
+  }
+
+  return messages.join("\n");
+}
+
+function formatDoctorReport(options: PicoCommandRegistryOptions): string {
+  const envPath = join(options.workDir, ".env");
+  const apiKeys = loadApiKeys();
+  const nodeMajor = Number(process.versions.node.split(".")[0] ?? "0");
+  const nodeOk = nodeMajor >= 22;
+  const cwdOk = existsSync(options.workDir);
+  const envModel = process.env.LLM_MODEL;
+
+  return [
+    `CWD: ${options.workDir} (${cwdOk ? "ok" : "missing"})`,
+    `.env: ${existsSync(envPath) ? "found" : "missing"}`,
+    `Provider: ${options.provider}`,
+    `Model: ${options.model}${envModel && envModel !== options.model ? ` (env: ${envModel})` : ""}`,
+    `LLM_BASE_URL: ${process.env.LLM_BASE_URL ? "set" : "missing"}`,
+    `LLM_API_KEY[S]: ${apiKeys.length > 0 ? `${apiKeys.length} configured` : "missing"}`,
+    `Node: ${process.version} (${nodeOk ? "ok" : "requires >=22.0.0"})`,
+  ].join("\n");
 }
