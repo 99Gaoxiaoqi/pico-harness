@@ -8,6 +8,8 @@
 //   - user      : 绿色 ❯ + 内容(提交即固定)
 //   - assistant : isStatic 用 CompletedText(代码块着色,非流式);
 //                 否则用 StreamingText(末条流式中,按行增量渲染)
+//   - system    : 淡色 • + 内容(本地命令反馈,由 assistant 文本识别)
+//   - error     : 黄色 ! + 原始错误信息(由 assistant 文本识别)
 //   - tool      : 渲染 <ToolCard>(自带折叠/展开)
 //   - thinking  : 返回 null(spinner 由 App 层渲染,不在此重复)
 
@@ -33,31 +35,38 @@ function MessageRowImpl({ entry, isStatic, isLast }: MessageRowProps): React.Rea
   switch (entry.kind) {
     case "user":
       return (
-        <Box marginTop={1}>
-          <Text color="green" bold>
-            ❯{" "}
-          </Text>
+        <MessageFrame marker="❯" markerColor="green" boldMarker>
           <Text wrap="wrap">{entry.content}</Text>
-        </Box>
+        </MessageFrame>
       );
 
     case "assistant":
-      if (isLightweightStatusContent(entry.content)) {
+      if (isErrorContent(entry.content)) {
         return (
-          <Box marginTop={1}>
+          <MessageFrame marker="!" markerColor="yellow" boldMarker>
+            <Text color="yellow" wrap="wrap">
+              {entry.content}
+            </Text>
+          </MessageFrame>
+        );
+      }
+
+      if (isSystemContent(entry.content)) {
+        return (
+          <MessageFrame marker="•" markerColor="gray">
             <Text dimColor wrap="wrap">
               {entry.content}
             </Text>
-          </Box>
+          </MessageFrame>
         );
       }
 
       // isStatic:已固化走 CompletedText(代码块着色,整体 memo);
       // 否则(末条流式中)走 StreamingText(按行 stable/unstable 增量渲染)
       return (
-        <Box>
+        <MessageFrame marker="✦" markerColor="cyan">
           {isStatic ? <CompletedText content={entry.content} /> : <StreamingText content={entry.content} />}
-        </Box>
+        </MessageFrame>
       );
 
     case "tool":
@@ -80,18 +89,46 @@ function MessageRowImpl({ entry, isStatic, isLast }: MessageRowProps): React.Rea
   }
 }
 
-function isLightweightStatusContent(content: string): boolean {
+function MessageFrame({
+  marker,
+  markerColor,
+  boldMarker = false,
+  children,
+}: {
+  marker: string;
+  markerColor: "green" | "cyan" | "gray" | "yellow";
+  boldMarker?: boolean;
+  children: React.ReactNode;
+}): React.ReactNode {
+  return (
+    <Box marginTop={1}>
+      <Box width={2}>
+        <Text color={markerColor} bold={boldMarker}>
+          {marker}
+        </Text>
+      </Box>
+      <Box flexDirection="column" flexGrow={1}>
+        {children}
+      </Box>
+    </Box>
+  );
+}
+
+function isSystemContent(content: string): boolean {
   const trimmed = content.trim();
   if (trimmed.length === 0) return false;
   if (trimmed.startsWith("Unknown command")) return true;
   if (trimmed.startsWith("No help found")) return true;
   if (trimmed.startsWith("Usage:")) return true;
-  if (trimmed.startsWith("执行出错:")) return true;
-  if (trimmed.startsWith("⚠️ 执行出错:")) return true;
   if (trimmed.includes("command is not connected yet.")) return true;
 
   const lines = trimmed.split("\n").filter((line) => line.trim().length > 0);
   return lines.length > 0 && lines.every((line) => line.trim().startsWith("/"));
+}
+
+function isErrorContent(content: string): boolean {
+  const trimmed = content.trim();
+  return trimmed.startsWith("执行出错:") || trimmed.startsWith("⚠️ 执行出错:");
 }
 
 /**
@@ -105,6 +142,9 @@ function isLightweightStatusContent(content: string): boolean {
 function arePropsEqual(prev: MessageRowProps, next: MessageRowProps): boolean {
   // isStatic 状态变化(如末条 assistant 从流式→固化)必须重渲染
   if (prev.isStatic !== next.isStatic) return false;
+
+  // 末条身份会影响工具树形符号;变化时必须让该行刷新。
+  if (prev.isLast !== next.isLast) return false;
 
   // 非静态:内容可能还在变,一律重渲染(fail-safe)
   if (!next.isStatic) return false;
