@@ -1,22 +1,19 @@
 // TUI 顶层组件:对标 Claude Code 的 App.tsx(ink + React 19)。
-// 布局:LogoHeader(首项) → 消息列表(全部条目,React.memo 跳过静态) → spinner → 输入框。
+// 布局:LogoHeader → 消息列表(全部条目,React.memo 跳过静态) → spinner → 输入框。
 //
-// 关键架构(对标 Claude Code):
-//   不用 ink 的 <Static> 组件——它会让条目从 live 区"毕业"到 static 区时,
-//   在终端产生重复(动态区残留 + static 新行)。Claude Code 同款不用 Static,
-//   而是把所有条目留在同一渲染树,用 React.memo(isStatic 时跳过重渲染)。
-//   性能靠"静态条目 memo 后零 diff"保证,不靠 Static 输出到 scrollback。
+// 关键架构(三路子代理排查确认):
+//   不用 ink 的 <Static> 组件——它靠 items.length 追踪已渲染项,当条目在
+//   live/static 间迁移导致 Static 子树节点身份变化时,reconciler 会清空
+//   fullStaticOutput 并把所有历史条目重新裸写到 stdout,产生滚雪球重复。
+//   Claude Code 也不用 <Static>(源码确认),靠差分渲染 + alt screen。
 //
-// 对标改动:
-//   1. 去掉 <Static>,所有条目在同一 <Box>,isStatic 仅作 memo 提示
-//   2. 去固定顶栏 → LogoHeader 作为消息流首项
-//   3. Spinner 用 SpinnerMode:据末尾条目状态切阶段
-//   4. 输入框 borderBottom only(对标 PromptInput)
-//
-// 状态机:idle(可输入) | running(模型运行中,输入框禁用)。
+//   正确方案:所有条目留同一渲染树,用 React.memo(MessageRow 已有)跳过静态条目。
+//   配合 render() 的 alternateScreen:true(进入 alt buffer,内容不进 scrollback,
+//   退出时恢复主屏),彻底杜绝重复输出。
+//   alt buffer 下 ink 只重绘可视区域(差分渲染),历史条目靠 React.memo 零 diff。
 
 import React from "react";
-import { Box, Static, Text, useApp, useInput } from "ink";
+import { Box, Text, useApp, useInput } from "ink";
 import { InputBox } from "./input-box.js";
 import { Spinner } from "./spinner.js";
 import type { SpinnerMode } from "./spinner.js";
@@ -40,7 +37,7 @@ export interface AppProps {
 export function App({ model, workDir, entries, running, onSubmit }: AppProps): React.ReactNode {
   const { exit } = useApp();
 
-  // Ctrl+C 退出(ink 默认不绑,需手动)
+  // Ctrl+C 退出(ink 默认不���,需手动)
   useInput((_input, key) => {
     if (key.ctrl && _input === "c") {
       exit();
@@ -54,16 +51,12 @@ export function App({ model, workDir, entries, running, onSubmit }: AppProps): R
 
   return (
     <Box flexDirection="column">
-      {/* Logo:用 <Static> 包裹,只渲染一次(items 固定单个元素,不会增长,
-          故不会触发"条目毕业导致重复"的陷阱)。避免 Logo 在每次 setState
-          重绘时被重复输出到终端。 */}
-      <Static items={[{ model, workDir }]}>
-        {(item) => <LogoHeader key="logo" model={item.model} workDir={item.workDir} />}
-      </Static>
+      {/* Logo(消息流首项)。alt screen 模式下它随每帧重绘,但差分渲染只写变化 cell,不重复 */}
+      <LogoHeader model={model} workDir={workDir} />
 
-      {/* 消息列表:全部条目在同一渲染树。
-          isStatic 的条目由 MessageRow 的 React.memo 跳过重渲染(零 diff)。
-          不用 <Static>(会导致条目毕业时终端重复渲染)。 */}
+      {/* 消息列表:全部条目在同一渲染树(不用 <Static>)。
+          React.memo(MessageRow) 跳过静态条目的重渲染(零 diff)。
+          稳定 key:用 entries 的索引(条目只追加不重排,索引天然稳定)。 */}
       <Box flexDirection="column" paddingX={1}>
         {entries.map((entry, i) => {
           const isLast = i === entries.length - 1;
@@ -100,24 +93,20 @@ export function App({ model, workDir, entries, running, onSubmit }: AppProps): R
 
 /**
  * 判断当前是否"主动流式":末尾是流式 assistant,或 thinking/running tool 占位。
- * 用于区分 SpinnerMode 和 isStreaming。
  */
 function isActivelyStreaming(entries: TuiEntry[]): boolean {
   const last = entries[entries.length - 1];
   if (!last) return false;
-  // assistant 末条仍在累积 / thinking 占位 / running tool 都算"进行中"
-  return last.kind === "assistant" || last.kind === "thinking" || (last.kind === "tool" && last.status === "running");
+  return (
+    last.kind === "assistant" ||
+    last.kind === "thinking" ||
+    (last.kind === "tool" && last.status === "running")
+  );
 }
 
-/**
- * 据 liveEntries 末尾状态选 SpinnerMode(对标 Claude Code 各阶段文案):
- *   - thinking           → "thinking"
- *   - running tool       → "tool-use"
- *   - assistant 流式中   → "responding"
- *   - 无 delta/其他      → "requesting"(等首包)
- */
-function pickSpinnerMode(liveEntries: TuiEntry[], isStreaming: boolean): SpinnerMode {
-  const last = liveEntries[liveEntries.length - 1];
+/** 据 entries 末尾状态选 SpinnerMode */
+function pickSpinnerMode(entries: TuiEntry[], isStreaming: boolean): SpinnerMode {
+  const last = entries[entries.length - 1];
   if (!last) return "requesting";
   if (last.kind === "thinking") return "thinking";
   if (last.kind === "tool" && last.status === "running") return "tool-use";

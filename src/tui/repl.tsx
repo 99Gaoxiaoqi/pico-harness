@@ -105,5 +105,9 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     );
   }
 
-  render(<ReplApp />);
+  // alternateScreen:true 进入终端 alt buffer(\x1b[?1049h)——内容不进 scrollback,
+  // 退出时恢复主屏,彻底杜绝"历史内容被重复输出到 scrollback"的滚雪球 bug。
+  // patchConsole:false 让 process.stderr.write 不被 ink 劫持(诊断日志能正常输出)。
+  // alt buffer 下 ink 差分渲染只重绘可视区域,历史条目靠 React.memo 零 diff。
+  render(<ReplApp />, { alternateScreen: true, patchConsole: false });
 }
