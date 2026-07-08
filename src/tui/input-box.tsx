@@ -6,7 +6,7 @@
 //   - 多行:Alt+Enter / Shift+Enter 插入换行,Enter 提交
 //   - 输入历史:↑/↓ 翻最近 20 条(对标 onHistoryUp/Down)
 //
-// 支持:字符输入、Backspace 删除、Enter 提交、Ctrl+C 退出(由 App 层处理)。
+// 支持:字符输入、基础光标编辑、Backspace/Delete、Enter 提交、Ctrl+C 退出(由 App 层处理)。
 
 import React, { useState } from "react";
 import { Box, Text, useInput } from "ink";
@@ -47,7 +47,7 @@ export function InputBox({
     );
   });
 
-  const { text, activeSuggestions } = controller;
+  const { text, cursor, activeSuggestions } = controller;
 
   return (
     <Box flexDirection="column">
@@ -58,29 +58,50 @@ export function InputBox({
         {disabled ? (
           <Text dimColor>模型运行中,请等待…</Text>
         ) : text.includes("\n") ? (
-          // 多行:逐行渲染,光标 ▋ 在最后一行末尾
-          <Box flexDirection="column">
-            {text.split("\n").map((line, i, lines) => (
-              <Text key={i}>
-                {line}
-                {i === lines.length - 1 ? <Text color="gray">▋</Text> : null}
-              </Text>
-            ))}
-          </Box>
+          <Box flexDirection="column">{renderMultilineTextWithCursor(text, cursor)}</Box>
         ) : (
-          <Text>
-            {text}
-            <Text color="gray">▋</Text>
-          </Text>
+          renderLineWithCursor(text, cursor)
         )}
       </Box>
       {!disabled && <SuggestionList session={activeSuggestions} />}
       {!disabled && (
         <Text dimColor>
-          {" "}
-          Enter 发送 · Alt/Shift+Enter 换行 · ↑/↓ 历史/候选 · Tab 补全 · Ctrl+C 退出
+          {" "}Enter 发送 · Alt/Shift+Enter 换行 · ←/→ 编辑 · ↑/↓ 历史/候选 · Tab 补全 · Ctrl+C 退出
         </Text>
       )}
     </Box>
+  );
+}
+
+function renderMultilineTextWithCursor(text: string, cursor: number): React.ReactNode {
+  const lines = text.split("\n");
+  let offset = 0;
+
+  return lines.map((line, index) => {
+    const lineStart = offset;
+    const lineEnd = lineStart + line.length;
+    const hasCursor = cursor >= lineStart && cursor <= lineEnd;
+    offset = lineEnd + 1;
+
+    return (
+      <Text key={index}>
+        {hasCursor ? renderLineContentWithCursor(line, cursor - lineStart) : line}
+      </Text>
+    );
+  });
+}
+
+function renderLineWithCursor(line: string, cursor: number): React.ReactNode {
+  return <Text>{renderLineContentWithCursor(line, cursor)}</Text>;
+}
+
+function renderLineContentWithCursor(line: string, cursor: number): React.ReactNode {
+  const safeCursor = Math.max(0, Math.min(cursor, line.length));
+  return (
+    <>
+      {line.slice(0, safeCursor)}
+      <Text color="gray">▋</Text>
+      {line.slice(safeCursor)}
+    </>
   );
 }
