@@ -142,10 +142,10 @@ git diff --check
 - 修改：`tests/input/pico-command-registry.test.ts`
 
 **任务：**
-- [ ] 将 `/mode` 从 `/model` alias 中拆出，作为真正的交互模式命令。
-- [ ] 支持 `/mode` 展示当前模式。
-- [ ] 支持 `/mode default|plan|auto|yolo` 更新当前 session 设置。
-- [ ] `/status` 展示 mode、permissionMode、model、thinkingEffort。
+- [x] 将 `/mode` 从 `/model` alias 中拆出，作为真正的交互模式命令。
+- [x] 支持 `/mode` 展示当前模式。
+- [x] 支持 `/mode default|plan|auto|yolo` 更新当前 session 设置。
+- [x] `/status` 展示 mode、permissionMode、model、thinkingEffort。
 
 **验收命令：**
 
@@ -167,10 +167,10 @@ git diff --check
 - 修改：`tests/tui/repl-input-routing.test.tsx`
 
 **任务：**
-- [ ] `/clear` 真正清空 TUI 本地 transcript，不影响 session history。
-- [ ] `/compact` 触发现有 compactor 或返回清晰不可用原因。
-- [ ] `/init` 在当前项目生成或更新 Pico 需要的轻量配置入口。
-- [ ] `/doctor` 检查 `.env`、provider、model、cwd、node 版本并输出诊断。
+- [x] `/clear` 真正清空 TUI 本地 transcript，不影响 session history。
+- [x] `/compact` 触发现有 compactor 或返回清晰不可用原因。
+- [x] `/init` 在当前项目生成或更新 Pico 需要的轻量配置入口。
+- [x] `/doctor` 检查 `.env`、provider、model、cwd、node 版本并输出诊断。
 
 **验收命令：**
 
@@ -193,10 +193,10 @@ git diff --check
 - 修改：`tests/tui/suggestions.test.tsx`
 
 **任务：**
-- [ ] `/help <command>` 展示 usage、aliases、说明和参数。
-- [ ] 候选面板展示 alias 匹配来源，减少 `Unknown slash command`。
-- [ ] 未知命令建议按 alias 和编辑距离排序。
-- [ ] 命令描述统一中文或简洁英文，避免混乱。
+- [x] `/help <command>` 展示 usage、aliases、说明和参数。
+- [x] 候选面板展示 alias 匹配来源，减少 `Unknown slash command`。
+- [x] 未知命令建议按 alias 和编辑距离排序。
+- [x] 命令描述统一中文或简洁英文，避免混乱。
 
 **验收命令：**
 
@@ -208,10 +208,10 @@ git diff --check
 
 **阶段 3 集成验收：**
 
-- [ ] 合并 3A、3B、3C。
-- [ ] 运行阶段最低门槛命令。
-- [ ] 冒烟：`npm run dev -- --prompt /mode`、`/doctor`、`/help mode`。
-- [ ] 提交：`feat(input): 补齐 Claude 风格命令体系`。
+- [x] 合并 3A、3B、3C。
+- [x] 运行阶段最低门槛命令。
+- [x] 冒烟：`npm run dev -- --prompt /mode`、`/doctor`、`/help mode`。
+- [x] 提交：`feat(input): 补齐 Claude 风格命令体系`。
 
 ---
 
@@ -572,7 +572,7 @@ npm run smoke:tui
 ## 阶段推进顺序
 
 - [x] 阶段 2：视觉和交互精修。
-- [ ] 阶段 3：命令体系补全。
+- [x] 阶段 3：命令体系补全。
 - [ ] 阶段 4：权限与工具体验。
 - [ ] 阶段 5：回滚与会话管理增强。
 - [ ] 阶段 6：子代理与 Agent 体验。
