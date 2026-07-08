@@ -15,6 +15,7 @@ import type { LLMProvider } from "../provider/interface.js";
 import type { Message, ToolDefinition } from "../schema/message.js";
 import type { Session } from "../engine/session.js";
 import { estimateCost, type BillingRoute } from "./pricing.js";
+import { logger } from "./logger.js";
 
 /**
  * CostTracker:包装了真实 LLMProvider 的装饰器中间件。
@@ -42,10 +43,18 @@ export class CostTracker implements LLMProvider {
     if (resp.usage) {
       const { promptTokens, completionTokens } = resp.usage;
       const cost = estimateCost(this.modelRoute, resp.usage);
-      console.log(
-        `[Tracker] 📊 API 完成 | 耗时: ${latencyMs}ms | 输入: ${promptTokens} tk | 输出: ${completionTokens} tk | ` +
-          `cache_read: ${cost.usage.cacheReadTokens} tk | cache_write: ${cost.usage.cacheWriteTokens} tk | ` +
-          `reasoning: ${cost.usage.reasoningTokens} tk | 成本状态: ${cost.status} | 花费: ¥${cost.costCNY.toFixed(6)}`,
+      logger.info(
+        {
+          latencyMs,
+          promptTokens,
+          completionTokens,
+          cacheRead: cost.usage.cacheReadTokens,
+          cacheWrite: cost.usage.cacheWriteTokens,
+          reasoning: cost.usage.reasoningTokens,
+          costStatus: cost.status,
+          costCNY: cost.costCNY,
+        },
+        "[Tracker] API 完成",
       );
       if (this.session) {
         this.session.recordUsage(
@@ -55,12 +64,18 @@ export class CostTracker implements LLMProvider {
           cost.usage,
           cost.status,
         );
-        console.log(
-          `[Tracker] 💰 会话 (${this.session.id}) 累计: 输入 ${this.session.totalPromptTokens} tk | 输出 ${this.session.totalCompletionTokens} tk | ¥${this.session.totalCostCNY.toFixed(6)}`,
+        logger.info(
+          {
+            sessionId: this.session.id,
+            totalPromptTokens: this.session.totalPromptTokens,
+            totalCompletionTokens: this.session.totalCompletionTokens,
+            totalCostCNY: this.session.totalCostCNY,
+          },
+          "[Tracker] 会话累计",
         );
       }
     } else {
-      console.log(`[Tracker] ⚠ API 完成但无 Usage 数据 | 耗时: ${latencyMs}ms`);
+      logger.warn({ latencyMs }, "[Tracker] API 完成但无 Usage 数据");
     }
     return resp;
   }
@@ -91,8 +106,9 @@ export class CostTracker implements LLMProvider {
           cost.status,
         );
       }
-      console.log(
-        `[Tracker] 📊 流式API完成 | 耗时: ${latencyMs}ms | 成本: ¥${cost.costCNY.toFixed(6)}`,
+      logger.info(
+        { latencyMs, costCNY: cost.costCNY },
+        "[Tracker] 流式 API 完成",
       );
     }
     return resp;
