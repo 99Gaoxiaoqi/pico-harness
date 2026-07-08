@@ -19,7 +19,7 @@
 - [x] 第二阶段 worktree 已创建。
 - [x] 子代理已启动并拿到各自写入范围。
 - [x] 子代理开发结果已全部集成回 `main`。
-- [ ] 集成测试子代理完成最终验证。
+- [x] 集成测试子代理完成最终验证。
 
 ---
 
@@ -219,12 +219,12 @@ git diff --check
 
 **验证子代理：** 最后单独启动，不参与实现，只做验证和问题定位。
 
-- [ ] 运行目标单元测试。
-- [ ] 运行 lint。
-- [ ] 运行 `git diff --check`。
-- [ ] 用 `.env` 启动真实 TUI 冒烟：`npm run dev -- --prompt /status`、`/model`、`/help`。
-- [ ] 验证默认 session、新建 session、`--continue`、`--resume` 行为。
-- [ ] 验证 TUI 不再重复渲染用户输入框。
+- [x] 运行目标单元测试。
+- [x] 运行 lint。
+- [x] 运行 `git diff --check`。
+- [x] 用 `.env` 启动真实 TUI 冒烟：`npm run dev -- --prompt /status`、`/model`、`/help`。
+- [x] 验证默认 session、新建 session、`--continue`、`--resume` 行为。
+- [x] 验证 TUI 不再重复渲染用户输入框。
 
 **最终验收命令：**
 
