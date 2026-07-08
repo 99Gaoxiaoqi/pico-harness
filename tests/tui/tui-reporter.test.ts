@@ -77,6 +77,29 @@ describe("TuiReporter", () => {
     expect(entries.map((e) => e.kind)).toEqual(["user", "tool", "assistant"]);
   });
 
+  it("多轮流式不串:第2轮 onTextDelta 不追加到第1轮 assistant", () => {
+    const { reporter, last } = harness();
+    reporter.onStart("/tmp", true);
+    // 第1轮:流式 + 固化
+    reporter.onTurnStart(1);
+    reporter.onTextDelta("你好");
+    reporter.onMessage("你好");
+    // 工具调用(中间穿插)
+    reporter.onToolCall("read_file", '{"path":"a"}');
+    reporter.onToolResult("read_file", "内容", false);
+    // 第2轮:onTurnStart 重置缓冲 → onTextDelta 应创建新 assistant,不追加到第1轮
+    reporter.onTurnStart(2);
+    reporter.onTextDelta("结果");
+    reporter.onMessage("最终结果");
+
+    const entries = last()!;
+    // 应有2条独立的 assistant,内容不混
+    const assistants = entries.filter((e) => e.kind === "assistant");
+    expect(assistants).toHaveLength(2);
+    expect(assistants[0]).toMatchObject({ content: "你好" });
+    expect(assistants[1]).toMatchObject({ content: "最终结果" });
+  });
+
   it("并发同名工具:onToolResult 更新最后一个 running 的", () => {
     const { reporter, last } = harness();
     reporter.onToolCall("read_file", '{"path":"a"}');
