@@ -324,10 +324,10 @@ git diff --check
 - 新增：`tests/tui/session-selector.test.tsx`
 
 **任务：**
-- [ ] 增加 session 摘要结构：id、cwd、createdAt、updatedAt、messageCount。
-- [ ] `/sessions` 展示当前项目可恢复的 session 列表。
-- [ ] `/resume <session-id>` 在 TUI 内提示用户重启或切换的最小路径。
-- [ ] SessionSelector 组件支持空列表、当前项、长 id 截断。
+- [x] 增加 session 摘要结构：id、cwd、createdAt、updatedAt、messageCount。
+- [x] `/sessions` 展示当前项目可恢复的 session 列表。
+- [x] `/resume <session-id>` 在 TUI 内提示用户重启或切换的最小路径。
+- [x] SessionSelector 组件支持空列表、当前项、长 id 截断。
 
 **验收命令：**
 
@@ -349,10 +349,10 @@ git diff --check
 - 修改：`tests/cli-file-history.test.ts`
 
 **任务：**
-- [ ] `/snapshots` 展示时间、messageId、文件数量、变更摘要。
-- [ ] `/rewind` 无参数时展示最近快照和 mode 使用说明。
-- [ ] `/rewind <id> code|conversation|both` 支持 TUI 文本路径。
-- [ ] 找不到快照时输出可行动提示。
+- [x] `/snapshots` 展示时间、messageId、文件数量、变更摘要。
+- [x] `/rewind` 无参数时展示最近快照和 mode 使用说明。
+- [x] `/rewind <id> code|conversation|both` 支持 TUI 文本路径。
+- [x] 找不到快照时输出可行动提示。
 
 **验收命令：**
 
@@ -374,10 +374,10 @@ git diff --check
 - 修改：`tests/tui/status-bar.test.tsx`
 
 **任务：**
-- [ ] sessionMode 区分 new / continue / resume / fork。
-- [ ] fork session 在状态栏显示来源 session 短 id。
-- [ ] `/status` 输出 sessionId、sessionMode、forkFrom。
-- [ ] 继续/恢复失败时给出明确错误。
+- [x] sessionMode 区分 new / continue / resume / fork。
+- [x] fork session 在状态栏显示来源 session 短 id。
+- [x] `/status` 输出 sessionId、sessionMode、forkFrom。
+- [x] 继续/恢复失败时给出明确错误。
 
 **验收命令：**
 
@@ -389,10 +389,10 @@ git diff --check
 
 **阶段 5 集成验收：**
 
-- [ ] 合并 5A、5B、5C。
-- [ ] 运行阶段最低门槛命令。
-- [ ] 冒烟：`npm run dev -- --prompt /sessions`、`/snapshots`。
-- [ ] 提交：`feat(cli): 增强 session 与回滚交互`。
+- [x] 合并 5A、5B、5C。
+- [x] 运行阶段最低门槛命令。
+- [x] 冒烟：`npm run dev -- --prompt /sessions`、`/snapshots`。
+- [x] 提交并集成阶段 5 session 与回滚交互。
 
 ---
 
@@ -574,7 +574,7 @@ npm run smoke:tui
 - [x] 阶段 2：视觉和交互精修。
 - [x] 阶段 3：命令体系补全。
 - [x] 阶段 4：权限与工具体验。
-- [ ] 阶段 5：回滚与会话管理增强。
+- [x] 阶段 5：回滚与会话管理增强。
 - [ ] 阶段 6：子代理与 Agent 体验。
 - [ ] 阶段 7：真实项目验证与发布收口。
 
