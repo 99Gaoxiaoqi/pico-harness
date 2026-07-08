@@ -151,7 +151,6 @@ describe("AgentEngine 工具渐进披露接入(ROADMAP 5.4)", () => {
         return { role: "assistant", content: "完成" };
       }
     })();
-    const registry = new MockRegistry(allTools);
     // registry.execute 命中 search_tools 时,模拟 SearchToolsTool 的 disclose 副作用。
     // 真实 SearchToolsTool.execute 会调 disclosure.disclose;此处用真实 ToolDisclosure +
     // 手动 disclose 还原语义(测试关注 loop 拦截点,非 SearchToolsTool 本身)。

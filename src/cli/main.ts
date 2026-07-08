@@ -327,8 +327,7 @@ async function main() {
         systemPrompt: usePlanMode ? undefined : acpSystemPrompt,
         goalManager,
         todoStore,
-        // TODO: loop 端会加此字段,合并后即消(toolDisclosure?: ToolDisclosure on AgentEngineOptions)。
-        ...(toolDisclosure ? { toolDisclosure } : {}),
+        toolDisclosure,
         compactor: buildCompactor(kind, modelName),
         observationProcessor: buildObservationProcessor(workDir),
         reporter,
@@ -377,8 +376,7 @@ async function main() {
           systemPrompt,
           goalManager,
           todoStore,
-          // TODO: loop 端会加此字段,合并后即消(toolDisclosure?: ToolDisclosure on AgentEngineOptions)。
-          ...(toolDisclosure ? { toolDisclosure } : {}),
+          toolDisclosure,
           compactor: buildCompactor(kind, modelName),
           observationProcessor: buildObservationProcessor(workDir),
           reporter: new SilentReporter(), // 实际回写由运行时 FeishuReporter 负责

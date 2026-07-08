@@ -224,8 +224,7 @@ export async function runAgentFromCli(
     systemPrompt,
     goalManager,
     todoStore,
-    // TODO: loop 端会加此字段,合并后即消(toolDisclosure?: ToolDisclosure on AgentEngineOptions)。
-    ...(toolDisclosure ? { toolDisclosure } : {}),
+    toolDisclosure,
     compactor: buildCompactor(kind, providerConfig.model),
     // 模型摘要压缩:provider 存在即启用,作为字符级降级用尽后的最后防线。
     // 优先用辅助廉价模型(AUX_LLM_*)生成摘要省主模型成本;未配置则用主 provider。

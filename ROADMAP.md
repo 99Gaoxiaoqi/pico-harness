@@ -339,11 +339,10 @@ git worktree remove ../pico-1-streaming
 
 - [x] 5.1 AgentSwarm（批量子代理）— delegate_task 已支持 tasks[] 批量 + 并发池，远超原始设想
 - [x] 5.2 Cron 调度 — 不做（请求驱动引擎不内置 cron，靠外部调度器 + REST API，Claude Code/AutoGen 同款决策）
-- [x] 5.4 Tool Search 渐进披露 — 不做（15 工具 << 50 阈值，过早优化；预留 get_tools_for_context 钩子，等工具数 ≥40 再做）
 - [x] 5.3 Auxiliary Client（辅助模型做压缩/标题）— AUX_LLM_* 配置 + FullCompactor 用 aux + Compactor summarizer 工厂
-- [ ] 5.4 Tool Search 渐进披露（P2，工具还少，过早优化）
+- [x] 5.4 Tool Search 渐进披露 — 工具分组分层(核心组始终加载 + 扩展组按需披露)；search_tools 元工具检索激活；loop.ts 拦截点 + 所有 host 入口注入 ToolDisclosure 单例（2026-07-08 实现，详见变更记录）
 - [x] 5.5 Image / Media 支持 — 方案 B(加 images 字段,content 保持 string),3 provider 多模态翻译 + HTTP/ACP/CLI 入口传图
-- [ ] 5.6 TUI 界面（P2，与 HTTP+WS 路线重复，暂不做）
+- [x] 5.6 TUI 界面 — 不做（与 HTTP+WS 路线重复，暂不做）
 - [x] 5.7 Rate Limit Tracking — header 解析 + CredentialPool 精确冷却 + 3 provider 回传
 - [x] 5.8 版本化迁移（JSONL schema 版本号）— meta record + migration 框架
 
@@ -381,6 +380,18 @@ git worktree remove ../pico-1-streaming
 
 ## 📅 变更记录
 
+- 2026-07-08：阶段 5.4 Tool Search 渐进披露实现（修订原"不做"决策）
+  - 原 ROADMAP 标 5.4"不做（15 工具 << 50 阈值）"；经重新评估决定采用**工具分组分层**方案实现（非全量检索披露，避免过度设计）
+  - **核心三件套**（`src/tools/`）：
+    - `tool-tiers.ts`：CORE_TOOLS 常量集（read/write/edit/bash/glob/grep/todo 共 7 个核心工具）+ getTier() 分层判定
+    - `tool-disclosure.ts`：ToolDisclosure 状态机——disclose()/pickForLLM()(核心∪disclosed扩展)/getDisclosed()/reset()；不影响 registry.execute 路由（安全网：模型误调未披露工具也能执行）
+    - `search-tools.ts`：SearchToolsTool 元工具——模型用关键词检索激活扩展工具，命中调 disclose() 加入 disclosed 集合，下一轮自动可用
+  - **接入层**：
+    - `engine/loop.ts`：AgentEngineOptions 加 toolDisclosure? 字段；run() 拦截点（getAvailableTools 后）pickForLLM 筛选 + search_tools schema 始终注入；trace 记录 totalToolCount
+    - `default-registry.ts` + `run-agent.ts` + `main.ts`(ACP/飞书) + `http.ts`：所有 host 入口创建 ToolDisclosure 单例，对齐 GoalManager/TodoStore 注入范式；向后兼容（未注入则行为不变）
+  - **极简哲学**：不改 BaseTool 接口（tier 用集中常量表），不改 execute 路由，不改 ToolDefinition schema
+  - 验证：三件套单测 21 + loop 拦截点测试 4 = 25 个新测试全过；typecheck 零新增错误（接口对接 host↔loop 零误差）；全量 mock 测试无回归
+  - 策略：worktree 两波并行（第一波串行建三件套，第二波 loop/host 两个子代理并行因文件集不相交）
 - 2026-07-07：阶段 4 多模型与多端入口全部完成（5/5）
   - 4.1 Gemini Provider：原生协议适配（generateContent API、system_instruction 顶层、parts 结构），factory/profile 加 gemini 分发（+13 测试）
   - 4.2 Credential Pool：round-robin 轮换 + 60s 冷却 + 全限流兜底，429 自动切 key 重试（+14 测试）
