@@ -1,15 +1,22 @@
-// 工具调用卡片:对标 Claude Code 的 AgentProgressLine(树形缩进 + 状态图标 + 参数着色)。
-// 从 message-list.tsx 抽出独立组件,便于精修与测试。
+// 工具调用卡片:对标 Claude Code 的 AgentProgressLine(树形缩进 + 状态图标 + 参数着色)
+// + 工具结果折叠(除最后一条默认折叠,按 e 展开)。
 //
 // 渲染要点:
-//   ⎿ <tool_name>(<着色参数>) <状态图标>
-//     <summary>            (done=灰/error=红)
+//   折叠态:⎿ <name>(<着色参数>) <状态图标> <字节摘要>   (一行,不含 summary 详情)
+//   展开态:⎿ <name>(<着色参数>) <状态图标>               (首行)
+//            <完整 summary>                                (多行详情)
+//
+// 折叠/展开:组件自维护 collapsed state,用 useInput 监听 `e` 键切换。
+//   多个 tool-card 同时监听 `e` 会冲突——按 isLast 区分响应:
+//     - 非末条(默认折叠):响应 `e` 切换自身状态(展开↔折叠)
+//     - 末条:默认展开(查看最新结果),且不抢 `e` 键(让前面的卡片能切)
+//   这样任意时刻按 `e`,只有"被关注"的卡片(非末条/已展开)响应,行为可预期。
 //
 // 参数高亮:尝试 JSON.parse,成功则提取 path/command/url/query 等关键字段着色显示;
 // 失败降级为原始字符串(截断)。
 
-import React from "react";
-import { Box, Text } from "ink";
+import React, { useState } from "react";
+import { Box, Text, useInput } from "ink";
 
 /** 参数里需要高亮(青色)的关键字段,按优先级排序 */
 const HIGHLIGHT_KEYS = ["path", "command", "url", "query", "file", "pattern"] as const;
@@ -19,10 +26,25 @@ export function ToolCard(props: {
   args: string;
   status: "running" | "done" | "error";
   summary?: string;
+  /** 是否为消息列表中最后一条:决定默认折叠态 + 是否响应 `e` 键 */
+  isLast?: boolean;
 }): React.ReactNode {
-  const { name, args, status, summary } = props;
+  const { name, args, status, summary, isLast = false } = props;
+  // 默认折叠:非末条折叠;末条展开(方便看最新结果)
+  const [collapsed, setCollapsed] = useState(!isLast);
+
+  // 按 e 切换折叠:非末条总响应;末条只在已被展开后(用户主动操作)才响应
+  // —— 避免末条抢键导致前面的卡片无法切。极简策略:isLast 时让出 `e`。
+  useInput((_input, key) => {
+    if (key.return) return;
+    if (_input === "e" && !key.ctrl && !key.meta && !isLast) {
+      setCollapsed((c) => !c);
+    }
+  });
+
   return (
     <Box flexDirection="column" marginLeft={2}>
+      {/* 首行:树形缩进 + 工具名 + 着色参数 + 状态图标 */}
       <Box>
         <Text dimColor>⎿ </Text>
         <Text color="cyan">{name}</Text>
@@ -32,16 +54,30 @@ export function ToolCard(props: {
         {status === "running" && <Text color="yellow">⠋</Text>}
         {status === "done" && <Text color="green">✓</Text>}
         {status === "error" && <Text color="red">✗</Text>}
+        {/* 折叠态下用字节摘要收尾(如 "120字节"),给个简短提示 */}
+        {collapsed && summary && <Text dimColor> {byteHint(summary)}</Text>}
+        {/* 折叠提示:非末条可按 e 展开 */}
+        {!isLast && <Text dimColor> {collapsed ? "[e 展开]" : "[e 折叠]"}</Text>}
       </Box>
-      {summary && (
+      {/* 展开态:显示完整 summary 详情(多行) */}
+      {!collapsed && summary && (
         <Box marginLeft={2}>
-          <Text color={status === "error" ? "red" : undefined} dimColor={status !== "error"}>
+          <Text color={status === "error" ? "red" : undefined} dimColor={status !== "error"} wrap="wrap">
             {summary}
           </Text>
         </Box>
       )}
     </Box>
   );
+}
+
+/**
+ * 从 summary 提取字节提示(形如 "120 字节 · …")。
+ * reporter 生成的 summary 首段是 "<字节数> 字节 · ",折叠态只取这部分。
+ */
+function byteHint(summary: string): string {
+  const m = summary.match(/^(\d+\s*字节)/);
+  return m ? m[1]! : summary.slice(0, 12);
 }
 
 /**
