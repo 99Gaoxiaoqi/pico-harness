@@ -26,6 +26,33 @@ describe("processUserInput", () => {
     }
   });
 
+  it("/help <command> 展示 usage、aliases、说明和参数", async () => {
+    const registry = createBuiltinCommandRegistry();
+    const result = await processUserInput("/help thinking", { registry });
+
+    expect(result.type).toBe("local-command");
+    if (result.type === "local-command") {
+      expect(result.command).toBe("help");
+      expect(result.result.message).toContain("Command: /thinking");
+      expect(result.result.message).toContain("Usage: /thinking <off|low|medium|high>");
+      expect(result.result.message).toContain("Aliases: /effort");
+      expect(result.result.message).toContain("Description: Show or change thinking effort");
+      expect(result.result.message).toContain("Parameters:");
+      expect(result.result.message).toContain("<off|low|medium|high>");
+    }
+  });
+
+  it("/help <alias> 会展示原命令帮助", async () => {
+    const registry = createBuiltinCommandRegistry();
+    const result = await processUserInput("/help h", { registry });
+
+    expect(result.type).toBe("local-command");
+    if (result.type === "local-command") {
+      expect(result.result.message).toContain("Command: /help");
+      expect(result.result.message).toContain("Aliases: /h, /?");
+    }
+  });
+
   it("/clear 返回清屏本地命令结果", async () => {
     const result = await processUserInput("/clear", {
       registry: createBuiltinCommandRegistry(),
@@ -46,6 +73,17 @@ describe("processUserInput", () => {
       type: "unknown-command",
       command: "xxx",
     });
+  });
+
+  it("未知命令建议按 alias 和编辑距离排序", async () => {
+    const result = await processUserInput("/hlep", {
+      registry: createBuiltinCommandRegistry(),
+    });
+
+    expect(result.type).toBe("unknown-command");
+    if (result.type === "unknown-command") {
+      expect(result.suggestions[0]).toBe("help");
+    }
   });
 
   it("alias 会解析到原命令", async () => {

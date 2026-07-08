@@ -64,6 +64,26 @@ describe("SuggestionList row model", () => {
     ]);
   });
 
+  it("renders alias match source in slash command rows", () => {
+    const session: ActiveSuggestionSession = {
+      kind: "slash",
+      query: "h",
+      replaceStart: 0,
+      replaceEnd: 2,
+      selectedIndex: 0,
+      items: [{ value: "help", matchedAlias: "h", description: "Show help" }],
+    };
+
+    const rows = formatSuggestionRows(session);
+    const output = renderToString(<SuggestionList session={session} />);
+
+    expect(rows[0]).toMatchObject({
+      left: "/help",
+      description: "alias /h · Show help",
+    });
+    expect(output).toContain("alias /h · Show help");
+  });
+
   it("clips selected Chinese, multiline, and long command candidates for panel rendering", () => {
     const session: ActiveSuggestionSession = {
       kind: "slash",

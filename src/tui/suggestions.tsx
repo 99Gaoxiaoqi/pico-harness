@@ -14,6 +14,8 @@ export interface InputSuggestion {
   insertText?: string;
   /** Short help text rendered on the right. */
   description?: string;
+  /** Alias that matched the current slash-command query. */
+  matchedAlias?: string;
 }
 
 export interface ActiveSuggestionSession {
@@ -62,10 +64,11 @@ export function formatSuggestionRows(
 
   return session.items.slice(0, MAX_SUGGESTIONS).map((item, index) => {
     const value = stripMarker(item.value, session.kind);
+    const description = formatSuggestionDescription(item, session.kind);
     return {
       key: `${session.kind}:${value}:${index}`,
       left: truncateInline(`${markerForKind(session.kind)}${value}`, SUGGESTION_LABEL_WIDTH),
-      description: truncateInline(item.description ?? "", SUGGESTION_DESCRIPTION_WIDTH),
+      description: truncateInline(description, SUGGESTION_DESCRIPTION_WIDTH),
       selected: index === session.selectedIndex,
     };
   });
@@ -95,6 +98,21 @@ function truncateInline(value: string, maxLength: number): string {
   }
 
   return `${result}…`;
+}
+
+function formatSuggestionDescription(
+  item: InputSuggestion,
+  kind: SuggestionKind,
+): string {
+  if (kind !== "slash" || item.matchedAlias === undefined) {
+    return item.description ?? "";
+  }
+
+  const alias = stripMarker(item.matchedAlias, "slash");
+  const source = `alias /${alias}`;
+  return item.description === undefined || item.description.length === 0
+    ? source
+    : `${source} · ${item.description}`;
 }
 
 function displayWidth(value: string): number {
