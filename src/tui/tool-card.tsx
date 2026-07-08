@@ -140,6 +140,7 @@ function AgentToolProgressLine({
   const meta = agentToolMeta(name, args);
   const failure = isFailureStatus(status);
   const resultText = status === "running" ? meta.task : agentResultText(status, summary);
+  const preview = agentResultHint(resultText);
 
   useInput((_input, key) => {
     if (key.return) return;
@@ -163,11 +164,11 @@ function AgentToolProgressLine({
         )}
         <Text dimColor> · </Text>
         <ToolStatus status={status} />
-        {summary && (
+        {preview && (
           <>
             <Text dimColor> · </Text>
             <Text color={failure ? "yellow" : undefined} dimColor={!failure} wrap="truncate">
-              {resultHint(resultText)}
+              {preview}
             </Text>
           </>
         )}
@@ -218,10 +219,14 @@ function agentToolMeta(name: string, args: string): {
   }
 
   if (name === "delegate_task") {
+    const batch = delegateBatchMeta(parsed);
     return {
       label: "Agents",
-      detail: firstString(parsed, ["agent_name", "mode"]) ?? taskCountDetail(parsed),
-      task: firstString(parsed, ["goal", "task", "description"]) ?? "Delegating tasks…",
+      detail: firstString(parsed, ["agent_name", "mode"]) ?? batch?.detail,
+      task:
+        batch?.task ??
+        firstString(parsed, ["goal", "task", "description"]) ??
+        "Delegating tasks…",
       color: "cyan",
     };
   }
@@ -261,11 +266,19 @@ function firstString(value: unknown, keys: string[]): string | undefined {
   return undefined;
 }
 
-function taskCountDetail(value: unknown): string | undefined {
+function delegateBatchMeta(value: unknown): { detail: string; task: string } | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const tasks = (value as Record<string, unknown>)["tasks"];
-  if (Array.isArray(tasks)) return `${tasks.length} tasks`;
-  return undefined;
+  if (!Array.isArray(tasks) || tasks.length === 0) return undefined;
+  const firstTask = tasks.find((task) => task && typeof task === "object" && !Array.isArray(task));
+  const firstGoal =
+    firstTask && typeof firstTask === "object"
+      ? firstString(firstTask, ["goal", "task", "description"])
+      : undefined;
+  return {
+    detail: `${tasks.length} agents`,
+    task: compactText(`1/${tasks.length} queued${firstGoal ? ` · ${firstGoal}` : ""}`, 96),
+  };
 }
 
 function agentResultText(status: ToolCardStatus, summary: string | undefined): string {
@@ -288,6 +301,10 @@ function ToolStatus({ status }: { status: ToolCardStatus }): React.ReactNode {
 
 function resultHint(summary: string): string {
   return compactText(summary, 72);
+}
+
+function agentResultHint(summary: string): string {
+  return compactText(summary, 24);
 }
 
 function normalizeStatus(status: ToolCardStatus): "running" | "success" | "failed" | "denied" {

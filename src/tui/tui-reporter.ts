@@ -113,7 +113,7 @@ export class TuiReporter implements Reporter {
     for (let i = this.entries.length - 1; i >= 0; i--) {
       const e = this.entries[i]!;
       if (e.kind === "tool" && e.name === toolName && e.status === "running") {
-        e.status = resolveToolStatus(result, isError);
+        e.status = resolveToolStatus(toolName, result, isError);
         e.summary = summarizeResult(toolName, e.args, result, isError);
         break;
       }
@@ -178,6 +178,10 @@ export class TuiReporter implements Reporter {
 function summarizeResult(toolName: string, args: string, result: string, isError: boolean): string {
   if (isError) return formatErrorSummary(result);
 
+  if (isAgentToolName(toolName)) {
+    return summarizeAgentResult(toolName, result);
+  }
+
   const target = toolTargetSummary(toolName, args);
   const output = formatOutputPreview(result, { maxLines: 3 });
   if (target) return `${target} · ${result.length} 字节 · ${output}`;
@@ -188,9 +192,18 @@ function summarizeResult(toolName: string, args: string, result: string, isError
   return `${result.length} 字节 · ${head.join(" ⏎ ").slice(0, 120)}${suffix}`;
 }
 
-function resolveToolStatus(result: string, isError: boolean): ToolCardStatus {
-  if (!isError) return "done";
+function resolveToolStatus(toolName: string, result: string, isError: boolean): ToolCardStatus {
+  if (!isError) return isAgentToolName(toolName) && agentResultHasFailure(result) ? "failed" : "done";
   return isDeniedResult(result) ? "denied" : "error";
+}
+
+function isAgentToolName(toolName: string): boolean {
+  return (
+    toolName === "spawn_subagent" ||
+    toolName === "delegate_task" ||
+    toolName === "delegate_status" ||
+    toolName.startsWith("[Subagent]")
+  );
 }
 
 function isDeniedResult(result: string): boolean {
@@ -228,4 +241,88 @@ function formatErrorSummary(error: string): string {
 function compactText(text: string, max: number): string {
   const oneLine = text.replace(/\s+/g, " ").trim();
   return oneLine.length > max ? `${oneLine.slice(0, max - 1)}…` : oneLine;
+}
+
+function summarizeAgentResult(toolName: string, result: string): string {
+  const parsed = parseJsonObject(result);
+  if (!parsed) return summarizePlainAgentResult(toolName, result);
+
+  const topLevelError = stringField(parsed, "error");
+  if (topLevelError) return formatErrorSummary(topLevelError);
+
+  const status = stringField(parsed, "status");
+  const delegationId = stringField(parsed, "delegationId") ?? stringField(parsed, "delegation_id");
+  const batch = extractDelegationBatch(parsed);
+  if (batch) return summarizeDelegationBatch(batch);
+
+  if (status) {
+    const idPart = delegationId ? ` · ${compactText(delegationId, 48)}` : "";
+    return `${status}${idPart}`;
+  }
+
+  return summarizePlainAgentResult(toolName, result);
+}
+
+function summarizePlainAgentResult(toolName: string, result: string): string {
+  const label = toolName.startsWith("[Subagent]") ? "Subagent" : "Agent";
+  return `${label} · ${formatOutputPreview(result, { maxLines: 3 })}`;
+}
+
+function agentResultHasFailure(result: string): boolean {
+  const parsed = parseJsonObject(result);
+  if (!parsed) return result.startsWith("子智能体执行失败:");
+  if (stringField(parsed, "error")) return true;
+
+  const batch = extractDelegationBatch(parsed);
+  return batch ? batch.results.some((item) => stringField(item, "status") === "error") : false;
+}
+
+function extractDelegationBatch(value: Record<string, unknown>): { results: Record<string, unknown>[] } | undefined {
+  const direct = value["results"];
+  if (Array.isArray(direct)) return { results: direct.filter(isRecord) };
+
+  const nestedResult = value["result"];
+  if (isRecord(nestedResult)) {
+    const nested = nestedResult["results"];
+    if (Array.isArray(nested)) return { results: nested.filter(isRecord) };
+  }
+
+  return undefined;
+}
+
+function summarizeDelegationBatch(batch: { results: Record<string, unknown>[] }): string {
+  const total = batch.results.length;
+  const completed = batch.results.filter((item) => stringField(item, "status") === "completed").length;
+  const failed = batch.results.filter((item) => stringField(item, "status") === "error").length;
+
+  const parts = [`${completed}/${total} completed`];
+  if (failed > 0) parts.push(`${failed} failed`);
+
+  const success = batch.results.find((item) => stringField(item, "status") === "completed");
+  const failure = batch.results.find((item) => stringField(item, "status") === "error");
+  const successSummary = success ? stringField(success, "summary") : undefined;
+  const failureSummary = failure ? stringField(failure, "error") ?? stringField(failure, "summary") : undefined;
+
+  if (successSummary) parts.push(`ok: ${compactText(successSummary, 72)}`);
+  if (failureSummary) parts.push(`failed: ${compactText(failureSummary, 88)}`);
+
+  return compactText(parts.join(" · "), 220);
+}
+
+function parseJsonObject(text: string): Record<string, unknown> | undefined {
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    return isRecord(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function stringField(value: Record<string, unknown>, key: string): string | undefined {
+  const raw = value[key];
+  return typeof raw === "string" && raw.trim() ? raw.trim() : undefined;
 }

@@ -160,6 +160,46 @@ describe("TuiReporter", () => {
     expect(entry.kind === "tool" ? entry.summary : "").toContain("Error: command failed");
   });
 
+  it("delegate_task 批量结果展示 completed/total,且保留成功与失败摘要", () => {
+    const { reporter, last } = harness();
+    reporter.onToolCall(
+      "delegate_task",
+      JSON.stringify({
+        tasks: [
+          { agent_name: "reviewer", goal: "检查 TUI 子代理展示" },
+          { agent_name: "tester", goal: "运行回归测试" },
+        ],
+      }),
+    );
+    reporter.onToolResult(
+      "delegate_task",
+      JSON.stringify({
+        results: [
+          {
+            taskIndex: 0,
+            status: "completed",
+            summary: "reviewer confirmed the card keeps ordinary tool behavior",
+            durationMs: 12,
+          },
+          {
+            taskIndex: 1,
+            status: "error",
+            error: "TypeError: cannot read property status of undefined",
+            durationMs: 9,
+          },
+        ],
+        totalDurationMs: 21,
+      }),
+      false,
+    );
+
+    const entry = last()![0]!;
+    expect(entry).toMatchObject({ kind: "tool", name: "delegate_task", status: "failed" });
+    expect(entry.kind === "tool" ? entry.summary : "").toContain("1/2 completed");
+    expect(entry.kind === "tool" ? entry.summary : "").toContain("reviewer confirmed");
+    expect(entry.kind === "tool" ? entry.summary : "").toContain("TypeError");
+  });
+
   describe("getMode(SpinnerMode 追踪)", () => {
     it("初始为 idle", () => {
       const { reporter } = harness();
