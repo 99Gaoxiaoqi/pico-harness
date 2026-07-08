@@ -229,12 +229,14 @@ git worktree remove ../pico-1-streaming
 - [x] 新增 TaskList / TaskOutput / TaskStop 工具
 - [x] 测试 + 提交
 
-### 2.6 PreToolUse / PostToolUse Hooks
-- [ ] `tools/registry.ts` 加 `PreToolUseHook` 和 `PostToolUseHook` 接口
-- [ ] `tools/registry-impl.ts` 执行链插入 hook 调用点
-- [ ] PreToolUse 可拦截或改写参数
-- [ ] PostToolUse 可修改输出
-- [ ] 测试 + 提交
+### 2.6 PreToolUse / PostToolUse Hooks ✅
+> 对标 Claude Code/Codex/Kimi Code 三家源码确认的事实标准协议。现有 RequestMiddleware(代码内)定位不同——hooks 是**用户可配置 shell 扩展点**(不碰源码)。
+- [x] 新建 `hooks/types.ts` + `hooks/runner.ts` + `hooks/config.ts`(用户可配置 shell hooks,对齐 Claude Code 协议:stdin JSON + exit 0/2 + stdout permissionDecision)
+- [x] `tools/registry-impl.ts` execute 链插入 PreToolUse(可拦截/改写参数)/ PostToolUse(fire-and-forget)
+- [x] PreToolUse 可拦截或改写参数(matcher 三模式 + modifiedInput)
+- [x] PostToolUse fire-and-forget(不阻断工具)
+- [x] 测试 + 提交(config 8 + runner 26 + registry 11,共 45 测试;真实模型 e2e 验证 .bat/.sh 脚本拦截 bash)
+- [x] **fail-open 铁律**:任何故障(超时/崩溃/解析失败)都不阻断工具
 
 ### 2.7 edit_file 加 replace_all ✅
 - [x] `tools/registry-impl.ts` fuzzyReplace 增加 `replaceAll` 选项（L1-L4 各级）
@@ -336,7 +338,8 @@ git worktree remove ../pico-1-streaming
 > **目标**：从"能用"到"好用"。按实际需求挑着做。
 
 - [x] 5.1 AgentSwarm（批量子代理）— delegate_task 已支持 tasks[] 批量 + 并发池，远超原始设想
-- [ ] 5.2 Cron 调度（P2，偏离交互式 Agent 定位，暂不做）
+- [x] 5.2 Cron 调度 — 不做（请求驱动引擎不内置 cron，靠外部调度器 + REST API，Claude Code/AutoGen 同款决策）
+- [x] 5.4 Tool Search 渐进披露 — 不做（15 工具 << 50 阈值，过早优化；预留 get_tools_for_context 钩子，等工具数 ≥40 再做）
 - [x] 5.3 Auxiliary Client（辅助模型做压缩/标题）— AUX_LLM_* 配置 + FullCompactor 用 aux + Compactor summarizer 工厂
 - [ ] 5.4 Tool Search 渐进披露（P2，工具还少，过早优化）
 - [x] 5.5 Image / Media 支持 — 方案 B(加 images 字段,content 保持 string),3 provider 多模态翻译 + HTTP/ACP/CLI 入口传图
@@ -352,11 +355,11 @@ git worktree remove ../pico-1-streaming
 |------|---------|------|------|
 | 阶段 1 | 5 | 5 | ✅ 完成 |
 | 阶段 1.5 | 8 | 8 | ✅ 完成 |
-| 阶段 2 | 7 | 6 | 🟢 仅剩 2.6 Hooks（暂缓到阶段 3） |
+| 阶段 2 | 7 | 7 | ✅ 完成 |
 | 阶段 3 | 7 | 7 | ✅ 完成 |
 | 阶段 4 | 5 | 5 | ✅ 完成 |
-| 阶段 5 | 8 | 5 | 🟡 5.1/5.3/5.5/5.7/5.8 完成，5.2/5.4/5.6 暂不做 |
-| **总计** | **40** | **36** | — |
+| 阶段 5 | 8 | 8 | ✅ 全部闭环（5.2/5.4 经调研确认不做） |
+| **总计** | **40** | **40** | 🎉 全部完成 |
 
 ---
 
