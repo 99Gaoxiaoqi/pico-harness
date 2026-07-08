@@ -152,7 +152,7 @@ export class TuiReporter implements Reporter {
 
   /** 把当前 entries 的快照推给 onUpdate,驱动 ink 重渲染 */
   private emit(): void {
-    // 浅拷贝数���(元素是引用,ink 靠 .length 变化触发渲染)
+    // 浅拷贝数组(元素是引用,ink 靠 .length 变化触发渲染)
     this.onUpdate([...this.entries]);
   }
 }
