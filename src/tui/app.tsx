@@ -16,11 +16,11 @@
 // 状态机:idle(可输入) | running(模型运行中,输入框禁用)。
 
 import React from "react";
-import { Box, Text, useApp, useInput } from "ink";
+import { Box, Static, Text, useApp, useInput } from "ink";
 import { InputBox } from "./input-box.js";
 import { Spinner } from "./spinner.js";
 import type { SpinnerMode } from "./spinner.js";
-import { LogoHeader, MessageList, shouldRenderStatically } from "./message-list.js";
+import { LogoHeader, shouldRenderStatically } from "./message-list.js";
 import { MessageRow } from "./message-row.js";
 import type { TuiEntry } from "./tui-reporter.js";
 
@@ -54,8 +54,12 @@ export function App({ model, workDir, entries, running, onSubmit }: AppProps): R
 
   return (
     <Box flexDirection="column">
-      {/* Logo(消息流首项,对标 Claude Code 无常驻顶栏) */}
-      <LogoHeader model={model} workDir={workDir} />
+      {/* Logo:用 <Static> 包裹,只渲染一次(items 固定单个元素,不会增长,
+          故不会触发"条目毕业导致重复"的陷阱)。避免 Logo 在每次 setState
+          重绘时被重复输出到终端。 */}
+      <Static items={[{ model, workDir }]}>
+        {(item) => <LogoHeader key="logo" model={item.model} workDir={item.workDir} />}
+      </Static>
 
       {/* 消息列表:全部条目在同一渲染树。
           isStatic 的条目由 MessageRow 的 React.memo 跳过重渲染(零 diff)。
