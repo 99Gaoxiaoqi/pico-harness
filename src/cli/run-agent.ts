@@ -53,6 +53,10 @@ import { BackgroundManager } from "../tools/background-manager.js";
 import { loadHooksConfig } from "../hooks/config.js";
 import { HookRunner } from "../hooks/runner.js";
 import { createPicoCommandRegistry } from "../input/pico-command-registry.js";
+import {
+  getOrCreateSessionSettings,
+  toolStatusFromRegistry,
+} from "../input/session-settings.js";
 import { preparePromptWithMentions } from "../input/prepare-prompt.js";
 import { processUserInput } from "../input/process-user-input.js";
 import type { InputProcessResult } from "../input/types.js";
@@ -149,17 +153,57 @@ export async function runUserInputFromCli(
 ): Promise<RunUserInputCliResult> {
   const workDir = await resolveWorkDir(options.dir);
   const provider = options.provider ?? "openai";
-  const model = options.model ?? dependencies.env?.LLM_MODEL ?? process.env.LLM_MODEL ?? "(default)";
-  const registry = await createPicoCommandRegistry({ workDir, provider, model });
+  const sessionId = options.session ?? consoleSessionId(workDir);
+  const model = options.model ?? dependencies.env?.LLM_MODEL ?? process.env.LLM_MODEL ?? defaultModel(provider);
+  const toolRegistry = buildRegistry(workDir, cliBackgroundManager, new GoalManager(), new TodoStore(workDir), new ToolDisclosure());
+  const settings = getOrCreateSessionSettings({
+    sessionId,
+    cwd: workDir,
+    provider,
+    model,
+    ...(options.thinkingEffort !== undefined ? { thinkingEffort: options.thinkingEffort } : {}),
+    permissionMode: "ask",
+    tools: toolStatusFromRegistry(toolRegistry),
+  });
+  const registry = await createPicoCommandRegistry({
+    workDir,
+    provider,
+    model: settings.model,
+    sessionId,
+    ...(settings.thinkingEffortExplicit ? { thinkingEffort: settings.thinkingEffort } : {}),
+    permissionMode: settings.permissionMode,
+    tools: settings.tools,
+  });
   const input = await processUserInput(options.prompt, { registry });
 
   if (input.type === "prompt" || input.type === "prompt-command") {
     const rawPrompt = input.type === "prompt" ? input.prompt : input.result.prompt;
     const prompt = await preparePromptWithMentions(rawPrompt, workDir);
+    const activeSettings = getOrCreateSessionSettings({
+      sessionId,
+      cwd: workDir,
+      provider,
+      model,
+      ...(options.thinkingEffort !== undefined ? { thinkingEffort: options.thinkingEffort } : {}),
+      permissionMode: "ask",
+      tools: settings.tools,
+    });
     return {
       type: "agent",
       input,
-      result: await runAgentFromCli({ ...options, dir: workDir, prompt }, dependencies),
+      result: await runAgentFromCli(
+        {
+          ...options,
+          dir: workDir,
+          session: sessionId,
+          prompt,
+          model: activeSettings.model,
+          ...(activeSettings.thinkingEffortExplicit
+            ? { thinkingEffort: activeSettings.thinkingEffort }
+            : {}),
+        },
+        dependencies,
+      ),
     };
   }
 
@@ -173,14 +217,36 @@ export async function runAgentFromCli(
 ): Promise<RunAgentCliResult> {
   const prompt = normalizePrompt(options.prompt);
   const kind = options.provider ?? "openai";
+  const workDir = await resolveWorkDir(options.dir);
+  const sessionId = options.session ?? consoleSessionId(workDir);
+  const defaultConfigModel =
+    options.model ?? (dependencies.env ?? process.env).LLM_MODEL ?? defaultModel(kind);
+  const settings = getOrCreateSessionSettings({
+    sessionId,
+    cwd: workDir,
+    provider: kind,
+    model: defaultConfigModel,
+    ...(options.thinkingEffort !== undefined ? { thinkingEffort: options.thinkingEffort } : {}),
+    permissionMode: "ask",
+  });
+  const effectiveOptions: RunAgentCliOptions = {
+    ...options,
+    dir: workDir,
+    session: sessionId,
+    model: options.model ?? settings.model,
+    ...(options.thinkingEffort !== undefined
+      ? { thinkingEffort: options.thinkingEffort }
+      : settings.thinkingEffortExplicit
+        ? { thinkingEffort: settings.thinkingEffort }
+        : {}),
+  };
   const providerConfig = resolveProviderConfig(
-    options,
+    effectiveOptions,
     dependencies.env ?? process.env,
     dependencies.provider !== undefined,
   );
-  const workDir = await resolveWorkDir(options.dir);
   const session = await globalSessionManager.getOrCreate(
-    options.session ?? consoleSessionId(workDir),
+    sessionId,
     workDir,
   );
   // 凭证轮换(4.2):多 key 时从池取首个 key 覆盖 config.apiKey,并构建轮换回调。
@@ -254,9 +320,9 @@ export async function runAgentFromCli(
     provider: trackedProvider,
     registry,
     workDir,
-    enableThinking: options.enableThinking ?? true,
-    ...(options.thinkingEffort !== undefined ? { thinkingEffort: options.thinkingEffort } : {}),
-    planMode: options.planMode ?? false,
+    enableThinking: effectiveOptions.enableThinking ?? true,
+    ...(effectiveOptions.thinkingEffort !== undefined ? { thinkingEffort: effectiveOptions.thinkingEffort } : {}),
+    planMode: effectiveOptions.planMode ?? false,
     systemPrompt,
     goalManager,
     todoStore,
@@ -270,7 +336,7 @@ export async function runAgentFromCli(
     }),
     observationProcessor,
     reporter: dependencies.reporter ?? new TerminalReporter(),
-    tracer: options.trace === true ? new Tracer() : undefined,
+    tracer: effectiveOptions.trace === true ? new Tracer() : undefined,
     steerQueue,
     ...(rebuildProvider ? { rebuildProvider } : {}),
   });
@@ -298,8 +364,8 @@ export async function runAgentFromCli(
 
   try {
     // 5.5e 图片入口:--image <path> 转成 ImagePart 附到首条 user 消息
-    const images: ImagePart[] | undefined = options.imagePath
-      ? [loadImage(options.imagePath)]
+    const images: ImagePart[] | undefined = effectiveOptions.imagePath
+      ? [loadImage(effectiveOptions.imagePath)]
       : undefined;
     session.append({
       role: "user",
@@ -314,7 +380,7 @@ export async function runAgentFromCli(
       finalMessage: findFinalMessage(messages),
       usage: snapshotUsage(session),
       messages,
-      ...(options.trace === true ? { tracePath: await findTracePath(workDir, session.id) } : {}),
+      ...(effectiveOptions.trace === true ? { tracePath: await findTracePath(workDir, session.id) } : {}),
     };
 
     await writeRunSummary(dependencies.write, result);
