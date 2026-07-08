@@ -157,10 +157,10 @@ git diff --check
 
 **任务：**
 
-- [ ] 兼容加载 `.claude/commands/**/*.md` 和 `~/.claude/commands/**/*.md`。
-- [ ] 子目录命令用冒号命名，例如 `.claude/commands/git/review.md` 注册为 `/git:review`。
-- [ ] 支持 `$1`、`$2`、`$ARGUMENTS` 的最小参数替换。
-- [ ] 兼容读取 `.claude/agents/*.md`，并在 `/agents` 中展示。
+- [x] 兼容加载 `.claude/commands/**/*.md` 和 `~/.claude/commands/**/*.md`。
+- [x] 子目录命令用冒号命名，例如 `.claude/commands/git/review.md` 注册为 `/git:review`。
+- [x] 支持 `$1`、`$2`、`$ARGUMENTS` 的最小参数替换。
+- [x] 兼容读取 `.claude/agents/*.md`，并在 `/agents` 中展示。
 
 **验收命令：**
 
@@ -208,7 +208,7 @@ git diff --check
 
 - [x] 合并 Worker A：先稳定 session id 和启动语义。
 - [ ] 合并 Worker D：在稳定 session 语义上接入模型/思考状态。
-- [ ] 合并 Worker E：接入 Claude commands/agents 资源。
+- [x] 合并 Worker E：接入 Claude commands/agents 资源。
 - [x] 合并 Worker B：接入外壳与状态区。
 - [x] 合并 Worker C：接入输入编辑体验。
 - [ ] 合并 Worker F：接入 rewind/approval UI。
