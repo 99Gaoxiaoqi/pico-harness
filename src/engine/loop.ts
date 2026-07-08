@@ -25,6 +25,7 @@ import { PromptComposer } from "../context/composer.js";
 import { SkillLoader } from "../context/skill.js";
 import { RecoveryManager } from "../context/recovery.js";
 import { TodoStore } from "../context/todo-store.js";
+import { ToolDisclosure } from "../tools/tool-disclosure.js";
 import { SilentReporter, type Reporter } from "./reporter.js";
 import { SteerQueue } from "./steer-queue.js";
 import { ReminderInjector, ToolGuardrailController, type GuardrailOptions } from "./reminder.js";
@@ -120,6 +121,13 @@ export interface AgentEngineOptions {
    * 未提供则行为不变(单进程单实例场景不受影响)。
    */
   todoStore?: TodoStore;
+  /**
+   * 工具渐进披露状态机(ROADMAP 5.4)。
+   * 注入后:每轮只把核心组 + 已披露的扩展组工具喂给大模型,而非全量。
+   * 模型用 search_tools 元工具检索激活扩展工具。registry.execute 仍按全集路由(安全网)。
+   * 未提供则行为不变(全量工具喂给 LLM)。
+   */
+  toolDisclosure?: ToolDisclosure;
   /** 可选的轮次日志回调,便于第 19 讲 Tracing 接入 */
   onTurn?: (info: { turn: number; message: Message }) => void;
   /**
@@ -187,6 +195,8 @@ export class AgentEngine implements AgentRunner {
   private readonly goalManager?: GoalManager;
   /** TodoStore 单例(可选);planMode 下 PromptComposer 复用,与 TodoTool 共享 */
   private readonly todoStore?: TodoStore;
+  /** 工具渐进披露(可选);注入后每轮只把核心+已披露工具喂给 LLM */
+  private readonly toolDisclosure?: ToolDisclosure;
   private readonly onTurn?: (info: { turn: number; message: Message }) => void;
   /** Plan Mode 退出回调(ExitPlanMode 审批通过后触发),供 host 监听 */
   private readonly onPlanExit?: () => void;
@@ -226,6 +236,7 @@ export class AgentEngine implements AgentRunner {
     });
     this.goalManager = opts.goalManager;
     this.todoStore = opts.todoStore;
+    this.toolDisclosure = opts.toolDisclosure;
     this.onTurn = opts.onTurn;
     this.onPlanExit = opts.onPlanExit;
     this.reporter = opts.reporter ?? new SilentReporter();
@@ -273,6 +284,16 @@ export class AgentEngine implements AgentRunner {
       return composer.build();
     }
     return this.systemPrompt;
+  }
+
+  /**
+   * 从全量工具里挑出 search_tools 的 schema(若已注册)。
+   * disclosure 启用时,search_tools 元工具必须始终暴露给 LLM,否则模型无法激活扩展工具。
+   * 未注册 search_tools(用户未注入 disclosure 到 registry)则返回空数组。
+   */
+  private searchToolSchema(allTools: ToolDefinition[]): ToolDefinition[] {
+    const search = allTools.find((t) => t.name === "search_tools");
+    return search ? [search] : [];
   }
 
   /**
@@ -563,7 +584,13 @@ export class AgentEngine implements AgentRunner {
 
         try {
           // 获取当前挂载的所有工具定义
-          const availableTools = this.registry.getAvailableTools();
+          const allTools = this.registry.getAvailableTools();
+          // 渐进披露(ROADMAP 5.4):启用时只把核心组+已披露扩展组喂给 LLM,
+          // 模型用 search_tools 元工具按需激活扩展工具。registry.execute 仍按全集路由(安全网)。
+          // 未启用 disclosure 时 availableTools = allTools,行为不变。
+          const availableTools = this.toolDisclosure
+            ? [...this.toolDisclosure.pickForLLM(allTools), ...this.searchToolSchema(allTools)]
+            : allTools;
 
           // ====================================================================
           // 1. 上下文组装:System Prompt + 截取最近 N 条作为 WorkingMemory
@@ -685,6 +712,7 @@ export class AgentEngine implements AgentRunner {
           const actionSpan = turnSpan?.startChild("LLM.Action", {
             inputMessageCount: compactedContext.length,
             availableToolCount: availableTools.length,
+            ...(this.toolDisclosure ? { totalToolCount: allTools.length } : {}),
           });
           let responseMsg: Message;
           try {
