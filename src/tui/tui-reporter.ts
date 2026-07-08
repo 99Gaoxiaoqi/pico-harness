@@ -14,6 +14,8 @@
 
 import type { Reporter } from "../engine/reporter.js";
 import type { SpinnerMode } from "./spinner.js";
+import { formatOutputPreview } from "./diff-preview.js";
+import type { ToolCardStatus } from "./tool-card.js";
 
 /**
  * UI 模式:SpinnerMode 扩展一个 "idle"(空闲,无 spinner)。
@@ -25,7 +27,7 @@ export type UiMode = SpinnerMode | "idle";
 export type TuiEntry =
   | { kind: "user"; content: string }
   | { kind: "assistant"; content: string }
-  | { kind: "tool"; name: string; args: string; status: "running" | "done" | "error"; summary?: string }
+  | { kind: "tool"; name: string; args: string; status: ToolCardStatus; summary?: string }
   | { kind: "thinking" };
 
 /**
@@ -111,8 +113,8 @@ export class TuiReporter implements Reporter {
     for (let i = this.entries.length - 1; i >= 0; i--) {
       const e = this.entries[i]!;
       if (e.kind === "tool" && e.name === toolName && e.status === "running") {
-        e.status = isError ? "error" : "done";
-        e.summary = summarizeResult(result);
+        e.status = resolveToolStatus(result, isError);
+        e.summary = summarizeResult(toolName, e.args, result, isError);
         break;
       }
     }
@@ -172,10 +174,58 @@ export class TuiReporter implements Reporter {
   }
 }
 
-/** 工具结果摘要:前 3 行,每行截断 100 字符(对齐 TerminalReporter 的摘要逻辑) */
-function summarizeResult(result: string): string {
+/** 工具结果摘要:默认短输出;写入类和 bash 保留路径/命令上下文,错误保留可复制摘要。 */
+function summarizeResult(toolName: string, args: string, result: string, isError: boolean): string {
+  if (isError) return formatErrorSummary(result);
+
+  const target = toolTargetSummary(toolName, args);
+  const output = formatOutputPreview(result, { maxLines: 3 });
+  if (target) return `${target} · ${result.length} 字节 · ${output}`;
+
   const lines = result.split("\n");
   const head = lines.slice(0, 3).map((l) => l.slice(0, 100));
   const suffix = lines.length > 3 ? ` …(+${lines.length - 3} 行)` : "";
   return `${result.length} 字节 · ${head.join(" ⏎ ").slice(0, 120)}${suffix}`;
+}
+
+function resolveToolStatus(result: string, isError: boolean): ToolCardStatus {
+  if (!isError) return "done";
+  return isDeniedResult(result) ? "denied" : "error";
+}
+
+function isDeniedResult(result: string): boolean {
+  return (
+    result.includes("执行被系统拦截") ||
+    result.includes("执行被 Guardrail 阻断") ||
+    result.includes("被 PreToolUse hook 阻断") ||
+    result.includes("permissionDecision: deny")
+  );
+}
+
+function toolTargetSummary(toolName: string, args: string): string | undefined {
+  if (!["edit_file", "write_file", "bash"].includes(toolName)) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(args);
+  } catch {
+    return undefined;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+  const obj = parsed as Record<string, unknown>;
+  const value = toolName === "bash" ? obj["command"] : obj["path"];
+  if (typeof value !== "string" || !value.trim()) return undefined;
+  return compactText(value.trim(), 64);
+}
+
+function formatErrorSummary(error: string): string {
+  const firstUsefulLine = error
+    .split("\n")
+    .map((line) => line.trim())
+    .find((line) => line.length > 0);
+  return `可复制错误: ${compactText(firstUsefulLine ?? error, 166)}`;
+}
+
+function compactText(text: string, max: number): string {
+  const oneLine = text.replace(/\s+/g, " ").trim();
+  return oneLine.length > max ? `${oneLine.slice(0, max - 1)}…` : oneLine;
 }
