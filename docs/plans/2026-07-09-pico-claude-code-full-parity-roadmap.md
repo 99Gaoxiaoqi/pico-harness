@@ -414,10 +414,10 @@ git diff --check
 - 新增：`tests/tui/agent-list.test.tsx`
 
 **任务：**
-- [ ] `/agents` 展示内置代理和 `.claude/agents` 代理。
-- [ ] agent 摘要包含 name、description、tools、source。
-- [ ] AgentList 支持空态、长描述截断、来源标记。
-- [ ] agent frontmatter 解析失败时不阻断其他 agent。
+- [x] `/agents` 展示内置代理和 `.claude/agents` 代理。
+- [x] agent 摘要包含 name、description、tools、source。
+- [x] AgentList 支持空态、长描述截断、来源标记。
+- [x] agent frontmatter 解析失败时不阻断其他 agent。
 
 **验收命令：**
 
@@ -439,10 +439,10 @@ git diff --check
 - 修改：`tests/input/pico-command-registry.test.ts`
 
 **任务：**
-- [ ] `/agent <name> <task>` 转成明确 prompt 或 delegate_task 调用意图。
-- [ ] 找不到 agent 时给出最接近建议。
-- [ ] agent task 为空时展示 usage。
-- [ ] 保持普通 `/agents` 列表行为不变。
+- [x] `/agent <name> <task>` 转成明确 prompt 或 delegate_task 调用意图。
+- [x] 找不到 agent 时给出最接近建议。
+- [x] agent task 为空时展示 usage。
+- [x] 保持普通 `/agents` 列表行为不变。
 
 **验收命令：**
 
@@ -464,10 +464,10 @@ git diff --check
 - 修改：`tests/tui/tool-card.test.ts`
 
 **任务：**
-- [ ] delegate_task 工具调用显示 agent 名称、任务摘要、状态。
-- [ ] 多任务批量分派时显示总数和完成数。
-- [ ] 子代理失败时保留失败摘要，不吞掉其他成功结果。
-- [ ] 长任务结果默认折叠。
+- [x] delegate_task 工具调用显示 agent 名称、任务摘要、状态。
+- [x] 多任务批量分派时显示总数和完成数。
+- [x] 子代理失败时保留失败摘要，不吞掉其他成功结果。
+- [x] 长任务结果默认折叠。
 
 **验收命令：**
 
@@ -479,10 +479,10 @@ git diff --check
 
 **阶段 6 集成验收：**
 
-- [ ] 合并 6A、6B、6C。
-- [ ] 运行阶段最低门槛命令。
-- [ ] 冒烟：`npm run dev -- --prompt /agents`。
-- [ ] 提交：`feat(input): 增强子代理交互体验`。
+- [x] 合并 6A、6B、6C。
+- [x] 运行阶段最低门槛命令。
+- [x] 冒烟：`npm run dev -- --prompt /agents`。
+- [x] 提交：`feat(input): 增强子代理交互体验`。
 
 ---
 
@@ -575,7 +575,7 @@ npm run smoke:tui
 - [x] 阶段 3：命令体系补全。
 - [x] 阶段 4：权限与工具体验。
 - [x] 阶段 5：回滚与会话管理增强。
-- [ ] 阶段 6：子代理与 Agent 体验。
+- [x] 阶段 6：子代理与 Agent 体验。
 - [ ] 阶段 7：真实项目验证与发布收口。
 
 ---
