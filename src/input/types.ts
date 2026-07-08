@@ -11,6 +11,7 @@ export type LocalCommandAction =
   | "exit"
   | "status"
   | "model"
+  | "thinking"
   | "tools"
   | "skills"
   | "agents"

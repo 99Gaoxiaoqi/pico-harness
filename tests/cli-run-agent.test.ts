@@ -1,10 +1,11 @@
 import { mkdir, mkdtemp, readFile, readdir, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { runAgentFromCli, runUserInputFromCli } from "../src/cli/run-agent.js";
 import type { Message, ToolDefinition } from "../src/schema/message.js";
 import type { LLMProvider } from "../src/provider/interface.js";
+import { resetSessionSettingsForTests } from "../src/input/session-settings.js";
 
 class ScriptedProvider implements LLMProvider {
   readonly calls: Array<{ messages: Message[]; toolNames: string[] }> = [];
@@ -27,6 +28,10 @@ class ScriptedProvider implements LLMProvider {
 }
 
 describe("runAgentFromCli", () => {
+  afterEach(() => {
+    resetSessionSettingsForTests();
+  });
+
   it("拼装完整 CLI Harness 并在指定工作区执行工具闭环", async () => {
     const workDir = await mkdtemp(join(tmpdir(), "pico-cli-"));
     const provider = new ScriptedProvider([
@@ -287,5 +292,50 @@ describe("runAgentFromCli", () => {
 
     expect(result.type).toBe("agent");
     expect(provider.calls[0]?.messages.at(-1)?.content).toBe("Review the current changes: src");
+  });
+
+  it("/model 切换同一 session 后续请求使用的模型", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-cli-settings-"));
+    const createdModels: string[] = [];
+
+    const local = await runUserInputFromCli({
+      prompt: "/model kimi-k2.5",
+      dir: workDir,
+      session: "cli-settings-session",
+      provider: "openai",
+      model: "glm-5.2",
+    });
+
+    const agent = await runUserInputFromCli(
+      {
+        prompt: "Say done",
+        dir: workDir,
+        session: "cli-settings-session",
+        provider: "openai",
+        enableThinking: false,
+      },
+      {
+        env: {
+          LLM_BASE_URL: "https://llm.example/v1",
+          LLM_API_KEY: "test-key",
+          LLM_MODEL: "glm-5.2",
+        },
+        providerFactory: (_kind, config) => {
+          createdModels.push(config.model);
+          return new ScriptedProvider([
+            {
+              role: "assistant",
+              content: "Done with switched model.",
+              usage: { promptTokens: 2, completionTokens: 1 },
+            },
+          ]);
+        },
+        write: () => undefined,
+      },
+    );
+
+    expect(local.type).toBe("local-command");
+    expect(agent.type).toBe("agent");
+    expect(createdModels).toEqual(["kimi-k2.5"]);
   });
 });
