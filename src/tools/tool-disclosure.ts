@@ -10,6 +10,17 @@
 import type { ToolDefinition } from "../schema/message.js";
 import { getTier } from "./tool-tiers.js";
 
+export interface ToolDisclosureItem {
+  name: string;
+  readOnly: boolean;
+}
+
+export function formatToolDisclosureItem(tool: ToolDisclosureItem): string {
+  const access = tool.readOnly ? "read-only" : "write";
+  const risk = tool.readOnly ? "low" : "write";
+  return `- ${tool.name} - ${access} - risk: ${risk}`;
+}
+
 /**
  * 维护已披露的扩展工具集合,决定本轮喂给 LLM 哪些工具。
  *

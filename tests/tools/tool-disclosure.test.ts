@@ -3,8 +3,11 @@
 
 import { describe, expect, it } from "vitest";
 import { CORE_TOOLS, getTier } from "../../src/tools/tool-tiers.js";
-import { ToolDisclosure } from "../../src/tools/tool-disclosure.js";
-import { SearchToolsTool } from "../../src/tools/search-tools.js";
+import {
+  formatToolDisclosureItem,
+  ToolDisclosure,
+} from "../../src/tools/tool-disclosure.js";
+import { findMatchingTools, SearchToolsTool } from "../../src/tools/search-tools.js";
 import type { ToolDefinition } from "../../src/schema/message.js";
 
 // 构造一个最小 ToolDefinition 的便捷函数
@@ -131,6 +134,17 @@ describe("ToolDisclosure.disclosed 集合", () => {
   });
 });
 
+describe("tool disclosure formatting", () => {
+  it("格式化工具名、读写属性与最小风险级别", () => {
+    expect(formatToolDisclosureItem({ name: "read_file", readOnly: true })).toBe(
+      "- read_file - read-only - risk: low",
+    );
+    expect(formatToolDisclosureItem({ name: "write_file", readOnly: false })).toBe(
+      "- write_file - write - risk: write",
+    );
+  });
+});
+
 describe("SearchToolsTool", () => {
   // 扩展工具池(只含扩展组)
   const EXTENDED: ToolDefinition[] = [
@@ -180,6 +194,11 @@ describe("SearchToolsTool", () => {
     expect(out).toContain("web_search");
     expect(out).toContain("task_create");
     expect(d.getDisclosed()).toEqual(expect.arrayContaining(["web_search", "task_create"]));
+  });
+
+  it("findMatchingTools 暴露与 search_tools 相同的匹配逻辑", () => {
+    const hits = findMatchingTools(EXTENDED, "网络 后台");
+    expect(hits.map((t) => t.name)).toEqual(["web_search", "task_create"]);
   });
 
   it("无命中时提示换关键词", async () => {

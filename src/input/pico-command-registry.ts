@@ -30,7 +30,6 @@ import { loadApiKeys } from "../provider/config.js";
 import { buildDefaultToolRegistry } from "../tools/default-registry.js";
 import {
   formatSessionStatus,
-  formatToolStatus,
   getOrCreateSessionSettings,
   parseThinkingEffortArg,
   setSessionMode,
@@ -41,6 +40,14 @@ import {
   type SessionToolStatus,
 } from "./session-settings.js";
 import type { ThinkingEffort } from "../provider/thinking.js";
+import { getTier } from "../tools/tool-tiers.js";
+import {
+  formatToolDisclosureItem,
+  ToolDisclosure,
+  type ToolDisclosureItem,
+} from "../tools/tool-disclosure.js";
+import { findMatchingTools } from "../tools/search-tools.js";
+import type { ToolDefinition } from "../schema/message.js";
 
 export interface PicoCommandRegistryOptions {
   workDir: string;
@@ -51,6 +58,7 @@ export interface PicoCommandRegistryOptions {
   thinkingEffort?: ThinkingEffort;
   permissionMode?: string;
   tools?: readonly SessionToolStatus[];
+  toolDisclosure?: ToolDisclosure;
 }
 
 export async function createPicoCommandRegistry(
@@ -90,7 +98,7 @@ export async function createPicoCommandRegistry(
     createDoctorCommand(options),
     createModelCommand(settings),
     createThinkingCommand(settings),
-    createToolsCommand(settings),
+    createToolsCommand(settings, options.toolDisclosure),
     createSnapshotsCommand(options),
     createRewindCommand(options),
     createUndoCommand(options),
@@ -305,18 +313,119 @@ function createThinkingCommand(settings: SessionSettings): SlashCommand {
   };
 }
 
-function createToolsCommand(settings: SessionSettings): SlashCommand {
+function createToolsCommand(
+  settings: SessionSettings,
+  disclosure?: ToolDisclosure,
+): SlashCommand {
   return {
     name: "tools",
     aliases: ["tool"],
-    description: "List available tools",
-    usage: "/tools",
+    description: "List or search available tools",
+    usage: "/tools [query]",
     kind: "local",
-    execute: (): LocalCommandResult => ({
-      type: "local",
-      action: "tools",
-      message: formatToolStatus(settings.tools),
-    }),
+    execute: (input): LocalCommandResult => {
+      const query = input.args.trim();
+      return {
+        type: "local",
+        action: "tools",
+        message: query
+          ? formatToolSearchResults(settings.tools, query, disclosure)
+          : formatToolsByDisclosure(settings.tools, disclosure),
+      };
+    },
+  };
+}
+
+function formatToolsByDisclosure(
+  tools: readonly SessionToolStatus[],
+  disclosure?: ToolDisclosure,
+): string {
+  if (tools.length === 0) {
+    return "No tools are available.\nUse /tools <query> to search after tools are loaded.";
+  }
+
+  const grouped = groupToolsByDisclosure(tools, disclosure);
+  const lines = [
+    "Core tools",
+    renderToolGroup(grouped.core),
+    "",
+    "Disclosed tools",
+    renderToolGroup(grouped.disclosed),
+    "",
+    "Searchable tools",
+    grouped.searchable.length > 0
+      ? renderToolGroup(grouped.searchable)
+      : "No searchable tools are loaded.",
+    "",
+    "Use /tools <query> to search searchable tools.",
+  ];
+  return lines.join("\n");
+}
+
+function formatToolSearchResults(
+  tools: readonly SessionToolStatus[],
+  query: string,
+  disclosure?: ToolDisclosure,
+): string {
+  const grouped = groupToolsByDisclosure(tools, disclosure);
+  const definitions = grouped.searchable.map(toolStatusToDefinition);
+  const hits = findMatchingTools(definitions, query);
+  if (hits.length === 0) {
+    return `No matching searchable tools for "${query}".\nUse /tools to list core, disclosed, and searchable tools.`;
+  }
+
+  const statusByName = new Map(grouped.searchable.map((tool) => [tool.name, tool]));
+  const hitStatuses = hits
+    .map((tool) => statusByName.get(tool.name))
+    .filter((tool): tool is SessionToolStatus => tool !== undefined);
+  return [`Search results for "${query}"`, renderToolGroup(hitStatuses)].join("\n");
+}
+
+function groupToolsByDisclosure(
+  tools: readonly SessionToolStatus[],
+  disclosure?: ToolDisclosure,
+): {
+  core: SessionToolStatus[];
+  disclosed: SessionToolStatus[];
+  searchable: SessionToolStatus[];
+} {
+  const disclosedNames = new Set(disclosure?.getDisclosed() ?? []);
+  const core: SessionToolStatus[] = [];
+  const disclosed: SessionToolStatus[] = [];
+  const searchable: SessionToolStatus[] = [];
+
+  for (const tool of tools) {
+    if (tool.name === "search_tools") continue;
+    if (getTier(tool.name) === "core") {
+      core.push(tool);
+    } else if (disclosedNames.has(tool.name)) {
+      disclosed.push(tool);
+    } else {
+      searchable.push(tool);
+    }
+  }
+
+  return {
+    core: sortTools(core),
+    disclosed: sortTools(disclosed),
+    searchable: sortTools(searchable),
+  };
+}
+
+function renderToolGroup(tools: readonly ToolDisclosureItem[]): string {
+  if (tools.length === 0) return "(none)";
+  return tools.map(formatToolDisclosureItem).join("\n");
+}
+
+function sortTools<T extends ToolDisclosureItem>(tools: readonly T[]): T[] {
+  return [...tools].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function toolStatusToDefinition(tool: SessionToolStatus): ToolDefinition {
+  return {
+    name: tool.name,
+    description: "",
+    inputSchema: { type: "object", properties: {} },
   };
 }
 
