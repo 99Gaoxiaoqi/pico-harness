@@ -14,14 +14,16 @@
 
 import React, { useState } from "react";
 import { Box, Text, useInput } from "ink";
+import { formatOutputPreview } from "./diff-preview.js";
 
 /** 参数里需要高亮(青色)的关键字段,按优先级排序 */
 const HIGHLIGHT_KEYS = ["path", "command", "url", "query", "file", "pattern"] as const;
+export type ToolCardStatus = "running" | "done" | "error" | "success" | "failed" | "denied";
 
 export function ToolCard(props: {
   name: string;
   args: string;
-  status: "running" | "done" | "error";
+  status: ToolCardStatus;
   summary?: string;
   /** 是否为消息列表中最后一条:决定树形符号 */
   isLast?: boolean;
@@ -62,11 +64,15 @@ function StandardToolCard({
 }: {
   name: string;
   args: string;
-  status: "running" | "done" | "error";
+  status: ToolCardStatus;
   summary?: string;
   initialExpanded?: boolean;
 }): React.ReactNode {
   const [expanded, setExpanded] = useState(initialExpanded ?? false);
+  const target = toolTargetSummary(name, args);
+  const failure = isFailureStatus(status);
+  const displaySummary = summary && failure ? ensureErrorSummary(summary) : summary;
+  const preview = displaySummary ? toolResultPreview(displaySummary, expanded) : undefined;
 
   useInput((_input, key) => {
     if (key.return) return;
@@ -80,13 +86,14 @@ function StandardToolCard({
       <Box>
         <Text dimColor>⎿ </Text>
         <Text color="cyan">{name}</Text>
+        {target && <Text dimColor> ({target})</Text>}
         <Text dimColor> · </Text>
         <ToolStatus status={status} />
-        {summary && (
+        {preview && (
           <>
             <Text dimColor> · </Text>
-            <Text color={status === "error" ? "yellow" : undefined} dimColor={status !== "error"} wrap="truncate">
-              {resultHint(summary)}
+            <Text color={failure ? "yellow" : undefined} dimColor={!failure} wrap="truncate">
+              {resultHint(preview)}
             </Text>
           </>
         )}
@@ -99,10 +106,10 @@ function StandardToolCard({
             <ArgsView args={args} />
           </Box>
           {summary && (
-            <Box>
+            <Box flexDirection="column">
               <Text dimColor>结果 </Text>
-              <Text color={status === "error" ? "yellow" : undefined} dimColor={status !== "error"} wrap="wrap">
-                {summary}
+              <Text color={failure ? "yellow" : undefined} dimColor={!failure} wrap="wrap">
+                {preview}
               </Text>
             </Box>
           )}
@@ -122,7 +129,7 @@ function AgentToolProgressLine({
 }: {
   name: string;
   args: string;
-  status: "running" | "done" | "error";
+  status: ToolCardStatus;
   summary?: string;
   isLast: boolean;
   initialExpanded?: boolean;
@@ -131,6 +138,8 @@ function AgentToolProgressLine({
   const treeChar = isLast ? "└─" : "├─";
   const branchChar = isLast ? "   ⎿  " : "│  ⎿  ";
   const meta = agentToolMeta(name, args);
+  const failure = isFailureStatus(status);
+  const resultText = status === "running" ? meta.task : agentResultText(status, summary);
 
   useInput((_input, key) => {
     if (key.return) return;
@@ -157,8 +166,8 @@ function AgentToolProgressLine({
         {summary && (
           <>
             <Text dimColor> · </Text>
-            <Text color={status === "error" ? "yellow" : undefined} dimColor={status !== "error"} wrap="truncate">
-              {resultHint(agentResultText(status, summary))}
+            <Text color={failure ? "yellow" : undefined} dimColor={!failure} wrap="truncate">
+              {resultHint(resultText)}
             </Text>
           </>
         )}
@@ -172,8 +181,8 @@ function AgentToolProgressLine({
           </Box>
           <Box>
             <Text dimColor>{branchChar}结果 </Text>
-            <Text color={status === "error" ? "yellow" : undefined} dimColor={status !== "error"} wrap="wrap">
-              {status === "running" ? meta.task : agentResultText(status, summary)}
+            <Text color={failure ? "yellow" : undefined} dimColor={!failure} wrap="wrap">
+              {resultText}
             </Text>
           </Box>
         </>
@@ -259,9 +268,9 @@ function taskCountDetail(value: unknown): string | undefined {
   return undefined;
 }
 
-function agentResultText(status: "running" | "done" | "error", summary: string | undefined): string {
-  if (status === "error") return summary ? compactText(summary, 110) : "Subagent failed";
-  return summary ? compactText(summary, 110) : "Done";
+function agentResultText(status: ToolCardStatus, summary: string | undefined): string {
+  if (isFailureStatus(status)) return summary ? compactText(summary, 110) : "Subagent failed";
+  return summary ? compactText(summary, 110) : "Success";
 }
 
 function compactText(text: string, max: number): string {
@@ -269,14 +278,53 @@ function compactText(text: string, max: number): string {
   return oneLine.length > max ? `${oneLine.slice(0, max - 1)}…` : oneLine;
 }
 
-function ToolStatus({ status }: { status: "running" | "done" | "error" }): React.ReactNode {
-  if (status === "running") return <Text color="yellow">Running</Text>;
-  if (status === "error") return <Text color="yellow">Failed</Text>;
-  return <Text color="green">Done</Text>;
+function ToolStatus({ status }: { status: ToolCardStatus }): React.ReactNode {
+  const normalized = normalizeStatus(status);
+  if (normalized === "running") return <Text color="yellow">Running</Text>;
+  if (normalized === "denied") return <Text color="yellow">Denied</Text>;
+  if (normalized === "failed") return <Text color="yellow">Failed</Text>;
+  return <Text color="green">Success</Text>;
 }
 
 function resultHint(summary: string): string {
   return compactText(summary, 72);
+}
+
+function normalizeStatus(status: ToolCardStatus): "running" | "success" | "failed" | "denied" {
+  if (status === "done") return "success";
+  if (status === "error") return "failed";
+  return status;
+}
+
+function isFailureStatus(status: ToolCardStatus): boolean {
+  const normalized = normalizeStatus(status);
+  return normalized === "failed" || normalized === "denied";
+}
+
+function toolResultPreview(summary: string, expanded: boolean): string {
+  return formatOutputPreview(summary, { maxLines: expanded ? 5 : 3, expanded });
+}
+
+function toolTargetSummary(name: string, args: string): string | undefined {
+  if (!["edit_file", "write_file", "bash"].includes(name)) return undefined;
+  const parsed = parseArgs(args);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+  const obj = parsed as Record<string, unknown>;
+  const value = name === "bash" ? obj["command"] : obj["path"];
+  if (typeof value !== "string" || !value.trim()) return undefined;
+  return compactText(value.trim(), 64);
+}
+
+export function formatErrorSummary(error: string): string {
+  const firstUsefulLine = error
+    .split("\n")
+    .map((line) => line.trim())
+    .find((line) => line.length > 0);
+  return `可复制错误: ${compactText(firstUsefulLine ?? error, 166)}`;
+}
+
+function ensureErrorSummary(error: string): string {
+  return error.startsWith("可复制错误:") ? error : formatErrorSummary(error);
 }
 
 /**
