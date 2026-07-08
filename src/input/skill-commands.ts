@@ -1,8 +1,19 @@
 import type { SkillLoader, SkillSummary } from "../context/skill.js";
+import {
+  loadClaudeAgents,
+  summarizeClaudeAgents,
+  type LoadClaudeAgentsOptions,
+  type ClaudeAgentSummary,
+} from "./agent-loader.js";
 
 export type SkillCommandResolution =
   | { found: true; name: string; body: string }
   | { found: false; name: string; available: SkillSummary[] };
+
+export interface AgentListCommandResult {
+  message: string;
+  data: ClaudeAgentSummary[];
+}
 
 export async function renderSkillListCommand(loader: SkillLoader): Promise<string> {
   const skills = await loader.listSummaries();
@@ -13,6 +24,27 @@ export async function renderSkillListCommand(loader: SkillLoader): Promise<strin
     lines.push(`- ${skill.name}: ${skill.description}`);
   }
   return lines.join("\n");
+}
+
+export async function renderAgentListCommand(
+  options: LoadClaudeAgentsOptions,
+): Promise<AgentListCommandResult> {
+  const agents = summarizeClaudeAgents(await loadClaudeAgents(options));
+  if (agents.length === 0) {
+    return {
+      data: [],
+      message: "当前没有可用 Agents。",
+    };
+  }
+
+  const lines = ["可用 Agents:"];
+  for (const agent of agents) {
+    lines.push(`- ${agent.name}: ${agent.description}`);
+  }
+  return {
+    data: agents,
+    message: lines.join("\n"),
+  };
 }
 
 export async function resolveSkillCommand(

@@ -76,6 +76,28 @@ describe("markdown command loader", () => {
     await rm(fakeHome, { recursive: true, force: true });
   });
 
+  it("loads Claude project and user commands recursively with colon names", async () => {
+    const fakeHome = await mkdtemp(join(tmpdir(), "pico-claude-home-"));
+    await mkdir(join(workDir, ".claude", "commands", "git"), { recursive: true });
+    await mkdir(join(fakeHome, ".claude", "commands", "ops"), { recursive: true });
+    await writeFile(
+      join(workDir, ".claude", "commands", "git", "review.md"),
+      "---\ndescription: review git changes\n---\n\nProject git review",
+    );
+    await writeFile(
+      join(fakeHome, ".claude", "commands", "ops", "deploy.md"),
+      "---\ndescription: deploy service\n---\n\nUser deploy",
+    );
+
+    const commands = await loadMarkdownCommands({ homeDir: fakeHome, workDir });
+
+    expect(commands.map((command) => [command.name, command.source, command.prompt])).toEqual([
+      ["git:review", "project", "Project git review"],
+      ["ops:deploy", "user", "User deploy"],
+    ]);
+    await rm(fakeHome, { recursive: true, force: true });
+  });
+
   it("optionally projects .claw/skills/**/SKILL.md as prompt commands below user commands", async () => {
     await writeSkill("review", "skill review", "# Skill Review");
     await writeSkill("deploy", "deploy service", "# Deploy");
@@ -123,6 +145,18 @@ describe("markdown command loader", () => {
 
     expect(renderMarkdownCommandPrompt(command, "src/index.ts")).toBe(
       "Review src/index.ts\nThen summarize src/index.ts",
+    );
+  });
+
+  it("renders positional prompt command arguments", () => {
+    const command = parseMarkdownCommand(
+      "Review $1 against $2\nAll: $ARGUMENTS",
+      "review",
+      "project",
+    );
+
+    expect(renderMarkdownCommandPrompt(command, 'src/index.ts "main branch" --strict')).toBe(
+      "Review src/index.ts against main branch\nAll: src/index.ts \"main branch\" --strict",
     );
   });
 
