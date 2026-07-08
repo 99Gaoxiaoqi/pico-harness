@@ -233,10 +233,10 @@ git diff --check
 - 修改：`tests/tui/approval-panel.test.tsx`
 
 **任务：**
-- [ ] 增加 `/permissions` 展示当前权限模式和 session approvals。
-- [ ] 支持 `/permissions default|auto|yolo|plan` 的最小切换。
-- [ ] ApprovalPanel 明确展示 allow once / allow session / deny / edit 四个动作。
-- [ ] `/status` 与状态栏同步展示权限模式。
+- [x] 增加 `/permissions` 展示当前权限模式和 session approvals。
+- [x] 支持 `/permissions default|auto|yolo|plan` 的最小切换。
+- [x] ApprovalPanel 明确展示 allow once / allow session / deny / edit 四个动作。
+- [x] `/status` 与状态栏同步展示权限模式。
 
 **验收命令：**
 
@@ -259,10 +259,10 @@ git diff --check
 - 修改：`tests/tui/tui-reporter.test.ts`
 
 **任务：**
-- [ ] 工具卡片显示 running / success / failed / denied 状态。
-- [ ] 对 edit/write/bash 展示 diff 或路径摘要。
-- [ ] 长输出默认折叠，展开时保留截断提示。
-- [ ] 失败状态显示可复制的错误摘要。
+- [x] 工具卡片显示 running / success / failed / denied 状态。
+- [x] 对 edit/write/bash 展示 diff 或路径摘要。
+- [x] 长输出默认折叠，展开时保留截断提示。
+- [x] 失败状态显示可复制的错误摘要。
 
 **验收命令：**
 
@@ -284,10 +284,10 @@ git diff --check
 - 修改：`tests/tools/tool-disclosure.test.ts`
 
 **任务：**
-- [ ] `/tools` 区分核心工具、已披露工具、可搜索工具。
-- [ ] `/tools <query>` 复用 search_tools 逻辑展示命中结果。
-- [ ] 工具名称、读写属性、风险级别输出稳定可测试。
-- [ ] 未加载扩展工具时给出如何搜索的提示。
+- [x] `/tools` 区分核心工具、已披露工具、可搜索工具。
+- [x] `/tools <query>` 复用 search_tools 逻辑展示命中结果。
+- [x] 工具名称、读写属性、风险级别输出稳定可测试。
+- [x] 未加载扩展工具时给出如何搜索的提示。
 
 **验收命令：**
 
@@ -299,10 +299,10 @@ git diff --check
 
 **阶段 4 集成验收：**
 
-- [ ] 合并 4A、4B、4C。
-- [ ] 运行阶段最低门槛命令。
-- [ ] 冒烟：`npm run dev -- --prompt /permissions`、`/tools bash`。
-- [ ] 提交：`feat(tui): 增强权限与工具调用体验`。
+- [x] 合并 4A、4B、4C。
+- [x] 运行阶段最低门槛命令。
+- [x] 冒烟：`npm run dev -- --prompt /permissions`、`/tools bash`。
+- [x] 提交并集成阶段 4 权限与工具调用体验。
 
 ---
 
@@ -573,7 +573,7 @@ npm run smoke:tui
 
 - [x] 阶段 2：视觉和交互精修。
 - [x] 阶段 3：命令体系补全。
-- [ ] 阶段 4：权限与工具体验。
+- [x] 阶段 4：权限与工具体验。
 - [ ] 阶段 5：回滚与会话管理增强。
 - [ ] 阶段 6：子代理与 Agent 体验。
 - [ ] 阶段 7：真实项目验证与发布收口。
