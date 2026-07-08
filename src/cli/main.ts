@@ -46,6 +46,7 @@ import { createToolResultObservationProcessor } from "../tools/tool-result-obser
 import { CostTracker } from "../observability/tracker.js";
 import { Tracer } from "../observability/trace.js";
 import { runAgentFromCli } from "./run-agent.js";
+import { startTuiRepl } from "../tui/repl.js";
 import { globalApprovalPolicy, globalApprovalManager, type ApprovalNotifier } from "../approval/manager.js";
 import { computeApprovalDiff } from "../approval/diff.js";
 import type { MiddlewareFunc } from "../tools/registry.js";
@@ -247,6 +248,8 @@ async function main() {
       acp: { type: "boolean", default: false },
       // 运行模式:default | plan | auto | yolo(ACP 模式下使用)
       mode: { type: "string", default: "default" },
+      // TUI 模式:启动 ink REPL 交互界面(顶栏 + 消息列表 + 输入框)
+      tui: { type: "boolean", default: false },
     },
     allowPositionals: true,
   });
@@ -395,6 +398,21 @@ async function main() {
 
   if (values.serve) {
     await serve(kind, enableThinking, thinkingEffort, planMode, traceEnabled, Number(values.port));
+    return;
+  }
+
+  if (values.tui) {
+    // TUI 模式:启动 ink REPL 交互界面(顶栏 + 消息列表 + 输入框),
+    // 每轮用户输入复用 runAgentFromCli 装配 engine,与 feishu/acp/serve 平级。
+    const workDir = process.cwd();
+    const modelName = process.env.LLM_MODEL ?? (kind === "openai" ? "glm-5.2" : "claude-3-5-sonnet");
+    await startTuiRepl({
+      workDir,
+      provider: kind,
+      model: modelName,
+      enableThinking,
+      ...(values["mcp-config"] ? { mcpConfigPath: values["mcp-config"] } : {}),
+    });
     return;
   }
 
