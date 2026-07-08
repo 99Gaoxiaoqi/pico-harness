@@ -21,6 +21,9 @@ import { ExitPlanModeTool } from "./plan-exit.js";
 import { TodoTool } from "./todo.js";
 import { CreateGoalTool, GetGoalTool, UpdateGoalTool } from "./goal.js";
 import { FetchURLTool, WebSearchTool } from "./web.js";
+import { ToolDisclosure } from "./tool-disclosure.js";
+import { SearchToolsTool } from "./search-tools.js";
+import { getTier } from "./tool-tiers.js";
 
 export interface DefaultToolRegistryOptions extends ToolRegistryOptions {
   backgroundManager?: BackgroundManager;
@@ -39,13 +42,20 @@ export interface DefaultToolRegistryOptions extends ToolRegistryOptions {
    * 未提供则内部 new(向后兼容,单实例场景仍可用)。
    */
   todoStore?: TodoStore;
+  /**
+   * 工具渐进披露状态机(ROADMAP 5.4)。
+   * 注入后:额外注册 search_tools 元工具,模型用它按需激活扩展工具。
+   * 必须与 AgentEngine 传入的是同一实例,确保 registry 的 disclose 与 loop 的 pickForLLM 同步。
+   * 未提供则不启用渐进披露(全量工具喂给 LLM,行为不变)。
+   */
+  toolDisclosure?: ToolDisclosure;
 }
 
 export function buildDefaultToolRegistry(
   workDir: string,
   options: DefaultToolRegistryOptions = {},
 ): ToolRegistry {
-  const { backgroundManager = new BackgroundManager(), goalManager, todoStore, ...registryOptions } =
+  const { backgroundManager = new BackgroundManager(), goalManager, todoStore, toolDisclosure, ...registryOptions } =
     options;
   const registry = new ToolRegistry(registryOptions);
   registry.register(new EchoTool());
@@ -77,5 +87,12 @@ export function buildDefaultToolRegistry(
   }
   registry.register(new FetchURLTool());
   registry.register(new WebSearchTool());
+  // 渐进披露(ROADMAP 5.4):注入 disclosure 时注册 search_tools 元工具。
+  // 扩展工具列表 = 全量工具里非核心组的(含 MCP 动态工具,若已注册)。
+  // search_tools 持有 disclosure 引用,execute 时回写 disclosed 集合。
+  if (toolDisclosure) {
+    const extended = registry.getAvailableTools().filter((t) => getTier(t.name) === "extended");
+    registry.register(new SearchToolsTool(extended, toolDisclosure));
+  }
   return registry;
 }

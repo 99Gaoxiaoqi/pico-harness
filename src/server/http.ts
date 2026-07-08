@@ -27,6 +27,7 @@ import { buildDefaultToolRegistry } from "../tools/default-registry.js";
 import { BackgroundManager } from "../tools/background-manager.js";
 import { PromptComposer } from "../context/composer.js";
 import { TodoStore } from "../context/todo-store.js";
+import { ToolDisclosure } from "../tools/tool-disclosure.js";
 import {
   globalApprovalManager,
   globalApprovalPolicy,
@@ -69,6 +70,12 @@ export interface ServerOptions {
   goalManager?: GoalManager;
   /** 进程级共享 TodoStore(可选;不传则自建),registry 与 Composer 共享同一实例 */
   todoStore?: TodoStore;
+  /**
+   * 工具渐进披露状态机(ROADMAP 5.4)。
+   * 注入后:额外注册 search_tools 元工具,模型用它按需激活扩展工具。
+   * 必须与 AgentEngine 传入的是同一实例。不传则自建(跨请求复用)。
+   */
+  toolDisclosure?: ToolDisclosure;
 }
 
 /**
@@ -137,6 +144,7 @@ export async function assembleEngine(
     goalManager: GoalManager;
     backgroundManager: BackgroundManager;
     todoStore?: TodoStore;
+    toolDisclosure?: ToolDisclosure;
     requestThinkingEffort: ThinkingEffort;
     requestPlanMode?: boolean;
     maxTurns?: number;
@@ -147,6 +155,7 @@ export async function assembleEngine(
     goalManager,
     backgroundManager,
     todoStore,
+    toolDisclosure,
     requestThinkingEffort,
     requestPlanMode,
     maxTurns,
@@ -172,6 +181,7 @@ export async function assembleEngine(
     backgroundManager,
     goalManager,
     ...(todoStore ? { todoStore } : {}),
+    ...(toolDisclosure ? { toolDisclosure } : {}),
   });
   registry.use(buildApprovalMiddleware(terminalNotifier, workDir));
   const engine = new AgentEngine({
@@ -184,6 +194,8 @@ export async function assembleEngine(
     systemPrompt,
     goalManager,
     ...(todoStore ? { todoStore } : {}),
+    // TODO: loop 端会加此字段,合并后即消(toolDisclosure?: ToolDisclosure on AgentEngineOptions)。
+    ...(toolDisclosure ? { toolDisclosure } : {}),
     compactor: buildCompactor(opts.kind, modelName),
     observationProcessor: buildObservationProcessor(workDir),
     reporter,
@@ -253,6 +265,8 @@ export async function startHttpServer(opts: ServerOptions): Promise<Server> {
   const goalManager = opts.goalManager ?? new GoalManager();
   const backgroundManager = opts.backgroundManager ?? new BackgroundManager();
   const todoStore = opts.todoStore ?? new TodoStore(workDir);
+  // 工具渐进披露状态机(ROADMAP 5.4):跨请求复用,registry(search_tools)与 engine(pickForLLM)共享。
+  const toolDisclosure = opts.toolDisclosure ?? new ToolDisclosure();
   // 自增计数器:生成 URL 安全的 sessionId(无 / : \ 等破坏路由的字符)
   let sessionCounter = 0;
 
@@ -327,6 +341,7 @@ export async function startHttpServer(opts: ServerOptions): Promise<Server> {
             goalManager,
             backgroundManager,
             todoStore,
+            toolDisclosure,
             requestThinkingEffort,
             ...(parsed.planMode !== undefined ? { requestPlanMode: parsed.planMode } : {}),
             ...(parsed.maxTurns !== undefined ? { maxTurns: parsed.maxTurns } : {}),
@@ -397,6 +412,7 @@ export async function startHttpServer(opts: ServerOptions): Promise<Server> {
             backgroundManager,
             goalManager,
             todoStore,
+            ...(toolDisclosure ? { toolDisclosure } : {}),
           });
           sendJson(res, 200, { tools: registry.getAvailableTools() });
           return;
