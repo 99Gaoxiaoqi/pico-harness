@@ -1,3 +1,5 @@
+import React from "react";
+import { renderToString } from "ink";
 import { describe, expect, it, vi } from "vitest";
 import {
   createInputControllerState,
@@ -5,6 +7,7 @@ import {
   type InputControllerOptions,
   type InputKey,
 } from "../../src/tui/input-controller.js";
+import { renderInputPrompt } from "../../src/tui/input-box.js";
 
 const baseKey: InputKey = {
   upArrow: false,
@@ -140,6 +143,17 @@ describe("InputBox input controller", () => {
     expect(state.text).toBe("");
     expect(state.activeSuggestions).toBeNull();
     expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("renders disabled state without hiding the current multiline draft", () => {
+    const output = renderToString(
+      <>{renderInputPrompt({ disabled: true, text: "先检查\nnpm test", cursor: "先检查".length })}</>,
+    );
+
+    expect(output).toContain("先检查");
+    expect(output).toContain("npm test");
+    expect(output).toContain("Running");
+    expect(output).not.toContain("Enter 发送");
   });
 
   it("moves the cursor with arrows, Home/End, and Ctrl+A/Ctrl+E", () => {

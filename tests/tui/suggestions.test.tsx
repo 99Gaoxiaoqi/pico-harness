@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   MAX_SUGGESTIONS,
+  SUGGESTION_DESCRIPTION_WIDTH,
+  SUGGESTION_LABEL_WIDTH,
   formatSuggestionRows,
   type ActiveSuggestionSession,
 } from "../../src/tui/suggestions.js";
@@ -57,5 +59,39 @@ describe("SuggestionList row model", () => {
         selected: true,
       },
     ]);
+  });
+
+  it("clips selected Chinese, multiline, and long command candidates for panel rendering", () => {
+    const session: ActiveSuggestionSession = {
+      kind: "slash",
+      query: "",
+      replaceStart: 0,
+      replaceEnd: 1,
+      selectedIndex: 2,
+      items: [
+        {
+          value: "doctor",
+          description: "检查项目配置\n并给出修复建议",
+        },
+        {
+          value: "很长的中文命令名称用于测试候选面板截断",
+          description: "输出当前会话的中文摘要，包含后续行动和风险提示",
+        },
+        {
+          value: "very-long-command-name-that-should-not-stretch-the-terminal",
+          description: "print a concise report for this repository without wrapping the panel",
+        },
+      ],
+    };
+
+    const rows = formatSuggestionRows(session);
+
+    expect(rows).toHaveLength(3);
+    expect(rows[0]?.description).toBe("检查项目配置 并给出修复建议");
+    expect(rows[1]?.left.length).toBeLessThanOrEqual(SUGGESTION_LABEL_WIDTH);
+    expect(rows[1]?.description.length).toBeLessThanOrEqual(SUGGESTION_DESCRIPTION_WIDTH);
+    expect(rows[2]).toMatchObject({ selected: true });
+    expect(rows[2]?.left).toBe("/very-long-command-name-that-shoul…");
+    expect(rows[2]?.description).toBe("print a concise report for this repository without…");
   });
 });
