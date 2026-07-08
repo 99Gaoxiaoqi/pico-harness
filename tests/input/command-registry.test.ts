@@ -36,4 +36,31 @@ describe("CommandRegistry", () => {
       () => new CommandRegistry([localCommand("help", ["h"]), localCommand("status", ["h"])]),
     ).toThrow(/Duplicate/);
   });
+
+  it("候选包含 alias 匹配来源", () => {
+    const registry = new CommandRegistry([
+      localCommand("help", ["h", "?"]),
+      localCommand("status", ["st"]),
+    ]);
+
+    expect(registry.detailedSuggestions("st")).toEqual([
+      {
+        name: "status",
+        insertText: "status",
+        description: "status command",
+        matchedAlias: "st",
+      },
+    ]);
+  });
+
+  it("未知命令建议优先 alias 匹配,再按编辑距离排序", () => {
+    const registry = new CommandRegistry([
+      localCommand("help", ["h"]),
+      localCommand("status", ["st"]),
+      localCommand("model", ["models"]),
+    ]);
+
+    expect(registry.suggestions("sta")).toEqual(["status"]);
+    expect(registry.suggestions("hlep").slice(0, 2)).toEqual(["help", "model"]);
+  });
 });
