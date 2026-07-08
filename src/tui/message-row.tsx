@@ -42,6 +42,16 @@ function MessageRowImpl({ entry, isStatic, isLast }: MessageRowProps): React.Rea
       );
 
     case "assistant":
+      if (isLightweightStatusContent(entry.content)) {
+        return (
+          <Box marginTop={1}>
+            <Text dimColor wrap="wrap">
+              {entry.content}
+            </Text>
+          </Box>
+        );
+      }
+
       // isStatic:已固化走 CompletedText(代码块着色,整体 memo);
       // 否则(末条流式中)走 StreamingText(按行 stable/unstable 增量渲染)
       return (
@@ -68,6 +78,20 @@ function MessageRowImpl({ entry, isStatic, isLast }: MessageRowProps): React.Rea
     default:
       return null;
   }
+}
+
+function isLightweightStatusContent(content: string): boolean {
+  const trimmed = content.trim();
+  if (trimmed.length === 0) return false;
+  if (trimmed.startsWith("Unknown command")) return true;
+  if (trimmed.startsWith("No help found")) return true;
+  if (trimmed.startsWith("Usage:")) return true;
+  if (trimmed.startsWith("执行出错:")) return true;
+  if (trimmed.startsWith("⚠️ 执行出错:")) return true;
+  if (trimmed.includes("command is not connected yet.")) return true;
+
+  const lines = trimmed.split("\n").filter((line) => line.trim().length > 0);
+  return lines.length > 0 && lines.every((line) => line.trim().startsWith("/"));
 }
 
 /**
