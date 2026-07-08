@@ -42,6 +42,32 @@ describe("StatusBar", () => {
     ]);
   });
 
+  it("shows a fork source as a short session id", () => {
+    const source = "cli-source-session-abcdef123456";
+    const output = renderToString(
+      <StatusBar
+        model="glm-5.2"
+        provider="openai"
+        cwd="/workspace/demo"
+        sessionMode="fork"
+        forkFrom={source}
+      />,
+    );
+
+    expect(output).toContain("mode fork");
+    expect(output).toContain("from cli-...123456");
+    expect(output).not.toContain(source);
+    expect(
+      buildStatusItems({
+        model: "glm-5.2",
+        provider: "openai",
+        cwd: "/workspace/demo",
+        sessionMode: "fork",
+        forkFrom: source,
+      }),
+    ).toContainEqual(["forkFrom", "cli-...123456"]);
+  });
+
   it("falls back cleanly when provider is missing", () => {
     const output = renderToString(
       <StatusBar model="glm-5.2" cwd="/workspace/demo" sessionMode="new" />,

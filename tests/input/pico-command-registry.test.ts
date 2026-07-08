@@ -269,6 +269,25 @@ describe("Pico command registry", () => {
     expect(result.result.message).toContain("CWD: /tmp/pico-work");
   });
 
+  it("/status exposes session id mode and fork source", async () => {
+    const registry = await createPicoCommandRegistry({
+      workDir: "/tmp/pico-work",
+      provider: "openai",
+      model: "glm-5.2",
+      sessionId: "session-fork",
+      sessionMode: "fork",
+      forkFrom: "session-source",
+    });
+
+    const result = await processUserInput("/status", { registry });
+
+    expect(result.type).toBe("local-command");
+    if (result.type !== "local-command") return;
+    expect(result.result.message).toContain("sessionId: session-fork");
+    expect(result.result.message).toContain("sessionMode: fork");
+    expect(result.result.message).toContain("forkFrom: session-source");
+  });
+
   it("builtin registry exposes /mode as its own command", async () => {
     const result = await processUserInput("/mode", {
       registry: createBuiltinCommandRegistry(),

@@ -1,6 +1,7 @@
 import { readdir, stat } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
+import { rememberResolvedCliSession } from "../input/session-settings.js";
 
 export type CliSessionMode = "new" | "continue" | "resume" | "fork";
 
@@ -29,34 +30,37 @@ export async function resolveCliSession(
   assertSingleSessionMode(options);
 
   if (options.resumeSession || options.session) {
-    return {
+    const sessionId = options.resumeSession ?? options.session!;
+    await assertSessionFileExists(options.workDir, sessionId, "resume");
+    return rememberSelection({
       mode: "resume",
-      sessionId: options.resumeSession ?? options.session!,
-    };
+      sessionId,
+    });
   }
 
   if (options.forkSession) {
-    return {
+    await assertSessionFileExists(options.workDir, options.forkSession, "fork");
+    return rememberSelection({
       mode: "fork",
       sessionId: createCliSessionId(),
       sourceSessionId: options.forkSession,
-    };
+    });
   }
 
   if (options.continueSession) {
     const latest = await findLatestSessionId(options.workDir);
     if (latest) {
-      return {
+      return rememberSelection({
         mode: "continue",
         sessionId: latest,
-      };
+      });
     }
   }
 
-  return {
+  return rememberSelection({
     mode: "new",
     sessionId: createCliSessionId(),
-  };
+  });
 }
 
 export function createCliSessionId(): string {
@@ -77,7 +81,7 @@ function assertSingleSessionMode(options: ResolveCliSessionOptions): void {
 }
 
 async function findLatestSessionId(workDir: string): Promise<string | undefined> {
-  const sessionsDir = join(workDir, ".claw", "sessions");
+  const sessionsDir = sessionsDirectory(workDir);
   let entries: string[];
   try {
     entries = await readdir(sessionsDir);
@@ -99,4 +103,30 @@ async function findLatestSessionId(workDir: string): Promise<string | undefined>
 
   candidates.sort((a, b) => b.mtimeMs - a.mtimeMs || b.sessionId.localeCompare(a.sessionId));
   return candidates[0]?.sessionId;
+}
+
+async function assertSessionFileExists(
+  workDir: string,
+  sessionId: string,
+  action: "resume" | "fork",
+): Promise<void> {
+  const path = sessionFilePath(workDir, sessionId);
+  const info = await stat(path).catch(() => undefined);
+  if (info?.isFile()) return;
+
+  const prefix = action === "resume" ? "无法恢复" : "无法 fork";
+  throw new Error(`${prefix} session ${sessionId}: 找不到 ${path}`);
+}
+
+function rememberSelection(selection: CliSessionSelection): CliSessionSelection {
+  rememberResolvedCliSession(selection);
+  return selection;
+}
+
+function sessionsDirectory(workDir: string): string {
+  return join(workDir, ".claw", "sessions");
+}
+
+function sessionFilePath(workDir: string, sessionId: string): string {
+  return join(sessionsDirectory(workDir), `${sessionId}.jsonl`);
 }
