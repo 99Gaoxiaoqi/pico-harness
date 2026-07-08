@@ -1,4 +1,15 @@
 import { SkillLoader } from "../context/skill.js";
+import { globalSessionManager, type Session } from "../engine/session.js";
+import {
+  defaultCliSessionId,
+  listFileHistorySnapshotSummaries,
+  parseRewindMode,
+  rewindFileHistoryFromCli,
+} from "../cli/file-history.js";
+import {
+  formatRewindSelector,
+  latestSnapshotMessageId,
+} from "../tui/rewind-selector.js";
 import { createBuiltinCommands } from "./builtin-commands.js";
 import { CommandRegistry } from "./command-registry.js";
 import {
@@ -30,6 +41,7 @@ export interface PicoCommandRegistryOptions {
   workDir: string;
   model: string;
   provider: ProviderKind;
+  session?: Session;
   sessionId?: string;
   thinkingEffort?: ThinkingEffort;
   permissionMode?: string;
@@ -66,6 +78,9 @@ export async function createPicoCommandRegistry(
     createModelCommand(settings),
     createThinkingCommand(settings),
     createToolsCommand(settings),
+    createSnapshotsCommand(options),
+    createRewindCommand(options),
+    createUndoCommand(options),
     createSkillsCommand(skillLoader),
     createSkillCommand(skillLoader),
   ]);
@@ -181,6 +196,85 @@ function createToolsCommand(settings: SessionSettings): SlashCommand {
       message: formatToolStatus(settings.tools),
     }),
   };
+}
+
+function createSnapshotsCommand(options: PicoCommandRegistryOptions): SlashCommand {
+  return {
+    name: "snapshots",
+    aliases: ["snapshot"],
+    description: "List current session rewind points",
+    usage: "/snapshots",
+    kind: "local",
+    execute: async (): Promise<LocalCommandResult> => {
+      const session = await resolveCommandSession(options);
+      const summaries = listFileHistorySnapshotSummaries(session);
+      return {
+        type: "local",
+        action: "message",
+        message: formatRewindSelector(session.id, summaries),
+        data: summaries,
+      };
+    },
+  };
+}
+
+function createRewindCommand(options: PicoCommandRegistryOptions): SlashCommand {
+  return {
+    name: "rewind",
+    description: "Rewind code, conversation, or both to a file-history snapshot",
+    usage: "/rewind [message-id] [code|conversation|both]",
+    kind: "local",
+    execute: async (input): Promise<LocalCommandResult> => {
+      const session = await resolveCommandSession(options);
+      const messageId = input.argv[0];
+      const mode = parseRewindMode(input.argv[1]);
+      const result = await rewindFileHistoryFromCli(session, messageId, mode);
+      return {
+        type: "local",
+        action: "message",
+        message: result.changed
+          ? result.output
+          : formatRewindSelector(session.id, listFileHistorySnapshotSummaries(session)),
+      };
+    },
+  };
+}
+
+function createUndoCommand(options: PicoCommandRegistryOptions): SlashCommand {
+  return {
+    name: "undo",
+    description: "Undo the latest file-history snapshot",
+    usage: "/undo [message-id] [code|conversation|both]",
+    kind: "local",
+    execute: async (input): Promise<LocalCommandResult> => {
+      const session = await resolveCommandSession(options);
+      const summaries = listFileHistorySnapshotSummaries(session);
+      const messageId = input.argv[0] ?? latestSnapshotMessageId(summaries);
+      if (!messageId) {
+        return {
+          type: "local",
+          action: "message",
+          message: formatRewindSelector(session.id, summaries),
+        };
+      }
+
+      const mode = parseRewindMode(input.argv[1]);
+      const result = await rewindFileHistoryFromCli(session, messageId, mode);
+      return {
+        type: "local",
+        action: "message",
+        message: result.output,
+      };
+    },
+  };
+}
+
+async function resolveCommandSession(options: PicoCommandRegistryOptions): Promise<Session> {
+  if (options.session) return options.session;
+  return globalSessionManager.getOrCreate(
+    options.sessionId ?? defaultCliSessionId(options.workDir),
+    options.workDir,
+  );
 }
 
 function createSkillsCommand(loader: SkillLoader): SlashCommand {
