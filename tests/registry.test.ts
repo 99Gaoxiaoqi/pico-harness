@@ -15,6 +15,7 @@ import {
 import { BackgroundManager } from "../src/tools/background-manager.js";
 import type { BaseTool } from "../src/tools/registry.js";
 import type { ToolDefinition } from "../src/schema/message.js";
+import { HookRunner } from "../src/hooks/runner.js";
 
 class FakeTool implements BaseTool {
   maxResultSizeChars?: number;
@@ -785,3 +786,279 @@ describe("EditFileTool replace_all 全替换", () => {
     expect(await readFile(join(workDir, "f.txt"), "utf8")).toBe("bar\nbar\nbar");
   });
 });
+
+// ==========================================
+// 任务 2.6:Registry 集成 PreToolUse / PostToolUse hooks
+// 测 hook deny 阻断工具、allow 放行、modifiedInput 改写参数、PostToolUse fire-and-forget
+// ==========================================
+describe("ToolRegistry hooks 集成 (任务 2.6)", () => {
+  let workDir: string;
+
+  beforeEach(async () => {
+    workDir = await mkdtemp(join(tmpdir(), "pico-reg-hook-"));
+  });
+  afterEach(async () => {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        await rm(workDir, { recursive: true, force: true });
+        return;
+      } catch {
+        await new Promise((r) => setTimeout(r, 200));
+      }
+    }
+  });
+
+  /**
+   * 写一个 node hook 脚本,经 shell 调用。behavior 控制行为(见 runner.test.ts)。
+   */
+  async function writeHookScript(behavior: string): Promise<string> {
+    const scriptPath = join(workDir, `reg-hook-${Date.now()}-${Math.random().toString(36).slice(2)}.js`);
+    let body: string;
+    if (behavior.startsWith("exit2:")) {
+      const msg = behavior.slice("exit2:".length);
+      body = `process.stdin.resume();process.stdin.on('end',()=>{process.stderr.write(${JSON.stringify(msg)});process.exit(2);});`;
+    } else if (behavior === "exit1") {
+      body = `process.stdin.resume();process.stdin.on('end',()=>process.exit(1));`;
+    } else if (behavior.startsWith("json:")) {
+      const json = behavior.slice("json:".length);
+      body = `process.stdin.resume();process.stdin.on('end',()=>{process.stdout.write(${JSON.stringify(json)});process.exit(0);});`;
+    } else if (behavior.startsWith("capture:")) {
+      // 把 stdin 写到指定文件,用于断言 PostToolUse 收到 tool_response
+      const outFile = behavior.slice("capture:".length);
+      body = `let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{require("fs").writeFileSync(${JSON.stringify(outFile)},d);process.exit(0);});`;
+    } else {
+      body = `process.stdin.resume();process.stdin.on('end',()=>process.exit(0));`;
+    }
+    await writeFile(scriptPath, body, "utf8");
+    return `node ${JSON.stringify(scriptPath)}`;
+  }
+
+  it("PreToolUse deny → 工具不执行,返回 isError", async () => {
+    const command = await writeHookScript("exit2:禁止执行");
+    const registry = new ToolRegistry();
+    let executed = false;
+    registry.register(
+      new FakeTool(
+        "danger",
+        { name: "danger", description: "", inputSchema: { type: "object" } },
+        async () => {
+          executed = true;
+          return "should-not-run";
+        },
+      ),
+    );
+    registry.setHookRunner(
+      new HookRunner(workDir, { PreToolUse: [{ hooks: [{ type: "command", command }] }] }),
+    );
+
+    const result = await registry.execute({ id: "c1", name: "danger", arguments: "{}" });
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("PreToolUse hook 阻断");
+    expect(result.output).toContain("禁止执行");
+    expect(executed).toBe(false);
+  });
+
+  it("PreToolUse allow(exit 0)→ 工具正常执行", async () => {
+    const command = await writeHookScript("exit0");
+    const registry = new ToolRegistry();
+    registry.register(
+      new FakeTool(
+        "say",
+        { name: "say", description: "", inputSchema: { type: "object" } },
+        async (args) => `said:${JSON.parse(args).msg}`,
+      ),
+    );
+    registry.setHookRunner(
+      new HookRunner(workDir, { PreToolUse: [{ hooks: [{ type: "command", command }] }] }),
+    );
+
+    const result = await registry.execute({ id: "c1", name: "say", arguments: '{"msg":"hi"}' });
+    expect(result.isError).toBe(false);
+    expect(result.output).toBe("said:hi");
+  });
+
+  it("PreToolUse permissionDecision deny(stdout JSON)→ 阻断", async () => {
+    const command = await writeHookScript(
+      `json:{"permissionDecision":"deny","permissionDecisionReason":"危险"}`,
+    );
+    const registry = new ToolRegistry();
+    registry.register(
+      new FakeTool(
+        "x",
+        { name: "x", description: "", inputSchema: { type: "object" } },
+        async () => "ran",
+      ),
+    );
+    registry.setHookRunner(
+      new HookRunner(workDir, { PreToolUse: [{ hooks: [{ type: "command", command }] }] }),
+    );
+
+    const result = await registry.execute({ id: "c1", name: "x", arguments: "{}" });
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("危险");
+  });
+
+  it("PreToolUse modifiedInput → 改写工具参数后执行", async () => {
+    const command = await writeHookScript(`json:{"modifiedInput":{"msg":"rewritten-by-hook"}}`);
+    const registry = new ToolRegistry();
+    registry.register(
+      new FakeTool(
+        "say",
+        { name: "say", description: "", inputSchema: { type: "object" } },
+        async (args) => `said:${JSON.parse(args).msg}`,
+      ),
+    );
+    registry.setHookRunner(
+      new HookRunner(workDir, { PreToolUse: [{ hooks: [{ type: "command", command }] }] }),
+    );
+
+    const result = await registry.execute({ id: "c1", name: "say", arguments: '{"msg":"orig"}' });
+    expect(result.isError).toBe(false);
+    // 工具收到的是 hook 改写后的参数
+    expect(result.output).toBe("said:rewritten-by-hook");
+  });
+
+  it("PreToolUse fail-open(exit 1)→ 工具仍执行", async () => {
+    const command = await writeHookScript("exit1");
+    const registry = new ToolRegistry();
+    registry.register(
+      new FakeTool(
+        "say",
+        { name: "say", description: "", inputSchema: { type: "object" } },
+        async () => "ran-anyway",
+      ),
+    );
+    registry.setHookRunner(
+      new HookRunner(workDir, { PreToolUse: [{ hooks: [{ type: "command", command }] }] }),
+    );
+
+    const result = await registry.execute({ id: "c1", name: "say", arguments: "{}" });
+    expect(result.isError).toBe(false);
+    expect(result.output).toBe("ran-anyway");
+  });
+
+  it("PreToolUse 在 requestMiddleware 之后执行(审批先于 hook)", async () => {
+    // requestMiddleware 拦截 → 应直接返回,PreToolUse hook 根本不执行
+    const command = await writeHookScript("exit2:should-not-run");
+    const registry = new ToolRegistry();
+    registry.register(
+      new FakeTool(
+        "say",
+        { name: "say", description: "", inputSchema: { type: "object" } },
+        async () => "ran",
+      ),
+    );
+    // 中间件拦截
+    registry.useRequest(async () => ({ allowed: false, reason: "中间件拒绝" }));
+    registry.setHookRunner(
+      new HookRunner(workDir, { PreToolUse: [{ hooks: [{ type: "command", command }] }] }),
+    );
+
+    const result = await registry.execute({ id: "c1", name: "say", arguments: "{}" });
+    expect(result.isError).toBe(true);
+    // 应是中间件拦截文案,而非 hook 阻断文案
+    expect(result.output).toContain("中间件拒绝");
+    expect(result.output).not.toContain("PreToolUse hook 阻断");
+  });
+
+  it("PostToolUse fire-and-forget:工具执行后通知,不阻断返回值", async () => {
+    const command = await writeHookScript("exit0");
+    const registry = new ToolRegistry();
+    registry.register(
+      new FakeTool(
+        "say",
+        { name: "say", description: "", inputSchema: { type: "object" } },
+        async () => "done",
+      ),
+    );
+    registry.setHookRunner(
+      new HookRunner(workDir, { PostToolUse: [{ hooks: [{ type: "command", command }] }] }),
+    );
+
+    const result = await registry.execute({ id: "c1", name: "say", arguments: "{}" });
+    expect(result.isError).toBe(false);
+    expect(result.output).toBe("done");
+  });
+
+  it("PostToolUse 收到 tool_response(工具输出)", async () => {
+    // hook 把 stdin 写到文件,断言含 tool_response
+    const outFile = join(workDir, "post-input.json");
+    const command = await writeHookScript(`capture:${outFile}`);
+    const registry = new ToolRegistry();
+    registry.register(
+      new FakeTool(
+        "say",
+        { name: "say", description: "", inputSchema: { type: "object" } },
+        async () => "TOOL-OUTPUT-123",
+      ),
+    );
+    registry.setHookRunner(
+      new HookRunner(workDir, { PostToolUse: [{ hooks: [{ type: "command", command }] }] }),
+    );
+
+    await registry.execute({ id: "c1", name: "say", arguments: "{}" });
+    // fire-and-forget:子进程异步写文件,轮询等待(最多 ~2s)
+    let received: Record<string, unknown> | undefined;
+    for (let i = 0; i < 20; i++) {
+      await new Promise((r) => setTimeout(r, 100));
+      try {
+        received = JSON.parse(await readFile(outFile, "utf8")) as Record<string, unknown>;
+        break;
+      } catch {
+        // 文件尚未写完,继续轮询
+      }
+    }
+    expect(received).toBeDefined();
+    expect(received!.hook_event_name).toBe("PostToolUse");
+    expect(received!.tool_response).toBe("TOOL-OUTPUT-123");
+    expect(received!.tool_name).toBe("say");
+  });
+
+  it("未挂载 hookRunner 时 → 零开销,正常执行", async () => {
+    const registry = new ToolRegistry();
+    registry.register(
+      new FakeTool(
+        "say",
+        { name: "say", description: "", inputSchema: { type: "object" } },
+        async () => "no-hook",
+      ),
+    );
+    // 不 setHookRunner
+    const result = await registry.execute({ id: "c1", name: "say", arguments: "{}" });
+    expect(result.isError).toBe(false);
+    expect(result.output).toBe("no-hook");
+  });
+
+  it("setSessionId 注入的 session_id 传给 hook stdin", async () => {
+    const outFile = join(workDir, "pre-input.json");
+    const command = await writeHookScript(`capture:${outFile}`);
+    const registry = new ToolRegistry();
+    registry.register(
+      new FakeTool(
+        "say",
+        { name: "say", description: "", inputSchema: { type: "object" } },
+        async () => "ok",
+      ),
+    );
+    registry.setHookRunner(
+      new HookRunner(workDir, { PreToolUse: [{ hooks: [{ type: "command", command }] }] }),
+    );
+    registry.setSessionId("sess-abc-789");
+
+    await registry.execute({ id: "c1", name: "say", arguments: "{}" });
+
+    let received: Record<string, unknown> | undefined;
+    for (let i = 0; i < 20; i++) {
+      await new Promise((r) => setTimeout(r, 100));
+      try {
+        received = JSON.parse(await readFile(outFile, "utf8")) as Record<string, unknown>;
+        break;
+      } catch {
+        // 文件尚未写完,继续轮询
+      }
+    }
+    expect(received).toBeDefined();
+    expect(received!.session_id).toBe("sess-abc-789");
+  });
+});
+
