@@ -13,6 +13,13 @@
 // 不直接渲染 ink 组件(保持 reporter 纯数据层),渲染由 App.tsx 消费 state ��成。
 
 import type { Reporter } from "../engine/reporter.js";
+import type { SpinnerMode } from "./spinner.js";
+
+/**
+ * UI 模式:SpinnerMode 扩展一个 "idle"(空闲,无 spinner)。
+ * app.tsx / repl.tsx 据此决定 spinner 是否显示、显示哪个阶段。
+ */
+export type UiMode = SpinnerMode | "idle";
 
 /** 对话流中的一条记录。简化为联合类型,App.tsx 按 kind 分发渲染。 */
 export type TuiEntry =
@@ -32,6 +39,8 @@ export class TuiReporter implements Reporter {
   private streamingText = "";
   /** 当前轮正在运行的工具名栈(支持嵌套,但实际并发批次会被串行回调) */
   private pendingTools = new Set<string>();
+  /** 当前 UI 模式(SpinnerMode | "idle"),供 spinner 切换阶段。 */
+  private spinnerMode: UiMode = "idle";
 
   constructor(
     /** 由 App.tsx 注册:收到新 entries 快照后 setState 触发重渲染 */
@@ -46,25 +55,34 @@ export class TuiReporter implements Reporter {
     this.emit();
   }
 
+  /** 读当前 UI 模式,供 app.tsx 的 spinner 用(repl 每次 onUpdate 后调一次,极简)。 */
+  getMode(): UiMode {
+    return this.spinnerMode;
+  }
+
   onStart(_workDir: string, _enableThinking: boolean): void {
     // 顶栏已展示 workDir/model,这里不重复;清空本轮缓冲。
     this.streamingText = "";
     this.pendingTools.clear();
+    this.spinnerMode = "requesting"; // 等首包
     this.emit();
   }
 
   onTurnStart(_turn: number): void {
     // 轮次分隔由 App 渲染处理,这里重置本轮缓冲
     this.streamingText = "";
+    this.spinnerMode = "requesting"; // 新一轮,等首包
   }
 
   onThinking(): void {
     // 进入慢思考:push 一个 thinking 占位,spinner 据此显示
+    this.spinnerMode = "thinking";
     this.entries.push({ kind: "thinking" });
     this.emit();
   }
 
   onToolCall(toolName: string, args: string): void {
+    this.spinnerMode = "tool-use"; // 工具执行中
     this.pendingTools.add(toolName);
     this.entries.push({ kind: "tool", name: toolName, args, status: "running" });
     this.emit();
@@ -104,11 +122,13 @@ export class TuiReporter implements Reporter {
 
   onFinish(): void {
     // 任务完成:App 据此切回 idle 状态(显示输入框)。无需额外条目。
+    this.spinnerMode = "idle"; // 回到空闲
     this.emit();
   }
 
   onTextDelta(delta: string): void {
     // 流式增量:累积到缓冲,追加/更新最后一条 assistant 条目
+    this.spinnerMode = "responding"; // 生成回复中
     this.streamingText += delta;
     const last = this.entries[this.entries.length - 1];
     if (last && last.kind === "assistant") {

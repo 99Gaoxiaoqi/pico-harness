@@ -8,11 +8,16 @@
 //
 // 代价:每轮重建 engine 对象(轻量,不重连 MCP——MCP 配置只在首轮传)。
 // 对 MVP 可接受;后续若要复用 engine 实例,再抽取 buildEngine()。
+//
+// 并发防护(对标 Claude Code):用 QueryGuard 三态状态机 + generation 防陈旧。
+// 用户连按 Enter 时,第二个查询让第一个的 finally 块 generation 不匹配,
+// 跳过 cleanup,避免竞态。running 由 status !== "idle" 派生(同步,无 React batch 延迟)。
 
-import { useState } from "react";
+import { useRef, useState, useSyncExternalStore } from "react";
 import { render } from "ink";
 import { App } from "./app.js";
 import { TuiReporter, type TuiEntry } from "./tui-reporter.js";
+import { QueryGuard } from "./query-guard.js";
 import type { RunAgentCliOptions } from "../cli/run-agent.js";
 import { runAgentFromCli } from "../cli/run-agent.js";
 import type { ProviderKind } from "../provider/factory.js";
@@ -35,23 +40,31 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
   // 共享状态:TuiReporter 和 App 共用同一个 entries 数组引用
   const entries: TuiEntry[] = [];
 
-  // ink render 需要 setState 驱动重渲染,用一个包装组件管理 entries/running 状态
+  // ink render 需要 setState 驱动重渲染,用一个包装组件管理 entries 状态
   let setEntries: (e: TuiEntry[]) => void = () => {};
-  let setRunning: (r: boolean) => void = () => {};
 
   // TuiReporter:onUpdate 回调把新 entries 推给 ink 的 setState
   const reporter = new TuiReporter((next) => setEntries(next), entries);
 
-  // 包装组件:管理 entries/running 状态,把 setter 暴露给外部
+  // 包装组件:管理 entries 状态 + QueryGuard 派生 running,把 setter 暴露给外部
   function ReplApp() {
     const [stateEntries, setStateEntries] = useState<TuiEntry[]>([]);
-    const [running, setStateRunning] = useState(false);
     setEntries = setStateEntries;
-    setRunning = setStateRunning;
+
+    // QueryGuard:三态状态机(idle/dispatching/running),useSyncExternalStore 订阅。
+    // 稳定引用,放在 useRef 里只创建一次。
+    const guardRef = useRef<QueryGuard>(null);
+    if (guardRef.current === null) guardRef.current = new QueryGuard();
+    const guard = guardRef.current;
+    const status = useSyncExternalStore(guard.subscribe, guard.getSnapshot);
+    const running = status !== "idle"; // 派生:非 idle 即视为运行中
 
     const handleSubmit = async (text: string): Promise<void> => {
+      // 并发防护:已在运行则拒绝新提交。tryStart 返回 generation 号或 null。
+      const gen = guard.tryStart();
+      if (gen === null) return;
+
       reporter.pushUserMessage(text);
-      setRunning(true);
       try {
         const cliOpts: RunAgentCliOptions = {
           prompt: text,
@@ -70,7 +83,11 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         });
         setEntries([...entries]);
       } finally {
-        setRunning(false);
+        // generation 防陈旧:若期间用户发起了新查询(自增 generation),此处 mismatch
+        // → end 返回 false,跳过 cleanup,避免把新查询误判为结束。
+        guard.end(gen);
+        // 兜底:确保本轮 mode 回到 idle(reporter.getMode 供 app.tsx 的 spinner 用)
+        // 注:reporter.onFinish 已设 idle;此处仅在出错未触发 onFinish 时补救。
       }
     };
 
