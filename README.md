@@ -59,6 +59,8 @@ curl -X POST localhost:3000/ask -H 'Content-Type: application/json' -d '{"prompt
 npm run bench
 ```
 
+想像 Claude Code 一样在任意项目目录启动交互式 Pico,见 [Pico Claude Code 风格交互启动指南](./docs/tui-claude-code-parity.md)。
+
 ## 🏗️ 架构概览
 
 ```
