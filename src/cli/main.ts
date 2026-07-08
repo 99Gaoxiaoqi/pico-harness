@@ -409,6 +409,7 @@ async function main() {
       provider: kind,
       model: modelName,
       enableThinking,
+      thinkingEffort,
       ...(values["mcp-config"] ? { mcpConfigPath: values["mcp-config"] } : {}),
     });
     return;

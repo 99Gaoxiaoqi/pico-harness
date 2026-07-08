@@ -22,6 +22,11 @@ describe("App", () => {
 
     expect(output).toContain("你好");
     expect(output).toContain("你好！");
+    expect(output).toContain("pico · glm-5.2 · /workspace/demo");
+    expect(output).toContain("glm-5.2/openai");
+    expect(output).toContain("mode new");
+    expect(output).toContain("perm ask");
+    expect(output).toContain("think off");
     expect(countOccurrences(output, 'Try "fix this" or / for commands')).toBe(1);
     expect(countOccurrences(output, "Enter 发送")).toBe(0);
     expect(countOccurrences(output, "Tab 补全")).toBe(0);
@@ -44,6 +49,28 @@ describe("App", () => {
     expect(countOccurrences(output, "Running")).toBe(1);
     expect(countOccurrences(output, 'Try "fix this" or / for commands')).toBe(0);
     expect(countOccurrences(output, "Enter 发送")).toBe(0);
+  });
+
+  it("passes provider, permission mode, and thinking effort into the runtime status", () => {
+    const output = renderToString(
+      <App
+        model="claude-sonnet"
+        provider="claude"
+        workDir="/workspace/demo"
+        sessionMode="resume"
+        permissionMode="acceptEdits"
+        thinkingEffort="high"
+        entries={[]}
+        running={false}
+        onSubmit={vi.fn()}
+      />,
+    );
+
+    expect(output).toContain("pico · claude-sonnet · /workspace/demo");
+    expect(output).toContain("claude-sonnet/claude");
+    expect(output).toContain("mode resume");
+    expect(output).toContain("perm acceptEdits");
+    expect(output).toContain("think high");
   });
 });
 
