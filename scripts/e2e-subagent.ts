@@ -6,7 +6,7 @@
 //   B. 主 agent 据此路径用 read_file 能回查到原文(跨上下文回查缺口已补)
 //   C. summary 续写: 子代理若给出过短 summary 会触发扩写(<200字)
 
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AgentEngine } from "../src/engine/loop.js";

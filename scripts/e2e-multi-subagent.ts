@@ -11,7 +11,7 @@
 //   D. summary 质量:每个子代理 summary 均 >= 200 字(扩写机制)
 //   E. artifact 外部化:读大文件的子代理回传 artifact 路径
 
-import { mkdtemp, readFile, writeFile, readdir } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -158,7 +158,11 @@ async function main() {
   let fail = 0;
   const check = (name: string, ok: boolean, detail = "") => {
     console.log(`[${ok ? "✅" : "❌"}] ${name}${detail ? " — " + detail : ""}`);
-    ok ? pass++ : fail++;
+    if (ok) {
+      pass++;
+    } else {
+      fail++;
+    }
   };
 
   // 验证 A:并发委派——4 个任务全部完成,无 error
@@ -194,7 +198,7 @@ async function main() {
   // 验证 C:worker 写文件——子任务 #3 应已创建 fix.txt
   const fixPath = join(workDir, "fix.txt");
   let workerOk = false;
-  let workerDetail = "";
+  let workerDetail: string;
   if (existsSync(fixPath)) {
     const content = await readFile(fixPath, "utf8");
     workerOk = content.includes("bug") || content.includes("除零") || content.length > 0;
