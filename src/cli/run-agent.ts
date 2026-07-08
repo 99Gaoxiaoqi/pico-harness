@@ -47,6 +47,7 @@ import {
   type ApprovalNotifier,
 } from "../approval/manager.js";
 import { computeApprovalDiff } from "../approval/diff.js";
+import { formatApprovalPanel } from "../tui/approval-panel.js";
 import type { MiddlewareFunc } from "../tools/registry.js";
 import { McpConnectionManager } from "../mcp/manager.js";
 import { BackgroundManager } from "../tools/background-manager.js";
@@ -150,7 +151,11 @@ export async function runUserInputFromCli(
   const workDir = await resolveWorkDir(options.dir);
   const provider = options.provider ?? "openai";
   const model = options.model ?? dependencies.env?.LLM_MODEL ?? process.env.LLM_MODEL ?? "(default)";
-  const registry = await createPicoCommandRegistry({ workDir, provider, model });
+  const session = await globalSessionManager.getOrCreate(
+    options.session ?? consoleSessionId(workDir),
+    workDir,
+  );
+  const registry = await createPicoCommandRegistry({ workDir, provider, model, session });
   const input = await processUserInput(options.prompt, { registry });
 
   if (input.type === "prompt" || input.type === "prompt-command") {
@@ -510,16 +515,7 @@ function buildApprovalMiddleware(notifier: ApprovalNotifier, workDir: string): M
 }
 
 const terminalNotifier: ApprovalNotifier = (notice) => {
-  console.warn(`\n\x1b[31m[需要审批 TaskID: ${notice.taskId}]\x1b[0m ${notice.message}\n`);
-  if (notice.diff) {
-    console.warn(`\x1b[33m${notice.diff}\x1b[0m\n`);
-  }
-  // exit_plan_mode 的审批支持 modify:提示用户可输入 modify 口令带新 plan 通过。
-  if (notice.toolName === "exit_plan_mode") {
-    console.warn(
-      `\x1b[2m回复:approve ${notice.taskId} 通过 / reject ${notice.taskId} 拒绝 / modify ${notice.taskId} <新plan内容> 修改后通过\x1b[0m\n`,
-    );
-  }
+  console.warn(`\n${formatApprovalPanel(notice)}\n`);
 };
 
 function resolveProviderConfig(
