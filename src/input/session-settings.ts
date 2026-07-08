@@ -42,6 +42,7 @@ export interface SessionSettingResult {
 }
 
 const settingsBySession = new Map<string, SessionSettings>();
+const permissionCommandModes = new Set(["default", "auto", "yolo", "plan"]);
 
 export function createDefaultSessionSettings(defaults: SessionSettingsDefaults): SessionSettings {
   return {
@@ -63,7 +64,9 @@ export function getOrCreateSessionSettings(defaults: SessionSettingsDefaults): S
     existing.cwd = defaults.cwd;
     existing.provider = defaults.provider;
     existing.mode = defaults.mode ?? existing.mode;
-    existing.permissionMode = defaults.permissionMode ?? existing.permissionMode;
+    if (defaults.permissionMode !== undefined && shouldApplyPermissionModeDefault(existing.permissionMode, defaults.permissionMode)) {
+      existing.permissionMode = defaults.permissionMode;
+    }
     existing.tools = defaults.tools ?? existing.tools;
     if (defaults.thinkingEffort !== undefined) {
       existing.thinkingEffort = defaults.thinkingEffort;
@@ -108,6 +111,19 @@ export function setSessionMode(settings: SessionSettings, mode: string): Session
   return { ok: true, message: `Mode set to ${settings.mode}` };
 }
 
+export function setSessionPermissionMode(settings: SessionSettings, mode: string): SessionSettingResult {
+  const normalized = mode.trim().toLowerCase();
+  if (!permissionCommandModes.has(normalized)) {
+    return {
+      ok: false,
+      message: `Current permission mode: ${settings.permissionMode}\nUsage: /permissions <default|auto|yolo|plan>`,
+    };
+  }
+
+  settings.permissionMode = normalized;
+  return { ok: true, message: `Permission mode set to ${settings.permissionMode}` };
+}
+
 export function setSessionThinkingEffort(
   settings: SessionSettings,
   effort: ThinkingEffort,
@@ -142,6 +158,14 @@ export function formatSessionStatus(settings: SessionSettings): string {
   ].join("\n");
 }
 
+export function formatPermissionStatus(settings: SessionSettings): string {
+  return [
+    `Permission mode: ${settings.permissionMode}`,
+    "Session approvals: unavailable",
+    "Usage: /permissions <default|auto|yolo|plan>",
+  ].join("\n");
+}
+
 export function formatToolStatus(tools: readonly SessionToolStatus[]): string {
   if (tools.length === 0) {
     return "No tools are available.";
@@ -165,4 +189,10 @@ function toProfileProtocol(provider: ProviderKind): "openai" | "claude" | "gemin
 
 function isSessionMode(mode: string): mode is SessionMode {
   return mode === "default" || mode === "plan" || mode === "auto" || mode === "yolo";
+}
+
+function shouldApplyPermissionModeDefault(current: string, next: string): boolean {
+  if (current === next) return true;
+  if (current === "ask") return true;
+  return next !== "ask";
 }

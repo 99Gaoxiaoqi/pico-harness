@@ -30,11 +30,13 @@ import { loadApiKeys } from "../provider/config.js";
 import { buildDefaultToolRegistry } from "../tools/default-registry.js";
 import {
   formatSessionStatus,
+  formatPermissionStatus,
   formatToolStatus,
   getOrCreateSessionSettings,
   parseThinkingEffortArg,
   setSessionMode,
   setSessionModel,
+  setSessionPermissionMode,
   setSessionThinkingEffort,
   toolStatusFromRegistry,
   type SessionSettings,
@@ -74,6 +76,7 @@ export async function createPicoCommandRegistry(
       command.name !== "skill" &&
       command.name !== "model" &&
       command.name !== "mode" &&
+      command.name !== "permissions" &&
       command.name !== "status" &&
       command.name !== "compact" &&
       command.name !== "init" &&
@@ -85,6 +88,7 @@ export async function createPicoCommandRegistry(
     ...builtins,
     createStatusCommand(settings),
     createModeCommand(settings),
+    createPermissionsCommand(settings),
     createCompactCommand(options),
     createInitCommand(options),
     createDoctorCommand(options),
@@ -272,6 +276,34 @@ function createModeCommand(settings: SessionSettings): SlashCommand {
         action: "message",
         message: result.message,
         data: { ok: result.ok, mode: settings.mode },
+      };
+    },
+  };
+}
+
+function createPermissionsCommand(settings: SessionSettings): SlashCommand {
+  return {
+    name: "permissions",
+    aliases: ["permission"],
+    description: "Show or change the current permission mode",
+    usage: "/permissions [default|auto|yolo|plan]",
+    kind: "local",
+    execute: (input): LocalCommandResult => {
+      if (input.args.trim().length === 0) {
+        return {
+          type: "local",
+          action: "message",
+          message: formatPermissionStatus(settings),
+          data: { permissionMode: settings.permissionMode },
+        };
+      }
+
+      const result = setSessionPermissionMode(settings, input.args);
+      return {
+        type: "local",
+        action: "message",
+        message: `${result.message}\nSession approvals: unavailable`,
+        data: { ok: result.ok, permissionMode: settings.permissionMode },
       };
     },
   };
