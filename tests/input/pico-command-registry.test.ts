@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -17,9 +17,11 @@ import {
 
 describe("Pico command registry", () => {
   const cleanup: Array<() => void> = [];
+  const originalEnv = { ...process.env };
 
   afterEach(() => {
     resetSessionSettingsForTests();
+    process.env = { ...originalEnv };
     while (cleanup.length > 0) {
       cleanup.pop()?.();
     }
@@ -257,5 +259,66 @@ describe("Pico command registry", () => {
     expect(result.command).toBe("undo");
     expect(result.result.message).toContain("turn-2");
     expect(readFileSync(filePath, "utf8")).toBe("before\n");
+  });
+
+  it("/compact 在无法安全触发摘要压缩时说明原因", async () => {
+    const registry = await createPicoCommandRegistry({
+      workDir: process.cwd(),
+      provider: "openai",
+      model: "glm-5.2",
+    });
+
+    const result = await processUserInput("/compact", { registry });
+
+    expect(result.type).toBe("local-command");
+    if (result.type !== "local-command") return;
+    expect(result.command).toBe("compact");
+    expect(result.result.message).toContain("Compact unavailable");
+    expect(result.result.message).toContain("no live session");
+  });
+
+  it("/init creates lightweight Pico project entry files without overwriting existing AGENTS.md", async () => {
+    const workDir = mkdtempSync(join(tmpdir(), "pico-command-init-"));
+    cleanup.push(() => rmSync(workDir, { recursive: true, force: true }));
+    writeFileSync(join(workDir, "AGENTS.md"), "# Existing\n");
+    const registry = await createPicoCommandRegistry({
+      workDir,
+      provider: "openai",
+      model: "glm-5.2",
+    });
+
+    const result = await processUserInput("/init", { registry });
+
+    expect(result.type).toBe("local-command");
+    if (result.type !== "local-command") return;
+    expect(readFileSync(join(workDir, "AGENTS.md"), "utf8")).toBe("# Existing\n");
+    expect(existsSync(join(workDir, ".pico", "config.json"))).toBe(true);
+    expect(result.result.message).toContain("AGENTS.md already exists");
+    expect(result.result.message).toContain("Created .pico/config.json");
+  });
+
+  it("/doctor reports env provider model cwd and node diagnostics", async () => {
+    const workDir = mkdtempSync(join(tmpdir(), "pico-command-doctor-"));
+    cleanup.push(() => rmSync(workDir, { recursive: true, force: true }));
+    writeFileSync(join(workDir, ".env"), "LLM_BASE_URL=https://llm.example.test\n");
+    process.env.LLM_BASE_URL = "https://llm.example.test";
+    process.env.LLM_API_KEY = "test-key";
+    process.env.LLM_MODEL = "glm-5.2";
+    const registry = await createPicoCommandRegistry({
+      workDir,
+      provider: "openai",
+      model: "glm-5.2",
+    });
+
+    const result = await processUserInput("/doctor", { registry });
+
+    expect(result.type).toBe("local-command");
+    if (result.type !== "local-command") return;
+    expect(result.command).toBe("doctor");
+    expect(result.result.message).toContain(".env: found");
+    expect(result.result.message).toContain("Provider: openai");
+    expect(result.result.message).toContain("Model: glm-5.2");
+    expect(result.result.message).toContain(`CWD: ${workDir}`);
+    expect(result.result.message).toContain("Node:");
   });
 });
