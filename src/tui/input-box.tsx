@@ -51,26 +51,62 @@ export function InputBox({
 
   return (
     <Box flexDirection="column">
-      <Box>
-        <Text color="green" bold>
-          ❯{" "}
-        </Text>
-        {disabled ? (
-          <Text dimColor>模型运行中,请等待…</Text>
-        ) : text.includes("\n") ? (
-          <Box flexDirection="column">{renderMultilineTextWithCursor(text, cursor)}</Box>
-        ) : (
-          renderLineWithCursor(text, cursor)
-        )}
-      </Box>
+      {renderInputPrompt({ disabled: Boolean(disabled), text, cursor })}
       {!disabled && <SuggestionList session={activeSuggestions} />}
-      {!disabled && (
-        <Text dimColor>
-          {" "}Enter 发送 · Alt/Shift+Enter 换行 · ←/→ 编辑 · ↑/↓ 历史/候选 · Tab 补全 · Ctrl+C 退出
-        </Text>
-      )}
     </Box>
   );
+}
+
+export function renderInputPrompt({
+  disabled,
+  text,
+  cursor,
+}: {
+  disabled: boolean;
+  text: string;
+  cursor: number;
+}): React.ReactNode {
+  return (
+    <Box>
+      <Text color={disabled ? "gray" : "green"} bold={!disabled}>
+        ❯{" "}
+      </Text>
+      {renderInputContent(text, cursor, disabled)}
+    </Box>
+  );
+}
+
+function renderInputContent(
+  text: string,
+  cursor: number,
+  disabled: boolean,
+): React.ReactNode {
+  if (disabled) {
+    return (
+      <Box flexDirection="column">
+        {text ? renderMultilineText(text) : null}
+        <Text dimColor>Running…</Text>
+      </Box>
+    );
+  }
+
+  if (!text) {
+    return <Text dimColor>Try &quot;fix this&quot; or / for commands</Text>;
+  }
+
+  if (text.includes("\n")) {
+    return <Box flexDirection="column">{renderMultilineTextWithCursor(text, cursor)}</Box>;
+  }
+
+  return renderLineWithCursor(text, cursor);
+}
+
+function renderMultilineText(text: string): React.ReactNode {
+  return text.split("\n").map((line, index) => (
+    <Text key={index} dimColor>
+      {line}
+    </Text>
+  ));
 }
 
 function renderMultilineTextWithCursor(text: string, cursor: number): React.ReactNode {
