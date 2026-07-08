@@ -16,6 +16,8 @@ export interface InputKey {
   downArrow?: boolean;
   leftArrow?: boolean;
   rightArrow?: boolean;
+  home?: boolean;
+  end?: boolean;
   return?: boolean;
   ctrl?: boolean;
   shift?: boolean;
@@ -34,6 +36,7 @@ export interface InputControllerOptions {
 
 export interface InputControllerState {
   text: string;
+  cursor: number;
   activeSuggestions: ActiveSuggestionSession | null;
   history: string[];
   historyIndex: number | null;
@@ -55,6 +58,7 @@ interface SuggestionContext {
 export function createInputControllerState(): InputControllerState {
   return {
     text: "",
+    cursor: 0,
     activeSuggestions: null,
     history: [],
     historyIndex: null,
@@ -70,8 +74,12 @@ export function reduceInputControllerEvent(
 ): InputControllerResult {
   if (options.disabled) return { state };
 
+  if (key.ctrl) {
+    return reduceCtrlInput(state, input, options);
+  }
+
   if (key.return && (key.meta || key.shift)) {
-    return withText(state, `${state.text}\n`, options);
+    return insertText(state, "\n", options);
   }
 
   if (key.return) {
@@ -82,8 +90,26 @@ export function reduceInputControllerEvent(
     return completeSuggestion(state, options);
   }
 
-  if (key.backspace || key.delete) {
-    return withText(state, state.text.slice(0, -1), options, { clearHistoryBrowse: true });
+  if (key.backspace) {
+    if (state.cursor === 0) return { state };
+    return withText(
+      state,
+      state.text.slice(0, state.cursor - 1) + state.text.slice(state.cursor),
+      state.cursor - 1,
+      options,
+      { clearHistoryBrowse: true },
+    );
+  }
+
+  if (key.delete) {
+    if (state.cursor >= state.text.length) return { state };
+    return withText(
+      state,
+      state.text.slice(0, state.cursor) + state.text.slice(state.cursor + 1),
+      state.cursor,
+      options,
+      { clearHistoryBrowse: true },
+    );
   }
 
   if (state.activeSuggestions && state.activeSuggestions.items.length > 0) {
@@ -92,54 +118,176 @@ export function reduceInputControllerEvent(
     }
   }
 
+  if (key.leftArrow || key.rightArrow || key.home || key.end) {
+    return moveCursor(state, key, options);
+  }
+
   if (key.upArrow || key.downArrow) {
     return browseHistory(state, key.upArrow ? -1 : 1, options);
   }
 
   if (isPrintableInput(input, key)) {
-    return withText(state, state.text + input, options, { clearHistoryBrowse: true });
+    return insertText(state, normalizeInput(input), options);
   }
 
   return { state };
 }
 
-export function getSuggestionContext(text: string): SuggestionContext | null {
-  const lineStart = text.lastIndexOf("\n") + 1;
-  const line = text.slice(lineStart);
+export function getSuggestionContext(
+  text: string,
+  cursor = text.length,
+): SuggestionContext | null {
+  const safeCursor = clampCursor(cursor, text);
+  const lineStart = text.lastIndexOf("\n", safeCursor - 1) + 1;
+  const nextLineBreak = text.indexOf("\n", safeCursor);
+  const lineEnd = nextLineBreak === -1 ? text.length : nextLineBreak;
+  const line = text.slice(lineStart, lineEnd);
+  const cursorInLine = safeCursor - lineStart;
 
-  if (line.startsWith("/") && !/\s/.test(line)) {
-    return {
-      kind: "slash",
-      query: line.slice(1),
-      replaceStart: lineStart,
-      replaceEnd: text.length,
-    };
+  if (line.startsWith("/") && cursorInLine > 0) {
+    const tokenEnd = findTokenEnd(line, cursorInLine);
+    if (cursorInLine <= tokenEnd && !/\s/.test(line.slice(0, cursorInLine))) {
+      return {
+        kind: "slash",
+        query: line.slice(1, cursorInLine),
+        replaceStart: lineStart,
+        replaceEnd: lineStart + tokenEnd,
+      };
+    }
   }
 
-  const mention = /(^|\s)@([^\s]*)$/.exec(line);
-  if (!mention) return null;
+  const tokenStart = findTokenStart(line, cursorInLine);
+  const tokenEnd = findTokenEnd(line, cursorInLine);
+  const tokenBeforeCursor = line.slice(tokenStart, cursorInLine);
+  if (!tokenBeforeCursor.startsWith("@")) return null;
 
-  const prefixLength = mention[1]?.length ?? 0;
-  const query = mention[2] ?? "";
-  const replaceStart = lineStart + mention.index + prefixLength;
   return {
     kind: "mention",
-    query,
-    replaceStart,
-    replaceEnd: text.length,
+    query: tokenBeforeCursor.slice(1),
+    replaceStart: lineStart + tokenStart,
+    replaceEnd: lineStart + tokenEnd,
   };
+}
+
+function reduceCtrlInput(
+  state: InputControllerState,
+  input: string,
+  options: InputControllerOptions,
+): InputControllerResult {
+  switch (input.toLowerCase()) {
+    case "a":
+      return setCursor(state, 0, options);
+    case "e":
+      return setCursor(state, state.text.length, options);
+    case "u":
+      return clearBeforeCursorOnLine(state, options);
+    case "w":
+      return deletePreviousWord(state, options);
+    default:
+      return { state };
+  }
+}
+
+function clearBeforeCursorOnLine(
+  state: InputControllerState,
+  options: InputControllerOptions,
+): InputControllerResult {
+  const lineStart = state.text.lastIndexOf("\n", state.cursor - 1) + 1;
+  return withText(
+    state,
+    state.text.slice(0, lineStart) + state.text.slice(state.cursor),
+    lineStart,
+    options,
+    { clearHistoryBrowse: true },
+  );
+}
+
+function deletePreviousWord(
+  state: InputControllerState,
+  options: InputControllerOptions,
+): InputControllerResult {
+  if (state.cursor === 0) return { state };
+
+  let start = state.cursor;
+  while (start > 0 && /\s/.test(state.text[start - 1] ?? "")) start--;
+  while (start > 0 && !/\s/.test(state.text[start - 1] ?? "")) start--;
+
+  return withText(
+    state,
+    state.text.slice(0, start) + state.text.slice(state.cursor),
+    start,
+    options,
+    { clearHistoryBrowse: true },
+  );
+}
+
+function insertText(
+  state: InputControllerState,
+  input: string,
+  options: InputControllerOptions,
+): InputControllerResult {
+  const text = normalizeInput(input);
+  return withText(
+    state,
+    state.text.slice(0, state.cursor) + text + state.text.slice(state.cursor),
+    state.cursor + text.length,
+    options,
+    { clearHistoryBrowse: true },
+  );
+}
+
+function moveCursor(
+  state: InputControllerState,
+  key: InputKey,
+  options: InputControllerOptions,
+): InputControllerResult {
+  if (key.home) return setCursor(state, 0, options);
+  if (key.end) return setCursor(state, state.text.length, options);
+  if (key.leftArrow) return setCursor(state, state.cursor - 1, options);
+  return setCursor(state, state.cursor + 1, options);
+}
+
+function setCursor(
+  state: InputControllerState,
+  cursor: number,
+  options: InputControllerOptions,
+): InputControllerResult {
+  return withText(state, state.text, cursor, options);
+}
+
+function findTokenStart(line: string, cursorInLine: number): number {
+  let start = Math.min(cursorInLine, line.length);
+  while (start > 0 && !/\s/.test(line[start - 1] ?? "")) start--;
+  return start;
+}
+
+function findTokenEnd(line: string, cursorInLine: number): number {
+  let end = Math.min(cursorInLine, line.length);
+  while (end < line.length && !/\s/.test(line[end] ?? "")) end++;
+  return end;
+}
+
+function clampCursor(cursor: number, text: string): number {
+  return Math.max(0, Math.min(cursor, text.length));
+}
+
+function normalizeInput(input: string): string {
+  return input.replace(/\r\n?/g, "\n");
 }
 
 function withText(
   state: InputControllerState,
   text: string,
+  cursor: number,
   options: InputControllerOptions,
   flags: { clearHistoryBrowse?: boolean } = {},
 ): InputControllerResult {
+  const nextCursor = clampCursor(cursor, text);
   const next = {
     ...state,
     text,
-    activeSuggestions: buildSuggestionSession(text, options),
+    cursor: nextCursor,
+    activeSuggestions: buildSuggestionSession(text, nextCursor, options),
   };
 
   if (flags.clearHistoryBrowse) {
@@ -157,6 +305,7 @@ function submit(
   const next = {
     ...state,
     text: "",
+    cursor: 0,
     activeSuggestions: null,
     historyIndex: null,
     draft: "",
@@ -188,6 +337,7 @@ function completeSuggestion(
   const replacement = `${marker}${stripMarker(item.insertText ?? item.value, session.kind)} `;
   const nextText =
     state.text.slice(0, session.replaceStart) + replacement + state.text.slice(session.replaceEnd);
+  const nextCursor = session.replaceStart + replacement.length;
 
   return withText(
     {
@@ -195,6 +345,7 @@ function completeSuggestion(
       historyIndex: null,
     },
     nextText,
+    nextCursor,
     options,
   );
 }
@@ -234,7 +385,12 @@ function browseHistory(
       state: {
         ...state,
         text: state.history[historyIndex] ?? "",
-        activeSuggestions: buildSuggestionSession(state.history[historyIndex] ?? "", options),
+        cursor: (state.history[historyIndex] ?? "").length,
+        activeSuggestions: buildSuggestionSession(
+          state.history[historyIndex] ?? "",
+          (state.history[historyIndex] ?? "").length,
+          options,
+        ),
         historyIndex,
         draft,
       },
@@ -249,7 +405,12 @@ function browseHistory(
       state: {
         ...state,
         text: state.history[historyIndex] ?? "",
-        activeSuggestions: buildSuggestionSession(state.history[historyIndex] ?? "", options),
+        cursor: (state.history[historyIndex] ?? "").length,
+        activeSuggestions: buildSuggestionSession(
+          state.history[historyIndex] ?? "",
+          (state.history[historyIndex] ?? "").length,
+          options,
+        ),
         historyIndex,
       },
     };
@@ -259,7 +420,8 @@ function browseHistory(
     state: {
       ...state,
       text: state.draft,
-      activeSuggestions: buildSuggestionSession(state.draft, options),
+      cursor: state.draft.length,
+      activeSuggestions: buildSuggestionSession(state.draft, state.draft.length, options),
       historyIndex: null,
     },
   };
@@ -267,9 +429,10 @@ function browseHistory(
 
 function buildSuggestionSession(
   text: string,
+  cursor: number,
   options: InputControllerOptions,
 ): ActiveSuggestionSession | null {
-  const context = getSuggestionContext(text);
+  const context = getSuggestionContext(text, cursor);
   if (!context) return null;
 
   const source =
@@ -309,14 +472,17 @@ function isPrintableInput(input: string, key: InputKey): boolean {
       !key.downArrow &&
       !key.leftArrow &&
       !key.rightArrow &&
+      !key.home &&
+      !key.end &&
       input.length > 0 &&
-      !hasControlCharacter(input),
+      !hasUnsupportedControlCharacter(input),
   );
 }
 
-function hasControlCharacter(input: string): boolean {
+function hasUnsupportedControlCharacter(input: string): boolean {
   for (const ch of input) {
     const code = ch.charCodeAt(0);
+    if (ch === "\n" || ch === "\r") continue;
     if (code <= 0x1f || code === 0x7f) return true;
   }
   return false;
