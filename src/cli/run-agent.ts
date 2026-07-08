@@ -13,6 +13,7 @@ import { createContextBudget, estimateTokenBudgetAsChars } from "../context/cont
 import { PromptComposer } from "../context/composer.js";
 import { SkillLoader, SkillViewTool } from "../context/skill.js";
 import { TodoStore } from "../context/todo-store.js";
+import { ToolDisclosure } from "../tools/tool-disclosure.js";
 import {
   createProvider,
   createRawProvider,
@@ -187,7 +188,10 @@ export async function runAgentFromCli(
   // TodoStore 单例:registry(TodoTool)与 PromptComposer 共享同一实例,
   // 根治历史上 TodoTool/Composer 各 new 各的跨实例不可见 bug(对标 GoalManager 范式)。
   const todoStore = new TodoStore(workDir);
-  const registry = buildRegistry(workDir, cliBackgroundManager, goalManager, todoStore);
+  // 工具渐进披露状态机(ROADMAP 5.4):registry(search_tools 元工具)与 engine(pickForLLM)共享同一实例,
+  // 确保扩展工具被披露后下一轮即进入 LLM 工具列表。对标 GoalManager/TodoStore 注入范式。
+  const toolDisclosure = new ToolDisclosure();
+  const registry = buildRegistry(workDir, cliBackgroundManager, goalManager, todoStore, toolDisclosure);
   // 【任务 2.6】用户可配置 Shell Hooks:加载 .claw/settings.json 的 hooks 配置,
   // 存在则挂载 HookRunner 到 registry。fail-open:配置缺失/畸形均不启用 hook,零影响。
   registry.setSessionId?.(session.id);
@@ -220,6 +224,8 @@ export async function runAgentFromCli(
     systemPrompt,
     goalManager,
     todoStore,
+    // TODO: loop 端会加此字段,合并后即消(toolDisclosure?: ToolDisclosure on AgentEngineOptions)。
+    ...(toolDisclosure ? { toolDisclosure } : {}),
     compactor: buildCompactor(kind, providerConfig.model),
     // 模型摘要压缩:provider 存在即启用,作为字符级降级用尽后的最后防线。
     // 优先用辅助廉价模型(AUX_LLM_*)生成摘要省主模型成本;未配置则用主 provider。
@@ -292,12 +298,14 @@ function buildRegistry(
   backgroundManager: BackgroundManager = cliBackgroundManager,
   goalManager?: GoalManager,
   todoStore?: TodoStore,
+  toolDisclosure?: ToolDisclosure,
 ): ToolRegistry {
   return buildDefaultToolRegistry(workDir, {
     truncateResults: false,
     backgroundManager,
     ...(goalManager !== undefined ? { goalManager } : {}),
     ...(todoStore !== undefined ? { todoStore } : {}),
+    ...(toolDisclosure !== undefined ? { toolDisclosure } : {}),
   });
 }
 
