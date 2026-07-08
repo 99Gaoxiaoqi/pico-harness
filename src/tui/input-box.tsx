@@ -82,8 +82,11 @@ export function InputBox({ disabled, onSubmit }: InputBoxProps): React.ReactNode
       return;
     }
 
-    // 普通可打印字符(过滤控制字符)
-    if (input && !key.ctrl && !key.meta && !key.shift && input.length === 1 && input >= " ") {
+    // 普通可打印文本(含中文输入法 IME 提交的多字符文本)。
+    // 过滤控制字符:排除 ctrl/meta/shift 组合键,排除含控制字符(\x00-\x1f)的输入。
+    // 注意:不能用 input.length === 1,IME 合成提交的中文是多字符(如"你好"),
+    // 那样会丢弃整个词组,导致只能逐字输入。改为:只要不含控制字符就接受。
+    if (input && !key.ctrl && !key.meta && !key.shift && !key.return && !key.backspace && !key.delete && !key.upArrow && !key.downArrow && !key.leftArrow && !key.rightArrow && input.length > 0 && !/[\x00-\x1f\x7f]/.test(input)) {
       // 用户手动改字 → 退出历史浏览
       historyIdxRef.current = null;
       setText((prev) => prev + input);

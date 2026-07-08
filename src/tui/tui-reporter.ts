@@ -37,6 +37,8 @@ export type TuiEntry =
 export class TuiReporter implements Reporter {
   /** 当前轮正在流式累积的 assistant 文本(临时缓冲,onMessage 时固化) */
   private streamingText = "";
+  /** 当前轮流式 assistant 在 entries 中的索引(onTextDelta 首次创建时记下,避免多轮串) */
+  private streamingEntryIdx: number | null = null;
   /** 当前轮正在运行的工具名栈(支持嵌套,但实际并发批次会被串行回调) */
   private pendingTools = new Set<string>();
   /** 当前 UI 模式(SpinnerMode | "idle"),供 spinner 切换阶段。 */
@@ -62,15 +64,16 @@ export class TuiReporter implements Reporter {
 
   onStart(_workDir: string, _enableThinking: boolean): void {
     // 顶栏已展示 workDir/model,这里不重复;清空本轮缓冲。
-    this.streamingText = "";
+    this.resetTurnBuffer();
     this.pendingTools.clear();
     this.spinnerMode = "requesting"; // 等首包
     this.emit();
   }
 
   onTurnStart(_turn: number): void {
-    // 轮次分隔由 App 渲染处理,这里重置本轮缓冲
-    this.streamingText = "";
+    // 轮次分隔:重置流式缓冲,确保每轮的 onTextDelta 创建新 assistant 条目,
+    // 不追加到上一轮已固化的条目上(根治多轮重复/混乱)。
+    this.resetTurnBuffer();
     this.spinnerMode = "requesting"; // 新一轮,等首包
   }
 
@@ -103,20 +106,17 @@ export class TuiReporter implements Reporter {
   }
 
   onMessage(content: string): void {
-    // 模型完成一轮纯文本回复:把流式缓冲固化为一条 assistant 条目
-    // (若本轮有流式 delta,streamingText 已含内容;onMessage 是权威完整版)
-    if (this.streamingText) {
-      // 替换最后一条流式 assistant 为权威版本
-      const last = this.entries[this.entries.length - 1];
-      if (last && last.kind === "assistant") {
-        last.content = content;
-      } else {
-        this.entries.push({ kind: "assistant", content });
+    // 模型完成一轮纯文本回复:用权威完整版替换本轮流式缓冲创建的条目。
+    // 若本轮无流式 delta(streamingEntryIdx===null,如非流式 provider),直接 push。
+    if (this.streamingEntryIdx !== null && this.streamingEntryIdx < this.entries.length) {
+      const entry = this.entries[this.streamingEntryIdx];
+      if (entry && entry.kind === "assistant") {
+        entry.content = content; // 流式版本→权威版本
       }
     } else {
       this.entries.push({ kind: "assistant", content });
     }
-    this.streamingText = "";
+    this.resetTurnBuffer(); // 固化后清缓冲,下一轮 onTextDelta 会创建新条目
     this.emit();
   }
 
@@ -127,16 +127,27 @@ export class TuiReporter implements Reporter {
   }
 
   onTextDelta(delta: string): void {
-    // 流式增量:累积到缓冲,追加/更新最后一条 assistant 条目
+    // 流式增量:累积到本轮专属的 assistant 条目(由 streamingEntryIdx 精确定位)。
+    // 首次 delta 时创建条目并记下索引;后续 delta 追加到同一条目。
+    // 不再用"entries 末尾"定位——多轮(调工具→继续回复)时末尾可能是工具卡片。
     this.spinnerMode = "responding"; // 生成回复中
     this.streamingText += delta;
-    const last = this.entries[this.entries.length - 1];
-    if (last && last.kind === "assistant") {
-      last.content += delta;
+    if (this.streamingEntryIdx !== null && this.streamingEntryIdx < this.entries.length) {
+      const entry = this.entries[this.streamingEntryIdx];
+      if (entry && entry.kind === "assistant") {
+        entry.content += delta;
+      }
     } else {
       this.entries.push({ kind: "assistant", content: delta });
+      this.streamingEntryIdx = this.entries.length - 1;
     }
     this.emit();
+  }
+
+  /** 重置本轮流式缓冲:onMessage 固化后 / onTurnStart 新轮开始时调 */
+  private resetTurnBuffer(): void {
+    this.streamingText = "";
+    this.streamingEntryIdx = null;
   }
 
   /** 把当前 entries 的快照推给 onUpdate,驱动 ink 重渲染 */
