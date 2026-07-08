@@ -97,10 +97,10 @@ git diff --check
 
 **任务：**
 
-- [ ] 支持左右方向键、Home/End、Ctrl+A/Ctrl+E。
-- [ ] 支持 Ctrl+U 清空行、Ctrl+W 删除前一个词。
-- [ ] 粘贴多行时保持现有 Alt/Shift+Enter 多行语义。
-- [ ] slash/@ 候选在有光标后仍按当前 token 补全。
+- [x] 支持左右方向键、Home/End、Ctrl+A/Ctrl+E。
+- [x] 支持 Ctrl+U 清空行、Ctrl+W 删除前一个词。
+- [x] 粘贴多行时保持现有 Alt/Shift+Enter 多行语义。
+- [x] slash/@ 候选在有光标后仍按当前 token 补全。
 
 **验收命令：**
 
@@ -210,7 +210,7 @@ git diff --check
 - [ ] 合并 Worker D：在稳定 session 语义上接入模型/思考状态。
 - [ ] 合并 Worker E：接入 Claude commands/agents 资源。
 - [x] 合并 Worker B：接入外壳与状态区。
-- [ ] 合并 Worker C：接入输入编辑体验。
+- [x] 合并 Worker C：接入输入编辑体验。
 - [ ] 合并 Worker F：接入 rewind/approval UI。
 
 ---
