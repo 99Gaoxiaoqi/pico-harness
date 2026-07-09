@@ -13,9 +13,23 @@
 // 用户连按 Enter 时,第二个查询让第一个的 finally 块 generation 不匹配,
 // 跳过 cleanup,避免竞态。running 由 status !== "idle" 派生(同步,无 React batch 延迟)。
 
+import type React from "react";
 import { useRef, useState, useSyncExternalStore } from "react";
-import { render, useApp } from "ink";
+import { render, useApp, useInput } from "ink";
 import { App } from "./app.js";
+import type { DialogRequest } from "./dialog-arbiter.js";
+import { createLocalUiDialogRequest } from "./local-ui-dialog-host.js";
+import {
+  buildModelOptions,
+  modelSelectionToCommand,
+} from "./model-options.js";
+import {
+  createModelSelectorState,
+  ModelSelector,
+  resolveModelSelectorKey,
+  type ModelOption,
+  type ModelSelectorState,
+} from "./model-selector.js";
 import { TuiReporter, type TuiEntry } from "./tui-reporter.js";
 import { QueryGuard } from "./query-guard.js";
 import type { RunAgentCliOptions, RunAgentWriter } from "../cli/run-agent.js";
@@ -67,6 +81,22 @@ export interface HandleTuiInputSubmissionDeps {
   runAgent: (prompt: string) => Promise<void>;
   exit: () => void;
   processInput?: (text: string) => Promise<TuiInputProcessResult>;
+  openDialog?: (request: DialogRequest) => void;
+  currentModelId?: string;
+  modelOptions?: readonly ModelOption[];
+  createModelSelectorContent?: (effect: LocalTuiModelSelectorDialogEffect) => React.ReactNode;
+}
+
+export type LocalTuiCommandUiEffect =
+  | { kind: "none" }
+  | LocalTuiModelSelectorDialogEffect;
+
+export interface LocalTuiModelSelectorDialogEffect {
+  kind: "dialog";
+  selector: "model";
+  request: DialogRequest;
+  models: readonly ModelOption[];
+  currentModelId?: string;
 }
 
 export async function handleTuiInputSubmission(
@@ -182,6 +212,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     const guard = guardRef.current;
     const status = useSyncExternalStore(guard.subscribe, guard.getSnapshot);
     const running = status !== "idle"; // 派生:非 idle 即视为运行中
+    const [dialogRequests, setDialogRequests] = useState<DialogRequest[]>([]);
 
     const handleSubmit = async (text: string): Promise<void> => {
       let gen: number | null = null;
@@ -201,6 +232,33 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
           workDir: opts.workDir,
           exit,
           processInput: async () => processed,
+          openDialog: (request) => {
+            setDialogRequests((current) => [
+              ...current.filter((item) => item.id !== request.id),
+              request,
+            ]);
+          },
+          currentModelId: settings.model,
+          modelOptions: buildModelOptions(),
+          createModelSelectorContent: (effect) => (
+            <InteractiveModelSelector
+              models={effect.models}
+              currentModelId={effect.currentModelId}
+              onCancel={() => {
+                setDialogRequests((current) =>
+                  current.filter((item) => item.id !== effect.request.id),
+                );
+              }}
+              onSelect={(modelId) => {
+                setDialogRequests((current) =>
+                  current.filter((item) => item.id !== effect.request.id),
+                );
+                dispatchModelSelectorSelection(modelId, (command) => {
+                  void handleSubmit(command);
+                });
+              }}
+            />
+          ),
           runAgent: async (prompt) => {
             const cliOpts: RunAgentCliOptions = {
               prompt,
@@ -260,6 +318,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
             .slice(0, 20)
             .map((file) => ({ value: file }))
         }
+        dialogRequests={dialogRequests}
         onSubmit={(text) => void handleSubmit(text)}
       />
     );
@@ -284,8 +343,28 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
 
 function handleLocalTuiCommand(
   result: LocalCommandResult,
-  deps: Pick<HandleTuiInputSubmissionDeps, "reporter" | "exit">,
+  deps: Pick<
+    HandleTuiInputSubmissionDeps,
+    | "reporter"
+    | "exit"
+    | "openDialog"
+    | "currentModelId"
+    | "modelOptions"
+    | "createModelSelectorContent"
+  >,
 ): void {
+  const uiEffect = resolveLocalTuiCommandUiEffect(result, {
+    currentModelId: deps.currentModelId,
+    models: deps.modelOptions,
+  });
+  if (uiEffect.kind === "dialog" && deps.openDialog) {
+    deps.openDialog({
+      ...uiEffect.request,
+      content: deps.createModelSelectorContent?.(uiEffect) ?? uiEffect.request.content,
+    });
+    return;
+  }
+
   switch (result.action) {
     case "clear":
       deps.reporter.clear();
@@ -297,6 +376,73 @@ function handleLocalTuiCommand(
       deps.reporter.pushSystemMessage(result.message ?? "");
       return;
   }
+}
+
+export function resolveLocalTuiCommandUiEffect(
+  result: LocalCommandResult,
+  options: {
+    currentModelId?: string;
+    models?: readonly ModelOption[];
+  } = {},
+): LocalTuiCommandUiEffect {
+  if (result.ui?.kind !== "open-selector" || result.ui.selector !== "model") {
+    return { kind: "none" };
+  }
+
+  const models = options.models ?? buildModelOptions();
+  const request = createLocalUiDialogRequest(result.ui, {
+    currentModelId: options.currentModelId,
+    models,
+  });
+  if (!request) return { kind: "none" };
+
+  return {
+    kind: "dialog",
+    selector: "model",
+    request,
+    models,
+    currentModelId: options.currentModelId,
+  };
+}
+
+export function dispatchModelSelectorSelection(
+  modelId: string,
+  submitInput: (text: string) => void,
+): void {
+  submitInput(modelSelectionToCommand(modelId));
+}
+
+interface InteractiveModelSelectorProps {
+  models: readonly ModelOption[];
+  currentModelId?: string;
+  onSelect: (modelId: string) => void;
+  onCancel: () => void;
+}
+
+function InteractiveModelSelector({
+  models,
+  currentModelId,
+  onSelect,
+  onCancel,
+}: InteractiveModelSelectorProps): React.ReactNode {
+  const [state, setState] = useState<ModelSelectorState>(() =>
+    createModelSelectorState(models, currentModelId),
+  );
+
+  useInput((input, key) => {
+    const next = resolveModelSelectorKey(
+      state,
+      models,
+      { input, key },
+      {
+        onConfirm: (model) => onSelect(model.id),
+        onCancel,
+      },
+    );
+    if (next.status === "selecting") setState(next);
+  });
+
+  return <ModelSelector models={models} currentModelId={currentModelId} state={state} />;
 }
 
 function formatUnknownCommand(
