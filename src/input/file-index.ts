@@ -97,7 +97,7 @@ async function discoverFiles(
   runner: CommandRunner,
 ): Promise<string[]> {
   const files =
-    (await tryCommand(runner, "git", ["ls-files"], cwd)) ??
+    (await tryCommand(runner, "git", ["-c", "core.quotepath=false", "ls-files"], cwd)) ??
     (await tryCommand(runner, "rg", ["--files"], cwd)) ??
     (await scanFiles(cwd));
 
