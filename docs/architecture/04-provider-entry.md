@@ -1,6 +1,6 @@
-# Provider 适配与多端入口
+# Provider 适配与 TUI 入口
 
-> 所有入口最终都装配一个 AgentEngine，引擎通过 LLMProvider 接口与模型通信。不同入口的差异在于装配方式和 I/O 形态。
+> TUI 入口最终装配一个 AgentEngine，引擎通过 LLMProvider 接口与模型通信。入口层负责 provider 配置、session、reporter、工具与审批装配。
 
 ---
 
@@ -71,7 +71,7 @@ new CostTracker(provider, modelRoute, session);
 
 ### Anthropic Prompt Cache (`anthropic-cache.ts`)
 
-最��� 4 个 `cache_control: ephemeral` 断点：system → tools 尾 → 历史前缀尾 → 余量。命中后 cache_read 单价降至约 1/10。
+最多 4 个 `cache_control: ephemeral` 断点：system → tools 尾 → 历史前缀尾 → 余量。命中后 cache_read 单价降至约 1/10。
 
 ---
 
@@ -106,41 +106,8 @@ main.ts parseArgs
 5. GoalManager/TodoStore/ToolDisclosure 单例
 6. buildRegistry + Hooks + 审批中间件
 7. PromptComposer.build（预组装 system prompt）
-8. AgentEngine 构造
+8. AgentEngine 构造（`PICO_TRACE=1` 或 `trace: true` 时注入 Tracer）
 9. session.append(user) + engine.run(session)
-
-### HTTP+WS (`server/`)
-
-**REST 端点**：
-| 方法 | 路径 | 功能 |
-|------|------|------|
-| POST | `/sessions` | 创建会话 |
-| GET | `/sessions/:id` | 会话状态 |
-| POST | `/sessions/:id/messages` | 发消息 |
-| POST | `/approvals/:taskId` | 审批 |
-| GET | `/tools` | 工具列表 |
-
-**WebSocket**：`ws://host/?sessionId=xxx&lastSeq=NNN&epoch=EEE`
-
-- cursor 多端同步：持久事件推进 seq，易失事件（text-delta）不推进
-- fork/rewind 时 epoch++，旧 cursor 失效推 resync
-
-### ACP (`src/acp/`)
-
-Agent Client Protocol，IDE（VSCode 插件）与 Agent 通信协议。
-
-- JSON-RPC 2.0 over stdio
-- 方法：`initialize` / `session/create` / `prompt` / `fs/readTextFile` / `fs/writeTextFile`
-- 流式：`response/start` → `response/output`（增量）→ `response/finish`
-- 4 模式：default(审批) / plan / auto(自动) / yolo(全自动)
-
-### 飞书 (`src/feishu/`)
-
-- WSClient 长连接（无需公网回调地址）
-- 每群独立 Session（`feishu:{chatId}`）
-- 意图拦截：闲聊不触发，需命令前缀或关键词
-- Steer 运行时注入：Agent 运行中消息 push 进 SteerQueue
-- 审批卡片：同意/拒绝/修改按钮
 
 ### TUI (`src/tui/`)
 
@@ -178,9 +145,7 @@ loop.ts 构造包装 provider，把 generate() 替换为 generateStream()
   ▼
 Reporter.onTextDelta(delta)
   ├── TerminalReporter: process.stdout.write(delta)        [CLI]
-  ├── TuiReporter: streamingText += delta → emit()          [TUI]
-  ├── AcpStreamCollector: notify(response/output, {delta})  [ACP]
-  └── WS pushVolatile: broadcast text-delta                 [HTTP/WS]
+  └── TuiReporter: streamingText += delta → emit()          [TUI]
 ```
 
 retry / overflowRetry 无需改动自动获得流式能力（构造器已替换 generate）。

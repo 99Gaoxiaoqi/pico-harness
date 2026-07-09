@@ -8,6 +8,7 @@ import {
   dispatchModelSelectorSelection,
   handleTuiInputSubmission,
   resolveLocalTuiCommandUiEffect,
+  runTuiAgentPrompt,
   type TuiInputProcessResult,
 } from "../../src/tui/repl.js";
 
@@ -180,6 +181,42 @@ describe("TUI input routing", () => {
 
     expect(processInput).toHaveBeenCalledWith("review this");
     expect(runAgent).toHaveBeenCalledWith("review this");
+  });
+
+  it("shows the trace path after a TUI request when tracing is enabled", async () => {
+    const { reporter, snapshots } = harness();
+    const runAgent = vi.fn(async () => ({
+      sessionId: "tui-session",
+      sessionSelection: { mode: "new" as const, sessionId: "tui-session" },
+      workDir: process.cwd(),
+      finalMessage: "done",
+      usage: { promptTokens: 1, completionTokens: 1, costCNY: 0 },
+      messages: [],
+      tracePath: "/tmp/project/.claw/traces/trace_tui-session_1.json",
+    }));
+
+    await runTuiAgentPrompt(
+      {
+        prompt: "trace this",
+        dir: process.cwd(),
+        session: "tui-session",
+      },
+      {
+        reporter,
+        runAgent,
+      },
+    );
+
+    expect(runAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ prompt: "trace this" }),
+      expect.objectContaining({ reporter }),
+    );
+    expect(snapshots.at(-1)).toEqual([
+      {
+        kind: "system",
+        content: "Trace saved: /tmp/project/.claw/traces/trace_tui-session_1.json",
+      },
+    ]);
   });
 
   it("/sessions 打开 session selector dialog", async () => {

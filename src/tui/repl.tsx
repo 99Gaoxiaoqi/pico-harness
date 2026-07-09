@@ -1,17 +1,8 @@
-// TUI REPL 启动器:装配 ink render + TuiReporter,循环接收用户输入调 engine。
+// TUI REPL entrypoint: wires ink rendering, TuiReporter, local commands, and
+// per-turn calls into runAgentFromCli.
 //
-// 设计权衡(极简优先):
-// runAgentFromCli 的装配链很重(凭证轮换/provider/registry/MCP/审批)。
-// 不重新装配,而是每轮用户输入调一次 runAgentFromCli,共享同一个 TuiReporter。
-// session 通过 consoleSessionId(workDir) 固定 ID 复用(run-agent.ts:146-149)。
-// 这样零改动 run-agent.ts,MVP 最小侵入。
-//
-// 代价:每轮重建 engine 对象(轻量,不重连 MCP——MCP 配置只在首轮传)。
-// 对 MVP 可接受;后续若要复用 engine 实例,再抽取 buildEngine()。
-//
-// 并发防护(对标 Claude Code):用 QueryGuard 三态状态机 + generation 防陈旧。
-// 用户连按 Enter 时,第二个查询让第一个的 finally 块 generation 不匹配,
-// 跳过 cleanup,避免竞态。running 由 status !== "idle" 派生(同步,无 React batch 延迟)。
+// Each user prompt builds a fresh engine around the same session and reporter.
+// QueryGuard prevents overlapping submissions from racing cleanup state.
 
 import type React from "react";
 import { useRef, useState, useSyncExternalStore } from "react";
@@ -30,7 +21,11 @@ import {
 import { TuiReporter, type TuiEntry } from "./tui-reporter.js";
 import { QueryGuard } from "./query-guard.js";
 import { RunningInputQueue } from "./running-input-queue.js";
-import type { RunAgentCliOptions } from "../cli/run-agent.js";
+import type {
+  RunAgentCliDependencies,
+  RunAgentCliOptions,
+  RunAgentCliResult,
+} from "../cli/run-agent.js";
 import { runAgentFromCli } from "../cli/run-agent.js";
 import { listFileHistorySnapshotSummaries } from "../cli/file-history.js";
 import { createCliSessionId, type CliSessionSelection } from "../cli/session-resolver.js";
@@ -115,6 +110,11 @@ export interface HandleTuiRunningInputSubmissionDeps extends HandleTuiInputSubmi
   guard: Pick<QueryGuard, "tryStart" | "end" | "getSnapshot">;
   queue: RunningInputQueue;
 }
+
+export type TuiRunAgent = (
+  options: RunAgentCliOptions,
+  dependencies: RunAgentCliDependencies,
+) => Promise<RunAgentCliResult>;
 
 const RUNNING_IMMEDIATE_LOCAL_COMMANDS = new Set(["help", "status"]);
 
@@ -426,8 +426,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
               thinkingEffort: settings.thinkingEffort,
               ...(opts.mcpConfigPath ? { mcpConfigPath: opts.mcpConfigPath } : {}),
             };
-            // 复用同一个 TUI session,reporter 是 TuiReporter 实例(共享 entries)
-            await runAgentFromCli(cliOpts, {
+            await runTuiAgentPrompt(cliOpts, {
               reporter,
               toolDisclosure,
             });
@@ -561,6 +560,23 @@ export function resolveLocalTuiCommandUiEffect(
     models,
     currentModelId: options.currentModelId,
   };
+}
+
+export async function runTuiAgentPrompt(
+  cliOpts: RunAgentCliOptions,
+  deps: {
+    reporter: TuiReporter;
+    toolDisclosure?: ToolDisclosure;
+    runAgent?: TuiRunAgent;
+  },
+): Promise<void> {
+  const result = await (deps.runAgent ?? runAgentFromCli)(cliOpts, {
+    reporter: deps.reporter,
+    ...(deps.toolDisclosure ? { toolDisclosure: deps.toolDisclosure } : {}),
+  });
+  if (result.tracePath) {
+    deps.reporter.pushSystemMessage(`Trace saved: ${result.tracePath}`);
+  }
 }
 
 export function dispatchModelSelectorSelection(

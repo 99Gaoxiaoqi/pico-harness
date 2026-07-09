@@ -123,7 +123,7 @@ generateWithRetry (内层:普通重试)
 ## 2. Session (`session.ts`)
 
 ### 核心职责
-会话物理隔离（多端并发下绝不共用 history）+ WorkingMemory 滑动窗口 + 事件溯源持久化。
+会话物理隔离（并发 run 不共用 history）+ WorkingMemory 滑动窗口 + 事件溯源持久化。
 
 ### 关键机制
 
