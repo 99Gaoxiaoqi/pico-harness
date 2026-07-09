@@ -1,5 +1,6 @@
 import type { BaseTool } from "./registry.js";
 import type { ToolDefinition } from "../schema/message.js";
+import { TaskRegistry } from "../tasks/task-registry.js";
 
 export interface DelegationResult {
   taskIndex: number;
@@ -23,6 +24,13 @@ export interface DelegationManagerOptions {
   maxConcurrentChildren?: number;
   maxAsyncChildren?: number;
   maxOutputSummaryChars?: number;
+  taskRegistry?: TaskRegistry;
+}
+
+export interface DelegationTaskRuntimeInput {
+  description?: string;
+  toolUseId?: string;
+  outputFile?: string;
 }
 
 export interface DelegationResumeInfo {
@@ -72,14 +80,19 @@ export class DelegationManager {
   readonly maxConcurrentChildren: number;
   private readonly maxAsyncChildren: number;
   private readonly maxOutputSummaryChars: number;
+  readonly taskRegistry?: TaskRegistry;
 
   constructor(options: DelegationManagerOptions = {}) {
     this.maxConcurrentChildren = options.maxConcurrentChildren ?? 3;
     this.maxAsyncChildren = options.maxAsyncChildren ?? 3;
     this.maxOutputSummaryChars = options.maxOutputSummaryChars ?? 2_000;
+    this.taskRegistry = options.taskRegistry;
   }
 
-  dispatch(runner: () => Promise<DelegationBatchResult>): {
+  dispatch(
+    runner: () => Promise<DelegationBatchResult>,
+    taskInput: DelegationTaskRuntimeInput = {},
+  ): {
     status: string;
     delegationId?: string;
     taskId?: string;
@@ -96,10 +109,19 @@ export class DelegationManager {
     const now = Date.now();
     const id = `delegation-${now}-${this.nextId}`;
     this.nextId++;
+    const task = this.taskRegistry?.create("local_agent", {
+      description: taskInput.description ?? "delegate_task",
+      toolUseId: taskInput.toolUseId,
+      outputFile: taskInput.outputFile,
+      data: { delegationId: id },
+    });
+    if (task) {
+      this.taskRegistry?.start(task.taskId);
+    }
 
     const record: DelegationRecord = {
       id,
-      taskId: id,
+      taskId: task?.taskId ?? id,
       status: "running",
       startedAt: now,
       updatedAt: now,
@@ -113,12 +135,14 @@ export class DelegationManager {
         record.result = result;
         record.completedAt = Date.now();
         record.updatedAt = record.completedAt;
+        this.taskRegistry?.complete(record.taskId, { data: { delegationId: id, result } });
       })
       .catch((err: unknown) => {
         record.status = "error";
         record.error = err instanceof Error ? err.message : String(err);
         record.completedAt = Date.now();
         record.updatedAt = record.completedAt;
+        this.taskRegistry?.fail(record.taskId, record.error, { data: { delegationId: id } });
       });
 
     this.records.set(id, record);
