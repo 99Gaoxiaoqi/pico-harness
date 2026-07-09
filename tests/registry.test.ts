@@ -214,13 +214,19 @@ describe("ReadFileTool 防御底线", () => {
     expect(out).toContain("已被系统截断");
   });
 
-  it("路径穿越到工作区外被拒绝", async () => {
-    await mkdir(join(workDir, "sub"), { recursive: true });
-    await writeFile(join(workDir, "sub", "real.txt"), "ok");
+  it("允许只读方式读取工作区外文件", async () => {
+    const outsideDir = await mkdtemp(join(tmpdir(), "claw-outside-"));
+    const outsideFile = join(outsideDir, "note.txt");
+    await writeFile(outsideFile, "outside ok");
     const tool = new ReadFileTool(workDir);
-    await expect(tool.execute(JSON.stringify({ path: "../../../etc/passwd" }))).rejects.toThrow(
-      /路径越界/,
-    );
+
+    try {
+      await expect(tool.execute(JSON.stringify({ path: outsideFile }))).resolves.toContain(
+        "outside ok",
+      );
+    } finally {
+      await rm(outsideDir, { recursive: true, force: true });
+    }
   });
 
   it("参数格式错误时抛出解析错误", async () => {

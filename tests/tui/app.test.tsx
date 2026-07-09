@@ -1,7 +1,12 @@
 import React from "react";
 import { renderToString, Text } from "ink";
 import { describe, expect, it, vi } from "vitest";
-import { App, nextTranscriptScroll, resolveAppKeyEvent } from "../../src/tui/app.js";
+import {
+  App,
+  nextTranscriptScroll,
+  resolveAppKeyEvent,
+  resolveTranscriptScrollKey,
+} from "../../src/tui/app.js";
 
 describe("App", () => {
   it("renders history messages separately from the single bottom input box", () => {
@@ -49,6 +54,22 @@ describe("App", () => {
     expect(output).not.toContain("Running…");
     expect(countOccurrences(output, 'Try "fix this" or / for commands')).toBe(1);
     expect(countOccurrences(output, "Enter 发送")).toBe(0);
+  });
+
+  it("does not render spinner while assistant text is streaming", () => {
+    const output = renderToString(
+      <App
+        model="glm-5.2"
+        provider="openai"
+        workDir="/workspace/demo"
+        entries={[{ kind: "assistant", content: "正在输出" }]}
+        running
+        onSubmit={vi.fn()}
+      />,
+    );
+
+    expect(output).toContain("正在输出");
+    expect(output).not.toContain("生成回复中");
   });
 
   it("renders the focused modal and disables the bottom input while modal is active", () => {
@@ -150,6 +171,12 @@ describe("App", () => {
     expect(nextTranscriptScroll(82, "pageDown", 10, 100)).toBe(null);
     expect(nextTranscriptScroll(5, "top", 10, 100)).toBe(0);
     expect(nextTranscriptScroll(5, "bottom", 10, 100)).toBeNull();
+  });
+
+  it("maps running plain arrows to transcript scrolling for terminal wheel events", () => {
+    expect(resolveTranscriptScrollKey({ upArrow: true }, true)).toBe("lineUp");
+    expect(resolveTranscriptScrollKey({ downArrow: true }, true)).toBe("lineDown");
+    expect(resolveTranscriptScrollKey({ upArrow: true }, false)).toBeNull();
   });
 });
 
