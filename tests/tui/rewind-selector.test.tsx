@@ -4,11 +4,15 @@ import {
   cancelRewindSelection,
   confirmRewindSelection,
   createRewindSelectorState,
+  escapeRewindSelector,
   formatRewindConfirm,
   formatRewindSelector,
   formatRewindSelectorState,
   formatRewindUsage,
   latestSnapshotMessageId,
+  moveRewindSelection,
+  selectRewindConfirmAction,
+  selectRewindPreview,
   selectRewindSnapshot,
 } from "../../src/tui/rewind-selector.js";
 
@@ -28,14 +32,12 @@ describe("RewindSelector", () => {
 
     expect(output).toContain("Rewind");
     expect(output).toContain("turn-1");
-    expect(output).toContain("Restore the code and/or conversation");
+    expect(output).toContain("Choose a message to preview");
     expect(output).toContain("2 files changed");
   });
 
   it("空快照时给出可行动提示", () => {
-    expect(formatRewindSelector("empty-session", [])).toBe(
-      "Rewind\nNothing to rewind to yet.",
-    );
+    expect(formatRewindSelector("empty-session", [])).toBe("Rewind\nNothing to rewind to yet.");
   });
 
   it("长 messageId 在展示位截断且不展示可执行命令", () => {
@@ -92,9 +94,9 @@ describe("RewindSelector", () => {
       },
     ]);
 
-    expect(output).toContain("Restore the code and/or conversation");
+    expect(output).toContain("Enter to preview");
     expect(output).toContain("turn-2");
-    expect(output).toContain("Enter to continue");
+    expect(output).not.toContain("Enter to continue");
   });
 
   it("取最后一个快照作为 /undo 默认目标", () => {
@@ -123,10 +125,35 @@ describe("RewindSelector", () => {
     const state = createRewindSelectorState();
     const output = formatRewindSelectorState("session-1", [snapshotSummary("turn-1")], state);
 
-    expect(output).toContain("Restore the code and/or conversation");
+    expect(state).toMatchObject({ phase: "select", selectedIndex: 0 });
+    expect(output).toContain("Preview first; confirm happens on the next screen.");
     expect(output).toContain("turn-1");
     expect(output).not.toContain("Restore code and conversation");
     expect(onConfirm).not.toHaveBeenCalled();
+  });
+
+  it("上下移动会在可见快照间循环选择，Enter 只进入 preview", () => {
+    const snapshots = [
+      snapshotSummary("turn-1"),
+      snapshotSummary("turn-2"),
+      snapshotSummary("turn-3"),
+    ];
+
+    const movedDown = moveRewindSelection(createRewindSelectorState(), snapshots, "down");
+    expect(movedDown).toMatchObject({ phase: "select", selectedIndex: 1 });
+
+    const movedUp = moveRewindSelection(movedDown, snapshots, "up");
+    expect(movedUp).toMatchObject({ phase: "select", selectedIndex: 0 });
+
+    const wrapped = moveRewindSelection(movedUp, snapshots, "up");
+    expect(wrapped).toMatchObject({ phase: "select", selectedIndex: 2 });
+
+    const preview = selectRewindPreview(wrapped, snapshots, emptyDiffStat("turn-3"));
+    expect(preview).toMatchObject({
+      phase: "confirm",
+      messageId: "turn-3",
+      selectedAction: "both",
+    });
   });
 
   it("选择消息后进入确认态并展示 changed files 和 +/- 统计", () => {
@@ -153,19 +180,23 @@ describe("RewindSelector", () => {
 
     expect(selected.phase).toBe("confirm");
     const output = formatRewindSelectorState("session-1", [snapshotSummary("turn-1")], selected);
-    expect(output).toContain("Confirm you want to restore");
+    expect(output).toContain("Preview changes before confirming rewind");
     expect(output).toContain("turn-1");
     expect(output).toContain("+3 -1");
     expect(output).toContain("src/a.ts");
-    expect(output).toContain("Restore code and conversation");
-    expect(output).toContain("Restore conversation");
-    expect(output).toContain("Restore code");
+    expect(output).toContain("Confirm: restore code and conversation");
+    expect(output).toContain("Confirm: restore conversation only");
+    expect(output).toContain("Confirm: restore code only");
   });
 
   it("cancel 不调用 rewind，confirm 才调用对应 callback", () => {
     const onConfirm = vi.fn();
     const onCancel = vi.fn();
-    const selected = selectRewindSnapshot(createRewindSelectorState(), "turn-1", emptyDiffStat("turn-1"));
+    const selected = selectRewindSnapshot(
+      createRewindSelectorState(),
+      "turn-1",
+      emptyDiffStat("turn-1"),
+    );
 
     const canceled = cancelRewindSelection(selected, { onCancel, onConfirm });
     expect(canceled.phase).toBe("select");
@@ -178,12 +209,76 @@ describe("RewindSelector", () => {
     expect(onCancel).toHaveBeenCalledTimes(1);
   });
 
+  it("确认态上下移动选择 confirm/cancel，选择 cancel 不执行回滚", () => {
+    const onConfirm = vi.fn();
+    const onCancel = vi.fn();
+    const selected = selectRewindSnapshot(
+      createRewindSelectorState(),
+      "turn-1",
+      emptyDiffStat("turn-1"),
+    );
+
+    const conversation = moveRewindSelection(selected, [snapshotSummary("turn-1")], "down");
+    expect(conversation).toMatchObject({ phase: "confirm", selectedAction: "conversation" });
+
+    const cancel = moveRewindSelection(conversation, [snapshotSummary("turn-1")], "up");
+    expect(cancel).toMatchObject({ phase: "confirm", selectedAction: "both" });
+
+    const wrappedCancel = moveRewindSelection(cancel, [snapshotSummary("turn-1")], "up");
+    expect(wrappedCancel).toMatchObject({ phase: "confirm", selectedAction: "cancel" });
+
+    const next = selectRewindConfirmAction(wrappedCancel, { onConfirm, onCancel });
+    expect(next).toMatchObject({ phase: "select", selectedIndex: 0 });
+    expect(onCancel).toHaveBeenCalledTimes(1);
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
+
+  it("确认态选择 confirm 才执行对应 rewind mode", () => {
+    const onConfirm = vi.fn();
+    const selected = selectRewindSnapshot(
+      createRewindSelectorState(),
+      "turn-1",
+      emptyDiffStat("turn-1"),
+    );
+    const codeOnly = moveRewindSelection(
+      moveRewindSelection(selected, [snapshotSummary("turn-1")], "down"),
+      [snapshotSummary("turn-1")],
+      "down",
+    );
+
+    const next = selectRewindConfirmAction(codeOnly, { onConfirm });
+
+    expect(next).toMatchObject({ phase: "select", selectedIndex: 0 });
+    expect(onConfirm).toHaveBeenCalledWith("turn-1", "code");
+  });
+
+  it("Esc 在任意阶段取消并回到初始选择态", () => {
+    const onCancel = vi.fn();
+
+    expect(escapeRewindSelector(createRewindSelectorState(), { onCancel })).toMatchObject({
+      phase: "select",
+      selectedIndex: 0,
+    });
+    expect(onCancel).toHaveBeenCalledTimes(1);
+
+    const selected = selectRewindSnapshot(
+      createRewindSelectorState(),
+      "turn-1",
+      emptyDiffStat("turn-1"),
+    );
+    expect(escapeRewindSelector(selected, { onCancel })).toMatchObject({
+      phase: "select",
+      selectedIndex: 0,
+    });
+    expect(onCancel).toHaveBeenCalledTimes(2);
+  });
+
   it("确认态可作为 Ink 组件渲染", () => {
     const output = renderToString(
       formatRewindConfirm("session-1", snapshotSummary("turn-1"), emptyDiffStat("turn-1")),
     );
 
-    expect(output).toContain("Confirm you want to restore");
+    expect(output).toContain("Preview changes before confirming rewind");
     expect(output).toContain("turn-1");
   });
 });
