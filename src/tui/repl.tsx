@@ -374,9 +374,10 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
 
   // ink render 需要 setState 驱动重渲染,用一个包装组件管理 entries 状态
   let setEntries: (e: TuiEntry[]) => void = () => {};
+  const scheduleEntriesUpdate = createTuiUpdateScheduler((next) => setEntries(next), 33);
 
   // TuiReporter:onUpdate 回调把新 entries 推给 ink 的 setState
-  const reporter = new TuiReporter((next) => setEntries(next), entries);
+  const reporter = new TuiReporter(scheduleEntriesUpdate, entries);
 
   // 包装组件:管理 entries 状态 + QueryGuard 派生 running,把 setter 暴露给外部
   function ReplApp() {
@@ -550,6 +551,40 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     exitOnCtrlC: false,
   });
   await instance.waitUntilExit();
+}
+
+function createTuiUpdateScheduler(
+  apply: (entries: TuiEntry[]) => void,
+  minIntervalMs: number,
+): (entries: TuiEntry[]) => void {
+  let latest: TuiEntry[] | null = null;
+  let timer: NodeJS.Timeout | null = null;
+  let lastAppliedAt = 0;
+
+  return (entries) => {
+    latest = entries;
+    const now = Date.now();
+    const elapsed = now - lastAppliedAt;
+    if (elapsed >= minIntervalMs) {
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      lastAppliedAt = now;
+      apply(entries);
+      latest = null;
+      return;
+    }
+
+    if (timer) return;
+    timer = setTimeout(() => {
+      timer = null;
+      if (!latest) return;
+      lastAppliedAt = Date.now();
+      apply(latest);
+      latest = null;
+    }, minIntervalMs - elapsed);
+  };
 }
 
 function handleLocalTuiCommand(

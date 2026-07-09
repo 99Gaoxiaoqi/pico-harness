@@ -109,7 +109,7 @@ export function App({
   const [transcriptScrollRows, setTranscriptScrollRows] = useState<number | null>(null);
 
   useInput((input, key) => {
-    const transcriptAction = resolveTranscriptScrollKey(key);
+    const transcriptAction = resolveTranscriptScrollKey(key, running);
     if (transcriptAction) {
       setTranscriptScrollRows((current) =>
         nextTranscriptScroll(current, transcriptAction, transcriptRows, transcriptTotalRows),
@@ -142,7 +142,7 @@ export function App({
   const isStreaming = running && isActivelyStreaming(entries);
   // spinner 阶段:据末尾条目状态选
   const spinnerMode = pickSpinnerMode(entries, isStreaming);
-  const showSpinner = running && !inputDisabled;
+  const showSpinner = running && !inputDisabled && spinnerMode !== "responding";
 
   // 诊断:记录每次渲染的 entries 状态
   dbg(`render: entries=${entries.length} running=${running} streaming=${isStreaming}`);
@@ -281,15 +281,20 @@ function pickSpinnerMode(entries: TuiEntry[], isStreaming: boolean): SpinnerMode
 
 export function resolveTranscriptScrollKey(key: {
   ctrl?: boolean;
+  shift?: boolean;
   pageUp?: boolean;
   pageDown?: boolean;
   upArrow?: boolean;
   downArrow?: boolean;
   home?: boolean;
   end?: boolean;
-}): TranscriptScrollAction | null {
+}, running = false): TranscriptScrollAction | null {
   if (key.pageUp) return "pageUp";
   if (key.pageDown) return "pageDown";
+  if (running && key.upArrow && !key.ctrl && !key.shift) return "lineUp";
+  if (running && key.downArrow && !key.ctrl && !key.shift) return "lineDown";
+  if (key.shift && key.upArrow) return "lineUp";
+  if (key.shift && key.downArrow) return "lineDown";
   if (key.ctrl && key.upArrow) return "lineUp";
   if (key.ctrl && key.downArrow) return "lineDown";
   if (key.ctrl && key.home) return "top";

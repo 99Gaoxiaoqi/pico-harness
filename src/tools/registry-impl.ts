@@ -42,6 +42,14 @@ export function safeResolve(workDir: string, path: string): string {
 }
 
 /**
+ * 只读工具使用的路径解析。
+ * 写入/编辑仍必须留在 workDir 内;read_file 允许读取外部绝对路径或 ../ 参考资料。
+ */
+export function resolveReadablePath(workDir: string, path: string): string {
+  return isAbsolute(path) ? resolve(path) : resolve(workDir, path);
+}
+
+/**
  * registryImpl:Registry 接口的默认实现。
  * 用 map 以工具 name 为 key 做 O(1) 路由查找。
  * 像忠实的前台总机:接线(收 ToolCall)→ 查黄页(map)→ 转接(Execute)。
@@ -356,13 +364,13 @@ export class ReadFileTool implements BaseTool {
   /** 声明读 path 归一化后的绝对路径(与 execute 的 safeResolve 一致) */
   accesses(args: string): ToolAccesses {
     const { path } = JSON.parse(args) as { path?: string };
-    return ToolAccesses.readFile(safeResolve(this.workDir, path ?? ""));
+    return ToolAccesses.readFile(resolveReadablePath(this.workDir, path ?? ""));
   }
 
   definition(): ToolDefinition {
     return {
       name: "read_file",
-      description: "读取指定路径的文件内容。请提供相对工作区的路径。",
+      description: "读取指定路径的文件内容。支持相对工作区路径,也支持只读绝对路径。",
       inputSchema: {
         type: "object",
         properties: {
@@ -383,8 +391,8 @@ export class ReadFileTool implements BaseTool {
       throw new Error("参数解析失败: 期望 JSON 含 path 字段");
     }
 
-    // 2. 路径穿越防护:确保最终路径在 workDir 之内
-    const fullPath = safeResolve(this.workDir, path);
+    // 2. 只读访问:允许读取工作区外参考文件,写入/编辑工具仍由 safeResolve 限制。
+    const fullPath = resolveReadablePath(this.workDir, path);
 
     // 3. 物理 IO
     const raw = await readFile(fullPath, "utf8");
