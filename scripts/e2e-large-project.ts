@@ -36,7 +36,9 @@ async function main(): Promise<void> {
   await cp(join(projectRoot, ".claw"), join(workDir, ".claw"), { recursive: true });
   // node_modules 用软链接避免重复安装(类型检查需要)
   try {
-    execSync(`ln -s "${join(projectRoot, "node_modules")}" "${join(workDir, "node_modules")}"`, { stdio: "ignore" });
+    execSync(`ln -s "${join(projectRoot, "node_modules")}" "${join(workDir, "node_modules")}"`, {
+      stdio: "ignore",
+    });
   } catch {
     console.log("[setup] node_modules 软链接失败,跳过(可能影响 typecheck)");
   }
@@ -46,24 +48,21 @@ async function main(): Promise<void> {
   const beforeContent = await readFile(targetFile, "utf8");
   console.log(`[setup] 目标文件 registry-impl.ts 大小: ${beforeContent.length} 字符`);
 
-  const result = await runAgentFromCli(
-    {
-      prompt:
-        "这是一个 TypeScript Agent Harness 项目。请完成以下任务:\n" +
-        "1. 先用 bash 运行 ls src/tools/ 了解工具目录结构\n" +
-        "2. 用 read_file 读取 src/tools/registry-impl.ts,找到 ReadFileTool 类\n" +
-        "3. 给 ReadFileTool 的 definition 和 execute 加两个可选参数: offset(从第几行开始读,默认1) 和 limit(读几行,默认全部)。execute 里根据这两个参数截取行范围(在加行号前缀之前截取)\n" +
-        "4. 用 edit_file 修改代码(可能需要多次 edit)\n" +
-        "5. 用 bash 运行 npx tsc --noEmit 确认编译通过。如果有类型错误就修复\n" +
-        "6. 完成后用中文告诉我:改了哪些地方、typecheck 结果",
-      dir: workDir,
-      session: `large-test-${Date.now()}`,
-      provider: "openai",
-      enableThinking: false,
-      planMode: false,
-    },
-    { write: () => undefined },
-  );
+  const result = await runAgentFromCli({
+    prompt:
+      "这是一个 TypeScript Agent Harness 项目。请完成以下任务:\n" +
+      "1. 先用 bash 运行 ls src/tools/ 了解工具目录结构\n" +
+      "2. 用 read_file 读取 src/tools/registry-impl.ts,找到 ReadFileTool 类\n" +
+      "3. 给 ReadFileTool 的 definition 和 execute 加两个可选参数: offset(从第几行开始读,默认1) 和 limit(读几行,默认全部)。execute 里根据这两个参数截取行范围(在加行号前缀之前截取)\n" +
+      "4. 用 edit_file 修改代码(可能需要多次 edit)\n" +
+      "5. 用 bash 运行 npx tsc --noEmit 确认编译通过。如果有类型错误就修复\n" +
+      "6. 完成后用中文告诉我:改了哪些地方、typecheck 结果",
+    dir: workDir,
+    session: `large-test-${Date.now()}`,
+    provider: "openai",
+    enableThinking: false,
+    planMode: false,
+  });
 
   console.log("\n========== 结果 ==========");
   console.log("[最终回复]", result.finalMessage.slice(0, 300));
@@ -72,22 +71,35 @@ async function main(): Promise<void> {
 
   // 验证 A: 模型是否探索了项目(bash ls 被调用)
   const bashCalls = result.messages.filter(
-    (m) => m.role === "assistant" && Array.isArray(m.toolCalls) && m.toolCalls.some((tc) => tc.name === "bash"),
+    (m) =>
+      m.role === "assistant" &&
+      Array.isArray(m.toolCalls) &&
+      m.toolCalls.some((tc) => tc.name === "bash"),
   );
   const passA = bashCalls.length > 0;
   console.log("========== 验证 ==========");
-  console.log(`[验证 A] 探索能力(bash ls 被调用): ${passA ? "✅ 通过" : "❌ 失败"} (${bashCalls.length} 次 bash)`);
+  console.log(
+    `[验证 A] 探索能力(bash ls 被调用): ${passA ? "✅ 通过" : "❌ 失败"} (${bashCalls.length} 次 bash)`,
+  );
 
   // 验证 B: 模型是否读取了目标文件
   const readCalls = result.messages.filter(
-    (m) => m.role === "assistant" && Array.isArray(m.toolCalls) && m.toolCalls.some((tc) => tc.name === "read_file"),
+    (m) =>
+      m.role === "assistant" &&
+      Array.isArray(m.toolCalls) &&
+      m.toolCalls.some((tc) => tc.name === "read_file"),
   );
   const passB = readCalls.length > 0;
-  console.log(`[验证 B] 理解能力(read_file 被调用): ${passB ? "✅ 通过" : "❌ 失败"} (${readCalls.length} 次)`);
+  console.log(
+    `[验证 B] 理解能力(read_file 被调用): ${passB ? "✅ 通过" : "❌ 失败"} (${readCalls.length} 次)`,
+  );
 
   // 验证 C: edit_file 是否成功(文件被修改)
   const editCalls = result.messages.filter(
-    (m) => m.role === "assistant" && Array.isArray(m.toolCalls) && m.toolCalls.some((tc) => tc.name === "edit_file"),
+    (m) =>
+      m.role === "assistant" &&
+      Array.isArray(m.toolCalls) &&
+      m.toolCalls.some((tc) => tc.name === "edit_file"),
   );
   const afterContent = await readFile(targetFile, "utf8");
   const fileChanged = beforeContent !== afterContent;
@@ -95,8 +107,12 @@ async function main(): Promise<void> {
   const hasOffset = /offset/.test(afterContent);
   const hasLimit = /limit/.test(afterContent);
   const passC = fileChanged && hasOffset && hasLimit;
-  console.log(`[验证 C] 编辑能力(edit_file 成功 + 含 offset/limit): ${passC ? "✅ 通过" : "❌ 失败"}`);
-  console.log(`  edit 调用 ${editCalls.length} 次,文件已改: ${fileChanged},含 offset: ${hasOffset},含 limit: ${hasLimit}`);
+  console.log(
+    `[验证 C] 编辑能力(edit_file 成功 + 含 offset/limit): ${passC ? "✅ 通过" : "❌ 失败"}`,
+  );
+  console.log(
+    `  edit 调用 ${editCalls.length} 次,文件已改: ${fileChanged},含 offset: ${hasOffset},含 limit: ${hasLimit}`,
+  );
 
   // 验证 D: 模型是否跑了 typecheck(检查 bash 工具调用的参数,而非 observation)
   const typecheckRun = result.messages.some(

@@ -10,8 +10,7 @@
 // 若 transport 加载失败(如测试环境 worker thread 限制),自动降级为 plain pino。
 //
 // 重要:pino transport 模式下 logger.level 动态修改对 transport 不生效
-// (transport 在 worker thread 里)。TUI 模式必须在 logger 初始化前就用
-// LOG_LEVEL 环境变量压低级别,这由 main.ts 在最开头检测 --tui 参数完成。
+// (transport 在 worker thread 里)。TUI 启动前可通过 LOG_LEVEL 环境变量压低级别。
 
 import pino from "pino";
 

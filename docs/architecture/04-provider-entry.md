@@ -21,18 +21,18 @@ interface LLMProvider {
 
 ### 三家 Provider 协议差异
 
-| 维度 | OpenAI | Claude (Anthropic) | Gemini (Google) |
-|------|--------|---------------------|-----------------|
-| **端点** | `/chat/completions` | `/messages` | `/models/{model}:generateContent` |
-| **鉴权** | `Authorization: Bearer` | `x-api-key` + `anthropic-version` | `?key=` query param |
-| **system** | messages 数组 `role:system` | 顶层 `body.system` 字段 | 顶层 `system_instruction` |
-| **工具定义** | `tools: [{type:function, function:{name,parameters}}]` | `tools: [{name, input_schema}]` | `tools: [{functionDeclarations}]` |
-| **工具结果** | `role:tool` + `tool_call_id` | user 消息 `tool_result` block | user parts `functionResponse` |
-| **思考强度** | `reasoning_effort` 字符串 | `thinking.budget_tokens` | 不支持 |
-| **Prompt Cache** | — | `cache_control: ephemeral` | — |
-| **流式** | SSE `data:` + `[DONE]` | 事件驱动(content_block_delta) | SSE alt=sse |
-| **assistant 角色** | `assistant` | `assistant` | `model`（注意不是 assistant） |
-| **工具调用参数** | JSON 字符串 | 对象（input） | 对象（args） |
+| 维度               | OpenAI                                                 | Claude (Anthropic)                | Gemini (Google)                   |
+| ------------------ | ------------------------------------------------------ | --------------------------------- | --------------------------------- |
+| **端点**           | `/chat/completions`                                    | `/messages`                       | `/models/{model}:generateContent` |
+| **鉴权**           | `Authorization: Bearer`                                | `x-api-key` + `anthropic-version` | `?key=` query param               |
+| **system**         | messages 数组 `role:system`                            | 顶层 `body.system` 字段           | 顶层 `system_instruction`         |
+| **工具定义**       | `tools: [{type:function, function:{name,parameters}}]` | `tools: [{name, input_schema}]`   | `tools: [{functionDeclarations}]` |
+| **工具结果**       | `role:tool` + `tool_call_id`                           | user 消息 `tool_result` block     | user parts `functionResponse`     |
+| **思考强度**       | `reasoning_effort` 字符串                              | `thinking.budget_tokens`          | 不支持                            |
+| **Prompt Cache**   | —                                                      | `cache_control: ephemeral`        | —                                 |
+| **流式**           | SSE `data:` + `[DONE]`                                 | 事件驱动(content_block_delta)     | SSE alt=sse                       |
+| **assistant 角色** | `assistant`                                            | `assistant`                       | `model`（注意不是 assistant）     |
+| **工具调用参数**   | JSON 字符串                                            | 对象（input）                     | 对象（args）                      |
 
 ### Provider 工厂 (`factory.ts`)
 
@@ -60,47 +60,45 @@ CredentialPool (credential-pool.ts)
 装饰器模式——实现 LLMProvider 接口，内部包裹真实 provider。Engine 毫不知情被监控（AOP）。
 
 ```ts
-new CostTracker(provider, modelRoute, session)
+new CostTracker(provider, modelRoute, session);
 // generate(): 计时 → 调真 provider → estimateCost → session.recordUsage → 返回
 // generateStream(): 透传 onDelta,同样计费
 ```
 
 ### 限流 Header 解析 (`ratelimit.ts`)
+
 统一解析各家 header（`x-ratelimit-remaining` / `retry-after` / `x-ratelimit-reset`）为 `RateLimitInfo`。
 
 ### Anthropic Prompt Cache (`anthropic-cache.ts`)
+
 最��� 4 个 `cache_control: ephemeral` 断点：system → tools 尾 → 历史前缀尾 → 余量。命中后 cache_read 单价降至约 1/10。
 
 ---
 
-## 第二部分：多端入口
+## 第二部分：TUI 单入口
 
-### 入口差异速查
+### 入口边界
 
-| 维度 | CLI 默认 | --serve | --acp | --feishu | --tui |
-|------|---------|---------|-------|----------|-------|
-| **I/O** | stdout 单次 | REST + WS | JSON-RPC stdio | 飞书 WSClient | ink React |
-| **Provider** | CostTracker + fallback | 裸 provider | CostTracker | CostTracker | CostTracker |
-| **Session** | `console:{workDir}` | `http-{ts}-{n}` | `acp:{uuid}` | `feishu:{chatId}` | 复用 console |
-| **流式** | stdout | WS text-delta | response/output | 轮次消息 | TuiReporter |
-| **审批** | 终端 | REST + 终端 | 终端 | 飞书卡片 | 终端 |
-| **共享单例** | per-run | 进程级 | 进程级 | 进程级 | per-run |
-| **MCP** | ✅ | ❌ | ❌ | ❌ | ✅(首轮) |
-| **Steer** | --steer | ❌ | ❌ | 运行时注入 | ❌ |
+| 维度         | 当前实现                       |
+| ------------ | ------------------------------ |
+| **启动**     | `pico` / `npm run dev`         |
+| **I/O**      | ink React TUI + `TuiReporter`  |
+| **Provider** | CostTracker + fallback         |
+| **Session**  | 当前项目 TUI session           |
+| **审批**     | 本地 TUI/终端审批              |
+| **MCP**      | 通过 `--mcp-config` 启动时加载 |
 
-### CLI 入口 (`cli/main.ts` → `run-agent.ts`)
+### 启动装配 (`cli/main.ts` → `tui/repl.tsx` → `run-agent.ts`)
 
 ```
-main.ts parseArgs → 按模式分发
-  ├─ --list-snapshots / --rewind: 文件历史操作
-  ├─ --acp: ACP stdio server
-  ├─ --feishu: 飞书 bot
-  ├─ --serve: HTTP+WS server
-  ├─ --tui: TUI ink REPL
-  └─ 默认: runAgentFromCli(单次任务)
+main.ts parseArgs
+  └─ startTuiRepl
+      └─ handleSubmit
+          └─ runAgentFromCli
 ```
 
 `runAgentFromCli` 装配链：
+
 1. resolveProviderConfig（CLI 参数 > 环境变量）
 2. globalSessionManager.getOrCreate（固定 ID 复用）
 3. 凭证轮换装配（rebuildProvider 回调）
@@ -123,12 +121,14 @@ main.ts parseArgs → 按模式分发
 | GET | `/tools` | 工具列表 |
 
 **WebSocket**：`ws://host/?sessionId=xxx&lastSeq=NNN&epoch=EEE`
+
 - cursor 多端同步：持久事件推进 seq，易失事件（text-delta）不推进
 - fork/rewind 时 epoch++，旧 cursor 失效推 resync
 
 ### ACP (`src/acp/`)
 
 Agent Client Protocol，IDE（VSCode 插件）与 Agent 通信协议。
+
 - JSON-RPC 2.0 over stdio
 - 方法：`initialize` / `session/create` / `prompt` / `fs/readTextFile` / `fs/writeTextFile`
 - 流式：`response/start` → `response/output`（增量）→ `response/finish`
@@ -157,6 +157,7 @@ TuiReporter → TuiEntry[] → onUpdate → setEntries → ink 重渲染
 ```
 
 **架构决策**：
+
 - 不用 ink `<Static>`（滚雪球 bug），所有条目留同一渲染树
 - `alternateScreen: true`（alt buffer，内容不进 scrollback）
 - QueryGuard 三态状态机防并发提交

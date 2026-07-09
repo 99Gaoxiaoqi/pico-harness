@@ -47,7 +47,7 @@ describe("processUserInput", () => {
     expect(result.type).toBe("local-command");
     if (result.type === "local-command") {
       expect(result.result.message).toContain("/help");
-      expect(result.result.message).toContain("/skills");
+      expect(result.result.message).not.toContain("huge-external-skill");
       expect(result.result.message).not.toContain("huge-external-skill");
       expect(result.result.message).toContain("Use /help <command> for any command");
     }
@@ -77,18 +77,26 @@ describe("processUserInput", () => {
 
   it("/help <command> 展示 usage、aliases、说明和参数", async () => {
     const registry = createBuiltinCommandRegistry();
-    const result = await processUserInput("/help thinking", { registry });
+    const result = await processUserInput("/help skill", { registry });
 
     expect(result.type).toBe("local-command");
     if (result.type === "local-command") {
       expect(result.command).toBe("help");
-      expect(result.result.message).toContain("Command: /thinking");
-      expect(result.result.message).toContain("Usage: /thinking <off|low|medium|high>");
-      expect(result.result.message).toContain("Aliases: /effort");
-      expect(result.result.message).toContain("Description: Show or change thinking effort");
+      expect(result.result.message).toContain("Command: /skill");
+      expect(result.result.message).toContain("Usage: /skill <name>");
+      expect(result.result.message).toContain("Aliases: /use-skill");
+      expect(result.result.message).toContain("Description: Ask the agent to use a named skill");
       expect(result.result.message).toContain("Parameters:");
-      expect(result.result.message).toContain("<off|low|medium|high>");
+      expect(result.result.message).toContain("<name>");
     }
+  });
+
+  it("builtin registry is a minimal fallback and does not expose TUI-specific placeholders", () => {
+    const commands = createBuiltinCommandRegistry()
+      .list()
+      .map((command) => command.name);
+
+    expect(commands).toEqual(["help", "clear", "exit", "skill"]);
   });
 
   it("/help <alias> 会展示原命令帮助", async () => {

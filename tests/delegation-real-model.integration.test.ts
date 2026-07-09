@@ -27,9 +27,7 @@ describeRealModel("real model delegation integration", () => {
         enableThinking: false,
         planMode: false,
       },
-      {
-        write: () => undefined,
-      },
+      {},
     );
 
     expect(result.finalMessage.trim()).toBe("REAL_DELEGATE_DONE");

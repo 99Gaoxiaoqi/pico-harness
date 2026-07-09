@@ -10,7 +10,7 @@ import type { ProviderKind } from "../provider/factory.js";
 import { resolveThinkingEffort } from "../provider/thinking.js";
 import { startTuiRepl } from "../tui/repl.js";
 
-;["SIGINT", "SIGTERM", "beforeExit", "exit"].forEach((evt) => {
+["SIGINT", "SIGTERM", "beforeExit", "exit"].forEach((evt) => {
   process.on(evt, () => FTS5Store.closeAll());
 });
 
@@ -24,9 +24,7 @@ async function main(): Promise<void> {
       dir: { type: "string" },
       model: { type: "string" },
       "mcp-config": { type: "string" },
-      tui: { type: "boolean", default: true },
     },
-    allowPositionals: true,
   });
 
   const provider = values.provider as ProviderKind;

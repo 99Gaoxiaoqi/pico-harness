@@ -15,7 +15,6 @@ import {
   latestSnapshotMessageId,
 } from "../tui/rewind-selector.js";
 import { listCliSessionSummaries } from "../cli/session-resolver.js";
-import { formatSessionSelector } from "../tui/session-selector.js";
 import { createPermissionState } from "../approval/permission-state.js";
 import { formatPermissionPanel } from "../tui/approval-panel.js";
 import { createBuiltinCommands } from "./builtin-commands.js";
@@ -25,10 +24,7 @@ import {
   renderMarkdownCommandPrompt,
   type MarkdownPromptCommand,
 } from "./markdown-command-loader.js";
-import {
-  renderSkillCommand,
-  renderSkillListCommand,
-} from "./skill-commands.js";
+import { renderSkillCommand, renderSkillListCommand } from "./skill-commands.js";
 import {
   loadClaudeAgents,
   summarizeClaudeAgents,
@@ -96,8 +92,7 @@ export async function createPicoCommandRegistry(
   options: PicoCommandRegistryOptions,
 ): Promise<CommandRegistry> {
   const skillLoader = new SkillLoader(options.workDir);
-  const tools =
-    options.tools ?? toolStatusFromRegistry(buildDefaultToolRegistry(options.workDir));
+  const tools = options.tools ?? toolStatusFromRegistry(buildDefaultToolRegistry(options.workDir));
   const settings = getOrCreateSessionSettings({
     sessionId: options.sessionId ?? `cwd:${options.workDir}`,
     ...(options.sessionMode !== undefined ? { sessionMode: options.sessionMode } : {}),
@@ -138,10 +133,7 @@ export async function createPicoCommandRegistry(
     workDir: options.workDir,
     includeSkillCommands: true,
     skillLoader,
-    builtinNames: registry.list().flatMap((command) => [
-      command.name,
-      ...(command.aliases ?? []),
-    ]),
+    builtinNames: registry.list().flatMap((command) => [command.name, ...(command.aliases ?? [])]),
   });
   for (const command of markdownCommands) {
     if (registry.has(command.name)) continue;
@@ -160,12 +152,15 @@ export function commandSuggestions(
   argumentHint?: string;
   matchedAlias?: string;
 }> {
-  return registry.detailedSuggestions(query).slice(0, 20).map((command) => ({
-    value: command.insertText,
-    description: command.description,
-    ...(command.argumentHint === undefined ? {} : { argumentHint: command.argumentHint }),
-    ...(command.matchedAlias === undefined ? {} : { matchedAlias: command.matchedAlias }),
-  }));
+  return registry
+    .detailedSuggestions(query)
+    .slice(0, 20)
+    .map((command) => ({
+      value: command.insertText,
+      description: command.description,
+      ...(command.argumentHint === undefined ? {} : { argumentHint: command.argumentHint }),
+      ...(command.matchedAlias === undefined ? {} : { matchedAlias: command.matchedAlias }),
+    }));
 }
 
 function createStatusCommand(settings: SessionSettings): SlashCommand {
@@ -194,8 +189,7 @@ function createCompactCommand(options: PicoCommandRegistryOptions): SlashCommand
         return {
           type: "local",
           action: "message",
-          message:
-            "Compact unavailable: no live session was provided to the command registry.",
+          message: "Compact unavailable: no live session was provided to the command registry.",
         };
       }
 
@@ -385,10 +379,7 @@ function createThinkingCommand(settings: SessionSettings): SlashCommand {
   };
 }
 
-function createToolsCommand(
-  settings: SessionSettings,
-  disclosure?: ToolDisclosure,
-): SlashCommand {
+function createToolsCommand(settings: SessionSettings, disclosure?: ToolDisclosure): SlashCommand {
   return {
     name: "tools",
     aliases: ["tool"],
@@ -438,9 +429,7 @@ function formatAgentSummaries(agents: readonly ClaudeAgentSummary[]): string {
     ...agents.map((agent) => {
       const description = agent.description ? `: ${agent.description}` : "";
       const tools =
-        agent.tools && agent.tools.length > 0
-          ? ` (tools: ${agent.tools.join(", ")})`
-          : "";
+        agent.tools && agent.tools.length > 0 ? ` (tools: ${agent.tools.join(", ")})` : "";
       return `- ${agent.name} [${formatAgentSource(agent.source)}]${description}${tools}`;
     }),
   ].join("\n");
@@ -556,10 +545,10 @@ function createSessionsCommand(options: PicoCommandRegistryOptions): SlashComman
       return {
         type: "local",
         action: "message",
-        message: formatSessionSelector(summaries, {
-          currentSessionId: options.sessionId ?? options.session?.id,
-          currentProjectCwd: options.workDir,
-        }),
+        message:
+          summaries.length === 0
+            ? "当前项目暂无可恢复 session。"
+            : `找到 ${summaries.length} 个可恢复 session。`,
         data: summaries,
         ui: { kind: "open-selector", selector: "session" },
       };
@@ -794,10 +783,15 @@ function formatAgentNotFound(name: string, agents: readonly ClaudeAgent[]): stri
     return `未找到 Agent: ${name}\n当前没有可用 Agents。\n${formatAgentUsage()}`;
   }
 
-  const suggestion = closestAgentName(name, agents.map((agent) => agent.name));
+  const suggestion = closestAgentName(
+    name,
+    agents.map((agent) => agent.name),
+  );
   const lines = [
     `未找到 Agent: ${name}`,
-    suggestion ? `Did you mean: ${suggestion}` : `可用 Agents: ${agents.map((agent) => agent.name).join(", ")}`,
+    suggestion
+      ? `Did you mean: ${suggestion}`
+      : `可用 Agents: ${agents.map((agent) => agent.name).join(", ")}`,
     formatAgentUsage(),
   ];
   return lines.join("\n");

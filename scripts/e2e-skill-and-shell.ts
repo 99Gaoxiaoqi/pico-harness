@@ -35,17 +35,14 @@ async function main(): Promise<void> {
     "2. 用 bash 执行这个命令并报告输出:echo 'hello-posix-shell' | grep 'posix'。\n" +
     "不要写任何文件,不要调用其他工具。";
 
-  const result = await runAgentFromCli(
-    {
-      prompt,
-      dir: workDir,
-      session: `e2e-skill-${Date.now()}`,
-      provider: "openai",
-      enableThinking: false,
-      planMode: false,
-    },
-    { write: () => undefined },
-  );
+  const result = await runAgentFromCli({
+    prompt,
+    dir: workDir,
+    session: `e2e-skill-${Date.now()}`,
+    provider: "openai",
+    enableThinking: false,
+    planMode: false,
+  });
 
   console.log("========== 结果 ==========");
   console.log("[最终回复]", result.finalMessage);
@@ -77,15 +74,12 @@ async function main(): Promise<void> {
     `[验证 A] 默认 CLI 路径注入 Skills 清单 → 模型调用 skill_view: ${passA ? "✅ 通过" : "❌ 失败"}`,
   );
 
-  const passB =
-    skillViewCalls.length > 0 &&
-    /aihot|AI|资讯|日报|API/i.test(result.finalMessage);
+  const passB = skillViewCalls.length > 0 && /aihot|AI|资讯|日报|API/i.test(result.finalMessage);
   console.log(
     `[验证 B] skill_view 正文被正确解析 → 模型复述技能用途: ${passB ? "✅ 通过" : "❌ 失败"}`,
   );
 
-  const passC =
-    bashCalls.length > 0 && bashObservations.length > 0;
+  const passC = bashCalls.length > 0 && bashObservations.length > 0;
   console.log(
     `[验证 C] 跨平台 shell → bash 执行 echo|grep 管道返回 'hello-posix-shell': ${passC ? "✅ 通过" : "❌ 失败"}`,
   );
@@ -95,9 +89,7 @@ async function main(): Promise<void> {
 
   // AGENTS.md 要求"始终用中文回复"
   const passD = /[\u4e00-\u9fa5]/.test(result.finalMessage);
-  console.log(
-    `[验证 D] AGENTS.md 被加载 → 模型用中文回复: ${passD ? "✅ 通过" : "❌ 失败"}`,
-  );
+  console.log(`[验证 D] AGENTS.md 被加载 → 模型用中文回复: ${passD ? "✅ 通过" : "❌ 失败"}`);
 
   const allPass = passA && passB && passC && passD;
   console.log(`\n========== 汇总 ==========`);

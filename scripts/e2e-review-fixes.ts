@@ -30,17 +30,14 @@ async function main(): Promise<void> {
   const sessionId = `review-persist-${Date.now()}`;
 
   // 第一段:真实模型跑一轮
-  const result1 = await runAgentFromCli(
-    {
-      prompt: "请用中文一句话告诉我:你有哪些工具可用?不要调用任何工具,直接回答。",
-      dir: workDir,
-      session: sessionId,
-      provider: "openai",
-      enableThinking: false,
-      planMode: false,
-    },
-    { write: () => undefined },
-  );
+  const result1 = await runAgentFromCli({
+    prompt: "请用中文一句话告诉我:你有哪些工具可用?不要调用任何工具,直接回答。",
+    dir: workDir,
+    session: sessionId,
+    provider: "openai",
+    enableThinking: false,
+    planMode: false,
+  });
   console.log(`[第一段] 模型回复: ${result1.finalMessage.slice(0, 80)}...`);
   await flush();
 
@@ -56,17 +53,14 @@ async function main(): Promise<void> {
   }
 
   // 第二段:用同一个 sessionId 再跑一次,验证恢复的历史被喂给模型
-  const result2 = await runAgentFromCli(
-    {
-      prompt: "我刚才问了你什么?用中文一句话回答。",
-      dir: workDir,
-      session: sessionId,
-      provider: "openai",
-      enableThinking: false,
-      planMode: false,
-    },
-    { write: () => undefined },
-  );
+  const result2 = await runAgentFromCli({
+    prompt: "我刚才问了你什么?用中文一句话回答。",
+    dir: workDir,
+    session: sessionId,
+    provider: "openai",
+    enableThinking: false,
+    planMode: false,
+  });
   // 模型应该能回忆第一轮的话题(工具相关)
   const passA = fileExists && /工具|tool|可用/i.test(result2.finalMessage);
   console.log(`[第二段] 模型回忆: ${result2.finalMessage.slice(0, 80)}...`);
@@ -84,38 +78,35 @@ async function main(): Promise<void> {
     ]);
   });
 
-  const resultB = await runAgentFromCli(
-    {
-      prompt:
-        "请用 bash 同时执行 3 个命令检查文件:wc -c a.txt、wc -c b.txt、wc -c c.txt。" +
-        "一次性提交(如果有并行能力),然后汇总三个文件的字节数。",
-      dir: workDirB,
-      session: `review-sched-${Date.now()}`,
-      provider: "openai",
-      enableThinking: false,
-      planMode: false,
-    },
-    { write: () => undefined },
-  );
+  const resultB = await runAgentFromCli({
+    prompt:
+      "请用 bash 同时执行 3 个命令检查文件:wc -c a.txt、wc -c b.txt、wc -c c.txt。" +
+      "一次性提交(如果有并行能力),然后汇总三个文件的字节数。",
+    dir: workDirB,
+    session: `review-sched-${Date.now()}`,
+    provider: "openai",
+    enableThinking: false,
+    planMode: false,
+  });
   const passB = /9|content/i.test(resultB.finalMessage);
   console.log(`[验证 B] ToolScheduler 并发: ${passB ? "✅ 通过" : "❌ 失败"}`);
   console.log(`  最终回复: ${resultB.finalMessage.slice(0, 80)}...\n`);
 
   // 验证 C: 基础链路 + skill 加载
   console.log("========== 验证 C: 基础链路 + skill 加载 ==========");
-  const resultC = await runAgentFromCli(
-    {
-      prompt: "请调用 skill_view 工具(name 传 aihot)查看技能,然后用中文一句话告诉我它的用途。",
-      dir: workDir,
-      session: `review-skill-${Date.now()}`,
-      provider: "openai",
-      enableThinking: false,
-      planMode: false,
-    },
-    { write: () => undefined },
-  );
+  const resultC = await runAgentFromCli({
+    prompt: "请调用 skill_view 工具(name 传 aihot)查看技能,然后用中文一句话告诉我它的用途。",
+    dir: workDir,
+    session: `review-skill-${Date.now()}`,
+    provider: "openai",
+    enableThinking: false,
+    planMode: false,
+  });
   const skillCalled = resultC.messages.some(
-    (m) => m.role === "assistant" && Array.isArray(m.toolCalls) && m.toolCalls.some((tc) => tc.name === "skill_view"),
+    (m) =>
+      m.role === "assistant" &&
+      Array.isArray(m.toolCalls) &&
+      m.toolCalls.some((tc) => tc.name === "skill_view"),
   );
   const passC = skillCalled && /aihot|AI|资讯/i.test(resultC.finalMessage);
   console.log(`[验证 C] 基础链路 + skill 加载: ${passC ? "✅ 通过" : "❌ 失败"}\n`);
