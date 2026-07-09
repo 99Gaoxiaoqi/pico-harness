@@ -134,7 +134,25 @@ describe("Pico command registry", () => {
     expect(result.type).toBe("local-command");
     if (result.type !== "local-command") return;
     expect(result.result.message).toContain("Model set to kimi-k2.5");
+    expect(result.result.ui).toBeUndefined();
     expect(getStoredSessionSettings("session-model")?.model).toBe("kimi-k2.5");
+  });
+
+  it("/model without arguments opens the model selector signal", async () => {
+    const registry = await createPicoCommandRegistry({
+      workDir: process.cwd(),
+      provider: "openai",
+      model: "glm-5.2",
+      sessionId: "session-model-selector",
+    });
+
+    const result = await processUserInput("/model", { registry });
+
+    expect(result.type).toBe("local-command");
+    if (result.type !== "local-command") return;
+    expect(result.command).toBe("model");
+    expect(result.result.message).toContain("Current model: glm-5.2");
+    expect(result.result.ui).toEqual({ kind: "open-selector", selector: "model" });
   });
 
   it("/thinking and /effort update supported thinking effort", async () => {
@@ -401,6 +419,7 @@ describe("Pico command registry", () => {
     expect(result.type).toBe("local-command");
     if (result.type !== "local-command") return;
     expect(result.command).toBe("sessions");
+    expect(result.result.ui).toEqual({ kind: "open-selector", selector: "session" });
     expect(result.result.message).toContain("cli-current");
     expect(result.result.message).toContain("messages=2");
     expect(result.result.message).toContain("current");
@@ -515,6 +534,7 @@ describe("Pico command registry", () => {
     expect(result.result.message).toContain("Preview first");
     expect(result.result.message).toContain("turn-1");
     expect(result.result.message).toContain("Enter to preview");
+    expect(result.result.ui).toEqual({ kind: "open-selector", selector: "rewind" });
     expect(result.result.message).not.toContain("用法: /rewind <messageId> code|conversation|both");
   });
 
@@ -526,6 +546,7 @@ describe("Pico command registry", () => {
     expect(result.type).toBe("local-command");
     if (result.type !== "local-command") return;
     expect(result.command).toBe("rewind");
+    expect(result.result.ui).toEqual({ kind: "open-selector", selector: "rewind" });
     expect(result.result.message).toContain("Rewind");
     expect(result.result.message).toContain("turn-1");
   });
@@ -538,6 +559,7 @@ describe("Pico command registry", () => {
     expect(result.type).toBe("local-command");
     if (result.type !== "local-command") return;
     expect(result.result.message).toContain("已回滚");
+    expect(result.result.ui).toBeUndefined();
     expect(result.result.message).toContain("mode=code");
     expect(result.result.message).toContain("只回滚文件");
     expect(readFileSync(filePath, "utf8")).toBe("before\n");
