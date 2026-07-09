@@ -75,7 +75,7 @@ describe("runAgentFromCli", () => {
     resetSessionSettingsForTests();
   });
 
-  it("拼装完整 CLI Harness 并在指定工作区执行工具闭环", async () => {
+  it("runs a request in the selected workdir and returns the trace path when trace is explicit", async () => {
     const workDir = await mkdtemp(join(tmpdir(), "pico-cli-"));
     const provider = new ScriptedProvider([
       {
@@ -136,6 +136,37 @@ describe("runAgentFromCli", () => {
     expect(provider.calls[0]?.toolNames).not.toContain("task_list");
     expect(provider.calls[0]?.messages[0]?.content).toContain("PLAN.md");
     expect(write).not.toHaveBeenCalled();
+  });
+
+  it("enables per-request trace from PICO_TRACE", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-cli-trace-env-"));
+    const provider = new ScriptedProvider([
+      {
+        role: "assistant",
+        content: "Trace env works.",
+        usage: { promptTokens: 2, completionTokens: 1 },
+      },
+    ]);
+
+    const result = await runAgentFromCli(
+      {
+        prompt: "Say done",
+        dir: workDir,
+        session: "trace_env_session",
+        provider: "openai",
+        enableThinking: false,
+      },
+      {
+        env: {
+          PICO_TRACE: "1",
+        },
+        provider,
+      },
+    );
+
+    expect(result.finalMessage).toBe("Trace env works.");
+    expect(result.tracePath).toContain(join(".claw", "traces"));
+    expect(await readdir(join(workDir, ".claw", "traces"))).toHaveLength(1);
   });
 
   it("从环境与参数解析 Provider 配置并允许命令行覆盖模型", async () => {

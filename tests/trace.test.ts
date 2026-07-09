@@ -1,6 +1,3 @@
-// Tracing 链路追踪测试。
-// 覆盖:Span Tree 结构、Trace 文件导出、sessionId 文件名清洗、Main Loop 埋点。
-
 import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
@@ -76,8 +73,8 @@ class RecordingRegistry implements Registry {
   }
 }
 
-describe("Tracing", () => {
-  it("导出文件时清洗 sessionId,避免路径字符破坏 trace 文件名", async () => {
+describe("trace export", () => {
+  it("sanitizes session ids before writing trace filenames", async () => {
     const workDir = await mkdtemp(join(tmpdir(), "pico-trace-export-"));
     const root = new Span("Agent.Run", null);
     root.end();
@@ -95,7 +92,7 @@ describe("Tracing", () => {
     }
   });
 
-  it("AgentEngine 记录 Run/Turn/LLM/Tool 的 trace tree 并写入 .claw/traces", async () => {
+  it("records the engine run, turn, model, and tool spans under .claw/traces", async () => {
     const workDir = await mkdtemp(join(tmpdir(), "pico-trace-run-"));
     const session = new Session("trace:session/001", workDir);
     const tracer = new Tracer();

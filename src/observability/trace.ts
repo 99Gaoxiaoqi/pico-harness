@@ -1,25 +1,23 @@
-// 链路追踪(Tracing):为 Agent 引入决策树回放机制,透视大模型黑盒。
+// Trace captures the agent run as a small span tree that can be replayed after
+// the fact when logs alone are too noisy.
 //
-// 解决痛点:Agent 跑5分钟15个Turn后"无法修复",面对满屏日志无法定位哪步跑偏。
-// 大模型是不可控黑盒,不提供"X光机",智障行为将无法调试。
-//
-// 借鉴云原生 OpenTelemetry/Jaeger,追踪对象从网络节点变成智能体决策层级:
+// The span model mirrors OpenTelemetry-style tracing, but the nodes are agent
+// decisions instead of network calls:
 // - Root Span:一次完整 Run 任务
 // - Child Spans:ReAct 循环的每个 Turn
 // - Leaf Spans:Turn 内细分操作(Generate/Execute/Compaction)
 //
-// Node 无 Go 的 context.Context,主路径用显式父 Span 管理:startChild 直接把子节点
-// 挂到当前 Turn 下。Tracer 仍保留 startSpan/endSpan,供简单的串行调用场景使用。
-// 最终导出 JSON 决策树到 .claw/traces/,像读病历一样逐帧复盘。
+// Main loop spans use explicit parent references. Tracer still keeps a
+// startSpan/endSpan stack for simple sequential callers. JSON exports are saved
+// under .claw/traces/.
 
 import { writeFileSync, mkdirSync } from "node:fs";
-// 用 pathe 替代 node:path:全平台产出正斜杠路径,
-// 让导出路径在断言/跨平台对比时统一为 POSIX 风格(.claw/traces)。
+// pathe keeps trace paths stable in tests by using POSIX separators.
 import { join } from "pathe";
 
 export type TraceAttributes = Record<string, unknown>;
 
-/** Span:链路追踪中的一个时间跨度和操作节点 */
+/** A timed operation node in the trace tree. */
 export class Span {
   readonly name: string;
   readonly startTime: number;
@@ -27,7 +25,7 @@ export class Span {
   durationMs?: number;
   readonly attributes: Record<string, unknown> = {};
   readonly children: Span[] = [];
-  /** 父节点(根 Span 为 null) */
+  /** Parent node. Null only for the root span. */
   readonly parent: Span | null;
   private readonly now: () => number;
 
@@ -44,14 +42,14 @@ export class Span {
     this.addAttributes(attributes);
   }
 
-  /** 开启一个显式子 Span。TS 没有 Go context,用父节点直接挂载避免并发错位。 */
+  /** Start an explicit child span without relying on ambient context. */
   startChild(name: string, attributes: TraceAttributes = {}): Span {
     const span = new Span(name, this, this.now, attributes);
     this.children.push(span);
     return span;
   }
 
-  /** 结束跨度,计算耗时 */
+  /** Finish the span and record elapsed time. */
   end(): void {
     if (this.endTime !== undefined) {
       return;
@@ -60,7 +58,7 @@ export class Span {
     this.durationMs = this.endTime - this.startTime;
   }
 
-  /** 记录关键元数据 */
+  /** Record one metadata field. */
   addAttribute(key: string, value: unknown): void {
     if (value === undefined) {
       return;
@@ -68,14 +66,14 @@ export class Span {
     this.attributes[key] = value;
   }
 
-  /** 批量记录关键元数据 */
+  /** Record multiple metadata fields. */
   addAttributes(attributes: TraceAttributes): void {
     for (const [key, value] of Object.entries(attributes)) {
       this.addAttribute(key, value);
     }
   }
 
-  /** 序列化为纯 JSON 友好对象(去掉 parent 避免循环引用) */
+  /** Serialize without parent to avoid circular JSON. */
   toJSON(): Record<string, unknown> {
     return {
       name: this.name,
@@ -89,8 +87,8 @@ export class Span {
 }
 
 /**
- * Tracer:链路追踪器,栈式管理当前 Span。
- * StartSpan 挂为当前 Span 的 child 并切换;EndSpan 回退到 parent。
+ * Stack-based tracer for simple sequential instrumentation.
+ * startSpan attaches to the current span; endSpan returns to the parent.
  */
 export interface TracerOptions {
   now?: () => number;
@@ -102,17 +100,17 @@ export class Tracer {
 
   constructor(private readonly options: TracerOptions = {}) {}
 
-  /** 开启根 Span(整个任务的根节点) */
+  /** Start the root span for one agent run. */
   startRoot(name: string, attributes: TraceAttributes = {}): Span {
     this.rootSpan = new Span(name, null, this.options.now ?? Date.now, attributes);
     this.currentSpan = this.rootSpan;
     return this.rootSpan;
   }
 
-  /** 开启子 Span,自动挂到当前 Span 下并切换为当前 */
+  /** Start a child span and make it current. */
   startSpan(name: string, attributes: TraceAttributes = {}): Span {
     if (!this.currentSpan) {
-      // 无当前 Span 时退化为根
+      // No active span: treat this call as a root span.
       return this.startRoot(name, attributes);
     }
     const span = this.currentSpan.startChild(name, attributes);
@@ -120,7 +118,7 @@ export class Tracer {
     return span;
   }
 
-  /** 结束当前 Span,回退到父节点 */
+  /** End the span and restore its parent as current. */
   endSpan(span: Span): void {
     span.end();
     if (this.currentSpan === span) {
@@ -128,12 +126,12 @@ export class Tracer {
     }
   }
 
-  /** 获取根 Span(供导出) */
+  /** Return the root span for export or inspection. */
   getRoot(): Span | null {
     return this.rootSpan;
   }
 
-  /** 序列化当前根 Span */
+  /** Serialize the current root span. */
   snapshot(): Record<string, unknown> {
     if (!this.rootSpan) {
       throw new Error("Tracer has no root span.");
@@ -141,7 +139,7 @@ export class Tracer {
     return this.rootSpan.toJSON();
   }
 
-  /** 导出当前根 Span 到文件 */
+  /** Export the current root span to a trace file. */
   exportToFile(workDir: string, sessionId: string): string {
     if (!this.rootSpan) {
       throw new Error("Tracer has no root span.");
@@ -149,17 +147,14 @@ export class Tracer {
     return exportTraceToFile(this.rootSpan, workDir, sessionId, this.options.now?.());
   }
 
-  /** 重置(测试用) */
+  /** Reset internal state. Used by tests. */
   reset(): void {
     this.rootSpan = null;
     this.currentSpan = null;
   }
 }
 
-/**
- * 将根 Span 序列化并保存为本地 JSON 文件。
- * 像读病历一样逐帧复盘 Agent 的全量决策路径。
- */
+/** Serialize and save the root span as local JSON. */
 export function exportTraceToFile(
   rootSpan: Span,
   workDir: string,
@@ -175,12 +170,12 @@ export function exportTraceToFile(
   return filepath;
 }
 
-/** 截断字符串(防 Trace 文件过度膨胀) */
+/** Keep high-cardinality fields small in trace attributes. */
 export function truncate(s: string, max: number): string {
   return s.length > max ? s.slice(0, max) + "..." : s;
 }
 
-/** 清洗文件名片段,防止 sessionId 中的 /、: 等字符破坏导出路径 */
+/** Keep session ids safe inside trace filenames. */
 function sanitizeFilePart(value: string): string {
   return value.replaceAll(/[^a-zA-Z0-9_-]/gu, "_");
 }
