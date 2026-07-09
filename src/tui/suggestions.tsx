@@ -3,6 +3,7 @@ import { Box, Text } from "ink";
 
 export const MAX_SUGGESTIONS = 5;
 export const SUGGESTION_LABEL_WIDTH = 32;
+export const SUGGESTION_METADATA_WIDTH = 28;
 export const SUGGESTION_DESCRIPTION_WIDTH = 38;
 
 export type SuggestionKind = "slash" | "mention";
@@ -14,10 +15,18 @@ export interface InputSuggestion {
   insertText?: string;
   /** Short help text rendered on the right. */
   description?: string;
-  /** Optional argument placeholder rendered after the description. */
+  /** Optional argument placeholder rendered after the command name. */
   argumentHint?: string;
+  /** Optional usage string, usually including the command name. */
+  usage?: string;
   /** Alias that matched the current slash-command query. */
   matchedAlias?: string;
+  /** Alias associated with this slash command. */
+  alias?: string;
+  /** Optional slash command source tag. */
+  source?: string;
+  /** Optional slash command type tag. */
+  kind?: string;
 }
 
 export interface ActiveSuggestionSession {
@@ -32,6 +41,7 @@ export interface ActiveSuggestionSession {
 export interface SuggestionRow {
   key: string;
   left: string;
+  metadata: string;
   description: string;
   selected: boolean;
 }
@@ -52,6 +62,7 @@ export function SuggestionList({ session }: SuggestionListProps): React.ReactNod
             {row.selected ? "› " : "  "}
             {row.left}
           </Text>
+          {row.metadata ? <Text dimColor>  {row.metadata}</Text> : null}
           {row.description ? <Text dimColor>  {row.description}</Text> : null}
         </Box>
       ))}
@@ -66,10 +77,13 @@ export function formatSuggestionRows(
 
   return session.items.slice(0, MAX_SUGGESTIONS).map((item, index) => {
     const value = stripMarker(item.value, session.kind);
-    const description = formatSuggestionDescription(item, session.kind);
+    const left = formatSuggestionLabel(item, session.kind);
+    const metadata = formatSuggestionMetadata(item, session.kind);
+    const description = formatSuggestionDescription(item);
     return {
       key: `${session.kind}:${value}:${index}`,
-      left: truncateInline(`${markerForKind(session.kind)}${value}`, SUGGESTION_LABEL_WIDTH),
+      left: truncateInline(left, SUGGESTION_LABEL_WIDTH),
+      metadata: truncateInline(metadata, SUGGESTION_METADATA_WIDTH),
       description: truncateInline(description, SUGGESTION_DESCRIPTION_WIDTH),
       selected: index === session.selectedIndex,
     };
@@ -102,26 +116,52 @@ function truncateInline(value: string, maxLength: number): string {
   return `${result}…`;
 }
 
-function formatSuggestionDescription(
+function formatSuggestionLabel(
   item: InputSuggestion,
   kind: SuggestionKind,
 ): string {
-  const detail = formatDescriptionDetail(item);
-  if (kind !== "slash" || item.matchedAlias === undefined) {
-    return detail;
-  }
+  const value = stripMarker(item.value, kind);
+  const label = `${markerForKind(kind)}${value}`;
+  if (kind !== "slash") return label;
 
-  const alias = stripMarker(item.matchedAlias, "slash");
-  const source = `alias /${alias}`;
-  return detail.length === 0 ? source : `${source} · ${detail}`;
+  const hint = formatUsageHint(item, value);
+  return hint.length === 0 ? label : `${label} ${hint}`;
 }
 
-function formatDescriptionDetail(item: InputSuggestion): string {
-  const description = item.description?.trim() ?? "";
-  const argumentHint = item.argumentHint?.trim() ?? "";
-  if (argumentHint.length === 0) return description;
-  if (description.length === 0) return argumentHint;
-  return `${description} ${argumentHint}`;
+function formatSuggestionMetadata(item: InputSuggestion, kind: SuggestionKind): string {
+  if (kind !== "slash") return "";
+
+  const parts = [
+    formatAliasTag(item.matchedAlias ?? item.alias),
+    item.source?.trim() ?? "",
+    item.kind?.trim() ?? "",
+  ].filter((part) => part.length > 0);
+
+  return parts.join(" · ");
+}
+
+function formatAliasTag(alias: string | undefined): string {
+  if (alias === undefined) return "";
+  const value = stripMarker(alias, "slash");
+  return value.length === 0 ? "" : `alias /${value}`;
+}
+
+function formatSuggestionDescription(item: InputSuggestion): string {
+  return item.description?.trim() ?? "";
+}
+
+function formatUsageHint(item: InputSuggestion, value: string): string {
+  const usage = item.usage?.trim();
+  if (usage !== undefined && usage.length > 0) {
+    const normalized = usage.replace(/\s+/g, " ");
+    const prefix = `/${value}`;
+    if (normalized === prefix || normalized === value) return "";
+    if (normalized.startsWith(`${prefix} `)) return normalized.slice(prefix.length).trim();
+    if (normalized.startsWith(`${value} `)) return normalized.slice(value.length).trim();
+    return normalized;
+  }
+
+  return item.argumentHint?.trim() ?? "";
 }
 
 function displayWidth(value: string): number {
