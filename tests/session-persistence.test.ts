@@ -281,15 +281,19 @@ describe("truncate 竞态保护(pendingWrites 顺序保证)", () => {
     const file = join(workDir, ".claw", "sessions", "race-order.jsonl");
     const content = await readFile(file, "utf8");
     const lines = content.trim().split("\n");
-    expect(lines.length).toBe(5); // 4 messages + 1 truncate
+    const records = lines.map((line) => JSON.parse(line) as { type: string; fromIndex?: number });
+    const metaRecords = records.filter((rec) => rec.type === "meta");
+    const dataRecords = records.filter((rec) => rec.type !== "meta");
+    expect(metaRecords).toHaveLength(1);
+    expect(dataRecords).toHaveLength(5); // 4 messages + 1 truncate
 
     // 前 4 行必须全是 message(证明 appends 先落盘)
     for (let i = 0; i < 4; i++) {
-      const rec = JSON.parse(lines[i]!) as { type: string };
+      const rec = dataRecords[i]!;
       expect(rec.type).toBe("message");
     }
     // 最后一行必须是 truncate(证明 truncate 没有抢跑到 message 前面)
-    const last = JSON.parse(lines[4]!) as { type: string; fromIndex: number };
+    const last = dataRecords[4]!;
     expect(last.type).toBe("truncate");
     expect(last.fromIndex).toBe(2);
   });

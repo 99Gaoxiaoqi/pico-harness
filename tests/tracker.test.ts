@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { estimateCost, getPricingEntry } from "../src/observability/pricing.js";
 import { CostTracker } from "../src/observability/tracker.js";
 import { Session } from "../src/engine/session.js";
+import { logger } from "../src/observability/logger.js";
 import type { LLMProvider } from "../src/provider/interface.js";
 import { toCanonicalUsage, type Message } from "../src/schema/message.js";
 
@@ -134,7 +135,7 @@ describe("CostTracker", () => {
   });
 
   it("记录耗时(耗时大于 0)", async () => {
-    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const infoSpy = vi.spyOn(logger, "info").mockImplementation(() => undefined);
     const inner = new (class implements LLMProvider {
       async generate(): Promise<Message> {
         await new Promise((r) => setTimeout(r, 10));
@@ -143,11 +144,15 @@ describe("CostTracker", () => {
     })();
     const tracker = new CostTracker(inner, "glm-5.2");
 
-    await tracker.generate([], []);
-    // 日志里应含耗时数字
-    const calls = logSpy.mock.calls.flat().join(" ");
-    expect(calls).toMatch(/耗时: \d+ms/);
-    logSpy.mockRestore();
+    try {
+      await tracker.generate([], []);
+      const trackerLog = infoSpy.mock.calls.find((call) => call[1] === "[Tracker] API 完成");
+      const payload = trackerLog?.[0] as { latencyMs?: number } | undefined;
+      expect(payload?.latencyMs).toEqual(expect.any(Number));
+      expect(payload?.latencyMs ?? 0).toBeGreaterThan(0);
+    } finally {
+      infoSpy.mockRestore();
+    }
   });
 
   it("CanonicalUsage 将 cache/reasoning 拆成独立油耗桶", () => {

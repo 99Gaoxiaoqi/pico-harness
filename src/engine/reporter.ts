@@ -7,6 +7,8 @@
 
 import pc from "picocolors";
 
+const diffColors = pc.createColors(true);
+
 /** Agent 引擎向外界输出信息的规范 */
 export interface Reporter {
   /** 当模型开始进行慢思考 (Reasoning) 时调用 */
@@ -113,10 +115,10 @@ export function colorizeDiff(diff: string): string {
   return diff
     .split("\n")
     .map((line) => {
-      if (line.startsWith("+")) return pc.green(line);
-      if (line.startsWith("-")) return pc.red(line);
-      if (line.startsWith("@@")) return pc.cyan(line);
-      return pc.dim(line);
+      if (line.startsWith("+")) return diffColors.green(line);
+      if (line.startsWith("-")) return diffColors.red(line);
+      if (line.startsWith("@@")) return diffColors.cyan(line);
+      return diffColors.dim(line);
     })
     .join("\n");
 }
