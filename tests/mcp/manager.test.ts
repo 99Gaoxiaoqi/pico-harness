@@ -10,7 +10,7 @@
 //
 // Mock server: tests/mcp/fixtures/mock-stdio-server.mjs(一个最小合规的 MCP stdio server)
 
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,6 +18,7 @@ import { dirname, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ToolRegistry } from "../../src/tools/registry-impl.js";
 import { StdioMcpClient } from "../../src/mcp/stdio-client.js";
+import { HttpMcpClient } from "../../src/mcp/http-client.js";
 import { McpToolBridge } from "../../src/mcp/mcp-tool.js";
 import { McpConnectionManager } from "../../src/mcp/manager.js";
 import {
@@ -36,6 +37,28 @@ function stdioConfig(name: string, args: string[] = []): McpServerConfig {
     args: [MOCK_SERVER, ...args],
     transport: "stdio",
   };
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function waitUntil(
+  predicate: () => boolean,
+  timeoutMs = 1000,
+  intervalMs = 25,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return true;
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+  return predicate();
 }
 
 describe("StdioMcpClient stdio 通信", () => {
@@ -75,6 +98,29 @@ describe("StdioMcpClient stdio 通信", () => {
     await client.connect();
     await client.close();
     await expect(client.close()).resolves.toBeUndefined();
+  });
+
+  it("close 会兜底杀掉忽略 SIGTERM 的子进程", async () => {
+    const pidFile = join(await mkdtemp(join(tmpdir(), "pico-mcp-pid-")), "server.pid");
+    client = new StdioMcpClient(
+      stdioConfig("stubborn", ["--ignore-sigterm", "--pid-file", pidFile]),
+    );
+    let pid: number | undefined;
+
+    try {
+      await client.connect();
+      pid = Number(await readFile(pidFile, "utf8"));
+
+      await client.close();
+
+      const exited = await waitUntil(() => !isProcessAlive(pid!));
+      expect(exited).toBe(true);
+    } finally {
+      if (pid !== undefined && isProcessAlive(pid)) {
+        process.kill(pid, "SIGKILL");
+        await waitUntil(() => !isProcessAlive(pid), 500);
+      }
+    }
   });
 
   it("stderr 快照捕获子进程诊断输出", async () => {
@@ -149,6 +195,40 @@ describe("McpConnectionManager 编排", () => {
     expect(manager.getConnectedCount()).toBe(2);
 
     await manager.closeAll();
+  });
+
+  it("closeAll 后保留 server 条目并把已连接状态重置为 pending", async () => {
+    const configPath = join(tmpDir, "mcp.json");
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        mcpServers: {
+          alpha: stdioConfig("alpha", ["--tools", "1"]),
+        },
+      }),
+    );
+
+    const registry = new ToolRegistry({ truncateResults: false });
+    const manager = new McpConnectionManager(registry);
+    await manager.loadConfig(configPath);
+    await manager.connectAll();
+    expect(manager.getStatus().get("alpha")?.status).toBe("connected");
+
+    await manager.closeAll();
+
+    const status = manager.getStatus().get("alpha");
+    expect(status).toMatchObject({
+      status: "pending",
+      toolCount: 0,
+      toolNames: [],
+    });
+    expect(manager.getConnectedCount()).toBe(0);
+    expect(manager.getStatusSnapshot().summary).toMatchObject({
+      total: 1,
+      connected: 0,
+      pending: 1,
+      toolCount: 0,
+    });
   });
 
   it("自动注册工具到 Registry(名 mcp__<server>__<tool>)", async () => {
@@ -257,6 +337,23 @@ describe("McpConnectionManager 编排", () => {
     });
   });
 
+  it("相对配置路径按 stdioCwd 解析", async () => {
+    await writeFile(
+      join(tmpDir, "mcp.json"),
+      JSON.stringify({
+        mcpServers: {
+          local: { ...stdioConfig("local"), enabled: false },
+        },
+      }),
+    );
+
+    const registry = new ToolRegistry({ truncateResults: false });
+    const manager = new McpConnectionManager(registry, { stdioCwd: tmpDir });
+    await manager.loadConfig("mcp.json");
+
+    expect(manager.getStatusSnapshot().configPath).toBe(join(tmpDir, "mcp.json"));
+  });
+
   it("状态快照展示 loaded config path 以及 stdio/http/sse transport", async () => {
     const configPath = join(tmpDir, "mcp.json");
     await writeFile(
@@ -318,6 +415,62 @@ describe("McpConnectionManager 编排", () => {
     const registry = new ToolRegistry({ truncateResults: false });
     const manager = new McpConnectionManager(registry);
     await expect(manager.loadConfig(configPath)).rejects.toThrow(/command/);
+  });
+});
+
+describe("HttpMcpClient SSE 解析", () => {
+  it("支持 CRLF 分隔的 text/event-stream 响应", async () => {
+    const originalFetch = globalThis.fetch;
+    const calls: unknown[] = [];
+    globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(String(init.body)) : {};
+      calls.push(body);
+      if (body.id !== undefined) {
+        const sse = `event: message\r\ndata: ${JSON.stringify({
+          jsonrpc: "2.0",
+          id: body.id,
+          result:
+            body.method === "tools/list"
+              ? {
+                  tools: [
+                    {
+                      name: "echo",
+                      description: "echo",
+                      inputSchema: { type: "object" },
+                    },
+                  ],
+                }
+              : {
+                  protocolVersion: "2024-11-05",
+                  capabilities: {},
+                  serverInfo: { name: "http", version: "1" },
+                },
+        })}\r\n\r\n`;
+        return new Response(sse, {
+          headers: { "Content-Type": "text/event-stream" },
+        });
+      }
+      return new Response(JSON.stringify({ ok: true }), {
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    try {
+      const client = new HttpMcpClient({
+        name: "http",
+        transport: "http",
+        url: "https://mcp.example.test/rpc",
+        toolTimeoutMs: 500,
+      });
+      await client.connect();
+      const tools = await client.listTools();
+
+      expect(tools.map((tool) => tool.name)).toEqual(["echo"]);
+      expect(calls).toHaveLength(3);
+      await client.close();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 });
 

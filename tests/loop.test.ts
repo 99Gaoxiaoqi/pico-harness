@@ -9,6 +9,7 @@ import { describe, expect, it } from "vitest";
 import { AgentEngine } from "../src/engine/loop.js";
 import { Session } from "../src/engine/session.js";
 import { IterationBudget } from "../src/engine/budget.js";
+import { LLMStatusError } from "../src/provider/errors.js";
 import type { LLMProvider } from "../src/provider/interface.js";
 import type { Message, ToolCall, ToolDefinition, ToolResult } from "../src/schema/message.js";
 import type { BaseTool, Registry } from "../src/tools/registry.js";
@@ -456,6 +457,42 @@ describe("AgentEngine Main Loop", () => {
 
     const costBudget = new IterationBudget({ maxCostCNY: 0.01 });
     expect(costBudget.consumeCost(0.02).allowed).toBe(false);
+  });
+
+  it("429 轮换 provider 后同一轮后续调用继续使用新 provider", async () => {
+    const oldProviderCalls: number[] = [];
+    const newProviderCalls: { toolsCount: number }[] = [];
+    const oldProvider: LLMProvider = {
+      modelName: "old-key",
+      async generate(): Promise<Message> {
+        oldProviderCalls.push(1);
+        throw new LLMStatusError(429, "rate limited");
+      },
+    };
+    const newProvider: LLMProvider = {
+      modelName: "new-key",
+      async generate(_messages, tools): Promise<Message> {
+        newProviderCalls.push({ toolsCount: tools.length });
+        return {
+          role: "assistant",
+          content: tools.length === 0 ? "思考完成" : "最终答案",
+        };
+      },
+    };
+    const engine = new AgentEngine({
+      provider: oldProvider,
+      registry: new MockRegistry(),
+      workDir: "/tmp",
+      enableThinking: true,
+      rebuildProvider: () => newProvider,
+    });
+
+    const session = newSession("做点什么");
+    await engine.run(session);
+
+    expect(oldProviderCalls).toHaveLength(1);
+    expect(newProviderCalls).toEqual([{ toolsCount: 0 }, { toolsCount: 1 }]);
+    expect(session.getHistory().at(-1)?.content).toBe("最终答案");
   });
 
   it("Guardrail 会逐个分析并发批次里的每个工具结果", async () => {

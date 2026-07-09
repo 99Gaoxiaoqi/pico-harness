@@ -75,7 +75,6 @@ export async function generateWithRetry(
   const signal = options?.signal;
   const onRetry = options?.onRetry;
   const onRateLimited = options?.onRateLimited;
-  const hasCustomRetryable = typeof provider.isRetryableError === "function";
 
   // 快路径:只允许调用一次,失败即抛(兜底失败日志仍记录)
   if (maxAttempts <= 1) {
@@ -96,9 +95,10 @@ export async function generateWithRetry(
     try {
       return await activeProvider.generate(messages, tools);
     } catch (error) {
-      const retryable = hasCustomRetryable
-        ? activeProvider.isRetryableError!(error)
-        : defaultIsRetryableError(error);
+      const retryable =
+        typeof activeProvider.isRetryableError === "function"
+          ? activeProvider.isRetryableError(error)
+          : defaultIsRetryableError(error);
 
       // 不可重试或已达上限:记失败日志后抛出
       if (attempt >= maxAttempts || !retryable) {

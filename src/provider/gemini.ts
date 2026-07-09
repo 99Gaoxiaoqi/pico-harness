@@ -226,6 +226,7 @@ export class GeminiProvider implements LLMProvider {
   ): Record<string, unknown> {
     let systemPrompt = "";
     const contents: GeminiContent[] = [];
+    const toolCallNames = new Map<string, string>();
 
     for (const msg of messages) {
       switch (msg.role) {
@@ -237,9 +238,10 @@ export class GeminiProvider implements LLMProvider {
             // 工具观察结果:user 消息里的 functionResponse part
             // 注:Gemini 的 functionResponse.response 是对象,这里把工具输出字符串包成 {result}
             // (Gemini 不要求 response 一定匹配工具 schema,任意对象均可)
+            const functionName = toolCallNames.get(msg.toolCallId) ?? msg.toolCallId;
             contents.push({
               role: "user",
-              parts: [{ functionResponse: { name: msg.toolCallId, response: { result: msg.content } } }],
+              parts: [{ functionResponse: { name: functionName, response: { result: msg.content } } }],
             });
           } else {
             // 5.5d 多模态:user 消息可携带 images → Gemini inlineData(仅 base64)
@@ -264,6 +266,7 @@ export class GeminiProvider implements LLMProvider {
           }
           // 历史工具调用 → functionCall part(args 是对象)
           for (const tc of msg.toolCalls ?? []) {
+            toolCallNames.set(tc.id, tc.name);
             let args: Record<string, unknown>;
             try {
               args = JSON.parse(tc.arguments) as Record<string, unknown>;

@@ -279,7 +279,9 @@ export async function runAgentFromCli(
   // MCP 服务器:加载配置 → 并行连接 → 自动注册工具到 registry。
   // per-server 失败隔离,一个 server 挂了不影响其他。
   const mcpConfigPath = options.mcpConfigPath;
-  const mcpManager = mcpConfigPath ? new McpConnectionManager(registry) : undefined;
+  const mcpManager = mcpConfigPath
+    ? new McpConnectionManager(registry, { stdioCwd: workDir })
+    : undefined;
   if (mcpManager && mcpConfigPath) {
     await mcpManager.loadConfig(mcpConfigPath);
     dependencies.mcpStatusSink?.(mcpManager.getStatusSnapshot());
@@ -315,6 +317,7 @@ export async function runAgentFromCli(
     // Close MCP connections and child processes before returning.
     if (mcpManager) {
       await mcpManager.closeAll();
+      dependencies.mcpStatusSink?.(mcpManager.getStatusSnapshot());
     }
   }
 }

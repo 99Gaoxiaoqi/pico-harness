@@ -8,7 +8,7 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { GeminiProvider } from "../../src/provider/gemini.js";
-import type { Message } from "../../src/schema/message.js";
+import type { Message, ToolDefinition } from "../../src/schema/message.js";
 
 const cfg = {
   baseURL: "https://generativelanguage.googleapis.com",
@@ -47,6 +47,15 @@ function mockJsonFetch(json: unknown): { calls: { body: unknown }[] } {
 function getContents(body: unknown): { role: string; parts: unknown[] }[] {
   return (body as Record<string, unknown>).contents as { role: string; parts: unknown[] }[];
 }
+
+const echoTool: ToolDefinition = {
+  name: "echo",
+  description: "回显",
+  inputSchema: {
+    type: "object",
+    properties: { text: { type: "string" } },
+  },
+};
 
 describe("GeminiProvider 图片多模态翻译 (5.5d)", () => {
   it("image_base64 → inlineData part,顺序:image 在前,text 在后", async () => {
@@ -119,5 +128,28 @@ describe("GeminiProvider 图片多模态翻译 (5.5d)", () => {
     };
     const p = new GeminiProvider(cfg);
     await expect(p.generate([msg], [])).rejects.toThrow(/image_url/);
+  });
+
+  it("流式工具结果回传时 functionResponse.name 使用原始工具名", async () => {
+    const { calls } = mockJsonFetch({
+      candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }],
+    });
+
+    const history: Message[] = [
+      { role: "user", content: "echo hi" },
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [{ id: "gemini-call-0", name: "echo", arguments: '{"text":"hi"}' }],
+      },
+      { role: "user", content: "echo: hi", toolCallId: "gemini-call-0" },
+    ];
+    const p = new GeminiProvider(cfg);
+    await p.generate(history, [echoTool]);
+
+    const contents = getContents(calls[0]!.body);
+    expect(contents[2]!.parts).toEqual([
+      { functionResponse: { name: "echo", response: { result: "echo: hi" } } },
+    ]);
   });
 });

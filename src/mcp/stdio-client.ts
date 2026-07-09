@@ -28,6 +28,8 @@ import {
 
 /** 默认请求超时:30s。MCP server 可能启动慢(如 npx 首次下载) */
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+const CLOSE_SIGTERM_TIMEOUT_MS = 200;
+const CLOSE_SIGKILL_TIMEOUT_MS = 1000;
 
 interface PendingRequest {
   resolve: (value: unknown) => void;
@@ -112,13 +114,18 @@ export class StdioMcpClient implements McpClient {
     }
     this.pending.clear();
 
-    if (this.child) {
+    const child = this.child;
+    if (child) {
       this.removeAllListeners();
-      // 先 SIGTERM 礼让退出,200ms 后 SIGTERM 兜底
-      if (!this.child.killed) {
-        this.child.kill("SIGTERM");
-      }
       this.child = undefined;
+      child.stdin?.end();
+      if (!isChildExited(child)) {
+        child.kill("SIGTERM");
+      }
+      if (!(await waitForChildExit(child, CLOSE_SIGTERM_TIMEOUT_MS)) && !isChildExited(child)) {
+        child.kill("SIGKILL");
+        await waitForChildExit(child, CLOSE_SIGKILL_TIMEOUT_MS).catch(() => false);
+      }
     }
   }
 
@@ -308,4 +315,27 @@ export class StdioMcpClient implements McpClient {
       isError: r.isError === true,
     };
   }
+}
+
+function isChildExited(child: ChildProcess): boolean {
+  return child.exitCode !== null || child.signalCode !== null;
+}
+
+function waitForChildExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
+  if (isChildExited(child)) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      cleanup();
+      resolve(false);
+    }, timeoutMs);
+    const onExit = () => {
+      cleanup();
+      resolve(true);
+    };
+    const cleanup = () => {
+      clearTimeout(timer);
+      child.removeListener("exit", onExit);
+    };
+    child.once("exit", onExit);
+  });
 }

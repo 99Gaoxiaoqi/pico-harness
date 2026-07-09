@@ -245,9 +245,10 @@ export class HttpMcpClient implements McpClient {
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
         let sep: number;
-        while ((sep = buffer.indexOf("\n\n")) !== -1) {
+        while ((sep = findSseSeparator(buffer)) !== -1) {
+          const separatorLength = sseSeparatorLength(buffer, sep);
           const eventBlock = buffer.slice(0, sep);
-          buffer = buffer.slice(sep + 2);
+          buffer = buffer.slice(sep + separatorLength);
           const parsed = this.parseSseEvent(eventBlock);
           if (parsed !== null && parsed.id === wantId) {
             return parsed;
@@ -262,7 +263,7 @@ export class HttpMcpClient implements McpClient {
 
   /** 解析一个 SSE 事件块(以空行分隔),提取 data 里的 JSON-RPC 消息 */
   private parseSseEvent(block: string): JsonRpcResponse | null {
-    const lines = block.split("\n");
+    const lines = splitSseLines(block);
     const dataLines: string[] = [];
     for (const line of lines) {
       if (line.startsWith("data:")) {
@@ -310,9 +311,10 @@ export class HttpMcpClient implements McpClient {
               if (done) break;
               buffer += decoder.decode(value, { stream: true });
               let sep: number;
-              while ((sep = buffer.indexOf("\n\n")) !== -1) {
+              while ((sep = findSseSeparator(buffer)) !== -1) {
+                const separatorLength = sseSeparatorLength(buffer, sep);
                 const eventBlock = buffer.slice(0, sep);
-                buffer = buffer.slice(sep + 2);
+                buffer = buffer.slice(sep + separatorLength);
                 this.handleSseEvent(eventBlock, resolveReady);
               }
             }
@@ -340,7 +342,7 @@ export class HttpMcpClient implements McpClient {
 
   /** 处理 SSE 事件块:endpoint 事件设 POST 地址;message 事件派发给 pending */
   private handleSseEvent(block: string, onEndpoint: () => void): void {
-    const lines = block.split("\n");
+    const lines = splitSseLines(block);
     let event = "message";
     const dataLines: string[] = [];
     for (const line of lines) {
@@ -417,4 +419,20 @@ export class HttpMcpClient implements McpClient {
       isError: r.isError === true,
     };
   }
+}
+
+function findSseSeparator(buffer: string): number {
+  const lf = buffer.indexOf("\n\n");
+  const crlf = buffer.indexOf("\r\n\r\n");
+  if (lf === -1) return crlf;
+  if (crlf === -1) return lf;
+  return Math.min(lf, crlf);
+}
+
+function sseSeparatorLength(buffer: string, index: number): number {
+  return buffer.startsWith("\r\n\r\n", index) ? 4 : 2;
+}
+
+function splitSseLines(block: string): string[] {
+  return block.split(/\r?\n/);
 }

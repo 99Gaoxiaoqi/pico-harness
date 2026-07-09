@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { renderToString } from "ink";
 import { describe, expect, it, vi } from "vitest";
 import { createBuiltinCommandRegistry } from "../../src/input/builtin-commands.js";
+import { createPicoCommandRegistry } from "../../src/input/pico-command-registry.js";
+import { RunningInputQueue } from "../../src/tui/running-input-queue.js";
 import type { CliSessionBrowserSummary } from "../../src/tui/session-browser-adapter.js";
 import { TuiReporter } from "../../src/tui/tui-reporter.js";
 import {
@@ -13,6 +15,7 @@ import {
   resolveLocalTuiCommandUiEffect,
   runTuiAgentPrompt,
   type TuiInputProcessResult,
+  handleTuiRunningInputSubmission,
 } from "../../src/tui/repl.js";
 
 describe("TUI input routing", () => {
@@ -105,6 +108,80 @@ describe("TUI input routing", () => {
       {
         kind: "system",
         content: expect.stringContaining("/clear"),
+      },
+    ]);
+  });
+
+  it("/help lists /image when using the full Pico command registry", async () => {
+    const registry = await createPicoCommandRegistry({
+      workDir: process.cwd(),
+      provider: "openai",
+      model: "glm-5.2",
+      sessionId: "tui-help-image",
+    });
+    const { reporter, snapshots, runAgent, exit, workDir } = harness();
+
+    await handleTuiInputSubmission("/help", {
+      reporter,
+      registry,
+      workDir,
+      runAgent,
+      exit,
+    });
+
+    expect(runAgent).not.toHaveBeenCalled();
+    expect(snapshots.at(-1)).toEqual([
+      {
+        kind: "system",
+        content: expect.stringContaining("/image - Attach a local image to this prompt"),
+      },
+    ]);
+  });
+
+  it("/mcp can run locally while an agent response is running", async () => {
+    const registry = await createPicoCommandRegistry({
+      workDir: process.cwd(),
+      provider: "openai",
+      model: "glm-5.2",
+      sessionId: "tui-running-mcp",
+    });
+    const { reporter, snapshots, runAgent, exit, workDir } = harness();
+    const processInput = vi.fn(
+      async (): Promise<TuiInputProcessResult> => ({
+        type: "local-command",
+        raw: "/mcp",
+        command: "mcp",
+        args: "",
+        argv: [],
+        result: {
+          type: "local",
+          action: "mcp",
+          message: "MCP status\nNo MCP config loaded.",
+        },
+      }),
+    );
+
+    await handleTuiRunningInputSubmission("/mcp", {
+      reporter,
+      registry,
+      workDir,
+      runAgent,
+      exit,
+      processInput,
+      guard: {
+        getSnapshot: () => "running",
+        tryStart: () => null,
+        end: () => true,
+      },
+      queue: new RunningInputQueue(),
+    });
+
+    expect(processInput).toHaveBeenCalledWith("/mcp");
+    expect(runAgent).not.toHaveBeenCalled();
+    expect(snapshots.at(-1)).toEqual([
+      {
+        kind: "system",
+        content: "MCP status\nNo MCP config loaded.",
       },
     ]);
   });

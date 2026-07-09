@@ -11,6 +11,7 @@ export interface MentionReference {
 }
 
 const TRAILING_PUNCTUATION = /[),.;!?，。；！？）]+$/;
+const PLAIN_PATH_TERMINATORS = ")]}）】>,，。；;!?！？、";
 
 export function parseMentions(input: string): MentionReference[] {
   const mentions: MentionReference[] = [];
@@ -34,6 +35,7 @@ export function parseMentions(input: string): MentionReference[] {
 }
 
 function parseAt(input: string, at: number): MentionReference | undefined {
+  if (!isMentionBoundary(input[at - 1])) return undefined;
   if (input.startsWith("@skill:", at)) {
     return parseNamedMention(input, at, "skill", "@skill:".length);
   }
@@ -54,7 +56,7 @@ function parseNamedMention(
 ): MentionReference | undefined {
   const start = at + prefixLength;
   let end = start;
-  while (end < input.length && !/\s/.test(input[end] ?? "")) {
+  while (end < input.length && !isMentionTerminator(input[end])) {
     end++;
   }
   const trimmedEnd = trimTrailingPunctuation(input, start, end);
@@ -92,7 +94,7 @@ function parseQuotedPath(input: string, at: number): MentionReference | undefine
 function parsePlainPath(input: string, at: number): MentionReference | undefined {
   const start = at + 1;
   let end = start;
-  while (end < input.length && !/\s/.test(input[end] ?? "")) {
+  while (end < input.length && !isMentionTerminator(input[end])) {
     end++;
   }
   end = trimTrailingPunctuation(input, start, end);
@@ -161,6 +163,14 @@ function trimTrailingPunctuation(input: string, start: number, end: number): num
   const body = input.slice(start, end);
   const trimmed = body.replace(TRAILING_PUNCTUATION, "");
   return start + trimmed.length;
+}
+
+function isMentionBoundary(previous: string | undefined): boolean {
+  return previous === undefined || /\s/.test(previous) || "([{（【".includes(previous);
+}
+
+function isMentionTerminator(char: string | undefined): boolean {
+  return char === undefined || /\s/.test(char) || PLAIN_PATH_TERMINATORS.includes(char);
 }
 
 interface ParsedLineRange {
