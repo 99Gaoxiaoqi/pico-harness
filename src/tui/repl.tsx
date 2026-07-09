@@ -44,7 +44,7 @@ import { buildDefaultToolRegistry } from "../tools/default-registry.js";
 import { ToolDisclosure } from "../tools/tool-disclosure.js";
 import { getOrCreateSessionSettings, toolStatusFromRegistry } from "../input/session-settings.js";
 import { globalSessionManager } from "../engine/session.js";
-import { McpConnectionManager } from "../mcp/manager.js";
+import { McpConnectionManager, type McpStatusSnapshot } from "../mcp/manager.js";
 import { hasLocalUiCommandAction } from "./local-ui-command.js";
 import {
   confirmSessionBrowserSelection,
@@ -324,14 +324,15 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
   const tuiSession = await globalSessionManager.getOrCreate(tuiSessionId, opts.workDir);
   const toolDisclosure = new ToolDisclosure();
   const toolRegistry = buildDefaultToolRegistry(opts.workDir, { toolDisclosure });
-  const mcpManager = opts.mcpConfigPath ? new McpConnectionManager(toolRegistry) : undefined;
-  if (mcpManager && opts.mcpConfigPath) {
+  let latestMcpStatus: McpStatusSnapshot | undefined;
+  if (opts.mcpConfigPath) {
+    const mcpStatusManager = new McpConnectionManager(toolRegistry);
     try {
-      await mcpManager.loadConfig(opts.mcpConfigPath);
-      await mcpManager.connectAll();
+      await mcpStatusManager.loadConfig(opts.mcpConfigPath);
     } catch {
-      // /mcp 会展示 manager 捕获的 loadError;TUI 本身继续可用。
+      // /mcp 展示解析错误;TUI 本身继续可用。
     }
+    latestMcpStatus = mcpStatusManager.getStatusSnapshot();
   }
   const initialThinkingEffort =
     opts.thinkingEffort ?? (opts.enableThinking === false ? "off" : "medium");
@@ -356,7 +357,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     permissionMode: settings.permissionMode,
     tools: settings.tools,
     toolDisclosure,
-    mcpStatus: () => mcpManager?.getStatusSnapshot(),
+    mcpStatus: () => latestMcpStatus,
   });
   const initialFileSuggestions = await listFileSuggestions({
     cwd: opts.workDir,
@@ -464,6 +465,9 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
             await runTuiAgentPrompt(cliOpts, {
               reporter,
               toolDisclosure,
+              mcpStatusSink: (snapshot) => {
+                latestMcpStatus = snapshot;
+              },
             });
           },
         });
@@ -520,11 +524,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     patchConsole: false,
     exitOnCtrlC: false,
   });
-  try {
-    await instance.waitUntilExit();
-  } finally {
-    await mcpManager?.closeAll();
-  }
+  await instance.waitUntilExit();
 }
 
 function handleLocalTuiCommand(
@@ -606,12 +606,14 @@ export async function runTuiAgentPrompt(
   deps: {
     reporter: TuiReporter;
     toolDisclosure?: ToolDisclosure;
+    mcpStatusSink?: (snapshot: McpStatusSnapshot) => void;
     runAgent?: TuiRunAgent;
   },
 ): Promise<void> {
   const result = await (deps.runAgent ?? runAgentFromCli)(cliOpts, {
     reporter: deps.reporter,
     ...(deps.toolDisclosure ? { toolDisclosure: deps.toolDisclosure } : {}),
+    ...(deps.mcpStatusSink ? { mcpStatusSink: deps.mcpStatusSink } : {}),
   });
   if (result.tracePath) {
     deps.reporter.pushSystemMessage(`Trace saved: ${result.tracePath}`);

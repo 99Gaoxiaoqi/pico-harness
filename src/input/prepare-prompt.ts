@@ -45,10 +45,13 @@ export function loadImage(imagePath: string, workDir: string): ImagePart {
 
 function extractImageMentions(prompt: string): { prompt: string; paths: string[] } {
   const paths: string[] = [];
-  const cleaned = prompt.replace(/(^|\s)@image:(\S+)/gu, (_match, prefix: string, path: string) => {
-    paths.push(unquote(path));
-    return prefix;
-  });
+  const cleaned = prompt.replace(
+    /(^|\s)@image:(?:"([^"]+)"|'([^']+)'|(\S+))/gu,
+    (_match, prefix: string, doubleQuoted?: string, singleQuoted?: string, bare?: string) => {
+      paths.push(doubleQuoted ?? singleQuoted ?? unquote(bare ?? ""));
+      return prefix;
+    },
+  );
   return {
     prompt: cleaned.replace(/\s{2,}/gu, " ").trim(),
     paths,
@@ -74,6 +77,7 @@ function resolveImagePath(imagePath: string, workDir: string): string {
   } catch (error) {
     throw new Error(
       `图片不存在或无法读取: ${imagePath}\n${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
     );
   }
 
