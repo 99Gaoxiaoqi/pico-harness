@@ -289,6 +289,24 @@ git worktree remove ../pico-1-streaming
 
 ---
 
+## 阶段 7：TUI 产品化（进行中）
+
+> **目标**：采用 Claude Code 的 transcript/渲染思路与 Kimi Code 的命令管理体验，修复 Pico TUI 的运行时真实性、焦点、长会话滚动和能力可发现性。
+>
+> 设计：`docs/superpowers/specs/2026-07-10-tui-productization-design.md`
+>
+> 第一阶段计划：`docs/superpowers/plans/2026-07-10-tui-productization-phase1.md`
+
+- [ ] 7.1 真实中断链路：AbortSignal 贯穿 TUI、Engine、Provider 和 ToolScheduler
+- [ ] 7.2 焦点仲裁：审批、候选、输入和 transcript 单一键盘所有权
+- [ ] 7.3 Transcript 行模型：工具聚合、Unicode 宽度、展开行高和 auto-follow
+- [ ] 7.4 命令真实性：Plan、Permission 和 Session 启动语义接入真实运行时
+- [ ] 7.5 命令发现：扫描收敛、完整候选、分类与统一 Help 元数据
+- [ ] 7.6 产品外壳：Logo 首项、动态状态行和结构化错误
+- [ ] 7.7 真实模型 E2E 与完整集成验证
+
+---
+
 ## 阶段 3：上下文与控制流增强（P1）
 
 > **目标**：让 Agent 更聪明地管理上下文、更可控地执行任务。
