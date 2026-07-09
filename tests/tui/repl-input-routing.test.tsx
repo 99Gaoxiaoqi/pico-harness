@@ -2,7 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 import { createBuiltinCommandRegistry } from "../../src/input/builtin-commands.js";
 import { TuiReporter } from "../../src/tui/tui-reporter.js";
 import {
+  dispatchModelSelectorSelection,
   handleTuiInputSubmission,
+  resolveLocalTuiCommandUiEffect,
   type TuiInputProcessResult,
 } from "../../src/tui/repl.js";
 
@@ -16,6 +18,66 @@ describe("TUI input routing", () => {
     const workDir = process.cwd();
     return { reporter, snapshots, runAgent, exit, registry, workDir };
   }
+
+  it("/model local UI action opens the model selector dialog", async () => {
+    const { reporter, runAgent, exit, registry, workDir } = harness();
+    const openDialog = vi.fn();
+    const processInput = vi.fn(async (): Promise<TuiInputProcessResult> => ({
+      type: "local-command",
+      raw: "/model",
+      command: "model",
+      args: "",
+      argv: [],
+      result: {
+        type: "local",
+        action: "model",
+        ui: { kind: "open-selector", selector: "model" },
+        message: "Select a model.",
+      },
+    }));
+
+    await handleTuiInputSubmission("/model", {
+      reporter,
+      registry,
+      workDir,
+      runAgent,
+      exit,
+      processInput,
+      openDialog,
+      currentModelId: "glm-5.2",
+    });
+
+    expect(openDialog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: "local-ui:model-selector",
+        layer: "modal",
+        priority: 40,
+      }),
+    );
+    expect(runAgent).not.toHaveBeenCalled();
+  });
+
+  it("model selector selection dispatches the existing /model command path", () => {
+    const onSubmit = vi.fn();
+
+    dispatchModelSelectorSelection("kimi-k2.5", onSubmit);
+
+    expect(onSubmit).toHaveBeenCalledWith("/model kimi-k2.5");
+  });
+
+  it("/model with an explicit argument does not open the selector", () => {
+    expect(
+      resolveLocalTuiCommandUiEffect(
+        {
+          type: "local",
+          action: "model",
+          message: "Model change requested: kimi-k2.5",
+          data: { model: "kimi-k2.5" },
+        },
+        { currentModelId: "glm-5.2" },
+      ),
+    ).toEqual({ kind: "none" });
+  });
 
   it("本地 display 命令只追加系统消息,不调用模型", async () => {
     const { reporter, snapshots, runAgent, exit, registry, workDir } = harness();
