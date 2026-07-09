@@ -30,6 +30,23 @@ export interface FileHistoryState {
   fileVersions: Map<string, number>;
 }
 
+export type FileHistoryDiffFileStatus = "modified" | "created" | "deleted";
+
+export interface FileHistoryDiffFileStat {
+  filePath: string;
+  status: FileHistoryDiffFileStatus;
+  addedLines: number;
+  removedLines: number;
+}
+
+export interface FileHistoryDiffStat {
+  messageId: string;
+  changedFileCount: number;
+  addedLines: number;
+  removedLines: number;
+  files: FileHistoryDiffFileStat[];
+}
+
 export function createFileHistoryState(): FileHistoryState {
   return {
     snapshots: [],
@@ -285,6 +302,130 @@ export async function fileHistoryRewind(
 
   state.snapshots = state.snapshots.slice(0, targetIdx + 1);
   await saveFileHistoryState(state, sessionId, baseDir);
+}
+
+export async function fileHistoryDiffStat(
+  state: FileHistoryState,
+  messageId: string,
+  sessionId: string,
+  baseDir: string = DEFAULT_BASE_DIR,
+): Promise<FileHistoryDiffStat> {
+  const target = state.snapshots.find((s) => s.messageId === messageId);
+  if (!target) {
+    throw new Error(`FileHistory: 找不到 messageId=${messageId} 的快照`);
+  }
+
+  const filePaths = Array.from(
+    new Set([...state.trackedFiles, ...target.trackedFileBackups.keys()]),
+  ).sort();
+  const files: FileHistoryDiffFileStat[] = [];
+
+  for (const filePath of filePaths) {
+    const backup = target.trackedFileBackups.get(filePath);
+    const before = await readSnapshotFileContent(backup, sessionId, baseDir);
+    const after = await readCurrentFileContent(filePath);
+    if (before === after) continue;
+
+    const changes = countLineChanges(before ?? "", after ?? "");
+    files.push({
+      filePath,
+      status: classifyDiffFile(before, after),
+      addedLines: changes.addedLines,
+      removedLines: changes.removedLines,
+    });
+  }
+
+  return {
+    messageId,
+    changedFileCount: files.length,
+    addedLines: files.reduce((sum, file) => sum + file.addedLines, 0),
+    removedLines: files.reduce((sum, file) => sum + file.removedLines, 0),
+    files,
+  };
+}
+
+async function readSnapshotFileContent(
+  backup: FileHistoryBackup | undefined,
+  sessionId: string,
+  baseDir: string,
+): Promise<string | undefined> {
+  if (!backup || backup.backupFileName === null) return undefined;
+  return readFile(resolveBackupPath(sessionId, backup.backupFileName, baseDir), "utf8");
+}
+
+async function readCurrentFileContent(filePath: string): Promise<string | undefined> {
+  try {
+    return await readFile(filePath, "utf8");
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return undefined;
+    throw err;
+  }
+}
+
+function classifyDiffFile(
+  before: string | undefined,
+  after: string | undefined,
+): FileHistoryDiffFileStatus {
+  if (before === undefined) return "created";
+  if (after === undefined) return "deleted";
+  return "modified";
+}
+
+function countLineChanges(before: string, after: string): { addedLines: number; removedLines: number } {
+  const beforeLines = splitDiffLines(before);
+  const afterLines = splitDiffLines(after);
+  let prefix = 0;
+  while (
+    prefix < beforeLines.length &&
+    prefix < afterLines.length &&
+    beforeLines[prefix] === afterLines[prefix]
+  ) {
+    prefix++;
+  }
+
+  let beforeEnd = beforeLines.length - 1;
+  let afterEnd = afterLines.length - 1;
+  while (
+    beforeEnd >= prefix &&
+    afterEnd >= prefix &&
+    beforeLines[beforeEnd] === afterLines[afterEnd]
+  ) {
+    beforeEnd--;
+    afterEnd--;
+  }
+
+  const beforeMiddle = beforeLines.slice(prefix, beforeEnd + 1);
+  const afterMiddle = afterLines.slice(prefix, afterEnd + 1);
+  const common = longestCommonSubsequenceLength(beforeMiddle, afterMiddle);
+  return {
+    addedLines: afterMiddle.length - common,
+    removedLines: beforeMiddle.length - common,
+  };
+}
+
+function splitDiffLines(value: string): string[] {
+  if (value.length === 0) return [];
+  const lines = value.split("\n");
+  if (lines.at(-1) === "") lines.pop();
+  return lines;
+}
+
+function longestCommonSubsequenceLength(left: string[], right: string[]): number {
+  if (left.length === 0 || right.length === 0) return 0;
+
+  let previous = new Array<number>(right.length + 1).fill(0);
+  for (const leftLine of left) {
+    const current = new Array<number>(right.length + 1).fill(0);
+    for (let i = 0; i < right.length; i++) {
+      current[i + 1] =
+        leftLine === right[i]
+          ? previous[i]! + 1
+          : Math.max(previous[i + 1]!, current[i]!);
+    }
+    previous = current;
+  }
+  return previous[right.length]!;
 }
 
 interface PersistedFileHistoryBackup {

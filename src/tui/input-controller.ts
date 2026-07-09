@@ -31,7 +31,6 @@ export interface InputControllerOptions {
   disabled?: boolean;
   slashCommandSuggestions?: SuggestionSource;
   fileMentionSuggestions?: SuggestionSource;
-  onSubmit?: (text: string) => void;
 }
 
 export interface InputControllerState {
@@ -74,16 +73,29 @@ export function reduceInputControllerEvent(
 ): InputControllerResult {
   if (options.disabled) return { state };
 
+  const batchedReturn = splitTrailingReturnInput(input);
+  if (batchedReturn !== null && !key.ctrl) {
+    const nextState = batchedReturn.prefix
+      ? insertText(state, normalizeInput(batchedReturn.prefix), options).state
+      : state;
+    if (key.meta || key.shift) {
+      return insertText(nextState, "\n", options);
+    }
+    return submit(nextState);
+  }
+
   if (key.ctrl) {
     return reduceCtrlInput(state, input, options);
   }
 
-  if (key.return && (key.meta || key.shift)) {
+  const returnPressed = key.return || input === "\r" || input === "\n";
+
+  if (returnPressed && (key.meta || key.shift)) {
     return insertText(state, "\n", options);
   }
 
-  if (key.return) {
-    return submit(state, options);
+  if (returnPressed) {
+    return submit(state);
   }
 
   if (key.tab && state.activeSuggestions && state.activeSuggestions.items.length > 0) {
@@ -275,6 +287,12 @@ function normalizeInput(input: string): string {
   return input.replace(/\r\n?/g, "\n");
 }
 
+function splitTrailingReturnInput(input: string): { prefix: string } | null {
+  if (!input.endsWith("\r") && !input.endsWith("\n")) return null;
+  const withoutReturn = input.replace(/(?:\r\n?|\n)$/, "");
+  return { prefix: withoutReturn };
+}
+
 function withText(
   state: InputControllerState,
   text: string,
@@ -297,10 +315,7 @@ function withText(
   return { state: next };
 }
 
-function submit(
-  state: InputControllerState,
-  options: InputControllerOptions,
-): InputControllerResult {
+function submit(state: InputControllerState): InputControllerResult {
   const trimmed = state.text.trim();
   const next = {
     ...state,
@@ -313,7 +328,6 @@ function submit(
 
   if (!trimmed) return { state: next };
 
-  options.onSubmit?.(trimmed);
   return {
     state: {
       ...next,

@@ -17,9 +17,14 @@ import { Box, useApp, useInput } from "ink";
 import { appendFileSync } from "node:fs";
 import { InputBox } from "./input-box.js";
 import type { SuggestionSource } from "./input-controller.js";
+import {
+  pickFocusedDialog,
+  type DialogRequest,
+} from "./dialog-arbiter.js";
 import { LogoPanel } from "./logo-panel.js";
 import { Spinner } from "./spinner.js";
 import type { SpinnerMode } from "./spinner.js";
+import { LayoutShell } from "./layout-shell.js";
 import { MessageList } from "./message-list.js";
 import { StatusBar } from "./status-bar.js";
 import type { TuiEntry } from "./tui-reporter.js";
@@ -52,6 +57,8 @@ export interface AppProps {
   slashCommandSuggestions?: SuggestionSource;
   /** @ 文件候选源 */
   fileMentionSuggestions?: SuggestionSource;
+  /** 当前请求展示的 overlay/modal,由 priority 仲裁出唯一焦点弹窗 */
+  dialogRequests?: DialogRequest[];
   /** 用户提交一条消息时触发(repl 调 engine.run) */
   onSubmit: (text: string) => void;
 }
@@ -67,6 +74,7 @@ export function App({
   running,
   slashCommandSuggestions,
   fileMentionSuggestions,
+  dialogRequests = [],
   onSubmit,
 }: AppProps): React.ReactNode {
   const { exit } = useApp();
@@ -82,6 +90,10 @@ export function App({
   const isStreaming = running && isActivelyStreaming(entries);
   // spinner 阶段:据末尾条目状态选
   const spinnerMode = pickSpinnerMode(entries, isStreaming);
+  const focusedDialog = pickFocusedDialog(dialogRequests);
+  const modal = focusedDialog?.layer === "modal" ? focusedDialog.content : undefined;
+  const overlay = focusedDialog?.layer === "overlay" ? focusedDialog.content : undefined;
+  const inputDisabled = running || modal !== undefined;
 
   // 诊断:记录每次渲染的 entries 状态
   dbg(`render: entries=${entries.length} running=${running} streaming=${isStreaming}`);
@@ -90,19 +102,19 @@ export function App({
     dbg(`  [${i}] ${e.kind}: ${c}`);
   });
 
-  return (
-    <Box flexDirection="column">
-      {/* Claude Code 风格:Logo 与状态区是稳定首块,不随 messages 数组变化而重新脏化整棵消息树。 */}
-      <StableLogoPanel model={model} cwd={workDir} />
-      <StatusBar
-        model={model}
-        provider={provider}
-        cwd={workDir}
-        sessionMode={sessionMode}
-        permissionMode={permissionMode}
-        thinkingEffort={thinkingEffort}
-      />
-
+  const header = <StableLogoPanel model={model} cwd={workDir} />;
+  const status = (
+    <StatusBar
+      model={model}
+      provider={provider}
+      cwd={workDir}
+      sessionMode={sessionMode}
+      permissionMode={permissionMode}
+      thinkingEffort={thinkingEffort}
+    />
+  );
+  const transcript = (
+    <>
       {/* 消息列表:统一走 MessageList,由 shouldRenderStatically + MessageRow.memo 控制静态行。 */}
       <Box flexDirection="column" paddingX={1}>
         <MessageList entries={entries} isStreaming={isStreaming} />
@@ -114,25 +126,36 @@ export function App({
           <Spinner mode={spinnerMode} />
         </Box>
       )}
-
-      {/* 输入框:仅底边(对标 PromptInput),running 时禁用。 */}
-      <Box
-        flexDirection="column"
-        borderStyle="single"
-        borderTop={false}
-        borderLeft={false}
-        borderRight={false}
-        borderColor={running ? "gray" : "green"}
-        paddingX={1}
-      >
-        <InputBox
-          disabled={running}
-          slashCommandSuggestions={slashCommandSuggestions}
-          fileMentionSuggestions={fileMentionSuggestions}
-          onSubmit={onSubmit}
-        />
-      </Box>
+    </>
+  );
+  const bottom = (
+    <Box
+      flexDirection="column"
+      borderStyle="single"
+      borderTop={false}
+      borderLeft={false}
+      borderRight={false}
+      borderColor={inputDisabled ? "gray" : "green"}
+      paddingX={1}
+    >
+      <InputBox
+        disabled={inputDisabled}
+        slashCommandSuggestions={slashCommandSuggestions}
+        fileMentionSuggestions={fileMentionSuggestions}
+        onSubmit={onSubmit}
+      />
     </Box>
+  );
+
+  return (
+    <LayoutShell
+      header={header}
+      status={status}
+      transcript={transcript}
+      bottom={bottom}
+      overlay={overlay}
+      modal={modal}
+    />
   );
 }
 

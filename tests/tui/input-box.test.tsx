@@ -1,6 +1,6 @@
 import React from "react";
 import { renderToString } from "ink";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
   createInputControllerState,
   reduceInputControllerEvent,
@@ -107,15 +107,13 @@ describe("InputBox input controller", () => {
   });
 
   it("Enter submits current text and keeps multiline/history behavior", () => {
-    const onSubmit = vi.fn();
-    const options: InputControllerOptions = { onSubmit };
+    const options: InputControllerOptions = {};
     let state = typeText("line 1", options);
     state = reduceInputControllerEvent(state, "", key({ return: true, shift: true }), options).state;
     state = typeText("line 2", options, state);
 
     const result = reduceInputControllerEvent(state, "", key({ return: true }), options);
 
-    expect(onSubmit).toHaveBeenCalledWith("line 1\nline 2");
     expect(result.submittedText).toBe("line 1\nline 2");
     expect(result.state.text).toBe("");
 
@@ -128,21 +126,54 @@ describe("InputBox input controller", () => {
     expect(historyState.text).toBe("line 1\nline 2");
   });
 
+  it("raw carriage return submits instead of inserting a hidden newline", () => {
+    const options: InputControllerOptions = {};
+    const state = typeText("/status", options);
+
+    const result = reduceInputControllerEvent(state, "\r", key({}), options);
+
+    expect(result.submittedText).toBe("/status");
+    expect(result.state.text).toBe("");
+  });
+
+  it("batched text ending with carriage return submits in one terminal event", () => {
+    const options: InputControllerOptions = {};
+
+    const result = reduceInputControllerEvent(
+      createInputControllerState(),
+      "/help\r",
+      key({}),
+      options,
+    );
+
+    expect(result.submittedText).toBe("/help");
+    expect(result.state.text).toBe("");
+  });
+
+  it("raw shift return still inserts a multiline break", () => {
+    const options: InputControllerOptions = {};
+    let state = typeText("line 1", options);
+
+    state = reduceInputControllerEvent(state, "\r", key({ shift: true }), options).state;
+    state = typeText("line 2", options, state);
+
+    expect(state.text).toBe("line 1\nline 2");
+  });
+
   it("disabled input ignores typing, candidates, completion, and submit", () => {
-    const onSubmit = vi.fn();
     const options: InputControllerOptions = {
       disabled: true,
-      onSubmit,
       slashCommandSuggestions: () => [{ value: "help", description: "显示帮助" }],
     };
 
     let state = typeText("/", options);
     state = reduceInputControllerEvent(state, "", key({ tab: true }), options).state;
-    state = reduceInputControllerEvent(state, "", key({ return: true }), options).state;
+    const result = reduceInputControllerEvent(state, "", key({ return: true }), options);
+    state = result.state;
 
     expect(state.text).toBe("");
     expect(state.activeSuggestions).toBeNull();
-    expect(onSubmit).not.toHaveBeenCalled();
+    expect(result.submittedText).toBeUndefined();
   });
 
   it("renders disabled state without hiding the current multiline draft", () => {

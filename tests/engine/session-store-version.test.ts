@@ -1,7 +1,7 @@
 // 5.8a:JSONL schema 版本号 + migration 框架单元测试。
 //
 // 验证范围:
-// 1. 新建 SessionStore → appendMessage → load:首行是 meta、schemaVersion=1
+// 1. 新建 SessionStore → appendMessage → load:首行是 meta、schemaVersion=2
 // 2. 旧文件(手动写无 meta 的 JSONL)→ load:version=0、records 正常
 // 3. migrate v0→v1:原样返回(结构未变)
 // 4. meta 行不在 records 数组里(load 已剥离)
@@ -15,6 +15,7 @@ import {
   SessionStore,
   getSchemaVersion,
   migrate,
+  type SessionMetadata,
   type SessionRecord,
 } from "../../src/engine/session-store.js";
 import type { Message } from "../../src/schema/message.js";
@@ -57,8 +58,16 @@ describe("5.8a SessionStore schema 版本号 + migration", () => {
     await safeRm(workDir);
   });
 
-  it("新建 SessionStore 首次写入产生 meta 头行,schemaVersion=1", async () => {
-    const store = new SessionStore(storePath);
+  it("新建 SessionStore 首次写入产生 meta 头行,schemaVersion=2", async () => {
+    const metadata: SessionMetadata = {
+      schemaVersion: 2,
+      sessionId: "session-identity",
+      originalCwd: workDir,
+      projectRoot: workDir,
+      cwd: workDir,
+      sessionProjectDir: workDir,
+    };
+    const store = new SessionStore(storePath, metadata);
     await store.appendMessage(1, userMsg("hello"));
     await flush();
 
@@ -76,7 +85,9 @@ describe("5.8a SessionStore schema 版本号 + migration", () => {
     expect(lines.length).toBe(2); // meta + 1 message
     const firstLine = JSON.parse(lines[0]!) as SessionRecord;
     expect(firstLine.type).toBe("meta");
-    expect((firstLine as { schemaVersion: number }).schemaVersion).toBe(1);
+    expect((firstLine as { schemaVersion: number }).schemaVersion).toBe(2);
+    expect(firstLine).toMatchObject(metadata);
+    await expect(store.loadMetadata()).resolves.toMatchObject(metadata);
   });
 
   it("多次 append 只写一次 meta 头", async () => {
@@ -115,6 +126,19 @@ describe("5.8a SessionStore schema 版本号 + migration", () => {
 
     // 从 load 结果(已剥离 meta)判断版本:无 meta 头 → 0
     expect(getSchemaVersion(records)).toBe(0);
+  });
+
+  it("旧 meta 缺少 session identity 字段时仍可兼容加载", async () => {
+    const oldMeta = JSON.stringify({ type: "meta", schemaVersion: 1 });
+    const oldLine = JSON.stringify({ type: "message", seq: 1, message: userMsg("old") });
+    await writeFile(storePath, `${oldMeta}\n${oldLine}\n`, "utf8");
+
+    const store = new SessionStore(storePath);
+
+    await expect(store.load()).resolves.toMatchObject([
+      { type: "message", seq: 1, message: userMsg("old") },
+    ]);
+    await expect(store.loadMetadata()).resolves.toEqual({ schemaVersion: 1 });
   });
 
   it("getSchemaVersion:从含 meta 的原始数组正确提取版本", async () => {

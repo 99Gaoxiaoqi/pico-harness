@@ -1,6 +1,7 @@
 import type { ParsedSlashInput } from "./types.js";
 
-const NAME_RE = /^\/([A-Za-z0-9_?][A-Za-z0-9_-]*|\?)(?:\s+([\s\S]*))?$/;
+const NAME_RE =
+  /^\/([A-Za-z0-9_?][A-Za-z0-9_-]*(?::[A-Za-z0-9][A-Za-z0-9_-]*)*|\?)(?:\s+([\s\S]*))?$/;
 
 export function parseSlashInput(input: string): ParsedSlashInput | null {
   const raw = input;

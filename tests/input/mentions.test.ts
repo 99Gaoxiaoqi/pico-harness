@@ -32,7 +32,7 @@ describe("parseMentions", () => {
   });
 
   it("parses line references", () => {
-    const mentions = parseMentions("read @src/app.ts#L5 and @src/lib.ts#L10-20");
+    const mentions = parseMentions("read @src/app.ts#L5 and @src/lib.ts#L10-L20");
 
     expect(mentions).toMatchObject([
       {
@@ -44,6 +44,34 @@ describe("parseMentions", () => {
       {
         kind: "path",
         target: "src/lib.ts",
+        lineStart: 10,
+        lineEnd: 20,
+      },
+    ]);
+  });
+
+  it("preserves plain text while parsing file mentions with optional line ranges", () => {
+    const input = "请读 @src/foo.ts, 再看 @src/foo.ts#L10 和 @src/foo.ts#L10-L20。";
+    const mentions = parseMentions(input);
+
+    expect(input).toBe("请读 @src/foo.ts, 再看 @src/foo.ts#L10 和 @src/foo.ts#L10-L20。");
+    expect(mentions).toMatchObject([
+      {
+        kind: "path",
+        raw: "@src/foo.ts",
+        target: "src/foo.ts",
+      },
+      {
+        kind: "path",
+        raw: "@src/foo.ts#L10",
+        target: "src/foo.ts",
+        lineStart: 10,
+        lineEnd: 10,
+      },
+      {
+        kind: "path",
+        raw: "@src/foo.ts#L10-L20",
+        target: "src/foo.ts",
         lineStart: 10,
         lineEnd: 20,
       },

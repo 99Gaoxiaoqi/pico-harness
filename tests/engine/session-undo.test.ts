@@ -265,4 +265,23 @@ describe("FileHistory 1.5.7 三轴 rewind", () => {
     expect(readFileSync(src, "utf8")).toBe("original\n");
     expect(session.length).toBe(2);
   });
+
+  it("getRewindDiffStat 提供 selector 确认态所需的只读统计", async () => {
+    const src = join(workDir, "file.ts");
+    writeFileSync(src, "original\n");
+
+    await fileHistoryTrackEdit(session.fileHistory, src, "turn-1", session.id);
+    await fileHistoryMakeSnapshot(session.fileHistory, "turn-1", session.id);
+    writeFileSync(src, "original\nnext\n");
+
+    const stat = await session.getRewindDiffStat("turn-1");
+
+    expect(stat).toMatchObject({
+      messageId: "turn-1",
+      changedFileCount: 1,
+      addedLines: 1,
+      removedLines: 0,
+    });
+    expect(readFileSync(src, "utf8")).toBe("original\nnext\n");
+  });
 });

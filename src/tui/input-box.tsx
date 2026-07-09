@@ -8,7 +8,7 @@
 //
 // 支持:字符输入、基础光标编辑、Backspace/Delete、Enter 提交、Ctrl+C 退出(由 App 层处理)。
 
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
 import { Box, Text, useInput } from "ink";
 import {
   createInputControllerState,
@@ -34,17 +34,21 @@ export function InputBox({
   fileMentionSuggestions,
   onSubmit,
 }: InputBoxProps): React.ReactNode {
-  const [controller, setController] = useState(createInputControllerState);
+  const initialController = useRef(createInputControllerState());
+  const controllerRef = useRef(initialController.current);
+  const [controller, setController] = useState(initialController.current);
 
   useInput((input, key) => {
-    setController((current) =>
-      reduceInputControllerEvent(current, input, key, {
-        disabled,
-        slashCommandSuggestions,
-        fileMentionSuggestions,
-        onSubmit,
-      }).state,
-    );
+    const result = reduceInputControllerEvent(controllerRef.current, input, key, {
+      disabled,
+      slashCommandSuggestions,
+      fileMentionSuggestions,
+    });
+    controllerRef.current = result.state;
+    setController(result.state);
+    if (result.submittedText !== undefined) {
+      onSubmit(result.submittedText);
+    }
   });
 
   const { text, cursor, activeSuggestions } = controller;

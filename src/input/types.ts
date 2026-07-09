@@ -31,11 +31,28 @@ export interface PromptCommandResult {
 }
 
 export interface CommandRegistryView {
-  list(): readonly SlashCommand[];
+  list(options?: CommandListOptions): readonly SlashCommand[];
 }
 
 export interface CommandExecutionContext {
   registry?: CommandRegistryView;
+}
+
+export type SlashCommandKind = "local" | "prompt" | "local-jsx";
+
+export type SlashCommandSource =
+  | "builtin"
+  | "project"
+  | "user"
+  | "skill"
+  | "plugin"
+  | "mcp"
+  | (string & {});
+
+export interface CommandListOptions {
+  source?: SlashCommandSource;
+  includeHidden?: boolean;
+  includeDisabled?: boolean;
 }
 
 export interface SlashCommand {
@@ -43,7 +60,11 @@ export interface SlashCommand {
   aliases?: readonly string[];
   description: string;
   usage?: string;
-  kind: "local" | "prompt";
+  argumentHint?: string;
+  kind?: SlashCommandKind;
+  source?: SlashCommandSource;
+  isHidden?: boolean;
+  isEnabled?: boolean;
   execute(
     input: ParsedSlashInput,
     context: CommandExecutionContext,

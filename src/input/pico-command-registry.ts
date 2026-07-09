@@ -150,10 +150,16 @@ export async function createPicoCommandRegistry(
 export function commandSuggestions(
   registry: CommandRegistry,
   query: string,
-): Array<{ value: string; description?: string; matchedAlias?: string }> {
+): Array<{
+  value: string;
+  description?: string;
+  argumentHint?: string;
+  matchedAlias?: string;
+}> {
   return registry.detailedSuggestions(query).slice(0, 20).map((command) => ({
     value: command.insertText,
     description: command.description,
+    ...(command.argumentHint === undefined ? {} : { argumentHint: command.argumentHint }),
     ...(command.matchedAlias === undefined ? {} : { matchedAlias: command.matchedAlias }),
   }));
 }
@@ -269,6 +275,7 @@ function createModelCommand(settings: SessionSettings): SlashCommand {
     aliases: ["models"],
     description: "Show or change the active model",
     usage: "/model [name]",
+    argumentHint: "[name]",
     kind: "local",
     execute: (input): LocalCommandResult => {
       const result = setSessionModel(settings, input.args);
@@ -287,6 +294,7 @@ function createModeCommand(settings: SessionSettings): SlashCommand {
     name: "mode",
     description: "Show or change the current interaction mode",
     usage: "/mode <default|plan|auto|yolo>",
+    argumentHint: "<default|plan|auto|yolo>",
     kind: "local",
     execute: (input): LocalCommandResult => {
       if (input.args.trim().length === 0) {
@@ -314,7 +322,8 @@ function createPermissionsCommand(settings: SessionSettings): SlashCommand {
     name: "permissions",
     aliases: ["permission"],
     description: "Show or change the current permission mode",
-    usage: "/permissions [default|auto|yolo|plan]",
+    usage: "/permissions [ask|default|auto|yolo|plan]",
+    argumentHint: "[ask|default|auto|yolo|plan]",
     kind: "local",
     execute: (input): LocalCommandResult => {
       if (input.args.trim().length === 0) {
@@ -343,6 +352,7 @@ function createThinkingCommand(settings: SessionSettings): SlashCommand {
     aliases: ["effort"],
     description: "Show or change thinking effort",
     usage: "/thinking <off|low|medium|high>",
+    argumentHint: "<off|low|medium|high>",
     kind: "local",
     execute: (input): LocalCommandResult => {
       const effort = parseThinkingEffortArg(input.args);
@@ -374,6 +384,7 @@ function createToolsCommand(
     aliases: ["tool"],
     description: "List or search available tools",
     usage: "/tools [query]",
+    argumentHint: "[query]",
     kind: "local",
     execute: (input): LocalCommandResult => {
       const query = input.args.trim();
@@ -549,6 +560,7 @@ function createResumeCommand(): SlashCommand {
     name: "resume",
     description: "Show how to resume a saved session",
     usage: "/resume <session-id>",
+    argumentHint: "<session-id>",
     kind: "local",
     execute: (input): LocalCommandResult => {
       const sessionId = input.argv[0];
@@ -599,6 +611,7 @@ function createRewindCommand(options: PicoCommandRegistryOptions): SlashCommand 
     name: "rewind",
     description: "Rewind code, conversation, or both to a file-history snapshot",
     usage: "/rewind [message-id] [code|conversation|both]",
+    argumentHint: "[message-id] [code|conversation|both]",
     kind: "local",
     execute: async (input): Promise<LocalCommandResult> => {
       const session = await resolveCommandSession(options);
@@ -627,6 +640,7 @@ function createUndoCommand(options: PicoCommandRegistryOptions): SlashCommand {
     name: "undo",
     description: "Undo the latest file-history snapshot",
     usage: "/undo [message-id] [code|conversation|both]",
+    argumentHint: "[message-id] [code|conversation|both]",
     kind: "local",
     execute: async (input): Promise<LocalCommandResult> => {
       const session = await resolveCommandSession(options);
@@ -698,6 +712,7 @@ function createSkillCommand(loader: SkillLoader): SlashCommand {
     aliases: ["use-skill"],
     description: "Show a skill body by name",
     usage: "/skill <name>",
+    argumentHint: "<name>",
     kind: "local",
     execute: async (input): Promise<LocalCommandResult> => ({
       type: "local",
@@ -712,6 +727,7 @@ function createAgentCommand(options: PicoCommandRegistryOptions): SlashCommand {
     name: "agent",
     description: "Dispatch a task to a named subagent",
     usage: "/agent <name> <task>",
+    argumentHint: "<name> <task>",
     kind: "prompt",
     execute: async (input): Promise<PromptCommandResult | LocalCommandResult> => {
       const agentName = input.argv[0]?.trim();
@@ -833,7 +849,9 @@ function createMarkdownPromptCommand(command: MarkdownPromptCommand): SlashComma
     name: command.name,
     description: command.description || `Run ${command.name}`,
     usage: command.argumentHint ? `/${command.name} ${command.argumentHint}` : `/${command.name}`,
+    ...(command.argumentHint ? { argumentHint: command.argumentHint } : {}),
     kind: "prompt",
+    source: command.source,
     execute: (input): PromptCommandResult => ({
       type: "prompt",
       prompt: renderMarkdownCommandPrompt(command, input.args),

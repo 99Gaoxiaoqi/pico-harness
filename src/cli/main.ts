@@ -47,6 +47,7 @@ import { CostTracker } from "../observability/tracker.js";
 import { Tracer } from "../observability/trace.js";
 import { runUserInputFromCli } from "./run-agent.js";
 import { startTuiRepl } from "../tui/repl.js";
+import { shouldStartTuiByDefault } from "./launch-mode.js";
 import { globalApprovalPolicy, globalApprovalManager, type ApprovalNotifier } from "../approval/manager.js";
 import { computeApprovalDiff } from "../approval/diff.js";
 import type { MiddlewareFunc } from "../tools/registry.js";
@@ -398,11 +399,15 @@ async function main() {
     return;
   }
 
-  if (values.tui) {
+  if (shouldStartTuiByDefault({
+    tui: values.tui,
+    prompt: values.prompt,
+    positionals,
+  })) {
     // TUI 模式:启动 ink REPL 交互界面(顶栏 + 消息列表 + 输入框),
     // 每轮用户输入复用 runAgentFromCli 装配 engine,与 feishu/acp/serve 平级。
     // 日志静默靠 preload-env.ts(--import 预加载,在 logger 初始化前设 LOG_LEVEL=warn)。
-    const workDir = process.cwd();
+    const workDir = await resolveCliWorkDir(values.dir);
     const modelName = process.env.LLM_MODEL ?? (kind === "openai" ? "glm-5.2" : "claude-3-5-sonnet");
     await startTuiRepl({
       workDir,

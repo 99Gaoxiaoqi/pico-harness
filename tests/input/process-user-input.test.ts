@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { createBuiltinCommandRegistry } from "../../src/input/builtin-commands.js";
+import { CommandRegistry } from "../../src/input/command-registry.js";
 import { processUserInput } from "../../src/input/process-user-input.js";
+import type { SlashCommand } from "../../src/input/types.js";
 
 describe("processUserInput", () => {
   it("普通输入进入 prompt", async () => {
@@ -23,6 +25,52 @@ describe("processUserInput", () => {
       expect(result.result.action).toBe("help");
       expect(result.result.message).toContain("/help");
       expect(result.result.message).toContain("/clear");
+    }
+  });
+
+  it("/help 默认只展示核心命令,避免外部技能命令刷屏", async () => {
+    const externalCommand: SlashCommand = {
+      name: "huge-external-skill",
+      description: "A very noisy external skill command",
+      usage: "/huge-external-skill",
+      kind: "prompt",
+      execute: () => ({ type: "prompt", prompt: "external" }),
+    };
+    const registry = new CommandRegistry([
+      ...createBuiltinCommandRegistry().list(),
+      externalCommand,
+    ]);
+
+    const result = await processUserInput("/help", { registry });
+
+    expect(result.type).toBe("local-command");
+    if (result.type === "local-command") {
+      expect(result.result.message).toContain("/help");
+      expect(result.result.message).toContain("/skills");
+      expect(result.result.message).not.toContain("huge-external-skill");
+      expect(result.result.message).toContain("Use /help <command> for any command");
+    }
+  });
+
+  it("/help <external> 仍然能查看外部命令详情", async () => {
+    const externalCommand: SlashCommand = {
+      name: "huge-external-skill",
+      description: "A very noisy external skill command",
+      usage: "/huge-external-skill <topic>",
+      kind: "prompt",
+      execute: () => ({ type: "prompt", prompt: "external" }),
+    };
+    const registry = new CommandRegistry([
+      ...createBuiltinCommandRegistry().list(),
+      externalCommand,
+    ]);
+
+    const result = await processUserInput("/help huge-external-skill", { registry });
+
+    expect(result.type).toBe("local-command");
+    if (result.type === "local-command") {
+      expect(result.result.message).toContain("Command: /huge-external-skill");
+      expect(result.result.message).toContain("Usage: /huge-external-skill <topic>");
     }
   });
 

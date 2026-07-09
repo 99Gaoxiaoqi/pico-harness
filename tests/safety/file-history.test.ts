@@ -11,6 +11,7 @@ import {
   fileHistoryTrackEdit,
   fileHistoryMakeSnapshot,
   fileHistoryRewind,
+  fileHistoryDiffStat,
   fileHistoryLoadState,
   type FileHistoryState,
 } from "../../src/safety/file-history.js";
@@ -467,6 +468,62 @@ describe("FileHistory 1.5.4 回滚 rewind", () => {
 
     expect(state.snapshots).toHaveLength(2);
     expect(state.snapshots[1]!.messageId).toBe("m3");
+  });
+
+  it("diff stat 只读统计目标快照到当前文件的 changed files 和 +/-", async () => {
+    const src = join(workDir, "file.ts");
+    const created = join(workDir, "created.ts");
+    writeFileSync(src, "a\nb\n");
+
+    await fileHistoryTrackEdit(state, src, "m1", sessionId, baseDir);
+    await fileHistoryTrackEdit(state, created, "m1", sessionId, baseDir);
+    await fileHistoryMakeSnapshot(state, "m1", sessionId, baseDir);
+
+    writeFileSync(src, "a\nb\nc\n");
+    writeFileSync(created, "new\n");
+    const beforeSnapshotCount = state.snapshots.length;
+
+    const stat = await fileHistoryDiffStat(state, "m1", sessionId, baseDir);
+
+    expect(stat.messageId).toBe("m1");
+    expect(stat.changedFileCount).toBe(2);
+    expect(stat.addedLines).toBe(2);
+    expect(stat.removedLines).toBe(0);
+    expect(stat.files.map((file) => file.filePath)).toEqual([created, src].sort());
+    expect(stat.files.find((file) => file.filePath === src)).toMatchObject({
+      status: "modified",
+      addedLines: 1,
+      removedLines: 0,
+    });
+    expect(stat.files.find((file) => file.filePath === created)).toMatchObject({
+      status: "created",
+      addedLines: 1,
+      removedLines: 0,
+    });
+    expect(state.snapshots).toHaveLength(beforeSnapshotCount);
+    expect(readFileSync(src, "utf8")).toBe("a\nb\nc\n");
+  });
+
+  it("diff stat 将当前已删除的文件统计为 removed lines", async () => {
+    const src = join(workDir, "deleted.ts");
+    writeFileSync(src, "a\nb\n");
+
+    await fileHistoryTrackEdit(state, src, "m1", sessionId, baseDir);
+    await fileHistoryMakeSnapshot(state, "m1", sessionId, baseDir);
+    rmSync(src, { force: true });
+
+    const stat = await fileHistoryDiffStat(state, "m1", sessionId, baseDir);
+
+    expect(stat.changedFileCount).toBe(1);
+    expect(stat.addedLines).toBe(0);
+    expect(stat.removedLines).toBe(2);
+    expect(stat.files[0]).toMatchObject({
+      filePath: src,
+      status: "deleted",
+      addedLines: 0,
+      removedLines: 2,
+    });
+    expect(existsSync(src)).toBe(false);
   });
 });
 

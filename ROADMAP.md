@@ -245,6 +245,31 @@ git worktree remove ../pico-1-streaming
 
 ---
 
+## 阶段 5.1：Claude Code TUI Parity（并行开发计划）
+
+> **目标**：按真实 Claude Code 源码对比结果，补齐 Pico 的 TUI 交互内核、统一命令体系、`@` 附件、`/rewind` 确认、项目 session identity 和后续多代理任务基础。
+>
+> 详细任务拆分见：`docs/plans/2026-07-09-claude-code-parity-parallel.md`
+
+### 第一批：互不依赖并行任务
+
+- [x] A. TUI 布局与焦点弹窗仲裁
+- [x] B. 统一 Command Kernel 与 `/help` 元数据
+- [x] C. `@file` 附件解析与路径候选
+- [x] D. `/rewind` 消息选择器与二次确认
+- [x] E. Session Identity 与项目内 Resume 基础
+
+### 第二批：第一批合并后再并行
+
+- [ ] F. Skills 即 Prompt Command
+- [ ] G. Slash/Path Typeahead UI
+- [ ] H. 工具 UI 状态协议
+- [ ] I. `/permissions` 可视化入口
+- [ ] J. 后台 Agent Task Registry 与 SendMessage
+- [ ] K. TUI Resume Picker
+
+---
+
 ## 阶段 3：上下文与控制流增强（P1）
 
 > **目标**：让 Agent 更聪明地管理上下文、更可控地执行任务。

@@ -20,6 +20,7 @@ import { TuiReporter, type TuiEntry } from "./tui-reporter.js";
 import { QueryGuard } from "./query-guard.js";
 import type { RunAgentCliOptions, RunAgentWriter } from "../cli/run-agent.js";
 import { runAgentFromCli } from "../cli/run-agent.js";
+import { createCliSessionId, type CliSessionSelection } from "../cli/session-resolver.js";
 import { listFileSuggestions } from "../input/file-suggestions.js";
 import {
   commandSuggestions,
@@ -33,7 +34,11 @@ import type { ProviderKind } from "../provider/factory.js";
 import type { ThinkingEffort } from "../provider/thinking.js";
 import { buildDefaultToolRegistry } from "../tools/default-registry.js";
 import { ToolDisclosure } from "../tools/tool-disclosure.js";
-import { toolStatusFromRegistry } from "../input/session-settings.js";
+import {
+  getOrCreateSessionSettings,
+  toolStatusFromRegistry,
+} from "../input/session-settings.js";
+import { globalSessionManager } from "../engine/session.js";
 
 export interface ReplOptions {
   /** 工作区 */
@@ -117,13 +122,36 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
   }
 
   const provider = opts.provider ?? "openai";
+  const tuiSessionId = createCliSessionId();
+  const tuiSessionSelection: CliSessionSelection = {
+    mode: "new",
+    sessionId: tuiSessionId,
+  };
+  const tuiSession = await globalSessionManager.getOrCreate(tuiSessionId, opts.workDir);
   const toolDisclosure = new ToolDisclosure();
   const toolRegistry = buildDefaultToolRegistry(opts.workDir, { toolDisclosure });
+  const initialThinkingEffort =
+    opts.thinkingEffort ?? (opts.enableThinking === false ? "off" : "medium");
+  const settings = getOrCreateSessionSettings({
+    sessionId: tuiSessionId,
+    sessionMode: "new",
+    cwd: opts.workDir,
+    provider,
+    model: opts.model,
+    thinkingEffort: initialThinkingEffort,
+    permissionMode: "ask",
+    tools: toolStatusFromRegistry(toolRegistry),
+  });
   const registry = await createPicoCommandRegistry({
     workDir: opts.workDir,
     provider,
-    model: opts.model,
-    tools: toolStatusFromRegistry(toolRegistry),
+    model: settings.model,
+    session: tuiSession,
+    sessionId: tuiSessionId,
+    sessionMode: "new",
+    thinkingEffort: settings.thinkingEffort,
+    permissionMode: settings.permissionMode,
+    tools: settings.tools,
     toolDisclosure,
   });
   const initialFileSuggestions = await listFileSuggestions({
@@ -155,25 +183,36 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     const running = status !== "idle"; // 派生:非 idle 即视为运行中
 
     const handleSubmit = async (text: string): Promise<void> => {
-      // 并发防护:已在运行则拒绝新提交。tryStart 返回 generation 号或 null。
-      const gen = guard.tryStart();
-      if (gen === null) return;
+      let gen: number | null = null;
 
       try {
+        const processed = await processUserInput(text, { registry });
+        const needsAgentRun = processed.type === "prompt" || processed.type === "prompt-command";
+        if (needsAgentRun) {
+          // 并发防护:已在运行则拒绝新提交。tryStart 返回 generation 号或 null。
+          gen = guard.tryStart();
+          if (gen === null) return;
+        }
+
         await handleTuiInputSubmission(text, {
           reporter,
           registry,
           workDir: opts.workDir,
           exit,
+          processInput: async () => processed,
           runAgent: async (prompt) => {
             const cliOpts: RunAgentCliOptions = {
               prompt,
               provider,
               dir: opts.workDir,
+              session: tuiSessionId,
+              sessionSelection: tuiSessionSelection,
+              model: settings.model,
               enableThinking: opts.enableThinking ?? true,
+              thinkingEffort: settings.thinkingEffort,
               ...(opts.mcpConfigPath ? { mcpConfigPath: opts.mcpConfigPath } : {}),
             };
-            // 复用 session(consoleSessionId 固定),reporter 是 TuiReporter 实例(共享 entries)
+            // 复用同一个 TUI session,reporter 是 TuiReporter 实例(共享 entries)
             await runAgentFromCli(cliOpts, {
               reporter,
               toolDisclosure,
@@ -191,7 +230,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
       } finally {
         // generation 防陈旧:若期间用户发起了新查询(自增 generation),此处 mismatch
         // → end 返回 false,跳过 cleanup,避免把新查询误判为结束。
-        guard.end(gen);
+        if (gen !== null) guard.end(gen);
         // 兜底:确保本轮 mode 回到 idle(reporter.getMode 供 app.tsx 的 spinner 用)
         // 注:reporter.onFinish 已设 idle;此处仅在出错未触发 onFinish 时补救。
       }
@@ -199,10 +238,12 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
 
     return (
       <App
-        model={opts.model}
+        model={settings.model}
         provider={provider}
         workDir={opts.workDir}
-        thinkingEffort={opts.thinkingEffort ?? (opts.enableThinking === false ? "off" : "medium")}
+        sessionMode={settings.mode}
+        permissionMode={settings.permissionMode}
+        thinkingEffort={settings.thinkingEffort}
         entries={stateEntries}
         running={running}
         slashCommandSuggestions={(query) => commandSuggestions(registry, query)}
