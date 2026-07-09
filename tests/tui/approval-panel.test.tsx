@@ -3,6 +3,7 @@ import { createPermissionState } from "../../src/approval/permission-state.js";
 import {
   formatApprovalPanel,
   formatPermissionPanel,
+  nextApprovalPanelState,
   resolveApprovalPanelKey,
 } from "../../src/tui/approval-panel.js";
 
@@ -31,20 +32,59 @@ describe("ApprovalPanel", () => {
     expect(resolveApprovalPanelKey("a", {})).toBe("approve-session");
     expect(resolveApprovalPanelKey("n", {})).toBe("reject");
     expect(resolveApprovalPanelKey("", { escape: true })).toBe("reject");
+    expect(resolveApprovalPanelKey("e", {})).toBe("toggle-diff");
     expect(resolveApprovalPanelKey("x", {})).toBeNull();
   });
 
-  it("diff 在审批面板里只展示统计摘要", () => {
+  it("diff 在审批面板里默认只展示统计摘要和审批摘要", () => {
+    const longDiff = [
+      "--- old",
+      "+++ new",
+      ...Array.from({ length: 40 }, (_, index) => `+line ${index + 1}`),
+    ].join("\n");
     const output = formatApprovalPanel({
       taskId: "task-3",
       toolName: "write_file",
       args: JSON.stringify({ path: "AIHOT.md" }),
-      message: "需要审批",
-      diff: ["--- old", "+++ new", "+line 1", "+line 2", "-line 3"].join("\n"),
+      message: "将写入日报文件",
+      diff: longDiff,
     });
 
-    expect(output).toContain("Diff: +2 -1");
+    expect(output).toContain("摘要: 将写入日报文件");
+    expect(output).toContain("目标: AIHOT.md");
+    expect(output).toContain("Diff: +40 -0");
     expect(output).not.toContain("+line 1");
+    expect(output).not.toContain("+line 40");
+  });
+
+  it("通过纯函数切换长 diff 展开状态,展开后仍截断预览", () => {
+    const longDiff = [
+      "--- old",
+      "+++ new",
+      ...Array.from({ length: 40 }, (_, index) => `+line ${index + 1}`),
+    ].join("\n");
+
+    const expanded = nextApprovalPanelState({ diffExpanded: false }, "toggle-diff");
+    const collapsed = nextApprovalPanelState(expanded, "toggle-diff");
+
+    expect(expanded.diffExpanded).toBe(true);
+    expect(collapsed.diffExpanded).toBe(false);
+
+    const output = formatApprovalPanel(
+      {
+        taskId: "task-3",
+        toolName: "write_file",
+        args: JSON.stringify({ path: "AIHOT.md" }),
+        message: "将写入日报文件",
+        diff: longDiff,
+      },
+      { diffExpanded: expanded.diffExpanded },
+    );
+
+    expect(output).toContain("+line 1");
+    expect(output).toContain("+line 20");
+    expect(output).not.toContain("+line 40");
+    expect(output).toContain("已隐藏");
   });
 
   it("展示文件路径作为审批目标", () => {

@@ -96,6 +96,35 @@ describe("App", () => {
     expect(countOccurrences(output, 'Try "fix this" or / for commands')).toBe(0);
   });
 
+  it("renders approval as an inline overlay without disabling the bottom input", () => {
+    const output = renderToString(
+      <App
+        model="glm-5.2"
+        provider="openai"
+        workDir="/workspace/demo"
+        sessionMode="new"
+        entries={[
+          { kind: "user", content: "更新文件" },
+          { kind: "tool", name: "write_file", args: '{"path":"AIHOT.md"}', status: "approval" },
+        ]}
+        running
+        dialogRequests={[
+          {
+            id: "approval:pending",
+            layer: "overlay",
+            priority: 80,
+            content: <Text>Approval required: write_file</Text>,
+          },
+        ]}
+        onSubmit={vi.fn()}
+      />,
+    );
+
+    expect(output).toContain("Approval required: write_file");
+    expect(output).not.toContain("Use dialog controls");
+    expect(countOccurrences(output, 'Try "fix this" or / for commands')).toBe(1);
+  });
+
   it("passes provider, permission mode, and thinking effort into the runtime status", () => {
     const output = renderToString(
       <App

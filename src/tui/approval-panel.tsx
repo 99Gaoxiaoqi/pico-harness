@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState } from "react";
 import { Box, Text, useInput } from "ink";
 import type { ApprovalNotice } from "../approval/manager.js";
 import type {
@@ -7,11 +7,19 @@ import type {
   PermissionState,
 } from "../approval/permission-state.js";
 
-export type ApprovalPanelProps = ApprovalNotice;
+const DEFAULT_DIFF_PREVIEW_LINES = 22;
+
+export interface ApprovalPanelProps extends ApprovalNotice {
+  diffExpanded?: boolean;
+}
 export interface PermissionPanelProps {
   state: PermissionState;
 }
 export type ApprovalPanelAction = "approve" | "approve-session" | "reject";
+export type ApprovalPanelKeyAction = ApprovalPanelAction | "toggle-diff";
+export interface ApprovalPanelState {
+  diffExpanded: boolean;
+}
 export interface InteractiveApprovalPanelProps extends ApprovalPanelProps {
   onAction: (action: ApprovalPanelAction) => void;
 }
@@ -20,18 +28,38 @@ export function InteractiveApprovalPanel({
   onAction,
   ...notice
 }: InteractiveApprovalPanelProps): React.ReactNode {
+  const [state, setState] = useState<ApprovalPanelState>(() => ({
+    diffExpanded: notice.diffExpanded ?? false,
+  }));
+
   useInput((input, key) => {
     const action = resolveApprovalPanelKey(input, key);
-    if (action) onAction(action);
+    if (!action) return;
+    if (action === "toggle-diff") {
+      setState((current) => nextApprovalPanelState(current, action));
+      return;
+    }
+    onAction(action);
   });
 
-  return <ApprovalPanel {...notice} />;
+  return <ApprovalPanel {...notice} diffExpanded={state.diffExpanded} />;
 }
 
-export function ApprovalPanel(notice: ApprovalPanelProps): React.ReactNode {
+export function ApprovalPanel({
+  diffExpanded = false,
+  ...notice
+}: ApprovalPanelProps): React.ReactNode {
   return (
-    <Box flexDirection="column" borderStyle="round" borderColor="yellow" paddingX={1}>
-      {formatApprovalPanel(notice, { includeDiff: false })
+    <Box
+      flexDirection="column"
+      borderStyle="single"
+      borderColor="yellow"
+      borderLeft={false}
+      borderRight={false}
+      borderBottom={false}
+      paddingX={1}
+    >
+      {formatApprovalPanel(notice, { diffExpanded })
         .split("\n")
         .map((line, index) => (
           <Text key={`${index}:${line}`}>{line}</Text>
@@ -54,37 +82,50 @@ export function PermissionPanel({ state }: PermissionPanelProps): React.ReactNod
 
 export function formatApprovalPanel(
   notice: ApprovalNotice,
-  options: { includeDiff?: boolean } = {},
+  options: { diffExpanded?: boolean; includeDiff?: boolean; maxDiffPreviewLines?: number } = {},
 ): string {
-  const target = approvalTarget(notice.toolName, notice.args);
+  const target = notice.preview?.target ?? approvalTarget(notice.toolName, notice.args);
+  const summary = notice.preview?.summary ?? approvalSummary(notice.message);
+  const diff = notice.preview?.diff ?? notice.diff;
+  const diffExpanded = options.diffExpanded ?? options.includeDiff ?? false;
   const lines = [
     `Approval required: ${notice.toolName}`,
     `目标: ${target}`,
+    `摘要: ${summary}`,
     `任务: ${notice.taskId}`,
-    `Enter/Y 允许一次 · A 本会话允许 · N/Esc 拒绝`,
+    `Enter/Y 允许一次 · A 本会话允许 · N/Esc 拒绝 · E 展开/折叠 diff`,
     `命令备用: approve ${notice.taskId} · reject ${notice.taskId} · modify ${notice.taskId} <content>`,
   ];
-  if (notice.diff) {
-    lines.push(formatDiffSummary(notice.diff));
+  if (diff) {
+    lines.push(formatDiffSummary(diff, diffExpanded));
   }
-  if (options.includeDiff !== false && notice.diff) {
-    lines.push("Diff preview hidden in TUI approval. Use edit/view tools after approval if needed.");
+  if (diffExpanded && diff) {
+    lines.push(formatDiffPreview(diff, options.maxDiffPreviewLines));
   }
   return lines.join("\n");
 }
 
 export function resolveApprovalPanelKey(
   input: string,
-  key: { return?: boolean; escape?: boolean },
-): ApprovalPanelAction | null {
+  key: { return?: boolean; escape?: boolean; ctrl?: boolean; meta?: boolean },
+): ApprovalPanelKeyAction | null {
   const normalized = input.toLowerCase();
   if (key.return || normalized === "y") return "approve";
   if (normalized === "a") return "approve-session";
   if (key.escape || normalized === "n") return "reject";
+  if (normalized === "e" && !key.ctrl && !key.meta) return "toggle-diff";
   return null;
 }
 
-export function formatDiffSummary(diff: string): string {
+export function nextApprovalPanelState(
+  state: ApprovalPanelState,
+  action: ApprovalPanelKeyAction,
+): ApprovalPanelState {
+  if (action !== "toggle-diff") return state;
+  return { ...state, diffExpanded: !state.diffExpanded };
+}
+
+export function formatDiffSummary(diff: string, expanded = false): string {
   const lines = diff.split("\n");
   let added = 0;
   let removed = 0;
@@ -92,7 +133,15 @@ export function formatDiffSummary(diff: string): string {
     if (line.startsWith("+") && !line.startsWith("+++")) added++;
     if (line.startsWith("-") && !line.startsWith("---")) removed++;
   }
-  return `Diff: +${added} -${removed} (${lines.length} 行, 已折叠)`;
+  return `Diff: +${added} -${removed} (${lines.length} 行, ${expanded ? "已展开预览" : "已折叠"})`;
+}
+
+export function formatDiffPreview(diff: string, maxLines = DEFAULT_DIFF_PREVIEW_LINES): string {
+  const lines = diff.split("\n");
+  const visible = lines.slice(0, Math.max(0, maxLines));
+  const hidden = Math.max(0, lines.length - visible.length);
+  const suffix = hidden > 0 ? [`... 已隐藏 ${hidden} 行`] : [];
+  return ["Diff preview:", ...visible, ...suffix].join("\n");
 }
 
 export function formatPermissionPanel(state: PermissionState): string {
@@ -132,6 +181,10 @@ export function approvalTarget(toolName: string, args: string): string {
     }
   }
   return compact(args, 160);
+}
+
+function approvalSummary(message: string): string {
+  return compact(message.replace(/\s+/gu, " ").trim() || "需要审批", 160);
 }
 
 function parseArgs(args: string): Record<string, unknown> | undefined {

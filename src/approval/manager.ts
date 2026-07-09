@@ -35,11 +35,20 @@ export interface ApprovalResult {
 }
 
 /** 审批请求的通知信息(供通知通道发送给人类) */
+export interface ApprovalPreview {
+  target: string;
+  summary: string;
+  diff?: string;
+  truncated?: boolean;
+}
+
 export interface ApprovalNotice {
   taskId: string;
   toolName: string;
   args: string;
   message: string;
+  /** 面向审批 UI/通知通道的极简预览信息。 */
+  preview?: ApprovalPreview;
   /**
    * 工具执行前的 before/after diff 预览(可选)。
    * 由 computeApprovalDiff 在拦截时计算,供通知卡片展示具体改动。
@@ -106,7 +115,10 @@ Agent 试图执行以下动作:
       const timer = setTimeout(() => {
         if (this.pendingTasks.has(taskId)) {
           this.pendingTasks.delete(taskId);
-          logger.warn({ taskId, timeoutMs: this.timeoutMs }, `[Approval] 任务 ${taskId} 审批超时,自动拒绝。`);
+          logger.warn(
+            { taskId, timeoutMs: this.timeoutMs },
+            `[Approval] 任务 ${taskId} 审批超时,自动拒绝。`,
+          );
           resolve({
             allowed: false,
             reason: `审批超时(${Math.floor(this.timeoutMs / 60000)} 分钟无人响应),系统自动拒绝。`,
@@ -117,7 +129,14 @@ Agent 试图执行以下动作:
       this.pendingTasks.set(taskId, { resolve, timer, toolName, args });
 
       // 通过通知通道发送审批请求(diff 可选,计算失败时为 undefined)
-      notify({ taskId, toolName, args, message, ...(diff !== undefined ? { diff } : {}) });
+      notify({
+        taskId,
+        toolName,
+        args,
+        message,
+        preview: buildApprovalPreview(toolName, args, diff),
+        ...(diff !== undefined ? { diff } : {}),
+      });
       logger.info({ taskId }, `[Approval] 已发送审批请求,执行流挂起等待...`);
     });
   }
@@ -133,7 +152,10 @@ Agent 试图执行以下动作:
     }
     clearTimeout(entry.timer);
     this.pendingTasks.delete(taskId);
-    logger.info({ taskId, allowed, reason }, `[Approval] 收到审批结果 (TaskID: ${taskId}, Allowed: ${allowed}): ${reason}`);
+    logger.info(
+      { taskId, allowed, reason },
+      `[Approval] 收到审批结果 (TaskID: ${taskId}, Allowed: ${allowed}): ${reason}`,
+    );
     entry.resolve({ allowed, reason });
     return true;
   }
@@ -152,7 +174,10 @@ Agent 试图执行以下动作:
     }
     clearTimeout(entry.timer);
     this.pendingTasks.delete(taskId);
-    logger.info({ taskId, reason, modified: true }, `[Approval] 收到审批结果 (TaskID: ${taskId}, Modified): ${reason}`);
+    logger.info(
+      { taskId, reason, modified: true },
+      `[Approval] 收到审批结果 (TaskID: ${taskId}, Modified): ${reason}`,
+    );
     entry.resolve({ allowed: true, reason, modifiedContent });
     return true;
   }
@@ -280,6 +305,14 @@ const HARDLINE_PATTERNS: RegExp[] = [
   /\bgit\s+push\s+(-f|--force)\s+.*\b(main|master)\b/i,
 ];
 
+const BASH_WRITE_REDIRECT_RE = /\d*>>?\s*(?!&)([^\s|;&]+)/u;
+const BASH_WRITE_INTENT_PATTERNS: RegExp[] = [
+  BASH_WRITE_REDIRECT_RE,
+  /\btee\s+(-a\s+)?[^\s|;&]+/iu,
+  /\bsed\s+(-i|--in-place)\b/iu,
+  /\bperl\s+-pi\b/iu,
+];
+
 export function isDangerousCommand(toolName: string, args: string): boolean {
   // 纯读取工具默认 YOLO 模式,全部放行
   if (toolName !== "bash" && toolName !== "write_file" && toolName !== "edit_file") {
@@ -300,6 +333,84 @@ export function isHardlineCommand(toolName: string, args: string): boolean {
     return false;
   }
   return HARDLINE_PATTERNS.some((pattern) => pattern.test(args));
+}
+
+function buildApprovalPreview(toolName: string, args: string, diff?: string): ApprovalPreview {
+  const target = approvalPreviewTarget(toolName, args);
+  const preview: ApprovalPreview = {
+    target,
+    summary: approvalPreviewSummary(toolName, target, args),
+  };
+  if (diff !== undefined) {
+    preview.diff = diff;
+    preview.truncated = diff.includes("已截断");
+  }
+  return preview;
+}
+
+function approvalPreviewSummary(toolName: string, target: string, args: string): string {
+  if (toolName === "write_file") return `write_file 写入 ${target}`;
+  if (toolName === "edit_file") return `edit_file 修改 ${target}`;
+  if (toolName === "read_file") return `read_file 读取 ${target}`;
+  if (toolName === "bash") {
+    const command = parseBashCommand(args);
+    if (command && findBashWriteRedirectTarget(command)) {
+      return `bash 执行并写入 ${target}`;
+    }
+    return `bash 执行 ${target}`;
+  }
+  return `${toolName} ${target}`;
+}
+
+function approvalPreviewTarget(toolName: string, args: string): string {
+  const parsed = parseArgsObject(args);
+  if (parsed) {
+    if (toolName === "bash") {
+      const command = parsed["command"];
+      if (typeof command === "string" && command.trim()) {
+        return compactPreview(findBashWriteRedirectTarget(command) ?? command.trim(), 160);
+      }
+    }
+    const keys =
+      toolName === "bash"
+        ? ["command", "path", "file", "url", "query"]
+        : ["path", "file", "command", "url", "query"];
+    for (const key of keys) {
+      const value = parsed[key];
+      if (typeof value === "string" && value.trim()) {
+        return compactPreview(value.trim(), 160);
+      }
+    }
+  }
+  return compactPreview(args, 160);
+}
+
+function parseArgsObject(args: string): Record<string, unknown> | undefined {
+  try {
+    const parsed = JSON.parse(args);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
+function parseBashCommand(args: string): string | undefined {
+  const parsed = parseArgsObject(args);
+  const command = parsed?.["command"];
+  return typeof command === "string" ? command : undefined;
+}
+
+function findBashWriteRedirectTarget(command: string): string | undefined {
+  const match = command.match(BASH_WRITE_REDIRECT_RE);
+  return match?.[1]?.replace(/[)}\]]+$/u, "");
+}
+
+function compactPreview(value: string, max: number): string {
+  if (value.length <= max) return value;
+  return `${value.slice(0, max - 1)}…`;
 }
 
 export class ApprovalPolicy {
@@ -371,6 +482,16 @@ export function isAgentOpsDangerousCommand(toolName: string, args: string): bool
   if (toolName === "write_file" || toolName === "edit_file") {
     return true;
   }
+  if (toolName === "bash") {
+    const command = parseBashCommand(args);
+    if (command && hasBashWriteIntent(command)) {
+      return true;
+    }
+  }
 
   return isDangerousCommand(toolName, args);
+}
+
+function hasBashWriteIntent(command: string): boolean {
+  return BASH_WRITE_INTENT_PATTERNS.some((pattern) => pattern.test(command));
 }
