@@ -496,7 +496,8 @@ describe("Pico command registry", () => {
     if (result.type !== "local-command") return;
     expect(result.command).toBe("snapshots");
     expect(result.result.message).toContain("Rewind");
-    expect(result.result.message).toContain("Restore the code and/or conversation");
+    expect(result.result.message).toContain("Choose a message to preview");
+    expect(result.result.message).toContain("Preview first");
     expect(result.result.message).toContain("turn-1");
     expect(result.result.message).toContain("1 file changed");
     expect(result.result.message).not.toContain("/rewind turn-1 both");
@@ -510,9 +511,10 @@ describe("Pico command registry", () => {
     expect(result.type).toBe("local-command");
     if (result.type !== "local-command") return;
     expect(result.result.message).toContain("Rewind");
-    expect(result.result.message).toContain("Restore the code and/or conversation");
+    expect(result.result.message).toContain("Choose a message to preview");
+    expect(result.result.message).toContain("Preview first");
     expect(result.result.message).toContain("turn-1");
-    expect(result.result.message).toContain("Enter to continue");
+    expect(result.result.message).toContain("Enter to preview");
     expect(result.result.message).not.toContain("用法: /rewind <messageId> code|conversation|both");
   });
 
