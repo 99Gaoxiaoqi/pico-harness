@@ -14,6 +14,7 @@ const CORE_HELP_COMMANDS = new Set([
   "model",
   "thinking",
   "tools",
+  "mcp",
   "agents",
   "sessions",
   "resume",

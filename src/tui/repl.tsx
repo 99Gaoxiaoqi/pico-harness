@@ -48,6 +48,7 @@ import { buildDefaultToolRegistry } from "../tools/default-registry.js";
 import { ToolDisclosure } from "../tools/tool-disclosure.js";
 import { getOrCreateSessionSettings, toolStatusFromRegistry } from "../input/session-settings.js";
 import { globalSessionManager } from "../engine/session.js";
+import { McpConnectionManager } from "../mcp/manager.js";
 import { hasLocalUiCommandAction } from "./local-ui-command.js";
 import {
   confirmSessionBrowserSelection,
@@ -300,6 +301,15 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
   const tuiSession = await globalSessionManager.getOrCreate(tuiSessionId, opts.workDir);
   const toolDisclosure = new ToolDisclosure();
   const toolRegistry = buildDefaultToolRegistry(opts.workDir, { toolDisclosure });
+  const mcpManager = opts.mcpConfigPath ? new McpConnectionManager(toolRegistry) : undefined;
+  if (mcpManager && opts.mcpConfigPath) {
+    try {
+      await mcpManager.loadConfig(opts.mcpConfigPath);
+      await mcpManager.connectAll();
+    } catch {
+      // /mcp 会展示 manager 捕获的 loadError;TUI 本身继续可用。
+    }
+  }
   const initialThinkingEffort =
     opts.thinkingEffort ?? (opts.enableThinking === false ? "off" : "medium");
   const settings = getOrCreateSessionSettings({
@@ -323,6 +333,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     permissionMode: settings.permissionMode,
     tools: settings.tools,
     toolDisclosure,
+    mcpStatus: () => mcpManager?.getStatusSnapshot(),
   });
   const initialFileSuggestions = await listFileSuggestions({
     cwd: opts.workDir,
@@ -486,7 +497,11 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     patchConsole: false,
     exitOnCtrlC: false,
   });
-  await instance.waitUntilExit();
+  try {
+    await instance.waitUntilExit();
+  } finally {
+    await mcpManager?.closeAll();
+  }
 }
 
 function handleLocalTuiCommand(

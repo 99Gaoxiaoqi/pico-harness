@@ -62,6 +62,12 @@ describe("HelpPanel", () => {
             kind: "local",
             source: "builtin",
           },
+          {
+            name: "mcp",
+            description: "Show MCP server connection status",
+            kind: "local",
+            source: "builtin",
+          },
         ]}
       />,
     );
@@ -69,6 +75,8 @@ describe("HelpPanel", () => {
     expect(output).toContain("Slash commands");
     expect(output).toContain("builtin / local");
     expect(output).toContain("/model [name]");
+    expect(output).toContain("/mcp");
+    expect(output).toContain("Show MCP server connection status");
   });
 
   it("uses scroll props to show a stable command window", () => {
