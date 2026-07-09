@@ -13,7 +13,7 @@
 //   3. truncate 折叠:重放遇到 truncate record,丢弃 fromIndex 之前的 message。
 //   4. seq 单调递增:保证重放顺序,并防重复(幂等)。
 
-import { appendFile, readFile } from "node:fs/promises";
+import { appendFile, readFile, stat } from "node:fs/promises";
 import type { Message } from "../schema/message.js";
 import { logger } from "../observability/logger.js";
 import type { SessionIdentity } from "./session-identity.js";
@@ -94,6 +94,7 @@ export class SessionStore {
    * 仅内存标志,不感知外部对文件的改动(每次新 SessionStore 实例默认未初始化)。
    */
   private initialized = false;
+  private initPromise?: Promise<void>;
 
   constructor(
     private readonly filePath: string,
@@ -249,20 +250,48 @@ export class SessionStore {
   }
 
   private async appendLine(line: string): Promise<void> {
-    // 5.8a:首次写入时先落 meta 头行(携带 schema 版本号),保证 load 可识别版本。
-    // 之后置 initialized,后续 append 仅写数据行。
-    if (!this.initialized) {
-      const { schemaVersion: _ignored, ...identity } = this.metadata ?? {};
-      const meta = JSON.stringify({
-        type: "meta",
-        schemaVersion: CURRENT_SCHEMA_VERSION,
-        ...identity,
-      });
-      await appendFile(this.filePath, meta + "\n", "utf8");
-      this.initialized = true;
-    }
+    await this.ensureInitialized();
     await appendFile(this.filePath, line + "\n", "utf8");
   }
+
+  private async ensureInitialized(): Promise<void> {
+    if (this.initialized) return;
+    this.initPromise ??= this.writeMetadataOnce().catch((error: unknown) => {
+      this.initPromise = undefined;
+      throw error;
+    });
+    await this.initPromise;
+  }
+
+  private async writeMetadataOnce(): Promise<void> {
+    try {
+      const existing = await stat(this.filePath);
+      if (existing.size > 0) {
+        this.initialized = true;
+        return;
+      }
+    } catch (error) {
+      if (!isNotFoundError(error)) throw error;
+    }
+
+    const { schemaVersion: _ignored, ...identity } = this.metadata ?? {};
+    const meta = JSON.stringify({
+      type: "meta",
+      schemaVersion: CURRENT_SCHEMA_VERSION,
+      ...identity,
+    });
+    await appendFile(this.filePath, meta + "\n", "utf8");
+    this.initialized = true;
+  }
+}
+
+function isNotFoundError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { code?: unknown }).code === "ENOENT"
+  );
 }
 
 /**
@@ -279,7 +308,7 @@ export class SessionStore {
  */
 export function migrate(records: SessionRecord[], fromVersion: number): SessionRecord[] {
   let current = fromVersion;
-  let out = records;
+  const out = records;
   // 按版本号顺序应用每个迁移步骤,直到达到 CURRENT_SCHEMA_VERSION。
   while (current < CURRENT_SCHEMA_VERSION) {
     switch (current) {
