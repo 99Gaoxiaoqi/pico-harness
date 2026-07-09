@@ -1,12 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { CommandRegistry } from "../../src/input/command-registry.js";
+import type { CommandAvailability } from "../../src/input/command-availability.js";
 import type { SlashCommand } from "../../src/input/types.js";
 
 function localCommand(
   name: string,
   aliases: readonly string[] = [],
-  overrides: Partial<SlashCommand & { priority: number }> = {},
-): SlashCommand & { priority?: number } {
+  overrides: Partial<SlashCommand & { priority: number; availability: CommandAvailability }> = {},
+): SlashCommand & { priority?: number; availability?: CommandAvailability } {
   return {
     name,
     aliases,
@@ -140,6 +141,28 @@ describe("CommandRegistry", () => {
         matchedAlias: "rv",
       },
     ]);
+  });
+
+  it("候选可按 running 和 modal 状态携带 disabled reason", () => {
+    const registry = new CommandRegistry([
+      localCommand("help", [], { availability: "always" }),
+      localCommand("compact", [], { availability: "idle" }),
+      localCommand("stop", [], { availability: "running" }),
+    ]);
+
+    const running = registry.detailedSuggestions("", { availabilityState: "running" });
+    expect(running.find((suggestion) => suggestion.name === "help")).not.toHaveProperty("disabled");
+    expect(running.find((suggestion) => suggestion.name === "compact")).toMatchObject({
+      disabled: true,
+      disabledReason: "Command is only available while idle.",
+    });
+    expect(running.find((suggestion) => suggestion.name === "stop")).not.toHaveProperty("disabled");
+
+    expect(registry.detailedSuggestions("hel", { availabilityState: "modal" })[0]).toMatchObject({
+      name: "help",
+      disabled: true,
+      disabledReason: "Command unavailable while a modal is active.",
+    });
   });
 
   it("同等匹配时优先展示 priority 更高的候选", () => {
