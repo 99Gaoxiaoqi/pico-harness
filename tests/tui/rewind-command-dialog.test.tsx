@@ -11,6 +11,7 @@ import {
   RewindCommandDialogView,
   resolveRewindCommandDialogKey,
 } from "../../src/tui/rewind-command-dialog.js";
+import { createRewindSelectorState } from "../../src/tui/rewind-selector.js";
 import type { FileHistoryDiffStat } from "../../src/safety/file-history.js";
 import { TuiReporter } from "../../src/tui/tui-reporter.js";
 
@@ -50,6 +51,29 @@ describe("RewindCommandDialog", () => {
       selectedAction: "both",
     });
     expect(getDiffStat).toHaveBeenCalledWith("turn-1");
+    expect(onDispatchCommand).not.toHaveBeenCalled();
+  });
+
+  it("快照超过可见上限时 Enter 预览屏幕高亮的最新项", async () => {
+    const snapshots = Array.from({ length: 9 }, (_, index) =>
+      snapshotSummary(`turn-${index + 1}`),
+    );
+    const onDispatchCommand = vi.fn();
+    const getDiffStat = vi.fn(async (messageId: string) => diffStat(messageId));
+
+    const next = await resolveRewindCommandDialogKey(
+      createRewindCommandDialogState(createRewindSelectorState(snapshots)),
+      snapshots,
+      { input: "", key: { return: true } },
+      { getDiffStat, onDispatchCommand },
+    );
+
+    expect(next.selector).toMatchObject({
+      phase: "confirm",
+      messageId: "turn-9",
+      selectedAction: "both",
+    });
+    expect(getDiffStat).toHaveBeenCalledWith("turn-9");
     expect(onDispatchCommand).not.toHaveBeenCalled();
   });
 

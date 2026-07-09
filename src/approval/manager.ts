@@ -67,7 +67,12 @@ export class ApprovalManager {
   /** TaskID → 挂起的 Promise resolver */
   private readonly pendingTasks = new Map<
     string,
-    { resolve: (r: ApprovalResult) => void; timer: NodeJS.Timeout }
+    {
+      resolve: (r: ApprovalResult) => void;
+      timer: NodeJS.Timeout;
+      toolName: string;
+      args: string;
+    }
   >();
 
   /** 默认超时(ms) */
@@ -109,7 +114,7 @@ Agent 试图执行以下动作:
         }
       }, this.timeoutMs);
 
-      this.pendingTasks.set(taskId, { resolve, timer });
+      this.pendingTasks.set(taskId, { resolve, timer, toolName, args });
 
       // 通过通知通道发送审批请求(diff 可选,计算失败时为 undefined)
       notify({ taskId, toolName, args, message, ...(diff !== undefined ? { diff } : {}) });
@@ -168,6 +173,11 @@ Agent 试图执行以下动作:
   /** 当前挂起的审批任务数(测试/监控用) */
   get pendingCount(): number {
     return this.pendingTasks.size;
+  }
+
+  getPendingTask(taskId: string): { toolName: string; args: string } | undefined {
+    const task = this.pendingTasks.get(taskId);
+    return task ? { toolName: task.toolName, args: task.args } : undefined;
   }
 
   /** 清理所有挂起任务(测试用) */

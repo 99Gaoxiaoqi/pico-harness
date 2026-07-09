@@ -61,6 +61,8 @@ import {
   type CliSessionBrowserSummary,
 } from "./session-browser-adapter.js";
 import { createRewindCommandDialogRequest } from "./rewind-command-dialog.js";
+import { globalApprovalManager, globalApprovalPolicy, type ApprovalNotice } from "../approval/manager.js";
+import { ApprovalPanel } from "./approval-panel.js";
 
 export interface ReplOptions {
   /** 工作区 */
@@ -69,8 +71,6 @@ export interface ReplOptions {
   provider?: ProviderKind;
   /** 模型名(顶栏展示) */
   model: string;
-  /** 慢思考 */
-  enableThinking?: boolean;
   /** Provider 原生思考强度 */
   thinkingEffort?: ThinkingEffort;
   /** MCP 配置路径(可选,首轮传入) */
@@ -79,6 +79,8 @@ export interface ReplOptions {
 
 const SESSION_SELECTOR_DIALOG_ID = "local-ui:session-selector";
 const SELECTOR_DIALOG_PRIORITY = 40;
+const APPROVAL_DIALOG_ID = "approval:pending";
+const APPROVAL_DIALOG_PRIORITY = 80;
 
 export type TuiInputProcessResult = InputProcessResult;
 
@@ -124,6 +126,8 @@ export async function handleTuiInputSubmission(
   text: string,
   deps: HandleTuiInputSubmissionDeps,
 ): Promise<void> {
+  if (handleApprovalCommand(text, deps)) return;
+
   const processed = await processTuiInput(text, deps);
 
   switch (processed.type) {
@@ -174,6 +178,8 @@ export async function handleTuiRunningInputSubmission(
   text: string,
   deps: HandleTuiRunningInputSubmissionDeps,
 ): Promise<void> {
+  if (handleApprovalCommand(text, deps)) return;
+
   const running = deps.guard.getSnapshot() !== "idle";
   const blockedCommand = running ? blockedRunningLocalCommand(text, deps.registry) : undefined;
   if (blockedCommand !== undefined) {
@@ -334,8 +340,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     }
     latestMcpStatus = mcpStatusManager.getStatusSnapshot();
   }
-  const initialThinkingEffort =
-    opts.thinkingEffort ?? (opts.enableThinking === false ? "off" : "medium");
+  const initialThinkingEffort = opts.thinkingEffort ?? "medium";
   const settings = getOrCreateSessionSettings({
     sessionId: tuiSessionId,
     sessionMode: "new",
@@ -457,7 +462,6 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
               session: tuiSessionId,
               sessionSelection: tuiSessionSelection,
               model: settings.model,
-              enableThinking: opts.enableThinking ?? true,
               thinkingEffort: settings.thinkingEffort,
               ...(runOptions?.images ? { images: runOptions.images } : {}),
               ...(opts.mcpConfigPath ? { mcpConfigPath: opts.mcpConfigPath } : {}),
@@ -465,6 +469,12 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
             await runTuiAgentPrompt(cliOpts, {
               reporter,
               toolDisclosure,
+              openDialog: (request) => {
+                setDialogRequests((current) => [
+                  ...current.filter((item) => item.id !== request.id),
+                  request,
+                ]);
+              },
               mcpStatusSink: (snapshot) => {
                 latestMcpStatus = snapshot;
               },
@@ -506,6 +516,19 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         }
         dialogRequests={dialogRequests}
         onSubmit={(text) => void handleSubmit(text)}
+        onInterrupt={() => {
+          guard.forceEnd();
+          const dropped = runningQueue.clear();
+          reporter.pushSystemMessage(
+            dropped > 0
+              ? `Interrupted current run and dropped ${dropped} queued input(s).`
+              : "Interrupted current run.",
+          );
+        }}
+        onRedraw={() => {
+          if (process.stdout.isTTY) process.stdout.write("\x1b[2J\x1b[H");
+          setEntries([...entries]);
+        }}
       />
     );
   }
@@ -607,17 +630,80 @@ export async function runTuiAgentPrompt(
     reporter: TuiReporter;
     toolDisclosure?: ToolDisclosure;
     mcpStatusSink?: (snapshot: McpStatusSnapshot) => void;
+    openDialog?: (request: DialogRequest) => void;
     runAgent?: TuiRunAgent;
   },
 ): Promise<void> {
   const result = await (deps.runAgent ?? runAgentFromCli)(cliOpts, {
     reporter: deps.reporter,
+    approvalNotifier: (notice) => {
+      deps.reporter.onToolAwaitingApproval(notice.toolName, notice.args);
+      deps.openDialog?.(createApprovalDialogRequest(notice));
+    },
     ...(deps.toolDisclosure ? { toolDisclosure: deps.toolDisclosure } : {}),
     ...(deps.mcpStatusSink ? { mcpStatusSink: deps.mcpStatusSink } : {}),
   });
   if (result.tracePath) {
     deps.reporter.pushSystemMessage(`Trace saved: ${result.tracePath}`);
   }
+}
+
+function createApprovalDialogRequest(notice: ApprovalNotice): DialogRequest {
+  return {
+    id: APPROVAL_DIALOG_ID,
+    layer: "modal",
+    priority: APPROVAL_DIALOG_PRIORITY,
+    content: <ApprovalPanel {...notice} />,
+  };
+}
+
+function handleApprovalCommand(text: string, deps: Pick<HandleTuiInputSubmissionDeps, "reporter" | "closeDialog">): boolean {
+  const parsed = parseApprovalCommand(text);
+  if (!parsed) return false;
+
+  if (parsed.action === "approve-session") {
+    const pending = globalApprovalManager.getPendingTask(parsed.taskId);
+    if (pending) {
+      globalApprovalPolicy.allowForSession("cli", {
+        name: pending.toolName,
+        arguments: pending.args,
+      });
+    }
+  }
+
+  const ok =
+    parsed.action === "modify"
+      ? globalApprovalManager.resolveApprovalWithModify(parsed.taskId, "TUI modify", parsed.content)
+      : globalApprovalManager.resolveApproval(
+          parsed.taskId,
+          parsed.action === "approve" || parsed.action === "approve-session",
+          `TUI ${parsed.action}`,
+        );
+
+  deps.closeDialog?.(APPROVAL_DIALOG_ID);
+  deps.reporter.pushSystemMessage(
+    ok
+      ? `Approval ${parsed.action}: ${parsed.taskId}`
+      : `Approval task not found: ${parsed.taskId}`,
+  );
+  return true;
+}
+
+type ParsedApprovalCommand =
+  | { action: "approve" | "approve-session" | "reject"; taskId: string }
+  | { action: "modify"; taskId: string; content: string };
+
+function parseApprovalCommand(text: string): ParsedApprovalCommand | null {
+  const trimmed = text.trim();
+  const simple = /^(approve|approve-session|reject)\s+(\S+)$/u.exec(trimmed);
+  if (simple) {
+    const action = simple[1] as "approve" | "approve-session" | "reject";
+    return { action, taskId: simple[2]! };
+  }
+
+  const modify = /^modify\s+(\S+)\s+([\s\S]+)$/u.exec(trimmed);
+  if (!modify) return null;
+  return { action: "modify", taskId: modify[1]!, content: modify[2]! };
 }
 
 export function dispatchModelSelectorSelection(

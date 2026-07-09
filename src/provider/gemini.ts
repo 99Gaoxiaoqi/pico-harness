@@ -110,7 +110,7 @@ export class GeminiProvider implements LLMProvider {
    * 流式生成:请求 streamGenerateContent(alt=sse),解析 SSE。
    * Gemini 流式协议:每条 data 是一个 candidate 增量,
    * candidate.content.parts 里含 text / functionCall。text 即时转发 onDelta,
-   * functionCall 累积(同名合并)。
+   * functionCall 按出现顺序保留为独立调用。
    */
   async generateStream(
     messages: Message[],
@@ -146,7 +146,7 @@ export class GeminiProvider implements LLMProvider {
 
     // 解析 SSE 流
     let fullContent = "";
-    const toolCallMap = new Map<string, Record<string, unknown>>();
+    const toolCalls: ToolCall[] = [];
     let usage: Usage | undefined;
 
     const reader = resp.body.getReader();
@@ -188,24 +188,15 @@ export class GeminiProvider implements LLMProvider {
               fullContent += part.text;
               onDelta(part.text);
             } else if (part.functionCall?.name) {
-              // 累积同名工具调用(args 是对象,直接合并;新 args 字段覆盖旧字段)
-              const prev = toolCallMap.get(part.functionCall.name) ?? {};
-              toolCallMap.set(part.functionCall.name, { ...prev, ...part.functionCall.args });
+              toolCalls.push({
+                id: `gemini-call-${toolCalls.length}`,
+                name: part.functionCall.name,
+                arguments: JSON.stringify(part.functionCall.args ?? {}),
+              });
             }
           }
         }
       }
-    }
-
-    const toolCalls: ToolCall[] = [];
-    let i = 0;
-    for (const [name, args] of toolCallMap) {
-      toolCalls.push({
-        // Gemini 流式不返回 functionCall id,这里生成稳定的占位 id 供 toolCallId 关联
-        id: `gemini-call-${i++}`,
-        name,
-        arguments: JSON.stringify(args),
-      });
     }
 
     return {
@@ -287,7 +278,7 @@ export class GeminiProvider implements LLMProvider {
     if (systemPrompt) {
       body.system_instruction = { parts: [{ text: systemPrompt }] };
     }
-    // 慢思考支撑:availableTools 为空时不挂载 tools
+    // 无可用工具时不挂载 tools
     if (availableTools.length > 0) {
       body.tools = [
         {
@@ -310,17 +301,15 @@ export class GeminiProvider implements LLMProvider {
   ): Message {
     let textContent = "";
     const toolCalls: ToolCall[] = [];
-    let callIdx = 0;
     for (const part of parts) {
       if (part.text) {
         textContent += part.text;
       } else if (part.functionCall?.name) {
         toolCalls.push({
-          id: part.functionCall.name, // Gemini 非流式 functionCall 通常不带 id,用 name 占位
+          id: `gemini-call-${toolCalls.length}`,
           name: part.functionCall.name,
           arguments: JSON.stringify(part.functionCall.args ?? {}),
         });
-        callIdx++;
       }
     }
 

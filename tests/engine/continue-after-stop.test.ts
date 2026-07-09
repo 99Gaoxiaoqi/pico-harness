@@ -69,7 +69,6 @@ describe("AgentEngine + shouldContinueAfterStop", () => {
       provider,
       registry,
       workDir: "/tmp",
-      enableThinking: false,
       shouldContinueAfterStop: async () => {
         called++;
         return { continue: false };
@@ -111,7 +110,6 @@ describe("AgentEngine + shouldContinueAfterStop", () => {
       provider,
       registry,
       workDir: "/tmp",
-      enableThinking: false,
       shouldContinueAfterStop: async ({ lastMessage }) => {
         stopCount++;
         seenPrompts.push(lastMessage.content);
@@ -145,7 +143,6 @@ describe("AgentEngine + shouldContinueAfterStop", () => {
       provider,
       registry,
       workDir: "/tmp",
-      enableThinking: false,
       shouldContinueAfterStop: () => {
         called++;
         // 返回 void
@@ -173,7 +170,6 @@ describe("AgentEngine + shouldContinueAfterStop", () => {
       registry,
       workDir: "/tmp",
       maxTurns: 50,
-      enableThinking: false,
       shouldContinueAfterStop: (() => {
         let continues = 0;
         const MAX_CONTINUES = 2; // host 自己的限制
@@ -213,7 +209,6 @@ describe("AgentEngine + shouldContinueAfterStop", () => {
       provider,
       registry,
       workDir: "/tmp",
-      enableThinking: false,
       // 故意不传 shouldContinueAfterStop
     });
 
@@ -241,7 +236,6 @@ describe("AgentEngine + shouldContinueAfterStop", () => {
       provider,
       registry,
       workDir: "/tmp",
-      enableThinking: false,
       shouldContinueAfterStop: async () => {
         stopCount++;
         if (stopCount === 1) return { continue: true }; // 无 continuePrompt
@@ -266,7 +260,6 @@ describe("AgentEngine + shouldContinueAfterStop", () => {
       provider,
       registry,
       workDir: "/tmp",
-      enableThinking: false,
       shouldContinueAfterStop: async (info) => {
         infos.push(info);
         return { continue: false };

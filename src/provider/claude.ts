@@ -314,7 +314,7 @@ export class ClaudeProvider implements LLMProvider {
     };
     if (systemPrompt) body.system = systemPrompt;
     if (thinkingConfig) body.thinking = thinkingConfig;
-    // 慢思考支撑:availableTools 为空时不挂载 tools
+    // 无可用工具时不挂载 tools
     if (availableTools.length > 0) {
       body.tools = availableTools.map((t) => {
         const schema = t.inputSchema as {

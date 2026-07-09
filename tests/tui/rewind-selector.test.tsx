@@ -132,6 +132,36 @@ describe("RewindSelector", () => {
     expect(onConfirm).not.toHaveBeenCalled();
   });
 
+  it("快照超过可见上限时默认高亮最新可见项，Enter 预览同一项", () => {
+    const snapshots = Array.from({ length: 9 }, (_, index) =>
+      snapshotSummary(`turn-${index + 1}`),
+    );
+    const state = createRewindSelectorState(snapshots);
+
+    const output = formatRewindSelectorState("session-1", snapshots, state, { maxItems: 7 });
+    const preview = selectRewindPreview(state, snapshots, emptyDiffStat("unused"));
+
+    expect(output).not.toContain("turn-1");
+    expect(output).toContain("> turn-9");
+    expect(preview).toMatchObject({ phase: "confirm", messageId: "turn-9" });
+  });
+
+  it("旧初始索引落在隐藏区时，屏幕高亮项和 Enter 预览项保持一致", () => {
+    const snapshots = Array.from({ length: 9 }, (_, index) =>
+      snapshotSummary(`turn-${index + 1}`),
+    );
+    const legacyState = { phase: "select" as const, selectedIndex: 0 };
+
+    const output = formatRewindSelectorState("session-1", snapshots, legacyState, {
+      maxItems: 7,
+    });
+    const preview = selectRewindPreview(legacyState, snapshots, emptyDiffStat("unused"));
+
+    expect(output).toContain("> turn-1");
+    expect(output).not.toContain("turn-9");
+    expect(preview).toMatchObject({ phase: "confirm", messageId: "turn-1" });
+  });
+
   it("上下移动会在可见快照间循环选择，Enter 只进入 preview", () => {
     const snapshots = [
       snapshotSummary("turn-1"),

@@ -120,7 +120,7 @@ export class OpenAIProvider implements LLMProvider {
       model: this.config.model,
       messages: openaiMsgs,
     };
-    // 慢思考支撑:availableTools 为空时不挂载 tools,模型只能纯文本输出
+    // 无可用工具时不挂载 tools,模型只能纯文本输出
     if (availableTools.length > 0) {
       body.tools = availableTools.map((t) => ({
         type: "function",
@@ -289,7 +289,7 @@ export class OpenAIProvider implements LLMProvider {
 
     // 解析 SSE 流
     let fullContent = "";
-    const toolCallAccumulator = new Map<number, { id: string; name: string; arguments: string }>();
+    const toolCallAccumulator = new Map<number, { id?: string; name?: string; arguments: string }>();
     let usage: Usage | undefined;
 
     const reader = resp.body.getReader();
@@ -331,20 +331,17 @@ export class OpenAIProvider implements LLMProvider {
             // 工具调用 delta(分片累积)
             if (delta.tool_calls) {
               for (const tc of delta.tool_calls) {
-                const existing = toolCallAccumulator.get(tc.index);
-                if (existing) {
-                  // 后续分片:追加 arguments
-                  if (tc.function?.arguments) {
-                    existing.arguments += tc.function.arguments;
-                  }
-                } else {
-                  // 第一个分片:带 id 和 name
-                  toolCallAccumulator.set(tc.index, {
-                    id: tc.id ?? "",
-                    name: tc.function?.name ?? "",
-                    arguments: tc.function?.arguments ?? "",
-                  });
+                const existing = toolCallAccumulator.get(tc.index) ?? { arguments: "" };
+                if (tc.id) {
+                  existing.id = tc.id;
                 }
+                if (tc.function?.name) {
+                  existing.name = tc.function.name;
+                }
+                if (tc.function?.arguments) {
+                  existing.arguments += tc.function.arguments;
+                }
+                toolCallAccumulator.set(tc.index, existing);
               }
             }
 
@@ -362,11 +359,13 @@ export class OpenAIProvider implements LLMProvider {
       }
     }
 
-    const toolCalls: ToolCall[] = [...toolCallAccumulator.values()].map((tc) => ({
-      id: tc.id,
-      name: tc.name,
-      arguments: tc.arguments,
-    }));
+    const toolCalls: ToolCall[] = [];
+    for (const [index, tc] of toolCallAccumulator) {
+      if (!tc.id || !tc.name) {
+        throw new Error(`OpenAI 流式工具调用缺少必要字段(index=${index})`);
+      }
+      toolCalls.push({ id: tc.id, name: tc.name, arguments: tc.arguments });
+    }
 
     return {
       role: "assistant",

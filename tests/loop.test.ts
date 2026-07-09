@@ -5,10 +5,11 @@
 //
 // 第 11 讲:引擎改为 Session 驱动,测试改为构造 Session 后调用 engine.run(session)。
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { AgentEngine } from "../src/engine/loop.js";
 import { Session } from "../src/engine/session.js";
 import { IterationBudget } from "../src/engine/budget.js";
+import type { Reporter } from "../src/engine/reporter.js";
 import { LLMStatusError } from "../src/provider/errors.js";
 import type { LLMProvider } from "../src/provider/interface.js";
 import type { Message, ToolCall, ToolDefinition, ToolResult } from "../src/schema/message.js";
@@ -29,8 +30,7 @@ class ScriptedProvider implements LLMProvider {
 }
 
 /**
- * Thinking 感知 Mock:根据 availableTools 是否为空区分两阶段。
- * 记录每次调用收到的 tools 数量,供测试断言 Thinking 阶段确实传了空数组。
+ * 工具感知 Mock:记录每次调用收到的 tools 数量,供测试断言不会再触发空 tools 规划请求。
  */
 class ThinkingAwareProvider implements LLMProvider {
   readonly calls: { toolsCount: number }[] = [];
@@ -38,7 +38,7 @@ class ThinkingAwareProvider implements LLMProvider {
   async generate(_msgs: Message[], availableTools: ToolDefinition[]): Promise<Message> {
     this.calls.push({ toolsCount: availableTools.length });
     if (availableTools.length === 0) {
-      // Phase 1: 慢思考 —— 返回纯文本规划
+      // 旧两阶段实现会在空 tools 时返回规划文本;新实现不应触发这条路径。
       return { role: "assistant", content: "我计划先读文件再下结论。" };
     }
     // Phase 2: 行动 —— 第一次调工具,第二次给最终答案
@@ -51,6 +51,22 @@ class ThinkingAwareProvider implements LLMProvider {
       };
     }
     return { role: "assistant", content: "完成" };
+  }
+}
+
+class StreamingProvider implements LLMProvider {
+  async generate(): Promise<Message> {
+    return { role: "assistant", content: "non-stream" };
+  }
+
+  async generateStream(
+    _msgs: Message[],
+    _tools: ToolDefinition[],
+    onDelta: (delta: string) => void,
+  ): Promise<Message> {
+    onDelta("runtime ");
+    onDelta("delta");
+    return { role: "assistant", content: "runtime delta" };
   }
 }
 
@@ -88,7 +104,37 @@ function newSession(prompt: string, workDir = "/tmp"): Session {
   return sess;
 }
 
+function reporter(onTextDelta?: (delta: string) => void): Reporter {
+  return {
+    onThinking() {},
+    onToolCall() {},
+    onToolResult() {},
+    onMessage() {},
+    onStart() {},
+    onTurnStart() {},
+    onFinish() {},
+    ...(onTextDelta ? { onTextDelta } : {}),
+  };
+}
+
 describe("AgentEngine Main Loop", () => {
+  it("run 传入的 runtimeReporter 接收本轮 stream delta", async () => {
+    const constructorDelta = vi.fn();
+    const runtimeDelta = vi.fn();
+    const engine = new AgentEngine({
+      provider: new StreamingProvider(),
+      registry: new MockRegistry(),
+      workDir: "/tmp",
+      reporter: reporter(constructorDelta),
+    });
+
+    await engine.run(newSession("hi"), reporter(runtimeDelta));
+
+    expect(runtimeDelta).toHaveBeenCalledTimes(2);
+    expect(runtimeDelta.mock.calls.map((call) => call[0])).toEqual(["runtime ", "delta"]);
+    expect(constructorDelta).not.toHaveBeenCalled();
+  });
+
   it("执行一轮工具调用后收到最终答案即退出", async () => {
     const provider = new ScriptedProvider([
       {
@@ -169,7 +215,7 @@ describe("AgentEngine Main Loop", () => {
     expect(session.getHistory().at(-1)?.content).toBe("ok");
   });
 
-  it("开启 enableThinking 后,每轮行动前先发起空 tools 的慢思考", async () => {
+  it("不再执行应用层两阶段 thinking,每轮只发起一次带工具请求", async () => {
     const provider = new ThinkingAwareProvider();
     const registry = new MockRegistry();
     const engine = new AgentEngine({
@@ -177,37 +223,31 @@ describe("AgentEngine Main Loop", () => {
       registry,
       workDir: "/tmp",
       enableThinking: true,
-    });
+    } as ConstructorParameters<typeof AgentEngine>[0] & { enableThinking: boolean });
 
     const session = newSession("复杂任务");
     await engine.run(session);
 
-    // 每一轮都应有一次 toolsCount===0 (Thinking) 紧跟一次 toolsCount>0 (Action)
-    // 共两轮 → 4 次 generate 调用
-    expect(provider.calls).toHaveLength(4);
-    expect(provider.calls[0]!.toolsCount).toBe(0); // Turn1 Thinking
-    expect(provider.calls[1]!.toolsCount).toBeGreaterThan(0); // Turn1 Action
-    expect(provider.calls[2]!.toolsCount).toBe(0); // Turn2 Thinking
-    expect(provider.calls[3]!.toolsCount).toBeGreaterThan(0); // Turn2 Action
-
-    // Turn1 的思考 trace 应作为 assistant 消息出现在 Session 历史中
-    const thinkMsg = session
-      .getHistory()
-      .find((m) => m.role === "assistant" && m.content === "我计划先读文件再下结论。");
-    expect(thinkMsg).toBeDefined();
+    // 共两轮:一轮工具调用,一轮最终回答。没有额外的空 tools planning 请求。
+    expect(provider.calls).toHaveLength(2);
+    expect(provider.calls.every((c) => c.toolsCount > 0)).toBe(true);
+    expect(
+      session
+        .getHistory()
+        .some((m) => m.role === "assistant" && m.content === "我计划先读文件再下结论。"),
+    ).toBe(false);
 
     // 工具仍被调用一次
     expect(registry.executed).toHaveLength(1);
   });
 
-  it("关闭 enableThinking 时,不发起 Thinking 请求", async () => {
+  it("默认不发起空 tools 的 Thinking 请求", async () => {
     const provider = new ThinkingAwareProvider();
     const registry = new MockRegistry();
     const engine = new AgentEngine({
       provider,
       registry,
       workDir: "/tmp",
-      enableThinking: false,
     });
 
     await engine.run(newSession("简单任务"));
@@ -251,7 +291,7 @@ describe("AgentEngine Main Loop", () => {
       }
     })();
 
-    const engine = new AgentEngine({ provider, registry, workDir: "/tmp", enableThinking: false });
+    const engine = new AgentEngine({ provider, registry, workDir: "/tmp" });
     const start = Date.now();
     const session = newSession("并发读");
     await engine.run(session);
@@ -304,7 +344,7 @@ describe("AgentEngine Main Loop", () => {
       }
     })();
 
-    const engine = new AgentEngine({ provider, registry, workDir: "/tmp", enableThinking: false });
+    const engine = new AgentEngine({ provider, registry, workDir: "/tmp" });
     const start = Date.now();
     await engine.run(newSession("写读同文件"));
     const elapsed = Date.now() - start;
@@ -346,7 +386,7 @@ describe("AgentEngine Main Loop", () => {
       }
     })();
 
-    const engine = new AgentEngine({ provider, registry, workDir: "/tmp", enableThinking: false });
+    const engine = new AgentEngine({ provider, registry, workDir: "/tmp" });
     const start = Date.now();
     await engine.run(newSession("并发写不同文件"));
     const elapsed = Date.now() - start;
@@ -383,7 +423,7 @@ describe("AgentEngine Main Loop", () => {
       }
     })();
     const registry = new MockRegistry();
-    const engine = new AgentEngine({ provider, registry, workDir: "/tmp", enableThinking: false });
+    const engine = new AgentEngine({ provider, registry, workDir: "/tmp" });
 
     // 第一轮:一次 run 内完成工具调用 + 最终答案
     const session = newSession("第一轮任务");
@@ -483,7 +523,6 @@ describe("AgentEngine Main Loop", () => {
       provider: oldProvider,
       registry: new MockRegistry(),
       workDir: "/tmp",
-      enableThinking: true,
       rebuildProvider: () => newProvider,
     });
 
@@ -491,7 +530,7 @@ describe("AgentEngine Main Loop", () => {
     await engine.run(session);
 
     expect(oldProviderCalls).toHaveLength(1);
-    expect(newProviderCalls).toEqual([{ toolsCount: 0 }, { toolsCount: 1 }]);
+    expect(newProviderCalls).toEqual([{ toolsCount: 1 }]);
     expect(session.getHistory().at(-1)?.content).toBe("最终答案");
   });
 

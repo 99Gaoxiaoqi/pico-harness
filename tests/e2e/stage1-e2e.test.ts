@@ -19,29 +19,38 @@ import {
 } from "../../src/tools/registry-impl.js";
 import type { ToolCall } from "../../src/schema/message.js";
 
-// 加载 .env
-const envContent = readFileSync(".env", "utf8");
-for (const line of envContent.split("\n")) {
-  const m = line.match(/^([^#=]+)=(.*)$/);
-  if (m && !process.env[m[1].trim()]) {
-    process.env[m[1].trim()] = m[2].trim();
+function readDotEnv(): Record<string, string> {
+  try {
+    const envContent = readFileSync(".env", "utf8");
+    return Object.fromEntries(
+      envContent
+        .split("\n")
+        .map((line) => line.match(/^([^#=]+)=(.*)$/))
+        .filter((m): m is RegExpMatchArray => !!m)
+        .map((m) => [m[1]!.trim(), m[2]!.trim()]),
+    );
+  } catch {
+    return {};
   }
 }
 
-const BASE_URL = process.env.LLM_BASE_URL!;
-const API_KEY = process.env.LLM_API_KEY!;
-const MODEL = process.env.LLM_MODEL!;
+const dotEnv = readDotEnv();
+const BASE_URL = process.env.LLM_BASE_URL ?? dotEnv.LLM_BASE_URL;
+const API_KEY = process.env.LLM_API_KEY ?? dotEnv.LLM_API_KEY;
+const MODEL = process.env.LLM_MODEL ?? dotEnv.LLM_MODEL;
+const RUN_LLM_E2E = process.env.RUN_LLM_E2E === "1" || process.env.PICO_LLM_E2E === "1";
+const describeRealLLM = RUN_LLM_E2E && BASE_URL && API_KEY && MODEL ? describe : describe.skip;
 
 describe("阶段 1 端到端测试", { timeout: 60000 }, () => {
   // ──────────────────────────────────────────────
   // 测试 1: 真实流式输出
   // ──────────────────────────────────────────────
-  describe("流式输出 (真实 API)", () => {
+  describeRealLLM("流式输出 (真实 API)", () => {
     it("generateStream 回调被多次触发，delta 拼接等于最终 content", async () => {
       const provider = new OpenAIProvider({
-        baseURL: BASE_URL,
-        apiKey: API_KEY,
-        model: MODEL,
+        baseURL: BASE_URL!,
+        apiKey: API_KEY!,
+        model: MODEL!,
       });
 
       const deltas: string[] = [];
@@ -66,9 +75,9 @@ describe("阶段 1 端到端测试", { timeout: 60000 }, () => {
 
     it("流式模式下的工具调用累积正确", async () => {
       const provider = new OpenAIProvider({
-        baseURL: BASE_URL,
-        apiKey: API_KEY,
-        model: MODEL,
+        baseURL: BASE_URL!,
+        apiKey: API_KEY!,
+        model: MODEL!,
       });
 
       const deltas: string[] = [];

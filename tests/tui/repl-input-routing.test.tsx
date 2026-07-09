@@ -6,6 +6,7 @@ import { renderToString } from "ink";
 import { describe, expect, it, vi } from "vitest";
 import { createBuiltinCommandRegistry } from "../../src/input/builtin-commands.js";
 import { createPicoCommandRegistry } from "../../src/input/pico-command-registry.js";
+import { globalApprovalManager } from "../../src/approval/manager.js";
 import { RunningInputQueue } from "../../src/tui/running-input-queue.js";
 import type { CliSessionBrowserSummary } from "../../src/tui/session-browser-adapter.js";
 import { TuiReporter } from "../../src/tui/tui-reporter.js";
@@ -244,6 +245,71 @@ describe("TUI input routing", () => {
 
     expect(runAgent).toHaveBeenCalledWith("Review the current changes.");
     expect(snapshots.at(0)).toEqual([{ kind: "user", content: "/review" }]);
+  });
+
+  it("runTuiAgentPrompt routes approval notices into TUI dialog and approval tool status", async () => {
+    const { reporter, snapshots } = harness();
+    const openDialog = vi.fn();
+    const runAgent = vi.fn(async (_options, deps) => {
+      reporter.onToolCall("write_file", JSON.stringify({ path: "AIHOT.md", content: "# daily" }));
+      deps.approvalNotifier?.({
+        taskId: "call_1",
+        toolName: "write_file",
+        args: JSON.stringify({ path: "AIHOT.md", content: "# daily" }),
+        message: "approval",
+      });
+      return {
+        sessionId: "tui-session",
+        sessionSelection: { mode: "new" as const, sessionId: "tui-session" },
+        workDir: process.cwd(),
+        finalMessage: "",
+        usage: { promptTokens: 0, completionTokens: 0, costCNY: 0 },
+        messages: [],
+      };
+    });
+
+    await runTuiAgentPrompt(
+      {
+        prompt: "write",
+        dir: process.cwd(),
+        session: "tui-session",
+      },
+      {
+        reporter,
+        runAgent,
+        openDialog,
+      },
+    );
+
+    expect(openDialog).toHaveBeenCalledWith(expect.objectContaining({ id: "approval:pending" }));
+    expect(snapshots.at(-1)).toEqual([
+      expect.objectContaining({ kind: "tool", name: "write_file", status: "approval" }),
+    ]);
+  });
+
+  it("approval command is handled locally and resolves a pending approval", async () => {
+    const { reporter, snapshots, runAgent, exit, registry, workDir } = harness();
+    globalApprovalManager.clear();
+    const approval = globalApprovalManager.waitForApproval(
+      "call_local",
+      "write_file",
+      JSON.stringify({ path: "AIHOT.md", content: "# daily" }),
+      () => undefined,
+    );
+
+    await handleTuiInputSubmission("approve call_local", {
+      reporter,
+      registry,
+      workDir,
+      runAgent,
+      exit,
+    });
+
+    await expect(approval).resolves.toMatchObject({ allowed: true });
+    expect(runAgent).not.toHaveBeenCalled();
+    expect(snapshots.at(-1)).toEqual([
+      { kind: "system", content: "Approval approve: call_local" },
+    ]);
   });
 
   it("mention-expanded prompt 继续走 runAgentFromCli", async () => {

@@ -12,8 +12,8 @@
 //   退出时恢复主屏),彻底杜绝重复输出。
 //   alt buffer 下 ink 只重绘可视区域(差分渲染),历史条目靠 React.memo 零 diff。
 
-import React, { memo } from "react";
-import { Box, useApp, useInput } from "ink";
+import React, { memo, useEffect, useMemo, useState } from "react";
+import { Box, useApp, useInput, useWindowSize } from "ink";
 import { appendFileSync } from "node:fs";
 import { InputBox } from "./input-box.js";
 import type {
@@ -31,6 +31,7 @@ import { LayoutShell } from "./layout-shell.js";
 import { MessageList } from "./message-list.js";
 import { StatusBar } from "./status-bar.js";
 import type { TuiEntry } from "./tui-reporter.js";
+import { resolveKeybinding } from "./keybindings/resolver.js";
 
 /** 诊断日志:写文件(绕过 ink patchConsole 劫持),只在 TUI_DEBUG 时 */
 function dbg(msg: string): void {
@@ -66,6 +67,9 @@ export interface AppProps {
   dialogRequests?: DialogRequest[];
   /** 用户提交一条消息时触发(repl 调 engine.run) */
   onSubmit: (text: string) => void;
+  onInterrupt?: () => void;
+  onExit?: () => void;
+  onRedraw?: () => void;
 }
 
 export function App({
@@ -82,15 +86,45 @@ export function App({
   fileMentionSuggestions,
   dialogRequests = [],
   onSubmit,
+  onInterrupt,
+  onExit,
+  onRedraw,
 }: AppProps): React.ReactNode {
   const { exit } = useApp();
+  const { rows } = useWindowSize();
+  const transcriptRows = Math.max(6, rows - 8);
+  const transcriptTotalRows = useMemo(() => estimateTranscriptRows(entries), [entries]);
+  const [transcriptScrollRows, setTranscriptScrollRows] = useState<number | null>(null);
 
-  // Ctrl+C 退出(ink 默认不���,需手动)
-  useInput((_input, key) => {
-    if (key.ctrl && _input === "c") {
+  useInput((input, key) => {
+    const transcriptAction = resolveTranscriptScrollKey(key);
+    if (transcriptAction) {
+      setTranscriptScrollRows((current) =>
+        nextTranscriptScroll(current, transcriptAction, transcriptRows, transcriptTotalRows),
+      );
+      return;
+    }
+
+    const action = resolveAppKeyEvent(input, key, running);
+    if (action === "interrupt") {
+      onInterrupt?.();
+      return;
+    }
+    if (action === "redraw") {
+      onRedraw?.();
+      return;
+    }
+    if (action === "exit") {
+      onExit?.();
       exit();
     }
   });
+
+  useEffect(() => {
+    setTranscriptScrollRows((current) =>
+      current === null ? null : clampScrollRows(current, transcriptRows, transcriptTotalRows),
+    );
+  }, [transcriptRows, transcriptTotalRows]);
 
   // 是否仍有"主动流式":running 且末尾是流式 assistant / thinking / running tool
   const isStreaming = running && isActivelyStreaming(entries);
@@ -122,8 +156,18 @@ export function App({
   const transcript = (
     <>
       {/* 消息列表:统一走 MessageList,由 shouldRenderStatically + MessageRow.memo 控制静态行。 */}
-      <Box flexDirection="column" paddingX={1}>
-        <MessageList entries={entries} isStreaming={isStreaming} />
+      <Box flexDirection="column" height={transcriptRows} overflowY="hidden" paddingX={1}>
+        <MessageList
+          entries={entries}
+          isStreaming={isStreaming}
+          viewportRows={transcriptRows}
+          scrollOffsetRows={transcriptScrollRows ?? 0}
+          estimatedRowHeight={2}
+          overscanRows={0}
+          virtualizeThreshold={0}
+          scrollToBottom={transcriptScrollRows === null}
+          preserveVirtualSpacers={false}
+        />
       </Box>
 
       {/* 思考/spinner:据末尾状态显示对应 mode */}
@@ -168,6 +212,37 @@ export function App({
 
 const StableLogoPanel = memo(LogoPanel);
 
+export type AppGlobalAction = "interrupt" | "exit" | "redraw";
+type TranscriptScrollAction = "pageUp" | "pageDown" | "lineUp" | "lineDown" | "top" | "bottom";
+
+export function resolveAppKeyEvent(
+  input: string,
+  key: {
+    ctrl?: boolean;
+    shift?: boolean;
+    meta?: boolean;
+    tab?: boolean;
+    return?: boolean;
+    upArrow?: boolean;
+    downArrow?: boolean;
+    leftArrow?: boolean;
+    rightArrow?: boolean;
+    home?: boolean;
+    end?: boolean;
+    backspace?: boolean;
+    delete?: boolean;
+    escape?: boolean;
+  },
+  running: boolean,
+): AppGlobalAction | null {
+  const resolved = resolveKeybinding({ input, key }, "Global");
+  if (!resolved || resolved.kind !== "action") return null;
+  if (resolved.action === "app:interrupt") return running ? "interrupt" : null;
+  if (resolved.action === "app:exit") return "exit";
+  if (resolved.action === "app:redraw") return "redraw";
+  return null;
+}
+
 /**
  * 判断当前是否"主动流式":末尾是流式 assistant,或 thinking/running tool 占位。
  */
@@ -189,4 +264,72 @@ function pickSpinnerMode(entries: TuiEntry[], isStreaming: boolean): SpinnerMode
   if (last.kind === "tool" && last.status === "running") return "tool-use";
   if (last.kind === "assistant" && isStreaming) return "responding";
   return "requesting";
+}
+
+export function resolveTranscriptScrollKey(key: {
+  ctrl?: boolean;
+  pageUp?: boolean;
+  pageDown?: boolean;
+  upArrow?: boolean;
+  downArrow?: boolean;
+  home?: boolean;
+  end?: boolean;
+}): TranscriptScrollAction | null {
+  if (key.pageUp) return "pageUp";
+  if (key.pageDown) return "pageDown";
+  if (key.ctrl && key.upArrow) return "lineUp";
+  if (key.ctrl && key.downArrow) return "lineDown";
+  if (key.ctrl && key.home) return "top";
+  if (key.ctrl && key.end) return "bottom";
+  return null;
+}
+
+export function nextTranscriptScroll(
+  current: number | null,
+  action: TranscriptScrollAction,
+  viewportRows: number,
+  totalRows: number,
+): number | null {
+  const maxScroll = maxTranscriptScroll(viewportRows, totalRows);
+  const currentOffset = current ?? maxScroll;
+  const page = Math.max(1, viewportRows - 2);
+
+  switch (action) {
+    case "pageUp":
+      return clampScrollRows(currentOffset - page, viewportRows, totalRows);
+    case "pageDown": {
+      const next = clampScrollRows(currentOffset + page, viewportRows, totalRows);
+      return next >= maxScroll ? null : next;
+    }
+    case "lineUp":
+      return clampScrollRows(currentOffset - 1, viewportRows, totalRows);
+    case "lineDown": {
+      const next = clampScrollRows(currentOffset + 1, viewportRows, totalRows);
+      return next >= maxScroll ? null : next;
+    }
+    case "top":
+      return 0;
+    case "bottom":
+      return null;
+  }
+}
+
+function clampScrollRows(offset: number, viewportRows: number, totalRows: number): number {
+  return Math.min(Math.max(0, offset), maxTranscriptScroll(viewportRows, totalRows));
+}
+
+function maxTranscriptScroll(viewportRows: number, totalRows: number): number {
+  return Math.max(0, totalRows - Math.max(1, viewportRows));
+}
+
+function estimateTranscriptRows(entries: readonly TuiEntry[]): number {
+  return entries.reduce((total, entry) => total + estimateEntryRows(entry), 0);
+}
+
+function estimateEntryRows(entry: TuiEntry): number {
+  if (entry.kind === "thinking") return 1;
+  if (entry.kind === "tool") return entry.summary ? 2 : 1;
+  const content = entry.kind === "user" || entry.kind === "assistant" || entry.kind === "system" ? entry.content : "";
+  const logicalLines = content.split("\n").length;
+  return Math.max(1, logicalLines) + 1;
 }

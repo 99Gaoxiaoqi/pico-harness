@@ -136,11 +136,14 @@ export function formatModelSelector(
   const maxItems = options.maxItems ?? 12;
   const maxNameLength = options.maxNameLength ?? MODEL_NAME_DISPLAY_WIDTH;
   const maxDescriptionLength = options.maxDescriptionLength ?? MODEL_DESCRIPTION_DISPLAY_WIDTH;
-  const visible = models.slice(0, maxItems);
+  const selectedIndex = clampSelection(state.selectedIndex, models.length);
+  const firstVisibleIndex = visibleWindowStart(selectedIndex, models.length, maxItems);
+  const visible = models.slice(firstVisibleIndex, firstVisibleIndex + maxItems);
   const lines = ["Models"];
 
   for (const [index, model] of visible.entries()) {
-    const selected = index === state.selectedIndex;
+    const modelIndex = firstVisibleIndex + index;
+    const selected = modelIndex === selectedIndex;
     const current = model.id === options.currentModelId;
     const marker = selected ? "›" : " ";
     const currentLabel = current ? " [current]" : "";
@@ -170,4 +173,15 @@ function truncateInline(value: string, maxLength: number): string {
 
 function modulo(value: number, divisor: number): number {
   return ((value % divisor) + divisor) % divisor;
+}
+
+function clampSelection(index: number, itemCount: number): number {
+  if (itemCount <= 0) return 0;
+  return Math.min(Math.max(0, index), itemCount - 1);
+}
+
+function visibleWindowStart(selectedIndex: number, itemCount: number, maxItems: number): number {
+  const visibleCount = Math.max(1, maxItems);
+  if (itemCount <= visibleCount) return 0;
+  return Math.min(Math.max(0, selectedIndex - visibleCount + 1), itemCount - visibleCount);
 }

@@ -15,12 +15,14 @@
 import React, { useState } from "react";
 import { Box, Text, useInput } from "ink";
 import { formatOutputPreview } from "./diff-preview.js";
+import { compactText, compactToolName, summarizeToolTarget } from "./tool-format.js";
 
 /** 参数里需要高亮(青色)的关键字段,按优先级排序 */
 const HIGHLIGHT_KEYS = ["path", "command", "url", "query", "file", "pattern"] as const;
 export type ToolCardStatus =
   | "queued"
   | "running"
+  | "approval"
   | "success"
   | "error"
   | "denied"
@@ -58,6 +60,7 @@ export function ToolCard(props: {
       args={args}
       status={status}
       summary={summary}
+      isLast={isLast}
       initialExpanded={initialExpanded}
     />
   );
@@ -68,21 +71,28 @@ function StandardToolCard({
   args,
   status,
   summary,
+  isLast,
   initialExpanded,
 }: {
   name: string;
   args: string;
   status: ToolCardStatus;
   summary?: string;
+  isLast: boolean;
   initialExpanded?: boolean;
 }): React.ReactNode {
   const [expanded, setExpanded] = useState(initialExpanded ?? false);
-  const target = toolTargetSummary(name, args);
+  const canToggle = isLast || initialExpanded !== undefined;
+  const showDetails = canToggle && expanded;
+  const target = summarizeToolTarget(name, args, 30);
+  const grouped = args.includes("\"groupedCount\"");
   const failure = isFailureStatus(status);
   const displaySummary = summary && failure ? ensureErrorSummary(summary) : summary;
-  const preview = displaySummary ? toolResultPreview(displaySummary, expanded) : undefined;
+  const resultBadge = displaySummary && (failure || grouped || !target) ? toolResultBadge(displaySummary, failure) : undefined;
+  const resultDetails = displaySummary ? toolResultPreview(displaySummary, showDetails) : undefined;
 
   useInput((_input, key) => {
+    if (!canToggle) return;
     if (key.return) return;
     if (_input === "e" && !key.ctrl && !key.meta) {
       setExpanded((open) => !open);
@@ -93,31 +103,38 @@ function StandardToolCard({
     <Box flexDirection="column" marginLeft={2}>
       <Box>
         <Text dimColor>⎿ </Text>
-        <Text color="cyan">{name}</Text>
-        {target && <Text dimColor> ({target})</Text>}
-        <Text dimColor> · </Text>
-        <ToolStatus status={status} />
-        {preview && (
+        <Text color="cyan">{compactToolName(name)}</Text>
+        {target && (
           <>
             <Text dimColor> · </Text>
-            <Text color={failure ? "red" : undefined} dimColor={!failure} wrap="truncate">
-              {resultHint(preview)}
+            <Text dimColor wrap="truncate">
+              {target}
             </Text>
           </>
         )}
-        <Text dimColor> {expanded ? "[e 折叠]" : "[e 展开]"}</Text>
+        <Text dimColor> · </Text>
+        <ToolStatus status={status} />
+        {resultBadge && (
+          <>
+            <Text dimColor> · </Text>
+            <Text color={failure ? "red" : undefined} dimColor={!failure} wrap="truncate">
+              {resultBadge}
+            </Text>
+          </>
+        )}
+        {canToggle && <Text dimColor> {showDetails ? "[e 折叠]" : "[e 展开]"}</Text>}
       </Box>
-      {expanded && (
+      {showDetails && (
         <Box flexDirection="column" marginLeft={2}>
           <Box>
             <Text dimColor>参数 </Text>
             <ArgsView args={args} />
           </Box>
-          {summary && (
+          {resultDetails && (
             <Box flexDirection="column">
               <Text dimColor>结果 </Text>
               <Text color={failure ? "red" : undefined} dimColor={!failure} wrap="wrap">
-                {preview}
+                {resultDetails}
               </Text>
             </Box>
           )}
@@ -143,6 +160,8 @@ function AgentToolProgressLine({
   initialExpanded?: boolean;
 }): React.ReactNode {
   const [expanded, setExpanded] = useState(initialExpanded ?? false);
+  const canToggle = isLast || initialExpanded !== undefined;
+  const showDetails = canToggle && expanded;
   const treeChar = isLast ? "└─" : "├─";
   const branchChar = isLast ? "   ⎿  " : "│  ⎿  ";
   const meta = agentToolMeta(name, args);
@@ -151,6 +170,7 @@ function AgentToolProgressLine({
   const preview = agentResultHint(resultText);
 
   useInput((_input, key) => {
+    if (!canToggle) return;
     if (key.return) return;
     if (_input === "e" && !key.ctrl && !key.meta) {
       setExpanded((open) => !open);
@@ -180,9 +200,9 @@ function AgentToolProgressLine({
             </Text>
           </>
         )}
-        <Text dimColor> {expanded ? "[e 折叠]" : "[e 展开]"}</Text>
+        {canToggle && <Text dimColor> {showDetails ? "[e 折叠]" : "[e 展开]"}</Text>}
       </Box>
-      {expanded && (
+      {showDetails && (
         <>
           <Box>
             <Text dimColor>{branchChar}参数 </Text>
@@ -294,29 +314,21 @@ function agentResultText(status: ToolCardStatus, summary: string | undefined): s
   return summary ? compactText(summary, 110) : "Success";
 }
 
-function compactText(text: string, max: number): string {
-  const oneLine = text.replace(/\s+/g, " ").trim();
-  return oneLine.length > max ? `${oneLine.slice(0, max - 1)}…` : oneLine;
-}
-
 function ToolStatus({ status }: { status: ToolCardStatus }): React.ReactNode {
   const normalized = normalizeStatus(status);
   if (normalized === "queued") return <Text dimColor>Queued</Text>;
   if (normalized === "running") return <Text color="yellow">Running</Text>;
+  if (normalized === "approval") return <Text color="yellow">Approval</Text>;
   if (normalized === "denied") return <Text color="red">Denied</Text>;
   if (normalized === "error") return <Text color="red">Error</Text>;
   return <Text color="green">Success</Text>;
-}
-
-function resultHint(summary: string): string {
-  return compactText(summary, 72);
 }
 
 function agentResultHint(summary: string): string {
   return compactText(summary, 24);
 }
 
-function normalizeStatus(status: ToolCardStatus): "queued" | "running" | "success" | "error" | "denied" {
+function normalizeStatus(status: ToolCardStatus): "queued" | "running" | "approval" | "success" | "error" | "denied" {
   if (status === "done") return "success";
   if (status === "failed") return "error";
   return status;
@@ -332,14 +344,25 @@ function toolResultPreview(summary: string, expanded: boolean): string {
   return expanded ? preview : compactText(preview, 120);
 }
 
-function toolTargetSummary(name: string, args: string): string | undefined {
-  if (!["edit_file", "write_file", "bash"].includes(name)) return undefined;
-  const parsed = parseArgs(args);
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
-  const obj = parsed as Record<string, unknown>;
-  const value = name === "bash" ? obj["command"] : obj["path"];
-  if (typeof value !== "string" || !value.trim()) return undefined;
-  return compactText(value.trim(), 64);
+function toolResultBadge(summary: string, failure = false): string {
+  if (failure) return compactText(summary, 44);
+
+  const grouped = summary.match(/^\d+ calls\s*·\s*([^·]+)/);
+  if (grouped?.[1]) return compactText(grouped[1], 24);
+
+  const preview = formatOutputPreview(summary, { maxLines: 1 });
+  const compactedPreview = compactText(preview, 24);
+  if (preview.includes("已截断") && compactedPreview.includes("已截断")) return compactedPreview;
+  if (preview.includes("已截断") && !compactedPreview.includes("已截断")) {
+    const firstLine = compactText(summary.split("\n").find((line) => line.trim()) ?? summary, 18);
+    return `${firstLine} · 已截断`;
+  }
+
+  const first = summary
+    .split("·")
+    .map((part) => part.trim())
+    .find(Boolean);
+  return compactText(first ?? compactedPreview, 24);
 }
 
 export function formatErrorSummary(error: string): string {

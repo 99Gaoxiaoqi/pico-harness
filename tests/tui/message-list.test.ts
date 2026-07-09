@@ -32,6 +32,32 @@ describe("MessageList virtual transcript", () => {
     expect(output).toContain("message-104");
     expect(output).not.toContain("message-105");
   });
+
+  it("渲染层折叠连续同类工具调用", () => {
+    const entries: TuiEntry[] = [
+      { kind: "assistant", content: "开始检查" },
+      {
+        kind: "tool",
+        name: "bash",
+        args: JSON.stringify({ command: "curl -s https://aihot.virxact.com/api/news" }),
+        status: "success",
+        summary: "0 字节 · ",
+      },
+      {
+        kind: "tool",
+        name: "bash",
+        args: JSON.stringify({ command: "curl -s https://aihot.virxact.com/api/daily" }),
+        status: "success",
+        summary: "0 字节 · ",
+      },
+    ];
+
+    const output = renderToString(React.createElement(MessageList, { entries }));
+
+    expect(output).toContain("bash · 2 calls");
+    expect(output).toContain("2 success");
+    expect(output).not.toContain("/api/daily");
+  });
 });
 
 function makeUserEntries(count: number): TuiEntry[] {

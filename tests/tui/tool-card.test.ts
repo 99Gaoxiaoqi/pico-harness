@@ -29,9 +29,9 @@ describe("ToolCard agent tool detection", () => {
       }),
     );
 
-    expect(output).toContain("⎿ read_file");
+    expect(output).toContain("⎿ read");
     expect(output).toContain("Success");
-    expect(output).toContain("120 字节");
+    expect(output).toContain("src/index.ts");
     expect(output).toContain("[e 展开]");
     expect(output).not.toContain("参数");
     expect(output).not.toContain("结果");
@@ -72,6 +72,7 @@ describe("ToolCard agent tool detection", () => {
         args: JSON.stringify({ path: "src/a.ts", oldText: "old", newText: "new" }),
         status: "success",
         summary: "✅ 成功修改文件: src/a.ts\n\n@@\n-old\n+new",
+        isLast: true,
       }),
     );
     const bashOutput = renderToString(
@@ -80,6 +81,7 @@ describe("ToolCard agent tool detection", () => {
         args: JSON.stringify({ command: "npm test -- --run" }),
         status: "success",
         summary: "100 字节 · pass",
+        isLast: true,
       }),
     );
 
@@ -97,6 +99,7 @@ describe("ToolCard agent tool detection", () => {
         args: JSON.stringify({ path: "src/a.ts" }),
         status: "success",
         summary,
+        isLast: true,
       }),
     );
     const expanded = renderToString(
@@ -110,12 +113,12 @@ describe("ToolCard agent tool detection", () => {
     );
 
     expect(folded).not.toContain("+ line 4");
-    expect(folded).toContain("已截断");
+    expect(folded).not.toContain("已截断");
     expect(expanded).toContain("+ line 4");
     expect(expanded).toContain("已截断");
   });
 
-  it("长结果折叠态只占一行,并显示一行摘要", () => {
+  it("长结果折叠态只占一行,目标已足够时不铺开输出", () => {
     const summary = Array.from({ length: 8 }, (_, i) => `line ${i}: ${"x".repeat(24)}`).join("\n");
     const output = renderToString(
       React.createElement(ToolCard, {
@@ -123,13 +126,15 @@ describe("ToolCard agent tool detection", () => {
         args: JSON.stringify({ path: "src/large.ts" }),
         status: "success",
         summary,
+        isLast: true,
       }),
     );
 
     expect(output.trimEnd().split("\n")).toHaveLength(1);
-    expect(output).toContain("line 0");
+    expect(output).toContain("src/large.ts");
+    expect(output).not.toContain("line 0");
     expect(output).not.toContain("line 2");
-    expect(output).toContain("已截断");
+    expect(output).not.toContain("已截断");
   });
 
   it("error/denied 折叠态使用可读错误摘要", () => {
@@ -139,6 +144,7 @@ describe("ToolCard agent tool detection", () => {
         args: JSON.stringify({ command: "npm test" }),
         status: "error",
         summary: "\n\nError: command failed\n    at stack line\nmore details",
+        isLast: true,
       }),
     );
     const deniedOutput = renderToString(
@@ -147,6 +153,7 @@ describe("ToolCard agent tool detection", () => {
         args: JSON.stringify({ command: "rm -rf /" }),
         status: "denied",
         summary: "permissionDecision: deny\ncommand rejected by policy",
+        isLast: true,
       }),
     );
 
@@ -174,6 +181,7 @@ describe("ToolCard agent tool detection", () => {
           goal: "检查子代理状态展示是否接近 Claude Code",
         }),
         status: "running",
+        isLast: true,
       }),
     );
 
@@ -191,14 +199,66 @@ describe("ToolCard agent tool detection", () => {
           tasks: [{ goal: longGoal }, { goal: "运行测试" }, { goal: "整理报告" }],
         }),
         status: "running",
+        isLast: true,
       }),
     );
 
     expect(output).toContain("3 agents");
     expect(output).toContain("1/3 queued");
-    expect(output).toContain("分析很长很长");
+    expect(output).toContain("分析");
     expect(output).not.toContain(longGoal);
     expect(output.split("\n")).toHaveLength(1);
+  });
+});
+
+describe("ToolCard collapsed layout", () => {
+  it("历史标准工具卡不显示展开入口,避免 e 一次展开全部", () => {
+    const output = renderToString(
+      React.createElement(ToolCard, {
+        name: "bash",
+        args: JSON.stringify({ command: 'curl -s "https://aihot.virxact.com/api/news?limit=20"' }),
+        status: "success",
+        summary: "0 字节 · ",
+        isLast: false,
+      }),
+    );
+
+    expect(output).toContain("⎿ bash");
+    expect(output).toContain("curl aihot.virxact");
+    expect(output).toContain("limit=20");
+    expect(output).not.toContain("[e 展开]");
+    expect(output.trimEnd().split("\n")).toHaveLength(1);
+  });
+
+  it("末条标准工具卡显示展开入口", () => {
+    const output = renderToString(
+      React.createElement(ToolCard, {
+        name: "bash",
+        args: JSON.stringify({ command: "npm test" }),
+        status: "success",
+        summary: "100 字节 · pass",
+        isLast: true,
+      }),
+    );
+
+    expect(output).toContain("[e 展开]");
+  });
+
+  it("超长单行摘要在折叠态不铺开完整内容", () => {
+    const longJson = `{"items":"${"中文内容".repeat(80)}"}`;
+    const output = renderToString(
+      React.createElement(ToolCard, {
+        name: "bash",
+        args: JSON.stringify({ command: `curl -s https://aihot.virxact.com/api/news && echo ${longJson}` }),
+        status: "success",
+        summary: `${longJson} · ${"x".repeat(500)}`,
+        isLast: true,
+      }),
+    );
+
+    expect(output.trimEnd().split("\n")).toHaveLength(1);
+    expect(output).not.toContain(longJson);
+    expect(output).toContain("…");
   });
 });
 

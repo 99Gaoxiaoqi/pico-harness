@@ -16,6 +16,7 @@ import { Box, Text } from "ink";
 import type { TuiEntry } from "./tui-reporter.js";
 import { MessageRow } from "./message-row.js";
 import { computeVirtualTranscript } from "./virtual-transcript.js";
+import { groupToolEntries } from "./tool-grouping.js";
 
 export interface MessageListProps {
   /** 待渲染的条目 */
@@ -34,6 +35,8 @@ export interface MessageListProps {
   virtualizeThreshold?: number;
   /** 可选:忽略 scrollOffsetRows,直接渲染尾部窗口 */
   scrollToBottom?: boolean;
+  /** 可选:虚拟窗口是否保留上下占位行,默认保留 */
+  preserveVirtualSpacers?: boolean;
 }
 
 /** 渲染一组 entries:逐条用 <MessageRow> 分发(轮次间加分隔线) */
@@ -46,16 +49,18 @@ export function MessageList({
   overscanRows,
   virtualizeThreshold,
   scrollToBottom,
+  preserveVirtualSpacers = true,
 }: MessageListProps): React.ReactNode {
+  const displayEntries = groupToolEntries(entries);
   const window =
     viewportRows === undefined
       ? {
-          visibleItems: entries,
+          visibleItems: displayEntries,
           startIndex: 0,
           topSpacerRows: 0,
           bottomSpacerRows: 0,
         }
-      : computeVirtualTranscript(entries, viewportRows, scrollOffsetRows, {
+      : computeVirtualTranscript(displayEntries, viewportRows, scrollOffsetRows, {
           estimatedRowHeight,
           overscanRows,
           virtualizeThreshold,
@@ -64,11 +69,11 @@ export function MessageList({
 
   return (
     <Box flexDirection="column">
-      {window.topSpacerRows > 0 && <Box height={window.topSpacerRows} />}
+      {preserveVirtualSpacers && window.topSpacerRows > 0 && <Box height={window.topSpacerRows} />}
       {window.visibleItems.map((entry, i) => {
         const originalIndex = window.startIndex + i;
-        const isLast = originalIndex === entries.length - 1;
-        const prev = entries[originalIndex - 1];
+        const isLast = originalIndex === displayEntries.length - 1;
+        const prev = displayEntries[originalIndex - 1];
         // 轮次分隔:遇到新的 user 消息,且前面已有内容时,加一条淡色分隔线
         const showSeparator = entry.kind === "user" && prev !== undefined;
         return (
@@ -82,7 +87,7 @@ export function MessageList({
           </React.Fragment>
         );
       })}
-      {window.bottomSpacerRows > 0 && <Box height={window.bottomSpacerRows} />}
+      {preserveVirtualSpacers && window.bottomSpacerRows > 0 && <Box height={window.bottomSpacerRows} />}
     </Box>
   );
 }

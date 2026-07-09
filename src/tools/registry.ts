@@ -68,6 +68,8 @@ export interface BaseTool {
 export interface Registry {
   /** 挂载一个新的工具到系统中 */
   register(tool: BaseTool): void;
+  /** 按名称卸载工具,用于动态工具生命周期清理 */
+  unregister?(name: string): boolean;
   /** 【第 16 讲】全局挂载一个安全拦截中间件 */
   use(mw: MiddlewareFunc): void;
   /** request 阶段中间件:可拦截或改写参数 */

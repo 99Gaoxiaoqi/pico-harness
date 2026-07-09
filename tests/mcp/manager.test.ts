@@ -61,6 +61,10 @@ async function waitUntil(
   return predicate();
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 describe("StdioMcpClient stdio 通信", () => {
   let client: StdioMcpClient;
 
@@ -229,6 +233,33 @@ describe("McpConnectionManager 编排", () => {
       pending: 1,
       toolCount: 0,
     });
+    expect(registry.getAvailableTools().some((tool) => tool.name.startsWith("mcp__alpha__"))).toBe(false);
+  });
+
+  it("连接成功后 server 断开会把状态标记为 failed 并移除工具", async () => {
+    const configPath = join(tmpDir, "mcp.json");
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        mcpServers: {
+          flaky: stdioConfig("flaky", ["--tools", "1", "--crash", "200"]),
+        },
+      }),
+    );
+
+    const registry = new ToolRegistry({ truncateResults: false });
+    const manager = new McpConnectionManager(registry);
+    await manager.loadConfig(configPath);
+    await manager.connectAll();
+    expect(manager.getStatus().get("flaky")?.status).toBe("connected");
+    expect(registry.getAvailableTools().map((tool) => tool.name)).toContain("mcp__flaky__echo");
+
+    const failed = await waitUntil(() => manager.getStatus().get("flaky")?.status === "failed", 1000);
+
+    expect(failed).toBe(true);
+    expect(manager.getStatus().get("flaky")?.error).toContain("意外退出");
+    expect(registry.getAvailableTools().some((tool) => tool.name.startsWith("mcp__flaky__"))).toBe(false);
+    await manager.closeAll();
   });
 
   it("自动注册工具到 Registry(名 mcp__<server>__<tool>)", async () => {
@@ -298,6 +329,33 @@ describe("McpConnectionManager 编排", () => {
     expect(result.isError).toBe(false);
 
     await manager.closeAll();
+  });
+
+  it("状态错误信息会脱敏 stderr 中的 token/password", async () => {
+    const configPath = join(tmpDir, "mcp.json");
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        mcpServers: {
+          bad: stdioConfig("bad", [
+            "--fail-startup",
+            "--stderr",
+            "api_key=sk-secret-token password=hunter2 Authorization: Bearer live-secret",
+          ]),
+        },
+      }),
+    );
+
+    const registry = new ToolRegistry({ truncateResults: false });
+    const manager = new McpConnectionManager(registry);
+    await manager.loadConfig(configPath);
+    await manager.connectAll();
+
+    const error = manager.getStatus().get("bad")?.error ?? "";
+    expect(error).toContain("[REDACTED]");
+    expect(error).not.toContain("sk-secret-token");
+    expect(error).not.toContain("hunter2");
+    expect(error).not.toContain("live-secret");
   });
 
   it("enabled:false 的 server 标记为 disabled 不连接", async () => {
@@ -469,6 +527,143 @@ describe("HttpMcpClient SSE 解析", () => {
       expect(calls).toHaveLength(3);
       await client.close();
     } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("HTTP 请求超时时会 abort 底层 fetch", async () => {
+    const originalFetch = globalThis.fetch;
+    let signal: AbortSignal | undefined;
+    globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+      signal = init?.signal ?? undefined;
+      return new Promise<Response>(() => {});
+    }) as typeof fetch;
+
+    const client = new HttpMcpClient({
+      name: "http",
+      transport: "http",
+      url: "https://mcp.example.test/rpc",
+      toolTimeoutMs: 20,
+    });
+
+    try {
+      await expect(client.connect()).rejects.toThrow(/超时/);
+      expect(signal?.aborted).toBe(true);
+    } finally {
+      await client.close().catch(() => {});
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("close 会 abort 正在进行的 HTTP IO", async () => {
+    const originalFetch = globalThis.fetch;
+    let signal: AbortSignal | undefined;
+    globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+      signal = init?.signal ?? undefined;
+      return new Promise<Response>(() => {});
+    }) as typeof fetch;
+
+    const client = new HttpMcpClient({
+      name: "http",
+      transport: "http",
+      url: "https://mcp.example.test/rpc",
+      toolTimeoutMs: 1000,
+    });
+
+    const connecting = client.connect();
+    await waitUntil(() => signal !== undefined, 200);
+    await client.close();
+
+    await expect(connecting).rejects.toThrow(/已关闭/);
+    expect(signal?.aborted).toBe(true);
+    globalThis.fetch = originalFetch;
+  });
+
+  it("HTTP SSE 读到匹配响应后会取消 reader", async () => {
+    const originalFetch = globalThis.fetch;
+    let canceled = false;
+    globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(String(init.body)) : {};
+      if (body.method === "tools/list") {
+        const stream = new ReadableStream({
+          start(controller) {
+            controller.enqueue(
+              new TextEncoder().encode(
+                `data: ${JSON.stringify({ jsonrpc: "2.0", id: body.id, result: { tools: [] } })}\n\n`,
+              ),
+            );
+          },
+          cancel() {
+            canceled = true;
+          },
+        });
+        return new Response(stream, {
+          headers: { "Content-Type": "text/event-stream" },
+        });
+      }
+      return new Response(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: body.id ?? 0,
+          result: {
+            protocolVersion: "2024-11-05",
+            capabilities: {},
+            serverInfo: { name: "http", version: "1" },
+          },
+        }),
+        { headers: { "Content-Type": "application/json" } },
+      );
+    }) as typeof fetch;
+
+    try {
+      const client = new HttpMcpClient({
+        name: "http",
+        transport: "http",
+        url: "https://mcp.example.test/rpc",
+        toolTimeoutMs: 500,
+      });
+      await client.connect();
+      await client.listTools();
+
+      expect(canceled).toBe(true);
+      await client.close();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("HTTP SSE 结束但没有匹配 request id 时立即报错", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(String(init.body)) : {};
+      const sse = `data: ${JSON.stringify({
+        jsonrpc: "2.0",
+        id: Number(body.id) + 1000,
+        result: {},
+      })}\n\n`;
+      return new Response(sse, {
+        headers: { "Content-Type": "text/event-stream" },
+      });
+    }) as typeof fetch;
+
+    const client = new HttpMcpClient({
+      name: "http",
+      transport: "http",
+      url: "https://mcp.example.test/rpc",
+      toolTimeoutMs: 5000,
+    });
+
+    try {
+      const result = await Promise.race([
+        client.connect().then(
+          () => "resolved",
+          (err: Error) => err.message,
+        ),
+        sleep(100).then(() => "still pending"),
+      ]);
+      expect(result).toContain("missing response id");
+    } finally {
+      await client.close().catch(() => {});
       globalThis.fetch = originalFetch;
     }
   });

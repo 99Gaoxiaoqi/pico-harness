@@ -36,7 +36,6 @@ async function main(): Promise<void> {
     workDir,
     provider,
     model,
-    enableThinking: values.thinking !== "false",
     thinkingEffort,
     ...(values["mcp-config"] ? { mcpConfigPath: values["mcp-config"] } : {}),
   });

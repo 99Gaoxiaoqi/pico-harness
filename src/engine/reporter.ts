@@ -11,7 +11,7 @@ const diffColors = pc.createColors(true);
 
 /** Agent 引擎向外界输出信息的规范 */
 export interface Reporter {
-  /** 当模型开始进行慢思考 (Reasoning) 时调用 */
+  /** 当 provider 输出原生 thinking/reasoning 时调用 */
   onThinking(): void;
   /** 当模型决定调用工具时调用 */
   onToolCall(toolName: string, args: string): void;
@@ -20,7 +20,7 @@ export interface Reporter {
   /** 当模型宣告任务完成,向用户输出最终纯文本回答时调用 */
   onMessage(content: string): void;
   /** 引擎启动时调用 */
-  onStart(workDir: string, enableThinking: boolean): void;
+  onStart(workDir: string): void;
   /** 每个 Turn 开始时调用 */
   onTurnStart(turn: number): void;
   /** 任务完成退出循环时调用 */
@@ -36,9 +36,8 @@ export class TerminalReporter implements Reporter {
   private spinnerFrames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
   private spinnerIdx = 0;
 
-  onStart(workDir: string, enableThinking: boolean): void {
+  onStart(workDir: string): void {
     console.log(`[Engine] 引擎启动,锁定工作区: ${workDir}`);
-    console.log(`[Engine] 慢思考模式 (Thinking Phase): ${enableThinking}`);
   }
 
   onTurnStart(turn: number): void {
@@ -46,7 +45,7 @@ export class TerminalReporter implements Reporter {
   }
 
   onThinking(): void {
-    console.log("[Engine][Phase 1] 慢思考模式...");
+    console.log("[Engine] 思考中...");
     this.startSpinner();
   }
 

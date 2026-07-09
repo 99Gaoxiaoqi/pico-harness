@@ -1,9 +1,9 @@
-// E2E: 用真实大模型验证 ThinkingEffort 系统。
+// E2E: 验证 ThinkingEffort 系统。
 // 运行: node --env-file=.env --import tsx scripts/e2e-thinking-effort.ts
 //
 // 验证点:
-//   A. 不同 thinkingEffort 下 OpenAI body 含正确的 reasoning_effort
-//   B. thinkingEffort=high 比 off 给出更详细的回答(模型思考行为差异)
+//   A. 用 fake fetch 捕获 OpenAI body,验证不同 thinkingEffort 含正确 reasoning_effort
+//   B. 可选真实模型对比: RUN_REAL_THINKING_E2E=1 时观察 high/off 回复差异
 //   C. createProvider 三参数签名正常透传 thinkingEffort
 //   D. 子代理继承 thinkingEffort(复用 provider)
 
@@ -12,6 +12,8 @@ import { resolveThinkingEffort, type ThinkingEffort } from "../src/provider/thin
 import { resolveProviderProfile } from "../src/provider/profile.js";
 import type { LLMProvider } from "../src/provider/interface.js";
 import type { Message } from "../src/schema/message.js";
+
+const originalFetch = globalThis.fetch;
 
 async function sendAndMeasure(
   provider: LLMProvider,
@@ -45,32 +47,76 @@ async function main() {
 
   const question = "一根5米长的杆子，要通过一个宽3米、高4米的矩形门洞，怎么过去？";
 
-  // === 验证 A+B: 不同档位下 provider 行为差异 ===
-  console.log("--- 验证 A+B: 不同 thinkingEffort 档位行为对比 ---");
-  console.log(`[prompt] "${question}"\n`);
+  // === 验证 A: fake fetch 捕获请求 body ===
+  console.log("--- 验证 A: request body reasoning_effort ---");
+  const capturedBodies: Record<string, Record<string, unknown>> = {};
+  globalThis.fetch = (async (_url: string | URL, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+    const effortKey = (body.reasoning_effort as string | undefined) ?? "off";
+    capturedBodies[effortKey] = body;
+    return {
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      headers: new Headers(),
+      body: null,
+      async json() {
+        return { choices: [{ message: { role: "assistant", content: "ok" } }] };
+      },
+      async text() {
+        return '{"choices":[{"message":{"role":"assistant","content":"ok"}}]}';
+      },
+    } as unknown as Response;
+  }) as unknown as typeof fetch;
 
   const efforts: ThinkingEffort[] = ["off", "low", "medium", "high"];
-  const results: Record<string, { content: string; length: number }> = {};
-
   for (const effort of efforts) {
-    console.log(`[创建 provider] thinkingEffort = ${effort}`);
-    const provider = createRawProvider("openai", undefined, effort);
-    results[effort] = await sendAndMeasure(provider, effort, question);
-    console.log();
+    const provider = createRawProvider(
+      "openai",
+      { baseURL: "https://fixture.local", apiKey: "sk-test", model },
+      effort,
+    );
+    await provider.generate([{ role: "user", content: question }], []);
   }
 
-  // 验证 A: 不同档位实际发出了请求(这里无法直接截获 body,但可确认无崩溃)
-  console.log("--- 验证结果 ---");
-  const allOk = Object.values(results).every((r) => r.content.length > 0);
-  console.log(`[验证 A] 四种档位均成功返回: ${allOk ? "✅ 通过" : "❌ 有失败"}`);
+  const bodyChecks = [
+    ["off", capturedBodies.off?.reasoning_effort === undefined],
+    ["low", capturedBodies.low?.reasoning_effort === "low"],
+    ["medium", capturedBodies.medium?.reasoning_effort === "medium"],
+    ["high", capturedBodies.high?.reasoning_effort === "high"],
+  ] as const;
+  for (const [effort, ok] of bodyChecks) {
+    console.log(`  [${effort}] reasoning_effort body 校验: ${ok ? "✅" : "❌"}`);
+    if (!ok) {
+      throw new Error(`thinkingEffort=${effort} 的 request body 不符合预期`);
+    }
+  }
 
-  // 验证 B: high 档位理论上会给出更详细的回答(带思考),但简单问题差异可能小
-  // 至少 high 不会比 off 短太多(<0.5x)
-  const offLen = results["off"]!.length;
-  const highLen = results["high"]!.length;
-  const ratio = offLen > 0 ? (highLen / offLen).toFixed(2) : "N/A";
-  console.log(`[验证 B] high(${highLen}字) / off(${offLen}字) = ${ratio}x`);
-  console.log(`          注: 简单问题差异可能小,主要验证无崩溃;复杂问题差异更明显`);
+  globalThis.fetch = originalFetch;
+
+  if (process.env.RUN_REAL_THINKING_E2E === "1") {
+    // === 验证 B: 不同档位下 provider 行为差异 ===
+    console.log("\n--- 验证 B: 真实模型 thinkingEffort 档位行为对比 ---");
+    console.log(`[prompt] "${question}"\n`);
+
+    const results: Record<string, { content: string; length: number }> = {};
+    for (const effort of efforts) {
+      console.log(`[创建 provider] thinkingEffort = ${effort}`);
+      const provider = createRawProvider("openai", undefined, effort);
+      results[effort] = await sendAndMeasure(provider, effort, question);
+      console.log();
+    }
+
+    const allOk = Object.values(results).every((r) => r.content.length > 0);
+    if (!allOk) throw new Error("真实模型对比中存在空回复");
+    const offLen = results["off"]!.length;
+    const highLen = results["high"]!.length;
+    const ratio = offLen > 0 ? (highLen / offLen).toFixed(2) : "N/A";
+    console.log(`[验证 B] high(${highLen}字) / off(${offLen}字) = ${ratio}x`);
+    console.log("          注: 简单问题差异可能小,这里仅作显式 opt-in 的真实模型观察");
+  } else {
+    console.log("\n[验证 B] 跳过真实模型对比;设置 RUN_REAL_THINKING_E2E=1 后启用。");
+  }
 
   // === 验证 C: resolveThinkingEffort 兼容性 ===
   console.log("\n--- 验证 C: resolveThinkingEffort 兼容性 ---");
@@ -92,23 +138,29 @@ async function main() {
     console.log(`  resolveThinkingEffort(${input === undefined ? "undefined" : `"${input}"`}) => "${actual}" ${ok ? "✅" : `❌ expected "${expected}"`}`);
   }
   console.log(`[验证 C] resolveThinkingEffort 兼容性: ${compatPass ? "✅ 通过" : "❌ 有失败"}`);
+  if (!compatPass) {
+    throw new Error("resolveThinkingEffort 兼容性验证失败");
+  }
 
   // === 验证 D: 子代理继承 thinkingEffort(用 createProvider 三参数) ===
   console.log("\n--- 验证 D: createProvider 三参数签名 ---");
   try {
-    createRawProvider("openai", undefined, "high");
-    createRawProvider("openai", undefined, "off");
+    const fakeConfig = { baseURL: "https://fixture.local", apiKey: "sk-test", model };
+    createRawProvider("openai", fakeConfig, "high");
+    createRawProvider("openai", fakeConfig, "off");
     // 如果能正常创建,签名正确
     console.log(`  创建 high 档 provider: ✅`);
     console.log(`  创建 off 档 provider: ✅`);
   } catch (err) {
     console.log(`  创建 provider 失败: ❌ ${err}`);
+    throw err;
   }
 
   console.log("\n=== E2E ThinkingEffort 完成 ===");
 }
 
 main().catch((err) => {
+  globalThis.fetch = originalFetch;
   console.error("\n[E2E 失败]", err);
   process.exit(1);
 });

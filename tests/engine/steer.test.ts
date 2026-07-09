@@ -121,7 +121,6 @@ describe("AgentEngine + SteerQueue", () => {
       provider,
       registry,
       workDir: "/tmp",
-      enableThinking: false,
       steerQueue,
     });
 
@@ -151,7 +150,6 @@ describe("AgentEngine + SteerQueue", () => {
       provider,
       registry,
       workDir: "/tmp",
-      enableThinking: false,
       steerQueue,
     });
 
@@ -191,7 +189,6 @@ describe("AgentEngine + SteerQueue", () => {
       provider,
       registry,
       workDir: "/tmp",
-      enableThinking: false,
       steerQueue,
     });
 
@@ -240,7 +237,6 @@ describe("AgentEngine + SteerQueue", () => {
       provider,
       registry,
       workDir: "/tmp",
-      enableThinking: false,
       steerQueue,
     });
 
@@ -271,7 +267,6 @@ describe("AgentEngine + SteerQueue", () => {
       provider,
       registry,
       workDir: "/tmp",
-      enableThinking: false,
       // 故意不传 steerQueue
     });
 
@@ -301,7 +296,6 @@ describe("AgentEngine + SteerQueue", () => {
       provider,
       registry,
       workDir: "/tmp",
-      enableThinking: false,
     });
 
     // 构造时未配置,getSteerQueue 为 undefined

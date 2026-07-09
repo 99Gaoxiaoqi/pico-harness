@@ -44,18 +44,8 @@ export class CredentialPool {
       return this.keys[0] ?? "";
     }
 
-    // 清理已过期的限流标记(顺带精确化 available 判定)
-    this.sweepExpired();
-
-    // 从当前 index 起,最多轮一圈找未限流的 key
-    for (let i = 0; i < this.keys.length; i++) {
-      const key = this.keys[(this.index + i) % this.keys.length]!;
-      if (!this.rateLimited.has(key)) {
-        // 命中:推进 index 到命中位的下一个,下次从下一位起轮
-        this.index = (this.index + i + 1) % this.keys.length;
-        return key;
-      }
-    }
+    const availableKey = this.getNextAvailable();
+    if (availableKey !== undefined) return availableKey;
 
     // 全限流兜底:取最早到期的那个(retry 层会据退避时长等待)
     const earliestKey = this.earliestExpiryKey();
@@ -70,6 +60,26 @@ export class CredentialPool {
     const key = this.keys[this.index] ?? "";
     this.index = (this.index + 1) % this.keys.length;
     return key;
+  }
+
+  /**
+   * 只返回当前未冷却的 key。
+   *
+   * 与 getNext() 的兼容兜底不同,全限流时返回 undefined,
+   * 供 retry/CLI 判断"没有真正轮换到可用凭证",从而走退避等待。
+   */
+  getNextAvailable(): string | undefined {
+    if (this.keys.length === 0) return undefined;
+    this.sweepExpired();
+
+    for (let i = 0; i < this.keys.length; i++) {
+      const key = this.keys[(this.index + i) % this.keys.length]!;
+      if (!this.rateLimited.has(key)) {
+        this.index = (this.index + i + 1) % this.keys.length;
+        return key;
+      }
+    }
+    return undefined;
   }
 
   /** 标记某 key 限流,冷却 cooldownMs(默认 60s)后自动恢复。 */

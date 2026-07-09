@@ -198,7 +198,7 @@ function reduceKeybindingInput(
       ? "Autocomplete"
       : "Chat";
   const resolved = resolveKeybinding({ input, key }, context, options.keybindings);
-  if (!resolved) return { state };
+  if (!resolved) return isPrintableInput(input, key) ? null : { state };
 
   return applyResolvedKeybinding(state, resolved, options);
 }
@@ -556,7 +556,6 @@ function isPrintableInput(input: string, key: InputKey): boolean {
     input &&
       !key.ctrl &&
       !key.meta &&
-      !key.shift &&
       !key.return &&
       !key.backspace &&
       !key.delete &&

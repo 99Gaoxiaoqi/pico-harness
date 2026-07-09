@@ -45,6 +45,19 @@ describe("TuiReporter", () => {
     expect(entry.kind === "tool" ? entry.summary : undefined).toContain("字节");
   });
 
+  it("onToolAwaitingApproval 将 running 工具标记为 approval,后续结果仍能更新", () => {
+    const { reporter, last } = harness();
+    const args = '{"path":"AIHOT.md","content":"# daily"}';
+    reporter.onToolCall("write_file", args);
+    reporter.onToolAwaitingApproval("write_file", args);
+    let entries = last()!;
+    expect(entries[0]).toMatchObject({ kind: "tool", name: "write_file", status: "approval" });
+
+    reporter.onToolResult("write_file", "写入成功", false);
+    entries = last()!;
+    expect(entries[0]).toMatchObject({ kind: "tool", name: "write_file", status: "success" });
+  });
+
   it("onToolResult 错误时 status=error", () => {
     const { reporter, last } = harness();
     reporter.onToolCall("bash", '{"command":"bad"}');
@@ -95,7 +108,7 @@ describe("TuiReporter", () => {
 
   it("多轮流式不串:第2轮 onTextDelta 不追加到第1轮 assistant", () => {
     const { reporter, last } = harness();
-    reporter.onStart("/tmp", true);
+    reporter.onStart("/tmp");
     // 第1轮:流式 + 固化
     reporter.onTurnStart(1);
     reporter.onTextDelta("你好");

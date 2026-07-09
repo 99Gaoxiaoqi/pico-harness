@@ -125,8 +125,7 @@ async function main() {
 
   console.log(`\n[结果] 共捕获 ${writeSpans.length} 个 write_file 调用:`);
   if (writeSpans.length < 2) {
-    console.log("  ⚠️ 捕获到的 write 调用不足 2 个,模型可能没在同一批发出。无法判定调度。");
-    return;
+    throw new Error("捕获到的 write 调用不足 2 个,模型可能没在同一批发出,无法判定调度");
   }
 
   const t0 = Math.min(...writeSpans.map((s) => s.start));
@@ -156,9 +155,9 @@ async function main() {
     console.log("  ✅ 冲突图调度生效 —— 写不同文件被并行执行!");
     console.log("     (旧二元调度会把所有 write 强制串行,区间不会重叠)");
   } else {
-    console.log("  ❌ write 全部串行,未观察到并行。可能原因:");
-    console.log("     - 模型没有在同一批发出多个 write(检查上面时序间隔)");
-    console.log("     - 或调度未生效");
+    throw new Error(
+      "write 全部串行,未观察到并行。可能是模型没有在同一批发出多个 write,或调度未生效",
+    );
   }
 }
 

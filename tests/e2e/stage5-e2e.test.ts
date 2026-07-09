@@ -10,7 +10,7 @@
 //   PICO_OPENAI_E2E_BASE_URL / PICO_OPENAI_E2E_API_KEY / PICO_OPENAI_E2E_MODEL
 // 未设置时自动 skip。AUX 使用同端点同模型(测试用,生产应配廉价模型)。
 
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -60,6 +60,8 @@ function createTrackingProvider(real: LLMProvider, calls: { generateCount: numbe
 describeOrSkip("阶段 5 端到端测试(真实大模型)", { timeout: 180000 }, () => {
   let workDir: string;
   let provider: OpenAIProvider;
+  let originalPersistence: string | undefined;
+  const originalFetch = globalThis.fetch;
 
   beforeAll(() => {
     workDir = mkdtempSync(join(tmpdir(), "pico-stage5-e2e-"));
@@ -71,7 +73,17 @@ describeOrSkip("阶段 5 端到端测试(真实大模型)", { timeout: 180000 },
     provider = new OpenAIProvider({ baseURL: BASE_URL!, apiKey: API_KEY!, model: MODEL });
   });
 
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    vi.restoreAllMocks();
+  });
+
   afterAll(() => {
+    if (originalPersistence === undefined) {
+      delete process.env.PICO_PERSISTENCE;
+    } else {
+      process.env.PICO_PERSISTENCE = originalPersistence;
+    }
     try {
       rmSync(workDir, { recursive: true, force: true });
     } catch {
@@ -83,6 +95,7 @@ describeOrSkip("阶段 5 端到端测试(真实大模型)", { timeout: 180000 },
   describe("版本化迁移(5.8)", () => {
     it("真实 session 跑一轮后,JSONL 首行有 meta schemaVersion=1", async () => {
       // 用持久化 session(非内存),让 JSONL 真实落盘
+      originalPersistence = process.env.PICO_PERSISTENCE;
       process.env.PICO_PERSISTENCE = "1";
       const session = new Session(`e2e-version-${Date.now()}`, workDir);
       session.append({ role: "user", content: "你好" });
@@ -112,7 +125,11 @@ describeOrSkip("阶段 5 端到端测试(真实大模型)", { timeout: 180000 },
       expect(record.type).toBe("meta");
       expect(record.schemaVersion).toBe(1);
 
-      process.env.PICO_PERSISTENCE = "0";
+      if (originalPersistence === undefined) {
+        delete process.env.PICO_PERSISTENCE;
+      } else {
+        process.env.PICO_PERSISTENCE = originalPersistence;
+      }
     }, 60000);
   });
 
@@ -147,14 +164,13 @@ describeOrSkip("阶段 5 端到端测试(真实大模型)", { timeout: 180000 },
       console.log(`[E2E aux] main provider 调用次数: ${mainCalls.generateCount}`);
       console.log(`[E2E aux] aux provider 调用次数: ${auxCalls.generateCount}`);
 
-      // 验证:压缩用的是 aux 而非 main
-      if (success) {
-        expect(auxCalls.generateCount, "压缩应该调 aux provider").toBeGreaterThan(0);
-        expect(mainCalls.generateCount, "压缩不应该调 main provider").toBe(0);
-      }
+      expect(success, "压缩必须成功,否则无法验证 aux provider 路径").toBe(true);
+      expect(auxCalls.generateCount, "压缩应该调 aux provider").toBeGreaterThan(0);
+      expect(mainCalls.generateCount, "压缩不应该调 main provider").toBe(0);
       // 至少 session history 被压缩了(变短)
       const history = session.getHistory();
       console.log(`[E2E aux] 压缩后 history 长度: ${history.length}`);
+      expect(history.length, "压缩后 history 应该变短").toBeLessThan(20);
     }, 120000);
 
     it("不配 aux provider 时 FullCompactor 用主 provider(回归)", async () => {
@@ -170,9 +186,8 @@ describeOrSkip("阶段 5 端到端测试(真实大模型)", { timeout: 180000 },
 
       const success = await fullCompactor.compact(session, 2);
       console.log(`[E2E aux-regress] 压缩成功: ${success}, main 调用: ${mainCalls.generateCount}`);
-      if (success) {
-        expect(mainCalls.generateCount, "不配 aux 应该用主 provider").toBeGreaterThan(0);
-      }
+      expect(success, "压缩必须成功,否则无法验证主 provider fallback").toBe(true);
+      expect(mainCalls.generateCount, "不配 aux 应该用主 provider").toBeGreaterThan(0);
     }, 120000);
   });
 
@@ -181,13 +196,13 @@ describeOrSkip("阶段 5 端到端测试(真实大模型)", { timeout: 180000 },
     it("onRateLimitInfo 回调在真实 API 调用时被检查(端点无 header 则不触发)", async () => {
       let receivedInfo: unknown = null;
       const providerWithCb = new OpenAIProvider({
-        baseURL: BASE_URL,
-        apiKey: API_KEY,
+        baseURL: BASE_URL!,
+        apiKey: API_KEY!,
         model: MODEL,
         onRateLimitInfo: (info) => {
           receivedInfo = info;
         },
-      } as never); // ProviderConfig 加了 onRateLimitInfo 但类型可能还没更新
+      });
 
       const result = await providerWithCb.generate(
         [{ role: "user", content: "ping" }],
@@ -198,5 +213,48 @@ describeOrSkip("阶段 5 端到端测试(真实大模型)", { timeout: 180000 },
       // 端点不返回 header,receivedInfo 应该是 null(回调未触发)
       // 但回调机制本身被检查了(provider 调了 parseRateLimitHeaders)
     }, 30000);
+
+  });
+});
+
+describe("Rate Limit 回调(本地 fixture)", () => {
+  const originalFetch = globalThis.fetch;
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    vi.restoreAllMocks();
+  });
+
+  it("onRateLimitInfo 命中 header 时必须触发回调", async () => {
+    const received: unknown[] = [];
+    globalThis.fetch = vi.fn(async () => {
+      return {
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        headers: new Headers({ "x-ratelimit-remaining": "7", "x-ratelimit-limit": "100" }),
+        body: null,
+        async json() {
+          return { choices: [{ message: { role: "assistant", content: "ok" } }] };
+        },
+        async text() {
+          return '{"choices":[{"message":{"role":"assistant","content":"ok"}}]}';
+        },
+      } as unknown as Response;
+    }) as unknown as typeof fetch;
+
+    const providerWithCb = new OpenAIProvider({
+      baseURL: "https://fixture.local",
+      apiKey: "sk-test",
+      model: MODEL,
+      onRateLimitInfo: (info) => {
+        received.push(info);
+      },
+    });
+
+    const result = await providerWithCb.generate([{ role: "user", content: "ping" }], []);
+    expect(result.content).toBe("ok");
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+    expect(received).toEqual([expect.objectContaining({ remaining: 7, limit: 100 })]);
   });
 });

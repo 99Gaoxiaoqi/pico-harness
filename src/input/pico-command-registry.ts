@@ -780,7 +780,9 @@ function createUndoCommand(options: PicoCommandRegistryOptions): SlashCommand {
       }
 
       const mode = parseRewindMode(input.argv[1]);
-      const result = await rewindFileHistoryFromCli(session, messageId, mode);
+      const result = await session.serialize(() =>
+        rewindFileHistoryFromCli(session, messageId, mode),
+      );
       return {
         type: "local",
         action: "message",
@@ -804,8 +806,10 @@ async function tryRewindCommand(
   modeInput: string | undefined,
 ): Promise<string> {
   try {
-    const mode = parseRewindMode(modeInput);
-    const result = await rewindFileHistoryFromCli(session, messageId, mode);
+    const result = await session.serialize(async () => {
+      const mode = parseRewindMode(modeInput);
+      return rewindFileHistoryFromCli(session, messageId, mode);
+    });
     return result.output;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

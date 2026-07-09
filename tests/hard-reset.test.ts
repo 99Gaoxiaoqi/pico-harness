@@ -58,7 +58,6 @@ describe("硬重置兜底", () => {
       registry,
       workDir: "/tmp",
       compactor,
-      enableThinking: false,
       workingMemoryLimit: 20,
     });
 
@@ -103,7 +102,6 @@ describe("硬重置兜底", () => {
       registry,
       workDir: "/tmp",
       compactor,
-      enableThinking: false,
     });
 
     const session = new Session("hard-reset-2", "/tmp");
@@ -136,7 +134,6 @@ describe("硬重置兜底", () => {
       registry,
       workDir: "/tmp",
       compactor,
-      enableThinking: false,
     });
 
     const session = new Session("normal", "/tmp");

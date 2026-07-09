@@ -34,7 +34,7 @@ export function RewindSelector({
   sessionId,
   snapshots,
   maxItems,
-  state = createRewindSelectorState(),
+  state = createRewindSelectorState(snapshots),
 }: RewindSelectorProps): React.ReactNode {
   return (
     <Box flexDirection="column">
@@ -47,8 +47,10 @@ export function RewindSelector({
   );
 }
 
-export function createRewindSelectorState(): RewindSelectorState {
-  return { phase: "select", selectedIndex: 0 };
+export function createRewindSelectorState(
+  snapshots: readonly FileHistorySnapshotSummary[] = [],
+): RewindSelectorState {
+  return { phase: "select", selectedIndex: snapshots.length > 0 ? snapshots.length - 1 : 0 };
 }
 
 export function selectRewindSnapshot(
@@ -84,7 +86,7 @@ export function selectRewindPreview(
   diffStat: FileHistoryDiffStat,
 ): RewindSelectorState {
   if (state.phase !== "select" || snapshots.length === 0) return state;
-  const selected = snapshots[clampIndex(state.selectedIndex, snapshots.length)];
+  const selected = selectedRewindSnapshot(state, snapshots);
   if (!selected) return state;
   return selectRewindSnapshot(state, selected.messageId, {
     ...diffStat,
@@ -144,7 +146,10 @@ export function formatRewindSelectorState(
     const snapshot = snapshots.find((item) => item.messageId === state.messageId);
     return formatRewindConfirmText(snapshot, state.diffStat, options);
   }
-  return formatRewindMessageList(snapshots, { ...options, selectedIndex: state.selectedIndex });
+  return formatRewindMessageList(snapshots, {
+    ...options,
+    selectedIndex: clampIndex(state.selectedIndex, snapshots.length),
+  });
 }
 
 export function formatRewindSelector(
@@ -171,9 +176,12 @@ function formatRewindMessageList(
   const maxItems = options.maxItems ?? 7;
   const maxIdLength = options.maxIdLength ?? 24;
   const maxSummaryLength = options.maxSummaryLength ?? 72;
-  const visible = snapshots.slice(-maxItems);
-  const firstVisibleIndex = snapshots.length - visible.length;
-  const selectedIndex = options.selectedIndex ?? -1;
+  const selectedIndex =
+    options.selectedIndex === undefined
+      ? snapshots.length - 1
+      : clampIndex(options.selectedIndex, snapshots.length);
+  const firstVisibleIndex = visibleWindowStart(selectedIndex, snapshots.length, maxItems);
+  const visible = snapshots.slice(firstVisibleIndex, firstVisibleIndex + maxItems);
   const lines = [
     "Rewind",
     "Choose a message to preview before deciding whether to rewind.",
@@ -286,6 +294,20 @@ function moveIndex(index: number, itemCount: number, direction: "up" | "down"): 
 
 function clampIndex(index: number, itemCount: number): number {
   return Math.min(Math.max(index, 0), itemCount - 1);
+}
+
+export function selectedRewindSnapshot(
+  state: RewindSelectorState,
+  snapshots: readonly FileHistorySnapshotSummary[],
+): FileHistorySnapshotSummary | undefined {
+  if (state.phase !== "select" || snapshots.length === 0) return undefined;
+  return snapshots[clampIndex(state.selectedIndex, snapshots.length)];
+}
+
+function visibleWindowStart(selectedIndex: number, itemCount: number, maxItems: number): number {
+  const visibleCount = Math.max(1, maxItems);
+  if (itemCount <= visibleCount) return 0;
+  return Math.min(Math.max(0, selectedIndex - visibleCount + 1), itemCount - visibleCount);
 }
 
 function moveConfirmAction(

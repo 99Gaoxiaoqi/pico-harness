@@ -138,7 +138,6 @@ describe("子代理自定义 opts 的端到端", () => {
       provider,
       registry,
       workDir,
-      enableThinking: false,
     });
     return { engine, registry, firstSystem: () => firstSys };
   }

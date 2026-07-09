@@ -45,8 +45,15 @@ const describeOrSkip = endpointAvailable ? describe : describe.skip;
 
 describeOrSkip("阶段 2.6+5.6 真实模型 e2e", { timeout: 120000 }, () => {
   let workDir: string;
+  let originalEnv: Record<string, string | undefined>;
 
   beforeAll(() => {
+    originalEnv = {
+      LLM_BASE_URL: process.env.LLM_BASE_URL,
+      LLM_API_KEY: process.env.LLM_API_KEY,
+      LLM_MODEL: process.env.LLM_MODEL,
+      PICO_PERSISTENCE: process.env.PICO_PERSISTENCE,
+    };
     workDir = mkdtempSync(join(tmpdir(), "pico-hooks-e2e-"));
     mkdirSync(join(workDir, "src"), { recursive: true });
     writeFileSync(join(workDir, "src", "app.ts"), 'export const VERSION = "1.0.0";\n');
@@ -57,6 +64,13 @@ describeOrSkip("阶段 2.6+5.6 真实模型 e2e", { timeout: 120000 }, () => {
   });
 
   afterAll(() => {
+    for (const [key, value] of Object.entries(originalEnv)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
     try {
       rmSync(workDir, { recursive: true, force: true });
     } catch {
@@ -131,15 +145,12 @@ describeOrSkip("阶段 2.6+5.6 真实模型 e2e", { timeout: 120000 }, () => {
       );
       console.log(`[E2E hooks] 模型调了 bash: ${bashCalled}, 找到阻断消息: ${!!blockedMessage}`);
 
-      // 如果模型调了 bash,hook 应该拦住
-      if (bashCalled) {
-        expect(blockedMessage, "bash 被调了,应该有 hook 阻断消息").toBeDefined();
-      }
-      // 如果模型没调 bash(可能直接回复),测试仍通过(hook 机制本身在 runner.test.ts 已验证)
+      expect(bashCalled, "模型必须调用 bash,否则本 e2e 没有验证 hook 路径").toBe(true);
+      expect(blockedMessage, "bash 被调了,应该有 hook 阻断消息").toBeDefined();
     }, 60000);
 
     it("无 hook 时 bash 正常执行(回归)", async () => {
-      const provider = new OpenAIProvider({ baseURL: BASE_URL, apiKey: API_KEY, model: MODEL });
+      const provider = new OpenAIProvider({ baseURL: BASE_URL!, apiKey: API_KEY!, model: MODEL });
       const registry = buildDefaultToolRegistry(workDir);
 
       const session = new Session(`e2e-nohook-${Date.now()}`, workDir, { persistence: false });
@@ -162,6 +173,7 @@ describeOrSkip("阶段 2.6+5.6 真实模型 e2e", { timeout: 120000 }, () => {
         (m) => m.role === "user" && m.toolCallId && m.content.toLowerCase().includes("hello"),
       );
       console.log(`[E2E hooks-regress] bash 结果: ${bashResult?.content.slice(0, 100) ?? "(未找到)"}`);
+      expect(bashResult, "无 hook 时应该真的执行 bash 并返回 hello").toBeDefined();
     }, 60000);
   });
 
