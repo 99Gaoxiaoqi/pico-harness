@@ -22,6 +22,7 @@ import type { RunAgentCliOptions, RunAgentWriter } from "../cli/run-agent.js";
 import { runAgentFromCli } from "../cli/run-agent.js";
 import { createCliSessionId, type CliSessionSelection } from "../cli/session-resolver.js";
 import { listFileSuggestions } from "../input/file-index.js";
+import { getSlashArgumentHints } from "../input/slash-argument-hints.js";
 import {
   commandSuggestions,
   createPicoCommandRegistry,
@@ -247,6 +248,12 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         entries={stateEntries}
         running={running}
         slashCommandSuggestions={(query) => commandSuggestions(registry, query)}
+        slashArgumentSuggestions={(command, query) =>
+          getSlashArgumentHints(command, query).map((hint) => ({
+            value: hint.value,
+            description: hint.description,
+          }))
+        }
         fileMentionSuggestions={(query) =>
           initialFileSuggestions
             .filter((file) => !query || file.includes(query))

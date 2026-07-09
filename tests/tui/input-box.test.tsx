@@ -60,6 +60,27 @@ describe("InputBox input controller", () => {
     expect(state.activeSuggestions).toBeNull();
   });
 
+  it("/model argument + Tab completes the selected slash argument", () => {
+    const options: InputControllerOptions = {
+      slashArgumentSuggestions: (command, query) =>
+        command === "model" && "kimi-k2.5".startsWith(query)
+          ? [{ value: "kimi-k2.5", description: "Kimi model" }]
+          : [],
+    };
+    let state = typeText("/model k", options);
+
+    expect(state.activeSuggestions?.kind).toBe("slash-argument");
+    expect(state.activeSuggestions?.items).toEqual([
+      { value: "kimi-k2.5", description: "Kimi model" },
+    ]);
+
+    state = reduceInputControllerEvent(state, "", key({ tab: true }), options).state;
+
+    expect(state.text).toBe("/model kimi-k2.5 ");
+    expect(state.cursor).toBe("/model kimi-k2.5 ".length);
+    expect(state.activeSuggestions).toBeNull();
+  });
+
   it("Enter accepts the open slash suggestion instead of submitting the prompt", () => {
     const options: InputControllerOptions = {
       slashCommandSuggestions: (query) =>

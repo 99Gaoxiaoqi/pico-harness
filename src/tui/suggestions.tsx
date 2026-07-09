@@ -6,7 +6,7 @@ export const SUGGESTION_LABEL_WIDTH = 32;
 export const SUGGESTION_METADATA_WIDTH = 28;
 export const SUGGESTION_DESCRIPTION_WIDTH = 38;
 
-export type SuggestionKind = "slash" | "mention";
+export type SuggestionKind = "slash" | "slash-argument" | "mention";
 
 export interface InputSuggestion {
   /** Candidate value without the leading "/" or "@". */
@@ -90,12 +90,15 @@ export function formatSuggestionRows(
   });
 }
 
-export function markerForKind(kind: SuggestionKind): "/" | "@" {
-  return kind === "slash" ? "/" : "@";
+export function markerForKind(kind: SuggestionKind): "/" | "@" | "" {
+  if (kind === "slash") return "/";
+  if (kind === "mention") return "@";
+  return "";
 }
 
 export function stripMarker(value: string, kind: SuggestionKind): string {
   const marker = markerForKind(kind);
+  if (marker.length === 0) return value;
   return value.startsWith(marker) ? value.slice(1) : value;
 }
 

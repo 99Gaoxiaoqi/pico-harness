@@ -16,7 +16,10 @@ import React, { memo } from "react";
 import { Box, useApp, useInput } from "ink";
 import { appendFileSync } from "node:fs";
 import { InputBox } from "./input-box.js";
-import type { SuggestionSource } from "./input-controller.js";
+import type {
+  SlashArgumentSuggestionSource,
+  SuggestionSource,
+} from "./input-controller.js";
 import {
   pickFocusedDialog,
   type DialogRequest,
@@ -55,6 +58,8 @@ export interface AppProps {
   running: boolean;
   /** Slash command 候选源 */
   slashCommandSuggestions?: SuggestionSource;
+  /** Slash command 参数候选源 */
+  slashArgumentSuggestions?: SlashArgumentSuggestionSource;
   /** @ 文件候选源 */
   fileMentionSuggestions?: SuggestionSource;
   /** 当前请求展示的 overlay/modal,由 priority 仲裁出唯一焦点弹窗 */
@@ -73,6 +78,7 @@ export function App({
   entries,
   running,
   slashCommandSuggestions,
+  slashArgumentSuggestions,
   fileMentionSuggestions,
   dialogRequests = [],
   onSubmit,
@@ -141,6 +147,7 @@ export function App({
       <InputBox
         disabled={inputDisabled}
         slashCommandSuggestions={slashCommandSuggestions}
+        slashArgumentSuggestions={slashArgumentSuggestions}
         fileMentionSuggestions={fileMentionSuggestions}
         onSubmit={onSubmit}
       />
