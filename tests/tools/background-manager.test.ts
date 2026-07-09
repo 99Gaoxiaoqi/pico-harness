@@ -2,6 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { TaskRegistry } from "../../src/tasks/task-registry.js";
 import { BackgroundManager } from "../../src/tools/background-manager.js";
 
 function waitFor(check: () => boolean, timeoutMs = 2000, intervalMs = 20): Promise<void> {
@@ -43,7 +44,7 @@ describe("BackgroundManager", () => {
   it("启动任务并记录输出和退出码", async () => {
     const started = manager.start("printf 'hello\\n'; printf 'oops\\n' >&2; exit 7", workDir);
 
-    expect(started.taskId).toMatch(/^bg-/);
+    expect(started.taskId).toMatch(/^b_[0-9a-z]{8}$/);
     expect(started.pid).toBeGreaterThan(0);
     expect(started.status).toBe("running");
     expect(started.command).toContain("printf");
@@ -62,7 +63,34 @@ describe("BackgroundManager", () => {
     expect(output.stderr).toContain("oops");
   });
 
+  it("接入 TaskRegistry 作为 local_bash task 并同步完成状态", async () => {
+    const registry = new TaskRegistry();
+    manager = new BackgroundManager({ maxOutputChars: 80, taskRegistry: registry });
+
+    const started = manager.start("printf 'hello'", workDir);
+    expect(registry.get(started.taskId)).toMatchObject({
+      taskId: started.taskId,
+      type: "local_bash",
+      status: "running",
+      description: "printf 'hello'",
+      data: {
+        command: "printf 'hello'",
+        cwd: workDir,
+        pid: started.pid,
+      },
+    });
+
+    await waitFor(() => manager.list()[0]?.status === "exited");
+
+    expect(registry.get(started.taskId)).toMatchObject({
+      status: "completed",
+      data: expect.objectContaining({ exitCode: 0 }),
+    });
+  });
+
   it("停止运行中的任务并更新状态", async () => {
+    const registry = new TaskRegistry();
+    manager = new BackgroundManager({ maxOutputChars: 80, taskRegistry: registry });
     const started = manager.start('node -e "setInterval(() => {}, 1000)"', workDir);
 
     const stopped = await manager.stop(started.taskId);
@@ -70,6 +98,10 @@ describe("BackgroundManager", () => {
     expect(stopped.status).toBe("stopped");
     expect(stopped.signal).toBeTruthy();
     expect(stopped.endedAt).toBeInstanceOf(Date);
+    expect(registry.get(started.taskId)).toMatchObject({
+      status: "killed",
+      error: "stopped",
+    });
   });
 
   it("stop 对忽略 SIGTERM 的任务有超时兜底,不会永久挂起", async () => {
