@@ -4,7 +4,7 @@
 // 引导它("现在重点处理测试文件")。不能打断当前 LLM 调用,等当前轮的工具执行完后,
 // 把 steer 文本作为 user 消息注入,下一轮模型就能看到。
 //
-// 两阶段浮现(loop.ts 集成):
+// 双点浮现(loop.ts 集成):
 //   - A 点(provider 调用前):peek 当前 steer,临时拼进 compactedContext 末尾,
 //     本轮模型立即看到(不落 session)。让 host 插的话尽快生效。
 //   - C 点(工具结果 append 后):drain 队列,把每条 steer 落成一条 user 消息,

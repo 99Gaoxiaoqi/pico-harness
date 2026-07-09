@@ -1,6 +1,5 @@
 // 统一思考强度 (ThinkingEffort) 抽象层。
 //
-// 区别于 enableThinking(应用层两阶段请求:先空 tools 规划再带 tools 执行),
 // ThinkingEffort 控制的是模型原生 reasoning 能力 —— 通过请求参数告诉模型
 // "思考多深"(OpenAI 的 reasoning_effort / Anthropic 的 thinking.budget_tokens)。
 //

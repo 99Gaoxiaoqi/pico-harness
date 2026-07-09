@@ -25,6 +25,7 @@ import {
   type McpTool,
   type McpToolResult,
 } from "./types.js";
+import { redactSensitiveText, redactSensitiveValue } from "./redact.js";
 
 /** 默认请求超时:30s。MCP server 可能启动慢(如 npx 首次下载) */
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
@@ -53,6 +54,8 @@ export class StdioMcpClient implements McpClient {
   private stderrBuffer = "";
   private connected = false;
   private closed = false;
+  private readonly closeHandlers: Array<(err?: Error) => void> = [];
+  private readonly errorHandlers: Array<(err: Error) => void> = [];
 
   constructor(private readonly config: McpServerConfig) {
     if (config.transport !== "stdio") {
@@ -75,7 +78,12 @@ export class StdioMcpClient implements McpClient {
     // 合并父进程 env,再覆盖 config.env —— 否则 npx/uvx 找不到 PATH
     const childEnv = { ...process.env, ...env };
 
-    logger.info({ server: this.config.name, command }, `[MCP] 启动 stdio server: ${command} ${args.join(" ")}`);
+    const safeCommand = redactSensitiveText(command);
+    const safeArgs = args.map((arg) => redactSensitiveText(arg));
+    logger.info(
+      { server: this.config.name, command: safeCommand, args: safeArgs, env: redactSensitiveValue(env) },
+      `[MCP] 启动 stdio server: ${safeCommand} ${safeArgs.join(" ")}`,
+    );
     this.child = spawn(command, args, {
       stdio: ["pipe", "pipe", "pipe"],
       env: childEnv,
@@ -131,7 +139,15 @@ export class StdioMcpClient implements McpClient {
 
   /** 返回 stderr 尾部快照(失败诊断用) */
   stderrSnapshot(): string {
-    return this.stderrBuffer;
+    return redactSensitiveText(this.stderrBuffer);
+  }
+
+  onClose(handler: (err?: Error) => void): void {
+    this.closeHandlers.push(handler);
+  }
+
+  onError(handler: (err: Error) => void): void {
+    this.errorHandlers.push(handler);
   }
 
   // ---------- 内部实现 ----------
@@ -155,8 +171,10 @@ export class StdioMcpClient implements McpClient {
     });
 
     child.on("error", (err) => {
-      logger.error({ server: this.config.name, err: err.message }, `[MCP] 子进程 error: ${err.message}`);
-      this.failAllPending(new Error(`MCP server "${this.config.name}" 子进程错误: ${err.message}`));
+      const safeError = new Error(redactSensitiveText(`MCP server "${this.config.name}" 子进程错误: ${err.message}`));
+      logger.error({ server: this.config.name, err: safeError.message }, `[MCP] 子进程 error: ${safeError.message}`);
+      this.failAllPending(safeError);
+      this.emitError(safeError);
     });
 
     child.on("exit", (code, signal) => {
@@ -164,12 +182,13 @@ export class StdioMcpClient implements McpClient {
       if (!this.closed) {
         // 非主动关闭 → 异常退出,拒绝所有 pending
         const msg = `MCP server "${this.config.name}" 子进程意外退出(code=${code} signal=${signal})`;
-        const err = new Error(msg);
+        const err = new Error(redactSensitiveText(msg));
         if (this.stderrBuffer.length > 0) {
-          err.message += `\nstderr: ${this.stderrBuffer.trimEnd()}`;
+          err.message += `\nstderr: ${redactSensitiveText(this.stderrBuffer.trimEnd())}`;
         }
         this.failAllPending(err);
         this.connected = false;
+        this.emitClose(err);
       }
     });
   }
@@ -238,6 +257,18 @@ export class StdioMcpClient implements McpClient {
       pending.reject(err);
     }
     this.pending.clear();
+  }
+
+  private emitClose(err?: Error): void {
+    for (const handler of this.closeHandlers) {
+      handler(err);
+    }
+  }
+
+  private emitError(err: Error): void {
+    for (const handler of this.errorHandlers) {
+      handler(err);
+    }
   }
 
   /**

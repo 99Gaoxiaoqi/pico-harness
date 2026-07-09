@@ -94,6 +94,17 @@ describe("CredentialPool 全限流兜底", () => {
     const got = pool.getNext();
     expect(got).toBe("k2");
   });
+
+  it("所有 key 冷却时 getNextAvailable 返回 undefined,供 retry 走退避", () => {
+    const clock = makeClock();
+    const pool = new CredentialPool(["k1", "k2"], clock.now);
+
+    pool.markRateLimited("k1", 60_000);
+    pool.markRateLimited("k2", 30_000);
+
+    expect(pool.available).toBe(0);
+    expect(pool.getNextAvailable()).toBeUndefined();
+  });
 });
 
 describe("CredentialPool 单 key / 空池兼容", () => {

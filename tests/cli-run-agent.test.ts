@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { runAgentFromCli } from "../src/cli/run-agent.js";
+import type { Reporter } from "../src/engine/reporter.js";
 import type { Message, ToolDefinition } from "../src/schema/message.js";
 import type { LLMProvider } from "../src/provider/interface.js";
 import { resetSessionSettingsForTests } from "../src/input/session-settings.js";
@@ -70,6 +71,19 @@ class BlockingProvider implements LLMProvider {
   }
 }
 
+function reporter(onTextDelta?: (delta: string) => void): Reporter {
+  return {
+    onThinking() {},
+    onToolCall() {},
+    onToolResult() {},
+    onMessage() {},
+    onStart() {},
+    onTurnStart() {},
+    onFinish() {},
+    ...(onTextDelta ? { onTextDelta } : {}),
+  };
+}
+
 describe("runAgentFromCli", () => {
   afterEach(() => {
     resetSessionSettingsForTests();
@@ -107,7 +121,6 @@ describe("runAgentFromCli", () => {
         dir: workDir,
         session: "cli_session",
         model: "glm-5.2",
-        enableThinking: false,
         planMode: true,
         trace: true,
       },
@@ -154,7 +167,6 @@ describe("runAgentFromCli", () => {
         dir: workDir,
         session: "trace_env_session",
         provider: "openai",
-        enableThinking: false,
       },
       {
         env: {
@@ -179,7 +191,6 @@ describe("runAgentFromCli", () => {
         dir: workDir,
         provider: "claude",
         model: "claude-override",
-        enableThinking: false,
       },
       {
         env: {
@@ -223,7 +234,6 @@ describe("runAgentFromCli", () => {
         dir: workDir,
         provider: "openai",
         model: "glm-5.2",
-        enableThinking: false,
       },
       {
         env: {
@@ -261,6 +271,62 @@ describe("runAgentFromCli", () => {
     expect(result.usage.costCNY).toBeCloseTo(0.0000576, 10);
   });
 
+  it("glm-5.2 流式不可用时自动切到 kimi-k2.5 并继续转发 stream delta", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-cli-stream-fallback-"));
+    const deltas: string[] = [];
+    const created: string[] = [];
+
+    const result = await runAgentFromCli(
+      {
+        prompt: "Say done",
+        dir: workDir,
+        provider: "openai",
+        model: "glm-5.2",
+      },
+      {
+        env: {
+          LLM_BASE_URL: "https://llm.example/v1",
+          LLM_API_KEY: "test-key",
+          LLM_MODEL: "glm-5.2",
+        },
+        reporter: reporter((delta) => deltas.push(delta)),
+        providerFactory: (_kind, config) => {
+          created.push(config.model);
+          if (config.model === "glm-5.2") {
+            return {
+              generate: async () => {
+                throw new Error("model glm-5.2 is unavailable");
+              },
+              generateStream: async () => {
+                throw new Error("model glm-5.2 is unavailable");
+              },
+            };
+          }
+          return {
+            generate: async () => ({
+              role: "assistant",
+              content: "fallback non-stream",
+              usage: { promptTokens: 5, completionTokens: 2 },
+            }),
+            generateStream: async (_messages, _tools, onDelta) => {
+              onDelta("stream ");
+              onDelta("fallback");
+              return {
+                role: "assistant",
+                content: "stream fallback",
+                usage: { promptTokens: 5, completionTokens: 2 },
+              };
+            },
+          };
+        },
+      },
+    );
+
+    expect(created).toEqual(["glm-5.2", "kimi-k2.5"]);
+    expect(deltas).toEqual(["stream ", "fallback"]);
+    expect(result.finalMessage).toBe("stream fallback");
+  });
+
   it("注入 provider 时不要求网络配置", async () => {
     const workDir = await mkdtemp(join(tmpdir(), "pico-cli-injected-provider-"));
     const provider = new ScriptedProvider([
@@ -276,7 +342,6 @@ describe("runAgentFromCli", () => {
         prompt: "Say done",
         dir: workDir,
         provider: "openai",
-        enableThinking: false,
       },
       {
         env: {},
@@ -304,7 +369,6 @@ describe("runAgentFromCli", () => {
         prompt: "Say done",
         dir: workDir,
         provider: "openai",
-        enableThinking: false,
       },
       {
         provider: provider(),
@@ -315,7 +379,6 @@ describe("runAgentFromCli", () => {
         prompt: "Say done again",
         dir: workDir,
         provider: "openai",
-        enableThinking: false,
       },
       {
         provider: provider(),
@@ -337,7 +400,6 @@ describe("runAgentFromCli", () => {
         dir: workDir,
         session: "same-session",
         provider: "openai",
-        enableThinking: false,
       },
       {
         provider,
@@ -351,7 +413,6 @@ describe("runAgentFromCli", () => {
         dir: workDir,
         session: "same-session",
         provider: "openai",
-        enableThinking: false,
       },
       {
         provider,

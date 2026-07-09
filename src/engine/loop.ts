@@ -57,14 +57,8 @@ export interface AgentEngineOptions {
   /** 系统提示词;由 PromptComposer 动态组装。planMode 开启时此项被忽略 */
   systemPrompt?: string;
   /**
-   * 慢思考模式开关 (第 03 讲)。
-   * 开启后,每轮行动前先发起一次不带工具的纯文本请求,强制模型规划。
-   */
-  enableThinking?: boolean;
-  /**
    * 模型原生思考强度(off/low/medium/high)。
    * 控制 provider 向模型发送 reasoning_effort / thinking.budget_tokens 参数。
-   * 与 enableThinking(应用层两阶段)正交独立,二者可同时开启。
    * 此字段在 engine 层仅用于子代理继承;provider 的实际参数注入在构造时已完成。
    */
   thinkingEffort?: ThinkingEffort;
@@ -180,7 +174,6 @@ export class AgentEngine implements AgentRunner {
   private readonly registry: Registry;
   private readonly workDir: string;
   private readonly systemPrompt: string;
-  private readonly enableThinking: boolean;
   private readonly thinkingEffort: ThinkingEffort;
   // planMode 非 readonly:ExitPlanMode 审批通过后由 exitPlanMode() 置 false。
   private planMode: boolean;
@@ -201,6 +194,7 @@ export class AgentEngine implements AgentRunner {
   /** Plan Mode 退出回调(ExitPlanMode 审批通过后触发),供 host 监听 */
   private readonly onPlanExit?: () => void;
   private readonly reporter: Reporter;
+  private runtimeReporter?: Reporter;
   private readonly observationProcessor?: ToolObservationProcessor;
   private readonly tracer?: Tracer;
   /**
@@ -221,7 +215,6 @@ export class AgentEngine implements AgentRunner {
       opts.systemPrompt ??
       "You are pico, an expert coding assistant running in a Harness engine. " +
         "You have tools to read, write, edit files and run bash. Think step by step.";
-    this.enableThinking = opts.enableThinking ?? false;
     this.thinkingEffort = opts.thinkingEffort ?? "off";
     this.planMode = opts.planMode ?? false;
     this.workingMemoryLimit = opts.workingMemoryLimit ?? DEFAULT_WORKING_MEMORY_LIMIT;
@@ -252,10 +245,10 @@ export class AgentEngine implements AgentRunner {
   private wrapStreamingProvider(provider: LLMProvider): LLMProvider {
     const generateStreamFn = provider.generateStream;
     if (!generateStreamFn) return provider;
-    const reporter = this.reporter;
     return {
       generate: (msgs: Message[], tools: ToolDefinition[]) =>
         generateStreamFn.call(provider, msgs, tools, (delta: string) => {
+          const reporter = this.runtimeReporter ?? this.reporter;
           reporter.onTextDelta?.(delta);
         }),
       get modelName() {
@@ -526,9 +519,8 @@ export class AgentEngine implements AgentRunner {
       sessionId: session.id,
       workDir: session.workDir,
       planMode: this.planMode,
-      enableThinking: this.enableThinking,
     });
-    reporter.onStart(this.workDir, this.enableThinking);
+    reporter.onStart(this.workDir);
     logger.info(
       { sessionId: session.id, workDir: session.workDir, planMode: this.planMode },
       `[Engine] 唤醒会话 [${session.id}],锁定工作区: ${session.workDir} (PlanMode: ${this.planMode})`,
@@ -541,8 +533,10 @@ export class AgentEngine implements AgentRunner {
     let turnCount = 0;
     let exhaustedReason: string | undefined;
     let hardResetTriggered = false;
+    const previousRuntimeReporter = this.runtimeReporter;
+    this.runtimeReporter = reporter;
 
-    // The Main Loop:心跳开始 (Two-Stage ReAct 循环)
+    // The Main Loop:心跳开始 (ReAct 循环)
     try {
       for (;;) {
         turnCount++;
@@ -651,7 +645,7 @@ export class AgentEngine implements AgentRunner {
 
           // ====================================================================
           // 【Steer A 点】(ROADMAP 3.2):provider 调用前,把 pending steer 文本
-          // 临时拼进 compactedContext 末尾。本轮模型(Thinking + Action)立即看到,
+          // 临时拼进 compactedContext 末尾。本轮模型立即看到,
           // 不落 session;真正的落盘在下方 C 点(工具结果 append 后)。
           // 用 peek 而非 drain:让本轮先"瞥见",待本轮工具执行完再正式入 session。
           // ====================================================================
@@ -660,61 +654,6 @@ export class AgentEngine implements AgentRunner {
             compactedContext.push({ role: "user", content: `[STEER] ${pendingSteer}` });
           }
 
-          // ====================================================================
-          // Phase 1: 慢思考阶段 (Thinking) —— 剥夺工具,强制规划 (第 03 讲)
-          // ====================================================================
-          if (this.enableThinking) {
-            reporter.onThinking();
-
-            // 核心机制:传入空的 tools 数组!
-            // 大模型看不到任何 JSON Schema,被迫只能输出纯文本的思考过程。
-            const thinkingSpan = turnSpan?.startChild("LLM.Thinking", {
-              inputMessageCount: compactedContext.length,
-              availableToolCount: 0,
-            });
-            let thinkResp: Message;
-            try {
-              thinkResp = await this.generateWithOverflowRetry(
-                session,
-                systemPrompt,
-                [],
-                compactedContext,
-                thinkingSpan,
-              );
-              // 若本轮内部触发了模型摘要压缩(session.history 被缩短),调整 beforeLen
-              // 让返回切片包含摘要起的所有消息(对标硬重置路径的 beforeLen 调整)
-              if (session.length < beforeLen) {
-                beforeLen = 0;
-              }
-              recordLlmResponse(thinkingSpan, thinkResp);
-              const budgetDecision = thinkResp.usage
-                ? this.budget.consumeUsage(thinkResp.usage)
-                : { allowed: true };
-              if (!budgetDecision.allowed) {
-                exhaustedReason = budgetDecision.reason;
-              }
-            } catch (err) {
-              recordTraceError(thinkingSpan, err);
-              throw err;
-            } finally {
-              thinkingSpan?.end();
-            }
-
-            if (thinkResp.content) {
-              // 将思考过程持久化到 Session,并追加到本轮临时上下文供 Action 使用
-              session.append(thinkResp);
-              compactedContext.push(thinkResp);
-            }
-            if (exhaustedReason) {
-              break;
-            }
-          }
-
-          // ====================================================================
-          // Phase 2: 行动阶段 (Action) —— 恢复工具,顺着规划执行
-          // ====================================================================
-          // 此时 compactedContext 已包含 Phase 1 模型自己的 Thinking Trace。
-          // 自回归特性:模型看到自己刚才的规划,会顺理成章生成对应的工具调用。
           const actionSpan = turnSpan?.startChild("LLM.Action", {
             inputMessageCount: compactedContext.length,
             availableToolCount: availableTools.length,
@@ -843,6 +782,7 @@ export class AgentEngine implements AgentRunner {
         await this.runGraceCall(session, systemPrompt, exhaustedReason, reporter, rootSpan);
       }
     } finally {
+      this.runtimeReporter = previousRuntimeReporter;
       rootSpan?.end();
       if (rootSpan) {
         const tracePath = exportTraceToFile(rootSpan, session.workDir, session.id);
@@ -1083,7 +1023,6 @@ export class AgentEngine implements AgentRunner {
    * - 仅传入受限 Registry(只读/受控工具,爆炸半径限制)
    * - 专属 System Prompt 严厉警告必须用工具不许偷懒,并暴露项目 Skill 索引
    * - maxSubTurns=10 防卡死
-   * - 强制关闭慢思考(子任务急速响应)
    * - 退出条件:不调工具 = 做好总结,返回 content
    *
    * @returns 子智能体的纯文本总结汇报及外部化产物引用
@@ -1141,7 +1080,6 @@ export class AgentEngine implements AgentRunner {
       // 【驾驭底线】子智能体仅能获取传入的只读工具注册表
       const availableTools = readOnlyRegistry.getAvailableTools();
 
-      // 子任务急速响应:强制关闭慢思考,直接预测行动。
       // 响应式溢出重试:子代理用独立 contextHistory(非 Session 驱动),无法重取
       // WorkingMemory,故仅用更小的 maxChars 预算对 contextHistory 重新压缩重试。
       const actionResp = await this.generateSubWithOverflowRetry(contextHistory, availableTools);

@@ -21,6 +21,7 @@ const { values } = parseArgs({
     "fail-startup": { type: "boolean", default: false },
     "ignore-sigterm": { type: "boolean", default: false },
     "pid-file": { type: "string" },
+    stderr: { type: "string" },
   },
   allowPositionals: false,
 });
@@ -41,7 +42,7 @@ if (values["ignore-sigterm"]) {
 
 // 启动即失败:写 stderr 后立即非零退出,不读 stdin(模拟 server 启动崩溃)
 if (values["fail-startup"]) {
-  process.stderr.write(`[mock] ${serverName} 启动失败(模拟)\n`);
+  process.stderr.write(values.stderr ?? `[mock] ${serverName} 启动失败(模拟)\n`);
   process.exit(1);
 }
 

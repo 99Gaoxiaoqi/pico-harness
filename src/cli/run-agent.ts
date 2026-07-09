@@ -70,7 +70,6 @@ export interface RunAgentCliOptions {
   baseURL?: string;
   apiKey?: string;
   model?: string;
-  enableThinking?: boolean;
   /** Native model thinking effort: off/low/medium/high. */
   thinkingEffort?: ThinkingEffort;
   planMode?: boolean;
@@ -188,9 +187,9 @@ export async function runAgentFromCli(
     rebuildProvider = (): LLMProvider | undefined => {
       // 标记当前 key 限流 → 取下一个可用 key → 重建整条包装链
       credentialPool.markRateLimited(currentConfig.apiKey);
-      const nextKey = credentialPool.getNext();
-      if (nextKey === currentConfig.apiKey) {
-        // 轮换无可用 key(全限流兜底返回同 key)→ 交给 retry 层指数退避
+      const nextKey = credentialPool.getNextAvailable();
+      if (!nextKey || nextKey === currentConfig.apiKey) {
+        // 轮换无可用 key(所有 key cooling)→ 交给 retry 层指数退避
         return undefined;
       }
       currentConfig = { ...currentConfig, apiKey: nextKey };
@@ -241,7 +240,6 @@ export async function runAgentFromCli(
     provider: trackedProvider,
     registry,
     workDir,
-    enableThinking: effectiveOptions.enableThinking ?? true,
     ...(effectiveOptions.thinkingEffort !== undefined
       ? { thinkingEffort: effectiveOptions.thinkingEffort }
       : {}),
@@ -389,6 +387,35 @@ class CostTrackedModelFallbackProvider implements LLMProvider {
         model: this.fallbackModel,
       });
       this.switched = true;
+      return this.activeProvider.generate(messages, availableTools);
+    }
+  }
+
+  async generateStream(
+    messages: Message[],
+    availableTools: ToolDefinition[],
+    onDelta: (delta: string) => void,
+  ): Promise<Message> {
+    try {
+      if (this.activeProvider.generateStream) {
+        return await this.activeProvider.generateStream(messages, availableTools, onDelta);
+      }
+      return await this.activeProvider.generate(messages, availableTools);
+    } catch (err) {
+      if (this.switched || !isModelUnavailableError(err, this.activeModel)) {
+        throw err;
+      }
+
+      console.warn(`[Provider] ${this.activeModel} 不可用,自动切换到 ${this.fallbackModel}`);
+      this.activeModel = this.fallbackModel;
+      this.activeProvider = this.createTrackedProvider({
+        ...this.primaryConfig,
+        model: this.fallbackModel,
+      });
+      this.switched = true;
+      if (this.activeProvider.generateStream) {
+        return this.activeProvider.generateStream(messages, availableTools, onDelta);
+      }
       return this.activeProvider.generate(messages, availableTools);
     }
   }

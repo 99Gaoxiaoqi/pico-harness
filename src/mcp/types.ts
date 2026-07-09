@@ -90,6 +90,10 @@ export interface McpClient {
   callTool(name: string, args: Record<string, unknown>): Promise<McpToolResult>;
   /** 优雅关闭:杀子进程 / 关连接 */
   close(): Promise<void>;
+  /** 非主动关闭时通知上层更新状态 */
+  onClose?(handler: (err?: Error) => void): void;
+  /** transport 错误时通知上层更新状态 */
+  onError?(handler: (err: Error) => void): void;
 }
 
 /**

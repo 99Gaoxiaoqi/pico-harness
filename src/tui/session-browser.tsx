@@ -116,7 +116,8 @@ export function formatSessionBrowser(
   const maxItems = options.maxItems ?? 10;
   const titleWidth = options.maxTitleLength ?? SESSION_BROWSER_TITLE_WIDTH;
   const cwdWidth = options.maxCwdLength ?? SESSION_BROWSER_CWD_WIDTH;
-  const shown = visible.slice(0, maxItems);
+  const firstShownIndex = visibleWindowStart(selectedIndex, visible.length, maxItems);
+  const shown = visible.slice(firstShownIndex, firstShownIndex + maxItems);
   const lines = [`Sessions [${state.scope}] ${visible.length}/${sessions.length}`];
 
   if (visible.length === 0) {
@@ -126,7 +127,8 @@ export function formatSessionBrowser(
 
   for (let index = 0; index < shown.length; index++) {
     const session = shown[index]!;
-    const marker = index === selectedIndex ? ">" : " ";
+    const visibleIndex = firstShownIndex + index;
+    const marker = visibleIndex === selectedIndex ? ">" : " ";
     lines.push(
       [
         marker,
@@ -169,6 +171,12 @@ function clampSelection(index: number, itemCount: number): number {
 
 function modulo(value: number, divisor: number): number {
   return ((value % divisor) + divisor) % divisor;
+}
+
+function visibleWindowStart(selectedIndex: number, itemCount: number, maxItems: number): number {
+  const visibleCount = Math.max(1, maxItems);
+  if (itemCount <= visibleCount) return 0;
+  return Math.min(Math.max(0, selectedIndex - visibleCount + 1), itemCount - visibleCount);
 }
 
 function normalizeCwd(value: string | undefined): string | undefined {

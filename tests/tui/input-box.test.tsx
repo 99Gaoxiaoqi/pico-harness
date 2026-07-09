@@ -220,6 +220,17 @@ describe("InputBox input controller", () => {
     expect(state.text).toBe("line 1\nline 2");
   });
 
+  it("inserts shifted printable characters instead of treating them as shortcuts", () => {
+    const options: InputControllerOptions = {};
+    let state = createInputControllerState();
+
+    state = reduceInputControllerEvent(state, "A", key({ shift: true }), options).state;
+    state = reduceInputControllerEvent(state, "/README", key({ shift: true }), options).state;
+
+    expect(state.text).toBe("A/README");
+    expect(state.cursor).toBe("A/README".length);
+  });
+
   it("disabled input ignores typing, candidates, completion, and submit", () => {
     const options: InputControllerOptions = {
       disabled: true,

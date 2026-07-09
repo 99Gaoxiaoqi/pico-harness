@@ -97,6 +97,14 @@ export class ToolRegistry implements Registry {
     logger.info({ tool: name }, `[Registry] 成功挂载工具: ${name}`);
   }
 
+  unregister(name: string): boolean {
+    const removed = this.tools.delete(name);
+    if (removed) {
+      logger.info({ tool: name }, `[Registry] 已卸载工具: ${name}`);
+    }
+    return removed;
+  }
+
   /** 挂载一个安全拦截中间件 (第 16 讲) */
   use(mw: MiddlewareFunc): void {
     this.useRequest(mw);

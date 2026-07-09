@@ -21,11 +21,13 @@ import { HttpMcpClient } from "./http-client.js";
 import { McpToolBridge } from "./mcp-tool.js";
 import {
   assertMcpInputSchema,
+  qualifyMcpToolName,
   type McpClient,
   type McpConfig,
   type McpConnectionStatus,
   type McpServerConfig,
 } from "./types.js";
+import { redactSensitiveText } from "./redact.js";
 
 /** 默认工作区相对配置路径 */
 const DEFAULT_CONFIG_RELATIVE = ".claw/mcp.json";
@@ -170,15 +172,16 @@ export class McpConnectionManager {
     try {
       const client = this.createClient(entry.config);
       entry.client = client;
+      this.attachLifecycle(entry, client);
       // connect + listTools 在超时内完成,防子进程卡死
       await this.withTimeout(this.connectAndList(client), timeoutMs, entry.name);
       // 注:connectAndList 成功时已把工具注册,这里只更新状态
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = redactSensitiveText(err instanceof Error ? err.message : String(err));
       entry.status = "failed";
       entry.error = msg;
       entry.toolCount = 0;
-      entry.toolNames = [];
+      this.unregisterEntryTools(entry);
       // 失败时关掉 client,防句柄泄漏
       if (entry.client) {
         await entry.client.close().catch(() => {});
@@ -245,7 +248,7 @@ export class McpConnectionManager {
       if (entry.status === "connected") {
         entry.status = "pending";
         entry.toolCount = 0;
-        entry.toolNames = [];
+        this.unregisterEntryTools(entry);
         entry.error = undefined;
       }
     }
@@ -381,6 +384,30 @@ export class McpConnectionManager {
       { total, connected, failed, disabled },
       `[MCP] 连接完成: ${connected}/${total} 成功, ${failed} 失败, ${disabled} 禁用`,
     );
+  }
+
+  private attachLifecycle(entry: ServerEntry, client: McpClient): void {
+    const markFailed = (err?: Error) => {
+      if (entry.status !== "connected") return;
+      const msg = redactSensitiveText(
+        err?.message ?? `MCP server "${entry.name}" 连接已关闭`,
+      );
+      entry.status = "failed";
+      entry.error = msg;
+      entry.toolCount = 0;
+      entry.client = undefined;
+      this.unregisterEntryTools(entry);
+      logger.warn({ server: entry.name, err: msg }, `[MCP] server "${entry.name}" 连接断开: ${msg}`);
+    };
+    client.onClose?.(markFailed);
+    client.onError?.(markFailed);
+  }
+
+  private unregisterEntryTools(entry: ServerEntry): void {
+    for (const toolName of entry.toolNames) {
+      this.registry.unregister(qualifyMcpToolName(entry.name, toolName));
+    }
+    entry.toolNames = [];
   }
 }
 

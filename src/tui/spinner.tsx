@@ -6,7 +6,7 @@
 //
 // SpinnerMode(对标 Claude Code types.ts):随引擎阶段切换文案:
 //   requesting — 等首包("请求中…")
-//   thinking    — 慢思考("思考中…")
+//   thinking    — provider 原生 thinking/reasoning("思考中…")
 //   tool-use    — 工具执行("执行工具中…")
 //   responding  — 流式输出("生成回复中…")
 

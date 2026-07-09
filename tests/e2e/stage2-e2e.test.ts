@@ -10,7 +10,7 @@
 //
 // 注意:本测试依赖 .env 的真实 API 凭证,会消耗 token。CI 无凭证时整体跳过。
 
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -24,24 +24,35 @@ import { PromptComposer } from "../../src/context/composer.js";
 import { FetchURLTool, WebSearchTool } from "../../src/tools/web.js";
 import type { Message } from "../../src/schema/message.js";
 
-// ─── 加载 .env(与 stage1-e2e 同模式)───
-let BASE_URL: string | undefined;
-let API_KEY: string | undefined;
-let MODEL: string | undefined;
-try {
-  const envContent = readFileSync(".env", "utf8");
-  for (const line of envContent.split("\n")) {
-    const m = line.match(/^([^#=]+)=(.*)$/);
-    if (m && !process.env[m[1].trim()]) process.env[m[1].trim()] = m[2].trim();
+function readDotEnv(): Record<string, string> {
+  try {
+    const envContent = readFileSync(".env", "utf8");
+    return Object.fromEntries(
+      envContent
+        .split("\n")
+        .map((line) => line.match(/^([^#=]+)=(.*)$/))
+        .filter((m): m is RegExpMatchArray => !!m)
+        .map((m) => [m[1]!.trim(), m[2]!.trim()]),
+    );
+  } catch {
+    return {};
   }
-  BASE_URL = process.env.LLM_BASE_URL;
-  API_KEY = process.env.LLM_API_KEY;
-  MODEL = process.env.LLM_MODEL;
-} catch {
-  // 无 .env,跳过
 }
 
-const skip = !BASE_URL || !API_KEY || !MODEL;
+// ─── 读取 .env fallback,但不写回 process.env,避免污染其他 e2e 文件 ───
+const dotEnv = readDotEnv();
+let BASE_URL = process.env.LLM_BASE_URL ?? dotEnv.LLM_BASE_URL;
+let API_KEY = process.env.LLM_API_KEY ?? dotEnv.LLM_API_KEY;
+let MODEL = process.env.LLM_MODEL ?? dotEnv.LLM_MODEL;
+const RUN_LLM_E2E = process.env.RUN_LLM_E2E === "1" || process.env.PICO_LLM_E2E === "1";
+const RUN_NETWORK_E2E = process.env.RUN_NETWORK_E2E === "1" || process.env.PICO_NET_E2E === "1";
+const originalFetch = globalThis.fetch;
+afterAll(() => {
+  globalThis.fetch = originalFetch;
+  vi.restoreAllMocks();
+});
+
+const skip = !RUN_LLM_E2E || !BASE_URL || !API_KEY || !MODEL;
 
 const describeOrSkip = skip ? describe.skip : describe;
 
@@ -274,25 +285,47 @@ describeOrSkip("���段 2 端到端测试(真实大模型)", { timeout: 180
   });
 });
 
-// ─── web 工具真实抓取/搜索(不依赖 LLM,直接测工具)───
-// fetch_url 不走模型,几秒即可,但依赖网络。无网络时会失败 —— e2e 本就依赖外部环境。
-// web_search 仅在配置了 SEARCH_API_BASE 时执行,否则整体 skip。
+// ─── web 工具抓取/搜索(不依赖 LLM,直接测工具)───
+// 默认用本地 fake fetch 防止 test:e2e 在无 LLM 凭证时仍访问外网;真实网络需显式 RUN_NETWORK_E2E=1 或 PICO_NET_E2E=1。
+describe("fetch_url 本地 fixture", { timeout: 60000 }, () => {
+  it("抓本地 fixture 并 HTML strip", async () => {
+    globalThis.fetch = vi.fn(async () => {
+      return {
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        headers: new Headers({ "content-type": "text/html; charset=utf-8" }),
+        async text() {
+          return "<html><head><title>Fixture</title></head><body><h1>Fixture Domain</h1><p>Local only</p></body></html>";
+        },
+      } as unknown as Response;
+    }) as unknown as typeof fetch;
+    const tool = new FetchURLTool();
+    const result = await tool.execute(
+      JSON.stringify({ url: "https://fixture.test", max_chars: 2000 }),
+    );
+    console.log(`[E2E fetch_url] 结果:\n${result.slice(0, 300)}`);
+    expect(result).toContain("Fixture Domain");
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+  });
+});
 
-describe("fetch_url 真实抓取", { timeout: 60000 }, () => {
+const describeNetwork = RUN_NETWORK_E2E ? describe : describe.skip;
+describeNetwork("fetch_url 真实抓取", { timeout: 60000 }, () => {
   it("抓 example.com 并 HTML strip", async () => {
+    globalThis.fetch = originalFetch;
     const tool = new FetchURLTool();
     const result = await tool.execute(
       JSON.stringify({ url: "https://example.com", max_chars: 2000 }),
     );
-    console.log(`[E2E fetch_url] 结果:\n${result.slice(0, 300)}`);
-    // example.com 的正文标题就是 "Example Domain"(ICANN 保留稳定测试域名,内容固定)
+    console.log(`[E2E fetch_url real] 结果:\n${result.slice(0, 300)}`);
     expect(result).toContain("Example Domain");
   });
 });
 
 describe("web_search 真实搜索(条件)", { timeout: 60000 }, () => {
   // 无 SEARCH_API_BASE 配置时整体 skip,不强造(极简:依赖外部搜索 API)
-  const hasSearchApi = !!process.env.SEARCH_API_BASE && !!process.env.SEARCH_API_KEY;
+  const hasSearchApi = RUN_NETWORK_E2E && !!process.env.SEARCH_API_BASE && !!process.env.SEARCH_API_KEY;
   const describeSearch = hasSearchApi ? describe : describe.skip;
 
   describeSearch("有 SEARCH_API 配置时", () => {

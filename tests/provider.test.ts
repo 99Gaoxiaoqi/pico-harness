@@ -92,7 +92,7 @@ describe("OpenAIProvider 翻译层", () => {
     expect(msg.toolCalls).toEqual([{ id: "c1", name: "echo", arguments: '{"text":"hi"}' }]);
   });
 
-  it("慢思考:空 tools 时不挂载 tools 字段", async () => {
+  it("空 tools 时不挂载 tools 字段", async () => {
     const calls = mockFetch({
       choices: [{ message: { role: "assistant", content: "思考中" } }],
     });

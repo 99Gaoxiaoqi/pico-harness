@@ -358,7 +358,6 @@ describe("FullCompactor 接入 generateWithOverflowRetry(loop 端到端)", () =>
       workDir: "/tmp",
       compactor,
       fullCompactor,
-      enableThinking: false,
       workingMemoryLimit: 20,
     });
 
@@ -401,7 +400,6 @@ describe("FullCompactor 接入 generateWithOverflowRetry(loop 端到端)", () =>
       workDir: "/tmp",
       compactor,
       fullCompactor,
-      enableThinking: false,
       workingMemoryLimit: 20,
     });
 

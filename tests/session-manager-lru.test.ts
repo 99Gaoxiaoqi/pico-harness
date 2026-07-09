@@ -6,7 +6,7 @@
 // afterEach 先 clear()(close 所有 Session 释放句柄)再删目录。
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionManager } from "../src/engine/session.js";
@@ -32,6 +32,22 @@ function makeMgr(options?: { maxSessions?: number; ttlMs?: number }): SessionMan
 }
 
 describe("SessionManager LRU 驱逐", () => {
+  it("同 sessionId 但不同 workDir 不复用同一 Session", async () => {
+    const mgr = makeMgr({ maxSessions: 10, ttlMs: 60_000 });
+    const workDirA = join(workDir, "project-a");
+    const workDirB = join(workDir, "project-b");
+    mkdirSync(workDirA);
+    mkdirSync(workDirB);
+
+    const sessionA = await mgr.getOrCreate("same-id", workDirA, { persistence: false });
+    const sessionB = await mgr.getOrCreate("same-id", workDirB, { persistence: false });
+
+    expect(sessionB).not.toBe(sessionA);
+    expect(sessionA.workDir).toBe(workDirA);
+    expect(sessionB.workDir).toBe(workDirB);
+    expect(mgr.size).toBe(2);
+  });
+
   it("超出 maxSessions 时驱逐最旧(首个插入)", async () => {
     const mgr = makeMgr({ maxSessions: 2, ttlMs: 60_000 });
     await mgr.getOrCreate("s1", workDir, { persistence: false });

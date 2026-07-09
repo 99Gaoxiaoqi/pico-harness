@@ -102,8 +102,7 @@ function newEngine(provider: LLMProvider, maxChars: number): AgentEngine {
     registry: new EmptyRegistry(),
     workDir: "/tmp",
     compactor,
-    // 关闭慢思考,确保每轮只有一次 Action 阶段 generate 调用,便于精确计数
-    enableThinking: false,
+    // 每轮只有一次 generate 调用,便于精确计数
     workingMemoryLimit: 20,
   });
 }
@@ -212,7 +211,6 @@ describe("runSub 简化版响应式溢出重试", () => {
       registry: new EmptyRegistry(),
       workDir: "/tmp",
       compactor,
-      enableThinking: false,
     });
 
     // 子代理任务 prompt 撑大,确保首次压缩后仍可能溢出(由 mock 模拟溢出)
@@ -240,7 +238,6 @@ describe("runSub 简化版响应式溢出重试", () => {
       registry: new EmptyRegistry(),
       workDir: "/tmp",
       compactor,
-      enableThinking: false,
     });
 
     await expect(engine.runSub("任务 " + bigText(600), new EmptyRegistry())).rejects.toBeInstanceOf(
@@ -262,7 +259,6 @@ describe("runSub 简化版响应式溢出重试", () => {
       registry: new EmptyRegistry(),
       workDir: "/tmp",
       compactor,
-      enableThinking: false,
     });
 
     await expect(engine.runSub("任务", new EmptyRegistry())).rejects.toBeInstanceOf(LLMStatusError);

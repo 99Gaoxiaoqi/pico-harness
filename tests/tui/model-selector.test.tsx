@@ -68,6 +68,22 @@ describe("ModelSelector", () => {
     expect(moveModelSelection(state, models, "down").selectedIndex).toBe(1);
   });
 
+  it("超过 maxItems 后仍展示选中模型，确认项与高亮项一致", () => {
+    const manyModels = Array.from({ length: 8 }, (_, index) => ({
+      id: `model-${index + 1}`,
+      name: `Model ${index + 1}`,
+    }));
+    const state = createModelSelectorState(manyModels, "model-7");
+    const onConfirm = vi.fn();
+
+    const output = formatModelSelector(manyModels, { state, maxItems: 4 });
+    confirmModelSelection(state, manyModels, { onConfirm });
+
+    expect(output).toContain("› Model 7");
+    expect(output).not.toContain("Model 1");
+    expect(onConfirm).toHaveBeenCalledWith(manyModels[6]);
+  });
+
   it("confirm and cancel return closed states and call callbacks", () => {
     const state = createModelSelectorState(models, "gpt-5-thinking");
     const onConfirm = vi.fn();

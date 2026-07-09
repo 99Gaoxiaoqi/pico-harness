@@ -9,7 +9,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { Session } from "../../src/engine/session.js";
 import { createBuiltinCommandRegistry } from "../../src/input/builtin-commands.js";
 import {
@@ -742,6 +742,48 @@ describe("Pico command registry", () => {
     expect(result.command).toBe("undo");
     expect(result.result.message).toContain("turn-2");
     expect(readFileSync(filePath, "utf8")).toBe("before\n");
+  });
+
+  it("/undo 执行回滚时通过 session.serialize 串行化", async () => {
+    let insideSerialize = false;
+    const rewindCode = vi.fn(async () => {
+      expect(insideSerialize).toBe(true);
+    });
+    const serialize = vi.fn(async (task: () => Promise<unknown>) => {
+      insideSerialize = true;
+      try {
+        return await task();
+      } finally {
+        insideSerialize = false;
+      }
+    });
+    const session = {
+      id: "fake-undo-session",
+      fileHistory: {
+        snapshots: [
+          {
+            messageId: "turn-1",
+            timestamp: new Date("2026-07-09T00:00:00.000Z"),
+            trackedFileBackups: new Map(),
+          },
+        ],
+      },
+      rewindCode,
+      serialize,
+    } as unknown as Session;
+    const registry = await createPicoCommandRegistry({
+      workDir: process.cwd(),
+      provider: "openai",
+      model: "glm-5.2",
+      session,
+      sessionId: session.id,
+    });
+
+    const result = await processUserInput("/undo turn-1 code", { registry });
+
+    expect(result.type).toBe("local-command");
+    expect(serialize).toHaveBeenCalledOnce();
+    expect(rewindCode).toHaveBeenCalledWith("turn-1");
   });
 
   it("/compact 在无法安全触发摘要压缩时说明原因", async () => {

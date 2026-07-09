@@ -498,7 +498,6 @@ describe("AgentEngine.runSub", () => {
       provider,
       registry: readOnlyRegistry,
       workDir: tmpdir(),
-      enableThinking: false,
     });
   }
 
@@ -554,7 +553,6 @@ describe("AgentEngine.runSub", () => {
       provider,
       registry,
       workDir,
-      enableThinking: false,
     });
 
     await engine.runSub("查看项目技能", registry);
@@ -836,7 +834,6 @@ describe("SubagentTool + AgentEngine 端到端委派", () => {
       provider: mainProvider,
       registry: mainRegistry,
       workDir: tmpdir(),
-      enableThinking: false,
     });
 
     // 注册 SubagentTool,其 runner 就是 engine 自身

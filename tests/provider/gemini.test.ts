@@ -206,7 +206,31 @@ describe("GeminiProvider.generate (非流式)", () => {
 
     expect(msg.content).toBe("好的");
     expect(msg.toolCalls).toEqual([
-      { id: "echo", name: "echo", arguments: '{"text":"hi"}' },
+      { id: "gemini-call-0", name: "echo", arguments: '{"text":"hi"}' },
+    ]);
+  });
+
+  it("同名 functionCall 生成唯一 toolCallId", async () => {
+    mockJsonFetch({
+      candidates: [
+        {
+          content: {
+            parts: [
+              { functionCall: { name: "echo", args: { text: "one" } } },
+              { functionCall: { name: "echo", args: { text: "two" } } },
+            ],
+          },
+          finishReason: "STOP",
+        },
+      ],
+    });
+
+    const p = new GeminiProvider(cfg);
+    const msg = await p.generate(history, [echoTool]);
+
+    expect(msg.toolCalls).toEqual([
+      { id: "gemini-call-0", name: "echo", arguments: '{"text":"one"}' },
+      { id: "gemini-call-1", name: "echo", arguments: '{"text":"two"}' },
     ]);
   });
 
@@ -299,6 +323,31 @@ describe("GeminiProvider.generateStream (流式)", () => {
     ]);
   });
 
+  it("工具调用流:同名 functionCall 按出现顺序保留为多个调用", async () => {
+    const sse =
+      sseData({
+        candidates: [
+          { content: { parts: [{ functionCall: { name: "echo", args: { text: "one" } } }] } },
+        ],
+      }) +
+      sseData({
+        candidates: [
+          { content: { parts: [{ functionCall: { name: "echo", args: { text: "two" } } }] } },
+        ],
+        finishReason: "STOP",
+      });
+
+    mockStreamFetch(sseStream([sse]));
+
+    const p = new GeminiProvider(cfg);
+    const msg = await p.generateStream!(history, [echoTool], () => {});
+
+    expect(msg.toolCalls).toEqual([
+      { id: "gemini-call-0", name: "echo", arguments: '{"text":"one"}' },
+      { id: "gemini-call-1", name: "echo", arguments: '{"text":"two"}' },
+    ]);
+  });
+
   it("流式端点 URL 含 streamGenerateContent + key= + alt=sse", async () => {
     const { calls } = mockStreamFetch(
       sseStream([
@@ -342,8 +391,8 @@ describe("GeminiProvider.generateStream (流式)", () => {
   });
 });
 
-// Gemini 真实模型 e2e:无 Google API 凭证时 skip。
-const RUN_GEMINI_E2E = !!process.env.GEMINI_API_KEY;
+// Gemini 真实模型 e2e:必须显式 opt-in,避免默认 npm test 因本机凭证误触真实网络。
+const RUN_GEMINI_E2E = process.env.RUN_GEMINI_E2E === "1" && !!process.env.GEMINI_API_KEY;
 const e2eDescribe = RUN_GEMINI_E2E ? describe : describe.skip;
 e2eDescribe("GeminiProvider e2e (真实模型)", () => {
   it("真实 generate 返回文本", async () => {

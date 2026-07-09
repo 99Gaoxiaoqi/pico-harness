@@ -82,6 +82,21 @@ describe("SessionBrowser", () => {
     expect(moveSessionBrowserSelection(initial, sessions, -1).selectedIndex).toBe(2);
   });
 
+  it("超过 maxItems 后仍展示选中项，确认项与高亮项一致", () => {
+    const sessions = Array.from({ length: 12 }, (_, index) =>
+      sessionSummary({ id: `cli-${index + 1}`, cwd: "/tmp/project" }),
+    );
+    const state = createSessionBrowserState({ scope: "all", selectedIndex: 10 });
+    const onConfirm = vi.fn();
+
+    const output = formatSessionBrowser(sessions, { state, maxItems: 5 });
+    confirmSessionBrowserSelection(state, sessions, undefined, { onConfirm });
+
+    expect(output).toContain("> 2026-07-09 02:00 cli-11");
+    expect(output).not.toContain("cli-1 msgs=");
+    expect(onConfirm).toHaveBeenCalledWith(sessions[10]);
+  });
+
   it("确认只返回当前过滤视图内的选中 session，取消只触发取消回调", () => {
     const onConfirm = vi.fn();
     const onCancel = vi.fn();

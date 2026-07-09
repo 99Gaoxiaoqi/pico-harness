@@ -80,7 +80,7 @@ export class TuiReporter implements Reporter {
     return this.spinnerMode;
   }
 
-  onStart(_workDir: string, _enableThinking: boolean): void {
+  onStart(_workDir: string): void {
     // 顶栏已展示 workDir/model,这里不重复;清空本轮缓冲。
     this.resetTurnBuffer();
     this.pendingTools.clear();
@@ -96,7 +96,7 @@ export class TuiReporter implements Reporter {
   }
 
   onThinking(): void {
-    // 进入慢思考:push 一个 thinking 占位,spinner 据此显示
+    // Provider 原生 thinking 流可复用该占位,spinner 据此显示。
     this.spinnerMode = "thinking";
     this.entries.push({ kind: "thinking" });
     this.emit();
@@ -106,6 +106,19 @@ export class TuiReporter implements Reporter {
     this.spinnerMode = "tool-use"; // 工具执行中
     this.pendingTools.add(toolName);
     this.entries.push({ kind: "tool", name: toolName, args, status: "running" });
+    this.emit();
+  }
+
+  onToolAwaitingApproval(toolName: string, args: string): void {
+    for (let i = this.entries.length - 1; i >= 0; i--) {
+      const e = this.entries[i]!;
+      if (e.kind === "tool" && e.name === toolName && e.args === args && isPendingToolStatus(e.status)) {
+        e.status = "approval";
+        e.summary = "等待审批";
+        break;
+      }
+    }
+    this.spinnerMode = "tool-use";
     this.emit();
   }
 
@@ -199,7 +212,7 @@ function resolveToolStatus(toolName: string, result: string, isError: boolean): 
 }
 
 function isPendingToolStatus(status: ToolCardStatus): boolean {
-  return status === "queued" || status === "running";
+  return status === "queued" || status === "running" || status === "approval";
 }
 
 function isAgentToolName(toolName: string): boolean {

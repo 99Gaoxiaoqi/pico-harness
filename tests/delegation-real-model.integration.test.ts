@@ -24,7 +24,6 @@ describeRealModel("real model delegation integration", () => {
         dir: workDir,
         session: `real-delegate-test-${Date.now()}`,
         provider: "openai",
-        enableThinking: false,
         planMode: false,
       },
       {},

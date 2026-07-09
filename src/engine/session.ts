@@ -12,7 +12,7 @@
 // 依靠喂给它的 Session 推理 —— 随时休眠、随时被唤醒的记忆连续体。
 
 import { mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import type { CanonicalUsage, Message } from "../schema/message.js";
 import type { CostStatus } from "../observability/pricing.js";
 import { logger } from "../observability/logger.js";
@@ -781,7 +781,7 @@ export class SessionManager {
   }
 
   /**
-   * 获取或创建一个会话(同 id 复用,不同 id 物理隔离)。
+   * 获取或创建一个会话(同 id + 同 workDir 复用,否则物理隔离)。
    * 新建时自动重放磁盘日志恢复历史(recover)。返回 Promise 以支持异步恢复。
    * persistence 显式透传给 Session(测试场景精确控制,避免环境变量并行污染)。
    *
@@ -795,16 +795,17 @@ export class SessionManager {
     // TTL 惰性清理:借这次访问顺带扫一遍过期项(低频,不阻塞主流程)。
     this.evictExpired();
 
-    const existing = this.entries.get(id);
+    const key = this.entryKey(id, workDir);
+    const existing = this.entries.get(key);
     if (existing) {
       existing.lastAccessMs = Date.now();
-      this.touch(id); // MRU 提升
+      this.touch(key); // MRU 提升
       return existing.session;
     }
 
     const sess = new Session(id, workDir, options);
     await sess.recover();
-    this.entries.set(id, { session: sess, lastAccessMs: Date.now() });
+    this.entries.set(key, { session: sess, lastAccessMs: Date.now() });
     // LRU 驱赶:新增后若超 maxSessions,驱逐最旧(刚 set 的不会是最旧)。
     this.evictLru();
     return sess;
@@ -814,21 +815,21 @@ export class SessionManager {
    * 获取已存在的会话(不创建)。命中时做 MRU 提升与 lastAccess 更新。
    * 不触发 TTL 清理(get 应轻量;清理在 getOrCreate 路径做)。
    */
-  get(id: string): Session | undefined {
-    const entry = this.entries.get(id);
+  get(id: string, workDir?: string): Session | undefined {
+    const key = this.findEntryKey(id, workDir);
+    if (!key) return undefined;
+    const entry = this.entries.get(key);
     if (!entry) return undefined;
     entry.lastAccessMs = Date.now();
-    this.touch(id);
+    this.touch(key);
     return entry.session;
   }
 
   /** 删除已存在的会话并返回被删除实例;不存在时返回 undefined。释放底层资源。 */
-  delete(id: string): Session | undefined {
-    const entry = this.entries.get(id);
-    if (!entry) return undefined;
-    this.entries.delete(id);
-    entry.session.close();
-    return entry.session;
+  delete(id: string, workDir?: string): Session | undefined {
+    const key = this.findEntryKey(id, workDir);
+    if (!key) return undefined;
+    return this.deleteByKey(key);
   }
 
   /** 当前管理的会话总数 */
@@ -845,11 +846,11 @@ export class SessionManager {
   }
 
   /** MRU 提升:把 key 移到 Map 末尾(最近使用),保持迭代序 = LRU 序。 */
-  private touch(id: string): void {
-    const entry = this.entries.get(id);
+  private touch(key: string): void {
+    const entry = this.entries.get(key);
     if (!entry) return;
-    this.entries.delete(id);
-    this.entries.set(id, entry);
+    this.entries.delete(key);
+    this.entries.set(key, entry);
   }
 
   /** LRU 驱赶:超出 maxSessions 时驱逐最旧项,直到回到上限内。 */
@@ -857,20 +858,42 @@ export class SessionManager {
     while (this.entries.size > this.maxSessions) {
       const oldest = this.entries.keys().next().value;
       if (oldest === undefined) break;
-      this.delete(oldest);
+      this.deleteByKey(oldest);
     }
   }
 
   /** TTL 惰性清理:驱逐空闲超过 ttlMs 的会话。每次 getOrCreate 调一次。 */
   private evictExpired(): void {
     const now = Date.now();
-    for (const [id, entry] of this.entries) {
+    for (const [key, entry] of this.entries) {
       if (now - entry.lastAccessMs > this.ttlMs) {
-        // 复用 delete:从 entries 移除并 close()
-        this.entries.delete(id);
-        entry.session.close();
+        this.deleteByKey(key);
       }
     }
+  }
+
+  private deleteByKey(key: string): Session | undefined {
+    const entry = this.entries.get(key);
+    if (!entry) return undefined;
+    this.entries.delete(key);
+    entry.session.close();
+    return entry.session;
+  }
+
+  private entryKey(id: string, workDir: string): string {
+    return `${resolve(workDir)}\0${id}`;
+  }
+
+  private findEntryKey(id: string, workDir?: string): string | undefined {
+    if (workDir !== undefined) {
+      const key = this.entryKey(id, workDir);
+      return this.entries.has(key) ? key : undefined;
+    }
+
+    for (const [key, entry] of [...this.entries].reverse()) {
+      if (entry.session.id === id) return key;
+    }
+    return undefined;
   }
 }
 

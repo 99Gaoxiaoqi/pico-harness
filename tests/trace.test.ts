@@ -133,7 +133,6 @@ describe("trace export", () => {
           sessionId: "trace:session/001",
           workDir,
           planMode: false,
-          enableThinking: false,
         },
       });
       expect(exported.children?.map((span) => span.name)).toEqual(["Turn-1", "Turn-2"]);

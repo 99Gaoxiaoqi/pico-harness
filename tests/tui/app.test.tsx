@@ -1,7 +1,7 @@
 import React from "react";
 import { renderToString, Text } from "ink";
 import { describe, expect, it, vi } from "vitest";
-import { App } from "../../src/tui/app.js";
+import { App, nextTranscriptScroll, resolveAppKeyEvent } from "../../src/tui/app.js";
 
 describe("App", () => {
   it("renders history messages separately from the single bottom input box", () => {
@@ -95,6 +95,39 @@ describe("App", () => {
     expect(output).toContain("mode resume");
     expect(output).toContain("perm acceptEdits");
     expect(output).toContain("think high");
+  });
+
+  it("maps global Ctrl shortcuts to interrupt, exit, and redraw semantics", () => {
+    expect(resolveAppKeyEvent("c", { ctrl: true }, false)).toBeNull();
+    expect(resolveAppKeyEvent("c", { ctrl: true }, true)).toBe("interrupt");
+    expect(resolveAppKeyEvent("d", { ctrl: true }, true)).toBe("exit");
+    expect(resolveAppKeyEvent("l", { ctrl: true }, false)).toBe("redraw");
+  });
+
+  it("renders the bottom transcript window for long conversations", () => {
+    const output = renderToString(
+      <App
+        model="glm-5.2"
+        provider="openai"
+        workDir="/workspace/demo"
+        entries={Array.from({ length: 60 }, (_, i) => ({
+          kind: "assistant" as const,
+          content: `message-${i}`,
+        }))}
+        running={false}
+        onSubmit={vi.fn()}
+      />,
+    );
+
+    expect(output).toContain("message-59");
+    expect(output).not.toContain("message-0");
+  });
+
+  it("computes transcript page scrolling around the bottom anchor", () => {
+    expect(nextTranscriptScroll(null, "pageUp", 10, 100)).toBe(82);
+    expect(nextTranscriptScroll(82, "pageDown", 10, 100)).toBe(null);
+    expect(nextTranscriptScroll(5, "top", 10, 100)).toBe(0);
+    expect(nextTranscriptScroll(5, "bottom", 10, 100)).toBeNull();
   });
 });
 

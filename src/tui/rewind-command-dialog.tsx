@@ -9,6 +9,7 @@ import {
   RewindSelector,
   selectRewindConfirmAction,
   selectRewindPreview,
+  selectedRewindSnapshot,
   type RewindSelectorState,
 } from "./rewind-selector.js";
 
@@ -78,10 +79,12 @@ export function RewindCommandDialog({
   getDiffStat,
   onDispatchCommand,
   onClose,
-  initialState = createRewindCommandDialogState(),
+  initialState,
   maxItems,
 }: RewindCommandDialogProps): React.ReactNode {
-  const [state, setState] = useState(initialState);
+  const [state, setState] = useState(() =>
+    initialState ?? createRewindCommandDialogState(createRewindSelectorState(snapshots)),
+  );
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -145,7 +148,7 @@ export async function resolveRewindCommandDialogKey(
   if (!event.key.return) return state;
 
   if (state.selector.phase === "select") {
-    const snapshot = snapshots[clampIndex(state.selector.selectedIndex, snapshots.length)];
+    const snapshot = selectedRewindSnapshot(state.selector, snapshots);
     if (!snapshot) return state;
     const diffStat = await callbacks.getDiffStat(snapshot.messageId);
     return {
@@ -190,9 +193,4 @@ function closeRewindDialog(): RewindCommandDialogState {
     selector: createRewindSelectorState(),
     status: "closed",
   };
-}
-
-function clampIndex(index: number, itemCount: number): number {
-  if (itemCount <= 0) return 0;
-  return Math.min(Math.max(index, 0), itemCount - 1);
 }

@@ -188,7 +188,6 @@ describe("large ToolResult artifact externalization", () => {
       provider,
       registry,
       workDir,
-      enableThinking: false,
       observationProcessor: createToolResultObservationProcessor({
         store,
         externalizeThresholdChars: 1024,

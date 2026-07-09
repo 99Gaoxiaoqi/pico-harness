@@ -22,6 +22,7 @@ import {
   type McpTool,
   type McpToolResult,
 } from "./types.js";
+import { redactSensitiveText } from "./redact.js";
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 
@@ -29,6 +30,7 @@ interface PendingRequest {
   resolve: (value: unknown) => void;
   reject: (reason: Error) => void;
   timer: NodeJS.Timeout;
+  controller: AbortController;
 }
 
 /**
@@ -47,6 +49,9 @@ export class HttpMcpClient implements McpClient {
   private postEndpoint: string | undefined;
   /** sse 模式:读 SSE 流的 AbortController,close() 时中止 */
   private sseAbort: AbortController | undefined;
+  private readonly activeControllers = new Set<AbortController>();
+  private readonly closeHandlers: Array<(err?: Error) => void> = [];
+  private readonly errorHandlers: Array<(err: Error) => void> = [];
 
   constructor(private readonly config: McpServerConfig) {
     if (config.transport !== "http" && config.transport !== "sse") {
@@ -94,12 +99,25 @@ export class HttpMcpClient implements McpClient {
       this.sseAbort.abort();
       this.sseAbort = undefined;
     }
+    for (const controller of this.activeControllers) {
+      controller.abort();
+    }
+    this.activeControllers.clear();
     // 拒绝所有 pending
     for (const [, pending] of this.pending) {
       clearTimeout(pending.timer);
+      pending.controller.abort();
       pending.reject(new Error(`MCP server "${this.config.name}" 已关闭`));
     }
     this.pending.clear();
+  }
+
+  onClose(handler: (err?: Error) => void): void {
+    this.closeHandlers.push(handler);
+  }
+
+  onError(handler: (err: Error) => void): void {
+    this.errorHandlers.push(handler);
   }
 
   // ---------- 内部实现 ----------
@@ -143,18 +161,20 @@ export class HttpMcpClient implements McpClient {
     const id = this.nextId++;
     const req: JsonRpcRequest = { jsonrpc: "2.0", id, method, params };
     const timeoutMs = this.config.toolTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+    const controller = new AbortController();
 
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
+        controller.abort();
         reject(new Error(`MCP server "${this.config.name}" 请求 ${method} 超时(${timeoutMs}ms)`));
       }, timeoutMs);
 
-      this.pending.set(id, { resolve, reject, timer });
+      this.pending.set(id, { resolve, reject, timer, controller });
 
       const send = this.config.transport === "sse" ? this.postEndpoint : undefined;
       // http:sendHttpPost 会从响应体直接 resolve;sse:仅 POST,响应走 SSE 流
-      this.sendHttpPost(req, send)
+      this.sendHttpPost(req, send, controller)
         .then((directResult) => {
           // http transport:响应体已包含结果,直接 resolve
           if (directResult !== undefined) {
@@ -171,7 +191,7 @@ export class HttpMcpClient implements McpClient {
         .catch((err) => {
           clearTimeout(timer);
           this.pending.delete(id);
-          reject(new Error(`MCP server "${this.config.name}" 发送请求失败: ${err.message}`));
+          reject(new Error(redactSensitiveText(`MCP server "${this.config.name}" 发送请求失败: ${err.message}`)));
         });
     });
   }
@@ -184,6 +204,7 @@ export class HttpMcpClient implements McpClient {
   private async sendHttpPost(
     msg: JsonRpcRequest | { jsonrpc: "2.0"; method: string; params: Record<string, unknown> },
     targetUrl?: string,
+    controller = new AbortController(),
   ): Promise<JsonRpcResponse | undefined> {
     const url = targetUrl ?? this.config.url!;
     const headers: Record<string, string> = {
@@ -192,35 +213,41 @@ export class HttpMcpClient implements McpClient {
       ...(this.config.headers ?? {}),
     };
 
-    const res = await fetch(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(msg),
-    });
-
-    if (!res.ok) {
-      throw new Error(`HTTP ${res.status} ${res.statusText}`);
-    }
-
-    const contentType = res.headers.get("content-type") ?? "";
-
-    // SSE 响应:读流直到拿到对应 id 的 response
-    if (contentType.includes("text/event-stream")) {
-      return this.readSseResponse(res, msg);
-    }
-
-    // JSON 响应:直接解析
-    if (contentType.includes("application/json")) {
-      const body = (await res.json()) as JsonRpcResponse;
-      return body;
-    }
-
-    // 兜底:当纯文本解析
-    const text = await res.text();
     try {
-      return JSON.parse(text) as JsonRpcResponse;
-    } catch {
-      throw new Error(`MCP server "${this.config.name}" 返回无法解析的响应: ${text.slice(0, 200)}`);
+      this.activeControllers.add(controller);
+      const res = await fetch(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(msg),
+        signal: controller.signal,
+      });
+
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status} ${res.statusText}`);
+      }
+
+      const contentType = res.headers.get("content-type") ?? "";
+
+      // SSE 响应:读流直到拿到对应 id 的 response
+      if (contentType.includes("text/event-stream")) {
+        return await this.readSseResponse(res, msg);
+      }
+
+      // JSON 响应:直接解析
+      if (contentType.includes("application/json")) {
+        const body = (await res.json()) as JsonRpcResponse;
+        return body;
+      }
+
+      // 兜底:当纯文本解析
+      const text = await res.text();
+      try {
+        return JSON.parse(text) as JsonRpcResponse;
+      } catch {
+        throw new Error(`MCP server "${this.config.name}" 返回无法解析的响应: ${text.slice(0, 200)}`);
+      }
+    } finally {
+      this.activeControllers.delete(controller);
     }
   }
 
@@ -233,11 +260,16 @@ export class HttpMcpClient implements McpClient {
     msg: JsonRpcRequest | { jsonrpc: "2.0"; method: string; params: Record<string, unknown> },
   ): Promise<JsonRpcResponse | undefined> {
     const body = res.body;
-    if (!body) return undefined;
+    const wantId = "id" in msg ? msg.id : undefined;
+    if (!body) {
+      if (wantId !== undefined) {
+        throw new Error(`missing response id ${String(wantId)} in HTTP SSE response`);
+      }
+      return undefined;
+    }
     const reader = body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
-    const wantId = "id" in msg ? msg.id : undefined;
 
     try {
       while (true) {
@@ -255,7 +287,11 @@ export class HttpMcpClient implements McpClient {
           }
         }
       }
+      if (wantId !== undefined) {
+        throw new Error(`missing response id ${String(wantId)} in HTTP SSE response`);
+      }
     } finally {
+      await reader.cancel().catch(() => {});
       reader.releaseLock();
     }
     return undefined;
@@ -320,13 +356,23 @@ export class HttpMcpClient implements McpClient {
             }
           } catch (err) {
             if (!this.closed) {
-              this.failAllPending(new Error(`SSE 流中断: ${err instanceof Error ? err.message : String(err)}`));
+              const safeError = new Error(redactSensitiveText(`SSE 流中断: ${err instanceof Error ? err.message : String(err)}`));
+              this.failAllPending(safeError);
+              this.emitError(safeError);
+            }
+          } finally {
+            await reader.cancel().catch(() => {});
+            reader.releaseLock();
+            if (!this.closed && this.connected) {
+              this.emitClose(new Error(`MCP server "${this.config.name}" SSE 流已关闭`));
             }
           }
         })
         .catch((err) => {
           if (!this.closed) {
-            rejectReady(new Error(`SSE 连接失败: ${err instanceof Error ? err.message : String(err)}`));
+            const safeError = new Error(redactSensitiveText(`SSE 连接失败: ${err instanceof Error ? err.message : String(err)}`));
+            rejectReady(safeError);
+            this.emitError(safeError);
           }
         });
     });
@@ -385,9 +431,22 @@ export class HttpMcpClient implements McpClient {
   private failAllPending(err: Error): void {
     for (const [, pending] of this.pending) {
       clearTimeout(pending.timer);
+      pending.controller.abort();
       pending.reject(err);
     }
     this.pending.clear();
+  }
+
+  private emitClose(err?: Error): void {
+    for (const handler of this.closeHandlers) {
+      handler(err);
+    }
+  }
+
+  private emitError(err: Error): void {
+    for (const handler of this.errorHandlers) {
+      handler(err);
+    }
   }
 
   /** 把相对 URL 解析成绝对(sse endpoint 可能是相对路径) */
