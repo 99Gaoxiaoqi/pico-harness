@@ -8,7 +8,7 @@
 //   - user      : 绿色 ❯ + 内容(提交即固定)
 //   - assistant : isStatic 用 CompletedText(代码块着色,非流式);
 //                 否则用 StreamingText(末条流式中,按行增量渲染)
-//   - system    : 淡色 • + 内容(本地命令反馈,由 assistant 文本识别)
+//   - system    : 淡色 • + 内容(本地控制面反馈)
 //   - error     : 黄色 ! + 原始错误信息(由 assistant 文本识别)
 //   - tool      : 渲染 <ToolCard>(自带折叠/展开)
 //   - thinking  : 返回 null(spinner 由 App 层渲染,不在此重复)
@@ -51,21 +51,20 @@ function MessageRowImpl({ entry, isStatic, isLast }: MessageRowProps): React.Rea
         );
       }
 
-      if (isSystemContent(entry.content)) {
-        return (
-          <MessageFrame marker="•" markerColor="gray">
-            <Text dimColor wrap="wrap">
-              {entry.content}
-            </Text>
-          </MessageFrame>
-        );
-      }
-
       // isStatic:已固化走 CompletedText(代码块着色,整体 memo);
       // 否则(末条流式中)走 StreamingText(按行 stable/unstable 增量渲染)
       return (
         <MessageFrame marker="✦" markerColor="cyan">
           {isStatic ? <CompletedText content={entry.content} /> : <StreamingText content={entry.content} />}
+        </MessageFrame>
+      );
+
+    case "system":
+      return (
+        <MessageFrame marker="•" markerColor="gray">
+          <Text dimColor wrap="wrap">
+            {entry.content}
+          </Text>
         </MessageFrame>
       );
 
@@ -114,18 +113,6 @@ function MessageFrame({
   );
 }
 
-function isSystemContent(content: string): boolean {
-  const trimmed = content.trim();
-  if (trimmed.length === 0) return false;
-  if (trimmed.startsWith("Unknown command")) return true;
-  if (trimmed.startsWith("No help found")) return true;
-  if (trimmed.startsWith("Usage:")) return true;
-  if (trimmed.includes("command is not connected yet.")) return true;
-
-  const lines = trimmed.split("\n").filter((line) => line.trim().length > 0);
-  return lines.length > 0 && lines.every((line) => line.trim().startsWith("/"));
-}
-
 function isErrorContent(content: string): boolean {
   const trimmed = content.trim();
   return trimmed.startsWith("执行出错:") || trimmed.startsWith("⚠️ 执行出错:");
@@ -156,6 +143,7 @@ function arePropsEqual(prev: MessageRowProps, next: MessageRowProps): boolean {
 
   switch (b.kind) {
     case "user":
+    case "system":
     case "assistant":
       // content 完全一致即跳过(报告者可能换数组引用,但 content 不变)
       return a.kind === b.kind && a.content === b.content;

@@ -53,13 +53,19 @@ describe("shouldRenderStatically", () => {
     expect(shouldRenderStatically(e, true, true)).toBe(false);
   });
 
+  it("system 条目:始终固定(true)", () => {
+    const e: TuiEntry = { kind: "system", content: "Unknown slash command: /wat" };
+    expect(shouldRenderStatically(e, false, false)).toBe(true);
+    expect(shouldRenderStatically(e, true, true)).toBe(true);
+  });
+
   it("消息列表统一 user/assistant/system/error 行首符号与缩进", () => {
     const output = renderToString(
       React.createElement(MessageList, {
         entries: [
           { kind: "user", content: "帮我检查" },
           { kind: "assistant", content: "正在检查" },
-          { kind: "assistant", content: "Unknown command: /wat" },
+          { kind: "system", content: "Unknown command: /wat" },
           { kind: "assistant", content: "⚠️ 执行出错: boom" },
         ],
       }),

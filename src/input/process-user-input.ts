@@ -35,6 +35,8 @@ export async function processUserInput(
   input: string,
   options: ProcessUserInputOptions = {},
 ): Promise<InputProcessResult> {
+  const registry = options.registry ?? createBuiltinCommandRegistry();
+
   if (input.trim().length === 0) {
     return {
       type: "empty",
@@ -44,6 +46,18 @@ export async function processUserInput(
 
   const parsed = parseSlashInput(input);
   if (parsed === null) {
+    if (isSlashLikeInput(input)) {
+      return {
+        type: "unknown-command",
+        raw: input,
+        command: "",
+        args: "",
+        argv: [],
+        message: "Invalid slash command. Type /help to see available commands.",
+        suggestions: registry.suggestions("help"),
+      };
+    }
+
     return {
       type: "prompt",
       raw: input,
@@ -51,7 +65,6 @@ export async function processUserInput(
     };
   }
 
-  const registry = options.registry ?? createBuiltinCommandRegistry();
   const command = registry.resolve(parsed.name);
   if (command === undefined) {
     return {
@@ -100,6 +113,10 @@ export async function processUserInput(
     argv: parsed.argv,
     result,
   };
+}
+
+function isSlashLikeInput(input: string): boolean {
+  return input.trimStart().startsWith("/");
 }
 
 function buildHelpMessage(registry: CommandRegistry, filter?: string): string {

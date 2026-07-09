@@ -45,6 +45,7 @@ import {
 } from "../input/pico-command-registry.js";
 import { preparePromptWithMentions } from "../input/prepare-prompt.js";
 import { processUserInput } from "../input/process-user-input.js";
+import { parseSlashInput } from "../input/slash-parser.js";
 import type { CommandRegistry } from "../input/command-registry.js";
 import type { InputProcessResult, LocalCommandResult } from "../input/types.js";
 import type { ProviderKind } from "../provider/factory.js";
@@ -123,9 +124,11 @@ export interface LocalTuiModelSelectorDialogEffect {
 }
 
 export interface HandleTuiRunningInputSubmissionDeps extends HandleTuiInputSubmissionDeps {
-  guard: Pick<QueryGuard, "tryStart" | "end">;
+  guard: Pick<QueryGuard, "tryStart" | "end" | "getSnapshot">;
   queue: RunningInputQueue;
 }
+
+const RUNNING_IMMEDIATE_LOCAL_COMMANDS = new Set(["help", "status"]);
 
 export async function handleTuiInputSubmission(
   text: string,
@@ -159,8 +162,20 @@ export async function handleTuiRunningInputSubmission(
   text: string,
   deps: HandleTuiRunningInputSubmissionDeps,
 ): Promise<void> {
+  const running = deps.guard.getSnapshot() !== "idle";
+  const blockedCommand = running ? blockedRunningLocalCommand(text, deps.registry) : undefined;
+  if (blockedCommand !== undefined) {
+    deps.reporter.pushSystemMessage(formatRunningCommandBlocked(blockedCommand));
+    return;
+  }
+
   const processed = await processTuiInput(text, deps);
   if (!needsAgentRun(processed)) {
+    if (running && processed.type === "local-command" && !canRunLocalCommandWhileRunning(processed.command)) {
+      deps.reporter.pushSystemMessage(formatRunningCommandBlocked(processed.command));
+      return;
+    }
+
     await handleTuiInputSubmission(text, {
       ...deps,
       processInput: async () => processed,
@@ -170,7 +185,7 @@ export async function handleTuiRunningInputSubmission(
 
   const gen = deps.guard.tryStart();
   if (gen === null) {
-    const queued = deps.queue.enqueue(text);
+    const queued = deps.queue.enqueue(text, processed);
     if (queued.type === "rejected") {
       deps.reporter.pushSystemMessage(`Input queue is full (${queued.capacity}). Please wait.`);
     }
@@ -204,7 +219,7 @@ async function drainQueuedTuiInputs(deps: HandleTuiRunningInputSubmissionDeps): 
     const queued = deps.queue.drain();
     for (const item of queued) {
       if (item.kind !== "normal") continue;
-      const processed = await processTuiInput(item.text, deps);
+      const processed = item.processed ?? (await processTuiInput(item.text, deps));
       if (!needsAgentRun(processed)) {
         await handleTuiInputSubmission(item.text, {
           ...deps,
@@ -215,7 +230,7 @@ async function drainQueuedTuiInputs(deps: HandleTuiRunningInputSubmissionDeps): 
 
       const gen = deps.guard.tryStart();
       if (gen === null) {
-        const queuedAgain = deps.queue.enqueue(item.text);
+        const queuedAgain = deps.queue.enqueue(item.text, processed);
         if (queuedAgain.type === "rejected") {
           deps.reporter.pushSystemMessage(`Input queue is full (${queuedAgain.capacity}). Please wait.`);
         }
@@ -236,6 +251,23 @@ async function processTuiInput(
 
 function needsAgentRun(processed: TuiInputProcessResult): boolean {
   return processed.type === "prompt" || processed.type === "prompt-command";
+}
+
+function blockedRunningLocalCommand(text: string, registry: CommandRegistry): string | undefined {
+  const parsed = parseSlashInput(text);
+  if (!parsed) return undefined;
+
+  const command = registry.resolve(parsed.name);
+  if (!command || command.kind === "prompt") return undefined;
+  return canRunLocalCommandWhileRunning(command.name) ? undefined : command.name;
+}
+
+function canRunLocalCommandWhileRunning(command: string): boolean {
+  return RUNNING_IMMEDIATE_LOCAL_COMMANDS.has(command);
+}
+
+function formatRunningCommandBlocked(command: string): string {
+  return `Cannot run /${command} while the agent is running. Please wait for the current response to finish.`;
 }
 
 /** 启动 TUI REPL 循环 */

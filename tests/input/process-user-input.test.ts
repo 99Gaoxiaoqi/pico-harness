@@ -124,6 +124,20 @@ describe("processUserInput", () => {
     });
   });
 
+  it("格式非法的 slash 输入不会退化成普通 prompt", async () => {
+    const registry = createBuiltinCommandRegistry();
+
+    for (const input of ["/", "/ 中文", "/模式", "/mode("]) {
+      const result = await processUserInput(input, { registry });
+
+      expect(result.type, input).toBe("unknown-command");
+      if (result.type === "unknown-command") {
+        expect(result.raw).toBe(input);
+        expect(result.message).toContain("Invalid slash command");
+      }
+    }
+  });
+
   it("未知命令建议按 alias 和编辑距离排序", async () => {
     const result = await processUserInput("/hlep", {
       registry: createBuiltinCommandRegistry(),

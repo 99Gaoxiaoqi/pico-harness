@@ -26,6 +26,7 @@ export type UiMode = SpinnerMode | "idle";
 /** 对话流中的一条记录。简化为联合类型,App.tsx 按 kind 分发渲染。 */
 export type TuiEntry =
   | { kind: "user"; content: string }
+  | { kind: "system"; content: string }
   | { kind: "assistant"; content: string }
   | { kind: "tool"; name: string; args: string; status: ToolCardStatus; summary?: string }
   | { kind: "thinking" };
@@ -59,9 +60,9 @@ export class TuiReporter implements Reporter {
     this.emit();
   }
 
-  /** 本地输入命令的系统反馈。渲染层尚无 system kind,先复用 assistant 气泡承载。 */
+  /** 本地输入命令的系统反馈。 */
   pushSystemMessage(content: string): void {
-    this.entries.push({ kind: "assistant", content });
+    this.entries.push({ kind: "system", content });
     this.emit();
   }
 
