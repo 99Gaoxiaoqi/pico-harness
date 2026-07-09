@@ -4,7 +4,16 @@ import { join } from "node:path";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
 
-export const TUI_SMOKE_PROMPTS = ["/status", "/mode", "/tools", "/help"];
+export const TUI_SMOKE_CHECKS = [
+  {
+    label: "typecheck",
+    args: ["run", "typecheck"],
+  },
+  {
+    label: "tui-tests",
+    args: ["run", "test", "--", "tests/tui/repl-input-routing.test.tsx", "tests/tui/app.test.tsx"],
+  },
+];
 
 export function parseDotEnv(text) {
   const parsed = {};
@@ -86,9 +95,9 @@ export function runTuiSmoke(options = {}) {
 
   let hasFailure = false;
 
-  for (const prompt of TUI_SMOKE_PROMPTS) {
-    log(`RUN ${prompt}`);
-    const result = spawnSync("npm", ["run", "dev", "--", "--prompt", prompt], {
+  for (const check of TUI_SMOKE_CHECKS) {
+    log(`RUN ${check.label}`);
+    const result = spawnSync("npm", check.args, {
       cwd,
       encoding: "utf8",
       env: process.env,
@@ -97,11 +106,11 @@ export function runTuiSmoke(options = {}) {
       stdio: "pipe",
     });
     const exitCode = typeof result.status === "number" ? result.status : 1;
-    log(`EXIT ${prompt} ${exitCode}`);
-    log(`SUMMARY ${prompt}: ${summarizeOutput(result.stdout, result.stderr)}`);
+    log(`EXIT ${check.label} ${exitCode}`);
+    log(`SUMMARY ${check.label}: ${summarizeOutput(result.stdout, result.stderr)}`);
 
     if (result.error) {
-      log(`ERROR ${prompt}: ${result.error.message}`);
+      log(`ERROR ${check.label}: ${result.error.message}`);
     }
     if (exitCode !== 0) {
       hasFailure = true;

@@ -14,10 +14,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "smoke:tui": "node scripts/tui-smoke.mjs",
-    "lint": "eslint src/cli src/tui tests/cli-launch-mode.test.ts tests/cli-run-agent.test.ts",
-    "format": "prettier --check .",
-    "docker:build": "docker build -t pico-harness .",
-    "docker:run": "docker run -it --rm -v $(pwd):/workspace --env-file .env pico-harness"
+    "lint": "eslint src/cli src/tui src/input tests/cli-run-agent.test.ts tests/input/process-user-input.test.ts",
+    "format": "prettier --check ."
   },
   "engines": {
     "node": ">=22.0.0"

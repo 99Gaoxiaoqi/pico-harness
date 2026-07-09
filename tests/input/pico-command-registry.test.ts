@@ -21,10 +21,7 @@ import {
   getStoredSessionSettings,
   resetSessionSettingsForTests,
 } from "../../src/input/session-settings.js";
-import {
-  fileHistoryMakeSnapshot,
-  fileHistoryTrackEdit,
-} from "../../src/safety/file-history.js";
+import { fileHistoryMakeSnapshot, fileHistoryTrackEdit } from "../../src/safety/file-history.js";
 import { ToolDisclosure } from "../../src/tools/tool-disclosure.js";
 
 describe("Pico command registry", () => {
@@ -420,10 +417,15 @@ describe("Pico command registry", () => {
     if (result.type !== "local-command") return;
     expect(result.command).toBe("sessions");
     expect(result.result.ui).toEqual({ kind: "open-selector", selector: "session" });
-    expect(result.result.message).toContain("cli-current");
-    expect(result.result.message).toContain("messages=2");
-    expect(result.result.message).toContain("current");
-    expect(result.result.message).toContain("/resume cli-current");
+    expect(result.result.message).toContain("找到 1 个可恢复 session");
+    expect(result.result.data).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "cli-current",
+          messageCount: 2,
+        }),
+      ]),
+    );
   });
 
   it("/resume gives a restart hint instead of hot-switching the running engine", async () => {
@@ -463,9 +465,7 @@ describe("Pico command registry", () => {
     expect(help.result.message).toContain("/resume");
     expect(resumeHelp.type).toBe("local-command");
     if (resumeHelp.type !== "local-command") return;
-    expect(resumeHelp.result.message).toContain(
-      `Usage: /resume ${resumeCommand?.argumentHint}`,
-    );
+    expect(resumeHelp.result.message).toContain(`Usage: /resume ${resumeCommand?.argumentHint}`);
     expect(commandSuggestions(registry, "sess").map((item) => item.value)).toContain("sessions");
     expect(commandSuggestions(registry, "res")).toContainEqual(
       expect.objectContaining({
@@ -495,15 +495,15 @@ describe("Pico command registry", () => {
     expect(result.result.message).toContain("forkFrom: session-source");
   });
 
-  it("builtin registry exposes /mode as its own command", async () => {
+  it("builtin registry leaves /mode to the Pico TUI registry", async () => {
     const result = await processUserInput("/mode", {
       registry: createBuiltinCommandRegistry(),
     });
 
-    expect(result.type).toBe("local-command");
-    if (result.type !== "local-command") return;
+    expect(result.type).toBe("unknown-command");
+    if (result.type !== "unknown-command") return;
     expect(result.command).toBe("mode");
-    expect(result.result.message).toContain("Mode command is not connected yet.");
+    expect(result.suggestions).toContain("help");
   });
 
   it("/snapshots 展示当前 session 可回滚点", async () => {

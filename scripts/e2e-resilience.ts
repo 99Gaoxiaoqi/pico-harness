@@ -26,22 +26,22 @@ async function main(): Promise<void> {
 
   // 验证 A:基础链路 + Skill 加载(D)
   console.log("========== 验证 A+D: 基础链路 + Skill 加载 ==========");
-  const resultA = await runAgentFromCli(
-    {
-      prompt:
-        "请调用 skill_view 工具(name 传 aihot)查看技能内容," +
-        "然后用中文一句话告诉我这个技能的用途。不要写文件。",
-      dir: workDir,
-      session: `e2e-resilience-A-${Date.now()}`,
-      provider: "openai",
-      enableThinking: false,
-      planMode: false,
-    },
-    { write: () => undefined },
-  );
+  const resultA = await runAgentFromCli({
+    prompt:
+      "请调用 skill_view 工具(name 传 aihot)查看技能内容," +
+      "然后用中文一句话告诉我这个技能的用途。不要写文件。",
+    dir: workDir,
+    session: `e2e-resilience-A-${Date.now()}`,
+    provider: "openai",
+    enableThinking: false,
+    planMode: false,
+  });
 
   const skillViewCalled = resultA.messages.some(
-    (m) => m.role === "assistant" && Array.isArray(m.toolCalls) && m.toolCalls.some((tc) => tc.name === "skill_view"),
+    (m) =>
+      m.role === "assistant" &&
+      Array.isArray(m.toolCalls) &&
+      m.toolCalls.some((tc) => tc.name === "skill_view"),
   );
   const passA = skillViewCalled && /aihot|AI|资讯/i.test(resultA.finalMessage);
   console.log(`[验证 A+D] 基础链路 + Skill 加载: ${passA ? "✅ 通过" : "❌ 失败"}`);
@@ -51,24 +51,23 @@ async function main(): Promise<void> {
   // 验证 B:子代理场景
   console.log("========== 验证 B: 子代理委派 ==========");
   const workDirB = await mkdtemp(join(tmpdir(), "pico-e2e-resilience-B-"));
-  const resultB = await runAgentFromCli(
-    {
-      prompt:
-        "请用 delegate_task 工具启动 1 个 mode=worker 的子代理," +
-        "子代理目标:用 write_file 创建 subagent-test.txt,内容为 SUBAGENT_OK。" +
-        "子代理完成后回复 DELEGATE_DONE。",
-      dir: workDirB,
-      session: `e2e-resilience-B-${Date.now()}`,
-      provider: "openai",
-      enableThinking: false,
-      planMode: false,
-    },
-    { write: () => undefined },
-  );
+  const resultB = await runAgentFromCli({
+    prompt:
+      "请用 delegate_task 工具启动 1 个 mode=worker 的子代理," +
+      "子代理目标:用 write_file 创建 subagent-test.txt,内容为 SUBAGENT_OK。" +
+      "子代理完成后回复 DELEGATE_DONE。",
+    dir: workDirB,
+    session: `e2e-resilience-B-${Date.now()}`,
+    provider: "openai",
+    enableThinking: false,
+    planMode: false,
+  });
 
   let passB: boolean;
   try {
-    const content = await import("node:fs/promises").then((fs) => fs.readFile(join(workDirB, "subagent-test.txt"), "utf8"));
+    const content = await import("node:fs/promises").then((fs) =>
+      fs.readFile(join(workDirB, "subagent-test.txt"), "utf8"),
+    );
     passB = content.trim() === "SUBAGENT_OK";
   } catch {
     passB = false;
@@ -81,18 +80,15 @@ async function main(): Promise<void> {
   const workDirC = await mkdtemp(join(tmpdir(), "pico-e2e-resilience-C-"));
   // 写一个中等大小的文件,让模型读取后上下文增长,验证压缩链路不崩
   await writeFile(join(workDirC, "large-log.txt"), "日志行:系统运行正常 ".repeat(500), "utf8");
-  const resultC = await runAgentFromCli(
-    {
-      prompt:
-        "请用 bash 执行 wc -c large-log.txt 查看文件大小,然后告诉我文件有多少字节。不要读取整个文件。",
-      dir: workDirC,
-      session: `e2e-resilience-C-${Date.now()}`,
-      provider: "openai",
-      enableThinking: false,
-      planMode: false,
-    },
-    { write: () => undefined },
-  );
+  const resultC = await runAgentFromCli({
+    prompt:
+      "请用 bash 执行 wc -c large-log.txt 查看文件大小,然后告诉我文件有多少字节。不要读取整个文件。",
+    dir: workDirC,
+    session: `e2e-resilience-C-${Date.now()}`,
+    provider: "openai",
+    enableThinking: false,
+    planMode: false,
+  });
   const passC = /\d+/.test(resultC.finalMessage) && resultC.finalMessage.length > 0;
   console.log(`[验证 C] 大上下文压力(压缩链路不崩): ${passC ? "✅ 通过" : "❌ 失败"}`);
   console.log(`  最终回复: ${resultC.finalMessage.slice(0, 80)}...\n`);

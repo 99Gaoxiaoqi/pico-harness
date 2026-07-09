@@ -3,9 +3,6 @@ export interface SlashArgumentHint {
   description?: string;
 }
 
-const COMMAND_RE =
-  /^\/([A-Za-z0-9_?][A-Za-z0-9_-]*(?::[A-Za-z0-9][A-Za-z0-9_-]*)*|\?)(?:\s+([\s\S]*))?$/;
-
 const ARGUMENT_HINTS: Record<string, readonly SlashArgumentHint[]> = {
   model: [
     { value: "glm-5.2", description: "OpenAI-compatible default model" },
@@ -62,27 +59,6 @@ export function getSlashArgumentHints(
     .map((hint) => ({ ...hint }));
 }
 
-export function getSlashArgumentHintsForInput(
-  input: string,
-  cursor = input.length,
-): readonly SlashArgumentHint[] {
-  const beforeCursor = input.slice(0, clampCursor(cursor, input.length));
-  const match = COMMAND_RE.exec(beforeCursor);
-  if (match === null) return [];
-
-  const command = match[1];
-  const args = match[2];
-  if (command === undefined || args === undefined) return [];
-  if (/\s/.test(args)) return [];
-
-  return getSlashArgumentHints(command, args);
-}
-
 function normalizeCommand(command: string): string {
   return command.replace(/^\/+/, "").trim().toLowerCase();
-}
-
-function clampCursor(cursor: number, inputLength: number): number {
-  if (!Number.isFinite(cursor)) return inputLength;
-  return Math.max(0, Math.min(inputLength, Math.trunc(cursor)));
 }

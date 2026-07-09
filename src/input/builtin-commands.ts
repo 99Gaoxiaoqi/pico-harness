@@ -1,6 +1,30 @@
 import { CommandRegistry } from "./command-registry.js";
 import type { LocalCommandResult, PromptCommandResult, SlashCommand } from "./types.js";
 
+const CORE_HELP_COMMANDS = new Set([
+  "help",
+  "clear",
+  "exit",
+  "status",
+  "mode",
+  "permissions",
+  "compact",
+  "init",
+  "doctor",
+  "model",
+  "thinking",
+  "tools",
+  "agents",
+  "sessions",
+  "resume",
+  "snapshots",
+  "rewind",
+  "undo",
+  "agent",
+  "skills",
+  "skill",
+]);
+
 export function createBuiltinCommands(): readonly SlashCommand[] {
   return [
     localCommand({
@@ -32,85 +56,6 @@ export function createBuiltinCommands(): readonly SlashCommand[] {
       action: "exit",
       message: "Exit requested.",
     }),
-    localCommand({
-      name: "status",
-      aliases: ["st"],
-      description: "Show current session status",
-      usage: "/status",
-      action: "status",
-      message: "Status is not connected yet.",
-    }),
-    localCommand({
-      name: "compact",
-      description: "Compact current session context",
-      usage: "/compact",
-      action: "message",
-      message: "Compact command is not connected yet.",
-    }),
-    localCommand({
-      name: "init",
-      description: "Create lightweight Pico project entry files",
-      usage: "/init",
-      action: "message",
-      message: "Init command is not connected yet.",
-    }),
-    localCommand({
-      name: "doctor",
-      description: "Diagnose local Pico configuration",
-      usage: "/doctor",
-      action: "message",
-      message: "Doctor command is not connected yet.",
-    }),
-    localCommand({
-      name: "model",
-      aliases: ["models"],
-      description: "Show or change the active model",
-      usage: "/model [name]",
-      action: "model",
-      execute: (input) => ({
-        type: "local",
-        action: "model",
-        ...(input.args.length === 0
-          ? { ui: { kind: "open-selector", selector: "model" } as const }
-          : {}),
-        message:
-          input.args.length === 0
-            ? "Model command is not connected yet."
-            : `Model change requested: ${input.args}`,
-        data: input.args.length === 0 ? undefined : { model: input.args },
-      }),
-    }),
-    localCommand({
-      name: "mode",
-      description: "Show or change the current interaction mode",
-      usage: "/mode <default|plan|auto|yolo>",
-      action: "message",
-      message: "Mode command is not connected yet.",
-    }),
-    localCommand({
-      name: "tools",
-      aliases: ["tool"],
-      description: "List available tools",
-      usage: "/tools",
-      action: "tools",
-      message: "Tools command is not connected yet.",
-    }),
-    localCommand({
-      name: "thinking",
-      aliases: ["effort"],
-      description: "Show or change thinking effort",
-      usage: "/thinking <off|low|medium|high>",
-      action: "thinking",
-      message: "Thinking command is not connected yet.",
-    }),
-    localCommand({
-      name: "skills",
-      aliases: ["skill-list"],
-      description: "List available skills",
-      usage: "/skills",
-      action: "skills",
-      message: "Skills command is not connected yet.",
-    }),
     {
       name: "skill",
       aliases: ["use-skill"],
@@ -134,14 +79,6 @@ export function createBuiltinCommands(): readonly SlashCommand[] {
         };
       },
     },
-    localCommand({
-      name: "agents",
-      aliases: ["agent"],
-      description: "List available subagents",
-      usage: "/agents",
-      action: "agents",
-      message: "Agents command is not connected yet.",
-    }),
   ];
 }
 
@@ -178,27 +115,53 @@ function localCommand(spec: LocalCommandSpec): SlashCommand {
 
 function buildHelpMessage(commands: readonly SlashCommand[], filter?: string): string {
   const normalizedFilter = filter?.replace(/^\/+/, "").toLowerCase();
-  const visible =
-    normalizedFilter === undefined
-      ? commands
-      : commands.filter(
-          (command) =>
-            command.name === normalizedFilter ||
-            command.aliases?.some((alias) => alias.toLowerCase() === normalizedFilter) === true,
-        );
 
-  if (visible.length === 0) {
-    return `No help found for /${filter ?? ""}.`;
+  if (normalizedFilter !== undefined && normalizedFilter.trim().length > 0) {
+    const visible = commands.filter(
+      (command) =>
+        command.name === normalizedFilter ||
+        command.aliases?.some((alias) => alias.toLowerCase() === normalizedFilter) === true,
+    );
+    if (visible.length === 0) return `No help found for /${filter ?? ""}.`;
+    return visible.map(formatCommandHelp).join("\n");
   }
 
-  return visible
-    .map((command) => {
-      const usage = command.usage ?? `/${command.name}`;
-      const aliases =
-        command.aliases === undefined || command.aliases.length === 0
-          ? ""
-          : ` (aliases: ${command.aliases.map((alias) => `/${alias}`).join(", ")})`;
-      return `${usage}${aliases} - ${command.description}`;
-    })
-    .join("\n");
+  const visible = commands.filter((command) => CORE_HELP_COMMANDS.has(command.name));
+  if (visible.length === 0) return "No slash commands available.";
+
+  return [
+    "Available slash commands:",
+    ...visible.map((command) => `/${command.name} - ${command.description}`),
+    "",
+    "Use /help <command> for any command, or /skills and /agents for extension lists.",
+  ].join("\n");
+}
+
+function formatCommandHelp(command: SlashCommand): string {
+  const usage = command.usage ?? `/${command.name}`;
+  const aliases = command.aliases?.map((alias) => `/${alias}`).join(", ") || "none";
+  const parameters = extractUsageParameters(usage);
+  const parameterLines =
+    parameters.length === 0
+      ? ["Parameters: none"]
+      : ["Parameters:", ...parameters.map((parameter) => `  ${parameter}`)];
+
+  return [
+    `Command: /${command.name}`,
+    `Usage: ${usage}`,
+    `Aliases: ${aliases}`,
+    `Description: ${command.description}`,
+    ...parameterLines,
+  ].join("\n");
+}
+
+function extractUsageParameters(usage: string): string[] {
+  return usage
+    .split(/\s+/)
+    .slice(1)
+    .filter(
+      (part) =>
+        (part.startsWith("<") && part.endsWith(">")) ||
+        (part.startsWith("[") && part.endsWith("]")),
+    );
 }

@@ -1,7 +1,7 @@
 import { mkdtemp, readFile, readdir, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { runAgentFromCli } from "../src/cli/run-agent.js";
 import type { Message, ToolDefinition } from "../src/schema/message.js";
 import type { LLMProvider } from "../src/provider/interface.js";
@@ -99,7 +99,7 @@ describe("runAgentFromCli", () => {
         usage: { promptTokens: 12, completionTokens: 3 },
       },
     ]);
-    const output: string[] = [];
+    const write = vi.fn();
 
     const result = await runAgentFromCli(
       {
@@ -113,9 +113,7 @@ describe("runAgentFromCli", () => {
       },
       {
         provider,
-        write: (chunk) => {
-          output.push(chunk);
-        },
+        write,
       },
     );
 
@@ -132,19 +130,12 @@ describe("runAgentFromCli", () => {
     expect(result.tracePath).toContain(join(".claw", "traces"));
     expect(await readdir(join(workDir, ".claw", "traces"))).toHaveLength(1);
     expect(provider.calls[0]?.toolNames).toEqual(
-      expect.arrayContaining([
-        "bash",
-        "read_file",
-        "write_file",
-        "edit_file",
-        "search_tools",
-      ]),
+      expect.arrayContaining(["bash", "read_file", "write_file", "edit_file", "search_tools"]),
     );
     expect(provider.calls[0]?.toolNames).not.toContain("delegate_task");
     expect(provider.calls[0]?.toolNames).not.toContain("task_list");
     expect(provider.calls[0]?.messages[0]?.content).toContain("PLAN.md");
-    expect(output.join("")).toContain("Session: cli_session");
-    expect(output.join("")).toContain("Trace:");
+    expect(write).not.toHaveBeenCalled();
   });
 
   it("从环境与参数解析 Provider 配置并允许命令行覆盖模型", async () => {
@@ -175,7 +166,6 @@ describe("runAgentFromCli", () => {
             },
           ]);
         },
-        write: () => undefined,
       },
     );
 
@@ -227,7 +217,6 @@ describe("runAgentFromCli", () => {
             },
           ]);
         },
-        write: () => undefined,
       },
     );
 
@@ -259,7 +248,6 @@ describe("runAgentFromCli", () => {
       },
       {
         provider: provider(),
-        write: () => undefined,
       },
     );
     const second = await runAgentFromCli(
@@ -271,7 +259,6 @@ describe("runAgentFromCli", () => {
       },
       {
         provider: provider(),
-        write: () => undefined,
       },
     );
 
@@ -294,7 +281,6 @@ describe("runAgentFromCli", () => {
       },
       {
         provider,
-        write: () => undefined,
       },
     );
     await provider.firstCallStarted;
@@ -309,20 +295,24 @@ describe("runAgentFromCli", () => {
       },
       {
         provider,
-        write: () => undefined,
       },
     );
 
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(provider.calls).toHaveLength(1);
-    expect(provider.calls[0]?.messages.some((message) => message.content === "second prompt")).toBe(false);
+    expect(provider.calls[0]?.messages.some((message) => message.content === "second prompt")).toBe(
+      false,
+    );
 
     provider.release();
     await Promise.all([first, second]);
 
     expect(provider.calls).toHaveLength(2);
-    expect(provider.calls[1]?.messages.some((message) => message.content === "first prompt")).toBe(true);
-    expect(provider.calls[1]?.messages.some((message) => message.content === "second prompt")).toBe(true);
+    expect(provider.calls[1]?.messages.some((message) => message.content === "first prompt")).toBe(
+      true,
+    );
+    expect(provider.calls[1]?.messages.some((message) => message.content === "second prompt")).toBe(
+      true,
+    );
   });
-
 });

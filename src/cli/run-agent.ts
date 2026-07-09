@@ -27,11 +27,7 @@ import type { LLMProvider } from "../provider/interface.js";
 import { resolveProviderProfile } from "../provider/profile.js";
 import type { ThinkingEffort } from "../provider/thinking.js";
 import type { ImagePart, Message, ToolDefinition } from "../schema/message.js";
-import {
-  BashTool,
-  ReadFileTool,
-  ToolRegistry,
-} from "../tools/registry-impl.js";
+import { BashTool, ReadFileTool, ToolRegistry } from "../tools/registry-impl.js";
 import { buildDefaultToolRegistry } from "../tools/default-registry.js";
 import { ExitPlanModeTool } from "../tools/plan-exit.js";
 import { DelegationManager, DelegateStatusTool } from "../tools/delegation-manager.js";
@@ -53,13 +49,8 @@ import { McpConnectionManager } from "../mcp/manager.js";
 import { BackgroundManager } from "../tools/background-manager.js";
 import { loadHooksConfig } from "../hooks/config.js";
 import { HookRunner } from "../hooks/runner.js";
-import {
-  getOrCreateSessionSettings,
-} from "../input/session-settings.js";
-import {
-  resolveCliSession,
-  type CliSessionSelection,
-} from "./session-resolver.js";
+import { getOrCreateSessionSettings } from "../input/session-settings.js";
+import { resolveCliSession, type CliSessionSelection } from "./session-resolver.js";
 
 const cliBackgroundManager = new BackgroundManager();
 
@@ -137,7 +128,6 @@ export interface RunAgentCliResult {
 }
 
 export type RunAgentEnv = Record<string, string | undefined>;
-export type RunAgentWriter = (chunk: string) => Promise<void> | void;
 export type RunAgentProviderFactory = (kind: ProviderKind, config: ProviderConfig) => LLMProvider;
 
 export interface RunAgentCliDependencies {
@@ -147,7 +137,6 @@ export interface RunAgentCliDependencies {
   reporter?: Reporter;
   approvalNotifier?: ApprovalNotifier;
   toolDisclosure?: ToolDisclosure;
-  write?: RunAgentWriter;
 }
 
 export async function runAgentFromCli(
@@ -193,10 +182,7 @@ export async function runAgentFromCli(
     dependencies.env ?? process.env,
     dependencies.provider !== undefined,
   );
-  const session = await globalSessionManager.getOrCreate(
-    sessionSelection.sessionId,
-    workDir,
-  );
+  const session = await globalSessionManager.getOrCreate(sessionSelection.sessionId, workDir);
   if (sessionSelection.mode === "fork" && sessionSelection.sourceSessionId) {
     await seedForkedSession(session, sessionSelection.sourceSessionId, workDir);
   }
@@ -244,7 +230,13 @@ export async function runAgentFromCli(
   // 工具渐进披露状态机(ROADMAP 5.4):registry(search_tools 元工具)与 engine(pickForLLM)共享同一实例,
   // 确保扩展工具被披露后下一轮即进入 LLM 工具列表。对标 GoalManager/TodoStore 注入范式。
   const toolDisclosure = dependencies.toolDisclosure ?? new ToolDisclosure();
-  const registry = buildRegistry(workDir, cliBackgroundManager, goalManager, todoStore, toolDisclosure);
+  const registry = buildRegistry(
+    workDir,
+    cliBackgroundManager,
+    goalManager,
+    todoStore,
+    toolDisclosure,
+  );
   // 【任务 2.6】用户可配置 Shell Hooks:加载 .claw/settings.json 的 hooks 配置,
   // 存在则挂载 HookRunner 到 registry。fail-open:配置缺失/畸形均不启用 hook,零影响。
   registry.setSessionId?.(session.id);
@@ -272,7 +264,9 @@ export async function runAgentFromCli(
     registry,
     workDir,
     enableThinking: effectiveOptions.enableThinking ?? true,
-    ...(effectiveOptions.thinkingEffort !== undefined ? { thinkingEffort: effectiveOptions.thinkingEffort } : {}),
+    ...(effectiveOptions.thinkingEffort !== undefined
+      ? { thinkingEffort: effectiveOptions.thinkingEffort }
+      : {}),
     planMode: effectiveOptions.planMode ?? false,
     systemPrompt,
     goalManager,
@@ -333,10 +327,10 @@ export async function runAgentFromCli(
         finalMessage: findFinalMessage(messages),
         usage: snapshotUsage(session),
         messages,
-        ...(effectiveOptions.trace === true ? { tracePath: await findTracePath(workDir, session.id) } : {}),
+        ...(effectiveOptions.trace === true
+          ? { tracePath: await findTracePath(workDir, session.id) }
+          : {}),
       };
-
-      await writeRunSummary(dependencies.write, result);
 
       return result;
     });
@@ -616,33 +610,4 @@ async function findTracePath(workDir: string, sessionId: string): Promise<string
 
 function sanitizeTracePart(value: string): string {
   return value.replaceAll(/[^a-zA-Z0-9_-]/gu, "_");
-}
-
-async function writeRunSummary(
-  write: RunAgentWriter | undefined,
-  result: RunAgentCliResult,
-): Promise<void> {
-  const emit =
-    write ??
-    ((chunk: string) => {
-      process.stdout.write(chunk);
-    });
-  const lines = [
-    "",
-    `Session: ${result.sessionId}`,
-    `SessionMode: ${formatSessionSelection(result.sessionSelection)}`,
-    `WorkDir: ${result.workDir}`,
-    `Final: ${result.finalMessage}`,
-    `Usage: input ${result.usage.promptTokens} tk, output ${result.usage.completionTokens} tk, ¥${result.usage.costCNY.toFixed(6)}`,
-    ...(result.tracePath ? [`Trace: ${result.tracePath}`] : []),
-  ];
-
-  await emit(`${lines.join("\n")}\n`);
-}
-
-function formatSessionSelection(selection: CliSessionSelection): string {
-  if (selection.mode === "fork" && selection.sourceSessionId) {
-    return `fork from ${selection.sourceSessionId}`;
-  }
-  return selection.mode;
 }

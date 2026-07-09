@@ -8,7 +8,7 @@
 
 ```bash
 cd /path/to/your-project
-pico --tui
+pico
 ```
 
 如果你正在本仓库内开发 Pico，可以从任意目标项目目录直接调用源码入口：
@@ -17,15 +17,7 @@ pico --tui
 cd /path/to/your-project
 npx tsx --env-file=/path/to/pico-harness/.env \
   --import /path/to/pico-harness/src/tui/preload-env.ts \
-  /path/to/pico-harness/src/cli/main.ts --tui
-```
-
-也可以运行单轮任务：
-
-```bash
-cd /path/to/your-project
-npx tsx --env-file=/path/to/pico-harness/.env \
-  /path/to/pico-harness/src/cli/main.ts "阅读 README 并总结项目结构"
+  /path/to/pico-harness/src/cli/main.ts
 ```
 
 启动时的 `cwd` 就是 Pico 眼里的项目根目录：
@@ -39,41 +31,40 @@ npx tsx --env-file=/path/to/pico-harness/.env \
 
 Pico 的 CLI session 以当前项目目录为边界：
 
-| 模式 | 启动方式 | 语义 |
-| --- | --- | --- |
-| new | 不传 session 参数 | 创建一个新的 `cli-*` session。 |
-| continue | `pico --continue` 或 `pico -c` | 继续当前项目最近更新的 session；如果没有历史 session，则创建新 session。 |
-| resume | `pico --resume <session-id>` 或 `pico -r <session-id>` | 恢复指定 session。找不到 `.claw/sessions/<session-id>.jsonl` 会启动失败。 |
-| fork | `pico --fork-session <session-id>` | 从指定 session 复制历史，派生一个新的 `cli-*` session。 |
+| 模式        | 启动方式               | 语义                                               |
+| ----------- | ---------------------- | -------------------------------------------------- |
+| new         | `pico`                 | 在当前项目启动 TUI，并创建或复用当前 TUI session。 |
+| browse      | `/sessions`            | 在 TUI 内查看当前项目可恢复的 session。            |
+| resume hint | `/resume <session-id>` | 输出恢复提示；当前运行中的 engine 不做热切换。     |
 
-交互内可以先用 `/sessions` 查看当前项目可恢复的 session，再用 `/resume <session-id>` 获取重启提示。当前运行中的 engine 不做热切换，真正恢复需要用 `--resume <session-id>` 重启入口。
+交互内可以先用 `/sessions` 查看当前项目可恢复的 session，再用 `/resume <session-id>` 获取提示。当前运行中的 engine 不做热切换。
 
 ## Slash Commands
 
 当前交互层支持这些内置命令：
 
-| 命令 | 说明 |
-| --- | --- |
-| `/status` | 查看当前 session、cwd、provider、model、thinking、permission 和 fork 来源。 |
-| `/mode` | 查看或切换交互模式：`default`、`plan`、`auto`、`yolo`。 |
-| `/model` | 查看或切换后续请求使用的模型。 |
-| `/thinking` | 查看或切换思考强度：`off`、`low`、`medium`、`high`。别名：`/effort`。 |
-| `/permissions` | 查看或切换权限模式：`default`、`auto`、`yolo`、`plan`。 |
-| `/tools` | 列出核心、已披露和可搜索工具；`/tools <query>` 搜索可披露工具。 |
-| `/help` | 列出命令；`/help <command>` 查看单个命令用法。 |
-| `/clear` | 清空本地 TUI transcript 视图。 |
-| `/compact` | 对当前 session 历史做摘要压缩；缺少模型配置时会说明不可用原因。 |
-| `/init` | 在当前项目创建轻量入口文件：`AGENTS.md` 和 `.pico/config.json`，不会覆盖已有 `AGENTS.md`。 |
-| `/doctor` | 检查 cwd、`.env`、provider、model、`LLM_BASE_URL`、`LLM_API_KEY[S]` 和 Node 版本。 |
-| `/sessions` | 列出当前项目可恢复 session。 |
-| `/resume` | 输出如何用 `--resume <session-id>` 重启恢复。 |
-| `/snapshots` | 列出当前 session 的文件历史回滚点。 |
-| `/rewind` | 回滚代码、对话或二者：`/rewind <messageId> code|conversation|both`。 |
-| `/undo` | 默认回滚最近一个文件历史快照，也可指定 message id 和模式。 |
-| `/agents` | 列出内置 Agent 和项目 `.claude/agents/*.md`。 |
-| `/agent` | 把任务委派给指定 Agent：`/agent <name> <task>`。 |
-| `/skills` | 列出当前项目 `.claw/skills` 中可用 Skill。 |
-| `/skill` | 查看指定 Skill 正文：`/skill <name>`。 |
+| 命令           | 说明                                                                                       |
+| -------------- | ------------------------------------------------------------------------------------------ | ------------ | ------- |
+| `/status`      | 查看当前 session、cwd、provider、model、thinking、permission 和 fork 来源。                |
+| `/mode`        | 查看或切换交互模式：`default`、`plan`、`auto`、`yolo`。                                    |
+| `/model`       | 查看或切换后续请求使用的模型。                                                             |
+| `/thinking`    | 查看或切换思考强度：`off`、`low`、`medium`、`high`。别名：`/effort`。                      |
+| `/permissions` | 查看或切换权限模式：`default`、`auto`、`yolo`、`plan`。                                    |
+| `/tools`       | 列出核心、已披露和可搜索工具；`/tools <query>` 搜索可披露工具。                            |
+| `/help`        | 列出命令；`/help <command>` 查看单个命令用法。                                             |
+| `/clear`       | 清空本地 TUI transcript 视图。                                                             |
+| `/compact`     | 对当前 session 历史做摘要压缩；缺少模型配置时会说明不可用原因。                            |
+| `/init`        | 在当前项目创建轻量入口文件：`AGENTS.md` 和 `.pico/config.json`，不会覆盖已有 `AGENTS.md`。 |
+| `/doctor`      | 检查 cwd、`.env`、provider、model、`LLM_BASE_URL`、`LLM_API_KEY[S]` 和 Node 版本。         |
+| `/sessions`    | 列出当前项目可恢复 session。                                                               |
+| `/resume`      | 输出指定 session 的恢复提示。                                                              |
+| `/snapshots`   | 列出当前 session 的文件历史回滚点。                                                        |
+| `/rewind`      | 回滚代码、对话或二者：`/rewind <messageId> code                                            | conversation | both`。 |
+| `/undo`        | 默认回滚最近一个文件历史快照，也可指定 message id 和模式。                                 |
+| `/agents`      | 列出内置 Agent 和项目 `.claude/agents/*.md`。                                              |
+| `/agent`       | 把任务委派给指定 Agent：`/agent <name> <task>`。                                           |
+| `/skills`      | 列出当前项目 `.claw/skills` 中可用 Skill。                                                 |
+| `/skill`       | 查看指定 Skill 正文：`/skill <name>`。                                                     |
 
 项目或用户自定义 Markdown 命令也会进入同一套 slash command registry。内置命令名优先保留，避免项目命令覆盖关键控制命令。
 
@@ -122,7 +113,7 @@ Pico 会加载项目级 Claude agent profile：
 开发命令如果写成 `--env-file=.env`，这个 `.env` 是相对当前 shell 所在目录解析的。在任意项目目录启动时，推荐使用绝对路径：
 
 ```bash
-npx tsx --env-file=/path/to/pico-harness/.env /path/to/pico-harness/src/cli/main.ts --tui
+npx tsx --env-file=/path/to/pico-harness/.env /path/to/pico-harness/src/cli/main.ts
 ```
 
 已安装的 `pico` 命令不会自动加载 `.env`，需要先在 shell 中设置 `LLM_BASE_URL`、`LLM_API_KEY`、`LLM_MODEL`，或用外部工具加载环境变量。
@@ -134,7 +125,7 @@ npx tsx --env-file=/path/to/pico-harness/.env /path/to/pico-harness/src/cli/main
 - `LLM_BASE_URL` 是否已设置。
 - `LLM_API_KEY` 或 `LLM_API_KEYS` 是否已设置。
 - `LLM_MODEL` 是否符合当前 provider。
-- `--provider`、`--model`、`--base-url`、`--api-key` 是否传给了正确入口。
+- `--provider`、`--model` 是否传给了正确入口，或环境变量是否已设置。
 
 ### 未知命令
 

@@ -19,10 +19,7 @@ import { render, useApp, useInput } from "ink";
 import { App } from "./app.js";
 import type { DialogRequest } from "./dialog-arbiter.js";
 import { createLocalUiDialogRequest } from "./local-ui-dialog-host.js";
-import {
-  buildModelOptions,
-  modelSelectionToCommand,
-} from "./model-options.js";
+import { buildModelOptions, modelSelectionToCommand } from "./model-options.js";
 import {
   createModelSelectorState,
   ModelSelector,
@@ -33,16 +30,13 @@ import {
 import { TuiReporter, type TuiEntry } from "./tui-reporter.js";
 import { QueryGuard } from "./query-guard.js";
 import { RunningInputQueue } from "./running-input-queue.js";
-import type { RunAgentCliOptions, RunAgentWriter } from "../cli/run-agent.js";
+import type { RunAgentCliOptions } from "../cli/run-agent.js";
 import { runAgentFromCli } from "../cli/run-agent.js";
 import { listFileHistorySnapshotSummaries } from "../cli/file-history.js";
 import { createCliSessionId, type CliSessionSelection } from "../cli/session-resolver.js";
 import { listFileSuggestions } from "../input/file-index.js";
 import { getSlashArgumentHints } from "../input/slash-argument-hints.js";
-import {
-  commandSuggestions,
-  createPicoCommandRegistry,
-} from "../input/pico-command-registry.js";
+import { commandSuggestions, createPicoCommandRegistry } from "../input/pico-command-registry.js";
 import { preparePromptWithMentions } from "../input/prepare-prompt.js";
 import { processUserInput } from "../input/process-user-input.js";
 import { parseSlashInput } from "../input/slash-parser.js";
@@ -52,10 +46,7 @@ import type { ProviderKind } from "../provider/factory.js";
 import type { ThinkingEffort } from "../provider/thinking.js";
 import { buildDefaultToolRegistry } from "../tools/default-registry.js";
 import { ToolDisclosure } from "../tools/tool-disclosure.js";
-import {
-  getOrCreateSessionSettings,
-  toolStatusFromRegistry,
-} from "../input/session-settings.js";
+import { getOrCreateSessionSettings, toolStatusFromRegistry } from "../input/session-settings.js";
 import { globalSessionManager } from "../engine/session.js";
 import { hasLocalUiCommandAction } from "./local-ui-command.js";
 import {
@@ -89,7 +80,6 @@ export interface ReplOptions {
   mcpConfigPath?: string;
 }
 
-const suppressCliSummary: RunAgentWriter = () => undefined;
 const SESSION_SELECTOR_DIALOG_ID = "local-ui:session-selector";
 const SELECTOR_DIALOG_PRIORITY = 40;
 
@@ -111,9 +101,7 @@ export interface HandleTuiInputSubmissionDeps {
   createModelSelectorContent?: (effect: LocalTuiModelSelectorDialogEffect) => React.ReactNode;
 }
 
-export type LocalTuiCommandUiEffect =
-  | { kind: "none" }
-  | LocalTuiModelSelectorDialogEffect;
+export type LocalTuiCommandUiEffect = { kind: "none" } | LocalTuiModelSelectorDialogEffect;
 
 export interface LocalTuiModelSelectorDialogEffect {
   kind: "dialog";
@@ -171,7 +159,11 @@ export async function handleTuiRunningInputSubmission(
 
   const processed = await processTuiInput(text, deps);
   if (!needsAgentRun(processed)) {
-    if (running && processed.type === "local-command" && !canRunLocalCommandWhileRunning(processed.command)) {
+    if (
+      running &&
+      processed.type === "local-command" &&
+      !canRunLocalCommandWhileRunning(processed.command)
+    ) {
       deps.reporter.pushSystemMessage(formatRunningCommandBlocked(processed.command));
       return;
     }
@@ -232,7 +224,9 @@ async function drainQueuedTuiInputs(deps: HandleTuiRunningInputSubmissionDeps): 
       if (gen === null) {
         const queuedAgain = deps.queue.enqueue(item.text, processed);
         if (queuedAgain.type === "rejected") {
-          deps.reporter.pushSystemMessage(`Input queue is full (${queuedAgain.capacity}). Please wait.`);
+          deps.reporter.pushSystemMessage(
+            `Input queue is full (${queuedAgain.capacity}). Please wait.`,
+          );
         }
         return;
       }
@@ -246,7 +240,9 @@ async function processTuiInput(
   text: string,
   deps: Pick<HandleTuiInputSubmissionDeps, "registry" | "processInput">,
 ): Promise<TuiInputProcessResult> {
-  return (deps.processInput ?? ((input) => processUserInput(input, { registry: deps.registry })))(text);
+  return (deps.processInput ?? ((input) => processUserInput(input, { registry: deps.registry })))(
+    text,
+  );
 }
 
 function needsAgentRun(processed: TuiInputProcessResult): boolean {
@@ -434,7 +430,6 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
             await runAgentFromCli(cliOpts, {
               reporter,
               toolDisclosure,
-              write: suppressCliSummary,
             });
           },
         });
@@ -653,18 +648,10 @@ function TuiSessionBrowserDialog({
     }
   });
 
-  return (
-    <SessionBrowser
-      currentProjectCwd={currentProjectCwd}
-      sessions={sessions}
-      state={state}
-    />
-  );
+  return <SessionBrowser currentProjectCwd={currentProjectCwd} sessions={sessions} state={state} />;
 }
 
-function isSessionSelectorResult(
-  result: LocalCommandResult,
-): result is LocalCommandResult & {
+function isSessionSelectorResult(result: LocalCommandResult): result is LocalCommandResult & {
   ui: { kind: "open-selector"; selector: "session" };
 } {
   return (
@@ -745,6 +732,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function formatUnknownCommand(
   input: Extract<TuiInputProcessResult, { type: "unknown-command" }>,
 ): string {
-  const suffix = input.suggestions.length > 0 ? `\nSuggestions: ${input.suggestions.join(", ")}` : "";
+  const suffix =
+    input.suggestions.length > 0 ? `\nSuggestions: ${input.suggestions.join(", ")}` : "";
   return `${input.message}${suffix}`;
 }
