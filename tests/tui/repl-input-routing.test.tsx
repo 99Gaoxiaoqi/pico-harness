@@ -1,4 +1,7 @@
 import React from "react";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { renderToString } from "ink";
 import { describe, expect, it, vi } from "vitest";
 import { createBuiltinCommandRegistry } from "../../src/input/builtin-commands.js";
@@ -180,6 +183,60 @@ describe("TUI input routing", () => {
 
     expect(processInput).toHaveBeenCalledWith("review this");
     expect(runAgent).toHaveBeenCalledWith("review this");
+  });
+
+  it("@image:path 随本条 prompt 发送 ImagePart", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-tui-img-"));
+    try {
+      await writeFile(join(workDir, "pic.jpg"), "JPG");
+      const { reporter, snapshots, runAgent, exit, registry } = harness();
+
+      await handleTuiInputSubmission("看一下 @image:pic.jpg", {
+        reporter,
+        registry,
+        workDir,
+        runAgent,
+        exit,
+      });
+
+      expect(runAgent).toHaveBeenCalledWith("看一下", {
+        images: [
+          expect.objectContaining({
+            type: "image_base64",
+            mimeType: "image/jpeg",
+          }),
+        ],
+      });
+      expect(snapshots.at(-1)).toEqual([
+        { kind: "user", content: "看一下 @image:pic.jpg" },
+        { kind: "system", content: "已附加图片: pic.jpg" },
+      ]);
+    } finally {
+      await rm(workDir, { recursive: true, force: true });
+    }
+  });
+
+  it("@image:path 路径错误时显示本地提示且不调用模型", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-tui-img-missing-"));
+    try {
+      const { reporter, snapshots, runAgent, exit, registry } = harness();
+
+      await handleTuiInputSubmission("看一下 @image:missing.png", {
+        reporter,
+        registry,
+        workDir,
+        runAgent,
+        exit,
+      });
+
+      expect(runAgent).not.toHaveBeenCalled();
+      expect(snapshots.at(-1)).toEqual([
+        { kind: "user", content: "看一下 @image:missing.png" },
+        { kind: "system", content: expect.stringContaining("missing.png") },
+      ]);
+    } finally {
+      await rm(workDir, { recursive: true, force: true });
+    }
   });
 
   it("/sessions 打开 session selector dialog", async () => {
