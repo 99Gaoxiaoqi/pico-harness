@@ -15,25 +15,64 @@ import React from "react";
 import { Box, Text } from "ink";
 import type { TuiEntry } from "./tui-reporter.js";
 import { MessageRow } from "./message-row.js";
+import { computeVirtualTranscript } from "./virtual-transcript.js";
 
 export interface MessageListProps {
   /** 待渲染的条目 */
   entries: TuiEntry[];
   /** 是否有流式进行中(用于判定末条 assistant) */
   isStreaming?: boolean;
+  /** 可选:启用长 transcript 虚拟渲染时的视口行数 */
+  viewportRows?: number;
+  /** 可选:启用长 transcript 虚拟渲染时的滚动偏移行数 */
+  scrollOffsetRows?: number;
+  /** 可选:单条消息行高估算 */
+  estimatedRowHeight?: number;
+  /** 可选:视口上下额外渲染行数 */
+  overscanRows?: number;
+  /** 可选:低于或等于该条目数时不虚拟化,默认 200 */
+  virtualizeThreshold?: number;
+  /** 可选:忽略 scrollOffsetRows,直接渲染尾部窗口 */
+  scrollToBottom?: boolean;
 }
 
 /** 渲染一组 entries:逐条用 <MessageRow> 分发(轮次间加分隔线) */
-export function MessageList({ entries, isStreaming = false }: MessageListProps): React.ReactNode {
+export function MessageList({
+  entries,
+  isStreaming = false,
+  viewportRows,
+  scrollOffsetRows = 0,
+  estimatedRowHeight,
+  overscanRows,
+  virtualizeThreshold,
+  scrollToBottom,
+}: MessageListProps): React.ReactNode {
+  const window =
+    viewportRows === undefined
+      ? {
+          visibleItems: entries,
+          startIndex: 0,
+          topSpacerRows: 0,
+          bottomSpacerRows: 0,
+        }
+      : computeVirtualTranscript(entries, viewportRows, scrollOffsetRows, {
+          estimatedRowHeight,
+          overscanRows,
+          virtualizeThreshold,
+          scrollToBottom,
+        });
+
   return (
     <Box flexDirection="column">
-      {entries.map((entry, i) => {
-        const isLast = i === entries.length - 1;
-        const prev = entries[i - 1];
+      {window.topSpacerRows > 0 && <Box height={window.topSpacerRows} />}
+      {window.visibleItems.map((entry, i) => {
+        const originalIndex = window.startIndex + i;
+        const isLast = originalIndex === entries.length - 1;
+        const prev = entries[originalIndex - 1];
         // 轮次分隔:遇到新的 user 消息,且前面已有内容时,加一条淡色分隔线
         const showSeparator = entry.kind === "user" && prev !== undefined;
         return (
-          <React.Fragment key={i}>
+          <React.Fragment key={originalIndex}>
             {showSeparator && <Separator />}
             <MessageRow
               entry={entry}
@@ -43,6 +82,7 @@ export function MessageList({ entries, isStreaming = false }: MessageListProps):
           </React.Fragment>
         );
       })}
+      {window.bottomSpacerRows > 0 && <Box height={window.bottomSpacerRows} />}
     </Box>
   );
 }
@@ -70,7 +110,11 @@ function Separator(): React.ReactNode {
  *   - assistant 末条且非 streaming  → true(已固化)
  *   - thinking       → false(始终在动态区,spinner 据此显示)
  */
-export function shouldRenderStatically(entry: TuiEntry, isLast: boolean, isStreaming: boolean): boolean {
+export function shouldRenderStatically(
+  entry: TuiEntry,
+  isLast: boolean,
+  isStreaming: boolean,
+): boolean {
   switch (entry.kind) {
     case "user":
       return true;
@@ -94,7 +138,13 @@ export function shouldRenderStatically(entry: TuiEntry, isLast: boolean, isStrea
  *
  * 显示:`pico · {model} · {workDir}` 一行,淡色处理不抢注意力。
  */
-export function LogoHeader({ model, workDir }: { model: string; workDir: string }): React.ReactNode {
+export function LogoHeader({
+  model,
+  workDir,
+}: {
+  model: string;
+  workDir: string;
+}): React.ReactNode {
   return (
     <Box marginTop={1}>
       <Text bold color="cyan">
