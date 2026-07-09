@@ -5,8 +5,8 @@ import type { SlashCommand } from "../../src/input/types.js";
 function localCommand(
   name: string,
   aliases: readonly string[] = [],
-  overrides: Partial<SlashCommand> = {},
-): SlashCommand {
+  overrides: Partial<SlashCommand & { priority: number }> = {},
+): SlashCommand & { priority?: number } {
   return {
     name,
     aliases,
@@ -107,9 +107,48 @@ describe("CommandRegistry", () => {
         name: "status",
         insertText: "status",
         description: "status command",
+        source: "builtin",
+        kind: "local",
+        aliases: ["st"],
         matchedAlias: "st",
       },
     ]);
+  });
+
+  it("候选携带命令来源、类型、用法、优先级和 aliases 元数据", () => {
+    const registry = new CommandRegistry([
+      localCommand("review", ["rv"], {
+        kind: "prompt",
+        source: "project",
+        usage: "/review <path>",
+        argumentHint: "<path>",
+        priority: 30,
+      }),
+    ]);
+
+    expect(registry.detailedSuggestions("rv")).toEqual([
+      {
+        name: "review",
+        insertText: "review",
+        description: "review command",
+        argumentHint: "<path>",
+        source: "project",
+        kind: "prompt",
+        usage: "/review <path>",
+        priority: 30,
+        aliases: ["rv"],
+        matchedAlias: "rv",
+      },
+    ]);
+  });
+
+  it("同等匹配时优先展示 priority 更高的候选", () => {
+    const registry = new CommandRegistry([
+      localCommand("stage", [], { priority: 10 }),
+      localCommand("stash", [], { priority: 30 }),
+    ]);
+
+    expect(registry.suggestions("sta")).toEqual(["stash", "stage"]);
   });
 
   it("按 source 分组列出可见且启用的命令", () => {
@@ -120,9 +159,7 @@ describe("CommandRegistry", () => {
       localCommand("offline", [], { source: "mcp", isEnabled: false }),
     ]);
 
-    expect(registry.list({ source: "project" }).map((command) => command.name)).toEqual([
-      "review",
-    ]);
+    expect(registry.list({ source: "project" }).map((command) => command.name)).toEqual(["review"]);
     expect(registry.listBySource()).toEqual([
       {
         source: "builtin",
@@ -153,6 +190,9 @@ describe("CommandRegistry", () => {
         insertText: "review",
         description: "Review a file",
         argumentHint: "<path>",
+        source: "builtin",
+        kind: "local",
+        aliases: [],
       },
     ]);
     expect(registry.detailedSuggestions("sec").map((suggestion) => suggestion.name)).not.toContain(
