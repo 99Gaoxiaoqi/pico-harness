@@ -1,30 +1,44 @@
-import type { CommandListOptions, SlashCommand, SlashCommandSource } from "./types.js";
+import type {
+  CommandListOptions,
+  SlashCommand,
+  SlashCommandKind,
+  SlashCommandSource,
+} from "./types.js";
+
+export interface RegistrySlashCommand extends SlashCommand {
+  priority?: number;
+}
 
 export interface CommandSuggestion {
   name: string;
   insertText: string;
   description: string;
   argumentHint?: string;
+  source: SlashCommandSource;
+  kind: SlashCommandKind;
+  usage?: string;
+  priority?: number;
+  aliases: readonly string[];
   matchedAlias?: string;
 }
 
 export interface CommandSourceGroup {
   source: SlashCommandSource;
-  commands: readonly SlashCommand[];
+  commands: readonly RegistrySlashCommand[];
 }
 
 export class CommandRegistry {
-  private readonly commands = new Map<string, SlashCommand>();
+  private readonly commands = new Map<string, RegistrySlashCommand>();
   private readonly aliases = new Map<string, string>();
-  private readonly ordered: SlashCommand[] = [];
+  private readonly ordered: RegistrySlashCommand[] = [];
 
-  constructor(commands: readonly SlashCommand[] = []) {
+  constructor(commands: readonly RegistrySlashCommand[] = []) {
     for (const command of commands) {
       this.register(command);
     }
   }
 
-  register(command: SlashCommand): void {
+  register(command: RegistrySlashCommand): void {
     const name = normalizeCommandName(command.name);
     assertTokenAvailable(name, this.commands, this.aliases);
 
@@ -41,7 +55,7 @@ export class CommandRegistry {
     }
   }
 
-  resolve(name: string): SlashCommand | undefined {
+  resolve(name: string): RegistrySlashCommand | undefined {
     const normalized = normalizeCommandName(name);
     const direct = this.commands.get(normalized);
     if (direct !== undefined) {
@@ -55,12 +69,12 @@ export class CommandRegistry {
     return command !== undefined && isCommandEnabled(command) ? command : undefined;
   }
 
-  list(options: CommandListOptions = {}): readonly SlashCommand[] {
+  list(options: CommandListOptions = {}): readonly RegistrySlashCommand[] {
     return this.ordered.filter((command) => shouldListCommand(command, options));
   }
 
   listBySource(options: CommandListOptions = {}): readonly CommandSourceGroup[] {
-    const groups = new Map<SlashCommandSource, SlashCommand[]>();
+    const groups = new Map<SlashCommandSource, RegistrySlashCommand[]>();
     for (const command of this.list(options)) {
       const source = command.source ?? "builtin";
       const group = groups.get(source);
@@ -101,9 +115,7 @@ export class CommandRegistry {
       .filter((candidate) => !hasTextMatch || (candidate.match?.rank ?? 3) < 3)
       .sort((left, right) => compareMatches(left, right))
       .slice(0, 5)
-      .map((candidate) =>
-        suggestionFromCommand(candidate.command, candidate.match?.matchedAlias),
-      );
+      .map((candidate) => suggestionFromCommand(candidate.command, candidate.match?.matchedAlias));
   }
 }
 
@@ -112,10 +124,10 @@ export function normalizeCommandName(name: string): string {
 }
 
 function normalizeCommand(
-  command: SlashCommand,
+  command: RegistrySlashCommand,
   name: string,
   aliases: readonly string[],
-): SlashCommand {
+): RegistrySlashCommand {
   return {
     ...command,
     name,
@@ -129,7 +141,7 @@ function normalizeCommand(
 
 function assertTokenAvailable(
   token: string,
-  commands: ReadonlyMap<string, SlashCommand>,
+  commands: ReadonlyMap<string, RegistrySlashCommand>,
   aliases: ReadonlyMap<string, string>,
 ): void {
   if (token.length === 0) {
@@ -148,30 +160,35 @@ interface SuggestionMatch {
 }
 
 function suggestionFromCommand(
-  command: SlashCommand,
+  command: RegistrySlashCommand,
   matchedAlias?: string,
 ): CommandSuggestion {
   return {
     name: command.name,
     insertText: command.name,
     description: command.description,
+    source: command.source ?? "builtin",
+    kind: command.kind ?? "local",
+    aliases: command.aliases ?? [],
     ...(command.argumentHint === undefined ? {} : { argumentHint: command.argumentHint }),
+    ...(command.usage === undefined ? {} : { usage: command.usage }),
+    ...(command.priority === undefined ? {} : { priority: command.priority }),
     ...(matchedAlias === undefined ? {} : { matchedAlias }),
   };
 }
 
-function shouldListCommand(command: SlashCommand, options: CommandListOptions): boolean {
+function shouldListCommand(command: RegistrySlashCommand, options: CommandListOptions): boolean {
   if (options.source !== undefined && command.source !== options.source) return false;
   if (!options.includeHidden && command.isHidden === true) return false;
   if (!options.includeDisabled && !isCommandEnabled(command)) return false;
   return true;
 }
 
-function isCommandEnabled(command: SlashCommand): boolean {
+function isCommandEnabled(command: RegistrySlashCommand): boolean {
   return command.isEnabled !== false;
 }
 
-function bestMatch(command: SlashCommand, query: string): SuggestionMatch | null {
+function bestMatch(command: RegistrySlashCommand, query: string): SuggestionMatch | null {
   const matches = [
     tokenMatch(command.name, query),
     ...(command.aliases ?? []).map((alias) => tokenMatch(alias, query, alias)),
@@ -181,11 +198,7 @@ function bestMatch(command: SlashCommand, query: string): SuggestionMatch | null
   return matches.sort(compareSuggestionMatch)[0] ?? null;
 }
 
-function tokenMatch(
-  token: string,
-  query: string,
-  matchedAlias?: string,
-): SuggestionMatch | null {
+function tokenMatch(token: string, query: string, matchedAlias?: string): SuggestionMatch | null {
   const normalized = normalizeCommandName(token);
   const aliasPart = matchedAlias === undefined ? {} : { matchedAlias };
 
@@ -207,11 +220,14 @@ function tokenMatch(
 }
 
 function compareMatches(
-  left: { command: SlashCommand; index: number; match: SuggestionMatch | null },
-  right: { command: SlashCommand; index: number; match: SuggestionMatch | null },
+  left: { command: RegistrySlashCommand; index: number; match: SuggestionMatch | null },
+  right: { command: RegistrySlashCommand; index: number; match: SuggestionMatch | null },
 ): number {
   const byMatch = compareSuggestionMatch(left.match, right.match);
   if (byMatch !== 0) return byMatch;
+
+  const byPriority = (right.command.priority ?? 0) - (left.command.priority ?? 0);
+  if (byPriority !== 0) return byPriority;
 
   const byName = left.command.name.localeCompare(right.command.name);
   return byName === 0 ? left.index - right.index : byName;
