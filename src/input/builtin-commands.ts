@@ -12,6 +12,7 @@ export function createBuiltinCommands(): readonly SlashCommand[] {
       execute: (input, context) => ({
         type: "local",
         action: "help",
+        ui: { kind: "open-panel", panel: "help" },
         message: buildHelpMessage(context.registry?.list() ?? [], input.argv[0]),
       }),
     }),
@@ -69,6 +70,9 @@ export function createBuiltinCommands(): readonly SlashCommand[] {
       execute: (input) => ({
         type: "local",
         action: "model",
+        ...(input.args.length === 0
+          ? { ui: { kind: "open-selector", selector: "model" } as const }
+          : {}),
         message:
           input.args.length === 0
             ? "Model command is not connected yet."
