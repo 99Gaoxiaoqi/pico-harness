@@ -53,14 +53,9 @@ import { McpConnectionManager } from "../mcp/manager.js";
 import { BackgroundManager } from "../tools/background-manager.js";
 import { loadHooksConfig } from "../hooks/config.js";
 import { HookRunner } from "../hooks/runner.js";
-import { createPicoCommandRegistry } from "../input/pico-command-registry.js";
 import {
   getOrCreateSessionSettings,
-  toolStatusFromRegistry,
 } from "../input/session-settings.js";
-import { preparePromptWithMentions } from "../input/prepare-prompt.js";
-import { processUserInput } from "../input/process-user-input.js";
-import type { InputProcessResult } from "../input/types.js";
 import {
   resolveCliSession,
   type CliSessionSelection,
@@ -95,7 +90,7 @@ export interface RunAgentCliOptions {
   /**
    * Steer 文本(ROADMAP 3.2,--steer):run 前一次性注入队列。
    * engine 第一轮(A 点)peek 即可见,第一轮工具执行后(C 点)落 session 永久浮现。
-   * 运行中动态注入靠 HTTP / 飞书入口,CLI 单次阻塞模式仅支持启动注入。
+   * TUI 当前只在启动本轮 run 前一次性注入。
    */
   steer?: string;
   /**
@@ -141,14 +136,6 @@ export interface RunAgentCliResult {
   tracePath?: string;
 }
 
-export type RunUserInputCliResult =
-  | {
-      type: "agent";
-      input: Extract<InputProcessResult, { type: "prompt" | "prompt-command" }>;
-      result: RunAgentCliResult;
-    }
-  | Exclude<InputProcessResult, { type: "prompt" | "prompt-command" }>;
-
 export type RunAgentEnv = Record<string, string | undefined>;
 export type RunAgentWriter = (chunk: string) => Promise<void> | void;
 export type RunAgentProviderFactory = (kind: ProviderKind, config: ProviderConfig) => LLMProvider;
@@ -161,92 +148,6 @@ export interface RunAgentCliDependencies {
   approvalNotifier?: ApprovalNotifier;
   toolDisclosure?: ToolDisclosure;
   write?: RunAgentWriter;
-}
-
-export async function runUserInputFromCli(
-  options: RunAgentCliOptions,
-  dependencies: RunAgentCliDependencies = {},
-): Promise<RunUserInputCliResult> {
-  const workDir = await resolveWorkDir(options.dir);
-  const provider = options.provider ?? "openai";
-  const sessionSelection =
-    options.sessionSelection ??
-    (await resolveCliSession({
-      workDir,
-      ...(options.session ? { session: options.session } : {}),
-      ...(options.continueSession ? { continueSession: true } : {}),
-      ...(options.resumeSession ? { resumeSession: options.resumeSession } : {}),
-      ...(options.forkSession ? { forkSession: options.forkSession } : {}),
-    }));
-  const model = options.model ?? dependencies.env?.LLM_MODEL ?? process.env.LLM_MODEL ?? defaultModel(provider);
-  const session = await globalSessionManager.getOrCreate(sessionSelection.sessionId, workDir);
-  if (sessionSelection.mode === "fork" && sessionSelection.sourceSessionId) {
-    await seedForkedSession(session, sessionSelection.sourceSessionId, workDir);
-  }
-  const toolDisclosure = dependencies.toolDisclosure ?? new ToolDisclosure();
-  const toolRegistry = buildRegistry(
-    workDir,
-    cliBackgroundManager,
-    new GoalManager(),
-    new TodoStore(workDir),
-    toolDisclosure,
-  );
-  const settings = getOrCreateSessionSettings({
-    sessionId: sessionSelection.sessionId,
-    cwd: workDir,
-    provider,
-    model,
-    ...(options.thinkingEffort !== undefined ? { thinkingEffort: options.thinkingEffort } : {}),
-    permissionMode: "ask",
-    tools: toolStatusFromRegistry(toolRegistry),
-  });
-  const registry = await createPicoCommandRegistry({
-    workDir,
-    provider,
-    model: settings.model,
-    session,
-    sessionId: sessionSelection.sessionId,
-    ...(settings.thinkingEffortExplicit ? { thinkingEffort: settings.thinkingEffort } : {}),
-    permissionMode: settings.permissionMode,
-    tools: settings.tools,
-    toolDisclosure,
-  });
-  const input = await processUserInput(options.prompt, { registry });
-
-  if (input.type === "prompt" || input.type === "prompt-command") {
-    const rawPrompt = input.type === "prompt" ? input.prompt : input.result.prompt;
-    const prompt = await preparePromptWithMentions(rawPrompt, workDir);
-    const activeSettings = getOrCreateSessionSettings({
-      sessionId: sessionSelection.sessionId,
-      cwd: workDir,
-      provider,
-      model,
-      ...(options.thinkingEffort !== undefined ? { thinkingEffort: options.thinkingEffort } : {}),
-      permissionMode: "ask",
-      tools: settings.tools,
-    });
-    return {
-      type: "agent",
-      input,
-      result: await runAgentFromCli(
-        {
-          ...options,
-          dir: workDir,
-          session: sessionSelection.sessionId,
-          sessionSelection,
-          prompt,
-          model: activeSettings.model,
-          ...(activeSettings.thinkingEffortExplicit
-            ? { thinkingEffort: activeSettings.thinkingEffort }
-            : {}),
-        },
-        dependencies,
-      ),
-    };
-  }
-
-  await writeLocalInputResult(input, dependencies.write);
-  return input;
 }
 
 export async function runAgentFromCli(
@@ -353,7 +254,7 @@ export async function runAgentFromCli(
   }
   const observationProcessor = buildObservationProcessor(workDir);
   // Steer 队列(ROADMAP 3.2):CLI --steer 启动注入。run 前一次性 push,
-  // engine 第一轮 A 点 peek 即可见。运行中动态注入靠 HTTP / 飞书。
+  // engine 第一轮 A 点 peek 即可见。
   const steerQueue = new SteerQueue();
   if (options.steer) {
     steerQueue.push(options.steer);
@@ -395,7 +296,7 @@ export async function runAgentFromCli(
   registerDelegationTools(registry, engine, workDir, await loadProfiles(workDir));
 
   // 3.6 Plan Review:把 ExitPlanModeTool 的退出回调接到 engine.exitPlanMode,
-  // 并把审批通知路由到 host 注入的 notifier(终端/飞书),使审批通过后真正切换 planMode。
+  // 并把审批通知路由到 host 注入的 notifier,使审批通过后真正切换 planMode。
   const notifier = dependencies.approvalNotifier ?? terminalNotifier;
   const exitTool = registry.getTool("exit_plan_mode");
   if (exitTool instanceof ExitPlanModeTool) {
@@ -445,25 +346,6 @@ export async function runAgentFromCli(
       await mcpManager.closeAll();
     }
   }
-}
-
-async function writeLocalInputResult(
-  input: Exclude<InputProcessResult, { type: "prompt" | "prompt-command" }>,
-  write: RunAgentWriter | undefined,
-): Promise<void> {
-  const emit =
-    write ??
-    ((chunk: string) => {
-      process.stdout.write(chunk);
-    });
-  if (input.type === "empty") return;
-  if (input.type === "unknown-command") {
-    const suffix = input.suggestions.length > 0 ? `\nSuggestions: ${input.suggestions.join(", ")}` : "";
-    await emit(`${input.message}${suffix}\n`);
-    return;
-  }
-  const message = input.result.message ?? "";
-  if (message) await emit(`${message}\n`);
 }
 
 function buildRegistry(
