@@ -7,7 +7,12 @@
 //   - 协议类型与工具函数
 
 export { McpConnectionManager, DEFAULT_CONFIG_RELATIVE } from "./manager.js";
-export type { McpConnectionManagerOptions, McpServerStatus } from "./manager.js";
+export type {
+  McpConnectionManagerOptions,
+  McpServerStatus,
+  McpStatusSnapshot,
+  McpStatusSummary,
+} from "./manager.js";
 export { StdioMcpClient } from "./stdio-client.js";
 export { HttpMcpClient } from "./http-client.js";
 export { McpToolBridge } from "./mcp-tool.js";

@@ -142,8 +142,10 @@ describe("McpConnectionManager 编排", () => {
     const status = manager.getStatus();
     expect(status.get("alpha")?.status).toBe("connected");
     expect(status.get("alpha")?.toolCount).toBe(1);
+    expect(status.get("alpha")?.toolNames).toEqual(["echo"]);
     expect(status.get("beta")?.status).toBe("connected");
     expect(status.get("beta")?.toolCount).toBe(3);
+    expect(status.get("beta")?.toolNames).toEqual(["echo", "tool_1", "tool_2"]);
     expect(manager.getConnectedCount()).toBe(2);
 
     await manager.closeAll();
@@ -204,6 +206,7 @@ describe("McpConnectionManager 编排", () => {
     expect(status.get("good")?.toolCount).toBe(2);
     expect(status.get("bad")?.status).toBe("failed");
     expect(status.get("bad")?.error).toBeTruthy();
+    expect(status.get("bad")?.toolNames).toEqual([]);
     expect(manager.getConnectedCount()).toBe(1);
 
     // good 的工具仍可用
@@ -244,8 +247,56 @@ describe("McpConnectionManager 编排", () => {
   it("配置文件不存在时静默跳过(不抛异常)", async () => {
     const registry = new ToolRegistry({ truncateResults: false });
     const manager = new McpConnectionManager(registry);
-    await manager.loadConfig(join(tmpDir, "nonexistent.json"));
+    const missingPath = join(tmpDir, "nonexistent.json");
+    await manager.loadConfig(missingPath);
     expect(manager.getStatus().size).toBe(0);
+    expect(manager.getStatusSnapshot()).toMatchObject({
+      configPath: missingPath,
+      loadError: expect.stringContaining("配置文件不存在"),
+      servers: [],
+    });
+  });
+
+  it("状态快照展示 loaded config path 以及 stdio/http/sse transport", async () => {
+    const configPath = join(tmpDir, "mcp.json");
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        mcpServers: {
+          local: { ...stdioConfig("local"), enabled: false },
+          remoteHttp: {
+            transport: "http",
+            url: "https://mcp.example.test/rpc",
+            enabled: false,
+          },
+          remoteSse: {
+            transport: "sse",
+            url: "https://mcp.example.test/sse",
+            enabled: false,
+          },
+        },
+      }),
+    );
+
+    const registry = new ToolRegistry({ truncateResults: false });
+    const manager = new McpConnectionManager(registry);
+    await manager.loadConfig(configPath);
+
+    const snapshot = manager.getStatusSnapshot();
+    expect(snapshot.configPath).toBe(configPath);
+    expect(snapshot.summary).toMatchObject({
+      total: 3,
+      connected: 0,
+      failed: 0,
+      disabled: 3,
+      pending: 0,
+      toolCount: 0,
+    });
+    expect(snapshot.servers).toEqual([
+      expect.objectContaining({ name: "local", transport: "stdio", status: "disabled" }),
+      expect.objectContaining({ name: "remoteHttp", transport: "http", status: "disabled" }),
+      expect.objectContaining({ name: "remoteSse", transport: "sse", status: "disabled" }),
+    ]);
   });
 
   it("非法配置抛异常", async () => {

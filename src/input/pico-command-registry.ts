@@ -50,6 +50,7 @@ import {
   type SessionToolStatus,
 } from "./session-settings.js";
 import type { ThinkingEffort } from "../provider/thinking.js";
+import type { McpStatusSnapshot } from "../mcp/manager.js";
 import { getTier } from "../tools/tool-tiers.js";
 import {
   formatToolDisclosureItem,
@@ -70,9 +71,12 @@ const OVERRIDDEN_BUILTIN_COMMANDS = new Set([
   "init",
   "doctor",
   "tools",
+  "mcp",
   "thinking",
   "agents",
 ]);
+
+export type McpStatusProvider = () => McpStatusSnapshot | undefined;
 
 export interface PicoCommandRegistryOptions {
   workDir: string;
@@ -86,6 +90,7 @@ export interface PicoCommandRegistryOptions {
   permissionMode?: string;
   tools?: readonly SessionToolStatus[];
   toolDisclosure?: ToolDisclosure;
+  mcpStatus?: McpStatusProvider;
 }
 
 export async function createPicoCommandRegistry(
@@ -109,7 +114,7 @@ export async function createPicoCommandRegistry(
   );
   const registry = new CommandRegistry([
     ...builtins,
-    createStatusCommand(settings),
+    createStatusCommand(settings, options.mcpStatus),
     createModeCommand(settings),
     createPermissionsCommand(settings),
     createCompactCommand(options),
@@ -118,6 +123,7 @@ export async function createPicoCommandRegistry(
     createModelCommand(settings),
     createThinkingCommand(settings),
     createToolsCommand(settings, options.toolDisclosure),
+    createMcpCommand(options.mcpStatus),
     createAgentsCommand(options),
     createSessionsCommand(options),
     createResumeCommand(),
@@ -163,7 +169,10 @@ export function commandSuggestions(
     }));
 }
 
-function createStatusCommand(settings: SessionSettings): SlashCommand {
+function createStatusCommand(
+  settings: SessionSettings,
+  mcpStatus?: McpStatusProvider,
+): SlashCommand {
   return {
     name: "status",
     aliases: ["st"],
@@ -173,9 +182,19 @@ function createStatusCommand(settings: SessionSettings): SlashCommand {
     execute: (): LocalCommandResult => ({
       type: "local",
       action: "status",
-      message: formatSessionStatus(settings),
+      message: formatStatusWithMcp(settings, mcpStatus),
     }),
   };
+}
+
+function formatStatusWithMcp(
+  settings: SessionSettings,
+  mcpStatus: McpStatusProvider | undefined,
+): string {
+  const base = formatSessionStatus(settings);
+  const snapshot = mcpStatus?.();
+  if (snapshot === undefined) return base;
+  return `${base}\n${formatMcpOverview(snapshot)}`;
 }
 
 function createCompactCommand(options: PicoCommandRegistryOptions): SlashCommand {
@@ -398,6 +417,84 @@ function createToolsCommand(settings: SessionSettings, disclosure?: ToolDisclosu
       };
     },
   };
+}
+
+function createMcpCommand(mcpStatus?: McpStatusProvider): SlashCommand {
+  return {
+    name: "mcp",
+    description: "Show MCP server connection status",
+    usage: "/mcp",
+    kind: "local",
+    execute: (): LocalCommandResult => ({
+      type: "local",
+      action: "mcp",
+      message: formatMcpStatus(mcpStatus?.()),
+    }),
+  };
+}
+
+function formatMcpStatus(snapshot: McpStatusSnapshot | undefined): string {
+  if (snapshot === undefined) {
+    return "MCP status\nNo MCP config loaded.";
+  }
+
+  const lines = [
+    "MCP status",
+    `Config: ${snapshot.configPath ?? "(not loaded)"}`,
+    formatMcpSummary(snapshot),
+  ];
+
+  if (snapshot.servers.length === 0) {
+    lines.push("No MCP servers loaded.");
+    if (snapshot.loadError) lines.push(`Error: ${snapshot.loadError}`);
+    return lines.join("\n");
+  }
+
+  for (const server of snapshot.servers) {
+    lines.push(
+      `- ${server.name} [${server.transport}] ${server.status} - ${formatToolCount(server.toolCount)}${formatToolSummary(server.toolNames)}`,
+    );
+    if (server.error) lines.push(`  error: ${server.error}`);
+  }
+
+  if (snapshot.loadError) lines.push(`Load error: ${snapshot.loadError}`);
+  return lines.join("\n");
+}
+
+function formatMcpOverview(snapshot: McpStatusSnapshot): string {
+  const summary = snapshot.summary;
+  const parts = [
+    `MCP: ${summary.connected}/${summary.total} connected`,
+    `${summary.failed} failed`,
+    `${summary.toolCount} tools`,
+  ];
+  if (summary.disabled > 0) parts.splice(2, 0, `${summary.disabled} disabled`);
+  if (summary.pending > 0) parts.splice(2, 0, `${summary.pending} pending`);
+  if (snapshot.loadError) parts.push("load error");
+  return parts.join(", ");
+}
+
+function formatMcpSummary(snapshot: McpStatusSnapshot): string {
+  const summary = snapshot.summary;
+  const parts = [
+    `Summary: ${summary.connected}/${summary.total} connected`,
+    `${summary.failed} failed`,
+  ];
+  if (summary.disabled > 0) parts.push(`${summary.disabled} disabled`);
+  if (summary.pending > 0) parts.push(`${summary.pending} pending`);
+  parts.push(`${summary.toolCount} tools`);
+  return parts.join(", ");
+}
+
+function formatToolCount(count: number): string {
+  return count === 1 ? "1 tool" : `${count} tools`;
+}
+
+function formatToolSummary(toolNames: readonly string[]): string {
+  if (toolNames.length === 0) return "";
+  const visible = toolNames.slice(0, 5);
+  const suffix = toolNames.length > visible.length ? `, +${toolNames.length - visible.length} more` : "";
+  return `: ${visible.join(", ")}${suffix}`;
 }
 
 function createAgentsCommand(options: PicoCommandRegistryOptions): SlashCommand {
