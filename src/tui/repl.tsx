@@ -18,6 +18,7 @@ import { render, useApp } from "ink";
 import { App } from "./app.js";
 import { TuiReporter, type TuiEntry } from "./tui-reporter.js";
 import { QueryGuard } from "./query-guard.js";
+import { RunningInputQueue } from "./running-input-queue.js";
 import type { RunAgentCliOptions, RunAgentWriter } from "../cli/run-agent.js";
 import { runAgentFromCli } from "../cli/run-agent.js";
 import { createCliSessionId, type CliSessionSelection } from "../cli/session-resolver.js";
@@ -69,11 +70,16 @@ export interface HandleTuiInputSubmissionDeps {
   processInput?: (text: string) => Promise<TuiInputProcessResult>;
 }
 
+export interface HandleTuiRunningInputSubmissionDeps extends HandleTuiInputSubmissionDeps {
+  guard: Pick<QueryGuard, "tryStart" | "end">;
+  queue: RunningInputQueue;
+}
+
 export async function handleTuiInputSubmission(
   text: string,
   deps: HandleTuiInputSubmissionDeps,
 ): Promise<void> {
-  const processed = await (deps.processInput ?? ((input) => processUserInput(input, { registry: deps.registry })))(text);
+  const processed = await processTuiInput(text, deps);
 
   switch (processed.type) {
     case "empty":
@@ -95,6 +101,101 @@ export async function handleTuiInputSubmission(
       deps.reporter.pushSystemMessage(formatUnknownCommand(processed));
       return;
   }
+}
+
+export async function handleTuiRunningInputSubmission(
+  text: string,
+  deps: HandleTuiRunningInputSubmissionDeps,
+): Promise<void> {
+  const processed = await processTuiInput(text, deps);
+  if (!needsAgentRun(processed)) {
+    await handleTuiInputSubmission(text, {
+      reporter: deps.reporter,
+      registry: deps.registry,
+      workDir: deps.workDir,
+      runAgent: deps.runAgent,
+      exit: deps.exit,
+      processInput: async () => processed,
+    });
+    return;
+  }
+
+  const gen = deps.guard.tryStart();
+  if (gen === null) {
+    const queued = deps.queue.enqueue(text);
+    if (queued.type === "rejected") {
+      deps.reporter.pushSystemMessage(`Input queue is full (${queued.capacity}). Please wait.`);
+    }
+    return;
+  }
+
+  await runProcessedAgentInput(text, processed, deps, gen, { drainAfter: true });
+}
+
+async function runProcessedAgentInput(
+  text: string,
+  processed: TuiInputProcessResult,
+  deps: HandleTuiRunningInputSubmissionDeps,
+  gen: number,
+  options: { drainAfter: boolean },
+): Promise<void> {
+  try {
+    await handleTuiInputSubmission(text, {
+      reporter: deps.reporter,
+      registry: deps.registry,
+      workDir: deps.workDir,
+      runAgent: deps.runAgent,
+      exit: deps.exit,
+      processInput: async () => processed,
+    });
+  } finally {
+    if (deps.guard.end(gen) && options.drainAfter) {
+      await drainQueuedTuiInputs(deps);
+    }
+  }
+}
+
+async function drainQueuedTuiInputs(deps: HandleTuiRunningInputSubmissionDeps): Promise<void> {
+  while (deps.queue.size > 0) {
+    const queued = deps.queue.drain();
+    for (const item of queued) {
+      if (item.kind !== "normal") continue;
+      const processed = await processTuiInput(item.text, deps);
+      if (!needsAgentRun(processed)) {
+        await handleTuiInputSubmission(item.text, {
+          reporter: deps.reporter,
+          registry: deps.registry,
+          workDir: deps.workDir,
+          runAgent: deps.runAgent,
+          exit: deps.exit,
+          processInput: async () => processed,
+        });
+        continue;
+      }
+
+      const gen = deps.guard.tryStart();
+      if (gen === null) {
+        const queuedAgain = deps.queue.enqueue(item.text);
+        if (queuedAgain.type === "rejected") {
+          deps.reporter.pushSystemMessage(`Input queue is full (${queuedAgain.capacity}). Please wait.`);
+        }
+        return;
+      }
+
+      await runProcessedAgentInput(item.text, processed, deps, gen, { drainAfter: false });
+    }
+  }
+}
+
+async function processTuiInput(
+  text: string,
+  deps: Pick<HandleTuiInputSubmissionDeps, "registry" | "processInput">,
+): Promise<TuiInputProcessResult> {
+  return (deps.processInput ?? ((input) => processUserInput(input, { registry: deps.registry })))(text);
+}
+
+function needsAgentRun(processed: TuiInputProcessResult): boolean {
+  return processed.type === "prompt" || processed.type === "prompt-command";
 }
 
 /** 启动 TUI REPL 循环 */
@@ -180,27 +281,21 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     const guardRef = useRef<QueryGuard>(null);
     if (guardRef.current === null) guardRef.current = new QueryGuard();
     const guard = guardRef.current;
+    const runningQueueRef = useRef<RunningInputQueue>(null);
+    if (runningQueueRef.current === null) runningQueueRef.current = new RunningInputQueue();
+    const runningQueue = runningQueueRef.current;
     const status = useSyncExternalStore(guard.subscribe, guard.getSnapshot);
     const running = status !== "idle"; // 派生:非 idle 即视为运行中
 
     const handleSubmit = async (text: string): Promise<void> => {
-      let gen: number | null = null;
-
       try {
-        const processed = await processUserInput(text, { registry });
-        const needsAgentRun = processed.type === "prompt" || processed.type === "prompt-command";
-        if (needsAgentRun) {
-          // 并发防护:已在运行则拒绝新提交。tryStart 返回 generation 号或 null。
-          gen = guard.tryStart();
-          if (gen === null) return;
-        }
-
-        await handleTuiInputSubmission(text, {
+        await handleTuiRunningInputSubmission(text, {
           reporter,
+          guard,
+          queue: runningQueue,
           registry,
           workDir: opts.workDir,
           exit,
-          processInput: async () => processed,
           runAgent: async (prompt) => {
             const cliOpts: RunAgentCliOptions = {
               prompt,
@@ -228,12 +323,6 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
           content: `⚠️ 执行出错: ${err instanceof Error ? err.message : String(err)}`,
         });
         setEntries([...entries]);
-      } finally {
-        // generation 防陈旧:若期间用户发起了新查询(自增 generation),此处 mismatch
-        // → end 返回 false,跳过 cleanup,避免把新查询误判为结束。
-        if (gen !== null) guard.end(gen);
-        // 兜底:确保本轮 mode 回到 idle(reporter.getMode 供 app.tsx 的 spinner 用)
-        // 注:reporter.onFinish 已设 idle;此处仅在出错未触发 onFinish 时补救。
       }
     };
 
