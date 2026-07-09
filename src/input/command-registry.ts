@@ -1,3 +1,8 @@
+import {
+  annotateCommandAvailability,
+  type CommandAvailability,
+  type CommandInputState,
+} from "./command-availability.js";
 import type {
   CommandListOptions,
   SlashCommand,
@@ -7,6 +12,7 @@ import type {
 
 export interface RegistrySlashCommand extends SlashCommand {
   priority?: number;
+  availability?: CommandAvailability;
 }
 
 export interface CommandSuggestion {
@@ -20,6 +26,12 @@ export interface CommandSuggestion {
   priority?: number;
   aliases: readonly string[];
   matchedAlias?: string;
+  disabled?: boolean;
+  disabledReason?: string;
+}
+
+export interface CommandSuggestionOptions {
+  availabilityState?: CommandInputState;
 }
 
 export interface CommandSourceGroup {
@@ -96,10 +108,15 @@ export class CommandRegistry {
     return this.detailedSuggestions(name).map((suggestion) => suggestion.name);
   }
 
-  detailedSuggestions(name: string): readonly CommandSuggestion[] {
+  detailedSuggestions(
+    name: string,
+    options: CommandSuggestionOptions = {},
+  ): readonly CommandSuggestion[] {
     const normalized = normalizeCommandName(name);
     if (normalized.length === 0) {
-      return this.list().map((command) => suggestionFromCommand(command));
+      return withAvailability(this.list(), options.availabilityState).map((command) =>
+        suggestionFromCommand(command),
+      );
     }
 
     const candidates = this.list()
@@ -111,11 +128,18 @@ export class CommandRegistry {
       .filter((candidate) => candidate.match !== null);
     const hasTextMatch = candidates.some((candidate) => (candidate.match?.rank ?? 3) < 3);
 
-    return candidates
+    const matches = candidates
       .filter((candidate) => !hasTextMatch || (candidate.match?.rank ?? 3) < 3)
       .sort((left, right) => compareMatches(left, right))
-      .slice(0, 5)
-      .map((candidate) => suggestionFromCommand(candidate.command, candidate.match?.matchedAlias));
+      .slice(0, 5);
+    const commands = withAvailability(
+      matches.map((candidate) => candidate.command),
+      options.availabilityState,
+    );
+
+    return matches.map((candidate, index) =>
+      suggestionFromCommand(commands[index] ?? candidate.command, candidate.match?.matchedAlias),
+    );
   }
 }
 
@@ -160,7 +184,7 @@ interface SuggestionMatch {
 }
 
 function suggestionFromCommand(
-  command: RegistrySlashCommand,
+  command: RegistrySlashCommand & { disabled?: boolean; disabledReason?: string },
   matchedAlias?: string,
 ): CommandSuggestion {
   return {
@@ -174,7 +198,17 @@ function suggestionFromCommand(
     ...(command.usage === undefined ? {} : { usage: command.usage }),
     ...(command.priority === undefined ? {} : { priority: command.priority }),
     ...(matchedAlias === undefined ? {} : { matchedAlias }),
+    ...(command.disabled === true ? { disabled: true } : {}),
+    ...(command.disabledReason === undefined ? {} : { disabledReason: command.disabledReason }),
   };
+}
+
+function withAvailability<T extends RegistrySlashCommand>(
+  commands: readonly T[],
+  state: CommandInputState | undefined,
+): readonly (T & { disabled?: boolean; disabledReason?: string })[] {
+  if (state === undefined) return commands;
+  return annotateCommandAvailability(commands, state);
 }
 
 function shouldListCommand(command: RegistrySlashCommand, options: CommandListOptions): boolean {
