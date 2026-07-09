@@ -32,7 +32,7 @@ describe("App", () => {
     expect(countOccurrences(output, "Tab 补全")).toBe(0);
   });
 
-  it("renders a single disabled input state while running", () => {
+  it("keeps the bottom input active while running so new prompts can queue", () => {
     const output = renderToString(
       <App
         model="glm-5.2"
@@ -46,8 +46,8 @@ describe("App", () => {
     );
 
     expect(output).toContain("处理中");
-    expect(countOccurrences(output, "Running")).toBe(1);
-    expect(countOccurrences(output, 'Try "fix this" or / for commands')).toBe(0);
+    expect(output).not.toContain("Running…");
+    expect(countOccurrences(output, 'Try "fix this" or / for commands')).toBe(1);
     expect(countOccurrences(output, "Enter 发送")).toBe(0);
   });
 

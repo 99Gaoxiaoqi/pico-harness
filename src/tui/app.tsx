@@ -99,7 +99,7 @@ export function App({
   const focusedDialog = pickFocusedDialog(dialogRequests);
   const modal = focusedDialog?.layer === "modal" ? focusedDialog.content : undefined;
   const overlay = focusedDialog?.layer === "overlay" ? focusedDialog.content : undefined;
-  const inputDisabled = running || modal !== undefined;
+  const inputDisabled = modal !== undefined;
 
   // 诊断:记录每次渲染的 entries 状态
   dbg(`render: entries=${entries.length} running=${running} streaming=${isStreaming}`);
