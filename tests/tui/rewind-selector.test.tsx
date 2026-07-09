@@ -26,21 +26,19 @@ describe("RewindSelector", () => {
       },
     ]);
 
-    expect(output).toContain("session-1");
+    expect(output).toContain("Rewind");
     expect(output).toContain("turn-1");
-    expect(output).toContain("time=2026-07-09T01:02:03.000Z");
-    expect(output).toContain("files=2");
-    expect(output).toContain("summary=1 个文件有备份, 1 个文件将在 rewind 时删除");
-    expect(output).toContain("/rewind turn-1 both");
+    expect(output).toContain("Restore the code and/or conversation");
+    expect(output).toContain("2 files changed");
   });
 
   it("空快照时给出可行动提示", () => {
     expect(formatRewindSelector("empty-session", [])).toBe(
-      "session empty-session 暂无可回滚快照。完成一次文件修改后再运行 /snapshots。",
+      "Rewind\nNothing to rewind to yet.",
     );
   });
 
-  it("长 messageId 在展示位截断但保留可执行命令", () => {
+  it("长 messageId 在展示位截断且不展示可执行命令", () => {
     const messageId = `turn-${"a".repeat(60)}-${"z".repeat(20)}`;
     const output = formatRewindSelector("session-1", [
       {
@@ -52,11 +50,11 @@ describe("RewindSelector", () => {
       },
     ]);
 
-    expect(output).toContain("id=turn-aaaaaaaaaaaaaaaa...");
-    expect(output).toContain(`/rewind ${messageId} both`);
+    expect(output).toContain("turn-aaaaaaaaaaaaaaaa...");
+    expect(output).not.toContain(`/rewind ${messageId} both`);
   });
 
-  it("过长摘要会截断，避免撑开 TUI 文本路径", () => {
+  it("过长文件摘要会截断，避免撑开 TUI 文本路径", () => {
     const output = formatRewindSelector(
       "session-1",
       [
@@ -72,7 +70,7 @@ describe("RewindSelector", () => {
       { maxSummaryLength: 18 },
     );
 
-    expect(output).toContain("summary=这是一个非常长的变更摘要...");
+    expect(output).toContain("1 file changed ...");
     expect(output).not.toContain("多文件说明");
   });
 
@@ -94,11 +92,9 @@ describe("RewindSelector", () => {
       },
     ]);
 
-    expect(output).toContain("最近快照: turn-2");
-    expect(output).toContain("用法: /rewind <messageId> code|conversation|both");
-    expect(output).toContain("code: 只回滚文件");
-    expect(output).toContain("conversation: 只回滚对话");
-    expect(output).toContain("both: 同时回滚文件和对话");
+    expect(output).toContain("Restore the code and/or conversation");
+    expect(output).toContain("turn-2");
+    expect(output).toContain("Enter to continue");
   });
 
   it("取最后一个快照作为 /undo 默认目标", () => {
@@ -127,9 +123,9 @@ describe("RewindSelector", () => {
     const state = createRewindSelectorState();
     const output = formatRewindSelectorState("session-1", [snapshotSummary("turn-1")], state);
 
-    expect(output).toContain("选择要 rewind 到的消息");
+    expect(output).toContain("Restore the code and/or conversation");
     expect(output).toContain("turn-1");
-    expect(output).not.toContain("code / conversation / both");
+    expect(output).not.toContain("Restore code and conversation");
     expect(onConfirm).not.toHaveBeenCalled();
   });
 
@@ -157,11 +153,13 @@ describe("RewindSelector", () => {
 
     expect(selected.phase).toBe("confirm");
     const output = formatRewindSelectorState("session-1", [snapshotSummary("turn-1")], selected);
-    expect(output).toContain("确认 rewind: turn-1");
-    expect(output).toContain("changed files=2");
+    expect(output).toContain("Confirm you want to restore");
+    expect(output).toContain("turn-1");
     expect(output).toContain("+3 -1");
     expect(output).toContain("src/a.ts");
-    expect(output).toContain("code / conversation / both / cancel");
+    expect(output).toContain("Restore code and conversation");
+    expect(output).toContain("Restore conversation");
+    expect(output).toContain("Restore code");
   });
 
   it("cancel 不调用 rewind，confirm 才调用对应 callback", () => {
@@ -185,8 +183,8 @@ describe("RewindSelector", () => {
       formatRewindConfirm("session-1", snapshotSummary("turn-1"), emptyDiffStat("turn-1")),
     );
 
-    expect(output).toContain("确认 rewind: turn-1");
-    expect(output).toContain("changed files=0");
+    expect(output).toContain("Confirm you want to restore");
+    expect(output).toContain("turn-1");
   });
 });
 

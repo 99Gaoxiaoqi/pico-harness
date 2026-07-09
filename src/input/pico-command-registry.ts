@@ -617,6 +617,7 @@ function createSnapshotsCommand(options: PicoCommandRegistryOptions): SlashComma
 function createRewindCommand(options: PicoCommandRegistryOptions): SlashCommand {
   return {
     name: "rewind",
+    aliases: ["checkpoint"],
     description: "Rewind code, conversation, or both to a file-history snapshot",
     usage: "/rewind [message-id] [code|conversation|both]",
     argumentHint: "[message-id] [code|conversation|both]",

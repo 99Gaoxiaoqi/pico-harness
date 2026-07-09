@@ -175,6 +175,14 @@ function findLastBackup(state: FileHistoryState, filePath: string): FileHistoryB
   return undefined;
 }
 
+function findFirstBackup(state: FileHistoryState, filePath: string): FileHistoryBackup | undefined {
+  for (const snapshot of state.snapshots) {
+    const backup = snapshot.trackedFileBackups.get(filePath);
+    if (backup) return backup;
+  }
+  return undefined;
+}
+
 async function cleanupExclusiveBackups(
   state: FileHistoryState,
   removed: FileHistorySnapshot,
@@ -280,28 +288,20 @@ export async function fileHistoryRewind(
   sessionId: string,
   baseDir: string = DEFAULT_BASE_DIR,
 ): Promise<void> {
-  const targetIdx = state.snapshots.findIndex((s) => s.messageId === messageId);
-  if (targetIdx === -1) {
+  const target = state.snapshots.find((s) => s.messageId === messageId);
+  if (!target) {
     throw new Error(`FileHistory: 找不到 messageId=${messageId} 的快照`);
   }
-  const target = state.snapshots[targetIdx]!;
 
-  for (const [filePath, backup] of target.trackedFileBackups) {
+  for (const filePath of state.trackedFiles) {
+    const backup = target.trackedFileBackups.get(filePath) ?? findFirstBackup(state, filePath);
+    if (!backup) continue;
     if (backup.backupFileName === null) {
       await unlink(filePath).catch(() => {});
     } else {
       await restoreBackup(filePath, backup.backupFileName, sessionId, baseDir);
     }
   }
-
-  for (const filePath of state.trackedFiles) {
-    if (!target.trackedFileBackups.has(filePath)) {
-      await unlink(filePath).catch(() => {});
-    }
-  }
-
-  state.snapshots = state.snapshots.slice(0, targetIdx + 1);
-  await saveFileHistoryState(state, sessionId, baseDir);
 }
 
 export async function fileHistoryDiffStat(
@@ -321,7 +321,7 @@ export async function fileHistoryDiffStat(
   const files: FileHistoryDiffFileStat[] = [];
 
   for (const filePath of filePaths) {
-    const backup = target.trackedFileBackups.get(filePath);
+    const backup = target.trackedFileBackups.get(filePath) ?? findFirstBackup(state, filePath);
     const before = await readSnapshotFileContent(backup, sessionId, baseDir);
     const after = await readCurrentFileContent(filePath);
     if (before === after) continue;

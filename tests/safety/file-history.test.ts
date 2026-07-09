@@ -431,7 +431,7 @@ describe("FileHistory 1.5.4 回滚 rewind", () => {
     await expect(fileHistoryRewind(state, "no-such-msg", sessionId, baseDir)).rejects.toThrow();
   });
 
-  it("rewind 后 snapshots 截断到 target", async () => {
+  it("rewind 后保留 snapshot 链,只恢复文件系统", async () => {
     const src = join(workDir, "file.ts");
     writeFileSync(src, "v1\n");
 
@@ -446,8 +446,10 @@ describe("FileHistory 1.5.4 回滚 rewind", () => {
 
     await fileHistoryRewind(state, "m1", sessionId, baseDir);
 
-    expect(state.snapshots).toHaveLength(1);
+    expect(readFileSync(src, "utf8")).toBe("v1\n");
+    expect(state.snapshots).toHaveLength(3);
     expect(state.snapshots[0]!.messageId).toBe("m1");
+    expect(state.snapshots[2]!.messageId).toBe("m3");
   });
 
   it("rewind 后可继续 makeSnapshot", async () => {
@@ -466,8 +468,7 @@ describe("FileHistory 1.5.4 回滚 rewind", () => {
     writeFileSync(src, "v3\n");
     await fileHistoryMakeSnapshot(state, "m3", sessionId, baseDir);
 
-    expect(state.snapshots).toHaveLength(2);
-    expect(state.snapshots[1]!.messageId).toBe("m3");
+    expect(state.snapshots.map((snapshot) => snapshot.messageId)).toEqual(["m1", "m2", "m3"]);
   });
 
   it("diff stat 只读统计目标快照到当前文件的 changed files 和 +/-", async () => {

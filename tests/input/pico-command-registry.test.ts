@@ -495,22 +495,37 @@ describe("Pico command registry", () => {
     expect(result.type).toBe("local-command");
     if (result.type !== "local-command") return;
     expect(result.command).toBe("snapshots");
+    expect(result.result.message).toContain("Rewind");
+    expect(result.result.message).toContain("Restore the code and/or conversation");
     expect(result.result.message).toContain("turn-1");
-    expect(result.result.message).toContain("files=1");
-    expect(result.result.message).toContain("summary=1 个文件有备份");
-    expect(result.result.message).toContain("/rewind turn-1 both");
+    expect(result.result.message).toContain("1 file changed");
+    expect(result.result.message).not.toContain("/rewind turn-1 both");
   });
 
-  it("/rewind 无参数展示最近快照和 mode 使用说明", async () => {
+  it("/rewind 无参数展示 Claude 风格选择器入口", async () => {
     const { registry } = await registryWithSnapshot("turn-1");
 
     const result = await processUserInput("/rewind", { registry });
 
     expect(result.type).toBe("local-command");
     if (result.type !== "local-command") return;
-    expect(result.result.message).toContain("最近快照: turn-1");
-    expect(result.result.message).toContain("用法: /rewind <messageId> code|conversation|both");
-    expect(result.result.message).toContain("code: 只回滚文件");
+    expect(result.result.message).toContain("Rewind");
+    expect(result.result.message).toContain("Restore the code and/or conversation");
+    expect(result.result.message).toContain("turn-1");
+    expect(result.result.message).toContain("Enter to continue");
+    expect(result.result.message).not.toContain("用法: /rewind <messageId> code|conversation|both");
+  });
+
+  it("/checkpoint 作为 /rewind alias 展示同一个入口", async () => {
+    const { registry } = await registryWithSnapshot("turn-1");
+
+    const result = await processUserInput("/checkpoint", { registry });
+
+    expect(result.type).toBe("local-command");
+    if (result.type !== "local-command") return;
+    expect(result.command).toBe("rewind");
+    expect(result.result.message).toContain("Rewind");
+    expect(result.result.message).toContain("turn-1");
   });
 
   it("/rewind <message-id> 接到既有文件历史回滚", async () => {
