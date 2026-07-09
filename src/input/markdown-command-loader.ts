@@ -139,7 +139,7 @@ async function loadCommandsFromDir(
 }
 
 async function walkMarkdownFiles(dir: string): Promise<string[]> {
-  let entries: Awaited<ReturnType<typeof readdir>>;
+  let entries;
   try {
     entries = await readdir(dir, { withFileTypes: true });
   } catch (err) {

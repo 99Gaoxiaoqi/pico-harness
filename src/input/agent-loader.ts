@@ -121,7 +121,7 @@ async function loadAgentsFromDir(
   agentsDir: string,
   source: ClaudeAgentSource,
 ): Promise<ClaudeAgent[]> {
-  let entries: Awaited<ReturnType<typeof readdir>>;
+  let entries;
   try {
     entries = await readdir(agentsDir, { withFileTypes: true });
   } catch (err) {
