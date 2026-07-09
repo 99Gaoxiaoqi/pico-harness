@@ -34,6 +34,7 @@ import { TuiReporter, type TuiEntry } from "./tui-reporter.js";
 import { QueryGuard } from "./query-guard.js";
 import type { RunAgentCliOptions, RunAgentWriter } from "../cli/run-agent.js";
 import { runAgentFromCli } from "../cli/run-agent.js";
+import { listFileHistorySnapshotSummaries } from "../cli/file-history.js";
 import { createCliSessionId, type CliSessionSelection } from "../cli/session-resolver.js";
 import { listFileSuggestions } from "../input/file-index.js";
 import { getSlashArgumentHints } from "../input/slash-argument-hints.js";
@@ -69,6 +70,7 @@ import {
   sessionSelectionToCommand,
   type CliSessionBrowserSummary,
 } from "./session-browser-adapter.js";
+import { createRewindCommandDialogRequest } from "./rewind-command-dialog.js";
 
 export interface ReplOptions {
   /** 工作区 */
@@ -101,6 +103,7 @@ export interface HandleTuiInputSubmissionDeps {
   openDialog?: (request: DialogRequest) => void;
   closeDialog?: (id: string) => void;
   dispatchInput?: (text: string) => Promise<void> | void;
+  openLocalUiDialog?: (result: LocalCommandResult) => void;
   currentModelId?: string;
   modelOptions?: readonly ModelOption[];
   createModelSelectorContent?: (effect: LocalTuiModelSelectorDialogEffect) => React.ReactNode;
@@ -262,6 +265,23 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
           dispatchInput: async (nextText) => {
             await handleSubmit(nextText);
           },
+          openLocalUiDialog: (result) => {
+            if (result.ui?.kind !== "open-selector" || result.ui.selector !== "rewind") return;
+            const request = createRewindCommandDialogRequest({
+              sessionId: tuiSessionId,
+              snapshots: listFileHistorySnapshotSummaries(tuiSession),
+              getDiffStat: (messageId) => tuiSession.getRewindDiffStat(messageId),
+              onClose: () => setDialogRequests([]),
+              onDispatchCommand: (command) => {
+                setDialogRequests([]);
+                void handleSubmit(command);
+              },
+            });
+            setDialogRequests((current) => [
+              ...current.filter((item) => item.id !== request.id),
+              request,
+            ]);
+          },
           currentModelId: settings.model,
           modelOptions: buildModelOptions(),
           createModelSelectorContent: (effect) => (
@@ -378,6 +398,7 @@ function handleLocalTuiCommand(
     | "currentModelId"
     | "modelOptions"
     | "createModelSelectorContent"
+    | "openLocalUiDialog"
   >,
 ): void {
   const uiEffect = resolveLocalTuiCommandUiEffect(result, {
@@ -406,6 +427,7 @@ function handleLocalTuiCommand(
       return;
     default:
       deps.reporter.pushSystemMessage(result.message ?? "");
+      if (result.ui !== undefined) deps.openLocalUiDialog?.(result);
       return;
   }
 }
