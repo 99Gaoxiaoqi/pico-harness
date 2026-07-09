@@ -5,6 +5,20 @@ export interface ParsedSlashInput {
   argv: readonly string[];
 }
 
+export type LocalUiPanel = "help" | "model" | "sessions" | "rewind";
+
+export type LocalUiSelector = "model" | "session" | "rewind";
+
+export type LocalUiCommandAction =
+  | {
+      kind: "open-panel";
+      panel: LocalUiPanel;
+    }
+  | {
+      kind: "open-selector";
+      selector: LocalUiSelector;
+    };
+
 export type LocalCommandAction =
   | "help"
   | "clear"
@@ -22,6 +36,7 @@ export interface LocalCommandResult {
   action: LocalCommandAction;
   message?: string;
   data?: unknown;
+  ui?: LocalUiCommandAction;
 }
 
 export interface PromptCommandResult {
