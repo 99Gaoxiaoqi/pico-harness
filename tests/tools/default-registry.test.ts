@@ -28,7 +28,7 @@ describe("buildDefaultToolRegistry", () => {
       id: "call_bg",
       name: "bash",
       arguments: JSON.stringify({
-        command: "node -e \"setTimeout(() => {}, 1000)\"",
+        command: 'node -e "setTimeout(() => {}, 1000)"',
         background: true,
       }),
     });
@@ -49,19 +49,13 @@ describe("buildDefaultToolRegistry", () => {
     });
   });
 
-  it("注册 delegate_task 工具名供 /agent 分派提示使用", () => {
+  it("默认不暴露验证工具和运行时委派入口", () => {
     const registry = buildDefaultToolRegistry(workDir);
-    const tool = registry.getAvailableTools().find((item) => item.name === "delegate_task");
+    const tools = registry.getAvailableTools().map((tool) => tool.name);
 
-    expect(tool).toBeDefined();
-    expect(tool?.description).toContain("delegate_task");
-    expect(tool?.inputSchema).toMatchObject({
-      type: "object",
-      properties: {
-        goal: { type: "string" },
-        agent_name: { type: "string" },
-      },
-    });
+    expect(tools).not.toContain("echo");
+    expect(tools).not.toContain("delegate_task");
+    expect(tools).not.toContain("spawn_subagent");
   });
 
   it("显式传入同一个 BackgroundManager 时多个 registry 共享任务", async () => {
@@ -73,7 +67,7 @@ describe("buildDefaultToolRegistry", () => {
       id: "call_bg",
       name: "bash",
       arguments: JSON.stringify({
-        command: "node -e \"setTimeout(() => {}, 1000)\"",
+        command: 'node -e "setTimeout(() => {}, 1000)"',
         background: true,
       }),
     });
