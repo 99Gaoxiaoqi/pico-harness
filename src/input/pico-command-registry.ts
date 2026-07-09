@@ -288,6 +288,9 @@ function createModelCommand(settings: SessionSettings): SlashCommand {
         action: "model",
         message: result.message,
         data: { model: settings.model },
+        ...(input.args.trim().length === 0
+          ? { ui: { kind: "open-selector", selector: "model" } as const }
+          : {}),
       };
     },
   };
@@ -558,6 +561,7 @@ function createSessionsCommand(options: PicoCommandRegistryOptions): SlashComman
           currentProjectCwd: options.workDir,
         }),
         data: summaries,
+        ui: { kind: "open-selector", selector: "session" },
       };
     },
   };
@@ -631,6 +635,7 @@ function createRewindCommand(options: PicoCommandRegistryOptions): SlashCommand 
           type: "local",
           action: "message",
           message: formatRewindUsage(session.id, summaries),
+          ui: { kind: "open-selector", selector: "rewind" },
         };
       }
 

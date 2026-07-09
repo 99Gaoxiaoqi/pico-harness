@@ -23,6 +23,7 @@ describe("processUserInput", () => {
     if (result.type === "local-command") {
       expect(result.command).toBe("help");
       expect(result.result.action).toBe("help");
+      expect(result.result.ui).toEqual({ kind: "open-panel", panel: "help" });
       expect(result.result.message).toContain("/help");
       expect(result.result.message).toContain("/clear");
     }
