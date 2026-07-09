@@ -6,6 +6,11 @@ import {
   type InputSuggestion,
   type SuggestionKind,
 } from "./suggestions.js";
+import {
+  resolveKeybinding,
+  type ResolvedKeybinding,
+  type UserKeybindingConfig,
+} from "./keybindings/resolver.js";
 
 const HISTORY_MAX = 20;
 
@@ -31,6 +36,7 @@ export interface InputControllerOptions {
   disabled?: boolean;
   slashCommandSuggestions?: SuggestionSource;
   fileMentionSuggestions?: SuggestionSource;
+  keybindings?: UserKeybindingConfig;
 }
 
 export interface InputControllerState {
@@ -87,27 +93,8 @@ export function reduceInputControllerEvent(
     return submit(nextState);
   }
 
-  if (key.ctrl) {
-    return reduceCtrlInput(state, input, options);
-  }
-
-  const returnPressed = key.return || input === "\r" || input === "\n";
-
-  if (returnPressed && (key.meta || key.shift)) {
-    return insertText(state, "\n", options);
-  }
-
-  if (returnPressed && hasSelectableSuggestion(state)) {
-    return completeSuggestion(state, options);
-  }
-
-  if (returnPressed) {
-    return submit(state);
-  }
-
-  if (key.tab && hasSelectableSuggestion(state)) {
-    return completeSuggestion(state, options);
-  }
+  const keybindingResult = reduceKeybindingInput(state, input, key, options);
+  if (keybindingResult) return keybindingResult;
 
   if (key.backspace) {
     if (state.cursor === 0) return { state };
@@ -135,14 +122,6 @@ export function reduceInputControllerEvent(
     if (key.upArrow || key.downArrow) {
       return moveSuggestionSelection(state, key.upArrow ? -1 : 1);
     }
-  }
-
-  if (key.leftArrow || key.rightArrow || key.home || key.end) {
-    return moveCursor(state, key, options);
-  }
-
-  if (key.upArrow || key.downArrow) {
-    return browseHistory(state, key.upArrow ? -1 : 1, options);
   }
 
   if (isPrintableInput(input, key)) {
@@ -188,23 +167,80 @@ export function getSuggestionContext(
   };
 }
 
-function reduceCtrlInput(
+function reduceKeybindingInput(
   state: InputControllerState,
   input: string,
+  key: InputKey,
+  options: InputControllerOptions,
+): InputControllerResult | null {
+  if (!isKeybindingManagedEvent(input, key)) return null;
+
+  const context =
+    hasSelectableSuggestion(state) && !(key.return && (key.meta || key.shift))
+      ? "Autocomplete"
+      : "Chat";
+  const resolved = resolveKeybinding({ input, key }, context, options.keybindings);
+  if (!resolved) return { state };
+
+  return applyResolvedKeybinding(state, resolved, options);
+}
+
+function applyResolvedKeybinding(
+  state: InputControllerState,
+  resolved: ResolvedKeybinding,
   options: InputControllerOptions,
 ): InputControllerResult {
-  switch (input.toLowerCase()) {
-    case "a":
+  if (resolved.kind === "command") return submitCommand(state, resolved.command);
+
+  switch (resolved.action) {
+    case "cursor:start":
       return setCursor(state, 0, options);
-    case "e":
+    case "cursor:end":
       return setCursor(state, state.text.length, options);
-    case "u":
+    case "cursor:left":
+      return setCursor(state, state.cursor - 1, options);
+    case "cursor:right":
+      return setCursor(state, state.cursor + 1, options);
+    case "edit:clearBeforeCursor":
       return clearBeforeCursorOnLine(state, options);
-    case "w":
+    case "edit:deletePreviousWord":
       return deletePreviousWord(state, options);
+    case "input:newline":
+      return insertText(state, "\n", options);
+    case "input:submit":
+      return submit(state);
+    case "suggestion:accept":
+      return hasSelectableSuggestion(state) ? completeSuggestion(state, options) : { state };
+    case "suggestion:previous":
+      return moveSuggestionSelection(state, -1);
+    case "suggestion:next":
+      return moveSuggestionSelection(state, 1);
+    case "suggestion:dismiss":
+      return { state: { ...state, activeSuggestions: null } };
+    case "history:previous":
+      return browseHistory(state, -1, options);
+    case "history:next":
+      return browseHistory(state, 1, options);
     default:
       return { state };
   }
+}
+
+function isKeybindingManagedEvent(input: string, key: InputKey): boolean {
+  return Boolean(
+    key.ctrl ||
+      key.meta ||
+      key.shift ||
+      key.tab ||
+      key.return ||
+      key.upArrow ||
+      key.downArrow ||
+      key.leftArrow ||
+      key.rightArrow ||
+      key.home ||
+      key.end ||
+      input === "\u001b",
+  );
 }
 
 function clearBeforeCursorOnLine(
@@ -253,17 +289,6 @@ function insertText(
     options,
     { clearHistoryBrowse: true },
   );
-}
-
-function moveCursor(
-  state: InputControllerState,
-  key: InputKey,
-  options: InputControllerOptions,
-): InputControllerResult {
-  if (key.home) return setCursor(state, 0, options);
-  if (key.end) return setCursor(state, state.text.length, options);
-  if (key.leftArrow) return setCursor(state, state.cursor - 1, options);
-  return setCursor(state, state.cursor + 1, options);
 }
 
 function setCursor(
@@ -341,6 +366,21 @@ function submit(state: InputControllerState): InputControllerResult {
       history: pushHistory(state.history, trimmed),
     },
     submittedText: trimmed,
+  };
+}
+
+function submitCommand(state: InputControllerState, command: `/${string}`): InputControllerResult {
+  return {
+    state: {
+      ...state,
+      text: "",
+      cursor: 0,
+      activeSuggestions: null,
+      historyIndex: null,
+      draft: "",
+      history: pushHistory(state.history, command),
+    },
+    submittedText: command,
   };
 }
 
