@@ -15,6 +15,10 @@ import {
 const HISTORY_MAX = 20;
 
 export type SuggestionSource = (query: string) => readonly InputSuggestion[];
+export type SlashArgumentSuggestionSource = (
+  command: string,
+  query: string,
+) => readonly InputSuggestion[];
 
 export interface InputKey {
   upArrow?: boolean;
@@ -35,6 +39,7 @@ export interface InputKey {
 export interface InputControllerOptions {
   disabled?: boolean;
   slashCommandSuggestions?: SuggestionSource;
+  slashArgumentSuggestions?: SlashArgumentSuggestionSource;
   fileMentionSuggestions?: SuggestionSource;
   keybindings?: UserKeybindingConfig;
 }
@@ -58,6 +63,7 @@ interface SuggestionContext {
   query: string;
   replaceStart: number;
   replaceEnd: number;
+  command?: string;
 }
 
 export function createInputControllerState(): InputControllerState {
@@ -143,6 +149,18 @@ export function getSuggestionContext(
   const cursorInLine = safeCursor - lineStart;
 
   if (line.startsWith("/") && cursorInLine > 0) {
+    const commandMatch = /^\/([^\s]+)\s+([^\s]*)$/.exec(line.slice(0, cursorInLine));
+    if (commandMatch !== null) {
+      const argStart = lineStart + cursorInLine - (commandMatch[2]?.length ?? 0);
+      return {
+        kind: "slash-argument",
+        command: commandMatch[1] ?? "",
+        query: commandMatch[2] ?? "",
+        replaceStart: argStart,
+        replaceEnd: lineStart + findTokenEnd(line, cursorInLine),
+      };
+    }
+
     const tokenEnd = findTokenEnd(line, cursorInLine);
     if (cursorInLine <= tokenEnd && !/\s/.test(line.slice(0, cursorInLine))) {
       return {
@@ -500,11 +518,7 @@ function buildSuggestionSession(
   const context = getSuggestionContext(text, cursor);
   if (!context) return null;
 
-  const source =
-    context.kind === "slash" ? options.slashCommandSuggestions : options.fileMentionSuggestions;
-  if (!source) return null;
-
-  const items = source(context.query).slice(0, MAX_SUGGESTIONS);
+  const items = suggestionItemsForContext(context, options).slice(0, MAX_SUGGESTIONS);
   if (items.length === 0) return null;
 
   return {
@@ -515,6 +529,19 @@ function buildSuggestionSession(
     selectedIndex: 0,
     items: [...items],
   };
+}
+
+function suggestionItemsForContext(
+  context: SuggestionContext,
+  options: InputControllerOptions,
+): readonly InputSuggestion[] {
+  if (context.kind === "slash") {
+    return options.slashCommandSuggestions?.(context.query) ?? [];
+  }
+  if (context.kind === "slash-argument") {
+    return options.slashArgumentSuggestions?.(context.command ?? "", context.query) ?? [];
+  }
+  return options.fileMentionSuggestions?.(context.query) ?? [];
 }
 
 function pushHistory(history: string[], entry: string): string[] {

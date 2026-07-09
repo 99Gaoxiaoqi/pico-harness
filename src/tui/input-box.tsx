@@ -13,6 +13,7 @@ import { Box, Text, useInput } from "ink";
 import {
   createInputControllerState,
   reduceInputControllerEvent,
+  type SlashArgumentSuggestionSource,
   type SuggestionSource,
 } from "./input-controller.js";
 import { SuggestionList } from "./suggestions.js";
@@ -22,6 +23,8 @@ export interface InputBoxProps {
   disabled?: boolean;
   /** Slash command 候选源,query 不含前导 / */
   slashCommandSuggestions?: SuggestionSource;
+  /** Slash command 参数候选源,query 为当前参数前缀 */
+  slashArgumentSuggestions?: SlashArgumentSuggestionSource;
   /** File mention 候选源,query 不含前导 @ */
   fileMentionSuggestions?: SuggestionSource;
   /** Enter 提交回调 */
@@ -31,6 +34,7 @@ export interface InputBoxProps {
 export function InputBox({
   disabled,
   slashCommandSuggestions,
+  slashArgumentSuggestions,
   fileMentionSuggestions,
   onSubmit,
 }: InputBoxProps): React.ReactNode {
@@ -42,6 +46,7 @@ export function InputBox({
     const result = reduceInputControllerEvent(controllerRef.current, input, key, {
       disabled,
       slashCommandSuggestions,
+      slashArgumentSuggestions,
       fileMentionSuggestions,
     });
     controllerRef.current = result.state;
