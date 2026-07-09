@@ -6,7 +6,6 @@ import { BackgroundManager } from "./background-manager.js";
 import {
   BashTool,
   EditFileTool,
-  EchoTool,
   ReadFileTool,
   TaskListTool,
   TaskOutputTool,
@@ -24,8 +23,6 @@ import { FetchURLTool, WebSearchTool } from "./web.js";
 import { ToolDisclosure } from "./tool-disclosure.js";
 import { SearchToolsTool } from "./search-tools.js";
 import { getTier } from "./tool-tiers.js";
-import type { BaseTool } from "./registry.js";
-import type { ToolDefinition } from "../schema/message.js";
 
 export interface DefaultToolRegistryOptions extends ToolRegistryOptions {
   backgroundManager?: BackgroundManager;
@@ -57,10 +54,14 @@ export function buildDefaultToolRegistry(
   workDir: string,
   options: DefaultToolRegistryOptions = {},
 ): ToolRegistry {
-  const { backgroundManager = new BackgroundManager(), goalManager, todoStore, toolDisclosure, ...registryOptions } =
-    options;
+  const {
+    backgroundManager = new BackgroundManager(),
+    goalManager,
+    todoStore,
+    toolDisclosure,
+    ...registryOptions
+  } = options;
   const registry = new ToolRegistry(registryOptions);
-  registry.register(new EchoTool());
   registry.register(new ReadFileTool(workDir));
   registry.register(new WriteFileTool(workDir));
   registry.register(new EditFileTool(workDir));
@@ -89,7 +90,6 @@ export function buildDefaultToolRegistry(
   }
   registry.register(new FetchURLTool());
   registry.register(new WebSearchTool());
-  registry.register(new DelegateTaskUnavailableTool());
   // 渐进披露(ROADMAP 5.4):注入 disclosure 时注册 search_tools 元工具。
   // 扩展工具列表 = 全量工具里非核心组的(含 MCP 动态工具,若已注册)。
   // search_tools 持有 disclosure 引用,execute 时回写 disclosed 集合。
@@ -98,36 +98,4 @@ export function buildDefaultToolRegistry(
     registry.register(new SearchToolsTool(extended, toolDisclosure));
   }
   return registry;
-}
-
-class DelegateTaskUnavailableTool implements BaseTool {
-  name(): string {
-    return "delegate_task";
-  }
-
-  definition(): ToolDefinition {
-    return {
-      name: "delegate_task",
-      description:
-        "delegate_task: 把任务委派给指定子 Agent 执行。CLI/server host 会在运行时注入真实实现。",
-      inputSchema: {
-        type: "object",
-        properties: {
-          goal: { type: "string" },
-          context: { type: "string" },
-          agent_name: { type: "string" },
-          mode: { type: "string", enum: ["explore", "worker"] },
-          role: { type: "string", enum: ["leaf", "orchestrator"] },
-        },
-        required: ["goal"],
-      },
-    };
-  }
-
-  async execute(): Promise<string> {
-    return JSON.stringify({
-      error:
-        "delegate_task is not connected in this registry. Start Pico through the CLI/server host to enable subagent delegation.",
-    });
-  }
 }
