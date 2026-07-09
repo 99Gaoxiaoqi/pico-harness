@@ -170,6 +170,43 @@ describe("SuggestionList row model", () => {
     expect(output).not.toContain("alias");
   });
 
+  it("renders disabled slash command rows with the disabled reason", () => {
+    const session: ActiveSuggestionSession = {
+      kind: "slash",
+      query: "",
+      replaceStart: 0,
+      replaceEnd: 1,
+      selectedIndex: 0,
+      items: [
+        {
+          value: "compact",
+          description: "Compact current session context",
+          disabled: true,
+          disabledReason: "Command is only available while idle.",
+        },
+        { value: "help", description: "显示帮助" },
+      ],
+    };
+
+    const rows = formatSuggestionRows(session);
+    const output = renderToString(<SuggestionList session={session} />);
+
+    expect(rows[0]).toMatchObject({
+      left: "/compact",
+      description: "Compact current session context",
+      disabled: true,
+      disabledReason: "Command is only available while idle.",
+    });
+    expect(rows[1]).toMatchObject({
+      left: "/help",
+      description: "显示帮助",
+    });
+    expect(rows[1]).not.toHaveProperty("disabled");
+    expect(output).toContain("Command is only available while");
+    expect(output).toContain("idle.");
+    expect(output).toContain("显示帮助");
+  });
+
   it("clips selected Chinese, multiline, and long command candidates for panel rendering", () => {
     const session: ActiveSuggestionSession = {
       kind: "slash",
