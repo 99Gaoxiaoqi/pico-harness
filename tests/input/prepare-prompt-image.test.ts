@@ -40,6 +40,36 @@ describe("preparePromptForMessage image mentions", () => {
     }
   });
 
+  it("@image:path 后的中文标点不属于图片路径", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-prepare-img-punct-"));
+    try {
+      await writeFile(join(workDir, "pic.png"), "PNG");
+
+      const result = await preparePromptForMessage("看一下 @image:pic.png。", workDir);
+
+      expect(result.prompt).toBe("看一下 。");
+      expect(result.images).toHaveLength(1);
+      expect(result.notices).toEqual(["已附加图片: pic.png"]);
+    } finally {
+      await safeRm(workDir);
+    }
+  });
+
+  it("括号中的 @image:path 也按图片附件解析", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-prepare-img-paren-"));
+    try {
+      await writeFile(join(workDir, "pic.png"), "PNG");
+
+      const result = await preparePromptForMessage("请看(@image:pic.png)", workDir);
+
+      expect(result.prompt).toBe("请看()");
+      expect(result.images).toHaveLength(1);
+      expect(result.notices).toEqual(["已附加图片: pic.png"]);
+    } finally {
+      await safeRm(workDir);
+    }
+  });
+
   it("@image: 缺失文件时给出路径错误", async () => {
     const workDir = await mkdtemp(join(tmpdir(), "pico-prepare-img-missing-"));
     try {

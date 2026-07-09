@@ -98,7 +98,8 @@ export class McpConnectionManager {
    * @param configPath 配置文件路径;若相对路径,锚定到 cwd
    */
   async loadConfig(configPath: string): Promise<void> {
-    const absPath = isAbsolute(configPath) ? configPath : resolve(process.cwd(), configPath);
+    const baseDir = this.options.stdioCwd ?? process.cwd();
+    const absPath = isAbsolute(configPath) ? configPath : resolve(baseDir, configPath);
     this.configPath = absPath;
     this.loadError = undefined;
     let text: string;
@@ -230,15 +231,24 @@ export class McpConnectionManager {
   /** 关闭所有连接(进程退出时调用) */
   async closeAll(): Promise<void> {
     const tasks: Promise<void>[] = [];
+    const closingEntries: ServerEntry[] = [];
     for (const entry of this.entries.values()) {
       if (entry.client) {
         const client = entry.client;
         entry.client = undefined;
+        closingEntries.push(entry);
         tasks.push(client.close().catch(() => {}));
       }
     }
     await Promise.allSettled(tasks);
-    this.entries.clear();
+    for (const entry of closingEntries) {
+      if (entry.status === "connected") {
+        entry.status = "pending";
+        entry.toolCount = 0;
+        entry.toolNames = [];
+        entry.error = undefined;
+      }
+    }
     logger.info(`[MCP] 所有 server 连接已关闭`);
   }
 

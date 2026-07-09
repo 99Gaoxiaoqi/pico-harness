@@ -4,29 +4,53 @@
 //   2. 流式模式下的工具调用(tool_use)累积正确
 //
 // 与 stage1-e2e.test.ts 的 OpenAI 流式测试对称,但走 Claude 协议。
-// 凭证为用户提供的测试端点,直接硬编码 —— 不读 .env(避免与 deepseek 凭证冲突)。
+// 凭证通过环境变量显式开启:
+//   PICO_CLAUDE_E2E_BASE_URL / PICO_CLAUDE_E2E_API_KEY / PICO_CLAUDE_E2E_MODEL
+// 未设置时自动 skip。
 //
-// 用法: npx vitest run tests/e2e/stage1-claude-e2e.test.ts
+// 用法: npm run test:e2e -- tests/e2e/stage1-claude-e2e.test.ts
 
 import { describe, it, expect } from "vitest";
 import { ClaudeProvider } from "../../src/provider/claude.js";
 import type { Message } from "../../src/schema/message.js";
 
-// ─── 用户提供的 Claude 兼容测试端点(硬编码,不读 .env)───
 // 注意:ClaudeProvider 内部 fetch 拼的是 `${baseURL}/messages`。
-// Anthropic 原生是 `https://api.anthropic.com/v1/messages`,
-// 所以兼容端点的 baseURL 应带 /v1 后缀,这里用 /api/v1。
-const BASE_URL = "https://claude.jlcops.com/api/v1";
-const API_KEY = "cr_81973ecc042bc925ea2ae16eba9b7d946e67761f1765bcdf80c1ef2acdc5dca2";
-const MODEL = "kimi-k2.7-code";
+const BASE_URL = process.env.PICO_CLAUDE_E2E_BASE_URL;
+const API_KEY = process.env.PICO_CLAUDE_E2E_API_KEY;
+const MODEL = process.env.PICO_CLAUDE_E2E_MODEL ?? "kimi-k2.7-code";
 
-describe("阶段 1 Claude 流式真实 API 测试", { timeout: 60000 }, () => {
+let endpointAvailable = false;
+if (BASE_URL && API_KEY) {
+  try {
+    const probe = await fetch(`${BASE_URL}/messages`, {
+      method: "POST",
+      headers: {
+        "x-api-key": API_KEY,
+        "anthropic-version": "2023-06-01",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: MODEL,
+        messages: [{ role: "user", content: "ping" }],
+        max_tokens: 5,
+      }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    endpointAvailable = probe.ok;
+  } catch {
+    // 连接失败
+  }
+}
+
+const describeOrSkip = endpointAvailable ? describe : describe.skip;
+
+describeOrSkip("阶段 1 Claude 流式真实 API 测试", { timeout: 60000 }, () => {
   // ──────────────────────────────────────────────
   // 测试 1: 真实流式输出
   // ──────────────────────────────────────────────
   describe("流式输出 (真实 Claude 兼容 API)", () => {
     it("generateStream 回调被多次触发,delta 拼接等于最终 content", async () => {
-      const provider = new ClaudeProvider({ baseURL: BASE_URL, apiKey: API_KEY, model: MODEL });
+      const provider = new ClaudeProvider({ baseURL: BASE_URL!, apiKey: API_KEY!, model: MODEL });
 
       const deltas: string[] = [];
       const messages: Message[] = [
@@ -54,7 +78,7 @@ describe("阶段 1 Claude 流式真实 API 测试", { timeout: 60000 }, () => {
   // ──────────────────────────────────────────────
   describe("流式模式下的工具调用累积 (真实 Claude 兼容 API)", () => {
     it("模型发出 tool_use,arguments 完整可解析", async () => {
-      const provider = new ClaudeProvider({ baseURL: BASE_URL, apiKey: API_KEY, model: MODEL });
+      const provider = new ClaudeProvider({ baseURL: BASE_URL!, apiKey: API_KEY!, model: MODEL });
 
       const deltas: string[] = [];
       const messages: Message[] = [

@@ -176,7 +176,7 @@ export interface AgentEngineOptions {
 
 /** 微型 OS 的核心驱动 */
 export class AgentEngine implements AgentRunner {
-  private readonly provider: LLMProvider;
+  private provider: LLMProvider;
   private readonly registry: Registry;
   private readonly workDir: string;
   private readonly systemPrompt: string;
@@ -246,25 +246,31 @@ export class AgentEngine implements AgentRunner {
     this.shouldContinueAfterStop = opts.shouldContinueAfterStop;
     this.rebuildProvider = opts.rebuildProvider;
 
-    // 流式 provider 包装:如果 provider 支持 generateStream,
-    // 把 generate() 替换为 generateStream(),同时把 delta 转发给 reporter.onTextDelta。
-    // 这样 generateWithRetry / generateWithOverflowRetry 无需改动,自动获得流式能力。
-    const generateStreamFn = this.provider.generateStream;
-    if (generateStreamFn) {
-      const realProvider = this.provider;
-      const reporter = this.reporter;
-      this.provider = {
-        generate: (msgs: Message[], tools: ToolDefinition[]) =>
-          generateStreamFn.call(realProvider, msgs, tools, (delta: string) => {
-            reporter.onTextDelta?.(delta);
-          }),
-        get modelName() {
-          return realProvider.modelName;
-        },
-        isRetryableError: realProvider.isRetryableError,
-        generateStream: generateStreamFn.bind(realProvider),
-      };
-    }
+    this.provider = this.wrapStreamingProvider(this.provider);
+  }
+
+  private wrapStreamingProvider(provider: LLMProvider): LLMProvider {
+    const generateStreamFn = provider.generateStream;
+    if (!generateStreamFn) return provider;
+    const reporter = this.reporter;
+    return {
+      generate: (msgs: Message[], tools: ToolDefinition[]) =>
+        generateStreamFn.call(provider, msgs, tools, (delta: string) => {
+          reporter.onTextDelta?.(delta);
+        }),
+      get modelName() {
+        return provider.modelName;
+      },
+      isRetryableError: provider.isRetryableError,
+      generateStream: generateStreamFn.bind(provider),
+    };
+  }
+
+  private rotateProvider(): LLMProvider | undefined {
+    const provider = this.rebuildProvider?.();
+    if (!provider) return undefined;
+    this.provider = this.wrapStreamingProvider(provider);
+    return this.provider;
   }
 
   /**
@@ -401,7 +407,7 @@ export class AgentEngine implements AgentRunner {
         // (defaultIsRetryableError 已排除),冒泡到本方法 catch 做响应式降级。
         return await generateWithRetry(this.provider, context, tools, {
           onRetry: this.makeRetryReporter(span),
-          onRateLimited: this.rebuildProvider,
+          onRateLimited: () => this.rotateProvider(),
         });
       } catch (err) {
         // 非 overflow 错误直接抛(429/5xx 等普通重试已由 generateWithRetry 处理)
@@ -964,7 +970,7 @@ export class AgentEngine implements AgentRunner {
       ];
       const response = await generateWithRetry(this.provider, context, [], {
         onRetry: this.makeRetryReporter(graceSpan),
-        onRateLimited: this.rebuildProvider,
+        onRateLimited: () => this.rotateProvider(),
       });
       recordLlmResponse(graceSpan, response);
       session.append(response);
@@ -1004,7 +1010,7 @@ export class AgentEngine implements AgentRunner {
       // 无 Compactor:子代理无法降级,叠加普通重试层(溢出则原样抛出)
       return generateWithRetry(this.provider, contextHistory, tools, {
         onRetry: this.makeRetryReporter(),
-        onRateLimited: this.rebuildProvider,
+        onRateLimited: () => this.rotateProvider(),
       });
     }
     // 首轮:用默认预算压缩(attempt 0,系数 1.0)
@@ -1015,7 +1021,7 @@ export class AgentEngine implements AgentRunner {
         // 响应式压缩在外(子代理版仅降字符预算,不改 WorkingMemory 条数)。
         return await generateWithRetry(this.provider, context, tools, {
           onRetry: this.makeRetryReporter(),
-          onRateLimited: this.rebuildProvider,
+          onRateLimited: () => this.rotateProvider(),
         });
       } catch (err) {
         if (!(err instanceof ContextOverflowError)) {

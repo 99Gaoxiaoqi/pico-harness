@@ -118,7 +118,7 @@ export type TuiRunAgent = (
   dependencies: RunAgentCliDependencies,
 ) => Promise<RunAgentCliResult>;
 
-const RUNNING_IMMEDIATE_LOCAL_COMMANDS = new Set(["help", "status"]);
+const RUNNING_IMMEDIATE_LOCAL_COMMANDS = new Set(["help", "status", "mcp"]);
 
 export async function handleTuiInputSubmission(
   text: string,
@@ -326,7 +326,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
   const toolRegistry = buildDefaultToolRegistry(opts.workDir, { toolDisclosure });
   let latestMcpStatus: McpStatusSnapshot | undefined;
   if (opts.mcpConfigPath) {
-    const mcpStatusManager = new McpConnectionManager(toolRegistry);
+    const mcpStatusManager = new McpConnectionManager(toolRegistry, { stdioCwd: opts.workDir });
     try {
       await mcpStatusManager.loadConfig(opts.mcpConfigPath);
     } catch {

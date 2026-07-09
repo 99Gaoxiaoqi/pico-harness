@@ -12,6 +12,7 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:e2e": "vitest run --config vitest.e2e.config.ts",
     "test:watch": "vitest",
     "smoke:tui": "node scripts/tui-smoke.mjs",
     "lint": "eslint src/cli src/tui src/input tests/cli-run-agent.test.ts tests/input/process-user-input.test.ts",

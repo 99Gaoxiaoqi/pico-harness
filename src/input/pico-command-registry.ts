@@ -649,7 +649,7 @@ function createImageCommand(): SlashCommand {
       }
       return {
         type: "prompt",
-        prompt: `请查看这张图片。 @image:${imagePath}`,
+        prompt: `请查看这张图片。 @image:${JSON.stringify(imagePath)}`,
       };
     },
   };

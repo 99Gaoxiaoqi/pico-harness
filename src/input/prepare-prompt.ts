@@ -45,27 +45,71 @@ export function loadImage(imagePath: string, workDir: string): ImagePart {
 
 function extractImageMentions(prompt: string): { prompt: string; paths: string[] } {
   const paths: string[] = [];
-  const cleaned = prompt.replace(
-    /(^|\s)@image:(?:"([^"]+)"|'([^']+)'|(\S+))/gu,
-    (_match, prefix: string, doubleQuoted?: string, singleQuoted?: string, bare?: string) => {
-      paths.push(doubleQuoted ?? singleQuoted ?? unquote(bare ?? ""));
-      return prefix;
-    },
-  );
+  const output: string[] = [];
+
+  for (let i = 0; i < prompt.length; ) {
+    if (prompt.startsWith("@image:", i) && isImageMentionBoundary(prompt[i - 1])) {
+      const parsed = readImagePath(prompt, i + "@image:".length);
+      if (parsed) {
+        paths.push(parsed.path);
+        output.push(parsed.suffix);
+        i = parsed.end;
+        continue;
+      }
+    }
+
+    output.push(prompt[i]!);
+    i++;
+  }
+
+  const cleaned = output.join("");
   return {
     prompt: cleaned.replace(/\s{2,}/gu, " ").trim(),
     paths,
   };
 }
 
-function unquote(value: string): string {
-  if (
-    (value.startsWith('"') && value.endsWith('"')) ||
-    (value.startsWith("'") && value.endsWith("'"))
-  ) {
-    return value.slice(1, -1);
+function isImageMentionBoundary(char: string | undefined): boolean {
+  return char === undefined || /[\s([{（【]/u.test(char);
+}
+
+function readImagePath(
+  text: string,
+  start: number,
+): { path: string; suffix: string; end: number } | null {
+  const quote = text[start];
+  if (quote === '"' || quote === "'") {
+    const end = findClosingQuote(text, start, quote);
+    if (end === -1) return null;
+    const raw = text.slice(start, end + 1);
+    const path = quote === '"' ? parseJsonString(raw) : raw.slice(1, -1);
+    return path ? { path, suffix: "", end: end + 1 } : null;
   }
-  return value;
+
+  let end = start;
+  while (end < text.length && !/\s/u.test(text[end]!)) end++;
+  const token = text.slice(start, end);
+  const path = token.replace(/[。．，,、；;：:！？!?）)\]】}]+$/u, "");
+  if (!path) return null;
+  return { path, suffix: token.slice(path.length), end };
+}
+
+function findClosingQuote(text: string, start: number, quote: string): number {
+  for (let i = start + 1; i < text.length; i++) {
+    if (text[i] !== quote) continue;
+    if (quote === '"' && text[i - 1] === "\\") continue;
+    return i;
+  }
+  return -1;
+}
+
+function parseJsonString(value: string): string | null {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return typeof parsed === "string" ? parsed : null;
+  } catch {
+    return null;
+  }
 }
 
 function resolveImagePath(imagePath: string, workDir: string): string {

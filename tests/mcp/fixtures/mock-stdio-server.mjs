@@ -11,6 +11,7 @@
 //   --name X:server 名(用于 initialize 响应)
 
 import { parseArgs } from "node:util";
+import { writeFileSync } from "node:fs";
 
 const { values } = parseArgs({
   options: {
@@ -18,6 +19,8 @@ const { values } = parseArgs({
     tools: { type: "string", default: "2" },
     name: { type: "string", default: "mock-server" },
     "fail-startup": { type: "boolean", default: false },
+    "ignore-sigterm": { type: "boolean", default: false },
+    "pid-file": { type: "string" },
   },
   allowPositionals: false,
 });
@@ -25,6 +28,16 @@ const { values } = parseArgs({
 const crashAfterMs = Number(values.crash);
 const toolCount = Number(values.tools);
 const serverName = values.name;
+
+if (values["pid-file"]) {
+  writeFileSync(values["pid-file"], String(process.pid));
+}
+
+if (values["ignore-sigterm"]) {
+  process.on("SIGTERM", () => {
+    process.stderr.write("[mock] ignoring SIGTERM\n");
+  });
+}
 
 // 启动即失败:写 stderr 后立即非零退出,不读 stdin(模拟 server 启动崩溃)
 if (values["fail-startup"]) {

@@ -94,4 +94,33 @@ describe("parseMentions", () => {
       },
     ]);
   });
+
+  it("does not treat email addresses as file mentions", () => {
+    const mentions = parseMentions("联系 me@example.com，再看 @src/app.ts");
+
+    expect(mentions).toMatchObject([
+      {
+        kind: "path",
+        raw: "@src/app.ts",
+        target: "src/app.ts",
+      },
+    ]);
+  });
+
+  it("parses mentions after opening brackets", () => {
+    const mentions = parseMentions("请看(@src/app.ts)和（@docs/readme.md）");
+
+    expect(mentions).toMatchObject([
+      {
+        kind: "path",
+        raw: "@src/app.ts",
+        target: "src/app.ts",
+      },
+      {
+        kind: "path",
+        raw: "@docs/readme.md",
+        target: "docs/readme.md",
+      },
+    ]);
+  });
 });

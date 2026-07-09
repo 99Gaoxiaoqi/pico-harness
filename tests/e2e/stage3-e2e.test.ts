@@ -1,15 +1,14 @@
 // 阶段 3 端到端真实测试 — 验证上下文与控制流增强机制在真实大模型下的可用性。
-// 用法: npx vitest run tests/e2e/stage3-e2e.test.ts
+// 用法: npm run test:e2e -- tests/e2e/stage3-e2e.test.ts
 //
 // 测试目标(真实模型验证"行为引导"特性,不只是机制正确):
 //   1. Goal Mode:模型能主动调用 create_goal,goal context 注入后影响后续行为
 //   2. Steer:运行中注入引导文本,模型下一轮会参考
 //   3. shouldContinueAfterStop:host 续接回调让 Agent 继续干活
 //
-// 凭证:用户提供端点(硬编码,不读 .env 避免与 deepseek 冲突)
-//   BASE_URL: https://claude.jlcops.com/api
-//   API_KEY:  cr_81973ecc042bc925ea2ae16eba9b7d946e67761f1765bcdf80c1ef2acdc5dca2
-//   MODEL:    deepseek-v4-pro
+// 凭证通过环境变量显式开启:
+//   PICO_OPENAI_E2E_BASE_URL / PICO_OPENAI_E2E_API_KEY / PICO_OPENAI_E2E_MODEL
+// 未设置时自动 skip。
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
@@ -24,29 +23,30 @@ import { GoalManager } from "../../src/engine/goal-manager.js";
 import { SteerQueue } from "../../src/engine/steer-queue.js";
 import { PromptComposer } from "../../src/context/composer.js";
 
-// 硬编码用户提供的测试端点(与 stage1-claude-e2e 同模式)
-// 注意:OpenAI 兼容协议拼 /v1/chat/completions,所以 baseURL 带 /v1
-const BASE_URL = "https://claude.jlcops.com/api/v1";
-const API_KEY = "cr_81973ecc042bc925ea2ae16eba9b7d946e67761f1765bcdf80c1ef2acdc5dca2";
-const MODEL = "deepseek-v4-pro";
+// 注意:OpenAI 兼容协议拼 /chat/completions,baseURL 通常带 /v1。
+const BASE_URL = process.env.PICO_OPENAI_E2E_BASE_URL;
+const API_KEY = process.env.PICO_OPENAI_E2E_API_KEY;
+const MODEL = process.env.PICO_OPENAI_E2E_MODEL ?? "deepseek-v4-pro";
 
 // 先探测端点可用性(避免硬编码凭证失效时全盘失败)
 let endpointAvailable = false;
-try {
-  const probe = await fetch(`${BASE_URL}/chat/completions`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${API_KEY}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: MODEL,
-      messages: [{ role: "user", content: "ping" }],
-      max_tokens: 5,
-    }),
-    signal: AbortSignal.timeout(15_000),
-  });
-  endpointAvailable = probe.ok;
-  if (!probe.ok) console.log(`[E2E 探测] 端点不可用: ${probe.status} ${await probe.text()}`);
-} catch (err) {
-  console.log(`[E2E 探测] 连接失败: ${String(err)}`);
+if (BASE_URL && API_KEY) {
+  try {
+    const probe = await fetch(`${BASE_URL}/chat/completions`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${API_KEY}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: MODEL,
+        messages: [{ role: "user", content: "ping" }],
+        max_tokens: 5,
+      }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    endpointAvailable = probe.ok;
+    if (!probe.ok) console.log(`[E2E 探测] 端点不可用: ${probe.status} ${await probe.text()}`);
+  } catch (err) {
+    console.log(`[E2E 探测] 连接失败: ${String(err)}`);
+  }
 }
 
 const describeOrSkip = endpointAvailable ? describe : describe.skip;
@@ -62,7 +62,7 @@ describeOrSkip("阶段 3 端到端测试(真实大模型 deepseek-v4-pro)", { ti
       join(workDir, "src", "app.ts"),
       ['export const VERSION = "1.0.0";', "export function hello() { return 'hi'; }", ""].join("\n"),
     );
-    provider = new OpenAIProvider({ baseURL: BASE_URL, apiKey: API_KEY, model: MODEL });
+    provider = new OpenAIProvider({ baseURL: BASE_URL!, apiKey: API_KEY!, model: MODEL });
   });
 
   afterAll(() => {

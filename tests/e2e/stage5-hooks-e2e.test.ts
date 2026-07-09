@@ -1,11 +1,13 @@
 // 阶段 2.6 + 5.6 真实模型 e2e — Hooks 端到端 + ANSI 验证。
-// 用法: npx vitest run tests/e2e/stage5-hooks-e2e.test.ts
+// 用法: npm run test:e2e -- tests/e2e/stage5-hooks-e2e.test.ts
 //
 // 测试目标:
 //   1. Hooks:配一个真实 PreToolUse shell 脚本拦 bash,用真实模型触发,验证 hook 真的拦住
 //   2. ANSI:验证 colorizeDiff 输出含 ANSI 颜色码
 //
-// 凭证: deepseek-v4-pro @ claude.jlcops.com
+// 凭证通过环境变量显式开启:
+//   PICO_OPENAI_E2E_BASE_URL / PICO_OPENAI_E2E_API_KEY / PICO_OPENAI_E2E_MODEL
+// 未设置时自动 skip。
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
@@ -20,21 +22,23 @@ import { HookRunner } from "../../src/hooks/runner.js";
 import type { HooksConfig } from "../../src/hooks/types.js";
 import { colorizeDiff } from "../../src/engine/reporter.js";
 
-const BASE_URL = "https://claude.jlcops.com/api/v1";
-const API_KEY = "cr_81973ecc042bc925ea2ae16eba9b7d946e67761f1765bcdf80c1ef2acdc5dca2";
-const MODEL = "deepseek-v4-pro";
+const BASE_URL = process.env.PICO_OPENAI_E2E_BASE_URL;
+const API_KEY = process.env.PICO_OPENAI_E2E_API_KEY;
+const MODEL = process.env.PICO_OPENAI_E2E_MODEL ?? "deepseek-v4-pro";
 
 let endpointAvailable = false;
-try {
-  const probe = await fetch(`${BASE_URL}/chat/completions`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${API_KEY}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ model: MODEL, messages: [{ role: "user", content: "ping" }], max_tokens: 5 }),
-    signal: AbortSignal.timeout(15_000),
-  });
-  endpointAvailable = probe.ok;
-} catch {
-  // 连接失败
+if (BASE_URL && API_KEY) {
+  try {
+    const probe = await fetch(`${BASE_URL}/chat/completions`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${API_KEY}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ model: MODEL, messages: [{ role: "user", content: "ping" }], max_tokens: 5 }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    endpointAvailable = probe.ok;
+  } catch {
+    // 连接失败
+  }
 }
 
 const describeOrSkip = endpointAvailable ? describe : describe.skip;
@@ -46,8 +50,8 @@ describeOrSkip("阶段 2.6+5.6 真实模型 e2e", { timeout: 120000 }, () => {
     workDir = mkdtempSync(join(tmpdir(), "pico-hooks-e2e-"));
     mkdirSync(join(workDir, "src"), { recursive: true });
     writeFileSync(join(workDir, "src", "app.ts"), 'export const VERSION = "1.0.0";\n');
-    process.env.LLM_BASE_URL = BASE_URL;
-    process.env.LLM_API_KEY = API_KEY;
+    process.env.LLM_BASE_URL = BASE_URL!;
+    process.env.LLM_API_KEY = API_KEY!;
     process.env.LLM_MODEL = MODEL;
     process.env.PICO_PERSISTENCE = "0";
   });
@@ -85,7 +89,7 @@ describeOrSkip("阶段 2.6+5.6 真实模型 e2e", { timeout: 120000 }, () => {
         ],
       };
 
-      const provider = new OpenAIProvider({ baseURL: BASE_URL, apiKey: API_KEY, model: MODEL });
+      const provider = new OpenAIProvider({ baseURL: BASE_URL!, apiKey: API_KEY!, model: MODEL });
       const registry = buildDefaultToolRegistry(workDir);
       registry.setHookRunner?.(new HookRunner(workDir, hooksConfig));
       registry.setSessionId?.("e2e-hooks-test");
