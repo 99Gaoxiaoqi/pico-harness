@@ -74,89 +74,61 @@ export function confirmRewindSelection(
 }
 
 export function formatRewindSelectorState(
-  sessionId: string,
+  _sessionId: string,
   snapshots: readonly FileHistorySnapshotSummary[],
   state: RewindSelectorState,
   options: { maxItems?: number; maxIdLength?: number; maxSummaryLength?: number } = {},
 ): string {
   if (state.phase === "confirm") {
     const snapshot = snapshots.find((item) => item.messageId === state.messageId);
-    return formatRewindConfirmText(sessionId, snapshot, state.diffStat, options);
+    return formatRewindConfirmText(snapshot, state.diffStat, options);
   }
-  return formatRewindMessageList(sessionId, snapshots, options);
+  return formatRewindMessageList(snapshots, options);
 }
 
 export function formatRewindSelector(
-  sessionId: string,
+  _sessionId: string,
   snapshots: readonly FileHistorySnapshotSummary[],
   options: { maxItems?: number; maxIdLength?: number; maxSummaryLength?: number } = {},
 ): string {
-  if (snapshots.length === 0) {
-    return `session ${sessionId} 暂无可回滚快照。完成一次文件修改后再运行 /snapshots。`;
-  }
-
-  const maxItems = options.maxItems ?? 20;
-  const maxIdLength = options.maxIdLength ?? 24;
-  const maxSummaryLength = options.maxSummaryLength ?? 72;
-  const visible = snapshots.slice(-maxItems);
-  const lines = [`session ${sessionId} 可回滚快照:`];
-  for (const snapshot of visible) {
-    const summary = truncateText(
-      snapshot.changeSummary ?? formatSnapshotChangeSummary(snapshot),
-      maxSummaryLength,
-    );
-    lines.push([
-      `- time=${snapshot.timestamp}`,
-      `id=${truncateText(snapshot.messageId, maxIdLength)}`,
-      `files=${snapshot.trackedFileCount}`,
-      `summary=${summary}`,
-    ].join(" "));
-    lines.push(`  use: /rewind ${snapshot.messageId} both`);
-  }
-  const hidden = snapshots.length - visible.length;
-  if (hidden > 0) lines.push(`... 已隐藏 ${hidden} 个更早快照`);
-  return lines.join("\n");
+  return formatRewindMessageList(snapshots, options);
 }
 
 function formatRewindMessageList(
-  sessionId: string,
   snapshots: readonly FileHistorySnapshotSummary[],
   options: { maxItems?: number; maxIdLength?: number; maxSummaryLength?: number } = {},
 ): string {
   if (snapshots.length === 0) {
-    return `session ${sessionId} 暂无可回滚消息。完成一次文件修改后再运行 /snapshots。`;
+    return "Rewind\nNothing to rewind to yet.";
   }
 
-  const maxItems = options.maxItems ?? 20;
+  const maxItems = options.maxItems ?? 7;
   const maxIdLength = options.maxIdLength ?? 24;
   const maxSummaryLength = options.maxSummaryLength ?? 72;
   const visible = snapshots.slice(-maxItems);
-  const lines = [`session ${sessionId}: 选择要 rewind 到的消息:`];
+  const lines = ["Rewind", "Restore the code and/or conversation to the point before..."];
   for (const snapshot of visible) {
     const summary = truncateText(
-      snapshot.changeSummary ?? formatSnapshotChangeSummary(snapshot),
+      formatClaudeStyleSnapshotSummary(snapshot),
       maxSummaryLength,
     );
-    lines.push([
-      `- time=${snapshot.timestamp}`,
-      `id=${truncateText(snapshot.messageId, maxIdLength)}`,
-      `files=${snapshot.trackedFileCount}`,
-      `summary=${summary}`,
-    ].join(" "));
+    lines.push(`- ${truncateText(snapshot.messageId, maxIdLength)}`);
+    lines.push(`  ${summary}`);
   }
   const hidden = snapshots.length - visible.length;
-  if (hidden > 0) lines.push(`... 已隐藏 ${hidden} 个更早快照`);
+  if (hidden > 0) lines.push(`... ${hidden} earlier messages hidden`);
+  lines.push("Enter to continue · Esc to exit");
   return lines.join("\n");
 }
 
 export function formatRewindConfirm(
-  sessionId: string,
+  _sessionId: string,
   snapshot: FileHistorySnapshotSummary | undefined,
   diffStat: FileHistoryDiffStat,
 ): React.ReactNode {
   return (
     <Box flexDirection="column">
-      {formatRewindConfirmText(sessionId, snapshot, diffStat)
+      {formatRewindConfirmText(snapshot, diffStat)
         .split("\n")
         .map((line, index) => (
           <Text key={`${index}:${line}`}>{line}</Text>
@@ -166,7 +138,6 @@ export function formatRewindConfirm(
 }
 
 function formatRewindConfirmText(
-  sessionId: string,
   snapshot: FileHistorySnapshotSummary | undefined,
   diffStat: FileHistoryDiffStat,
   options: { maxItems?: number; maxIdLength?: number } = {},
@@ -175,14 +146,21 @@ function formatRewindConfirmText(
   const maxIdLength = options.maxIdLength ?? 48;
   const messageId = snapshot?.messageId ?? diffStat.messageId;
   const lines = [
-    `session ${sessionId} 确认 rewind: ${messageId}`,
-    `changed files=${diffStat.changedFileCount} +${diffStat.addedLines} -${diffStat.removedLines}`,
+    "Rewind",
+    "Confirm you want to restore to the point before you sent this message:",
+    `- ${truncateText(messageId, maxIdLength)}`,
   ];
 
   if (snapshot?.messageIndex !== undefined) {
-    lines.push(`conversation target messageIndex=${snapshot.messageIndex}`);
+    lines.push(`  messageIndex=${snapshot.messageIndex}`);
   }
 
+  lines.push("The conversation will be forked.");
+  lines.push(
+    diffStat.changedFileCount > 0
+      ? `The code will be restored +${diffStat.addedLines} -${diffStat.removedLines} in ${formatChangedFiles(diffStat.files)}.`
+      : "The code has not changed (nothing will be restored).",
+  );
   for (const file of diffStat.files.slice(0, maxItems)) {
     lines.push(
       [
@@ -194,8 +172,14 @@ function formatRewindConfirmText(
     );
   }
   const hidden = diffStat.files.length - Math.min(diffStat.files.length, maxItems);
-  if (hidden > 0) lines.push(`... 已隐藏 ${hidden} 个文件`);
-  lines.push("选择 mode: code / conversation / both / cancel");
+  if (hidden > 0) lines.push(`... ${hidden} files hidden`);
+  lines.push("Restore code and conversation");
+  lines.push("Restore conversation");
+  lines.push("Restore code");
+  lines.push("Never mind");
+  if (diffStat.changedFileCount > 0) {
+    lines.push("! Rewinding does not affect files edited manually or via bash.");
+  }
   return lines.join("\n");
 }
 
@@ -203,21 +187,21 @@ export function formatRewindUsage(
   sessionId: string,
   snapshots: readonly FileHistorySnapshotSummary[],
 ): string {
-  const latest = snapshots.at(-1);
-  const lines = [
-    "请提供要回滚的快照和 mode。",
-    "用法: /rewind <messageId> code|conversation|both",
-    "mode:",
-    "- code: 只回滚文件",
-    "- conversation: 只回滚对话",
-    "- both: 同时回滚文件和对话",
-  ];
-  if (latest) {
-    lines.push(`最近快照: ${latest.messageId}`, "", formatRewindSelector(sessionId, snapshots, { maxItems: 5 }));
-  } else {
-    lines.push("", formatRewindSelector(sessionId, snapshots));
-  }
-  return lines.join("\n");
+  return formatRewindSelector(sessionId, snapshots, { maxItems: 7 });
+}
+
+function formatClaudeStyleSnapshotSummary(snapshot: FileHistorySnapshotSummary): string {
+  if (snapshot.trackedFileCount === 0) return "No code changes";
+  const fileLabel = snapshot.trackedFileCount === 1 ? "1 file changed" : `${snapshot.trackedFileCount} files changed`;
+  return `${fileLabel} · ${snapshot.changeSummary ?? formatSnapshotChangeSummary(snapshot)}`;
+}
+
+function formatChangedFiles(files: readonly FileHistoryDiffStat["files"][number][]): string {
+  if (files.length === 0) return "no files";
+  const basenames = files.map((file) => file.filePath.split(/[\\/]/).at(-1) ?? file.filePath);
+  if (basenames.length === 1) return basenames[0]!;
+  if (basenames.length === 2) return `${basenames[0]} and ${basenames[1]}`;
+  return `${basenames[0]} and ${basenames.length - 1} other files`;
 }
 
 export function latestSnapshotMessageId(
