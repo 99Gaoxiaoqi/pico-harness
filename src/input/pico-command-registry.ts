@@ -124,6 +124,7 @@ export async function createPicoCommandRegistry(
     createSnapshotsCommand(options),
     createRewindCommand(options),
     createUndoCommand(options),
+    createImageCommand(),
     createAgentCommand(options),
     createSkillsCommand(skillLoader),
     createSkillCommand(skillLoader),
@@ -530,6 +531,30 @@ function toolStatusToDefinition(tool: SessionToolStatus): ToolDefinition {
     name: tool.name,
     description: "",
     inputSchema: { type: "object", properties: {} },
+  };
+}
+
+function createImageCommand(): SlashCommand {
+  return {
+    name: "image",
+    description: "Attach a local image to this prompt",
+    usage: "/image <path>",
+    argumentHint: "<path>",
+    kind: "prompt",
+    execute: (input): PromptCommandResult | LocalCommandResult => {
+      const imagePath = input.args.trim();
+      if (imagePath.length === 0) {
+        return {
+          type: "local",
+          action: "message",
+          message: "Usage: /image <path>",
+        };
+      }
+      return {
+        type: "prompt",
+        prompt: `请查看这张图片。 @image:${imagePath}`,
+      };
+    },
   };
 }
 
