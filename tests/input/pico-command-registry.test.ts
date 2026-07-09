@@ -397,6 +397,122 @@ describe("Pico command registry", () => {
     expect(result.result.message).toContain("CWD: /tmp/pico-work");
   });
 
+  it("/mcp shows empty state when no MCP config is loaded", async () => {
+    const registry = await createPicoCommandRegistry({
+      workDir: process.cwd(),
+      provider: "openai",
+      model: "glm-5.2",
+      sessionId: "session-mcp-empty",
+    });
+
+    const result = await processUserInput("/mcp", { registry });
+
+    expect(result.type).toBe("local-command");
+    if (result.type !== "local-command") return;
+    expect(result.command).toBe("mcp");
+    expect(result.result.action).toBe("mcp");
+    expect(result.result.message).toContain("MCP status");
+    expect(result.result.message).toContain("No MCP config loaded");
+  });
+
+  it("/mcp displays config path, stdio/http/sse servers, errors, and tool summary", async () => {
+    const registry = await createPicoCommandRegistry({
+      workDir: process.cwd(),
+      provider: "openai",
+      model: "glm-5.2",
+      sessionId: "session-mcp-status",
+      mcpStatus: () => ({
+        configPath: "/tmp/pico/mcp.json",
+        servers: [
+          {
+            name: "local",
+            transport: "stdio",
+            status: "connected",
+            toolCount: 2,
+            toolNames: ["echo", "read_file"],
+          },
+          {
+            name: "remote-http",
+            transport: "http",
+            status: "failed",
+            toolCount: 0,
+            toolNames: [],
+            error: "HTTP 503 Service Unavailable",
+          },
+          {
+            name: "events",
+            transport: "sse",
+            status: "disabled",
+            toolCount: 0,
+            toolNames: [],
+          },
+        ],
+        summary: {
+          total: 3,
+          connected: 1,
+          failed: 1,
+          disabled: 1,
+          pending: 0,
+          toolCount: 2,
+        },
+      }),
+    });
+
+    const result = await processUserInput("/mcp", { registry });
+
+    expect(result.type).toBe("local-command");
+    if (result.type !== "local-command") return;
+    expect(result.result.message).toContain("Config: /tmp/pico/mcp.json");
+    expect(result.result.message).toContain("Summary: 1/3 connected, 1 failed, 1 disabled, 2 tools");
+    expect(result.result.message).toContain("- local [stdio] connected - 2 tools: echo, read_file");
+    expect(result.result.message).toContain("- remote-http [http] failed - 0 tools");
+    expect(result.result.message).toContain("error: HTTP 503 Service Unavailable");
+    expect(result.result.message).toContain("- events [sse] disabled - 0 tools");
+  });
+
+  it("/status includes an MCP overview when status is available", async () => {
+    const registry = await createPicoCommandRegistry({
+      workDir: "/tmp/pico-work",
+      provider: "openai",
+      model: "glm-5.2",
+      sessionId: "session-status-mcp",
+      mcpStatus: () => ({
+        configPath: "/tmp/pico/mcp.json",
+        servers: [
+          {
+            name: "local",
+            transport: "stdio",
+            status: "connected",
+            toolCount: 1,
+            toolNames: ["echo"],
+          },
+          {
+            name: "remote",
+            transport: "http",
+            status: "failed",
+            toolCount: 0,
+            toolNames: [],
+            error: "boom",
+          },
+        ],
+        summary: {
+          total: 2,
+          connected: 1,
+          failed: 1,
+          disabled: 0,
+          pending: 0,
+          toolCount: 1,
+        },
+      }),
+    });
+
+    const result = await processUserInput("/status", { registry });
+
+    expect(result.type).toBe("local-command");
+    if (result.type !== "local-command") return;
+    expect(result.result.message).toContain("MCP: 1/2 connected, 1 failed, 1 tools");
+  });
+
   it("/sessions lists resumable sessions for the current project", async () => {
     const workDir = mkdtempSync(join(tmpdir(), "pico-command-sessions-"));
     cleanup.push(() => rmSync(workDir, { recursive: true, force: true }));
@@ -472,6 +588,31 @@ describe("Pico command registry", () => {
         value: "resume",
         description: resumeCommand?.description,
         argumentHint: resumeCommand?.argumentHint,
+      }),
+    );
+  });
+
+  it("/mcp is discoverable from help and suggestions", async () => {
+    const registry = await createPicoCommandRegistry({
+      workDir: process.cwd(),
+      provider: "openai",
+      model: "glm-5.2",
+      sessionId: "session-mcp-discovery",
+    });
+
+    const help = await processUserInput("/help", { registry });
+    const mcpHelp = await processUserInput("/help mcp", { registry });
+
+    expect(help.type).toBe("local-command");
+    if (help.type !== "local-command") return;
+    expect(help.result.message).toContain("/mcp");
+    expect(mcpHelp.type).toBe("local-command");
+    if (mcpHelp.type !== "local-command") return;
+    expect(mcpHelp.result.message).toContain("Command: /mcp");
+    expect(commandSuggestions(registry, "mc")).toContainEqual(
+      expect.objectContaining({
+        value: "mcp",
+        description: "Show MCP server connection status",
       }),
     );
   });

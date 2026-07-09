@@ -38,6 +38,7 @@ interface ServerEntry {
   status: McpConnectionStatus;
   client?: McpClient;
   toolCount: number;
+  toolNames: string[];
   error?: string;
 }
 
@@ -47,7 +48,24 @@ export interface McpServerStatus {
   transport: string;
   status: McpConnectionStatus;
   toolCount: number;
+  toolNames: readonly string[];
   error?: string;
+}
+
+export interface McpStatusSummary {
+  total: number;
+  connected: number;
+  failed: number;
+  disabled: number;
+  pending: number;
+  toolCount: number;
+}
+
+export interface McpStatusSnapshot {
+  configPath?: string;
+  loadError?: string;
+  servers: readonly McpServerStatus[];
+  summary: McpStatusSummary;
 }
 
 export interface McpConnectionManagerOptions {
@@ -67,6 +85,8 @@ export interface McpConnectionManagerOptions {
  */
 export class McpConnectionManager {
   private readonly entries = new Map<string, ServerEntry>();
+  private configPath: string | undefined;
+  private loadError: string | undefined;
 
   constructor(
     private readonly registry: ToolRegistry,
@@ -79,26 +99,37 @@ export class McpConnectionManager {
    */
   async loadConfig(configPath: string): Promise<void> {
     const absPath = isAbsolute(configPath) ? configPath : resolve(process.cwd(), configPath);
+    this.configPath = absPath;
+    this.loadError = undefined;
     let text: string;
     try {
       text = await readFile(absPath, "utf8");
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
       if (code === "ENOENT") {
+        this.loadError = `配置文件不存在: ${absPath}`;
         logger.warn({ path: absPath }, `[MCP] 配置文件不存在: ${absPath},跳过 MCP 加载`);
         return;
       }
-      throw new Error(`读取 MCP 配置失败: ${absPath}: ${(err as Error).message}`, { cause: err });
+      this.loadError = `读取 MCP 配置失败: ${absPath}: ${(err as Error).message}`;
+      throw new Error(this.loadError, { cause: err });
     }
 
     let data: unknown;
     try {
       data = JSON.parse(text);
     } catch {
-      throw new Error(`MCP 配置不是合法 JSON: ${absPath}`);
+      this.loadError = `MCP 配置不是合法 JSON: ${absPath}`;
+      throw new Error(this.loadError);
     }
 
-    const config = this.validateConfig(data, absPath);
+    let config: McpConfig;
+    try {
+      config = this.validateConfig(data, absPath);
+    } catch (err) {
+      this.loadError = err instanceof Error ? err.message : String(err);
+      throw err;
+    }
     for (const [name, serverConfig] of Object.entries(config.mcpServers)) {
       // 补全 name 字段(配置里 key 就是 server 名)
       serverConfig.name = name;
@@ -108,6 +139,7 @@ export class McpConnectionManager {
         config: serverConfig,
         status: disabled ? "disabled" : "pending",
         toolCount: 0,
+        toolNames: [],
       });
     }
     logger.info(
@@ -145,6 +177,7 @@ export class McpConnectionManager {
       entry.status = "failed";
       entry.error = msg;
       entry.toolCount = 0;
+      entry.toolNames = [];
       // 失败时关掉 client,防句柄泄漏
       if (entry.client) {
         await entry.client.close().catch(() => {});
@@ -168,11 +201,14 @@ export class McpConnectionManager {
 
     await client.connect();
     const tools = await client.listTools();
+    const registeredToolNames: string[] = [];
     // 注册每个工具到 registry
     for (const tool of tools) {
       try {
+        assertMcpInputSchema(tool.name, tool.inputSchema);
         const bridge = new McpToolBridge(client, entry.name, tool);
         this.registry.register(bridge);
+        registeredToolNames.push(tool.name);
       } catch (err) {
         // 单个工具注册失败(inputSchema 非法等)不影响其他工具
         logger.warn(
@@ -182,15 +218,12 @@ export class McpConnectionManager {
       }
     }
     entry.status = "connected";
-    entry.toolCount = tools.length;
+    entry.toolCount = registeredToolNames.length;
+    entry.toolNames = registeredToolNames;
     entry.error = undefined;
-    // 预热 assertMcpInputSchema,提前发现非法 Schema
-    for (const tool of tools) {
-      assertMcpInputSchema(tool.name, tool.inputSchema);
-    }
     logger.info(
-      { server: entry.name, tools: tools.length },
-      `[MCP] server "${entry.name}" 连接成功,注册 ${tools.length} 个工具`,
+      { server: entry.name, tools: registeredToolNames.length },
+      `[MCP] server "${entry.name}" 连接成功,注册 ${registeredToolNames.length} 个工具`,
     );
   }
 
@@ -218,10 +251,23 @@ export class McpConnectionManager {
         transport: entry.config.transport,
         status: entry.status,
         toolCount: entry.toolCount,
+        toolNames: [...entry.toolNames],
         error: entry.error,
       });
     }
     return result;
+  }
+
+  /** 返回完整状态快照(TUI/诊断用) */
+  getStatusSnapshot(): McpStatusSnapshot {
+    const servers = [...this.getStatus().values()];
+    const summary = summarizeServers(servers);
+    return {
+      ...(this.configPath !== undefined ? { configPath: this.configPath } : {}),
+      ...(this.loadError !== undefined ? { loadError: this.loadError } : {}),
+      servers,
+      summary,
+    };
   }
 
   /** 已连接 server 数(成功 + 失败 + 禁用 = 总数) */
@@ -326,6 +372,31 @@ export class McpConnectionManager {
       `[MCP] 连接完成: ${connected}/${total} 成功, ${failed} 失败, ${disabled} 禁用`,
     );
   }
+}
+
+function summarizeServers(servers: readonly McpServerStatus[]): McpStatusSummary {
+  let connected = 0;
+  let failed = 0;
+  let disabled = 0;
+  let pending = 0;
+  let toolCount = 0;
+
+  for (const server of servers) {
+    if (server.status === "connected") connected++;
+    else if (server.status === "failed") failed++;
+    else if (server.status === "disabled") disabled++;
+    else if (server.status === "pending") pending++;
+    toolCount += server.toolCount;
+  }
+
+  return {
+    total: servers.length,
+    connected,
+    failed,
+    disabled,
+    pending,
+    toolCount,
+  };
 }
 
 /** 默认配置文件相对路径(.claw/mcp.json) */

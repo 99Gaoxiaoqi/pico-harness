@@ -27,6 +27,7 @@ export type LocalCommandAction =
   | "model"
   | "thinking"
   | "tools"
+  | "mcp"
   | "skills"
   | "agents"
   | "message";
