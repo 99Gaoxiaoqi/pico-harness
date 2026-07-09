@@ -38,29 +38,30 @@ describe("ToolCard agent tool detection", () => {
     expect(output.split("\n")).toHaveLength(1);
   });
 
-  it("最后一条展开时显示参数和结果摘要,错误结果保留原始摘要", () => {
+  it("最后一条展开时显示参数和结果摘要,错误结果保留可读摘要", () => {
     const output = renderToString(
       React.createElement(ToolCard, {
         name: "bash",
         args: JSON.stringify({ command: "npm test" }),
-        status: "failed",
+        status: "error",
         summary: "执行失败: missing script test",
         isLast: true,
         initialExpanded: true,
       }),
     );
 
-    expect(output).toContain("Failed");
+    expect(output).toContain("Error");
     expect(output).toContain("参数");
     expect(output).toContain("command:npm test");
     expect(output).toContain("结果");
-    expect(output).toContain("执行失败: missing script test");
+    expect(output).toContain("可复制错误: 执行失败: missing script test");
   });
 
-  it("显示 running / success / failed / denied 四种状态文案", () => {
+  it("显示 queued / running / success / error / denied 五种协议状态文案", () => {
+    expect(renderToolStatus("queued")).toContain("Queued");
     expect(renderToolStatus("running")).toContain("Running");
-    expect(renderToolStatus("done")).toContain("Success");
-    expect(renderToolStatus("error")).toContain("Failed");
+    expect(renderToolStatus("success")).toContain("Success");
+    expect(renderToolStatus("error")).toContain("Error");
     expect(renderToolStatus("denied")).toContain("Denied");
   });
 
@@ -83,7 +84,8 @@ describe("ToolCard agent tool detection", () => {
     );
 
     expect(editOutput).toContain("src/a.ts");
-    expect(editOutput).toContain("@@");
+    expect(editOutput).not.toContain("@@");
+    expect(editOutput.trimEnd().split("\n")).toHaveLength(1);
     expect(bashOutput).toContain("npm test -- --run");
   });
 
@@ -111,6 +113,48 @@ describe("ToolCard agent tool detection", () => {
     expect(folded).toContain("已截断");
     expect(expanded).toContain("+ line 4");
     expect(expanded).toContain("已截断");
+  });
+
+  it("长结果折叠态只占一行,并显示一行摘要", () => {
+    const summary = Array.from({ length: 8 }, (_, i) => `line ${i}: ${"x".repeat(24)}`).join("\n");
+    const output = renderToString(
+      React.createElement(ToolCard, {
+        name: "read_file",
+        args: JSON.stringify({ path: "src/large.ts" }),
+        status: "success",
+        summary,
+      }),
+    );
+
+    expect(output.trimEnd().split("\n")).toHaveLength(1);
+    expect(output).toContain("line 0");
+    expect(output).not.toContain("line 2");
+    expect(output).toContain("已截断");
+  });
+
+  it("error/denied 折叠态使用可读错误摘要", () => {
+    const errorOutput = renderToString(
+      React.createElement(ToolCard, {
+        name: "bash",
+        args: JSON.stringify({ command: "npm test" }),
+        status: "error",
+        summary: "\n\nError: command failed\n    at stack line\nmore details",
+      }),
+    );
+    const deniedOutput = renderToString(
+      React.createElement(ToolCard, {
+        name: "bash",
+        args: JSON.stringify({ command: "rm -rf /" }),
+        status: "denied",
+        summary: "permissionDecision: deny\ncommand rejected by policy",
+      }),
+    );
+
+    expect(errorOutput).toContain("Error");
+    expect(errorOutput).toContain("可复制错误: Error: command failed");
+    expect(errorOutput).not.toContain("at stack line");
+    expect(deniedOutput).toContain("Denied");
+    expect(deniedOutput).toContain("可复制错误: permissionDecision: deny");
   });
 
   it("失败状态提供可复制的错误摘要", () => {

@@ -14,6 +14,8 @@ export interface InputSuggestion {
   insertText?: string;
   /** Short help text rendered on the right. */
   description?: string;
+  /** Optional argument placeholder rendered after the description. */
+  argumentHint?: string;
   /** Alias that matched the current slash-command query. */
   matchedAlias?: string;
 }
@@ -104,15 +106,22 @@ function formatSuggestionDescription(
   item: InputSuggestion,
   kind: SuggestionKind,
 ): string {
+  const detail = formatDescriptionDetail(item);
   if (kind !== "slash" || item.matchedAlias === undefined) {
-    return item.description ?? "";
+    return detail;
   }
 
   const alias = stripMarker(item.matchedAlias, "slash");
   const source = `alias /${alias}`;
-  return item.description === undefined || item.description.length === 0
-    ? source
-    : `${source} · ${item.description}`;
+  return detail.length === 0 ? source : `${source} · ${detail}`;
+}
+
+function formatDescriptionDetail(item: InputSuggestion): string {
+  const description = item.description?.trim() ?? "";
+  const argumentHint = item.argumentHint?.trim() ?? "";
+  if (argumentHint.length === 0) return description;
+  if (description.length === 0) return argumentHint;
+  return `${description} ${argumentHint}`;
 }
 
 function displayWidth(value: string): number {

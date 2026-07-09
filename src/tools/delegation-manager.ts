@@ -16,15 +16,49 @@ export interface DelegationBatchResult {
   totalDurationMs: number;
 }
 
+export type DelegationRecordStatus = "running" | "completed" | "error";
+export type DelegationTaskStatus = "queued" | "running" | "done" | "error" | "cancelled";
+
 export interface DelegationManagerOptions {
   maxConcurrentChildren?: number;
   maxAsyncChildren?: number;
+  maxOutputSummaryChars?: number;
+}
+
+export interface DelegationResumeInfo {
+  kind: "delegate_task";
+  taskId: string;
+  delegationId: string;
+  statusTool: "delegate_status";
+  statusArgs: { delegation_id: string };
+  canSendMessage: boolean;
+}
+
+export interface DelegationTaskSnapshot {
+  taskId: string;
+  delegationId: string;
+  status: DelegationRecordStatus;
+  taskStatus: DelegationTaskStatus;
+  statusSnapshot: {
+    status: DelegationTaskStatus;
+    mappedFrom: DelegationRecordStatus;
+    allowedStatuses: DelegationTaskStatus[];
+  };
+  startedAt: number;
+  updatedAt: number;
+  completedAt?: number;
+  outputSummary: string;
+  resume: DelegationResumeInfo;
+  result?: DelegationBatchResult;
+  error?: string;
 }
 
 interface DelegationRecord {
   id: string;
-  status: "running" | "completed" | "error";
+  taskId: string;
+  status: DelegationRecordStatus;
   startedAt: number;
+  updatedAt: number;
   completedAt?: number;
   result?: DelegationBatchResult;
   error?: string;
@@ -37,15 +71,19 @@ export class DelegationManager {
 
   readonly maxConcurrentChildren: number;
   private readonly maxAsyncChildren: number;
+  private readonly maxOutputSummaryChars: number;
 
   constructor(options: DelegationManagerOptions = {}) {
     this.maxConcurrentChildren = options.maxConcurrentChildren ?? 3;
     this.maxAsyncChildren = options.maxAsyncChildren ?? 3;
+    this.maxOutputSummaryChars = options.maxOutputSummaryChars ?? 2_000;
   }
 
   dispatch(runner: () => Promise<DelegationBatchResult>): {
     status: string;
     delegationId?: string;
+    taskId?: string;
+    snapshot?: DelegationTaskSnapshot;
     error?: string;
   } {
     if (this.activeCount >= this.maxAsyncChildren) {
@@ -55,13 +93,16 @@ export class DelegationManager {
       };
     }
 
-    const id = `delegation-${Date.now()}-${this.nextId}`;
+    const now = Date.now();
+    const id = `delegation-${now}-${this.nextId}`;
     this.nextId++;
 
     const record: DelegationRecord = {
       id,
+      taskId: id,
       status: "running",
-      startedAt: Date.now(),
+      startedAt: now,
+      updatedAt: now,
       promise: Promise.resolve(),
     };
 
@@ -71,31 +112,31 @@ export class DelegationManager {
         record.status = "completed";
         record.result = result;
         record.completedAt = Date.now();
+        record.updatedAt = record.completedAt;
       })
       .catch((err: unknown) => {
         record.status = "error";
         record.error = err instanceof Error ? err.message : String(err);
         record.completedAt = Date.now();
+        record.updatedAt = record.completedAt;
       });
 
     this.records.set(id, record);
-    return { status: "dispatched", delegationId: id };
+    return {
+      status: "dispatched",
+      delegationId: id,
+      taskId: record.taskId,
+      snapshot: this.toSnapshot(record),
+    };
   }
 
-  snapshot(id: string): Record<string, unknown> {
+  snapshot(id: string): DelegationTaskSnapshot | { status: "not_found"; error: string } {
     const record = this.records.get(id);
     if (!record) {
       return { status: "not_found", error: `找不到委派任务: ${id}` };
     }
 
-    return {
-      delegationId: record.id,
-      status: record.status,
-      startedAt: record.startedAt,
-      ...(record.completedAt !== undefined ? { completedAt: record.completedAt } : {}),
-      ...(record.result !== undefined ? { result: record.result } : {}),
-      ...(record.error !== undefined ? { error: record.error } : {}),
-    };
+    return this.toSnapshot(record);
   }
 
   async wait(id: string): Promise<void> {
@@ -111,6 +152,64 @@ export class DelegationManager {
     }
     return count;
   }
+
+  private toSnapshot(record: DelegationRecord): DelegationTaskSnapshot {
+    const taskStatus = mapTaskStatus(record.status);
+    return {
+      taskId: record.taskId,
+      delegationId: record.id,
+      status: record.status,
+      taskStatus,
+      statusSnapshot: {
+        status: taskStatus,
+        mappedFrom: record.status,
+        allowedStatuses: ["queued", "running", "done", "error", "cancelled"],
+      },
+      startedAt: record.startedAt,
+      updatedAt: record.updatedAt,
+      ...(record.completedAt !== undefined ? { completedAt: record.completedAt } : {}),
+      outputSummary: this.outputSummary(record),
+      resume: {
+        kind: "delegate_task",
+        taskId: record.taskId,
+        delegationId: record.id,
+        statusTool: "delegate_status",
+        statusArgs: { delegation_id: record.id },
+        canSendMessage: record.status !== "running",
+      },
+      ...(record.result !== undefined ? { result: record.result } : {}),
+      ...(record.error !== undefined ? { error: record.error } : {}),
+    };
+  }
+
+  private outputSummary(record: DelegationRecord): string {
+    if (record.result) {
+      const lines = record.result.results.map((result) => {
+        if (result.status === "completed") {
+          return `task ${result.taskIndex} completed: ${result.summary ?? ""}`;
+        }
+        return `task ${result.taskIndex} error: ${result.error ?? ""}`;
+      });
+      return truncateSummary(lines.join("\n"), this.maxOutputSummaryChars);
+    }
+    if (record.error) {
+      return truncateSummary(`error: ${record.error}`, this.maxOutputSummaryChars);
+    }
+    return "";
+  }
+}
+
+function mapTaskStatus(status: DelegationRecordStatus): DelegationTaskStatus {
+  if (status === "completed") return "done";
+  if (status === "error") return "error";
+  return "running";
+}
+
+function truncateSummary(value: string, maxChars: number): string {
+  if (value.length <= maxChars) return value;
+  const marker = "\n[truncated]";
+  if (maxChars <= marker.length) return marker.slice(0, Math.max(0, maxChars));
+  return value.slice(0, maxChars - marker.length) + marker;
 }
 
 export class DelegateStatusTool implements BaseTool {

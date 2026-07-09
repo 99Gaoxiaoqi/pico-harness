@@ -16,7 +16,10 @@ import {
 } from "../src/tools/subagent.js";
 import { SkillLoader, SkillViewTool } from "../src/context/skill.js";
 import { DelegationManager, DelegateStatusTool } from "../src/tools/delegation-manager.js";
-import { createSubagentRegistryFactory, TOOL_CONSTRUCTORS } from "../src/tools/delegation-registry.js";
+import {
+  createSubagentRegistryFactory,
+  TOOL_CONSTRUCTORS,
+} from "../src/tools/delegation-registry.js";
 import { ToolRegistry, ReadFileTool, BashTool } from "../src/tools/registry-impl.js";
 import type { LLMProvider } from "../src/provider/interface.js";
 import type { Message, ToolDefinition, ToolCall, ToolResult } from "../src/schema/message.js";
@@ -322,6 +325,70 @@ describe("DelegateTaskTool", () => {
     expect(completed.result.results[0]!.summary).toBe("background complete");
   });
 
+  it("background=true 返回 task registry 快照,并安全截断输出摘要", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const runner: AgentRunner = {
+      async runSub() {
+        await gate;
+        return subResult(`prefix-${"x".repeat(120)}-suffix`);
+      },
+    };
+    const manager = new DelegationManager({ maxOutputSummaryChars: 48 });
+    const tool = new DelegateTaskTool(runner, () => mockReadOnlyRegistry(), manager);
+    const statusTool = new DelegateStatusTool(manager);
+
+    const dispatched = JSON.parse(
+      await tool.execute(JSON.stringify({ goal: "后台任务", background: true })),
+    ) as {
+      status: string;
+      taskId: string;
+      delegationId: string;
+      snapshot: {
+        taskId: string;
+        delegationId: string;
+        status: string;
+        taskStatus: string;
+        outputSummary: string;
+        resume: { statusTool: string; statusArgs: { delegation_id: string } };
+      };
+    };
+
+    expect(dispatched.status).toBe("dispatched");
+    expect(dispatched.taskId).toBe(dispatched.delegationId);
+    expect(dispatched.snapshot).toMatchObject({
+      taskId: dispatched.taskId,
+      delegationId: dispatched.delegationId,
+      status: "running",
+      taskStatus: "running",
+      outputSummary: "",
+      resume: {
+        statusTool: "delegate_status",
+        statusArgs: { delegation_id: dispatched.delegationId },
+      },
+    });
+
+    release();
+    await manager.wait(dispatched.delegationId);
+
+    const completed = JSON.parse(
+      await statusTool.execute(JSON.stringify({ delegation_id: dispatched.delegationId })),
+    ) as {
+      status: string;
+      taskStatus: string;
+      outputSummary: string;
+      resume: { canSendMessage: boolean };
+    };
+
+    expect(completed.status).toBe("completed");
+    expect(completed.taskStatus).toBe("done");
+    expect(completed.outputSummary.length).toBeLessThanOrEqual(64);
+    expect(completed.outputSummary).toContain("[truncated]");
+    expect(completed.resume.canSendMessage).toBe(true);
+  });
+
   it("达到 maxSpawnDepth 时拒绝继续 delegate_task", async () => {
     let called = false;
     const runner: AgentRunner = {
@@ -600,9 +667,9 @@ describe("AgentEngine.runSub", () => {
     const registry = mockReadOnlyRegistry();
     const engine = makeEngine(provider, registry);
 
-    await expect(
-      engine.runSub("无尽探索", registry, undefined, { maxTurns: 2 }),
-    ).rejects.toThrow("超过 2 轮");
+    await expect(engine.runSub("无尽探索", registry, undefined, { maxTurns: 2 })).rejects.toThrow(
+      "超过 2 轮",
+    );
   });
 
   it("不传新参数时行为不变(回归保护)", async () => {

@@ -60,6 +60,45 @@ describe("InputBox input controller", () => {
     expect(state.activeSuggestions).toBeNull();
   });
 
+  it("Enter accepts the open slash suggestion instead of submitting the prompt", () => {
+    const options: InputControllerOptions = {
+      slashCommandSuggestions: (query) =>
+        [
+          { value: "help", description: "显示帮助" },
+          { value: "skills", description: "列出 skills" },
+        ].filter((item) => item.value.startsWith(query)),
+    };
+    let state = typeText("/sk", options);
+
+    const result = reduceInputControllerEvent(state, "", key({ return: true }), options);
+    state = result.state;
+
+    expect(result.submittedText).toBeUndefined();
+    expect(state.text).toBe("/skills ");
+    expect(state.cursor).toBe("/skills ".length);
+    expect(state.activeSuggestions).toBeNull();
+  });
+
+  it("raw carriage return accepts the open file mention suggestion", () => {
+    const options: InputControllerOptions = {
+      fileMentionSuggestions: (query) =>
+        [
+          { value: "src/tui/input-box.tsx", description: "file" },
+          { value: "src/tui/suggestions.tsx", description: "file" },
+        ].filter((item) => item.value.startsWith(query)),
+    };
+    let state = typeText("open @src/t", options);
+    state = reduceInputControllerEvent(state, "", key({ downArrow: true }), options).state;
+
+    const result = reduceInputControllerEvent(state, "\r", key({}), options);
+    state = result.state;
+
+    expect(result.submittedText).toBeUndefined();
+    expect(state.text).toBe("open @src/tui/suggestions.tsx ");
+    expect(state.cursor).toBe("open @src/tui/suggestions.tsx ".length);
+    expect(state.activeSuggestions).toBeNull();
+  });
+
   it("@src/t + Tab completes the selected file mention", () => {
     const options: InputControllerOptions = {
       fileMentionSuggestions: (query) =>

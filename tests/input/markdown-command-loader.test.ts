@@ -120,6 +120,70 @@ describe("markdown command loader", () => {
     });
   });
 
+  it("projects .claude/skills/**/SKILL.md with prompt command metadata", async () => {
+    await writeClaudeSkill(
+      "review",
+      `---\nname: review\ndescription: review code\nargument-hint: "[path]"\nallowed-tools:\n  - Read\n  - Bash\n---\n\n# Review\nUse $ARGUMENTS`,
+    );
+
+    const commands = await loadMarkdownCommands({
+      includeSkillCommands: true,
+      userCommandsDir,
+      workDir,
+    });
+
+    expect(commands).toHaveLength(1);
+    expect(commands[0]).toMatchObject({
+      allowedTools: ["Read", "Bash"],
+      argumentHint: "[path]",
+      description: "review code",
+      name: "review",
+      prompt: "# Review\nUse $ARGUMENTS",
+      source: "skill",
+      sourcePath: join(workDir, ".claude", "skills", "review", "SKILL.md"),
+    });
+  });
+
+  it("skips skill projections with invalid command names", async () => {
+    await writeSkill("valid", "valid skill", "Valid prompt");
+    await writeClaudeSkill(
+      "bad name",
+      "---\nname: bad name\ndescription: invalid\n---\n\nInvalid prompt",
+    );
+    await writeClaudeSkill(
+      "nested",
+      "---\nname: git:review\ndescription: invalid nested command\n---\n\nNested prompt",
+    );
+
+    const commands = await loadMarkdownCommands({
+      includeSkillCommands: true,
+      userCommandsDir,
+      workDir,
+    });
+
+    expect(commands.map((command) => [command.name, command.prompt])).toEqual([
+      ["valid", "Valid prompt"],
+    ]);
+  });
+
+  it("keeps project and user markdown commands above skill projections", async () => {
+    await writeSkill("project-wins", "skill project", "Skill project prompt");
+    await writeSkill("user-wins", "skill user", "Skill user prompt");
+    await writeCommand(workDir, "project-wins", "project", "Project prompt");
+    await writeCommand(userCommandsDir, "user-wins", "user", "User prompt");
+
+    const commands = await loadMarkdownCommands({
+      includeSkillCommands: true,
+      userCommandsDir,
+      workDir,
+    });
+
+    expect(commands.map((command) => [command.name, command.source, command.prompt])).toEqual([
+      ["project-wins", "project", "Project prompt"],
+      ["user-wins", "user", "User prompt"],
+    ]);
+  });
+
   it("uses priority project > user > skill projection > builtin", async () => {
     await writeCommand(workDir, "same", "project", "Project prompt");
     await writeCommand(userCommandsDir, "same", "user", "User prompt");
@@ -180,5 +244,10 @@ describe("markdown command loader", () => {
       join(workDir, ".claw", "skills", name, "SKILL.md"),
       `---\nname: ${name}\ndescription: ${description}\n---\n\n${body}`,
     );
+  }
+
+  async function writeClaudeSkill(name: string, content: string): Promise<void> {
+    await mkdir(join(workDir, ".claude", "skills", name), { recursive: true });
+    await writeFile(join(workDir, ".claude", "skills", name, "SKILL.md"), content);
   }
 });

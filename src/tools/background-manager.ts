@@ -31,6 +31,7 @@ export interface BackgroundManagerOptions {
 
 interface ManagedTask {
   record: BackgroundTaskRecord;
+  order: number;
   child: ChildProcessByStdio<null, Readable, Readable>;
   stdout: string;
   stderr: string;
@@ -56,6 +57,7 @@ export class BackgroundManager {
   }
 
   start(command: string, cwd: string): BackgroundTaskRecord {
+    const order = this.nextId;
     const taskId = this.createTaskId();
     const shell = resolveShell();
     const child = spawn(shell, shellArgs(shell, command), {
@@ -83,6 +85,7 @@ export class BackgroundManager {
     });
     const managed: ManagedTask = {
       record,
+      order,
       child,
       stdout: "",
       stderr: "",
@@ -173,6 +176,7 @@ export class BackgroundManager {
       try {
         task.child.kill(signal);
       } catch {
+        // Process may have exited between the process-group kill and fallback kill.
       }
     }
   }
@@ -210,11 +214,7 @@ export class BackgroundManager {
   private pruneCompletedTasks(): void {
     const completed = [...this.tasks.values()]
       .filter((task) => task.record.status !== "running")
-      .sort(
-        (a, b) =>
-          (a.record.endedAt?.getTime() ?? a.record.startedAt.getTime()) -
-          (b.record.endedAt?.getTime() ?? b.record.startedAt.getTime()),
-      );
+      .sort((a, b) => a.order - b.order);
 
     while (completed.length > this.maxCompletedTasks) {
       const oldest = completed.shift();
