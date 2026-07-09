@@ -1,4 +1,3 @@
-import React from "react";
 import { renderToString } from "ink";
 import { describe, expect, it } from "vitest";
 import {
@@ -58,6 +57,7 @@ describe("SuggestionList row model", () => {
       {
         key: "mention:src/tui/input-box.tsx:0",
         left: "@src/tui/input-box.tsx",
+        metadata: "",
         description: "file",
         selected: true,
       },
@@ -79,9 +79,11 @@ describe("SuggestionList row model", () => {
 
     expect(rows[0]).toMatchObject({
       left: "/help",
-      description: "alias /h · Show help",
+      metadata: "alias /h",
+      description: "Show help",
     });
-    expect(output).toContain("alias /h · Show help");
+    expect(output).toContain("alias /h");
+    expect(output).toContain("Show help");
   });
 
   it("renders slash command descriptions with argument hints", () => {
@@ -104,10 +106,68 @@ describe("SuggestionList row model", () => {
     const output = renderToString(<SuggestionList session={session} />);
 
     expect(rows[0]).toMatchObject({
-      left: "/resume",
-      description: "Resume a saved session <session-id>",
+      left: "/resume <session-id>",
+      metadata: "",
+      description: "Resume a saved session",
     });
-    expect(output).toContain("Resume a saved session <session-id>");
+    expect(output).toContain("/resume <session-id>");
+    expect(output).toContain("Resume a saved session");
+  });
+
+  it("renders slash command metadata as restrained tags", () => {
+    const session: ActiveSuggestionSession = {
+      kind: "slash",
+      query: "st",
+      replaceStart: 0,
+      replaceEnd: 3,
+      selectedIndex: 0,
+      items: [
+        {
+          value: "status",
+          description: "Show current TUI/session status",
+          usage: "/status",
+          alias: "st",
+          source: "builtin",
+          kind: "local",
+        },
+      ],
+    };
+
+    const rows = formatSuggestionRows(session);
+    const output = renderToString(<SuggestionList session={session} />);
+
+    expect(rows[0]).toMatchObject({
+      left: "/status",
+      metadata: "alias /st · builtin · local",
+      description: "Show current TUI/session status",
+    });
+    expect(output).toContain("/status");
+    expect(output).toContain("alias /st · builtin · local");
+    expect(output).toContain("Show current TUI/session status");
+  });
+
+  it("keeps slash command rows without metadata visually plain", () => {
+    const session: ActiveSuggestionSession = {
+      kind: "slash",
+      query: "",
+      replaceStart: 0,
+      replaceEnd: 1,
+      selectedIndex: 0,
+      items: [{ value: "help", description: "显示帮助" }],
+    };
+
+    const rows = formatSuggestionRows(session);
+    const output = renderToString(<SuggestionList session={session} />);
+
+    expect(rows[0]).toMatchObject({
+      left: "/help",
+      metadata: "",
+      description: "显示帮助",
+    });
+    expect(output).toContain("› /help");
+    expect(output).toContain("显示帮助");
+    expect(output).not.toContain("builtin");
+    expect(output).not.toContain("alias");
   });
 
   it("clips selected Chinese, multiline, and long command candidates for panel rendering", () => {
