@@ -27,6 +27,10 @@ export interface InputSuggestion {
   source?: string;
   /** Optional slash command type tag. */
   kind?: string;
+  /** Whether the suggestion is currently unavailable. */
+  disabled?: boolean;
+  /** Short reason shown when the suggestion is unavailable. */
+  disabledReason?: string;
 }
 
 export interface ActiveSuggestionSession {
@@ -44,6 +48,8 @@ export interface SuggestionRow {
   metadata: string;
   description: string;
   selected: boolean;
+  disabled?: boolean;
+  disabledReason?: string;
 }
 
 export interface SuggestionListProps {
@@ -58,21 +64,38 @@ export function SuggestionList({ session }: SuggestionListProps): React.ReactNod
     <Box flexDirection="column" marginLeft={2}>
       {rows.map((row) => (
         <Box key={row.key}>
-          <Text color={row.selected ? "green" : "gray"} bold={row.selected}>
+          <Text
+            color={row.disabled ? "gray" : row.selected ? "green" : "gray"}
+            bold={row.selected && !row.disabled}
+          >
             {row.selected ? "› " : "  "}
             {row.left}
           </Text>
-          {row.metadata ? <Text dimColor>  {row.metadata}</Text> : null}
-          {row.description ? <Text dimColor>  {row.description}</Text> : null}
+          {row.metadata ? (
+            <Text dimColor>
+              {"  "}
+              {row.metadata}
+            </Text>
+          ) : null}
+          {row.description ? (
+            <Text dimColor>
+              {"  "}
+              {row.description}
+            </Text>
+          ) : null}
+          {row.disabledReason ? (
+            <Text dimColor>
+              {"  "}
+              {row.disabledReason}
+            </Text>
+          ) : null}
         </Box>
       ))}
     </Box>
   );
 }
 
-export function formatSuggestionRows(
-  session: ActiveSuggestionSession | null,
-): SuggestionRow[] {
+export function formatSuggestionRows(session: ActiveSuggestionSession | null): SuggestionRow[] {
   if (!session) return [];
 
   return session.items.slice(0, MAX_SUGGESTIONS).map((item, index) => {
@@ -80,12 +103,18 @@ export function formatSuggestionRows(
     const left = formatSuggestionLabel(item, session.kind);
     const metadata = formatSuggestionMetadata(item, session.kind);
     const description = formatSuggestionDescription(item);
+    const disabled = item.disabled === true;
+    const disabledReason = disabled ? formatDisabledReason(item) : "";
     return {
       key: `${session.kind}:${value}:${index}`,
       left: truncateInline(left, SUGGESTION_LABEL_WIDTH),
       metadata: truncateInline(metadata, SUGGESTION_METADATA_WIDTH),
       description: truncateInline(description, SUGGESTION_DESCRIPTION_WIDTH),
       selected: index === session.selectedIndex,
+      ...(disabled ? { disabled: true } : {}),
+      ...(disabledReason.length === 0
+        ? {}
+        : { disabledReason: truncateInline(disabledReason, SUGGESTION_DESCRIPTION_WIDTH) }),
     };
   });
 }
@@ -119,10 +148,7 @@ function truncateInline(value: string, maxLength: number): string {
   return `${result}…`;
 }
 
-function formatSuggestionLabel(
-  item: InputSuggestion,
-  kind: SuggestionKind,
-): string {
+function formatSuggestionLabel(item: InputSuggestion, kind: SuggestionKind): string {
   const value = stripMarker(item.value, kind);
   const label = `${markerForKind(kind)}${value}`;
   if (kind !== "slash") return label;
@@ -151,6 +177,10 @@ function formatAliasTag(alias: string | undefined): string {
 
 function formatSuggestionDescription(item: InputSuggestion): string {
   return item.description?.trim() ?? "";
+}
+
+function formatDisabledReason(item: InputSuggestion): string {
+  return item.disabledReason?.trim() ?? "";
 }
 
 function formatUsageHint(item: InputSuggestion, value: string): string {
