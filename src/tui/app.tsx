@@ -91,9 +91,17 @@ export function App({
   onRedraw,
 }: AppProps): React.ReactNode {
   const { exit } = useApp();
-  const { rows } = useWindowSize();
+  const { rows, columns } = useWindowSize();
   const transcriptRows = Math.max(6, rows - 8);
-  const transcriptTotalRows = useMemo(() => estimateTranscriptRows(entries), [entries]);
+  const transcriptWrapWidth = Math.max(20, columns - 6);
+  const getEntryRows = useMemo(
+    () => (entry: TuiEntry) => estimateEntryRows(entry, transcriptWrapWidth),
+    [transcriptWrapWidth],
+  );
+  const transcriptTotalRows = useMemo(
+    () => estimateTranscriptRows(entries, transcriptWrapWidth),
+    [entries, transcriptWrapWidth],
+  );
   const [transcriptScrollRows, setTranscriptScrollRows] = useState<number | null>(null);
 
   useInput((input, key) => {
@@ -162,7 +170,9 @@ export function App({
           isStreaming={isStreaming}
           viewportRows={transcriptRows}
           scrollOffsetRows={transcriptScrollRows ?? 0}
-          estimatedRowHeight={2}
+          estimatedRowHeight={3}
+          getEntryRows={getEntryRows}
+          wrapWidth={transcriptWrapWidth}
           overscanRows={0}
           virtualizeThreshold={0}
           scrollToBottom={transcriptScrollRows === null}
@@ -206,6 +216,7 @@ export function App({
       bottom={bottom}
       overlay={overlay}
       modal={modal}
+      height={rows}
     />
   );
 }
@@ -322,14 +333,20 @@ function maxTranscriptScroll(viewportRows: number, totalRows: number): number {
   return Math.max(0, totalRows - Math.max(1, viewportRows));
 }
 
-function estimateTranscriptRows(entries: readonly TuiEntry[]): number {
-  return entries.reduce((total, entry) => total + estimateEntryRows(entry), 0);
+function estimateTranscriptRows(entries: readonly TuiEntry[], wrapWidth: number): number {
+  return entries.reduce((total, entry) => total + estimateEntryRows(entry, wrapWidth), 0);
 }
 
-function estimateEntryRows(entry: TuiEntry): number {
+function estimateEntryRows(entry: TuiEntry, wrapWidth: number): number {
   if (entry.kind === "thinking") return 1;
   if (entry.kind === "tool") return entry.summary ? 2 : 1;
   const content = entry.kind === "user" || entry.kind === "assistant" || entry.kind === "system" ? entry.content : "";
-  const logicalLines = content.split("\n").length;
-  return Math.max(1, logicalLines) + 1;
+  return estimateTextRows(content, wrapWidth) + 1;
+}
+
+function estimateTextRows(text: string, wrapWidth: number): number {
+  const width = Math.max(8, Math.floor(wrapWidth));
+  return text.split("\n").reduce((total, line) => {
+    return total + Math.max(1, Math.ceil(line.length / width));
+  }, 0);
 }

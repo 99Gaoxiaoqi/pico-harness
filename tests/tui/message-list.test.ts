@@ -33,6 +33,40 @@ describe("MessageList virtual transcript", () => {
     expect(output).not.toContain("message-105");
   });
 
+  it("keeps the tail of a tall streaming assistant visible at the bottom", () => {
+    const entries: TuiEntry[] = [
+      ...Array.from({ length: 50 }, (_, i) => ({
+        kind: "assistant" as const,
+        content: `old-${i}`,
+      })),
+      {
+        kind: "assistant",
+        content: Array.from({ length: 20 }, (_, i) => `stream-line-${i}`).join("\n"),
+      },
+    ];
+
+    const output = renderToString(
+      React.createElement(MessageList, {
+        entries,
+        isStreaming: true,
+        viewportRows: 10,
+        scrollOffsetRows: 0,
+        estimatedRowHeight: 2,
+        getEntryRows: (entry: TuiEntry) =>
+          entry.kind === "assistant" ? entry.content.split("\n").length + 1 : 2,
+        wrapWidth: 80,
+        overscanRows: 0,
+        virtualizeThreshold: 0,
+        scrollToBottom: true,
+        preserveVirtualSpacers: false,
+      }),
+    );
+
+    expect(output).toContain("stream-line-19");
+    expect(output).not.toContain("stream-line-0");
+    expect(output).not.toContain("old-49");
+  });
+
   it("渲染层折叠连续同类工具调用", () => {
     const entries: TuiEntry[] = [
       { kind: "assistant", content: "开始检查" },

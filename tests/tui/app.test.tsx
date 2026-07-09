@@ -123,6 +123,28 @@ describe("App", () => {
     expect(output).not.toContain("message-0");
   });
 
+  it("renders the tail of a long streaming assistant response", () => {
+    const output = renderToString(
+      <App
+        model="glm-5.2"
+        provider="openai"
+        workDir="/workspace/demo"
+        entries={[
+          { kind: "assistant", content: "old context" },
+          {
+            kind: "assistant",
+            content: Array.from({ length: 40 }, (_, i) => `tail-line-${i}`).join("\n"),
+          },
+        ]}
+        running
+        onSubmit={vi.fn()}
+      />,
+    );
+
+    expect(output).toContain("tail-line-39");
+    expect(output).not.toContain("tail-line-0");
+  });
+
   it("computes transcript page scrolling around the bottom anchor", () => {
     expect(nextTranscriptScroll(null, "pageUp", 10, 100)).toBe(82);
     expect(nextTranscriptScroll(82, "pageDown", 10, 100)).toBe(null);

@@ -26,6 +26,8 @@ export interface VirtualTranscriptWindow<T> {
   topSpacerRows: number;
   /** Estimated rows represented by the spacer after visibleItems. */
   bottomSpacerRows: number;
+  /** Rows skipped inside the first visible item. */
+  startOffsetRows: number;
 }
 
 export function computeVirtualTranscript<T>(
@@ -46,6 +48,7 @@ export function computeVirtualTranscript<T>(
       endIndex: items.length,
       topSpacerRows: 0,
       bottomSpacerRows: 0,
+      startOffsetRows: 0,
     };
   }
 
@@ -75,6 +78,7 @@ export function computeVirtualTranscript<T>(
     endIndex,
     topSpacerRows: offsets[startIndex] ?? 0,
     bottomSpacerRows: totalRows - (offsets[endIndex] ?? totalRows),
+    startOffsetRows: Math.max(0, windowTop - (offsets[startIndex] ?? 0)),
   };
 }
 
