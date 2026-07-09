@@ -32,11 +32,12 @@ import { createCliSessionId, type CliSessionSelection } from "../cli/session-res
 import { listFileSuggestions } from "../input/file-index.js";
 import { getSlashArgumentHints } from "../input/slash-argument-hints.js";
 import { commandSuggestions, createPicoCommandRegistry } from "../input/pico-command-registry.js";
-import { preparePromptWithMentions } from "../input/prepare-prompt.js";
+import { preparePromptForMessage, type PreparedUserPrompt } from "../input/prepare-prompt.js";
 import { processUserInput } from "../input/process-user-input.js";
 import { parseSlashInput } from "../input/slash-parser.js";
 import type { CommandRegistry } from "../input/command-registry.js";
 import type { InputProcessResult, LocalCommandResult } from "../input/types.js";
+import type { ImagePart } from "../schema/message.js";
 import type { ProviderKind } from "../provider/factory.js";
 import type { ThinkingEffort } from "../provider/thinking.js";
 import { buildDefaultToolRegistry } from "../tools/default-registry.js";
@@ -84,7 +85,7 @@ export interface HandleTuiInputSubmissionDeps {
   reporter: TuiReporter;
   registry: CommandRegistry;
   workDir: string;
-  runAgent: (prompt: string) => Promise<void>;
+  runAgent: (prompt: string, options?: { images?: ImagePart[] }) => Promise<void>;
   exit: () => void;
   processInput?: (text: string) => Promise<TuiInputProcessResult>;
   openDialog?: (request: DialogRequest) => void;
@@ -129,12 +130,12 @@ export async function handleTuiInputSubmission(
       return;
     case "prompt": {
       deps.reporter.pushUserMessage(processed.raw);
-      await deps.runAgent(await preparePromptWithMentions(processed.prompt, deps.workDir));
+      await runPreparedUserPrompt(processed.prompt, deps);
       return;
     }
     case "prompt-command": {
       deps.reporter.pushUserMessage(processed.raw);
-      await deps.runAgent(await preparePromptWithMentions(processed.result.prompt, deps.workDir));
+      await runPreparedUserPrompt(processed.result.prompt, deps);
       return;
     }
     case "local-command":
@@ -144,6 +145,28 @@ export async function handleTuiInputSubmission(
       deps.reporter.pushSystemMessage(formatUnknownCommand(processed));
       return;
   }
+}
+
+async function runPreparedUserPrompt(
+  prompt: string,
+  deps: Pick<HandleTuiInputSubmissionDeps, "workDir" | "reporter" | "runAgent">,
+): Promise<void> {
+  let prepared: PreparedUserPrompt;
+  try {
+    prepared = await preparePromptForMessage(prompt, deps.workDir);
+  } catch (error) {
+    deps.reporter.pushSystemMessage(error instanceof Error ? error.message : String(error));
+    return;
+  }
+
+  for (const notice of prepared.notices ?? []) {
+    deps.reporter.pushSystemMessage(notice);
+  }
+  if (prepared.images) {
+    await deps.runAgent(prepared.prompt, { images: prepared.images });
+    return;
+  }
+  await deps.runAgent(prepared.prompt);
 }
 
 export async function handleTuiRunningInputSubmission(
@@ -414,7 +437,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
               }}
             />
           ),
-          runAgent: async (prompt) => {
+          runAgent: async (prompt, runOptions) => {
             const cliOpts: RunAgentCliOptions = {
               prompt,
               provider,
@@ -424,6 +447,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
               model: settings.model,
               enableThinking: opts.enableThinking ?? true,
               thinkingEffort: settings.thinkingEffort,
+              ...(runOptions?.images ? { images: runOptions.images } : {}),
               ...(opts.mcpConfigPath ? { mcpConfigPath: opts.mcpConfigPath } : {}),
             };
             await runTuiAgentPrompt(cliOpts, {
