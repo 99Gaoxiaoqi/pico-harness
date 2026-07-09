@@ -271,6 +271,45 @@ describe("InputBox input controller", () => {
     expect(state.cursor).toBe(0);
   });
 
+  it("uses user keybindings for slash commands and null unbinds", () => {
+    const commandResult = reduceInputControllerEvent(
+      createInputControllerState(),
+      "m",
+      key({ ctrl: true }),
+      {
+        keybindings: {
+          Chat: {
+            "ctrl+m": "command:/model",
+          },
+        },
+      },
+    );
+
+    expect(commandResult.submittedText).toBe("/model");
+
+    const state = typeText("hello", {
+      keybindings: {
+        Chat: {
+          "ctrl+a": null,
+        },
+      },
+    });
+    const unboundResult = reduceInputControllerEvent(
+      state,
+      "a",
+      key({ ctrl: true }),
+      {
+        keybindings: {
+          Chat: {
+            "ctrl+a": null,
+          },
+        },
+      },
+    );
+
+    expect(unboundResult.state.cursor).toBe("hello".length);
+  });
+
   it("keeps pasted multiline text as content and still uses Alt/Shift+Enter for newlines", () => {
     const options: InputControllerOptions = {};
     let state = reduceInputControllerEvent(
