@@ -17,10 +17,16 @@ import type { CanonicalUsage, Message } from "../schema/message.js";
 import type { CostStatus } from "../observability/pricing.js";
 import { logger } from "../observability/logger.js";
 import { SessionStore } from "./session-store.js";
+import {
+  createSessionIdentity,
+  type SessionIdentity,
+} from "./session-identity.js";
 import { FTS5Store } from "../memory/fts5-store.js";
 import {
   createFileHistoryState,
   type FileHistoryState,
+  type FileHistoryDiffStat,
+  fileHistoryDiffStat,
   fileHistoryLoadState,
   fileHistoryRewind,
 } from "../safety/file-history.js";
@@ -39,6 +45,8 @@ export class Session {
   readonly id: string;
   /** 该会话绑定的物理工作区 */
   readonly workDir: string;
+  /** 会话与项目/worktree 的显式身份,供后续 resume 过滤使用。 */
+  readonly identity: SessionIdentity;
   readonly createdAt: Date;
   updatedAt: Date;
 
@@ -113,9 +121,22 @@ export class Session {
    */
   private fts5?: FTS5Store;
 
-  constructor(id: string, workDir: string, options?: { persistence?: boolean }) {
+  constructor(
+    id: string,
+    workDir: string,
+    options?: { persistence?: boolean; identity?: SessionIdentity },
+  ) {
     this.id = id;
     this.workDir = workDir;
+    this.identity =
+      options?.identity ??
+      createSessionIdentity({
+        sessionId: id,
+        cwd: workDir,
+        originalCwd: process.cwd(),
+        projectRoot: workDir,
+        sessionProjectDir: workDir,
+      });
     this.conversationId = id;
     this.createdAt = new Date();
     this.updatedAt = new Date();
@@ -139,7 +160,7 @@ export class Session {
     try {
       const dir = join(this.workDir, ".claw", "sessions");
       mkdirSync(dir, { recursive: true });
-      this.store = new SessionStore(join(dir, `${sanitizeFilePart(this.id)}.jsonl`));
+      this.store = new SessionStore(join(dir, `${sanitizeFilePart(this.id)}.jsonl`), this.identity);
     } catch (error) {
       // 持久化初始化失败不应阻断会话本身,降级为纯内存
       logger.warn({ error: String(error) }, "[session] 持久化初始化失败,降级为纯内存");
@@ -200,7 +221,10 @@ export class Session {
     // 3.1:重放后从 history 重建 toolResultMeta(cachedAt 未知,用当前时间;
     // accessCount 归零)。避免恢复后已有 ToolResult 丢失年龄追踪。
     this.rebuildToolResultMeta();
-    this.nextSeq = (records[records.length - 1]?.seq ?? -1) + 1;
+    this.nextSeq = records.reduce(
+      (maxSeq, record) => ("seq" in record ? Math.max(maxSeq, record.seq) : maxSeq),
+      -1,
+    ) + 1;
   }
 
   /**
@@ -431,6 +455,10 @@ export class Session {
 
   async rewindCode(messageId: string): Promise<void> {
     await fileHistoryRewind(this.fileHistory, messageId, this.id);
+  }
+
+  async getRewindDiffStat(messageId: string): Promise<FileHistoryDiffStat> {
+    return fileHistoryDiffStat(this.fileHistory, messageId, this.id);
   }
 
   rewindConversation(messageIndex: number): void {
@@ -762,7 +790,7 @@ export class SessionManager {
   async getOrCreate(
     id: string,
     workDir: string,
-    options?: { persistence?: boolean },
+    options?: { persistence?: boolean; identity?: SessionIdentity },
   ): Promise<Session> {
     // TTL 惰性清理:借这次访问顺带扫一遍过期项(低频,不阻塞主流程)。
     this.evictExpired();

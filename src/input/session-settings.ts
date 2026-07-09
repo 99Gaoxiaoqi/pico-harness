@@ -51,7 +51,7 @@ const resolvedCliSessionSemantics = new Map<
   string,
   { sessionMode: SessionMode; forkFrom?: string }
 >();
-const permissionCommandModes = new Set(["default", "auto", "yolo", "plan"]);
+const permissionCommandModes = new Set(["ask", "default", "auto", "yolo", "plan"]);
 
 export function createDefaultSessionSettings(defaults: SessionSettingsDefaults): SessionSettings {
   const resolvedSemantics = resolvedCliSessionSemantics.get(defaults.sessionId);
@@ -154,7 +154,7 @@ export function setSessionPermissionMode(settings: SessionSettings, mode: string
   if (!permissionCommandModes.has(normalized)) {
     return {
       ok: false,
-      message: `Current permission mode: ${settings.permissionMode}\nUsage: /permissions <default|auto|yolo|plan>`,
+      message: `Current permission mode: ${settings.permissionMode}\nUsage: /permissions <ask|default|auto|yolo|plan>`,
     };
   }
 
@@ -203,7 +203,7 @@ export function formatPermissionStatus(settings: SessionSettings): string {
   return [
     `Permission mode: ${settings.permissionMode}`,
     "Session approvals: unavailable",
-    "Usage: /permissions <default|auto|yolo|plan>",
+    "Usage: /permissions <ask|default|auto|yolo|plan>",
   ].join("\n");
 }
 

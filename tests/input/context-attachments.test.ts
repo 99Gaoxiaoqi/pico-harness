@@ -61,6 +61,25 @@ describe("context attachments", () => {
     expect(attachments[0]?.content).not.toContain("line-20");
   });
 
+  it("returns readable context for missing files instead of throwing", async () => {
+    await expect(
+      resolveContextAttachments(parseMentions("@missing.ts"), { cwd: workDir }),
+    ).resolves.toMatchObject([
+      {
+        type: "missing",
+        reference: "missing.ts",
+        truncated: false,
+      },
+    ]);
+
+    const attachments = await resolveContextAttachments(
+      parseMentions("@missing.ts"),
+      { cwd: workDir },
+    );
+    expect(attachments[0]?.content).toContain("File not found");
+    expect(attachments[0]?.content).toContain("missing.ts");
+  });
+
   it("lists directory entries with a hard limit", async () => {
     await mkdir(join(workDir, "docs"), { recursive: true });
     for (let index = 0; index < 5; index++) {
@@ -79,6 +98,24 @@ describe("context attachments", () => {
     });
     expect(attachments[0]?.content.split("\n")).toHaveLength(4);
     expect(attachments[0]?.content).toContain("共 5 项,已截断");
+  });
+
+  it("summarizes directory mentions with files and subdirectories", async () => {
+    await mkdir(join(workDir, "docs", "guide"), { recursive: true });
+    await writeFile(join(workDir, "docs", "intro.md"), "");
+
+    const attachments = await resolveContextAttachments(
+      parseMentions("@docs"),
+      { cwd: workDir },
+    );
+
+    expect(attachments[0]).toMatchObject({
+      type: "directory",
+      reference: "docs",
+      truncated: false,
+    });
+    expect(attachments[0]?.content).toContain("guide/");
+    expect(attachments[0]?.content).toContain("intro.md");
   });
 
   it("resolves skill and agent mentions without changing Message schema", async () => {

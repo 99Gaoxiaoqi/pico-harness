@@ -432,15 +432,29 @@ describe("Pico command registry", () => {
       model: "glm-5.2",
       sessionId: "session-discovery",
     });
+    const resumeCommand = registry.resolve("resume");
 
     const help = await processUserInput("/help", { registry });
+    const resumeHelp = await processUserInput("/help resume", { registry });
 
+    expect(resumeCommand?.argumentHint).toBe("<session-id>");
     expect(help.type).toBe("local-command");
     if (help.type !== "local-command") return;
     expect(help.result.message).toContain("/sessions");
     expect(help.result.message).toContain("/resume");
+    expect(resumeHelp.type).toBe("local-command");
+    if (resumeHelp.type !== "local-command") return;
+    expect(resumeHelp.result.message).toContain(
+      `Usage: /resume ${resumeCommand?.argumentHint}`,
+    );
     expect(commandSuggestions(registry, "sess").map((item) => item.value)).toContain("sessions");
-    expect(commandSuggestions(registry, "res").map((item) => item.value)).toContain("resume");
+    expect(commandSuggestions(registry, "res")).toContainEqual(
+      expect.objectContaining({
+        value: "resume",
+        description: resumeCommand?.description,
+        argumentHint: resumeCommand?.argumentHint,
+      }),
+    );
   });
 
   it("/status exposes session id mode and fork source", async () => {

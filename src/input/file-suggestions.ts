@@ -34,7 +34,7 @@ const IGNORED_DIRS: ReadonlySet<string> = new Set([
 export async function listFileSuggestions(
   options: FileSuggestionOptions,
 ): Promise<string[]> {
-  const query = normalizePath(options.query ?? "");
+  const query = normalizeQuery(options.query ?? "");
   const limit = options.limit ?? DEFAULT_LIMIT;
   const runner = options.commandRunner ?? runCommand;
 
@@ -116,4 +116,15 @@ function unique(values: string[]): string[] {
 
 function normalizePath(path: string): string {
   return path.replaceAll("\\", "/");
+}
+
+function normalizeQuery(query: string): string {
+  const normalized = normalizePath(query.trim());
+  if (normalized.startsWith('@"')) {
+    return normalized.slice(2).replace(/"$/, "");
+  }
+  if (normalized.startsWith("@")) {
+    return normalized.slice(1);
+  }
+  return normalized;
 }

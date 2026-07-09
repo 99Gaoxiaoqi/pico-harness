@@ -64,4 +64,14 @@ describe("listFileSuggestions", () => {
 
     expect(suggestions).toEqual(["src/app.ts"]);
   });
+
+  it("treats @-prefixed query text as a relative file path", async () => {
+    const suggestions = await listFileSuggestions({
+      cwd: workDir,
+      query: "@src",
+      commandRunner: async () => "src/app.ts\nREADME.md\n",
+    });
+
+    expect(suggestions).toEqual(["src/app.ts"]);
+  });
 });

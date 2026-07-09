@@ -14,6 +14,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionManager } from "../../src/engine/session.js";
+import { SessionStore } from "../../src/engine/session-store.js";
 import type { Message } from "../../src/schema/message.js";
 import { corruptDatabase, simulateDiskFull, restorePermissions } from "../helpers/fault-injection.js";
 
@@ -116,6 +117,24 @@ describe("Session + FTS5 断点续传", () => {
     const results = s2.search("HTTP Server");
     expect(results.length).toBeGreaterThan(0);
     expect(results[0]!.content).toContain("HTTP Server");
+  });
+
+  it("新 session metadata 包含 cwd、projectRoot 与 sessionProjectDir", async () => {
+    const mgr = new SessionManager();
+    const session = await mgr.getOrCreate("identity_001", workDir, ON);
+    session.append(userMsg("hello identity"));
+    await flush();
+
+    const storePath = join(workDir, ".claw", "sessions", "identity_001.jsonl");
+    const metadata = await new SessionStore(storePath).loadMetadata();
+
+    expect(metadata).toMatchObject({
+      sessionId: "identity_001",
+      cwd: workDir,
+      originalCwd: expect.any(String) as string,
+      projectRoot: workDir,
+      sessionProjectDir: workDir,
+    });
   });
 
   it("Session 2 继续插入 5 条 → Session 3 检索到全部 10 条", async () => {

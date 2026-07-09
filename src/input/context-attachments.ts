@@ -100,8 +100,22 @@ async function resolvePathAttachment(
   cwd: string,
   limits: AttachmentLimits,
 ): Promise<ContextAttachment> {
-  const fullPath = safeResolve(cwd, mention.target);
-  const info = await stat(fullPath);
+  let fullPath: string;
+  try {
+    fullPath = safeResolve(cwd, mention.target);
+  } catch (error) {
+    const reference = normalizeReference(mention.target);
+    return missingAttachment(reference, `Unable to read path: ${reference}\n${errorMessage(error)}`);
+  }
+
+  let info: Awaited<ReturnType<typeof stat>>;
+  try {
+    info = await stat(fullPath);
+  } catch (error) {
+    const reference = toReference(cwd, fullPath);
+    return missingAttachment(reference, `File not found: ${reference}\n${errorMessage(error)}`);
+  }
+
   const reference = toReference(cwd, fullPath);
 
   if (info.isDirectory()) {
@@ -115,6 +129,15 @@ async function resolvePathAttachment(
     type: "missing",
     reference,
     content: `Unsupported path type: ${reference}`,
+    truncated: false,
+  };
+}
+
+function missingAttachment(reference: string, content: string): ContextAttachment {
+  return {
+    type: "missing",
+    reference,
+    content,
     truncated: false,
   };
 }
@@ -219,6 +242,14 @@ function splitLines(text: string): string[] {
 function toReference(cwd: string, fullPath: string): string {
   const rel = relative(cwd, fullPath).replaceAll("\\", "/");
   return rel.length === 0 ? "." : rel;
+}
+
+function normalizeReference(reference: string): string {
+  return reference.replaceAll("\\", "/");
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function escapeAttribute(value: string): string {

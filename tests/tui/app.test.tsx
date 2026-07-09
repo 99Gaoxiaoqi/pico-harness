@@ -1,5 +1,5 @@
 import React from "react";
-import { renderToString } from "ink";
+import { renderToString, Text } from "ink";
 import { describe, expect, it, vi } from "vitest";
 import { App } from "../../src/tui/app.js";
 
@@ -49,6 +49,30 @@ describe("App", () => {
     expect(countOccurrences(output, "Running")).toBe(1);
     expect(countOccurrences(output, 'Try "fix this" or / for commands')).toBe(0);
     expect(countOccurrences(output, "Enter 发送")).toBe(0);
+  });
+
+  it("renders the focused modal and disables the bottom input while modal is active", () => {
+    const output = renderToString(
+      <App
+        model="glm-5.2"
+        provider="openai"
+        workDir="/workspace/demo"
+        sessionMode="new"
+        entries={[{ kind: "user", content: "打开设置" }]}
+        running={false}
+        dialogRequests={[
+          { id: "tips", layer: "overlay", priority: 10, content: <Text>Overlay tips</Text> },
+          { id: "settings", layer: "modal", priority: 50, content: <Text>Settings modal</Text> },
+        ]}
+        onSubmit={vi.fn()}
+      />,
+    );
+
+    expect(output).toContain("打开设置");
+    expect(output).toContain("Settings modal");
+    expect(output).not.toContain("Overlay tips");
+    expect(countOccurrences(output, "Running")).toBe(1);
+    expect(countOccurrences(output, 'Try "fix this" or / for commands')).toBe(0);
   });
 
   it("passes provider, permission mode, and thinking effort into the runtime status", () => {

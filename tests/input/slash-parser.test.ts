@@ -15,6 +15,15 @@ describe("parseSlashInput", () => {
     });
   });
 
+  it("解析带 namespace 的命令名", () => {
+    expect(parseSlashInput("/project:review src/input")).toEqual({
+      raw: "/project:review src/input",
+      name: "project:review",
+      args: "src/input",
+      argv: ["src/input"],
+    });
+  });
+
   it("解析多参数并保留引号内空格", () => {
     expect(parseSlashInput('/model "gpt-5 mini" fast')).toEqual({
       raw: '/model "gpt-5 mini" fast',

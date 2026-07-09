@@ -1,8 +1,15 @@
-import { describe, expect, it } from "vitest";
+import { renderToString } from "ink";
+import { describe, expect, it, vi } from "vitest";
 import {
+  cancelRewindSelection,
+  confirmRewindSelection,
+  createRewindSelectorState,
+  formatRewindConfirm,
   formatRewindSelector,
+  formatRewindSelectorState,
   formatRewindUsage,
   latestSnapshotMessageId,
+  selectRewindSnapshot,
 } from "../../src/tui/rewind-selector.js";
 
 describe("RewindSelector", () => {
@@ -114,4 +121,92 @@ describe("RewindSelector", () => {
       ]),
     ).toBe("turn-2");
   });
+
+  it("初始状态只列消息，不立即执行回滚", () => {
+    const onConfirm = vi.fn();
+    const state = createRewindSelectorState();
+    const output = formatRewindSelectorState("session-1", [snapshotSummary("turn-1")], state);
+
+    expect(output).toContain("选择要 rewind 到的消息");
+    expect(output).toContain("turn-1");
+    expect(output).not.toContain("code / conversation / both");
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
+
+  it("选择消息后进入确认态并展示 changed files 和 +/- 统计", () => {
+    const selected = selectRewindSnapshot(createRewindSelectorState(), "turn-1", {
+      messageId: "turn-1",
+      changedFileCount: 2,
+      addedLines: 3,
+      removedLines: 1,
+      files: [
+        {
+          filePath: "/tmp/project/src/a.ts",
+          status: "modified",
+          addedLines: 2,
+          removedLines: 1,
+        },
+        {
+          filePath: "/tmp/project/src/b.ts",
+          status: "created",
+          addedLines: 1,
+          removedLines: 0,
+        },
+      ],
+    });
+
+    expect(selected.phase).toBe("confirm");
+    const output = formatRewindSelectorState("session-1", [snapshotSummary("turn-1")], selected);
+    expect(output).toContain("确认 rewind: turn-1");
+    expect(output).toContain("changed files=2");
+    expect(output).toContain("+3 -1");
+    expect(output).toContain("src/a.ts");
+    expect(output).toContain("code / conversation / both / cancel");
+  });
+
+  it("cancel 不调用 rewind，confirm 才调用对应 callback", () => {
+    const onConfirm = vi.fn();
+    const onCancel = vi.fn();
+    const selected = selectRewindSnapshot(createRewindSelectorState(), "turn-1", emptyDiffStat("turn-1"));
+
+    const canceled = cancelRewindSelection(selected, { onCancel, onConfirm });
+    expect(canceled.phase).toBe("select");
+    expect(onCancel).toHaveBeenCalledTimes(1);
+    expect(onConfirm).not.toHaveBeenCalled();
+
+    const confirmed = confirmRewindSelection(selected, "conversation", { onCancel, onConfirm });
+    expect(confirmed.phase).toBe("select");
+    expect(onConfirm).toHaveBeenCalledWith("turn-1", "conversation");
+    expect(onCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("确认态可作为 Ink 组件渲染", () => {
+    const output = renderToString(
+      formatRewindConfirm("session-1", snapshotSummary("turn-1"), emptyDiffStat("turn-1")),
+    );
+
+    expect(output).toContain("确认 rewind: turn-1");
+    expect(output).toContain("changed files=0");
+  });
 });
+
+function snapshotSummary(messageId: string) {
+  return {
+    messageId,
+    timestamp: "2026-07-09T01:02:03.000Z",
+    trackedFileCount: 1,
+    backedUpFileCount: 1,
+    deletedFileCount: 0,
+    messageIndex: 2,
+  };
+}
+
+function emptyDiffStat(messageId: string) {
+  return {
+    messageId,
+    changedFileCount: 0,
+    addedLines: 0,
+    removedLines: 0,
+    files: [],
+  };
+}

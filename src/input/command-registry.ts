@@ -1,10 +1,16 @@
-import type { SlashCommand } from "./types.js";
+import type { CommandListOptions, SlashCommand, SlashCommandSource } from "./types.js";
 
 export interface CommandSuggestion {
   name: string;
   insertText: string;
   description: string;
+  argumentHint?: string;
   matchedAlias?: string;
+}
+
+export interface CommandSourceGroup {
+  source: SlashCommandSource;
+  commands: readonly SlashCommand[];
 }
 
 export class CommandRegistry {
@@ -22,15 +28,16 @@ export class CommandRegistry {
     const name = normalizeCommandName(command.name);
     assertTokenAvailable(name, this.commands, this.aliases);
 
-    const aliases = command.aliases ?? [];
+    const aliases = (command.aliases ?? []).map(normalizeCommandName);
     for (const alias of aliases) {
-      assertTokenAvailable(normalizeCommandName(alias), this.commands, this.aliases);
+      assertTokenAvailable(alias, this.commands, this.aliases);
     }
 
-    this.commands.set(name, { ...command, name });
-    this.ordered.push({ ...command, name });
+    const normalized = normalizeCommand(command, name, aliases);
+    this.commands.set(name, normalized);
+    this.ordered.push(normalized);
     for (const alias of aliases) {
-      this.aliases.set(normalizeCommandName(alias), name);
+      this.aliases.set(alias, name);
     }
   }
 
@@ -38,15 +45,33 @@ export class CommandRegistry {
     const normalized = normalizeCommandName(name);
     const direct = this.commands.get(normalized);
     if (direct !== undefined) {
-      return direct;
+      return isCommandEnabled(direct) ? direct : undefined;
     }
 
     const target = this.aliases.get(normalized);
-    return target === undefined ? undefined : this.commands.get(target);
+    if (target === undefined) return undefined;
+
+    const command = this.commands.get(target);
+    return command !== undefined && isCommandEnabled(command) ? command : undefined;
   }
 
-  list(): readonly SlashCommand[] {
-    return this.ordered;
+  list(options: CommandListOptions = {}): readonly SlashCommand[] {
+    return this.ordered.filter((command) => shouldListCommand(command, options));
+  }
+
+  listBySource(options: CommandListOptions = {}): readonly CommandSourceGroup[] {
+    const groups = new Map<SlashCommandSource, SlashCommand[]>();
+    for (const command of this.list(options)) {
+      const source = command.source ?? "builtin";
+      const group = groups.get(source);
+      if (group === undefined) {
+        groups.set(source, [command]);
+      } else {
+        group.push(command);
+      }
+    }
+
+    return Array.from(groups, ([source, commands]) => ({ source, commands }));
   }
 
   has(name: string): boolean {
@@ -60,10 +85,10 @@ export class CommandRegistry {
   detailedSuggestions(name: string): readonly CommandSuggestion[] {
     const normalized = normalizeCommandName(name);
     if (normalized.length === 0) {
-      return this.ordered.map((command) => suggestionFromCommand(command));
+      return this.list().map((command) => suggestionFromCommand(command));
     }
 
-    const candidates = this.ordered
+    const candidates = this.list()
       .map((command, index) => ({
         command,
         index,
@@ -84,6 +109,22 @@ export class CommandRegistry {
 
 export function normalizeCommandName(name: string): string {
   return name.replace(/^\/+/, "").trim().toLowerCase();
+}
+
+function normalizeCommand(
+  command: SlashCommand,
+  name: string,
+  aliases: readonly string[],
+): SlashCommand {
+  return {
+    ...command,
+    name,
+    aliases,
+    kind: command.kind ?? "local",
+    source: command.source ?? "builtin",
+    isHidden: command.isHidden ?? false,
+    isEnabled: command.isEnabled ?? true,
+  };
 }
 
 function assertTokenAvailable(
@@ -114,8 +155,20 @@ function suggestionFromCommand(
     name: command.name,
     insertText: command.name,
     description: command.description,
+    ...(command.argumentHint === undefined ? {} : { argumentHint: command.argumentHint }),
     ...(matchedAlias === undefined ? {} : { matchedAlias }),
   };
+}
+
+function shouldListCommand(command: SlashCommand, options: CommandListOptions): boolean {
+  if (options.source !== undefined && command.source !== options.source) return false;
+  if (!options.includeHidden && command.isHidden === true) return false;
+  if (!options.includeDisabled && !isCommandEnabled(command)) return false;
+  return true;
+}
+
+function isCommandEnabled(command: SlashCommand): boolean {
+  return command.isEnabled !== false;
 }
 
 function bestMatch(command: SlashCommand, query: string): SuggestionMatch | null {

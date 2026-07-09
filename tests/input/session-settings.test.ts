@@ -92,6 +92,22 @@ describe("session settings", () => {
     expect(result.message).toContain("Permission mode set to yolo");
   });
 
+  it("allows restoring the default ask permission mode", () => {
+    const settings = createDefaultSessionSettings({
+      sessionId: "session-permissions-ask",
+      cwd: "/workspace/app",
+      provider: "openai",
+      model: "glm-5.2",
+      permissionMode: "yolo",
+    });
+
+    const result = setSessionPermissionMode(settings, "ask");
+
+    expect(result.ok).toBe(true);
+    expect(settings.permissionMode).toBe("ask");
+    expect(result.message).toContain("Permission mode set to ask");
+  });
+
   it("keeps the previous permission mode for unsupported permission modes", () => {
     const settings = createDefaultSessionSettings({
       sessionId: "session-permissions-invalid",
@@ -105,7 +121,7 @@ describe("session settings", () => {
 
     expect(result.ok).toBe(false);
     expect(settings.permissionMode).toBe("auto");
-    expect(result.message).toContain("Usage: /permissions <default|auto|yolo|plan>");
+    expect(result.message).toContain("Usage: /permissions <ask|default|auto|yolo|plan>");
   });
 
   it("formats permission mode and unavailable session approvals", () => {

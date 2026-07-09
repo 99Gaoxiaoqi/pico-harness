@@ -3,6 +3,30 @@ import { normalizeCommandName, type CommandRegistry } from "./command-registry.j
 import { parseSlashInput } from "./slash-parser.js";
 import type { InputProcessResult, SlashCommand } from "./types.js";
 
+const CORE_HELP_COMMANDS = new Set([
+  "help",
+  "clear",
+  "exit",
+  "status",
+  "mode",
+  "permissions",
+  "compact",
+  "init",
+  "doctor",
+  "model",
+  "thinking",
+  "tools",
+  "agents",
+  "sessions",
+  "resume",
+  "snapshots",
+  "rewind",
+  "undo",
+  "agent",
+  "skills",
+  "skill",
+]);
+
 export interface ProcessUserInputOptions {
   registry?: CommandRegistry;
 }
@@ -86,14 +110,16 @@ function buildHelpMessage(registry: CommandRegistry, filter?: string): string {
       : formatCommandHelp(command);
   }
 
-  const lines = registry
+  const commands = registry
     .list()
+    .filter((command) => CORE_HELP_COMMANDS.has(command.name));
+  const lines = commands
     .map((command) => `/${command.name} - ${command.description}`);
   return [
     "Available slash commands:",
     ...lines,
     "",
-    "Use /help <command> for details.",
+    "Use /help <command> for any command, or /skills and /agents for extension lists.",
   ].join("\n");
 }
 

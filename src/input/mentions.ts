@@ -113,7 +113,7 @@ function parsePlainPath(input: string, at: number): MentionReference | undefined
 }
 
 function parseLineRange(input: string, start: number): ParsedLineRange | undefined {
-  const match = /^#L(\d+)(?:-(\d+))?/i.exec(input.slice(start));
+  const match = /^#L(\d+)(?:-L?(\d+))?/i.exec(input.slice(start));
   if (!match) return undefined;
   const lineStart = Number(match[1]);
   const lineEnd = match[2] ? Number(match[2]) : lineStart;
@@ -130,7 +130,7 @@ function splitLineRange(rawBody: string): {
   target: string;
   range?: ParsedLineRange;
 } {
-  const match = /#L(\d+)(?:-(\d+))?$/i.exec(rawBody);
+  const match = /#L(\d+)(?:-L?(\d+))?$/i.exec(rawBody);
   if (!match) return { target: rawBody };
   const lineStart = Number(match[1]);
   const lineEnd = match[2] ? Number(match[2]) : lineStart;

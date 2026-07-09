@@ -16,17 +16,27 @@
 import { appendFile, readFile } from "node:fs/promises";
 import type { Message } from "../schema/message.js";
 import { logger } from "../observability/logger.js";
+import type { SessionIdentity } from "./session-identity.js";
 
 /**
- * 当前 JSONL schema 版本号(5.8a)。
+ * 当前 JSONL schema 版本号。
  *
  * meta 行({"type":"meta","schemaVersion":N})写在每个文件首行,
  * 作为头标记携带版本信息。旧文件(无 meta 行)视为 version 0。
  * 未来结构变更时 bump 此常量,并在 migrate() 加对应 case 分支。
  *
  * v0→v1:无结构变化(仅引入 meta 头与版本号机制本身),migrate 原样返回。
+ * v1→v2:meta 头新增 session identity 字段,历史事件结构不变。
  */
-const CURRENT_SCHEMA_VERSION = 1;
+const CURRENT_SCHEMA_VERSION = 2;
+
+export type SessionMetadata = {
+  readonly schemaVersion: number;
+} & Partial<SessionIdentity>;
+
+export type SessionMetadataInput = Omit<SessionMetadata, "schemaVersion"> & {
+  readonly schemaVersion?: number;
+};
 
 /** 持久化的事件记录:每行一个,带 type 判别联合。 */
 /**
@@ -46,7 +56,7 @@ export type SessionRecord =
   | { readonly type: "truncate"; readonly seq: number; readonly fromIndex: number }
   | { readonly type: "undo"; readonly seq: number; readonly count: number; readonly at: string }
   | { readonly type: "rewind_to"; readonly seq: number; readonly messageIndex: number; readonly at: string }
-  | { readonly type: "meta"; readonly schemaVersion: number };
+  | ({ readonly type: "meta" } & SessionMetadata);
 
 /**
  * record 落盘监听器(4.3 cursor 多端同步)。
@@ -85,7 +95,10 @@ export class SessionStore {
    */
   private initialized = false;
 
-  constructor(private readonly filePath: string) {}
+  constructor(
+    private readonly filePath: string,
+    private readonly metadata?: SessionMetadataInput,
+  ) {}
 
   /** 递增 epoch(fork/rewind 时调用)。纯游标概念,不改写已落盘的 JSONL。 */
   bumpEpoch(): void {
@@ -205,11 +218,46 @@ export class SessionStore {
     return records;
   }
 
+  async loadMetadata(): Promise<SessionMetadata | undefined> {
+    let content: string;
+    try {
+      content = await readFile(this.filePath, "utf8");
+    } catch {
+      return undefined;
+    }
+
+    const lines = content.split("\n");
+    if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (!line) continue;
+      let parsed: SessionRecord;
+      try {
+        parsed = JSON.parse(line) as SessionRecord;
+      } catch {
+        if (i === lines.length - 1) break;
+        continue;
+      }
+      if (parsed.type === "meta") {
+        const { type: _type, ...metadata } = parsed;
+        return metadata;
+      }
+    }
+
+    return undefined;
+  }
+
   private async appendLine(line: string): Promise<void> {
     // 5.8a:首次写入时先落 meta 头行(携带 schema 版本号),保证 load 可识别版本。
     // 之后置 initialized,后续 append 仅写数据行。
     if (!this.initialized) {
-      const meta = JSON.stringify({ type: "meta", schemaVersion: CURRENT_SCHEMA_VERSION });
+      const { schemaVersion: _ignored, ...identity } = this.metadata ?? {};
+      const meta = JSON.stringify({
+        type: "meta",
+        schemaVersion: CURRENT_SCHEMA_VERSION,
+        ...identity,
+      });
       await appendFile(this.filePath, meta + "\n", "utf8");
       this.initialized = true;
     }
@@ -237,6 +285,9 @@ export function migrate(records: SessionRecord[], fromVersion: number): SessionR
     switch (current) {
       case 0:
         // v0→v1:结构未变(仅引入 meta 头),原样返回。
+        break;
+      case 1:
+        // v1→v2:session identity 只存在于 meta 头,records 结构未变。
         break;
       default:
         // 未知中间版本:停止迁移,保住现有数据。

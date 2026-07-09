@@ -8,6 +8,10 @@ import {
   type CliSessionSummary,
   type CliSessionSelection,
 } from "../src/cli/session-resolver.js";
+import {
+  createSessionIdentity,
+  isSameSessionProjectGroup,
+} from "../src/engine/session-identity.js";
 
 describe("resolveCliSession", () => {
   it("默认每次启动都创建新的 session id", async () => {
@@ -149,6 +153,32 @@ describe("resolveCliSession", () => {
         resumeSession: "cli-known",
       }),
     ).rejects.toThrow("session 启动参数只能选择一种");
+  });
+});
+
+describe("session identity resume grouping", () => {
+  it("同一 repo 的不同 worktree 可被识别为同组候选", () => {
+    const main = createSessionIdentity({
+      sessionId: "cli-main",
+      cwd: "/repo",
+      projectRoot: "/repo",
+      sessionProjectDir: "/repo",
+    });
+    const worktree = createSessionIdentity({
+      sessionId: "cli-worktree",
+      cwd: "/repo-worktree",
+      projectRoot: "/repo-worktree",
+      sessionProjectDir: "/repo",
+    });
+    const otherRepo = createSessionIdentity({
+      sessionId: "cli-other",
+      cwd: "/other",
+      projectRoot: "/other",
+      sessionProjectDir: "/other",
+    });
+
+    expect(isSameSessionProjectGroup(main, worktree)).toBe(true);
+    expect(isSameSessionProjectGroup(main, otherRepo)).toBe(false);
   });
 });
 
