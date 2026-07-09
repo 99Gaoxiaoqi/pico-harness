@@ -18,7 +18,15 @@ import { formatOutputPreview } from "./diff-preview.js";
 
 /** 参数里需要高亮(青色)的关键字段,按优先级排序 */
 const HIGHLIGHT_KEYS = ["path", "command", "url", "query", "file", "pattern"] as const;
-export type ToolCardStatus = "running" | "done" | "error" | "success" | "failed" | "denied";
+export type ToolCardStatus =
+  | "queued"
+  | "running"
+  | "success"
+  | "error"
+  | "denied"
+  // Legacy aliases accepted at the view boundary while reporters migrate.
+  | "done"
+  | "failed";
 
 export function ToolCard(props: {
   name: string;
@@ -92,7 +100,7 @@ function StandardToolCard({
         {preview && (
           <>
             <Text dimColor> · </Text>
-            <Text color={failure ? "yellow" : undefined} dimColor={!failure} wrap="truncate">
+            <Text color={failure ? "red" : undefined} dimColor={!failure} wrap="truncate">
               {resultHint(preview)}
             </Text>
           </>
@@ -108,7 +116,7 @@ function StandardToolCard({
           {summary && (
             <Box flexDirection="column">
               <Text dimColor>结果 </Text>
-              <Text color={failure ? "yellow" : undefined} dimColor={!failure} wrap="wrap">
+              <Text color={failure ? "red" : undefined} dimColor={!failure} wrap="wrap">
                 {preview}
               </Text>
             </Box>
@@ -167,7 +175,7 @@ function AgentToolProgressLine({
         {preview && (
           <>
             <Text dimColor> · </Text>
-            <Text color={failure ? "yellow" : undefined} dimColor={!failure} wrap="truncate">
+            <Text color={failure ? "red" : undefined} dimColor={!failure} wrap="truncate">
               {preview}
             </Text>
           </>
@@ -182,7 +190,7 @@ function AgentToolProgressLine({
           </Box>
           <Box>
             <Text dimColor>{branchChar}结果 </Text>
-            <Text color={failure ? "yellow" : undefined} dimColor={!failure} wrap="wrap">
+            <Text color={failure ? "red" : undefined} dimColor={!failure} wrap="wrap">
               {resultText}
             </Text>
           </Box>
@@ -293,9 +301,10 @@ function compactText(text: string, max: number): string {
 
 function ToolStatus({ status }: { status: ToolCardStatus }): React.ReactNode {
   const normalized = normalizeStatus(status);
+  if (normalized === "queued") return <Text dimColor>Queued</Text>;
   if (normalized === "running") return <Text color="yellow">Running</Text>;
-  if (normalized === "denied") return <Text color="yellow">Denied</Text>;
-  if (normalized === "failed") return <Text color="yellow">Failed</Text>;
+  if (normalized === "denied") return <Text color="red">Denied</Text>;
+  if (normalized === "error") return <Text color="red">Error</Text>;
   return <Text color="green">Success</Text>;
 }
 
@@ -307,19 +316,20 @@ function agentResultHint(summary: string): string {
   return compactText(summary, 24);
 }
 
-function normalizeStatus(status: ToolCardStatus): "running" | "success" | "failed" | "denied" {
+function normalizeStatus(status: ToolCardStatus): "queued" | "running" | "success" | "error" | "denied" {
   if (status === "done") return "success";
-  if (status === "error") return "failed";
+  if (status === "failed") return "error";
   return status;
 }
 
 function isFailureStatus(status: ToolCardStatus): boolean {
   const normalized = normalizeStatus(status);
-  return normalized === "failed" || normalized === "denied";
+  return normalized === "error" || normalized === "denied";
 }
 
 function toolResultPreview(summary: string, expanded: boolean): string {
-  return formatOutputPreview(summary, { maxLines: expanded ? 5 : 3, expanded });
+  const preview = formatOutputPreview(summary, { maxLines: expanded ? 5 : 1, expanded });
+  return expanded ? preview : compactText(preview, 120);
 }
 
 function toolTargetSummary(name: string, args: string): string | undefined {

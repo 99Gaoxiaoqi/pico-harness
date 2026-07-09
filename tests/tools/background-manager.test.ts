@@ -4,11 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { BackgroundManager } from "../../src/tools/background-manager.js";
 
-function waitFor(
-  check: () => boolean,
-  timeoutMs = 2000,
-  intervalMs = 20,
-): Promise<void> {
+function waitFor(check: () => boolean, timeoutMs = 2000, intervalMs = 20): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   return new Promise((resolve, reject) => {
     const tick = () => {
@@ -67,7 +63,7 @@ describe("BackgroundManager", () => {
   });
 
   it("停止运行中的任务并更新状态", async () => {
-    const started = manager.start("node -e \"setInterval(() => {}, 1000)\"", workDir);
+    const started = manager.start('node -e "setInterval(() => {}, 1000)"', workDir);
 
     const stopped = await manager.stop(started.taskId);
 
@@ -123,14 +119,14 @@ describe("BackgroundManager", () => {
 
   it("限制已完成任务数量,避免记录无限增长", async () => {
     manager = new BackgroundManager({ maxOutputChars: 80, maxCompletedTasks: 2 });
-    const first = manager.start("printf 'one'", workDir);
+    const first = manager.start(
+      "node -e \"setTimeout(() => process.stdout.write('one'), 80)\"",
+      workDir,
+    );
     const second = manager.start("printf 'two'", workDir);
     const third = manager.start("printf 'three'", workDir);
 
-    await waitFor(
-      () =>
-        manager.list().some((task) => task.taskId === third.taskId && task.status === "exited"),
-    );
+    await waitFor(() => manager.list().every((task) => task.status !== "running"));
 
     const tasks = manager.list();
     expect(tasks.map((task) => task.taskId)).not.toContain(first.taskId);

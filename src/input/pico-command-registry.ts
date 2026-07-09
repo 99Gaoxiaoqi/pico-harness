@@ -16,6 +16,8 @@ import {
 } from "../tui/rewind-selector.js";
 import { listCliSessionSummaries } from "../cli/session-resolver.js";
 import { formatSessionSelector } from "../tui/session-selector.js";
+import { createPermissionState } from "../approval/permission-state.js";
+import { formatPermissionPanel } from "../tui/approval-panel.js";
 import { createBuiltinCommands } from "./builtin-commands.js";
 import { CommandRegistry } from "./command-registry.js";
 import {
@@ -40,7 +42,6 @@ import { loadApiKeys } from "../provider/config.js";
 import { buildDefaultToolRegistry } from "../tools/default-registry.js";
 import {
   formatSessionStatus,
-  formatPermissionStatus,
   getOrCreateSessionSettings,
   parseThinkingEffortArg,
   setSessionMode,
@@ -330,7 +331,10 @@ function createPermissionsCommand(settings: SessionSettings): SlashCommand {
         return {
           type: "local",
           action: "message",
-          message: formatPermissionStatus(settings),
+          message: [
+            formatPermissionPanel(createPermissionState({ mode: settings.permissionMode })),
+            "Usage: /permissions <ask|default|auto|yolo|plan>",
+          ].join("\n"),
           data: { permissionMode: settings.permissionMode },
         };
       }
@@ -548,6 +552,7 @@ function createSessionsCommand(options: PicoCommandRegistryOptions): SlashComman
         action: "message",
         message: formatSessionSelector(summaries, {
           currentSessionId: options.sessionId ?? options.session?.id,
+          currentProjectCwd: options.workDir,
         }),
         data: summaries,
       };

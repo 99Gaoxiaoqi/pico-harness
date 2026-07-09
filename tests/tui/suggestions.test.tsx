@@ -84,6 +84,32 @@ describe("SuggestionList row model", () => {
     expect(output).toContain("alias /h · Show help");
   });
 
+  it("renders slash command descriptions with argument hints", () => {
+    const session: ActiveSuggestionSession = {
+      kind: "slash",
+      query: "res",
+      replaceStart: 0,
+      replaceEnd: 4,
+      selectedIndex: 0,
+      items: [
+        {
+          value: "resume",
+          description: "Resume a saved session",
+          argumentHint: "<session-id>",
+        },
+      ],
+    };
+
+    const rows = formatSuggestionRows(session);
+    const output = renderToString(<SuggestionList session={session} />);
+
+    expect(rows[0]).toMatchObject({
+      left: "/resume",
+      description: "Resume a saved session <session-id>",
+    });
+    expect(output).toContain("Resume a saved session <session-id>");
+  });
+
   it("clips selected Chinese, multiline, and long command candidates for panel rendering", () => {
     const session: ActiveSuggestionSession = {
       kind: "slash",

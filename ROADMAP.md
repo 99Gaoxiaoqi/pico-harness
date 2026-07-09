@@ -261,12 +261,14 @@ git worktree remove ../pico-1-streaming
 
 ### 第二批：第一批合并后再并行
 
-- [ ] F. Skills 即 Prompt Command
-- [ ] G. Slash/Path Typeahead UI
-- [ ] H. 工具 UI 状态协议
-- [ ] I. `/permissions` 可视化入口
-- [ ] J. 后台 Agent Task Registry 与 SendMessage
-- [ ] K. TUI Resume Picker
+> 详细任务拆分见：`docs/plans/2026-07-09-claude-code-parity-phase2.md`
+
+- [x] F1. Skill Prompt Command 投影补齐
+- [x] G1. Slash 与 @Path Typeahead 行为完善
+- [x] H1. Tool UI 状态协议硬化
+- [x] I1. Permissions 可视化模型与面板
+- [x] J1. 后台 Agent Task Registry 状态快照
+- [x] K1. TUI Resume Picker 接线
 
 ---
 

@@ -109,10 +109,10 @@ export class TuiReporter implements Reporter {
   }
 
   onToolResult(toolName: string, result: string, isError: boolean): void {
-    // 找到最后一个同名的 running 工具卡片,更新它的状态
+    // 找到最后一个同名的 pending 工具卡片,更新它的状态
     for (let i = this.entries.length - 1; i >= 0; i--) {
       const e = this.entries[i]!;
-      if (e.kind === "tool" && e.name === toolName && e.status === "running") {
+      if (e.kind === "tool" && e.name === toolName && isPendingToolStatus(e.status)) {
         e.status = resolveToolStatus(toolName, result, isError);
         e.summary = summarizeResult(toolName, e.args, result, isError);
         break;
@@ -193,8 +193,12 @@ function summarizeResult(toolName: string, args: string, result: string, isError
 }
 
 function resolveToolStatus(toolName: string, result: string, isError: boolean): ToolCardStatus {
-  if (!isError) return isAgentToolName(toolName) && agentResultHasFailure(result) ? "failed" : "done";
+  if (!isError) return isAgentToolName(toolName) && agentResultHasFailure(result) ? "error" : "success";
   return isDeniedResult(result) ? "denied" : "error";
+}
+
+function isPendingToolStatus(status: ToolCardStatus): boolean {
+  return status === "queued" || status === "running";
 }
 
 function isAgentToolName(toolName: string): boolean {

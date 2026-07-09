@@ -1,8 +1,8 @@
 import { readdir, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join, relative, sep } from "node:path";
+import { basename, dirname, join, relative, sep } from "node:path";
 import * as yaml from "js-yaml";
-import { SkillLoader } from "../context/skill.js";
+import type { SkillLoader } from "../context/skill.js";
 import { parseCommandArgs } from "./slash-parser.js";
 
 export type MarkdownCommandSource = "project" | "user" | "skill" | "builtin";
@@ -73,11 +73,7 @@ export function parseMarkdownCommand(
   source: MarkdownCommandSource,
   sourcePath?: string,
 ): MarkdownPromptCommand {
-  const stripped = content.replace(/^\uFEFF/, "");
-  const match = stripped.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n([\s\S]*))?$/);
-  const frontmatterText = match?.[1] ?? "";
-  const prompt = (match ? (match[2] ?? "") : stripped).trim();
-  const frontmatter = parseFrontmatter(frontmatterText);
+  const { frontmatter, prompt } = parseMarkdownContent(content);
 
   return {
     description: normalizeString(frontmatter.description),
@@ -172,26 +168,48 @@ function commandNameFromPath(commandsDir: string, sourcePath: string): string {
 async function loadSkillProjectionCommands(
   options: LoadMarkdownCommandsOptions,
 ): Promise<MarkdownPromptCommand[]> {
-  const loader = options.skillLoader ?? new SkillLoader(options.workDir);
-  const summaries = await loader.listSummaries();
+  const skillBaseDirs = [
+    join(options.workDir, ".claude", "skills"),
+    join(options.workDir, ".claw", "skills"),
+  ];
+  const skillFiles = (await Promise.all(skillBaseDirs.map(walkSkillMarkdownFiles))).flat();
   const commands: MarkdownPromptCommand[] = [];
 
-  for (const summary of summaries) {
-    if (!COMMAND_NAME_PATTERN.test(summary.name)) continue;
-    const body = await loader.viewBody(summary.name);
-    if (body === undefined) continue;
-    const sourcePath = await loader.viewSourcePath(summary.name);
-    commands.push({
-      description: summary.description,
-      name: summary.name,
-      priority: COMMAND_PRIORITIES.skill,
-      prompt: body,
-      source: "skill",
-      ...(sourcePath ? { sourcePath } : {}),
-    });
+  for (const sourcePath of skillFiles) {
+    const content = await readFile(sourcePath, "utf8");
+    const fallbackName = basename(dirname(sourcePath));
+    const command = parseSkillProjectionCommand(content, fallbackName, sourcePath);
+    if (command) commands.push(command);
   }
 
   return commands;
+}
+
+async function walkSkillMarkdownFiles(dir: string): Promise<string[]> {
+  const files = await walkMarkdownFiles(dir);
+  return files.filter((file) => basename(file) === "SKILL.md");
+}
+
+function parseSkillProjectionCommand(
+  content: string,
+  fallbackName: string,
+  sourcePath: string,
+): MarkdownPromptCommand | undefined {
+  const { frontmatter, prompt } = parseMarkdownContent(content);
+  const name = normalizeString(frontmatter.name) || fallbackName;
+  if (!COMMAND_NAME_PATTERN.test(name)) return undefined;
+
+  return {
+    description: normalizeString(frontmatter.description),
+    name,
+    priority: COMMAND_PRIORITIES.skill,
+    prompt,
+    source: "skill",
+    sourcePath,
+    ...optionalString("argumentHint", frontmatter["argument-hint"]),
+    ...optionalString("model", frontmatter.model),
+    ...optionalAllowedTools(frontmatter["allowed-tools"]),
+  };
 }
 
 function makeBuiltinPlaceholder(name: string): MarkdownPromptCommand {
@@ -201,6 +219,19 @@ function makeBuiltinPlaceholder(name: string): MarkdownPromptCommand {
     priority: COMMAND_PRIORITIES.builtin,
     prompt: "",
     source: "builtin",
+  };
+}
+
+function parseMarkdownContent(content: string): {
+  frontmatter: Record<string, unknown>;
+  prompt: string;
+} {
+  const stripped = content.replace(/^\uFEFF/, "");
+  const match = stripped.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n([\s\S]*))?$/);
+  const frontmatterText = match?.[1] ?? "";
+  return {
+    frontmatter: parseFrontmatter(frontmatterText),
+    prompt: (match ? (match[2] ?? "") : stripped).trim(),
   };
 }
 

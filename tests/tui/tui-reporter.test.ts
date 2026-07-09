@@ -26,7 +26,7 @@ describe("TuiReporter", () => {
     expect(last()).toEqual([{ kind: "thinking" }]);
   });
 
-  it("onToolCall → onToolResult 配对更新状态(running→done)", () => {
+  it("onToolCall → onToolResult 配对更新状态(running→success)", () => {
     const { reporter, last } = harness();
     reporter.onToolCall("read_file", '{"path":"README.md"}');
     let entries = last()!;
@@ -34,7 +34,7 @@ describe("TuiReporter", () => {
 
     reporter.onToolResult("read_file", "# pico-harness\n一个引擎", false);
     entries = last()!;
-    expect(entries[0]).toMatchObject({ kind: "tool", name: "read_file", status: "done" });
+    expect(entries[0]).toMatchObject({ kind: "tool", name: "read_file", status: "success" });
     const entry = entries[0]!;
     expect(entry.kind === "tool" ? entry.summary : undefined).toContain("字节");
   });
@@ -116,9 +116,9 @@ describe("TuiReporter", () => {
     reporter.onToolCall("read_file", '{"path":"b"}');
     reporter.onToolResult("read_file", "内容a", false);
     const entries = last()!;
-    // 第一个仍 running,第二个 done
+    // 第一个仍 running,第二个 success
     expect(entries[0]).toMatchObject({ status: "running" });
-    expect(entries[1]).toMatchObject({ status: "done" });
+    expect(entries[1]).toMatchObject({ status: "success" });
   });
 
   it("onUpdate 每次回调传入新数组引用(触发 ink 重渲染)", () => {
@@ -194,7 +194,7 @@ describe("TuiReporter", () => {
     );
 
     const entry = last()![0]!;
-    expect(entry).toMatchObject({ kind: "tool", name: "delegate_task", status: "failed" });
+    expect(entry).toMatchObject({ kind: "tool", name: "delegate_task", status: "error" });
     expect(entry.kind === "tool" ? entry.summary : "").toContain("1/2 completed");
     expect(entry.kind === "tool" ? entry.summary : "").toContain("reviewer confirmed");
     expect(entry.kind === "tool" ? entry.summary : "").toContain("TypeError");

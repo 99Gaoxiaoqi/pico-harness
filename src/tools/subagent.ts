@@ -233,7 +233,7 @@ export class DelegateTaskTool implements BaseTool {
       description:
         "把一个或多个互不依赖的任务委派给隔离子智能体执行。默认 explore 模式只读分析;" +
         "mode=worker 时子智能体可使用受控 write_file/edit_file/bash 完成局部开发;" +
-        "tasks 可批量并行执行;background=true 会立即返回 delegationId,之后用 delegate_status 查询。",
+        "tasks 可批量并行执行;background=true 会立即返回 taskId/delegationId,之后用 delegate_status 查询。",
       inputSchema: {
         type: "object",
         properties: {
@@ -277,7 +277,8 @@ export class DelegateTaskTool implements BaseTool {
           },
           background: {
             type: "boolean",
-            description: "是否后台运行。true 时立即返回 delegationId,后续用 delegate_status 查询。",
+            description:
+              "是否后台运行。true 时立即返回 taskId/delegationId,后续用 delegate_status 查询。",
           },
         },
       },

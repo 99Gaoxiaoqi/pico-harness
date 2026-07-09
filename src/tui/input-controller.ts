@@ -81,6 +81,9 @@ export function reduceInputControllerEvent(
     if (key.meta || key.shift) {
       return insertText(nextState, "\n", options);
     }
+    if (hasSelectableSuggestion(nextState)) {
+      return completeSuggestion(nextState, options);
+    }
     return submit(nextState);
   }
 
@@ -94,11 +97,15 @@ export function reduceInputControllerEvent(
     return insertText(state, "\n", options);
   }
 
+  if (returnPressed && hasSelectableSuggestion(state)) {
+    return completeSuggestion(state, options);
+  }
+
   if (returnPressed) {
     return submit(state);
   }
 
-  if (key.tab && state.activeSuggestions && state.activeSuggestions.items.length > 0) {
+  if (key.tab && hasSelectableSuggestion(state)) {
     return completeSuggestion(state, options);
   }
 
@@ -362,6 +369,10 @@ function completeSuggestion(
     nextCursor,
     options,
   );
+}
+
+function hasSelectableSuggestion(state: InputControllerState): boolean {
+  return Boolean(state.activeSuggestions && state.activeSuggestions.items.length > 0);
 }
 
 function moveSuggestionSelection(

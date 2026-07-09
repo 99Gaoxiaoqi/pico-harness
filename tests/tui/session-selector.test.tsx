@@ -1,15 +1,9 @@
 import { renderToString } from "ink";
 import { describe, expect, it } from "vitest";
-import {
-  SessionSelector,
-  formatSessionSelector,
-} from "../../src/tui/session-selector.js";
+import { SessionSelector, formatSessionSelector } from "../../src/tui/session-selector.js";
 import type { CliSessionSummary } from "../../src/cli/session-resolver.js";
 
-type SessionSummaryOverrides = Omit<
-  Partial<CliSessionSummary>,
-  "createdAt" | "updatedAt"
-> & {
+type SessionSummaryOverrides = Omit<Partial<CliSessionSummary>, "createdAt" | "updatedAt"> & {
   createdAt?: Date | string;
   updatedAt?: Date | string;
 };
@@ -26,26 +20,71 @@ describe("SessionSelector", () => {
       [
         sessionSummary({
           id: "cli-current",
+          cwd: "/tmp/current-project",
           messageCount: 2,
           updatedAt: "2026-07-09T03:00:00.000Z",
         }),
       ],
-      { currentSessionId: "cli-current" },
+      {
+        currentProjectCwd: "/tmp/current-project",
+        currentSessionId: "cli-current",
+      },
     );
 
     expect(output).toContain("cli-current");
-    expect(output).toContain("current");
+    expect(output).toContain("[current]");
     expect(output).toContain("messages=2");
-    expect(output).toContain("use=/resume cli-current");
+    expect(output).toContain("use: /resume cli-current");
   });
 
   it("truncates long session ids without losing the resume target", () => {
     const longId = "cli-abcdefghijklmnopqrstuvwxyz-0123456789-long-tail";
 
-    const output = formatSessionSelector([sessionSummary({ id: longId })]);
+    const output = formatSessionSelector(
+      [sessionSummary({ id: longId, cwd: "/tmp/current-project" })],
+      { currentProjectCwd: "/tmp/current-project" },
+    );
 
     expect(output).toContain("cli-abcdefghijklmnopqrstuvwxyz-012…");
-    expect(output).toContain(`use=/resume ${longId}`);
+    expect(output).toContain(`use: /resume ${longId}`);
+
+    const summaryLine = output.split("\n").find((line) => line.startsWith("- "))!;
+    expect(summaryLine).not.toContain(longId);
+    expect(summaryLine.length).toBeLessThanOrEqual(120);
+  });
+
+  it("orders current project sessions before cross-project sessions", () => {
+    const output = formatSessionSelector(
+      [
+        sessionSummary({
+          id: "cli-other-newer",
+          cwd: "/tmp/other-project",
+          updatedAt: "2026-07-09T05:00:00.000Z",
+        }),
+        sessionSummary({
+          id: "cli-current-older",
+          cwd: "/tmp/current-project",
+          updatedAt: "2026-07-09T04:00:00.000Z",
+        }),
+      ],
+      { currentProjectCwd: "/tmp/current-project" },
+    );
+
+    expect(output.indexOf("cli-current-older")).toBeLessThan(output.indexOf("cli-other-newer"));
+  });
+
+  it("shows a shell launch hint for cross-project sessions", () => {
+    const output = formatSessionSelector(
+      [
+        sessionSummary({
+          id: "cli-other",
+          cwd: "/tmp/other-project",
+        }),
+      ],
+      { currentProjectCwd: "/tmp/current-project" },
+    );
+
+    expect(output).toContain("launch: cd /tmp/other-project && pico --resume cli-other");
   });
 
   it("renders formatted rows as an Ink component", () => {
@@ -67,9 +106,7 @@ describe("SessionSelector", () => {
   });
 });
 
-function sessionSummary(
-  overrides: SessionSummaryOverrides = {},
-): CliSessionSummary {
+function sessionSummary(overrides: SessionSummaryOverrides = {}): CliSessionSummary {
   return {
     id: overrides.id ?? "cli-one",
     cwd: overrides.cwd ?? "/tmp/project",
