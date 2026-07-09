@@ -89,7 +89,7 @@ CanonicalUsage = {
 ```ts
 waitForApproval(taskId, toolName, args, notify, diff?) → Promise<ApprovalResult>
 // 返回新 Promise + setTimeout(30分钟超时)
-// notify 发审批请求(飞书卡片/终端/HTTP)
+// notify 发审批请求(终端/TUI host)
 // resolveApproval(taskId, allowed, reason) 回调流触发
 ```
 
@@ -168,6 +168,8 @@ new CostTracker(provider, modelRoute, session)
 - 借鉴 OpenTelemetry/Jaeger 的 Span 机制
 - 三层结构：Root Span(一次 Run) → Turn Span → Leaf Span(Generate/Execute/Compaction)
 - 导出 JSON 到 `.claw/traces/`
+- 入口：显式 `trace: true` 或环境变量 `PICO_TRACE=1`
+- TUI 每轮结束后把 `result.tracePath` 追加为 system message，方便直接打开文件复盘
 
 ### Pricing (`pricing.ts`)
 - 硬编码官方定价快照（glm-5.2/glm-4.5-air/kimi-k2.5/claude-3-5-sonnet）
@@ -204,8 +206,8 @@ new CostTracker(provider, modelRoute, session)
 ### 环境变量
 - `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL`（必填）
 - `LLM_API_KEYS`（复数，逗号分隔，429 自动轮换）
-- `FEISHU_*`（飞书可选）
 - `AUX_LLM_*`（辅助廉价模型，FullCompactor 用）
+- `PICO_TRACE=1`（每轮导出 trace JSON）
 - `LOG_LEVEL`（默认 info）
 - `SEARCH_API_BASE` / `SEARCH_API_KEY`（WebSearch）
 

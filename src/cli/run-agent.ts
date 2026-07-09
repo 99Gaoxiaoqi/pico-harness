@@ -58,9 +58,9 @@ export interface RunAgentCliOptions {
   dir?: string;
   /** 兼容旧 --session:按指定 id 恢复会话 */
   session?: string;
-  /** Claude Code 风格 -c/--continue:继续当前项目最近一次会话 */
+  /** Continue the latest session in the current project. */
   continueSession?: boolean;
-  /** Claude Code 风格 -r/--resume:恢复指定会话 */
+  /** Resume a specific session. */
   resumeSession?: string;
   /** 从指定会话派生一个新会话 */
   forkSession?: string;
@@ -71,17 +71,14 @@ export interface RunAgentCliOptions {
   apiKey?: string;
   model?: string;
   enableThinking?: boolean;
-  /** 模型原生思考强度(off/low/medium/high),控制 reasoning_effort / thinking.budget_tokens */
+  /** Native model thinking effort: off/low/medium/high. */
   thinkingEffort?: ThinkingEffort;
   planMode?: boolean;
+  /** Enable per-request JSON trace export. Also enabled by PICO_TRACE=1. */
   trace?: boolean;
   /** MCP 配置文件路径(--mcp-config)。提供则启动时连接所有 MCP server 并注册工具 */
   mcpConfigPath?: string;
-  /**
-   * Steer 文本(ROADMAP 3.2,--steer):run 前一次性注入队列。
-   * engine 第一轮(A 点)peek 即可见,第一轮工具执行后(C 点)落 session 永久浮现。
-   * TUI 当前只在启动本轮 run 前一次性注入。
-   */
+  /** Steer text injected once before the run starts. */
   steer?: string;
   /**
    * 图片附件路径(5.5e Image/Media):--image <path> 启动注入。
@@ -164,12 +161,15 @@ export async function runAgentFromCli(
     ...(options.thinkingEffort !== undefined ? { thinkingEffort: options.thinkingEffort } : {}),
     permissionMode: "ask",
   });
+  const traceEnabled =
+    options.trace === true || isTruthyEnv((dependencies.env ?? process.env).PICO_TRACE);
   const effectiveOptions: RunAgentCliOptions = {
     ...options,
     dir: workDir,
     session: sessionSelection.sessionId,
     sessionSelection,
     model: options.model ?? settings.model,
+    trace: traceEnabled,
     ...(options.thinkingEffort !== undefined
       ? { thinkingEffort: options.thinkingEffort }
       : settings.thinkingEffortExplicit
@@ -223,11 +223,9 @@ export async function runAgentFromCli(
   // GoalManager 单例:registry(3 工具)与 engine(prompt 注入 + Grace Call)共享同一实例,
   // 确保工具改的状态引擎侧立即可见。
   const goalManager = new GoalManager();
-  // TodoStore 单例:registry(TodoTool)与 PromptComposer 共享同一实例,
-  // 根治历史上 TodoTool/Composer 各 new 各的跨实例不可见 bug(对标 GoalManager 范式)。
+  // TodoTool and PromptComposer must share one store so todo context stays current.
   const todoStore = new TodoStore(workDir);
-  // 工具渐进披露状态机(ROADMAP 5.4):registry(search_tools 元工具)与 engine(pickForLLM)共享同一实例,
-  // 确保扩展工具被披露后下一轮即进入 LLM 工具列表。对标 GoalManager/TodoStore 注入范式。
+  // search_tools and engine tool selection share disclosure state across turns.
   const toolDisclosure = dependencies.toolDisclosure ?? new ToolDisclosure();
   const registry = buildRegistry(
     workDir,
@@ -244,8 +242,7 @@ export async function runAgentFromCli(
     registry.setHookRunner?.(new HookRunner(workDir, hooksConfig));
   }
   const observationProcessor = buildObservationProcessor(workDir);
-  // Steer 队列(ROADMAP 3.2):CLI --steer 启动注入。run 前一次性 push,
-  // engine 第一轮 A 点 peek 即可见。
+  // Inject steer text before the first turn can read it.
   const steerQueue = new SteerQueue();
   if (options.steer) {
     steerQueue.push(options.steer);
@@ -280,7 +277,7 @@ export async function runAgentFromCli(
     }),
     observationProcessor,
     reporter: dependencies.reporter ?? new TerminalReporter(),
-    tracer: effectiveOptions.trace === true ? new Tracer() : undefined,
+    tracer: traceEnabled ? new Tracer() : undefined,
     steerQueue,
     ...(rebuildProvider ? { rebuildProvider } : {}),
   });
@@ -326,7 +323,7 @@ export async function runAgentFromCli(
         finalMessage: findFinalMessage(messages),
         usage: snapshotUsage(session),
         messages,
-        ...(effectiveOptions.trace === true
+        ...(traceEnabled
           ? { tracePath: await findTracePath(workDir, session.id) }
           : {}),
       };
@@ -334,7 +331,7 @@ export async function runAgentFromCli(
       return result;
     });
   } finally {
-    // 进程退出前优雅关闭所有 MCP 连接(杀子进程/关 HTTP 连接)
+    // Close MCP connections and child processes before returning.
     if (mcpManager) {
       await mcpManager.closeAll();
     }
@@ -586,6 +583,10 @@ function snapshotUsage(session: Session): RunAgentUsage {
     completionTokens: session.totalCompletionTokens,
     costCNY: session.totalCostCNY,
   };
+}
+
+function isTruthyEnv(value: string | undefined): boolean {
+  return value === "1" || value?.toLowerCase() === "true" || value?.toLowerCase() === "on";
 }
 
 async function findTracePath(workDir: string, sessionId: string): Promise<string | undefined> {

@@ -27,6 +27,16 @@ npx tsx --env-file=/path/to/pico-harness/.env \
 - CLI session 保存在当前项目的 `.claw/sessions/<session-id>.jsonl`，不同项目目录互不混用。
 - 已安装的 `pico` 不会自动读取本仓库 `.env`；请提前导出环境变量，或使用上面的开发命令显式传 `--env-file`。
 
+## Trace 调试入口
+
+需要复盘每轮 agent 决策时，在启动前设置：
+
+```bash
+PICO_TRACE=1 pico
+```
+
+开启后，每次请求都会把 span tree 写到当前项目的 `.claw/traces/trace_<session>_<timestamp>.json`。TUI 会在本轮结束后追加一条 system message，直接显示保存路径；程序化调用仍可从 `runAgentFromCli()` 的 `result.tracePath` 读取同一路径。
+
 ## Session 启动语义
 
 Pico 的 CLI session 以当前项目目录为边界：
