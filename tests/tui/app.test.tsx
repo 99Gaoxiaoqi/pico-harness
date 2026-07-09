@@ -71,7 +71,7 @@ describe("App", () => {
     expect(output).toContain("打开设置");
     expect(output).toContain("Settings modal");
     expect(output).not.toContain("Overlay tips");
-    expect(countOccurrences(output, "Running")).toBe(1);
+    expect(output).toContain("Use dialog controls");
     expect(countOccurrences(output, 'Try "fix this" or / for commands')).toBe(0);
   });
 

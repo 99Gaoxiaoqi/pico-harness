@@ -62,7 +62,7 @@ import {
 } from "./session-browser-adapter.js";
 import { createRewindCommandDialogRequest } from "./rewind-command-dialog.js";
 import { globalApprovalManager, globalApprovalPolicy, type ApprovalNotice } from "../approval/manager.js";
-import { ApprovalPanel } from "./approval-panel.js";
+import { InteractiveApprovalPanel, type ApprovalPanelAction } from "./approval-panel.js";
 
 export interface ReplOptions {
   /** 工作区 */
@@ -475,6 +475,8 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
                   request,
                 ]);
               },
+              closeDialog: (id) =>
+                setDialogRequests((current) => current.filter((item) => item.id !== id)),
               mcpStatusSink: (snapshot) => {
                 latestMcpStatus = snapshot;
               },
@@ -631,6 +633,7 @@ export async function runTuiAgentPrompt(
     toolDisclosure?: ToolDisclosure;
     mcpStatusSink?: (snapshot: McpStatusSnapshot) => void;
     openDialog?: (request: DialogRequest) => void;
+    closeDialog?: (id: string) => void;
     runAgent?: TuiRunAgent;
   },
 ): Promise<void> {
@@ -638,7 +641,12 @@ export async function runTuiAgentPrompt(
     reporter: deps.reporter,
     approvalNotifier: (notice) => {
       deps.reporter.onToolAwaitingApproval(notice.toolName, notice.args);
-      deps.openDialog?.(createApprovalDialogRequest(notice));
+      deps.openDialog?.(
+        createApprovalDialogRequest(notice, {
+          reporter: deps.reporter,
+          closeDialog: deps.closeDialog,
+        }),
+      );
     },
     ...(deps.toolDisclosure ? { toolDisclosure: deps.toolDisclosure } : {}),
     ...(deps.mcpStatusSink ? { mcpStatusSink: deps.mcpStatusSink } : {}),
@@ -648,12 +656,22 @@ export async function runTuiAgentPrompt(
   }
 }
 
-function createApprovalDialogRequest(notice: ApprovalNotice): DialogRequest {
+function createApprovalDialogRequest(
+  notice: ApprovalNotice,
+  deps: Pick<HandleTuiInputSubmissionDeps, "reporter" | "closeDialog">,
+): DialogRequest {
   return {
     id: APPROVAL_DIALOG_ID,
     layer: "modal",
     priority: APPROVAL_DIALOG_PRIORITY,
-    content: <ApprovalPanel {...notice} />,
+    content: (
+      <InteractiveApprovalPanel
+        {...notice}
+        onAction={(action) =>
+          resolveApprovalAction({ action, taskId: notice.taskId }, deps)
+        }
+      />
+    ),
   };
 }
 
@@ -661,6 +679,16 @@ function handleApprovalCommand(text: string, deps: Pick<HandleTuiInputSubmission
   const parsed = parseApprovalCommand(text);
   if (!parsed) return false;
 
+  resolveApprovalAction(parsed, deps);
+  return true;
+}
+
+function resolveApprovalAction(
+  parsed:
+    | { action: ApprovalPanelAction; taskId: string }
+    | { action: "modify"; taskId: string; content: string },
+  deps: Pick<HandleTuiInputSubmissionDeps, "reporter" | "closeDialog">,
+): boolean {
   if (parsed.action === "approve-session") {
     const pending = globalApprovalManager.getPendingTask(parsed.taskId);
     if (pending) {
@@ -686,7 +714,7 @@ function handleApprovalCommand(text: string, deps: Pick<HandleTuiInputSubmission
       ? `Approval ${parsed.action}: ${parsed.taskId}`
       : `Approval task not found: ${parsed.taskId}`,
   );
-  return true;
+  return ok;
 }
 
 type ParsedApprovalCommand =

@@ -92,7 +92,11 @@ export function App({
 }: AppProps): React.ReactNode {
   const { exit } = useApp();
   const { rows, columns } = useWindowSize();
-  const transcriptRows = Math.max(6, rows - 8);
+  const focusedDialog = pickFocusedDialog(dialogRequests);
+  const modal = focusedDialog?.layer === "modal" ? focusedDialog.content : undefined;
+  const overlay = focusedDialog?.layer === "overlay" ? focusedDialog.content : undefined;
+  const inputDisabled = modal !== undefined;
+  const transcriptRows = Math.max(inputDisabled ? 3 : 6, rows - (inputDisabled ? 13 : 8));
   const transcriptWrapWidth = Math.max(20, columns - 6);
   const getEntryRows = useMemo(
     () => (entry: TuiEntry) => estimateEntryRows(entry, transcriptWrapWidth),
@@ -138,10 +142,7 @@ export function App({
   const isStreaming = running && isActivelyStreaming(entries);
   // spinner 阶段:据末尾条目状态选
   const spinnerMode = pickSpinnerMode(entries, isStreaming);
-  const focusedDialog = pickFocusedDialog(dialogRequests);
-  const modal = focusedDialog?.layer === "modal" ? focusedDialog.content : undefined;
-  const overlay = focusedDialog?.layer === "overlay" ? focusedDialog.content : undefined;
-  const inputDisabled = modal !== undefined;
+  const showSpinner = running && !inputDisabled;
 
   // 诊断:记录每次渲染的 entries 状态
   dbg(`render: entries=${entries.length} running=${running} streaming=${isStreaming}`);
@@ -181,7 +182,7 @@ export function App({
       </Box>
 
       {/* 思考/spinner:据末尾状态显示对应 mode */}
-      {running && (
+      {showSpinner && (
         <Box paddingX={1}>
           <Spinner mode={spinnerMode} />
         </Box>
@@ -200,6 +201,7 @@ export function App({
     >
       <InputBox
         disabled={inputDisabled}
+        disabledLabel="Use dialog controls"
         slashCommandSuggestions={slashCommandSuggestions}
         slashArgumentSuggestions={slashArgumentSuggestions}
         fileMentionSuggestions={fileMentionSuggestions}

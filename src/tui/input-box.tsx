@@ -21,6 +21,8 @@ import { SuggestionList } from "./suggestions.js";
 export interface InputBoxProps {
   /** 禁用状态(模型运行中) */
   disabled?: boolean;
+  /** 禁用时展示的静态提示 */
+  disabledLabel?: string;
   /** Slash command 候选源,query 不含前导 / */
   slashCommandSuggestions?: SuggestionSource;
   /** Slash command 参数候选源,query 为当前参数前缀 */
@@ -33,6 +35,7 @@ export interface InputBoxProps {
 
 export function InputBox({
   disabled,
+  disabledLabel = "Running…",
   slashCommandSuggestions,
   slashArgumentSuggestions,
   fileMentionSuggestions,
@@ -60,7 +63,7 @@ export function InputBox({
 
   return (
     <Box flexDirection="column">
-      {renderInputPrompt({ disabled: Boolean(disabled), text, cursor })}
+      {renderInputPrompt({ disabled: Boolean(disabled), disabledLabel, text, cursor })}
       {!disabled && <SuggestionList session={activeSuggestions} />}
     </Box>
   );
@@ -68,10 +71,12 @@ export function InputBox({
 
 export function renderInputPrompt({
   disabled,
+  disabledLabel = "Running…",
   text,
   cursor,
 }: {
   disabled: boolean;
+  disabledLabel?: string;
   text: string;
   cursor: number;
 }): React.ReactNode {
@@ -80,7 +85,7 @@ export function renderInputPrompt({
       <Text color={disabled ? "gray" : "green"} bold={!disabled}>
         ❯{" "}
       </Text>
-      {renderInputContent(text, cursor, disabled)}
+      {renderInputContent(text, cursor, disabled, disabledLabel)}
     </Box>
   );
 }
@@ -89,12 +94,13 @@ function renderInputContent(
   text: string,
   cursor: number,
   disabled: boolean,
+  disabledLabel: string,
 ): React.ReactNode {
   if (disabled) {
     return (
       <Box flexDirection="column">
         {text ? renderMultilineText(text) : null}
-        <Text dimColor>Running…</Text>
+        <Text dimColor>{disabledLabel}</Text>
       </Box>
     );
   }

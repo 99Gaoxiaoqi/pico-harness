@@ -1,9 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { createPermissionState } from "../../src/approval/permission-state.js";
-import { formatApprovalPanel, formatPermissionPanel } from "../../src/tui/approval-panel.js";
+import {
+  formatApprovalPanel,
+  formatPermissionPanel,
+  resolveApprovalPanelKey,
+} from "../../src/tui/approval-panel.js";
 
 describe("ApprovalPanel", () => {
-  it("展示工具名、命令和四个审批入口", () => {
+  it("展示工具名、命令和键盘审批入口", () => {
     const output = formatApprovalPanel({
       taskId: "task-1",
       toolName: "bash",
@@ -13,13 +17,34 @@ describe("ApprovalPanel", () => {
 
     expect(output).toContain("bash");
     expect(output).toContain("rm -rf dist");
-    expect(output).toContain("allow once");
-    expect(output).toContain("allow session");
-    expect(output).toContain("deny");
-    expect(output).toContain("edit");
+    expect(output).toContain("Enter/Y");
+    expect(output).toContain("A 本会话允许");
+    expect(output).toContain("N/Esc");
     expect(output).toContain("approve task-1");
     expect(output).toContain("reject task-1");
     expect(output).toContain("modify task-1");
+  });
+
+  it("审批面板按键映射到审批动作", () => {
+    expect(resolveApprovalPanelKey("", { return: true })).toBe("approve");
+    expect(resolveApprovalPanelKey("y", {})).toBe("approve");
+    expect(resolveApprovalPanelKey("a", {})).toBe("approve-session");
+    expect(resolveApprovalPanelKey("n", {})).toBe("reject");
+    expect(resolveApprovalPanelKey("", { escape: true })).toBe("reject");
+    expect(resolveApprovalPanelKey("x", {})).toBeNull();
+  });
+
+  it("diff 在审批面板里只展示统计摘要", () => {
+    const output = formatApprovalPanel({
+      taskId: "task-3",
+      toolName: "write_file",
+      args: JSON.stringify({ path: "AIHOT.md" }),
+      message: "需要审批",
+      diff: ["--- old", "+++ new", "+line 1", "+line 2", "-line 3"].join("\n"),
+    });
+
+    expect(output).toContain("Diff: +2 -1");
+    expect(output).not.toContain("+line 1");
   });
 
   it("展示文件路径作为审批目标", () => {
