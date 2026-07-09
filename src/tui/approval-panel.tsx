@@ -1,16 +1,31 @@
 import React from "react";
-import { Box, Text } from "ink";
+import { Box, Text, useInput } from "ink";
 import type { ApprovalNotice } from "../approval/manager.js";
 import type {
   PermissionRecentDenial,
   PermissionRule,
   PermissionState,
 } from "../approval/permission-state.js";
-import { DiffPreview, formatDiffPreview } from "./diff-preview.js";
 
 export type ApprovalPanelProps = ApprovalNotice;
 export interface PermissionPanelProps {
   state: PermissionState;
+}
+export type ApprovalPanelAction = "approve" | "approve-session" | "reject";
+export interface InteractiveApprovalPanelProps extends ApprovalPanelProps {
+  onAction: (action: ApprovalPanelAction) => void;
+}
+
+export function InteractiveApprovalPanel({
+  onAction,
+  ...notice
+}: InteractiveApprovalPanelProps): React.ReactNode {
+  useInput((input, key) => {
+    const action = resolveApprovalPanelKey(input, key);
+    if (action) onAction(action);
+  });
+
+  return <ApprovalPanel {...notice} />;
 }
 
 export function ApprovalPanel(notice: ApprovalPanelProps): React.ReactNode {
@@ -21,7 +36,6 @@ export function ApprovalPanel(notice: ApprovalPanelProps): React.ReactNode {
         .map((line, index) => (
           <Text key={`${index}:${line}`}>{line}</Text>
         ))}
-      {notice.diff && <DiffPreview diff={notice.diff} maxLines={40} />}
     </Box>
   );
 }
@@ -44,19 +58,41 @@ export function formatApprovalPanel(
 ): string {
   const target = approvalTarget(notice.toolName, notice.args);
   const lines = [
-    `[审批] ${notice.toolName}`,
+    `Approval required: ${notice.toolName}`,
     `目标: ${target}`,
     `任务: ${notice.taskId}`,
-    `allow once: approve ${notice.taskId}`,
-    `allow session: approve-session ${notice.taskId}`,
-    `deny: reject ${notice.taskId}`,
-    `edit: modify ${notice.taskId} <content>`,
+    `Enter/Y 允许一次 · A 本会话允许 · N/Esc 拒绝`,
+    `命令备用: approve ${notice.taskId} · reject ${notice.taskId} · modify ${notice.taskId} <content>`,
   ];
+  if (notice.diff) {
+    lines.push(formatDiffSummary(notice.diff));
+  }
   if (options.includeDiff !== false && notice.diff) {
-    const diff = formatDiffPreview(notice.diff, { maxLines: 40 });
-    if (diff) lines.push("Diff:", diff);
+    lines.push("Diff preview hidden in TUI approval. Use edit/view tools after approval if needed.");
   }
   return lines.join("\n");
+}
+
+export function resolveApprovalPanelKey(
+  input: string,
+  key: { return?: boolean; escape?: boolean },
+): ApprovalPanelAction | null {
+  const normalized = input.toLowerCase();
+  if (key.return || normalized === "y") return "approve";
+  if (normalized === "a") return "approve-session";
+  if (key.escape || normalized === "n") return "reject";
+  return null;
+}
+
+export function formatDiffSummary(diff: string): string {
+  const lines = diff.split("\n");
+  let added = 0;
+  let removed = 0;
+  for (const line of lines) {
+    if (line.startsWith("+") && !line.startsWith("+++")) added++;
+    if (line.startsWith("-") && !line.startsWith("---")) removed++;
+  }
+  return `Diff: +${added} -${removed} (${lines.length} 行, 已折叠)`;
 }
 
 export function formatPermissionPanel(state: PermissionState): string {
