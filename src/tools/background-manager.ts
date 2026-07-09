@@ -2,6 +2,7 @@ import { spawn, type ChildProcessByStdio } from "node:child_process";
 import { basename } from "node:path";
 import type { Readable } from "node:stream";
 import { isWindows, resolveShell } from "../os/shell.js";
+import { TaskRegistry } from "../tasks/task-registry.js";
 
 export type BackgroundTaskStatus = "running" | "exited" | "failed" | "stopped";
 
@@ -27,6 +28,7 @@ export interface BackgroundManagerOptions {
   maxOutputChars?: number;
   stopTimeoutMs?: number;
   maxCompletedTasks?: number;
+  taskRegistry?: TaskRegistry;
 }
 
 interface ManagedTask {
@@ -48,24 +50,37 @@ export class BackgroundManager {
   private readonly maxOutputChars: number;
   private readonly stopTimeoutMs: number;
   private readonly maxCompletedTasks: number;
+  readonly taskRegistry: TaskRegistry;
   private nextId = 1;
 
   constructor(options: BackgroundManagerOptions = {}) {
     this.maxOutputChars = options.maxOutputChars ?? DEFAULT_MAX_OUTPUT_CHARS;
     this.stopTimeoutMs = options.stopTimeoutMs ?? DEFAULT_STOP_TIMEOUT_MS;
     this.maxCompletedTasks = options.maxCompletedTasks ?? DEFAULT_MAX_COMPLETED_TASKS;
+    this.taskRegistry = options.taskRegistry ?? new TaskRegistry();
   }
 
   start(command: string, cwd: string): BackgroundTaskRecord {
     const order = this.nextId;
-    const taskId = this.createTaskId();
-    const shell = resolveShell();
-    const child = spawn(shell, shellArgs(shell, command), {
-      cwd,
-      detached: !isWindows,
-      windowsHide: true,
-      stdio: ["ignore", "pipe", "pipe"],
+    this.nextId++;
+    const task = this.taskRegistry.create("local_bash", {
+      description: command,
+      data: { command, cwd },
     });
+    const taskId = task.taskId;
+    const shell = resolveShell();
+    let child: ChildProcessByStdio<null, Readable, Readable>;
+    try {
+      child = spawn(shell, shellArgs(shell, command), {
+        cwd,
+        detached: !isWindows,
+        windowsHide: true,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } catch (err) {
+      this.taskRegistry.fail(taskId, err);
+      throw err;
+    }
 
     const record: BackgroundTaskRecord = {
       taskId,
@@ -78,6 +93,7 @@ export class BackgroundManager {
       startedAt: new Date(),
       endedAt: null,
     };
+    this.taskRegistry.start(taskId, { data: { pid: record.pid } });
 
     let resolveClose: (record: BackgroundTaskRecord) => void = () => {};
     const closePromise = new Promise<BackgroundTaskRecord>((resolve) => {
@@ -101,10 +117,11 @@ export class BackgroundManager {
     child.stderr.on("data", (chunk: string) => {
       managed.stderr = appendRing(managed.stderr, chunk, this.maxOutputChars);
     });
-    child.on("error", () => {
+    child.on("error", (err) => {
       if (record.status === "running") {
         record.status = "failed";
         record.endedAt = new Date();
+        this.taskRegistry.fail(taskId, err);
       }
     });
     child.on("close", (code, signal) => {
@@ -114,6 +131,15 @@ export class BackgroundManager {
       record.exitCode = code;
       record.signal = signal;
       record.endedAt = new Date();
+      if (record.status === "stopped") {
+        this.taskRegistry.kill(taskId, "stopped", { data: { exitCode: code, signal } });
+      } else if (record.status === "exited" && code === 0) {
+        this.taskRegistry.complete(taskId, { data: { exitCode: code, signal } });
+      } else if (record.status === "exited") {
+        this.taskRegistry.fail(taskId, `exit code ${code ?? "unknown"}`, {
+          data: { exitCode: code, signal },
+        });
+      }
       this.pruneCompletedTasks();
       resolveClose({ ...record });
     });
@@ -151,10 +177,6 @@ export class BackgroundManager {
     });
   }
 
-  private createTaskId(): string {
-    return `bg-${Date.now().toString(36)}-${this.nextId++}`;
-  }
-
   private getTask(taskId: string): ManagedTask {
     const task = this.tasks.get(taskId);
     if (!task) {
@@ -186,6 +208,7 @@ export class BackgroundManager {
       task.record.status = "stopped";
       task.record.signal = signal;
       task.record.endedAt = new Date();
+      this.taskRegistry.kill(task.record.taskId, "stopped", { data: { signal } });
       this.pruneCompletedTasks();
     }
     return { ...task.record };

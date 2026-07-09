@@ -352,7 +352,7 @@ describe("BashTool", () => {
 
     expect(Date.now() - startedAt).toBeLessThan(200);
     const parsed = JSON.parse(out) as { taskId: string; pid: number; status: string };
-    expect(parsed.taskId).toMatch(/^bg-/);
+    expect(parsed.taskId).toMatch(/^b_[0-9a-z]{8}$/);
     expect(parsed.pid).toBeGreaterThan(0);
     expect(parsed.status).toBe("running");
     expect(backgroundManager.list().map((task) => task.taskId)).toContain(parsed.taskId);
@@ -1061,4 +1061,3 @@ describe("ToolRegistry hooks 集成 (任务 2.6)", () => {
     expect(received!.session_id).toBe("sess-abc-789");
   });
 });
-
