@@ -148,4 +148,4 @@
   `npm test -- tests/input/skill-commands.test.ts tests/input/markdown-command-loader.test.ts tests/tui/suggestions.test.tsx tests/tui/input-box.test.tsx tests/tui/tool-card.test.ts tests/tui/tui-reporter.test.ts tests/tui/approval-panel.test.tsx tests/approval/permission-state.test.ts tests/subagent.test.ts tests/tools/background-manager.test.ts tests/tui/session-selector.test.tsx`
 - [x] 运行宽集成测试：`npm test -- tests/input tests/tui tests/tools/background-manager.test.ts tests/subagent.test.ts tests/approval`
 - [x] 运行自动 TUI 烟测：`npm run smoke:tui`
-- [ ] 提交并推送 `main`。
+- [x] 提交并推送 `main`。
