@@ -282,10 +282,10 @@ git worktree remove ../pico-1-streaming
 - [x] 6.1 统一 Task Runtime：统一 background bash / subagent / workflow 的 task 状态模型
 - [x] 6.2 Keybinding Kernel：上下文级快捷键、用户覆盖、slash command 绑定
 - [x] 6.3 Virtual Transcript：长会话虚拟渲染与 scroll 窗口
-- [ ] 6.4 Permission Arbiter：本地审批、hook、channel、classifier 的先到先赢决策核心
-- [ ] 6.5 File Index：`@file` 候选缓存、后台刷新、ignore/git/rg fallback
-- [ ] 6.6 Plugin Lifecycle MVP：本地插件 install/enable/disable/list 生命周期
-- [ ] 6.7 Compact Recovery：压缩失败兜底与压缩后关键信息恢复
+- [x] 6.4 Permission Arbiter：本地审批、hook、channel、classifier 的先到先赢决策核心
+- [x] 6.5 File Index：`@file` 候选缓存、后台刷新、ignore/git/rg fallback
+- [x] 6.6 Plugin Lifecycle MVP：本地插件 install/enable/disable/list 生命周期
+- [x] 6.7 Compact Recovery：压缩失败兜底与压缩后关键信息恢复
 
 ---
 
@@ -402,8 +402,8 @@ git worktree remove ../pico-1-streaming
 | 阶段 3 | 7 | 7 | ✅ 完成 |
 | 阶段 4 | 5 | 5 | ✅ 完成 |
 | 阶段 5 | 8 | 8 | ✅ 全部闭环（5.2/5.4 经调研确认不做） |
-| 阶段 6 | 8 | 4 | 🚧 进行中 |
-| **总计** | **48** | **44** | 🚧 阶段 6 进行中 |
+| 阶段 6 | 8 | 8 | ✅ 完成 |
+| **总计** | **48** | **48** | ✅ 阶段 6 完成 |
 
 ---
 
