@@ -4,7 +4,8 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ClaudeProvider } from "../src/provider/claude.js";
-import { createProvider, isModelUnavailableError } from "../src/provider/factory.js";
+import { createProvider } from "../src/provider/factory.js";
+import { isModelUnavailableError } from "../src/provider/fallback.js";
 import { OpenAIProvider } from "../src/provider/openai.js";
 import { resolveProviderProfile } from "../src/provider/profile.js";
 import type { Message, ToolDefinition } from "../src/schema/message.js";
@@ -119,35 +120,22 @@ describe("OpenAIProvider 翻译层", () => {
     expect(last.tool_call_id).toBe("c1");
   });
 
-  it("工厂在 glm-5.2 不可用时用 kimi-k2.5 重试", async () => {
+  it("工厂只创建 raw provider,不在 factory 内做 glm-5.2 fallback", async () => {
     const calls: { body: Record<string, unknown> }[] = [];
     globalThis.fetch = vi.fn(async (_url: string | URL, init?: RequestInit) => {
       const body = JSON.parse(init?.body as string) as Record<string, unknown>;
       calls.push({ body });
 
-      if (body.model === "glm-5.2") {
-        return new Response(JSON.stringify({ error: { message: "model glm-5.2 unavailable" } }), {
-          status: 404,
-          headers: { "Content-Type": "application/json" },
-        });
-      }
-
-      return new Response(
-        JSON.stringify({
-          choices: [{ message: { role: "assistant", content: "fallback ok" } }],
-        }),
-        {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        },
-      );
+      return new Response(JSON.stringify({ error: { message: "model glm-5.2 unavailable" } }), {
+        status: 404,
+        headers: { "Content-Type": "application/json" },
+      });
     }) as unknown as typeof fetch;
 
     const p = createProvider("openai", cfg);
-    const msg = await p.generate(history, []);
 
-    expect(calls.map((call) => call.body.model)).toEqual(["glm-5.2", "kimi-k2.5"]);
-    expect(msg.content).toBe("fallback ok");
+    await expect(p.generate(history, [])).rejects.toThrow("model glm-5.2 unavailable");
+    expect(calls.map((call) => call.body.model)).toEqual(["glm-5.2"]);
   });
 
   it("把 glm-5.2 额度耗尽视为当前模型不可用", () => {
