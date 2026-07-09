@@ -66,6 +66,23 @@ describe("computeVirtualTranscript", () => {
     expect(result.topSpacerRows).toBe(1972);
     expect(result.bottomSpacerRows).toBe(0);
   });
+
+  it("reports the row offset when the viewport starts inside a tall item", () => {
+    const items = ["old", "streaming"];
+
+    const result = computeVirtualTranscript(items, 5, 0, {
+      estimatedRowHeight: 2,
+      getItemRows: (_item, index) => (index === 1 ? 20 : 2),
+      overscanRows: 0,
+      scrollToBottom: true,
+      virtualizeThreshold: 0,
+    });
+
+    expect(result.visibleItems).toEqual(["streaming"]);
+    expect(result.startIndex).toBe(1);
+    expect(result.startOffsetRows).toBe(15);
+    expect(result.bottomSpacerRows).toBe(0);
+  });
 });
 
 function makeItems(count: number): string[] {

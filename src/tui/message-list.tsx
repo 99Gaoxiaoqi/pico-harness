@@ -29,6 +29,10 @@ export interface MessageListProps {
   scrollOffsetRows?: number;
   /** 可选:单条消息行高估算 */
   estimatedRowHeight?: number;
+  /** 可选:按 entry 估算行高,用于让虚拟窗口按真实内容滚动 */
+  getEntryRows?: (entry: TuiEntry, index: number) => number | undefined;
+  /** 可选:文本换行宽度估算 */
+  wrapWidth?: number;
   /** 可选:视口上下额外渲染行数 */
   overscanRows?: number;
   /** 可选:低于或等于该条目数时不虚拟化,默认 200 */
@@ -46,6 +50,8 @@ export function MessageList({
   viewportRows,
   scrollOffsetRows = 0,
   estimatedRowHeight,
+  getEntryRows,
+  wrapWidth,
   overscanRows,
   virtualizeThreshold,
   scrollToBottom,
@@ -59,9 +65,11 @@ export function MessageList({
           startIndex: 0,
           topSpacerRows: 0,
           bottomSpacerRows: 0,
+          startOffsetRows: 0,
         }
       : computeVirtualTranscript(displayEntries, viewportRows, scrollOffsetRows, {
           estimatedRowHeight,
+          getItemRows: getEntryRows,
           overscanRows,
           virtualizeThreshold,
           scrollToBottom,
@@ -74,14 +82,19 @@ export function MessageList({
         const originalIndex = window.startIndex + i;
         const isLast = originalIndex === displayEntries.length - 1;
         const prev = displayEntries[originalIndex - 1];
+        const rowsToSkip = i === 0 ? window.startOffsetRows : 0;
+        const estimatedRows = getEntryRows?.(entry, originalIndex) ?? estimatedRowHeight;
+        const visibleRows =
+          estimatedRows === undefined ? viewportRows : Math.max(1, estimatedRows - rowsToSkip);
+        const visibleEntry = clipEntryTopRows(entry, rowsToSkip, visibleRows, wrapWidth);
         // 轮次分隔:遇到新的 user 消息,且前面已有内容时,加一条淡色分隔线
         const showSeparator = entry.kind === "user" && prev !== undefined;
         return (
           <React.Fragment key={originalIndex}>
             {showSeparator && <Separator />}
             <MessageRow
-              entry={entry}
-              isStatic={shouldRenderStatically(entry, isLast, isStreaming)}
+              entry={visibleEntry}
+              isStatic={shouldRenderStatically(visibleEntry, isLast, isStreaming)}
               isLast={isLast}
             />
           </React.Fragment>
@@ -90,6 +103,56 @@ export function MessageList({
       {preserveVirtualSpacers && window.bottomSpacerRows > 0 && <Box height={window.bottomSpacerRows} />}
     </Box>
   );
+}
+
+function clipEntryTopRows(
+  entry: TuiEntry,
+  rowsToSkip: number,
+  visibleRows: number | undefined,
+  wrapWidth: number | undefined,
+): TuiEntry {
+  if (rowsToSkip <= 0) return entry;
+  if (entry.kind !== "assistant" && entry.kind !== "user" && entry.kind !== "system") {
+    return entry;
+  }
+
+  // MessageFrame 会重新绘制一行上边距,这里稍微多跳过正文顶部,
+  // 让长流式回复优先保住最新尾行。
+  const contentRowsToSkip = rowsToSkip;
+  const contentRowsToKeep = Math.max(1, (visibleRows ?? 1) - 1);
+  const content = clipTextTopRows(entry.content, contentRowsToSkip, contentRowsToKeep, wrapWidth);
+  return { ...entry, content };
+}
+
+function clipTextTopRows(
+  text: string,
+  rowsToSkip: number,
+  rowsToKeep: number,
+  wrapWidth: number | undefined,
+): string {
+  if (rowsToSkip <= 0) return text;
+  const rows = textToVisualRows(text, wrapWidth);
+  return rows.slice(rowsToSkip, rowsToSkip + rowsToKeep).join("\n");
+}
+
+function textToVisualRows(text: string, wrapWidth: number | undefined): string[] {
+  const width = normalizeWrapWidth(wrapWidth);
+  const rows: string[] = [];
+  for (const logicalLine of text.split("\n")) {
+    if (logicalLine.length === 0) {
+      rows.push("");
+      continue;
+    }
+    for (let index = 0; index < logicalLine.length; index += width) {
+      rows.push(logicalLine.slice(index, index + width));
+    }
+  }
+  return rows.length === 0 ? [""] : rows;
+}
+
+function normalizeWrapWidth(width: number | undefined): number {
+  if (width === undefined || !Number.isFinite(width) || width < 8) return 80;
+  return Math.floor(width);
 }
 
 /** 轮次分隔:淡色虚线,让多轮对话结构清晰 */
