@@ -80,11 +80,7 @@ function budgetToolResultPlaceholder(originalLen: number): string {
  *   (无退出码时省略 exit 段)
  * - 找不到 ToolCall(向前无匹配 assistant): `[早期工具输出已清理,原始 {N} 字符]`
  */
-export function makeToolResultSummary(
-  msg: Message,
-  allMsgs: Message[],
-  index: number,
-): string {
+export function makeToolResultSummary(msg: Message, allMsgs: Message[], index: number): string {
   const content = msg.content;
   const lineCount = content.split("\n").length;
   // 向前找最近的 assistant toolCalls,匹配本条 toolCallId,提取工具名
@@ -188,9 +184,7 @@ export function createAuxSummarizer(provider: LLMProvider): Summarizer {
     const previousSummaryBlock = input.previousSummary
       ? `\n\n上一次的摘要(请基于它做增量更新,保留仍相关的旧信息):\n${input.previousSummary}`
       : "";
-    const focusTopicBlock = input.focusTopic
-      ? `\n\n请重点关注以下主题:\n${input.focusTopic}`
-      : "";
+    const focusTopicBlock = input.focusTopic ? `\n\n请重点关注以下主题:\n${input.focusTopic}` : "";
     const messages: Message[] = [
       {
         role: "system",
@@ -270,6 +264,8 @@ export interface CompactorOptions {
    * 不影响现有 retainLastMsgs 的生产配置(6 条)。
    */
   retainLastMsgsMicro?: number;
+  /** 压缩成功后追加的恢复消息,用于重新注入计划/关键文件等轻量上下文。 */
+  postCompactRestore?: () => Message[];
 }
 
 /**
@@ -289,6 +285,7 @@ export class Compactor {
   private readonly toolResultMetaProvider?: () => ReadonlyMap<string, ToolResultMetaEntry>;
   /** MicroCompaction 3.1:保护区最近消息条数(默认 20) */
   private readonly retainLastMsgsMicro: number;
+  private readonly postCompactRestore?: () => Message[];
   private ineffectiveCount = 0;
   private usedStrongerCompact = false;
   private previousSummary: string | undefined;
@@ -302,6 +299,7 @@ export class Compactor {
     this.focusTopic = opts.focusTopic;
     this.toolResultMetaProvider = opts.toolResultMetaProvider;
     this.retainLastMsgsMicro = opts.retainLastMsgsMicro ?? MICRO_RETAIN_LAST_MSGS_DEFAULT;
+    this.postCompactRestore = opts.postCompactRestore;
   }
 
   get ineffectiveCompressionCount(): number {
@@ -458,7 +456,7 @@ export class Compactor {
       });
     } catch (err) {
       logger.warn({ err }, `[Compactor] LLM 摘要失败,退回字符级掩码`);
-      return this.compact(msgs);
+      return this.appendPostCompactRestore(this.compactToBudget(msgs));
     }
     this.previousSummary = summaryText;
     this.summarizedRemoteCount = remoteMsgs.length;
@@ -476,7 +474,7 @@ export class Compactor {
     logger.warn(
       `[Compactor] ✅ LLM 摘要压缩完成。${currentLength} → ${newLength} 字符(远期 ${remoteMsgs.length} 条 → 摘要)。`,
     );
-    return result;
+    return this.appendPostCompactRestore(result);
   }
 
   /** 粗略计算当前上下文的总字符长度(用 char count 代替 token) */
@@ -539,6 +537,23 @@ export class Compactor {
   private recordCompressionEffect(before: number, after: number): void {
     const savingPct = before === 0 ? 100 : ((before - after) / before) * 100;
     this.ineffectiveCount = savingPct < 10 ? this.ineffectiveCount + 1 : 0;
+  }
+
+  private appendPostCompactRestore(msgs: Message[]): Message[] {
+    if (!this.postCompactRestore) {
+      return msgs;
+    }
+    let restored: Message[];
+    try {
+      restored = this.postCompactRestore();
+    } catch (err) {
+      logger.warn({ err }, `[Compactor] postCompactRestore 失败,跳过恢复消息`);
+      return msgs;
+    }
+    if (restored.length === 0) {
+      return msgs;
+    }
+    return sanitizeToolPairs([...msgs, ...restored]);
   }
 
   private strongerCompact(msgs: Message[], maxChars: number): Message[] {
