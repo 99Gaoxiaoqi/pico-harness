@@ -29,19 +29,21 @@ describe("TUI input routing", () => {
   it("/model local UI action opens the model selector dialog", async () => {
     const { reporter, runAgent, exit, registry, workDir } = harness();
     const openDialog = vi.fn();
-    const processInput = vi.fn(async (): Promise<TuiInputProcessResult> => ({
-      type: "local-command",
-      raw: "/model",
-      command: "model",
-      args: "",
-      argv: [],
-      result: {
-        type: "local",
-        action: "model",
-        ui: { kind: "open-selector", selector: "model" },
-        message: "Select a model.",
-      },
-    }));
+    const processInput = vi.fn(
+      async (): Promise<TuiInputProcessResult> => ({
+        type: "local-command",
+        raw: "/model",
+        command: "model",
+        args: "",
+        argv: [],
+        result: {
+          type: "local",
+          action: "model",
+          ui: { kind: "open-selector", selector: "model" },
+          message: "Select a model.",
+        },
+      }),
+    );
 
     await handleTuiInputSubmission("/model", {
       reporter,
@@ -140,17 +142,19 @@ describe("TUI input routing", () => {
 
   it("prompt command 发送展开后的 prompt 给 runAgentFromCli", async () => {
     const { reporter, snapshots, runAgent, exit, registry, workDir } = harness();
-    const processInput = vi.fn(async (): Promise<TuiInputProcessResult> => ({
-      type: "prompt-command",
-      raw: "/review",
-      command: "review",
-      args: "",
-      argv: [],
-      result: {
-        type: "prompt",
-        prompt: "Review the current changes.",
-      },
-    }));
+    const processInput = vi.fn(
+      async (): Promise<TuiInputProcessResult> => ({
+        type: "prompt-command",
+        raw: "/review",
+        command: "review",
+        args: "",
+        argv: [],
+        result: {
+          type: "prompt",
+          prompt: "Review the current changes.",
+        },
+      }),
+    );
 
     await handleTuiInputSubmission("/review", {
       reporter,
@@ -167,11 +171,13 @@ describe("TUI input routing", () => {
 
   it("mention-expanded prompt 继续走 runAgentFromCli", async () => {
     const { reporter, runAgent, exit, registry, workDir } = harness();
-    const processInput = vi.fn(async (): Promise<TuiInputProcessResult> => ({
-      type: "prompt",
-      raw: "review this",
-      prompt: "review this",
-    }));
+    const processInput = vi.fn(
+      async (): Promise<TuiInputProcessResult> => ({
+        type: "prompt",
+        raw: "review this",
+        prompt: "review this",
+      }),
+    );
 
     await handleTuiInputSubmission("review this", {
       reporter,
@@ -279,26 +285,28 @@ describe("TUI input routing", () => {
   it("/sessions 打开 session selector dialog", async () => {
     const { reporter, runAgent, exit, registry, workDir } = harness();
     const openDialog = vi.fn();
-    const processInput = vi.fn(async (): Promise<TuiInputProcessResult> => ({
-      type: "local-command",
-      raw: "/sessions",
-      command: "sessions",
-      args: "",
-      argv: [],
-      result: {
-        type: "local",
-        action: "message",
-        message: "legacy session list",
-        data: [
-          sessionSummary({
-            id: "cli-current",
-            title: "继续调试 TUI",
-            firstMessage: "继续调试 TUI",
-          }),
-        ],
-        ui: { kind: "open-selector", selector: "session" },
-      },
-    }));
+    const processInput = vi.fn(
+      async (): Promise<TuiInputProcessResult> => ({
+        type: "local-command",
+        raw: "/sessions",
+        command: "sessions",
+        args: "",
+        argv: [],
+        result: {
+          type: "local",
+          action: "message",
+          message: "legacy session list",
+          data: [
+            sessionSummary({
+              id: "cli-current",
+              title: "继续调试 TUI",
+              firstMessage: "继续调试 TUI",
+            }),
+          ],
+          ui: { kind: "open-selector", selector: "session" },
+        },
+      }),
+    );
 
     await handleTuiInputSubmission("/sessions", {
       reporter,
@@ -328,19 +336,21 @@ describe("TUI input routing", () => {
     const selected = sessionSummary({ id: "cli-current" });
     const dispatchInput = vi.fn(async () => undefined);
     const openDialog = vi.fn();
-    const processInput = vi.fn(async (): Promise<TuiInputProcessResult> => ({
-      type: "local-command",
-      raw: "/sessions",
-      command: "sessions",
-      args: "",
-      argv: [],
-      result: {
-        type: "local",
-        action: "message",
-        data: [selected],
-        ui: { kind: "open-selector", selector: "session" },
-      },
-    }));
+    const processInput = vi.fn(
+      async (): Promise<TuiInputProcessResult> => ({
+        type: "local-command",
+        raw: "/sessions",
+        command: "sessions",
+        args: "",
+        argv: [],
+        result: {
+          type: "local",
+          action: "message",
+          data: [selected],
+          ui: { kind: "open-selector", selector: "session" },
+        },
+      }),
+    );
 
     await handleTuiInputSubmission("/sessions", {
       reporter,

@@ -43,7 +43,7 @@ import {
 import { computeApprovalDiff } from "../approval/diff.js";
 import { formatApprovalPanel } from "../tui/approval-panel.js";
 import type { MiddlewareFunc } from "../tools/registry.js";
-import { McpConnectionManager } from "../mcp/manager.js";
+import { McpConnectionManager, type McpStatusSnapshot } from "../mcp/manager.js";
 import { BackgroundManager } from "../tools/background-manager.js";
 import { loadHooksConfig } from "../hooks/config.js";
 import { HookRunner } from "../hooks/runner.js";
@@ -114,6 +114,7 @@ export interface RunAgentCliDependencies {
   reporter?: Reporter;
   approvalNotifier?: ApprovalNotifier;
   toolDisclosure?: ToolDisclosure;
+  mcpStatusSink?: (snapshot: McpStatusSnapshot) => void;
 }
 
 export async function runAgentFromCli(
@@ -281,7 +282,9 @@ export async function runAgentFromCli(
   const mcpManager = mcpConfigPath ? new McpConnectionManager(registry) : undefined;
   if (mcpManager && mcpConfigPath) {
     await mcpManager.loadConfig(mcpConfigPath);
+    dependencies.mcpStatusSink?.(mcpManager.getStatusSnapshot());
     await mcpManager.connectAll();
+    dependencies.mcpStatusSink?.(mcpManager.getStatusSnapshot());
   }
 
   try {
@@ -303,9 +306,7 @@ export async function runAgentFromCli(
         finalMessage: findFinalMessage(messages),
         usage: snapshotUsage(session),
         messages,
-        ...(traceEnabled
-          ? { tracePath: await findTracePath(workDir, session.id) }
-          : {}),
+        ...(traceEnabled ? { tracePath: await findTracePath(workDir, session.id) } : {}),
       };
 
       return result;

@@ -25,6 +25,21 @@ describe("preparePromptForMessage image mentions", () => {
     }
   });
 
+  it('@image:"path with spaces" 支持带空格文件名', async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-prepare-img-spaces-"));
+    try {
+      await writeFile(join(workDir, "screen shot.png"), "PNG");
+
+      const result = await preparePromptForMessage('看一下 @image:"screen shot.png"', workDir);
+
+      expect(result.prompt).toBe("看一下");
+      expect(result.images).toHaveLength(1);
+      expect(result.notices).toEqual(["已附加图片: screen shot.png"]);
+    } finally {
+      await safeRm(workDir);
+    }
+  });
+
   it("@image: 缺失文件时给出路径错误", async () => {
     const workDir = await mkdtemp(join(tmpdir(), "pico-prepare-img-missing-"));
     try {
