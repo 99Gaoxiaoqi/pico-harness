@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { createBuiltinCommandRegistry } from "../../src/input/builtin-commands.js";
+import { CommandRegistry } from "../../src/input/command-registry.js";
 import type { LocalCommandResult } from "../../src/input/types.js";
+import type { SlashCommand } from "../../src/input/types.js";
 import { QueryGuard } from "../../src/tui/query-guard.js";
 import { handleTuiRunningInputSubmission } from "../../src/tui/repl.js";
 import { RunningInputQueue } from "../../src/tui/running-input-queue.js";
@@ -71,7 +73,7 @@ describe("TUI running input queue", () => {
     expect(queue.size).toBe(0);
   });
 
-  it("running 中 clear/exit 等本地命令不入队", async () => {
+  it("running 中会改状态的本地命令被拦截", async () => {
     const { reporter, snapshots, guard, queue, registry, workDir, exit, runAgent } = harness();
     reporter.pushUserMessage("old");
     guard.tryStart();
@@ -85,23 +87,20 @@ describe("TUI running input queue", () => {
       exit,
       runAgent,
     });
-    await handleTuiRunningInputSubmission("/exit", {
-      reporter,
-      guard,
-      queue,
-      registry,
-      workDir,
-      exit,
-      runAgent,
-    });
 
     expect(queue.size).toBe(0);
     expect(runAgent).not.toHaveBeenCalled();
-    expect(exit).toHaveBeenCalledTimes(1);
-    expect(snapshots.at(-1)).toEqual([]);
+    expect(exit).not.toHaveBeenCalled();
+    expect(snapshots.at(-1)).toEqual([
+      { kind: "user", content: "old" },
+      {
+        kind: "system",
+        content: "Cannot run /clear while the agent is running. Please wait for the current response to finish.",
+      },
+    ]);
   });
 
-  it("running 中本地 UI 命令不入队且保留弹层回调", async () => {
+  it("running 中本地 UI 命令不入队且不会打开弹层", async () => {
     const { reporter, guard, queue, registry, workDir, exit, runAgent } = harness();
     const result: LocalCommandResult = {
       type: "local",
@@ -133,6 +132,76 @@ describe("TUI running input queue", () => {
 
     expect(queue.size).toBe(0);
     expect(runAgent).not.toHaveBeenCalled();
-    expect(openLocalUiDialog).toHaveBeenCalledWith(result);
+    expect(openLocalUiDialog).not.toHaveBeenCalled();
+  });
+
+  it("running 中 help/status 这类只读命令仍可立即执行", async () => {
+    const { reporter, guard, queue, registry, workDir, exit, runAgent } = harness();
+    guard.tryStart();
+
+    await handleTuiRunningInputSubmission("/help", {
+      reporter,
+      guard,
+      queue,
+      registry,
+      workDir,
+      exit,
+      runAgent,
+    });
+
+    expect(queue.size).toBe(0);
+    expect(runAgent).not.toHaveBeenCalled();
+    expect(exit).not.toHaveBeenCalled();
+  });
+
+  it("running 中 prompt command 入队后不会二次执行命令展开", async () => {
+    const { reporter, guard, queue, workDir, exit, runAgent } = harness();
+    let finishFirst!: () => void;
+    const firstDone = new Promise<void>((resolve) => {
+      finishFirst = resolve;
+    });
+    runAgent.mockImplementationOnce(async () => firstDone);
+    const execute = vi.fn<SlashCommand["execute"]>(() => ({
+      type: "prompt",
+      prompt: "expanded prompt",
+    }));
+    const registry = new CommandRegistry([
+      ...createBuiltinCommandRegistry().list(),
+      {
+        name: "expand",
+        description: "Expand once",
+        usage: "/expand",
+        kind: "prompt",
+        execute,
+      },
+    ]);
+
+    const first = handleTuiRunningInputSubmission("first", {
+      reporter,
+      guard,
+      queue,
+      registry,
+      workDir,
+      exit,
+      runAgent,
+    });
+    await Promise.resolve();
+
+    await handleTuiRunningInputSubmission("/expand", {
+      reporter,
+      guard,
+      queue,
+      registry,
+      workDir,
+      exit,
+      runAgent,
+    });
+
+    expect(execute).toHaveBeenCalledTimes(1);
+    finishFirst();
+    await first;
+
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(runAgent).toHaveBeenNthCalledWith(2, "expanded prompt");
   });
 });

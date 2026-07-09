@@ -20,6 +20,12 @@ describe("TuiReporter", () => {
     expect(last()).toEqual([{ kind: "user", content: "你好" }]);
   });
 
+  it("pushSystemMessage 追加 system 条目,不伪装成 assistant", () => {
+    const { reporter, last } = harness();
+    reporter.pushSystemMessage("Unknown slash command: /wat");
+    expect(last()).toEqual([{ kind: "system", content: "Unknown slash command: /wat" }]);
+  });
+
   it("onThinking 追加 thinking 占位条目", () => {
     const { reporter, last } = harness();
     reporter.onThinking();

@@ -413,30 +413,32 @@ export async function runAgentFromCli(
   }
 
   try {
-    // 5.5e 图片入口:--image <path> 转成 ImagePart 附到首条 user 消息
-    const images: ImagePart[] | undefined = effectiveOptions.imagePath
-      ? [loadImage(effectiveOptions.imagePath)]
-      : undefined;
-    session.append({
-      role: "user",
-      content: prompt,
-      ...(images ? { images } : {}),
+    return await session.serialize(async () => {
+      // 5.5e 图片入口:--image <path> 转成 ImagePart 附到首条 user 消息
+      const images: ImagePart[] | undefined = effectiveOptions.imagePath
+        ? [loadImage(effectiveOptions.imagePath)]
+        : undefined;
+      session.append({
+        role: "user",
+        content: prompt,
+        ...(images ? { images } : {}),
+      });
+
+      const messages = await engine.run(session);
+      const result: RunAgentCliResult = {
+        sessionId: session.id,
+        sessionSelection,
+        workDir,
+        finalMessage: findFinalMessage(messages),
+        usage: snapshotUsage(session),
+        messages,
+        ...(effectiveOptions.trace === true ? { tracePath: await findTracePath(workDir, session.id) } : {}),
+      };
+
+      await writeRunSummary(dependencies.write, result);
+
+      return result;
     });
-
-    const messages = await engine.run(session);
-    const result: RunAgentCliResult = {
-      sessionId: session.id,
-      sessionSelection,
-      workDir,
-      finalMessage: findFinalMessage(messages),
-      usage: snapshotUsage(session),
-      messages,
-      ...(effectiveOptions.trace === true ? { tracePath: await findTracePath(workDir, session.id) } : {}),
-    };
-
-    await writeRunSummary(dependencies.write, result);
-
-    return result;
   } finally {
     // 进程退出前优雅关闭所有 MCP 连接(杀子进程/关 HTTP 连接)
     if (mcpManager) {

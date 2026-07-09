@@ -1,3 +1,5 @@
+import type { InputProcessResult } from "../input/types.js";
+
 const DEFAULT_MAX_QUEUED = 20;
 
 export type RunningInputKind = "normal" | "steer" | "inject";
@@ -5,6 +7,7 @@ export type RunningInputKind = "normal" | "steer" | "inject";
 export interface RunningInputItem {
   kind: RunningInputKind;
   text: string;
+  processed?: InputProcessResult;
 }
 
 export interface RunningInputQueueOptions {
@@ -35,7 +38,7 @@ export class RunningInputQueue {
     this.maxQueued = options.maxQueued ?? DEFAULT_MAX_QUEUED;
   }
 
-  enqueue(text: string): RunningInputEnqueueResult {
+  enqueue(text: string, processed?: InputProcessResult): RunningInputEnqueueResult {
     if (this.queued.length >= this.maxQueued) {
       return {
         type: "rejected",
@@ -44,7 +47,11 @@ export class RunningInputQueue {
       };
     }
 
-    const item: RunningInputItem = { kind: "normal", text };
+    const item: RunningInputItem = {
+      kind: "normal",
+      text,
+      ...(processed === undefined ? {} : { processed }),
+    };
     this.queued.push(item);
     return { type: "queued", item };
   }

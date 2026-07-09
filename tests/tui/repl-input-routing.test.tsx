@@ -97,7 +97,7 @@ describe("TUI input routing", () => {
     expect(exit).not.toHaveBeenCalled();
     expect(snapshots.at(-1)).toEqual([
       {
-        kind: "assistant",
+        kind: "system",
         content: expect.stringContaining("/clear"),
       },
     ]);

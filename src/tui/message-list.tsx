@@ -103,6 +103,7 @@ function Separator(): React.ReactNode {
  *
  * 规则:
  *   - user           → true(提交即固定)
+ *   - system         → true(本地控制面反馈,提交即固定)
  *   - tool status=done/error → true(工具已 resolve)
  *   - tool status=running    → false(进行中)
  *   - assistant 非末条       → true(历史回复)
@@ -117,6 +118,7 @@ export function shouldRenderStatically(
 ): boolean {
   switch (entry.kind) {
     case "user":
+    case "system":
       return true;
     case "tool":
       // done/error 已 resolve → 固定;running → 动态

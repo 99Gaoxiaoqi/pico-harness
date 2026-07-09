@@ -28,6 +28,49 @@ class ScriptedProvider implements LLMProvider {
   }
 }
 
+class BlockingProvider implements LLMProvider {
+  readonly calls: Array<{ messages: Message[]; toolNames: string[] }> = [];
+  private readonly firstStarted: () => void;
+  private releaseFirst!: () => void;
+  readonly firstCallStarted: Promise<void>;
+  readonly firstCallRelease: Promise<void>;
+
+  constructor() {
+    this.firstCallStarted = new Promise((resolve) => {
+      this.firstStarted = resolve;
+    });
+    this.firstCallRelease = new Promise((resolve) => {
+      this.releaseFirst = resolve;
+    });
+  }
+
+  async generate(messages: Message[], availableTools: ToolDefinition[]): Promise<Message> {
+    this.calls.push({
+      messages: [...messages],
+      toolNames: availableTools.map((tool) => tool.name),
+    });
+    if (this.calls.length === 1) {
+      this.firstStarted();
+      await this.firstCallRelease;
+      return {
+        role: "assistant",
+        content: "first done",
+        usage: { promptTokens: 1, completionTokens: 1 },
+      };
+    }
+
+    return {
+      role: "assistant",
+      content: "second done",
+      usage: { promptTokens: 1, completionTokens: 1 },
+    };
+  }
+
+  release(): void {
+    this.releaseFirst();
+  }
+}
+
 describe("runAgentFromCli", () => {
   afterEach(() => {
     resetSessionSettingsForTests();
@@ -236,6 +279,51 @@ describe("runAgentFromCli", () => {
     expect(first.sessionId).toMatch(/^cli-/);
     expect(second.sessionId).toMatch(/^cli-/);
     expect(second.sessionId).not.toBe(first.sessionId);
+  });
+
+  it("同一 session 并发 run 时 append 与 engine.run 保持串行", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-cli-concurrent-"));
+    const provider = new BlockingProvider();
+
+    const first = runAgentFromCli(
+      {
+        prompt: "first prompt",
+        dir: workDir,
+        session: "same-session",
+        provider: "openai",
+        enableThinking: false,
+      },
+      {
+        provider,
+        write: () => undefined,
+      },
+    );
+    await provider.firstCallStarted;
+
+    const second = runAgentFromCli(
+      {
+        prompt: "second prompt",
+        dir: workDir,
+        session: "same-session",
+        provider: "openai",
+        enableThinking: false,
+      },
+      {
+        provider,
+        write: () => undefined,
+      },
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(provider.calls).toHaveLength(1);
+    expect(provider.calls[0]?.messages.some((message) => message.content === "second prompt")).toBe(false);
+
+    provider.release();
+    await Promise.all([first, second]);
+
+    expect(provider.calls).toHaveLength(2);
+    expect(provider.calls[1]?.messages.some((message) => message.content === "first prompt")).toBe(true);
+    expect(provider.calls[1]?.messages.some((message) => message.content === "second prompt")).toBe(true);
   });
 
   it("CLI 单轮本地命令写 stdout 且不调用模型", async () => {
