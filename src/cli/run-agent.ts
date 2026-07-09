@@ -38,6 +38,7 @@ import { Tracer } from "../observability/trace.js";
 import {
   globalApprovalManager,
   globalApprovalPolicy,
+  isAgentOpsDangerousCommand,
   type ApprovalNotifier,
 } from "../approval/manager.js";
 import { computeApprovalDiff } from "../approval/diff.js";
@@ -497,17 +498,22 @@ function buildObservationProcessor(workDir: string) {
 
 function buildApprovalMiddleware(notifier: ApprovalNotifier, workDir: string): MiddlewareFunc {
   return async (call) => {
-    return globalApprovalPolicy.decide("cli", call, async () => {
-      // 拦截时计算 before/after diff,失败返回 undefined 不阻断审批
-      const diff = await computeApprovalDiff(call.name, call.arguments, workDir);
-      return globalApprovalManager.waitForApproval(
-        call.id,
-        call.name,
-        call.arguments,
-        notifier,
-        diff,
-      );
-    });
+    return globalApprovalPolicy.decide(
+      "cli",
+      call,
+      async () => {
+        // 拦截时计算 before/after diff,失败返回 undefined 不阻断审批
+        const diff = await computeApprovalDiff(call.name, call.arguments, workDir);
+        return globalApprovalManager.waitForApproval(
+          call.id,
+          call.name,
+          call.arguments,
+          notifier,
+          diff,
+        );
+      },
+      isAgentOpsDangerousCommand,
+    );
   };
 }
 

@@ -1,7 +1,8 @@
-import { mkdtemp, readFile, readdir, realpath } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { globalApprovalManager, type ApprovalNotice } from "../src/approval/manager.js";
 import { runAgentFromCli } from "../src/cli/run-agent.js";
 import type { Reporter } from "../src/engine/reporter.js";
 import type { Message, ToolDefinition } from "../src/schema/message.js";
@@ -84,8 +85,49 @@ function reporter(onTextDelta?: (delta: string) => void): Reporter {
   };
 }
 
+function makeApprovalCapture(): {
+  notices: ApprovalNotice[];
+  notifier: (notice: ApprovalNotice) => void;
+  nextNotice: Promise<ApprovalNotice>;
+} {
+  const notices: ApprovalNotice[] = [];
+  let resolveNotice!: (notice: ApprovalNotice) => void;
+  const nextNotice = new Promise<ApprovalNotice>((resolve) => {
+    resolveNotice = resolve;
+  });
+  return {
+    notices,
+    nextNotice,
+    notifier: (notice) => {
+      notices.push(notice);
+      resolveNotice(notice);
+    },
+  };
+}
+
+async function waitForApprovalBeforeCompletion<T>(
+  nextNotice: Promise<ApprovalNotice>,
+  runPromise: Promise<T>,
+): Promise<ApprovalNotice> {
+  return Promise.race([
+    nextNotice,
+    runPromise.then(
+      () => {
+        throw new Error("agent run completed before requesting approval");
+      },
+      (err) => {
+        throw err;
+      },
+    ),
+    new Promise<never>((_, reject) => {
+      setTimeout(() => reject(new Error("timed out waiting for approval")), 1000);
+    }),
+  ]);
+}
+
 describe("runAgentFromCli", () => {
   afterEach(() => {
+    globalApprovalManager.clear();
     resetSessionSettingsForTests();
   });
 
@@ -114,6 +156,10 @@ describe("runAgentFromCli", () => {
       },
     ]);
     const write = vi.fn();
+    const approvalNotifier = (notice: ApprovalNotice) => {
+      write(notice.message);
+      globalApprovalManager.resolveApproval(notice.taskId, true, "test approval");
+    };
 
     const result = await runAgentFromCli(
       {
@@ -126,7 +172,7 @@ describe("runAgentFromCli", () => {
       },
       {
         provider,
-        write,
+        approvalNotifier,
       },
     );
 
@@ -148,7 +194,209 @@ describe("runAgentFromCli", () => {
     expect(provider.calls[0]?.toolNames).not.toContain("delegate_task");
     expect(provider.calls[0]?.toolNames).not.toContain("task_list");
     expect(provider.calls[0]?.messages[0]?.content).toContain("PLAN.md");
-    expect(write).not.toHaveBeenCalled();
+    expect(write).toHaveBeenCalledTimes(1);
+  });
+
+  it("write_file requests approval before writing", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-cli-approval-write-"));
+    const provider = new ScriptedProvider([
+      {
+        role: "assistant",
+        content: "I will write a file.",
+        toolCalls: [
+          {
+            id: "call_write_approval",
+            name: "write_file",
+            arguments: JSON.stringify({ path: "approval.txt", content: "secret" }),
+          },
+        ],
+        usage: { promptTokens: 1, completionTokens: 1 },
+      },
+      {
+        role: "assistant",
+        content: "Saw rejection.",
+        usage: { promptTokens: 1, completionTokens: 1 },
+      },
+    ]);
+    const approval = makeApprovalCapture();
+
+    const runPromise = runAgentFromCli(
+      {
+        prompt: "Write approval.txt",
+        dir: workDir,
+        session: "approval_write_session",
+        provider: "openai",
+      },
+      {
+        provider,
+        approvalNotifier: approval.notifier,
+      },
+    );
+
+    const notice = await waitForApprovalBeforeCompletion(approval.nextNotice, runPromise);
+    expect(globalApprovalManager.pendingCount).toBe(1);
+    expect(notice).toMatchObject({
+      taskId: "call_write_approval",
+      toolName: "write_file",
+    });
+    expect(notice.preview?.target).toBe("approval.txt");
+    expect(notice.preview?.summary).toContain("write_file");
+    expect(notice.diff).toContain("+ secret");
+    expect(notice.preview?.diff).toBe(notice.diff);
+    await expect(readFile(join(workDir, "approval.txt"), "utf8")).rejects.toThrow();
+
+    globalApprovalManager.resolveApproval(notice.taskId, false, "test rejection");
+    await expect(runPromise).resolves.toMatchObject({ finalMessage: "Saw rejection." });
+    await expect(readFile(join(workDir, "approval.txt"), "utf8")).rejects.toThrow();
+  });
+
+  it("edit_file requests approval before editing", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-cli-approval-edit-"));
+    await writeFile(join(workDir, "approval-edit.txt"), "old value\n", "utf8");
+    const provider = new ScriptedProvider([
+      {
+        role: "assistant",
+        content: "I will edit a file.",
+        toolCalls: [
+          {
+            id: "call_edit_approval",
+            name: "edit_file",
+            arguments: JSON.stringify({
+              path: "approval-edit.txt",
+              old_text: "old value",
+              new_text: "new value",
+            }),
+          },
+        ],
+        usage: { promptTokens: 1, completionTokens: 1 },
+      },
+      {
+        role: "assistant",
+        content: "Edit rejected.",
+        usage: { promptTokens: 1, completionTokens: 1 },
+      },
+    ]);
+    const approval = makeApprovalCapture();
+
+    const runPromise = runAgentFromCli(
+      {
+        prompt: "Edit approval-edit.txt",
+        dir: workDir,
+        session: "approval_edit_session",
+        provider: "openai",
+      },
+      {
+        provider,
+        approvalNotifier: approval.notifier,
+      },
+    );
+
+    const notice = await waitForApprovalBeforeCompletion(approval.nextNotice, runPromise);
+    expect(notice).toMatchObject({
+      taskId: "call_edit_approval",
+      toolName: "edit_file",
+    });
+    expect(notice.preview?.target).toBe("approval-edit.txt");
+    expect(notice.diff).toContain("- old value");
+    expect(notice.diff).toContain("+ new value");
+    expect(await readFile(join(workDir, "approval-edit.txt"), "utf8")).toBe("old value\n");
+
+    globalApprovalManager.resolveApproval(notice.taskId, false, "test rejection");
+    await expect(runPromise).resolves.toMatchObject({ finalMessage: "Edit rejected." });
+    expect(await readFile(join(workDir, "approval-edit.txt"), "utf8")).toBe("old value\n");
+  });
+
+  it("read_file does not request approval", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-cli-approval-read-"));
+    await writeFile(join(workDir, "notes.txt"), "hello\n", "utf8");
+    const provider = new ScriptedProvider([
+      {
+        role: "assistant",
+        content: "I will read a file.",
+        toolCalls: [
+          {
+            id: "call_read_no_approval",
+            name: "read_file",
+            arguments: JSON.stringify({ path: "notes.txt" }),
+          },
+        ],
+        usage: { promptTokens: 1, completionTokens: 1 },
+      },
+      {
+        role: "assistant",
+        content: "Read done.",
+        usage: { promptTokens: 1, completionTokens: 1 },
+      },
+    ]);
+    const approvalNotifier = vi.fn();
+
+    const result = await runAgentFromCli(
+      {
+        prompt: "Read notes.txt",
+        dir: workDir,
+        session: "approval_read_session",
+        provider: "openai",
+      },
+      {
+        provider,
+        approvalNotifier,
+      },
+    );
+
+    expect(result.finalMessage).toBe("Read done.");
+    expect(approvalNotifier).not.toHaveBeenCalled();
+    expect(globalApprovalManager.pendingCount).toBe(0);
+  });
+
+  it("bash redirect writes request approval before executing", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-cli-approval-bash-"));
+    const provider = new ScriptedProvider([
+      {
+        role: "assistant",
+        content: "I will write through bash.",
+        toolCalls: [
+          {
+            id: "call_bash_redirect_approval",
+            name: "bash",
+            arguments: JSON.stringify({ command: "echo hi > a.txt" }),
+          },
+        ],
+        usage: { promptTokens: 1, completionTokens: 1 },
+      },
+      {
+        role: "assistant",
+        content: "Bash rejected.",
+        usage: { promptTokens: 1, completionTokens: 1 },
+      },
+    ]);
+    const approval = makeApprovalCapture();
+
+    const runPromise = runAgentFromCli(
+      {
+        prompt: "Use bash to write a.txt",
+        dir: workDir,
+        session: "approval_bash_session",
+        provider: "openai",
+      },
+      {
+        provider,
+        approvalNotifier: approval.notifier,
+      },
+    );
+
+    const notice = await waitForApprovalBeforeCompletion(approval.nextNotice, runPromise);
+    expect(notice).toMatchObject({
+      taskId: "call_bash_redirect_approval",
+      toolName: "bash",
+    });
+    expect(notice.preview?.target).toBe("a.txt");
+    expect(notice.preview?.summary).toContain("写入");
+    expect(notice.diff).toContain("+ echo hi");
+    await expect(readFile(join(workDir, "a.txt"), "utf8")).rejects.toThrow();
+
+    globalApprovalManager.resolveApproval(notice.taskId, false, "test rejection");
+    await expect(runPromise).resolves.toMatchObject({ finalMessage: "Bash rejected." });
+    await expect(readFile(join(workDir, "a.txt"), "utf8")).rejects.toThrow();
   });
 
   it("enables per-request trace from PICO_TRACE", async () => {

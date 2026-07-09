@@ -10,8 +10,7 @@
 // - diff 复用 generateSimpleDiff 的内置截断(DIFF_MAX_LINES=30),此处不重复截断。
 
 import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
-import { generateSimpleDiff } from "../tools/registry-impl.js";
+import { generateSimpleDiff, safeResolve } from "../tools/registry-impl.js";
 
 /**
  * 在工具执行前计算审批 diff 预览。
@@ -99,7 +98,7 @@ async function computeWriteFileDiff(
   if (!isString(path) || !isString(content)) {
     return undefined;
   }
-  const oldText = await readFileOrEmpty(resolve(workDir, path));
+  const oldText = await readFileOrEmpty(safeResolve(workDir, path));
   return generateSimpleDiff(oldText, content);
 }
 
@@ -130,6 +129,6 @@ async function computeBashDiff(
   // 重定向前的命令文本作为 new 近似(剥掉重定向部分)。
   const sourceCmd = command.slice(0, match.index).trim();
   // old 读目标文件;new 用源命令文本(无源命令则空串,纯 truncating 重定向)。
-  const oldText = await readFileOrEmpty(resolve(workDir, target));
+  const oldText = await readFileOrEmpty(safeResolve(workDir, target));
   return generateSimpleDiff(oldText, sourceCmd);
 }

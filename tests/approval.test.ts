@@ -111,6 +111,15 @@ describe("isDangerousCommand", () => {
     expect(isAgentOpsDangerousCommand("bash", '{"command":"tail -n 50 error.log"}')).toBe(false);
   });
 
+  it("AgentOps 场景审批 bash 明显写入意图", () => {
+    expect(isAgentOpsDangerousCommand("bash", '{"command":"echo hi>a.txt"}')).toBe(true);
+    expect(isAgentOpsDangerousCommand("bash", '{"command":"printf hi | tee a.txt"}')).toBe(true);
+    expect(isAgentOpsDangerousCommand("bash", '{"command":"sed -i s/old/new/ a.txt"}')).toBe(true);
+    expect(isAgentOpsDangerousCommand("bash", '{"command":"perl -pi -e s/old/new/ a.txt"}')).toBe(
+      true,
+    );
+  });
+
   it("Hardline 命令不可审批绕过,普通 rm 只是 dangerous", () => {
     expect(isHardlineCommand("bash", '{"command":"rm -rf /"}')).toBe(true);
     expect(isHardlineCommand("bash", '{"command":"mkfs.ext4 /dev/sda"}')).toBe(true);

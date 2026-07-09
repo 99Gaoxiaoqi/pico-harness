@@ -61,7 +61,11 @@ import {
   type CliSessionBrowserSummary,
 } from "./session-browser-adapter.js";
 import { createRewindCommandDialogRequest } from "./rewind-command-dialog.js";
-import { globalApprovalManager, globalApprovalPolicy, type ApprovalNotice } from "../approval/manager.js";
+import {
+  globalApprovalManager,
+  globalApprovalPolicy,
+  type ApprovalNotice,
+} from "../approval/manager.js";
 import { InteractiveApprovalPanel, type ApprovalPanelAction } from "./approval-panel.js";
 
 export interface ReplOptions {
@@ -697,20 +701,21 @@ function createApprovalDialogRequest(
 ): DialogRequest {
   return {
     id: APPROVAL_DIALOG_ID,
-    layer: "modal",
+    layer: "overlay",
     priority: APPROVAL_DIALOG_PRIORITY,
     content: (
       <InteractiveApprovalPanel
         {...notice}
-        onAction={(action) =>
-          resolveApprovalAction({ action, taskId: notice.taskId }, deps)
-        }
+        onAction={(action) => resolveApprovalAction({ action, taskId: notice.taskId }, deps)}
       />
     ),
   };
 }
 
-function handleApprovalCommand(text: string, deps: Pick<HandleTuiInputSubmissionDeps, "reporter" | "closeDialog">): boolean {
+function handleApprovalCommand(
+  text: string,
+  deps: Pick<HandleTuiInputSubmissionDeps, "reporter" | "closeDialog">,
+): boolean {
   const parsed = parseApprovalCommand(text);
   if (!parsed) return false;
 

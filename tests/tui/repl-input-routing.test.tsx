@@ -281,7 +281,9 @@ describe("TUI input routing", () => {
       },
     );
 
-    expect(openDialog).toHaveBeenCalledWith(expect.objectContaining({ id: "approval:pending" }));
+    expect(openDialog).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "approval:pending", layer: "overlay" }),
+    );
     expect(snapshots.at(-1)).toEqual([
       expect.objectContaining({ kind: "tool", name: "write_file", status: "approval" }),
     ]);
@@ -307,9 +309,7 @@ describe("TUI input routing", () => {
 
     await expect(approval).resolves.toMatchObject({ allowed: true });
     expect(runAgent).not.toHaveBeenCalled();
-    expect(snapshots.at(-1)).toEqual([
-      { kind: "system", content: "Approval approve: call_local" },
-    ]);
+    expect(snapshots.at(-1)).toEqual([{ kind: "system", content: "Approval approve: call_local" }]);
   });
 
   it("mention-expanded prompt 继续走 runAgentFromCli", async () => {
