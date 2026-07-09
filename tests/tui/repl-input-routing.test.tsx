@@ -1,5 +1,8 @@
+import React from "react";
+import { renderToString } from "ink";
 import { describe, expect, it, vi } from "vitest";
 import { createBuiltinCommandRegistry } from "../../src/input/builtin-commands.js";
+import type { CliSessionBrowserSummary } from "../../src/tui/session-browser-adapter.js";
 import { TuiReporter } from "../../src/tui/tui-reporter.js";
 import {
   dispatchModelSelectorSelection,
@@ -178,4 +181,107 @@ describe("TUI input routing", () => {
     expect(processInput).toHaveBeenCalledWith("review this");
     expect(runAgent).toHaveBeenCalledWith("review this");
   });
+
+  it("/sessions 打开 session selector dialog", async () => {
+    const { reporter, runAgent, exit, registry, workDir } = harness();
+    const openDialog = vi.fn();
+    const processInput = vi.fn(async (): Promise<TuiInputProcessResult> => ({
+      type: "local-command",
+      raw: "/sessions",
+      command: "sessions",
+      args: "",
+      argv: [],
+      result: {
+        type: "local",
+        action: "message",
+        message: "legacy session list",
+        data: [
+          sessionSummary({
+            id: "cli-current",
+            title: "继续调试 TUI",
+            firstMessage: "继续调试 TUI",
+          }),
+        ],
+        ui: { kind: "open-selector", selector: "session" },
+      },
+    }));
+
+    await handleTuiInputSubmission("/sessions", {
+      reporter,
+      registry,
+      workDir,
+      runAgent,
+      exit,
+      processInput,
+      openDialog,
+    });
+
+    expect(runAgent).not.toHaveBeenCalled();
+    expect(openDialog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: "local-ui:session-selector",
+        layer: "modal",
+        priority: 40,
+      }),
+    );
+    const request = openDialog.mock.calls[0]?.[0];
+    expect(renderToString(request.content)).toContain("Sessions [cwd]");
+    expect(renderToString(request.content)).toContain("继续调试 TUI");
+  });
+
+  it("选择 session 后派发 /resume <session-id>", async () => {
+    const { reporter, runAgent, exit, registry, workDir } = harness();
+    const selected = sessionSummary({ id: "cli-current" });
+    const dispatchInput = vi.fn(async () => undefined);
+    const openDialog = vi.fn();
+    const processInput = vi.fn(async (): Promise<TuiInputProcessResult> => ({
+      type: "local-command",
+      raw: "/sessions",
+      command: "sessions",
+      args: "",
+      argv: [],
+      result: {
+        type: "local",
+        action: "message",
+        data: [selected],
+        ui: { kind: "open-selector", selector: "session" },
+      },
+    }));
+
+    await handleTuiInputSubmission("/sessions", {
+      reporter,
+      registry,
+      workDir,
+      runAgent,
+      exit,
+      processInput,
+      openDialog,
+      dispatchInput,
+    });
+
+    const request = openDialog.mock.calls[0]?.[0];
+    expect(React.isValidElement(request.content)).toBe(true);
+    const props = request.content.props as {
+      onSelect: (session: CliSessionBrowserSummary) => Promise<void> | void;
+    };
+    await props.onSelect(selected);
+
+    expect(dispatchInput).toHaveBeenCalledWith("/resume cli-current");
+    expect(runAgent).not.toHaveBeenCalled();
+  });
 });
+
+function sessionSummary(
+  overrides: Partial<CliSessionBrowserSummary> = {},
+): CliSessionBrowserSummary {
+  return {
+    id: overrides.id ?? "cli-current",
+    cwd: overrides.cwd ?? process.cwd(),
+    createdAt: overrides.createdAt ?? new Date("2026-07-09T01:00:00.000Z"),
+    updatedAt: overrides.updatedAt ?? new Date("2026-07-09T02:00:00.000Z"),
+    messageCount: overrides.messageCount ?? 3,
+    ...(overrides.title !== undefined ? { title: overrides.title } : {}),
+    ...(overrides.firstMessage !== undefined ? { firstMessage: overrides.firstMessage } : {}),
+    ...(overrides.lastMessage !== undefined ? { lastMessage: overrides.lastMessage } : {}),
+  };
+}

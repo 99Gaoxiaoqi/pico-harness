@@ -54,6 +54,21 @@ import {
   toolStatusFromRegistry,
 } from "../input/session-settings.js";
 import { globalSessionManager } from "../engine/session.js";
+import { hasLocalUiCommandAction } from "./local-ui-command.js";
+import {
+  confirmSessionBrowserSelection,
+  createSessionBrowserState,
+  moveSessionBrowserSelection,
+  SessionBrowser,
+  toggleSessionBrowserScope,
+  type SessionBrowserSession,
+  type SessionBrowserState,
+} from "./session-browser.js";
+import {
+  mapCliSessionsToBrowserSessions,
+  sessionSelectionToCommand,
+  type CliSessionBrowserSummary,
+} from "./session-browser-adapter.js";
 
 export interface ReplOptions {
   /** 工作区 */
@@ -71,6 +86,8 @@ export interface ReplOptions {
 }
 
 const suppressCliSummary: RunAgentWriter = () => undefined;
+const SESSION_SELECTOR_DIALOG_ID = "local-ui:session-selector";
+const SELECTOR_DIALOG_PRIORITY = 40;
 
 export type TuiInputProcessResult = InputProcessResult;
 
@@ -82,6 +99,8 @@ export interface HandleTuiInputSubmissionDeps {
   exit: () => void;
   processInput?: (text: string) => Promise<TuiInputProcessResult>;
   openDialog?: (request: DialogRequest) => void;
+  closeDialog?: (id: string) => void;
+  dispatchInput?: (text: string) => Promise<void> | void;
   currentModelId?: string;
   modelOptions?: readonly ModelOption[];
   createModelSelectorContent?: (effect: LocalTuiModelSelectorDialogEffect) => React.ReactNode;
@@ -203,6 +222,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
   function ReplApp() {
     const { exit } = useApp();
     const [stateEntries, setStateEntries] = useState<TuiEntry[]>([]);
+    const [dialogRequests, setDialogRequests] = useState<DialogRequest[]>([]);
     setEntries = setStateEntries;
 
     // QueryGuard:三态状态机(idle/dispatching/running),useSyncExternalStore 订阅。
@@ -212,7 +232,6 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     const guard = guardRef.current;
     const status = useSyncExternalStore(guard.subscribe, guard.getSnapshot);
     const running = status !== "idle"; // 派生:非 idle 即视为运行中
-    const [dialogRequests, setDialogRequests] = useState<DialogRequest[]>([]);
 
     const handleSubmit = async (text: string): Promise<void> => {
       let gen: number | null = null;
@@ -237,6 +256,11 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
               ...current.filter((item) => item.id !== request.id),
               request,
             ]);
+          },
+          closeDialog: (id) =>
+            setDialogRequests((current) => current.filter((item) => item.id !== id)),
+          dispatchInput: async (nextText) => {
+            await handleSubmit(nextText);
           },
           currentModelId: settings.model,
           modelOptions: buildModelOptions(),
@@ -347,7 +371,10 @@ function handleLocalTuiCommand(
     HandleTuiInputSubmissionDeps,
     | "reporter"
     | "exit"
+    | "workDir"
     | "openDialog"
+    | "closeDialog"
+    | "dispatchInput"
     | "currentModelId"
     | "modelOptions"
     | "createModelSelectorContent"
@@ -362,6 +389,11 @@ function handleLocalTuiCommand(
       ...uiEffect.request,
       content: deps.createModelSelectorContent?.(uiEffect) ?? uiEffect.request.content,
     });
+    return;
+  }
+
+  if (isSessionSelectorResult(result) && deps.openDialog) {
+    deps.openDialog(createSessionSelectorDialogRequest(result, deps));
     return;
   }
 
@@ -443,6 +475,140 @@ function InteractiveModelSelector({
   });
 
   return <ModelSelector models={models} currentModelId={currentModelId} state={state} />;
+}
+
+interface TuiSessionBrowserDialogProps {
+  sessions: readonly SessionBrowserSession[];
+  currentProjectCwd: string;
+  onSelect: (session: SessionBrowserSession) => Promise<void> | void;
+  onCancel?: () => void;
+}
+
+function TuiSessionBrowserDialog({
+  sessions,
+  currentProjectCwd,
+  onSelect,
+  onCancel,
+}: TuiSessionBrowserDialogProps): React.ReactNode {
+  const [state, setState] = useState<SessionBrowserState>(() => createSessionBrowserState());
+
+  useInput((input, key) => {
+    if (key.upArrow) {
+      setState((current) => moveSessionBrowserSelection(current, sessions, -1, currentProjectCwd));
+      return;
+    }
+
+    if (key.downArrow) {
+      setState((current) => moveSessionBrowserSelection(current, sessions, 1, currentProjectCwd));
+      return;
+    }
+
+    if (input === "a") {
+      setState((current) => toggleSessionBrowserScope(current, sessions, currentProjectCwd));
+      return;
+    }
+
+    if (key.return) {
+      setState((current) =>
+        confirmSessionBrowserSelection(current, sessions, currentProjectCwd, {
+          onConfirm: (session) => void onSelect(session),
+        }),
+      );
+      return;
+    }
+
+    if (key.escape || input === "q") {
+      onCancel?.();
+    }
+  });
+
+  return (
+    <SessionBrowser
+      currentProjectCwd={currentProjectCwd}
+      sessions={sessions}
+      state={state}
+    />
+  );
+}
+
+function isSessionSelectorResult(
+  result: LocalCommandResult,
+): result is LocalCommandResult & {
+  ui: { kind: "open-selector"; selector: "session" };
+} {
+  return (
+    hasLocalUiCommandAction(result) &&
+    result.ui.kind === "open-selector" &&
+    result.ui.selector === "session"
+  );
+}
+
+function createSessionSelectorDialogRequest(
+  result: LocalCommandResult,
+  deps: Pick<HandleTuiInputSubmissionDeps, "workDir" | "closeDialog" | "dispatchInput">,
+): DialogRequest {
+  const sessions = mapCliSessionsToBrowserSessions(extractSessionSummaries(result.data));
+
+  return {
+    id: SESSION_SELECTOR_DIALOG_ID,
+    layer: "modal",
+    priority: SELECTOR_DIALOG_PRIORITY,
+    content: (
+      <TuiSessionBrowserDialog
+        currentProjectCwd={deps.workDir}
+        sessions={sessions}
+        onCancel={() => deps.closeDialog?.(SESSION_SELECTOR_DIALOG_ID)}
+        onSelect={async (session) => {
+          deps.closeDialog?.(SESSION_SELECTOR_DIALOG_ID);
+          await deps.dispatchInput?.(sessionSelectionToCommand(session.id));
+        }}
+      />
+    ),
+  };
+}
+
+function extractSessionSummaries(data: unknown): CliSessionBrowserSummary[] {
+  const values = Array.isArray(data)
+    ? data
+    : isRecord(data) && Array.isArray(data.sessions)
+      ? data.sessions
+      : [];
+  return values.flatMap((value) => {
+    const summary = toSessionSummary(value);
+    return summary ? [summary] : [];
+  });
+}
+
+function toSessionSummary(value: unknown): CliSessionBrowserSummary | null {
+  if (!isRecord(value)) return null;
+  if (typeof value.id !== "string" || typeof value.cwd !== "string") return null;
+  if (typeof value.messageCount !== "number") return null;
+
+  const createdAt = toDate(value.createdAt);
+  const updatedAt = toDate(value.updatedAt);
+  if (!createdAt || !updatedAt) return null;
+
+  return {
+    id: value.id,
+    cwd: value.cwd,
+    createdAt,
+    updatedAt,
+    messageCount: value.messageCount,
+    ...(typeof value.title === "string" ? { title: value.title } : {}),
+    ...(typeof value.firstMessage === "string" ? { firstMessage: value.firstMessage } : {}),
+    ...(typeof value.lastMessage === "string" ? { lastMessage: value.lastMessage } : {}),
+  };
+}
+
+function toDate(value: unknown): Date | null {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) return value;
+  if (typeof value !== "string" && typeof value !== "number") return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
 function formatUnknownCommand(
