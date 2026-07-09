@@ -2,6 +2,7 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { FileIndex } from "../../src/input/file-index.js";
 import { listFileSuggestions } from "../../src/input/file-suggestions.js";
 
 describe("listFileSuggestions", () => {
@@ -73,5 +74,25 @@ describe("listFileSuggestions", () => {
     });
 
     expect(suggestions).toEqual(["src/app.ts"]);
+  });
+
+  it("can use a long-lived FileIndex cache", async () => {
+    const calls: string[] = [];
+    const fileIndex = FileIndex.create({
+      cwd: workDir,
+      commandRunner: async (command) => {
+        calls.push(command);
+        return "src/app.ts\nREADME.md\n";
+      },
+    });
+
+    await expect(
+      listFileSuggestions({ cwd: workDir, query: "src", fileIndex }),
+    ).resolves.toEqual(["src/app.ts"]);
+    await expect(
+      listFileSuggestions({ cwd: workDir, query: "README", fileIndex }),
+    ).resolves.toEqual(["README.md"]);
+
+    expect(calls).toEqual(["git"]);
   });
 });
