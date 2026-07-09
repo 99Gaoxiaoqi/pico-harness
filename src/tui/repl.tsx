@@ -21,7 +21,7 @@ import { QueryGuard } from "./query-guard.js";
 import type { RunAgentCliOptions, RunAgentWriter } from "../cli/run-agent.js";
 import { runAgentFromCli } from "../cli/run-agent.js";
 import { createCliSessionId, type CliSessionSelection } from "../cli/session-resolver.js";
-import { listFileSuggestions } from "../input/file-suggestions.js";
+import { listFileSuggestions } from "../input/file-index.js";
 import {
   commandSuggestions,
   createPicoCommandRegistry,

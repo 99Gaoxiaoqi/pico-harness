@@ -14,6 +14,14 @@ export interface FileIndexOptions {
   commandRunner?: CommandRunner;
 }
 
+export interface FileSuggestionOptions {
+  cwd: string;
+  query?: string;
+  limit?: number;
+  commandRunner?: CommandRunner;
+  fileIndex?: FileIndex;
+}
+
 interface DirectoryEntry {
   name: string;
   isDirectory(): boolean;
@@ -69,6 +77,19 @@ export class FileIndex {
     }
     return this.cachedFiles ?? [];
   }
+}
+
+export async function listFileSuggestions(
+  options: FileSuggestionOptions,
+): Promise<string[]> {
+  const index =
+    options.fileIndex ??
+    FileIndex.create({
+      cwd: options.cwd,
+      commandRunner: options.commandRunner,
+    });
+
+  return index.query(options.query ?? "", options.limit ?? DEFAULT_FILE_SUGGESTION_LIMIT);
 }
 
 async function discoverFiles(

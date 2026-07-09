@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { FileIndex } from "../../src/input/file-index.js";
-import { listFileSuggestions } from "../../src/input/file-suggestions.js";
+import { listFileSuggestions } from "../../src/input/file-index.js";
 
 describe("listFileSuggestions", () => {
   let workDir: string;

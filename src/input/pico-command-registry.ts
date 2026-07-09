@@ -63,6 +63,21 @@ import {
 import { findMatchingTools } from "../tools/search-tools.js";
 import type { ToolDefinition } from "../schema/message.js";
 
+const OVERRIDDEN_BUILTIN_COMMANDS = new Set([
+  "skills",
+  "skill",
+  "model",
+  "mode",
+  "permissions",
+  "status",
+  "compact",
+  "init",
+  "doctor",
+  "tools",
+  "thinking",
+  "agents",
+]);
+
 export interface PicoCommandRegistryOptions {
   workDir: string;
   model: string;
@@ -95,19 +110,7 @@ export async function createPicoCommandRegistry(
     tools,
   });
   const builtins = createBuiltinCommands().filter(
-    (command) =>
-      command.name !== "skills" &&
-      command.name !== "skill" &&
-      command.name !== "model" &&
-      command.name !== "mode" &&
-      command.name !== "permissions" &&
-      command.name !== "status" &&
-      command.name !== "compact" &&
-      command.name !== "init" &&
-      command.name !== "doctor" &&
-      command.name !== "tools" &&
-      command.name !== "thinking" &&
-      command.name !== "agents",
+    (command) => !OVERRIDDEN_BUILTIN_COMMANDS.has(command.name),
   );
   const registry = new CommandRegistry([
     ...builtins,

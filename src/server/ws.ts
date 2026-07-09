@@ -88,6 +88,7 @@ function recordToEvent(record: SessionRecord, seq: number, epoch: number): WsEve
         payload: { messageIndex: record.messageIndex, at: record.at },
       };
   }
+  throw new Error(`未知 SessionRecord 类型: ${(record as { type: string }).type}`);
 }
 
 /**

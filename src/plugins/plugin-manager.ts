@@ -1,13 +1,30 @@
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
-import type {
-  InstalledPlugin,
-  PluginManifest,
-  PluginOperationResult,
-  PluginScope,
-} from "./plugin-types.js";
 
-export type { InstalledPlugin, PluginManifest, PluginOperationResult, PluginScope };
+export type PluginScope = "user" | "project" | "local";
+
+export interface PluginManifest {
+  name: string;
+  version: string;
+  description?: string;
+  [key: string]: unknown;
+}
+
+export interface PluginOperationResult {
+  success: boolean;
+  message: string;
+  pluginId?: string;
+  pluginName?: string;
+  scope?: PluginScope;
+}
+
+export interface InstalledPlugin {
+  id: string;
+  scope: PluginScope;
+  manifest: PluginManifest;
+  installPath: string;
+  enabled: boolean;
+}
 
 const SCOPE_ORDER: PluginScope[] = ["user", "project", "local"];
 
