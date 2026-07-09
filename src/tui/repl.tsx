@@ -13,9 +13,10 @@
 // 用户连按 Enter 时,第二个查询让第一个的 finally 块 generation 不匹配,
 // 跳过 cleanup,避免竞态。running 由 status !== "idle" 派生(同步,无 React batch 延迟)。
 
-import { useRef, useState, useSyncExternalStore } from "react";
-import { render, useApp } from "ink";
+import { useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import { render, useApp, useInput } from "ink";
 import { App } from "./app.js";
+import type { DialogRequest } from "./dialog-arbiter.js";
 import { TuiReporter, type TuiEntry } from "./tui-reporter.js";
 import { QueryGuard } from "./query-guard.js";
 import type { RunAgentCliOptions, RunAgentWriter } from "../cli/run-agent.js";
@@ -40,6 +41,21 @@ import {
   toolStatusFromRegistry,
 } from "../input/session-settings.js";
 import { globalSessionManager } from "../engine/session.js";
+import { hasLocalUiCommandAction } from "./local-ui-command.js";
+import {
+  confirmSessionBrowserSelection,
+  createSessionBrowserState,
+  moveSessionBrowserSelection,
+  SessionBrowser,
+  toggleSessionBrowserScope,
+  type SessionBrowserSession,
+  type SessionBrowserState,
+} from "./session-browser.js";
+import {
+  mapCliSessionsToBrowserSessions,
+  sessionSelectionToCommand,
+  type CliSessionBrowserSummary,
+} from "./session-browser-adapter.js";
 
 export interface ReplOptions {
   /** 工作区 */
@@ -57,6 +73,8 @@ export interface ReplOptions {
 }
 
 const suppressCliSummary: RunAgentWriter = () => undefined;
+const SESSION_SELECTOR_DIALOG_ID = "local-ui:session-selector";
+const SELECTOR_DIALOG_PRIORITY = 40;
 
 export type TuiInputProcessResult = InputProcessResult;
 
@@ -67,6 +85,9 @@ export interface HandleTuiInputSubmissionDeps {
   runAgent: (prompt: string) => Promise<void>;
   exit: () => void;
   processInput?: (text: string) => Promise<TuiInputProcessResult>;
+  openDialog?: (request: DialogRequest) => void;
+  closeDialog?: (id: string) => void;
+  dispatchInput?: (text: string) => Promise<void> | void;
 }
 
 export async function handleTuiInputSubmission(
@@ -173,6 +194,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
   function ReplApp() {
     const { exit } = useApp();
     const [stateEntries, setStateEntries] = useState<TuiEntry[]>([]);
+    const [dialogRequests, setDialogRequests] = useState<DialogRequest[]>([]);
     setEntries = setStateEntries;
 
     // QueryGuard:三态状态机(idle/dispatching/running),useSyncExternalStore 订阅。
@@ -201,6 +223,16 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
           workDir: opts.workDir,
           exit,
           processInput: async () => processed,
+          openDialog: (request) =>
+            setDialogRequests((requests) => [
+              ...requests.filter((item) => item.id !== request.id),
+              request,
+            ]),
+          closeDialog: (id) =>
+            setDialogRequests((requests) => requests.filter((item) => item.id !== id)),
+          dispatchInput: async (nextText) => {
+            await handleSubmit(nextText);
+          },
           runAgent: async (prompt) => {
             const cliOpts: RunAgentCliOptions = {
               prompt,
@@ -260,6 +292,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
             .slice(0, 20)
             .map((file) => ({ value: file }))
         }
+        dialogRequests={dialogRequests}
         onSubmit={(text) => void handleSubmit(text)}
       />
     );
@@ -284,8 +317,16 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
 
 function handleLocalTuiCommand(
   result: LocalCommandResult,
-  deps: Pick<HandleTuiInputSubmissionDeps, "reporter" | "exit">,
+  deps: Pick<
+    HandleTuiInputSubmissionDeps,
+    "reporter" | "exit" | "workDir" | "openDialog" | "closeDialog" | "dispatchInput"
+  >,
 ): void {
+  if (isSessionSelectorResult(result) && deps.openDialog) {
+    deps.openDialog(createSessionSelectorDialogRequest(result, deps));
+    return;
+  }
+
   switch (result.action) {
     case "clear":
       deps.reporter.clear();
@@ -297,6 +338,140 @@ function handleLocalTuiCommand(
       deps.reporter.pushSystemMessage(result.message ?? "");
       return;
   }
+}
+
+interface TuiSessionBrowserDialogProps {
+  sessions: readonly SessionBrowserSession[];
+  currentProjectCwd: string;
+  onSelect: (session: SessionBrowserSession) => Promise<void> | void;
+  onCancel?: () => void;
+}
+
+function TuiSessionBrowserDialog({
+  sessions,
+  currentProjectCwd,
+  onSelect,
+  onCancel,
+}: TuiSessionBrowserDialogProps): ReactNode {
+  const [state, setState] = useState<SessionBrowserState>(() => createSessionBrowserState());
+
+  useInput((input, key) => {
+    if (key.upArrow) {
+      setState((current) => moveSessionBrowserSelection(current, sessions, -1, currentProjectCwd));
+      return;
+    }
+
+    if (key.downArrow) {
+      setState((current) => moveSessionBrowserSelection(current, sessions, 1, currentProjectCwd));
+      return;
+    }
+
+    if (input === "a") {
+      setState((current) => toggleSessionBrowserScope(current, sessions, currentProjectCwd));
+      return;
+    }
+
+    if (key.return) {
+      setState((current) =>
+        confirmSessionBrowserSelection(current, sessions, currentProjectCwd, {
+          onConfirm: (session) => void onSelect(session),
+        }),
+      );
+      return;
+    }
+
+    if (key.escape || input === "q") {
+      onCancel?.();
+    }
+  });
+
+  return (
+    <SessionBrowser
+      currentProjectCwd={currentProjectCwd}
+      sessions={sessions}
+      state={state}
+    />
+  );
+}
+
+function isSessionSelectorResult(
+  result: LocalCommandResult,
+): result is LocalCommandResult & {
+  ui: { kind: "open-selector"; selector: "session" };
+} {
+  return (
+    hasLocalUiCommandAction(result) &&
+    result.ui.kind === "open-selector" &&
+    result.ui.selector === "session"
+  );
+}
+
+function createSessionSelectorDialogRequest(
+  result: LocalCommandResult,
+  deps: Pick<HandleTuiInputSubmissionDeps, "workDir" | "closeDialog" | "dispatchInput">,
+): DialogRequest {
+  const sessions = mapCliSessionsToBrowserSessions(extractSessionSummaries(result.data));
+
+  return {
+    id: SESSION_SELECTOR_DIALOG_ID,
+    layer: "modal",
+    priority: SELECTOR_DIALOG_PRIORITY,
+    content: (
+      <TuiSessionBrowserDialog
+        currentProjectCwd={deps.workDir}
+        sessions={sessions}
+        onCancel={() => deps.closeDialog?.(SESSION_SELECTOR_DIALOG_ID)}
+        onSelect={async (session) => {
+          deps.closeDialog?.(SESSION_SELECTOR_DIALOG_ID);
+          await deps.dispatchInput?.(sessionSelectionToCommand(session.id));
+        }}
+      />
+    ),
+  };
+}
+
+function extractSessionSummaries(data: unknown): CliSessionBrowserSummary[] {
+  const values = Array.isArray(data)
+    ? data
+    : isRecord(data) && Array.isArray(data.sessions)
+      ? data.sessions
+      : [];
+  return values.flatMap((value) => {
+    const summary = toSessionSummary(value);
+    return summary ? [summary] : [];
+  });
+}
+
+function toSessionSummary(value: unknown): CliSessionBrowserSummary | null {
+  if (!isRecord(value)) return null;
+  if (typeof value.id !== "string" || typeof value.cwd !== "string") return null;
+  if (typeof value.messageCount !== "number") return null;
+
+  const createdAt = toDate(value.createdAt);
+  const updatedAt = toDate(value.updatedAt);
+  if (!createdAt || !updatedAt) return null;
+
+  return {
+    id: value.id,
+    cwd: value.cwd,
+    createdAt,
+    updatedAt,
+    messageCount: value.messageCount,
+    ...(typeof value.title === "string" ? { title: value.title } : {}),
+    ...(typeof value.firstMessage === "string" ? { firstMessage: value.firstMessage } : {}),
+    ...(typeof value.lastMessage === "string" ? { lastMessage: value.lastMessage } : {}),
+  };
+}
+
+function toDate(value: unknown): Date | null {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) return value;
+  if (typeof value !== "string" && typeof value !== "number") return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
 function formatUnknownCommand(
