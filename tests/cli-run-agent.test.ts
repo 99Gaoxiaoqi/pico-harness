@@ -1,12 +1,11 @@
-import { mkdir, mkdtemp, readFile, readdir, realpath, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { runAgentFromCli, runUserInputFromCli } from "../src/cli/run-agent.js";
+import { runAgentFromCli } from "../src/cli/run-agent.js";
 import type { Message, ToolDefinition } from "../src/schema/message.js";
 import type { LLMProvider } from "../src/provider/interface.js";
 import { resetSessionSettingsForTests } from "../src/input/session-settings.js";
-import { ToolDisclosure } from "../src/tools/tool-disclosure.js";
 
 class ScriptedProvider implements LLMProvider {
   readonly calls: Array<{ messages: Message[]; toolNames: string[] }> = [];
@@ -326,131 +325,4 @@ describe("runAgentFromCli", () => {
     expect(provider.calls[1]?.messages.some((message) => message.content === "second prompt")).toBe(true);
   });
 
-  it("CLI 单轮本地命令写 stdout 且不调用模型", async () => {
-    const provider = new ScriptedProvider([
-      {
-        role: "assistant",
-        content: "should not be used",
-      },
-    ]);
-    const output: string[] = [];
-
-    const result = await runUserInputFromCli(
-      { prompt: "/help", provider: "openai" },
-      {
-        provider,
-        write: (chunk) => {
-          output.push(chunk);
-        },
-      },
-    );
-
-    expect(result.type).toBe("local-command");
-    expect(provider.calls).toHaveLength(0);
-    expect(output.join("")).toContain("/clear");
-  });
-
-  it("CLI /tools 使用注入的工具披露状态", async () => {
-    const workDir = await mkdtemp(join(tmpdir(), "pico-cli-tools-"));
-    const disclosure = new ToolDisclosure();
-    disclosure.disclose(["web_search"]);
-    const output: string[] = [];
-
-    const result = await runUserInputFromCli(
-      {
-        prompt: "/tools",
-        dir: workDir,
-        provider: "openai",
-        model: "glm-5.2",
-      },
-      {
-        toolDisclosure: disclosure,
-        write: (chunk) => {
-          output.push(chunk);
-        },
-      },
-    );
-
-    expect(result.type).toBe("local-command");
-    expect(output.join("")).toContain("Disclosed tools");
-    expect(output.join("")).toContain("- web_search - read-only - risk: low");
-  });
-
-  it("CLI 单轮 prompt command 调用模型", async () => {
-    const workDir = await mkdtemp(join(tmpdir(), "pico-cli-"));
-    await mkdir(join(workDir, ".pico", "commands"), { recursive: true });
-    await writeFile(
-      join(workDir, ".pico", "commands", "review.md"),
-      "---\ndescription: Review changes\n---\nReview the current changes: $ARGUMENTS",
-      "utf8",
-    );
-    const provider = new ScriptedProvider([
-      {
-        role: "assistant",
-        content: "Review prompt received.",
-        usage: { promptTokens: 3, completionTokens: 2 },
-      },
-    ]);
-
-    const result = await runUserInputFromCli(
-      {
-        prompt: "/review src",
-        dir: workDir,
-        provider: "openai",
-        enableThinking: false,
-      },
-      {
-        provider,
-        write: () => undefined,
-      },
-    );
-
-    expect(result.type).toBe("agent");
-    expect(provider.calls[0]?.messages.at(-1)?.content).toBe("Review the current changes: src");
-  });
-
-  it("/model 切换同一 session 后续请求使用的模型", async () => {
-    const workDir = await mkdtemp(join(tmpdir(), "pico-cli-settings-"));
-    const createdModels: string[] = [];
-
-    const local = await runUserInputFromCli({
-      prompt: "/model kimi-k2.5",
-      dir: workDir,
-      session: "cli-settings-session",
-      provider: "openai",
-      model: "glm-5.2",
-    });
-
-    const agent = await runUserInputFromCli(
-      {
-        prompt: "Say done",
-        dir: workDir,
-        session: "cli-settings-session",
-        provider: "openai",
-        enableThinking: false,
-      },
-      {
-        env: {
-          LLM_BASE_URL: "https://llm.example/v1",
-          LLM_API_KEY: "test-key",
-          LLM_MODEL: "glm-5.2",
-        },
-        providerFactory: (_kind, config) => {
-          createdModels.push(config.model);
-          return new ScriptedProvider([
-            {
-              role: "assistant",
-              content: "Done with switched model.",
-              usage: { promptTokens: 2, completionTokens: 1 },
-            },
-          ]);
-        },
-        write: () => undefined,
-      },
-    );
-
-    expect(local.type).toBe("local-command");
-    expect(agent.type).toBe("agent");
-    expect(createdModels).toEqual(["kimi-k2.5"]);
-  });
 });

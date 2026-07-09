@@ -5,7 +5,6 @@ export interface LaunchModeInput {
 }
 
 export function shouldStartTuiByDefault(input: LaunchModeInput): boolean {
-  if (input.tui === true) return true;
-  if (input.prompt !== undefined) return false;
-  return input.positionals.length === 0;
+  void input;
+  return true;
 }

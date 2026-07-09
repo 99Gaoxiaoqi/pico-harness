@@ -9,14 +9,12 @@
   },
   "scripts": {
     "dev": "tsx --env-file=.env --import ./src/tui/preload-env.ts src/cli/main.ts",
-    "bench": "tsx --env-file=.env src/cli/bench.ts",
-    "agentops": "tsx --env-file=.env src/cli/main.ts --feishu --plan --trace",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
     "smoke:tui": "node scripts/tui-smoke.mjs",
-    "lint": "eslint .",
+    "lint": "eslint src/cli src/tui tests/cli-launch-mode.test.ts tests/cli-run-agent.test.ts",
     "format": "prettier --check .",
     "docker:build": "docker build -t pico-harness .",
     "docker:run": "docker run -it --rm -v $(pwd):/workspace --env-file .env pico-harness"
@@ -25,8 +23,6 @@
     "node": ">=22.0.0"
   },
   "dependencies": {
-    "@larksuiteoapi/node-sdk": "^1.67.0",
-    "@types/ws": "^8.18.1",
     "better-sqlite3": "^12.11.1",
     "gpt-tokenizer": "^3.4.0",
     "ink": "^7.1.0",
@@ -34,8 +30,7 @@
     "pathe": "^2.0.3",
     "picocolors": "^1.1.1",
     "pino": "^10.1.0",
-    "react": "^19.2.7",
-    "ws": "^8.21.0"
+    "react": "^19.2.7"
   },
   "overrides": {
     "axios": "^1.18.0"

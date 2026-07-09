@@ -12,21 +12,21 @@ describe("CLI launch mode", () => {
     ).toBe(true);
   });
 
-  it("keeps one-shot CLI mode when a prompt or positional task is provided", () => {
+  it("starts TUI even when a prompt or positional task is provided", () => {
     expect(
       shouldStartTuiByDefault({
         tui: false,
         prompt: "/status",
         positionals: [],
       }),
-    ).toBe(false);
+    ).toBe(true);
     expect(
       shouldStartTuiByDefault({
         tui: false,
         prompt: undefined,
         positionals: ["read README"],
       }),
-    ).toBe(false);
+    ).toBe(true);
   });
 
   it("respects explicit --tui", () => {
