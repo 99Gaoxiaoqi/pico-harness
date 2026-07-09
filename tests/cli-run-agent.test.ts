@@ -226,6 +226,35 @@ describe("runAgentFromCli", () => {
       promptTokens: 5,
       completionTokens: 2,
     });
+    // fallback 成功后按 kimi-k2.5 费率计费:((5 * 0.6) + (2 * 2.5)) / 1M USD * 7.2
+    expect(result.usage.costCNY).toBeCloseTo(0.0000576, 10);
+  });
+
+  it("注入 provider 时不要求网络配置", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-cli-injected-provider-"));
+    const provider = new ScriptedProvider([
+      {
+        role: "assistant",
+        content: "Injected provider works.",
+        usage: { promptTokens: 2, completionTokens: 1 },
+      },
+    ]);
+
+    const result = await runAgentFromCli(
+      {
+        prompt: "Say done",
+        dir: workDir,
+        provider: "openai",
+        enableThinking: false,
+      },
+      {
+        env: {},
+        provider,
+      },
+    );
+
+    expect(result.finalMessage).toBe("Injected provider works.");
+    expect(provider.calls).toHaveLength(1);
   });
 
   it("未指定 session 时默认每次 CLI 启动使用新 session", async () => {

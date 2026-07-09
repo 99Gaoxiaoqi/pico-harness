@@ -17,11 +17,10 @@ import { ToolDisclosure } from "../tools/tool-disclosure.js";
 import {
   createProvider,
   createRawProvider,
-  fallbackModelFor,
   getCredentialPool,
-  isModelUnavailableError,
   type ProviderKind,
 } from "../provider/factory.js";
+import { fallbackModelFor, isModelUnavailableError } from "../provider/fallback.js";
 import type { ProviderConfig } from "../provider/config.js";
 import type { LLMProvider } from "../provider/interface.js";
 import { resolveProviderProfile } from "../provider/profile.js";
