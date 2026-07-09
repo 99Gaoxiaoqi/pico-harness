@@ -32,6 +32,28 @@ describe("listFileSuggestions", () => {
     expect(calls).toEqual(["git"]);
   });
 
+  it("disables git quoted paths so Chinese file names are suggested normally", async () => {
+    const quotedOctalPath = String.raw`"\345\206\205\345\256\271/\350\257\264\346\230\216.md"`;
+    let gitArgs: string[] | undefined;
+
+    const suggestions = await listFileSuggestions({
+      cwd: workDir,
+      query: "@内容",
+      commandRunner: async (command, args) => {
+        if (command !== "git") return "";
+        gitArgs = args;
+        if (args.includes("core.quotepath=false")) {
+          return "内容/说明.md\nsrc/app.ts\n";
+        }
+        return `${quotedOctalPath}\nsrc/app.ts\n`;
+      },
+    });
+
+    expect(gitArgs).toEqual(["-c", "core.quotepath=false", "ls-files"]);
+    expect(suggestions).toEqual(["内容/说明.md"]);
+    expect(suggestions).not.toContain(quotedOctalPath);
+  });
+
   it("falls back to rg --files when git fails", async () => {
     const calls: string[] = [];
     const suggestions = await listFileSuggestions({
