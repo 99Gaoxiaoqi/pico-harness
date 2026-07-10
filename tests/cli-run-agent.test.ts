@@ -331,6 +331,64 @@ describe("runAgentFromCli", () => {
     expect(fileContent).toBeUndefined();
   });
 
+  it("exit_plan_mode 内部审批使用本轮 signal", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-cli-plan-exit-abort-"));
+    const originalPlan = "# 原计划\n不应被晚到审批修改";
+    await writeFile(join(workDir, "PLAN.md"), originalPlan, "utf8");
+    const provider = new ScriptedProvider([
+      {
+        role: "assistant",
+        content: "Submit the plan.",
+        toolCalls: [{ id: "call_exit_plan_abort", name: "exit_plan_mode", arguments: "{}" }],
+        usage: { promptTokens: 1, completionTokens: 1 },
+      },
+      {
+        role: "assistant",
+        content: "must not continue",
+        usage: { promptTokens: 1, completionTokens: 1 },
+      },
+    ]);
+    const approval = makeApprovalCapture();
+    const controller = new AbortController();
+    const runPromise = runAgentFromCli(
+      {
+        prompt: "Submit PLAN.md",
+        dir: workDir,
+        session: "plan_exit_abort_session",
+        provider: "openai",
+        planMode: true,
+      },
+      {
+        provider,
+        approvalNotifier: approval.notifier,
+        signal: controller.signal,
+      },
+    );
+    const outcomePromise = runPromise.then(
+      (result) => result,
+      (error: unknown) => error,
+    );
+
+    const notice = await waitForApprovalBeforeCompletion(approval.nextNotice, runPromise);
+    controller.abort(new DOMException("interrupted", "AbortError"));
+    await Promise.resolve();
+    const pendingAfterAbort = globalApprovalManager.pendingCount;
+    const lateModify = globalApprovalManager.resolveApprovalWithModify(
+      notice.taskId,
+      "late modify",
+      "# 不应写入",
+    );
+    const lateApprove = globalApprovalManager.resolveApproval(notice.taskId, true, "late approve");
+    const outcome = await outcomePromise;
+
+    expect(outcome).toMatchObject({ name: "AbortError" });
+    expect(pendingAfterAbort).toBe(0);
+    expect(lateModify).toBe(false);
+    expect(lateApprove).toBe(false);
+    expect(provider.calls).toHaveLength(1);
+    await expect(readFile(join(workDir, "PLAN.md"), "utf8")).resolves.toBe(originalPlan);
+  });
+
   it("edit_file requests approval before editing", async () => {
     const workDir = await mkdtemp(join(tmpdir(), "pico-cli-approval-edit-"));
     await writeFile(join(workDir, "approval-edit.txt"), "old value\n", "utf8");

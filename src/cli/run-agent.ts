@@ -282,6 +282,7 @@ export async function runAgentFromCli(
   if (exitTool instanceof ExitPlanModeTool) {
     exitTool.setExitCallback(() => engine.exitPlanMode());
     exitTool.setNotify(notifier);
+    exitTool.setAbortSignal(dependencies.signal);
   }
 
   // MCP 服务器:加载配置 → 并行连接 → 自动注册工具到 registry。
