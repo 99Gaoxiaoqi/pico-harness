@@ -483,6 +483,7 @@ git worktree remove ../pico-1-streaming
 - [x] 10.4 Read 支持 offset / limit 分页、总量提示和 PARTIAL 语义，并阻断 artifact 读取的二次外部化
 - [x] 10.5 Grep / Glob / MCP / 未知工具按工具类型使用分页或通用大输出兜底
 - [x] 10.6 使用跨模块集成测试验证滚动窗口、大输出落盘和分页读取，并完成 main 分支验收
+- [x] 10.7 修复 166x17 立即换行终端的全帧重复刷屏：增量渲染、右边界留列与 Ctrl+L 安全重绘
 
 ---
 
@@ -501,8 +502,8 @@ git worktree remove ../pico-1-streaming
 | 阶段 7       | 8        | 8      | ✅ 完成                             |
 | 阶段 8       | 8        | 8      | ✅ TUI-only 收口完成                |
 | 阶段 9       | 3        | 3      | ✅ 模型路由与核心交互完成           |
-| 阶段 10      | 6        | 6      | ✅ TUI 滚动与大型输出收敛完成       |
-| **当前总计** | **84**   | **84** | ✅ 阶段 1-10 交付并收口             |
+| 阶段 10      | 7        | 7      | ✅ TUI 滚动与大型输出收敛完成       |
+| **当前总计** | **85**   | **85** | ✅ 阶段 1-10 交付并收口             |
 
 ---
 
@@ -527,6 +528,11 @@ git worktree remove ../pico-1-streaming
 ---
 
 ## 📅 变更记录
+
+- 2026-07-11：修复 ChatGPT.app 166x17 全屏重复刷屏
+  - 生产 Ink 启用 incrementalRendering，根布局保留右边界 1 列，防止 spinner 帧触发终端立即 wrap/scrollback。
+  - Ctrl+L 改为 Ink 管理的空帧/完整帧重画，不再裸写 stdout 破坏差分帧状态。
+  - 166x17 生产配置集成验收模拟立即换行；PR-safe E2E 16 条、构建产物 PTY smoke、lint、format、typecheck、build 与 audit 通过。
 
 - 2026-07-11：完成阶段 10 TUI 滚动与大型工具输出收敛
   - Transcript 视口改为 follow / manual / tool-anchor 三态；工具展开锚点失效、新 prompt 提交和滚回底部时恢复自动跟随。
