@@ -34,6 +34,7 @@ import {
 } from "./help-panel.js";
 import {
   approvalPanelContentWidth,
+  isApprovalDialogId,
   measureApprovalPanelRows,
   type InteractiveApprovalPanelProps,
 } from "./approval-panel.js";
@@ -110,7 +111,7 @@ export function App({
   const { rows, columns } = useWindowSize();
   const focusedDialog = pickFocusedDialog(dialogRequests);
   const inputDisabled = focusedDialog !== null;
-  const inlineModal = focusedDialog?.layer === "modal" && focusedDialog.id === "approval:pending";
+  const inlineModal = focusedDialog?.layer === "modal" && isApprovalDialogId(focusedDialog.id);
   const modal =
     focusedDialog?.layer === "modal" && !inlineModal ? focusedDialog.content : undefined;
   const transcriptWrapWidth = Math.max(1, columns - 6);
@@ -168,9 +169,10 @@ export function App({
     inputDisabled ? 0 : 6,
     rows - 8 - genericDialogRows - transcriptLayout.approvalRows,
   );
-  const lastLayoutItem = transcriptLayout.items.at(-1);
-  const lastToolKey = lastLayoutItem?.entry.kind === "tool" ? lastLayoutItem.key : null;
-  const lastToolExpanded = lastToolKey !== null && expandedToolKey === lastToolKey;
+  const focusedToolItem = transcriptLayout.items.find((item) => item.focusedTool);
+  const focusedToolKey = focusedToolItem?.key ?? null;
+  const focusedToolExpanded = focusedToolKey !== null && expandedToolKey === focusedToolKey;
+  const inputDraft = useRef("");
   const [transcriptView, setTranscriptView] = useState<TranscriptViewState>({
     scrollRows: null,
     newMessageCount: 0,
@@ -185,11 +187,20 @@ export function App({
     const owner = resolveAppInputOwner(input, key, {
       running,
       modal: inputDisabled,
-      canToggleTool: lastToolKey !== null,
+      canToggleTool: focusedToolKey !== null,
+      inputDraft: inputDraft.current,
       keybindings,
     });
-    if (owner === "tool-card" && lastToolKey) {
-      setExpandedToolKey((current) => (current === lastToolKey ? null : lastToolKey));
+    if (owner === "tool-card" && focusedToolKey) {
+      if (focusedToolExpanded) {
+        setExpandedToolKey(null);
+      } else {
+        setExpandedToolKey(focusedToolKey);
+        setTranscriptView({
+          scrollRows: transcriptItemStartRow(transcriptLayout, focusedToolKey),
+          newMessageCount: 0,
+        });
+      }
       return;
     }
 
@@ -292,7 +303,7 @@ export function App({
         {transcriptView.newMessageCount > 0 && (
           <Text color="cyan">↓ {transcriptView.newMessageCount} new messages</Text>
         )}
-        <ToolCardFocusProvider expanded={lastToolExpanded}>
+        <ToolCardFocusProvider expanded={focusedToolExpanded}>
           <MessageList
             layout={transcriptLayout}
             isStreaming={isStreaming}
@@ -332,10 +343,14 @@ export function App({
           resolveAppInputOwner(input, key, {
             running,
             modal: inputDisabled,
-            canToggleTool: lastToolKey !== null,
+            canToggleTool: focusedToolKey !== null,
+            inputDraft: inputDraft.current,
             keybindings,
           }) === "input"
         }
+        onTextChange={(text) => {
+          inputDraft.current = text;
+        }}
         slashCommandSuggestions={slashCommandSuggestions}
         slashArgumentSuggestions={slashArgumentSuggestions}
         fileMentionSuggestions={fileMentionSuggestions}
@@ -429,11 +444,18 @@ export function resolveAppInputOwner(
     running: boolean;
     modal: boolean;
     canToggleTool: boolean;
+    inputDraft?: string;
     keybindings?: UserKeybindingConfig;
   },
 ): AppInputOwner {
   if (resolveAppKeyEvent(input, key, options.running, options.keybindings)) return "global";
   if (options.modal) return "modal";
+  if (
+    options.inputDraft &&
+    resolveKeybinding({ input, key }, "Chat", options.keybindings) !== null
+  ) {
+    return "input";
+  }
   if (resolveToolCardToggleKey(input, key, options.canToggleTool, false, options.keybindings)) {
     return "tool-card";
   }
@@ -553,6 +575,18 @@ function clampScrollRows(offset: number, viewportRows: number, totalRows: number
 
 function maxTranscriptScroll(viewportRows: number, totalRows: number): number {
   return Math.max(0, totalRows - Math.max(1, viewportRows));
+}
+
+function transcriptItemStartRow(
+  layout: ReturnType<typeof buildTranscriptLayout>,
+  key: string,
+): number {
+  let rows = 0;
+  for (const item of layout.items) {
+    if (item.key === key) return rows;
+    rows += item.rows;
+  }
+  return rows;
 }
 
 function approvalNoticeFromContent(content: React.ReactNode): ApprovalNotice | undefined {

@@ -79,7 +79,11 @@ import {
   globalApprovalPolicy,
   type ApprovalNotice,
 } from "../approval/manager.js";
-import { InteractiveApprovalPanel, type ApprovalPanelAction } from "./approval-panel.js";
+import {
+  approvalDialogId,
+  InteractiveApprovalPanel,
+  type ApprovalPanelAction,
+} from "./approval-panel.js";
 import { createTuiRuntimeState, type TuiRuntimeState } from "./runtime-state.js";
 
 export interface ReplOptions {
@@ -101,7 +105,6 @@ export interface ReplOptions {
 
 const SESSION_SELECTOR_DIALOG_ID = "local-ui:session-selector";
 const SELECTOR_DIALOG_PRIORITY = 40;
-const APPROVAL_DIALOG_ID = "approval:pending";
 const APPROVAL_DIALOG_PRIORITY = 80;
 
 export type TuiInputProcessResult = InputProcessResult;
@@ -496,6 +499,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     mcpStatus: () => latestMcpStatus,
     additionalDirectories: settings.additionalDirectories,
     additionalDirectoryManager: workspaceRoots,
+    goalManager: runtimeState.goalManager,
   });
   await fileIndex.refresh().catch(() => undefined);
 
@@ -832,7 +836,16 @@ export async function runTuiAgentPrompt(
   },
 ): Promise<void> {
   const controller = new AbortController();
-  const closeApprovalOnAbort = () => deps.closeDialog?.(APPROVAL_DIALOG_ID);
+  const pendingApprovalDialogs = new Set<string>();
+  const closePendingApprovalDialogs = () => {
+    for (const id of pendingApprovalDialogs) deps.closeDialog?.(id);
+    pendingApprovalDialogs.clear();
+  };
+  const closeApprovalDialog = (id: string) => {
+    pendingApprovalDialogs.delete(id);
+    deps.closeDialog?.(id);
+  };
+  const closeApprovalOnAbort = () => closePendingApprovalDialogs();
   controller.signal.addEventListener("abort", closeApprovalOnAbort, { once: true });
   if (deps.abortControllerRef) deps.abortControllerRef.current = controller;
   try {
@@ -841,10 +854,12 @@ export async function runTuiAgentPrompt(
       signal: controller.signal,
       approvalNotifier: (notice) => {
         deps.reporter.onToolAwaitingApproval(notice.toolName, notice.args);
+        const dialogId = approvalDialogId(notice.taskId);
+        pendingApprovalDialogs.add(dialogId);
         deps.openDialog?.(
           createApprovalDialogRequest(notice, {
             reporter: deps.reporter,
-            closeDialog: deps.closeDialog,
+            closeDialog: closeApprovalDialog,
             sessionId: cliOpts.sessionSelection?.sessionId ?? cliOpts.session,
           }),
         );
@@ -859,6 +874,7 @@ export async function runTuiAgentPrompt(
     }
   } finally {
     controller.signal.removeEventListener("abort", closeApprovalOnAbort);
+    closePendingApprovalDialogs();
     if (deps.abortControllerRef?.current === controller) {
       deps.abortControllerRef.current = null;
     }
@@ -925,7 +941,7 @@ function createApprovalDialogRequest(
   deps: Pick<HandleTuiInputSubmissionDeps, "reporter" | "closeDialog" | "sessionId">,
 ): DialogRequest {
   return {
-    id: APPROVAL_DIALOG_ID,
+    id: approvalDialogId(notice.taskId),
     layer: "modal",
     priority: APPROVAL_DIALOG_PRIORITY,
     content: (
@@ -973,7 +989,7 @@ function resolveApprovalAction(
           `TUI ${parsed.action}`,
         );
 
-  deps.closeDialog?.(APPROVAL_DIALOG_ID);
+  deps.closeDialog?.(approvalDialogId(parsed.taskId));
   deps.reporter.pushSystemMessage(
     ok
       ? `Approval ${parsed.action}: ${parsed.taskId}`

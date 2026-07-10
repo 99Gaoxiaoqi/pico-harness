@@ -11,6 +11,7 @@ const CORE_HELP_COMMANDS = new Set([
   "clear",
   "exit",
   "status",
+  "goal",
   "mode",
   "permissions",
   "compact",

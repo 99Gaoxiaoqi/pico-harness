@@ -393,11 +393,19 @@ describe("App", () => {
       expect(output).toContain("aliases: /h, /?");
       expect(output.split("\n").length).toBeLessThanOrEqual(24);
 
-      output = await harness.write("\u001b[6~");
+      let foundPermissions = false;
+      for (let page = 0; page < 12; page += 1) {
+        output = await harness.write("\u001b[6~");
+        expect(output.split("\n").length).toBeLessThanOrEqual(24);
+        if (output.includes("builtin / permissions")) {
+          foundPermissions = true;
+          break;
+        }
+      }
+      expect(foundPermissions).toBe(true);
       expect(output).toContain("builtin / permissions");
       expect(output).toContain("aliases: /permission");
       expect(output).toContain("/permissions [ask|default|auto|");
-      expect(output.split("\n").length).toBeLessThanOrEqual(24);
 
       await harness.write("\u001b");
       await new Promise((resolve) => setTimeout(resolve, 80));
@@ -657,7 +665,7 @@ describe("App", () => {
         running
         dialogRequests={[
           {
-            id: "approval:pending",
+            id: "approval:pending:approval-1",
             layer: "modal",
             priority: 80,
             content: <Text>Approval required: write_file</Text>,
@@ -707,6 +715,53 @@ describe("App", () => {
     expect(resolveAppKeyEvent("c", { ctrl: true }, true)).toBe("interrupt");
     expect(resolveAppKeyEvent("d", { ctrl: true }, true)).toBe("exit");
     expect(resolveAppKeyEvent("l", { ctrl: true }, false)).toBe("redraw");
+  });
+
+  it("Enter 只由聚焦的审批面板消费并批准一次", async () => {
+    const onAction = vi.fn();
+    const onSubmit = vi.fn();
+    const harness = createInteractiveApp(
+      <App
+        model="glm-5.2"
+        workDir="/workspace/demo"
+        entries={[
+          {
+            kind: "tool",
+            name: "write_file",
+            args: '{"path":"approved.txt"}',
+            status: "approval",
+          },
+        ]}
+        running
+        dialogRequests={[
+          {
+            id: "approval:pending:approval-enter",
+            layer: "modal",
+            priority: 80,
+            content: (
+              <InteractiveApprovalPanel
+                taskId="approval-enter"
+                toolName="write_file"
+                args={JSON.stringify({ path: "approved.txt", content: "ok" })}
+                message="approval"
+                onAction={onAction}
+              />
+            ),
+          },
+        ]}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    try {
+      await harness.write("\r");
+      await harness.write("\r");
+      expect(onAction).toHaveBeenCalledOnce();
+      expect(onAction).toHaveBeenCalledWith("approve");
+      expect(onSubmit).not.toHaveBeenCalled();
+    } finally {
+      await harness.cleanup();
+    }
   });
 
   it("applies configured global bindings and null unbinds", () => {
@@ -795,7 +850,225 @@ describe("App", () => {
     expect(resolveToolCardToggleKey("e", { ctrl: true }, true, false, keybindings)).toBeNull();
   });
 
-  it("Ctrl+E expands the focused ToolCard without also moving the input cursor", async () => {
+  it("Ctrl+E expands and scrolls to the latest ToolCard above a long assistant reply", async () => {
+    const harness = createInteractiveApp(
+      <App
+        model="glm-5.2"
+        provider="openai"
+        workDir="/workspace/demo"
+        entries={[
+          {
+            kind: "tool",
+            name: "read_file",
+            args: '{"path":"README.md"}',
+            status: "success",
+            summary: "result-line-0\nresult-line-1",
+          },
+          {
+            kind: "assistant",
+            content: Array.from({ length: 40 }, (_, index) => `tail-line-${index}`).join("\n"),
+          },
+        ]}
+        running={false}
+        onSubmit={vi.fn()}
+      />,
+      { columns: 80, rows: 24 },
+    );
+
+    try {
+      const frame = await harness.write("\u0005");
+
+      expect(frame).toContain("result-line-1");
+      expect(frame).toContain("tail-line-0");
+      expect(frame).not.toContain("tail-line-39");
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("keeps a bound Chat shortcut on a non-empty draft instead of expanding ToolCard", async () => {
+    const harness = createInteractiveApp(
+      <App
+        model="glm-5.2"
+        provider="openai"
+        workDir="/workspace/demo"
+        entries={[
+          {
+            kind: "tool",
+            name: "read_file",
+            args: '{"path":"README.md"}',
+            status: "success",
+            summary: "result-line-0\nresult-line-1",
+          },
+          { kind: "assistant", content: "finished" },
+        ]}
+        running={false}
+        onSubmit={vi.fn()}
+      />,
+    );
+
+    try {
+      await harness.write("ab");
+      await harness.write("\u001b[D");
+      const frame = await harness.write("\u0005");
+
+      expect(frame).toContain("ab▋");
+      expect(frame).not.toContain("参数");
+      expect(frame).not.toContain("result-line-1");
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("Ctrl+E expands the latest running ToolCard while a turn is active", async () => {
+    const harness = createInteractiveApp(
+      <App
+        model="glm-5.2"
+        provider="openai"
+        workDir="/workspace/demo"
+        entries={[
+          {
+            kind: "tool",
+            name: "bash",
+            args: '{"command":"npm test"}',
+            status: "running",
+            summary: "still running",
+          },
+          { kind: "thinking" },
+        ]}
+        running
+        onSubmit={vi.fn()}
+      />,
+    );
+
+    try {
+      const frame = await harness.write("\u0005");
+
+      expect(frame).toContain("参数");
+      expect(frame).toContain("command:npm test");
+      expect(frame).toContain("Running");
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("keeps Ctrl+E and plain e in the input when no ToolCard shortcut owns them", async () => {
+    const harness = createInteractiveApp(
+      <App
+        model="glm-5.2"
+        provider="openai"
+        workDir="/workspace/demo"
+        entries={[]}
+        running={false}
+        onSubmit={vi.fn()}
+      />,
+    );
+
+    try {
+      await harness.write("ab");
+      await harness.write("\u001b[D");
+      let frame = await harness.write("\u0005");
+      expect(frame).toContain("ab▋");
+
+      frame = await harness.write("e");
+      expect(frame).toContain("abe▋");
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("does not let a modal leak Ctrl+E to the latest ToolCard", async () => {
+    const entries = [
+      {
+        kind: "tool" as const,
+        name: "read_file",
+        args: '{"path":"README.md"}',
+        status: "success" as const,
+        summary: "result-line-0\nresult-line-1",
+      },
+      { kind: "assistant" as const, content: "finished" },
+    ];
+    const harness = createInteractiveApp(
+      <App
+        model="glm-5.2"
+        provider="openai"
+        workDir="/workspace/demo"
+        entries={entries}
+        running={false}
+        dialogRequests={[
+          { id: "settings", layer: "modal", priority: 50, content: <Text>Settings modal</Text> },
+        ]}
+        onSubmit={vi.fn()}
+      />,
+    );
+
+    try {
+      expect(await harness.write("\u0005")).toBe("");
+      const frame = await harness.rerender(
+        <App
+          model="glm-5.2"
+          provider="openai"
+          workDir="/workspace/demo"
+          entries={entries}
+          running={false}
+          onSubmit={vi.fn()}
+        />,
+      );
+
+      expect(frame).toContain("finished");
+      expect(frame).not.toContain("参数");
+      expect(frame).not.toContain("result-line-1");
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("uses the configured ToolCard shortcut for a tool followed by system feedback", async () => {
+    const keybindings = {
+      Transcript: {
+        "ctrl+t": "transcript:toggleShowAll" as const,
+        "ctrl+e": null,
+      },
+    };
+    const harness = createInteractiveApp(
+      <App
+        model="glm-5.2"
+        provider="openai"
+        workDir="/workspace/demo"
+        entries={[
+          {
+            kind: "tool",
+            name: "read_file",
+            args: '{"path":"README.md"}',
+            status: "success",
+            summary: "result-line-0\nresult-line-1",
+          },
+          { kind: "system", content: "local feedback" },
+        ]}
+        running={false}
+        keybindings={keybindings}
+        onSubmit={vi.fn()}
+      />,
+    );
+
+    try {
+      await harness.write("ab");
+      await harness.write("\u001b[D");
+      let frame = await harness.write("\u0005");
+      expect(frame).not.toContain("参数");
+      expect(frame).toContain("ab▋");
+
+      frame = await harness.write("\u0014");
+      expect(frame).toContain("参数");
+      expect(frame).toContain("result-line-1");
+      expect(frame).toContain("local feedback");
+      expect(frame).toContain("ab▋");
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("does not let plain e steal the prompt when a ToolCard is available", async () => {
     const harness = createInteractiveApp(
       <App
         model="glm-5.2"
@@ -809,6 +1082,7 @@ describe("App", () => {
             status: "success",
             summary: "done",
           },
+          { kind: "assistant", content: "finished" },
         ]}
         running={false}
         onSubmit={vi.fn()}
@@ -816,13 +1090,10 @@ describe("App", () => {
     );
 
     try {
-      await harness.write("ab");
-      await harness.write("\u001b[D");
-      const frame = await harness.write("\u0005");
+      const frame = await harness.write("e");
 
-      expect(frame).toContain("参数");
-      expect(frame).toContain("a▋b");
-      expect(frame).not.toContain("ab▋");
+      expect(frame).toContain("e▋");
+      expect(frame).not.toContain("参数");
     } finally {
       await harness.cleanup();
     }
@@ -905,7 +1176,7 @@ describe("App", () => {
         running
         dialogRequests={[
           {
-            id: "approval:pending",
+            id: "approval:pending:approval-1",
             layer: "modal",
             priority: 80,
             content: (

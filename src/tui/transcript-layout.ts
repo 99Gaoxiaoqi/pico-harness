@@ -15,6 +15,8 @@ export interface TranscriptLayoutOptions {
 export interface TranscriptLayoutItem {
   key: string;
   entry: TuiEntry;
+  /** 当前可由 transcript 快捷键展开的最近工具。 */
+  focusedTool: boolean;
   rows: number;
   separatorRows: number;
 }
@@ -33,20 +35,25 @@ export function buildTranscriptLayout(
   options: TranscriptLayoutOptions,
 ): TranscriptLayout {
   const entries = groupToolEntries(sourceEntries.slice());
+  const keys = entries.map((entry, index) => transcriptEntryKey(entry, index));
+  const focusedToolKey = findLatestToolKey(entries, keys);
   const items = entries.map((entry, index) => {
-    const key = transcriptEntryKey(entry, index);
+    const key = keys[index]!;
+    const focusedTool = key === focusedToolKey;
     const separatorRows = entry.kind === "user" && index > 0 ? 1 : 0;
     return {
       key,
       entry,
+      focusedTool,
       separatorRows,
       rows:
         separatorRows +
         entryRows(
           entry,
           options.wrapWidth,
-          key === options.expandedToolKey && index === entries.length - 1,
+          focusedTool && key === options.expandedToolKey,
           index === entries.length - 1,
+          focusedTool,
         ),
     };
   });
@@ -63,15 +70,34 @@ export function buildTranscriptLayout(
   };
 }
 
+function findLatestToolKey(entries: readonly TuiEntry[], keys: readonly string[]): string | null {
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    if (entries[index]?.kind === "tool") return keys[index] ?? null;
+  }
+  return null;
+}
+
 export function transcriptEntryKey(entry: TuiEntry, index: number): string {
   if (entry.kind === "tool") return `tool:${index}:${entry.name}:${entry.args}`;
   return `${entry.kind}:${index}`;
 }
 
-function entryRows(entry: TuiEntry, wrapWidth: number, expanded: boolean, isLast: boolean): number {
+function entryRows(
+  entry: TuiEntry,
+  wrapWidth: number,
+  expanded: boolean,
+  isLast: boolean,
+  focusedTool: boolean,
+): number {
   if (entry.kind === "thinking") return 0;
   if (entry.kind === "tool") {
-    return buildToolCardVisualRows({ ...entry, expanded, isLast, wrapWidth }).length;
+    return buildToolCardVisualRows({
+      ...entry,
+      expanded,
+      isLast,
+      wrapWidth,
+      canToggle: focusedTool,
+    }).length;
   }
   if (entry.kind === "logo")
     return buildLogoPanelRows({ ...entry, renderWidth: wrapWidth }).length + 1;

@@ -29,6 +29,8 @@ export interface MessageRowProps {
   isStatic: boolean;
   /** 是否为列表中最后一条:决定 tool 默认折叠状态 */
   isLast: boolean;
+  /** 是否是 transcript 中当前可展开的最近工具。 */
+  toolFocused?: boolean;
   toolStartOffsetRows?: number;
   toolVisibleRows?: number;
   wrapWidth?: number;
@@ -41,6 +43,7 @@ function MessageRowImpl({
   entry,
   isStatic,
   isLast,
+  toolFocused,
   toolStartOffsetRows,
   toolVisibleRows,
   wrapWidth,
@@ -112,6 +115,7 @@ function MessageRowImpl({
           status={entry.status}
           summary={entry.summary}
           isLast={isLast}
+          focused={toolFocused}
           startOffsetRows={toolStartOffsetRows}
           visibleRows={toolVisibleRows}
           wrapWidth={wrapWidth}
@@ -223,6 +227,7 @@ function arePropsEqual(prev: MessageRowProps, next: MessageRowProps): boolean {
   // 末条身份会影响工具树形符号;变化时必须让该行刷新。
   if (prev.isLast !== next.isLast) return false;
   if (
+    prev.toolFocused !== next.toolFocused ||
     prev.toolStartOffsetRows !== next.toolStartOffsetRows ||
     prev.toolVisibleRows !== next.toolVisibleRows ||
     prev.wrapWidth !== next.wrapWidth

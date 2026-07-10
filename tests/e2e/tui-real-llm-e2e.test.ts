@@ -314,9 +314,14 @@ describeRealLLM("TUI productization real LLM e2e", { timeout: 240000 }, () => {
 
       const entries = harness.entries();
       expect(openDialog).toHaveBeenCalledWith(
-        expect.objectContaining({ id: "approval:pending", layer: "modal" }),
+        expect.objectContaining({
+          id: expect.stringMatching(/^approval:pending:/u),
+          layer: "modal",
+        }),
       );
-      expect(closeDialog).toHaveBeenCalledWith("approval:pending");
+      const approvalDialog = openDialog.mock.calls.at(-1)?.[0];
+      expect(approvalDialog?.id).toMatch(/^approval:pending:/u);
+      expect(closeDialog).toHaveBeenCalledWith(approvalDialog?.id);
       expect(entries).toContainEqual(
         expect.objectContaining({ kind: "tool", name: "write_file", status: "denied" }),
       );

@@ -71,6 +71,7 @@ import {
 } from "../tools/tool-disclosure.js";
 import { findMatchingTools } from "../tools/search-tools.js";
 import type { ToolDefinition } from "../schema/message.js";
+import type { GoalManager } from "../engine/goal-manager.js";
 
 const OVERRIDDEN_BUILTIN_COMMANDS = new Set([
   "skills",
@@ -106,6 +107,7 @@ export interface PicoCommandRegistryOptions {
   mcpStatus?: McpStatusProvider;
   additionalDirectories?: readonly string[];
   additionalDirectoryManager?: AdditionalDirectoryManager;
+  goalManager?: GoalManager;
 }
 
 export async function createPicoCommandRegistry(
@@ -133,6 +135,7 @@ export async function createPicoCommandRegistry(
   const registry = new CommandRegistry([
     ...builtins,
     createStatusCommand(settings, options.mcpStatus),
+    createGoalCommand(options.goalManager),
     createModeCommand(settings),
     createPermissionsCommand(settings),
     createCompactCommand(options),
@@ -315,6 +318,41 @@ function createStatusCommand(
       action: "status",
       message: formatStatusWithMcp(settings, mcpStatus),
     }),
+  };
+}
+
+function createGoalCommand(goalManager?: GoalManager): SlashCommand {
+  return {
+    name: "goal",
+    description: "Show the current session goal",
+    usage: "/goal",
+    category: "session",
+    kind: "local",
+    availability: "always",
+    execute: (input): LocalCommandResult => {
+      if (input.args.trim().length > 0) {
+        return {
+          type: "local",
+          action: "message",
+          message: "Usage: /goal",
+        };
+      }
+      if (!goalManager) {
+        return {
+          type: "local",
+          action: "message",
+          message: "Goal unavailable: no live TUI runtime was provided.",
+        };
+      }
+
+      const currentGoal = goalManager.buildGoalContext();
+      return {
+        type: "local",
+        action: "message",
+        message:
+          currentGoal || "No active goal. Tell Pico the long-running goal you want to track.",
+      };
+    },
   };
 }
 

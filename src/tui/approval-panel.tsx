@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
 import { Box, Text, useInput } from "ink";
 import type { ApprovalNotice } from "../approval/manager.js";
 import type {
@@ -12,6 +12,15 @@ import { wrappedVisualRows } from "./terminal-width.js";
 const DEFAULT_DIFF_PREVIEW_LINES = 22;
 const LAYOUT_SHELL_HORIZONTAL_PADDING = 2;
 const APPROVAL_PANEL_HORIZONTAL_PADDING = 2;
+const APPROVAL_DIALOG_PREFIX = "approval:pending:";
+
+export function approvalDialogId(taskId: string): string {
+  return `${APPROVAL_DIALOG_PREFIX}${taskId}`;
+}
+
+export function isApprovalDialogId(id: string): boolean {
+  return id.startsWith(APPROVAL_DIALOG_PREFIX);
+}
 
 export interface ApprovalPanelProps extends ApprovalNotice {
   diffExpanded?: boolean;
@@ -40,6 +49,7 @@ export function InteractiveApprovalPanel({
   const [state, setState] = useState<ApprovalPanelState>(() => ({
     diffExpanded: diffExpanded ?? false,
   }));
+  const submittedTaskId = useRef<string | null>(null);
   const expanded = diffExpanded ?? state.diffExpanded;
 
   useInput((input, key) => {
@@ -53,6 +63,8 @@ export function InteractiveApprovalPanel({
       onDiffExpandedChange?.(nextExpanded);
       return;
     }
+    if (submittedTaskId.current === notice.taskId) return;
+    submittedTaskId.current = notice.taskId;
     onAction(action);
   });
 

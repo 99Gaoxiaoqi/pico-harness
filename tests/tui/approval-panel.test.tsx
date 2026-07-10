@@ -4,9 +4,11 @@ import { describe, expect, it } from "vitest";
 import { createPermissionState } from "../../src/approval/permission-state.js";
 import {
   ApprovalPanel,
+  approvalDialogId,
   approvalPanelContentWidth,
   formatApprovalPanel,
   formatPermissionPanel,
+  isApprovalDialogId,
   measureApprovalPanelRows,
   nextApprovalPanelState,
   resolveApprovalPanelKey,
@@ -14,6 +16,13 @@ import {
 import type { ApprovalNotice } from "../../src/approval/manager.js";
 
 describe("ApprovalPanel", () => {
+  it("为每个待审批任务生成独立 dialog id", () => {
+    expect(approvalDialogId("task-1")).toBe("approval:pending:task-1");
+    expect(approvalDialogId("task-2")).not.toBe(approvalDialogId("task-1"));
+    expect(isApprovalDialogId(approvalDialogId("task-1"))).toBe(true);
+    expect(isApprovalDialogId("local-ui:model-selector")).toBe(false);
+  });
+
   it("展示工具名、命令和键盘审批入口", () => {
     const output = formatApprovalPanel({
       taskId: "task-1",
