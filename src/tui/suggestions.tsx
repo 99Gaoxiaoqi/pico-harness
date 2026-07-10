@@ -3,7 +3,7 @@ import { Box, Text } from "ink";
 
 export const MAX_SUGGESTIONS = 5;
 export const SUGGESTION_LABEL_WIDTH = 32;
-export const SUGGESTION_METADATA_WIDTH = 28;
+export const SUGGESTION_METADATA_WIDTH = 40;
 export const SUGGESTION_DESCRIPTION_WIDTH = 38;
 
 export type SuggestionKind = "slash" | "slash-argument" | "mention";
@@ -70,27 +70,8 @@ export function SuggestionList({ session }: SuggestionListProps): React.ReactNod
             color={row.disabled ? "gray" : row.selected ? "green" : "gray"}
             bold={row.selected && !row.disabled}
           >
-            {row.selected ? "› " : "  "}
-            {row.left}
+            {formatSuggestionRowLine(row)}
           </Text>
-          {row.metadata ? (
-            <Text dimColor>
-              {"  "}
-              {row.metadata}
-            </Text>
-          ) : null}
-          {row.description ? (
-            <Text dimColor>
-              {"  "}
-              {row.description}
-            </Text>
-          ) : null}
-          {row.disabledReason ? (
-            <Text dimColor>
-              {"  "}
-              {row.disabledReason}
-            </Text>
-          ) : null}
         </Box>
       ))}
     </Box>
@@ -118,9 +99,20 @@ export function formatSuggestionRows(session: ActiveSuggestionSession | null): S
       ...(disabled ? { disabled: true } : {}),
       ...(disabledReason.length === 0
         ? {}
-        : { disabledReason: truncateInline(disabledReason, SUGGESTION_DESCRIPTION_WIDTH) }),
+        : { disabledReason }),
     };
   });
+}
+
+function formatSuggestionRowLine(row: SuggestionRow): string {
+  return [
+    `${row.selected ? "›" : " "} ${row.left}`,
+    row.metadata,
+    row.description,
+    row.disabledReason ?? "",
+  ]
+    .filter((part) => part.length > 0)
+    .join("  ");
 }
 
 function suggestionWindowStart(selectedIndex: number, totalItems: number): number {
@@ -173,6 +165,7 @@ function formatSuggestionMetadata(item: InputSuggestion, kind: SuggestionKind): 
   const parts = [
     formatAliasTag(item.matchedAlias ?? item.alias),
     item.source?.trim() ?? "",
+    item.category?.trim() ?? "",
     item.kind?.trim() ?? "",
   ].filter((part) => part.length > 0);
 

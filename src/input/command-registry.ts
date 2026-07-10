@@ -132,8 +132,7 @@ export class CommandRegistry {
 
     const matches = candidates
       .filter((candidate) => !hasTextMatch || (candidate.match?.rank ?? 3) < 3)
-      .sort((left, right) => compareMatches(left, right))
-      .slice(0, 5);
+      .sort((left, right) => compareMatches(left, right));
     const commands = withAvailability(
       matches.map((candidate) => candidate.command),
       options.availabilityState,

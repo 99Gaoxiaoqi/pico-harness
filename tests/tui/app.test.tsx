@@ -1,7 +1,15 @@
 import React from "react";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { PassThrough } from "node:stream";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { render, renderToString, Text, type Instance } from "ink";
 import { describe, expect, it, vi } from "vitest";
+import {
+  commandArgumentSuggestions,
+  commandSuggestions,
+  createPicoCommandRegistry,
+} from "../../src/input/pico-command-registry.js";
 import {
   App,
   nextTranscriptScroll,
@@ -57,6 +65,96 @@ describe("App", () => {
     expect(output).not.toContain("Running…");
     expect(countOccurrences(output, 'Try "fix this" or / for commands')).toBe(1);
     expect(countOccurrences(output, "Enter 发送")).toBe(0);
+  });
+
+  it("keeps full registry slash candidates through InputBox and completes beyond the first window", async () => {
+    const workDir = mkdtempSync(join(tmpdir(), "pico-app-registry-suggestions-"));
+    const commandsDir = join(workDir, ".pico", "commands");
+    mkdirSync(commandsDir, { recursive: true });
+    for (let i = 0; i < 24; i++) {
+      writeFileSync(
+        join(commandsDir, `bulk-${String(i).padStart(2, "0")}.md`),
+        `---\ndescription: bulk ${i}\n---\n\nBulk ${i}`,
+      );
+    }
+    const registry = await createPicoCommandRegistry({
+      workDir,
+      provider: "openai",
+      model: "glm-5.2",
+    });
+    const harness = createInteractiveApp(
+      <App
+        model="glm-5.2"
+        provider="openai"
+        workDir={workDir}
+        entries={[]}
+        running={false}
+        slashCommandSuggestions={(query) => commandSuggestions(registry, query)}
+        onSubmit={vi.fn()}
+      />,
+    );
+
+    try {
+      await harness.write("/bulk");
+      await harness.write("\u001b[B".repeat(20));
+      const output = await harness.write("\t");
+
+      expect(output).toContain("/bulk-20");
+    } finally {
+      await harness.cleanup();
+      rmSync(workDir, { recursive: true, force: true });
+    }
+  });
+
+  it("awaits async argument completers and discards stale query results", async () => {
+    const workDir = mkdtempSync(join(tmpdir(), "pico-app-async-completer-"));
+    const registry = await createPicoCommandRegistry({
+      workDir,
+      provider: "openai",
+      model: "glm-5.2",
+    });
+    const submitted = vi.fn();
+    const harness = createInteractiveApp(
+      <App
+        model="glm-5.2"
+        provider="openai"
+        workDir={workDir}
+        entries={[]}
+        running={false}
+        slashArgumentSuggestions={(async (command, query) => {
+          await new Promise((resolve) => setTimeout(resolve, query === "k" ? 30 : 1));
+          if (command !== "model") return [];
+          return query === "k"
+            ? [{ value: "kube-stale", description: "stale result" }]
+            : commandArgumentSuggestions(registry, command, query);
+        }) as never}
+        onSubmit={submitted}
+      />,
+    );
+
+    try {
+      await harness.write("/model k");
+      await harness.write("i");
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      const output = await harness.rerender(
+        <App
+          model="glm-5.2"
+          provider="openai"
+          workDir={workDir}
+          entries={[]}
+          running={false}
+          slashArgumentSuggestions={(async (command, query) =>
+            command === "model" ? commandArgumentSuggestions(registry, command, query) : []) as never}
+          onSubmit={submitted}
+        />,
+      );
+
+      expect(output).toContain("kimi-k2.5");
+      expect(output).not.toContain("kube-stale");
+    } finally {
+      await harness.cleanup();
+      rmSync(workDir, { recursive: true, force: true });
+    }
   });
 
   it("does not render spinner while assistant text is streaming", () => {

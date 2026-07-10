@@ -13,6 +13,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { Session } from "../../src/engine/session.js";
 import { createBuiltinCommandRegistry } from "../../src/input/builtin-commands.js";
 import {
+  commandArgumentSuggestions,
   commandSuggestions,
   createPicoCommandRegistry,
 } from "../../src/input/pico-command-registry.js";
@@ -458,6 +459,57 @@ describe("Pico command registry", () => {
     await expect(Promise.resolve(registry.resolve("rewind")?.argumentCompleter?.("turn-r"))).resolves.toEqual([
       { value: "turn-review", description: "0 files · 2026-07-09T03:00:00.000Z" },
     ]);
+  });
+
+  it("argument candidates read realtime skill and snapshot data after registry creation", async () => {
+    const workDir = mkdtempSync(join(tmpdir(), "pico-command-live-completer-"));
+    cleanup.push(() => rmSync(workDir, { recursive: true, force: true }));
+    const session = new Session("snapshot-live-session", workDir, { persistence: false });
+    const registry = await createPicoCommandRegistry({
+      workDir,
+      provider: "openai",
+      model: "glm-5.2",
+      session,
+      sessionId: session.id,
+    });
+
+    mkdirSync(join(workDir, ".claw", "skills", "late-review"), { recursive: true });
+    writeFileSync(
+      join(workDir, ".claw", "skills", "late-review", "SKILL.md"),
+      "---\nname: late-review\ndescription: late skill\n---\n\n# Late",
+    );
+    session.fileHistory.snapshots.push({
+      messageId: "turn-late",
+      timestamp: new Date("2026-07-09T04:00:00.000Z"),
+      trackedFileBackups: new Map(),
+    });
+
+    await expect(Promise.resolve(commandArgumentSuggestions(registry, "skill", "late"))).resolves.toEqual([
+      { value: "late-review", description: "late skill" },
+    ]);
+    await expect(Promise.resolve(commandArgumentSuggestions(registry, "rewind", "turn-l"))).resolves.toEqual([
+      { value: "turn-late", description: "0 files · 2026-07-09T04:00:00.000Z" },
+    ]);
+  });
+
+  it("commandSuggestions 保留完整候选,不截断到 20 条", async () => {
+    const workDir = mkdtempSync(join(tmpdir(), "pico-command-many-suggestions-"));
+    cleanup.push(() => rmSync(workDir, { recursive: true, force: true }));
+    const commandsDir = join(workDir, ".pico", "commands");
+    mkdirSync(commandsDir, { recursive: true });
+    for (let i = 0; i < 24; i++) {
+      writeFileSync(
+        join(commandsDir, `bulk-${String(i).padStart(2, "0")}.md`),
+        `---\ndescription: bulk ${i}\n---\n\nBulk ${i}`,
+      );
+    }
+    const registry = await createPicoCommandRegistry({
+      workDir,
+      provider: "openai",
+      model: "glm-5.2",
+    });
+
+    expect(commandSuggestions(registry, "bulk").map((item) => item.value)).toHaveLength(24);
   });
 
   it("/status summarizes mode permission mode model and thinking effort", async () => {

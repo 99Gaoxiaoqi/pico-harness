@@ -539,7 +539,6 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         fileMentionSuggestions={(query) =>
           initialFileSuggestions
             .filter((file) => !query || file.includes(query))
-            .slice(0, 20)
             .map((file) => ({ value: file }))
         }
         dialogRequests={dialogRequests}
@@ -610,6 +609,7 @@ function handleLocalTuiCommand(
   result: LocalCommandResult,
   deps: Pick<
     HandleTuiInputSubmissionDeps,
+    | "registry"
     | "reporter"
     | "exit"
     | "workDir"
@@ -637,6 +637,16 @@ function handleLocalTuiCommand(
   if (isSessionSelectorResult(result) && deps.openDialog) {
     deps.openDialog(createSessionSelectorDialogRequest(result, deps));
     return;
+  }
+
+  if (result.ui?.kind === "open-panel" && result.ui.panel === "help" && deps.openDialog) {
+    const request = createLocalUiDialogRequest(result.ui, {
+      commands: deps.registry.list({ includeDisabled: true }),
+    });
+    if (request) {
+      deps.openDialog(request);
+      return;
+    }
   }
 
   switch (result.action) {

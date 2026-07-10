@@ -45,6 +45,7 @@ const NON_COMMAND_DIRS = new Set([
   "workflows",
   "templates",
   "agents",
+  "skills",
   "node_modules",
 ]);
 
@@ -197,8 +198,25 @@ async function loadSkillProjectionCommands(
 }
 
 async function walkSkillMarkdownFiles(dir: string): Promise<string[]> {
-  const files = await walkMarkdownFiles(dir);
-  return files.filter((file) => basename(file) === "SKILL.md");
+  let entries;
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch (err) {
+    if (isErrnoException(err, "ENOENT")) return [];
+    throw err;
+  }
+
+  const files: string[] = [];
+  for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      if (entry.name === "node_modules" || entry.name === ".git") continue;
+      files.push(...(await walkSkillMarkdownFiles(path)));
+    } else if (entry.isFile() && entry.name === "SKILL.md") {
+      files.push(path);
+    }
+  }
+  return files;
 }
 
 function parseSkillProjectionCommand(

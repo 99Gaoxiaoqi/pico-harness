@@ -141,6 +141,33 @@ describe("markdown command loader", () => {
     expect(commands.map((command) => command.name)).toEqual(["deploy"]);
   });
 
+  it("does not apply command directory blacklist to skill projection scanning", async () => {
+    await writeClaudeSkill(
+      "workflows/release",
+      "---\nname: release-flow\ndescription: release workflow\n---\n\n# Release",
+    );
+    await writeClaudeSkill(
+      "agents/reviewer",
+      "---\nname: agent-review\ndescription: agent workflow\n---\n\n# Agent",
+    );
+    await writeClaudeSkill(
+      "templates/pr",
+      "---\nname: pr-template\ndescription: PR template\n---\n\n# PR",
+    );
+
+    const commands = await loadMarkdownCommands({
+      includeSkillCommands: true,
+      userCommandsDir,
+      workDir,
+    });
+
+    expect(commands.map((command) => command.name)).toEqual([
+      "agent-review",
+      "pr-template",
+      "release-flow",
+    ]);
+  });
+
   it("optionally projects .claw/skills/**/SKILL.md as prompt commands below user commands", async () => {
     await writeSkill("review", "skill review", "# Skill Review");
     await writeSkill("deploy", "deploy service", "# Deploy");

@@ -6,17 +6,20 @@ import type {
   SlashCommandSource,
 } from "../input/types.js";
 
-export const HELP_PANEL_COMMAND_WIDTH = 32;
+export const HELP_PANEL_COMMAND_WIDTH = 44;
 export const HELP_PANEL_DESCRIPTION_WIDTH = 72;
 
 export interface HelpPanelCommand {
   name: string;
   aliases?: readonly string[];
+  usage?: string;
   argumentHint?: string;
   description?: string;
   kind?: SlashCommandKind;
   category?: SlashCommandCategory;
   source?: SlashCommandSource;
+  disabled?: boolean;
+  disabledReason?: string;
 }
 
 export interface HelpPanelScrollState {
@@ -42,6 +45,8 @@ export interface HelpPanelRow {
   usage: string;
   description: string;
   aliases: string;
+  disabled: boolean;
+  disabledReason: string;
   selected: boolean;
 }
 
@@ -94,6 +99,7 @@ export function formatHelpPanel(
     for (const row of section.rows) {
       lines.push(formatHelpPanelRow(row));
       if (row.aliases) lines.push(`    aliases: ${row.aliases}`);
+      if (row.disabledReason) lines.push(`    ${row.disabledReason}`);
     }
   }
   if (hiddenBelow > 0) lines.push(`↓ ${hiddenBelow} hidden`);
@@ -126,6 +132,8 @@ export function formatHelpPanelSections(
         HELP_PANEL_DESCRIPTION_WIDTH,
       ),
       aliases: formatAliases(command.aliases),
+      disabled: command.disabled === true,
+      disabledReason: command.disabledReason?.trim() ?? "",
       selected: commandIndex === selectedIndex,
     });
     sections.set(title, section);
@@ -183,10 +191,13 @@ function scrollOffsetForSelection(
 
 function formatHelpPanelRow(row: HelpPanelRow): string {
   const marker = row.selected ? "›" : " ";
-  return `${marker} ${row.usage}  ${row.description}`;
+  const disabled = row.disabled ? " [disabled]" : "";
+  return `${marker} ${row.usage}${disabled}  ${row.description}`;
 }
 
 function formatCommandUsage(command: HelpPanelCommand): string {
+  const explicitUsage = command.usage?.trim();
+  if (explicitUsage) return truncateInline(explicitUsage, HELP_PANEL_COMMAND_WIDTH);
   const hint = command.argumentHint?.trim();
   const usage = hint ? `/${command.name} ${hint}` : `/${command.name}`;
   return truncateInline(usage, HELP_PANEL_COMMAND_WIDTH);

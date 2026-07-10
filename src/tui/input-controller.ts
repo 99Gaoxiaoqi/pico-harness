@@ -13,11 +13,15 @@ import {
 
 const HISTORY_MAX = 20;
 
-export type SuggestionSource = (query: string) => readonly InputSuggestion[];
+export type SuggestionSourceResult =
+  | readonly InputSuggestion[]
+  | Promise<readonly InputSuggestion[]>;
+
+export type SuggestionSource = (query: string) => SuggestionSourceResult;
 export type SlashArgumentSuggestionSource = (
   command: string,
   query: string,
-) => readonly InputSuggestion[];
+) => SuggestionSourceResult;
 
 export interface InputKey {
   upArrow?: boolean;
@@ -57,7 +61,7 @@ export interface InputControllerResult {
   submittedText?: string;
 }
 
-interface SuggestionContext {
+export interface SuggestionContext {
   kind: SuggestionKind;
   query: string;
   replaceStart: number;
@@ -535,12 +539,27 @@ function suggestionItemsForContext(
   options: InputControllerOptions,
 ): readonly InputSuggestion[] {
   if (context.kind === "slash") {
-    return options.slashCommandSuggestions?.(context.query) ?? [];
+    return syncSuggestionItems(options.slashCommandSuggestions?.(context.query) ?? []);
   }
   if (context.kind === "slash-argument") {
-    return options.slashArgumentSuggestions?.(context.command ?? "", context.query) ?? [];
+    return syncSuggestionItems(
+      options.slashArgumentSuggestions?.(context.command ?? "", context.query) ?? [],
+    );
   }
-  return options.fileMentionSuggestions?.(context.query) ?? [];
+  return syncSuggestionItems(options.fileMentionSuggestions?.(context.query) ?? []);
+}
+
+function syncSuggestionItems(result: SuggestionSourceResult): readonly InputSuggestion[] {
+  return isPromiseLike(result) ? [] : result;
+}
+
+function isPromiseLike<T>(value: T | Promise<T>): value is Promise<T> {
+  return Boolean(
+    typeof value === "object" &&
+      value !== null &&
+      "then" in value &&
+      typeof (value as { then?: unknown }).then === "function",
+  );
 }
 
 function pushHistory(history: string[], entry: string): string[] {
