@@ -69,6 +69,8 @@ export interface AppProps {
   mcpSummary?: string;
   /** 当前任务摘要(Logo/状态区展示) */
   taskSummary?: string;
+  /** 当前运行中输入队列长度 */
+  queuedCount?: number;
   /** 当前对话流条目(reporter 增量更新) */
   entries: TuiEntry[];
   /** 是否正在运行(idle 时聚焦输入框) */
@@ -97,6 +99,7 @@ export function App({
   thinkingEffort = "off",
   mcpSummary,
   taskSummary,
+  queuedCount = 0,
   entries,
   running,
   slashCommandSuggestions,
@@ -269,14 +272,17 @@ export function App({
     dbg(`  [${i}] ${e.kind}: ${c}`);
   });
 
-  const phase = approvalNotice ? "approval" : running ? "running" : "idle";
+  const phase = approvalNotice ? "approval" : queuedCount > 0 ? "queued" : running ? "running" : "idle";
+  const runtimeTaskSummary =
+    queuedCount > 0 ? `${queuedCount} queued` : taskSummary ?? (thinkingEffort === "off" ? undefined : `think ${thinkingEffort}`);
   const status = (
     <StatusBar
       phase={phase}
       sessionMode={sessionMode}
       permissionMode={permissionMode}
       contextSummary={provider}
-      taskSummary={taskSummary ?? (thinkingEffort === "off" ? undefined : `think ${thinkingEffort}`)}
+      taskSummary={runtimeTaskSummary}
+      renderWidth={Math.max(1, columns - 2)}
     />
   );
   const transcript = (

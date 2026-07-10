@@ -156,6 +156,54 @@ describe("MessageList virtual transcript", () => {
     expect(output).toContain("result-2");
     expect(output).not.toContain("result-0");
   });
+
+  it("clips logo and error entries from internal row offsets", () => {
+    const entries: TuiEntry[] = [
+      {
+        kind: "logo",
+        model: "glm-5.2",
+        cwd: "/工作区/从0开始构建AgentHarness/pico-harness",
+        sessionMode: "plan",
+        permissionMode: "auto",
+        mcpSummary: "MCP 1/2",
+        taskSummary: "任务 🚀",
+      },
+      {
+        kind: "error",
+        message: "first-line\nsecond-line\nthird-line",
+        retryable: false,
+        action: "check logs",
+      },
+    ];
+
+    const logoOutput = renderToString(
+      React.createElement(MessageList, {
+        layout: buildTranscriptLayout(entries, { wrapWidth: 12 }),
+        viewportRows: 3,
+        scrollOffsetRows: 7,
+        overscanRows: 0,
+        virtualizeThreshold: 0,
+        preserveVirtualSpacers: false,
+      }),
+      { columns: 18 },
+    );
+    const errorOutput = renderToString(
+      React.createElement(MessageList, {
+        layout: buildTranscriptLayout(entries.slice(1), { wrapWidth: 12 }),
+        viewportRows: 2,
+        scrollOffsetRows: 2,
+        overscanRows: 0,
+        virtualizeThreshold: 0,
+        preserveVirtualSpacers: false,
+      }),
+      { columns: 18 },
+    );
+
+    expect(logoOutput).not.toContain("pico ·");
+    expect(logoOutput).toContain("MCP 1/2");
+    expect(errorOutput).not.toContain("first-line");
+    expect(errorOutput).toContain("second-line");
+  });
 });
 
 function makeUserEntries(count: number): TuiEntry[] {

@@ -110,8 +110,8 @@ export function MessageList({
               entry={visibleEntry}
               isStatic={shouldRenderStatically(visibleEntry, isLast, isStreaming)}
               isLast={isLast}
-              toolStartOffsetRows={entry.kind === "tool" ? contentRowsToSkip : undefined}
-              toolVisibleRows={entry.kind === "tool" ? entryVisibleRows : undefined}
+              toolStartOffsetRows={canClipInsideMessageRow(entry) ? contentRowsToSkip : undefined}
+              toolVisibleRows={canClipInsideMessageRow(entry) ? entryVisibleRows : undefined}
               wrapWidth={layout.wrapWidth}
             />
           </React.Fragment>
@@ -132,8 +132,7 @@ function clipEntryTopRows(
   if (
     entry.kind !== "assistant" &&
     entry.kind !== "user" &&
-    entry.kind !== "system" &&
-    entry.kind !== "error"
+    entry.kind !== "system"
   ) {
     return entry;
   }
@@ -142,9 +141,12 @@ function clipEntryTopRows(
   // 让长流式回复优先保住最新尾行。
   const contentRowsToSkip = rowsToSkip;
   const contentRowsToKeep = Math.max(1, (visibleRows ?? 1) - 1);
-  const text = entry.kind === "error" ? entry.message : entry.content;
-  const content = clipTextTopRows(text, contentRowsToSkip, contentRowsToKeep, wrapWidth);
-  return entry.kind === "error" ? { ...entry, message: content } : { ...entry, content };
+  const content = clipTextTopRows(entry.content, contentRowsToSkip, contentRowsToKeep, wrapWidth);
+  return { ...entry, content };
+}
+
+function canClipInsideMessageRow(entry: TuiEntry): boolean {
+  return entry.kind === "tool" || entry.kind === "logo" || entry.kind === "error";
 }
 
 function clipTextTopRows(

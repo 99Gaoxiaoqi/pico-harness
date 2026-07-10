@@ -6,6 +6,8 @@ import {
   terminalWidth,
   visualRows,
 } from "../../src/tui/transcript-layout.js";
+import { buildLogoPanelRows } from "../../src/tui/logo-panel.js";
+import { buildErrorEntryRows } from "../../src/tui/message-row.js";
 import type { TuiEntry } from "../../src/tui/tui-reporter.js";
 import { ToolCard, ToolCardFocusProvider } from "../../src/tui/tool-card.js";
 
@@ -103,6 +105,28 @@ describe("transcript layout", () => {
 
     expect(layout.items[0]?.rows).toBe(0);
     expect(layout.contentRows).toBe(0);
+  });
+
+  it("measures logo and error entries from the same rows used by rendering", () => {
+    const logo: TuiEntry = {
+      kind: "logo",
+      model: "glm-5.2",
+      cwd: "/工作区/从0开始构建AgentHarness/pico-harness",
+      sessionMode: "plan",
+      permissionMode: "auto",
+      mcpSummary: "MCP 1/2",
+      taskSummary: "任务 🚀",
+    };
+    const error: TuiEntry = {
+      kind: "error",
+      message: "失败 你好 🚀".repeat(2),
+      retryable: false,
+      action: "check logs",
+    };
+    const layout = buildTranscriptLayout([logo, error], { wrapWidth: 12 });
+
+    expect(layout.items[0]?.rows).toBe(buildLogoPanelRows({ ...logo, renderWidth: 12 }).length + 1);
+    expect(layout.items[1]?.rows).toBe(buildErrorEntryRows(error, 12).length + 1);
   });
 
   it.each([
