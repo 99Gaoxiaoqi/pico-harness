@@ -7,6 +7,7 @@ import type {
   PermissionState,
 } from "../approval/permission-state.js";
 import { resolveKeybinding } from "./keybindings/resolver.js";
+import { visualRows } from "./terminal-width.js";
 
 const DEFAULT_DIFF_PREVIEW_LINES = 22;
 
@@ -23,27 +24,35 @@ export interface ApprovalPanelState {
 }
 export interface InteractiveApprovalPanelProps extends ApprovalPanelProps {
   onAction: (action: ApprovalPanelAction) => void;
+  onDiffExpandedChange?: (expanded: boolean) => void;
 }
 
 export function InteractiveApprovalPanel({
   onAction,
+  onDiffExpandedChange,
+  diffExpanded,
   ...notice
 }: InteractiveApprovalPanelProps): React.ReactNode {
   const [state, setState] = useState<ApprovalPanelState>(() => ({
-    diffExpanded: notice.diffExpanded ?? false,
+    diffExpanded: diffExpanded ?? false,
   }));
+  const expanded = diffExpanded ?? state.diffExpanded;
 
   useInput((input, key) => {
     const action = resolveApprovalPanelKey(input, key);
     if (!action) return;
     if (action === "toggle-diff") {
-      setState((current) => nextApprovalPanelState(current, action));
+      const nextExpanded = !expanded;
+      if (diffExpanded === undefined) {
+        setState({ diffExpanded: nextExpanded });
+      }
+      onDiffExpandedChange?.(nextExpanded);
       return;
     }
     onAction(action);
   });
 
-  return <ApprovalPanel {...notice} diffExpanded={state.diffExpanded} />;
+  return <ApprovalPanel {...notice} diffExpanded={expanded} />;
 }
 
 export function ApprovalPanel({
@@ -104,6 +113,19 @@ export function formatApprovalPanel(
     lines.push(formatDiffPreview(diff, options.maxDiffPreviewLines));
   }
   return lines.join("\n");
+}
+
+export function measureApprovalPanelRows(
+  notice: ApprovalNotice,
+  options: { diffExpanded: boolean; wrapWidth: number },
+): number {
+  const contentRows = formatApprovalPanel(notice, { diffExpanded: options.diffExpanded })
+    .split("\n")
+    .reduce(
+      (total, line) => total + visualRows(line, Math.max(1, options.wrapWidth)).length,
+      0,
+    );
+  return 1 + contentRows;
 }
 
 export function resolveApprovalPanelKey(

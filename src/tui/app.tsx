@@ -34,6 +34,11 @@ import type { TuiEntry } from "./tui-reporter.js";
 import { resolveKeybinding } from "./keybindings/resolver.js";
 import { ToolCardFocusProvider } from "./tool-card.js";
 import { buildTranscriptLayout } from "./transcript-layout.js";
+import {
+  measureApprovalPanelRows,
+  type InteractiveApprovalPanelProps,
+} from "./approval-panel.js";
+import type { ApprovalNotice } from "../approval/manager.js";
 
 /** 诊断日志:写文件(绕过 ink patchConsole 劫持),只在 TUI_DEBUG 时 */
 function dbg(msg: string): void {
@@ -98,11 +103,27 @@ export function App({
   const inputDisabled = focusedDialog?.layer === "modal";
   const inlineModal = inputDisabled && focusedDialog.id === "approval:pending";
   const modal = inputDisabled && !inlineModal ? focusedDialog.content : undefined;
-  const overlay =
-    focusedDialog?.layer === "overlay" || inlineModal ? focusedDialog.content : undefined;
-  const approvalRows = inlineModal ? 7 : 0;
-  const genericDialogRows = inputDisabled && !inlineModal ? 5 : 0;
   const transcriptWrapWidth = Math.max(20, columns - 6);
+  const approvalNotice = inlineModal
+    ? approvalNoticeFromContent(focusedDialog.content)
+    : undefined;
+  const [approvalDiffExpanded, setApprovalDiffExpanded] = useState(false);
+  const controlledApproval =
+    inlineModal && React.isValidElement<InteractiveApprovalPanelProps>(focusedDialog.content)
+      ? React.cloneElement(focusedDialog.content, {
+          diffExpanded: approvalDiffExpanded,
+          onDiffExpandedChange: setApprovalDiffExpanded,
+        })
+      : focusedDialog?.content;
+  const overlay =
+    focusedDialog?.layer === "overlay" || inlineModal ? controlledApproval : undefined;
+  const approvalRows = approvalNotice
+    ? measureApprovalPanelRows(approvalNotice, {
+        diffExpanded: approvalDiffExpanded,
+        wrapWidth: transcriptWrapWidth,
+      })
+    : 0;
+  const genericDialogRows = inputDisabled && !inlineModal ? 5 : 0;
   const [expandedToolKey, setExpandedToolKey] = useState<string | null>(null);
   const transcriptLayout = useMemo(
     () =>
@@ -198,6 +219,10 @@ export function App({
         : { ...current, newMessageCount: current.newMessageCount + addedEntries },
     );
   }, [entries.length]);
+
+  useEffect(() => {
+    setApprovalDiffExpanded(false);
+  }, [approvalNotice?.taskId]);
 
   // 是否仍有"主动流式":running 且末尾是流式 assistant / thinking / running tool
   const isStreaming = running && isActivelyStreaming(entries);
@@ -444,4 +469,25 @@ function clampScrollRows(offset: number, viewportRows: number, totalRows: number
 
 function maxTranscriptScroll(viewportRows: number, totalRows: number): number {
   return Math.max(0, totalRows - Math.max(1, viewportRows));
+}
+
+function approvalNoticeFromContent(content: React.ReactNode): ApprovalNotice | undefined {
+  if (!React.isValidElement<Partial<InteractiveApprovalPanelProps>>(content)) return undefined;
+  const props = content.props;
+  if (
+    typeof props.taskId !== "string" ||
+    typeof props.toolName !== "string" ||
+    typeof props.args !== "string" ||
+    typeof props.message !== "string"
+  ) {
+    return undefined;
+  }
+  return {
+    taskId: props.taskId,
+    toolName: props.toolName,
+    args: props.args,
+    message: props.message,
+    ...(props.preview ? { preview: props.preview } : {}),
+    ...(props.diff ? { diff: props.diff } : {}),
+  };
 }

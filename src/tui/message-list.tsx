@@ -52,6 +52,13 @@ export function MessageList({
   preserveVirtualSpacers = true,
 }: MessageListProps): React.ReactNode {
   const displayEntries = layout.entries;
+  const threshold = normalizeNonNegativeRows(virtualizeThreshold, 200);
+  const overscan = normalizeNonNegativeRows(overscanRows, 20);
+  const virtualized = viewportRows !== undefined && displayEntries.length > threshold;
+  let remainingWindowRows =
+    !virtualized || viewportRows === undefined
+      ? Number.POSITIVE_INFINITY
+      : Math.max(1, viewportRows) + overscan * 2;
   const window =
     viewportRows === undefined
       ? {
@@ -81,8 +88,12 @@ export function MessageList({
         const separatorRows = item?.separatorRows ?? 0;
         const contentRowsToSkip = Math.max(0, rowsToSkip - separatorRows);
         const estimatedRows = item?.rows ?? estimatedRowHeight;
-        const visibleRows =
-          estimatedRows === undefined ? viewportRows : Math.max(1, estimatedRows - rowsToSkip);
+        const remainingItemRows =
+          estimatedRows === undefined
+            ? remainingWindowRows
+            : Math.max(0, estimatedRows - rowsToSkip);
+        const visibleRows = Math.min(remainingItemRows, remainingWindowRows);
+        remainingWindowRows = Math.max(0, remainingWindowRows - visibleRows);
         const visibleEntry = clipEntryTopRows(
           entry,
           contentRowsToSkip,
@@ -91,6 +102,7 @@ export function MessageList({
         );
         // 轮次分隔:遇到新的 user 消息,且前面已有内容时,加一条淡色分隔线
         const showSeparator = entry.kind === "user" && prev !== undefined && rowsToSkip === 0;
+        const entryVisibleRows = Math.max(0, visibleRows - (showSeparator ? separatorRows : 0));
         return (
           <React.Fragment key={originalIndex}>
             {showSeparator && <Separator />}
@@ -98,6 +110,9 @@ export function MessageList({
               entry={visibleEntry}
               isStatic={shouldRenderStatically(visibleEntry, isLast, isStreaming)}
               isLast={isLast}
+              toolStartOffsetRows={entry.kind === "tool" ? contentRowsToSkip : undefined}
+              toolVisibleRows={entry.kind === "tool" ? entryVisibleRows : undefined}
+              wrapWidth={layout.wrapWidth}
             />
           </React.Fragment>
         );
@@ -140,6 +155,11 @@ function clipTextTopRows(
 function normalizeWrapWidth(width: number | undefined): number {
   if (width === undefined || !Number.isFinite(width) || width < 8) return 80;
   return Math.floor(width);
+}
+
+function normalizeNonNegativeRows(value: number | undefined, fallback: number): number {
+  if (value === undefined || !Number.isFinite(value) || value < 0) return fallback;
+  return Math.floor(value);
 }
 
 /** 轮次分隔:淡色虚线,让多轮对话结构清晰 */

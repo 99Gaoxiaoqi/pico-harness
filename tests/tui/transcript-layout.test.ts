@@ -1,3 +1,5 @@
+import React from "react";
+import { renderToString } from "ink";
 import { describe, expect, it } from "vitest";
 import {
   buildTranscriptLayout,
@@ -5,6 +7,7 @@ import {
   visualRows,
 } from "../../src/tui/transcript-layout.js";
 import type { TuiEntry } from "../../src/tui/tui-reporter.js";
+import { ToolCard } from "../../src/tui/tool-card.js";
 
 describe("transcript layout", () => {
   it("measures CJK and emoji grapheme clusters by terminal display width", () => {
@@ -65,5 +68,40 @@ describe("transcript layout", () => {
     expect(layout.contentRows).toBe(layout.items[0]?.rows);
     expect(layout.approvalRows).toBe(7);
     expect(layout.totalRows).toBe(layout.contentRows + 7);
+  });
+
+  it("uses the same truncated args and five-line result rows as the real ToolCard", () => {
+    const entry: Extract<TuiEntry, { kind: "tool" }> = {
+      kind: "tool",
+      name: "read_file",
+      args: JSON.stringify({ path: `docs/${"very-long-name-".repeat(12)}.md` }),
+      status: "success",
+      summary: Array.from({ length: 8 }, (_, index) => `result-${index}`).join("\n"),
+    };
+    const collapsed = buildTranscriptLayout([entry], { wrapWidth: 18 });
+    const expanded = buildTranscriptLayout([entry], {
+      wrapWidth: 18,
+      expandedToolKey: collapsed.items[0]?.key,
+    });
+    const output = renderToString(
+      React.createElement(ToolCard, {
+        ...entry,
+        isLast: true,
+        initialExpanded: true,
+        wrapWidth: 18,
+      } as React.ComponentProps<typeof ToolCard> & { wrapWidth: number }),
+      { columns: 18 },
+    );
+
+    expect(output.replace(/\s+/gu, " ")).toContain("已截断 3 行");
+    expect(output).not.toContain("result-5");
+    expect(expanded.items[0]?.rows).toBe(output.split("\n").length);
+  });
+
+  it("assigns zero layout rows to non-rendering thinking entries", () => {
+    const layout = buildTranscriptLayout([{ kind: "thinking" }], { wrapWidth: 40 });
+
+    expect(layout.items[0]?.rows).toBe(0);
+    expect(layout.contentRows).toBe(0);
   });
 });

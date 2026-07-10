@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { MessageList } from "../../src/tui/message-list.js";
 import { buildTranscriptLayout } from "../../src/tui/transcript-layout.js";
 import type { TuiEntry } from "../../src/tui/tui-reporter.js";
+import { ToolCardFocusProvider } from "../../src/tui/tool-card.js";
 
 describe("MessageList virtual transcript", () => {
   it("keeps the existing full render behavior unless virtualization is configured", () => {
@@ -118,6 +119,42 @@ describe("MessageList virtual transcript", () => {
 
     expect(layout.entries).toHaveLength(1);
     expect(output).toContain("read · 2 calls");
+  });
+
+  it("clips an expanded tool from its internal start offset", () => {
+    const entry: TuiEntry = {
+      kind: "tool",
+      name: "read_file",
+      args: "{}",
+      status: "success",
+      summary: Array.from({ length: 8 }, (_, index) => `result-${index}`).join("\n"),
+    };
+    const collapsed = buildTranscriptLayout([entry], { wrapWidth: 40 });
+    const layout = buildTranscriptLayout([entry], {
+      wrapWidth: 40,
+      expandedToolKey: collapsed.items[0]?.key,
+    });
+
+    const output = renderToString(
+      React.createElement(
+        ToolCardFocusProvider,
+        { expanded: true },
+        React.createElement(MessageList, {
+          layout,
+          viewportRows: 2,
+          scrollOffsetRows: 4,
+          overscanRows: 0,
+          virtualizeThreshold: 0,
+          preserveVirtualSpacers: false,
+        }),
+      ),
+    );
+
+    expect(output).not.toContain("⎿ read");
+    expect(output).not.toContain("参数");
+    expect(output).toContain("result-1");
+    expect(output).toContain("result-2");
+    expect(output).not.toContain("result-0");
   });
 });
 

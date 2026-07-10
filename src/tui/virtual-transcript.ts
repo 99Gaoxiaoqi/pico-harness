@@ -87,9 +87,13 @@ function buildItemRows<T>(
   estimatedRowHeight: number,
   getItemRows: ((item: T, index: number) => number | undefined) | undefined,
 ): number[] {
-  return items.map((item, index) =>
-    normalizePositiveInteger(getItemRows?.(item, index), estimatedRowHeight),
-  );
+  return items.map((item, index) => {
+    const itemRows = getItemRows?.(item, index);
+    if (itemRows !== undefined && Number.isFinite(itemRows) && itemRows >= 0) {
+      return Math.ceil(itemRows);
+    }
+    return estimatedRowHeight;
+  });
 }
 
 function buildOffsets(itemRows: readonly number[]): number[] {

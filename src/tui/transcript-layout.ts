@@ -1,6 +1,8 @@
-import stringWidth from "string-width";
 import type { TuiEntry } from "./tui-reporter.js";
 import { groupToolEntries } from "./tool-grouping.js";
+import { buildToolCardVisualRows } from "./tool-card.js";
+export { terminalWidth, visualRows } from "./terminal-width.js";
+import { visualRows } from "./terminal-width.js";
 
 export interface TranscriptLayoutOptions {
   wrapWidth: number;
@@ -24,41 +26,6 @@ export interface TranscriptLayout {
   totalRows: number;
 }
 
-const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
-
-export function terminalWidth(text: string): number {
-  return stringWidth(text);
-}
-
-export function visualRows(text: string, wrapWidth: number): string[] {
-  const width = normalizeWrapWidth(wrapWidth);
-  const rows: string[] = [];
-
-  for (const logicalLine of text.split("\n")) {
-    const graphemes = Array.from(graphemeSegmenter.segment(logicalLine), ({ segment }) => segment);
-    if (graphemes.length === 0) {
-      rows.push("");
-      continue;
-    }
-
-    let row = "";
-    let rowWidth = 0;
-    for (const grapheme of graphemes) {
-      const graphemeWidth = terminalWidth(grapheme);
-      if (row && rowWidth + graphemeWidth > width) {
-        rows.push(row);
-        row = "";
-        rowWidth = 0;
-      }
-      row += grapheme;
-      rowWidth += graphemeWidth;
-    }
-    rows.push(row);
-  }
-
-  return rows.length > 0 ? rows : [""];
-}
-
 export function buildTranscriptLayout(
   sourceEntries: readonly TuiEntry[],
   options: TranscriptLayoutOptions,
@@ -72,7 +39,13 @@ export function buildTranscriptLayout(
       entry,
       separatorRows,
       rows:
-        separatorRows + entryRows(entry, options.wrapWidth, key === options.expandedToolKey),
+        separatorRows +
+        entryRows(
+          entry,
+          options.wrapWidth,
+          key === options.expandedToolKey,
+          index === entries.length - 1,
+        ),
     };
   });
   const contentRows = items.reduce((total, item) => total + item.rows, 0);
@@ -93,21 +66,17 @@ export function transcriptEntryKey(entry: TuiEntry, index: number): string {
   return `${entry.kind}:${index}`;
 }
 
-function entryRows(entry: TuiEntry, wrapWidth: number, expanded: boolean): number {
-  if (entry.kind === "thinking") return 1;
-  if (entry.kind === "tool") return expanded ? expandedToolRows(entry, wrapWidth) : 1;
-  return visualRows(entry.content, wrapWidth).length + 1;
-}
-
-function expandedToolRows(
-  entry: Extract<TuiEntry, { kind: "tool" }>,
+function entryRows(
+  entry: TuiEntry,
   wrapWidth: number,
+  expanded: boolean,
+  isLast: boolean,
 ): number {
-  const detailWidth = Math.max(1, normalizeWrapWidth(wrapWidth) - 4);
-  const argsRows = visualRows(`参数 ${entry.args}`, detailWidth).length;
-  if (!entry.summary) return 1 + argsRows;
-  const resultRows = visualRows(entry.summary, detailWidth).length;
-  return 2 + argsRows + resultRows;
+  if (entry.kind === "thinking") return 0;
+  if (entry.kind === "tool") {
+    return buildToolCardVisualRows({ ...entry, expanded, isLast, wrapWidth }).length;
+  }
+  return visualRows(entry.content, wrapWidth).length + 1;
 }
 
 function normalizeWrapWidth(width: number): number {
