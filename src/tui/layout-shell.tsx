@@ -8,7 +8,9 @@ export interface LayoutShellProps {
   bottom?: React.ReactNode;
   overlay?: React.ReactNode;
   modal?: React.ReactNode;
+  width?: number;
   height?: number;
+  hidden?: boolean;
 }
 
 export function LayoutShell({
@@ -18,10 +20,18 @@ export function LayoutShell({
   bottom,
   overlay,
   modal,
+  width,
   height,
+  hidden = false,
 }: LayoutShellProps): React.ReactNode {
   return (
-    <Box flexDirection="column" height={height} overflowY={height ? "hidden" : undefined}>
+    <Box
+      flexDirection="column"
+      display={hidden ? "none" : "flex"}
+      width={width}
+      height={height}
+      overflowY={height ? "hidden" : undefined}
+    >
       {header}
       {status}
       {transcript}
