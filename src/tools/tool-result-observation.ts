@@ -2,7 +2,12 @@ import { logger } from "../observability/logger.js";
 import type { ToolCall, ToolResult } from "../schema/message.js";
 import { summarizeToolResult } from "./result-summarizer.js";
 
-const DEFAULT_EXTERNALIZE_THRESHOLD_CHARS = 4000;
+/**
+ * 未知与扩展工具的通用上下文保护阈值。
+ * Bash 输出更容易出现大段日志，使用更保守的独立阈值。
+ */
+const DEFAULT_EXTERNALIZE_THRESHOLD_CHARS = 50_000;
+const BASH_EXTERNALIZE_THRESHOLD_CHARS = 30_000;
 const DEFAULT_SUMMARY_MAX_CHARS = 1600;
 const DEFAULT_ARTIFACT_SESSION_ID = "default";
 
@@ -51,11 +56,21 @@ export interface ToolResultObservationProcessorOptions {
 export function createToolResultObservationProcessor(
   opts: ToolResultObservationProcessorOptions,
 ): ToolObservationProcessor {
-  const threshold = opts.externalizeThresholdChars ?? DEFAULT_EXTERNALIZE_THRESHOLD_CHARS;
   const summaryMaxChars = opts.summaryMaxChars ?? DEFAULT_SUMMARY_MAX_CHARS;
   const cleanupAfterWrite = opts.cleanupAfterWrite ?? opts.cleanup ?? true;
 
   return async ({ toolCall, result, output, sessionId }) => {
+    // read_file 自身提供行分页和页大小上限。如果再走通用外部化，
+    // 读 artifact 的结果会被写成新 artifact，形成 artifact→read→artifact 循环。
+    if (toolCall.name === "read_file") {
+      return output;
+    }
+
+    const threshold =
+      opts.externalizeThresholdChars ??
+      (toolCall.name === "bash"
+        ? BASH_EXTERNALIZE_THRESHOLD_CHARS
+        : DEFAULT_EXTERNALIZE_THRESHOLD_CHARS);
     if (output.length <= threshold) {
       return output;
     }
