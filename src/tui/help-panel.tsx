@@ -5,7 +5,7 @@ import type {
   SlashCommandKind,
   SlashCommandSource,
 } from "../input/types.js";
-import { visualRows } from "./terminal-width.js";
+import { terminalWidth, truncateTerminalText, visualRows } from "./terminal-width.js";
 
 export const HELP_PANEL_COMMAND_WIDTH = 44;
 export const HELP_PANEL_DESCRIPTION_WIDTH = 72;
@@ -33,6 +33,8 @@ export interface HelpPanelProps {
   selectedIndex?: number;
   scrollOffset?: number;
   maxItems?: number;
+  maxRows?: number;
+  renderWidth?: number;
 }
 
 export interface InteractiveHelpPanelProps extends HelpPanelProps {
@@ -48,6 +50,7 @@ export interface HelpPanelSection {
 export interface HelpPanelRow {
   key: string;
   commandIndex: number;
+  name: string;
   usage: string;
   description: string;
   aliases: string;
@@ -61,10 +64,12 @@ export function HelpPanel({
   selectedIndex,
   scrollOffset,
   maxItems,
+  maxRows,
+  renderWidth,
 }: HelpPanelProps): React.ReactNode {
   return (
     <Box flexDirection="column" marginLeft={2}>
-      {formatHelpPanel(commands, { selectedIndex, scrollOffset, maxItems })
+      {formatHelpPanel(commands, { selectedIndex, scrollOffset, maxItems, maxRows, width: renderWidth })
         .split("\n")
         .map((line, index) => (
           <Text key={`${index}:${line}`}>{line}</Text>
@@ -78,6 +83,8 @@ export function InteractiveHelpPanel({
   selectedIndex,
   scrollOffset,
   maxItems,
+  maxRows,
+  renderWidth,
   dialogId = "local-ui:help",
   onClose,
 }: InteractiveHelpPanelProps): React.ReactNode {
@@ -110,16 +117,28 @@ export function InteractiveHelpPanel({
       selectedIndex={state.selectedIndex}
       scrollOffset={state.scrollOffset}
       maxItems={pageSize}
+      maxRows={maxRows}
+      renderWidth={renderWidth}
     />
   );
 }
 
 export function formatHelpPanel(
   commands: readonly HelpPanelCommand[],
-  options: { selectedIndex?: number; scrollOffset?: number; maxItems?: number } = {},
+  options: {
+    selectedIndex?: number;
+    scrollOffset?: number;
+    maxItems?: number;
+    maxRows?: number;
+    width?: number;
+  } = {},
 ): string {
+  const width = normalizePanelWidth(options.width);
   if (commands.length === 0) {
-    return "Slash commands\nNo slash commands available.";
+    return finalizeHelpPanelLines(["Slash commands", "No slash commands available."], {
+      width,
+      maxRows: options.maxRows,
+    });
   }
 
   const pageSize = Math.max(1, options.maxItems ?? commands.length);
@@ -144,14 +163,15 @@ export function formatHelpPanel(
   for (const section of sections) {
     lines.push(section.title);
     for (const row of section.rows) {
-      lines.push(formatHelpPanelRow(row));
-      if (row.aliases) lines.push(`    aliases: ${row.aliases}`);
-      if (row.disabledReason) lines.push(`    ${row.disabledReason}`);
+      lines.push(formatHelpPanelRow(row, width));
+      if (row.disabled && width !== undefined) lines.push(formatHelpPanelDetailLine("    [disabled]", width));
+      if (row.aliases) lines.push(formatHelpPanelDetailLine(`    aliases: ${row.aliases}`, width));
+      if (row.disabledReason) lines.push(formatHelpPanelDetailLine(`    ${row.disabledReason}`, width));
     }
   }
   if (hiddenBelow > 0) lines.push(`↓ ${hiddenBelow} hidden`);
 
-  return lines.join("\n");
+  return finalizeHelpPanelLines(lines, { width, maxRows: options.maxRows });
 }
 
 export function measureHelpPanelRows(
@@ -160,11 +180,12 @@ export function measureHelpPanelRows(
     selectedIndex?: number;
     scrollOffset?: number;
     maxItems?: number;
+    maxRows?: number;
     width?: number;
   } = {},
 ): number {
   const wrapWidth = Math.max(1, options.width ?? 80);
-  return visualRows(formatHelpPanel(commands, options), wrapWidth).length;
+  return visualRows(formatHelpPanel(commands, { ...options, maxRows: options.maxRows }), wrapWidth).length;
 }
 
 export function fitHelpPanelMaxItems(
@@ -198,12 +219,12 @@ export function fitHelpPanelMaxItems(
     fitted = maxItems;
     fittedRows = rows;
   }
-  return { maxItems: fitted, maxRenderedRows: fittedRows };
+  return { maxItems: fitted, maxRenderedRows: Math.min(maxRows, fittedRows) };
 }
 
 function measureWorstHelpPanelRows(
   commands: readonly HelpPanelCommand[],
-  options: { maxItems: number; width?: number },
+  options: { maxItems: number; maxRows?: number; width?: number },
 ): number {
   const maxItems = Math.max(1, options.maxItems);
   const maxScroll = Math.max(0, commands.length - maxItems);
@@ -215,6 +236,7 @@ function measureWorstHelpPanelRows(
         selectedIndex: scrollOffset,
         scrollOffset,
         maxItems,
+        maxRows: options.maxRows,
         width: options.width,
       }),
     );
@@ -241,6 +263,7 @@ export function formatHelpPanelSections(
     section.rows.push({
       key: `${source}:${category}:${command.name}:${commandIndex}`,
       commandIndex,
+      name: command.name,
       usage: formatCommandUsage(command),
       description: truncateInline(
         command.description ?? "(no description)",
@@ -320,10 +343,45 @@ function scrollOffsetForSelection(
   return clamp(nextOffset, 0, maxScroll);
 }
 
-function formatHelpPanelRow(row: HelpPanelRow): string {
+function formatHelpPanelRow(row: HelpPanelRow, width?: number): string {
   const marker = row.selected ? "›" : " ";
   const disabled = row.disabled ? " [disabled]" : "";
-  return `${marker} ${row.usage}${disabled}  ${row.description}`;
+  const line = `${marker} ${row.usage}${disabled}  ${row.description}`;
+  if (width === undefined || terminalWidth(line) <= width) return line;
+  return truncateTerminalText(`${marker} ${row.usage}  ${row.description}`, width);
+}
+
+function formatHelpPanelDetailLine(line: string, width?: number): string {
+  if (width === undefined) return line;
+  return truncateTerminalText(line, width);
+}
+
+function finalizeHelpPanelLines(
+  lines: readonly string[],
+  options: { width?: number; maxRows?: number },
+): string {
+  const formatted = options.width === undefined
+    ? [...lines]
+    : lines.map((line) => truncateTerminalText(line, options.width ?? 80));
+  const maxRows = options.maxRows;
+  if (maxRows === undefined || formatted.length <= maxRows) return formatted.join("\n");
+
+  const footer = formatted.at(-1)?.startsWith("↓ ") ? formatted.at(-1) : undefined;
+  const reserveFooter = footer === undefined ? 0 : 1;
+  const available = Math.max(1, maxRows - reserveFooter);
+  if (available === 1) {
+    return [formatted[0] ?? "Slash commands", ...(footer ? [footer] : [])].join("\n");
+  }
+
+  const visible = formatted.slice(0, Math.max(1, available - 1));
+  visible.push(truncateTerminalText("… details truncated", options.width ?? 80));
+  if (footer) visible.push(footer);
+  return visible.slice(0, maxRows).join("\n");
+}
+
+function normalizePanelWidth(width: number | undefined): number | undefined {
+  if (width === undefined || !Number.isFinite(width)) return undefined;
+  return Math.max(1, Math.floor(width));
 }
 
 function formatCommandUsage(command: HelpPanelCommand): string {

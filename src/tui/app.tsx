@@ -354,7 +354,11 @@ function measureGenericDialogLayout(
       scrollOffset: content.props.scrollOffset,
     });
     return {
-      content: React.cloneElement(content, { maxItems: fit.maxItems }),
+      content: React.cloneElement(content, {
+        maxItems: fit.maxItems,
+        maxRows,
+        renderWidth: width,
+      }),
       rows: fit.maxRenderedRows,
     };
   }

@@ -558,6 +558,69 @@ describe("App", () => {
     }
   });
 
+  it("clips a single oversized help command without covering chrome on a 26x24 terminal", async () => {
+    const closeDialog = vi.fn();
+    const request = createLocalUiDialogRequest(
+      { kind: "open-panel", panel: "help" },
+      {
+        commands: [
+          {
+            name: "超长命令🚦",
+            aliases: Array.from({ length: 24 }, (_, index) => `别名-${index}-👨‍👩‍👧‍👦-非常长`),
+            usage: "/超长命令🚦 [中文参数|emoji👨‍👩‍👧‍👦|extra-long-option-name]",
+            description:
+              "这是一个单项就很高的命令说明，包含大量中文宽字符和 emoji 👨‍👩‍👧‍👦，如果不在命令详情内部裁剪就会覆盖标题、footer、status 和输入区域。",
+            kind: "local" as const,
+            source: "builtin" as const,
+            category: "workspace" as const,
+            disabled: true,
+            disabledReason:
+              "禁用原因：当前运行状态不允许执行这个命令。这里故意放入很多中文宽字符、emoji 🚦🚦🚦 和额外说明，验证单项详情内部必须裁剪。",
+          },
+        ],
+        onClose: closeDialog,
+      } as never,
+    );
+    const app = (dialogRequests = request ? [request] : []) => (
+      <App
+        model="glm-5.2"
+        provider="openai"
+        workDir="/workspace/demo"
+        entries={Array.from({ length: 20 }, (_, index) => ({
+          kind: "assistant" as const,
+          content: `message-${index}`,
+        }))}
+        running={false}
+        dialogRequests={dialogRequests}
+        onSubmit={vi.fn()}
+      />
+    );
+    const harness = createInteractiveApp(app(), { columns: 26, rows: 24 });
+
+    try {
+      let output = await harness.write("\u001b[B");
+
+      expect(output).toContain("Slash commands");
+      expect(output).toContain("› /超长命令");
+      expect(output).toContain("[disabled]");
+      expect(output).toContain("aliases:");
+      expect(output).toContain("…");
+      expect(output).toContain("Use dialog controls");
+      expect(output).toContain("────────────────");
+      expect(output.split("\n").length).toBeLessThanOrEqual(24);
+
+      await harness.write("\u001b");
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      expect(closeDialog).toHaveBeenCalledWith("local-ui:help");
+
+      output = await harness.rerender(app([]));
+      output = await harness.write("恢复");
+      expect(output).toContain("恢复▋");
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
   it("renders approval as an inline modal and disables the bottom input", () => {
     const output = renderToString(
       <App
