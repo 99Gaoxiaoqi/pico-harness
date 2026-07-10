@@ -11,6 +11,7 @@
 
 import { readFile } from "node:fs/promises";
 import { generateSimpleDiff, safeResolve } from "../tools/registry-impl.js";
+import type { WorkspaceRoots } from "../tools/workspace-roots.js";
 
 /**
  * 在工具执行前计算审批 diff 预览。
@@ -29,6 +30,7 @@ export async function computeApprovalDiff(
   toolName: string,
   args: string,
   workDir: string,
+  workspaceRoots?: Pick<WorkspaceRoots, "resolve">,
 ): Promise<string | undefined> {
   // 任何意外都吞掉:审批流程绝不能因 diff 计算而中断。
   try {
@@ -44,13 +46,13 @@ export async function computeApprovalDiff(
     const obj = parsed as Record<string, unknown>;
 
     if (toolName === "edit_file") {
-      return computeEditFileDiff(obj, workDir);
+      return await computeEditFileDiff(obj, workDir);
     }
     if (toolName === "write_file") {
-      return computeWriteFileDiff(obj, workDir);
+      return await computeWriteFileDiff(obj, workDir, workspaceRoots);
     }
     if (toolName === "bash") {
-      return computeBashDiff(obj, workDir);
+      return await computeBashDiff(obj, workDir);
     }
     return undefined;
   } catch {
@@ -92,13 +94,15 @@ async function computeEditFileDiff(
 async function computeWriteFileDiff(
   obj: Record<string, unknown>,
   workDir: string,
+  workspaceRoots?: Pick<WorkspaceRoots, "resolve">,
 ): Promise<string | undefined> {
   const path = obj["path"];
   const content = obj["content"];
   if (!isString(path) || !isString(content)) {
     return undefined;
   }
-  const oldText = await readFileOrEmpty(safeResolve(workDir, path));
+  const absolutePath = workspaceRoots?.resolve(path) ?? safeResolve(workDir, path);
+  const oldText = await readFileOrEmpty(absolutePath);
   return generateSimpleDiff(oldText, content);
 }
 

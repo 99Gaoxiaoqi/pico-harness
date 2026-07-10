@@ -465,6 +465,36 @@ describe("Pico command registry", () => {
     expect(result.result.message).toContain("Did you mean: reviewer");
   });
 
+  it("/skill 与动态 /<skill-name> 都执行显式激活 prompt", async () => {
+    const workDir = mkdtempSync(join(tmpdir(), "pico-command-skill-activate-"));
+    cleanup.push(() => rmSync(workDir, { recursive: true, force: true }));
+    const sourcePath = join(workDir, ".claw", "skills", "review", "SKILL.md");
+    mkdirSync(join(workDir, ".claw", "skills", "review"), { recursive: true });
+    writeFileSync(
+      sourcePath,
+      "---\nname: review\ndescription: review files\n---\n\nReview $0 carefully.",
+    );
+    const registry = await createPicoCommandRegistry({
+      workDir,
+      provider: "openai",
+      model: "glm-5.2",
+    });
+
+    for (const input of ["/skill review src/a.ts", "/review src/a.ts"]) {
+      const result = await processUserInput(input, { registry });
+      expect(result.type).toBe("prompt-command");
+      if (result.type !== "prompt-command") continue;
+      expect(result.result.prompt).toContain('User explicitly activated skill "review"');
+      expect(result.result.prompt).toContain("Review src/a.ts carefully.");
+      expect(result.result.metadata).toMatchObject({
+        skillName: "review",
+        skillArgs: "src/a.ts",
+        skillSourcePath: sourcePath,
+        skillTrigger: "user-slash",
+      });
+    }
+  });
+
   it("command descriptors provide dynamic skill, agent, session, and snapshot argument candidates", async () => {
     const workDir = mkdtempSync(join(tmpdir(), "pico-command-arg-completer-"));
     cleanup.push(() => rmSync(workDir, { recursive: true, force: true }));

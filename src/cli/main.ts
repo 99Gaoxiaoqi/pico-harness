@@ -23,6 +23,7 @@ async function main(): Promise<void> {
       dir: { type: "string" },
       model: { type: "string" },
       "mcp-config": { type: "string" },
+      "add-dir": { type: "string", multiple: true },
       session: { type: "string", short: "S" },
       "continue": { type: "boolean", short: "c" },
       resume: { type: "string" },
@@ -43,6 +44,7 @@ async function main(): Promise<void> {
     thinkingEffort,
     sessionSelection,
     ...(values["mcp-config"] ? { mcpConfigPath: values["mcp-config"] } : {}),
+    ...(values["add-dir"] ? { addDirs: values["add-dir"] } : {}),
   });
 }
 

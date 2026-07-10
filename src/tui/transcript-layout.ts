@@ -80,6 +80,10 @@ function entryRows(
   }
   if (entry.kind === "logo") return buildLogoPanelRows({ ...entry, renderWidth: wrapWidth }).length + 1;
   if (entry.kind === "error") return buildErrorEntryRows(entry, wrapWidth).length + 1;
+  if (entry.kind === "skill") {
+    const label = `Skill activated: ${entry.name}${entry.args ? ` ${entry.args}` : ""}`;
+    return visualRows(label, wrapWidth).length + 1;
+  }
   return visualRows(entry.content, wrapWidth).length + 1;
 }
 

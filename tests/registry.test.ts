@@ -214,15 +214,15 @@ describe("ReadFileTool 防御底线", () => {
     expect(out).toContain("已被系统截断");
   });
 
-  it("允许只读方式读取工作区外文件", async () => {
+  it("读取工作区外文件前也必须先通过 /add-dir 授权目录", async () => {
     const outsideDir = await mkdtemp(join(tmpdir(), "claw-outside-"));
     const outsideFile = join(outsideDir, "note.txt");
     await writeFile(outsideFile, "outside ok");
     const tool = new ReadFileTool(workDir);
 
     try {
-      await expect(tool.execute(JSON.stringify({ path: outsideFile }))).resolves.toContain(
-        "outside ok",
+      await expect(tool.execute(JSON.stringify({ path: outsideFile }))).rejects.toThrow(
+        "/add-dir",
       );
     } finally {
       await rm(outsideDir, { recursive: true, force: true });

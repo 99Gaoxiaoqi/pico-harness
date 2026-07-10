@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, readdir, realpath, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -344,6 +344,140 @@ describe("runAgentFromCli", () => {
     globalApprovalManager.resolveApproval(notice.taskId, false, "test rejection");
     await expect(runPromise).resolves.toMatchObject({ finalMessage: "Saw rejection." });
     await expect(readFile(join(workDir, "approval.txt"), "utf8")).rejects.toThrow();
+  });
+
+  it("未授权的外部写入在审批前拒绝并提示 /add-dir", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-cli-boundary-root-"));
+    const outsideDir = await mkdtemp(join(tmpdir(), "pico-cli-boundary-outside-"));
+    const outsideFile = join(outsideDir, "blocked.txt");
+    const provider = new ScriptedProvider([
+      {
+        role: "assistant",
+        content: "I will write outside.",
+        toolCalls: [
+          {
+            id: "call_outside_blocked",
+            name: "write_file",
+            arguments: JSON.stringify({ path: outsideFile, content: "blocked" }),
+          },
+        ],
+        usage: { promptTokens: 1, completionTokens: 1 },
+      },
+      {
+        role: "assistant",
+        content: "Boundary explained.",
+        usage: { promptTokens: 1, completionTokens: 1 },
+      },
+    ]);
+    const approvalNotifier = vi.fn();
+
+    const result = await runAgentFromCli(
+      {
+        prompt: "Write outside",
+        dir: workDir,
+        session: "outside_boundary_session",
+        provider: "openai",
+      },
+      { provider, approvalNotifier },
+    );
+
+    expect(result.finalMessage).toBe("Boundary explained.");
+    expect(approvalNotifier).not.toHaveBeenCalled();
+    expect(
+      result.messages.some(
+        (message) => message.toolCallId !== undefined && message.content.includes("/add-dir"),
+      ),
+    ).toBe(true);
+    await expect(readFile(outsideFile, "utf8")).rejects.toThrow();
+  });
+
+  it("附加目录中的写入进入正常审批并可执行", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-cli-added-root-"));
+    const outsideDir = await mkdtemp(join(tmpdir(), "pico-cli-added-outside-"));
+    const outsideFile = join(outsideDir, "allowed.txt");
+    const provider = new ScriptedProvider([
+      {
+        role: "assistant",
+        content: "I will write the authorized file.",
+        toolCalls: [
+          {
+            id: "call_outside_allowed",
+            name: "write_file",
+            arguments: JSON.stringify({ path: outsideFile, content: "allowed" }),
+          },
+        ],
+        usage: { promptTokens: 1, completionTokens: 1 },
+      },
+      {
+        role: "assistant",
+        content: "Authorized write done.",
+        usage: { promptTokens: 1, completionTokens: 1 },
+      },
+    ]);
+    const approvalNotifier = vi.fn((notice: ApprovalNotice) => {
+      globalApprovalManager.resolveApproval(notice.taskId, true, "authorized test directory");
+    });
+
+    const result = await runAgentFromCli(
+      {
+        prompt: "Write authorized external file",
+        dir: workDir,
+        session: "added_boundary_session",
+        provider: "openai",
+        addDirs: [outsideDir],
+      },
+      { provider, approvalNotifier },
+    );
+
+    expect(result.finalMessage).toBe("Authorized write done.");
+    expect(approvalNotifier).toHaveBeenCalledOnce();
+    await expect(readFile(outsideFile, "utf8")).resolves.toBe("allowed");
+  });
+
+  it("从 .pico/config.json 加载 additionalDirectories", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-cli-config-root-"));
+    const outsideDir = await mkdtemp(join(tmpdir(), "pico-cli-config-outside-"));
+    const outsideFile = join(outsideDir, "configured.txt");
+    await mkdir(join(workDir, ".pico"), { recursive: true });
+    await writeFile(
+      join(workDir, ".pico", "config.json"),
+      JSON.stringify({ permissions: { additionalDirectories: [outsideDir] } }),
+    );
+    const provider = new ScriptedProvider([
+      {
+        role: "assistant",
+        content: "I will use the configured directory.",
+        toolCalls: [
+          {
+            id: "call_configured_outside",
+            name: "write_file",
+            arguments: JSON.stringify({ path: outsideFile, content: "configured" }),
+          },
+        ],
+        usage: { promptTokens: 1, completionTokens: 1 },
+      },
+      {
+        role: "assistant",
+        content: "Configured write done.",
+        usage: { promptTokens: 1, completionTokens: 1 },
+      },
+    ]);
+    const approvalNotifier = vi.fn((notice: ApprovalNotice) => {
+      globalApprovalManager.resolveApproval(notice.taskId, true, "configured directory");
+    });
+
+    await runAgentFromCli(
+      {
+        prompt: "Write configured external file",
+        dir: workDir,
+        session: "configured_boundary_session",
+        provider: "openai",
+      },
+      { provider, approvalNotifier },
+    );
+
+    expect(approvalNotifier).toHaveBeenCalledOnce();
+    await expect(readFile(outsideFile, "utf8")).resolves.toBe("configured");
   });
 
   it("审批等待期间 abort 会取消任务且晚批准不执行危险工具", async () => {

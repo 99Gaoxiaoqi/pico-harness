@@ -582,6 +582,43 @@ describe("TUI input routing", () => {
     expect(snapshots.at(0)).toEqual([{ kind: "user", content: "/review" }]);
   });
 
+  it("显式 Skill 在运行 Agent 前写入结构化 transcript 条目", async () => {
+    const { reporter, snapshots, runAgent, exit, registry, workDir } = harness();
+    const processInput = vi.fn(
+      async (): Promise<TuiInputProcessResult> => ({
+        type: "prompt-command",
+        raw: "/review src/a.ts",
+        command: "review",
+        args: "src/a.ts",
+        argv: ["src/a.ts"],
+        result: {
+          type: "prompt",
+          prompt: "wrapped skill prompt",
+          metadata: {
+            skillName: "review",
+            skillArgs: "src/a.ts",
+            skillTrigger: "user-slash",
+          },
+        },
+      }),
+    );
+
+    await handleTuiInputSubmission("/review src/a.ts", {
+      reporter,
+      registry,
+      workDir,
+      runAgent,
+      exit,
+      processInput,
+    });
+
+    expect(runAgent).toHaveBeenCalledWith("wrapped skill prompt");
+    expect(snapshots.at(-1)).toEqual([
+      { kind: "user", content: "/review src/a.ts" },
+      { kind: "skill", name: "review", args: "src/a.ts", trigger: "user-slash" },
+    ]);
+  });
+
   it("runTuiAgentPrompt routes approval notices into TUI dialog and approval tool status", async () => {
     const { reporter, snapshots } = harness();
     const openDialog = vi.fn();

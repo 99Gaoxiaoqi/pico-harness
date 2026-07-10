@@ -26,6 +26,18 @@ describe("TuiReporter", () => {
     expect(last()).toEqual([{ kind: "system", content: "Unknown slash command: /wat" }]);
   });
 
+  it("pushSkillActivation 追加可观察的 skill 激活条目", () => {
+    const { reporter, last } = harness();
+    reporter.pushSkillActivation({
+      name: "review",
+      args: "src/a.ts",
+      trigger: "user-slash",
+    });
+    expect(last()).toEqual([
+      { kind: "skill", name: "review", args: "src/a.ts", trigger: "user-slash" },
+    ]);
+  });
+
   it("pushError 追加结构化 error 条目,不伪装成 assistant 文本", () => {
     const { reporter, last } = harness();
     reporter.pushError("boom", { retryable: true, action: "retry" });

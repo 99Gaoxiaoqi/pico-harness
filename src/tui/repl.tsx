@@ -52,6 +52,8 @@ import type { ThinkingEffort } from "../provider/thinking.js";
 import { buildDefaultToolRegistry } from "../tools/default-registry.js";
 import { ToolDisclosure } from "../tools/tool-disclosure.js";
 import { getOrCreateSessionSettings, toolStatusFromRegistry } from "../input/session-settings.js";
+import { loadConfiguredAdditionalDirectories } from "../input/add-directory.js";
+import { WorkspaceRoots } from "../tools/workspace-roots.js";
 import { globalSessionManager } from "../engine/session.js";
 import { McpConnectionManager, type McpStatusSnapshot } from "../mcp/manager.js";
 import { hasLocalUiCommandAction } from "./local-ui-command.js";
@@ -90,6 +92,8 @@ export interface ReplOptions {
   mcpConfigPath?: string;
   /** CLI 已解析的 session 选择结果。 */
   sessionSelection?: CliSessionSelection;
+  /** CLI --add-dir 提供的附加工作目录。 */
+  addDirs?: string[];
 }
 
 const SESSION_SELECTOR_DIALOG_ID = "local-ui:session-selector";
@@ -167,6 +171,10 @@ export async function handleTuiInputSubmission(
     }
     case "prompt-command": {
       deps.reporter.pushUserMessage(processed.raw);
+      const skillActivation = skillActivationFromMetadata(processed.result.metadata);
+      if (skillActivation) {
+        deps.reporter.pushSkillActivation(skillActivation);
+      }
       await runPreparedUserPrompt(processed.result.prompt, deps);
       return;
     }
@@ -177,6 +185,23 @@ export async function handleTuiInputSubmission(
       deps.reporter.pushSystemMessage(formatUnknownCommand(processed));
       return;
   }
+}
+
+function skillActivationFromMetadata(
+  metadata: Record<string, unknown> | undefined,
+): { name: string; args: string; trigger: "user-slash" | "model-tool" } | undefined {
+  if (!metadata) return undefined;
+  const name = metadata["skillName"];
+  const args = metadata["skillArgs"];
+  const trigger = metadata["skillTrigger"];
+  if (
+    typeof name !== "string" ||
+    typeof args !== "string" ||
+    (trigger !== "user-slash" && trigger !== "model-tool")
+  ) {
+    return undefined;
+  }
+  return { name, args, trigger };
 }
 
 async function runPreparedUserPrompt(
@@ -408,7 +433,12 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
   const tuiSessionId = tuiSessionSelection.sessionId;
   const tuiSession = await globalSessionManager.getOrCreate(tuiSessionId, opts.workDir);
   const toolDisclosure = new ToolDisclosure();
-  const toolRegistry = buildDefaultToolRegistry(opts.workDir, { toolDisclosure });
+  const configuredAdditionalDirectories = await loadConfiguredAdditionalDirectories(opts.workDir);
+  const workspaceRoots = await WorkspaceRoots.create(opts.workDir, [
+    ...configuredAdditionalDirectories,
+    ...(opts.addDirs ?? []),
+  ]);
+  const toolRegistry = buildDefaultToolRegistry(opts.workDir, { toolDisclosure, workspaceRoots });
   let latestMcpStatus: McpStatusSnapshot | undefined;
   if (opts.mcpConfigPath) {
     const mcpStatusManager = new McpConnectionManager(toolRegistry, { stdioCwd: opts.workDir });
@@ -432,6 +462,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     thinkingEffort: initialThinkingEffort,
     permissionMode: "ask",
     tools: toolStatusFromRegistry(toolRegistry),
+    additionalDirectories: workspaceRoots.list().slice(1),
   });
   const registry = await createPicoCommandRegistry({
     workDir: opts.workDir,
@@ -448,6 +479,8 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     tools: settings.tools,
     toolDisclosure,
     mcpStatus: () => latestMcpStatus,
+    additionalDirectories: settings.additionalDirectories,
+    additionalDirectoryManager: workspaceRoots,
   });
   const initialFileSuggestions = await listFileSuggestions({
     cwd: opts.workDir,
@@ -556,6 +589,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
               planMode: settings.mode === "plan" || settings.permissionMode === "plan",
               ...(runOptions?.images ? { images: runOptions.images } : {}),
               ...(opts.mcpConfigPath ? { mcpConfigPath: opts.mcpConfigPath } : {}),
+              addDirs: [...settings.additionalDirectories],
             };
             await runTuiAgentPrompt(cliOpts, {
               reporter,
