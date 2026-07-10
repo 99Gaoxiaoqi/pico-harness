@@ -10,10 +10,7 @@ import type { DialogRequest } from "../../src/tui/dialog-arbiter.js";
 import { LLMStatusError } from "../../src/provider/errors.js";
 import { defaultIsRetryableError } from "../../src/provider/retry.js";
 import { OpenAIProvider } from "../../src/provider/openai.js";
-import type {
-  LLMProvider,
-  LLMProviderRequestOptions,
-} from "../../src/provider/interface.js";
+import type { LLMProvider, LLMProviderRequestOptions } from "../../src/provider/interface.js";
 import type { Message, ToolDefinition } from "../../src/schema/message.js";
 import {
   runTuiAgentPrompt,
@@ -57,7 +54,7 @@ function stripEnvQuotes(value: string): string {
   if (value.length < 2) return value;
   const first = value[0];
   const last = value[value.length - 1];
-  return (first === "\"" && last === "\"") || (first === "'" && last === "'")
+  return (first === '"' && last === '"') || (first === "'" && last === "'")
     ? value.slice(1, -1)
     : value;
 }
@@ -238,7 +235,9 @@ describeRealLLM("TUI productization real LLM e2e", { timeout: 240000 }, () => {
           {
             reporter,
             runAgent,
-            ...(options.abortControllerRef ? { abortControllerRef: options.abortControllerRef } : {}),
+            ...(options.abortControllerRef
+              ? { abortControllerRef: options.abortControllerRef }
+              : {}),
             ...(options.openDialog ? { openDialog: options.openDialog } : {}),
             ...(options.closeDialog ? { closeDialog: options.closeDialog } : {}),
           },
@@ -268,6 +267,7 @@ describeRealLLM("TUI productization real LLM e2e", { timeout: 240000 }, () => {
     });
     const writeOnlyProvider = new ToolFilteringProvider(realProvider, new Set(["write_file"]));
     let rejectApproval: (() => void) | undefined;
+    let rejectedApproval = false;
     const openDialog = vi.fn((request: DialogRequest) => {
       const element = request.content;
       if (React.isValidElement<{ onAction?: (action: "reject") => void }>(element)) {
@@ -275,6 +275,12 @@ describeRealLLM("TUI productization real LLM e2e", { timeout: 240000 }, () => {
       }
     });
     const closeDialog = vi.fn();
+    const abortControllerRef: TuiAbortControllerRef = { current: null };
+    const rejectCapturedApproval = () => {
+      if (rejectedApproval || !rejectApproval) return;
+      rejectedApproval = true;
+      rejectApproval();
+    };
 
     const run = harness.runPrompt(
       [
@@ -283,15 +289,30 @@ describeRealLLM("TUI productization real LLM e2e", { timeout: 240000 }, () => {
         "If the tool is rejected, stop and say PICO_TUI_APPROVAL_REJECTED_OK.",
         "Do not answer directly before attempting the tool call.",
       ].join(" "),
-      { provider: writeOnlyProvider, openDialog, closeDialog },
+      { provider: writeOnlyProvider, openDialog, closeDialog, abortControllerRef },
     );
-    await vi.waitFor(() => expect(openDialog).toHaveBeenCalled(), { timeout: 60000 });
-    const settledBeforeReject = await promiseSettled(run);
-    expect(settledBeforeReject).toBe(false);
-    expect(readFileSync(target, "utf8")).toBe("ORIGINAL\n");
-    expect(rejectApproval).toBeTypeOf("function");
-    rejectApproval?.();
-    await run;
+    const outcome = observeOutcome(run);
+    let approvalRejectedForHappyPath = false;
+    try {
+      await vi.waitFor(() => expect(openDialog).toHaveBeenCalled(), { timeout: 60000 });
+      const settledBeforeReject = await promiseSettled(outcome);
+      expect(settledBeforeReject).toBe(false);
+      expect(readFileSync(target, "utf8")).toBe("ORIGINAL\n");
+      expect(rejectApproval).toBeTypeOf("function");
+      rejectCapturedApproval();
+      approvalRejectedForHappyPath = true;
+    } finally {
+      rejectCapturedApproval();
+      if (!approvalRejectedForHappyPath) {
+        abortControllerRef.current?.abort(new DOMException("approval test cleanup", "AbortError"));
+      }
+    }
+    const approvalOutcome = await withTimeout(
+      outcome,
+      60000,
+      "timed out waiting for approval run to finish",
+    );
+    expect(approvalOutcome).toMatchObject({ status: "fulfilled" });
 
     const entries = harness.entries();
     expect(openDialog).toHaveBeenCalledWith(
@@ -317,14 +338,27 @@ describeRealLLM("TUI productization real LLM e2e", { timeout: 240000 }, () => {
         model: realEnv.LLM_MODEL!,
       }),
     );
-    const interrupted = harness.runPrompt(
-      firstPrompt,
-      { abortControllerRef, provider: observedProvider },
-    );
+    const interrupted = harness.runPrompt(firstPrompt, {
+      abortControllerRef,
+      provider: observedProvider,
+    });
+    const interruptedOutcome = observeOutcome(interrupted);
 
-    await observedProvider.waitForStreamStart();
-    abortControllerRef.current?.abort(new DOMException("real e2e interrupted", "AbortError"));
-    await expect(interrupted).rejects.toMatchObject({ name: "AbortError" });
+    try {
+      await withTimeout(
+        observedProvider.waitForStreamStart(),
+        10_000,
+        "timed out waiting for real provider stream start",
+      );
+      abortControllerRef.current?.abort(new DOMException("real e2e interrupted", "AbortError"));
+    } finally {
+      abortControllerRef.current?.abort(new DOMException("real e2e cleanup", "AbortError"));
+    }
+    const interruptedResult = await interruptedOutcome;
+    expect(interruptedResult).toMatchObject({
+      status: "rejected",
+      error: expect.objectContaining({ name: "AbortError" }),
+    });
 
     await harness.runPrompt("Reply exactly: PICO_TUI_AFTER_ABORT_OK. Do not use tools.", {
       provider: observedProvider,
@@ -335,9 +369,11 @@ describeRealLLM("TUI productization real LLM e2e", { timeout: 240000 }, () => {
     expect(assistantText(entries)).toContain("PICO_TUI_AFTER_ABORT_OK");
     expect(observedProvider.requests.length).toBeGreaterThanOrEqual(2);
     const secondRequestMessages = observedProvider.requests.at(-1)?.messages ?? [];
-    expect(secondRequestMessages.some((message) => message.content.includes("PICO_TUI_ABORT_FIRST_PROMPT"))).toBe(
-      true,
-    );
+    expect(
+      secondRequestMessages.some((message) =>
+        message.content.includes("PICO_TUI_ABORT_FIRST_PROMPT"),
+      ),
+    ).toBe(true);
   });
 
   it("长回复和多轮后仍能提交下一条并保持 transcript 可用", async () => {
@@ -351,24 +387,47 @@ describeRealLLM("TUI productization real LLM e2e", { timeout: 240000 }, () => {
     const entries = harness.entries();
     const assistantEntries = entries.filter((entry) => entry.kind === "assistant");
     expect(assistantEntries.length).toBeGreaterThanOrEqual(2);
-    const longAssistant = assistantEntries.find((entry) => entry.content.includes("PICO_TUI_LONG_LINE"));
+    const longAssistant = assistantEntries.find((entry) =>
+      entry.content.includes("PICO_TUI_LONG_LINE"),
+    );
     expect(longAssistant).toBeDefined();
-    expect(countOccurrences(longAssistant?.content ?? "", "PICO_TUI_LONG_LINE")).toBeGreaterThanOrEqual(10);
+    expect(
+      countOccurrences(longAssistant?.content ?? "", "PICO_TUI_LONG_LINE"),
+    ).toBeGreaterThanOrEqual(10);
     expect(assistantText(entries)).toContain("PICO_TUI_NEXT_OK");
     expect(entries.some((entry) => entry.kind === "error")).toBe(false);
 
     const layout = buildTranscriptLayout(entries, { wrapWidth: 60 });
     const longAssistantIndex = entries.findIndex((entry) => entry === longAssistant);
     expect(layout.items[longAssistantIndex]?.rows).toBeGreaterThanOrEqual(10);
-    expect(entries.at(-1)).toMatchObject({ kind: "assistant", content: expect.stringContaining("PICO_TUI_NEXT_OK") });
+    expect(entries.at(-1)).toMatchObject({
+      kind: "assistant",
+      content: expect.stringContaining("PICO_TUI_NEXT_OK"),
+    });
   });
 });
 
 function assistantText(entries: readonly TuiEntry[]): string {
   return entries
-    .filter((entry): entry is Extract<TuiEntry, { kind: "assistant" }> => entry.kind === "assistant")
+    .filter(
+      (entry): entry is Extract<TuiEntry, { kind: "assistant" }> => entry.kind === "assistant",
+    )
     .map((entry) => entry.content)
     .join("\n");
+}
+
+type PromiseOutcome =
+  | { status: "fulfilled" }
+  | {
+      status: "rejected";
+      error: unknown;
+    };
+
+function observeOutcome(promise: Promise<unknown>): Promise<PromiseOutcome> {
+  return promise.then(
+    () => ({ status: "fulfilled" }),
+    (error: unknown) => ({ status: "rejected", error }),
+  );
 }
 
 async function promiseSettled(promise: Promise<unknown>): Promise<boolean> {
@@ -381,6 +440,20 @@ async function promiseSettled(promise: Promise<unknown>): Promise<boolean> {
     new Promise<typeof pending>((resolve) => setTimeout(() => resolve(pending), 100)),
   ]);
   return result !== pending;
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 function countOccurrences(text: string, needle: string): number {
