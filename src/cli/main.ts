@@ -40,7 +40,7 @@ Options:
   --provider <openai|claude|gemini>  Provider protocol (default: openai)
   --thinking <off|low|medium|high>   Native thinking effort (default: high)
   --dir <path>                       Workspace directory (default: current directory)
-  --model <name>                     Model name (default: LLM_MODEL or provider default)
+  --model <provider/model|name>      Model route or legacy model name
   --mcp-config <path>                MCP server configuration file
   --add-dir <path>                   Add an authorized workspace directory (repeatable)
   -S, --session <id>                 Resume a session by id
@@ -110,6 +110,7 @@ export async function runCli(args: readonly string[], runtime: CliRuntime): Prom
       workDir,
       provider: options.provider,
       model,
+      modelExplicit: options.model !== undefined,
       thinkingEffort: options.thinkingEffort,
       sessionSelection,
       ...(options.mcpConfigPath ? { mcpConfigPath: options.mcpConfigPath } : {}),

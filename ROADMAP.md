@@ -487,6 +487,8 @@ git worktree remove ../pico-1-streaming
 
 <!-- 开发过程中发现的新需求，追加到这里，注明发现日期 -->
 
+- [x] 2026-07-10：参考 OpenCode 引入 `providerID/modelID` 模型路由；`.pico/config.json` provider map 关联协议、端点和凭证环境变量，`/model` 仅从配置/发现目录安全切换完整路由，旧 `LLM_*` 保持兼容；本地 HTTP 集成测试覆盖模型发现、非法路由拒绝和真实请求切换。
+
 - 2026-07-10（未排期）：SkillRegistry 如需新增指令更新 API，必须另行设计和验证；当前只承诺已实现的执行记录与检索，不声称会自动改写 Skill。
 
 - 2026-07-07（阶段 2 真实模型 e2e 发现）：`TodoStore.load()` 幂等性导致跨实例不可见 ✅ 已修复（2026-07-08）

@@ -94,6 +94,42 @@ pico-harness/
 | `LLM_MODEL`    | ✅   | 模型名(如 `glm-5.2`)                      |
 | `LOG_LEVEL`    | 可选 | 日志级别:debug/info/warn/error(默认 info) |
 
+### 多模型路由
+
+旧的 `LLM_BASE_URL` / `LLM_API_KEY[S]` / `LLM_MODEL` 配置继续可用；Pico 会把它们视为 `legacy/<model>` 路由。需要在 DeepSeek、GLM 等不同端点之间安全切换时，在工作区的 `.pico/config.json` 配置 provider map：
+
+```json
+{
+  "version": 1,
+  "model": "deepseek/deepseek-v4-pro",
+  "providers": {
+    "deepseek": {
+      "protocol": "openai",
+      "baseURL": "https://your-deepseek-gateway.example/v1",
+      "apiKeyEnv": "DEEPSEEK_API_KEY",
+      "models": ["deepseek-v4-pro", "deepseek-v4-flash"]
+    },
+    "zhipu": {
+      "protocol": "openai",
+      "baseURL": "https://your-glm-gateway.example/v1",
+      "apiKeyEnv": "ZHIPU_API_KEY",
+      "models": ["glm-5.2"]
+    }
+  }
+}
+```
+
+把密钥导出到启动 `pico` 的进程环境，配置文件只保存环境变量名：
+
+```bash
+export DEEPSEEK_API_KEY=your-deepseek-key
+export ZHIPU_API_KEY=your-zhipu-key
+```
+
+已安装的 `pico` 不会自动读取当前工作区的 `.env`。仓库内的 `npm run dev` 会通过 `--env-file=.env` 加载 Pico 仓库根目录的 `.env`；其他启动方式请先 `export`，或使用自己的环境加载工具。
+
+`/model` 使用 `providerID/modelID` 作为稳定标识。OpenAI 兼容 provider 默认请求 `GET /models`；显式 `models` 是允许列表，也是端点不支持模型发现时的可靠 fallback。可用 `"discoverModels": false` 完全关闭发现。密钥值不会写入 SessionSettings、状态栏或命令输出。
+
 ## 🧪 测试与评估
 
 ```bash

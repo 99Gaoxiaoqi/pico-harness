@@ -43,6 +43,7 @@ import { getCommandAvailability, type CommandInputState } from "../input/command
 import type { InputProcessResult, LocalCommandResult } from "../input/types.js";
 import type { ImagePart } from "../schema/message.js";
 import type { ProviderKind } from "../provider/factory.js";
+import { loadModelRouter } from "../provider/model-router.js";
 import { isAbortError } from "../provider/errors.js";
 import { defaultIsRetryableError } from "../provider/retry.js";
 import type { ThinkingEffort } from "../provider/thinking.js";
@@ -93,6 +94,8 @@ export interface ReplOptions {
   provider?: ProviderKind;
   /** 模型名(顶栏展示) */
   model: string;
+  /** Whether model came from an explicit --model argument rather than an environment/default. */
+  modelExplicit?: boolean;
   /** Provider 原生思考强度 */
   thinkingEffort?: ThinkingEffort;
   /** MCP 配置路径(可选,首轮传入) */
@@ -434,6 +437,12 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
 
   const provider = opts.provider ?? "openai";
   const picoConfig = await loadPicoConfig(opts.workDir);
+  const modelRouter = await loadModelRouter({
+    config: picoConfig,
+    legacyProvider: provider,
+    legacyModel: opts.model,
+    legacyModelExplicit: opts.modelExplicit,
+  });
   const tuiSessionSelection: CliSessionSelection = opts.sessionSelection ?? {
     mode: "new",
     sessionId: createCliSessionId(),
@@ -447,6 +456,11 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
   });
   const { toolDisclosure, fileIndex } = runtimeState;
   const storedSettings = getStoredSessionSettings(tuiSessionId);
+  const requestedModel =
+    storedSettings?.modelRouteId ??
+    picoConfig.model ??
+    (opts.modelExplicit || process.env.LLM_MODEL ? opts.model : undefined);
+  const initialRoute = modelRouter.require(requestedModel);
   const restoredAdditionalDirectories =
     storedSettings?.cwd === opts.workDir ? storedSettings.additionalDirectories : [];
   const workspaceRoots = await WorkspaceRoots.create(opts.workDir, [
@@ -473,8 +487,9 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
       ? { forkFrom: tuiSessionSelection.sourceSessionId }
       : {}),
     cwd: opts.workDir,
-    provider,
-    model: opts.model,
+    provider: initialRoute.provider,
+    model: initialRoute.model,
+    modelRouteId: initialRoute.id,
     thinkingEffort: initialThinkingEffort,
     permissionMode: "ask",
     tools: toolStatusFromRegistry(toolRegistry),
@@ -484,8 +499,10 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
   const registry = await createPicoCommandRegistry({
     workDir: opts.workDir,
     projectCommandsDir: picoConfig.commandsDir,
-    provider,
+    provider: settings.provider,
     model: settings.model,
+    modelRouteId: settings.modelRouteId,
+    modelRouter,
     session: tuiSession,
     sessionId: tuiSessionId,
     sessionMode: tuiSessionSelection.mode,
@@ -572,8 +589,8 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
               request,
             ]);
           },
-          currentModelId: settings.model,
-          modelOptions: buildModelOptions(),
+          currentModelId: settings.modelRouteId,
+          modelOptions: buildModelOptions(modelRouter.routes),
           createModelSelectorContent: (effect) => (
             <InteractiveModelSelector
               models={effect.models}
@@ -594,13 +611,22 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
             />
           ),
           runAgent: async (prompt, runOptions) => {
+            const activeRoute = modelRouter.providerConfig(
+              settings.modelRouteId,
+              settings.thinkingEffort,
+            );
             const cliOpts: RunAgentCliOptions = {
               prompt,
-              provider,
+              provider: activeRoute.provider,
               dir: opts.workDir,
               session: tuiSessionId,
               sessionSelection: tuiSessionSelection,
-              model: settings.model,
+              baseURL: activeRoute.config.baseURL,
+              ...(activeRoute.route.source === "legacy"
+                ? {}
+                : { apiKey: activeRoute.config.apiKey }),
+              model: activeRoute.config.model,
+              allowModelFallback: false,
               thinkingEffort: settings.thinkingEffort,
               planMode: settings.mode === "plan" || settings.permissionMode === "plan",
               ...(runOptions?.images ? { images: runOptions.images } : {}),
@@ -641,7 +667,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     return (
       <App
         model={settings.model}
-        provider={provider}
+        provider={settings.provider}
         workDir={opts.workDir}
         sessionMode={settings.mode}
         permissionMode={settings.permissionMode}

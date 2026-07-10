@@ -92,6 +92,7 @@ describe("pico CLI entry", () => {
       workDir: "/workspace",
       provider: "claude",
       model: "claude-test",
+      modelExplicit: true,
       thinkingEffort: "high",
       sessionSelection: { mode: "new", sessionId: "cli-test" },
       mcpConfigPath: "mcp.json",

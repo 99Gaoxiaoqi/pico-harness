@@ -46,6 +46,7 @@ import type {
   SlashCommand,
 } from "./types.js";
 import { createProvider, type ProviderKind } from "../provider/factory.js";
+import { type ModelRouter } from "../provider/model-router.js";
 import { loadApiKeys } from "../provider/config.js";
 import { buildDefaultToolRegistry } from "../tools/default-registry.js";
 import {
@@ -54,6 +55,7 @@ import {
   parseThinkingEffortArg,
   setSessionMode,
   setSessionModel,
+  setSessionModelRoute,
   setSessionPermissionMode,
   setSessionThinkingEffort,
   toolStatusFromRegistry,
@@ -95,6 +97,8 @@ export interface PicoCommandRegistryOptions {
   workDir: string;
   projectCommandsDir?: string;
   model: string;
+  modelRouteId?: string;
+  modelRouter?: ModelRouter;
   provider: ProviderKind;
   session?: Session;
   sessionId?: string;
@@ -122,6 +126,7 @@ export async function createPicoCommandRegistry(
     cwd: options.workDir,
     provider: options.provider,
     model: options.model,
+    ...(options.modelRouteId !== undefined ? { modelRouteId: options.modelRouteId } : {}),
     ...(options.thinkingEffort !== undefined ? { thinkingEffort: options.thinkingEffort } : {}),
     ...(options.permissionMode !== undefined ? { permissionMode: options.permissionMode } : {}),
     tools,
@@ -138,10 +143,10 @@ export async function createPicoCommandRegistry(
     createGoalCommand(options.goalManager),
     createModeCommand(settings),
     createPermissionsCommand(settings),
-    createCompactCommand(options),
+    createCompactCommand(options, settings),
     createInitCommand(options),
     createDoctorCommand(options),
-    createModelCommand(settings),
+    createModelCommand(settings, options.modelRouter),
     createAddDirectoryCommand(settings, options.additionalDirectoryManager),
     createThinkingCommand(settings),
     createToolsCommand(settings, options.toolDisclosure),
@@ -216,13 +221,6 @@ export function commandArgumentSuggestions(
   const result = command?.argumentCompleter?.(query) ?? [];
   return Promise.resolve(result).then((items) => [...items]);
 }
-
-export const MODEL_ARGUMENT_CANDIDATES: readonly SlashArgumentCandidate[] = [
-  { value: "glm-5.2", description: "OpenAI-compatible default model" },
-  { value: "kimi-k2.5", description: "OpenAI-compatible fallback model" },
-  { value: "claude-3-5-sonnet", description: "Claude default model" },
-  { value: "gemini-2.0-flash", description: "Gemini default model" },
-];
 
 const MODE_CANDIDATES: readonly SlashArgumentCandidate[] = [
   { value: "default", description: "Normal interactive mode" },
@@ -366,7 +364,10 @@ function formatStatusWithMcp(
   return `${base}\n${formatMcpOverview(snapshot)}`;
 }
 
-function createCompactCommand(options: PicoCommandRegistryOptions): SlashCommand {
+function createCompactCommand(
+  options: PicoCommandRegistryOptions,
+  settings: SessionSettings,
+): SlashCommand {
   return {
     name: "compact",
     description: "Compact current session context",
@@ -392,8 +393,26 @@ function createCompactCommand(options: PicoCommandRegistryOptions): SlashCommand
         };
       }
 
-      const baseURL = process.env.LLM_BASE_URL;
-      const apiKey = loadApiKeys()[0];
+      let activeProvider = options.provider;
+      let activeConfig: { baseURL: string; apiKey: string; model: string } | undefined;
+      if (options.modelRouter) {
+        try {
+          const resolved = options.modelRouter.providerConfig(
+            settings.modelRouteId,
+            settings.thinkingEffort,
+          );
+          activeProvider = resolved.provider;
+          activeConfig = resolved.config;
+        } catch (error) {
+          return {
+            type: "local",
+            action: "message",
+            message: `Compact unavailable: ${error instanceof Error ? error.message : String(error)}`,
+          };
+        }
+      }
+      const baseURL = activeConfig?.baseURL ?? process.env.LLM_BASE_URL;
+      const apiKey = activeConfig?.apiKey ?? loadApiKeys()[0];
       if (!baseURL || !apiKey) {
         return {
           type: "local",
@@ -405,10 +424,10 @@ function createCompactCommand(options: PicoCommandRegistryOptions): SlashCommand
 
       try {
         const before = options.session.length;
-        const provider = createProvider(options.provider, {
+        const provider = createProvider(activeProvider, {
           baseURL,
           apiKey,
-          model: options.model,
+          model: activeConfig?.model ?? settings.model,
         });
         const ok = await new FullCompactor({ provider }).compact(options.session, retainLastN);
         return {
@@ -459,7 +478,14 @@ function createDoctorCommand(options: PicoCommandRegistryOptions): SlashCommand 
   };
 }
 
-function createModelCommand(settings: SessionSettings): SlashCommand {
+function createModelCommand(settings: SessionSettings, router?: ModelRouter): SlashCommand {
+  const candidates = (): readonly SlashArgumentCandidate[] =>
+    router
+      ? router.routes.map((route) => ({
+          value: route.id,
+          description: `${route.providerId} · ${route.provider}`,
+        }))
+      : [{ value: settings.model, description: `${settings.provider} · current model` }];
   return {
     name: "model",
     aliases: ["models"],
@@ -467,16 +493,28 @@ function createModelCommand(settings: SessionSettings): SlashCommand {
     usage: "/model [name]",
     argumentHint: "[name]",
     category: "model",
-    argumentCompleter: completeFromCandidates(MODEL_ARGUMENT_CANDIDATES),
+    argumentCompleter: (query) => filterArgumentCandidates(candidates(), query),
     kind: "local",
     availability: "idle",
     execute: (input): LocalCommandResult => {
-      const result = setSessionModel(settings, input.args);
+      const result = router
+        ? input.args.trim().length === 0
+          ? {
+              ok: false,
+              message: `Current model: ${settings.modelRouteId ?? settings.model}`,
+            }
+          : setSessionModelRoute(settings, router, input.args)
+        : setSessionModel(settings, input.args);
       return {
         type: "local",
         action: "model",
         message: result.message,
-        data: { model: settings.model },
+        data: {
+          model: settings.model,
+          provider: settings.provider,
+          modelRouteId: settings.modelRouteId,
+          ok: result.ok,
+        },
         ...(input.args.trim().length === 0
           ? { ui: { kind: "open-selector", selector: "model" } as const }
           : {}),

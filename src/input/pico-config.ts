@@ -1,5 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import type { ModelProviderConfig } from "../provider/model-router.js";
+import type { ProviderKind } from "../provider/factory.js";
 import {
   KEYBINDING_ACTIONS,
   KEYBINDING_CONTEXTS,
@@ -20,6 +22,9 @@ export interface PicoConfig {
   commandsDir: string;
   additionalDirectories: string[];
   keybindings: KeybindingMap;
+  /** Default model route in providerID/modelID form. */
+  model?: string;
+  providers: Record<string, ModelProviderConfig>;
 }
 
 export async function loadPicoConfig(workDir: string): Promise<PicoConfig> {
@@ -42,11 +47,14 @@ export async function loadPicoConfig(workDir: string): Promise<PicoConfig> {
     throw configError(configPath, "root", "must be an object");
   }
 
+  const model = parseDefaultModel(parsed["model"], configPath);
   return {
     version: parseVersion(parsed["version"], configPath),
     commandsDir: parseCommandsDir(parsed["commandsDir"], workDir, configPath),
     additionalDirectories: parseAdditionalDirectories(parsed["permissions"], configPath),
     keybindings: parseKeybindings(parsed["keybindings"], configPath),
+    ...(model !== undefined ? { model } : {}),
+    providers: parseProviders(parsed["providers"], configPath),
   };
 }
 
@@ -56,7 +64,74 @@ function defaultPicoConfig(workDir: string): PicoConfig {
     commandsDir: join(workDir, ".pico", "commands"),
     additionalDirectories: [],
     keybindings: {},
+    providers: {},
   };
+}
+
+function parseDefaultModel(value: unknown, configPath: string): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !/^[^/\s]+\/.+$/u.test(value.trim())) {
+    throw configError(configPath, "model", "must use providerID/modelID format");
+  }
+  return value.trim();
+}
+
+function parseProviders(value: unknown, configPath: string): Record<string, ModelProviderConfig> {
+  if (value === undefined) return {};
+  if (!isRecord(value)) throw configError(configPath, "providers", "must be an object");
+
+  const providers: Record<string, ModelProviderConfig> = {};
+  for (const [rawId, rawProvider] of Object.entries(value)) {
+    const id = rawId.trim();
+    const field = `providers.${rawId}`;
+    if (!id || id.includes("/")) {
+      throw configError(configPath, field, "id must be non-empty and must not contain /");
+    }
+    if (!isRecord(rawProvider)) throw configError(configPath, field, "must be an object");
+    const protocol = rawProvider["protocol"] ?? "openai";
+    if (!isProviderKind(protocol)) {
+      throw configError(configPath, `${field}.protocol`, "must be openai, claude, or gemini");
+    }
+    const baseURL = parseRequiredString(rawProvider["baseURL"], configPath, `${field}.baseURL`);
+    const apiKeyEnv = parseRequiredString(
+      rawProvider["apiKeyEnv"],
+      configPath,
+      `${field}.apiKeyEnv`,
+    );
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(apiKeyEnv)) {
+      throw configError(configPath, `${field}.apiKeyEnv`, "must be an environment variable name");
+    }
+    const rawModels = rawProvider["models"];
+    if (
+      rawModels !== undefined &&
+      (!Array.isArray(rawModels) || rawModels.some((model) => typeof model !== "string"))
+    ) {
+      throw configError(configPath, `${field}.models`, "must be a string array");
+    }
+    const discoverModels = rawProvider["discoverModels"];
+    if (discoverModels !== undefined && typeof discoverModels !== "boolean") {
+      throw configError(configPath, `${field}.discoverModels`, "must be a boolean");
+    }
+    providers[id] = {
+      protocol,
+      baseURL,
+      apiKeyEnv,
+      models: (rawModels ?? []).map((model) => model.trim()).filter(Boolean),
+      discoverModels: discoverModels ?? protocol === "openai",
+    };
+  }
+  return providers;
+}
+
+function parseRequiredString(value: unknown, configPath: string, field: string): string {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw configError(configPath, field, "must be a non-empty string");
+  }
+  return value.trim();
+}
+
+function isProviderKind(value: unknown): value is ProviderKind {
+  return value === "openai" || value === "claude" || value === "gemini";
 }
 
 function parseVersion(value: unknown, configPath: string): typeof CONFIG_VERSION {

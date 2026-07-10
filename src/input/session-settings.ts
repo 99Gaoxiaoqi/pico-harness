@@ -1,4 +1,5 @@
 import type { ProviderKind } from "../provider/factory.js";
+import type { ModelRouter } from "../provider/model-router.js";
 import { resolveProviderProfile } from "../provider/profile.js";
 import { isValidThinkingEffort, type ThinkingEffort } from "../provider/thinking.js";
 import type { Registry } from "../tools/registry.js";
@@ -19,6 +20,8 @@ export interface SessionSettings {
   provider: ProviderKind;
   mode: InteractionMode;
   model: string;
+  /** Stable providerID/modelID identity. Endpoint and credentials stay in ModelRouter. */
+  modelRouteId?: string;
   thinkingEffort: ThinkingEffort;
   thinkingEffortExplicit: boolean;
   permissionMode: string;
@@ -34,6 +37,7 @@ export interface SessionSettingsDefaults {
   provider: ProviderKind;
   mode?: InteractionMode;
   model: string;
+  modelRouteId?: string;
   thinkingEffort?: ThinkingEffort;
   permissionMode?: string;
   tools?: readonly SessionToolStatus[];
@@ -63,6 +67,7 @@ export function createDefaultSessionSettings(defaults: SessionSettingsDefaults):
     provider: defaults.provider,
     mode: defaults.mode ?? "default",
     model: defaults.model,
+    ...(defaults.modelRouteId !== undefined ? { modelRouteId: defaults.modelRouteId } : {}),
     thinkingEffort: defaults.thinkingEffort ?? "off",
     thinkingEffortExplicit: defaults.thinkingEffort !== undefined,
     permissionMode: defaults.permissionMode ?? "ask",
@@ -175,6 +180,21 @@ export function setSessionModel(settings: SessionSettings, model: string): Sessi
   return { ok: true, message: `Model set to ${settings.model}` };
 }
 
+export function setSessionModelRoute(
+  settings: SessionSettings,
+  router: ModelRouter,
+  query: string,
+): SessionSettingResult {
+  const validation = router.validate(query);
+  if (!validation.ok) return { ok: false, message: validation.message };
+
+  const { route } = validation;
+  settings.modelRouteId = route.id;
+  settings.provider = route.provider;
+  settings.model = route.model;
+  return { ok: true, message: `Model set to ${route.id}` };
+}
+
 export function setSessionMode(settings: SessionSettings, mode: string): SessionSettingResult {
   const normalized = mode.trim().toLowerCase();
   if (!isInteractionMode(normalized)) {
@@ -232,6 +252,7 @@ export function formatSessionStatus(settings: SessionSettings): string {
     `Mode: ${settings.mode}`,
     `Permission mode: ${settings.permissionMode}`,
     `Model: ${settings.model}`,
+    `Model route: ${settings.modelRouteId ?? "legacy"}`,
     `Thinking effort: ${settings.thinkingEffort}`,
     `Session: ${settings.sessionId}`,
     `sessionId: ${settings.sessionId}`,

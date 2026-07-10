@@ -6,7 +6,6 @@ import { join } from "node:path";
 import { render, renderToString, Text, type Instance } from "ink";
 import { describe, expect, it, vi } from "vitest";
 import {
-  commandArgumentSuggestions,
   commandSuggestions,
   createPicoCommandRegistry,
 } from "../../src/input/pico-command-registry.js";
@@ -145,11 +144,6 @@ describe("App", () => {
 
   it("awaits async argument completers and discards stale query results", async () => {
     const workDir = mkdtempSync(join(tmpdir(), "pico-app-async-completer-"));
-    const registry = await createPicoCommandRegistry({
-      workDir,
-      provider: "openai",
-      model: "glm-5.2",
-    });
     const submitted = vi.fn();
     const harness = createInteractiveApp(
       <App
@@ -164,7 +158,7 @@ describe("App", () => {
             if (command !== "model") return [];
             return query === "k"
               ? [{ value: "kube-stale", description: "stale result" }]
-              : commandArgumentSuggestions(registry, command, query);
+              : [{ value: "kimi-k2.5", description: "fresh result" }];
           }) as never
         }
         onSubmit={submitted}
@@ -183,9 +177,9 @@ describe("App", () => {
           entries={[]}
           running={false}
           slashArgumentSuggestions={
-            (async (command, query) =>
+            (async (command) =>
               command === "model"
-                ? commandArgumentSuggestions(registry, command, query)
+                ? [{ value: "kimi-k2.5", description: "fresh result" }]
                 : []) as never
           }
           onSubmit={submitted}
