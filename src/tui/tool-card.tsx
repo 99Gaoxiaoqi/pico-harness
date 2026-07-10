@@ -4,21 +4,19 @@
 // 渲染要点:
 //   折叠态:⎿ <name> · <状态> · <结果摘要>       (一行,默认)
 //   展开态:⎿ <name> · <状态>                   (首行)
-//            参数 <着色参数>
+//            参数 <截断后参数>
 //            结果 <完整 summary>
 //
 // 折叠/展开:由 App 顶层焦点所有者统一处理,工具卡片只消费受控状态。
 //
-// 参数高亮:尝试 JSON.parse,成功则提取 path/command/url/query 等关键字段着色显示;
-// 失败降级为原始字符串(截断)。
+// buildToolCardVisualRows 是布局与渲染的唯一视觉行来源,便于虚拟窗口从卡片内部裁剪。
 
 import React, { createContext, useContext } from "react";
 import { Box, Text } from "ink";
 import { formatOutputPreview } from "./diff-preview.js";
 import { compactText, compactToolName, summarizeToolTarget } from "./tool-format.js";
+import { visualRows } from "./terminal-width.js";
 
-/** 参数里需要高亮(青色)的关键字段,按优先级排序 */
-const HIGHLIGHT_KEYS = ["path", "command", "url", "query", "file", "pattern"] as const;
 export type ToolCardStatus =
   | "queued"
   | "running"
@@ -46,7 +44,7 @@ export function ToolCardFocusProvider({
   );
 }
 
-export function ToolCard(props: {
+export interface ToolCardProps {
   name: string;
   args: string;
   status: ToolCardStatus;
@@ -55,174 +53,157 @@ export function ToolCard(props: {
   isLast?: boolean;
   /** 初始展开状态;未传时默认折叠 */
   initialExpanded?: boolean;
-}): React.ReactNode {
-  const { name, args, status, summary, isLast = false, initialExpanded } = props;
-  const focusedExpanded = useContext(ToolCardExpansionContext);
-  if (isAgentToolName(name)) {
-    return (
-      <AgentToolProgressLine
-        name={name}
-        args={args}
-        status={status}
-        summary={summary}
-        isLast={isLast}
-        initialExpanded={initialExpanded}
-        expanded={focusedExpanded}
-      />
-    );
-  }
-
-  return (
-    <StandardToolCard
-      name={name}
-      args={args}
-      status={status}
-      summary={summary}
-      isLast={isLast}
-      initialExpanded={initialExpanded}
-      expanded={focusedExpanded}
-    />
-  );
+  /** 与 transcript layout 一致的可用宽度 */
+  wrapWidth?: number;
+  /** 虚拟窗口从工具卡内部跳过的行数 */
+  startOffsetRows?: number;
+  /** 虚拟窗口在本工具卡内保留的行数 */
+  visibleRows?: number;
 }
 
-function StandardToolCard({
-  name,
-  args,
-  status,
-  summary,
-  isLast,
-  initialExpanded,
-  expanded,
-}: {
+export type ToolCardVisualRowKind = "header" | "args" | "result-label" | "result";
+
+export interface ToolCardVisualRow {
+  kind: ToolCardVisualRowKind;
+  text: string;
+}
+
+export interface BuildToolCardVisualRowsOptions {
   name: string;
   args: string;
   status: ToolCardStatus;
   summary?: string;
   isLast: boolean;
-  initialExpanded?: boolean;
   expanded: boolean;
-}): React.ReactNode {
+  wrapWidth: number;
+  canToggle?: boolean;
+}
+
+export function ToolCard(props: ToolCardProps): React.ReactNode {
+  const {
+    name,
+    args,
+    status,
+    summary,
+    isLast = false,
+    initialExpanded,
+    wrapWidth = 80,
+    startOffsetRows = 0,
+    visibleRows,
+  } = props;
+  const focusedExpanded = useContext(ToolCardExpansionContext);
   const canToggle = isLast || initialExpanded !== undefined;
-  const showDetails = canToggle && (initialExpanded ?? expanded);
+  const expanded = canToggle && (initialExpanded ?? focusedExpanded);
+  const rows = buildToolCardVisualRows({
+    name,
+    args,
+    status,
+    summary,
+    isLast,
+    expanded,
+    wrapWidth,
+    canToggle,
+  });
+  const start = Math.max(0, Math.floor(startOffsetRows));
+  const end = visibleRows === undefined ? undefined : start + Math.max(0, Math.ceil(visibleRows));
+  const visible = rows.slice(start, end);
+  const failed = isFailureStatus(status);
+
+  return (
+    <Box flexDirection="column" marginLeft={isAgentToolName(name) ? 1 : 2}>
+      {visible.map((row, index) => (
+        <Text
+          key={`${start + index}:${row.kind}:${row.text}`}
+          color={row.kind === "header" ? "cyan" : failed && row.kind === "result" ? "red" : undefined}
+          dimColor={row.kind !== "header" && !(failed && row.kind === "result")}
+          wrap="truncate"
+        >
+          {row.text}
+        </Text>
+      ))}
+    </Box>
+  );
+}
+
+export function buildToolCardVisualRows(
+  options: BuildToolCardVisualRowsOptions,
+): ToolCardVisualRow[] {
+  return isAgentToolName(options.name)
+    ? buildAgentToolVisualRows(options)
+    : buildStandardToolVisualRows(options);
+}
+
+function buildStandardToolVisualRows(
+  options: BuildToolCardVisualRowsOptions,
+): ToolCardVisualRow[] {
+  const { name, args, status, summary, expanded, wrapWidth } = options;
+  const canToggle = options.canToggle ?? options.isLast;
   const target = summarizeToolTarget(name, args, 30);
   const grouped = args.includes("\"groupedCount\"");
   const failure = isFailureStatus(status);
   const displaySummary = summary && failure ? ensureErrorSummary(summary) : summary;
   const resultBadge = displaySummary && (failure || grouped || !target) ? toolResultBadge(displaySummary, failure) : undefined;
-  const resultDetails = displaySummary ? toolResultPreview(displaySummary, showDetails) : undefined;
+  const header = [
+    `⎿ ${compactToolName(name)}`,
+    target,
+    toolStatusText(status),
+    resultBadge,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  const rows: ToolCardVisualRow[] = [
+    { kind: "header", text: `${header}${canToggle ? " [⌃E]" : ""}` },
+  ];
+  if (!expanded) return rows;
 
-  return (
-    <Box flexDirection="column" marginLeft={2}>
-      <Box>
-        <Text dimColor>⎿ </Text>
-        <Text color="cyan">{compactToolName(name)}</Text>
-        {target && (
-          <>
-            <Text dimColor> · </Text>
-            <Text dimColor wrap="truncate">
-              {target}
-            </Text>
-          </>
-        )}
-        <Text dimColor> · </Text>
-        <ToolStatus status={status} />
-        {resultBadge && (
-          <>
-            <Text dimColor> · </Text>
-            <Text color={failure ? "red" : undefined} dimColor={!failure} wrap="truncate">
-              {resultBadge}
-            </Text>
-          </>
-        )}
-        {canToggle && <Text dimColor> [⌃E]</Text>}
-      </Box>
-      {showDetails && (
-        <Box flexDirection="column" marginLeft={2}>
-          <Box>
-            <Text dimColor>参数 </Text>
-            <ArgsView args={args} />
-          </Box>
-          {resultDetails && (
-            <Box flexDirection="column">
-              <Text dimColor>结果 </Text>
-              <Text color={failure ? "red" : undefined} dimColor={!failure} wrap="wrap">
-                {resultDetails}
-              </Text>
-            </Box>
-          )}
-        </Box>
-      )}
-    </Box>
+  const detailWidth = Math.max(1, Math.floor(wrapWidth) - 4);
+  rows.push(
+    ...visualRows(`参数 ${formatToolArgsText(args)}`, detailWidth).map((text) => ({
+      kind: "args" as const,
+      text: `  ${text}`,
+    })),
   );
+  if (!displaySummary) return rows;
+  rows.push({ kind: "result-label", text: "  结果" });
+  rows.push(
+    ...visualRows(toolResultPreview(displaySummary, true), detailWidth).map((text) => ({
+      kind: "result" as const,
+      text: `  ${text}`,
+    })),
+  );
+  return rows;
 }
 
-function AgentToolProgressLine({
-  name,
-  args,
-  status,
-  summary,
-  isLast,
-  initialExpanded,
-  expanded,
-}: {
-  name: string;
-  args: string;
-  status: ToolCardStatus;
-  summary?: string;
-  isLast: boolean;
-  initialExpanded?: boolean;
-  expanded: boolean;
-}): React.ReactNode {
-  const canToggle = isLast || initialExpanded !== undefined;
-  const showDetails = canToggle && (initialExpanded ?? expanded);
+function buildAgentToolVisualRows(
+  options: BuildToolCardVisualRowsOptions,
+): ToolCardVisualRow[] {
+  const { name, args, status, summary, isLast, expanded, wrapWidth } = options;
+  const canToggle = options.canToggle ?? isLast;
   const treeChar = isLast ? "└─" : "├─";
-  const branchChar = isLast ? "   ⎿  " : "│  ⎿  ";
   const meta = agentToolMeta(name, args);
-  const failure = isFailureStatus(status);
   const resultText = status === "running" ? meta.task : agentResultText(status, summary);
   const preview = agentResultHint(resultText);
+  const label = `${treeChar} ${meta.label}${meta.detail ? ` (${meta.detail})` : ""}`;
+  const rows: ToolCardVisualRow[] = [
+    {
+      kind: "header",
+      text: `${label} · ${toolStatusText(status)}${preview ? ` · ${preview}` : ""}${canToggle ? " [⌃E]" : ""}`,
+    },
+  ];
+  if (!expanded) return rows;
 
-  return (
-    <Box flexDirection="column" marginLeft={1}>
-      <Box>
-        <Text dimColor>{treeChar} </Text>
-        <Text bold color={meta.color}>
-          {meta.label}
-        </Text>
-        {meta.detail && (
-          <Text dimColor>
-            {" "}
-            ({meta.detail})
-          </Text>
-        )}
-        <Text dimColor> · </Text>
-        <ToolStatus status={status} />
-        {preview && (
-          <>
-            <Text dimColor> · </Text>
-            <Text color={failure ? "red" : undefined} dimColor={!failure} wrap="truncate">
-              {preview}
-            </Text>
-          </>
-        )}
-        {canToggle && <Text dimColor> [⌃E]</Text>}
-      </Box>
-      {showDetails && (
-        <>
-          <Box>
-            <Text dimColor>{branchChar}参数 </Text>
-            <ArgsView args={args} />
-          </Box>
-          <Box>
-            <Text dimColor>{branchChar}结果 </Text>
-            <Text color={failure ? "red" : undefined} dimColor={!failure} wrap="wrap">
-              {resultText}
-            </Text>
-          </Box>
-        </>
-      )}
-    </Box>
+  const detailWidth = Math.max(1, Math.floor(wrapWidth) - 5);
+  rows.push(
+    ...visualRows(`参数 ${formatToolArgsText(args)}`, detailWidth).map((text) => ({
+      kind: "args" as const,
+      text: `   ${text}`,
+    })),
+    ...visualRows(`结果 ${resultText}`, detailWidth).map((text) => ({
+      kind: "result" as const,
+      text: `   ${text}`,
+    })),
   );
+  return rows;
 }
 
 export function isAgentToolName(name: string): boolean {
@@ -319,14 +300,14 @@ function agentResultText(status: ToolCardStatus, summary: string | undefined): s
   return summary ? compactText(summary, 110) : "Success";
 }
 
-function ToolStatus({ status }: { status: ToolCardStatus }): React.ReactNode {
+function toolStatusText(status: ToolCardStatus): string {
   const normalized = normalizeStatus(status);
-  if (normalized === "queued") return <Text dimColor>Queued</Text>;
-  if (normalized === "running") return <Text color="yellow">Running</Text>;
-  if (normalized === "approval") return <Text color="yellow">Approval</Text>;
-  if (normalized === "denied") return <Text color="red">Denied</Text>;
-  if (normalized === "error") return <Text color="red">Error</Text>;
-  return <Text color="green">Success</Text>;
+  if (normalized === "queued") return "Queued";
+  if (normalized === "running") return "Running";
+  if (normalized === "approval") return "Approval";
+  if (normalized === "denied") return "Denied";
+  if (normalized === "error") return "Error";
+  return "Success";
 }
 
 function agentResultHint(summary: string): string {
@@ -382,59 +363,27 @@ function ensureErrorSummary(error: string): string {
   return error.startsWith("可复制错误:") ? error : formatErrorSummary(error);
 }
 
-/**
- * 参数渲染:解析 JSON 后对关键字段着色。
- * 解析失败或为空时降级显示原始字符串(截断到 80 字符)。
- */
-function ArgsView({ args }: { args: string }): React.ReactNode {
+function formatToolArgsText(args: string): string {
   const trimmed = args.trim();
-  if (!trimmed) return null;
+  if (!trimmed) return "";
 
   let parsed: unknown;
   try {
     parsed = JSON.parse(trimmed);
   } catch {
-    // 降级:原始字符串(截断)
-    const preview = trimmed.length > 80 ? `${trimmed.slice(0, 80)}…` : trimmed;
-    return <Text dimColor>{preview}</Text>;
+    return trimmed.length > 80 ? `${trimmed.slice(0, 80)}…` : trimmed;
   }
 
-  // 仅对对象做字段着色,其他类型(数组/原始值)直接字符串化
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     const text = JSON.stringify(parsed) ?? trimmed;
-    const preview = text.length > 80 ? `${text.slice(0, 80)}…` : text;
-    return <Text dimColor>{preview}</Text>;
+    return text.length > 80 ? `${text.slice(0, 80)}…` : text;
   }
 
-  return <ParsedArgsView obj={parsed as Record<string, unknown>} />;
-}
-
-/** 把解析后的对象渲染成 `key:"value"` 序列,关键字段青色高亮 */
-function ParsedArgsView({ obj }: { obj: Record<string, unknown> }): React.ReactNode {
-  const entries = Object.entries(obj);
-  return (
-    <>
-      {entries.map(([key, value], i) => (
-        <React.Fragment key={key}>
-          {i > 0 && <Text dimColor> </Text>}
-          <ArgsField fieldKey={key} value={value} />
-        </React.Fragment>
-      ))}
-    </>
-  );
-}
-
-/** 单个字段:key 灰色,value 在关键字段时青色加粗 */
-function ArgsField({ fieldKey, value }: { fieldKey: string; value: unknown }): React.ReactNode {
-  const isHighlight = (HIGHLIGHT_KEYS as readonly string[]).includes(fieldKey);
-  // value 简单字符串化(字符串去引号,其他 JSON 化,过长截断)
-  const raw = typeof value === "string" ? value : JSON.stringify(value);
-  const text = raw && raw.length > 60 ? `${raw.slice(0, 60)}…` : raw;
-
-  return (
-    <>
-      <Text dimColor>{fieldKey}:</Text>
-      {isHighlight ? <Text color="cyan">{text}</Text> : <Text dimColor>{text}</Text>}
-    </>
-  );
+  return Object.entries(parsed as Record<string, unknown>)
+    .map(([key, value]) => {
+      const raw = typeof value === "string" ? value : JSON.stringify(value);
+      const text = raw && raw.length > 60 ? `${raw.slice(0, 60)}…` : raw;
+      return `${key}:${text ?? ""}`;
+    })
+    .join(" ");
 }

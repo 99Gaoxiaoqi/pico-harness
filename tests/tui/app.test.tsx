@@ -9,6 +9,7 @@ import {
   resolveToolCardToggleKey,
   resolveTranscriptScrollKey,
 } from "../../src/tui/app.js";
+import { InteractiveApprovalPanel } from "../../src/tui/approval-panel.js";
 
 describe("App", () => {
   it("renders history messages separately from the single bottom input box", () => {
@@ -315,13 +316,60 @@ describe("App", () => {
       await harness.cleanup();
     }
   });
+
+  it("reflows a narrow transcript when approval diff is expanded with E", async () => {
+    const harness = createInteractiveApp(
+      <App
+        model="glm-5.2"
+        provider="openai"
+        workDir="/workspace/demo"
+        entries={Array.from({ length: 20 }, (_, index) => ({
+          kind: "assistant" as const,
+          content: `message-${index}`,
+        }))}
+        running
+        dialogRequests={[
+          {
+            id: "approval:pending",
+            layer: "modal",
+            priority: 80,
+            content: (
+              <InteractiveApprovalPanel
+                taskId="approval-1"
+                toolName="write_file"
+                args={JSON.stringify({ path: `docs/${"nested/".repeat(8)}PLAN.md` })}
+                message="Review a long write operation before allowing it to continue"
+                diff={Array.from({ length: 6 }, (_, index) => `+added-${index}`).join("\n")}
+                onAction={vi.fn()}
+              />
+            ),
+          },
+        ]}
+        onSubmit={vi.fn()}
+      />,
+      { columns: 48, rows: 40 },
+    );
+
+    try {
+      const expanded = await harness.write("e");
+
+      expect(expanded).toContain("Diff preview:");
+      expect(expanded).toContain("+added-5");
+      expect(expanded).toContain("Use dialog controls");
+    } finally {
+      await harness.cleanup();
+    }
+  });
 });
 
 function countOccurrences(text: string, needle: string): number {
   return text.split(needle).length - 1;
 }
 
-function createInteractiveApp(node: React.ReactNode): {
+function createInteractiveApp(
+  node: React.ReactNode,
+  dimensions: { columns: number; rows: number } = { columns: 80, rows: 24 },
+): {
   write: (input: string) => Promise<string>;
   rerender: (node: React.ReactNode) => Promise<string>;
   cleanup: () => Promise<void>;
@@ -340,8 +388,8 @@ function createInteractiveApp(node: React.ReactNode): {
   });
   Object.defineProperties(stdout, {
     isTTY: { value: true },
-    columns: { value: 80, writable: true },
-    rows: { value: 24, writable: true },
+    columns: { value: dimensions.columns, writable: true },
+    rows: { value: dimensions.rows, writable: true },
   });
   let output = "";
   stdout.on("data", (chunk) => {

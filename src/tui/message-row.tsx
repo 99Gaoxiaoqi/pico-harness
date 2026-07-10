@@ -26,12 +26,22 @@ export interface MessageRowProps {
   isStatic: boolean;
   /** 是否为列表中最后一条:决定 tool 默认折叠状态 */
   isLast: boolean;
+  toolStartOffsetRows?: number;
+  toolVisibleRows?: number;
+  wrapWidth?: number;
 }
 
 /** 单条消息行组件(React.memo 包裹) */
 export const MessageRow = memo(MessageRowImpl, arePropsEqual);
 
-function MessageRowImpl({ entry, isStatic, isLast }: MessageRowProps): React.ReactNode {
+function MessageRowImpl({
+  entry,
+  isStatic,
+  isLast,
+  toolStartOffsetRows,
+  toolVisibleRows,
+  wrapWidth,
+}: MessageRowProps): React.ReactNode {
   switch (entry.kind) {
     case "user":
       return (
@@ -76,6 +86,9 @@ function MessageRowImpl({ entry, isStatic, isLast }: MessageRowProps): React.Rea
           status={entry.status}
           summary={entry.summary}
           isLast={isLast}
+          startOffsetRows={toolStartOffsetRows}
+          visibleRows={toolVisibleRows}
+          wrapWidth={wrapWidth}
         />
       );
 
@@ -132,6 +145,13 @@ function arePropsEqual(prev: MessageRowProps, next: MessageRowProps): boolean {
 
   // 末条身份会影响工具树形符号;变化时必须让该行刷新。
   if (prev.isLast !== next.isLast) return false;
+  if (
+    prev.toolStartOffsetRows !== next.toolStartOffsetRows ||
+    prev.toolVisibleRows !== next.toolVisibleRows ||
+    prev.wrapWidth !== next.wrapWidth
+  ) {
+    return false;
+  }
 
   // 非静态:内容可能还在变,一律重渲染(fail-safe)
   if (!next.isStatic) return false;
