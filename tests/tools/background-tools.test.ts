@@ -3,17 +3,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { BackgroundManager } from "../../src/tools/background-manager.js";
-import {
-  TaskListTool,
-  TaskOutputTool,
-  TaskStopTool,
-} from "../../src/tools/registry-impl.js";
+import { TaskListTool, TaskOutputTool, TaskStopTool } from "../../src/tools/registry-impl.js";
 
-function waitFor(
-  check: () => boolean,
-  timeoutMs = 2000,
-  intervalMs = 20,
-): Promise<void> {
+function waitFor(check: () => boolean, timeoutMs = 2000, intervalMs = 20): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   return new Promise((resolve, reject) => {
     const tick = () => {
@@ -50,7 +42,7 @@ describe("后台任务控制工具", () => {
   });
 
   it("TaskListTool 列出后台任务并声明只读", async () => {
-    const task = manager.start("node -e \"setTimeout(() => {}, 1000)\"", workDir);
+    const task = manager.start('node -e "setTimeout(() => {}, 1000)"', workDir);
     const tool = new TaskListTool(manager);
 
     const out = await tool.execute("{}");
@@ -83,7 +75,7 @@ describe("后台任务控制工具", () => {
   });
 
   it("TaskStopTool 停止任务并声明全局写访问", async () => {
-    const task = manager.start("node -e \"setInterval(() => {}, 1000)\"", workDir);
+    const task = manager.start('node -e "setInterval(() => {}, 1000)"', workDir);
     const tool = new TaskStopTool(manager);
 
     const out = await tool.execute(JSON.stringify({ taskId: task.taskId }));

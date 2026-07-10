@@ -81,7 +81,12 @@ export class StdioMcpClient implements McpClient {
     const safeCommand = redactSensitiveText(command);
     const safeArgs = args.map((arg) => redactSensitiveText(arg));
     logger.info(
-      { server: this.config.name, command: safeCommand, args: safeArgs, env: redactSensitiveValue(env) },
+      {
+        server: this.config.name,
+        command: safeCommand,
+        args: safeArgs,
+        env: redactSensitiveValue(env),
+      },
       `[MCP] 启动 stdio server: ${safeCommand} ${safeArgs.join(" ")}`,
     );
     this.child = spawn(command, args, {
@@ -171,14 +176,22 @@ export class StdioMcpClient implements McpClient {
     });
 
     child.on("error", (err) => {
-      const safeError = new Error(redactSensitiveText(`MCP server "${this.config.name}" 子进程错误: ${err.message}`));
-      logger.error({ server: this.config.name, err: safeError.message }, `[MCP] 子进程 error: ${safeError.message}`);
+      const safeError = new Error(
+        redactSensitiveText(`MCP server "${this.config.name}" 子进程错误: ${err.message}`),
+      );
+      logger.error(
+        { server: this.config.name, err: safeError.message },
+        `[MCP] 子进程 error: ${safeError.message}`,
+      );
       this.failAllPending(safeError);
       this.emitError(safeError);
     });
 
     child.on("exit", (code, signal) => {
-      logger.warn({ server: this.config.name, code, signal }, `[MCP] 子进程退出 code=${code} signal=${signal}`);
+      logger.warn(
+        { server: this.config.name, code, signal },
+        `[MCP] 子进程退出 code=${code} signal=${signal}`,
+      );
       if (!this.closed) {
         // 非主动关闭 → 异常退出,拒绝所有 pending
         const msg = `MCP server "${this.config.name}" 子进程意外退出(code=${code} signal=${signal})`;
@@ -224,7 +237,10 @@ export class StdioMcpClient implements McpClient {
     const response = msg as JsonRpcResponse;
     // 只处理有 id 的 response;notification(无 id)忽略
     if (response.id === undefined) {
-      logger.debug({ server: this.config.name, method: (msg as { method?: string }).method }, `[MCP] 收到 notification`);
+      logger.debug(
+        { server: this.config.name, method: (msg as { method?: string }).method },
+        `[MCP] 收到 notification`,
+      );
       return;
     }
     this.resolvePending(response);

@@ -82,7 +82,11 @@ function MessageRowImpl({
       // 否则(末条流式中)走 StreamingText(按行 stable/unstable 增量渲染)
       return (
         <MessageFrame marker="✦" markerColor="cyan">
-          {isStatic ? <CompletedText content={entry.content} /> : <StreamingText content={entry.content} />}
+          {isStatic ? (
+            <CompletedText content={entry.content} />
+          ) : (
+            <StreamingText content={entry.content} />
+          )}
         </MessageFrame>
       );
 
@@ -252,10 +256,7 @@ function arePropsEqual(prev: MessageRowProps, next: MessageRowProps): boolean {
       return a.kind === b.kind && a.content === b.content;
     case "skill":
       return (
-        a.kind === "skill" &&
-        a.name === b.name &&
-        a.args === b.args &&
-        a.trigger === b.trigger
+        a.kind === "skill" && a.name === b.name && a.args === b.args && a.trigger === b.trigger
       );
     case "error":
       return (

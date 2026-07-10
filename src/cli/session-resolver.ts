@@ -87,9 +87,7 @@ export function createCliSessionId(): string {
   return `cli-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`;
 }
 
-export async function listCliSessionSummaries(
-  workDir: string,
-): Promise<CliSessionSummary[]> {
+export async function listCliSessionSummaries(workDir: string): Promise<CliSessionSummary[]> {
   const files = await listSessionFiles(workDir);
   const summaries: CliSessionSummary[] = [];
   for (const file of files) {
@@ -104,9 +102,7 @@ export async function listCliSessionSummaries(
   }
 
   summaries.sort(
-    (a, b) =>
-      b.updatedAt.getTime() - a.updatedAt.getTime() ||
-      b.id.localeCompare(a.id),
+    (a, b) => b.updatedAt.getTime() - a.updatedAt.getTime() || b.id.localeCompare(a.id),
   );
   return summaries;
 }

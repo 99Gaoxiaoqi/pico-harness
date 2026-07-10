@@ -43,13 +43,7 @@ describe("StatusBar", () => {
 
   it("shows a fork source as a short session id", () => {
     const source = "cli-source-session-abcdef123456";
-    const output = renderToString(
-      <StatusBar
-        phase="idle"
-        sessionMode="fork"
-        forkFrom={source}
-      />,
-    );
+    const output = renderToString(<StatusBar phase="idle" sessionMode="fork" forkFrom={source} />);
 
     expect(output).toContain("mode fork");
     expect(output).toContain("from cli-...123456");
@@ -64,9 +58,7 @@ describe("StatusBar", () => {
   });
 
   it("falls back cleanly when provider is missing", () => {
-    const output = renderToString(
-      <StatusBar sessionMode="new" />,
-    );
+    const output = renderToString(<StatusBar sessionMode="new" />);
 
     expect(output).toContain("phase idle");
     expect(output).toContain("mode new");

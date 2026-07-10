@@ -197,9 +197,7 @@ describe("ClaudeProvider 流式输出 (generateStream)", () => {
 
     expect(deltas).toEqual(["好的"]);
     expect(msg.content).toBe("好的");
-    expect(msg.toolCalls).toEqual([
-      { id: "toolu_1", name: "echo", arguments: '{"text":"hi"}' },
-    ]);
+    expect(msg.toolCalls).toEqual([{ id: "toolu_1", name: "echo", arguments: '{"text":"hi"}' }]);
   });
 
   it("usage 统计:message_start 的 input_tokens + message_delta 的 output_tokens + cache 字段", async () => {

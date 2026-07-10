@@ -157,9 +157,7 @@ describe("Goal 工具", () => {
       const mgr = new GoalManager();
       mgr.create("原标题", "原描述");
       const tool = new UpdateGoalTool(mgr);
-      await tool.execute(
-        JSON.stringify({ id: "goal-1", title: "新标题", description: "新描述" }),
-      );
+      await tool.execute(JSON.stringify({ id: "goal-1", title: "新标题", description: "新描述" }));
       expect(mgr.get("goal-1")?.title).toBe("新标题");
       expect(mgr.get("goal-1")?.description).toBe("新描述");
     });
@@ -186,18 +184,18 @@ describe("Goal 工具", () => {
 
     it("不存在的 id 抛错", async () => {
       const tool = new UpdateGoalTool(new GoalManager());
-      await expect(
-        tool.execute(JSON.stringify({ id: "goal-999", progress: "x" })),
-      ).rejects.toThrow(/未找到目标/);
+      await expect(tool.execute(JSON.stringify({ id: "goal-999", progress: "x" }))).rejects.toThrow(
+        /未找到目标/,
+      );
     });
 
     it("非法 status 抛错", async () => {
       const mgr = new GoalManager();
       mgr.create("目标", "描述");
       const tool = new UpdateGoalTool(mgr);
-      await expect(
-        tool.execute(JSON.stringify({ id: "goal-1", status: "done" })),
-      ).rejects.toThrow(/status/);
+      await expect(tool.execute(JSON.stringify({ id: "goal-1", status: "done" }))).rejects.toThrow(
+        /status/,
+      );
     });
 
     it("非法 JSON 抛错", async () => {

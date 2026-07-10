@@ -85,9 +85,7 @@ describe("AgentEngine + shouldContinueAfterStop", () => {
     // 续接消息未注入:session 只有最初的 user + assistant
     expect(returned.at(-1)?.content).toBe("完成");
     // 没有"请继续推进任务"这种续接 prompt
-    expect(
-      session.getHistory().some((m) => m.content.includes("请继续推进任务")),
-    ).toBe(false);
+    expect(session.getHistory().some((m) => m.content.includes("请继续推进任务"))).toBe(false);
   });
 
   it("回调返回 {continue:true, continuePrompt} → session 多一条 user,循环继续,下一轮调工具正常跑", async () => {
@@ -219,9 +217,7 @@ describe("AgentEngine + shouldContinueAfterStop", () => {
     expect(registry.executed).toHaveLength(1);
     expect(returned.at(-1)?.content).toBe("完成");
     // 无续接消息注入
-    expect(
-      session.getHistory().some((m) => m.content.includes("请继续推进任务")),
-    ).toBe(false);
+    expect(session.getHistory().some((m) => m.content.includes("请继续推进任务"))).toBe(false);
   });
 
   it("不传 continuePrompt 时使用默认续接消息", async () => {

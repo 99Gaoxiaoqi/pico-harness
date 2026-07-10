@@ -41,7 +41,10 @@ class OverflowMockProvider implements LLMProvider {
   async generate(messages: Message[], availableTools: ToolDefinition[]): Promise<Message> {
     // 深拷贝入参,避免后续 push 改动影响记录
     this.calls.push({
-      messages: messages.map((m) => ({ ...m, ...(m.toolCalls ? { toolCalls: [...m.toolCalls] } : {}) })),
+      messages: messages.map((m) => ({
+        ...m,
+        ...(m.toolCalls ? { toolCalls: [...m.toolCalls] } : {}),
+      })),
       toolsCount: availableTools.length,
     });
     const beh = this.behaviors[this.i];

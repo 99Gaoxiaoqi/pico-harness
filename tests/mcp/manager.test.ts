@@ -21,11 +21,7 @@ import { StdioMcpClient } from "../../src/mcp/stdio-client.js";
 import { HttpMcpClient } from "../../src/mcp/http-client.js";
 import { McpToolBridge } from "../../src/mcp/mcp-tool.js";
 import { McpConnectionManager } from "../../src/mcp/manager.js";
-import {
-  isMcpToolName,
-  qualifyMcpToolName,
-  type McpServerConfig,
-} from "../../src/mcp/types.js";
+import { isMcpToolName, qualifyMcpToolName, type McpServerConfig } from "../../src/mcp/types.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const MOCK_SERVER = resolve(__dirname, "fixtures", "mock-stdio-server.mjs");
@@ -233,7 +229,9 @@ describe("McpConnectionManager 编排", () => {
       pending: 1,
       toolCount: 0,
     });
-    expect(registry.getAvailableTools().some((tool) => tool.name.startsWith("mcp__alpha__"))).toBe(false);
+    expect(registry.getAvailableTools().some((tool) => tool.name.startsWith("mcp__alpha__"))).toBe(
+      false,
+    );
   });
 
   it("连接成功后 server 断开会把状态标记为 failed 并移除工具", async () => {
@@ -254,11 +252,16 @@ describe("McpConnectionManager 编排", () => {
     expect(manager.getStatus().get("flaky")?.status).toBe("connected");
     expect(registry.getAvailableTools().map((tool) => tool.name)).toContain("mcp__flaky__echo");
 
-    const failed = await waitUntil(() => manager.getStatus().get("flaky")?.status === "failed", 1000);
+    const failed = await waitUntil(
+      () => manager.getStatus().get("flaky")?.status === "failed",
+      1000,
+    );
 
     expect(failed).toBe(true);
     expect(manager.getStatus().get("flaky")?.error).toContain("意外退出");
-    expect(registry.getAvailableTools().some((tool) => tool.name.startsWith("mcp__flaky__"))).toBe(false);
+    expect(registry.getAvailableTools().some((tool) => tool.name.startsWith("mcp__flaky__"))).toBe(
+      false,
+    );
     await manager.closeAll();
   });
 
@@ -465,10 +468,7 @@ describe("McpConnectionManager 编排", () => {
 
   it("stdio 模式缺 command 抛异常", async () => {
     const configPath = join(tmpDir, "no-command.json");
-    await writeFile(
-      configPath,
-      JSON.stringify({ mcpServers: { bad: { transport: "stdio" } } }),
-    );
+    await writeFile(configPath, JSON.stringify({ mcpServers: { bad: { transport: "stdio" } } }));
 
     const registry = new ToolRegistry({ truncateResults: false });
     const manager = new McpConnectionManager(registry);

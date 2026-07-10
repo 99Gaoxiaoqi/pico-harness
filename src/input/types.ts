@@ -85,9 +85,7 @@ export interface SlashArgumentCandidate {
 
 export type SlashArgumentCompleter = (
   query: string,
-) =>
-  | readonly SlashArgumentCandidate[]
-  | Promise<readonly SlashArgumentCandidate[]>;
+) => readonly SlashArgumentCandidate[] | Promise<readonly SlashArgumentCandidate[]>;
 
 export interface CommandListOptions {
   source?: SlashCommandSource;

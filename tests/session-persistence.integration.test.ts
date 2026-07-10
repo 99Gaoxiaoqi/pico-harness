@@ -27,7 +27,11 @@ async function safeRm(path: string): Promise<void> {
       await rm(path, { recursive: true, force: true });
       return;
     } catch (err) {
-      if (String(err).includes("EBUSY") || String(err).includes("EPERM") || String(err).includes("ENOTEMPTY")) {
+      if (
+        String(err).includes("EBUSY") ||
+        String(err).includes("EPERM") ||
+        String(err).includes("ENOTEMPTY")
+      ) {
         await new Promise((r) => setTimeout(r, 50 * (attempt + 1)));
         continue;
       }

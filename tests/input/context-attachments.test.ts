@@ -49,10 +49,10 @@ describe("context attachments", () => {
       Array.from({ length: 250 }, (_, index) => `line-${index}`).join("\n"),
     );
 
-    const attachments = await resolveContextAttachments(
-      parseMentions("@big.txt"),
-      { cwd: workDir, limits: { maxFileLines: 5, maxFileBytes: 40 } },
-    );
+    const attachments = await resolveContextAttachments(parseMentions("@big.txt"), {
+      cwd: workDir,
+      limits: { maxFileLines: 5, maxFileBytes: 40 },
+    });
 
     expect(attachments[0]?.type).toBe("file");
     expect(attachments[0]?.truncated).toBe(true);
@@ -72,10 +72,9 @@ describe("context attachments", () => {
       },
     ]);
 
-    const attachments = await resolveContextAttachments(
-      parseMentions("@missing.ts"),
-      { cwd: workDir },
-    );
+    const attachments = await resolveContextAttachments(parseMentions("@missing.ts"), {
+      cwd: workDir,
+    });
     expect(attachments[0]?.content).toContain("File not found");
     expect(attachments[0]?.content).toContain("missing.ts");
   });
@@ -86,10 +85,10 @@ describe("context attachments", () => {
       await writeFile(join(workDir, "docs", `${index}.md`), "");
     }
 
-    const attachments = await resolveContextAttachments(
-      parseMentions("@docs"),
-      { cwd: workDir, limits: { maxDirectoryEntries: 3 } },
-    );
+    const attachments = await resolveContextAttachments(parseMentions("@docs"), {
+      cwd: workDir,
+      limits: { maxDirectoryEntries: 3 },
+    });
 
     expect(attachments[0]).toMatchObject({
       type: "directory",
@@ -104,10 +103,7 @@ describe("context attachments", () => {
     await mkdir(join(workDir, "docs", "guide"), { recursive: true });
     await writeFile(join(workDir, "docs", "intro.md"), "");
 
-    const attachments = await resolveContextAttachments(
-      parseMentions("@docs"),
-      { cwd: workDir },
-    );
+    const attachments = await resolveContextAttachments(parseMentions("@docs"), { cwd: workDir });
 
     expect(attachments[0]).toMatchObject({
       type: "directory",

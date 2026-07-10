@@ -7,7 +7,12 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createAuxProvider, loadAuxProviderConfig } from "../../src/provider/aux-config.js";
 
-const AUX_VARS = ["AUX_LLM_BASE_URL", "AUX_LLM_API_KEY", "AUX_LLM_MODEL", "AUX_LLM_PROVIDER"] as const;
+const AUX_VARS = [
+  "AUX_LLM_BASE_URL",
+  "AUX_LLM_API_KEY",
+  "AUX_LLM_MODEL",
+  "AUX_LLM_PROVIDER",
+] as const;
 
 describe("aux-config", () => {
   const savedEnv: Record<string, string | undefined> = {};

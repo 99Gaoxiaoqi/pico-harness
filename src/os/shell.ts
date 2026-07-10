@@ -130,10 +130,7 @@ function bashCandidatesFromGitExe(gitExe: string): string[] {
     return [];
   }
   const root = dirname(gitDir);
-  return [
-    join(root, "bin", "bash.exe"),
-    join(root, "usr", "bin", "bash.exe"),
-  ];
+  return [join(root, "bin", "bash.exe"), join(root, "usr", "bin", "bash.exe")];
 }
 
 /**

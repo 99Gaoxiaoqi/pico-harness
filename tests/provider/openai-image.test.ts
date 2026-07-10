@@ -64,10 +64,7 @@ describe("OpenAIProvider 图片多模态翻译", () => {
     ];
     await p.generate(hist, []);
 
-    const msgs = (calls[0]!.body as Record<string, unknown>).messages as Record<
-      string,
-      unknown
-    >[];
+    const msgs = (calls[0]!.body as Record<string, unknown>).messages as Record<string, unknown>[];
     const userMsg = msgs[1]!;
     expect(userMsg.role).toBe("user");
     // 有图片时 content 必须是数组
@@ -96,10 +93,7 @@ describe("OpenAIProvider 图片多模态翻译", () => {
     ];
     await p.generate(hist, []);
 
-    const msgs = (calls[0]!.body as Record<string, unknown>).messages as Record<
-      string,
-      unknown
-    >[];
+    const msgs = (calls[0]!.body as Record<string, unknown>).messages as Record<string, unknown>[];
     const content = msgs[0]!.content as Record<string, unknown>[];
     expect(content[0]).toEqual({ type: "text", text: "这是网络图" });
     expect(content[1]).toEqual({
@@ -116,10 +110,7 @@ describe("OpenAIProvider 图片多模态翻译", () => {
     const hist: Message[] = [{ role: "user", content: "纯文本" }];
     await p.generate(hist, []);
 
-    const msgs = (calls[0]!.body as Record<string, unknown>).messages as Record<
-      string,
-      unknown
-    >[];
+    const msgs = (calls[0]!.body as Record<string, unknown>).messages as Record<string, unknown>[];
     // 无图片时保持字符串,不变成数组
     expect(msgs[0]!.content).toBe("纯文本");
     expect(typeof msgs[0]!.content).toBe("string");
@@ -142,10 +133,7 @@ describe("OpenAIProvider 图片多模态翻译", () => {
     ];
     await p.generate(hist, []);
 
-    const msgs = (calls[0]!.body as Record<string, unknown>).messages as Record<
-      string,
-      unknown
-    >[];
+    const msgs = (calls[0]!.body as Record<string, unknown>).messages as Record<string, unknown>[];
     const content = msgs[0]!.content as Record<string, unknown>[];
     // 文本 + 2 张图 = 3 个 block
     expect(content).toHaveLength(3);

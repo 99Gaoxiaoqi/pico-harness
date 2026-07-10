@@ -5,8 +5,8 @@ export type CommandInputState = "idle" | "running" | "modal";
 
 export type AvailabilityCommand = Pick<SlashCommand, "name"> &
   Partial<Pick<SlashCommand, "kind">> & {
-  availability?: CommandAvailability;
-};
+    availability?: CommandAvailability;
+  };
 
 export interface CommandAvailabilityResult {
   available: boolean;

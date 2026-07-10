@@ -70,14 +70,20 @@ async function main() {
 
   console.log("========== runSub 返回结果 ==========");
   console.log("[summary 长度]", result.summary.length, "字");
-  console.log("[summary 内容]", result.summary.slice(0, 500), result.summary.length > 500 ? "..." : "");
+  console.log(
+    "[summary 内容]",
+    result.summary.slice(0, 500),
+    result.summary.length > 500 ? "..." : "",
+  );
   console.log("[artifacts 数量]", result.artifacts.length);
   console.log("[artifacts 列表]", result.artifacts);
 
   // 5. 验证点 A: artifacts 非空(子代理读大文件应触发外部化并被收集)
   const passedA = result.artifacts.length > 0;
   console.log("\n========== 验证 ==========");
-  console.log(`[验证 A] artifact 路径被收集回主 agent: ${passedA ? "✅ 通过" : "❌ 失败(未触发外部化或提取失败)"}`);
+  console.log(
+    `[验证 A] artifact 路径被收集回主 agent: ${passedA ? "✅ 通过" : "❌ 失败(未触发外部化或提取失败)"}`,
+  );
 
   // 6. 验证点 B: 主 agent 用 read_file 能读到 artifact 路径指向的原文
   if (passedA) {
@@ -89,16 +95,22 @@ async function main() {
       );
       // 外部化的内容应是原始工具输出(含 big-log 内容)
       const containsOriginal = readBack.includes("测试数据");
-      console.log(`[验证 B] 主 agent read_file 回查 artifact 原文: ${containsOriginal ? "✅ 通过" : "❌ 读到但内容不符"}`);
+      console.log(
+        `[验证 B] 主 agent read_file 回查 artifact 原文: ${containsOriginal ? "✅ 通过" : "❌ 读到但内容不符"}`,
+      );
       console.log(`         回查内容前 80 字: ${readBack.slice(0, 80).replace(/\n/g, " ")}`);
     } catch (err) {
-      console.log(`[验证 B] 主 agent read_file 回查 artifact 原文: ❌ 失败 - ${err instanceof Error ? err.message : String(err)}`);
+      console.log(
+        `[验证 B] 主 agent read_file 回查 artifact 原文: ❌ 失败 - ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   }
 
   // 7. 验证点 C: summary 续写(若 summary < 200,续写应已扩写)
   const passedC = result.summary.length >= 200;
-  console.log(`[验证 C] summary 续写(>=200字): ${passedC ? "✅ 通过" : "⚠️ 仍 <200 字(模型可能未遵从扩写指令)"}`);
+  console.log(
+    `[验证 C] summary 续写(>=200字): ${passedC ? "✅ 通过" : "⚠️ 仍 <200 字(模型可能未遵从扩写指令)"}`,
+  );
 
   console.log("\n=== E2E 完成 ===");
 }

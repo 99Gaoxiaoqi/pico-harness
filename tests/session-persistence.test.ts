@@ -29,7 +29,11 @@ async function safeRm(path: string): Promise<void> {
       await rm(path, { recursive: true, force: true });
       return;
     } catch (err) {
-      if (String(err).includes("EBUSY") || String(err).includes("EPERM") || String(err).includes("ENOTEMPTY")) {
+      if (
+        String(err).includes("EBUSY") ||
+        String(err).includes("EPERM") ||
+        String(err).includes("ENOTEMPTY")
+      ) {
         await new Promise((r) => setTimeout(r, 50 * (attempt + 1)));
         continue;
       }
@@ -199,7 +203,10 @@ describe("SessionStore 末行撕裂容忍", () => {
     const mgr2 = new SessionManager();
     const s2 = await mgr2.getOrCreate("chat-tear", workDir, ON);
     expect(s2.length).toBe(2); // good-1 + good-2,撕裂行被跳过
-    const contents = s2.getHistory().map((m) => m.content).sort();
+    const contents = s2
+      .getHistory()
+      .map((m) => m.content)
+      .sort();
     expect(contents).toEqual(["good-1", "good-2"]);
   });
 

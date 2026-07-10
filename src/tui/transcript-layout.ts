@@ -68,17 +68,13 @@ export function transcriptEntryKey(entry: TuiEntry, index: number): string {
   return `${entry.kind}:${index}`;
 }
 
-function entryRows(
-  entry: TuiEntry,
-  wrapWidth: number,
-  expanded: boolean,
-  isLast: boolean,
-): number {
+function entryRows(entry: TuiEntry, wrapWidth: number, expanded: boolean, isLast: boolean): number {
   if (entry.kind === "thinking") return 0;
   if (entry.kind === "tool") {
     return buildToolCardVisualRows({ ...entry, expanded, isLast, wrapWidth }).length;
   }
-  if (entry.kind === "logo") return buildLogoPanelRows({ ...entry, renderWidth: wrapWidth }).length + 1;
+  if (entry.kind === "logo")
+    return buildLogoPanelRows({ ...entry, renderWidth: wrapWidth }).length + 1;
   if (entry.kind === "error") return buildErrorEntryRows(entry, wrapWidth).length + 1;
   if (entry.kind === "skill") {
     const label = `Skill activated: ${entry.name}${entry.args ? ` ${entry.args}` : ""}`;

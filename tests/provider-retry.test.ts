@@ -22,10 +22,10 @@ const msgs: Message[] = [{ role: "user", content: "hi" }];
 const tools: ToolDefinition[] = [];
 
 /** 构造可按调用次序编排抛错 / 返回的 mock provider;默认无 isRetryableError(走兜底) */
-function makeProvider(opts?: {
-  isRetryableError?: (e: unknown) => boolean;
-  modelName?: string;
-}): { provider: LLMProvider; fn: ReturnType<typeof vi.fn> } {
+function makeProvider(opts?: { isRetryableError?: (e: unknown) => boolean; modelName?: string }): {
+  provider: LLMProvider;
+  fn: ReturnType<typeof vi.fn>;
+} {
   const fn = vi.fn();
   const provider: LLMProvider = {
     generate: fn as unknown as LLMProvider["generate"],

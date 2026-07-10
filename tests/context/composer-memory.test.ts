@@ -64,12 +64,7 @@ describe("PromptComposer 记忆集成", () => {
   it("✅ 技能按成功率排序（Top 5）", async () => {
     // 添加 7 个技能，验证只返回前 5 个
     for (let i = 0; i < 7; i++) {
-      const skill = createLearnedSkill(
-        `技能${i}`,
-        `trigger-${i}`,
-        `指令${i}`,
-        "auto",
-      );
+      const skill = createLearnedSkill(`技能${i}`, `trigger-${i}`, `指令${i}`, "auto");
       skill.stats.successCount = i * 2; // 成功率递增
       skill.stats.failCount = 1;
       mockRegistry.addSkill(skill);

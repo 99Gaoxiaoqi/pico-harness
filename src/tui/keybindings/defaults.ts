@@ -42,4 +42,3 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
     q: "transcript:exit",
   },
 };
-

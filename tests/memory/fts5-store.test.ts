@@ -118,7 +118,7 @@ describe("FTS5Store", () => {
       const results = store.search("驾驭");
       expect(results.length).toBeGreaterThan(0);
       expect(results.some((r) => r.content.includes("驾驭"))).toBe(true);
-      
+
       // 长查询(≥3 字符)使用 FTS5 trigram
       const results2 = store.search("驾驭工程");
       expect(results2.length).toBeGreaterThan(0);
@@ -157,7 +157,7 @@ describe("FTS5Store", () => {
     });
 
     it("应该处理 content 为对象数组的消息(转 JSON 字符串)", () => {
-      const msg: Message = {
+      const msg = {
         role: "assistant",
         content: [
           { type: "text", text: "调用 read_file 工具" },
@@ -167,8 +167,8 @@ describe("FTS5Store", () => {
             name: "read_file",
             input: { path: "/foo/bar.ts" },
           },
-        ] as any, // 测试环境允许复杂 content 结构
-      };
+        ],
+      } as unknown as Message; // 测试兼容历史复杂 content 结构
       store.insert("s1", 0, msg);
 
       const results = store.search("read_file");
@@ -198,7 +198,7 @@ describe("FTS5Store", () => {
 
       // 等待 5ms 确保 updatedAt 不同(ISO timestamp 精确到毫秒)
       await new Promise((resolve) => setTimeout(resolve, 5));
-      
+
       store.saveSummary("s1", "第二版摘要(更新)", 20);
       const second = store.getSummary("s1");
       expect(second?.summary).toBe("第二版摘要(更新)");
@@ -261,7 +261,13 @@ describe("FTS5Store", () => {
 
   describe("并发安全", () => {
     it("应该支持并发插入(单进程多 Session)", () => {
-      const sessions = ["sessionAlpha", "sessionBeta", "sessionGamma", "sessionDelta", "sessionEpsilon"];
+      const sessions = [
+        "sessionAlpha",
+        "sessionBeta",
+        "sessionGamma",
+        "sessionDelta",
+        "sessionEpsilon",
+      ];
       const insertCount = 20;
 
       // 并发插入 100 条消息(5 个 session × 20 条)
@@ -279,7 +285,7 @@ describe("FTS5Store", () => {
       expect(store.search("sessionAlpha", 50).length).toBeGreaterThan(0);
       expect(store.search("sessionBeta", 50).length).toBeGreaterThan(0);
       expect(store.search("sessionGamma", 50).length).toBeGreaterThan(0);
-      
+
       // 验证中文关键词能搜到所有会话
       const allResults = store.search("测试会话标识符", 100);
       expect(allResults.length).toBeGreaterThanOrEqual(sessions.length * insertCount);

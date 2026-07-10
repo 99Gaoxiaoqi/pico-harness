@@ -37,9 +37,7 @@ export function assertFileHistoryCliFlags(input: {
   }
 }
 
-export function listFileHistorySnapshotSummaries(
-  session: Session,
-): FileHistorySnapshotSummary[] {
+export function listFileHistorySnapshotSummaries(session: Session): FileHistorySnapshotSummary[] {
   return session.fileHistory.snapshots.map((snapshot) => {
     let backedUpFileCount = 0;
     let deletedFileCount = 0;
@@ -164,7 +162,11 @@ function formatCliRewindUsage(
   ];
   const latest = summaries.at(-1);
   if (latest) {
-    lines.push(`最近快照: ${latest.messageId}`, "可回滚快照:", formatFileHistorySnapshots(sessionId, summaries));
+    lines.push(
+      `最近快照: ${latest.messageId}`,
+      "可回滚快照:",
+      formatFileHistorySnapshots(sessionId, summaries),
+    );
   } else {
     lines.push(formatFileHistorySnapshots(sessionId, summaries));
   }
@@ -188,9 +190,7 @@ function resolveSnapshotMessageIndex(session: Session, snapshot: FileHistorySnap
     if (inferred !== undefined) return inferred;
   }
 
-  throw new Error(
-    `快照 ${snapshot.messageId} 缺少 messageIndex，无法执行 conversation rewind`,
-  );
+  throw new Error(`快照 ${snapshot.messageId} 缺少 messageIndex，无法执行 conversation rewind`);
 }
 
 function parseTurnNumber(messageId: string): number | undefined {
@@ -206,9 +206,7 @@ function inferMessageIndexAfterUserTurn(session: Session, turnNumber: number): n
     if (history[i]!.role !== "user") continue;
     seenUserTurns++;
     if (seenUserTurns === turnNumber) {
-      const nextUserIndex = history.findIndex(
-        (msg, index) => index > i && msg.role === "user",
-      );
+      const nextUserIndex = history.findIndex((msg, index) => index > i && msg.role === "user");
       return nextUserIndex === -1 ? history.length : nextUserIndex;
     }
   }

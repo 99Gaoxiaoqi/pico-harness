@@ -26,7 +26,8 @@ export function summarizeToolTarget(name: string, args: string, maxWidth = 56): 
   const parsed = parseJsonObject(args);
   if (!parsed) return undefined;
 
-  const groupedCount = typeof parsed["groupedCount"] === "number" ? parsed["groupedCount"] : undefined;
+  const groupedCount =
+    typeof parsed["groupedCount"] === "number" ? parsed["groupedCount"] : undefined;
   if (groupedCount && groupedCount > 1) return `${groupedCount} calls`;
 
   const raw = targetValue(name, parsed);

@@ -49,9 +49,7 @@ export function AgentList({ agents }: AgentListProps): React.ReactNode {
   );
 }
 
-export function formatAgentRows(
-  agents: readonly ClaudeAgentSummary[],
-): AgentRow[] {
+export function formatAgentRows(agents: readonly ClaudeAgentSummary[]): AgentRow[] {
   return agents.map((agent, index) => ({
     key: `${agent.source}:${agent.name}:${index}`,
     name: truncateInline(agent.name, AGENT_NAME_WIDTH),

@@ -1,5 +1,14 @@
 import { createHash } from "node:crypto";
-import { copyFile, mkdir, stat, chmod, unlink, readFile, writeFile, rename } from "node:fs/promises";
+import {
+  copyFile,
+  mkdir,
+  stat,
+  chmod,
+  unlink,
+  readFile,
+  writeFile,
+  rename,
+} from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 
@@ -206,6 +215,7 @@ async function cleanupExclusiveBackups(
       try {
         await unlink(p);
       } catch {
+        // Best-effort cleanup:backup 可能已被其他清理路径删除。
       }
     }
   }
@@ -372,7 +382,10 @@ function classifyDiffFile(
   return "modified";
 }
 
-function countLineChanges(before: string, after: string): { addedLines: number; removedLines: number } {
+function countLineChanges(
+  before: string,
+  after: string,
+): { addedLines: number; removedLines: number } {
   const beforeLines = splitDiffLines(before);
   const afterLines = splitDiffLines(after);
   let prefix = 0;
@@ -419,9 +432,7 @@ function longestCommonSubsequenceLength(left: string[], right: string[]): number
     const current = new Array<number>(right.length + 1).fill(0);
     for (let i = 0; i < right.length; i++) {
       current[i + 1] =
-        leftLine === right[i]
-          ? previous[i]! + 1
-          : Math.max(previous[i + 1]!, current[i]!);
+        leftLine === right[i] ? previous[i]! + 1 : Math.max(previous[i + 1]!, current[i]!);
     }
     previous = current;
   }

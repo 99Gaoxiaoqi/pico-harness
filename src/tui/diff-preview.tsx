@@ -20,7 +20,11 @@ export function DiffPreview({ diff, maxLines }: DiffPreviewProps): React.ReactNo
   return (
     <Box flexDirection="column" marginLeft={2}>
       {lines.map((line, index) => (
-        <Text key={`${index}:${line.text}`} color={lineColor(line.kind)} dimColor={line.kind === "context"}>
+        <Text
+          key={`${index}:${line.text}`}
+          color={lineColor(line.kind)}
+          dimColor={line.kind === "context"}
+        >
           {line.text}
         </Text>
       ))}
@@ -28,7 +32,10 @@ export function DiffPreview({ diff, maxLines }: DiffPreviewProps): React.ReactNo
   );
 }
 
-export function formatDiffPreview(diff: string | undefined, options: { maxLines?: number } = {}): string {
+export function formatDiffPreview(
+  diff: string | undefined,
+  options: { maxLines?: number } = {},
+): string {
   return splitDiffPreviewLines(diff, options)
     .map((line) => line.text)
     .join("\n");

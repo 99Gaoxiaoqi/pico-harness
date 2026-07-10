@@ -65,12 +65,8 @@ const BUILTIN_AGENTS: readonly ClaudeAgent[] = [
   },
 ];
 
-export async function loadClaudeAgents(
-  options: LoadClaudeAgentsOptions,
-): Promise<ClaudeAgent[]> {
-  const userDir = options.homeDir
-    ? [join(options.homeDir ?? homedir(), ".claude", "agents")]
-    : [];
+export async function loadClaudeAgents(options: LoadClaudeAgentsOptions): Promise<ClaudeAgent[]> {
+  const userDir = options.homeDir ? [join(options.homeDir ?? homedir(), ".claude", "agents")] : [];
   const groups = await Promise.all([
     loadAgentsFromDir(join(options.workDir, ".claude", "agents"), "project"),
     ...userDir.map((dir) => loadAgentsFromDir(dir, "user")),

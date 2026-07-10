@@ -79,35 +79,35 @@ export class DangerousCommandPolicy implements PermissionPolicy {
 
 /** 敏感文件模式：匹配到就需审批 */
 const SENSITIVE_FILE_PATTERNS: RegExp[] = [
-  /\.env$/i,              // .env（含 .env.local, .env.production 等）
-  /\.env\b/i,             // .env.*
-  /id_rsa/i,              // SSH 私钥
-  /id_ed25519/i,          // SSH ed25519 私钥
-  /id_ecdsa/i,            // SSH ecdsa 私钥
-  /credentials/i,         // 通用 credentials 文件
-  /\.aws\/credentials/i,  // AWS credentials
-  /\.aws\/config/i,       // AWS config
-  /\.ssh\//i,             // .ssh 目录下任何文件
-  /\.gnupg\//i,           // GPG 密钥
-  /\.npmrc$/i,            // npm token
-  /\.pypirc$/i,           // PyPI token
+  /\.env$/i, // .env（含 .env.local, .env.production 等）
+  /\.env\b/i, // .env.*
+  /id_rsa/i, // SSH 私钥
+  /id_ed25519/i, // SSH ed25519 私钥
+  /id_ecdsa/i, // SSH ecdsa 私钥
+  /credentials/i, // 通用 credentials 文件
+  /\.aws\/credentials/i, // AWS credentials
+  /\.aws\/config/i, // AWS config
+  /\.ssh\//i, // .ssh 目录下任何文件
+  /\.gnupg\//i, // GPG 密钥
+  /\.npmrc$/i, // npm token
+  /\.pypirc$/i, // PyPI token
   /\.docker\/config\.json/i, // Docker credentials
-  /_rsa/i,                // RSA 私钥文件
-  /\.pem$/i,              // PEM 证书
-  /\.key$/i,              // 密钥文件
-  /favicon\.ico$/i,       // favicon.ico 是一个特例，跳过
+  /_rsa/i, // RSA 私钥文件
+  /\.pem$/i, // PEM 证书
+  /\.key$/i, // 密钥文件
+  /favicon\.ico$/i, // favicon.ico 是一个特例，跳过
 ];
 
 /** 豁免模式：即使是敏感文件名也不拦截 */
 const SENSITIVE_FILE_EXEMPTIONS: RegExp[] = [
-  /\.env\.example$/i,     // .env.example 是示例文件
-  /\.env\.sample$/i,      // .env.sample
-  /\.env\.template$/i,    // .env.template
-  /\.env\.dist$/i,        // .env.dist
-  /id_rsa\.pub/i,         // 公钥不敏感
+  /\.env\.example$/i, // .env.example 是示例文件
+  /\.env\.sample$/i, // .env.sample
+  /\.env\.template$/i, // .env.template
+  /\.env\.dist$/i, // .env.dist
+  /id_rsa\.pub/i, // 公钥不敏感
   /id_ed25519\.pub/i,
   /id_ecdsa\.pub/i,
-  /favicon\.ico$/i,       // 修正：favicon 不是敏感文件
+  /favicon\.ico$/i, // 修正：favicon 不是敏感文件
 ];
 
 function extractFilePath(toolName: string, args: string): string | null {
@@ -160,7 +160,11 @@ export class GitDirectoryPolicy implements PermissionPolicy {
 
   evaluate(ctx: PolicyContext): PolicyResult {
     // 只对写操作生效
-    if (ctx.toolCall.name !== "write_file" && ctx.toolCall.name !== "edit_file" && ctx.toolCall.name !== "bash") {
+    if (
+      ctx.toolCall.name !== "write_file" &&
+      ctx.toolCall.name !== "edit_file" &&
+      ctx.toolCall.name !== "bash"
+    ) {
       return { decision: "allow" };
     }
 
@@ -294,11 +298,11 @@ export class PermissionManager {
   constructor(policies?: PermissionPolicy[]) {
     this.sessionApprovals = new Set<string>();
     this.policies = policies ?? [
-      new SessionApprovalPolicy(),   // 先检查记忆（短路）
-      new PlanModeGuardPolicy(),      // Plan 守卫（deny 优先）
-      new SensitiveFilePolicy(),      // 敏感文件
-      new GitDirectoryPolicy(),        // Git 目录
-      new DangerousCommandPolicy(),   // 高危命令
+      new SessionApprovalPolicy(), // 先检查记忆（短路）
+      new PlanModeGuardPolicy(), // Plan 守卫（deny 优先）
+      new SensitiveFilePolicy(), // 敏感文件
+      new GitDirectoryPolicy(), // Git 目录
+      new DangerousCommandPolicy(), // 高危命令
     ];
   }
 

@@ -96,8 +96,6 @@ describe("OpenAIProvider.generateStream", () => {
     const p = new OpenAIProvider(cfg);
     const msg = await p.generateStream(history, [echoTool], () => {});
 
-    expect(msg.toolCalls).toEqual([
-      { id: "call_1", name: "echo", arguments: '{"text":"hi"}' },
-    ]);
+    expect(msg.toolCalls).toEqual([{ id: "call_1", name: "echo", arguments: '{"text":"hi"}' }]);
   });
 });

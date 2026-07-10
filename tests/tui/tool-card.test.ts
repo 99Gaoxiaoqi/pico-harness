@@ -249,7 +249,9 @@ describe("ToolCard collapsed layout", () => {
     const output = renderToString(
       React.createElement(ToolCard, {
         name: "bash",
-        args: JSON.stringify({ command: `curl -s https://aihot.virxact.com/api/news && echo ${longJson}` }),
+        args: JSON.stringify({
+          command: `curl -s https://aihot.virxact.com/api/news && echo ${longJson}`,
+        }),
         status: "success",
         summary: `${longJson} · ${"x".repeat(500)}`,
         isLast: true,

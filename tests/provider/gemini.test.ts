@@ -13,7 +13,11 @@ import { GeminiProvider } from "../../src/provider/gemini.js";
 import { ContextOverflowError, LLMStatusError } from "../../src/provider/errors.js";
 import type { Message, ToolDefinition } from "../../src/schema/message.js";
 
-const cfg = { baseURL: "https://generativelanguage.googleapis.com", apiKey: "AIza-test-key", model: "gemini-2.0-flash" };
+const cfg = {
+  baseURL: "https://generativelanguage.googleapis.com",
+  apiKey: "AIza-test-key",
+  model: "gemini-2.0-flash",
+};
 
 const originalFetch = globalThis.fetch;
 afterEach(() => {
@@ -158,7 +162,11 @@ describe("GeminiProvider.generate (非流式)", () => {
       [
         { role: "system", content: "你是助手" },
         { role: "user", content: "你好" },
-        { role: "assistant", content: "你好啊", toolCalls: [{ id: "c1", name: "echo", arguments: '{"text":"x"}' }] },
+        {
+          role: "assistant",
+          content: "你好啊",
+          toolCalls: [{ id: "c1", name: "echo", arguments: '{"text":"x"}' }],
+        },
         { role: "user", content: "hi", toolCallId: "echo" },
       ],
       [echoTool],
@@ -172,7 +180,10 @@ describe("GeminiProvider.generate (非流式)", () => {
     expect(contents[0]).toEqual({ role: "user", parts: [{ text: "你好" }] });
     // assistant → model,含 text + functionCall(args 为对象)
     expect(contents[1]!.role).toBe("model");
-    const modelParts = contents[1]!.parts as { text?: string; functionCall?: { name: string; args: unknown } }[];
+    const modelParts = contents[1]!.parts as {
+      text?: string;
+      functionCall?: { name: string; args: unknown };
+    }[];
     expect(modelParts[0]!.text).toBe("你好啊");
     expect(modelParts[1]!.functionCall).toEqual({ name: "echo", args: { text: "x" } });
     // toolCallId 的 user → functionResponse
@@ -181,7 +192,9 @@ describe("GeminiProvider.generate (非流式)", () => {
       parts: [{ functionResponse: { name: "echo", response: { result: "hi" } } }],
     });
     // tools → functionDeclarations(parameters 为 JSON Schema)
-    const tools = body.tools as { functionDeclarations: { name: string; parameters: Record<string, unknown> }[] }[];
+    const tools = body.tools as {
+      functionDeclarations: { name: string; parameters: Record<string, unknown> }[];
+    }[];
     expect(tools[0]!.functionDeclarations[0]!.name).toBe("echo");
     expect(tools[0]!.functionDeclarations[0]!.parameters).toMatchObject({ type: "object" });
   });
@@ -191,10 +204,7 @@ describe("GeminiProvider.generate (非流式)", () => {
       candidates: [
         {
           content: {
-            parts: [
-              { text: "好的" },
-              { functionCall: { name: "echo", args: { text: "hi" } } },
-            ],
+            parts: [{ text: "好的" }, { functionCall: { name: "echo", args: { text: "hi" } } }],
           },
           finishReason: "STOP",
         },

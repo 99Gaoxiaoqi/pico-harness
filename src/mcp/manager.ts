@@ -187,7 +187,10 @@ export class McpConnectionManager {
         await entry.client.close().catch(() => {});
         entry.client = undefined;
       }
-      logger.error({ server: entry.name, err: msg }, `[MCP] server "${entry.name}" 连接失败: ${msg}`);
+      logger.error(
+        { server: entry.name, err: msg },
+        `[MCP] server "${entry.name}" 连接失败: ${msg}`,
+      );
     }
   }
 
@@ -216,7 +219,11 @@ export class McpConnectionManager {
       } catch (err) {
         // 单个工具注册失败(inputSchema 非法等)不影响其他工具
         logger.warn(
-          { server: entry.name, tool: tool.name, err: err instanceof Error ? err.message : String(err) },
+          {
+            server: entry.name,
+            tool: tool.name,
+            err: err instanceof Error ? err.message : String(err),
+          },
           `[MCP] 工具注册失败,已跳过`,
         );
       }
@@ -308,12 +315,18 @@ export class McpConnectionManager {
       case "sse":
         return new HttpMcpClient(config);
       default:
-        throw new Error(`MCP server "${config.name}" 不支持的 transport: ${(config as { transport: string }).transport}`);
+        throw new Error(
+          `MCP server "${config.name}" 不支持的 transport: ${(config as { transport: string }).transport}`,
+        );
     }
   }
 
   /** 带超时执行 Promise */
-  private async withTimeout<T>(promise: Promise<T>, timeoutMs: number, serverName: string): Promise<T> {
+  private async withTimeout<T>(
+    promise: Promise<T>,
+    timeoutMs: number,
+    serverName: string,
+  ): Promise<T> {
     let timer: NodeJS.Timeout | undefined;
     try {
       return await new Promise<T>((resolve, reject) => {
@@ -362,8 +375,12 @@ export class McpConnectionManager {
         ...(serverCfg.env !== undefined ? { env: serverCfg.env } : {}),
         ...(serverCfg.cwd !== undefined ? { cwd: serverCfg.cwd } : {}),
         ...(serverCfg.headers !== undefined ? { headers: serverCfg.headers } : {}),
-        ...(serverCfg.startupTimeoutMs !== undefined ? { startupTimeoutMs: serverCfg.startupTimeoutMs } : {}),
-        ...(serverCfg.toolTimeoutMs !== undefined ? { toolTimeoutMs: serverCfg.toolTimeoutMs } : {}),
+        ...(serverCfg.startupTimeoutMs !== undefined
+          ? { startupTimeoutMs: serverCfg.startupTimeoutMs }
+          : {}),
+        ...(serverCfg.toolTimeoutMs !== undefined
+          ? { toolTimeoutMs: serverCfg.toolTimeoutMs }
+          : {}),
         ...(serverCfg.enabled !== undefined ? { enabled: serverCfg.enabled } : {}),
       };
     }
@@ -389,15 +406,16 @@ export class McpConnectionManager {
   private attachLifecycle(entry: ServerEntry, client: McpClient): void {
     const markFailed = (err?: Error) => {
       if (entry.status !== "connected") return;
-      const msg = redactSensitiveText(
-        err?.message ?? `MCP server "${entry.name}" 连接已关闭`,
-      );
+      const msg = redactSensitiveText(err?.message ?? `MCP server "${entry.name}" 连接已关闭`);
       entry.status = "failed";
       entry.error = msg;
       entry.toolCount = 0;
       entry.client = undefined;
       this.unregisterEntryTools(entry);
-      logger.warn({ server: entry.name, err: msg }, `[MCP] server "${entry.name}" 连接断开: ${msg}`);
+      logger.warn(
+        { server: entry.name, err: msg },
+        `[MCP] server "${entry.name}" 连接断开: ${msg}`,
+      );
     };
     client.onClose?.(markFailed);
     client.onError?.(markFailed);

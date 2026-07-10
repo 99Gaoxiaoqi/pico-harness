@@ -114,7 +114,9 @@ export function ToolCard(props: ToolCardProps): React.ReactNode {
       {visible.map((row, index) => (
         <Text
           key={`${start + index}:${row.kind}:${row.text}`}
-          color={row.kind === "header" ? "cyan" : failed && row.kind === "result" ? "red" : undefined}
+          color={
+            row.kind === "header" ? "cyan" : failed && row.kind === "result" ? "red" : undefined
+          }
           dimColor={row.kind !== "header" && !(failed && row.kind === "result")}
           wrap="truncate"
         >
@@ -133,16 +135,17 @@ export function buildToolCardVisualRows(
     : buildStandardToolVisualRows(options);
 }
 
-function buildStandardToolVisualRows(
-  options: BuildToolCardVisualRowsOptions,
-): ToolCardVisualRow[] {
+function buildStandardToolVisualRows(options: BuildToolCardVisualRowsOptions): ToolCardVisualRow[] {
   const { name, args, status, summary, expanded, wrapWidth } = options;
   const canToggle = options.canToggle ?? options.isLast;
   const target = summarizeToolTarget(name, args, 30);
-  const grouped = args.includes("\"groupedCount\"");
+  const grouped = args.includes('"groupedCount"');
   const failure = isFailureStatus(status);
   const displaySummary = summary && failure ? ensureErrorSummary(summary) : summary;
-  const resultBadge = displaySummary && (failure || grouped || !target) ? toolResultBadge(displaySummary, failure) : undefined;
+  const resultBadge =
+    displaySummary && (failure || grouped || !target)
+      ? toolResultBadge(displaySummary, failure)
+      : undefined;
   const availableHeaderWidth = Math.max(1, Math.floor(wrapWidth) - 2);
   const header = buildPrioritizedHeader({
     prefix: "⎿ ",
@@ -152,9 +155,7 @@ function buildStandardToolVisualRows(
     optionalParts: [target, resultBadge],
     availableWidth: availableHeaderWidth,
   });
-  const rows: ToolCardVisualRow[] = [
-    { kind: "header", text: header },
-  ];
+  const rows: ToolCardVisualRow[] = [{ kind: "header", text: header }];
   if (!expanded) return rows;
 
   const detailWidth = Math.max(1, Math.floor(wrapWidth) - 4);
@@ -175,9 +176,7 @@ function buildStandardToolVisualRows(
   return rows;
 }
 
-function buildAgentToolVisualRows(
-  options: BuildToolCardVisualRowsOptions,
-): ToolCardVisualRow[] {
+function buildAgentToolVisualRows(options: BuildToolCardVisualRowsOptions): ToolCardVisualRow[] {
   const { name, args, status, summary, isLast, expanded, wrapWidth } = options;
   const canToggle = options.canToggle ?? isLast;
   const treeChar = isLast ? "└─" : "├─";
@@ -254,7 +253,10 @@ export function isAgentToolName(name: string): boolean {
   );
 }
 
-function agentToolMeta(name: string, args: string): {
+function agentToolMeta(
+  name: string,
+  args: string,
+): {
   label: string;
   detail?: string;
   task: string;
@@ -277,9 +279,7 @@ function agentToolMeta(name: string, args: string): {
       label: "Agents",
       detail: firstString(parsed, ["agent_name", "mode"]) ?? batch?.detail,
       task:
-        batch?.task ??
-        firstString(parsed, ["goal", "task", "description"]) ??
-        "Delegating tasks…",
+        batch?.task ?? firstString(parsed, ["goal", "task", "description"]) ?? "Delegating tasks…",
       color: "cyan",
     };
   }
@@ -296,7 +296,8 @@ function agentToolMeta(name: string, args: string): {
   return {
     label: "Agent",
     detail: firstString(parsed, ["agent_name", "mode"]),
-    task: firstString(parsed, ["task_prompt", "goal", "task", "description"]) ?? "Starting subagent…",
+    task:
+      firstString(parsed, ["task_prompt", "goal", "task", "description"]) ?? "Starting subagent…",
     color: "cyan",
   };
 }
@@ -353,7 +354,9 @@ function agentResultHint(summary: string): string {
   return compactText(summary, 24);
 }
 
-function normalizeStatus(status: ToolCardStatus): "queued" | "running" | "approval" | "success" | "error" | "denied" {
+function normalizeStatus(
+  status: ToolCardStatus,
+): "queued" | "running" | "approval" | "success" | "error" | "denied" {
   if (status === "done") return "success";
   if (status === "failed") return "error";
   return status;

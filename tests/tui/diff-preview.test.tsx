@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { formatDiffPreview, formatOutputPreview, splitDiffPreviewLines } from "../../src/tui/diff-preview.js";
+import {
+  formatDiffPreview,
+  formatOutputPreview,
+  splitDiffPreviewLines,
+} from "../../src/tui/diff-preview.js";
 
 describe("DiffPreview", () => {
   it("复用 diff 字符串并做最小高亮分类", () => {

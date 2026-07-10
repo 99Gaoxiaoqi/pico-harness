@@ -43,7 +43,9 @@ describe("TodoTool", () => {
 
   describe("add", () => {
     it("添加任务返回成功描述", async () => {
-      const out = await tool.execute(JSON.stringify({ action: "add", content: "实现工具", priority: "high" }));
+      const out = await tool.execute(
+        JSON.stringify({ action: "add", content: "实现工具", priority: "high" }),
+      );
       expect(out).toContain("✅ 已添加任务 #1");
       expect(out).toContain("实现工具");
       expect(out).toContain("(high)");
@@ -79,9 +81,9 @@ describe("TodoTool", () => {
 
     it("无任何可更新字段抛错", async () => {
       await tool.execute(JSON.stringify({ action: "add", content: "x" }));
-      await expect(
-        tool.execute(JSON.stringify({ action: "update", id: 1 })),
-      ).rejects.toThrow(/至少/);
+      await expect(tool.execute(JSON.stringify({ action: "update", id: 1 }))).rejects.toThrow(
+        /至少/,
+      );
     });
 
     it("非法 status 抛错", async () => {
@@ -102,7 +104,9 @@ describe("TodoTool", () => {
     });
 
     it("不存在的 id 抛错", async () => {
-      await expect(tool.execute(JSON.stringify({ action: "toggle", id: 5 }))).rejects.toThrow(/未找到/);
+      await expect(tool.execute(JSON.stringify({ action: "toggle", id: 5 }))).rejects.toThrow(
+        /未找到/,
+      );
     });
   });
 
@@ -118,7 +122,9 @@ describe("TodoTool", () => {
     });
 
     it("不存在的 id 抛错", async () => {
-      await expect(tool.execute(JSON.stringify({ action: "remove", id: 7 }))).rejects.toThrow(/未找到/);
+      await expect(tool.execute(JSON.stringify({ action: "remove", id: 7 }))).rejects.toThrow(
+        /未找到/,
+      );
     });
   });
 
@@ -141,7 +147,9 @@ describe("TodoTool", () => {
 
   describe("错误处理", () => {
     it("非法 action 抛错", async () => {
-      await expect(tool.execute(JSON.stringify({ action: "unknown" }))).rejects.toThrow(/非法 action/);
+      await expect(tool.execute(JSON.stringify({ action: "unknown" }))).rejects.toThrow(
+        /非法 action/,
+      );
     });
 
     it("缺少 action 抛错", async () => {
@@ -159,9 +167,9 @@ describe("TodoTool", () => {
     });
 
     it("非法 id 类型抛错", async () => {
-      await expect(
-        tool.execute(JSON.stringify({ action: "toggle", id: "abc" })),
-      ).rejects.toThrow(/id/);
+      await expect(tool.execute(JSON.stringify({ action: "toggle", id: "abc" }))).rejects.toThrow(
+        /id/,
+      );
     });
   });
 

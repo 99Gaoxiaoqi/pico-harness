@@ -63,7 +63,8 @@ export class SkillLoader {
     if (skills.length === 0) return "";
 
     let builder = "\n### 可用专业技能 (Agent Skills)\n";
-    builder += "以下是你拥有的标准化外挂技能清单。需要完整执行指南时,请调用 skill_view 工具按名称读取。\n\n";
+    builder +=
+      "以下是你拥有的标准化外挂技能清单。需要完整执行指南时,请调用 skill_view 工具按名称读取。\n\n";
     for (const skill of skills) {
       builder += `#### 技能名称: ${skill.name}\n`;
       builder += `**触发条件**: ${skill.description}\n\n`;
@@ -152,7 +153,8 @@ export class SkillViewTool implements BaseTool {
   definition(): ToolDefinition {
     return {
       name: "skill_view",
-      description: "按技能名称读取完整 SKILL.md 正文。当系统提示词只展示技能清单时,用它查看具体执行指南。",
+      description:
+        "按技能名称读取完整 SKILL.md 正文。当系统提示词只展示技能清单时,用它查看具体执行指南。",
       inputSchema: {
         type: "object",
         properties: {
@@ -319,7 +321,9 @@ function truncate(s: string, max: number): string {
  */
 function normalizeDescription(raw: unknown): string {
   if (raw == null) return "";
-  let desc = String(raw).trim().replace(/^['"]+|['"]+$/g, "");
+  let desc = String(raw)
+    .trim()
+    .replace(/^['"]+|['"]+$/g, "");
   if (desc.length > MAX_DESCRIPTION_LENGTH) {
     desc = desc.slice(0, MAX_DESCRIPTION_LENGTH - 3) + "...";
   }

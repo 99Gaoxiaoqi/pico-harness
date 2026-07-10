@@ -50,7 +50,9 @@ const context: LocalUiDialogHostContext = {
 describe("createLocalUiDialogRequest", () => {
   it("returns null for unknown or invalid UI actions", () => {
     expect(createLocalUiDialogRequest(undefined, context)).toBeNull();
-    expect(createLocalUiDialogRequest({ kind: "open-panel", panel: "unknown" }, context)).toBeNull();
+    expect(
+      createLocalUiDialogRequest({ kind: "open-panel", panel: "unknown" }, context),
+    ).toBeNull();
     expect(
       createLocalUiDialogRequest({ kind: "open-selector", selector: "unknown" }, context),
     ).toBeNull();

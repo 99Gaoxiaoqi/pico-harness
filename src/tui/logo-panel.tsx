@@ -107,7 +107,11 @@ function buildLogoPanelFrameRows(props: LogoPanelProps): string[] {
   return ["", ...buildLogoPanelRows(props)];
 }
 
-function clipRows(rows: string[], startOffsetRows: number, visibleRows: number | undefined): string[] {
+function clipRows(
+  rows: string[],
+  startOffsetRows: number,
+  visibleRows: number | undefined,
+): string[] {
   const start = Math.max(0, Math.floor(startOffsetRows));
   const end = visibleRows === undefined ? undefined : start + Math.max(0, Math.floor(visibleRows));
   return rows.slice(start, end);

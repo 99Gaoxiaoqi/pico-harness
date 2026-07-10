@@ -88,10 +88,7 @@ export class TuiReporter implements Reporter {
   }
 
   /** 结构化错误反馈,避免渲染层靠文案前缀猜测。 */
-  pushError(
-    message: string,
-    options: { retryable?: boolean; action?: string } = {},
-  ): void {
+  pushError(message: string, options: { retryable?: boolean; action?: string } = {}): void {
     this.entries.push({
       kind: "error",
       message,
@@ -147,7 +144,12 @@ export class TuiReporter implements Reporter {
   onToolAwaitingApproval(toolName: string, args: string): void {
     for (let i = this.entries.length - 1; i >= 0; i--) {
       const e = this.entries[i]!;
-      if (e.kind === "tool" && e.name === toolName && e.args === args && isPendingToolStatus(e.status)) {
+      if (
+        e.kind === "tool" &&
+        e.name === toolName &&
+        e.args === args &&
+        isPendingToolStatus(e.status)
+      ) {
         this.entries[i] = { ...e, status: "approval", summary: "等待审批" };
         break;
       }
@@ -244,7 +246,8 @@ function summarizeResult(toolName: string, args: string, result: string, isError
 }
 
 function resolveToolStatus(toolName: string, result: string, isError: boolean): ToolCardStatus {
-  if (!isError) return isAgentToolName(toolName) && agentResultHasFailure(result) ? "error" : "success";
+  if (!isError)
+    return isAgentToolName(toolName) && agentResultHasFailure(result) ? "error" : "success";
   return isDeniedResult(result) ? "denied" : "error";
 }
 
@@ -332,7 +335,9 @@ function agentResultHasFailure(result: string): boolean {
   return batch ? batch.results.some((item) => stringField(item, "status") === "error") : false;
 }
 
-function extractDelegationBatch(value: Record<string, unknown>): { results: Record<string, unknown>[] } | undefined {
+function extractDelegationBatch(
+  value: Record<string, unknown>,
+): { results: Record<string, unknown>[] } | undefined {
   const direct = value["results"];
   if (Array.isArray(direct)) return { results: direct.filter(isRecord) };
 
@@ -347,7 +352,9 @@ function extractDelegationBatch(value: Record<string, unknown>): { results: Reco
 
 function summarizeDelegationBatch(batch: { results: Record<string, unknown>[] }): string {
   const total = batch.results.length;
-  const completed = batch.results.filter((item) => stringField(item, "status") === "completed").length;
+  const completed = batch.results.filter(
+    (item) => stringField(item, "status") === "completed",
+  ).length;
   const failed = batch.results.filter((item) => stringField(item, "status") === "error").length;
 
   const parts = [`${completed}/${total} completed`];
@@ -356,7 +363,9 @@ function summarizeDelegationBatch(batch: { results: Record<string, unknown>[] })
   const success = batch.results.find((item) => stringField(item, "status") === "completed");
   const failure = batch.results.find((item) => stringField(item, "status") === "error");
   const successSummary = success ? stringField(success, "summary") : undefined;
-  const failureSummary = failure ? stringField(failure, "error") ?? stringField(failure, "summary") : undefined;
+  const failureSummary = failure
+    ? (stringField(failure, "error") ?? stringField(failure, "summary"))
+    : undefined;
 
   if (successSummary) parts.push(`ok: ${compactText(successSummary, 72)}`);
   if (failureSummary) parts.push(`failed: ${compactText(failureSummary, 88)}`);

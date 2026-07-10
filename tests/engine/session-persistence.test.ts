@@ -16,7 +16,11 @@ import { join } from "node:path";
 import { SessionManager } from "../../src/engine/session.js";
 import { SessionStore } from "../../src/engine/session-store.js";
 import type { Message } from "../../src/schema/message.js";
-import { corruptDatabase, simulateDiskFull, restorePermissions } from "../helpers/fault-injection.js";
+import {
+  corruptDatabase,
+  simulateDiskFull,
+  restorePermissions,
+} from "../helpers/fault-injection.js";
 
 /** 显式开启持久化的 getOrCreate 选项 */
 const ON = { persistence: true } as const;
@@ -32,18 +36,14 @@ function assistantMsg(content: string): Message {
 function toolUseMsg(toolName: string): Message {
   return {
     role: "assistant",
-    content: [
-      { type: "tool_use", id: "1", name: toolName, input: {} }
-    ]
+    content: [{ type: "tool_use", id: "1", name: toolName, input: {} }],
   };
 }
 
 function toolResultMsg(result: string): Message {
   return {
     role: "user",
-    content: [
-      { type: "tool_result", tool_use_id: "1", content: result }
-    ]
+    content: [{ type: "tool_result", tool_use_id: "1", content: result }],
   };
 }
 
@@ -68,7 +68,11 @@ async function safeRm(path: string): Promise<void> {
       await rm(path, { recursive: true, force: true });
       return;
     } catch (err) {
-      if (String(err).includes("EBUSY") || String(err).includes("EPERM") || String(err).includes("ENOTEMPTY")) {
+      if (
+        String(err).includes("EBUSY") ||
+        String(err).includes("EPERM") ||
+        String(err).includes("ENOTEMPTY")
+      ) {
         // 句柄未释放,退避后重试
         await new Promise((r) => setTimeout(r, 50 * (attempt + 1)));
         continue;
@@ -98,7 +102,7 @@ describe("Session + FTS5 断点续传", () => {
       assistantMsg("好的,我先读取 package.json"),
       toolUseMsg("read_file"),
       toolResultMsg("文件不存在"),
-      assistantMsg("我来创建 package.json")
+      assistantMsg("我来创建 package.json"),
     );
     await flush();
     expect(s1.length).toBe(5);
@@ -141,26 +145,14 @@ describe("Session + FTS5 断点续传", () => {
     // Session 1
     const mgr1 = new SessionManager();
     const s1 = await mgr1.getOrCreate("user_002", workDir, ON);
-    s1.append(
-      userMsg("m1"),
-      userMsg("m2"),
-      userMsg("m3"),
-      userMsg("m4"),
-      userMsg("m5")
-    );
+    s1.append(userMsg("m1"), userMsg("m2"), userMsg("m3"), userMsg("m4"), userMsg("m5"));
     await flush();
 
     // Session 2: 继续插入
     const mgr2 = new SessionManager();
     const s2 = await mgr2.getOrCreate("user_002", workDir, ON);
     expect(s2.length).toBe(5);
-    s2.append(
-      userMsg("m6"),
-      userMsg("m7"),
-      userMsg("m8"),
-      userMsg("m9"),
-      userMsg("m10")
-    );
+    s2.append(userMsg("m6"), userMsg("m7"), userMsg("m8"), userMsg("m9"), userMsg("m10"));
     await flush();
     expect(s2.length).toBe(10);
 
@@ -168,7 +160,7 @@ describe("Session + FTS5 断点续传", () => {
     const mgr3 = new SessionManager();
     const s3 = await mgr3.getOrCreate("user_002", workDir, ON);
     expect(s3.length).toBe(10);
-    
+
     // FTS5 检索到所有消息
     const results = s3.search("m");
     expect(results.length).toBe(10);
@@ -213,30 +205,24 @@ describe("跨 Session 全文检索", () => {
 
     // Session A: 讨论添加工具
     const sA = await mgr.getOrCreate("chat_A", workDir, ON);
-    sA.append(
-      userMsg("帮我添加一个新工具"),
-      assistantMsg("好的,我来添加 read_file 工具")
-    );
+    sA.append(userMsg("帮我添加一个新工具"), assistantMsg("好的,我来添加 read_file 工具"));
     await flush();
 
     // Session B: 讨论修复 bug
     const sB = await mgr.getOrCreate("chat_B", workDir, ON);
-    sB.append(
-      userMsg("有个 bug 需要修复"),
-      assistantMsg("我查看一下错误日志")
-    );
+    sB.append(userMsg("有个 bug 需要修复"), assistantMsg("我查看一下错误日志"));
     await flush();
 
     // Session C: 检索"工具" → 只返回 A 的消息
     const resultsTools = sA.search("工具");
     expect(resultsTools.length).toBeGreaterThan(0);
-    expect(resultsTools.every(r => r.sessionId === "chat_A")).toBe(true);
+    expect(resultsTools.every((r) => r.sessionId === "chat_A")).toBe(true);
     expect(resultsTools[0]!.content).toContain("工具");
 
     // Session C: 检索"bug" → 只返回 B 的消息
     const resultsBug = sB.search("bug");
     expect(resultsBug.length).toBeGreaterThan(0);
-    expect(resultsBug.every(r => r.sessionId === "chat_B")).toBe(true);
+    expect(resultsBug.every((r) => r.sessionId === "chat_B")).toBe(true);
     expect(resultsBug[0]!.content).toContain("bug");
 
     // Session A 不应检索到"bug"
@@ -259,7 +245,7 @@ describe("跨 Session 全文检索", () => {
   it("空 Session 检索 → 返回空数组", async () => {
     const mgr = new SessionManager();
     const s = await mgr.getOrCreate("chat_new", workDir, ON);
-    
+
     const results = s.search("任何关键词");
     expect(results).toEqual([]);
   });
@@ -279,7 +265,7 @@ describe("WorkingMemory 与 FTS5 数据一致性", () => {
   it("Session.append() 后 WorkingMemory 和 FTS5 都包含该消息", async () => {
     const mgr = new SessionManager();
     const s = await mgr.getOrCreate("chat_1", workDir, ON);
-    
+
     s.append(userMsg("测试消息ABC"));
     await flush();
 
@@ -296,7 +282,7 @@ describe("WorkingMemory 与 FTS5 数据一致性", () => {
   it("Session.truncateTo() 后 FTS5 不受影响(历史保留)", async () => {
     const mgr = new SessionManager();
     const s = await mgr.getOrCreate("chat_2", workDir, ON);
-    
+
     s.append(userMsg("old_message"), userMsg("new_message"));
     await flush();
 
@@ -316,12 +302,8 @@ describe("WorkingMemory 与 FTS5 数据一致性", () => {
   it("Session.applyCompaction() 后 FTS5 包含压缩前的原始消息", async () => {
     const mgr = new SessionManager();
     const s = await mgr.getOrCreate("chat_compact", workDir, ON);
-    
-    s.append(
-      userMsg("原始消息1"),
-      userMsg("原始消息2"),
-      userMsg("原始消息3")
-    );
+
+    s.append(userMsg("原始消息1"), userMsg("原始消息2"), userMsg("原始消息3"));
     await flush();
 
     // 应用压缩:前 2 条压缩为摘要
@@ -343,7 +325,7 @@ describe("WorkingMemory 与 FTS5 数据一致性", () => {
   it("Session.search() 和 WorkingMemory.getWorkingMemory() 数据不冲突", async () => {
     const mgr = new SessionManager();
     const s = await mgr.getOrCreate("chat_3", workDir, ON);
-    
+
     // 插入 10 条消息
     for (let i = 0; i < 10; i++) {
       s.append(userMsg(`message_${i}`));
@@ -395,7 +377,7 @@ describe("持久化失败降级逻辑", () => {
   it("FTS5 插入失败(磁盘满) → Session.append() 继续成功, 只记录 warn", async () => {
     const mgr = new SessionManager();
     const s = await mgr.getOrCreate("chat_disk_full", workDir, ON);
-    
+
     s.append(userMsg("before disk full"));
     await flush();
 
@@ -407,7 +389,7 @@ describe("持久化失败降级逻辑", () => {
     // Session.append() 的核心行为:FTS5 失败不阻塞主流程
     s.append(userMsg("after disk full"));
     await flush();
-    
+
     // WorkingMemory 正常工作
     expect(s.length).toBe(2);
     expect(s.getHistory()[1]!.content).toBe("after disk full");
@@ -454,7 +436,7 @@ describe("持久化失败降级逻辑", () => {
   it("重启后 FTS5 恢复正常 → 检索到之前的消息", async () => {
     const mgr1 = new SessionManager();
     const s1 = await mgr1.getOrCreate("chat_recover", workDir, ON);
-    
+
     s1.append(userMsg("persistent message"));
     await flush();
 
@@ -486,7 +468,7 @@ describe("多 Session 隔离", () => {
 
   it("Session A 插入消息, Session B 检索时只返回 B 的消息", async () => {
     const mgr = new SessionManager();
-    
+
     const sA = await mgr.getOrCreate("alice", workDir, ON);
     sA.append(userMsg("Alice's message"));
     await flush();
@@ -498,12 +480,12 @@ describe("多 Session 隔离", () => {
     // A 检索只返回 A 的消息
     const resultsA = sA.search("message");
     expect(resultsA.length).toBe(1);
-    expect(resultsA.every(r => r.sessionId === "alice")).toBe(true);
+    expect(resultsA.every((r) => r.sessionId === "alice")).toBe(true);
 
     // B 检索只返回 B 的消息
     const resultsB = sB.search("message");
     expect(resultsB.length).toBe(1);
-    expect(resultsB.every(r => r.sessionId === "bob")).toBe(true);
+    expect(resultsB.every((r) => r.sessionId === "bob")).toBe(true);
   });
 
   it("5 个 Session 各自插入并检索, 互不干扰", async () => {
@@ -539,7 +521,7 @@ describe("并发 Session 测试", () => {
 
   it("10 个 Session 同时创建并插入消息", async () => {
     const mgr = new SessionManager();
-    
+
     const tasks = Array.from({ length: 10 }, async (_, i) => {
       const s = await mgr.getOrCreate(`concurrent_${i}`, workDir, ON);
       s.append(userMsg(`concurrent message ${i}`));
@@ -559,7 +541,7 @@ describe("并发 Session 测试", () => {
   it("并发检索无死锁", async () => {
     const mgr = new SessionManager();
     const s = await mgr.getOrCreate("concurrent_search", workDir, ON);
-    
+
     // 先插入一些数据
     for (let i = 0; i < 100; i++) {
       s.append(userMsg(`message ${i}`));
@@ -572,7 +554,7 @@ describe("并发 Session 测试", () => {
     });
 
     const results = await Promise.all(searchTasks);
-    
+
     // 所有检索都应成功返回 100 条
     for (const r of results) {
       expect(r.length).toBe(100);
@@ -581,7 +563,7 @@ describe("并发 Session 测试", () => {
 
   it("所有 Session 的消息都正确持久化", async () => {
     const mgr1 = new SessionManager();
-    
+
     // 并发创建 20 个 Session
     const tasks = Array.from({ length: 20 }, async (_, i) => {
       const s = await mgr1.getOrCreate(`persist_${i}`, workDir, ON);
@@ -634,12 +616,12 @@ describe("真实场景模拟", () => {
     // 群 A 检索"工具" → 只返回 A 的消息
     const resultsA = sessionA.search("工具");
     expect(resultsA.length).toBeGreaterThan(0);
-    expect(resultsA.every(r => r.sessionId === "feishu_chat_123")).toBe(true);
+    expect(resultsA.every((r) => r.sessionId === "feishu_chat_123")).toBe(true);
 
     // 群 B 检索"bug" → 只返回 B 的消息
     const resultsB = sessionB.search("bug");
     expect(resultsB.length).toBeGreaterThan(0);
-    expect(resultsB.every(r => r.sessionId === "feishu_chat_456")).toBe(true);
+    expect(resultsB.every((r) => r.sessionId === "feishu_chat_456")).toBe(true);
 
     // 群 A 不应检索到"bug"
     expect(sessionA.search("bug").length).toBe(0);
@@ -659,9 +641,9 @@ describe("真实场景模拟", () => {
       session.append(toolResultMsg("文件创建成功"));
       session.append(userMsg("用 TypeScript"));
       await flush();
-      
+
       expect(session.length).toBe(5);
-      
+
       // 模拟崩溃:Session 对象销毁(内存丢失)
     }
 
@@ -711,16 +693,16 @@ describe("真实场景模拟", () => {
     const results = session.search("request 5");
     expect(results.length).toBeGreaterThan(0);
     // FTS5 按相关性排序，只验证结果中包含目标消息
-    const hasTarget = results.some(r => r.content === "request 5");
+    const hasTarget = results.some((r) => r.content === "request 5");
     expect(hasTarget).toBe(true);
 
     // 重启后验证
     const mgr2 = new SessionManager();
     const session2 = await mgr2.getOrCreate("long_chat", workDir, ON);
-    
+
     // WorkingMemory 恢复压缩后的状态
     expect(session2.length).toBe(21);
-    
+
     // FTS5 仍能检索历史
     const results2 = session2.search("request 5");
     expect(results2.length).toBeGreaterThan(0);
@@ -728,7 +710,7 @@ describe("真实场景模拟", () => {
 
   it("跨 Session 断电恢复", async () => {
     const mgr1 = new SessionManager();
-    
+
     // 创建 3 个 Session,模拟生产环境同时处理多个用户
     const s1 = await mgr1.getOrCreate("user_a", workDir, ON);
     const s2 = await mgr1.getOrCreate("user_b", workDir, ON);
@@ -740,7 +722,7 @@ describe("真实场景模拟", () => {
     await flush();
 
     // 模拟断电(所有 Session 对象销毁)
-    
+
     // 重启后恢复
     const mgr2 = new SessionManager();
     const r1 = await mgr2.getOrCreate("user_a", workDir, ON);
@@ -750,10 +732,10 @@ describe("真实场景模拟", () => {
     // 所有 Session 都正确恢复
     expect(r1.length).toBe(1);
     expect(r1.getHistory()[0]!.content).toBe("user A request");
-    
+
     expect(r2.length).toBe(1);
     expect(r2.getHistory()[0]!.content).toBe("user B request");
-    
+
     expect(r3.length).toBe(1);
     expect(r3.getHistory()[0]!.content).toBe("user C request");
 
