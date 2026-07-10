@@ -28,7 +28,12 @@ import {
   renderMarkdownCommandPrompt,
   type MarkdownPromptCommand,
 } from "./markdown-command-loader.js";
-import { renderSkillCommand, renderSkillListCommand } from "./skill-commands.js";
+import {
+  renderSkillCommand,
+  renderSkillListCommand,
+  resolveSkillCommand,
+} from "./skill-commands.js";
+import { renderSkillActivation } from "./skill-activation.js";
 import {
   loadClaudeAgents,
   summarizeClaudeAgents,
@@ -132,11 +137,11 @@ export async function createPicoCommandRegistry(
     createStatusCommand(settings, options.mcpStatus),
     createModeCommand(settings),
     createPermissionsCommand(settings),
-    createAddDirectoryCommand(settings, options.additionalDirectoryManager),
     createCompactCommand(options),
     createInitCommand(options),
     createDoctorCommand(options),
     createModelCommand(settings),
+    createAddDirectoryCommand(settings, options.additionalDirectoryManager),
     createThinkingCommand(settings),
     createToolsCommand(settings, options.toolDisclosure),
     createMcpCommand(options.mcpStatus),
@@ -1006,19 +1011,41 @@ function createSkillCommand(loader: SkillLoader): SlashCommand {
   return {
     name: "skill",
     aliases: ["use-skill"],
-    description: "Show a skill body by name",
-    usage: "/skill <name>",
-    argumentHint: "<name>",
+    description: "Activate a skill and run it with the agent",
+    usage: "/skill <name> [arguments]",
+    argumentHint: "<name> [arguments]",
     category: "skill",
     argumentCompleter: async (query) =>
       filterArgumentCandidates(await loadSkillArgumentCandidates(loader), query),
-    kind: "local",
+    kind: "prompt",
     availability: "idle",
-    execute: async (input): Promise<LocalCommandResult> => ({
-      type: "local",
-      action: "message",
-      message: input.args ? await renderSkillCommand(loader, input.args) : "Usage: /skill <name>",
-    }),
+    execute: async (input): Promise<PromptCommandResult | LocalCommandResult> => {
+      const skillName = input.argv[0];
+      if (!skillName) {
+        return { type: "local", action: "message", message: "Usage: /skill <name> [arguments]" };
+      }
+      const resolved = await resolveSkillCommand(loader, skillName);
+      if (!resolved.found) {
+        return {
+          type: "local",
+          action: "message",
+          message: await renderSkillCommand(loader, skillName),
+        };
+      }
+      const skillArgs = input.args.match(/^\S+(?:\s+([\s\S]*))?$/)?.[1] ?? "";
+      const activation = renderSkillActivation({
+        name: resolved.name,
+        args: skillArgs,
+        body: resolved.body,
+        sourcePath: await loader.viewSourcePath(resolved.name),
+        trigger: "user-slash",
+      });
+      return {
+        type: "prompt",
+        prompt: activation.prompt,
+        metadata: { ...activation.metadata },
+      };
+    },
   };
 }
 
@@ -1163,16 +1190,33 @@ function createMarkdownPromptCommand(command: MarkdownPromptCommand): SlashComma
     kind: "prompt",
     source: command.source,
     category: command.source === "skill" ? "skill" : "workspace",
-    execute: (input): PromptCommandResult => ({
-      type: "prompt",
-      prompt: renderMarkdownCommandPrompt(command, input.args),
-      metadata: {
+    execute: (input): PromptCommandResult => {
+      const baseMetadata = {
         source: command.source,
         sourcePath: command.sourcePath,
         allowedTools: command.allowedTools,
         model: command.model,
-      },
-    }),
+      };
+      if (command.source === "skill") {
+        const activation = renderSkillActivation({
+          name: command.name,
+          args: input.args,
+          body: command.prompt,
+          sourcePath: command.sourcePath,
+          trigger: "user-slash",
+        });
+        return {
+          type: "prompt",
+          prompt: activation.prompt,
+          metadata: { ...baseMetadata, ...activation.metadata },
+        };
+      }
+      return {
+        type: "prompt",
+        prompt: renderMarkdownCommandPrompt(command, input.args),
+        metadata: baseMetadata,
+      };
+    },
   };
 }
 

@@ -1,11 +1,36 @@
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
   createAddDirectoryCommand,
+  loadConfiguredAdditionalDirectories,
   type AdditionalDirectoryManager,
 } from "../../src/input/add-directory.js";
 import { createDefaultSessionSettings } from "../../src/input/session-settings.js";
 
 describe("add directory command", () => {
+  it("loads permissions.additionalDirectories from project config", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-add-dir-config-"));
+    await mkdir(join(workDir, ".pico"), { recursive: true });
+    await writeFile(
+      join(workDir, ".pico", "config.json"),
+      JSON.stringify({
+        permissions: { additionalDirectories: ["../shared", "/absolute/shared"] },
+      }),
+    );
+
+    await expect(loadConfiguredAdditionalDirectories(workDir)).resolves.toEqual([
+      "../shared",
+      "/absolute/shared",
+    ]);
+  });
+
+  it("returns no configured directories when project config is absent", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-add-dir-no-config-"));
+    await expect(loadConfiguredAdditionalDirectories(workDir)).resolves.toEqual([]);
+  });
+
   it("lists the currently authorized workspace roots without arguments", async () => {
     const manager: AdditionalDirectoryManager = {
       list: () => ["/workspace/app", "/workspace/shared"],

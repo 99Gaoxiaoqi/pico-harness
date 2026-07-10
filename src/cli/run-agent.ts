@@ -28,6 +28,7 @@ import type { ThinkingEffort } from "../provider/thinking.js";
 import type { ImagePart, Message, ToolDefinition } from "../schema/message.js";
 import { BashTool, ReadFileTool, ToolRegistry } from "../tools/registry-impl.js";
 import { buildDefaultToolRegistry } from "../tools/default-registry.js";
+import { WorkspaceRoots } from "../tools/workspace-roots.js";
 import { ExitPlanModeTool } from "../tools/plan-exit.js";
 import { DelegationManager, DelegateStatusTool } from "../tools/delegation-manager.js";
 import { createSubagentRegistryFactory } from "../tools/delegation-registry.js";
@@ -53,9 +54,11 @@ import { BackgroundManager } from "../tools/background-manager.js";
 import { loadHooksConfig } from "../hooks/config.js";
 import { HookRunner } from "../hooks/runner.js";
 import {
+  addSessionAdditionalDirectory,
   getOrCreateSessionSettings,
   type SessionSettings,
 } from "../input/session-settings.js";
+import { loadConfiguredAdditionalDirectories } from "../input/add-directory.js";
 import { loadImage } from "../input/prepare-prompt.js";
 import { resolveCliSession, type CliSessionSelection } from "./session-resolver.js";
 
@@ -91,6 +94,8 @@ export interface RunAgentCliOptions {
   imagePath?: string;
   /** TUI/宿主已解析好的图片附件。 */
   images?: ImagePart[];
+  /** Claude Code 风格附加工作目录；可重复传入，当前会话内生效。 */
+  addDirs?: string[];
 }
 
 export { loadImage } from "../input/prepare-prompt.js";
@@ -134,6 +139,7 @@ export async function runAgentFromCli(
   const prompt = normalizePrompt(options.prompt);
   const kind = options.provider ?? "openai";
   const workDir = await resolveWorkDir(options.dir);
+  const configuredAdditionalDirectories = await loadConfiguredAdditionalDirectories(workDir);
   const sessionSelection =
     options.sessionSelection ??
     (await resolveCliSession({
@@ -153,6 +159,14 @@ export async function runAgentFromCli(
     ...(options.thinkingEffort !== undefined ? { thinkingEffort: options.thinkingEffort } : {}),
     permissionMode: "ask",
   });
+  const workspaceRoots = await WorkspaceRoots.create(workDir, [
+    ...settings.additionalDirectories,
+    ...configuredAdditionalDirectories,
+    ...(options.addDirs ?? []),
+  ]);
+  for (const directory of workspaceRoots.list().slice(1)) {
+    addSessionAdditionalDirectory(settings, directory);
+  }
   const traceEnabled =
     options.trace === true || isTruthyEnv((dependencies.env ?? process.env).PICO_TRACE);
   const effectiveOptions: RunAgentCliOptions = {
@@ -164,6 +178,7 @@ export async function runAgentFromCli(
     planMode:
       options.planMode ?? (settings.mode === "plan" || settings.permissionMode === "plan"),
     trace: traceEnabled,
+    addDirs: [...settings.additionalDirectories],
     ...(options.thinkingEffort !== undefined
       ? { thinkingEffort: options.thinkingEffort }
       : settings.thinkingEffortExplicit
@@ -227,6 +242,7 @@ export async function runAgentFromCli(
     goalManager,
     todoStore,
     toolDisclosure,
+    workspaceRoots,
   );
   // 【任务 2.6】用户可配置 Shell Hooks:加载 .claw/settings.json 的 hooks 配置,
   // 存在则挂载 HookRunner 到 registry。fail-open:配置缺失/畸形均不启用 hook,零影响。
@@ -253,6 +269,7 @@ export async function runAgentFromCli(
     provider: trackedProvider,
     registry,
     workDir,
+    workspaceRoots,
     ...(effectiveOptions.thinkingEffort !== undefined
       ? { thinkingEffort: effectiveOptions.thinkingEffort }
       : {}),
@@ -282,6 +299,7 @@ export async function runAgentFromCli(
       dependencies.signal,
       globalApprovalManager,
       settings,
+      workspaceRoots,
     ),
   );
   registerDelegationTools(registry, engine, workDir, await loadProfiles(workDir));
@@ -352,6 +370,7 @@ function buildRegistry(
   goalManager?: GoalManager,
   todoStore?: TodoStore,
   toolDisclosure?: ToolDisclosure,
+  workspaceRoots?: WorkspaceRoots,
 ): ToolRegistry {
   return buildDefaultToolRegistry(workDir, {
     truncateResults: false,
@@ -359,6 +378,7 @@ function buildRegistry(
     ...(goalManager !== undefined ? { goalManager } : {}),
     ...(todoStore !== undefined ? { todoStore } : {}),
     ...(toolDisclosure !== undefined ? { toolDisclosure } : {}),
+    ...(workspaceRoots !== undefined ? { workspaceRoots } : {}),
   });
 }
 
@@ -532,6 +552,7 @@ export function buildApprovalMiddleware(
   signal?: AbortSignal,
   approvalManager: ApprovalManager = globalApprovalManager,
   settings?: Pick<SessionSettings, "sessionId" | "mode" | "permissionMode">,
+  workspaceRoots?: Pick<WorkspaceRoots, "resolve">,
 ): MiddlewareFunc {
   return async (call) => {
     if (isPlanModeWriteDenied(call, settings)) {
@@ -556,7 +577,12 @@ export function buildApprovalMiddleware(
       call,
       async () => {
         // 拦截时计算 before/after diff,失败返回 undefined 不阻断审批
-        const diff = await computeApprovalDiff(call.name, call.arguments, workDir);
+        const diff = await computeApprovalDiff(
+          call.name,
+          call.arguments,
+          workDir,
+          workspaceRoots,
+        );
         // Provider call id 只在局部轮次内唯一,不能用作全局审批主键。
         return approvalManager.waitForApproval(
           `approval_${randomUUID()}`,

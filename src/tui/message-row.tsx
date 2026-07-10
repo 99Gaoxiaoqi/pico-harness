@@ -68,6 +68,15 @@ function MessageRowImpl({
         </MessageFrame>
       );
 
+    case "skill":
+      return (
+        <MessageFrame marker="◆" markerColor="yellow">
+          <Text color="yellow" wrap="wrap">
+            {`Skill activated: ${entry.name}${entry.args ? ` ${entry.args}` : ""}`}
+          </Text>
+        </MessageFrame>
+      );
+
     case "assistant":
       // isStatic:已固化走 CompletedText(代码块着色,整体 memo);
       // 否则(末条流式中)走 StreamingText(按行 stable/unstable 增量渲染)
@@ -241,6 +250,13 @@ function arePropsEqual(prev: MessageRowProps, next: MessageRowProps): boolean {
     case "assistant":
       // content 完全一致即跳过(报告者可能换数组引用,但 content 不变)
       return a.kind === b.kind && a.content === b.content;
+    case "skill":
+      return (
+        a.kind === "skill" &&
+        a.name === b.name &&
+        a.args === b.args &&
+        a.trigger === b.trigger
+      );
     case "error":
       return (
         a.kind === "error" &&

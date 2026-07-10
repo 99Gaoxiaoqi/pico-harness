@@ -34,6 +34,7 @@ import type { GoalManager } from "./goal-manager.js";
 import { Tracer, exportTraceToFile, truncate, type Span } from "../observability/trace.js";
 import { logger } from "../observability/logger.js";
 import { extractBashRedirectTargets, safeResolve } from "../tools/registry-impl.js";
+import type { WorkspaceRoots } from "../tools/workspace-roots.js";
 import type { Session } from "./session.js";
 import type { ToolObservationProcessor } from "../tools/tool-result-observation.js";
 import { ToolAccesses } from "../tools/tool-access.js";
@@ -122,6 +123,8 @@ export interface AgentEngineOptions {
    * 未提供则行为不变(全量工具喂给 LLM)。
    */
   toolDisclosure?: ToolDisclosure;
+  /** 文件工具与历史快照共用的工作区根集合。 */
+  workspaceRoots?: WorkspaceRoots;
   /** 可选的轮次日志回调,便于第 19 讲 Tracing 接入 */
   onTurn?: (info: { turn: number; message: Message }) => void;
   /**
@@ -173,6 +176,7 @@ export class AgentEngine implements AgentRunner {
   private provider: LLMProvider;
   private readonly registry: Registry;
   private readonly workDir: string;
+  private readonly workspaceRoots?: WorkspaceRoots;
   private readonly systemPrompt: string;
   private readonly thinkingEffort: ThinkingEffort;
   // planMode 非 readonly:ExitPlanMode 审批通过后由 exitPlanMode() 置 false。
@@ -211,6 +215,7 @@ export class AgentEngine implements AgentRunner {
     this.provider = opts.provider;
     this.registry = opts.registry;
     this.workDir = opts.workDir;
+    this.workspaceRoots = opts.workspaceRoots;
     this.systemPrompt =
       opts.systemPrompt ??
       "You are pico, an expert coding assistant running in a Harness engine. " +
@@ -574,7 +579,7 @@ export class AgentEngine implements AgentRunner {
               if (!path) return;
               await fileHistoryTrackEdit(
                 session.fileHistory,
-                safeResolve(this.workDir, path),
+                this.workspaceRoots?.resolve(path) ?? safeResolve(this.workDir, path),
                 currentMessageId,
                 session.id,
               );

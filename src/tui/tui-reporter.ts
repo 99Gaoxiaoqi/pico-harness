@@ -35,6 +35,7 @@ export type TuiEntry =
       taskSummary?: string;
     }
   | { kind: "user"; content: string }
+  | { kind: "skill"; name: string; args: string; trigger: "user-slash" | "model-tool" }
   | { kind: "system"; content: string }
   | { kind: "error"; message: string; retryable?: boolean; action?: string }
   | { kind: "assistant"; content: string }
@@ -67,6 +68,16 @@ export class TuiReporter implements Reporter {
   /** user 消息由 repl 主动 push(不在 Reporter 接口里),暴露此方法供调用 */
   pushUserMessage(content: string): void {
     this.entries.push({ kind: "user", content });
+    this.emit();
+  }
+
+  /** 显式 Skill 激活属于持久 transcript 事件,不伪装成普通用户文本。 */
+  pushSkillActivation(input: {
+    name: string;
+    args: string;
+    trigger: "user-slash" | "model-tool";
+  }): void {
+    this.entries.push({ kind: "skill", ...input });
     this.emit();
   }
 
