@@ -15,7 +15,7 @@ import type { CliSessionBrowserSummary } from "../../src/tui/session-browser-ada
 import { TuiReporter } from "../../src/tui/tui-reporter.js";
 import {
   dispatchModelSelectorSelection,
-  formatTuiRunError,
+  formatTuiRunErrorEntry,
   getTuiCommandAvailabilityState,
   handleTuiInterrupt,
   handleTuiInputSubmission,
@@ -37,8 +37,13 @@ describe("TUI input routing", () => {
   }
 
   it("AbortError 不生成普通执行失败内容", () => {
-    expect(formatTuiRunError(new DOMException("interrupted", "AbortError"))).toBeUndefined();
-    expect(formatTuiRunError(new Error("boom"))).toBe("⚠️ 执行出错: boom");
+    expect(formatTuiRunErrorEntry(new DOMException("interrupted", "AbortError"))).toBeUndefined();
+    expect(formatTuiRunErrorEntry(new Error("boom"))).toEqual({
+      kind: "error",
+      message: "boom",
+      retryable: true,
+      action: "check logs or retry",
+    });
   });
 
   it("/model local UI action opens the model selector dialog", async () => {

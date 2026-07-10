@@ -26,6 +26,12 @@ describe("TuiReporter", () => {
     expect(last()).toEqual([{ kind: "system", content: "Unknown slash command: /wat" }]);
   });
 
+  it("pushError 追加结构化 error 条目,不伪装成 assistant 文本", () => {
+    const { reporter, last } = harness();
+    reporter.pushError("boom", { retryable: true, action: "retry" });
+    expect(last()).toEqual([{ kind: "error", message: "boom", retryable: true, action: "retry" }]);
+  });
+
   it("onThinking 追加 thinking 占位条目", () => {
     const { reporter, last } = harness();
     reporter.onThinking();

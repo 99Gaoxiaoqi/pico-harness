@@ -567,13 +567,9 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
           },
         });
       } catch (err) {
-        const runError = formatTuiRunError(err);
+        const runError = formatTuiRunErrorEntry(err);
         if (runError === undefined) return;
-        // 错误以 assistant 条目形式展示(不入侵 ink 渲染层)
-        entries.push({
-          kind: "assistant",
-          content: runError,
-        });
+        entries.push(runError);
         setEntries([...entries]);
       }
     };
@@ -586,6 +582,8 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         sessionMode={settings.mode}
         permissionMode={settings.permissionMode}
         thinkingEffort={settings.thinkingEffort}
+        mcpSummary={formatTuiMcpSummary(latestMcpStatus)}
+        taskSummary={settings.thinkingEffort === "off" ? undefined : `think ${settings.thinkingEffort}`}
         entries={stateEntries}
         running={running}
         slashCommandSuggestions={(query) =>
@@ -814,9 +812,27 @@ export function handleTuiInterrupt(
   );
 }
 
-export function formatTuiRunError(error: unknown): string | undefined {
+export function formatTuiRunErrorEntry(
+  error: unknown,
+): Extract<TuiEntry, { kind: "error" }> | undefined {
   if (isAbortError(error)) return undefined;
-  return `⚠️ 执行出错: ${error instanceof Error ? error.message : String(error)}`;
+  return {
+    kind: "error",
+    message: error instanceof Error ? error.message : String(error),
+    retryable: true,
+    action: "check logs or retry",
+  };
+}
+
+export function formatTuiMcpSummary(snapshot: McpStatusSnapshot | undefined): string {
+  if (!snapshot) return "MCP none";
+  if (snapshot.loadError) return "MCP error";
+  const { connected, total, failed, pending, toolCount } = snapshot.summary;
+  const parts = [`MCP ${connected}/${total}`];
+  if (pending > 0) parts.push(`${pending} pending`);
+  if (failed > 0) parts.push(`${failed} failed`);
+  if (toolCount > 0) parts.push(`${toolCount} tools`);
+  return parts.join(" ");
 }
 
 function createApprovalDialogRequest(

@@ -60,6 +60,12 @@ describe("shouldRenderStatically", () => {
     expect(shouldRenderStatically(e, true, true)).toBe(true);
   });
 
+  it("error 条目:始终固定(true)", () => {
+    const e: TuiEntry = { kind: "error", message: "boom", retryable: true, action: "retry" };
+    expect(shouldRenderStatically(e, false, false)).toBe(true);
+    expect(shouldRenderStatically(e, true, true)).toBe(true);
+  });
+
   it("消息列表统一 user/assistant/system/error 行首符号与缩进", () => {
     const output = renderToString(
       React.createElement(MessageList, {
@@ -68,7 +74,8 @@ describe("shouldRenderStatically", () => {
             { kind: "user", content: "帮我检查" },
             { kind: "assistant", content: "正在检查" },
             { kind: "system", content: "Unknown command: /wat" },
-            { kind: "assistant", content: "⚠️ 执行出错: boom" },
+            { kind: "error", message: "boom", retryable: true, action: "retry" },
+            { kind: "assistant", content: "⚠️ 执行出错: should stay assistant" },
           ],
           { wrapWidth: 80 },
         ),
@@ -78,7 +85,9 @@ describe("shouldRenderStatically", () => {
     expect(output).toContain("❯ 帮我检查");
     expect(output).toContain("✦ 正在检查");
     expect(output).toContain("• Unknown command: /wat");
-    expect(output).toContain("! ⚠️ 执行出错: boom");
+    expect(output).toContain("! boom");
+    expect(output).toContain("retry");
+    expect(output).toContain("✦ ⚠️ 执行出错: should stay assistant");
   });
 
   it("流式 assistant 只让末条动态渲染,历史行不重复出现", () => {

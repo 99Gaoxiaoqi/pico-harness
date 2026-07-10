@@ -12,7 +12,7 @@
 //   退出时恢复主屏),彻底杜绝重复输出。
 //   alt buffer 下 ink 只重绘可视区域(差分渲染),历史条目靠 React.memo 零 diff。
 
-import React, { memo, useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Box, Text, useApp, useInput, useWindowSize } from "ink";
 import { appendFileSync } from "node:fs";
 import { InputBox } from "./input-box.js";
@@ -24,7 +24,6 @@ import {
   pickFocusedDialog,
   type DialogRequest,
 } from "./dialog-arbiter.js";
-import { LogoPanel } from "./logo-panel.js";
 import { Spinner } from "./spinner.js";
 import type { SpinnerMode } from "./spinner.js";
 import { LayoutShell } from "./layout-shell.js";
@@ -66,6 +65,10 @@ export interface AppProps {
   permissionMode?: string;
   /** 思考强度(状态区展示) */
   thinkingEffort?: string;
+  /** MCP 启动摘要(Logo 展示) */
+  mcpSummary?: string;
+  /** 当前任务摘要(Logo/状态区展示) */
+  taskSummary?: string;
   /** 当前对话流条目(reporter 增量更新) */
   entries: TuiEntry[];
   /** 是否正在运行(idle 时聚焦输入框) */
@@ -92,6 +95,8 @@ export function App({
   sessionMode = "new",
   permissionMode = "ask",
   thinkingEffort = "off",
+  mcpSummary,
+  taskSummary,
   entries,
   running,
   slashCommandSuggestions,
@@ -137,14 +142,29 @@ export function App({
     : 0;
   const genericDialogRows = dialogLayout.rows;
   const [expandedToolKey, setExpandedToolKey] = useState<string | null>(null);
+  const transcriptEntries = useMemo<TuiEntry[]>(
+    () => [
+      {
+        kind: "logo",
+        model,
+        cwd: workDir,
+        sessionMode,
+        permissionMode,
+        mcpSummary,
+        taskSummary,
+      },
+      ...entries,
+    ],
+    [entries, mcpSummary, model, permissionMode, sessionMode, taskSummary, workDir],
+  );
   const transcriptLayout = useMemo(
     () =>
-      buildTranscriptLayout(entries, {
+      buildTranscriptLayout(transcriptEntries, {
         wrapWidth: transcriptWrapWidth,
         expandedToolKey,
         approvalRows,
       }),
-    [approvalRows, entries, expandedToolKey, transcriptWrapWidth],
+    [approvalRows, expandedToolKey, transcriptEntries, transcriptWrapWidth],
   );
   const transcriptTotalRows = transcriptLayout.contentRows;
   const transcriptRows = Math.max(
@@ -249,15 +269,14 @@ export function App({
     dbg(`  [${i}] ${e.kind}: ${c}`);
   });
 
-  const header = <StableLogoPanel model={model} cwd={workDir} />;
+  const phase = approvalNotice ? "approval" : running ? "running" : "idle";
   const status = (
     <StatusBar
-      model={model}
-      provider={provider}
-      cwd={workDir}
+      phase={phase}
       sessionMode={sessionMode}
       permissionMode={permissionMode}
-      thinkingEffort={thinkingEffort}
+      contextSummary={provider}
+      taskSummary={taskSummary ?? (thinkingEffort === "off" ? undefined : `think ${thinkingEffort}`)}
     />
   );
   const transcript = (
@@ -320,7 +339,6 @@ export function App({
 
   return (
     <LayoutShell
-      header={header}
       status={status}
       transcript={transcript}
       bottom={bottom}
@@ -330,8 +348,6 @@ export function App({
     />
   );
 }
-
-const StableLogoPanel = memo(LogoPanel);
 
 interface GenericDialogLayout {
   content: React.ReactNode;

@@ -2,59 +2,53 @@ import React from "react";
 import { Box, Text } from "ink";
 
 export interface StatusBarProps {
-  model: string;
-  provider?: string;
-  cwd: string;
+  phase?: "idle" | "running" | "approval" | "queued" | string;
   sessionMode?: string;
   forkFrom?: string;
   permissionMode?: string;
-  thinkingEffort?: string;
-  cwdMaxLength?: number;
+  contextSummary?: string;
+  taskSummary?: string;
+  summaryMaxLength?: number;
 }
 
 export type StatusItem = readonly [label: string, value: string];
 
 export function buildStatusItems({
-  model,
-  provider = "auto",
-  cwd,
+  phase = "idle",
   sessionMode = "new",
   forkFrom,
   permissionMode = "ask",
-  thinkingEffort = "off",
-  cwdMaxLength = 32,
+  contextSummary,
+  taskSummary,
+  summaryMaxLength = 32,
 }: StatusBarProps): StatusItem[] {
   const items: StatusItem[] = [
-    ["model", model],
-    ["provider", provider],
-    ["cwd", truncateMiddle(cwd, cwdMaxLength)],
+    ["phase", phase],
     ["mode", sessionMode],
   ];
   if (forkFrom !== undefined) {
     items.push(["forkFrom", shortSessionId(forkFrom)]);
   }
-  items.push(["perm", permissionMode], ["think", thinkingEffort]);
+  items.push(["perm", permissionMode]);
+  if (contextSummary) items.push(["context", truncateMiddle(contextSummary, summaryMaxLength)]);
+  if (taskSummary) items.push(["task", truncateMiddle(taskSummary, summaryMaxLength)]);
   return items;
 }
 
 export function StatusBar(props: StatusBarProps): React.ReactNode {
   const items = buildStatusItems(props);
   const itemByLabel = new Map(items);
-  const model = itemByLabel.get("model") ?? props.model;
-  const provider = itemByLabel.get("provider") ?? props.provider ?? "auto";
-  const cwd = itemByLabel.get("cwd") ?? props.cwd;
+  const phase = itemByLabel.get("phase") ?? props.phase ?? "idle";
   const sessionMode = itemByLabel.get("mode") ?? props.sessionMode ?? "new";
   const forkFrom = itemByLabel.get("forkFrom");
   const permissionMode = itemByLabel.get("perm") ?? props.permissionMode ?? "ask";
-  const thinkingEffort = itemByLabel.get("think") ?? props.thinkingEffort ?? "off";
-  const providerText = provider === "auto" ? "provider auto" : provider;
   const modeText = forkFrom === undefined ? sessionMode : `${sessionMode} from ${forkFrom}`;
   const text = [
-    `${model}/${providerText}`,
+    `phase ${phase}`,
     `mode ${modeText}`,
     `perm ${permissionMode}`,
-    `think ${thinkingEffort}`,
-    cwd,
+    ...(itemByLabel.has("context") ? [`ctx ${itemByLabel.get("context")}`] : []),
+    ...(itemByLabel.has("task") ? [`task ${itemByLabel.get("task")}`] : []),
   ].join(" · ");
 
   return (

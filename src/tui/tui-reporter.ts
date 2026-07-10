@@ -25,8 +25,18 @@ export type UiMode = SpinnerMode | "idle";
 
 /** 对话流中的一条记录。简化为联合类型,App.tsx 按 kind 分发渲染。 */
 export type TuiEntry =
+  | {
+      kind: "logo";
+      model?: string;
+      cwd?: string;
+      sessionMode?: string;
+      permissionMode?: string;
+      mcpSummary?: string;
+      taskSummary?: string;
+    }
   | { kind: "user"; content: string }
   | { kind: "system"; content: string }
+  | { kind: "error"; message: string; retryable?: boolean; action?: string }
   | { kind: "assistant"; content: string }
   | { kind: "tool"; name: string; args: string; status: ToolCardStatus; summary?: string }
   | { kind: "thinking" };
@@ -63,6 +73,20 @@ export class TuiReporter implements Reporter {
   /** 本地输入命令的系统反馈。 */
   pushSystemMessage(content: string): void {
     this.entries.push({ kind: "system", content });
+    this.emit();
+  }
+
+  /** 结构化错误反馈,避免渲染层靠文案前缀猜测。 */
+  pushError(
+    message: string,
+    options: { retryable?: boolean; action?: string } = {},
+  ): void {
+    this.entries.push({
+      kind: "error",
+      message,
+      ...(options.retryable !== undefined ? { retryable: options.retryable } : {}),
+      ...(options.action !== undefined ? { action: options.action } : {}),
+    });
     this.emit();
   }
 

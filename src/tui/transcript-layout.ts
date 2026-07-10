@@ -1,6 +1,7 @@
 import type { TuiEntry } from "./tui-reporter.js";
 import { groupToolEntries } from "./tool-grouping.js";
 import { buildToolCardVisualRows } from "./tool-card.js";
+import { truncateLogoCwd } from "./logo-panel.js";
 export { terminalWidth, visualRows } from "./terminal-width.js";
 import { visualRows } from "./terminal-width.js";
 
@@ -76,7 +77,30 @@ function entryRows(
   if (entry.kind === "tool") {
     return buildToolCardVisualRows({ ...entry, expanded, isLast, wrapWidth }).length;
   }
+  if (entry.kind === "logo") return visualRows(logoText(entry), wrapWidth).length + 1;
+  if (entry.kind === "error") return visualRows(errorText(entry), wrapWidth).length + 1;
   return visualRows(entry.content, wrapWidth).length + 1;
+}
+
+function logoText(entry: Extract<TuiEntry, { kind: "logo" }>): string {
+  const detail = entry.model ?? "Agent Harness";
+  return [
+    "pico",
+    detail,
+    ...(entry.cwd ? [truncateLogoCwd(entry.cwd)] : []),
+    ...(entry.sessionMode ? [`mode ${entry.sessionMode}`] : []),
+    ...(entry.permissionMode ? [`perm ${entry.permissionMode}`] : []),
+    ...(entry.mcpSummary ? [entry.mcpSummary] : []),
+    ...(entry.taskSummary ? [entry.taskSummary] : []),
+  ].join(" · ");
+}
+
+function errorText(entry: Extract<TuiEntry, { kind: "error" }>): string {
+  return [
+    entry.message,
+    ...(entry.retryable !== undefined ? [entry.retryable ? "retryable" : "not retryable"] : []),
+    ...(entry.action ? [entry.action] : []),
+  ].join(" · ");
 }
 
 function normalizeWrapWidth(width: number): number {
