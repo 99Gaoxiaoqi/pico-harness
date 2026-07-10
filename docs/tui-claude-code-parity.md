@@ -149,7 +149,7 @@ Pico 会加载项目级 Claude agent profile：
 - `@skill:review`：附加指定 Skill 正文。
 - `@agent:tester`：提示优先使用子代理能力处理该 Agent 相关工作。
 
-路径引用会相对当前 `cwd` 解析，并限制在主工作区或已通过 `/add-dir` 授权的目录内。
+`@` 路径引用仍相对当前 `cwd` 解析并限制在主工作区内；`/add-dir` 扩展的是 Read、Write、Edit、Glob、Grep 等文件工具的访问根。
 
 ## 常见错误
 

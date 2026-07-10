@@ -1,10 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   addSessionAdditionalDirectory,
   createDefaultSessionSettings,
   formatPermissionStatus,
   formatSessionStatus,
   formatToolStatus,
+  getOrCreateSessionSettings,
+  resetSessionSettingsForTests,
   setSessionMode,
   setSessionPermissionMode,
   setSessionThinkingEffort,
@@ -12,6 +14,8 @@ import {
 } from "../../src/input/session-settings.js";
 
 describe("session settings", () => {
+  afterEach(() => resetSessionSettingsForTests());
+
   it("creates a readonly additional-directory snapshot from initial values", () => {
     const initial = ["/workspace/shared", "/workspace/shared"];
     const settings = createDefaultSessionSettings({
@@ -66,6 +70,25 @@ describe("session settings", () => {
       "/workspace/session",
     ]);
     expect(Object.isFrozen(snapshot)).toBe(true);
+  });
+
+  it("does not carry session directory grants across different cwd values", () => {
+    getOrCreateSessionSettings({
+      sessionId: "same-id-different-cwd",
+      cwd: "/workspace/a",
+      provider: "openai",
+      model: "glm-5.2",
+      additionalDirectories: ["/workspace/a-shared"],
+    });
+
+    const settings = getOrCreateSessionSettings({
+      sessionId: "same-id-different-cwd",
+      cwd: "/workspace/b",
+      provider: "openai",
+      model: "glm-5.2",
+    });
+
+    expect(settings.additionalDirectories).toEqual([]);
   });
 
   it("creates a minimal settings snapshot for status output", () => {

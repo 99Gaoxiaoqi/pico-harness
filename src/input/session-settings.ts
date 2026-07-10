@@ -79,6 +79,10 @@ export function createDefaultSessionSettings(defaults: SessionSettingsDefaults):
 export function getOrCreateSessionSettings(defaults: SessionSettingsDefaults): SessionSettings {
   const existing = settingsBySession.get(defaults.sessionId);
   if (existing !== undefined) {
+    if (existing.cwd !== defaults.cwd) {
+      // session id 可能被不同项目复用；目录授权绝不能跨 cwd 继承。
+      existing.additionalDirectories = createAdditionalDirectorySnapshot([]);
+    }
     const resolvedSemantics = resolvedCliSessionSemantics.get(defaults.sessionId);
     const sessionMode = defaults.sessionMode ?? resolvedSemantics?.sessionMode;
     const forkFrom = defaults.forkFrom ?? resolvedSemantics?.forkFrom;

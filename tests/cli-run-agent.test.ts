@@ -492,7 +492,7 @@ describe("runAgentFromCli", () => {
     );
     getOrCreateSessionSettings({
       sessionId: "additional_directory_order",
-      cwd: workDir,
+      cwd: await realpath(workDir),
       provider: "openai",
       model: "glm-5.2",
       additionalDirectories: [sessionDir],

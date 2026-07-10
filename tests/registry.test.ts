@@ -917,11 +917,20 @@ describe("ToolRegistry hooks 集成 (任务 2.6)", () => {
     registry.setHookRunner(
       new HookRunner(workDir, { PreToolUse: [{ hooks: [{ type: "command", command }] }] }),
     );
+    const checkedInputs: string[] = [];
+    registry.useRequest(async (call) => {
+      checkedInputs.push(call.arguments);
+      return { allowed: true };
+    });
 
     const result = await registry.execute({ id: "c1", name: "say", arguments: '{"msg":"orig"}' });
     expect(result.isError).toBe(false);
     // 工具收到的是 hook 改写后的参数
     expect(result.output).toBe("said:rewritten-by-hook");
+    expect(checkedInputs).toEqual([
+      '{"msg":"orig"}',
+      '{"msg":"rewritten-by-hook"}',
+    ]);
   });
 
   it("PreToolUse fail-open(exit 1)→ 工具仍执行", async () => {

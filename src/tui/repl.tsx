@@ -439,8 +439,9 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
   const tuiSession = await globalSessionManager.getOrCreate(tuiSessionId, opts.workDir);
   const toolDisclosure = new ToolDisclosure();
   const configuredAdditionalDirectories = await loadConfiguredAdditionalDirectories(opts.workDir);
+  const storedSettings = getStoredSessionSettings(tuiSessionId);
   const restoredAdditionalDirectories =
-    getStoredSessionSettings(tuiSessionId)?.additionalDirectories ?? [];
+    storedSettings?.cwd === opts.workDir ? storedSettings.additionalDirectories : [];
   const workspaceRoots = await WorkspaceRoots.create(opts.workDir, [
     ...configuredAdditionalDirectories,
     ...(opts.addDirs ?? []),
