@@ -750,17 +750,52 @@ export class AgentEngine implements AgentRunner {
             maxConcurrency: AgentEngine.MAX_TOOL_CONCURRENCY,
             signal,
           });
-          const scheduled = toolCalls.map((tc) =>
-            scheduler.add({
-              accesses: getAccesses ? getAccesses.call(this.registry, tc) : ToolAccesses.all(),
-              start: async () => {
-                signal?.throwIfAborted();
-                return this.runOneTool(tc, reporter, session.id, turnSpan, signal);
-              },
-            }),
+          const settledResults: Array<
+            { message: Message; reminder?: Message } | undefined
+          > = new Array(toolCalls.length);
+          const scheduled = toolCalls.map((tc, index) =>
+            scheduler
+              .add({
+                accesses: getAccesses ? getAccesses.call(this.registry, tc) : ToolAccesses.all(),
+                start: async () => {
+                  signal?.throwIfAborted();
+                  return this.runOneTool(tc, reporter, session.id, turnSpan, signal);
+                },
+              })
+              .then((result) => {
+                settledResults[index] = result;
+                return result;
+              }),
           );
-          const results = await Promise.all(scheduled);
-          signal?.throwIfAborted();
+          let results: Array<{ message: Message; reminder?: Message }>;
+          try {
+            results = await Promise.all(scheduled);
+            signal?.throwIfAborted();
+          } catch (err) {
+            if (signal?.aborted) {
+              const abortedObservations = toolCalls.map((toolCall, index) => {
+                const settled = settledResults[index];
+                if (settled) return settled.message;
+                const content = "工具执行已取消:本轮运行被中止,未产生可用结果。";
+                reporter.onToolResult(toolCall.name, content, true);
+                return {
+                  role: "user" as const,
+                  content,
+                  toolCallId: toolCall.id,
+                };
+              });
+              session.append(...abortedObservations);
+              const settledReminders = settledResults.flatMap((result) =>
+                result?.reminder ? [result.reminder] : [],
+              );
+              if (settledReminders.length > 0) {
+                session.append(...settledReminders);
+              }
+            }
+            throw err;
+          } finally {
+            scheduler.dispose();
+          }
 
           const observations: Message[] = new Array(toolCalls.length);
           const reminderMessages: Message[] = [];

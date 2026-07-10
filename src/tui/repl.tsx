@@ -496,11 +496,12 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
           },
         });
       } catch (err) {
-        if (isAbortError(err)) return;
+        const runError = formatTuiRunError(err);
+        if (runError === undefined) return;
         // 错误以 assistant 条目形式展示(不入侵 ink 渲染层)
         entries.push({
           kind: "assistant",
-          content: `⚠️ 执行出错: ${err instanceof Error ? err.message : String(err)}`,
+          content: runError,
         });
         setEntries([...entries]);
       }
@@ -680,6 +681,8 @@ export async function runTuiAgentPrompt(
   },
 ): Promise<void> {
   const controller = new AbortController();
+  const closeApprovalOnAbort = () => deps.closeDialog?.(APPROVAL_DIALOG_ID);
+  controller.signal.addEventListener("abort", closeApprovalOnAbort, { once: true });
   if (deps.abortControllerRef) deps.abortControllerRef.current = controller;
   try {
     const result = await (deps.runAgent ?? runAgentFromCli)(cliOpts, {
@@ -701,6 +704,7 @@ export async function runTuiAgentPrompt(
       deps.reporter.pushSystemMessage(`Trace saved: ${result.tracePath}`);
     }
   } finally {
+    controller.signal.removeEventListener("abort", closeApprovalOnAbort);
     if (deps.abortControllerRef?.current === controller) {
       deps.abortControllerRef.current = null;
     }
@@ -719,6 +723,11 @@ export function handleTuiInterrupt(
       ? `Interrupted current run and dropped ${dropped} queued input(s).`
       : "Interrupted current run.",
   );
+}
+
+export function formatTuiRunError(error: unknown): string | undefined {
+  if (isAbortError(error)) return undefined;
+  return `⚠️ 执行出错: ${error instanceof Error ? error.message : String(error)}`;
 }
 
 function createApprovalDialogRequest(

@@ -3,7 +3,7 @@
 //   - 并行:耗时 ≈ 单任务
 //   - 串行:耗时 ≈ N × 单任务
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ToolAccesses, type ToolAccesses as ToolAccessesType } from "../src/tools/tool-access.js";
 import { ToolScheduler, type ToolCallTask } from "../src/tools/tool-scheduler.js";
 
@@ -168,6 +168,21 @@ describe("ToolScheduler 资源冲突调度", () => {
 });
 
 describe("ToolScheduler 执行器韧性(maxConcurrency + signal)", () => {
+  it("正常完成所有任务后解绑 abort listener", async () => {
+    const controller = new AbortController();
+    const addEventListener = vi.spyOn(controller.signal, "addEventListener");
+    const removeEventListener = vi.spyOn(controller.signal, "removeEventListener");
+    const scheduler = new ToolScheduler<string>({ signal: controller.signal });
+
+    await expect(
+      scheduler.add({ accesses: ToolAccesses.none(), start: async () => "done" }),
+    ).resolves.toBe("done");
+
+    const listener = addEventListener.mock.calls.find(([event]) => event === "abort")?.[1];
+    expect(listener).toBeDefined();
+    expect(removeEventListener).toHaveBeenCalledWith("abort", listener);
+  });
+
   it("并发上限触发:超出的任务排队,名额释放后依次启动", async () => {
     // 6 个互不冲突(none)任务,上限 2 → 应分 3 波,每波 2 个
     const timeline: Array<{ name: string; t: number }> = [];

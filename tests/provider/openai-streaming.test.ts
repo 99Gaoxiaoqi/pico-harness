@@ -43,6 +43,27 @@ function mockStreamFetch(sse: string): void {
 }
 
 describe("OpenAIProvider.generateStream", () => {
+  it("流式请求把外部 signal 接入 fetch", async () => {
+    let fetchSignal: AbortSignal | null | undefined;
+    globalThis.fetch = vi.fn(async (_url: string | URL, init?: RequestInit) => {
+      fetchSignal = init?.signal;
+      return {
+        ok: true,
+        status: 200,
+        headers: new Headers(),
+        body: sseStream("data: [DONE]\n\n"),
+      } as unknown as Response;
+    }) as unknown as typeof fetch;
+    const controller = new AbortController();
+    const provider = new OpenAIProvider(cfg);
+
+    await provider.generateStream(history, [], () => {}, { signal: controller.signal });
+    controller.abort();
+
+    expect(fetchSignal).toBeInstanceOf(AbortSignal);
+    expect(fetchSignal?.aborted).toBe(true);
+  });
+
   it("tool_call 分片后续 delta 会补写 id/name 并追加 arguments", async () => {
     mockStreamFetch(
       sseData({

@@ -266,7 +266,13 @@ export async function runAgentFromCli(
     ...(rebuildProvider ? { rebuildProvider } : {}),
   });
 
-  registry.use(buildApprovalMiddleware(dependencies.approvalNotifier ?? terminalNotifier, workDir));
+  registry.use(
+    buildApprovalMiddleware(
+      dependencies.approvalNotifier ?? terminalNotifier,
+      workDir,
+      dependencies.signal,
+    ),
+  );
   registerDelegationTools(registry, engine, workDir, await loadProfiles(workDir));
 
   // 3.6 Plan Review:把 ExitPlanModeTool 的退出回调接到 engine.exitPlanMode,
@@ -505,7 +511,11 @@ function buildObservationProcessor(workDir: string) {
   return createToolResultObservationProcessor({ store });
 }
 
-function buildApprovalMiddleware(notifier: ApprovalNotifier, workDir: string): MiddlewareFunc {
+function buildApprovalMiddleware(
+  notifier: ApprovalNotifier,
+  workDir: string,
+  signal?: AbortSignal,
+): MiddlewareFunc {
   return async (call) => {
     return globalApprovalPolicy.decide(
       "cli",
@@ -519,6 +529,7 @@ function buildApprovalMiddleware(notifier: ApprovalNotifier, workDir: string): M
           call.arguments,
           notifier,
           diff,
+          signal,
         );
       },
       isAgentOpsDangerousCommand,

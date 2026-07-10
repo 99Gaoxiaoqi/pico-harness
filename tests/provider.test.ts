@@ -20,12 +20,18 @@ afterEach(() => {
 
 /** 捕获请求体,返回预设响应 */
 function mockFetch(responseBody: unknown) {
-  const calls: { url: string; body: unknown; headers: Record<string, string> }[] = [];
+  const calls: {
+    url: string;
+    body: unknown;
+    headers: Record<string, string>;
+    signal?: AbortSignal;
+  }[] = [];
   globalThis.fetch = vi.fn(async (url: string | URL, init?: RequestInit) => {
     calls.push({
       url: String(url),
       body: init?.body ? JSON.parse(init.body as string) : null,
       headers: (init?.headers as Record<string, string>) ?? {},
+      ...(init?.signal ? { signal: init.signal } : {}),
     });
     return new Response(JSON.stringify(responseBody), {
       status: 200,
@@ -51,6 +57,20 @@ const history: Message[] = [
 ];
 
 describe("OpenAIProvider 翻译层", () => {
+  it("普通请求把外部 signal 接入 fetch", async () => {
+    const calls = mockFetch({
+      choices: [{ message: { role: "assistant", content: "done" } }],
+    });
+    const controller = new AbortController();
+    const provider = new OpenAIProvider(cfg);
+
+    await provider.generate(history, [], { signal: controller.signal });
+    controller.abort();
+
+    expect(calls[0]?.signal).toBeInstanceOf(AbortSignal);
+    expect(calls[0]?.signal?.aborted).toBe(true);
+  });
+
   it("正向:system/user 翻译为 OpenAI messages,工具挂到 tools", async () => {
     const calls = mockFetch({
       choices: [{ message: { role: "assistant", content: "done", tool_calls: [] } }],
