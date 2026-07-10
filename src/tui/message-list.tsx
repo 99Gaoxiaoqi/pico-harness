@@ -110,6 +110,7 @@ export function MessageList({
               entry={visibleEntry}
               isStatic={shouldRenderStatically(visibleEntry, isLast, isStreaming)}
               isLast={isLast}
+              toolFocused={item?.focusedTool ?? false}
               toolStartOffsetRows={canClipInsideMessageRow(entry) ? contentRowsToSkip : undefined}
               toolVisibleRows={canClipInsideMessageRow(entry) ? entryVisibleRows : undefined}
               wrapWidth={layout.wrapWidth}

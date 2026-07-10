@@ -130,14 +130,23 @@ describe("transcript layout", () => {
   });
 
   it.each([
-    ["assistant", { kind: "assistant", content: "done" } as const],
-    ["thinking", { kind: "thinking" } as const],
-  ])("collapses a previously expanded tool after appending %s", (_kind, trailingEntry) => {
+    [
+      "resolved tool followed by assistant",
+      "success" as const,
+      { kind: "assistant", content: "done" } as const,
+    ],
+    ["running tool followed by thinking", "running" as const, { kind: "thinking" } as const],
+    [
+      "resolved tool followed by system feedback",
+      "success" as const,
+      { kind: "system", content: "local feedback" } as const,
+    ],
+  ])("keeps the latest %s focused and expandable", (_label, status, trailingEntry) => {
     const tool: Extract<TuiEntry, { kind: "tool" }> = {
       kind: "tool",
       name: "read_file",
       args: JSON.stringify({ path: "src/large.ts" }),
-      status: "success",
+      status,
       summary: "line-0\nline-1\nline-2",
     };
     const initial = buildTranscriptLayout([tool], { wrapWidth: 40 });
@@ -149,12 +158,19 @@ describe("transcript layout", () => {
       React.createElement(
         ToolCardFocusProvider,
         { expanded: true },
-        React.createElement(ToolCard, { ...tool, isLast: false, wrapWidth: 40 }),
+        React.createElement(ToolCard, {
+          ...tool,
+          isLast: false,
+          focused: true,
+          wrapWidth: 40,
+        }),
       ),
       { columns: 40 },
     );
 
     expect(layout.items[0]?.rows).toBe(renderedTool.split("\n").length);
-    expect(layout.items[0]?.rows).toBe(1);
+    expect(layout.items[0]?.focusedTool).toBe(true);
+    expect(layout.items[0]?.rows).toBeGreaterThan(1);
+    expect(layout.items.at(-1)?.focusedTool).toBe(false);
   });
 });

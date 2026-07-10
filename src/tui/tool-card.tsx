@@ -1,5 +1,5 @@
 // 工具调用卡片:对标 Claude Code 的 AgentProgressLine(树形缩进 + 状态 + 参数着色)
-// + 工具结果折叠(默认一行摘要,按 e 展开)。
+// + 工具结果折叠(默认一行摘要,按 Ctrl+E 展开)。
 //
 // 渲染要点:
 //   折叠态:⎿ <name> · <状态> · <结果摘要>       (一行,默认)
@@ -51,6 +51,8 @@ export interface ToolCardProps {
   summary?: string;
   /** 是否为消息列表中最后一条:决定树形符号 */
   isLast?: boolean;
+  /** 是否是 transcript 快捷键当前控制的工具卡。 */
+  focused?: boolean;
   /** 初始展开状态;未传时默认折叠 */
   initialExpanded?: boolean;
   /** 与 transcript layout 一致的可用宽度 */
@@ -86,13 +88,14 @@ export function ToolCard(props: ToolCardProps): React.ReactNode {
     status,
     summary,
     isLast = false,
+    focused,
     initialExpanded,
     wrapWidth = 80,
     startOffsetRows = 0,
     visibleRows,
   } = props;
   const focusedExpanded = useContext(ToolCardExpansionContext);
-  const canToggle = isLast || initialExpanded !== undefined;
+  const canToggle = focused ?? (isLast || initialExpanded !== undefined);
   const expanded = canToggle && (initialExpanded ?? focusedExpanded);
   const rows = buildToolCardVisualRows({
     name,
@@ -221,8 +224,11 @@ function buildPrioritizedHeader(options: {
   optionalParts: Array<string | undefined>;
   availableWidth: number;
 }): string {
-  const toggle = options.showToggle ? " [⌃E]" : "";
-  const suffix = ` · ${options.status}${toggle}`;
+  const regularSuffix = ` · ${options.status}${options.showToggle ? " [Ctrl+E]" : ""}`;
+  const compactSuffix = ` ${options.status}${options.showToggle ? " Ctrl+E" : ""}`;
+  const fullNameWidth =
+    terminalWidth(options.prefix) + terminalWidth(options.name) + terminalWidth(regularSuffix);
+  const suffix = fullNameWidth <= options.availableWidth ? regularSuffix : compactSuffix;
   const nameBudget = Math.max(
     1,
     options.availableWidth - terminalWidth(options.prefix) - terminalWidth(suffix),

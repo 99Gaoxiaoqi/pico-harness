@@ -1,5 +1,5 @@
 import React from "react";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { renderToString } from "ink";
@@ -9,11 +9,16 @@ import { CommandRegistry } from "../../src/input/command-registry.js";
 import { createPicoCommandRegistry } from "../../src/input/pico-command-registry.js";
 import type { SlashCommand } from "../../src/input/types.js";
 import { ApprovalManager, globalApprovalManager } from "../../src/approval/manager.js";
-import { buildApprovalMiddleware } from "../../src/cli/run-agent.js";
+import { buildApprovalMiddleware, runAgentFromCli } from "../../src/cli/run-agent.js";
+import { globalSessionManager } from "../../src/engine/session.js";
+import { resetSessionSettingsForTests } from "../../src/input/session-settings.js";
+import type { LLMProvider } from "../../src/provider/interface.js";
+import type { Message } from "../../src/schema/message.js";
 import { LLMStatusError } from "../../src/provider/errors.js";
 import { RunningInputQueue } from "../../src/tui/running-input-queue.js";
 import type { CliSessionBrowserSummary } from "../../src/tui/session-browser-adapter.js";
 import { TuiReporter } from "../../src/tui/tui-reporter.js";
+import { WorkspaceRoots } from "../../src/tools/workspace-roots.js";
 import {
   appendTuiRunError,
   createTuiUpdateScheduler,
@@ -28,6 +33,16 @@ import {
   type TuiInputProcessResult,
   handleTuiRunningInputSubmission,
 } from "../../src/tui/repl.js";
+
+class ScriptedTuiProvider implements LLMProvider {
+  constructor(private readonly responses: Message[]) {}
+
+  generate(): Promise<Message> {
+    const response = this.responses.shift();
+    if (!response) throw new Error("No scripted TUI response left.");
+    return Promise.resolve(response);
+  }
+}
 
 describe("TUI input routing", () => {
   function harness() {
@@ -244,10 +259,22 @@ describe("TUI input routing", () => {
 
     const request = openDialog.mock.calls[0]?.[0];
     const output = renderToString(request.content);
+    const commands = request.content.props.commands as Array<{
+      name: string;
+      disabled?: boolean;
+      disabledReason?: string;
+    }>;
     expect(output).toContain("/compact [disabled]");
     expect(output).toContain("Command is only available while idle.");
-    expect(output).toContain("/model [name] [disabled]");
-    expect(output).not.toContain("/mcp [disabled]");
+    expect(commands).toContainEqual(
+      expect.objectContaining({
+        name: "model",
+        disabled: true,
+        disabledReason: "Command is only available while idle.",
+      }),
+    );
+    expect(commands).toContainEqual(expect.objectContaining({ name: "goal", disabled: false }));
+    expect(commands).toContainEqual(expect.objectContaining({ name: "mcp", disabled: false }));
   });
 
   it("running command availability comes from descriptors", async () => {
@@ -658,11 +685,183 @@ describe("TUI input routing", () => {
     );
 
     expect(openDialog).toHaveBeenCalledWith(
-      expect.objectContaining({ id: "approval:pending", layer: "modal" }),
+      expect.objectContaining({ id: "approval:pending:call_1", layer: "modal" }),
     );
     expect(snapshots.at(-1)).toEqual([
       expect.objectContaining({ kind: "tool", name: "write_file", status: "approval" }),
     ]);
+  });
+
+  it("组合校验 workspace 边界与 TUI Enter 审批闭环", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-tui-workspace-root-"));
+    const outsideDir = await mkdtemp(join(tmpdir(), "pico-tui-workspace-added-"));
+    const target = join(outsideDir, "approved.txt");
+    const blockedTarget = join(outsideDir, "blocked.txt");
+    const { reporter } = harness();
+
+    try {
+      const blockedOpenDialog = vi.fn();
+      const blockedProvider = new ScriptedTuiProvider([
+        {
+          role: "assistant",
+          content: "try blocked write",
+          toolCalls: [
+            {
+              id: "blocked-write",
+              name: "write_file",
+              arguments: JSON.stringify({ path: blockedTarget, content: "blocked" }),
+            },
+          ],
+          usage: { promptTokens: 1, completionTokens: 1 },
+        },
+        {
+          role: "assistant",
+          content: "blocked as expected",
+          usage: { promptTokens: 1, completionTokens: 1 },
+        },
+      ]);
+
+      await runTuiAgentPrompt(
+        { prompt: "write outside", dir: workDir, session: "tui-workspace-blocked" },
+        {
+          reporter,
+          openDialog: blockedOpenDialog,
+          runAgent: (options, dependencies) =>
+            runAgentFromCli(options, { ...dependencies, provider: blockedProvider }),
+        },
+      );
+
+      expect(blockedOpenDialog).not.toHaveBeenCalled();
+      await expect(readFile(blockedTarget, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+
+      const allowedOpenDialog = vi.fn();
+      const closeDialog = vi.fn();
+      const canonicalWorkDir = await realpath(workDir);
+      const workspaceRoots = await WorkspaceRoots.create(canonicalWorkDir);
+      const commandRegistry = await createPicoCommandRegistry({
+        workDir: canonicalWorkDir,
+        provider: "openai",
+        model: "glm-5.2",
+        sessionId: "tui-workspace-allowed",
+        additionalDirectoryManager: workspaceRoots,
+      });
+      const localRunAgent = vi.fn();
+      await handleTuiInputSubmission(`/add-dir ${outsideDir}`, {
+        reporter,
+        registry: commandRegistry,
+        workDir: canonicalWorkDir,
+        runAgent: localRunAgent,
+        exit: vi.fn(),
+      });
+      expect(localRunAgent).not.toHaveBeenCalled();
+      expect(workspaceRoots.list()).toContain(await realpath(outsideDir));
+      const allowedProvider = new ScriptedTuiProvider([
+        {
+          role: "assistant",
+          content: "write authorized file",
+          toolCalls: [
+            {
+              id: "allowed-write",
+              name: "write_file",
+              arguments: JSON.stringify({ path: target, content: "approved by Enter" }),
+            },
+          ],
+          usage: { promptTokens: 1, completionTokens: 1 },
+        },
+        {
+          role: "assistant",
+          content: "authorized write complete",
+          usage: { promptTokens: 1, completionTokens: 1 },
+        },
+      ]);
+      const allowedRun = runTuiAgentPrompt(
+        {
+          prompt: "write added directory",
+          dir: canonicalWorkDir,
+          session: "tui-workspace-allowed",
+        },
+        {
+          reporter,
+          openDialog: allowedOpenDialog,
+          closeDialog,
+          runAgent: (options, dependencies) =>
+            runAgentFromCli(options, { ...dependencies, provider: allowedProvider }),
+        },
+      );
+      await vi.waitFor(() => expect(allowedOpenDialog).toHaveBeenCalledOnce());
+      const request = allowedOpenDialog.mock.calls[0]?.[0];
+      expect(request.id).toMatch(/^approval:pending:/u);
+      const props = request.content.props as { onAction: (action: "approve") => boolean };
+
+      // InteractiveApprovalPanel 已单独验证 Enter -> approve；这里验证该动作贯穿真实工具链。
+      props.onAction("approve");
+      await allowedRun;
+
+      await expect(readFile(target, "utf8")).resolves.toBe("approved by Enter");
+      expect(closeDialog).toHaveBeenCalledWith(request.id);
+    } finally {
+      globalApprovalManager.clear();
+      globalSessionManager.clear();
+      resetSessionSettingsForTests();
+      await Promise.all([
+        rm(workDir, { recursive: true, force: true }),
+        rm(outsideDir, { recursive: true, force: true }),
+      ]);
+    }
+  });
+
+  it("并发审批使用独立 dialog，解决其中一个不会关闭另一个", async () => {
+    const { reporter } = harness();
+    const openDialog = vi.fn();
+    const closeDialog = vi.fn();
+    const runAgent = vi.fn(async (_options, deps) => {
+      const first = globalApprovalManager.waitForApproval(
+        "parallel-1",
+        "write_file",
+        JSON.stringify({ path: "one.txt", content: "one" }),
+        deps.approvalNotifier!,
+      );
+      const second = globalApprovalManager.waitForApproval(
+        "parallel-2",
+        "write_file",
+        JSON.stringify({ path: "two.txt", content: "two" }),
+        deps.approvalNotifier!,
+      );
+      await Promise.all([first, second]);
+      return {
+        sessionId: "tui-session",
+        sessionSelection: { mode: "new" as const, sessionId: "tui-session" },
+        workDir: process.cwd(),
+        finalMessage: "approved",
+        usage: { promptTokens: 0, completionTokens: 0, costCNY: 0 },
+        messages: [],
+      };
+    });
+
+    const prompt = runTuiAgentPrompt(
+      { prompt: "write twice", dir: process.cwd(), session: "tui-session" },
+      { reporter, runAgent, openDialog, closeDialog },
+    );
+    await vi.waitFor(() => expect(openDialog).toHaveBeenCalledTimes(2));
+
+    const firstRequest = openDialog.mock.calls[0]?.[0];
+    const secondRequest = openDialog.mock.calls[1]?.[0];
+    expect([firstRequest.id, secondRequest.id]).toEqual([
+      "approval:pending:parallel-1",
+      "approval:pending:parallel-2",
+    ]);
+
+    const firstProps = firstRequest.content.props as { onAction: (action: "approve") => boolean };
+    firstProps.onAction("approve");
+    expect(closeDialog).toHaveBeenCalledWith("approval:pending:parallel-1");
+    expect(closeDialog).not.toHaveBeenCalledWith("approval:pending:parallel-2");
+    expect(globalApprovalManager.pendingCount).toBe(1);
+
+    const secondProps = secondRequest.content.props as { onAction: (action: "approve") => boolean };
+    secondProps.onAction("approve");
+    await prompt;
+    expect(closeDialog).toHaveBeenCalledWith("approval:pending:parallel-2");
+    expect(globalApprovalManager.pendingCount).toBe(0);
   });
 
   it("approve-session records approval under the current TUI session id", async () => {
@@ -827,7 +1026,7 @@ describe("TUI input routing", () => {
     handleTuiInterrupt(abortControllerRef.current, queue, reporter);
 
     await expect(run).rejects.toMatchObject({ name: "AbortError" });
-    expect(closeDialog).toHaveBeenCalledWith("approval:pending");
+    expect(closeDialog).toHaveBeenCalledWith("approval:pending:abort-dialog");
     expect(abortControllerRef.current).toBeNull();
   });
 

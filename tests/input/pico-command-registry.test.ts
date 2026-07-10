@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Session } from "../../src/engine/session.js";
+import { GoalManager } from "../../src/engine/goal-manager.js";
 import { createBuiltinCommandRegistry } from "../../src/input/builtin-commands.js";
 import {
   commandArgumentSuggestions,
@@ -83,6 +84,63 @@ describe("Pico command registry", () => {
     if (result.type !== "local-command") return;
     expect(result.command).toBe("mode");
     expect(result.result.message).toContain("Current mode: default");
+  });
+
+  it("/goal shows the active goal from the shared TUI runtime", async () => {
+    const goalManager = new GoalManager();
+    const goal = goalManager.create("Ship TUI fixes", "Close the reported interaction gaps", {
+      maxTurns: 8,
+    });
+    goalManager.update(goal.id, { progress: "Goal command wired" });
+    const registry = await createPicoCommandRegistry({
+      workDir: process.cwd(),
+      provider: "openai",
+      model: "glm-5.2",
+      sessionId: "session-goal-show",
+      goalManager,
+    });
+
+    const result = await processUserInput("/goal", { registry });
+
+    expect(result.type).toBe("local-command");
+    if (result.type !== "local-command") return;
+    expect(result.command).toBe("goal");
+    expect(result.result.message).toContain("Ship TUI fixes");
+    expect(result.result.message).toContain("Close the reported interaction gaps");
+    expect(result.result.message).toContain("Goal command wired");
+    expect(result.result.message).toContain("8 轮");
+  });
+
+  it("/goal explains an empty or unavailable runtime without creating state", async () => {
+    const goalManager = new GoalManager();
+    const liveRegistry = await createPicoCommandRegistry({
+      workDir: process.cwd(),
+      provider: "openai",
+      model: "glm-5.2",
+      sessionId: "session-goal-empty",
+      goalManager,
+    });
+    const detachedRegistry = await createPicoCommandRegistry({
+      workDir: process.cwd(),
+      provider: "openai",
+      model: "glm-5.2",
+      sessionId: "session-goal-detached",
+    });
+
+    const empty = await processUserInput("/goal", { registry: liveRegistry });
+    const detached = await processUserInput("/goal", { registry: detachedRegistry });
+    const invalid = await processUserInput("/goal create something", { registry: liveRegistry });
+
+    expect(empty.type === "local-command" ? empty.result.message : undefined).toContain(
+      "No active goal",
+    );
+    expect(detached.type === "local-command" ? detached.result.message : undefined).toContain(
+      "Goal unavailable",
+    );
+    expect(invalid.type === "local-command" ? invalid.result.message : undefined).toBe(
+      "Usage: /goal",
+    );
+    expect(goalManager.list()).toHaveLength(0);
   });
 
   it("/add-dir adds a raw path to this session without writing project config", async () => {
@@ -874,6 +932,48 @@ describe("Pico command registry", () => {
       expect.objectContaining({
         value: "mcp",
         description: "Show MCP server connection status",
+      }),
+    );
+  });
+
+  it("/goal is discoverable from help and remains available while the agent is running", async () => {
+    const registry = await createPicoCommandRegistry({
+      workDir: process.cwd(),
+      provider: "openai",
+      model: "glm-5.2",
+      sessionId: "session-goal-discovery",
+      goalManager: new GoalManager(),
+    });
+
+    const help = await processUserInput("/help", { registry });
+    const goalHelp = await processUserInput("/help goal", { registry });
+    const runningSuggestion = commandSuggestions(registry, "go", {
+      availabilityState: "running",
+    }).find((candidate) => candidate.value === "goal");
+    const modalSuggestion = commandSuggestions(registry, "go", {
+      availabilityState: "modal",
+    }).find((candidate) => candidate.value === "goal");
+
+    expect(help.type).toBe("local-command");
+    if (help.type !== "local-command") return;
+    expect(help.result.message).toContain("/goal");
+    expect(goalHelp.type).toBe("local-command");
+    if (goalHelp.type !== "local-command") return;
+    expect(goalHelp.result.message).toContain("Command: /goal");
+    expect(goalHelp.result.message).toContain("Usage: /goal");
+    expect(runningSuggestion).toEqual(
+      expect.objectContaining({
+        value: "goal",
+        description: "Show the current session goal",
+        usage: "/goal",
+      }),
+    );
+    expect(runningSuggestion?.disabled).toBeUndefined();
+    expect(modalSuggestion).toEqual(
+      expect.objectContaining({
+        value: "goal",
+        disabled: true,
+        disabledReason: "Command unavailable while a modal is active.",
       }),
     );
   });

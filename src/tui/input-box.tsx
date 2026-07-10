@@ -37,6 +37,8 @@ export interface InputBoxProps {
   fileMentionSuggestions?: SuggestionSource;
   /** 顶层焦点仲裁:只有当前按键归 InputBox 所有时才处理。 */
   acceptsInput?: (input: string, key: InputKey) => boolean;
+  /** 将当前草稿同步给顶层焦点仲裁。 */
+  onTextChange?: (text: string) => void;
   /** Enter 提交回调 */
   onSubmit: (text: string) => void;
   /** User overrides loaded from .pico/config.json. */
@@ -50,6 +52,7 @@ export function InputBox({
   slashArgumentSuggestions,
   fileMentionSuggestions,
   acceptsInput,
+  onTextChange,
   onSubmit,
   keybindings,
 }: InputBoxProps): React.ReactNode {
@@ -69,6 +72,7 @@ export function InputBox({
 
   useInput((input, key) => {
     if (acceptsInput && !acceptsInput(input, key)) return;
+    const previousText = controllerRef.current.text;
     const suggestionOptions = {
       slashCommandSuggestions,
       slashArgumentSuggestions,
@@ -81,6 +85,7 @@ export function InputBox({
     });
     controllerRef.current = result.state;
     setController(result.state);
+    if (result.state.text !== previousText) onTextChange?.(result.state.text);
     if (result.submittedText === undefined && !disabled && result.pendingSuggestion) {
       scheduleAsyncSuggestions({
         pending: result.pendingSuggestion,
