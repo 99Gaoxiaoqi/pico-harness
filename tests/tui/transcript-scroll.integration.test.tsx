@@ -49,6 +49,7 @@ describe("TUI transcript scrolling integration", () => {
   });
 
   it("leaves a tool anchor and follows new assistant output", async () => {
+    const onSubmit = vi.fn();
     const entries: TuiEntry[] = [
       {
         kind: "tool",
@@ -59,7 +60,7 @@ describe("TUI transcript scrolling integration", () => {
       },
       longAssistant("answer", 50),
     ];
-    const harness = createAppHarness(app(entries, vi.fn()));
+    const harness = createAppHarness(app(entries, onSubmit));
 
     try {
       await harness.ready();
@@ -67,8 +68,15 @@ describe("TUI transcript scrolling integration", () => {
       expect(frame).toContain("expanded-tool-detail");
       expect(frame).not.toContain("answer-49");
 
+      await harness.write("next turn");
+      frame = await harness.write("\r");
+      expect(onSubmit).toHaveBeenCalledWith("next turn");
+      expect(frame).not.toContain("expanded-tool-detail");
+      expect(frame).toContain("answer-49");
+
+      await harness.write("\u0005");
       frame = await harness.rerender(
-        app([...entries, { kind: "assistant", content: "continued-tail-marker" }], vi.fn()),
+        app([...entries, { kind: "assistant", content: "continued-tail-marker" }], onSubmit),
       );
       expect(frame).toContain("continued-tail-marker");
     } finally {
