@@ -37,6 +37,7 @@ export async function applyTuiRewind(input: {
   const { session, reporter, snapshot, mode } = input;
   if (mode === "code") {
     await session.rewindCode(snapshot.messageId);
+    reporter.pushSystemMessage(formatRewindSuccess(snapshot, mode));
     return {};
   }
 
@@ -61,8 +62,21 @@ export async function applyTuiRewind(input: {
   if (snapshot.interactionMode) {
     input.onRestoreInteractionMode?.(snapshot.interactionMode);
   }
+  reporter.pushSystemMessage(formatRewindSuccess(snapshot, mode));
   return {
     inputText: snapshot.userPrompt,
     ...(snapshot.interactionMode ? { interactionMode: snapshot.interactionMode } : {}),
   };
+}
+
+function formatRewindSuccess(snapshot: FileHistorySnapshotSummary, mode: RewindMode): string {
+  const prompt = (snapshot.userPrompt ?? snapshot.messageId).replace(/\s+/gu, " ").trim();
+  const target = prompt.length <= 72 ? prompt : `${prompt.slice(0, 71)}…`;
+  if (mode === "code") {
+    return `Rewind complete: restored code to before “${target}”; conversation kept.`;
+  }
+  if (mode === "conversation") {
+    return `Rewind complete: restored conversation to before “${target}”; code kept. Original prompt is ready to edit.`;
+  }
+  return `Rewind complete: restored code and conversation to before “${target}”. Original prompt is ready to edit.`;
 }

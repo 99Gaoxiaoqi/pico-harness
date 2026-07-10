@@ -553,7 +553,7 @@ describe("Pico command registry", () => {
     }
   });
 
-  it("command descriptors provide dynamic skill, agent, session, and snapshot argument candidates", async () => {
+  it("command descriptors provide dynamic skill, agent, and session argument candidates", async () => {
     const workDir = mkdtempSync(join(tmpdir(), "pico-command-arg-completer-"));
     cleanup.push(() => rmSync(workDir, { recursive: true, force: true }));
     mkdirSync(join(workDir, ".claw", "skills", "review"), { recursive: true });
@@ -595,14 +595,10 @@ describe("Pico command registry", () => {
     ).resolves.toEqual([
       { value: "cli-review", description: "1 messages · 2026-07-09T02:00:00.000Z" },
     ]);
-    await expect(
-      Promise.resolve(registry.resolve("rewind")?.argumentCompleter?.("turn-r")),
-    ).resolves.toEqual([
-      { value: "turn-review", description: "0 files · 2026-07-09T03:00:00.000Z" },
-    ]);
+    expect(registry.resolve("rewind")?.argumentCompleter).toBeUndefined();
   });
 
-  it("argument candidates read realtime skill and snapshot data after registry creation", async () => {
+  it("argument candidates read realtime skill data while rewind stays menu-only", async () => {
     const workDir = mkdtempSync(join(tmpdir(), "pico-command-live-completer-"));
     cleanup.push(() => rmSync(workDir, { recursive: true, force: true }));
     const session = new Session("snapshot-live-session", workDir, { persistence: false });
@@ -630,7 +626,7 @@ describe("Pico command registry", () => {
     ).resolves.toEqual([{ value: "late-review", description: "late skill" }]);
     await expect(
       Promise.resolve(commandArgumentSuggestions(registry, "rewind", "turn-l")),
-    ).resolves.toEqual([{ value: "turn-late", description: "0 files · 2026-07-09T04:00:00.000Z" }]);
+    ).resolves.toEqual([]);
   });
 
   it("commandSuggestions 保留完整候选,不截断到 20 条", async () => {
@@ -1074,32 +1070,30 @@ describe("Pico command registry", () => {
     expect(result.result.message).toContain("turn-1");
   });
 
-  it("/rewind <message-id> 接到既有文件历史回滚", async () => {
+  it("/rewind <message-id> 也收敛到交互选择器，不绕过 TUI runtime", async () => {
     const { registry, filePath } = await registryWithSnapshot("turn-1");
 
     const result = await processUserInput("/rewind turn-1 code", { registry });
 
     expect(result.type).toBe("local-command");
     if (result.type !== "local-command") return;
-    expect(result.result.message).toContain("已回滚");
-    expect(result.result.ui).toBeUndefined();
-    expect(result.result.message).toContain("mode=code");
-    expect(result.result.message).toContain("只回滚文件");
-    expect(readFileSync(filePath, "utf8")).toBe("before\n");
+    expect(result.result.message).toContain("已收敛到交互菜单");
+    expect(result.result.ui).toEqual({ kind: "open-selector", selector: "rewind" });
+    expect(readFileSync(filePath, "utf8")).toBe("after\n");
   });
 
-  it("/rewind 找不到快照时给出可行动提示", async () => {
+  it("/rewind 的旧 message-id 参数不再触发隐藏的直接回滚", async () => {
     const { registry } = await registryWithSnapshot("turn-1");
 
     const result = await processUserInput("/rewind missing code", { registry });
 
     expect(result.type).toBe("local-command");
     if (result.type !== "local-command") return;
-    expect(result.result.message).toContain("找不到 messageId=missing");
-    expect(result.result.message).toContain("请运行 /snapshots 查看可用快照");
+    expect(result.result.message).toContain("请在列表中选择目标消息");
+    expect(result.result.ui).toEqual({ kind: "open-selector", selector: "rewind" });
   });
 
-  it("/undo 默认回滚最后一个文件历史快照", async () => {
+  it("/undo 收敛为同一个 rewind 交互入口", async () => {
     const { registry, filePath } = await registryWithSnapshot("turn-2");
 
     const result = await processUserInput("/undo", { registry });
@@ -1107,23 +1101,12 @@ describe("Pico command registry", () => {
     expect(result.type).toBe("local-command");
     if (result.type !== "local-command") return;
     expect(result.command).toBe("undo");
-    expect(result.result.message).toContain("turn-2");
-    expect(readFileSync(filePath, "utf8")).toBe("before\n");
+    expect(result.result.message).toContain("兼容入口");
+    expect(result.result.ui).toEqual({ kind: "open-selector", selector: "rewind" });
+    expect(readFileSync(filePath, "utf8")).toBe("after\n");
   });
 
-  it("/undo 执行回滚时通过 session.serialize 串行化", async () => {
-    let insideSerialize = false;
-    const rewindCode = vi.fn(async () => {
-      expect(insideSerialize).toBe(true);
-    });
-    const serialize = vi.fn(async (task: () => Promise<unknown>) => {
-      insideSerialize = true;
-      try {
-        return await task();
-      } finally {
-        insideSerialize = false;
-      }
-    });
+  it("/undo 的旧参数不会绕过 TUI runtime", async () => {
     const session = {
       id: "fake-undo-session",
       fileHistory: {
@@ -1135,8 +1118,6 @@ describe("Pico command registry", () => {
           },
         ],
       },
-      rewindCode,
-      serialize,
     } as unknown as Session;
     const registry = await createPicoCommandRegistry({
       workDir: process.cwd(),
@@ -1149,8 +1130,8 @@ describe("Pico command registry", () => {
     const result = await processUserInput("/undo turn-1 code", { registry });
 
     expect(result.type).toBe("local-command");
-    expect(serialize).toHaveBeenCalledOnce();
-    expect(rewindCode).toHaveBeenCalledWith("turn-1");
+    if (result.type !== "local-command") return;
+    expect(result.result.ui).toEqual({ kind: "open-selector", selector: "rewind" });
   });
 
   it("/compact 在无法安全触发摘要压缩时说明原因", async () => {

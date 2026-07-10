@@ -15,7 +15,6 @@ import { TuiReporter } from "../../src/tui/tui-reporter.js";
 describe("RewindCommandDialog", () => {
   it("初始选择态展示快照列表且不派发 rewind", () => {
     const state = createRewindCommandDialogState();
-    const onDispatchCommand = vi.fn();
 
     const output = renderToString(
       <RewindCommandDialogView
@@ -28,18 +27,17 @@ describe("RewindCommandDialog", () => {
     expect(output).toContain("Choose a message to preview");
     expect(output).toContain("turn-1");
     expect(output).not.toContain("Preview changes before confirming rewind");
-    expect(onDispatchCommand).not.toHaveBeenCalled();
   });
 
   it("Enter 只进入 preview 态，不执行 rewind 命令", async () => {
-    const onDispatchCommand = vi.fn();
+    const onRewind = vi.fn(async () => undefined);
     const getDiffStat = vi.fn(async () => diffStat("turn-1"));
 
     const next = await resolveRewindCommandDialogKey(
       createRewindCommandDialogState(),
       [snapshotSummary("turn-1")],
       { input: "", key: { return: true } },
-      { getDiffStat, onDispatchCommand },
+      { getDiffStat, onRewind },
     );
 
     expect(next.selector).toMatchObject({
@@ -48,19 +46,19 @@ describe("RewindCommandDialog", () => {
       selectedAction: "both",
     });
     expect(getDiffStat).toHaveBeenCalledWith("turn-1");
-    expect(onDispatchCommand).not.toHaveBeenCalled();
+    expect(onRewind).not.toHaveBeenCalled();
   });
 
   it("快照超过可见上限时 Enter 预览屏幕高亮的最新项", async () => {
     const snapshots = Array.from({ length: 9 }, (_, index) => snapshotSummary(`turn-${index + 1}`));
-    const onDispatchCommand = vi.fn();
+    const onRewind = vi.fn(async () => undefined);
     const getDiffStat = vi.fn(async (messageId: string) => diffStat(messageId));
 
     const next = await resolveRewindCommandDialogKey(
       createRewindCommandDialogState(createRewindSelectorState(snapshots)),
       snapshots,
       { input: "", key: { return: true } },
-      { getDiffStat, onDispatchCommand },
+      { getDiffStat, onRewind },
     );
 
     expect(next.selector).toMatchObject({
@@ -69,61 +67,61 @@ describe("RewindCommandDialog", () => {
       selectedAction: "both",
     });
     expect(getDiffStat).toHaveBeenCalledWith("turn-9");
-    expect(onDispatchCommand).not.toHaveBeenCalled();
+    expect(onRewind).not.toHaveBeenCalled();
   });
 
   it("Esc cancel 关闭 dialog 且不派发命令", async () => {
     const onClose = vi.fn();
-    const onDispatchCommand = vi.fn();
+    const onRewind = vi.fn(async () => undefined);
     const preview = await resolveRewindCommandDialogKey(
       createRewindCommandDialogState(),
       [snapshotSummary("turn-1")],
       { input: "", key: { return: true } },
-      { getDiffStat: async () => diffStat("turn-1") },
+      { getDiffStat: async () => diffStat("turn-1"), onRewind },
     );
 
     const next = await resolveRewindCommandDialogKey(
       preview,
       [snapshotSummary("turn-1")],
       { input: "\u001b", key: { escape: true } },
-      { getDiffStat: async () => diffStat("turn-1"), onClose, onDispatchCommand },
+      { getDiffStat: async () => diffStat("turn-1"), onClose, onRewind },
     );
 
     expect(next.status).toBe("closed");
     expect(onClose).toHaveBeenCalledTimes(1);
-    expect(onDispatchCommand).not.toHaveBeenCalled();
+    expect(onRewind).not.toHaveBeenCalled();
   });
 
-  it("confirm 后派发 /rewind <messageId> <mode>", async () => {
+  it("confirm 后直接执行统一的 TUI rewind runtime", async () => {
     const onClose = vi.fn();
-    const onDispatchCommand = vi.fn();
+    const onRewind = vi.fn(async () => undefined);
     const preview = await resolveRewindCommandDialogKey(
       createRewindCommandDialogState(),
       [snapshotSummary("turn-1")],
       { input: "", key: { return: true } },
-      { getDiffStat: async () => diffStat("turn-1") },
+      { getDiffStat: async () => diffStat("turn-1"), onRewind },
     );
     const codeOnly = await resolveRewindCommandDialogKey(
       await resolveRewindCommandDialogKey(
         preview,
         [snapshotSummary("turn-1")],
         { input: "", key: { downArrow: true } },
-        { getDiffStat: async () => diffStat("turn-1") },
+        { getDiffStat: async () => diffStat("turn-1"), onRewind },
       ),
       [snapshotSummary("turn-1")],
       { input: "", key: { downArrow: true } },
-      { getDiffStat: async () => diffStat("turn-1") },
+      { getDiffStat: async () => diffStat("turn-1"), onRewind },
     );
 
     const next = await resolveRewindCommandDialogKey(
       codeOnly,
       [snapshotSummary("turn-1")],
       { input: "", key: { return: true } },
-      { getDiffStat: async () => diffStat("turn-1"), onClose, onDispatchCommand },
+      { getDiffStat: async () => diffStat("turn-1"), onClose, onRewind },
     );
 
     expect(next.status).toBe("closed");
-    expect(onDispatchCommand).toHaveBeenCalledWith("/rewind turn-1 code");
+    expect(onRewind).toHaveBeenCalledWith(expect.objectContaining({ messageId: "turn-1" }), "code");
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
