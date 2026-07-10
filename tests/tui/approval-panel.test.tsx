@@ -33,6 +33,8 @@ describe("ApprovalPanel", () => {
     expect(resolveApprovalPanelKey("n", {})).toBe("reject");
     expect(resolveApprovalPanelKey("", { escape: true })).toBe("reject");
     expect(resolveApprovalPanelKey("e", {})).toBe("toggle-diff");
+    expect(resolveApprovalPanelKey("y", { ctrl: true })).toBeNull();
+    expect(resolveApprovalPanelKey("", { return: true, ctrl: true })).toBeNull();
     expect(resolveApprovalPanelKey("x", {})).toBeNull();
   });
 

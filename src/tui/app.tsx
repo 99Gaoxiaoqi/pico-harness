@@ -32,6 +32,7 @@ import { MessageList } from "./message-list.js";
 import { StatusBar } from "./status-bar.js";
 import type { TuiEntry } from "./tui-reporter.js";
 import { resolveKeybinding } from "./keybindings/resolver.js";
+import { ToolCardFocusProvider } from "./tool-card.js";
 
 /** 诊断日志:写文件(绕过 ink patchConsole 劫持),只在 TUI_DEBUG 时 */
 function dbg(msg: string): void {
@@ -93,9 +94,11 @@ export function App({
   const { exit } = useApp();
   const { rows, columns } = useWindowSize();
   const focusedDialog = pickFocusedDialog(dialogRequests);
-  const modal = focusedDialog?.layer === "modal" ? focusedDialog.content : undefined;
-  const overlay = focusedDialog?.layer === "overlay" ? focusedDialog.content : undefined;
-  const inputDisabled = modal !== undefined;
+  const inputDisabled = focusedDialog?.layer === "modal";
+  const inlineModal = inputDisabled && focusedDialog.id === "approval:pending";
+  const modal = inputDisabled && !inlineModal ? focusedDialog.content : undefined;
+  const overlay =
+    focusedDialog?.layer === "overlay" || inlineModal ? focusedDialog.content : undefined;
   const transcriptRows = Math.max(inputDisabled ? 3 : 6, rows - (inputDisabled ? 13 : 8));
   const transcriptWrapWidth = Math.max(20, columns - 6);
   const getEntryRows = useMemo(
@@ -107,9 +110,25 @@ export function App({
     [entries, transcriptWrapWidth],
   );
   const [transcriptScrollRows, setTranscriptScrollRows] = useState<number | null>(null);
+  const lastEntry = entries.at(-1);
+  const lastToolKey =
+    lastEntry?.kind === "tool" ? `${entries.length}:${lastEntry.name}:${lastEntry.args}` : null;
+  const [expandedToolKey, setExpandedToolKey] = useState<string | null>(null);
+  const lastToolExpanded = lastToolKey !== null && expandedToolKey === lastToolKey;
 
   useInput((input, key) => {
-    const transcriptAction = resolveTranscriptScrollKey(key, running);
+    const toolCardAction = resolveToolCardToggleKey(
+      input,
+      key,
+      lastToolKey !== null,
+      inputDisabled,
+    );
+    if (toolCardAction === "toggle" && lastToolKey) {
+      setExpandedToolKey((current) => (current === lastToolKey ? null : lastToolKey));
+      return;
+    }
+
+    const transcriptAction = resolveTranscriptScrollKey(key, running, inputDisabled);
     if (transcriptAction) {
       setTranscriptScrollRows((current) =>
         nextTranscriptScroll(current, transcriptAction, transcriptRows, transcriptTotalRows),
@@ -166,19 +185,21 @@ export function App({
     <>
       {/* 消息列表:统一走 MessageList,由 shouldRenderStatically + MessageRow.memo 控制静态行。 */}
       <Box flexDirection="column" height={transcriptRows} overflowY="hidden" paddingX={1}>
-        <MessageList
-          entries={entries}
-          isStreaming={isStreaming}
-          viewportRows={transcriptRows}
-          scrollOffsetRows={transcriptScrollRows ?? 0}
-          estimatedRowHeight={3}
-          getEntryRows={getEntryRows}
-          wrapWidth={transcriptWrapWidth}
-          overscanRows={0}
-          virtualizeThreshold={0}
-          scrollToBottom={transcriptScrollRows === null}
-          preserveVirtualSpacers={false}
-        />
+        <ToolCardFocusProvider expanded={lastToolExpanded}>
+          <MessageList
+            entries={entries}
+            isStreaming={isStreaming}
+            viewportRows={transcriptRows}
+            scrollOffsetRows={transcriptScrollRows ?? 0}
+            estimatedRowHeight={3}
+            getEntryRows={getEntryRows}
+            wrapWidth={transcriptWrapWidth}
+            overscanRows={0}
+            virtualizeThreshold={0}
+            scrollToBottom={transcriptScrollRows === null}
+            preserveVirtualSpacers={false}
+          />
+        </ToolCardFocusProvider>
       </Box>
 
       {/* 思考/spinner:据末尾状态显示对应 mode */}
@@ -227,6 +248,7 @@ const StableLogoPanel = memo(LogoPanel);
 
 export type AppGlobalAction = "interrupt" | "exit" | "redraw";
 type TranscriptScrollAction = "pageUp" | "pageDown" | "lineUp" | "lineDown" | "top" | "bottom";
+type ToolCardAction = "toggle";
 
 export function resolveAppKeyEvent(
   input: string,
@@ -288,7 +310,8 @@ export function resolveTranscriptScrollKey(key: {
   downArrow?: boolean;
   home?: boolean;
   end?: boolean;
-}, running = false): TranscriptScrollAction | null {
+}, running = false, blocked = false): TranscriptScrollAction | null {
+  if (blocked) return null;
   if (key.pageUp) return "pageUp";
   if (key.pageDown) return "pageDown";
   if (running && key.upArrow && !key.ctrl && !key.shift) return "lineUp";
@@ -300,6 +323,19 @@ export function resolveTranscriptScrollKey(key: {
   if (key.ctrl && key.home) return "top";
   if (key.ctrl && key.end) return "bottom";
   return null;
+}
+
+export function resolveToolCardToggleKey(
+  input: string,
+  key: { ctrl?: boolean; shift?: boolean; meta?: boolean },
+  canToggle: boolean,
+  blocked: boolean,
+): ToolCardAction | null {
+  if (!canToggle || blocked) return null;
+  const resolved = resolveKeybinding({ input, key }, "Transcript");
+  return resolved?.kind === "action" && resolved.action === "transcript:toggleShowAll"
+    ? "toggle"
+    : null;
 }
 
 export function nextTranscriptScroll(

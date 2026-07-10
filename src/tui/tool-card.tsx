@@ -7,13 +7,13 @@
 //            参数 <着色参数>
 //            结果 <完整 summary>
 //
-// 折叠/展开:组件自维护 expanded state,用 useInput 监听 `e` 键切换。
+// 折叠/展开:由 App 顶层焦点所有者统一处理,工具卡片只消费受控状态。
 //
 // 参数高亮:尝试 JSON.parse,成功则提取 path/command/url/query 等关键字段着色显示;
 // 失败降级为原始字符串(截断)。
 
-import React, { useState } from "react";
-import { Box, Text, useInput } from "ink";
+import React, { createContext, useContext } from "react";
+import { Box, Text } from "ink";
 import { formatOutputPreview } from "./diff-preview.js";
 import { compactText, compactToolName, summarizeToolTarget } from "./tool-format.js";
 
@@ -30,6 +30,22 @@ export type ToolCardStatus =
   | "done"
   | "failed";
 
+const ToolCardExpansionContext = createContext(false);
+
+export function ToolCardFocusProvider({
+  expanded,
+  children,
+}: {
+  expanded: boolean;
+  children: React.ReactNode;
+}): React.ReactNode {
+  return (
+    <ToolCardExpansionContext.Provider value={expanded}>
+      {children}
+    </ToolCardExpansionContext.Provider>
+  );
+}
+
 export function ToolCard(props: {
   name: string;
   args: string;
@@ -41,6 +57,7 @@ export function ToolCard(props: {
   initialExpanded?: boolean;
 }): React.ReactNode {
   const { name, args, status, summary, isLast = false, initialExpanded } = props;
+  const focusedExpanded = useContext(ToolCardExpansionContext);
   if (isAgentToolName(name)) {
     return (
       <AgentToolProgressLine
@@ -50,6 +67,7 @@ export function ToolCard(props: {
         summary={summary}
         isLast={isLast}
         initialExpanded={initialExpanded}
+        expanded={focusedExpanded}
       />
     );
   }
@@ -62,6 +80,7 @@ export function ToolCard(props: {
       summary={summary}
       isLast={isLast}
       initialExpanded={initialExpanded}
+      expanded={focusedExpanded}
     />
   );
 }
@@ -73,6 +92,7 @@ function StandardToolCard({
   summary,
   isLast,
   initialExpanded,
+  expanded,
 }: {
   name: string;
   args: string;
@@ -80,24 +100,16 @@ function StandardToolCard({
   summary?: string;
   isLast: boolean;
   initialExpanded?: boolean;
+  expanded: boolean;
 }): React.ReactNode {
-  const [expanded, setExpanded] = useState(initialExpanded ?? false);
   const canToggle = isLast || initialExpanded !== undefined;
-  const showDetails = canToggle && expanded;
+  const showDetails = canToggle && (initialExpanded ?? expanded);
   const target = summarizeToolTarget(name, args, 30);
   const grouped = args.includes("\"groupedCount\"");
   const failure = isFailureStatus(status);
   const displaySummary = summary && failure ? ensureErrorSummary(summary) : summary;
   const resultBadge = displaySummary && (failure || grouped || !target) ? toolResultBadge(displaySummary, failure) : undefined;
   const resultDetails = displaySummary ? toolResultPreview(displaySummary, showDetails) : undefined;
-
-  useInput((_input, key) => {
-    if (!canToggle) return;
-    if (key.return) return;
-    if (_input === "e" && !key.ctrl && !key.meta) {
-      setExpanded((open) => !open);
-    }
-  });
 
   return (
     <Box flexDirection="column" marginLeft={2}>
@@ -122,7 +134,7 @@ function StandardToolCard({
             </Text>
           </>
         )}
-        {canToggle && <Text dimColor> {showDetails ? "[e 折叠]" : "[e 展开]"}</Text>}
+        {canToggle && <Text dimColor> [⌃E]</Text>}
       </Box>
       {showDetails && (
         <Box flexDirection="column" marginLeft={2}>
@@ -151,6 +163,7 @@ function AgentToolProgressLine({
   summary,
   isLast,
   initialExpanded,
+  expanded,
 }: {
   name: string;
   args: string;
@@ -158,24 +171,16 @@ function AgentToolProgressLine({
   summary?: string;
   isLast: boolean;
   initialExpanded?: boolean;
+  expanded: boolean;
 }): React.ReactNode {
-  const [expanded, setExpanded] = useState(initialExpanded ?? false);
   const canToggle = isLast || initialExpanded !== undefined;
-  const showDetails = canToggle && expanded;
+  const showDetails = canToggle && (initialExpanded ?? expanded);
   const treeChar = isLast ? "└─" : "├─";
   const branchChar = isLast ? "   ⎿  " : "│  ⎿  ";
   const meta = agentToolMeta(name, args);
   const failure = isFailureStatus(status);
   const resultText = status === "running" ? meta.task : agentResultText(status, summary);
   const preview = agentResultHint(resultText);
-
-  useInput((_input, key) => {
-    if (!canToggle) return;
-    if (key.return) return;
-    if (_input === "e" && !key.ctrl && !key.meta) {
-      setExpanded((open) => !open);
-    }
-  });
 
   return (
     <Box flexDirection="column" marginLeft={1}>
@@ -200,7 +205,7 @@ function AgentToolProgressLine({
             </Text>
           </>
         )}
-        {canToggle && <Text dimColor> {showDetails ? "[e 折叠]" : "[e 展开]"}</Text>}
+        {canToggle && <Text dimColor> [⌃E]</Text>}
       </Box>
       {showDetails && (
         <>

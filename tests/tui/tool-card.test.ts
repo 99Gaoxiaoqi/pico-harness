@@ -32,7 +32,7 @@ describe("ToolCard agent tool detection", () => {
     expect(output).toContain("⎿ read");
     expect(output).toContain("Success");
     expect(output).toContain("src/index.ts");
-    expect(output).toContain("[e 展开]");
+    expect(output).toContain("[⌃E]");
     expect(output).not.toContain("参数");
     expect(output).not.toContain("结果");
     expect(output.split("\n")).toHaveLength(1);
@@ -241,7 +241,7 @@ describe("ToolCard collapsed layout", () => {
       }),
     );
 
-    expect(output).toContain("[e 展开]");
+    expect(output).toContain("[⌃E]");
   });
 
   it("超长单行摘要在折叠态不铺开完整内容", () => {

@@ -289,7 +289,7 @@ describe("TUI input routing", () => {
     );
 
     expect(openDialog).toHaveBeenCalledWith(
-      expect.objectContaining({ id: "approval:pending", layer: "overlay" }),
+      expect.objectContaining({ id: "approval:pending", layer: "modal" }),
     );
     expect(snapshots.at(-1)).toEqual([
       expect.objectContaining({ kind: "tool", name: "write_file", status: "approval" }),

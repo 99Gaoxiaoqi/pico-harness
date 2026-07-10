@@ -736,7 +736,7 @@ function createApprovalDialogRequest(
 ): DialogRequest {
   return {
     id: APPROVAL_DIALOG_ID,
-    layer: "overlay",
+    layer: "modal",
     priority: APPROVAL_DIALOG_PRIORITY,
     content: (
       <InteractiveApprovalPanel
