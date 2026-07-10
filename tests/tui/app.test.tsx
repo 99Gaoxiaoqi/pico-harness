@@ -205,14 +205,15 @@ describe("App", () => {
     expect(nextTranscriptScroll(5, "bottom", 10, 100)).toBeNull();
   });
 
-  it("maps running plain arrows to transcript scrolling for terminal wheel events", () => {
-    expect(resolveTranscriptScrollKey({ upArrow: true }, true)).toBe("lineUp");
-    expect(resolveTranscriptScrollKey({ downArrow: true }, true)).toBe("lineDown");
-    expect(resolveTranscriptScrollKey({ upArrow: true }, false)).toBeNull();
+  it("keeps plain arrows on input and reserves modified arrows for transcript scrolling", () => {
+    expect(resolveTranscriptScrollKey({ upArrow: true })).toBeNull();
+    expect(resolveTranscriptScrollKey({ downArrow: true })).toBeNull();
+    expect(resolveTranscriptScrollKey({ ctrl: true, upArrow: true })).toBe("lineUp");
+    expect(resolveTranscriptScrollKey({ ctrl: true, downArrow: true })).toBe("lineDown");
   });
 
   it("modal focus blocks transcript and ToolCard shortcuts", () => {
-    expect(resolveTranscriptScrollKey({ pageUp: true }, true, true)).toBeNull();
+    expect(resolveTranscriptScrollKey({ pageUp: true }, true)).toBeNull();
     expect(resolveToolCardToggleKey("e", {}, true, false)).toBeNull();
     expect(resolveToolCardToggleKey("e", { ctrl: true }, true, false)).toBe("toggle");
     expect(resolveToolCardToggleKey("e", { ctrl: true }, true, true)).toBeNull();
@@ -251,7 +252,7 @@ describe("App", () => {
     }
   });
 
-  it("running Up scrolls the transcript without also replacing the input draft from history", async () => {
+  it("running Up stays with input history instead of scrolling the transcript", async () => {
     const onSubmit = vi.fn();
     const harness = createInteractiveApp(
       <App
@@ -273,8 +274,43 @@ describe("App", () => {
       await harness.write("draft");
       const frame = await harness.write("\u001b[A");
 
-      expect(frame).toContain("draft▋");
-      expect(frame).not.toContain("first▋");
+      expect(frame).toContain("first▋");
+      expect(frame).not.toContain("draft▋");
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("counts new messages while away from bottom and clears the count on return", async () => {
+    const entries = Array.from({ length: 30 }, (_, index) => ({
+      kind: "assistant" as const,
+      content: `message-${index}`,
+    }));
+    const app = (nextEntries: typeof entries) => (
+      <App
+        model="glm-5.2"
+        provider="openai"
+        workDir="/workspace/demo"
+        entries={nextEntries}
+        running={false}
+        onSubmit={vi.fn()}
+      />
+    );
+    const harness = createInteractiveApp(app(entries));
+
+    try {
+      await harness.write("\u001b[5~");
+      const withNewMessages = await harness.rerender(
+        app([
+          ...entries,
+          { kind: "assistant", content: "new-1" },
+          { kind: "assistant", content: "new-2" },
+        ]),
+      );
+      expect(withNewMessages).toContain("2 new messages");
+
+      const atBottom = await harness.write("\u001b[1;5F");
+      expect(atBottom).not.toContain("2 new messages");
     } finally {
       await harness.cleanup();
     }
@@ -287,6 +323,7 @@ function countOccurrences(text: string, needle: string): number {
 
 function createInteractiveApp(node: React.ReactNode): {
   write: (input: string) => Promise<string>;
+  rerender: (node: React.ReactNode) => Promise<string>;
   cleanup: () => Promise<void>;
 } {
   const stdin = new PassThrough();
@@ -325,6 +362,12 @@ function createInteractiveApp(node: React.ReactNode): {
       const offset = output.length;
       stdin.write(input);
       await new Promise((resolve) => setTimeout(resolve, 10));
+      await instance.waitUntilRenderFlush();
+      return stripAnsi(output.slice(offset));
+    },
+    async rerender(nextNode: React.ReactNode): Promise<string> {
+      const offset = output.length;
+      instance.rerender(nextNode);
       await instance.waitUntilRenderFlush();
       return stripAnsi(output.slice(offset));
     },

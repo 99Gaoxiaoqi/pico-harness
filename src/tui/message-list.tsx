@@ -16,11 +16,11 @@ import { Box, Text } from "ink";
 import type { TuiEntry } from "./tui-reporter.js";
 import { MessageRow } from "./message-row.js";
 import { computeVirtualTranscript } from "./virtual-transcript.js";
-import { groupToolEntries } from "./tool-grouping.js";
+import { visualRows, type TranscriptLayout } from "./transcript-layout.js";
 
 export interface MessageListProps {
-  /** 待渲染的条目 */
-  entries: TuiEntry[];
+  /** App 预先生成的聚合条目与行高。 */
+  layout: TranscriptLayout;
   /** 是否有流式进行中(用于判定末条 assistant) */
   isStreaming?: boolean;
   /** 可选:启用长 transcript 虚拟渲染时的视口行数 */
@@ -29,10 +29,6 @@ export interface MessageListProps {
   scrollOffsetRows?: number;
   /** 可选:单条消息行高估算 */
   estimatedRowHeight?: number;
-  /** 可选:按 entry 估算行高,用于让虚拟窗口按真实内容滚动 */
-  getEntryRows?: (entry: TuiEntry, index: number) => number | undefined;
-  /** 可选:文本换行宽度估算 */
-  wrapWidth?: number;
   /** 可选:视口上下额外渲染行数 */
   overscanRows?: number;
   /** 可选:低于或等于该条目数时不虚拟化,默认 200 */
@@ -45,19 +41,17 @@ export interface MessageListProps {
 
 /** 渲染一组 entries:逐条用 <MessageRow> 分发(轮次间加分隔线) */
 export function MessageList({
-  entries,
+  layout,
   isStreaming = false,
   viewportRows,
   scrollOffsetRows = 0,
   estimatedRowHeight,
-  getEntryRows,
-  wrapWidth,
   overscanRows,
   virtualizeThreshold,
   scrollToBottom,
   preserveVirtualSpacers = true,
 }: MessageListProps): React.ReactNode {
-  const displayEntries = groupToolEntries(entries);
+  const displayEntries = layout.entries;
   const window =
     viewportRows === undefined
       ? {
@@ -69,7 +63,7 @@ export function MessageList({
         }
       : computeVirtualTranscript(displayEntries, viewportRows, scrollOffsetRows, {
           estimatedRowHeight,
-          getItemRows: getEntryRows,
+          getItemRows: (_entry, index) => layout.items[index]?.rows,
           overscanRows,
           virtualizeThreshold,
           scrollToBottom,
@@ -82,13 +76,21 @@ export function MessageList({
         const originalIndex = window.startIndex + i;
         const isLast = originalIndex === displayEntries.length - 1;
         const prev = displayEntries[originalIndex - 1];
+        const item = layout.items[originalIndex];
         const rowsToSkip = i === 0 ? window.startOffsetRows : 0;
-        const estimatedRows = getEntryRows?.(entry, originalIndex) ?? estimatedRowHeight;
+        const separatorRows = item?.separatorRows ?? 0;
+        const contentRowsToSkip = Math.max(0, rowsToSkip - separatorRows);
+        const estimatedRows = item?.rows ?? estimatedRowHeight;
         const visibleRows =
           estimatedRows === undefined ? viewportRows : Math.max(1, estimatedRows - rowsToSkip);
-        const visibleEntry = clipEntryTopRows(entry, rowsToSkip, visibleRows, wrapWidth);
+        const visibleEntry = clipEntryTopRows(
+          entry,
+          contentRowsToSkip,
+          visibleRows,
+          layout.wrapWidth,
+        );
         // 轮次分隔:遇到新的 user 消息,且前面已有内容时,加一条淡色分隔线
-        const showSeparator = entry.kind === "user" && prev !== undefined;
+        const showSeparator = entry.kind === "user" && prev !== undefined && rowsToSkip === 0;
         return (
           <React.Fragment key={originalIndex}>
             {showSeparator && <Separator />}
@@ -131,23 +133,8 @@ function clipTextTopRows(
   wrapWidth: number | undefined,
 ): string {
   if (rowsToSkip <= 0) return text;
-  const rows = textToVisualRows(text, wrapWidth);
+  const rows = visualRows(text, normalizeWrapWidth(wrapWidth));
   return rows.slice(rowsToSkip, rowsToSkip + rowsToKeep).join("\n");
-}
-
-function textToVisualRows(text: string, wrapWidth: number | undefined): string[] {
-  const width = normalizeWrapWidth(wrapWidth);
-  const rows: string[] = [];
-  for (const logicalLine of text.split("\n")) {
-    if (logicalLine.length === 0) {
-      rows.push("");
-      continue;
-    }
-    for (let index = 0; index < logicalLine.length; index += width) {
-      rows.push(logicalLine.slice(index, index + width));
-    }
-  }
-  return rows.length === 0 ? [""] : rows;
 }
 
 function normalizeWrapWidth(width: number | undefined): number {
