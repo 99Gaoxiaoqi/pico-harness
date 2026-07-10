@@ -15,7 +15,6 @@
 // 清理内存资源,防止挂死泄漏。
 
 import { logger } from "../observability/logger.js";
-import type { PermissionSource } from "./arbiter.js";
 
 /** 审批结果包 */
 export interface ApprovalResult {
@@ -201,11 +200,7 @@ Agent 试图执行以下动作:
   }
 
   /** 取消单个挂起审批任务,用于 Permission Arbiter 失去竞速或外部中止时释放资源。 */
-  cancelApproval(
-    taskId: string,
-    reason = "审批请求已取消。",
-    abortReason?: unknown,
-  ): boolean {
+  cancelApproval(taskId: string, reason = "审批请求已取消。", abortReason?: unknown): boolean {
     const entry = this.takePendingTask(taskId);
     if (!entry) {
       return false;
@@ -257,33 +252,6 @@ Agent 试图执行以下动作:
  * Middleware 与飞书 Bot 回调之间通过它共享审批状态。
  */
 export const globalApprovalManager = new ApprovalManager();
-
-export interface LocalApprovalSourceOptions {
-  manager: ApprovalManager;
-  taskId: string;
-  toolName: string;
-  args: string;
-  notify: ApprovalNotifier;
-  diff?: string;
-}
-
-/** 将现有 ApprovalManager 人工审批包装为 Permission Arbiter 的本地 source。 */
-export function createLocalApprovalSource({
-  manager,
-  taskId,
-  toolName,
-  args,
-  notify,
-  diff,
-}: LocalApprovalSourceOptions): PermissionSource {
-  return {
-    name: "local",
-    promise: manager.waitForApproval(taskId, toolName, args, notify, diff),
-    cleanup: () => {
-      manager.cancelApproval(taskId, "审批仲裁已由其他来源处理。");
-    },
-  };
-}
 
 /**
  * 高危命令检测:正则黑名单。

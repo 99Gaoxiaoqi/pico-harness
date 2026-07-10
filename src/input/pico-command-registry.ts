@@ -18,10 +18,7 @@ import { listCliSessionSummaries } from "../cli/session-resolver.js";
 import { createPermissionState } from "../approval/permission-state.js";
 import { formatPermissionPanel } from "../tui/approval-panel.js";
 import { createBuiltinCommands } from "./builtin-commands.js";
-import {
-  createAddDirectoryCommand,
-  type AdditionalDirectoryManager,
-} from "./add-directory.js";
+import { createAddDirectoryCommand, type AdditionalDirectoryManager } from "./add-directory.js";
 import { CommandRegistry } from "./command-registry.js";
 import {
   loadMarkdownCommands,
@@ -95,6 +92,7 @@ export type McpStatusProvider = () => McpStatusSnapshot | undefined;
 
 export interface PicoCommandRegistryOptions {
   workDir: string;
+  projectCommandsDir?: string;
   model: string;
   provider: ProviderKind;
   session?: Session;
@@ -159,6 +157,9 @@ export async function createPicoCommandRegistry(
 
   const markdownCommands = await loadMarkdownCommands({
     workDir: options.workDir,
+    ...(options.projectCommandsDir !== undefined
+      ? { projectCommandsDir: options.projectCommandsDir }
+      : {}),
     includeSkillCommands: true,
     skillLoader,
     builtinNames: registry.list().flatMap((command) => [command.name, ...(command.aliases ?? [])]),
@@ -642,7 +643,8 @@ function formatToolCount(count: number): string {
 function formatToolSummary(toolNames: readonly string[]): string {
   if (toolNames.length === 0) return "";
   const visible = toolNames.slice(0, 5);
-  const suffix = toolNames.length > visible.length ? `, +${toolNames.length - visible.length} more` : "";
+  const suffix =
+    toolNames.length > visible.length ? `, +${toolNames.length - visible.length} more` : "";
   return `: ${visible.join(", ")}${suffix}`;
 }
 
@@ -892,9 +894,7 @@ function createSnapshotsCommand(options: PicoCommandRegistryOptions): SlashComma
   };
 }
 
-function createRewindCommand(
-  options: PicoCommandRegistryOptions,
-): SlashCommand {
+function createRewindCommand(options: PicoCommandRegistryOptions): SlashCommand {
   return {
     name: "rewind",
     aliases: ["checkpoint"],
@@ -1049,9 +1049,7 @@ function createSkillCommand(loader: SkillLoader): SlashCommand {
   };
 }
 
-function createAgentCommand(
-  options: PicoCommandRegistryOptions,
-): SlashCommand {
+function createAgentCommand(options: PicoCommandRegistryOptions): SlashCommand {
   return {
     name: "agent",
     description: "Dispatch a task to a named subagent",
@@ -1254,6 +1252,7 @@ function initializeProjectEntrypoints(workDir: string): string {
         {
           version: 1,
           commandsDir: ".pico/commands",
+          keybindings: {},
         },
         null,
         2,

@@ -3,15 +3,15 @@ import { readdir } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { promisify } from "node:util";
 
-export type CommandRunner = (
-  command: string,
-  args: string[],
-  cwd: string,
-) => Promise<string>;
+export type CommandRunner = (command: string, args: string[], cwd: string) => Promise<string>;
 
 export interface FileIndexOptions {
   cwd: string;
   commandRunner?: CommandRunner;
+  /** Maximum cache age. Internal writes can invalidate sooner with markDirty(). */
+  cacheTtlMs?: number;
+  /** Injectable clock for deterministic tests. */
+  now?: () => number;
 }
 
 export interface FileSuggestionOptions {
@@ -31,6 +31,7 @@ interface DirectoryEntry {
 const execFileAsync = promisify(execFile);
 
 export const DEFAULT_FILE_SUGGESTION_LIMIT = 50;
+export const DEFAULT_FILE_INDEX_CACHE_TTL_MS = 5_000;
 export const FILE_SUGGESTION_IGNORED_DIRS: ReadonlySet<string> = new Set([
   ".git",
   ".claw",
@@ -45,43 +46,55 @@ export const FILE_SUGGESTION_IGNORED_DIRS: ReadonlySet<string> = new Set([
 
 export class FileIndex {
   private cachedFiles: string[] | undefined;
+  private dirty = false;
+  private refreshedAt = 0;
 
   private constructor(
     private readonly cwd: string,
     private readonly commandRunner: CommandRunner,
+    private readonly cacheTtlMs: number,
+    private readonly now: () => number,
   ) {}
 
   static create(options: FileIndexOptions): FileIndex {
-    return new FileIndex(options.cwd, options.commandRunner ?? runCommand);
+    return new FileIndex(
+      options.cwd,
+      options.commandRunner ?? runCommand,
+      options.cacheTtlMs ?? DEFAULT_FILE_INDEX_CACHE_TTL_MS,
+      options.now ?? Date.now,
+    );
   }
 
-  async query(
-    text: string,
-    limit = DEFAULT_FILE_SUGGESTION_LIMIT,
-  ): Promise<string[]> {
+  async query(text: string, limit = DEFAULT_FILE_SUGGESTION_LIMIT): Promise<string[]> {
     const query = normalizeFileQuery(text);
     const files = await this.getFiles();
 
-    return files
-      .filter((file) => query.length === 0 || file.includes(query))
-      .slice(0, limit);
+    return files.filter((file) => query.length === 0 || file.includes(query)).slice(0, limit);
   }
 
   async refresh(): Promise<void> {
     this.cachedFiles = await discoverFiles(this.cwd, this.commandRunner);
+    this.refreshedAt = this.now();
+    this.dirty = false;
+  }
+
+  markDirty(): void {
+    this.dirty = true;
   }
 
   private async getFiles(): Promise<string[]> {
-    if (this.cachedFiles === undefined) {
+    if (
+      this.cachedFiles === undefined ||
+      this.dirty ||
+      this.now() - this.refreshedAt >= this.cacheTtlMs
+    ) {
       await this.refresh();
     }
     return this.cachedFiles ?? [];
   }
 }
 
-export async function listFileSuggestions(
-  options: FileSuggestionOptions,
-): Promise<string[]> {
+export async function listFileSuggestions(options: FileSuggestionOptions): Promise<string[]> {
   const index =
     options.fileIndex ??
     FileIndex.create({
@@ -92,10 +105,7 @@ export async function listFileSuggestions(
   return index.query(options.query ?? "", options.limit ?? DEFAULT_FILE_SUGGESTION_LIMIT);
 }
 
-async function discoverFiles(
-  cwd: string,
-  runner: CommandRunner,
-): Promise<string[]> {
+async function discoverFiles(cwd: string, runner: CommandRunner): Promise<string[]> {
   const files =
     (await tryCommand(runner, "git", ["-c", "core.quotepath=false", "ls-files"], cwd)) ??
     (await tryCommand(runner, "rg", ["--files"], cwd)) ??
@@ -121,11 +131,7 @@ async function tryCommand(
   }
 }
 
-async function runCommand(
-  command: string,
-  args: string[],
-  cwd: string,
-): Promise<string> {
+async function runCommand(command: string, args: string[], cwd: string): Promise<string> {
   const { stdout } = await execFileAsync(command, args, {
     cwd,
     encoding: "utf8",

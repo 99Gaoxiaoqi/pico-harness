@@ -9,6 +9,7 @@ import {
   type ApprovalNotice,
 } from "../src/approval/manager.js";
 import { buildApprovalMiddleware, runAgentFromCli } from "../src/cli/run-agent.js";
+import { globalSessionManager } from "../src/engine/session.js";
 import type { Reporter } from "../src/engine/reporter.js";
 import type { Message, ToolDefinition } from "../src/schema/message.js";
 import type { LLMProvider } from "../src/provider/interface.js";
@@ -17,6 +18,7 @@ import {
   getStoredSessionSettings,
   resetSessionSettingsForTests,
 } from "../src/input/session-settings.js";
+import { createTuiRuntimeState } from "../src/tui/runtime-state.js";
 
 class ScriptedProvider implements LLMProvider {
   readonly calls: Array<{ messages: Message[]; toolNames: string[] }> = [];
@@ -137,7 +139,57 @@ async function waitForApprovalBeforeCompletion<T>(
 describe("runAgentFromCli", () => {
   afterEach(() => {
     globalApprovalManager.clear();
+    globalSessionManager.clear();
     resetSessionSettingsForTests();
+  });
+
+  it("reuses session-scoped goal state, prompt memory and late tool status", async () => {
+    const workDir = await realpath(await mkdtemp(join(tmpdir(), "pico-cli-runtime-state-")));
+    const sessionId = "runtime-state-session";
+    const session = await globalSessionManager.getOrCreate(sessionId, workDir, {
+      persistence: false,
+    });
+    const runtimeState = await createTuiRuntimeState({ workDir, sessionId, session });
+    const provider = new ScriptedProvider([
+      {
+        role: "assistant",
+        content: "create persistent goal",
+        toolCalls: [
+          {
+            id: "create-runtime-goal",
+            name: "create_goal",
+            arguments: JSON.stringify({
+              title: "Persistent TUI goal",
+              description: "must survive the next prompt",
+            }),
+          },
+        ],
+      },
+      { role: "assistant", content: "goal created" },
+      { role: "assistant", content: "goal still visible" },
+    ]);
+    const toolSnapshots: string[][] = [];
+
+    await runAgentFromCli(
+      { prompt: "create it", dir: workDir, session: sessionId, provider: "openai" },
+      {
+        provider,
+        runtimeState,
+        toolStatusSink: (tools) => toolSnapshots.push(tools.map((tool) => tool.name)),
+      },
+    );
+    await runAgentFromCli(
+      { prompt: "continue it", dir: workDir, session: sessionId, provider: "openai" },
+      { provider, runtimeState },
+    );
+
+    expect(runtimeState.goalManager.getActive()?.title).toBe("Persistent TUI goal");
+    expect(provider.calls[2]?.messages[0]?.content).toContain("Persistent TUI goal");
+    expect(toolSnapshots.at(-1)).toEqual(
+      expect.arrayContaining(["delegate_task", "delegate_status", "spawn_subagent"]),
+    );
+
+    await runtimeState.dispose();
   });
 
   it("已中止 signal 会阻止新 run 调用 provider", async () => {
@@ -559,11 +611,7 @@ describe("runAgentFromCli", () => {
     controller.abort(new DOMException("interrupted", "AbortError"));
     await expect(runPromise).rejects.toMatchObject({ name: "AbortError" });
     const pendingAfterAbort = globalApprovalManager.pendingCount;
-    const lateApproval = globalApprovalManager.resolveApproval(
-      notice.taskId,
-      true,
-      "late approve",
-    );
+    const lateApproval = globalApprovalManager.resolveApproval(notice.taskId, true, "late approve");
     await new Promise((resolve) => setTimeout(resolve, 20));
     const fileContent = await readFile(join(workDir, "must-not-exist.txt"), "utf8").catch(
       () => undefined,

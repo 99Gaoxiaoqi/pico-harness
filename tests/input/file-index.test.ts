@@ -25,10 +25,7 @@ describe("FileIndex", () => {
       },
     });
 
-    await expect(index.query("src/", 10)).resolves.toEqual([
-      "src/api.ts",
-      "src/app.ts",
-    ]);
+    await expect(index.query("src/", 10)).resolves.toEqual(["src/api.ts", "src/app.ts"]);
     await expect(index.query("README", 10)).resolves.toEqual(["README.md"]);
 
     expect(calls).toEqual(["git"]);
@@ -53,6 +50,42 @@ describe("FileIndex", () => {
 
     await expect(index.query("new", 10)).resolves.toEqual(["src/new.ts"]);
     expect(calls).toEqual(["git", "git"]);
+  });
+
+  it("refreshes lazily after markDirty", async () => {
+    let output = "src/old.ts\n";
+    const calls: string[] = [];
+    const index = FileIndex.create({
+      cwd: workDir,
+      commandRunner: async (command) => {
+        calls.push(command);
+        return output;
+      },
+    });
+
+    await expect(index.query("new")).resolves.toEqual([]);
+    output = "src/old.ts\nsrc/new.ts\n";
+    index.markDirty();
+    await expect(index.query("new")).resolves.toEqual(["src/new.ts"]);
+    expect(calls).toEqual(["git", "git"]);
+  });
+
+  it("refreshes after the configured cache ttl", async () => {
+    let now = 1_000;
+    let output = "src/old.ts\n";
+    const index = FileIndex.create({
+      cwd: workDir,
+      commandRunner: async () => output,
+      cacheTtlMs: 5_000,
+      now: () => now,
+    });
+
+    await expect(index.query("")).resolves.toEqual(["src/old.ts"]);
+    output = "src/new.ts\n";
+    now += 4_999;
+    await expect(index.query("")).resolves.toEqual(["src/old.ts"]);
+    now += 1;
+    await expect(index.query("")).resolves.toEqual(["src/new.ts"]);
   });
 
   it("falls back from git ls-files to rg --files", async () => {
@@ -86,17 +119,13 @@ describe("FileIndex", () => {
       },
     });
 
-    await expect(index.query("", 10)).resolves.toEqual([
-      "README.md",
-      "src/app.ts",
-    ]);
+    await expect(index.query("", 10)).resolves.toEqual(["README.md", "src/app.ts"]);
   });
 
   it("filters ignored directories from command output", async () => {
     const index = FileIndex.create({
       cwd: workDir,
-      commandRunner: async () =>
-        "src/app.ts\nnode_modules/hidden.ts\n.git/config\n",
+      commandRunner: async () => "src/app.ts\nnode_modules/hidden.ts\n.git/config\n",
     });
 
     await expect(index.query("", 10)).resolves.toEqual(["src/app.ts"]);

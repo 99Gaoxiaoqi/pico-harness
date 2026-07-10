@@ -1,6 +1,5 @@
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
 import { addSessionAdditionalDirectory, type SessionSettings } from "./session-settings.js";
+import { loadPicoConfig } from "./pico-config.js";
 import type { LocalCommandResult, SlashCommand } from "./types.js";
 
 export interface AddDirectoryResult {
@@ -15,22 +14,7 @@ export interface AdditionalDirectoryManager {
 }
 
 export async function loadConfiguredAdditionalDirectories(workDir: string): Promise<string[]> {
-  let content: string;
-  try {
-    content = await readFile(join(workDir, ".pico", "config.json"), "utf8");
-  } catch (error) {
-    if (isErrnoCode(error, "ENOENT")) return [];
-    throw error;
-  }
-
-  const parsed = JSON.parse(content) as unknown;
-  if (!isRecord(parsed) || !isRecord(parsed["permissions"])) return [];
-  const directories = parsed["permissions"]["additionalDirectories"];
-  if (directories === undefined) return [];
-  if (!Array.isArray(directories) || directories.some((item) => typeof item !== "string")) {
-    throw new Error(".pico/config.json permissions.additionalDirectories 必须是字符串数组。");
-  }
-  return directories.map((item) => item.trim()).filter(Boolean);
+  return (await loadPicoConfig(workDir)).additionalDirectories;
 }
 
 export function createAddDirectoryCommand(
@@ -62,10 +46,10 @@ export function createAddDirectoryCommand(
         const result = await manager.addDirectory(input.args);
         const roots = [...manager.list()];
         if (!result.added) {
-          return localMessage(
-            `Directory not added: ${result.reason ?? result.path}`,
-            { ...result, roots },
-          );
+          return localMessage(`Directory not added: ${result.reason ?? result.path}`, {
+            ...result,
+            roots,
+          });
         }
 
         const additionalDirectories = addSessionAdditionalDirectory(settings, result.path);
@@ -98,17 +82,4 @@ function localMessage(message: string, data?: unknown): LocalCommandResult {
     message,
     ...(data === undefined ? {} : { data }),
   };
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function isErrnoCode(error: unknown, code: string): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "code" in error &&
-    (error as { code?: unknown }).code === code
-  );
 }

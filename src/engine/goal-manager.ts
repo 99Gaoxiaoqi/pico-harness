@@ -17,10 +17,20 @@
 // 状态机:active(进行中) → paused(主动暂停) / blocked(被阻塞) → complete(完成)
 // 同一时刻最多一个 active goal(setActive 会把旧的置回 active 之外的状态)。
 
-import type { BudgetConfig } from "./budget.js";
+import type { Usage } from "../schema/message.js";
+import { toCanonicalUsage } from "../schema/message.js";
+import type { BudgetConfig, BudgetDecision } from "./budget.js";
 
 /** 目标状态机四态 */
 export type GoalStatus = "active" | "paused" | "blocked" | "complete";
+
+export interface GoalBudgetUsage {
+  turns: number;
+  tokens: number;
+  costCNY: number;
+  /** Wall-clock budgets are measured from goal creation and do not pause. */
+  startedAt: number;
+}
 
 /** 单个目标 */
 export interface Goal {
@@ -32,6 +42,8 @@ export interface Goal {
   createdAt: number;
   /** 预算配置(tokens / turns / 墙钟)。可选:无配置表示不设预算约束。 */
   budgetConfig?: BudgetConfig;
+  /** Session-lifetime usage retained when budget limits are edited. */
+  budgetUsage: GoalBudgetUsage;
   /** 模型更新的进度说明(自由文本,模型在推进过程中写入) */
   progress?: string;
   /** blocked 状态下的阻塞原因 */
@@ -85,6 +97,11 @@ export class GoalManager {
   private activeGoalId: string | null = null;
   /** 自增序列,保证 id 唯一且可读 */
   private seq = 0;
+  private readonly now: () => number;
+
+  constructor(options: { now?: () => number } = {}) {
+    this.now = options.now ?? Date.now;
+  }
 
   /**
    * 创建一个新目标,默认状态为 active,并自动设为当前激活目标。
@@ -94,18 +111,21 @@ export class GoalManager {
    * @param description 目标详细描述
    * @param budgetConfig 可选预算约束(tokens/turns/墙钟)
    */
-  create(
-    title: string,
-    description: string,
-    budgetConfig?: BudgetConfig,
-  ): Goal {
+  create(title: string, description: string, budgetConfig?: BudgetConfig): Goal {
     this.seq++;
+    const createdAt = this.now();
     const goal: Goal = {
       id: `goal-${this.seq}`,
       title,
       description,
       status: "active",
-      createdAt: Date.now(),
+      createdAt,
+      budgetUsage: {
+        turns: 0,
+        tokens: 0,
+        costCNY: 0,
+        startedAt: createdAt,
+      },
       ...(budgetConfig !== undefined ? { budgetConfig } : {}),
     };
     this.goals.set(goal.id, goal);
@@ -149,9 +169,7 @@ export class GoalManager {
 
     if (patch.status !== undefined) {
       if (!VALID_STATUSES.has(patch.status)) {
-        throw new Error(
-          `非法 goal 状态: ${patch.status}。合法值:active/paused/blocked/complete`,
-        );
+        throw new Error(`非法 goal 状态: ${patch.status}。合法值:active/paused/blocked/complete`);
       }
       // 切到 active 时,把原 active 降级(状态机唯一性约束)
       if (patch.status === "active" && this.activeGoalId !== id) {
@@ -176,6 +194,63 @@ export class GoalManager {
   /** 返回全部目标(按创建顺序) */
   list(): Goal[] {
     return [...this.goals.values()];
+  }
+
+  /** Check whether the active goal permits one more model turn. */
+  canStartTurn(now = this.now()): BudgetDecision {
+    const active = this.getActive();
+    if (!active) return { allowed: true };
+    const config = active.budgetConfig;
+    if (!config) return { allowed: true };
+    if (config.maxTurns !== undefined && active.budgetUsage.turns + 1 > config.maxTurns) {
+      return { allowed: false, reason: `Goal 已达到最大轮次 ${config.maxTurns}` };
+    }
+    return this.currentBudgetDecision(now);
+  }
+
+  /** Consume one model turn only when the active goal still allows it. */
+  startTurn(): BudgetDecision {
+    const decision = this.canStartTurn();
+    if (!decision.allowed) return decision;
+    const active = this.getActive();
+    if (active) active.budgetUsage.turns++;
+    return { allowed: true };
+  }
+
+  consumeUsage(usage: Usage): BudgetDecision {
+    const active = this.getActive();
+    if (!active) return { allowed: true };
+    const canonical = toCanonicalUsage(usage);
+    active.budgetUsage.tokens += canonical.totalPromptTokens + canonical.totalCompletionTokens;
+    return this.currentBudgetDecision();
+  }
+
+  consumeCost(costCNY: number): BudgetDecision {
+    const active = this.getActive();
+    if (!active) return { allowed: true };
+    if (Number.isFinite(costCNY) && costCNY > 0) {
+      active.budgetUsage.costCNY += costCNY;
+    }
+    return this.currentBudgetDecision();
+  }
+
+  currentBudgetDecision(now = this.now()): BudgetDecision {
+    const active = this.getActive();
+    if (!active?.budgetConfig) return { allowed: true };
+    const { budgetConfig: config, budgetUsage: usage } = active;
+    if (config.maxWallClockMs !== undefined && now - usage.startedAt > config.maxWallClockMs) {
+      return {
+        allowed: false,
+        reason: `Goal 已达墙钟时间上限 ${config.maxWallClockMs}ms`,
+      };
+    }
+    if (config.maxTokens !== undefined && usage.tokens > config.maxTokens) {
+      return { allowed: false, reason: `Goal 已达到 Token 预算 ${config.maxTokens}` };
+    }
+    if (config.maxCostCNY !== undefined && usage.costCNY > config.maxCostCNY) {
+      return { allowed: false, reason: `Goal 已达到成本预算 ¥${config.maxCostCNY}` };
+    }
+    return { allowed: true };
   }
 
   /**
@@ -236,6 +311,9 @@ export class GoalManager {
     const budgetStr = formatBudget(active.budgetConfig);
     if (budgetStr) {
       lines.push(`  - 预算约束: ${budgetStr}`);
+      lines.push(
+        `  - 已消耗: ${active.budgetUsage.turns} 轮 + ${active.budgetUsage.tokens} tokens + ¥${active.budgetUsage.costCNY.toFixed(4)}`,
+      );
     }
     lines.push("  - 提示:推进任务时请对齐此目标;达成后用 update_goal 置 complete。");
     return lines.join("\n");

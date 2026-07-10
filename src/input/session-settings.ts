@@ -1,9 +1,6 @@
 import type { ProviderKind } from "../provider/factory.js";
 import { resolveProviderProfile } from "../provider/profile.js";
-import {
-  isValidThinkingEffort,
-  type ThinkingEffort,
-} from "../provider/thinking.js";
+import { isValidThinkingEffort, type ThinkingEffort } from "../provider/thinking.js";
 import type { Registry } from "../tools/registry.js";
 
 export interface SessionToolStatus {
@@ -70,9 +67,7 @@ export function createDefaultSessionSettings(defaults: SessionSettingsDefaults):
     thinkingEffortExplicit: defaults.thinkingEffort !== undefined,
     permissionMode: defaults.permissionMode ?? "ask",
     tools: defaults.tools ?? [],
-    additionalDirectories: createAdditionalDirectorySnapshot(
-      defaults.additionalDirectories ?? [],
-    ),
+    additionalDirectories: createAdditionalDirectorySnapshot(defaults.additionalDirectories ?? []),
   };
 }
 
@@ -97,7 +92,10 @@ export function getOrCreateSessionSettings(defaults: SessionSettingsDefaults): S
     existing.cwd = defaults.cwd;
     existing.provider = defaults.provider;
     existing.mode = defaults.mode ?? existing.mode;
-    if (defaults.permissionMode !== undefined && shouldApplyPermissionModeDefault(existing.permissionMode, defaults.permissionMode)) {
+    if (
+      defaults.permissionMode !== undefined &&
+      shouldApplyPermissionModeDefault(existing.permissionMode, defaults.permissionMode)
+    ) {
       existing.permissionMode = defaults.permissionMode;
     }
     existing.tools = defaults.tools ?? existing.tools;
@@ -123,9 +121,7 @@ export function rememberResolvedCliSession(selection: {
 }): void {
   resolvedCliSessionSemantics.set(selection.sessionId, {
     sessionMode: selection.mode,
-    ...(selection.sourceSessionId !== undefined
-      ? { forkFrom: selection.sourceSessionId }
-      : {}),
+    ...(selection.sourceSessionId !== undefined ? { forkFrom: selection.sourceSessionId } : {}),
   });
 }
 
@@ -161,6 +157,14 @@ export function setSessionAdditionalDirectories(
   return settings.additionalDirectories;
 }
 
+export function setSessionTools(
+  settings: SessionSettings,
+  tools: readonly SessionToolStatus[],
+): readonly SessionToolStatus[] {
+  settings.tools = Object.freeze(tools.map((tool) => Object.freeze({ ...tool })));
+  return settings.tools;
+}
+
 export function setSessionModel(settings: SessionSettings, model: string): SessionSettingResult {
   const normalized = model.trim();
   if (!normalized) {
@@ -184,7 +188,10 @@ export function setSessionMode(settings: SessionSettings, mode: string): Session
   return { ok: true, message: `Mode set to ${settings.mode}` };
 }
 
-export function setSessionPermissionMode(settings: SessionSettings, mode: string): SessionSettingResult {
+export function setSessionPermissionMode(
+  settings: SessionSettings,
+  mode: string,
+): SessionSettingResult {
   const normalized = mode.trim().toLowerCase();
   if (!permissionCommandModes.has(normalized)) {
     return {
@@ -247,9 +254,7 @@ export function formatToolStatus(tools: readonly SessionToolStatus[]): string {
     return "No tools are available.";
   }
 
-  return tools
-    .map((tool) => `${tool.name} - ${tool.readOnly ? "read-only" : "write"}`)
-    .join("\n");
+  return tools.map((tool) => `${tool.name} - ${tool.readOnly ? "read-only" : "write"}`).join("\n");
 }
 
 export function toolStatusFromRegistry(registry: Registry): SessionToolStatus[] {
