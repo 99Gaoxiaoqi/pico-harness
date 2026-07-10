@@ -24,6 +24,7 @@ describe("TUI running input queue", () => {
 
   it("running 中两个普通输入排队,当前任务完成后按顺序调用 runAgent", async () => {
     const { reporter, guard, queue, registry, workDir, exit, runAgent } = harness();
+    const onQueueSizeChange = vi.fn();
     let finishFirst!: () => void;
     const firstDone = new Promise<void>((resolve) => {
       finishFirst = resolve;
@@ -38,6 +39,7 @@ describe("TUI running input queue", () => {
       workDir,
       exit,
       runAgent,
+      onQueueSizeChange,
     });
     await waitForGuardStatus(guard, "running");
 
@@ -49,6 +51,7 @@ describe("TUI running input queue", () => {
       workDir,
       exit,
       runAgent,
+      onQueueSizeChange,
     });
     await handleTuiRunningInputSubmission("third", {
       reporter,
@@ -58,6 +61,7 @@ describe("TUI running input queue", () => {
       workDir,
       exit,
       runAgent,
+      onQueueSizeChange,
     });
 
     expect(runAgent).toHaveBeenCalledTimes(1);
@@ -71,6 +75,9 @@ describe("TUI running input queue", () => {
     expect(runAgent).toHaveBeenNthCalledWith(2, "second");
     expect(runAgent).toHaveBeenNthCalledWith(3, "third");
     expect(queue.size).toBe(0);
+    expect(onQueueSizeChange).toHaveBeenCalledWith(1);
+    expect(onQueueSizeChange).toHaveBeenCalledWith(2);
+    expect(onQueueSizeChange).toHaveBeenLastCalledWith(0);
   });
 
   it("running 中会改状态的本地命令被拦截", async () => {

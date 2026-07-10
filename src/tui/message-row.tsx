@@ -78,16 +78,8 @@ function MessageRowImpl({
       );
 
     case "error":
-      return (
-        <MessageFrame marker="!" markerColor="yellow" boldMarker>
-          <Text color="yellow" wrap="wrap">
-            {clipRows(
-              buildErrorEntryRows(entry, wrapWidth),
-              toolStartOffsetRows,
-              toolVisibleRows,
-            ).join("\n")}
-          </Text>
-        </MessageFrame>
+      return renderErrorRows(
+        clipRows(buildErrorFrameRows(entry, wrapWidth), toolStartOffsetRows, toolVisibleRows),
       );
 
     case "system":
@@ -161,13 +153,44 @@ export function buildErrorEntryRows(
   return visualRows(formatErrorEntry(entry), Math.max(1, wrapWidth));
 }
 
+function buildErrorFrameRows(
+  entry: Extract<TuiEntry, { kind: "error" }>,
+  wrapWidth = 80,
+): string[] {
+  return ["", ...buildErrorEntryRows(entry, wrapWidth)];
+}
+
+function renderErrorRows(rows: string[]): React.ReactNode {
+  let markerRendered = false;
+  return (
+    <Box flexDirection="column">
+      {rows.map((row, index) => {
+        if (row === "") return <Text key={`${index}:blank`}> </Text>;
+        const marker = markerRendered ? "" : "!";
+        markerRendered = true;
+        return (
+          <Box key={`${index}:${row}`}>
+            <Box width={2}>
+              <Text color="yellow" bold>
+                {marker}
+              </Text>
+            </Box>
+            <Text color="yellow" wrap="truncate">
+              {row}
+            </Text>
+          </Box>
+        );
+      })}
+    </Box>
+  );
+}
+
 function clipRows(
   rows: string[],
   startOffsetRows: number | undefined,
   visibleRows: number | undefined,
 ): string[] {
-  const rawStart = Math.max(0, Math.floor(startOffsetRows ?? 0));
-  const start = rawStart === 0 ? 0 : Math.max(0, rawStart - 1);
+  const start = Math.max(0, Math.floor(startOffsetRows ?? 0));
   const end = visibleRows === undefined ? undefined : start + Math.max(0, Math.floor(visibleRows));
   return rows.slice(start, end);
 }

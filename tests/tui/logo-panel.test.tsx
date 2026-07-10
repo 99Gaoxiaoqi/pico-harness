@@ -52,8 +52,34 @@ describe("LogoPanel", () => {
     const output = renderToString(<LogoPanel {...props} />, { columns });
 
     expect(output.split("\n")).toHaveLength(buildLogoPanelRows(props).length + 1);
-    expect(output).toContain("任");
-    expect(output).toContain("务");
-    expect(output).toContain("🚀");
+    expect(output).not.toContain("任务");
+    expect(output).not.toContain("MCP 1/2");
+  });
+
+  it("clips with the top margin counted as a real visual row", () => {
+    const props = {
+      model: "glm-5.2",
+      cwd: "/工作区/从0开始构建AgentHarness/pico-harness",
+      sessionMode: "plan",
+      permissionMode: "auto",
+      mcpSummary: "MCP 1/2",
+      taskSummary: "任务 🚀",
+      renderWidth: 10,
+    };
+
+    const firstWindow = renderToString(
+      <LogoPanel {...props} startOffsetRows={0} visibleRows={2} />,
+      { columns: 12 },
+    );
+    const shiftedWindow = renderToString(
+      <LogoPanel {...props} startOffsetRows={1} visibleRows={2} />,
+      { columns: 12 },
+    );
+
+    expect(firstWindow.split("\n")).toHaveLength(2);
+    expect(firstWindow).toContain("pico");
+    expect(shiftedWindow.split("\n")).toHaveLength(2);
+    expect(shiftedWindow).toContain("pico");
+    expect(shiftedWindow).not.toBe(firstWindow);
   });
 });

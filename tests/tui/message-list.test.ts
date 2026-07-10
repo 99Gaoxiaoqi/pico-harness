@@ -180,7 +180,7 @@ describe("MessageList virtual transcript", () => {
       React.createElement(MessageList, {
         layout: buildTranscriptLayout(entries, { wrapWidth: 12 }),
         viewportRows: 3,
-        scrollOffsetRows: 7,
+        scrollOffsetRows: 2,
         overscanRows: 0,
         virtualizeThreshold: 0,
         preserveVirtualSpacers: false,
@@ -200,9 +200,34 @@ describe("MessageList virtual transcript", () => {
     );
 
     expect(logoOutput).not.toContain("pico ·");
-    expect(logoOutput).toContain("MCP 1/2");
+    expect(logoOutput).toContain("工作区");
     expect(errorOutput).not.toContain("first-line");
     expect(errorOutput).toContain("second-line");
+  });
+
+  it("counts the error top margin inside the clipped viewport", () => {
+    const entries: TuiEntry[] = [
+      {
+        kind: "error",
+        message: "失败一行 失败二行 失败三行 失败四行",
+        retryable: false,
+      },
+    ];
+
+    const output = renderToString(
+      React.createElement(MessageList, {
+        layout: buildTranscriptLayout(entries, { wrapWidth: 10 }),
+        viewportRows: 2,
+        scrollOffsetRows: 0,
+        overscanRows: 0,
+        virtualizeThreshold: 0,
+        preserveVirtualSpacers: false,
+      }),
+      { columns: 16 },
+    );
+
+    expect(output.split("\n")).toHaveLength(2);
+    expect(output).toContain("!");
   });
 });
 

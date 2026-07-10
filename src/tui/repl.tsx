@@ -130,6 +130,7 @@ export interface LocalTuiModelSelectorDialogEffect {
 export interface HandleTuiRunningInputSubmissionDeps extends HandleTuiInputSubmissionDeps {
   guard: Pick<QueryGuard, "tryStart" | "end" | "getSnapshot">;
   queue: RunningInputQueue;
+  onQueueSizeChange?: (size: number) => void;
 }
 
 export type TuiRunAgent = (
@@ -186,10 +187,7 @@ async function runPreparedUserPrompt(
   try {
     prepared = await preparePromptForMessage(prompt, deps.workDir);
   } catch (error) {
-    deps.reporter.pushError(error instanceof Error ? error.message : String(error), {
-      retryable: defaultIsRetryableError(error),
-      action: "check logs or retry",
-    });
+    appendTuiRunError(deps.reporter, error);
     return;
   }
 
@@ -230,6 +228,8 @@ export async function handleTuiRunningInputSubmission(
     const queued = deps.queue.enqueue(text, processed, { commandAvailabilityState: availabilityState });
     if (queued.type === "rejected") {
       deps.reporter.pushSystemMessage(`Input queue is full (${queued.capacity}). Please wait.`);
+    } else {
+      deps.onQueueSizeChange?.(deps.queue.size);
     }
     return;
   }
@@ -265,6 +265,7 @@ async function runProcessedAgentInput(
 async function drainQueuedTuiInputs(deps: HandleTuiRunningInputSubmissionDeps): Promise<void> {
   while (deps.queue.size > 0) {
     const queued = deps.queue.drain();
+    deps.onQueueSizeChange?.(deps.queue.size);
     for (const item of queued) {
       if (item.kind !== "normal") continue;
       const processed = item.processed ?? (await processTuiInput(item.text, deps));
@@ -286,6 +287,8 @@ async function drainQueuedTuiInputs(deps: HandleTuiRunningInputSubmissionDeps): 
           deps.reporter.pushSystemMessage(
             `Input queue is full (${queuedAgain.capacity}). Please wait.`,
           );
+        } else {
+          deps.onQueueSizeChange?.(deps.queue.size);
         }
         return;
       }
@@ -466,6 +469,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     const { exit } = useApp();
     const [stateEntries, setStateEntries] = useState<TuiEntry[]>([]);
     const [dialogRequests, setDialogRequests] = useState<DialogRequest[]>([]);
+    const [queuedCount, setQueuedCount] = useState(0);
     setEntries = setStateEntries;
 
     // QueryGuard:三态状态机(idle/dispatching/running),useSyncExternalStore 订阅。
@@ -486,6 +490,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
           reporter,
           guard,
           queue: runningQueue,
+          onQueueSizeChange: setQueuedCount,
           registry,
           workDir: opts.workDir,
           exit,
@@ -584,8 +589,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         permissionMode={settings.permissionMode}
         thinkingEffort={settings.thinkingEffort}
         mcpSummary={formatTuiMcpSummary(latestMcpStatus)}
-        taskSummary={settings.thinkingEffort === "off" ? undefined : `think ${settings.thinkingEffort}`}
-        queuedCount={runningQueue.size}
+        queuedCount={queuedCount}
         entries={stateEntries}
         running={running}
         slashCommandSuggestions={(query) =>
@@ -605,7 +609,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         dialogRequests={dialogRequests}
         onSubmit={(text) => void handleSubmit(text)}
         onInterrupt={() => {
-          handleTuiInterrupt(abortControllerRef.current, runningQueue, reporter);
+          handleTuiInterrupt(abortControllerRef.current, runningQueue, reporter, setQueuedCount);
         }}
         onRedraw={() => {
           if (process.stdout.isTTY) process.stdout.write("\x1b[2J\x1b[H");
@@ -804,9 +808,11 @@ export function handleTuiInterrupt(
   controller: AbortController | null,
   queue: RunningInputQueue,
   reporter: Pick<TuiReporter, "pushSystemMessage">,
+  onQueueSizeChange?: (size: number) => void,
 ): void {
   controller?.abort(new DOMException("interrupted", "AbortError"));
   const dropped = queue.clear();
+  onQueueSizeChange?.(queue.size);
   reporter.pushSystemMessage(
     dropped > 0
       ? `Interrupted current run and dropped ${dropped} queued input(s).`
@@ -818,16 +824,19 @@ export function formatTuiRunErrorEntry(
   error: unknown,
 ): Extract<TuiEntry, { kind: "error" }> | undefined {
   if (isAbortError(error)) return undefined;
+  const retryable = defaultIsRetryableError(error);
+  const action = retryable ? "retry" : undefined;
   return {
     kind: "error",
     message: error instanceof Error ? error.message : String(error),
-    retryable: defaultIsRetryableError(error),
-    action: "check logs or retry",
+    retryable,
+    ...(action === undefined ? {} : { action }),
   };
 }
 
 export function formatTuiRunError(error: unknown): string | undefined {
-  return formatTuiRunErrorEntry(error)?.message;
+  const entry = formatTuiRunErrorEntry(error);
+  return entry === undefined ? undefined : `⚠️ 执行出错: ${entry.message}`;
 }
 
 export function appendTuiRunError(reporter: TuiReporter, error: unknown): void {
