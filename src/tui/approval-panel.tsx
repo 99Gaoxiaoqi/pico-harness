@@ -1,6 +1,7 @@
 import React, { useRef, useState } from "react";
 import { Box, Text, useInput } from "ink";
 import type { ApprovalNotice } from "../approval/manager.js";
+import { formatPermissionSessionScope } from "../approval/session-permissions.js";
 import type {
   PermissionRecentDenial,
   PermissionRule,
@@ -24,14 +25,16 @@ export function isApprovalDialogId(id: string): boolean {
 
 export interface ApprovalPanelProps extends ApprovalNotice {
   diffExpanded?: boolean;
+  selectedIndex?: number;
 }
 export interface PermissionPanelProps {
   state: PermissionState;
 }
 export type ApprovalPanelAction = "approve" | "approve-session" | "reject";
-export type ApprovalPanelKeyAction = ApprovalPanelAction | "toggle-diff";
+export type ApprovalPanelKeyAction = ApprovalPanelAction | "toggle-diff" | "move-up" | "move-down";
 export interface ApprovalPanelState {
   diffExpanded: boolean;
+  selectedIndex: number;
 }
 export interface InteractiveApprovalPanelProps extends ApprovalPanelProps {
   onAction: (action: ApprovalPanelAction) => void;
@@ -47,18 +50,30 @@ export function InteractiveApprovalPanel({
   ...notice
 }: InteractiveApprovalPanelProps): React.ReactNode {
   const [state, setState] = useState<ApprovalPanelState>(() => ({
-    diffExpanded: diffExpanded ?? false,
+    diffExpanded: diffExpanded ?? Boolean(notice.diff ?? notice.preview?.diff),
+    selectedIndex: 0,
   }));
   const submittedTaskId = useRef<string | null>(null);
   const expanded = diffExpanded ?? state.diffExpanded;
+  const optionCount = notice.sessionScope ? 3 : 2;
 
   useInput((input, key) => {
-    const action = resolveApprovalPanelKey(input, key, keybindings);
+    const action = resolveApprovalPanelKey(
+      input,
+      key,
+      keybindings,
+      state.selectedIndex,
+      notice.sessionScope !== undefined,
+    );
     if (!action) return;
+    if (action === "move-up" || action === "move-down") {
+      setState((current) => nextApprovalPanelState(current, action, optionCount));
+      return;
+    }
     if (action === "toggle-diff") {
       const nextExpanded = !expanded;
       if (diffExpanded === undefined) {
-        setState({ diffExpanded: nextExpanded });
+        setState((current) => ({ ...current, diffExpanded: nextExpanded }));
       }
       onDiffExpandedChange?.(nextExpanded);
       return;
@@ -68,11 +83,12 @@ export function InteractiveApprovalPanel({
     onAction(action);
   });
 
-  return <ApprovalPanel {...notice} diffExpanded={expanded} />;
+  return <ApprovalPanel {...notice} diffExpanded={expanded} selectedIndex={state.selectedIndex} />;
 }
 
 export function ApprovalPanel({
   diffExpanded = false,
+  selectedIndex = 0,
   ...notice
 }: ApprovalPanelProps): React.ReactNode {
   return (
@@ -85,7 +101,7 @@ export function ApprovalPanel({
       borderBottom={false}
       paddingX={1}
     >
-      {formatApprovalPanel(notice, { diffExpanded })
+      {formatApprovalPanel(notice, { diffExpanded, selectedIndex })
         .split("\n")
         .map((line, index) => (
           <Text key={`${index}:${line}`}>{line}</Text>
@@ -108,26 +124,44 @@ export function PermissionPanel({ state }: PermissionPanelProps): React.ReactNod
 
 export function formatApprovalPanel(
   notice: ApprovalNotice,
-  options: { diffExpanded?: boolean; includeDiff?: boolean; maxDiffPreviewLines?: number } = {},
+  options: {
+    diffExpanded?: boolean;
+    includeDiff?: boolean;
+    maxDiffPreviewLines?: number;
+    selectedIndex?: number;
+  } = {},
 ): string {
   const target = notice.preview?.target ?? approvalTarget(notice.toolName, notice.args);
   const summary = notice.preview?.summary ?? approvalSummary(notice.message);
   const diff = notice.preview?.diff ?? notice.diff;
-  const diffExpanded = options.diffExpanded ?? options.includeDiff ?? false;
-  const lines = [
-    `Approval required: ${notice.toolName}`,
-    `目标: ${target}`,
-    `摘要: ${summary}`,
-    `任务: ${notice.taskId}`,
-    `Enter/Y 允许一次 · A 本会话允许 · N/Esc 拒绝 · E 展开/折叠 diff`,
-    `命令备用: approve ${notice.taskId} · reject ${notice.taskId} · modify ${notice.taskId} <content>`,
+  const diffExpanded = options.diffExpanded ?? options.includeDiff ?? Boolean(diff);
+  const hasSessionOption = notice.sessionScope !== undefined;
+  const approvalOptions: Array<{ label: string; action: ApprovalPanelAction }> = [
+    { label: "Yes", action: "approve" },
+    ...(hasSessionOption
+      ? [
+          {
+            label: formatPermissionSessionScope(notice.sessionScope!),
+            action: "approve-session" as const,
+          },
+        ]
+      : []),
+    { label: "No", action: "reject" },
   ];
-  if (diff) {
-    lines.push(formatDiffSummary(diff, diffExpanded));
-  }
+  const selectedIndex = clampSelection(options.selectedIndex ?? 0, approvalOptions.length);
+  const lines = [approvalQuestion(notice.toolName, target), `  ${target}`];
   if (diffExpanded && diff) {
     lines.push(formatDiffPreview(diff, options.maxDiffPreviewLines));
+  } else if (diff) {
+    lines.push(formatDiffSummary(diff, false));
   }
+  if (!diff && summary !== target) lines.push(`  ${summary}`);
+  lines.push(
+    ...approvalOptions.map(
+      (option, index) => `${index === selectedIndex ? "❯" : " "} ${index + 1}. ${option.label}`,
+    ),
+    "  ↑/↓ or J/K to move · Enter to select · Esc to cancel · E to toggle diff",
+  );
   return lines.join("\n");
 }
 
@@ -153,7 +187,23 @@ export function resolveApprovalPanelKey(
   input: string,
   key: { return?: boolean; escape?: boolean; ctrl?: boolean; meta?: boolean },
   keybindings?: UserKeybindingConfig,
+  selectedIndex = 0,
+  hasSessionOption = true,
 ): ApprovalPanelKeyAction | null {
+  const arrowKey = key as typeof key & { upArrow?: boolean; downArrow?: boolean };
+  if (arrowKey.upArrow || (input.toLowerCase() === "k" && !key.ctrl && !key.meta)) return "move-up";
+  if (arrowKey.downArrow || (input.toLowerCase() === "j" && !key.ctrl && !key.meta))
+    return "move-down";
+  const normalized = input.toLowerCase();
+  if (key.return && !key.ctrl && !key.meta) {
+    return actionAtSelection(selectedIndex, hasSessionOption);
+  }
+  if (key.escape) return "reject";
+  if (normalized === "y" && !key.ctrl && !key.meta) return "approve";
+  if (normalized === "a" && !key.ctrl && !key.meta) {
+    return hasSessionOption ? "approve-session" : null;
+  }
+  if (normalized === "n" && !key.ctrl && !key.meta) return "reject";
   const resolved = resolveKeybinding({ input, key }, "Confirmation", keybindings);
   if (resolved?.kind === "action" && resolved.action === "confirmation:accept") {
     return "approve";
@@ -162,8 +212,6 @@ export function resolveApprovalPanelKey(
     return "reject";
   }
 
-  const normalized = input.toLowerCase();
-  if (normalized === "a" && !key.ctrl && !key.meta) return "approve-session";
   if (normalized === "e" && !key.ctrl && !key.meta) return "toggle-diff";
   return null;
 }
@@ -171,9 +219,16 @@ export function resolveApprovalPanelKey(
 export function nextApprovalPanelState(
   state: ApprovalPanelState,
   action: ApprovalPanelKeyAction,
+  optionCount = 3,
 ): ApprovalPanelState {
-  if (action !== "toggle-diff") return state;
-  return { ...state, diffExpanded: !state.diffExpanded };
+  if (action === "toggle-diff") return { ...state, diffExpanded: !state.diffExpanded };
+  if (action === "move-up") {
+    return { ...state, selectedIndex: (state.selectedIndex + optionCount - 1) % optionCount };
+  }
+  if (action === "move-down") {
+    return { ...state, selectedIndex: (state.selectedIndex + 1) % optionCount };
+  }
+  return state;
 }
 
 export function formatDiffSummary(diff: string, expanded = false): string {
@@ -268,4 +323,24 @@ function formatRecentDenial(denial: PermissionRecentDenial): string {
 function compact(value: string, max: number): string {
   if (value.length <= max) return value;
   return `${value.slice(0, max - 1)}…`;
+}
+
+function actionAtSelection(index: number, hasSessionOption: boolean): ApprovalPanelAction {
+  const actions: readonly ApprovalPanelAction[] = hasSessionOption
+    ? ["approve", "approve-session", "reject"]
+    : ["approve", "reject"];
+  return actions[clampSelection(index, actions.length)]!;
+}
+
+function clampSelection(index: number, optionCount: number): number {
+  return Math.max(0, Math.min(optionCount - 1, Math.floor(index)));
+}
+
+function approvalQuestion(toolName: string, target: string): string {
+  const name = target.split(/[\\/]/u).at(-1) ?? target;
+  if (toolName === "edit_file") return `Do you want to make this edit to ${name}?`;
+  if (toolName === "write_file") return `Do you want to write to ${name}?`;
+  if (toolName === "read_file") return `Do you want to read ${name}?`;
+  if (toolName === "bash") return "Do you want to execute this command?";
+  return `Do you want to allow ${toolName}?`;
 }

@@ -27,6 +27,8 @@ import { WorkspaceRoots, buildWorkspaceBoundaryMiddleware } from "./workspace-ro
 export interface DefaultToolRegistryOptions extends ToolRegistryOptions {
   /** Read/Write/Edit/Glob/Grep 与请求边界共享的工作区根集合。 */
   workspaceRoots?: WorkspaceRoots;
+  /** Host 将工作区 ask/yolo 与审批合并处理时，关闭这里的严格前置拒绝。 */
+  deferWorkspaceBoundary?: boolean;
   backgroundManager?: BackgroundManager;
   /**
    * Goal Manager 单例(ROADMAP 3.5)。三个 Goal 工具共享此实例,
@@ -62,12 +64,13 @@ export function buildDefaultToolRegistry(
     todoStore,
     toolDisclosure,
     workspaceRoots,
+    deferWorkspaceBoundary = false,
     ...registryOptions
   } = options;
   const roots = workspaceRoots ?? WorkspaceRoots.createSync(workDir);
   const registry = new ToolRegistry(registryOptions);
   // 必须先于 host 后续挂载的审批中间件,避免一次审批扩大文件系统边界。
-  registry.useRequest(buildWorkspaceBoundaryMiddleware(roots));
+  if (!deferWorkspaceBoundary) registry.useRequest(buildWorkspaceBoundaryMiddleware(roots));
   registry.register(new ReadFileTool(roots));
   registry.register(new WriteFileTool(roots));
   registry.register(new EditFileTool(roots));

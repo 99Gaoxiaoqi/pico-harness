@@ -23,7 +23,7 @@ describe("ApprovalPanel", () => {
     expect(isApprovalDialogId("local-ui:model-selector")).toBe(false);
   });
 
-  it("展示工具名、命令和键盘审批入口", () => {
+  it("展示 Claude 风格问题、命令和选择入口，不暴露内部任务 ID", () => {
     const output = formatApprovalPanel({
       taskId: "task-1",
       toolName: "bash",
@@ -31,14 +31,12 @@ describe("ApprovalPanel", () => {
       message: "需要审批",
     });
 
-    expect(output).toContain("bash");
+    expect(output).toContain("Do you want to execute this command?");
     expect(output).toContain("rm -rf dist");
-    expect(output).toContain("Enter/Y");
-    expect(output).toContain("A 本会话允许");
-    expect(output).toContain("N/Esc");
-    expect(output).toContain("approve task-1");
-    expect(output).toContain("reject task-1");
-    expect(output).toContain("modify task-1");
+    expect(output).toContain("1. Yes");
+    expect(output).toContain("2. No");
+    expect(output).toContain("↑/↓ or J/K");
+    expect(output).not.toContain("task-1");
   });
 
   it("审批面板按键映射到审批动作", () => {
@@ -48,6 +46,9 @@ describe("ApprovalPanel", () => {
     expect(resolveApprovalPanelKey("n", {})).toBe("reject");
     expect(resolveApprovalPanelKey("", { escape: true })).toBe("reject");
     expect(resolveApprovalPanelKey("e", {})).toBe("toggle-diff");
+    expect(resolveApprovalPanelKey("j", {})).toBe("move-down");
+    expect(resolveApprovalPanelKey("k", {})).toBe("move-up");
+    expect(resolveApprovalPanelKey("", { return: true }, undefined, 2)).toBe("reject");
     expect(resolveApprovalPanelKey("y", { ctrl: true })).toBeNull();
     expect(resolveApprovalPanelKey("", { return: true, ctrl: true })).toBeNull();
     expect(resolveApprovalPanelKey("x", {})).toBeNull();
@@ -62,12 +63,12 @@ describe("ApprovalPanel", () => {
       },
     };
 
-    expect(resolveApprovalPanelKey("y", {}, keybindings)).toBeNull();
+    expect(resolveApprovalPanelKey("y", {}, keybindings)).toBe("approve");
     expect(resolveApprovalPanelKey("p", {}, keybindings)).toBe("approve");
     expect(resolveApprovalPanelKey("r", {}, keybindings)).toBe("reject");
   });
 
-  it("diff 在审批面板里默认只展示统计摘要和审批摘要", () => {
+  it("diff 在审批面板里默认展示截断后的内容", () => {
     const longDiff = [
       "--- old",
       "+++ new",
@@ -81,10 +82,9 @@ describe("ApprovalPanel", () => {
       diff: longDiff,
     });
 
-    expect(output).toContain("摘要: 将写入日报文件");
-    expect(output).toContain("目标: AIHOT.md");
-    expect(output).toContain("Diff: +40 -0");
-    expect(output).not.toContain("+line 1");
+    expect(output).toContain("Do you want to write to AIHOT.md?");
+    expect(output).toContain("Diff preview:");
+    expect(output).toContain("+line 1");
     expect(output).not.toContain("+line 40");
   });
 
@@ -95,7 +95,10 @@ describe("ApprovalPanel", () => {
       ...Array.from({ length: 40 }, (_, index) => `+line ${index + 1}`),
     ].join("\n");
 
-    const expanded = nextApprovalPanelState({ diffExpanded: false }, "toggle-diff");
+    const expanded = nextApprovalPanelState(
+      { diffExpanded: false, selectedIndex: 0 },
+      "toggle-diff",
+    );
     const collapsed = nextApprovalPanelState(expanded, "toggle-diff");
 
     expect(expanded.diffExpanded).toBe(true);
@@ -126,7 +129,7 @@ describe("ApprovalPanel", () => {
       message: "需要审批",
     });
 
-    expect(output).toContain("write_file");
+    expect(output).toContain("Do you want to write to index.ts?");
     expect(output).toContain("src/index.ts");
   });
 

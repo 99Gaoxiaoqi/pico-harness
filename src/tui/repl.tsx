@@ -76,11 +76,7 @@ import {
 } from "./session-browser-adapter.js";
 import { createRewindCommandDialogRequest } from "./rewind-command-dialog.js";
 import { applyTuiRewind, rewindInputReplacement } from "./rewind-runtime.js";
-import {
-  globalApprovalManager,
-  globalApprovalPolicy,
-  type ApprovalNotice,
-} from "../approval/manager.js";
+import { globalApprovalManager, type ApprovalNotice } from "../approval/manager.js";
 import {
   approvalDialogId,
   InteractiveApprovalPanel,
@@ -509,7 +505,6 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     model: initialRoute.model,
     modelRouteId: initialRoute.id,
     thinkingEffort: initialThinkingEffort,
-    permissionMode: "ask",
     tools: toolStatusFromRegistry(toolRegistry),
     additionalDirectories: workspaceRoots.list().slice(1),
   });
@@ -667,7 +662,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
               model: activeRoute.config.model,
               allowModelFallback: false,
               thinkingEffort: settings.thinkingEffort,
-              planMode: settings.mode === "plan" || settings.permissionMode === "plan",
+              planMode: settings.mode === "plan",
               ...(runOptions?.images ? { images: runOptions.images } : {}),
               ...(rewindContext !== null ? { rewindPrompt: rewindContext.prompt } : {}),
               ...(rewindContext !== null
@@ -713,7 +708,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         provider={settings.provider}
         workDir={opts.workDir}
         sessionMode={settings.mode}
-        permissionMode={settings.permissionMode}
+        permissionMode={settings.mode}
         thinkingEffort={settings.thinkingEffort}
         mcpSummary={formatTuiMcpSummary(latestMcpStatus)}
         queuedCount={queuedCount}
@@ -1040,30 +1035,28 @@ function resolveApprovalAction(
     | { action: "modify"; taskId: string; content: string },
   deps: Pick<HandleTuiInputSubmissionDeps, "reporter" | "closeDialog" | "sessionId">,
 ): boolean {
-  if (parsed.action === "approve-session") {
-    const pending = globalApprovalManager.getPendingTask(parsed.taskId);
-    if (pending) {
-      globalApprovalPolicy.allowForSession(deps.sessionId ?? "cli", {
-        name: pending.toolName,
-        arguments: pending.args,
-      });
-    }
-  }
-
   const ok =
     parsed.action === "modify"
       ? globalApprovalManager.resolveApprovalWithModify(parsed.taskId, "TUI modify", parsed.content)
-      : globalApprovalManager.resolveApproval(
-          parsed.taskId,
-          parsed.action === "approve" || parsed.action === "approve-session",
-          `TUI ${parsed.action}`,
-        );
+      : parsed.action === "approve-session"
+        ? globalApprovalManager.resolveApprovalForSession(parsed.taskId, "TUI approve-session")
+        : globalApprovalManager.resolveApproval(
+            parsed.taskId,
+            parsed.action === "approve",
+            `TUI ${parsed.action}`,
+          );
 
   deps.closeDialog?.(approvalDialogId(parsed.taskId));
   deps.reporter.pushSystemMessage(
     ok
-      ? `Approval ${parsed.action}: ${parsed.taskId}`
-      : `Approval task not found: ${parsed.taskId}`,
+      ? parsed.action === "approve-session"
+        ? "Allowed for this session."
+        : parsed.action === "approve"
+          ? "Allowed once."
+          : parsed.action === "reject"
+            ? "Rejected."
+            : "Approved with changes."
+      : "Approval request is no longer active.",
   );
   return ok;
 }

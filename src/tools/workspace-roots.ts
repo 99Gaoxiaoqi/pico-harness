@@ -3,6 +3,7 @@ import { realpath as realpathAsync, stat as statAsync } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import type { ToolCall } from "../schema/message.js";
 import type { RequestMiddleware } from "./registry.js";
+import { bashCommandFromArgs, extractBashWritePaths } from "../approval/bash-paths.js";
 
 const OUTSIDE_WORKSPACE_MESSAGE = "路径不在当前工作区。请先运行 /add-dir <directory> 授权该目录。";
 
@@ -12,7 +13,14 @@ export interface AddDirectoryResult {
   reason?: string;
 }
 
+export interface WorkspaceAccess {
+  path: string;
+  access: "read" | "write";
+}
+
 export class WorkspaceRoots {
+  private readonly oneCallPaths = new Map<string, number>();
+
   private constructor(
     private readonly primaryRoot: string,
     private readonly roots: string[],
@@ -70,21 +78,58 @@ export class WorkspaceRoots {
   }
 
   resolve(path: string): string {
-    const lexicalTarget = isAbsolute(path) ? resolve(path) : resolve(this.primaryRoot, path);
-    const target = canonicalizeTargetSync(lexicalTarget);
+    const target = this.resolveUnchecked(path);
     if (!this.isAllowed(target)) {
       throw outsideWorkspaceError(path);
     }
     return target;
   }
 
+  resolveUnchecked(path: string): string {
+    const lexicalTarget = isAbsolute(path) ? resolve(path) : resolve(this.primaryRoot, path);
+    return canonicalizeTargetSync(lexicalTarget);
+  }
+
+  isAllowedPath(path: string): boolean {
+    return this.isAllowed(this.resolveUnchecked(path));
+  }
+
+  directoryForPath(path: string): string {
+    return dirname(this.resolveUnchecked(path));
+  }
+
+  async authorizationDirectoryForPath(path: string): Promise<string> {
+    const target = this.resolveUnchecked(path);
+    try {
+      const info = await statAsync(target);
+      return info.isDirectory() ? realpathAsync(target) : realpathAsync(dirname(target));
+    } catch (error) {
+      if (!hasErrnoCode(error, "ENOENT") && !hasErrnoCode(error, "ENOTDIR")) throw error;
+      return realpathAsync(await nearestExistingAncestor(dirname(target)));
+    }
+  }
+
   async assertAllowed(path: string): Promise<string> {
-    const target = this.resolve(path);
+    const target = this.resolveUnchecked(path);
+    let usedOneCallPermission = false;
+    if (!this.isAllowed(target)) {
+      const remaining = this.oneCallPaths.get(target) ?? 0;
+      if (remaining <= 0) throw outsideWorkspaceError(path);
+      usedOneCallPermission = true;
+      if (remaining === 1) this.oneCallPaths.delete(target);
+      else this.oneCallPaths.set(target, remaining - 1);
+    }
     const existingAncestor = await nearestExistingAncestor(target);
     const canonicalAncestor = await realpathAsync(existingAncestor);
-    if (!this.isAllowed(canonicalAncestor)) {
+    if (!this.isAllowed(canonicalAncestor) && !usedOneCallPermission) {
       throw outsideWorkspaceError(path);
     }
+    return target;
+  }
+
+  authorizeOnce(path: string): string {
+    const target = this.resolveUnchecked(path);
+    this.oneCallPaths.set(target, (this.oneCallPaths.get(target) ?? 0) + 1);
     return target;
   }
 
@@ -95,19 +140,17 @@ export class WorkspaceRoots {
 
 export function buildWorkspaceBoundaryMiddleware(roots: WorkspaceRoots): RequestMiddleware {
   return async (call) => {
-    const path = workspacePathFromCall(call);
-    if (path === undefined) {
-      return { allowed: true };
+    for (const access of workspaceAccessesFromCall(call)) {
+      try {
+        await roots.assertAllowed(access.path);
+      } catch (error) {
+        return {
+          allowed: false,
+          reason: error instanceof Error ? error.message : String(error),
+        };
+      }
     }
-    try {
-      await roots.assertAllowed(path);
-      return { allowed: true };
-    } catch (error) {
-      return {
-        allowed: false,
-        reason: error instanceof Error ? error.message : String(error),
-      };
-    }
+    return { allowed: true };
   };
 }
 
@@ -147,24 +190,28 @@ async function nearestExistingAncestor(path: string): Promise<string> {
   }
 }
 
-function workspacePathFromCall(call: ToolCall): string | undefined {
-  if (!WORKSPACE_PATH_TOOLS.has(call.name)) {
-    return undefined;
+export function workspaceAccessesFromCall(call: ToolCall): WorkspaceAccess[] {
+  if (call.name === "bash") {
+    const command = bashCommandFromArgs(call.arguments);
+    return command
+      ? extractBashWritePaths(command).map((path) => ({ path, access: "write" as const }))
+      : [];
   }
+  if (!WORKSPACE_PATH_TOOLS.has(call.name)) return [];
   let input: unknown;
   try {
     input = JSON.parse(call.arguments) as unknown;
   } catch {
-    return undefined;
+    return [];
   }
   if (typeof input !== "object" || input === null) {
-    return undefined;
+    return [];
   }
   const path = (input as Record<string, unknown>)["path"];
   if (typeof path === "string") {
-    return path || ".";
+    return [{ path: path || ".", access: READ_ONLY_PATH_TOOLS.has(call.name) ? "read" : "write" }];
   }
-  return call.name === "glob" || call.name === "grep" ? "." : undefined;
+  return call.name === "glob" || call.name === "grep" ? [{ path: ".", access: "read" }] : [];
 }
 
 const WORKSPACE_PATH_TOOLS: ReadonlySet<string> = new Set([
@@ -174,6 +221,8 @@ const WORKSPACE_PATH_TOOLS: ReadonlySet<string> = new Set([
   "glob",
   "grep",
 ]);
+
+const READ_ONLY_PATH_TOOLS: ReadonlySet<string> = new Set(["read_file", "glob", "grep"]);
 
 function isWithin(root: string, path: string): boolean {
   const rel = relative(root, path);

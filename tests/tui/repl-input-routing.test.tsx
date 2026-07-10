@@ -8,8 +8,8 @@ import { createBuiltinCommandRegistry } from "../../src/input/builtin-commands.j
 import { CommandRegistry } from "../../src/input/command-registry.js";
 import { createPicoCommandRegistry } from "../../src/input/pico-command-registry.js";
 import type { SlashCommand } from "../../src/input/types.js";
-import { ApprovalManager, globalApprovalManager } from "../../src/approval/manager.js";
-import { buildApprovalMiddleware, runAgentFromCli } from "../../src/cli/run-agent.js";
+import { globalApprovalManager } from "../../src/approval/manager.js";
+import { runAgentFromCli } from "../../src/cli/run-agent.js";
 import { globalSessionManager } from "../../src/engine/session.js";
 import { resetSessionSettingsForTests } from "../../src/input/session-settings.js";
 import type { LLMProvider } from "../../src/provider/interface.js";
@@ -229,7 +229,7 @@ describe("TUI input routing", () => {
     expect(output).toContain("builtin / help");
     expect(output).toContain("/help [command]");
     expect(output).toContain("builtin / permissions");
-    expect(output).toContain("/permissions [ask|default|auto|");
+    expect(output).toContain("/permissions [default|auto|yolo|plan]");
   });
 
   it("/help annotates HelpPanel commands from the real running TUI state", async () => {
@@ -692,7 +692,7 @@ describe("TUI input routing", () => {
     ]);
   });
 
-  it("组合校验 workspace 边界与 TUI Enter 审批闭环", async () => {
+  it("组合校验 yolo 外部写与 default TUI Enter 审批闭环", async () => {
     const workDir = await mkdtemp(join(tmpdir(), "pico-tui-workspace-root-"));
     const outsideDir = await mkdtemp(join(tmpdir(), "pico-tui-workspace-added-"));
     const target = join(outsideDir, "approved.txt");
@@ -732,7 +732,7 @@ describe("TUI input routing", () => {
       );
 
       expect(blockedOpenDialog).not.toHaveBeenCalled();
-      await expect(readFile(blockedTarget, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(readFile(blockedTarget, "utf8")).resolves.toBe("blocked");
 
       const allowedOpenDialog = vi.fn();
       const closeDialog = vi.fn();
@@ -746,6 +746,13 @@ describe("TUI input routing", () => {
         additionalDirectoryManager: workspaceRoots,
       });
       const localRunAgent = vi.fn();
+      await handleTuiInputSubmission("/mode default", {
+        reporter,
+        registry: commandRegistry,
+        workDir: canonicalWorkDir,
+        runAgent: localRunAgent,
+        exit: vi.fn(),
+      });
       await handleTuiInputSubmission(`/add-dir ${outsideDir}`, {
         reporter,
         registry: commandRegistry,
@@ -868,14 +875,18 @@ describe("TUI input routing", () => {
     const { reporter } = harness();
     const openDialog = vi.fn();
     const args = JSON.stringify({ path: "session-key.txt", content: "remember me" });
+    let permissionResult: Awaited<ReturnType<typeof globalApprovalManager.waitForApproval>>;
     const runAgent = vi.fn(async (_options, deps) => {
       const approval = globalApprovalManager.waitForApproval(
         "approval_session_key",
         "write_file",
         args,
         deps.approvalNotifier!,
+        undefined,
+        undefined,
+        { sessionScope: { type: "all-edits" } },
       );
-      await approval;
+      permissionResult = await approval;
       return {
         sessionId: "tui-session-key",
         sessionSelection: { mode: "new" as const, sessionId: "tui-session-key" },
@@ -905,28 +916,7 @@ describe("TUI input routing", () => {
 
     props.onAction("approve-session");
     await promptPromise;
-
-    const notifier = vi.fn();
-    const middleware = buildApprovalMiddleware(
-      notifier,
-      process.cwd(),
-      undefined,
-      new ApprovalManager(1),
-      {
-        sessionId: "tui-session-key",
-        mode: "default",
-        permissionMode: "default",
-      },
-    );
-    const result = await middleware({
-      id: "call_remembered",
-      name: "write_file",
-      arguments: args,
-    });
-
-    expect(result.allowed).toBe(true);
-    expect(result.reason).toContain("allowlist");
-    expect(notifier).not.toHaveBeenCalled();
+    expect(permissionResult!).toMatchObject({ allowed: true, allowForSession: true });
   });
 
   it("runTuiAgentPrompt 为每轮创建 controller、传递 signal 并在结束后清理", async () => {
@@ -1050,7 +1040,7 @@ describe("TUI input routing", () => {
 
     await expect(approval).resolves.toMatchObject({ allowed: true });
     expect(runAgent).not.toHaveBeenCalled();
-    expect(snapshots.at(-1)).toEqual([{ kind: "system", content: "Approval approve: call_local" }]);
+    expect(snapshots.at(-1)).toEqual([{ kind: "system", content: "Allowed once." }]);
   });
 
   it("mention-expanded prompt 继续走 runAgentFromCli", async () => {

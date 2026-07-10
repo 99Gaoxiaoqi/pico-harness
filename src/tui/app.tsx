@@ -93,7 +93,7 @@ export function App({
   model,
   workDir,
   sessionMode = "new",
-  permissionMode = "ask",
+  permissionMode = "yolo",
   mcpSummary,
   taskSummary,
   queuedCount = 0,
@@ -119,7 +119,7 @@ export function App({
     focusedDialog?.layer === "modal" && !inlineModal ? focusedDialog.content : undefined;
   const transcriptWrapWidth = Math.max(1, columns - 6);
   const approvalNotice = inlineModal ? approvalNoticeFromContent(focusedDialog.content) : undefined;
-  const [approvalDiffExpanded, setApprovalDiffExpanded] = useState(false);
+  const [approvalDiffExpanded, setApprovalDiffExpanded] = useState(true);
   const controlledApproval =
     inlineModal && React.isValidElement<InteractiveApprovalPanelProps>(focusedDialog.content)
       ? React.cloneElement(focusedDialog.content, {
@@ -265,7 +265,7 @@ export function App({
   }, [entries.length]);
 
   useEffect(() => {
-    setApprovalDiffExpanded(false);
+    setApprovalDiffExpanded(true);
   }, [approvalNotice?.taskId]);
 
   // 是否仍有"主动流式":running 且末尾是流式 assistant / thinking / running tool

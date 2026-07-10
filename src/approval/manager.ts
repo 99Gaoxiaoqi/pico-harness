@@ -15,6 +15,7 @@
 // 清理内存资源,防止挂死泄漏。
 
 import { logger } from "../observability/logger.js";
+import type { PermissionSessionScope } from "./session-permissions.js";
 
 /** 审批结果包 */
 export interface ApprovalResult {
@@ -31,6 +32,8 @@ export interface ApprovalResult {
    * 由 ExitPlanMode 等场景使用:审批通过且携带新内容时,调用方写回 PLAN.md 再放行。
    */
   modifiedContent?: string;
+  /** 用户选择 Claude Code 风格的 session 级授权。 */
+  allowForSession?: boolean;
 }
 
 /** 审批请求的通知信息(供通知通道发送给人类) */
@@ -54,6 +57,8 @@ export interface ApprovalNotice {
    * 计算失败或工具不产生 diff 时为 undefined,审批照常进行。
    */
   diff?: string;
+  /** 当前审批可应用的结构化 session 权限更新。 */
+  sessionScope?: PermissionSessionScope;
 }
 
 /** 通知回调:由调用方注入(飞书发卡片 / 终端打印 / HTTP 推送) */
@@ -65,6 +70,7 @@ interface PendingApproval {
   timer: NodeJS.Timeout;
   toolName: string;
   args: string;
+  sessionScope?: PermissionSessionScope;
   signal?: AbortSignal;
   abortListener?: () => void;
 }
@@ -104,6 +110,7 @@ export class ApprovalManager {
     notify: ApprovalNotifier,
     diff?: string,
     signal?: AbortSignal,
+    options: { sessionScope?: PermissionSessionScope } = {},
   ): Promise<ApprovalResult> {
     signal?.throwIfAborted();
     const message = `⚠ **高危操作审批请求**
@@ -129,7 +136,14 @@ Agent 试图执行以下动作:
         }
       }, this.timeoutMs);
 
-      const entry: PendingApproval = { resolve, reject, timer, toolName, args };
+      const entry: PendingApproval = {
+        resolve,
+        reject,
+        timer,
+        toolName,
+        args,
+        ...(options.sessionScope ? { sessionScope: options.sessionScope } : {}),
+      };
       if (signal) {
         entry.signal = signal;
         entry.abortListener = () => {
@@ -157,6 +171,7 @@ Agent 试图执行以下动作:
         message,
         preview: buildApprovalPreview(toolName, args, diff),
         ...(diff !== undefined ? { diff } : {}),
+        ...(options.sessionScope ? { sessionScope: options.sessionScope } : {}),
       });
       logger.info({ taskId }, `[Approval] 已发送审批请求,执行流挂起等待...`);
     });
@@ -176,6 +191,16 @@ Agent 试图执行以下动作:
       `[Approval] 收到审批结果 (TaskID: ${taskId}, Allowed: ${allowed}): ${reason}`,
     );
     entry.resolve({ allowed, reason });
+    return true;
+  }
+
+  resolveApprovalForSession(taskId: string, reason: string): boolean {
+    const entry = this.takePendingTask(taskId);
+    if (!entry) {
+      logger.warn({ taskId }, `[Approval] 找不到对应的 TaskID: ${taskId},可能已超时或处理完毕。`);
+      return false;
+    }
+    entry.resolve({ allowed: true, reason, allowForSession: true });
     return true;
   }
 
@@ -230,9 +255,17 @@ Agent 试图执行以下动作:
     return this.pendingTasks.size;
   }
 
-  getPendingTask(taskId: string): { toolName: string; args: string } | undefined {
+  getPendingTask(
+    taskId: string,
+  ): { toolName: string; args: string; sessionScope?: PermissionSessionScope } | undefined {
     const task = this.pendingTasks.get(taskId);
-    return task ? { toolName: task.toolName, args: task.args } : undefined;
+    return task
+      ? {
+          toolName: task.toolName,
+          args: task.args,
+          ...(task.sessionScope ? { sessionScope: task.sessionScope } : {}),
+        }
+      : undefined;
   }
 
   /** 清理所有挂起任务(测试用) */

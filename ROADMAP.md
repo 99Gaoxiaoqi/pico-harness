@@ -466,6 +466,12 @@ git worktree remove ../pico-1-streaming
 
 ---
 
+## 阶段 9：Claude Code 核心交互机制（进行中）
+
+- [x] 9.3 权限与模式收敛：单一 interaction mode、默认 yolo、Claude 风格三选审批、结构化 session grant、外部目录原子授权、Bash 越界写守卫与 bypass-immune 安全边界
+
+---
+
 ## 📊 历史交付进度与当前收口
 
 | 阶段         | 总任务数 | 完成   | 状态                                |
