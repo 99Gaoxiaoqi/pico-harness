@@ -1,6 +1,6 @@
 import { renderToString } from "ink";
 import { describe, expect, it } from "vitest";
-import { StatusBar, buildStatusItems } from "../../src/tui/status-bar.js";
+import { StatusBar, buildStatusItems, buildStatusBarText } from "../../src/tui/status-bar.js";
 
 describe("StatusBar", () => {
   it("renders compact runtime phase without repeating model or cwd", () => {
@@ -82,12 +82,31 @@ describe("StatusBar", () => {
         contextSummary="/Users/anxuan/geektime-downloader/从0开始构建AgentHarness/pico-harness"
         taskSummary="queued input waiting for the current run to finish"
         summaryMaxLength={30}
+        renderWidth={120}
       />,
+      { columns: 140 },
     );
 
     expect(output).toContain("/Users/anxua...");
     expect(output).toContain("pico-harness");
     expect(output).toContain("queued input...");
     expect(output).not.toContain("geektime-downloader/从0开始构建AgentHarness");
+  });
+
+  it("keeps a single line at 26 columns by dropping low-priority fields", () => {
+    const props = {
+      phase: "approval",
+      sessionMode: "resume",
+      permissionMode: "acceptEdits",
+      contextSummary: "ctx 你好 🚀 80%",
+      taskSummary: "queued task with long description",
+      renderWidth: 24,
+    };
+    const output = renderToString(<StatusBar {...props} />, { columns: 26 });
+
+    expect(output.split("\n")).toHaveLength(1);
+    expect(output).toBe(` ${buildStatusBarText(props)}`);
+    expect(output).toContain("approval");
+    expect(output).not.toContain("queued task");
   });
 });

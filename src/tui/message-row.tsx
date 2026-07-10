@@ -20,6 +20,7 @@ import type { TuiEntry } from "./tui-reporter.js";
 import { CompletedText, StreamingText } from "./streaming-text.js";
 import { ToolCard } from "./tool-card.js";
 import { LogoPanel } from "./logo-panel.js";
+import { visualRows } from "./terminal-width.js";
 
 export interface MessageRowProps {
   /** 本条消息数据 */
@@ -54,6 +55,9 @@ function MessageRowImpl({
           permissionMode={entry.permissionMode}
           mcpSummary={entry.mcpSummary}
           taskSummary={entry.taskSummary}
+          renderWidth={wrapWidth}
+          startOffsetRows={toolStartOffsetRows}
+          visibleRows={toolVisibleRows}
         />
       );
 
@@ -77,7 +81,11 @@ function MessageRowImpl({
       return (
         <MessageFrame marker="!" markerColor="yellow" boldMarker>
           <Text color="yellow" wrap="wrap">
-            {formatErrorEntry(entry)}
+            {clipRows(
+              buildErrorEntryRows(entry, wrapWidth),
+              toolStartOffsetRows,
+              toolVisibleRows,
+            ).join("\n")}
           </Text>
         </MessageFrame>
       );
@@ -139,11 +147,29 @@ function MessageFrame({
   );
 }
 
-function formatErrorEntry(entry: Extract<TuiEntry, { kind: "error" }>): string {
+export function formatErrorEntry(entry: Extract<TuiEntry, { kind: "error" }>): string {
   const parts = [entry.message];
   if (entry.retryable !== undefined) parts.push(entry.retryable ? "retryable" : "not retryable");
   if (entry.action) parts.push(entry.action);
   return parts.join(" · ");
+}
+
+export function buildErrorEntryRows(
+  entry: Extract<TuiEntry, { kind: "error" }>,
+  wrapWidth = 80,
+): string[] {
+  return visualRows(formatErrorEntry(entry), Math.max(1, wrapWidth));
+}
+
+function clipRows(
+  rows: string[],
+  startOffsetRows: number | undefined,
+  visibleRows: number | undefined,
+): string[] {
+  const rawStart = Math.max(0, Math.floor(startOffsetRows ?? 0));
+  const start = rawStart === 0 ? 0 : Math.max(0, rawStart - 1);
+  const end = visibleRows === undefined ? undefined : start + Math.max(0, Math.floor(visibleRows));
+  return rows.slice(start, end);
 }
 
 /**

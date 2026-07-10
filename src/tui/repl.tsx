@@ -47,6 +47,7 @@ import type { InputProcessResult, LocalCommandResult } from "../input/types.js";
 import type { ImagePart } from "../schema/message.js";
 import type { ProviderKind } from "../provider/factory.js";
 import { isAbortError } from "../provider/errors.js";
+import { defaultIsRetryableError } from "../provider/retry.js";
 import type { ThinkingEffort } from "../provider/thinking.js";
 import { buildDefaultToolRegistry } from "../tools/default-registry.js";
 import { ToolDisclosure } from "../tools/tool-disclosure.js";
@@ -185,7 +186,10 @@ async function runPreparedUserPrompt(
   try {
     prepared = await preparePromptForMessage(prompt, deps.workDir);
   } catch (error) {
-    deps.reporter.pushSystemMessage(error instanceof Error ? error.message : String(error));
+    deps.reporter.pushError(error instanceof Error ? error.message : String(error), {
+      retryable: defaultIsRetryableError(error),
+      action: "check logs or retry",
+    });
     return;
   }
 
@@ -567,10 +571,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
           },
         });
       } catch (err) {
-        const runError = formatTuiRunErrorEntry(err);
-        if (runError === undefined) return;
-        entries.push(runError);
-        setEntries([...entries]);
+        appendTuiRunError(reporter, err);
       }
     };
 
@@ -584,6 +585,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         thinkingEffort={settings.thinkingEffort}
         mcpSummary={formatTuiMcpSummary(latestMcpStatus)}
         taskSummary={settings.thinkingEffort === "off" ? undefined : `think ${settings.thinkingEffort}`}
+        queuedCount={runningQueue.size}
         entries={stateEntries}
         running={running}
         slashCommandSuggestions={(query) =>
@@ -630,7 +632,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
   await instance.waitUntilExit();
 }
 
-function createTuiUpdateScheduler(
+export function createTuiUpdateScheduler(
   apply: (entries: TuiEntry[]) => void,
   minIntervalMs: number,
 ): (entries: TuiEntry[]) => void {
@@ -819,9 +821,22 @@ export function formatTuiRunErrorEntry(
   return {
     kind: "error",
     message: error instanceof Error ? error.message : String(error),
-    retryable: true,
+    retryable: defaultIsRetryableError(error),
     action: "check logs or retry",
   };
+}
+
+export function formatTuiRunError(error: unknown): string | undefined {
+  return formatTuiRunErrorEntry(error)?.message;
+}
+
+export function appendTuiRunError(reporter: TuiReporter, error: unknown): void {
+  const runError = formatTuiRunErrorEntry(error);
+  if (runError === undefined) return;
+  reporter.pushError(runError.message, {
+    retryable: runError.retryable,
+    action: runError.action,
+  });
 }
 
 export function formatTuiMcpSummary(snapshot: McpStatusSnapshot | undefined): string {

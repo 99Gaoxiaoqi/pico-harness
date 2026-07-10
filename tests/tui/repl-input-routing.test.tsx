@@ -10,11 +10,15 @@ import { createPicoCommandRegistry } from "../../src/input/pico-command-registry
 import type { SlashCommand } from "../../src/input/types.js";
 import { ApprovalManager, globalApprovalManager } from "../../src/approval/manager.js";
 import { buildApprovalMiddleware } from "../../src/cli/run-agent.js";
+import { LLMStatusError } from "../../src/provider/errors.js";
 import { RunningInputQueue } from "../../src/tui/running-input-queue.js";
 import type { CliSessionBrowserSummary } from "../../src/tui/session-browser-adapter.js";
 import { TuiReporter } from "../../src/tui/tui-reporter.js";
 import {
+  appendTuiRunError,
+  createTuiUpdateScheduler,
   dispatchModelSelectorSelection,
+  formatTuiRunError,
   formatTuiRunErrorEntry,
   getTuiCommandAvailabilityState,
   handleTuiInterrupt,
@@ -41,9 +45,33 @@ describe("TUI input routing", () => {
     expect(formatTuiRunErrorEntry(new Error("boom"))).toEqual({
       kind: "error",
       message: "boom",
-      retryable: true,
+      retryable: false,
       action: "check logs or retry",
     });
+    expect(formatTuiRunErrorEntry(new LLMStatusError(503, "unavailable"))).toMatchObject({
+      kind: "error",
+      retryable: true,
+    });
+    expect(formatTuiRunError(new Error("boom"))).toBe("boom");
+  });
+
+  it("运行异常通过 reporter.pushError 进入节流快照,不会被 pending update 覆盖", async () => {
+    vi.useFakeTimers();
+    const snapshots: unknown[][] = [];
+    const scheduler = createTuiUpdateScheduler((entries) => snapshots.push([...entries]), 100);
+    const reporter = new TuiReporter(scheduler);
+
+    reporter.pushUserMessage("run");
+    reporter.onTextDelta("pending");
+    appendTuiRunError(reporter, new Error("boom"));
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(snapshots.at(-1)).toEqual([
+      { kind: "user", content: "run" },
+      { kind: "assistant", content: "pending" },
+      { kind: "error", message: "boom", retryable: false, action: "check logs or retry" },
+    ]);
+    vi.useRealTimers();
   });
 
   it("/model local UI action opens the model selector dialog", async () => {
@@ -872,7 +900,7 @@ describe("TUI input routing", () => {
     }
   });
 
-  it("@image:path 路径错误时显示本地提示且不调用模型", async () => {
+  it("@image:path 路径错误时显示结构化错误且不调用模型", async () => {
     const workDir = await mkdtemp(join(tmpdir(), "pico-tui-img-missing-"));
     try {
       const { reporter, snapshots, runAgent, exit, registry } = harness();
@@ -888,7 +916,12 @@ describe("TUI input routing", () => {
       expect(runAgent).not.toHaveBeenCalled();
       expect(snapshots.at(-1)).toEqual([
         { kind: "user", content: "看一下 @image:missing.png" },
-        { kind: "system", content: expect.stringContaining("missing.png") },
+        {
+          kind: "error",
+          message: expect.stringContaining("missing.png"),
+          retryable: false,
+          action: "check logs or retry",
+        },
       ]);
     } finally {
       await rm(workDir, { recursive: true, force: true });
