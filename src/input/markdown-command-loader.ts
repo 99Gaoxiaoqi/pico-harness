@@ -45,7 +45,6 @@ const NON_COMMAND_DIRS = new Set([
   "workflows",
   "templates",
   "agents",
-  "skills",
   "node_modules",
 ]);
 

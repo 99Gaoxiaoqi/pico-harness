@@ -8,7 +8,7 @@
 
 import { readFile, readdir, stat } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
-import type { Dirent, Stats } from "node:fs";
+import type { Dirent } from "node:fs";
 import * as yaml from "js-yaml";
 import type { BaseTool } from "../tools/registry.js";
 import type { ToolDefinition } from "../schema/message.js";
@@ -49,10 +49,8 @@ export interface SkillSummary {
 
 /** 负责从本地文件系统中加载并解析符合规范的技能模板 */
 export class SkillLoader {
-  // mtime+size 缓存:父目录元数据未变则复用上次解析结果,避免全量扫描+读取。
-  // 简化约定:单个 SKILL.md 的内容编辑不会改变父目录 mtime,这类变更不感知,
-  // 仅新增/删除技能目录时失效——对技能低频变更场景可接受。
-  private cache?: { skills: Skill[]; mtimeMs: number; size: number };
+  // 文件签名缓存:每次扫描 SKILL.md 路径和 mtime/size,未变则复用解析结果。
+  private cache?: { skills: Skill[]; signature: string };
 
   constructor(private readonly workDir: string) {}
 
@@ -91,10 +89,8 @@ export class SkillLoader {
   private async loadSkillFiles(): Promise<Skill[]> {
     const skillBaseDir = join(this.workDir, ".claw", "skills");
 
-    // 先取父目录 stat:mtime+size 未变则直接复用缓存
-    let dirStat: Stats;
     try {
-      dirStat = await stat(skillBaseDir);
+      await stat(skillBaseDir);
     } catch (err) {
       // ENOENT:工作区未配置技能目录,静默返回空
       if (isErrnoException(err, "ENOENT")) return [];
@@ -103,15 +99,12 @@ export class SkillLoader {
       return [];
     }
 
-    if (
-      this.cache &&
-      this.cache.mtimeMs === dirStat.mtimeMs &&
-      this.cache.size === dirStat.size
-    ) {
+    const skillFiles = await walkForSkillMd(skillBaseDir);
+    const signature = await skillFileSignature(skillFiles);
+    if (this.cache && this.cache.signature === signature) {
       return this.cache.skills;
     }
 
-    const skillFiles = await walkForSkillMd(skillBaseDir);
     const skills: Skill[] = [];
     for (const file of skillFiles) {
       try {
@@ -130,9 +123,24 @@ export class SkillLoader {
     }
 
     const sorted = skills.sort((a, b) => a.name.localeCompare(b.name));
-    this.cache = { skills: sorted, mtimeMs: dirStat.mtimeMs, size: dirStat.size };
+    this.cache = { skills: sorted, signature };
     return sorted;
   }
+}
+
+async function skillFileSignature(files: readonly string[]): Promise<string> {
+  const parts: string[] = [];
+  for (const file of [...files].sort()) {
+    try {
+      const fileStat = await stat(file);
+      parts.push(`${file}:${fileStat.mtimeMs}:${fileStat.size}`);
+    } catch (err) {
+      if (!isErrnoException(err, "ENOENT")) {
+        logger.debug({ err, file }, "读取 SKILL.md 签名失败");
+      }
+    }
+  }
+  return parts.join("\n");
 }
 
 export class SkillViewTool implements BaseTool {

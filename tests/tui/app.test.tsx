@@ -10,6 +10,7 @@ import {
   commandSuggestions,
   createPicoCommandRegistry,
 } from "../../src/input/pico-command-registry.js";
+import { createLocalUiDialogRequest } from "../../src/tui/local-ui-dialog-host.js";
 import {
   App,
   nextTranscriptScroll,
@@ -157,6 +158,36 @@ describe("App", () => {
     }
   });
 
+  it("calls an async suggestion source once per input state and catches rejected results", async () => {
+    const calls: string[] = [];
+    const harness = createInteractiveApp(
+      <App
+        model="glm-5.2"
+        provider="openai"
+        workDir="/workspace/demo"
+        entries={[]}
+        running={false}
+        slashCommandSuggestions={(query) => {
+          calls.push(query);
+          return query === "h"
+            ? Promise.reject(new Error("late failure"))
+            : Promise.resolve([{ value: "help", description: "Show help" }]);
+        }}
+        onSubmit={vi.fn()}
+      />,
+    );
+
+    try {
+      await harness.write("/");
+      await harness.write("h");
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      expect(calls).toEqual(["", "h"]);
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
   it("does not render spinner while assistant text is streaming", () => {
     const output = renderToString(
       <App
@@ -195,6 +226,54 @@ describe("App", () => {
     expect(output).not.toContain("Overlay tips");
     expect(output).toContain("Use dialog controls");
     expect(countOccurrences(output, 'Try "fix this" or / for commands')).toBe(0);
+  });
+
+  it("keeps help focused, scrollable, and closable without letting InputBox steal keys", async () => {
+    const closeDialog = vi.fn();
+    const request = createLocalUiDialogRequest(
+      { kind: "open-panel", panel: "help" },
+      {
+        commands: ["help", "status", "model", "tools", "mcp", "exit"].map((name) => ({
+          name,
+          description: `${name} command`,
+          kind: "local" as const,
+          source: "builtin" as const,
+          category: name === "help" ? ("help" as const) : ("system" as const),
+        })),
+        onClose: closeDialog,
+        maxHelpItems: 3,
+      } as never,
+    );
+    const harness = createInteractiveApp(
+      <App
+        model="glm-5.2"
+        provider="openai"
+        workDir="/workspace/demo"
+        entries={[]}
+        running={false}
+        dialogRequests={request ? [request] : []}
+        onSubmit={vi.fn()}
+      />,
+      { columns: 80, rows: 16 },
+    );
+
+    try {
+      let output = await harness.write("abc");
+      expect(output).not.toContain("abc▋");
+
+      output = await harness.write("\u001b[B");
+      expect(output).toContain("Use dialog controls");
+      expect(output).toContain("› /status");
+
+      output = await harness.write("\u001b[6~");
+      expect(output).toContain("› /mcp");
+
+      await harness.write("\u001b");
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      expect(closeDialog).toHaveBeenCalledWith("local-ui:help");
+    } finally {
+      await harness.cleanup();
+    }
   });
 
   it("renders approval as an inline modal and disables the bottom input", () => {

@@ -71,6 +71,23 @@ describe("skill command helpers", () => {
     });
   });
 
+  it("refreshes cached summaries when an existing SKILL.md changes after a prior read", async () => {
+    await writeSkill("review", "old description", "# Review\nold body");
+    await expect(loader.listSummaries()).resolves.toEqual([
+      { name: "review", description: "old description" },
+    ]);
+
+    await writeFile(
+      join(workDir, ".claw", "skills", "review", "SKILL.md"),
+      "---\nname: review\ndescription: new description\n---\n\n# Review\nnew body",
+    );
+
+    await expect(loader.listSummaries()).resolves.toEqual([
+      { name: "review", description: "new description" },
+    ]);
+    await expect(loader.viewBody("review")).resolves.toBe("# Review\nnew body");
+  });
+
   it("renders /agents with Claude agent summaries and data", async () => {
     await mkdir(join(workDir, ".claude", "agents"), { recursive: true });
     await writeFile(

@@ -1,5 +1,5 @@
-import React from "react";
-import { Box, Text } from "ink";
+import React, { useState } from "react";
+import { Box, Text, useInput } from "ink";
 import type {
   SlashCommandCategory,
   SlashCommandKind,
@@ -34,6 +34,11 @@ export interface HelpPanelProps {
   maxItems?: number;
 }
 
+export interface InteractiveHelpPanelProps extends HelpPanelProps {
+  dialogId?: string;
+  onClose?: (id: string) => void;
+}
+
 export interface HelpPanelSection {
   title: string;
   rows: HelpPanelRow[];
@@ -64,6 +69,47 @@ export function HelpPanel({
           <Text key={`${index}:${line}`}>{line}</Text>
         ))}
     </Box>
+  );
+}
+
+export function InteractiveHelpPanel({
+  commands,
+  selectedIndex,
+  scrollOffset,
+  maxItems,
+  dialogId = "local-ui:help",
+  onClose,
+}: InteractiveHelpPanelProps): React.ReactNode {
+  const pageSize = Math.max(1, maxItems ?? commands.length);
+  const [state, setState] = useState<HelpPanelScrollState>({
+    selectedIndex: selectedIndex ?? 0,
+    scrollOffset: scrollOffset ?? 0,
+  });
+
+  useInput((input, key) => {
+    if (input === "\u001b" || key.escape) {
+      onClose?.(dialogId);
+      return;
+    }
+
+    const delta = helpPanelKeyDelta(key, pageSize);
+    if (delta === 0) return;
+    setState((current) =>
+      updateHelpPanelScroll(current, {
+        delta,
+        totalItems: commands.length,
+        pageSize,
+      }),
+    );
+  });
+
+  return (
+    <HelpPanel
+      commands={commands}
+      selectedIndex={state.selectedIndex}
+      scrollOffset={state.scrollOffset}
+      maxItems={pageSize}
+    />
   );
 }
 
@@ -160,6 +206,22 @@ export function updateHelpPanelScroll(
   );
 
   return { selectedIndex, scrollOffset };
+}
+
+function helpPanelKeyDelta(
+  key: {
+    upArrow?: boolean;
+    downArrow?: boolean;
+    pageUp?: boolean;
+    pageDown?: boolean;
+  },
+  pageSize: number,
+): number {
+  if (key.upArrow) return -1;
+  if (key.downArrow) return 1;
+  if (key.pageUp) return -pageSize;
+  if (key.pageDown) return pageSize;
+  return 0;
 }
 
 function normalizeHelpPanelScroll(

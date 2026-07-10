@@ -2,7 +2,7 @@ import React from "react";
 import type { FileHistorySnapshotSummary } from "../cli/file-history.js";
 import type { LocalUiCommandAction } from "../input/types.js";
 import type { DialogRequest } from "./dialog-arbiter.js";
-import { HelpPanel, type HelpPanelCommand } from "./help-panel.js";
+import { InteractiveHelpPanel, type HelpPanelCommand } from "./help-panel.js";
 import { isLocalUiCommandAction } from "./local-ui-command.js";
 import { ModelSelector, type ModelOption } from "./model-selector.js";
 import { RewindSelector } from "./rewind-selector.js";
@@ -16,6 +16,8 @@ export interface LocalUiDialogHostContext {
   currentProjectCwd?: string;
   rewindSessionId?: string;
   rewindSnapshots?: readonly FileHistorySnapshotSummary[];
+  onClose?: (id: string) => void;
+  maxHelpItems?: number;
 }
 
 type LocalUiDialogKind = "help" | "model" | "session" | "rewind";
@@ -44,7 +46,13 @@ export function createLocalUiDialogContent(
 ): React.ReactNode {
   switch (kind) {
     case "help":
-      return <HelpPanel commands={context.commands ?? []} />;
+      return (
+        <InteractiveHelpPanel
+          commands={context.commands ?? []}
+          maxItems={context.maxHelpItems ?? 10}
+          onClose={context.onClose}
+        />
+      );
     case "model":
       return <ModelSelector currentModelId={context.currentModelId} models={context.models ?? []} />;
     case "session":
