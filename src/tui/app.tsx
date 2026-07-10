@@ -383,6 +383,7 @@ export function App({
         inputReplacement={inputReplacement}
         onSubmit={(text) => {
           setTranscriptView({ mode: "follow" });
+          setExpandedToolKey(null);
           onSubmit(text);
         }}
       />
