@@ -19,6 +19,7 @@ import { logger } from "../observability/logger.js";
 
 /** 搜索结果默认上限,避免海量匹配撑爆 Context。 */
 const DEFAULT_MAX_RESULTS = 50;
+const MAX_RESULTS_LIMIT = 500;
 
 /**
  * 递归遍历时跳过的目录:VCS、依赖、引擎自身配置、构建产物。
@@ -101,7 +102,7 @@ function parseGrepArgs(args: string): {
   const rawMax = parsed["max_results"];
   const maxResults =
     typeof rawMax === "number" && Number.isFinite(rawMax) && rawMax > 0
-      ? Math.floor(rawMax)
+      ? Math.min(Math.floor(rawMax), MAX_RESULTS_LIMIT)
       : DEFAULT_MAX_RESULTS;
   return { pattern, path, glob, caseSensitive, lineNumber, maxResults };
 }
@@ -131,7 +132,7 @@ function formatMatches(matches: RawMatch[], maxResults: number, withLineNumber: 
   );
   let out = lines.join("\n");
   if (matches.length > maxResults) {
-    out += `\n...[匹配结果共 ${matches.length} 条,已截断至前 ${maxResults} 条]`;
+    out += `\n...[匹配结果共 ${matches.length} 条,已截断至前 ${maxResults} 条；请缩小 path/glob/pattern 或降低 max_results]`;
   }
   return out;
 }
@@ -424,8 +425,10 @@ export class GrepTool implements BaseTool {
             description: "是否输出行号,默认 true。",
           },
           max_results: {
-            type: "number",
-            description: "最多返回匹配条数,默认 50。",
+            type: "integer",
+            minimum: 1,
+            maximum: MAX_RESULTS_LIMIT,
+            description: `最多返回匹配条数,默认 ${DEFAULT_MAX_RESULTS}，最大 ${MAX_RESULTS_LIMIT}。`,
           },
         },
         required: ["pattern"],
