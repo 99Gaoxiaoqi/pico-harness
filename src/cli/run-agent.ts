@@ -40,6 +40,8 @@ import {
   globalApprovalManager,
   globalApprovalPolicy,
   isAgentOpsDangerousCommand,
+  isDangerousCommand,
+  isHardlineCommand,
   type ApprovalManager,
   type ApprovalNotifier,
 } from "../approval/manager.js";
@@ -50,7 +52,10 @@ import { McpConnectionManager, type McpStatusSnapshot } from "../mcp/manager.js"
 import { BackgroundManager } from "../tools/background-manager.js";
 import { loadHooksConfig } from "../hooks/config.js";
 import { HookRunner } from "../hooks/runner.js";
-import { getOrCreateSessionSettings } from "../input/session-settings.js";
+import {
+  getOrCreateSessionSettings,
+  type SessionSettings,
+} from "../input/session-settings.js";
 import { loadImage } from "../input/prepare-prompt.js";
 import { resolveCliSession, type CliSessionSelection } from "./session-resolver.js";
 
@@ -156,6 +161,8 @@ export async function runAgentFromCli(
     session: sessionSelection.sessionId,
     sessionSelection,
     model: options.model ?? settings.model,
+    planMode:
+      options.planMode ?? (settings.mode === "plan" || settings.permissionMode === "plan"),
     trace: traceEnabled,
     ...(options.thinkingEffort !== undefined
       ? { thinkingEffort: options.thinkingEffort }
@@ -273,6 +280,8 @@ export async function runAgentFromCli(
       dependencies.approvalNotifier ?? terminalNotifier,
       workDir,
       dependencies.signal,
+      globalApprovalManager,
+      settings,
     ),
   );
   registerDelegationTools(registry, engine, workDir, await loadProfiles(workDir));
@@ -519,10 +528,28 @@ export function buildApprovalMiddleware(
   workDir: string,
   signal?: AbortSignal,
   approvalManager: ApprovalManager = globalApprovalManager,
+  settings?: Pick<SessionSettings, "sessionId" | "mode" | "permissionMode">,
 ): MiddlewareFunc {
   return async (call) => {
+    if (isPlanModeWriteDenied(call, settings)) {
+      return {
+        allowed: false,
+        reason: "Plan Mode 守卫：当前处于 Plan Mode，只能修改 PLAN.md / TODO.md。",
+      };
+    }
+    if (settings?.permissionMode === "yolo") {
+      return isHardlineCommand(call.name, call.arguments)
+        ? {
+            allowed: false,
+            reason: "Hardline 高危命令不可审批绕过,系统直接拒绝。",
+          }
+        : { allowed: true, reason: "YOLO 模式放行" };
+    }
+
+    const isDangerous =
+      settings?.permissionMode === "auto" ? isDangerousCommand : isAgentOpsDangerousCommand;
     return globalApprovalPolicy.decide(
-      "cli",
+      settings?.sessionId ?? "cli",
       call,
       async () => {
         // 拦截时计算 before/after diff,失败返回 undefined 不阻断审批
@@ -537,9 +564,44 @@ export function buildApprovalMiddleware(
           signal,
         );
       },
-      isAgentOpsDangerousCommand,
+      isDangerous,
     );
   };
+}
+
+function isPlanModeWriteDenied(
+  call: { name: string; arguments: string },
+  settings: Pick<SessionSettings, "mode" | "permissionMode"> | undefined,
+): boolean {
+  if (settings?.mode !== "plan" && settings?.permissionMode !== "plan") return false;
+  if (call.name === "write_file" || call.name === "edit_file") {
+    const path = parseJsonStringField(call.arguments, "path");
+    return path !== undefined && !isPlanModeAllowedPath(path);
+  }
+  if (call.name !== "bash") return false;
+  const command = parseJsonStringField(call.arguments, "command");
+  if (command === undefined) return false;
+  const redirects = command.matchAll(/\d*>>?\s*(?!&)([^\s|;&]+)/gu);
+  for (const redirect of redirects) {
+    const target = redirect[1];
+    if (target !== undefined && !isPlanModeAllowedPath(target)) return true;
+  }
+  return false;
+}
+
+function parseJsonStringField(args: string, field: string): string | undefined {
+  try {
+    const parsed = JSON.parse(args) as Record<string, unknown>;
+    const value = parsed[field];
+    return typeof value === "string" ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function isPlanModeAllowedPath(path: string): boolean {
+  const basename = path.split(/[\\/]/u).pop() ?? path;
+  return basename === "PLAN.md" || basename === "TODO.md";
 }
 
 const terminalNotifier: ApprovalNotifier = (notice) => {

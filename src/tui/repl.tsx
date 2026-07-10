@@ -80,6 +80,8 @@ export interface ReplOptions {
   thinkingEffort?: ThinkingEffort;
   /** MCP 配置路径(可选,首轮传入) */
   mcpConfigPath?: string;
+  /** CLI 已解析的 session 选择结果。 */
+  sessionSelection?: CliSessionSelection;
 }
 
 const SESSION_SELECTOR_DIALOG_ID = "local-ui:session-selector";
@@ -331,11 +333,12 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
   }
 
   const provider = opts.provider ?? "openai";
-  const tuiSessionId = createCliSessionId();
-  const tuiSessionSelection: CliSessionSelection = {
-    mode: "new",
-    sessionId: tuiSessionId,
-  };
+  const tuiSessionSelection: CliSessionSelection =
+    opts.sessionSelection ?? {
+      mode: "new",
+      sessionId: createCliSessionId(),
+    };
+  const tuiSessionId = tuiSessionSelection.sessionId;
   const tuiSession = await globalSessionManager.getOrCreate(tuiSessionId, opts.workDir);
   const toolDisclosure = new ToolDisclosure();
   const toolRegistry = buildDefaultToolRegistry(opts.workDir, { toolDisclosure });
@@ -352,7 +355,10 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
   const initialThinkingEffort = opts.thinkingEffort ?? "medium";
   const settings = getOrCreateSessionSettings({
     sessionId: tuiSessionId,
-    sessionMode: "new",
+    sessionMode: tuiSessionSelection.mode,
+    ...(tuiSessionSelection.sourceSessionId !== undefined
+      ? { forkFrom: tuiSessionSelection.sourceSessionId }
+      : {}),
     cwd: opts.workDir,
     provider,
     model: opts.model,
@@ -366,7 +372,10 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     model: settings.model,
     session: tuiSession,
     sessionId: tuiSessionId,
-    sessionMode: "new",
+    sessionMode: tuiSessionSelection.mode,
+    ...(tuiSessionSelection.sourceSessionId !== undefined
+      ? { forkFrom: tuiSessionSelection.sourceSessionId }
+      : {}),
     thinkingEffort: settings.thinkingEffort,
     permissionMode: settings.permissionMode,
     tools: settings.tools,
@@ -474,6 +483,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
               sessionSelection: tuiSessionSelection,
               model: settings.model,
               thinkingEffort: settings.thinkingEffort,
+              planMode: settings.mode === "plan" || settings.permissionMode === "plan",
               ...(runOptions?.images ? { images: runOptions.images } : {}),
               ...(opts.mcpConfigPath ? { mcpConfigPath: opts.mcpConfigPath } : {}),
             };

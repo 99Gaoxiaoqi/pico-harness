@@ -9,6 +9,7 @@ import { FTS5Store } from "../memory/fts5-store.js";
 import type { ProviderKind } from "../provider/factory.js";
 import { resolveThinkingEffort } from "../provider/thinking.js";
 import { startTuiRepl } from "../tui/repl.js";
+import { resolveCliSession } from "./session-resolver.js";
 
 ["SIGINT", "SIGTERM", "beforeExit", "exit"].forEach((evt) => {
   process.on(evt, () => FTS5Store.closeAll());
@@ -24,6 +25,11 @@ async function main(): Promise<void> {
       dir: { type: "string" },
       model: { type: "string" },
       "mcp-config": { type: "string" },
+      session: { type: "string", short: "S" },
+      "continue": { type: "boolean", short: "c" },
+      resume: { type: "string" },
+      "fork": { type: "string" },
+      "fork-session": { type: "string" },
     },
   });
 
@@ -31,12 +37,24 @@ async function main(): Promise<void> {
   const thinkingEffort = resolveThinkingEffort(values.thinking);
   const workDir = await resolveCliWorkDir(values.dir);
   const model = values.model ?? process.env.LLM_MODEL ?? defaultModelForKind(provider);
+  const sessionSelection = await resolveCliSession({
+    workDir,
+    ...(typeof values.session === "string" ? { session: values.session } : {}),
+    ...(values["continue"] === true ? { continueSession: true } : {}),
+    ...(typeof values.resume === "string" ? { resumeSession: values.resume } : {}),
+    ...(typeof values["fork"] === "string"
+      ? { forkSession: values["fork"] }
+      : typeof values["fork-session"] === "string"
+        ? { forkSession: values["fork-session"] }
+        : {}),
+  });
 
   await startTuiRepl({
     workDir,
     provider,
     model,
     thinkingEffort,
+    sessionSelection,
     ...(values["mcp-config"] ? { mcpConfigPath: values["mcp-config"] } : {}),
   });
 }
