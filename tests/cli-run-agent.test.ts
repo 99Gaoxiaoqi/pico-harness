@@ -11,7 +11,10 @@ import { buildApprovalMiddleware, runAgentFromCli } from "../src/cli/run-agent.j
 import type { Reporter } from "../src/engine/reporter.js";
 import type { Message, ToolDefinition } from "../src/schema/message.js";
 import type { LLMProvider } from "../src/provider/interface.js";
-import { resetSessionSettingsForTests } from "../src/input/session-settings.js";
+import {
+  getOrCreateSessionSettings,
+  resetSessionSettingsForTests,
+} from "../src/input/session-settings.js";
 
 class ScriptedProvider implements LLMProvider {
   readonly calls: Array<{ messages: Message[]; toolNames: string[] }> = [];
@@ -546,6 +549,253 @@ describe("runAgentFromCli", () => {
     expect(result.finalMessage).toBe("Read done.");
     expect(approvalNotifier).not.toHaveBeenCalled();
     expect(globalApprovalManager.pendingCount).toBe(0);
+  });
+
+  it("uses shared /mode plan settings as real planMode for the next run", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-cli-settings-plan-"));
+    getOrCreateSessionSettings({
+      sessionId: "settings_plan_session",
+      cwd: workDir,
+      provider: "openai",
+      model: "glm-5.2",
+      mode: "plan",
+      permissionMode: "yolo",
+    });
+    const provider = new ScriptedProvider([
+      {
+        role: "assistant",
+        content: "I will try a write.",
+        toolCalls: [
+          {
+            id: "call_plan_write",
+            name: "write_file",
+            arguments: JSON.stringify({ path: "not-plan.txt", content: "blocked" }),
+          },
+        ],
+        usage: { promptTokens: 1, completionTokens: 1 },
+      },
+      {
+        role: "assistant",
+        content: "Plan mode blocked it.",
+        usage: { promptTokens: 1, completionTokens: 1 },
+      },
+    ]);
+    const approvalNotifier = vi.fn();
+
+    const result = await runAgentFromCli(
+      {
+        prompt: "Write not-plan.txt",
+        dir: workDir,
+        session: "settings_plan_session",
+        provider: "openai",
+      },
+      {
+        provider,
+        approvalNotifier,
+      },
+    );
+
+    expect(result.finalMessage).toBe("Plan mode blocked it.");
+    expect(approvalNotifier).not.toHaveBeenCalled();
+    await expect(readFile(join(workDir, "not-plan.txt"), "utf8")).rejects.toThrow();
+  });
+
+  it("uses shared /permissions yolo settings to bypass normal write approval", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-cli-settings-yolo-"));
+    getOrCreateSessionSettings({
+      sessionId: "settings_yolo_session",
+      cwd: workDir,
+      provider: "openai",
+      model: "glm-5.2",
+      permissionMode: "yolo",
+    });
+    const provider = new ScriptedProvider([
+      {
+        role: "assistant",
+        content: "I will write.",
+        toolCalls: [
+          {
+            id: "call_yolo_write",
+            name: "write_file",
+            arguments: JSON.stringify({ path: "yolo.txt", content: "allowed" }),
+          },
+        ],
+        usage: { promptTokens: 1, completionTokens: 1 },
+      },
+      {
+        role: "assistant",
+        content: "Yolo write done.",
+        usage: { promptTokens: 1, completionTokens: 1 },
+      },
+    ]);
+    const approvalNotifier = vi.fn();
+
+    const result = await runAgentFromCli(
+      {
+        prompt: "Write yolo.txt",
+        dir: workDir,
+        session: "settings_yolo_session",
+        provider: "openai",
+      },
+      {
+        provider,
+        approvalNotifier,
+      },
+    );
+
+    expect(result.finalMessage).toBe("Yolo write done.");
+    expect(approvalNotifier).not.toHaveBeenCalled();
+    expect(await readFile(join(workDir, "yolo.txt"), "utf8")).toBe("allowed");
+  });
+
+  it("uses shared /permissions ask settings to request normal write approval", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-cli-settings-ask-"));
+    getOrCreateSessionSettings({
+      sessionId: "settings_ask_session",
+      cwd: workDir,
+      provider: "openai",
+      model: "glm-5.2",
+      permissionMode: "ask",
+    });
+    const provider = new ScriptedProvider([
+      {
+        role: "assistant",
+        content: "I will write.",
+        toolCalls: [
+          {
+            id: "call_ask_write",
+            name: "write_file",
+            arguments: JSON.stringify({ path: "ask.txt", content: "needs approval" }),
+          },
+        ],
+        usage: { promptTokens: 1, completionTokens: 1 },
+      },
+      {
+        role: "assistant",
+        content: "Ask write rejected.",
+        usage: { promptTokens: 1, completionTokens: 1 },
+      },
+    ]);
+    const approval = makeApprovalCapture();
+
+    const runPromise = runAgentFromCli(
+      {
+        prompt: "Write ask.txt",
+        dir: workDir,
+        session: "settings_ask_session",
+        provider: "openai",
+      },
+      {
+        provider,
+        approvalNotifier: approval.notifier,
+      },
+    );
+
+    const notice = await waitForApprovalBeforeCompletion(approval.nextNotice, runPromise);
+    expect(notice.toolName).toBe("write_file");
+    globalApprovalManager.resolveApproval(notice.taskId, false, "test rejection");
+
+    await expect(runPromise).resolves.toMatchObject({ finalMessage: "Ask write rejected." });
+    await expect(readFile(join(workDir, "ask.txt"), "utf8")).rejects.toThrow();
+  });
+
+  it("uses shared /permissions auto settings to allow ordinary safe writes", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-cli-settings-auto-"));
+    getOrCreateSessionSettings({
+      sessionId: "settings_auto_session",
+      cwd: workDir,
+      provider: "openai",
+      model: "glm-5.2",
+      permissionMode: "auto",
+    });
+    const provider = new ScriptedProvider([
+      {
+        role: "assistant",
+        content: "I will write.",
+        toolCalls: [
+          {
+            id: "call_auto_write",
+            name: "write_file",
+            arguments: JSON.stringify({ path: "auto.txt", content: "safe" }),
+          },
+        ],
+        usage: { promptTokens: 1, completionTokens: 1 },
+      },
+      {
+        role: "assistant",
+        content: "Auto write done.",
+        usage: { promptTokens: 1, completionTokens: 1 },
+      },
+    ]);
+    const approvalNotifier = vi.fn();
+
+    const result = await runAgentFromCli(
+      {
+        prompt: "Write auto.txt",
+        dir: workDir,
+        session: "settings_auto_session",
+        provider: "openai",
+      },
+      {
+        provider,
+        approvalNotifier,
+      },
+    );
+
+    expect(result.finalMessage).toBe("Auto write done.");
+    expect(approvalNotifier).not.toHaveBeenCalled();
+    expect(await readFile(join(workDir, "auto.txt"), "utf8")).toBe("safe");
+  });
+
+  it("uses shared /permissions default settings to request normal write approval", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-cli-settings-default-"));
+    getOrCreateSessionSettings({
+      sessionId: "settings_default_session",
+      cwd: workDir,
+      provider: "openai",
+      model: "glm-5.2",
+      permissionMode: "default",
+    });
+    const provider = new ScriptedProvider([
+      {
+        role: "assistant",
+        content: "I will write.",
+        toolCalls: [
+          {
+            id: "call_default_write",
+            name: "write_file",
+            arguments: JSON.stringify({ path: "default.txt", content: "needs approval" }),
+          },
+        ],
+        usage: { promptTokens: 1, completionTokens: 1 },
+      },
+      {
+        role: "assistant",
+        content: "Default write rejected.",
+        usage: { promptTokens: 1, completionTokens: 1 },
+      },
+    ]);
+    const approval = makeApprovalCapture();
+
+    const runPromise = runAgentFromCli(
+      {
+        prompt: "Write default.txt",
+        dir: workDir,
+        session: "settings_default_session",
+        provider: "openai",
+      },
+      {
+        provider,
+        approvalNotifier: approval.notifier,
+      },
+    );
+
+    const notice = await waitForApprovalBeforeCompletion(approval.nextNotice, runPromise);
+    expect(notice.toolName).toBe("write_file");
+    globalApprovalManager.resolveApproval(notice.taskId, false, "test rejection");
+
+    await expect(runPromise).resolves.toMatchObject({ finalMessage: "Default write rejected." });
+    await expect(readFile(join(workDir, "default.txt"), "utf8")).rejects.toThrow();
   });
 
   it("bash redirect writes request approval before executing", async () => {

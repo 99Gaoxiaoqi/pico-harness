@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -153,6 +153,18 @@ describe("resolveCliSession", () => {
         resumeSession: "cli-known",
       }),
     ).rejects.toThrow("session 启动参数只能选择一种");
+  });
+});
+
+describe("CLI main session flags", () => {
+  it("registers resolver-backed session flags and short aliases", async () => {
+    const source = await readFile(join(process.cwd(), "src", "cli", "main.ts"), "utf8");
+
+    expect(source).toContain('session: { type: "string", short: "S" }');
+    expect(source).toContain('"continue": { type: "boolean", short: "c" }');
+    expect(source).toContain('"fork": { type: "string" }');
+    expect(source).toContain("resolveCliSession");
+    expect(source).toContain("sessionSelection");
   });
 });
 

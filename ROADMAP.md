@@ -300,7 +300,7 @@ git worktree remove ../pico-1-streaming
 - [ ] 7.1 真实中断链路：AbortSignal 贯穿 TUI、Engine、Provider 和 ToolScheduler
 - [ ] 7.2 焦点仲裁：审批、候选、输入和 transcript 单一键盘所有权
 - [ ] 7.3 Transcript 行模型：工具聚合、Unicode 宽度、展开行高和 auto-follow
-- [ ] 7.4 命令真实性：Plan、Permission 和 Session 启动语义接入真实运行时
+- [x] 7.4 命令真实性：Plan、Permission 和 Session 启动语义接入真实运行时（聚焦测试 72 个通过；typecheck / lint / diff check 通过）
 - [ ] 7.5 命令发现：扫描收敛、完整候选、分类与统一 Help 元数据
 - [ ] 7.6 产品外壳：Logo 首项、动态状态行和结构化错误
 - [ ] 7.7 真实模型 E2E 与完整集成验证

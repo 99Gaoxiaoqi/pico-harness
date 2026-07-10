@@ -101,6 +101,23 @@ describe("Pico command registry", () => {
     expect(getStoredSessionSettings("session-mode-update")?.mode).toBe("plan");
   });
 
+  it("/mode plan keeps the shared settings object used by later runs", async () => {
+    const registry = await createPicoCommandRegistry({
+      workDir: process.cwd(),
+      provider: "openai",
+      model: "glm-5.2",
+      sessionId: "session-mode-shared",
+    });
+
+    const before = getStoredSessionSettings("session-mode-shared");
+    const result = await processUserInput("/mode plan", { registry });
+    const after = getStoredSessionSettings("session-mode-shared");
+
+    expect(result.type).toBe("local-command");
+    expect(before).toBe(after);
+    expect(after?.mode).toBe("plan");
+  });
+
   it("/mode rejects unsupported interaction modes", async () => {
     const registry = await createPicoCommandRegistry({
       workDir: process.cwd(),
@@ -116,6 +133,29 @@ describe("Pico command registry", () => {
     expect(result.command).toBe("mode");
     expect(result.result.message).toContain("Usage: /mode <default|plan|auto|yolo>");
     expect(getStoredSessionSettings("session-mode-reject")?.mode).toBe("default");
+  });
+
+  it("/permissions yolo/auto/default/ask updates the shared permission mode", async () => {
+    const registry = await createPicoCommandRegistry({
+      workDir: process.cwd(),
+      provider: "openai",
+      model: "glm-5.2",
+      sessionId: "session-permissions-shared",
+    });
+
+    const yolo = await processUserInput("/permissions yolo", { registry });
+    const auto = await processUserInput("/permissions auto", { registry });
+    const defaultMode = await processUserInput("/permissions default", { registry });
+    const ask = await processUserInput("/permissions ask", { registry });
+
+    expect(yolo.type).toBe("local-command");
+    expect(auto.type).toBe("local-command");
+    expect(defaultMode.type).toBe("local-command");
+    expect(ask.type).toBe("local-command");
+    expect(getStoredSessionSettings("session-permissions-shared")?.permissionMode).toBe("ask");
+    expect(ask.type === "local-command" ? ask.result.data : undefined).toMatchObject({
+      permissionMode: "ask",
+    });
   });
 
   it("/model switches the session model used by later requests", async () => {

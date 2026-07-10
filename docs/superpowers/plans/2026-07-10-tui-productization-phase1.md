@@ -36,7 +36,7 @@
 - 测试：`tests/loop.test.ts`
 - 测试：`tests/tui/repl-input-routing.test.tsx`
 
-- [ ] **步骤 1：编写失败测试**
+- [x] **步骤 1：编写失败测试**
 
 新增断言：`runAgentFromCli` 将 `signal` 传给 Engine；已 abort 的 run 不追加 assistant 成功消息；TUI interrupt 会调用当前 controller 的 `abort()`。
 
@@ -48,7 +48,7 @@ await expect(runAgentFromCli(options, { signal: controller.signal })).rejects.to
 });
 ```
 
-- [ ] **步骤 2：运行测试并确认红灯**
+- [x] **步骤 2：运行测试并确认红灯**
 
 运行：`npx vitest run tests/cli-run-agent.test.ts tests/loop.test.ts tests/tui/repl-input-routing.test.tsx`
 
@@ -187,17 +187,19 @@ expect(globalApprovalManager.isYoloMode(sessionId)).toBe(true);
 
 预期：TUI 当前未传 planMode，CLI 参数未注册。
 
-- [ ] **步骤 3：接通真实设置**
+- [x] **步骤 3：接通真实设置**
 
 TUI 每次 run 从同一 `SessionSettings` 读取 mode/permission；Plan 映射到 `planMode`；yolo/auto/default 映射到 ApprovalManager；main.ts 注册已有 resolver 支持的 session 参数。
 
-- [ ] **步骤 4：运行聚焦测试**
+- [x] **步骤 4：运行聚焦测试**
 
 运行：`npx vitest run tests/input/pico-command-registry.test.ts tests/cli/session-resolver.test.ts tests/cli-run-agent.test.ts`
 
 预期：PASS。
 
-- [ ] **步骤 5：提交**
+结果：`npm test -- tests/input/pico-command-registry.test.ts tests/cli-session-resolver.test.ts tests/cli-run-agent.test.ts` 72 个测试通过；`npm run typecheck`、`npm run lint`、`git diff --check` 通过。
+
+- [x] **步骤 5：提交**
 
 ```bash
 git add src/tui/repl.tsx src/cli/main.ts src/cli/run-agent.ts src/input/session-settings.ts src/input/pico-command-registry.ts src/approval/manager.ts tests
@@ -337,4 +339,3 @@ git commit -m "test(tui): 补齐产品化真实模型验收"
 - 类型一致性：统一使用 `AbortSignal`、`SessionSettings`、现有 `DialogRequest` 和 `SlashCommand`。
 - 范围控制：Plugins/Goal/Tasks 的完整管理面板属于阶段 2，本计划只为其建立可信命令目录和运行时基础。
 - 无占位实现：每个任务均给出文件、失败测试、聚焦命令和提交边界。
-
