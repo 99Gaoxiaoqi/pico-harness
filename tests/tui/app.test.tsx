@@ -309,9 +309,116 @@ describe("App", () => {
 
     try {
       let output = await harness.write("\u001b[6~");
-      expect(output).toContain("› /cmd-10");
+      expect(output).toContain("› /cmd-12");
       expect(output).toContain("Use dialog controls");
       expect(output).not.toContain('Try "fix this" or / for commands');
+      expect(output.split("\n").length).toBeLessThanOrEqual(24);
+
+      await harness.write("\u001b");
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      expect(closeDialog).toHaveBeenCalledWith("local-ui:help");
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("sizes real registry help dynamically and restores input after Esc", async () => {
+    const closeDialog = vi.fn();
+    const registry = await createPicoCommandRegistry({
+      workDir: process.cwd(),
+      provider: "openai",
+      model: "glm-5.2",
+      sessionId: "app-help-dynamic-idle",
+    });
+    const request = createLocalUiDialogRequest(
+      { kind: "open-panel", panel: "help" },
+      {
+        commands: registry.list({ includeDisabled: true, availabilityState: "idle" }),
+        onClose: closeDialog,
+      } as never,
+    );
+    const entries = Array.from({ length: 20 }, (_, index) => ({
+      kind: "assistant" as const,
+      content: `message-${index}`,
+    }));
+    const app = (dialogRequests = request ? [request] : []) => (
+      <App
+        model="glm-5.2"
+        provider="openai"
+        workDir="/workspace/demo"
+        entries={entries}
+        running={false}
+        dialogRequests={dialogRequests}
+        onSubmit={vi.fn()}
+      />
+    );
+    const harness = createInteractiveApp(app(), { columns: 80, rows: 24 });
+
+    try {
+      let output = await harness.write("\u001b[B");
+      expect(output).toContain("builtin / help");
+      expect(output).toContain("aliases: /h, /?");
+      expect(output.split("\n").length).toBeLessThanOrEqual(24);
+
+      output = await harness.write("\u001b[6~");
+      expect(output).toContain("builtin / permissions");
+      expect(output).toContain("aliases: /permission");
+      expect(output).toContain("/permissions [ask|default|auto|");
+      expect(output.split("\n").length).toBeLessThanOrEqual(24);
+
+      await harness.write("\u001b");
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      expect(closeDialog).toHaveBeenCalledWith("local-ui:help");
+
+      output = await harness.rerender(app([]));
+      output = await harness.write("after");
+      expect(output).toContain("after▋");
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("keeps real running help scrollable with disabled reasons and wrapped rows", async () => {
+    const closeDialog = vi.fn();
+    const registry = await createPicoCommandRegistry({
+      workDir: process.cwd(),
+      provider: "openai",
+      model: "glm-5.2",
+      sessionId: "app-help-dynamic-running",
+    });
+    const request = createLocalUiDialogRequest(
+      { kind: "open-panel", panel: "help" },
+      {
+        commands: registry.list({ includeDisabled: true, availabilityState: "running" }),
+        onClose: closeDialog,
+      } as never,
+    );
+    const harness = createInteractiveApp(
+      <App
+        model="glm-5.2"
+        provider="openai"
+        workDir="/workspace/demo"
+        entries={Array.from({ length: 20 }, (_, index) => ({
+          kind: "assistant" as const,
+          content: `message-${index}`,
+        }))}
+        running
+        dialogRequests={request ? [request] : []}
+        onSubmit={vi.fn()}
+      />,
+      { columns: 80, rows: 24 },
+    );
+
+    try {
+      let output = await harness.write("\u001b[6~");
+      expect(output).toContain("[disabled]");
+      expect(output).toContain("Command is only available while idle.");
+      expect(output).toContain("↓");
+      expect(output.split("\n").length).toBeLessThanOrEqual(24);
+
+      output = await harness.write("\u001b[6~");
+      expect(output).toContain("›");
+      expect(output).toContain("Use dialog controls");
       expect(output.split("\n").length).toBeLessThanOrEqual(24);
 
       await harness.write("\u001b");

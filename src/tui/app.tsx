@@ -34,7 +34,12 @@ import type { TuiEntry } from "./tui-reporter.js";
 import { resolveKeybinding } from "./keybindings/resolver.js";
 import { ToolCardFocusProvider } from "./tool-card.js";
 import { buildTranscriptLayout } from "./transcript-layout.js";
-import { DEFAULT_HELP_PANEL_MAX_ITEMS } from "./local-ui-dialog-host.js";
+import {
+  fitHelpPanelMaxItems,
+  InteractiveHelpPanel,
+  measureHelpPanelRows,
+  type InteractiveHelpPanelProps,
+} from "./help-panel.js";
 import {
   approvalPanelContentWidth,
   measureApprovalPanelRows,
@@ -118,15 +123,20 @@ export function App({
           onDiffExpandedChange: setApprovalDiffExpanded,
         })
       : focusedDialog?.content;
+  const dialogLayout = measureGenericDialogLayout(controlledApproval, {
+    active: focusedDialog !== null && !inlineModal,
+    rows,
+    columns,
+  });
   const overlay =
-    focusedDialog?.layer === "overlay" || inlineModal ? controlledApproval : undefined;
+    focusedDialog?.layer === "overlay" || inlineModal ? dialogLayout.content : undefined;
   const approvalRows = approvalNotice
     ? measureApprovalPanelRows(approvalNotice, {
         diffExpanded: approvalDiffExpanded,
         wrapWidth: approvalPanelContentWidth(columns),
       })
     : 0;
-  const genericDialogRows = focusedDialog && !inlineModal ? DEFAULT_HELP_PANEL_MAX_ITEMS + 4 : 0;
+  const genericDialogRows = dialogLayout.rows;
   const [expandedToolKey, setExpandedToolKey] = useState<string | null>(null);
   const transcriptLayout = useMemo(
     () =>
@@ -323,6 +333,41 @@ export function App({
 }
 
 const StableLogoPanel = memo(LogoPanel);
+
+interface GenericDialogLayout {
+  content: React.ReactNode;
+  rows: number;
+}
+
+function measureGenericDialogLayout(
+  content: React.ReactNode,
+  options: { active: boolean; rows: number; columns: number },
+): GenericDialogLayout {
+  if (!options.active) return { content, rows: 0 };
+
+  const maxRows = Math.max(3, options.rows - 9);
+  const width = Math.max(20, options.columns - 8);
+  if (React.isValidElement<InteractiveHelpPanelProps>(content) && content.type === InteractiveHelpPanel) {
+    const maxItems = fitHelpPanelMaxItems(content.props.commands, {
+      maxRows,
+      width,
+      selectedIndex: content.props.selectedIndex,
+      scrollOffset: content.props.scrollOffset,
+    });
+    const measuredRows = measureHelpPanelRows(content.props.commands, {
+      maxItems,
+      width,
+      selectedIndex: content.props.selectedIndex,
+      scrollOffset: content.props.scrollOffset,
+    });
+    return {
+      content: React.cloneElement(content, { maxItems }),
+      rows: Math.min(maxRows, measuredRows),
+    };
+  }
+
+  return { content, rows: Math.min(maxRows, 5) };
+}
 
 export type AppGlobalAction = "interrupt" | "exit" | "redraw";
 type TranscriptScrollAction = "pageUp" | "pageDown" | "lineUp" | "lineDown" | "top" | "bottom";

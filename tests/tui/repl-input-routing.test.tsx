@@ -5,7 +5,9 @@ import { join } from "node:path";
 import { renderToString } from "ink";
 import { describe, expect, it, vi } from "vitest";
 import { createBuiltinCommandRegistry } from "../../src/input/builtin-commands.js";
+import { CommandRegistry } from "../../src/input/command-registry.js";
 import { createPicoCommandRegistry } from "../../src/input/pico-command-registry.js";
+import type { SlashCommand } from "../../src/input/types.js";
 import { ApprovalManager, globalApprovalManager } from "../../src/approval/manager.js";
 import { buildApprovalMiddleware } from "../../src/cli/run-agent.js";
 import { RunningInputQueue } from "../../src/tui/running-input-queue.js";
@@ -212,11 +214,10 @@ describe("TUI input routing", () => {
     expect(output).toContain("/compact [disabled]");
     expect(output).toContain("Command is only available while idle.");
     expect(output).toContain("/model [name] [disabled]");
-    expect(output).toContain("Cannot run while the agent is running.");
     expect(output).not.toContain("/mcp [disabled]");
   });
 
-  it("running command availability shares the same allowlist as TUI execution", async () => {
+  it("running command availability comes from descriptors", async () => {
     const registry = await createPicoCommandRegistry({
       workDir: process.cwd(),
       provider: "openai",
@@ -232,7 +233,7 @@ describe("TUI input routing", () => {
       expect.objectContaining({
         name: "model",
         disabled: true,
-        disabledReason: "Cannot run while the agent is running.",
+        disabledReason: "Command is only available while idle.",
       }),
     );
     expect(
@@ -245,6 +246,79 @@ describe("TUI input routing", () => {
         availabilityState: getTuiCommandAvailabilityState("running"),
       })[0],
     ).not.toHaveProperty("disabled");
+  });
+
+  it("running local execution follows descriptor availability instead of command names", async () => {
+    const alwaysExecute = vi.fn<SlashCommand["execute"]>(() => ({
+      type: "local",
+      action: "message",
+      message: "always local ran",
+    }));
+    const panelExecute = vi.fn<SlashCommand["execute"]>(() => ({
+      type: "local",
+      action: "message",
+      message: "running panel ran",
+    }));
+    const statusExecute = vi.fn<SlashCommand["execute"]>(() => ({
+      type: "local",
+      action: "message",
+      message: "idle status ran",
+    }));
+    const registry = new CommandRegistry([
+      {
+        name: "always-local",
+        description: "Always local",
+        kind: "local",
+        execute: alwaysExecute,
+      },
+      {
+        name: "panel",
+        description: "Running panel",
+        kind: "local-jsx",
+        availability: "running",
+        execute: panelExecute,
+      },
+      {
+        name: "status",
+        description: "Idle status override",
+        kind: "local",
+        availability: "idle",
+        execute: statusExecute,
+      },
+    ]);
+    const { reporter, snapshots, runAgent, exit, workDir } = harness();
+    const runningDeps = {
+      reporter,
+      registry,
+      workDir,
+      runAgent,
+      exit,
+      guard: {
+        getSnapshot: () => "running" as const,
+        tryStart: () => null,
+        end: () => true,
+      },
+      queue: new RunningInputQueue(),
+    };
+
+    await handleTuiRunningInputSubmission("/always-local", runningDeps);
+    await handleTuiRunningInputSubmission("/panel", runningDeps);
+    await handleTuiRunningInputSubmission("/status", runningDeps);
+
+    expect(alwaysExecute).toHaveBeenCalledTimes(1);
+    expect(panelExecute).toHaveBeenCalledTimes(1);
+    expect(statusExecute).not.toHaveBeenCalled();
+    expect(registry.detailedSuggestions("status", { availabilityState: "running" })).toContainEqual(
+      expect.objectContaining({
+        name: "status",
+        disabled: true,
+        disabledReason: "Command is only available while idle.",
+      }),
+    );
+    expect(snapshots.at(-1)).toContainEqual({
+      kind: "system",
+      content: "Cannot run /status while the agent is running. Please wait for the current response to finish.",
+    });
   });
 
   it("/mcp can run locally while an agent response is running", async () => {

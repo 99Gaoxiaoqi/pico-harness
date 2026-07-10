@@ -40,6 +40,7 @@ export function createBuiltinCommands(): readonly SlashCommand[] {
       description: "Show available slash commands",
       usage: "/help [command]",
       category: "help",
+      availability: "always",
       action: "help",
       execute: (input, context) => ({
         type: "local",
@@ -54,6 +55,7 @@ export function createBuiltinCommands(): readonly SlashCommand[] {
       description: "Clear the local transcript view",
       usage: "/clear",
       category: "system",
+      availability: "idle",
       action: "clear",
       message: "Clear requested.",
     }),
@@ -63,6 +65,7 @@ export function createBuiltinCommands(): readonly SlashCommand[] {
       description: "Exit the interactive session",
       usage: "/exit",
       category: "system",
+      availability: "idle",
       action: "exit",
       message: "Exit requested.",
     }),
@@ -102,6 +105,7 @@ interface LocalCommandSpec {
   description: string;
   usage: string;
   category?: SlashCommandCategory;
+  availability?: SlashCommand["availability"];
   action: LocalCommandResult["action"];
   message?: string;
   execute?: SlashCommand["execute"];
@@ -114,6 +118,7 @@ function localCommand(spec: LocalCommandSpec): SlashCommand {
     description: spec.description,
     usage: spec.usage,
     category: spec.category,
+    availability: spec.availability,
     kind: "local",
     execute:
       spec.execute ??

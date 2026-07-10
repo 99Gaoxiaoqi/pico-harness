@@ -381,6 +381,7 @@ function createInitCommand(options: PicoCommandRegistryOptions): SlashCommand {
     description: "Create lightweight Pico project entry files",
     usage: "/init",
     kind: "local",
+    availability: "idle",
     execute: (): LocalCommandResult => ({
       type: "local",
       action: "message",
@@ -395,6 +396,7 @@ function createDoctorCommand(options: PicoCommandRegistryOptions): SlashCommand 
     description: "Diagnose local Pico configuration",
     usage: "/doctor",
     kind: "local",
+    availability: "idle",
     execute: (): LocalCommandResult => ({
       type: "local",
       action: "message",
@@ -413,6 +415,7 @@ function createModelCommand(settings: SessionSettings): SlashCommand {
     category: "model",
     argumentCompleter: completeFromCandidates(MODEL_ARGUMENT_CANDIDATES),
     kind: "local",
+    availability: "idle",
     execute: (input): LocalCommandResult => {
       const result = setSessionModel(settings, input.args);
       return {
@@ -437,6 +440,7 @@ function createModeCommand(settings: SessionSettings): SlashCommand {
     category: "session",
     argumentCompleter: completeFromCandidates(MODE_CANDIDATES),
     kind: "local",
+    availability: "idle",
     execute: (input): LocalCommandResult => {
       if (input.args.trim().length === 0) {
         return {
@@ -468,6 +472,7 @@ function createPermissionsCommand(settings: SessionSettings): SlashCommand {
     category: "permissions",
     argumentCompleter: completeFromCandidates(PERMISSION_CANDIDATES),
     kind: "local",
+    availability: "idle",
     execute: (input): LocalCommandResult => {
       if (input.args.trim().length === 0) {
         return {
@@ -502,6 +507,7 @@ function createThinkingCommand(settings: SessionSettings): SlashCommand {
     category: "model",
     argumentCompleter: completeFromCandidates(THINKING_CANDIDATES),
     kind: "local",
+    availability: "idle",
     execute: (input): LocalCommandResult => {
       const effort = parseThinkingEffortArg(input.args);
       if (effort === undefined) {
@@ -532,6 +538,7 @@ function createToolsCommand(settings: SessionSettings, disclosure?: ToolDisclosu
     argumentHint: "[query]",
     category: "tools",
     kind: "local",
+    availability: "idle",
     execute: (input): LocalCommandResult => {
       const query = input.args.trim();
       return {
@@ -630,6 +637,7 @@ function createAgentsCommand(options: PicoCommandRegistryOptions): SlashCommand 
     description: "List available subagents",
     usage: "/agents",
     kind: "local",
+    availability: "idle",
     execute: async (): Promise<LocalCommandResult> => {
       const agents = summarizeClaudeAgents(
         await loadClaudeAgents({ workDir: options.workDir, includeBuiltins: true }),
@@ -790,6 +798,7 @@ function createSessionsCommand(options: PicoCommandRegistryOptions): SlashComman
     usage: "/sessions",
     category: "session",
     kind: "local",
+    availability: "idle",
     execute: async (): Promise<LocalCommandResult> => {
       const summaries = await listCliSessionSummaries(options.workDir);
       return {
@@ -816,6 +825,7 @@ function createResumeCommand(options: PicoCommandRegistryOptions): SlashCommand 
     argumentCompleter: async (query) =>
       filterArgumentCandidates(await loadSessionArgumentCandidates(options.workDir), query),
     kind: "local",
+    availability: "idle",
     execute: (input): LocalCommandResult => {
       const sessionId = input.argv[0];
       if (!sessionId) {
@@ -853,6 +863,7 @@ function createSnapshotsCommand(options: PicoCommandRegistryOptions): SlashComma
     usage: "/snapshots",
     category: "session",
     kind: "local",
+    availability: "idle",
     execute: async (): Promise<LocalCommandResult> => {
       const session = await resolveCommandSession(options);
       const summaries = listFileHistorySnapshotSummaries(session);
@@ -879,6 +890,7 @@ function createRewindCommand(
     argumentCompleter: async (query) =>
       filterArgumentCandidates(await loadSnapshotArgumentCandidates(options), query),
     kind: "local",
+    availability: "idle",
     execute: async (input): Promise<LocalCommandResult> => {
       const session = await resolveCommandSession(options);
       const messageId = input.argv[0];
@@ -909,6 +921,7 @@ function createUndoCommand(options: PicoCommandRegistryOptions): SlashCommand {
     usage: "/undo [message-id] [code|conversation|both]",
     argumentHint: "[message-id] [code|conversation|both]",
     kind: "local",
+    availability: "idle",
     execute: async (input): Promise<LocalCommandResult> => {
       const session = await resolveCommandSession(options);
       const summaries = listFileHistorySnapshotSummaries(session);
@@ -970,6 +983,7 @@ function createSkillsCommand(loader: SkillLoader): SlashCommand {
     usage: "/skills",
     category: "skill",
     kind: "local",
+    availability: "idle",
     execute: async (): Promise<LocalCommandResult> => ({
       type: "local",
       action: "skills",
@@ -989,6 +1003,7 @@ function createSkillCommand(loader: SkillLoader): SlashCommand {
     argumentCompleter: async (query) =>
       filterArgumentCandidates(await loadSkillArgumentCandidates(loader), query),
     kind: "local",
+    availability: "idle",
     execute: async (input): Promise<LocalCommandResult> => ({
       type: "local",
       action: "message",

@@ -153,6 +153,47 @@ export function formatHelpPanel(
   return lines.join("\n");
 }
 
+export function measureHelpPanelRows(
+  commands: readonly HelpPanelCommand[],
+  options: {
+    selectedIndex?: number;
+    scrollOffset?: number;
+    maxItems?: number;
+    width?: number;
+  } = {},
+): number {
+  const wrapWidth = Math.max(1, options.width ?? 80);
+  return formatHelpPanel(commands, options)
+    .split("\n")
+    .reduce((rows, line) => rows + Math.max(1, Math.ceil(line.length / wrapWidth)), 0);
+}
+
+export function fitHelpPanelMaxItems(
+  commands: readonly HelpPanelCommand[],
+  options: {
+    maxRows: number;
+    width?: number;
+    selectedIndex?: number;
+    scrollOffset?: number;
+  },
+): number {
+  if (commands.length === 0) return 1;
+
+  const maxRows = Math.max(1, options.maxRows);
+  let fitted = 1;
+  for (let maxItems = 1; maxItems <= commands.length; maxItems++) {
+    const rows = measureHelpPanelRows(commands, {
+      selectedIndex: options.selectedIndex,
+      scrollOffset: options.scrollOffset,
+      maxItems,
+      width: options.width,
+    });
+    if (rows > maxRows) break;
+    fitted = maxItems;
+  }
+  return fitted;
+}
+
 export function formatHelpPanelSections(
   commands: readonly HelpPanelCommand[],
   options: { selectedIndex?: number; scrollOffset?: number; maxItems?: number } = {},

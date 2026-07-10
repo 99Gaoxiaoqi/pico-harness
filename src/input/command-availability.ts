@@ -2,8 +2,6 @@ import type { SlashCommand } from "./types.js";
 
 export type CommandAvailability = "always" | "idle" | "running";
 export type CommandInputState = "idle" | "running" | "modal";
-export const RUNNING_ALLOWED_LOCAL_COMMANDS = ["help", "status", "mcp"] as const;
-const RUNNING_ALLOWED_LOCAL_COMMAND_SET = new Set<string>(RUNNING_ALLOWED_LOCAL_COMMANDS);
 
 export type AvailabilityCommand = Pick<SlashCommand, "name"> &
   Partial<Pick<SlashCommand, "kind">> & {
@@ -32,18 +30,6 @@ export function getCommandAvailability(
   }
 
   const availability = command.availability ?? "always";
-  if (
-    state === "running" &&
-    availability === "always" &&
-    (command.kind ?? "local") === "local" &&
-    !RUNNING_ALLOWED_LOCAL_COMMAND_SET.has(command.name)
-  ) {
-    return {
-      available: false,
-      disabledReason: "Cannot run while the agent is running.",
-    };
-  }
-
   if (availability === "always" || availability === state) {
     return { available: true };
   }
