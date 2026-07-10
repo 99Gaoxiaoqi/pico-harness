@@ -714,6 +714,7 @@ describe("App", () => {
     expect(output).toContain("phase idle");
     expect(output).toContain("mode resume");
     expect(output).toContain("perm acceptEdits");
+    expect(output).toContain("task task");
     expect(output).not.toContain("ctx claude");
     expect(output).not.toContain("think high");
     expect(output).not.toContain("claude-sonnet/claude");
