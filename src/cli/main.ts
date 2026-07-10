@@ -1,15 +1,13 @@
 // pico 的唯一外壳入口:TUI。
 // 网络服务、机器人、ACP 和 one-shot CLI 都已移除,避免多入口共享 session 造成状态串扰。
 
-import { mkdir, realpath } from "node:fs/promises";
-import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { primeTokenizer } from "../context/token-counter.js";
 import { FTS5Store } from "../memory/fts5-store.js";
 import type { ProviderKind } from "../provider/factory.js";
 import { resolveThinkingEffort } from "../provider/thinking.js";
 import { startTuiRepl } from "../tui/repl.js";
-import { resolveCliSession } from "./session-resolver.js";
+import { resolveCliStartupSession } from "./session-args.js";
 
 ["SIGINT", "SIGTERM", "beforeExit", "exit"].forEach((evt) => {
   process.on(evt, () => FTS5Store.closeAll());
@@ -35,19 +33,8 @@ async function main(): Promise<void> {
 
   const provider = values.provider as ProviderKind;
   const thinkingEffort = resolveThinkingEffort(values.thinking);
-  const workDir = await resolveCliWorkDir(values.dir);
+  const { workDir, sessionSelection } = await resolveCliStartupSession(process.argv.slice(2));
   const model = values.model ?? process.env.LLM_MODEL ?? defaultModelForKind(provider);
-  const sessionSelection = await resolveCliSession({
-    workDir,
-    ...(typeof values.session === "string" ? { session: values.session } : {}),
-    ...(values["continue"] === true ? { continueSession: true } : {}),
-    ...(typeof values.resume === "string" ? { resumeSession: values.resume } : {}),
-    ...(typeof values["fork"] === "string"
-      ? { forkSession: values["fork"] }
-      : typeof values["fork-session"] === "string"
-        ? { forkSession: values["fork-session"] }
-        : {}),
-  });
 
   await startTuiRepl({
     workDir,
@@ -57,12 +44,6 @@ async function main(): Promise<void> {
     sessionSelection,
     ...(values["mcp-config"] ? { mcpConfigPath: values["mcp-config"] } : {}),
   });
-}
-
-async function resolveCliWorkDir(dir: string | undefined): Promise<string> {
-  const target = resolve(dir ?? process.cwd());
-  await mkdir(target, { recursive: true });
-  return realpath(target);
 }
 
 function defaultModelForKind(kind: ProviderKind): string {

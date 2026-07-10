@@ -102,6 +102,7 @@ export interface HandleTuiInputSubmissionDeps {
   closeDialog?: (id: string) => void;
   dispatchInput?: (text: string) => Promise<void> | void;
   openLocalUiDialog?: (result: LocalCommandResult) => void;
+  sessionId?: string;
   currentModelId?: string;
   modelOptions?: readonly ModelOption[];
   createModelSelectorContent?: (effect: LocalTuiModelSelectorDialogEffect) => React.ReactNode;
@@ -425,6 +426,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
           registry,
           workDir: opts.workDir,
           exit,
+          sessionId: tuiSessionId,
           openDialog: (request) => {
             setDialogRequests((current) => [
               ...current.filter((item) => item.id !== request.id),
@@ -704,6 +706,7 @@ export async function runTuiAgentPrompt(
           createApprovalDialogRequest(notice, {
             reporter: deps.reporter,
             closeDialog: deps.closeDialog,
+            sessionId: cliOpts.sessionSelection?.sessionId ?? cliOpts.session,
           }),
         );
       },
@@ -742,7 +745,7 @@ export function formatTuiRunError(error: unknown): string | undefined {
 
 function createApprovalDialogRequest(
   notice: ApprovalNotice,
-  deps: Pick<HandleTuiInputSubmissionDeps, "reporter" | "closeDialog">,
+  deps: Pick<HandleTuiInputSubmissionDeps, "reporter" | "closeDialog" | "sessionId">,
 ): DialogRequest {
   return {
     id: APPROVAL_DIALOG_ID,
@@ -759,7 +762,7 @@ function createApprovalDialogRequest(
 
 function handleApprovalCommand(
   text: string,
-  deps: Pick<HandleTuiInputSubmissionDeps, "reporter" | "closeDialog">,
+  deps: Pick<HandleTuiInputSubmissionDeps, "reporter" | "closeDialog" | "sessionId">,
 ): boolean {
   const parsed = parseApprovalCommand(text);
   if (!parsed) return false;
@@ -772,12 +775,12 @@ function resolveApprovalAction(
   parsed:
     | { action: ApprovalPanelAction; taskId: string }
     | { action: "modify"; taskId: string; content: string },
-  deps: Pick<HandleTuiInputSubmissionDeps, "reporter" | "closeDialog">,
+  deps: Pick<HandleTuiInputSubmissionDeps, "reporter" | "closeDialog" | "sessionId">,
 ): boolean {
   if (parsed.action === "approve-session") {
     const pending = globalApprovalManager.getPendingTask(parsed.taskId);
     if (pending) {
-      globalApprovalPolicy.allowForSession("cli", {
+      globalApprovalPolicy.allowForSession(deps.sessionId ?? "cli", {
         name: pending.toolName,
         arguments: pending.args,
       });

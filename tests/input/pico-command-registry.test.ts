@@ -613,8 +613,28 @@ describe("Pico command registry", () => {
     if (result.type !== "local-command") return;
     expect(result.command).toBe("resume");
     expect(result.result.message).toContain("cli-known");
-    expect(result.result.message).toContain("--resume cli-known");
+    expect(result.result.message).toContain("--session cli-known");
+    expect(result.result.message).toContain("--continue");
     expect(result.result.message).toContain("当前会话不会热切换");
+  });
+
+  it("/resume without args points to current session startup flags", async () => {
+    const registry = await createPicoCommandRegistry({
+      workDir: process.cwd(),
+      provider: "openai",
+      model: "glm-5.2",
+      sessionId: "cli-active",
+    });
+
+    const result = await processUserInput("/resume", { registry });
+
+    expect(result.type).toBe("local-command");
+    if (result.type !== "local-command") return;
+    expect(result.command).toBe("resume");
+    expect(result.result.message).toContain("Usage: /resume <session-id>");
+    expect(result.result.message).toContain("--session <session-id>");
+    expect(result.result.message).toContain("--continue");
+    expect(result.result.message).not.toContain("--resume");
   });
 
   it("/sessions and /resume are discoverable from help and suggestions", async () => {

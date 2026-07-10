@@ -691,7 +691,11 @@ function createResumeCommand(): SlashCommand {
         return {
           type: "local",
           action: "message",
-          message: "Usage: /resume <session-id>\n先用 /sessions 查看可恢复 session。",
+          message: [
+            "Usage: /resume <session-id>",
+            "先用 /sessions 查看可恢复 session。",
+            "启动时可使用 --session <session-id> / -S <session-id> 恢复指定会话，或使用 --continue / -c 继续当前项目最近会话。",
+          ].join("\n"),
         };
       }
 
@@ -700,7 +704,8 @@ function createResumeCommand(): SlashCommand {
         action: "message",
         message: [
           `准备恢复 session: ${sessionId}`,
-          `请重启入口并传入启动参数: --resume ${sessionId}`,
+          `请重启入口并传入启动参数: --session ${sessionId}`,
+          "也可以使用 --continue 继续当前项目最近会话。",
           "当前会话不会热切换 running engine。",
         ].join("\n"),
         data: { sessionId },

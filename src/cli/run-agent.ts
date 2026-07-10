@@ -291,7 +291,10 @@ export async function runAgentFromCli(
   const notifier = dependencies.approvalNotifier ?? terminalNotifier;
   const exitTool = registry.getTool("exit_plan_mode");
   if (exitTool instanceof ExitPlanModeTool) {
-    exitTool.setExitCallback(() => engine.exitPlanMode());
+    exitTool.setExitCallback(() => {
+      markSharedPlanModeExited(settings);
+      engine.exitPlanMode();
+    });
     exitTool.setNotify(notifier);
     exitTool.setAbortSignal(dependencies.signal);
   }
@@ -602,6 +605,15 @@ function parseJsonStringField(args: string, field: string): string | undefined {
 function isPlanModeAllowedPath(path: string): boolean {
   const basename = path.split(/[\\/]/u).pop() ?? path;
   return basename === "PLAN.md" || basename === "TODO.md";
+}
+
+function markSharedPlanModeExited(settings: SessionSettings): void {
+  if (settings.mode === "plan") {
+    settings.mode = "default";
+  }
+  if (settings.permissionMode === "plan") {
+    settings.permissionMode = "ask";
+  }
 }
 
 const terminalNotifier: ApprovalNotifier = (notice) => {

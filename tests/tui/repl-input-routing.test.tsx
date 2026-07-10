@@ -6,7 +6,8 @@ import { renderToString } from "ink";
 import { describe, expect, it, vi } from "vitest";
 import { createBuiltinCommandRegistry } from "../../src/input/builtin-commands.js";
 import { createPicoCommandRegistry } from "../../src/input/pico-command-registry.js";
-import { globalApprovalManager } from "../../src/approval/manager.js";
+import { ApprovalManager, globalApprovalManager } from "../../src/approval/manager.js";
+import { buildApprovalMiddleware } from "../../src/cli/run-agent.js";
 import { RunningInputQueue } from "../../src/tui/running-input-queue.js";
 import type { CliSessionBrowserSummary } from "../../src/tui/session-browser-adapter.js";
 import { TuiReporter } from "../../src/tui/tui-reporter.js";
@@ -294,6 +295,71 @@ describe("TUI input routing", () => {
     expect(snapshots.at(-1)).toEqual([
       expect.objectContaining({ kind: "tool", name: "write_file", status: "approval" }),
     ]);
+  });
+
+  it("approve-session records approval under the current TUI session id", async () => {
+    const { reporter } = harness();
+    const openDialog = vi.fn();
+    const args = JSON.stringify({ path: "session-key.txt", content: "remember me" });
+    const runAgent = vi.fn(async (_options, deps) => {
+      const approval = globalApprovalManager.waitForApproval(
+        "approval_session_key",
+        "write_file",
+        args,
+        deps.approvalNotifier!,
+      );
+      await approval;
+      return {
+        sessionId: "tui-session-key",
+        sessionSelection: { mode: "new" as const, sessionId: "tui-session-key" },
+        workDir: process.cwd(),
+        finalMessage: "approved",
+        usage: { promptTokens: 0, completionTokens: 0, costCNY: 0 },
+        messages: [],
+      };
+    });
+
+    const promptPromise = runTuiAgentPrompt(
+      {
+        prompt: "write",
+        dir: process.cwd(),
+        session: "tui-session-key",
+        sessionSelection: { mode: "new", sessionId: "tui-session-key" },
+      },
+      {
+        reporter,
+        runAgent,
+        openDialog,
+      },
+    );
+    await vi.waitFor(() => expect(openDialog).toHaveBeenCalled());
+    const request = openDialog.mock.calls[0]?.[0];
+    const props = request.content.props as { onAction: (action: "approve-session") => boolean };
+
+    props.onAction("approve-session");
+    await promptPromise;
+
+    const notifier = vi.fn();
+    const middleware = buildApprovalMiddleware(
+      notifier,
+      process.cwd(),
+      undefined,
+      new ApprovalManager(1),
+      {
+        sessionId: "tui-session-key",
+        mode: "default",
+        permissionMode: "default",
+      },
+    );
+    const result = await middleware({
+      id: "call_remembered",
+      name: "write_file",
+      arguments: args,
+    });
+
+    expect(result.allowed).toBe(true);
+    expect(result.reason).toContain("allowlist");
+    expect(notifier).not.toHaveBeenCalled();
   });
 
   it("runTuiAgentPrompt 为每轮创建 controller、传递 signal 并在结束后清理", async () => {
