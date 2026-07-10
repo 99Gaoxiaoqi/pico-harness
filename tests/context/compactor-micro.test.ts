@@ -25,7 +25,9 @@ function toolResultMsg(toolCallId: string, output: string): Message {
 }
 
 /** 构造一个 meta 提供者,返回固定的元数据表(便于控制 cachedAt / accessCount) */
-function makeMetaProvider(meta: Record<string, ToolResultMetaEntry>): () => ReadonlyMap<string, ToolResultMetaEntry> {
+function makeMetaProvider(
+  meta: Record<string, ToolResultMetaEntry>,
+): () => ReadonlyMap<string, ToolResultMetaEntry> {
   const map = new Map(Object.entries(meta));
   return () => map;
 }

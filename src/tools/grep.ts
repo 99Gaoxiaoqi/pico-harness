@@ -152,7 +152,7 @@ function compileGlob(glob: string): (path: string) => boolean {
   // 问号 → 单字符(不含斜杠)
   const withQuestion = withStar.replace(/\?/g, "[^/]");
   // 占位符还原为通配
-  const pattern = withQuestion.replace(/\u0000/g, ".*");
+  const pattern = withQuestion.replaceAll("\u0000", ".*");
   const re = new RegExp(`^${pattern}$`);
   /**
    * 与 rg -g 行为对齐:不含斜杠的简单 glob(如 *.ts)匹配任意目录下的文件名;
@@ -174,7 +174,10 @@ function compileGlob(glob: string): (path: string) => boolean {
  * grep 搜索全树成本敏感,跟随符号链接易引发环路与越界)。
  * glob 给定时按 basename 过滤。
  */
-async function collectFiles(root: string, globFilter?: (relPath: string) => boolean): Promise<string[]> {
+async function collectFiles(
+  root: string,
+  globFilter?: (relPath: string) => boolean,
+): Promise<string[]> {
   const results: string[] = [];
 
   async function walk(dir: string): Promise<void> {
@@ -264,7 +267,8 @@ function searchWithRg(opts: {
             return;
           }
           // 其他错误:把 stderr 带回,交上层降级
-          const codeDesc = err.code !== undefined && err.code !== null ? String(err.code) : "unknown";
+          const codeDesc =
+            err.code !== undefined && err.code !== null ? String(err.code) : "unknown";
           reject(new Error(`rg 执行失败 (exit ${codeDesc}): ${stderr?.trim() ?? err.message}`));
           return;
         }
@@ -325,12 +329,7 @@ async function searchWithNode(opts: {
   const files = await collectFiles(opts.searchRoot, opts.globFilter);
 
   // 编译正则;失败则退化为字面匹配
-  let regex: RegExp | null = null;
-  try {
-    regex = new RegExp(opts.pattern, opts.caseSensitive ? "" : "i");
-  } catch {
-    regex = null;
-  }
+  const regex = compileSearchPattern(opts.pattern, opts.caseSensitive);
   const literalNeedle = opts.caseSensitive ? opts.pattern : opts.pattern.toLowerCase();
 
   const matches: RawMatch[] = [];
@@ -369,6 +368,14 @@ async function searchWithNode(opts: {
     }
   }
   return matches;
+}
+
+function compileSearchPattern(pattern: string, caseSensitive: boolean): RegExp | null {
+  try {
+    return new RegExp(pattern, caseSensitive ? "" : "i");
+  } catch {
+    return null;
+  }
 }
 
 export class GrepTool implements BaseTool {

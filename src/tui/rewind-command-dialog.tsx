@@ -82,8 +82,8 @@ export function RewindCommandDialog({
   initialState,
   maxItems,
 }: RewindCommandDialogProps): React.ReactNode {
-  const [state, setState] = useState(() =>
-    initialState ?? createRewindCommandDialogState(createRewindSelectorState(snapshots)),
+  const [state, setState] = useState(
+    () => initialState ?? createRewindCommandDialogState(createRewindSelectorState(snapshots)),
   );
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -92,11 +92,16 @@ export function RewindCommandDialog({
     if (busy || state.status === "closed") return;
     setBusy(true);
     setError(null);
-    void resolveRewindCommandDialogKey(state, snapshots, { input, key }, {
-      getDiffStat,
-      onDispatchCommand,
-      onClose,
-    })
+    void resolveRewindCommandDialogKey(
+      state,
+      snapshots,
+      { input, key },
+      {
+        getDiffStat,
+        onDispatchCommand,
+        onClose,
+      },
+    )
       .then(setState)
       .catch((err: unknown) => {
         setError(err instanceof Error ? err.message : String(err));
@@ -177,9 +182,7 @@ export function rewindSelectionToCommand(messageId: string, mode: RewindMode): s
   return `/rewind ${messageId} ${mode}`;
 }
 
-export function createRewindCommandDialogRequest(
-  props: RewindCommandDialogProps,
-): DialogRequest {
+export function createRewindCommandDialogRequest(props: RewindCommandDialogProps): DialogRequest {
   return {
     id: "local-ui:rewind-selector",
     layer: "modal",

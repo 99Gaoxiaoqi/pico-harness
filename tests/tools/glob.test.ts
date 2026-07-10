@@ -121,9 +121,7 @@ describe("GlobTool", () => {
   });
 
   it("path 参数限定搜索起始目录", async () => {
-    const out = await tool.execute(
-      JSON.stringify({ pattern: "**/*.ts", path: "src/sub" }),
-    );
+    const out = await tool.execute(JSON.stringify({ pattern: "**/*.ts", path: "src/sub" }));
     const set = new Set(lines(out));
     // 相对路径以 src/sub 为根
     expect(set.has("d.ts")).toBe(true);
@@ -141,9 +139,7 @@ describe("GlobTool", () => {
   });
 
   it("空 pattern 抛错", async () => {
-    await expect(tool.execute(JSON.stringify({ pattern: "" }))).rejects.toThrow(
-      /pattern/,
-    );
+    await expect(tool.execute(JSON.stringify({ pattern: "" }))).rejects.toThrow(/pattern/);
   });
 
   it("经 ToolRegistry 路由分发也能正常工作", async () => {

@@ -14,9 +14,7 @@
 import { readFile, readdir, writeFile, mkdir } from "node:fs/promises";
 import { join } from "pathe";
 import { logger } from "../observability/logger.js";
-import type {
-  LearnedSkill,
-} from "./skill-schema.js";
+import type { LearnedSkill } from "./skill-schema.js";
 import { createLearnedSkill, calculateSuccessRate } from "./skill-schema.js";
 
 /** 失败模式匹配时的最大前缀长度（用于去重） */
@@ -27,7 +25,7 @@ const FAILURE_WARNING_THRESHOLD = 3;
 
 /**
  * 技能注册表：管理学习到的技能的生命周期
- * 
+ *
  * 设计约定：
  * - 技能文件路径：<workDir>/.claw/skills/<skillId>.json
  * - 并发安全：内存缓存 + 每次变更即刻落盘
@@ -165,8 +163,7 @@ export class SkillRegistry {
     // 更新平均执行时间（增量平均）
     const totalCount = skill.stats.successCount + skill.stats.failCount;
     skill.stats.avgExecutionTime =
-      (skill.stats.avgExecutionTime * (totalCount - 1) + executionTime) /
-      totalCount;
+      (skill.stats.avgExecutionTime * (totalCount - 1) + executionTime) / totalCount;
 
     skill.stats.lastUsed = new Date().toISOString();
     skill.updatedAt = new Date().toISOString();

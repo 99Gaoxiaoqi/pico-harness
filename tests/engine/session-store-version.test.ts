@@ -150,9 +150,7 @@ describe("5.8a SessionStore schema 版本号 + migration", () => {
     expect(getSchemaVersion(withMeta)).toBe(1);
 
     // 不含 meta → 0
-    const noMeta: SessionRecord[] = [
-      { type: "message", seq: 1, message: userMsg("x") },
-    ];
+    const noMeta: SessionRecord[] = [{ type: "message", seq: 1, message: userMsg("x") }];
     expect(getSchemaVersion(noMeta)).toBe(0);
 
     // 空数组 → 0
@@ -172,9 +170,7 @@ describe("5.8a SessionStore schema 版本号 + migration", () => {
   });
 
   it("migrate v1→v1:fromVersion 已是当前版本,原样返回", () => {
-    const records: SessionRecord[] = [
-      { type: "message", seq: 1, message: userMsg("a") },
-    ];
+    const records: SessionRecord[] = [{ type: "message", seq: 1, message: userMsg("a") }];
     const migrated = migrate(records, 1);
     expect(migrated).toEqual(records);
   });

@@ -16,13 +16,25 @@ describe("shouldRenderStatically", () => {
   });
 
   it("tool done:已 resolve → 固定(true)", () => {
-    const e: TuiEntry = { kind: "tool", name: "read", args: "{}", status: "done", summary: "10 字节" };
+    const e: TuiEntry = {
+      kind: "tool",
+      name: "read",
+      args: "{}",
+      status: "done",
+      summary: "10 字节",
+    };
     expect(shouldRenderStatically(e, false, false)).toBe(true);
     expect(shouldRenderStatically(e, true, false)).toBe(true);
   });
 
   it("tool error:已 resolve → 固定(true)", () => {
-    const e: TuiEntry = { kind: "tool", name: "bash", args: "{}", status: "error", summary: "失败" };
+    const e: TuiEntry = {
+      kind: "tool",
+      name: "bash",
+      args: "{}",
+      status: "error",
+      summary: "失败",
+    };
     expect(shouldRenderStatically(e, true, true)).toBe(true);
   });
 

@@ -17,10 +17,7 @@ import type { CanonicalUsage, Message } from "../schema/message.js";
 import type { CostStatus } from "../observability/pricing.js";
 import { logger } from "../observability/logger.js";
 import { SessionStore } from "./session-store.js";
-import {
-  createSessionIdentity,
-  type SessionIdentity,
-} from "./session-identity.js";
+import { createSessionIdentity, type SessionIdentity } from "./session-identity.js";
 import { FTS5Store } from "../memory/fts5-store.js";
 import {
   createFileHistoryState,
@@ -155,7 +152,7 @@ export class Session {
    */
   private initPersistence(explicit?: boolean): void {
     // 显式参数优先;未传时回落到环境变量,再回落到默认开启
-    const enabled = explicit ?? (process.env.PICO_PERSISTENCE !== "0");
+    const enabled = explicit ?? process.env.PICO_PERSISTENCE !== "0";
     if (!enabled) return;
     try {
       const dir = join(this.workDir, ".claw", "sessions");
@@ -178,7 +175,7 @@ export class Session {
       const store = FTS5Store.acquire(this.workDir);
       this.fts5 = store ?? undefined;
     } catch (err) {
-      logger.warn({ err }, '[session] FTS5 初始化失败,降级为纯内存');
+      logger.warn({ err }, "[session] FTS5 初始化失败,降级为纯内存");
       this.fts5 = undefined;
     }
   }
@@ -221,10 +218,11 @@ export class Session {
     // 3.1:重放后从 history 重建 toolResultMeta(cachedAt 未知,用当前时间;
     // accessCount 归零)。避免恢复后已有 ToolResult 丢失年龄追踪。
     this.rebuildToolResultMeta();
-    this.nextSeq = records.reduce(
-      (maxSeq, record) => ("seq" in record ? Math.max(maxSeq, record.seq) : maxSeq),
-      -1,
-    ) + 1;
+    this.nextSeq =
+      records.reduce(
+        (maxSeq, record) => ("seq" in record ? Math.max(maxSeq, record.seq) : maxSeq),
+        -1,
+      ) + 1;
   }
 
   /**
@@ -321,7 +319,8 @@ export class Session {
 
   /** 单条消息追加:核心逻辑,处理 deferred + toolResultMeta 登记 */
   private appendOne(msg: Message): void {
-    const hasToolCalls = msg.role === "assistant" && msg.toolCalls !== undefined && msg.toolCalls.length > 0;
+    const hasToolCalls =
+      msg.role === "assistant" && msg.toolCalls !== undefined && msg.toolCalls.length > 0;
     const isToolResult = msg.role === "user" && msg.toolCallId !== undefined;
 
     // 1. assistant 带 toolCalls:登记 pendingToolCallIds,然后正常入 history
@@ -378,7 +377,7 @@ export class Session {
       try {
         this.fts5.insert(this.id, beforeLen, msg);
       } catch (err) {
-        logger.warn({ err }, '[session] FTS5 索引失败');
+        logger.warn({ err }, "[session] FTS5 索引失败");
       }
     }
 
@@ -389,9 +388,7 @@ export class Session {
       const seq = this.nextSeq++;
       const writePromise = this.store
         .appendMessage(seq, msg)
-        .catch((err) =>
-          logger.warn({ seq }, `[session] 持久化写入失败: ${String(err)}`),
-        );
+        .catch((err) => logger.warn({ seq }, `[session] 持久化写入失败: ${String(err)}`));
       this.pendingWrites.push(writePromise);
     }
   }
@@ -485,9 +482,9 @@ export class Session {
     this.pendingWrites = [];
     await Promise.all(pending);
     const seq = this.nextSeq++;
-    this.store.appendTruncate(seq, fromIndex).catch((err) =>
-      logger.warn({ seq }, `[session] truncate 落盘失败: ${String(err)}`),
-    );
+    this.store
+      .appendTruncate(seq, fromIndex)
+      .catch((err) => logger.warn({ seq }, `[session] truncate 落盘失败: ${String(err)}`));
   }
 
   private async persistUndoEvent(count: number): Promise<void> {
@@ -496,9 +493,9 @@ export class Session {
     this.pendingWrites = [];
     await Promise.all(pending);
     const seq = this.nextSeq++;
-    this.store.appendUndoEvent(seq, count).catch((err) =>
-      logger.warn({ seq }, `[session] undo 落盘失败: ${String(err)}`),
-    );
+    this.store
+      .appendUndoEvent(seq, count)
+      .catch((err) => logger.warn({ seq }, `[session] undo 落盘失败: ${String(err)}`));
   }
 
   private async persistRewindTo(messageIndex: number): Promise<void> {
@@ -507,9 +504,9 @@ export class Session {
     this.pendingWrites = [];
     await Promise.all(pending);
     const seq = this.nextSeq++;
-    this.store.appendRewindTo(seq, messageIndex).catch((err) =>
-      logger.warn({ seq }, `[session] rewind_to 落盘失败: ${String(err)}`),
-    );
+    this.store
+      .appendRewindTo(seq, messageIndex)
+      .catch((err) => logger.warn({ seq }, `[session] rewind_to 落盘失败: ${String(err)}`));
   }
 
   private applyUndoToHistory(history: Message[], count: number): Message[] {
@@ -519,7 +516,10 @@ export class Session {
     return history.slice(0, cutIndex);
   }
 
-  private findUndoCut(history: Message[], count: number): { cutIndex: number; removedCount: number } {
+  private findUndoCut(
+    history: Message[],
+    count: number,
+  ): { cutIndex: number; removedCount: number } {
     let removedCount = 0;
     let cutIndex = 0;
     for (let i = history.length - 1; i >= 0; i--) {
@@ -621,17 +621,21 @@ export class Session {
     // 2. summary message(重放后成为新 history 头部)
     const sumSeq = this.nextSeq++;
     this.pendingWrites.push(
-      this.store.appendMessage(sumSeq, summaryMsg).catch((err) =>
-        logger.warn({ seq: sumSeq }, `[session] compaction summary 落盘失败: ${String(err)}`),
-      ),
+      this.store
+        .appendMessage(sumSeq, summaryMsg)
+        .catch((err) =>
+          logger.warn({ seq: sumSeq }, `[session] compaction summary 落盘失败: ${String(err)}`),
+        ),
     );
     // 3. retained tail(重放后跟在 summary 之后,保持原顺序)
     for (const m of retained) {
       const seq = this.nextSeq++;
       this.pendingWrites.push(
-        this.store.appendMessage(seq, m).catch((err) =>
-          logger.warn({ seq }, `[session] compaction retained 落盘失败: ${String(err)}`),
-        ),
+        this.store
+          .appendMessage(seq, m)
+          .catch((err) =>
+            logger.warn({ seq }, `[session] compaction retained 落盘失败: ${String(err)}`),
+          ),
       );
     }
   }
@@ -702,9 +706,12 @@ export class Session {
    * @param limit - 返回结果数(默认 10)
    * @returns 匹配的对话片段(按相关性排序,仅返回当前 Session 的消息)
    */
-  search(query: string, limit = 10): Array<{ content: string; turnIndex: number; sessionId: string }> {
+  search(
+    query: string,
+    limit = 10,
+  ): Array<{ content: string; turnIndex: number; sessionId: string }> {
     if (!this.fts5) {
-      logger.warn('[session] FTS5 未初始化,无法检索');
+      logger.warn("[session] FTS5 未初始化,无法检索");
       return [];
     }
 
@@ -717,7 +724,7 @@ export class Session {
         sessionId: r.sessionId,
       }));
     } catch (err) {
-      logger.warn({ err, query }, '[session] FTS5 检索失败');
+      logger.warn({ err, query }, "[session] FTS5 检索失败");
       return [];
     }
   }

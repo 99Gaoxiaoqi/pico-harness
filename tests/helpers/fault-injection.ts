@@ -8,6 +8,7 @@
 
 import { chmodSync, readFileSync, writeFileSync } from "node:fs";
 import { existsSync } from "node:fs";
+import Database from "better-sqlite3";
 
 /** 损坏 SQLite 数据库文件头(模拟文件损坏) */
 export function corruptDatabase(dbPath: string): void {
@@ -50,12 +51,11 @@ export function corruptJSONL(jsonlPath: string): void {
 }
 
 /** 模拟并发写入锁竞争(通过 PRAGMA locking_mode = EXCLUSIVE) */
-export function lockDatabase(dbPath: string): void {
+export function lockDatabase(dbPath: string): Database.Database {
   if (!existsSync(dbPath)) {
     throw new Error(`Database file not found: ${dbPath}`);
   }
   // 使用 better-sqlite3 锁定数据库(模拟其他进程持锁)
-  const Database = require("better-sqlite3");
   const db = new Database(dbPath);
   db.pragma("locking_mode = EXCLUSIVE");
   // 开启一个事务并持有锁(不提交也不回滚)
@@ -65,7 +65,7 @@ export function lockDatabase(dbPath: string): void {
 }
 
 /** 释放数据库锁 */
-export function unlockDatabase(db: any): void {
+export function unlockDatabase(db: Database.Database | null | undefined): void {
   if (db) {
     try {
       db.prepare("ROLLBACK").run();

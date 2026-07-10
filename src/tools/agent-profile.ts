@@ -135,8 +135,7 @@ export class AgentProfileLoader {
           : name;
 
       // systemPrompt 校验(必填)
-      const systemPrompt =
-        typeof raw.systemPrompt === "string" ? raw.systemPrompt.trim() : "";
+      const systemPrompt = typeof raw.systemPrompt === "string" ? raw.systemPrompt.trim() : "";
       if (!systemPrompt) {
         logger.warn(
           { index: i, name },
@@ -184,10 +183,7 @@ export class AgentProfileLoader {
 
       // 重名去重:后者覆盖前者
       if (byName.has(name)) {
-        logger.warn(
-          { name },
-          `[agent-profile] 角色名 '${name}' 重复,后者覆盖前者`,
-        );
+        logger.warn({ name }, `[agent-profile] 角色名 '${name}' 重复,后者覆盖前者`);
       }
       byName.set(name, profile);
     }

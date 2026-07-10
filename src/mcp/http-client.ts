@@ -74,7 +74,10 @@ export class HttpMcpClient implements McpClient {
 
     await this.initialize();
     this.connected = true;
-    logger.info({ server: this.config.name, transport: this.config.transport }, `[MCP] ${this.config.transport} server "${this.config.name}" 连接成功`);
+    logger.info(
+      { server: this.config.name, transport: this.config.transport },
+      `[MCP] ${this.config.transport} server "${this.config.name}" 连接成功`,
+    );
   }
 
   async listTools(): Promise<McpTool[]> {
@@ -181,7 +184,11 @@ export class HttpMcpClient implements McpClient {
             clearTimeout(timer);
             this.pending.delete(id);
             if (directResult.error) {
-              reject(new Error(`MCP server "${this.config.name}" 返回错误: ${directResult.error.message}`));
+              reject(
+                new Error(
+                  `MCP server "${this.config.name}" 返回错误: ${directResult.error.message}`,
+                ),
+              );
             } else {
               resolve(directResult.result);
             }
@@ -191,7 +198,11 @@ export class HttpMcpClient implements McpClient {
         .catch((err) => {
           clearTimeout(timer);
           this.pending.delete(id);
-          reject(new Error(redactSensitiveText(`MCP server "${this.config.name}" 发送请求失败: ${err.message}`)));
+          reject(
+            new Error(
+              redactSensitiveText(`MCP server "${this.config.name}" 发送请求失败: ${err.message}`),
+            ),
+          );
         });
     });
   }
@@ -244,7 +255,9 @@ export class HttpMcpClient implements McpClient {
       try {
         return JSON.parse(text) as JsonRpcResponse;
       } catch {
-        throw new Error(`MCP server "${this.config.name}" 返回无法解析的响应: ${text.slice(0, 200)}`);
+        throw new Error(
+          `MCP server "${this.config.name}" 返回无法解析的响应: ${text.slice(0, 200)}`,
+        );
       }
     } finally {
       this.activeControllers.delete(controller);
@@ -356,7 +369,11 @@ export class HttpMcpClient implements McpClient {
             }
           } catch (err) {
             if (!this.closed) {
-              const safeError = new Error(redactSensitiveText(`SSE 流中断: ${err instanceof Error ? err.message : String(err)}`));
+              const safeError = new Error(
+                redactSensitiveText(
+                  `SSE 流中断: ${err instanceof Error ? err.message : String(err)}`,
+                ),
+              );
               this.failAllPending(safeError);
               this.emitError(safeError);
             }
@@ -370,7 +387,11 @@ export class HttpMcpClient implements McpClient {
         })
         .catch((err) => {
           if (!this.closed) {
-            const safeError = new Error(redactSensitiveText(`SSE 连接失败: ${err instanceof Error ? err.message : String(err)}`));
+            const safeError = new Error(
+              redactSensitiveText(
+                `SSE 连接失败: ${err instanceof Error ? err.message : String(err)}`,
+              ),
+            );
             rejectReady(safeError);
             this.emitError(safeError);
           }
@@ -381,7 +402,10 @@ export class HttpMcpClient implements McpClient {
     await Promise.race([
       ready,
       new Promise<void>((_, reject) =>
-        setTimeout(() => reject(new Error(`等待 SSE endpoint 事件超时`)), this.config.startupTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS),
+        setTimeout(
+          () => reject(new Error(`等待 SSE endpoint 事件超时`)),
+          this.config.startupTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
+        ),
       ),
     ]);
   }
@@ -422,7 +446,9 @@ export class HttpMcpClient implements McpClient {
     clearTimeout(pending.timer);
     this.pending.delete(id);
     if (response.error) {
-      pending.reject(new Error(`MCP server "${this.config.name}" 返回错误: ${response.error.message}`));
+      pending.reject(
+        new Error(`MCP server "${this.config.name}" 返回错误: ${response.error.message}`),
+      );
     } else {
       pending.resolve(response.result);
     }

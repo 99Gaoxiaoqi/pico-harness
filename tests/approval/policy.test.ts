@@ -14,10 +14,7 @@ function makeCall(name: string, args: Record<string, unknown>): ToolCall {
   return { id: "call_1", name, arguments: JSON.stringify(args) };
 }
 
-function makeCtx(
-  toolCall: ToolCall,
-  overrides: Partial<PolicyContext> = {},
-): PolicyContext {
+function makeCtx(toolCall: ToolCall, overrides: Partial<PolicyContext> = {}): PolicyContext {
   return {
     toolCall,
     workDir: "/project",
@@ -146,7 +143,9 @@ describe("SensitiveFilePolicy", () => {
   });
 
   it("edit config/key.pem → ask", () => {
-    const ctx = makeCtx(makeCall("edit_file", { path: "config/key.pem", old_text: "a", new_text: "b" }));
+    const ctx = makeCtx(
+      makeCall("edit_file", { path: "config/key.pem", old_text: "a", new_text: "b" }),
+    );
     const result = policy.evaluate(ctx);
     expect(result.decision).toBe("ask");
   });
@@ -205,56 +204,48 @@ describe("PlanModeGuardPolicy", () => {
   const policy = new PlanModeGuardPolicy();
 
   it("planMode + write src/a.ts → deny", () => {
-    const ctx = makeCtx(
-      makeCall("write_file", { path: "src/a.ts", content: "..." }),
-      { planMode: true },
-    );
+    const ctx = makeCtx(makeCall("write_file", { path: "src/a.ts", content: "..." }), {
+      planMode: true,
+    });
     const result = policy.evaluate(ctx);
     expect(result.decision).toBe("deny");
     expect(result.reason).toContain("Plan Mode");
   });
 
   it("planMode + write PLAN.md → allow", () => {
-    const ctx = makeCtx(
-      makeCall("write_file", { path: "PLAN.md", content: "# Plan" }),
-      { planMode: true },
-    );
+    const ctx = makeCtx(makeCall("write_file", { path: "PLAN.md", content: "# Plan" }), {
+      planMode: true,
+    });
     const result = policy.evaluate(ctx);
     expect(result.decision).toBe("allow");
   });
 
   it("planMode + edit TODO.md → allow", () => {
-    const ctx = makeCtx(
-      makeCall("edit_file", { path: "TODO.md", old_text: "a", new_text: "b" }),
-      { planMode: true },
-    );
+    const ctx = makeCtx(makeCall("edit_file", { path: "TODO.md", old_text: "a", new_text: "b" }), {
+      planMode: true,
+    });
     const result = policy.evaluate(ctx);
     expect(result.decision).toBe("allow");
   });
 
   it("not planMode + write src/a.ts → allow", () => {
-    const ctx = makeCtx(
-      makeCall("write_file", { path: "src/a.ts", content: "..." }),
-      { planMode: false },
-    );
+    const ctx = makeCtx(makeCall("write_file", { path: "src/a.ts", content: "..." }), {
+      planMode: false,
+    });
     const result = policy.evaluate(ctx);
     expect(result.decision).toBe("allow");
   });
 
   it("planMode + bash echo > src/a.ts → deny", () => {
-    const ctx = makeCtx(
-      makeCall("bash", { command: "echo hello > src/a.ts" }),
-      { planMode: true },
-    );
+    const ctx = makeCtx(makeCall("bash", { command: "echo hello > src/a.ts" }), { planMode: true });
     const result = policy.evaluate(ctx);
     expect(result.decision).toBe("deny");
   });
 
   it("planMode + bash echo > PLAN.md → allow", () => {
-    const ctx = makeCtx(
-      makeCall("bash", { command: "echo '# Plan' > PLAN.md" }),
-      { planMode: true },
-    );
+    const ctx = makeCtx(makeCall("bash", { command: "echo '# Plan' > PLAN.md" }), {
+      planMode: true,
+    });
     const result = policy.evaluate(ctx);
     expect(result.decision).toBe("allow");
   });
@@ -274,10 +265,9 @@ describe("SessionApprovalPolicy", () => {
   });
 
   it("prior approval for same tool+path → allow with reason", () => {
-    const ctx = makeCtx(
-      makeCall("write_file", { path: "src/a.ts", content: "..." }),
-      { sessionApprovals: new Set(["write_file:src/a.ts"]) },
-    );
+    const ctx = makeCtx(makeCall("write_file", { path: "src/a.ts", content: "..." }), {
+      sessionApprovals: new Set(["write_file:src/a.ts"]),
+    });
     const result = policy.evaluate(ctx);
     expect(result.decision).toBe("allow");
     expect(result.reason).toContain("Session 审批记忆");
@@ -320,10 +310,9 @@ describe("PermissionManager", () => {
   });
 
   it("planMode + write non-plan file → deny (overrides sensitive)", () => {
-    const ctx = makeCtx(
-      makeCall("write_file", { path: "src/a.ts", content: "..." }),
-      { planMode: true },
-    );
+    const ctx = makeCtx(makeCall("write_file", { path: "src/a.ts", content: "..." }), {
+      planMode: true,
+    });
     const result = manager.evaluate(ctx);
     expect(result.decision).toBe("deny");
   });

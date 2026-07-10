@@ -3,10 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { join } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { Session, SessionManager } from "../src/engine/session.js";
-import {
-  fileHistoryMakeSnapshot,
-  fileHistoryTrackEdit,
-} from "../src/safety/file-history.js";
+import { fileHistoryMakeSnapshot, fileHistoryTrackEdit } from "../src/safety/file-history.js";
 import {
   assertFileHistoryCliFlags,
   formatFileHistorySnapshots,
@@ -20,9 +17,13 @@ describe("CLI FileHistory 1.5.8", () => {
 
   beforeEach(() => {
     workDir = mkdtempSync(join(tmpdir(), "pico-cli-rewind-"));
-    session = new Session(`cli-rewind-${Date.now()}-${Math.random().toString(16).slice(2)}`, workDir, {
-      persistence: false,
-    });
+    session = new Session(
+      `cli-rewind-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      workDir,
+      {
+        persistence: false,
+      },
+    );
   });
 
   afterEach(() => {
@@ -71,7 +72,10 @@ describe("CLI FileHistory 1.5.8", () => {
   });
 
   it("--list-snapshots 空快照时给出清晰提示并视为成功", () => {
-    const output = formatFileHistorySnapshots(session.id, listFileHistorySnapshotSummaries(session));
+    const output = formatFileHistorySnapshots(
+      session.id,
+      listFileHistorySnapshotSummaries(session),
+    );
 
     expect(output).toContain(`session ${session.id}`);
     expect(output).toContain("没有文件历史快照");
@@ -84,7 +88,9 @@ describe("CLI FileHistory 1.5.8", () => {
 
     expect(result.changed).toBe(false);
     expect(result.output).toContain("最近快照: turn-1");
-    expect(result.output).toContain("用法: --rewind <message-id> --rewind-mode code|conversation|both");
+    expect(result.output).toContain(
+      "用法: --rewind <message-id> --rewind-mode code|conversation|both",
+    );
     expect(result.output).toContain("可回滚快照");
     expect(result.output).toContain("turn-1");
   });
@@ -192,8 +198,8 @@ describe("CLI FileHistory 1.5.8", () => {
   });
 
   it("--list-snapshots 与 --rewind 同时提供时明确拒绝", () => {
-    expect(() =>
-      assertFileHistoryCliFlags({ listSnapshots: true, rewind: true }),
-    ).toThrow("--list-snapshots 不能和 --rewind 同时使用");
+    expect(() => assertFileHistoryCliFlags({ listSnapshots: true, rewind: true })).toThrow(
+      "--list-snapshots 不能和 --rewind 同时使用",
+    );
   });
 });

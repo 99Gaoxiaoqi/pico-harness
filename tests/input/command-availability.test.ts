@@ -5,7 +5,10 @@ import {
 } from "../../src/input/command-availability.js";
 import type { SlashCommand } from "../../src/input/types.js";
 
-function command(name: string, availability?: "always" | "idle" | "running"): SlashCommand & {
+function command(
+  name: string,
+  availability?: "always" | "idle" | "running",
+): SlashCommand & {
   availability?: "always" | "idle" | "running";
 } {
   return {

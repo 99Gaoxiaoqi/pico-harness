@@ -107,11 +107,19 @@ describe("FullCompactor 模型摘要压缩", () => {
   });
 
   it("mock provider 返回摘要 → session.history 前 N 条被替换为 1 条 summary", async () => {
-    const provider = new SummaryMockProvider([{ kind: "ok", content: "## 历史任务快照\n完成重构" }]);
+    const provider = new SummaryMockProvider([
+      { kind: "ok", content: "## 历史任务快照\n完成重构" },
+    ]);
     const fc = new FullCompactor({ provider });
     const session = new Session("fc-1", "/tmp");
     // 5 条历史,保留尾部 2 条 → 压缩前 3 条
-    session.append(userMsg("task1"), assistantMsg("step1"), userMsg("task2"), assistantMsg("step2"), userMsg("recent"));
+    session.append(
+      userMsg("task1"),
+      assistantMsg("step1"),
+      userMsg("task2"),
+      assistantMsg("step2"),
+      userMsg("recent"),
+    );
     expect(session.length).toBe(5);
 
     const ok = await fc.compact(session, 2);
@@ -265,7 +273,11 @@ describe("FullCompactor 持久化(applyCompaction 落盘 + recover 重放)", () 
         await rm(path, { recursive: true, force: true });
         return;
       } catch (err) {
-        if (String(err).includes("EBUSY") || String(err).includes("EPERM") || String(err).includes("ENOTEMPTY")) {
+        if (
+          String(err).includes("EBUSY") ||
+          String(err).includes("EPERM") ||
+          String(err).includes("ENOTEMPTY")
+        ) {
           await new Promise((r) => setTimeout(r, 50 * (attempt + 1)));
           continue;
         }
@@ -392,7 +404,9 @@ describe("FullCompactor 接入 generateWithOverflowRetry(loop 端到端)", () =>
       { kind: "ok", content: "压缩后重试成功" },
     ]);
     // 摘要 provider:返回一段摘要
-    const summaryProvider = new SummaryMockProvider([{ kind: "ok", content: "## 历史任务快照\n完成任务" }]);
+    const summaryProvider = new SummaryMockProvider([
+      { kind: "ok", content: "## 历史任务快照\n完成任务" },
+    ]);
     const fullCompactor = new FullCompactor({ provider: summaryProvider });
     // 大预算 Compactor:不实际触发字符级截断(overflow 由 mock 模拟),保证 context 完整传到 provider
     const compactor = new Compactor({ maxChars: 100000, retainLastMsgs: 20 });
@@ -408,7 +422,10 @@ describe("FullCompactor 接入 generateWithOverflowRetry(loop 端到端)", () =>
     const session = new Session("fc-loop-1", "/tmp");
     // 8 条历史,足够 FullCompactor 压缩前缀(retainLastN≈3,compactedCount=5)
     for (let i = 0; i < 8; i++) {
-      session.append({ role: i % 2 === 0 ? "user" : "assistant", content: `msg-${i}-` + "X".repeat(50) });
+      session.append({
+        role: i % 2 === 0 ? "user" : "assistant",
+        content: `msg-${i}-` + "X".repeat(50),
+      });
     }
 
     const controller = new AbortController();
@@ -451,7 +468,10 @@ describe("FullCompactor 接入 generateWithOverflowRetry(loop 端到端)", () =>
 
     const session = new Session("fc-loop-2", "/tmp");
     for (let i = 0; i < 8; i++) {
-      session.append({ role: i % 2 === 0 ? "user" : "assistant", content: `msg-${i}-` + "X".repeat(50) });
+      session.append({
+        role: i % 2 === 0 ? "user" : "assistant",
+        content: `msg-${i}-` + "X".repeat(50),
+      });
     }
 
     // 压缩失败 → 抛 ContextOverflowError(generateWithOverflowRetry 兜底失败)

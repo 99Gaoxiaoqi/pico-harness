@@ -41,9 +41,7 @@ export class ToolDisclosure {
 
   /** 从全量工具列表中挑出本轮该喂给 LLM 的子集:核心 ∪ disclosed 扩展。 */
   pickForLLM(allTools: ToolDefinition[]): ToolDefinition[] {
-    return allTools.filter(
-      (t) => getTier(t.name) === "core" || this.disclosed.has(t.name),
-    );
+    return allTools.filter((t) => getTier(t.name) === "core" || this.disclosed.has(t.name));
   }
 
   /** 当前已披露的扩展工具名(只读快照,供测试和观测)。 */

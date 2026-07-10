@@ -43,7 +43,10 @@ describe("HookRunner", () => {
    *   - "hang"             → 永不退出(测超时)
    */
   async function writeHookScript(behavior: string): Promise<string> {
-    const scriptPath = join(workDir, `hook-${Date.now()}-${Math.random().toString(36).slice(2)}.js`);
+    const scriptPath = join(
+      workDir,
+      `hook-${Date.now()}-${Math.random().toString(36).slice(2)}.js`,
+    );
     let body: string;
     if (behavior === "hang") {
       body = `
@@ -162,9 +165,7 @@ describe("HookRunner", () => {
     });
 
     it("stdout {modifiedInput:{...}} → allow + 透传 modifiedInput", async () => {
-      const command = await writeHookScript(
-        `json:{"modifiedInput":{"command":"echo safe"}}`,
-      );
+      const command = await writeHookScript(`json:{"modifiedInput":{"command":"echo safe"}}`);
       const runner = makeRunner({
         PreToolUse: [{ hooks: [{ type: "command", command }] }],
       });
@@ -233,7 +234,14 @@ describe("HookRunner", () => {
       const cmd1 = await writeHookScript("exit0");
       const cmd2 = await writeHookScript("exit0");
       const runner = makeRunner({
-        PreToolUse: [{ hooks: [{ type: "command", command: cmd1 }, { type: "command", command: cmd2 }] }],
+        PreToolUse: [
+          {
+            hooks: [
+              { type: "command", command: cmd1 },
+              { type: "command", command: cmd2 },
+            ],
+          },
+        ],
       });
       const result = await runner.runPreToolUse("bash", {}, "sess-1");
       expect(result.decision).toBe("allow");
@@ -250,9 +258,7 @@ describe("HookRunner", () => {
     it("matcher 不命中 → allow(handler 不执行)", async () => {
       const denyCmd = await writeHookScript("exit2:should-not-run");
       const runner = makeRunner({
-        PreToolUse: [
-          { matcher: "write_file", hooks: [{ type: "command", command: denyCmd }] },
-        ],
+        PreToolUse: [{ matcher: "write_file", hooks: [{ type: "command", command: denyCmd }] }],
       });
       const result = await runner.runPreToolUse("bash", {}, "sess-1");
       expect(result.decision).toBe("allow");
@@ -300,7 +306,9 @@ describe("HookRunner", () => {
         "utf8",
       );
       const runner = makeRunner({
-        PreToolUse: [{ hooks: [{ type: "command", command: `node ${JSON.stringify(scriptPath)}` }] }],
+        PreToolUse: [
+          { hooks: [{ type: "command", command: `node ${JSON.stringify(scriptPath)}` }] },
+        ],
       });
       await runner.runPreToolUse("bash", { command: "ls" }, "sess-xyz");
 

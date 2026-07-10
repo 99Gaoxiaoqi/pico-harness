@@ -148,10 +148,7 @@ export function reduceInputControllerEvent(
   return { state };
 }
 
-export function getSuggestionContext(
-  text: string,
-  cursor = text.length,
-): SuggestionContext | null {
+export function getSuggestionContext(text: string, cursor = text.length): SuggestionContext | null {
   const safeCursor = clampCursor(cursor, text);
   const lineStart = text.lastIndexOf("\n", safeCursor - 1) + 1;
   const nextLineBreak = text.indexOf("\n", safeCursor);
@@ -258,17 +255,17 @@ function applyResolvedKeybinding(
 function isKeybindingManagedEvent(input: string, key: InputKey): boolean {
   return Boolean(
     key.ctrl ||
-      key.meta ||
-      key.shift ||
-      key.tab ||
-      key.return ||
-      key.upArrow ||
-      key.downArrow ||
-      key.leftArrow ||
-      key.rightArrow ||
-      key.home ||
-      key.end ||
-      input === "\u001b",
+    key.meta ||
+    key.shift ||
+    key.tab ||
+    key.return ||
+    key.upArrow ||
+    key.downArrow ||
+    key.leftArrow ||
+    key.rightArrow ||
+    key.home ||
+    key.end ||
+    input === "\u001b",
   );
 }
 
@@ -483,16 +480,19 @@ function browseHistory(
     const draft = state.historyIndex === null ? state.text : state.draft;
     const text = state.history[historyIndex] ?? "";
     const suggestion = buildSuggestionSession(text, text.length, options);
-    return withPendingSuggestion({
-      state: {
-        ...state,
-        text,
-        cursor: text.length,
-        activeSuggestions: suggestion.session,
-        historyIndex,
-        draft,
+    return withPendingSuggestion(
+      {
+        state: {
+          ...state,
+          text,
+          cursor: text.length,
+          activeSuggestions: suggestion.session,
+          historyIndex,
+          draft,
+        },
       },
-    }, suggestion);
+      suggestion,
+    );
   }
 
   if (state.historyIndex === null) return { state };
@@ -501,27 +501,33 @@ function browseHistory(
     const historyIndex = state.historyIndex + 1;
     const text = state.history[historyIndex] ?? "";
     const suggestion = buildSuggestionSession(text, text.length, options);
-    return withPendingSuggestion({
-      state: {
-        ...state,
-        text,
-        cursor: text.length,
-        activeSuggestions: suggestion.session,
-        historyIndex,
+    return withPendingSuggestion(
+      {
+        state: {
+          ...state,
+          text,
+          cursor: text.length,
+          activeSuggestions: suggestion.session,
+          historyIndex,
+        },
       },
-    }, suggestion);
+      suggestion,
+    );
   }
 
   const suggestion = buildSuggestionSession(state.draft, state.draft.length, options);
-  return withPendingSuggestion({
-    state: {
-      ...state,
-      text: state.draft,
-      cursor: state.draft.length,
-      activeSuggestions: suggestion.session,
-      historyIndex: null,
+  return withPendingSuggestion(
+    {
+      state: {
+        ...state,
+        text: state.draft,
+        cursor: state.draft.length,
+        activeSuggestions: suggestion.session,
+        historyIndex: null,
+      },
     },
-  }, suggestion);
+    suggestion,
+  );
 }
 
 function buildSuggestionSession(
@@ -588,9 +594,9 @@ function suggestionItemsForContext(
 function isPromiseLike<T>(value: T | Promise<T>): value is Promise<T> {
   return Boolean(
     typeof value === "object" &&
-      value !== null &&
-      "then" in value &&
-      typeof (value as { then?: unknown }).then === "function",
+    value !== null &&
+    "then" in value &&
+    typeof (value as { then?: unknown }).then === "function",
   );
 }
 
@@ -604,19 +610,19 @@ function pushHistory(history: string[], entry: string): string[] {
 function isPrintableInput(input: string, key: InputKey): boolean {
   return Boolean(
     input &&
-      !key.ctrl &&
-      !key.meta &&
-      !key.return &&
-      !key.backspace &&
-      !key.delete &&
-      !key.upArrow &&
-      !key.downArrow &&
-      !key.leftArrow &&
-      !key.rightArrow &&
-      !key.home &&
-      !key.end &&
-      input.length > 0 &&
-      !hasUnsupportedControlCharacter(input),
+    !key.ctrl &&
+    !key.meta &&
+    !key.return &&
+    !key.backspace &&
+    !key.delete &&
+    !key.upArrow &&
+    !key.downArrow &&
+    !key.leftArrow &&
+    !key.rightArrow &&
+    !key.home &&
+    !key.end &&
+    input.length > 0 &&
+    !hasUnsupportedControlCharacter(input),
   );
 }
 

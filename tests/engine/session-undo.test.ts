@@ -127,7 +127,9 @@ describe("FileHistory 1.5.6 对话 undo", () => {
     persisted.undo(1);
     await flushPersistence();
 
-    const lines = readFileSync(sessionJsonlPath(workDir, "undo-persist"), "utf8").trim().split("\n");
+    const lines = readFileSync(sessionJsonlPath(workDir, "undo-persist"), "utf8")
+      .trim()
+      .split("\n");
     const records = lines.map((line) => JSON.parse(line) as { type: string; count?: number });
     expect(records.filter((r) => r.type === "message")).toHaveLength(4);
     expect(records.at(-1)).toMatchObject({ type: "undo", count: 1 });
@@ -142,7 +144,9 @@ describe("FileHistory 1.5.6 对话 undo", () => {
     persisted.rewindTo(2);
     await flushPersistence();
 
-    const lines = readFileSync(sessionJsonlPath(workDir, "rewind-persist"), "utf8").trim().split("\n");
+    const lines = readFileSync(sessionJsonlPath(workDir, "rewind-persist"), "utf8")
+      .trim()
+      .split("\n");
     const records = lines.map((line) => JSON.parse(line) as { type: string; count?: number });
     expect(records.filter((r) => r.type === "message")).toHaveLength(4);
     expect(records.at(-1)).toMatchObject({ type: "undo", count: 1 });
@@ -172,7 +176,9 @@ describe("FileHistory 1.5.6 对话 undo", () => {
     persisted.undo(1);
     await flushPersistence();
 
-    const recovered = await new SessionManager().getOrCreate("undo-recover", workDir, { persistence: true });
+    const recovered = await new SessionManager().getOrCreate("undo-recover", workDir, {
+      persistence: true,
+    });
 
     expect(recovered.length).toBe(2);
     expect(recovered.getHistory().map((m) => m.content)).toEqual(["u1", "a1"]);
@@ -191,7 +197,9 @@ describe("FileHistory 1.5.6 对话 undo", () => {
     await flushPersistence();
 
     expect(persisted.getHistory().map((m) => m.content)).toEqual(["summary"]);
-    const recovered = await new SessionManager().getOrCreate("undo-compaction", workDir, { persistence: true });
+    const recovered = await new SessionManager().getOrCreate("undo-compaction", workDir, {
+      persistence: true,
+    });
     expect(recovered.getHistory().map((m) => m.content)).toEqual(["summary"]);
   });
 });

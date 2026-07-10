@@ -214,9 +214,15 @@ describe("TuiReporter", () => {
     reporter.onToolResult("bash", "tests passed", false);
 
     const entries = last()!;
-    expect(entries[0]).toMatchObject({ kind: "tool", summary: expect.stringContaining("src/a.ts") });
+    expect(entries[0]).toMatchObject({
+      kind: "tool",
+      summary: expect.stringContaining("src/a.ts"),
+    });
     expect(entries[0]).toMatchObject({ kind: "tool", summary: expect.stringContaining("@@") });
-    expect(entries[1]).toMatchObject({ kind: "tool", summary: expect.stringContaining("npm test") });
+    expect(entries[1]).toMatchObject({
+      kind: "tool",
+      summary: expect.stringContaining("npm test"),
+    });
   });
 
   it("失败摘要保留可复制错误", () => {

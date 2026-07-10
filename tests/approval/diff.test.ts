@@ -129,7 +129,9 @@ describe("computeApprovalDiff", () => {
   });
 
   it("参数非法 JSON → 返回 undefined 不抛错", async () => {
-    await expect(computeApprovalDiff("edit_file", "{not valid json", workDir)).resolves.toBeUndefined();
+    await expect(
+      computeApprovalDiff("edit_file", "{not valid json", workDir),
+    ).resolves.toBeUndefined();
     await expect(computeApprovalDiff("write_file", "garbage", workDir)).resolves.toBeUndefined();
     await expect(computeApprovalDiff("bash", "", workDir)).resolves.toBeUndefined();
   });

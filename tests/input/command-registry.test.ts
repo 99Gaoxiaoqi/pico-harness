@@ -147,9 +147,7 @@ describe("CommandRegistry", () => {
     const registry = new CommandRegistry([
       localCommand("agent", [], {
         category: "workspace",
-        argumentCompleter: (query) => [
-          { value: `${query}reviewer`, description: "project agent" },
-        ],
+        argumentCompleter: (query) => [{ value: `${query}reviewer`, description: "project agent" }],
       }),
     ]);
     const command = registry.resolve("agent");

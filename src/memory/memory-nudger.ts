@@ -11,9 +11,9 @@
 // - Hermes Agent 的 Periodic Nudge 机制
 // - Context7 的 Memory Injection 策略
 
-import type { SkillRegistry } from './skill-registry.js';
-import type { FTS5Store } from './fts5-store.js';
-import { calculateSuccessRate } from './skill-schema.js';
+import type { SkillRegistry } from "./skill-registry.js";
+import type { FTS5Store } from "./fts5-store.js";
+import { calculateSuccessRate } from "./skill-schema.js";
 
 /**
  * MemoryNudger: 周期性记忆提醒生成器。
@@ -43,12 +43,12 @@ export class MemoryNudger {
       return null;
     }
 
-    const parts: string[] = ['# 💡 记忆提醒'];
+    const parts: string[] = ["# 💡 记忆提醒"];
 
     // 1. 最近学会的技能（Top 3）
     const topSkills = this.skillRegistry.getTopSkills(3);
     if (topSkills.length > 0) {
-      parts.push('\n## 你最近掌握的技能');
+      parts.push("\n## 你最近掌握的技能");
       for (const skill of topSkills) {
         const successRate = (calculateSuccessRate(skill) * 100).toFixed(0);
         parts.push(
@@ -56,17 +56,17 @@ export class MemoryNudger {
         );
         parts.push(`  触发条件: ${skill.trigger}`);
       }
-      parts.push('\n💡 提示: 遇到类似任务时，优先考虑使用已有技能。');
+      parts.push("\n💡 提示: 遇到类似任务时，优先考虑使用已有技能。");
     }
 
     // 2. 会话摘要（如果有）
     const summary = this.fts5.getSummary(sessionId);
-    if (summary && typeof summary === 'string') {
-      parts.push('\n## 本次对话要点');
+    if (summary && typeof summary === "string") {
+      parts.push("\n## 本次对话要点");
       parts.push(summary);
     }
 
     // 如果既没有技能也没有摘要，返回 null
-    return parts.length > 1 ? parts.join('\n') : null;
+    return parts.length > 1 ? parts.join("\n") : null;
   }
 }

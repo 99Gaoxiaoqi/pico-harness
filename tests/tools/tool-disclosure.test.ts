@@ -3,10 +3,7 @@
 
 import { describe, expect, it } from "vitest";
 import { CORE_TOOLS, getTier } from "../../src/tools/tool-tiers.js";
-import {
-  formatToolDisclosureItem,
-  ToolDisclosure,
-} from "../../src/tools/tool-disclosure.js";
+import { formatToolDisclosureItem, ToolDisclosure } from "../../src/tools/tool-disclosure.js";
 import { findMatchingTools, SearchToolsTool } from "../../src/tools/search-tools.js";
 import type { ToolDefinition } from "../../src/schema/message.js";
 

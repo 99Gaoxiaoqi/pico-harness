@@ -31,7 +31,13 @@ function setup(): {
   manager: DelegationManager;
   seenOpts: SubagentRunOptions[];
   seenRequests: Array<{ mode: string; agentName?: string }>;
-  factory: (req: { mode: string; role: string; depth: number; maxSpawnDepth: number; agentName?: string }) => Registry;
+  factory: (req: {
+    mode: string;
+    role: string;
+    depth: number;
+    maxSpawnDepth: number;
+    agentName?: string;
+  }) => Registry;
 } {
   const seenOpts: SubagentRunOptions[] = [];
   const seenRequests: Array<{ mode: string; agentName?: string }> = [];
@@ -183,7 +189,10 @@ describe("delegate_task 的 agent_name 自定义角色(集成)", () => {
         agentName: "auditor",
       });
 
-      const toolNames = registry.getAvailableTools().map((t) => t.name).sort();
+      const toolNames = registry
+        .getAvailableTools()
+        .map((t) => t.name)
+        .sort();
       // auditor profile 声明了 [read_file, bash],外加 delegate_status
       expect(toolNames).toContain("read_file");
       expect(toolNames).toContain("bash");

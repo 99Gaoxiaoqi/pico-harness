@@ -1,10 +1,6 @@
 import React, { useState } from "react";
 import { Box, Text, useInput } from "ink";
-import type {
-  SlashCommandCategory,
-  SlashCommandKind,
-  SlashCommandSource,
-} from "../input/types.js";
+import type { SlashCommandCategory, SlashCommandKind, SlashCommandSource } from "../input/types.js";
 import { terminalWidth, truncateTerminalText, visualRows } from "./terminal-width.js";
 
 export const HELP_PANEL_COMMAND_WIDTH = 44;
@@ -69,7 +65,13 @@ export function HelpPanel({
 }: HelpPanelProps): React.ReactNode {
   return (
     <Box flexDirection="column" marginLeft={2}>
-      {formatHelpPanel(commands, { selectedIndex, scrollOffset, maxItems, maxRows, width: renderWidth })
+      {formatHelpPanel(commands, {
+        selectedIndex,
+        scrollOffset,
+        maxItems,
+        maxRows,
+        width: renderWidth,
+      })
         .split("\n")
         .map((line, index) => (
           <Text key={`${index}:${line}`}>{line}</Text>
@@ -169,7 +171,8 @@ export function formatHelpPanel(
         lines.push(formatHelpPanelDetailLine("    [disabled]", width));
       }
       if (row.aliases) lines.push(formatHelpPanelDetailLine(`    aliases: ${row.aliases}`, width));
-      if (row.disabledReason) lines.push(formatHelpPanelDetailLine(`    ${row.disabledReason}`, width));
+      if (row.disabledReason)
+        lines.push(formatHelpPanelDetailLine(`    ${row.disabledReason}`, width));
     }
   }
   if (hiddenBelow > 0) lines.push(`↓ ${hiddenBelow} hidden`);
@@ -188,7 +191,8 @@ export function measureHelpPanelRows(
   } = {},
 ): number {
   const wrapWidth = Math.max(1, options.width ?? 80);
-  return visualRows(formatHelpPanel(commands, { ...options, maxRows: options.maxRows }), wrapWidth).length;
+  return visualRows(formatHelpPanel(commands, { ...options, maxRows: options.maxRows }), wrapWidth)
+    .length;
 }
 
 export function fitHelpPanelMaxItems(
@@ -346,7 +350,10 @@ function scrollOffsetForSelection(
   return clamp(nextOffset, 0, maxScroll);
 }
 
-function formatHelpPanelRow(row: HelpPanelRow, width?: number): { line: string; showsDisabled: boolean } {
+function formatHelpPanelRow(
+  row: HelpPanelRow,
+  width?: number,
+): { line: string; showsDisabled: boolean } {
   const marker = row.selected ? "›" : " ";
   const disabled = row.disabled ? " [disabled]" : "";
   const line = `${marker} ${row.usage}${disabled}  ${row.description}`;
@@ -368,9 +375,10 @@ function finalizeHelpPanelLines(
   lines: readonly string[],
   options: { width?: number; maxRows?: number },
 ): string {
-  const formatted = options.width === undefined
-    ? [...lines]
-    : lines.map((line) => truncateTerminalText(line, options.width ?? 80));
+  const formatted =
+    options.width === undefined
+      ? [...lines]
+      : lines.map((line) => truncateTerminalText(line, options.width ?? 80));
   const maxRows = options.maxRows;
   if (maxRows === undefined || formatted.length <= maxRows) return formatted.join("\n");
 

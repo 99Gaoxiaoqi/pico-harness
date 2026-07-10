@@ -10,11 +10,7 @@ import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import {
-  GrepTool,
-  resetRgCache,
-  setRgAvailable,
-} from "../../src/tools/grep.js";
+import { GrepTool, resetRgCache, setRgAvailable } from "../../src/tools/grep.js";
 import { ToolRegistry } from "../../src/tools/registry-impl.js";
 import type { ToolCall } from "../../src/schema/message.js";
 
@@ -57,9 +53,7 @@ describe("GrepTool - Node.js 降级路径 (强制 rgAvailable=false)", () => {
 
   it("case_sensitive=true:只匹配精确大小写 hello", async () => {
     const tool = new GrepTool(workDir);
-    const out = await tool.execute(
-      JSON.stringify({ pattern: "hello", case_sensitive: true }),
-    );
+    const out = await tool.execute(JSON.stringify({ pattern: "hello", case_sensitive: true }));
     expect(out).toContain("src/foo.ts:1:");
     expect(out).toContain("function hello()");
     // HELLO(大写)不应命中
@@ -69,9 +63,7 @@ describe("GrepTool - Node.js 降级路径 (强制 rgAvailable=false)", () => {
 
   it("glob 过滤 *.ts:不搜 markdown", async () => {
     const tool = new GrepTool(workDir);
-    const out = await tool.execute(
-      JSON.stringify({ pattern: "hello", glob: "*.ts" }),
-    );
+    const out = await tool.execute(JSON.stringify({ pattern: "hello", glob: "*.ts" }));
     // ts 文件命中
     expect(out).toContain("src/foo.ts:1:");
     expect(out).toContain("src/bar.ts:1:");
@@ -81,9 +73,7 @@ describe("GrepTool - Node.js 降级路径 (强制 rgAvailable=false)", () => {
 
   it("glob 过滤 *.md:只搜 markdown", async () => {
     const tool = new GrepTool(workDir);
-    const out = await tool.execute(
-      JSON.stringify({ pattern: "hello", glob: "*.md" }),
-    );
+    const out = await tool.execute(JSON.stringify({ pattern: "hello", glob: "*.md" }));
     expect(out).toContain("readme.md:1:");
     expect(out).toContain("# Hello World");
     expect(out).not.toContain("src/foo.ts");
@@ -207,9 +197,7 @@ describe("GrepTool - rg 路径 (仅当环境真实装有 rg 时运行)", () => {
   it("rg 路径:case_sensitive=true 只匹配精确大小写", async () => {
     if (!rgInstalled) return;
     const tool = new GrepTool(workDir);
-    const out = await tool.execute(
-      JSON.stringify({ pattern: "hello", case_sensitive: true }),
-    );
+    const out = await tool.execute(JSON.stringify({ pattern: "hello", case_sensitive: true }));
     expect(out).toContain("foo.ts:1:");
     expect(out).not.toContain("bar.ts");
   });
@@ -264,14 +252,7 @@ describe("GrepTool - 接口元数据", () => {
     expect(def.name).toBe("grep");
     const props = def.inputSchema["properties"] as Record<string, unknown>;
     expect(Object.keys(props).sort()).toEqual(
-      [
-        "case_sensitive",
-        "glob",
-        "line_number",
-        "max_results",
-        "path",
-        "pattern",
-      ].sort(),
+      ["case_sensitive", "glob", "line_number", "max_results", "path", "pattern"].sort(),
     );
     expect(def.inputSchema["required"]).toEqual(["pattern"]);
   });

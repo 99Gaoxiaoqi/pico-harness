@@ -64,8 +64,7 @@ export class TerminalReporter implements Reporter {
     const allLines = result.split("\n");
     const lines = allLines.slice(0, 3).map((l) => l.slice(0, 100));
     const summary = lines.join("\n    | ");
-    const more =
-      allLines.length > 3 ? `\n    | ... (共 ${allLines.length} 行)` : "";
+    const more = allLines.length > 3 ? `\n    | ... (共 ${allLines.length} 行)` : "";
     console.log(pc.green(`    -> ✅ ${toolName}`) + ` (返回 ${result.length} 字节)`);
     if (summary.trim()) console.log(pc.dim(`    | ${summary}${more}`));
   }

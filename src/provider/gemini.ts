@@ -175,7 +175,11 @@ export class GeminiProvider implements LLMProvider {
       for (const event of events) {
         const lines = event.split("\n");
         for (const line of lines) {
-          const data = line.startsWith("data: ") ? line.slice(6) : line.startsWith("data:") ? line.slice(5) : null;
+          const data = line.startsWith("data: ")
+            ? line.slice(6)
+            : line.startsWith("data:")
+              ? line.slice(5)
+              : null;
           if (!data || data === "[DONE]") continue;
 
           let chunk: GeminiResponse;
@@ -241,7 +245,9 @@ export class GeminiProvider implements LLMProvider {
             const functionName = toolCallNames.get(msg.toolCallId) ?? msg.toolCallId;
             contents.push({
               role: "user",
-              parts: [{ functionResponse: { name: functionName, response: { result: msg.content } } }],
+              parts: [
+                { functionResponse: { name: functionName, response: { result: msg.content } } },
+              ],
             });
           } else {
             // 5.5d 多模态:user 消息可携带 images → Gemini inlineData(仅 base64)

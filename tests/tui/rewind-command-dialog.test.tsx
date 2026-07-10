@@ -2,10 +2,7 @@ import { renderToString } from "ink";
 import { describe, expect, it, vi } from "vitest";
 import { createBuiltinCommandRegistry } from "../../src/input/builtin-commands.js";
 import type { LocalCommandResult } from "../../src/input/types.js";
-import {
-  handleTuiInputSubmission,
-  type TuiInputProcessResult,
-} from "../../src/tui/repl.js";
+import { handleTuiInputSubmission, type TuiInputProcessResult } from "../../src/tui/repl.js";
 import {
   createRewindCommandDialogState,
   RewindCommandDialogView,
@@ -55,9 +52,7 @@ describe("RewindCommandDialog", () => {
   });
 
   it("快照超过可见上限时 Enter 预览屏幕高亮的最新项", async () => {
-    const snapshots = Array.from({ length: 9 }, (_, index) =>
-      snapshotSummary(`turn-${index + 1}`),
-    );
+    const snapshots = Array.from({ length: 9 }, (_, index) => snapshotSummary(`turn-${index + 1}`));
     const onDispatchCommand = vi.fn();
     const getDiffStat = vi.fn(async (messageId: string) => diffStat(messageId));
 
@@ -139,14 +134,16 @@ describe("RewindCommandDialog", () => {
       message: "Rewind\nChoose a message to preview",
       ui: { kind: "open-selector", selector: "rewind" },
     };
-    const processInput = vi.fn(async (): Promise<TuiInputProcessResult> => ({
-      type: "local-command",
-      raw: "/rewind",
-      command: "rewind",
-      args: "",
-      argv: [],
-      result,
-    }));
+    const processInput = vi.fn(
+      async (): Promise<TuiInputProcessResult> => ({
+        type: "local-command",
+        raw: "/rewind",
+        command: "rewind",
+        args: "",
+        argv: [],
+        result,
+      }),
+    );
     const openLocalUiDialog = vi.fn();
 
     await handleTuiInputSubmission("/rewind", {

@@ -111,10 +111,7 @@ export class CostTracker implements LLMProvider {
           cost.status,
         );
       }
-      logger.info(
-        { latencyMs, costCNY: cost.costCNY },
-        "[Tracker] 流式 API 完成",
-      );
+      logger.info({ latencyMs, costCNY: cost.costCNY }, "[Tracker] 流式 API 完成");
     }
     return resp;
   }

@@ -11,7 +11,9 @@ describe("MessageList virtual transcript", () => {
     const entries = makeUserEntries(220);
 
     const output = renderToString(
-      React.createElement(MessageList, { layout: buildTranscriptLayout(entries, { wrapWidth: 80 }) }),
+      React.createElement(MessageList, {
+        layout: buildTranscriptLayout(entries, { wrapWidth: 80 }),
+      }),
     );
 
     expect(output).toContain("message-0");
@@ -88,7 +90,9 @@ describe("MessageList virtual transcript", () => {
     ];
 
     const output = renderToString(
-      React.createElement(MessageList, { layout: buildTranscriptLayout(entries, { wrapWidth: 80 }) }),
+      React.createElement(MessageList, {
+        layout: buildTranscriptLayout(entries, { wrapWidth: 80 }),
+      }),
     );
 
     expect(output).toContain("bash · 2 calls");

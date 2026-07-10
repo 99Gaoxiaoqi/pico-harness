@@ -1,11 +1,9 @@
-const SENSITIVE_KEY_PATTERN = /^(?:.*(?:api[-_]?key|apikey|token|authorization|password|passwd|secret).*)$/i;
+const SENSITIVE_KEY_PATTERN =
+  /^(?:.*(?:api[-_]?key|apikey|token|authorization|password|passwd|secret).*)$/i;
 
 export function redactSensitiveText(text: string): string {
   return text
-    .replace(
-      /((?:authorization)\s*[:=]\s*bearer\s+)[^\s,;]+/gi,
-      "$1[REDACTED]",
-    )
+    .replace(/((?:authorization)\s*[:=]\s*bearer\s+)[^\s,;]+/gi, "$1[REDACTED]")
     .replace(/((?:authorization)\s*[:=]\s*)[^\s,;]+/gi, "$1[REDACTED]")
     .replace(
       /((?:api[-_]?key|apikey|token|password|passwd|secret)\s*[:=]\s*)[^\s,;&]+/gi,
@@ -13,7 +11,7 @@ export function redactSensitiveText(text: string): string {
     )
     .replace(
       /("(?:api[-_]?key|apikey|token|authorization|password|passwd|secret)"\s*:\s*")[^"]+"/gi,
-      "$1[REDACTED]\"",
+      '$1[REDACTED]"',
     );
 }
 

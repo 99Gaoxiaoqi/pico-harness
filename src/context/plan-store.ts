@@ -50,10 +50,7 @@ export class PlanStore {
 
   /** 检查 PLAN.md 和 TODO.md 是否存在(Plan Mode 唤醒嗅探用) */
   async exists(): Promise<{ plan: boolean; todo: boolean }> {
-    const [plan, todo] = await Promise.all([
-      fileExists(this.planPath),
-      fileExists(this.todoPath),
-    ]);
+    const [plan, todo] = await Promise.all([fileExists(this.planPath), fileExists(this.todoPath)]);
     return { plan, todo };
   }
 

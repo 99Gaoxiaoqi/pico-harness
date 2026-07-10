@@ -108,9 +108,9 @@ describe("listFileSuggestions", () => {
       },
     });
 
-    await expect(
-      listFileSuggestions({ cwd: workDir, query: "src", fileIndex }),
-    ).resolves.toEqual(["src/app.ts"]);
+    await expect(listFileSuggestions({ cwd: workDir, query: "src", fileIndex })).resolves.toEqual([
+      "src/app.ts",
+    ]);
     await expect(
       listFileSuggestions({ cwd: workDir, query: "README", fileIndex }),
     ).resolves.toEqual(["README.md"]);

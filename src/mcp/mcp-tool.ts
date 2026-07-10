@@ -13,7 +13,13 @@ import type { BaseTool } from "../tools/registry.js";
 import type { ToolDefinition } from "../schema/message.js";
 import { ToolAccesses } from "../tools/tool-access.js";
 import { logger } from "../observability/logger.js";
-import { assertMcpInputSchema, mcpResultToText, qualifyMcpToolName, type McpClient, type McpTool } from "./types.js";
+import {
+  assertMcpInputSchema,
+  mcpResultToText,
+  qualifyMcpToolName,
+  type McpClient,
+  type McpTool,
+} from "./types.js";
 
 export interface McpToolBridgeOptions {
   /** MCP 工具单次返回最大字符数;超长截断。默认 16000 */
@@ -80,13 +86,18 @@ export class McpToolBridge implements BaseTool {
       if (result.isError) {
         // server 报 isError:把内容拼成错误信息返回(不抛异常,保持 BaseTool 契约)
         const text = mcpResultToText(result);
-        return text.length > 0 ? `MCP 工具 ${this.tool.name} 返回错误: ${text}` : `MCP 工具 ${this.tool.name} 返回错误(无详情)`;
+        return text.length > 0
+          ? `MCP 工具 ${this.tool.name} 返回错误: ${text}`
+          : `MCP 工具 ${this.tool.name} 返回错误(无详情)`;
       }
       const text = mcpResultToText(result);
       return this.truncate(text);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      logger.warn({ server: this.serverName, tool: this.tool.name, err: msg }, `[MCP] 工具调用失败: ${msg}`);
+      logger.warn(
+        { server: this.serverName, tool: this.tool.name, err: msg },
+        `[MCP] 工具调用失败: ${msg}`,
+      );
       // 抛异常由 Registry 封装成 isError ToolResult
       throw new Error(`MCP 工具 ${this.qualifiedName} 调用失败: ${msg}`, { cause: err });
     }

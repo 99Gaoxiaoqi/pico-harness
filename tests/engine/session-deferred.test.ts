@@ -153,9 +153,7 @@ describe("Session deferredMessages(3.4 tool 顺序完整性)", () => {
 
   it("deferred 不进 WorkingMemory(flush 前不可见)", () => {
     const sess = new Session("defer-9", "/tmp", { persistence: false });
-    sess.append(
-      assistantMsg("call", [{ id: "w1", name: "read", arguments: "{}" }]),
-    );
+    sess.append(assistantMsg("call", [{ id: "w1", name: "read", arguments: "{}" }]));
     sess.append(userMsg("暂存消息-should-not-appear"));
     const wm = sess.getWorkingMemory(10);
     // 只有 assistant 在 wm,暂存消息不可见

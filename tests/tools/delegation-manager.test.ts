@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { TaskRegistry } from "../../src/tasks/task-registry.js";
-import { DelegationManager, type DelegationBatchResult } from "../../src/tools/delegation-manager.js";
+import {
+  DelegationManager,
+  type DelegationBatchResult,
+} from "../../src/tools/delegation-manager.js";
 
 describe("DelegationManager task runtime adapter", () => {
   it("background delegation 创建 local_agent task 并同步完成状态", async () => {

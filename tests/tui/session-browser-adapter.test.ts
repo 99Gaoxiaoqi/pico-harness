@@ -44,7 +44,10 @@ describe("session-browser-adapter", () => {
   });
 });
 
-type SessionSummaryOverrides = Omit<Partial<CliSessionBrowserSummary>, "createdAt" | "updatedAt"> & {
+type SessionSummaryOverrides = Omit<
+  Partial<CliSessionBrowserSummary>,
+  "createdAt" | "updatedAt"
+> & {
   createdAt?: Date | string;
   updatedAt?: Date | string;
 };

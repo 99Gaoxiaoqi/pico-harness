@@ -80,15 +80,10 @@ describe("子代理自定义 opts 的 Tool 层透传", () => {
   it("DelegateTaskTool 把自定义 opts 透传给每个子任务的 runSub", async () => {
     const { runner, seenOpts } = recordingRunner();
     const manager = new DelegationManager();
-    const tool = new DelegateTaskTool(
-      runner,
-      () => mockRegistry(),
-      manager,
-      {
-        maxTurns: 3,
-        systemPrompt: "你是测试员",
-      },
-    );
+    const tool = new DelegateTaskTool(runner, () => mockRegistry(), manager, {
+      maxTurns: 3,
+      systemPrompt: "你是测试员",
+    });
 
     await tool.execute(JSON.stringify({ goal: "跑测试" }));
 

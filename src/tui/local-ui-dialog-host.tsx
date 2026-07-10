@@ -55,7 +55,9 @@ export function createLocalUiDialogContent(
         />
       );
     case "model":
-      return <ModelSelector currentModelId={context.currentModelId} models={context.models ?? []} />;
+      return (
+        <ModelSelector currentModelId={context.currentModelId} models={context.models ?? []} />
+      );
     case "session":
       return (
         <SessionBrowser
@@ -83,7 +85,9 @@ function resolveLocalUiDialogKind(action: unknown): LocalUiDialogKind | null {
   return action.selector;
 }
 
-function panelToDialogKind(action: Extract<LocalUiCommandAction, { kind: "open-panel" }>): LocalUiDialogKind {
+function panelToDialogKind(
+  action: Extract<LocalUiCommandAction, { kind: "open-panel" }>,
+): LocalUiDialogKind {
   if (action.panel === "sessions") return "session";
   return action.panel;
 }

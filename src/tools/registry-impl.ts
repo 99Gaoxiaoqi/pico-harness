@@ -13,7 +13,11 @@ import type {
 import type { ToolCall, ToolDefinition, ToolResult } from "../schema/message.js";
 import { logger } from "../observability/logger.js";
 import { ToolAccesses } from "./tool-access.js";
-import { toModelTextView, materializeModelText, makeCarriageReturnsVisible } from "./line-endings.js";
+import {
+  toModelTextView,
+  materializeModelText,
+  makeCarriageReturnsVisible,
+} from "./line-endings.js";
 import { findClosestLines, formatCandidateHint } from "./edit-hint.js";
 // 跨平台 shell:Windows 上统一走 Git Bash,避免 cmd.exe 不识别 POSIX 语义。
 import { execAsync, execOptions } from "../os/shell.js";
@@ -220,7 +224,11 @@ export class ToolRegistry implements Registry {
     if (this.hookRunner) {
       let hookResult;
       try {
-        hookResult = await this.hookRunner.runPreToolUse(currentCall.name, toolInput, this.sessionId);
+        hookResult = await this.hookRunner.runPreToolUse(
+          currentCall.name,
+          toolInput,
+          this.sessionId,
+        );
       } catch (err) {
         // HookRunner 内部已 fail-open,此处防御性兜底:绝不阻断
         logger.warn(
@@ -424,8 +432,7 @@ export class ReadFileTool implements BaseTool {
     const lines = text.endsWith("\n") ? text.slice(0, -1).split("\n") : text.split("\n");
     const renderedLines = lines.map((line, i) => {
       // mixed 行尾:每行 \r 显形为字面 "\r",提醒模型该文件含杂散 CR,Edit 匹配可能失败。
-      const content =
-        lineEndingStyle === "mixed" ? makeCarriageReturnsVisible(line) : line;
+      const content = lineEndingStyle === "mixed" ? makeCarriageReturnsVisible(line) : line;
       return `${i + 1}\t${content}`;
     });
     let output = renderedLines.join("\n");
@@ -580,7 +587,7 @@ export class BashTool implements BaseTool {
 
   async execute(args: string): Promise<string> {
     let command: string;
-    let background = false;
+    let background: boolean;
     try {
       const input = JSON.parse(args) as { command?: string; background?: boolean };
       command = input.command ?? "";
@@ -781,7 +788,7 @@ function parseTaskIdArgs(args: string): { taskId: string; tail?: number } {
     if (err instanceof Error && err.message === "缺少 taskId 字段") {
       throw err;
     }
-    throw new Error("参数解析失败: 期望 JSON 含 taskId 字段");
+    throw new Error("参数解析失败: 期望 JSON 含 taskId 字段", { cause: err });
   }
 }
 
@@ -834,7 +841,10 @@ function fuzzyReplace(
   }
 
   // L4: 逐行去缩进匹配 (最强容错,消除模型遗漏缩进的幻觉)
-  return { content: lineByLineReplace(normalizedContent, normalizedOld, newText, replaceAll), level: 4 };
+  return {
+    content: lineByLineReplace(normalizedContent, normalizedOld, newText, replaceAll),
+    level: 4,
+  };
 }
 
 /** 统计子串出现次数 (不重叠) */
@@ -969,9 +979,11 @@ function lineByLineReplace(
     const matchEnd = matchStart + oldLines.length;
     const fileRegion = contentLines.slice(matchStart, matchEnd).join("\n");
     const adjustedNewText = reindentReplacement(fileRegion, oldText, newText);
-    return [...contentLines.slice(0, matchStart), adjustedNewText, ...contentLines.slice(matchEnd)].join(
-      "\n",
-    );
+    return [
+      ...contentLines.slice(0, matchStart),
+      adjustedNewText,
+      ...contentLines.slice(matchEnd),
+    ].join("\n");
   }
 
   // replaceAll:从后往前逐区间替换(倒序避免行号偏移),每个区间独立缩进重对齐
@@ -1064,7 +1076,11 @@ export class EditFileTool implements BaseTool {
       const { content: newContent, level } = fuzzyReplace(content, oldText, newText, replaceAll);
 
       // 4. 写回磁盘:按记录的原始行尾风格还原(CRLF 文件写回仍是 CRLF)
-      await writeFile(fullPath, materializeModelText(newContent, modelView.lineEndingStyle), "utf8");
+      await writeFile(
+        fullPath,
+        materializeModelText(newContent, modelView.lineEndingStyle),
+        "utf8",
+      );
 
       // 5. 生成 diff 预览(简单 before/after 对比,供用户审批时查看)
       const diffPreview = generateSimpleDiff(oldText, newText);

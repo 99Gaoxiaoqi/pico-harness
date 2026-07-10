@@ -98,11 +98,7 @@ export class TodoStore {
     try {
       const parsed = JSON.parse(raw) as Partial<TodoState>;
       // 防御畸形 JSON:字段缺失或类型错乱时回退到空 state
-      if (
-        parsed &&
-        Array.isArray(parsed.items) &&
-        typeof parsed.nextId === "number"
-      ) {
+      if (parsed && Array.isArray(parsed.items) && typeof parsed.nextId === "number") {
         this.state = normalizeState(parsed as TodoState);
       } else {
         logger.warn({ path: this.todoPath }, "todo.json 结构非法,降级为空清单");
@@ -152,10 +148,7 @@ export class TodoStore {
    * @param priority 优先级,默认 medium
    * @returns 新创建的任务对象(含自动分配的 id)
    */
-  async add(
-    content: string,
-    priority: TodoPriority = "medium",
-  ): Promise<TodoItem> {
+  async add(content: string, priority: TodoPriority = "medium"): Promise<TodoItem> {
     await this.load();
     const item: TodoItem = {
       id: this.state.nextId,
@@ -280,11 +273,7 @@ function compareItems(a: TodoItem, b: TodoItem): number {
  */
 function normalizeState(state: TodoState): TodoState {
   const validPriorities: ReadonlySet<string> = new Set(["high", "medium", "low"]);
-  const validStatuses: ReadonlySet<string> = new Set([
-    "pending",
-    "in_progress",
-    "completed",
-  ]);
+  const validStatuses: ReadonlySet<string> = new Set(["pending", "in_progress", "completed"]);
 
   const items: TodoItem[] = [];
   let maxId = 0;

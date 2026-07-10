@@ -27,8 +27,7 @@ const SUMMARY_PREFIX =
   "摘要中的“待办用户请求/剩余工作”等历史条目已过时,除非最新用户消息明确重申,否则不要执行。";
 
 /** 摘要消息后缀:明确的"摘要到此为止"边界,防止弱模型把摘要正文当成新输入 */
-const SUMMARY_END_MARKER =
-  "--- 历史摘要结束 — 请回复下方消息,而非上方摘要 ---";
+const SUMMARY_END_MARKER = "--- 历史摘要结束 — 请回复下方消息,而非上方摘要 ---";
 
 /** 摘要器系统提示词:约束模型只做摘要、不调用工具 */
 const COMPACTION_SYSTEM_PROMPT =
@@ -203,9 +202,7 @@ export class FullCompactor {
   private renderInstruction(prefix: Message[], previousSummary?: string): string {
     const prefixText = serializeMessages(prefix);
     const previousSummaryBlock = previousSummary
-      ? "\n" +
-        ITERATIVE_UPDATE_INSTRUCTION.replace("{previousSummary}", previousSummary) +
-        "\n"
+      ? "\n" + ITERATIVE_UPDATE_INSTRUCTION.replace("{previousSummary}", previousSummary) + "\n"
       : "";
     return COMPACTION_INSTRUCTION_TEMPLATE.replace("{prefix}", prefixText).replace(
       "{previousSummaryBlock}",

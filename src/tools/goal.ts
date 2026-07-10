@@ -104,7 +104,9 @@ function parseBudgetConfig(parsed: Record<string, unknown>): BudgetConfig | unde
     hasAny = true;
   }
   if (!hasAny) {
-    throw new Error("budget 对象至少需含一个预算字段(maxTurns/maxTokens/maxCostCNY/maxWallClockMs)");
+    throw new Error(
+      "budget 对象至少需含一个预算字段(maxTurns/maxTokens/maxCostCNY/maxWallClockMs)",
+    );
   }
   return config;
 }
@@ -197,8 +199,7 @@ export class GetGoalTool implements BaseTool {
   definition(): ToolDefinition {
     return {
       name: "get_goal",
-      description:
-        "查询目标。无参数时返回当前激活目标(若无则返回全部);传 id 返回单个目标详情。",
+      description: "查询目标。无参数时返回当前激活目标(若无则返回全部);传 id 返回单个目标详情。",
       inputSchema: {
         type: "object",
         properties: {
@@ -363,7 +364,9 @@ export class UpdateGoalTool implements BaseTool {
       patch.blockedReason === undefined &&
       patch.budgetConfig === undefined
     ) {
-      throw new Error("update_goal 至少需提供一个可更新字段(title/description/status/progress/blockedReason/budget)");
+      throw new Error(
+        "update_goal 至少需提供一个可更新字段(title/description/status/progress/blockedReason/budget)",
+      );
     }
 
     const updated = this.manager.update(id, patch);

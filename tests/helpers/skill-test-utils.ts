@@ -43,9 +43,7 @@ export function createMockSkill(overrides?: Partial<LearnedSkill>): LearnedSkill
 /**
  * 创建 Mock 失败模式
  */
-export function createMockFailurePattern(
-  overrides?: Partial<FailurePattern>
-): FailurePattern {
+export function createMockFailurePattern(overrides?: Partial<FailurePattern>): FailurePattern {
   return {
     errorPattern: "Error: test error",
     solution: undefined,

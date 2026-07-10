@@ -77,6 +77,11 @@ describe("groupToolEntries", () => {
   });
 });
 
-function tool(name: string, args: string, status: Extract<TuiEntry, { kind: "tool" }>["status"], summary?: string): TuiEntry {
+function tool(
+  name: string,
+  args: string,
+  status: Extract<TuiEntry, { kind: "tool" }>["status"],
+  summary?: string,
+): TuiEntry {
   return { kind: "tool", name, args, status, summary };
 }

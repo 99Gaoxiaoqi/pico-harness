@@ -145,10 +145,7 @@ export class HookRunner {
       return await this.spawnAndWait(handler.command, input, timeoutMs);
     } catch (err) {
       // 任何 spawn / IO / 解析异常:fail-open 放行,绝不阻断工具
-      logger.warn(
-        { err: String(err), event, tool: toolName },
-        `[Hook] 执行失败,fail-open 放行`,
-      );
+      logger.warn({ err: String(err), event, tool: toolName }, `[Hook] 执行失败,fail-open 放行`);
       return { decision: "allow" };
     }
   }
@@ -157,11 +154,7 @@ export class HookRunner {
    * spawn shell 子进程,写 stdin,等待 exit,判定结果。
    * 抛出的异常由上层 executeHandler 兜成 fail-open。
    */
-  private spawnAndWait(
-    command: string,
-    input: HookInput,
-    timeoutMs: number,
-  ): Promise<HookOutput> {
+  private spawnAndWait(command: string, input: HookInput, timeoutMs: number): Promise<HookOutput> {
     return new Promise<HookOutput>((resolve) => {
       let child: ChildProcess;
       try {
@@ -172,7 +165,7 @@ export class HookRunner {
           // 让子进程继承关闭的 stdio:stdin 可写、stdout/stderr 可读
           stdio: ["pipe", "pipe", "pipe"],
         });
-      } catch (err) {
+      } catch {
         // spawn 同步失败 → fail-open
         resolve({ decision: "allow" });
         return;
@@ -273,8 +266,7 @@ function parseAllowStdout(stdout: string): HookOutput {
   const obj = parsed as Record<string, unknown>;
 
   // 判定 deny:两种协议字段
-  const isDeny =
-    obj.permissionDecision === "deny" || obj.decision === "block";
+  const isDeny = obj.permissionDecision === "deny" || obj.decision === "block";
   if (isDeny) {
     const reason =
       (typeof obj.permissionDecisionReason === "string" && obj.permissionDecisionReason) ||

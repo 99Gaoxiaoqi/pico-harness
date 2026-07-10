@@ -32,9 +32,9 @@ describe("ContextOverflowError", () => {
 
 describe("isContextOverflowStatus", () => {
   it("400 + maximum context length 命中返回 true", () => {
-    expect(
-      isContextOverflowStatus(400, "This model's maximum context length is 8192 tokens"),
-    ).toBe(true);
+    expect(isContextOverflowStatus(400, "This model's maximum context length is 8192 tokens")).toBe(
+      true,
+    );
   });
 
   it("413 + 不匹配的消息返回 false", () => {

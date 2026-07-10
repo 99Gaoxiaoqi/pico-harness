@@ -1,5 +1,13 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, writeFileSync, readFileSync, rmSync, statSync, mkdirSync, existsSync } from "node:fs";
+import {
+  mkdtempSync,
+  writeFileSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  mkdirSync,
+  existsSync,
+} from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -237,7 +245,9 @@ describe("FileHistory 1.5.2 写前备份 trackEdit", () => {
   it("文件不存在时不报错且加入 trackedFiles", async () => {
     const missing = join(workDir, "no-such-file.ts");
 
-    await expect(fileHistoryTrackEdit(state, missing, "m1", sessionId, baseDir)).resolves.toBeUndefined();
+    await expect(
+      fileHistoryTrackEdit(state, missing, "m1", sessionId, baseDir),
+    ).resolves.toBeUndefined();
 
     expect(state.trackedFiles.has(missing)).toBe(true);
   });
@@ -387,7 +397,7 @@ describe("FileHistory 1.5.4 回滚 rewind", () => {
   });
 
   it("改 3 个文件后 rewind 全部恢复", async () => {
-    const files = ["a.ts", "b.ts", "c.ts"].map(f => join(workDir, f));
+    const files = ["a.ts", "b.ts", "c.ts"].map((f) => join(workDir, f));
     for (const f of files) writeFileSync(f, "original\n");
 
     for (const f of files) {

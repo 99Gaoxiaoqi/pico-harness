@@ -86,10 +86,7 @@ describe("PromptComposer 集成测试", () => {
 
   it("✅ turnCount=10 时包含 Nudge", async () => {
     // 设置第 10 轮的 Nudge
-    mockNudger.setNudge(
-      10,
-      "# ⏰ 阶段性提示\n\n已完成 10 轮对话，建议回顾任务目标。",
-    );
+    mockNudger.setNudge(10, "# ⏰ 阶段性提示\n\n已完成 10 轮对话，建议回顾任务目标。");
 
     const skill = createLearnedSkill("测试技能", "测试", "步骤", "auto");
     skill.stats.successCount = 3;

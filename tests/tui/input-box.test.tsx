@@ -191,7 +191,12 @@ describe("InputBox input controller", () => {
   it("Enter submits current text and keeps multiline/history behavior", () => {
     const options: InputControllerOptions = {};
     let state = typeText("line 1", options);
-    state = reduceInputControllerEvent(state, "", key({ return: true, shift: true }), options).state;
+    state = reduceInputControllerEvent(
+      state,
+      "",
+      key({ return: true, shift: true }),
+      options,
+    ).state;
     state = typeText("line 2", options, state);
 
     const result = reduceInputControllerEvent(state, "", key({ return: true }), options);
@@ -262,8 +267,12 @@ describe("InputBox input controller", () => {
           ? Promise.resolve([{ value: "code-review", description: "Review agent" }])
           : [],
     };
-    let state = reduceInputControllerEvent(createInputControllerState(), "/status\r", key({}), {})
-      .state;
+    let state = reduceInputControllerEvent(
+      createInputControllerState(),
+      "/status\r",
+      key({}),
+      {},
+    ).state;
     state = reduceInputControllerEvent(state, "/agent co", key({}), {}).state;
     state = reduceInputControllerEvent(state, "", key({ upArrow: true }), {}).state;
 
@@ -314,7 +323,9 @@ describe("InputBox input controller", () => {
 
   it("renders disabled state without hiding the current multiline draft", () => {
     const output = renderToString(
-      <>{renderInputPrompt({ disabled: true, text: "先检查\nnpm test", cursor: "先检查".length })}</>,
+      <>
+        {renderInputPrompt({ disabled: true, text: "先检查\nnpm test", cursor: "先检查".length })}
+      </>,
     );
 
     expect(output).toContain("先检查");
@@ -391,18 +402,13 @@ describe("InputBox input controller", () => {
         },
       },
     });
-    const unboundResult = reduceInputControllerEvent(
-      state,
-      "a",
-      key({ ctrl: true }),
-      {
-        keybindings: {
-          Chat: {
-            "ctrl+a": null,
-          },
+    const unboundResult = reduceInputControllerEvent(state, "a", key({ ctrl: true }), {
+      keybindings: {
+        Chat: {
+          "ctrl+a": null,
         },
       },
-    );
+    });
 
     expect(unboundResult.state.cursor).toBe("hello".length);
   });
@@ -419,7 +425,12 @@ describe("InputBox input controller", () => {
     expect(state.text).toBe("line 1\nline 2");
     expect(state.cursor).toBe("line 1\nline 2".length);
 
-    state = reduceInputControllerEvent(state, "", key({ return: true, shift: true }), options).state;
+    state = reduceInputControllerEvent(
+      state,
+      "",
+      key({ return: true, shift: true }),
+      options,
+    ).state;
     state = reduceInputControllerEvent(state, "line 3", key({}), options).state;
 
     expect(state.text).toBe("line 1\nline 2\nline 3");

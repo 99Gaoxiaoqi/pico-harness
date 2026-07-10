@@ -16,7 +16,6 @@ import { tmpdir } from "node:os";
 import { join } from "pathe";
 import { SkillRegistry } from "../../src/memory/skill-registry.js";
 import { logger } from "../../src/observability/logger.js";
-import { createMockSkill, delay } from "../helpers/skill-test-utils.js";
 
 describe("SkillRegistry 集成测试", () => {
   let testDir: string;
@@ -33,7 +32,7 @@ describe("SkillRegistry 集成测试", () => {
     // 清理临时文件
     try {
       rmSync(testDir, { recursive: true, force: true });
-    } catch (err) {
+    } catch {
       // 忽略清理失败（Windows 文件锁问题）
     }
   });
@@ -49,7 +48,7 @@ describe("SkillRegistry 集成测试", () => {
         "测试技能",
         "测试触发词",
         "执行步骤 1\n执行步骤 2",
-        "manual"
+        "manual",
       );
 
       expect(skill.id).toMatch(/^skill_[a-f0-9]{12}$/);
@@ -86,67 +85,42 @@ describe("SkillRegistry 集成测试", () => {
       // spy on logger.warn
       const warnSpy = vi.spyOn(logger, "warn");
 
-      const skill = await registry.add(
-        "易失败技能",
-        "失败触发",
-        "可能失败的步骤",
-        "auto"
-      );
+      const skill = await registry.add("易失败技能", "失败触发", "可能失败的步骤", "auto");
 
       // 失败 1 次：不触发
-      await registry.recordExecution(
-        skill.id,
-        false,
-        500,
-        "Error: API timeout"
-      );
+      await registry.recordExecution(skill.id, false, 500, "Error: API timeout");
       expect(warnSpy).not.toHaveBeenCalledWith(
         expect.objectContaining({
           occurrences: 3,
         }),
-        expect.any(String)
+        expect.any(String),
       );
 
       // 失败 2 次：不触发
-      await registry.recordExecution(
-        skill.id,
-        false,
-        500,
-        "Error: API timeout again"
-      );
+      await registry.recordExecution(skill.id, false, 500, "Error: API timeout again");
       expect(warnSpy).not.toHaveBeenCalledWith(
         expect.objectContaining({
           occurrences: 3,
         }),
-        expect.any(String)
+        expect.any(String),
       );
 
       // 失败 3 次：触发预警
-      await registry.recordExecution(
-        skill.id,
-        false,
-        500,
-        "Error: API timeout third time"
-      );
+      await registry.recordExecution(skill.id, false, 500, "Error: API timeout third time");
 
       // 验证 logger.warn 被调用，且包含正确的 occurrences
       expect(warnSpy).toHaveBeenCalledWith(
         expect.objectContaining({
           occurrences: 3,
         }),
-        expect.stringContaining("技能重复失败 3 次")
+        expect.stringContaining("技能重复失败 3 次"),
       );
 
       warnSpy.mockRestore();
     });
 
     test("新技能创建时记录初始版本", async () => {
-      const skill = await registry.add(
-        "可改进技能",
-        "改进触发",
-        "旧版本指令",
-        "manual"
-      );
+      const skill = await registry.add("可改进技能", "改进触发", "旧版本指令", "manual");
 
       expect(skill.versions).toHaveLength(1);
       expect(skill.versions[0].version).toBe(1);
@@ -200,7 +174,7 @@ describe("SkillRegistry 集成测试", () => {
 
       // 搜索所有技能（空关键词）
       const results = registry.search("");
-      
+
       // 相同成功率（100%）时，按使用次数排序：B(5) > A(3) > C(1)
       expect(results[0].id).toBe(skill2.id);
       expect(results[1].id).toBe(skill1.id);
@@ -221,7 +195,7 @@ describe("SkillRegistry 集成测试", () => {
       await registry.recordExecution(skill3.id, false, 100);
 
       const results = registry.search("");
-      
+
       // 排序：skill1(1.0) > skill2(0.5) > skill3(0.0)
       expect(results[0].id).toBe(skill1.id);
       expect(results[1].id).toBe(skill2.id);
@@ -230,7 +204,7 @@ describe("SkillRegistry 集成测试", () => {
 
     test("大小写不敏感搜索", async () => {
       await registry.add("HTTP Request", "Send HTTP", "inst", "auto");
-      
+
       const results1 = registry.search("http");
       const results2 = registry.search("HTTP");
       const results3 = registry.search("HtTp");
@@ -259,24 +233,14 @@ describe("SkillRegistry 集成测试", () => {
       const skill = await registry.add("重复失败", "trigger", "inst", "auto");
 
       // 第 1 次失败
-      await registry.recordExecution(
-        skill.id,
-        false,
-        100,
-        "Error: ENOENT: no such file"
-      );
+      await registry.recordExecution(skill.id, false, 100, "Error: ENOENT: no such file");
 
       let updated = registry.getAll().find((s) => s.id === skill.id);
       expect(updated?.knownFailures).toHaveLength(1);
       expect(updated?.knownFailures[0].occurrences).toBe(1);
 
       // 第 2 次相同错误
-      await registry.recordExecution(
-        skill.id,
-        false,
-        100,
-        "Error: ENOENT: no such file"
-      );
+      await registry.recordExecution(skill.id, false, 100, "Error: ENOENT: no such file");
 
       updated = registry.getAll().find((s) => s.id === skill.id);
       expect(updated?.knownFailures).toHaveLength(1); // 仍然只有 1 个
@@ -286,18 +250,8 @@ describe("SkillRegistry 集成测试", () => {
     test("不同错误分别记录", async () => {
       const skill = await registry.add("多种错误", "trigger", "inst", "auto");
 
-      await registry.recordExecution(
-        skill.id,
-        false,
-        100,
-        "Error: API timeout"
-      );
-      await registry.recordExecution(
-        skill.id,
-        false,
-        100,
-        "Error: Database connection failed"
-      );
+      await registry.recordExecution(skill.id, false, 100, "Error: API timeout");
+      await registry.recordExecution(skill.id, false, 100, "Error: Database connection failed");
 
       const updated = registry.getAll().find((s) => s.id === skill.id);
       expect(updated?.knownFailures).toHaveLength(2);
@@ -307,19 +261,14 @@ describe("SkillRegistry 集成测试", () => {
       const skill = await registry.add("子串匹配", "trigger", "inst", "auto");
 
       // 第 1 次：短错误
-      await registry.recordExecution(
-        skill.id,
-        false,
-        100,
-        "Error: ENOENT"
-      );
+      await registry.recordExecution(skill.id, false, 100, "Error: ENOENT");
 
       // 第 2 次：长错误（包含第 1 次的子串）
       await registry.recordExecution(
         skill.id,
         false,
         100,
-        "Error: ENOENT: no such file or directory '/path/to/file.txt'"
+        "Error: ENOENT: no such file or directory '/path/to/file.txt'",
       );
 
       const updated = registry.getAll().find((s) => s.id === skill.id);
@@ -349,11 +298,9 @@ describe("SkillRegistry 集成测试", () => {
 
       // 并发执行 10 次（5 成功 + 5 失败）
       const promises = [
+        ...Array.from({ length: 5 }, () => registry.recordExecution(skill.id, true, 100)),
         ...Array.from({ length: 5 }, () =>
-          registry.recordExecution(skill.id, true, 100)
-        ),
-        ...Array.from({ length: 5 }, () =>
-          registry.recordExecution(skill.id, false, 100, "Error: test")
+          registry.recordExecution(skill.id, false, 100, "Error: test"),
         ),
       ];
 
@@ -411,7 +358,7 @@ describe("SkillRegistry 集成测试", () => {
         "HTTP/2 推送 (Push:Async)",
         "特殊字符 trigger",
         "instructions",
-        "auto"
+        "auto",
       );
 
       expect(skill.name).toBe("HTTP/2 推送 (Push:Async)");
@@ -423,12 +370,7 @@ describe("SkillRegistry 集成测试", () => {
 
     test("超长 instructions（10KB）", async () => {
       const longInstructions = "步骤 1\n".repeat(2000); // ~14KB
-      const skill = await registry.add(
-        "超长技能",
-        "trigger",
-        longInstructions,
-        "auto"
-      );
+      const skill = await registry.add("超长技能", "trigger", longInstructions, "auto");
 
       expect(skill.instructions.length).toBeGreaterThanOrEqual(10000);
 
@@ -443,9 +385,7 @@ describe("SkillRegistry 集成测试", () => {
       const skill = await registry.add("空错误", "trigger", "inst", "auto");
 
       // 空错误消息不应崩溃（但可能不会记录到 knownFailures）
-      await expect(
-        registry.recordExecution(skill.id, false, 100, "")
-      ).resolves.toBeUndefined();
+      await expect(registry.recordExecution(skill.id, false, 100, "")).resolves.toBeUndefined();
 
       const updated = registry.getAll().find((s) => s.id === skill.id);
       expect(updated?.stats.failCount).toBe(1);
@@ -488,7 +428,7 @@ describe("SkillRegistry 集成测试", () => {
 
       expect(warnSpy).toHaveBeenCalledWith(
         expect.objectContaining({ skillId: "skill_nonexistent" }),
-        expect.stringContaining("技能不存在")
+        expect.stringContaining("技能不存在"),
       );
 
       warnSpy.mockRestore();
@@ -509,7 +449,7 @@ describe("SkillRegistry 集成测试", () => {
         "添加新工具",
         "需要添加工具",
         "1. 在 src/tools/ 创建文件\n2. 在 ToolRegistry 注册\n3. 定义 schema",
-        "manual"
+        "manual",
       );
 
       // 第 2-5 次使用该技能（全部成功）
@@ -522,7 +462,7 @@ describe("SkillRegistry 集成测试", () => {
         skill.id,
         false,
         500,
-        "Error: Tool not registered in ToolRegistry"
+        "Error: Tool not registered in ToolRegistry",
       );
 
       // 验证统计
@@ -555,19 +495,19 @@ describe("SkillRegistry 集成测试", () => {
         "API 调用",
         "调用外部 API",
         "直接发送请求（无重试）",
-        "auto"
+        "auto",
       );
 
       // 初期连续失败 3 次（触发预警）
       const warnSpy = vi.spyOn(logger, "warn");
-      
+
       await registry.recordExecution(skill.id, false, 200, "Error: Timeout");
       await registry.recordExecution(skill.id, false, 200, "Error: Timeout");
       await registry.recordExecution(skill.id, false, 200, "Error: Timeout");
 
       expect(warnSpy).toHaveBeenCalledWith(
         expect.objectContaining({ occurrences: 3 }),
-        expect.any(String)
+        expect.any(String),
       );
 
       // 人工改进后（添加重试逻辑），后续成功
@@ -578,7 +518,9 @@ describe("SkillRegistry 集成测试", () => {
       const updated = registry.getAll().find((s) => s.id === skill.id);
       expect(updated?.stats.successCount).toBe(5);
       expect(updated?.stats.failCount).toBe(3);
-      expect(updated?.stats.successCount / (updated?.stats.successCount + updated?.stats.failCount)).toBeCloseTo(0.625);
+      expect(
+        updated?.stats.successCount / (updated?.stats.successCount + updated?.stats.failCount),
+      ).toBeCloseTo(0.625);
 
       warnSpy.mockRestore();
     });
@@ -625,7 +567,7 @@ describe("SkillRegistry 集成测试", () => {
 
     test("重复 init 调用是幂等的", async () => {
       const registry = new SkillRegistry(testDir);
-      
+
       await registry.init();
       await registry.init();
       await registry.init();
@@ -643,7 +585,7 @@ describe("SkillRegistry 集成测试", () => {
     test("目录不存在时自动创建", async () => {
       const nonExistentDir = join(testDir, "deep", "nested", "path");
       const registry = new SkillRegistry(nonExistentDir);
-      
+
       await registry.init();
       await registry.add("测试", "trigger", "inst", "auto");
 
@@ -657,9 +599,7 @@ describe("SkillRegistry 集成测试", () => {
 
       // 模拟持久化失败（无法验证，因为 save 是 private）
       // 这里只验证即使有文件系统错误，API 不抛异常
-      await expect(
-        registry.recordExecution(skill.id, true, 100)
-      ).resolves.toBeUndefined();
+      await expect(registry.recordExecution(skill.id, true, 100)).resolves.toBeUndefined();
     });
   });
 });

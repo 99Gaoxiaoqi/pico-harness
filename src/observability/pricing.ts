@@ -77,9 +77,7 @@ export function getPricingEntry(route: BillingRoute): PricingEntry | null {
 
 export function estimateCost(routeOrModel: BillingRoute | string, usage: Usage): CostResult {
   const route =
-    typeof routeOrModel === "string"
-      ? { provider: "unknown", model: routeOrModel }
-      : routeOrModel;
+    typeof routeOrModel === "string" ? { provider: "unknown", model: routeOrModel } : routeOrModel;
   const canonical = toCanonicalUsage(usage);
   const pricing = getPricingEntry(route);
   if (!pricing) {

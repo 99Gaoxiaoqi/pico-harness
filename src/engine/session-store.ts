@@ -55,7 +55,12 @@ export type SessionRecord =
     }
   | { readonly type: "truncate"; readonly seq: number; readonly fromIndex: number }
   | { readonly type: "undo"; readonly seq: number; readonly count: number; readonly at: string }
-  | { readonly type: "rewind_to"; readonly seq: number; readonly messageIndex: number; readonly at: string }
+  | {
+      readonly type: "rewind_to";
+      readonly seq: number;
+      readonly messageIndex: number;
+      readonly at: string;
+    }
   | ({ readonly type: "meta" } & SessionMetadata);
 
 /**
@@ -69,11 +74,7 @@ export type SessionRecord =
  *
  * 监听器同步触发(appendLine 之后),保证 seq 单调与推送顺序一致。
  */
-export type SessionRecordListener = (
-  record: SessionRecord,
-  seq: number,
-  epoch: number,
-) => void;
+export type SessionRecordListener = (record: SessionRecord, seq: number, epoch: number) => void;
 
 /**
  * 单个 Session 的 JSONL 事件日志读写器。
@@ -203,10 +204,7 @@ export class SessionStore {
         }
         // 中间行损坏:跳过该行继续解析(warn 不 throw),保住其余有效记录。
         // 旧实现 throw 会让 recover 全量丢弃,第 50 行损坏 → 前 49 条有效记录丢失(M2)。
-        logger.warn(
-          { line: i + 1 },
-          `[session] 第 ${i + 1} 行损坏,跳过: ${String(error)}`,
-        );
+        logger.warn({ line: i + 1 }, `[session] 第 ${i + 1} 行损坏,跳过: ${String(error)}`);
         continue;
       }
       // meta 头行(5.8a schema 版本号):不参与重放,跳过(版本信息由 getSchemaVersion 另读)。

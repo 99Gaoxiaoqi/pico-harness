@@ -123,7 +123,7 @@ export class FTS5Store {
   /** 初始化数据库 schema(幂等:IF NOT EXISTS) */
   private initSchema(): void {
     if (!this.db) return;
-    
+
     // FTS5 虚拟表:对话片段全文检索
     // tokenize='trigram' 使用 3-gram 分词,对中文/日文等无空格语言友好
     // 性能开销略高,但索引准确度更好(支持子串匹配)
@@ -193,18 +193,18 @@ export class FTS5Store {
 
   /**
    * 全文检索对话历史(FTS5 MATCH 语法)。
-   * 
+   *
    * @param query - 搜索关键词(支持 FTS5 查询语法:AND/OR/NOT/"短语")
    * @param limit - 返回结果数上限(默认 10)
    * @param sessionId - 可选的 Session ID 过滤(不传则全局检索)
    * @returns 按相关性排序的结果数组(relevance 越接近 0 越相关)
-   * 
+   *
    * 示例:
    * - search("驾驭工程") → trigram 自动匹配子串(≥3 字符)
    * - search("FTS5 全文检索") → 匹配包含这些关键词的文档
    * - search("Session AND WorkingMemory") → 必须同时包含
    * - search('"Session 物理隔离"') → 精确短语匹配
-   * 
+   *
    * 中文支持:trigram tokenizer 要求查询长度 ≥3 字符。
    * 对于短查询(<3 字符,如"驾驭"),降级为 LIKE 模糊匹配。
    */
@@ -214,9 +214,9 @@ export class FTS5Store {
       // trigram tokenizer 要求查询长度 ≥3,对于短查询降级为 LIKE
       if (query.length < 3 && !/\b(AND|OR|NOT)\b|["()]/.test(query)) {
         // 短查询:用 LIKE 模糊匹配(性能略差,但能覆盖短词)
-        const whereClause = sessionId 
-          ? 'WHERE content LIKE ? AND session_id = ?' 
-          : 'WHERE content LIKE ?';
+        const whereClause = sessionId
+          ? "WHERE content LIKE ? AND session_id = ?"
+          : "WHERE content LIKE ?";
         const stmt = this.db.prepare(`
           SELECT 
             session_id AS sessionId,
@@ -229,16 +229,14 @@ export class FTS5Store {
           ${whereClause}
           LIMIT ?
         `);
-        const params = sessionId 
-          ? [`%${query}%`, sessionId, limit] 
-          : [`%${query}%`, limit];
+        const params = sessionId ? [`%${query}%`, sessionId, limit] : [`%${query}%`, limit];
         return stmt.all(...params) as SearchResult[];
       }
 
       // 标准 FTS5 查询(trigram ≥3 字符)
-      const whereClause = sessionId 
-        ? 'WHERE conversation_chunks MATCH ? AND session_id = ?' 
-        : 'WHERE conversation_chunks MATCH ?';
+      const whereClause = sessionId
+        ? "WHERE conversation_chunks MATCH ? AND session_id = ?"
+        : "WHERE conversation_chunks MATCH ?";
       const stmt = this.db.prepare(`
         SELECT 
           session_id AS sessionId,
@@ -252,9 +250,7 @@ export class FTS5Store {
         ORDER BY rank
         LIMIT ?
       `);
-      const params = sessionId 
-        ? [query, sessionId, limit] 
-        : [query, limit];
+      const params = sessionId ? [query, sessionId, limit] : [query, limit];
       return stmt.all(...params) as SearchResult[];
     } catch (err) {
       logger.warn({ err, query }, "[fts5] 搜索失败");

@@ -15,7 +15,11 @@ import {
 import type { Message, ToolCall, ToolDefinition, Usage } from "../schema/message.js";
 import type { ProviderConfig } from "./config.js";
 import { resolveProviderProfile, type ProviderProfile } from "./profile.js";
-import { toAnthropicThinkingConfig, anthropicBudgetTokens, type ThinkingEffort } from "./thinking.js";
+import {
+  toAnthropicThinkingConfig,
+  anthropicBudgetTokens,
+  type ThinkingEffort,
+} from "./thinking.js";
 import { ContextOverflowError, isContextOverflowStatus, LLMStatusError } from "./errors.js";
 import { applyAnthropicCacheControl } from "./anthropic-cache.js";
 import { parseRateLimitHeaders } from "./ratelimit.js";
@@ -362,10 +366,7 @@ export class ClaudeProvider implements LLMProvider {
    * 反向翻译:Anthropic content blocks → 内部 schema.Message。
    * generate(非流式)使用,流式则在解析过程中增量累积。
    */
-  private translateContentBlocks(
-    content: Block[],
-    usage?: AnthropicResponse["usage"],
-  ): Message {
+  private translateContentBlocks(content: Block[], usage?: AnthropicResponse["usage"]): Message {
     let textContent = "";
     const toolCalls: ToolCall[] = [];
     for (const block of content) {
@@ -381,8 +382,7 @@ export class ClaudeProvider implements LLMProvider {
     }
 
     const normalizedUsage =
-      usage &&
-      (typeof usage.input_tokens === "number" || typeof usage.output_tokens === "number")
+      usage && (typeof usage.input_tokens === "number" || typeof usage.output_tokens === "number")
         ? {
             promptTokens: usage.input_tokens ?? 0,
             completionTokens: usage.output_tokens ?? 0,
@@ -446,7 +446,13 @@ export class ClaudeProvider implements LLMProvider {
     switch (type) {
       case "message_start": {
         const message = payload.message as
-          | { usage?: { input_tokens?: number; cache_creation_input_tokens?: number; cache_read_input_tokens?: number } }
+          | {
+              usage?: {
+                input_tokens?: number;
+                cache_creation_input_tokens?: number;
+                cache_read_input_tokens?: number;
+              };
+            }
           | undefined;
         const u = message?.usage;
         if (u) {

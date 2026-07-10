@@ -141,11 +141,7 @@ export class ToolGuardrailController {
     return { allowed: true };
   }
 
-  afterCall(
-    toolCall: ToolCall,
-    result: ToolResult,
-    opts: AfterCallOptions = {},
-  ): Message | null {
+  afterCall(toolCall: ToolCall, result: ToolResult, opts: AfterCallOptions = {}): Message | null {
     if (result.isError) {
       return this.recordFailure(toolCall);
     }
@@ -165,7 +161,10 @@ export class ToolGuardrailController {
     const exactCount = (this.exactFailures.get(exactKey) ?? 0) + 1;
     this.exactFailures.set(exactKey, exactCount);
     if (exactCount >= this.exactFailureBlockAt) {
-      this.blockedReasons.set(exactKey, `重复失败: ${toolCall.name} 使用相同参数连续失败 ${exactCount} 次`);
+      this.blockedReasons.set(
+        exactKey,
+        `重复失败: ${toolCall.name} 使用相同参数连续失败 ${exactCount} 次`,
+      );
     }
     if (exactCount >= this.exactFailureWarnAt) {
       return makeReminder(
@@ -177,7 +176,10 @@ export class ToolGuardrailController {
     const toolCount = (this.sameToolFailures.get(toolKey) ?? 0) + 1;
     this.sameToolFailures.set(toolKey, toolCount);
     if (toolCount >= this.sameToolFailureBlockAt) {
-      this.blockedReasons.set(toolKey, `同一工具重复失败: ${toolCall.name} 连续失败 ${toolCount} 次`);
+      this.blockedReasons.set(
+        toolKey,
+        `同一工具重复失败: ${toolCall.name} 连续失败 ${toolCount} 次`,
+      );
     }
     if (toolCount >= this.sameToolFailureWarnAt) {
       return makeReminder(
@@ -194,10 +196,7 @@ export class ToolGuardrailController {
     const count = previous && previous.outputHash === outputHash ? previous.count + 1 : 1;
     this.noProgress.set(key, { outputHash, count });
     if (count >= this.noProgressBlockAt) {
-      this.blockedReasons.set(
-        key,
-        `无进展: ${toolCall.name} 连续 ${count} 次返回相同结果`,
-      );
+      this.blockedReasons.set(key, `无进展: ${toolCall.name} 连续 ${count} 次返回相同结果`);
     }
     if (count >= this.noProgressWarnAt) {
       return makeReminder(

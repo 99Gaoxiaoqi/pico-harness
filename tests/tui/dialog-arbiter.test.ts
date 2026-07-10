@@ -1,8 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  pickFocusedDialog,
-  type DialogRequest,
-} from "../../src/tui/dialog-arbiter.js";
+import { pickFocusedDialog, type DialogRequest } from "../../src/tui/dialog-arbiter.js";
 
 describe("pickFocusedDialog", () => {
   it("returns only the highest-priority active dialog as focused", () => {

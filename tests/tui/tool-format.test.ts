@@ -14,7 +14,8 @@ describe("tool-format", () => {
   });
 
   it("把 curl 命令压缩成稳定的一行目标", () => {
-    const command = 'curl -s -H "Accept: application/json" "https://aihot.virxact.com/api/news?limit=20"';
+    const command =
+      'curl -s -H "Accept: application/json" "https://aihot.virxact.com/api/news?limit=20"';
 
     expect(compactCommand(command, 80)).toBe("curl aihot.virxact.com/api/news?limit=20");
   });
@@ -29,9 +30,9 @@ describe("tool-format", () => {
   });
 
   it("从工具参数提取目标,非法 JSON 安全返回 undefined", () => {
-    expect(summarizeToolTarget("read_file", JSON.stringify({ path: "src/tui/tool-card.tsx" }))).toBe(
-      "src/tui/tool-card.tsx",
-    );
+    expect(
+      summarizeToolTarget("read_file", JSON.stringify({ path: "src/tui/tool-card.tsx" })),
+    ).toBe("src/tui/tool-card.tsx");
     expect(summarizeToolTarget("bash", JSON.stringify({ command: "npm test -- --run" }))).toBe(
       "npm test -- --run",
     );

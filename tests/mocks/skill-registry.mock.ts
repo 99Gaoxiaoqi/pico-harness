@@ -23,10 +23,7 @@ export class MockSkillRegistry {
 
   search(query: string): LearnedSkill[] {
     return this.skills.filter(
-      (s) =>
-        s.name.includes(query) ||
-        s.trigger.includes(query) ||
-        s.instructions.includes(query),
+      (s) => s.name.includes(query) || s.trigger.includes(query) || s.instructions.includes(query),
     );
   }
 

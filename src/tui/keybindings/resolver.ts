@@ -117,4 +117,3 @@ function baseKeyName(event: KeybindingEvent): string | null {
 function hasOwn(object: Record<string, unknown>, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(object, key);
 }
-

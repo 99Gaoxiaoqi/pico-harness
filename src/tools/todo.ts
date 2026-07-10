@@ -21,23 +21,13 @@ import {
 } from "../context/todo-store.js";
 
 /** 合法 action 白名单 */
-const VALID_ACTIONS: ReadonlySet<string> = new Set([
-  "add",
-  "update",
-  "toggle",
-  "remove",
-  "list",
-]);
+const VALID_ACTIONS: ReadonlySet<string> = new Set(["add", "update", "toggle", "remove", "list"]);
 
 /** 合法优先级白名单 */
 const VALID_PRIORITIES: ReadonlySet<string> = new Set(["high", "medium", "low"]);
 
 /** 合法状态白名单 */
-const VALID_STATUSES: ReadonlySet<string> = new Set([
-  "pending",
-  "in_progress",
-  "completed",
-]);
+const VALID_STATUSES: ReadonlySet<string> = new Set(["pending", "in_progress", "completed"]);
 
 /** 状态对应的 checkbox 标记(与 TodoStore.buildTodoContext 一致) */
 function statusMark(status: TodoStatus): string {
@@ -123,9 +113,7 @@ export class TodoTool implements BaseTool {
 
     const action = parsed["action"];
     if (typeof action !== "string" || !VALID_ACTIONS.has(action)) {
-      throw new Error(
-        `非法 action: ${String(action)}。合法值:add/update/toggle/remove/list`,
-      );
+      throw new Error(`非法 action: ${String(action)}。合法值:add/update/toggle/remove/list`);
     }
 
     switch (action) {
@@ -156,9 +144,7 @@ export class TodoTool implements BaseTool {
     const rawPriority = parsed["priority"];
     if (rawPriority !== undefined) {
       if (typeof rawPriority !== "string" || !VALID_PRIORITIES.has(rawPriority)) {
-        throw new Error(
-          `非法 priority: ${String(rawPriority)}。合法值:high/medium/low`,
-        );
+        throw new Error(`非法 priority: ${String(rawPriority)}。合法值:high/medium/low`);
       }
       priority = rawPriority as TodoPriority;
     }
@@ -184,13 +170,8 @@ export class TodoTool implements BaseTool {
     }
 
     if (parsed["priority"] !== undefined) {
-      if (
-        typeof parsed["priority"] !== "string" ||
-        !VALID_PRIORITIES.has(parsed["priority"])
-      ) {
-        throw new Error(
-          `非法 priority: ${String(parsed["priority"])}。合法值:high/medium/low`,
-        );
+      if (typeof parsed["priority"] !== "string" || !VALID_PRIORITIES.has(parsed["priority"])) {
+        throw new Error(`非法 priority: ${String(parsed["priority"])}。合法值:high/medium/low`);
       }
       patch.priority = parsed["priority"] as TodoPriority;
     }
@@ -248,7 +229,9 @@ export class TodoTool implements BaseTool {
     if (items.length === 0) {
       return "📋 当前清单为空";
     }
-    const lines = items.map((it) => `- ${statusMark(it.status)} #${it.id} (${it.priority}) ${it.content}`);
+    const lines = items.map(
+      (it) => `- ${statusMark(it.status)} #${it.id} (${it.priority}) ${it.content}`,
+    );
     return `📋 当前清单(${items.length} 项):\n${lines.join("\n")}`;
   }
 }

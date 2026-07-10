@@ -135,7 +135,9 @@ async function main() {
     const actual = resolveThinkingEffort(input);
     const ok = actual === expected;
     if (!ok) compatPass = false;
-    console.log(`  resolveThinkingEffort(${input === undefined ? "undefined" : `"${input}"`}) => "${actual}" ${ok ? "✅" : `❌ expected "${expected}"`}`);
+    console.log(
+      `  resolveThinkingEffort(${input === undefined ? "undefined" : `"${input}"`}) => "${actual}" ${ok ? "✅" : `❌ expected "${expected}"`}`,
+    );
   }
   console.log(`[验证 C] resolveThinkingEffort 兼容性: ${compatPass ? "✅ 通过" : "❌ 有失败"}`);
   if (!compatPass) {

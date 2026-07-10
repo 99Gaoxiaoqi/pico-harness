@@ -143,7 +143,7 @@ describe("SessionStore volatile 字段序列化", () => {
     expect((parsed as { volatile?: boolean }).volatile).toBeUndefined();
   });
 
-  it("appendMessage 传 volatile=true 时 JSON 行包含 \"volatile\":true", async () => {
+  it('appendMessage 传 volatile=true 时 JSON 行包含 "volatile":true', async () => {
     const store = new SessionStore(storePath);
     await store.appendMessage(0, userMsg("stream-chunk"), true);
     const { readFile } = await import("node:fs/promises");

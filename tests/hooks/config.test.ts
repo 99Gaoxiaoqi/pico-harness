@@ -95,7 +95,7 @@ describe("loadHooksConfig", () => {
     const config = await loadHooksConfig(workDir);
     expect(config).toBeDefined();
     expect(config!.PreToolUse).toHaveLength(1);
-    expect((config as object).hasOwnProperty("BogusEvent")).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(config, "BogusEvent")).toBe(false);
   });
 
   it("丢弃非 command 类型或空 command 的 handler", async () => {

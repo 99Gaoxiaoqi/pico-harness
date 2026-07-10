@@ -17,15 +17,13 @@ export async function resolveCliStartupSession(
     options: {
       dir: { type: "string" },
       session: { type: "string", short: "S" },
-      "continue": { type: "boolean", short: "c" },
+      continue: { type: "boolean", short: "c" },
       resume: { type: "string" },
-      "fork": { type: "string" },
+      fork: { type: "string" },
       "fork-session": { type: "string" },
     },
   });
-  const workDir = await resolveCliWorkDir(
-    typeof values.dir === "string" ? values.dir : undefined,
-  );
+  const workDir = await resolveCliWorkDir(typeof values.dir === "string" ? values.dir : undefined);
   const sessionSelection = await resolveCliSession({
     workDir,
     ...(typeof values.session === "string" ? { session: values.session } : {}),

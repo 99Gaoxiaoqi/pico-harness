@@ -70,13 +70,18 @@ describe("FetchURLTool", () => {
 
   it("非 200 状态码抛错带状态码", async () => {
     fetchSpy.mockResolvedValue(
-      mockResponse({ ok: false, status: 404, statusText: "Not Found", text: "nope" }) as unknown as Response,
+      mockResponse({
+        ok: false,
+        status: 404,
+        statusText: "Not Found",
+        text: "nope",
+      }) as unknown as Response,
     );
 
     const tool = new FetchURLTool();
-    await expect(tool.execute(JSON.stringify({ url: "https://example.com/missing" }))).rejects.toThrow(
-      /404/,
-    );
+    await expect(
+      tool.execute(JSON.stringify({ url: "https://example.com/missing" })),
+    ).rejects.toThrow(/404/);
   });
 
   it("非法 URL 抛错", async () => {
@@ -86,9 +91,9 @@ describe("FetchURLTool", () => {
 
   it("拒绝非 http/https 协议(file://)", async () => {
     const tool = new FetchURLTool();
-    await expect(
-      tool.execute(JSON.stringify({ url: "file:///etc/passwd" })),
-    ).rejects.toThrow(/http\/https/);
+    await expect(tool.execute(JSON.stringify({ url: "file:///etc/passwd" }))).rejects.toThrow(
+      /http\/https/,
+    );
   });
 
   it("max_chars 截断:超长内容被截断并标注", async () => {
@@ -98,9 +103,7 @@ describe("FetchURLTool", () => {
     );
 
     const tool = new FetchURLTool();
-    const out = await tool.execute(
-      JSON.stringify({ url: "https://example.com", max_chars: 50 }),
-    );
+    const out = await tool.execute(JSON.stringify({ url: "https://example.com", max_chars: 50 }));
     expect(out).toContain("已截断");
     // 截断后的正文部分应不超过 50 字符 + 标注
     expect(out.length).toBeLessThan(long.length);
@@ -211,7 +214,12 @@ describe("WebSearchTool", () => {
     process.env["SEARCH_API_KEY"] = "secret-key";
 
     fetchSpy.mockResolvedValue(
-      mockResponse({ ok: false, status: 401, statusText: "Unauthorized", text: "" }) as unknown as Response,
+      mockResponse({
+        ok: false,
+        status: 401,
+        statusText: "Unauthorized",
+        text: "",
+      }) as unknown as Response,
     );
 
     const tool = new WebSearchTool();
@@ -277,7 +285,7 @@ describe("stripHtml 单元测试", () => {
 
   it("解码常见实体", () => {
     const out = stripHtml("&nbsp;a&amp;b&lt;c&gt;d&quot;e&#39;f&apos;g");
-    expect(out).toBe('a&b<c>d"e\'f\'g');
+    expect(out).toBe("a&b<c>d\"e'f'g");
   });
 
   it("压缩连续空白(行内多空格归一,连续空行合并至单个)", () => {

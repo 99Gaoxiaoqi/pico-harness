@@ -1,7 +1,7 @@
 // ToolRegistry 与 ReadFileTool 的单元测试。
 // 对应课程第 05 讲:路由分发、截断保护、路径穿越防护。
 
-import { mkdtemp, mkdir, rm, writeFile, readFile, realpath } from "node:fs/promises";
+import { mkdtemp, rm, writeFile, readFile, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -221,9 +221,7 @@ describe("ReadFileTool 防御底线", () => {
     const tool = new ReadFileTool(workDir);
 
     try {
-      await expect(tool.execute(JSON.stringify({ path: outsideFile }))).rejects.toThrow(
-        "/add-dir",
-      );
+      await expect(tool.execute(JSON.stringify({ path: outsideFile }))).rejects.toThrow("/add-dir");
     } finally {
       await rm(outsideDir, { recursive: true, force: true });
     }
@@ -370,7 +368,7 @@ describe("BashTool", () => {
     await expect(
       tool.execute(
         JSON.stringify({
-          command: "node -e \"setTimeout(() => {}, 1000)\"",
+          command: 'node -e "setTimeout(() => {}, 1000)"',
           background: true,
         }),
       ),
@@ -571,9 +569,7 @@ describe("EditFileTool 模型视图与缩进重对齐", () => {
   it("LF 文件编辑后仍是 LF(不引入 CR)", async () => {
     await writeFile(join(workDir, "lf.txt"), "line1\nold\nline3");
     const tool = new EditFileTool(workDir);
-    await tool.execute(
-      JSON.stringify({ path: "lf.txt", old_text: "old", new_text: "new" }),
-    );
+    await tool.execute(JSON.stringify({ path: "lf.txt", old_text: "old", new_text: "new" }));
     const result = await readFile(join(workDir, "lf.txt"), "utf8");
     expect(result).toBe("line1\nnew\nline3");
     expect(result).not.toContain("\r");
@@ -581,10 +577,7 @@ describe("EditFileTool 模型视图与缩进重对齐", () => {
 
   it("L4 缩进重对齐:文件 4 空格、模型 2 空格,写回对齐文件风格", async () => {
     // 文件用 4 空格缩进
-    await writeFile(
-      join(workDir, "indent.ts"),
-      "function foo() {\n    bar();\n    baz();\n}",
-    );
+    await writeFile(join(workDir, "indent.ts"), "function foo() {\n    bar();\n    baz();\n}");
     const tool = new EditFileTool(workDir);
     // 模型幻觉:用 2 空格缩进
     const out = await tool.execute(
@@ -619,10 +612,7 @@ describe("EditFileTool 模型视图与缩进重对齐", () => {
 
   it("L4 dedent 行:比模型基准缩进更少的行锚定到文件基准", async () => {
     // 文件 4 空格
-    await writeFile(
-      join(workDir, "dedent.ts"),
-      "wrapper {\n    line1();\n    line2();\n}",
-    );
+    await writeFile(join(workDir, "dedent.ts"), "wrapper {\n    line1();\n    line2();\n}");
     const tool = new EditFileTool(workDir);
     // 模型基准 2 空格;new_text 首行 dedent(0 缩进注释)
     const out = await tool.execute(
@@ -635,17 +625,12 @@ describe("EditFileTool 模型视图与缩进重对齐", () => {
     expect(out).toContain("L4");
     const result = await readFile(join(workDir, "dedent.ts"), "utf8");
     // dedent 行锚定到文件基准(4 空格),其余行按模型相对嵌套对齐
-    expect(result).toBe(
-      "wrapper {\n    // comment\n    line1New();\n    line2New();\n}",
-    );
+    expect(result).toBe("wrapper {\n    // comment\n    line1New();\n    line2New();\n}");
   });
 
   it("CRLF 文件 + L4 缩进重对齐:两个特性组合(视图往返 + 缩进对齐)", async () => {
     // 磁盘 CRLF + 4 空格缩进
-    await writeFile(
-      join(workDir, "combo.ts"),
-      "function foo() {\r\n    bar();\r\n    baz();\r\n}",
-    );
+    await writeFile(join(workDir, "combo.ts"), "function foo() {\r\n    bar();\r\n    baz();\r\n}");
     const tool = new EditFileTool(workDir);
     // 模型 LF 视图 + 2 空格缩进
     const out = await tool.execute(
@@ -694,9 +679,7 @@ describe("EditFileTool replace_all 全替换", () => {
     await writeFile(join(workDir, "b.txt"), "foo\nbar\nfoo\nbaz\nfoo");
     const tool = new EditFileTool(workDir);
     await expect(
-      tool.execute(
-        JSON.stringify({ path: "b.txt", old_text: "foo", new_text: "qux" }),
-      ),
+      tool.execute(JSON.stringify({ path: "b.txt", old_text: "foo", new_text: "qux" })),
     ).rejects.toThrow(/匹配到了.*处/);
     // 文件内容未改
     expect(await readFile(join(workDir, "b.txt"), "utf8")).toBe("foo\nbar\nfoo\nbaz\nfoo");
@@ -755,7 +738,11 @@ describe("EditFileTool replace_all 全替换", () => {
     // old_text 无缩进(模型幻觉),L1/L2/L3 不命中,降级到 L4,两处匹配
     await expect(
       tool.execute(
-        JSON.stringify({ path: "e.ts", old_text: "bar();\nbaz();", new_text: "barNew();\nbazNew();" }),
+        JSON.stringify({
+          path: "e.ts",
+          old_text: "bar();\nbaz();",
+          new_text: "barNew();\nbazNew();",
+        }),
       ),
     ).rejects.toThrow(/模糊匹配.*处/);
     // 文件内容未改
@@ -818,7 +805,10 @@ describe("ToolRegistry hooks 集成 (任务 2.6)", () => {
    * 写一个 node hook 脚本,经 shell 调用。behavior 控制行为(见 runner.test.ts)。
    */
   async function writeHookScript(behavior: string): Promise<string> {
-    const scriptPath = join(workDir, `reg-hook-${Date.now()}-${Math.random().toString(36).slice(2)}.js`);
+    const scriptPath = join(
+      workDir,
+      `reg-hook-${Date.now()}-${Math.random().toString(36).slice(2)}.js`,
+    );
     let body: string;
     if (behavior.startsWith("exit2:")) {
       const msg = behavior.slice("exit2:".length);
@@ -927,10 +917,7 @@ describe("ToolRegistry hooks 集成 (任务 2.6)", () => {
     expect(result.isError).toBe(false);
     // 工具收到的是 hook 改写后的参数
     expect(result.output).toBe("said:rewritten-by-hook");
-    expect(checkedInputs).toEqual([
-      '{"msg":"orig"}',
-      '{"msg":"rewritten-by-hook"}',
-    ]);
+    expect(checkedInputs).toEqual(['{"msg":"orig"}', '{"msg":"rewritten-by-hook"}']);
   });
 
   it("PreToolUse fail-open(exit 1)→ 工具仍执行", async () => {

@@ -17,7 +17,6 @@ import { tmpdir } from "node:os";
 import { join } from "pathe";
 import { performance } from "node:perf_hooks";
 import { FTS5Store } from "../../src/memory/fts5-store.js";
-import type { Message } from "../../src/schema/message.js";
 
 // 性能基准默认关闭,避免在常规回归里因环境抖动产生假失败
 const describeBenchmark = process.env.RUN_BENCHMARK === "1" ? describe : describe.skip;
@@ -144,9 +143,15 @@ describeBenchmark("FTS5Store - 压力测试与性能基准", () => {
       const elapsed3 = performance.now() - start3;
 
       console.log(`\n📏 不同长度消息插入 (${count} 条):`);
-      console.log(`   100字:  ${elapsed1.toFixed(2)}ms (${((count / elapsed1) * 1000).toFixed(0)} ops/s)`);
-      console.log(`   1000字: ${elapsed2.toFixed(2)}ms (${((count / elapsed2) * 1000).toFixed(0)} ops/s)`);
-      console.log(`   5000字: ${elapsed3.toFixed(2)}ms (${((count / elapsed3) * 1000).toFixed(0)} ops/s)`);
+      console.log(
+        `   100字:  ${elapsed1.toFixed(2)}ms (${((count / elapsed1) * 1000).toFixed(0)} ops/s)`,
+      );
+      console.log(
+        `   1000字: ${elapsed2.toFixed(2)}ms (${((count / elapsed2) * 1000).toFixed(0)} ops/s)`,
+      );
+      console.log(
+        `   5000字: ${elapsed3.toFixed(2)}ms (${((count / elapsed3) * 1000).toFixed(0)} ops/s)`,
+      );
 
       // 长消息耗时应该更长,但不应超过 10 倍(trigram 对长文本索引开销大)
       expect(elapsed3).toBeGreaterThan(elapsed1);
@@ -227,12 +232,7 @@ describeBenchmark("FTS5Store - 压力测试与性能基准", () => {
         });
       }
 
-      const queries = [
-        "驾驭工程",
-        "Harness Engineering",
-        "大模型 CPU",
-        "驾驭工程 AND Harness",
-      ];
+      const queries = ["驾驭工程", "Harness Engineering", "大模型 CPU", "驾驭工程 AND Harness"];
 
       for (const query of queries) {
         const start = performance.now();
@@ -317,7 +317,7 @@ describeBenchmark("FTS5Store - 压力测试与性能基准", () => {
         });
       });
 
-      const readers = Array.from({ length: 5 }, (_, idx) => {
+      const readers = Array.from({ length: 5 }, () => {
         return Promise.resolve().then(() => {
           for (let i = 0; i < 50; i++) {
             const results = store.search("基础数据", 10);
@@ -479,8 +479,6 @@ describeBenchmark("FTS5Store - 压力测试与性能基准", () => {
 
       // 检查 WAL 文件是否存在
       const walPath = join(tempDir, ".claw", "sessions.db-wal");
-      const shmPath = join(tempDir, ".claw", "sessions.db-shm");
-
       try {
         const walExists = readFileSync(walPath).length > 0;
         console.log(`\n📝 WAL 模式: .db-wal 文件存在,大小 ${readFileSync(walPath).length} 字节`);
@@ -600,7 +598,9 @@ describeBenchmark("FTS5Store - 压力测试与性能基准", () => {
       const elapsed = performance.now() - start;
 
       console.log(`\n📊 技能统计查询(1000 条): ${elapsed.toFixed(2)}ms`);
-      console.log(`   总调用: ${stats?.totalCalls}, 成功率: ${((stats?.successRate ?? 0) * 100).toFixed(1)}%`);
+      console.log(
+        `   总调用: ${stats?.totalCalls}, 成功率: ${((stats?.successRate ?? 0) * 100).toFixed(1)}%`,
+      );
 
       expect(elapsed).toBeLessThan(10);
       expect(stats?.totalCalls).toBe(1000);

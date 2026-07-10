@@ -1,11 +1,7 @@
 import React from "react";
 import { renderToString } from "ink";
 import { describe, expect, it } from "vitest";
-import {
-  AGENT_DESCRIPTION_WIDTH,
-  AgentList,
-  formatAgentRows,
-} from "../../src/tui/agent-list.js";
+import { AGENT_DESCRIPTION_WIDTH, AgentList, formatAgentRows } from "../../src/tui/agent-list.js";
 import type { ClaudeAgentSummary } from "../../src/input/agent-loader.js";
 
 describe("AgentList", () => {

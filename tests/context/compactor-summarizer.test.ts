@@ -5,10 +5,7 @@
 // 额外验证可装配性:把它注入 Compactor.compactWithSummary,确认走摘要分支而非字符级掩码。
 
 import { describe, expect, it, vi } from "vitest";
-import {
-  Compactor,
-  createAuxSummarizer,
-} from "../../src/context/compactor.js";
+import { Compactor, createAuxSummarizer } from "../../src/context/compactor.js";
 import type { LLMProvider } from "../../src/provider/interface.js";
 import type { Message, ToolDefinition } from "../../src/schema/message.js";
 
@@ -40,10 +37,7 @@ describe("createAuxSummarizer", () => {
     const summarizer = createAuxSummarizer(mockProvider);
 
     const result = await summarizer({
-      newMessages: [
-        userMsg("我们要降低 token 成本"),
-        assistantMsg("可以用辅助模型做摘要"),
-      ],
+      newMessages: [userMsg("我们要降低 token 成本"), assistantMsg("可以用辅助模型做摘要")],
     });
 
     // 1. 辅助 provider 被调了一次
@@ -127,9 +121,7 @@ describe("createAuxSummarizer", () => {
     // 辅助 provider 被调(说明走了摘要分支而非退回字符级掩码)
     expect(mockProvider.generate).toHaveBeenCalledTimes(1);
     // 摘要以 system 消息形式出现在结果开头
-    const summaryMsg = result.find(
-      (m) => m.role === "system" && m.content.includes("[历史摘要]"),
-    );
+    const summaryMsg = result.find((m) => m.role === "system" && m.content.includes("[历史摘要]"));
     expect(summaryMsg).toBeDefined();
     expect(summaryMsg!.content).toContain("这是 LLM 浓缩出的摘要");
     // 保护区最近一条用户消息保留

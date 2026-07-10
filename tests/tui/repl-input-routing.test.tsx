@@ -402,7 +402,9 @@ describe("TUI input routing", () => {
     expect(runningLocal).not.toHaveBeenCalled();
     expect(runningPrompt).not.toHaveBeenCalled();
     expect(runAgent).not.toHaveBeenCalled();
-    expect(registry.detailedSuggestions("running-local", { availabilityState: "idle" })).toContainEqual(
+    expect(
+      registry.detailedSuggestions("running-local", { availabilityState: "idle" }),
+    ).toContainEqual(
       expect.objectContaining({
         name: "running-local",
         disabled: true,
@@ -461,7 +463,9 @@ describe("TUI input routing", () => {
     expect(runningPrompt).toHaveBeenCalledTimes(1);
     expect(idlePrompt).not.toHaveBeenCalled();
     expect(runAgent).toHaveBeenCalledWith("summarize current output");
-    expect(registry.detailedSuggestions("idle-review", { availabilityState: "running" })).toContainEqual(
+    expect(
+      registry.detailedSuggestions("idle-review", { availabilityState: "running" }),
+    ).toContainEqual(
       expect.objectContaining({
         name: "idle-review",
         disabled: true,

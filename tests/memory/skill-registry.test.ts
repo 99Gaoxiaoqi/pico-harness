@@ -64,12 +64,7 @@ describe("SkillRegistry", () => {
     });
 
     it("添加的技能自动持久化到磁盘", async () => {
-      const skill = await registry.add(
-        "测试技能",
-        "test",
-        "执行测试",
-        "auto",
-      );
+      const skill = await registry.add("测试技能", "test", "执行测试", "auto");
 
       const filePath = join(workDir, ".claw", "skills", `${skill.id}.json`);
       const content = await readFile(filePath, "utf8");
@@ -181,9 +176,7 @@ describe("SkillRegistry", () => {
 
       const all = registry.getAll();
       expect(all).toHaveLength(3);
-      expect(all.map((s) => s.name)).toEqual(
-        expect.arrayContaining(["技能1", "技能2", "技能3"]),
-      );
+      expect(all.map((s) => s.name)).toEqual(expect.arrayContaining(["技能1", "技能2", "技能3"]));
     });
   });
 
@@ -259,9 +252,7 @@ describe("SkillRegistry", () => {
     });
 
     it("不存在的技能 ID 不抛出异常", async () => {
-      await expect(
-        registry.recordExecution("不存在的ID", true, 100),
-      ).resolves.toBeUndefined();
+      await expect(registry.recordExecution("不存在的ID", true, 100)).resolves.toBeUndefined();
     });
   });
 
@@ -274,12 +265,7 @@ describe("SkillRegistry", () => {
     });
 
     it("记录新失败模式", async () => {
-      await registry.recordExecution(
-        skillId,
-        false,
-        100,
-        "连接超时: ETIMEDOUT",
-      );
+      await registry.recordExecution(skillId, false, 100, "连接超时: ETIMEDOUT");
 
       const skill = registry.getAll().find((s) => s.id === skillId)!;
       expect(skill.knownFailures).toHaveLength(1);
@@ -288,18 +274,8 @@ describe("SkillRegistry", () => {
     });
 
     it("相同错误累积计数（去重）", async () => {
-      await registry.recordExecution(
-        skillId,
-        false,
-        100,
-        "连接超时: ETIMEDOUT",
-      );
-      await registry.recordExecution(
-        skillId,
-        false,
-        100,
-        "连接超时: ETIMEDOUT on port 443",
-      );
+      await registry.recordExecution(skillId, false, 100, "连接超时: ETIMEDOUT");
+      await registry.recordExecution(skillId, false, 100, "连接超时: ETIMEDOUT on port 443");
 
       const skill = registry.getAll().find((s) => s.id === skillId)!;
       // 应该去重为同一个失败模式
@@ -410,9 +386,7 @@ describe("SkillRegistry", () => {
 
       // 并发记录 10 次成功
       await Promise.all(
-        Array.from({ length: 10 }, () =>
-          registry.recordExecution(skill.id, true, 100),
-        ),
+        Array.from({ length: 10 }, () => registry.recordExecution(skill.id, true, 100)),
       );
 
       const loaded = registry.getAll().find((s) => s.id === skill.id)!;

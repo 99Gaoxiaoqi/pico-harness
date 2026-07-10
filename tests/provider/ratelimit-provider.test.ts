@@ -130,7 +130,11 @@ describe("OpenAIProvider RateLimit 回传", () => {
 describe("ClaudeProvider RateLimit 回传", () => {
   it("generate:命中 anthropic-ratelimit 风格 + retry-after 回调", async () => {
     mockJsonFetchWithHeaders(
-      { content: [{ type: "text", text: "hi" }], stop_reason: "end_turn", usage: { input_tokens: 1, output_tokens: 1 } },
+      {
+        content: [{ type: "text", text: "hi" }],
+        stop_reason: "end_turn",
+        usage: { input_tokens: 1, output_tokens: 1 },
+      },
       { "anthropic-ratelimit-tokens-reset": "1700000000", "retry-after": "30" },
     );
     const received: RateLimitInfo[] = [];

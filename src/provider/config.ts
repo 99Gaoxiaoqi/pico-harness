@@ -50,7 +50,9 @@ export function loadProviderConfig(): ProviderConfig {
   // 多 key 轮换由 CredentialPool 在 factory 层接管,见 credential-pool.ts。
   const apiKey = keys[0];
   if (!baseURL || !apiKey || !model) {
-    throw new Error("缺少环境变量 LLM_BASE_URL / LLM_API_KEY[S] / LLM_MODEL,请检查 .env 是否已加载");
+    throw new Error(
+      "缺少环境变量 LLM_BASE_URL / LLM_API_KEY[S] / LLM_MODEL,请检查 .env 是否已加载",
+    );
   }
   return { baseURL, apiKey, model };
 }

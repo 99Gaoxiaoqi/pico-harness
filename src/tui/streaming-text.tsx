@@ -23,9 +23,7 @@ export function StreamingText({ content }: { content: string }): React.ReactNode
 
 /** 已固化的行:memo 化,text 不变时跳过重渲染 */
 const StableLines = memo(function StableLines({ text }: { text: string }) {
-  return (
-    <Text wrap="wrap">{text}</Text>
-  );
+  return <Text wrap="wrap">{text}</Text>;
 });
 
 /** 当前进行中的行:每次 delta 重渲染(只处理这一行,代价小) */

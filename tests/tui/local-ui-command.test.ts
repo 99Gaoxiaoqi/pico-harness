@@ -1,8 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  hasLocalUiCommandAction,
-  isLocalUiCommandAction,
-} from "../../src/tui/local-ui-command.js";
+import { hasLocalUiCommandAction, isLocalUiCommandAction } from "../../src/tui/local-ui-command.js";
 import type { LocalCommandResult } from "../../src/input/types.js";
 
 describe("local UI command contract", () => {

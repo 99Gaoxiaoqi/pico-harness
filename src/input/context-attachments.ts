@@ -74,10 +74,7 @@ export async function resolveContextAttachments(
   return attachments;
 }
 
-export function injectContextAttachments(
-  prompt: string,
-  attachments: ContextAttachment[],
-): string {
+export function injectContextAttachments(prompt: string, attachments: ContextAttachment[]): string {
   if (attachments.length === 0) return prompt;
 
   const blocks = attachments.map((attachment) => {
@@ -105,7 +102,10 @@ async function resolvePathAttachment(
     fullPath = safeResolve(cwd, mention.target);
   } catch (error) {
     const reference = normalizeReference(mention.target);
-    return missingAttachment(reference, `Unable to read path: ${reference}\n${errorMessage(error)}`);
+    return missingAttachment(
+      reference,
+      `Unable to read path: ${reference}\n${errorMessage(error)}`,
+    );
   }
 
   let info: Awaited<ReturnType<typeof stat>>;
@@ -159,8 +159,10 @@ async function readFileAttachment(
   const selected = allLoadedLines.slice(startIndex, endIndexExclusive);
   const lineLimited = selected.length > limits.maxFileLines;
   const renderedLines = selected.slice(0, limits.maxFileLines);
-  const actualEnd = renderedLines.length > 0 ? requestedStart + renderedLines.length - 1 : requestedStart;
-  const rangeClipped = requestedEnd > allLoadedLines.length || requestedStart > allLoadedLines.length;
+  const actualEnd =
+    renderedLines.length > 0 ? requestedStart + renderedLines.length - 1 : requestedStart;
+  const rangeClipped =
+    requestedEnd > allLoadedLines.length || requestedStart > allLoadedLines.length;
   const truncated = bytesTruncated || lineLimited || rangeClipped;
   const content = renderNumberedLines(renderedLines, requestedStart, truncated);
 
@@ -180,9 +182,7 @@ async function readDirectoryAttachment(
   limits: AttachmentLimits,
 ): Promise<ContextAttachment> {
   const entries = await readdir(fullPath, { withFileTypes: true });
-  const names = entries
-    .map((entry) => `${entry.name}${entry.isDirectory() ? "/" : ""}`)
-    .sort();
+  const names = entries.map((entry) => `${entry.name}${entry.isDirectory() ? "/" : ""}`).sort();
   const visible = names.slice(0, limits.maxDirectoryEntries);
   const truncated = names.length > visible.length;
   const content = truncated
@@ -222,11 +222,7 @@ async function readNamedSource(
   return source[name];
 }
 
-function renderNumberedLines(
-  lines: string[],
-  startLine: number,
-  truncated: boolean,
-): string {
+function renderNumberedLines(lines: string[], startLine: number, truncated: boolean): string {
   const rendered = lines.map((line, index) => `${startLine + index}: ${line}`);
   if (truncated) rendered.push("... (已截断)");
   return rendered.join("\n");

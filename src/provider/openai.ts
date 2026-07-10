@@ -298,7 +298,10 @@ export class OpenAIProvider implements LLMProvider {
 
     // 解析 SSE 流
     let fullContent = "";
-    const toolCallAccumulator = new Map<number, { id?: string; name?: string; arguments: string }>();
+    const toolCallAccumulator = new Map<
+      number,
+      { id?: string; name?: string; arguments: string }
+    >();
     let usage: Usage | undefined;
 
     const reader = resp.body.getReader();
@@ -324,7 +327,17 @@ export class OpenAIProvider implements LLMProvider {
 
           try {
             const chunk = JSON.parse(data) as {
-              choices?: { delta?: { content?: string; tool_calls?: Array<{ index: number; id?: string; function?: { name?: string; arguments?: string } }> }; finish_reason?: string }[];
+              choices?: {
+                delta?: {
+                  content?: string;
+                  tool_calls?: Array<{
+                    index: number;
+                    id?: string;
+                    function?: { name?: string; arguments?: string };
+                  }>;
+                };
+                finish_reason?: string;
+              }[];
               usage?: { prompt_tokens?: number; completion_tokens?: number };
             };
 

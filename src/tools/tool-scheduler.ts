@@ -141,7 +141,10 @@ export class ToolScheduler<R> {
     );
   }
 
-  private conflictsWithAny(task: ScheduledTask<R>, candidates: readonly ScheduledTask<R>[]): boolean {
+  private conflictsWithAny(
+    task: ScheduledTask<R>,
+    candidates: readonly ScheduledTask<R>[],
+  ): boolean {
     return candidates.some((c) => ToolAccesses.conflict(task.accesses, c.accesses));
   }
 

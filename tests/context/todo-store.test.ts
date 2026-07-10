@@ -140,12 +140,7 @@ describe("TodoStore", () => {
       await store.add("高优 2", "high");
 
       const ordered = store.list().map((it) => `${it.priority}-${it.content}`);
-      expect(ordered).toEqual([
-        "high-高优 1",
-        "high-高优 2",
-        "medium-中优 1",
-        "low-低优 1",
-      ]);
+      expect(ordered).toEqual(["high-高优 1", "high-高优 2", "medium-中优 1", "low-低优 1"]);
     });
 
     it("空清单返回空数组", async () => {
@@ -169,8 +164,18 @@ describe("TodoStore", () => {
       expect(state.items).toHaveLength(2);
       expect(state.nextId).toBe(3);
       const items = store2.list();
-      expect(items[0]).toMatchObject({ id: 1, content: "任务 A", priority: "high", status: "pending" });
-      expect(items[1]).toMatchObject({ id: 2, content: "任务 B", priority: "medium", status: "in_progress" });
+      expect(items[0]).toMatchObject({
+        id: 1,
+        content: "任务 A",
+        priority: "high",
+        status: "pending",
+      });
+      expect(items[1]).toMatchObject({
+        id: 2,
+        content: "任务 B",
+        priority: "medium",
+        status: "in_progress",
+      });
     });
 
     it("load 幂等:多次调用返回同一缓存", async () => {

@@ -36,4 +36,3 @@ export type KeybindingAction = (typeof KEYBINDING_ACTIONS)[number];
 export type CommandKeybinding = `command:/${string}`;
 export type KeybindingValue = KeybindingAction | CommandKeybinding | null;
 export type KeybindingMap = Partial<Record<KeybindingContext, Record<string, KeybindingValue>>>;
-

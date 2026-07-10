@@ -117,7 +117,9 @@ export function MessageList({
           </React.Fragment>
         );
       })}
-      {preserveVirtualSpacers && window.bottomSpacerRows > 0 && <Box height={window.bottomSpacerRows} />}
+      {preserveVirtualSpacers && window.bottomSpacerRows > 0 && (
+        <Box height={window.bottomSpacerRows} />
+      )}
     </Box>
   );
 }
@@ -129,11 +131,7 @@ function clipEntryTopRows(
   wrapWidth: number | undefined,
 ): TuiEntry {
   if (rowsToSkip <= 0) return entry;
-  if (
-    entry.kind !== "assistant" &&
-    entry.kind !== "user" &&
-    entry.kind !== "system"
-  ) {
+  if (entry.kind !== "assistant" && entry.kind !== "user" && entry.kind !== "system") {
     return entry;
   }
 

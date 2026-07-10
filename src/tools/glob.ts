@@ -136,12 +136,7 @@ export class GlobTool implements BaseTool {
  * 递归遍历目录树,收集匹配 glob 正则的文件相对路径。
  * 跳过 IGNORED_DIRS;相对路径统一用正斜杠,跨平台一致。
  */
-async function collect(
-  dir: string,
-  root: string,
-  matcher: RegExp,
-  out: string[],
-): Promise<void> {
+async function collect(dir: string, root: string, matcher: RegExp, out: string[]): Promise<void> {
   let entries: Dirent[];
   try {
     entries = await readdir(dir, { withFileTypes: true });

@@ -190,14 +190,13 @@ function parseSearchResults(data: unknown): SearchResult[] {
   if (!data || typeof data !== "object") return [];
   const obj = data as Record<string, unknown>;
   // 优先 results,其次 items/data(常见搜索 API 命名)
-  const arr =
-    Array.isArray(obj["results"])
-      ? (obj["results"] as unknown[])
-      : Array.isArray(obj["items"])
-        ? (obj["items"] as unknown[])
-        : Array.isArray(obj["data"])
-          ? (obj["data"] as unknown[])
-          : [];
+  const arr = Array.isArray(obj["results"])
+    ? (obj["results"] as unknown[])
+    : Array.isArray(obj["items"])
+      ? (obj["items"] as unknown[])
+      : Array.isArray(obj["data"])
+        ? (obj["data"] as unknown[])
+        : [];
   return arr
     .filter((item): item is Record<string, unknown> => typeof item === "object" && item !== null)
     .map((item) => ({

@@ -94,9 +94,9 @@ describe("ExitPlanModeTool", () => {
     await expect(execution).rejects.toMatchObject({ name: "AbortError" });
     expect(manager.pendingCount).toBe(0);
     expect(manager.resolveApproval(notice!.taskId, true, "late approve")).toBe(false);
-    expect(
-      manager.resolveApprovalWithModify(notice!.taskId, "late modify", "# 不应写入"),
-    ).toBe(false);
+    expect(manager.resolveApprovalWithModify(notice!.taskId, "late modify", "# 不应写入")).toBe(
+      false,
+    );
     expect(onExit).not.toHaveBeenCalled();
     await expect(readFile(join(workDir, "PLAN.md"), "utf8")).resolves.toBe(originalPlan);
   });
@@ -117,9 +117,7 @@ describe("ExitPlanModeTool", () => {
 
     const execution = tool.execute("{}");
     await vi.waitFor(() => expect(notice).toBeDefined());
-    expect(
-      manager.resolveApprovalWithModify(notice!.taskId, "approved", "# 不应写入"),
-    ).toBe(true);
+    expect(manager.resolveApprovalWithModify(notice!.taskId, "approved", "# 不应写入")).toBe(true);
     controller.abort(new DOMException("interrupted after approval", "AbortError"));
 
     await expect(execution).rejects.toMatchObject({ name: "AbortError" });

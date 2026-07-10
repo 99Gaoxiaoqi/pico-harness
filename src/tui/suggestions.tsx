@@ -97,9 +97,7 @@ export function formatSuggestionRows(session: ActiveSuggestionSession | null): S
       description: truncateInline(description, SUGGESTION_DESCRIPTION_WIDTH),
       selected: itemIndex === session.selectedIndex,
       ...(disabled ? { disabled: true } : {}),
-      ...(disabledReason.length === 0
-        ? {}
-        : { disabledReason }),
+      ...(disabledReason.length === 0 ? {} : { disabledReason }),
     };
   });
 }
