@@ -770,8 +770,8 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     process.stdout.write("\x1b[2J\x1b[H");
   }
 
-  // alternateScreen 隔离 shell scrollback；根布局在 App 中保留右侧 1 列，
-  // 避免满宽帧触发终端立即换行。保持 Ink 默认全帧渲染，兼容中文与复杂布局。
+  // alternateScreen 隔离 shell scrollback；根布局由 Yoga 按当前终端宽度保留右侧 1 列，
+  // 缩放时不依赖 React 尚未更新的宽度状态。保持 Ink 默认全帧渲染，兼容中文与复杂布局。
   // patchConsole:false 让 stderr 不被劫持。
   const instance = render(<ReplApp />, TUI_RENDER_OPTIONS);
   instanceRef.current = instance;

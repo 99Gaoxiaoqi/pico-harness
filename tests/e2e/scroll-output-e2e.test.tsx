@@ -232,7 +232,7 @@ describe("阶段 10：滚动窗口与大型工具输出集成验收", () => {
     expect(harness.rawOutput()).toContain(MOUSE_DISABLE);
   });
 
-  it("生产全屏在 166x17 立即换行终端中流式更新不重复刷屏", async () => {
+  it("生产全屏从 166 列缩到 80 列后流式更新不越界或重复刷屏", async () => {
     const terminal = new ImmediateWrapTerminal(166, 17);
     const user: TuiEntry = { kind: "user", content: "USER_CJK_MARKER_这个skill是在哪拿的" };
     const app = (entries: TuiEntry[], running: boolean) => (
@@ -251,6 +251,8 @@ describe("阶段 10：滚动窗口与大型工具输出集成验收", () => {
 
     try {
       await harness.wait(280); // 让 80ms spinner 真实跨过多帧。
+      await harness.resize(80, 17);
+      await harness.wait(120);
       await harness.rerender(
         app([user, { kind: "assistant", content: "FINAL_CJK_MARKER_这份skill来自工作区" }], true),
       );
@@ -272,6 +274,7 @@ describe("阶段 10：滚动窗口与大型工具输出集成验收", () => {
       expect(visible.match(/phase idle · mode yolo/gu)).toHaveLength(1);
       expect(visible.match(/USER_CJK_MARKER/gu)).toHaveLength(1);
       expect(visible.match(/FINAL_CJK_MARKER/gu)).toHaveLength(1);
+      expect(terminal.wrapEvents).toBe(0);
       expect(terminal.scrollEvents).toBe(0);
       expect(terminal.scrollbackText()).not.toMatch(
         /phase (?:running|idle) · mode yolo|USER_CJK_MARKER|FINAL_CJK_MARKER/u,
@@ -366,6 +369,7 @@ function createProductionFrameHarness(
   terminal: ImmediateWrapTerminal,
 ): {
   wait: (milliseconds: number) => Promise<void>;
+  resize: (columns: number, rows: number) => Promise<void>;
   rerender: (node: React.ReactNode) => Promise<void>;
   cleanup: () => Promise<void>;
 } {
@@ -404,6 +408,12 @@ function createProductionFrameHarness(
 
   return {
     wait,
+    async resize(columns: number, rows: number): Promise<void> {
+      terminal.resize(columns, rows);
+      Object.assign(stdout, { columns, rows });
+      stdout.emit("resize");
+      await wait(50);
+    },
     async rerender(nextNode: React.ReactNode): Promise<void> {
       instance.rerender(nextNode);
       await wait(50);
@@ -418,8 +428,9 @@ function createProductionFrameHarness(
 
 /** 模拟 ChatGPT.app 终端的右边界立即 wrap，而非 xterm 的 wrap-pending。 */
 class ImmediateWrapTerminal {
-  readonly columns: number;
-  readonly rows: number;
+  columns: number;
+  rows: number;
+  wrapEvents = 0;
   scrollEvents = 0;
   private screen: string[][];
   private scrollback: string[] = [];
@@ -474,6 +485,7 @@ class ImmediateWrapTerminal {
       index += value.length;
       if (width === 0) continue;
       if (this.x + width > this.columns) {
+        this.wrapEvents++;
         this.x = 0;
         this.lineFeed();
       }
@@ -481,6 +493,7 @@ class ImmediateWrapTerminal {
       if (width === 2 && this.x + 1 < this.columns) this.screen[this.y]![this.x + 1] = "";
       this.x += width;
       if (this.x >= this.columns) {
+        this.wrapEvents++;
         this.x = 0;
         this.lineFeed();
       }
@@ -493,6 +506,19 @@ class ImmediateWrapTerminal {
 
   scrollbackText(): string {
     return this.scrollback.join("\n");
+  }
+
+  resize(columns: number, rows: number): void {
+    this.columns = Math.max(1, columns);
+    this.rows = Math.max(1, rows);
+    this.screen = Array.from({ length: this.rows }, () => this.blankLine());
+    this.scrollback = [];
+    this.x = 0;
+    this.y = 0;
+    this.savedX = 0;
+    this.savedY = 0;
+    this.wrapEvents = 0;
+    this.scrollEvents = 0;
   }
 
   private applyCsi(parameters: string, final: string): void {
