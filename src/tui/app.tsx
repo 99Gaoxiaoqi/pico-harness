@@ -400,7 +400,6 @@ export function App({
       bottom={bottom}
       overlay={overlay}
       modal={modal}
-      width={Math.max(1, columns - 1)}
       height={rows}
       hidden={redrawBlank}
     />

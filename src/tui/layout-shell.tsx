@@ -8,7 +8,6 @@ export interface LayoutShellProps {
   bottom?: React.ReactNode;
   overlay?: React.ReactNode;
   modal?: React.ReactNode;
-  width?: number;
   height?: number;
   hidden?: boolean;
 }
@@ -20,7 +19,6 @@ export function LayoutShell({
   bottom,
   overlay,
   modal,
-  width,
   height,
   hidden = false,
 }: LayoutShellProps): React.ReactNode {
@@ -28,8 +26,9 @@ export function LayoutShell({
     <Box
       flexDirection="column"
       display={hidden ? "none" : "flex"}
-      width={width}
+      marginRight={1}
       height={height}
+      overflowX="hidden"
       overflowY={height ? "hidden" : undefined}
     >
       {header}
