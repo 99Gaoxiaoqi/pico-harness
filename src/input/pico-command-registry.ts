@@ -15,8 +15,6 @@ import {
   latestSnapshotMessageId,
 } from "../tui/rewind-selector.js";
 import { listCliSessionSummaries } from "../cli/session-resolver.js";
-import { createPermissionState } from "../approval/permission-state.js";
-import { formatPermissionPanel } from "../tui/approval-panel.js";
 import { createBuiltinCommands } from "./builtin-commands.js";
 import { createAddDirectoryCommand, type AdditionalDirectoryManager } from "./add-directory.js";
 import { CommandRegistry } from "./command-registry.js";
@@ -230,11 +228,10 @@ const MODE_CANDIDATES: readonly SlashArgumentCandidate[] = [
 ];
 
 const PERMISSION_CANDIDATES: readonly SlashArgumentCandidate[] = [
-  { value: "ask", description: "Ask before actions that need approval" },
-  { value: "default", description: "Use the default permission policy" },
-  { value: "auto", description: "Auto-approve supported actions" },
-  { value: "yolo", description: "Auto-approve the session" },
-  { value: "plan", description: "Use plan-oriented permissions" },
+  { value: "default", description: "Claude-style permission prompts" },
+  { value: "auto", description: "Accept ordinary edits" },
+  { value: "yolo", description: "Bypass ordinary permission prompts" },
+  { value: "plan", description: "Plan without implementation writes" },
 ];
 
 const THINKING_CANDIDATES: readonly SlashArgumentCandidate[] = [
@@ -559,8 +556,8 @@ function createPermissionsCommand(settings: SessionSettings): SlashCommand {
     name: "permissions",
     aliases: ["permission"],
     description: "Show or change the current permission mode",
-    usage: "/permissions [ask|default|auto|yolo|plan]",
-    argumentHint: "[ask|default|auto|yolo|plan]",
+    usage: "/permissions [default|auto|yolo|plan]",
+    argumentHint: "[default|auto|yolo|plan]",
     category: "permissions",
     argumentCompleter: completeFromCandidates(PERMISSION_CANDIDATES),
     kind: "local",
@@ -571,10 +568,12 @@ function createPermissionsCommand(settings: SessionSettings): SlashCommand {
           type: "local",
           action: "message",
           message: [
-            formatPermissionPanel(createPermissionState({ mode: settings.permissionMode })),
-            "Usage: /permissions <ask|default|auto|yolo|plan>",
+            `Current mode: ${settings.mode}`,
+            "/permissions is an alias for /mode.",
+            `Authorized directories: ${settings.additionalDirectories.length}`,
+            "Usage: /permissions <default|auto|yolo|plan>",
           ].join("\n"),
-          data: { permissionMode: settings.permissionMode },
+          data: { mode: settings.mode, permissionMode: settings.mode },
         };
       }
 
@@ -582,8 +581,8 @@ function createPermissionsCommand(settings: SessionSettings): SlashCommand {
       return {
         type: "local",
         action: "message",
-        message: `${result.message}\nSession approvals: unavailable`,
-        data: { ok: result.ok, permissionMode: settings.permissionMode },
+        message: result.message,
+        data: { ok: result.ok, mode: settings.mode, permissionMode: settings.mode },
       };
     },
   };

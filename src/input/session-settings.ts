@@ -3,6 +3,7 @@ import type { ModelRouter } from "../provider/model-router.js";
 import { resolveProviderProfile } from "../provider/profile.js";
 import { isValidThinkingEffort, type ThinkingEffort } from "../provider/thinking.js";
 import type { Registry } from "../tools/registry.js";
+import { globalSessionPermissionGrants } from "../approval/session-permissions.js";
 
 export interface SessionToolStatus {
   name: string;
@@ -10,6 +11,7 @@ export interface SessionToolStatus {
 }
 
 export type InteractionMode = "default" | "plan" | "auto" | "yolo";
+export const DEFAULT_INTERACTION_MODE: InteractionMode = "yolo";
 export type SessionMode = "new" | "continue" | "resume" | "fork";
 
 export interface SessionSettings {
@@ -19,12 +21,15 @@ export interface SessionSettings {
   cwd: string;
   provider: ProviderKind;
   mode: InteractionMode;
+  /** 进入 plan 前的模式；退出 plan 时恢复。 */
+  prePlanMode?: Exclude<InteractionMode, "plan">;
   model: string;
   /** Stable providerID/modelID identity. Endpoint and credentials stay in ModelRouter. */
   modelRouteId?: string;
   thinkingEffort: ThinkingEffort;
   thinkingEffortExplicit: boolean;
-  permissionMode: string;
+  /** @deprecated `/permissions` 兼容别名；读写都代理到 mode，不保存第二份状态。 */
+  permissionMode: InteractionMode;
   tools: readonly SessionToolStatus[];
   additionalDirectories: readonly string[];
 }
@@ -54,26 +59,40 @@ const resolvedCliSessionSemantics = new Map<
   string,
   { sessionMode: SessionMode; forkFrom?: string }
 >();
-const permissionCommandModes = new Set(["ask", "default", "auto", "yolo", "plan"]);
+const permissionCommandModes = new Set([
+  "ask",
+  "default",
+  "auto",
+  "acceptedits",
+  "yolo",
+  "bypasspermissions",
+  "plan",
+]);
 
 export function createDefaultSessionSettings(defaults: SessionSettingsDefaults): SessionSettings {
   const resolvedSemantics = resolvedCliSessionSemantics.get(defaults.sessionId);
   const forkFrom = defaults.forkFrom ?? resolvedSemantics?.forkFrom;
-  return {
+  const mode =
+    normalizeInteractionMode(defaults.mode ?? defaults.permissionMode) ?? DEFAULT_INTERACTION_MODE;
+  const compatibilityPreviousMode = normalizeInteractionMode(defaults.permissionMode);
+  const settings = {
     sessionId: defaults.sessionId,
     sessionMode: defaults.sessionMode ?? resolvedSemantics?.sessionMode ?? "new",
     ...(forkFrom !== undefined ? { forkFrom } : {}),
     cwd: defaults.cwd,
     provider: defaults.provider,
-    mode: defaults.mode ?? "default",
+    mode,
+    ...(mode === "plan" && compatibilityPreviousMode && compatibilityPreviousMode !== "plan"
+      ? { prePlanMode: compatibilityPreviousMode }
+      : {}),
     model: defaults.model,
     ...(defaults.modelRouteId !== undefined ? { modelRouteId: defaults.modelRouteId } : {}),
     thinkingEffort: defaults.thinkingEffort ?? "off",
     thinkingEffortExplicit: defaults.thinkingEffort !== undefined,
-    permissionMode: defaults.permissionMode ?? "ask",
     tools: defaults.tools ?? [],
     additionalDirectories: createAdditionalDirectorySnapshot(defaults.additionalDirectories ?? []),
-  };
+  } as Omit<SessionSettings, "permissionMode"> & Partial<Pick<SessionSettings, "permissionMode">>;
+  return withPermissionModeAlias(settings);
 }
 
 export function getOrCreateSessionSettings(defaults: SessionSettingsDefaults): SessionSettings {
@@ -82,6 +101,7 @@ export function getOrCreateSessionSettings(defaults: SessionSettingsDefaults): S
     if (existing.cwd !== defaults.cwd) {
       // session id 可能被不同项目复用；目录授权绝不能跨 cwd 继承。
       existing.additionalDirectories = createAdditionalDirectorySnapshot([]);
+      globalSessionPermissionGrants.clear(existing.sessionId);
     }
     const resolvedSemantics = resolvedCliSessionSemantics.get(defaults.sessionId);
     const sessionMode = defaults.sessionMode ?? resolvedSemantics?.sessionMode;
@@ -96,12 +116,9 @@ export function getOrCreateSessionSettings(defaults: SessionSettingsDefaults): S
     }
     existing.cwd = defaults.cwd;
     existing.provider = defaults.provider;
-    existing.mode = defaults.mode ?? existing.mode;
-    if (
-      defaults.permissionMode !== undefined &&
-      shouldApplyPermissionModeDefault(existing.permissionMode, defaults.permissionMode)
-    ) {
-      existing.permissionMode = defaults.permissionMode;
+    const requestedMode = normalizeInteractionMode(defaults.mode ?? defaults.permissionMode);
+    if (requestedMode !== undefined && requestedMode !== existing.mode) {
+      setSessionMode(existing, requestedMode);
     }
     existing.tools = defaults.tools ?? existing.tools;
     for (const directory of defaults.additionalDirectories ?? []) {
@@ -137,6 +154,7 @@ export function getStoredSessionSettings(sessionId: string): SessionSettings | u
 export function resetSessionSettingsForTests(): void {
   settingsBySession.clear();
   resolvedCliSessionSemantics.clear();
+  globalSessionPermissionGrants.clear();
 }
 
 export function addSessionAdditionalDirectory(
@@ -196,16 +214,31 @@ export function setSessionModelRoute(
 }
 
 export function setSessionMode(settings: SessionSettings, mode: string): SessionSettingResult {
-  const normalized = mode.trim().toLowerCase();
-  if (!isInteractionMode(normalized)) {
+  const normalized = normalizeInteractionMode(mode);
+  if (normalized === undefined) {
     return {
       ok: false,
       message: `Current mode: ${settings.mode}\nUsage: /mode <default|plan|auto|yolo>`,
     };
   }
 
+  if (normalized === "plan" && settings.mode !== "plan") {
+    settings.prePlanMode = settings.mode;
+  } else if (normalized !== "plan") {
+    delete settings.prePlanMode;
+  }
   settings.mode = normalized;
   return { ok: true, message: `Mode set to ${settings.mode}` };
+}
+
+export function exitSessionPlanMode(settings: SessionSettings): SessionSettingResult {
+  if (settings.mode !== "plan") {
+    return { ok: true, message: `Mode remains ${settings.mode}` };
+  }
+  const restored = settings.prePlanMode ?? DEFAULT_INTERACTION_MODE;
+  delete settings.prePlanMode;
+  settings.mode = restored;
+  return { ok: true, message: `Mode restored to ${settings.mode}` };
 }
 
 export function setSessionPermissionMode(
@@ -216,12 +249,12 @@ export function setSessionPermissionMode(
   if (!permissionCommandModes.has(normalized)) {
     return {
       ok: false,
-      message: `Current permission mode: ${settings.permissionMode}\nUsage: /permissions <ask|default|auto|yolo|plan>`,
+      message: `Current mode: ${settings.mode}\nUsage: /permissions <default|auto|yolo|plan>`,
     };
   }
 
-  settings.permissionMode = normalized;
-  return { ok: true, message: `Permission mode set to ${settings.permissionMode}` };
+  const result = setSessionMode(settings, normalized);
+  return { ...result, message: `Mode set to ${settings.mode} (/permissions is an alias)` };
 }
 
 export function setSessionThinkingEffort(
@@ -250,7 +283,6 @@ export function parseThinkingEffortArg(raw: string): ThinkingEffort | undefined 
 export function formatSessionStatus(settings: SessionSettings): string {
   return [
     `Mode: ${settings.mode}`,
-    `Permission mode: ${settings.permissionMode}`,
     `Model: ${settings.model}`,
     `Model route: ${settings.modelRouteId ?? "legacy"}`,
     `Thinking effort: ${settings.thinkingEffort}`,
@@ -264,9 +296,9 @@ export function formatSessionStatus(settings: SessionSettings): string {
 
 export function formatPermissionStatus(settings: SessionSettings): string {
   return [
-    `Permission mode: ${settings.permissionMode}`,
-    "Session approvals: unavailable",
-    "Usage: /permissions <ask|default|auto|yolo|plan>",
+    `Mode: ${settings.mode}`,
+    "/permissions is a compatibility alias for /mode.",
+    "Usage: /permissions <default|auto|yolo|plan>",
   ].join("\n");
 }
 
@@ -289,16 +321,31 @@ function toProfileProtocol(provider: ProviderKind): "openai" | "claude" | "gemin
   return provider === "openai" ? "openai" : provider;
 }
 
-function isInteractionMode(mode: string): mode is InteractionMode {
-  return mode === "default" || mode === "plan" || mode === "auto" || mode === "yolo";
-}
-
-function shouldApplyPermissionModeDefault(current: string, next: string): boolean {
-  if (current === next) return true;
-  if (current === "ask") return true;
-  return next !== "ask";
+export function normalizeInteractionMode(mode: string | undefined): InteractionMode | undefined {
+  const normalized = mode?.trim().toLowerCase();
+  if (normalized === "ask" || normalized === "default") return "default";
+  if (normalized === "auto" || normalized === "acceptedits") return "auto";
+  if (normalized === "yolo" || normalized === "bypasspermissions") return "yolo";
+  if (normalized === "plan") return "plan";
+  return undefined;
 }
 
 function createAdditionalDirectorySnapshot(directories: readonly string[]): readonly string[] {
   return Object.freeze([...new Set(directories)]);
+}
+
+function withPermissionModeAlias(
+  settings: Omit<SessionSettings, "permissionMode"> &
+    Partial<Pick<SessionSettings, "permissionMode">>,
+): SessionSettings {
+  Object.defineProperty(settings, "permissionMode", {
+    enumerable: true,
+    configurable: false,
+    get: () => settings.mode,
+    set: (value: string) => {
+      const mode = normalizeInteractionMode(value);
+      if (mode !== undefined) settings.mode = mode;
+    },
+  });
+  return settings as SessionSettings;
 }

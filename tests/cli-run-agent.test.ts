@@ -5,7 +5,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ApprovalManager,
   globalApprovalManager,
-  globalApprovalPolicy,
   type ApprovalNotice,
 } from "../src/approval/manager.js";
 import { buildApprovalMiddleware, runAgentFromCli } from "../src/cli/run-agent.js";
@@ -134,6 +133,16 @@ async function waitForApprovalBeforeCompletion<T>(
       setTimeout(() => reject(new Error("timed out waiting for approval")), 1000);
     }),
   ]);
+}
+
+async function useDefaultInteractionMode(sessionId: string, workDir: string): Promise<void> {
+  getOrCreateSessionSettings({
+    sessionId,
+    cwd: await realpath(workDir),
+    provider: "openai",
+    model: "glm-5.2",
+    mode: "default",
+  });
 }
 
 describe("runAgentFromCli", () => {
@@ -342,7 +351,7 @@ describe("runAgentFromCli", () => {
     expect(provider.calls[0]?.toolNames).not.toContain("delegate_task");
     expect(provider.calls[0]?.toolNames).not.toContain("task_list");
     expect(provider.calls[0]?.messages[0]?.content).toContain("PLAN.md");
-    expect(write).toHaveBeenCalledTimes(1);
+    expect(write).not.toHaveBeenCalled();
   });
 
   it("write_file requests approval before writing", async () => {
@@ -367,6 +376,7 @@ describe("runAgentFromCli", () => {
       },
     ]);
     const approval = makeApprovalCapture();
+    await useDefaultInteractionMode("approval_write_session", workDir);
 
     const runPromise = runAgentFromCli(
       {
@@ -398,7 +408,7 @@ describe("runAgentFromCli", () => {
     await expect(readFile(join(workDir, "approval.txt"), "utf8")).rejects.toThrow();
   });
 
-  it("未授权的外部写入在审批前拒绝并提示 /add-dir", async () => {
+  it("默认 yolo 静默授权外部写入", async () => {
     const workDir = await mkdtemp(join(tmpdir(), "pico-cli-boundary-root-"));
     const outsideDir = await mkdtemp(join(tmpdir(), "pico-cli-boundary-outside-"));
     const outsideFile = join(outsideDir, "blocked.txt");
@@ -435,12 +445,7 @@ describe("runAgentFromCli", () => {
 
     expect(result.finalMessage).toBe("Boundary explained.");
     expect(approvalNotifier).not.toHaveBeenCalled();
-    expect(
-      result.messages.some(
-        (message) => message.toolCallId !== undefined && message.content.includes("/add-dir"),
-      ),
-    ).toBe(true);
-    await expect(readFile(outsideFile, "utf8")).rejects.toThrow();
+    await expect(readFile(outsideFile, "utf8")).resolves.toBe("blocked");
   });
 
   it("附加目录中的写入进入正常审批并可执行", async () => {
@@ -469,6 +474,7 @@ describe("runAgentFromCli", () => {
     const approvalNotifier = vi.fn((notice: ApprovalNotice) => {
       globalApprovalManager.resolveApproval(notice.taskId, true, "authorized test directory");
     });
+    await useDefaultInteractionMode("added_boundary_session", workDir);
 
     const result = await runAgentFromCli(
       {
@@ -517,6 +523,7 @@ describe("runAgentFromCli", () => {
     const approvalNotifier = vi.fn((notice: ApprovalNotice) => {
       globalApprovalManager.resolveApproval(notice.taskId, true, "configured directory");
     });
+    await useDefaultInteractionMode("configured_boundary_session", workDir);
 
     await runAgentFromCli(
       {
@@ -593,6 +600,7 @@ describe("runAgentFromCli", () => {
     ]);
     const approval = makeApprovalCapture();
     const controller = new AbortController();
+    await useDefaultInteractionMode("approval_abort_session", workDir);
     const runPromise = runAgentFromCli(
       {
         prompt: "Write must-not-exist.txt",
@@ -738,7 +746,7 @@ describe("runAgentFromCli", () => {
     await expect(runPromise).resolves.toMatchObject({ finalMessage: "Done after plan." });
     expect(await readFile(join(workDir, "after-plan.txt"), "utf8")).toBe("implemented");
     expect(getStoredSessionSettings("plan_exit_settings_session")).toMatchObject({
-      mode: "default",
+      mode: "yolo",
       permissionMode: "yolo",
     });
 
@@ -808,7 +816,7 @@ describe("runAgentFromCli", () => {
     await expect(runPromise).resolves.toMatchObject({ finalMessage: "Exited permission plan." });
     expect(getStoredSessionSettings("plan_exit_permission_session")).toMatchObject({
       mode: "default",
-      permissionMode: "ask",
+      permissionMode: "default",
     });
   });
 
@@ -839,6 +847,7 @@ describe("runAgentFromCli", () => {
       },
     ]);
     const approval = makeApprovalCapture();
+    await useDefaultInteractionMode("approval_edit_session", workDir);
 
     const runPromise = runAgentFromCli(
       {
@@ -1180,6 +1189,7 @@ describe("runAgentFromCli", () => {
       },
     ]);
     const notices: ApprovalNotice[] = [];
+    await useDefaultInteractionMode("approval_session_once", workDir);
 
     const result = await runAgentFromCli(
       {
@@ -1192,11 +1202,7 @@ describe("runAgentFromCli", () => {
         provider,
         approvalNotifier: (notice) => {
           notices.push(notice);
-          globalApprovalPolicy.allowForSession("approval_session_once", {
-            name: notice.toolName,
-            arguments: notice.args,
-          });
-          globalApprovalManager.resolveApproval(notice.taskId, true, "approve for session");
+          globalApprovalManager.resolveApprovalForSession(notice.taskId, "approve for session");
         },
       },
     );
@@ -1228,6 +1234,7 @@ describe("runAgentFromCli", () => {
       },
     ]);
     const approval = makeApprovalCapture();
+    await useDefaultInteractionMode("approval_bash_session", workDir);
 
     const runPromise = runAgentFromCli(
       {

@@ -54,7 +54,7 @@ export interface PermissionStateInput {
 export function createPermissionState(input: PermissionStateInput = {}): PermissionState {
   const maxRecentDenials = input.maxRecentDenials ?? 5;
   return {
-    mode: input.mode ?? "ask",
+    mode: input.mode ?? "yolo",
     rules: {
       allow: normalizeRules("allow", input.rules?.allow ?? []),
       ask: normalizeRules("ask", input.rules?.ask ?? []),

@@ -123,7 +123,7 @@ describe("session settings", () => {
     expect(formatSessionStatus(settings)).toContain("sessionMode: new");
     expect(formatSessionStatus(settings)).toContain("forkFrom: -");
     expect(formatSessionStatus(settings)).toContain("CWD: /workspace/app");
-    expect(formatSessionStatus(settings)).toContain("Permission mode: ask");
+    expect(settings.permissionMode).toBe(settings.mode);
   });
 
   it("stores and formats fork session semantics", () => {
@@ -168,7 +168,7 @@ describe("session settings", () => {
     const result = setSessionMode(settings, "fast");
 
     expect(result.ok).toBe(false);
-    expect(settings.mode).toBe("default");
+    expect(settings.mode).toBe("yolo");
     expect(result.message).toContain("Usage: /mode <default|plan|auto|yolo>");
   });
 
@@ -184,7 +184,7 @@ describe("session settings", () => {
 
     expect(result.ok).toBe(true);
     expect(settings.permissionMode).toBe("yolo");
-    expect(result.message).toContain("Permission mode set to yolo");
+    expect(result.message).toContain("/permissions is an alias");
   });
 
   it("allows restoring the default ask permission mode", () => {
@@ -199,8 +199,9 @@ describe("session settings", () => {
     const result = setSessionPermissionMode(settings, "ask");
 
     expect(result.ok).toBe(true);
-    expect(settings.permissionMode).toBe("ask");
-    expect(result.message).toContain("Permission mode set to ask");
+    expect(settings.permissionMode).toBe("default");
+    expect(settings.mode).toBe("default");
+    expect(result.message).toContain("/permissions is an alias");
   });
 
   it("keeps the previous permission mode for unsupported permission modes", () => {
@@ -216,7 +217,7 @@ describe("session settings", () => {
 
     expect(result.ok).toBe(false);
     expect(settings.permissionMode).toBe("auto");
-    expect(result.message).toContain("Usage: /permissions <ask|default|auto|yolo|plan>");
+    expect(result.message).toContain("Usage: /permissions <default|auto|yolo|plan>");
   });
 
   it("formats permission mode and unavailable session approvals", () => {
@@ -230,8 +231,8 @@ describe("session settings", () => {
 
     const message = formatPermissionStatus(settings);
 
-    expect(message).toContain("Permission mode: plan");
-    expect(message).toContain("Session approvals: unavailable");
+    expect(message).toContain("Mode: plan");
+    expect(message).toContain("compatibility alias");
   });
 
   it("updates thinking effort only when the provider profile supports it", () => {

@@ -27,7 +27,7 @@ import type { ThinkingEffort } from "../provider/thinking.js";
 import type { ImagePart, Message, ToolDefinition } from "../schema/message.js";
 import { BashTool, ReadFileTool, ToolRegistry } from "../tools/registry-impl.js";
 import { buildDefaultToolRegistry } from "../tools/default-registry.js";
-import { WorkspaceRoots } from "../tools/workspace-roots.js";
+import { WorkspaceRoots, workspaceAccessesFromCall } from "../tools/workspace-roots.js";
 import { ExitPlanModeTool } from "../tools/plan-exit.js";
 import { DelegationManager, DelegateStatusTool } from "../tools/delegation-manager.js";
 import { createSubagentRegistryFactory } from "../tools/delegation-registry.js";
@@ -38,13 +38,19 @@ import { CostTracker } from "../observability/tracker.js";
 import { Tracer } from "../observability/trace.js";
 import {
   globalApprovalManager,
-  globalApprovalPolicy,
   isAgentOpsDangerousCommand,
   isDangerousCommand,
   isHardlineCommand,
   type ApprovalManager,
   type ApprovalNotifier,
 } from "../approval/manager.js";
+import {
+  applySessionPermissionScope,
+  bypassImmuneSafetyPath,
+  globalSessionPermissionGrants,
+  permissionScopeForCall,
+  type PermissionRuntimeSettings,
+} from "../approval/session-permissions.js";
 import { computeApprovalDiff } from "../approval/diff.js";
 import { formatApprovalPanel } from "../tui/approval-panel.js";
 import { createTuiRuntimeState, type TuiRuntimeState } from "../tui/runtime-state.js";
@@ -55,6 +61,7 @@ import { loadHooksConfig } from "../hooks/config.js";
 import { HookRunner } from "../hooks/runner.js";
 import {
   getOrCreateSessionSettings,
+  exitSessionPlanMode,
   setSessionAdditionalDirectories,
   toolStatusFromRegistry,
   type SessionToolStatus,
@@ -169,7 +176,6 @@ export async function runAgentFromCli(
     provider: kind,
     model: defaultConfigModel,
     ...(options.thinkingEffort !== undefined ? { thinkingEffort: options.thinkingEffort } : {}),
-    permissionMode: "ask",
   });
   const workspaceRoots = await WorkspaceRoots.create(workDir, [
     ...configuredAdditionalDirectories,
@@ -185,7 +191,7 @@ export async function runAgentFromCli(
     session: sessionSelection.sessionId,
     sessionSelection,
     model: options.model ?? settings.model,
-    planMode: options.planMode ?? (settings.mode === "plan" || settings.permissionMode === "plan"),
+    planMode: options.planMode ?? settings.mode === "plan",
     trace: traceEnabled,
     addDirs: [...settings.additionalDirectories],
     ...(options.thinkingEffort !== undefined
@@ -428,6 +434,7 @@ function buildRegistry(
 ): ToolRegistry {
   return buildDefaultToolRegistry(workDir, {
     truncateResults: false,
+    deferWorkspaceBoundary: true,
     backgroundManager,
     ...(goalManager !== undefined ? { goalManager } : {}),
     ...(todoStore !== undefined ? { todoStore } : {}),
@@ -608,8 +615,9 @@ export function buildApprovalMiddleware(
   workDir: string,
   signal?: AbortSignal,
   approvalManager: ApprovalManager = globalApprovalManager,
-  settings?: Pick<SessionSettings, "sessionId" | "mode" | "permissionMode">,
-  workspaceRoots?: Pick<WorkspaceRoots, "resolve">,
+  settings?: Pick<SessionSettings, "sessionId" | "mode"> &
+    Partial<Pick<SessionSettings, "additionalDirectories">>,
+  workspaceRoots?: WorkspaceRoots,
 ): MiddlewareFunc {
   return async (call) => {
     if (isPlanModeWriteDenied(call, settings)) {
@@ -618,43 +626,130 @@ export function buildApprovalMiddleware(
         reason: "Plan Mode 守卫：当前处于 Plan Mode，只能修改 PLAN.md / TODO.md。",
       };
     }
-    if (settings?.permissionMode === "yolo") {
-      return isHardlineCommand(call.name, call.arguments)
-        ? {
-            allowed: false,
-            reason: "Hardline 高危命令不可审批绕过,系统直接拒绝。",
-          }
-        : { allowed: true, reason: "YOLO 模式放行" };
+    if (isHardlineCommand(call.name, call.arguments)) {
+      return {
+        allowed: false,
+        reason: "Hardline 高危命令不可审批绕过,系统直接拒绝。",
+      };
     }
 
-    const isDangerous =
-      settings?.permissionMode === "auto" ? isDangerousCommand : isAgentOpsDangerousCommand;
-    return globalApprovalPolicy.decide(
-      settings?.sessionId ?? "cli",
+    const sessionId = settings?.sessionId ?? "cli";
+    const mode = settings?.mode ?? "default";
+    const workspaceAccesses = workspaceAccessesFromCall(call);
+    const externalAccesses = workspaceRoots
+      ? workspaceAccesses.filter((access) => !workspaceRoots.isAllowedPath(access.path))
+      : [];
+    const externalDirectories = workspaceRoots
+      ? await externalAuthorizationDirectories(externalAccesses, workspaceRoots)
+      : [];
+    const safetyPath = bypassImmuneSafetyPath(call, workDir);
+    const hasSessionGrant = globalSessionPermissionGrants.allows(sessionId, call, workDir);
+    const hasExplicitSafetyGrant = globalSessionPermissionGrants.allowsSafetyOverride(
+      sessionId,
       call,
-      async () => {
-        // 拦截时计算 before/after diff,失败返回 undefined 不阻断审批
-        const diff = await computeApprovalDiff(call.name, call.arguments, workDir, workspaceRoots);
-        // Provider call id 只在局部轮次内唯一,不能用作全局审批主键。
-        return approvalManager.waitForApproval(
-          `approval_${randomUUID()}`,
-          call.name,
-          call.arguments,
-          notifier,
-          diff,
-          signal,
-        );
-      },
-      isDangerous,
+      workDir,
     );
+
+    // Claude Code step 2a: bypassPermissions 绕过普通 working-dir ask。
+    if (mode === "yolo" && safetyPath === undefined) {
+      if (externalDirectories.length > 0 && workspaceRoots && settings) {
+        await applySessionPermissionScope(
+          permissionScopeForCall(call, {
+            externalDirectories,
+            autoEditsAlreadyEnabled: true,
+          }),
+          {
+            sessionId,
+            settings: settings as PermissionRuntimeSettings,
+            workspaceRoots,
+          },
+        );
+      }
+      return { allowed: true, reason: "YOLO 模式放行" };
+    }
+
+    if (
+      hasSessionGrant &&
+      externalDirectories.length === 0 &&
+      (safetyPath === undefined || hasExplicitSafetyGrant)
+    ) {
+      return { allowed: true, reason: "本会话结构化权限规则放行" };
+    }
+
+    const needsApproval =
+      safetyPath !== undefined ||
+      externalDirectories.length > 0 ||
+      (mode === "default" && isAgentOpsDangerousCommand(call.name, call.arguments)) ||
+      (mode === "auto" && isDangerousCommand(call.name, call.arguments));
+    if (!needsApproval) return { allowed: true, reason: `${mode} 模式自动放行` };
+
+    const externalScope =
+      externalDirectories.length > 0
+        ? permissionScopeForCall(call, {
+            externalDirectories,
+            autoEditsAlreadyEnabled: mode === "auto" || mode === "yolo",
+          })
+        : undefined;
+    const scope = permissionScopeForCall(call, {
+      ...(safetyPath !== undefined
+        ? { safetyPath }
+        : externalDirectories.length > 0
+          ? { externalDirectories }
+          : {}),
+      autoEditsAlreadyEnabled: mode === "auto",
+    });
+    const diff = await computeApprovalDiff(call.name, call.arguments, workDir, workspaceRoots);
+    const result = await approvalManager.waitForApproval(
+      `approval_${randomUUID()}`,
+      call.name,
+      call.arguments,
+      notifier,
+      diff,
+      signal,
+      { sessionScope: scope },
+    );
+    if (!result.allowed || !workspaceRoots || !settings) return result;
+
+    if (result.allowForSession) {
+      await applySessionPermissionScope(scope, {
+        sessionId,
+        settings: settings as PermissionRuntimeSettings,
+        workspaceRoots,
+      });
+      if (safetyPath !== undefined && externalScope?.type === "directories") {
+        await applySessionPermissionScope(
+          { ...externalScope, enableAutoEdits: false },
+          {
+            sessionId,
+            settings: settings as PermissionRuntimeSettings,
+            workspaceRoots,
+          },
+        );
+      }
+    } else {
+      for (const access of externalAccesses) workspaceRoots.authorizeOnce(access.path);
+    }
+    return result;
   };
+}
+
+async function externalAuthorizationDirectories(
+  accesses: ReturnType<typeof workspaceAccessesFromCall>,
+  workspaceRoots: WorkspaceRoots,
+): Promise<string[]> {
+  const directories = await Promise.all(
+    accesses
+      .filter((access) => !workspaceRoots.isAllowedPath(access.path))
+      .map((access) => workspaceRoots.authorizationDirectoryForPath(access.path)),
+  );
+  return [...new Set(directories)];
 }
 
 function isPlanModeWriteDenied(
   call: { name: string; arguments: string },
-  settings: Pick<SessionSettings, "mode" | "permissionMode"> | undefined,
+  settings: Pick<SessionSettings, "mode"> | undefined,
 ): boolean {
-  if (settings?.mode !== "plan" && settings?.permissionMode !== "plan") return false;
+  if (settings?.mode !== "plan") return false;
   if (call.name === "write_file" || call.name === "edit_file") {
     const path = parseJsonStringField(call.arguments, "path");
     return path !== undefined && !isPlanModeAllowedPath(path);
@@ -686,12 +781,7 @@ function isPlanModeAllowedPath(path: string): boolean {
 }
 
 function markSharedPlanModeExited(settings: SessionSettings): void {
-  if (settings.mode === "plan") {
-    settings.mode = "default";
-  }
-  if (settings.permissionMode === "plan") {
-    settings.permissionMode = "ask";
-  }
+  exitSessionPlanMode(settings);
 }
 
 const terminalNotifier: ApprovalNotifier = (notice) => {
