@@ -468,8 +468,8 @@ describe("Pico command registry", () => {
   it("/skill 与动态 /<skill-name> 都执行显式激活 prompt", async () => {
     const workDir = mkdtempSync(join(tmpdir(), "pico-command-skill-activate-"));
     cleanup.push(() => rmSync(workDir, { recursive: true, force: true }));
-    const sourcePath = join(workDir, ".claw", "skills", "review", "SKILL.md");
-    mkdirSync(join(workDir, ".claw", "skills", "review"), { recursive: true });
+    const sourcePath = join(workDir, ".claude", "skills", "review", "SKILL.md");
+    mkdirSync(join(workDir, ".claude", "skills", "review"), { recursive: true });
     writeFileSync(
       sourcePath,
       "---\nname: review\ndescription: review files\n---\n\nReview $0 carefully.",

@@ -8,6 +8,7 @@ import {
   setSessionMode,
   setSessionPermissionMode,
   setSessionThinkingEffort,
+  setSessionAdditionalDirectories,
 } from "../../src/input/session-settings.js";
 
 describe("session settings", () => {
@@ -41,6 +42,30 @@ describe("session settings", () => {
     expect(settings.additionalDirectories).toEqual(["/workspace/shared"]);
     expect(second).toBe(first);
     expect(Object.isFrozen(second)).toBe(true);
+  });
+
+  it("replaces additional directories with a deduplicated readonly ordered snapshot", () => {
+    const settings = createDefaultSessionSettings({
+      sessionId: "session-additional-replace",
+      cwd: "/workspace/app",
+      provider: "openai",
+      model: "glm-5.2",
+      additionalDirectories: ["/workspace/session"],
+    });
+
+    const snapshot = setSessionAdditionalDirectories(settings, [
+      "/workspace/config",
+      "/workspace/cli",
+      "/workspace/session",
+      "/workspace/config",
+    ]);
+
+    expect(snapshot).toEqual([
+      "/workspace/config",
+      "/workspace/cli",
+      "/workspace/session",
+    ]);
+    expect(Object.isFrozen(snapshot)).toBe(true);
   });
 
   it("creates a minimal settings snapshot for status output", () => {

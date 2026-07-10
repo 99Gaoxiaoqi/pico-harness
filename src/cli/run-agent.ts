@@ -54,8 +54,8 @@ import { BackgroundManager } from "../tools/background-manager.js";
 import { loadHooksConfig } from "../hooks/config.js";
 import { HookRunner } from "../hooks/runner.js";
 import {
-  addSessionAdditionalDirectory,
   getOrCreateSessionSettings,
+  setSessionAdditionalDirectories,
   type SessionSettings,
 } from "../input/session-settings.js";
 import { loadConfiguredAdditionalDirectories } from "../input/add-directory.js";
@@ -160,13 +160,11 @@ export async function runAgentFromCli(
     permissionMode: "ask",
   });
   const workspaceRoots = await WorkspaceRoots.create(workDir, [
-    ...settings.additionalDirectories,
     ...configuredAdditionalDirectories,
     ...(options.addDirs ?? []),
+    ...settings.additionalDirectories,
   ]);
-  for (const directory of workspaceRoots.list().slice(1)) {
-    addSessionAdditionalDirectory(settings, directory);
-  }
+  setSessionAdditionalDirectories(settings, workspaceRoots.list().slice(1));
   const traceEnabled =
     options.trace === true || isTruthyEnv((dependencies.env ?? process.env).PICO_TRACE);
   const effectiveOptions: RunAgentCliOptions = {

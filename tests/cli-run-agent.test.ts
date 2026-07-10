@@ -480,6 +480,49 @@ describe("runAgentFromCli", () => {
     await expect(readFile(outsideFile, "utf8")).resolves.toBe("configured");
   });
 
+  it("按 config、CLI、session 顺序合并附加目录", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-cli-root-order-"));
+    const configDir = await mkdtemp(join(tmpdir(), "pico-cli-config-order-"));
+    const cliDir = await mkdtemp(join(tmpdir(), "pico-cli-arg-order-"));
+    const sessionDir = await mkdtemp(join(tmpdir(), "pico-cli-session-order-"));
+    await mkdir(join(workDir, ".pico"), { recursive: true });
+    await writeFile(
+      join(workDir, ".pico", "config.json"),
+      JSON.stringify({ permissions: { additionalDirectories: [configDir] } }),
+    );
+    getOrCreateSessionSettings({
+      sessionId: "additional_directory_order",
+      cwd: workDir,
+      provider: "openai",
+      model: "glm-5.2",
+      additionalDirectories: [sessionDir],
+    });
+    const provider = new ScriptedProvider([
+      {
+        role: "assistant",
+        content: "No tools needed.",
+        usage: { promptTokens: 1, completionTokens: 1 },
+      },
+    ]);
+
+    await runAgentFromCli(
+      {
+        prompt: "Reply without tools",
+        dir: workDir,
+        session: "additional_directory_order",
+        provider: "openai",
+        addDirs: [cliDir],
+      },
+      { provider },
+    );
+
+    expect(getStoredSessionSettings("additional_directory_order")?.additionalDirectories).toEqual([
+      await realpath(configDir),
+      await realpath(cliDir),
+      await realpath(sessionDir),
+    ]);
+  });
+
   it("审批等待期间 abort 会取消任务且晚批准不执行危险工具", async () => {
     const workDir = await mkdtemp(join(tmpdir(), "pico-cli-approval-abort-"));
     const provider = new ScriptedProvider([

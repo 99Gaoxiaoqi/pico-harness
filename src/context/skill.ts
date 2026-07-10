@@ -1,4 +1,4 @@
-// Skill 加载器:扫描 .claw/skills/**/SKILL.md,解析 YAML frontmatter + Markdown 正文。
+// Skill 加载器:扫描 .claude/skills 与 .claw/skills 下的 SKILL.md。
 // 对应课程第 10 讲 internal/context/skill.go。
 //
 // 遵循 Agent Skills 规范 (agentskills.io):
@@ -55,7 +55,7 @@ export class SkillLoader {
   constructor(private readonly workDir: string) {}
 
   /**
-   * 扫描 .claw/skills 目录,解析所有 SKILL.md,格式化为字符串准备注入 Context。
+   * 扫描 Claude/Pico 两个 Skill 目录,解析所有 SKILL.md,格式化为字符串准备注入 Context。
    * 目录不存在则静默返回空 (当前工作区未配置技能)。
    */
   async loadAll(): Promise<string> {
@@ -87,19 +87,12 @@ export class SkillLoader {
   }
 
   private async loadSkillFiles(): Promise<Skill[]> {
-    const skillBaseDir = join(this.workDir, ".claw", "skills");
-
-    try {
-      await stat(skillBaseDir);
-    } catch (err) {
-      // ENOENT:工作区未配置技能目录,静默返回空
-      if (isErrnoException(err, "ENOENT")) return [];
-      // 其他错误(权限等)记 warn 后返回空,不让技能加载阻断主流程
-      logger.warn({ err }, "读取技能目录失败");
-      return [];
-    }
-
-    const skillFiles = await walkForSkillMd(skillBaseDir);
+    // 与 slash command 投影保持同一发现顺序；同名时 Claude 目录优先。
+    const skillBaseDirs = [
+      join(this.workDir, ".claude", "skills"),
+      join(this.workDir, ".claw", "skills"),
+    ];
+    const skillFiles = (await Promise.all(skillBaseDirs.map(walkForSkillMd))).flat();
     const signature = await skillFileSignature(skillFiles);
     if (this.cache && this.cache.signature === signature) {
       return this.cache.skills;
@@ -122,7 +115,11 @@ export class SkillLoader {
       }
     }
 
-    const sorted = skills.sort((a, b) => a.name.localeCompare(b.name));
+    const byName = new Map<string, Skill>();
+    for (const skill of skills) {
+      if (!byName.has(skill.name)) byName.set(skill.name, skill);
+    }
+    const sorted = [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
     this.cache = { skills: sorted, signature };
     return sorted;
   }
