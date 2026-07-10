@@ -98,6 +98,12 @@ export interface RunAgentCliOptions {
   images?: ImagePart[];
   /** Claude Code 风格附加工作目录；可重复传入，当前会话内生效。 */
   addDirs?: string[];
+  /** TUI 中用户实际发送的文本，用作 /rewind 的可见名称。 */
+  rewindPrompt?: string;
+  /** 用户消息写入可见 transcript 前的条目下标。 */
+  rewindTranscriptIndex?: number;
+  /** 宿主可选记录该消息发送时的交互模式。 */
+  rewindInteractionMode?: string;
 }
 
 export { loadImage } from "../input/prepare-prompt.js";
@@ -372,6 +378,15 @@ export async function runAgentFromCli(
       const images: ImagePart[] | undefined =
         effectiveOptions.images ??
         (effectiveOptions.imagePath ? [loadImage(effectiveOptions.imagePath, workDir)] : undefined);
+      await session.beginRewindPoint({
+        userPrompt: effectiveOptions.rewindPrompt ?? prompt,
+        ...(effectiveOptions.rewindTranscriptIndex !== undefined
+          ? { transcriptIndex: effectiveOptions.rewindTranscriptIndex }
+          : {}),
+        ...(effectiveOptions.rewindInteractionMode !== undefined
+          ? { interactionMode: effectiveOptions.rewindInteractionMode }
+          : {}),
+      });
       session.append({
         role: "user",
         content: prompt,

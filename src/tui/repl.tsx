@@ -27,7 +27,7 @@ import type {
   RunAgentCliResult,
 } from "../cli/run-agent.js";
 import { runAgentFromCli } from "../cli/run-agent.js";
-import { listFileHistorySnapshotSummaries } from "../cli/file-history.js";
+import { listRewindPointSummaries } from "../cli/file-history.js";
 import { createCliSessionId, type CliSessionSelection } from "../cli/session-resolver.js";
 import { loadPicoConfig } from "../input/pico-config.js";
 import {
@@ -75,6 +75,7 @@ import {
   type CliSessionBrowserSummary,
 } from "./session-browser-adapter.js";
 import { createRewindCommandDialogRequest } from "./rewind-command-dialog.js";
+import { applyTuiRewind, rewindInputReplacement } from "./rewind-runtime.js";
 import {
   globalApprovalManager,
   globalApprovalPolicy,
@@ -117,6 +118,7 @@ export interface HandleTuiInputSubmissionDeps {
   registry: CommandRegistry;
   workDir: string;
   runAgent: (prompt: string, options?: { images?: ImagePart[] }) => Promise<void>;
+  setRewindContext?: (context: { prompt: string; transcriptIndex: number }) => void;
   exit: () => void;
   processInput?: (text: string) => Promise<TuiInputProcessResult>;
   openDialog?: (request: DialogRequest) => void;
@@ -174,17 +176,25 @@ export async function handleTuiInputSubmission(
     case "empty":
       return;
     case "prompt": {
+      const rewindTranscriptIndex = deps.reporter.getEntryCount();
       deps.reporter.pushUserMessage(processed.raw);
-      await runPreparedUserPrompt(processed.prompt, deps);
+      await runPreparedUserPrompt(processed.prompt, deps, {
+        rewindPrompt: processed.raw,
+        rewindTranscriptIndex,
+      });
       return;
     }
     case "prompt-command": {
+      const rewindTranscriptIndex = deps.reporter.getEntryCount();
       deps.reporter.pushUserMessage(processed.raw);
       const skillActivation = skillActivationFromMetadata(processed.result.metadata);
       if (skillActivation) {
         deps.reporter.pushSkillActivation(skillActivation);
       }
-      await runPreparedUserPrompt(processed.result.prompt, deps);
+      await runPreparedUserPrompt(processed.result.prompt, deps, {
+        rewindPrompt: processed.raw,
+        rewindTranscriptIndex,
+      });
       return;
     }
     case "local-command":
@@ -215,7 +225,11 @@ function skillActivationFromMetadata(
 
 async function runPreparedUserPrompt(
   prompt: string,
-  deps: Pick<HandleTuiInputSubmissionDeps, "workDir" | "reporter" | "runAgent">,
+  deps: Pick<
+    HandleTuiInputSubmissionDeps,
+    "workDir" | "reporter" | "runAgent" | "setRewindContext"
+  >,
+  rewind: { rewindPrompt: string; rewindTranscriptIndex: number },
 ): Promise<void> {
   let prepared: PreparedUserPrompt;
   try {
@@ -228,6 +242,10 @@ async function runPreparedUserPrompt(
   for (const notice of prepared.notices ?? []) {
     deps.reporter.pushSystemMessage(notice);
   }
+  deps.setRewindContext?.({
+    prompt: rewind.rewindPrompt,
+    transcriptIndex: rewind.rewindTranscriptIndex,
+  });
   if (prepared.images) {
     await deps.runAgent(prepared.prompt, { images: prepared.images });
     return;
@@ -536,6 +554,10 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     const [stateEntries, setStateEntries] = useState<TuiEntry[]>([]);
     const [dialogRequests, setDialogRequests] = useState<DialogRequest[]>([]);
     const [queuedCount, setQueuedCount] = useState(0);
+    const [inputReplacement, setInputReplacement] = useState<{
+      sequence: number;
+      text: string;
+    }>();
     setEntries = setStateEntries;
 
     // QueryGuard:三态状态机(idle/dispatching/running),useSyncExternalStore 订阅。
@@ -547,6 +569,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     if (runningQueueRef.current === null) runningQueueRef.current = new RunningInputQueue();
     const runningQueue = runningQueueRef.current;
     const abortControllerRef = useRef<AbortController | null>(null);
+    const rewindContextRef = useRef<{ prompt: string; transcriptIndex: number } | null>(null);
     const status = useSyncExternalStore(guard.subscribe, guard.getSnapshot);
     const running = status !== "idle"; // 派生:非 idle 即视为运行中
 
@@ -561,6 +584,9 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
           workDir: opts.workDir,
           exit,
           sessionId: tuiSessionId,
+          setRewindContext: (context) => {
+            rewindContextRef.current = context;
+          },
           openDialog: (request) => {
             setDialogRequests((current) => [
               ...current.filter((item) => item.id !== request.id),
@@ -574,20 +600,31 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
           },
           openLocalUiDialog: (result) => {
             if (result.ui?.kind !== "open-selector" || result.ui.selector !== "rewind") return;
-            const request = createRewindCommandDialogRequest({
-              sessionId: tuiSessionId,
-              snapshots: listFileHistorySnapshotSummaries(tuiSession),
-              getDiffStat: (messageId) => tuiSession.getRewindDiffStat(messageId),
-              onClose: () => setDialogRequests([]),
-              onDispatchCommand: (command) => {
-                setDialogRequests([]);
-                void handleSubmit(command);
-              },
-            });
-            setDialogRequests((current) => [
-              ...current.filter((item) => item.id !== request.id),
-              request,
-            ]);
+            void listRewindPointSummaries(tuiSession)
+              .then((snapshots) => {
+                const request = createRewindCommandDialogRequest({
+                  sessionId: tuiSessionId,
+                  snapshots,
+                  getDiffStat: (messageId) => tuiSession.getRewindDiffStat(messageId),
+                  onClose: () => setDialogRequests([]),
+                  onRewind: async (snapshot, mode) => {
+                    const rewind = await applyTuiRewind({
+                      session: tuiSession,
+                      reporter,
+                      snapshot,
+                      mode,
+                    });
+                    if (rewind.inputText !== undefined) {
+                      setInputReplacement((current) => rewindInputReplacement(current, rewind));
+                    }
+                  },
+                });
+                setDialogRequests((current) => [
+                  ...current.filter((item) => item.id !== request.id),
+                  request,
+                ]);
+              })
+              .catch((error: unknown) => appendTuiRunError(reporter, error));
           },
           currentModelId: settings.modelRouteId,
           modelOptions: buildModelOptions(modelRouter.routes),
@@ -615,6 +652,8 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
               settings.modelRouteId,
               settings.thinkingEffort,
             );
+            const rewindContext = rewindContextRef.current;
+            rewindContextRef.current = null;
             const cliOpts: RunAgentCliOptions = {
               prompt,
               provider: activeRoute.provider,
@@ -630,6 +669,10 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
               thinkingEffort: settings.thinkingEffort,
               planMode: settings.mode === "plan" || settings.permissionMode === "plan",
               ...(runOptions?.images ? { images: runOptions.images } : {}),
+              ...(rewindContext !== null ? { rewindPrompt: rewindContext.prompt } : {}),
+              ...(rewindContext !== null
+                ? { rewindTranscriptIndex: rewindContext.transcriptIndex }
+                : {}),
               ...(opts.mcpConfigPath ? { mcpConfigPath: opts.mcpConfigPath } : {}),
               addDirs: [...settings.additionalDirectories],
             };
@@ -690,6 +733,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         }
         keybindings={picoConfig.keybindings}
         dialogRequests={dialogRequests}
+        inputReplacement={inputReplacement}
         onSubmit={(text) => void handleSubmit(text)}
         onInterrupt={() => {
           handleTuiInterrupt(abortControllerRef.current, runningQueue, reporter, setQueuedCount);

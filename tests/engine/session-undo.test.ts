@@ -135,7 +135,7 @@ describe("FileHistory 1.5.6 对话 undo", () => {
     expect(records.at(-1)).toMatchObject({ type: "undo", count: 1 });
   });
 
-  it("rewindTo 后按移除的 user 轮次数追加 undo 事件", async () => {
+  it("rewindTo 精确持久化 messageIndex", async () => {
     const persisted = new Session("rewind-persist", workDir, { persistence: true });
     persisted.append({ role: "user", content: "u1" }, { role: "assistant", content: "a1" });
     persisted.append({ role: "user", content: "u2" }, { role: "assistant", content: "a2" });
@@ -149,7 +149,7 @@ describe("FileHistory 1.5.6 对话 undo", () => {
       .split("\n");
     const records = lines.map((line) => JSON.parse(line) as { type: string; count?: number });
     expect(records.filter((r) => r.type === "message")).toHaveLength(4);
-    expect(records.at(-1)).toMatchObject({ type: "undo", count: 1 });
+    expect(records.at(-1)).toMatchObject({ type: "rewind_to", messageIndex: 2 });
   });
 
   it("rewindConversation 截掉仅 assistant 后缀后可精确恢复", async () => {

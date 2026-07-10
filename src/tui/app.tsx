@@ -85,6 +85,8 @@ export interface AppProps {
   onRedraw?: () => void;
   /** User keybinding overrides loaded once at TUI startup. */
   keybindings?: UserKeybindingConfig;
+  /** /rewind 等外部动作请求替换输入草稿。 */
+  inputReplacement?: { sequence: number; text: string };
 }
 
 export function App({
@@ -106,6 +108,7 @@ export function App({
   onExit,
   onRedraw,
   keybindings,
+  inputReplacement,
 }: AppProps): React.ReactNode {
   const { exit } = useApp();
   const { rows, columns } = useWindowSize();
@@ -355,6 +358,7 @@ export function App({
         slashArgumentSuggestions={slashArgumentSuggestions}
         fileMentionSuggestions={fileMentionSuggestions}
         keybindings={keybindings}
+        inputReplacement={inputReplacement}
         onSubmit={onSubmit}
       />
     </Box>

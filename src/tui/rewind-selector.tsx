@@ -1,10 +1,6 @@
 import React from "react";
 import { Box, Text } from "ink";
-import {
-  formatSnapshotChangeSummary,
-  type FileHistorySnapshotSummary,
-  type RewindMode,
-} from "../cli/file-history.js";
+import type { FileHistorySnapshotSummary, RewindMode } from "../cli/file-history.js";
 import type { FileHistoryDiffStat } from "../safety/file-history.js";
 
 export interface RewindSelectorProps {
@@ -21,6 +17,7 @@ export type RewindSelectorState =
       messageId: string;
       diffStat: FileHistoryDiffStat;
       selectedAction: RewindConfirmAction;
+      returnIndex: number;
     };
 
 export type RewindConfirmAction = RewindMode | "cancel";
@@ -50,15 +47,25 @@ export function RewindSelector({
 export function createRewindSelectorState(
   snapshots: readonly FileHistorySnapshotSummary[] = [],
 ): RewindSelectorState {
-  return { phase: "select", selectedIndex: snapshots.length > 0 ? snapshots.length - 1 : 0 };
+  if (usesLegacySelectorData(snapshots)) {
+    return { phase: "select", selectedIndex: snapshots.length > 0 ? snapshots.length - 1 : 0 };
+  }
+  // Claude Code 把 “Current prompt” 作为最后一个虚拟选项并默认聚焦。
+  return { phase: "select", selectedIndex: snapshots.length };
 }
 
 export function selectRewindSnapshot(
-  _state: RewindSelectorState,
+  state: RewindSelectorState,
   messageId: string,
   diffStat: FileHistoryDiffStat,
 ): RewindSelectorState {
-  return { phase: "confirm", messageId, diffStat, selectedAction: "both" };
+  return {
+    phase: "confirm",
+    messageId,
+    diffStat,
+    selectedAction: "both",
+    returnIndex: state.phase === "select" ? state.selectedIndex : state.returnIndex,
+  };
 }
 
 export function moveRewindSelection(
@@ -69,14 +76,22 @@ export function moveRewindSelection(
   if (state.phase === "confirm") {
     return {
       ...state,
-      selectedAction: moveConfirmAction(state.selectedAction, direction),
+      selectedAction: moveConfirmAction(
+        state.selectedAction,
+        state.diffStat,
+        direction,
+        usesLegacySelectorData(snapshots),
+      ),
     };
   }
-
   if (snapshots.length === 0) return state;
   return {
     ...state,
-    selectedIndex: moveIndex(state.selectedIndex, snapshots.length, direction),
+    selectedIndex: moveIndex(
+      state.selectedIndex,
+      snapshots.length + (usesLegacySelectorData(snapshots) ? 0 : 1),
+      direction,
+    ),
   };
 }
 
@@ -85,13 +100,19 @@ export function selectRewindPreview(
   snapshots: readonly FileHistorySnapshotSummary[],
   diffStat: FileHistoryDiffStat,
 ): RewindSelectorState {
-  if (state.phase !== "select" || snapshots.length === 0) return state;
+  if (state.phase !== "select") return state;
   const selected = selectedRewindSnapshot(state, snapshots);
   if (!selected) return state;
-  return selectRewindSnapshot(state, selected.messageId, {
+  const next = selectRewindSnapshot(state, selected.messageId, {
     ...diffStat,
     messageId: selected.messageId,
   });
+  return next.phase === "confirm" && selected.userPrompt !== undefined
+    ? {
+        ...next,
+        selectedAction: diffStat.changedFileCount > 0 ? "both" : "conversation",
+      }
+    : next;
 }
 
 export function selectRewindConfirmAction(
@@ -101,16 +122,20 @@ export function selectRewindConfirmAction(
   if (state.phase !== "confirm") return state;
   if (state.selectedAction === "cancel") {
     callbacks.onCancel?.();
-    return createRewindSelectorState();
+    return { phase: "select", selectedIndex: state.returnIndex };
   }
   callbacks.onConfirm?.(state.messageId, state.selectedAction);
   return createRewindSelectorState();
 }
 
 export function escapeRewindSelector(
-  _state: RewindSelectorState,
+  state: RewindSelectorState,
   callbacks: RewindSelectorCallbacks = {},
 ): RewindSelectorState {
+  if (state.phase === "confirm") {
+    callbacks.onCancel?.();
+    return { phase: "select", selectedIndex: state.returnIndex };
+  }
   callbacks.onCancel?.();
   return createRewindSelectorState();
 }
@@ -119,10 +144,7 @@ export function cancelRewindSelection(
   state: RewindSelectorState,
   callbacks: RewindSelectorCallbacks = {},
 ): RewindSelectorState {
-  if (state.phase === "confirm") {
-    callbacks.onCancel?.();
-  }
-  return createRewindSelectorState();
+  return escapeRewindSelector(state, callbacks);
 }
 
 export function confirmRewindSelection(
@@ -130,9 +152,7 @@ export function confirmRewindSelection(
   mode: RewindMode,
   callbacks: RewindSelectorCallbacks = {},
 ): RewindSelectorState {
-  if (state.phase === "confirm") {
-    callbacks.onConfirm?.(state.messageId, mode);
-  }
+  if (state.phase === "confirm") callbacks.onConfirm?.(state.messageId, mode);
   return createRewindSelectorState();
 }
 
@@ -144,12 +164,12 @@ export function formatRewindSelectorState(
 ): string {
   if (state.phase === "confirm") {
     const snapshot = snapshots.find((item) => item.messageId === state.messageId);
-    return formatRewindConfirmText(snapshot, state.diffStat, options);
+    if (snapshot?.userPrompt === undefined) {
+      return formatLegacyRewindConfirmText(snapshot, state.diffStat, options);
+    }
+    return formatRewindConfirmText(snapshot, state.diffStat, state.selectedAction, options);
   }
-  return formatRewindMessageList(snapshots, {
-    ...options,
-    selectedIndex: clampIndex(state.selectedIndex, snapshots.length),
-  });
+  return formatRewindMessageList(snapshots, { ...options, selectedIndex: state.selectedIndex });
 }
 
 export function formatRewindSelector(
@@ -160,43 +180,43 @@ export function formatRewindSelector(
   return formatRewindMessageList(snapshots, options);
 }
 
+export function formatRewindUsage(
+  sessionId: string,
+  snapshots: readonly FileHistorySnapshotSummary[],
+): string {
+  return formatRewindSelector(sessionId, snapshots, { maxItems: 7 });
+}
+
 function formatRewindMessageList(
   snapshots: readonly FileHistorySnapshotSummary[],
-  options: {
-    maxItems?: number;
-    maxIdLength?: number;
-    maxSummaryLength?: number;
-    selectedIndex?: number;
-  } = {},
+  options: { maxItems?: number; maxSummaryLength?: number; selectedIndex?: number } = {},
 ): string {
-  if (snapshots.length === 0) {
-    return "Rewind\nNothing to rewind to yet.";
-  }
+  if (snapshots.length === 0) return "Rewind\nNothing to rewind to yet.";
+  if (usesLegacySelectorData(snapshots)) return formatLegacyRewindMessageList(snapshots, options);
 
+  const itemCount = snapshots.length + 1;
   const maxItems = options.maxItems ?? 7;
-  const maxIdLength = options.maxIdLength ?? 24;
-  const maxSummaryLength = options.maxSummaryLength ?? 72;
-  const selectedIndex =
-    options.selectedIndex === undefined
-      ? snapshots.length - 1
-      : clampIndex(options.selectedIndex, snapshots.length);
-  const firstVisibleIndex = visibleWindowStart(selectedIndex, snapshots.length, maxItems);
-  const visible = snapshots.slice(firstVisibleIndex, firstVisibleIndex + maxItems);
-  const lines = [
-    "Rewind",
-    "Choose a message to preview before deciding whether to rewind.",
-    "Preview first; confirm happens on the next screen.",
-  ];
-  for (const [visibleIndex, snapshot] of visible.entries()) {
-    const snapshotIndex = firstVisibleIndex + visibleIndex;
-    const marker = snapshotIndex === selectedIndex ? ">" : " ";
-    const summary = truncateText(formatClaudeStyleSnapshotSummary(snapshot), maxSummaryLength);
-    lines.push(`${marker} ${truncateText(snapshot.messageId, maxIdLength)}`);
-    lines.push(`  ${summary}`);
+  const selectedIndex = clampIndex(options.selectedIndex ?? snapshots.length, itemCount);
+  const firstVisibleIndex = visibleWindowStart(selectedIndex, itemCount, maxItems);
+  const lastVisibleIndex = Math.min(itemCount, firstVisibleIndex + maxItems);
+  const lines = ["Rewind", "Restore the code and/or conversation to the point before…"];
+
+  for (let index = firstVisibleIndex; index < lastVisibleIndex; index++) {
+    const marker = index === selectedIndex ? "❯" : " ";
+    const snapshot = snapshots[index];
+    if (!snapshot) {
+      lines.push(`${marker} Current prompt`);
+      lines.push("  Current conversation state");
+      continue;
+    }
+    lines.push(`${marker} ${truncateText(oneLine(snapshot.userPrompt ?? snapshot.messageId), 72)}`);
+    lines.push(
+      `  ${formatSnapshotChange(snapshot)} · ${formatRelativeTime(new Date(snapshot.timestamp))}`,
+    );
   }
-  const hidden = snapshots.length - visible.length;
-  if (hidden > 0) lines.push(`... ${hidden} earlier messages hidden`);
-  lines.push("Up/Down to choose · Enter to preview · Esc to cancel");
+  const hidden = itemCount - (lastVisibleIndex - firstVisibleIndex);
+  if (hidden > 0) lines.push(`… ${hidden} messages outside this window`);
+  lines.push("↑/↓ to choose · Enter to continue · Esc to cancel");
   return lines.join("\n");
 }
 
@@ -205,13 +225,19 @@ export function formatRewindConfirm(
   snapshot: FileHistorySnapshotSummary | undefined,
   diffStat: FileHistoryDiffStat,
 ): React.ReactNode {
+  const content =
+    snapshot?.userPrompt === undefined
+      ? formatLegacyRewindConfirmText(snapshot, diffStat, {})
+      : formatRewindConfirmText(
+          snapshot,
+          diffStat,
+          diffStat.changedFileCount > 0 ? "both" : "conversation",
+        );
   return (
     <Box flexDirection="column">
-      {formatRewindConfirmText(snapshot, diffStat)
-        .split("\n")
-        .map((line, index) => (
-          <Text key={`${index}:${line}`}>{line}</Text>
-        ))}
+      {content.split("\n").map((line, index) => (
+        <Text key={`${index}:${line}`}>{line}</Text>
+      ))}
     </Box>
   );
 }
@@ -219,72 +245,76 @@ export function formatRewindConfirm(
 function formatRewindConfirmText(
   snapshot: FileHistorySnapshotSummary | undefined,
   diffStat: FileHistoryDiffStat,
+  selectedAction: RewindConfirmAction,
   options: { maxItems?: number; maxIdLength?: number } = {},
 ): string {
-  const maxItems = options.maxItems ?? 20;
-  const maxIdLength = options.maxIdLength ?? 48;
-  const messageId = snapshot?.messageId ?? diffStat.messageId;
+  const maxItems = options.maxItems ?? 10;
+  const maxPathLength = options.maxIdLength ?? 72;
+  const prompt = snapshot?.userPrompt ?? snapshot?.messageId ?? "Selected message";
   const lines = [
     "Rewind",
-    "Preview changes before confirming rewind:",
-    `- ${truncateText(messageId, maxIdLength)}`,
+    "Confirm you want to restore to the point before you sent this message:",
+    `  ${truncateText(oneLine(prompt), 72)}`,
   ];
-
-  if (snapshot?.messageIndex !== undefined) {
-    lines.push(`  messageIndex=${snapshot.messageIndex}`);
-  }
-
-  lines.push("The conversation will be forked.");
+  if (snapshot) lines.push(`  (${formatRelativeTime(new Date(snapshot.timestamp))})`);
+  lines.push("The conversation will be forked from this point.");
   lines.push(
     diffStat.changedFileCount > 0
-      ? `The code will be restored +${diffStat.addedLines} -${diffStat.removedLines} in ${formatChangedFiles(diffStat.files)}.`
-      : "The code has not changed (nothing will be restored).",
+      ? `Code restore: ${diffStat.changedFileCount} file(s), +${diffStat.addedLines} -${diffStat.removedLines}`
+      : "Code restore: no file changes",
   );
   for (const file of diffStat.files.slice(0, maxItems)) {
     lines.push(
-      [
-        `- ${truncateText(file.filePath, maxIdLength)}`,
-        file.status,
-        `+${file.addedLines}`,
-        `-${file.removedLines}`,
-      ].join(" "),
+      `  ${truncateText(file.filePath, maxPathLength)}  ${file.status} +${file.addedLines} -${file.removedLines}`,
     );
   }
-  const hidden = diffStat.files.length - Math.min(diffStat.files.length, maxItems);
-  if (hidden > 0) lines.push(`... ${hidden} files hidden`);
-  lines.push("Confirm: restore code and conversation");
-  lines.push("Confirm: restore conversation only");
-  lines.push("Confirm: restore code only");
-  lines.push("Cancel: keep current session");
-  lines.push("Up/Down to choose · Enter to confirm selected action · Esc to cancel");
-  if (diffStat.changedFileCount > 0) {
-    lines.push("! Rewinding does not affect files edited manually or via bash.");
+  if (diffStat.files.length > maxItems) {
+    lines.push(`  … ${diffStat.files.length - maxItems} more files`);
   }
+  lines.push("");
+  for (const [action, label] of restoreActions(diffStat)) {
+    lines.push(`${selectedAction === action ? "❯" : " "} ${label}`);
+  }
+  lines.push("↑/↓ to choose · Enter to confirm · Esc to go back");
   return lines.join("\n");
 }
 
-export function formatRewindUsage(
-  sessionId: string,
-  snapshots: readonly FileHistorySnapshotSummary[],
-): string {
-  return formatRewindSelector(sessionId, snapshots, { maxItems: 7 });
+const CODE_RESTORE_ACTIONS: readonly [RewindConfirmAction, string][] = [
+  ["both", "Restore code and conversation"],
+  ["conversation", "Restore conversation"],
+  ["code", "Restore code"],
+  ["cancel", "Never mind"],
+];
+
+const CONVERSATION_RESTORE_ACTIONS: readonly [RewindConfirmAction, string][] = [
+  ["conversation", "Restore conversation"],
+  ["cancel", "Never mind"],
+];
+
+function restoreActions(diffStat: FileHistoryDiffStat): readonly [RewindConfirmAction, string][] {
+  return diffStat.changedFileCount > 0 ? CODE_RESTORE_ACTIONS : CONVERSATION_RESTORE_ACTIONS;
 }
 
-function formatClaudeStyleSnapshotSummary(snapshot: FileHistorySnapshotSummary): string {
-  if (snapshot.trackedFileCount === 0) return "No code changes";
-  const fileLabel =
-    snapshot.trackedFileCount === 1
-      ? "1 file changed"
-      : `${snapshot.trackedFileCount} files changed`;
-  return `${fileLabel} · ${snapshot.changeSummary ?? formatSnapshotChangeSummary(snapshot)}`;
+function formatSnapshotChange(snapshot: FileHistorySnapshotSummary): string {
+  const count = snapshot.changedFileCount ?? snapshot.trackedFileCount;
+  if (count === 0) return "No code changes";
+  const name =
+    count === 1 && snapshot.changedFiles?.[0]
+      ? (snapshot.changedFiles[0].split(/[\\/]/).at(-1) ?? snapshot.changedFiles[0])
+      : `${count} files changed`;
+  if (snapshot.addedLines === undefined || snapshot.removedLines === undefined) return name;
+  return `${name} +${snapshot.addedLines} -${snapshot.removedLines}`;
 }
 
-function formatChangedFiles(files: readonly FileHistoryDiffStat["files"][number][]): string {
-  if (files.length === 0) return "no files";
-  const basenames = files.map((file) => file.filePath.split(/[\\/]/).at(-1) ?? file.filePath);
-  if (basenames.length === 1) return basenames[0]!;
-  if (basenames.length === 2) return `${basenames[0]} and ${basenames[1]}`;
-  return `${basenames[0]} and ${basenames.length - 1} other files`;
+function formatRelativeTime(date: Date, now = new Date()): string {
+  const seconds = Math.max(0, Math.floor((now.getTime() - date.getTime()) / 1000));
+  if (seconds < 10) return "just now";
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
 }
 
 function moveIndex(index: number, itemCount: number, direction: "up" | "down"): number {
@@ -293,6 +323,7 @@ function moveIndex(index: number, itemCount: number, direction: "up" | "down"): 
 }
 
 function clampIndex(index: number, itemCount: number): number {
+  if (itemCount <= 0) return 0;
   return Math.min(Math.max(index, 0), itemCount - 1);
 }
 
@@ -300,21 +331,35 @@ export function selectedRewindSnapshot(
   state: RewindSelectorState,
   snapshots: readonly FileHistorySnapshotSummary[],
 ): FileHistorySnapshotSummary | undefined {
-  if (state.phase !== "select" || snapshots.length === 0) return undefined;
-  return snapshots[clampIndex(state.selectedIndex, snapshots.length)];
+  if (state.phase !== "select") return undefined;
+  return snapshots[state.selectedIndex];
+}
+
+export function isCurrentRewindSelection(
+  state: RewindSelectorState,
+  snapshots: readonly FileHistorySnapshotSummary[],
+): boolean {
+  return state.phase === "select" && state.selectedIndex === snapshots.length;
 }
 
 function visibleWindowStart(selectedIndex: number, itemCount: number, maxItems: number): number {
   const visibleCount = Math.max(1, maxItems);
   if (itemCount <= visibleCount) return 0;
-  return Math.min(Math.max(0, selectedIndex - visibleCount + 1), itemCount - visibleCount);
+  return Math.min(
+    Math.max(0, selectedIndex - Math.floor(visibleCount / 2)),
+    itemCount - visibleCount,
+  );
 }
 
 function moveConfirmAction(
   action: RewindConfirmAction,
+  diffStat: FileHistoryDiffStat,
   direction: "up" | "down",
+  legacy: boolean,
 ): RewindConfirmAction {
-  const actions: readonly RewindConfirmAction[] = ["both", "conversation", "code", "cancel"];
+  const actions = (legacy ? CODE_RESTORE_ACTIONS : restoreActions(diffStat)).map(
+    ([value]) => value,
+  );
   const index = actions.indexOf(action);
   return actions[moveIndex(index === -1 ? 0 : index, actions.length, direction)]!;
 }
@@ -326,19 +371,79 @@ export function latestSnapshotMessageId(
 }
 
 function truncateText(value: string, maxLength: number): string {
-  if (value.length <= maxLength) return value;
-  const sliceLength = Math.max(0, maxLength - 3);
-  const sliced = value.slice(0, sliceLength);
-  const punctuationIndex = findLastPunctuationIndex(sliced);
-  const prefix = punctuationIndex > 0 ? sliced.slice(0, punctuationIndex) : sliced;
-  return `${prefix}...`;
+  return value.length <= maxLength ? value : `${value.slice(0, Math.max(0, maxLength - 1))}…`;
 }
 
-function findLastPunctuationIndex(value: string): number {
-  return Math.max(
-    value.lastIndexOf(","),
-    value.lastIndexOf("，"),
-    value.lastIndexOf(";"),
-    value.lastIndexOf("；"),
+function oneLine(value: string): string {
+  return value.replace(/\s+/gu, " ").trim();
+}
+
+function truncateLegacyText(value: string, maxLength: number): string {
+  if (value.length <= maxLength) return value;
+  const sliced = value.slice(0, Math.max(0, maxLength - 3));
+  const punctuationIndex = Math.max(
+    sliced.lastIndexOf(","),
+    sliced.lastIndexOf("，"),
+    sliced.lastIndexOf(";"),
+    sliced.lastIndexOf("；"),
   );
+  return `${punctuationIndex > 0 ? sliced.slice(0, punctuationIndex) : sliced}...`;
+}
+
+function usesLegacySelectorData(snapshots: readonly FileHistorySnapshotSummary[]): boolean {
+  return (
+    snapshots.length > 0 &&
+    snapshots.some((snapshot) => snapshot.legacy === true || snapshot.userPrompt === undefined)
+  );
+}
+
+function formatLegacyRewindMessageList(
+  snapshots: readonly FileHistorySnapshotSummary[],
+  options: { maxItems?: number; maxSummaryLength?: number; selectedIndex?: number },
+): string {
+  const maxItems = options.maxItems ?? 7;
+  const selectedIndex = clampIndex(options.selectedIndex ?? snapshots.length - 1, snapshots.length);
+  const firstVisibleIndex = visibleWindowStart(selectedIndex, snapshots.length, maxItems);
+  const lastVisibleIndex = Math.min(snapshots.length, firstVisibleIndex + maxItems);
+  const lines = [
+    "Rewind",
+    "Choose a message to preview before deciding whether to rewind.",
+    "Preview first; confirm happens on the next screen.",
+  ];
+  for (let index = firstVisibleIndex; index < lastVisibleIndex; index++) {
+    const snapshot = snapshots[index]!;
+    const marker = index === selectedIndex ? ">" : " ";
+    const fileLabel =
+      snapshot.trackedFileCount === 1
+        ? "1 file changed"
+        : `${snapshot.trackedFileCount} files changed`;
+    const summary = `${fileLabel} · ${snapshot.changeSummary ?? "No code changes"}`;
+    lines.push(`${marker} ${truncateLegacyText(snapshot.messageId, 24)}`);
+    lines.push(`  ${truncateLegacyText(summary, options.maxSummaryLength ?? 72)}`);
+  }
+  lines.push("Up/Down to choose · Enter to preview · Esc to cancel");
+  return lines.join("\n");
+}
+
+function formatLegacyRewindConfirmText(
+  snapshot: FileHistorySnapshotSummary | undefined,
+  diffStat: FileHistoryDiffStat,
+  options: { maxItems?: number; maxIdLength?: number },
+): string {
+  const lines = [
+    "Rewind",
+    "Preview changes before confirming rewind:",
+    `- ${snapshot?.messageId ?? diffStat.messageId}`,
+    "The conversation will be forked.",
+    `The code will be restored +${diffStat.addedLines} -${diffStat.removedLines}.`,
+  ];
+  for (const file of diffStat.files.slice(0, options.maxItems ?? 20)) {
+    lines.push(`- ${file.filePath} ${file.status} +${file.addedLines} -${file.removedLines}`);
+  }
+  lines.push("Confirm: restore code and conversation");
+  lines.push("Confirm: restore conversation only");
+  lines.push("Confirm: restore code only");
+  lines.push("Cancel: keep current session");
+  lines.push("Up/Down to choose · Enter to confirm selected action · Esc to cancel");
+  return lines.join("\n");
 }

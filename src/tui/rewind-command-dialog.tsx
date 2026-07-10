@@ -7,7 +7,7 @@ import {
   createRewindSelectorState,
   moveRewindSelection,
   RewindSelector,
-  selectRewindConfirmAction,
+  isCurrentRewindSelection,
   selectRewindPreview,
   selectedRewindSnapshot,
   type RewindSelectorState,
@@ -31,6 +31,7 @@ export interface RewindCommandDialogKeyEvent {
 export interface RewindCommandDialogCallbacks {
   getDiffStat: (messageId: string) => Promise<FileHistoryDiffStat>;
   onDispatchCommand?: (command: string) => void;
+  onRewind?: (snapshot: FileHistorySnapshotSummary, mode: RewindMode) => Promise<void>;
   onClose?: () => void;
 }
 
@@ -45,7 +46,8 @@ export interface RewindCommandDialogProps {
   sessionId: string;
   snapshots: readonly FileHistorySnapshotSummary[];
   getDiffStat: (messageId: string) => Promise<FileHistoryDiffStat>;
-  onDispatchCommand: (command: string) => void;
+  onDispatchCommand?: (command: string) => void;
+  onRewind?: (snapshot: FileHistorySnapshotSummary, mode: RewindMode) => Promise<void>;
   onClose: () => void;
   initialState?: RewindCommandDialogState;
   maxItems?: number;
@@ -78,6 +80,7 @@ export function RewindCommandDialog({
   snapshots,
   getDiffStat,
   onDispatchCommand,
+  onRewind,
   onClose,
   initialState,
   maxItems,
@@ -99,6 +102,7 @@ export function RewindCommandDialog({
       {
         getDiffStat,
         onDispatchCommand,
+        onRewind,
         onClose,
       },
     )
@@ -132,6 +136,20 @@ export async function resolveRewindCommandDialogKey(
   if (state.status === "closed") return state;
 
   if (event.key.escape || event.input === "\u001b") {
+    const selector = state.selector;
+    const selectedSnapshot =
+      selector.phase === "confirm"
+        ? snapshots.find((snapshot) => snapshot.messageId === selector.messageId)
+        : undefined;
+    if (selector.phase === "confirm" && selectedSnapshot?.userPrompt !== undefined) {
+      return {
+        ...state,
+        selector: {
+          phase: "select",
+          selectedIndex: selector.returnIndex,
+        },
+      };
+    }
     callbacks.onClose?.();
     return closeRewindDialog();
   }
@@ -153,6 +171,10 @@ export async function resolveRewindCommandDialogKey(
   if (!event.key.return) return state;
 
   if (state.selector.phase === "select") {
+    if (isCurrentRewindSelection(state.selector, snapshots)) {
+      callbacks.onClose?.();
+      return closeRewindDialog();
+    }
     const snapshot = selectedRewindSnapshot(state.selector, snapshots);
     if (!snapshot) return state;
     const diffStat = await callbacks.getDiffStat(snapshot.messageId);
@@ -162,20 +184,24 @@ export async function resolveRewindCommandDialogKey(
     };
   }
 
-  let didClose = false;
-  const selector = selectRewindConfirmAction(state.selector, {
-    onConfirm: (messageId, mode) => {
-      callbacks.onDispatchCommand?.(rewindSelectionToCommand(messageId, mode));
-      callbacks.onClose?.();
-      didClose = true;
-    },
-    onCancel: () => {
-      callbacks.onClose?.();
-      didClose = true;
-    },
-  });
-
-  return didClose ? closeRewindDialog() : { ...state, selector };
+  const confirm = state.selector;
+  if (confirm.selectedAction === "cancel") {
+    return {
+      ...state,
+      selector: { phase: "select", selectedIndex: confirm.returnIndex },
+    };
+  }
+  const snapshot = snapshots.find((item) => item.messageId === confirm.messageId);
+  if (!snapshot) throw new Error("The selected rewind point is no longer available.");
+  if (callbacks.onRewind) {
+    await callbacks.onRewind(snapshot, confirm.selectedAction);
+  } else {
+    callbacks.onDispatchCommand?.(
+      rewindSelectionToCommand(confirm.messageId, confirm.selectedAction),
+    );
+  }
+  callbacks.onClose?.();
+  return closeRewindDialog();
 }
 
 export function rewindSelectionToCommand(messageId: string, mode: RewindMode): string {

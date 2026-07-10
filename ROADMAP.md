@@ -462,6 +462,7 @@ git worktree remove ../pico-1-streaming
 - [x] 8.6 PR 门禁包含确定性 E2E、build、package dry-run 和构建产物 PTY smoke；真实模型验收 fail-closed 并接入 nightly/manual workflow
 - [x] 8.7 公开文档统一 TUI-only 边界、`/snapshots` / `/rewind` 文件历史与 SkillRegistry 已实现能力，阶段 4 外壳标为历史退役
 - [x] 8.8 归档旧计划，通过 `rg`、lint、format、typecheck、全量测试、真实模型验收、TUI smoke 和发布包验证
+- [x] 8.9 `/rewind` 收敛为 Claude Code 用户消息级 checkpoint：提示词/相对时间/单条文件变化选择器，code/conversation/both 恢复，conversation fork 后同步截断 Session 与 TUI transcript 并回填原 prompt；旧 turn manifest 仅保留显式 code rewind 兼容
 
 ---
 
@@ -478,8 +479,8 @@ git worktree remove ../pico-1-streaming
 | 阶段 5.1     | 11       | 11     | ✅ 完成                             |
 | 阶段 6       | 8        | 8      | ✅ 完成                             |
 | 阶段 7       | 8        | 8      | ✅ 完成                             |
-| 阶段 8       | 8        | 8      | ✅ TUI-only 收口完成                |
-| **当前总计** | **75**   | **75** | ✅ 阶段 1-8 交付并收口              |
+| 阶段 8       | 9        | 9      | ✅ TUI-only 收口完成                |
+| **当前总计** | **76**   | **76** | ✅ 阶段 1-8 交付并收口              |
 
 ---
 
@@ -504,6 +505,12 @@ git worktree remove ../pico-1-streaming
 ---
 
 ## 📅 变更记录
+
+- 2026-07-10：`/rewind` 对齐 Claude Code 用户消息级机制
+  - 顶层用户消息进入模型前建立唯一 RewindPoint，内部 ReAct turn 不再生成用户可见快照。
+  - 选择器展示原始提示词、相对时间和该条消息真实文件变化；确认页默认 code+conversation，无代码变化时只提供 conversation。
+  - conversation/both 精确持久化 `rewind_to(messageIndex)`，同步 fork Session、截断可见 transcript、移除未来活动分支，并把原 prompt 回填输入框。
+  - manifest 新字段全部可选；旧 turn 快照不进入消息选择器，仍可通过显式 messageId 执行 code-only 兼容回滚。
 
 - 2026-07-10：修复 TUI 工作区审批、Goal 与工具卡交互
   - 审批 dialog 按 taskId 隔离，并发请求不再覆盖；连续 Enter 只处理一次，abort/finally 会清理本轮全部审批框。

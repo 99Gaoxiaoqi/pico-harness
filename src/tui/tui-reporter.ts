@@ -71,6 +71,20 @@ export class TuiReporter implements Reporter {
     this.emit();
   }
 
+  getEntryCount(): number {
+    return this.entries.length;
+  }
+
+  /** 对话 rewind 后让可见 transcript 与 Session 使用同一截断边界。 */
+  truncateTo(entryIndex: number): void {
+    const safeIndex = Math.min(Math.max(0, entryIndex), this.entries.length);
+    this.entries.splice(safeIndex);
+    this.resetTurnBuffer();
+    this.pendingTools.clear();
+    this.spinnerMode = "idle";
+    this.emit();
+  }
+
   /** 显式 Skill 激活属于持久 transcript 事件,不伪装成普通用户文本。 */
   pushSkillActivation(input: {
     name: string;

@@ -12,6 +12,7 @@
 // 依靠喂给它的 Session 推理 —— 随时休眠、随时被唤醒的记忆连续体。
 
 import { mkdirSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
 import type { CanonicalUsage, Message } from "../schema/message.js";
 import type { CostStatus } from "../observability/pricing.js";
@@ -23,8 +24,11 @@ import {
   createFileHistoryState,
   type FileHistoryState,
   type FileHistoryDiffStat,
+  fileHistoryBeginRewindPoint,
+  fileHistoryDiscardFrom,
   fileHistoryDiffStat,
   fileHistoryLoadState,
+  fileHistoryMessageDiffStat,
   fileHistoryRewind,
 } from "../safety/file-history.js";
 
@@ -435,19 +439,39 @@ export class Session {
     void this.persistUndoEvent(removedCount);
   }
 
-  rewindTo(messageIndex: number): void {
-    const removedUserCount = this.countUserPrompts(this.history.slice(messageIndex));
+  async beginRewindPoint(input: {
+    userPrompt: string;
+    transcriptIndex?: number;
+    interactionMode?: string;
+    messageId?: string;
+  }): Promise<string> {
+    const messageId = input.messageId ?? randomUUID();
+    await fileHistoryBeginRewindPoint(
+      this.fileHistory,
+      {
+        messageId,
+        userPrompt: input.userPrompt,
+        messageIndex: this.history.length,
+        ...(input.transcriptIndex !== undefined ? { transcriptIndex: input.transcriptIndex } : {}),
+        ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
+      },
+      this.id,
+    );
+    return messageId;
+  }
+
+  async rewindTo(messageIndex: number): Promise<void> {
     this.history = this.history.slice(0, messageIndex);
     this.pruneToolResultMeta();
+    this.deferredMessages = [];
+    this.pendingToolCallIds.clear();
     this.conversationId = `${this.id}-${Date.now().toString(36)}`;
     this.updatedAt = new Date();
     // 4.3: rewind 重写历史,递增 epoch 让旧 cursor 的 WS client 感知世代已变。
     this.store?.bumpEpoch();
-    if (removedUserCount > 0) {
-      void this.persistUndoEvent(removedUserCount);
-    } else {
-      void this.persistRewindTo(messageIndex);
-    }
+    // 精确记录截断下标；不能折叠成 undo(count)，否则 tool result / injection
+    // 边界在恢复时可能漂移。
+    await this.persistRewindTo(messageIndex);
   }
 
   async rewindCode(messageId: string): Promise<void> {
@@ -458,13 +482,21 @@ export class Session {
     return fileHistoryDiffStat(this.fileHistory, messageId, this.id);
   }
 
-  rewindConversation(messageIndex: number): void {
-    this.rewindTo(messageIndex);
+  async getRewindPointChangeStat(messageId: string): Promise<FileHistoryDiffStat> {
+    return fileHistoryMessageDiffStat(this.fileHistory, messageId, this.id);
+  }
+
+  async rewindConversation(messageIndex: number, messageId?: string): Promise<void> {
+    await this.rewindTo(messageIndex);
+    if (messageId) {
+      await fileHistoryDiscardFrom(this.fileHistory, messageId, this.id);
+    }
   }
 
   async rewindBoth(messageId: string, messageIndex: number): Promise<void> {
     await fileHistoryRewind(this.fileHistory, messageId, this.id);
-    this.rewindTo(messageIndex);
+    await this.rewindTo(messageIndex);
+    await fileHistoryDiscardFrom(this.fileHistory, messageId, this.id);
   }
 
   /**
@@ -504,7 +536,7 @@ export class Session {
     this.pendingWrites = [];
     await Promise.all(pending);
     const seq = this.nextSeq++;
-    this.store
+    await this.store
       .appendRewindTo(seq, messageIndex)
       .catch((err) => logger.warn({ seq }, `[session] rewind_to 落盘失败: ${String(err)}`));
   }
@@ -547,10 +579,6 @@ export class Session {
       message.content.startsWith("[上下文压缩") ||
       message.content.includes("--- 历史摘要结束")
     );
-  }
-
-  private countUserPrompts(messages: Message[]): number {
-    return messages.reduce((count, message) => count + (message.role === "user" ? 1 : 0), 0);
   }
 
   /**
