@@ -83,7 +83,7 @@ describe("Pico command registry", () => {
     expect(result.type).toBe("local-command");
     if (result.type !== "local-command") return;
     expect(result.command).toBe("mode");
-    expect(result.result.message).toContain("Current mode: default");
+    expect(result.result.message).toContain("Current mode: yolo");
   });
 
   it("/goal shows the active goal from the shared TUI runtime", async () => {
@@ -240,10 +240,10 @@ describe("Pico command registry", () => {
     if (result.type !== "local-command") return;
     expect(result.command).toBe("mode");
     expect(result.result.message).toContain("Usage: /mode <default|plan|auto|yolo>");
-    expect(getStoredSessionSettings("session-mode-reject")?.mode).toBe("default");
+    expect(getStoredSessionSettings("session-mode-reject")?.mode).toBe("yolo");
   });
 
-  it("/permissions yolo/auto/default/ask updates the shared permission mode", async () => {
+  it("/permissions yolo/auto/default/ask updates the shared interaction mode", async () => {
     const registry = await createPicoCommandRegistry({
       workDir: process.cwd(),
       provider: "openai",
@@ -260,9 +260,9 @@ describe("Pico command registry", () => {
     expect(auto.type).toBe("local-command");
     expect(defaultMode.type).toBe("local-command");
     expect(ask.type).toBe("local-command");
-    expect(getStoredSessionSettings("session-permissions-shared")?.permissionMode).toBe("ask");
+    expect(getStoredSessionSettings("session-permissions-shared")?.permissionMode).toBe("default");
     expect(ask.type === "local-command" ? ask.result.data : undefined).toMatchObject({
-      permissionMode: "ask",
+      permissionMode: "default",
     });
   });
 
@@ -670,7 +670,7 @@ describe("Pico command registry", () => {
     expect(result.type).toBe("local-command");
     if (result.type !== "local-command") return;
     expect(result.result.message).toContain("Mode: default");
-    expect(result.result.message).toContain("Permission mode: ask");
+    expect(result.result.message).not.toContain("Permission mode:");
     expect(result.result.message).toContain("Model: glm-5.2");
     expect(result.result.message).toContain("Thinking effort: medium");
     expect(result.result.message).toContain("Session: session-status");

@@ -39,7 +39,7 @@
 ## 公开入口与文件历史
 
 - 唯一公开入口是 `pico` → TUI；`runAgentFromCli` 仅是 TUI 内部装配函数。
-- TUI 通过 `/snapshots` 查看文件历史，通过 `/rewind` 选择 code / conversation / both 回滚。
+- TUI 的 `/rewind` 按顶层用户消息展示提示词、时间和单轮文件变化，并原子恢复 code / conversation / transcript / input / mode；`/snapshots` 只作诊断入口。
 - REST/WebSocket、ACP、飞书、one-shot/headless CLI、Cron、Docker 和 Plugin runtime 不在当前公开范围。
 - `safety/checkpoint-manager.ts` 只是 legacy/manual fallback；现行主方案是 `safety/file-history.ts`，不要删除 fallback。
 
@@ -49,7 +49,7 @@
 
 - [x] 第 01-22 讲:全部完成,详见各讲文档
 
-### 进化阶段(进行中)
+### 进化阶段(已收口)
 
 > **进度跟踪在 ROADMAP.md**,新窗口请先读该文件了解当前状态。
 
@@ -59,4 +59,5 @@
 - [x] 阶段 3:上下文与控制流增强(MicroCompaction / Steer / undo / Goal Mode / Plan Review / shouldContinueAfterStop)
 - [x] 阶段 4:历史完成多端入口；当前仅保留 Gemini / Credential Pool，REST+WS / ACP / 飞书 / Docker 外壳已退役
 - [x] 阶段 5-7:历史功能迭代已收口，当前公开产品边界以 TUI 为准
-- [ ] 阶段 8:TUI-only 文档与产品边界收口（进度见 ROADMAP.md）
+- [x] 阶段 8:TUI-only 文档与产品边界收口
+- [x] 阶段 9:OpenCode 风格模型路由 + Claude Code 风格 Rewind / 审批 / 单一模式

@@ -41,7 +41,7 @@ describe("App", () => {
     expect(countOccurrences(output, "pico · glm-5.2 · /workspace/demo")).toBe(1);
     expect(output).toContain("phase idle");
     expect(output).toContain("mode new");
-    expect(output).toContain("perm ask");
+    expect(output).toContain("perm yolo");
     expect(output).not.toContain("glm-5.2/openai");
     expect(countOccurrences(output, 'Try "fix this" or / for commands')).toBe(1);
     expect(countOccurrences(output, "Enter 发送")).toBe(0);
@@ -399,7 +399,7 @@ describe("App", () => {
       expect(foundPermissions).toBe(true);
       expect(output).toContain("builtin / permissions");
       expect(output).toContain("aliases: /permission");
-      expect(output).toContain("/permissions [ask|default|auto|");
+      expect(output).toContain("/permissions [default|auto|yolo|plan]");
 
       await harness.write("\u001b");
       await new Promise((resolve) => setTimeout(resolve, 80));
@@ -1157,7 +1157,7 @@ describe("App", () => {
     }
   });
 
-  it("reflows a narrow transcript when approval diff is expanded with E", async () => {
+  it("reflows a narrow transcript when approval diff is toggled with E", async () => {
     const harness = createInteractiveApp(
       <App
         model="glm-5.2"
@@ -1191,11 +1191,47 @@ describe("App", () => {
     );
 
     try {
-      const expanded = await harness.write("e");
+      const initiallyExpanded = await harness.rerender(
+        <App
+          model="glm-5.2"
+          provider="openai"
+          workDir="/workspace/demo"
+          entries={Array.from({ length: 20 }, (_, index) => ({
+            kind: "assistant" as const,
+            content: `message-${index}`,
+          }))}
+          running
+          dialogRequests={[
+            {
+              id: "approval:pending:approval-1",
+              layer: "modal",
+              priority: 80,
+              content: (
+                <InteractiveApprovalPanel
+                  taskId="approval-1"
+                  toolName="write_file"
+                  args={JSON.stringify({ path: `docs/${"nested/".repeat(8)}PLAN.md` })}
+                  message="Review a long write operation before allowing it to continue"
+                  diff={Array.from({ length: 6 }, (_, index) => `+added-${index}`).join("\n")}
+                  onAction={vi.fn()}
+                />
+              ),
+            },
+          ]}
+          onSubmit={vi.fn()}
+        />,
+      );
+      expect(initiallyExpanded).toContain("Diff preview:");
 
-      expect(expanded).toContain("Diff preview:");
-      expect(expanded).toContain("+added-5");
-      expect(expanded).toContain("Use dialog controls");
+      const collapsed = await harness.write("e");
+      expect(collapsed).toContain("Diff: +6 -0");
+      expect(collapsed).not.toContain("Diff preview:");
+
+      const expandedAgain = await harness.write("e");
+
+      expect(expandedAgain).toContain("Diff preview:");
+      expect(expandedAgain).toContain("+added-5");
+      expect(expandedAgain).toContain("Use dialog controls");
     } finally {
       await harness.cleanup();
     }

@@ -61,7 +61,9 @@ npx tsx --env-file=.env --import ./src/tui/preload-env.ts src/cli/main.ts \
 ### 当前范围
 
 - `src/cli/run-agent.ts` 中的 `runAgentFromCli` 是 TUI 内部装配函数，不是可支持的 one-shot/headless CLI 入口。
-- 文件历史在 TUI 内使用 `/snapshots` 和 `/rewind`。
+- `/rewind` 按用户消息列出提示词、时间和该轮文件变化，恢复后会同步截断对话并把原提示词放回输入框；`/snapshots` 保留为诊断入口。
+- 默认交互模式是 `yolo`：普通工具和普通工作区外路径不弹审批；hardline、Plan 守卫、显式 Hook deny 和敏感路径安全检查仍不可绕过。需要逐次确认时使用 `/mode default`。
+- `/permissions` 是 `/mode` 的兼容别名，不再维护第二套权限状态。
 - REST/WebSocket、ACP、飞书与 one-shot CLI 外壳曾在历史阶段完成，后已退役。
 - Cron/headless 调度、Docker 部署和 Plugin runtime 不在当前产品范围。
 
