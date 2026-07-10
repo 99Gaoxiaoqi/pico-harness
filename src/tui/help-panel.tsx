@@ -175,11 +175,20 @@ export function fitHelpPanelMaxItems(
     selectedIndex?: number;
     scrollOffset?: number;
   },
-): number {
-  if (commands.length === 0) return 1;
+): { maxItems: number; maxRenderedRows: number } {
+  if (commands.length === 0) {
+    return {
+      maxItems: 1,
+      maxRenderedRows: measureHelpPanelRows(commands, { width: options.width, maxItems: 1 }),
+    };
+  }
 
   const maxRows = Math.max(1, options.maxRows);
   let fitted = 1;
+  let fittedRows = measureWorstHelpPanelRows(commands, {
+    maxItems: fitted,
+    width: options.width,
+  });
   for (let maxItems = 1; maxItems <= commands.length; maxItems++) {
     const rows = measureWorstHelpPanelRows(commands, {
       maxItems,
@@ -187,8 +196,9 @@ export function fitHelpPanelMaxItems(
     });
     if (rows > maxRows) break;
     fitted = maxItems;
+    fittedRows = rows;
   }
-  return fitted;
+  return { maxItems: fitted, maxRenderedRows: fittedRows };
 }
 
 function measureWorstHelpPanelRows(

@@ -37,7 +37,6 @@ import { buildTranscriptLayout } from "./transcript-layout.js";
 import {
   fitHelpPanelMaxItems,
   InteractiveHelpPanel,
-  measureHelpPanelRows,
   type InteractiveHelpPanelProps,
 } from "./help-panel.js";
 import {
@@ -149,7 +148,7 @@ export function App({
   );
   const transcriptTotalRows = transcriptLayout.contentRows;
   const transcriptRows = Math.max(
-    inputDisabled ? 1 : 6,
+    inputDisabled ? 0 : 6,
     rows - 8 - genericDialogRows - transcriptLayout.approvalRows,
   );
   const lastLayoutItem = transcriptLayout.items.at(-1);
@@ -348,21 +347,15 @@ function measureGenericDialogLayout(
   const maxRows = Math.max(3, options.rows - 9);
   const width = Math.max(20, options.columns - 8);
   if (React.isValidElement<InteractiveHelpPanelProps>(content) && content.type === InteractiveHelpPanel) {
-    const maxItems = fitHelpPanelMaxItems(content.props.commands, {
+    const fit = fitHelpPanelMaxItems(content.props.commands, {
       maxRows,
       width,
       selectedIndex: content.props.selectedIndex,
       scrollOffset: content.props.scrollOffset,
     });
-    const measuredRows = measureHelpPanelRows(content.props.commands, {
-      maxItems,
-      width,
-      selectedIndex: content.props.selectedIndex,
-      scrollOffset: content.props.scrollOffset,
-    });
     return {
-      content: React.cloneElement(content, { maxItems }),
-      rows: Math.min(maxRows, measuredRows),
+      content: React.cloneElement(content, { maxItems: fit.maxItems }),
+      rows: fit.maxRenderedRows,
     };
   }
 
