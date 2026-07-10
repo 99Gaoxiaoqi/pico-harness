@@ -40,7 +40,7 @@ import { processUserInput } from "../input/process-user-input.js";
 import { parseSlashInput } from "../input/slash-parser.js";
 import type { CommandRegistry } from "../input/command-registry.js";
 import {
-  RUNNING_ALLOWED_LOCAL_COMMANDS,
+  getCommandAvailability,
   type CommandInputState,
 } from "../input/command-availability.js";
 import type { InputProcessResult, LocalCommandResult } from "../input/types.js";
@@ -140,8 +140,6 @@ export interface TuiAbortControllerRef {
   current: AbortController | null;
 }
 
-const RUNNING_IMMEDIATE_LOCAL_COMMANDS = new Set<string>(RUNNING_ALLOWED_LOCAL_COMMANDS);
-
 export function getTuiCommandAvailabilityState(status: string): CommandInputState {
   return status === "idle" ? "idle" : "running";
 }
@@ -216,7 +214,7 @@ export async function handleTuiRunningInputSubmission(
     if (
       running &&
       processed.type === "local-command" &&
-      !canRunLocalCommandWhileRunning(processed.command)
+      !canRunLocalCommandWhileRunning(processed.command, deps.registry)
     ) {
       deps.reporter.pushSystemMessage(formatRunningCommandBlocked(processed.command));
       return;
@@ -310,11 +308,12 @@ function blockedRunningLocalCommand(text: string, registry: CommandRegistry): st
 
   const command = registry.resolve(parsed.name);
   if (!command || command.kind === "prompt") return undefined;
-  return canRunLocalCommandWhileRunning(command.name) ? undefined : command.name;
+  return getCommandAvailability(command, "running").available ? undefined : command.name;
 }
 
-function canRunLocalCommandWhileRunning(command: string): boolean {
-  return RUNNING_IMMEDIATE_LOCAL_COMMANDS.has(command);
+function canRunLocalCommandWhileRunning(command: string, registry: CommandRegistry): boolean {
+  const descriptor = registry.resolve(command);
+  return descriptor !== undefined && getCommandAvailability(descriptor, "running").available;
 }
 
 function formatRunningCommandBlocked(command: string): string {
