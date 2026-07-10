@@ -12,6 +12,7 @@ import type { LLMProvider } from "../../src/provider/interface.js";
 import type { Message, ToolDefinition } from "../../src/schema/message.js";
 import { App } from "../../src/tui/app.js";
 import { TUI_RENDER_OPTIONS } from "../../src/tui/repl.js";
+import { resolveTuiRenderStdout } from "../../src/tui/terminal-grid.js";
 import type { TuiEntry } from "../../src/tui/tui-reporter.js";
 import { BashTool, ReadFileTool, ToolRegistry } from "../../src/tools/registry-impl.js";
 import { createToolResultObservationProcessor } from "../../src/tools/tool-result-observation.js";
@@ -232,8 +233,9 @@ describe("阶段 10：滚动窗口与大型工具输出集成验收", () => {
     expect(harness.rawOutput()).toContain(MOUSE_DISABLE);
   });
 
-  it("生产全屏从 166 列缩到 80 列后流式更新不越界或重复刷屏", async () => {
-    const terminal = new ImmediateWrapTerminal(166, 17);
+  it("生产全屏在 PTY 与前端尺寸漂移后流式更新不越界或重复刷屏", async () => {
+    // ChatGPT.app 真实故障：后端仍为 166x17，xterm 前端已 fit 到约 87x40。
+    const terminal = new ImmediateWrapTerminal(87, 40);
     const user: TuiEntry = { kind: "user", content: "USER_CJK_MARKER_这个skill是在哪拿的" };
     const app = (entries: TuiEntry[], running: boolean) => (
       <App
@@ -247,7 +249,10 @@ describe("阶段 10：滚动窗口与大型工具输出集成验收", () => {
         onSubmit={() => undefined}
       />
     );
-    const harness = createProductionFrameHarness(app([user], true), terminal);
+    const harness = await createProductionFrameHarness(app([user], true), terminal, {
+      columns: 166,
+      rows: 17,
+    });
 
     try {
       await harness.wait(280); // 让 80ms spinner 真实跨过多帧。
@@ -272,8 +277,15 @@ describe("阶段 10：滚动窗口与大型工具输出集成验收", () => {
 
       const visible = terminal.visibleText();
       expect(visible.match(/phase idle · mode yolo/gu)).toHaveLength(1);
+      expect(visible).not.toContain("phase running · mode yolo");
       expect(visible.match(/USER_CJK_MARKER/gu)).toHaveLength(1);
       expect(visible.match(/FINAL_CJK_MARKER/gu)).toHaveLength(1);
+      expect(visible.split("\n").filter((line) => /^─+$/u.test(line))).toEqual(["─".repeat(79)]);
+      expect(harness.probeQueries()).toBe(1);
+      expect(harness.appFramesBeforeProbe()).toBe(0);
+      expect(harness.rawText().match(/phase running · mode yolo/gu)?.length ?? 0).toBeGreaterThan(
+        1,
+      );
       expect(terminal.wrapEvents).toBe(0);
       expect(terminal.scrollEvents).toBe(0);
       expect(terminal.scrollbackText()).not.toMatch(
@@ -364,15 +376,19 @@ function createInteractiveApp(
   };
 }
 
-function createProductionFrameHarness(
+async function createProductionFrameHarness(
   node: React.ReactNode,
   terminal: ImmediateWrapTerminal,
-): {
+  reportedDimensions: { columns: number; rows: number },
+): Promise<{
   wait: (milliseconds: number) => Promise<void>;
   resize: (columns: number, rows: number) => Promise<void>;
   rerender: (node: React.ReactNode) => Promise<void>;
+  rawText: () => string;
+  probeQueries: () => number;
+  appFramesBeforeProbe: () => number;
   cleanup: () => Promise<void>;
-} {
+}> {
   const stdin = new PassThrough();
   const stdout = new PassThrough();
   const stderr = new PassThrough();
@@ -387,15 +403,40 @@ function createProductionFrameHarness(
   });
   Object.defineProperties(stdout, {
     isTTY: { value: true },
-    columns: { value: terminal.columns, writable: true },
-    rows: { value: terminal.rows, writable: true },
+    columns: { value: reportedDimensions.columns, writable: true },
+    rows: { value: reportedDimensions.rows, writable: true },
   });
-  stdout.on("data", (chunk) => terminal.write(String(chunk)));
+  let rawOutput = "";
+  let probeQueries = 0;
+  let probeComplete = false;
+  let appFramesBeforeProbe = 0;
+  stdout.on("data", (chunk) => {
+    const output = String(chunk);
+    rawOutput += output;
+    terminal.write(output);
+    if (!probeComplete && stripAnsi(output).includes("phase ")) appFramesBeforeProbe++;
+    if (!output.includes("\u001b[6n")) return;
+    probeQueries++;
+    const response = terminal.cursorPositionResponse();
+    const splitAt = Math.max(1, Math.floor(response.length / 2));
+    stdin.write(response.slice(0, splitAt));
+    queueMicrotask(() => {
+      stdin.write(response.slice(splitAt));
+      probeComplete = true;
+    });
+  });
+
+  const renderStdout = await resolveTuiRenderStdout(
+    stdin as unknown as NodeJS.ReadStream,
+    stdout as unknown as NodeJS.WriteStream,
+    { CODEX_SHELL: "1" },
+    50,
+  );
 
   const instance: Instance = render(node, {
     ...TUI_RENDER_OPTIONS,
     stdin: stdin as unknown as NodeJS.ReadStream,
-    stdout: stdout as unknown as NodeJS.WriteStream,
+    stdout: renderStdout,
     stderr: stderr as unknown as NodeJS.WriteStream,
     debug: false,
     interactive: true,
@@ -409,7 +450,6 @@ function createProductionFrameHarness(
   return {
     wait,
     async resize(columns: number, rows: number): Promise<void> {
-      terminal.resize(columns, rows);
       Object.assign(stdout, { columns, rows });
       stdout.emit("resize");
       await wait(50);
@@ -418,6 +458,9 @@ function createProductionFrameHarness(
       instance.rerender(nextNode);
       await wait(50);
     },
+    rawText: () => stripAnsi(rawOutput),
+    probeQueries: () => probeQueries,
+    appFramesBeforeProbe: () => appFramesBeforeProbe,
     async cleanup(): Promise<void> {
       instance.unmount();
       await instance.waitUntilExit();
@@ -508,17 +551,8 @@ class ImmediateWrapTerminal {
     return this.scrollback.join("\n");
   }
 
-  resize(columns: number, rows: number): void {
-    this.columns = Math.max(1, columns);
-    this.rows = Math.max(1, rows);
-    this.screen = Array.from({ length: this.rows }, () => this.blankLine());
-    this.scrollback = [];
-    this.x = 0;
-    this.y = 0;
-    this.savedX = 0;
-    this.savedY = 0;
-    this.wrapEvents = 0;
-    this.scrollEvents = 0;
+  cursorPositionResponse(): string {
+    return `\u001b[${this.y + 1};${this.x + 1}R`;
   }
 
   private applyCsi(parameters: string, final: string): void {
