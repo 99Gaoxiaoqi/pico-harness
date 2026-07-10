@@ -1,4 +1,5 @@
 import stringWidth from "string-width";
+import wrapAnsi from "wrap-ansi";
 
 const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 
@@ -33,6 +34,13 @@ export function visualRows(text: string, wrapWidth: number): string[] {
   }
 
   return rows.length > 0 ? rows : [""];
+}
+
+export function wrappedVisualRows(text: string, wrapWidth: number): string[] {
+  return wrapAnsi(text, normalizeWrapWidth(wrapWidth), {
+    trim: false,
+    hard: true,
+  }).split("\n");
 }
 
 function normalizeWrapWidth(width: number): number {
