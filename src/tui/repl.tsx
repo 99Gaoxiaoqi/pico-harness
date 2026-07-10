@@ -223,7 +223,7 @@ export async function handleTuiRunningInputSubmission(
 
   const gen = deps.guard.tryStart();
   if (gen === null) {
-    const queued = deps.queue.enqueue(text, processed);
+    const queued = deps.queue.enqueue(text, processed, { commandAvailabilityState: availabilityState });
     if (queued.type === "rejected") {
       deps.reporter.pushSystemMessage(`Input queue is full (${queued.capacity}). Please wait.`);
     }
@@ -268,13 +268,16 @@ async function drainQueuedTuiInputs(deps: HandleTuiRunningInputSubmissionDeps): 
         await handleTuiInputSubmission(item.text, {
           ...deps,
           processInput: async () => processed,
+          commandAvailabilityState: item.commandAvailabilityState ?? deps.commandAvailabilityState,
         });
         continue;
       }
 
       const gen = deps.guard.tryStart();
       if (gen === null) {
-        const queuedAgain = deps.queue.enqueue(item.text, processed);
+        const queuedAgain = deps.queue.enqueue(item.text, processed, {
+          commandAvailabilityState: item.commandAvailabilityState ?? deps.commandAvailabilityState,
+        });
         if (queuedAgain.type === "rejected") {
           deps.reporter.pushSystemMessage(
             `Input queue is full (${queuedAgain.capacity}). Please wait.`,
@@ -283,7 +286,16 @@ async function drainQueuedTuiInputs(deps: HandleTuiRunningInputSubmissionDeps): 
         return;
       }
 
-      await runProcessedAgentInput(item.text, processed, deps, gen, { drainAfter: false });
+      await runProcessedAgentInput(
+        item.text,
+        processed,
+        {
+          ...deps,
+          commandAvailabilityState: item.commandAvailabilityState ?? deps.commandAvailabilityState,
+        },
+        gen,
+        { drainAfter: false },
+      );
     }
   }
 }

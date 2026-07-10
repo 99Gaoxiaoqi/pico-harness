@@ -39,7 +39,7 @@ describe("TUI running input queue", () => {
       exit,
       runAgent,
     });
-    await Promise.resolve();
+    await waitForGuardStatus(guard, "running");
 
     await handleTuiRunningInputSubmission("second", {
       reporter,
@@ -174,6 +174,7 @@ describe("TUI running input queue", () => {
         description: "Expand once",
         usage: "/expand",
         kind: "prompt",
+        availability: "running",
         execute,
       },
     ]);
@@ -187,7 +188,7 @@ describe("TUI running input queue", () => {
       exit,
       runAgent,
     });
-    await Promise.resolve();
+    await waitForGuardStatus(guard, "running");
 
     await handleTuiRunningInputSubmission("/expand", {
       reporter,
@@ -207,3 +208,11 @@ describe("TUI running input queue", () => {
     expect(runAgent).toHaveBeenNthCalledWith(2, "expanded prompt");
   });
 });
+
+async function waitForGuardStatus(guard: QueryGuard, status: string): Promise<void> {
+  for (let attempt = 0; attempt < 20; attempt++) {
+    if (guard.getSnapshot() === status) return;
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+  expect(guard.getSnapshot()).toBe(status);
+}

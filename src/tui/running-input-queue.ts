@@ -1,4 +1,5 @@
 import type { InputProcessResult } from "../input/types.js";
+import type { CommandInputState } from "../input/command-availability.js";
 
 const DEFAULT_MAX_QUEUED = 20;
 
@@ -8,6 +9,7 @@ export interface RunningInputItem {
   kind: RunningInputKind;
   text: string;
   processed?: InputProcessResult;
+  commandAvailabilityState?: CommandInputState;
 }
 
 export interface RunningInputQueueOptions {
@@ -38,7 +40,11 @@ export class RunningInputQueue {
     this.maxQueued = options.maxQueued ?? DEFAULT_MAX_QUEUED;
   }
 
-  enqueue(text: string, processed?: InputProcessResult): RunningInputEnqueueResult {
+  enqueue(
+    text: string,
+    processed?: InputProcessResult,
+    options: { commandAvailabilityState?: CommandInputState } = {},
+  ): RunningInputEnqueueResult {
     if (this.queued.length >= this.maxQueued) {
       return {
         type: "rejected",
@@ -51,6 +57,9 @@ export class RunningInputQueue {
       kind: "normal",
       text,
       ...(processed === undefined ? {} : { processed }),
+      ...(options.commandAvailabilityState === undefined
+        ? {}
+        : { commandAvailabilityState: options.commandAvailabilityState }),
     };
     this.queued.push(item);
     return { type: "queued", item };

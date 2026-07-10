@@ -494,6 +494,70 @@ describe("App", () => {
     }
   });
 
+  it("budgets the worst help page on a 26x24 terminal", async () => {
+    const closeDialog = vi.fn();
+    const commands = [
+      {
+        name: "短",
+        usage: "/短",
+        description: "短",
+        kind: "local" as const,
+        source: "builtin" as const,
+        category: "system" as const,
+      },
+      ...Array.from({ length: 8 }, (_, index) => ({
+        name: `复杂-${index}`,
+        aliases: [`别名-${index}`, `长别名-${index}`],
+        usage: `/复杂-${index} [中文参数|emoji🚦]`,
+        description: `后续页面 ${index} 包含中文宽字符、emoji 👨‍👩‍👧‍👦、类别、别名和禁用原因，需要用真实视觉高度预算`,
+        kind: "local" as const,
+        source: "builtin" as const,
+        category: index % 2 === 0 ? ("workspace" as const) : ("system" as const),
+        disabled: true,
+        disabledReason: `禁用原因 ${index}：运行中不可用，请等待当前任务结束后再执行 🚦。`,
+      })),
+    ];
+    const request = createLocalUiDialogRequest(
+      { kind: "open-panel", panel: "help" },
+      {
+        commands,
+        onClose: closeDialog,
+      } as never,
+    );
+    const harness = createInteractiveApp(
+      <App
+        model="glm-5.2"
+        provider="openai"
+        workDir="/workspace/demo"
+        entries={Array.from({ length: 20 }, (_, index) => ({
+          kind: "assistant" as const,
+          content: `message-${index}`,
+        }))}
+        running={false}
+        dialogRequests={request ? [request] : []}
+        onSubmit={vi.fn()}
+      />,
+      { columns: 26, rows: 24 },
+    );
+
+    try {
+      const output = await harness.write("\u001b[6~");
+
+      expect(output).toContain("Slash commands");
+      expect(output).toContain("↑");
+      expect(output).toContain("↓");
+      expect(output).toContain("Use dialog controls");
+      expect(output).toContain("────────────────");
+      expect(output.split("\n").length).toBeLessThanOrEqual(24);
+
+      await harness.write("\u001b");
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      expect(closeDialog).toHaveBeenCalledWith("local-ui:help");
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
   it("renders approval as an inline modal and disables the bottom input", () => {
     const output = renderToString(
       <App
