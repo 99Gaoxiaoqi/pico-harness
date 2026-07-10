@@ -13,6 +13,9 @@ import { readFile } from "node:fs/promises";
 import { generateSimpleDiff, safeResolve } from "../tools/registry-impl.js";
 import type { WorkspaceRoots } from "../tools/workspace-roots.js";
 
+type ApprovalPathResolver = Pick<WorkspaceRoots, "resolve"> &
+  Partial<Pick<WorkspaceRoots, "resolveUnchecked">>;
+
 /**
  * 在工具执行前计算审批 diff 预览。
  *
@@ -30,7 +33,7 @@ export async function computeApprovalDiff(
   toolName: string,
   args: string,
   workDir: string,
-  workspaceRoots?: Pick<WorkspaceRoots, "resolve">,
+  workspaceRoots?: ApprovalPathResolver,
 ): Promise<string | undefined> {
   // 任何意外都吞掉:审批流程绝不能因 diff 计算而中断。
   try {
@@ -52,7 +55,7 @@ export async function computeApprovalDiff(
       return await computeWriteFileDiff(obj, workDir, workspaceRoots);
     }
     if (toolName === "bash") {
-      return await computeBashDiff(obj, workDir);
+      return await computeBashDiff(obj, workDir, workspaceRoots);
     }
     return undefined;
   } catch {
@@ -94,14 +97,17 @@ async function computeEditFileDiff(
 async function computeWriteFileDiff(
   obj: Record<string, unknown>,
   workDir: string,
-  workspaceRoots?: Pick<WorkspaceRoots, "resolve">,
+  workspaceRoots?: ApprovalPathResolver,
 ): Promise<string | undefined> {
   const path = obj["path"];
   const content = obj["content"];
   if (!isString(path) || !isString(content)) {
     return undefined;
   }
-  const absolutePath = workspaceRoots?.resolve(path) ?? safeResolve(workDir, path);
+  const absolutePath =
+    workspaceRoots?.resolveUnchecked?.(path) ??
+    workspaceRoots?.resolve(path) ??
+    safeResolve(workDir, path);
   const oldText = await readFileOrEmpty(absolutePath);
   return generateSimpleDiff(oldText, content);
 }
@@ -115,6 +121,7 @@ async function computeWriteFileDiff(
 async function computeBashDiff(
   obj: Record<string, unknown>,
   workDir: string,
+  workspaceRoots?: ApprovalPathResolver,
 ): Promise<string | undefined> {
   const command = obj["command"];
   if (!isString(command)) {
@@ -126,13 +133,18 @@ async function computeBashDiff(
   if (!match) {
     return undefined;
   }
-  const target = match[1];
-  if (!target) {
+  const rawTarget = match[1];
+  if (!rawTarget) {
     return undefined;
   }
+  const target = rawTarget.replace(/^(?:"([^"]*)"|'([^']*)')$/u, "$1$2");
   // 重定向前的命令文本作为 new 近似(剥掉重定向部分)。
   const sourceCmd = command.slice(0, match.index).trim();
   // old 读目标文件;new 用源命令文本(无源命令则空串,纯 truncating 重定向)。
-  const oldText = await readFileOrEmpty(safeResolve(workDir, target));
+  const absoluteTarget =
+    workspaceRoots?.resolveUnchecked?.(target) ??
+    workspaceRoots?.resolve(target) ??
+    safeResolve(workDir, target);
+  const oldText = await readFileOrEmpty(absoluteTarget);
   return generateSimpleDiff(oldText, sourceCmd);
 }

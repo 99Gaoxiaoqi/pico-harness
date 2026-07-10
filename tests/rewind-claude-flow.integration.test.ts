@@ -125,11 +125,15 @@ describe("Claude Code style rewind integration", () => {
     expect(selector).toContain("Current prompt");
     expect(selector).not.toContain("turn-");
 
+    let restoredMode: string | undefined;
     const rewind = await applyTuiRewind({
       session,
       reporter,
       snapshot: points[0]!,
       mode: "both",
+      onRestoreInteractionMode: (mode) => {
+        restoredMode = mode;
+      },
     });
 
     expect(await readFile(filePath, "utf8")).toBe("base\n");
@@ -138,6 +142,7 @@ describe("Claude Code style rewind integration", () => {
     expect(session.fileHistory.snapshots).toEqual([]);
     expect(reporter.getEntryCount()).toBe(0);
     expect(rewind).toMatchObject({ inputText: "把 note 改成第一版", interactionMode: "default" });
+    expect(restoredMode).toBe("default");
     expect(rewindInputReplacement(undefined, rewind)).toEqual({
       sequence: 1,
       text: "把 note 改成第一版",

@@ -462,12 +462,13 @@ git worktree remove ../pico-1-streaming
 - [x] 8.6 PR 门禁包含确定性 E2E、build、package dry-run 和构建产物 PTY smoke；真实模型验收 fail-closed 并接入 nightly/manual workflow
 - [x] 8.7 公开文档统一 TUI-only 边界、`/snapshots` / `/rewind` 文件历史与 SkillRegistry 已实现能力，阶段 4 外壳标为历史退役
 - [x] 8.8 归档旧计划，通过 `rg`、lint、format、typecheck、全量测试、真实模型验收、TUI smoke 和发布包验证
-- [x] 8.9 `/rewind` 收敛为 Claude Code 用户消息级 checkpoint：提示词/相对时间/单条文件变化选择器，code/conversation/both 恢复，conversation fork 后同步截断 Session 与 TUI transcript 并回填原 prompt；旧 turn manifest 仅保留显式 code rewind 兼容
 
 ---
 
-## 阶段 9：Claude Code 核心交互机制（进行中）
+## 阶段 9：模型路由与 Claude Code 核心交互 ✅（2026-07-10）
 
+- [x] 9.1 参考 OpenCode 引入 `providerID/modelID` 模型路由：provider map、端点模型发现、本地兼容校验和跨端点原子切换
+- [x] 9.2 `/rewind` 收敛为用户消息级 checkpoint：提示词/相对时间/单条文件变化选择器，原子恢复 code/conversation/transcript/input/mode
 - [x] 9.3 权限与模式收敛：单一 interaction mode、默认 yolo、Claude 风格三选审批、结构化 session grant、外部目录原子授权、Bash 越界写守卫与 bypass-immune 安全边界
 
 ---
@@ -485,8 +486,9 @@ git worktree remove ../pico-1-streaming
 | 阶段 5.1     | 11       | 11     | ✅ 完成                             |
 | 阶段 6       | 8        | 8      | ✅ 完成                             |
 | 阶段 7       | 8        | 8      | ✅ 完成                             |
-| 阶段 8       | 9        | 9      | ✅ TUI-only 收口完成                |
-| **当前总计** | **76**   | **76** | ✅ 阶段 1-8 交付并收口              |
+| 阶段 8       | 8        | 8      | ✅ TUI-only 收口完成                |
+| 阶段 9       | 3        | 3      | ✅ 模型路由与核心交互完成           |
+| **当前总计** | **78**   | **78** | ✅ 阶段 1-9 交付并收口              |
 
 ---
 

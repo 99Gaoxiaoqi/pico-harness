@@ -62,7 +62,7 @@ describe("StatusBar", () => {
 
     expect(output).toContain("phase idle");
     expect(output).toContain("mode new");
-    expect(output).toContain("perm ask");
+    expect(output).toContain("perm yolo");
     expect(output).not.toContain("provider");
   });
 

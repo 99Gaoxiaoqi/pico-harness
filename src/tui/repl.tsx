@@ -53,6 +53,7 @@ import {
   getOrCreateSessionSettings,
   getStoredSessionSettings,
   setSessionAdditionalDirectories,
+  setSessionMode,
   setSessionTools,
   toolStatusFromRegistry,
 } from "../input/session-settings.js";
@@ -608,6 +609,10 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
                       reporter,
                       snapshot,
                       mode,
+                      onRestoreInteractionMode: (interactionMode) => {
+                        const restored = setSessionMode(settings, interactionMode);
+                        if (!restored.ok) throw new Error(restored.message);
+                      },
                     });
                     if (rewind.inputText !== undefined) {
                       setInputReplacement((current) => rewindInputReplacement(current, rewind));
@@ -668,6 +673,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
               ...(rewindContext !== null
                 ? { rewindTranscriptIndex: rewindContext.transcriptIndex }
                 : {}),
+              ...(rewindContext !== null ? { rewindInteractionMode: settings.mode } : {}),
               ...(opts.mcpConfigPath ? { mcpConfigPath: opts.mcpConfigPath } : {}),
               addDirs: [...settings.additionalDirectories],
             };
