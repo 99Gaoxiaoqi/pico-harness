@@ -297,13 +297,13 @@ git worktree remove ../pico-1-streaming
 >
 > 第一阶段计划：`docs/superpowers/plans/2026-07-10-tui-productization-phase1.md`
 
-- [ ] 7.1 真实中断链路：AbortSignal 贯穿 TUI、Engine、Provider 和 ToolScheduler
-- [ ] 7.2 焦点仲裁：审批、候选、输入和 transcript 单一键盘所有权
-- [ ] 7.3 Transcript 行模型：工具聚合、Unicode 宽度、展开行高和 auto-follow
+- [x] 7.1 真实中断链路：AbortSignal 贯穿 TUI、Engine、Provider 和 ToolScheduler（TUI 聚焦测试覆盖中断链路；真实模型 E2E 验证中断后同 session 可继续）
+- [x] 7.2 焦点仲裁：审批、候选、输入和 transcript 单一键盘所有权（TUI 聚焦测试覆盖审批/Help/候选/InputBox 键盘所有权）
+- [x] 7.3 Transcript 行模型：工具聚合、Unicode 宽度、展开行高和 auto-follow（TUI 聚焦测试覆盖虚拟 transcript、Logo/error 裁剪、CJK/Emoji 宽度和极窄布局）
 - [x] 7.4 命令真实性：Plan、Permission 和 Session 启动语义接入真实运行时（聚焦测试 72 个通过；typecheck / lint / diff check 通过）
 - [x] 7.5 命令发现：扫描收敛、完整候选、分类与统一 Help 元数据（input/tui 聚焦测试 421 个通过；typecheck / lint / diff check 通过）
-- [ ] 7.6 产品外壳：Logo 首项、动态状态行和结构化错误
-- [ ] 7.7 真实模型 E2E 与完整集成验证
+- [x] 7.6 产品外壳：Logo 首项、动态状态行和结构化错误（TUI 聚焦测试 312 个通过；typecheck / lint / diff check 通过；真实任务摘要收口测试 33 个通过）
+- [x] 7.7 真实模型 E2E 与完整集成验证（新增 `tests/e2e/tui-real-llm-e2e.test.ts`；未设置 `RUN_LLM_E2E` 时 1 文件/4 测试 skipped；`RUN_LLM_E2E=1` 真实模型验收 4 个通过，覆盖问候无工具、写入审批拒绝、中断续跑、长回复多轮 transcript）
 
 ---
 
