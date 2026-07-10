@@ -282,6 +282,53 @@ describe("ToolCard collapsed layout", () => {
       expect(output.split("\n")).toHaveLength(1);
     },
   );
+
+  it.each([
+    {
+      label: "long MCP",
+      name: "mcp__production_database_server__execute_dangerous_migration",
+      status: "error" as const,
+      statusText: "Error",
+      args: JSON.stringify({ target: "production", operation: "migrate" }),
+      expectedName: "mcp",
+    },
+    {
+      label: "delegate_task",
+      name: "delegate_task",
+      status: "running" as const,
+      statusText: "Running",
+      args: JSON.stringify({
+        agent_name: "reviewer-with-a-very-long-name",
+        goal: "Review a very long implementation plan before continuing",
+      }),
+      expectedName: "Agents",
+    },
+    {
+      label: "exit_plan_mode",
+      name: "exit_plan_mode",
+      status: "success" as const,
+      statusText: "Success",
+      args: JSON.stringify({ plan: "A very long plan ready for approval" }),
+      expectedName: "exit",
+    },
+  ])("26 列时 $label header 保留名称、状态和 Ctrl+E", (tool) => {
+    const output = renderToString(
+      React.createElement(ToolCard, {
+        name: tool.name,
+        args: tool.args,
+        status: tool.status,
+        summary: "A long result that may be truncated after the required header fields",
+        isLast: true,
+        wrapWidth: 26,
+      }),
+      { columns: 26 },
+    );
+
+    expect(output).toContain(tool.expectedName);
+    expect(output).toContain(tool.statusText);
+    expect(output).toContain("[⌃E]");
+    expect(output.split("\n")).toHaveLength(1);
+  });
 });
 
 function renderToolStatus(status: React.ComponentProps<typeof ToolCard>["status"]): string {
