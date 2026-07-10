@@ -186,25 +186,27 @@ export class ToolRegistry implements Registry {
     }
 
     // 2. 【核心防御】第 16 讲:在执行底层逻辑前,依次运行所有 Middleware。
-    //    任一中间件返回 allowed=false,工具的底层 execute 就绝对不会被触发。
-    //    异步签名以支持人工审批挂起 (Human-in-the-loop)。
-    for (const mw of this.requestMiddlewares) {
-      const { allowed, reason, call: rewrittenCall } = await mw(currentCall);
-      if (!allowed) {
-        logger.warn(
-          { tool: currentCall.name, reason },
-          `[Registry] ⚠ 工具 ${currentCall.name} 被 Middleware 拦截: ${reason}`,
-        );
-        return {
-          toolCallId: currentCall.id,
-          output: `执行被系统拦截。原因: ${reason}`,
-          isError: true, // 必须返回 Error,强制大模型阅读拒绝理由
-        };
+    //    hook 若改写参数,必须再跑一次同一链,确保边界与审批针对最终参数。
+    const runRequestMiddlewares = async (): Promise<ToolResult | undefined> => {
+      for (const mw of this.requestMiddlewares) {
+        const { allowed, reason, call: rewrittenCall } = await mw(currentCall);
+        if (!allowed) {
+          logger.warn(
+            { tool: currentCall.name, reason },
+            `[Registry] ⚠ 工具 ${currentCall.name} 被 Middleware 拦截: ${reason}`,
+          );
+          return {
+            toolCallId: currentCall.id,
+            output: `执行被系统拦截。原因: ${reason}`,
+            isError: true,
+          };
+        }
+        if (rewrittenCall) currentCall = rewrittenCall;
       }
-      if (rewrittenCall) {
-        currentCall = rewrittenCall;
-      }
-    }
+      return undefined;
+    };
+    const initialRejection = await runRequestMiddlewares();
+    if (initialRejection) return initialRejection;
 
     // 3. 【任务 2.6】PreToolUse hook:在工具执行前判定 allow/deny。
     //    放在 requestMiddlewares 之后(审批先于用户 hook),preWriteHook/tool.execute 之前。
@@ -242,6 +244,8 @@ export class ToolRegistry implements Registry {
       if (hookResult.modifiedInput !== undefined) {
         currentCall = { ...currentCall, arguments: JSON.stringify(hookResult.modifiedInput) };
         toolInput = hookResult.modifiedInput;
+        const rewrittenRejection = await runRequestMiddlewares();
+        if (rewrittenRejection) return rewrittenRejection;
       }
     }
 
