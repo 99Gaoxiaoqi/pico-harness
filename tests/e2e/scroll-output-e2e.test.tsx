@@ -11,6 +11,7 @@ import { Session } from "../../src/engine/session.js";
 import type { LLMProvider } from "../../src/provider/interface.js";
 import type { Message, ToolDefinition } from "../../src/schema/message.js";
 import { App } from "../../src/tui/app.js";
+import { TUI_RENDER_OPTIONS } from "../../src/tui/repl.js";
 import type { TuiEntry } from "../../src/tui/tui-reporter.js";
 import { BashTool, ReadFileTool, ToolRegistry } from "../../src/tools/registry-impl.js";
 import { createToolResultObservationProcessor } from "../../src/tools/tool-result-observation.js";
@@ -230,6 +231,56 @@ describe("阶段 10：滚动窗口与大型工具输出集成验收", () => {
     await harness.cleanup();
     expect(harness.rawOutput()).toContain(MOUSE_DISABLE);
   });
+
+  it("生产全屏在 166x17 立即换行终端中流式更新不重复刷屏", async () => {
+    const terminal = new ImmediateWrapTerminal(166, 17);
+    const user: TuiEntry = { kind: "user", content: "USER_CJK_MARKER_这个skill是在哪拿的" };
+    const app = (entries: TuiEntry[], running: boolean) => (
+      <App
+        model="local-model"
+        provider="openai"
+        workDir="/workspace/demo"
+        sessionMode="yolo"
+        permissionMode="yolo"
+        entries={entries}
+        running={running}
+        onSubmit={() => undefined}
+      />
+    );
+    const harness = createProductionFrameHarness(app([user], true), terminal);
+
+    try {
+      await harness.wait(280); // 让 80ms spinner 真实跨过多帧。
+      await harness.rerender(
+        app([user, { kind: "assistant", content: "FINAL_CJK_MARKER_这份skill来自工作区" }], true),
+      );
+      await harness.wait(120);
+      await harness.rerender(
+        app(
+          [
+            user,
+            {
+              kind: "assistant",
+              content: "FINAL_CJK_MARKER_这份skill来自工作区，流式回答已完成",
+            },
+          ],
+          false,
+        ),
+      );
+
+      const visible = terminal.visibleText();
+      expect(visible.match(/phase idle · mode yolo/gu)).toHaveLength(1);
+      expect(visible.match(/USER_CJK_MARKER/gu)).toHaveLength(1);
+      expect(visible.match(/FINAL_CJK_MARKER/gu)).toHaveLength(1);
+      expect(terminal.rawText().match(/phase running · mode yolo/gu)).toHaveLength(1);
+      expect(terminal.scrollEvents).toBe(0);
+      expect(terminal.scrollbackText()).not.toMatch(
+        /phase (?:running|idle) · mode yolo|USER_CJK_MARKER|FINAL_CJK_MARKER/u,
+      );
+    } finally {
+      await harness.cleanup();
+    }
+  });
 });
 
 function requireObservation(messages: Message[], toolCallId: string): string {
@@ -309,6 +360,242 @@ function createInteractiveApp(
       instance.cleanup();
     },
   };
+}
+
+function createProductionFrameHarness(
+  node: React.ReactNode,
+  terminal: ImmediateWrapTerminal,
+): {
+  wait: (milliseconds: number) => Promise<void>;
+  rerender: (node: React.ReactNode) => Promise<void>;
+  cleanup: () => Promise<void>;
+} {
+  const stdin = new PassThrough();
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
+  Object.defineProperties(stdin, {
+    isTTY: { value: true },
+    isRaw: { value: false, writable: true },
+  });
+  Object.assign(stdin, {
+    setRawMode: () => undefined,
+    ref: () => undefined,
+    unref: () => undefined,
+  });
+  Object.defineProperties(stdout, {
+    isTTY: { value: true },
+    columns: { value: terminal.columns, writable: true },
+    rows: { value: terminal.rows, writable: true },
+  });
+  stdout.on("data", (chunk) => terminal.write(String(chunk)));
+
+  const instance: Instance = render(node, {
+    ...TUI_RENDER_OPTIONS,
+    stdin: stdin as unknown as NodeJS.ReadStream,
+    stdout: stdout as unknown as NodeJS.WriteStream,
+    stderr: stderr as unknown as NodeJS.WriteStream,
+    debug: false,
+    interactive: true,
+  });
+
+  const wait = async (milliseconds: number): Promise<void> => {
+    await new Promise((resolve) => setTimeout(resolve, milliseconds));
+    await instance.waitUntilRenderFlush();
+  };
+
+  return {
+    wait,
+    async rerender(nextNode: React.ReactNode): Promise<void> {
+      instance.rerender(nextNode);
+      await wait(50);
+    },
+    async cleanup(): Promise<void> {
+      instance.unmount();
+      await instance.waitUntilExit();
+      instance.cleanup();
+    },
+  };
+}
+
+/** 模拟 ChatGPT.app 终端的右边界立即 wrap，而非 xterm 的 wrap-pending。 */
+class ImmediateWrapTerminal {
+  readonly columns: number;
+  readonly rows: number;
+  scrollEvents = 0;
+  private screen: string[][];
+  private scrollback: string[] = [];
+  private x = 0;
+  private y = 0;
+  private savedX = 0;
+  private savedY = 0;
+  private rawOutput = "";
+
+  constructor(columns: number, rows: number) {
+    this.columns = columns;
+    this.rows = rows;
+    this.screen = Array.from({ length: rows }, () => this.blankLine());
+  }
+
+  write(chunk: string): void {
+    this.rawOutput += chunk;
+    for (let index = 0; index < chunk.length; ) {
+      if (chunk[index] === "\u001b" && chunk[index + 1] === "[") {
+        const end = findCsiEnd(chunk, index + 2);
+        if (end === -1) return;
+        this.applyCsi(chunk.slice(index + 2, end), chunk[end]!);
+        index = end + 1;
+        continue;
+      }
+      if (chunk[index] === "\u001b" && chunk[index + 1] === "]") {
+        const bell = chunk.indexOf("\u0007", index + 2);
+        const stringTerminator = chunk.indexOf("\u001b\\", index + 2);
+        const end = [bell, stringTerminator].filter((value) => value >= 0).sort((a, b) => a - b)[0];
+        if (end === undefined) return;
+        index = end + (end === stringTerminator ? 2 : 1);
+        continue;
+      }
+      if (chunk[index] === "\r") {
+        this.x = 0;
+        index++;
+        continue;
+      }
+      if (chunk[index] === "\n") {
+        this.x = 0;
+        this.lineFeed();
+        index++;
+        continue;
+      }
+      if (chunk[index] === "\u0007") {
+        index++;
+        continue;
+      }
+
+      const codePoint = chunk.codePointAt(index);
+      if (codePoint === undefined) break;
+      const value = String.fromCodePoint(codePoint);
+      const width = terminalCharacterWidth(codePoint);
+      index += value.length;
+      if (width === 0) continue;
+      if (this.x + width > this.columns) {
+        this.x = 0;
+        this.lineFeed();
+      }
+      this.screen[this.y]![this.x] = value;
+      if (width === 2 && this.x + 1 < this.columns) this.screen[this.y]![this.x + 1] = "";
+      this.x += width;
+      if (this.x >= this.columns) {
+        this.x = 0;
+        this.lineFeed();
+      }
+    }
+  }
+
+  visibleText(): string {
+    return this.screen.map((line) => line.join("").trimEnd()).join("\n");
+  }
+
+  scrollbackText(): string {
+    return this.scrollback.join("\n");
+  }
+
+  rawText(): string {
+    return stripAnsi(this.rawOutput);
+  }
+
+  private applyCsi(parameters: string, final: string): void {
+    const privateMode = parameters.startsWith("?");
+    const values = (privateMode ? parameters.slice(1) : parameters)
+      .split(";")
+      .map((value) => (value === "" ? 0 : Number(value)));
+    const amount = Math.max(1, values[0] ?? 0);
+
+    if (privateMode && final === "h" && values.includes(1049)) {
+      this.screen = Array.from({ length: this.rows }, () => this.blankLine());
+      this.scrollback = [];
+      this.x = 0;
+      this.y = 0;
+      this.scrollEvents = 0;
+      return;
+    }
+    if (privateMode && (final === "h" || final === "l")) return;
+    if (final === "m") return;
+    if (final === "A") this.y = Math.max(0, this.y - amount);
+    else if (final === "B") this.y = Math.min(this.rows - 1, this.y + amount);
+    else if (final === "C") this.x = Math.min(this.columns - 1, this.x + amount);
+    else if (final === "D") this.x = Math.max(0, this.x - amount);
+    else if (final === "E") {
+      this.y = Math.min(this.rows - 1, this.y + amount);
+      this.x = 0;
+    } else if (final === "F") {
+      this.y = Math.max(0, this.y - amount);
+      this.x = 0;
+    } else if (final === "G") this.x = Math.min(this.columns - 1, amount - 1);
+    else if (final === "H" || final === "f") {
+      this.y = Math.min(this.rows - 1, Math.max(0, (values[0] || 1) - 1));
+      this.x = Math.min(this.columns - 1, Math.max(0, (values[1] || 1) - 1));
+    } else if (final === "J") this.eraseDisplay(values[0] ?? 0);
+    else if (final === "K") this.eraseLine(values[0] ?? 0);
+    else if (final === "s") {
+      this.savedX = this.x;
+      this.savedY = this.y;
+    } else if (final === "u") {
+      this.x = this.savedX;
+      this.y = this.savedY;
+    }
+  }
+
+  private eraseDisplay(mode: number): void {
+    if (mode === 2 || mode === 3) {
+      this.screen = Array.from({ length: this.rows }, () => this.blankLine());
+      if (mode === 3) this.scrollback = [];
+      return;
+    }
+    for (let column = this.x; column < this.columns; column++) this.screen[this.y]![column] = " ";
+    for (let row = this.y + 1; row < this.rows; row++) this.screen[row] = this.blankLine();
+  }
+
+  private eraseLine(mode: number): void {
+    const from = mode === 1 || mode === 2 ? 0 : this.x;
+    const to = mode === 0 ? this.columns : this.x + 1;
+    for (let column = from; column < to; column++) this.screen[this.y]![column] = " ";
+  }
+
+  private lineFeed(): void {
+    this.y++;
+    if (this.y < this.rows) return;
+    this.scrollback.push(this.screen.shift()!.join("").trimEnd());
+    this.screen.push(this.blankLine());
+    this.y = this.rows - 1;
+    this.scrollEvents++;
+  }
+
+  private blankLine(): string[] {
+    return Array.from({ length: this.columns }, () => " ");
+  }
+}
+
+function findCsiEnd(value: string, from: number): number {
+  for (let index = from; index < value.length; index++) {
+    const code = value.charCodeAt(index);
+    if (code >= 0x40 && code <= 0x7e) return index;
+  }
+  return -1;
+}
+
+function terminalCharacterWidth(codePoint: number): 0 | 1 | 2 {
+  if ((codePoint >= 0x300 && codePoint <= 0x36f) || (codePoint >= 0xfe00 && codePoint <= 0xfe0f)) {
+    return 0;
+  }
+  if (
+    (codePoint >= 0x1100 && codePoint <= 0x115f) ||
+    (codePoint >= 0x2e80 && codePoint <= 0xa4cf) ||
+    (codePoint >= 0xac00 && codePoint <= 0xd7a3) ||
+    (codePoint >= 0xf900 && codePoint <= 0xfaff) ||
+    (codePoint >= 0x1f300 && codePoint <= 0x1faff)
+  ) {
+    return 2;
+  }
+  return 1;
 }
 
 const ANSI_PATTERN = new RegExp(`${String.fromCharCode(27)}\\[[0-?]*[ -/]*[@-~]`, "gu");

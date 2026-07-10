@@ -6,7 +6,7 @@
 
 import type React from "react";
 import { useRef, useState, useSyncExternalStore } from "react";
-import { render, useApp, useInput } from "ink";
+import { render, useApp, useInput, type Instance, type RenderOptions } from "ink";
 import { App } from "./app.js";
 import type { DialogRequest } from "./dialog-arbiter.js";
 import { createLocalUiDialogRequest } from "./local-ui-dialog-host.js";
@@ -107,6 +107,13 @@ export interface ReplOptions {
 const SESSION_SELECTOR_DIALOG_ID = "local-ui:session-selector";
 const SELECTOR_DIALOG_PRIORITY = 40;
 const APPROVAL_DIALOG_PRIORITY = 80;
+
+export const TUI_RENDER_OPTIONS = {
+  alternateScreen: true,
+  incrementalRendering: true,
+  patchConsole: false,
+  exitOnCtrlC: false,
+} as const satisfies RenderOptions;
 
 export type TuiInputProcessResult = InputProcessResult;
 
@@ -545,7 +552,9 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
   const reporter = new TuiReporter(scheduleEntriesUpdate, entries);
 
   // 包装组件:管理 entries 状态 + QueryGuard 派生 running,把 setter 暴露给外部
-  function ReplApp() {
+  const instanceRef: { current?: Instance } = {};
+
+  function ReplApp({ redrawBlank = false }: { redrawBlank?: boolean }) {
     const { exit } = useApp();
     const [stateEntries, setStateEntries] = useState<TuiEntry[]>([]);
     const [dialogRequests, setDialogRequests] = useState<DialogRequest[]>([]);
@@ -741,13 +750,16 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         keybindings={picoConfig.keybindings}
         dialogRequests={dialogRequests}
         inputReplacement={inputReplacement}
+        redrawBlank={redrawBlank}
         onSubmit={(text) => void handleSubmit(text)}
         onInterrupt={() => {
           handleTuiInterrupt(abortControllerRef.current, runningQueue, reporter, setQueuedCount);
         }}
         onRedraw={() => {
-          if (process.stdout.isTTY) process.stdout.write("\x1b[2J\x1b[H");
-          setEntries([...entries]);
+          // 先经 Ink 输出空帧，再输出完整帧。两次 rerender 均与 Ink 的
+          // incremental frame bookkeeping 同步，避免裸写 clear 导致后续差分帧错位。
+          instanceRef.current?.rerender(<ReplApp redrawBlank />);
+          instanceRef.current?.rerender(<ReplApp />);
         }}
       />
     );
@@ -759,14 +771,10 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     process.stdout.write("\x1b[2J\x1b[H");
   }
 
-  // alternateScreen:true 进 alt buffer。alt buffer 下 ink 走 clearTerminal 全量重绘
-  // (而非 eraseLines 逐行擦除),绕过行数计算 bug(中文字符宽度导致行数不匹配)。
-  // patchConsole:false 让 stderr 不被劫持。
-  const instance = render(<ReplApp />, {
-    alternateScreen: true,
-    patchConsole: false,
-    exitOnCtrlC: false,
-  });
+  // alternateScreen 隔离 shell scrollback；incrementalRendering 只写变化行，
+  // 避免 spinner/流式输出每帧重写整屏。patchConsole:false 让 stderr 不被劫持。
+  const instance = render(<ReplApp />, TUI_RENDER_OPTIONS);
+  instanceRef.current = instance;
   try {
     await instance.waitUntilExit();
   } finally {
