@@ -205,12 +205,22 @@ export class HookRunner {
         finish(interpretExit(code, stdout, stderr));
       });
 
-      // 写 stdin(JSON 输入)。写失败不阻断:仍等 exit/close 判定。
+      // Pipe failures are emitted asynchronously and cannot be caught by the
+      // write() try/catch below. A hook that exits before reading stdin must
+      // remain fail-open instead of becoming an unhandled EPIPE.
+      child.stdin?.once("error", (err) => {
+        logger.warn({ err: String(err), command }, `[Hook] stdin error,fail-open 放行`);
+        killProcessTree(child);
+        finish({ decision: "allow" });
+      });
+
+      // 写 stdin(JSON 输入)。同步写失败也按 fail-open 处理。
       try {
         child.stdin?.write(JSON.stringify(input));
         child.stdin?.end();
       } catch {
-        // 写失败忽略,仍由 exit/close 判定(大概率 fail-open)
+        killProcessTree(child);
+        finish({ decision: "allow" });
       }
     });
   }
