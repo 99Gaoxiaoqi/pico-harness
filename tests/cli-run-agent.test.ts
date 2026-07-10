@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ApprovalManager,
   globalApprovalManager,
+  globalApprovalPolicy,
   type ApprovalNotice,
 } from "../src/approval/manager.js";
 import { buildApprovalMiddleware, runAgentFromCli } from "../src/cli/run-agent.js";
@@ -13,6 +14,7 @@ import type { Message, ToolDefinition } from "../src/schema/message.js";
 import type { LLMProvider } from "../src/provider/interface.js";
 import {
   getOrCreateSessionSettings,
+  getStoredSessionSettings,
   resetSessionSettingsForTests,
 } from "../src/input/session-settings.js";
 
@@ -453,6 +455,138 @@ describe("runAgentFromCli", () => {
     await expect(readFile(join(workDir, "PLAN.md"), "utf8")).resolves.toBe(originalPlan);
   });
 
+  it("exit_plan_mode approval updates shared settings and allows same-turn writes", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-cli-plan-exit-settings-"));
+    await writeFile(join(workDir, "PLAN.md"), "# 计划\n批准后写文件", "utf8");
+    getOrCreateSessionSettings({
+      sessionId: "plan_exit_settings_session",
+      cwd: workDir,
+      provider: "openai",
+      model: "glm-5.2",
+      mode: "plan",
+      permissionMode: "yolo",
+    });
+    const provider = new ScriptedProvider([
+      {
+        role: "assistant",
+        content: "Submit the plan.",
+        toolCalls: [{ id: "call_exit_plan", name: "exit_plan_mode", arguments: "{}" }],
+        usage: { promptTokens: 1, completionTokens: 1 },
+      },
+      {
+        role: "assistant",
+        content: "Now execute.",
+        toolCalls: [
+          {
+            id: "call_write_after_exit",
+            name: "write_file",
+            arguments: JSON.stringify({ path: "after-plan.txt", content: "implemented" }),
+          },
+        ],
+        usage: { promptTokens: 1, completionTokens: 1 },
+      },
+      {
+        role: "assistant",
+        content: "Done after plan.",
+        usage: { promptTokens: 1, completionTokens: 1 },
+      },
+    ]);
+    const approval = makeApprovalCapture();
+
+    const runPromise = runAgentFromCli(
+      {
+        prompt: "Submit plan then write after-plan.txt",
+        dir: workDir,
+        session: "plan_exit_settings_session",
+        provider: "openai",
+      },
+      {
+        provider,
+        approvalNotifier: approval.notifier,
+      },
+    );
+
+    const notice = await waitForApprovalBeforeCompletion(approval.nextNotice, runPromise);
+    expect(notice.toolName).toBe("exit_plan_mode");
+    globalApprovalManager.resolveApproval(notice.taskId, true, "approve plan");
+
+    await expect(runPromise).resolves.toMatchObject({ finalMessage: "Done after plan." });
+    expect(await readFile(join(workDir, "after-plan.txt"), "utf8")).toBe("implemented");
+    expect(getStoredSessionSettings("plan_exit_settings_session")).toMatchObject({
+      mode: "default",
+      permissionMode: "yolo",
+    });
+
+    const secondProvider = new ScriptedProvider([
+      {
+        role: "assistant",
+        content: "Second turn.",
+        usage: { promptTokens: 1, completionTokens: 1 },
+      },
+    ]);
+    await runAgentFromCli(
+      {
+        prompt: "Second turn",
+        dir: workDir,
+        session: "plan_exit_settings_session",
+        provider: "openai",
+      },
+      {
+        provider: secondProvider,
+      },
+    );
+
+    expect(secondProvider.calls[0]?.messages[0]?.content).not.toContain("Plan Mode: ON");
+  });
+
+  it("exit_plan_mode approval clears plan permission mode in shared settings", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-cli-plan-exit-permission-"));
+    await writeFile(join(workDir, "PLAN.md"), "# 计划\n只退出权限模式", "utf8");
+    getOrCreateSessionSettings({
+      sessionId: "plan_exit_permission_session",
+      cwd: workDir,
+      provider: "openai",
+      model: "glm-5.2",
+      mode: "default",
+      permissionMode: "plan",
+    });
+    const provider = new ScriptedProvider([
+      {
+        role: "assistant",
+        content: "Submit the plan.",
+        toolCalls: [{ id: "call_exit_plan_permission", name: "exit_plan_mode", arguments: "{}" }],
+        usage: { promptTokens: 1, completionTokens: 1 },
+      },
+      {
+        role: "assistant",
+        content: "Exited permission plan.",
+        usage: { promptTokens: 1, completionTokens: 1 },
+      },
+    ]);
+    const approval = makeApprovalCapture();
+    const runPromise = runAgentFromCli(
+      {
+        prompt: "Submit PLAN.md",
+        dir: workDir,
+        session: "plan_exit_permission_session",
+        provider: "openai",
+      },
+      {
+        provider,
+        approvalNotifier: approval.notifier,
+      },
+    );
+
+    const notice = await waitForApprovalBeforeCompletion(approval.nextNotice, runPromise);
+    globalApprovalManager.resolveApproval(notice.taskId, true, "approve plan");
+
+    await expect(runPromise).resolves.toMatchObject({ finalMessage: "Exited permission plan." });
+    expect(getStoredSessionSettings("plan_exit_permission_session")).toMatchObject({
+      mode: "default",
+      permissionMode: "ask",
+    });
+  });
+
   it("edit_file requests approval before editing", async () => {
     const workDir = await mkdtemp(join(tmpdir(), "pico-cli-approval-edit-"));
     await writeFile(join(workDir, "approval-edit.txt"), "old value\n", "utf8");
@@ -796,6 +930,55 @@ describe("runAgentFromCli", () => {
 
     await expect(runPromise).resolves.toMatchObject({ finalMessage: "Default write rejected." });
     await expect(readFile(join(workDir, "default.txt"), "utf8")).rejects.toThrow();
+  });
+
+  it("approve for session makes two identical dangerous calls ask only once", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-cli-approval-session-"));
+    const args = JSON.stringify({ path: "remembered.txt", content: "remembered" });
+    const provider = new ScriptedProvider([
+      {
+        role: "assistant",
+        content: "First write.",
+        toolCalls: [{ id: "call_write_session_1", name: "write_file", arguments: args }],
+        usage: { promptTokens: 1, completionTokens: 1 },
+      },
+      {
+        role: "assistant",
+        content: "Second write.",
+        toolCalls: [{ id: "call_write_session_2", name: "write_file", arguments: args }],
+        usage: { promptTokens: 1, completionTokens: 1 },
+      },
+      {
+        role: "assistant",
+        content: "Both writes done.",
+        usage: { promptTokens: 1, completionTokens: 1 },
+      },
+    ]);
+    const notices: ApprovalNotice[] = [];
+
+    const result = await runAgentFromCli(
+      {
+        prompt: "Write remembered.txt twice",
+        dir: workDir,
+        session: "approval_session_once",
+        provider: "openai",
+      },
+      {
+        provider,
+        approvalNotifier: (notice) => {
+          notices.push(notice);
+          globalApprovalPolicy.allowForSession("approval_session_once", {
+            name: notice.toolName,
+            arguments: notice.args,
+          });
+          globalApprovalManager.resolveApproval(notice.taskId, true, "approve for session");
+        },
+      },
+    );
+
+    expect(result.finalMessage).toBe("Both writes done.");
+    expect(notices).toHaveLength(1);
+    expect(await readFile(join(workDir, "remembered.txt"), "utf8")).toBe("remembered");
   });
 
   it("bash redirect writes request approval before executing", async () => {

@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -12,6 +12,7 @@ import {
   createSessionIdentity,
   isSameSessionProjectGroup,
 } from "../src/engine/session-identity.js";
+import { resolveCliStartupSession } from "../src/cli/session-args.js";
 
 describe("resolveCliSession", () => {
   it("默认每次启动都创建新的 session id", async () => {
@@ -157,14 +158,44 @@ describe("resolveCliSession", () => {
 });
 
 describe("CLI main session flags", () => {
-  it("registers resolver-backed session flags and short aliases", async () => {
-    const source = await readFile(join(process.cwd(), "src", "cli", "main.ts"), "utf8");
+  it("parses --session/-S with cwd and resolves explicit sessions", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-session-args-"));
 
-    expect(source).toContain('session: { type: "string", short: "S" }');
-    expect(source).toContain('"continue": { type: "boolean", short: "c" }');
-    expect(source).toContain('"fork": { type: "string" }');
-    expect(source).toContain("resolveCliSession");
-    expect(source).toContain("sessionSelection");
+    await expect(
+      resolveCliStartupSession(["--dir", workDir, "--session", "cli-explicit"]),
+    ).resolves.toEqual({
+      workDir: await realpath(workDir),
+      sessionSelection: { mode: "resume", sessionId: "cli-explicit" },
+    });
+
+    await expect(resolveCliStartupSession(["--dir", workDir, "-S", "cli-short"])).resolves.toEqual({
+      workDir: await realpath(workDir),
+      sessionSelection: { mode: "resume", sessionId: "cli-short" },
+    });
+  });
+
+  it("parses --continue/-c and --fork through the real startup resolver", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-session-args-"));
+    await touchSessionFile(workDir, "cli-old", "2026-07-09T01:00:00.000Z");
+    await touchSessionFile(workDir, "cli-new", "2026-07-09T02:00:00.000Z");
+
+    await expect(resolveCliStartupSession(["--dir", workDir, "--continue"])).resolves.toEqual({
+      workDir: await realpath(workDir),
+      sessionSelection: { mode: "continue", sessionId: "cli-new" },
+    });
+    await expect(resolveCliStartupSession(["--dir", workDir, "-c"])).resolves.toEqual({
+      workDir: await realpath(workDir),
+      sessionSelection: { mode: "continue", sessionId: "cli-new" },
+    });
+
+    const fork = await resolveCliStartupSession(["--dir", workDir, "--fork", "cli-new"]);
+    expect(fork.workDir).toBe(await realpath(workDir));
+    expect(fork.sessionSelection).toMatchObject({
+      mode: "fork",
+      sourceSessionId: "cli-new",
+    });
+    expect(fork.sessionSelection.sessionId).toMatch(/^cli-/);
+    expect(fork.sessionSelection.sessionId).not.toBe("cli-new");
   });
 });
 
