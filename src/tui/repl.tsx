@@ -110,7 +110,6 @@ const APPROVAL_DIALOG_PRIORITY = 80;
 
 export const TUI_RENDER_OPTIONS = {
   alternateScreen: true,
-  incrementalRendering: true,
   patchConsole: false,
   exitOnCtrlC: false,
 } as const satisfies RenderOptions;
@@ -771,8 +770,9 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     process.stdout.write("\x1b[2J\x1b[H");
   }
 
-  // alternateScreen 隔离 shell scrollback；incrementalRendering 只写变化行，
-  // 避免 spinner/流式输出每帧重写整屏。patchConsole:false 让 stderr 不被劫持。
+  // alternateScreen 隔离 shell scrollback；根布局在 App 中保留右侧 1 列，
+  // 避免满宽帧触发终端立即换行。保持 Ink 默认全帧渲染，兼容中文与复杂布局。
+  // patchConsole:false 让 stderr 不被劫持。
   const instance = render(<ReplApp />, TUI_RENDER_OPTIONS);
   instanceRef.current = instance;
   try {
