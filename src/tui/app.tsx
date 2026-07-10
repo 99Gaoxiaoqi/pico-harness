@@ -12,8 +12,8 @@
 //   退出时恢复主屏),彻底杜绝重复输出。
 //   alt buffer 下 ink 只重绘可视区域(差分渲染),历史条目靠 React.memo 零 diff。
 
-import React, { memo, useEffect, useMemo, useState } from "react";
-import { Box, useApp, useInput, useWindowSize } from "ink";
+import React, { memo, useEffect, useMemo, useRef, useState } from "react";
+import { Box, Text, useApp, useInput, useWindowSize } from "ink";
 import { appendFileSync } from "node:fs";
 import { InputBox } from "./input-box.js";
 import type {
@@ -33,6 +33,7 @@ import { StatusBar } from "./status-bar.js";
 import type { TuiEntry } from "./tui-reporter.js";
 import { resolveKeybinding } from "./keybindings/resolver.js";
 import { ToolCardFocusProvider } from "./tool-card.js";
+import { buildTranscriptLayout } from "./transcript-layout.js";
 
 /** 诊断日志:写文件(绕过 ink patchConsole 劫持),只在 TUI_DEBUG 时 */
 function dbg(msg: string): void {
@@ -99,22 +100,36 @@ export function App({
   const modal = inputDisabled && !inlineModal ? focusedDialog.content : undefined;
   const overlay =
     focusedDialog?.layer === "overlay" || inlineModal ? focusedDialog.content : undefined;
-  const transcriptRows = Math.max(inputDisabled ? 3 : 6, rows - (inputDisabled ? 13 : 8));
+  const approvalRows = inlineModal ? 7 : 0;
+  const genericDialogRows = inputDisabled && !inlineModal ? 5 : 0;
   const transcriptWrapWidth = Math.max(20, columns - 6);
-  const getEntryRows = useMemo(
-    () => (entry: TuiEntry) => estimateEntryRows(entry, transcriptWrapWidth),
-    [transcriptWrapWidth],
-  );
-  const transcriptTotalRows = useMemo(
-    () => estimateTranscriptRows(entries, transcriptWrapWidth),
-    [entries, transcriptWrapWidth],
-  );
-  const [transcriptScrollRows, setTranscriptScrollRows] = useState<number | null>(null);
-  const lastEntry = entries.at(-1);
-  const lastToolKey =
-    lastEntry?.kind === "tool" ? `${entries.length}:${lastEntry.name}:${lastEntry.args}` : null;
   const [expandedToolKey, setExpandedToolKey] = useState<string | null>(null);
+  const transcriptLayout = useMemo(
+    () =>
+      buildTranscriptLayout(entries, {
+        wrapWidth: transcriptWrapWidth,
+        expandedToolKey,
+        approvalRows,
+      }),
+    [approvalRows, entries, expandedToolKey, transcriptWrapWidth],
+  );
+  const transcriptTotalRows = transcriptLayout.contentRows;
+  const transcriptRows = Math.max(
+    inputDisabled ? 3 : 6,
+    rows - 8 - genericDialogRows - transcriptLayout.approvalRows,
+  );
+  const lastLayoutItem = transcriptLayout.items.at(-1);
+  const lastToolKey = lastLayoutItem?.entry.kind === "tool" ? lastLayoutItem.key : null;
   const lastToolExpanded = lastToolKey !== null && expandedToolKey === lastToolKey;
+  const [transcriptView, setTranscriptView] = useState<TranscriptViewState>({
+    scrollRows: null,
+    newMessageCount: 0,
+  });
+  const previousEntryCount = useRef(entries.length);
+  const transcriptViewportRows = Math.max(
+    1,
+    transcriptRows - (transcriptView.newMessageCount > 0 ? 1 : 0),
+  );
 
   useInput((input, key) => {
     const owner = resolveAppInputOwner(input, key, {
@@ -128,11 +143,20 @@ export function App({
     }
 
     if (owner === "transcript") {
-      const transcriptAction = resolveTranscriptScrollKey(key, running);
+      const transcriptAction = resolveTranscriptScrollKey(key);
       if (!transcriptAction) return;
-      setTranscriptScrollRows((current) =>
-        nextTranscriptScroll(current, transcriptAction, transcriptRows, transcriptTotalRows),
-      );
+      setTranscriptView((current) => {
+        const scrollRows = nextTranscriptScroll(
+          current.scrollRows,
+          transcriptAction,
+          transcriptViewportRows,
+          transcriptTotalRows,
+        );
+        return {
+          scrollRows,
+          newMessageCount: scrollRows === null ? 0 : current.newMessageCount,
+        };
+      });
       return;
     }
 
@@ -153,10 +177,27 @@ export function App({
   });
 
   useEffect(() => {
-    setTranscriptScrollRows((current) =>
-      current === null ? null : clampScrollRows(current, transcriptRows, transcriptTotalRows),
+    setTranscriptView((current) => {
+      if (current.scrollRows === null) return current;
+      const scrollRows = clampScrollRows(
+        current.scrollRows,
+        transcriptViewportRows,
+        transcriptTotalRows,
+      );
+      return scrollRows === current.scrollRows ? current : { ...current, scrollRows };
+    });
+  }, [transcriptTotalRows, transcriptViewportRows]);
+
+  useEffect(() => {
+    const addedEntries = Math.max(0, entries.length - previousEntryCount.current);
+    previousEntryCount.current = entries.length;
+    if (addedEntries === 0) return;
+    setTranscriptView((current) =>
+      current.scrollRows === null
+        ? current
+        : { ...current, newMessageCount: current.newMessageCount + addedEntries },
     );
-  }, [transcriptRows, transcriptTotalRows]);
+  }, [entries.length]);
 
   // 是否仍有"主动流式":running 且末尾是流式 assistant / thinking / running tool
   const isStreaming = running && isActivelyStreaming(entries);
@@ -186,18 +227,19 @@ export function App({
     <>
       {/* 消息列表:统一走 MessageList,由 shouldRenderStatically + MessageRow.memo 控制静态行。 */}
       <Box flexDirection="column" height={transcriptRows} overflowY="hidden" paddingX={1}>
+        {transcriptView.newMessageCount > 0 && (
+          <Text color="cyan">↓ {transcriptView.newMessageCount} new messages</Text>
+        )}
         <ToolCardFocusProvider expanded={lastToolExpanded}>
           <MessageList
-            entries={entries}
+            layout={transcriptLayout}
             isStreaming={isStreaming}
-            viewportRows={transcriptRows}
-            scrollOffsetRows={transcriptScrollRows ?? 0}
+            viewportRows={transcriptViewportRows}
+            scrollOffsetRows={transcriptView.scrollRows ?? 0}
             estimatedRowHeight={3}
-            getEntryRows={getEntryRows}
-            wrapWidth={transcriptWrapWidth}
             overscanRows={0}
             virtualizeThreshold={0}
-            scrollToBottom={transcriptScrollRows === null}
+            scrollToBottom={transcriptView.scrollRows === null}
             preserveVirtualSpacers={false}
           />
         </ToolCardFocusProvider>
@@ -259,6 +301,11 @@ type TranscriptScrollAction = "pageUp" | "pageDown" | "lineUp" | "lineDown" | "t
 type ToolCardAction = "toggle";
 export type AppInputOwner = "global" | "modal" | "tool-card" | "transcript" | "input";
 
+interface TranscriptViewState {
+  scrollRows: number | null;
+  newMessageCount: number;
+}
+
 interface AppInputKey {
   ctrl?: boolean;
   shift?: boolean;
@@ -286,7 +333,7 @@ export function resolveAppInputOwner(
   if (resolveAppKeyEvent(input, key, options.running)) return "global";
   if (options.modal) return "modal";
   if (resolveToolCardToggleKey(input, key, options.canToggleTool, false)) return "tool-card";
-  if (resolveTranscriptScrollKey(key, options.running)) return "transcript";
+  if (resolveTranscriptScrollKey(key)) return "transcript";
   return "input";
 }
 
@@ -335,12 +382,10 @@ export function resolveTranscriptScrollKey(key: {
   downArrow?: boolean;
   home?: boolean;
   end?: boolean;
-}, running = false, blocked = false): TranscriptScrollAction | null {
+}, blocked = false): TranscriptScrollAction | null {
   if (blocked) return null;
   if (key.pageUp) return "pageUp";
   if (key.pageDown) return "pageDown";
-  if (running && key.upArrow && !key.ctrl && !key.shift) return "lineUp";
-  if (running && key.downArrow && !key.ctrl && !key.shift) return "lineDown";
   if (key.shift && key.upArrow) return "lineUp";
   if (key.shift && key.downArrow) return "lineDown";
   if (key.ctrl && key.upArrow) return "lineUp";
@@ -399,22 +444,4 @@ function clampScrollRows(offset: number, viewportRows: number, totalRows: number
 
 function maxTranscriptScroll(viewportRows: number, totalRows: number): number {
   return Math.max(0, totalRows - Math.max(1, viewportRows));
-}
-
-function estimateTranscriptRows(entries: readonly TuiEntry[], wrapWidth: number): number {
-  return entries.reduce((total, entry) => total + estimateEntryRows(entry, wrapWidth), 0);
-}
-
-function estimateEntryRows(entry: TuiEntry, wrapWidth: number): number {
-  if (entry.kind === "thinking") return 1;
-  if (entry.kind === "tool") return entry.summary ? 2 : 1;
-  const content = entry.kind === "user" || entry.kind === "assistant" || entry.kind === "system" ? entry.content : "";
-  return estimateTextRows(content, wrapWidth) + 1;
-}
-
-function estimateTextRows(text: string, wrapWidth: number): number {
-  const width = Math.max(8, Math.floor(wrapWidth));
-  return text.split("\n").reduce((total, line) => {
-    return total + Math.max(1, Math.ceil(line.length / width));
-  }, 0);
 }

@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import React from "react";
 import { renderToString } from "ink";
 import { MessageList, shouldRenderStatically } from "../../src/tui/message-list.js";
+import { buildTranscriptLayout } from "../../src/tui/transcript-layout.js";
 import type { TuiEntry } from "../../src/tui/tui-reporter.js";
 
 describe("shouldRenderStatically", () => {
@@ -62,12 +63,15 @@ describe("shouldRenderStatically", () => {
   it("消息列表统一 user/assistant/system/error 行首符号与缩进", () => {
     const output = renderToString(
       React.createElement(MessageList, {
-        entries: [
-          { kind: "user", content: "帮我检查" },
-          { kind: "assistant", content: "正在检查" },
-          { kind: "system", content: "Unknown command: /wat" },
-          { kind: "assistant", content: "⚠️ 执行出错: boom" },
-        ],
+        layout: buildTranscriptLayout(
+          [
+            { kind: "user", content: "帮我检查" },
+            { kind: "assistant", content: "正在检查" },
+            { kind: "system", content: "Unknown command: /wat" },
+            { kind: "assistant", content: "⚠️ 执行出错: boom" },
+          ],
+          { wrapWidth: 80 },
+        ),
       }),
     );
 
@@ -81,11 +85,20 @@ describe("shouldRenderStatically", () => {
     const output = renderToString(
       React.createElement(MessageList, {
         isStreaming: true,
-        entries: [
-          { kind: "assistant", content: "历史回复" },
-          { kind: "tool", name: "read_file", args: "{}", status: "done", summary: "10 字节 · ok" },
-          { kind: "assistant", content: "正在流式输出" },
-        ],
+        layout: buildTranscriptLayout(
+          [
+            { kind: "assistant", content: "历史回复" },
+            {
+              kind: "tool",
+              name: "read_file",
+              args: "{}",
+              status: "done",
+              summary: "10 字节 · ok",
+            },
+            { kind: "assistant", content: "正在流式输出" },
+          ],
+          { wrapWidth: 80 },
+        ),
       }),
     );
 

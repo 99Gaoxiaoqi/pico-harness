@@ -2,13 +2,16 @@ import React from "react";
 import { renderToString } from "ink";
 import { describe, expect, it } from "vitest";
 import { MessageList } from "../../src/tui/message-list.js";
+import { buildTranscriptLayout } from "../../src/tui/transcript-layout.js";
 import type { TuiEntry } from "../../src/tui/tui-reporter.js";
 
 describe("MessageList virtual transcript", () => {
   it("keeps the existing full render behavior unless virtualization is configured", () => {
     const entries = makeUserEntries(220);
 
-    const output = renderToString(React.createElement(MessageList, { entries }));
+    const output = renderToString(
+      React.createElement(MessageList, { layout: buildTranscriptLayout(entries, { wrapWidth: 80 }) }),
+    );
 
     expect(output).toContain("message-0");
     expect(output).toContain("message-219");
@@ -19,7 +22,7 @@ describe("MessageList virtual transcript", () => {
 
     const output = renderToString(
       React.createElement(MessageList, {
-        entries,
+        layout: buildTranscriptLayout(entries, { wrapWidth: 80 }),
         viewportRows: 4,
         scrollOffsetRows: 100,
         estimatedRowHeight: 1,
@@ -27,10 +30,10 @@ describe("MessageList virtual transcript", () => {
       }),
     );
 
-    expect(output).not.toContain("message-98");
-    expect(output).toContain("message-99");
-    expect(output).toContain("message-104");
-    expect(output).not.toContain("message-105");
+    expect(output).not.toContain("message-32");
+    expect(output).toContain("message-33");
+    expect(output).toContain("message-35");
+    expect(output).not.toContain("message-36");
   });
 
   it("keeps the tail of a tall streaming assistant visible at the bottom", () => {
@@ -47,14 +50,11 @@ describe("MessageList virtual transcript", () => {
 
     const output = renderToString(
       React.createElement(MessageList, {
-        entries,
+        layout: buildTranscriptLayout(entries, { wrapWidth: 80 }),
         isStreaming: true,
         viewportRows: 10,
         scrollOffsetRows: 0,
         estimatedRowHeight: 2,
-        getEntryRows: (entry: TuiEntry) =>
-          entry.kind === "assistant" ? entry.content.split("\n").length + 1 : 2,
-        wrapWidth: 80,
         overscanRows: 0,
         virtualizeThreshold: 0,
         scrollToBottom: true,
@@ -86,11 +86,38 @@ describe("MessageList virtual transcript", () => {
       },
     ];
 
-    const output = renderToString(React.createElement(MessageList, { entries }));
+    const output = renderToString(
+      React.createElement(MessageList, { layout: buildTranscriptLayout(entries, { wrapWidth: 80 }) }),
+    );
 
     expect(output).toContain("bash · 2 calls");
     expect(output).toContain("2 success");
     expect(output).not.toContain("/api/daily");
+  });
+
+  it("consumes the pre-grouped row layout instead of rebuilding display entries", () => {
+    const entries: TuiEntry[] = [
+      {
+        kind: "tool",
+        name: "read_file",
+        args: '{"path":"a.ts"}',
+        status: "success",
+        summary: "a",
+      },
+      {
+        kind: "tool",
+        name: "read_file",
+        args: '{"path":"b.ts"}',
+        status: "success",
+        summary: "b",
+      },
+    ];
+    const layout = buildTranscriptLayout(entries, { wrapWidth: 40 });
+
+    const output = renderToString(React.createElement(MessageList, { layout }));
+
+    expect(layout.entries).toHaveLength(1);
+    expect(output).toContain("read · 2 calls");
   });
 });
 
