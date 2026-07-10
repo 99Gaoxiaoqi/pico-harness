@@ -433,7 +433,7 @@ export class AgentEngine implements AgentRunner {
               { retainLastN },
               `[Engine] ⚠ 字符级降级用尽,触发模型摘要压缩(FullCompactor),保留尾部 ${retainLastN} 条`,
             );
-            const compacted = await this.fullCompactor.compact(session, retainLastN);
+            const compacted = await this.fullCompactor.compact(session, retainLastN, signal);
             signal?.throwIfAborted();
             if (compacted) {
               // 压缩成功:用新 history 重新组装 context,从默认预算重试
