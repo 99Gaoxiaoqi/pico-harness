@@ -18,6 +18,10 @@ import { listCliSessionSummaries } from "../cli/session-resolver.js";
 import { createPermissionState } from "../approval/permission-state.js";
 import { formatPermissionPanel } from "../tui/approval-panel.js";
 import { createBuiltinCommands } from "./builtin-commands.js";
+import {
+  createAddDirectoryCommand,
+  type AdditionalDirectoryManager,
+} from "./add-directory.js";
 import { CommandRegistry } from "./command-registry.js";
 import {
   loadMarkdownCommands,
@@ -97,6 +101,8 @@ export interface PicoCommandRegistryOptions {
   tools?: readonly SessionToolStatus[];
   toolDisclosure?: ToolDisclosure;
   mcpStatus?: McpStatusProvider;
+  additionalDirectories?: readonly string[];
+  additionalDirectoryManager?: AdditionalDirectoryManager;
 }
 
 export async function createPicoCommandRegistry(
@@ -114,6 +120,9 @@ export async function createPicoCommandRegistry(
     ...(options.thinkingEffort !== undefined ? { thinkingEffort: options.thinkingEffort } : {}),
     ...(options.permissionMode !== undefined ? { permissionMode: options.permissionMode } : {}),
     tools,
+    ...(options.additionalDirectories !== undefined
+      ? { additionalDirectories: options.additionalDirectories }
+      : {}),
   });
   const builtins = createBuiltinCommands().filter(
     (command) => !OVERRIDDEN_BUILTIN_COMMANDS.has(command.name),
@@ -123,6 +132,7 @@ export async function createPicoCommandRegistry(
     createStatusCommand(settings, options.mcpStatus),
     createModeCommand(settings),
     createPermissionsCommand(settings),
+    createAddDirectoryCommand(settings, options.additionalDirectoryManager),
     createCompactCommand(options),
     createInitCommand(options),
     createDoctorCommand(options),
