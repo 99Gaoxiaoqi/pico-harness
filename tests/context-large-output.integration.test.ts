@@ -1,6 +1,6 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Compactor } from "../src/context/compactor.js";
 import { ToolResultArtifactStore } from "../src/context/artifact-store.js";
@@ -29,6 +29,7 @@ async function safeRm(path: string): Promise<void> {
   }
 }
 import type { Registry } from "../src/tools/registry.js";
+import { BashTool, ReadFileTool, ToolRegistry } from "../src/tools/registry-impl.js";
 import { createToolResultObservationProcessor } from "../src/tools/tool-result-observation.js";
 
 const ONE_MIB = 1024 * 1024;
@@ -179,6 +180,71 @@ describe("large ToolResult artifact externalization", () => {
 
   afterEach(async () => {
     await safeRm(workDir);
+  });
+
+  it("Bash 完整落盘大输出后可用 read_file 分页读取且不再外部化", async () => {
+    const lines = Array.from(
+      { length: 450 },
+      (_, index) => `line-${String(index + 1).padStart(3, "0")}:${"x".repeat(90)}`,
+    );
+    const log = `${lines.join("\n")}\n`;
+    expect(log.length).toBeGreaterThan(30_000);
+    expect(log.length).toBeLessThan(50_000);
+    await writeFile(join(workDir, "large.log"), log, "utf8");
+
+    const registry = new ToolRegistry({ truncateResults: false });
+    registry.register(new BashTool(workDir));
+    registry.register(new ReadFileTool(workDir));
+    const store = new ToolResultArtifactStore({
+      baseDir: join(workDir, ".claw", "artifacts"),
+    });
+    const processor = createToolResultObservationProcessor({ store });
+
+    const bashCall: ToolCall = {
+      id: "bash-large",
+      name: "bash",
+      arguments: '{"command":"cat large.log"}',
+    };
+    const bashResult = await registry.execute(bashCall);
+    expect(bashResult.isError).toBe(false);
+    expect(bashResult.output).toBe(log);
+
+    const bashObservation = await processor({
+      toolCall: bashCall,
+      result: bashResult,
+      output: bashResult.output,
+      sessionId: "paging-integration",
+    });
+    expect(bashObservation).toContain("[大型工具输出已外部化]");
+    expect(bashObservation).toContain(`originalChars: ${log.length}`);
+    const artifactPath = bashObservation.match(/^artifactPath: (.+)$/m)?.[1];
+    expect(artifactPath).toBeDefined();
+    expect(await readFile(artifactPath!, "utf8")).toBe(log);
+
+    const readCall: ToolCall = {
+      id: "read-page",
+      name: "read_file",
+      arguments: JSON.stringify({ path: artifactPath, offset: 201, limit: 180 }),
+    };
+    const readResult = await registry.execute(readCall);
+    expect(readResult.isError).toBe(false);
+    expect(readResult.output).toContain(`201\t${lines[200]}`);
+    expect(readResult.output).toContain("共 450 行,当前显示 201-380 行,行尾: LF");
+    expect(readResult.output).toContain('"offset":381');
+    expect(readResult.output).toContain('"limit":180');
+    expect(readResult.output).toContain("PARTIAL:");
+
+    const readObservation = await processor({
+      toolCall: readCall,
+      result: readResult,
+      output: readResult.output,
+      sessionId: "paging-integration",
+    });
+    expect(readObservation).toBe(readResult.output);
+
+    const artifactEntries = await readdir(dirname(artifactPath!));
+    expect(artifactEntries.filter((entry) => entry.endsWith(".txt"))).toHaveLength(1);
+    expect(artifactEntries.filter((entry) => entry.endsWith(".json"))).toHaveLength(1);
   });
 
   it("Engine 把大 ToolResult 外部化,上下文保留 artifact path 与中间错误摘要", async () => {
