@@ -92,6 +92,8 @@ export interface AppProps {
   keybindings?: UserKeybindingConfig;
   /** /rewind 等外部动作请求替换输入草稿。 */
   inputReplacement?: { sequence: number; text: string };
+  /** Ctrl+L 经 Ink renderer 输出的过渡空帧，避免绕过帧记账。 */
+  redrawBlank?: boolean;
 }
 
 export function App({
@@ -114,6 +116,7 @@ export function App({
   onRedraw,
   keybindings,
   inputReplacement,
+  redrawBlank = false,
 }: AppProps): React.ReactNode {
   const { exit, suspendTerminal } = useApp();
   const mouseMode = useTerminalMouseMode();
@@ -397,7 +400,9 @@ export function App({
       bottom={bottom}
       overlay={overlay}
       modal={modal}
+      width={Math.max(1, columns - 1)}
       height={rows}
+      hidden={redrawBlank}
     />
   );
 }
