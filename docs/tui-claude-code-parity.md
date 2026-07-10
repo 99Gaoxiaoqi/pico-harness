@@ -138,6 +138,8 @@ pico --add-dir ../shared --add-dir /absolute/generated
 
 键位值可以是内置 action、`command:/...` slash command，或 `null` 用于解绑默认键。已知字段会在启动时严格校验，错误会带配置路径和字段名；`commandsDir` 必须保持在项目目录内。
 
+工具卡默认用 `Ctrl+E` 展开或折叠，卡片右侧会显示完整提示；裸 `e` 保留给输入框。
+
 ## Claude Code 兼容入口
 
 ### `.claude/commands`

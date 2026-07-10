@@ -503,6 +503,13 @@ git worktree remove ../pico-1-streaming
 
 ## 📅 变更记录
 
+- 2026-07-10：修复 TUI 工作区审批、Goal 与工具卡交互
+  - 审批 dialog 按 taskId 隔离，并发请求不再覆盖；连续 Enter 只处理一次，abort/finally 会清理本轮全部审批框。
+  - 未授权外部路径继续在普通写审批前拒绝；`/add-dir` 后主 Agent、spawn、delegate、profile 与递归子代理共享同一组 WorkspaceRoots。
+  - 新增只读 `/goal` 状态命令并接入共享 GoalManager、帮助面板与 slash suggestions。
+  - 最近工具卡在后续回复出现后仍可用 Ctrl+E 展开；长回复会自动滚回工具卡，非空输入草稿仍优先使用 Ctrl+E 跳到行尾。
+  - 验证：全量 mock 156 个文件、1933 项通过；确定性 E2E 10 项、相关真实模型 E2E 7 项通过；lint、format、typecheck、build、audit 与 TUI smoke 通过。
+
 - 2026-07-10：完成阶段 8 TUI-only 收口
   - 发布入口、会话共享运行时、动态工具、项目配置、工作区审批和文档边界全部收口。
   - 默认测试 1915 项通过、确定性 E2E 10 项通过；构建产物 PTY 发起 1 次本地模型请求并完成渲染。
@@ -542,7 +549,7 @@ git worktree remove ../pico-1-streaming
     3. **逐行流式渲染**（对标 `StreamingMarkdown`）：`streaming-text.tsx` 按最后换行分割 stable/unstable，stable memo 不重渲染，避免长文本 O(n²)
     4. **isStatic 按状态判定**（对标 `shouldRenderStatically`）：按 tool resolve 状态逐条判 static（非按索引切分），配合 React.memo 跳过重渲染
     5. **无固定顶栏**（对标 Claude Code 布局）：Logo 作为消息流首项，输入框 borderBottom only
-    6. **工具结果折叠/展开**（对标 `shouldCollapseDiffs`）：默认折叠只显字节数，按 e 展开
+    6. **工具结果折叠/展开**（对标 `shouldCollapseDiffs`）：默认折叠只显字节数，按 Ctrl+E 展开
     7. **QueryGuard 并发防护**（对标 `QueryGuard.ts`）：三态状态机 + generation 号防陈旧，useSyncExternalStore 订阅，防连按 Enter 并发提交
   - **新增文件**：query-guard.ts / streaming-text.tsx / message-row.tsx（React.memo + isStatic）
   - **额外**：多行输入（Alt+Enter 换行）+ 输入历史（↑↓ 翻）
