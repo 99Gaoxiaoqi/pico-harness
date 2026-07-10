@@ -233,6 +233,39 @@ describe("SuggestionList row model", () => {
     expect(output).toContain("显示帮助");
   });
 
+  it("renders descriptor source, category, kind, and disabled reason in slash rows", () => {
+    const session: ActiveSuggestionSession = {
+      kind: "slash",
+      query: "perm",
+      replaceStart: 0,
+      replaceEnd: 5,
+      selectedIndex: 0,
+      items: [
+        {
+          value: "permissions",
+          description: "Show or change the current permission mode",
+          source: "builtin",
+          category: "permissions",
+          kind: "local",
+          disabled: true,
+          disabledReason: "Command unavailable while a modal is active.",
+        },
+      ],
+    };
+
+    const rows = formatSuggestionRows(session);
+    const output = renderToString(<SuggestionList session={session} />);
+
+    expect(rows[0]).toMatchObject({
+      left: "/permissions",
+      metadata: "builtin · permissions · local",
+      disabled: true,
+      disabledReason: "Command unavailable while a modal is active.",
+    });
+    expect(output).toContain("builtin · permissions · local");
+    expect(output).toContain("Command unavailable while a modal");
+  });
+
   it("clips selected Chinese, multiline, and long command candidates for panel rendering", () => {
     const session: ActiveSuggestionSession = {
       kind: "slash",

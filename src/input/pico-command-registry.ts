@@ -102,13 +102,6 @@ export async function createPicoCommandRegistry(
   options: PicoCommandRegistryOptions,
 ): Promise<CommandRegistry> {
   const skillLoader = new SkillLoader(options.workDir);
-  const [skillCandidates, agentCandidates, sessionCandidates, snapshotCandidates] =
-    await Promise.all([
-      loadSkillArgumentCandidates(skillLoader),
-      loadAgentArgumentCandidates(options.workDir),
-      loadSessionArgumentCandidates(options.workDir),
-      loadSnapshotArgumentCandidates(options),
-    ]);
   const tools = options.tools ?? toolStatusFromRegistry(buildDefaultToolRegistry(options.workDir));
   const settings = getOrCreateSessionSettings({
     sessionId: options.sessionId ?? `cwd:${options.workDir}`,
@@ -138,14 +131,14 @@ export async function createPicoCommandRegistry(
     createMcpCommand(options.mcpStatus),
     createAgentsCommand(options),
     createSessionsCommand(options),
-    createResumeCommand(sessionCandidates),
+    createResumeCommand(options),
     createSnapshotsCommand(options),
-    createRewindCommand(options, snapshotCandidates),
+    createRewindCommand(options),
     createUndoCommand(options),
     createImageCommand(),
-    createAgentCommand(options, agentCandidates),
+    createAgentCommand(options),
     createSkillsCommand(skillLoader),
-    createSkillCommand(skillLoader, skillCandidates),
+    createSkillCommand(skillLoader),
   ]);
 
   const markdownCommands = await loadMarkdownCommands({
@@ -174,10 +167,11 @@ export function commandSuggestions(
   category?: string;
   usage?: string;
   matchedAlias?: string;
+  disabled?: boolean;
+  disabledReason?: string;
 }> {
   return registry
     .detailedSuggestions(query)
-    .slice(0, 20)
     .map((command) => ({
       value: command.insertText,
       description: command.description,
@@ -187,6 +181,8 @@ export function commandSuggestions(
       ...(command.usage === undefined ? {} : { usage: command.usage }),
       ...(command.argumentHint === undefined ? {} : { argumentHint: command.argumentHint }),
       ...(command.matchedAlias === undefined ? {} : { matchedAlias: command.matchedAlias }),
+      ...(command.disabled === true ? { disabled: true } : {}),
+      ...(command.disabledReason === undefined ? {} : { disabledReason: command.disabledReason }),
     }));
 }
 
@@ -194,11 +190,10 @@ export function commandArgumentSuggestions(
   registry: CommandRegistry,
   commandName: string,
   query: string,
-): readonly SlashArgumentCandidate[] {
+): Promise<readonly SlashArgumentCandidate[]> {
   const command = registry.resolve(commandName);
   const result = command?.argumentCompleter?.(query) ?? [];
-  if (isPromiseLike(result)) return [];
-  return [...result];
+  return Promise.resolve(result).then((items) => [...items]);
 }
 
 export const MODEL_ARGUMENT_CANDIDATES: readonly SlashArgumentCandidate[] = [
@@ -244,15 +239,6 @@ function filterArgumentCandidates(
   return candidates
     .filter((candidate) => candidate.value.toLowerCase().startsWith(normalized))
     .map((candidate) => ({ ...candidate }));
-}
-
-function isPromiseLike<T>(value: T | Promise<T>): value is Promise<T> {
-  return Boolean(
-    typeof value === "object" &&
-      value !== null &&
-      "then" in value &&
-      typeof (value as { then?: unknown }).then === "function",
-  );
 }
 
 async function loadSkillArgumentCandidates(
@@ -817,14 +803,15 @@ function createSessionsCommand(options: PicoCommandRegistryOptions): SlashComman
   };
 }
 
-function createResumeCommand(sessionCandidates: readonly SlashArgumentCandidate[]): SlashCommand {
+function createResumeCommand(options: PicoCommandRegistryOptions): SlashCommand {
   return {
     name: "resume",
     description: "Show how to resume a saved session",
     usage: "/resume <session-id>",
     argumentHint: "<session-id>",
     category: "session",
-    argumentCompleter: completeFromCandidates(sessionCandidates),
+    argumentCompleter: async (query) =>
+      filterArgumentCandidates(await loadSessionArgumentCandidates(options.workDir), query),
     kind: "local",
     execute: (input): LocalCommandResult => {
       const sessionId = input.argv[0];
@@ -878,7 +865,6 @@ function createSnapshotsCommand(options: PicoCommandRegistryOptions): SlashComma
 
 function createRewindCommand(
   options: PicoCommandRegistryOptions,
-  snapshotCandidates: readonly SlashArgumentCandidate[],
 ): SlashCommand {
   return {
     name: "rewind",
@@ -887,7 +873,8 @@ function createRewindCommand(
     usage: "/rewind [message-id] [code|conversation|both]",
     argumentHint: "[message-id] [code|conversation|both]",
     category: "session",
-    argumentCompleter: completeFromCandidates(snapshotCandidates),
+    argumentCompleter: async (query) =>
+      filterArgumentCandidates(await loadSnapshotArgumentCandidates(options), query),
     kind: "local",
     execute: async (input): Promise<LocalCommandResult> => {
       const session = await resolveCommandSession(options);
@@ -988,10 +975,7 @@ function createSkillsCommand(loader: SkillLoader): SlashCommand {
   };
 }
 
-function createSkillCommand(
-  loader: SkillLoader,
-  skillCandidates: readonly SlashArgumentCandidate[],
-): SlashCommand {
+function createSkillCommand(loader: SkillLoader): SlashCommand {
   return {
     name: "skill",
     aliases: ["use-skill"],
@@ -999,7 +983,8 @@ function createSkillCommand(
     usage: "/skill <name>",
     argumentHint: "<name>",
     category: "skill",
-    argumentCompleter: completeFromCandidates(skillCandidates),
+    argumentCompleter: async (query) =>
+      filterArgumentCandidates(await loadSkillArgumentCandidates(loader), query),
     kind: "local",
     execute: async (input): Promise<LocalCommandResult> => ({
       type: "local",
@@ -1011,7 +996,6 @@ function createSkillCommand(
 
 function createAgentCommand(
   options: PicoCommandRegistryOptions,
-  agentCandidates: readonly SlashArgumentCandidate[],
 ): SlashCommand {
   return {
     name: "agent",
@@ -1019,7 +1003,8 @@ function createAgentCommand(
     usage: "/agent <name> <task>",
     argumentHint: "<name> <task>",
     category: "agent",
-    argumentCompleter: completeFromCandidates(agentCandidates),
+    argumentCompleter: async (query) =>
+      filterArgumentCandidates(await loadAgentArgumentCandidates(options.workDir), query),
     kind: "prompt",
     execute: async (input): Promise<PromptCommandResult | LocalCommandResult> => {
       const agentName = input.argv[0]?.trim();

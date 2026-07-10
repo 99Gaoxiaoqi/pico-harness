@@ -193,6 +193,23 @@ describe("CommandRegistry", () => {
     expect(registry.suggestions("sta")).toEqual(["stash", "stage"]);
   });
 
+  it("detailedSuggestions 保留完整候选,不在 registry 数据层截断", () => {
+    const registry = new CommandRegistry(
+      Array.from({ length: 8 }, (_, index) => localCommand(`bulk-${index}`)),
+    );
+
+    expect(registry.detailedSuggestions("bulk").map((suggestion) => suggestion.name)).toEqual([
+      "bulk-0",
+      "bulk-1",
+      "bulk-2",
+      "bulk-3",
+      "bulk-4",
+      "bulk-5",
+      "bulk-6",
+      "bulk-7",
+    ]);
+  });
+
   it("按 source 分组列出可见且启用的命令", () => {
     const registry = new CommandRegistry([
       localCommand("status", [], { source: "builtin" }),

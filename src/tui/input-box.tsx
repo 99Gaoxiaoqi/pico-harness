@@ -12,11 +12,16 @@ import React, { useRef, useState } from "react";
 import { Box, Text, useInput } from "ink";
 import {
   createInputControllerState,
+  getSuggestionContext,
   reduceInputControllerEvent,
+  type InputControllerOptions,
+  type InputControllerState,
   type InputKey,
   type SlashArgumentSuggestionSource,
   type SuggestionSource,
+  type SuggestionSourceResult,
 } from "./input-controller.js";
+import type { ActiveSuggestionSession, InputSuggestion } from "./suggestions.js";
 import { SuggestionList } from "./suggestions.js";
 
 export interface InputBoxProps {
@@ -47,18 +52,31 @@ export function InputBox({
 }: InputBoxProps): React.ReactNode {
   const initialController = useRef(createInputControllerState());
   const controllerRef = useRef(initialController.current);
+  const suggestionRequestSeq = useRef(0);
   const [controller, setController] = useState(initialController.current);
 
   useInput((input, key) => {
     if (acceptsInput && !acceptsInput(input, key)) return;
-    const result = reduceInputControllerEvent(controllerRef.current, input, key, {
-      disabled,
+    const suggestionOptions = {
       slashCommandSuggestions,
       slashArgumentSuggestions,
       fileMentionSuggestions,
+    };
+    const result = reduceInputControllerEvent(controllerRef.current, input, key, {
+      disabled,
+      ...suggestionOptions,
     });
     controllerRef.current = result.state;
     setController(result.state);
+    if (result.submittedText === undefined && !disabled) {
+      scheduleAsyncSuggestions({
+        state: result.state,
+        options: suggestionOptions,
+        requestSeq: suggestionRequestSeq,
+        controllerRef,
+        setController,
+      });
+    }
     if (result.submittedText !== undefined) {
       onSubmit(result.submittedText);
     }
@@ -71,6 +89,108 @@ export function InputBox({
       {renderInputPrompt({ disabled: Boolean(disabled), disabledLabel, text, cursor })}
       {!disabled && <SuggestionList session={activeSuggestions} />}
     </Box>
+  );
+}
+
+function scheduleAsyncSuggestions({
+  state,
+  options,
+  requestSeq,
+  controllerRef,
+  setController,
+}: {
+  state: InputControllerState;
+  options: Pick<
+    InputControllerOptions,
+    "slashCommandSuggestions" | "slashArgumentSuggestions" | "fileMentionSuggestions"
+  >;
+  requestSeq: React.MutableRefObject<number>;
+  controllerRef: React.MutableRefObject<InputControllerState>;
+  setController: React.Dispatch<React.SetStateAction<InputControllerState>>;
+}): void {
+  const context = getSuggestionContext(state.text, state.cursor);
+  if (!context) {
+    requestSeq.current += 1;
+    return;
+  }
+
+  const result = suggestionResultForContext(context, options);
+  if (!isPromiseLike(result)) return;
+
+  const requestId = ++requestSeq.current;
+  void result.then((items) => {
+    if (requestSeq.current !== requestId) return;
+
+    const current = controllerRef.current;
+    const currentContext = getSuggestionContext(current.text, current.cursor);
+    if (!sameSuggestionContext(context, currentContext)) return;
+
+    const activeSuggestions = buildAsyncSuggestionSession(context, items, current.activeSuggestions);
+    const next = { ...current, activeSuggestions };
+    controllerRef.current = next;
+    setController(next);
+  });
+}
+
+function suggestionResultForContext(
+  context: NonNullable<ReturnType<typeof getSuggestionContext>>,
+  options: Pick<
+    InputControllerOptions,
+    "slashCommandSuggestions" | "slashArgumentSuggestions" | "fileMentionSuggestions"
+  >,
+): SuggestionSourceResult {
+  if (context.kind === "slash") {
+    return options.slashCommandSuggestions?.(context.query) ?? [];
+  }
+  if (context.kind === "slash-argument") {
+    return options.slashArgumentSuggestions?.(context.command ?? "", context.query) ?? [];
+  }
+  return options.fileMentionSuggestions?.(context.query) ?? [];
+}
+
+function buildAsyncSuggestionSession(
+  context: NonNullable<ReturnType<typeof getSuggestionContext>>,
+  items: readonly InputSuggestion[],
+  current: ActiveSuggestionSession | null,
+): ActiveSuggestionSession | null {
+  if (items.length === 0) return null;
+  const selectedIndex =
+    current && sameSuggestionContext(context, current)
+      ? Math.min(current.selectedIndex, items.length - 1)
+      : 0;
+  return {
+    kind: context.kind,
+    query: context.query,
+    replaceStart: context.replaceStart,
+    replaceEnd: context.replaceEnd,
+    selectedIndex,
+    items: [...items],
+  };
+}
+
+function sameSuggestionContext(
+  left: NonNullable<ReturnType<typeof getSuggestionContext>>,
+  right:
+    | NonNullable<ReturnType<typeof getSuggestionContext>>
+    | ActiveSuggestionSession
+    | null,
+): boolean {
+  return Boolean(
+    right &&
+      left.kind === right.kind &&
+      left.query === right.query &&
+      left.replaceStart === right.replaceStart &&
+      left.replaceEnd === right.replaceEnd &&
+      ("command" in right ? left.command === right.command : true),
+  );
+}
+
+function isPromiseLike<T>(value: T | Promise<T>): value is Promise<T> {
+  return Boolean(
+    typeof value === "object" &&
+      value !== null &&
+      "then" in value &&
+      typeof (value as { then?: unknown }).then === "function",
   );
 }
 

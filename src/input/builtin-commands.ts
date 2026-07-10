@@ -1,5 +1,10 @@
 import { CommandRegistry } from "./command-registry.js";
-import type { LocalCommandResult, PromptCommandResult, SlashCommand } from "./types.js";
+import type {
+  LocalCommandResult,
+  PromptCommandResult,
+  SlashCommand,
+  SlashCommandCategory,
+} from "./types.js";
 
 const CORE_HELP_COMMANDS = new Set([
   "help",
@@ -34,6 +39,7 @@ export function createBuiltinCommands(): readonly SlashCommand[] {
       aliases: ["h", "?"],
       description: "Show available slash commands",
       usage: "/help [command]",
+      category: "help",
       action: "help",
       execute: (input, context) => ({
         type: "local",
@@ -47,6 +53,7 @@ export function createBuiltinCommands(): readonly SlashCommand[] {
       aliases: ["cls"],
       description: "Clear the local transcript view",
       usage: "/clear",
+      category: "system",
       action: "clear",
       message: "Clear requested.",
     }),
@@ -55,6 +62,7 @@ export function createBuiltinCommands(): readonly SlashCommand[] {
       aliases: ["quit", "q"],
       description: "Exit the interactive session",
       usage: "/exit",
+      category: "system",
       action: "exit",
       message: "Exit requested.",
     }),
@@ -93,6 +101,7 @@ interface LocalCommandSpec {
   aliases?: readonly string[];
   description: string;
   usage: string;
+  category?: SlashCommandCategory;
   action: LocalCommandResult["action"];
   message?: string;
   execute?: SlashCommand["execute"];
@@ -104,6 +113,7 @@ function localCommand(spec: LocalCommandSpec): SlashCommand {
     aliases: spec.aliases,
     description: spec.description,
     usage: spec.usage,
+    category: spec.category,
     kind: "local",
     execute:
       spec.execute ??

@@ -147,6 +147,40 @@ describe("TUI input routing", () => {
     ]);
   });
 
+  it("/help opens the real HelpPanel dialog with command descriptor metadata", async () => {
+    const registry = await createPicoCommandRegistry({
+      workDir: process.cwd(),
+      provider: "openai",
+      model: "glm-5.2",
+      sessionId: "tui-help-panel",
+    });
+    const { reporter, runAgent, exit, workDir } = harness();
+    const openDialog = vi.fn();
+
+    await handleTuiInputSubmission("/help", {
+      reporter,
+      registry,
+      workDir,
+      runAgent,
+      exit,
+      openDialog,
+    });
+
+    expect(runAgent).not.toHaveBeenCalled();
+    expect(openDialog).toHaveBeenCalledOnce();
+    const request = openDialog.mock.calls[0]?.[0];
+    expect(request).toMatchObject({
+      id: "local-ui:help",
+      layer: "overlay",
+    });
+    const output = renderToString(request.content);
+    expect(output).toContain("Slash commands");
+    expect(output).toContain("builtin / help");
+    expect(output).toContain("/help [command]");
+    expect(output).toContain("builtin / permissions");
+    expect(output).toContain("/permissions [ask|default|auto|");
+  });
+
   it("/mcp can run locally while an agent response is running", async () => {
     const registry = await createPicoCommandRegistry({
       workDir: process.cwd(),
