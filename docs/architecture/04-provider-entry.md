@@ -77,6 +77,8 @@ new CostTracker(provider, modelRoute, session);
 
 ## 第二部分：TUI 单入口
 
+`pico` → TUI 是唯一公开产品入口。REST/WebSocket、ACP、飞书和 one-shot/headless CLI 属于已退役的历史外壳。
+
 ### 入口边界
 
 | 维度         | 当前实现                       |
@@ -97,7 +99,7 @@ main.ts parseArgs
           └─ runAgentFromCli
 ```
 
-`runAgentFromCli` 装配链：
+`runAgentFromCli` 是 TUI 每轮运行的内部装配函数，不是公开 one-shot/headless API。其装配链：
 
 1. resolveProviderConfig（CLI 参数 > 环境变量）
 2. globalSessionManager.getOrCreate（固定 ID 复用）
@@ -144,8 +146,7 @@ loop.ts 构造包装 provider，把 generate() 替换为 generateStream()
   │ delta => reporter.onTextDelta?.(delta)
   ▼
 Reporter.onTextDelta(delta)
-  ├── TerminalReporter: process.stdout.write(delta)        [CLI]
-  └── TuiReporter: streamingText += delta → emit()          [TUI]
+  └── TuiReporter: streamingText += delta → emit()          [公开 TUI]
 ```
 
 retry / overflowRetry 无需改动自动获得流式能力（构造器已替换 generate）。

@@ -6,7 +6,7 @@
 // 最简版本：问 → 答 → 结束
 const response = await provider.generate(
   [{ role: "user", content: "帮我看看 package.json 里有哪些依赖" }],
-  [] // 没有工具
+  [], // 没有工具
 );
 console.log(response.content);
 ```
@@ -104,8 +104,8 @@ export class IterationBudget {
 
   constructor(
     private maxTurns: number = 50,
-    private maxTokens: number = 1_000_000,  // 100 万 Token 硬上限
-    private maxCostCents: number = 500,       // 单次任务最多烧 5 块钱
+    private maxTokens: number = 1_000_000, // 100 万 Token 硬上限
+    private maxCostCents: number = 500, // 单次任务最多烧 5 块钱
   ) {}
 
   canContinue(): boolean {
@@ -273,8 +273,8 @@ export async function runLoop(
     recoveryManager: RecoveryManager;
     reminderInjector: ReminderInjector;
     // ... 更多
-  }
-): Promise<void>
+  },
+): Promise<void>;
 ```
 
 看起来很多参数，但每一个都是被现实问题逼出来的：

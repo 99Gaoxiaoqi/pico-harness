@@ -26,7 +26,7 @@
 详见 **ROADMAP.md**——这是持久化的开发计划,记录了所有待办任务和进度。
 
 1. **测试驱动**:每完成一个功能点,先写测试再写实现(或同步写),`npm test` 全过后才提交。
-2. **真实大模型���证(强制)**:mock 单元测试不够,所有功能必须补真实大模型 e2e(`tests/e2e/`)验证端到端可用。mock 证明"机制对",e2e 证明"模型真会用"。e2e 暴露的 bug 往往是 mock 永远发现不了的(如 4.4 ACP 的 `buildApprovalMiddleware` 未 import 在 24 个 mock 全绿下隐藏,真实模型 e2e 才暴露)。
+2. **真实大模型验证(强制)**:mock 单元测试不够,当前公开 TUI 功能必须补真实大模型 e2e(`tests/e2e/`)验证端到端可用。mock 证明"机制对",e2e 证明"模型真会用"。
 3. **小步提交**:每完成一小部分就 Git 提交一次,不要堆积。提交信息 `feat(scope): 中文描述`。
 4. **Worktree 并行**:大功能用 `git worktree add ../pico-<阶段>-<功能> -b feat/<功能>` 隔离开发。
 5. **进度同步**:每完成一个任务,立即在 ROADMAP.md 里把 `- [ ]` 改成 `- [x]`。
@@ -35,11 +35,12 @@
 
 - 通过 Git 提交信息时,遵循中文团队习惯:type 保留 `feat`/`fix`/`docs` 等 Conventional Commits 英文关键字,scope、subject 和 body 使用中文。
 
-## 文件历史 CLI
+## 公开入口与文件历史
 
-- 阶段 1.5.8 起,CLI 通过 `--list-snapshots` 查看当前/指定 session 的文件历史快照。
-- `--rewind [message-id] --rewind-mode code|conversation|both` 使用文件历史执行代码、对话或二者同时回滚；省略 `message-id` 时只列出可选快照。
-- 旧的 `safety/checkpoint-manager.ts` 保留为 fallback,不要删除。
+- 唯一公开入口是 `pico` → TUI；`runAgentFromCli` 仅是 TUI 内部装配函数。
+- TUI 通过 `/snapshots` 查看文件历史，通过 `/rewind` 选择 code / conversation / both 回滚。
+- REST/WebSocket、ACP、飞书、one-shot/headless CLI、Cron、Docker 和 Plugin runtime 不在当前公开范围。
+- `safety/checkpoint-manager.ts` 只是 legacy/manual fallback；现行主方案是 `safety/file-history.ts`，不要删除 fallback。
 
 ## 当前进度
 
@@ -55,5 +56,6 @@
 - [x] 阶段 1.5:文件历史系统(纯 copyFile 备份 + 三轴 rewind)
 - [x] 阶段 2:工具生态扩展(Glob / Grep / TodoList / WebSearch / Background Tasks / replace_all)
 - [x] 阶段 3:上下文与控制流增强(MicroCompaction / Steer / undo / Goal Mode / Plan Review / shouldContinueAfterStop)
-- [x] 阶段 4:多模型与多端入口(Gemini / Credential Pool / REST+WS / ACP / Docker)
-- [ ] 阶段 5:高级特性(按需迭代)
+- [x] 阶段 4:历史完成多端入口；当前仅保留 Gemini / Credential Pool，REST+WS / ACP / 飞书 / Docker 外壳已退役
+- [x] 阶段 5-7:历史功能迭代已收口，当前公开产品边界以 TUI 为准
+- [ ] 阶段 8:TUI-only 文档与产品边界收口（进度见 ROADMAP.md）

@@ -37,7 +37,7 @@ pico-harness 是一个用 TypeScript 实现的**工业级 Agent Harness 引擎**
                     ┌──────────────────┐         ┌──────────────────────┐    ┌──────────────────┐
                     │ src/safety/      │         │ src/observability/    │    │ src/schema/       │
                     │  file-history    │         │  logger/tracker/trace │    │  message.ts       │
-                    │  checkpoint(旧)  │         │  pricing              │    │  (核心数据结构)    │
+                    │  checkpoint legacy │         │  pricing              │    │  (核心数据结构)    │
                     └──────────────────┘         └──────────────────────┘    └──────────────────┘
 ```
 
@@ -45,7 +45,7 @@ pico-harness 是一个用 TypeScript 实现的**工业级 Agent Harness 引擎**
 
 | 原则             | 说明                                                                  |
 | ---------------- | --------------------------------------------------------------------- |
-| **极简工具集**   | 优先用 Read/Write/Edit/Bash 四个原语组合能力                         |
+| **极简工具集**   | 优先用 Read/Write/Edit/Bash 四个原语组合能力                          |
 | **状态外部化**   | 规划写在 PLAN.md，进度写在 TODO.md，不依赖内存状态机                  |
 | **边做边验证**   | 每完成一步就运行测试确认，不一次性堆砌代码                            |
 | **Session 驱动** | 引擎是"打工执行器"，不维护状态，靠 Session 推理（随时休眠/唤醒）      |
@@ -70,3 +70,4 @@ pico-harness 是一个用 TypeScript 实现的**工业级 Agent Harness 引擎**
 - **核心依赖**: better-sqlite3（持久化/FTS5）、ink+react（TUI）、pino（日志）、gpt-tokenizer（BPE 计数）、js-yaml、picocolors
 - **开发工具**: tsx（dev 运行）、vitest（测试）、eslint+prettier
 - **启动**: `pico` 或 `npm run dev` 进入 TUI
+- **入口边界**: `pico` → TUI 是唯一公开产品入口；`runAgentFromCli` 仅供 TUI 内部装配

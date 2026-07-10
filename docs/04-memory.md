@@ -17,9 +17,9 @@ Session 是最核心的记忆单元。它的设计很简单：**一个 Session =
 ```typescript
 // src/engine/session.ts
 export class Session {
-  readonly id: string;          // 会话标识
-  readonly workDir: string;     // 绑定的工作区
-  private history: Message[];   // 完整对话历史
+  readonly id: string; // 会话标识
+  readonly workDir: string; // 绑定的工作区
+  private history: Message[]; // 完整对话历史
 
   // Token 累计统计
   totalPromptTokens = 0;
@@ -199,13 +199,16 @@ async build(turnCount: number): Promise<string> {
 # AGENTS.md
 
 ## 身份
+
 你是 pico，一个 TypeScript 编码助手。
 
 ## 红线
+
 - 不得执行 rm -rf、git push --force 等高危操作
 - 修改文件前先读取确认，不盲目覆盖
 
 ## 工作风格
+
 - 极简工具集：只用 Read / Write / Edit / Bash 四个原语
 - 状态外部化：规划写在 PLAN.md，进度写在 TODO.md
 ```

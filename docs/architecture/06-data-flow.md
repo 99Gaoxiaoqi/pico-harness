@@ -151,12 +151,12 @@ generateWithRetry 内层捕获
 ## 4. 文件历史三轴 rewind 流程
 
 ```
-用户运行: pico --rewind turn-3 --rewind-mode both
+用户在 TUI 输入: /rewind turn-3 both
 
-cli/file-history.ts 解析:
+TUI rewind command/dialog 解析:
   ├─ messageId = "turn-3"
   ├─ messageIndex = 从快照 manifest 查 turn-3 对应的 session.length
-  └─ rewind-mode = "both"
+  └─ mode = "both"
 
 session.rewindBoth(messageId, messageIndex):
   │
@@ -172,7 +172,7 @@ session.rewindBoth(messageId, messageIndex):
       ├─ history = slice(0, messageIndex)  // 截断对话
       ├─ pruneToolResultMeta
       ├─ conversationId = 新 fork ID
-      ├─ store.bumpEpoch()  // WS client 感知世代已变
+      ├─ store.bumpEpoch()  // 持久化会话世代变更
       └─ persistRewindTo(messageIndex)  // 落盘 truncate 事件
 
 结果: 代码回到 turn-3 开头 + 对话回到 turn-3 之前
@@ -228,7 +228,7 @@ ReplApp.handleSubmit:
   ├─ guard.tryStart() → generation=1 (并发防护)
   ├─ reporter.pushUserMessage("你好") → entries.push({kind:"user"}) → emit
   │   └─ onUpdate([...entries]) → setEntries → App 重渲染
-  └─ runAgentFromCli({prompt:"你好", reporter})
+  └─ runAgentFromCli({prompt:"你好", reporter})  // TUI 内部装配，非公开 CLI
       │
       ▼ engine 事件流
       ├─ onStart → spinnerMode="requesting" → emit → App 重渲染

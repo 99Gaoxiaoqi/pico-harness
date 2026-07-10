@@ -21,13 +21,13 @@
 
 ```ts
 interface BaseTool {
-  name(): string;                              // 全局唯一名
-  definition(): ToolDefinition;               // name + description + inputSchema(JSON Schema)
-  execute(args: string): Promise<string>;     // 原始 JSON 字符串,延迟解析
-  readOnly?: boolean;                         // 默认 false
-  accesses?(args: string): ToolAccesses;      // 资源访问集;未实现按 all() 保守
-  maxResultSizeChars?: number;                // 默认 8000
-  toolset?: string;                           // 工具所属集(预留分组)
+  name(): string; // 全局唯一名
+  definition(): ToolDefinition; // name + description + inputSchema(JSON Schema)
+  execute(args: string): Promise<string>; // 原始 JSON 字符串,延迟解析
+  readOnly?: boolean; // 默认 false
+  accesses?(args: string): ToolAccesses; // 资源访问集;未实现按 all() 保守
+  maxResultSizeChars?: number; // 默认 8000
+  toolset?: string; // 工具所属集(预留分组)
 }
 ```
 
@@ -38,14 +38,14 @@ interface BaseTool {
 ```ts
 interface Registry {
   register(tool: BaseTool): void;
-  getAvailableTools(): ToolDefinition[];      // 返回 schema 给 Main Loop
+  getAvailableTools(): ToolDefinition[]; // 返回 schema 给 Main Loop
   execute(call: ToolCall): Promise<ToolResult>; // 路由并执行
-  use(mw: MiddlewareFunc): void;              // 安全拦截中间件
-  useRequest?(mw: RequestMiddleware): void;   // 可拦截/改写参数
+  use(mw: MiddlewareFunc): void; // 安全拦截中间件
+  useRequest?(mw: RequestMiddleware): void; // 可拦截/改写参数
   useExecution?(mw: ExecutionMiddleware): void; // 洋葱包裹执行
   isReadOnlyTool?(name: string): boolean;
   getAccesses?(call: ToolCall): ToolAccesses;
-  setHookRunner?(runner: HookRunner): void;   // 用户 Shell Hooks
+  setHookRunner?(runner: HookRunner): void; // 用户 Shell Hooks
 }
 ```
 
@@ -84,6 +84,7 @@ type FileAccessOp = "read" | "write" | "readwrite";
 ### 调度器
 
 在 `loop.ts:786` 每批 toolCalls 创建 `ToolScheduler`：
+
 - 不冲突的重叠执行，冲突的等待
 - 结果按 provider 原始顺序回传（保序）
 - `maxConcurrency=8` 防打爆 IO
@@ -95,40 +96,40 @@ type FileAccessOp = "read" | "write" | "readwrite";
 
 ### 核心组（每轮始终暴露，渐进披露）
 
-| name | readOnly | accesses | 用途 |
-|------|----------|----------|------|
-| `read_file` | ✅ | `readFile(path)` | 读文件，加行号，截断 12000 字节 |
-| `write_file` | ❌ | `writeFile(path)` | 创建/覆盖文件，自动建父目录 |
-| `edit_file` | ❌ | `readWriteFile(path)` | 四级模糊匹配链局部替换 |
-| `bash` | ❌ | `all()` | 执行 shell，30s 超时，支持 background |
-| `glob` | ✅ | `none()` | glob 模式匹配文件路径（自实现 glob→RegExp） |
-| `grep` | ✅ | `none()` | 搜索文本/正则（ripgrep 优先，降级 Node.js） |
-| `todo` | ❌ | `all()` | 任务清单 add/update/toggle/remove/list |
+| name         | readOnly | accesses              | 用途                                        |
+| ------------ | -------- | --------------------- | ------------------------------------------- |
+| `read_file`  | ✅       | `readFile(path)`      | 读文件，加行号，截断 12000 字节             |
+| `write_file` | ❌       | `writeFile(path)`     | 创建/覆盖文件，自动建父目录                 |
+| `edit_file`  | ❌       | `readWriteFile(path)` | 四级模糊匹配链局部替换                      |
+| `bash`       | ❌       | `all()`               | 执行 shell，30s 超时，支持 background       |
+| `glob`       | ✅       | `none()`              | glob 模式匹配文件路径（自实现 glob→RegExp） |
+| `grep`       | ✅       | `none()`              | 搜索文本/正则（ripgrep 优先，降级 Node.js） |
+| `todo`       | ❌       | `all()`               | 任务清单 add/update/toggle/remove/list      |
 
 ### 扩展组（按需披露，search_tools 激活）
 
-| name | readOnly | accesses | 用途 |
-|------|----------|----------|------|
-| `echo` | ✅ | `none()` | 原样回显（验证链路） |
-| `skill_view` | ✅ | — | 查看 SKILL.md 正文 |
-| `task_list` | ✅ | `none()` | 列后台任务 |
-| `task_output` | ✅ | `none()` | 读后台任务输出 |
-| `task_stop` | ❌ | `all()` | 停止后台任务 |
-| `fetch_url` | ✅ | `none()` | 抓网页 → 纯文本 |
-| `web_search` | ✅ | `none()` | 网络搜索 |
-| `exit_plan_mode` | ❌ | `all()` | Plan Mode 审批网关 |
-| `create_goal` | ❌ | `all()` | 创建并激活长程目标 |
-| `get_goal` | ✅ | `none()` | 查询目标 |
-| `update_goal` | ❌ | `all()` | 更新目标字段 |
-| `search_tools` | ✅ | `none()` | 渐进披露元工具（检索激活扩展组） |
+| name             | readOnly | accesses | 用途                             |
+| ---------------- | -------- | -------- | -------------------------------- |
+| `echo`           | ✅       | `none()` | 原样回显（验证链路）             |
+| `skill_view`     | ✅       | —        | 查看 SKILL.md 正文               |
+| `task_list`      | ✅       | `none()` | 列后台任务                       |
+| `task_output`    | ✅       | `none()` | 读后台任务输出                   |
+| `task_stop`      | ❌       | `all()`  | 停止后台任务                     |
+| `fetch_url`      | ✅       | `none()` | 抓网页 → 纯文本                  |
+| `web_search`     | ✅       | `none()` | 网络搜索                         |
+| `exit_plan_mode` | ❌       | `all()`  | Plan Mode 审批网关               |
+| `create_goal`    | ❌       | `all()`  | 创建并激活长程目标               |
+| `get_goal`       | ✅       | `none()` | 查询目标                         |
+| `update_goal`    | ❌       | `all()`  | 更新目标字段                     |
+| `search_tools`   | ✅       | `none()` | 渐进披露元工具（检索激活扩展组） |
 
 ### 子代理工具（host 单独注册）
 
-| name | 用途 |
-|------|------|
-| `spawn_subagent` | 单任务子代理委派（只读 registry） |
-| `delegate_task` | 批量/explore/worker 委派（Hermes 风格） |
-| `delegate_status` | 查询 background 委派状态 |
+| name              | 用途                                    |
+| ----------------- | --------------------------------------- |
+| `spawn_subagent`  | 单任务子代理委派（只读 registry）       |
+| `delegate_task`   | 批量/explore/worker 委派（Hermes 风格） |
+| `delegate_status` | 查询 background 委派状态                |
 
 ---
 
@@ -148,18 +149,21 @@ L4 逐行去缩进 + 缩进重对齐
 ## 5. 子代理机制
 
 ### 防污染设计
+
 - 全新纯净 contextHistory（不依赖外部 Session）
 - 仅挂载受限 Registry（explore 只读 / worker 受控写）
 - `maxSubTurns=10` 防卡死，`maxSpawnDepth=2` 防无限委派
 - 强制关闭慢思考
 
 ### explore vs worker
-| 模式 | 工具 | 限制 |
-|------|------|------|
-| explore | read_file/skill_view/bash(强制只读)/glob/grep/fetch_url/web_search | 禁止任何写操作 |
-| worker | 上述 + write_file/edit_file | 禁高危命令（rm/sudo/git push 等） |
+
+| 模式    | 工具                                                               | 限制                              |
+| ------- | ------------------------------------------------------------------ | --------------------------------- |
+| explore | read_file/skill_view/bash(强制只读)/glob/grep/fetch_url/web_search | 禁止任何写操作                    |
+| worker  | 上述 + write_file/edit_file                                        | 禁高危命令（rm/sudo/git push 等） |
 
 ### 自定义角色 (`.claw/agents.yaml`)
+
 按 `profile.tools` 白名单实例化工具，支持自定义 system prompt + maxTurns。
 
 ---
@@ -183,6 +187,7 @@ L4 逐行去缩进 + 缩进重对齐
 ## 7. 用户可配置 Shell Hooks (`src/hooks/`)
 
 对标 Claude Code / Codex / Kimi Code 协议：
+
 - **PreToolUse**：可拦截（deny）或改写参数（modifiedInput）
 - **PostToolUse**：fire-and-forget 通知
 - stdin 传 JSON，exit 0=放行 / exit 2=阻断

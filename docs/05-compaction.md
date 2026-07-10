@@ -115,7 +115,7 @@ const SUMMARY_SECTIONS = [
   "10. 重要上下文",
   "11. 用户偏好与约束",
   "12. 下一步计划",
-  "13. 不确定/待确认事项"
+  "13. 不确定/待确认事项",
 ];
 ```
 
@@ -158,16 +158,16 @@ BPE（Byte Pair Encoding）是大模型训练时使用的分词算法。cl100k_b
 // src/context/context-budget.ts
 export class ContextBudget {
   constructor(
-    private maxTokens: number,         // 硬上限，如 180K
-    private softLimit: number = 0.8,  // 软限制比例，达到 80% 时开始温和压缩
+    private maxTokens: number, // 硬上限，如 180K
+    private softLimit: number = 0.8, // 软限制比例，达到 80% 时开始温和压缩
   ) {}
 
   shouldCompact(currentTokens: number): "none" | "gentle" | "aggressive" | "full" {
     const ratio = currentTokens / this.maxTokens;
     if (ratio < this.softLimit) return "none";
-    if (ratio < 0.9) return "gentle";     // 温和摘要
+    if (ratio < 0.9) return "gentle"; // 温和摘要
     if (ratio < 1.0) return "aggressive"; // 掩码 + 掐头去尾
-    return "full";                         // 模型摘要兜底
+    return "full"; // 模型摘要兜底
   }
 }
 ```

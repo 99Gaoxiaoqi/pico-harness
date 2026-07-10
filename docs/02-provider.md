@@ -12,18 +12,18 @@ if (modelType === "claude") {
   const resp = await fetch("https://api.anthropic.com/v1/messages", {
     headers: { "x-api-key": key, "anthropic-version": "2023-06-01" },
     body: JSON.stringify({
-      system: systemPrompt,           // Claude: system 是顶层字段
+      system: systemPrompt, // Claude: system 是顶层字段
       messages: toClaudeFormat(msgs), // 需要一套转换逻辑
       // ...
-    })
+    }),
   });
 } else if (modelType === "openai") {
   const resp = await fetch("https://api.openai.com/v1/chat/completions", {
-    headers: { "Authorization": `Bearer ${key}` },
+    headers: { Authorization: `Bearer ${key}` },
     body: JSON.stringify({
       messages: toOpenAIFormat(msgs), // 又一套转换逻辑
       // ...
-    })
+    }),
   });
 }
 ```
@@ -42,9 +42,9 @@ if (modelType === "claude") {
 
 在 Agent Harness 里，不同的大模型就是不同的"语言"：
 
-| 厂商 | 协议特征 |
-|------|---------|
-| **OpenAI** | `system` 在 `messages` 数组里；工具调用是 `tool_calls` 字段；工具结果 `role="tool"` |
+| 厂商       | 协议特征                                                                                                          |
+| ---------- | ----------------------------------------------------------------------------------------------------------------- |
+| **OpenAI** | `system` 在 `messages` 数组里；工具调用是 `tool_calls` 字段；工具结果 `role="tool"`                               |
 | **Claude** | `system` 是独立顶层字段；工具调用是 `content` 里的 `tool_use` block；工具结果 `role="user"` + `tool_result` block |
 
 Main Loop 不应该知道这些。它只需要一个"翻译官"：接收标准格式的上下文，返回标准格式的响应。

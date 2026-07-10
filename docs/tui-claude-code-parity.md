@@ -53,29 +53,29 @@ Pico 的 CLI session 以当前项目目录为边界：
 
 当前交互层支持这些内置命令：
 
-| 命令           | 说明                                                                                       |
-| -------------- | ------------------------------------------------------------------------------------------ | ------------ | ------- |
-| `/status`      | 查看当前 session、cwd、provider、model、thinking、permission 和 fork 来源。                |
-| `/mode`        | 查看或切换交互模式：`default`、`plan`、`auto`、`yolo`。                                    |
-| `/model`       | 查看或切换后续请求使用的模型。                                                             |
-| `/thinking`    | 查看或切换思考强度：`off`、`low`、`medium`、`high`。别名：`/effort`。                      |
-| `/permissions` | 查看或切换权限模式：`default`、`auto`、`yolo`、`plan`。                                    |
-| `/tools`       | 列出核心、已披露和可搜索工具；`/tools <query>` 搜索可披露工具。                            |
-| `/help`        | 列出命令；`/help <command>` 查看单个命令用法。                                             |
-| `/clear`       | 清空本地 TUI transcript 视图。                                                             |
-| `/compact`     | 对当前 session 历史做摘要压缩；缺少模型配置时会说明不可用原因。                            |
-| `/init`        | 在当前项目创建轻量入口文件：`AGENTS.md` 和 `.pico/config.json`，不会覆盖已有 `AGENTS.md`。 |
-| `/doctor`      | 检查 cwd、`.env`、provider、model、`LLM_BASE_URL`、`LLM_API_KEY[S]` 和 Node 版本。         |
-| `/sessions`    | 列出当前项目可恢复 session。                                                               |
-| `/resume`      | 输出指定 session 的恢复提示。                                                              |
-| `/snapshots`   | 列出当前 session 的文件历史回滚点。                                                        |
-| `/rewind`      | 回滚代码、对话或二者：`/rewind <messageId> code                                            | conversation | both`。 |
-| `/undo`        | 默认回滚最近一个文件历史快照，也可指定 message id 和模式。                                 |
-| `/agents`      | 列出内置 Agent 和项目 `.claude/agents/*.md`。                                              |
-| `/agent`       | 把任务委派给指定 Agent：`/agent <name> <task>`。                                           |
-| `/skills`      | 列出当前项目 `.claw/skills` 中可用 Skill。                                                 |
-| `/skill`       | 显式激活 Skill 并交给 Agent 执行：`/skill <name> [arguments]`。                             |
-| `/add-dir`     | 列出或添加当前会话可访问的工作目录：`/add-dir [directory]`。                               |
+| 命令           | 说明                                                                                          |
+| -------------- | --------------------------------------------------------------------------------------------- |
+| `/status`      | 查看当前 session、cwd、provider、model、thinking、permission 和 fork 来源。                   |
+| `/mode`        | 查看或切换交互模式：`default`、`plan`、`auto`、`yolo`。                                       |
+| `/model`       | 查看或切换后续请求使用的模型。                                                                |
+| `/thinking`    | 查看或切换思考强度：`off`、`low`、`medium`、`high`。别名：`/effort`。                         |
+| `/permissions` | 查看或切换权限模式：`default`、`auto`、`yolo`、`plan`。                                       |
+| `/tools`       | 列出核心、已披露和可搜索工具；`/tools <query>` 搜索可披露工具。                               |
+| `/help`        | 列出命令；`/help <command>` 查看单个命令用法。                                                |
+| `/clear`       | 清空本地 TUI transcript 视图。                                                                |
+| `/compact`     | 对当前 session 历史做摘要压缩；缺少模型配置时会说明不可用原因。                               |
+| `/init`        | 在当前项目创建轻量入口文件：`AGENTS.md` 和 `.pico/config.json`，不会覆盖已有 `AGENTS.md`。    |
+| `/doctor`      | 检查 cwd、`.env`、provider、model、`LLM_BASE_URL`、`LLM_API_KEY[S]` 和 Node 版本。            |
+| `/sessions`    | 列出当前项目可恢复 session。                                                                  |
+| `/resume`      | 输出指定 session 的恢复提示。                                                                 |
+| `/snapshots`   | 列出当前 session 的文件历史回滚点。                                                           |
+| `/rewind`      | 回滚代码、对话或二者：`/rewind <messageId> <mode>`，模式可选 `code`、`conversation`、`both`。 |
+| `/undo`        | 默认回滚最近一个文件历史快照，也可指定 message id 和模式。                                    |
+| `/agents`      | 列出内置 Agent 和项目 `.claude/agents/*.md`。                                                 |
+| `/agent`       | 把任务委派给指定 Agent：`/agent <name> <task>`。                                              |
+| `/skills`      | 列出当前项目 `.claw/skills` 中可用 Skill。                                                    |
+| `/skill`       | 显式激活 Skill 并交给 Agent 执行：`/skill <name> [arguments]`。                               |
+| `/add-dir`     | 列出或添加当前会话可访问的工作目录：`/add-dir [directory]`。                                  |
 
 项目或用户自定义 Markdown 命令也会进入同一套 slash command registry。内置命令名优先保留，避免项目命令覆盖关键控制命令。
 
@@ -113,6 +113,31 @@ pico --add-dir ../shared --add-dir /absolute/generated
 
 配置中的相对路径以项目根目录为基准。附加目录只扩展文件工具的访问边界，不会从外部目录加载 `AGENTS.md`、hooks 或命令配置。
 
+### 项目配置与键位
+
+`.pico/config.json` 还可以设置项目命令目录和 TUI 键位：
+
+```json
+{
+  "version": 1,
+  "commandsDir": ".pico/commands",
+  "permissions": {
+    "additionalDirectories": ["../shared"]
+  },
+  "keybindings": {
+    "Global": {
+      "ctrl+x": "app:exit",
+      "ctrl+k": "command:/tools"
+    },
+    "Chat": {
+      "meta+enter": "input:newline"
+    }
+  }
+}
+```
+
+键位值可以是内置 action、`command:/...` slash command，或 `null` 用于解绑默认键。已知字段会在启动时严格校验，错误会带配置路径和字段名；`commandsDir` 必须保持在项目目录内。
+
 ## Claude Code 兼容入口
 
 ### `.claude/commands`
@@ -136,7 +161,7 @@ Pico 会加载项目级 Claude agent profile：
 
 每个文件可用 frontmatter 声明 `name`、`description`、`tools`，正文作为 Agent instructions。`/agents` 会列出这些 Agent；`/agent <name> <task>` 会生成委派 prompt，要求主 Agent 调用 `delegate_task`。
 
-当前 TUI/CLI 默认还会提供内置 Agent：`Explore`、`Plan`、`general-purpose`。项目级 `.claude/agents` 可以覆盖同名内置 Agent。
+当前 TUI 默认还会提供内置 Agent：`Explore`、`Plan`、`general-purpose`。项目级 `.claude/agents` 可以覆盖同名内置 Agent。
 
 ### `@` mentions
 
