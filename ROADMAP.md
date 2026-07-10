@@ -473,16 +473,16 @@ git worktree remove ../pico-1-streaming
 
 ---
 
-## 阶段 10：TUI 滚动与大型工具输出收敛（进行中）
+## 阶段 10：TUI 滚动与大型工具输出收敛 ✅（2026-07-11）
 
 > **目标**：修复工具展开后 transcript 失去自动跟底的问题，引入鼠标滚轮交互，并按 Claude Code 主线、Kimi Code 分页思路收敛大型工具输出。
 
-- [ ] 10.1 TUI 视口状态拆分为 follow / manual / tool-anchor，工具锚点失效和新 prompt 提交时恢复跟底
-- [ ] 10.2 全屏 TUI 支持鼠标滚轮，滚回底部后恢复自动跟随，退出与异常路径恢复终端 mouse mode
-- [ ] 10.3 Bash 大输出先完整落盘再返回预览，默认阈值对齐 Claude Code 的 30,000 字符
-- [ ] 10.4 Read 支持 offset / limit 分页、总量提示和 PARTIAL 语义，并阻断 artifact 读取的二次外部化
-- [ ] 10.5 Grep / Glob / MCP / 未知工具按工具类型使用分页或通用大输出兜底
-- [ ] 10.6 使用跨模块集成测试验证滚动窗口、大输出落盘和分页读取，并完成 main 分支验收
+- [x] 10.1 TUI 视口状态拆分为 follow / manual / tool-anchor，工具锚点失效和新 prompt 提交时恢复跟底
+- [x] 10.2 全屏 TUI 支持鼠标滚轮，滚回底部后恢复自动跟随，退出与异常路径恢复终端 mouse mode
+- [x] 10.3 Bash 大输出先完整落盘再返回预览，默认阈值对齐 Claude Code 的 30,000 字符
+- [x] 10.4 Read 支持 offset / limit 分页、总量提示和 PARTIAL 语义，并阻断 artifact 读取的二次外部化
+- [x] 10.5 Grep / Glob / MCP / 未知工具按工具类型使用分页或通用大输出兜底
+- [x] 10.6 使用跨模块集成测试验证滚动窗口、大输出落盘和分页读取，并完成 main 分支验收
 
 ---
 
@@ -501,8 +501,8 @@ git worktree remove ../pico-1-streaming
 | 阶段 7       | 8        | 8      | ✅ 完成                             |
 | 阶段 8       | 8        | 8      | ✅ TUI-only 收口完成                |
 | 阶段 9       | 3        | 3      | ✅ 模型路由与核心交互完成           |
-| 阶段 10      | 6        | 0      | 🚧 TUI 滚动与大型输出收敛中         |
-| **当前总计** | **84**   | **78** | 🚧 阶段 10 开发中                   |
+| 阶段 10      | 6        | 6      | ✅ TUI 滚动与大型输出收敛完成       |
+| **当前总计** | **84**   | **84** | ✅ 阶段 1-10 交付并收口             |
 
 ---
 
@@ -527,6 +527,13 @@ git worktree remove ../pico-1-streaming
 ---
 
 ## 📅 变更记录
+
+- 2026-07-11：完成阶段 10 TUI 滚动与大型工具输出收敛
+  - Transcript 视口改为 follow / manual / tool-anchor 三态；工具展开锚点失效、新 prompt 提交和滚回底部时恢复自动跟随。
+  - 全屏 TUI 启用 SGR 1000/1006 鼠标滚轮，保留 PageUp/PageDown 回退，并在卸载与挂起链路对称恢复终端 mouse mode。
+  - Bash 超过 30,000 chars 后完整写入 session artifact；未知/MCP 工具使用 50,000 chars 通用阈值，Grep/Glob 超限时提示缩小查询。
+  - Read 新增 1-based offset/limit 分页、PARTIAL 与下一页提示；单页最多 30,000 chars，并阻断 artifact 回读的二次外部化。
+  - 验证：PR-safe E2E 4 个文件、15 条用例通过；lint、typecheck、build 与 audit 通过。
 
 - 2026-07-10：`/rewind` 对齐 Claude Code 用户消息级机制
   - 顶层用户消息进入模型前建立唯一 RewindPoint，内部 ReAct turn 不再生成用户可见快照。
