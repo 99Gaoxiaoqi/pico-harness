@@ -163,8 +163,11 @@ export function formatHelpPanel(
   for (const section of sections) {
     lines.push(section.title);
     for (const row of section.rows) {
-      lines.push(formatHelpPanelRow(row, width));
-      if (row.disabled && width !== undefined) lines.push(formatHelpPanelDetailLine("    [disabled]", width));
+      const formattedRow = formatHelpPanelRow(row, width);
+      lines.push(formattedRow.line);
+      if (row.disabled && !formattedRow.showsDisabled) {
+        lines.push(formatHelpPanelDetailLine("    [disabled]", width));
+      }
       if (row.aliases) lines.push(formatHelpPanelDetailLine(`    aliases: ${row.aliases}`, width));
       if (row.disabledReason) lines.push(formatHelpPanelDetailLine(`    ${row.disabledReason}`, width));
     }
@@ -343,12 +346,17 @@ function scrollOffsetForSelection(
   return clamp(nextOffset, 0, maxScroll);
 }
 
-function formatHelpPanelRow(row: HelpPanelRow, width?: number): string {
+function formatHelpPanelRow(row: HelpPanelRow, width?: number): { line: string; showsDisabled: boolean } {
   const marker = row.selected ? "›" : " ";
   const disabled = row.disabled ? " [disabled]" : "";
   const line = `${marker} ${row.usage}${disabled}  ${row.description}`;
-  if (width === undefined || terminalWidth(line) <= width) return line;
-  return truncateTerminalText(`${marker} ${row.usage}  ${row.description}`, width);
+  if (width === undefined || terminalWidth(line) <= width) {
+    return { line, showsDisabled: row.disabled };
+  }
+  return {
+    line: truncateTerminalText(`${marker} ${row.usage}  ${row.description}`, width),
+    showsDisabled: false,
+  };
 }
 
 function formatHelpPanelDetailLine(line: string, width?: number): string {
