@@ -2,8 +2,12 @@ import { mkdtemp, readFile, readdir, realpath, writeFile } from "node:fs/promise
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { globalApprovalManager, type ApprovalNotice } from "../src/approval/manager.js";
-import { runAgentFromCli } from "../src/cli/run-agent.js";
+import {
+  ApprovalManager,
+  globalApprovalManager,
+  type ApprovalNotice,
+} from "../src/approval/manager.js";
+import { buildApprovalMiddleware, runAgentFromCli } from "../src/cli/run-agent.js";
 import type { Reporter } from "../src/engine/reporter.js";
 import type { Message, ToolDefinition } from "../src/schema/message.js";
 import type { LLMProvider } from "../src/provider/interface.js";
@@ -161,6 +165,63 @@ describe("runAgentFromCli", () => {
     expect(provider.calls).toHaveLength(0);
   });
 
+  it("同 provider call id 的并发普通审批可独立 approve/reject", async () => {
+    const manager = new ApprovalManager(100);
+    const notices: ApprovalNotice[] = [];
+    let resolveNotices!: () => void;
+    const noticesReady = new Promise<void>((resolve) => {
+      resolveNotices = resolve;
+    });
+    const middleware = buildApprovalMiddleware(
+      (notice) => {
+        notices.push(notice);
+        if (notices.length === 2) resolveNotices();
+      },
+      process.cwd(),
+      undefined,
+      manager,
+    );
+    const duplicateCall = {
+      id: "gemini-call-0",
+      name: "write_file",
+      arguments: JSON.stringify({ path: "same-call-id.txt", content: "collision test" }),
+    };
+
+    try {
+      const approvals = [middleware(duplicateCall), middleware({ ...duplicateCall })];
+      await noticesReady;
+      const decisions = [
+        manager.resolveApproval(notices[0]!.taskId, true, "approve first"),
+        manager.resolveApproval(notices[1]!.taskId, false, "reject second"),
+      ];
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      const outcome = await Promise.race([
+        Promise.all(approvals).then((results) => ({ state: "settled" as const, results })),
+        new Promise<{ state: "timed-out" }>((resolve) => {
+          timeout = setTimeout(() => resolve({ state: "timed-out" }), 150);
+        }),
+      ]);
+      if (timeout) clearTimeout(timeout);
+
+      expect({
+        uniqueIds: new Set(notices.map((notice) => notice.taskId)).size,
+        decisions,
+        state: outcome.state,
+        allowed:
+          outcome.state === "settled"
+            ? outcome.results.map((result) => result.allowed).sort()
+            : undefined,
+      }).toEqual({
+        uniqueIds: 2,
+        decisions: [true, true],
+        state: "settled",
+        allowed: [false, true],
+      });
+    } finally {
+      manager.clear();
+    }
+  });
+
   it("runs a request in the selected workdir and returns the trace path when trace is explicit", async () => {
     const workDir = await mkdtemp(join(tmpdir(), "pico-cli-"));
     const provider = new ScriptedProvider([
@@ -266,7 +327,7 @@ describe("runAgentFromCli", () => {
     const notice = await waitForApprovalBeforeCompletion(approval.nextNotice, runPromise);
     expect(globalApprovalManager.pendingCount).toBe(1);
     expect(notice).toMatchObject({
-      taskId: "call_write_approval",
+      taskId: expect.stringMatching(/^approval_[0-9a-f-]+$/),
       toolName: "write_file",
     });
     expect(notice.preview?.target).toBe("approval.txt");
@@ -432,7 +493,7 @@ describe("runAgentFromCli", () => {
 
     const notice = await waitForApprovalBeforeCompletion(approval.nextNotice, runPromise);
     expect(notice).toMatchObject({
-      taskId: "call_edit_approval",
+      taskId: expect.stringMatching(/^approval_[0-9a-f-]+$/),
       toolName: "edit_file",
     });
     expect(notice.preview?.target).toBe("approval-edit.txt");
@@ -525,7 +586,7 @@ describe("runAgentFromCli", () => {
 
     const notice = await waitForApprovalBeforeCompletion(approval.nextNotice, runPromise);
     expect(notice).toMatchObject({
-      taskId: "call_bash_redirect_approval",
+      taskId: expect.stringMatching(/^approval_[0-9a-f-]+$/),
       toolName: "bash",
     });
     expect(notice.preview?.target).toBe("a.txt");
