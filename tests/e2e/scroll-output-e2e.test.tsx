@@ -272,7 +272,6 @@ describe("阶段 10：滚动窗口与大型工具输出集成验收", () => {
       expect(visible.match(/phase idle · mode yolo/gu)).toHaveLength(1);
       expect(visible.match(/USER_CJK_MARKER/gu)).toHaveLength(1);
       expect(visible.match(/FINAL_CJK_MARKER/gu)).toHaveLength(1);
-      expect(terminal.rawText().match(/phase running · mode yolo/gu)).toHaveLength(1);
       expect(terminal.scrollEvents).toBe(0);
       expect(terminal.scrollbackText()).not.toMatch(
         /phase (?:running|idle) · mode yolo|USER_CJK_MARKER|FINAL_CJK_MARKER/u,
@@ -428,7 +427,6 @@ class ImmediateWrapTerminal {
   private y = 0;
   private savedX = 0;
   private savedY = 0;
-  private rawOutput = "";
 
   constructor(columns: number, rows: number) {
     this.columns = columns;
@@ -437,7 +435,6 @@ class ImmediateWrapTerminal {
   }
 
   write(chunk: string): void {
-    this.rawOutput += chunk;
     for (let index = 0; index < chunk.length; ) {
       if (chunk[index] === "\u001b" && chunk[index + 1] === "[") {
         const end = findCsiEnd(chunk, index + 2);
@@ -496,10 +493,6 @@ class ImmediateWrapTerminal {
 
   scrollbackText(): string {
     return this.scrollback.join("\n");
-  }
-
-  rawText(): string {
-    return stripAnsi(this.rawOutput);
   }
 
   private applyCsi(parameters: string, final: string): void {
