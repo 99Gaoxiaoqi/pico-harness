@@ -68,6 +68,45 @@ describe("App", () => {
     expect(countOccurrences(output, "Enter 发送")).toBe(0);
   });
 
+  it("uses the real content width for transcript layout on an extremely narrow terminal", async () => {
+    const app = (
+      <App
+        model="glm-5.2"
+        provider="openai"
+        workDir="/工作区/从0开始构建AgentHarness/pico-harness"
+        sessionMode="plan"
+        permissionMode="auto"
+        mcpSummary="MCP 1/2"
+        taskSummary="真实任务"
+        entries={[
+          {
+            kind: "error",
+            message: "错误包含中文和 emoji 🚀，需要和布局测高一致",
+            retryable: false,
+          },
+        ]}
+        running={false}
+        onSubmit={vi.fn()}
+      />
+    );
+    const harness = createInteractiveApp(
+      app,
+      { columns: 12, rows: 24 },
+    );
+
+    try {
+      const output = await harness.rerender(app);
+
+      expect(output.split("\n").length).toBeLessThanOrEqual(24);
+      expect(output).toContain("Try");
+      expect(output).toContain("phase");
+      expect(output).not.toContain("真实任务");
+      expect(output).not.toContain("MCP 1/2");
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
   it("keeps full registry slash candidates through InputBox and completes beyond the first window", async () => {
     const workDir = mkdtempSync(join(tmpdir(), "pico-app-registry-suggestions-"));
     const commandsDir = join(workDir, ".pico", "commands");
@@ -675,7 +714,7 @@ describe("App", () => {
     expect(output).toContain("phase idle");
     expect(output).toContain("mode resume");
     expect(output).toContain("perm acceptEdits");
-    expect(output).toContain("ctx claude");
+    expect(output).not.toContain("ctx claude");
     expect(output).not.toContain("think high");
     expect(output).not.toContain("claude-sonnet/claude");
   });

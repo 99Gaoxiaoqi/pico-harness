@@ -92,11 +92,9 @@ export interface AppProps {
 
 export function App({
   model,
-  provider = "openai",
   workDir,
   sessionMode = "new",
   permissionMode = "ask",
-  thinkingEffort = "off",
   mcpSummary,
   taskSummary,
   queuedCount = 0,
@@ -118,7 +116,7 @@ export function App({
   const inlineModal = focusedDialog?.layer === "modal" && focusedDialog.id === "approval:pending";
   const modal =
     focusedDialog?.layer === "modal" && !inlineModal ? focusedDialog.content : undefined;
-  const transcriptWrapWidth = Math.max(20, columns - 6);
+  const transcriptWrapWidth = Math.max(1, columns - 6);
   const approvalNotice = inlineModal
     ? approvalNoticeFromContent(focusedDialog.content)
     : undefined;
@@ -273,14 +271,13 @@ export function App({
   });
 
   const phase = approvalNotice ? "approval" : queuedCount > 0 ? "queued" : running ? "running" : "idle";
-  const runtimeTaskSummary =
-    queuedCount > 0 ? `${queuedCount} queued` : taskSummary ?? (thinkingEffort === "off" ? undefined : `think ${thinkingEffort}`);
+  const runtimeTaskSummary = queuedCount > 0 ? `${queuedCount} queued` : undefined;
   const status = (
     <StatusBar
       phase={phase}
       sessionMode={sessionMode}
       permissionMode={permissionMode}
-      contextSummary={provider}
+      contextSummary={undefined}
       taskSummary={runtimeTaskSummary}
       renderWidth={Math.max(1, columns - 2)}
     />
@@ -367,7 +364,7 @@ function measureGenericDialogLayout(
   if (!options.active) return { content, rows: 0 };
 
   const maxRows = Math.max(3, options.rows - 9);
-  const width = Math.max(20, options.columns - 8);
+  const width = Math.max(1, options.columns - 8);
   if (React.isValidElement<InteractiveHelpPanelProps>(content) && content.type === InteractiveHelpPanel) {
     const fit = fitHelpPanelMaxItems(content.props.commands, {
       maxRows,

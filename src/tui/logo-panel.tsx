@@ -34,7 +34,7 @@ export function LogoPanel({
   visibleRows,
 }: LogoPanelProps): React.ReactNode {
   const rows = clipRows(
-    buildLogoPanelRows({
+    buildLogoPanelFrameRows({
       name,
       subtitle,
       model,
@@ -51,21 +51,25 @@ export function LogoPanel({
   );
 
   return (
-    <Box flexDirection="column" marginTop={1} paddingX={1}>
-      {rows.map((row, index) => (
-        <Text key={`${index}:${row}`} dimColor={index > 0 || !row.startsWith(name)}>
-          {index === 0 && row.startsWith(name) ? (
-            <>
-              <Text bold color="cyan">
-                {name}
-              </Text>
-              <Text dimColor>{row.slice(name.length)}</Text>
-            </>
-          ) : (
-            row
-          )}
-        </Text>
-      ))}
+    <Box flexDirection="column" paddingX={1}>
+      {rows.map((row, index) =>
+        row === "" ? (
+          <Box key={`${index}:blank`} height={1} />
+        ) : (
+          <Text key={`${index}:${row}`} dimColor={!row.startsWith(name)}>
+            {row.startsWith(name) ? (
+              <>
+                <Text bold color="cyan">
+                  {name}
+                </Text>
+                <Text dimColor>{row.slice(name.length)}</Text>
+              </>
+            ) : (
+              row
+            )}
+          </Text>
+        ),
+      )}
     </Box>
   );
 }
@@ -86,21 +90,25 @@ export function buildLogoPanelRows({
   cwdMaxLength = 48,
   renderWidth = 80,
 }: LogoPanelProps): string[] {
+  const compact = renderWidth <= 24;
   const detail = model ?? subtitle;
   const parts = [
     detail,
     ...(cwd ? [truncateLogoCwd(cwd, cwdMaxLength)] : []),
-    ...(sessionMode ? [`mode ${sessionMode}`] : []),
-    ...(permissionMode ? [`perm ${permissionMode}`] : []),
-    ...(mcpSummary ? [mcpSummary] : []),
-    ...(taskSummary ? [taskSummary] : []),
+    ...(!compact && sessionMode ? [`mode ${sessionMode}`] : []),
+    ...(!compact && permissionMode ? [`perm ${permissionMode}`] : []),
+    ...(!compact && mcpSummary ? [mcpSummary] : []),
+    ...(!compact && taskSummary ? [taskSummary] : []),
   ];
   return visualRows(`${name} · ${parts.join(" · ")}`, Math.max(1, renderWidth));
 }
 
+function buildLogoPanelFrameRows(props: LogoPanelProps): string[] {
+  return ["", ...buildLogoPanelRows(props)];
+}
+
 function clipRows(rows: string[], startOffsetRows: number, visibleRows: number | undefined): string[] {
-  const rawStart = Math.max(0, Math.floor(startOffsetRows));
-  const start = rawStart === 0 ? 0 : Math.max(0, rawStart - 1);
+  const start = Math.max(0, Math.floor(startOffsetRows));
   const end = visibleRows === undefined ? undefined : start + Math.max(0, Math.floor(visibleRows));
   return rows.slice(start, end);
 }

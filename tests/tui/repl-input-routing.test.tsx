@@ -46,13 +46,13 @@ describe("TUI input routing", () => {
       kind: "error",
       message: "boom",
       retryable: false,
-      action: "check logs or retry",
     });
     expect(formatTuiRunErrorEntry(new LLMStatusError(503, "unavailable"))).toMatchObject({
       kind: "error",
       retryable: true,
+      action: "retry",
     });
-    expect(formatTuiRunError(new Error("boom"))).toBe("boom");
+    expect(formatTuiRunError(new Error("boom"))).toBe("⚠️ 执行出错: boom");
   });
 
   it("运行异常通过 reporter.pushError 进入节流快照,不会被 pending update 覆盖", async () => {
@@ -69,7 +69,7 @@ describe("TUI input routing", () => {
     expect(snapshots.at(-1)).toEqual([
       { kind: "user", content: "run" },
       { kind: "assistant", content: "pending" },
-      { kind: "error", message: "boom", retryable: false, action: "check logs or retry" },
+      { kind: "error", message: "boom", retryable: false },
     ]);
     vi.useRealTimers();
   });
@@ -725,6 +725,7 @@ describe("TUI input routing", () => {
           controller: AbortController | null,
           queue: RunningInputQueue,
           reporter: TuiReporter,
+          onQueueSizeChange?: (size: number) => void,
         ) => void;
       };
     expect(replModule.handleTuiInterrupt).toBeTypeOf("function");
@@ -733,14 +734,16 @@ describe("TUI input routing", () => {
     const controller = new AbortController();
     const abort = vi.spyOn(controller, "abort");
     const queue = new RunningInputQueue();
+    const onQueueSizeChange = vi.fn();
     queue.enqueue("queued prompt");
 
-    replModule.handleTuiInterrupt(controller, queue, reporter);
+    replModule.handleTuiInterrupt(controller, queue, reporter, onQueueSizeChange);
 
     expect(abort).toHaveBeenCalledOnce();
     expect(abort.mock.calls[0]?.[0]).toMatchObject({ name: "AbortError" });
     expect(controller.signal.aborted).toBe(true);
     expect(queue.size).toBe(0);
+    expect(onQueueSizeChange).toHaveBeenCalledWith(0);
     expect(snapshots.at(-1)).toEqual([
       {
         kind: "system",
@@ -920,7 +923,6 @@ describe("TUI input routing", () => {
           kind: "error",
           message: expect.stringContaining("missing.png"),
           retryable: false,
-          action: "check logs or retry",
         },
       ]);
     } finally {
