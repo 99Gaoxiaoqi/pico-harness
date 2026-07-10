@@ -84,6 +84,7 @@ import {
   type ApprovalPanelAction,
 } from "./approval-panel.js";
 import { createTuiRuntimeState, type TuiRuntimeState } from "./runtime-state.js";
+import { resolveTuiRenderStdout } from "./terminal-grid.js";
 
 export interface ReplOptions {
   /** 工作区 */
@@ -764,16 +765,20 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     );
   }
 
+  // ChatGPT.app 可能先改变 xterm 网格、后端 PTY 却仍上报旧宽度。
+  // Ink 接管 alt-screen 前先查询前端光标边界，避免隐式换行让擦行记账失步。
+  const renderStdout = await resolveTuiRenderStdout(process.stdin, process.stdout);
+
   // 启动前清掉当前可视区,避免上一次未正常退出的 TUI 帧或 shell scrollback
   // 留在首屏,造成 Logo/Header 看起来重复。
-  if (process.stdout.isTTY) {
-    process.stdout.write("\x1b[2J\x1b[H");
+  if (renderStdout.isTTY) {
+    renderStdout.write("\x1b[2J\x1b[H");
   }
 
   // alternateScreen 隔离 shell scrollback；根布局由 Yoga 按当前终端宽度保留右侧 1 列，
   // 缩放时不依赖 React 尚未更新的宽度状态。保持 Ink 默认全帧渲染，兼容中文与复杂布局。
   // patchConsole:false 让 stderr 不被劫持。
-  const instance = render(<ReplApp />, TUI_RENDER_OPTIONS);
+  const instance = render(<ReplApp />, { ...TUI_RENDER_OPTIONS, stdout: renderStdout });
   instanceRef.current = instance;
   try {
     await instance.waitUntilExit();

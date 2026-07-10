@@ -483,7 +483,7 @@ git worktree remove ../pico-1-streaming
 - [x] 10.4 Read 支持 offset / limit 分页、总量提示和 PARTIAL 语义，并阻断 artifact 读取的二次外部化
 - [x] 10.5 Grep / Glob / MCP / 未知工具按工具类型使用分页或通用大输出兜底
 - [x] 10.6 使用跨模块集成测试验证滚动窗口、大输出落盘和分页读取，并完成 main 分支验收
-- [x] 10.7 修复立即换行终端的全帧重复刷屏：自适应右边界留列与 Ctrl+L 安全重绘
+- [x] 10.7 修复宿主 xterm 与 PTY 尺寸漂移时的全帧重复刷屏：前端网格探测、自适应右边界留列与 Ctrl+L 安全重绘
 
 ---
 
@@ -530,9 +530,10 @@ git worktree remove ../pico-1-streaming
 ## 📅 变更记录
 
 - 2026-07-11：修复 ChatGPT.app 166x17 全屏重复刷屏
-  - Yoga 根布局按终端当前宽度自适应保留右边界 1 列，防止 spinner 帧和动态缩放触发立即 wrap/scrollback；保持 Ink 默认全帧渲染，避免增量模式造成中文与复杂布局错位。
+  - ChatGPT.app 中 xterm 可能已缩至约 87 列，后端 PTY 却仍上报 166 列；Ink 启动前用 CPR 读取前端真实网格，并将它作为布局上限。
+  - Yoga 根布局按有效终端宽度自适应保留右边界 1 列并裁剪溢出，防止 spinner 帧和动态缩放触发隐式 wrap；保持 Ink 默认全帧渲染，避免增量模式造成中文与复杂布局错位。
   - Ctrl+L 改为 Ink 管理的空帧/完整帧重画，不再裸写 stdout 破坏差分帧状态。
-  - 166x17 缩至 80x17 的生产配置集成验收模拟立即换行；PR-safe E2E 16 条、构建产物 PTY smoke、lint、format、typecheck、build 与 audit 通过。
+  - 生产配置集成验收分离模拟 PTY 166x17 与前端 87x40，验证 CPR 分片回应、中文流式多帧与后续缩至 80 列均不产生残影。
 
 - 2026-07-11：完成阶段 10 TUI 滚动与大型工具输出收敛
   - Transcript 视口改为 follow / manual / tool-anchor 三态；工具展开锚点失效、新 prompt 提交和滚回底部时恢复自动跟随。
