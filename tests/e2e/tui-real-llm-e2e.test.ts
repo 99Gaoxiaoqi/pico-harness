@@ -292,38 +292,50 @@ describeRealLLM("TUI productization real LLM e2e", { timeout: 240000 }, () => {
       { provider: writeOnlyProvider, openDialog, closeDialog, abortControllerRef },
     );
     const outcome = observeOutcome(run);
-    let approvalRejectedForHappyPath = false;
+    let approvalCompleted = false;
+    let approvalTryError: unknown;
     try {
-      await vi.waitFor(() => expect(openDialog).toHaveBeenCalled(), { timeout: 60000 });
+      await waitForDialogOrOutcome(openDialog, outcome, 60000);
       const settledBeforeReject = await promiseSettled(outcome);
       expect(settledBeforeReject).toBe(false);
       expect(readFileSync(target, "utf8")).toBe("ORIGINAL\n");
       expect(rejectApproval).toBeTypeOf("function");
       rejectCapturedApproval();
-      approvalRejectedForHappyPath = true;
+      const approvalOutcome = await withTimeout(
+        outcome,
+        60000,
+        "timed out waiting for approval run to finish",
+      );
+      expect(approvalOutcome).toMatchObject({ status: "fulfilled" });
+      approvalCompleted = true;
+
+      const entries = harness.entries();
+      expect(openDialog).toHaveBeenCalledWith(
+        expect.objectContaining({ id: "approval:pending", layer: "modal" }),
+      );
+      expect(closeDialog).toHaveBeenCalledWith("approval:pending");
+      expect(entries).toContainEqual(
+        expect.objectContaining({ kind: "tool", name: "write_file", status: "denied" }),
+      );
+      expect(readFileSync(target, "utf8")).toBe("ORIGINAL\n");
+      expect(assistantText(entries)).toContain("PICO_TUI_APPROVAL_REJECTED_OK");
+    } catch (error) {
+      approvalTryError = error;
+      throw error;
     } finally {
-      rejectCapturedApproval();
-      if (!approvalRejectedForHappyPath) {
+      if (!approvalCompleted) {
+        rejectCapturedApproval();
         abortControllerRef.current?.abort(new DOMException("approval test cleanup", "AbortError"));
+        try {
+          await withTimeout(outcome, 5000, "timed out cleaning up approval run");
+        } catch (cleanupError) {
+          if (!approvalTryError) throw cleanupError;
+          console.warn("approval run cleanup did not settle", cleanupError);
+        }
+      } else {
+        expect(await promiseSettled(outcome)).toBe(true);
       }
     }
-    const approvalOutcome = await withTimeout(
-      outcome,
-      60000,
-      "timed out waiting for approval run to finish",
-    );
-    expect(approvalOutcome).toMatchObject({ status: "fulfilled" });
-
-    const entries = harness.entries();
-    expect(openDialog).toHaveBeenCalledWith(
-      expect.objectContaining({ id: "approval:pending", layer: "modal" }),
-    );
-    expect(closeDialog).toHaveBeenCalledWith("approval:pending");
-    expect(entries).toContainEqual(
-      expect.objectContaining({ kind: "tool", name: "write_file", status: "denied" }),
-    );
-    expect(readFileSync(target, "utf8")).toBe("ORIGINAL\n");
-    expect(assistantText(entries)).toContain("PICO_TUI_APPROVAL_REJECTED_OK");
   });
 
   it("AbortSignal 中断后同 session 可继续", async () => {
@@ -344,6 +356,8 @@ describeRealLLM("TUI productization real LLM e2e", { timeout: 240000 }, () => {
     });
     const interruptedOutcome = observeOutcome(interrupted);
 
+    let interruptCompleted = false;
+    let interruptTryError: unknown;
     try {
       await withTimeout(
         observedProvider.waitForStreamStart(),
@@ -351,14 +365,32 @@ describeRealLLM("TUI productization real LLM e2e", { timeout: 240000 }, () => {
         "timed out waiting for real provider stream start",
       );
       abortControllerRef.current?.abort(new DOMException("real e2e interrupted", "AbortError"));
+      const interruptedResult = await withTimeout(
+        interruptedOutcome,
+        15000,
+        "timed out waiting for interrupted run to finish",
+      );
+      expect(interruptedResult).toMatchObject({
+        status: "rejected",
+        error: expect.objectContaining({ name: "AbortError" }),
+      });
+      interruptCompleted = true;
+    } catch (error) {
+      interruptTryError = error;
+      throw error;
     } finally {
-      abortControllerRef.current?.abort(new DOMException("real e2e cleanup", "AbortError"));
+      if (!interruptCompleted) {
+        abortControllerRef.current?.abort(new DOMException("real e2e cleanup", "AbortError"));
+        try {
+          await withTimeout(interruptedOutcome, 5000, "timed out cleaning up interrupted run");
+        } catch (cleanupError) {
+          if (!interruptTryError) throw cleanupError;
+          console.warn("interrupted run cleanup did not settle", cleanupError);
+        }
+      } else {
+        expect(await promiseSettled(interruptedOutcome)).toBe(true);
+      }
     }
-    const interruptedResult = await interruptedOutcome;
-    expect(interruptedResult).toMatchObject({
-      status: "rejected",
-      error: expect.objectContaining({ name: "AbortError" }),
-    });
 
     await harness.runPrompt("Reply exactly: PICO_TUI_AFTER_ABORT_OK. Do not use tools.", {
       provider: observedProvider,
@@ -428,6 +460,22 @@ function observeOutcome(promise: Promise<unknown>): Promise<PromiseOutcome> {
     () => ({ status: "fulfilled" }),
     (error: unknown) => ({ status: "rejected", error }),
   );
+}
+
+async function waitForDialogOrOutcome(
+  openDialog: ReturnType<typeof vi.fn>,
+  outcome: Promise<PromiseOutcome>,
+  timeoutMs: number,
+): Promise<void> {
+  const result = await Promise.race([
+    vi
+      .waitFor(() => expect(openDialog).toHaveBeenCalled(), { timeout: timeoutMs })
+      .then(() => ({ kind: "dialog" as const })),
+    outcome.then((settledOutcome) => ({ kind: "outcome" as const, outcome: settledOutcome })),
+  ]);
+  if (result.kind === "outcome") {
+    throw new Error(`run settled before approval dialog opened: ${result.outcome.status}`);
+  }
 }
 
 async function promiseSettled(promise: Promise<unknown>): Promise<boolean> {
