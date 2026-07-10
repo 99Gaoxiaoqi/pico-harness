@@ -30,8 +30,11 @@ import { runAgentFromCli } from "../cli/run-agent.js";
 import { listFileHistorySnapshotSummaries } from "../cli/file-history.js";
 import { createCliSessionId, type CliSessionSelection } from "../cli/session-resolver.js";
 import { listFileSuggestions } from "../input/file-index.js";
-import { getSlashArgumentHints } from "../input/slash-argument-hints.js";
-import { commandSuggestions, createPicoCommandRegistry } from "../input/pico-command-registry.js";
+import {
+  commandArgumentSuggestions,
+  commandSuggestions,
+  createPicoCommandRegistry,
+} from "../input/pico-command-registry.js";
 import { preparePromptForMessage, type PreparedUserPrompt } from "../input/prepare-prompt.js";
 import { processUserInput } from "../input/process-user-input.js";
 import { parseSlashInput } from "../input/slash-parser.js";
@@ -531,10 +534,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         running={running}
         slashCommandSuggestions={(query) => commandSuggestions(registry, query)}
         slashArgumentSuggestions={(command, query) =>
-          getSlashArgumentHints(command, query).map((hint) => ({
-            value: hint.value,
-            description: hint.description,
-          }))
+          commandArgumentSuggestions(registry, command, query)
         }
         fileMentionSuggestions={(query) =>
           initialFileSuggestions

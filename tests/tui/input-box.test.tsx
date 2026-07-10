@@ -141,6 +141,28 @@ describe("InputBox input controller", () => {
     expect(state.activeSuggestions).toBeNull();
   });
 
+  it("keeps the full candidate list in controller state while selection moves past the first window", () => {
+    const options: InputControllerOptions = {
+      fileMentionSuggestions: () =>
+        Array.from({ length: 8 }, (_, index) => ({
+          value: `src/file-${index}.ts`,
+          description: "file",
+        })),
+    };
+    let state = typeText("@src", options);
+
+    expect(state.activeSuggestions?.items).toHaveLength(8);
+
+    for (let i = 0; i < 6; i++) {
+      state = reduceInputControllerEvent(state, "", key({ downArrow: true }), options).state;
+    }
+
+    expect(state.activeSuggestions?.selectedIndex).toBe(6);
+    state = reduceInputControllerEvent(state, "", key({ tab: true }), options).state;
+
+    expect(state.text).toBe("@src/file-6.ts ");
+  });
+
   it("arrow keys move suggestion selection before falling back to history", () => {
     const options: InputControllerOptions = {
       slashCommandSuggestions: () => [

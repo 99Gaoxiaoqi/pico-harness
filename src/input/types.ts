@@ -65,6 +65,30 @@ export type SlashCommandSource =
   | "mcp"
   | (string & {});
 
+export type SlashCommandCategory =
+  | "session"
+  | "workspace"
+  | "tools"
+  | "model"
+  | "permissions"
+  | "help"
+  | "skill"
+  | "agent"
+  | "mcp"
+  | "system"
+  | (string & {});
+
+export interface SlashArgumentCandidate {
+  value: string;
+  description?: string;
+}
+
+export type SlashArgumentCompleter = (
+  query: string,
+) =>
+  | readonly SlashArgumentCandidate[]
+  | Promise<readonly SlashArgumentCandidate[]>;
+
 export interface CommandListOptions {
   source?: SlashCommandSource;
   includeHidden?: boolean;
@@ -77,6 +101,8 @@ export interface SlashCommand {
   description: string;
   usage?: string;
   argumentHint?: string;
+  category?: SlashCommandCategory;
+  argumentCompleter?: SlashArgumentCompleter;
   kind?: SlashCommandKind;
   source?: SlashCommandSource;
   isHidden?: boolean;

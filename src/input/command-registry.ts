@@ -5,6 +5,7 @@ import {
 } from "./command-availability.js";
 import type {
   CommandListOptions,
+  SlashCommandCategory,
   SlashCommand,
   SlashCommandKind,
   SlashCommandSource,
@@ -21,6 +22,7 @@ export interface CommandSuggestion {
   description: string;
   argumentHint?: string;
   source: SlashCommandSource;
+  category?: SlashCommandCategory;
   kind: SlashCommandKind;
   usage?: string;
   priority?: number;
@@ -192,6 +194,7 @@ function suggestionFromCommand(
     insertText: command.name,
     description: command.description,
     source: command.source ?? "builtin",
+    ...(command.category === undefined ? {} : { category: command.category }),
     kind: command.kind ?? "local",
     aliases: command.aliases ?? [],
     ...(command.argumentHint === undefined ? {} : { argumentHint: command.argumentHint }),

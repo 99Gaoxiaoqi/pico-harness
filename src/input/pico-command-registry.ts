@@ -32,7 +32,12 @@ import {
   type ClaudeAgentSummary,
   type ClaudeAgentSource,
 } from "./agent-loader.js";
-import type { LocalCommandResult, PromptCommandResult, SlashCommand } from "./types.js";
+import type {
+  LocalCommandResult,
+  PromptCommandResult,
+  SlashArgumentCandidate,
+  SlashCommand,
+} from "./types.js";
 import { createProvider, type ProviderKind } from "../provider/factory.js";
 import { loadApiKeys } from "../provider/config.js";
 import { buildDefaultToolRegistry } from "../tools/default-registry.js";
@@ -97,6 +102,13 @@ export async function createPicoCommandRegistry(
   options: PicoCommandRegistryOptions,
 ): Promise<CommandRegistry> {
   const skillLoader = new SkillLoader(options.workDir);
+  const [skillCandidates, agentCandidates, sessionCandidates, snapshotCandidates] =
+    await Promise.all([
+      loadSkillArgumentCandidates(skillLoader),
+      loadAgentArgumentCandidates(options.workDir),
+      loadSessionArgumentCandidates(options.workDir),
+      loadSnapshotArgumentCandidates(options),
+    ]);
   const tools = options.tools ?? toolStatusFromRegistry(buildDefaultToolRegistry(options.workDir));
   const settings = getOrCreateSessionSettings({
     sessionId: options.sessionId ?? `cwd:${options.workDir}`,
@@ -126,14 +138,14 @@ export async function createPicoCommandRegistry(
     createMcpCommand(options.mcpStatus),
     createAgentsCommand(options),
     createSessionsCommand(options),
-    createResumeCommand(),
+    createResumeCommand(sessionCandidates),
     createSnapshotsCommand(options),
-    createRewindCommand(options),
+    createRewindCommand(options, snapshotCandidates),
     createUndoCommand(options),
     createImageCommand(),
-    createAgentCommand(options),
+    createAgentCommand(options, agentCandidates),
     createSkillsCommand(skillLoader),
-    createSkillCommand(skillLoader),
+    createSkillCommand(skillLoader, skillCandidates),
   ]);
 
   const markdownCommands = await loadMarkdownCommands({
@@ -157,6 +169,10 @@ export function commandSuggestions(
   value: string;
   description?: string;
   argumentHint?: string;
+  source?: string;
+  kind?: string;
+  category?: string;
+  usage?: string;
   matchedAlias?: string;
 }> {
   return registry
@@ -165,9 +181,118 @@ export function commandSuggestions(
     .map((command) => ({
       value: command.insertText,
       description: command.description,
+      source: command.source,
+      kind: command.kind,
+      ...(command.category === undefined ? {} : { category: command.category }),
+      ...(command.usage === undefined ? {} : { usage: command.usage }),
       ...(command.argumentHint === undefined ? {} : { argumentHint: command.argumentHint }),
       ...(command.matchedAlias === undefined ? {} : { matchedAlias: command.matchedAlias }),
     }));
+}
+
+export function commandArgumentSuggestions(
+  registry: CommandRegistry,
+  commandName: string,
+  query: string,
+): readonly SlashArgumentCandidate[] {
+  const command = registry.resolve(commandName);
+  const result = command?.argumentCompleter?.(query) ?? [];
+  if (isPromiseLike(result)) return [];
+  return [...result];
+}
+
+export const MODEL_ARGUMENT_CANDIDATES: readonly SlashArgumentCandidate[] = [
+  { value: "glm-5.2", description: "OpenAI-compatible default model" },
+  { value: "kimi-k2.5", description: "OpenAI-compatible fallback model" },
+  { value: "claude-3-5-sonnet", description: "Claude default model" },
+  { value: "gemini-2.0-flash", description: "Gemini default model" },
+];
+
+const MODE_CANDIDATES: readonly SlashArgumentCandidate[] = [
+  { value: "default", description: "Normal interactive mode" },
+  { value: "plan", description: "Plan before acting" },
+  { value: "auto", description: "Autonomous mode" },
+  { value: "yolo", description: "YOLO mode" },
+];
+
+const PERMISSION_CANDIDATES: readonly SlashArgumentCandidate[] = [
+  { value: "ask", description: "Ask before actions that need approval" },
+  { value: "default", description: "Use the default permission policy" },
+  { value: "auto", description: "Auto-approve supported actions" },
+  { value: "yolo", description: "Auto-approve the session" },
+  { value: "plan", description: "Use plan-oriented permissions" },
+];
+
+const THINKING_CANDIDATES: readonly SlashArgumentCandidate[] = [
+  { value: "off", description: "Disable native thinking effort" },
+  { value: "low", description: "Use low thinking effort" },
+  { value: "medium", description: "Use medium thinking effort" },
+  { value: "high", description: "Use high thinking effort" },
+];
+
+function completeFromCandidates(
+  candidates: readonly SlashArgumentCandidate[],
+): (query: string) => readonly SlashArgumentCandidate[] {
+  return (query) => filterArgumentCandidates(candidates, query);
+}
+
+function filterArgumentCandidates(
+  candidates: readonly SlashArgumentCandidate[],
+  query: string,
+): SlashArgumentCandidate[] {
+  const normalized = query.trimStart().toLowerCase();
+  return candidates
+    .filter((candidate) => candidate.value.toLowerCase().startsWith(normalized))
+    .map((candidate) => ({ ...candidate }));
+}
+
+function isPromiseLike<T>(value: T | Promise<T>): value is Promise<T> {
+  return Boolean(
+    typeof value === "object" &&
+      value !== null &&
+      "then" in value &&
+      typeof (value as { then?: unknown }).then === "function",
+  );
+}
+
+async function loadSkillArgumentCandidates(
+  loader: SkillLoader,
+): Promise<readonly SlashArgumentCandidate[]> {
+  const skills = await loader.listSummaries();
+  return skills.map((skill) => ({
+    value: skill.name,
+    description: skill.description,
+  }));
+}
+
+async function loadAgentArgumentCandidates(
+  workDir: string,
+): Promise<readonly SlashArgumentCandidate[]> {
+  const agents = await loadClaudeAgents({ workDir, includeBuiltins: true });
+  return summarizeClaudeAgents(agents).map((agent) => ({
+    value: agent.name,
+    description: agent.description,
+  }));
+}
+
+async function loadSessionArgumentCandidates(
+  workDir: string,
+): Promise<readonly SlashArgumentCandidate[]> {
+  const sessions = await listCliSessionSummaries(workDir);
+  return sessions.map((session) => ({
+    value: session.id,
+    description: `${session.messageCount} messages · ${session.updatedAt.toISOString()}`,
+  }));
+}
+
+async function loadSnapshotArgumentCandidates(
+  options: PicoCommandRegistryOptions,
+): Promise<readonly SlashArgumentCandidate[]> {
+  if (!options.session) return [];
+  return listFileHistorySnapshotSummaries(options.session).map((snapshot) => ({
+    value: snapshot.messageId,
+    description: `${snapshot.trackedFileCount} files · ${snapshot.timestamp}`,
+  }));
 }
 
 function createStatusCommand(
@@ -179,6 +304,7 @@ function createStatusCommand(
     aliases: ["st"],
     description: "Show current TUI/session status",
     usage: "/status",
+    category: "session",
     kind: "local",
     execute: (): LocalCommandResult => ({
       type: "local",
@@ -203,6 +329,7 @@ function createCompactCommand(options: PicoCommandRegistryOptions): SlashCommand
     name: "compact",
     description: "Compact current session context",
     usage: "/compact",
+    category: "session",
     kind: "local",
     execute: async (): Promise<LocalCommandResult> => {
       if (!options.session) {
@@ -294,6 +421,8 @@ function createModelCommand(settings: SessionSettings): SlashCommand {
     description: "Show or change the active model",
     usage: "/model [name]",
     argumentHint: "[name]",
+    category: "model",
+    argumentCompleter: completeFromCandidates(MODEL_ARGUMENT_CANDIDATES),
     kind: "local",
     execute: (input): LocalCommandResult => {
       const result = setSessionModel(settings, input.args);
@@ -316,6 +445,8 @@ function createModeCommand(settings: SessionSettings): SlashCommand {
     description: "Show or change the current interaction mode",
     usage: "/mode <default|plan|auto|yolo>",
     argumentHint: "<default|plan|auto|yolo>",
+    category: "session",
+    argumentCompleter: completeFromCandidates(MODE_CANDIDATES),
     kind: "local",
     execute: (input): LocalCommandResult => {
       if (input.args.trim().length === 0) {
@@ -345,6 +476,8 @@ function createPermissionsCommand(settings: SessionSettings): SlashCommand {
     description: "Show or change the current permission mode",
     usage: "/permissions [ask|default|auto|yolo|plan]",
     argumentHint: "[ask|default|auto|yolo|plan]",
+    category: "permissions",
+    argumentCompleter: completeFromCandidates(PERMISSION_CANDIDATES),
     kind: "local",
     execute: (input): LocalCommandResult => {
       if (input.args.trim().length === 0) {
@@ -377,6 +510,8 @@ function createThinkingCommand(settings: SessionSettings): SlashCommand {
     description: "Show or change thinking effort",
     usage: "/thinking <off|low|medium|high>",
     argumentHint: "<off|low|medium|high>",
+    category: "model",
+    argumentCompleter: completeFromCandidates(THINKING_CANDIDATES),
     kind: "local",
     execute: (input): LocalCommandResult => {
       const effort = parseThinkingEffortArg(input.args);
@@ -406,6 +541,7 @@ function createToolsCommand(settings: SessionSettings, disclosure?: ToolDisclosu
     description: "List or search available tools",
     usage: "/tools [query]",
     argumentHint: "[query]",
+    category: "tools",
     kind: "local",
     execute: (input): LocalCommandResult => {
       const query = input.args.trim();
@@ -425,6 +561,7 @@ function createMcpCommand(mcpStatus?: McpStatusProvider): SlashCommand {
     name: "mcp",
     description: "Show MCP server connection status",
     usage: "/mcp",
+    category: "mcp",
     kind: "local",
     execute: (): LocalCommandResult => ({
       type: "local",
@@ -637,6 +774,7 @@ function createImageCommand(): SlashCommand {
     description: "Attach a local image to this prompt",
     usage: "/image <path>",
     argumentHint: "<path>",
+    category: "workspace",
     kind: "prompt",
     execute: (input): PromptCommandResult | LocalCommandResult => {
       const imagePath = input.args.trim();
@@ -661,6 +799,7 @@ function createSessionsCommand(options: PicoCommandRegistryOptions): SlashComman
     aliases: ["session-list"],
     description: "List resumable sessions for this project",
     usage: "/sessions",
+    category: "session",
     kind: "local",
     execute: async (): Promise<LocalCommandResult> => {
       const summaries = await listCliSessionSummaries(options.workDir);
@@ -678,12 +817,14 @@ function createSessionsCommand(options: PicoCommandRegistryOptions): SlashComman
   };
 }
 
-function createResumeCommand(): SlashCommand {
+function createResumeCommand(sessionCandidates: readonly SlashArgumentCandidate[]): SlashCommand {
   return {
     name: "resume",
     description: "Show how to resume a saved session",
     usage: "/resume <session-id>",
     argumentHint: "<session-id>",
+    category: "session",
+    argumentCompleter: completeFromCandidates(sessionCandidates),
     kind: "local",
     execute: (input): LocalCommandResult => {
       const sessionId = input.argv[0];
@@ -720,6 +861,7 @@ function createSnapshotsCommand(options: PicoCommandRegistryOptions): SlashComma
     aliases: ["snapshot"],
     description: "List current session rewind points",
     usage: "/snapshots",
+    category: "session",
     kind: "local",
     execute: async (): Promise<LocalCommandResult> => {
       const session = await resolveCommandSession(options);
@@ -734,13 +876,18 @@ function createSnapshotsCommand(options: PicoCommandRegistryOptions): SlashComma
   };
 }
 
-function createRewindCommand(options: PicoCommandRegistryOptions): SlashCommand {
+function createRewindCommand(
+  options: PicoCommandRegistryOptions,
+  snapshotCandidates: readonly SlashArgumentCandidate[],
+): SlashCommand {
   return {
     name: "rewind",
     aliases: ["checkpoint"],
     description: "Rewind code, conversation, or both to a file-history snapshot",
     usage: "/rewind [message-id] [code|conversation|both]",
     argumentHint: "[message-id] [code|conversation|both]",
+    category: "session",
+    argumentCompleter: completeFromCandidates(snapshotCandidates),
     kind: "local",
     execute: async (input): Promise<LocalCommandResult> => {
       const session = await resolveCommandSession(options);
@@ -831,6 +978,7 @@ function createSkillsCommand(loader: SkillLoader): SlashCommand {
     aliases: ["skill-list"],
     description: "List available skills",
     usage: "/skills",
+    category: "skill",
     kind: "local",
     execute: async (): Promise<LocalCommandResult> => ({
       type: "local",
@@ -840,13 +988,18 @@ function createSkillsCommand(loader: SkillLoader): SlashCommand {
   };
 }
 
-function createSkillCommand(loader: SkillLoader): SlashCommand {
+function createSkillCommand(
+  loader: SkillLoader,
+  skillCandidates: readonly SlashArgumentCandidate[],
+): SlashCommand {
   return {
     name: "skill",
     aliases: ["use-skill"],
     description: "Show a skill body by name",
     usage: "/skill <name>",
     argumentHint: "<name>",
+    category: "skill",
+    argumentCompleter: completeFromCandidates(skillCandidates),
     kind: "local",
     execute: async (input): Promise<LocalCommandResult> => ({
       type: "local",
@@ -856,12 +1009,17 @@ function createSkillCommand(loader: SkillLoader): SlashCommand {
   };
 }
 
-function createAgentCommand(options: PicoCommandRegistryOptions): SlashCommand {
+function createAgentCommand(
+  options: PicoCommandRegistryOptions,
+  agentCandidates: readonly SlashArgumentCandidate[],
+): SlashCommand {
   return {
     name: "agent",
     description: "Dispatch a task to a named subagent",
     usage: "/agent <name> <task>",
     argumentHint: "<name> <task>",
+    category: "agent",
+    argumentCompleter: completeFromCandidates(agentCandidates),
     kind: "prompt",
     execute: async (input): Promise<PromptCommandResult | LocalCommandResult> => {
       const agentName = input.argv[0]?.trim();
@@ -991,6 +1149,7 @@ function createMarkdownPromptCommand(command: MarkdownPromptCommand): SlashComma
     ...(command.argumentHint ? { argumentHint: command.argumentHint } : {}),
     kind: "prompt",
     source: command.source,
+    category: command.source === "skill" ? "skill" : "workspace",
     execute: (input): PromptCommandResult => ({
       type: "prompt",
       prompt: renderMarkdownCommandPrompt(command, input.args),
