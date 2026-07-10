@@ -1,5 +1,7 @@
 # 文件历史系统 Implementation Plan
 
+> **归档状态（2026-07-10）：** 本文保留当时的 CLI 实现计划供追溯，不再作为当前使用说明。当前唯一公开入口是 TUI，文件历史使用 `/snapshots` / `/rewind`；`checkpoint-manager.ts` 只是 legacy/manual fallback。
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans / superpowers:test-driven-development 实现本计划。每个子模块先写测试再写实现,`npm test` 全过后才提交。
 
 **Goal:** 用纯 `copyFile` 备份方案替换 1.2 的 git stash 快照,实现文件回滚与对话回滚解耦的三轴 rewind。
@@ -63,11 +65,11 @@ ToolRegistry 在 loop.ts 里构造时,注入的 hook 闭包 `session.fileHistory
 
 ### D4. 三轴 rewind 语义
 
-| 轴 | 函数 | 行为 | 副作用 |
-|---|---|---|---|
-| code | `rewindCode(messageId)` | 回滚文件到 messageId 快照,不碰对话 | 无 |
-| conversation | `rewindConversation(messageIndex)` | 截断对话到 messageIndex,不碰文件 | 生成新 conversationId(fork) |
-| both | `rewindBoth(messageId)` | 两者都做 | 生成新 conversationId |
+| 轴           | 函数                               | 行为                               | 副作用                      |
+| ------------ | ---------------------------------- | ---------------------------------- | --------------------------- |
+| code         | `rewindCode(messageId)`            | 回滚文件到 messageId 快照,不碰对话 | 无                          |
+| conversation | `rewindConversation(messageIndex)` | 截断对话到 messageIndex,不碰文件   | 生成新 conversationId(fork) |
+| both         | `rewindBoth(messageId)`            | 两者都做                           | 生成新 conversationId       |
 
 **Fork 语义**:`rewindConversation` 时生成新 `conversationId`,旧 JSONL 保留在磁盘(不删),新会话从截断点 fork 出去。当前 Session 没有 conversationId 字段——1.5.6 新增 `conversationId: string`(初始 = session.id)。
 
@@ -100,6 +102,7 @@ function extractRedirectTargets(cmd: string): string[] {
 ### 1.5.1 数据结构与存储层
 
 **Files:**
+
 - Create: `src/safety/file-history.ts`
 - Test: `tests/safety/file-history.test.ts`
 
@@ -138,27 +141,28 @@ export interface FileHistoryState {
 
 ```typescript
 /** 生成备份文件名:sha256(absPath).slice(0,16) + "@v" + version */
-export function getBackupFileName(filePath: string, version: number): string
+export function getBackupFileName(filePath: string, version: number): string;
 
 /** 解析备份存储绝对路径 */
-export function resolveBackupPath(sessionId: string, backupFileName: string): string
+export function resolveBackupPath(sessionId: string, backupFileName: string): string;
 
 /** copyFile 备份 + chmod 保留权限,lazy mkdir */
 export async function createBackup(
   filePath: string,
   version: number,
   sessionId: string,
-): Promise<string /* backupFileName */>
+): Promise<string /* backupFileName */>;
 
 /** 从备份恢复:copyFile + lazy mkdir 父目录 */
 export async function restoreBackup(
   filePath: string,
   backupFileName: string,
   sessionId: string,
-): Promise<void>
+): Promise<void>;
 ```
 
 **测试要求(vitest,expect 风格):**
+
 - `getBackupFileName` 输出格式 `^[0-9a-f]{16}@v\d+$`
 - `resolveBackupPath` 路径含 sessionId 和 backupFileName
 - `createBackup` → 文件存在 + 内容一致 + 权限一致
@@ -173,6 +177,7 @@ export async function restoreBackup(
 ### 1.5.2 写前备份 trackEdit
 
 **Files:**
+
 - Modify: `src/safety/file-history.ts`(追加函数)
 - Test: `tests/safety/file-history.test.ts`(追加测试)
 
@@ -189,10 +194,11 @@ export async function fileHistoryTrackEdit(
   filePath: string,
   messageId: string,
   sessionId: string,
-): Promise<void>
+): Promise<void>;
 ```
 
 **行为:**
+
 1. 若 `state.trackedFiles` 已含 filePath 且当前 snapshot 的 messageId == 传入 messageId → 跳过(同轮去重)
 2. 若文件不存在 → 标记 `backupFileName: null`,加入 trackedFiles
 3. 若文件存在 → `createBackup(filePath, version, sessionId)`,version = 该文件已有备份数 + 1
@@ -200,6 +206,7 @@ export async function fileHistoryTrackEdit(
 5. 不创建 snapshot(snapshot 由 makeSnapshot 在轮末统一做)
 
 **测试:**
+
 - 写文件前 trackEdit → 备份是修改前内容
 - 同文件同 messageId 第二次 trackEdit → 跳过(备份不变)
 - 不同 messageId 的 trackEdit → 新备份 version +1
@@ -212,6 +219,7 @@ export async function fileHistoryTrackEdit(
 ### 1.5.3 每轮快照 makeSnapshot
 
 **Files:**
+
 - Modify: `src/safety/file-history.ts`
 - Test: `tests/safety/file-history.test.ts`
 
@@ -228,16 +236,17 @@ export async function fileHistoryMakeSnapshot(
   state: FileHistoryState,
   messageId: string,
   sessionId: string,
-): Promise<void>
+): Promise<void>;
 
 /** 比较 origin 文件当前 stat 与上次备份时的 mtime+size */
 async function checkOriginFileChanged(
   filePath: string,
   lastBackup: FileHistoryBackup | undefined,
-): Promise<boolean>
+): Promise<boolean>;
 ```
 
 **行为:**
+
 1. 创建新 `FileHistorySnapshot { messageId, trackedFileBackups: new Map(), timestamp: new Date() }`
 2. 遍历 `state.trackedFiles`:
    - 取该文件最近一次备份(从 snapshots 倒找)
@@ -250,6 +259,7 @@ async function checkOriginFileChanged(
 4. 若 `snapshots.length > 100` → 删最老的(shift),并清理其独占备份文件
 
 **测试:**
+
 - 改文件 → makeSnapshot → 新版本备份
 - 未变文件 → makeSnapshot → 复用旧备份(copyFile 不被调用,可用 spy 验证)
 - 删除文件 → makeSnapshot → backupFileName=null
@@ -262,6 +272,7 @@ async function checkOriginFileChanged(
 ### 1.5.4 回滚 rewind
 
 **Files:**
+
 - Modify: `src/safety/file-history.ts`
 - Test: `tests/safety/file-history.test.ts`
 
@@ -275,29 +286,32 @@ export async function fileHistoryRewind(
   state: FileHistoryState,
   messageId: string,
   sessionId: string,
-): Promise<void>
+): Promise<void>;
 
 /** 遍历快照的 trackedFileBackups,逐文件恢复 */
 async function applySnapshot(
   state: FileHistoryState,
   target: FileHistorySnapshot,
   sessionId: string,
-): Promise<void>
+): Promise<void>;
 ```
 
 **applySnapshot 行为:**
+
 - 遍历 `target.trackedFileBackups`:
   - `backupFileName == null` → `unlink(filePath)`(Agent 新建的文件被撤销);忽略 ENOENT
   - `backupFileName != null` → `restoreBackup(filePath, backupFileName, sessionId)`
 - **不处理 target 之后新增的文件**——这由调用方(rewind)负责:rewind 先找 target snapshot,然后还要扫描后续 snapshot 中出现的"新文件"(backupFileName 从有值变 null 的),一并 unlink
 
 **fileHistoryRewind 行为:**
+
 1. 找到 messageId 对应的 snapshot
 2. `applySnapshot(state, snapshot, sessionId)`
 3. 截断 `state.snapshots` 到该 snapshot(保留 target 及之前的)
 4. 不动 `state.trackedFiles`(保留跟踪记录)
 
 **测试:**
+
 - 改 3 个文件 → rewind → 全部恢复
 - 新建文件 → rewind → 文件被 unlink
 - rewind 到不存在的 messageId → throw 或 noop(选 throw,便于发现 bug)
@@ -310,6 +324,7 @@ async function applySnapshot(
 ### 1.5.5 集成到工具系统
 
 **Files:**
+
 - Modify: `src/tools/registry-impl.ts`(WriteFileTool/EditFileTool/BashTool 注入 hook + ToolRegistry 构造参数)
 - Modify: `src/engine/session.ts`(加 `fileHistory: FileHistoryState` 字段 + 初始化)
 - Modify: `src/engine/loop.ts`(每轮结束调 `fileHistoryMakeSnapshot` + 注入 preWriteHook)
@@ -328,6 +343,7 @@ async function applySnapshot(
 **currentMessageId 来源:** loop 里 user message append 后,取 `session.getHistory()` 最后一条的 id?当前 Message 类型有没有 id?需要看 schema/message.ts。若无 id,用 `turnCount` 或生成 `${session.id}-${turnCount}`。
 
 **端到端测试:**
+
 - mock provider 返回 edit_file 工具调用 → 执行 → 验证备份自动创建
 - 改文件 → 再改 → 验证两个版本备份都在
 - BashTool `echo x > foo.txt` → 验证 foo.txt 备份(若之前存在)
@@ -339,6 +355,7 @@ async function applySnapshot(
 ### 1.5.6 对话 undo
 
 **Files:**
+
 - Modify: `src/engine/session.ts`(加 `conversationId` 字段 + `undo(count)` + `rewindTo(messageIndex)`)
 - Modify: `src/engine/session-store.ts`(追加 undo 事件 + recover 时重放)
 - Test: `tests/engine/session-undo.test.ts`(新建)
@@ -384,11 +401,13 @@ rewindTo(messageIndex: number): void {
 ```
 
 **JSONL event sourcing:**
+
 - SessionStore.append 追加普通消息(已有)
 - 新增 SessionStore.appendUndoEvent(count | messageIndex)
 - recover() 重放:遇到 undo 事件 → truncateTo
 
 **测试:**
+
 - 对话 5 轮 → undo(2) → 只剩 3 轮
 - undo 到 compaction 边界停止(不越过)
 - undo 后 deferredMessages 清空
@@ -401,6 +420,7 @@ rewindTo(messageIndex: number): void {
 ### 1.5.7 三轴选择
 
 **Files:**
+
 - Modify: `src/safety/file-history.ts`(加 `rewindCode`)
 - Modify: `src/engine/session.ts`(加 `rewindConversation`/`rewindBoth`)
 - Test: `tests/safety/file-history.test.ts` + `tests/engine/session-undo.test.ts`(追加)
@@ -433,6 +453,7 @@ async rewindBoth(messageId: string): Promise<void> {
 ```
 
 **测试:**
+
 - rewindCode 只回滚文件,对话 history 不变
 - rewindConversation 只截断对话,文件不变,conversationId 变化
 - rewindBoth 两者都做
@@ -445,6 +466,7 @@ async rewindBoth(messageId: string): Promise<void> {
 ### 1.5.8 CLI 集成 + 替换旧方案
 
 **Files:**
+
 - Modify: `src/cli/main.ts`(加 `--rewind` / `--list-snapshots` 命令)
 - Modify: `src/safety/checkpoint-manager.ts`(标记为 fallback,加 deprecation 注释)
 - Modify: `AGENTS.md` + `ROADMAP.md`(文档更新)
@@ -461,6 +483,7 @@ pico --rewind <message-id> --axis code|conversation|both
 ```
 
 **保留 checkpoint-manager.ts:**
+
 - 加注释 `@deprecated 1.5 后用作非交互场景 fallback,新代码用 file-history`
 - 不删,不在 main path 调用
 

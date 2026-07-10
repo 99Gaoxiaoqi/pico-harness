@@ -1,5 +1,7 @@
 # Pico TUI Slash Command 与 @ Mention 实现计划
 
+> **归档状态（2026-07-10）：** 本计划已完成并归档。下文“TUI/CLI”与 `runAgentFromCli` 保留当时实现语境；当前 `pico` → TUI 是唯一公开入口，`runAgentFromCli` 仅供 TUI 内部装配。
+
 > **面向实现子代理：** 本计划用于并行 worktree 开发。每个任务必须遵守指定写入范围，不要改动其他 worker 的文件；不要回滚他人的修改。实现时优先 TDD，小步验证，完成后报告变更文件、测试命令和遗留风险。
 
 **目标：** 给 Pico TUI 增加 Claude Code 风格的 `/` 命令、`@` 引用、skills 显示/调用和输入候选能力。
@@ -43,6 +45,7 @@
 **建议分支/worktree：** `codex/pico-input-commands`
 
 **写入范围：**
+
 - 创建：`src/input/types.ts`
 - 创建：`src/input/slash-parser.ts`
 - 创建：`src/input/command-registry.ts`
@@ -53,6 +56,7 @@
 - 创建：`tests/input/process-user-input.test.ts`
 
 **职责：**
+
 - 定义 `InputProcessResult`、`SlashCommand`、`LocalCommandResult`、`PromptCommandResult`。
 - 解析 `/name args`，支持 aliases。
 - 实现内置命令的纯函数骨架。
@@ -61,6 +65,7 @@
 - `/clear`、`/exit` 返回结构化 local action，不直接操作 TUI。
 
 **验收：**
+
 - 普通输入返回 `{ kind: "prompt" }`。
 - `/help` 返回 `{ kind: "local", action: "display" }`。
 - `/clear` 返回 `{ kind: "local", action: "clear" }`。
@@ -71,6 +76,7 @@
 **建议分支/worktree：** `codex/pico-input-mentions`
 
 **写入范围：**
+
 - 创建：`src/input/mentions.ts`
 - 创建：`src/input/context-attachments.ts`
 - 创建：`src/input/file-suggestions.ts`
@@ -79,6 +85,7 @@
 - 创建：`tests/input/file-suggestions.test.ts`
 
 **职责：**
+
 - 解析 `@file`、`@dir`、`@file#Lx`、`@file#Lx-y`、quoted path。
 - 解析 `@skill:name` 和 `@agent:name`。
 - 解析结果转为 `ContextAttachment`，第一版用文本块注入 prompt。
@@ -86,6 +93,7 @@
 - 文件候选：优先 `git ls-files`，失败回退 `rg --files`，再失败回退 Node 目录扫描。
 
 **验收：**
+
 - 多个 mention 与中文文本混排能正确识别。
 - 行号范围越界时安全截断。
 - 大文件不会完整注入。
@@ -96,6 +104,7 @@
 **建议分支/worktree：** `codex/pico-skill-commands`
 
 **写入范围：**
+
 - 创建：`src/input/markdown-command-loader.ts`
 - 创建：`src/input/skill-commands.ts`
 - 创建：`tests/input/markdown-command-loader.test.ts`
@@ -103,6 +112,7 @@
 - 可修改：`src/context/skill.ts`，仅允许增加不破坏兼容的 helper。
 
 **职责：**
+
 - 复用 `SkillLoader.listSummaries()` 和 `SkillLoader.viewBody()`。
 - `/skills` 展示所有 skill 名称和 description。
 - `/skill <name>` 展示完整正文。
@@ -111,6 +121,7 @@
 - markdown command frontmatter 第一版支持 `description`、`argument-hint`、`allowed-tools`、`model`。
 
 **验收：**
+
 - 临时 `.claw/skills/demo/SKILL.md` 能被 `/skills` 和 `/skill demo` 读取。
 - `.pico/commands/review.md` 能注册为 `/review` prompt command。
 - 重名命令按优先级处理：项目 > 用户 > skill projection > builtin。
@@ -120,6 +131,7 @@
 **建议分支/worktree：** `codex/pico-tui-suggestions`
 
 **写入范围：**
+
 - 创建：`src/tui/suggestions.tsx`
 - 创建：`src/tui/input-controller.ts`
 - 修改：`src/tui/input-box.tsx`
@@ -127,6 +139,7 @@
 - 创建：`tests/tui/suggestions.test.tsx`
 
 **职责：**
+
 - 给 `InputBox` 增加可注入候选源：slash command suggestions 与 file mention suggestions。
 - 输入 `/` 时展示命令候选；输入 `@` 时展示文件候选。
 - 支持 ↑/↓ 选择、Tab 补全、Enter 执行当前输入。
@@ -134,6 +147,7 @@
 - 保留现有历史输入、多行输入、disabled 行为。
 
 **验收：**
+
 - 无候选时行为与现有 TUI 一致。
 - `/sk` + Tab 能补全成 `/skills `。
 - `@src/t` + Tab 能补全文件。
@@ -144,6 +158,7 @@
 **建议分支/worktree：** `codex/pico-input-integration`
 
 **写入范围：**
+
 - 修改：`src/tui/repl.tsx`
 - 修改：`src/tui/tui-reporter.ts`
 - 修改：`src/cli/run-agent.ts`
@@ -152,6 +167,7 @@
 - 扩展：`tests/cli-run-agent.test.ts`
 
 **职责：**
+
 - 在 TUI `handleSubmit` 中调用 `processUserInput()`。
 - 本地 display 命令直接追加 TUI 系统消息，不调用模型。
 - `/clear` 清空当前 TUI entries。
@@ -160,6 +176,7 @@
 - CLI 单轮模式也复用同一输入处理层：本地命令写 stdout，prompt 命令调用模型。
 
 **验收：**
+
 - `/help` 不调用 provider。
 - `/clear` 清屏但不破坏 session。
 - 普通 prompt 保持原行为。

@@ -3,6 +3,8 @@
 > **这份文件是 pico-harness 的持久化开发计划。**
 > 每完成一个任务，把 `- [ ]` 改成 `- [x]`。
 > 新窗口打开时，先读这个文件了解当前进度。
+>
+> **当前产品边界：** `pico` → TUI 是唯一公开入口。阶段 1-7 的勾选表示相应能力曾完成交付，不代表历史外壳仍是当前公开 API。REST/WebSocket、ACP、飞书和 one-shot CLI 已退役；Cron/headless、Docker 和 Plugin runtime 不在当前范围。
 
 ---
 
@@ -53,8 +55,11 @@ git worktree remove ../pico-1-streaming
 ## 阶段 1：基础可用性补齐（P0）
 
 > **目标**：解决"没法用"的问题。流式输出 + Checkpoint + Diff 预览 + Permission + MCP。
+>
+> **归档说明：** 本阶段的 CLI/飞书条目是历史验收记录；当前对外仅保留 TUI 路径。
 
 ### 1.1 流式输出（SSE / Streaming）✅
+
 - [x] `provider/interface.ts` 加 `generateStream()` 方法，返回 AsyncIterable
 - [x] `provider/openai.ts` 实现流式（SSE 解析）
 - [x] `provider/claude.ts` 实现流式（SSE 解析）
@@ -64,7 +69,8 @@ git worktree remove ../pico-1-streaming
 - [x] 测试：mock provider 返回流式数据，验证回调顺序（openai 3 个 + claude 9 个测试通过）
 - [x] 提交
 
-### 1.2 Checkpoint（git 快照）✅
+### 1.2 Checkpoint（git 快照，legacy/manual fallback）✅
+
 - [x] 新建 `safety/checkpoint-manager.ts`
 - [x] 在文件变动工具（Write/Edit/Bash 含写）执行前，用 `git stash create` 创建快照
 - [x] 每个 turn dedup（同一 turn 多次写操作只快照一次）
@@ -74,6 +80,7 @@ git worktree remove ../pico-1-streaming
 - [x] 提交
 
 ### 1.3 Diff 预览 ✅
+
 - [x] `tools/registry-impl.ts` 的 EditFileTool 返回 before/after diff
 - [x] WriteFileTool 返回新建文件标记
 - [x] `approval/manager.ts` 审批通知附带 diff（`ApprovalNotice.diff` 字段 + `computeApprovalDiff`）
@@ -82,6 +89,7 @@ git worktree remove ../pico-1-streaming
 - [x] 提交
 
 ### 1.4 细粒度 Permission 系统 ✅
+
 - [x] 重写 `approval/manager.ts` 为 Policy 链模式
 - [x] Policy 1：高危命令检测（保留现有正则）
 - [x] Policy 2：敏感文件保护（`.env`、`id_rsa`、`credentials`、`.aws/credentials`）
@@ -92,6 +100,7 @@ git worktree remove ../pico-1-streaming
 - [x] 提交
 
 ### 1.5 MCP 客户端 ✅
+
 - [x] 新建 `mcp/` 目录
 - [x] `mcp/stdio-client.ts`：stdio transport 连接 MCP server
 - [x] `mcp/http-client.ts`：http/SSE transport
@@ -110,6 +119,7 @@ git worktree remove ../pico-1-streaming
 > 不依赖用户项目的 git，文件回滚和对话回滚解耦，三轴可选。
 
 ### 1.5.1 数据结构与存储层 ✅
+
 - [x] 新建 `safety/file-history.ts`
 - [x] 定义 `FileHistoryBackup`（backupFileName: string | null, version, backupTime）
 - [x] 定义 `FileHistorySnapshot`（messageId, trackedFileBackups, timestamp）
@@ -123,6 +133,7 @@ git worktree remove ../pico-1-streaming
 - [x] 提交
 
 ### 1.5.2 写前备份（trackEdit）✅
+
 - [x] `fileHistoryTrackEdit(state, filePath, messageId)` 函数
 - [x] 在 EditTool/WriteTool 执行**前**调用，保存修改前的原始内容（已由 1.5.5 集成）
 - [x] 去重：同一文件在同一轮已跟踪则跳过（不覆盖 v1 备份）
@@ -132,6 +143,7 @@ git worktree remove ../pico-1-streaming
 - [x] 提交
 
 ### 1.5.3 每轮快照（makeSnapshot）✅
+
 - [x] `fileHistoryMakeSnapshot(state, messageId)` 函数
 - [x] 每个用户消息结束时调用（已由 1.5.5 集成）
 - [x] 遍历所有 trackedFiles，用 `stat` 的 mtime+size 判断是否变化
@@ -144,6 +156,7 @@ git worktree remove ../pico-1-streaming
 - [x] 提交
 
 ### 1.5.4 回滚（rewind）✅
+
 - [x] `fileHistoryRewind(state, messageId)` 函数
 - [x] `applySnapshot(state, targetSnapshot)`：遍历所有 trackedFiles（内联实现）
   - null → `unlink` 删除（Agent 新建的文件被撤销）
@@ -154,6 +167,7 @@ git worktree remove ../pico-1-streaming
 - [x] 提交
 
 ### 1.5.5 集成到工具系统 ✅
+
 - [x] EditFileTool.execute 前调 `fileHistoryTrackEdit`（通过 preWriteHook）
 - [x] WriteFileTool.execute 前调 `fileHistoryTrackEdit`（通过 preWriteHook）
 - [x] BashTool：检测 `>` 重定向时备份目标文件
@@ -163,6 +177,7 @@ git worktree remove ../pico-1-streaming
 - [x] 提交
 
 ### 1.5.6 对话 undo ✅
+
 - [x] Session 新增 `undo(count)` 方法
 - [x] 从 history 末尾向前删，跳过 injection（system 消息）
 - [x] 遇到 compaction 边界停止
@@ -174,6 +189,7 @@ git worktree remove ../pico-1-streaming
 - [x] 提交
 
 ### 1.5.7 三轴选择 ✅
+
 - [x] `rewindCode(messageId)`：只回滚文件，不碰对话
 - [x] `rewindConversation(messageIndex)`：只截断对话，不碰文件
 - [x] `rewindBoth(messageId, messageIndex)`：两者都回滚
@@ -181,11 +197,13 @@ git worktree remove ../pico-1-streaming
 - [x] 测试：三轴各自独立 + 组合（3 个测试通过，累计 44）
 - [x] 提交
 
-### 1.5.8 CLI 集成 + 替换旧方案 ✅
+### 1.5.8 历史 CLI 集成 + 替换旧方案 ✅
+
+- 当前等价公开能力已转入 TUI：`/snapshots` 列点，`/rewind` 执行 code / conversation / both 回滚。
 - [x] CLI 加 `--rewind` 命令：列出可选快照点
 - [x] `--rewind <message-id>`：三轴选择（code / conversation / both）
 - [x] `--list-snapshots`：列出所有快照及文件变更统计
-- [x] 保留旧的 `safety/checkpoint-manager.ts` 作为 fallback（非交互场景）
+- [x] 保留旧的 `safety/checkpoint-manager.ts` 作为 legacy/manual fallback（非公开 TUI 主路径）
 - [x] 文档更新：AGENTS.md 和 ROADMAP.md
 - [x] 相关测试通过；`npm run typecheck` 已运行并记录既有 tests 类型错误基线
 - [x] 提交
@@ -197,12 +215,14 @@ git worktree remove ../pico-1-streaming
 > **目标**：从 4 个工具扩展到"够用的工具集"。
 
 ### 2.1 Glob 工具（文件匹配）✅
+
 - [x] 新建 `tools/glob.ts`（GlobTool 独立文件,跨文件工具模式）
 - [x] 支持 glob pattern（`**/*.ts`、`src/**/*.test.ts`、`*.{ts,js}`、`[abc]`）
 - [x] readOnly + accesses（none）声明
 - [x] 测试 + 提交（31 个测试通过）
 
 ### 2.2 Grep 工具（ripgrep 封装）✅
+
 - [x] 新建 `tools/grep.ts`（GrepTool 独立文件）
 - [x] 封装 ripgrep（如未安装则降级到 Node.js 实现）
 - [x] 支持 -i / -n / --type 等常用参数（case_sensitive / line_number / glob）
@@ -210,12 +230,14 @@ git worktree remove ../pico-1-streaming
 - [x] 测试 + 提交（23 个测试通过）
 
 ### 2.3 TodoList 工具 ✅
+
 - [x] 新建 `context/todo-store.ts`（持久化到 `.claw/todo.json`）
 - [x] 新建 `tools/todo.ts`（TodoTool add/update/toggle/remove/list）
 - [x] Prompt Composer 注入当前 Todo 状态
 - [x] 测试 + 提交（todo-store 19 + todo 23,共 42 个测试通过）
 
 ### 2.4 WebSearch + FetchURL ✅
+
 - [x] 新建 `tools/web.ts`（WebSearchTool + FetchURLTool 独立文件）
 - [x] FetchURLTool 原生 fetch + HTML strip + 截断
 - [x] WebSearchTool 支持配置搜索 API（SEARCH_API_BASE/KEY 环境变量）
@@ -223,6 +245,7 @@ git worktree remove ../pico-1-streaming
 - [x] 测试 + 提交（20 个测试通过）
 
 ### 2.5 Background Tasks（bash 后台化）
+
 - [x] 新建 `tools/background-manager.ts`
 - [x] BashTool 支持 `background: true` 参数
 - [x] 后台任务有唯一 ID + stdout/stderr 环形缓冲
@@ -230,7 +253,9 @@ git worktree remove ../pico-1-streaming
 - [x] 测试 + 提交
 
 ### 2.6 PreToolUse / PostToolUse Hooks ✅
+
 > 对标 Claude Code/Codex/Kimi Code 三家源码确认的事实标准协议。现有 RequestMiddleware(代码内)定位不同——hooks 是**用户可配置 shell 扩展点**(不碰源码)。
+
 - [x] 新建 `hooks/types.ts` + `hooks/runner.ts` + `hooks/config.ts`(用户可配置 shell hooks,对齐 Claude Code 协议:stdin JSON + exit 0/2 + stdout permissionDecision)
 - [x] `tools/registry-impl.ts` execute 链插入 PreToolUse(可拦截/改写参数)/ PostToolUse(fire-and-forget)
 - [x] PreToolUse 可拦截或改写参数(matcher 三模式 + modifiedInput)
@@ -239,6 +264,7 @@ git worktree remove ../pico-1-streaming
 - [x] **fail-open 铁律**:任何故障(超时/崩溃/解析失败)都不阻断工具
 
 ### 2.7 edit_file 加 replace_all ✅
+
 - [x] `tools/registry-impl.ts` fuzzyReplace 增加 `replaceAll` 选项（L1-L4 各级）
 - [x] ToolDefinition 更新参数 schema
 - [x] 测试 + 提交（7 个新测试,默认 false 行为不变）
@@ -279,12 +305,12 @@ git worktree remove ../pico-1-streaming
 > 详细任务拆分见：`docs/plans/2026-07-09-claude-code-runtime-parity-stage6.md`
 
 - [x] 6.0 测试基线分诊：修复本地确定性失败，网络 e2e 单独标注环境问题
-- [x] 6.1 统一 Task Runtime：统一 background bash / subagent / workflow 的 task 状态模型
-- [x] 6.2 Keybinding Kernel：上下文级快捷键、用户覆盖、slash command 绑定
+- [x] 6.1 统一 Task Runtime：提供通用 task 状态模型，当前运行时接入 background bash 与 subagent
+- [x] 6.2 Keybinding Kernel：完成上下文解析、默认绑定和可注入覆盖机制；未作为公开用户配置入口
 - [x] 6.3 Virtual Transcript：长会话虚拟渲染与 scroll 窗口
-- [x] 6.4 Permission Arbiter：本地审批、hook、channel、classifier 的先到先赢决策核心
-- [x] 6.5 File Index：`@file` 候选缓存、后台刷新、ignore/git/rg fallback
-- [x] 6.6 Plugin Lifecycle MVP：本地插件 install/enable/disable/list 生命周期
+- [x] 6.4 Permission Arbiter：完成决策竞速原语与 local approval adapter；hook/channel/classifier source 不在当前运行时范围
+- [x] 6.5 File Index：`@file` 候选缓存、显式 refresh、ignore/git/rg fallback；TUI 当前启动时构建一次候选
+- [x] 6.6 Plugin Lifecycle MVP：历史完成本地 manager 机制；Plugin runtime 不在当前公开 TUI 范围
 - [x] 6.7 Compact Recovery：压缩失败兜底与压缩后关键信息恢复
 
 ---
@@ -313,6 +339,7 @@ git worktree remove ../pico-1-streaming
 > **目标**：让 Agent 更聪明地管理上下文、更可控地执行任务。
 
 ### 3.1 MicroCompaction ✅
+
 - [x] `context/compactor.ts` 增加旧 tool result 渐进清理策略
 - [x] 按缓存年龄（>1 小时）+ 使用率（≥0.5）触发
 - [x] 旧 tool result 替换为 `[Old tool result cleared]` 标记
@@ -320,6 +347,7 @@ git worktree remove ../pico-1-streaming
 - [x] 测试 + 提交（compactor-micro 10 个测试）
 
 ### 3.2 Steer 机制（运行时注入）✅
+
 - [x] `engine/loop.ts` 加 steer queue（`src/engine/steer-queue.ts`）
 - [x] API call 期间可注入文本，drain 到下一个 tool message（A 点 peek 临时注入、C 点 drain 落 session）
 - [x] CLI 支持 `--steer <text>` 在运行中注入（启动时 push 一次）
@@ -327,68 +355,79 @@ git worktree remove ../pico-1-streaming
 - [x] 测试 + 提交（steer 9 个测试）
 
 ### 3.3 undo 回滚 ✅
+
 > 实际由阶段 1.5.6 提前实现，能力超出原 ROADMAP 描述（三轴回滚 + fork 语义）。本节打勾收尾。
+
 - [x] `engine/session.ts` 加 undo 方法（1.5.6 已实现 `undo(count)` / `rewindTo(messageIndex)`）
 - [x] 回滚到上一个 user prompt 或 compaction 边界（`undo(count)` 截断到第 count 个 user prompt 之前，遇 compaction 边界停止）
 - [x] CLI 支持 `--undo` 命令（已被 `--rewind <id> --rewind-mode conversation|code|both` 取代，三轴覆盖、语义更强）
 - [x] 测试 + 提交（`tests/engine/session-undo.test.ts` 14 个测试；Windows EBUSY 但逻辑正确）
 
 ### 3.4 deferredMessages ✅
+
 - [x] `engine/session.ts` 保证 tool 调用顺序完整性（pendingToolCallIds 跟踪）
 - [x] tool result 到齐前暂存后续消息（deferredMessages 队列，flush 顺序回放）
 - [x] 测试 + 提交（session-deferred 10 个测试）
 
 ### 3.5 Goal Mode ✅
+
 - [x] 新建 `engine/goal-manager.ts`（单例，避免 TodoStore 跨实例 bug）
 - [x] 状态机：active / paused / blocked / complete
-- [x] budget 支持（tokens / turns / wall-clock，复用 IterationBudget）
+- [x] budget 配置存储与上下文展示（tokens / turns / wall-clock）；引擎执行预算仍由独立 IterationBudget 控制
 - [x] 新增 CreateGoal / GetGoal / UpdateGoal 工具（`src/tools/goal.ts` 跨文件模式）
 - [x] Goal context 在 continuation boundary 注入（PromptComposer + Grace Call）
 - [x] 测试 + 提交（goal-manager 24 + goal 28，共 52 个测试）
 
 ### 3.6 Plan Review 审批 ✅
+
 - [x] `context/plan-store.ts` 加 ExitPlanMode 触发审批流（`src/tools/plan-exit.ts` 走工具路径自动挂审批）
 - [x] 审批卡片展示 plan 内容（飞书卡片 + 终端 notifier 展示 PLAN.md）
 - [x] 用户可选 approve / reject / modify（ApprovalResult 加 modifiedContent 三态）
 - [x] 测试 + 提交（plan-exit 10 个测试）
 
 ### 3.7 shouldContinueAfterStop ✅
+
 - [x] `engine/loop.ts` 非工具停止后 host 可决定续接（回调 `{continue, continuePrompt?}`）
 - [x] 测试 + 提交（continue-after-stop 7 个测试）
 
 ---
 
-## 阶段 4：多模型与多端入口（P2）
+## 阶段 4：多模型与多端入口（历史完成，多端外壳已退役）
 
-> **目标**：从"CLI + 飞书"到"多端可用"。
+> **历史目标**：从"CLI + 飞书"到"多端可用"。下列条目记录曾完成的实现；后续 REST/WebSocket、ACP、飞书和 one-shot CLI 外壳已退役。当前仅 `pico` → TUI 是公开入口。
 
 ### 4.1 Gemini Provider ✅
+
 - [x] 新建 `provider/gemini.ts`（GeminiProvider 实现 generate + generateStream）
 - [x] factory.ts 加 gemini 分发（ProviderKind + createProvider/createRawProvider switch）
 - [x] Gemini 原生协议适配（generateContent/streamGenerateContent、system_instruction 顶层、parts 结构、functionCall）
 - [x] 测试 + 提交（13 mock 测试 + 1 e2e skip）
 
 ### 4.2 Credential Pool ✅
+
 - [x] 新建 `provider/credential-pool.ts`（round-robin 轮询 + 60s 冷却 + 全限流兜底）
 - [x] 多凭证配置（LLM_API_KEYS 复数优先于 LLM_API_KEY 单数）
 - [x] 限流时自动轮换（retry.ts 遇 429 标记限流 + 切 key 重试）
 - [x] 测试 + 提交（pool 10 + rotation 4，共 14 测试）
 
-### 4.3 REST + WebSocket 协议 ✅
+### 4.3 REST + WebSocket 协议 ✅（历史完成，已退役）
+
 - [x] 新建 `server/` 目录（http.ts + ws.ts）
 - [x] REST API：POST /sessions、GET /sessions/:id、POST /sessions/:id/messages、POST /approvals/:taskId、GET /tools
 - [x] WebSocket：流式 text-delta + cursor {seq, epoch}
 - [x] 多端同步：volatile 事件不推进 seq（session-store 加 volatile 字段 + epoch）
 - [x] 测试 + 提交（http 12 + ws 8 + epoch 12，共 32 测试）
 
-### 4.4 ACP 协议适配器 ✅
+### 4.4 ACP 协议适配器 ✅（历史完成，已退役）
+
 - [x] 新建 `acp/` 目录（protocol.ts + stdio-server.ts + server.ts）
 - [x] stdio 驱动 + initialize/session/prompt 方法（复用 MCP stdio 骨架，方向相反）
 - [x] IDE 文件桥接（fs/readTextFile / fs/writeTextFile，路径锚定防穿越）
 - [x] 4 模式映射（default/plan/auto/yolo → planMode + YOLO approval）
 - [x] 测试 + 提交（24 测试）
 
-### 4.5 Docker 部署 ✅
+### 4.5 Docker 部署 ✅（历史完成，当前不支持）
+
 - [x] `Dockerfile`（多阶段构建：builder 编译 better-sqlite3 + prod 干净运行时）
 - [x] `docker-compose.yml`（环境变量透传 + workspace 卷挂载 + 端口映射）
 - [x] 环境变量配置文档（`docs/deployment.md`，env 矩阵 + 4 入口模式 + 排障）
@@ -401,30 +440,46 @@ git worktree remove ../pico-1-streaming
 > **目标**：从"能用"到"好用"。按实际需求挑着做。
 
 - [x] 5.1 AgentSwarm（批量子代理）— delegate_task 已支持 tasks[] 批量 + 并发池，远超原始设想
-- [x] 5.2 Cron 调度 — 不做（请求驱动引擎不内置 cron，靠外部调度器 + REST API，Claude Code/AutoGen 同款决策）
-- [x] 5.3 Auxiliary Client（辅助模型做压缩/标题）— AUX_LLM_* 配置 + FullCompactor 用 aux + Compactor summarizer 工厂
-- [x] 5.4 Tool Search 渐进披露 — 工具分组分层(核心组始终加载 + 扩展组按需披露)；search_tools 元工具检索激活；loop.ts 拦截点 + 所有 host 入口注入 ToolDisclosure 单例（2026-07-08 实现，详见变更记录）
-- [x] 5.5 Image / Media 支持 — 方案 B(加 images 字段,content 保持 string),3 provider 多模态翻译 + HTTP/ACP/CLI 入口传图
-- [x] 5.6 TUI 界面 — ink + React 19 (深度对标 Claude Code)：交互 REPL + 逐行流式渲染 + isStatic memo 优化 + QueryGuard 并发防护 + SpinnerMode 5 阶段 + 工具折叠 + 多行输入；--tui flag 启动（2026-07-08 实现，详见变更记录）
+- [x] 5.2 Cron 调度 — 不做（Cron/headless 调度不在当前 TUI-only 产品范围，不再以已退役的 REST API 作为替代承诺）
+- [x] 5.3 Auxiliary Client（辅助模型做压缩/标题）— AUX*LLM*\* 配置 + FullCompactor 用 aux + Compactor summarizer 工厂
+- [x] 5.4 Tool Search 渐进披露 — 工具分组分层 + `search_tools` 检索激活；当前由 TUI 内部装配 ToolDisclosure
+- [x] 5.5 Image / Media 支持 — 方案 B（加 images 字段，content 保持 string），3 provider 多模态翻译 + TUI `/image` / `@image:` 传图
+- [x] 5.6 TUI 界面 — ink + React 19：交互 REPL + 逐行流式渲染 + isStatic memo + QueryGuard + SpinnerMode + 工具折叠 + 多行输入；当前为 `pico` 默认入口
 - [x] 5.7 Rate Limit Tracking — header 解析 + CredentialPool 精确冷却 + 3 provider 回传
 - [x] 5.8 版本化迁移（JSONL schema 版本号）— meta record + migration 框架
 
 ---
 
-## 📊 进度统计
+## 阶段 8：TUI-only 产品边界收口 ✅（2026-07-10）
 
-| 阶段 | 总任务数 | 完成 | 状态 |
-|------|---------|------|------|
-| 阶段 1 | 5 | 5 | ✅ 完成 |
-| 阶段 1.5 | 8 | 8 | ✅ 完成 |
-| 阶段 2 | 7 | 7 | ✅ 完成 |
-| 阶段 3 | 7 | 7 | ✅ 完成 |
-| 阶段 4 | 5 | 5 | ✅ 完成 |
-| 阶段 5 | 8 | 8 | ✅ 全部闭环（5.2/5.4 经调研确认不做） |
-| 阶段 5.1 | 11 | 11 | ✅ 完成 |
-| 阶段 6 | 8 | 8 | ✅ 完成 |
-| 阶段 7 | 8 | 8 | ✅ 完成 |
-| **总计** | **67** | **67** | ✅ 阶段 7.8 完成 |
+> 本阶段把公开入口、会话运行时、配置、验证与历史状态收口到 TUI；不恢复已退役外壳，不新增 headless 或 Plugin runtime。
+
+- [x] 8.1 `pico` 成为可构建、可安装的唯一公开 TUI 入口；退役 one-shot / server / ACP 启动参数和遗留启动脚本
+- [x] 8.2 TUI 会话共享 Goal、Todo、TaskRegistry、ToolDisclosure、SkillRegistry、MemoryNudger、FileIndex 和 SteerQueue
+- [x] 8.3 `search_tools` 每次从实时 registry 检索后注册的 delegate / MCP 扩展工具，不自我披露
+- [x] 8.4 `.pico/config.json` 接通 `commandsDir`、附加工作区和 TUI keybindings；文件索引支持 TTL 与写后失效
+- [x] 8.5 移除重复的通用对话 arbiter，保留 TUI 本地对话与审批链；工作区外路径在审批前明确提示 `/add-dir`
+- [x] 8.6 PR 门禁包含确定性 E2E、build、package dry-run 和构建产物 PTY smoke；真实模型验收 fail-closed 并接入 nightly/manual workflow
+- [x] 8.7 公开文档统一 TUI-only 边界、`/snapshots` / `/rewind` 文件历史与 SkillRegistry 已实现能力，阶段 4 外壳标为历史退役
+- [x] 8.8 归档旧计划，通过 `rg`、lint、format、typecheck、全量测试、真实模型验收、TUI smoke 和发布包验证
+
+---
+
+## 📊 历史交付进度与当前收口
+
+| 阶段         | 总任务数 | 完成   | 状态                                |
+| ------------ | -------- | ------ | ----------------------------------- |
+| 阶段 1       | 5        | 5      | ✅ 完成                             |
+| 阶段 1.5     | 8        | 8      | ✅ 完成                             |
+| 阶段 2       | 7        | 7      | ✅ 完成                             |
+| 阶段 3       | 7        | 7      | ✅ 完成                             |
+| 阶段 4       | 5        | 5      | ✅ 历史完成；多端外壳已退役         |
+| 阶段 5       | 8        | 8      | ✅ 历史闭环（5.2 不做；5.4 已实现） |
+| 阶段 5.1     | 11       | 11     | ✅ 完成                             |
+| 阶段 6       | 8        | 8      | ✅ 完成                             |
+| 阶段 7       | 8        | 8      | ✅ 完成                             |
+| 阶段 8       | 8        | 8      | ✅ TUI-only 收口完成                |
+| **当前总计** | **75**   | **75** | ✅ 阶段 1-8 交付并收口              |
 
 ---
 
@@ -432,9 +487,7 @@ git worktree remove ../pico-1-streaming
 
 <!-- 开发过程中发现的新需求，追加到这里，注明发现日期 -->
 
-- 2026-07-10（阶段 8 候选，未排期）：SkillRegistry 指令更新与版本演进
-  - 当前状态：新技能会记录初始版本，尚未提供更新已有技能指令的公开接口。
-  - 后续范围：评估 `updateInstructions()` API、持久化迁移、版本原因记录与对应测试；未进入当前交付范围。
+- 2026-07-10（未排期）：SkillRegistry 如需新增指令更新 API，必须另行设计和验证；当前只承诺已实现的执行记录与检索，不声称会自动改写 Skill。
 
 - 2026-07-07（阶段 2 真实模型 e2e 发现）：`TodoStore.load()` 幂等性导致跨实例不可见 ✅ 已修复（2026-07-08）
   - 现象：`load()` 首次加载后置 `loaded=true`，后续调用直接返回内存缓存，不再重读磁盘。多个 `TodoStore` 实例（如 PromptComposer 的、TodoTool 的、CLI 新进程的）各自维护独立内存缓存，互相看不到对方的写入。
@@ -449,6 +502,11 @@ git worktree remove ../pico-1-streaming
 ---
 
 ## 📅 变更记录
+
+- 2026-07-10：完成阶段 8 TUI-only 收口
+  - 发布入口、会话共享运行时、动态工具、项目配置、工作区审批和文档边界全部收口。
+  - 默认测试 1914 项通过、确定性 E2E 10 项通过；构建产物 PTY 发起 1 次本地模型请求并完成渲染。
+  - 真实模型全链路覆盖流式、工具、Goal、审批、Skill / 附加工作区、Hooks 与 TUI；修正 thinking 模型探针 token 与旧 schema v1 断言。
 
 - 2026-07-10：项目收口清理
   - 重新核对阶段 1～7，补计阶段 5.1 与阶段 7，当前正式任务为 67/67 完成。

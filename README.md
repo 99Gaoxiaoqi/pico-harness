@@ -3,7 +3,7 @@
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Node](https://img.shields.io/badge/node-%3E%3D22-green.svg)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.9-blue.svg)
-![Tests](https://img.shields.io/badge/tests-1657%20passed-brightgreen.svg)
+![Tests](https://img.shields.io/badge/tests-1914%20passed-brightgreen.svg)
 
 用 TypeScript 从零实现的工业级 Agent Harness 引擎,对标课程《从 0 开始构建 Agent Harness》中的 `go-pico`。
 
@@ -34,12 +34,16 @@
 git clone <repo-url> pico-harness
 cd pico-harness
 npm install
+npm run build
+npm link
 
 # 复制环境变量模板并填入你的 API Key
 cp .env.example .env
 ```
 
 ## 🚀 快速开始
+
+Pico 当前唯一公开产品入口是 `pico` 启动的交互式 TUI。`npm run dev` 是仓库开发入口，进入同一 TUI。
 
 ```bash
 # 在当前项目目录启动 TUI
@@ -53,6 +57,13 @@ npx tsx --env-file=.env --import ./src/tui/preload-env.ts src/cli/main.ts \
 ```
 
 想像 Claude Code 一样在任意项目目录启动交互式 Pico,见 [Pico Claude Code 风格交互启动指南](./docs/tui-claude-code-parity.md)。
+
+### 当前范围
+
+- `src/cli/run-agent.ts` 中的 `runAgentFromCli` 是 TUI 内部装配函数，不是可支持的 one-shot/headless CLI 入口。
+- 文件历史在 TUI 内使用 `/snapshots` 和 `/rewind`。
+- REST/WebSocket、ACP、飞书与 one-shot CLI 外壳曾在历史阶段完成，后已退役。
+- Cron/headless 调度、Docker 部署和 Plugin runtime 不在当前产品范围。
 
 ## 🏗️ 架构概览
 
@@ -76,12 +87,12 @@ pico-harness/
 
 ## 🔧 环境变量
 
-| 变量 | 必填 | 说明 |
-|------|------|------|
-| `LLM_BASE_URL` | ✅ | 大模型 API 端点(OpenAI 兼容) |
-| `LLM_API_KEY` | ✅ | API Key |
-| `LLM_MODEL` | ✅ | 模型名(如 `glm-5.2`) |
-| `LOG_LEVEL` | 可选 | 日志级别:debug/info/warn/error(默认 info) |
+| 变量           | 必填 | 说明                                      |
+| -------------- | ---- | ----------------------------------------- |
+| `LLM_BASE_URL` | ✅   | 大模型 API 端点(OpenAI 兼容)              |
+| `LLM_API_KEY`  | ✅   | API Key                                   |
+| `LLM_MODEL`    | ✅   | 模型名(如 `glm-5.2`)                      |
+| `LOG_LEVEL`    | 可选 | 日志级别:debug/info/warn/error(默认 info) |
 
 ## 🧪 测试与评估
 
@@ -90,6 +101,9 @@ npm test           # 运行默认单元/集成测试(不含真实 e2e)
 npm run typecheck  # TypeScript 类型检查
 npm run lint       # ESLint 代码检查
 npm run build      # 编译到 dist/
+npm run test:e2e   # 无密钥、无外网的确定性 E2E
+npm run smoke:tui  # 构建后在 PTY 中驱动 TUI 并调用本地 fake OpenAI
+npm pack --dry-run # 验证发布包内容与 pico bin
 ```
 
 ## 📖 课程进度

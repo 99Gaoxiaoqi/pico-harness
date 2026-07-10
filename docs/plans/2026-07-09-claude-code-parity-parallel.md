@@ -1,6 +1,6 @@
 # Claude Code TUI Parity 并行开发计划
 
-> **状态（2026-07-10）：** 本计划对应能力已合并并在 `ROADMAP.md` 标记完成；下方未勾选项保留为历史执行清单，不再作为当前进度来源。
+> **归档状态（2026-07-10）：** 本计划对应能力已合并并在 `ROADMAP.md` 标记历史完成；下方未勾选项保留为历史执行清单，不再作为当前进度来源。当前公开入口为 `pico` → TUI。
 
 > **面向 AI 代理的工作者：** 必需子技能：使用 superpowers:subagent-driven-development 或等价的隔离子代理流程。每个任务必须先写/补测试，再实现，再运行目标测试。不要回退他人改动。
 
@@ -30,6 +30,7 @@
 **目标：** 建立 Claude Code 式 TUI 骨架：历史消息、当前输入和 overlay/modal 分层；一次只允许一个焦点弹窗。
 
 **文件：**
+
 - 修改：`src/tui/app.tsx`
 - 修改：`src/tui/message-list.tsx`
 - 修改：`src/tui/input-box.tsx`
@@ -40,6 +41,7 @@
 - 测试：`tests/tui/dialog-arbiter.test.ts`
 
 **步骤：**
+
 - [ ] 写 `dialog-arbiter` 单元测试：多个 dialog request 时按 priority 只返回一个 focused dialog。
 - [ ] 实现 `DialogRequest`、`FocusedDialog`、`pickFocusedDialog()`。
 - [ ] 写 app 布局测试：消息列表和输入框分别渲染，running 或 modal active 时输入禁用。
@@ -56,6 +58,7 @@
 **目标：** 将现有 slash command 扩展成 Claude Code 类 `prompt/local/local-jsx` 的轻量命令内核，为 skills/plugin/MCP 后续接入留接口。
 
 **文件：**
+
 - 修改：`src/input/types.ts`
 - 修改：`src/input/command-registry.ts`
 - 修改：`src/input/pico-command-registry.ts`
@@ -65,6 +68,7 @@
 - 测试：`tests/input/slash-parser.test.ts`
 
 **步骤：**
+
 - [ ] 写测试：command 支持 `kind/source/aliases/argumentHint/isHidden/isEnabled`。
 - [ ] 扩展 `SlashCommand` 类型，保持旧命令兼容。
 - [ ] 写测试：registry list 可按 source 分组，suggestion 返回描述和参数提示。
@@ -82,6 +86,7 @@
 **目标：** 复刻 Claude Code 的核心 `@file#Lx-y` 能力：解析文件引用、行号范围、目录摘要候选，并在 prompt 准备阶段生成附件上下文。
 
 **文件：**
+
 - 修改：`src/input/context-attachments.ts`
 - 修改：`src/input/file-suggestions.ts`
 - 修改：`src/input/mentions.ts`
@@ -91,6 +96,7 @@
 - 测试：`tests/input/mentions.test.ts`
 
 **步骤：**
+
 - [ ] 写测试：解析 `@src/foo.ts`、`@src/foo.ts#L10`、`@src/foo.ts#L10-L20`。
 - [ ] 实现 mention range parser，保留原普通文本。
 - [ ] 写测试：不存在文件返回可读错误上下文，不抛出未捕获异常。
@@ -108,6 +114,7 @@
 **目标：** 将 Pico 现有三轴 rewind 包装成 Claude Code 风格：先选消息，再显示 changed files/diff stat，再选择 code/conversation/both。
 
 **文件：**
+
 - 修改：`src/tui/rewind-selector.tsx`
 - 修改：`src/safety/file-history.ts`
 - 修改：`src/engine/session.ts`
@@ -116,6 +123,7 @@
 - 测试：`tests/engine/session-undo.test.ts`
 
 **步骤：**
+
 - [ ] 写测试：selector 初始状态只列消息，不立即执行回滚。
 - [ ] 写测试：选择消息后进入 confirm state，展示 changed files 和 `+/-` 统计。
 - [ ] 在 file history 中增加只读 diff stat helper。
@@ -132,6 +140,7 @@
 **目标：** 显式保存 `originalCwd/projectRoot/cwd/sessionId/sessionProjectDir`，让后续 TUI `/resume` 能按项目/worktree 过滤。
 
 **文件：**
+
 - 修改：`src/engine/session-store.ts`
 - 修改：`src/engine/session.ts`
 - 修改：`src/cli/main.ts`
@@ -141,6 +150,7 @@
 - 测试：`tests/cli-session-resolver.test.ts`
 
 **步骤：**
+
 - [ ] 写测试：新 session metadata 包含 cwd、projectRoot、sessionProjectDir。
 - [ ] 创建 `SessionIdentity` 类型和 `createSessionIdentity()` helper。
 - [ ] 写测试：旧 JSONL/session metadata 缺字段时可兼容加载。

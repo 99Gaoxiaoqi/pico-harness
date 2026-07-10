@@ -18,14 +18,14 @@ Agent 能做事了。但我不知道它在做什么。
 // src/observability/tracker.ts
 export class CostTracker implements LLMProvider {
   constructor(
-    private readonly next: LLMProvider,       // 真正的 Provider
+    private readonly next: LLMProvider, // 真正的 Provider
     private readonly modelRoute: BillingRoute, // 计费路由（哪个模型，什么价格）
-    private readonly session?: Session,        // 累计到哪个 Session
+    private readonly session?: Session, // 累计到哪个 Session
   ) {}
 
   async generate(messages: Message[], tools: ToolDefinition[]): Promise<Message> {
     const start = Date.now();
-    const resp = await this.next.generate(messages, tools);  // 透明转发
+    const resp = await this.next.generate(messages, tools); // 透明转发
     const latencyMs = Date.now() - start;
 
     if (resp.usage) {
@@ -42,7 +42,7 @@ export class CostTracker implements LLMProvider {
       }
     }
 
-    return resp;  // 原封不动返回，Main Loop 无感知
+    return resp; // 原封不动返回，Main Loop 无感知
   }
 }
 ```
@@ -74,14 +74,14 @@ const engine = new AgentEngine({ provider: trackedProvider, ... });
 // src/observability/pricing.ts
 const OFFICIAL_PRICING = {
   "glm-5.2": {
-    inputPerMillion: 1.0,      // 输入 1 元/百万 Token
-    outputPerMillion: 3.0,     // 输出 3 元/百万 Token
-    cacheReadPerMillion: 0.1,  // 缓存命中 0.1 元/百万 Token
+    inputPerMillion: 1.0, // 输入 1 元/百万 Token
+    outputPerMillion: 3.0, // 输出 3 元/百万 Token
+    cacheReadPerMillion: 0.1, // 缓存命中 0.1 元/百万 Token
   },
   "claude-3-5-sonnet": {
-    inputPerMillion: 22.0,     // 输入 22 元/百万 Token
-    outputPerMillion: 88.0,    // 输出 88 元/百万 Token
-    cacheReadPerMillion: 2.2,  // 缓存命中 2.2 元/百万 Token
+    inputPerMillion: 22.0, // 输入 22 元/百万 Token
+    outputPerMillion: 88.0, // 输出 88 元/百万 Token
+    cacheReadPerMillion: 2.2, // 缓存命中 2.2 元/百万 Token
     cacheWritePerMillion: 27.5, // 缓存写入 27.5 元/百万 Token
   },
 };
@@ -106,7 +106,12 @@ export class Tracer {
     return this.rootSpan.startChild(`Turn #${turnNumber}`);
   }
 
-  async traceToolCall(span: Span, toolName: string, args: string, fn: () => Promise<string>): Promise<string> {
+  async traceToolCall(
+    span: Span,
+    toolName: string,
+    args: string,
+    fn: () => Promise<string>,
+  ): Promise<string> {
     const toolSpan = span.startChild(`Tool.${toolName}`, { args });
     try {
       const result = await fn();
@@ -159,15 +164,21 @@ Session "refactor-utils"
 // src/observability/logger.ts
 export const logger = {
   info: (msg: string, meta?: Record<string, unknown>) => {
-    console.log(JSON.stringify({
-      level: "info",
-      timestamp: new Date().toISOString(),
-      message: msg,
-      ...meta,
-    }));
+    console.log(
+      JSON.stringify({
+        level: "info",
+        timestamp: new Date().toISOString(),
+        message: msg,
+        ...meta,
+      }),
+    );
   },
-  warn: (msg: string, meta?: Record<string, unknown>) => {/* 类似，level: "warn" */},
-  error: (msg: string, meta?: Record<string, unknown>) => {/* 类似，level: "error" */},
+  warn: (msg: string, meta?: Record<string, unknown>) => {
+    /* 类似，level: "warn" */
+  },
+  error: (msg: string, meta?: Record<string, unknown>) => {
+    /* 类似，level: "error" */
+  },
 };
 ```
 
@@ -198,6 +209,7 @@ export const logger = {
 - **结构化日志**：每行 JSON，可被 jq/ELK/Grafana 消费
 
 这三个系统合在一起，回答了三类问题：
+
 - **成本**："这个 Session 花了 ¥3.42，其中 Claude 输出占了 ¥2.80"
 - **轨迹**："Turn 3 的 edit_file 失败了，因为 old_text 不匹配。之后 Recovery 注入了救援指南，Turn 4 重试成功"
 - **日志**："12:34:56 飞书 Bot 收到消息，分配 Session `wxid_abc`，开始处理"

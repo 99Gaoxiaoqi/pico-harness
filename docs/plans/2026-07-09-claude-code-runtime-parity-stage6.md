@@ -1,6 +1,6 @@
 # Claude Code Runtime Parity 实现计划
 
-> **状态（2026-07-10）：** 本计划对应能力已合并并在 `ROADMAP.md` 标记完成；下方未勾选项保留为历史执行清单，不再作为当前进度来源。
+> **归档状态（2026-07-10）：** 本计划对应机制已合并；下方未勾选项保留为历史执行清单，不再作为当前进度来源。PluginManager 只代表历史本地 manager 机制，Plugin runtime 不在当前公开 TUI 范围。
 
 > **面向 AI 代理的工作者：** 必需子技能：使用 superpowers:subagent-driven-development（推荐）或 superpowers:executing-plans 逐任务实现此计划。步骤使用复选框（`- [ ]`）语法来跟踪进度。
 
@@ -56,6 +56,7 @@
 ### 任务 0：测试基线分诊
 
 **文件：**
+
 - 修改：`ROADMAP.md`
 - 可能修改：`tests/session-persistence.test.ts`
 - 可能修改：`tests/tracker.test.ts`
@@ -74,6 +75,7 @@
 - [ ] **步骤 3：按 TDD 修复本地失败**
 
 最小目标：
+
 - session persistence 测试断言应适配当前 JSONL meta/undo/summary 记录，或实现过滤逻辑。
 - tracker 测试应稳定捕获 reporter 输出。
 - ANSI 测试应明确 color 开关来源。
@@ -93,6 +95,7 @@ git commit -m "fix(test): 修复阶段六前置测试基线"
 ### 任务 1：统一 Task Runtime
 
 **文件：**
+
 - 创建：`src/tasks/task-types.ts`
 - 创建：`src/tasks/task-registry.ts`
 - 修改：`src/tools/background-manager.ts`
@@ -102,6 +105,7 @@ git commit -m "fix(test): 修复阶段六前置测试基线"
 - [ ] **步骤 1：编写失败测试**
 
 测试行为：
+
 - `createTask("local_bash")` 生成 `b_` 前缀 ID。
 - task 初始状态为 `pending`。
 - `start/complete/fail/kill` 更新状态和时间。
@@ -113,6 +117,7 @@ git commit -m "fix(test): 修复阶段六前置测试基线"
 - [ ] **步骤 2：实现最小 Task 类型与 Registry**
 
 实现：
+
 - `TaskType = "local_bash" | "local_agent" | "remote_agent" | "local_workflow" | "monitor_mcp"`
 - `TaskStatus = "pending" | "running" | "completed" | "failed" | "killed"`
 - `generateTaskId(type)` 使用 Claude Code 同类前缀。
@@ -121,6 +126,7 @@ git commit -m "fix(test): 修复阶段六前置测试基线"
 - [ ] **步骤 3：接入 background manager**
 
 最小接入：
+
 - background bash 创建 `local_bash` task。
 - 完成、失败、停止时同步 task 状态。
 - 现有 `task_list/task_output/task_stop` 外部行为保持不变。
@@ -128,12 +134,14 @@ git commit -m "fix(test): 修复阶段六前置测试基线"
 - [ ] **步骤 4：接入 delegation manager**
 
 最小接入：
+
 - delegate/subagent 创建 `local_agent` task。
 - snapshot 中包含 description/toolUseId/outputFile 可选字段。
 
 - [ ] **步骤 5：验证**
 
 运行：
+
 - `npm test tests/tasks/task-registry.test.ts`
 - `npm test tests/tools/background-manager.test.ts tests/tools/delegation-manager.test.ts`
 
@@ -149,6 +157,7 @@ git commit -m "feat(task): 引入统一任务运行时"
 ### 任务 2：Keybinding Kernel
 
 **文件：**
+
 - 创建：`src/tui/keybindings/schema.ts`
 - 创建：`src/tui/keybindings/defaults.ts`
 - 创建：`src/tui/keybindings/resolver.ts`
@@ -158,6 +167,7 @@ git commit -m "feat(task): 引入统一任务运行时"
 - [ ] **步骤 1：编写失败测试**
 
 测试行为：
+
 - Chat 上下文 `ctrl+a` 解析为 `cursor:start`。
 - Autocomplete 上下文 `tab` 解析为 `suggestion:accept`。
 - 用户绑定 `command:/model` 解析为 slash command action。
@@ -169,6 +179,7 @@ git commit -m "feat(task): 引入统一任务运行时"
 - [ ] **步骤 2：实现 schema/defaults/resolver**
 
 实现最小 API：
+
 - `KeybindingContext`
 - `KeybindingAction`
 - `KeybindingMap`
@@ -177,6 +188,7 @@ git commit -m "feat(task): 引入统一任务运行时"
 - [ ] **步骤 3：迁移 input-controller**
 
 迁移范围：
+
 - 保留现有 reducer 输入输出 API。
 - 内部先用 resolver 判断特殊动作，再落到 printable input。
 - 不改变现有历史、suggestion、multi-line 行为。
@@ -184,6 +196,7 @@ git commit -m "feat(task): 引入统一任务运行时"
 - [ ] **步骤 4：验证**
 
 运行：
+
 - `npm test tests/tui/keybindings.test.ts`
 - `npm test tests/tui/input-controller.test.ts`
 
@@ -199,6 +212,7 @@ git commit -m "feat(tui): 引入上下文按键绑定内核"
 ### 任务 3：Virtual Transcript
 
 **文件：**
+
 - 创建：`src/tui/virtual-transcript.ts`
 - 修改：`src/tui/message-list.tsx`
 - 测试：`tests/tui/virtual-transcript.test.ts`
@@ -206,6 +220,7 @@ git commit -m "feat(tui): 引入上下文按键绑定内核"
 - [ ] **步骤 1：编写失败测试**
 
 测试行为：
+
 - 1000 条消息只返回 viewport 附近窗口。
 - overscan 正确扩展窗口。
 - 窗口前后 spacer 高度与行高估算一致。
@@ -217,12 +232,14 @@ git commit -m "feat(tui): 引入上下文按键绑定内核"
 - [ ] **步骤 2：实现纯计算模块**
 
 先不碰 Ink DOM，创建纯函数：
+
 - `computeVirtualTranscript(items, viewportRows, scrollOffset, options)`
 - 返回 `{ visibleItems, startIndex, endIndex, topSpacerRows, bottomSpacerRows }`
 
 - [ ] **步骤 3：接入 message-list**
 
 最小接入：
+
 - 小于阈值时走原渲染。
 - 超过阈值时渲染 spacer + visible messages。
 - 默认阈值 200，避免小 session 行为变化。
@@ -230,6 +247,7 @@ git commit -m "feat(tui): 引入上下文按键绑定内核"
 - [ ] **步骤 4：验证**
 
 运行：
+
 - `npm test tests/tui/virtual-transcript.test.ts`
 - `npm test tests/tui/message-list.test.ts`
 - `npm run smoke:tui`
@@ -246,6 +264,7 @@ git commit -m "feat(tui): 支持长会话虚拟 transcript"
 ### 任务 4：Permission Arbiter
 
 **文件：**
+
 - 创建：`src/approval/arbiter.ts`
 - 修改：`src/approval/manager.ts`
 - 测试：`tests/approval/arbiter.test.ts`
@@ -253,6 +272,7 @@ git commit -m "feat(tui): 支持长会话虚拟 transcript"
 - [ ] **步骤 1：编写失败测试**
 
 测试行为：
+
 - 多个 source 并发时，最先 resolve 的 decision 生效。
 - loser source 的 cleanup 被调用。
 - abort 时所有 source cleanup 被调用并返回 reject。
@@ -264,6 +284,7 @@ git commit -m "feat(tui): 支持长会话虚拟 transcript"
 - [ ] **步骤 2：实现 PermissionArbiter**
 
 实现最小 API：
+
 - `racePermissionSources({ sources, signal, timeoutMs })`
 - source 返回 `{ promise, cleanup }`
 - decision 复用现有 `ApprovalResult`。
@@ -271,12 +292,14 @@ git commit -m "feat(tui): 支持长会话虚拟 transcript"
 - [ ] **步骤 3：接入 ApprovalManager**
 
 接入范围：
+
 - `waitForApproval` 仍可单独使用。
 - 新增 local approval source adapter，供后续 hook/channel/classifier 扩展。
 
 - [ ] **步骤 4：验证**
 
 运行：
+
 - `npm test tests/approval/arbiter.test.ts`
 - `npm test tests/approval`
 
@@ -292,6 +315,7 @@ git commit -m "feat(approval): 引入权限决策仲裁器"
 ### 任务 5：File Index
 
 **文件：**
+
 - 创建：`src/input/file-index.ts`
 - 修改：`src/input/file-suggestions.ts`
 - 测试：`tests/input/file-index.test.ts`
@@ -299,6 +323,7 @@ git commit -m "feat(approval): 引入权限决策仲裁器"
 - [ ] **步骤 1：编写失败测试**
 
 测试行为：
+
 - 首次查询构建索引。
 - 第二次查询复用缓存。
 - `refresh()` 后包含新增文件。
@@ -310,6 +335,7 @@ git commit -m "feat(approval): 引入权限决策仲裁器"
 - [ ] **步骤 2：实现 FileIndex**
 
 实现：
+
 - `FileIndex.create({ cwd, commandRunner })`
 - `query(text, limit)`
 - `refresh()`
@@ -318,6 +344,7 @@ git commit -m "feat(approval): 引入权限决策仲裁器"
 - [ ] **步骤 3：接入 file-suggestions**
 
 兼容：
+
 - `listFileSuggestions(options)` API 不变。
 - 未传 index 时保持旧行为。
 - TUI 后续可持有长生命周期 index。
@@ -325,6 +352,7 @@ git commit -m "feat(approval): 引入权限决策仲裁器"
 - [ ] **步骤 4：验证**
 
 运行：
+
 - `npm test tests/input/file-index.test.ts`
 - `npm test tests/input/file-suggestions.test.ts`
 
@@ -340,6 +368,7 @@ git commit -m "feat(input): 引入文件建议索引缓存"
 ### 任务 6：Plugin Lifecycle MVP
 
 **文件：**
+
 - 创建：`src/plugins/plugin-types.ts`
 - 创建：`src/plugins/plugin-manager.ts`
 - 测试：`tests/plugins/plugin-manager.test.ts`
@@ -347,6 +376,7 @@ git commit -m "feat(input): 引入文件建议索引缓存"
 - [ ] **步骤 1：编写失败测试**
 
 测试行为：
+
 - 从目录读取 plugin manifest。
 - install 到 user/project/local scope。
 - enable/disable 修改 settings。
@@ -358,6 +388,7 @@ git commit -m "feat(input): 引入文件建议索引缓存"
 - [ ] **步骤 2：实现本地 PluginManager**
 
 不做 marketplace 网络安装，先做本地目录生命周期：
+
 - `installFromDirectory(path, scope)`
 - `enable(id, scope)`
 - `disable(id, scope)`
@@ -378,12 +409,14 @@ git commit -m "feat(plugin): 引入本地插件生命周期管理"
 ### 任务 7：Compact Recovery
 
 **文件：**
+
 - 修改：`src/context/compactor.ts`
 - 测试：`tests/context/compactor-recovery.test.ts`
 
 - [ ] **步骤 1：编写失败测试**
 
 测试行为：
+
 - summarizer 抛 prompt-too-long 类错误时，compactor 使用更激进字符压缩兜底。
 - 压缩后保留最近关键文件/skill/plan 附件恢复入口。
 
@@ -393,6 +426,7 @@ git commit -m "feat(plugin): 引入本地插件生命周期管理"
 - [ ] **步骤 2：实现失败兜底**
 
 实现：
+
 - 捕获 summarizer 失败。
 - 对远期历史按 API round/消息组降级。
 - 保持 toolCalls 不删除。
@@ -400,12 +434,14 @@ git commit -m "feat(plugin): 引入本地插件生命周期管理"
 - [ ] **步骤 3：实现恢复挂钩**
 
 最小实现：
+
 - 新增可选 `postCompactRestore?: () => Message[]`。
 - compact 完成后追加恢复消息。
 
 - [ ] **步骤 4：验证**
 
 运行：
+
 - `npm test tests/context/compactor-recovery.test.ts`
 - `npm test tests/context/compactor.test.ts tests/context/full-compactor.test.ts`
 

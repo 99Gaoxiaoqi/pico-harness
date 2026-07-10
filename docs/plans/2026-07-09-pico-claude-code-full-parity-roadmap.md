@@ -1,5 +1,7 @@
 # Pico Claude Code 高拟真交互后续阶段总任务单
 
+> **归档状态（2026-07-10）：** 阶段 2-7 的历史交付已完成，本文不再作为当前执行入口。下文 `--prompt` 等命令仅是当时验收记录；当前唯一公开入口是 `pico` → TUI。
+
 > **面向 AI 代理的工作者：** 必需子技能：使用 `superpowers-zh:subagent-driven-development` 调度子代理；每个阶段使用独立 worktree；每个子任务完成后先测试、提交，再由主协调者合并回 `main` 并勾选本文件。
 
 **目标：** 在已完成的第一轮 Claude Code 风格启动与 TUI 基础上，逐步补齐更贴近 Claude Code 的命令体系、TUI 细节、权限工具流、回滚会话流、子代理流和真实项目验收。
@@ -46,12 +48,14 @@ git diff --check
 **分支/worktree：** `codex/pico-cc-p2-visual-logo` / `.worktrees/pico-cc-p2-visual-logo`
 
 **写入范围：**
+
 - 修改：`src/tui/logo-panel.tsx`
 - 修改：`src/tui/status-bar.tsx`
 - 修改：`tests/tui/logo-panel.test.tsx`
 - 修改：`tests/tui/status-bar.test.tsx`
 
 **任务：**
+
 - [x] 调整 LogoPanel，使 `pico · model · cwd` 成为第一屏强信号。
 - [x] 状态区增加 session 模式、权限模式、思考强度的紧凑展示。
 - [x] 确保 cwd 过长时中间截断，不撑爆终端宽度。
@@ -70,6 +74,7 @@ git diff --check
 **分支/worktree：** `codex/pico-cc-p2-visual-messages` / `.worktrees/pico-cc-p2-visual-messages`
 
 **写入范围：**
+
 - 修改：`src/tui/message-row.tsx`
 - 修改：`src/tui/message-list.tsx`
 - 修改：`src/tui/tool-card.tsx`
@@ -77,6 +82,7 @@ git diff --check
 - 修改：`tests/tui/should-render-statically.test.ts`
 
 **任务：**
+
 - [x] 统一 user / assistant / system / error 的行首符号与缩进。
 - [x] 工具调用默认显示一行摘要，展开时显示参数和结果摘要。
 - [x] 错误行使用醒目但不刺眼的样式，并保留原始错误信息。
@@ -95,6 +101,7 @@ git diff --check
 **分支/worktree：** `codex/pico-cc-p2-visual-input` / `.worktrees/pico-cc-p2-visual-input`
 
 **写入范围：**
+
 - 修改：`src/tui/input-box.tsx`
 - 修改：`src/tui/suggestions.tsx`
 - 修改：`src/tui/input-controller.ts`
@@ -102,6 +109,7 @@ git diff --check
 - 修改：`tests/tui/suggestions.test.tsx`
 
 **任务：**
+
 - [x] 输入框提示文案对齐 Claude Code 风格，避免重复底部帮助行。
 - [x] 候选面板限制高度，支持当前选中项高亮和描述截断。
 - [x] 输入区在 running 状态下只显示禁用态，不吞掉历史内容。
@@ -135,6 +143,7 @@ git diff --check
 **分支/worktree：** `codex/pico-cc-p3-commands-mode` / `.worktrees/pico-cc-p3-commands-mode`
 
 **写入范围：**
+
 - 修改：`src/input/session-settings.ts`
 - 修改：`src/input/builtin-commands.ts`
 - 修改：`src/input/pico-command-registry.ts`
@@ -142,6 +151,7 @@ git diff --check
 - 修改：`tests/input/pico-command-registry.test.ts`
 
 **任务：**
+
 - [x] 将 `/mode` 从 `/model` alias 中拆出，作为真正的交互模式命令。
 - [x] 支持 `/mode` 展示当前模式。
 - [x] 支持 `/mode default|plan|auto|yolo` 更新当前 session 设置。
@@ -160,6 +170,7 @@ git diff --check
 **分支/worktree：** `codex/pico-cc-p3-commands-local` / `.worktrees/pico-cc-p3-commands-local`
 
 **写入范围：**
+
 - 修改：`src/input/builtin-commands.ts`
 - 修改：`src/input/pico-command-registry.ts`
 - 修改：`src/tui/repl.tsx`
@@ -167,6 +178,7 @@ git diff --check
 - 修改：`tests/tui/repl-input-routing.test.tsx`
 
 **任务：**
+
 - [x] `/clear` 真正清空 TUI 本地 transcript，不影响 session history。
 - [x] `/compact` 触发现有 compactor 或返回清晰不可用原因。
 - [x] `/init` 在当前项目生成或更新 Pico 需要的轻量配置入口。
@@ -185,6 +197,7 @@ git diff --check
 **分支/worktree：** `codex/pico-cc-p3-commands-help` / `.worktrees/pico-cc-p3-commands-help`
 
 **写入范围：**
+
 - 修改：`src/input/command-registry.ts`
 - 修改：`src/input/process-user-input.ts`
 - 修改：`src/tui/suggestions.tsx`
@@ -193,6 +206,7 @@ git diff --check
 - 修改：`tests/tui/suggestions.test.tsx`
 
 **任务：**
+
 - [x] `/help <command>` 展示 usage、aliases、说明和参数。
 - [x] 候选面板展示 alias 匹配来源，减少 `Unknown slash command`。
 - [x] 未知命令建议按 alias 和编辑距离排序。
@@ -226,6 +240,7 @@ git diff --check
 **分支/worktree：** `codex/pico-cc-p4-permissions-mode` / `.worktrees/pico-cc-p4-permissions-mode`
 
 **写入范围：**
+
 - 修改：`src/input/session-settings.ts`
 - 修改：`src/input/pico-command-registry.ts`
 - 修改：`src/tui/approval-panel.tsx`
@@ -233,6 +248,7 @@ git diff --check
 - 修改：`tests/tui/approval-panel.test.tsx`
 
 **任务：**
+
 - [x] 增加 `/permissions` 展示当前权限模式和 session approvals。
 - [x] 支持 `/permissions default|auto|yolo|plan` 的最小切换。
 - [x] ApprovalPanel 明确展示 allow once / allow session / deny / edit 四个动作。
@@ -251,6 +267,7 @@ git diff --check
 **分支/worktree：** `codex/pico-cc-p4-tools-card` / `.worktrees/pico-cc-p4-tools-card`
 
 **写入范围：**
+
 - 修改：`src/tui/tool-card.tsx`
 - 修改：`src/tui/diff-preview.tsx`
 - 修改：`src/tui/tui-reporter.ts`
@@ -259,6 +276,7 @@ git diff --check
 - 修改：`tests/tui/tui-reporter.test.ts`
 
 **任务：**
+
 - [x] 工具卡片显示 running / success / failed / denied 状态。
 - [x] 对 edit/write/bash 展示 diff 或路径摘要。
 - [x] 长输出默认折叠，展开时保留截断提示。
@@ -277,6 +295,7 @@ git diff --check
 **分支/worktree：** `codex/pico-cc-p4-tools-disclosure` / `.worktrees/pico-cc-p4-tools-disclosure`
 
 **写入范围：**
+
 - 修改：`src/input/pico-command-registry.ts`
 - 修改：`src/tools/tool-disclosure.ts`
 - 修改：`src/tools/search-tools.ts`
@@ -284,6 +303,7 @@ git diff --check
 - 修改：`tests/tools/tool-disclosure.test.ts`
 
 **任务：**
+
 - [x] `/tools` 区分核心工具、已披露工具、可搜索工具。
 - [x] `/tools <query>` 复用 search_tools 逻辑展示命中结果。
 - [x] 工具名称、读写属性、风险级别输出稳定可测试。
@@ -317,6 +337,7 @@ git diff --check
 **分支/worktree：** `codex/pico-cc-p5-session-list` / `.worktrees/pico-cc-p5-session-list`
 
 **写入范围：**
+
 - 修改：`src/cli/session-resolver.ts`
 - 修改：`src/input/pico-command-registry.ts`
 - 新增：`src/tui/session-selector.tsx`
@@ -324,6 +345,7 @@ git diff --check
 - 新增：`tests/tui/session-selector.test.tsx`
 
 **任务：**
+
 - [x] 增加 session 摘要结构：id、cwd、createdAt、updatedAt、messageCount。
 - [x] `/sessions` 展示当前项目可恢复的 session 列表。
 - [x] `/resume <session-id>` 在 TUI 内提示用户重启或切换的最小路径。
@@ -342,6 +364,7 @@ git diff --check
 **分支/worktree：** `codex/pico-cc-p5-rewind-selector` / `.worktrees/pico-cc-p5-rewind-selector`
 
 **写入范围：**
+
 - 修改：`src/tui/rewind-selector.tsx`
 - 修改：`src/input/pico-command-registry.ts`
 - 修改：`src/cli/file-history.ts`
@@ -349,6 +372,7 @@ git diff --check
 - 修改：`tests/cli-file-history.test.ts`
 
 **任务：**
+
 - [x] `/snapshots` 展示时间、messageId、文件数量、变更摘要。
 - [x] `/rewind` 无参数时展示最近快照和 mode 使用说明。
 - [x] `/rewind <id> code|conversation|both` 支持 TUI 文本路径。
@@ -367,6 +391,7 @@ git diff --check
 **分支/worktree：** `codex/pico-cc-p5-fork-status` / `.worktrees/pico-cc-p5-fork-status`
 
 **写入范围：**
+
 - 修改：`src/cli/session-resolver.ts`
 - 修改：`src/tui/status-bar.tsx`
 - 修改：`src/input/session-settings.ts`
@@ -374,6 +399,7 @@ git diff --check
 - 修改：`tests/tui/status-bar.test.tsx`
 
 **任务：**
+
 - [x] sessionMode 区分 new / continue / resume / fork。
 - [x] fork session 在状态栏显示来源 session 短 id。
 - [x] `/status` 输出 sessionId、sessionMode、forkFrom。
@@ -407,6 +433,7 @@ git diff --check
 **分支/worktree：** `codex/pico-cc-p6-agents-list` / `.worktrees/pico-cc-p6-agents-list`
 
 **写入范围：**
+
 - 修改：`src/input/agent-loader.ts`
 - 修改：`src/input/pico-command-registry.ts`
 - 新增：`src/tui/agent-list.tsx`
@@ -414,6 +441,7 @@ git diff --check
 - 新增：`tests/tui/agent-list.test.tsx`
 
 **任务：**
+
 - [x] `/agents` 展示内置代理和 `.claude/agents` 代理。
 - [x] agent 摘要包含 name、description、tools、source。
 - [x] AgentList 支持空态、长描述截断、来源标记。
@@ -432,6 +460,7 @@ git diff --check
 **分支/worktree：** `codex/pico-cc-p6-agents-dispatch` / `.worktrees/pico-cc-p6-agents-dispatch`
 
 **写入范围：**
+
 - 修改：`src/input/pico-command-registry.ts`
 - 修改：`src/input/process-user-input.ts`
 - 修改：`src/tools/default-registry.ts`
@@ -439,6 +468,7 @@ git diff --check
 - 修改：`tests/input/pico-command-registry.test.ts`
 
 **任务：**
+
 - [x] `/agent <name> <task>` 转成明确 prompt 或 delegate_task 调用意图。
 - [x] 找不到 agent 时给出最接近建议。
 - [x] agent task 为空时展示 usage。
@@ -457,6 +487,7 @@ git diff --check
 **分支/worktree：** `codex/pico-cc-p6-agents-status` / `.worktrees/pico-cc-p6-agents-status`
 
 **写入范围：**
+
 - 修改：`src/tui/tui-reporter.ts`
 - 修改：`src/tui/message-row.tsx`
 - 修改：`src/tui/tool-card.tsx`
@@ -464,6 +495,7 @@ git diff --check
 - 修改：`tests/tui/tool-card.test.ts`
 
 **任务：**
+
 - [x] delegate_task 工具调用显示 agent 名称、任务摘要、状态。
 - [x] 多任务批量分派时显示总数和完成数。
 - [x] 子代理失败时保留失败摘要，不吞掉其他成功结果。
@@ -497,11 +529,13 @@ git diff --check
 **分支/worktree：** `codex/pico-cc-p7-acceptance-smoke` / `.worktrees/pico-cc-p7-acceptance-smoke`
 
 **写入范围：**
+
 - 新增：`scripts/tui-smoke.mjs`
 - 新增：`tests/tui/tui-smoke-script.test.ts`
 - 修改：`package.json`
 
 **任务：**
+
 - [x] 新增 `npm run smoke:tui`，依次执行 `/status`、`/mode`、`/tools`、`/help`。
 - [x] 脚本读取 `.env`，缺 provider 配置时输出 skip 原因并成功退出。
 - [x] 测试覆盖有配置和无配置两种路径。
@@ -521,10 +555,12 @@ git diff --check
 **分支/worktree：** `codex/pico-cc-p7-acceptance-docs` / `.worktrees/pico-cc-p7-acceptance-docs`
 
 **写入范围：**
+
 - 新增：`docs/tui-claude-code-parity.md`
 - 修改：`README.md`
 
 **任务：**
+
 - [x] 说明在任意项目目录启动 Pico 的推荐方式。
 - [x] 说明 session：new / continue / resume / fork。
 - [x] 列出支持的 slash commands、`.claude/commands`、`.claude/agents`。
@@ -543,6 +579,7 @@ git diff --check
 **分支/worktree：** 不写代码，只在 `main` 集成后运行。
 
 **任务：**
+
 - [x] 运行完整目标测试。
 - [x] 运行 lint。
 - [x] 运行 `git diff --check`。
