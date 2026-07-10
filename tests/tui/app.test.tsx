@@ -414,6 +414,7 @@ describe("App", () => {
       expect(output).toContain("[disabled]");
       expect(output).toContain("Command is only available while idle.");
       expect(output).toContain("↓");
+      expect(countOccurrences(output, "[disabled]")).toBe(countOccurrences(output, "[disabled]  "));
       expect(output.split("\n").length).toBeLessThanOrEqual(24);
 
       output = await harness.write("\u001b[6~");
