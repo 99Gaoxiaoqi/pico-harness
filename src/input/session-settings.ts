@@ -26,6 +26,7 @@ export interface SessionSettings {
   thinkingEffortExplicit: boolean;
   permissionMode: string;
   tools: readonly SessionToolStatus[];
+  additionalDirectories: readonly string[];
 }
 
 export interface SessionSettingsDefaults {
@@ -39,6 +40,7 @@ export interface SessionSettingsDefaults {
   thinkingEffort?: ThinkingEffort;
   permissionMode?: string;
   tools?: readonly SessionToolStatus[];
+  additionalDirectories?: readonly string[];
 }
 
 export interface SessionSettingResult {
@@ -68,6 +70,9 @@ export function createDefaultSessionSettings(defaults: SessionSettingsDefaults):
     thinkingEffortExplicit: defaults.thinkingEffort !== undefined,
     permissionMode: defaults.permissionMode ?? "ask",
     tools: defaults.tools ?? [],
+    additionalDirectories: createAdditionalDirectorySnapshot(
+      defaults.additionalDirectories ?? [],
+    ),
   };
 }
 
@@ -92,6 +97,9 @@ export function getOrCreateSessionSettings(defaults: SessionSettingsDefaults): S
       existing.permissionMode = defaults.permissionMode;
     }
     existing.tools = defaults.tools ?? existing.tools;
+    for (const directory of defaults.additionalDirectories ?? []) {
+      addSessionAdditionalDirectory(existing, directory);
+    }
     if (defaults.thinkingEffort !== undefined) {
       existing.thinkingEffort = defaults.thinkingEffort;
       existing.thinkingEffortExplicit = true;
@@ -124,6 +132,21 @@ export function getStoredSessionSettings(sessionId: string): SessionSettings | u
 export function resetSessionSettingsForTests(): void {
   settingsBySession.clear();
   resolvedCliSessionSemantics.clear();
+}
+
+export function addSessionAdditionalDirectory(
+  settings: SessionSettings,
+  directory: string,
+): readonly string[] {
+  if (settings.additionalDirectories.includes(directory)) {
+    return settings.additionalDirectories;
+  }
+
+  settings.additionalDirectories = createAdditionalDirectorySnapshot([
+    ...settings.additionalDirectories,
+    directory,
+  ]);
+  return settings.additionalDirectories;
 }
 
 export function setSessionModel(settings: SessionSettings, model: string): SessionSettingResult {
@@ -236,4 +259,8 @@ function shouldApplyPermissionModeDefault(current: string, next: string): boolea
   if (current === next) return true;
   if (current === "ask") return true;
   return next !== "ask";
+}
+
+function createAdditionalDirectorySnapshot(directories: readonly string[]): readonly string[] {
+  return Object.freeze([...new Set(directories)]);
 }

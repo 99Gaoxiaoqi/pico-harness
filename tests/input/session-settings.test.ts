@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  addSessionAdditionalDirectory,
   createDefaultSessionSettings,
   formatPermissionStatus,
   formatSessionStatus,
@@ -10,6 +11,38 @@ import {
 } from "../../src/input/session-settings.js";
 
 describe("session settings", () => {
+  it("creates a readonly additional-directory snapshot from initial values", () => {
+    const initial = ["/workspace/shared", "/workspace/shared"];
+    const settings = createDefaultSessionSettings({
+      sessionId: "session-additional-initial",
+      cwd: "/workspace/app",
+      provider: "openai",
+      model: "glm-5.2",
+      additionalDirectories: initial,
+    });
+
+    initial.push("/workspace/later");
+
+    expect(settings.additionalDirectories).toEqual(["/workspace/shared"]);
+    expect(Object.isFrozen(settings.additionalDirectories)).toBe(true);
+  });
+
+  it("adds session directories idempotently using readonly snapshots", () => {
+    const settings = createDefaultSessionSettings({
+      sessionId: "session-additional-update",
+      cwd: "/workspace/app",
+      provider: "openai",
+      model: "glm-5.2",
+    });
+
+    const first = addSessionAdditionalDirectory(settings, "/workspace/shared");
+    const second = addSessionAdditionalDirectory(settings, "/workspace/shared");
+
+    expect(settings.additionalDirectories).toEqual(["/workspace/shared"]);
+    expect(second).toBe(first);
+    expect(Object.isFrozen(second)).toBe(true);
+  });
+
   it("creates a minimal settings snapshot for status output", () => {
     const settings = createDefaultSessionSettings({
       sessionId: "session-a",

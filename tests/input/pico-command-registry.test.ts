@@ -85,6 +85,55 @@ describe("Pico command registry", () => {
     expect(result.result.message).toContain("Current mode: default");
   });
 
+  it("/add-dir adds a raw path to this session without writing project config", async () => {
+    const workDir = mkdtempSync(join(tmpdir(), "pico-command-add-dir-"));
+    cleanup.push(() => rmSync(workDir, { recursive: true, force: true }));
+    const canonicalPath = join(workDir, "outside path");
+    const addDirectory = vi.fn(async (_path: string) => ({
+      added: true,
+      path: canonicalPath,
+    }));
+    const manager = {
+      list: () => [workDir],
+      addDirectory,
+    };
+    const registry = await createPicoCommandRegistry({
+      workDir,
+      provider: "openai",
+      model: "glm-5.2",
+      sessionId: "session-add-dir",
+      additionalDirectoryManager: manager,
+    });
+
+    const result = await processUserInput("/add-dir ../outside path", { registry });
+
+    expect(result.type).toBe("local-command");
+    if (result.type !== "local-command") return;
+    expect(result.command).toBe("add-dir");
+    expect(addDirectory).toHaveBeenCalledWith("../outside path");
+    expect(result.result.message).toContain(canonicalPath);
+    expect(getStoredSessionSettings("session-add-dir")?.additionalDirectories).toEqual([
+      canonicalPath,
+    ]);
+    expect(existsSync(join(workDir, ".pico", "config.json"))).toBe(false);
+  });
+
+  it("/add-dir remains backward-compatible when no manager is supplied", async () => {
+    const registry = await createPicoCommandRegistry({
+      workDir: process.cwd(),
+      provider: "openai",
+      model: "glm-5.2",
+      sessionId: "session-add-dir-unavailable",
+    });
+
+    const result = await processUserInput("/add-dir /outside", { registry });
+
+    expect(result.type).toBe("local-command");
+    if (result.type !== "local-command") return;
+    expect(result.command).toBe("add-dir");
+    expect(result.result.message).toContain("unavailable");
+  });
+
   it("/mode updates the current interaction mode", async () => {
     const registry = await createPicoCommandRegistry({
       workDir: process.cwd(),
