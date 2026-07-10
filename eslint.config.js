@@ -9,6 +9,16 @@ export default [
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {
+    files: ["**/*.mjs"],
+    languageOptions: {
+      ecmaVersion: "latest",
+      sourceType: "module",
+      globals: {
+        ...globals.node,
+      },
+    },
+  },
+  {
     files: ["**/*.ts"],
     languageOptions: {
       ecmaVersion: "latest",

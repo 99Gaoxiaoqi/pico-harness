@@ -30,3 +30,15 @@ jobs:
 
       - name: Test
         run: npm test
+
+      - name: Deterministic E2E (no credentials, no external network)
+        run: npm run test:e2e
+
+      - name: Build distributable
+        run: npm run build
+
+      - name: Verify package contents
+        run: npm pack --dry-run
+
+      - name: Smoke test built TUI in a PTY against local fake OpenAI
+        run: npm run smoke:tui

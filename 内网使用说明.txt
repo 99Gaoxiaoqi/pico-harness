@@ -3,72 +3,31 @@ pico-harness 内网部署包
 
 【环境要求】
   - Windows x64
-  - Node.js v24+（包内已含编译好的 node_modules，无需 npm install）
+  - Node.js v22+
+  - 依赖已安装，并已配置 .env
 
-【6 种启动方式】
+【唯一启动方式】
+  双击 启动TUI.bat，进入交互式 TUI。
 
-  ┌─────────────────────────────────────────────────────────────┐
-  │  双击启动脚本(最简单,推荐)                                  │
-  ├─────────────────────────────────────────────────────────────┤
-  │                                                             │
-  │  ★ 启动TUI.bat          交互式 TUI 界面(多轮对话+流式)      │
-  │    启动TUI-安静模式.bat   同上,但隐藏日志(画面最干净)       │
-  │    启动CLI.bat          传统命令行(单次执行)                │
-  │    单次任务.bat         弹框输入任务,执行一次退出            │
-  │    启动HTTP服务.bat      REST API + WebSocket 流式           │
-  │    启动ACP-IDE桥接.bat   IDE 插件桥接(stdio JSON-RPC)       │
-  │                                                             │
-  └─────────────────────────────────────────────────────────────┘
+  也可在终端运行:
+    npx tsx --import ./src/tui/preload-env.ts --env-file=.env src/cli/main.ts
 
-【各模式说明】
+  安装后可在任意项目目录运行:
+    pico
 
-  1. TUI 交互模式（推荐）— 启动TUI.bat
-     多轮对话 REPL，流式输出渲染，工具调用卡片，spinner 动画。
-     操作: 打字→Enter发送 / Alt+Enter多行 / ↑↓翻历史 / e展开结果 / Ctrl+C退出
+【已退役入口】
+  one-shot CLI、HTTP/WS、ACP、飞书和 Docker 外壳已移除。
+  --prompt、--serve、--acp、--tui 等旧参数不再受支持。
 
-  2. 单次 CLI 模式 — 单次任务.bat 或 启动CLI.bat
-     执行一次任务后退出，适合脚本化调用。
-       单次任务.bat "找出所有 TODO 注释"
-     或:
-       npx tsx --env-file=.env src/cli/main.ts --prompt "你的任务"
-
-  3. HTTP+WS 服务模式 — 启动HTTP服务.bat
-     启动 REST API + WebSocket，供其他程序/浏览器调用:
-       POST /sessions              创建会话
-       POST /sessions/:id/messages 发送消息
-       GET  /tools                 查看可用工具
-       ws://localhost:3000         WebSocket 流式
-
-  4. ACP 模式 — 启动ACP-IDE桥接.bat
-     stdio JSON-RPC 协议，供 IDE 插件(VSCode 等)驱动 Agent。
-     运行模式: default(审批) / plan(规划) / auto(自动) / yolo(全自动)
-
-  5. 命令行手动启动（任意自定义参数）
-       npx tsx --env-file=.env src/cli/main.ts [选项]
-
-     常用选项:
-       --tui                 启动 TUI 界面
-       --prompt "任务"        单次执行
-       --serve --port 3000   HTTP 服务
-       --acp --mode default  ACP 模式
-       --plan                Plan Mode(先规划后执行)
-       --trace               记录决策树
-       --dir ./workspace     指定工作目录
-       --image photo.jpg     附带图片(多模态)
-       --list-snapshots      查看文件历史快照
-       --rewind <id>         回滚到某时间点
-
+【常用参数】
+  运行 pico --help 查看当前受支持的 TUI 启动参数。
 
 【大模型配置】
-  .env 文件已内置:
-    LLM_BASE_URL=https://...（API 地址）
-    LLM_API_KEY=...（密钥）
-    LLM_MODEL=...（模型名）
-  修改 .env 即可切换模型。
-
+  在 .env 中配置:
+    LLM_BASE_URL=https://...
+    LLM_API_KEY=...
+    LLM_MODEL=...
 
 【注意】
-  - 本包仅适用 Windows x64（better-sqlite3 原生模块已编译）
   - 中文乱码时先执行: chcp 65001
-  - 日志走 stderr，TUI 画面走 stdout，互不干扰
-  - 想完全静默日志: 用「启动TUI-安静模式.bat」或设 LOG_LEVEL=warn
+  - 日志级别可通过 LOG_LEVEL 调整

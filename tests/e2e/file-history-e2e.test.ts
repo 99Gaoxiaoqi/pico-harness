@@ -5,7 +5,12 @@ import { tmpdir, homedir } from "node:os";
 import type { LLMProvider } from "../../src/provider/interface.js";
 import { AgentEngine } from "../../src/engine/loop.js";
 import { Session } from "../../src/engine/session.js";
-import { ToolRegistry, WriteFileTool, EditFileTool, BashTool } from "../../src/tools/registry-impl.js";
+import {
+  ToolRegistry,
+  WriteFileTool,
+  EditFileTool,
+  BashTool,
+} from "../../src/tools/registry-impl.js";
 import {
   createFileHistoryState,
   fileHistoryTrackEdit,
@@ -195,9 +200,9 @@ describe("FileHistory 1.5.5 集成到工具系统", () => {
       expect(readFileSync(resolveBackupPath(sessionId, firstBackup!.backupFileName!), "utf8")).toBe(
         "original first",
       );
-      expect(readFileSync(resolveBackupPath(sessionId, secondBackup!.backupFileName!), "utf8")).toBe(
-        "original second",
-      );
+      expect(
+        readFileSync(resolveBackupPath(sessionId, secondBackup!.backupFileName!), "utf8"),
+      ).toBe("original second");
       expect(readFileSync(firstPath, "utf8")).toBe("replaced");
       expect(readFileSync(secondPath, "utf8")).toBe("original secondappended");
     });

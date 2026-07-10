@@ -18,6 +18,7 @@ import type { Message, ImagePart } from "../../src/schema/message.js";
 const BASE_URL = process.env.PICO_VISION_E2E_BASE_URL;
 const API_KEY = process.env.PICO_VISION_E2E_API_KEY;
 const MODEL = process.env.PICO_VISION_E2E_MODEL ?? "Doubao-Seed-2.0-pro";
+const RUN_LLM_E2E = process.env.RUN_LLM_E2E === "1";
 
 // 16x16 纯蓝色 PNG(RGB 0,0,255)——Node 手写生成的最小有效 PNG
 const BLUE_16x16_PNG =
@@ -25,7 +26,7 @@ const BLUE_16x16_PNG =
 
 // 探测端点可用性
 let endpointAvailable = false;
-if (BASE_URL && API_KEY) {
+if (RUN_LLM_E2E && BASE_URL && API_KEY) {
   try {
     const probe = await fetch(`${BASE_URL}/messages`, {
       method: "POST",
@@ -91,10 +92,7 @@ describeOrSkip("阶段 5.5 真实 vision e2e(Claude 协议)", { timeout: 120000 
       model: MODEL,
     });
 
-    const result = await provider.generate(
-      [{ role: "user", content: "1+1=? 只回答数字。" }],
-      [],
-    );
+    const result = await provider.generate([{ role: "user", content: "1+1=? 只回答数字。" }], []);
     console.log(`[E2E vision-regress] 模型回复: "${result.content}"`);
     expect(result.content.length).toBeGreaterThan(0);
     expect(result.content).toContain("2");

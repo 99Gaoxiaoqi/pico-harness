@@ -18,9 +18,10 @@ import type { Message } from "../../src/schema/message.js";
 const BASE_URL = process.env.PICO_CLAUDE_E2E_BASE_URL;
 const API_KEY = process.env.PICO_CLAUDE_E2E_API_KEY;
 const MODEL = process.env.PICO_CLAUDE_E2E_MODEL ?? "kimi-k2.7-code";
+const RUN_LLM_E2E = process.env.RUN_LLM_E2E === "1";
 
 let endpointAvailable = false;
-if (BASE_URL && API_KEY) {
+if (RUN_LLM_E2E && BASE_URL && API_KEY) {
   try {
     const probe = await fetch(`${BASE_URL}/messages`, {
       method: "POST",
@@ -53,9 +54,7 @@ describeOrSkip("阶段 1 Claude 流式真实 API 测试", { timeout: 60000 }, ()
       const provider = new ClaudeProvider({ baseURL: BASE_URL!, apiKey: API_KEY!, model: MODEL });
 
       const deltas: string[] = [];
-      const messages: Message[] = [
-        { role: "user", content: "用一句话介绍你自己,不超过30个字" },
-      ];
+      const messages: Message[] = [{ role: "user", content: "用一句话介绍你自己,不超过30个字" }];
 
       const result = await provider.generateStream(messages, [], (delta) => {
         deltas.push(delta);
