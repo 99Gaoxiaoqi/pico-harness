@@ -8,18 +8,17 @@
 //
 // 支持:字符输入、基础光标编辑、Backspace/Delete、Enter 提交、Ctrl+C 退出(由 App 层处理)。
 
-import React, { useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Box, Text, useInput } from "ink";
 import {
   createInputControllerState,
   getSuggestionContext,
   reduceInputControllerEvent,
-  type InputControllerOptions,
   type InputControllerState,
   type InputKey,
+  type PendingSuggestionRequest,
   type SlashArgumentSuggestionSource,
   type SuggestionSource,
-  type SuggestionSourceResult,
 } from "./input-controller.js";
 import type { ActiveSuggestionSession, InputSuggestion } from "./suggestions.js";
 import { SuggestionList } from "./suggestions.js";
@@ -53,7 +52,16 @@ export function InputBox({
   const initialController = useRef(createInputControllerState());
   const controllerRef = useRef(initialController.current);
   const suggestionRequestSeq = useRef(0);
+  const mounted = useRef(true);
   const [controller, setController] = useState(initialController.current);
+
+  useEffect(
+    () => () => {
+      mounted.current = false;
+      suggestionRequestSeq.current += 1;
+    },
+    [],
+  );
 
   useInput((input, key) => {
     if (acceptsInput && !acceptsInput(input, key)) return;
@@ -68,11 +76,11 @@ export function InputBox({
     });
     controllerRef.current = result.state;
     setController(result.state);
-    if (result.submittedText === undefined && !disabled) {
+    if (result.submittedText === undefined && !disabled && result.pendingSuggestion) {
       scheduleAsyncSuggestions({
-        state: result.state,
-        options: suggestionOptions,
+        pending: result.pendingSuggestion,
         requestSeq: suggestionRequestSeq,
+        mounted,
         controllerRef,
         setController,
       });
@@ -93,59 +101,38 @@ export function InputBox({
 }
 
 function scheduleAsyncSuggestions({
-  state,
-  options,
+  pending,
   requestSeq,
+  mounted,
   controllerRef,
   setController,
 }: {
-  state: InputControllerState;
-  options: Pick<
-    InputControllerOptions,
-    "slashCommandSuggestions" | "slashArgumentSuggestions" | "fileMentionSuggestions"
-  >;
+  pending: PendingSuggestionRequest;
   requestSeq: React.MutableRefObject<number>;
+  mounted: React.MutableRefObject<boolean>;
   controllerRef: React.MutableRefObject<InputControllerState>;
   setController: React.Dispatch<React.SetStateAction<InputControllerState>>;
 }): void {
-  const context = getSuggestionContext(state.text, state.cursor);
-  if (!context) {
-    requestSeq.current += 1;
-    return;
-  }
-
-  const result = suggestionResultForContext(context, options);
-  if (!isPromiseLike(result)) return;
-
   const requestId = ++requestSeq.current;
-  void result.then((items) => {
+  void pending.result.then((items) => {
+    if (!mounted.current) return;
     if (requestSeq.current !== requestId) return;
 
     const current = controllerRef.current;
     const currentContext = getSuggestionContext(current.text, current.cursor);
-    if (!sameSuggestionContext(context, currentContext)) return;
+    if (!sameSuggestionContext(pending.context, currentContext)) return;
 
-    const activeSuggestions = buildAsyncSuggestionSession(context, items, current.activeSuggestions);
+    const activeSuggestions = buildAsyncSuggestionSession(
+      pending.context,
+      items,
+      current.activeSuggestions,
+    );
     const next = { ...current, activeSuggestions };
     controllerRef.current = next;
     setController(next);
+  }).catch(() => {
+    if (!mounted.current || requestSeq.current !== requestId) return;
   });
-}
-
-function suggestionResultForContext(
-  context: NonNullable<ReturnType<typeof getSuggestionContext>>,
-  options: Pick<
-    InputControllerOptions,
-    "slashCommandSuggestions" | "slashArgumentSuggestions" | "fileMentionSuggestions"
-  >,
-): SuggestionSourceResult {
-  if (context.kind === "slash") {
-    return options.slashCommandSuggestions?.(context.query) ?? [];
-  }
-  if (context.kind === "slash-argument") {
-    return options.slashArgumentSuggestions?.(context.command ?? "", context.query) ?? [];
-  }
-  return options.fileMentionSuggestions?.(context.query) ?? [];
 }
 
 function buildAsyncSuggestionSession(
@@ -185,14 +172,6 @@ function sameSuggestionContext(
   );
 }
 
-function isPromiseLike<T>(value: T | Promise<T>): value is Promise<T> {
-  return Boolean(
-    typeof value === "object" &&
-      value !== null &&
-      "then" in value &&
-      typeof (value as { then?: unknown }).then === "function",
-  );
-}
 
 export function renderInputPrompt({
   disabled,

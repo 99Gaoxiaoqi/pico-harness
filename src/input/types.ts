@@ -93,6 +93,7 @@ export interface CommandListOptions {
   source?: SlashCommandSource;
   includeHidden?: boolean;
   includeDisabled?: boolean;
+  availabilityState?: import("./command-availability.js").CommandInputState;
 }
 
 export interface SlashCommand {
@@ -102,6 +103,7 @@ export interface SlashCommand {
   usage?: string;
   argumentHint?: string;
   category?: SlashCommandCategory;
+  availability?: import("./command-availability.js").CommandAvailability;
   argumentCompleter?: SlashArgumentCompleter;
   kind?: SlashCommandKind;
   source?: SlashCommandSource;

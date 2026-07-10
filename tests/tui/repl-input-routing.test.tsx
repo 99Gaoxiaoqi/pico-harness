@@ -181,6 +181,37 @@ describe("TUI input routing", () => {
     expect(output).toContain("/permissions [ask|default|auto|");
   });
 
+  it("/help annotates HelpPanel commands from the real running TUI state", async () => {
+    const registry = await createPicoCommandRegistry({
+      workDir: process.cwd(),
+      provider: "openai",
+      model: "glm-5.2",
+      sessionId: "tui-running-help-panel",
+    });
+    const { reporter, runAgent, exit, workDir } = harness();
+    const openDialog = vi.fn();
+
+    await handleTuiRunningInputSubmission("/help", {
+      reporter,
+      registry,
+      workDir,
+      runAgent,
+      exit,
+      openDialog,
+      guard: {
+        getSnapshot: () => "running",
+        tryStart: () => null,
+        end: () => true,
+      },
+      queue: new RunningInputQueue(),
+    });
+
+    const request = openDialog.mock.calls[0]?.[0];
+    const output = renderToString(request.content);
+    expect(output).toContain("/compact [disabled]");
+    expect(output).toContain("Command is only available while idle.");
+  });
+
   it("/mcp can run locally while an agent response is running", async () => {
     const registry = await createPicoCommandRegistry({
       workDir: process.cwd(),

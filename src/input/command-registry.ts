@@ -83,8 +83,11 @@ export class CommandRegistry {
     return command !== undefined && isCommandEnabled(command) ? command : undefined;
   }
 
-  list(options: CommandListOptions = {}): readonly RegistrySlashCommand[] {
-    return this.ordered.filter((command) => shouldListCommand(command, options));
+  list(
+    options: CommandListOptions = {},
+  ): readonly (RegistrySlashCommand & { disabled?: boolean; disabledReason?: string })[] {
+    const commands = this.ordered.filter((command) => shouldListCommand(command, options));
+    return withAvailability(commands, options.availabilityState);
   }
 
   listBySource(options: CommandListOptions = {}): readonly CommandSourceGroup[] {
@@ -116,7 +119,7 @@ export class CommandRegistry {
   ): readonly CommandSuggestion[] {
     const normalized = normalizeCommandName(name);
     if (normalized.length === 0) {
-      return withAvailability(this.list(), options.availabilityState).map((command) =>
+      return this.list({ availabilityState: options.availabilityState }).map((command) =>
         suggestionFromCommand(command),
       );
     }

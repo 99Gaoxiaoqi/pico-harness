@@ -184,6 +184,34 @@ describe("CommandRegistry", () => {
     });
   });
 
+  it("list can return commands annotated with real availability state", () => {
+    const registry = new CommandRegistry([
+      localCommand("help", [], { availability: "always", category: "help", source: "builtin" }),
+      localCommand("compact", [], {
+        availability: "idle",
+        category: "session",
+        source: "builtin",
+      }),
+    ]);
+
+    const modalCommands = registry.list({
+      includeDisabled: true,
+      availabilityState: "modal",
+    });
+
+    expect(modalCommands.find((command) => command.name === "help")).toMatchObject({
+      category: "help",
+      source: "builtin",
+      disabled: true,
+      disabledReason: "Command unavailable while a modal is active.",
+    });
+    expect(modalCommands.find((command) => command.name === "compact")).toMatchObject({
+      category: "session",
+      source: "builtin",
+      disabled: true,
+    });
+  });
+
   it("同等匹配时优先展示 priority 更高的候选", () => {
     const registry = new CommandRegistry([
       localCommand("stage", [], { priority: 10 }),

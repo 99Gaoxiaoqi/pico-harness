@@ -789,6 +789,25 @@ describe("Pico command registry", () => {
     );
   });
 
+  it("commandSuggestions carries disabled metadata from the current TUI availability state", async () => {
+    const registry = await createPicoCommandRegistry({
+      workDir: process.cwd(),
+      provider: "openai",
+      model: "glm-5.2",
+      sessionId: "session-modal-suggestions",
+    });
+
+    expect(commandSuggestions(registry, "help", { availabilityState: "modal" })).toContainEqual(
+      expect.objectContaining({
+        value: "help",
+        category: "help",
+        source: "builtin",
+        disabled: true,
+        disabledReason: "Command unavailable while a modal is active.",
+      }),
+    );
+  });
+
   it("/status exposes session id mode and fork source", async () => {
     const registry = await createPicoCommandRegistry({
       workDir: "/tmp/pico-work",

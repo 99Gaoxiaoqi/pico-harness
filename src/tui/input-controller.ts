@@ -59,6 +59,7 @@ export interface InputControllerState {
 export interface InputControllerResult {
   state: InputControllerState;
   submittedText?: string;
+  pendingSuggestion?: PendingSuggestionRequest;
 }
 
 export interface SuggestionContext {
@@ -67,6 +68,11 @@ export interface SuggestionContext {
   replaceStart: number;
   replaceEnd: number;
   command?: string;
+}
+
+export interface PendingSuggestionRequest {
+  context: SuggestionContext;
+  result: Promise<readonly InputSuggestion[]>;
 }
 
 export function createInputControllerState(): InputControllerState {
@@ -354,18 +360,24 @@ function withText(
   flags: { clearHistoryBrowse?: boolean } = {},
 ): InputControllerResult {
   const nextCursor = clampCursor(cursor, text);
+  const suggestion = buildSuggestionSession(text, nextCursor, options);
   const next = {
     ...state,
     text,
     cursor: nextCursor,
-    activeSuggestions: buildSuggestionSession(text, nextCursor, options),
+    activeSuggestions: suggestion.session,
   };
 
   if (flags.clearHistoryBrowse) {
     next.historyIndex = null;
   }
 
-  return { state: next };
+  return {
+    state: next,
+    ...(suggestion.pendingSuggestion === undefined
+      ? {}
+      : { pendingSuggestion: suggestion.pendingSuggestion }),
+  };
 }
 
 function submit(state: InputControllerState): InputControllerResult {
@@ -476,7 +488,7 @@ function browseHistory(
           state.history[historyIndex] ?? "",
           (state.history[historyIndex] ?? "").length,
           options,
-        ),
+        ).session,
         historyIndex,
         draft,
       },
@@ -496,7 +508,7 @@ function browseHistory(
           state.history[historyIndex] ?? "",
           (state.history[historyIndex] ?? "").length,
           options,
-        ),
+        ).session,
         historyIndex,
       },
     };
@@ -507,7 +519,7 @@ function browseHistory(
       ...state,
       text: state.draft,
       cursor: state.draft.length,
-      activeSuggestions: buildSuggestionSession(state.draft, state.draft.length, options),
+      activeSuggestions: buildSuggestionSession(state.draft, state.draft.length, options).session,
       historyIndex: null,
     },
   };
@@ -517,40 +529,40 @@ function buildSuggestionSession(
   text: string,
   cursor: number,
   options: InputControllerOptions,
-): ActiveSuggestionSession | null {
+): { session: ActiveSuggestionSession | null; pendingSuggestion?: PendingSuggestionRequest } {
   const context = getSuggestionContext(text, cursor);
-  if (!context) return null;
+  if (!context) return { session: null };
 
-  const items = suggestionItemsForContext(context, options);
-  if (items.length === 0) return null;
+  const result = suggestionItemsForContext(context, options);
+  if (isPromiseLike(result)) {
+    return { session: null, pendingSuggestion: { context, result } };
+  }
+  const items = result;
+  if (items.length === 0) return { session: null };
 
   return {
-    kind: context.kind,
-    query: context.query,
-    replaceStart: context.replaceStart,
-    replaceEnd: context.replaceEnd,
-    selectedIndex: 0,
-    items: [...items],
+    session: {
+      kind: context.kind,
+      query: context.query,
+      replaceStart: context.replaceStart,
+      replaceEnd: context.replaceEnd,
+      selectedIndex: 0,
+      items: [...items],
+    },
   };
 }
 
 function suggestionItemsForContext(
   context: SuggestionContext,
   options: InputControllerOptions,
-): readonly InputSuggestion[] {
+): SuggestionSourceResult {
   if (context.kind === "slash") {
-    return syncSuggestionItems(options.slashCommandSuggestions?.(context.query) ?? []);
+    return options.slashCommandSuggestions?.(context.query) ?? [];
   }
   if (context.kind === "slash-argument") {
-    return syncSuggestionItems(
-      options.slashArgumentSuggestions?.(context.command ?? "", context.query) ?? [],
-    );
+    return options.slashArgumentSuggestions?.(context.command ?? "", context.query) ?? [];
   }
-  return syncSuggestionItems(options.fileMentionSuggestions?.(context.query) ?? []);
-}
-
-function syncSuggestionItems(result: SuggestionSourceResult): readonly InputSuggestion[] {
-  return isPromiseLike(result) ? [] : result;
+  return options.fileMentionSuggestions?.(context.query) ?? [];
 }
 
 function isPromiseLike<T>(value: T | Promise<T>): value is Promise<T> {

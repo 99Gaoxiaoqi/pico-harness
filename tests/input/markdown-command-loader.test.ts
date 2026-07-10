@@ -141,6 +141,25 @@ describe("markdown command loader", () => {
     expect(commands.map((command) => command.name)).toEqual(["deploy"]);
   });
 
+  it("keeps skills as a legal command namespace under command roots", async () => {
+    await mkdir(join(workDir, ".claude", "commands", "skills"), { recursive: true });
+    await writeFile(
+      join(workDir, ".claude", "commands", "skills", "review.md"),
+      "---\ndescription: review with a skill\n---\n\nUse review skill",
+    );
+
+    const commands = await loadMarkdownCommands({ userCommandsDir, workDir });
+
+    expect(commands).toContainEqual(
+      expect.objectContaining({
+        name: "skills:review",
+        description: "review with a skill",
+        prompt: "Use review skill",
+        source: "project",
+      }),
+    );
+  });
+
   it("does not apply command directory blacklist to skill projection scanning", async () => {
     await writeClaudeSkill(
       "workflows/release",

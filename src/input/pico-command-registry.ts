@@ -33,6 +33,7 @@ import {
   type ClaudeAgentSource,
 } from "./agent-loader.js";
 import type {
+  CommandListOptions,
   LocalCommandResult,
   PromptCommandResult,
   SlashArgumentCandidate,
@@ -158,6 +159,7 @@ export async function createPicoCommandRegistry(
 export function commandSuggestions(
   registry: CommandRegistry,
   query: string,
+  options: Pick<CommandListOptions, "availabilityState"> = {},
 ): Array<{
   value: string;
   description?: string;
@@ -171,7 +173,7 @@ export function commandSuggestions(
   disabledReason?: string;
 }> {
   return registry
-    .detailedSuggestions(query)
+    .detailedSuggestions(query, { availabilityState: options.availabilityState })
     .map((command) => ({
       value: command.insertText,
       description: command.description,
@@ -317,6 +319,7 @@ function createCompactCommand(options: PicoCommandRegistryOptions): SlashCommand
     usage: "/compact",
     category: "session",
     kind: "local",
+    availability: "idle",
     execute: async (): Promise<LocalCommandResult> => {
       if (!options.session) {
         return {

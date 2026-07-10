@@ -101,9 +101,10 @@ export function App({
   const { exit } = useApp();
   const { rows, columns } = useWindowSize();
   const focusedDialog = pickFocusedDialog(dialogRequests);
-  const inputDisabled = focusedDialog?.layer === "modal";
-  const inlineModal = inputDisabled && focusedDialog.id === "approval:pending";
-  const modal = inputDisabled && !inlineModal ? focusedDialog.content : undefined;
+  const inputDisabled = focusedDialog !== null;
+  const inlineModal = focusedDialog?.layer === "modal" && focusedDialog.id === "approval:pending";
+  const modal =
+    focusedDialog?.layer === "modal" && !inlineModal ? focusedDialog.content : undefined;
   const transcriptWrapWidth = Math.max(20, columns - 6);
   const approvalNotice = inlineModal
     ? approvalNoticeFromContent(focusedDialog.content)
@@ -124,7 +125,7 @@ export function App({
         wrapWidth: approvalPanelContentWidth(columns),
       })
     : 0;
-  const genericDialogRows = inputDisabled && !inlineModal ? 5 : 0;
+  const genericDialogRows = focusedDialog && !inlineModal ? 5 : 0;
   const [expandedToolKey, setExpandedToolKey] = useState<string | null>(null);
   const transcriptLayout = useMemo(
     () =>

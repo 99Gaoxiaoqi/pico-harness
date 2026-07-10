@@ -39,6 +39,7 @@ import { preparePromptForMessage, type PreparedUserPrompt } from "../input/prepa
 import { processUserInput } from "../input/process-user-input.js";
 import { parseSlashInput } from "../input/slash-parser.js";
 import type { CommandRegistry } from "../input/command-registry.js";
+import type { CommandInputState } from "../input/command-availability.js";
 import type { InputProcessResult, LocalCommandResult } from "../input/types.js";
 import type { ImagePart } from "../schema/message.js";
 import type { ProviderKind } from "../provider/factory.js";
@@ -109,6 +110,7 @@ export interface HandleTuiInputSubmissionDeps {
   currentModelId?: string;
   modelOptions?: readonly ModelOption[];
   createModelSelectorContent?: (effect: LocalTuiModelSelectorDialogEffect) => React.ReactNode;
+  commandAvailabilityState?: CommandInputState;
 }
 
 export type LocalTuiCommandUiEffect = { kind: "none" } | LocalTuiModelSelectorDialogEffect;
@@ -216,6 +218,7 @@ export async function handleTuiRunningInputSubmission(
     await handleTuiInputSubmission(text, {
       ...deps,
       processInput: async () => processed,
+      commandAvailabilityState: running ? "running" : "idle",
     });
     return;
   }
@@ -532,7 +535,11 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         thinkingEffort={settings.thinkingEffort}
         entries={stateEntries}
         running={running}
-        slashCommandSuggestions={(query) => commandSuggestions(registry, query)}
+        slashCommandSuggestions={(query) =>
+          commandSuggestions(registry, query, {
+            availabilityState: dialogRequests.length > 0 ? "modal" : running ? "running" : "idle",
+          })
+        }
         slashArgumentSuggestions={(command, query) =>
           commandArgumentSuggestions(registry, command, query)
         }
@@ -620,6 +627,7 @@ function handleLocalTuiCommand(
     | "modelOptions"
     | "createModelSelectorContent"
     | "openLocalUiDialog"
+    | "commandAvailabilityState"
   >,
 ): void {
   const uiEffect = resolveLocalTuiCommandUiEffect(result, {
@@ -641,7 +649,11 @@ function handleLocalTuiCommand(
 
   if (result.ui?.kind === "open-panel" && result.ui.panel === "help" && deps.openDialog) {
     const request = createLocalUiDialogRequest(result.ui, {
-      commands: deps.registry.list({ includeDisabled: true }),
+      commands: deps.registry.list({
+        includeDisabled: true,
+        availabilityState: deps.commandAvailabilityState ?? "idle",
+      }),
+      onClose: deps.closeDialog,
     });
     if (request) {
       deps.openDialog(request);
