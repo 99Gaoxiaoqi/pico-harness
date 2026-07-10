@@ -117,25 +117,26 @@ export function App({
   const lastToolExpanded = lastToolKey !== null && expandedToolKey === lastToolKey;
 
   useInput((input, key) => {
-    const toolCardAction = resolveToolCardToggleKey(
-      input,
-      key,
-      lastToolKey !== null,
-      inputDisabled,
-    );
-    if (toolCardAction === "toggle" && lastToolKey) {
+    const owner = resolveAppInputOwner(input, key, {
+      running,
+      modal: inputDisabled,
+      canToggleTool: lastToolKey !== null,
+    });
+    if (owner === "tool-card" && lastToolKey) {
       setExpandedToolKey((current) => (current === lastToolKey ? null : lastToolKey));
       return;
     }
 
-    const transcriptAction = resolveTranscriptScrollKey(key, running, inputDisabled);
-    if (transcriptAction) {
+    if (owner === "transcript") {
+      const transcriptAction = resolveTranscriptScrollKey(key, running);
+      if (!transcriptAction) return;
       setTranscriptScrollRows((current) =>
         nextTranscriptScroll(current, transcriptAction, transcriptRows, transcriptTotalRows),
       );
       return;
     }
 
+    if (owner !== "global") return;
     const action = resolveAppKeyEvent(input, key, running);
     if (action === "interrupt") {
       onInterrupt?.();
@@ -223,6 +224,13 @@ export function App({
       <InputBox
         disabled={inputDisabled}
         disabledLabel="Use dialog controls"
+        acceptsInput={(input, key) =>
+          resolveAppInputOwner(input, key, {
+            running,
+            modal: inputDisabled,
+            canToggleTool: lastToolKey !== null,
+          }) === "input"
+        }
         slashCommandSuggestions={slashCommandSuggestions}
         slashArgumentSuggestions={slashArgumentSuggestions}
         fileMentionSuggestions={fileMentionSuggestions}
@@ -249,25 +257,42 @@ const StableLogoPanel = memo(LogoPanel);
 export type AppGlobalAction = "interrupt" | "exit" | "redraw";
 type TranscriptScrollAction = "pageUp" | "pageDown" | "lineUp" | "lineDown" | "top" | "bottom";
 type ToolCardAction = "toggle";
+export type AppInputOwner = "global" | "modal" | "tool-card" | "transcript" | "input";
+
+interface AppInputKey {
+  ctrl?: boolean;
+  shift?: boolean;
+  meta?: boolean;
+  tab?: boolean;
+  return?: boolean;
+  upArrow?: boolean;
+  downArrow?: boolean;
+  leftArrow?: boolean;
+  rightArrow?: boolean;
+  pageUp?: boolean;
+  pageDown?: boolean;
+  home?: boolean;
+  end?: boolean;
+  backspace?: boolean;
+  delete?: boolean;
+  escape?: boolean;
+}
+
+export function resolveAppInputOwner(
+  input: string,
+  key: AppInputKey,
+  options: { running: boolean; modal: boolean; canToggleTool: boolean },
+): AppInputOwner {
+  if (resolveAppKeyEvent(input, key, options.running)) return "global";
+  if (options.modal) return "modal";
+  if (resolveToolCardToggleKey(input, key, options.canToggleTool, false)) return "tool-card";
+  if (resolveTranscriptScrollKey(key, options.running)) return "transcript";
+  return "input";
+}
 
 export function resolveAppKeyEvent(
   input: string,
-  key: {
-    ctrl?: boolean;
-    shift?: boolean;
-    meta?: boolean;
-    tab?: boolean;
-    return?: boolean;
-    upArrow?: boolean;
-    downArrow?: boolean;
-    leftArrow?: boolean;
-    rightArrow?: boolean;
-    home?: boolean;
-    end?: boolean;
-    backspace?: boolean;
-    delete?: boolean;
-    escape?: boolean;
-  },
+  key: AppInputKey,
   running: boolean,
 ): AppGlobalAction | null {
   const resolved = resolveKeybinding({ input, key }, "Global");
