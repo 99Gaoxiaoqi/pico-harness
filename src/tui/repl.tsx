@@ -39,7 +39,10 @@ import { preparePromptForMessage, type PreparedUserPrompt } from "../input/prepa
 import { processUserInput } from "../input/process-user-input.js";
 import { parseSlashInput } from "../input/slash-parser.js";
 import type { CommandRegistry } from "../input/command-registry.js";
-import type { CommandInputState } from "../input/command-availability.js";
+import {
+  RUNNING_ALLOWED_LOCAL_COMMANDS,
+  type CommandInputState,
+} from "../input/command-availability.js";
 import type { InputProcessResult, LocalCommandResult } from "../input/types.js";
 import type { ImagePart } from "../schema/message.js";
 import type { ProviderKind } from "../provider/factory.js";
@@ -137,7 +140,11 @@ export interface TuiAbortControllerRef {
   current: AbortController | null;
 }
 
-const RUNNING_IMMEDIATE_LOCAL_COMMANDS = new Set(["help", "status", "mcp"]);
+const RUNNING_IMMEDIATE_LOCAL_COMMANDS = new Set<string>(RUNNING_ALLOWED_LOCAL_COMMANDS);
+
+export function getTuiCommandAvailabilityState(status: string): CommandInputState {
+  return status === "idle" ? "idle" : "running";
+}
 
 export async function handleTuiInputSubmission(
   text: string,
@@ -537,7 +544,8 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         running={running}
         slashCommandSuggestions={(query) =>
           commandSuggestions(registry, query, {
-            availabilityState: dialogRequests.length > 0 ? "modal" : running ? "running" : "idle",
+            availabilityState:
+              dialogRequests.length > 0 ? "modal" : getTuiCommandAvailabilityState(status),
           })
         }
         slashArgumentSuggestions={(command, query) =>

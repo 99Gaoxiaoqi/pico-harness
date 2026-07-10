@@ -276,6 +276,52 @@ describe("App", () => {
     }
   });
 
+  it("budgets production help overlay to the visible window on a 24 row terminal", async () => {
+    const closeDialog = vi.fn();
+    const request = createLocalUiDialogRequest(
+      { kind: "open-panel", panel: "help" },
+      {
+        commands: Array.from({ length: 18 }, (_, index) => ({
+          name: `cmd-${String(index).padStart(2, "0")}`,
+          description: `command ${index}`,
+          kind: "local" as const,
+          source: "builtin" as const,
+          category: "system" as const,
+        })),
+        onClose: closeDialog,
+      } as never,
+    );
+    const harness = createInteractiveApp(
+      <App
+        model="glm-5.2"
+        provider="openai"
+        workDir="/workspace/demo"
+        entries={Array.from({ length: 20 }, (_, index) => ({
+          kind: "assistant" as const,
+          content: `message-${index}`,
+        }))}
+        running={false}
+        dialogRequests={request ? [request] : []}
+        onSubmit={vi.fn()}
+      />,
+      { columns: 80, rows: 24 },
+    );
+
+    try {
+      let output = await harness.write("\u001b[6~");
+      expect(output).toContain("› /cmd-10");
+      expect(output).toContain("Use dialog controls");
+      expect(output).not.toContain('Try "fix this" or / for commands');
+      expect(output.split("\n").length).toBeLessThanOrEqual(24);
+
+      await harness.write("\u001b");
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      expect(closeDialog).toHaveBeenCalledWith("local-ui:help");
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
   it("renders approval as an inline modal and disables the bottom input", () => {
     const output = renderToString(
       <App
