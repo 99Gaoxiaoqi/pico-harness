@@ -1,11 +1,17 @@
+import React from "react";
+import { Box, renderToString } from "ink";
 import { describe, expect, it } from "vitest";
 import { createPermissionState } from "../../src/approval/permission-state.js";
 import {
+  ApprovalPanel,
+  approvalPanelContentWidth,
   formatApprovalPanel,
   formatPermissionPanel,
+  measureApprovalPanelRows,
   nextApprovalPanelState,
   resolveApprovalPanelKey,
 } from "../../src/tui/approval-panel.js";
+import type { ApprovalNotice } from "../../src/approval/manager.js";
 
 describe("ApprovalPanel", () => {
   it("展示工具名、命令和键盘审批入口", () => {
@@ -139,5 +145,31 @@ describe("ApprovalPanel", () => {
     expect(output).toContain("Mode: default");
     expect(output).toContain("No permission rules configured.");
     expect(output).toContain("No recent denials.");
+  });
+
+  it.each([
+    [20, false],
+    [20, true],
+    [27, false],
+    [27, true],
+  ])("matches rendered approval rows at %i columns when expanded=%s", (columns, diffExpanded) => {
+    const notice: ApprovalNotice = {
+      taskId: "approval-narrow",
+      toolName: "write_file",
+      args: JSON.stringify({ path: "docs/deeply/nested/PLAN.md" }),
+      message: "Review this narrow terminal write before continuing",
+      diff: Array.from({ length: 6 }, (_, index) => `+line-${index}`).join("\n"),
+    };
+    const contentWidth = approvalPanelContentWidth(columns);
+    const measured = measureApprovalPanelRows(notice, { diffExpanded, wrapWidth: contentWidth });
+    const rendered = renderToString(
+      <Box paddingX={1}>
+        <ApprovalPanel {...notice} diffExpanded={diffExpanded} />
+      </Box>,
+      { columns },
+    );
+
+    expect(contentWidth).toBe(columns - 4);
+    expect(measured).toBe(rendered.split("\n").length);
   });
 });

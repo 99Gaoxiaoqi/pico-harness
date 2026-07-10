@@ -7,9 +7,11 @@ import type {
   PermissionState,
 } from "../approval/permission-state.js";
 import { resolveKeybinding } from "./keybindings/resolver.js";
-import { visualRows } from "./terminal-width.js";
+import { wrappedVisualRows } from "./terminal-width.js";
 
 const DEFAULT_DIFF_PREVIEW_LINES = 22;
+const LAYOUT_SHELL_HORIZONTAL_PADDING = 2;
+const APPROVAL_PANEL_HORIZONTAL_PADDING = 2;
 
 export interface ApprovalPanelProps extends ApprovalNotice {
   diffExpanded?: boolean;
@@ -122,10 +124,18 @@ export function measureApprovalPanelRows(
   const contentRows = formatApprovalPanel(notice, { diffExpanded: options.diffExpanded })
     .split("\n")
     .reduce(
-      (total, line) => total + visualRows(line, Math.max(1, options.wrapWidth)).length,
+      (total, line) => total + wrappedVisualRows(line, Math.max(1, options.wrapWidth)).length,
       0,
     );
   return 1 + contentRows;
+}
+
+export function approvalPanelContentWidth(terminalColumns: number): number {
+  const columns = Number.isFinite(terminalColumns) ? Math.floor(terminalColumns) : 80;
+  return Math.max(
+    1,
+    columns - LAYOUT_SHELL_HORIZONTAL_PADDING - APPROVAL_PANEL_HORIZONTAL_PADDING,
+  );
 }
 
 export function resolveApprovalPanelKey(

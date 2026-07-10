@@ -35,6 +35,7 @@ import { resolveKeybinding } from "./keybindings/resolver.js";
 import { ToolCardFocusProvider } from "./tool-card.js";
 import { buildTranscriptLayout } from "./transcript-layout.js";
 import {
+  approvalPanelContentWidth,
   measureApprovalPanelRows,
   type InteractiveApprovalPanelProps,
 } from "./approval-panel.js";
@@ -120,7 +121,7 @@ export function App({
   const approvalRows = approvalNotice
     ? measureApprovalPanelRows(approvalNotice, {
         diffExpanded: approvalDiffExpanded,
-        wrapWidth: transcriptWrapWidth,
+        wrapWidth: approvalPanelContentWidth(columns),
       })
     : 0;
   const genericDialogRows = inputDisabled && !inlineModal ? 5 : 0;

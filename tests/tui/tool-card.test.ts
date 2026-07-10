@@ -260,6 +260,28 @@ describe("ToolCard collapsed layout", () => {
     expect(output).not.toContain(longJson);
     expect(output).toContain("…");
   });
+
+  it.each(["Success", "Error", "Running"] as const)(
+    "26 列时保留工具名、%s 状态和 Ctrl+E 提示",
+    (statusText) => {
+      const output = renderToString(
+        React.createElement(ToolCard, {
+          name: "read_file",
+          args: JSON.stringify({ path: `src/${"deeply-nested/".repeat(8)}file.ts` }),
+          status: statusText.toLowerCase() as "success" | "error" | "running",
+          summary: `${"long result ".repeat(20)}`,
+          isLast: true,
+          wrapWidth: 26,
+        }),
+        { columns: 26 },
+      );
+
+      expect(output).toContain("read");
+      expect(output).toContain(statusText);
+      expect(output).toContain("[⌃E]");
+      expect(output.split("\n")).toHaveLength(1);
+    },
+  );
 });
 
 function renderToolStatus(status: React.ComponentProps<typeof ToolCard>["status"]): string {

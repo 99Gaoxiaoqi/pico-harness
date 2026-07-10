@@ -15,7 +15,7 @@ import React, { createContext, useContext } from "react";
 import { Box, Text } from "ink";
 import { formatOutputPreview } from "./diff-preview.js";
 import { compactText, compactToolName, summarizeToolTarget } from "./tool-format.js";
-import { visualRows } from "./terminal-width.js";
+import { terminalWidth, visualRows } from "./terminal-width.js";
 
 export type ToolCardStatus =
   | "queued"
@@ -143,16 +143,28 @@ function buildStandardToolVisualRows(
   const failure = isFailureStatus(status);
   const displaySummary = summary && failure ? ensureErrorSummary(summary) : summary;
   const resultBadge = displaySummary && (failure || grouped || !target) ? toolResultBadge(displaySummary, failure) : undefined;
-  const header = [
+  const toggleHint = canToggle ? " [⌃E]" : "";
+  const fullHeader = [
     `⎿ ${compactToolName(name)}`,
     target,
     toolStatusText(status),
     resultBadge,
   ]
     .filter(Boolean)
-    .join(" · ");
+    .join(" · ") + toggleHint;
+  const coreHeader = `⎿ ${compactToolName(name)} · ${toolStatusText(status)}${toggleHint}`;
+  const targetHeader = target
+    ? `⎿ ${compactToolName(name)} · ${target} · ${toolStatusText(status)}${toggleHint}`
+    : coreHeader;
+  const availableHeaderWidth = Math.max(1, Math.floor(wrapWidth) - 2);
+  const header =
+    terminalWidth(fullHeader) <= availableHeaderWidth
+      ? fullHeader
+      : terminalWidth(targetHeader) <= availableHeaderWidth
+        ? targetHeader
+        : coreHeader;
   const rows: ToolCardVisualRow[] = [
-    { kind: "header", text: `${header}${canToggle ? " [⌃E]" : ""}` },
+    { kind: "header", text: header },
   ];
   if (!expanded) return rows;
 

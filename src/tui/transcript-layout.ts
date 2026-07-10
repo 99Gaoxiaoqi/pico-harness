@@ -43,7 +43,7 @@ export function buildTranscriptLayout(
         entryRows(
           entry,
           options.wrapWidth,
-          key === options.expandedToolKey,
+          key === options.expandedToolKey && index === entries.length - 1,
           index === entries.length - 1,
         ),
     };

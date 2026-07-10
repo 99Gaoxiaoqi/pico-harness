@@ -7,7 +7,7 @@ import {
   visualRows,
 } from "../../src/tui/transcript-layout.js";
 import type { TuiEntry } from "../../src/tui/tui-reporter.js";
-import { ToolCard } from "../../src/tui/tool-card.js";
+import { ToolCard, ToolCardFocusProvider } from "../../src/tui/tool-card.js";
 
 describe("transcript layout", () => {
   it("measures CJK and emoji grapheme clusters by terminal display width", () => {
@@ -103,5 +103,34 @@ describe("transcript layout", () => {
 
     expect(layout.items[0]?.rows).toBe(0);
     expect(layout.contentRows).toBe(0);
+  });
+
+  it.each([
+    ["assistant", { kind: "assistant", content: "done" } as const],
+    ["thinking", { kind: "thinking" } as const],
+  ])("collapses a previously expanded tool after appending %s", (_kind, trailingEntry) => {
+    const tool: Extract<TuiEntry, { kind: "tool" }> = {
+      kind: "tool",
+      name: "read_file",
+      args: JSON.stringify({ path: "src/large.ts" }),
+      status: "success",
+      summary: "line-0\nline-1\nline-2",
+    };
+    const initial = buildTranscriptLayout([tool], { wrapWidth: 40 });
+    const layout = buildTranscriptLayout([tool, trailingEntry], {
+      wrapWidth: 40,
+      expandedToolKey: initial.items[0]?.key,
+    });
+    const renderedTool = renderToString(
+      React.createElement(
+        ToolCardFocusProvider,
+        { expanded: true },
+        React.createElement(ToolCard, { ...tool, isLast: false, wrapWidth: 40 }),
+      ),
+      { columns: 40 },
+    );
+
+    expect(layout.items[0]?.rows).toBe(renderedTool.split("\n").length);
+    expect(layout.items[0]?.rows).toBe(1);
   });
 });
