@@ -205,13 +205,13 @@ describe("ReadFileTool 防御底线", () => {
     expect(out).toContain("1\ta\\r");
   });
 
-  it("超过 12000 字节时触发截断保护", async () => {
+  it("超长单行会在分页内触发单行保护", async () => {
     const big = "x".repeat(20000);
     await writeFile(join(workDir, "big.txt"), big);
     const tool = new ReadFileTool(workDir);
     const out = await tool.execute(JSON.stringify({ path: "big.txt" }));
     expect(out.length).toBeLessThan(20000);
-    expect(out).toContain("已被系统截断");
+    expect(out).toContain("单行超过 2000 chars,已截断");
   });
 
   it("读取工作区外文件前也必须先通过 /add-dir 授权目录", async () => {

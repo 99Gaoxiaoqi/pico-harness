@@ -39,6 +39,11 @@ import {
   type InteractiveApprovalPanelProps,
 } from "./approval-panel.js";
 import type { ApprovalNotice } from "../approval/manager.js";
+import {
+  parseSgrMouseInput,
+  suspendProcessUntilContinued,
+  useTerminalMouseMode,
+} from "./mouse-input.js";
 
 /** 诊断日志:写文件(绕过 ink patchConsole 劫持),只在 TUI_DEBUG 时 */
 function dbg(msg: string): void {
@@ -110,7 +115,8 @@ export function App({
   keybindings,
   inputReplacement,
 }: AppProps): React.ReactNode {
-  const { exit } = useApp();
+  const { exit, suspendTerminal } = useApp();
+  const mouseMode = useTerminalMouseMode();
   const { rows, columns } = useWindowSize();
   const focusedDialog = pickFocusedDialog(dialogRequests);
   const inputDisabled = focusedDialog !== null;
@@ -176,15 +182,10 @@ export function App({
   const focusedToolKey = focusedToolItem?.key ?? null;
   const focusedToolExpanded = focusedToolKey !== null && expandedToolKey === focusedToolKey;
   const inputDraft = useRef("");
-  const [transcriptView, setTranscriptView] = useState<TranscriptViewState>({
-    scrollRows: null,
-    newMessageCount: 0,
-  });
-  const previousEntryCount = useRef(entries.length);
-  const transcriptViewportRows = Math.max(
-    1,
-    transcriptRows - (transcriptView.newMessageCount > 0 ? 1 : 0),
-  );
+  const [transcriptView, setTranscriptView] = useState<TranscriptViewState>({ mode: "follow" });
+  const previousEntries = useRef(entries);
+  const newMessageCount = transcriptView.mode === "manual" ? transcriptView.newMessageCount : 0;
+  const transcriptViewportRows = Math.max(1, transcriptRows - (newMessageCount > 0 ? 1 : 0));
 
   useInput((input, key) => {
     const owner = resolveAppInputOwner(input, key, {
@@ -197,31 +198,31 @@ export function App({
     if (owner === "tool-card" && focusedToolKey) {
       if (focusedToolExpanded) {
         setExpandedToolKey(null);
+        setTranscriptView({ mode: "follow" });
       } else {
         setExpandedToolKey(focusedToolKey);
         setTranscriptView({
-          scrollRows: transcriptItemStartRow(transcriptLayout, focusedToolKey),
-          newMessageCount: 0,
+          mode: "tool-anchor",
+          toolKey: focusedToolKey,
+          offsetRows: transcriptItemStartRow(transcriptLayout, focusedToolKey),
         });
       }
       return;
     }
 
     if (owner === "transcript") {
-      const transcriptAction = resolveTranscriptScrollKey(key);
+      const mouseInput = parseSgrMouseInput(input);
+      if (mouseInput?.kind === "other") return;
+      const transcriptAction =
+        mouseInput?.kind === "wheel"
+          ? mouseInput.direction === "up"
+            ? "wheelUp"
+            : "wheelDown"
+          : resolveTranscriptScrollKey(key);
       if (!transcriptAction) return;
-      setTranscriptView((current) => {
-        const scrollRows = nextTranscriptScroll(
-          current.scrollRows,
-          transcriptAction,
-          transcriptViewportRows,
-          transcriptTotalRows,
-        );
-        return {
-          scrollRows,
-          newMessageCount: scrollRows === null ? 0 : current.newMessageCount,
-        };
-      });
+      setTranscriptView((current) =>
+        nextTranscriptView(current, transcriptAction, transcriptViewportRows, transcriptTotalRows),
+      );
       return;
     }
 
@@ -235,6 +236,13 @@ export function App({
       onRedraw?.();
       return;
     }
+    if (action === "suspend") {
+      mouseMode.disable();
+      void suspendTerminal(suspendProcessUntilContinued)
+        .then(() => mouseMode.enable())
+        .catch((error: unknown) => exit(error instanceof Error ? error : new Error(String(error))));
+      return;
+    }
     if (action === "exit") {
       onExit?.();
       exit();
@@ -243,26 +251,42 @@ export function App({
 
   useEffect(() => {
     setTranscriptView((current) => {
-      if (current.scrollRows === null) return current;
-      const scrollRows = clampScrollRows(
-        current.scrollRows,
+      if (current.mode === "follow") return current;
+      const offsetRows = clampScrollRows(
+        current.offsetRows,
         transcriptViewportRows,
         transcriptTotalRows,
       );
-      return scrollRows === current.scrollRows ? current : { ...current, scrollRows };
+      if (
+        current.mode === "manual" &&
+        offsetRows >= maxTranscriptScroll(transcriptViewportRows, transcriptTotalRows)
+      ) {
+        return { mode: "follow" };
+      }
+      return offsetRows === current.offsetRows ? current : { ...current, offsetRows };
     });
   }, [transcriptTotalRows, transcriptViewportRows]);
 
   useEffect(() => {
-    const addedEntries = Math.max(0, entries.length - previousEntryCount.current);
-    previousEntryCount.current = entries.length;
-    if (addedEntries === 0) return;
-    setTranscriptView((current) =>
-      current.scrollRows === null
+    const previous = previousEntries.current;
+    previousEntries.current = entries;
+    if (entries === previous) return;
+    const addedEntries = Math.max(0, entries.length - previous.length);
+    setTranscriptView((current) => {
+      if (current.mode === "tool-anchor") return { mode: "follow" };
+      if (current.mode !== "manual" || addedEntries === 0) return current;
+      return { ...current, newMessageCount: current.newMessageCount + addedEntries };
+    });
+  }, [entries]);
+
+  useEffect(() => {
+    setTranscriptView((current) => {
+      if (current.mode !== "tool-anchor") return current;
+      return expandedToolKey === current.toolKey && focusedToolKey === current.toolKey
         ? current
-        : { ...current, newMessageCount: current.newMessageCount + addedEntries },
-    );
-  }, [entries.length]);
+        : { mode: "follow" };
+    });
+  }, [expandedToolKey, focusedToolKey]);
 
   useEffect(() => {
     setApprovalDiffExpanded(true);
@@ -303,19 +327,17 @@ export function App({
     <>
       {/* 消息列表:统一走 MessageList,由 shouldRenderStatically + MessageRow.memo 控制静态行。 */}
       <Box flexDirection="column" height={transcriptRows} overflowY="hidden" paddingX={1}>
-        {transcriptView.newMessageCount > 0 && (
-          <Text color="cyan">↓ {transcriptView.newMessageCount} new messages</Text>
-        )}
+        {newMessageCount > 0 && <Text color="cyan">↓ {newMessageCount} new messages</Text>}
         <ToolCardFocusProvider expanded={focusedToolExpanded}>
           <MessageList
             layout={transcriptLayout}
             isStreaming={isStreaming}
             viewportRows={transcriptViewportRows}
-            scrollOffsetRows={transcriptView.scrollRows ?? 0}
+            scrollOffsetRows={transcriptView.mode === "follow" ? 0 : transcriptView.offsetRows}
             estimatedRowHeight={3}
             overscanRows={0}
             virtualizeThreshold={0}
-            scrollToBottom={transcriptView.scrollRows === null}
+            scrollToBottom={transcriptView.mode === "follow"}
             preserveVirtualSpacers={false}
           />
         </ToolCardFocusProvider>
@@ -359,7 +381,11 @@ export function App({
         fileMentionSuggestions={fileMentionSuggestions}
         keybindings={keybindings}
         inputReplacement={inputReplacement}
-        onSubmit={onSubmit}
+        onSubmit={(text) => {
+          setTranscriptView({ mode: "follow" });
+          setExpandedToolKey(null);
+          onSubmit(text);
+        }}
       />
     </Box>
   );
@@ -412,15 +438,23 @@ function measureGenericDialogLayout(
   return { content, rows: Math.min(maxRows, 5) };
 }
 
-export type AppGlobalAction = "interrupt" | "exit" | "redraw";
-type TranscriptScrollAction = "pageUp" | "pageDown" | "lineUp" | "lineDown" | "top" | "bottom";
+export type AppGlobalAction = "interrupt" | "exit" | "redraw" | "suspend";
+type TranscriptScrollAction =
+  | "pageUp"
+  | "pageDown"
+  | "lineUp"
+  | "lineDown"
+  | "wheelUp"
+  | "wheelDown"
+  | "top"
+  | "bottom";
 type ToolCardAction = "toggle";
 export type AppInputOwner = "global" | "modal" | "tool-card" | "transcript" | "input";
 
-interface TranscriptViewState {
-  scrollRows: number | null;
-  newMessageCount: number;
-}
+type TranscriptViewState =
+  | { mode: "follow" }
+  | { mode: "manual"; offsetRows: number; newMessageCount: number }
+  | { mode: "tool-anchor"; toolKey: string; offsetRows: number };
 
 interface AppInputKey {
   ctrl?: boolean;
@@ -454,6 +488,7 @@ export function resolveAppInputOwner(
 ): AppInputOwner {
   if (resolveAppKeyEvent(input, key, options.running, options.keybindings)) return "global";
   if (options.modal) return "modal";
+  if (parseSgrMouseInput(input)) return "transcript";
   if (
     options.inputDraft &&
     resolveKeybinding({ input, key }, "Chat", options.keybindings) !== null
@@ -473,6 +508,7 @@ export function resolveAppKeyEvent(
   running: boolean,
   keybindings?: UserKeybindingConfig,
 ): AppGlobalAction | null {
+  if (input === "z" && key.ctrl) return "suspend";
   const resolved = resolveKeybinding({ input, key }, "Global", keybindings);
   if (!resolved || resolved.kind !== "action") return null;
   if (resolved.action === "app:interrupt") return running ? "interrupt" : null;
@@ -562,8 +598,14 @@ export function nextTranscriptScroll(
     }
     case "lineUp":
       return clampScrollRows(currentOffset - 1, viewportRows, totalRows);
+    case "wheelUp":
+      return clampScrollRows(currentOffset - 3, viewportRows, totalRows);
     case "lineDown": {
       const next = clampScrollRows(currentOffset + 1, viewportRows, totalRows);
+      return next >= maxScroll ? null : next;
+    }
+    case "wheelDown": {
+      const next = clampScrollRows(currentOffset + 3, viewportRows, totalRows);
       return next >= maxScroll ? null : next;
     }
     case "top":
@@ -571,6 +613,23 @@ export function nextTranscriptScroll(
     case "bottom":
       return null;
   }
+}
+
+function nextTranscriptView(
+  current: TranscriptViewState,
+  action: TranscriptScrollAction,
+  viewportRows: number,
+  totalRows: number,
+): TranscriptViewState {
+  const currentOffset = current.mode === "follow" ? null : current.offsetRows;
+  const offsetRows = nextTranscriptScroll(currentOffset, action, viewportRows, totalRows);
+  if (offsetRows === null) return { mode: "follow" };
+  if (offsetRows >= maxTranscriptScroll(viewportRows, totalRows)) return { mode: "follow" };
+  return {
+    mode: "manual",
+    offsetRows,
+    newMessageCount: current.mode === "manual" ? current.newMessageCount : 0,
+  };
 }
 
 function clampScrollRows(offset: number, viewportRows: number, totalRows: number): number {

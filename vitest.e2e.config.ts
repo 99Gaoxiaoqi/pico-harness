@@ -8,6 +8,7 @@ export default defineConfig({
       "tests/e2e/file-history-e2e.test.ts",
       "tests/e2e/local-openai-e2e.test.ts",
       "tests/e2e/model-routing-e2e.test.ts",
+      "tests/e2e/scroll-output-e2e.test.tsx",
     ],
     environment: "node",
     setupFiles: ["tests/setup.ts"],

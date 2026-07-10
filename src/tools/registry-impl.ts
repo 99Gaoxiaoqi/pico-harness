@@ -356,12 +356,13 @@ export class EchoTool implements BaseTool {
 
 // ==========================================
 // 内置工具 2:ReadFileTool (第 05 讲核心)
-// 防御底线:WorkDir 边界限制 + 路径穿越防护 + 长度截断保护
+// 防御底线:WorkDir 边界限制 + 路径穿越防护 + 行分页保护
 // ==========================================
 
-/** 读取文件的最大字节数,防止超大文件撑爆 Context (OOM)。
- *  加行号前缀后同样信息量字节数增加,阈值从 8000 放宽到 12000。 */
-const READ_FILE_MAX_BYTES = 12000;
+const READ_FILE_DEFAULT_LIMIT_LINES = 500;
+const READ_FILE_MAX_LIMIT_LINES = 1000;
+const READ_FILE_MAX_PAGE_CHARS = 30_000;
+const READ_FILE_MAX_RENDERED_LINE_CHARS = 2000;
 
 /** 行尾风格 → 展示标签(供状态行输出,帮模型识别文件格式) */
 function lineEndingStyleLabel(style: "lf" | "crlf" | "mixed"): string {
@@ -372,6 +373,8 @@ function lineEndingStyleLabel(style: "lf" | "crlf" | "mixed"): string {
 
 export class ReadFileTool implements BaseTool {
   readonly readOnly = true;
+  // read_file 由自身的 offset/limit 和页字符上限保护，Registry 不再二次截断。
+  readonly maxResultSizeChars = Number.POSITIVE_INFINITY;
   private readonly roots: WorkspaceRoots;
 
   constructor(workDirOrRoots: string | WorkspaceRoots) {
@@ -391,11 +394,23 @@ export class ReadFileTool implements BaseTool {
   definition(): ToolDefinition {
     return {
       name: "read_file",
-      description: "读取指定路径的文件内容。相对路径基于主工作区,绝对路径须位于已授权工作区。",
+      description:
+        "按行读取指定路径的文件内容，保留原始行号。相对路径基于主工作区，绝对路径须位于已授权工作区。大文件请按 PARTIAL 提示继续分页。",
       inputSchema: {
         type: "object",
         properties: {
           path: { type: "string", description: "要读取的文件路径,如 src/cli/main.ts" },
+          offset: {
+            type: "integer",
+            minimum: 1,
+            description: "可选，起始行号（1-based），默认从第 1 行开始。",
+          },
+          limit: {
+            type: "integer",
+            minimum: 1,
+            maximum: READ_FILE_MAX_LIMIT_LINES,
+            description: `可选，最多读取的行数，默认 ${READ_FILE_DEFAULT_LIMIT_LINES}，最大 ${READ_FILE_MAX_LIMIT_LINES}。`,
+          },
         },
         required: ["path"],
       },
@@ -405,11 +420,29 @@ export class ReadFileTool implements BaseTool {
   async execute(args: string): Promise<string> {
     // 1. 延迟解析 JSON 参数
     let path: string;
+    let offset: number;
+    let limit: number;
+    let paginationRequested: boolean;
     try {
-      const input = JSON.parse(args) as { path?: string };
-      path = input.path ?? "";
-    } catch {
-      throw new Error("参数解析失败: 期望 JSON 含 path 字段");
+      const input = JSON.parse(args) as { path?: unknown; offset?: unknown; limit?: unknown };
+      if (typeof input.path !== "string" || input.path.length === 0) {
+        throw new Error("path 必须是非空字符串");
+      }
+      path = input.path;
+      paginationRequested = input.offset !== undefined || input.limit !== undefined;
+      offset = parsePositiveInteger(input.offset, "offset", 1);
+      limit = parsePositiveInteger(input.limit, "limit", READ_FILE_DEFAULT_LIMIT_LINES);
+      if (limit > READ_FILE_MAX_LIMIT_LINES) {
+        throw new Error(`limit 不能超过 ${READ_FILE_MAX_LIMIT_LINES}`);
+      }
+    } catch (err) {
+      const reason =
+        err instanceof SyntaxError
+          ? "期望 JSON 含 path 字段"
+          : err instanceof Error
+            ? err.message
+            : "期望 JSON 含 path 字段";
+      throw new Error(`参数解析失败: ${reason}`, { cause: err });
     }
 
     // 2. 所有文件访问统一经过共享工作区边界。
@@ -424,32 +457,130 @@ export class ReadFileTool implements BaseTool {
 
     // 5. 空文件:只返回状态行,不输出空行号
     if (text.length === 0) {
+      if (offset !== 1) {
+        throw new Error(`offset ${offset} 超出文件总行数 0`);
+      }
       return `共 0 行,行尾: ${lineEndingStyleLabel(lineEndingStyle)}`;
     }
 
-    // 6. 按行分割并加行号前缀(对齐 kimi-code renderLine: "行号\t内容",行号从 1 开始)。
+    // 6. 按行分割(行号从 1 开始)。
     //    末尾换行不产生空行号:先剥掉尾部 \n 再 split。
     const lines = text.endsWith("\n") ? text.slice(0, -1).split("\n") : text.split("\n");
-    const renderedLines = lines.map((line, i) => {
-      // mixed 行尾:每行 \r 显形为字面 "\r",提醒模型该文件含杂散 CR,Edit 匹配可能失败。
-      const content = lineEndingStyle === "mixed" ? makeCarriageReturnsVisible(line) : line;
-      return `${i + 1}\t${content}`;
-    });
-    let output = renderedLines.join("\n");
-
-    // 7. 【核心防线】长度截断保护(作用于渲染后文本)。
-    //    绝不把系统安全寄希望于大模型理智,底层工具强制兜底。
-    //    Token 是金钱,Context 是生命线。
-    if (output.length > READ_FILE_MAX_BYTES) {
-      output =
-        output.slice(0, READ_FILE_MAX_BYTES) +
-        `\n\n...[由于内容过长,已被系统截断至前 ${READ_FILE_MAX_BYTES} 字节]`;
+    if (offset > lines.length) {
+      throw new Error(`offset ${offset} 超出文件总行数 ${lines.length}`);
     }
 
-    // 8. 末尾状态行:帮助模型了解文件行数与行尾格式
-    output += `\n共 ${lines.length} 行,行尾: ${lineEndingStyleLabel(lineEndingStyle)}`;
-    return output;
+    // 7. 行数分页 + 页字符上限双重保护。不在字符中间切断整页，
+    //    因此下一页始终能用稳定的原始行号继续。
+    const startIndex = offset - 1;
+    const requestedEndIndex = Math.min(lines.length, startIndex + limit);
+    const renderedLines: string[] = [];
+    let clippedLineCount = 0;
+
+    for (let index = startIndex; index < requestedEndIndex; index++) {
+      const rendered = renderReadLine(lines[index] ?? "", index + 1, lineEndingStyle);
+      if (rendered.clipped) clippedLineCount++;
+      renderedLines.push(rendered.text);
+
+      const candidate = formatReadPage({
+        renderedLines,
+        path,
+        offset,
+        limit,
+        totalLines: lines.length,
+        lineEndingStyle,
+        paginationRequested,
+        clippedLineCount,
+      });
+      if (candidate.length > READ_FILE_MAX_PAGE_CHARS) {
+        renderedLines.pop();
+        if (rendered.clipped) clippedLineCount--;
+        break;
+      }
+    }
+
+    // 单行已有 2,000 chars 上限，因此正常情况不会为空；保底保留一行。
+    if (renderedLines.length === 0) {
+      const rendered = renderReadLine(lines[startIndex] ?? "", offset, lineEndingStyle);
+      renderedLines.push(rendered.text);
+      clippedLineCount = rendered.clipped ? 1 : 0;
+    }
+
+    return formatReadPage({
+      renderedLines,
+      path,
+      offset,
+      limit,
+      totalLines: lines.length,
+      lineEndingStyle,
+      paginationRequested,
+      clippedLineCount,
+    });
   }
+}
+
+function parsePositiveInteger(value: unknown, name: string, fallback: number): number {
+  if (value === undefined) return fallback;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1) {
+    throw new Error(`${name} 必须是大于等于 1 的整数`);
+  }
+  return value;
+}
+
+function renderReadLine(
+  line: string,
+  lineNumber: number,
+  lineEndingStyle: "lf" | "crlf" | "mixed",
+): { text: string; clipped: boolean } {
+  const content = lineEndingStyle === "mixed" ? makeCarriageReturnsVisible(line) : line;
+  const prefix = `${lineNumber}\t`;
+  const full = `${prefix}${content}`;
+  if (full.length <= READ_FILE_MAX_RENDERED_LINE_CHARS) {
+    return { text: full, clipped: false };
+  }
+
+  const marker = `...[单行超过 ${READ_FILE_MAX_RENDERED_LINE_CHARS} chars,已截断]`;
+  const keepChars = Math.max(0, READ_FILE_MAX_RENDERED_LINE_CHARS - prefix.length - marker.length);
+  return {
+    text: `${prefix}${content.slice(0, keepChars)}${marker}`,
+    clipped: true,
+  };
+}
+
+function formatReadPage(input: {
+  renderedLines: readonly string[];
+  path: string;
+  offset: number;
+  limit: number;
+  totalLines: number;
+  lineEndingStyle: "lf" | "crlf" | "mixed";
+  paginationRequested: boolean;
+  clippedLineCount: number;
+}): string {
+  const endLine = input.offset + input.renderedLines.length - 1;
+  const hasMoreLines = endLine < input.totalLines;
+  const isDefaultCompleteRead = !input.paginationRequested && input.offset === 1 && !hasMoreLines;
+  const status = isDefaultCompleteRead
+    ? `共 ${input.totalLines} 行,行尾: ${lineEndingStyleLabel(input.lineEndingStyle)}`
+    : `共 ${input.totalLines} 行,当前显示 ${input.offset}-${endLine} 行,行尾: ${lineEndingStyleLabel(input.lineEndingStyle)}`;
+  const parts = [input.renderedLines.join("\n"), status];
+
+  if (input.clippedLineCount > 0) {
+    parts.push(
+      `[提示: ${input.clippedLineCount} 个超长行已各自截断至 ${READ_FILE_MAX_RENDERED_LINE_CHARS} chars，请用更精确的 bash 命令定位所需片段。]`,
+    );
+  }
+  if (hasMoreLines) {
+    parts.push(
+      `PARTIAL: 文件内容未全部显示。继续读取: read_file ${JSON.stringify({
+        path: input.path,
+        offset: endLine + 1,
+        limit: input.limit,
+      })}`,
+    );
+  }
+
+  return parts.join("\n");
 }
 
 // ==========================================
@@ -526,13 +657,16 @@ export class WriteFileTool implements BaseTool {
 // ==========================================
 // 内置工具 4:BashTool (第 06 讲,YOLO 哲学核心)
 // 极简工具集原语之一:执行任意 Shell 命令。
-// 4 条驾驭底线:超时控制、工作区绑定、错误原样回传、长度截断。
+// 4 条驾驭底线:超时控制、工作区绑定、错误原样回传、有界执行缓冲。
 // ==========================================
 
 /** bash 命令最大执行时间,防止卡死进程 (如 top / 常驻服务) */
 const BASH_TIMEOUT_MS = 30_000;
-/** bash 输出截断长度,防 OOM */
-const BASH_MAX_BYTES = 8000;
+/**
+ * child_process.exec 的物理缓冲上限。这是 Node API 的 bytes 单位，
+ * 与上层 observation 按 chars 判断是两个不同契约。
+ */
+const BASH_EXEC_MAX_BUFFER_BYTES = 10 * 1024 * 1024;
 const REDIRECT_RE = /(?:>>|>)\s*(\S+)/g;
 
 export function extractBashRedirectTargets(workDir: string, command: string): string[] {
@@ -547,6 +681,9 @@ export function extractBashRedirectTargets(workDir: string, command: string): st
 }
 
 export class BashTool implements BaseTool {
+  // 完整已捕获输出必须交给 observation 外部化，Registry 不再提前截断。
+  readonly maxResultSizeChars = Number.POSITIVE_INFINITY;
+
   constructor(
     private readonly workDir: string,
     private readonly backgroundManager = new BackgroundManager(),
@@ -615,12 +752,13 @@ export class BashTool implements BaseTool {
     // 注意:命令执行失败时绝不抛异常,而是原样回传(底线 3),交给模型自纠。
     let stdout: string;
     let timedOut = false;
+    let exceededExecutionBuffer = false;
     try {
       const { stdout: out } = await execAsync(
         command,
         execOptions({
           cwd: this.workDir,
-          maxBuffer: 1024 * 1024,
+          maxBuffer: BASH_EXEC_MAX_BUFFER_BYTES,
           timeout: BASH_TIMEOUT_MS,
         }),
       );
@@ -629,6 +767,7 @@ export class BashTool implements BaseTool {
       const e = err as {
         killed?: boolean;
         signal?: string;
+        code?: string | number;
         stdout?: string;
         stderr?: string;
         message?: string;
@@ -637,6 +776,9 @@ export class BashTool implements BaseTool {
       if (e.killed && e.signal === "SIGTERM") {
         timedOut = true;
       }
+      exceededExecutionBuffer =
+        e.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" ||
+        /maxBuffer|max buffer/i.test(e.message ?? "");
       // 合并 stdout/stderr,原样回传让模型分析
       const parts = [e.stdout ?? "", e.stderr ?? ""].filter(Boolean);
       stdout = parts.length > 0 ? parts.join("\n") : `执行报错: ${e.message ?? String(err)}`;
@@ -645,20 +787,16 @@ export class BashTool implements BaseTool {
     if (timedOut) {
       stdout += `\n[警告: 命令执行超时(${BASH_TIMEOUT_MS / 1000}s),已被系统强制终止。如果是启动常驻服务,请改用后台运行方式。]`;
     }
+    if (exceededExecutionBuffer) {
+      stdout += `\n[警告: 终端输出超过执行缓冲上限 ${BASH_EXEC_MAX_BUFFER_BYTES} bytes，命令已终止；本次结果仅包含已捕获内容。请缩小命令范围或分页输出。]`;
+    }
 
     // 空输出给明确成功反馈
     if (!stdout.trim()) {
       return "命令执行成功,无终端输出。";
     }
 
-    // 驾驭底线 4:长度截断保护
-    if (stdout.length > BASH_MAX_BYTES) {
-      return (
-        stdout.slice(0, BASH_MAX_BYTES) +
-        `\n\n...[终端输出过长,已截断至前 ${BASH_MAX_BYTES} 字节]...`
-      );
-    }
-
+    // 不在工具层截断。>30,000 chars 由 observation 完整落盘并返回摘要。
     return stdout;
   }
 }
