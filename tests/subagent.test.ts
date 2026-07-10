@@ -2,7 +2,7 @@
 // 覆盖:SubagentTool execute / RunSub 受限循环 / maxSubTurns 强制召回 /
 // 只读工具隔离 / 物理隔离(子探索不污染主) / 退出条件。
 
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -21,6 +21,7 @@ import {
   TOOL_CONSTRUCTORS,
 } from "../src/tools/delegation-registry.js";
 import { ToolRegistry, ReadFileTool, BashTool } from "../src/tools/registry-impl.js";
+import { WorkspaceRoots } from "../src/tools/workspace-roots.js";
 import type { LLMProvider } from "../src/provider/interface.js";
 import type { Message, ToolDefinition, ToolCall, ToolResult } from "../src/schema/message.js";
 import type { Registry } from "../src/tools/registry.js";
@@ -199,6 +200,107 @@ describe("DelegateTaskTool", () => {
 
     expect(parsed.results[0]!.summary).toBe("worker wrote file");
     expect(await readFile(join(workDir, "worker.txt"), "utf8")).toBe("from worker");
+  });
+
+  it("worker 共享已授权 WorkspaceRoots,可在外部 root 实际写入并读取", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-subagent-root-primary-"));
+    const additionalDir = await mkdtemp(join(tmpdir(), "pico-subagent-root-added-"));
+    const target = join(additionalDir, "worker-external.txt");
+    const workspaceRoots = await WorkspaceRoots.create(workDir, [additionalDir]);
+
+    try {
+      const runner: AgentRunner = {
+        async runSub(_task, registry) {
+          const writeResult = await registry.execute({
+            id: "write-external",
+            name: "write_file",
+            arguments: JSON.stringify({ path: target, content: "shared root" }),
+          });
+          expect(writeResult.isError).toBe(false);
+
+          const readResult = await registry.execute({
+            id: "read-external",
+            name: "read_file",
+            arguments: JSON.stringify({ path: target }),
+          });
+          expect(readResult.isError).toBe(false);
+          expect(readResult.output).toContain("shared root");
+          return subResult("worker external read/write complete");
+        },
+      };
+      const manager = new DelegationManager();
+      const registryFactory = createSubagentRegistryFactory({
+        workDir,
+        workspaceRoots,
+        runner,
+        manager,
+      });
+      const tool = new DelegateTaskTool(runner, registryFactory, manager);
+
+      const output = JSON.parse(
+        await tool.execute(JSON.stringify({ goal: "读写授权的外部目录", mode: "worker" })),
+      ) as { results: Array<{ status: string; summary: string }> };
+
+      expect(output.results[0]).toMatchObject({
+        status: "completed",
+        summary: "worker external read/write complete",
+      });
+      expect(await readFile(target, "utf8")).toBe("shared root");
+    } finally {
+      await rm(workDir, { recursive: true, force: true });
+      await rm(additionalDir, { recursive: true, force: true });
+    }
+  });
+
+  it("worker 仍拒绝读写未授权的外部 root", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-subagent-denied-primary-"));
+    const outsideDir = await mkdtemp(join(tmpdir(), "pico-subagent-denied-outside-"));
+    const target = join(outsideDir, "must-not-exist.txt");
+    const workspaceRoots = await WorkspaceRoots.create(workDir);
+
+    try {
+      const runner: AgentRunner = {
+        async runSub(_task, registry) {
+          const writeResult = await registry.execute({
+            id: "write-denied",
+            name: "write_file",
+            arguments: JSON.stringify({ path: target, content: "blocked" }),
+          });
+          const readResult = await registry.execute({
+            id: "read-denied",
+            name: "read_file",
+            arguments: JSON.stringify({ path: target }),
+          });
+
+          expect(writeResult.isError).toBe(true);
+          expect(writeResult.output).toContain("/add-dir");
+          expect(readResult.isError).toBe(true);
+          expect(readResult.output).toContain("/add-dir");
+          return subResult("unauthorized root blocked");
+        },
+      };
+      const manager = new DelegationManager();
+      const registryFactory = createSubagentRegistryFactory({
+        workDir,
+        workspaceRoots,
+        runner,
+        manager,
+      });
+      const tool = new DelegateTaskTool(runner, registryFactory, manager);
+
+      const output = JSON.parse(
+        await tool.execute(JSON.stringify({ goal: "尝试读写未授权目录", mode: "worker" })),
+      ) as { results: Array<{ status: string; summary: string }> };
+
+      expect(output.results[0]).toMatchObject({
+        status: "completed",
+        summary: "unauthorized root blocked",
+      });
+      await expect(readFile(target, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await rm(workDir, { recursive: true, force: true });
+      await rm(outsideDir, { recursive: true, force: true });
+    }
   });
 
   it("explore 模式子代理的 bash 写入命令会被拒绝", async () => {
@@ -471,6 +573,122 @@ describe("子代理注册表接通阶段 2 只读工具", () => {
       expect(toolNames).not.toContain("web_search");
     } finally {
       await rm(workDir, { recursive: true, force: true });
+    }
+  });
+
+  it("自定义 profile 的文件工具继承同一个 WorkspaceRoots", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-profile-root-primary-"));
+    const additionalDir = await mkdtemp(join(tmpdir(), "pico-profile-root-added-"));
+    const target = join(additionalDir, "profile-external.txt");
+    const workspaceRoots = await WorkspaceRoots.create(workDir, [additionalDir]);
+    const runner: AgentRunner = {
+      async runSub() {
+        return subResult("");
+      },
+    };
+    const manager = new DelegationManager();
+
+    try {
+      const factory = createSubagentRegistryFactory({
+        workDir,
+        workspaceRoots,
+        runner,
+        manager,
+        profiles: [
+          {
+            name: "external-editor",
+            description: "编辑已授权外部目录",
+            systemPrompt: "只编辑指定文件",
+            tools: ["read_file", "write_file", "edit_file", "glob", "grep", "bash"],
+          },
+        ],
+      });
+      const registry = factory({
+        mode: "worker",
+        role: "leaf",
+        depth: 1,
+        maxSpawnDepth: 2,
+        agentName: "external-editor",
+      });
+
+      const writeResult = await registry.execute({
+        id: "profile-write",
+        name: "write_file",
+        arguments: JSON.stringify({ path: target, content: "profile root" }),
+      });
+      const readResult = await registry.execute({
+        id: "profile-read",
+        name: "read_file",
+        arguments: JSON.stringify({ path: target }),
+      });
+      const bashResult = await registry.execute({
+        id: "profile-pwd",
+        name: "bash",
+        arguments: JSON.stringify({ command: "pwd" }),
+      });
+
+      expect(writeResult.isError).toBe(false);
+      expect(readResult.isError).toBe(false);
+      expect(readResult.output).toContain("profile root");
+      expect(await realpath(bashResult.output.trim())).toBe(await realpath(workDir));
+      expect(await readFile(target, "utf8")).toBe("profile root");
+    } finally {
+      await rm(workDir, { recursive: true, force: true });
+      await rm(additionalDir, { recursive: true, force: true });
+    }
+  });
+
+  it("递归 delegate_task 创建的 worker 继承同一个 WorkspaceRoots", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-recursive-root-primary-"));
+    const additionalDir = await mkdtemp(join(tmpdir(), "pico-recursive-root-added-"));
+    const target = join(additionalDir, "recursive-external.txt");
+    const workspaceRoots = await WorkspaceRoots.create(workDir, [additionalDir]);
+
+    try {
+      const runner: AgentRunner = {
+        async runSub(_task, registry) {
+          const writeResult = await registry.execute({
+            id: "recursive-write",
+            name: "write_file",
+            arguments: JSON.stringify({ path: target, content: "recursive root" }),
+          });
+          const readResult = await registry.execute({
+            id: "recursive-read",
+            name: "read_file",
+            arguments: JSON.stringify({ path: target }),
+          });
+          expect(writeResult.isError).toBe(false);
+          expect(readResult.isError).toBe(false);
+          expect(readResult.output).toContain("recursive root");
+          return subResult("recursive worker complete");
+        },
+      };
+      const manager = new DelegationManager();
+      const factory = createSubagentRegistryFactory({
+        workDir,
+        workspaceRoots,
+        runner,
+        manager,
+      });
+      const orchestratorRegistry = factory({
+        mode: "explore",
+        role: "orchestrator",
+        depth: 0,
+        maxSpawnDepth: 2,
+      });
+
+      const delegated = await orchestratorRegistry.execute({
+        id: "recursive-delegate",
+        name: "delegate_task",
+        arguments: JSON.stringify({ goal: "编辑授权的外部文件", mode: "worker" }),
+      });
+
+      expect(delegated.isError).toBe(false);
+      expect(delegated.output).toContain("recursive worker complete");
+      expect(await readFile(target, "utf8")).toBe("recursive root");
+    } finally {
+      await rm(workDir, { recursive: true, force: true });
+      await rm(additionalDir, { recursive: true, force: true });
     }
   });
 

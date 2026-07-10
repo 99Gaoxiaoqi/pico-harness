@@ -327,6 +327,7 @@ export async function runAgentFromCli(
     workDir,
     await loadProfiles(workDir),
     delegationManager,
+    workspaceRoots,
   );
   dependencies.toolStatusSink?.(toolStatusFromRegistry(registry));
 
@@ -506,9 +507,10 @@ class CostTrackedModelFallbackProvider implements LLMProvider {
   }
 }
 
-function buildReadOnlyRegistry(workDir: string): ToolRegistry {
+function buildReadOnlyRegistry(workDir: string, workspaceRoots: WorkspaceRoots): ToolRegistry {
   const registry = new ToolRegistry({ truncateResults: false });
-  registry.register(new ReadFileTool(workDir));
+  registry.register(new ReadFileTool(workspaceRoots));
+  // Bash 只使用主工作目录作为 cwd，/add-dir 不改变 shell 运行起点。
   registry.register(new BashTool(workDir, undefined, { allowBackground: false }));
   registry.register(new SkillViewTool(new SkillLoader(workDir)));
   return registry;
@@ -529,9 +531,11 @@ function registerDelegationTools(
   workDir: string,
   profiles: AgentProfile[],
   manager: DelegationManager,
+  workspaceRoots: WorkspaceRoots,
 ): void {
   const registryFactory = createSubagentRegistryFactory({
     workDir,
+    workspaceRoots,
     runner: engine,
     manager,
     ...(profiles.length > 0 ? { profiles } : {}),
@@ -542,7 +546,7 @@ function registerDelegationTools(
     }),
   );
   registry.register(new DelegateStatusTool(manager));
-  registry.register(new SpawnSubagentTool(engine, buildReadOnlyRegistry(workDir)));
+  registry.register(new SpawnSubagentTool(engine, buildReadOnlyRegistry(workDir, workspaceRoots)));
 }
 
 function buildCompactor(kind: ProviderKind, model: string): Compactor {
