@@ -14,6 +14,7 @@ import { TuiReporter } from "../../src/tui/tui-reporter.js";
 import {
   dispatchModelSelectorSelection,
   formatTuiRunError,
+  getTuiCommandAvailabilityState,
   handleTuiInterrupt,
   handleTuiInputSubmission,
   resolveLocalTuiCommandUiEffect,
@@ -210,6 +211,40 @@ describe("TUI input routing", () => {
     const output = renderToString(request.content);
     expect(output).toContain("/compact [disabled]");
     expect(output).toContain("Command is only available while idle.");
+    expect(output).toContain("/model [name] [disabled]");
+    expect(output).toContain("Cannot run while the agent is running.");
+    expect(output).not.toContain("/mcp [disabled]");
+  });
+
+  it("running command availability shares the same allowlist as TUI execution", async () => {
+    const registry = await createPicoCommandRegistry({
+      workDir: process.cwd(),
+      provider: "openai",
+      model: "glm-5.2",
+      sessionId: "tui-running-availability",
+    });
+
+    expect(
+      registry.detailedSuggestions("model", {
+        availabilityState: getTuiCommandAvailabilityState("running"),
+      }),
+    ).toContainEqual(
+      expect.objectContaining({
+        name: "model",
+        disabled: true,
+        disabledReason: "Cannot run while the agent is running.",
+      }),
+    );
+    expect(
+      registry.detailedSuggestions("mcp", {
+        availabilityState: getTuiCommandAvailabilityState("running"),
+      })[0],
+    ).toEqual(expect.objectContaining({ name: "mcp" }));
+    expect(
+      registry.detailedSuggestions("mcp", {
+        availabilityState: getTuiCommandAvailabilityState("running"),
+      })[0],
+    ).not.toHaveProperty("disabled");
   });
 
   it("/mcp can run locally while an agent response is running", async () => {

@@ -96,9 +96,11 @@ export function reduceInputControllerEvent(
 
   const batchedReturn = splitTrailingReturnInput(input);
   if (batchedReturn !== null && !key.ctrl) {
-    const nextState = batchedReturn.prefix
-      ? insertText(state, normalizeInput(batchedReturn.prefix), options).state
-      : state;
+    const prefixed = batchedReturn.prefix
+      ? insertText(state, normalizeInput(batchedReturn.prefix), options)
+      : { state };
+    consumePendingSuggestion(prefixed.pendingSuggestion);
+    const nextState = prefixed.state;
     if (key.meta || key.shift) {
       return insertText(nextState, "\n", options);
     }
@@ -479,50 +481,47 @@ function browseHistory(
     const historyIndex =
       state.historyIndex === null ? state.history.length - 1 : Math.max(0, state.historyIndex - 1);
     const draft = state.historyIndex === null ? state.text : state.draft;
-    return {
+    const text = state.history[historyIndex] ?? "";
+    const suggestion = buildSuggestionSession(text, text.length, options);
+    return withPendingSuggestion({
       state: {
         ...state,
-        text: state.history[historyIndex] ?? "",
-        cursor: (state.history[historyIndex] ?? "").length,
-        activeSuggestions: buildSuggestionSession(
-          state.history[historyIndex] ?? "",
-          (state.history[historyIndex] ?? "").length,
-          options,
-        ).session,
+        text,
+        cursor: text.length,
+        activeSuggestions: suggestion.session,
         historyIndex,
         draft,
       },
-    };
+    }, suggestion);
   }
 
   if (state.historyIndex === null) return { state };
 
   if (state.historyIndex < state.history.length - 1) {
     const historyIndex = state.historyIndex + 1;
-    return {
+    const text = state.history[historyIndex] ?? "";
+    const suggestion = buildSuggestionSession(text, text.length, options);
+    return withPendingSuggestion({
       state: {
         ...state,
-        text: state.history[historyIndex] ?? "",
-        cursor: (state.history[historyIndex] ?? "").length,
-        activeSuggestions: buildSuggestionSession(
-          state.history[historyIndex] ?? "",
-          (state.history[historyIndex] ?? "").length,
-          options,
-        ).session,
+        text,
+        cursor: text.length,
+        activeSuggestions: suggestion.session,
         historyIndex,
       },
-    };
+    }, suggestion);
   }
 
-  return {
+  const suggestion = buildSuggestionSession(state.draft, state.draft.length, options);
+  return withPendingSuggestion({
     state: {
       ...state,
       text: state.draft,
       cursor: state.draft.length,
-      activeSuggestions: buildSuggestionSession(state.draft, state.draft.length, options).session,
+      activeSuggestions: suggestion.session,
       historyIndex: null,
     },
-  };
+  }, suggestion);
 }
 
 function buildSuggestionSession(
@@ -535,6 +534,7 @@ function buildSuggestionSession(
 
   const result = suggestionItemsForContext(context, options);
   if (isPromiseLike(result)) {
+    consumePromiseRejection(result);
     return { session: null, pendingSuggestion: { context, result } };
   }
   const items = result;
@@ -550,6 +550,26 @@ function buildSuggestionSession(
       items: [...items],
     },
   };
+}
+
+function withPendingSuggestion(
+  result: { state: InputControllerState },
+  suggestion: { pendingSuggestion?: PendingSuggestionRequest },
+): InputControllerResult {
+  return {
+    ...result,
+    ...(suggestion.pendingSuggestion === undefined
+      ? {}
+      : { pendingSuggestion: suggestion.pendingSuggestion }),
+  };
+}
+
+function consumePendingSuggestion(pending: PendingSuggestionRequest | undefined): void {
+  if (pending !== undefined) consumePromiseRejection(pending.result);
+}
+
+function consumePromiseRejection(promise: Promise<readonly InputSuggestion[]>): void {
+  void promise.catch(() => undefined);
 }
 
 function suggestionItemsForContext(

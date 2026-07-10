@@ -24,6 +24,7 @@ type LocalUiDialogKind = "help" | "model" | "session" | "rewind";
 
 const HELP_DIALOG_PRIORITY = 30;
 const SELECTOR_DIALOG_PRIORITY = 40;
+export const DEFAULT_HELP_PANEL_MAX_ITEMS = 10;
 
 export function createLocalUiDialogRequest(
   action: unknown,
@@ -49,7 +50,7 @@ export function createLocalUiDialogContent(
       return (
         <InteractiveHelpPanel
           commands={context.commands ?? []}
-          maxItems={context.maxHelpItems ?? 10}
+          maxItems={context.maxHelpItems ?? DEFAULT_HELP_PANEL_MAX_ITEMS}
           onClose={context.onClose}
         />
       );

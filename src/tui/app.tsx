@@ -34,6 +34,7 @@ import type { TuiEntry } from "./tui-reporter.js";
 import { resolveKeybinding } from "./keybindings/resolver.js";
 import { ToolCardFocusProvider } from "./tool-card.js";
 import { buildTranscriptLayout } from "./transcript-layout.js";
+import { DEFAULT_HELP_PANEL_MAX_ITEMS } from "./local-ui-dialog-host.js";
 import {
   approvalPanelContentWidth,
   measureApprovalPanelRows,
@@ -125,7 +126,7 @@ export function App({
         wrapWidth: approvalPanelContentWidth(columns),
       })
     : 0;
-  const genericDialogRows = focusedDialog && !inlineModal ? 5 : 0;
+  const genericDialogRows = focusedDialog && !inlineModal ? DEFAULT_HELP_PANEL_MAX_ITEMS + 4 : 0;
   const [expandedToolKey, setExpandedToolKey] = useState<string | null>(null);
   const transcriptLayout = useMemo(
     () =>
@@ -138,7 +139,7 @@ export function App({
   );
   const transcriptTotalRows = transcriptLayout.contentRows;
   const transcriptRows = Math.max(
-    inputDisabled ? 3 : 6,
+    inputDisabled ? 1 : 6,
     rows - 8 - genericDialogRows - transcriptLayout.approvalRows,
   );
   const lastLayoutItem = transcriptLayout.items.at(-1);

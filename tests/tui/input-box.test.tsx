@@ -232,6 +232,49 @@ describe("InputBox input controller", () => {
     expect(result.state.text).toBe("");
   });
 
+  it("returns pending async suggestions when history restores a slash argument", async () => {
+    const options: InputControllerOptions = {
+      slashArgumentSuggestions: (command, query) =>
+        command === "skill" && query === "re"
+          ? Promise.resolve([{ value: "review", description: "Review skill" }])
+          : [],
+    };
+    let state = reduceInputControllerEvent(
+      createInputControllerState(),
+      "/skill re\r",
+      key({}),
+      {},
+    ).state;
+
+    const result = reduceInputControllerEvent(state, "", key({ upArrow: true }), options);
+    state = result.state;
+
+    expect(state.text).toBe("/skill re");
+    await expect(result.pendingSuggestion?.result).resolves.toEqual([
+      { value: "review", description: "Review skill" },
+    ]);
+  });
+
+  it("returns pending async suggestions when history down restores the draft", async () => {
+    const options: InputControllerOptions = {
+      slashArgumentSuggestions: (command, query) =>
+        command === "agent" && query === "co"
+          ? Promise.resolve([{ value: "code-review", description: "Review agent" }])
+          : [],
+    };
+    let state = reduceInputControllerEvent(createInputControllerState(), "/status\r", key({}), {})
+      .state;
+    state = reduceInputControllerEvent(state, "/agent co", key({}), {}).state;
+    state = reduceInputControllerEvent(state, "", key({ upArrow: true }), {}).state;
+
+    const result = reduceInputControllerEvent(state, "", key({ downArrow: true }), options);
+
+    expect(result.state.text).toBe("/agent co");
+    await expect(result.pendingSuggestion?.result).resolves.toEqual([
+      { value: "code-review", description: "Review agent" },
+    ]);
+  });
+
   it("raw shift return still inserts a multiline break", () => {
     const options: InputControllerOptions = {};
     let state = typeText("line 1", options);
