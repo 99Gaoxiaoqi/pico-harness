@@ -49,6 +49,9 @@ export class ExitPlanModeTool implements BaseTool {
    */
   private notify: (notice: ApprovalNotice) => void = defaultTerminalNotify;
 
+  /** host 注入的本轮中止信号,用于取消内部审批等待。 */
+  private abortSignal: AbortSignal | undefined;
+
   constructor(
     private readonly store: PlanStore,
     /** 审批管理器,默认用全局单例;测试时可注入隔离实例 */
@@ -63,6 +66,11 @@ export class ExitPlanModeTool implements BaseTool {
   /** host 注入审批通知回调(终端/飞书卡片) */
   setNotify(notify: (notice: ApprovalNotice) => void): void {
     this.notify = notify;
+  }
+
+  /** host(run-agent.ts)注入本轮运行的中止信号 */
+  setAbortSignal(signal: AbortSignal | undefined): void {
+    this.abortSignal = signal;
   }
 
   name(): string {
@@ -112,6 +120,7 @@ export class ExitPlanModeTool implements BaseTool {
       "退出 Plan Mode",
       this.notify,
       plan,
+      this.abortSignal,
     );
 
     // 3. 分支处理

@@ -4,7 +4,7 @@
 import { mkdtemp, rm, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PlanStore } from "../../src/context/plan-store.js";
 import { ExitPlanModeTool } from "../../src/tools/plan-exit.js";
 import { ToolRegistry } from "../../src/tools/registry-impl.js";
@@ -71,6 +71,34 @@ describe("ExitPlanModeTool", () => {
     const out = await tool.execute("{}");
     expect(out).toContain("没有 PLAN.md");
     expect(out).toContain("无 plan 可提交");
+  });
+
+  it("审批等待期间 abort 会清理 pending 并阻止晚到决策继续退出", async () => {
+    const originalPlan = "# 原计划\n保持不变";
+    await store.writePlan(originalPlan);
+    const manager = new ApprovalManager(60_000);
+    const controller = new AbortController();
+    const onExit = vi.fn();
+    let notice: ApprovalNotice | undefined;
+    const tool = new ExitPlanModeTool(store, manager);
+    tool.setAbortSignal(controller.signal);
+    tool.setExitCallback(onExit);
+    tool.setNotify((value) => {
+      notice = value;
+    });
+
+    const execution = tool.execute("{}");
+    await vi.waitFor(() => expect(notice).toBeDefined());
+    controller.abort(new DOMException("interrupted", "AbortError"));
+
+    await expect(execution).rejects.toMatchObject({ name: "AbortError" });
+    expect(manager.pendingCount).toBe(0);
+    expect(manager.resolveApproval(notice!.taskId, true, "late approve")).toBe(false);
+    expect(
+      manager.resolveApprovalWithModify(notice!.taskId, "late modify", "# 不应写入"),
+    ).toBe(false);
+    expect(onExit).not.toHaveBeenCalled();
+    await expect(readFile(join(workDir, "PLAN.md"), "utf8")).resolves.toBe(originalPlan);
   });
 
   it("approve:审批通过 → 调 onExit → 返回成功", async () => {
