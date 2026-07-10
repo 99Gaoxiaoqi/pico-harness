@@ -1,5 +1,6 @@
 import React from "react";
-import { renderToString, Text } from "ink";
+import { PassThrough } from "node:stream";
+import { render, renderToString, Text, type Instance } from "ink";
 import { describe, expect, it, vi } from "vitest";
 import {
   App,
@@ -216,8 +217,125 @@ describe("App", () => {
     expect(resolveToolCardToggleKey("e", { ctrl: true }, true, false)).toBe("toggle");
     expect(resolveToolCardToggleKey("e", { ctrl: true }, true, true)).toBeNull();
   });
+
+  it("Ctrl+E expands the focused ToolCard without also moving the input cursor", async () => {
+    const harness = createInteractiveApp(
+      <App
+        model="glm-5.2"
+        provider="openai"
+        workDir="/workspace/demo"
+        entries={[
+          {
+            kind: "tool",
+            name: "read_file",
+            args: '{"path":"README.md"}',
+            status: "success",
+            summary: "done",
+          },
+        ]}
+        running={false}
+        onSubmit={vi.fn()}
+      />,
+    );
+
+    try {
+      await harness.write("ab");
+      await harness.write("\u001b[D");
+      const frame = await harness.write("\u0005");
+
+      expect(frame).toContain("参数");
+      expect(frame).toContain("a▋b");
+      expect(frame).not.toContain("ab▋");
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("running Up scrolls the transcript without also replacing the input draft from history", async () => {
+    const onSubmit = vi.fn();
+    const harness = createInteractiveApp(
+      <App
+        model="glm-5.2"
+        provider="openai"
+        workDir="/workspace/demo"
+        entries={Array.from({ length: 30 }, (_, index) => ({
+          kind: "assistant" as const,
+          content: `message-${index}`,
+        }))}
+        running
+        onSubmit={onSubmit}
+      />,
+    );
+
+    try {
+      await harness.write("first\r");
+      expect(onSubmit).toHaveBeenCalledWith("first");
+      await harness.write("draft");
+      const frame = await harness.write("\u001b[A");
+
+      expect(frame).toContain("draft▋");
+      expect(frame).not.toContain("first▋");
+    } finally {
+      await harness.cleanup();
+    }
+  });
 });
 
 function countOccurrences(text: string, needle: string): number {
   return text.split(needle).length - 1;
+}
+
+function createInteractiveApp(node: React.ReactNode): {
+  write: (input: string) => Promise<string>;
+  cleanup: () => Promise<void>;
+} {
+  const stdin = new PassThrough();
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
+  Object.defineProperties(stdin, {
+    isTTY: { value: true },
+    isRaw: { value: false, writable: true },
+  });
+  Object.assign(stdin, {
+    setRawMode: vi.fn(),
+    ref: vi.fn(),
+    unref: vi.fn(),
+  });
+  Object.defineProperties(stdout, {
+    isTTY: { value: true },
+    columns: { value: 80, writable: true },
+    rows: { value: 24, writable: true },
+  });
+  let output = "";
+  stdout.on("data", (chunk) => {
+    output += String(chunk);
+  });
+  const instance: Instance = render(node, {
+    stdin: stdin as unknown as NodeJS.ReadStream,
+    stdout: stdout as unknown as NodeJS.WriteStream,
+    stderr: stderr as unknown as NodeJS.WriteStream,
+    debug: true,
+    interactive: true,
+    exitOnCtrlC: false,
+    patchConsole: false,
+  });
+
+  return {
+    async write(input: string): Promise<string> {
+      const offset = output.length;
+      stdin.write(input);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      await instance.waitUntilRenderFlush();
+      return stripAnsi(output.slice(offset));
+    },
+    async cleanup(): Promise<void> {
+      instance.unmount();
+      await instance.waitUntilExit();
+      instance.cleanup();
+    },
+  };
+}
+
+function stripAnsi(value: string): string {
+  return value.replace(/\u001b\[[0-?]*[ -/]*[@-~]/gu, "");
 }
