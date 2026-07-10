@@ -448,7 +448,7 @@ git worktree remove ../pico-1-streaming
   - `/skill <name> [arguments]` 与动态 `/<skill-name>` 均生成显式激活的 synthetic user prompt，TUI 记录结构化 Skill 事件。
   - 新增 WorkspaceRoots、`/add-dir`、可重复 `--add-dir` 与 `.pico/config.json` additionalDirectories；文件边界在审批前确定性拒绝。
   - Read/Write/Edit/Glob/Grep、审批 diff 与文件历史共享附加目录能力；未授权目录不弹无效审批，授权后恢复正常写审批。
-  - 验证：全量 mock 153 个文件、1880 项通过；lint、typecheck、build、audit 通过；真实模型 Skill + 外部目录闭环 1/1 通过。
+  - 验证：全量 mock 153 个文件、1881 项通过；lint、typecheck、build、audit 通过；真实模型 Skill + 外部目录闭环 1/1 通过。
 
 - 2026-07-08：阶段 5.6 TUI 界面实现（修订原"不做"决策）
   - 原 ROADMAP 标 5.6"不做（与 HTTP+WS 路线重复）"；经 Claude Code 源码调研确认其用 ink+React，决定采用同款技术栈实现交互 REPL
