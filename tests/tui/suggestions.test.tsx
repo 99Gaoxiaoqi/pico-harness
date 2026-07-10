@@ -43,6 +43,32 @@ describe("SuggestionList row model", () => {
     });
   });
 
+  it("renders a fixed window around the selected candidate", () => {
+    const session: ActiveSuggestionSession = {
+      kind: "mention",
+      query: "src",
+      replaceStart: 0,
+      replaceEnd: 4,
+      selectedIndex: 6,
+      items: Array.from({ length: 8 }, (_, index) => ({
+        value: `src/file-${index}.ts`,
+        description: "file",
+      })),
+    };
+
+    const rows = formatSuggestionRows(session);
+
+    expect(rows).toHaveLength(MAX_SUGGESTIONS);
+    expect(rows.map((row) => row.left)).toEqual([
+      "@src/file-2.ts",
+      "@src/file-3.ts",
+      "@src/file-4.ts",
+      "@src/file-5.ts",
+      "@src/file-6.ts",
+    ]);
+    expect(rows[4]).toMatchObject({ selected: true });
+  });
+
   it("renders mention rows with @path labels", () => {
     const session: ActiveSuggestionSession = {
       kind: "mention",

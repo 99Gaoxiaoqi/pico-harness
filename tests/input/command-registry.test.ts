@@ -143,6 +143,25 @@ describe("CommandRegistry", () => {
     ]);
   });
 
+  it("保留 descriptor 上的 category 和 argumentCompleter 元数据", async () => {
+    const registry = new CommandRegistry([
+      localCommand("agent", [], {
+        category: "workspace",
+        argumentCompleter: (query) => [
+          { value: `${query}reviewer`, description: "project agent" },
+        ],
+      }),
+    ]);
+    const command = registry.resolve("agent");
+
+    expect(command).toMatchObject({
+      category: "workspace",
+    });
+    await expect(Promise.resolve(command?.argumentCompleter?.("code-"))).resolves.toEqual([
+      { value: "code-reviewer", description: "project agent" },
+    ]);
+  });
+
   it("候选可按 running 和 modal 状态携带 disabled reason", () => {
     const registry = new CommandRegistry([
       localCommand("help", [], { availability: "always" }),

@@ -1,6 +1,10 @@
 import React from "react";
 import { Box, Text } from "ink";
-import type { SlashCommandKind, SlashCommandSource } from "../input/types.js";
+import type {
+  SlashCommandCategory,
+  SlashCommandKind,
+  SlashCommandSource,
+} from "../input/types.js";
 
 export const HELP_PANEL_COMMAND_WIDTH = 32;
 export const HELP_PANEL_DESCRIPTION_WIDTH = 72;
@@ -11,6 +15,7 @@ export interface HelpPanelCommand {
   argumentHint?: string;
   description?: string;
   kind?: SlashCommandKind;
+  category?: SlashCommandCategory;
   source?: SlashCommandSource;
 }
 
@@ -109,11 +114,11 @@ export function formatHelpPanelSections(
   visibleCommands.forEach((command, visibleIndex) => {
     const commandIndex = scrollOffset + visibleIndex;
     const source = command.source ?? "unknown";
-    const kind = command.kind ?? "local";
-    const title = `${source} / ${kind}`;
+    const category = command.category ?? command.kind ?? "local";
+    const title = `${source} / ${category}`;
     const section = sections.get(title) ?? { title, rows: [] };
     section.rows.push({
-      key: `${source}:${kind}:${command.name}:${commandIndex}`,
+      key: `${source}:${category}:${command.name}:${commandIndex}`,
       commandIndex,
       usage: formatCommandUsage(command),
       description: truncateInline(

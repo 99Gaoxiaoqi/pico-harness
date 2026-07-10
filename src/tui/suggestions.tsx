@@ -27,6 +27,8 @@ export interface InputSuggestion {
   source?: string;
   /** Optional slash command type tag. */
   kind?: string;
+  /** Optional slash command category tag. */
+  category?: string;
   /** Whether the suggestion is currently unavailable. */
   disabled?: boolean;
   /** Short reason shown when the suggestion is unavailable. */
@@ -98,7 +100,9 @@ export function SuggestionList({ session }: SuggestionListProps): React.ReactNod
 export function formatSuggestionRows(session: ActiveSuggestionSession | null): SuggestionRow[] {
   if (!session) return [];
 
-  return session.items.slice(0, MAX_SUGGESTIONS).map((item, index) => {
+  const windowStart = suggestionWindowStart(session.selectedIndex, session.items.length);
+  return session.items.slice(windowStart, windowStart + MAX_SUGGESTIONS).map((item, index) => {
+    const itemIndex = windowStart + index;
     const value = stripMarker(item.value, session.kind);
     const left = formatSuggestionLabel(item, session.kind);
     const metadata = formatSuggestionMetadata(item, session.kind);
@@ -106,17 +110,23 @@ export function formatSuggestionRows(session: ActiveSuggestionSession | null): S
     const disabled = item.disabled === true;
     const disabledReason = disabled ? formatDisabledReason(item) : "";
     return {
-      key: `${session.kind}:${value}:${index}`,
+      key: `${session.kind}:${value}:${itemIndex}`,
       left: truncateInline(left, SUGGESTION_LABEL_WIDTH),
       metadata: truncateInline(metadata, SUGGESTION_METADATA_WIDTH),
       description: truncateInline(description, SUGGESTION_DESCRIPTION_WIDTH),
-      selected: index === session.selectedIndex,
+      selected: itemIndex === session.selectedIndex,
       ...(disabled ? { disabled: true } : {}),
       ...(disabledReason.length === 0
         ? {}
         : { disabledReason: truncateInline(disabledReason, SUGGESTION_DESCRIPTION_WIDTH) }),
     };
   });
+}
+
+function suggestionWindowStart(selectedIndex: number, totalItems: number): number {
+  if (totalItems <= MAX_SUGGESTIONS) return 0;
+  const clamped = Math.min(Math.max(selectedIndex, 0), totalItems - 1);
+  return Math.min(Math.max(0, clamped - MAX_SUGGESTIONS + 1), totalItems - MAX_SUGGESTIONS);
 }
 
 export function markerForKind(kind: SuggestionKind): "/" | "@" | "" {

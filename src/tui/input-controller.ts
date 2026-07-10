@@ -1,5 +1,4 @@
 import {
-  MAX_SUGGESTIONS,
   markerForKind,
   stripMarker,
   type ActiveSuggestionSession,
@@ -518,7 +517,7 @@ function buildSuggestionSession(
   const context = getSuggestionContext(text, cursor);
   if (!context) return null;
 
-  const items = suggestionItemsForContext(context, options).slice(0, MAX_SUGGESTIONS);
+  const items = suggestionItemsForContext(context, options);
   if (items.length === 0) return null;
 
   return {

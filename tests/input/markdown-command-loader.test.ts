@@ -98,6 +98,49 @@ describe("markdown command loader", () => {
     await rm(fakeHome, { recursive: true, force: true });
   });
 
+  it("only registers explicit command markdown and skips resource-like directories", async () => {
+    await mkdir(join(workDir, ".claude", "commands", "resources"), { recursive: true });
+    await mkdir(join(workDir, ".claude", "commands", "references"), { recursive: true });
+    await mkdir(join(workDir, ".claude", "commands", "workflows"), { recursive: true });
+    await mkdir(join(workDir, ".claude", "commands", "templates"), { recursive: true });
+    await mkdir(join(workDir, ".claude", "commands", "agents"), { recursive: true });
+    await mkdir(join(workDir, ".claude", "commands", "node_modules", "pkg"), {
+      recursive: true,
+    });
+    await writeFile(
+      join(workDir, ".claude", "commands", "deploy.md"),
+      "---\ndescription: deploy service\n---\n\nDeploy",
+    );
+    await writeFile(
+      join(workDir, ".claude", "commands", "resources", "README.md"),
+      "# Shared resources",
+    );
+    await writeFile(
+      join(workDir, ".claude", "commands", "references", "api.md"),
+      "# API reference",
+    );
+    await writeFile(
+      join(workDir, ".claude", "commands", "workflows", "release.md"),
+      "# Release workflow",
+    );
+    await writeFile(
+      join(workDir, ".claude", "commands", "templates", "pr.md"),
+      "# PR template",
+    );
+    await writeFile(
+      join(workDir, ".claude", "commands", "agents", "reviewer.md"),
+      "# Agent prompt",
+    );
+    await writeFile(
+      join(workDir, ".claude", "commands", "node_modules", "pkg", "index.md"),
+      "# Package docs",
+    );
+
+    const commands = await loadMarkdownCommands({ userCommandsDir, workDir });
+
+    expect(commands.map((command) => command.name)).toEqual(["deploy"]);
+  });
+
   it("optionally projects .claw/skills/**/SKILL.md as prompt commands below user commands", async () => {
     await writeSkill("review", "skill review", "# Skill Review");
     await writeSkill("deploy", "deploy service", "# Deploy");

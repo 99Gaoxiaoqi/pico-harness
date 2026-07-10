@@ -415,6 +415,51 @@ describe("Pico command registry", () => {
     expect(result.result.message).toContain("Did you mean: reviewer");
   });
 
+  it("command descriptors provide dynamic skill, agent, session, and snapshot argument candidates", async () => {
+    const workDir = mkdtempSync(join(tmpdir(), "pico-command-arg-completer-"));
+    cleanup.push(() => rmSync(workDir, { recursive: true, force: true }));
+    mkdirSync(join(workDir, ".claw", "skills", "review"), { recursive: true });
+    writeFileSync(
+      join(workDir, ".claw", "skills", "review", "SKILL.md"),
+      "---\nname: review\ndescription: 审查代码\n---\n\n# Review",
+    );
+    mkdirSync(join(workDir, ".claude", "agents"), { recursive: true });
+    writeFileSync(
+      join(workDir, ".claude", "agents", "reviewer.md"),
+      "---\ndescription: 审查 Agent\n---\n\n# Reviewer",
+    );
+    writeSessionLog(workDir, "cli-review", "2026-07-09T02:00:00.000Z", [
+      { type: "message", seq: 1, message: { role: "user", content: "review me" } },
+    ]);
+    const session = new Session("snapshot-session", workDir, { persistence: false });
+    session.fileHistory.snapshots.push({
+      messageId: "turn-review",
+      timestamp: new Date("2026-07-09T03:00:00.000Z"),
+      trackedFileBackups: new Map(),
+    });
+
+    const registry = await createPicoCommandRegistry({
+      workDir,
+      provider: "openai",
+      model: "glm-5.2",
+      session,
+      sessionId: session.id,
+    });
+
+    await expect(Promise.resolve(registry.resolve("skill")?.argumentCompleter?.("rev"))).resolves.toEqual([
+      { value: "review", description: "审查代码" },
+    ]);
+    await expect(Promise.resolve(registry.resolve("agent")?.argumentCompleter?.("rev"))).resolves.toEqual([
+      { value: "reviewer", description: "审查 Agent" },
+    ]);
+    await expect(Promise.resolve(registry.resolve("resume")?.argumentCompleter?.("cli-r"))).resolves.toEqual([
+      { value: "cli-review", description: "1 messages · 2026-07-09T02:00:00.000Z" },
+    ]);
+    await expect(Promise.resolve(registry.resolve("rewind")?.argumentCompleter?.("turn-r"))).resolves.toEqual([
+      { value: "turn-review", description: "0 files · 2026-07-09T03:00:00.000Z" },
+    ]);
+  });
+
   it("/status summarizes mode permission mode model and thinking effort", async () => {
     const registry = await createPicoCommandRegistry({
       workDir: "/tmp/pico-work",

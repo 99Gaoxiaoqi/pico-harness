@@ -37,6 +37,16 @@ const COMMAND_PRIORITIES: Record<MarkdownCommandSource, number> = {
 
 const COMMAND_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 const COMMAND_PATH_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]*(?::[A-Za-z0-9][A-Za-z0-9_-]*)*$/;
+const NON_COMMAND_DIRS = new Set([
+  "README",
+  "readme",
+  "resources",
+  "references",
+  "workflows",
+  "templates",
+  "agents",
+  "node_modules",
+]);
 
 export async function loadMarkdownCommands(
   options: LoadMarkdownCommandsOptions,
@@ -151,6 +161,7 @@ async function walkMarkdownFiles(dir: string): Promise<string[]> {
   for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
     const path = join(dir, entry.name);
     if (entry.isDirectory()) {
+      if (NON_COMMAND_DIRS.has(entry.name)) continue;
       files.push(...(await walkMarkdownFiles(path)));
     } else if (entry.isFile() && entry.name.endsWith(".md")) {
       files.push(path);

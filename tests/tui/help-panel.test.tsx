@@ -51,6 +51,46 @@ describe("HelpPanel", () => {
     expect(output).toContain("  /theme  Open theme picker");
   });
 
+  it("groups commands by source and command category metadata", () => {
+    const commands: HelpPanelCommand[] = [
+      {
+        name: "model",
+        category: "session",
+        description: "Change model",
+        kind: "local",
+        source: "builtin",
+      },
+      {
+        name: "review",
+        category: "workspace",
+        description: "Review project",
+        kind: "prompt",
+        source: "project",
+      },
+      {
+        name: "skill-audit",
+        category: "skill",
+        description: "Run skill",
+        kind: "prompt",
+        source: "skill",
+      },
+      {
+        name: "mcp-tool",
+        category: "mcp",
+        description: "Run MCP command",
+        kind: "prompt",
+        source: "mcp",
+      },
+    ];
+
+    expect(formatHelpPanelSections(commands).map((section) => section.title)).toEqual([
+      "builtin / session",
+      "project / workspace",
+      "skill / skill",
+      "mcp / mcp",
+    ]);
+  });
+
   it("renders as a compact Ink component", () => {
     const output = renderToString(
       <HelpPanel
