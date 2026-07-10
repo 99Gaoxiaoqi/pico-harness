@@ -596,8 +596,10 @@ describe("Pico command registry", () => {
   });
 
   it("/status summarizes mode permission mode model and thinking effort", async () => {
+    const workDir = mkdtempSync(join(tmpdir(), "pico-command-status-"));
+    cleanup.push(() => rmSync(workDir, { recursive: true, force: true }));
     const registry = await createPicoCommandRegistry({
-      workDir: "/tmp/pico-work",
+      workDir,
       provider: "openai",
       model: "glm-5.2",
       sessionId: "session-status",
@@ -614,7 +616,7 @@ describe("Pico command registry", () => {
     expect(result.result.message).toContain("Model: glm-5.2");
     expect(result.result.message).toContain("Thinking effort: medium");
     expect(result.result.message).toContain("Session: session-status");
-    expect(result.result.message).toContain("CWD: /tmp/pico-work");
+    expect(result.result.message).toContain(`CWD: ${workDir}`);
   });
 
   it("/mcp shows empty state when no MCP config is loaded", async () => {
@@ -693,8 +695,10 @@ describe("Pico command registry", () => {
   });
 
   it("/status includes an MCP overview when status is available", async () => {
+    const workDir = mkdtempSync(join(tmpdir(), "pico-command-mcp-status-"));
+    cleanup.push(() => rmSync(workDir, { recursive: true, force: true }));
     const registry = await createPicoCommandRegistry({
-      workDir: "/tmp/pico-work",
+      workDir,
       provider: "openai",
       model: "glm-5.2",
       sessionId: "session-status-mcp",
@@ -894,8 +898,10 @@ describe("Pico command registry", () => {
   });
 
   it("/status exposes session id mode and fork source", async () => {
+    const workDir = mkdtempSync(join(tmpdir(), "pico-command-fork-status-"));
+    cleanup.push(() => rmSync(workDir, { recursive: true, force: true }));
     const registry = await createPicoCommandRegistry({
-      workDir: "/tmp/pico-work",
+      workDir,
       provider: "openai",
       model: "glm-5.2",
       sessionId: "session-fork",
