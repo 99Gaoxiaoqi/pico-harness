@@ -7,7 +7,6 @@ import {
   createRewindSelectorState,
   moveRewindSelection,
   RewindSelector,
-  isCurrentRewindSelection,
   selectRewindPreview,
   selectedRewindSnapshot,
   type RewindSelectorState,
@@ -30,8 +29,7 @@ export interface RewindCommandDialogKeyEvent {
 
 export interface RewindCommandDialogCallbacks {
   getDiffStat: (messageId: string) => Promise<FileHistoryDiffStat>;
-  onDispatchCommand?: (command: string) => void;
-  onRewind?: (snapshot: FileHistorySnapshotSummary, mode: RewindMode) => Promise<void>;
+  onRewind: (snapshot: FileHistorySnapshotSummary, mode: RewindMode) => Promise<void>;
   onClose?: () => void;
 }
 
@@ -46,8 +44,7 @@ export interface RewindCommandDialogProps {
   sessionId: string;
   snapshots: readonly FileHistorySnapshotSummary[];
   getDiffStat: (messageId: string) => Promise<FileHistoryDiffStat>;
-  onDispatchCommand?: (command: string) => void;
-  onRewind?: (snapshot: FileHistorySnapshotSummary, mode: RewindMode) => Promise<void>;
+  onRewind: (snapshot: FileHistorySnapshotSummary, mode: RewindMode) => Promise<void>;
   onClose: () => void;
   initialState?: RewindCommandDialogState;
   maxItems?: number;
@@ -79,7 +76,6 @@ export function RewindCommandDialog({
   sessionId,
   snapshots,
   getDiffStat,
-  onDispatchCommand,
   onRewind,
   onClose,
   initialState,
@@ -101,7 +97,6 @@ export function RewindCommandDialog({
       { input, key },
       {
         getDiffStat,
-        onDispatchCommand,
         onRewind,
         onClose,
       },
@@ -171,10 +166,6 @@ export async function resolveRewindCommandDialogKey(
   if (!event.key.return) return state;
 
   if (state.selector.phase === "select") {
-    if (isCurrentRewindSelection(state.selector, snapshots)) {
-      callbacks.onClose?.();
-      return closeRewindDialog();
-    }
     const snapshot = selectedRewindSnapshot(state.selector, snapshots);
     if (!snapshot) return state;
     const diffStat = await callbacks.getDiffStat(snapshot.messageId);
@@ -193,19 +184,9 @@ export async function resolveRewindCommandDialogKey(
   }
   const snapshot = snapshots.find((item) => item.messageId === confirm.messageId);
   if (!snapshot) throw new Error("The selected rewind point is no longer available.");
-  if (callbacks.onRewind) {
-    await callbacks.onRewind(snapshot, confirm.selectedAction);
-  } else {
-    callbacks.onDispatchCommand?.(
-      rewindSelectionToCommand(confirm.messageId, confirm.selectedAction),
-    );
-  }
+  await callbacks.onRewind(snapshot, confirm.selectedAction);
   callbacks.onClose?.();
   return closeRewindDialog();
-}
-
-export function rewindSelectionToCommand(messageId: string, mode: RewindMode): string {
-  return `/rewind ${messageId} ${mode}`;
 }
 
 export function createRewindCommandDialogRequest(props: RewindCommandDialogProps): DialogRequest {

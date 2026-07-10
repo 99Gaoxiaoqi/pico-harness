@@ -598,6 +598,12 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
             if (result.ui?.kind !== "open-selector" || result.ui.selector !== "rewind") return;
             void listRewindPointSummaries(tuiSession)
               .then((snapshots) => {
+                if (snapshots.length === 0) {
+                  reporter.pushSystemMessage(
+                    "No user-message checkpoints are available yet. Send a new prompt, then run /rewind again.",
+                  );
+                  return;
+                }
                 const request = createRewindCommandDialogRequest({
                   sessionId: tuiSessionId,
                   snapshots,

@@ -47,11 +47,8 @@ export function RewindSelector({
 export function createRewindSelectorState(
   snapshots: readonly FileHistorySnapshotSummary[] = [],
 ): RewindSelectorState {
-  if (usesLegacySelectorData(snapshots)) {
-    return { phase: "select", selectedIndex: snapshots.length > 0 ? snapshots.length - 1 : 0 };
-  }
-  // Claude Code 把 “Current prompt” 作为最后一个虚拟选项并默认聚焦。
-  return { phase: "select", selectedIndex: snapshots.length };
+  // Claude Code 的菜单只列真实用户 prompt；默认聚焦最近一条。
+  return { phase: "select", selectedIndex: snapshots.length > 0 ? snapshots.length - 1 : 0 };
 }
 
 export function selectRewindSnapshot(
@@ -87,11 +84,7 @@ export function moveRewindSelection(
   if (snapshots.length === 0) return state;
   return {
     ...state,
-    selectedIndex: moveIndex(
-      state.selectedIndex,
-      snapshots.length + (usesLegacySelectorData(snapshots) ? 0 : 1),
-      direction,
-    ),
+    selectedIndex: moveIndex(state.selectedIndex, snapshots.length, direction),
   };
 }
 
@@ -194,7 +187,7 @@ function formatRewindMessageList(
   if (snapshots.length === 0) return "Rewind\nNothing to rewind to yet.";
   if (usesLegacySelectorData(snapshots)) return formatLegacyRewindMessageList(snapshots, options);
 
-  const itemCount = snapshots.length + 1;
+  const itemCount = snapshots.length;
   const maxItems = options.maxItems ?? 7;
   const selectedIndex = clampIndex(options.selectedIndex ?? snapshots.length, itemCount);
   const firstVisibleIndex = visibleWindowStart(selectedIndex, itemCount, maxItems);
@@ -203,12 +196,7 @@ function formatRewindMessageList(
 
   for (let index = firstVisibleIndex; index < lastVisibleIndex; index++) {
     const marker = index === selectedIndex ? "❯" : " ";
-    const snapshot = snapshots[index];
-    if (!snapshot) {
-      lines.push(`${marker} Current prompt`);
-      lines.push("  Current conversation state");
-      continue;
-    }
+    const snapshot = snapshots[index]!;
     lines.push(`${marker} ${truncateText(oneLine(snapshot.userPrompt ?? snapshot.messageId), 72)}`);
     lines.push(
       `  ${formatSnapshotChange(snapshot)} · ${formatRelativeTime(new Date(snapshot.timestamp))}`,
@@ -333,13 +321,6 @@ export function selectedRewindSnapshot(
 ): FileHistorySnapshotSummary | undefined {
   if (state.phase !== "select") return undefined;
   return snapshots[state.selectedIndex];
-}
-
-export function isCurrentRewindSelection(
-  state: RewindSelectorState,
-  snapshots: readonly FileHistorySnapshotSummary[],
-): boolean {
-  return state.phase === "select" && state.selectedIndex === snapshots.length;
 }
 
 function visibleWindowStart(selectedIndex: number, itemCount: number, maxItems: number): number {

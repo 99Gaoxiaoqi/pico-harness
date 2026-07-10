@@ -70,7 +70,7 @@ Pico 的 CLI session 以当前项目目录为边界：
 | `/resume`      | 输出指定 session 的恢复提示。                                                              |
 | `/snapshots`   | 诊断性列出当前 session 的文件历史数据。                                                    |
 | `/rewind`      | 打开用户消息选择器，按提示词/时间/文件变化恢复 code、conversation 或二者。                 |
-| `/undo`        | 默认回滚最近一个文件历史快照，也可指定 message id 和模式。                                 |
+| `/undo`        | `/rewind` 的兼容入口；同样打开用户消息选择器，不再走隐藏的直接回滚路径。                   |
 | `/agents`      | 列出内置 Agent 和项目 `.claude/agents/*.md`。                                              |
 | `/agent`       | 把任务委派给指定 Agent：`/agent <name> <task>`。                                           |
 | `/skills`      | 列出当前项目 `.claw/skills` 中可用 Skill。                                                 |

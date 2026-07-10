@@ -104,7 +104,7 @@ export function reduceInputControllerEvent(
     if (key.meta || key.shift) {
       return insertText(nextState, "\n", options);
     }
-    if (hasSelectableSuggestion(nextState)) {
+    if (hasSelectableSuggestion(nextState) && !shouldSubmitExactSlashCommand(nextState)) {
       return completeSuggestion(nextState, options);
     }
     return submit(nextState);
@@ -202,7 +202,9 @@ function reduceKeybindingInput(
   if (!isKeybindingManagedEvent(input, key)) return null;
 
   const context =
-    hasSelectableSuggestion(state) && !(key.return && (key.meta || key.shift))
+    hasSelectableSuggestion(state) &&
+    !(key.return && (key.meta || key.shift)) &&
+    !(key.return && shouldSubmitExactSlashCommand(state))
       ? "Autocomplete"
       : "Chat";
   const resolved = resolveKeybinding({ input, key }, context, options.keybindings);
@@ -445,6 +447,20 @@ function completeSuggestion(
 
 function hasSelectableSuggestion(state: InputControllerState): boolean {
   return Boolean(state.activeSuggestions && state.activeSuggestions.items.length > 0);
+}
+
+/** 已完整输入一个 slash command 时，Enter 应执行命令；Tab 仍用于补全。 */
+function shouldSubmitExactSlashCommand(state: InputControllerState): boolean {
+  const session = state.activeSuggestions;
+  if (session?.kind !== "slash") return false;
+  const item = session.items[session.selectedIndex];
+  if (!item) return false;
+
+  const typed = state.text.trim();
+  const candidates = [item.insertText, item.value, item.matchedAlias, item.alias].filter(
+    (value): value is string => typeof value === "string" && value.length > 0,
+  );
+  return candidates.some((value) => `/${stripMarker(value, "slash")}` === typed);
 }
 
 function moveSuggestionSelection(

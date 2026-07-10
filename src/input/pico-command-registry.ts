@@ -3,17 +3,8 @@ import { join } from "node:path";
 import { SkillLoader } from "../context/skill.js";
 import { FullCompactor } from "../context/full-compactor.js";
 import { globalSessionManager, type Session } from "../engine/session.js";
-import {
-  defaultCliSessionId,
-  listFileHistorySnapshotSummaries,
-  parseRewindMode,
-  rewindFileHistoryFromCli,
-} from "../cli/file-history.js";
-import {
-  formatRewindSelector,
-  formatRewindUsage,
-  latestSnapshotMessageId,
-} from "../tui/rewind-selector.js";
+import { defaultCliSessionId, listFileHistorySnapshotSummaries } from "../cli/file-history.js";
+import { formatRewindSelector, formatRewindUsage } from "../tui/rewind-selector.js";
 import { listCliSessionSummaries } from "../cli/session-resolver.js";
 import { createBuiltinCommands } from "./builtin-commands.js";
 import { createAddDirectoryCommand, type AdditionalDirectoryManager } from "./add-directory.js";
@@ -284,16 +275,6 @@ async function loadSessionArgumentCandidates(
   return sessions.map((session) => ({
     value: session.id,
     description: `${session.messageCount} messages · ${session.updatedAt.toISOString()}`,
-  }));
-}
-
-async function loadSnapshotArgumentCandidates(
-  options: PicoCommandRegistryOptions,
-): Promise<readonly SlashArgumentCandidate[]> {
-  if (!options.session) return [];
-  return listFileHistorySnapshotSummaries(options.session).map((snapshot) => ({
-    value: snapshot.messageId,
-    description: `${snapshot.trackedFileCount} files · ${snapshot.timestamp}`,
   }));
 }
 
@@ -973,32 +954,22 @@ function createRewindCommand(options: PicoCommandRegistryOptions): SlashCommand 
   return {
     name: "rewind",
     aliases: ["checkpoint"],
-    description: "Rewind code, conversation, or both to a file-history snapshot",
-    usage: "/rewind [message-id] [code|conversation|both]",
-    argumentHint: "[message-id] [code|conversation|both]",
+    description: "Open the rewind menu for code and conversation checkpoints",
+    usage: "/rewind",
     category: "session",
-    argumentCompleter: async (query) =>
-      filterArgumentCandidates(await loadSnapshotArgumentCandidates(options), query),
     kind: "local",
     availability: "idle",
     execute: async (input): Promise<LocalCommandResult> => {
       const session = await resolveCommandSession(options);
-      const messageId = input.argv[0];
       const summaries = listFileHistorySnapshotSummaries(session);
-      if (messageId === undefined) {
-        return {
-          type: "local",
-          action: "message",
-          message: formatRewindUsage(session.id, summaries),
-          ui: { kind: "open-selector", selector: "rewind" },
-        };
-      }
-
-      const message = await tryRewindCommand(session, messageId, input.argv[1]);
       return {
         type: "local",
         action: "message",
-        message,
+        message:
+          input.argv.length === 0
+            ? formatRewindUsage(session.id, summaries)
+            : `直接 message-id 回滚已收敛到交互菜单。请在列表中选择目标消息。\n${formatRewindUsage(session.id, summaries)}`,
+        ui: { kind: "open-selector", selector: "rewind" },
       };
     },
   };
@@ -1007,31 +978,18 @@ function createRewindCommand(options: PicoCommandRegistryOptions): SlashCommand 
 function createUndoCommand(options: PicoCommandRegistryOptions): SlashCommand {
   return {
     name: "undo",
-    description: "Undo the latest file-history snapshot",
-    usage: "/undo [message-id] [code|conversation|both]",
-    argumentHint: "[message-id] [code|conversation|both]",
+    description: "Open the rewind menu (compatibility alias)",
+    usage: "/undo",
     kind: "local",
     availability: "idle",
-    execute: async (input): Promise<LocalCommandResult> => {
+    execute: async (): Promise<LocalCommandResult> => {
       const session = await resolveCommandSession(options);
       const summaries = listFileHistorySnapshotSummaries(session);
-      const messageId = input.argv[0] ?? latestSnapshotMessageId(summaries);
-      if (!messageId) {
-        return {
-          type: "local",
-          action: "message",
-          message: formatRewindSelector(session.id, summaries),
-        };
-      }
-
-      const mode = parseRewindMode(input.argv[1]);
-      const result = await session.serialize(() =>
-        rewindFileHistoryFromCli(session, messageId, mode),
-      );
       return {
         type: "local",
         action: "message",
-        message: result.output,
+        message: `/undo 已收敛为 /rewind 的兼容入口。\n${formatRewindUsage(session.id, summaries)}`,
+        ui: { kind: "open-selector", selector: "rewind" },
       };
     },
   };
@@ -1043,26 +1001,6 @@ async function resolveCommandSession(options: PicoCommandRegistryOptions): Promi
     options.sessionId ?? defaultCliSessionId(options.workDir),
     options.workDir,
   );
-}
-
-async function tryRewindCommand(
-  session: Session,
-  messageId: string,
-  modeInput: string | undefined,
-): Promise<string> {
-  try {
-    const result = await session.serialize(async () => {
-      const mode = parseRewindMode(modeInput);
-      return rewindFileHistoryFromCli(session, messageId, mode);
-    });
-    return result.output;
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    if (message.startsWith(`找不到 messageId=${messageId}`)) {
-      return `找不到 messageId=${messageId} 的文件历史快照。请运行 /snapshots 查看可用快照，或使用 /rewind <messageId> code|conversation|both。`;
-    }
-    return `${message}\n用法: /rewind <messageId> code|conversation|both`;
-  }
 }
 
 function createSkillsCommand(loader: SkillLoader): SlashCommand {

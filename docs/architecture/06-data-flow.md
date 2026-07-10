@@ -151,12 +151,13 @@ generateWithRetry 内层捕获
 ## 4. 文件历史三轴 rewind 流程
 
 ```
-用户在 TUI 输入: /rewind turn-3 both
+用户在 TUI 输入: /rewind
 
-TUI rewind command/dialog 解析:
-  ├─ messageId = "turn-3"
-  ├─ messageIndex = 从快照 manifest 查 turn-3 对应的 session.length
-  └─ mode = "both"
+TUI rewind command/dialog:
+  ├─ 直接打开用户消息列表，不暴露 UUID 参数补全
+  ├─ 用户选择提示词，再选择 code / conversation / both
+  ├─ messageId / messageIndex 从所选快照读取
+  └─ 统一调用 applyTuiRewind，同步 Session、文件、transcript、输入框与 mode
 
 session.rewindBoth(messageId, messageIndex):
   │
