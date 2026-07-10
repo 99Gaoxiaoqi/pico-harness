@@ -7,6 +7,8 @@ import { globalApprovalManager } from "../../src/approval/manager.js";
 import { runAgentFromCli, type RunAgentCliDependencies } from "../../src/cli/run-agent.js";
 import { buildTranscriptLayout } from "../../src/tui/transcript-layout.js";
 import type { DialogRequest } from "../../src/tui/dialog-arbiter.js";
+import { LLMStatusError } from "../../src/provider/errors.js";
+import { defaultIsRetryableError } from "../../src/provider/retry.js";
 import { OpenAIProvider } from "../../src/provider/openai.js";
 import type {
   LLMProvider,
@@ -91,11 +93,51 @@ class ToolFilteringProvider implements LLMProvider {
   }
 
   isRetryableError(error: unknown): boolean {
-    return this.real.isRetryableError?.(error) ?? false;
+    return this.real.isRetryableError?.(error) ?? defaultIsRetryableError(error);
   }
 
   private filterTools(tools: ToolDefinition[]): ToolDefinition[] {
     return tools.filter((tool) => this.allowedTools.has(tool.name));
+  }
+}
+
+class ObservingProvider implements LLMProvider {
+  readonly modelName?: string;
+  readonly requests: Array<{ messages: Message[]; tools: ToolDefinition[] }> = [];
+  private streamStartResolve!: () => void;
+  private streamStarted = new Promise<void>((resolve) => {
+    this.streamStartResolve = resolve;
+  });
+
+  constructor(private readonly real: LLMProvider) {
+    this.modelName = real.modelName;
+  }
+
+  async waitForStreamStart(): Promise<void> {
+    await this.streamStarted;
+  }
+
+  generate(
+    messages: Message[],
+    availableTools: ToolDefinition[],
+    options?: LLMProviderRequestOptions,
+  ): Promise<Message> {
+    this.requests.push({ messages: [...messages], tools: [...availableTools] });
+    this.streamStartResolve();
+    return this.real.generate(messages, availableTools, options);
+  }
+
+  generateStream(
+    messages: Message[],
+    availableTools: ToolDefinition[],
+    onDelta: (delta: string) => void,
+    options?: LLMProviderRequestOptions,
+  ): Promise<Message> {
+    this.requests.push({ messages: [...messages], tools: [...availableTools] });
+    this.streamStartResolve();
+    return this.real.generateStream
+      ? this.real.generateStream(messages, availableTools, onDelta, options)
+      : this.real.generate(messages, availableTools, options);
   }
 }
 
@@ -118,6 +160,21 @@ const realEnv = loadRealLlmEnv();
 const RUN_LLM_E2E = process.env.RUN_LLM_E2E === "1" || process.env.PICO_LLM_E2E === "1";
 const hasRealLlmConfig = Boolean(realEnv.LLM_BASE_URL && realEnv.LLM_API_KEY && realEnv.LLM_MODEL);
 const describeRealLLM = RUN_LLM_E2E && hasRealLlmConfig ? describe : describe.skip;
+
+describe("TUI real LLM e2e helpers", () => {
+  it("ToolFilteringProvider falls back to the default retryable classifier", () => {
+    const provider: LLMProvider = {
+      modelName: "stub",
+      async generate() {
+        return { role: "assistant", content: "ok" };
+      },
+    };
+    const filtering = new ToolFilteringProvider(provider, new Set(["write_file"]));
+    const error = new LLMStatusError(503, "temporarily unavailable");
+
+    expect(filtering.isRetryableError(error)).toBe(defaultIsRetryableError(error));
+  });
+});
 
 describeRealLLM("TUI productization real LLM e2e", { timeout: 240000 }, () => {
   const tempDirs: string[] = [];
@@ -210,15 +267,16 @@ describeRealLLM("TUI productization real LLM e2e", { timeout: 240000 }, () => {
       model: realEnv.LLM_MODEL!,
     });
     const writeOnlyProvider = new ToolFilteringProvider(realProvider, new Set(["write_file"]));
+    let rejectApproval: (() => void) | undefined;
     const openDialog = vi.fn((request: DialogRequest) => {
       const element = request.content;
       if (React.isValidElement<{ onAction?: (action: "reject") => void }>(element)) {
-        element.props.onAction?.("reject");
+        rejectApproval = () => element.props.onAction?.("reject");
       }
     });
     const closeDialog = vi.fn();
 
-    await harness.runPrompt(
+    const run = harness.runPrompt(
       [
         "Use the write_file tool exactly once.",
         "Overwrite real-approval.txt with the exact content PICO_TUI_APPROVAL_SHOULD_NOT_WRITE.",
@@ -227,6 +285,13 @@ describeRealLLM("TUI productization real LLM e2e", { timeout: 240000 }, () => {
       ].join(" "),
       { provider: writeOnlyProvider, openDialog, closeDialog },
     );
+    await vi.waitFor(() => expect(openDialog).toHaveBeenCalled(), { timeout: 60000 });
+    const settledBeforeReject = await promiseSettled(run);
+    expect(settledBeforeReject).toBe(false);
+    expect(readFileSync(target, "utf8")).toBe("ORIGINAL\n");
+    expect(rejectApproval).toBeTypeOf("function");
+    rejectApproval?.();
+    await run;
 
     const entries = harness.entries();
     expect(openDialog).toHaveBeenCalledWith(
@@ -243,20 +308,36 @@ describeRealLLM("TUI productization real LLM e2e", { timeout: 240000 }, () => {
   it("AbortSignal 中断后同 session 可继续", async () => {
     const harness = createHarness("abort");
     const abortControllerRef: TuiAbortControllerRef = { current: null };
+    const firstPrompt =
+      "Write a long numbered list with at least 800 items. Include PICO_TUI_ABORT_FIRST_PROMPT. Start now and do not use tools.";
+    const observedProvider = new ObservingProvider(
+      new OpenAIProvider({
+        baseURL: realEnv.LLM_BASE_URL!,
+        apiKey: realEnv.LLM_API_KEY!,
+        model: realEnv.LLM_MODEL!,
+      }),
+    );
     const interrupted = harness.runPrompt(
-      "Write a long numbered list with at least 800 items. Start now and do not use tools.",
-      { abortControllerRef },
+      firstPrompt,
+      { abortControllerRef, provider: observedProvider },
     );
 
-    await vi.waitFor(() => expect(abortControllerRef.current).not.toBeNull(), { timeout: 5000 });
+    await observedProvider.waitForStreamStart();
     abortControllerRef.current?.abort(new DOMException("real e2e interrupted", "AbortError"));
-    await expect(interrupted).rejects.toThrow();
+    await expect(interrupted).rejects.toMatchObject({ name: "AbortError" });
 
-    await harness.runPrompt("Reply exactly: PICO_TUI_AFTER_ABORT_OK. Do not use tools.");
+    await harness.runPrompt("Reply exactly: PICO_TUI_AFTER_ABORT_OK. Do not use tools.", {
+      provider: observedProvider,
+    });
 
     const entries = harness.entries();
     expect(entries.some((entry) => entry.kind === "error")).toBe(false);
     expect(assistantText(entries)).toContain("PICO_TUI_AFTER_ABORT_OK");
+    expect(observedProvider.requests.length).toBeGreaterThanOrEqual(2);
+    const secondRequestMessages = observedProvider.requests.at(-1)?.messages ?? [];
+    expect(secondRequestMessages.some((message) => message.content.includes("PICO_TUI_ABORT_FIRST_PROMPT"))).toBe(
+      true,
+    );
   });
 
   it("长回复和多轮后仍能提交下一条并保持 transcript 可用", async () => {
@@ -270,12 +351,16 @@ describeRealLLM("TUI productization real LLM e2e", { timeout: 240000 }, () => {
     const entries = harness.entries();
     const assistantEntries = entries.filter((entry) => entry.kind === "assistant");
     expect(assistantEntries.length).toBeGreaterThanOrEqual(2);
-    expect(assistantText(entries)).toContain("PICO_TUI_LONG_LINE");
+    const longAssistant = assistantEntries.find((entry) => entry.content.includes("PICO_TUI_LONG_LINE"));
+    expect(longAssistant).toBeDefined();
+    expect(countOccurrences(longAssistant?.content ?? "", "PICO_TUI_LONG_LINE")).toBeGreaterThanOrEqual(10);
     expect(assistantText(entries)).toContain("PICO_TUI_NEXT_OK");
     expect(entries.some((entry) => entry.kind === "error")).toBe(false);
 
     const layout = buildTranscriptLayout(entries, { wrapWidth: 60 });
-    expect(layout.contentRows).toBeGreaterThan(entries.length);
+    const longAssistantIndex = entries.findIndex((entry) => entry === longAssistant);
+    expect(layout.items[longAssistantIndex]?.rows).toBeGreaterThanOrEqual(10);
+    expect(entries.at(-1)).toMatchObject({ kind: "assistant", content: expect.stringContaining("PICO_TUI_NEXT_OK") });
   });
 });
 
@@ -284,4 +369,20 @@ function assistantText(entries: readonly TuiEntry[]): string {
     .filter((entry): entry is Extract<TuiEntry, { kind: "assistant" }> => entry.kind === "assistant")
     .map((entry) => entry.content)
     .join("\n");
+}
+
+async function promiseSettled(promise: Promise<unknown>): Promise<boolean> {
+  const pending = Symbol("pending");
+  const result = await Promise.race([
+    promise.then(
+      () => true,
+      () => true,
+    ),
+    new Promise<typeof pending>((resolve) => setTimeout(() => resolve(pending), 100)),
+  ]);
+  return result !== pending;
+}
+
+function countOccurrences(text: string, needle: string): number {
+  return text.split(needle).length - 1;
 }
