@@ -280,6 +280,57 @@ describe("runAgentFromCli", () => {
     await expect(readFile(join(workDir, "approval.txt"), "utf8")).rejects.toThrow();
   });
 
+  it("审批等待期间 abort 会取消任务且晚批准不执行危险工具", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-cli-approval-abort-"));
+    const provider = new ScriptedProvider([
+      {
+        role: "assistant",
+        content: "I will write a file.",
+        toolCalls: [
+          {
+            id: "call_write_abort",
+            name: "write_file",
+            arguments: JSON.stringify({ path: "must-not-exist.txt", content: "danger" }),
+          },
+        ],
+        usage: { promptTokens: 1, completionTokens: 1 },
+      },
+    ]);
+    const approval = makeApprovalCapture();
+    const controller = new AbortController();
+    const runPromise = runAgentFromCli(
+      {
+        prompt: "Write must-not-exist.txt",
+        dir: workDir,
+        session: "approval_abort_session",
+        provider: "openai",
+      },
+      {
+        provider,
+        approvalNotifier: approval.notifier,
+        signal: controller.signal,
+      },
+    );
+
+    const notice = await waitForApprovalBeforeCompletion(approval.nextNotice, runPromise);
+    controller.abort(new DOMException("interrupted", "AbortError"));
+    await expect(runPromise).rejects.toMatchObject({ name: "AbortError" });
+    const pendingAfterAbort = globalApprovalManager.pendingCount;
+    const lateApproval = globalApprovalManager.resolveApproval(
+      notice.taskId,
+      true,
+      "late approve",
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const fileContent = await readFile(join(workDir, "must-not-exist.txt"), "utf8").catch(
+      () => undefined,
+    );
+
+    expect(pendingAfterAbort).toBe(0);
+    expect(lateApproval).toBe(false);
+    expect(fileContent).toBeUndefined();
+  });
+
   it("edit_file requests approval before editing", async () => {
     const workDir = await mkdtemp(join(tmpdir(), "pico-cli-approval-edit-"));
     await writeFile(join(workDir, "approval-edit.txt"), "old value\n", "utf8");

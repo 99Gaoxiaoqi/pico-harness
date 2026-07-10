@@ -188,6 +188,37 @@ describe("ApprovalManager", () => {
     mgr.clear();
     expect(mgr.pendingCount).toBe(0);
   });
+
+  it("signal abort 取消审批、清理 timer/listener 且拒绝晚到批准", async () => {
+    vi.useFakeTimers();
+    const mgr = new ApprovalManager(60_000);
+    const controller = new AbortController();
+    const removeEventListener = vi.spyOn(controller.signal, "removeEventListener");
+    const promise = mgr.waitForApproval(
+      "abort-approval",
+      "bash",
+      '{"command":"rm temp.txt"}',
+      () => {},
+      undefined,
+      controller.signal,
+    );
+    const outcomePromise = promise.then(
+      (result) => result,
+      (error: unknown) => error,
+    );
+
+    controller.abort(new DOMException("interrupted", "AbortError"));
+    const pendingAfterAbort = mgr.pendingCount;
+    const timersAfterAbort = vi.getTimerCount();
+    const lateApproval = mgr.resolveApproval("abort-approval", true, "late approve");
+    const outcome = await outcomePromise;
+
+    expect(outcome).toMatchObject({ name: "AbortError" });
+    expect(pendingAfterAbort).toBe(0);
+    expect(timersAfterAbort).toBe(0);
+    expect(lateApproval).toBe(false);
+    expect(removeEventListener).toHaveBeenCalledWith("abort", expect.any(Function));
+  });
 });
 
 describe("ApprovalPolicy", () => {

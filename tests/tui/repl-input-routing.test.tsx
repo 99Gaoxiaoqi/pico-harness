@@ -12,6 +12,8 @@ import type { CliSessionBrowserSummary } from "../../src/tui/session-browser-ada
 import { TuiReporter } from "../../src/tui/tui-reporter.js";
 import {
   dispatchModelSelectorSelection,
+  formatTuiRunError,
+  handleTuiInterrupt,
   handleTuiInputSubmission,
   resolveLocalTuiCommandUiEffect,
   runTuiAgentPrompt,
@@ -29,6 +31,11 @@ describe("TUI input routing", () => {
     const workDir = process.cwd();
     return { reporter, snapshots, runAgent, exit, registry, workDir };
   }
+
+  it("AbortError 不生成普通执行失败内容", () => {
+    expect(formatTuiRunError(new DOMException("interrupted", "AbortError"))).toBeUndefined();
+    expect(formatTuiRunError(new Error("boom"))).toBe("⚠️ 执行出错: boom");
+  });
 
   it("/model local UI action opens the model selector dialog", async () => {
     const { reporter, runAgent, exit, registry, workDir } = harness();
@@ -347,6 +354,44 @@ describe("TUI input routing", () => {
         content: "Interrupted current run and dropped 1 queued input(s).",
       },
     ]);
+  });
+
+  it("TUI interrupt 会关闭当前审批 dialog", async () => {
+    const { reporter } = harness();
+    const abortControllerRef: { current: AbortController | null } = { current: null };
+    const openDialog = vi.fn();
+    const closeDialog = vi.fn();
+    const queue = new RunningInputQueue();
+    const runAgent = vi.fn(async (_options, deps) => {
+      deps.approvalNotifier?.({
+        taskId: "abort-dialog",
+        toolName: "write_file",
+        args: '{"path":"danger.txt","content":"x"}',
+        message: "approval",
+      });
+      const signal = deps.signal;
+      if (!signal) throw new Error("missing signal");
+      await new Promise<never>((_resolve, reject) => {
+        const rejectWithAbort = () => reject(signal.reason);
+        if (signal.aborted) {
+          rejectWithAbort();
+          return;
+        }
+        signal.addEventListener("abort", rejectWithAbort, { once: true });
+      });
+      throw new Error("unreachable");
+    });
+    const run = runTuiAgentPrompt(
+      { prompt: "write", dir: process.cwd(), session: "tui-session" },
+      { reporter, runAgent, openDialog, closeDialog, abortControllerRef },
+    );
+    await vi.waitFor(() => expect(openDialog).toHaveBeenCalledOnce());
+
+    handleTuiInterrupt(abortControllerRef.current, queue, reporter);
+
+    await expect(run).rejects.toMatchObject({ name: "AbortError" });
+    expect(closeDialog).toHaveBeenCalledWith("approval:pending");
+    expect(abortControllerRef.current).toBeNull();
   });
 
   it("approval command is handled locally and resolves a pending approval", async () => {

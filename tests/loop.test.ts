@@ -182,6 +182,74 @@ describe("AgentEngine Main Loop", () => {
     expect(registry.executed.map((call) => call.id)).toEqual(["c1"]);
   });
 
+  it("工具批次中止后同一 Session 可继续且 tool calls/results 保持配对", async () => {
+    let releaseTool!: () => void;
+    let toolStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      toolStarted = resolve;
+    });
+    const release = new Promise<void>((resolve) => {
+      releaseTool = resolve;
+    });
+    const contexts: Message[][] = [];
+    let providerCalls = 0;
+    const provider: LLMProvider = {
+      async generate(messages): Promise<Message> {
+        contexts.push(messages.map((message) => ({ ...message })));
+        providerCalls++;
+        if (providerCalls === 1) {
+          return {
+            role: "assistant",
+            content: "run tools",
+            toolCalls: [
+              { id: "abort-c1", name: "bash", arguments: "{}" },
+              { id: "abort-c2", name: "bash", arguments: "{}" },
+            ],
+          };
+        }
+        return { role: "assistant", content: "continued safely" };
+      },
+    };
+    const registry = new (class extends MockRegistry {
+      override async execute(call: ToolCall): Promise<ToolResult> {
+        this.executed.push(call);
+        if (call.id === "abort-c1") {
+          toolStarted();
+          await release;
+        }
+        return { toolCallId: call.id, output: `out-${call.id}`, isError: false };
+      }
+    })();
+    const engine = new AgentEngine({ provider, registry, workDir: "/tmp" });
+    const session = newSession("first run");
+    const controller = new AbortController();
+    const firstRun = engine.run(session, undefined, undefined, controller.signal);
+
+    await started;
+    controller.abort(new DOMException("interrupted", "AbortError"));
+    await expect(firstRun).rejects.toMatchObject({ name: "AbortError" });
+    releaseTool();
+
+    session.append({ role: "user", content: "continue after abort" });
+    const secondRun = await engine.run(session);
+
+    expect(secondRun.at(-1)?.content).toBe("continued safely");
+    const secondContext = contexts[1] ?? [];
+    const toolCallIds = secondContext.flatMap((message) =>
+      message.toolCalls?.map((call) => call.id) ?? [],
+    );
+    const toolResultIds = new Set(
+      secondContext.flatMap((message) => (message.toolCallId ? [message.toolCallId] : [])),
+    );
+    expect(toolCallIds).toEqual(["abort-c1", "abort-c2"]);
+    expect(toolCallIds.every((id) => toolResultIds.has(id))).toBe(true);
+    expect(
+      secondContext.some(
+        (message) => message.role === "user" && message.content === "continue after abort",
+      ),
+    ).toBe(true);
+  });
+
   it("run 传入的 runtimeReporter 接收本轮 stream delta", async () => {
     const constructorDelta = vi.fn();
     const runtimeDelta = vi.fn();

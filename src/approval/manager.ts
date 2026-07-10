@@ -60,6 +60,16 @@ export interface ApprovalNotice {
 /** 通知回调:由调用方注入(飞书发卡片 / 终端打印 / HTTP 推送) */
 export type ApprovalNotifier = (notice: ApprovalNotice) => void;
 
+interface PendingApproval {
+  resolve: (result: ApprovalResult) => void;
+  reject: (reason: unknown) => void;
+  timer: NodeJS.Timeout;
+  toolName: string;
+  args: string;
+  signal?: AbortSignal;
+  abortListener?: () => void;
+}
+
 /** 默认审批超时:30 分钟(超时自动 Reject,防协程泄漏) */
 const DEFAULT_APPROVAL_TIMEOUT_MS = 30 * 60 * 1000;
 
@@ -74,15 +84,7 @@ const DEFAULT_APPROVAL_TIMEOUT_MS = 30 * 60 * 1000;
  */
 export class ApprovalManager {
   /** TaskID → 挂起的 Promise resolver */
-  private readonly pendingTasks = new Map<
-    string,
-    {
-      resolve: (r: ApprovalResult) => void;
-      timer: NodeJS.Timeout;
-      toolName: string;
-      args: string;
-    }
-  >();
+  private readonly pendingTasks = new Map<string, PendingApproval>();
 
   /** 默认超时(ms) */
   private readonly timeoutMs: number;
@@ -102,7 +104,9 @@ export class ApprovalManager {
     args: string,
     notify: ApprovalNotifier,
     diff?: string,
+    signal?: AbortSignal,
   ): Promise<ApprovalResult> {
+    signal?.throwIfAborted();
     const message = `⚠ **高危操作审批请求**
 Agent 试图执行以下动作:
 - 工具: ${toolName}
@@ -110,23 +114,41 @@ Agent 试图执行以下动作:
 任务 ID: **${taskId}**
 👉 请回复 "approve ${taskId}" 同意放行,或 "reject ${taskId}" 拒绝执行。`;
 
-    return new Promise<ApprovalResult>((resolve) => {
+    return new Promise<ApprovalResult>((resolve, reject) => {
       // 【协程泄漏防护】超时自动判 Reject,清理内存
       const timer = setTimeout(() => {
-        if (this.pendingTasks.has(taskId)) {
-          this.pendingTasks.delete(taskId);
+        const entry = this.takePendingTask(taskId);
+        if (entry) {
           logger.warn(
             { taskId, timeoutMs: this.timeoutMs },
             `[Approval] 任务 ${taskId} 审批超时,自动拒绝。`,
           );
-          resolve({
+          entry.resolve({
             allowed: false,
             reason: `审批超时(${Math.floor(this.timeoutMs / 60000)} 分钟无人响应),系统自动拒绝。`,
           });
         }
       }, this.timeoutMs);
 
-      this.pendingTasks.set(taskId, { resolve, timer, toolName, args });
+      const entry: PendingApproval = { resolve, reject, timer, toolName, args };
+      if (signal) {
+        entry.signal = signal;
+        entry.abortListener = () => {
+          this.cancelApproval(
+            taskId,
+            "审批请求已因本轮中止而取消。",
+            signal.reason ?? new DOMException("aborted", "AbortError"),
+          );
+        };
+      }
+      this.pendingTasks.set(taskId, entry);
+      if (signal && entry.abortListener) {
+        signal.addEventListener("abort", entry.abortListener, { once: true });
+        if (signal.aborted) {
+          entry.abortListener();
+          return;
+        }
+      }
 
       // 通过通知通道发送审批请求(diff 可选,计算失败时为 undefined)
       notify({
@@ -145,13 +167,11 @@ Agent 试图执行以下动作:
    * 由审批回调(飞书 Webhook/终端输入)触发,唤醒挂起的执行流。
    */
   resolveApproval(taskId: string, allowed: boolean, reason: string): boolean {
-    const entry = this.pendingTasks.get(taskId);
+    const entry = this.takePendingTask(taskId);
     if (!entry) {
       logger.warn({ taskId }, `[Approval] 找不到对应的 TaskID: ${taskId},可能已超时或处理完毕。`);
       return false;
     }
-    clearTimeout(entry.timer);
-    this.pendingTasks.delete(taskId);
     logger.info(
       { taskId, allowed, reason },
       `[Approval] 收到审批结果 (TaskID: ${taskId}, Allowed: ${allowed}): ${reason}`,
@@ -167,13 +187,11 @@ Agent 试图执行以下动作:
    * 此时 allowed=true(放行退出 Plan Mode),但 modifiedContent 非 undefined(写回后再放行)。
    */
   resolveApprovalWithModify(taskId: string, reason: string, modifiedContent: string): boolean {
-    const entry = this.pendingTasks.get(taskId);
+    const entry = this.takePendingTask(taskId);
     if (!entry) {
       logger.warn({ taskId }, `[Approval] 找不到对应的 TaskID: ${taskId},可能已超时或处理完毕。`);
       return false;
     }
-    clearTimeout(entry.timer);
-    this.pendingTasks.delete(taskId);
     logger.info(
       { taskId, reason, modified: true },
       `[Approval] 收到审批结果 (TaskID: ${taskId}, Modified): ${reason}`,
@@ -183,16 +201,33 @@ Agent 试图执行以下动作:
   }
 
   /** 取消单个挂起审批任务,用于 Permission Arbiter 失去竞速或外部中止时释放资源。 */
-  cancelApproval(taskId: string, reason = "审批请求已取消。"): boolean {
-    const entry = this.pendingTasks.get(taskId);
+  cancelApproval(
+    taskId: string,
+    reason = "审批请求已取消。",
+    abortReason?: unknown,
+  ): boolean {
+    const entry = this.takePendingTask(taskId);
     if (!entry) {
       return false;
     }
-    clearTimeout(entry.timer);
-    this.pendingTasks.delete(taskId);
     logger.info({ taskId, reason }, `[Approval] 审批请求已取消 (TaskID: ${taskId}): ${reason}`);
-    entry.resolve({ allowed: false, reason });
+    if (abortReason !== undefined) {
+      entry.reject(abortReason);
+    } else {
+      entry.resolve({ allowed: false, reason });
+    }
     return true;
+  }
+
+  private takePendingTask(taskId: string): PendingApproval | undefined {
+    const entry = this.pendingTasks.get(taskId);
+    if (!entry) return undefined;
+    this.pendingTasks.delete(taskId);
+    clearTimeout(entry.timer);
+    if (entry.signal && entry.abortListener) {
+      entry.signal.removeEventListener("abort", entry.abortListener);
+    }
+    return entry;
   }
 
   /** 当前挂起的审批任务数(测试/监控用) */
@@ -207,8 +242,11 @@ Agent 试图执行以下动作:
 
   /** 清理所有挂起任务(测试用) */
   clear(): void {
-    for (const { timer } of this.pendingTasks.values()) {
-      clearTimeout(timer);
+    for (const entry of this.pendingTasks.values()) {
+      clearTimeout(entry.timer);
+      if (entry.signal && entry.abortListener) {
+        entry.signal.removeEventListener("abort", entry.abortListener);
+      }
     }
     this.pendingTasks.clear();
   }

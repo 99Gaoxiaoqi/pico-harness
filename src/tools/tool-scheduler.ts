@@ -81,6 +81,7 @@ export class ToolScheduler<R> {
   private queued: ScheduledTask<R>[] = [];
   private readonly maxConcurrency: number;
   private readonly signal?: AbortSignal;
+  private abortListener?: () => void;
   /** 是否已中止(避免重复处理,也用于 add 时短路) */
   private aborted = false;
 
@@ -102,6 +103,9 @@ export class ToolScheduler<R> {
    * 任务是否立即启动取决于它与当前 active/前面 queued 的冲突关系,以及并发名额。
    */
   add(task: ToolCallTask<R>): Promise<R> {
+    if (this.signal && !this.aborted && !this.abortListener) {
+      this.attachAbort(this.signal);
+    }
     // 创建外部可控的 Promise,返回句柄给调用方
     let resolveFn!: (value: R) => void;
     let rejectFn!: (reason: unknown) => void;
@@ -169,6 +173,9 @@ export class ToolScheduler<R> {
     const index = this.active.indexOf(task);
     if (index >= 0) this.active.splice(index, 1);
     this.startQueuedTasks();
+    if (this.active.length === 0 && this.queued.length === 0) {
+      this.dispose();
+    }
   }
 
   /**
@@ -201,7 +208,16 @@ export class ToolScheduler<R> {
       this.abortRemaining();
       return;
     }
-    signal.addEventListener("abort", () => this.abortRemaining(), { once: true });
+    if (this.abortListener) return;
+    this.abortListener = () => this.abortRemaining();
+    signal.addEventListener("abort", this.abortListener, { once: true });
+  }
+
+  /** 解绑本批次的 abort listener，loop 在 finally 中调用作为兜底。 */
+  dispose(): void {
+    if (!this.signal || !this.abortListener) return;
+    this.signal.removeEventListener("abort", this.abortListener);
+    this.abortListener = undefined;
   }
 
   /**
@@ -222,5 +238,6 @@ export class ToolScheduler<R> {
     };
     rejectAll(this.queued);
     rejectAll(this.active);
+    this.dispose();
   }
 }
