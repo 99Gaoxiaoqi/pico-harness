@@ -5,7 +5,11 @@
 //       把 OpenAI 返回的 tool_calls → 内部 schema.Message。
 // 不引入重型 SDK,直接用原生 fetch,更贴合"手写翻译层"的精神。
 
-import type { LLMProvider } from "./interface.js";
+import {
+  providerRequestSignal,
+  type LLMProvider,
+  type LLMProviderRequestOptions,
+} from "./interface.js";
 import type { Message, ToolCall, ToolDefinition, Usage } from "../schema/message.js";
 import type { ProviderConfig } from "./config.js";
 import { resolveProviderProfile, type ProviderProfile } from "./profile.js";
@@ -78,7 +82,11 @@ export class OpenAIProvider implements LLMProvider {
     return content;
   }
 
-  async generate(messages: Message[], availableTools: ToolDefinition[]): Promise<Message> {
+  async generate(
+    messages: Message[],
+    availableTools: ToolDefinition[],
+    options?: LLMProviderRequestOptions,
+  ): Promise<Message> {
     // 1. 翻译上下文消息
     const openaiMsgs: unknown[] = [];
     for (const msg of messages) {
@@ -150,7 +158,7 @@ export class OpenAIProvider implements LLMProvider {
         "Content-Type": "application/json",
       },
       body: bodyJson,
-      signal: AbortSignal.timeout(120_000), // 2 分钟超时,防网络挂起永久阻塞
+      signal: providerRequestSignal(options?.signal),
     });
 
     if (!resp.ok) {
@@ -211,6 +219,7 @@ export class OpenAIProvider implements LLMProvider {
     messages: Message[],
     availableTools: ToolDefinition[],
     onDelta: (delta: string) => void,
+    options?: LLMProviderRequestOptions,
   ): Promise<Message> {
     // 复用 generate 的消息翻译逻辑
     const openaiMsgs: unknown[] = [];
@@ -266,7 +275,7 @@ export class OpenAIProvider implements LLMProvider {
         "Content-Type": "application/json",
       },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(120_000),
+      signal: providerRequestSignal(options?.signal),
     });
 
     if (!resp.ok) {

@@ -131,6 +131,36 @@ describe("runAgentFromCli", () => {
     resetSessionSettingsForTests();
   });
 
+  it("已中止 signal 会阻止新 run 调用 provider", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-cli-aborted-"));
+    const provider = new ScriptedProvider([
+      {
+        role: "assistant",
+        content: "should not run",
+        usage: { promptTokens: 1, completionTokens: 1 },
+      },
+    ]);
+    const controller = new AbortController();
+    controller.abort(new DOMException("interrupted", "AbortError"));
+
+    await expect(
+      runAgentFromCli(
+        {
+          prompt: "do not start",
+          dir: workDir,
+          session: "aborted-session",
+          provider: "openai",
+        },
+        {
+          provider,
+          signal: controller.signal,
+        },
+      ),
+    ).rejects.toMatchObject({ name: "AbortError" });
+
+    expect(provider.calls).toHaveLength(0);
+  });
+
   it("runs a request in the selected workdir and returns the trace path when trace is explicit", async () => {
     const workDir = await mkdtemp(join(tmpdir(), "pico-cli-"));
     const provider = new ScriptedProvider([

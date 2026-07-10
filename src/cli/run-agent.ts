@@ -21,7 +21,7 @@ import {
 } from "../provider/factory.js";
 import { fallbackModelFor, isModelUnavailableError } from "../provider/fallback.js";
 import type { ProviderConfig } from "../provider/config.js";
-import type { LLMProvider } from "../provider/interface.js";
+import type { LLMProvider, LLMProviderRequestOptions } from "../provider/interface.js";
 import { resolveProviderProfile } from "../provider/profile.js";
 import type { ThinkingEffort } from "../provider/thinking.js";
 import type { ImagePart, Message, ToolDefinition } from "../schema/message.js";
@@ -115,12 +115,15 @@ export interface RunAgentCliDependencies {
   approvalNotifier?: ApprovalNotifier;
   toolDisclosure?: ToolDisclosure;
   mcpStatusSink?: (snapshot: McpStatusSnapshot) => void;
+  /** 宿主本轮运行的中止信号。 */
+  signal?: AbortSignal;
 }
 
 export async function runAgentFromCli(
   options: RunAgentCliOptions,
   dependencies: RunAgentCliDependencies = {},
 ): Promise<RunAgentCliResult> {
+  dependencies.signal?.throwIfAborted();
   const prompt = normalizePrompt(options.prompt);
   const kind = options.provider ?? "openai";
   const workDir = await resolveWorkDir(options.dir);
@@ -290,6 +293,7 @@ export async function runAgentFromCli(
 
   try {
     return await session.serialize(async () => {
+      dependencies.signal?.throwIfAborted();
       const images: ImagePart[] | undefined =
         effectiveOptions.images ??
         (effectiveOptions.imagePath ? [loadImage(effectiveOptions.imagePath, workDir)] : undefined);
@@ -299,7 +303,7 @@ export async function runAgentFromCli(
         ...(images ? { images } : {}),
       });
 
-      const messages = await engine.run(session);
+      const messages = await engine.run(session, undefined, undefined, dependencies.signal);
       const result: RunAgentCliResult = {
         sessionId: session.id,
         sessionSelection,
@@ -373,9 +377,13 @@ class CostTrackedModelFallbackProvider implements LLMProvider {
     this.activeProvider = this.createTrackedProvider(primaryConfig);
   }
 
-  async generate(messages: Message[], availableTools: ToolDefinition[]): Promise<Message> {
+  async generate(
+    messages: Message[],
+    availableTools: ToolDefinition[],
+    options?: LLMProviderRequestOptions,
+  ): Promise<Message> {
     try {
-      return await this.activeProvider.generate(messages, availableTools);
+      return await this.activeProvider.generate(messages, availableTools, options);
     } catch (err) {
       if (this.switched || !isModelUnavailableError(err, this.activeModel)) {
         throw err;
@@ -388,7 +396,7 @@ class CostTrackedModelFallbackProvider implements LLMProvider {
         model: this.fallbackModel,
       });
       this.switched = true;
-      return this.activeProvider.generate(messages, availableTools);
+      return this.activeProvider.generate(messages, availableTools, options);
     }
   }
 
@@ -396,12 +404,13 @@ class CostTrackedModelFallbackProvider implements LLMProvider {
     messages: Message[],
     availableTools: ToolDefinition[],
     onDelta: (delta: string) => void,
+    options?: LLMProviderRequestOptions,
   ): Promise<Message> {
     try {
       if (this.activeProvider.generateStream) {
-        return await this.activeProvider.generateStream(messages, availableTools, onDelta);
+        return await this.activeProvider.generateStream(messages, availableTools, onDelta, options);
       }
-      return await this.activeProvider.generate(messages, availableTools);
+      return await this.activeProvider.generate(messages, availableTools, options);
     } catch (err) {
       if (this.switched || !isModelUnavailableError(err, this.activeModel)) {
         throw err;
@@ -415,9 +424,9 @@ class CostTrackedModelFallbackProvider implements LLMProvider {
       });
       this.switched = true;
       if (this.activeProvider.generateStream) {
-        return this.activeProvider.generateStream(messages, availableTools, onDelta);
+        return this.activeProvider.generateStream(messages, availableTools, onDelta, options);
       }
-      return this.activeProvider.generate(messages, availableTools);
+      return this.activeProvider.generate(messages, availableTools, options);
     }
   }
 

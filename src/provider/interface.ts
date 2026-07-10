@@ -4,13 +4,30 @@
 
 import type { Message, ToolDefinition } from "../schema/message.js";
 
+const PROVIDER_TIMEOUT_MS = 120_000;
+
+export interface LLMProviderRequestOptions {
+  /** 宿主中止信号。Provider 应将它与自身超时合并后传给网络请求。 */
+  signal?: AbortSignal;
+}
+
+/** 合并宿主中止与 Provider 默认超时，任一触发即取消请求。 */
+export function providerRequestSignal(signal?: AbortSignal): AbortSignal {
+  const timeout = AbortSignal.timeout(PROVIDER_TIMEOUT_MS);
+  return signal ? AbortSignal.any([signal, timeout]) : timeout;
+}
+
 /** 与大模型通信的统一契约 */
 export interface LLMProvider {
   /**
    * 接收当前上下文历史与可用工具列表,发起一次大模型推理。
    * @returns 模型的响应消息 (可能含 toolCalls,也可能只有纯文本最终答案)
    */
-  generate(messages: Message[], availableTools: ToolDefinition[]): Promise<Message>;
+  generate(
+    messages: Message[],
+    availableTools: ToolDefinition[],
+    options?: LLMProviderRequestOptions,
+  ): Promise<Message>;
   /** 可选:provider 自治判定哪些错误可重试。未实现则由 retry 层用默认兜底判定。 */
   isRetryableError?(error: unknown): boolean;
   /** 可选:模型名,供重试 / 计费日志打点。 */
@@ -24,5 +41,6 @@ export interface LLMProvider {
     messages: Message[],
     availableTools: ToolDefinition[],
     onDelta: (delta: string) => void,
+    options?: LLMProviderRequestOptions,
   ): Promise<Message>;
 }
