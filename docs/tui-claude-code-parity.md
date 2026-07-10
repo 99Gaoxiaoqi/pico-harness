@@ -74,9 +74,44 @@ Pico 的 CLI session 以当前项目目录为边界：
 | `/agents`      | 列出内置 Agent 和项目 `.claude/agents/*.md`。                                              |
 | `/agent`       | 把任务委派给指定 Agent：`/agent <name> <task>`。                                           |
 | `/skills`      | 列出当前项目 `.claw/skills` 中可用 Skill。                                                 |
-| `/skill`       | 查看指定 Skill 正文：`/skill <name>`。                                                     |
+| `/skill`       | 显式激活 Skill 并交给 Agent 执行：`/skill <name> [arguments]`。                             |
+| `/add-dir`     | 列出或添加当前会话可访问的工作目录：`/add-dir [directory]`。                               |
 
 项目或用户自定义 Markdown 命令也会进入同一套 slash command registry。内置命令名优先保留，避免项目命令覆盖关键控制命令。
+
+### 显式 Skill 激活
+
+`/skill <name> [arguments]` 与动态的 `/<skill-name> [arguments]` 都会启动一次 Agent 请求，不再只是把 Skill 正文显示在本地。TUI 会先记录一条 `Skill activated` 事件，再把带来源、触发方式和参数的 Skill 指令作为用户请求交给模型。
+
+Skill 正文支持 Claude Code 风格参数：`$ARGUMENTS` 保留完整参数，`$ARGUMENTS[0]` 与 `$0` 表示第一个参数；正文没有占位符时，参数会以 `ARGUMENTS: ...` 附在末尾。
+
+### 附加工作目录
+
+文件工具默认只能访问启动时的项目根目录。访问外部绝对路径时，Pico 会在进入审批前拒绝，并提示先运行：
+
+```text
+/add-dir /path/to/shared-directory
+```
+
+目录加入当前会话后，Read、Write、Edit、Glob、Grep、审批 diff 和文件历史会共享同一组工作区根。写操作仍会按现有权限模式正常请求审批；`/add-dir` 本身只更新当前会话，不修改配置文件。
+
+启动时也可以重复传入 CLI 参数：
+
+```bash
+pico --add-dir ../shared --add-dir /absolute/generated
+```
+
+需要长期配置时，在项目的 `.pico/config.json` 中声明：
+
+```json
+{
+  "permissions": {
+    "additionalDirectories": ["../shared", "/absolute/generated"]
+  }
+}
+```
+
+配置中的相对路径以项目根目录为基准。附加目录只扩展文件工具的访问边界，不会从外部目录加载 `AGENTS.md`、hooks 或命令配置。
 
 ## Claude Code 兼容入口
 
@@ -114,7 +149,7 @@ Pico 会加载项目级 Claude agent profile：
 - `@skill:review`：附加指定 Skill 正文。
 - `@agent:tester`：提示优先使用子代理能力处理该 Agent 相关工作。
 
-路径引用会相对当前 `cwd` 解析，并限制在工作目录内。
+路径引用会相对当前 `cwd` 解析，并限制在主工作区或已通过 `/add-dir` 授权的目录内。
 
 ## 常见错误
 
@@ -142,6 +177,10 @@ npx tsx --env-file=/path/to/pico-harness/.env /path/to/pico-harness/src/cli/main
 未知 slash command 会显示 `Unknown slash command: /xxx`，并尽量给出 suggestions。请用 `/help` 查看内置命令，用 `/sessions`、`/agents`、`/skills` 查看当前项目加载到的动态能力。
 
 如果自定义 `.claude/commands` 没出现，检查文件是否以 `.md` 结尾，路径名是否只包含字母、数字、下划线、短横线和子目录冒号映射所需的目录结构。
+
+### 路径不在当前工作区
+
+如果工具结果提示“请先运行 `/add-dir <directory>`”，说明目标路径尚未加入工作区根集合。先执行 `/add-dir`，确认返回的 canonical path，再重试原任务。未授权路径不会弹出无效的写入审批。
 
 ### Worktree 没有 `.env`
 

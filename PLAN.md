@@ -1,6 +1,6 @@
 # 当前计划索引
 
-- [ ] **Claude Code 风格 Skill 与 Workspace**：设计见 `docs/superpowers/specs/2026-07-10-claude-skill-workspace-design.md`，执行计划见 `docs/superpowers/plans/2026-07-10-claude-skill-workspace.md`。三条并行支线分别负责 Skill 激活、Workspace Roots、`/add-dir`，主协调者最后完成共享接线和真实模型 E2E。
+- [x] **Claude Code 风格 Skill 与 Workspace**：设计见 `docs/superpowers/specs/2026-07-10-claude-skill-workspace-design.md`，执行计划见 `docs/superpowers/plans/2026-07-10-claude-skill-workspace.md`。三条并行支线分别负责 Skill 激活、Workspace Roots、`/add-dir`，主协调者已完成共享接线和真实模型 E2E。
 - [x] **Pico Claude Code 高拟真交互后续阶段总任务单**：详见 `docs/plans/2026-07-09-pico-claude-code-full-parity-roadmap.md`。在第一轮基础集成之上，按阶段 2-7 继续拆分为视觉交互、命令体系、权限工具、回滚会话、子代理体验、真实项目验收；每阶段使用独立 worktree 和子代理推进。
 - [x] **Pico Claude Code 风格启动与交互复刻**：详见 `docs/plans/2026-07-09-pico-claude-code-parity.md`。按极简边界拆为 6 个并行 worktree 子任务：session 启动、TUI 外壳、输入编辑、命令状态、Claude 资源兼容、回滚/权限 UI。
 - [x] **Pico TUI Slash Command 与 @ Mention 改造**：详见 `docs/plans/2026-07-08-pico-tui-slash-mention.md`。已拆分为 5 个可并行 worktree 子任务：命令核心、mention 附件、skills/markdown commands、TUI 候选面板、TUI/CLI 集成。

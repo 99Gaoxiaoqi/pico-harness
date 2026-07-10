@@ -1,6 +1,6 @@
 # Claude Code 风格 Skill 与 Workspace 实现计划
 
-> **面向 AI 代理的工作者：** 必需子技能：使用 superpowers:subagent-driven-development（推荐）逐任务实现此计划。步骤使用复选框（`- [ ]`）语法来跟踪进度。
+> **面向 AI 代理的工作者：** 必需子技能：使用 superpowers:subagent-driven-development（推荐）逐任务实现此计划。步骤使用复选框（`- [x]`）语法来跟踪进度。
 
 **目标：** 让显式 Skill 成为可观察的执行指令，并用 additional directories 统一解决工作区外文件访问与审批能力错位。
 
@@ -30,7 +30,7 @@
 - 创建：`tests/input/skill-activation.test.ts`
 - 修改：`tests/input/markdown-command-loader.test.ts`
 
-- [ ] **步骤 1：编写失败测试**
+- [x] **步骤 1：编写失败测试**
 
 ```ts
 it("wraps an explicitly activated skill as instructions", () => {
@@ -53,13 +53,13 @@ it("appends arguments when the skill has no placeholder", () => {
 });
 ```
 
-- [ ] **步骤 2：运行红灯**
+- [x] **步骤 2：运行红灯**
 
 运行：`npm test -- tests/input/skill-activation.test.ts tests/input/markdown-command-loader.test.ts`
 
 预期：FAIL，`skill-activation.ts` 尚不存在，旧 `$N` 规则也不符合 Claude Code。
 
-- [ ] **步骤 3：实现最少渲染 API**
+- [x] **步骤 3：实现最少渲染 API**
 
 ```ts
 export interface SkillActivationInput {
@@ -79,13 +79,13 @@ export function renderSkillActivation(input: SkillActivationInput): {
 
 实现 `$ARGUMENTS`、`$ARGUMENTS[N]`、`$N` 和无占位符追加，XML 属性必须转义。
 
-- [ ] **步骤 4：运行绿灯与静态检查**
+- [x] **步骤 4：运行绿灯与静态检查**
 
 运行：`npm test -- tests/input/skill-activation.test.ts tests/input/markdown-command-loader.test.ts && npx eslint src/input/skill-activation.ts src/input/markdown-command-loader.ts tests/input/skill-activation.test.ts tests/input/markdown-command-loader.test.ts && npm run typecheck`
 
 预期：目标测试、lint、typecheck 全部通过。
 
-- [ ] **步骤 5：提交**
+- [x] **步骤 5：提交**
 
 ```bash
 git add src/input/skill-activation.ts src/input/markdown-command-loader.ts tests/input/skill-activation.test.ts tests/input/markdown-command-loader.test.ts
@@ -103,7 +103,7 @@ git commit -m "feat(skill): 增加显式技能激活语义"
 - 创建：`tests/tools/workspace-roots.test.ts`
 - 创建：`tests/tools/additional-directory-tools.test.ts`
 
-- [ ] **步骤 1：编写失败测试**
+- [x] **步骤 1：编写失败测试**
 
 ```ts
 it("rejects an external path until its directory is added", async () => {
@@ -121,13 +121,13 @@ it("rejects a workspace symlink that resolves outside", async () => {
 });
 ```
 
-- [ ] **步骤 2：运行红灯**
+- [x] **步骤 2：运行红灯**
 
 运行：`npm test -- tests/tools/workspace-roots.test.ts tests/tools/additional-directory-tools.test.ts`
 
 预期：FAIL，`WorkspaceRoots` 尚不存在。
 
-- [ ] **步骤 3：实现共享能力并注入工具**
+- [x] **步骤 3：实现共享能力并注入工具**
 
 ```ts
 export class WorkspaceRoots {
@@ -143,13 +143,13 @@ export function buildWorkspaceBoundaryMiddleware(roots: WorkspaceRoots): Middlew
 
 所有路径型工具构造函数接收同一 `WorkspaceRoots`；`DefaultToolRegistryOptions` 增加 `workspaceRoots?: WorkspaceRoots`。保留 `safeResolve(workDir, path)` 兼容导出，但内部改为单 root 的严格 helper。
 
-- [ ] **步骤 4：运行绿灯与静态检查**
+- [x] **步骤 4：运行绿灯与静态检查**
 
 运行：`npm test -- tests/tools/workspace-roots.test.ts tests/tools/additional-directory-tools.test.ts tests/tools/diff-preview.test.ts tests/tools/glob.test.ts tests/tools/grep.test.ts && npx eslint src/tools tests/tools/workspace-roots.test.ts tests/tools/additional-directory-tools.test.ts && npm run typecheck`
 
 预期：目标测试、lint、typecheck 全部通过。
 
-- [ ] **步骤 5：提交**
+- [x] **步骤 5：提交**
 
 ```bash
 git add src/tools tests/tools/workspace-roots.test.ts tests/tools/additional-directory-tools.test.ts
@@ -166,7 +166,7 @@ git commit -m "feat(workspace): 支持附加工作目录"
 - 修改：`tests/input/session-settings.test.ts`
 - 修改：`tests/input/pico-command-registry.test.ts`
 
-- [ ] **步骤 1：编写失败测试**
+- [x] **步骤 1：编写失败测试**
 
 ```ts
 it("adds a directory to the current session through /add-dir", async () => {
@@ -182,13 +182,13 @@ it("loads permissions.additionalDirectories from .pico/config.json", async () =>
 });
 ```
 
-- [ ] **步骤 2：运行红灯**
+- [x] **步骤 2：运行红灯**
 
 运行：`npm test -- tests/input/add-directory.test.ts tests/input/session-settings.test.ts tests/input/pico-command-registry.test.ts`
 
 预期：FAIL，命令、配置 loader 和 session 字段尚不存在。
 
-- [ ] **步骤 3：实现命令与结构化接口**
+- [x] **步骤 3：实现命令与结构化接口**
 
 ```ts
 export interface AdditionalDirectoryManager {
@@ -201,13 +201,13 @@ export async function loadConfiguredAdditionalDirectories(workDir: string): Prom
 
 `SessionSettings` 增加 `additionalDirectories: string[]`；`/add-dir` 无参数列出目录，有参数调用 manager，并把 canonical path 同步进 settings。
 
-- [ ] **步骤 4：运行绿灯与静态检查**
+- [x] **步骤 4：运行绿灯与静态检查**
 
 运行：`npm test -- tests/input/add-directory.test.ts tests/input/session-settings.test.ts tests/input/pico-command-registry.test.ts && npx eslint src/input tests/input/add-directory.test.ts tests/input/session-settings.test.ts tests/input/pico-command-registry.test.ts && npm run typecheck`
 
 预期：目标测试、lint、typecheck 全部通过。
 
-- [ ] **步骤 5：提交**
+- [x] **步骤 5：提交**
 
 ```bash
 git add src/input tests/input/add-directory.test.ts tests/input/session-settings.test.ts tests/input/pico-command-registry.test.ts
@@ -228,7 +228,7 @@ git commit -m "feat(workspace): 增加附加目录命令"
 - 测试：`tests/tui/tui-reporter.test.ts`
 - 测试：`tests/cli-run-agent.test.ts`
 
-- [ ] **步骤 1：编写 Skill 命令与 transcript 失败测试**
+- [x] **步骤 1：编写 Skill 命令与 transcript 失败测试**
 
 ```ts
 it("executes /skill as an activated prompt command", async () => {
@@ -253,7 +253,7 @@ it("records a durable skill activation entry before running the agent", async ()
 });
 ```
 
-- [ ] **步骤 2：编写审批前路径拒绝失败测试**
+- [x] **步骤 2：编写审批前路径拒绝失败测试**
 
 ```ts
 it("rejects an unregistered external path before approval", async () => {
@@ -269,13 +269,13 @@ it("rejects an unregistered external path before approval", async () => {
 });
 ```
 
-- [ ] **步骤 3：运行红灯**
+- [x] **步骤 3：运行红灯**
 
 运行：`npm test -- tests/input/pico-command-registry.test.ts tests/tui/repl-input-routing.test.tsx tests/cli-run-agent.test.ts`
 
 预期：FAIL，`/skill` 仍为 local command，TUI 尚无 skill entry，workspace middleware 尚未接在 approval 之前。
 
-- [ ] **步骤 4：完成共享接线**
+- [x] **步骤 4：完成共享接线**
 
 ```ts
 const workspaceRoots = await WorkspaceRoots.create(workDir, [
@@ -288,9 +288,9 @@ registry.use(buildApprovalMiddleware(/* existing arguments */));
 
 启动时合并 config/CLI dirs，创建唯一 `WorkspaceRoots`，同时注入 registry、session settings 与 command registry。`/skill` 和动态 Skill command 都调用 `renderSkillActivation()`；TUI 根据 prompt metadata 添加 Skill entry。`RunAgentCliOptions`、`ReplOptions` 增加 `addDirs?: string[]`，每轮把 session 中的 additional directories 传给 `runAgentFromCli`。
 
-- [ ] **步骤 5：运行绿灯**：`npm test -- tests/input tests/tools tests/tui/repl-input-routing.test.tsx tests/tui/tui-reporter.test.ts tests/cli-run-agent.test.ts`
-- [ ] **步骤 6：运行 lint/typecheck**：`npm run lint && npm run typecheck`
-- [ ] **步骤 7：提交**：`git commit -m "feat(tui): 接通技能与附加目录交互"`
+- [x] **步骤 5：运行绿灯**：`npm test -- tests/input tests/tools tests/tui/repl-input-routing.test.tsx tests/tui/tui-reporter.test.ts tests/cli-run-agent.test.ts`
+- [x] **步骤 6：运行 lint/typecheck**：`npm run lint && npm run typecheck`
+- [x] **步骤 7：提交**：`git commit -m "feat(tui): 接通技能与附加目录交互"`
 
 ### 任务 5（主协调者）：真实模型 E2E、文档与收口
 
@@ -300,7 +300,7 @@ registry.use(buildApprovalMiddleware(/* existing arguments */));
 - 修改：`ROADMAP.md`
 - 修改：`PLAN.md`
 
-- [ ] **步骤 1：编写真实模型 E2E**
+- [x] **步骤 1：编写真实模型 E2E**
 
 ```ts
 it.runIf(process.env.RUN_LLM_E2E === "1")(
@@ -323,10 +323,10 @@ it.runIf(process.env.RUN_LLM_E2E === "1")(
 ```
 
 临时 Skill 要求创建 marker；显式调用后模型必须按 Skill 操作；未授权外部目录失败且没有审批；`/add-dir` 后同一路径进入正常写审批。
-- [ ] **步骤 2：运行 mock 全量验证**：`npm test`
-- [ ] **步骤 3：运行质量验证**：`npm run lint && npm run typecheck && npm run build && npm audit --audit-level=high`
-- [ ] **步骤 4：运行真实模型验证**：`RUN_LLM_E2E=1 npm run test:e2e -- tests/e2e/skill-workspace-real-llm-e2e.test.ts`
-- [ ] **步骤 5：更新 ROADMAP/PLAN 并提交**：`git commit -m "test(e2e): 验证技能与附加目录闭环"`
+- [x] **步骤 2：运行 mock 全量验证**：`npm test`
+- [x] **步骤 3：运行质量验证**：`npm run lint && npm run typecheck && npm run build && npm audit --audit-level=high`
+- [x] **步骤 4：运行真实模型验证**：`RUN_LLM_E2E=1 npm run test:e2e -- tests/e2e/skill-workspace-real-llm-e2e.test.ts`
+- [x] **步骤 5：更新 ROADMAP/PLAN 并提交**：`git commit -m "test(e2e): 验证技能与附加目录闭环"`
 
 ## 计划自检
 

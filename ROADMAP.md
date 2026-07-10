@@ -304,7 +304,7 @@ git worktree remove ../pico-1-streaming
 - [x] 7.5 命令发现：扫描收敛、完整候选、分类与统一 Help 元数据（input/tui 聚焦测试 421 个通过；typecheck / lint / diff check 通过）
 - [x] 7.6 产品外壳：Logo 首项、动态状态行和结构化错误（TUI 聚焦测试 312 个通过；typecheck / lint / diff check 通过；真实任务摘要收口测试 33 个通过）
 - [x] 7.7 真实模型 E2E 与完整集成验证（新增 `tests/e2e/tui-real-llm-e2e.test.ts`；未设置 `RUN_LLM_E2E` 时 helper 1 个通过、真实模型 4 个 skipped；`RUN_LLM_E2E=1` 共 5 个通过，覆盖问候无工具、写入审批挂起后拒绝、中断 AbortError 后同 session 续跑、长回复多轮 transcript）
-- [ ] 7.8 Claude Code 风格 Skill 与 Workspace：显式 Skill 激活、additional directories、`/add-dir`、审批前路径守卫、TUI 可见事件与真实模型 E2E（设计：`docs/superpowers/specs/2026-07-10-claude-skill-workspace-design.md`；计划：`docs/superpowers/plans/2026-07-10-claude-skill-workspace.md`）
+- [x] 7.8 Claude Code 风格 Skill 与 Workspace：显式 Skill 激活、additional directories、`/add-dir`、审批前路径守卫、TUI 可见事件与真实模型 E2E（设计：`docs/superpowers/specs/2026-07-10-claude-skill-workspace-design.md`；计划：`docs/superpowers/plans/2026-07-10-claude-skill-workspace.md`）
 
 ---
 
@@ -443,6 +443,12 @@ git worktree remove ../pico-1-streaming
 ---
 
 ## 📅 变更记录
+
+- 2026-07-10：完成 7.8 Claude Code 风格 Skill 与 Workspace
+  - `/skill <name> [arguments]` 与动态 `/<skill-name>` 均生成显式激活的 synthetic user prompt，TUI 记录结构化 Skill 事件。
+  - 新增 WorkspaceRoots、`/add-dir`、可重复 `--add-dir` 与 `.pico/config.json` additionalDirectories；文件边界在审批前确定性拒绝。
+  - Read/Write/Edit/Glob/Grep、审批 diff 与文件历史共享附加目录能力；未授权目录不弹无效审批，授权后恢复正常写审批。
+  - 验证：全量 mock 153 个文件、1880 项通过；lint、typecheck、build、audit 通过；真实模型 Skill + 外部目录闭环 1/1 通过。
 
 - 2026-07-08：阶段 5.6 TUI 界面实现（修订原"不做"决策）
   - 原 ROADMAP 标 5.6"不做（与 HTTP+WS 路线重复）"；经 Claude Code 源码调研确认其用 ink+React，决定采用同款技术栈实现交互 REPL
