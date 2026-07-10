@@ -140,7 +140,7 @@ describe("SkillRegistry 集成测试", () => {
       warnSpy.mockRestore();
     });
 
-    test("技能改进后创建新版本", async () => {
+    test("新技能创建时记录初始版本", async () => {
       const skill = await registry.add(
         "可改进技能",
         "改进触发",
@@ -151,9 +151,6 @@ describe("SkillRegistry 集成测试", () => {
       expect(skill.versions).toHaveLength(1);
       expect(skill.versions[0].version).toBe(1);
       expect(skill.versions[0].reason).toBe("初始版本");
-
-      // TODO: 需要添加 SkillRegistry.updateInstructions() 方法
-      // 当前测试标记为预期功能
     });
   });
 

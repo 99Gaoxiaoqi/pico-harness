@@ -167,7 +167,7 @@ git worktree remove ../pico-1-streaming
 - [x] 从 history 末尾向前删，跳过 injection（system 消息）
 - [x] 遇到 compaction 边界停止
 - [x] 截断到第 count 个 user prompt 之前
-- [ ] 清空 deferredMessages / pendingToolResultIds（字段预留到 3.4，不在阶段 1.5 实现）
+- [x] 清空 deferredMessages / pendingToolCallIds（已于 3.4 实现，并由 session deferred 测试覆盖）
 - [x] JSONL 持久化：追加 undo 记录
 - [x] Session 新增 `rewindTo(messageIndex)`：截断到指定位
 - [x] 测试：对话 5 轮 → undo(2) → 验证只剩 3 轮；undo 跳过 injection（6 个测试通过）
@@ -181,7 +181,7 @@ git worktree remove ../pico-1-streaming
 - [x] 测试：三轴各自独立 + 组合（3 个测试通过，累计 44）
 - [x] 提交
 
-### 1.5.8 CLI 集成 + 替换旧方案
+### 1.5.8 CLI 集成 + 替换旧方案 ✅
 - [x] CLI 加 `--rewind` 命令：列出可选快照点
 - [x] `--rewind <message-id>`：三轴选择（code / conversation / both）
 - [x] `--list-snapshots`：列出所有快照及文件变更统计
@@ -245,7 +245,7 @@ git worktree remove ../pico-1-streaming
 
 ---
 
-## 阶段 5.1：Claude Code TUI Parity（并行开发计划）
+## 阶段 5.1：Claude Code TUI Parity（已完成）
 
 > **目标**：按真实 Claude Code 源码对比结果，补齐 Pico 的 TUI 交互内核、统一命令体系、`@` 附件、`/rewind` 确认、项目 session identity 和后续多代理任务基础。
 >
@@ -272,7 +272,7 @@ git worktree remove ../pico-1-streaming
 
 ---
 
-## 阶段 6：Claude Code Runtime Parity（进行中）
+## 阶段 6：Claude Code Runtime Parity（已完成）
 
 > **目标**：继续对比 `/Users/anxuan/workspace/claude-code-main/src`，把 Pico 从“长得像 Claude Code 的 TUI”推进到“运行时机制也接近 Claude Code”。
 >
@@ -289,7 +289,7 @@ git worktree remove ../pico-1-streaming
 
 ---
 
-## 阶段 7：TUI 产品化（进行中）
+## 阶段 7：TUI 产品化（已完成）
 
 > **目标**：采用 Claude Code 的 transcript/渲染思路与 Kimi Code 的命令管理体验，修复 Pico TUI 的运行时真实性、焦点、长会话滚动和能力可发现性。
 >
@@ -421,14 +421,20 @@ git worktree remove ../pico-1-streaming
 | 阶段 3 | 7 | 7 | ✅ 完成 |
 | 阶段 4 | 5 | 5 | ✅ 完成 |
 | 阶段 5 | 8 | 8 | ✅ 全部闭环（5.2/5.4 经调研确认不做） |
+| 阶段 5.1 | 11 | 11 | ✅ 完成 |
 | 阶段 6 | 8 | 8 | ✅ 完成 |
-| **总计** | **48** | **48** | ✅ 阶段 6 完成 |
+| 阶段 7 | 8 | 8 | ✅ 完成 |
+| **总计** | **67** | **67** | ✅ 阶段 7.8 完成 |
 
 ---
 
 ## 📝 补充任务（发现的新问题追加到这里）
 
 <!-- 开发过程中发现的新需求，追加到这里，注明发现日期 -->
+
+- 2026-07-10（阶段 8 候选，未排期）：SkillRegistry 指令更新与版本演进
+  - 当前状态：新技能会记录初始版本，尚未提供更新已有技能指令的公开接口。
+  - 后续范围：评估 `updateInstructions()` API、持久化迁移、版本原因记录与对应测试；未进入当前交付范围。
 
 - 2026-07-07（阶段 2 真实模型 e2e 发现）：`TodoStore.load()` 幂等性导致跨实例不可见 ✅ 已修复（2026-07-08）
   - 现象：`load()` 首次加载后置 `loaded=true`，后续调用直接返回内存缓存，不再重读磁盘。多个 `TodoStore` 实例（如 PromptComposer 的、TodoTool 的、CLI 新进程的）各自维护独立内存缓存，互相看不到对方的写入。
@@ -443,6 +449,11 @@ git worktree remove ../pico-1-streaming
 ---
 
 ## 📅 变更记录
+
+- 2026-07-10：项目收口清理
+  - 重新核对阶段 1～7，补计阶段 5.1 与阶段 7，当前正式任务为 67/67 完成。
+  - 将阶段 1.5.6 的 deferred 状态清理同步为已由 3.4 实现，历史执行计划明确标记为非当前进度来源。
+  - 将 SkillRegistry 指令更新从测试中的隐藏 TODO 移入阶段 8 候选，不纳入当前交付范围。
 
 - 2026-07-10：完成 7.8 Claude Code 风格 Skill 与 Workspace
   - `/skill <name> [arguments]` 与动态 `/<skill-name>` 均生成显式激活的 synthetic user prompt，TUI 记录结构化 Skill 事件。
