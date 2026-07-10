@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { mkdir, readdir, realpath } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { AgentEngine } from "../engine/loop.js";
@@ -39,6 +40,7 @@ import {
   globalApprovalManager,
   globalApprovalPolicy,
   isAgentOpsDangerousCommand,
+  type ApprovalManager,
   type ApprovalNotifier,
 } from "../approval/manager.js";
 import { computeApprovalDiff } from "../approval/diff.js";
@@ -512,10 +514,11 @@ function buildObservationProcessor(workDir: string) {
   return createToolResultObservationProcessor({ store });
 }
 
-function buildApprovalMiddleware(
+export function buildApprovalMiddleware(
   notifier: ApprovalNotifier,
   workDir: string,
   signal?: AbortSignal,
+  approvalManager: ApprovalManager = globalApprovalManager,
 ): MiddlewareFunc {
   return async (call) => {
     return globalApprovalPolicy.decide(
@@ -524,8 +527,9 @@ function buildApprovalMiddleware(
       async () => {
         // 拦截时计算 before/after diff,失败返回 undefined 不阻断审批
         const diff = await computeApprovalDiff(call.name, call.arguments, workDir);
-        return globalApprovalManager.waitForApproval(
-          call.id,
+        // Provider call id 只在局部轮次内唯一,不能用作全局审批主键。
+        return approvalManager.waitForApproval(
+          `approval_${randomUUID()}`,
           call.name,
           call.arguments,
           notifier,
