@@ -11,7 +11,7 @@
 // 算明经济账是落地的关键:衡量 Agent 优秀与否除看代码能否跑通,更看 Token 效率。
 // 不把成本监控落到实处,就无法优化 System Prompt 长度,也无从判断上下文压缩是否省钱。
 
-import type { LLMProvider } from "../provider/interface.js";
+import type { LLMProvider, LLMProviderRequestOptions } from "../provider/interface.js";
 import type { Message, ToolDefinition } from "../schema/message.js";
 import type { Session } from "../engine/session.js";
 import { estimateCost, type BillingRoute } from "./pricing.js";
@@ -35,9 +35,13 @@ export class CostTracker implements LLMProvider {
     return typeof this.modelRoute === "string" ? this.modelRoute : this.modelRoute.model;
   }
 
-  async generate(messages: Message[], availableTools: ToolDefinition[]): Promise<Message> {
+  async generate(
+    messages: Message[],
+    availableTools: ToolDefinition[],
+    options?: LLMProviderRequestOptions,
+  ): Promise<Message> {
     const start = Date.now();
-    const resp = await this.next.generate(messages, availableTools);
+    const resp = await this.next.generate(messages, availableTools, options);
     const latencyMs = Date.now() - start;
 
     if (resp.usage) {
@@ -85,14 +89,15 @@ export class CostTracker implements LLMProvider {
     messages: Message[],
     availableTools: ToolDefinition[],
     onDelta: (delta: string) => void,
+    options?: LLMProviderRequestOptions,
   ): Promise<Message> {
     // 内部 provider 不支持流式时，降级到非流式 generate
     if (!this.next.generateStream) {
-      return this.generate(messages, availableTools);
+      return this.generate(messages, availableTools, options);
     }
 
     const start = Date.now();
-    const resp = await this.next.generateStream(messages, availableTools, onDelta);
+    const resp = await this.next.generateStream(messages, availableTools, onDelta, options);
     const latencyMs = Date.now() - start;
 
     if (resp.usage) {

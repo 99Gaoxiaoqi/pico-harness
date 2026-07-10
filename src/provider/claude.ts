@@ -7,7 +7,11 @@
 // 3. 工具结果是 user 消息里的 tool_result block (非 role=tool)
 // 4. 工具 Schema 需把 properties / required 分别填充进 input_schema
 
-import type { LLMProvider } from "./interface.js";
+import {
+  providerRequestSignal,
+  type LLMProvider,
+  type LLMProviderRequestOptions,
+} from "./interface.js";
 import type { Message, ToolCall, ToolDefinition, Usage } from "../schema/message.js";
 import type { ProviderConfig } from "./config.js";
 import { resolveProviderProfile, type ProviderProfile } from "./profile.js";
@@ -52,7 +56,11 @@ export class ClaudeProvider implements LLMProvider {
     return this.config.model;
   }
 
-  async generate(messages: Message[], availableTools: ToolDefinition[]): Promise<Message> {
+  async generate(
+    messages: Message[],
+    availableTools: ToolDefinition[],
+    options?: LLMProviderRequestOptions,
+  ): Promise<Message> {
     // 1. 构建请求体(消息翻译 + 工具 schema + thinking + cache 注入)
     const body = this.buildRequestBody(messages, availableTools);
 
@@ -65,7 +73,7 @@ export class ClaudeProvider implements LLMProvider {
         "Content-Type": "application/json",
       },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(120_000), // 2 分钟超时,防网络挂起永久阻塞
+      signal: providerRequestSignal(options?.signal),
     });
 
     if (!resp.ok) {
@@ -109,6 +117,7 @@ export class ClaudeProvider implements LLMProvider {
     messages: Message[],
     availableTools: ToolDefinition[],
     onDelta: (delta: string) => void,
+    options?: LLMProviderRequestOptions,
   ): Promise<Message> {
     // 1. 构建请求体(与 generate 共用,加 stream: true)
     const body = this.buildRequestBody(messages, availableTools);
@@ -123,7 +132,7 @@ export class ClaudeProvider implements LLMProvider {
         "Content-Type": "application/json",
       },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(120_000),
+      signal: providerRequestSignal(options?.signal),
     });
 
     if (!resp.ok) {

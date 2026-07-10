@@ -10,7 +10,7 @@
 // 而是依靠喂给它的 Session 实例进行推理 —— 随时休眠、随时被唤醒的记忆连续体。
 // 每轮组装 = SystemPrompt + Session.GetWorkingMemory(N),严格限制 Context 规模。
 
-import type { LLMProvider } from "../provider/interface.js";
+import type { LLMProvider, LLMProviderRequestOptions } from "../provider/interface.js";
 import { ContextOverflowError } from "../provider/errors.js";
 import { generateWithRetry, type RetryInfo } from "../provider/retry.js";
 import type { Message, ToolCall, ToolDefinition, ToolResult } from "../schema/message.js";
@@ -246,11 +246,17 @@ export class AgentEngine implements AgentRunner {
     const generateStreamFn = provider.generateStream;
     if (!generateStreamFn) return provider;
     return {
-      generate: (msgs: Message[], tools: ToolDefinition[]) =>
-        generateStreamFn.call(provider, msgs, tools, (delta: string) => {
-          const reporter = this.runtimeReporter ?? this.reporter;
-          reporter.onTextDelta?.(delta);
-        }),
+      generate: (msgs: Message[], tools: ToolDefinition[], options?: LLMProviderRequestOptions) =>
+        generateStreamFn.call(
+          provider,
+          msgs,
+          tools,
+          (delta: string) => {
+            const reporter = this.runtimeReporter ?? this.reporter;
+            reporter.onTextDelta?.(delta);
+          },
+          options,
+        ),
       get modelName() {
         return provider.modelName;
       },
@@ -388,6 +394,7 @@ export class AgentEngine implements AgentRunner {
     tools: ToolDefinition[],
     baseContext: Message[],
     span?: Span,
+    signal?: AbortSignal,
   ): Promise<Message> {
     // attempt 0:直接用调用方已压缩好的 baseContext,避免重复压缩
     let context = baseContext;
@@ -395,10 +402,12 @@ export class AgentEngine implements AgentRunner {
     let compactionDone = false;
     for (let attempt = 0; ; attempt++) {
       try {
+        signal?.throwIfAborted();
         // 【集成点】普通重试层(generateWithRetry)在内,响应式压缩在外:
         // 429/5xx/网络错误在此重试;ContextOverflowError 不被普通重试吞掉
         // (defaultIsRetryableError 已排除),冒泡到本方法 catch 做响应式降级。
         return await generateWithRetry(this.provider, context, tools, {
+          signal,
           onRetry: this.makeRetryReporter(span),
           onRateLimited: () => this.rotateProvider(),
         });
@@ -412,6 +421,7 @@ export class AgentEngine implements AgentRunner {
           // 字符级降级用尽仍 overflow,在抛错前用 provider 把 history 前缀浓缩成摘要替换,
           // 成功后用新 history 重新组装 context 从默认预算重试。仅触发 1 次,防死循环。
           if (this.fullCompactor && !compactionDone) {
+            signal?.throwIfAborted();
             compactionDone = true;
             // 保留尾部:最近约半个最降级窗口的消息(对标 kimi-code computeCompactCount)
             const lastMemoryFactor = AgentEngine.OVERFLOW_MEMORY_FACTORS[attempt]!;
@@ -424,6 +434,7 @@ export class AgentEngine implements AgentRunner {
               `[Engine] ⚠ 字符级降级用尽,触发模型摘要压缩(FullCompactor),保留尾部 ${retainLastN} 条`,
             );
             const compacted = await this.fullCompactor.compact(session, retainLastN);
+            signal?.throwIfAborted();
             if (compacted) {
               // 压缩成功:用新 history 重新组装 context,从默认预算重试
               const newWorkingMemory = session.getWorkingMemory(this.workingMemoryLimit);
@@ -512,7 +523,9 @@ export class AgentEngine implements AgentRunner {
     session: Session,
     runtimeReporter?: Reporter,
     runtimeTracer?: Tracer,
+    signal?: AbortSignal,
   ): Promise<Message[]> {
+    signal?.throwIfAborted();
     const reporter = runtimeReporter ?? this.reporter;
     const tracer = runtimeTracer ?? this.tracer;
     const rootSpan = tracer?.startRoot("Agent.Run", {
@@ -528,6 +541,7 @@ export class AgentEngine implements AgentRunner {
 
     // Plan Mode 开启时,每次 run 动态组装 System Prompt(反映最新工作区状态)
     const systemPrompt = await this.buildSystemPrompt();
+    signal?.throwIfAborted();
 
     let beforeLen = session.length;
     let turnCount = 0;
@@ -539,6 +553,7 @@ export class AgentEngine implements AgentRunner {
     // The Main Loop:心跳开始 (ReAct 循环)
     try {
       for (;;) {
+        signal?.throwIfAborted();
         turnCount++;
         const turnBudget = this.budget.canStartTurn(turnCount);
         if (!turnBudget.allowed) {
@@ -667,7 +682,9 @@ export class AgentEngine implements AgentRunner {
               availableTools,
               compactedContext,
               actionSpan,
+              signal,
             );
+            signal?.throwIfAborted();
             // 若本轮内部触发了模型摘要压缩(session.history 被缩短),调整 beforeLen
             // 让返回切片包含摘要起的所有消息(对标硬重置路径的 beforeLen 调整)
             if (session.length < beforeLen) {
@@ -708,6 +725,7 @@ export class AgentEngine implements AgentRunner {
               turn: turnCount,
               lastMessage: responseMsg,
             });
+            signal?.throwIfAborted();
             if (decision?.continue) {
               session.append({
                 role: "user",
@@ -730,14 +748,19 @@ export class AgentEngine implements AgentRunner {
           // 防止一批大量不冲突只读工具同时打 IO 把系统压垮。
           const scheduler = new ToolScheduler<{ message: Message; reminder?: Message }>({
             maxConcurrency: AgentEngine.MAX_TOOL_CONCURRENCY,
+            signal,
           });
           const scheduled = toolCalls.map((tc) =>
             scheduler.add({
               accesses: getAccesses ? getAccesses.call(this.registry, tc) : ToolAccesses.all(),
-              start: async () => this.runOneTool(tc, reporter, session.id, turnSpan),
+              start: async () => {
+                signal?.throwIfAborted();
+                return this.runOneTool(tc, reporter, session.id, turnSpan, signal);
+              },
             }),
           );
           const results = await Promise.all(scheduled);
+          signal?.throwIfAborted();
 
           const observations: Message[] = new Array(toolCalls.length);
           const reminderMessages: Message[] = [];
@@ -779,7 +802,8 @@ export class AgentEngine implements AgentRunner {
         }
       }
       if (exhaustedReason) {
-        await this.runGraceCall(session, systemPrompt, exhaustedReason, reporter, rootSpan);
+        signal?.throwIfAborted();
+        await this.runGraceCall(session, systemPrompt, exhaustedReason, reporter, rootSpan, signal);
       }
     } finally {
       this.runtimeReporter = previousRuntimeReporter;
@@ -800,6 +824,7 @@ export class AgentEngine implements AgentRunner {
     reporter: Reporter,
     sessionId?: string,
     parentSpan?: Span,
+    signal?: AbortSignal,
   ): Promise<{ message: Message; result: ToolResult; reminder?: Message }> {
     const toolSpan = parentSpan?.startChild("Tool.Execute", {
       toolName: toolCall.name,
@@ -807,6 +832,7 @@ export class AgentEngine implements AgentRunner {
       arguments: toolCall.arguments,
     });
     try {
+      signal?.throwIfAborted();
       reporter.onToolCall(toolCall.name, toolCall.arguments);
       const guardDecision = this.guardrail.beforeCall(toolCall);
       let result: ToolResult;
@@ -817,7 +843,9 @@ export class AgentEngine implements AgentRunner {
           isError: true,
         };
       } else {
+        signal?.throwIfAborted();
         result = await this.registry.execute(toolCall);
+        signal?.throwIfAborted();
       }
 
       // 【核心拦截与注入】工具执行失败时,交由 RecoveryManager 诊断并注入"锦囊妙计"。
@@ -834,6 +862,7 @@ export class AgentEngine implements AgentRunner {
         finalOutput,
         sessionId,
       );
+      signal?.throwIfAborted();
 
       toolSpan?.addAttributes({
         isError: result.isError,
@@ -892,7 +921,9 @@ export class AgentEngine implements AgentRunner {
     reason: string,
     reporter: Reporter,
     parentSpan?: Span,
+    signal?: AbortSignal,
   ): Promise<void> {
+    signal?.throwIfAborted();
     // Goal Mode(可选):把 active goal 状态拼进收尾提示,让总结对齐目标。
     // 无 goalManager 或无 active goal 时 goalSection 为空,gracePrompt 保持原样。
     const goalContext = this.goalManager?.buildGoalContext() ?? "";
@@ -909,9 +940,11 @@ export class AgentEngine implements AgentRunner {
         ...session.getWorkingMemory(this.workingMemoryLimit),
       ];
       const response = await generateWithRetry(this.provider, context, [], {
+        signal,
         onRetry: this.makeRetryReporter(graceSpan),
         onRateLimited: () => this.rotateProvider(),
       });
+      signal?.throwIfAborted();
       recordLlmResponse(graceSpan, response);
       session.append(response);
       if (response.content) {

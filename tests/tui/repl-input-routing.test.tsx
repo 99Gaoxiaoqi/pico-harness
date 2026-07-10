@@ -289,6 +289,66 @@ describe("TUI input routing", () => {
     ]);
   });
 
+  it("runTuiAgentPrompt 为每轮创建 controller、传递 signal 并在结束后清理", async () => {
+    const { reporter } = harness();
+    const abortControllerRef: { current: AbortController | null } = { current: null };
+    let signalDuringRun: AbortSignal | undefined;
+    let controllerDuringRun: AbortController | null = null;
+    const runAgent = vi.fn(async (_options, deps) => {
+      signalDuringRun = deps.signal;
+      controllerDuringRun = abortControllerRef.current;
+      return {
+        sessionId: "tui-session",
+        sessionSelection: { mode: "new" as const, sessionId: "tui-session" },
+        workDir: process.cwd(),
+        finalMessage: "done",
+        usage: { promptTokens: 1, completionTokens: 1, costCNY: 0 },
+        messages: [],
+      };
+    });
+
+    await runTuiAgentPrompt(
+      { prompt: "run", dir: process.cwd(), session: "tui-session" },
+      { reporter, runAgent, abortControllerRef },
+    );
+
+    expect(controllerDuringRun).toBeInstanceOf(AbortController);
+    expect(signalDuringRun).toBe(controllerDuringRun?.signal);
+    expect(abortControllerRef.current).toBeNull();
+  });
+
+  it("TUI interrupt 调用当前 controller.abort 并清理排队输入", async () => {
+    const { reporter, snapshots } = harness();
+    const replModule =
+      (await import("../../src/tui/repl.js")) as typeof import("../../src/tui/repl.js") & {
+        handleTuiInterrupt?: (
+          controller: AbortController | null,
+          queue: RunningInputQueue,
+          reporter: TuiReporter,
+        ) => void;
+      };
+    expect(replModule.handleTuiInterrupt).toBeTypeOf("function");
+    if (!replModule.handleTuiInterrupt) return;
+
+    const controller = new AbortController();
+    const abort = vi.spyOn(controller, "abort");
+    const queue = new RunningInputQueue();
+    queue.enqueue("queued prompt");
+
+    replModule.handleTuiInterrupt(controller, queue, reporter);
+
+    expect(abort).toHaveBeenCalledOnce();
+    expect(abort.mock.calls[0]?.[0]).toMatchObject({ name: "AbortError" });
+    expect(controller.signal.aborted).toBe(true);
+    expect(queue.size).toBe(0);
+    expect(snapshots.at(-1)).toEqual([
+      {
+        kind: "system",
+        content: "Interrupted current run and dropped 1 queued input(s).",
+      },
+    ]);
+  });
+
   it("approval command is handled locally and resolves a pending approval", async () => {
     const { reporter, snapshots, runAgent, exit, registry, workDir } = harness();
     globalApprovalManager.clear();

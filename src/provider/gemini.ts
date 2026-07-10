@@ -13,7 +13,11 @@
 //    args 是对象,不是 JSON 字符串
 // 7. 工具结果回传:user 消息的 parts 里含 {functionResponse: {name, response: {...}}}
 
-import type { LLMProvider } from "./interface.js";
+import {
+  providerRequestSignal,
+  type LLMProvider,
+  type LLMProviderRequestOptions,
+} from "./interface.js";
 import type { Message, ToolCall, ToolDefinition, Usage } from "../schema/message.js";
 import type { ProviderConfig } from "./config.js";
 import { resolveProviderProfile, type ProviderProfile } from "./profile.js";
@@ -74,14 +78,18 @@ export class GeminiProvider implements LLMProvider {
     return `${base}/v1beta/models/${this.config.model}:streamGenerateContent?key=${this.config.apiKey}&alt=sse`;
   }
 
-  async generate(messages: Message[], availableTools: ToolDefinition[]): Promise<Message> {
+  async generate(
+    messages: Message[],
+    availableTools: ToolDefinition[],
+    options?: LLMProviderRequestOptions,
+  ): Promise<Message> {
     const body = this.buildRequestBody(messages, availableTools);
 
     const resp = await fetch(this.generateUrl(), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(120_000),
+      signal: providerRequestSignal(options?.signal),
     });
 
     if (!resp.ok) {
@@ -116,6 +124,7 @@ export class GeminiProvider implements LLMProvider {
     messages: Message[],
     availableTools: ToolDefinition[],
     onDelta: (delta: string) => void,
+    options?: LLMProviderRequestOptions,
   ): Promise<Message> {
     const body = this.buildRequestBody(messages, availableTools);
 
@@ -123,7 +132,7 @@ export class GeminiProvider implements LLMProvider {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(120_000),
+      signal: providerRequestSignal(options?.signal),
     });
 
     if (!resp.ok) {

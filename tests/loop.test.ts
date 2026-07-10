@@ -118,6 +118,70 @@ function reporter(onTextDelta?: (delta: string) => void): Reporter {
 }
 
 describe("AgentEngine Main Loop", () => {
+  it("run 将 signal 传给 provider 调用", async () => {
+    let receivedSignal: AbortSignal | undefined;
+    const provider: LLMProvider = {
+      async generate(_messages, _tools, options?: { signal?: AbortSignal }): Promise<Message> {
+        receivedSignal = options?.signal;
+        return { role: "assistant", content: "done" };
+      },
+    };
+    const engine = new AgentEngine({ provider, registry: new MockRegistry(), workDir: "/tmp" });
+    const controller = new AbortController();
+
+    await engine.run(newSession("hi"), undefined, undefined, controller.signal);
+
+    expect(receivedSignal).toBe(controller.signal);
+  });
+
+  it("中止本轮工具批次时拒绝排队工具", async () => {
+    let releaseFirst!: () => void;
+    let firstStarted!: () => void;
+    const firstStart = new Promise<void>((resolve) => {
+      firstStarted = resolve;
+    });
+    const firstRelease = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const provider = new ScriptedProvider([
+      {
+        role: "assistant",
+        content: "run tools",
+        toolCalls: [
+          { id: "c1", name: "bash", arguments: "{}" },
+          { id: "c2", name: "bash", arguments: "{}" },
+        ],
+      },
+      { role: "assistant", content: "done" },
+    ]);
+    const registry = new (class extends MockRegistry {
+      override async execute(call: ToolCall): Promise<ToolResult> {
+        this.executed.push(call);
+        if (call.id === "c1") {
+          firstStarted();
+          await firstRelease;
+        }
+        return { toolCallId: call.id, output: `out-${call.id}`, isError: false };
+      }
+    })();
+    const engine = new AgentEngine({ provider, registry, workDir: "/tmp" });
+    const controller = new AbortController();
+    const reason = new DOMException("interrupted", "AbortError");
+    const run = engine.run(newSession("hi"), undefined, undefined, controller.signal);
+
+    await firstStart;
+    controller.abort(reason);
+    const outcome = await Promise.race([
+      run.catch((error: unknown) => error),
+      new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 50)),
+    ]);
+    releaseFirst();
+    await run.catch(() => undefined);
+
+    expect(outcome).toMatchObject({ name: "AbortError" });
+    expect(registry.executed.map((call) => call.id)).toEqual(["c1"]);
+  });
+
   it("run 传入的 runtimeReporter 接收本轮 stream delta", async () => {
     const constructorDelta = vi.fn();
     const runtimeDelta = vi.fn();

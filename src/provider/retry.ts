@@ -79,8 +79,11 @@ export async function generateWithRetry(
   // 快路径:只允许调用一次,失败即抛(兜底失败日志仍记录)
   if (maxAttempts <= 1) {
     try {
-      return await provider.generate(messages, tools);
+      const result = await provider.generate(messages, tools, { signal });
+      signal?.throwIfAborted();
+      return result;
     } catch (error) {
+      signal?.throwIfAborted();
       logRequestFailure(error, 1, maxAttempts, provider.modelName, signal);
       throw error;
     }
@@ -93,8 +96,14 @@ export async function generateWithRetry(
   // 主循环:尝试 → 失败 → 判定可重试 → 退避 → 再尝试
   for (let attempt = 1; ; attempt++) {
     try {
-      return await activeProvider.generate(messages, tools);
+      if (attempt > 1) signal?.throwIfAborted();
+      const result = await activeProvider.generate(messages, tools, { signal });
+      signal?.throwIfAborted();
+      return result;
     } catch (error) {
+      // Provider 可能不支持中途取消；若它在 abort 后才返回/抛错，
+      // 优先恢复宿主的 AbortError 语义，不把它误判成普通重试失败。
+      signal?.throwIfAborted();
       const retryable =
         typeof activeProvider.isRetryableError === "function"
           ? activeProvider.isRetryableError(error)

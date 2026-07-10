@@ -39,6 +39,7 @@ import type { CommandRegistry } from "../input/command-registry.js";
 import type { InputProcessResult, LocalCommandResult } from "../input/types.js";
 import type { ImagePart } from "../schema/message.js";
 import type { ProviderKind } from "../provider/factory.js";
+import { isAbortError } from "../provider/errors.js";
 import type { ThinkingEffort } from "../provider/thinking.js";
 import { buildDefaultToolRegistry } from "../tools/default-registry.js";
 import { ToolDisclosure } from "../tools/tool-disclosure.js";
@@ -123,6 +124,10 @@ export type TuiRunAgent = (
   options: RunAgentCliOptions,
   dependencies: RunAgentCliDependencies,
 ) => Promise<RunAgentCliResult>;
+
+export interface TuiAbortControllerRef {
+  current: AbortController | null;
+}
 
 const RUNNING_IMMEDIATE_LOCAL_COMMANDS = new Set(["help", "status", "mcp"]);
 
@@ -398,6 +403,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     const runningQueueRef = useRef<RunningInputQueue>(null);
     if (runningQueueRef.current === null) runningQueueRef.current = new RunningInputQueue();
     const runningQueue = runningQueueRef.current;
+    const abortControllerRef = useRef<AbortController | null>(null);
     const status = useSyncExternalStore(guard.subscribe, guard.getSnapshot);
     const running = status !== "idle"; // 派生:非 idle 即视为运行中
 
@@ -485,10 +491,12 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
               mcpStatusSink: (snapshot) => {
                 latestMcpStatus = snapshot;
               },
+              abortControllerRef,
             });
           },
         });
       } catch (err) {
+        if (isAbortError(err)) return;
         // 错误以 assistant 条目形式展示(不入侵 ink 渲染层)
         entries.push({
           kind: "assistant",
@@ -524,13 +532,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         dialogRequests={dialogRequests}
         onSubmit={(text) => void handleSubmit(text)}
         onInterrupt={() => {
-          guard.forceEnd();
-          const dropped = runningQueue.clear();
-          reporter.pushSystemMessage(
-            dropped > 0
-              ? `Interrupted current run and dropped ${dropped} queued input(s).`
-              : "Interrupted current run.",
-          );
+          handleTuiInterrupt(abortControllerRef.current, runningQueue, reporter);
         }}
         onRedraw={() => {
           if (process.stdout.isTTY) process.stdout.write("\x1b[2J\x1b[H");
@@ -674,25 +676,49 @@ export async function runTuiAgentPrompt(
     openDialog?: (request: DialogRequest) => void;
     closeDialog?: (id: string) => void;
     runAgent?: TuiRunAgent;
+    abortControllerRef?: TuiAbortControllerRef;
   },
 ): Promise<void> {
-  const result = await (deps.runAgent ?? runAgentFromCli)(cliOpts, {
-    reporter: deps.reporter,
-    approvalNotifier: (notice) => {
-      deps.reporter.onToolAwaitingApproval(notice.toolName, notice.args);
-      deps.openDialog?.(
-        createApprovalDialogRequest(notice, {
-          reporter: deps.reporter,
-          closeDialog: deps.closeDialog,
-        }),
-      );
-    },
-    ...(deps.toolDisclosure ? { toolDisclosure: deps.toolDisclosure } : {}),
-    ...(deps.mcpStatusSink ? { mcpStatusSink: deps.mcpStatusSink } : {}),
-  });
-  if (result.tracePath) {
-    deps.reporter.pushSystemMessage(`Trace saved: ${result.tracePath}`);
+  const controller = new AbortController();
+  if (deps.abortControllerRef) deps.abortControllerRef.current = controller;
+  try {
+    const result = await (deps.runAgent ?? runAgentFromCli)(cliOpts, {
+      reporter: deps.reporter,
+      signal: controller.signal,
+      approvalNotifier: (notice) => {
+        deps.reporter.onToolAwaitingApproval(notice.toolName, notice.args);
+        deps.openDialog?.(
+          createApprovalDialogRequest(notice, {
+            reporter: deps.reporter,
+            closeDialog: deps.closeDialog,
+          }),
+        );
+      },
+      ...(deps.toolDisclosure ? { toolDisclosure: deps.toolDisclosure } : {}),
+      ...(deps.mcpStatusSink ? { mcpStatusSink: deps.mcpStatusSink } : {}),
+    });
+    if (result.tracePath) {
+      deps.reporter.pushSystemMessage(`Trace saved: ${result.tracePath}`);
+    }
+  } finally {
+    if (deps.abortControllerRef?.current === controller) {
+      deps.abortControllerRef.current = null;
+    }
   }
+}
+
+export function handleTuiInterrupt(
+  controller: AbortController | null,
+  queue: RunningInputQueue,
+  reporter: Pick<TuiReporter, "pushSystemMessage">,
+): void {
+  controller?.abort(new DOMException("interrupted", "AbortError"));
+  const dropped = queue.clear();
+  reporter.pushSystemMessage(
+    dropped > 0
+      ? `Interrupted current run and dropped ${dropped} queued input(s).`
+      : "Interrupted current run.",
+  );
 }
 
 function createApprovalDialogRequest(
