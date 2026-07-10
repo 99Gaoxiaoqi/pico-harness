@@ -25,23 +25,11 @@ import { colorizeDiff } from "../../src/engine/reporter.js";
 const BASE_URL = process.env.PICO_OPENAI_E2E_BASE_URL;
 const API_KEY = process.env.PICO_OPENAI_E2E_API_KEY;
 const MODEL = process.env.PICO_OPENAI_E2E_MODEL ?? "deepseek-v4-pro";
+const RUN_LLM_E2E = process.env.RUN_LLM_E2E === "1";
 
-let endpointAvailable = false;
-if (BASE_URL && API_KEY) {
-  try {
-    const probe = await fetch(`${BASE_URL}/chat/completions`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${API_KEY}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ model: MODEL, messages: [{ role: "user", content: "ping" }], max_tokens: 5 }),
-      signal: AbortSignal.timeout(15_000),
-    });
-    endpointAvailable = probe.ok;
-  } catch {
-    // 连接失败
-  }
-}
-
-const describeOrSkip = endpointAvailable ? describe : describe.skip;
+// Endpoint health is checked once by the fail-closed global setup. Once opted in,
+// request failures in this suite must fail the run instead of silently skipping it.
+const describeOrSkip = RUN_LLM_E2E && BASE_URL && API_KEY ? describe : describe.skip;
 
 describeOrSkip("阶段 2.6+5.6 真实模型 e2e", { timeout: 120000 }, () => {
   let workDir: string;
@@ -127,7 +115,9 @@ describeOrSkip("阶段 2.6+5.6 真实模型 e2e", { timeout: 120000 }, () => {
       console.log(`[E2E hooks] 共 ${messages.length} 条消息:`);
       for (const m of messages) {
         const preview = m.content.slice(0, 150).replace(/\n/g, " ");
-        const tcInfo = m.toolCalls?.length ? ` toolCalls=[${m.toolCalls.map(tc => tc.name).join(",")}]` : "";
+        const tcInfo = m.toolCalls?.length
+          ? ` toolCalls=[${m.toolCalls.map((tc) => tc.name).join(",")}]`
+          : "";
         const trInfo = m.toolCallId ? ` toolCallId=${m.toolCallId}` : "";
         console.log(`  [${m.role}]${tcInfo}${trInfo}: ${preview}`);
       }
@@ -172,7 +162,9 @@ describeOrSkip("阶段 2.6+5.6 真实模型 e2e", { timeout: 120000 }, () => {
       const bashResult = messages.find(
         (m) => m.role === "user" && m.toolCallId && m.content.toLowerCase().includes("hello"),
       );
-      console.log(`[E2E hooks-regress] bash 结果: ${bashResult?.content.slice(0, 100) ?? "(未找到)"}`);
+      console.log(
+        `[E2E hooks-regress] bash 结果: ${bashResult?.content.slice(0, 100) ?? "(未找到)"}`,
+      );
       expect(bashResult, "无 hook 时应该真的执行 bash 并返回 hello").toBeDefined();
     }, 60000);
   });

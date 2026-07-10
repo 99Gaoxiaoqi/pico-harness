@@ -11,7 +11,7 @@
 // 未设置时自动 skip。
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { OpenAIProvider } from "../../src/provider/openai.js";
@@ -27,29 +27,11 @@ import { PromptComposer } from "../../src/context/composer.js";
 const BASE_URL = process.env.PICO_OPENAI_E2E_BASE_URL;
 const API_KEY = process.env.PICO_OPENAI_E2E_API_KEY;
 const MODEL = process.env.PICO_OPENAI_E2E_MODEL ?? "deepseek-v4-pro";
+const RUN_LLM_E2E = process.env.RUN_LLM_E2E === "1";
 
-// 先探测端点可用性(避免硬编码凭证失效时全盘失败)
-let endpointAvailable = false;
-if (BASE_URL && API_KEY) {
-  try {
-    const probe = await fetch(`${BASE_URL}/chat/completions`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${API_KEY}`, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: MODEL,
-        messages: [{ role: "user", content: "ping" }],
-        max_tokens: 5,
-      }),
-      signal: AbortSignal.timeout(15_000),
-    });
-    endpointAvailable = probe.ok;
-    if (!probe.ok) console.log(`[E2E 探测] 端点不可用: ${probe.status} ${await probe.text()}`);
-  } catch (err) {
-    console.log(`[E2E 探测] 连接失败: ${String(err)}`);
-  }
-}
-
-const describeOrSkip = endpointAvailable ? describe : describe.skip;
+// Endpoint health is checked once by the fail-closed global setup. Once opted in,
+// request failures in this suite must fail the run instead of silently skipping it.
+const describeOrSkip = RUN_LLM_E2E && BASE_URL && API_KEY ? describe : describe.skip;
 
 describeOrSkip("阶段 3 端到端测试(真实大模型 deepseek-v4-pro)", { timeout: 180000 }, () => {
   let workDir: string;
@@ -60,7 +42,9 @@ describeOrSkip("阶段 3 端到端测试(真实大模型 deepseek-v4-pro)", { ti
     mkdirSync(join(workDir, "src"), { recursive: true });
     writeFileSync(
       join(workDir, "src", "app.ts"),
-      ['export const VERSION = "1.0.0";', "export function hello() { return 'hi'; }", ""].join("\n"),
+      ['export const VERSION = "1.0.0";', "export function hello() { return 'hi'; }", ""].join(
+        "\n",
+      ),
     );
     provider = new OpenAIProvider({ baseURL: BASE_URL!, apiKey: API_KEY!, model: MODEL });
   });
@@ -105,7 +89,9 @@ describeOrSkip("阶段 3 端到端测试(真实大模型 deepseek-v4-pro)", { ti
 
       // 验证 2:goal 内容正确
       const goal = goalManager.getActive() ?? goalManager.list()[0]!;
-      console.log(`[E2E goal] 模型建的 goal: id=${goal.id}, title="${goal.title}", status=${goal.status}`);
+      console.log(
+        `[E2E goal] 模型建的 goal: id=${goal.id}, title="${goal.title}", status=${goal.status}`,
+      );
       expect(goal.title).toBeTruthy();
       expect(goal.title.length).toBeGreaterThan(0);
 
@@ -180,8 +166,8 @@ describeOrSkip("阶段 3 端到端测试(真实大模型 deepseek-v4-pro)", { ti
       const messages = await engine.run(session);
 
       // 验证:session 里应该有 steer 注入产生的 user 消息(C 点 drain 落盘)
-      const steerMessages = messages.filter((m) =>
-        m.role === "user" && !m.toolCallId && m.content.includes("重要提示"),
+      const steerMessages = messages.filter(
+        (m) => m.role === "user" && !m.toolCallId && m.content.includes("重要提示"),
       );
       expect(steerMessages.length, "steer 文本应该被 drain 到 session").toBeGreaterThan(0);
 
@@ -241,7 +227,10 @@ describeOrSkip("阶段 3 端到端测试(真实大模型 deepseek-v4-pro)", { ti
 
       // 验证 3:续接后模型真的读了文件(第二轮被引导调工具)
       const readTool = messages.some(
-        (m) => m.role === "user" && m.toolCallId && (m.content.includes("VERSION") || m.content.includes("hi")),
+        (m) =>
+          m.role === "user" &&
+          m.toolCallId &&
+          (m.content.includes("VERSION") || m.content.includes("hi")),
       );
       console.log(`[E2E continue] 续接后模型读文件: ${readTool}`);
       console.log(`[E2E continue] 共 ${messages.length} 条消息`);

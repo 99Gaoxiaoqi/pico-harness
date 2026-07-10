@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execSync } from "node:child_process";
@@ -7,10 +7,7 @@ import { OpenAIProvider } from "../../src/provider/openai.js";
 import { CostTracker } from "../../src/observability/tracker.js";
 import type { LLMProvider, Message } from "../../src/provider/interface.js";
 import { CheckpointManager } from "../../src/safety/checkpoint-manager.js";
-import {
-  PermissionManager,
-  type PolicyContext,
-} from "../../src/approval/policy.js";
+import { PermissionManager, type PolicyContext } from "../../src/approval/policy.js";
 import {
   ToolRegistry,
   ReadFileTool,
@@ -54,9 +51,7 @@ describe("阶段 1 端到端测试", { timeout: 60000 }, () => {
       });
 
       const deltas: string[] = [];
-      const messages: Message[] = [
-        { role: "user", content: "用一句话介绍你自己，不超过30个字" },
-      ];
+      const messages: Message[] = [{ role: "user", content: "用一句话介绍你自己，不超过30个字" }];
 
       const result = await provider.generateStream!(messages, [], (delta) => {
         deltas.push(delta);
@@ -171,18 +166,13 @@ describe("阶段 1 端到端测试", { timeout: 60000 }, () => {
 
     it("Plan Mode + 写 src/a.ts → deny", () => {
       const result = manager.evaluate(
-        makeCtx(
-          makeCall("write_file", { path: "src/a.ts", content: "x" }),
-          { planMode: true },
-        ),
+        makeCtx(makeCall("write_file", { path: "src/a.ts", content: "x" }), { planMode: true }),
       );
       expect(result.decision).toBe("deny");
     });
 
     it("高危命令 rm -rf / → deny", () => {
-      const result = manager.evaluate(
-        makeCtx(makeCall("bash", { command: "rm -rf /" })),
-      );
+      const result = manager.evaluate(makeCtx(makeCall("bash", { command: "rm -rf /" })));
       expect(result.decision).toBe("deny");
     });
 

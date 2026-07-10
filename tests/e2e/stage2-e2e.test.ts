@@ -11,7 +11,7 @@
 // 注意:本测试依赖 .env 的真实 API 凭证,会消耗 token。CI 无凭证时整体跳过。
 
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { OpenAIProvider } from "../../src/provider/openai.js";
@@ -22,7 +22,6 @@ import { buildDefaultToolRegistry } from "../../src/tools/default-registry.js";
 import { TodoStore } from "../../src/context/todo-store.js";
 import { PromptComposer } from "../../src/context/composer.js";
 import { FetchURLTool, WebSearchTool } from "../../src/tools/web.js";
-import type { Message } from "../../src/schema/message.js";
 
 function readDotEnv(): Record<string, string> {
   try {
@@ -41,9 +40,9 @@ function readDotEnv(): Record<string, string> {
 
 // ─── 读取 .env fallback,但不写回 process.env,避免污染其他 e2e 文件 ───
 const dotEnv = readDotEnv();
-let BASE_URL = process.env.LLM_BASE_URL ?? dotEnv.LLM_BASE_URL;
-let API_KEY = process.env.LLM_API_KEY ?? dotEnv.LLM_API_KEY;
-let MODEL = process.env.LLM_MODEL ?? dotEnv.LLM_MODEL;
+const BASE_URL = process.env.LLM_BASE_URL ?? dotEnv.LLM_BASE_URL;
+const API_KEY = process.env.LLM_API_KEY ?? dotEnv.LLM_API_KEY;
+const MODEL = process.env.LLM_MODEL ?? dotEnv.LLM_MODEL;
 const RUN_LLM_E2E = process.env.RUN_LLM_E2E === "1" || process.env.PICO_LLM_E2E === "1";
 const RUN_NETWORK_E2E = process.env.RUN_NETWORK_E2E === "1" || process.env.PICO_NET_E2E === "1";
 const originalFetch = globalThis.fetch;
@@ -118,7 +117,11 @@ describeOrSkip("���段 2 端到端测试(真实大模型)", { timeout: 180
   describe("glob 工具(真实模型调用)", () => {
     it("模型能用 glob 模式找到所有 .ts 文件", async () => {
       const session = new Session(`e2e-glob-${Date.now()}`, workDir, { persistence: false });
-      session.append({ role: "user", content: "请用 glob 工具搜索 **/*.ts,列出所有匹配的 TypeScript 文件路径。只调用工具并直接报告结果,不要做其他操作。" });
+      session.append({
+        role: "user",
+        content:
+          "请用 glob 工具搜索 **/*.ts,列出所有匹配的 TypeScript 文件路径。只调用工具并直接报告结果,不要做其他操作。",
+      });
       const engine = new AgentEngine({
         provider,
         registry,
@@ -149,7 +152,11 @@ describeOrSkip("���段 2 端到端测试(真实大模型)", { timeout: 180
   describe("grep 工具(真实模型调用)", () => {
     it("模型能用 grep 搜到 greet 函数的定义位置", async () => {
       const session = new Session(`e2e-grep-${Date.now()}`, workDir, { persistence: false });
-      session.append({ role: "user", content: "请用 grep 工具搜索 pattern 'greet'(不区分大小写),找出它在哪些文件的哪些行出现。只调用工具并报告结果。" });
+      session.append({
+        role: "user",
+        content:
+          "请用 grep 工具搜索 pattern 'greet'(不区分大小写),找出它在哪些文件的哪些行出现。只调用工具并报告结果。",
+      });
       const engine = new AgentEngine({
         provider,
         registry,
@@ -220,7 +227,9 @@ describeOrSkip("���段 2 端到端测试(真实大模型)", { timeout: 180
       const systemPrompt = await composer.build();
       expect(systemPrompt).toContain("TodoList");
       expect(systemPrompt).toContain("验证 todo 工具集成测试");
-      console.log(`[E2E todo] composer 注入片段:\n${systemPrompt.split("TodoList")[1]?.slice(0, 200) ?? ""}`);
+      console.log(
+        `[E2E todo] composer 注入片段:\n${systemPrompt.split("TodoList")[1]?.slice(0, 200) ?? ""}`,
+      );
 
       // 让模型用 todo 工具 list 当前任务
       const session = new Session(`e2e-todo-${Date.now()}`, workDir, { persistence: false });
@@ -325,7 +334,8 @@ describeNetwork("fetch_url 真实抓取", { timeout: 60000 }, () => {
 
 describe("web_search 真实搜索(条件)", { timeout: 60000 }, () => {
   // 无 SEARCH_API_BASE 配置时整体 skip,不强造(极简:依赖外部搜索 API)
-  const hasSearchApi = RUN_NETWORK_E2E && !!process.env.SEARCH_API_BASE && !!process.env.SEARCH_API_KEY;
+  const hasSearchApi =
+    RUN_NETWORK_E2E && !!process.env.SEARCH_API_BASE && !!process.env.SEARCH_API_KEY;
   const describeSearch = hasSearchApi ? describe : describe.skip;
 
   describeSearch("有 SEARCH_API 配置时", () => {

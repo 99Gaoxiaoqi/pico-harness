@@ -3,7 +3,7 @@
 //
 // 测试目标:
 //   1. Auxiliary Client:配 AUX_LLM_* 环境变量,真实模型触发 FullCompactor 压缩,验证 aux 被用
-//   2. 版本化迁移:真实 session 跑一轮后,JSONL 首行有 meta schemaVersion=1
+//   2. 版本化迁移:真实 session 跑一轮后,JSONL 首行有 meta schemaVersion=2
 //   3. Rate Limit:端点不返回 rate limit header,用 mock header 单测已覆盖,这里验证回调机制可接通
 //
 // 凭证通过环境变量显式开启:
@@ -11,7 +11,7 @@
 // 未设置时自动 skip。AUX 使用同端点同模型(测试用,生产应配廉价模型)。
 
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { OpenAIProvider } from "../../src/provider/openai.js";
@@ -20,30 +20,16 @@ import { Session } from "../../src/engine/session.js";
 import { SilentReporter } from "../../src/engine/reporter.js";
 import { buildDefaultToolRegistry } from "../../src/tools/default-registry.js";
 import { FullCompactor } from "../../src/context/full-compactor.js";
-import { Compactor } from "../../src/context/compactor.js";
 import type { LLMProvider, Message } from "../../src/provider/interface.js";
 
 const BASE_URL = process.env.PICO_OPENAI_E2E_BASE_URL;
 const API_KEY = process.env.PICO_OPENAI_E2E_API_KEY;
 const MODEL = process.env.PICO_OPENAI_E2E_MODEL ?? "deepseek-v4-pro";
+const RUN_LLM_E2E = process.env.RUN_LLM_E2E === "1";
 
-// 探测端点可用性
-let endpointAvailable = false;
-if (BASE_URL && API_KEY) {
-  try {
-    const probe = await fetch(`${BASE_URL}/chat/completions`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${API_KEY}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ model: MODEL, messages: [{ role: "user", content: "ping" }], max_tokens: 5 }),
-      signal: AbortSignal.timeout(15_000),
-    });
-    endpointAvailable = probe.ok;
-  } catch {
-    // 连接失败
-  }
-}
-
-const describeOrSkip = endpointAvailable ? describe : describe.skip;
+// Endpoint health is checked once by the fail-closed global setup. Once opted in,
+// request failures in this suite must fail the run instead of silently skipping it.
+const describeOrSkip = RUN_LLM_E2E && BASE_URL && API_KEY ? describe : describe.skip;
 
 // 追踪 provider 调用的 wrapper
 function createTrackingProvider(real: LLMProvider, calls: { generateCount: number }): LLMProvider {
@@ -68,7 +54,9 @@ describeOrSkip("阶段 5 端到端测试(真实大模型)", { timeout: 180000 },
     mkdirSync(join(workDir, "src"), { recursive: true });
     writeFileSync(
       join(workDir, "src", "app.ts"),
-      ['export const VERSION = "1.0.0";', "export function hello() { return 'hi'; }", ""].join("\n"),
+      ['export const VERSION = "1.0.0";', "export function hello() { return 'hi'; }", ""].join(
+        "\n",
+      ),
     );
     provider = new OpenAIProvider({ baseURL: BASE_URL!, apiKey: API_KEY!, model: MODEL });
   });
@@ -93,7 +81,7 @@ describeOrSkip("阶段 5 端到端测试(真实大模型)", { timeout: 180000 },
 
   // ─── 测试 1: 版本化迁移 ───
   describe("版本化迁移(5.8)", () => {
-    it("真实 session 跑一轮后,JSONL 首行有 meta schemaVersion=1", async () => {
+    it("真实 session 跑一轮后,JSONL 首行有 meta schemaVersion=2", async () => {
       // 用持久化 session(非内存),让 JSONL 真实落盘
       originalPersistence = process.env.PICO_PERSISTENCE;
       process.env.PICO_PERSISTENCE = "1";
@@ -123,7 +111,7 @@ describeOrSkip("阶段 5 端到端测试(真实大模型)", { timeout: 180000 },
       console.log(`[E2E version] JSONL 首行: ${firstLine.slice(0, 100)}`);
 
       expect(record.type).toBe("meta");
-      expect(record.schemaVersion).toBe(1);
+      expect(record.schemaVersion).toBe(2);
 
       if (originalPersistence === undefined) {
         delete process.env.PICO_PERSISTENCE;
@@ -137,7 +125,11 @@ describeOrSkip("阶段 5 端到端测试(真实大模型)", { timeout: 180000 },
   describe("Auxiliary Client 压缩(5.3)", () => {
     it("FullCompactor 用 aux provider 压缩(真实模型)", async () => {
       // aux provider 也用同端点同模型(测试验证机制,生产应配廉价模型)
-      const auxProvider = new OpenAIProvider({ baseURL: BASE_URL!, apiKey: API_KEY!, model: MODEL });
+      const auxProvider = new OpenAIProvider({
+        baseURL: BASE_URL!,
+        apiKey: API_KEY!,
+        model: MODEL,
+      });
 
       const mainCalls = { generateCount: 0 };
       const auxCalls = { generateCount: 0 };
@@ -154,8 +146,14 @@ describeOrSkip("阶段 5 端到端测试(真实大模型)", { timeout: 180000 },
       const session = new Session(`e2e-aux-${Date.now()}`, workDir, { persistence: false });
       // 填入足够多的消息触发压缩(保留最近 2 条,前面都需要压缩)
       for (let i = 0; i < 10; i++) {
-        session.append({ role: "user", content: `这是第 ${i + 1} 条历史消息,内容是关于某个函数的讨论。` });
-        session.append({ role: "assistant", content: `收到第 ${i + 1} 条,我的回复是关于这个函数的细节。` });
+        session.append({
+          role: "user",
+          content: `这是第 ${i + 1} 条历史消息,内容是关于某个函数的讨论。`,
+        });
+        session.append({
+          role: "assistant",
+          content: `收到第 ${i + 1} 条,我的回复是关于这个函数的细节。`,
+        });
       }
 
       // 调压缩(保留最近 2 条)
@@ -204,16 +202,12 @@ describeOrSkip("阶段 5 端到端测试(真实大模型)", { timeout: 180000 },
         },
       });
 
-      const result = await providerWithCb.generate(
-        [{ role: "user", content: "ping" }],
-        [],
-      );
+      const result = await providerWithCb.generate([{ role: "user", content: "ping" }], []);
       expect(result.content.length).toBeGreaterThan(0);
       console.log(`[E2E ratelimit] 收到 rate limit info: ${JSON.stringify(receivedInfo)}`);
       // 端点不返回 header,receivedInfo 应该是 null(回调未触发)
       // 但回调机制本身被检查了(provider 调了 parseRateLimitHeaders)
     }, 30000);
-
   });
 });
 

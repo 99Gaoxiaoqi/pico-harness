@@ -3,7 +3,6 @@
 
 import { readFileSync } from "node:fs";
 import { OpenAIProvider } from "../../src/provider/openai.js";
-import type { Message } from "../../src/schema/message.js";
 
 // 加载 .env
 const env = readFileSync(".env", "utf8");
