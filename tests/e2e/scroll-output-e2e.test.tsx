@@ -66,11 +66,8 @@ class PagingScenarioProvider implements LLMProvider {
   }
 }
 
-/**
- * 阶段 10 验收套件先在并行开发期间固化用户主链路；两条功能分支合入后解除 skip。
- * 这些场景只经过生产 Registry / Engine / App / Ink 边界，不直接测纯 helper。
- */
-describe.skip("阶段 10：滚动窗口与大型工具输出集成验收", () => {
+/** 这些场景只经过生产 Registry / Engine / App / Ink 边界，不直接测纯 helper。 */
+describe("阶段 10：滚动窗口与大型工具输出集成验收", () => {
   const cleanups: Array<() => Promise<void>> = [];
 
   afterEach(async () => {
