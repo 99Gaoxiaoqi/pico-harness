@@ -9,7 +9,8 @@
 //   - assistant : isStatic 用 CompletedText(代码块着色,非流式);
 //                 否则用 StreamingText(末条流式中,按行增量渲染)
 //   - system    : 淡色 • + 内容(本地控制面反馈)
-//   - error     : 黄色 ! + 原始错误信息(由 assistant 文本识别)
+//   - error     : 黄色 ! + 结构化错误信息
+//   - logo      : 会话启动摘要,作为 transcript 首项
 //   - tool      : 渲染 <ToolCard>(自带折叠/展开)
 //   - thinking  : 返回 null(spinner 由 App 层渲染,不在此重复)
 
@@ -18,6 +19,7 @@ import { Box, Text } from "ink";
 import type { TuiEntry } from "./tui-reporter.js";
 import { CompletedText, StreamingText } from "./streaming-text.js";
 import { ToolCard } from "./tool-card.js";
+import { LogoPanel } from "./logo-panel.js";
 
 export interface MessageRowProps {
   /** 本条消息数据 */
@@ -43,6 +45,18 @@ function MessageRowImpl({
   wrapWidth,
 }: MessageRowProps): React.ReactNode {
   switch (entry.kind) {
+    case "logo":
+      return (
+        <LogoPanel
+          model={entry.model}
+          cwd={entry.cwd}
+          sessionMode={entry.sessionMode}
+          permissionMode={entry.permissionMode}
+          mcpSummary={entry.mcpSummary}
+          taskSummary={entry.taskSummary}
+        />
+      );
+
     case "user":
       return (
         <MessageFrame marker="❯" markerColor="green" boldMarker>
@@ -51,21 +65,20 @@ function MessageRowImpl({
       );
 
     case "assistant":
-      if (isErrorContent(entry.content)) {
-        return (
-          <MessageFrame marker="!" markerColor="yellow" boldMarker>
-            <Text color="yellow" wrap="wrap">
-              {entry.content}
-            </Text>
-          </MessageFrame>
-        );
-      }
-
       // isStatic:已固化走 CompletedText(代码块着色,整体 memo);
       // 否则(末条流式中)走 StreamingText(按行 stable/unstable 增量渲染)
       return (
         <MessageFrame marker="✦" markerColor="cyan">
           {isStatic ? <CompletedText content={entry.content} /> : <StreamingText content={entry.content} />}
+        </MessageFrame>
+      );
+
+    case "error":
+      return (
+        <MessageFrame marker="!" markerColor="yellow" boldMarker>
+          <Text color="yellow" wrap="wrap">
+            {formatErrorEntry(entry)}
+          </Text>
         </MessageFrame>
       );
 
@@ -126,9 +139,11 @@ function MessageFrame({
   );
 }
 
-function isErrorContent(content: string): boolean {
-  const trimmed = content.trim();
-  return trimmed.startsWith("执行出错:") || trimmed.startsWith("⚠️ 执行出错:");
+function formatErrorEntry(entry: Extract<TuiEntry, { kind: "error" }>): string {
+  const parts = [entry.message];
+  if (entry.retryable !== undefined) parts.push(entry.retryable ? "retryable" : "not retryable");
+  if (entry.action) parts.push(entry.action);
+  return parts.join(" · ");
 }
 
 /**
@@ -162,11 +177,28 @@ function arePropsEqual(prev: MessageRowProps, next: MessageRowProps): boolean {
   if (a.kind !== b.kind) return false;
 
   switch (b.kind) {
+    case "logo":
+      return (
+        a.kind === "logo" &&
+        a.model === b.model &&
+        a.cwd === b.cwd &&
+        a.sessionMode === b.sessionMode &&
+        a.permissionMode === b.permissionMode &&
+        a.mcpSummary === b.mcpSummary &&
+        a.taskSummary === b.taskSummary
+      );
     case "user":
     case "system":
     case "assistant":
       // content 完全一致即跳过(报告者可能换数组引用,但 content 不变)
       return a.kind === b.kind && a.content === b.content;
+    case "error":
+      return (
+        a.kind === "error" &&
+        a.message === b.message &&
+        a.retryable === b.retryable &&
+        a.action === b.action
+      );
     case "tool":
       // tool:全字段一致才跳过(状态/摘要都需稳定)
       return (

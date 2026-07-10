@@ -129,7 +129,12 @@ function clipEntryTopRows(
   wrapWidth: number | undefined,
 ): TuiEntry {
   if (rowsToSkip <= 0) return entry;
-  if (entry.kind !== "assistant" && entry.kind !== "user" && entry.kind !== "system") {
+  if (
+    entry.kind !== "assistant" &&
+    entry.kind !== "user" &&
+    entry.kind !== "system" &&
+    entry.kind !== "error"
+  ) {
     return entry;
   }
 
@@ -137,8 +142,9 @@ function clipEntryTopRows(
   // 让长流式回复优先保住最新尾行。
   const contentRowsToSkip = rowsToSkip;
   const contentRowsToKeep = Math.max(1, (visibleRows ?? 1) - 1);
-  const content = clipTextTopRows(entry.content, contentRowsToSkip, contentRowsToKeep, wrapWidth);
-  return { ...entry, content };
+  const text = entry.kind === "error" ? entry.message : entry.content;
+  const content = clipTextTopRows(text, contentRowsToSkip, contentRowsToKeep, wrapWidth);
+  return entry.kind === "error" ? { ...entry, message: content } : { ...entry, content };
 }
 
 function clipTextTopRows(
@@ -194,6 +200,8 @@ export function shouldRenderStatically(
   switch (entry.kind) {
     case "user":
     case "system":
+    case "logo":
+    case "error":
       return true;
     case "tool":
       // done/error 已 resolve → 固定;running → 动态

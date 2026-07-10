@@ -6,6 +6,10 @@ export interface LogoPanelProps {
   subtitle?: string;
   model?: string;
   cwd?: string;
+  sessionMode?: string;
+  permissionMode?: string;
+  mcpSummary?: string;
+  taskSummary?: string;
   cwdMaxLength?: number;
 }
 
@@ -14,14 +18,25 @@ export function LogoPanel({
   subtitle = "Agent Harness",
   model,
   cwd,
+  sessionMode,
+  permissionMode,
+  mcpSummary,
+  taskSummary,
   cwdMaxLength = 48,
 }: LogoPanelProps): React.ReactNode {
   const detail = model ?? subtitle;
-  const parts = cwd ? [detail, truncateMiddle(cwd, cwdMaxLength)] : [detail];
+  const parts = [
+    detail,
+    ...(cwd ? [truncateLogoCwd(cwd, cwdMaxLength)] : []),
+    ...(sessionMode ? [`mode ${sessionMode}`] : []),
+    ...(permissionMode ? [`perm ${permissionMode}`] : []),
+    ...(mcpSummary ? [mcpSummary] : []),
+    ...(taskSummary ? [taskSummary] : []),
+  ];
 
   return (
     <Box flexDirection="column" marginTop={1} paddingX={1}>
-      <Text wrap="truncate">
+      <Text wrap="wrap">
         <Text bold color="cyan">
           {name}
         </Text>
@@ -31,7 +46,7 @@ export function LogoPanel({
   );
 }
 
-function truncateMiddle(value: string, maxLength: number): string {
+export function truncateLogoCwd(value: string, maxLength = 48): string {
   if (value.length <= maxLength) return value;
   if (maxLength <= 3) return value.slice(0, maxLength);
 

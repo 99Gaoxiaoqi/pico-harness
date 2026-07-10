@@ -39,11 +39,11 @@ describe("App", () => {
 
     expect(output).toContain("你好");
     expect(output).toContain("你好！");
-    expect(output).toContain("pico · glm-5.2 · /workspace/demo");
-    expect(output).toContain("glm-5.2/openai");
+    expect(countOccurrences(output, "pico · glm-5.2 · /workspace/demo")).toBe(1);
+    expect(output).toContain("phase idle");
     expect(output).toContain("mode new");
     expect(output).toContain("perm ask");
-    expect(output).toContain("think off");
+    expect(output).not.toContain("glm-5.2/openai");
     expect(countOccurrences(output, 'Try "fix this" or / for commands')).toBe(1);
     expect(countOccurrences(output, "Enter 发送")).toBe(0);
     expect(countOccurrences(output, "Tab 补全")).toBe(0);
@@ -652,7 +652,7 @@ describe("App", () => {
     expect(output).not.toContain("┌");
   });
 
-  it("passes provider, permission mode, and thinking effort into the runtime status", () => {
+  it("keeps model/cwd in the logo and runtime state in the status bar", () => {
     const output = renderToString(
       <App
         model="claude-sonnet"
@@ -661,6 +661,8 @@ describe("App", () => {
         sessionMode="resume"
         permissionMode="acceptEdits"
         thinkingEffort="high"
+        mcpSummary="MCP"
+        taskSummary="task"
         entries={[]}
         running={false}
         onSubmit={vi.fn()}
@@ -668,10 +670,14 @@ describe("App", () => {
     );
 
     expect(output).toContain("pico · claude-sonnet · /workspace/demo");
-    expect(output).toContain("claude-sonnet/claude");
+    expect(output).toContain("MCP");
+    expect(output).toContain("task");
+    expect(output).toContain("phase idle");
     expect(output).toContain("mode resume");
     expect(output).toContain("perm acceptEdits");
-    expect(output).toContain("think high");
+    expect(output).toContain("ctx claude");
+    expect(output).not.toContain("think high");
+    expect(output).not.toContain("claude-sonnet/claude");
   });
 
   it("maps global Ctrl shortcuts to interrupt, exit, and redraw semantics", () => {

@@ -3,42 +3,41 @@ import { describe, expect, it } from "vitest";
 import { StatusBar, buildStatusItems } from "../../src/tui/status-bar.js";
 
 describe("StatusBar", () => {
-  it("renders compact runtime status with session, permission, and thinking effort", () => {
+  it("renders compact runtime phase without repeating model or cwd", () => {
     const output = renderToString(
       <StatusBar
-        model="glm-5.2"
-        provider="openai"
-        cwd="/workspace/demo"
+        phase="running"
         sessionMode="resume"
         permissionMode="acceptEdits"
-        thinkingEffort="high"
+        contextSummary="ctx 42%"
+        taskSummary="2 queued"
       />,
     );
 
-    expect(output).toContain("glm-5.2");
-    expect(output).toContain("openai");
+    expect(output).toContain("phase running");
     expect(output).toContain("mode resume");
     expect(output).toContain("perm acceptEdits");
-    expect(output).toContain("think high");
+    expect(output).toContain("ctx 42%");
+    expect(output).toContain("2 queued");
+    expect(output).not.toContain("glm-5.2");
+    expect(output).not.toContain("/workspace/demo");
   });
 
   it("keeps status item order stable for scanning", () => {
     expect(
       buildStatusItems({
-        model: "claude-3-5-sonnet",
-        provider: "anthropic",
-        cwd: "/repo",
+        phase: "approval",
         sessionMode: "new",
         permissionMode: "ask",
-        thinkingEffort: "medium",
+        contextSummary: "ctx 18%",
+        taskSummary: "approval pending",
       }),
     ).toEqual([
-      ["model", "claude-3-5-sonnet"],
-      ["provider", "anthropic"],
-      ["cwd", "/repo"],
+      ["phase", "approval"],
       ["mode", "new"],
       ["perm", "ask"],
-      ["think", "medium"],
+      ["context", "ctx 18%"],
+      ["task", "approval pending"],
     ]);
   });
 
@@ -46,9 +45,7 @@ describe("StatusBar", () => {
     const source = "cli-source-session-abcdef123456";
     const output = renderToString(
       <StatusBar
-        model="glm-5.2"
-        provider="openai"
-        cwd="/workspace/demo"
+        phase="idle"
         sessionMode="fork"
         forkFrom={source}
       />,
@@ -59,9 +56,7 @@ describe("StatusBar", () => {
     expect(output).not.toContain(source);
     expect(
       buildStatusItems({
-        model: "glm-5.2",
-        provider: "openai",
-        cwd: "/workspace/demo",
+        phase: "idle",
         sessionMode: "fork",
         forkFrom: source,
       }),
@@ -70,23 +65,29 @@ describe("StatusBar", () => {
 
   it("falls back cleanly when provider is missing", () => {
     const output = renderToString(
-      <StatusBar model="glm-5.2" cwd="/workspace/demo" sessionMode="new" />,
+      <StatusBar sessionMode="new" />,
     );
 
-    expect(output).toContain("provider auto");
+    expect(output).toContain("phase idle");
     expect(output).toContain("mode new");
     expect(output).toContain("perm ask");
-    expect(output).toContain("think off");
+    expect(output).not.toContain("provider");
   });
 
-  it("truncates long cwd values in the middle", () => {
-    const longCwd = "/Users/anxuan/geektime-downloader/从0开始构建AgentHarness/pico-harness";
+  it("truncates long context and task values in the middle", () => {
     const output = renderToString(
-      <StatusBar model="glm-5.2" cwd={longCwd} sessionMode="continue" cwdMaxLength={30} />,
+      <StatusBar
+        phase="queued"
+        sessionMode="continue"
+        contextSummary="/Users/anxuan/geektime-downloader/从0开始构建AgentHarness/pico-harness"
+        taskSummary="queued input waiting for the current run to finish"
+        summaryMaxLength={30}
+      />,
     );
 
     expect(output).toContain("/Users/anxua...");
     expect(output).toContain("pico-harness");
-    expect(output).not.toContain(longCwd);
+    expect(output).toContain("queued input...");
+    expect(output).not.toContain("geektime-downloader/从0开始构建AgentHarness");
   });
 });
