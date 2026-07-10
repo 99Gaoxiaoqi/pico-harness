@@ -14,7 +14,7 @@ import type { Dirent } from "node:fs";
 import type { BaseTool } from "./registry.js";
 import type { ToolDefinition } from "../schema/message.js";
 import { ToolAccesses } from "./tool-access.js";
-import { safeResolve } from "./registry-impl.js";
+import { WorkspaceRoots } from "./workspace-roots.js";
 import { logger } from "../observability/logger.js";
 
 /** 搜索结果默认上限,避免海量匹配撑爆 Context。 */
@@ -373,8 +373,14 @@ async function searchWithNode(opts: {
 
 export class GrepTool implements BaseTool {
   readonly readOnly = true;
+  private readonly roots: WorkspaceRoots;
 
-  constructor(private readonly workDir: string) {}
+  constructor(workDirOrRoots: string | WorkspaceRoots) {
+    this.roots =
+      typeof workDirOrRoots === "string"
+        ? WorkspaceRoots.createSync(workDirOrRoots)
+        : workDirOrRoots;
+  }
 
   name(): string {
     return "grep";
@@ -389,7 +395,7 @@ export class GrepTool implements BaseTool {
     return {
       name: "grep",
       description:
-        "在工作区文件中搜索文本或正则,返回匹配行(格式:文件:行号:内容)。优先用 ripgrep 加速,未安装时降级为 Node.js 实现。",
+        "在已授权工作区文件中搜索文本或正则,返回匹配行(格式:文件:行号:内容)。优先用 ripgrep 加速,未安装时降级为 Node.js 实现。",
       inputSchema: {
         type: "object",
         properties: {
@@ -423,8 +429,8 @@ export class GrepTool implements BaseTool {
   async execute(args: string): Promise<string> {
     const { pattern, path, glob, caseSensitive, lineNumber, maxResults } = parseGrepArgs(args);
 
-    // 路径防护:锚定到工作区根
-    const searchRoot = safeResolve(this.workDir, path || ".");
+    // 路径防护:搜索根必须位于共享工作区根集合内
+    const searchRoot = await this.roots.assertAllowed(path || ".");
 
     // 探测 rg(模块级缓存,只探测一次)
     if (rgAvailable === null) {

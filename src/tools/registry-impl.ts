@@ -19,6 +19,7 @@ import { findClosestLines, formatCandidateHint } from "./edit-hint.js";
 import { execAsync, execOptions } from "../os/shell.js";
 import { BackgroundManager } from "./background-manager.js";
 import type { HookRunner } from "../hooks/runner.js";
+import { WorkspaceRoots } from "./workspace-roots.js";
 
 const DEFAULT_RESULT_SIZE_CHARS = 8000;
 
@@ -43,10 +44,14 @@ export function safeResolve(workDir: string, path: string): string {
 
 /**
  * 只读工具使用的路径解析。
- * 写入/编辑仍必须留在 workDir 内;read_file 允许读取外部绝对路径或 ../ 参考资料。
+ * 保留给旧调用方的同步 helper;所有路径都必须留在 workDir 内。
  */
 export function resolveReadablePath(workDir: string, path: string): string {
-  return isAbsolute(path) ? resolve(path) : resolve(workDir, path);
+  return safeResolve(workDir, path);
+}
+
+function workspaceRootsFrom(input: string | WorkspaceRoots): WorkspaceRoots {
+  return typeof input === "string" ? WorkspaceRoots.createSync(input) : input;
 }
 
 /**
@@ -355,7 +360,11 @@ function lineEndingStyleLabel(style: "lf" | "crlf" | "mixed"): string {
 
 export class ReadFileTool implements BaseTool {
   readonly readOnly = true;
-  constructor(private readonly workDir: string) {}
+  private readonly roots: WorkspaceRoots;
+
+  constructor(workDirOrRoots: string | WorkspaceRoots) {
+    this.roots = workspaceRootsFrom(workDirOrRoots);
+  }
 
   name(): string {
     return "read_file";
@@ -364,13 +373,13 @@ export class ReadFileTool implements BaseTool {
   /** 声明读 path 归一化后的绝对路径(与 execute 的 safeResolve 一致) */
   accesses(args: string): ToolAccesses {
     const { path } = JSON.parse(args) as { path?: string };
-    return ToolAccesses.readFile(resolveReadablePath(this.workDir, path ?? ""));
+    return ToolAccesses.readFile(this.roots.resolve(path ?? ""));
   }
 
   definition(): ToolDefinition {
     return {
       name: "read_file",
-      description: "读取指定路径的文件内容。支持相对工作区路径,也支持只读绝对路径。",
+      description: "读取指定路径的文件内容。相对路径基于主工作区,绝对路径须位于已授权工作区。",
       inputSchema: {
         type: "object",
         properties: {
@@ -391,8 +400,8 @@ export class ReadFileTool implements BaseTool {
       throw new Error("参数解析失败: 期望 JSON 含 path 字段");
     }
 
-    // 2. 只读访问:允许读取工作区外参考文件,写入/编辑工具仍由 safeResolve 限制。
-    const fullPath = resolveReadablePath(this.workDir, path);
+    // 2. 所有文件访问统一经过共享工作区边界。
+    const fullPath = await this.roots.assertAllowed(path);
 
     // 3. 物理 IO
     const raw = await readFile(fullPath, "utf8");
@@ -437,7 +446,11 @@ export class ReadFileTool implements BaseTool {
 // 极简工具集原语之一:创建或覆盖文件。
 // ==========================================
 export class WriteFileTool implements BaseTool {
-  constructor(private readonly workDir: string) {}
+  private readonly roots: WorkspaceRoots;
+
+  constructor(workDirOrRoots: string | WorkspaceRoots) {
+    this.roots = workspaceRootsFrom(workDirOrRoots);
+  }
 
   name(): string {
     return "write_file";
@@ -446,13 +459,14 @@ export class WriteFileTool implements BaseTool {
   /** 声明写 path 归一化后的绝对路径 —— 不同文件的写可并行 */
   accesses(args: string): ToolAccesses {
     const { path } = JSON.parse(args) as { path?: string };
-    return ToolAccesses.writeFile(safeResolve(this.workDir, path ?? ""));
+    return ToolAccesses.writeFile(this.roots.resolve(path ?? ""));
   }
 
   definition(): ToolDefinition {
     return {
       name: "write_file",
-      description: "创建或覆盖写入一个文件。如果目录不存在会自动创建。请提供相对工作区的路径。",
+      description:
+        "创建或覆盖写入一个文件。如果目录不存在会自动创建。支持主工作区相对路径或已授权工作区内绝对路径。",
       inputSchema: {
         type: "object",
         properties: {
@@ -476,7 +490,7 @@ export class WriteFileTool implements BaseTool {
     }
 
     // 安全防线:限制在 WorkDir 下
-    const fullPath = safeResolve(this.workDir, path);
+    const fullPath = await this.roots.assertAllowed(path);
 
     // 自动创建缺失的父级目录
     await mkdir(resolve(fullPath, ".."), { recursive: true });
@@ -969,7 +983,11 @@ function lineByLineReplace(
 }
 
 export class EditFileTool implements BaseTool {
-  constructor(private readonly workDir: string) {}
+  private readonly roots: WorkspaceRoots;
+
+  constructor(workDirOrRoots: string | WorkspaceRoots) {
+    this.roots = workspaceRootsFrom(workDirOrRoots);
+  }
 
   name(): string {
     return "edit_file";
@@ -978,14 +996,14 @@ export class EditFileTool implements BaseTool {
   /** 声明对 path 的读改写(Edit 必须先读后写,与并发写同文件冲突) */
   accesses(args: string): ToolAccesses {
     const { path } = JSON.parse(args) as { path?: string };
-    return ToolAccesses.readWriteFile(safeResolve(this.workDir, path ?? ""));
+    return ToolAccesses.readWriteFile(this.roots.resolve(path ?? ""));
   }
 
   definition(): ToolDefinition {
     return {
       name: "edit_file",
       description:
-        "对现有文件进行局部的字符串替换。比重写整个文件更安全、更快速。请提供足够的上下文(建议上下各多包含几行)以确保 old_text 在文件中唯一。请先使用 read_file 读取文件,old_text 应取自 read_file 的输出(含行号前缀需去掉)。",
+        "对已授权工作区内的现有文件进行局部字符串替换。比重写整个文件更安全、更快速。请提供足够的上下文(建议上下各多包含几行)以确保 old_text 在文件中唯一。请先使用 read_file 读取文件,old_text 应取自 read_file 的输出(含行号前缀需去掉)。",
       inputSchema: {
         type: "object",
         properties: {
@@ -1027,7 +1045,7 @@ export class EditFileTool implements BaseTool {
       throw new Error("参数解析失败: 期望 JSON 含 path、old_text、new_text 字段");
     }
 
-    const fullPath = safeResolve(this.workDir, path);
+    const fullPath = await this.roots.assertAllowed(path);
 
     // 1. 读取原文件(原始字节流)
     const raw = await readFile(fullPath, "utf8");
