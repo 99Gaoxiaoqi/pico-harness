@@ -150,7 +150,10 @@ export async function handleTuiInputSubmission(
 ): Promise<void> {
   if (handleApprovalCommand(text, deps)) return;
 
-  const processed = await processTuiInput(text, deps);
+  const processed = await processTuiInput(text, {
+    ...deps,
+    commandAvailabilityState: deps.commandAvailabilityState ?? "idle",
+  });
 
   switch (processed.type) {
     case "empty":
@@ -203,27 +206,17 @@ export async function handleTuiRunningInputSubmission(
   if (handleApprovalCommand(text, deps)) return;
 
   const running = deps.guard.getSnapshot() !== "idle";
-  const blockedCommand = running ? blockedRunningLocalCommand(text, deps.registry) : undefined;
-  if (blockedCommand !== undefined) {
-    deps.reporter.pushSystemMessage(formatRunningCommandBlocked(blockedCommand));
-    return;
-  }
+  const availabilityState: CommandInputState = running ? "running" : "idle";
 
-  const processed = await processTuiInput(text, deps);
+  const processed = await processTuiInput(text, {
+    ...deps,
+    commandAvailabilityState: availabilityState,
+  });
   if (!needsAgentRun(processed)) {
-    if (
-      running &&
-      processed.type === "local-command" &&
-      !canRunLocalCommandWhileRunning(processed.command, deps.registry)
-    ) {
-      deps.reporter.pushSystemMessage(formatRunningCommandBlocked(processed.command));
-      return;
-    }
-
     await handleTuiInputSubmission(text, {
       ...deps,
       processInput: async () => processed,
-      commandAvailabilityState: running ? "running" : "idle",
+      commandAvailabilityState: availabilityState,
     });
     return;
   }
@@ -237,7 +230,13 @@ export async function handleTuiRunningInputSubmission(
     return;
   }
 
-  await runProcessedAgentInput(text, processed, deps, gen, { drainAfter: true });
+  await runProcessedAgentInput(
+    text,
+    processed,
+    { ...deps, commandAvailabilityState: availabilityState },
+    gen,
+    { drainAfter: true },
+  );
 }
 
 async function runProcessedAgentInput(
@@ -291,8 +290,31 @@ async function drainQueuedTuiInputs(deps: HandleTuiRunningInputSubmissionDeps): 
 
 async function processTuiInput(
   text: string,
-  deps: Pick<HandleTuiInputSubmissionDeps, "registry" | "processInput">,
+  deps: Pick<
+    HandleTuiInputSubmissionDeps,
+    "registry" | "processInput" | "commandAvailabilityState"
+  >,
 ): Promise<TuiInputProcessResult> {
+  const unavailable = blockedUnavailableCommand(
+    text,
+    deps.registry,
+    deps.commandAvailabilityState ?? "idle",
+  );
+  if (unavailable !== undefined) {
+    return {
+      type: "local-command",
+      raw: text,
+      command: unavailable.name,
+      args: unavailable.args,
+      argv: unavailable.argv,
+      result: {
+        type: "local",
+        action: "message",
+        message: formatUnavailableCommandBlocked(unavailable.name, unavailable.disabledReason),
+      },
+    };
+  }
+
   return (deps.processInput ?? ((input) => processUserInput(input, { registry: deps.registry })))(
     text,
   );
@@ -302,22 +324,35 @@ function needsAgentRun(processed: TuiInputProcessResult): boolean {
   return processed.type === "prompt" || processed.type === "prompt-command";
 }
 
-function blockedRunningLocalCommand(text: string, registry: CommandRegistry): string | undefined {
+function blockedUnavailableCommand(
+  text: string,
+  registry: CommandRegistry,
+  state: CommandInputState,
+):
+  | {
+      name: string;
+      args: string;
+      argv: readonly string[];
+      disabledReason: string;
+    }
+  | undefined {
   const parsed = parseSlashInput(text);
   if (!parsed) return undefined;
 
   const command = registry.resolve(parsed.name);
-  if (!command || command.kind === "prompt") return undefined;
-  return getCommandAvailability(command, "running").available ? undefined : command.name;
+  if (!command) return undefined;
+  const availability = getCommandAvailability(command, state);
+  if (availability.available) return undefined;
+  return {
+    name: command.name,
+    args: parsed.args,
+    argv: parsed.argv,
+    disabledReason: availability.disabledReason ?? "Command is unavailable.",
+  };
 }
 
-function canRunLocalCommandWhileRunning(command: string, registry: CommandRegistry): boolean {
-  const descriptor = registry.resolve(command);
-  return descriptor !== undefined && getCommandAvailability(descriptor, "running").available;
-}
-
-function formatRunningCommandBlocked(command: string): string {
-  return `Cannot run /${command} while the agent is running. Please wait for the current response to finish.`;
+function formatUnavailableCommandBlocked(command: string, disabledReason: string): string {
+  return `Cannot run /${command}: ${disabledReason}`;
 }
 
 /** 启动 TUI REPL 循环 */

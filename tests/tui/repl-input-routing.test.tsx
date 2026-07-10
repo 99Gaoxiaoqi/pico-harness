@@ -317,7 +317,127 @@ describe("TUI input routing", () => {
     );
     expect(snapshots.at(-1)).toContainEqual({
       kind: "system",
-      content: "Cannot run /status while the agent is running. Please wait for the current response to finish.",
+      content: "Cannot run /status: Command is only available while idle.",
+    });
+  });
+
+  it("idle execution blocks commands whose descriptor is running-only", async () => {
+    const runningLocal = vi.fn<SlashCommand["execute"]>(() => ({
+      type: "local",
+      action: "message",
+      message: "running local ran",
+    }));
+    const runningPrompt = vi.fn<SlashCommand["execute"]>(() => ({
+      type: "prompt",
+      prompt: "running prompt ran",
+    }));
+    const registry = new CommandRegistry([
+      {
+        name: "running-local",
+        description: "Running local",
+        kind: "local",
+        availability: "running",
+        execute: runningLocal,
+      },
+      {
+        name: "running-prompt",
+        description: "Running prompt",
+        kind: "prompt",
+        availability: "running",
+        execute: runningPrompt,
+      },
+    ]);
+    const { reporter, snapshots, runAgent, exit, workDir } = harness();
+
+    await handleTuiInputSubmission("/running-local", {
+      reporter,
+      registry,
+      workDir,
+      runAgent,
+      exit,
+      commandAvailabilityState: "idle",
+    });
+    await handleTuiInputSubmission("/running-prompt", {
+      reporter,
+      registry,
+      workDir,
+      runAgent,
+      exit,
+      commandAvailabilityState: "idle",
+    });
+
+    expect(runningLocal).not.toHaveBeenCalled();
+    expect(runningPrompt).not.toHaveBeenCalled();
+    expect(runAgent).not.toHaveBeenCalled();
+    expect(registry.detailedSuggestions("running-local", { availabilityState: "idle" })).toContainEqual(
+      expect.objectContaining({
+        name: "running-local",
+        disabled: true,
+        disabledReason: "Command is only available while running.",
+      }),
+    );
+    expect(snapshots.at(-1)).toContainEqual({
+      kind: "system",
+      content: "Cannot run /running-prompt: Command is only available while running.",
+    });
+  });
+
+  it("running execution allows prompt commands marked running and blocks idle prompt commands", async () => {
+    const runningPrompt = vi.fn<SlashCommand["execute"]>(() => ({
+      type: "prompt",
+      prompt: "summarize current output",
+    }));
+    const idlePrompt = vi.fn<SlashCommand["execute"]>(() => ({
+      type: "prompt",
+      prompt: "idle only prompt",
+    }));
+    const registry = new CommandRegistry([
+      {
+        name: "while-running",
+        description: "Running prompt",
+        kind: "prompt",
+        availability: "running",
+        execute: runningPrompt,
+      },
+      {
+        name: "idle-review",
+        description: "Idle prompt",
+        kind: "prompt",
+        availability: "idle",
+        execute: idlePrompt,
+      },
+    ]);
+    const { reporter, snapshots, runAgent, exit, workDir } = harness();
+    const deps = {
+      reporter,
+      registry,
+      workDir,
+      runAgent,
+      exit,
+      guard: {
+        getSnapshot: () => "running" as const,
+        tryStart: () => 1,
+        end: () => true,
+      },
+      queue: new RunningInputQueue(),
+    };
+
+    await handleTuiRunningInputSubmission("/while-running", deps);
+    await handleTuiRunningInputSubmission("/idle-review", deps);
+
+    expect(runningPrompt).toHaveBeenCalledTimes(1);
+    expect(idlePrompt).not.toHaveBeenCalled();
+    expect(runAgent).toHaveBeenCalledWith("summarize current output");
+    expect(registry.detailedSuggestions("idle-review", { availabilityState: "running" })).toContainEqual(
+      expect.objectContaining({
+        name: "idle-review",
+        disabled: true,
+        disabledReason: "Command is only available while idle.",
+      }),
+    );
+    expect(snapshots.at(-1)).toContainEqual({
+      kind: "system",
+      content: "Cannot run /idle-review: Command is only available while idle.",
     });
   });
 

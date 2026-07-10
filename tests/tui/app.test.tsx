@@ -309,7 +309,7 @@ describe("App", () => {
 
     try {
       let output = await harness.write("\u001b[6~");
-      expect(output).toContain("› /cmd-12");
+      expect(output).toContain("› /cmd-11");
       expect(output).toContain("Use dialog controls");
       expect(output).not.toContain('Try "fix this" or / for commands');
       expect(output.split("\n").length).toBeLessThanOrEqual(24);
@@ -424,6 +424,71 @@ describe("App", () => {
       await harness.write("\u001b");
       await new Promise((resolve) => setTimeout(resolve, 80));
       expect(closeDialog).toHaveBeenCalledWith("local-ui:help");
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("keeps every CJK and emoji help page within a 60x24 terminal", async () => {
+    const closeDialog = vi.fn();
+    const commands = Array.from({ length: 18 }, (_, index) => ({
+      name: `多语言-${String(index).padStart(2, "0")}`,
+      aliases: [`别名-${index}`, `emoji-${index}`],
+      usage: `/多语言-${String(index).padStart(2, "0")} [选项|参数|更长的参数名]`,
+      description: `处理中文宽字符、组合 emoji 👨‍👩‍👧‍👦、状态 ${index}，并展示一段足够长的说明文字用于真实换行测量`,
+      kind: "local" as const,
+      source: "builtin" as const,
+      category: index % 2 === 0 ? ("system" as const) : ("workspace" as const),
+      disabled: index % 3 === 0,
+      disabledReason:
+        index % 3 === 0
+          ? "运行中不可用：请等待当前任务结束后再执行这个包含中文和 emoji 🚦 的命令。"
+          : undefined,
+    }));
+    const request = createLocalUiDialogRequest(
+      { kind: "open-panel", panel: "help" },
+      {
+        commands,
+        onClose: closeDialog,
+      } as never,
+    );
+    const app = (dialogRequests = request ? [request] : []) => (
+      <App
+        model="glm-5.2"
+        provider="openai"
+        workDir="/workspace/demo"
+        entries={Array.from({ length: 20 }, (_, index) => ({
+          kind: "assistant" as const,
+          content: `message-${index}`,
+        }))}
+        running={false}
+        dialogRequests={dialogRequests}
+        onSubmit={vi.fn()}
+      />
+    );
+    const harness = createInteractiveApp(app(), { columns: 60, rows: 24 });
+
+    try {
+      let output = await harness.write("\u001b[6~");
+      expect(output).toContain("Use dialog controls");
+      expect(output).toContain("↓");
+      expect(output.split("\n").length).toBeLessThanOrEqual(24);
+
+      output = await harness.write("\u001b[6~");
+      expect(output).toContain("›");
+      expect(output.split("\n").length).toBeLessThanOrEqual(24);
+
+      output = await harness.write("\u001b[6~");
+      expect(output).toContain("Slash commands");
+      expect(output.split("\n").length).toBeLessThanOrEqual(24);
+
+      await harness.write("\u001b");
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      expect(closeDialog).toHaveBeenCalledWith("local-ui:help");
+
+      output = await harness.rerender(app([]));
+      output = await harness.write("恢复");
+      expect(output).toContain("恢复▋");
     } finally {
       await harness.cleanup();
     }
