@@ -5,6 +5,7 @@ import type {
   SlashCommandKind,
   SlashCommandSource,
 } from "../input/types.js";
+import { visualRows } from "./terminal-width.js";
 
 export const HELP_PANEL_COMMAND_WIDTH = 44;
 export const HELP_PANEL_DESCRIPTION_WIDTH = 72;
@@ -163,9 +164,7 @@ export function measureHelpPanelRows(
   } = {},
 ): number {
   const wrapWidth = Math.max(1, options.width ?? 80);
-  return formatHelpPanel(commands, options)
-    .split("\n")
-    .reduce((rows, line) => rows + Math.max(1, Math.ceil(line.length / wrapWidth)), 0);
+  return visualRows(formatHelpPanel(commands, options), wrapWidth).length;
 }
 
 export function fitHelpPanelMaxItems(
@@ -182,9 +181,7 @@ export function fitHelpPanelMaxItems(
   const maxRows = Math.max(1, options.maxRows);
   let fitted = 1;
   for (let maxItems = 1; maxItems <= commands.length; maxItems++) {
-    const rows = measureHelpPanelRows(commands, {
-      selectedIndex: options.selectedIndex,
-      scrollOffset: options.scrollOffset,
+    const rows = measureWorstHelpPanelRows(commands, {
       maxItems,
       width: options.width,
     });
@@ -192,6 +189,27 @@ export function fitHelpPanelMaxItems(
     fitted = maxItems;
   }
   return fitted;
+}
+
+function measureWorstHelpPanelRows(
+  commands: readonly HelpPanelCommand[],
+  options: { maxItems: number; width?: number },
+): number {
+  const maxItems = Math.max(1, options.maxItems);
+  const maxScroll = Math.max(0, commands.length - maxItems);
+  let rows = 0;
+  for (let scrollOffset = 0; scrollOffset <= maxScroll; scrollOffset++) {
+    rows = Math.max(
+      rows,
+      measureHelpPanelRows(commands, {
+        selectedIndex: scrollOffset,
+        scrollOffset,
+        maxItems,
+        width: options.width,
+      }),
+    );
+  }
+  return rows;
 }
 
 export function formatHelpPanelSections(

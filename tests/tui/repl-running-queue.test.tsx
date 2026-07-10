@@ -95,19 +95,29 @@ describe("TUI running input queue", () => {
       { kind: "user", content: "old" },
       {
         kind: "system",
-        content: "Cannot run /clear while the agent is running. Please wait for the current response to finish.",
+        content: "Cannot run /clear: Command is only available while idle.",
       },
     ]);
   });
 
   it("running 中本地 UI 命令不入队且不会打开弹层", async () => {
-    const { reporter, guard, queue, registry, workDir, exit, runAgent } = harness();
+    const { reporter, guard, queue, registry: baseRegistry, workDir, exit, runAgent } = harness();
     const result: LocalCommandResult = {
       type: "local",
       action: "message",
       message: "Rewind",
       ui: { kind: "open-selector", selector: "rewind" },
     };
+    const registry = new CommandRegistry([
+      ...baseRegistry.list(),
+      {
+        name: "rewind",
+        description: "Rewind",
+        kind: "local",
+        availability: "idle",
+        execute: () => result,
+      },
+    ]);
     const openLocalUiDialog = vi.fn();
     guard.tryStart();
 
@@ -119,14 +129,6 @@ describe("TUI running input queue", () => {
       workDir,
       exit,
       runAgent,
-      processInput: async () => ({
-        type: "local-command",
-        raw: "/rewind",
-        command: "rewind",
-        args: "",
-        argv: [],
-        result,
-      }),
       openLocalUiDialog,
     });
 
