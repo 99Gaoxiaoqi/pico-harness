@@ -41,6 +41,7 @@ describe("HookRunner", () => {
    *   - "exit1"            → exit 1(fail-open)
    *   - "json:<stdout>"    → exit 0,stdout 输出 JSON(按 stdout 判定)
    *   - "hang"             → 永不退出(测超时)
+   *   - "close-stdin"      → 立即关闭 stdin，模拟父进程写入 EPIPE
    */
   async function writeHookScript(behavior: string): Promise<string> {
     const scriptPath = join(
@@ -52,6 +53,11 @@ describe("HookRunner", () => {
       body = `
         process.stdin.resume();
         setTimeout(() => {}, 1000000);
+      `;
+    } else if (behavior === "close-stdin") {
+      body = `
+        process.stdin.destroy();
+        setTimeout(() => process.exit(1), 100);
       `;
     } else if (behavior.startsWith("exit2:")) {
       const msg = behavior.slice("exit2:".length);
@@ -208,6 +214,21 @@ describe("HookRunner", () => {
       });
       const result = await runner.runPreToolUse("bash", {}, "sess-1");
       expect(result.decision).toBe("allow");
+    });
+
+    it("hook 提前关闭 stdin 时 EPIPE 不泄漏为未处理异常", async () => {
+      const command = await writeHookScript("close-stdin");
+      const runner = makeRunner({
+        PreToolUse: [{ hooks: [{ type: "command", command }] }],
+      });
+      const result = await runner.runPreToolUse(
+        "bash",
+        { payload: "x".repeat(2 * 1024 * 1024) },
+        "sess-epipe",
+      );
+
+      expect(result.decision).toBe("allow");
+      await new Promise((resolve) => setTimeout(resolve, 50));
     });
   });
 

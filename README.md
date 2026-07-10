@@ -3,7 +3,7 @@
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Node](https://img.shields.io/badge/node-%3E%3D22-green.svg)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.9-blue.svg)
-![Tests](https://img.shields.io/badge/tests-1914%20passed-brightgreen.svg)
+![Tests](https://img.shields.io/badge/tests-1915%20passed-brightgreen.svg)
 
 用 TypeScript 从零实现的工业级 Agent Harness 引擎,对标课程《从 0 开始构建 Agent Harness》中的 `go-pico`。
 
