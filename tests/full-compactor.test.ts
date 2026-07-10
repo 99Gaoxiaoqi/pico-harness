@@ -19,7 +19,7 @@ import { ContextOverflowError } from "../src/provider/errors.js";
 import type { BaseTool, Registry } from "../src/tools/registry.js";
 import type { ToolCall, ToolResult } from "../src/schema/message.js";
 import { Session, SessionManager } from "../src/engine/session.js";
-import type { LLMProvider } from "../src/provider/interface.js";
+import type { LLMProvider, LLMProviderRequestOptions } from "../src/provider/interface.js";
 import type { Message, ToolDefinition } from "../src/schema/message.js";
 
 /**
@@ -27,17 +27,22 @@ import type { Message, ToolDefinition } from "../src/schema/message.js";
  * 记录每次 generate 入参,用于断言"迭代摘要传入 previousSummary"。
  */
 class SummaryMockProvider implements LLMProvider {
-  readonly calls: { messages: Message[]; toolsCount: number }[] = [];
+  readonly calls: { messages: Message[]; toolsCount: number; signal?: AbortSignal }[] = [];
   private i = 0;
   constructor(
     private readonly behaviors: Array<
       { kind: "ok"; content: string } | { kind: "throw"; error: Error } | { kind: "empty" }
     >,
   ) {}
-  async generate(messages: Message[], availableTools: ToolDefinition[]): Promise<Message> {
+  async generate(
+    messages: Message[],
+    availableTools: ToolDefinition[],
+    options?: LLMProviderRequestOptions,
+  ): Promise<Message> {
     this.calls.push({
       messages: messages.map((m) => ({ ...m })),
       toolsCount: availableTools.length,
+      ...(options?.signal ? { signal: options.signal } : {}),
     });
     const beh = this.behaviors[this.i];
     if (!beh) throw new Error("SummaryMockProvider: behavior 序列耗尽");
@@ -62,6 +67,45 @@ function assistantWithToolCall(id: string, name: string, args: string): Message 
 }
 
 describe("FullCompactor 模型摘要压缩", () => {
+  it("signal 中止摘要 provider 时立即抛 AbortError 且不重试", async () => {
+    let started!: () => void;
+    const requestStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    let receivedSignal: AbortSignal | undefined;
+    let calls = 0;
+    const provider: LLMProvider = {
+      async generate(_messages, _tools, options): Promise<Message> {
+        calls++;
+        receivedSignal = options?.signal;
+        started();
+        if (!options?.signal) throw new Error("missing abort signal");
+        await new Promise<never>((_resolve, reject) => {
+          const rejectWithAbort = () => reject(options.signal?.reason);
+          if (options.signal.aborted) {
+            rejectWithAbort();
+            return;
+          }
+          options.signal.addEventListener("abort", rejectWithAbort, { once: true });
+        });
+        throw new Error("unreachable");
+      },
+    };
+    const fc = new FullCompactor({ provider, maxAttempts: 3 });
+    const session = new Session("fc-abort", "/tmp");
+    session.append(userMsg("a"), assistantMsg("b"), userMsg("c"));
+    const controller = new AbortController();
+    const run = fc.compact(session, 1, controller.signal);
+
+    await requestStarted;
+    controller.abort(new DOMException("interrupted", "AbortError"));
+
+    await expect(run).rejects.toMatchObject({ name: "AbortError" });
+    expect(receivedSignal).toBe(controller.signal);
+    expect(calls).toBe(1);
+    expect(session.length).toBe(3);
+  });
+
   it("mock provider 返回摘要 → session.history 前 N 条被替换为 1 条 summary", async () => {
     const provider = new SummaryMockProvider([{ kind: "ok", content: "## 历史任务快照\n完成重构" }]);
     const fc = new FullCompactor({ provider });
@@ -367,11 +411,13 @@ describe("FullCompactor 接入 generateWithOverflowRetry(loop 端到端)", () =>
       session.append({ role: i % 2 === 0 ? "user" : "assistant", content: `msg-${i}-` + "X".repeat(50) });
     }
 
-    const returned = await engine.run(session);
+    const controller = new AbortController();
+    const returned = await engine.run(session, undefined, undefined, controller.signal);
     // 最终返回压缩后重试的成功消息
     expect(returned[returned.length - 1]!.content).toBe("压缩后重试成功");
     // 摘要 provider 被调 1 次(触发了一次模型摘要压缩)
     expect(summaryProvider.calls).toHaveLength(1);
+    expect(summaryProvider.calls[0]?.signal).toBe(controller.signal);
     // 压缩后 session.history 前 5 条被替换为 1 条 summary
     const history = session.getHistory();
     expect(history[0]!.role).toBe("assistant");

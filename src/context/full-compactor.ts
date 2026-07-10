@@ -15,6 +15,7 @@
 //   - 失败兜底:摘要调用失败/返回空 → 返回 false,调用方降级到字符级硬重置,不崩。
 
 import type { LLMProvider } from "../provider/interface.js";
+import { isAbortError } from "../provider/errors.js";
 import type { Message } from "../schema/message.js";
 import type { Session } from "../engine/session.js";
 import { logger } from "../observability/logger.js";
@@ -109,9 +110,11 @@ export class FullCompactor {
    * 响应式压缩:用 provider 把 history 前缀浓缩成摘要,替换 session.history。
    * @param session 要压缩的会话
    * @param retainLastN 保留最近 N 条不压缩(对标 kimi-code computeCompactCount)
+   * @param signal 本轮运行的中止信号
    * @returns 压缩成功返回 true,失败返回 false(调用方降级到硬重置)
    */
-  async compact(session: Session, retainLastN: number): Promise<boolean> {
+  async compact(session: Session, retainLastN: number, signal?: AbortSignal): Promise<boolean> {
+    signal?.throwIfAborted();
     const history = session.getHistory();
     // 计算要压缩的前缀条数:总长 - 保留尾部
     let compactedCount = history.length - retainLastN;
@@ -152,6 +155,7 @@ export class FullCompactor {
     // 调用 provider 生成摘要(带重试,失败/空都重试)
     let summary: string | undefined;
     for (let attempt = 0; attempt < this.maxAttempts; attempt++) {
+      signal?.throwIfAborted();
       try {
         const resp = await this.provider.generate(
           [
@@ -159,10 +163,14 @@ export class FullCompactor {
             { role: "user", content: instruction },
           ],
           [],
+          { signal },
         );
+        signal?.throwIfAborted();
         summary = extractSummary(resp);
         if (summary && summary.trim().length > 0) break;
       } catch (err) {
+        if (isAbortError(err)) throw err;
+        signal?.throwIfAborted();
         logger.warn(
           { attempt: attempt + 1, maxAttempts: this.maxAttempts, err: String(err) },
           `[FullCompactor] 摘要调用失败(attempt ${attempt + 1}/${this.maxAttempts})`,
