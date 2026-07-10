@@ -13,6 +13,7 @@ describe("loadPicoConfig", () => {
       commandsDir: join(workDir, ".pico", "commands"),
       additionalDirectories: [],
       keybindings: {},
+      providers: {},
     });
   });
 
@@ -32,6 +33,7 @@ describe("loadPicoConfig", () => {
           y: "confirmation:accept",
         },
       },
+      providers: {},
       futureField: true,
     });
 
@@ -48,6 +50,7 @@ describe("loadPicoConfig", () => {
           y: "confirmation:accept",
         },
       },
+      providers: {},
     });
   });
 

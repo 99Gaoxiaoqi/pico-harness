@@ -1,45 +1,66 @@
 import { describe, expect, it } from "vitest";
 import { createModelSelectorState } from "../../src/tui/model-selector.js";
 import { buildModelOptions, modelSelectionToCommand } from "../../src/tui/model-options.js";
+import type { ModelRoute } from "../../src/provider/model-router.js";
+
+const ROUTES: ModelRoute[] = [
+  route("deepseek/deepseek-v4-pro", "deepseek", "deepseek-v4-pro"),
+  route("deepseek/deepseek-v4-flash", "deepseek", "deepseek-v4-flash"),
+  route("anthropic/claude-3-5-sonnet", "anthropic", "claude-3-5-sonnet", "claude"),
+];
 
 describe("model options adapter", () => {
   it("builds selector options from slash model argument hints", () => {
-    const options = buildModelOptions();
+    const options = buildModelOptions(ROUTES);
 
     expect(options).toEqual([
       {
-        id: "glm-5.2",
-        name: "glm-5.2",
-        description: "OpenAI-compatible default model",
+        id: "deepseek/deepseek-v4-pro",
+        name: "deepseek-v4-pro",
+        description: "deepseek · openai",
       },
       {
-        id: "kimi-k2.5",
-        name: "kimi-k2.5",
-        description: "OpenAI-compatible fallback model",
+        id: "deepseek/deepseek-v4-flash",
+        name: "deepseek-v4-flash",
+        description: "deepseek · openai",
       },
       {
-        id: "claude-3-5-sonnet",
+        id: "anthropic/claude-3-5-sonnet",
         name: "claude-3-5-sonnet",
-        description: "Claude default model",
-      },
-      {
-        id: "gemini-2.0-flash",
-        name: "gemini-2.0-flash",
-        description: "Gemini default model",
+        description: "anthropic · claude",
       },
     ]);
   });
 
   it("lets the model selector choose the current model by id", () => {
-    const options = buildModelOptions();
+    const options = buildModelOptions(ROUTES);
 
-    expect(createModelSelectorState(options, "claude-3-5-sonnet")).toEqual({
+    expect(createModelSelectorState(options, "anthropic/claude-3-5-sonnet")).toEqual({
       selectedIndex: 2,
       status: "selecting",
     });
   });
 
   it("formats a model selection as the slash command to run", () => {
-    expect(modelSelectionToCommand("kimi-k2.5")).toBe("/model kimi-k2.5");
+    expect(modelSelectionToCommand("deepseek/deepseek-v4-flash")).toBe(
+      "/model deepseek/deepseek-v4-flash",
+    );
   });
 });
+
+function route(
+  id: string,
+  providerId: string,
+  model: string,
+  provider: ModelRoute["provider"] = "openai",
+): ModelRoute {
+  return {
+    id,
+    providerId,
+    provider,
+    model,
+    baseURL: "https://example.test/v1",
+    apiKeyEnv: "TEST_API_KEY",
+    source: "config",
+  };
+}

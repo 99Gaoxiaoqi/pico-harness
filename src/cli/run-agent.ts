@@ -81,6 +81,8 @@ export interface RunAgentCliOptions {
   baseURL?: string;
   apiKey?: string;
   model?: string;
+  /** Route-aware callers disable bare-model fallback because a fallback may need another endpoint. */
+  allowModelFallback?: boolean;
   /** Native model thinking effort: off/low/medium/high. */
   thinkingEffort?: ThinkingEffort;
   planMode?: boolean;
@@ -215,7 +217,7 @@ export async function runAgentFromCli(
   }
   // 凭证轮换(4.2):多 key 时从池取首个 key 覆盖 config.apiKey,并构建轮换回调。
   // 单 key / 注入 provider 时跳过(向后兼容)。pool 注入点集中在此,便于追踪 currentKey。
-  const credentialPool = getCredentialPool();
+  const credentialPool = options.apiKey === undefined ? getCredentialPool() : undefined;
   let currentConfig: ProviderConfig = providerConfig;
   let rebuildProvider: (() => LLMProvider | undefined) | undefined;
   if (credentialPool && credentialPool.size > 1 && dependencies.provider === undefined) {
@@ -224,12 +226,18 @@ export async function runAgentFromCli(
   const trackedProvider =
     dependencies.provider !== undefined
       ? new CostTracker(dependencies.provider, providerConfig.model, session)
-      : createTrackedProviderWithFallback(
-          kind,
-          currentConfig,
-          dependencies.providerFactory ?? createRawProvider,
-          session,
-        );
+      : effectiveOptions.allowModelFallback === false
+        ? new CostTracker(
+            (dependencies.providerFactory ?? createRawProvider)(kind, currentConfig),
+            currentConfig.model,
+            session,
+          )
+        : createTrackedProviderWithFallback(
+            kind,
+            currentConfig,
+            dependencies.providerFactory ?? createRawProvider,
+            session,
+          );
   if (credentialPool && credentialPool.size > 1 && dependencies.provider === undefined) {
     rebuildProvider = (): LLMProvider | undefined => {
       // 标记当前 key 限流 → 取下一个可用 key → 重建整条包装链
@@ -681,7 +689,7 @@ function resolveProviderConfig(
   allowMissingNetworkConfig: boolean,
 ): ProviderConfig {
   const baseURL = options.baseURL ?? env.LLM_BASE_URL;
-  const apiKey = options.apiKey ?? env.LLM_API_KEY;
+  const apiKey = options.apiKey ?? firstApiKey(env.LLM_API_KEYS) ?? env.LLM_API_KEY;
   const model = options.model ?? env.LLM_MODEL ?? defaultModel(options.provider ?? "openai");
 
   if (!allowMissingNetworkConfig && (!baseURL || !apiKey)) {
@@ -694,6 +702,13 @@ function resolveProviderConfig(
     model,
     ...(options.thinkingEffort !== undefined ? { thinkingEffort: options.thinkingEffort } : {}),
   };
+}
+
+function firstApiKey(value: string | undefined): string | undefined {
+  return value
+    ?.split(",")
+    .map((key) => key.trim())
+    .find(Boolean);
 }
 
 async function resolveWorkDir(dir: string | undefined): Promise<string> {

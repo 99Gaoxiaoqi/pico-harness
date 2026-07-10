@@ -1,11 +1,11 @@
-import { MODEL_ARGUMENT_CANDIDATES } from "../input/pico-command-registry.js";
+import type { ModelRoute } from "../provider/model-router.js";
 import type { ModelOption } from "./model-selector.js";
 
-export function buildModelOptions(): ModelOption[] {
-  return MODEL_ARGUMENT_CANDIDATES.map((hint) => ({
-    id: hint.value,
-    name: hint.value,
-    description: hint.description,
+export function buildModelOptions(routes: readonly ModelRoute[] = []): ModelOption[] {
+  return routes.map((route) => ({
+    id: route.id,
+    name: route.model,
+    description: `${route.providerId} · ${route.provider}`,
   }));
 }
 
