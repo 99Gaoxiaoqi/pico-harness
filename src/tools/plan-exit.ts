@@ -17,6 +17,7 @@
 // 注入的 onExit 回调。default-registry 构造时回调为空,host 构造 engine 后调
 // setExitCallback 注入,使工具与 engine 彻底解耦。
 
+import { randomUUID } from "node:crypto";
 import type { BaseTool } from "./registry.js";
 import type { ToolDefinition } from "../schema/message.js";
 import type { ToolAccesses } from "./tool-access.js";
@@ -113,7 +114,7 @@ export class ExitPlanModeTool implements BaseTool {
     }
 
     // 2. 提交审批:plan 内容作为 diff 展示给用户(用户据此决定 approve/reject/modify)
-    const taskId = `exit_plan_${Date.now()}`;
+    const taskId = `exit_plan_${Date.now().toString(36)}_${randomUUID()}`;
     const result = await this.approval.waitForApproval(
       taskId,
       "exit_plan_mode",
@@ -122,6 +123,7 @@ export class ExitPlanModeTool implements BaseTool {
       plan,
       this.abortSignal,
     );
+    this.abortSignal?.throwIfAborted();
 
     // 3. 分支处理
     if (!result.allowed) {
@@ -131,7 +133,9 @@ export class ExitPlanModeTool implements BaseTool {
 
     // modify:把用户修改后的内容写回 PLAN.md
     if (result.modifiedContent !== undefined) {
+      this.abortSignal?.throwIfAborted();
       await this.store.writePlan(result.modifiedContent);
+      this.abortSignal?.throwIfAborted();
       if (this.onExit) {
         this.onExit(result.modifiedContent);
       }
@@ -139,6 +143,7 @@ export class ExitPlanModeTool implements BaseTool {
     }
 
     // approve:回调通知 engine 退出 Plan Mode
+    this.abortSignal?.throwIfAborted();
     if (this.onExit) {
       this.onExit();
       return "✅ 审批通过,已退出 Plan Mode。现在可以开始执行计划了。";

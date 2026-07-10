@@ -101,6 +101,76 @@ describe("ExitPlanModeTool", () => {
     await expect(readFile(join(workDir, "PLAN.md"), "utf8")).resolves.toBe(originalPlan);
   });
 
+  it("审批成功同 tick abort 会在写计划和退出前停止", async () => {
+    const originalPlan = "# 原计划\n审批后仍可中止";
+    await store.writePlan(originalPlan);
+    const manager = new ApprovalManager(60_000);
+    const controller = new AbortController();
+    const onExit = vi.fn();
+    let notice: ApprovalNotice | undefined;
+    const tool = new ExitPlanModeTool(store, manager);
+    tool.setAbortSignal(controller.signal);
+    tool.setExitCallback(onExit);
+    tool.setNotify((value) => {
+      notice = value;
+    });
+
+    const execution = tool.execute("{}");
+    await vi.waitFor(() => expect(notice).toBeDefined());
+    expect(
+      manager.resolveApprovalWithModify(notice!.taskId, "approved", "# 不应写入"),
+    ).toBe(true);
+    controller.abort(new DOMException("interrupted after approval", "AbortError"));
+
+    await expect(execution).rejects.toMatchObject({ name: "AbortError" });
+    expect(onExit).not.toHaveBeenCalled();
+    await expect(readFile(join(workDir, "PLAN.md"), "utf8")).resolves.toBe(originalPlan);
+  });
+
+  it("同一毫秒的并发退出审批拥有不同 ID 且都能结算", async () => {
+    await store.writePlan("# 并发计划");
+    const manager = new ApprovalManager(10);
+    const notices: ApprovalNotice[] = [];
+    let resolveNotices!: () => void;
+    const noticesReady = new Promise<void>((resolve) => {
+      resolveNotices = resolve;
+    });
+    const captureNotice = (notice: ApprovalNotice) => {
+      notices.push(notice);
+      if (notices.length === 2) resolveNotices();
+    };
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_700_000_000_000);
+    const first = new ExitPlanModeTool(store, manager);
+    const second = new ExitPlanModeTool(store, manager);
+    first.setNotify(captureNotice);
+    second.setNotify(captureNotice);
+
+    try {
+      const executions = [first.execute("{}"), second.execute("{}")];
+      await noticesReady;
+      const decisions = notices.map((notice) =>
+        manager.resolveApproval(notice.taskId, false, "concurrent rejection"),
+      );
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      const settlement = await Promise.race([
+        Promise.all(executions).then(() => "settled" as const),
+        new Promise<"timed-out">((resolve) => {
+          timeout = setTimeout(() => resolve("timed-out"), 50);
+        }),
+      ]);
+      if (timeout) clearTimeout(timeout);
+
+      expect({
+        uniqueIds: new Set(notices.map((notice) => notice.taskId)).size,
+        decisions,
+        settlement,
+      }).toEqual({ uniqueIds: 2, decisions: [true, true], settlement: "settled" });
+    } finally {
+      now.mockRestore();
+      manager.clear();
+    }
+  });
+
   it("approve:审批通过 → 调 onExit → 返回成功", async () => {
     await store.writePlan("# 我的计划\n步骤一");
     const manager = new ApprovalManager();
