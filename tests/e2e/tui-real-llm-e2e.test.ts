@@ -293,7 +293,10 @@ describeRealLLM("TUI productization real LLM e2e", { timeout: 240000 }, () => {
     );
     const outcome = observeOutcome(run);
     let approvalCompleted = false;
+    let hasApprovalTryError = false;
     let approvalTryError: unknown;
+    let hasApprovalCleanupError = false;
+    let approvalCleanupError: unknown;
     try {
       await waitForDialogOrOutcome(openDialog, outcome, 60000);
       const settledBeforeReject = await promiseSettled(outcome);
@@ -320,8 +323,8 @@ describeRealLLM("TUI productization real LLM e2e", { timeout: 240000 }, () => {
       expect(readFileSync(target, "utf8")).toBe("ORIGINAL\n");
       expect(assistantText(entries)).toContain("PICO_TUI_APPROVAL_REJECTED_OK");
     } catch (error) {
+      hasApprovalTryError = true;
       approvalTryError = error;
-      throw error;
     } finally {
       if (!approvalCompleted) {
         rejectCapturedApproval();
@@ -329,13 +332,16 @@ describeRealLLM("TUI productization real LLM e2e", { timeout: 240000 }, () => {
         try {
           await withTimeout(outcome, 5000, "timed out cleaning up approval run");
         } catch (cleanupError) {
-          if (!approvalTryError) throw cleanupError;
+          hasApprovalCleanupError = true;
+          approvalCleanupError = cleanupError;
           console.warn("approval run cleanup did not settle", cleanupError);
         }
       } else {
         expect(await promiseSettled(outcome)).toBe(true);
       }
     }
+    if (hasApprovalTryError) throw approvalTryError;
+    if (hasApprovalCleanupError) throw approvalCleanupError;
   });
 
   it("AbortSignal 中断后同 session 可继续", async () => {
@@ -357,7 +363,10 @@ describeRealLLM("TUI productization real LLM e2e", { timeout: 240000 }, () => {
     const interruptedOutcome = observeOutcome(interrupted);
 
     let interruptCompleted = false;
+    let hasInterruptTryError = false;
     let interruptTryError: unknown;
+    let hasInterruptCleanupError = false;
+    let interruptCleanupError: unknown;
     try {
       await withTimeout(
         observedProvider.waitForStreamStart(),
@@ -376,21 +385,24 @@ describeRealLLM("TUI productization real LLM e2e", { timeout: 240000 }, () => {
       });
       interruptCompleted = true;
     } catch (error) {
+      hasInterruptTryError = true;
       interruptTryError = error;
-      throw error;
     } finally {
       if (!interruptCompleted) {
         abortControllerRef.current?.abort(new DOMException("real e2e cleanup", "AbortError"));
         try {
           await withTimeout(interruptedOutcome, 5000, "timed out cleaning up interrupted run");
         } catch (cleanupError) {
-          if (!interruptTryError) throw cleanupError;
+          hasInterruptCleanupError = true;
+          interruptCleanupError = cleanupError;
           console.warn("interrupted run cleanup did not settle", cleanupError);
         }
       } else {
         expect(await promiseSettled(interruptedOutcome)).toBe(true);
       }
     }
+    if (hasInterruptTryError) throw interruptTryError;
+    if (hasInterruptCleanupError) throw interruptCleanupError;
 
     await harness.runPrompt("Reply exactly: PICO_TUI_AFTER_ABORT_OK. Do not use tools.", {
       provider: observedProvider,
