@@ -557,6 +557,11 @@ export class AgentEngine implements AgentRunner {
     let turnCount = 0;
     let exhaustedReason: string | undefined;
     let hardResetTriggered = false;
+    const userRewindPointId = session.fileHistory.snapshots.findLast(
+      (snapshot) =>
+        snapshot.messageId === session.fileHistory.currentMessageId &&
+        snapshot.userPrompt !== undefined,
+    )?.messageId;
     const previousRuntimeReporter = this.runtimeReporter;
     this.runtimeReporter = reporter;
 
@@ -585,7 +590,8 @@ export class AgentEngine implements AgentRunner {
         }
         reporter.onTurnStart(turnCount);
         const turnSpan = rootSpan?.startChild(`Turn-${turnCount}`);
-        const currentMessageId = `turn-${session.fileHistory.snapshotSequence + 1}`;
+        const currentMessageId =
+          userRewindPointId ?? `turn-${session.fileHistory.snapshotSequence + 1}`;
         this.registry.setPreWriteHook?.(async (toolName, args) => {
           try {
             if (toolName === "write_file" || toolName === "edit_file") {
@@ -848,13 +854,15 @@ export class AgentEngine implements AgentRunner {
             session.append({ role: "user", content: text });
           }
         } finally {
-          await fileHistoryMakeSnapshot(
-            session.fileHistory,
-            currentMessageId,
-            session.id,
-            undefined,
-            session.length,
-          ).catch((err) => logger.warn({ err: String(err) }, "[FileHistory] 每轮快照创建失败"));
+          if (!userRewindPointId) {
+            await fileHistoryMakeSnapshot(
+              session.fileHistory,
+              currentMessageId,
+              session.id,
+              undefined,
+              session.length,
+            ).catch((err) => logger.warn({ err: String(err) }, "[FileHistory] 每轮快照创建失败"));
+          }
           turnSpan?.end();
         }
       }

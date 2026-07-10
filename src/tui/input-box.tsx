@@ -43,6 +43,8 @@ export interface InputBoxProps {
   onSubmit: (text: string) => void;
   /** User overrides loaded from .pico/config.json. */
   keybindings?: UserKeybindingConfig;
+  /** /rewind 等外部动作请求原子替换当前草稿。 */
+  inputReplacement?: { sequence: number; text: string };
 }
 
 export function InputBox({
@@ -55,10 +57,12 @@ export function InputBox({
   onTextChange,
   onSubmit,
   keybindings,
+  inputReplacement,
 }: InputBoxProps): React.ReactNode {
   const initialController = useRef(createInputControllerState());
   const controllerRef = useRef(initialController.current);
   const suggestionRequestSeq = useRef(0);
+  const appliedReplacementSequence = useRef<number | undefined>(undefined);
   const mounted = useRef(true);
   const [controller, setController] = useState(initialController.current);
 
@@ -69,6 +73,23 @@ export function InputBox({
     },
     [],
   );
+
+  useEffect(() => {
+    if (!inputReplacement) return;
+    if (appliedReplacementSequence.current === inputReplacement.sequence) return;
+    appliedReplacementSequence.current = inputReplacement.sequence;
+    const next: InputControllerState = {
+      ...controllerRef.current,
+      text: inputReplacement.text,
+      cursor: inputReplacement.text.length,
+      activeSuggestions: null,
+      historyIndex: null,
+      draft: "",
+    };
+    controllerRef.current = next;
+    setController(next);
+    onTextChange?.(next.text);
+  }, [inputReplacement, onTextChange]);
 
   useInput((input, key) => {
     if (acceptsInput && !acceptsInput(input, key)) return;

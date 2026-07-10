@@ -6,11 +6,19 @@ export type RewindMode = "code" | "conversation" | "both";
 export interface FileHistorySnapshotSummary {
   messageId: string;
   timestamp: string;
+  userPrompt?: string;
   trackedFileCount: number;
   backedUpFileCount: number;
   deletedFileCount: number;
   changeSummary?: string;
   messageIndex?: number;
+  transcriptIndex?: number;
+  interactionMode?: string;
+  changedFileCount?: number;
+  addedLines?: number;
+  removedLines?: number;
+  changedFiles?: string[];
+  legacy?: boolean;
 }
 
 export interface FileHistoryRewindResult {
@@ -38,10 +46,17 @@ export function assertFileHistoryCliFlags(input: {
 }
 
 export function listFileHistorySnapshotSummaries(session: Session): FileHistorySnapshotSummary[] {
-  return session.fileHistory.snapshots.map((snapshot) => {
+  const history = typeof session.getHistory === "function" ? session.getHistory() : [];
+  return session.fileHistory.snapshots.map((snapshot, index) => {
+    const relevantPaths =
+      snapshot.userPrompt !== undefined && snapshot.editedFilePaths !== undefined
+        ? snapshot.editedFilePaths
+        : new Set(snapshot.trackedFileBackups.keys());
     let backedUpFileCount = 0;
     let deletedFileCount = 0;
-    for (const backup of snapshot.trackedFileBackups.values()) {
+    for (const filePath of relevantPaths) {
+      const backup = snapshot.trackedFileBackups.get(filePath);
+      if (!backup) continue;
       if (backup.backupFileName === null) {
         deletedFileCount++;
       } else {
@@ -52,17 +67,47 @@ export function listFileHistorySnapshotSummaries(session: Session): FileHistoryS
     return {
       messageId: snapshot.messageId,
       timestamp: snapshot.timestamp.toISOString(),
-      trackedFileCount: snapshot.trackedFileBackups.size,
+      userPrompt: snapshot.userPrompt ?? inferLegacyPrompt(history, snapshot.messageIndex, index),
+      trackedFileCount: relevantPaths.size,
       backedUpFileCount,
       deletedFileCount,
       changeSummary: formatSnapshotChangeSummary({
-        trackedFileCount: snapshot.trackedFileBackups.size,
+        trackedFileCount: relevantPaths.size,
         backedUpFileCount,
         deletedFileCount,
       }),
       ...(snapshot.messageIndex !== undefined ? { messageIndex: snapshot.messageIndex } : {}),
+      ...(snapshot.transcriptIndex !== undefined
+        ? { transcriptIndex: snapshot.transcriptIndex }
+        : {}),
+      ...(snapshot.interactionMode !== undefined
+        ? { interactionMode: snapshot.interactionMode }
+        : {}),
+      ...(snapshot.userPrompt === undefined ? { legacy: true } : {}),
     };
   });
+}
+
+export async function listRewindPointSummaries(
+  session: Session,
+): Promise<FileHistorySnapshotSummary[]> {
+  return Promise.all(
+    listFileHistorySnapshotSummaries(session)
+      // 旧 turn-N 没有可靠的“用户消息之前”边界；保留显式 code rewind
+      // 兼容，但不在 Claude 风格消息选择器里制造重复/误导选项。
+      .filter((summary) => !summary.legacy)
+      .map(async (summary) => {
+        const stat = await session.getRewindPointChangeStat(summary.messageId);
+        return {
+          ...summary,
+          trackedFileCount: stat.changedFileCount,
+          changedFileCount: stat.changedFileCount,
+          addedLines: stat.addedLines,
+          removedLines: stat.removedLines,
+          changedFiles: stat.files.map((file) => file.filePath),
+        };
+      }),
+  );
 }
 
 export function formatFileHistorySnapshots(
@@ -73,11 +118,11 @@ export function formatFileHistorySnapshots(
     return `session ${sessionId} 没有文件历史快照。`;
   }
 
-  const lines = [`session ${sessionId} 的文件历史快照:`];
+  const lines = [`session ${sessionId} 的可回滚消息:`];
   for (const summary of summaries) {
     lines.push(
       [
-        `- messageId=${summary.messageId}`,
+        `- ${summary.userPrompt}${summary.legacy ? ` (legacy id=${summary.messageId})` : ""}`,
         `timestamp=${summary.timestamp}`,
         `files=${summary.trackedFileCount}`,
         `tracked=${summary.trackedFileCount}`,
@@ -88,6 +133,21 @@ export function formatFileHistorySnapshots(
     );
   }
   return lines.join("\n");
+}
+
+function inferLegacyPrompt(
+  history: ReturnType<Session["getHistory"]>,
+  messageIndex: number | undefined,
+  fallbackIndex: number,
+): string {
+  const start = Math.min(messageIndex ?? history.length, history.length) - 1;
+  for (let index = start; index >= 0; index--) {
+    const message = history[index];
+    if (message?.role === "user" && message.toolCallId === undefined && message.content.trim()) {
+      return message.content;
+    }
+  }
+  return `Earlier conversation checkpoint ${fallbackIndex + 1}`;
 }
 
 export async function rewindFileHistoryFromCli(
@@ -109,7 +169,7 @@ export async function rewindFileHistoryFromCli(
     await session.rewindCode(messageId);
   } else if (mode === "conversation") {
     const messageIndex = resolveSnapshotMessageIndex(session, snapshot);
-    session.rewindConversation(messageIndex);
+    await session.rewindConversation(messageIndex, messageId);
   } else {
     const messageIndex = resolveSnapshotMessageIndex(session, snapshot);
     await session.rewindBoth(messageId, messageIndex);

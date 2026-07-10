@@ -28,6 +28,14 @@ export interface FileHistorySnapshot {
   trackedFileBackups: Map<string, FileHistoryBackup>;
   timestamp: Date;
   messageIndex?: number;
+  /** 顶层用户消息的原始可见文本；旧 manifest 不包含该字段。 */
+  userPrompt?: string;
+  /** 该用户消息进入 TUI transcript 前的条目下标。 */
+  transcriptIndex?: number;
+  /** 预留给宿主恢复 default/plan/yolo 等交互模式。 */
+  interactionMode?: string;
+  /** 本条用户消息执行期间实际触碰过的文件。 */
+  editedFilePaths?: Set<string>;
 }
 
 export interface FileHistoryState {
@@ -143,6 +151,44 @@ export async function fileHistoryTrackEdit(
   sessionId: string,
   baseDir: string = DEFAULT_BASE_DIR,
 ): Promise<void> {
+  const rewindPoint = state.snapshots.findLast(
+    (snapshot) => snapshot.messageId === messageId && snapshot.userPrompt !== undefined,
+  );
+  if (rewindPoint) {
+    const editedFilePaths = rewindPoint.editedFilePaths ?? new Set<string>();
+    rewindPoint.editedFilePaths = editedFilePaths;
+    if (editedFilePaths.has(filePath)) return;
+
+    // 用户级 rewind point 在 prompt 进入模型前已捕获所有已跟踪文件。
+    // 首次出现的新路径仍需在写前补一份备份，然后把它追加入该点。
+    if (!rewindPoint.trackedFileBackups.has(filePath)) {
+      const version = (state.fileVersions.get(filePath) ?? 0) + 1;
+      let backup: FileHistoryBackup;
+      try {
+        const srcStat = await stat(filePath);
+        const backupFileName = await createBackup(filePath, version, sessionId, baseDir);
+        backup = {
+          backupFileName,
+          version,
+          backupTime: new Date(),
+          originMtimeMs: srcStat.mtimeMs,
+          originSize: srcStat.size,
+        };
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code !== "ENOENT") throw err;
+        backup = { backupFileName: null, version, backupTime: new Date() };
+      }
+      state.fileVersions.set(filePath, version);
+      rewindPoint.trackedFileBackups.set(filePath, backup);
+    }
+
+    state.trackedFiles.add(filePath);
+    editedFilePaths.add(filePath);
+    await saveFileHistoryState(state, sessionId, baseDir);
+    return;
+  }
+
   if (state.currentMessageId !== messageId) {
     state.pendingTrackEdits = new Map();
     state.currentMessageId = messageId;
@@ -227,12 +273,21 @@ export async function fileHistoryMakeSnapshot(
   sessionId: string,
   baseDir: string = DEFAULT_BASE_DIR,
   messageIndex?: number,
+  metadata?: { userPrompt: string; transcriptIndex?: number; interactionMode?: string },
 ): Promise<void> {
   const snapshot: FileHistorySnapshot = {
     messageId,
     trackedFileBackups: new Map(),
     timestamp: new Date(),
+    editedFilePaths: new Set(),
     ...(messageIndex !== undefined ? { messageIndex } : {}),
+    ...(metadata !== undefined ? { userPrompt: metadata.userPrompt } : {}),
+    ...(metadata?.transcriptIndex !== undefined
+      ? { transcriptIndex: metadata.transcriptIndex }
+      : {}),
+    ...(metadata?.interactionMode !== undefined
+      ? { interactionMode: metadata.interactionMode }
+      : {}),
   };
 
   for (const filePath of state.trackedFiles) {
@@ -280,7 +335,7 @@ export async function fileHistoryMakeSnapshot(
   state.snapshots.push(snapshot);
   state.snapshotSequence++;
   state.pendingTrackEdits = new Map();
-  state.currentMessageId = undefined;
+  state.currentMessageId = metadata === undefined ? undefined : messageId;
 
   if (state.snapshots.length > MAX_SNAPSHOTS) {
     const removed = state.snapshots.shift();
@@ -289,6 +344,44 @@ export async function fileHistoryMakeSnapshot(
     }
   }
 
+  await saveFileHistoryState(state, sessionId, baseDir);
+}
+
+/**
+ * 在顶层用户消息进入模型前建立 Claude Code 风格的 rewind 边界。
+ * 后续写操作会把首次写前备份追加入这个点，而不是为内部 ReAct turn 建点。
+ */
+export async function fileHistoryBeginRewindPoint(
+  state: FileHistoryState,
+  input: {
+    messageId: string;
+    userPrompt: string;
+    messageIndex: number;
+    transcriptIndex?: number;
+    interactionMode?: string;
+  },
+  sessionId: string,
+  baseDir: string = DEFAULT_BASE_DIR,
+): Promise<void> {
+  await fileHistoryMakeSnapshot(state, input.messageId, sessionId, baseDir, input.messageIndex, {
+    userPrompt: input.userPrompt,
+    ...(input.transcriptIndex !== undefined ? { transcriptIndex: input.transcriptIndex } : {}),
+    ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
+  });
+}
+
+/** 对话 fork 后只保留目标消息之前的活动 rewind points。 */
+export async function fileHistoryDiscardFrom(
+  state: FileHistoryState,
+  messageId: string,
+  sessionId: string,
+  baseDir: string = DEFAULT_BASE_DIR,
+): Promise<void> {
+  const targetIndex = state.snapshots.findIndex((snapshot) => snapshot.messageId === messageId);
+  if (targetIndex === -1) return;
+  state.snapshots = state.snapshots.slice(0, targetIndex);
+  state.pendingTrackEdits = new Map();
+  state.currentMessageId = undefined;
   await saveFileHistoryState(state, sessionId, baseDir);
 }
 
@@ -336,6 +429,56 @@ export async function fileHistoryDiffStat(
     const after = await readCurrentFileContent(filePath);
     if (before === after) continue;
 
+    const changes = countLineChanges(before ?? "", after ?? "");
+    files.push({
+      filePath,
+      status: classifyDiffFile(before, after),
+      addedLines: changes.addedLines,
+      removedLines: changes.removedLines,
+    });
+  }
+
+  return {
+    messageId,
+    changedFileCount: files.length,
+    addedLines: files.reduce((sum, file) => sum + file.addedLines, 0),
+    removedLines: files.reduce((sum, file) => sum + file.removedLines, 0),
+    files,
+  };
+}
+
+/**
+ * 统计某条用户消息自身造成的文件变化：before 是该消息的 rewind point，
+ * after 是下一条用户消息进入模型前的 point；末条消息则与当前磁盘比较。
+ */
+export async function fileHistoryMessageDiffStat(
+  state: FileHistoryState,
+  messageId: string,
+  sessionId: string,
+  baseDir: string = DEFAULT_BASE_DIR,
+): Promise<FileHistoryDiffStat> {
+  const targetIndex = state.snapshots.findIndex((snapshot) => snapshot.messageId === messageId);
+  const target = state.snapshots[targetIndex];
+  if (!target) {
+    throw new Error(`FileHistory: 找不到 messageId=${messageId} 的快照`);
+  }
+  const next = state.snapshots
+    .slice(targetIndex + 1)
+    .find((snapshot) => snapshot.userPrompt !== undefined);
+  const candidatePaths =
+    target.editedFilePaths !== undefined
+      ? Array.from(target.editedFilePaths)
+      : Array.from(target.trackedFileBackups.keys());
+  const files: FileHistoryDiffFileStat[] = [];
+
+  for (const filePath of candidatePaths.sort()) {
+    const beforeBackup =
+      target.trackedFileBackups.get(filePath) ?? findFirstBackup(state, filePath);
+    const before = await readSnapshotFileContent(beforeBackup, sessionId, baseDir);
+    const after = next
+      ? await readSnapshotFileContent(next.trackedFileBackups.get(filePath), sessionId, baseDir)
+      : await readCurrentFileContent(filePath);
+    if (before === after) continue;
     const changes = countLineChanges(before ?? "", after ?? "");
     files.push({
       filePath,
@@ -452,6 +595,10 @@ interface PersistedFileHistorySnapshot {
   trackedFileBackups: Array<[string, PersistedFileHistoryBackup]>;
   timestamp: string;
   messageIndex?: number;
+  userPrompt?: string;
+  transcriptIndex?: number;
+  interactionMode?: string;
+  editedFilePaths?: string[];
 }
 
 interface PersistedFileHistoryState {
@@ -483,6 +630,16 @@ async function saveFileHistoryState(
       ),
       timestamp: snapshot.timestamp.toISOString(),
       ...(snapshot.messageIndex !== undefined ? { messageIndex: snapshot.messageIndex } : {}),
+      ...(snapshot.userPrompt !== undefined ? { userPrompt: snapshot.userPrompt } : {}),
+      ...(snapshot.transcriptIndex !== undefined
+        ? { transcriptIndex: snapshot.transcriptIndex }
+        : {}),
+      ...(snapshot.interactionMode !== undefined
+        ? { interactionMode: snapshot.interactionMode }
+        : {}),
+      ...(snapshot.editedFilePaths !== undefined
+        ? { editedFilePaths: Array.from(snapshot.editedFilePaths) }
+        : {}),
     })),
     trackedFiles: Array.from(state.trackedFiles),
     snapshotSequence: state.snapshotSequence,
@@ -526,7 +683,17 @@ export async function fileHistoryLoadState(
       ]),
     ),
     timestamp: new Date(snapshot.timestamp),
+    ...(snapshot.editedFilePaths !== undefined
+      ? { editedFilePaths: new Set(snapshot.editedFilePaths) }
+      : {}),
     ...(snapshot.messageIndex !== undefined ? { messageIndex: snapshot.messageIndex } : {}),
+    ...(snapshot.userPrompt !== undefined ? { userPrompt: snapshot.userPrompt } : {}),
+    ...(snapshot.transcriptIndex !== undefined
+      ? { transcriptIndex: snapshot.transcriptIndex }
+      : {}),
+    ...(snapshot.interactionMode !== undefined
+      ? { interactionMode: snapshot.interactionMode }
+      : {}),
   }));
   state.trackedFiles = new Set(manifest.trackedFiles);
   state.snapshotSequence = manifest.snapshotSequence;
