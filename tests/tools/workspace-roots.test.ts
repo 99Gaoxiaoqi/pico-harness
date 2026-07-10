@@ -52,6 +52,19 @@ describe("WorkspaceRoots", () => {
     expect(roots.list()).toHaveLength(2);
   });
 
+  it("已被主工作区覆盖的子目录不会新增为独立 root", async () => {
+    const nested = join(primaryRoot, "nested");
+    await mkdir(nested);
+    const roots = await WorkspaceRoots.create(primaryRoot);
+
+    await expect(roots.addDirectory(nested)).resolves.toEqual({
+      added: false,
+      path: await realpath(nested),
+      reason: "Directory is already covered by an authorized workspace root.",
+    });
+    expect(roots.list()).toEqual([await realpath(primaryRoot)]);
+  });
+
   it("新增目录必须存在且必须是目录", async () => {
     const filePath = join(sandbox, "not-a-directory.txt");
     await writeFile(filePath, "x");

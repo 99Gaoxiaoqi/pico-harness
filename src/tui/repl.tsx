@@ -51,7 +51,12 @@ import { defaultIsRetryableError } from "../provider/retry.js";
 import type { ThinkingEffort } from "../provider/thinking.js";
 import { buildDefaultToolRegistry } from "../tools/default-registry.js";
 import { ToolDisclosure } from "../tools/tool-disclosure.js";
-import { getOrCreateSessionSettings, toolStatusFromRegistry } from "../input/session-settings.js";
+import {
+  getOrCreateSessionSettings,
+  getStoredSessionSettings,
+  setSessionAdditionalDirectories,
+  toolStatusFromRegistry,
+} from "../input/session-settings.js";
 import { loadConfiguredAdditionalDirectories } from "../input/add-directory.js";
 import { WorkspaceRoots } from "../tools/workspace-roots.js";
 import { globalSessionManager } from "../engine/session.js";
@@ -434,9 +439,12 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
   const tuiSession = await globalSessionManager.getOrCreate(tuiSessionId, opts.workDir);
   const toolDisclosure = new ToolDisclosure();
   const configuredAdditionalDirectories = await loadConfiguredAdditionalDirectories(opts.workDir);
+  const restoredAdditionalDirectories =
+    getStoredSessionSettings(tuiSessionId)?.additionalDirectories ?? [];
   const workspaceRoots = await WorkspaceRoots.create(opts.workDir, [
     ...configuredAdditionalDirectories,
     ...(opts.addDirs ?? []),
+    ...restoredAdditionalDirectories,
   ]);
   const toolRegistry = buildDefaultToolRegistry(opts.workDir, { toolDisclosure, workspaceRoots });
   let latestMcpStatus: McpStatusSnapshot | undefined;
@@ -464,6 +472,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     tools: toolStatusFromRegistry(toolRegistry),
     additionalDirectories: workspaceRoots.list().slice(1),
   });
+  setSessionAdditionalDirectories(settings, workspaceRoots.list().slice(1));
   const registry = await createPicoCommandRegistry({
     workDir: opts.workDir,
     provider,

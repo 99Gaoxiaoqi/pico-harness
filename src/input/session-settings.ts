@@ -149,6 +149,14 @@ export function addSessionAdditionalDirectory(
   return settings.additionalDirectories;
 }
 
+export function setSessionAdditionalDirectories(
+  settings: SessionSettings,
+  directories: readonly string[],
+): readonly string[] {
+  settings.additionalDirectories = createAdditionalDirectorySnapshot(directories);
+  return settings.additionalDirectories;
+}
+
 export function setSessionModel(settings: SessionSettings, model: string): SessionSettingResult {
   const normalized = model.trim();
   if (!normalized) {

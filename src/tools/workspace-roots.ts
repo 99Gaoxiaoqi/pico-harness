@@ -55,11 +55,18 @@ export class WorkspaceRoots {
 
   async addDirectory(path: string): Promise<AddDirectoryResult> {
     const canonicalPath = await normalizeDirectory(path, this.primaryRoot);
-    const added = !this.roots.includes(canonicalPath);
-    if (added) {
-      this.roots.push(canonicalPath);
+    if (this.roots.includes(canonicalPath)) {
+      return { added: false, path: canonicalPath };
     }
-    return { added, path: canonicalPath };
+    if (this.roots.some((root) => isWithin(root, canonicalPath))) {
+      return {
+        added: false,
+        path: canonicalPath,
+        reason: "Directory is already covered by an authorized workspace root.",
+      };
+    }
+    this.roots.push(canonicalPath);
+    return { added: true, path: canonicalPath };
   }
 
   resolve(path: string): string {
