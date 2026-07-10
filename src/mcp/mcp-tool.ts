@@ -22,7 +22,10 @@ import {
 } from "./types.js";
 
 export interface McpToolBridgeOptions {
-  /** MCP 工具单次返回最大字符数;超长截断。默认 16000 */
+  /**
+   * 可选的 MCP 本地硬截断上限。默认不截断，将完整结果交给
+   * observation（>50,000 chars 落盘）。仅在宿主明确需要更小上限时设置。
+   */
   maxResultSizeChars?: number;
 }
 
@@ -47,7 +50,7 @@ export class McpToolBridge implements BaseTool {
     options: McpToolBridgeOptions = {},
   ) {
     this.qualifiedName = qualifyMcpToolName(serverName, tool.name);
-    this.maxResultSizeChars = options.maxResultSizeChars ?? 16000;
+    this.maxResultSizeChars = options.maxResultSizeChars ?? Number.POSITIVE_INFINITY;
     this.toolDefinition = {
       name: this.qualifiedName,
       description: this.buildDescription(),

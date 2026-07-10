@@ -126,7 +126,7 @@ export class GlobTool implements BaseTool {
     // 7. 输出截断
     let output = matches.slice(0, MAX_RESULTS).join("\n");
     if (matches.length > MAX_RESULTS) {
-      output += `\n... (共 ${matches.length} 条,已截断)`;
+      output += `\n... (共 ${matches.length} 条,已截断至前 ${MAX_RESULTS} 条；请缩小 pattern 或 path 后重试)`;
     }
     return output;
   }
