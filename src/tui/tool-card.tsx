@@ -15,7 +15,7 @@ import React, { createContext, useContext } from "react";
 import { Box, Text } from "ink";
 import { formatOutputPreview } from "./diff-preview.js";
 import { compactText, compactToolName, summarizeToolTarget } from "./tool-format.js";
-import { terminalWidth, visualRows } from "./terminal-width.js";
+import { terminalWidth, truncateTerminalText, visualRows } from "./terminal-width.js";
 
 export type ToolCardStatus =
   | "queued"
@@ -143,26 +143,15 @@ function buildStandardToolVisualRows(
   const failure = isFailureStatus(status);
   const displaySummary = summary && failure ? ensureErrorSummary(summary) : summary;
   const resultBadge = displaySummary && (failure || grouped || !target) ? toolResultBadge(displaySummary, failure) : undefined;
-  const toggleHint = canToggle ? " [⌃E]" : "";
-  const fullHeader = [
-    `⎿ ${compactToolName(name)}`,
-    target,
-    toolStatusText(status),
-    resultBadge,
-  ]
-    .filter(Boolean)
-    .join(" · ") + toggleHint;
-  const coreHeader = `⎿ ${compactToolName(name)} · ${toolStatusText(status)}${toggleHint}`;
-  const targetHeader = target
-    ? `⎿ ${compactToolName(name)} · ${target} · ${toolStatusText(status)}${toggleHint}`
-    : coreHeader;
   const availableHeaderWidth = Math.max(1, Math.floor(wrapWidth) - 2);
-  const header =
-    terminalWidth(fullHeader) <= availableHeaderWidth
-      ? fullHeader
-      : terminalWidth(targetHeader) <= availableHeaderWidth
-        ? targetHeader
-        : coreHeader;
+  const header = buildPrioritizedHeader({
+    prefix: "⎿ ",
+    name: compactToolName(name),
+    status: toolStatusText(status),
+    showToggle: canToggle,
+    optionalParts: [target, resultBadge],
+    availableWidth: availableHeaderWidth,
+  });
   const rows: ToolCardVisualRow[] = [
     { kind: "header", text: header },
   ];
@@ -195,11 +184,18 @@ function buildAgentToolVisualRows(
   const meta = agentToolMeta(name, args);
   const resultText = status === "running" ? meta.task : agentResultText(status, summary);
   const preview = agentResultHint(resultText);
-  const label = `${treeChar} ${meta.label}${meta.detail ? ` (${meta.detail})` : ""}`;
+  const availableHeaderWidth = Math.max(1, Math.floor(wrapWidth) - 1);
   const rows: ToolCardVisualRow[] = [
     {
       kind: "header",
-      text: `${label} · ${toolStatusText(status)}${preview ? ` · ${preview}` : ""}${canToggle ? " [⌃E]" : ""}`,
+      text: buildPrioritizedHeader({
+        prefix: `${treeChar} `,
+        name: meta.label,
+        status: toolStatusText(status),
+        showToggle: canToggle,
+        optionalParts: [meta.detail ? `(${meta.detail})` : undefined, preview],
+        availableWidth: availableHeaderWidth,
+      }),
     },
   ];
   if (!expanded) return rows;
@@ -216,6 +212,37 @@ function buildAgentToolVisualRows(
     })),
   );
   return rows;
+}
+
+function buildPrioritizedHeader(options: {
+  prefix: string;
+  name: string;
+  status: string;
+  showToggle: boolean;
+  optionalParts: Array<string | undefined>;
+  availableWidth: number;
+}): string {
+  const toggle = options.showToggle ? " [⌃E]" : "";
+  const suffix = ` · ${options.status}${toggle}`;
+  const nameBudget = Math.max(
+    1,
+    options.availableWidth - terminalWidth(options.prefix) - terminalWidth(suffix),
+  );
+  const name = truncateTerminalText(options.name, nameBudget);
+  let header = `${options.prefix}${name}`;
+  let remaining = Math.max(
+    0,
+    options.availableWidth - terminalWidth(header) - terminalWidth(suffix),
+  );
+
+  for (const part of options.optionalParts) {
+    if (!part || remaining <= 4) continue;
+    const value = truncateTerminalText(part, remaining - 3);
+    header += ` · ${value}`;
+    remaining = Math.max(0, remaining - 3 - terminalWidth(value));
+  }
+
+  return `${header}${suffix}`;
 }
 
 export function isAgentToolName(name: string): boolean {

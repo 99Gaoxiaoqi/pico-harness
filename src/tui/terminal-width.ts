@@ -7,6 +7,23 @@ export function terminalWidth(text: string): number {
   return stringWidth(text);
 }
 
+export function truncateTerminalText(text: string, maxWidth: number): string {
+  const width = Math.max(0, Math.floor(maxWidth));
+  if (terminalWidth(text) <= width) return text;
+  if (width === 0) return "";
+  if (width === 1) return "…";
+
+  let result = "";
+  let resultWidth = 0;
+  for (const { segment } of graphemeSegmenter.segment(text)) {
+    const segmentWidth = terminalWidth(segment);
+    if (resultWidth + segmentWidth > width - 1) break;
+    result += segment;
+    resultWidth += segmentWidth;
+  }
+  return `${result}…`;
+}
+
 export function visualRows(text: string, wrapWidth: number): string[] {
   const width = normalizeWrapWidth(wrapWidth);
   const rows: string[] = [];
