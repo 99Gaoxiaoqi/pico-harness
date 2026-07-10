@@ -56,6 +56,29 @@ describe("markdown command loader", () => {
     ]);
   });
 
+  it("loads commands from an explicit project command directory", async () => {
+    const projectCommandsDir = join(workDir, "automation", "commands");
+    await mkdir(projectCommandsDir, { recursive: true });
+    await writeFile(
+      join(projectCommandsDir, "release.md"),
+      "---\ndescription: release project\n---\n\nRelease prompt",
+    );
+
+    const commands = await loadMarkdownCommands({
+      projectCommandsDir,
+      userCommandsDir,
+      workDir,
+    });
+
+    expect(commands).toContainEqual(
+      expect.objectContaining({
+        name: "release",
+        prompt: "Release prompt",
+        source: "project",
+      }),
+    );
+  });
+
   it("loads ~/.pico/commands by default when userCommandsDir is omitted", async () => {
     const fakeHome = await mkdtemp(join(tmpdir(), "pico-command-home-"));
     await mkdir(join(fakeHome, ".pico", "commands"), { recursive: true });
@@ -123,10 +146,7 @@ describe("markdown command loader", () => {
       join(workDir, ".claude", "commands", "workflows", "release.md"),
       "# Release workflow",
     );
-    await writeFile(
-      join(workDir, ".claude", "commands", "templates", "pr.md"),
-      "# PR template",
-    );
+    await writeFile(join(workDir, ".claude", "commands", "templates", "pr.md"), "# PR template");
     await writeFile(
       join(workDir, ".claude", "commands", "agents", "reviewer.md"),
       "# Agent prompt",
@@ -294,7 +314,11 @@ describe("markdown command loader", () => {
   });
 
   it("renders prompt command arguments by replacing $ARGUMENTS", () => {
-    const command = parseMarkdownCommand("Review $ARGUMENTS\nThen summarize $ARGUMENTS", "review", "project");
+    const command = parseMarkdownCommand(
+      "Review $ARGUMENTS\nThen summarize $ARGUMENTS",
+      "review",
+      "project",
+    );
 
     expect(renderMarkdownCommandPrompt(command, "src/index.ts")).toBe(
       "Review src/index.ts\nThen summarize src/index.ts",
@@ -309,7 +333,7 @@ describe("markdown command loader", () => {
     );
 
     expect(renderMarkdownCommandPrompt(command, 'src/index.ts "main branch" --strict')).toBe(
-      "Review src/index.ts against main branch\nAll: src/index.ts \"main branch\" --strict",
+      'Review src/index.ts against main branch\nAll: src/index.ts "main branch" --strict',
     );
   });
 

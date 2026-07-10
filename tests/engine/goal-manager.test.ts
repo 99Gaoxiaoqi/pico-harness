@@ -244,4 +244,58 @@ describe("GoalManager", () => {
       expect(mgr.buildGoalContext()).toBe("");
     });
   });
+
+  describe("goal budget enforcement", () => {
+    it("tracks turns across calls and blocks the next turn at the limit", () => {
+      const mgr = new GoalManager();
+      const goal = mgr.create("目标", "描述", { maxTurns: 2 });
+
+      expect(mgr.canStartTurn()).toEqual({ allowed: true });
+      mgr.startTurn();
+      expect(mgr.canStartTurn()).toEqual({ allowed: true });
+      mgr.startTurn();
+
+      expect(mgr.get(goal.id)?.budgetUsage.turns).toBe(2);
+      expect(mgr.canStartTurn()).toMatchObject({ allowed: false });
+    });
+
+    it("tracks canonical tokens and cost without resetting on budget updates", () => {
+      const mgr = new GoalManager();
+      const goal = mgr.create("目标", "描述", { maxTokens: 200, maxCostCNY: 1 });
+
+      expect(mgr.consumeUsage({ promptTokens: 80, completionTokens: 40 })).toEqual({
+        allowed: true,
+      });
+      expect(mgr.consumeCost(0.4)).toEqual({ allowed: true });
+      mgr.update(goal.id, { budgetConfig: { maxTokens: 100, maxCostCNY: 0.3 } });
+
+      expect(mgr.get(goal.id)?.budgetUsage).toMatchObject({ tokens: 120, costCNY: 0.4 });
+      expect(mgr.currentBudgetDecision()).toMatchObject({ allowed: false });
+    });
+
+    it("uses creation time for wall-clock budget and keeps usage per goal", () => {
+      let now = 1_000;
+      const mgr = new GoalManager({ now: () => now });
+      const first = mgr.create("第一个", "描述", { maxWallClockMs: 100 });
+      mgr.startTurn();
+      now += 101;
+      expect(mgr.canStartTurn()).toMatchObject({ allowed: false });
+
+      const second = mgr.create("第二个", "描述", { maxTurns: 1 });
+      expect(mgr.get(first.id)?.budgetUsage.turns).toBe(1);
+      expect(mgr.get(second.id)?.budgetUsage.turns).toBe(0);
+      expect(mgr.canStartTurn()).toEqual({ allowed: true });
+    });
+
+    it("renders consumed budget in the active goal context", () => {
+      const mgr = new GoalManager();
+      mgr.create("目标", "描述", { maxTurns: 3, maxTokens: 500 });
+      mgr.startTurn();
+      mgr.consumeUsage({ promptTokens: 100, completionTokens: 50 });
+
+      const context = mgr.buildGoalContext();
+      expect(context).toContain("已消耗: 1 轮");
+      expect(context).toContain("150 tokens");
+    });
+  });
 });

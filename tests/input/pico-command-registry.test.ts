@@ -526,16 +526,20 @@ describe("Pico command registry", () => {
       sessionId: session.id,
     });
 
-    await expect(Promise.resolve(registry.resolve("skill")?.argumentCompleter?.("rev"))).resolves.toEqual([
-      { value: "review", description: "审查代码" },
-    ]);
-    await expect(Promise.resolve(registry.resolve("agent")?.argumentCompleter?.("rev"))).resolves.toEqual([
-      { value: "reviewer", description: "审查 Agent" },
-    ]);
-    await expect(Promise.resolve(registry.resolve("resume")?.argumentCompleter?.("cli-r"))).resolves.toEqual([
+    await expect(
+      Promise.resolve(registry.resolve("skill")?.argumentCompleter?.("rev")),
+    ).resolves.toEqual([{ value: "review", description: "审查代码" }]);
+    await expect(
+      Promise.resolve(registry.resolve("agent")?.argumentCompleter?.("rev")),
+    ).resolves.toEqual([{ value: "reviewer", description: "审查 Agent" }]);
+    await expect(
+      Promise.resolve(registry.resolve("resume")?.argumentCompleter?.("cli-r")),
+    ).resolves.toEqual([
       { value: "cli-review", description: "1 messages · 2026-07-09T02:00:00.000Z" },
     ]);
-    await expect(Promise.resolve(registry.resolve("rewind")?.argumentCompleter?.("turn-r"))).resolves.toEqual([
+    await expect(
+      Promise.resolve(registry.resolve("rewind")?.argumentCompleter?.("turn-r")),
+    ).resolves.toEqual([
       { value: "turn-review", description: "0 files · 2026-07-09T03:00:00.000Z" },
     ]);
   });
@@ -563,12 +567,12 @@ describe("Pico command registry", () => {
       trackedFileBackups: new Map(),
     });
 
-    await expect(Promise.resolve(commandArgumentSuggestions(registry, "skill", "late"))).resolves.toEqual([
-      { value: "late-review", description: "late skill" },
-    ]);
-    await expect(Promise.resolve(commandArgumentSuggestions(registry, "rewind", "turn-l"))).resolves.toEqual([
-      { value: "turn-late", description: "0 files · 2026-07-09T04:00:00.000Z" },
-    ]);
+    await expect(
+      Promise.resolve(commandArgumentSuggestions(registry, "skill", "late")),
+    ).resolves.toEqual([{ value: "late-review", description: "late skill" }]);
+    await expect(
+      Promise.resolve(commandArgumentSuggestions(registry, "rewind", "turn-l")),
+    ).resolves.toEqual([{ value: "turn-late", description: "0 files · 2026-07-09T04:00:00.000Z" }]);
   });
 
   it("commandSuggestions 保留完整候选,不截断到 20 条", async () => {
@@ -679,7 +683,9 @@ describe("Pico command registry", () => {
     expect(result.type).toBe("local-command");
     if (result.type !== "local-command") return;
     expect(result.result.message).toContain("Config: /tmp/pico/mcp.json");
-    expect(result.result.message).toContain("Summary: 1/3 connected, 1 failed, 1 disabled, 2 tools");
+    expect(result.result.message).toContain(
+      "Summary: 1/3 connected, 1 failed, 1 disabled, 2 tools",
+    );
     expect(result.result.message).toContain("- local [stdio] connected - 2 tools: echo, read_file");
     expect(result.result.message).toContain("- remote-http [http] failed - 0 tools");
     expect(result.result.message).toContain("error: HTTP 503 Service Unavailable");
@@ -1073,6 +1079,11 @@ describe("Pico command registry", () => {
     if (result.type !== "local-command") return;
     expect(readFileSync(join(workDir, "AGENTS.md"), "utf8")).toBe("# Existing\n");
     expect(existsSync(join(workDir, ".pico", "config.json"))).toBe(true);
+    expect(JSON.parse(readFileSync(join(workDir, ".pico", "config.json"), "utf8"))).toEqual({
+      version: 1,
+      commandsDir: ".pico/commands",
+      keybindings: {},
+    });
     expect(result.result.message).toContain("AGENTS.md already exists");
     expect(result.result.message).toContain("Created .pico/config.json");
   });

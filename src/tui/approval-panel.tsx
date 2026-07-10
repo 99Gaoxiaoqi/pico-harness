@@ -6,7 +6,7 @@ import type {
   PermissionRule,
   PermissionState,
 } from "../approval/permission-state.js";
-import { resolveKeybinding } from "./keybindings/resolver.js";
+import { resolveKeybinding, type UserKeybindingConfig } from "./keybindings/resolver.js";
 import { wrappedVisualRows } from "./terminal-width.js";
 
 const DEFAULT_DIFF_PREVIEW_LINES = 22;
@@ -27,12 +27,14 @@ export interface ApprovalPanelState {
 export interface InteractiveApprovalPanelProps extends ApprovalPanelProps {
   onAction: (action: ApprovalPanelAction) => void;
   onDiffExpandedChange?: (expanded: boolean) => void;
+  keybindings?: UserKeybindingConfig;
 }
 
 export function InteractiveApprovalPanel({
   onAction,
   onDiffExpandedChange,
   diffExpanded,
+  keybindings,
   ...notice
 }: InteractiveApprovalPanelProps): React.ReactNode {
   const [state, setState] = useState<ApprovalPanelState>(() => ({
@@ -41,7 +43,7 @@ export function InteractiveApprovalPanel({
   const expanded = diffExpanded ?? state.diffExpanded;
 
   useInput((input, key) => {
-    const action = resolveApprovalPanelKey(input, key);
+    const action = resolveApprovalPanelKey(input, key, keybindings);
     if (!action) return;
     if (action === "toggle-diff") {
       const nextExpanded = !expanded;
@@ -132,17 +134,15 @@ export function measureApprovalPanelRows(
 
 export function approvalPanelContentWidth(terminalColumns: number): number {
   const columns = Number.isFinite(terminalColumns) ? Math.floor(terminalColumns) : 80;
-  return Math.max(
-    1,
-    columns - LAYOUT_SHELL_HORIZONTAL_PADDING - APPROVAL_PANEL_HORIZONTAL_PADDING,
-  );
+  return Math.max(1, columns - LAYOUT_SHELL_HORIZONTAL_PADDING - APPROVAL_PANEL_HORIZONTAL_PADDING);
 }
 
 export function resolveApprovalPanelKey(
   input: string,
   key: { return?: boolean; escape?: boolean; ctrl?: boolean; meta?: boolean },
+  keybindings?: UserKeybindingConfig,
 ): ApprovalPanelKeyAction | null {
-  const resolved = resolveKeybinding({ input, key }, "Confirmation");
+  const resolved = resolveKeybinding({ input, key }, "Confirmation", keybindings);
   if (resolved?.kind === "action" && resolved.action === "confirmation:accept") {
     return "approve";
   }

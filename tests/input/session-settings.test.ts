@@ -11,6 +11,7 @@ import {
   setSessionPermissionMode,
   setSessionThinkingEffort,
   setSessionAdditionalDirectories,
+  setSessionTools,
 } from "../../src/input/session-settings.js";
 
 describe("session settings", () => {
@@ -64,11 +65,7 @@ describe("session settings", () => {
       "/workspace/config",
     ]);
 
-    expect(snapshot).toEqual([
-      "/workspace/config",
-      "/workspace/cli",
-      "/workspace/session",
-    ]);
+    expect(snapshot).toEqual(["/workspace/config", "/workspace/cli", "/workspace/session"]);
     expect(Object.isFrozen(snapshot)).toBe(true);
   });
 
@@ -89,6 +86,23 @@ describe("session settings", () => {
     });
 
     expect(settings.additionalDirectories).toEqual([]);
+  });
+
+  it("replaces the tool catalog with an immutable runtime snapshot", () => {
+    const settings = createDefaultSessionSettings({
+      sessionId: "session-tools",
+      cwd: "/workspace/app",
+      provider: "openai",
+      model: "glm-5.2",
+    });
+    const tools = [{ name: "delegate_task", readOnly: false }];
+
+    const snapshot = setSessionTools(settings, tools);
+    tools.push({ name: "mcp__late__echo", readOnly: true });
+
+    expect(snapshot).toEqual([{ name: "delegate_task", readOnly: false }]);
+    expect(settings.tools).toBe(snapshot);
+    expect(Object.isFrozen(snapshot)).toBe(true);
   });
 
   it("creates a minimal settings snapshot for status output", () => {

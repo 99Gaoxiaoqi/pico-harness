@@ -22,6 +22,7 @@ import {
 } from "./input-controller.js";
 import type { ActiveSuggestionSession, InputSuggestion } from "./suggestions.js";
 import { SuggestionList } from "./suggestions.js";
+import type { UserKeybindingConfig } from "./keybindings/resolver.js";
 
 export interface InputBoxProps {
   /** 禁用状态(模型运行中) */
@@ -38,6 +39,8 @@ export interface InputBoxProps {
   acceptsInput?: (input: string, key: InputKey) => boolean;
   /** Enter 提交回调 */
   onSubmit: (text: string) => void;
+  /** User overrides loaded from .pico/config.json. */
+  keybindings?: UserKeybindingConfig;
 }
 
 export function InputBox({
@@ -48,6 +51,7 @@ export function InputBox({
   fileMentionSuggestions,
   acceptsInput,
   onSubmit,
+  keybindings,
 }: InputBoxProps): React.ReactNode {
   const initialController = useRef(createInputControllerState());
   const controllerRef = useRef(initialController.current);
@@ -72,6 +76,7 @@ export function InputBox({
     };
     const result = reduceInputControllerEvent(controllerRef.current, input, key, {
       disabled,
+      keybindings,
       ...suggestionOptions,
     });
     controllerRef.current = result.state;
@@ -114,25 +119,27 @@ function scheduleAsyncSuggestions({
   setController: React.Dispatch<React.SetStateAction<InputControllerState>>;
 }): void {
   const requestId = ++requestSeq.current;
-  void pending.result.then((items) => {
-    if (!mounted.current) return;
-    if (requestSeq.current !== requestId) return;
+  void pending.result
+    .then((items) => {
+      if (!mounted.current) return;
+      if (requestSeq.current !== requestId) return;
 
-    const current = controllerRef.current;
-    const currentContext = getSuggestionContext(current.text, current.cursor);
-    if (!sameSuggestionContext(pending.context, currentContext)) return;
+      const current = controllerRef.current;
+      const currentContext = getSuggestionContext(current.text, current.cursor);
+      if (!sameSuggestionContext(pending.context, currentContext)) return;
 
-    const activeSuggestions = buildAsyncSuggestionSession(
-      pending.context,
-      items,
-      current.activeSuggestions,
-    );
-    const next = { ...current, activeSuggestions };
-    controllerRef.current = next;
-    setController(next);
-  }).catch(() => {
-    if (!mounted.current || requestSeq.current !== requestId) return;
-  });
+      const activeSuggestions = buildAsyncSuggestionSession(
+        pending.context,
+        items,
+        current.activeSuggestions,
+      );
+      const next = { ...current, activeSuggestions };
+      controllerRef.current = next;
+      setController(next);
+    })
+    .catch(() => {
+      if (!mounted.current || requestSeq.current !== requestId) return;
+    });
 }
 
 function buildAsyncSuggestionSession(
@@ -157,21 +164,17 @@ function buildAsyncSuggestionSession(
 
 function sameSuggestionContext(
   left: NonNullable<ReturnType<typeof getSuggestionContext>>,
-  right:
-    | NonNullable<ReturnType<typeof getSuggestionContext>>
-    | ActiveSuggestionSession
-    | null,
+  right: NonNullable<ReturnType<typeof getSuggestionContext>> | ActiveSuggestionSession | null,
 ): boolean {
   return Boolean(
     right &&
-      left.kind === right.kind &&
-      left.query === right.query &&
-      left.replaceStart === right.replaceStart &&
-      left.replaceEnd === right.replaceEnd &&
-      ("command" in right ? left.command === right.command : true),
+    left.kind === right.kind &&
+    left.query === right.query &&
+    left.replaceStart === right.replaceStart &&
+    left.replaceEnd === right.replaceEnd &&
+    ("command" in right ? left.command === right.command : true),
   );
 }
-
 
 export function renderInputPrompt({
   disabled,

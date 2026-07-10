@@ -16,21 +16,15 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Box, Text, useApp, useInput, useWindowSize } from "ink";
 import { appendFileSync } from "node:fs";
 import { InputBox } from "./input-box.js";
-import type {
-  SlashArgumentSuggestionSource,
-  SuggestionSource,
-} from "./input-controller.js";
-import {
-  pickFocusedDialog,
-  type DialogRequest,
-} from "./dialog-arbiter.js";
+import type { SlashArgumentSuggestionSource, SuggestionSource } from "./input-controller.js";
+import { pickFocusedDialog, type DialogRequest } from "./dialog-arbiter.js";
 import { Spinner } from "./spinner.js";
 import type { SpinnerMode } from "./spinner.js";
 import { LayoutShell } from "./layout-shell.js";
 import { MessageList } from "./message-list.js";
 import { StatusBar } from "./status-bar.js";
 import type { TuiEntry } from "./tui-reporter.js";
-import { resolveKeybinding } from "./keybindings/resolver.js";
+import { resolveKeybinding, type UserKeybindingConfig } from "./keybindings/resolver.js";
 import { ToolCardFocusProvider } from "./tool-card.js";
 import { buildTranscriptLayout } from "./transcript-layout.js";
 import {
@@ -88,6 +82,8 @@ export interface AppProps {
   onInterrupt?: () => void;
   onExit?: () => void;
   onRedraw?: () => void;
+  /** User keybinding overrides loaded once at TUI startup. */
+  keybindings?: UserKeybindingConfig;
 }
 
 export function App({
@@ -108,6 +104,7 @@ export function App({
   onInterrupt,
   onExit,
   onRedraw,
+  keybindings,
 }: AppProps): React.ReactNode {
   const { exit } = useApp();
   const { rows, columns } = useWindowSize();
@@ -117,15 +114,14 @@ export function App({
   const modal =
     focusedDialog?.layer === "modal" && !inlineModal ? focusedDialog.content : undefined;
   const transcriptWrapWidth = Math.max(1, columns - 6);
-  const approvalNotice = inlineModal
-    ? approvalNoticeFromContent(focusedDialog.content)
-    : undefined;
+  const approvalNotice = inlineModal ? approvalNoticeFromContent(focusedDialog.content) : undefined;
   const [approvalDiffExpanded, setApprovalDiffExpanded] = useState(false);
   const controlledApproval =
     inlineModal && React.isValidElement<InteractiveApprovalPanelProps>(focusedDialog.content)
       ? React.cloneElement(focusedDialog.content, {
           diffExpanded: approvalDiffExpanded,
           onDiffExpandedChange: setApprovalDiffExpanded,
+          keybindings,
         })
       : focusedDialog?.content;
   const dialogLayout = measureGenericDialogLayout(controlledApproval, {
@@ -190,6 +186,7 @@ export function App({
       running,
       modal: inputDisabled,
       canToggleTool: lastToolKey !== null,
+      keybindings,
     });
     if (owner === "tool-card" && lastToolKey) {
       setExpandedToolKey((current) => (current === lastToolKey ? null : lastToolKey));
@@ -215,7 +212,7 @@ export function App({
     }
 
     if (owner !== "global") return;
-    const action = resolveAppKeyEvent(input, key, running);
+    const action = resolveAppKeyEvent(input, key, running, keybindings);
     if (action === "interrupt") {
       onInterrupt?.();
       return;
@@ -270,7 +267,13 @@ export function App({
     dbg(`  [${i}] ${e.kind}: ${c}`);
   });
 
-  const phase = approvalNotice ? "approval" : queuedCount > 0 ? "queued" : running ? "running" : "idle";
+  const phase = approvalNotice
+    ? "approval"
+    : queuedCount > 0
+      ? "queued"
+      : running
+        ? "running"
+        : "idle";
   const runtimeTaskSummary = queuedCount > 0 ? `${queuedCount} queued` : taskSummary;
   const status = (
     <StatusBar
@@ -330,11 +333,13 @@ export function App({
             running,
             modal: inputDisabled,
             canToggleTool: lastToolKey !== null,
+            keybindings,
           }) === "input"
         }
         slashCommandSuggestions={slashCommandSuggestions}
         slashArgumentSuggestions={slashArgumentSuggestions}
         fileMentionSuggestions={fileMentionSuggestions}
+        keybindings={keybindings}
         onSubmit={onSubmit}
       />
     </Box>
@@ -365,7 +370,10 @@ function measureGenericDialogLayout(
 
   const maxRows = Math.max(3, options.rows - 9);
   const width = Math.max(1, options.columns - 8);
-  if (React.isValidElement<InteractiveHelpPanelProps>(content) && content.type === InteractiveHelpPanel) {
+  if (
+    React.isValidElement<InteractiveHelpPanelProps>(content) &&
+    content.type === InteractiveHelpPanel
+  ) {
     const fit = fitHelpPanelMaxItems(content.props.commands, {
       maxRows,
       width,
@@ -417,11 +425,18 @@ interface AppInputKey {
 export function resolveAppInputOwner(
   input: string,
   key: AppInputKey,
-  options: { running: boolean; modal: boolean; canToggleTool: boolean },
+  options: {
+    running: boolean;
+    modal: boolean;
+    canToggleTool: boolean;
+    keybindings?: UserKeybindingConfig;
+  },
 ): AppInputOwner {
-  if (resolveAppKeyEvent(input, key, options.running)) return "global";
+  if (resolveAppKeyEvent(input, key, options.running, options.keybindings)) return "global";
   if (options.modal) return "modal";
-  if (resolveToolCardToggleKey(input, key, options.canToggleTool, false)) return "tool-card";
+  if (resolveToolCardToggleKey(input, key, options.canToggleTool, false, options.keybindings)) {
+    return "tool-card";
+  }
   if (resolveTranscriptScrollKey(key)) return "transcript";
   return "input";
 }
@@ -430,8 +445,9 @@ export function resolveAppKeyEvent(
   input: string,
   key: AppInputKey,
   running: boolean,
+  keybindings?: UserKeybindingConfig,
 ): AppGlobalAction | null {
-  const resolved = resolveKeybinding({ input, key }, "Global");
+  const resolved = resolveKeybinding({ input, key }, "Global", keybindings);
   if (!resolved || resolved.kind !== "action") return null;
   if (resolved.action === "app:interrupt") return running ? "interrupt" : null;
   if (resolved.action === "app:exit") return "exit";
@@ -462,16 +478,19 @@ function pickSpinnerMode(entries: TuiEntry[], isStreaming: boolean): SpinnerMode
   return "requesting";
 }
 
-export function resolveTranscriptScrollKey(key: {
-  ctrl?: boolean;
-  shift?: boolean;
-  pageUp?: boolean;
-  pageDown?: boolean;
-  upArrow?: boolean;
-  downArrow?: boolean;
-  home?: boolean;
-  end?: boolean;
-}, blocked = false): TranscriptScrollAction | null {
+export function resolveTranscriptScrollKey(
+  key: {
+    ctrl?: boolean;
+    shift?: boolean;
+    pageUp?: boolean;
+    pageDown?: boolean;
+    upArrow?: boolean;
+    downArrow?: boolean;
+    home?: boolean;
+    end?: boolean;
+  },
+  blocked = false,
+): TranscriptScrollAction | null {
   if (blocked) return null;
   if (key.pageUp) return "pageUp";
   if (key.pageDown) return "pageDown";
@@ -489,9 +508,10 @@ export function resolveToolCardToggleKey(
   key: { ctrl?: boolean; shift?: boolean; meta?: boolean },
   canToggle: boolean,
   blocked: boolean,
+  keybindings?: UserKeybindingConfig,
 ): ToolCardAction | null {
   if (!canToggle || blocked) return null;
-  const resolved = resolveKeybinding({ input, key }, "Transcript");
+  const resolved = resolveKeybinding({ input, key }, "Transcript", keybindings);
   return resolved?.kind === "action" && resolved.action === "transcript:toggleShowAll"
     ? "toggle"
     : null;

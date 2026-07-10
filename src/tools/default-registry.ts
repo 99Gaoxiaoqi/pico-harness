@@ -22,7 +22,6 @@ import { CreateGoalTool, GetGoalTool, UpdateGoalTool } from "./goal.js";
 import { FetchURLTool, WebSearchTool } from "./web.js";
 import { ToolDisclosure } from "./tool-disclosure.js";
 import { SearchToolsTool } from "./search-tools.js";
-import { getTier } from "./tool-tiers.js";
 import { WorkspaceRoots, buildWorkspaceBoundaryMiddleware } from "./workspace-roots.js";
 
 export interface DefaultToolRegistryOptions extends ToolRegistryOptions {
@@ -98,11 +97,10 @@ export function buildDefaultToolRegistry(
   registry.register(new FetchURLTool());
   registry.register(new WebSearchTool());
   // 渐进披露(ROADMAP 5.4):注入 disclosure 时注册 search_tools 元工具。
-  // 扩展工具列表 = 全量工具里非核心组的(含 MCP 动态工具,若已注册)。
-  // search_tools 持有 disclosure 引用,execute 时回写 disclosed 集合。
+  // search_tools 持有 registry 的实时定义数据源,execute 时才筛选扩展工具。
+  // 因此 host 后续注册的委派/MCP 工具也会立即可检索。
   if (toolDisclosure) {
-    const extended = registry.getAvailableTools().filter((t) => getTier(t.name) === "extended");
-    registry.register(new SearchToolsTool(extended, toolDisclosure));
+    registry.register(new SearchToolsTool(() => registry.getAvailableTools(), toolDisclosure));
   }
   return registry;
 }

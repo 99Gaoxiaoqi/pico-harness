@@ -13,12 +13,19 @@ import type { ToolDefinition } from "../schema/message.js";
 import type { ToolAccesses } from "./tool-access.js";
 import { ToolAccesses as ToolAccessesNs } from "./tool-access.js";
 import { ToolDisclosure } from "./tool-disclosure.js";
+import { getTier } from "./tool-tiers.js";
+
+export type ToolDefinitionSource = readonly ToolDefinition[] | (() => readonly ToolDefinition[]);
 
 export function findMatchingTools(
   extendedTools: readonly ToolDefinition[],
   query: string,
 ): ToolDefinition[] {
-  const tokens = query.trim().toLowerCase().split(/\s+/).filter((t) => t.length > 0);
+  const tokens = query
+    .trim()
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((t) => t.length > 0);
   if (tokens.length === 0) return [];
 
   return extendedTools.filter((tool) => {
@@ -30,15 +37,16 @@ export function findMatchingTools(
 /**
  * 元工具:模型用它检索并激活扩展工具。
  *
- * 构造时注入扩展工具定义列表(待检索池)与 ToolDisclosure(状态机)。
- * execute 在扩展工具的 name/description 里做关键词匹配,命中即 disclose。
+ * 构造时注入工具定义数组或实时数据源,与 ToolDisclosure(状态机)。
+ * 实时数据源使 registry 创建后动态注册的委派/MCP 工具也可检索;
+ * 数组形式保留给独立使用者和旧调用方。
  */
 export class SearchToolsTool implements BaseTool {
   /** 纯只读:只更新内存 disclosed 集合,不触碰文件/网络等资源。 */
   readonly readOnly = true;
 
   constructor(
-    private readonly extendedTools: ToolDefinition[],
+    private readonly toolSource: ToolDefinitionSource,
     private readonly disclosure: ToolDisclosure,
   ) {}
 
@@ -82,8 +90,12 @@ export class SearchToolsTool implements BaseTool {
       throw new Error("参数解析失败:query 必须是非空字符串");
     }
 
-    // 2. 任意分词命中即纳入(name 或 description 含分词,不分大小写)
-    const hits = findMatchingTools(this.extendedTools, query);
+    // 2. 每次执行都取实时工具列表,并只检索扩展工具。
+    // search_tools 本身也属于 extended,必须显式排除,避免自激活。
+    const candidates = this.resolveTools().filter(
+      (tool) => tool.name !== this.name() && getTier(tool.name) === "extended",
+    );
+    const hits = findMatchingTools(candidates, query);
 
     // 3. 无命中提示
     if (hits.length === 0) {
@@ -94,5 +106,9 @@ export class SearchToolsTool implements BaseTool {
     this.disclosure.disclose(hits.map((t) => t.name));
     const lines = hits.map((t) => `- ${t.name}: ${t.description}`);
     return `已激活 ${hits.length} 个工具,下一轮可直接调用:\n${lines.join("\n")}`;
+  }
+
+  private resolveTools(): readonly ToolDefinition[] {
+    return typeof this.toolSource === "function" ? this.toolSource() : this.toolSource;
   }
 }

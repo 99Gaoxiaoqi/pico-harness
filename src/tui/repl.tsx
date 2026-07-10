@@ -29,7 +29,7 @@ import type {
 import { runAgentFromCli } from "../cli/run-agent.js";
 import { listFileHistorySnapshotSummaries } from "../cli/file-history.js";
 import { createCliSessionId, type CliSessionSelection } from "../cli/session-resolver.js";
-import { listFileSuggestions } from "../input/file-index.js";
+import { loadPicoConfig } from "../input/pico-config.js";
 import {
   commandArgumentSuggestions,
   commandSuggestions,
@@ -39,10 +39,7 @@ import { preparePromptForMessage, type PreparedUserPrompt } from "../input/prepa
 import { processUserInput } from "../input/process-user-input.js";
 import { parseSlashInput } from "../input/slash-parser.js";
 import type { CommandRegistry } from "../input/command-registry.js";
-import {
-  getCommandAvailability,
-  type CommandInputState,
-} from "../input/command-availability.js";
+import { getCommandAvailability, type CommandInputState } from "../input/command-availability.js";
 import type { InputProcessResult, LocalCommandResult } from "../input/types.js";
 import type { ImagePart } from "../schema/message.js";
 import type { ProviderKind } from "../provider/factory.js";
@@ -50,14 +47,14 @@ import { isAbortError } from "../provider/errors.js";
 import { defaultIsRetryableError } from "../provider/retry.js";
 import type { ThinkingEffort } from "../provider/thinking.js";
 import { buildDefaultToolRegistry } from "../tools/default-registry.js";
-import { ToolDisclosure } from "../tools/tool-disclosure.js";
+import type { ToolDisclosure } from "../tools/tool-disclosure.js";
 import {
   getOrCreateSessionSettings,
   getStoredSessionSettings,
   setSessionAdditionalDirectories,
+  setSessionTools,
   toolStatusFromRegistry,
 } from "../input/session-settings.js";
-import { loadConfiguredAdditionalDirectories } from "../input/add-directory.js";
 import { WorkspaceRoots } from "../tools/workspace-roots.js";
 import { globalSessionManager } from "../engine/session.js";
 import { McpConnectionManager, type McpStatusSnapshot } from "../mcp/manager.js";
@@ -83,6 +80,7 @@ import {
   type ApprovalNotice,
 } from "../approval/manager.js";
 import { InteractiveApprovalPanel, type ApprovalPanelAction } from "./approval-panel.js";
+import { createTuiRuntimeState, type TuiRuntimeState } from "./runtime-state.js";
 
 export interface ReplOptions {
   /** 工作区 */
@@ -255,7 +253,9 @@ export async function handleTuiRunningInputSubmission(
 
   const gen = deps.guard.tryStart();
   if (gen === null) {
-    const queued = deps.queue.enqueue(text, processed, { commandAvailabilityState: availabilityState });
+    const queued = deps.queue.enqueue(text, processed, {
+      commandAvailabilityState: availabilityState,
+    });
     if (queued.type === "rejected") {
       deps.reporter.pushSystemMessage(`Input queue is full (${queued.capacity}). Please wait.`);
     } else {
@@ -430,20 +430,24 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
   }
 
   const provider = opts.provider ?? "openai";
-  const tuiSessionSelection: CliSessionSelection =
-    opts.sessionSelection ?? {
-      mode: "new",
-      sessionId: createCliSessionId(),
-    };
+  const picoConfig = await loadPicoConfig(opts.workDir);
+  const tuiSessionSelection: CliSessionSelection = opts.sessionSelection ?? {
+    mode: "new",
+    sessionId: createCliSessionId(),
+  };
   const tuiSessionId = tuiSessionSelection.sessionId;
   const tuiSession = await globalSessionManager.getOrCreate(tuiSessionId, opts.workDir);
-  const toolDisclosure = new ToolDisclosure();
-  const configuredAdditionalDirectories = await loadConfiguredAdditionalDirectories(opts.workDir);
+  const runtimeState = await createTuiRuntimeState({
+    workDir: opts.workDir,
+    sessionId: tuiSessionId,
+    session: tuiSession,
+  });
+  const { toolDisclosure, fileIndex } = runtimeState;
   const storedSettings = getStoredSessionSettings(tuiSessionId);
   const restoredAdditionalDirectories =
     storedSettings?.cwd === opts.workDir ? storedSettings.additionalDirectories : [];
   const workspaceRoots = await WorkspaceRoots.create(opts.workDir, [
-    ...configuredAdditionalDirectories,
+    ...picoConfig.additionalDirectories,
     ...(opts.addDirs ?? []),
     ...restoredAdditionalDirectories,
   ]);
@@ -476,6 +480,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
   setSessionAdditionalDirectories(settings, workspaceRoots.list().slice(1));
   const registry = await createPicoCommandRegistry({
     workDir: opts.workDir,
+    projectCommandsDir: picoConfig.commandsDir,
     provider,
     model: settings.model,
     session: tuiSession,
@@ -492,10 +497,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     additionalDirectories: settings.additionalDirectories,
     additionalDirectoryManager: workspaceRoots,
   });
-  const initialFileSuggestions = await listFileSuggestions({
-    cwd: opts.workDir,
-    limit: 500,
-  }).catch(() => []);
+  await fileIndex.refresh().catch(() => undefined);
 
   // 共享状态:TuiReporter 和 App 共用同一个 entries 数组引用
   const entries: TuiEntry[] = [];
@@ -604,6 +606,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
             await runTuiAgentPrompt(cliOpts, {
               reporter,
               toolDisclosure,
+              runtimeState,
               openDialog: (request) => {
                 setDialogRequests((current) => [
                   ...current.filter((item) => item.id !== request.id),
@@ -615,12 +618,19 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
               mcpStatusSink: (snapshot) => {
                 latestMcpStatus = snapshot;
               },
+              toolStatusSink: (tools) => {
+                setSessionTools(settings, tools);
+              },
               abortControllerRef,
             });
           },
         });
       } catch (err) {
         appendTuiRunError(reporter, err);
+      } finally {
+        // Agent writes and external edits invalidate the startup snapshot. Refresh lazily
+        // only when the user next opens @ suggestions.
+        fileIndex.markDirty();
       }
     };
 
@@ -646,10 +656,9 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
           commandArgumentSuggestions(registry, command, query)
         }
         fileMentionSuggestions={(query) =>
-          initialFileSuggestions
-            .filter((file) => !query || file.includes(query))
-            .map((file) => ({ value: file }))
+          fileIndex.query(query, 500).then((files) => files.map((file) => ({ value: file })))
         }
+        keybindings={picoConfig.keybindings}
         dialogRequests={dialogRequests}
         onSubmit={(text) => void handleSubmit(text)}
         onInterrupt={() => {
@@ -677,7 +686,11 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     patchConsole: false,
     exitOnCtrlC: false,
   });
-  await instance.waitUntilExit();
+  try {
+    await instance.waitUntilExit();
+  } finally {
+    await runtimeState.dispose();
+  }
 }
 
 export function createTuiUpdateScheduler(
@@ -809,7 +822,9 @@ export async function runTuiAgentPrompt(
   deps: {
     reporter: TuiReporter;
     toolDisclosure?: ToolDisclosure;
+    runtimeState?: TuiRuntimeState;
     mcpStatusSink?: (snapshot: McpStatusSnapshot) => void;
+    toolStatusSink?: RunAgentCliDependencies["toolStatusSink"];
     openDialog?: (request: DialogRequest) => void;
     closeDialog?: (id: string) => void;
     runAgent?: TuiRunAgent;
@@ -835,7 +850,9 @@ export async function runTuiAgentPrompt(
         );
       },
       ...(deps.toolDisclosure ? { toolDisclosure: deps.toolDisclosure } : {}),
+      ...(deps.runtimeState ? { runtimeState: deps.runtimeState } : {}),
       ...(deps.mcpStatusSink ? { mcpStatusSink: deps.mcpStatusSink } : {}),
+      ...(deps.toolStatusSink ? { toolStatusSink: deps.toolStatusSink } : {}),
     });
     if (result.tracePath) {
       deps.reporter.pushSystemMessage(`Trace saved: ${result.tracePath}`);

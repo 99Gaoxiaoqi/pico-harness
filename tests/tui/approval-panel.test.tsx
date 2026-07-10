@@ -44,6 +44,20 @@ describe("ApprovalPanel", () => {
     expect(resolveApprovalPanelKey("x", {})).toBeNull();
   });
 
+  it("审批面板使用用户自定义 Confirmation 快捷键", () => {
+    const keybindings = {
+      Confirmation: {
+        y: null,
+        p: "confirmation:accept" as const,
+        r: "confirmation:cancel" as const,
+      },
+    };
+
+    expect(resolveApprovalPanelKey("y", {}, keybindings)).toBeNull();
+    expect(resolveApprovalPanelKey("p", {}, keybindings)).toBe("approve");
+    expect(resolveApprovalPanelKey("r", {}, keybindings)).toBe("reject");
+  });
+
   it("diff 在审批面板里默认只展示统计摘要和审批摘要", () => {
     const longDiff = [
       "--- old",

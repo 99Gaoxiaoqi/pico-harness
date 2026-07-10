@@ -2,8 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readdir, realpath } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { AgentEngine } from "../engine/loop.js";
-import { GoalManager } from "../engine/goal-manager.js";
-import { SteerQueue } from "../engine/steer-queue.js";
+import type { GoalManager } from "../engine/goal-manager.js";
 import { globalSessionManager, type Session } from "../engine/session.js";
 import { TerminalReporter, type Reporter } from "../engine/reporter.js";
 import { Compactor } from "../context/compactor.js";
@@ -12,7 +11,7 @@ import { ToolResultArtifactStore } from "../context/artifact-store.js";
 import { createContextBudget, estimateTokenBudgetAsChars } from "../context/context-budget.js";
 import { PromptComposer } from "../context/composer.js";
 import { SkillLoader, SkillViewTool } from "../context/skill.js";
-import { TodoStore } from "../context/todo-store.js";
+import type { TodoStore } from "../context/todo-store.js";
 import { ToolDisclosure } from "../tools/tool-disclosure.js";
 import {
   createProvider,
@@ -48,6 +47,7 @@ import {
 } from "../approval/manager.js";
 import { computeApprovalDiff } from "../approval/diff.js";
 import { formatApprovalPanel } from "../tui/approval-panel.js";
+import { createTuiRuntimeState, type TuiRuntimeState } from "../tui/runtime-state.js";
 import type { MiddlewareFunc } from "../tools/registry.js";
 import { McpConnectionManager, type McpStatusSnapshot } from "../mcp/manager.js";
 import { BackgroundManager } from "../tools/background-manager.js";
@@ -56,13 +56,13 @@ import { HookRunner } from "../hooks/runner.js";
 import {
   getOrCreateSessionSettings,
   setSessionAdditionalDirectories,
+  toolStatusFromRegistry,
+  type SessionToolStatus,
   type SessionSettings,
 } from "../input/session-settings.js";
 import { loadConfiguredAdditionalDirectories } from "../input/add-directory.js";
 import { loadImage } from "../input/prepare-prompt.js";
 import { resolveCliSession, type CliSessionSelection } from "./session-resolver.js";
-
-const cliBackgroundManager = new BackgroundManager();
 
 export interface RunAgentCliOptions {
   prompt: string;
@@ -126,6 +126,10 @@ export interface RunAgentCliDependencies {
   reporter?: Reporter;
   approvalNotifier?: ApprovalNotifier;
   toolDisclosure?: ToolDisclosure;
+  /** Session-scoped services owned by the TUI host and reused across prompts. */
+  runtimeState?: TuiRuntimeState;
+  /** Receives the complete registry after late delegation/MCP registration. */
+  toolStatusSink?: (tools: readonly SessionToolStatus[]) => void;
   mcpStatusSink?: (snapshot: McpStatusSnapshot) => void;
   /** 宿主本轮运行的中止信号。 */
   signal?: AbortSignal;
@@ -173,8 +177,7 @@ export async function runAgentFromCli(
     session: sessionSelection.sessionId,
     sessionSelection,
     model: options.model ?? settings.model,
-    planMode:
-      options.planMode ?? (settings.mode === "plan" || settings.permissionMode === "plan"),
+    planMode: options.planMode ?? (settings.mode === "plan" || settings.permissionMode === "plan"),
     trace: traceEnabled,
     addDirs: [...settings.additionalDirectories],
     ...(options.thinkingEffort !== undefined
@@ -191,6 +194,24 @@ export async function runAgentFromCli(
   const session = await globalSessionManager.getOrCreate(sessionSelection.sessionId, workDir);
   if (sessionSelection.mode === "fork" && sessionSelection.sourceSessionId) {
     await seedForkedSession(session, sessionSelection.sourceSessionId, workDir);
+  }
+  const ownsRuntimeState = dependencies.runtimeState === undefined;
+  const runtimeState =
+    dependencies.runtimeState ??
+    (await createTuiRuntimeState({
+      workDir,
+      sessionId: session.id,
+      session,
+      ...(dependencies.toolDisclosure !== undefined
+        ? { toolDisclosure: dependencies.toolDisclosure }
+        : {}),
+    }));
+  runtimeState.assertCompatible(workDir, session.id);
+  if (
+    dependencies.toolDisclosure !== undefined &&
+    dependencies.toolDisclosure !== runtimeState.toolDisclosure
+  ) {
+    throw new Error("runtimeState.toolDisclosure must match dependencies.toolDisclosure");
   }
   // 凭证轮换(4.2):多 key 时从池取首个 key 覆盖 config.apiKey,并构建轮换回调。
   // 单 key / 注入 provider 时跳过(向后兼容)。pool 注入点集中在此,便于追踪 currentKey。
@@ -227,16 +248,11 @@ export async function runAgentFromCli(
       );
     };
   }
-  // GoalManager 单例:registry(3 工具)与 engine(prompt 注入 + Grace Call)共享同一实例,
-  // 确保工具改的状态引擎侧立即可见。
-  const goalManager = new GoalManager();
-  // TodoTool and PromptComposer must share one store so todo context stays current.
-  const todoStore = new TodoStore(workDir);
-  // search_tools and engine tool selection share disclosure state across turns.
-  const toolDisclosure = dependencies.toolDisclosure ?? new ToolDisclosure();
+  const { goalManager, todoStore, toolDisclosure, backgroundManager, delegationManager } =
+    runtimeState;
   const registry = buildRegistry(
     workDir,
-    cliBackgroundManager,
+    backgroundManager,
     goalManager,
     todoStore,
     toolDisclosure,
@@ -250,16 +266,21 @@ export async function runAgentFromCli(
     registry.setHookRunner?.(new HookRunner(workDir, hooksConfig));
   }
   const observationProcessor = buildObservationProcessor(workDir);
-  // Inject steer text before the first turn can read it.
-  const steerQueue = new SteerQueue();
+  // Inject steer text into the session-scoped queue before the next provider turn.
+  const steerQueue = runtimeState.steerQueue;
   if (options.steer) {
     steerQueue.push(options.steer);
   }
-  // 默认(非 Plan Mode)路径预组装 System Prompt:加载 AGENTS.md + Skills 清单 + Goal 状态,
-  // 避免 loop.ts 退化到硬编码英文兜底。Plan Mode 下由 buildSystemPrompt() 每轮动态重组,故此处不传。
-  const systemPrompt = options.planMode
-    ? undefined
-    : await new PromptComposer(workDir, false, { goalManager, todoStore }).build();
+  const systemPromptFactory = (): Promise<string> =>
+    new PromptComposer(workDir, effectiveOptions.planMode ?? false, {
+      sessionId: session.id,
+      skillRegistry: runtimeState.skillRegistry,
+      ...(runtimeState.memoryNudger !== undefined
+        ? { memoryNudger: runtimeState.memoryNudger }
+        : {}),
+      goalManager,
+      todoStore,
+    }).build(runtimeState.conversationTurnCount(session));
   // 辅助(廉价)模型:用于 FullCompactor 生成摘要,省主模型成本。
   // 配齐 AUX_LLM_BASE_URL / AUX_LLM_API_KEY / AUX_LLM_MODEL 才启用;缺则用主 provider。
   const auxProvider = loadAuxProvider(dependencies.env ?? process.env);
@@ -272,7 +293,7 @@ export async function runAgentFromCli(
       ? { thinkingEffort: effectiveOptions.thinkingEffort }
       : {}),
     planMode: effectiveOptions.planMode ?? false,
-    systemPrompt,
+    systemPromptFactory,
     goalManager,
     todoStore,
     toolDisclosure,
@@ -300,7 +321,14 @@ export async function runAgentFromCli(
       workspaceRoots,
     ),
   );
-  registerDelegationTools(registry, engine, workDir, await loadProfiles(workDir));
+  registerDelegationTools(
+    registry,
+    engine,
+    workDir,
+    await loadProfiles(workDir),
+    delegationManager,
+  );
+  dependencies.toolStatusSink?.(toolStatusFromRegistry(registry));
 
   // 3.6 Plan Review:把 ExitPlanModeTool 的退出回调接到 engine.exitPlanMode,
   // 并把审批通知路由到 host 注入的 notifier,使审批通过后真正切换 planMode。
@@ -326,6 +354,7 @@ export async function runAgentFromCli(
     dependencies.mcpStatusSink?.(mcpManager.getStatusSnapshot());
     await mcpManager.connectAll();
     dependencies.mcpStatusSink?.(mcpManager.getStatusSnapshot());
+    dependencies.toolStatusSink?.(toolStatusFromRegistry(registry));
   }
 
   try {
@@ -359,12 +388,15 @@ export async function runAgentFromCli(
       await mcpManager.closeAll();
       dependencies.mcpStatusSink?.(mcpManager.getStatusSnapshot());
     }
+    if (ownsRuntimeState) {
+      await runtimeState.dispose();
+    }
   }
 }
 
 function buildRegistry(
   workDir: string,
-  backgroundManager: BackgroundManager = cliBackgroundManager,
+  backgroundManager: BackgroundManager,
   goalManager?: GoalManager,
   todoStore?: TodoStore,
   toolDisclosure?: ToolDisclosure,
@@ -496,8 +528,8 @@ function registerDelegationTools(
   engine: AgentEngine,
   workDir: string,
   profiles: AgentProfile[],
+  manager: DelegationManager,
 ): void {
-  const manager = new DelegationManager();
   const registryFactory = createSubagentRegistryFactory({
     workDir,
     runner: engine,
@@ -575,12 +607,7 @@ export function buildApprovalMiddleware(
       call,
       async () => {
         // 拦截时计算 before/after diff,失败返回 undefined 不阻断审批
-        const diff = await computeApprovalDiff(
-          call.name,
-          call.arguments,
-          workDir,
-          workspaceRoots,
-        );
+        const diff = await computeApprovalDiff(call.name, call.arguments, workDir, workspaceRoots);
         // Provider call id 只在局部轮次内唯一,不能用作全局审批主键。
         return approvalManager.waitForApproval(
           `approval_${randomUUID()}`,

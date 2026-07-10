@@ -29,7 +29,7 @@ import { ToolDisclosure } from "../tools/tool-disclosure.js";
 import { SilentReporter, type Reporter } from "./reporter.js";
 import { SteerQueue } from "./steer-queue.js";
 import { ReminderInjector, ToolGuardrailController, type GuardrailOptions } from "./reminder.js";
-import { IterationBudget, type BudgetConfig } from "./budget.js";
+import { IterationBudget, type BudgetConfig, type BudgetDecision } from "./budget.js";
 import type { GoalManager } from "./goal-manager.js";
 import { Tracer, exportTraceToFile, truncate, type Span } from "../observability/trace.js";
 import { logger } from "../observability/logger.js";
@@ -57,6 +57,8 @@ export interface AgentEngineOptions {
   workDir: string;
   /** 系统提示词;由 PromptComposer 动态组装。planMode 开启时此项被忽略 */
   systemPrompt?: string;
+  /** Host-owned prompt composition with session-scoped memory and runtime state. */
+  systemPromptFactory?: () => Promise<string>;
   /**
    * 模型原生思考强度(off/low/medium/high)。
    * 控制 provider 向模型发送 reasoning_effort / thinking.budget_tokens 参数。
@@ -178,6 +180,7 @@ export class AgentEngine implements AgentRunner {
   private readonly workDir: string;
   private readonly workspaceRoots?: WorkspaceRoots;
   private readonly systemPrompt: string;
+  private readonly systemPromptFactory?: () => Promise<string>;
   private readonly thinkingEffort: ThinkingEffort;
   // planMode 非 readonly:ExitPlanMode 审批通过后由 exitPlanMode() 置 false。
   private planMode: boolean;
@@ -220,6 +223,7 @@ export class AgentEngine implements AgentRunner {
       opts.systemPrompt ??
       "You are pico, an expert coding assistant running in a Harness engine. " +
         "You have tools to read, write, edit files and run bash. Think step by step.";
+    this.systemPromptFactory = opts.systemPromptFactory;
     this.thinkingEffort = opts.thinkingEffort ?? "off";
     this.planMode = opts.planMode ?? false;
     this.workingMemoryLimit = opts.workingMemoryLimit ?? DEFAULT_WORKING_MEMORY_LIMIT;
@@ -284,6 +288,9 @@ export class AgentEngine implements AgentRunner {
    * 关闭时使用构造时固定的 systemPrompt。
    */
   private async buildSystemPrompt(): Promise<string> {
+    if (this.systemPromptFactory) {
+      return this.systemPromptFactory();
+    }
     if (this.planMode) {
       // planMode 时用 PromptComposer 动态组装;goalManager / todoStore 单例注入,
       // 让 active goal 与最新 todo 状态在每轮 prompt 中浮现(对齐 host 注入范式)。
@@ -458,9 +465,7 @@ export class AgentEngine implements AgentRunner {
               continue;
             }
             // 压缩失败(返回 false):降级到抛错,由 run() 的硬重置兜底
-            logger.error(
-              `[Engine] 模型摘要压缩失败,降级到抛出 ContextOverflowError(由硬重置兜底)`,
-            );
+            logger.error(`[Engine] 模型摘要压缩失败,降级到抛出 ContextOverflowError(由硬重置兜底)`);
           }
           logger.error(
             { attempt, maxRetry: AgentEngine.MAX_OVERFLOW_RETRY },
@@ -569,6 +574,15 @@ export class AgentEngine implements AgentRunner {
           );
           break;
         }
+        const goalTurnBudget = this.goalManager?.startTurn() ?? { allowed: true };
+        if (!goalTurnBudget.allowed) {
+          exhaustedReason = goalTurnBudget.reason ?? "Goal 预算已耗尽";
+          logger.warn(
+            { turnCount, goalId: this.goalManager?.getActive()?.id },
+            `[Engine] ${exhaustedReason},准备触发 Grace Call 收尾`,
+          );
+          break;
+        }
         reporter.onTurnStart(turnCount);
         const turnSpan = rootSpan?.startChild(`Turn-${turnCount}`);
         const currentMessageId = `turn-${session.fileHistory.snapshotSequence + 1}`;
@@ -599,6 +613,7 @@ export class AgentEngine implements AgentRunner {
               }
             }
           } catch {
+            // File-history tracking is best-effort and must not block the tool call.
           }
         });
 
@@ -638,14 +653,20 @@ export class AgentEngine implements AgentRunner {
             if (err instanceof ContextCompactionError && !hardResetTriggered) {
               hardResetTriggered = true;
               logger.error(
-                { beforeChars: err.beforeChars, afterChars: err.afterChars, maxChars: err.maxChars },
+                {
+                  beforeChars: err.beforeChars,
+                  afterChars: err.afterChars,
+                  maxChars: err.maxChars,
+                },
                 `[Engine] ⚠ 上下文压缩彻底失败(${err.beforeChars}→${err.afterChars} 仍超 ${err.maxChars}),触发硬重置兜底:清空历史只保留本轮用户输入`,
               );
-              turnSpan?.startChild("Context.HardReset", {
-                beforeChars: err.beforeChars,
-                afterChars: err.afterChars,
-                maxChars: err.maxChars,
-              })?.end();
+              turnSpan
+                ?.startChild("Context.HardReset", {
+                  beforeChars: err.beforeChars,
+                  afterChars: err.afterChars,
+                  maxChars: err.maxChars,
+                })
+                ?.end();
               session.truncateTo(beforeLen - 1);
               // 硬重置改变了 session 起点,更新 beforeLen 让返回值切片正确
               beforeLen = session.length - 1;
@@ -680,6 +701,7 @@ export class AgentEngine implements AgentRunner {
             ...(this.toolDisclosure ? { totalToolCount: allTools.length } : {}),
           });
           let responseMsg: Message;
+          const costBefore = session.totalCostCNY;
           try {
             responseMsg = await this.generateWithOverflowRetry(
               session,
@@ -696,9 +718,7 @@ export class AgentEngine implements AgentRunner {
               beforeLen = 0;
             }
             recordLlmResponse(actionSpan, responseMsg);
-            const budgetDecision = responseMsg.usage
-              ? this.budget.consumeUsage(responseMsg.usage)
-              : { allowed: true };
+            const budgetDecision = this.consumeResponseBudget(session, responseMsg, costBefore);
             if (!budgetDecision.allowed) {
               exhaustedReason = budgetDecision.reason;
             }
@@ -755,9 +775,8 @@ export class AgentEngine implements AgentRunner {
             maxConcurrency: AgentEngine.MAX_TOOL_CONCURRENCY,
             signal,
           });
-          const settledResults: Array<
-            { message: Message; reminder?: Message } | undefined
-          > = new Array(toolCalls.length);
+          const settledResults: Array<{ message: Message; reminder?: Message } | undefined> =
+            new Array(toolCalls.length);
           const scheduled = toolCalls.map((tc, index) =>
             scheduler
               .add({
@@ -835,9 +854,7 @@ export class AgentEngine implements AgentRunner {
             session.id,
             undefined,
             session.length,
-          ).catch((err) =>
-            logger.warn({ err: String(err) }, "[FileHistory] 每轮快照创建失败"),
-          );
+          ).catch((err) => logger.warn({ err: String(err) }, "[FileHistory] 每轮快照创建失败"));
           turnSpan?.end();
         }
       }
@@ -967,7 +984,9 @@ export class AgentEngine implements AgentRunner {
     // Goal Mode(可选):把 active goal 状态拼进收尾提示,让总结对齐目标。
     // 无 goalManager 或无 active goal 时 goalSection 为空,gracePrompt 保持原样。
     const goalContext = this.goalManager?.buildGoalContext() ?? "";
-    const goalSection = goalContext ? `\n\n${goalContext}\n请在总结中明确:当前目标达成到什么程度。` : "";
+    const goalSection = goalContext
+      ? `\n\n${goalContext}\n请在总结中明确:当前目标达成到什么程度。`
+      : "";
     const gracePrompt = `[SYSTEM] 已达执行预算: ${reason}。立即停止工具调用,用纯文本总结:1)已完成 2)未完成 3)下一步建议。${goalSection}`;
     session.append({ role: "user", content: gracePrompt });
     const graceSpan = parentSpan?.startChild("LLM.GraceCall", {
@@ -979,6 +998,7 @@ export class AgentEngine implements AgentRunner {
         { role: "system", content: systemPrompt },
         ...session.getWorkingMemory(this.workingMemoryLimit),
       ];
+      const costBefore = session.totalCostCNY;
       const response = await generateWithRetry(this.provider, context, [], {
         signal,
         onRetry: this.makeRetryReporter(graceSpan),
@@ -986,6 +1006,9 @@ export class AgentEngine implements AgentRunner {
       });
       signal?.throwIfAborted();
       recordLlmResponse(graceSpan, response);
+      // Grace Call is the one permitted over-budget summary. It does not consume another
+      // goal turn, but its measurable token/cost usage remains part of the goal totals.
+      this.consumeResponseBudget(session, response, costBefore);
       session.append(response);
       if (response.content) {
         reporter.onMessage(response.content);
@@ -997,6 +1020,25 @@ export class AgentEngine implements AgentRunner {
     } finally {
       graceSpan?.end();
     }
+  }
+
+  private consumeResponseBudget(
+    session: Session,
+    response: Message,
+    costBefore: number,
+  ): BudgetDecision {
+    const decisions: BudgetDecision[] = [];
+    if (response.usage) {
+      decisions.push(this.budget.consumeUsage(response.usage));
+      decisions.push(this.goalManager?.consumeUsage(response.usage) ?? { allowed: true });
+    }
+
+    const costDelta = Math.max(0, session.totalCostCNY - costBefore);
+    if (costDelta > 0) {
+      decisions.push(this.budget.consumeCost(costDelta));
+      decisions.push(this.goalManager?.consumeCost(costDelta) ?? { allowed: true });
+    }
+    return decisions.find((decision) => !decision.allowed) ?? { allowed: true };
   }
 
   /**

@@ -1,0 +1,147 @@
+import { resolve } from "node:path";
+import { TodoStore } from "../context/todo-store.js";
+import { GoalManager } from "../engine/goal-manager.js";
+import type { Session } from "../engine/session.js";
+import { SteerQueue } from "../engine/steer-queue.js";
+import { FileIndex } from "../input/file-index.js";
+import { MemoryNudger } from "../memory/memory-nudger.js";
+import { SkillRegistry } from "../memory/skill-registry.js";
+import { TaskRegistry } from "../tasks/task-registry.js";
+import { BackgroundManager } from "../tools/background-manager.js";
+import { DelegationManager } from "../tools/delegation-manager.js";
+import { ToolDisclosure } from "../tools/tool-disclosure.js";
+
+export interface TuiRuntimeStateOptions {
+  workDir: string;
+  sessionId: string;
+  session: Session;
+  toolDisclosure?: ToolDisclosure;
+}
+
+export interface TuiRuntimeState {
+  readonly workDir: string;
+  readonly sessionId: string;
+  readonly goalManager: GoalManager;
+  readonly todoStore: TodoStore;
+  readonly toolDisclosure: ToolDisclosure;
+  readonly taskRegistry: TaskRegistry;
+  readonly backgroundManager: BackgroundManager;
+  readonly delegationManager: DelegationManager;
+  readonly skillRegistry: SkillRegistry;
+  readonly memoryNudger: MemoryNudger | undefined;
+  readonly fileIndex: FileIndex;
+  readonly steerQueue: SteerQueue;
+  assertCompatible(workDir: string, sessionId: string): void;
+  conversationTurnCount(session: Session): number;
+  dispose(): Promise<void>;
+}
+
+export async function createTuiRuntimeState(
+  options: TuiRuntimeStateOptions,
+): Promise<TuiRuntimeState> {
+  const workDir = resolve(options.workDir);
+  if (options.session.id !== options.sessionId) {
+    throw new Error(
+      `TUI runtime session mismatch: expected ${options.sessionId}, received ${options.session.id}`,
+    );
+  }
+  if (resolve(options.session.workDir) !== workDir) {
+    throw new Error(
+      `TUI runtime workDir mismatch: expected ${workDir}, received ${options.session.workDir}`,
+    );
+  }
+
+  const taskRegistry = new TaskRegistry();
+  const skillRegistry = new SkillRegistry(workDir);
+  await skillRegistry.init();
+
+  return new DefaultTuiRuntimeState({
+    workDir,
+    sessionId: options.sessionId,
+    goalManager: new GoalManager(),
+    todoStore: new TodoStore(workDir),
+    toolDisclosure: options.toolDisclosure ?? new ToolDisclosure(),
+    taskRegistry,
+    backgroundManager: new BackgroundManager({ taskRegistry }),
+    delegationManager: new DelegationManager({ taskRegistry }),
+    skillRegistry,
+    memoryNudger: options.session.fts5Store
+      ? new MemoryNudger(skillRegistry, options.session.fts5Store)
+      : undefined,
+    fileIndex: FileIndex.create({ cwd: workDir }),
+    steerQueue: new SteerQueue(),
+  });
+}
+
+interface DefaultTuiRuntimeStateOptions {
+  workDir: string;
+  sessionId: string;
+  goalManager: GoalManager;
+  todoStore: TodoStore;
+  toolDisclosure: ToolDisclosure;
+  taskRegistry: TaskRegistry;
+  backgroundManager: BackgroundManager;
+  delegationManager: DelegationManager;
+  skillRegistry: SkillRegistry;
+  memoryNudger: MemoryNudger | undefined;
+  fileIndex: FileIndex;
+  steerQueue: SteerQueue;
+}
+
+class DefaultTuiRuntimeState implements TuiRuntimeState {
+  readonly workDir: string;
+  readonly sessionId: string;
+  readonly goalManager: GoalManager;
+  readonly todoStore: TodoStore;
+  readonly toolDisclosure: ToolDisclosure;
+  readonly taskRegistry: TaskRegistry;
+  readonly backgroundManager: BackgroundManager;
+  readonly delegationManager: DelegationManager;
+  readonly skillRegistry: SkillRegistry;
+  readonly memoryNudger: MemoryNudger | undefined;
+  readonly fileIndex: FileIndex;
+  readonly steerQueue: SteerQueue;
+  private disposed = false;
+
+  constructor(options: DefaultTuiRuntimeStateOptions) {
+    this.workDir = options.workDir;
+    this.sessionId = options.sessionId;
+    this.goalManager = options.goalManager;
+    this.todoStore = options.todoStore;
+    this.toolDisclosure = options.toolDisclosure;
+    this.taskRegistry = options.taskRegistry;
+    this.backgroundManager = options.backgroundManager;
+    this.delegationManager = options.delegationManager;
+    this.skillRegistry = options.skillRegistry;
+    this.memoryNudger = options.memoryNudger;
+    this.fileIndex = options.fileIndex;
+    this.steerQueue = options.steerQueue;
+  }
+
+  assertCompatible(workDir: string, sessionId: string): void {
+    if (resolve(workDir) !== this.workDir) {
+      throw new Error(
+        `TUI runtime workDir mismatch: expected ${this.workDir}, received ${resolve(workDir)}`,
+      );
+    }
+    if (sessionId !== this.sessionId) {
+      throw new Error(
+        `TUI runtime session mismatch: expected ${this.sessionId}, received ${sessionId}`,
+      );
+    }
+  }
+
+  conversationTurnCount(session: Session): number {
+    this.assertCompatible(session.workDir, session.id);
+    return session
+      .getHistory()
+      .filter((message) => message.role === "user" && message.toolCallId === undefined).length;
+  }
+
+  async dispose(): Promise<void> {
+    if (this.disposed) return;
+    this.disposed = true;
+    const runningTasks = this.backgroundManager.list().filter((task) => task.status === "running");
+    await Promise.allSettled(runningTasks.map((task) => this.backgroundManager.stop(task.taskId)));
+  }
+}

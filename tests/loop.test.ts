@@ -9,6 +9,7 @@ import { describe, expect, it, vi } from "vitest";
 import { AgentEngine } from "../src/engine/loop.js";
 import { Session } from "../src/engine/session.js";
 import { IterationBudget } from "../src/engine/budget.js";
+import { GoalManager } from "../src/engine/goal-manager.js";
 import type { Reporter } from "../src/engine/reporter.js";
 import { LLMStatusError } from "../src/provider/errors.js";
 import type { LLMProvider } from "../src/provider/interface.js";
@@ -118,6 +119,41 @@ function reporter(onTextDelta?: (delta: string) => void): Reporter {
 }
 
 describe("AgentEngine Main Loop", () => {
+  it("enforces an active goal turn budget and records grace-call usage", async () => {
+    const provider = new ScriptedProvider([
+      {
+        role: "assistant",
+        content: "run once",
+        toolCalls: [{ id: "goal-call", name: "bash", arguments: "{}" }],
+        usage: { promptTokens: 20, completionTokens: 10 },
+      },
+      {
+        role: "assistant",
+        content: "grace summary",
+        usage: { promptTokens: 5, completionTokens: 5 },
+      },
+    ]);
+    const registry = new MockRegistry();
+    const goalManager = new GoalManager();
+    const goal = goalManager.create("bounded goal", "run one model turn", { maxTurns: 1 });
+    const engine = new AgentEngine({
+      provider,
+      registry,
+      workDir: "/tmp",
+      goalManager,
+    });
+
+    const session = newSession("start bounded goal");
+    await engine.run(session);
+
+    expect(registry.executed).toHaveLength(1);
+    expect(goalManager.get(goal.id)?.budgetUsage).toMatchObject({
+      turns: 1,
+      tokens: 40,
+    });
+    expect(session.getHistory().at(-1)?.content).toBe("grace summary");
+  });
+
   it("run 将 signal 传给 provider 调用", async () => {
     let receivedSignal: AbortSignal | undefined;
     const provider: LLMProvider = {
@@ -235,8 +271,8 @@ describe("AgentEngine Main Loop", () => {
 
     expect(secondRun.at(-1)?.content).toBe("continued safely");
     const secondContext = contexts[1] ?? [];
-    const toolCallIds = secondContext.flatMap((message) =>
-      message.toolCalls?.map((call) => call.id) ?? [],
+    const toolCallIds = secondContext.flatMap(
+      (message) => message.toolCalls?.map((call) => call.id) ?? [],
     );
     const toolResultIds = new Set(
       secondContext.flatMap((message) => (message.toolCallId ? [message.toolCallId] : [])),

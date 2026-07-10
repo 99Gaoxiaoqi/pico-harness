@@ -22,6 +22,8 @@ export interface MarkdownPromptCommand {
 
 export interface LoadMarkdownCommandsOptions {
   workDir: string;
+  /** Absolute project command directory loaded from .pico/config.json. */
+  projectCommandsDir?: string;
   userCommandsDir?: string;
   homeDir?: string;
   includeSkillCommands?: boolean;
@@ -54,7 +56,7 @@ export async function loadMarkdownCommands(
 ): Promise<MarkdownPromptCommand[]> {
   const home = options.homeDir ?? homedir();
   const projectCommandsDirs = [
-    join(options.workDir, ".pico", "commands"),
+    options.projectCommandsDir ?? join(options.workDir, ".pico", "commands"),
     join(options.workDir, ".claude", "commands"),
   ];
   const userCommandsDirs = options.userCommandsDir
@@ -304,7 +306,10 @@ function normalizeString(value: unknown): string {
   return value == null ? "" : String(value).trim();
 }
 
-function optionalString(key: "argumentHint" | "model", value: unknown): Partial<MarkdownPromptCommand> {
+function optionalString(
+  key: "argumentHint" | "model",
+  value: unknown,
+): Partial<MarkdownPromptCommand> {
   const normalized = normalizeString(value);
   return normalized ? { [key]: normalized } : {};
 }

@@ -89,10 +89,7 @@ describe("App", () => {
         onSubmit={vi.fn()}
       />
     );
-    const harness = createInteractiveApp(
-      app,
-      { columns: 12, rows: 24 },
-    );
+    const harness = createInteractiveApp(app, { columns: 12, rows: 24 });
 
     try {
       const output = await harness.rerender(app);
@@ -161,13 +158,15 @@ describe("App", () => {
         workDir={workDir}
         entries={[]}
         running={false}
-        slashArgumentSuggestions={(async (command, query) => {
-          await new Promise((resolve) => setTimeout(resolve, query === "k" ? 30 : 1));
-          if (command !== "model") return [];
-          return query === "k"
-            ? [{ value: "kube-stale", description: "stale result" }]
-            : commandArgumentSuggestions(registry, command, query);
-        }) as never}
+        slashArgumentSuggestions={
+          (async (command, query) => {
+            await new Promise((resolve) => setTimeout(resolve, query === "k" ? 30 : 1));
+            if (command !== "model") return [];
+            return query === "k"
+              ? [{ value: "kube-stale", description: "stale result" }]
+              : commandArgumentSuggestions(registry, command, query);
+          }) as never
+        }
         onSubmit={submitted}
       />,
     );
@@ -183,8 +182,12 @@ describe("App", () => {
           workDir={workDir}
           entries={[]}
           running={false}
-          slashArgumentSuggestions={(async (command, query) =>
-            command === "model" ? commandArgumentSuggestions(registry, command, query) : []) as never}
+          slashArgumentSuggestions={
+            (async (command, query) =>
+              command === "model"
+                ? commandArgumentSuggestions(registry, command, query)
+                : []) as never
+          }
           onSubmit={submitted}
         />,
       );
@@ -269,20 +272,17 @@ describe("App", () => {
 
   it("keeps help focused, scrollable, and closable without letting InputBox steal keys", async () => {
     const closeDialog = vi.fn();
-    const request = createLocalUiDialogRequest(
-      { kind: "open-panel", panel: "help" },
-      {
-        commands: ["help", "status", "model", "tools", "mcp", "exit"].map((name) => ({
-          name,
-          description: `${name} command`,
-          kind: "local" as const,
-          source: "builtin" as const,
-          category: name === "help" ? ("help" as const) : ("system" as const),
-        })),
-        onClose: closeDialog,
-        maxHelpItems: 3,
-      } as never,
-    );
+    const request = createLocalUiDialogRequest({ kind: "open-panel", panel: "help" }, {
+      commands: ["help", "status", "model", "tools", "mcp", "exit"].map((name) => ({
+        name,
+        description: `${name} command`,
+        kind: "local" as const,
+        source: "builtin" as const,
+        category: name === "help" ? ("help" as const) : ("system" as const),
+      })),
+      onClose: closeDialog,
+      maxHelpItems: 3,
+    } as never);
     const harness = createInteractiveApp(
       <App
         model="glm-5.2"
@@ -317,19 +317,16 @@ describe("App", () => {
 
   it("budgets production help overlay to the visible window on a 24 row terminal", async () => {
     const closeDialog = vi.fn();
-    const request = createLocalUiDialogRequest(
-      { kind: "open-panel", panel: "help" },
-      {
-        commands: Array.from({ length: 18 }, (_, index) => ({
-          name: `cmd-${String(index).padStart(2, "0")}`,
-          description: `command ${index}`,
-          kind: "local" as const,
-          source: "builtin" as const,
-          category: "system" as const,
-        })),
-        onClose: closeDialog,
-      } as never,
-    );
+    const request = createLocalUiDialogRequest({ kind: "open-panel", panel: "help" }, {
+      commands: Array.from({ length: 18 }, (_, index) => ({
+        name: `cmd-${String(index).padStart(2, "0")}`,
+        description: `command ${index}`,
+        kind: "local" as const,
+        source: "builtin" as const,
+        category: "system" as const,
+      })),
+      onClose: closeDialog,
+    } as never);
     const harness = createInteractiveApp(
       <App
         model="glm-5.2"
@@ -347,7 +344,7 @@ describe("App", () => {
     );
 
     try {
-      let output = await harness.write("\u001b[6~");
+      const output = await harness.write("\u001b[6~");
       expect(output).toContain("› /cmd-11");
       expect(output).toContain("Use dialog controls");
       expect(output).not.toContain('Try "fix this" or / for commands');
@@ -369,13 +366,10 @@ describe("App", () => {
       model: "glm-5.2",
       sessionId: "app-help-dynamic-idle",
     });
-    const request = createLocalUiDialogRequest(
-      { kind: "open-panel", panel: "help" },
-      {
-        commands: registry.list({ includeDisabled: true, availabilityState: "idle" }),
-        onClose: closeDialog,
-      } as never,
-    );
+    const request = createLocalUiDialogRequest({ kind: "open-panel", panel: "help" }, {
+      commands: registry.list({ includeDisabled: true, availabilityState: "idle" }),
+      onClose: closeDialog,
+    } as never);
     const entries = Array.from({ length: 20 }, (_, index) => ({
       kind: "assistant" as const,
       content: `message-${index}`,
@@ -425,13 +419,10 @@ describe("App", () => {
       model: "glm-5.2",
       sessionId: "app-help-dynamic-running",
     });
-    const request = createLocalUiDialogRequest(
-      { kind: "open-panel", panel: "help" },
-      {
-        commands: registry.list({ includeDisabled: true, availabilityState: "running" }),
-        onClose: closeDialog,
-      } as never,
-    );
+    const request = createLocalUiDialogRequest({ kind: "open-panel", panel: "help" }, {
+      commands: registry.list({ includeDisabled: true, availabilityState: "running" }),
+      onClose: closeDialog,
+    } as never);
     const harness = createInteractiveApp(
       <App
         model="glm-5.2"
@@ -485,13 +476,10 @@ describe("App", () => {
           ? "运行中不可用：请等待当前任务结束后再执行这个包含中文和 emoji 🚦 的命令。"
           : undefined,
     }));
-    const request = createLocalUiDialogRequest(
-      { kind: "open-panel", panel: "help" },
-      {
-        commands,
-        onClose: closeDialog,
-      } as never,
-    );
+    const request = createLocalUiDialogRequest({ kind: "open-panel", panel: "help" }, {
+      commands,
+      onClose: closeDialog,
+    } as never);
     const app = (dialogRequests = request ? [request] : []) => (
       <App
         model="glm-5.2"
@@ -557,13 +545,10 @@ describe("App", () => {
         disabledReason: `禁用原因 ${index}：运行中不可用，请等待当前任务结束后再执行 🚦。`,
       })),
     ];
-    const request = createLocalUiDialogRequest(
-      { kind: "open-panel", panel: "help" },
-      {
-        commands,
-        onClose: closeDialog,
-      } as never,
-    );
+    const request = createLocalUiDialogRequest({ kind: "open-panel", panel: "help" }, {
+      commands,
+      onClose: closeDialog,
+    } as never);
     const harness = createInteractiveApp(
       <App
         model="glm-5.2"
@@ -600,27 +585,24 @@ describe("App", () => {
 
   it("clips a single oversized help command without covering chrome on a 26x24 terminal", async () => {
     const closeDialog = vi.fn();
-    const request = createLocalUiDialogRequest(
-      { kind: "open-panel", panel: "help" },
-      {
-        commands: [
-          {
-            name: "超长命令🚦",
-            aliases: Array.from({ length: 24 }, (_, index) => `别名-${index}-👨‍👩‍👧‍👦-非常长`),
-            usage: "/超长命令🚦 [中文参数|emoji👨‍👩‍👧‍👦|extra-long-option-name]",
-            description:
-              "这是一个单项就很高的命令说明，包含大量中文宽字符和 emoji 👨‍👩‍👧‍👦，如果不在命令详情内部裁剪就会覆盖标题、footer、status 和输入区域。",
-            kind: "local" as const,
-            source: "builtin" as const,
-            category: "workspace" as const,
-            disabled: true,
-            disabledReason:
-              "禁用原因：当前运行状态不允许执行这个命令。这里故意放入很多中文宽字符、emoji 🚦🚦🚦 和额外说明，验证单项详情内部必须裁剪。",
-          },
-        ],
-        onClose: closeDialog,
-      } as never,
-    );
+    const request = createLocalUiDialogRequest({ kind: "open-panel", panel: "help" }, {
+      commands: [
+        {
+          name: "超长命令🚦",
+          aliases: Array.from({ length: 24 }, (_, index) => `别名-${index}-👨‍👩‍👧‍👦-非常长`),
+          usage: "/超长命令🚦 [中文参数|emoji👨‍👩‍👧‍👦|extra-long-option-name]",
+          description:
+            "这是一个单项就很高的命令说明，包含大量中文宽字符和 emoji 👨‍👩‍👧‍👦，如果不在命令详情内部裁剪就会覆盖标题、footer、status 和输入区域。",
+          kind: "local" as const,
+          source: "builtin" as const,
+          category: "workspace" as const,
+          disabled: true,
+          disabledReason:
+            "禁用原因：当前运行状态不允许执行这个命令。这里故意放入很多中文宽字符、emoji 🚦🚦🚦 和额外说明，验证单项详情内部必须裁剪。",
+        },
+      ],
+      onClose: closeDialog,
+    } as never);
     const app = (dialogRequests = request ? [request] : []) => (
       <App
         model="glm-5.2"
@@ -727,6 +709,18 @@ describe("App", () => {
     expect(resolveAppKeyEvent("l", { ctrl: true }, false)).toBe("redraw");
   });
 
+  it("applies configured global bindings and null unbinds", () => {
+    const keybindings = {
+      Global: {
+        "ctrl+x": "app:exit" as const,
+        "ctrl+d": null,
+      },
+    };
+
+    expect(resolveAppKeyEvent("x", { ctrl: true }, false, keybindings)).toBe("exit");
+    expect(resolveAppKeyEvent("d", { ctrl: true }, false, keybindings)).toBeNull();
+  });
+
   it("renders the bottom transcript window for long conversations", () => {
     const output = renderToString(
       <App
@@ -787,6 +781,18 @@ describe("App", () => {
     expect(resolveToolCardToggleKey("e", {}, true, false)).toBeNull();
     expect(resolveToolCardToggleKey("e", { ctrl: true }, true, false)).toBe("toggle");
     expect(resolveToolCardToggleKey("e", { ctrl: true }, true, true)).toBeNull();
+  });
+
+  it("applies configured transcript bindings", () => {
+    const keybindings = {
+      Transcript: {
+        "ctrl+t": "transcript:toggleShowAll" as const,
+        "ctrl+e": null,
+      },
+    };
+
+    expect(resolveToolCardToggleKey("t", { ctrl: true }, true, false, keybindings)).toBe("toggle");
+    expect(resolveToolCardToggleKey("e", { ctrl: true }, true, false, keybindings)).toBeNull();
   });
 
   it("Ctrl+E expands the focused ToolCard without also moving the input cursor", async () => {
@@ -996,6 +1002,8 @@ function createInteractiveApp(
   };
 }
 
+const ANSI_PATTERN = new RegExp(`${String.fromCharCode(27)}\\[[0-?]*[ -/]*[@-~]`, "gu");
+
 function stripAnsi(value: string): string {
-  return value.replace(/\u001b\[[0-?]*[ -/]*[@-~]/gu, "");
+  return value.replace(ANSI_PATTERN, "");
 }

@@ -20,8 +20,6 @@ import type { LearnedSkill } from "../memory/skill-schema.js";
 // (engine/loop.ts 反向 import composer)。单例实例由 host 注入,本类不 new。
 import type { GoalManager } from "../engine/goal-manager.js";
 
-// 动态导入：SkillRegistry 和 MemoryNudger 尚未实现时使用 mock
-// 真实实现完成后，替换为实际类
 interface ISkillRegistry {
   init(): Promise<void>;
   getTopSkills(limit: number): LearnedSkill[];
@@ -32,17 +30,6 @@ interface IMemoryNudger {
   generate(sessionId: string, turnCount: number): Promise<string | null>;
 }
 
-// 临时 mock（真实实现在子代理2和3完成后替换）
-class SkillRegistryStub implements ISkillRegistry {
-  async init(): Promise<void> {}
-  getTopSkills(): LearnedSkill[] {
-    return [];
-  }
-  search(): LearnedSkill[] {
-    return [];
-  }
-}
-
 /** 负责根据工作区环境动态生成 System Prompt */
 export class PromptComposer {
   private readonly workDir: string;
@@ -50,7 +37,7 @@ export class PromptComposer {
   private readonly planMode: boolean;
   private readonly planStore: PlanStore;
   private readonly todoStore: TodoStore;
-  private readonly skillRegistry: ISkillRegistry;
+  private readonly skillRegistry?: ISkillRegistry;
   private readonly nudger?: IMemoryNudger;
   private readonly sessionId?: string;
   /** GoalManager 单例(可选):由 host 注入,注入后把 active goal 渲染进 prompt */
@@ -86,9 +73,9 @@ export class PromptComposer {
     this.todoStore = options?.todoStore ?? new TodoStore(workDir);
     this.sessionId = options?.sessionId;
 
-    // 初始化技能注册表（支持注入，默认使用 stub）
-    this.skillRegistry = options?.skillRegistry ?? new SkillRegistryStub();
-    void this.skillRegistry.init(); // 异步初始化，不阻塞构造
+    // Registry lifecycle belongs to the host. The composer never starts hidden
+    // asynchronous initialization from its constructor.
+    this.skillRegistry = options?.skillRegistry;
 
     // 初始化 Nudger（可选）
     this.nudger = options?.memoryNudger;
@@ -199,6 +186,7 @@ ${agentsContent}
    * 构建技能记忆上下文（格式化为 Markdown）
    */
   private async buildSkillContext(): Promise<string | null> {
+    if (!this.skillRegistry) return null;
     try {
       const topSkills = this.skillRegistry.getTopSkills(5);
       if (topSkills.length === 0) {
@@ -216,21 +204,24 @@ ${agentsContent}
         parts.push(`- **触发条件**: ${skill.trigger}`);
         parts.push(`- **执行步骤**:`);
         // 缩进 instructions
-        const indented = skill.instructions.split("\n").map((line) => `  ${line}`).join("\n");
+        const indented = skill.instructions
+          .split("\n")
+          .map((line) => `  ${line}`)
+          .join("\n");
         parts.push(indented);
 
-      // 展示第一个已知问题（如果有）
-      if (skill.knownFailures.length > 0) {
-        const firstFailure = skill.knownFailures[0];
-        if (firstFailure) {
-          parts.push(
-            `- **已知问题** (出现 ${firstFailure.occurrences} 次): ${firstFailure.errorPattern.slice(0, 100)}`,
-          );
-          if (firstFailure.solution) {
-            parts.push(`  解决方案: ${firstFailure.solution}`);
+        // 展示第一个已知问题（如果有）
+        if (skill.knownFailures.length > 0) {
+          const firstFailure = skill.knownFailures[0];
+          if (firstFailure) {
+            parts.push(
+              `- **已知问题** (出现 ${firstFailure.occurrences} 次): ${firstFailure.errorPattern.slice(0, 100)}`,
+            );
+            if (firstFailure.solution) {
+              parts.push(`  解决方案: ${firstFailure.solution}`);
+            }
           }
         }
-      }
 
         parts.push(`- **统计**: 成功 ${successCount} 次，失败 ${failCount} 次`);
       }
@@ -245,7 +236,7 @@ ${agentsContent}
   }
 
   /** 获取 SkillRegistry 实例（用于外部记录技能执行） */
-  getSkillRegistry(): ISkillRegistry {
+  getSkillRegistry(): ISkillRegistry | undefined {
     return this.skillRegistry;
   }
 }
