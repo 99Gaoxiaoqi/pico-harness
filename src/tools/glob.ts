@@ -16,7 +16,7 @@ import type { Dirent } from "node:fs";
 import type { BaseTool } from "./registry.js";
 import type { ToolDefinition } from "../schema/message.js";
 import { ToolAccesses } from "./tool-access.js";
-import { safeResolve } from "./registry-impl.js";
+import { WorkspaceRoots } from "./workspace-roots.js";
 
 // 递归遍历时跳过的目录:VCS、依赖、构建产物、引擎自有目录。
 // 与 skill.ts 的 EXCLUDED_SKILL_DIRS 对齐,避免误入 node_modules 等巨型子树。
@@ -50,8 +50,14 @@ const MAX_RESULTS = 100;
  */
 export class GlobTool implements BaseTool {
   readonly readOnly = true;
+  private readonly roots: WorkspaceRoots;
 
-  constructor(private readonly workDir: string) {}
+  constructor(workDirOrRoots: string | WorkspaceRoots) {
+    this.roots =
+      typeof workDirOrRoots === "string"
+        ? WorkspaceRoots.createSync(workDirOrRoots)
+        : workDirOrRoots;
+  }
 
   name(): string {
     return "glob";
@@ -60,7 +66,7 @@ export class GlobTool implements BaseTool {
   definition(): ToolDefinition {
     return {
       name: "glob",
-      description: "按 glob 模式匹配文件路径,返回相对路径列表(如 **/*.ts)。",
+      description: "在已授权工作区内按 glob 模式匹配文件路径,返回相对路径列表(如 **/*.ts)。",
       inputSchema: {
         type: "object",
         properties: {
@@ -99,8 +105,8 @@ export class GlobTool implements BaseTool {
       throw new Error("参数解析失败: pattern 必须是非空字符串");
     }
 
-    // 2. 路径穿越防护:搜索根锚定在 workDir 之内
-    const root = safeResolve(this.workDir, basePath);
+    // 2. 路径穿越防护:搜索根必须位于共享工作区根集合内
+    const root = await this.roots.assertAllowed(basePath);
 
     // 3. glob → RegExp(花括号展开为多个分支,合并为单一正则)
     const matcher = globToRegExp(pattern);

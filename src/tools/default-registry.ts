@@ -23,8 +23,11 @@ import { FetchURLTool, WebSearchTool } from "./web.js";
 import { ToolDisclosure } from "./tool-disclosure.js";
 import { SearchToolsTool } from "./search-tools.js";
 import { getTier } from "./tool-tiers.js";
+import { WorkspaceRoots, buildWorkspaceBoundaryMiddleware } from "./workspace-roots.js";
 
 export interface DefaultToolRegistryOptions extends ToolRegistryOptions {
+  /** Read/Write/Edit/Glob/Grep 与请求边界共享的工作区根集合。 */
+  workspaceRoots?: WorkspaceRoots;
   backgroundManager?: BackgroundManager;
   /**
    * Goal Manager 单例(ROADMAP 3.5)。三个 Goal 工具共享此实例,
@@ -59,19 +62,23 @@ export function buildDefaultToolRegistry(
     goalManager,
     todoStore,
     toolDisclosure,
+    workspaceRoots,
     ...registryOptions
   } = options;
+  const roots = workspaceRoots ?? WorkspaceRoots.createSync(workDir);
   const registry = new ToolRegistry(registryOptions);
-  registry.register(new ReadFileTool(workDir));
-  registry.register(new WriteFileTool(workDir));
-  registry.register(new EditFileTool(workDir));
+  // 必须先于 host 后续挂载的审批中间件,避免一次审批扩大文件系统边界。
+  registry.useRequest(buildWorkspaceBoundaryMiddleware(roots));
+  registry.register(new ReadFileTool(roots));
+  registry.register(new WriteFileTool(roots));
+  registry.register(new EditFileTool(roots));
   registry.register(new BashTool(workDir, backgroundManager));
   registry.register(new TaskListTool(backgroundManager));
   registry.register(new TaskOutputTool(backgroundManager));
   registry.register(new TaskStopTool(backgroundManager));
   registry.register(new SkillViewTool(new SkillLoader(workDir)));
-  registry.register(new GlobTool(workDir));
-  registry.register(new GrepTool(workDir));
+  registry.register(new GlobTool(roots));
+  registry.register(new GrepTool(roots));
   // TodoTool 持有 host 注入的 TodoStore 单例,与 PromptComposer 共享同一实例。
   // 未注入时降级为内部 new,保持向后兼容(单实例场景不受跨实例 bug 影响)。
   registry.register(new TodoTool(todoStore ?? new TodoStore(workDir)));
