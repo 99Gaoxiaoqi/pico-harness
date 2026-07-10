@@ -6,6 +6,7 @@ import type {
   PermissionRule,
   PermissionState,
 } from "../approval/permission-state.js";
+import { resolveKeybinding } from "./keybindings/resolver.js";
 
 const DEFAULT_DIFF_PREVIEW_LINES = 22;
 
@@ -109,10 +110,16 @@ export function resolveApprovalPanelKey(
   input: string,
   key: { return?: boolean; escape?: boolean; ctrl?: boolean; meta?: boolean },
 ): ApprovalPanelKeyAction | null {
+  const resolved = resolveKeybinding({ input, key }, "Confirmation");
+  if (resolved?.kind === "action" && resolved.action === "confirmation:accept") {
+    return "approve";
+  }
+  if (resolved?.kind === "action" && resolved.action === "confirmation:cancel") {
+    return "reject";
+  }
+
   const normalized = input.toLowerCase();
-  if (key.return || normalized === "y") return "approve";
-  if (normalized === "a") return "approve-session";
-  if (key.escape || normalized === "n") return "reject";
+  if (normalized === "a" && !key.ctrl && !key.meta) return "approve-session";
   if (normalized === "e" && !key.ctrl && !key.meta) return "toggle-diff";
   return null;
 }

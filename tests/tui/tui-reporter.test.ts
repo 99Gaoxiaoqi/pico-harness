@@ -58,6 +58,37 @@ describe("TuiReporter", () => {
     expect(entries[0]).toMatchObject({ kind: "tool", name: "write_file", status: "success" });
   });
 
+  it("工具状态更新每次都替换 entry 对象引用", () => {
+    const { reporter, last } = harness();
+    const args = '{"path":"AIHOT.md","content":"# daily"}';
+    reporter.onToolCall("write_file", args);
+    const running = last()![0];
+
+    reporter.onToolAwaitingApproval("write_file", args);
+    const approval = last()![0];
+    expect(approval).not.toBe(running);
+    expect(approval).toMatchObject({ kind: "tool", status: "approval" });
+
+    reporter.onToolResult("write_file", "写入成功", false);
+    const done = last()![0];
+    expect(done).not.toBe(approval);
+    expect(done).toMatchObject({ kind: "tool", status: "success" });
+  });
+
+  it.each([
+    ["error", "command not found"],
+    ["denied", "执行被系统拦截。原因: dangerous command"],
+  ] as const)("running -> %s 也会替换 entry 对象", (status, result) => {
+    const { reporter, last } = harness();
+    reporter.onToolCall("bash", '{"command":"bad"}');
+    const running = last()![0];
+
+    reporter.onToolResult("bash", result, true);
+
+    expect(last()![0]).not.toBe(running);
+    expect(last()![0]).toMatchObject({ kind: "tool", status });
+  });
+
   it("onToolResult 错误时 status=error", () => {
     const { reporter, last } = harness();
     reporter.onToolCall("bash", '{"command":"bad"}');

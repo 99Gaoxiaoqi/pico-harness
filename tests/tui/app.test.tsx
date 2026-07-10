@@ -5,6 +5,7 @@ import {
   App,
   nextTranscriptScroll,
   resolveAppKeyEvent,
+  resolveToolCardToggleKey,
   resolveTranscriptScrollKey,
 } from "../../src/tui/app.js";
 
@@ -96,7 +97,7 @@ describe("App", () => {
     expect(countOccurrences(output, 'Try "fix this" or / for commands')).toBe(0);
   });
 
-  it("renders approval as an inline overlay without disabling the bottom input", () => {
+  it("renders approval as an inline modal and disables the bottom input", () => {
     const output = renderToString(
       <App
         model="glm-5.2"
@@ -111,7 +112,7 @@ describe("App", () => {
         dialogRequests={[
           {
             id: "approval:pending",
-            layer: "overlay",
+            layer: "modal",
             priority: 80,
             content: <Text>Approval required: write_file</Text>,
           },
@@ -121,8 +122,9 @@ describe("App", () => {
     );
 
     expect(output).toContain("Approval required: write_file");
-    expect(output).not.toContain("Use dialog controls");
-    expect(countOccurrences(output, 'Try "fix this" or / for commands')).toBe(1);
+    expect(output).toContain("Use dialog controls");
+    expect(countOccurrences(output, 'Try "fix this" or / for commands')).toBe(0);
+    expect(output).not.toContain("┌");
   });
 
   it("passes provider, permission mode, and thinking effort into the runtime status", () => {
@@ -206,6 +208,13 @@ describe("App", () => {
     expect(resolveTranscriptScrollKey({ upArrow: true }, true)).toBe("lineUp");
     expect(resolveTranscriptScrollKey({ downArrow: true }, true)).toBe("lineDown");
     expect(resolveTranscriptScrollKey({ upArrow: true }, false)).toBeNull();
+  });
+
+  it("modal focus blocks transcript and ToolCard shortcuts", () => {
+    expect(resolveTranscriptScrollKey({ pageUp: true }, true, true)).toBeNull();
+    expect(resolveToolCardToggleKey("e", {}, true, false)).toBeNull();
+    expect(resolveToolCardToggleKey("e", { ctrl: true }, true, false)).toBe("toggle");
+    expect(resolveToolCardToggleKey("e", { ctrl: true }, true, true)).toBeNull();
   });
 });
 

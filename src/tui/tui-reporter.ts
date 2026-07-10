@@ -113,8 +113,7 @@ export class TuiReporter implements Reporter {
     for (let i = this.entries.length - 1; i >= 0; i--) {
       const e = this.entries[i]!;
       if (e.kind === "tool" && e.name === toolName && e.args === args && isPendingToolStatus(e.status)) {
-        e.status = "approval";
-        e.summary = "等待审批";
+        this.entries[i] = { ...e, status: "approval", summary: "等待审批" };
         break;
       }
     }
@@ -127,8 +126,11 @@ export class TuiReporter implements Reporter {
     for (let i = this.entries.length - 1; i >= 0; i--) {
       const e = this.entries[i]!;
       if (e.kind === "tool" && e.name === toolName && isPendingToolStatus(e.status)) {
-        e.status = resolveToolStatus(toolName, result, isError);
-        e.summary = summarizeResult(toolName, e.args, result, isError);
+        this.entries[i] = {
+          ...e,
+          status: resolveToolStatus(toolName, result, isError),
+          summary: summarizeResult(toolName, e.args, result, isError),
+        };
         break;
       }
     }
