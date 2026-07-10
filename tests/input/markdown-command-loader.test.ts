@@ -313,6 +313,36 @@ describe("markdown command loader", () => {
     );
   });
 
+  it("renders skill projections as explicit activations with zero-based arguments", async () => {
+    await writeClaudeSkill(
+      "review",
+      "---\nname: review\ndescription: review code\n---\n\nReview $0 then $ARGUMENTS[1]",
+    );
+    const commands = await loadMarkdownCommands({
+      includeSkillCommands: true,
+      userCommandsDir,
+      workDir,
+    });
+    const command = commands[0];
+
+    expect(command).toBeDefined();
+    expect(renderMarkdownCommandPrompt(command!, 'src/a.ts "main branch"')).toBe(
+      [
+        'User explicitly activated skill "review". Follow the loaded skill instructions and use them to complete the request.',
+        "",
+        `<pico-skill-loaded name="review" trigger="user-slash" source="${join(workDir, ".claude", "skills", "review", "SKILL.md")}">`,
+        "Review src/a.ts then main branch",
+        "</pico-skill-loaded>",
+      ].join("\n"),
+    );
+  });
+
+  it("keeps ordinary markdown commands on the existing renderer", () => {
+    const command = parseMarkdownCommand("Follow this workflow", "review", "project");
+
+    expect(renderMarkdownCommandPrompt(command, "fix login")).toBe("Follow this workflow");
+  });
+
   async function writeCommand(
     root: string,
     name: string,

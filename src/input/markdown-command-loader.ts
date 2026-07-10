@@ -4,6 +4,7 @@ import { basename, dirname, join, relative, sep } from "node:path";
 import * as yaml from "js-yaml";
 import type { SkillLoader } from "../context/skill.js";
 import { parseCommandArgs } from "./slash-parser.js";
+import { renderSkillActivation } from "./skill-activation.js";
 
 export type MarkdownCommandSource = "project" | "user" | "skill" | "builtin";
 
@@ -99,9 +100,20 @@ export function parseMarkdownCommand(
 }
 
 export function renderMarkdownCommandPrompt(
-  command: Pick<MarkdownPromptCommand, "prompt">,
+  command: Pick<MarkdownPromptCommand, "prompt"> &
+    Partial<Pick<MarkdownPromptCommand, "name" | "source" | "sourcePath">>,
   args: string,
 ): string {
+  if (command.source === "skill" && command.name) {
+    return renderSkillActivation({
+      name: command.name,
+      args,
+      body: command.prompt,
+      sourcePath: command.sourcePath,
+      trigger: "user-slash",
+    }).prompt;
+  }
+
   const trimmedArgs = args.trim();
   const argv = parseCommandArgs(trimmedArgs);
   return command.prompt
