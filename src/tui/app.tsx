@@ -271,7 +271,7 @@ export function App({
   });
 
   const phase = approvalNotice ? "approval" : queuedCount > 0 ? "queued" : running ? "running" : "idle";
-  const runtimeTaskSummary = queuedCount > 0 ? `${queuedCount} queued` : undefined;
+  const runtimeTaskSummary = queuedCount > 0 ? `${queuedCount} queued` : taskSummary;
   const status = (
     <StatusBar
       phase={phase}
