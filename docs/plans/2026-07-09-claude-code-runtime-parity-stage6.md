@@ -1,5 +1,7 @@
 # Claude Code Runtime Parity 实现计划
 
+> **状态（2026-07-10）：** 本计划对应能力已合并并在 `ROADMAP.md` 标记完成；下方未勾选项保留为历史执行清单，不再作为当前进度来源。
+
 > **面向 AI 代理的工作者：** 必需子技能：使用 superpowers:subagent-driven-development（推荐）或 superpowers:executing-plans 逐任务实现此计划。步骤使用复选框（`- [ ]`）语法来跟踪进度。
 
 **目标：** 将 Pico 从“Claude Code 风格 TUI”推进到“Claude Code 风格运行时”，优先补齐任务模型、按键系统、长会话性能、权限仲裁、文件索引、插件生命周期和上下文恢复能力。

@@ -1,5 +1,7 @@
 # Pico TUI 产品化第一阶段实现计划
 
+> **状态（2026-07-10）：** 本计划对应能力已合并并在 `ROADMAP.md` 标记完成；下方未勾选项保留为历史执行清单，不再作为当前进度来源。
+
 > **面向 AI 代理的工作者：** 必需子技能：使用 superpowers:subagent-driven-development（推荐）或 superpowers:executing-plans 逐任务实现此计划。步骤使用复选框（`- [ ]`）语法来跟踪进度。
 
 **目标：** 修复 Pico TUI 的运行时真实性、焦点和滚动问题，并交付 Claude/Kimi 风格的基础产品外壳与可信命令入口。
