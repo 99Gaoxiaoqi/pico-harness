@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -31,11 +31,24 @@ describe("stage 13 task and MCP host integration", () => {
     await git(["config", "user.email", "pico@example.test"], repo);
     await writeFile(join(repo, ".gitignore"), ".claw/\n.worktrees/\n", "utf8");
     await writeFile(join(repo, "README.md"), "stage 13\n", "utf8");
+    const hostileSentinel = join(root, "host-git-executed");
+    const hostileProgram = join(repo, ".githooks", "pre-commit");
+    await mkdir(join(repo, ".githooks"), { recursive: true });
+    await writeFile(
+      hostileProgram,
+      `#!/bin/sh\nprintf hostile > ${shellQuote(hostileSentinel)}\nexit 0\n`,
+      "utf8",
+    );
+    await chmod(hostileProgram, 0o755);
     await git(["add", "."], repo);
     await git(["commit", "-m", "initial"], repo);
     await git(["init", "--bare", remote], root);
     await git(["remote", "add", "origin", remote], repo);
     await git(["push", "-u", "origin", "main"], repo);
+    await git(["config", "core.hooksPath", ".githooks"], repo);
+    await git(["config", "core.fsmonitor", ".githooks/pre-commit"], repo);
+    await git(["config", "commit.gpgSign", "true"], repo);
+    await git(["config", "gpg.program", ".githooks/pre-commit"], repo);
 
     const taskRuntime = await TaskHostRuntime.create({ workDir: repo });
     const gate = deferred();
@@ -54,12 +67,14 @@ describe("stage 13 task and MCP host integration", () => {
 
     const completed = await taskRuntime.supervisor.wait(started.taskId);
     expect(completed).toMatchObject({ status: "completed", dirty: false });
+    await expect(access(hostileSentinel)).rejects.toThrow();
     expect(taskRuntime.tail(started.taskId)).toContain("include host feedback");
     await taskRuntime.merge(started.taskId);
     await taskRuntime.mergeQueue.waitForIdle();
     expect(taskRuntime.mergeQueue.get(started.taskId)?.status).toBe("merged");
     await taskRuntime.cleanupMerged(started.taskId);
     expect(await readFile(join(repo, "worker.txt"), "utf8")).toBe("include host feedback");
+    await expect(access(hostileSentinel)).rejects.toThrow();
 
     const runnerEntered = deferred();
     const stoppable = taskRuntime.start(
@@ -77,6 +92,21 @@ describe("stage 13 task and MCP host integration", () => {
     const stopPromise = taskRuntime.stop(stoppable.taskId);
     expect(taskRuntime.supervisor.get(stoppable.taskId)?.status).toBe("stopping");
     await expect(stopPromise).resolves.toMatchObject({ status: "stopped" });
+
+    await git(["config", "filter.evil.clean", hostileProgram], repo);
+    let unsafeRunnerEntered = false;
+    const unsafeFilterTask = taskRuntime.start(
+      { description: "reject unsafe git filter", branchSlug: "unsafe-filter" },
+      async () => {
+        unsafeRunnerEntered = true;
+      },
+    );
+    await expect(taskRuntime.supervisor.wait(unsafeFilterTask.taskId)).resolves.toMatchObject({
+      status: "failed",
+      error: expect.stringContaining("外部 Git filter/merge driver"),
+    });
+    expect(unsafeRunnerEntered).toBe(false);
+    await expect(access(hostileSentinel)).rejects.toThrow();
 
     const { url, close } = await startMcpServer();
     cleanups.push(close);
@@ -160,6 +190,10 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
     resolve = done;
   });
   return { promise, resolve };
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'\\''`)}'`;
 }
 
 async function startMcpServer(): Promise<{ url: string; close: () => Promise<void> }> {
