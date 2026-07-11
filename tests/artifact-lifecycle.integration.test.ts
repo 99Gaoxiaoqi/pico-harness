@@ -151,5 +151,20 @@ describe("Session-scoped artifact lifecycle", () => {
     await expect(pathExists(oldUnpinned.path)).resolves.toBe(false);
     await expect(pathExists(oldPinned.path)).resolves.toBe(true);
     await expect(pathExists(newUnpinned.path)).resolves.toBe(true);
+
+    // pinned 是优先保留而非无限保留；当仅 pinned 就超过硬 quota 时删最旧项。
+    await store.deleteSessionArtifacts("session-C");
+    const newerPinned = await store.write({
+      id: "newer-pinned",
+      sessionId: "session-D",
+      toolName: "bash",
+      args: { command: "cat newer.log" },
+      output: "cccccccc",
+      pinned: true,
+    });
+    const pinnedSweep = await store.cleanup();
+    expect(pinnedSweep.deleted).toContain("old-pinned");
+    await expect(pathExists(oldPinned.path)).resolves.toBe(false);
+    await expect(pathExists(newerPinned.path)).resolves.toBe(true);
   });
 });
