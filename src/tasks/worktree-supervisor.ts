@@ -7,6 +7,8 @@ import { TaskRegistry, type TaskSnapshot, isTerminalTaskStatus } from "./task-re
 import {
   buildSafeGitEnvironment,
   createDisabledHooksPath,
+  disabledGitFilterArgs,
+  GIT_FILTER_DRIVER_CONFIG_PATTERN,
   hardenGitArgs,
   UNSAFE_GIT_DRIVER_CONFIG_PATTERN,
 } from "./git-safety.js";
@@ -303,7 +305,10 @@ export class WorktreeSupervisor {
         await realpath(record.worktreePath),
         "physical worktreePath",
       );
-      const status = await this.git(["status", "--porcelain"], { cwd: record.worktreePath });
+      const filterOverrides = await this.buildDisabledFilterOverrides(record.worktreePath);
+      const status = await this.git([...filterOverrides, "status", "--porcelain"], {
+        cwd: record.worktreePath,
+      });
       if (status.stdout.trim()) {
         throw new Error(`worktree 存在未提交修改，拒绝清理: ${record.worktreePath}`);
       }
@@ -446,11 +451,18 @@ export class WorktreeSupervisor {
     if (!/^[0-9a-fA-F]{40,64}$/.test(commit)) {
       throw new Error(`无法解析基准提交: ${record.baseRef}`);
     }
+    const filterOverrides = await this.buildDisabledFilterOverrides(
+      this.repoRoot,
+      record.controller.signal,
+    );
     await this.assertNoActiveFilterAttributes(this.repoRoot, record.controller.signal, commit);
-    await this.git(["worktree", "add", "-b", record.branch, record.worktreePath, commit], {
-      cwd: this.repoRoot,
-      signal: record.controller.signal,
-    });
+    await this.git(
+      [...filterOverrides, "worktree", "add", "-b", record.branch, record.worktreePath, commit],
+      {
+        cwd: this.repoRoot,
+        signal: record.controller.signal,
+      },
+    );
   }
 
   private async assertRepositoryRoot(): Promise<void> {
@@ -480,9 +492,10 @@ export class WorktreeSupervisor {
   ): Promise<void> {
     try {
       if (!(await pathExists(record.worktreePath))) return;
+      const filterOverrides = await this.buildDisabledFilterOverrides(record.worktreePath);
       const [commit, status, branch] = await Promise.all([
         this.git(["rev-parse", "HEAD"], { cwd: record.worktreePath }),
-        this.git(["status", "--porcelain"], { cwd: record.worktreePath }),
+        this.git([...filterOverrides, "status", "--porcelain"], { cwd: record.worktreePath }),
         this.git(["branch", "--show-current"], { cwd: record.worktreePath }),
       ]);
       const actualBranch = branch.stdout.trim();
@@ -502,7 +515,11 @@ export class WorktreeSupervisor {
 
   /** 由宿主在沙箱外把 worker 的已隔离变更打包成原子提交。 */
   private async commitPendingChanges(record: WorktreeTaskRecord): Promise<void> {
-    const status = await this.git(["status", "--porcelain"], {
+    const filterOverrides = await this.buildDisabledFilterOverrides(
+      record.worktreePath,
+      record.controller.signal,
+    );
+    const status = await this.git([...filterOverrides, "status", "--porcelain"], {
       cwd: record.worktreePath,
       signal: record.controller.signal,
     });
@@ -510,10 +527,6 @@ export class WorktreeSupervisor {
 
     await this.assertNoExternalGitMergeDrivers(record.worktreePath, record.controller.signal);
 
-    const filterOverrides = await this.buildDisabledFilterOverrides(
-      record.worktreePath,
-      record.controller.signal,
-    );
     await this.git([...filterOverrides, "add", "--all"], {
       cwd: record.worktreePath,
       signal: record.controller.signal,
@@ -527,6 +540,7 @@ export class WorktreeSupervisor {
     record.controller.signal.throwIfAborted();
     await this.git(
       [
+        ...filterOverrides,
         "-c",
         "user.name=Pico Worker",
         "-c",
@@ -614,34 +628,11 @@ export class WorktreeSupervisor {
         "--null",
         "--name-only",
         "--get-regexp",
-        "^filter\\..*\\.(clean|smudge|process|required)$",
+        GIT_FILTER_DRIVER_CONFIG_PATTERN,
       ],
       { cwd, ...(signal ? { signal } : {}), allowExitCodes: [1] },
     );
-    if (result.stdout.includes("\ufffd")) {
-      throw new Error("Git filter 配置名包含无法安全解码的字节，拒绝自动提交。");
-    }
-
-    const driverNames = new Set<string>();
-    for (const key of result.stdout.split("\0").filter(Boolean)) {
-      const match = /^filter\.(.+)\.(?:clean|smudge|process|required)$/u.exec(key);
-      const driverName = match?.[1];
-      if (!driverName || /[\0\r\n]/u.test(driverName)) {
-        throw new Error(`Git filter 配置名无法安全解析: ${key}`);
-      }
-      driverNames.add(driverName);
-    }
-
-    return [...driverNames].flatMap((driverName) => [
-      "-c",
-      `filter.${driverName}.clean=`,
-      "-c",
-      `filter.${driverName}.smudge=`,
-      "-c",
-      `filter.${driverName}.process=`,
-      "-c",
-      `filter.${driverName}.required=false`,
-    ]);
+    return disabledGitFilterArgs(result.stdout);
   }
 
   private appendOutput(record: WorktreeTaskRecord, chunk: string): void {

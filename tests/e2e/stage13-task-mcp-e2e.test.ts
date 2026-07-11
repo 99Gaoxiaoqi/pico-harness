@@ -96,6 +96,7 @@ describe("stage 13 task and MCP host integration", () => {
     const stopPromise = taskRuntime.stop(stoppable.taskId);
     expect(taskRuntime.supervisor.get(stoppable.taskId)?.status).toBe("stopping");
     await expect(stopPromise).resolves.toMatchObject({ status: "stopped" });
+    await expect(access(hostileSentinel)).rejects.toThrow();
 
     await git(["config", "branch.main.mergeOptions", "--strategy=ours"], repo);
     const unsafeMergeOptionsTask = taskRuntime.start(
@@ -111,6 +112,7 @@ describe("stage 13 task and MCP host integration", () => {
     await expect(taskRuntime.supervisor.wait(unsafeMergeOptionsTask.taskId)).resolves.toMatchObject(
       { status: "completed" },
     );
+    await expect(access(hostileSentinel)).rejects.toThrow();
     await taskRuntime.merge(unsafeMergeOptionsTask.taskId);
     await taskRuntime.mergeQueue.waitForIdle();
     expect(taskRuntime.mergeQueue.get(unsafeMergeOptionsTask.taskId)).toMatchObject({
@@ -118,6 +120,7 @@ describe("stage 13 task and MCP host integration", () => {
       error: expect.stringContaining("mergeOptions"),
     });
     await expect(access(join(repo, "merge-options.txt"))).rejects.toThrow();
+    await expect(access(hostileSentinel)).rejects.toThrow();
     await git(["config", "--unset-all", "branch.main.mergeOptions"], repo);
 
     await git(["config", "filter.evil.clean", hostileProgram], repo);
@@ -139,6 +142,27 @@ describe("stage 13 task and MCP host integration", () => {
       error: expect.stringContaining("Git filter=evil"),
     });
     expect(unsafeRunnerEntered).toBe(true);
+    await expect(access(hostileSentinel)).rejects.toThrow();
+
+    await git(["config", "filter.evil=x.clean", hostileProgram], repo);
+    let unsafeFilterNameRunnerEntered = false;
+    const unsafeFilterNameTask = taskRuntime.start(
+      { description: "reject unsafe git filter name", branchSlug: "unsafe-filter-name" },
+      async (context) => {
+        unsafeFilterNameRunnerEntered = true;
+        await writeFile(
+          join(context.worktreePath, ".gitattributes"),
+          "*.dat filter=evil=x\n",
+          "utf8",
+        );
+        await writeFile(join(context.worktreePath, "payload.dat"), "must not filter\n", "utf8");
+      },
+    );
+    await expect(taskRuntime.supervisor.wait(unsafeFilterNameTask.taskId)).resolves.toMatchObject({
+      status: "failed",
+      error: expect.stringContaining("无法安全重建"),
+    });
+    expect(unsafeFilterNameRunnerEntered).toBe(false);
     await expect(access(hostileSentinel)).rejects.toThrow();
 
     const { url, close } = await startMcpServer();
