@@ -30,6 +30,7 @@ import { PromptComposer } from "../context/composer.js";
 import { SkillLoader } from "../context/skill.js";
 import { RecoveryManager } from "../context/recovery.js";
 import { TodoStore } from "../context/todo-store.js";
+import { createFirstTurnDelegationPolicy } from "../input/delegation-intent-policy.js";
 import { ToolDisclosure } from "../tools/tool-disclosure.js";
 import { SilentReporter, type Reporter } from "./reporter.js";
 import { SteerQueue } from "./steer-queue.js";
@@ -74,6 +75,9 @@ const EXPLORE_SYNTHESIS_RETRY_PROMPT =
 const MAX_EXPLORE_SYNTHESIS_TOOL_RETRIES = 2;
 const EXPLORE_SYNTHESIS_FAILED_MESSAGE =
   "子代理已完成探索，但主模型连续违反纯文本总结协议，本次未能生成可靠的统一总结。";
+const MAX_REQUIRED_FIRST_DELEGATION_ATTEMPTS = 2;
+const REQUIRED_FIRST_DELEGATION_FAILED_MESSAGE =
+  "模型未能按用户的明确要求启动 required 子代理，已停止主 Agent 自行探索。";
 
 function isBackgroundBashCall(call: ToolCall): boolean {
   if (call.name !== "bash") return false;
@@ -159,6 +163,26 @@ function buildSynthesisToolRejection(toolCall: ToolCall): Message {
     toolCallId: toolCall.id,
     providerData: { [PICO_TOOL_RESULT_ERROR_KEY]: true },
   };
+}
+
+function buildRequiredFirstToolRejection(toolCall: ToolCall): Message {
+  return {
+    role: "user",
+    content: "工具执行已拒绝：用户明确要求首先委派子代理，本轮只允许 required delegate_task。",
+    toolCallId: toolCall.id,
+    providerData: { [PICO_TOOL_RESULT_ERROR_KEY]: true },
+  };
+}
+
+function latestVisibleUserInput(messages: readonly Message[]): string {
+  return (
+    messages.findLast(
+      (message) =>
+        message.role === "user" &&
+        message.toolCallId === undefined &&
+        message.providerData?.["picoHiddenFromTranscript"] !== true,
+    )?.content ?? ""
+  );
 }
 
 function buildExclusiveDelegationRejection(
@@ -711,6 +735,12 @@ export class AgentEngine implements AgentRunner {
     const systemPrompt = await this.buildSystemPrompt();
     signal?.throwIfAborted();
 
+    const firstTurnDelegationPolicy = createFirstTurnDelegationPolicy(
+      latestVisibleUserInput(session.getHistory()),
+    );
+    let requiredFirstDelegationPending =
+      firstTurnDelegationPolicy.kind === "required-first-delegation";
+    let requiredFirstDelegationAttempts = 0;
     let beforeLen = session.length;
     let turnCount = 0;
     let exhaustedReason: string | undefined;
@@ -794,9 +824,17 @@ export class AgentEngine implements AgentRunner {
           const availableTools = this.toolDisclosure
             ? [...this.toolDisclosure.pickForLLM(allTools), ...this.searchToolSchema(allTools)]
             : allTools;
+          const requiredFirstDelegationActive =
+            requiredFirstDelegationPending &&
+            firstTurnDelegationPolicy.kind === "required-first-delegation" &&
+            allTools.some((tool) => tool.name === firstTurnDelegationPolicy.toolName);
           // explore-only required 委派收口后不再给主模型任何工具，
           // 从能力边界上阻断它重复阅读项目。worker/mixed 批次不受影响。
-          const providerTools = exploreSynthesisOnly ? [] : availableTools;
+          const providerTools = exploreSynthesisOnly
+            ? []
+            : requiredFirstDelegationActive
+              ? allTools.filter((tool) => tool.name === firstTurnDelegationPolicy.toolName)
+              : availableTools;
 
           // ====================================================================
           // 1. 上下文组装:System Prompt + 截取最近 N 条作为 WorkingMemory
@@ -869,6 +907,19 @@ export class AgentEngine implements AgentRunner {
               providerData: { picoKind: "steer", picoHiddenFromTranscript: true },
             });
           }
+          if (
+            requiredFirstDelegationActive &&
+            firstTurnDelegationPolicy.kind === "required-first-delegation"
+          ) {
+            compactedContext.push({
+              role: "user",
+              content: firstTurnDelegationPolicy.hiddenConstraint,
+              providerData: {
+                picoKind: "required_first_delegation",
+                picoHiddenFromTranscript: true,
+              },
+            });
+          }
 
           const actionSpan = turnSpan?.startChild("LLM.Action", {
             inputMessageCount: compactedContext.length,
@@ -906,6 +957,7 @@ export class AgentEngine implements AgentRunner {
 
           const toolCalls = responseMsg.toolCalls ?? [];
           if (exploreSynthesisOnly && toolCalls.length > 0) {
+            reporter.onAssistantResponseSuppressed?.("explore-synthesis-retry");
             // 某些 provider/模型可能在 tools=[] 时仍幻觉产生 tool_calls。
             // 保留 assistant tool call 与逐一 tool result 的协议配对，但绝不进入 Registry。
             const rejectedResponse: Message = {
@@ -950,6 +1002,38 @@ export class AgentEngine implements AgentRunner {
           const requiredDelegationIndex = findRequiredDelegationIndex(toolCalls);
           const requiredDelegation =
             requiredDelegationIndex !== undefined ? toolCalls[requiredDelegationIndex] : undefined;
+          if (requiredFirstDelegationActive && !requiredDelegation) {
+            reporter.onAssistantResponseSuppressed?.("delegation-first-retry");
+            const rejectedResponse: Message = {
+              ...responseMsg,
+              content: "",
+              providerData: {
+                ...responseMsg.providerData,
+                picoKind: "required_first_delegation_rejected",
+                picoHiddenFromTranscript: true,
+              },
+            };
+            session.append(rejectedResponse);
+            this.onTurn?.({ turn: turnCount, message: rejectedResponse });
+            session.append(...toolCalls.map(buildRequiredFirstToolRejection));
+            requiredFirstDelegationAttempts++;
+
+            if (requiredFirstDelegationAttempts >= MAX_REQUIRED_FIRST_DELEGATION_ATTEMPTS) {
+              const failedResponse: Message = {
+                role: "assistant",
+                content: REQUIRED_FIRST_DELEGATION_FAILED_MESSAGE,
+              };
+              session.append(failedResponse);
+              reporter.onMessage(failedResponse.content);
+              reporter.onFinish();
+              break;
+            }
+            continue;
+          }
+          if (requiredDelegation && requiredFirstDelegationActive) {
+            requiredFirstDelegationPending = false;
+            requiredFirstDelegationAttempts = 0;
+          }
           if (requiredDelegation && responseMsg.content) {
             responseMsg = {
               ...responseMsg,

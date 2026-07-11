@@ -9,10 +9,46 @@ import type {
   RequestMiddleware,
   ToolExecutionContext,
 } from "../src/tools/registry.js";
+import type { Reporter } from "../src/engine/reporter.js";
+import { TuiReporter, type TuiEntry } from "../src/tui/tui-reporter.js";
 
 const TOOL_NAMES = ["delegate_task", "read_file", "grep", "bash", "write_file"] as const;
 
 describe("required 委派的轮次工具策略", () => {
+  it("真实时序：模型企图先读项目时拒绝读取，再强制 required 委派", async () => {
+    const provider = new SequencedProvider([
+      {
+        role: "assistant",
+        content: "我先看一下项目顶层结构",
+        toolCalls: [{ id: "forbidden-ls", name: "bash", arguments: '{"command":"ls -la"}' }],
+      },
+      requiredDelegation("dispatch-after-retry", ["explore", "explore"]),
+      { role: "assistant", content: "只基于子代理结果的统一总结" },
+    ]);
+    const registry = new TemporalRegistry();
+    let entries: TuiEntry[] = [];
+    const reporter = new TuiReporter((next) => {
+      entries = next;
+    });
+    const running = runEngine("启动多个子代理阅读项目", provider, registry, reporter);
+
+    await waitUntil(() => registry.requiredStarted);
+    expect(registry.ordinaryExecutions).toEqual([]);
+    expect(
+      provider.requests.slice(0, 2).map((request) => request.tools.map((tool) => tool.name)),
+    ).toEqual([["delegate_task"], ["delegate_task"]]);
+    expect(JSON.stringify(entries)).not.toContain("我先看一下项目顶层结构");
+
+    registry.releaseRequired();
+    await running;
+
+    expect(provider.requests[2]?.tools).toEqual([]);
+    expect(registry.executed.map((call) => call.name)).toEqual(["delegate_task"]);
+    expect(entries.filter((entry) => entry.kind === "assistant")).toEqual([
+      expect.objectContaining({ content: "只基于子代理结果的统一总结" }),
+    ]);
+  });
+
   it("显式要求多个子代理阅读项目时，首轮主 Provider 只看到 delegate_task", async () => {
     const provider = new SequencedProvider([
       requiredDelegation("dispatch-explore", ["explore", "explore"]),
@@ -51,9 +87,9 @@ describe("required 委派的轮次工具策略", () => {
     expect(provider.requests).toHaveLength(2);
     expect(provider.requests[1]?.tools).toEqual([]);
     expect(registry.executed.map((call) => call.name)).toEqual(["delegate_task"]);
-    expect(output.filter((message) => message.role === "assistant")).toEqual([
-      expect.objectContaining({ content: "基于两个子代理证据的唯一统一总结" }),
-    ]);
+    expect(
+      output.filter((message) => message.role === "assistant" && message.content.length > 0),
+    ).toEqual([expect.objectContaining({ content: "基于两个子代理证据的唯一统一总结" })]);
   });
 
   it.each([
@@ -107,6 +143,20 @@ class SequencedProvider implements LLMProvider {
   constructor(private readonly responses: Message[]) {}
 
   async generate(messages: Message[], tools: ToolDefinition[]): Promise<Message> {
+    return this.next(messages, tools);
+  }
+
+  async generateStream(
+    messages: Message[],
+    tools: ToolDefinition[],
+    onDelta: (delta: string) => void,
+  ): Promise<Message> {
+    const response = this.next(messages, tools);
+    if (response.content) onDelta(response.content);
+    return response;
+  }
+
+  private next(messages: Message[], tools: ToolDefinition[]): Message {
     this.requests.push({
       messages: structuredClone(messages),
       tools: structuredClone(tools),
@@ -164,12 +214,22 @@ class TemporalRegistry implements Registry {
   }
 }
 
-function runEngine(prompt: string, provider: LLMProvider, registry: Registry): Promise<Message[]> {
+function runEngine(
+  prompt: string,
+  provider: LLMProvider,
+  registry: Registry,
+  reporter?: Reporter,
+): Promise<Message[]> {
   const session = new Session(`delegation-tool-policy-${Date.now()}`, "/tmp", {
     persistence: false,
   });
   session.append({ role: "user", content: prompt });
-  return new AgentEngine({ provider, registry, workDir: "/tmp" }).run(session);
+  return new AgentEngine({
+    provider,
+    registry,
+    workDir: "/tmp",
+    ...(reporter ? { reporter } : {}),
+  }).run(session);
 }
 
 function requiredDelegation(id: string, modes: readonly ("explore" | "worker")[]): Message {

@@ -1,5 +1,9 @@
 import { randomUUID } from "node:crypto";
-import type { SubagentActivityEvent, SubagentTraceEvent } from "../engine/reporter.js";
+import type {
+  AssistantResponseSuppressionReason,
+  SubagentActivityEvent,
+  SubagentTraceEvent,
+} from "../engine/reporter.js";
 import type { ToolCardStatus } from "./tool-card.js";
 import type { SpinnerMode } from "./spinner.js";
 
@@ -219,7 +223,7 @@ export type TuiEvent =
   | (TuiEventBase & {
       readonly type: "assistant.response.suppressed";
       readonly entryId: string;
-      readonly reason: "required-delegation";
+      readonly reason: AssistantResponseSuppressionReason;
     })
   | (TuiEventBase & {
       readonly type: "tool.started";

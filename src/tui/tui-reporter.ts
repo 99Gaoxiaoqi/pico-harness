@@ -12,7 +12,12 @@
 //
 // 不直接渲染 ink 组件(保持 reporter 纯数据层),渲染由 App.tsx 消费 state 完成。
 
-import type { Reporter, SubagentActivityEvent, SubagentTraceEvent } from "../engine/reporter.js";
+import type {
+  AssistantResponseSuppressionReason,
+  Reporter,
+  SubagentActivityEvent,
+  SubagentTraceEvent,
+} from "../engine/reporter.js";
 import { formatOutputPreview } from "./diff-preview.js";
 import type { ToolCardStatus } from "./tool-card.js";
 import {
@@ -214,7 +219,7 @@ export class TuiReporter implements Reporter {
 
   onToolCall(toolName: string, args: string, providerCallId?: string): void {
     if (isRequiredDelegation(toolName, args)) {
-      this.suppressCurrentTurnAssistantResponse();
+      this.suppressCurrentTurnAssistantResponse("required-delegation");
     }
     this.appendPhase("tool-use");
     const normalizedProviderCallId = normalizeIdentity(providerCallId);
@@ -422,19 +427,24 @@ export class TuiReporter implements Reporter {
     this.emit();
   }
 
+  onAssistantResponseSuppressed(reason: AssistantResponseSuppressionReason): void {
+    this.suppressCurrentTurnAssistantResponse(reason);
+    this.emit();
+  }
+
   private appendEntry(entry: TuiEntry): string {
     const entryId = this.eventStore.createId("entry");
     this.eventStore.append({ type: "entry.appended", entryId, entry });
     return entryId;
   }
 
-  private suppressCurrentTurnAssistantResponse(): void {
+  private suppressCurrentTurnAssistantResponse(reason: AssistantResponseSuppressionReason): void {
     const entryId = this.currentTurnAssistantEntryId ?? this.currentStream?.entryId ?? null;
     if (entryId === null) return;
     this.eventStore.append({
       type: "assistant.response.suppressed",
       entryId,
-      reason: "required-delegation",
+      reason,
     });
     this.currentTurnAssistantEntryId = null;
     this.currentStream = null;
