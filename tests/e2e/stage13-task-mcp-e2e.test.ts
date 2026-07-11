@@ -218,9 +218,12 @@ describe("stage 13 task and MCP host integration", () => {
     });
     const tasksResult = await processUserInput("/tasks", { registry: commands });
     const mcpResult = await processUserInput("/mcp", { registry: commands });
-    expect(tasksResult.type === "local-command" ? tasksResult.result.message : "").toContain(
-      started.taskId,
-    );
+    expect(tasksResult).toMatchObject({
+      type: "unknown-command",
+      command: "tasks",
+      message: "Unknown slash command: /tasks",
+    });
+    expect(taskRuntime.get(started.taskId)).toMatchObject({ status: "completed" });
     expect(mcpResult.type === "local-command" ? mcpResult.result.message : "").toContain(
       "connected",
     );
