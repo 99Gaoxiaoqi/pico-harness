@@ -623,6 +623,11 @@ git worktree remove ../pico-1-streaming
 
 ## 📅 变更记录
 
+- 2026-07-12：对齐 Claude Code 的核心编排工具披露边界
+  - `delegate_task` 升级为 Core Tool，主 Agent 首轮直接获得批量子代理编排能力，不再依赖 `search_tools` 猜测发现。
+  - MCP、插件和低频长尾工具仍保持渐进式披露，`delegate_status` / legacy `spawn_subagent` 不扩大为常驻入口。
+  - 现有 CLI 集成断言覆盖首轮工具可见性，工具分层回归同步更新。
+
 - 2026-07-12：退役面向用户的 `/tasks`，完成子代理活动可视化
   - Task/worktree 运行时继续作为主 Agent 内部能力，用户不再复制 task ID 执行 merge/stop/retry。
   - 批量 `delegate_task` 为每个子代理生成独立活动卡片，原位更新最近工具、状态和完成摘要，不渲染内部 activity/task ID。

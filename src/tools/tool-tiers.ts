@@ -6,6 +6,8 @@
 //
 // todo 归核心:Todolist 是状态外部化核心一环,prompt 已注入 todo 状态,
 // 模型频繁需要同步;移除会让基本功能受损。
+// delegate_task 归核心:它是主 Agent 的一级编排入口,如果继续隐藏在
+// search_tools 后,模型无法稳定响应用户明确的多子代理请求。
 
 /** 核心工具:每轮始终加载给大模型,移除任何一个都会让基本功能受损。 */
 export const CORE_TOOLS: ReadonlySet<string> = new Set([
@@ -17,6 +19,7 @@ export const CORE_TOOLS: ReadonlySet<string> = new Set([
   "grep",
   "todo",
   "ask_user",
+  "delegate_task",
 ]);
 
 /**

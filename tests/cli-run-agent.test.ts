@@ -346,9 +346,15 @@ describe("runAgentFromCli", () => {
     expect(result.tracePath).toContain(join(".claw", "traces"));
     expect(await readdir(join(workDir, ".claw", "traces"))).toHaveLength(1);
     expect(provider.calls[0]?.toolNames).toEqual(
-      expect.arrayContaining(["bash", "read_file", "write_file", "edit_file", "search_tools"]),
+      expect.arrayContaining([
+        "bash",
+        "read_file",
+        "write_file",
+        "edit_file",
+        "delegate_task",
+        "search_tools",
+      ]),
     );
-    expect(provider.calls[0]?.toolNames).not.toContain("delegate_task");
     expect(provider.calls[0]?.toolNames).not.toContain("task_list");
     expect(provider.calls[0]?.messages[0]?.content).toContain("PLAN.md");
     expect(write).not.toHaveBeenCalled();
