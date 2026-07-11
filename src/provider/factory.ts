@@ -7,6 +7,8 @@ import { GeminiProvider } from "./gemini.js";
 import type { LLMProvider } from "./interface.js";
 import type { ThinkingEffort } from "./thinking.js";
 import { CredentialPool } from "./credential-pool.js";
+import { CapabilityPreflightProvider } from "./capability-preflight.js";
+import { providerProfileForRoute } from "./model-capabilities.js";
 
 export type ProviderKind = "openai" | "claude" | "gemini";
 
@@ -80,12 +82,27 @@ export function createRawProvider(
   thinkingEffort?: ThinkingEffort,
 ): LLMProvider {
   const cfg = resolveConfig(config, thinkingEffort);
+  const profile = cfg.capabilities
+    ? providerProfileForRoute(kind, cfg.model, cfg.capabilities)
+    : undefined;
+  let provider: LLMProvider;
   switch (kind) {
     case "openai":
-      return new OpenAIProvider(cfg);
+      provider = new OpenAIProvider(cfg, profile);
+      break;
     case "claude":
-      return new ClaudeProvider(cfg);
+      provider = new ClaudeProvider(cfg, profile);
+      break;
     case "gemini":
-      return new GeminiProvider(cfg);
+      provider = new GeminiProvider(cfg, profile);
+      break;
   }
+  return cfg.capabilities
+    ? new CapabilityPreflightProvider(
+        provider,
+        cfg.routeId ?? `${kind}/${cfg.model}`,
+        cfg.capabilities,
+        cfg.thinkingEffort ?? "off",
+      )
+    : provider;
 }

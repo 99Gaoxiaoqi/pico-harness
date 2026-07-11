@@ -25,6 +25,20 @@ export class ContextOverflowError extends LLMStatusError {
   }
 }
 
+export type ModelCapabilityErrorCode = "context_window" | "vision" | "reasoning" | "tool_call";
+
+/** A deterministic route mismatch detected before any provider network request. */
+export class ModelCapabilityError extends Error {
+  constructor(
+    readonly routeId: string,
+    readonly code: ModelCapabilityErrorCode,
+    message: string,
+  ) {
+    super(message);
+    this.name = "ModelCapabilityError";
+  }
+}
+
 /** 上下文溢出的消息特征正则集合(复用 kimi-code 的经验模式)。 */
 export const CONTEXT_OVERFLOW_PATTERNS: readonly RegExp[] = [
   /context[ _-]?length/,

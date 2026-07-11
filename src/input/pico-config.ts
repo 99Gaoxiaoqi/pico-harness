@@ -191,6 +191,13 @@ function parseModelCapabilities(
     if (!isRecord(price)) throw configError(configPath, `${field}.price`, "must be an object");
     result.price = parseModelPrice(price, configPath, `${field}.price`);
   }
+  if (
+    result.context !== undefined &&
+    result.output !== undefined &&
+    result.output >= result.context
+  ) {
+    throw configError(configPath, field, "output must be smaller than context");
+  }
   return result;
 }
 

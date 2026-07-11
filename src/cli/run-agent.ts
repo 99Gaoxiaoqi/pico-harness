@@ -455,7 +455,9 @@ function createTrackedProviderWithFallback(
   providerFactory: RunAgentProviderFactory,
   session: Session,
 ): LLMProvider {
-  const fallbackModel = fallbackModelFor(config.model);
+  const fallbackModel = config.capabilities
+    ? config.capabilities.fallbackModel
+    : fallbackModelFor(config.model);
   if (!fallbackModel) {
     return new CostTracker(providerFactory(kind, config), config.model, session);
   }
@@ -539,7 +541,17 @@ class CostTrackedModelFallbackProvider implements LLMProvider {
   }
 
   private createTrackedProvider(config: ProviderConfig): LLMProvider {
-    return new CostTracker(this.providerFactory(this.kind, config), config.model, this.session);
+    // A fallback model requires its own capability record. Until the router supplies one,
+    // omit primary-model metadata instead of pretending both models share capabilities.
+    const fallbackConfig =
+      config.model === this.primaryConfig.model
+        ? config
+        : { ...config, capabilities: undefined, routeId: undefined };
+    return new CostTracker(
+      this.providerFactory(this.kind, fallbackConfig),
+      config.model,
+      this.session,
+    );
   }
 }
 
