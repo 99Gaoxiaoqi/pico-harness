@@ -501,13 +501,13 @@ git worktree remove ../pico-1-streaming
 
 ---
 
-## 阶段 12：可信 YOLO 与代码智能（已完成）
+## 阶段 12：主会话放权、worker 隔离与代码智能（已完成）
 
-> **目标**：在默认无审批的交互模式下保留宿主硬边界，并让模型路由、上下文预算和代码理解建立在真实能力元数据之上。三个任务在阶段 11 接口稳定后使用独立 worktree 并行。
+> **目标**：主 TUI 的默认 YOLO 按当前 OS 用户权限全程放权，不保留普通工作区/网络/敏感路径审批；不可信 worker 无论主会话 mode 都使用独立 worktree 和 OS 沙箱。同时让模型路由、上下文预算和代码理解建立在真实能力元数据之上。
 >
 > **执行计划**：`docs/plans/2026-07-11-stage12-trusted-yolo-code-intelligence.md`
 
-- [x] 12.1 YOLO 沙箱与策略：workspace-write、网络策略、敏感目录和危险命令边界；普通操作不弹审批，但越界不能仅靠模型或提示词约束
+- [x] 12.1 权限与隔离收敛：主 YOLO 全放权；Plan 只读守卫和 hardline/Hook deny 不可审批绕过；worker 的 workspace-write、网络和敏感目录边界由 worktree + OS 沙箱强制
 - [x] 12.2 模型能力与 Usage：route 记录 context/output/vision/reasoning/tool-call/cache/price/fallback 能力；请求前预检；提供 `/context` 与 `/usage`
 - [x] 12.3 LSP 与 Repo Map：支持 definitions、references、symbols、diagnostics、调用层级和渐进式仓库地图，并接入现有工具披露机制
 
@@ -517,7 +517,7 @@ git worktree remove ../pico-1-streaming
 
 > **目标**：让写入型子代理和外部工具连接都成为可观察、可中止、可恢复的 TUI 内部能力。两个任务的 TUI 接线串行完成，避免并发修改 `runtime-state.ts` / `repl.tsx`。
 
-- [x] 13.1.1 为 TaskRegistry 增加持久化快照、重启恢复、输出游标和遗留 running 任务收口
+- [x] 13.1.1 为 TaskRegistry 增加持久化账本、输出游标和遗留 running 任务收口；重启后可查历史，但不伪装为恢复上一个进程
 - [x] 13.1.2 实现 Agent Worktree Supervisor：创建唯一 branch/worktree、停止、重试、追加指令、完成通知和安全清理
 - [x] 13.1.3 实现主代理串行合并队列：检查工作树/提交、按最新目标分支合并、冲突保留现场且禁止强推
 - [x] 13.1.4 将 worker 子代理默认接入独立 worktree，并提供 `/tasks` 列表、详情、tail、stop、retry、message、merge 交互
@@ -576,7 +576,7 @@ git worktree remove ../pico-1-streaming
 | 阶段 9       | 3        | 3       | ✅ 模型路由与核心交互完成           |
 | 阶段 10      | 7        | 7       | ✅ TUI 滚动与大型输出收敛完成       |
 | 阶段 11      | 5        | 5       | ✅ TUI 可靠执行闭环完成             |
-| 阶段 12      | 3        | 3       | ✅ 可信 YOLO 与代码智能完成         |
+| 阶段 12      | 3        | 3       | ✅ 主 YOLO 放权与 worker 隔离完成   |
 | 阶段 12.5    | 6        | 6       | ✅ 模型级思考能力完成               |
 | 阶段 12.6    | 6        | 6       | ✅ 记忆存储韧性完成                 |
 | 阶段 13      | 9        | 9       | ✅ 隔离式并行与 MCP 生命周期完成    |
@@ -587,6 +587,13 @@ git worktree remove ../pico-1-streaming
 ## 📝 补充任务（发现的新问题追加到这里）
 
 <!-- 开发过程中发现的新需求，追加到这里，注明发现日期 -->
+
+### 任务系统后续收口（未排期）
+
+- [ ] 2026-07-11：为非 Git 项目设计安全的自动初始化；先生成/复核 `.gitignore` 与 baseline 文件集，不得默认 `git add .` 提交密钥或大文件。
+- [ ] 2026-07-11：增加真正的跨重启 task resume，持久化可验证的 branch/worktree/runner manifest 和续传语义；当前 `.claw/tasks/state.json` 只是历史账本。
+- [ ] 2026-07-11：将 task merge 改为隔离集成 worktree 中的可恢复事务，增加 `/tasks resume` / `abort`，冲突时不在主工作区留下半合并状态。
+- [ ] 2026-07-11：将 `/tasks message` 从“下一个安全排水点读取”升级为运行中 worker 的可观察实时 steer，并明确已送达/已消费状态。
 
 - [x] 2026-07-11：增加 Claude Code 风格的首次工作区信任门；信任通过前不读取项目 Session / Config / AGENTS / Skills，不启动 Provider / LSP / MCP / Hook；用户级信任库按 realpath 安全、原子持久化，非交互首启 fail-closed。
 
@@ -607,6 +614,12 @@ git worktree remove ../pico-1-streaming
 ---
 
 ## 📅 变更记录
+
+- 2026-07-11：完成并行全盘安全复审与任务执行收口
+  - 增加首次工作区信任门；收紧 Project Config / AGENTS / Skills / MCP / LSP / Hook 的启动时机、子进程环境与本地文件权限。
+  - Plan 仅允许保守可证明的只读 Bash，MCP 不得绕过 Plan；主 YOLO 按 OS 用户权限全放权，worker 无论主 mode 都保持 worktree + OS 沙箱。
+  - Fetch URL 增加 SSRF/凭据/重定向/DNS rebinding 防护；MCP HTTP/SSE/stdio、LSP、Hook 和 tool artifact 增加硬大小与资源上限。
+  - Write/Edit 封闭符号链接竞态；MCP 未知工具不再伪装为无副作用；worker 改由宿主提交，stop 等待 runner 真正退出，缺少 supervisor 时 fail-closed。
 
 - 2026-07-11：增加工作区首次信任门
   - CLI 得到真实工作目录后先完成信任确认，再读取 Session 并启动 TUI 项目级能力。
@@ -635,8 +648,8 @@ git worktree remove ../pico-1-streaming
   - 删除面向用户的 `/tools` 命令；模型内部 `search_tools` 延迟披露机制保持不变，MCP 状态和审批策略继续由 `/mcp`、`/permissions` 分别承载。
   - LSP/Repo Map 保持宿主自动发现与降级，不增加要求用户操作的代码智能命令。
 
-- 2026-07-11：完成阶段 12 可信 YOLO 与代码智能
-  - YOLO 普通工作区操作保持无审批；外部写入、敏感路径、网络和 hardline 由宿主策略确定性拒绝，macOS Bash 使用 OS 沙箱，缺少等价后端时 fail-closed。
+- 2026-07-11：完成阶段 12 主会话放权、worker 隔离与代码智能
+  - 主 YOLO 以当前 OS 用户权限执行普通操作，仅 hardline、Plan 守卫和 Hook deny 不可审批绕过；worker 始终使用独立 worktree 和 OS 沙箱，缺少等价后端时只影响 worker Bash 并 fail-closed。
   - 模型 route 记录能力、限额、价格与 fallback 来源；请求前预检图像、工具、reasoning 和 context，`/usage`、`/context` 区分 reported、estimated、partial 与 unknown。
   - TUI 生命周期接入 LSP JSON-RPC、导航/诊断/调用层级和 Repo Map 降级；六个代码智能工具复用 `search_tools` 渐进披露。
   - 最终只运行三条阶段 12 集成主链；typecheck、build、ESLint 和格式检查通过。

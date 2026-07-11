@@ -62,7 +62,7 @@ npx tsx --env-file=.env --import ./src/tui/preload-env.ts src/cli/main.ts \
 
 - `src/cli/run-agent.ts` 中的 `runAgentFromCli` 是 TUI 内部装配函数，不是可支持的 one-shot/headless CLI 入口。
 - `/rewind` 按用户消息列出提示词、时间和该轮文件变化，恢复后会同步截断对话并把原提示词放回输入框；`/snapshots` 保留为诊断入口。
-- 默认交互模式是 `yolo`：工作区内普通工具不弹审批；工作区外写入、敏感路径、hardline、Plan 守卫和显式 Hook deny 由宿主直接拒绝，不会用审批临时放开。需要逐次确认普通高风险操作时使用 `/mode default`。
+- 默认交互模式是 `yolo`：主 Agent 以当前 OS 用户权限执行普通读写、Bash 和网络操作，不弹日常审批。仅保留不可审批绕过的 hardline、Plan 写操作守卫和显式 Hook deny。需要逐次确认高风险操作时使用 `/mode default`。
 - `/permissions` 是 `/mode` 的兼容别名，不再维护第二套权限状态。
 - `/usage` 展示 provider 实际报告的 token/成本覆盖，缺失字段保持 `unknown`；`/context` 展示当前 route 的上下文预算、来源和能力。
 - REST/WebSocket、ACP、飞书与 one-shot CLI 外壳曾在历史阶段完成，后已退役。
@@ -139,7 +139,7 @@ export ZHIPU_API_KEY=your-zhipu-key
 
 `/model` 使用 `providerID/modelID` 作为稳定标识。OpenAI 兼容 provider 默认请求 `GET /models`；显式 `models` 是允许列表，也是端点不支持模型发现时的可靠 fallback。可用 `"discoverModels": false` 完全关闭发现。密钥值不会写入 SessionSettings、状态栏或命令输出。
 
-### 模型能力、YOLO 沙箱与代码智能
+### 模型能力、worker 沙箱与代码智能
 
 需要请求前能力预检时，可把 `models` 从字符串数组改为 OpenCode 风格的模型能力对象。未显式声明的 vision/reasoning/tool-call/cache 会显示为 `unknown`，不会根据兼容协议擅自推断：
 
@@ -186,9 +186,9 @@ export ZHIPU_API_KEY=your-zhipu-key
 }
 ```
 
-YOLO 的 Bash 默认禁止子进程联网；确需执行 `npm install` 等命令时，将 `sandbox.network` 显式设为 `allow`。macOS 使用宿主 `sandbox-exec` 强制 workspace-write 和敏感路径边界；当前 Linux 没有等价后端时按 fail-closed 拒绝 YOLO Bash，不会退化成无沙箱执行。
+`sandbox.network` 只约束 Pico 创建的 explore/worker 子代理，不约束主 TUI 的 YOLO。worker 无论主会话处于 `default` / `auto` / `plan` / `yolo` 都使用独立 worktree 和 OS 沙箱；默认禁止 worker Bash 联网，需要时可将 `sandbox.network` 设为 `allow`。macOS 使用 `sandbox-exec`；当前 Linux 没有等价后端时，worker Bash 按 fail-closed 拒绝，主 Agent 的 YOLO 不受影响。
 
-代码智能优先使用项目配置的 LSP server，其次发现 PATH 中已安装的 TypeScript/Python/Rust/Go server；不可用时快速降级为渐进式 Repo Map。`code_definition`、`code_references`、`code_symbols`、`code_diagnostics`、`code_call_hierarchy` 和 `repo_map` 属于扩展工具，通过 `search_tools` 按需激活。
+代码智能优先使用项目配置的 LSP server，其次发现 PATH 中已安装的 TypeScript/Python/Rust/Go server；不可用时快速降级为渐进式 Repo Map。`lsp.servers[].command` 是宿主直接启动的 language-server 可执行文件，`args` 是其参数；它不是 shell 脚本，也不是 TUI slash command。`code_definition`、`code_references`、`code_symbols`、`code_diagnostics`、`code_call_hierarchy` 和 `repo_map` 属于模型按需激活的内部工具，用户无需手动执行 `/lsp`。
 
 ## 🧪 测试与评估
 
