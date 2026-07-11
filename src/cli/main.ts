@@ -3,6 +3,9 @@
 // pico 的唯一外壳入口:TUI。
 // 网络服务、机器人、ACP 和 one-shot CLI 都已移除,避免多入口共享 session 造成状态串扰。
 
+// 发布后的 pico 直接执行 dist/cli/main.js,不会经过 npm dev 的 --import。
+// 必须在其他依赖图执行前预加载,避免 Pino 先以 stderr transport 初始化。
+import "../tui/preload-env.js";
 import { readFile, realpath } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
