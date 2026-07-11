@@ -45,11 +45,14 @@ export interface TuiPhaseProjection {
 export interface TuiStreamProjection {
   readonly id: string;
   readonly entryId: string;
-  readonly status: "streaming" | "completed";
+  readonly status: "streaming" | "completed" | "interrupted";
 }
 
 export interface TuiToolCallProjection {
+  /** EventStore 内部生成的全局唯一 ID，所有后续事件都用它关联。 */
   readonly id: string;
+  /** Provider 仅保证单次响应内可关联，跨轮可重复（如 Gemini）。 */
+  readonly providerCallId?: string;
   readonly entryId: string;
   readonly name: string;
   readonly args: string;
@@ -99,12 +102,21 @@ export type TuiEvent =
       readonly type: "assistant.stream.completed";
       readonly entryId: string;
       readonly streamId: string;
-      readonly content: string;
+      /** 只在 provider 最终文本与已投影 delta 不同时写入，避免大正文重复常驻。 */
+      readonly content?: string;
+    })
+  | (TuiEventBase & {
+      readonly type: "assistant.stream.interrupted";
+      readonly entryId: string;
+      readonly streamId: string;
+      readonly reason: "new-request" | "clear" | "truncate";
     })
   | (TuiEventBase & {
       readonly type: "tool.started";
       readonly entryId: string;
+      /** EventStore 内部 ID，不得直接使用 provider call ID。 */
       readonly toolCallId: string;
+      readonly providerCallId?: string;
       readonly name: string;
       readonly args: string;
     })
@@ -134,7 +146,13 @@ export type TuiEvent =
 
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
 
-export type TuiEventDraft = DistributiveOmit<TuiEvent, keyof TuiEventBase>;
+type TuiEventDraftWithIdentities = DistributiveOmit<TuiEvent, keyof TuiEventBase>;
+type TuiToolStartedDraft = Extract<TuiEventDraftWithIdentities, { type: "tool.started" }>;
+
+/** tool.started 的内部 toolCallId 由 store 生成，不对调用方开放。 */
+export type TuiEventDraft =
+  | Exclude<TuiEventDraftWithIdentities, TuiToolStartedDraft>
+  | Omit<TuiToolStartedDraft, "toolCallId">;
 
 export interface TuiEventStoreOptions {
   /** 测试、回放或水合时可注入可预测 ID。 */
@@ -151,6 +169,8 @@ export type TuiIdentityScope = "event" | "entry" | "phase" | "stream" | "tool";
  *
  * append 时同步执行纯 reducer，因此常规更新不需要每次重放全部历史；
  * replay() 则从空状态重放，供持久化水合和一致性检查使用。
+ * 本 store 只管当前内存 segment；长会话的 checkpoint/rollover 由 11.4
+ * 的 Session 持久化层负责，调用方不应假设 getEvents() 可无界增长。
  */
 export class TuiEventStore {
   private readonly events: TuiEvent[] = [];
@@ -174,8 +194,12 @@ export class TuiEventStore {
   }
 
   append(draft: TuiEventDraft): TuiEvent {
+    const identifiedDraft =
+      draft.type === "tool.started"
+        ? { ...draft, toolCallId: this.createId("tool") }
+        : draft;
     const event = freezeTuiEvent({
-      ...draft,
+      ...identifiedDraft,
       eventId: this.idFactory("event"),
       sequence: this.events.length + 1,
       createdAt: this.now(),
@@ -237,6 +261,7 @@ export class TuiEventStore {
         break;
       case "assistant.stream.delta":
       case "assistant.stream.completed":
+      case "assistant.stream.interrupted":
       case "tool.approval.requested":
       case "tool.completed":
       case "transcript.truncated":
@@ -264,6 +289,7 @@ export class TuiEventStore {
         break;
       case "assistant.stream.delta":
       case "assistant.stream.completed":
+      case "assistant.stream.interrupted":
       case "tool.approval.requested":
       case "tool.completed":
       case "transcript.truncated":
@@ -348,16 +374,29 @@ export function reduceTuiEvent(state: TuiProjection, event: TuiEvent): TuiProjec
     case "assistant.stream.completed": {
       const stream = streams[event.streamId];
       assertStreamTarget(stream, event.entryId, "streaming");
-      entries = replaceProjectedEntry(entries, event.entryId, (current) =>
-        projectedEntry(
-          current.id,
-          { kind: "assistant", content: event.content },
-          { streamId: event.streamId },
-        ),
-      );
+      const completedContent = event.content;
+      if (completedContent !== undefined) {
+        entries = replaceProjectedEntry(entries, event.entryId, (current) =>
+          projectedEntry(
+            current.id,
+            { kind: "assistant", content: completedContent },
+            { streamId: event.streamId },
+          ),
+        );
+      }
       streams = {
         ...streams,
         [event.streamId]: Object.freeze({ ...stream, status: "completed" as const }),
+      };
+      break;
+    }
+
+    case "assistant.stream.interrupted": {
+      const stream = streams[event.streamId];
+      assertStreamTarget(stream, event.entryId, "streaming");
+      streams = {
+        ...streams,
+        [event.streamId]: Object.freeze({ ...stream, status: "interrupted" as const }),
       };
       break;
     }
@@ -377,6 +416,9 @@ export function reduceTuiEvent(state: TuiProjection, event: TuiEvent): TuiProjec
         ...toolCalls,
         [event.toolCallId]: Object.freeze({
           id: event.toolCallId,
+          ...(event.providerCallId !== undefined
+            ? { providerCallId: event.providerCallId }
+            : {}),
           entryId: event.entryId,
           name: event.name,
           args: event.args,

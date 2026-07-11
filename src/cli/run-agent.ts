@@ -703,7 +703,7 @@ export function buildApprovalMiddleware(
       `approval_${randomUUID()}`,
       call.name,
       call.arguments,
-      notifier,
+      (notice) => notifier({ ...notice, providerCallId: call.id }),
       diff,
       signal,
       { sessionScope: scope },
