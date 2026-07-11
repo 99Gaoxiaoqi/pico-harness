@@ -835,20 +835,22 @@ function resolveProviderConfig(
 
 function trackingRoute(kind: ProviderKind, config: ProviderConfig): BillingRoute | string {
   const price = config.capabilities?.price;
-  return price?.source === "config"
-    ? {
-        provider: kind,
-        model: config.model,
-        baseUrl: config.baseURL,
-        pricing: {
-          inputPerMillion: price.inputPerMillion,
-          outputPerMillion: price.outputPerMillion,
-          cacheReadPerMillion: price.cacheReadPerMillion,
-          cacheWritePerMillion: price.cacheWritePerMillion,
-          source: "configured",
-        },
-      }
-    : config.model;
+  if (!config.capabilities) return config.model;
+  return {
+    provider: kind,
+    model: config.model,
+    baseUrl: config.baseURL,
+    pricing:
+      price?.source === "config"
+        ? {
+            inputPerMillion: price.inputPerMillion,
+            outputPerMillion: price.outputPerMillion,
+            cacheReadPerMillion: price.cacheReadPerMillion,
+            cacheWritePerMillion: price.cacheWritePerMillion,
+            source: "configured",
+          }
+        : null,
+  };
 }
 
 function firstApiKey(value: string | undefined): string | undefined {

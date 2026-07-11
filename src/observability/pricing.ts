@@ -9,7 +9,8 @@ export interface BillingRoute {
   model: string;
   baseUrl?: string;
   billingMode?: BillingMode;
-  pricing?: PricingEntry;
+  /** null explicitly disables the built-in model-name price table for a routed model. */
+  pricing?: PricingEntry | null;
 }
 
 export interface PricingEntry {
@@ -73,7 +74,7 @@ export function getPricingEntry(route: BillingRoute): PricingEntry | null {
   if (route.billingMode === "subscription_included") {
     return INCLUDED_PRICING;
   }
-  if (route.pricing) return route.pricing;
+  if (Object.hasOwn(route, "pricing")) return route.pricing ?? null;
   return OFFICIAL_PRICING[normalizeModelName(route.model)] ?? null;
 }
 
@@ -82,7 +83,7 @@ export function estimateCost(routeOrModel: BillingRoute | string, usage: Usage):
     typeof routeOrModel === "string" ? { provider: "unknown", model: routeOrModel } : routeOrModel;
   const canonical = toCanonicalUsage(usage);
   const pricing = getPricingEntry(route);
-  if (!pricing) {
+  if (!pricing || hasUnknownActivePrice(pricing, canonical)) {
     return {
       status: "unknown",
       usage: canonical,
@@ -106,6 +107,15 @@ export function estimateCost(routeOrModel: BillingRoute | string, usage: Usage):
     costCNY: costUSD * USD_TO_CNY,
     pricing,
   };
+}
+
+function hasUnknownActivePrice(pricing: PricingEntry, usage: CanonicalUsage): boolean {
+  return (
+    (usage.inputTokens > 0 && pricing.inputPerMillion === null) ||
+    (usage.outputTokens + usage.reasoningTokens > 0 && pricing.outputPerMillion === null) ||
+    (usage.cacheReadTokens > 0 && pricing.cacheReadPerMillion === null) ||
+    (usage.cacheWriteTokens > 0 && pricing.cacheWritePerMillion === null)
+  );
 }
 
 export function isFreeTierModel(model: string): boolean {
