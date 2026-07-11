@@ -21,6 +21,7 @@ const ALL_TOOLS: ToolDefinition[] = [
   def("glob", "匹配文件路径"),
   def("grep", "搜索文件内容"),
   def("todo", "任务清单"),
+  def("delegate_task", "委派一个或多个子智能体"),
   // 扩展组
   def("web_search", "搜索网络"),
   def("fetch_url", "抓取网页"),
@@ -57,6 +58,7 @@ describe("ToolDisclosure.pickForLLM", () => {
       "glob",
       "grep",
       "todo",
+      "delegate_task",
     ]);
   });
 
