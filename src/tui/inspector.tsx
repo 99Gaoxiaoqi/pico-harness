@@ -1,13 +1,11 @@
 import { createHash } from "node:crypto";
 import { open, realpath } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
-import React from "react";
-import { Box, Text } from "ink";
-import {
-  hashToolResultArtifactArgs,
-  ToolResultArtifactStore,
-} from "../context/artifact-store.js";
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import { Box, Text, useInput } from "ink";
+import { hashToolResultArtifactArgs, ToolResultArtifactStore } from "../context/artifact-store.js";
 import type { TuiToolCallProjection } from "./tui-event-store.js";
+import type { DialogRequest } from "./dialog-arbiter.js";
 
 const DEFAULT_PAGE_BYTES = 16 * 1024;
 const MIN_PAGE_BYTES = 256;
@@ -65,36 +63,202 @@ export interface InspectorPage {
   artifactRef?: string;
   /** 旧 meta 可能缺 argsHash；此时明确标记为仅 toolName 绑定。 */
   artifactBinding?: "tool+args" | "tool-only-legacy";
+  availability?: "complete" | "unavailable";
 }
 
 export interface InspectorProps {
   page: InspectorPage;
   maxLines?: number;
+  startLine?: number;
 }
 
-export function Inspector({ page, maxLines = 40 }: InspectorProps): React.ReactNode {
+export function Inspector({ page, maxLines = 40, startLine = 0 }: InspectorProps): React.ReactNode {
   const allLines = page.content.split("\n");
-  const visibleLines = allLines.slice(0, Math.max(1, maxLines));
+  const safeMaxLines = Math.max(1, maxLines);
+  const safeStartLine = Math.min(
+    Math.max(0, startLine),
+    Math.max(0, allLines.length - safeMaxLines),
+  );
+  const visibleLines = allLines.slice(safeStartLine, safeStartLine + safeMaxLines);
   return (
     <Box flexDirection="column">
       <Text bold>{page.title}</Text>
       <Text dimColor>
         bytes {page.offsetBytes}-{page.nextOffsetBytes} / {page.totalBytes}
+        {allLines.length > safeMaxLines
+          ? ` · lines ${safeStartLine + 1}-${safeStartLine + visibleLines.length}/${allLines.length}`
+          : ""}
       </Text>
       {visibleLines.map((line, index) => (
         <Text key={`${index}:${line}`} wrap="truncate">
           {line}
         </Text>
       ))}
-      {allLines.length > visibleLines.length ? (
-        <Text dimColor>… 当前页还有 {allLines.length - visibleLines.length} 行</Text>
-      ) : null}
       <Text dimColor>
-        {page.eof ? "End" : "More available"} · Copy current page
-        {page.locatePath ? " · Locate artifact" : ""}
+        {page.availability === "unavailable"
+          ? "Complete result unavailable"
+          : page.eof
+            ? "End"
+            : "More bytes available"}
+        {page.artifactBinding === "tool-only-legacy" ? " · legacy tool-only binding" : ""}
       </Text>
     </Box>
   );
+}
+
+export interface InspectorDialogContentProps {
+  source: InspectorSource;
+  pageBytes?: number;
+  visibleLines?: number;
+  onClose: () => void;
+  onCopy?: (text: string) => void | Promise<void>;
+  onLocate?: (path: string) => void | Promise<void>;
+  /** 可注入 Session 层分页器；默认使用本地安全读取。 */
+  loadPage?: typeof readInspectorPage;
+}
+
+export function InspectorDialogContent({
+  source,
+  pageBytes = DEFAULT_PAGE_BYTES,
+  visibleLines = 28,
+  onClose,
+  onCopy,
+  onLocate,
+  loadPage: loadPageCallback = readInspectorPage,
+}: InspectorDialogContentProps): React.ReactNode {
+  const [page, setPage] = useState<InspectorPage>();
+  const [lineOffset, setLineOffset] = useState(0);
+  const [pageHistory, setPageHistory] = useState<number[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string>();
+  const pendingLoad = useRef(false);
+  const requestSequence = useRef(0);
+  const mounted = useRef(true);
+
+  const loadOffset = useCallback(
+    async (offsetBytes: number, nextHistory: number[]): Promise<void> => {
+      if (pendingLoad.current) return;
+      pendingLoad.current = true;
+      const requestId = ++requestSequence.current;
+      if (mounted.current) {
+        setLoading(true);
+        setError(undefined);
+      }
+      try {
+        const nextPage = await loadPageCallback(source, {
+          offsetBytes,
+          limitBytes: pageBytes,
+        });
+        if (!mounted.current || requestId !== requestSequence.current) return;
+        setPage(nextPage);
+        setPageHistory(nextHistory);
+        setLineOffset(0);
+      } catch (loadError) {
+        if (mounted.current && requestId === requestSequence.current) {
+          setError(errorMessage(loadError));
+        }
+      } finally {
+        if (requestId === requestSequence.current) pendingLoad.current = false;
+        if (mounted.current && requestId === requestSequence.current) setLoading(false);
+      }
+    },
+    [loadPageCallback, pageBytes, source],
+  );
+
+  useEffect(() => {
+    mounted.current = true;
+    requestSequence.current++;
+    pendingLoad.current = false;
+    setPage(undefined);
+    setPageHistory([]);
+    setLineOffset(0);
+    setError(undefined);
+    void loadOffset(0, []);
+    return () => {
+      mounted.current = false;
+      requestSequence.current++;
+      pendingLoad.current = false;
+    };
+  }, [loadOffset]);
+
+  const maxLineOffset = Math.max(
+    0,
+    (page?.content.split("\n").length ?? 0) - Math.max(1, visibleLines),
+  );
+
+  useInput((input, key) => {
+    if (key.escape || input === "\u001b") {
+      onClose();
+      return;
+    }
+    if (key.upArrow) {
+      setLineOffset((current) => Math.max(0, current - 1));
+      return;
+    }
+    if (key.downArrow) {
+      setLineOffset((current) => Math.min(maxLineOffset, current + 1));
+      return;
+    }
+    if (key.pageUp || input === "[") {
+      const previousOffset = pageHistory.at(-1);
+      if (previousOffset !== undefined && !pendingLoad.current) {
+        void loadOffset(previousOffset, pageHistory.slice(0, -1));
+      }
+      return;
+    }
+    if (key.pageDown || input === "]") {
+      if (page && !page.eof && !pendingLoad.current) {
+        void loadOffset(page.nextOffsetBytes, [...pageHistory, page.offsetBytes]);
+      }
+      return;
+    }
+    if (input === "c" && page && onCopy) {
+      invokeDialogAction(
+        () => onCopy(page.copyText),
+        (message) => {
+          if (mounted.current) setError(message);
+        },
+      );
+      return;
+    }
+    if (input === "l" && page?.locatePath && onLocate) {
+      invokeDialogAction(
+        () => onLocate(page.locatePath!),
+        (message) => {
+          if (mounted.current) setError(message);
+        },
+      );
+    }
+  });
+
+  return (
+    <Box flexDirection="column">
+      {source.kind === "inline" && source.availability === "unavailable" ? (
+        <Text color="yellow">This view contains only a compact summary.</Text>
+      ) : null}
+      {!page ? <Text bold>{source.title}</Text> : null}
+      {page ? <Inspector page={page} maxLines={visibleLines} startLine={lineOffset} /> : null}
+      {loading ? <Text dimColor>Loading page…</Text> : null}
+      {error ? <Text color="red">{error}</Text> : null}
+      <Text dimColor>
+        ↑/↓ scroll · PgUp/[ previous bytes · PgDn/] next bytes
+        {onCopy ? " · c copy" : ""}
+        {onLocate && page?.locatePath ? " · l locate" : ""} · Esc close
+      </Text>
+    </Box>
+  );
+}
+
+export function createInspectorDialogRequest(
+  props: InspectorDialogContentProps,
+  options: { id?: string; priority?: number } = {},
+): DialogRequest {
+  return {
+    id: options.id ?? "local-ui:tool-inspector",
+    layer: "modal",
+    priority: options.priority ?? 30,
+    content: <InspectorDialogContent {...props} />,
+  };
 }
 
 export function createInlineInspectorSource(title: string, content: string): InlineInspectorSource {
@@ -187,6 +351,7 @@ export async function readInspectorPage(
       ...page,
       truncated: !page.eof,
       copyText: page.content,
+      availability: source.availability,
     };
   }
 
@@ -239,6 +404,7 @@ export async function readInspectorPage(
       locatePath: artifactPath,
       artifactRef: source.artifactRef,
       artifactBinding: meta.argsHash === undefined ? "tool-only-legacy" : "tool+args",
+      availability: "complete",
     };
   } finally {
     await handle.close();
@@ -315,8 +481,7 @@ function readBufferPage(
   const requestedLocalOffset =
     absoluteOffset === offsetBytes ? Math.min(offsetBytes, buffer.length) : 0;
   const localOffset = alignUtf8StartForward(buffer, requestedLocalOffset);
-  const pageOffset =
-    absoluteOffset === offsetBytes ? localOffset : absoluteOffset + localOffset;
+  const pageOffset = absoluteOffset === offsetBytes ? localOffset : absoluteOffset + localOffset;
   const available = buffer.subarray(localOffset, Math.min(buffer.length, localOffset + limitBytes));
   const candidateEnd = pageOffset + available.length;
   const reachesEof = candidateEnd >= absoluteTotal;
@@ -354,6 +519,20 @@ function validUtf8PrefixLength(buffer: Buffer, requireComplete: boolean): number
 
 function createUnavailableInspectorSource(title: string, content: string): InlineInspectorSource {
   return { kind: "inline", title, content, availability: "unavailable" };
+}
+
+function invokeDialogAction(
+  action: () => void | Promise<void>,
+  reportError: (message: string | undefined) => void,
+): void {
+  reportError(undefined);
+  void Promise.resolve()
+    .then(action)
+    .catch((error: unknown) => reportError(errorMessage(error)));
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function parseToolArguments(args: string): unknown {
