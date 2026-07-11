@@ -12,6 +12,7 @@ import { ModelCapabilityError } from "../../src/provider/errors.js";
 import { loadModelRouter } from "../../src/provider/model-router.js";
 import { ModelRuntimeCommandService } from "../../src/provider/model-runtime-report.js";
 import { loadPicoConfig } from "../../src/input/pico-config.js";
+import { estimateCost } from "../../src/observability/pricing.js";
 
 describe("stage 12 model capabilities integration", () => {
   const cleanups: Array<() => Promise<void>> = [];
@@ -118,6 +119,22 @@ describe("stage 12 model capabilities integration", () => {
       contextWindowTokens: 8192,
       estimation: "estimated",
     });
+    expect(
+      estimateCost(
+        {
+          provider: "local",
+          model: "partial-price-model",
+          pricing: {
+            inputPerMillion: 1,
+            outputPerMillion: null,
+            cacheReadPerMillion: null,
+            cacheWritePerMillion: null,
+            source: "configured",
+          },
+        },
+        { promptTokens: 10, completionTokens: 2 },
+      ),
+    ).toMatchObject({ status: "unknown", costCNY: 0 });
   });
 });
 
