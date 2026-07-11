@@ -51,6 +51,8 @@ export interface SessionRuntimeStateSnapshot {
 /** TUI resume 的单次一致读取结果。 */
 export interface SessionHydrationSnapshot {
   schemaVersion: 1;
+  /** 快照对应的最后一条 JSONL seq；持久化关闭/无记录时为 null。 */
+  persistenceSequence: number | null;
   sessionId: string;
   conversationId: string;
   workDir: string;
