@@ -22,18 +22,39 @@
 - `feat/stage12-lsp-repo-map`：LSP client/manager、Repo Map、代码智能工具与 tool tier/disclosure；不修改模型路由和审批策略。
 - 主代理：`ROADMAP.md`、`src/tui/repl.tsx`、`src/tui/runtime-state.ts`、共享 registry/config 接线、最终集成分支和 main。
 
-## Action Items
+并行度固定为三条开发泳道，每条泳道内部按原子交付顺序推进。各原子交付单独提交，前一个提交建立最小稳定接口，后一个提交只扩展本泳道行为；不为了增加代理数量拆分共享写入文件。
 
-- [ ] 定义 Stage 12 公共配置、错误语义和共享接线边界，保护现有 Session/TUI-only 契约。
-- [ ] 实现 YOLO sandbox policy，使普通工作区操作无审批，越界、敏感路径和 hardline 操作由宿主确定性拒绝。
-- [ ] 实现网络策略与 Bash/工具执行一致的硬边界，避免通过 shell、重定向或子进程绕过。
-- [ ] 扩展 model route capability 元数据，并在请求前校验 context/output/vision/reasoning/tool-call/cache/fallback 约束。
-- [ ] 实现会话级 usage/context 汇总与 `/usage`、`/context` TUI 输出。
-- [ ] 实现可管理的 LSP JSON-RPC 生命周期和 definitions/references/symbols/diagnostics/call hierarchy 能力。
-- [ ] 实现渐进式 Repo Map，并把 LSP/Repo Map 工具接入 `search_tools` 与 ToolDisclosure。
-- [ ] 在独立集成分支串行接通共享 runtime/config/TUI 文件，检查跨任务语义和降级路径。
-- [ ] 只新增最小跨模块集成覆盖，并在最终状态运行相关集成场景、typecheck 与 build。
-- [ ] 更新 ROADMAP 勾选状态，合并推送 main，并清理本阶段临时 worktree 和分支。
+## Atomic Deliverables
+
+### 安全泳道
+
+- [ ] 12.1a 定义 sandbox 配置、路径/命令/网络判定结果和 fail-closed 错误语义。
+- [ ] 12.1b 将 workspace-write 与网络策略落实到 Bash 子进程执行边界，覆盖重定向和子进程入口。
+- [ ] 12.1c 统一 Write/Edit/Bash 的 YOLO 行为，并增加一条工作区内成功、越界确定性拒绝的集成场景。
+
+### 模型泳道
+
+- [ ] 12.2a 扩展 route capability schema，并为旧配置提供兼容默认值和明确校验错误。
+- [ ] 12.2b 在 provider 调用前完成 context/output/vision/reasoning/tool-call/cache/fallback 能力预检。
+- [ ] 12.2c 汇总当前 route/session 的 usage/context 数据，并提供与 TUI 解耦的 `/usage`、`/context` 命令服务。
+
+### 代码智能泳道
+
+- [ ] 12.3a 实现 LSP stdio JSON-RPC 生命周期、超时、取消、退出与 server 发现/降级。
+- [ ] 12.3b 实现 definitions/references/symbols/diagnostics/call hierarchy 的统一领域接口。
+- [ ] 12.3c 实现渐进式 Repo Map，并接入 ToolDisclosure/`search_tools`，增加一条临时 TypeScript 仓库集成场景。
+
+### 集成泳道（主代理串行）
+
+- [ ] 12.4a 合并三条泳道，统一 config/runtime/registry 接线并解决错误语义冲突。
+- [ ] 12.4b 接入 `/usage`、`/context` TUI 命令，执行最终最小集成验证并更新路线图。
+
+## Integration Sequence
+
+- [ ] 第一波：三条泳道分别完成 12.1a、12.2a、12.3a，尽早固定接口并返回首个可审查提交。
+- [ ] 第二波：同一 worktree 连续完成 12.1b-c、12.2b-c、12.3b-c，保持文件所有权不变。
+- [ ] 第三波：主代理在独立集成分支完成 12.4a-b，不允许任务分支直接更新 main。
+- [ ] 最终更新 ROADMAP，合并推送 main，并清理本阶段临时 worktree 和分支。
 
 ## Validation
 
