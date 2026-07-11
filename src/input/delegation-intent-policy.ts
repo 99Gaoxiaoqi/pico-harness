@@ -1,8 +1,8 @@
 const DELEGATION_TOOL_NAME = "delegate_task" as const;
 const REQUIRED_COMPLETION_POLICY = "required" as const;
 
-const CHINESE_AGENT = String.raw`(?:子代理|子\s*agents?|sub[\s-]?agents?|agents?)`;
-const ENGLISH_AGENT = String.raw`(?:sub[\s-]?agents?|agents?)`;
+const CHINESE_AGENT = String.raw`(?:子代理|子\s*agents?|sub[\s-]?agents?|agents)`;
+const ENGLISH_AGENT = String.raw`(?:sub[\s-]?agents?|agents)`;
 
 const CHINESE_DISCUSSION_PATTERNS = [
   new RegExp(
