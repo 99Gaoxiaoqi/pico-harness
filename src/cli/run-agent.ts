@@ -70,9 +70,9 @@ import {
   type SessionToolStatus,
   type SessionSettings,
 } from "../input/session-settings.js";
-import { loadConfiguredAdditionalDirectories } from "../input/add-directory.js";
+import { loadPicoConfig } from "../input/pico-config.js";
 import { loadImage } from "../input/prepare-prompt.js";
-import { evaluateYoloToolCall } from "../safety/yolo-sandbox.js";
+import { evaluateYoloToolCall, type YoloSandboxConfig } from "../safety/yolo-sandbox.js";
 import { resolveCliSession, type CliSessionSelection } from "./session-resolver.js";
 
 export interface RunAgentCliOptions {
@@ -166,7 +166,8 @@ export async function runAgentFromCli(
   const prompt = normalizePrompt(options.prompt);
   const kind = options.provider ?? "openai";
   const workDir = await resolveWorkDir(options.dir);
-  const configuredAdditionalDirectories = await loadConfiguredAdditionalDirectories(workDir);
+  const picoConfig = await loadPicoConfig(workDir);
+  const configuredAdditionalDirectories = picoConfig.additionalDirectories;
   const sessionSelection =
     options.sessionSelection ??
     (await resolveCliSession({
@@ -227,6 +228,7 @@ export async function runAgentFromCli(
       ...(dependencies.toolDisclosure !== undefined
         ? { toolDisclosure: dependencies.toolDisclosure }
         : {}),
+      lspServers: picoConfig.lspServers,
     }));
   runtimeState.assertCompatible(workDir, session.id);
   if (
@@ -286,6 +288,8 @@ export async function runAgentFromCli(
     toolDisclosure,
     workspaceRoots,
     dependencies.askUserHandler,
+    runtimeState.codeIntelligence,
+    settings.mode === "yolo" ? { config: picoConfig.sandbox } : undefined,
   );
   // 【任务 2.6】用户可配置 Shell Hooks:加载 .claw/settings.json 的 hooks 配置,
   // 存在则挂载 HookRunner 到 registry。fail-open:配置缺失/畸形均不启用 hook,零影响。
@@ -348,6 +352,7 @@ export async function runAgentFromCli(
       globalApprovalManager,
       settings,
       workspaceRoots,
+      picoConfig.sandbox,
     ),
   );
   registerDelegationTools(
@@ -357,6 +362,7 @@ export async function runAgentFromCli(
     await loadProfiles(workDir),
     delegationManager,
     workspaceRoots,
+    settings.mode === "yolo" ? { config: picoConfig.sandbox } : undefined,
   );
   dependencies.toolStatusSink?.(toolStatusFromRegistry(registry));
 
@@ -441,6 +447,8 @@ function buildRegistry(
   toolDisclosure?: ToolDisclosure,
   workspaceRoots?: WorkspaceRoots,
   askUserHandler?: AskUserHandler,
+  codeIntelligence?: TuiRuntimeState["codeIntelligence"],
+  yoloSandbox?: { config?: Partial<YoloSandboxConfig> },
 ): ToolRegistry {
   return buildDefaultToolRegistry(workDir, {
     truncateResults: false,
@@ -451,6 +459,8 @@ function buildRegistry(
     ...(toolDisclosure !== undefined ? { toolDisclosure } : {}),
     ...(workspaceRoots !== undefined ? { workspaceRoots } : {}),
     ...(askUserHandler !== undefined ? { askUserHandler } : {}),
+    ...(codeIntelligence !== undefined ? { codeIntelligence } : {}),
+    ...(yoloSandbox !== undefined ? { yoloSandbox } : {}),
   });
 }
 
@@ -560,12 +570,36 @@ class CostTrackedModelFallbackProvider implements LLMProvider {
   }
 }
 
-function buildReadOnlyRegistry(workDir: string, workspaceRoots: WorkspaceRoots): ToolRegistry {
+function buildReadOnlyRegistry(
+  workDir: string,
+  workspaceRoots: WorkspaceRoots,
+  yoloSandbox?: { config?: Partial<YoloSandboxConfig> },
+): ToolRegistry {
   const registry = new ToolRegistry({ truncateResults: false });
   registry.register(new ReadFileTool(workspaceRoots));
   // Bash 只使用主工作目录作为 cwd，/add-dir 不改变 shell 运行起点。
-  registry.register(new BashTool(workDir, undefined, { allowBackground: false }));
+  registry.register(
+    new BashTool(workDir, undefined, {
+      allowBackground: false,
+      ...(yoloSandbox
+        ? {
+            sandbox: {
+              workspaceRoots,
+              ...(yoloSandbox.config ? { config: yoloSandbox.config } : {}),
+            },
+          }
+        : {}),
+    }),
+  );
   registry.register(new SkillViewTool(new SkillLoader(workDir)));
+  if (yoloSandbox) {
+    registry.use(async (call) => {
+      const decision = evaluateYoloToolCall(call, workDir, workspaceRoots, yoloSandbox.config);
+      return decision.allowed
+        ? { allowed: true }
+        : { allowed: false, reason: decision.reason ?? "YOLO 子代理边界拒绝。" };
+    });
+  }
   return registry;
 }
 
@@ -585,12 +619,14 @@ function registerDelegationTools(
   profiles: AgentProfile[],
   manager: DelegationManager,
   workspaceRoots: WorkspaceRoots,
+  yoloSandbox?: { config?: Partial<YoloSandboxConfig> },
 ): void {
   const registryFactory = createSubagentRegistryFactory({
     workDir,
     workspaceRoots,
     runner: engine,
     manager,
+    ...(yoloSandbox ? { yoloSandbox } : {}),
     ...(profiles.length > 0 ? { profiles } : {}),
   });
   registry.register(
@@ -599,7 +635,9 @@ function registerDelegationTools(
     }),
   );
   registry.register(new DelegateStatusTool(manager));
-  registry.register(new SpawnSubagentTool(engine, buildReadOnlyRegistry(workDir, workspaceRoots)));
+  registry.register(
+    new SpawnSubagentTool(engine, buildReadOnlyRegistry(workDir, workspaceRoots, yoloSandbox)),
+  );
 }
 
 function buildCompactor(kind: ProviderKind, model: string): Compactor {
@@ -641,6 +679,7 @@ export function buildApprovalMiddleware(
   settings?: Pick<SessionSettings, "sessionId" | "mode"> &
     Partial<Pick<SessionSettings, "additionalDirectories">>,
   workspaceRoots?: WorkspaceRoots,
+  yoloSandboxConfig: Partial<YoloSandboxConfig> = {},
 ): MiddlewareFunc {
   return async (call) => {
     if (isPlanModeWriteDenied(call, settings)) {
@@ -676,7 +715,7 @@ export function buildApprovalMiddleware(
     // YOLO 只绕过普通审批，不自动扩大工作区，也不开放敏感/网络/hardline 边界。
     if (mode === "yolo") {
       if (workspaceRoots) {
-        const decision = evaluateYoloToolCall(call, workDir, workspaceRoots);
+        const decision = evaluateYoloToolCall(call, workDir, workspaceRoots, yoloSandboxConfig);
         if (!decision.allowed) {
           return { allowed: false, reason: decision.reason ?? "YOLO 沙箱策略拒绝。" };
         }

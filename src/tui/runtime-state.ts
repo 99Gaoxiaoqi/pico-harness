@@ -10,12 +10,18 @@ import { TaskRegistry } from "../tasks/task-registry.js";
 import { BackgroundManager } from "../tools/background-manager.js";
 import { DelegationManager } from "../tools/delegation-manager.js";
 import { ToolDisclosure } from "../tools/tool-disclosure.js";
+import {
+  CodeIntelligenceManager,
+  type CodeIntelligenceService,
+  type LspServerConfig,
+} from "../code-intelligence/index.js";
 
 export interface TuiRuntimeStateOptions {
   workDir: string;
   sessionId: string;
   session: Session;
   toolDisclosure?: ToolDisclosure;
+  lspServers?: readonly LspServerConfig[];
 }
 
 export interface TuiRuntimeState {
@@ -31,6 +37,8 @@ export interface TuiRuntimeState {
   readonly memoryNudger: MemoryNudger | undefined;
   readonly fileIndex: FileIndex;
   readonly steerQueue: SteerQueue;
+  readonly codeIntelligence: CodeIntelligenceService;
+  readonly codeIntelligenceManager: CodeIntelligenceManager;
   assertCompatible(workDir: string, sessionId: string): void;
   conversationTurnCount(session: Session): number;
   dispose(): Promise<void>;
@@ -56,6 +64,17 @@ export async function createTuiRuntimeState(
   await skillRegistry.init();
   const goalManager = new GoalManager();
   const unbindGoalManager = options.session.bindGoalManager(goalManager);
+  const codeIntelligenceManager = new CodeIntelligenceManager({
+    rootDir: workDir,
+    ...(options.lspServers ? { lspServers: options.lspServers } : {}),
+  });
+  await codeIntelligenceManager.start();
+  const codeIntelligence = codeIntelligenceManager.service();
+  if (!codeIntelligence) {
+    await codeIntelligenceManager.close();
+    unbindGoalManager();
+    throw new Error("代码智能服务启动后未提供 LSP 或 Repo Map 后端");
+  }
 
   return new DefaultTuiRuntimeState({
     workDir,
@@ -72,6 +91,8 @@ export async function createTuiRuntimeState(
       : undefined,
     fileIndex: FileIndex.create({ cwd: workDir }),
     steerQueue: new SteerQueue(),
+    codeIntelligence,
+    codeIntelligenceManager,
     unbindGoalManager,
   });
 }
@@ -89,6 +110,8 @@ interface DefaultTuiRuntimeStateOptions {
   memoryNudger: MemoryNudger | undefined;
   fileIndex: FileIndex;
   steerQueue: SteerQueue;
+  codeIntelligence: CodeIntelligenceService;
+  codeIntelligenceManager: CodeIntelligenceManager;
   unbindGoalManager: () => void;
 }
 
@@ -105,6 +128,8 @@ class DefaultTuiRuntimeState implements TuiRuntimeState {
   readonly memoryNudger: MemoryNudger | undefined;
   readonly fileIndex: FileIndex;
   readonly steerQueue: SteerQueue;
+  readonly codeIntelligence: CodeIntelligenceService;
+  readonly codeIntelligenceManager: CodeIntelligenceManager;
   private readonly unbindGoalManager: () => void;
   private disposePromise?: Promise<void>;
 
@@ -121,6 +146,8 @@ class DefaultTuiRuntimeState implements TuiRuntimeState {
     this.memoryNudger = options.memoryNudger;
     this.fileIndex = options.fileIndex;
     this.steerQueue = options.steerQueue;
+    this.codeIntelligence = options.codeIntelligence;
+    this.codeIntelligenceManager = options.codeIntelligenceManager;
     this.unbindGoalManager = options.unbindGoalManager;
   }
 
@@ -153,6 +180,7 @@ class DefaultTuiRuntimeState implements TuiRuntimeState {
           .filter((task) => task.status === "running");
         await Promise.allSettled([
           this.delegationManager.dispose(),
+          this.codeIntelligenceManager.close(),
           ...runningTasks.map((task) => this.backgroundManager.stop(task.taskId)),
         ]);
       } finally {

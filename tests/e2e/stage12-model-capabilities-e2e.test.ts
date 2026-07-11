@@ -12,6 +12,8 @@ import { ModelCapabilityError } from "../../src/provider/errors.js";
 import { loadModelRouter } from "../../src/provider/model-router.js";
 import { ModelRuntimeCommandService } from "../../src/provider/model-runtime-report.js";
 import { loadPicoConfig } from "../../src/input/pico-config.js";
+import { createPicoCommandRegistry } from "../../src/input/pico-command-registry.js";
+import { processUserInput } from "../../src/input/process-user-input.js";
 import { estimateCost } from "../../src/observability/pricing.js";
 
 describe("stage 12 model capabilities integration", () => {
@@ -119,6 +121,24 @@ describe("stage 12 model capabilities integration", () => {
       contextWindowTokens: 8192,
       estimation: "estimated",
     });
+    const commandRegistry = await createPicoCommandRegistry({
+      workDir,
+      session: session!,
+      sessionId,
+      provider: active.provider,
+      model: active.route.model,
+      modelRouteId: active.route.id,
+      modelRouter: router,
+      modelRuntime: () => service,
+    });
+    const usageCommand = await processUserInput("/usage", { registry: commandRegistry });
+    const contextCommand = await processUserInput("/context", { registry: commandRegistry });
+    expect(usageCommand.type === "local-command" ? usageCommand.result.message : "").toContain(
+      "Prompt tokens: 12 (reported)",
+    );
+    expect(contextCommand.type === "local-command" ? contextCommand.result.message : "").toContain(
+      "Route: local/capable-model",
+    );
     expect(
       estimateCost(
         {

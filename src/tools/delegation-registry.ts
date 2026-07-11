@@ -16,6 +16,7 @@ import { GlobTool } from "./glob.js";
 import { GrepTool } from "./grep.js";
 import { FetchURLTool, WebSearchTool } from "./web.js";
 import { WorkspaceRoots } from "./workspace-roots.js";
+import { evaluateYoloToolCall, type YoloSandboxConfig } from "../safety/yolo-sandbox.js";
 
 export interface SubagentRegistryFactoryConfig {
   workDir: string;
@@ -26,6 +27,8 @@ export interface SubagentRegistryFactoryConfig {
   maxSpawnDepth?: number;
   /** 用户自定义角色库(来自 .claw/agents.yaml)。agent_name 命中时优先使用。 */
   profiles?: AgentProfile[];
+  /** 主 TUI 为 YOLO 时注入同一宿主边界，子代理不得绕过。 */
+  yoloSandbox?: { config?: Partial<YoloSandboxConfig> };
 }
 
 /**
@@ -33,13 +36,28 @@ export interface SubagentRegistryFactoryConfig {
  * 自定义角色的 tools 列表里的名字按此映射实例化。
  * 白名单由 agent-profile.ts 的 KNOWN_TOOL_NAMES 约束,这里只列已知的。
  */
-type ToolCtor = (workDir: string, workspaceRoots?: WorkspaceRoots) => BaseTool;
+type ToolCtor = (
+  workDir: string,
+  workspaceRoots?: WorkspaceRoots,
+  yoloSandbox?: { config?: Partial<YoloSandboxConfig> },
+) => BaseTool;
 // exported 供测试按名字断言实例化结果;自定义角色按 profile.tools 实例化时查此 map。
 export const TOOL_CONSTRUCTORS: Record<string, ToolCtor> = {
   read_file: (wd, roots) => new ReadFileTool(roots ?? wd),
   write_file: (wd, roots) => new WriteFileTool(roots ?? wd),
   edit_file: (wd, roots) => new EditFileTool(roots ?? wd),
-  bash: (wd) => new BashTool(wd, undefined, { allowBackground: false }),
+  bash: (wd, roots, yoloSandbox) =>
+    new BashTool(wd, undefined, {
+      allowBackground: false,
+      ...(roots && yoloSandbox
+        ? {
+            sandbox: {
+              workspaceRoots: roots,
+              ...(yoloSandbox.config ? { config: yoloSandbox.config } : {}),
+            },
+          }
+        : {}),
+    }),
   skill_view: (wd) => new SkillViewTool(new SkillLoader(wd)),
   glob: (wd, roots) => new GlobTool(roots ?? wd),
   grep: (wd, roots) => new GrepTool(roots ?? wd),
@@ -85,11 +103,11 @@ function buildProfileRegistry(
   const registry = new ToolRegistry();
   for (const toolName of profile.tools) {
     const ctor = TOOL_CONSTRUCTORS[toolName];
-    if (ctor) registry.register(ctor(config.workDir, config.workspaceRoots));
+    if (ctor) registry.register(ctor(config.workDir, config.workspaceRoots, config.yoloSandbox));
   }
   // 自定义角色仍挂安全 Middleware:高危命令拦截不因自定义放开
   // 用 worker 档的 Middleware(允许普通写,拦 rm -rf / git push --force 等)
-  registry.use(buildSubagentSafetyMiddleware("worker"));
+  registry.use(buildSubagentSafetyMiddleware("worker", config));
   registry.register(new DelegateStatusTool(config.manager));
 
   // orchestrator 仍可递归委派(若角色允许且未超深度)
@@ -106,7 +124,17 @@ function buildModeRegistry(
   registry.register(new ReadFileTool(config.workspaceRoots));
   registry.register(new SkillViewTool(new SkillLoader(config.workDir)));
 
-  const bash = new BashTool(config.workDir, undefined, { allowBackground: false });
+  const bash = new BashTool(config.workDir, undefined, {
+    allowBackground: false,
+    ...(config.yoloSandbox
+      ? {
+          sandbox: {
+            workspaceRoots: config.workspaceRoots,
+            ...(config.yoloSandbox.config ? { config: config.yoloSandbox.config } : {}),
+          },
+        }
+      : {}),
+  });
   if (request.mode === "explore") {
     (bash as BashTool & { readOnly?: boolean }).readOnly = true;
   }
@@ -127,7 +155,7 @@ function buildModeRegistry(
     registry.register(new EditFileTool(config.workspaceRoots));
   }
 
-  registry.use(buildSubagentSafetyMiddleware(request.mode));
+  registry.use(buildSubagentSafetyMiddleware(request.mode, config));
   registry.register(new DelegateStatusTool(config.manager));
 
   maybeRegisterDelegateTool(config, request, registry);
@@ -153,8 +181,22 @@ function maybeRegisterDelegateTool(
   }
 }
 
-function buildSubagentSafetyMiddleware(mode: "explore" | "worker"): RequestMiddleware {
+function buildSubagentSafetyMiddleware(
+  mode: "explore" | "worker",
+  config: ResolvedSubagentRegistryFactoryConfig,
+): RequestMiddleware {
   return async (call) => {
+    if (config.yoloSandbox) {
+      const decision = evaluateYoloToolCall(
+        call,
+        config.workDir,
+        config.workspaceRoots,
+        config.yoloSandbox.config,
+      );
+      if (!decision.allowed) {
+        return { allowed: false, reason: decision.reason ?? "YOLO 子代理边界拒绝。" };
+      }
+    }
     if (mode === "explore" && call.name === "bash" && isBashMutation(call.arguments)) {
       return {
         allowed: false,

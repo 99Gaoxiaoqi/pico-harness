@@ -61,6 +61,7 @@ import { loadModelRouter } from "../provider/model-router.js";
 import { isAbortError } from "../provider/errors.js";
 import { defaultIsRetryableError } from "../provider/retry.js";
 import type { ThinkingEffort } from "../provider/thinking.js";
+import { ModelRuntimeCommandService } from "../provider/model-runtime-report.js";
 import { buildDefaultToolRegistry } from "../tools/default-registry.js";
 import type { ToolDisclosure } from "../tools/tool-disclosure.js";
 import {
@@ -667,15 +668,17 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
       workDir: opts.workDir,
       sessionId: selection.sessionId,
       session,
+      lspServers: picoConfig.lspServers,
     });
 
     try {
-      const { toolDisclosure, fileIndex } = runtimeState;
+      const { toolDisclosure, fileIndex, codeIntelligence } = runtimeState;
       const askUserHandler = new AskUserHandler();
       const toolRegistry = buildDefaultToolRegistry(opts.workDir, {
         toolDisclosure,
         workspaceRoots,
         askUserHandler,
+        codeIntelligence,
       });
       let latestMcpStatus: McpStatusSnapshot | undefined;
       if (opts.mcpConfigPath) {
@@ -707,7 +710,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
       );
       setSessionAdditionalDirectories(settings, workspaceRoots.list().slice(1));
 
-      let bundle: TuiSessionBundle | undefined;
+      const bundleRef: { current?: TuiSessionBundle } = {};
       const registry = await createPicoCommandRegistry({
         workDir: opts.workDir,
         projectCommandsDir: picoConfig.commandsDir,
@@ -723,23 +726,30 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         permissionMode: settings.permissionMode,
         tools: settings.tools,
         toolDisclosure,
-        mcpStatus: () => bundle?.latestMcpStatus,
+        mcpStatus: () => bundleRef.current?.latestMcpStatus,
         additionalDirectories: settings.additionalDirectories,
         additionalDirectoryManager: workspaceRoots,
         goalManager: runtimeState.goalManager,
+        modelRuntime: () => {
+          const route = modelRouter.resolve(settings.modelRouteId);
+          return route
+            ? new ModelRuntimeCommandService(route, session, toolRegistry.getAvailableTools())
+            : undefined;
+        },
       });
       await fileIndex.refresh().catch(() => undefined);
 
-      let reporter!: TuiReporter;
+      const reporterRef: { current?: TuiReporter } = {};
       const scheduleEntriesUpdate = createTuiUpdateScheduler((next) => {
-        if (activeBundle?.reporter === reporter) setEntries(next);
+        if (activeBundle?.reporter === reporterRef.current) setEntries(next);
       }, 33);
-      reporter = new TuiReporter(() => undefined, [], {
+      const reporter = new TuiReporter(() => undefined, [], {
         onProjectionUpdate: (projection) =>
           scheduleEntriesUpdate(projectTuiEntriesForRendering(projection)),
       });
+      reporterRef.current = reporter;
       hydrateTuiReporter(reporter, hydration);
-      bundle = {
+      const bundle: TuiSessionBundle = {
         generation: ++nextBundleGeneration,
         selection,
         sessionId: selection.sessionId,
@@ -752,6 +762,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         askUserHandler,
         latestMcpStatus,
       };
+      bundleRef.current = bundle;
       return bundle;
     } catch (error) {
       await runtimeState.dispose();
@@ -1128,6 +1139,8 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
                 ? {}
                 : { apiKey: activeRoute.config.apiKey }),
               model: activeRoute.config.model,
+              modelRouteId: activeRoute.route.id,
+              modelCapabilities: activeRoute.route.capabilities,
               allowModelFallback: false,
               thinkingEffort: settings.thinkingEffort,
               planMode: settings.mode === "plan",
