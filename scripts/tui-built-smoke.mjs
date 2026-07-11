@@ -15,6 +15,7 @@ async function main() {
   const repoRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
   const entry = join(repoRoot, "dist", "cli", "main.js");
   const workDir = await mkdtemp(join(tmpdir(), "pico-built-tui-smoke-"));
+  const homeDir = await mkdtemp(join(tmpdir(), "pico-built-tui-home-"));
   const fakeServer = await startFakeOpenAiServer({ content: EXPECTED });
   let terminal;
 
@@ -43,6 +44,8 @@ async function main() {
           CI: "false",
           LOG_LEVEL: "error",
           PICO_PERSISTENCE: "0",
+          HOME: homeDir,
+          USERPROFILE: homeDir,
           LLM_BASE_URL: fakeServer.baseURL,
           LLM_API_KEY: "local-test-key",
           LLM_MODEL: "fake-model",
@@ -66,6 +69,7 @@ async function main() {
     }
     await fakeServer.close();
     await rm(workDir, { recursive: true, force: true });
+    await rm(homeDir, { recursive: true, force: true });
   }
 }
 
@@ -105,6 +109,7 @@ async function loadNodePty() {
 function driveTerminal(terminal) {
   return new Promise((resolvePromise, reject) => {
     let output = "";
+    let trustAccepted = false;
     let promptScheduled = false;
     let stopScheduled = false;
     let promptTimer;
@@ -116,7 +121,11 @@ function driveTerminal(terminal) {
     terminal.onData((chunk) => {
       output += chunk;
       const plain = stripAnsi(output);
-      if (!promptScheduled && /pico/iu.test(plain)) {
+      if (!trustAccepted && plain.includes("Pico 需要信任此工作区")) {
+        trustAccepted = true;
+        terminal.write("1\r");
+      }
+      if (!promptScheduled && /Try .*for commands/iu.test(plain)) {
         promptScheduled = true;
         // Wait until Ink has installed raw-mode input handlers. Writing on the
         // first rendered byte can race with mount and lose the submitted line.

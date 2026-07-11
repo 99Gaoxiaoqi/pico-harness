@@ -8,8 +8,16 @@ export interface CliStartupSession {
   sessionSelection: CliSessionSelection;
 }
 
+export interface ResolveCliStartupSessionOptions {
+  /**
+   * 已经过宿主信任门校验的真实工作区路径。提供后不再从 argv 解析目录。
+   */
+  trustedWorkDir?: string;
+}
+
 export async function resolveCliStartupSession(
   args: readonly string[] = process.argv.slice(2),
+  options: ResolveCliStartupSessionOptions = {},
 ): Promise<CliStartupSession> {
   const { values } = parseArgs({
     args: [...args],
@@ -23,7 +31,9 @@ export async function resolveCliStartupSession(
       "fork-session": { type: "string" },
     },
   });
-  const workDir = await resolveCliWorkDir(typeof values.dir === "string" ? values.dir : undefined);
+  const workDir =
+    options.trustedWorkDir ??
+    (await resolveCliWorkDir(typeof values.dir === "string" ? values.dir : undefined));
   const sessionSelection = await resolveCliSession({
     workDir,
     ...(typeof values.session === "string" ? { session: values.session } : {}),
