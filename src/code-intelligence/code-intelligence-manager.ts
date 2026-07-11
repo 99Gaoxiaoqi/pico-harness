@@ -4,6 +4,8 @@ import {
   type LspServerConfig,
   type LspServerDiscoveryResult,
 } from "./lsp-server-discovery.js";
+import { LspCodeIntelligenceService } from "./lsp-service.js";
+import type { CodeIntelligenceService } from "./types.js";
 
 export type CodeIntelligenceBackend = "lsp" | "repo-map";
 
@@ -25,6 +27,8 @@ export interface CodeIntelligenceManagerOptions {
  */
 export class CodeIntelligenceManager {
   private client: StdioLspClient | undefined;
+  private currentService: CodeIntelligenceService | undefined;
+  private startPromise: Promise<CodeIntelligenceStatus> | undefined;
   private currentStatus: CodeIntelligenceStatus = {
     backend: "repo-map",
     reason: "代码智能尚未启动，使用 Repo Map",
@@ -32,7 +36,12 @@ export class CodeIntelligenceManager {
 
   constructor(private readonly options: CodeIntelligenceManagerOptions) {}
 
-  async start(): Promise<CodeIntelligenceStatus> {
+  start(): Promise<CodeIntelligenceStatus> {
+    this.startPromise ??= this.startOnce();
+    return this.startPromise;
+  }
+
+  private async startOnce(): Promise<CodeIntelligenceStatus> {
     const discovery = await discoverLspServer({
       rootDir: this.options.rootDir,
       ...(this.options.lspServers ? { configuredServers: this.options.lspServers } : {}),
@@ -44,6 +53,7 @@ export class CodeIntelligenceManager {
     try {
       await client.start();
       this.client = client;
+      this.currentService = new LspCodeIntelligenceService(this.options.rootDir, client);
       this.currentStatus = {
         backend: "lsp",
         reason: discovery.reason,
@@ -51,6 +61,7 @@ export class CodeIntelligenceManager {
       };
     } catch (error) {
       this.client = undefined;
+      this.currentService = undefined;
       this.currentStatus = {
         backend: "repo-map",
         reason: `LSP server ${discovery.config.id} 启动失败，已降级为 Repo Map: ${errorMessage(error)}`,
@@ -67,9 +78,16 @@ export class CodeIntelligenceManager {
     return this.client?.isReady() ? this.client : undefined;
   }
 
+  service(): CodeIntelligenceService | undefined {
+    return this.currentService;
+  }
+
   async close(): Promise<void> {
-    await this.client?.close();
+    if (this.currentService) await this.currentService.close();
+    else await this.client?.close();
+    this.currentService = undefined;
     this.client = undefined;
+    this.startPromise = undefined;
   }
 
   private fallback(discovery: LspServerDiscoveryResult): CodeIntelligenceStatus {
