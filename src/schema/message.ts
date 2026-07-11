@@ -86,6 +86,16 @@ export interface Message {
   images?: ImagePart[];
 }
 
+/** Engine 内部注入不应在 resume 后伪装成用户消息。 */
+export function isMessageHiddenFromTranscript(message: Message): boolean {
+  if (message.providerData?.["picoHiddenFromTranscript"] === true) return true;
+  if (message.role !== "user" || message.toolCallId !== undefined) return false;
+  return (
+    message.content.startsWith("[SYSTEM REMINDER") ||
+    message.content.startsWith("[SYSTEM] 已达执行预算:")
+  );
+}
+
 /**
  * 图片附件类型(5.5 Image/Media)。
  * 两种形式:base64 内联(通用,所有 provider 都支持)或 URL 引用(部分 provider 支持)。

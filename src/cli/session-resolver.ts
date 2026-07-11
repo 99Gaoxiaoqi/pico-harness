@@ -1,8 +1,8 @@
-import { readdir, stat } from "node:fs/promises";
+import { readdir, rm, stat } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { SessionStore, type SessionRecord } from "../engine/session-store.js";
-import type { Message } from "../schema/message.js";
+import { isMessageHiddenFromTranscript, type Message } from "../schema/message.js";
 import { rememberResolvedCliSession } from "../input/session-settings.js";
 
 export type CliSessionMode = "new" | "continue" | "resume" | "fork";
@@ -19,6 +19,9 @@ export interface CliSessionSummary {
   createdAt: Date;
   updatedAt: Date;
   messageCount: number;
+  title?: string;
+  firstMessage?: string;
+  lastMessage?: string;
 }
 
 export interface ResolveCliSessionOptions {
@@ -92,12 +95,24 @@ export async function listCliSessionSummaries(workDir: string): Promise<CliSessi
   const summaries: CliSessionSummary[] = [];
   for (const file of files) {
     const records = await new SessionStore(file.path).load();
+    const messages = recoverSessionMessages(records);
+    const visibleUserMessages = messages.filter(
+      (message) =>
+        message.role === "user" &&
+        message.toolCallId === undefined &&
+        !isMessageHiddenFromTranscript(message) &&
+        message.content.trim().length > 0,
+    );
+    const firstMessage = compactSessionText(visibleUserMessages[0]?.content);
+    const lastMessage = compactSessionText(visibleUserMessages.at(-1)?.content);
     summaries.push({
       id: file.sessionId,
       cwd: workDir,
       createdAt: new Date(file.birthtimeMs > 0 ? file.birthtimeMs : file.ctimeMs),
       updatedAt: new Date(file.mtimeMs),
-      messageCount: countRecoveredMessages(records),
+      messageCount: messages.length,
+      ...(firstMessage ? { title: firstMessage, firstMessage } : {}),
+      ...(lastMessage ? { lastMessage } : {}),
     });
   }
 
@@ -152,7 +167,7 @@ async function listSessionFiles(workDir: string): Promise<SessionFileInfo[]> {
   return candidates;
 }
 
-function countRecoveredMessages(records: readonly SessionRecord[]): number {
+function recoverSessionMessages(records: readonly SessionRecord[]): Message[] {
   let history: Message[] = [];
   for (const record of records) {
     if (record.type === "message") {
@@ -166,7 +181,13 @@ function countRecoveredMessages(records: readonly SessionRecord[]): number {
       history = history.slice(0, record.messageIndex);
     }
   }
-  return history.length;
+  return history;
+}
+
+function compactSessionText(value: string | undefined): string | undefined {
+  const compacted = value?.replace(/\s+/gu, " ").trim();
+  if (!compacted) return undefined;
+  return compacted.length <= 240 ? compacted : `${compacted.slice(0, 239)}…`;
 }
 
 function applyUndoToHistory(history: readonly Message[], count: number): Message[] {
@@ -198,6 +219,11 @@ async function assertSessionFileExists(
 
   const prefix = action === "resume" ? "无法恢复" : "无法 fork";
   throw new Error(`${prefix} session ${sessionId}: 找不到 ${path}`);
+}
+
+/** 仅用于新 fork 构建失败时清理尚未公布的目标会话。 */
+export async function removeCliSessionFile(workDir: string, sessionId: string): Promise<void> {
+  await rm(sessionFilePath(workDir, sessionId), { force: true });
 }
 
 function rememberSelection(selection: CliSessionSelection): CliSessionSelection {

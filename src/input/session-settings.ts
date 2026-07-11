@@ -200,6 +200,15 @@ export function getStoredSessionSettings(sessionId: string): SessionSettings | u
   return settingsBySession.get(sessionId);
 }
 
+/** 新 fork 在公布前失败时，同步移除其未对外可见的运行态。 */
+export function forgetSessionSettings(sessionId: string): void {
+  const settings = settingsBySession.get(sessionId);
+  if (settings) persistenceBySettings.delete(settings);
+  settingsBySession.delete(sessionId);
+  resolvedCliSessionSemantics.delete(sessionId);
+  globalSessionPermissionGrants.clear(sessionId);
+}
+
 export function resetSessionSettingsForTests(): void {
   settingsBySession.clear();
   resolvedCliSessionSemantics.clear();
