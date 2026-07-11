@@ -1,5 +1,10 @@
 import type { ProviderKind } from "./factory.js";
 import { resolveProviderProfile, type ProviderProfile, type ProviderProtocol } from "./profile.js";
+import {
+  resolveModelReasoningCapability,
+  type ModelReasoningCapabilityInput,
+  type ResolvedModelReasoningCapability,
+} from "./reasoning-capability.js";
 
 export interface ModelPrice {
   currency: "USD";
@@ -24,6 +29,8 @@ export interface ModelRouteCapabilities {
   outputSource: CapabilityValueSource;
   vision: CapabilitySupport;
   reasoning: CapabilitySupport;
+  /** Model-specific reasoning levels and protocol request patches. */
+  reasoningProfile: ResolvedModelReasoningCapability;
   toolCall: CapabilitySupport;
   cache: CapabilitySupport;
   price: ModelPrice;
@@ -35,7 +42,7 @@ export interface ModelCapabilityConfig {
   context?: number;
   output?: number;
   vision?: boolean;
-  reasoning?: boolean;
+  reasoning?: ModelReasoningCapabilityInput;
   toolCall?: boolean;
   cache?: boolean;
   price?: Omit<ModelPrice, "currency" | "source">;
@@ -50,6 +57,9 @@ export function resolveModelRouteCapabilities(
 ): ModelRouteCapabilities {
   const profile = resolveProviderProfile(provider, model);
   const fallbackModel = override?.fallback === false ? undefined : override?.fallback;
+  const reasoningProfile = resolveModelReasoningCapability(provider, model, {
+    config: override?.reasoning,
+  });
   return {
     contextWindowTokens: override?.context ?? profile.contextWindowTokens,
     contextSource: override?.context === undefined ? "profile_default" : "config",
@@ -57,7 +67,8 @@ export function resolveModelRouteCapabilities(
     outputSource: override?.output === undefined ? "profile_default" : "config",
     // Adapter support does not prove a custom endpoint/model supports the feature.
     vision: override?.vision ?? "unknown",
-    reasoning: override?.reasoning ?? "unknown",
+    reasoning: reasoningProfile.enabled,
+    reasoningProfile,
     toolCall: override?.toolCall ?? "unknown",
     cache: override?.cache ?? "unknown",
     price: override?.price

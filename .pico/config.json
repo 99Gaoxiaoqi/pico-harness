@@ -13,7 +13,11 @@
           "context": 1048576,
           "output": 131072,
           "vision": false,
-          "reasoning": true,
+          "reasoning": {
+            "enabled": true,
+            "defaultLevel": "max",
+            "levels": ["nothink", "high", "max"]
+          },
           "toolCall": true,
           "cache": true
         },
@@ -52,7 +56,11 @@
           "context": 1048576,
           "output": 393216,
           "vision": false,
-          "reasoning": true,
+          "reasoning": {
+            "enabled": true,
+            "defaultLevel": "max",
+            "levels": ["off", "high", "max"]
+          },
           "toolCall": true,
           "cache": false
         },
@@ -60,7 +68,11 @@
           "context": 1048576,
           "output": 393216,
           "vision": false,
-          "reasoning": true,
+          "reasoning": {
+            "enabled": true,
+            "defaultLevel": "max",
+            "levels": ["off", "high", "max"]
+          },
           "toolCall": true,
           "cache": false
         },
@@ -290,7 +302,11 @@
         "deepseek-v4-pro": {
           "context": 128000,
           "output": 4096,
-          "reasoning": true,
+          "reasoning": {
+            "enabled": true,
+            "defaultLevel": "max",
+            "levels": ["off", "high", "max"]
+          },
           "toolCall": true,
           "cache": true
         }
