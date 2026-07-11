@@ -19,6 +19,7 @@ import {
   copyFileWithCloneFallback,
   discardFileChangeJournal,
   fileChangeJournalWarnings,
+  fileChangeJournalCoversPath,
   fileMatchesPreimage,
   inspectFileChangeJournal,
   type FileChangeJournal,
@@ -79,7 +80,7 @@ export interface FileHistoryDiffStat {
   addedLines: number;
   removedLines: number;
   files: FileHistoryDiffFileStat[];
-  /** true 表示本轮存在无法捕获或明确排除的文件范围。 */
+  /** true 表示本轮存在无法完整捕获的文件范围。 */
   incomplete?: boolean;
   warnings?: string[];
 }
@@ -147,6 +148,14 @@ export async function fileHistoryBeginJournal(
 /** 显式标记事务无法覆盖的副作用（如 background bash）。 */
 export function fileHistoryAddJournalWarning(journal: FileHistoryJournal, warning: string): void {
   addFileChangeJournalWarning(journal, warning);
+}
+
+/** 当前活动事务已覆盖的精确路径无需再以中途状态创建备份。 */
+export function fileHistoryJournalCoversPath(
+  journal: FileHistoryJournal,
+  filePath: string,
+): boolean {
+  return fileChangeJournalCoversPath(journal, filePath);
 }
 
 function errorMessage(error: unknown): string {
