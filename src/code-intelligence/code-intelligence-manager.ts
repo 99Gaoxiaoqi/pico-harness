@@ -5,6 +5,7 @@ import {
   type LspServerDiscoveryResult,
 } from "./lsp-server-discovery.js";
 import { LspCodeIntelligenceService } from "./lsp-service.js";
+import { RepoMapService } from "./repo-map.js";
 import type { CodeIntelligenceService } from "./types.js";
 
 export type CodeIntelligenceBackend = "lsp" | "repo-map";
@@ -61,7 +62,7 @@ export class CodeIntelligenceManager {
       };
     } catch (error) {
       this.client = undefined;
-      this.currentService = undefined;
+      this.currentService = new RepoMapService(this.options.rootDir);
       this.currentStatus = {
         backend: "repo-map",
         reason: `LSP server ${discovery.config.id} 启动失败，已降级为 Repo Map: ${errorMessage(error)}`,
@@ -91,6 +92,7 @@ export class CodeIntelligenceManager {
   }
 
   private fallback(discovery: LspServerDiscoveryResult): CodeIntelligenceStatus {
+    this.currentService = new RepoMapService(this.options.rootDir);
     this.currentStatus = { backend: "repo-map", reason: discovery.reason };
     return this.currentStatus;
   }

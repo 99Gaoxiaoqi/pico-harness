@@ -25,6 +25,8 @@ import { SearchToolsTool } from "./search-tools.js";
 import { registerAskUserTool } from "./ask-user.js";
 import type { AskUserHandler } from "./ask-user.js";
 import { WorkspaceRoots, buildWorkspaceBoundaryMiddleware } from "./workspace-roots.js";
+import type { CodeIntelligenceService } from "../code-intelligence/types.js";
+import { createCodeIntelligenceTools } from "./code-intelligence.js";
 
 export interface DefaultToolRegistryOptions extends ToolRegistryOptions {
   /** Read/Write/Edit/Glob/Grep 与请求边界共享的工作区根集合。 */
@@ -56,6 +58,8 @@ export interface DefaultToolRegistryOptions extends ToolRegistryOptions {
   toolDisclosure?: ToolDisclosure;
   /** 仅在宿主提供结构化交互 UI 时注册 ask_user，避免无 UI 的运行永久等待。 */
   askUserHandler?: AskUserHandler;
+  /** 宿主启动后注入的 LSP / Repo Map 统一服务。 */
+  codeIntelligence?: CodeIntelligenceService;
 }
 
 export function buildDefaultToolRegistry(
@@ -68,6 +72,7 @@ export function buildDefaultToolRegistry(
     todoStore,
     toolDisclosure,
     askUserHandler,
+    codeIntelligence,
     workspaceRoots,
     deferWorkspaceBoundary = false,
     ...registryOptions
@@ -109,6 +114,11 @@ export function buildDefaultToolRegistry(
   if (askUserHandler) registerAskUserTool(registry, askUserHandler);
   registry.register(new FetchURLTool());
   registry.register(new WebSearchTool());
+  if (codeIntelligence) {
+    for (const tool of createCodeIntelligenceTools(workDir, codeIntelligence)) {
+      registry.register(tool);
+    }
+  }
   // 渐进披露(ROADMAP 5.4):注入 disclosure 时注册 search_tools 元工具。
   // search_tools 持有 registry 的实时定义数据源,execute 时才筛选扩展工具。
   // 因此 host 后续注册的委派/MCP 工具也会立即可检索。
