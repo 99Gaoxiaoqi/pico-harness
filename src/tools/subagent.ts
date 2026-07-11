@@ -347,8 +347,17 @@ export class DelegateTaskTool implements BaseTool {
     maxSpawnDepth: number,
     signal?: AbortSignal,
   ): Promise<DelegationBatchResult["results"][number]> {
-    if (task.mode === "worker" && this.options.worktreeSupervisor) {
-      return this.runOneInWorktree(task, taskIndex, depth, maxSpawnDepth, signal);
+    if (task.mode === "worker") {
+      if (this.options.worktreeSupervisor) {
+        return this.runOneInWorktree(task, taskIndex, depth, maxSpawnDepth, signal);
+      }
+      return {
+        taskIndex,
+        status: "error",
+        error:
+          "worker 需要 Git worktree 隔离，当前仓库监督器不可用。请先初始化 Git 并建立基线提交，然后重启 Pico；已拒绝降级为直接写主工作区。",
+        durationMs: 0,
+      };
     }
     return this.runOneDirect(task, taskIndex, depth, maxSpawnDepth, undefined, signal);
   }
@@ -365,7 +374,7 @@ export class DelegateTaskTool implements BaseTool {
       ...task,
       context: [
         task.context,
-        "你正在独立 Git worktree 中开发。完成后运行最小相关验证，并将所有修改 git commit 到当前任务分支；不要 push，不要合并目标分支。",
+        "你正在独立 Git worktree 中开发。完成后运行最小相关验证；不要 git commit、push 或合并，宿主会在你退出后原子打包当前 worktree 变更。",
       ]
         .filter(Boolean)
         .join("\n\n"),

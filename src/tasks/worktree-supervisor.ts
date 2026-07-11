@@ -5,7 +5,13 @@ import { isAbsolute, relative, resolve } from "node:path";
 
 import { TaskRegistry, type TaskSnapshot, isTerminalTaskStatus } from "./task-registry.js";
 
-export type WorktreeTaskStatus = "preparing" | "running" | "completed" | "failed" | "stopped";
+export type WorktreeTaskStatus =
+  | "preparing"
+  | "running"
+  | "stopping"
+  | "completed"
+  | "failed"
+  | "stopped";
 
 export interface WorktreeTaskRequest {
   description: string;
@@ -83,6 +89,7 @@ export interface WorktreeSupervisorOptions {
   generateId?: () => string;
   maxOutputChars?: number;
   maxPendingMessages?: number;
+  stopTimeoutMs?: number;
 }
 
 export interface CleanupOptions {
@@ -129,6 +136,7 @@ interface WorktreeTaskRecord {
 
 const DEFAULT_MAX_OUTPUT_CHARS = 32_000;
 const DEFAULT_MAX_PENDING_MESSAGES = 100;
+const DEFAULT_STOP_TIMEOUT_MS = 10_000;
 
 /**
  * 为可写子代理提供独立 Git worktree，不负责自动合并。
@@ -144,6 +152,7 @@ export class WorktreeSupervisor {
   private readonly generateId: () => string;
   private readonly maxOutputChars: number;
   private readonly maxPendingMessages: number;
+  private readonly stopTimeoutMs: number;
   private readonly records = new Map<string, WorktreeTaskRecord>();
   private readonly completionSubscribers = new Set<CompletionSubscriber>();
 
@@ -172,6 +181,10 @@ export class WorktreeSupervisor {
       options.maxPendingMessages ?? DEFAULT_MAX_PENDING_MESSAGES,
       "maxPendingMessages",
     );
+    this.stopTimeoutMs = positiveInteger(
+      options.stopTimeoutMs ?? DEFAULT_STOP_TIMEOUT_MS,
+      "stopTimeoutMs",
+    );
   }
 
   start(request: WorktreeTaskRequest, runner: WorktreeTaskRunner): WorktreeTaskSnapshot {
@@ -198,9 +211,17 @@ export class WorktreeSupervisor {
     const record = this.requireRecord(taskId);
     if (isTerminal(record.status)) return this.toSnapshot(record);
 
-    record.controller.abort(new DOMException(reason, "AbortError"));
-    await this.captureRepositoryState(record, false);
-    this.finish(record, "stopped", { error: reason });
+    if (record.status !== "stopping") {
+      record.status = "stopping";
+      record.updatedAt = this.now();
+      record.controller.abort(new DOMException(reason, "AbortError"));
+    }
+    const settled = await waitForSettlement(record.promise, this.stopTimeoutMs);
+    if (!settled) {
+      throw new Error(
+        `任务 ${taskId} 已收到停止信号，但 runner 在 ${this.stopTimeoutMs}ms 内未退出；状态保持 stopping`,
+      );
+    }
     return this.toSnapshot(record);
   }
 
@@ -374,6 +395,9 @@ export class WorktreeSupervisor {
         drainMessages: () => this.drainMessages(record),
       });
       record.result = result ? cloneResult(result) : undefined;
+      if (!record.controller.signal.aborted) {
+        await this.commitPendingChanges(record);
+      }
       await this.captureRepositoryState(record, true);
       record.settled = true;
       if (record.controller.signal.aborted) {
@@ -454,10 +478,40 @@ export class WorktreeSupervisor {
       }
       record.commitHash = commit.stdout.trim();
       record.dirty = status.stdout.trim().length > 0;
+      if (required && record.dirty) {
+        throw new Error(`worker 完成后 worktree 仍有未提交修改: ${record.worktreePath}`);
+      }
     } catch (error) {
       if (required) throw error;
       this.appendOutput(record, `\n[supervisor] 无法读取 worktree 状态: ${errorMessage(error)}\n`);
     }
+  }
+
+  /** 由宿主在沙箱外把 worker 的已隔离变更打包成原子提交。 */
+  private async commitPendingChanges(record: WorktreeTaskRecord): Promise<void> {
+    const status = await this.git(["status", "--porcelain"], {
+      cwd: record.worktreePath,
+      signal: record.controller.signal,
+    });
+    if (status.stdout.trim().length === 0) return;
+
+    await this.git(["add", "--all"], {
+      cwd: record.worktreePath,
+      signal: record.controller.signal,
+    });
+    record.controller.signal.throwIfAborted();
+    await this.git(
+      [
+        "-c",
+        "user.name=Pico Worker",
+        "-c",
+        "user.email=pico-worker@localhost",
+        "commit",
+        "-m",
+        workerCommitMessage(record.request.description),
+      ],
+      { cwd: record.worktreePath, signal: record.controller.signal },
+    );
   }
 
   private appendOutput(record: WorktreeTaskRecord, chunk: string): void {
@@ -665,10 +719,32 @@ function defaultResourceId(): string {
 }
 
 function isTerminal(status: WorktreeTaskStatus): boolean {
-  if (status === "preparing" || status === "running") return false;
+  if (status === "preparing" || status === "running" || status === "stopping") return false;
   return isTerminalTaskStatus(
     status === "stopped" ? "killed" : status === "completed" ? "completed" : "failed",
   );
+}
+
+function workerCommitMessage(description: string): string {
+  const subject = description.replace(/[\0\r\n]+/gu, " ").trim().slice(0, 100) || "完成子任务";
+  return `feat(worker): ${subject}`;
+}
+
+function waitForSettlement(promise: Promise<void>, timeoutMs: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      resolve(false);
+    }, timeoutMs);
+    void promise.finally(() => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(true);
+    });
+  });
 }
 
 async function pathExists(path: string): Promise<boolean> {

@@ -103,7 +103,10 @@ export class TaskHostRuntime {
   async close(): Promise<void> {
     const running = this.supervisor
       .list()
-      .filter((task) => task.status === "preparing" || task.status === "running");
+      .filter(
+        (task) =>
+          task.status === "preparing" || task.status === "running" || task.status === "stopping",
+      );
     await Promise.allSettled(
       running.map((task) => this.supervisor.stop(task.taskId, "TUI closed")),
     );

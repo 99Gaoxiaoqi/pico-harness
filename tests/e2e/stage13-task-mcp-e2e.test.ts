@@ -45,10 +45,8 @@ describe("stage 13 task and MCP host integration", () => {
         await gate.promise;
         const messages = context.drainMessages();
         await writeFile(join(context.worktreePath, "worker.txt"), messages.join("\n"), "utf8");
-        await git(["add", "worker.txt"], context.worktreePath);
-        await git(["commit", "-m", "feat: worker result"], context.worktreePath);
         context.appendOutput(`received: ${messages.join(", ")}`);
-        return { summary: "worker committed" };
+        return { summary: "worker changes ready" };
       },
     );
     taskRuntime.sendMessage(started.taskId, "include host feedback");
@@ -62,6 +60,25 @@ describe("stage 13 task and MCP host integration", () => {
     expect(taskRuntime.mergeQueue.get(started.taskId)?.status).toBe("merged");
     await taskRuntime.cleanupMerged(started.taskId);
     expect(await readFile(join(repo, "worker.txt"), "utf8")).toBe("include host feedback");
+
+    const runnerEntered = deferred();
+    const stoppable = taskRuntime.start(
+      { description: "verify physical stop", branchSlug: "stoppable" },
+      async (context) => {
+        runnerEntered.resolve();
+        await new Promise<void>((resolveStop) => {
+          context.signal.addEventListener(
+            "abort",
+            () => setTimeout(resolveStop, 25),
+            { once: true },
+          );
+        });
+      },
+    );
+    await runnerEntered.promise;
+    const stopPromise = taskRuntime.stop(stoppable.taskId);
+    expect(taskRuntime.supervisor.get(stoppable.taskId)?.status).toBe("stopping");
+    await expect(stopPromise).resolves.toMatchObject({ status: "stopped" });
 
     const { url, close } = await startMcpServer();
     cleanups.push(close);
