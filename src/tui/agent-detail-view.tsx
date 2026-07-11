@@ -61,7 +61,9 @@ export function buildAgentDetailRows(
   const width = normalizeWidth(options.renderWidth);
   const limit = normalizeTimelineLimit(options.timelineLimit);
   const name = agent.agentName?.trim() || agent.task?.trim() || "Agent";
-  const metadata = [agent.status, agent.mode].filter(Boolean).join(" · ");
+  const completionPolicy =
+    agent.completionPolicy === "optional" ? "background" : agent.completionPolicy;
+  const metadata = [agent.status, agent.mode, completionPolicy].filter(Boolean).join(" · ");
   const rows = [
     truncateTerminalText(`← Main / ${name}`, width),
     `${STATUS_MARKER[agent.status]} ${metadata}`,

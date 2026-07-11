@@ -23,6 +23,7 @@ export interface AgentNavigationItem {
   agentName?: string;
   task?: string;
   mode?: "explore" | "worker";
+  completionPolicy?: "required" | "optional" | "detached";
   currentAction?: string;
   summary?: string;
   unreadCount?: number;
@@ -74,6 +75,9 @@ export function projectAgentNavigationItems(
         : {}),
       task: subagent.activity.task,
       ...(subagent.activity.mode !== undefined ? { mode: subagent.activity.mode } : {}),
+      ...(subagent.activity.completionPolicy !== undefined
+        ? { completionPolicy: subagent.activity.completionPolicy }
+        : {}),
       ...(subagent.activity.currentAction !== undefined
         ? { currentAction: subagent.activity.currentAction }
         : {}),

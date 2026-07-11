@@ -18,6 +18,7 @@ export interface SubagentActivityEvent {
   status: SubagentActivityStatus;
   agentName?: string;
   mode?: "explore" | "worker";
+  completionPolicy?: "required" | "optional" | "detached";
   currentAction?: string;
   summary?: string;
 }

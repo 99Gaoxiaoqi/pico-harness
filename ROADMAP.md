@@ -594,6 +594,7 @@ git worktree remove ../pico-1-streaming
 
 ### 工程与运行时后续收口（未排期）
 
+- [x] 2026-07-12：重构子代理完成语义：`delegate_task` 默认 `required` 并在子代理收口前阻塞返回；显式 `optional` 完成后把隐藏结果持久化到主会话，供下一个模型边界自动吸收，`detached` 只更新活动面板；旧 `background=true` 仅保留输入兼容，不再向模型暴露，TUI 展示 completion policy 且不暴露内部 ID。
 - [ ] 2026-07-11：删除只被测试引用的影子权限链 `approval/policy.ts` / `ApprovalPolicy`，把文档和验证统一到生产 `buildApprovalMiddleware`。
 - [ ] 2026-07-11：收敛两套 compaction/aux provider 实现，保留生产 `compactToBudget + FullCompactor` 单链路。
 - [ ] 2026-07-11：清理已退役但仍进入构建的 Plugin manager、孤立 Agent/Permission JSX 面板和 one-shot rewind CLI helper。
@@ -622,6 +623,12 @@ git worktree remove ../pico-1-streaming
 ---
 
 ## 📅 变更记录
+
+- 2026-07-12：收紧子代理完成与最终回答边界
+  - `delegate_task` 新增 `required / optional / detached` 三种 completion policy，默认 `required` 以前台工具调用形成硬等待，避免主 Agent 在必需结果返回前结束。
+  - `optional` 完成摘要以隐藏的 `subagent_completion` 消息持久化到主会话，在下一个模型边界自动吸收且不会伪装成用户输入；`detached` 不进入主上下文。
+  - 活动事件、回放投影、代理导航和详情视图保留并展示等待语义；旧 `background=true` 兼容映射为 `optional`，不再要求模型或用户轮询 task ID。
+  - 新增一条跨 DelegateTaskTool、DelegationManager、Session 完成消息与 TUI Reporter 的集成主链，覆盖三种策略。
 
 - 2026-07-12：子代理活动改为 Claude Code 风格的导航与详情视图
   - 主 transcript 不再纵向展开所有子代理卡片；输入框下方常驻 Main + 子代理紧凑导航，展示 queued/running/completed/failed 与未读数。

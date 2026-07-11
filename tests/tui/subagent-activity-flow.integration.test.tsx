@@ -72,6 +72,7 @@ describe("subagent activity flow", () => {
       (subagent) => subagent.activity.task === "cache",
     );
     expect(auth?.timeline.map((item) => item.kind)).toEqual(["thinking", "message", "tool"]);
+    expect(auth?.activity.completionPolicy).toBe("required");
     expect(cache?.timeline.map((item) => item.kind)).toEqual(["thinking", "message", "tool"]);
     expect(auth?.timeline.find((item) => item.kind === "message")).toMatchObject({
       content: "working:auth",

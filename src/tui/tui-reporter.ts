@@ -340,6 +340,9 @@ export class TuiReporter implements Reporter {
         status: activity.status,
         ...(activity.agentName !== undefined ? { agentName: activity.agentName } : {}),
         ...(activity.mode !== undefined ? { mode: activity.mode } : {}),
+        ...(activity.completionPolicy !== undefined
+          ? { completionPolicy: activity.completionPolicy }
+          : {}),
         ...(activity.currentAction !== undefined ? { currentAction: activity.currentAction } : {}),
         ...(activity.summary !== undefined ? { summary: activity.summary } : {}),
       },

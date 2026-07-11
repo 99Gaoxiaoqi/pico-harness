@@ -17,6 +17,8 @@ export interface DelegationBatchResult {
   totalDurationMs: number;
 }
 
+export type DelegationCompletionPolicy = "required" | "optional" | "detached";
+
 export type DelegationRecordStatus = "running" | "completed" | "error" | "cancelled";
 export type DelegationTaskStatus = "queued" | "running" | "done" | "error" | "cancelled";
 
@@ -25,6 +27,28 @@ export interface DelegationManagerOptions {
   maxAsyncChildren?: number;
   maxOutputSummaryChars?: number;
   taskRegistry?: TaskRegistry;
+  onCompletion?: (completion: DelegationCompletionEnvelope) => void;
+}
+
+export interface DelegationCompletionEnvelope {
+  completionSeq: number;
+  completionPolicy: DelegationCompletionPolicy;
+  status: Exclude<DelegationRecordStatus, "running">;
+  outputSummary: string;
+  error?: string;
+}
+
+export function formatDelegationCompletions(
+  completions: readonly DelegationCompletionEnvelope[],
+): string {
+  const lines = completions.map((completion, index) => {
+    const detail = completion.outputSummary || completion.error || "子代理未返回摘要";
+    return `${index + 1}. ${completion.status}: ${detail}`;
+  });
+  return [
+    "[SUBAGENT COMPLETION] 以下子代理已经收口。请吸收这些结果后继续推进；不要向用户暴露内部任务 ID。",
+    ...lines,
+  ].join("\n");
 }
 
 export interface DelegationTaskRuntimeInput {
@@ -46,6 +70,7 @@ export interface DelegationTaskSnapshot {
   taskId: string;
   delegationId: string;
   status: DelegationRecordStatus;
+  completionPolicy: DelegationCompletionPolicy;
   taskStatus: DelegationTaskStatus;
   statusSnapshot: {
     status: DelegationTaskStatus;
@@ -65,6 +90,8 @@ interface DelegationRecord {
   id: string;
   taskId: string;
   status: DelegationRecordStatus;
+  completionPolicy: DelegationCompletionPolicy;
+  completionSeq?: number;
   startedAt: number;
   updatedAt: number;
   completedAt?: number;
@@ -83,6 +110,8 @@ export class DelegationManager {
   readonly maxConcurrentChildren: number;
   private readonly maxAsyncChildren: number;
   private readonly maxOutputSummaryChars: number;
+  private readonly onCompletion?: DelegationManagerOptions["onCompletion"];
+  private nextCompletionSeq = 1;
   readonly taskRegistry?: TaskRegistry;
 
   constructor(options: DelegationManagerOptions = {}) {
@@ -90,11 +119,14 @@ export class DelegationManager {
     this.maxAsyncChildren = options.maxAsyncChildren ?? 3;
     this.maxOutputSummaryChars = options.maxOutputSummaryChars ?? 2_000;
     this.taskRegistry = options.taskRegistry;
+    this.onCompletion = options.onCompletion;
   }
 
   dispatch(
     runner: (signal: AbortSignal) => Promise<DelegationBatchResult>,
-    taskInput: DelegationTaskRuntimeInput = {},
+    taskInput: DelegationTaskRuntimeInput & {
+      completionPolicy?: DelegationCompletionPolicy;
+    } = {},
   ): {
     status: string;
     delegationId?: string;
@@ -113,13 +145,14 @@ export class DelegationManager {
     }
 
     const now = Date.now();
+    const completionPolicy = taskInput.completionPolicy ?? "required";
     const id = `delegation-${now}-${this.nextId}`;
     this.nextId++;
     const task = this.taskRegistry?.create("local_agent", {
       description: taskInput.description ?? "delegate_task",
       toolUseId: taskInput.toolUseId,
       outputFile: taskInput.outputFile,
-      data: { delegationId: id },
+      data: { delegationId: id, completionPolicy },
     });
     if (task) {
       this.taskRegistry?.start(task.taskId);
@@ -130,6 +163,7 @@ export class DelegationManager {
       id,
       taskId: task?.taskId ?? id,
       status: "running",
+      completionPolicy,
       startedAt: now,
       updatedAt: now,
       controller,
@@ -144,7 +178,10 @@ export class DelegationManager {
         record.result = result;
         record.completedAt = Date.now();
         record.updatedAt = record.completedAt;
-        this.taskRegistry?.complete(record.taskId, { data: { delegationId: id, result } });
+        this.taskRegistry?.complete(record.taskId, {
+          data: { delegationId: id, completionPolicy, result },
+        });
+        this.publishCompletion(record);
       })
       .catch((err: unknown) => {
         record.status = controller.signal.aborted ? "cancelled" : "error";
@@ -152,10 +189,15 @@ export class DelegationManager {
         record.completedAt = Date.now();
         record.updatedAt = record.completedAt;
         if (record.status === "cancelled") {
-          this.taskRegistry?.kill(record.taskId, record.error, { data: { delegationId: id } });
+          this.taskRegistry?.kill(record.taskId, record.error, {
+            data: { delegationId: id, completionPolicy },
+          });
         } else {
-          this.taskRegistry?.fail(record.taskId, record.error, { data: { delegationId: id } });
+          this.taskRegistry?.fail(record.taskId, record.error, {
+            data: { delegationId: id, completionPolicy },
+          });
         }
+        this.publishCompletion(record);
       });
 
     this.records.set(id, record);
@@ -210,6 +252,7 @@ export class DelegationManager {
       taskId: record.taskId,
       delegationId: record.id,
       status: record.status,
+      completionPolicy: record.completionPolicy,
       taskStatus,
       statusSnapshot: {
         status: taskStatus,
@@ -248,6 +291,30 @@ export class DelegationManager {
     }
     return "";
   }
+
+  private publishCompletion(record: DelegationRecord): void {
+    record.completionSeq ??= this.nextCompletionSeq++;
+    if (record.completionPolicy === "detached") return;
+    try {
+      this.onCompletion?.(this.toCompletionEnvelope(record));
+    } catch (error) {
+      // 完成通知是 best-effort，监听端异常不能反向污染子代理的终态。
+      void error;
+    }
+  }
+
+  private toCompletionEnvelope(record: DelegationRecord): DelegationCompletionEnvelope {
+    if (record.status === "running" || record.completionSeq === undefined) {
+      throw new Error("Delegation completion is not settled");
+    }
+    return {
+      completionSeq: record.completionSeq,
+      completionPolicy: record.completionPolicy,
+      status: record.status,
+      outputSummary: this.outputSummary(record),
+      ...(record.error !== undefined ? { error: record.error } : {}),
+    };
+  }
 }
 
 function mapTaskStatus(status: DelegationRecordStatus): DelegationTaskStatus {
@@ -276,7 +343,8 @@ export class DelegateStatusTool implements BaseTool {
   definition(): ToolDefinition {
     return {
       name: "delegate_status",
-      description: "查询 background=true 委派任务的状态和完成结果。",
+      description:
+        "兼容性诊断工具：仅查询旧调用已经持有 delegation_id 的委派状态。新委派会自动交付结果，不要主动调用。",
       inputSchema: {
         type: "object",
         properties: {

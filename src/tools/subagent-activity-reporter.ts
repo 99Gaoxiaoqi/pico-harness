@@ -6,6 +6,7 @@ export interface SubagentActivityScope {
   task: string;
   agentName?: string;
   mode: "explore" | "worker";
+  completionPolicy: "required" | "optional" | "detached";
 }
 
 /**
