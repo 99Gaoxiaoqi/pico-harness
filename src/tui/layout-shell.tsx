@@ -44,6 +44,8 @@ export function LayoutShell({
           {modal}
         </Box>
       )}
+      {/* 吸收保守布局预算留下的空行，让输入框/代理导航稳定贴底。 */}
+      <Box flexGrow={1} />
       {bottom}
     </Box>
   );

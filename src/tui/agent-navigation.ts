@@ -1,3 +1,5 @@
+import type { TuiProjection, TuiSubagentTraceItem } from "./tui-event-store.js";
+
 export const MAIN_AGENT_ID = "main";
 
 export type AgentNavigationStatus = "idle" | "queued" | "running" | "completed" | "failed";
@@ -56,6 +58,49 @@ export function createAgentNavigationState(): AgentNavigationState {
   return { focus: "input", selectedId: MAIN_AGENT_ID, activeId: MAIN_AGENT_ID };
 }
 
+/** 将 EventStore 的权威子代理投影收敛为 App 层的导航模型。 */
+export function projectAgentNavigationItems(
+  projection: Pick<TuiProjection, "subagents">,
+  mainStatus: AgentNavigationStatus = "idle",
+): AgentNavigationItem[] {
+  const subagents = Object.values(projection.subagents)
+    .sort((left, right) => left.entryId.localeCompare(right.entryId))
+    .map((subagent) => ({
+      id: subagent.activityId,
+      kind: "subagent" as const,
+      status: subagent.activity.status,
+      ...(subagent.activity.agentName !== undefined
+        ? { agentName: subagent.activity.agentName }
+        : {}),
+      task: subagent.activity.task,
+      ...(subagent.activity.mode !== undefined ? { mode: subagent.activity.mode } : {}),
+      ...(subagent.activity.currentAction !== undefined
+        ? { currentAction: subagent.activity.currentAction }
+        : {}),
+      ...(subagent.activity.summary !== undefined ? { summary: subagent.activity.summary } : {}),
+      timeline: subagent.timeline.map(projectTimelineItem),
+    }));
+  return [createMainAgentItem({ status: mainStatus }), ...subagents];
+}
+
+function projectTimelineItem(item: TuiSubagentTraceItem): AgentTimelineItem {
+  if (item.kind === "thinking") return { id: item.id, kind: "thinking" };
+  if (item.kind === "message") return { id: item.id, kind: "message", content: item.content };
+  return {
+    id: item.id,
+    kind: "tool",
+    name: item.name,
+    status:
+      item.status === "success" ? "completed" : item.status === "error" ? "failed" : "running",
+    ...(item.result !== undefined ? { summary: compactTimelineText(item.result, 240) } : {}),
+  };
+}
+
+function compactTimelineText(value: string, maxLength: number): string {
+  const normalized = value.replace(/\s+/gu, " ").trim();
+  return normalized.length <= maxLength ? normalized : `${normalized.slice(0, maxLength - 1)}…`;
+}
+
 /** Main 始终在首位，并且丢弃重复 ID，避免键盘循环落入歧义。 */
 export function normalizeAgentNavigationItems(
   items: readonly AgentNavigationItem[],
@@ -78,10 +123,13 @@ export function reconcileAgentNavigationState(
   items: readonly AgentNavigationItem[],
 ): AgentNavigationState {
   const ids = new Set(normalizeAgentNavigationItems(items).map((item) => item.id));
+  const selectedId = ids.has(state.selectedId) ? state.selectedId : MAIN_AGENT_ID;
+  const activeId = ids.has(state.activeId) ? state.activeId : MAIN_AGENT_ID;
+  if (selectedId === state.selectedId && activeId === state.activeId) return state;
   return {
     ...state,
-    selectedId: ids.has(state.selectedId) ? state.selectedId : MAIN_AGENT_ID,
-    activeId: ids.has(state.activeId) ? state.activeId : MAIN_AGENT_ID,
+    selectedId,
+    activeId,
   };
 }
 

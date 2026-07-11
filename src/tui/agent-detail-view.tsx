@@ -28,8 +28,8 @@ export function AgentDetailView({
 }: AgentDetailViewProps): React.ReactNode {
   const rows = buildAgentDetailRows(agent, { renderWidth, timelineLimit });
   const start = Math.max(0, Math.floor(startOffsetRows));
-  const end = visibleRows === undefined ? undefined : start + Math.max(0, Math.floor(visibleRows));
-  const visible = rows.slice(start, end);
+  const limit = visibleRows === undefined ? undefined : Math.max(0, Math.floor(visibleRows));
+  const visible = visibleDetailRows(rows, start, limit);
   if (visible.length === 0) return null;
 
   return (
@@ -41,6 +41,17 @@ export function AgentDetailView({
       ))}
     </Box>
   );
+}
+
+function visibleDetailRows(rows: readonly string[], start: number, limit?: number): string[] {
+  if (limit === undefined) return rows.slice(start);
+  if (limit === 0) return [];
+  if (start > 0 || rows.length <= limit) return rows.slice(start, start + limit);
+  if (limit <= 3) return rows.slice(-limit);
+  // 默认详情视图保留面包屑/状态，其余空间尾随最新轨迹。
+  const headRows = 2;
+  const tailRows = Math.max(1, limit - headRows - 1);
+  return [...rows.slice(0, headRows), "…", ...rows.slice(-tailRows)];
 }
 
 export function buildAgentDetailRows(

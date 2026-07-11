@@ -111,6 +111,35 @@ describe("subagent activity flow", () => {
     const replayed = new TuiEventStore({ initialSnapshot: reporter.getReplaySnapshot() });
     expect(replayed.getProjection().subagents).toEqual(completedProjection.subagents);
   });
+
+  it("全部是运行中工具时不驱逐待完成轨迹", () => {
+    const reporter = new TuiReporter(() => undefined);
+    reporter.onSubagentActivity({
+      activityId: "many-running-tools",
+      task: "并发工具边界",
+      status: "running",
+    });
+    for (let index = 0; index <= 256; index++) {
+      reporter.onSubagentTrace({
+        activityId: "many-running-tools",
+        traceId: `tool-${index}`,
+        type: "tool.started",
+        name: "read_file",
+        args: JSON.stringify({ path: `src/${index}.ts` }),
+      });
+    }
+
+    expect(() =>
+      reporter.onSubagentTrace({
+        activityId: "many-running-tools",
+        traceId: "tool-0",
+        type: "tool.completed",
+        result: "done",
+        isError: false,
+      }),
+    ).not.toThrow();
+    expect(reporter.getProjection().subagents["many-running-tools"]?.timeline).toHaveLength(256);
+  });
 });
 
 async function waitUntil(predicate: () => boolean): Promise<void> {

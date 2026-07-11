@@ -869,7 +869,7 @@ function reduceSubagentTrace(
         : {}),
       completedAt: createdAt,
     });
-    return Object.freeze(next);
+    return boundSubagentTimeline(next);
   }
 
   if (timeline.some((item) => item.id === trace.traceId)) {
@@ -901,7 +901,9 @@ function boundSubagentTimeline(
 ): readonly TuiSubagentTraceItem[] {
   if (timeline.length <= TUI_SUBAGENT_TRACE_MAX_ITEMS) return Object.freeze([...timeline]);
   const removable = timeline.findIndex((item) => item.kind !== "tool" || item.status !== "running");
-  const index = removable >= 0 ? removable : 0;
+  // 未完成工具还需要用 traceId 原位配对，宁可临时超额也不驱逐。
+  if (removable < 0) return Object.freeze([...timeline]);
+  const index = removable;
   return Object.freeze([...timeline.slice(0, index), ...timeline.slice(index + 1)]);
 }
 
