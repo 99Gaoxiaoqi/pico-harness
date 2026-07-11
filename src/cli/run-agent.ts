@@ -27,6 +27,7 @@ import type { ThinkingEffort } from "../provider/thinking.js";
 import type { ImagePart, Message, ToolDefinition } from "../schema/message.js";
 import { BashTool, ReadFileTool, ToolRegistry } from "../tools/registry-impl.js";
 import { buildDefaultToolRegistry } from "../tools/default-registry.js";
+import type { AskUserHandler } from "../tools/ask-user.js";
 import { WorkspaceRoots, workspaceAccessesFromCall } from "../tools/workspace-roots.js";
 import { ExitPlanModeTool } from "../tools/plan-exit.js";
 import { DelegationManager, DelegateStatusTool } from "../tools/delegation-manager.js";
@@ -143,6 +144,8 @@ export interface RunAgentCliDependencies {
   toolDisclosure?: ToolDisclosure;
   /** Session-scoped services owned by the TUI host and reused across prompts. */
   runtimeState?: TuiRuntimeState;
+  /** 仅由可展示结构化问题的 TUI bundle 提供。 */
+  askUserHandler?: AskUserHandler;
   /** Receives the complete registry after late delegation/MCP registration. */
   toolStatusSink?: (tools: readonly SessionToolStatus[]) => void;
   mcpStatusSink?: (snapshot: McpStatusSnapshot) => void;
@@ -277,6 +280,7 @@ export async function runAgentFromCli(
     todoStore,
     toolDisclosure,
     workspaceRoots,
+    dependencies.askUserHandler,
   );
   // 【任务 2.6】用户可配置 Shell Hooks:加载 .claw/settings.json 的 hooks 配置,
   // 存在则挂载 HookRunner 到 registry。fail-open:配置缺失/畸形均不启用 hook,零影响。
@@ -431,6 +435,7 @@ function buildRegistry(
   todoStore?: TodoStore,
   toolDisclosure?: ToolDisclosure,
   workspaceRoots?: WorkspaceRoots,
+  askUserHandler?: AskUserHandler,
 ): ToolRegistry {
   return buildDefaultToolRegistry(workDir, {
     truncateResults: false,
@@ -440,6 +445,7 @@ function buildRegistry(
     ...(todoStore !== undefined ? { todoStore } : {}),
     ...(toolDisclosure !== undefined ? { toolDisclosure } : {}),
     ...(workspaceRoots !== undefined ? { workspaceRoots } : {}),
+    ...(askUserHandler !== undefined ? { askUserHandler } : {}),
   });
 }
 
