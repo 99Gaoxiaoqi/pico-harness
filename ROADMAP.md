@@ -10,12 +10,12 @@
 
 ## 📐 开发流程（必须遵守）
 
-### 1. 测试驱动
+### 1. 集成验证
 
-- 每完成一个功能或一小部分工作，**先写测试再写实现**（或至少同步写）
-- 测试覆盖：正常路径 + 边界情况 + 错误处理
-- 运行 `npm test` 确认全部通过后再提交
-- 如果改动涉及 Provider/Session 等核心模块，跑一遍集成测试
+- 后续开发不再新增单元测试；保留既有回归，但不继续扩充内部实现级覆盖
+- 一个功能通常只新增一条跨模块成功主链路，确有高风险时在同一场景补关键失败断言
+- 在最终代码状态运行最相关的集成测试；跨核心模块时同时完成 typecheck 与 build
+- 不为同一行为在多个层级重复验证，也不默认运行无关全量测试
 
 ### 2. 小步提交
 
@@ -487,7 +487,7 @@ git worktree remove ../pico-1-streaming
 
 ---
 
-## 阶段 11：TUI 可靠执行闭环 🚧（2026-07-11 启动）
+## 阶段 11：TUI 可靠执行闭环 ✅（2026-07-11 完成）
 
 > **目标**：先把已经公开的执行、会话、文件历史与 TUI 状态能力做成可靠闭环；本阶段不扩展第二入口，不新增单元测试，只在最终集成状态运行一条跨模块主链路。
 >
@@ -496,12 +496,12 @@ git worktree remove ../pico-1-streaming
 - [x] 11.1 执行事务层：AbortSignal 下沉到工具执行上下文；Bash 使用可流式回传、可杀进程树的执行方式；以每轮文件变化 journal 补齐 Bash / formatter / 脚本等写入的 rewind 记录
 - [x] 11.2 Session 运行时持久化：保存并恢复 model route、mode、thinking、goal、usage/cost、授权目录和 transcript 水合所需状态
 - [x] 11.3 TUI 事件投影：为消息、阶段和 tool call 建立唯一 ID 与 append-only event store；由 reducer 投影界面，消除重复渲染、同名工具错配和可变状态漂移
-- [ ] 11.4 Session 与运行中交互：启动水合、会话搜索/热切换/fork；区分 steer、queue、interrupt/replace；增加结构化 AskUser 交互
-- [ ] 11.5 Inspector 与 Changes：浏览完整工具输出和 artifact；按轮展示完整文件 patch、单文件恢复并可跳转 `/rewind`
+- [x] 11.4 Session 与运行中交互：启动水合、会话搜索/热切换/fork；区分 steer、queue、interrupt/replace；增加结构化 AskUser 交互
+- [x] 11.5 Inspector 与 Changes：浏览完整工具输出和 artifact；按轮展示完整文件 patch、单文件恢复并可跳转 `/rewind`
 
 ---
 
-## 阶段 12：可信 YOLO 与代码智能（待阶段 11 完成）
+## 阶段 12：可信 YOLO 与代码智能（下一阶段）
 
 > **目标**：在默认无审批的交互模式下保留宿主硬边界，并让模型路由、上下文预算和代码理解建立在真实能力元数据之上。三个任务在阶段 11 接口稳定后使用独立 worktree 并行。
 
@@ -536,10 +536,10 @@ git worktree remove ../pico-1-streaming
 | 阶段 8       | 8        | 8      | ✅ TUI-only 收口完成                |
 | 阶段 9       | 3        | 3      | ✅ 模型路由与核心交互完成           |
 | 阶段 10      | 7        | 7      | ✅ TUI 滚动与大型输出收敛完成       |
-| 阶段 11      | 5        | 3      | 🚧 TUI 可靠执行闭环                 |
+| 阶段 11      | 5        | 5      | ✅ TUI 可靠执行闭环完成             |
 | 阶段 12      | 3        | 0      | ⏳ 可信 YOLO 与代码智能             |
 | 阶段 13      | 2        | 0      | ⏳ 隔离式并行与 MCP 生命周期        |
-| **当前总计** | **95**   | **88** | 🚧 阶段 11 进行中                   |
+| **当前总计** | **95**   | **90** | ⏳ 下一阶段：可信 YOLO 与代码智能   |
 
 ---
 
@@ -564,6 +564,12 @@ git worktree remove ../pico-1-streaming
 ---
 
 ## 📅 变更记录
+
+- 2026-07-11：完成阶段 11 TUI 可靠执行闭环
+  - 执行层支持可中止进程树、流式工具输出与跨工具文件事务；Session 持久化 route/mode/thinking/goal/usage/授权目录并支持搜索、热切换和 fork。
+  - TUI 使用有界 append-only event store 与稳定消息/tool ID，运行输入区分 steer/queue/replace，结构化 AskUser 可被审批安全抢占后恢复。
+  - Ctrl+E 接入完整 Tool Inspector 和可信 artifact 分页；新增 `/changes`，支持完整 patch、指纹防并发覆盖、hard-link 安全的原子单文件恢复及跳转 `/rewind`。
+  - 最终只运行一条 Stage 11 跨模块集成场景；typecheck、build 与该场景全部通过。
 
 - 2026-07-11：持久化阶段 11-13 开发任务
   - 阶段 11 先收敛执行事务、Session、TUI 事件投影、运行中交互与 Changes/Inspector；第一波三个独立 worktree 并行，第二波在共享接口合入后启动。
