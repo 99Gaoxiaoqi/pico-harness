@@ -139,7 +139,8 @@ export class LspCodeIntelligenceService implements CodeIntelligenceService {
         this.diagnosticsByUri.set(uri, diagnostics);
         return diagnostics;
       }
-    } catch {
+    } catch (error) {
+      if (options.signal?.aborted) throw error;
       // 大多数 server 仅通过 publishDiagnostics 推送；拉取不支持时返回快照。
     }
     return this.diagnosticsByUri.get(uri) ?? [];

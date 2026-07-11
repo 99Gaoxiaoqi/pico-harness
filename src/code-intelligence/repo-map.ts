@@ -152,7 +152,13 @@ export class RepoMapService implements CodeIntelligenceService {
     const word = wordAtPosition(originFile, query.position.line, query.position.character);
     if (!word) return [];
     await this.scanNext(this.scanBatchSize, options.signal);
-    const origin = this.allSymbols().find((symbol) => symbol.name === word);
+    const origin =
+      originFile.symbols.find(
+        (symbol) =>
+          symbol.name === word &&
+          query.position.line >= symbol.declarationLine &&
+          query.position.line <= symbol.endLine,
+      ) ?? this.allSymbols().find((symbol) => symbol.name === word);
     if (!origin) return [];
     return direction === "incoming" ? this.incomingCalls(origin) : this.outgoingCalls(origin);
   }
@@ -232,8 +238,8 @@ export class RepoMapService implements CodeIntelligenceService {
     throwIfAborted(signal);
     const absolutePath = this.safePath(filePath);
     const cached = this.indexedFiles.get(absolutePath);
-    if (cached) return cached;
     const text = await readFile(absolutePath, "utf8");
+    if (cached?.text === text) return cached;
     if (Buffer.byteLength(text, "utf8") > MAX_SOURCE_BYTES) {
       throw new Error(`Repo Map 跳过超过 ${MAX_SOURCE_BYTES} 字节的文件: ${filePath}`);
     }
