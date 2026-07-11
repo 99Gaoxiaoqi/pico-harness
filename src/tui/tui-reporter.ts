@@ -15,19 +15,25 @@
 import type { Reporter } from "../engine/reporter.js";
 import { formatOutputPreview } from "./diff-preview.js";
 import type { ToolCardStatus } from "./tool-card.js";
-import { TuiEventStore } from "./tui-event-store.js";
+import {
+  TUI_TOOL_OUTPUT_PROJECTION_LIMIT_CHARS,
+  TuiEventStore,
+} from "./tui-event-store.js";
 import type {
   TuiEntry,
   TuiEvent,
+  TuiEventStoreSnapshot,
   TuiProjection,
   TuiToolCallProjection,
+  TuiToolOutputRun,
   UiMode,
 } from "./tui-event-store.js";
-import { joinToolOutput } from "./tui-event-store.js";
 
 /** Bash 的外部化阈值是 30k；多留少量余量后立即停止向 append-only 日志写正文。 */
-export const TUI_TOOL_OUTPUT_MEMORY_LIMIT_CHARS = 32_000;
+export const TUI_TOOL_OUTPUT_MEMORY_LIMIT_CHARS =
+  TUI_TOOL_OUTPUT_PROJECTION_LIMIT_CHARS;
 export const TUI_INLINE_TOOL_RESULT_LIMIT_CHARS = 50_000;
+const TUI_TOOL_OUTPUT_EVENT_SEGMENT_CHARS = 2_048;
 
 export { TuiEventStore };
 
@@ -35,6 +41,7 @@ export type {
   TuiEntry,
   TuiEvent,
   TuiEventDraft,
+  TuiEventStoreSnapshot,
   TuiPhaseProjection,
   TuiProjectedEntry,
   TuiProjection,
@@ -42,6 +49,12 @@ export type {
   TuiToolCallProjection,
   UiMode,
 } from "./tui-event-store.js";
+
+interface PendingToolOutputSegment {
+  pieces: string[];
+  runs: Array<{ stream: "stdout" | "stderr"; length: number }>;
+  chars: number;
+}
 
 export interface TuiReporterOptions {
   /** 水合或回放时可以传入已有事件库。 */
@@ -64,6 +77,8 @@ export class TuiReporter implements Reporter {
    */
   private readonly pendingToolIdsByName = new Map<string, string[]>();
   private readonly pendingToolIdsByProviderCallId = new Map<string, string[]>();
+  /** 小 chunk 先在有界 segment 内聚合，避免每次输出都生成事件和重放拷贝。 */
+  private readonly pendingToolOutput = new Map<string, PendingToolOutputSegment>();
   private readonly eventStore: TuiEventStore;
   private readonly legacyEntries: TuiEntry[];
   private readonly onProjectionUpdate?: (projection: TuiProjection) => void;
@@ -98,9 +113,14 @@ export class TuiReporter implements Reporter {
     return this.eventStore.getProjection().entries.length;
   }
 
-  /** 完整 append-only 事件快照，供后续持久化、Inspector 与回放接线。 */
+  /** 只返回当前 checkpoint 之后的有界事件段。 */
   getEvents(): readonly TuiEvent[] {
     return this.eventStore.getEvents();
+  }
+
+  /** 持久化与水合的权威单元：checkpoint + 当前事件段。 */
+  getReplaySnapshot(): TuiEventStoreSnapshot {
+    return this.eventStore.getReplaySnapshot();
   }
 
   /** 带 entry / stream / tool / phase 稳定 ID 的权威投影。 */
@@ -233,25 +253,32 @@ export class TuiReporter implements Reporter {
     if (!tool || tool.outputTruncated) return;
 
     // 上限在 append 前生效：event log 与 projection 都不会持有上限外正文。
-    const remaining = Math.max(0, TUI_TOOL_OUTPUT_MEMORY_LIMIT_CHARS - tool.outputChars);
+    const bufferedChars = this.pendingToolOutput.get(internalToolCallId)?.chars ?? 0;
+    const remaining = Math.max(
+      0,
+      TUI_TOOL_OUTPUT_MEMORY_LIMIT_CHARS - tool.outputChars - bufferedChars,
+    );
     const retained = remaining > 0 ? chunk.slice(0, remaining) : "";
+    let projectionChanged = false;
     if (retained.length > 0) {
-      this.eventStore.append({
-        type: "tool.output",
-        toolCallId: internalToolCallId,
-        stream,
-        chunk: retained,
-      });
+      projectionChanged = this.bufferToolOutput(internalToolCallId, stream, retained);
+      // 首个非空 chunk 立即可见；之后才按固定大小聚合，兼顾流式体感与事件上限。
+      if (tool.outputChars === 0 && !projectionChanged) {
+        projectionChanged = this.flushToolOutput(internalToolCallId);
+      }
     }
     const droppedChars = chunk.length - retained.length;
     if (droppedChars > 0) {
+      projectionChanged = this.flushToolOutput(internalToolCallId) || projectionChanged;
       this.eventStore.append({
         type: "tool.output.truncated",
         toolCallId: internalToolCallId,
         droppedChars,
       });
+      this.pendingToolOutput.delete(internalToolCallId);
+      projectionChanged = true;
     }
-    this.emit();
+    if (projectionChanged) this.emit();
   }
 
   onToolResult(toolName: string, result: string, isError: boolean, providerCallId?: string): void {
@@ -261,6 +288,7 @@ export class TuiReporter implements Reporter {
       this.emit();
       return;
     }
+    this.flushToolOutput(internalToolCallId);
     const tool = this.eventStore.getProjection().toolCalls[internalToolCallId];
     if (!tool) {
       this.removePendingToolId(toolName, internalToolCallId, normalizeIdentity(providerCallId));
@@ -268,7 +296,7 @@ export class TuiReporter implements Reporter {
       return;
     }
     const externalized = parseExternalizedToolResult(result);
-    const streamedResult = joinToolOutput(tool.output);
+    const streamedResult = tool.output;
     const oversizedWithoutArtifact =
       externalized === undefined && result.length > TUI_INLINE_TOOL_RESULT_LIMIT_CHARS;
     const truncated = externalized !== undefined || oversizedWithoutArtifact;
@@ -370,6 +398,7 @@ export class TuiReporter implements Reporter {
     this.currentStream = null;
     this.pendingToolIdsByName.clear();
     this.pendingToolIdsByProviderCallId.clear();
+    this.pendingToolOutput.clear();
   }
 
   /** 从水合投影重建 reporter 的短命运行态，不依赖旧实例内存。 */
@@ -448,10 +477,55 @@ export class TuiReporter implements Reporter {
     internalToolCallId: string,
     providerCallId?: string,
   ): void {
+    this.pendingToolOutput.delete(internalToolCallId);
     removePendingId(this.pendingToolIdsByName, toolName, internalToolCallId);
     if (providerCallId !== undefined) {
       removePendingId(this.pendingToolIdsByProviderCallId, providerCallId, internalToolCallId);
     }
+  }
+
+  private bufferToolOutput(
+    toolCallId: string,
+    stream: "stdout" | "stderr",
+    content: string,
+  ): boolean {
+    let changed = false;
+    let offset = 0;
+    while (offset < content.length) {
+      const pending = this.pendingToolOutput.get(toolCallId) ?? {
+        pieces: [],
+        runs: [],
+        chars: 0,
+      };
+      this.pendingToolOutput.set(toolCallId, pending);
+      const retained = content.slice(
+        offset,
+        offset + (TUI_TOOL_OUTPUT_EVENT_SEGMENT_CHARS - pending.chars),
+      );
+      pending.pieces.push(retained);
+      appendToolOutputRun(pending.runs, stream, retained.length);
+      pending.chars += retained.length;
+      offset += retained.length;
+      if (pending.chars === TUI_TOOL_OUTPUT_EVENT_SEGMENT_CHARS) {
+        changed = this.flushToolOutput(toolCallId) || changed;
+      }
+    }
+    return changed;
+  }
+
+  private flushToolOutput(toolCallId: string): boolean {
+    const pending = this.pendingToolOutput.get(toolCallId);
+    if (!pending || pending.chars === 0) return false;
+    this.eventStore.append({
+      type: "tool.output",
+      toolCallId,
+      segment: {
+        content: pending.pieces.join(""),
+        runs: pending.runs.map((run): TuiToolOutputRun => ({ ...run })),
+      },
+    });
+    this.pendingToolOutput.delete(toolCallId);
+    return true;
   }
 
   /** 投影是唯一条目源；legacyEntries 仅作引用兼容镜像。 */
@@ -523,6 +597,17 @@ function appendPendingId(index: Map<string, string[]>, key: string, id: string):
   const pending = index.get(key) ?? [];
   pending.push(id);
   index.set(key, pending);
+}
+
+function appendToolOutputRun(
+  runs: Array<{ stream: "stdout" | "stderr"; length: number }>,
+  stream: "stdout" | "stderr",
+  length: number,
+): void {
+  if (length <= 0) return;
+  const last = runs.at(-1);
+  if (last?.stream === stream) last.length += length;
+  else runs.push({ stream, length });
 }
 
 function removePendingId(index: Map<string, string[]>, key: string, id: string): void {
