@@ -60,7 +60,6 @@ import type { ProviderKind } from "../provider/factory.js";
 import { loadModelRouter } from "../provider/model-router.js";
 import { isAbortError } from "../provider/errors.js";
 import { defaultIsRetryableError } from "../provider/retry.js";
-import type { ThinkingEffort } from "../provider/thinking.js";
 import { ModelRuntimeCommandService } from "../provider/model-runtime-report.js";
 import { buildDefaultToolRegistry } from "../tools/default-registry.js";
 import type { ToolDisclosure } from "../tools/tool-disclosure.js";
@@ -1129,10 +1128,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
           ),
           runAgent: async (prompt, runOptions) => {
             const reasoningLevel = effectiveSessionReasoningLevel(settings, modelRouter);
-            const activeRoute = modelRouter.providerConfig(
-              settings.modelRouteId,
-              reasoningLevel as ThinkingEffort | undefined,
-            );
+            const activeRoute = modelRouter.providerConfig(settings.modelRouteId, reasoningLevel);
             const rewindContext = rewindContextRef.current;
             rewindContextRef.current = null;
             const cliOpts: RunAgentCliOptions = {

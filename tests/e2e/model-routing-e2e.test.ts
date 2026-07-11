@@ -9,6 +9,7 @@ import { createPicoCommandRegistry } from "../../src/input/pico-command-registry
 import { loadPicoConfig } from "../../src/input/pico-config.js";
 import { processUserInput } from "../../src/input/process-user-input.js";
 import {
+  coordinateSessionReasoningLevel,
   getStoredSessionSettings,
   resetSessionSettingsForTests,
 } from "../../src/input/session-settings.js";
@@ -118,7 +119,140 @@ describe("model routing integration", () => {
     expect(glm.chatModels).toEqual(["glm-5.2"]);
     expect(deepseek.chatModels).toEqual([]);
   });
+
+  it("coordinates model-specific reasoning levels and maps them to provider request bodies", async () => {
+    const server = await startOpenAiServer(
+      ["glm-5-2-260617", "deepseek-v4-pro-260425"],
+      "REASONING_ROUTE_OK",
+    );
+    cleanups.push(server.close);
+
+    const workDir = await mkdtemp(join(tmpdir(), "pico-model-reasoning-"));
+    cleanups.push(() => rm(workDir, { recursive: true, force: true }));
+    await mkdir(join(workDir, ".pico"), { recursive: true });
+    await writeFile(
+      join(workDir, ".pico", "config.json"),
+      JSON.stringify({
+        version: 1,
+        model: "volcengine/glm-5-2-260617",
+        providers: {
+          volcengine: {
+            protocol: "openai",
+            baseURL: server.baseURL,
+            apiKeyEnv: "VOLCENGINE_API_KEY",
+            discoverModels: false,
+            models: {
+              "glm-5-2-260617": {
+                context: 128000,
+                output: 4096,
+                reasoning: true,
+                toolCall: true,
+              },
+              "deepseek-v4-pro-260425": {
+                context: 128000,
+                output: 4096,
+                reasoning: true,
+                toolCall: true,
+              },
+            },
+          },
+        },
+      }),
+    );
+
+    const env = { VOLCENGINE_API_KEY: "ark-secret", PICO_PERSISTENCE: "0" };
+    const config = await loadPicoConfig(workDir);
+    const router = await loadModelRouter({
+      config,
+      env,
+      legacyProvider: "openai",
+      legacyModel: "unused-protocol-default",
+    });
+    const initial = router.require(config.model);
+    const sessionId = `model-reasoning-${Date.now()}`;
+    const registry = await createPicoCommandRegistry({
+      workDir,
+      sessionId,
+      provider: initial.provider,
+      model: initial.model,
+      modelRouteId: initial.id,
+      modelRouter: router,
+    });
+    const settings = getStoredSessionSettings(sessionId)!;
+
+    expect(coordinateSessionReasoningLevel(settings, router)).toBe("max");
+    const status = await processUserInput("/thinking", { registry });
+    const statusMessage = status.type === "local-command" ? status.result.message : "";
+    expect(statusMessage).toContain("Supported levels: nothink, high, max");
+    expect(statusMessage).toContain("Default level: max");
+    expect(statusMessage).toContain("Current level: max");
+
+    await processUserInput("/thinking high", { registry });
+    await runActiveRoute("glm high", settings, router, workDir, env, sessionId);
+    const glmHighBody = server.chatBodies.at(-1)!;
+    expect(glmHighBody["model"]).toBe("glm-5-2-260617");
+    expect(glmHighBody["reasoning_effort"]).toBeUndefined();
+    expect(glmHighBody["chat_template_kwargs"]).toEqual({
+      enable_thinking: true,
+      reasoning_effort: "high",
+    });
+
+    const selectedDeepSeek = await processUserInput("/model volcengine/deepseek-v4-pro-260425", {
+      registry,
+    });
+    expect(
+      selectedDeepSeek.type === "local-command" ? selectedDeepSeek.result.message : "",
+    ).toContain("Model set to volcengine/deepseek-v4-pro-260425");
+    expect(settings.thinkingEffort).toBe("high");
+
+    await processUserInput("/thinking off", { registry });
+    await runActiveRoute("deepseek off", settings, router, workDir, env, sessionId);
+    const deepSeekOffBody = server.chatBodies.at(-1)!;
+    expect(deepSeekOffBody["model"]).toBe("deepseek-v4-pro-260425");
+    expect(deepSeekOffBody["thinking"]).toEqual({ type: "disabled" });
+    expect(deepSeekOffBody["reasoning_effort"]).toBeUndefined();
+
+    const selectedGlm = await processUserInput("/model volcengine/glm-5-2-260617", {
+      registry,
+    });
+    expect(selectedGlm.type === "local-command" ? selectedGlm.result.message : "").toContain(
+      "Thinking level off is unsupported; using model default max.",
+    );
+    expect(settings.thinkingEffort).toBe("max");
+    await runActiveRoute("glm fallback max", settings, router, workDir, env, sessionId);
+    expect(server.chatBodies.at(-1)?.["chat_template_kwargs"]).toEqual({
+      enable_thinking: true,
+      reasoning_effort: "max",
+    });
+  });
 });
+
+async function runActiveRoute(
+  prompt: string,
+  settings: NonNullable<ReturnType<typeof getStoredSessionSettings>>,
+  router: Awaited<ReturnType<typeof loadModelRouter>>,
+  workDir: string,
+  env: Readonly<Record<string, string>>,
+  sessionId: string,
+): Promise<void> {
+  const active = router.providerConfig(settings.modelRouteId, settings.thinkingEffort);
+  await runAgentFromCli(
+    {
+      prompt,
+      dir: workDir,
+      session: sessionId,
+      provider: active.provider,
+      baseURL: active.config.baseURL,
+      apiKey: active.config.apiKey,
+      model: active.config.model,
+      modelRouteId: active.route.id,
+      modelCapabilities: active.route.capabilities,
+      thinkingEffort: settings.thinkingEffort,
+      allowModelFallback: false,
+    },
+    { env, reporter: new SilentReporter() },
+  );
+}
 
 async function startOpenAiServer(
   models: string[],
@@ -127,9 +261,14 @@ async function startOpenAiServer(
   baseURL: string;
   authorization?: string;
   chatModels: readonly string[];
+  chatBodies: readonly Record<string, unknown>[];
   close: () => Promise<void>;
 }> {
-  const state: { authorization?: string; chatModels: string[] } = { chatModels: [] };
+  const state: {
+    authorization?: string;
+    chatModels: string[];
+    chatBodies: Record<string, unknown>[];
+  } = { chatModels: [], chatBodies: [] };
   const server = createServer(async (request, response) => {
     state.authorization = request.headers.authorization;
     if (request.method === "GET" && request.url === "/v1/models") {
@@ -139,6 +278,7 @@ async function startOpenAiServer(
     }
     if (request.method === "POST" && request.url === "/v1/chat/completions") {
       const body = await readJsonBody(request);
+      state.chatBodies.push(body);
       if (typeof body["model"] === "string") state.chatModels.push(body["model"]);
       response.writeHead(200, {
         "Content-Type": "text/event-stream",
@@ -167,6 +307,9 @@ async function startOpenAiServer(
     },
     get chatModels() {
       return state.chatModels;
+    },
+    get chatBodies() {
+      return state.chatBodies;
     },
     close: () => close(server),
   };

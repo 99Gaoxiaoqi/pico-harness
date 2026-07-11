@@ -23,7 +23,6 @@ import { fallbackModelFor, isModelUnavailableError } from "../provider/fallback.
 import type { ProviderConfig } from "../provider/config.js";
 import type { LLMProvider, LLMProviderRequestOptions } from "../provider/interface.js";
 import { resolveProviderProfile } from "../provider/profile.js";
-import type { ThinkingEffort } from "../provider/thinking.js";
 import type { ImagePart, Message, ToolDefinition } from "../schema/message.js";
 import { BashTool, ReadFileTool, ToolRegistry } from "../tools/registry-impl.js";
 import { buildDefaultToolRegistry } from "../tools/default-registry.js";
@@ -862,9 +861,7 @@ function resolveProviderConfig(
     model,
     ...(options.modelRouteId ? { routeId: options.modelRouteId } : {}),
     ...(options.modelCapabilities ? { capabilities: options.modelCapabilities } : {}),
-    ...(options.thinkingEffort !== undefined
-      ? { thinkingEffort: options.thinkingEffort as ThinkingEffort }
-      : {}),
+    ...(options.thinkingEffort !== undefined ? { thinkingEffort: options.thinkingEffort } : {}),
   };
 }
 
