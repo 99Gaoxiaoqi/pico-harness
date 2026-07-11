@@ -54,7 +54,60 @@ export interface McpConfig {
 }
 
 /** MCP 连接状态机 */
-export type McpConnectionStatus = "pending" | "connected" | "failed" | "disabled";
+export type McpConnectionStatus = "pending" | "connected" | "failed" | "disabled" | "needs_auth";
+
+/** MCP resources/list 返回的资源摘要。 */
+export interface McpResource {
+  uri: string;
+  name?: string;
+  description?: string;
+  mimeType?: string;
+  [key: string]: unknown;
+}
+
+export interface McpResourceListResult {
+  resources: McpResource[];
+  nextCursor?: string;
+}
+
+/** MCP resources/read 返回的内容块。 */
+export interface McpResourceContents {
+  uri: string;
+  mimeType?: string;
+  text?: string;
+  blob?: string;
+  [key: string]: unknown;
+}
+
+export interface McpResourceReadResult {
+  contents: McpResourceContents[];
+}
+
+/** MCP prompts/list 返回的 Prompt 模板。 */
+export interface McpPrompt {
+  name: string;
+  description?: string;
+  arguments?: Array<{
+    name: string;
+    description?: string;
+    required?: boolean;
+  }>;
+}
+
+export interface McpPromptListResult {
+  prompts: McpPrompt[];
+  nextCursor?: string;
+}
+
+export interface McpPromptMessage {
+  role: "user" | "assistant";
+  content: McpContentBlock;
+}
+
+export interface McpPromptGetResult {
+  description?: string;
+  messages: McpPromptMessage[];
+}
 
 /**
  * MCP tools/call 返回的内容块。MCP 用 content 数组表达多种返回类型,
@@ -88,6 +141,14 @@ export interface McpClient {
   listTools(): Promise<McpTool[]>;
   /** 调用指定工具,返回内容块数组 */
   callTool(name: string, args: Record<string, unknown>): Promise<McpToolResult>;
+  /** 列出 server 公开的资源。 */
+  listResources(cursor?: string): Promise<McpResourceListResult>;
+  /** 读取指定 URI 的资源。 */
+  readResource(uri: string): Promise<McpResourceReadResult>;
+  /** 列出 server 公开的 Prompt 模板。 */
+  listPrompts(cursor?: string): Promise<McpPromptListResult>;
+  /** 实例化指定 Prompt 模板。 */
+  getPrompt(name: string, args?: Record<string, string>): Promise<McpPromptGetResult>;
   /** 优雅关闭:杀子进程 / 关连接 */
   close(): Promise<void>;
   /** 非主动关闭时通知上层更新状态 */
