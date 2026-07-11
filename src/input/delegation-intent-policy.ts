@@ -127,6 +127,15 @@ export function detectExplicitDelegationIntent(
 ): ExplicitDelegationIntent | null {
   const normalized = normalizeInput(latestUserInput);
   if (normalized.length === 0) return null;
+  // 条件前置和后置的后台语义可能被逗号/then 分开，必须先在
+  // 整条用户消息上判断，否则会把“如果失败再启动”或“启动后放到后台”
+  // 误升级为必须立即等待的 required 委派。
+  if (
+    CONDITIONAL_EXECUTION_PATTERNS.some((pattern) => pattern.test(normalized)) ||
+    EXPLICIT_BACKGROUND_PATTERNS.some((pattern) => pattern.test(normalized))
+  ) {
+    return null;
+  }
 
   const actionableClauses = splitClauses(normalized).filter(
     (clause) =>

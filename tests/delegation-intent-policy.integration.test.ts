@@ -52,6 +52,12 @@ describe("explicit delegation intent input boundary", () => {
     "如果有必要，可以启动多个子代理阅读项目。",
     "Do not launch subagents; inspect the project yourself.",
     "If needed, you can launch several subagents.",
+    "如果测试失败，请启动多个子代理修复。",
+    "If tests fail, launch several subagents to fix them.",
+    "若 CI 报错，就让多个子代理并行排查。",
+    "请启动多个子代理，放到后台运行。",
+    "Launch several subagents, run them in the background.",
+    "启动多个子代理；不用等它们完成。",
     "Should we use subagents for this project?",
     "请你自己阅读项目并说明问题",
   ])("不把讨论或无委派要求的输入误判为执行意图: %s", (input) => {
