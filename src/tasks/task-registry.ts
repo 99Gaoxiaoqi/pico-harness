@@ -73,6 +73,18 @@ export interface TaskRegistryOptions {
   now?: () => number;
 }
 
+export interface RestoreTasksOptions {
+  /** Non-terminal work cannot survive a host process restart. */
+  interruptedStatus?: Extract<TaskStatus, "failed" | "killed">;
+  interruptedReason?: string;
+}
+
+export interface RestoreTasksResult {
+  restored: number;
+  interrupted: number;
+  duplicateTaskIds: string[];
+}
+
 interface StoredTask {
   snapshot: TaskSnapshot;
   order: number;
@@ -114,6 +126,53 @@ export class TaskRegistry {
     this.tasks.set(taskId, { snapshot, order: this.nextOrder++ });
     this.emit(snapshot);
     return cloneSnapshot(snapshot);
+  }
+
+  /**
+   * Restore persisted snapshots in their stored order.
+   *
+   * A process-local worker cannot still be pending/running after a restart, so
+   * those snapshots are closed explicitly instead of being presented as live.
+   * Existing IDs and later duplicates are ignored deterministically.
+   */
+  restore(
+    snapshots: readonly TaskSnapshot[],
+    options: RestoreTasksOptions = {},
+  ): RestoreTasksResult {
+    const interruptedStatus = options.interruptedStatus ?? "failed";
+    const interruptedReason = options.interruptedReason ?? "host restarted";
+    const duplicateTaskIds: string[] = [];
+    let restored = 0;
+    let interrupted = 0;
+
+    for (const candidate of snapshots) {
+      if (this.tasks.has(candidate.taskId)) {
+        duplicateTaskIds.push(candidate.taskId);
+        continue;
+      }
+
+      const snapshot = cloneSnapshot(candidate);
+      if (!isTerminalTaskStatus(snapshot.status)) {
+        snapshot.status = interruptedStatus;
+        snapshot.endTime = this.now();
+        snapshot.error = interruptedReason;
+        interrupted++;
+      }
+
+      this.tasks.set(snapshot.taskId, { snapshot, order: this.nextOrder++ });
+      restored++;
+      this.emit(snapshot);
+    }
+
+    return { restored, interrupted, duplicateTaskIds };
+  }
+
+  /** Alias for callers that use hydration terminology. */
+  hydrate(
+    snapshots: readonly TaskSnapshot[],
+    options: RestoreTasksOptions = {},
+  ): RestoreTasksResult {
+    return this.restore(snapshots, options);
   }
 
   start(taskId: string, input: UpdateTaskInput = {}): TaskSnapshot {
@@ -199,7 +258,7 @@ function cloneSnapshot(snapshot: TaskSnapshot): TaskSnapshot {
 }
 
 function cloneData(data: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
-  return data ? { ...data } : undefined;
+  return data ? structuredClone(data) : undefined;
 }
 
 function mergeData(
