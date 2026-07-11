@@ -85,6 +85,23 @@ export interface FileHistoryDiffStat {
   warnings?: string[];
 }
 
+export interface FileHistoryFilePatch extends FileHistoryDiffFileStat {
+  patch: string;
+}
+
+export interface FileHistoryChanges extends Omit<FileHistoryDiffStat, "files"> {
+  files: FileHistoryFilePatch[];
+  /** 所有文件 patch 按路径排序后的完整文本。 */
+  patch: string;
+}
+
+export interface FileHistoryRestoreFileResult {
+  messageId: string;
+  filePath: string;
+  status: FileHistoryDiffFileStatus;
+  restored: true;
+}
+
 /** Engine 层只持有不透明句柄，捕获/扫描细节留在 file-change-journal。 */
 export type FileHistoryJournal = FileChangeJournal;
 
@@ -748,6 +765,81 @@ export async function fileHistoryDiffStat(
 }
 
 /**
+ * 读取某个 rewind point 到当前磁盘的完整 patch，供 TUI Changes 面板使用。
+ * 此函数只读，不创建临时文件，也不改变 file-history state。
+ */
+export async function fileHistoryChanges(
+  state: FileHistoryState,
+  messageId: string,
+  sessionId: string,
+  baseDir: string = DEFAULT_BASE_DIR,
+): Promise<FileHistoryChanges> {
+  const target = state.snapshots.find((snapshot) => snapshot.messageId === messageId);
+  if (!target) {
+    throw new Error(`FileHistory: 找不到 messageId=${messageId} 的快照`);
+  }
+  const stat = await fileHistoryDiffStat(state, messageId, sessionId, baseDir);
+  const files: FileHistoryFilePatch[] = [];
+  for (const file of stat.files) {
+    const backup =
+      target.trackedFileBackups.get(file.filePath) ?? findFirstBackup(state, file.filePath);
+    const before = await readSnapshotFileContent(backup, sessionId, baseDir);
+    const after = await readCurrentFileContent(file.filePath);
+    const afterMode = await readCurrentFileMode(file.filePath);
+    files.push({
+      ...file,
+      patch: createUnifiedFilePatch({
+        filePath: file.filePath,
+        before,
+        after,
+        beforeMode: backup?.originMode,
+        afterMode,
+      }),
+    });
+  }
+  return {
+    ...stat,
+    files,
+    patch: files
+      .map((file) => file.patch)
+      .filter(Boolean)
+      .join("\n\n"),
+  };
+}
+
+/**
+ * 只恢复 Changes 面板中已确认属于该 rewind point 的单个变化文件。
+ * 任意未出现在当前 diff 的路径都会被拒绝，避免把 UI 字符串变成任意写入口。
+ */
+export async function fileHistoryRestoreFile(
+  state: FileHistoryState,
+  messageId: string,
+  filePath: string,
+  sessionId: string,
+  baseDir: string = DEFAULT_BASE_DIR,
+): Promise<FileHistoryRestoreFileResult> {
+  const target = state.snapshots.find((snapshot) => snapshot.messageId === messageId);
+  if (!target) {
+    throw new Error(`FileHistory: 找不到 messageId=${messageId} 的快照`);
+  }
+  const stat = await fileHistoryDiffStat(state, messageId, sessionId, baseDir);
+  const changedFile = stat.files.find((file) => file.filePath === filePath);
+  if (!changedFile) {
+    throw new Error(`FileHistory: ${filePath} 不属于快照 ${messageId} 的当前变化`);
+  }
+  const backup = target.trackedFileBackups.get(filePath) ?? findFirstBackup(state, filePath);
+  if (!backup) {
+    throw new Error(`FileHistory: ${filePath} 缺少可恢复的写前状态`);
+  }
+  if (backup.backupFileName === null) {
+    await rm(filePath, { recursive: true, force: true });
+  } else {
+    await restoreBackup(filePath, backup.backupFileName, sessionId, baseDir);
+  }
+  return { messageId, filePath, status: changedFile.status, restored: true };
+}
+
+/**
  * 统计某条用户消息自身造成的文件变化：before 是该消息的 rewind point，
  * after 是下一条用户消息进入模型前的 point；末条消息则与当前磁盘比较。
  */
@@ -846,6 +938,134 @@ function classifyDiffFile(
   return "modified";
 }
 
+export function createUnifiedFilePatch(input: {
+  filePath: string;
+  before: string | undefined;
+  after: string | undefined;
+  beforeMode?: number;
+  afterMode?: number;
+}): string {
+  const beforeLabel = input.before === undefined ? "/dev/null" : input.filePath;
+  const afterLabel = input.after === undefined ? "/dev/null" : input.filePath;
+  const lines: string[] = [`--- ${beforeLabel}`, `+++ ${afterLabel}`];
+  if (input.before === undefined && input.afterMode !== undefined) {
+    lines.unshift(`new file mode ${formatFileMode(input.afterMode)}`);
+  } else if (input.after === undefined && input.beforeMode !== undefined) {
+    lines.unshift(`deleted file mode ${formatFileMode(input.beforeMode)}`);
+  } else if (
+    input.beforeMode !== undefined &&
+    input.afterMode !== undefined &&
+    input.beforeMode !== input.afterMode
+  ) {
+    lines.unshift(
+      `old mode ${formatFileMode(input.beforeMode)}`,
+      `new mode ${formatFileMode(input.afterMode)}`,
+    );
+  }
+
+  const beforeLines = splitDiffLines(input.before ?? "");
+  const afterLines = splitDiffLines(input.after ?? "");
+  if (input.before === input.after) return lines.join("\n");
+  const prefixLength = commonPrefixLength(beforeLines, afterLines);
+  const suffixLength = commonSuffixLength(beforeLines, afterLines, prefixLength);
+  const beforeMiddle = beforeLines.slice(prefixLength, beforeLines.length - suffixLength);
+  const afterMiddle = afterLines.slice(prefixLength, afterLines.length - suffixLength);
+  lines.push(
+    `@@ -${beforeLines.length === 0 ? 0 : 1},${beforeLines.length} +${
+      afterLines.length === 0 ? 0 : 1
+    },${afterLines.length} @@`,
+    ...beforeLines.slice(0, prefixLength).map((line) => ` ${line}`),
+    ...buildLinePatch(beforeMiddle, afterMiddle),
+    ...beforeLines.slice(beforeLines.length - suffixLength).map((line) => ` ${line}`),
+  );
+  return lines.join("\n");
+}
+
+/** Hirschberg LCS：保持完整、准确的上下文行，同时避免为大文件分配 O(n*m) 矩阵。 */
+function buildLinePatch(before: readonly string[], after: readonly string[]): string[] {
+  if (before.length === 0) return after.map((line) => `+${line}`);
+  if (after.length === 0) return before.map((line) => `-${line}`);
+
+  if (before.length === 1) {
+    const commonIndex = after.indexOf(before[0]!);
+    if (commonIndex === -1) return [`-${before[0]}`, ...after.map((line) => `+${line}`)];
+    return [
+      ...after.slice(0, commonIndex).map((line) => `+${line}`),
+      ` ${before[0]}`,
+      ...after.slice(commonIndex + 1).map((line) => `+${line}`),
+    ];
+  }
+  if (after.length === 1) {
+    const commonIndex = before.indexOf(after[0]!);
+    if (commonIndex === -1) return [...before.map((line) => `-${line}`), `+${after[0]}`];
+    return [
+      ...before.slice(0, commonIndex).map((line) => `-${line}`),
+      ` ${after[0]}`,
+      ...before.slice(commonIndex + 1).map((line) => `-${line}`),
+    ];
+  }
+
+  const beforeMiddle = Math.floor(before.length / 2);
+  const leftScores = lcsLengthRow(before.slice(0, beforeMiddle), after);
+  const rightScores = lcsLengthRow(before.slice(beforeMiddle).toReversed(), after.toReversed());
+  let afterMiddle = 0;
+  let bestScore = -1;
+  for (let index = 0; index <= after.length; index++) {
+    const score = leftScores[index]! + rightScores[after.length - index]!;
+    if (score > bestScore) {
+      bestScore = score;
+      afterMiddle = index;
+    }
+  }
+  return [
+    ...buildLinePatch(before.slice(0, beforeMiddle), after.slice(0, afterMiddle)),
+    ...buildLinePatch(before.slice(beforeMiddle), after.slice(afterMiddle)),
+  ];
+}
+
+function lcsLengthRow(left: readonly string[], right: readonly string[]): number[] {
+  let previous = new Array<number>(right.length + 1).fill(0);
+  for (const leftLine of left) {
+    const current = new Array<number>(right.length + 1).fill(0);
+    for (let index = 0; index < right.length; index++) {
+      current[index + 1] =
+        leftLine === right[index]
+          ? previous[index]! + 1
+          : Math.max(previous[index + 1]!, current[index]!);
+    }
+    previous = current;
+  }
+  return previous;
+}
+
+function commonPrefixLength(left: readonly string[], right: readonly string[]): number {
+  let length = 0;
+  while (length < left.length && length < right.length && left[length] === right[length]) {
+    length++;
+  }
+  return length;
+}
+
+function commonSuffixLength(
+  left: readonly string[],
+  right: readonly string[],
+  prefixLength: number,
+): number {
+  let length = 0;
+  while (
+    length < left.length - prefixLength &&
+    length < right.length - prefixLength &&
+    left[left.length - length - 1] === right[right.length - length - 1]
+  ) {
+    length++;
+  }
+  return length;
+}
+
+function formatFileMode(mode: number): string {
+  return `100${(mode & 0o777).toString(8).padStart(3, "0")}`;
+}
+
 function countLineChanges(
   before: string,
   after: string,
@@ -890,17 +1110,7 @@ function splitDiffLines(value: string): string[] {
 
 function longestCommonSubsequenceLength(left: string[], right: string[]): number {
   if (left.length === 0 || right.length === 0) return 0;
-
-  let previous = new Array<number>(right.length + 1).fill(0);
-  for (const leftLine of left) {
-    const current = new Array<number>(right.length + 1).fill(0);
-    for (let i = 0; i < right.length; i++) {
-      current[i + 1] =
-        leftLine === right[i] ? previous[i]! + 1 : Math.max(previous[i + 1]!, current[i]!);
-    }
-    previous = current;
-  }
-  return previous[right.length]!;
+  return lcsLengthRow(left, right)[right.length]!;
 }
 
 interface PersistedFileHistoryBackup {
