@@ -29,6 +29,13 @@ import { signalProcessTree } from "../os/process-tree.js";
 import { BackgroundManager } from "./background-manager.js";
 import type { HookRunner } from "../hooks/runner.js";
 import { WorkspaceRoots } from "./workspace-roots.js";
+import {
+  buildSandboxSpawnPlan,
+  evaluateSandboxCommand,
+  SandboxViolationError,
+  type SandboxSpawnPlan,
+  type YoloSandboxConfig,
+} from "../safety/yolo-sandbox.js";
 
 const DEFAULT_RESULT_SIZE_CHARS = 8000;
 
@@ -722,7 +729,14 @@ export class BashTool implements BaseTool {
   constructor(
     private readonly workDir: string,
     private readonly backgroundManager = new BackgroundManager(),
-    private readonly options: { allowBackground?: boolean } = {},
+    private readonly options: {
+      allowBackground?: boolean;
+      /** 仅由可信宿主注入；一旦注入，无 OS 后端时 Bash fail-closed。 */
+      sandbox?: {
+        workspaceRoots: WorkspaceRoots;
+        config?: Partial<YoloSandboxConfig>;
+      };
+    } = {},
   ) {}
 
   name(): string {
@@ -768,11 +782,17 @@ export class BashTool implements BaseTool {
       throw new Error("参数解析失败: 期望 JSON 含 command 字段");
     }
 
+    const sandboxPlan = this.buildSandboxPlan(command);
+
     if (background) {
       if (this.options.allowBackground === false) {
         throw new Error("当前 bash 工具不允许后台执行");
       }
-      const task = this.backgroundManager.start(command, this.workDir);
+      const task = this.backgroundManager.start(
+        command,
+        this.workDir,
+        sandboxPlan ? { executable: sandboxPlan.command, args: sandboxPlan.args } : undefined,
+      );
       return JSON.stringify({
         taskId: task.taskId,
         pid: task.pid,
@@ -784,8 +804,19 @@ export class BashTool implements BaseTool {
     }
 
     context?.signal?.throwIfAborted();
-    const execution = await runForegroundCommand(command, this.workDir, context);
+    const execution = await runForegroundCommand(command, this.workDir, context, sandboxPlan);
     let stdout = execution.output;
+
+    if (
+      sandboxPlan?.sandboxed === true &&
+      execution.exitCode !== 0 &&
+      /(?:operation not permitted|permission denied|\bEPERM\b|\bEACCES\b)/iu.test(stdout)
+    ) {
+      throw new SandboxViolationError(
+        "sandbox_runtime_denied",
+        `OS 沙箱拒绝了子进程操作。${stdout.trim() ? `\n${stdout.trim()}` : ""}`,
+      );
+    }
 
     if (execution.timedOut) {
       stdout += `\n[警告: 命令执行超时(${BASH_TIMEOUT_MS / 1000}s),已终止完整子进程树。如果是启动常驻服务,请改用后台运行方式。]`;
@@ -807,6 +838,28 @@ export class BashTool implements BaseTool {
     // 不在工具层截断。>30,000 chars 由 observation 完整落盘并返回摘要。
     return stdout;
   }
+
+  private buildSandboxPlan(command: string): SandboxSpawnPlan | undefined {
+    const sandbox = this.options.sandbox;
+    if (!sandbox) return undefined;
+    const roots = sandbox.workspaceRoots.list();
+    const decision = evaluateSandboxCommand(command, this.workDir, roots, sandbox.config);
+    if (!decision.allowed) {
+      throw new SandboxViolationError(
+        decision.code ?? "workspace_write_denied",
+        decision.reason?.replace(/^\[sandbox:[^\]]+\]\s*/u, "") ?? "Bash 请求被沙箱策略拒绝。",
+      );
+    }
+    const shell = resolveShell();
+    return buildSandboxSpawnPlan({
+      command,
+      shell,
+      shellArgs: shellCommandArgs(shell, command),
+      cwd: this.workDir,
+      writableRoots: roots,
+      ...(sandbox.config ? { config: sandbox.config } : {}),
+    });
+  }
 }
 
 interface ForegroundCommandResult {
@@ -821,18 +874,23 @@ function runForegroundCommand(
   command: string,
   cwd: string,
   context?: ToolExecutionContext,
+  sandboxPlan?: SandboxSpawnPlan,
 ): Promise<ForegroundCommandResult> {
   const shell = resolveShell();
 
   return new Promise<ForegroundCommandResult>((resolvePromise, rejectPromise) => {
     let child: ChildProcess;
     try {
-      child = spawn(shell, shellCommandArgs(shell, command), {
-        cwd,
-        detached: !isWindows,
-        windowsHide: true,
-        stdio: ["ignore", "pipe", "pipe"],
-      });
+      child = spawn(
+        sandboxPlan?.command ?? shell,
+        sandboxPlan?.args ?? shellCommandArgs(shell, command),
+        {
+          cwd,
+          detached: !isWindows,
+          windowsHide: true,
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
     } catch (error) {
       resolvePromise({
         output: "",

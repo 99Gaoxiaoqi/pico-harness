@@ -79,7 +79,11 @@ export function buildDefaultToolRegistry(
   registry.register(new ReadFileTool(roots));
   registry.register(new WriteFileTool(roots));
   registry.register(new EditFileTool(roots));
-  registry.register(new BashTool(workDir, backgroundManager));
+  registry.register(
+    new BashTool(workDir, backgroundManager, {
+      sandbox: { workspaceRoots: roots },
+    }),
+  );
   registry.register(new TaskListTool(backgroundManager));
   registry.register(new TaskOutputTool(backgroundManager));
   registry.register(new TaskStopTool(backgroundManager));
