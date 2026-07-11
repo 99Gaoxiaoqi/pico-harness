@@ -72,7 +72,6 @@ Pico 的 CLI session 以当前项目目录为边界：
 | `/undo`        | `/rewind` 的兼容入口；同样打开用户消息选择器，不再走隐藏的直接回滚路径。                   |
 | `/agents`      | 列出内置 Agent 和项目 `.claude/agents/*.md`。                                              |
 | `/agent`       | 把任务委派给指定 Agent：`/agent <name> <task>`。                                           |
-| `/tasks`       | 查看和控制当前 TUI 启动的隔离 worktree 任务。                                              |
 | `/skills`      | 列出当前项目 `.claw/skills` 中可用 Skill。                                                 |
 | `/skill`       | 显式激活 Skill 并交给 Agent 执行：`/skill <name> [arguments]`。                            |
 | `/add-dir`     | 列出或添加当前会话可访问的工作目录：`/add-dir [directory]`。                               |
@@ -120,19 +119,13 @@ pico --add-dir ../shared --add-dir /absolute/generated
 
 配置中的相对路径以项目根目录为基准。附加目录只扩展文件工具的访问边界，不会从外部目录加载 `AGENTS.md`、hooks 或命令配置。
 
-### 隔离任务
+### 子代理活动
 
-`/tasks` 管理由当前 TUI 启动的可写 worker。worker 总是进入独立 branch/worktree 和 OS 沙箱，完成后由宿主统一提交；这个边界不随主会话的 `yolo` 放开。
+主 Agent 批量委派时，TUI 会为每个子代理显示独立活动卡片：任务目标、角色/模式、queued/running/completed/failed 状态、最近工具目标和完成摘要。同一子代理的更新原位替换同一张卡片，多个子代理可并行展示。
 
-- `/tasks`：列出持久化的任务记录。
-- `/tasks <task-id>` 和 `/tasks tail <task-id>`：查看状态与当前进程的有界输出。
-- `/tasks message <task-id> <text>`：把补充指令放入队列，worker 在下一个安全排水点读取；目前不是实时 steer。
-- `/tasks stop <task-id>`：发送 AbortSignal 并等待 runner 真正退出；超时时保持 `stopping`，不伪装成已停止。
-- `/tasks retry|merge|cleanup <task-id>`：重试、串行合并或清理已合并的临时资源。
+Task ID、TaskRegistry、worktree supervisor 和合并队列是主 Agent 的内部能力，不作为用户 slash command 暴露。可写 worker 仍总是进入独立 branch/worktree 和 OS 沙箱，完成后由宿主统一提交；这个边界不随主会话的 `yolo` 放开。
 
-`.claw/tasks/state.json` 当前持久化的是任务账本，用于重启后查看历史和将遗留 `running` 任务明确收口为失败；它不会复活上一个 Node/LLM 进程。真正的跨重启 resume、冲突合并隔离和实时 message steer 已列入后续任务。
-
-宿主提交/合并不执行仓库 hooks、fsmonitor、签名程序或凭据助手，也不在 `/tasks merge` 中隐式 `fetch`。检测到自定义 clean/smudge/process filter 或 merge driver 时会 fail-closed，需要人工审查与提交。
+`.claw/tasks/state.json` 持久化内部任务账本，并将重启后遗留的 `running` 记录明确收口为失败；它不会复活上一个 Node/LLM 进程。宿主提交/合并不执行仓库 hooks、fsmonitor、签名程序或凭据助手；检测到自定义 clean/smudge/process filter 或 merge driver 时 fail-closed。
 
 ### 项目配置与键位
 

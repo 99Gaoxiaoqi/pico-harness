@@ -520,7 +520,7 @@ git worktree remove ../pico-1-streaming
 - [x] 13.1.1 为 TaskRegistry 增加持久化账本、输出游标和遗留 running 任务收口；重启后可查历史，但不伪装为恢复上一个进程
 - [x] 13.1.2 实现 Agent Worktree Supervisor：创建唯一 branch/worktree、停止、重试、追加指令、完成通知和安全清理
 - [x] 13.1.3 实现主代理串行合并队列：检查工作树/提交、按最新目标分支合并、冲突保留现场且禁止强推
-- [x] 13.1.4 将 worker 子代理默认接入独立 worktree，并提供 `/tasks` 列表、详情、tail、stop、retry、message、merge 交互
+- [x] 13.1.4 将 worker 子代理默认接入独立 worktree，Task/worktree 控制作为主 Agent 内部能力，TUI 用独立活动卡片展示每个子代理
 - [x] 13.2.1 将 McpConnectionManager 提升到 TUI Runtime 生命周期，切换 Session 复用连接并在 TUI 退出时统一关闭
 - [x] 13.2.2 支持 MCP reload、enable、disable、reconnect，并保持工具注册与状态快照一致
 - [x] 13.2.3 扩展 MCP resources/prompts 的发现、读取与 TUI 命令展示
@@ -591,9 +591,6 @@ git worktree remove ../pico-1-streaming
 ### 任务系统后续收口（未排期）
 
 - [ ] 2026-07-11：为非 Git 项目设计安全的自动初始化；先生成/复核 `.gitignore` 与 baseline 文件集，不得默认 `git add .` 提交密钥或大文件。
-- [ ] 2026-07-11：增加真正的跨重启 task resume，持久化可验证的 branch/worktree/runner manifest 和续传语义；当前 `.claw/tasks/state.json` 只是历史账本。
-- [ ] 2026-07-11：将 task merge 改为隔离集成 worktree 中的可恢复事务，增加 `/tasks resume` / `abort`，冲突时不在主工作区留下半合并状态。
-- [ ] 2026-07-11：将 `/tasks message` 从“下一个安全排水点读取”升级为运行中 worker 的可观察实时 steer，并明确已送达/已消费状态。
 
 ### 工程与运行时后续收口（未排期）
 
@@ -626,6 +623,11 @@ git worktree remove ../pico-1-streaming
 
 ## 📅 变更记录
 
+- 2026-07-12：退役面向用户的 `/tasks`，完成子代理活动可视化
+  - Task/worktree 运行时继续作为主 Agent 内部能力，用户不再复制 task ID 执行 merge/stop/retry。
+  - 批量 `delegate_task` 为每个子代理生成独立活动卡片，原位更新最近工具、状态和完成摘要，不渲染内部 activity/task ID。
+  - 三条独立 worktree 支线并行实现命令退役、活动事件和 TUI 投影；跨模块集成主链、lint、typecheck、build 和 audit 通过。
+
 - 2026-07-11：完成并行全盘安全复审与任务执行收口
   - 增加首次工作区信任门；收紧 Project Config / AGENTS / Skills / MCP / LSP / Hook 的启动时机、子进程环境与本地文件权限。
   - Plan 仅允许保守可证明的只读 Bash，MCP 和可写/递归 `delegate_task` 不得绕过 Plan；主 YOLO 按 OS 用户权限全放权，worker 无论主 mode 都保持 worktree + OS 沙箱。
@@ -641,7 +643,7 @@ git worktree remove ../pico-1-streaming
   - 新增一条跨模块集成主链，覆盖首次信任、重启复用、项目不可自声明信任和非交互 fail-closed。
 
 - 2026-07-11：完成阶段 13 隔离式并行与 MCP 生命周期
-  - 可写 worker 默认进入唯一 worktree/分支；TaskRegistry 持久化运行状态，`/tasks` 支持查看、追加指令、停止、重试、串行合并和安全清理。
+  - 可写 worker 默认进入唯一 worktree/分支；TaskRegistry 持久化运行状态，任务控制后续收口为主 Agent 内部能力。
   - MCP 连接提升为 TUI 宿主级资源，Session 切换与每轮 Agent 只重绑 registry；`/mcp` 可重载、启停、重连并读取 resources/prompts。
   - OAuth 失败显式进入 `needs_auth`，宿主回调返回凭据补丁后重连；诊断持续脱敏。
   - 仅新增一条确定性集成主链；该场景、typecheck、变更文件 ESLint 与 build 通过。
