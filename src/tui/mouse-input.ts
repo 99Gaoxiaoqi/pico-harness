@@ -8,9 +8,43 @@ import {
 
 export { DISABLE_MOUSE_TRACKING, ENABLE_MOUSE_TRACKING };
 
+export interface TerminalMousePosition {
+  /** One-based terminal column reported by SGR mouse tracking. */
+  column: number;
+  /** One-based terminal row reported by SGR mouse tracking. */
+  row: number;
+}
+
+export interface TerminalHitRegion {
+  /** Inclusive, one-based terminal bounds. */
+  left: number;
+  right: number;
+  top: number;
+  bottom: number;
+}
+
 export type SgrMouseInput =
   | { kind: "wheel"; direction: "up" | "down"; column: number; row: number }
+  | {
+      kind: "left-button";
+      action: "press" | "release";
+      column: number;
+      row: number;
+    }
   | { kind: "other"; column: number; row: number };
+
+/** Inclusive hit test for the one-based coordinates emitted by SGR mouse tracking. */
+export function isTerminalPositionInRegion(
+  position: TerminalMousePosition,
+  region: TerminalHitRegion,
+): boolean {
+  return (
+    position.column >= region.left &&
+    position.column <= region.right &&
+    position.row >= region.top &&
+    position.row <= region.bottom
+  );
+}
 
 /**
  * Parse one SGR mouse report after Ink has decoded stdin. Ink strips the leading
@@ -19,7 +53,7 @@ export type SgrMouseInput =
  */
 export function parseSgrMouseInput(input: string): SgrMouseInput | null {
   const normalized = input.startsWith("\u001b") ? input.slice(1) : input;
-  const match = /^\[<(\d+);(\d+);(\d+)[Mm]$/u.exec(normalized);
+  const match = /^\[<(\d+);(\d+);(\d+)([Mm])$/u.exec(normalized);
   if (!match) return null;
 
   const button = Number(match[1]);
@@ -31,6 +65,14 @@ export function parseSgrMouseInput(input: string): SgrMouseInput | null {
     return {
       kind: "wheel",
       direction: unmodifiedButton === 64 ? "up" : "down",
+      column,
+      row,
+    };
+  }
+  if (unmodifiedButton === 0) {
+    return {
+      kind: "left-button",
+      action: match[4] === "M" ? "press" : "release",
       column,
       row,
     };

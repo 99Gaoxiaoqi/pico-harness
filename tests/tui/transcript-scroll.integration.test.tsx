@@ -3,13 +3,61 @@ import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import { render, type Instance } from "ink";
 import { App, type AppProps } from "../../src/tui/app.js";
-import { DISABLE_MOUSE_TRACKING, ENABLE_MOUSE_TRACKING } from "../../src/tui/mouse-input.js";
+import {
+  DISABLE_MOUSE_TRACKING,
+  ENABLE_MOUSE_TRACKING,
+  isTerminalPositionInRegion,
+  parseSgrMouseInput,
+} from "../../src/tui/mouse-input.js";
 import type { TuiEntry } from "../../src/tui/tui-reporter.js";
 
 const WHEEL_UP = "\u001b[<64;10;10M";
 const WHEEL_DOWN = "\u001b[<65;10;10M";
 
 describe("TUI transcript scrolling integration", () => {
+  it("preserves wheel parsing while exposing left-button coordinates for hit testing", () => {
+    expect(parseSgrMouseInput(WHEEL_UP)).toEqual({
+      kind: "wheel",
+      direction: "up",
+      column: 10,
+      row: 10,
+    });
+    expect(parseSgrMouseInput("[<65;12;9M")).toEqual({
+      kind: "wheel",
+      direction: "down",
+      column: 12,
+      row: 9,
+    });
+
+    const press = parseSgrMouseInput("\u001b[<0;7;21M");
+    const release = parseSgrMouseInput("\u001b[<0;7;21m");
+    expect(press).toEqual({
+      kind: "left-button",
+      action: "press",
+      column: 7,
+      row: 21,
+    });
+    expect(release).toEqual({
+      kind: "left-button",
+      action: "release",
+      column: 7,
+      row: 21,
+    });
+    expect(
+      press && isTerminalPositionInRegion(press, { left: 4, right: 9, top: 21, bottom: 21 }),
+    ).toBe(true);
+    expect(
+      press && isTerminalPositionInRegion(press, { left: 8, right: 12, top: 21, bottom: 21 }),
+    ).toBe(false);
+
+    expect(parseSgrMouseInput("\u001b[<1;7;21M")).toEqual({
+      kind: "other",
+      column: 7,
+      row: 21,
+    });
+    expect(parseSgrMouseInput("not-mouse-input")).toBeNull();
+  });
+
   it("freezes with the wheel, counts new entries, resumes follow at the bottom and on submit", async () => {
     const onSubmit = vi.fn();
     const initialEntries: TuiEntry[] = [longAssistant("history", 60)];
