@@ -364,7 +364,9 @@ export async function runAgentFromCli(
     await loadProfiles(workDir),
     delegationManager,
     workspaceRoots,
-    settings.mode === "yolo" ? { config: picoConfig.sandbox } : undefined,
+    // 主会话的 mode 只控制主 Agent 权限。worker/explore 是独立的不可信执行边界，
+    // 必须始终使用 worktree + OS 沙箱，不得因 default/auto 模式退化为无沙箱 Bash。
+    { config: picoConfig.sandbox },
     runtimeState.taskHostRuntime?.supervisor,
   );
   dependencies.toolStatusSink?.(toolStatusFromRegistry(registry));
@@ -583,7 +585,7 @@ class CostTrackedModelFallbackProvider implements LLMProvider {
 function buildReadOnlyRegistry(
   workDir: string,
   workspaceRoots: WorkspaceRoots,
-  yoloSandbox?: { config?: Partial<YoloSandboxConfig> },
+  yoloSandbox: { config?: Partial<YoloSandboxConfig> },
 ): ToolRegistry {
   const registry = new ToolRegistry({ truncateResults: false });
   registry.register(new ReadFileTool(workspaceRoots));
@@ -591,25 +593,19 @@ function buildReadOnlyRegistry(
   registry.register(
     new BashTool(workDir, undefined, {
       allowBackground: false,
-      ...(yoloSandbox
-        ? {
-            sandbox: {
-              workspaceRoots,
-              ...(yoloSandbox.config ? { config: yoloSandbox.config } : {}),
-            },
-          }
-        : {}),
+      sandbox: {
+        workspaceRoots,
+        ...(yoloSandbox.config ? { config: yoloSandbox.config } : {}),
+      },
     }),
   );
   registry.register(new SkillViewTool(new SkillLoader(workDir)));
-  if (yoloSandbox) {
-    registry.use(async (call) => {
-      const decision = evaluateYoloToolCall(call, workDir, workspaceRoots, yoloSandbox.config);
-      return decision.allowed
-        ? { allowed: true }
-        : { allowed: false, reason: decision.reason ?? "YOLO 子代理边界拒绝。" };
-    });
-  }
+  registry.use(async (call) => {
+    const decision = evaluateYoloToolCall(call, workDir, workspaceRoots, yoloSandbox.config);
+    return decision.allowed
+      ? { allowed: true }
+      : { allowed: false, reason: decision.reason ?? "子代理沙箱边界拒绝。" };
+  });
   return registry;
 }
 
@@ -629,7 +625,7 @@ function registerDelegationTools(
   profiles: AgentProfile[],
   manager: DelegationManager,
   workspaceRoots: WorkspaceRoots,
-  yoloSandbox?: { config?: Partial<YoloSandboxConfig> },
+  yoloSandbox: { config?: Partial<YoloSandboxConfig> },
   worktreeSupervisor?: WorktreeSupervisor,
 ): void {
   const registryFactory = createSubagentRegistryFactory({
@@ -637,7 +633,7 @@ function registerDelegationTools(
     workspaceRoots,
     runner: engine,
     manager,
-    ...(yoloSandbox ? { yoloSandbox } : {}),
+    yoloSandbox,
     ...(worktreeSupervisor ? { worktreeSupervisor } : {}),
     ...(profiles.length > 0 ? { profiles } : {}),
   });

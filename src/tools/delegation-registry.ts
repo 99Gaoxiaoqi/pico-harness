@@ -28,7 +28,7 @@ export interface SubagentRegistryFactoryConfig {
   maxSpawnDepth?: number;
   /** 用户自定义角色库(来自 .claw/agents.yaml)。agent_name 命中时优先使用。 */
   profiles?: AgentProfile[];
-  /** 主 TUI 为 YOLO 时注入同一宿主边界，子代理不得绕过。 */
+  /** 可写 worker/explore 的独立宿主边界；TUI 无论主会话 mode 都应注入。 */
   yoloSandbox?: { config?: Partial<YoloSandboxConfig> };
   worktreeSupervisor?: WorktreeSupervisor;
 }
@@ -204,7 +204,7 @@ function buildSubagentSafetyMiddleware(
         config.yoloSandbox.config,
       );
       if (!decision.allowed) {
-        return { allowed: false, reason: decision.reason ?? "YOLO 子代理边界拒绝。" };
+        return { allowed: false, reason: decision.reason ?? "子代理沙箱边界拒绝。" };
       }
     }
     if (mode === "explore" && call.name === "bash" && isBashMutation(call.arguments)) {
