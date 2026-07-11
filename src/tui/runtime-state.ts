@@ -86,9 +86,7 @@ export async function createTuiRuntimeState(
     backgroundManager: new BackgroundManager({ taskRegistry }),
     delegationManager: new DelegationManager({ taskRegistry }),
     skillRegistry,
-    memoryNudger: options.session.fts5Store
-      ? new MemoryNudger(skillRegistry, options.session.fts5Store)
-      : undefined,
+    memoryNudger: new MemoryNudger(skillRegistry, options.session.sessionSummaryStore),
     fileIndex: FileIndex.create({ cwd: workDir }),
     steerQueue: new SteerQueue(),
     codeIntelligence,

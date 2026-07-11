@@ -189,6 +189,7 @@ export class FullCompactor {
     // 包装职责归 FullCompactor(表现层),Session.applyCompaction 只做纯存储。
     const wrappedSummary = `${SUMMARY_PREFIX}\n\n${summary}\n\n${SUMMARY_END_MARKER}`;
     session.applyCompaction(wrappedSummary, compactedCount);
+    session.saveMemorySummary(summary, compactedCount);
     // previousSummary 存原始摘要(不带包装标记),供下次迭代增量更新
     this.previousSummary = summary;
     logger.info(

@@ -37,6 +37,13 @@ import {
   type SessionUsageSnapshot,
 } from "./session-runtime.js";
 import { FTS5Store } from "../memory/fts5-store.js";
+import { JsonlMemoryStore } from "../memory/jsonl-memory-store.js";
+import type {
+  ConversationSearchStore,
+  MemoryBackendStatus,
+  SessionSummaryStore,
+} from "../memory/memory-store.js";
+import { createSessionSummaryStore } from "../memory/summary-store.js";
 import {
   createFileHistoryState,
   type FileHistoryState,
@@ -56,6 +63,7 @@ function sanitizeFilePart(value: string): string {
 
 /** 进程级 per-key drain 表，让不同 SessionManager 实例也不会越过旧 tail。 */
 const sessionDrains = new Map<string, Promise<void>>();
+const summaryStorePool = new Map<string, { store: SessionSummaryStore; refCount: number }>();
 
 function sessionEntryKey(id: string, workDir: string): string {
   return `${resolve(workDir)}\0${id}`;
@@ -74,6 +82,31 @@ function registerSessionDrain(key: string, drain: Promise<void>): Promise<void> 
     },
   );
   return tracked;
+}
+
+function acquireSummaryStore(filePath: string): SessionSummaryStore {
+  const existing = summaryStorePool.get(filePath);
+  if (existing) {
+    existing.refCount++;
+    return existing.store;
+  }
+  const store = createSessionSummaryStore({ persistent: true, filePath });
+  summaryStorePool.set(filePath, { store, refCount: 1 });
+  return store;
+}
+
+function releaseSummaryStore(filePath: string): void {
+  const existing = summaryStorePool.get(filePath);
+  if (!existing) return;
+  existing.refCount = Math.max(0, existing.refCount - 1);
+  if (existing.refCount === 0) summaryStorePool.delete(filePath);
+}
+
+export interface SessionOptions {
+  persistence?: boolean;
+  identity?: SessionIdentity;
+  /** Deterministic backend injection for integration and embedders. */
+  memorySearchStore?: ConversationSearchStore;
 }
 
 /**
@@ -168,17 +201,14 @@ export class Session implements SessionRuntimePersistence {
    */
   private runQueue: Promise<unknown> = Promise.resolve();
 
-  /**
-   * FTS5 全文检索存储。可选,初始化失败降级为 undefined。
-   * 用于对话历史的语义检索和周期性记忆提醒。
-   */
-  private fts5?: FTS5Store;
+  /** 当前检索后端；SQLite 不可用时由 JSONL 重放消息重建内存索引。 */
+  private searchStore!: ConversationSearchStore;
+  /** acquire 得到的共享 FTS5 租约；即使降级也需要对称 release。 */
+  private fts5Lease?: FTS5Store;
+  private summaryStore!: SessionSummaryStore;
+  private summaryStoreLeasePath?: string;
 
-  constructor(
-    id: string,
-    workDir: string,
-    options?: { persistence?: boolean; identity?: SessionIdentity },
-  ) {
+  constructor(id: string, workDir: string, options?: SessionOptions) {
     this.id = id;
     this.workDir = workDir;
     this.identity =
@@ -194,7 +224,14 @@ export class Session implements SessionRuntimePersistence {
     this.createdAt = new Date();
     this.updatedAt = new Date();
     this.initPersistence(options?.persistence);
-    this.initFTS5();
+    this.initMemorySearch(options?.memorySearchStore);
+    const summaryPath = join(this.workDir, ".claw", "memory", "summaries.json");
+    if (this.store) {
+      this.summaryStore = acquireSummaryStore(summaryPath);
+      this.summaryStoreLeasePath = summaryPath;
+    } else {
+      this.summaryStore = createSessionSummaryStore({ persistent: false, filePath: summaryPath });
+    }
   }
 
   /**
@@ -226,13 +263,33 @@ export class Session implements SessionRuntimePersistence {
    * 【连接池化】通过 FTS5Store.acquire 复用 workDir 级单例,避免每 Session 开一个
    * SQLite 连接。失败时降级为 undefined,不影响主流程(记忆提醒功能可选)。
    */
-  private initFTS5(): void {
+  private initMemorySearch(explicit?: ConversationSearchStore): void {
+    if (explicit) {
+      this.searchStore = explicit;
+      return;
+    }
     try {
       const store = FTS5Store.acquire(this.workDir);
-      this.fts5 = store ?? undefined;
+      if (store) this.fts5Lease = store;
+      if (store?.status.state === "healthy") {
+        this.searchStore = store;
+        return;
+      }
+      this.searchStore = new JsonlMemoryStore({
+        persistentSource: this.store ? "session_jsonl" : "none",
+        reason: store?.status.reason ?? "SQLite FTS5 unavailable",
+        ...(store?.status.recommendation ? { recommendation: store.status.recommendation } : {}),
+        nodeVersion: store?.status.nodeVersion,
+        nodeModuleAbi: store?.status.nodeModuleAbi,
+      });
     } catch (err) {
-      logger.warn({ err }, "[session] FTS5 初始化失败,降级为纯内存");
-      this.fts5 = undefined;
+      logger.warn({ err }, "[session] FTS5 初始化失败,降级为 JSONL 重建索引");
+      this.searchStore = new JsonlMemoryStore({
+        persistentSource: this.store ? "session_jsonl" : "none",
+        reason: err instanceof Error ? err.message : String(err),
+        recommendation:
+          "请在当前 Node 环境运行 npm rebuild better-sqlite3；仍失败时重新运行 npm ci。",
+      });
     }
   }
 
@@ -243,7 +300,10 @@ export class Session implements SessionRuntimePersistence {
    */
   async recover(): Promise<void> {
     await this.recoverFileHistory();
-    if (!this.store) return;
+    if (!this.store) {
+      this.rebuildSearchIndex();
+      return;
+    }
     let records;
     try {
       records = await this.store.load();
@@ -252,7 +312,10 @@ export class Session implements SessionRuntimePersistence {
       logger.warn({ error: String(error) }, "[session] 日志重放失败,降级为空历史");
       return;
     }
-    if (records.length === 0) return;
+    if (records.length === 0) {
+      this.rebuildSearchIndex();
+      return;
+    }
 
     // 重放:message 累积进 pending,truncate 则截断 pending(对标 wire 折叠语义)
     // volatile message(易失事件,如流式片段)不重建进 history —— 4.3 cursor
@@ -288,6 +351,11 @@ export class Session implements SessionRuntimePersistence {
         (maxSeq, record) => ("seq" in record ? Math.max(maxSeq, record.seq) : maxSeq),
         -1,
       ) + 1;
+    this.rebuildSearchIndex();
+  }
+
+  private rebuildSearchIndex(): void {
+    this.searchStore.replaceSession(this.id, this.history);
   }
 
   /**
@@ -578,13 +646,10 @@ export class Session implements SessionRuntimePersistence {
     this.history.push(msg);
     this.updatedAt = new Date();
 
-    // FTS5 索引:为消息建立全文检索索引(用于记忆提醒和语义检索)
-    if (this.fts5) {
-      try {
-        this.fts5.insert(this.id, beforeLen, msg);
-      } catch (err) {
-        logger.warn({ err }, "[session] FTS5 索引失败");
-      }
+    try {
+      this.searchStore.insert(this.id, beforeLen, msg);
+    } catch (err) {
+      logger.warn({ err }, "[session] 记忆索引失败");
     }
 
     // 事件追加落盘:payload 在逻辑变更点复制，再进入唯一串行队列。
@@ -604,6 +669,7 @@ export class Session implements SessionRuntimePersistence {
     if (fromIndex < 0) fromIndex = 0;
     if (fromIndex >= this.history.length) {
       this.history = [];
+      this.rebuildSearchIndex();
       this.updatedAt = new Date();
       // 追加 truncate 事件(fromIndex = 历史长度 → 重放后为空)
       if (this.store) {
@@ -612,6 +678,7 @@ export class Session implements SessionRuntimePersistence {
       return;
     }
     this.history = this.history.slice(fromIndex);
+    this.rebuildSearchIndex();
     this.pruneToolResultMeta();
     this.updatedAt = new Date();
     if (this.store) {
@@ -629,6 +696,7 @@ export class Session implements SessionRuntimePersistence {
     const { cutIndex, removedCount } = this.findUndoCut(this.history, count);
     if (removedCount === 0) return;
     this.history = this.history.slice(0, cutIndex);
+    this.rebuildSearchIndex();
     this.pruneToolResultMeta();
     // 3.4: undo 时清空 deferred 与 pending,避免遗留半截 tool 配对状态
     this.deferredMessages = [];
@@ -665,6 +733,7 @@ export class Session implements SessionRuntimePersistence {
 
   async rewindTo(messageIndex: number): Promise<void> {
     this.history = this.history.slice(0, messageIndex);
+    this.rebuildSearchIndex();
     this.pruneToolResultMeta();
     this.deferredMessages = [];
     this.pendingToolCallIds.clear();
@@ -782,6 +851,7 @@ export class Session implements SessionRuntimePersistence {
     };
     // 内存:用 summary 替换前 compactedCount 条
     this.history = [summaryMsg, ...retained];
+    this.rebuildSearchIndex();
     // 压缩后清理已消失 ToolResult 的 meta(被摘要吞掉的前缀条目)
     this.pruneToolResultMeta();
     this.updatedAt = new Date();
@@ -872,28 +942,35 @@ export class Session implements SessionRuntimePersistence {
     query: string,
     limit = 10,
   ): Array<{ content: string; turnIndex: number; sessionId: string }> {
-    if (!this.fts5) {
-      logger.warn("[session] FTS5 未初始化,无法检索");
-      return [];
-    }
-
     try {
       // 传入 sessionId 过滤,只返回当前 Session 的消息
-      const results = this.fts5.search(query, limit, this.id);
+      const results = this.searchStore.search(query, limit, this.id);
       return results.map((r) => ({
         content: r.content,
         turnIndex: r.turnIndex,
         sessionId: r.sessionId,
       }));
     } catch (err) {
-      logger.warn({ err, query }, "[session] FTS5 检索失败");
+      logger.warn({ err, query }, "[session] 记忆检索失败");
       return [];
     }
   }
 
   /** 获取 FTS5Store 实例(用于 MemoryNudger) */
   get fts5Store(): FTS5Store | undefined {
-    return this.fts5;
+    return this.fts5Lease?.status.state === "healthy" ? this.fts5Lease : undefined;
+  }
+
+  get memoryStatus(): MemoryBackendStatus {
+    return this.searchStore.status;
+  }
+
+  get sessionSummaryStore(): SessionSummaryStore {
+    return this.summaryStore;
+  }
+
+  saveMemorySummary(summary: string, messageCount: number): void {
+    this.summaryStore.save(this.id, summary, messageCount);
   }
 
   /**
@@ -934,9 +1011,17 @@ export class Session implements SessionRuntimePersistence {
     this.lifecycle = "closing";
     this.goalBinding?.unsubscribe();
     this.goalBinding = undefined;
-    if (this.fts5) {
+    const leasedFts5 = this.fts5Lease;
+    if (leasedFts5) {
       FTS5Store.release(this.workDir);
-      this.fts5 = undefined;
+      this.fts5Lease = undefined;
+    }
+    if (this.searchStore !== leasedFts5) {
+      this.searchStore.close();
+    }
+    if (this.summaryStoreLeasePath) {
+      releaseSummaryStore(this.summaryStoreLeasePath);
+      this.summaryStoreLeasePath = undefined;
     }
 
     const drain = this.runQueue
@@ -1062,11 +1147,7 @@ export class SessionManager {
    *
    * 命中时做 MRU 提升(删除后重新 set 到末尾);新建后触发 LRU 驱赶 + TTL 惰性清理。
    */
-  async getOrCreate(
-    id: string,
-    workDir: string,
-    options?: { persistence?: boolean; identity?: SessionIdentity },
-  ): Promise<Session> {
+  async getOrCreate(id: string, workDir: string, options?: SessionOptions): Promise<Session> {
     // TTL 惰性清理:借这次访问顺带扫一遍过期项(低频,不阻塞主流程)。
     this.evictExpired();
 
@@ -1160,7 +1241,7 @@ export class SessionManager {
     key: string,
     id: string,
     workDir: string,
-    options?: { persistence?: boolean; identity?: SessionIdentity },
+    options?: SessionOptions,
   ): Promise<Session> {
     await sessionDrains.get(key);
 

@@ -125,7 +125,7 @@ export async function createPicoCommandRegistry(
   );
   const registry = new CommandRegistry([
     ...builtins,
-    createStatusCommand(settings, options.mcpStatus),
+    createStatusCommand(settings, options.session, options.mcpStatus),
     createModelRuntimeCommand("usage", options.modelRuntime),
     createModelRuntimeCommand("context", options.modelRuntime),
     createGoalCommand(options.goalManager),
@@ -274,6 +274,7 @@ async function loadSessionArgumentCandidates(
 
 function createStatusCommand(
   settings: SessionSettings,
+  session?: Session,
   mcpStatus?: McpStatusProvider,
 ): SlashCommand {
   return {
@@ -286,7 +287,7 @@ function createStatusCommand(
     execute: (): LocalCommandResult => ({
       type: "local",
       action: "status",
-      message: formatStatusWithMcp(settings, mcpStatus),
+      message: formatStatusWithMcp(settings, session, mcpStatus),
     }),
   };
 }
@@ -360,9 +361,10 @@ function createGoalCommand(goalManager?: GoalManager): SlashCommand {
 
 function formatStatusWithMcp(
   settings: SessionSettings,
+  session: Session | undefined,
   mcpStatus: McpStatusProvider | undefined,
 ): string {
-  const base = formatSessionStatus(settings);
+  const base = [formatSessionStatus(settings), ...formatMemoryBackend(session, false)].join("\n");
   const snapshot = mcpStatus?.();
   if (snapshot === undefined) return base;
   return `${base}\n${formatMcpOverview(snapshot)}`;
@@ -1350,5 +1352,22 @@ function formatDoctorReport(options: PicoCommandRegistryOptions): string {
     `LLM_BASE_URL: ${process.env.LLM_BASE_URL ? "set" : "missing"}`,
     `LLM_API_KEY[S]: ${apiKeys.length > 0 ? `${apiKeys.length} configured` : "missing"}`,
     `Node: ${process.version} (${nodeOk ? "ok" : "requires >=22.0.0"})`,
+    ...formatMemoryBackend(options.session, true),
   ].join("\n");
+}
+
+function formatMemoryBackend(
+  session: Session | undefined,
+  includeRecommendation: boolean,
+): string[] {
+  if (!session) return ["Memory: unavailable (no live session)"];
+  const status = session.memoryStatus;
+  return [
+    `Memory: ${status.backend} (${status.state}; source=${status.persistentSource})`,
+    `Memory runtime: ${status.nodeVersion}; ABI ${status.nodeModuleAbi ?? "unknown"}`,
+    ...(status.reason ? [`Memory reason: ${status.reason}`] : []),
+    ...(includeRecommendation && status.recommendation
+      ? [`Memory recommendation: ${status.recommendation}`]
+      : []),
+  ];
 }
