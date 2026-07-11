@@ -1,16 +1,29 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   copyFile,
   mkdir,
   stat,
+  lstat,
   chmod,
   unlink,
   readFile,
   writeFile,
   rename,
+  rm,
 } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
+import {
+  addFileChangeJournalWarning,
+  beginFileChangeJournal,
+  copyFileWithCloneFallback,
+  discardFileChangeJournal,
+  fileChangeJournalWarnings,
+  fileMatchesPreimage,
+  inspectFileChangeJournal,
+  type FileChangeJournal,
+  type FileChangePreimage,
+} from "./file-change-journal.js";
 
 const DEFAULT_BASE_DIR = join(homedir(), ".pico", "file-history");
 const MAX_SNAPSHOTS = 100;
@@ -21,6 +34,7 @@ export interface FileHistoryBackup {
   backupTime: Date;
   originMtimeMs?: number;
   originSize?: number;
+  originMode?: number;
 }
 
 export interface FileHistorySnapshot {
@@ -36,6 +50,8 @@ export interface FileHistorySnapshot {
   interactionMode?: string;
   /** 本条用户消息执行期间实际触碰过的文件。 */
   editedFilePaths?: Set<string>;
+  /** 本条消息的文件事务未完整覆盖工作区时的可见警告。 */
+  journalWarnings?: string[];
 }
 
 export interface FileHistoryState {
@@ -43,6 +59,7 @@ export interface FileHistoryState {
   trackedFiles: Set<string>;
   snapshotSequence: number;
   pendingTrackEdits: Map<string, FileHistoryBackup>;
+  pendingJournalWarnings: Set<string>;
   currentMessageId?: string;
   fileVersions: Map<string, number>;
 }
@@ -62,6 +79,17 @@ export interface FileHistoryDiffStat {
   addedLines: number;
   removedLines: number;
   files: FileHistoryDiffFileStat[];
+  /** true 表示本轮存在无法捕获或明确排除的文件范围。 */
+  incomplete?: boolean;
+  warnings?: string[];
+}
+
+/** Engine 层只持有不透明句柄，捕获/扫描细节留在 file-change-journal。 */
+export type FileHistoryJournal = FileChangeJournal;
+
+export interface FileHistoryJournalCommitResult {
+  incomplete: boolean;
+  warnings: string[];
 }
 
 export function createFileHistoryState(): FileHistoryState {
@@ -70,6 +98,7 @@ export function createFileHistoryState(): FileHistoryState {
     trackedFiles: new Set(),
     snapshotSequence: 0,
     pendingTrackEdits: new Map(),
+    pendingJournalWarnings: new Set(),
     currentMessageId: undefined,
     fileVersions: new Map(),
   };
@@ -98,6 +127,30 @@ export function resolveBackupPath(
 
 function resolveManifestPath(sessionId: string, baseDir: string = DEFAULT_BASE_DIR): string {
   return join(baseDir, getSessionDirName(sessionId), "manifest.json");
+}
+
+/**
+ * 在工具批次开始前创建写前镜像。COPYFILE_FICLONE 在支持的文件系统上使用
+ * copy-on-write，其他文件系统自动回退为普通 copy。镜像位于工作区外，
+ * 不会被后续 formatter/script 一起改写。
+ */
+export async function fileHistoryBeginJournal(
+  roots: readonly string[],
+  sessionId: string,
+  signal?: AbortSignal,
+  baseDir: string = DEFAULT_BASE_DIR,
+): Promise<FileHistoryJournal> {
+  const stagingDir = join(baseDir, getSessionDirName(sessionId), ".transactions", randomUUID());
+  return beginFileChangeJournal(roots, stagingDir, signal);
+}
+
+/** 显式标记事务无法覆盖的副作用（如 background bash）。 */
+export function fileHistoryAddJournalWarning(journal: FileHistoryJournal, warning: string): void {
+  addFileChangeJournalWarning(journal, warning);
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 export async function createBackup(
@@ -131,6 +184,16 @@ export async function restoreBackup(
 ): Promise<void> {
   const backupPath = resolveBackupPath(sessionId, backupFileName, baseDir);
   const backupStat = await stat(backupPath);
+
+  try {
+    const targetStat = await lstat(filePath);
+    if (!targetStat.isFile()) {
+      // 先移除 symlink/目录/特殊文件，避免 copyFile 跟随链接写出工作区。
+      await rm(filePath, { recursive: true, force: true });
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
 
   try {
     await copyFile(backupPath, filePath);
@@ -173,6 +236,7 @@ export async function fileHistoryTrackEdit(
           backupTime: new Date(),
           originMtimeMs: srcStat.mtimeMs,
           originSize: srcStat.size,
+          originMode: srcStat.mode & 0o777,
         };
       } catch (err) {
         const code = (err as NodeJS.ErrnoException).code;
@@ -191,6 +255,7 @@ export async function fileHistoryTrackEdit(
 
   if (state.currentMessageId !== messageId) {
     state.pendingTrackEdits = new Map();
+    state.pendingJournalWarnings = new Set();
     state.currentMessageId = messageId;
   }
 
@@ -210,6 +275,7 @@ export async function fileHistoryTrackEdit(
       backupTime: new Date(),
       originMtimeMs: srcStat.mtimeMs,
       originSize: srcStat.size,
+      originMode: srcStat.mode & 0o777,
     };
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
@@ -220,6 +286,216 @@ export async function fileHistoryTrackEdit(
   state.fileVersions.set(filePath, version);
   state.trackedFiles.add(filePath);
   state.pendingTrackEdits.set(filePath, backup);
+}
+
+/**
+ * 工具批次结束后提交事务：只将真正发生变化的路径写入 rewind point。
+ * 被覆盖/删除的文件使用事务开始时的 staged preimage，新建文件则记为 null。
+ */
+export async function fileHistoryCommitJournal(
+  state: FileHistoryState,
+  journal: FileHistoryJournal,
+  messageId: string,
+  sessionId: string,
+  baseDir: string = DEFAULT_BASE_DIR,
+): Promise<FileHistoryJournalCommitResult> {
+  let changed = false;
+  try {
+    const current = await inspectFileChangeJournal(journal);
+    const changedPreimages: Array<[string, FileChangePreimage]> = [];
+
+    for (const [filePath, preimage] of journal.preimages) {
+      const currentMetadata = current.files.get(filePath);
+      if (!currentMetadata || current.excludedPaths.has(filePath)) {
+        changedPreimages.push([filePath, preimage]);
+        continue;
+      }
+      if (preimage.size !== currentMetadata.size || preimage.mode !== currentMetadata.mode) {
+        changedPreimages.push([filePath, preimage]);
+        continue;
+      }
+      try {
+        if (!(await fileMatchesPreimage(filePath, preimage))) {
+          changedPreimages.push([filePath, preimage]);
+        }
+      } catch (error) {
+        addFileChangeJournalWarning(
+          journal,
+          `无法核对工具执行后内容 ${filePath}: ${errorMessage(error)}`,
+        );
+      }
+    }
+
+    for (const [filePath, baseline] of journal.baseline.files) {
+      if (journal.preimages.has(filePath)) continue;
+      const after = current.files.get(filePath);
+      if (
+        !after ||
+        current.excludedPaths.has(filePath) ||
+        baseline.size !== after.size ||
+        baseline.mode !== after.mode ||
+        baseline.mtimeMs !== after.mtimeMs
+      ) {
+        addFileChangeJournalWarning(
+          journal,
+          `未捕获写前内容的文件已变化，无法安全 rewind: ${filePath}`,
+        );
+      }
+    }
+
+    for (const [filePath] of current.files) {
+      if (
+        journal.baseline.files.has(filePath) ||
+        journal.baseline.excludedPaths.has(filePath) ||
+        !journal.baseline.complete ||
+        !current.complete
+      ) {
+        continue;
+      }
+      try {
+        if (await recordJournalChange(state, filePath, undefined, messageId, sessionId, baseDir)) {
+          changed = true;
+        }
+      } catch (error) {
+        addFileChangeJournalWarning(
+          journal,
+          `无法记录新建文件 ${filePath}: ${errorMessage(error)}`,
+        );
+      }
+    }
+
+    for (const [filePath, preimage] of changedPreimages) {
+      try {
+        if (await recordJournalChange(state, filePath, preimage, messageId, sessionId, baseDir)) {
+          changed = true;
+        }
+      } catch (error) {
+        addFileChangeJournalWarning(
+          journal,
+          `无法提交写前备份 ${filePath}: ${errorMessage(error)}`,
+        );
+      }
+    }
+
+    const warnings = fileChangeJournalWarnings(journal);
+    attachJournalWarnings(state, messageId, warnings);
+    if (changed || warnings.length > 0) {
+      await saveFileHistoryState(state, sessionId, baseDir);
+    }
+    return {
+      incomplete: warnings.length > 0,
+      warnings,
+    };
+  } finally {
+    await discardFileChangeJournal(journal);
+  }
+}
+
+async function recordJournalChange(
+  state: FileHistoryState,
+  filePath: string,
+  preimage: FileChangePreimage | undefined,
+  messageId: string,
+  sessionId: string,
+  baseDir: string,
+): Promise<boolean> {
+  const rewindPoint = state.snapshots.findLast(
+    (snapshot) => snapshot.messageId === messageId && snapshot.userPrompt !== undefined,
+  );
+  if (rewindPoint) {
+    const editedFilePaths = rewindPoint.editedFilePaths ?? new Set<string>();
+    rewindPoint.editedFilePaths = editedFilePaths;
+    if (editedFilePaths.has(filePath)) return false;
+    const existing = rewindPoint.trackedFileBackups.get(filePath);
+    if (!(await backupMatchesPreimage(existing, preimage, sessionId, baseDir))) {
+      const backup = await journalBackup(filePath, preimage, state, sessionId, baseDir);
+      rewindPoint.trackedFileBackups.set(filePath, backup);
+    }
+    state.trackedFiles.add(filePath);
+    editedFilePaths.add(filePath);
+    return true;
+  }
+
+  if (state.currentMessageId !== messageId) {
+    state.pendingTrackEdits = new Map();
+    state.pendingJournalWarnings = new Set();
+    state.currentMessageId = messageId;
+  }
+  if (state.pendingTrackEdits.has(filePath)) return false;
+  const backup = await journalBackup(filePath, preimage, state, sessionId, baseDir);
+  state.pendingTrackEdits.set(filePath, backup);
+  state.trackedFiles.add(filePath);
+  return true;
+}
+
+async function backupMatchesPreimage(
+  backup: FileHistoryBackup | undefined,
+  preimage: FileChangePreimage | undefined,
+  sessionId: string,
+  baseDir: string,
+): Promise<boolean> {
+  if (!backup) return false;
+  if (!preimage) return backup.backupFileName === null;
+  if (backup.backupFileName === null || backup.originMode !== preimage.mode) return false;
+  try {
+    return await fileMatchesPreimage(
+      resolveBackupPath(sessionId, backup.backupFileName, baseDir),
+      preimage,
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function journalBackup(
+  filePath: string,
+  preimage: FileChangePreimage | undefined,
+  state: FileHistoryState,
+  sessionId: string,
+  baseDir: string,
+): Promise<FileHistoryBackup> {
+  const version = (state.fileVersions.get(filePath) ?? 0) + 1;
+  state.fileVersions.set(filePath, version);
+  if (!preimage) {
+    return { backupFileName: null, version, backupTime: new Date() };
+  }
+
+  const backupFileName = getBackupFileName(filePath, version);
+  const backupPath = resolveBackupPath(sessionId, backupFileName, baseDir);
+  await mkdir(dirname(backupPath), { recursive: true });
+  await copyFileWithCloneFallback(preimage.stagedPath, backupPath);
+  await chmod(backupPath, preimage.mode);
+  return {
+    backupFileName,
+    version,
+    backupTime: new Date(),
+    originMtimeMs: preimage.mtimeMs,
+    originSize: preimage.size,
+    originMode: preimage.mode,
+  };
+}
+
+function attachJournalWarnings(
+  state: FileHistoryState,
+  messageId: string,
+  warnings: readonly string[],
+): void {
+  if (warnings.length === 0) return;
+  const rewindPoint = state.snapshots.findLast(
+    (snapshot) => snapshot.messageId === messageId && snapshot.userPrompt !== undefined,
+  );
+  if (rewindPoint) {
+    rewindPoint.journalWarnings = [
+      ...new Set([...(rewindPoint.journalWarnings ?? []), ...warnings]),
+    ];
+    return;
+  }
+  if (state.currentMessageId !== messageId) {
+    state.pendingTrackEdits = new Map();
+    state.pendingJournalWarnings = new Set();
+    state.currentMessageId = messageId;
+  }
+  for (const warning of warnings) state.pendingJournalWarnings.add(warning);
 }
 
 function findLastBackup(state: FileHistoryState, filePath: string): FileHistoryBackup | undefined {
@@ -280,6 +556,9 @@ export async function fileHistoryMakeSnapshot(
     trackedFileBackups: new Map(),
     timestamp: new Date(),
     editedFilePaths: new Set(),
+    ...(state.pendingJournalWarnings.size > 0
+      ? { journalWarnings: [...state.pendingJournalWarnings] }
+      : {}),
     ...(messageIndex !== undefined ? { messageIndex } : {}),
     ...(metadata !== undefined ? { userPrompt: metadata.userPrompt } : {}),
     ...(metadata?.transcriptIndex !== undefined
@@ -315,7 +594,8 @@ export async function fileHistoryMakeSnapshot(
     if (
       lastBackup &&
       lastBackup.originMtimeMs === currentStat.mtimeMs &&
-      lastBackup.originSize === currentStat.size
+      lastBackup.originSize === currentStat.size &&
+      lastBackup.originMode === (currentStat.mode & 0o777)
     ) {
       snapshot.trackedFileBackups.set(filePath, lastBackup);
     } else {
@@ -328,6 +608,7 @@ export async function fileHistoryMakeSnapshot(
         backupTime: new Date(),
         originMtimeMs: currentStat.mtimeMs,
         originSize: currentStat.size,
+        originMode: currentStat.mode & 0o777,
       });
     }
   }
@@ -335,6 +616,7 @@ export async function fileHistoryMakeSnapshot(
   state.snapshots.push(snapshot);
   state.snapshotSequence++;
   state.pendingTrackEdits = new Map();
+  state.pendingJournalWarnings = new Set();
   state.currentMessageId = metadata === undefined ? undefined : messageId;
 
   if (state.snapshots.length > MAX_SNAPSHOTS) {
@@ -381,6 +663,7 @@ export async function fileHistoryDiscardFrom(
   if (targetIndex === -1) return;
   state.snapshots = state.snapshots.slice(0, targetIndex);
   state.pendingTrackEdits = new Map();
+  state.pendingJournalWarnings = new Set();
   state.currentMessageId = undefined;
   await saveFileHistoryState(state, sessionId, baseDir);
 }
@@ -400,7 +683,7 @@ export async function fileHistoryRewind(
     const backup = target.trackedFileBackups.get(filePath) ?? findFirstBackup(state, filePath);
     if (!backup) continue;
     if (backup.backupFileName === null) {
-      await unlink(filePath).catch(() => {});
+      await rm(filePath, { recursive: true, force: true }).catch(() => {});
     } else {
       await restoreBackup(filePath, backup.backupFileName, sessionId, baseDir);
     }
@@ -427,7 +710,12 @@ export async function fileHistoryDiffStat(
     const backup = target.trackedFileBackups.get(filePath) ?? findFirstBackup(state, filePath);
     const before = await readSnapshotFileContent(backup, sessionId, baseDir);
     const after = await readCurrentFileContent(filePath);
-    if (before === after) continue;
+    const afterMode = await readCurrentFileMode(filePath);
+    const modeChanged =
+      backup?.originMode !== undefined &&
+      afterMode !== undefined &&
+      backup.originMode !== afterMode;
+    if (before === after && !modeChanged) continue;
 
     const changes = countLineChanges(before ?? "", after ?? "");
     files.push({
@@ -444,6 +732,9 @@ export async function fileHistoryDiffStat(
     addedLines: files.reduce((sum, file) => sum + file.addedLines, 0),
     removedLines: files.reduce((sum, file) => sum + file.removedLines, 0),
     files,
+    ...(target.journalWarnings?.length
+      ? { incomplete: true, warnings: [...target.journalWarnings] }
+      : {}),
   };
 }
 
@@ -475,10 +766,16 @@ export async function fileHistoryMessageDiffStat(
     const beforeBackup =
       target.trackedFileBackups.get(filePath) ?? findFirstBackup(state, filePath);
     const before = await readSnapshotFileContent(beforeBackup, sessionId, baseDir);
+    const afterBackup = next?.trackedFileBackups.get(filePath);
     const after = next
-      ? await readSnapshotFileContent(next.trackedFileBackups.get(filePath), sessionId, baseDir)
+      ? await readSnapshotFileContent(afterBackup, sessionId, baseDir)
       : await readCurrentFileContent(filePath);
-    if (before === after) continue;
+    const afterMode = next ? afterBackup?.originMode : await readCurrentFileMode(filePath);
+    const modeChanged =
+      beforeBackup?.originMode !== undefined &&
+      afterMode !== undefined &&
+      beforeBackup.originMode !== afterMode;
+    if (before === after && !modeChanged) continue;
     const changes = countLineChanges(before ?? "", after ?? "");
     files.push({
       filePath,
@@ -494,6 +791,9 @@ export async function fileHistoryMessageDiffStat(
     addedLines: files.reduce((sum, file) => sum + file.addedLines, 0),
     removedLines: files.reduce((sum, file) => sum + file.removedLines, 0),
     files,
+    ...(target.journalWarnings?.length
+      ? { incomplete: true, warnings: [...target.journalWarnings] }
+      : {}),
   };
 }
 
@@ -508,11 +808,23 @@ async function readSnapshotFileContent(
 
 async function readCurrentFileContent(filePath: string): Promise<string | undefined> {
   try {
+    const info = await lstat(filePath);
+    if (!info.isFile()) return undefined;
     return await readFile(filePath, "utf8");
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
     if (code === "ENOENT") return undefined;
     throw err;
+  }
+}
+
+async function readCurrentFileMode(filePath: string): Promise<number | undefined> {
+  try {
+    const info = await lstat(filePath);
+    return info.isFile() ? info.mode & 0o777 : undefined;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
   }
 }
 
@@ -588,6 +900,7 @@ interface PersistedFileHistoryBackup {
   backupTime: string;
   originMtimeMs?: number;
   originSize?: number;
+  originMode?: number;
 }
 
 interface PersistedFileHistorySnapshot {
@@ -599,6 +912,7 @@ interface PersistedFileHistorySnapshot {
   transcriptIndex?: number;
   interactionMode?: string;
   editedFilePaths?: string[];
+  journalWarnings?: string[];
 }
 
 interface PersistedFileHistoryState {
@@ -625,6 +939,7 @@ async function saveFileHistoryState(
             backupTime: backup.backupTime.toISOString(),
             ...(backup.originMtimeMs !== undefined ? { originMtimeMs: backup.originMtimeMs } : {}),
             ...(backup.originSize !== undefined ? { originSize: backup.originSize } : {}),
+            ...(backup.originMode !== undefined ? { originMode: backup.originMode } : {}),
           },
         ],
       ),
@@ -639,6 +954,9 @@ async function saveFileHistoryState(
         : {}),
       ...(snapshot.editedFilePaths !== undefined
         ? { editedFilePaths: Array.from(snapshot.editedFilePaths) }
+        : {}),
+      ...(snapshot.journalWarnings !== undefined
+        ? { journalWarnings: [...snapshot.journalWarnings] }
         : {}),
     })),
     trackedFiles: Array.from(state.trackedFiles),
@@ -679,12 +997,16 @@ export async function fileHistoryLoadState(
           backupTime: new Date(backup.backupTime),
           ...(backup.originMtimeMs !== undefined ? { originMtimeMs: backup.originMtimeMs } : {}),
           ...(backup.originSize !== undefined ? { originSize: backup.originSize } : {}),
+          ...(backup.originMode !== undefined ? { originMode: backup.originMode } : {}),
         },
       ]),
     ),
     timestamp: new Date(snapshot.timestamp),
     ...(snapshot.editedFilePaths !== undefined
       ? { editedFilePaths: new Set(snapshot.editedFilePaths) }
+      : {}),
+    ...(snapshot.journalWarnings !== undefined
+      ? { journalWarnings: [...snapshot.journalWarnings] }
       : {}),
     ...(snapshot.messageIndex !== undefined ? { messageIndex: snapshot.messageIndex } : {}),
     ...(snapshot.userPrompt !== undefined ? { userPrompt: snapshot.userPrompt } : {}),
@@ -699,6 +1021,7 @@ export async function fileHistoryLoadState(
   state.snapshotSequence = manifest.snapshotSequence;
   state.fileVersions = new Map(manifest.fileVersions);
   state.pendingTrackEdits = new Map();
+  state.pendingJournalWarnings = new Set();
   state.currentMessageId = undefined;
   return true;
 }

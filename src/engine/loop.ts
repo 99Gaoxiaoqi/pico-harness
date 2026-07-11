@@ -33,13 +33,20 @@ import { IterationBudget, type BudgetConfig, type BudgetDecision } from "./budge
 import type { GoalManager } from "./goal-manager.js";
 import { Tracer, exportTraceToFile, truncate, type Span } from "../observability/trace.js";
 import { logger } from "../observability/logger.js";
-import { extractBashRedirectTargets, safeResolve } from "../tools/registry-impl.js";
+import { safeResolve } from "../tools/registry-impl.js";
 import type { WorkspaceRoots } from "../tools/workspace-roots.js";
 import type { Session } from "./session.js";
 import type { ToolObservationProcessor } from "../tools/tool-result-observation.js";
 import { ToolAccesses } from "../tools/tool-access.js";
 import { ToolScheduler } from "../tools/tool-scheduler.js";
-import { fileHistoryTrackEdit, fileHistoryMakeSnapshot } from "../safety/file-history.js";
+import {
+  fileHistoryAddJournalWarning,
+  fileHistoryBeginJournal,
+  fileHistoryCommitJournal,
+  fileHistoryTrackEdit,
+  fileHistoryMakeSnapshot,
+  type FileHistoryJournal,
+} from "../safety/file-history.js";
 
 /** WorkingMemory 滑动窗口大小:截取最近 N 条消息供压缩器判断(含远期历史) */
 const DEFAULT_WORKING_MEMORY_LIMIT = 20;
@@ -49,6 +56,16 @@ const SUBAGENT_SUMMARY_MIN_CHARS = 200;
 /** summary 续写提示词:要求子代理把过短的总结扩写成完整汇报 */
 const SUBAGENT_SUMMARY_CONTINUATION_PROMPT =
   "你上一轮的总结过于简短,主架构师无法据此决策。请重新输出一份结构完整、细节充分的总结汇报:包括你探索了哪些文件/发现了什么、关键结论、以及尚存的不确定点。不要调用任何工具,直接用纯文本回答。";
+
+function isBackgroundBashCall(call: ToolCall): boolean {
+  if (call.name !== "bash") return false;
+  try {
+    const input = JSON.parse(call.arguments) as { background?: unknown };
+    return input.background === true;
+  } catch {
+    return false;
+  }
+}
 
 export interface AgentEngineOptions {
   provider: LLMProvider;
@@ -603,20 +620,6 @@ export class AgentEngine implements AgentRunner {
                 currentMessageId,
                 session.id,
               );
-              return;
-            }
-            if (toolName === "bash") {
-              const { command } = JSON.parse(args) as { command?: string };
-              if (!command) return;
-              const targets = extractBashRedirectTargets(this.workDir, command);
-              for (const target of targets) {
-                await fileHistoryTrackEdit(
-                  session.fileHistory,
-                  target,
-                  currentMessageId,
-                  session.id,
-                );
-              }
             }
           } catch {
             // File-history tracking is best-effort and must not block the tool call.
@@ -777,28 +780,44 @@ export class AgentEngine implements AgentRunner {
           const getAccesses = this.registry.getAccesses;
           // maxConcurrency 限制并发执行的工具数(对齐 hermes _MAX_TOOL_WORKERS=8),
           // 防止一批大量不冲突只读工具同时打 IO 把系统压垮。
+          let fileJournal: FileHistoryJournal | undefined;
+          const journalRoots =
+            this.workspaceRoots?.list() ?? (this.registry.setPreWriteHook ? [this.workDir] : []);
+          const hasPotentialWrite = toolCalls.some(
+            (call) => !(this.registry.isReadOnlyTool?.(call.name) ?? false),
+          );
+          if (hasPotentialWrite && journalRoots.length > 0) {
+            fileJournal = await fileHistoryBeginJournal(journalRoots, session.id, signal);
+            if (toolCalls.some(isBackgroundBashCall)) {
+              fileHistoryAddJournalWarning(
+                fileJournal,
+                "background bash 在工具返回后仍可继续写入，本轮 rewind 只覆盖返回前的变化",
+              );
+            }
+          }
           const scheduler = new ToolScheduler<{ message: Message; reminder?: Message }>({
             maxConcurrency: AgentEngine.MAX_TOOL_CONCURRENCY,
             signal,
           });
           const settledResults: Array<{ message: Message; reminder?: Message } | undefined> =
             new Array(toolCalls.length);
-          const scheduled = toolCalls.map((tc, index) =>
-            scheduler
-              .add({
-                accesses: getAccesses ? getAccesses.call(this.registry, tc) : ToolAccesses.all(),
-                start: async () => {
-                  signal?.throwIfAborted();
-                  return this.runOneTool(tc, reporter, session.id, turnSpan, signal);
-                },
-              })
-              .then((result) => {
-                settledResults[index] = result;
-                return result;
-              }),
-          );
           let results: Array<{ message: Message; reminder?: Message }>;
           try {
+            const scheduled = toolCalls.map((tc, index) =>
+              scheduler
+                .add({
+                  accesses: getAccesses ? getAccesses.call(this.registry, tc) : ToolAccesses.all(),
+                  settleOnAbort: this.registry.handlesAbortSignal?.(tc.name) ?? false,
+                  start: async () => {
+                    signal?.throwIfAborted();
+                    return this.runOneTool(tc, reporter, session.id, turnSpan, signal);
+                  },
+                })
+                .then((result) => {
+                  settledResults[index] = result;
+                  return result;
+                }),
+            );
             results = await Promise.all(scheduled);
             signal?.throwIfAborted();
           } catch (err) {
@@ -825,6 +844,25 @@ export class AgentEngine implements AgentRunner {
             throw err;
           } finally {
             scheduler.dispose();
+            if (fileJournal) {
+              await fileHistoryCommitJournal(
+                session.fileHistory,
+                fileJournal,
+                currentMessageId,
+                session.id,
+              )
+                .then((commit) => {
+                  if (commit.incomplete) {
+                    logger.warn(
+                      { warnings: commit.warnings },
+                      "[FileHistory] 本轮文件 journal 覆盖不完整",
+                    );
+                  }
+                })
+                .catch((err) =>
+                  logger.warn({ err: String(err) }, "[FileHistory] 本轮文件 journal 提交失败"),
+                );
+            }
           }
 
           const observations: Message[] = new Array(toolCalls.length);
@@ -909,7 +947,7 @@ export class AgentEngine implements AgentRunner {
         };
       } else {
         signal?.throwIfAborted();
-        result = await this.registry.execute(toolCall);
+        result = await this.registry.execute(toolCall, { signal });
         signal?.throwIfAborted();
       }
 
