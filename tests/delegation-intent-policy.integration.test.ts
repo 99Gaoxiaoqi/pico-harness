@@ -41,7 +41,10 @@ describe("explicit delegation intent input boundary", () => {
     "Claude Code 的子代理是怎么设计的？",
     "为什么主 Agent 启动子代理后还会阅读项目？",
     "使用子代理有什么好处？",
+    "请在后台启动多个子代理，不用等它们完成。",
     "How do subagents work?",
+    "Launch several subagents in the background without waiting.",
+    "Why does the main agent spawn subagents before reading the project?",
     "Should we use subagents for this project?",
     "请你自己阅读项目并说明问题",
   ])("不把讨论或无委派要求的输入误判为执行意图: %s", (input) => {
