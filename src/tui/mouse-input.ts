@@ -1,8 +1,12 @@
 import { useCallback, useEffect, useRef } from "react";
 import { useStdout } from "ink";
+import {
+  DISABLE_MOUSE_TRACKING,
+  ENABLE_MOUSE_TRACKING,
+  setTerminalMouseTrackingMode,
+} from "./terminal-grid.js";
 
-export const ENABLE_MOUSE_TRACKING = "\u001b[?1000h\u001b[?1006h";
-export const DISABLE_MOUSE_TRACKING = "\u001b[?1006l\u001b[?1000l";
+export { DISABLE_MOUSE_TRACKING, ENABLE_MOUSE_TRACKING };
 
 export type SgrMouseInput =
   | { kind: "wheel"; direction: "up" | "down"; column: number; row: number }
@@ -51,13 +55,13 @@ export function useTerminalMouseMode(): TerminalMouseMode {
 
   const enable = useCallback(() => {
     if (!mounted.current || !stdout.isTTY) return;
-    stdout.write(ENABLE_MOUSE_TRACKING);
+    setTerminalMouseTrackingMode(stdout, true);
     enabled.current = true;
   }, [stdout]);
 
   const disable = useCallback(() => {
     if (!enabled.current || !stdout.isTTY) return;
-    stdout.write(DISABLE_MOUSE_TRACKING);
+    setTerminalMouseTrackingMode(stdout, false);
     enabled.current = false;
   }, [stdout]);
 

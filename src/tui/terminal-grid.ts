@@ -4,6 +4,7 @@ const CPR_QUERY = "\u001b[?1049h\u001b[?6l\u001b[r\u001b[999;999H\u001b[6n";
 const CPR_QUERY_CLEANUP = "\u001b[?1049l";
 const LIVE_CPR_QUERY = "\u001b[s\u001b[999;999H\u001b[6n\u001b[u";
 const BEGIN_SYNCHRONIZED_OUTPUT = "\u001b[?2026h";
+const END_SYNCHRONIZED_OUTPUT = "\u001b[?2026l";
 const CLEAR_TERMINAL = "\u001b[2J\u001b[3J\u001b[H";
 const DEFAULT_PROBE_TIMEOUT_MS = 180;
 const LATE_CPR_DRAIN_MS = 250;
@@ -15,6 +16,11 @@ const CPR_RESPONSE_PATTERN = new RegExp(
   "gu",
 );
 
+export const ENABLE_MOUSE_TRACKING = "\u001b[?1000h\u001b[?1006h";
+export const DISABLE_MOUSE_TRACKING = "\u001b[?1006l\u001b[?1000l";
+
+const mouseTrackingControllers = new WeakMap<NodeJS.WriteStream, (enabled: boolean) => void>();
+
 export interface TerminalGrid {
   columns: number;
   rows: number;
@@ -23,6 +29,16 @@ export interface TerminalGrid {
 export interface TuiTerminalGridSession {
   stdout: NodeJS.WriteStream;
   dispose: () => Promise<void>;
+}
+
+/** Keep explicit suspend/resume intent while allowing the render facade to re-arm mouse mode. */
+export function setTerminalMouseTrackingMode(stdout: NodeJS.WriteStream, enabled: boolean): void {
+  const controller = mouseTrackingControllers.get(stdout);
+  if (controller) {
+    controller(enabled);
+    return;
+  }
+  stdout.write(enabled ? ENABLE_MOUSE_TRACKING : DISABLE_MOUSE_TRACKING);
 }
 
 /**
@@ -151,6 +167,7 @@ function createResizeAwareSession(
   let frontendGrid = normalizeGrid(initialFrontendGrid, { columns: 80, rows: 24 });
   let publishedGrid = effectiveTerminalGrid(stdout, frontendGrid);
   let stabilizeFramesUntil = 0;
+  let mouseTrackingRequested = false;
   let disposed = false;
   let resizeGeneration = 0;
   let resizeQueued = false;
@@ -293,10 +310,15 @@ function createResizeAwareSession(
       }
       if (property === "write") {
         return (chunk: unknown, ...args: unknown[]) => {
-          const stabilizedChunk =
-            Date.now() <= stabilizeFramesUntil && chunk === BEGIN_SYNCHRONIZED_OUTPUT
-              ? BEGIN_SYNCHRONIZED_OUTPUT + CLEAR_TERMINAL
-              : chunk;
+          let stabilizedChunk = chunk;
+          if (Date.now() <= stabilizeFramesUntil && chunk === BEGIN_SYNCHRONIZED_OUTPUT) {
+            stabilizedChunk = BEGIN_SYNCHRONIZED_OUTPUT + CLEAR_TERMINAL;
+          } else if (mouseTrackingRequested && chunk === END_SYNCHRONIZED_OUTPUT) {
+            // Some embedded terminal hosts drop mouse reporting after a full
+            // frame. Re-arm it inside Ink's synchronized write instead of an
+            // out-of-band timer that can desynchronize cursor bookkeeping.
+            stabilizedChunk = ENABLE_MOUSE_TRACKING + END_SYNCHRONIZED_OUTPUT;
+          }
           return Reflect.apply(target.write, target, [stabilizedChunk, ...args]);
         };
       }
@@ -346,6 +368,10 @@ function createResizeAwareSession(
   // to arm readable notifications; EventEmitter.prependListener() bypasses it.
   stdin.on("readable", onReadable);
   stdout.on("resize", onUnderlyingResize);
+  mouseTrackingControllers.set(facade, (enabled) => {
+    mouseTrackingRequested = enabled;
+    stdout.write(enabled ? ENABLE_MOUSE_TRACKING : DISABLE_MOUSE_TRACKING);
+  });
 
   return {
     stdout: facade,
@@ -356,6 +382,13 @@ function createResizeAwareSession(
       stdout.off("resize", onUnderlyingResize);
       await refreshPromise?.catch(() => undefined);
       while (liveProbe) await liveProbe.drained;
+      mouseTrackingRequested = false;
+      mouseTrackingControllers.delete(facade);
+      try {
+        stdout.write(DISABLE_MOUSE_TRACKING);
+      } catch {
+        // The terminal may already be closing; listener cleanup must continue.
+      }
       stdin.off("readable", onReadable);
       resizeEvents.removeAllListeners();
     },
