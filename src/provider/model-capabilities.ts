@@ -1,5 +1,5 @@
 import type { ProviderKind } from "./factory.js";
-import { resolveProviderProfile } from "./profile.js";
+import { resolveProviderProfile, type ProviderProfile, type ProviderProtocol } from "./profile.js";
 
 export interface ModelPrice {
   currency: "USD";
@@ -10,17 +10,22 @@ export interface ModelPrice {
   source: "config" | "unknown";
 }
 
+export type CapabilitySupport = boolean | "unknown";
+export type CapabilityValueSource = "config" | "profile_default";
+
 /**
  * Provider route metadata used before a request is sent. Values are concrete so
  * callers never need to infer support from a model name at execution time.
  */
 export interface ModelRouteCapabilities {
   contextWindowTokens: number;
+  contextSource: CapabilityValueSource;
   maxOutputTokens: number;
-  vision: boolean;
-  reasoning: boolean;
-  toolCall: boolean;
-  cache: boolean;
+  outputSource: CapabilityValueSource;
+  vision: CapabilitySupport;
+  reasoning: CapabilitySupport;
+  toolCall: CapabilitySupport;
+  cache: CapabilitySupport;
   price: ModelPrice;
   fallbackModel?: string;
 }
@@ -44,16 +49,17 @@ export function resolveModelRouteCapabilities(
   override: ModelCapabilityConfig | undefined,
 ): ModelRouteCapabilities {
   const profile = resolveProviderProfile(provider, model);
-  const fallbackModel =
-    override?.fallback === false ? undefined : (override?.fallback ?? profile.fallbackModel);
+  const fallbackModel = override?.fallback === false ? undefined : override?.fallback;
   return {
     contextWindowTokens: override?.context ?? profile.contextWindowTokens,
+    contextSource: override?.context === undefined ? "profile_default" : "config",
     maxOutputTokens: override?.output ?? profile.maxOutputTokens,
-    // All three built-in adapters implement image and tool request translation.
-    vision: override?.vision ?? true,
-    reasoning: override?.reasoning ?? profile.supportsThinkingControl,
-    toolCall: override?.toolCall ?? true,
-    cache: override?.cache ?? profile.supportsPromptCache,
+    outputSource: override?.output === undefined ? "profile_default" : "config",
+    // Adapter support does not prove a custom endpoint/model supports the feature.
+    vision: override?.vision ?? "unknown",
+    reasoning: override?.reasoning ?? "unknown",
+    toolCall: override?.toolCall ?? "unknown",
+    cache: override?.cache ?? "unknown",
     price: override?.price
       ? { currency: "USD", source: "config", ...override.price }
       : unknownModelPrice(),
@@ -69,5 +75,26 @@ export function unknownModelPrice(): ModelPrice {
     cacheReadPerMillion: null,
     cacheWritePerMillion: null,
     source: "unknown",
+  };
+}
+
+/** Apply route metadata to protocol translation without losing compatibility quirks. */
+export function providerProfileForRoute(
+  protocol: ProviderProtocol,
+  model: string,
+  capabilities: ModelRouteCapabilities,
+): ProviderProfile {
+  const profile = resolveProviderProfile(protocol, model);
+  return {
+    ...profile,
+    contextWindowTokens: capabilities.contextWindowTokens,
+    maxOutputTokens: capabilities.maxOutputTokens,
+    supportsPromptCache:
+      capabilities.cache === "unknown" ? profile.supportsPromptCache : capabilities.cache,
+    supportsThinkingControl:
+      capabilities.reasoning === "unknown"
+        ? profile.supportsThinkingControl
+        : capabilities.reasoning,
+    ...(capabilities.fallbackModel ? { fallbackModel: capabilities.fallbackModel } : {}),
   };
 }

@@ -151,6 +151,7 @@ export class ModelRouter {
         apiKey,
         model: route.model,
         capabilities: route.capabilities,
+        routeId: route.id,
         ...(thinkingEffort !== undefined ? { thinkingEffort } : {}),
       },
       route,
