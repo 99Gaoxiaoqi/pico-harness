@@ -2,6 +2,13 @@ import { readFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { ModelProviderConfig } from "../provider/model-router.js";
 import type { ModelCapabilityConfig } from "../provider/model-capabilities.js";
+import type {
+  JsonValue,
+  ModelReasoningCapabilityConfig,
+  ReasoningProtocolOptions,
+  ReasoningRequestPatch,
+  RequestBodyPath,
+} from "../provider/reasoning-capability.js";
 import type { ProviderKind } from "../provider/factory.js";
 import type { LspServerConfig } from "../code-intelligence/lsp-server-discovery.js";
 import type { YoloSandboxConfig } from "../safety/yolo-sandbox.js";
@@ -249,13 +256,18 @@ function parseModelCapabilities(
     }
     result[key] = candidate as number;
   }
-  for (const key of ["vision", "reasoning", "toolCall", "cache"] as const) {
+  for (const key of ["vision", "toolCall", "cache"] as const) {
     const candidate = value[key];
     if (candidate === undefined) continue;
     if (typeof candidate !== "boolean") {
       throw configError(configPath, `${field}.${key}`, "must be a boolean");
     }
     result[key] = candidate;
+  }
+
+  const reasoning = value["reasoning"];
+  if (reasoning !== undefined) {
+    result.reasoning = parseModelReasoning(reasoning, configPath, `${field}.reasoning`);
   }
 
   const fallback = value["fallback"];
@@ -279,6 +291,164 @@ function parseModelCapabilities(
     throw configError(configPath, field, "output must be smaller than context");
   }
   return result;
+}
+
+function parseModelReasoning(
+  value: unknown,
+  configPath: string,
+  field: string,
+): boolean | ModelReasoningCapabilityConfig {
+  if (typeof value === "boolean") return value;
+  if (!isRecord(value)) {
+    throw configError(configPath, field, "must be a boolean or reasoning capability object");
+  }
+  const enabled = value["enabled"];
+  if (typeof enabled !== "boolean") {
+    throw configError(configPath, `${field}.enabled`, "must be a boolean");
+  }
+
+  const levels = parseOptionalStringArray(value["levels"], configPath, `${field}.levels`) ?? [];
+  const normalizedLevels = new Set(levels.map((level) => level.toLowerCase()));
+  if (normalizedLevels.size !== levels.length) {
+    throw configError(configPath, `${field}.levels`, "must not contain duplicate levels");
+  }
+  const defaultLevel = parseOptionalNonEmptyString(
+    value["defaultLevel"],
+    configPath,
+    `${field}.defaultLevel`,
+  );
+  if (defaultLevel && !normalizedLevels.has(defaultLevel.toLowerCase())) {
+    throw configError(configPath, `${field}.defaultLevel`, "must be present in levels");
+  }
+  const providerOptionsByLevel = parseProviderOptionsByLevel(
+    value["providerOptionsByLevel"],
+    configPath,
+    `${field}.providerOptionsByLevel`,
+    normalizedLevels,
+  );
+  if (!enabled && (levels.length > 0 || defaultLevel || providerOptionsByLevel)) {
+    throw configError(configPath, field, "disabled reasoning must not declare levels or options");
+  }
+  return {
+    enabled,
+    ...(levels.length > 0 ? { levels } : {}),
+    ...(defaultLevel ? { defaultLevel } : {}),
+    ...(providerOptionsByLevel ? { providerOptionsByLevel } : {}),
+  };
+}
+
+function parseProviderOptionsByLevel(
+  value: unknown,
+  configPath: string,
+  field: string,
+  levels: ReadonlySet<string>,
+): Readonly<Record<string, ReasoningProtocolOptions>> | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) throw configError(configPath, field, "must be an object");
+  const result: Record<string, ReasoningProtocolOptions> = {};
+  for (const [level, rawProtocols] of Object.entries(value)) {
+    if (!levels.has(level.toLowerCase())) {
+      throw configError(configPath, `${field}.${level}`, "level must be declared in levels");
+    }
+    if (!isRecord(rawProtocols)) {
+      throw configError(configPath, `${field}.${level}`, "must be an object");
+    }
+    const protocols: Partial<Record<ProviderKind, ReasoningRequestPatch>> = {};
+    for (const [protocol, rawPatch] of Object.entries(rawProtocols)) {
+      if (!isProviderKind(protocol)) {
+        throw configError(
+          configPath,
+          `${field}.${level}.${protocol}`,
+          "must be openai, claude, or gemini",
+        );
+      }
+      protocols[protocol] = parseReasoningRequestPatch(
+        rawPatch,
+        configPath,
+        `${field}.${level}.${protocol}`,
+      );
+    }
+    result[level] = protocols;
+  }
+  return result;
+}
+
+function parseReasoningRequestPatch(
+  value: unknown,
+  configPath: string,
+  field: string,
+): ReasoningRequestPatch {
+  if (!isRecord(value)) throw configError(configPath, field, "must be an object");
+  const setValue = value["set"];
+  const unsetValue = value["unset"];
+  if (setValue !== undefined && !Array.isArray(setValue)) {
+    throw configError(configPath, `${field}.set`, "must be an array");
+  }
+  if (unsetValue !== undefined && !Array.isArray(unsetValue)) {
+    throw configError(configPath, `${field}.unset`, "must be an array");
+  }
+  const set = (setValue ?? []).map((operation, index) => {
+    if (!isRecord(operation)) {
+      throw configError(configPath, `${field}.set.${index}`, "must be an object");
+    }
+    const path = parseRequestBodyPath(operation["path"], configPath, `${field}.set.${index}.path`);
+    const patchValue = operation["value"];
+    if (!isJsonValue(patchValue)) {
+      throw configError(configPath, `${field}.set.${index}.value`, "must be a JSON value");
+    }
+    return { path, value: patchValue };
+  });
+  const unset = (unsetValue ?? []).map((path, index) =>
+    parseRequestBodyPath(path, configPath, `${field}.unset.${index}`),
+  );
+  return {
+    ...(set.length > 0 ? { set } : {}),
+    ...(unset.length > 0 ? { unset } : {}),
+  };
+}
+
+function parseRequestBodyPath(value: unknown, configPath: string, field: string): RequestBodyPath {
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    value.some(
+      (segment) =>
+        typeof segment !== "string" ||
+        segment.length === 0 ||
+        segment === "__proto__" ||
+        segment === "prototype" ||
+        segment === "constructor",
+    )
+  ) {
+    throw configError(configPath, field, "must be a safe, non-empty string path array");
+  }
+  const [first, ...rest] = value as string[];
+  return [first!, ...rest];
+}
+
+function parseOptionalNonEmptyString(
+  value: unknown,
+  configPath: string,
+  field: string,
+): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw configError(configPath, field, "must be a non-empty string");
+  }
+  return value.trim();
+}
+
+function isJsonValue(value: unknown): value is JsonValue {
+  if (
+    value === null ||
+    typeof value === "string" ||
+    typeof value === "boolean" ||
+    (typeof value === "number" && Number.isFinite(value))
+  ) {
+    return true;
+  }
+  if (Array.isArray(value)) return value.every(isJsonValue);
+  return isRecord(value) && Object.values(value).every(isJsonValue);
 }
 
 function parseModelPrice(
