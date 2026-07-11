@@ -59,6 +59,8 @@ const DEFAULT_WORKING_MEMORY_LIMIT = 20;
 
 /** 子代理 summary 低于此字数则触发一轮扩写(对齐 Kimi Code SUMMARY_MIN_LENGTH) */
 const SUBAGENT_SUMMARY_MIN_CHARS = 200;
+/** 子代理单次最终汇报上限，避免过长结果回灌主上下文。 */
+const SUBAGENT_SUMMARY_MAX_CHARS = 5_000;
 /** summary 续写提示词:要求子代理把过短的总结扩写成完整汇报 */
 const SUBAGENT_SUMMARY_CONTINUATION_PROMPT =
   "你上一轮的总结过于简短,主架构师无法据此决策。请重新输出一份结构完整、细节充分的总结汇报:包括你探索了哪些文件/发现了什么、关键结论、以及尚存的不确定点。不要调用任何工具,直接用纯文本回答。";
@@ -1374,7 +1376,10 @@ export class AgentEngine implements AgentRunner {
           { turns: turnCount },
           `[Subagent] ✅ 探路者完成 ${turnCount} 轮探索,返回总结。`,
         );
-        return { summary, artifacts: artifactPaths };
+        return {
+          summary: truncateSubagentSummary(summary, SUBAGENT_SUMMARY_MAX_CHARS),
+          artifacts: artifactPaths,
+        };
       }
 
       // 执行只读工具的并发循环(资源冲突图调度,复用主循环的调度策略)
@@ -1439,6 +1444,12 @@ export class AgentEngine implements AgentRunner {
       contextHistory.push(...observations);
     }
   }
+}
+
+function truncateSubagentSummary(summary: string, maxChars: number): string {
+  if (summary.length <= maxChars) return summary;
+  const marker = `\n[子代理总结已截断：原始 ${summary.length} 字符，上限 ${maxChars} 字符]`;
+  return `${summary.slice(0, Math.max(0, maxChars - marker.length))}${marker}`;
 }
 
 /**
