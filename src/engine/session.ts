@@ -14,7 +14,12 @@
 import { mkdirSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
-import { toCanonicalUsage, type CanonicalUsage, type Message } from "../schema/message.js";
+import {
+  toCanonicalUsage,
+  type CanonicalUsage,
+  type Message,
+  type UsageReportedField,
+} from "../schema/message.js";
 import type { CostStatus } from "../observability/pricing.js";
 import { logger } from "../observability/logger.js";
 import { SessionStore } from "./session-store.js";
@@ -101,6 +106,15 @@ export class Session implements SessionRuntimePersistence {
   totalCostCNY = 0;
   /** 最近一次成本状态 */
   lastCostStatus: CostStatus | null = null;
+  totalProviderCalls = 0;
+  totalUsageReports = 0;
+  totalInputReports = 0;
+  totalCacheReadReports = 0;
+  totalCacheWriteReports = 0;
+  totalReasoningReports = 0;
+  totalEstimatedCostReports = 0;
+  totalIncludedCostReports = 0;
+  totalUnknownCostReports = 0;
 
   private history: Message[] = [];
 
@@ -341,7 +355,10 @@ export class Session implements SessionRuntimePersistence {
     costCNY: number,
     canonical?: CanonicalUsage,
     costStatus?: CostStatus,
+    reportedFields: readonly UsageReportedField[] = ["prompt", "completion"],
   ): void {
+    this.totalProviderCalls++;
+    this.totalUsageReports++;
     this.totalPromptTokens += promptTokens;
     this.totalCompletionTokens += completionTokens;
     if (canonical) {
@@ -353,7 +370,21 @@ export class Session implements SessionRuntimePersistence {
     this.totalCostCNY += costCNY;
     if (costStatus) {
       this.lastCostStatus = costStatus;
+      if (costStatus === "estimated") this.totalEstimatedCostReports++;
+      else if (costStatus === "included") this.totalIncludedCostReports++;
+      else this.totalUnknownCostReports++;
     }
+    const reported = new Set(reportedFields);
+    if (reported.has("input")) this.totalInputReports++;
+    if (reported.has("cacheRead")) this.totalCacheReadReports++;
+    if (reported.has("cacheWrite")) this.totalCacheWriteReports++;
+    if (reported.has("reasoning")) this.totalReasoningReports++;
+    this.updateRuntimeState({ usage: this.getUsageSnapshot() });
+  }
+
+  /** Record a completed provider call whose response did not include usage metadata. */
+  recordMissingUsage(): void {
+    this.totalProviderCalls++;
     this.updateRuntimeState({ usage: this.getUsageSnapshot() });
   }
 
@@ -445,6 +476,15 @@ export class Session implements SessionRuntimePersistence {
       totalReasoningTokens: this.totalReasoningTokens,
       totalCostCNY: this.totalCostCNY,
       lastCostStatus: this.lastCostStatus,
+      totalProviderCalls: this.totalProviderCalls,
+      totalUsageReports: this.totalUsageReports,
+      totalInputReports: this.totalInputReports,
+      totalCacheReadReports: this.totalCacheReadReports,
+      totalCacheWriteReports: this.totalCacheWriteReports,
+      totalReasoningReports: this.totalReasoningReports,
+      totalEstimatedCostReports: this.totalEstimatedCostReports,
+      totalIncludedCostReports: this.totalIncludedCostReports,
+      totalUnknownCostReports: this.totalUnknownCostReports,
     };
   }
 
@@ -457,6 +497,15 @@ export class Session implements SessionRuntimePersistence {
     this.totalReasoningTokens = usage.totalReasoningTokens;
     this.totalCostCNY = usage.totalCostCNY;
     this.lastCostStatus = usage.lastCostStatus;
+    this.totalProviderCalls = usage.totalProviderCalls;
+    this.totalUsageReports = usage.totalUsageReports;
+    this.totalInputReports = usage.totalInputReports;
+    this.totalCacheReadReports = usage.totalCacheReadReports;
+    this.totalCacheWriteReports = usage.totalCacheWriteReports;
+    this.totalReasoningReports = usage.totalReasoningReports;
+    this.totalEstimatedCostReports = usage.totalEstimatedCostReports;
+    this.totalIncludedCostReports = usage.totalIncludedCostReports;
+    this.totalUnknownCostReports = usage.totalUnknownCostReports;
   }
 
   /**
@@ -916,6 +965,13 @@ function deriveUsageFromHistory(history: readonly Message[]): SessionUsageSnapsh
     usage.totalCacheReadTokens += canonical.cacheReadTokens;
     usage.totalCacheWriteTokens += canonical.cacheWriteTokens;
     usage.totalReasoningTokens += canonical.reasoningTokens;
+    usage.totalProviderCalls++;
+    usage.totalUsageReports++;
+    const reported = new Set(message.usage.reportedFields ?? ["prompt", "completion"]);
+    if (reported.has("input")) usage.totalInputReports++;
+    if (reported.has("cacheRead")) usage.totalCacheReadReports++;
+    if (reported.has("cacheWrite")) usage.totalCacheWriteReports++;
+    if (reported.has("reasoning")) usage.totalReasoningReports++;
   }
   return usage;
 }
@@ -946,6 +1002,24 @@ function mergeUsageWithHistory(
     ),
     totalCostCNY: persisted.totalCostCNY,
     lastCostStatus: persisted.lastCostStatus,
+    totalProviderCalls: Math.max(persisted.totalProviderCalls, fromHistory.totalProviderCalls),
+    totalUsageReports: Math.max(persisted.totalUsageReports, fromHistory.totalUsageReports),
+    totalInputReports: Math.max(persisted.totalInputReports, fromHistory.totalInputReports),
+    totalCacheReadReports: Math.max(
+      persisted.totalCacheReadReports,
+      fromHistory.totalCacheReadReports,
+    ),
+    totalCacheWriteReports: Math.max(
+      persisted.totalCacheWriteReports,
+      fromHistory.totalCacheWriteReports,
+    ),
+    totalReasoningReports: Math.max(
+      persisted.totalReasoningReports,
+      fromHistory.totalReasoningReports,
+    ),
+    totalEstimatedCostReports: persisted.totalEstimatedCostReports,
+    totalIncludedCostReports: persisted.totalIncludedCostReports,
+    totalUnknownCostReports: persisted.totalUnknownCostReports,
   };
 }
 

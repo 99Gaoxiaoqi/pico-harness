@@ -199,6 +199,18 @@ export class OpenAIProvider implements LLMProvider {
             completionTokens: data.usage.completion_tokens ?? 0,
             cacheReadTokens: data.usage.prompt_tokens_details?.cached_tokens ?? 0,
             reasoningTokens: data.usage.completion_tokens_details?.reasoning_tokens ?? 0,
+            reportedFields: [
+              ...(typeof data.usage.prompt_tokens === "number" ? (["prompt"] as const) : []),
+              ...(typeof data.usage.completion_tokens === "number"
+                ? (["completion"] as const)
+                : []),
+              ...(typeof data.usage.prompt_tokens_details?.cached_tokens === "number"
+                ? (["cacheRead"] as const)
+                : []),
+              ...(typeof data.usage.completion_tokens_details?.reasoning_tokens === "number"
+                ? (["reasoning"] as const)
+                : []),
+            ],
           }
         : undefined;
 
@@ -338,7 +350,12 @@ export class OpenAIProvider implements LLMProvider {
                 };
                 finish_reason?: string;
               }[];
-              usage?: { prompt_tokens?: number; completion_tokens?: number };
+              usage?: {
+                prompt_tokens?: number;
+                completion_tokens?: number;
+                prompt_tokens_details?: { cached_tokens?: number };
+                completion_tokens_details?: { reasoning_tokens?: number };
+              };
             };
 
             const delta = chunk.choices?.[0]?.delta;
@@ -372,6 +389,20 @@ export class OpenAIProvider implements LLMProvider {
               usage = {
                 promptTokens: chunk.usage.prompt_tokens ?? 0,
                 completionTokens: chunk.usage.completion_tokens ?? 0,
+                cacheReadTokens: chunk.usage.prompt_tokens_details?.cached_tokens ?? 0,
+                reasoningTokens: chunk.usage.completion_tokens_details?.reasoning_tokens ?? 0,
+                reportedFields: [
+                  ...(typeof chunk.usage.prompt_tokens === "number" ? (["prompt"] as const) : []),
+                  ...(typeof chunk.usage.completion_tokens === "number"
+                    ? (["completion"] as const)
+                    : []),
+                  ...(typeof chunk.usage.prompt_tokens_details?.cached_tokens === "number"
+                    ? (["cacheRead"] as const)
+                    : []),
+                  ...(typeof chunk.usage.completion_tokens_details?.reasoning_tokens === "number"
+                    ? (["reasoning"] as const)
+                    : []),
+                ],
               };
             }
           } catch {

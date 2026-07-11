@@ -33,7 +33,17 @@ export interface Usage {
   cacheWriteTokens?: number;
   /** reasoning / thinking token */
   reasoningTokens?: number;
+  /** Fields actually reported by the provider; omitted legacy records only prove prompt/output. */
+  reportedFields?: readonly UsageReportedField[];
 }
+
+export type UsageReportedField =
+  | "prompt"
+  | "completion"
+  | "input"
+  | "cacheRead"
+  | "cacheWrite"
+  | "reasoning";
 
 /** 计费与油耗分析使用的规范化五桶 Usage */
 export interface CanonicalUsage {

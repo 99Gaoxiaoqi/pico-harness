@@ -36,6 +36,8 @@ import { AgentProfileLoader, type AgentProfile } from "../tools/agent-profile.js
 import { DelegateTaskTool, SpawnSubagentTool } from "../tools/subagent.js";
 import { createToolResultObservationProcessor } from "../tools/tool-result-observation.js";
 import { CostTracker } from "../observability/tracker.js";
+import type { BillingRoute } from "../observability/pricing.js";
+import type { ModelRouteCapabilities } from "../provider/model-capabilities.js";
 import { Tracer } from "../observability/trace.js";
 import {
   globalApprovalManager,
@@ -89,6 +91,8 @@ export interface RunAgentCliOptions {
   baseURL?: string;
   apiKey?: string;
   model?: string;
+  modelRouteId?: string;
+  modelCapabilities?: ModelRouteCapabilities;
   /** Route-aware callers disable bare-model fallback because a fallback may need another endpoint. */
   allowModelFallback?: boolean;
   /** Native model thinking effort: off/low/medium/high. */
@@ -240,11 +244,11 @@ export async function runAgentFromCli(
   }
   const trackedProvider =
     dependencies.provider !== undefined
-      ? new CostTracker(dependencies.provider, providerConfig.model, session)
+      ? new CostTracker(dependencies.provider, trackingRoute(kind, providerConfig), session)
       : effectiveOptions.allowModelFallback === false
         ? new CostTracker(
             (dependencies.providerFactory ?? createRawProvider)(kind, currentConfig),
-            currentConfig.model,
+            trackingRoute(kind, currentConfig),
             session,
           )
         : createTrackedProviderWithFallback(
@@ -459,7 +463,7 @@ function createTrackedProviderWithFallback(
     ? config.capabilities.fallbackModel
     : fallbackModelFor(config.model);
   if (!fallbackModel) {
-    return new CostTracker(providerFactory(kind, config), config.model, session);
+    return new CostTracker(providerFactory(kind, config), trackingRoute(kind, config), session);
   }
 
   return new CostTrackedModelFallbackProvider(
@@ -549,7 +553,7 @@ class CostTrackedModelFallbackProvider implements LLMProvider {
         : { ...config, capabilities: undefined, routeId: undefined };
     return new CostTracker(
       this.providerFactory(this.kind, fallbackConfig),
-      config.model,
+      trackingRoute(this.kind, fallbackConfig),
       this.session,
     );
   }
@@ -823,8 +827,28 @@ function resolveProviderConfig(
     baseURL: baseURL ?? "",
     apiKey: apiKey ?? "",
     model,
+    ...(options.modelRouteId ? { routeId: options.modelRouteId } : {}),
+    ...(options.modelCapabilities ? { capabilities: options.modelCapabilities } : {}),
     ...(options.thinkingEffort !== undefined ? { thinkingEffort: options.thinkingEffort } : {}),
   };
+}
+
+function trackingRoute(kind: ProviderKind, config: ProviderConfig): BillingRoute | string {
+  const price = config.capabilities?.price;
+  return price?.source === "config"
+    ? {
+        provider: kind,
+        model: config.model,
+        baseUrl: config.baseURL,
+        pricing: {
+          inputPerMillion: price.inputPerMillion,
+          outputPerMillion: price.outputPerMillion,
+          cacheReadPerMillion: price.cacheReadPerMillion,
+          cacheWritePerMillion: price.cacheWritePerMillion,
+          source: "configured",
+        },
+      }
+    : config.model;
 }
 
 function firstApiKey(value: string | undefined): string | undefined {

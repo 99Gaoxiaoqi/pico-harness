@@ -12,7 +12,13 @@ import {
   type LLMProvider,
   type LLMProviderRequestOptions,
 } from "./interface.js";
-import type { Message, ToolCall, ToolDefinition, Usage } from "../schema/message.js";
+import type {
+  Message,
+  ToolCall,
+  ToolDefinition,
+  Usage,
+  UsageReportedField,
+} from "../schema/message.js";
 import type { ProviderConfig } from "./config.js";
 import { resolveProviderProfile, type ProviderProfile } from "./profile.js";
 import {
@@ -168,6 +174,7 @@ export class ClaudeProvider implements LLMProvider {
     let outputTokens = 0;
     let cacheWriteTokens = 0;
     let cacheReadTokens = 0;
+    const reportedFields = new Set<UsageReportedField>();
 
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
@@ -192,15 +199,20 @@ export class ClaudeProvider implements LLMProvider {
           },
           onInputTokens: (n) => {
             inputTokens = n;
+            reportedFields.add("prompt");
+            reportedFields.add("input");
           },
           onOutputTokens: (n) => {
             outputTokens = n;
+            reportedFields.add("completion");
           },
           onCacheWrite: (n) => {
             cacheWriteTokens = n;
+            reportedFields.add("cacheWrite");
           },
           onCacheRead: (n) => {
             cacheReadTokens = n;
+            reportedFields.add("cacheRead");
           },
         });
       }
@@ -233,6 +245,7 @@ export class ClaudeProvider implements LLMProvider {
             completionTokens: outputTokens,
             cacheWriteTokens,
             cacheReadTokens,
+            reportedFields: [...reportedFields],
           }
         : undefined;
 
@@ -388,6 +401,16 @@ export class ClaudeProvider implements LLMProvider {
             completionTokens: usage.output_tokens ?? 0,
             cacheWriteTokens: usage.cache_creation_input_tokens ?? 0,
             cacheReadTokens: usage.cache_read_input_tokens ?? 0,
+            reportedFields: [
+              ...(typeof usage.input_tokens === "number" ? (["prompt", "input"] as const) : []),
+              ...(typeof usage.output_tokens === "number" ? (["completion"] as const) : []),
+              ...(typeof usage.cache_creation_input_tokens === "number"
+                ? (["cacheWrite"] as const)
+                : []),
+              ...(typeof usage.cache_read_input_tokens === "number"
+                ? (["cacheRead"] as const)
+                : []),
+            ],
           }
         : undefined;
 

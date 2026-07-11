@@ -67,6 +67,7 @@ export class CostTracker implements LLMProvider {
           cost.costCNY,
           cost.usage,
           cost.status,
+          resp.usage.reportedFields,
         );
         logger.info(
           {
@@ -79,6 +80,7 @@ export class CostTracker implements LLMProvider {
         );
       }
     } else {
+      this.session?.recordMissingUsage();
       logger.warn({ latencyMs }, "[Tracker] API 完成但无 Usage 数据");
     }
     return resp;
@@ -109,10 +111,11 @@ export class CostTracker implements LLMProvider {
           cost.costCNY,
           cost.usage,
           cost.status,
+          resp.usage.reportedFields,
         );
       }
       logger.info({ latencyMs, costCNY: cost.costCNY }, "[Tracker] 流式 API 完成");
-    }
+    } else this.session?.recordMissingUsage();
     return resp;
   }
 }

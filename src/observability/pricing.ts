@@ -1,7 +1,7 @@
 import { toCanonicalUsage, type CanonicalUsage, type Usage } from "../schema/message.js";
 
 export type BillingMode = "metered" | "subscription_included";
-export type CostSource = "official_docs_snapshot" | "included";
+export type CostSource = "official_docs_snapshot" | "configured" | "included";
 export type CostStatus = "estimated" | "included" | "unknown";
 
 export interface BillingRoute {
@@ -9,6 +9,7 @@ export interface BillingRoute {
   model: string;
   baseUrl?: string;
   billingMode?: BillingMode;
+  pricing?: PricingEntry;
 }
 
 export interface PricingEntry {
@@ -72,6 +73,7 @@ export function getPricingEntry(route: BillingRoute): PricingEntry | null {
   if (route.billingMode === "subscription_included") {
     return INCLUDED_PRICING;
   }
+  if (route.pricing) return route.pricing;
   return OFFICIAL_PRICING[normalizeModelName(route.model)] ?? null;
 }
 
