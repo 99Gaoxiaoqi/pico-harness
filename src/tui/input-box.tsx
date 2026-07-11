@@ -39,12 +39,20 @@ export interface InputBoxProps {
   acceptsInput?: (input: string, key: InputKey) => boolean;
   /** 将当前草稿同步给顶层焦点仲裁。 */
   onTextChange?: (text: string) => void;
+  /** 将会影响焦点仲裁的输入状态同步给顶层。 */
+  onStateChange?: (snapshot: InputBoxStateSnapshot) => void;
   /** Enter 提交回调 */
   onSubmit: (text: string) => void;
   /** User overrides loaded from .pico/config.json. */
   keybindings?: UserKeybindingConfig;
   /** /rewind 等外部动作请求原子替换当前草稿。 */
   inputReplacement?: { sequence: number; text: string };
+}
+
+export interface InputBoxStateSnapshot {
+  text: string;
+  hasSuggestions: boolean;
+  historyIndex: number | null;
 }
 
 export function InputBox({
@@ -55,6 +63,7 @@ export function InputBox({
   fileMentionSuggestions,
   acceptsInput,
   onTextChange,
+  onStateChange,
   onSubmit,
   keybindings,
   inputReplacement,
@@ -89,7 +98,12 @@ export function InputBox({
     controllerRef.current = next;
     setController(next);
     onTextChange?.(next.text);
-  }, [inputReplacement, onTextChange]);
+    onStateChange?.(inputBoxStateSnapshot(next));
+  }, [inputReplacement, onStateChange, onTextChange]);
+
+  useEffect(() => {
+    onStateChange?.(inputBoxStateSnapshot(controllerRef.current));
+  }, [onStateChange]);
 
   useInput((input, key) => {
     if (acceptsInput && !acceptsInput(input, key)) return;
@@ -107,6 +121,7 @@ export function InputBox({
     controllerRef.current = result.state;
     setController(result.state);
     if (result.state.text !== previousText) onTextChange?.(result.state.text);
+    onStateChange?.(inputBoxStateSnapshot(result.state));
     if (result.submittedText === undefined && !disabled && result.pendingSuggestion) {
       scheduleAsyncSuggestions({
         pending: result.pendingSuggestion,
@@ -114,6 +129,7 @@ export function InputBox({
         mounted,
         controllerRef,
         setController,
+        onStateChange,
       });
     }
     if (result.submittedText !== undefined) {
@@ -137,12 +153,14 @@ function scheduleAsyncSuggestions({
   mounted,
   controllerRef,
   setController,
+  onStateChange,
 }: {
   pending: PendingSuggestionRequest;
   requestSeq: React.MutableRefObject<number>;
   mounted: React.MutableRefObject<boolean>;
   controllerRef: React.MutableRefObject<InputControllerState>;
   setController: React.Dispatch<React.SetStateAction<InputControllerState>>;
+  onStateChange?: (snapshot: InputBoxStateSnapshot) => void;
 }): void {
   const requestId = ++requestSeq.current;
   void pending.result
@@ -162,10 +180,19 @@ function scheduleAsyncSuggestions({
       const next = { ...current, activeSuggestions };
       controllerRef.current = next;
       setController(next);
+      onStateChange?.(inputBoxStateSnapshot(next));
     })
     .catch(() => {
       if (!mounted.current || requestSeq.current !== requestId) return;
     });
+}
+
+export function inputBoxStateSnapshot(state: InputControllerState): InputBoxStateSnapshot {
+  return {
+    text: state.text,
+    hasSuggestions: state.activeSuggestions !== null,
+    historyIndex: state.historyIndex,
+  };
 }
 
 function buildAsyncSuggestionSession(
