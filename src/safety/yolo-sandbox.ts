@@ -1,9 +1,12 @@
 import { existsSync } from "node:fs";
 import { isAbsolute, relative, resolve, sep } from "node:path";
-import { extractBashWritePaths } from "../approval/bash-paths.js";
+import { bashCommandFromArgs, extractBashWritePaths } from "../approval/bash-paths.js";
+import { isHardlineCommand } from "../approval/manager.js";
+import type { ToolCall } from "../schema/message.js";
+import type { WorkspaceRoots } from "../tools/workspace-roots.js";
 
 export type SandboxNetworkPolicy = "deny" | "allow";
-export type SandboxBackend = "macos-sandbox-exec" | "linux-bwrap" | "unavailable";
+export type SandboxBackend = "macos-sandbox-exec" | "unavailable";
 
 export interface YoloSandboxConfig {
   /** 子进程网络策略，默认拒绝。 */
@@ -55,6 +58,42 @@ export interface SandboxRequest {
   platform?: NodeJS.Platform;
 }
 
+/** YOLO 请求边界：普通工作区操作放行，越界/敏感/网络与 hardline 确定性拒绝。 */
+export function evaluateYoloToolCall(
+  call: ToolCall,
+  workDir: string,
+  workspaceRoots: WorkspaceRoots,
+  config: Partial<YoloSandboxConfig> = {},
+): SandboxDecision {
+  if (isHardlineCommand(call.name, call.arguments)) {
+    return denied("workspace_write_denied", "Hardline 高危命令不可通过 YOLO 绕过。");
+  }
+
+  if (call.name === "write_file" || call.name === "edit_file") {
+    const path = jsonStringField(call.arguments, "path");
+    if (!path) return { allowed: true };
+    const target = workspaceRoots.resolveUnchecked(path);
+    if (!workspaceRoots.isAllowedPath(target)) {
+      return denied(
+        "workspace_write_denied",
+        `写入目标不在授权工作区: ${path}。请先使用 /add-dir 显式授权。`,
+      );
+    }
+    if (isSensitiveWritePath(target, workspaceRoots.list())) {
+      return denied("sensitive_path_denied", `YOLO 不允许写入敏感路径: ${path}`);
+    }
+    return { allowed: true };
+  }
+
+  if (call.name === "bash") {
+    const command = bashCommandFromArgs(call.arguments);
+    return command
+      ? evaluateSandboxCommand(command, workDir, workspaceRoots.list(), config)
+      : { allowed: true };
+  }
+  return { allowed: true };
+}
+
 /**
  * 高置信的静态预检。它只用于提前返回清晰错误，不替代 OS 沙箱。
  * 未识别的 shell 语法仍会被 buildSandboxSpawnPlan 产生的宿主边界约束。
@@ -102,21 +141,16 @@ export function buildSandboxSpawnPlan(request: SandboxRequest): SandboxSpawnPlan
     };
   }
 
-  return {
-    backend,
-    command: findLinuxBwrap(),
-    args: buildBwrapArgs(roots, config.network, request.shell, request.shellArgs),
-    sandboxed: true,
-  };
+  throw new SandboxViolationError("sandbox_unavailable", `未实现的沙箱后端: ${String(backend)}`);
 }
 
 export function detectSandboxBackend(platform: NodeJS.Platform = process.platform): SandboxBackend {
   if (platform === "darwin" && existsSync("/usr/bin/sandbox-exec")) {
     return "macos-sandbox-exec";
   }
-  if (platform === "linux" && findLinuxBwrap() !== "") {
-    return "linux-bwrap";
-  }
+  // bwrap 可以将整个 root 重新 bind 为可写，但无法按“未来文件名”禁止
+  // 嵌套 .git/.env/私钥。在完成 Landlock 等等价边界前，Linux 必须 fail-closed，
+  // 不得仅因 bwrap 存在就宣称已强制敏感路径策略。
   return "unavailable";
 }
 
@@ -163,36 +197,6 @@ function buildMacosProfile(roots: readonly string[], network: SandboxNetworkPoli
   return rules.join("\n");
 }
 
-function buildBwrapArgs(
-  roots: readonly string[],
-  network: SandboxNetworkPolicy,
-  shell: string,
-  shellArgs: readonly string[],
-): string[] {
-  const args = [
-    "--die-with-parent",
-    "--new-session",
-    "--ro-bind",
-    "/",
-    "/",
-    "--dev",
-    "/dev",
-    "--proc",
-    "/proc",
-  ];
-  if (network === "deny") args.push("--unshare-net");
-  for (const root of roots) args.push("--bind", root, root);
-  args.push("--", shell, ...shellArgs);
-  return args;
-}
-
-function findLinuxBwrap(): string {
-  for (const candidate of ["/usr/bin/bwrap", "/bin/bwrap"]) {
-    if (existsSync(candidate)) return candidate;
-  }
-  return "";
-}
-
 function denied(code: SandboxViolationCode, reason: string): SandboxDecision {
   return { allowed: false, code, reason: `[sandbox:${code}] ${reason}` };
 }
@@ -208,6 +212,15 @@ function sbplString(value: string): string {
 
 function hasExplicitNetworkIntent(command: string): boolean {
   return EXPLICIT_NETWORK_COMMAND_RE.test(command) || NETWORK_URL_RE.test(command);
+}
+
+function jsonStringField(args: string, field: string): string | undefined {
+  try {
+    const value = (JSON.parse(args) as Record<string, unknown>)[field];
+    return typeof value === "string" ? value : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 const SENSITIVE_DIRECTORY_NAMES = new Set([".git", ".ssh", ".gnupg", ".aws", ".docker"]);

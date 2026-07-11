@@ -408,7 +408,7 @@ describe("runAgentFromCli", () => {
     await expect(readFile(join(workDir, "approval.txt"), "utf8")).rejects.toThrow();
   });
 
-  it("默认 yolo 静默授权外部写入", async () => {
+  it("默认 yolo 不弹审批且拒绝未授权外部写入", async () => {
     const workDir = await mkdtemp(join(tmpdir(), "pico-cli-boundary-root-"));
     const outsideDir = await mkdtemp(join(tmpdir(), "pico-cli-boundary-outside-"));
     const outsideFile = join(outsideDir, "blocked.txt");
@@ -445,7 +445,7 @@ describe("runAgentFromCli", () => {
 
     expect(result.finalMessage).toBe("Boundary explained.");
     expect(approvalNotifier).not.toHaveBeenCalled();
-    await expect(readFile(outsideFile, "utf8")).resolves.toBe("blocked");
+    await expect(readFile(outsideFile, "utf8")).rejects.toThrow();
   });
 
   it("附加目录中的写入进入正常审批并可执行", async () => {

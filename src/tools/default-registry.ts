@@ -27,12 +27,15 @@ import type { AskUserHandler } from "./ask-user.js";
 import { WorkspaceRoots, buildWorkspaceBoundaryMiddleware } from "./workspace-roots.js";
 import type { CodeIntelligenceService } from "../code-intelligence/types.js";
 import { createCodeIntelligenceTools } from "./code-intelligence.js";
+import type { YoloSandboxConfig } from "../safety/yolo-sandbox.js";
 
 export interface DefaultToolRegistryOptions extends ToolRegistryOptions {
   /** Read/Write/Edit/Glob/Grep 与请求边界共享的工作区根集合。 */
   workspaceRoots?: WorkspaceRoots;
   /** Host 将工作区 ask/yolo 与审批合并处理时，关闭这里的严格前置拒绝。 */
   deferWorkspaceBoundary?: boolean;
+  /** 仅可信宿主在 YOLO 运行态显式注入；未传时保持旧 Bash 行为。 */
+  yoloSandbox?: { config?: Partial<YoloSandboxConfig> };
   backgroundManager?: BackgroundManager;
   /**
    * Goal Manager 单例(ROADMAP 3.5)。三个 Goal 工具共享此实例,
@@ -75,6 +78,7 @@ export function buildDefaultToolRegistry(
     codeIntelligence,
     workspaceRoots,
     deferWorkspaceBoundary = false,
+    yoloSandbox,
     ...registryOptions
   } = options;
   const roots = workspaceRoots ?? WorkspaceRoots.createSync(workDir);
@@ -86,7 +90,14 @@ export function buildDefaultToolRegistry(
   registry.register(new EditFileTool(roots));
   registry.register(
     new BashTool(workDir, backgroundManager, {
-      sandbox: { workspaceRoots: roots },
+      ...(yoloSandbox
+        ? {
+            sandbox: {
+              workspaceRoots: roots,
+              ...(yoloSandbox.config ? { config: yoloSandbox.config } : {}),
+            },
+          }
+        : {}),
     }),
   );
   registry.register(new TaskListTool(backgroundManager));
