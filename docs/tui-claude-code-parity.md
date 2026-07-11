@@ -132,6 +132,8 @@ pico --add-dir ../shared --add-dir /absolute/generated
 
 `.claw/tasks/state.json` 当前持久化的是任务账本，用于重启后查看历史和将遗留 `running` 任务明确收口为失败；它不会复活上一个 Node/LLM 进程。真正的跨重启 resume、冲突合并隔离和实时 message steer 已列入后续任务。
 
+宿主提交/合并不执行仓库 hooks、fsmonitor、签名程序或凭据助手，也不在 `/tasks merge` 中隐式 `fetch`。检测到自定义 clean/smudge/process filter 或 merge driver 时会 fail-closed，需要人工审查与提交。
+
 ### 项目配置与键位
 
 `.pico/config.json` 还可以设置项目命令目录和 TUI 键位：
