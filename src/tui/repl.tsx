@@ -4,6 +4,7 @@
 // Each user prompt builds a fresh engine around the same session and reporter.
 // QueryGuard prevents overlapping submissions from racing cleanup state.
 
+import { access } from "node:fs/promises";
 import type React from "react";
 import { useRef, useState, useSyncExternalStore } from "react";
 import { render, Text, useApp, useInput, type Instance, type RenderOptions } from "ink";
@@ -637,6 +638,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
   const sharedMcpManager = new McpConnectionManager(undefined, { stdioCwd: opts.workDir });
   const mcpConfigPath = opts.mcpConfigPath ?? `${opts.workDir}/.claw/mcp.json`;
   let mcpInitialized = false;
+  let mcpStatusVisible = opts.mcpConfigPath !== undefined;
   const tuiSessionSelection: CliSessionSelection = opts.sessionSelection ?? {
     mode: "new",
     sessionId: createCliSessionId(),
@@ -652,6 +654,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
   const pendingTuiDialogActions = new Set<Promise<unknown>>();
   let activeAbortControllerRef: TuiAbortControllerRef | undefined;
   const unsubscribeMcpStatus = sharedMcpManager.subscribe((snapshot) => {
+    mcpStatusVisible = snapshot.configPath !== undefined;
     if (!activeBundle) return;
     activeBundle.latestMcpStatus = snapshot;
     setSessionTools(activeBundle.settings, toolStatusFromRegistry(activeBundle.toolRegistry));
@@ -708,14 +711,22 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
       sharedMcpManager.attachRegistry(toolRegistry);
       if (!mcpInitialized) {
         mcpInitialized = true;
-        try {
-          await sharedMcpManager.loadConfig(mcpConfigPath);
-          await sharedMcpManager.connectAll();
-        } catch {
-          // /mcp 展示配置或连接错误；TUI 本身继续可用。
+        const shouldLoadMcpConfig =
+          opts.mcpConfigPath !== undefined ||
+          (await access(mcpConfigPath).then(
+            () => true,
+            (error: NodeJS.ErrnoException) => error.code !== "ENOENT",
+          ));
+        if (shouldLoadMcpConfig) {
+          try {
+            await sharedMcpManager.loadConfig(mcpConfigPath);
+            await sharedMcpManager.connectAll();
+          } catch {
+            // /mcp 展示配置或连接错误；TUI 本身继续可用。
+          }
         }
       }
-      const latestMcpStatus: McpStatusSnapshot = sharedMcpManager.getStatusSnapshot();
+      const latestMcpStatus = mcpStatusVisible ? sharedMcpManager.getStatusSnapshot() : undefined;
 
       const settings = getOrCreateSessionSettings(
         {
