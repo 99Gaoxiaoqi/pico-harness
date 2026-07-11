@@ -168,13 +168,15 @@ export class BackgroundManager {
     }
 
     task.stopping = true;
-    this.killTask(task, "SIGTERM");
-    return this.withTimeout(task.closePromise, this.stopTimeoutMs, async () => {
-      this.killTask(task, "SIGKILL");
-      return this.withTimeout(task.closePromise, this.stopTimeoutMs, () =>
-        this.forceStopRecord(task, "SIGKILL"),
-      );
-    });
+    await this.killTask(task, "SIGTERM");
+    const gracefulClose = await this.waitForClose(task.closePromise, this.stopTimeoutMs);
+    if (gracefulClose) return gracefulClose;
+
+    await this.killTask(task, "SIGKILL");
+    const forcedClose = await this.waitForClose(task.closePromise, this.stopTimeoutMs);
+    if (forcedClose) return forcedClose;
+
+    throw new Error(`后台任务 ${taskId} 在强制终止后仍未退出`);
   }
 
   private getTask(taskId: string): ManagedTask {
@@ -185,39 +187,25 @@ export class BackgroundManager {
     return task;
   }
 
-  private killTask(task: ManagedTask, signal: NodeJS.Signals): void {
-    signalProcessTree(task.child, signal);
+  private killTask(task: ManagedTask, signal: NodeJS.Signals): Promise<boolean> {
+    return signalProcessTree(task.child, signal);
   }
 
-  private forceStopRecord(task: ManagedTask, signal: NodeJS.Signals): BackgroundTaskRecord {
-    if (task.record.status === "running") {
-      task.record.status = "stopped";
-      task.record.signal = signal;
-      task.record.endedAt = new Date();
-      this.taskRegistry.kill(task.record.taskId, "stopped", { data: { signal } });
-      this.pruneCompletedTasks();
-    }
-    return { ...task.record };
-  }
-
-  private async withTimeout(
+  private waitForClose(
     promise: Promise<BackgroundTaskRecord>,
     timeoutMs: number,
-    onTimeout: () => Promise<BackgroundTaskRecord> | BackgroundTaskRecord,
-  ): Promise<BackgroundTaskRecord> {
-    let timer: NodeJS.Timeout | undefined;
-    try {
-      return await Promise.race([
-        promise,
-        new Promise<BackgroundTaskRecord>((resolve) => {
-          timer = setTimeout(() => {
-            Promise.resolve(onTimeout()).then(resolve);
-          }, timeoutMs);
-        }),
-      ]);
-    } finally {
-      if (timer) clearTimeout(timer);
-    }
+  ): Promise<BackgroundTaskRecord | undefined> {
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (record?: BackgroundTaskRecord): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(record);
+      };
+      const timer = setTimeout(() => finish(), timeoutMs);
+      void promise.then((record) => finish(record));
+    });
   }
 
   private pruneCompletedTasks(): void {
