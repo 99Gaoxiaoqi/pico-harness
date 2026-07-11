@@ -1,8 +1,286 @@
 {
   "version": 1,
   "commandsDir": ".pico/commands",
-  "model": "deepseek/deepseek-v4-pro",
+  "model": "volcengine/deepseek-v4-pro-260425",
   "providers": {
+    "volcengine": {
+      "protocol": "openai",
+      "baseURL": "https://ark.cn-beijing.volces.com/api/coding/v3",
+      "apiKeyEnv": "VOLCENGINE_API_KEY",
+      "discoverModels": false,
+      "models": {
+        "glm-5-2-260617": {
+          "context": 1048576,
+          "output": 131072,
+          "vision": false,
+          "reasoning": true,
+          "toolCall": true,
+          "cache": true
+        },
+        "doubao-seed-evolving": {
+          "context": 262144,
+          "output": 131072,
+          "vision": true,
+          "reasoning": true,
+          "toolCall": true,
+          "cache": false
+        },
+        "doubao-seed-character-260628": {
+          "context": 131072,
+          "output": 32768,
+          "vision": false,
+          "toolCall": true,
+          "cache": false
+        },
+        "doubao-seed-2-1-turbo-260628": {
+          "context": 262144,
+          "output": 131072,
+          "vision": true,
+          "reasoning": true,
+          "toolCall": true,
+          "cache": false
+        },
+        "doubao-seed-2-1-pro-260628": {
+          "context": 262144,
+          "output": 131072,
+          "vision": true,
+          "reasoning": true,
+          "toolCall": true,
+          "cache": true
+        },
+        "deepseek-v4-flash-260425": {
+          "context": 1048576,
+          "output": 393216,
+          "vision": false,
+          "reasoning": true,
+          "toolCall": true,
+          "cache": false
+        },
+        "deepseek-v4-pro-260425": {
+          "context": 1048576,
+          "output": 393216,
+          "vision": false,
+          "reasoning": true,
+          "toolCall": true,
+          "cache": false
+        },
+        "doubao-seed-2-0-lite-260428": {
+          "context": 262144,
+          "output": 131072,
+          "vision": true,
+          "reasoning": true,
+          "toolCall": true,
+          "cache": false
+        },
+        "doubao-seed-2-0-mini-260428": {
+          "context": 262144,
+          "output": 131072,
+          "vision": true,
+          "reasoning": true,
+          "toolCall": true,
+          "cache": false
+        },
+        "doubao-seed-2-0-code-preview-260215": {
+          "context": 262144,
+          "output": 131072,
+          "vision": true,
+          "reasoning": true,
+          "toolCall": true,
+          "cache": false
+        },
+        "doubao-seed-2-0-pro-260215": {
+          "context": 262144,
+          "output": 131072,
+          "vision": true,
+          "reasoning": true,
+          "toolCall": true,
+          "cache": false
+        },
+        "doubao-seed-2-0-mini-260215": {
+          "context": 262144,
+          "output": 131072,
+          "vision": true,
+          "reasoning": true,
+          "toolCall": true,
+          "cache": false
+        },
+        "doubao-seed-2-0-lite-260215": {
+          "context": 262144,
+          "output": 131072,
+          "vision": true,
+          "reasoning": true,
+          "toolCall": true,
+          "cache": false
+        },
+        "doubao-seed-character-251128": {
+          "context": 131072,
+          "output": 32768,
+          "vision": false,
+          "toolCall": true,
+          "cache": false
+        },
+        "doubao-seed-1-6-lite-251015": {
+          "context": 262144,
+          "output": 65536,
+          "vision": true,
+          "reasoning": true,
+          "toolCall": true,
+          "cache": false
+        },
+        "deepseek-v3-1-terminus": {
+          "context": 131072,
+          "output": 32768,
+          "vision": false,
+          "reasoning": true,
+          "toolCall": true,
+          "cache": false
+        },
+        "deepseek-v3-1-250821": {
+          "context": 131072,
+          "output": 32768,
+          "vision": false,
+          "reasoning": true,
+          "toolCall": true,
+          "cache": false
+        },
+        "kimi-k2-250711": {
+          "context": 131072,
+          "output": 32768,
+          "vision": false,
+          "toolCall": true,
+          "cache": false
+        },
+        "doubao-seed-1-6-flash-250715": {
+          "context": 262144,
+          "output": 32768,
+          "vision": true,
+          "reasoning": true,
+          "toolCall": true,
+          "cache": false
+        },
+        "doubao-seed-1-6-thinking-250715": {
+          "context": 262144,
+          "output": 32768,
+          "vision": true,
+          "reasoning": true,
+          "toolCall": true,
+          "cache": false
+        },
+        "doubao-seed-1-6-thinking-250615": {
+          "context": 262144,
+          "output": 16384,
+          "vision": true,
+          "reasoning": true,
+          "toolCall": true,
+          "cache": false
+        },
+        "deepseek-r1-250528": {
+          "context": 131072,
+          "output": 32768,
+          "vision": false,
+          "reasoning": true,
+          "toolCall": true,
+          "cache": true
+        },
+        "doubao-1-5-ui-tars-250428": {
+          "context": 131072,
+          "output": 16384,
+          "vision": true,
+          "reasoning": true,
+          "toolCall": true,
+          "cache": false
+        },
+        "doubao-1-5-thinking-pro-m-250428": {
+          "context": 131072,
+          "output": 16384,
+          "vision": true,
+          "reasoning": true,
+          "toolCall": true,
+          "cache": false
+        },
+        "doubao-1-5-thinking-vision-pro-250428": {
+          "context": 131072,
+          "output": 16384,
+          "vision": true,
+          "reasoning": true,
+          "toolCall": true,
+          "cache": false
+        },
+        "doubao-1-5-thinking-pro-m-250415": {
+          "context": 131072,
+          "output": 16384,
+          "vision": true,
+          "reasoning": true,
+          "toolCall": true,
+          "cache": false
+        },
+        "doubao-1-5-thinking-pro-250415": {
+          "context": 131072,
+          "output": 16384,
+          "vision": false,
+          "reasoning": true,
+          "toolCall": true,
+          "cache": false
+        },
+        "deepseek-v3-250324": {
+          "context": 131072,
+          "output": 16384,
+          "vision": false,
+          "toolCall": true,
+          "cache": true
+        },
+        "deepseek-r1-250120": {
+          "context": 98304,
+          "output": 16384,
+          "vision": false,
+          "reasoning": true,
+          "toolCall": true,
+          "cache": true
+        },
+        "doubao-1-5-pro-256k-250115": {
+          "context": 262144,
+          "output": 12288,
+          "vision": false,
+          "toolCall": true,
+          "cache": false
+        },
+        "doubao-pro-32k-241215": {
+          "context": 32768,
+          "output": 16384,
+          "vision": false,
+          "toolCall": true,
+          "cache": true
+        },
+        "doubao-pro-32k-functioncall-241028": {
+          "context": 32768,
+          "output": 16384,
+          "vision": false,
+          "toolCall": true,
+          "cache": false
+        },
+        "doubao-pro-32k-functioncall-preview": {
+          "context": 32768,
+          "output": 16384,
+          "vision": false,
+          "toolCall": true,
+          "cache": false
+        },
+        "doubao-lite-32k-240828": {
+          "context": 32768,
+          "output": 4096,
+          "vision": false,
+          "toolCall": true,
+          "cache": false
+        },
+        "doubao-pro-32k-240828": {
+          "context": 32768,
+          "output": 16384,
+          "vision": false,
+          "toolCall": true,
+          "cache": false
+        }
+      }
+    },
     "deepseek": {
       "protocol": "openai",
       "baseURL": "https://api.deepseek.com",
