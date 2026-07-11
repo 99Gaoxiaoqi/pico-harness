@@ -75,6 +75,8 @@ export interface TuiReporterOptions {
  */
 export class TuiReporter implements Reporter {
   private currentStream: { entryId: string; streamId: string } | null = null;
+  /** 本轮刚完成的模型正文；若随后确认是 required 委派，则从主 transcript 定向撤销。 */
+  private currentTurnAssistantEntryId: string | null = null;
   /**
    * EventStore 内部 tool ID 的待完成索引。Provider call ID 仅作
    * 当前 pending 队列的关联键，不作为事件全局 ID，因为 Gemini 会跨轮复用它。
@@ -199,6 +201,7 @@ export class TuiReporter implements Reporter {
   onTurnStart(_turn: number): void {
     // 轮次分隔:结束未收到权威 onMessage 的旧流，确保新轮创建新 streamId。
     this.completeActiveStreams();
+    this.currentTurnAssistantEntryId = null;
     this.appendPhase("requesting", true);
     this.emit();
   }
@@ -210,6 +213,9 @@ export class TuiReporter implements Reporter {
   }
 
   onToolCall(toolName: string, args: string, providerCallId?: string): void {
+    if (isRequiredDelegation(toolName, args)) {
+      this.suppressCurrentTurnAssistantResponse();
+    }
     this.appendPhase("tool-use");
     const normalizedProviderCallId = normalizeIdentity(providerCallId);
     const entryId = this.eventStore.createId("entry");
@@ -374,6 +380,7 @@ export class TuiReporter implements Reporter {
 
   onMessage(content: string): void {
     if (this.currentStream) {
+      this.currentTurnAssistantEntryId = this.currentStream.entryId;
       const projectedContent = this.projectedStreamContent(this.currentStream);
       this.eventStore.append({
         type: "assistant.stream.completed",
@@ -381,7 +388,7 @@ export class TuiReporter implements Reporter {
         ...(projectedContent !== content ? { content } : {}),
       });
     } else {
-      this.appendEntry({ kind: "assistant", content });
+      this.currentTurnAssistantEntryId = this.appendEntry({ kind: "assistant", content });
     }
     this.currentStream = null;
     this.emit();
@@ -421,6 +428,17 @@ export class TuiReporter implements Reporter {
     return entryId;
   }
 
+  private suppressCurrentTurnAssistantResponse(): void {
+    const entryId = this.currentTurnAssistantEntryId;
+    if (entryId === null) return;
+    this.eventStore.append({
+      type: "assistant.response.suppressed",
+      entryId,
+      reason: "required-delegation",
+    });
+    this.currentTurnAssistantEntryId = null;
+  }
+
   private appendPhase(mode: UiMode, force = false): void {
     if (!force && this.eventStore.getProjection().phase.mode === mode) return;
     this.eventStore.append({
@@ -446,6 +464,7 @@ export class TuiReporter implements Reporter {
 
   private clearRuntimeTracking(): void {
     this.currentStream = null;
+    this.currentTurnAssistantEntryId = null;
     this.pendingToolIdsByName.clear();
     this.pendingToolIdsByProviderCallId.clear();
     this.pendingToolOutput.clear();
@@ -593,6 +612,22 @@ export class TuiReporter implements Reporter {
       ...projection.entries.map(({ entry }) => entry),
     );
   }
+}
+
+function isRequiredDelegation(toolName: string, rawArgs: string): boolean {
+  if (toolName !== "delegate_task") return false;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawArgs);
+  } catch {
+    return false;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
+  const input = parsed as Record<string, unknown>;
+  if (input["completion_policy"] === "optional" || input["completion_policy"] === "detached") {
+    return false;
+  }
+  return input["background"] !== true;
 }
 
 export interface ExternalizedToolResultMetadata {
