@@ -568,7 +568,8 @@ git worktree remove ../pico-1-streaming
 ## 📅 变更记录
 
 - 2026-07-11：收敛项目配置与工具入口
-  - 新增项目 `.pico/config.json`，将 DeepSeek provider、默认模型路由、能力限额和 LSP 自动发现策略放入 JSON；密钥仍仅通过 `LLM_API_KEY` 环境变量读取。
+  - 新增项目 `.pico/config.json`；默认选择火山方舟 Coding Plan，并从账号 `/models` 接口筛出 35 个支持文本输出与 Function Calling 的 Agent 模型，写入上下文、输出、视觉、reasoning、tool-call 和 cache 元数据；DeepSeek provider 保留为备用。
+  - 火山方舟与 DeepSeek 密钥分别只通过 `VOLCENGINE_API_KEY`、`LLM_API_KEY` 环境变量读取，不进入 JSON 或 Git。
   - 删除面向用户的 `/tools` 命令；模型内部 `search_tools` 延迟披露机制保持不变，MCP 状态和审批策略继续由 `/mcp`、`/permissions` 分别承载。
   - LSP/Repo Map 保持宿主自动发现与降级，不增加要求用户操作的代码智能命令。
 
