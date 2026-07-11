@@ -15,6 +15,7 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { logger } from "../observability/logger.js";
+import { buildMinimalChildProcessEnv } from "../os/child-process-env.js";
 import {
   MCP_PROTOCOL_VERSION,
   PICO_MCP_CLIENT_INFO,
@@ -79,8 +80,7 @@ export class StdioMcpClient implements McpClient {
     if (!command) {
       throw new Error(`MCP server "${this.config.name}" 缺少 command(stdio 模式必填)`);
     }
-    // 合并父进程 env,再覆盖 config.env —— 否则 npx/uvx 找不到 PATH
-    const childEnv = { ...process.env, ...env };
+    const childEnv = buildMinimalChildProcessEnv(env);
 
     const safeCommand = redactSensitiveText(command);
     const safeArgs = redactSensitiveArgs(args);

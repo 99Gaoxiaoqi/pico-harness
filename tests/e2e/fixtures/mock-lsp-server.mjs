@@ -1,3 +1,9 @@
+import { writeFileSync } from "node:fs";
+
+const envSnapshotFlag = process.argv.indexOf("--env-snapshot");
+const envSnapshotPath = envSnapshotFlag >= 0 ? process.argv[envSnapshotFlag + 1] : undefined;
+if (envSnapshotPath) writeFileSync(envSnapshotPath, JSON.stringify(process.env));
+
 let buffer = Buffer.alloc(0);
 let expectedLength;
 let initializeId;
