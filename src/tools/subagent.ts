@@ -128,6 +128,9 @@ interface NormalizedDelegateTask {
   agentName?: string;
 }
 
+const SUBAGENT_SUMMARY_MAX_CHARS = 5_000;
+const REQUIRED_DELEGATION_TEXT_BUDGET_CHARS = 10_000;
+
 /**
  * SubagentTool:拉起子智能体的特殊"套娃"工具。
  *
@@ -215,7 +218,7 @@ export class SpawnSubagentTool implements BaseTool {
     // 几万字的代码探索,化作轻量级 Summary,像普通 API 调用返回给主 Agent。
     // 附带被外部化的大型工具输出磁盘路径:主 Agent 可用 read_file 回查原文,
     // 避免子代理读过大文件后,主 Agent 既看不到原文也无法定位。
-    return formatSubagentReport("【子智能体探索报告】", result);
+    return formatSubagentReport("【子智能体探索报告】", capSubagentResult(result));
   }
 }
 
@@ -338,7 +341,10 @@ export class DelegateTaskTool implements BaseTool {
     // 不会进入下一次推理，也就不可能提前结束整轮。
     if (completionPolicy === "required") {
       return JSON.stringify(
-        await this.runBatch(tasks, activities, depth, maxSpawnDepth, context?.signal),
+        capDelegationBatchText(
+          await this.runBatch(tasks, activities, depth, maxSpawnDepth, context?.signal),
+          REQUIRED_DELEGATION_TEXT_BUDGET_CHARS,
+        ),
       );
     }
 
@@ -422,6 +428,10 @@ export class DelegateTaskTool implements BaseTool {
       throw error;
     }
     if (result.status === "completed") {
+      result = {
+        ...result,
+        summary: truncateWithMarker(result.summary ?? "", SUBAGENT_SUMMARY_MAX_CHARS),
+      };
       this.emitActivity(activity, "completed", {
         summary: compactActivityText(result.summary ?? "子代理已完成", 160),
       });
@@ -620,6 +630,111 @@ function formatSubagentReport(header: string, result: SubagentResult): string {
     );
   }
   return lines.join("\n");
+}
+
+function capSubagentResult(result: SubagentResult): SubagentResult {
+  return {
+    ...result,
+    summary: truncateWithMarker(result.summary, SUBAGENT_SUMMARY_MAX_CHARS),
+  };
+}
+
+/**
+ * required 批量委派只压缩可膨胀的 summary/error 文本，状态、耗时和
+ * artifacts 等结构化字段原样保留。短结果先满额保留，剩余预算按结果
+ * 顺序在长文本之间均分，使输出公平、确定且始终可由 JSON.stringify 安全编码。
+ */
+function capDelegationBatchText(
+  batch: DelegationBatchResult,
+  totalBudget: number,
+): DelegationBatchResult {
+  const textFields = batch.results.flatMap((result, resultIndex) => {
+    const fields: Array<{ resultIndex: number; key: "summary" | "error"; value: string }> = [];
+    if (result.summary !== undefined) {
+      fields.push({ resultIndex, key: "summary", value: result.summary });
+    }
+    if (result.error !== undefined) {
+      fields.push({ resultIndex, key: "error", value: result.error });
+    }
+    return fields;
+  });
+  const results = batch.results.map((result) => ({ ...result }));
+  for (const field of textFields) {
+    results[field.resultIndex]![field.key] = "";
+  }
+  const fixedChars = JSON.stringify({ ...batch, results }).length;
+  const budgets = allocateFairTextBudgets(
+    textFields.map((field) => jsonStringPayloadChars(field.value)),
+    Math.max(0, totalBudget - fixedChars),
+  );
+  for (let index = 0; index < textFields.length; index++) {
+    const field = textFields[index]!;
+    results[field.resultIndex]![field.key] = truncateForJsonBudget(
+      field.value,
+      budgets[index] ?? 0,
+    );
+  }
+  return { ...batch, results };
+}
+
+function truncateForJsonBudget(value: string, payloadBudget: number): string {
+  if (jsonStringPayloadChars(value) <= payloadBudget) return value;
+  if (payloadBudget <= 0) return "";
+
+  const marker = `\n[已截断：原始 ${value.length} 字符]`;
+  if (jsonStringPayloadChars(marker) > payloadBudget) {
+    return jsonStringPayloadChars("…") <= payloadBudget ? "…" : "";
+  }
+
+  let low = 0;
+  let high = value.length;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (jsonStringPayloadChars(`${value.slice(0, middle)}${marker}`) <= payloadBudget) {
+      low = middle;
+    } else {
+      high = middle - 1;
+    }
+  }
+  return `${value.slice(0, low)}${marker}`;
+}
+
+function jsonStringPayloadChars(value: string): number {
+  return JSON.stringify(value).length - 2;
+}
+
+function allocateFairTextBudgets(lengths: readonly number[], totalBudget: number): number[] {
+  const budgets = new Array<number>(lengths.length).fill(0);
+  const pending = lengths.map((_, index) => index);
+  let remaining = totalBudget;
+
+  while (pending.length > 0 && remaining > 0) {
+    const share = Math.floor(remaining / pending.length);
+    const fulfilled = pending.filter((index) => lengths[index]! <= share);
+    if (fulfilled.length === 0) {
+      for (let offset = 0; offset < pending.length; offset++) {
+        const index = pending[offset]!;
+        budgets[index] = share + (offset < remaining % pending.length ? 1 : 0);
+      }
+      break;
+    }
+    for (const index of fulfilled) {
+      budgets[index] = lengths[index]!;
+      remaining -= lengths[index]!;
+      pending.splice(pending.indexOf(index), 1);
+    }
+  }
+  return budgets;
+}
+
+function truncateWithMarker(value: string, maxChars: number): string {
+  if (value.length <= maxChars) return value;
+  if (maxChars <= 0) return "";
+  const marker = `\n[已截断：原始 ${value.length} 字符]`;
+  if (marker.length >= maxChars) {
+    return "[已截断]".slice(0, maxChars);
+  }
+  return `${value.slice(0, maxChars - marker.length)}${marker}`;
 }
 
 function parseDelegateArgs(args: string): DelegateTaskArgs {
