@@ -140,7 +140,7 @@ describe("Claude-style permission integration", () => {
     });
   });
 
-  it("默认 yolo 静默放行外部 Bash 写入，但安全文件询问且 hardline 不可绕过", async () => {
+  it("默认 yolo 不弹审批且确定性拒绝越界、安全文件与 hardline", async () => {
     const workDir = await realTempDir("pico-permission-yolo-");
     const outsideDir = await realTempDir("pico-permission-yolo-outside-");
     const nestedDir = join(outsideDir, "new", "nested");
@@ -156,10 +156,6 @@ describe("Claude-style permission integration", () => {
     ]);
     const reporter = new TuiReporter(() => undefined);
     const notices: ApprovalNotice[] = [];
-    let resolveDialog!: (request: DialogRequest) => void;
-    const nextDialog = new Promise<DialogRequest>((resolve) => {
-      resolveDialog = resolve;
-    });
 
     const run = runTuiAgentPrompt(
       {
@@ -176,34 +172,17 @@ describe("Claude-style permission integration", () => {
         openDialog: (request) => {
           const props = (request.content as React.ReactElement<ApprovalNotice>).props;
           notices.push(props);
-          resolveDialog(request);
         },
       },
     );
 
-    const request = await withTimeout(nextDialog, "safety approval dialog did not open");
-    await expect(readFile(outsideFile, "utf8")).resolves.toBe("yolo-ok");
-    const element = request.content as React.ReactElement<{
-      onAction: (action: ApprovalPanelAction) => void;
-    }>;
-    expect(notices).toHaveLength(1);
-    expect(notices[0]?.preview?.target).toBe(".env");
-    element.props.onAction("reject");
     await run;
 
+    expect(notices).toHaveLength(0);
+    await expect(readFile(outsideFile, "utf8")).rejects.toThrow();
     await expect(readFile(join(workDir, ".env"), "utf8")).rejects.toThrow();
-    expect(reporter.entries).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          kind: "tool",
-          name: "bash",
-          status: "denied",
-          summary: expect.stringContaining("Hardline"),
-        }),
-      ]),
-    );
     expect(getStoredSessionSettings(sessionId)?.mode).toBe("yolo");
-    expect(getStoredSessionSettings(sessionId)?.additionalDirectories).toContain(outsideDir);
+    expect(getStoredSessionSettings(sessionId)?.additionalDirectories).not.toContain(outsideDir);
   });
 });
 

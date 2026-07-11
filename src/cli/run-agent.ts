@@ -72,6 +72,7 @@ import {
 } from "../input/session-settings.js";
 import { loadConfiguredAdditionalDirectories } from "../input/add-directory.js";
 import { loadImage } from "../input/prepare-prompt.js";
+import { evaluateYoloToolCall } from "../safety/yolo-sandbox.js";
 import { resolveCliSession, type CliSessionSelection } from "./session-resolver.js";
 
 export interface RunAgentCliOptions {
@@ -672,22 +673,15 @@ export function buildApprovalMiddleware(
       workDir,
     );
 
-    // Claude Code step 2a: bypassPermissions 绕过普通 working-dir ask。
-    if (mode === "yolo" && safetyPath === undefined) {
-      if (externalDirectories.length > 0 && workspaceRoots && settings) {
-        await applySessionPermissionScope(
-          permissionScopeForCall(call, {
-            externalDirectories,
-            autoEditsAlreadyEnabled: true,
-          }),
-          {
-            sessionId,
-            settings: settings as PermissionRuntimeSettings,
-            workspaceRoots,
-          },
-        );
+    // YOLO 只绕过普通审批，不自动扩大工作区，也不开放敏感/网络/hardline 边界。
+    if (mode === "yolo") {
+      if (workspaceRoots) {
+        const decision = evaluateYoloToolCall(call, workDir, workspaceRoots);
+        if (!decision.allowed) {
+          return { allowed: false, reason: decision.reason ?? "YOLO 沙箱策略拒绝。" };
+        }
       }
-      return { allowed: true, reason: "YOLO 模式放行" };
+      return { allowed: true, reason: "YOLO 模式在宿主边界内放行" };
     }
 
     if (
@@ -709,7 +703,7 @@ export function buildApprovalMiddleware(
       externalDirectories.length > 0
         ? permissionScopeForCall(call, {
             externalDirectories,
-            autoEditsAlreadyEnabled: mode === "auto" || mode === "yolo",
+            autoEditsAlreadyEnabled: mode === "auto",
           })
         : undefined;
     const scope = permissionScopeForCall(call, {
