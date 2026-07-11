@@ -943,11 +943,7 @@ export async function runTuiAgentPrompt(
       reporter: deps.reporter,
       signal: controller.signal,
       approvalNotifier: (notice) => {
-        deps.reporter.onToolAwaitingApproval(
-          notice.toolName,
-          notice.args,
-          notice.providerCallId,
-        );
+        deps.reporter.onToolAwaitingApproval(notice.toolName, notice.args);
         const dialogId = approvalDialogId(notice.taskId);
         pendingApprovalDialogs.add(dialogId);
         deps.openDialog?.(

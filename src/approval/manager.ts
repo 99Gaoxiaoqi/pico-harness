@@ -48,8 +48,6 @@ export interface ApprovalNotice {
   taskId: string;
   toolName: string;
   args: string;
-  /** 当前 provider 工具调用的关联 ID；仅供 Reporter 定位 pending 卡片。 */
-  providerCallId?: string;
   message: string;
   /** 面向审批 UI/通知通道的极简预览信息。 */
   preview?: ApprovalPreview;
