@@ -17,6 +17,11 @@ import { appendFile, readFile, stat } from "node:fs/promises";
 import type { Message } from "../schema/message.js";
 import { logger } from "../observability/logger.js";
 import type { SessionIdentity } from "./session-identity.js";
+import {
+  normalizeSessionRuntimeStatePatch,
+  SESSION_RUNTIME_STATE_VERSION,
+  type SessionRuntimeStatePatch,
+} from "./session-runtime.js";
 
 /**
  * 当前 JSONL schema 版本号。
@@ -27,6 +32,7 @@ import type { SessionIdentity } from "./session-identity.js";
  *
  * v0→v1:无结构变化(仅引入 meta 头与版本号机制本身),migrate 原样返回。
  * v1→v2:meta 头新增 session identity 字段,历史事件结构不变。
+ * runtime_state 是可选的自版本记录，不改变旧事件语义，因此不 bump meta 版本。
  */
 const CURRENT_SCHEMA_VERSION = 2;
 
@@ -61,6 +67,13 @@ export type SessionRecord =
       readonly messageIndex: number;
       readonly at: string;
     }
+  | {
+      readonly type: "runtime_state";
+      readonly seq: number;
+      readonly at: string;
+      readonly stateVersion: typeof SESSION_RUNTIME_STATE_VERSION;
+      readonly patch: SessionRuntimeStatePatch;
+    }
   | ({ readonly type: "meta" } & SessionMetadata);
 
 /**
@@ -68,7 +81,8 @@ export type SessionRecord =
  *
  * SessionStore 在每条 record 追加后(无论 volatile 与否)向监听器广播
  * (record, seq, epoch)。WS 层订阅它,据此向连接的 client 推送事件流:
- *   - 持久事件(message with volatile!=true)/ truncate / undo / rewind_to 推进 seq
+ *   - 持久事件(message with volatile!=true)/ truncate / undo / rewind_to /
+ *     runtime_state 推进 seq
  *   - 易失事件(message with volatile===true)不推进 seq
  *   - epoch 用于 fork/rewind 后让旧 cursor 的 client 感知"世代已变"
  *
@@ -168,6 +182,19 @@ export class SessionStore {
     this.emit(record, seq);
   }
 
+  /** 追加一个会话运行态 section 快照，与消息共用同一 seq 序列。 */
+  async appendRuntimeState(seq: number, patch: SessionRuntimeStatePatch): Promise<void> {
+    const record: SessionRecord = {
+      type: "runtime_state",
+      seq,
+      at: new Date().toISOString(),
+      stateVersion: SESSION_RUNTIME_STATE_VERSION,
+      patch: structuredClone(patch),
+    };
+    await this.appendLine(JSON.stringify(record));
+    this.emit(record, seq);
+  }
+
   /**
    * 读取全部记录。逐行解析,容忍末行撕裂(最后一行 JSON.parse 失败则跳过)。
    * 中间行损坏改为"跳过该行继续解析"并 warn,保住其余有效记录(M2 修复);
@@ -196,7 +223,17 @@ export class SessionStore {
       if (!line) continue;
       let parsed: SessionRecord;
       try {
-        parsed = JSON.parse(line) as SessionRecord;
+        const candidate: unknown = JSON.parse(line);
+        if (isRuntimeStateCandidate(candidate)) {
+          const runtimeRecord = normalizeRuntimeStateRecord(candidate);
+          if (!runtimeRecord) {
+            logger.warn({ line: i + 1 }, `[session] 第 ${i + 1} 行 runtime_state 无效,已跳过`);
+            continue;
+          }
+          parsed = runtimeRecord;
+        } else {
+          parsed = candidate as SessionRecord;
+        }
       } catch (error) {
         if (i === lines.length - 1) {
           // 末行撕裂:append 写一半的典型表现,容忍跳过
@@ -281,6 +318,40 @@ export class SessionStore {
     await appendFile(this.filePath, meta + "\n", "utf8");
     this.initialized = true;
   }
+}
+
+function isRuntimeStateCandidate(value: unknown): value is Record<string, unknown> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    (value as Record<string, unknown>)["type"] === "runtime_state"
+  );
+}
+
+function normalizeRuntimeStateRecord(
+  value: Record<string, unknown>,
+): Extract<SessionRecord, { type: "runtime_state" }> | undefined {
+  const seq = value["seq"];
+  const at = value["at"];
+  if (
+    typeof seq !== "number" ||
+    !Number.isSafeInteger(seq) ||
+    seq < 0 ||
+    typeof at !== "string" ||
+    value["stateVersion"] !== SESSION_RUNTIME_STATE_VERSION
+  ) {
+    return undefined;
+  }
+  const patch = normalizeSessionRuntimeStatePatch(value["patch"]);
+  if (!patch) return undefined;
+  return {
+    type: "runtime_state",
+    seq,
+    at,
+    stateVersion: SESSION_RUNTIME_STATE_VERSION,
+    patch,
+  };
 }
 
 function isNotFoundError(error: unknown): boolean {
