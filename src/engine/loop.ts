@@ -14,7 +14,7 @@ import type { LLMProvider, LLMProviderRequestOptions } from "../provider/interfa
 import { ContextOverflowError } from "../provider/errors.js";
 import { generateWithRetry, type RetryInfo } from "../provider/retry.js";
 import type { Message, ToolCall, ToolDefinition, ToolResult } from "../schema/message.js";
-import type { Registry } from "../tools/registry.js";
+import type { Registry, ToolFileSideEffects } from "../tools/registry.js";
 import type { AgentRunner } from "../tools/subagent.js";
 import type { SubagentRunOptions, SubagentResult } from "../tools/subagent.js";
 import type { Compactor } from "../context/compactor.js";
@@ -68,10 +68,14 @@ function isBackgroundBashCall(call: ToolCall): boolean {
   }
 }
 
-function hasWorkspaceFileSideEffects(registry: Registry, call: ToolCall): boolean {
-  const effects = registry.getFileSideEffects?.(call);
-  if (effects) return effects.kind === "workspace";
-  return !(registry.isReadOnlyTool?.(call.name) ?? false);
+function fileSideEffectKind(registry: Registry, call: ToolCall): ToolFileSideEffects["kind"] {
+  try {
+    const effects = registry.getFileSideEffects?.(call);
+    if (effects) return effects.kind;
+    return registry.isReadOnlyTool?.(call.name) ? "none" : "workspace";
+  } catch {
+    return "workspace";
+  }
 }
 
 async function commitFileJournal(
@@ -824,9 +828,10 @@ export class AgentEngine implements AgentRunner {
           // maxConcurrency 限制并发执行的工具数(对齐 hermes _MAX_TOOL_WORKERS=8),
           // 防止一批大量不冲突只读工具同时打 IO 把系统压垮。
           let turnFileJournal: FileHistoryJournal | undefined;
-          const hasWorkspaceEffects = toolCalls.some((call) =>
-            hasWorkspaceFileSideEffects(this.registry, call),
+          const fileSideEffectKinds = toolCalls.map((call) =>
+            fileSideEffectKind(this.registry, call),
           );
+          const hasWorkspaceEffects = fileSideEffectKinds.includes("workspace");
           if (hasWorkspaceEffects && journalRoots.length > 0) {
             if (userRewindPointId) {
               runFileJournal ??= await fileHistoryBeginJournal(journalRoots, session.id, signal);
@@ -849,12 +854,14 @@ export class AgentEngine implements AgentRunner {
           const settledResults: Array<{ message: Message; reminder?: Message } | undefined> =
             new Array(toolCalls.length);
           let results: Array<{ message: Message; reminder?: Message }>;
+          let scheduled: Array<Promise<{ message: Message; reminder?: Message }>> = [];
           try {
-            const scheduled = toolCalls.map((tc, index) =>
+            scheduled = toolCalls.map((tc, index) =>
               scheduler
                 .add({
                   accesses: getAccesses ? getAccesses.call(this.registry, tc) : ToolAccesses.all(),
-                  settleOnAbort: this.registry.handlesAbortSignal?.(tc.name) ?? false,
+                  // 文件事务只能在活跃写任务的 start Promise 真实收口后提交。
+                  settleOnAbort: fileSideEffectKinds[index] !== "none",
                   start: async () => {
                     signal?.throwIfAborted();
                     return this.runOneTool(tc, reporter, session.id, turnSpan, signal);
@@ -869,6 +876,8 @@ export class AgentEngine implements AgentRunner {
             signal?.throwIfAborted();
           } catch (err) {
             if (signal?.aborted) {
+              // 队列任务已拒绝；workspace/exact 活跃任务则等底层 start 真实 settle。
+              await Promise.allSettled(scheduled);
               const abortedObservations = toolCalls.map((toolCall, index) => {
                 const settled = settledResults[index];
                 if (settled) return settled.message;

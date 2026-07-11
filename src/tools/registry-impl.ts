@@ -851,10 +851,14 @@ function runForegroundCommand(
     let childError: Error | undefined;
     let killTimer: NodeJS.Timeout | undefined;
     let settled = false;
+    const killAttempts: Promise<boolean>[] = [];
 
-    const forceKill = (): void => signalProcessTree(child, "SIGKILL");
+    const signalTree = (signal: NodeJS.Signals): void => {
+      killAttempts.push(signalProcessTree(child, signal).catch(() => false));
+    };
+    const forceKill = (): void => signalTree("SIGKILL");
     const terminateWithGrace = (): void => {
-      signalProcessTree(child, "SIGTERM");
+      signalTree("SIGTERM");
       if (killTimer) return;
       killTimer = setTimeout(forceKill, BASH_KILL_GRACE_MS);
       killTimer.unref();
@@ -904,16 +908,18 @@ function runForegroundCommand(
       if (settled) return;
       settled = true;
       cleanup();
-      if (context?.signal?.aborted) {
-        rejectPromise(abortError(context.signal));
-        return;
-      }
-      resolvePromise({
-        output: chunks.join(""),
-        exitCode,
-        timedOut,
-        exceededExecutionBuffer,
-        ...(childError ? { error: childError } : {}),
+      void Promise.allSettled(killAttempts).then(() => {
+        if (context?.signal?.aborted) {
+          rejectPromise(abortError(context.signal));
+          return;
+        }
+        resolvePromise({
+          output: chunks.join(""),
+          exitCode,
+          timedOut,
+          exceededExecutionBuffer,
+          ...(childError ? { error: childError } : {}),
+        });
       });
     });
 
