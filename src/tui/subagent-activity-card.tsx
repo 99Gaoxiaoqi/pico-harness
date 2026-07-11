@@ -66,7 +66,9 @@ export function buildSubagentActivityCardRows(
   wrapWidth = 80,
 ): string[] {
   const presentation = STATUS_PRESENTATION[entry.status];
-  const details = [entry.agentName, entry.mode].filter(isVisibleText).join(" · ");
+  const completionPolicy =
+    entry.completionPolicy === "optional" ? "background" : entry.completionPolicy;
+  const details = [entry.agentName, entry.mode, completionPolicy].filter(isVisibleText).join(" · ");
   const logicalRows = [
     `${entry.task} · ${presentation.label}`,
     details,

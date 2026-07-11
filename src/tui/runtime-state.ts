@@ -3,13 +3,18 @@ import { TodoStore } from "../context/todo-store.js";
 import { GoalManager } from "../engine/goal-manager.js";
 import type { Session } from "../engine/session.js";
 import { SteerQueue } from "../engine/steer-queue.js";
+import type { Message } from "../schema/message.js";
 import { FileIndex } from "../input/file-index.js";
 import { MemoryNudger } from "../memory/memory-nudger.js";
 import { SkillRegistry } from "../memory/skill-registry.js";
 import { TaskRegistry } from "../tasks/task-registry.js";
 import type { TaskHostRuntime } from "../tasks/task-runtime.js";
 import { BackgroundManager } from "../tools/background-manager.js";
-import { DelegationManager } from "../tools/delegation-manager.js";
+import {
+  DelegationManager,
+  formatDelegationCompletions,
+  type DelegationCompletionEnvelope,
+} from "../tools/delegation-manager.js";
 import { ToolDisclosure } from "../tools/tool-disclosure.js";
 import {
   CodeIntelligenceManager,
@@ -47,6 +52,19 @@ export interface TuiRuntimeState {
   dispose(): Promise<void>;
 }
 
+export function createDelegationCompletionMessage(
+  completion: DelegationCompletionEnvelope,
+): Message {
+  return {
+    role: "user",
+    content: formatDelegationCompletions([completion]),
+    providerData: {
+      picoKind: "subagent_completion",
+      picoHiddenFromTranscript: true,
+    },
+  };
+}
+
 export async function createTuiRuntimeState(
   options: TuiRuntimeStateOptions,
 ): Promise<TuiRuntimeState> {
@@ -79,6 +97,7 @@ export async function createTuiRuntimeState(
     throw new Error("代码智能服务启动后未提供 LSP 或 Repo Map 后端");
   }
 
+  const steerQueue = new SteerQueue();
   return new DefaultTuiRuntimeState({
     workDir,
     sessionId: options.sessionId,
@@ -88,11 +107,18 @@ export async function createTuiRuntimeState(
     taskRegistry,
     ...(options.taskHostRuntime ? { taskHostRuntime: options.taskHostRuntime } : {}),
     backgroundManager: new BackgroundManager({ taskRegistry }),
-    delegationManager: new DelegationManager({ taskRegistry }),
+    delegationManager: new DelegationManager({
+      taskRegistry,
+      onCompletion: (completion) => {
+        if (completion.completionPolicy === "optional") {
+          options.session.append(createDelegationCompletionMessage(completion));
+        }
+      },
+    }),
     skillRegistry,
     memoryNudger: new MemoryNudger(skillRegistry, options.session.sessionSummaryStore),
     fileIndex: FileIndex.create({ cwd: workDir }),
-    steerQueue: new SteerQueue(),
+    steerQueue,
     codeIntelligence,
     codeIntelligenceManager,
     unbindGoalManager,

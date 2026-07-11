@@ -34,6 +34,7 @@ type TuiEntryData =
       status: SubagentActivityEvent["status"];
       agentName?: string;
       mode?: SubagentActivityEvent["mode"];
+      completionPolicy?: SubagentActivityEvent["completionPolicy"];
       currentAction?: string;
       summary?: string;
     }

@@ -161,11 +161,18 @@ function formatSwitcherRow(
   const unread = normalizeUnread(item.unreadCount);
   const suffixParts = [
     options.width >= 40 && item.id !== MAIN_AGENT_ID ? presentation.label : "",
+    options.width >= 56 && item.id !== MAIN_AGENT_ID
+      ? presentCompletionPolicy(item.completionPolicy)
+      : "",
     unread > 0 ? `+${unread}` : "",
   ].filter(Boolean);
   const suffix = suffixParts.length > 0 ? ` · ${suffixParts.join(" · ")}` : "";
   const label = item.id === MAIN_AGENT_ID ? "Main" : formatAgentLabel(item);
   return `${prefix}${truncateTerminalText(label, Math.max(1, options.width - prefix.length - suffix.length))}${suffix}`;
+}
+
+function presentCompletionPolicy(policy: AgentNavigationItem["completionPolicy"]): string {
+  return policy === "optional" ? "background" : (policy ?? "");
 }
 
 function formatAgentLabel(item: AgentNavigationItem): string {

@@ -27,6 +27,7 @@ describe("agent navigation integration", () => {
         agentName: "auth-agent",
         task: "检查认证模块的错误处理与超长路径",
         mode: "explore",
+        completionPolicy: "required",
         currentAction: "read_file: src/auth/session.ts",
         unreadCount: 2,
         timeline: [
@@ -78,6 +79,9 @@ describe("agent navigation integration", () => {
       columns: 22,
     });
     expect(detail).toContain("← Main / auth-agent");
+    expect(
+      renderToString(<AgentDetailView agent={items[1]!} renderWidth={80} />, { columns: 80 }),
+    ).toContain("running · explore · required");
     expect(detail).toContain("read_file: src/auth/");
     expect(detail).toContain("Timeline");
     expect(detail).toContain("发现 session");

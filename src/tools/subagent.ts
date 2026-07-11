@@ -17,7 +17,7 @@ import type { ToolDefinition } from "../schema/message.js";
 import type { Registry } from "./registry.js";
 import type { Reporter } from "../engine/reporter.js";
 import { logger } from "../observability/logger.js";
-import type { DelegationBatchResult } from "./delegation-manager.js";
+import type { DelegationBatchResult, DelegationCompletionPolicy } from "./delegation-manager.js";
 import { DelegationManager } from "./delegation-manager.js";
 import type { AgentProfile } from "./agent-profile.js";
 import type { WorktreeSupervisor } from "../tasks/worktree-supervisor.js";
@@ -115,6 +115,8 @@ interface DelegateTaskInput {
 
 interface DelegateTaskArgs extends DelegateTaskInput {
   tasks?: DelegateTaskInput[];
+  completion_policy?: DelegationCompletionPolicy;
+  /** @deprecated 兼容旧模型调用；true 等价于 completion_policy=optional。 */
   background?: boolean;
 }
 
@@ -223,7 +225,7 @@ export class SpawnSubagentTool implements BaseTool {
  * 相比旧的 spawn_subagent,它支持:
  * - explore/worker 两种工具集,worker 可以在受控边界内写文件
  * - tasks 批量并行委派,适合拆分互不依赖的开发任务
- * - background 后台句柄,长任务可由 delegate_status 查询
+ * - completion_policy 控制最终答案是否必须等待结果
  * - role + depth 约束,防止无限递归委派
  */
 export class DelegateTaskTool implements BaseTool {
@@ -254,7 +256,9 @@ export class DelegateTaskTool implements BaseTool {
       description:
         "把一个或多个互不依赖的任务委派给隔离子智能体执行。默认 explore 模式只读分析;" +
         "mode=worker 时子智能体可使用受控 write_file/edit_file/bash 完成局部开发;" +
-        "tasks 可批量并行执行;background=true 会立即返回 taskId/delegationId,之后用 delegate_status 查询。",
+        "tasks 可批量并行执行。默认 completion_policy=required:以前台方式等待全部结果后再交还主 Agent;" +
+        "optional 允许本轮先结束,完成结果会在下一个模型边界自动进入主上下文;" +
+        "detached 仅更新活动面板。不要主动轮询内部任务 ID。",
       inputSchema: {
         type: "object",
         properties: {
@@ -296,10 +300,11 @@ export class DelegateTaskTool implements BaseTool {
             enum: ["leaf", "orchestrator"],
             description: "leaf 不再继续委派;orchestrator 在深度允许时可继续拆分任务。",
           },
-          background: {
-            type: "boolean",
+          completion_policy: {
+            type: "string",
+            enum: ["required", "optional", "detached"],
             description:
-              "是否后台运行。true 时立即返回 taskId/delegationId,后续用 delegate_status 查询。",
+              "结果交付策略。required=前台等待(默认);optional=可先结束并在下一个模型边界自动注入结果;detached=独立运行且不进入主上下文。",
           },
         },
       },
@@ -321,24 +326,32 @@ export class DelegateTaskTool implements BaseTool {
       return JSON.stringify({ error: "delegate_task 需要 goal 或 tasks[].goal。" });
     }
 
-    const activities = tasks.map((task) => this.createActivity(task));
+    const completionPolicy = normalizeCompletionPolicy(input);
+    const activities = tasks.map((task) => this.createActivity(task, completionPolicy));
     for (const activity of activities) {
       this.emitActivity(activity, "queued", {
         currentAction: `等待执行：${compactActivityText(activity.task, 48)}`,
       });
     }
 
-    if (input.background === true) {
+    // required 是前台委派：工具结果本身就是硬屏障，主 Agent 在拿到汇总前
+    // 不会进入下一次推理，也就不可能提前结束整轮。
+    if (completionPolicy === "required") {
       return JSON.stringify(
-        this.manager.dispatch((signal) =>
-          this.runBatch(tasks, activities, depth, maxSpawnDepth, signal),
-        ),
+        await this.runBatch(tasks, activities, depth, maxSpawnDepth, context?.signal),
       );
     }
 
-    return JSON.stringify(
-      await this.runBatch(tasks, activities, depth, maxSpawnDepth, context?.signal),
+    const dispatch = this.manager.dispatch(
+      (signal) => this.runBatch(tasks, activities, depth, maxSpawnDepth, signal),
+      { completionPolicy, description: summarizeDelegation(tasks) },
     );
+    return JSON.stringify({
+      status: dispatch.status,
+      completionPolicy,
+      count: tasks.length,
+      ...(dispatch.error !== undefined ? { error: dispatch.error } : {}),
+    });
   }
 
   private async runBatch(
@@ -568,11 +581,15 @@ export class DelegateTaskTool implements BaseTool {
     }
   }
 
-  private createActivity(task: NormalizedDelegateTask): SubagentActivityScope {
+  private createActivity(
+    task: NormalizedDelegateTask,
+    completionPolicy: DelegationCompletionPolicy,
+  ): SubagentActivityScope {
     return {
       activityId: randomUUID(),
       task: compactActivityText(task.goal, 120),
       mode: task.mode,
+      completionPolicy,
       ...(task.agentName ? { agentName: task.agentName } : {}),
     };
   }
@@ -649,6 +666,22 @@ function normalizeMode(
 
 function normalizeRole(value: string | undefined, fallback: SubagentRole = "leaf"): SubagentRole {
   return value === "orchestrator" || value === "leaf" ? value : fallback;
+}
+
+function normalizeCompletionPolicy(input: DelegateTaskArgs): DelegationCompletionPolicy {
+  if (
+    input.completion_policy === "required" ||
+    input.completion_policy === "optional" ||
+    input.completion_policy === "detached"
+  ) {
+    return input.completion_policy;
+  }
+  return input.background === true ? "optional" : "required";
+}
+
+function summarizeDelegation(tasks: readonly NormalizedDelegateTask[]): string {
+  const first = tasks[0]?.goal ?? "delegate_task";
+  return tasks.length === 1 ? first : `${first} 等 ${tasks.length} 个子任务`;
 }
 
 /**

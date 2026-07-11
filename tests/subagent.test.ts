@@ -15,7 +15,7 @@ import {
   type SubagentResult,
 } from "../src/tools/subagent.js";
 import { SkillLoader, SkillViewTool } from "../src/context/skill.js";
-import { DelegationManager, DelegateStatusTool } from "../src/tools/delegation-manager.js";
+import { DelegationManager } from "../src/tools/delegation-manager.js";
 import {
   createSubagentRegistryFactory,
   TOOL_CONSTRUCTORS,
@@ -185,7 +185,8 @@ describe("DelegateTaskTool", () => {
     expect(def.name).toBe("delegate_task");
     expect(def.inputSchema.properties).toHaveProperty("goal");
     expect(def.inputSchema.properties).toHaveProperty("tasks");
-    expect(def.inputSchema.properties).toHaveProperty("background");
+    expect(def.inputSchema.properties).toHaveProperty("completion_policy");
+    expect(def.inputSchema.properties).not.toHaveProperty("background");
   });
 
   it("worker 模式子代理可以通过受控工具集写文件", async () => {
@@ -472,7 +473,7 @@ describe("DelegateTaskTool", () => {
     expect(events.at(-1)?.summary).toContain("worktree 隔离");
   });
 
-  it("background=true 立即返回 handle,delegate_status 可查询完成结果", async () => {
+  it("legacy background=true 映射 optional 且不返回内部 ID", async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => {
       release = resolve;
@@ -483,36 +484,31 @@ describe("DelegateTaskTool", () => {
         return subResult("background complete");
       },
     };
-    const manager = new DelegationManager();
+    let complete!: () => void;
+    const completed = new Promise<void>((resolve) => {
+      complete = resolve;
+    });
+    const manager = new DelegationManager({ onCompletion: () => complete() });
     const events: SubagentActivityEvent[] = [];
     const tool = new DelegateTaskTool(runner, () => mockReadOnlyRegistry(), manager, {
       reporter: activityReporter(events),
     });
-    const statusTool = new DelegateStatusTool(manager);
-
     const dispatched = JSON.parse(
       await tool.execute(JSON.stringify({ goal: "后台任务", background: true })),
-    ) as { status: string; delegationId: string };
+    ) as { status: string; completionPolicy: string; count: number };
 
-    expect(dispatched.status).toBe("dispatched");
-    expect(
-      JSON.parse(
-        await statusTool.execute(JSON.stringify({ delegation_id: dispatched.delegationId })),
-      ).status,
-    ).toBe("running");
+    expect(dispatched).toEqual({
+      status: "dispatched",
+      completionPolicy: "optional",
+      count: 1,
+    });
 
     release();
-    await manager.wait(dispatched.delegationId);
-
-    const completed = JSON.parse(
-      await statusTool.execute(JSON.stringify({ delegation_id: dispatched.delegationId })),
-    ) as { status: string; result: { results: Array<{ summary: string }> } };
-    expect(completed.status).toBe("completed");
-    expect(completed.result.results[0]!.summary).toBe("background complete");
+    await completed;
     expect(events.map((event) => event.status)).toEqual(["queued", "running", "completed"]);
   });
 
-  it("background=true 返回 task registry 快照,并安全截断输出摘要", async () => {
+  it("optional 完成通知安全截断输出摘要", async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => {
       release = resolve;
@@ -523,57 +519,34 @@ describe("DelegateTaskTool", () => {
         return subResult(`prefix-${"x".repeat(120)}-suffix`);
       },
     };
-    const manager = new DelegationManager({ maxOutputSummaryChars: 48 });
+    let resolveCompletion!: (outputSummary: string) => void;
+    const completion = new Promise<string>((resolve) => {
+      resolveCompletion = resolve;
+    });
+    const manager = new DelegationManager({
+      maxOutputSummaryChars: 48,
+      onCompletion: (event) => resolveCompletion(event.outputSummary),
+    });
     const tool = new DelegateTaskTool(runner, () => mockReadOnlyRegistry(), manager);
-    const statusTool = new DelegateStatusTool(manager);
 
     const dispatched = JSON.parse(
-      await tool.execute(JSON.stringify({ goal: "后台任务", background: true })),
+      await tool.execute(JSON.stringify({ goal: "后台任务", completion_policy: "optional" })),
     ) as {
       status: string;
-      taskId: string;
-      delegationId: string;
-      snapshot: {
-        taskId: string;
-        delegationId: string;
-        status: string;
-        taskStatus: string;
-        outputSummary: string;
-        resume: { statusTool: string; statusArgs: { delegation_id: string } };
-      };
+      completionPolicy: string;
+      count: number;
     };
 
-    expect(dispatched.status).toBe("dispatched");
-    expect(dispatched.taskId).toBe(dispatched.delegationId);
-    expect(dispatched.snapshot).toMatchObject({
-      taskId: dispatched.taskId,
-      delegationId: dispatched.delegationId,
-      status: "running",
-      taskStatus: "running",
-      outputSummary: "",
-      resume: {
-        statusTool: "delegate_status",
-        statusArgs: { delegation_id: dispatched.delegationId },
-      },
+    expect(dispatched).toEqual({
+      status: "dispatched",
+      completionPolicy: "optional",
+      count: 1,
     });
 
     release();
-    await manager.wait(dispatched.delegationId);
-
-    const completed = JSON.parse(
-      await statusTool.execute(JSON.stringify({ delegation_id: dispatched.delegationId })),
-    ) as {
-      status: string;
-      taskStatus: string;
-      outputSummary: string;
-      resume: { canSendMessage: boolean };
-    };
-
-    expect(completed.status).toBe("completed");
-    expect(completed.taskStatus).toBe("done");
-    expect(completed.outputSummary.length).toBeLessThanOrEqual(64);
-    expect(completed.outputSummary).toContain("[truncated]");
-    expect(completed.resume.canSendMessage).toBe(true);
+    const outputSummary = await completion;
+    expect(outputSummary.length).toBeLessThanOrEqual(48);
+    expect(outputSummary).toContain("[truncated]");
   });
 
   it("达到 maxSpawnDepth 时拒绝继续 delegate_task", async () => {
