@@ -1,9 +1,11 @@
 import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Readable, Writable } from "node:stream";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { runCli, type CliRuntime } from "../src/cli/main.js";
 import { resolveCliWorkDir } from "../src/cli/session-args.js";
+import { createTerminalWorkspaceTrustPrompt } from "../src/cli/workspace-trust-prompt.js";
 import {
   ensureWorkspaceTrusted,
   WorkspaceTrustStore,
@@ -12,6 +14,28 @@ import {
 } from "../src/security/workspace-trust.js";
 
 describe("workspace trust startup integration", () => {
+  it("信任提示将路径控制字符转义为可见文本", async () => {
+    let output = "";
+    const prompt = createTerminalWorkspaceTrustPrompt({
+      input: Readable.from(["2\n"]),
+      output: new Writable({
+        write(chunk, _encoding, callback) {
+          output += String(chunk);
+          callback();
+        },
+      }),
+    });
+
+    await expect(
+      prompt.requestTrust({
+        workspacePath: "/tmp/evil\u001b[2J\n[1] fake",
+        risks: ["fixture"],
+      }),
+    ).resolves.toBe("deny");
+    expect(output).not.toContain("\u001b");
+    expect(output).toContain("\\u001b[2J\\n[1] fake");
+  });
+
   it("首次显式信任后持久化，已信任工作区直接启动，非交互首启 fail-closed", async () => {
     const root = await mkdtemp(join(tmpdir(), "pico-workspace-trust-"));
     onTestFinished(() => rm(root, { recursive: true, force: true }));

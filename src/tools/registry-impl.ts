@@ -747,6 +747,8 @@ export class BashTool implements BaseTool {
         workspaceRoots: WorkspaceRoots;
         config?: Partial<YoloSandboxConfig>;
       };
+      /** 子代理 Bash 由宿主注入最小环境；主 Bash 未设置时仍继承当前用户环境。 */
+      env?: NodeJS.ProcessEnv;
     } = {},
   ) {}
 
@@ -802,7 +804,12 @@ export class BashTool implements BaseTool {
       const task = this.backgroundManager.start(
         command,
         this.workDir,
-        sandboxPlan ? { executable: sandboxPlan.command, args: sandboxPlan.args } : undefined,
+        sandboxPlan || this.options.env
+          ? {
+              ...(sandboxPlan ? { executable: sandboxPlan.command, args: sandboxPlan.args } : {}),
+              ...(this.options.env ? { env: this.options.env } : {}),
+            }
+          : undefined,
       );
       return JSON.stringify({
         taskId: task.taskId,
@@ -815,7 +822,13 @@ export class BashTool implements BaseTool {
     }
 
     context?.signal?.throwIfAborted();
-    const execution = await runForegroundCommand(command, this.workDir, context, sandboxPlan);
+    const execution = await runForegroundCommand(
+      command,
+      this.workDir,
+      context,
+      sandboxPlan,
+      this.options.env,
+    );
     let stdout = execution.output;
 
     if (
@@ -886,6 +899,7 @@ function runForegroundCommand(
   cwd: string,
   context?: ToolExecutionContext,
   sandboxPlan?: SandboxSpawnPlan,
+  env?: NodeJS.ProcessEnv,
 ): Promise<ForegroundCommandResult> {
   const shell = resolveShell();
 
@@ -900,6 +914,7 @@ function runForegroundCommand(
           detached: !isWindows,
           windowsHide: true,
           stdio: ["ignore", "pipe", "pipe"],
+          ...(env ? { env } : {}),
         },
       );
     } catch (error) {
@@ -1440,10 +1455,7 @@ export class EditFileTool implements BaseTool {
       const content = modelView.text;
       const { content: newContent, level } = fuzzyReplace(content, oldText, newText, replaceAll);
 
-      await writeAllAtStart(
-        handle,
-        materializeModelText(newContent, modelView.lineEndingStyle),
-      );
+      await writeAllAtStart(handle, materializeModelText(newContent, modelView.lineEndingStyle));
 
       // 5. 生成 diff 预览(简单 before/after 对比,供用户审批时查看)
       const diffPreview = generateSimpleDiff(oldText, newText);

@@ -33,8 +33,10 @@ export interface BackgroundManagerOptions {
 
 export interface BackgroundTaskSpawnOptions {
   /** 可信宿主生成的实际执行文件与参数，任务记录仍保留原始 command。 */
-  executable: string;
-  args: readonly string[];
+  executable?: string;
+  args?: readonly string[];
+  /** 可信宿主为隔离子进程注入的最小环境。 */
+  env?: NodeJS.ProcessEnv;
 }
 
 interface ManagedTask {
@@ -83,12 +85,13 @@ export class BackgroundManager {
     try {
       child = spawn(
         spawnOptions?.executable ?? shell,
-        spawnOptions ? [...spawnOptions.args] : shellCommandArgs(shell, command),
+        spawnOptions?.args ? [...spawnOptions.args] : shellCommandArgs(shell, command),
         {
           cwd,
           detached: !isWindows,
           windowsHide: true,
           stdio: ["ignore", "pipe", "pipe"],
+          ...(spawnOptions?.env ? { env: spawnOptions.env } : {}),
         },
       );
     } catch (err) {

@@ -11,7 +11,7 @@
 // 经此改造,engine.Run 沦为纯"打工执行器":不内部维护状态,
 // 依靠喂给它的 Session 推理 —— 随时休眠、随时被唤醒的记忆连续体。
 
-import { mkdirSync } from "node:fs";
+import { chmodSync, mkdirSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
 import {
@@ -249,7 +249,8 @@ export class Session implements SessionRuntimePersistence {
     if (!enabled) return;
     try {
       const dir = join(this.workDir, ".claw", "sessions");
-      mkdirSync(dir, { recursive: true });
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+      chmodSync(dir, 0o700);
       this.store = new SessionStore(join(dir, `${sanitizeFilePart(this.id)}.jsonl`), this.identity);
     } catch (error) {
       // 持久化初始化失败不应阻断会话本身,降级为纯内存

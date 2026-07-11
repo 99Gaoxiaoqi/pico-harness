@@ -50,5 +50,6 @@ async function requestTrustFromTerminal(
 
 function formatTrustNotice(request: WorkspaceTrustPromptRequest): string {
   const risks = request.risks.map((risk) => `  • ${risk}`).join("\n");
-  return `\nPico 需要信任此工作区\n\n  ${request.workspacePath}\n\n信任后将允许：\n${risks}\n\n只有在你信任该目录内代码和配置时才继续。\n  [1] 信任并继续\n  [2] 退出\n\n`;
+  const visiblePath = JSON.stringify(request.workspacePath);
+  return `\nPico 需要信任此工作区\n\n  ${visiblePath}\n\n信任后将允许：\n${risks}\n\n只有在你信任该目录内代码和配置时才继续。\n  [1] 信任并继续\n  [2] 退出\n\n`;
 }

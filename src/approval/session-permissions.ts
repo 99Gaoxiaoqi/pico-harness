@@ -178,10 +178,12 @@ function scopeAllowsCall(scope: PermissionSessionScope, call: ToolCall, workDir:
   if (scope.type === "tool") return call.name === scope.toolName;
   if (scope.type === "bash-command") {
     if (call.name !== "bash") return false;
+    if (bashBackgroundFromArgs(call.arguments)) return false;
     const command = normalizeCommand(bashCommandFromArgs(call.arguments) ?? "");
     return scope.match === "exact"
       ? command === scope.command
-      : command === scope.command || command.startsWith(`${scope.command} `);
+      : isSingleSimpleShellCommand(command) &&
+          (command === scope.command || command.startsWith(`${scope.command} `));
   }
 
   const path = filePathFromCall(call);
@@ -193,6 +195,14 @@ function scopeAllowsCall(scope: PermissionSessionScope, call: ToolCall, workDir:
     scope.directories.some((directory) => isWithinDirectory(directory, absolutePath)) &&
     accessMatches(scope.access, call)
   );
+}
+
+function bashBackgroundFromArgs(args: string): boolean {
+  try {
+    return (JSON.parse(args) as { background?: unknown }).background === true;
+  } catch {
+    return false;
+  }
 }
 
 function accessMatches(access: PermissionAccess, call: ToolCall): boolean {
@@ -243,6 +253,9 @@ function bashSessionScope(
   command: string,
 ): Extract<PermissionSessionScope, { type: "bash-command" }> {
   const normalized = normalizeCommand(command);
+  if (!isSingleSimpleShellCommand(normalized)) {
+    return { type: "bash-command", command: normalized, match: "exact" };
+  }
   const firstSegment = normalized.split(/&&|\|\||;|\n/u, 1)[0] ?? normalized;
   const tokens = [...firstSegment.matchAll(/"([^"]*)"|'([^']*)'|([^\s]+)/gu)].map(
     (match) => match[1] ?? match[2] ?? match[3] ?? "",
@@ -254,6 +267,54 @@ function bashSessionScope(
     return { type: "bash-command", command: `${executable} ${subcommand}`, match: "prefix" };
   }
   return { type: "bash-command", command: normalized, match: "exact" };
+}
+
+/** Prefix grant 只能覆盖单个静态 shell 命令，不得吸收后续链、重定向或命令替换。 */
+function isSingleSimpleShellCommand(command: string): boolean {
+  let quote: "single" | "double" | undefined;
+  for (let index = 0; index < command.length; index++) {
+    const char = command[index]!;
+    const next = command[index + 1];
+    if (quote === "single") {
+      if (char === "'") quote = undefined;
+      continue;
+    }
+    if (quote === "double") {
+      if (char === '"') {
+        quote = undefined;
+        continue;
+      }
+      if (char === "`" || (char === "$" && (next === "(" || next === "{"))) return false;
+      if (char === "\\") index++;
+      continue;
+    }
+    if (char === "'") {
+      quote = "single";
+      continue;
+    }
+    if (char === '"') {
+      quote = "double";
+      continue;
+    }
+    if (
+      char === "`" ||
+      char === "\\" ||
+      char === ";" ||
+      char === "\n" ||
+      char === "|" ||
+      char === "&" ||
+      char === ">" ||
+      char === "<" ||
+      char === "(" ||
+      char === ")" ||
+      char === "{" ||
+      char === "}" ||
+      (char === "$" && (next === "(" || next === "{"))
+    ) {
+      return false;
+    }
+  }
+  return quote === undefined && command.length > 0;
 }
 
 const SAFE_PREFIX_COMMANDS = new Set([

@@ -12,7 +12,7 @@
 //   - load 失败(ENOENT/权限/畸形 JSON)→ 返回空 state,不抛
 //   - save 失败(权限/磁盘满)→ 只记 warn 不抛,内存缓存仍生效
 
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { dirname } from "node:path";
 import { logger } from "../observability/logger.js";
@@ -133,9 +133,11 @@ export class TodoStore {
    */
   async save(): Promise<void> {
     try {
-      await mkdir(dirname(this.todoPath), { recursive: true });
+      await mkdir(dirname(this.todoPath), { recursive: true, mode: 0o700 });
+      await chmod(dirname(this.todoPath), 0o700);
       const json = JSON.stringify(this.state, null, 2);
-      await writeFile(this.todoPath, json, "utf8");
+      await writeFile(this.todoPath, json, { encoding: "utf8", mode: 0o600 });
+      await chmod(this.todoPath, 0o600);
     } catch (err) {
       // 持久化失败记 warn 但不抛出异常(优雅降级)
       logger.warn({ err, path: this.todoPath }, "todo.json 持久化失败");

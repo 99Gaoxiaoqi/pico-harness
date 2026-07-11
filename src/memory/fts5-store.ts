@@ -12,7 +12,7 @@
 // 错误处理:初始化/插入/查询失败时降级,记 warn 不抛异常,不阻断主流程。
 
 import Database from "better-sqlite3";
-import { mkdirSync } from "node:fs";
+import { chmodSync, mkdirSync } from "node:fs";
 import { dirname } from "pathe";
 import { logger } from "../observability/logger.js";
 import type { Message } from "../schema/message.js";
@@ -202,8 +202,10 @@ export class FTS5Store implements ConversationSearchStore {
     this.dbPath = `${workDir}/.claw/sessions.db`;
     try {
       // 确保 .claw/ 目录存在
-      mkdirSync(dirname(this.dbPath), { recursive: true });
+      mkdirSync(dirname(this.dbPath), { recursive: true, mode: 0o700 });
+      chmodSync(dirname(this.dbPath), 0o700);
       this.db = new Database(this.dbPath);
+      chmodSync(this.dbPath, 0o600);
       // 启用 WAL 模式(并发读写性能更好,断电恢复更安全)
       this.db.pragma("journal_mode = WAL");
       this.initSchema();

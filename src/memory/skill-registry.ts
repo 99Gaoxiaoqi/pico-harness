@@ -11,7 +11,7 @@
 // - PlanStore 的路径绑定模式（构造时固定路径，杜绝穿越）
 // - Hermes Agent 的 Skill Memory 统计与排序逻辑
 
-import { readFile, readdir, writeFile, mkdir } from "node:fs/promises";
+import { chmod, readFile, readdir, writeFile, mkdir } from "node:fs/promises";
 import { join } from "pathe";
 import { logger } from "../observability/logger.js";
 import type { LearnedSkill } from "./skill-schema.js";
@@ -54,7 +54,8 @@ export class SkillRegistry {
 
     // 确保目录存在（mkdir -p 语义）
     try {
-      await mkdir(this.skillsDir, { recursive: true });
+      await mkdir(this.skillsDir, { recursive: true, mode: 0o700 });
+      await chmod(this.skillsDir, 0o700);
     } catch (err) {
       logger.warn({ err, dir: this.skillsDir }, "创建技能目录失败");
       // 不阻断初始化，后续操作会各自处理文件系统错误
@@ -224,7 +225,8 @@ export class SkillRegistry {
     try {
       // 格式化 JSON（带缩进，便于人工查看和版本控制）
       const json = JSON.stringify(skill, null, 2);
-      await writeFile(filePath, json, "utf8");
+      await writeFile(filePath, json, { encoding: "utf8", mode: 0o600 });
+      await chmod(filePath, 0o600);
     } catch (err) {
       // 持久化失败记 warn，但不抛出异常（优雅降级）
       logger.warn({ err, skillId: skill.id, filePath }, "技能持久化失败");

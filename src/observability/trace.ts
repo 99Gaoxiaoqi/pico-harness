@@ -11,7 +11,7 @@
 // startSpan/endSpan stack for simple sequential callers. JSON exports are saved
 // under .claw/traces/.
 
-import { writeFileSync, mkdirSync } from "node:fs";
+import { chmodSync, writeFileSync, mkdirSync } from "node:fs";
 // pathe keeps trace paths stable in tests by using POSIX separators.
 import { join } from "pathe";
 
@@ -162,11 +162,13 @@ export function exportTraceToFile(
   timestamp: number = Date.now(),
 ): string {
   const traceDir = join(workDir, ".claw", "traces");
-  mkdirSync(traceDir, { recursive: true });
+  mkdirSync(traceDir, { recursive: true, mode: 0o700 });
+  chmodSync(traceDir, 0o700);
   const filename = `trace_${sanitizeFilePart(sessionId)}_${timestamp}.json`;
   const filepath = join(traceDir, filename);
   const data = JSON.stringify(rootSpan.toJSON(), null, 2);
-  writeFileSync(filepath, data, "utf8");
+  writeFileSync(filepath, data, { encoding: "utf8", mode: 0o600 });
+  chmodSync(filepath, 0o600);
   return filepath;
 }
 
