@@ -34,7 +34,7 @@ export interface McpServerConfig {
   /** http/sse 模式:server URL */
   url?: string;
   transport: "stdio" | "http" | "sse";
-  /** stdio 模式:注入子进程的环境变量(会与父进程 env 合并) */
+  /** stdio 模式:在最小运行环境上显式注入子进程的环境变量 */
   env?: Record<string, string>;
   /** stdio 模式:子进程工作目录(默认继承父进程) */
   cwd?: string;
