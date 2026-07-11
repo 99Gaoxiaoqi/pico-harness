@@ -92,7 +92,9 @@ describe("required delegation barrier integration", () => {
     const resumedHistory = provider.receivedHistories[1] ?? [];
     expect(resumedHistory.some((message) => message.content === "dispatching")).toBe(false);
     expect(
-      resumedHistory.filter((message) => message.providerData?.["picoKind"] === "delegation_join"),
+      resumedHistory.filter(
+        (message) => message.providerData?.["picoKind"] === "explore_delegation_synthesis",
+      ),
     ).toHaveLength(1);
   });
 
@@ -101,7 +103,13 @@ describe("required delegation barrier integration", () => {
       {
         role: "assistant",
         content: "",
-        toolCalls: [requiredCall("delegate-2")],
+        toolCalls: [
+          {
+            id: "delegate-2",
+            name: "delegate_task",
+            arguments: JSON.stringify({ completion_policy: "required", goal: "inspect engine" }),
+          },
+        ],
       },
       { role: "assistant", content: "最终统一总结" },
     ]);
@@ -131,6 +139,115 @@ describe("required delegation barrier integration", () => {
       ],
     });
     expect(output.filter((message) => message.content === "最终统一总结")).toHaveLength(1);
+    expect(provider.receivedTools[1]).toEqual([]);
+    expect(
+      resumedHistory.some(
+        (message) => message.providerData?.["picoKind"] === "explore_delegation_synthesis",
+      ),
+    ).toBe(true);
+  });
+
+  it("explore-only join 后即使模型幻觉调用工具也不执行，配对拒绝结果后再要求纯文本", async () => {
+    const provider = new RecordingProvider([
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [requiredCall("delegate-synthesis")],
+      },
+      {
+        role: "assistant",
+        content: "我再读一下项目",
+        toolCalls: [{ id: "hallucinated-read", name: "bash", arguments: '{"command":"ls"}' }],
+      },
+      { role: "assistant", content: "只基于聚合结果的最终总结" },
+    ]);
+    const registry = new BarrierRegistry();
+    const session = createSession("synthesis-retry");
+
+    const running = new AgentEngine({ provider, registry, workDir: "/tmp" }).run(session);
+    await waitUntil(() => registry.startedRequired);
+    registry.releaseRequired();
+    await running;
+
+    expect(provider.receivedTools.slice(1)).toEqual([[], []]);
+    expect(registry.executed.map((call) => call.name)).toEqual(["delegate_task"]);
+    const history = session.getHistory();
+    expect(
+      history.some(
+        (message) =>
+          message.toolCallId === "hallucinated-read" &&
+          message.providerData?.["picoToolResultIsError"] === true,
+      ),
+    ).toBe(true);
+    expect(
+      history.some((message) => message.providerData?.["picoKind"] === "explore_synthesis_retry"),
+    ).toBe(true);
+  });
+
+  it("explore-only synthesis 连续幻觉工具调用时有限收口，不会死循环", async () => {
+    const hallucinated = (index: number): Message => ({
+      role: "assistant",
+      content: "",
+      toolCalls: [{ id: `hallucinated-${index}`, name: "bash", arguments: '{"command":"ls"}' }],
+    });
+    const provider = new RecordingProvider([
+      { role: "assistant", content: "", toolCalls: [requiredCall("delegate-finite")] },
+      hallucinated(1),
+      hallucinated(2),
+      hallucinated(3),
+      { role: "assistant", content: "不应该请求到这一轮" },
+    ]);
+    const registry = new BarrierRegistry();
+    const session = createSession("synthesis-finite");
+
+    const running = new AgentEngine({ provider, registry, workDir: "/tmp" }).run(session);
+    await waitUntil(() => registry.startedRequired);
+    registry.releaseRequired();
+    const output = await running;
+
+    expect(provider.receivedHistories).toHaveLength(4);
+    expect(provider.receivedTools.slice(1)).toEqual([[], [], []]);
+    expect(registry.executed.map((call) => call.name)).toEqual(["delegate_task"]);
+    expect(output.at(-1)?.content).toContain("连续违反纯文本总结协议");
+  });
+
+  it("worker 与 mixed required 委派收口后保留集成与定点验证工具", async () => {
+    for (const tasks of [
+      [{ goal: "implement", mode: "worker" }],
+      [{ goal: "inspect" }, { goal: "implement", mode: "worker" }],
+    ]) {
+      const provider = new RecordingProvider([
+        {
+          role: "assistant",
+          content: "",
+          toolCalls: [
+            {
+              id: `delegate-${tasks.length}`,
+              name: "delegate_task",
+              arguments: JSON.stringify({ completion_policy: "required", tasks }),
+            },
+          ],
+        },
+        { role: "assistant", content: "集成完成" },
+      ]);
+      const registry = new BarrierRegistry();
+      const session = createSession(`worker-${tasks.length}`);
+
+      const running = new AgentEngine({ provider, registry, workDir: "/tmp" }).run(session);
+      await waitUntil(() => registry.startedRequired);
+      registry.releaseRequired();
+      await running;
+
+      expect(provider.receivedTools[1]?.map((tool) => tool.name)).toEqual([
+        "delegate_task",
+        "bash",
+      ]);
+      expect(
+        provider.receivedHistories[1]?.some(
+          (message) => message.providerData?.["picoKind"] === "delegation_join",
+        ),
+      ).toBe(true);
+    }
   });
 
   it.each(["optional", "detached"] as const)(
@@ -164,12 +281,14 @@ describe("required delegation barrier integration", () => {
 
 class RecordingProvider implements LLMProvider {
   readonly receivedHistories: Message[][] = [];
+  readonly receivedTools: ToolDefinition[][] = [];
   private index = 0;
 
   constructor(private readonly responses: Message[]) {}
 
-  async generate(messages: Message[]): Promise<Message> {
+  async generate(messages: Message[], tools: ToolDefinition[]): Promise<Message> {
     this.receivedHistories.push(messages.map((message) => structuredClone(message)));
+    this.receivedTools.push(tools.map((tool) => structuredClone(tool)));
     return this.responses[this.index++] ?? { role: "assistant", content: "done" };
   }
 }
