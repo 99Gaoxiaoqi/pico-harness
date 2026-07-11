@@ -57,6 +57,25 @@ export interface TuiToolCallProjection {
   readonly name: string;
   readonly args: string;
   readonly status: ToolCardStatus;
+  /** 按到达顺序保留的有界增量输出；chunk 字符串与事件共享，不复制正文。 */
+  readonly output: readonly TuiToolOutputChunk[];
+  readonly outputChars: number;
+  readonly droppedOutputChars: number;
+  readonly outputTruncated: boolean;
+  /** 小结果的完整正文；若与增量输出一致，由 reducer 从 output 合成。 */
+  readonly result?: string;
+  /** 折叠态与外部化结果使用的短摘要。 */
+  readonly summary?: string;
+  /** 大结果的可信定位信息；读取时仍须由 Inspector 校验 artifact store。 */
+  readonly artifactRef?: string;
+  readonly artifactPath?: string;
+  readonly size?: number;
+  readonly truncated: boolean;
+}
+
+export interface TuiToolOutputChunk {
+  readonly stream: "stdout" | "stderr";
+  readonly chunk: string;
 }
 
 /** append-only 事件流的确定性投影。 */
@@ -126,10 +145,28 @@ export type TuiEvent =
       readonly summary: string;
     })
   | (TuiEventBase & {
+      readonly type: "tool.output";
+      readonly toolCallId: string;
+      readonly stream: "stdout" | "stderr";
+      readonly chunk: string;
+    })
+  | (TuiEventBase & {
+      readonly type: "tool.output.truncated";
+      readonly toolCallId: string;
+      /** 第一次超过 Reporter 内存上限时未写入事件流的字符数。 */
+      readonly droppedChars: number;
+    })
+  | (TuiEventBase & {
       readonly type: "tool.completed";
       readonly toolCallId: string;
       readonly status: ToolCardStatus;
       readonly summary: string;
+      /** 仅在结果无法由已记录的 output chunks 重建时携带。 */
+      readonly inlineResult?: string;
+      readonly artifactRef?: string;
+      readonly artifactPath?: string;
+      readonly size: number;
+      readonly truncated: boolean;
     })
   | (TuiEventBase & {
       readonly type: "phase.changed";
@@ -195,9 +232,7 @@ export class TuiEventStore {
 
   append(draft: TuiEventDraft): TuiEvent {
     const identifiedDraft =
-      draft.type === "tool.started"
-        ? { ...draft, toolCallId: this.createId("tool") }
-        : draft;
+      draft.type === "tool.started" ? { ...draft, toolCallId: this.createId("tool") } : draft;
     const event = freezeTuiEvent({
       ...identifiedDraft,
       eventId: this.idFactory("event"),
@@ -263,6 +298,8 @@ export class TuiEventStore {
       case "assistant.stream.completed":
       case "assistant.stream.interrupted":
       case "tool.approval.requested":
+      case "tool.output":
+      case "tool.output.truncated":
       case "tool.completed":
       case "transcript.truncated":
       case "transcript.cleared":
@@ -291,6 +328,8 @@ export class TuiEventStore {
       case "assistant.stream.completed":
       case "assistant.stream.interrupted":
       case "tool.approval.requested":
+      case "tool.output":
+      case "tool.output.truncated":
       case "tool.completed":
       case "transcript.truncated":
       case "transcript.cleared":
@@ -416,13 +455,16 @@ export function reduceTuiEvent(state: TuiProjection, event: TuiEvent): TuiProjec
         ...toolCalls,
         [event.toolCallId]: Object.freeze({
           id: event.toolCallId,
-          ...(event.providerCallId !== undefined
-            ? { providerCallId: event.providerCallId }
-            : {}),
+          ...(event.providerCallId !== undefined ? { providerCallId: event.providerCallId } : {}),
           entryId: event.entryId,
           name: event.name,
           args: event.args,
           status: "running" as const,
+          output: Object.freeze([]),
+          outputChars: 0,
+          droppedOutputChars: 0,
+          outputTruncated: false,
+          truncated: false,
         }),
       };
       break;
@@ -446,21 +488,80 @@ export function reduceTuiEvent(state: TuiProjection, event: TuiEvent): TuiProjec
       break;
     }
 
-    case "tool.completed": {
+    case "tool.output": {
       const tool = requirePendingTool(toolCalls, event.toolCallId);
+      const chunk = Object.freeze({ stream: event.stream, chunk: event.chunk });
+      const output = Object.freeze([...tool.output, chunk]);
+      const visibleOutput = joinToolOutput(output);
       entries = replaceProjectedEntry(entries, tool.entryId, (current) => {
         if (current.entry.kind !== "tool") {
           throw new Error(`TUI tool call ${event.toolCallId} points to a non-tool entry`);
         }
         return projectedEntry(
           current.id,
-          { ...current.entry, status: event.status, summary: event.summary },
+          { ...current.entry, summary: visibleOutput },
           { toolCallId: event.toolCallId },
         );
       });
       toolCalls = {
         ...toolCalls,
-        [event.toolCallId]: Object.freeze({ ...tool, status: event.status }),
+        [event.toolCallId]: Object.freeze({
+          ...tool,
+          output,
+          outputChars: tool.outputChars + event.chunk.length,
+        }),
+      };
+      break;
+    }
+
+    case "tool.output.truncated": {
+      const tool = requirePendingTool(toolCalls, event.toolCallId);
+      if (tool.outputTruncated) {
+        throw new Error(`TUI tool call ${event.toolCallId} output is already truncated`);
+      }
+      toolCalls = {
+        ...toolCalls,
+        [event.toolCallId]: Object.freeze({
+          ...tool,
+          droppedOutputChars: event.droppedChars,
+          outputTruncated: true,
+        }),
+      };
+      break;
+    }
+
+    case "tool.completed": {
+      const tool = requirePendingTool(toolCalls, event.toolCallId);
+      const streamedResult = joinToolOutput(tool.output);
+      // 11.4 持久化日志中的旧 completion 事件没有 size/truncated，水合时按非截断摘要兼容。
+      const truncated = event.truncated === true;
+      const result =
+        event.inlineResult ??
+        (!truncated && streamedResult.length > 0 ? streamedResult : undefined);
+      const displayResult =
+        event.artifactRef !== undefined ? event.summary : (result ?? event.summary);
+      entries = replaceProjectedEntry(entries, tool.entryId, (current) => {
+        if (current.entry.kind !== "tool") {
+          throw new Error(`TUI tool call ${event.toolCallId} points to a non-tool entry`);
+        }
+        return projectedEntry(
+          current.id,
+          { ...current.entry, status: event.status, summary: displayResult },
+          { toolCallId: event.toolCallId },
+        );
+      });
+      toolCalls = {
+        ...toolCalls,
+        [event.toolCallId]: Object.freeze({
+          ...tool,
+          status: event.status,
+          ...(result !== undefined ? { result } : {}),
+          summary: event.summary,
+          ...(event.artifactRef !== undefined ? { artifactRef: event.artifactRef } : {}),
+          ...(event.artifactPath !== undefined ? { artifactPath: event.artifactPath } : {}),
+          size: event.size ?? result?.length ?? event.summary.length,
+          truncated,
+        }),
       };
       break;
     }
@@ -556,6 +657,10 @@ function requirePendingTool(
 
 function isPendingToolStatus(status: ToolCardStatus): boolean {
   return status === "queued" || status === "running" || status === "approval";
+}
+
+export function joinToolOutput(chunks: readonly TuiToolOutputChunk[]): string {
+  return chunks.map(({ chunk }) => chunk).join("");
 }
 
 function retainEntryIndexes(
