@@ -627,8 +627,8 @@ git worktree remove ../pico-1-streaming
 
 - 2026-07-12：收紧子代理输出预算并修复终端重复刷帧
   - `AgentEngine.runSub` 将单个最终 summary 限制为 5,000 字符；委派工具对外部或 mock runner 同样执行防御性上限。
-  - required 批量委派按最终 JSON 转义后的实际长度分配文本预算，保证输出不超过 10,000 字符且保留 status、error、artifacts；`delegate_task` 超过 10,000 字符即进入 artifact 外部化链路，普通工具与 Bash 阈值不变。
-  - Codex 嵌入终端在启动 CPR 失败时不再直接相信过期 PTY 网格，临时使用不超过 PTY 的保守 80×16 网格，后续 resize/CPR 成功后恢复真实尺寸。
+  - required 批量委派按最终 JSON 转义后的实际长度分配文本预算，保证输出不超过 10,000 字符并优先保留 status、error、artifacts；artifact 路径本身超额时以省略计数代替。`delegate_task` 专用 artifact 外部化阈值同样为 10,000 字符，普通工具与 Bash 阈值不变。
+  - Codex 嵌入终端在启动 CPR 失败时不再直接相信过期 PTY 网格，临时使用不超过 PTY 的产品最小 60×12 网格，后续 resize/CPR 成功后恢复真实尺寸。
   - 新增 production frame 集成场景，覆盖 CPR 失败、尺寸漂移、Main + 4 子代理、长任务名与连续流式更新，断言无物理换行、无 scrollback 污染且内容只显示一次。
 
 - 2026-07-12：收紧子代理完成与最终回答边界

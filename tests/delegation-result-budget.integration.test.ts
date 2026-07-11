@@ -82,4 +82,37 @@ describe("delegation result budget integration", () => {
     expect(batch.results[1]?.artifacts).toEqual(artifacts);
     expect(batch.results[3]?.artifacts).toEqual(artifacts);
   });
+
+  it("artifact 路径本身超额时仍硬性遵守 10000 字符总预算", async () => {
+    const oversizedArtifacts = Array.from(
+      { length: 20 },
+      (_, index) => `.claw/artifacts/${index}-${"p".repeat(800)}.txt`,
+    );
+    const runner: AgentRunner = {
+      async runSub() {
+        return { summary: "done", artifacts: oversizedArtifacts };
+      },
+    };
+    const tool = new DelegateTaskTool(
+      runner,
+      () => new ToolRegistry(),
+      new DelegationManager({ maxConcurrentChildren: 4 }),
+    );
+
+    const raw = await tool.execute(
+      JSON.stringify({
+        tasks: Array.from({ length: 4 }, (_, index) => ({ goal: `task-${index}` })),
+      }),
+    );
+    const batch = JSON.parse(raw) as {
+      results: Array<{ status: string; summary?: string; artifacts?: string[] }>;
+      omittedArtifacts?: number;
+    };
+
+    expect(raw.length).toBeLessThanOrEqual(10_000);
+    expect(batch.results).toHaveLength(4);
+    expect(batch.results.every((result) => result.status === "completed")).toBe(true);
+    expect(batch.results.every((result) => result.artifacts === undefined)).toBe(true);
+    expect(batch.omittedArtifacts).toBe(80);
+  });
 });
