@@ -1,9 +1,36 @@
 # 当前计划索引
 
+- [x] **子代理活动可视化与 `/tasks` 退役**：移除面向用户的任务 ID 控制入口，保留内部 Task/worktree 运行时；批量委派会展示每个子代理的角色、目标、当前动作、状态和结果。
+
 - [x] **Claude Code 风格 Skill 与 Workspace**：设计见 `docs/superpowers/specs/2026-07-10-claude-skill-workspace-design.md`，执行计划见 `docs/superpowers/plans/2026-07-10-claude-skill-workspace.md`。三条并行支线分别负责 Skill 激活、Workspace Roots、`/add-dir`，主协调者已完成共享接线和真实模型 E2E。
 - [x] **Pico Claude Code 高拟真交互后续阶段总任务单**：详见 `docs/plans/2026-07-09-pico-claude-code-full-parity-roadmap.md`。在第一轮基础集成之上，按阶段 2-7 继续拆分为视觉交互、命令体系、权限工具、回滚会话、子代理体验、真实项目验收；每阶段使用独立 worktree 和子代理推进。
 - [x] **Pico Claude Code 风格启动与交互复刻**：详见 `docs/plans/2026-07-09-pico-claude-code-parity.md`。按极简边界拆为 6 个并行 worktree 子任务：session 启动、TUI 外壳、输入编辑、命令状态、Claude 资源兼容、回滚/权限 UI。
 - [x] **Pico TUI Slash Command 与 @ Mention 改造**：详见 `docs/plans/2026-07-08-pico-tui-slash-mention.md`。已拆分为 5 个可并行 worktree 子任务：命令核心、mention 附件、skills/markdown commands、TUI 候选面板、TUI/CLI 集成。
+
+---
+
+# 子代理活动可视化与 `/tasks` 退役
+
+通过 Reporter 事件把子代理执行过程投影到现有 TUI transcript，每个子代理使用独立活动卡片；Task ID 只作为内部关联键。保留 TaskRegistry、worktree supervisor 和合并底座，不再向用户暴露 `/tasks` 操作协议。
+
+## 范围
+
+- In：移除 `/tasks`；子代理活动生命周期事件；多卡片并行渲染；相关集成测试与文档同步。
+- Out：新增用户手工 merge/stop/retry UI；重写 TaskRegistry/worktree 底层；新增跨会话 Agent View。
+
+## 验收标准
+
+- `/tasks` 不再注册，帮助和 slash suggestions 不再出现该命令。
+- 批量 `delegate_task` 为每个子代理生成独立卡片，并能同时显示 queued/running/completed/failed。
+- 运行中卡片显示最近工具与目标，不向用户暴露 task ID。
+- 子代理完成后保留结果摘要，不影响主 Agent 获取原有 tool result。
+- 相关集成测试、lint、typecheck 和 build 通过。
+
+## 执行结果
+
+- 三条独立 worktree 支线已完成命令退役、活动事件链和 TUI 卡片，并合入集成分支。
+- 新增跨 `DelegateTaskTool → Reporter → EventStore → Ink` 的确定性集成主链，覆盖两个并行子代理的运行与完成。
+- 目标测试、lint、typecheck、build 和 high audit 通过；全量测试 1897 通过、53 个既有失败，主要来自当前 Node ABI 与 `better-sqlite3` 不兼容及旧断言。
 
 ---
 

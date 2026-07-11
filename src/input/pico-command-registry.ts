@@ -74,7 +74,6 @@ const OVERRIDDEN_BUILTIN_COMMANDS = new Set([
   "mcp",
   "thinking",
   "agents",
-  "tasks",
 ]);
 
 export type McpStatusProvider = () => McpStatusSnapshot | undefined;
@@ -131,7 +130,6 @@ export async function createPicoCommandRegistry(
   const registry = new CommandRegistry([
     ...builtins,
     createStatusCommand(settings, options.session, options.mcpStatus),
-    createTasksCommand(options.taskRuntime),
     createModelRuntimeCommand("usage", options.modelRuntime),
     createModelRuntimeCommand("context", options.modelRuntime),
     createGoalCommand(options.goalManager),
@@ -646,90 +644,6 @@ function createThinkingCommand(settings: SessionSettings, router?: ModelRouter):
     },
   };
 }
-
-function createTasksCommand(taskRuntime?: TaskHostRuntime): SlashCommand {
-  return {
-    name: "tasks",
-    description: "Inspect and control isolated worktree tasks",
-    usage: "/tasks [task-id|tail|stop|retry|message|merge|cleanup]",
-    category: "session",
-    kind: "local",
-    availability: "always",
-    execute: async (input): Promise<LocalCommandResult> => {
-      if (!taskRuntime) {
-        return {
-          type: "local",
-          action: "message",
-          message: "Task supervisor unavailable: the current directory is not a Git worktree.",
-        };
-      }
-      const [action, taskId, ...rest] = input.argv;
-      try {
-        if (!action) {
-          const tasks = taskRuntime.list();
-          return {
-            type: "local",
-            action: "message",
-            message:
-              tasks.length === 0
-                ? "No supervised tasks."
-                : [
-                    "Supervised tasks",
-                    ...tasks.map(
-                      (task) =>
-                        `- ${task.taskId} ${task.status} · ${task.description}${task.error ? ` · ${task.error}` : ""}`,
-                    ),
-                  ].join("\n"),
-          };
-        }
-        if (!TASK_ACTIONS.has(action)) {
-          const task = taskRuntime.get(action);
-          return {
-            type: "local",
-            action: "message",
-            message: task ? JSON.stringify(task, null, 2) : `Unknown task: ${action}`,
-          };
-        }
-        if (!taskId) {
-          return { type: "local", action: "message", message: `Usage: /tasks ${action} <task-id>` };
-        }
-        if (action === "tail") {
-          const maxChars = rest[0] ? Number(rest[0]) : undefined;
-          return {
-            type: "local",
-            action: "message",
-            message: taskRuntime.tail(taskId, maxChars),
-          };
-        }
-        let result: unknown;
-        if (action === "stop") result = await taskRuntime.stop(taskId);
-        else if (action === "retry") result = taskRuntime.retry(taskId);
-        else if (action === "message") result = taskRuntime.sendMessage(taskId, rest.join(" "));
-        else if (action === "merge") {
-          await taskRuntime.merge(taskId);
-          await taskRuntime.mergeQueue.waitForIdle();
-          result = taskRuntime.mergeQueue.get(taskId);
-        } else if (action === "cleanup") {
-          await taskRuntime.cleanupMerged(taskId);
-          result = { taskId, cleaned: true };
-        }
-        return {
-          type: "local",
-          action: "message",
-          message: JSON.stringify(result ?? taskRuntime.get(taskId) ?? { taskId, action }, null, 2),
-        };
-      } catch (error) {
-        return {
-          type: "local",
-          action: "message",
-          message: `Task command failed: ${error instanceof Error ? error.message : String(error)}`,
-        };
-      }
-    },
-  };
-}
-
-const TASK_ACTIONS = new Set(["tail", "stop", "retry", "message", "merge", "cleanup"]);
 
 function createMcpCommand(
   mcpStatus?: McpStatusProvider,
