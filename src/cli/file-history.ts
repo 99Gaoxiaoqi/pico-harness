@@ -18,6 +18,8 @@ export interface FileHistorySnapshotSummary {
   addedLines?: number;
   removedLines?: number;
   changedFiles?: string[];
+  incomplete?: boolean;
+  warnings?: string[];
   legacy?: boolean;
 }
 
@@ -83,6 +85,9 @@ export function listFileHistorySnapshotSummaries(session: Session): FileHistoryS
       ...(snapshot.interactionMode !== undefined
         ? { interactionMode: snapshot.interactionMode }
         : {}),
+      ...(snapshot.journalWarnings?.length
+        ? { incomplete: true, warnings: [...snapshot.journalWarnings] }
+        : {}),
       ...(snapshot.userPrompt === undefined ? { legacy: true } : {}),
     };
   });
@@ -105,6 +110,7 @@ export async function listRewindPointSummaries(
           addedLines: stat.addedLines,
           removedLines: stat.removedLines,
           changedFiles: stat.files.map((file) => file.filePath),
+          ...(stat.incomplete ? { incomplete: true, warnings: [...(stat.warnings ?? [])] } : {}),
         };
       }),
   );
@@ -128,6 +134,7 @@ export function formatFileHistorySnapshots(
         `tracked=${summary.trackedFileCount}`,
         `backups=${summary.backedUpFileCount}`,
         `deleted=${summary.deletedFileCount}`,
+        `coverage=${summary.incomplete ? "incomplete" : "complete"}`,
         `summary=${summary.changeSummary ?? formatSnapshotChangeSummary(summary)}`,
       ].join(" "),
     );

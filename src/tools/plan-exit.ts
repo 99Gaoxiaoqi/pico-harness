@@ -40,6 +40,8 @@ export type PlanExitCallback = (approvedPlan?: string) => void;
 export class ExitPlanModeTool implements BaseTool {
   /** 非只读:审批通过会切换 engine 的 planMode 状态(状态变更) */
   readonly readOnly = false;
+  /** modify 分支最多写回唯一的 PLAN.md。 */
+  readonly fileSideEffects = { kind: "exact", paths: ["PLAN.md"] } as const;
 
   /** host 注入的退出回调,注入前为空(审批通过也无处可退,工具返回提示) */
   private onExit?: PlanExitCallback;
