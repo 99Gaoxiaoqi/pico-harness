@@ -12,6 +12,9 @@ describe("explicit delegation intent input boundary", () => {
     ["请让一个子代理检查鉴权实现", "single"],
     ["用多个子代理阅读项目并总结", "multiple"],
     ["请先解释子代理如何工作，然后启动多个子代理阅读项目", "multiple"],
+    ["如果需要我可以补充信息。现在请启动多个子代理阅读项目", "multiple"],
+    ["If needed, I can provide context. Now launch several subagents", "multiple"],
+    ["请后台启动一个子代理跑测试；另外请启动两个子代理阅读项目并等待结果", "multiple"],
     ["Launch several subagents to inspect the project", "multiple"],
     ["Delegate this review to sub-agents", "unspecified"],
   ] as const)("把真实 prompt 输入 %s 转成 required 首动作策略", async (raw, count) => {

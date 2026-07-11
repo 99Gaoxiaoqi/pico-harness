@@ -51,6 +51,16 @@ const CONDITIONAL_EXECUTION_PATTERNS = [
   /\b(?:if|when necessary|if needed|optionally|may|might|could|can)\b.{0,40}\b(?:spawn|launch|start|create|dispatch|run|call|use|have|ask)\b/iu,
 ] as const;
 
+const CONDITIONAL_MARKER_PATTERNS = [
+  /(?:如果|若|假如|必要时|视情况|有必要的话)/iu,
+  /\b(?:if|when necessary|if needed|optionally|may|might|could|can)\b/iu,
+] as const;
+
+const BACKGROUND_MARKER_PATTERNS = [
+  /(?:后台|异步|不用等|无需等待|不要等待)/iu,
+  /\b(?:background|asynchronously|do not wait|don't wait|without waiting)\b/iu,
+] as const;
+
 const STRONG_EXECUTION_PATTERNS = [
   new RegExp(
     String.raw`(?:启动|调用|创建|派出|拉起|召唤|分派|委派|安排).{0,18}${CHINESE_AGENT}`,
@@ -127,24 +137,32 @@ export function detectExplicitDelegationIntent(
 ): ExplicitDelegationIntent | null {
   const normalized = normalizeInput(latestUserInput);
   if (normalized.length === 0) return null;
-  // 条件前置和后置的后台语义可能被逗号/then 分开，必须先在
-  // 整条用户消息上判断，否则会把“如果失败再启动”或“启动后放到后台”
-  // 误升级为必须立即等待的 required 委派。
-  if (
-    CONDITIONAL_EXECUTION_PATTERNS.some((pattern) => pattern.test(normalized)) ||
-    EXPLICIT_BACKGROUND_PATTERNS.some((pattern) => pattern.test(normalized))
-  ) {
-    return null;
-  }
+  const clauses = splitClauses(normalized);
+  const actionableClauses = clauses
+    .filter((clause, index) => {
+      const previous = clauses[index - 1];
+      const next = clauses[index + 1];
+      const conditionalPrefix =
+        clause.boundaryBefore === "soft" &&
+        previous !== undefined &&
+        !hasStrongExecution(previous.text) &&
+        CONDITIONAL_MARKER_PATTERNS.some((pattern) => pattern.test(previous.text));
+      const backgroundSuffix =
+        next?.boundaryBefore === "soft" &&
+        !hasStrongExecution(next.text) &&
+        BACKGROUND_MARKER_PATTERNS.some((pattern) => pattern.test(next.text));
 
-  const actionableClauses = splitClauses(normalized).filter(
-    (clause) =>
-      STRONG_EXECUTION_PATTERNS.some((pattern) => pattern.test(clause)) &&
-      !isDiscussionOnly(clause) &&
-      !EXPLICIT_BACKGROUND_PATTERNS.some((pattern) => pattern.test(clause)) &&
-      !NEGATED_EXECUTION_PATTERNS.some((pattern) => pattern.test(clause)) &&
-      !CONDITIONAL_EXECUTION_PATTERNS.some((pattern) => pattern.test(clause)),
-  );
+      return (
+        hasStrongExecution(clause.text) &&
+        !isDiscussionOnly(clause.text) &&
+        !EXPLICIT_BACKGROUND_PATTERNS.some((pattern) => pattern.test(clause.text)) &&
+        !NEGATED_EXECUTION_PATTERNS.some((pattern) => pattern.test(clause.text)) &&
+        !CONDITIONAL_EXECUTION_PATTERNS.some((pattern) => pattern.test(clause.text)) &&
+        !conditionalPrefix &&
+        !backgroundSuffix
+      );
+    })
+    .map((clause) => clause.text);
   if (actionableClauses.length === 0) return null;
 
   return {
@@ -189,11 +207,30 @@ function normalizeInput(input: string): string {
   return input.normalize("NFKC").replace(/\s+/gu, " ").trim();
 }
 
-function splitClauses(input: string): string[] {
-  return input
-    .split(/[，。！？；,.!?;]|(?:然后|随后|接着)|\bthen\b/iu)
-    .map((clause) => clause.trim())
-    .filter((clause) => clause.length > 0);
+function splitClauses(input: string): Array<{
+  text: string;
+  boundaryBefore: "start" | "soft" | "hard";
+}> {
+  const parts = input.split(/([，；,;]|然后|随后|接着|\bthen\b|[。！？.!?])/iu);
+  const clauses: Array<{ text: string; boundaryBefore: "start" | "soft" | "hard" }> = [];
+  let boundaryBefore: "start" | "soft" | "hard" = "start";
+  for (const part of parts) {
+    const trimmed = part.trim();
+    if (trimmed.length === 0) continue;
+    if (/^[。！？.!?]$/u.test(trimmed)) {
+      boundaryBefore = "hard";
+    } else if (/^(?:[，；,;]|然后|随后|接着|then)$/iu.test(trimmed)) {
+      boundaryBefore = "soft";
+    } else {
+      clauses.push({ text: trimmed, boundaryBefore });
+      boundaryBefore = "soft";
+    }
+  }
+  return clauses;
+}
+
+function hasStrongExecution(input: string): boolean {
+  return STRONG_EXECUTION_PATTERNS.some((pattern) => pattern.test(input));
 }
 
 function isDiscussionOnly(input: string): boolean {
