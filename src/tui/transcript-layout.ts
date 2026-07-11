@@ -78,6 +78,7 @@ function findLatestToolKey(entries: readonly TuiEntry[], keys: readonly string[]
 }
 
 export function transcriptEntryKey(entry: TuiEntry, index: number): string {
+  if (entry.uiEntryId) return entry.uiEntryId;
   if (entry.kind === "tool") return `tool:${index}:${entry.name}:${entry.args}`;
   return `${entry.kind}:${index}`;
 }

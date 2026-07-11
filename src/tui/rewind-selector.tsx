@@ -201,6 +201,13 @@ function formatRewindMessageList(
     lines.push(
       `  ${formatSnapshotChange(snapshot)} · ${formatRelativeTime(new Date(snapshot.timestamp))}`,
     );
+    if (snapshot.incomplete) {
+      lines.push(
+        `  ⚠ Partial restore${
+          snapshot.warnings?.[0] ? `: ${truncateText(oneLine(snapshot.warnings[0]), 56)}` : ""
+        }`,
+      );
+    }
   }
   const hidden = itemCount - (lastVisibleIndex - firstVisibleIndex);
   if (hidden > 0) lines.push(`… ${hidden} messages outside this window`);
@@ -246,10 +253,21 @@ function formatRewindConfirmText(
   ];
   if (snapshot) lines.push(`  (${formatRelativeTime(new Date(snapshot.timestamp))})`);
   lines.push("The conversation will be forked from this point.");
+  const partial = diffStat.incomplete === true || snapshot?.incomplete === true;
+  const warnings = [...new Set([...(diffStat.warnings ?? []), ...(snapshot?.warnings ?? [])])];
+  if (partial) {
+    lines.push("⚠ Partial restore: file capture was incomplete; only known files can be restored.");
+    for (const warning of warnings.slice(0, 3)) {
+      lines.push(`  ${truncateText(oneLine(warning), maxPathLength)}`);
+    }
+    if (warnings.length > 3) lines.push(`  … ${warnings.length - 3} more warnings`);
+  }
   lines.push(
     diffStat.changedFileCount > 0
-      ? `Code restore: ${diffStat.changedFileCount} file(s), +${diffStat.addedLines} -${diffStat.removedLines}`
-      : "Code restore: no file changes",
+      ? `${partial ? "Partial restore" : "Code restore"}: ${diffStat.changedFileCount} known file(s), +${diffStat.addedLines} -${diffStat.removedLines}`
+      : partial
+        ? "Partial restore: no known file changes; uncaptured side effects may remain"
+        : "Code restore: no file changes",
   );
   for (const file of diffStat.files.slice(0, maxItems)) {
     lines.push(
@@ -260,7 +278,7 @@ function formatRewindConfirmText(
     lines.push(`  … ${diffStat.files.length - maxItems} more files`);
   }
   lines.push("");
-  for (const [action, label] of restoreActions(diffStat)) {
+  for (const [action, label] of restoreActions(diffStat, partial)) {
     lines.push(`${selectedAction === action ? "❯" : " "} ${label}`);
   }
   lines.push("↑/↓ to choose · Enter to confirm · Esc to go back");
@@ -279,19 +297,37 @@ const CONVERSATION_RESTORE_ACTIONS: readonly [RewindConfirmAction, string][] = [
   ["cancel", "Never mind"],
 ];
 
-function restoreActions(diffStat: FileHistoryDiffStat): readonly [RewindConfirmAction, string][] {
-  return diffStat.changedFileCount > 0 ? CODE_RESTORE_ACTIONS : CONVERSATION_RESTORE_ACTIONS;
+function restoreActions(
+  diffStat: FileHistoryDiffStat,
+  partial = diffStat.incomplete === true,
+): readonly [RewindConfirmAction, string][] {
+  if (diffStat.changedFileCount === 0) return CONVERSATION_RESTORE_ACTIONS;
+  return codeRestoreActions(partial);
+}
+
+function codeRestoreActions(partial: boolean): readonly [RewindConfirmAction, string][] {
+  if (!partial) return CODE_RESTORE_ACTIONS;
+  return [
+    ["both", "Partial restore known code and conversation"],
+    ["conversation", "Restore conversation"],
+    ["code", "Partial restore known code"],
+    ["cancel", "Never mind"],
+  ];
 }
 
 function formatSnapshotChange(snapshot: FileHistorySnapshotSummary): string {
   const count = snapshot.changedFileCount ?? snapshot.trackedFileCount;
-  if (count === 0) return "No code changes";
+  if (count === 0)
+    return snapshot.incomplete ? "No known code changes · Partial restore" : "No code changes";
   const name =
     count === 1 && snapshot.changedFiles?.[0]
       ? (snapshot.changedFiles[0].split(/[\\/]/).at(-1) ?? snapshot.changedFiles[0])
       : `${count} files changed`;
-  if (snapshot.addedLines === undefined || snapshot.removedLines === undefined) return name;
-  return `${name} +${snapshot.addedLines} -${snapshot.removedLines}`;
+  const stat =
+    snapshot.addedLines === undefined || snapshot.removedLines === undefined
+      ? name
+      : `${name} +${snapshot.addedLines} -${snapshot.removedLines}`;
+  return snapshot.incomplete ? `${stat} · Partial restore` : stat;
 }
 
 function formatRelativeTime(date: Date, now = new Date()): string {
@@ -338,9 +374,9 @@ function moveConfirmAction(
   direction: "up" | "down",
   legacy: boolean,
 ): RewindConfirmAction {
-  const actions = (legacy ? CODE_RESTORE_ACTIONS : restoreActions(diffStat)).map(
-    ([value]) => value,
-  );
+  const actions = (
+    legacy ? codeRestoreActions(diffStat.incomplete === true) : restoreActions(diffStat)
+  ).map(([value]) => value);
   const index = actions.indexOf(action);
   return actions[moveIndex(index === -1 ? 0 : index, actions.length, direction)]!;
 }
@@ -401,6 +437,11 @@ function formatLegacyRewindMessageList(
     const summary = `${fileLabel} · ${snapshot.changeSummary ?? "No code changes"}`;
     lines.push(`${marker} ${truncateLegacyText(snapshot.messageId, 24)}`);
     lines.push(`  ${truncateLegacyText(summary, options.maxSummaryLength ?? 72)}`);
+    if (snapshot.incomplete) {
+      lines.push(
+        `  ⚠ Partial restore${snapshot.warnings?.[0] ? `: ${truncateLegacyText(snapshot.warnings[0], 48)}` : ""}`,
+      );
+    }
   }
   lines.push("Up/Down to choose · Enter to preview · Esc to cancel");
   return lines.join("\n");
@@ -416,14 +457,24 @@ function formatLegacyRewindConfirmText(
     "Preview changes before confirming rewind:",
     `- ${snapshot?.messageId ?? diffStat.messageId}`,
     "The conversation will be forked.",
-    `The code will be restored +${diffStat.addedLines} -${diffStat.removedLines}.`,
+    `${diffStat.incomplete ? "Partial restore of known code" : "The code will be restored"} +${diffStat.addedLines} -${diffStat.removedLines}.`,
   ];
+  if (diffStat.incomplete) {
+    lines.push("⚠ File capture was incomplete; untracked side effects may remain.");
+    for (const warning of (diffStat.warnings ?? []).slice(0, 3)) lines.push(`  ${warning}`);
+  }
   for (const file of diffStat.files.slice(0, options.maxItems ?? 20)) {
     lines.push(`- ${file.filePath} ${file.status} +${file.addedLines} -${file.removedLines}`);
   }
-  lines.push("Confirm: restore code and conversation");
+  lines.push(
+    diffStat.incomplete
+      ? "Confirm: Partial restore known code and conversation"
+      : "Confirm: restore code and conversation",
+  );
   lines.push("Confirm: restore conversation only");
-  lines.push("Confirm: restore code only");
+  lines.push(
+    diffStat.incomplete ? "Confirm: Partial restore known code only" : "Confirm: restore code only",
+  );
   lines.push("Cancel: keep current session");
   lines.push("Up/Down to choose · Enter to confirm selected action · Esc to cancel");
   return lines.join("\n");

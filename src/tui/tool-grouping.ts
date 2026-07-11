@@ -43,6 +43,8 @@ function flushGroup(result: TuiEntry[], group: ToolEntry[]): void {
 
   result.push({
     kind: "tool",
+    uiEntryId: groupedEntryId(group),
+    ...groupedToolCallIds(group),
     name: group[0]!.name,
     args: JSON.stringify({
       groupedCount: group.length,
@@ -51,6 +53,21 @@ function flushGroup(result: TuiEntry[], group: ToolEntry[]): void {
     status: groupStatus(group),
     summary: groupSummary(group),
   });
+}
+
+function groupedEntryId(group: readonly ToolEntry[]): string | undefined {
+  const ids = group.flatMap((entry) => (entry.uiEntryId ? [entry.uiEntryId] : []));
+  return ids.length === group.length ? `tool-group:${ids.join("|")}` : undefined;
+}
+
+function groupedToolCallIds(
+  group: readonly ToolEntry[],
+): Pick<ToolEntry, "uiToolCallId" | "uiToolCallIds"> {
+  const ids = group.flatMap((entry) =>
+    entry.uiToolCallIds ? [...entry.uiToolCallIds] : entry.uiToolCallId ? [entry.uiToolCallId] : [],
+  );
+  if (ids.length === 0) return {};
+  return { uiToolCallId: ids[ids.length - 1]!, uiToolCallIds: Object.freeze(ids) };
 }
 
 function groupStatus(group: ToolEntry[]): ToolEntry["status"] {

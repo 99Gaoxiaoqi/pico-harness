@@ -13,8 +13,14 @@
 import type { LLMProvider, LLMProviderRequestOptions } from "../provider/interface.js";
 import { ContextOverflowError } from "../provider/errors.js";
 import { generateWithRetry, type RetryInfo } from "../provider/retry.js";
-import type { Message, ToolCall, ToolDefinition, ToolResult } from "../schema/message.js";
-import type { Registry } from "../tools/registry.js";
+import {
+  PICO_TOOL_RESULT_ERROR_KEY,
+  type Message,
+  type ToolCall,
+  type ToolDefinition,
+  type ToolResult,
+} from "../schema/message.js";
+import type { Registry, ToolFileSideEffects } from "../tools/registry.js";
 import type { AgentRunner } from "../tools/subagent.js";
 import type { SubagentRunOptions, SubagentResult } from "../tools/subagent.js";
 import type { Compactor } from "../context/compactor.js";
@@ -33,13 +39,21 @@ import { IterationBudget, type BudgetConfig, type BudgetDecision } from "./budge
 import type { GoalManager } from "./goal-manager.js";
 import { Tracer, exportTraceToFile, truncate, type Span } from "../observability/trace.js";
 import { logger } from "../observability/logger.js";
-import { extractBashRedirectTargets, safeResolve } from "../tools/registry-impl.js";
+import { safeResolve } from "../tools/registry-impl.js";
 import type { WorkspaceRoots } from "../tools/workspace-roots.js";
 import type { Session } from "./session.js";
 import type { ToolObservationProcessor } from "../tools/tool-result-observation.js";
 import { ToolAccesses } from "../tools/tool-access.js";
 import { ToolScheduler } from "../tools/tool-scheduler.js";
-import { fileHistoryTrackEdit, fileHistoryMakeSnapshot } from "../safety/file-history.js";
+import {
+  fileHistoryAddJournalWarning,
+  fileHistoryBeginJournal,
+  fileHistoryCommitJournal,
+  fileHistoryJournalCoversPath,
+  fileHistoryTrackEdit,
+  fileHistoryMakeSnapshot,
+  type FileHistoryJournal,
+} from "../safety/file-history.js";
 
 /** WorkingMemory 滑动窗口大小:截取最近 N 条消息供压缩器判断(含远期历史) */
 const DEFAULT_WORKING_MEMORY_LIMIT = 20;
@@ -49,6 +63,46 @@ const SUBAGENT_SUMMARY_MIN_CHARS = 200;
 /** summary 续写提示词:要求子代理把过短的总结扩写成完整汇报 */
 const SUBAGENT_SUMMARY_CONTINUATION_PROMPT =
   "你上一轮的总结过于简短,主架构师无法据此决策。请重新输出一份结构完整、细节充分的总结汇报:包括你探索了哪些文件/发现了什么、关键结论、以及尚存的不确定点。不要调用任何工具,直接用纯文本回答。";
+
+function isBackgroundBashCall(call: ToolCall): boolean {
+  if (call.name !== "bash") return false;
+  try {
+    const input = JSON.parse(call.arguments) as { background?: unknown };
+    return input.background === true;
+  } catch {
+    return false;
+  }
+}
+
+function fileSideEffectKind(registry: Registry, call: ToolCall): ToolFileSideEffects["kind"] {
+  try {
+    const effects = registry.getFileSideEffects?.(call);
+    if (effects) return effects.kind;
+    return registry.isReadOnlyTool?.(call.name) ? "none" : "workspace";
+  } catch {
+    return "workspace";
+  }
+}
+
+async function commitFileJournal(
+  session: Session,
+  journal: FileHistoryJournal,
+  messageId: string,
+): Promise<void> {
+  try {
+    const commit = await fileHistoryCommitJournal(
+      session.fileHistory,
+      journal,
+      messageId,
+      session.id,
+    );
+    if (commit.incomplete) {
+      logger.warn({ warnings: commit.warnings }, "[FileHistory] 本轮文件 journal 覆盖不完整");
+    }
+  } catch (err) {
+    logger.warn({ err: String(err) }, "[FileHistory] 本轮文件 journal 提交失败");
+  }
+}
 
 export interface AgentEngineOptions {
   provider: LLMProvider;
@@ -562,6 +616,10 @@ export class AgentEngine implements AgentRunner {
         snapshot.messageId === session.fileHistory.currentMessageId &&
         snapshot.userPrompt !== undefined,
     )?.messageId;
+    const journalRoots =
+      this.workspaceRoots?.list() ?? (this.registry.setPreWriteHook ? [this.workDir] : []);
+    let runFileJournal: FileHistoryJournal | undefined;
+    let activeFileJournal: FileHistoryJournal | undefined;
     const previousRuntimeReporter = this.runtimeReporter;
     this.runtimeReporter = reporter;
 
@@ -594,29 +652,27 @@ export class AgentEngine implements AgentRunner {
           userRewindPointId ?? `turn-${session.fileHistory.snapshotSequence + 1}`;
         this.registry.setPreWriteHook?.(async (toolName, args) => {
           try {
-            if (toolName === "write_file" || toolName === "edit_file") {
-              const { path } = JSON.parse(args) as { path?: string };
-              if (!path) return;
+            const effects = this.registry.getFileSideEffects?.({
+              id: `file-history:${currentMessageId}`,
+              name: toolName,
+              arguments: args,
+            });
+            if (effects?.kind !== "exact") return;
+            for (const path of effects.paths) {
+              const resolvedPath =
+                this.workspaceRoots?.resolve(path) ?? safeResolve(this.workDir, path);
+              if (
+                activeFileJournal &&
+                fileHistoryJournalCoversPath(activeFileJournal, resolvedPath)
+              ) {
+                continue;
+              }
               await fileHistoryTrackEdit(
                 session.fileHistory,
-                this.workspaceRoots?.resolve(path) ?? safeResolve(this.workDir, path),
+                resolvedPath,
                 currentMessageId,
                 session.id,
               );
-              return;
-            }
-            if (toolName === "bash") {
-              const { command } = JSON.parse(args) as { command?: string };
-              if (!command) return;
-              const targets = extractBashRedirectTargets(this.workDir, command);
-              for (const target of targets) {
-                await fileHistoryTrackEdit(
-                  session.fileHistory,
-                  target,
-                  currentMessageId,
-                  session.id,
-                );
-              }
             }
           } catch {
             // File-history tracking is best-effort and must not block the tool call.
@@ -698,7 +754,11 @@ export class AgentEngine implements AgentRunner {
           // ====================================================================
           const pendingSteer = this.steerQueue?.peek();
           if (pendingSteer) {
-            compactedContext.push({ role: "user", content: `[STEER] ${pendingSteer}` });
+            compactedContext.push({
+              role: "user",
+              content: `[STEER] ${pendingSteer}`,
+              providerData: { picoKind: "steer", picoHiddenFromTranscript: true },
+            });
           }
 
           const actionSpan = turnSpan?.startChild("LLM.Action", {
@@ -757,11 +817,25 @@ export class AgentEngine implements AgentRunner {
               lastMessage: responseMsg,
             });
             signal?.throwIfAborted();
+
+            // steer 可能在最后一次 provider 调用期间到达。必须在真正 stop
+            // 前同步 drain 并续接本轮，否则它会泄漏到下一次无关 run。
+            const stopSteers = this.steerQueue?.drain() ?? [];
+            for (const text of stopSteers) {
+              session.append({
+                role: "user",
+                content: text,
+                providerData: { picoKind: "steer" },
+              });
+            }
             if (decision?.continue) {
               session.append({
                 role: "user",
                 content: decision.continuePrompt ?? "请继续推进任务。",
+                providerData: { picoKind: "continuation", picoHiddenFromTranscript: true },
               });
+            }
+            if (stopSteers.length > 0 || decision?.continue) {
               continue; // 不 break,回 for(;;) 顶部继续下一轮
             }
             reporter.onFinish();
@@ -777,41 +851,67 @@ export class AgentEngine implements AgentRunner {
           const getAccesses = this.registry.getAccesses;
           // maxConcurrency 限制并发执行的工具数(对齐 hermes _MAX_TOOL_WORKERS=8),
           // 防止一批大量不冲突只读工具同时打 IO 把系统压垮。
+          let turnFileJournal: FileHistoryJournal | undefined;
+          const fileSideEffectKinds = toolCalls.map((call) =>
+            fileSideEffectKind(this.registry, call),
+          );
+          const hasWorkspaceEffects = fileSideEffectKinds.includes("workspace");
+          if (hasWorkspaceEffects && journalRoots.length > 0) {
+            if (userRewindPointId) {
+              runFileJournal ??= await fileHistoryBeginJournal(journalRoots, session.id, signal);
+            } else {
+              turnFileJournal = await fileHistoryBeginJournal(journalRoots, session.id, signal);
+            }
+            const activeJournal = runFileJournal ?? turnFileJournal;
+            activeFileJournal = activeJournal;
+            if (activeJournal && toolCalls.some(isBackgroundBashCall)) {
+              fileHistoryAddJournalWarning(
+                activeJournal,
+                "background bash 在工具返回后仍可继续写入，本轮 rewind 只覆盖返回前的变化",
+              );
+            }
+          }
           const scheduler = new ToolScheduler<{ message: Message; reminder?: Message }>({
             maxConcurrency: AgentEngine.MAX_TOOL_CONCURRENCY,
             signal,
           });
           const settledResults: Array<{ message: Message; reminder?: Message } | undefined> =
             new Array(toolCalls.length);
-          const scheduled = toolCalls.map((tc, index) =>
-            scheduler
-              .add({
-                accesses: getAccesses ? getAccesses.call(this.registry, tc) : ToolAccesses.all(),
-                start: async () => {
-                  signal?.throwIfAborted();
-                  return this.runOneTool(tc, reporter, session.id, turnSpan, signal);
-                },
-              })
-              .then((result) => {
-                settledResults[index] = result;
-                return result;
-              }),
-          );
           let results: Array<{ message: Message; reminder?: Message }>;
+          let scheduled: Array<Promise<{ message: Message; reminder?: Message }>> = [];
           try {
+            scheduled = toolCalls.map((tc, index) =>
+              scheduler
+                .add({
+                  accesses: getAccesses ? getAccesses.call(this.registry, tc) : ToolAccesses.all(),
+                  // 文件事务只能在活跃写任务的 start Promise 真实收口后提交。
+                  settleOnAbort: fileSideEffectKinds[index] !== "none",
+                  start: async () => {
+                    signal?.throwIfAborted();
+                    return this.runOneTool(tc, reporter, session.id, turnSpan, signal);
+                  },
+                })
+                .then((result) => {
+                  settledResults[index] = result;
+                  return result;
+                }),
+            );
             results = await Promise.all(scheduled);
             signal?.throwIfAborted();
           } catch (err) {
             if (signal?.aborted) {
+              // 队列任务已拒绝；workspace/exact 活跃任务则等底层 start 真实 settle。
+              await Promise.allSettled(scheduled);
               const abortedObservations = toolCalls.map((toolCall, index) => {
                 const settled = settledResults[index];
                 if (settled) return settled.message;
                 const content = "工具执行已取消:本轮运行被中止,未产生可用结果。";
-                reporter.onToolResult(toolCall.name, content, true);
+                reporter.onToolResult(toolCall.name, content, true, toolCall.id);
                 return {
                   role: "user" as const,
                   content,
                   toolCallId: toolCall.id,
+                  providerData: { [PICO_TOOL_RESULT_ERROR_KEY]: true },
                 };
               });
               session.append(...abortedObservations);
@@ -825,6 +925,10 @@ export class AgentEngine implements AgentRunner {
             throw err;
           } finally {
             scheduler.dispose();
+            if (turnFileJournal) {
+              await commitFileJournal(session, turnFileJournal, currentMessageId);
+              activeFileJournal = runFileJournal;
+            }
           }
 
           const observations: Message[] = new Array(toolCalls.length);
@@ -851,7 +955,11 @@ export class AgentEngine implements AgentRunner {
           // ====================================================================
           const steerTexts = this.steerQueue?.drain() ?? [];
           for (const text of steerTexts) {
-            session.append({ role: "user", content: text });
+            session.append({
+              role: "user",
+              content: text,
+              providerData: { picoKind: "steer" },
+            });
           }
         } finally {
           if (!userRewindPointId) {
@@ -871,6 +979,10 @@ export class AgentEngine implements AgentRunner {
         await this.runGraceCall(session, systemPrompt, exhaustedReason, reporter, rootSpan, signal);
       }
     } finally {
+      if (runFileJournal && userRewindPointId) {
+        await commitFileJournal(session, runFileJournal, userRewindPointId);
+      }
+      activeFileJournal = undefined;
       this.runtimeReporter = previousRuntimeReporter;
       rootSpan?.end();
       if (rootSpan) {
@@ -898,7 +1010,7 @@ export class AgentEngine implements AgentRunner {
     });
     try {
       signal?.throwIfAborted();
-      reporter.onToolCall(toolCall.name, toolCall.arguments);
+      reporter.onToolCall(toolCall.name, toolCall.arguments, toolCall.id);
       const guardDecision = this.guardrail.beforeCall(toolCall);
       let result: ToolResult;
       if (!guardDecision.allowed) {
@@ -909,7 +1021,11 @@ export class AgentEngine implements AgentRunner {
         };
       } else {
         signal?.throwIfAborted();
-        result = await this.registry.execute(toolCall);
+        result = await this.registry.execute(toolCall, {
+          signal,
+          onOutput: ({ stream, chunk }) =>
+            reporter.onToolOutput?.(toolCall.name, stream, chunk, toolCall.id),
+        });
         signal?.throwIfAborted();
       }
 
@@ -935,7 +1051,7 @@ export class AgentEngine implements AgentRunner {
         rawOutputPreview: finalOutput === result.output ? undefined : truncate(result.output, 500),
       });
 
-      reporter.onToolResult(toolCall.name, observationOutput, result.isError);
+      reporter.onToolResult(toolCall.name, observationOutput, result.isError, toolCall.id);
       const readOnly = this.registry.isReadOnlyTool?.(toolCall.name) ?? false;
       const reminder = this.guardrail.afterCall(toolCall, result, { readOnly });
       // ToolCallId 必须携带!这是维系大模型推理链条的关键
@@ -944,6 +1060,7 @@ export class AgentEngine implements AgentRunner {
           role: "user",
           content: observationOutput,
           toolCallId: toolCall.id,
+          providerData: { [PICO_TOOL_RESULT_ERROR_KEY]: result.isError },
         },
         result,
         ...(reminder ? { reminder } : {}),
@@ -996,7 +1113,11 @@ export class AgentEngine implements AgentRunner {
       ? `\n\n${goalContext}\n请在总结中明确:当前目标达成到什么程度。`
       : "";
     const gracePrompt = `[SYSTEM] 已达执行预算: ${reason}。立即停止工具调用,用纯文本总结:1)已完成 2)未完成 3)下一步建议。${goalSection}`;
-    session.append({ role: "user", content: gracePrompt });
+    session.append({
+      role: "user",
+      content: gracePrompt,
+      providerData: { picoKind: "grace", picoHiddenFromTranscript: true },
+    });
     const graceSpan = parentSpan?.startChild("LLM.GraceCall", {
       reason,
       availableToolCount: 0,
@@ -1068,10 +1189,12 @@ export class AgentEngine implements AgentRunner {
   private async generateSubWithOverflowRetry(
     contextHistory: Message[],
     tools: ToolDefinition[],
+    signal?: AbortSignal,
   ): Promise<Message> {
     if (!this.compactor) {
       // 无 Compactor:子代理无法降级,叠加普通重试层(溢出则原样抛出)
       return generateWithRetry(this.provider, contextHistory, tools, {
+        signal,
         onRetry: this.makeRetryReporter(),
         onRateLimited: () => this.rotateProvider(),
       });
@@ -1083,6 +1206,7 @@ export class AgentEngine implements AgentRunner {
         // 【集成点】同 generateWithOverflowRetry,叠加普通重试层在内,
         // 响应式压缩在外(子代理版仅降字符预算,不改 WorkingMemory 条数)。
         return await generateWithRetry(this.provider, context, tools, {
+          signal,
           onRetry: this.makeRetryReporter(),
           onRateLimited: () => this.rotateProvider(),
         });
@@ -1157,6 +1281,8 @@ export class AgentEngine implements AgentRunner {
     opts: SubagentRunOptions = {},
   ): Promise<SubagentResult> {
     const rep = reporter ?? new SilentReporter();
+    const signal = opts.signal;
+    signal?.throwIfAborted();
     logger.info(
       { task: taskPrompt.slice(0, 100), thinkingEffort: this.thinkingEffort },
       `[Subagent] 🚀 拉起探路者,任务: ${taskPrompt.slice(0, 100)} (thinkingEffort: ${this.thinkingEffort},继承自主 Agent)`,
@@ -1165,6 +1291,7 @@ export class AgentEngine implements AgentRunner {
     const initialToolNames = new Set(readOnlyRegistry.getAvailableTools().map((tool) => tool.name));
     const canViewSkills = initialToolNames.has("skill_view");
     const skillIndex = canViewSkills ? await new SkillLoader(this.workDir).loadAll() : "";
+    signal?.throwIfAborted();
     const toolExamples = canViewSkills
       ? "bash 的 find/grep、read_file、skill_view"
       : "bash 的 find/grep、read_file";
@@ -1190,6 +1317,7 @@ export class AgentEngine implements AgentRunner {
     const artifactPaths: string[] = [];
 
     for (;;) {
+      signal?.throwIfAborted();
       turnCount++;
       if (turnCount > maxSubTurns) {
         throw new Error(
@@ -1205,7 +1333,11 @@ export class AgentEngine implements AgentRunner {
 
       // 响应式溢出重试:子代理用独立 contextHistory(非 Session 驱动),无法重取
       // WorkingMemory,故仅用更小的 maxChars 预算对 contextHistory 重新压缩重试。
-      const actionResp = await this.generateSubWithOverflowRetry(contextHistory, availableTools);
+      const actionResp = await this.generateSubWithOverflowRetry(
+        contextHistory,
+        availableTools,
+        signal,
+      );
       contextHistory.push(actionResp);
 
       if (actionResp.content) {
@@ -1229,7 +1361,11 @@ export class AgentEngine implements AgentRunner {
             { turns: turnCount, summaryLen: summary.length },
             `[Subagent] 📝 探路者总结过短,追加一轮扩写。`,
           );
-          const continuationResp = await this.generateSubWithOverflowRetry(contextHistory, []);
+          const continuationResp = await this.generateSubWithOverflowRetry(
+            contextHistory,
+            [],
+            signal,
+          );
           contextHistory.push(continuationResp);
           if (continuationResp.content && continuationResp.content.trim().length > 0) {
             summary = continuationResp.content;
@@ -1246,13 +1382,16 @@ export class AgentEngine implements AgentRunner {
       const getAccesses = readOnlyRegistry.getAccesses;
       const scheduler = new ToolScheduler<{ message: Message; artifactPath?: string }>({
         maxConcurrency: AgentEngine.MAX_TOOL_CONCURRENCY,
+        signal,
       });
       const scheduled = toolCalls.map((tc) =>
         scheduler.add({
           accesses: getAccesses ? getAccesses.call(readOnlyRegistry, tc) : ToolAccesses.all(),
+          settleOnAbort: true,
           start: async () => {
-            rep.onToolCall(`[Subagent] ${tc.name}`, tc.arguments);
-            const result = await readOnlyRegistry.execute(tc);
+            signal?.throwIfAborted();
+            rep.onToolCall(`[Subagent] ${tc.name}`, tc.arguments, tc.id);
+            const result = await readOnlyRegistry.execute(tc, { signal });
             let finalOutput = result.output;
             if (result.isError) {
               finalOutput = this.recovery.analyzeAndInject(tc.name, result.output);
@@ -1265,19 +1404,29 @@ export class AgentEngine implements AgentRunner {
             );
             // 从外部化占位文本中提取磁盘路径,回传给主 Agent 供其用 read_file 回查。
             const artifactPath = extractArtifactPath(observationOutput);
-            rep.onToolResult(`[Subagent] ${tc.name}`, observationOutput, result.isError);
+            rep.onToolResult(`[Subagent] ${tc.name}`, observationOutput, result.isError, tc.id);
             return {
               message: {
                 role: "user" as const,
                 content: observationOutput,
                 toolCallId: tc.id,
+                providerData: { [PICO_TOOL_RESULT_ERROR_KEY]: result.isError },
               },
               ...(artifactPath !== undefined ? { artifactPath } : {}),
             };
           },
         }),
       );
-      const subResults = await Promise.all(scheduled);
+      let subResults: Array<{ message: Message; artifactPath?: string }>;
+      try {
+        subResults = await Promise.all(scheduled);
+        signal?.throwIfAborted();
+      } catch (error) {
+        if (signal?.aborted) await Promise.allSettled(scheduled);
+        throw error;
+      } finally {
+        scheduler.dispose();
+      }
 
       const observations: Message[] = new Array(toolCalls.length);
       for (let i = 0; i < subResults.length; i++) {

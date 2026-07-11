@@ -78,7 +78,7 @@ export class ToolResultArtifactStore {
       sessionId,
       safeSessionId,
       toolName: input.toolName,
-      argsHash: hashArgs(input.args),
+      argsHash: hashToolResultArtifactArgs(input.args),
       createdAt,
       sizeBytes: Buffer.byteLength(input.output, "utf8"),
       ttlHours,
@@ -292,7 +292,8 @@ function artifactKey(meta: ToolResultArtifactMeta): string {
   return `${meta.safeSessionId}/${meta.id}`;
 }
 
-function hashArgs(args: unknown): string {
+/** Artifact 写入与 Inspector 绑定共用同一套稳定参数哈希。 */
+export function hashToolResultArtifactArgs(args: unknown): string {
   return hashText(stableStringify(args));
 }
 

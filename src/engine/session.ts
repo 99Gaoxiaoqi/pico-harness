@@ -14,11 +14,23 @@
 import { mkdirSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
-import type { CanonicalUsage, Message } from "../schema/message.js";
+import { toCanonicalUsage, type CanonicalUsage, type Message } from "../schema/message.js";
 import type { CostStatus } from "../observability/pricing.js";
 import { logger } from "../observability/logger.js";
 import { SessionStore } from "./session-store.js";
 import { createSessionIdentity, type SessionIdentity } from "./session-identity.js";
+import type { GoalManager } from "./goal-manager.js";
+import {
+  createEmptyUsageSnapshot,
+  normalizeSessionRuntimeStatePatch,
+  SESSION_RUNTIME_STATE_VERSION,
+  type PersistedSessionSettings,
+  type SessionHydrationSnapshot,
+  type SessionRuntimePersistence,
+  type SessionRuntimeStatePatch,
+  type SessionRuntimeStateSnapshot,
+  type SessionUsageSnapshot,
+} from "./session-runtime.js";
 import { FTS5Store } from "../memory/fts5-store.js";
 import {
   createFileHistoryState,
@@ -37,11 +49,33 @@ function sanitizeFilePart(value: string): string {
   return value.replaceAll(/[^a-zA-Z0-9_-]/gu, "_");
 }
 
+/** 进程级 per-key drain 表，让不同 SessionManager 实例也不会越过旧 tail。 */
+const sessionDrains = new Map<string, Promise<void>>();
+
+function sessionEntryKey(id: string, workDir: string): string {
+  return `${resolve(workDir)}\0${id}`;
+}
+
+function registerSessionDrain(key: string, drain: Promise<void>): Promise<void> {
+  const previous = sessionDrains.get(key);
+  const tracked = previous ? Promise.all([previous, drain]).then(() => undefined) : drain;
+  sessionDrains.set(key, tracked);
+  void tracked.then(
+    () => {
+      if (sessionDrains.get(key) === tracked) sessionDrains.delete(key);
+    },
+    () => {
+      if (sessionDrains.get(key) === tracked) sessionDrains.delete(key);
+    },
+  );
+  return tracked;
+}
+
 /**
  * Session:一次持续的人机交互过程。
  * 负责维护该会话的完整历史,并提供 WorkingMemory 提取。
  */
-export class Session {
+export class Session implements SessionRuntimePersistence {
   /** 会话标识(终端目录哈希 / 飞书 ChatID / 微信 OpenID) */
   readonly id: string;
   /** 该会话绑定的物理工作区 */
@@ -101,12 +135,16 @@ export class Session {
   /** 下一条 record 的序列号(单调递增,保证重放顺序与幂等) */
   private nextSeq = 0;
   /**
-   * 未落盘的 append 写入 Promise 集合。
-   * truncate 落盘前必须先 await 这些 Promise,否则 fire-and-forget 乱序可能
-   * 让 truncate record 先于 earlier appends 写入磁盘,崩溃恢复重放时
-   * 会因缺失 message 导致历史丢失(对标 C1 竞态修复)。
+   * 唯一 JSONL 写入队列。所有 record 在逻辑变更点同步分配 seq，
+   * 再串行接到 tail，因此物理落盘顺序与逻辑调用顺序一致。
    */
-  private pendingWrites: Promise<void>[] = [];
+  private persistenceTail: Promise<void> = Promise.resolve();
+  private lifecycle: "open" | "closing" | "closed" = "open";
+  private closePromise?: Promise<void>;
+
+  private persistedSettings?: PersistedSessionSettings;
+  private persistedGoal?: ReturnType<GoalManager["snapshot"]>;
+  private goalBinding?: { unsubscribe: () => void };
 
   /**
    * 并发安全:per-session 串行执行队列。
@@ -206,6 +244,7 @@ export class Session {
     // volatile message(易失事件,如流式片段)不重建进 history —— 4.3 cursor
     // 多端同步:它们仅用于 WS 实时推送,重放时丢弃。旧 JSONL 无此字段(按 false 处理)。
     let pending: Message[] = [];
+    let restoredUsage: SessionUsageSnapshot | undefined;
     for (const r of records) {
       if (r.type === "message") {
         if (r.volatile === true) continue;
@@ -216,9 +255,17 @@ export class Session {
         pending = this.applyUndoToHistory(pending, r.count);
       } else if (r.type === "rewind_to") {
         pending = pending.slice(0, r.messageIndex);
+      } else if (r.type === "runtime_state") {
+        if (r.patch.settings) this.persistedSettings = r.patch.settings;
+        if (r.patch.goal) this.persistedGoal = r.patch.goal;
+        if (r.patch.usage) restoredUsage = r.patch.usage;
       }
     }
     this.history = pending;
+    // 旧 JSONL 没有 runtime_state:从当前有效 assistant message.usage 回填 token。
+    // 旧数据无计价路由，成本只能保持 0/null。新日志取持久值与可恢复值的较大者，
+    // 容忍“message 已落盘、usage 记录末行撕裂”。
+    this.restoreUsage(mergeUsageWithHistory(restoredUsage, deriveUsageFromHistory(this.history)));
     // 3.1:重放后从 history 重建 toolResultMeta(cachedAt 未知,用当前时间;
     // accessCount 归零)。避免恢复后已有 ToolResult 丢失年龄追踪。
     this.rebuildToolResultMeta();
@@ -275,6 +322,9 @@ export class Session {
    * 返回任务的 Promise(结果需调用方 await)。
    */
   serialize<T>(task: () => Promise<T>): Promise<T> {
+    if (this.lifecycle !== "open") {
+      return Promise.reject(new Error(`Session ${this.id} is ${this.lifecycle}`));
+    }
     const result = this.runQueue.then(task, task);
     // 无论成功失败,都更新队列链;吞掉错误让调用方自己的 catch 处理
     this.runQueue = result.then(
@@ -304,6 +354,109 @@ export class Session {
     if (costStatus) {
       this.lastCostStatus = costStatus;
     }
+    this.updateRuntimeState({ usage: this.getUsageSnapshot() });
+  }
+
+  /** 返回与内部状态隔离的运行态快照，供启动恢复和 TUI 状态水合。 */
+  getRuntimeStateSnapshot(): SessionRuntimeStateSnapshot {
+    const snapshot: SessionRuntimeStateSnapshot = {
+      stateVersion: SESSION_RUNTIME_STATE_VERSION,
+      ...(this.persistedSettings ? { settings: this.persistedSettings } : {}),
+      ...(this.persistedGoal ? { goal: this.persistedGoal } : {}),
+      usage: this.getUsageSnapshot(),
+    };
+    return structuredClone(snapshot);
+  }
+
+  /** 更新一个完整 section，内存立即生效，然后追加到现有 Session JSONL。 */
+  updateRuntimeState(patch: SessionRuntimeStatePatch): void {
+    const normalized = normalizeSessionRuntimeStatePatch(patch);
+    if (!normalized) {
+      logger.warn("[session] 忽略无效的 runtime_state 更新");
+      return;
+    }
+    if (normalized.settings) this.persistedSettings = normalized.settings;
+    if (normalized.goal) this.persistedGoal = normalized.goal;
+    if (normalized.usage) this.restoreUsage(normalized.usage);
+    this.updatedAt = new Date();
+
+    if (this.store) {
+      const persisted = structuredClone(normalized);
+      this.enqueuePersistence("runtime_state", (store, seq) =>
+        store.appendRuntimeState(seq, persisted),
+      );
+    }
+  }
+
+  /**
+   * 把会话 GoalManager 绑定到同一份 JSONL。返回解绑函数供 11.4 热切换使用。
+   * 有持久快照时先恢复；无快照时保存当前初始状态。
+   */
+  bindGoalManager(manager: GoalManager): () => void {
+    this.goalBinding?.unsubscribe();
+    if (this.persistedGoal) {
+      manager.restore(this.persistedGoal);
+    } else {
+      this.updateRuntimeState({ goal: manager.snapshot() });
+    }
+    const unsubscribe = manager.subscribe((goal) => {
+      this.updateRuntimeState({ goal });
+    });
+    const binding = { unsubscribe };
+    this.goalBinding = binding;
+    return () => {
+      if (this.goalBinding !== binding) return;
+      unsubscribe();
+      this.goalBinding = undefined;
+    };
+  }
+
+  /** 等待当前已排队的会话写入完成。 */
+  async flushPersistence(): Promise<void> {
+    const barrier = this.persistenceTail;
+    await barrier;
+  }
+
+  /** 在首个 await 前同步冻结状态与当前 tail，不被后来写入污染边界。 */
+  readHydrationSnapshot(): Promise<SessionHydrationSnapshot> {
+    const snapshot: SessionHydrationSnapshot = {
+      schemaVersion: 1,
+      persistenceSequence: this.store && this.nextSeq > 0 ? this.nextSeq - 1 : null,
+      sessionId: this.id,
+      conversationId: this.conversationId,
+      workDir: this.workDir,
+      identity: structuredClone(this.identity),
+      createdAt: this.createdAt.toISOString(),
+      updatedAt: this.updatedAt.toISOString(),
+      messages: structuredClone(this.history),
+      runtime: this.getRuntimeStateSnapshot(),
+    };
+    const barrier = this.persistenceTail;
+    return barrier.then(() => snapshot);
+  }
+
+  private getUsageSnapshot(): SessionUsageSnapshot {
+    return {
+      totalPromptTokens: this.totalPromptTokens,
+      totalCompletionTokens: this.totalCompletionTokens,
+      totalInputTokens: this.totalInputTokens,
+      totalCacheReadTokens: this.totalCacheReadTokens,
+      totalCacheWriteTokens: this.totalCacheWriteTokens,
+      totalReasoningTokens: this.totalReasoningTokens,
+      totalCostCNY: this.totalCostCNY,
+      lastCostStatus: this.lastCostStatus,
+    };
+  }
+
+  private restoreUsage(usage: SessionUsageSnapshot): void {
+    this.totalPromptTokens = usage.totalPromptTokens;
+    this.totalCompletionTokens = usage.totalCompletionTokens;
+    this.totalInputTokens = usage.totalInputTokens;
+    this.totalCacheReadTokens = usage.totalCacheReadTokens;
+    this.totalCacheWriteTokens = usage.totalCacheWriteTokens;
+    this.totalReasoningTokens = usage.totalReasoningTokens;
+    this.totalCostCNY = usage.totalCostCNY;
+    this.lastCostStatus = usage.lastCostStatus;
   }
 
   /**
@@ -385,15 +538,10 @@ export class Session {
       }
     }
 
-    // 事件追加落盘:fire-and-forget,失败仅 warn 不阻塞主循环(对标 kimi-code append)。
-    // Promise 收集到 pendingWrites,供 persistTruncate 落盘前 await,避免 truncate
-    // 抢先写入导致重放时 message 缺失(C1 竞态修复)。
+    // 事件追加落盘:payload 在逻辑变更点复制，再进入唯一串行队列。
     if (this.store) {
-      const seq = this.nextSeq++;
-      const writePromise = this.store
-        .appendMessage(seq, msg)
-        .catch((err) => logger.warn({ seq }, `[session] 持久化写入失败: ${String(err)}`));
-      this.pendingWrites.push(writePromise);
+      const persisted = structuredClone(msg);
+      this.enqueuePersistence("message", (store, seq) => store.appendMessage(seq, persisted));
     }
   }
 
@@ -409,13 +557,17 @@ export class Session {
       this.history = [];
       this.updatedAt = new Date();
       // 追加 truncate 事件(fromIndex = 历史长度 → 重放后为空)
-      void this.persistTruncate(fromIndex);
+      if (this.store) {
+        this.enqueuePersistence("truncate", (store, seq) => store.appendTruncate(seq, fromIndex));
+      }
       return;
     }
     this.history = this.history.slice(fromIndex);
     this.pruneToolResultMeta();
     this.updatedAt = new Date();
-    void this.persistTruncate(fromIndex);
+    if (this.store) {
+      this.enqueuePersistence("truncate", (store, seq) => store.appendTruncate(seq, fromIndex));
+    }
   }
 
   /**
@@ -436,7 +588,9 @@ export class Session {
     this.updatedAt = new Date();
     // 4.3: undo 重写历史,递增 epoch 让旧 cursor 的 WS client 感知世代已变。
     this.store?.bumpEpoch();
-    void this.persistUndoEvent(removedCount);
+    if (this.store) {
+      this.enqueuePersistence("undo", (store, seq) => store.appendUndoEvent(seq, removedCount));
+    }
   }
 
   async beginRewindPoint(input: {
@@ -471,7 +625,11 @@ export class Session {
     this.store?.bumpEpoch();
     // 精确记录截断下标；不能折叠成 undo(count)，否则 tool result / injection
     // 边界在恢复时可能漂移。
-    await this.persistRewindTo(messageIndex);
+    if (this.store) {
+      await this.enqueuePersistence("rewind_to", (store, seq) =>
+        store.appendRewindTo(seq, messageIndex),
+      );
+    }
   }
 
   async rewindCode(messageId: string): Promise<void> {
@@ -497,48 +655,6 @@ export class Session {
     await fileHistoryRewind(this.fileHistory, messageId, this.id);
     await this.rewindTo(messageIndex);
     await fileHistoryDiscardFrom(this.fileHistory, messageId, this.id);
-  }
-
-  /**
-   * 追加 truncate 事件到 JSONL。重放时据此折叠历史。
-   * 关键:落盘前必须先 await earlier appends(pendingWrites),保证 truncate record
-   * 在文件中位于所有 prior message records 之后;否则 fire-and-forget 乱序会让
-   * truncate 先写完,崩溃恢复重放时因缺失 message 导致折叠后历史丢失(C1 修复)。
-   * truncateTo 同步调用,内部用 void 触发本异步方法;调用方靠 flush/重启等落盘。
-   */
-  private async persistTruncate(fromIndex: number): Promise<void> {
-    if (!this.store) return;
-    // 先捕获并清空当前 pending,再 await。避免 await 期间新 append push 的 promise
-    // 被错误清空(truncateTo 之后继续 append 是合法的续接场景)。
-    const pending = this.pendingWrites;
-    this.pendingWrites = [];
-    await Promise.all(pending);
-    const seq = this.nextSeq++;
-    this.store
-      .appendTruncate(seq, fromIndex)
-      .catch((err) => logger.warn({ seq }, `[session] truncate 落盘失败: ${String(err)}`));
-  }
-
-  private async persistUndoEvent(count: number): Promise<void> {
-    if (!this.store) return;
-    const pending = this.pendingWrites;
-    this.pendingWrites = [];
-    await Promise.all(pending);
-    const seq = this.nextSeq++;
-    this.store
-      .appendUndoEvent(seq, count)
-      .catch((err) => logger.warn({ seq }, `[session] undo 落盘失败: ${String(err)}`));
-  }
-
-  private async persistRewindTo(messageIndex: number): Promise<void> {
-    if (!this.store) return;
-    const pending = this.pendingWrites;
-    this.pendingWrites = [];
-    await Promise.all(pending);
-    const seq = this.nextSeq++;
-    await this.store
-      .appendRewindTo(seq, messageIndex)
-      .catch((err) => logger.warn({ seq }, `[session] rewind_to 落盘失败: ${String(err)}`));
   }
 
   private applyUndoToHistory(history: Message[], count: number): Message[] {
@@ -589,11 +705,10 @@ export class Session {
    * 内存语义:history = [summaryMsg, ...history.slice(compactedCount)]。
    * 保留尾部(从 compactedCount 起的消息)不动,前缀浓缩成一条摘要。
    *
-   * 持久化顺序(复用 pendingWrites 机制,保证重放正确):
-   *   1. 先 await earlier appends(让 prior message records 先落盘)
-   *   2. append truncate(beforeLen) —— 丢弃当前累积的全部 beforeLen 条
-   *   3. append summary message —— 重放后成为新 history 的第一条
-   *   4. append retained tail —— 重放后跟在 summary 之后
+   * 持久化顺序(全部在本方法的同步逻辑点入队):
+   *   1. append truncate(beforeLen) —— 丢弃当前累积的全部 beforeLen 条
+   *   2. append summary message —— 重放后成为新 history 的第一条
+   *   3. append retained tail —— 重放后跟在 summary 之后
    * 重放结果:[summary, ...retained],与内存一致。
    *
    * 用 truncate + 重写尾部而非"前插 summary",因为本 JSONL 只支持
@@ -621,56 +736,26 @@ export class Session {
     // 压缩后清理已消失 ToolResult 的 meta(被摘要吞掉的前缀条目)
     this.pruneToolResultMeta();
     this.updatedAt = new Date();
-    void this.persistCompaction(beforeLen, summaryMsg, retained);
-  }
-
-  /**
-   * 持久化模型摘要压缩事件:truncate(清空当前累积)→ summary → retained tail。
-   * 关键顺序:truncate 必须在 summary/tail 之前落盘,重放才正确(drop all → rebuild)。
-   * 复用 pendingWrites:先 await earlier appends,再 await truncate 写入,
-   * 最后把 summary/tail 作为 fire-and-forget 收集进 pendingWrites 供后续 await。
-   */
-  private async persistCompaction(
-    beforeLen: number,
-    summaryMsg: Message,
-    retained: Message[],
-  ): Promise<void> {
-    if (!this.store) return;
-    const pending = this.pendingWrites;
-    this.pendingWrites = [];
-    await Promise.all(pending);
-    // 1. truncate:丢弃当前累积的全部 beforeLen 条(必须先于 summary/tail 落盘)
-    const truncSeq = this.nextSeq++;
-    try {
-      await this.store.appendTruncate(truncSeq, beforeLen);
-    } catch (err) {
-      logger.warn({ seq: truncSeq }, `[session] compaction truncate 落盘失败: ${String(err)}`);
-    }
-    // 2. summary message(重放后成为新 history 头部)
-    const sumSeq = this.nextSeq++;
-    this.pendingWrites.push(
-      this.store
-        .appendMessage(sumSeq, summaryMsg)
-        .catch((err) =>
-          logger.warn({ seq: sumSeq }, `[session] compaction summary 落盘失败: ${String(err)}`),
-        ),
-    );
-    // 3. retained tail(重放后跟在 summary 之后,保持原顺序)
-    for (const m of retained) {
-      const seq = this.nextSeq++;
-      this.pendingWrites.push(
-        this.store
-          .appendMessage(seq, m)
-          .catch((err) =>
-            logger.warn({ seq }, `[session] compaction retained 落盘失败: ${String(err)}`),
-          ),
+    if (this.store) {
+      const persistedSummary = structuredClone(summaryMsg);
+      const persistedRetained = structuredClone(retained);
+      this.enqueuePersistence("compaction truncate", (store, seq) =>
+        store.appendTruncate(seq, beforeLen),
       );
+      this.enqueuePersistence("compaction summary", (store, seq) =>
+        store.appendMessage(seq, persistedSummary),
+      );
+      for (const message of persistedRetained) {
+        this.enqueuePersistence("compaction retained", (store, seq) =>
+          store.appendMessage(seq, message),
+        );
+      }
     }
   }
 
   /** 返回全量历史的深拷贝(仅供调试 / 测试,不参与推理) */
   getHistory(): Message[] {
-    return this.history.map((m) => ({ ...m }));
+    return structuredClone(this.history);
   }
 
   /** 当前历史消息条数 */
@@ -771,18 +856,97 @@ export class Session {
     return this.store;
   }
 
+  /** 在当前调用栈内分配 seq，并把写入串行接到唯一 tail。 */
+  private enqueuePersistence(
+    kind: string,
+    write: (store: SessionStore, seq: number) => Promise<void>,
+  ): Promise<void> {
+    const store = this.store;
+    if (!store || this.lifecycle === "closed") return this.persistenceTail;
+
+    const seq = this.nextSeq++;
+    const operation = this.persistenceTail.then(() => write(store, seq));
+    const settled = operation.catch((error: unknown) => {
+      logger.warn({ seq, kind }, `[session] ${kind} 落盘失败: ${String(error)}`);
+    });
+    this.persistenceTail = settled;
+    return settled;
+  }
+
   /**
-   * 关闭底层资源(FTS5 SQLite 连接引用)。进程退出或测试清理前调用。
+   * 发起关闭：同步释放 FTS5 句柄以保持旧调用方行为，返回的 Promise
+   * 在已排队 run 结束且 JSONL tail 完全 drain 后 resolve。
    * 【连接池化】只释放本 Session 持有的引用(FTS5Store.release),引用计数归零
    * 才真正关闭共享的 sessions.db。关键:Windows 上 SQLite 文件未释放句柄时删除会
    * 触发 EBUSY,必须释放后才能 rm 工作目录。幂等(重复调用安全)。
    */
-  close(): void {
+  close(): Promise<void> {
+    if (this.closePromise) return this.closePromise;
+    this.lifecycle = "closing";
+    this.goalBinding?.unsubscribe();
+    this.goalBinding = undefined;
     if (this.fts5) {
       FTS5Store.release(this.workDir);
       this.fts5 = undefined;
     }
+
+    const drain = this.runQueue
+      .then(() => {
+        // 已排队 run 全部结束后，在同一同步边界禁止后续写入并冻结最终 tail。
+        // 若先捕获 tail、再异步标记 closed，窗口内的新写入会逃出 close 的 drain。
+        this.lifecycle = "closed";
+        return this.persistenceTail;
+      })
+      .then(() => {
+        this.store = undefined;
+      });
+    this.closePromise = registerSessionDrain(sessionEntryKey(this.id, this.workDir), drain);
+    return this.closePromise;
   }
+}
+
+function deriveUsageFromHistory(history: readonly Message[]): SessionUsageSnapshot {
+  const usage = createEmptyUsageSnapshot();
+  for (const message of history) {
+    if (!message.usage) continue;
+    const canonical = toCanonicalUsage(message.usage);
+    usage.totalPromptTokens += Math.max(0, canonical.totalPromptTokens);
+    usage.totalCompletionTokens += Math.max(0, canonical.totalCompletionTokens);
+    usage.totalInputTokens += canonical.inputTokens;
+    usage.totalCacheReadTokens += canonical.cacheReadTokens;
+    usage.totalCacheWriteTokens += canonical.cacheWriteTokens;
+    usage.totalReasoningTokens += canonical.reasoningTokens;
+  }
+  return usage;
+}
+
+function mergeUsageWithHistory(
+  persisted: SessionUsageSnapshot | undefined,
+  fromHistory: SessionUsageSnapshot,
+): SessionUsageSnapshot {
+  if (!persisted) return fromHistory;
+  return {
+    totalPromptTokens: Math.max(persisted.totalPromptTokens, fromHistory.totalPromptTokens),
+    totalCompletionTokens: Math.max(
+      persisted.totalCompletionTokens,
+      fromHistory.totalCompletionTokens,
+    ),
+    totalInputTokens: Math.max(persisted.totalInputTokens, fromHistory.totalInputTokens),
+    totalCacheReadTokens: Math.max(
+      persisted.totalCacheReadTokens,
+      fromHistory.totalCacheReadTokens,
+    ),
+    totalCacheWriteTokens: Math.max(
+      persisted.totalCacheWriteTokens,
+      fromHistory.totalCacheWriteTokens,
+    ),
+    totalReasoningTokens: Math.max(
+      persisted.totalReasoningTokens,
+      fromHistory.totalReasoningTokens,
+    ),
+    totalCostCNY: persisted.totalCostCNY,
+    lastCostStatus: persisted.lastCostStatus,
+  };
 }
 
 /**
@@ -807,6 +971,8 @@ export class SessionManager {
   static readonly DEFAULT_TTL_MS = 24 * 60 * 60 * 1000;
 
   private readonly entries = new Map<string, { session: Session; lastAccessMs: number }>();
+  /** 合并同 key 的并发 recover，避免 drain 结束后同时创建两个实例。 */
+  private readonly openingByKey = new Map<string, Promise<Session>>();
   private readonly maxSessions: number;
   private readonly ttlMs: number;
 
@@ -838,12 +1004,16 @@ export class SessionManager {
       return existing.session;
     }
 
-    const sess = new Session(id, workDir, options);
-    await sess.recover();
-    this.entries.set(key, { session: sess, lastAccessMs: Date.now() });
-    // LRU 驱赶:新增后若超 maxSessions,驱逐最旧(刚 set 的不会是最旧)。
-    this.evictLru();
-    return sess;
+    const opening = this.openingByKey.get(key);
+    if (opening) return opening;
+
+    const created = this.openAfterDrain(key, id, workDir, options);
+    this.openingByKey.set(key, created);
+    try {
+      return await created;
+    } finally {
+      if (this.openingByKey.get(key) === created) this.openingByKey.delete(key);
+    }
   }
 
   /**
@@ -874,10 +1044,7 @@ export class SessionManager {
 
   /** 清空所有会话(主要用于测试)。释放每个 Session 的底层资源。 */
   clear(): void {
-    for (const { session } of this.entries.values()) {
-      session.close();
-    }
-    this.entries.clear();
+    for (const key of [...this.entries.keys()]) this.deleteByKey(key);
   }
 
   /** MRU 提升:把 key 移到 Map 末尾(最近使用),保持迭代序 = LRU 序。 */
@@ -911,12 +1078,41 @@ export class SessionManager {
     const entry = this.entries.get(key);
     if (!entry) return undefined;
     this.entries.delete(key);
-    entry.session.close();
+    this.startDrain(key, entry.session);
     return entry.session;
   }
 
+  private async openAfterDrain(
+    key: string,
+    id: string,
+    workDir: string,
+    options?: { persistence?: boolean; identity?: SessionIdentity },
+  ): Promise<Session> {
+    await sessionDrains.get(key);
+
+    // drain 等待期间可能已有其他路径完成创建，再检查一次。
+    const existing = this.entries.get(key);
+    if (existing) {
+      existing.lastAccessMs = Date.now();
+      this.touch(key);
+      return existing.session;
+    }
+
+    const session = new Session(id, workDir, options);
+    await session.recover();
+    this.entries.set(key, { session, lastAccessMs: Date.now() });
+    this.evictLru();
+    return session;
+  }
+
+  private startDrain(key: string, session: Session): void {
+    void session.close().catch((error: unknown) => {
+      logger.warn({ key, error: String(error) }, "[session] 驱逐时持久化 drain 失败");
+    });
+  }
+
   private entryKey(id: string, workDir: string): string {
-    return `${resolve(workDir)}\0${id}`;
+    return sessionEntryKey(id, workDir);
   }
 
   private findEntryKey(id: string, workDir?: string): string | undefined {

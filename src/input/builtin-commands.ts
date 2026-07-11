@@ -25,6 +25,7 @@ const CORE_HELP_COMMANDS = new Set([
   "sessions",
   "resume",
   "snapshots",
+  "changes",
   "rewind",
   "undo",
   "image",

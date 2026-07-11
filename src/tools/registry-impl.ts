@@ -1,6 +1,7 @@
 // Registry 默认实现 + 内置工具。
 // 对应课程第 05 讲:registryImpl + read_file 工具。
 
+import { spawn, type ChildProcess } from "node:child_process";
 import { readFile, writeFile, mkdir, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import type {
@@ -9,7 +10,10 @@ import type {
   MiddlewareFunc,
   Registry,
   RequestMiddleware,
+  ToolExecutionContext,
+  ToolFileSideEffects,
 } from "./registry.js";
+import { NO_FILE_SIDE_EFFECTS, WORKSPACE_FILE_SIDE_EFFECTS } from "./registry.js";
 import type { ToolCall, ToolDefinition, ToolResult } from "../schema/message.js";
 import { logger } from "../observability/logger.js";
 import { ToolAccesses } from "./tool-access.js";
@@ -20,7 +24,8 @@ import {
 } from "./line-endings.js";
 import { findClosestLines, formatCandidateHint } from "./edit-hint.js";
 // 跨平台 shell:Windows 上统一走 Git Bash,避免 cmd.exe 不识别 POSIX 语义。
-import { execAsync, execOptions } from "../os/shell.js";
+import { isWindows, resolveShell, shellCommandArgs } from "../os/shell.js";
+import { signalProcessTree } from "../os/process-tree.js";
 import { BackgroundManager } from "./background-manager.js";
 import type { HookRunner } from "../hooks/runner.js";
 import { WorkspaceRoots } from "./workspace-roots.js";
@@ -56,6 +61,18 @@ export function resolveReadablePath(workDir: string, path: string): string {
 
 function workspaceRootsFrom(input: string | WorkspaceRoots): WorkspaceRoots {
   return typeof input === "string" ? WorkspaceRoots.createSync(input) : input;
+}
+
+function exactPathSideEffects(args: string): ToolFileSideEffects {
+  try {
+    const { path } = JSON.parse(args) as { path?: unknown };
+    return {
+      kind: "exact",
+      paths: typeof path === "string" && path.length > 0 ? [path] : [],
+    };
+  } catch {
+    return { kind: "exact", paths: [] };
+  }
 }
 
 /**
@@ -161,6 +178,27 @@ export class ToolRegistry implements Registry {
     return this.tools.get(name)?.readOnly ?? false;
   }
 
+  handlesAbortSignal(name: string): boolean {
+    // 中间件可以选择不调 next，此时不能替整条链承诺物理收口。
+    return (
+      this.executionMiddlewares.length === 0 && (this.tools.get(name)?.handlesAbortSignal ?? false)
+    );
+  }
+
+  getFileSideEffects(call: ToolCall): ToolFileSideEffects {
+    const tool = this.tools.get(call.name);
+    if (!tool) return NO_FILE_SIDE_EFFECTS;
+    const declared = tool.fileSideEffects;
+    if (declared !== undefined) {
+      try {
+        return typeof declared === "function" ? declared.call(tool, call.arguments) : declared;
+      } catch (err) {
+        logger.warn({ tool: call.name, err }, "[Registry] 文件副作声明解析失败，使用保守范围");
+      }
+    }
+    return tool.readOnly ? NO_FILE_SIDE_EFFECTS : WORKSPACE_FILE_SIDE_EFFECTS;
+  }
+
   /**
    * 按 ToolCall 计算资源访问集(资源冲突图调度用)。
    * 委托给工具自报的 accesses() 方法;工具未实现或参数解析失败时,
@@ -177,7 +215,7 @@ export class ToolRegistry implements Registry {
     }
   }
 
-  async execute(call: ToolCall): Promise<ToolResult> {
+  async execute(call: ToolCall, context?: ToolExecutionContext): Promise<ToolResult> {
     // 1. 路由查找:找不到说明模型幻觉,返回 isError 让模型自纠
     let currentCall = call;
     const tool = this.tools.get(currentCall.name);
@@ -270,11 +308,11 @@ export class ToolRegistry implements Registry {
     }
     try {
       let chain: (nextCall: ToolCall) => Promise<string> = async (nextCall) =>
-        tool.execute(nextCall.arguments);
+        tool.execute(nextCall.arguments, context);
       for (let i = this.executionMiddlewares.length - 1; i >= 0; i--) {
         const mw = this.executionMiddlewares[i]!;
         const next = chain;
-        chain = (nextCall) => mw(nextCall, next);
+        chain = (nextCall) => mw(nextCall, next, context);
       }
       const output = await chain(currentCall);
       const finalOutput = this.truncateResults
@@ -302,6 +340,11 @@ export class ToolRegistry implements Registry {
       };
     } catch (err) {
       // 6. 封装:底层物理错误也封成 isError 的 ToolResult
+      if (context?.signal?.aborted) {
+        throw context.signal.reason instanceof Error
+          ? context.signal.reason
+          : new DOMException("aborted", "AbortError");
+      }
       const errMsg = err instanceof Error ? err.message : String(err);
       return {
         toolCallId: currentCall.id,
@@ -598,6 +641,10 @@ export class WriteFileTool implements BaseTool {
     return "write_file";
   }
 
+  fileSideEffects(args: string): ToolFileSideEffects {
+    return exactPathSideEffects(args);
+  }
+
   /** 声明写 path 归一化后的绝对路径 —— 不同文件的写可并行 */
   accesses(args: string): ToolAccesses {
     const { path } = JSON.parse(args) as { path?: string };
@@ -662,27 +709,15 @@ export class WriteFileTool implements BaseTool {
 
 /** bash 命令最大执行时间,防止卡死进程 (如 top / 常驻服务) */
 const BASH_TIMEOUT_MS = 30_000;
-/**
- * child_process.exec 的物理缓冲上限。这是 Node API 的 bytes 单位，
- * 与上层 observation 按 chars 判断是两个不同契约。
- */
+/** 前台命令可持久捕获的最大输出（bytes）。 */
 const BASH_EXEC_MAX_BUFFER_BYTES = 10 * 1024 * 1024;
-const REDIRECT_RE = /(?:>>|>)\s*(\S+)/g;
-
-export function extractBashRedirectTargets(workDir: string, command: string): string[] {
-  const targets: string[] = [];
-  REDIRECT_RE.lastIndex = 0;
-  let match: RegExpExecArray | null;
-  while ((match = REDIRECT_RE.exec(command)) !== null) {
-    const target = match[1]!.replace(/[;|&]+$/u, "");
-    if (target) targets.push(safeResolve(workDir, target));
-  }
-  return targets;
-}
+const BASH_KILL_GRACE_MS = 750;
 
 export class BashTool implements BaseTool {
   // 完整已捕获输出必须交给 observation 外部化，Registry 不再提前截断。
   readonly maxResultSizeChars = Number.POSITIVE_INFINITY;
+  readonly handlesAbortSignal = true;
+  readonly fileSideEffects = WORKSPACE_FILE_SIDE_EFFECTS;
 
   constructor(
     private readonly workDir: string,
@@ -722,7 +757,7 @@ export class BashTool implements BaseTool {
     };
   }
 
-  async execute(args: string): Promise<string> {
+  async execute(args: string, context?: ToolExecutionContext): Promise<string> {
     let command: string;
     let background: boolean;
     try {
@@ -748,47 +783,20 @@ export class BashTool implements BaseTool {
       });
     }
 
-    // 驾驭底线 1+2:超时控制 + 工作区绑定
-    // 注意:命令执行失败时绝不抛异常,而是原样回传(底线 3),交给模型自纠。
-    let stdout: string;
-    let timedOut = false;
-    let exceededExecutionBuffer = false;
-    try {
-      const { stdout: out } = await execAsync(
-        command,
-        execOptions({
-          cwd: this.workDir,
-          maxBuffer: BASH_EXEC_MAX_BUFFER_BYTES,
-          timeout: BASH_TIMEOUT_MS,
-        }),
-      );
-      stdout = out;
-    } catch (err) {
-      const e = err as {
-        killed?: boolean;
-        signal?: string;
-        code?: string | number;
-        stdout?: string;
-        stderr?: string;
-        message?: string;
-      };
-      // 判断是否超时
-      if (e.killed && e.signal === "SIGTERM") {
-        timedOut = true;
-      }
-      exceededExecutionBuffer =
-        e.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" ||
-        /maxBuffer|max buffer/i.test(e.message ?? "");
-      // 合并 stdout/stderr,原样回传让模型分析
-      const parts = [e.stdout ?? "", e.stderr ?? ""].filter(Boolean);
-      stdout = parts.length > 0 ? parts.join("\n") : `执行报错: ${e.message ?? String(err)}`;
-    }
+    context?.signal?.throwIfAborted();
+    const execution = await runForegroundCommand(command, this.workDir, context);
+    let stdout = execution.output;
 
-    if (timedOut) {
-      stdout += `\n[警告: 命令执行超时(${BASH_TIMEOUT_MS / 1000}s),已被系统强制终止。如果是启动常驻服务,请改用后台运行方式。]`;
+    if (execution.timedOut) {
+      stdout += `\n[警告: 命令执行超时(${BASH_TIMEOUT_MS / 1000}s),已终止完整子进程树。如果是启动常驻服务,请改用后台运行方式。]`;
     }
-    if (exceededExecutionBuffer) {
-      stdout += `\n[警告: 终端输出超过执行缓冲上限 ${BASH_EXEC_MAX_BUFFER_BYTES} bytes，命令已终止；本次结果仅包含已捕获内容。请缩小命令范围或分页输出。]`;
+    if (execution.exceededExecutionBuffer) {
+      stdout += `\n[警告: 终端输出超过执行缓冲上限 ${BASH_EXEC_MAX_BUFFER_BYTES} bytes，完整子进程树已终止；本次结果仅包含已捕获内容。请缩小命令范围或分页输出。]`;
+    }
+    if (execution.error && !stdout.trim()) {
+      stdout = `执行报错: ${execution.error.message}`;
+    } else if (execution.exitCode !== 0 && execution.exitCode !== null && !stdout.trim()) {
+      stdout = `执行报错: 命令以状态码 ${execution.exitCode} 退出。`;
     }
 
     // 空输出给明确成功反馈
@@ -799,6 +807,156 @@ export class BashTool implements BaseTool {
     // 不在工具层截断。>30,000 chars 由 observation 完整落盘并返回摘要。
     return stdout;
   }
+}
+
+interface ForegroundCommandResult {
+  output: string;
+  exitCode: number | null;
+  timedOut: boolean;
+  exceededExecutionBuffer: boolean;
+  error?: Error;
+}
+
+function runForegroundCommand(
+  command: string,
+  cwd: string,
+  context?: ToolExecutionContext,
+): Promise<ForegroundCommandResult> {
+  const shell = resolveShell();
+
+  return new Promise<ForegroundCommandResult>((resolvePromise, rejectPromise) => {
+    let child: ChildProcess;
+    try {
+      child = spawn(shell, shellCommandArgs(shell, command), {
+        cwd,
+        detached: !isWindows,
+        windowsHide: true,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } catch (error) {
+      resolvePromise({
+        output: "",
+        exitCode: null,
+        timedOut: false,
+        exceededExecutionBuffer: false,
+        error: asError(error),
+      });
+      return;
+    }
+
+    const chunks: string[] = [];
+    let capturedBytes = 0;
+    let timedOut = false;
+    let exceededExecutionBuffer = false;
+    let childError: Error | undefined;
+    let killTimer: NodeJS.Timeout | undefined;
+    let settled = false;
+    const killAttempts: Promise<boolean>[] = [];
+
+    const signalTree = (signal: NodeJS.Signals): void => {
+      killAttempts.push(signalProcessTree(child, signal).catch(() => false));
+    };
+    const forceKill = (): void => signalTree("SIGKILL");
+    const terminateWithGrace = (): void => {
+      signalTree("SIGTERM");
+      if (killTimer) return;
+      killTimer = setTimeout(forceKill, BASH_KILL_GRACE_MS);
+      killTimer.unref();
+    };
+    const emit = (stream: "stdout" | "stderr", chunk: string): void => {
+      try {
+        context?.onOutput?.({ stream, chunk });
+      } catch {
+        // Reporter 是观察者，不得因渲染错误中断物理命令。
+      }
+
+      if (exceededExecutionBuffer) return;
+      const bytes = Buffer.byteLength(chunk);
+      const remaining = BASH_EXEC_MAX_BUFFER_BYTES - capturedBytes;
+      if (bytes <= remaining) {
+        chunks.push(chunk);
+        capturedBytes += bytes;
+        return;
+      }
+      if (remaining > 0) {
+        chunks.push(truncateUtf8Bytes(chunk, remaining));
+        capturedBytes = BASH_EXEC_MAX_BUFFER_BYTES;
+      }
+      exceededExecutionBuffer = true;
+      forceKill();
+    };
+    const cleanup = (): void => {
+      if (timeoutTimer) clearTimeout(timeoutTimer);
+      if (killTimer) clearTimeout(killTimer);
+      if (context?.signal && abortListener) {
+        context.signal.removeEventListener("abort", abortListener);
+      }
+    };
+    const abortListener = (): void => {
+      // 中断是用户的显式意图，立即杀整组，不给孙进程继续写文件的宽限。
+      forceKill();
+    };
+
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk: string) => emit("stdout", chunk));
+    child.stderr?.on("data", (chunk: string) => emit("stderr", chunk));
+    child.once("error", (error) => {
+      childError = asError(error);
+    });
+    child.once("close", (exitCode) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      void Promise.allSettled(killAttempts).then(() => {
+        if (context?.signal?.aborted) {
+          rejectPromise(abortError(context.signal));
+          return;
+        }
+        resolvePromise({
+          output: chunks.join(""),
+          exitCode,
+          timedOut,
+          exceededExecutionBuffer,
+          ...(childError ? { error: childError } : {}),
+        });
+      });
+    });
+
+    const timeoutTimer = setTimeout(() => {
+      timedOut = true;
+      terminateWithGrace();
+    }, BASH_TIMEOUT_MS);
+    timeoutTimer.unref();
+
+    if (context?.signal) {
+      if (context.signal.aborted) {
+        abortListener();
+      } else {
+        context.signal.addEventListener("abort", abortListener, { once: true });
+      }
+    }
+  });
+}
+
+function truncateUtf8Bytes(value: string, maxBytes: number): string {
+  if (Buffer.byteLength(value) <= maxBytes) return value;
+  let low = 0;
+  let high = value.length;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (Buffer.byteLength(value.slice(0, middle)) <= maxBytes) low = middle;
+    else high = middle - 1;
+  }
+  return value.slice(0, low);
+}
+
+function abortError(signal: AbortSignal): Error {
+  return signal.reason instanceof Error ? signal.reason : new DOMException("aborted", "AbortError");
+}
+
+function asError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
 }
 
 // ==========================================
@@ -876,6 +1034,7 @@ export class TaskOutputTool implements BaseTool {
 
 export class TaskStopTool implements BaseTool {
   readonly readOnly = false;
+  readonly fileSideEffects = NO_FILE_SIDE_EFFECTS;
 
   constructor(private readonly backgroundManager: BackgroundManager) {}
 
@@ -1145,6 +1304,10 @@ export class EditFileTool implements BaseTool {
 
   name(): string {
     return "edit_file";
+  }
+
+  fileSideEffects(args: string): ToolFileSideEffects {
+    return exactPathSideEffects(args);
   }
 
   /** 声明对 path 的读改写(Edit 必须先读后写,与并发写同文件冲突) */
