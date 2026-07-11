@@ -3,6 +3,7 @@ import { groupToolEntries } from "./tool-grouping.js";
 import { buildToolCardVisualRows } from "./tool-card.js";
 import { buildLogoPanelRows } from "./logo-panel.js";
 import { buildErrorEntryRows } from "./message-row.js";
+import { buildSubagentActivityCardRows } from "./subagent-activity-card.js";
 export { terminalWidth, visualRows } from "./terminal-width.js";
 import { visualRows } from "./terminal-width.js";
 
@@ -103,6 +104,9 @@ function entryRows(
   if (entry.kind === "logo")
     return buildLogoPanelRows({ ...entry, renderWidth: wrapWidth }).length + 1;
   if (entry.kind === "error") return buildErrorEntryRows(entry, wrapWidth).length + 1;
+  if (entry.kind === "subagent-activity") {
+    return buildSubagentActivityCardRows(entry, wrapWidth).length + 1;
+  }
   if (entry.kind === "skill") {
     const label = `Skill activated: ${entry.name}${entry.args ? ` ${entry.args}` : ""}`;
     return visualRows(label, wrapWidth).length + 1;
