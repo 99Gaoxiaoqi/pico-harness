@@ -143,17 +143,40 @@ describe("Bash permission mode integration", () => {
     const redirect = await execute(planRegistry, "bash", {
       command: "printf planned > PLAN.md",
     });
+    const envSplit = await execute(planRegistry, "bash", {
+      command: `env -S ${shellQuote(nodeWriteCommand(join(workDir, "env-split.txt"), "blocked"))}`,
+    });
+    let mcpExecuted = false;
+    planRegistry.register({
+      name: () => "mcp__fixture__mutate",
+      definition: () => ({
+        name: "mcp__fixture__mutate",
+        description: "fixture",
+        inputSchema: { type: "object" },
+      }),
+      execute: async () => {
+        mcpExecuted = true;
+        return "unexpected";
+      },
+    });
+    const mcpMutation = await execute(planRegistry, "mcp__fixture__mutate", {});
 
     expect(planReadOnly.isError).toBe(false);
-    for (const rejected of [interpreter, redirect]) {
+    for (const rejected of [interpreter, redirect, envSplit]) {
       expect(rejected).toMatchObject({
         isError: true,
         output: expect.stringContaining("只允许可证明只读的 Bash"),
       });
     }
+    expect(mcpMutation).toMatchObject({
+      isError: true,
+      output: expect.stringContaining("MCP 工具的外部副作用无法证明为只读"),
+    });
+    expect(mcpExecuted).toBe(false);
     expect(planNotices).toHaveLength(0);
     await expect(access(join(workDir, "plan-indirect.txt"))).rejects.toThrow();
     await expect(access(join(workDir, "PLAN.md"))).rejects.toThrow();
+    await expect(access(join(workDir, "env-split.txt"))).rejects.toThrow();
   });
 });
 

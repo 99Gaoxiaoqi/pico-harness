@@ -59,6 +59,7 @@ import { formatApprovalPanel } from "../tui/approval-panel.js";
 import { createTuiRuntimeState, type TuiRuntimeState } from "../tui/runtime-state.js";
 import type { MiddlewareFunc } from "../tools/registry.js";
 import { McpConnectionManager, type McpStatusSnapshot } from "../mcp/manager.js";
+import { isMcpToolName } from "../mcp/types.js";
 import { BackgroundManager } from "../tools/background-manager.js";
 import { loadHooksConfig } from "../hooks/config.js";
 import { HookRunner } from "../hooks/runner.js";
@@ -747,6 +748,7 @@ export function buildApprovalMiddleware(
       safetyPath !== undefined ||
       externalDirectories.length > 0 ||
       bashNeedsApproval(call) ||
+      isMcpToolName(call.name) ||
       (mode === "default" && isAgentOpsDangerousCommand(call.name, call.arguments)) ||
       (mode === "auto" && isDangerousCommand(call.name, call.arguments));
     if (!needsApproval) return { allowed: true, reason: `${mode} 模式自动放行` };
@@ -823,6 +825,9 @@ function planModeDenialReason(
     return path !== undefined && !isPlanModeAllowedPath(path)
       ? "Plan Mode 守卫：当前处于 Plan Mode，只能修改 PLAN.md / TODO.md。"
       : undefined;
+  }
+  if (isMcpToolName(call.name)) {
+    return "Plan Mode 守卫：MCP 工具的外部副作用无法证明为只读，已拒绝执行。";
   }
   if (call.name !== "bash") return undefined;
   const command = parseJsonStringField(call.arguments, "command");
