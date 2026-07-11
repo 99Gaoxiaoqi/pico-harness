@@ -23,6 +23,11 @@ import type {
   TuiToolCallProjection,
   UiMode,
 } from "./tui-event-store.js";
+import { joinToolOutput } from "./tui-event-store.js";
+
+/** Bash 的外部化阈值是 30k；多留少量余量后立即停止向 append-only 日志写正文。 */
+export const TUI_TOOL_OUTPUT_MEMORY_LIMIT_CHARS = 32_000;
+export const TUI_INLINE_TOOL_RESULT_LIMIT_CHARS = 50_000;
 
 export { TuiEventStore };
 
@@ -215,6 +220,40 @@ export class TuiReporter implements Reporter {
     this.emit();
   }
 
+  onToolOutput(
+    toolName: string,
+    stream: "stdout" | "stderr",
+    chunk: string,
+    providerCallId?: string,
+  ): void {
+    if (chunk.length === 0) return;
+    const internalToolCallId = this.resolvePendingToolId(toolName, providerCallId);
+    if (internalToolCallId === undefined) return;
+    const tool = this.eventStore.getProjection().toolCalls[internalToolCallId];
+    if (!tool || tool.outputTruncated) return;
+
+    // 上限在 append 前生效：event log 与 projection 都不会持有上限外正文。
+    const remaining = Math.max(0, TUI_TOOL_OUTPUT_MEMORY_LIMIT_CHARS - tool.outputChars);
+    const retained = remaining > 0 ? chunk.slice(0, remaining) : "";
+    if (retained.length > 0) {
+      this.eventStore.append({
+        type: "tool.output",
+        toolCallId: internalToolCallId,
+        stream,
+        chunk: retained,
+      });
+    }
+    const droppedChars = chunk.length - retained.length;
+    if (droppedChars > 0) {
+      this.eventStore.append({
+        type: "tool.output.truncated",
+        toolCallId: internalToolCallId,
+        droppedChars,
+      });
+    }
+    this.emit();
+  }
+
   onToolResult(toolName: string, result: string, isError: boolean, providerCallId?: string): void {
     const internalToolCallId = this.resolvePendingToolId(toolName, providerCallId);
     if (internalToolCallId === undefined) {
@@ -228,11 +267,28 @@ export class TuiReporter implements Reporter {
       this.emit();
       return;
     }
+    const externalized = parseExternalizedToolResult(result);
+    const streamedResult = joinToolOutput(tool.output);
+    const oversizedWithoutArtifact =
+      externalized === undefined && result.length > TUI_INLINE_TOOL_RESULT_LIMIT_CHARS;
+    const truncated = externalized !== undefined || oversizedWithoutArtifact;
+    const canReuseStreamedResult =
+      !truncated && !tool.outputTruncated && streamedResult.length > 0 && streamedResult === result;
+    const summary = externalized
+      ? formatExternalizedResultSummary(externalized)
+      : summarizeResult(toolName, tool.args, result, isError);
     this.eventStore.append({
       type: "tool.completed",
       toolCallId: internalToolCallId,
       status: resolveToolStatus(toolName, result, isError),
-      summary: summarizeResult(toolName, tool.args, result, isError),
+      summary,
+      ...(!truncated && !canReuseStreamedResult ? { inlineResult: result } : {}),
+      ...(externalized?.artifactRef !== undefined ? { artifactRef: externalized.artifactRef } : {}),
+      ...(externalized?.artifactPath !== undefined
+        ? { artifactPath: externalized.artifactPath }
+        : {}),
+      size: externalized?.originalChars ?? result.length,
+      truncated,
     });
     this.removePendingTool(tool);
     this.emit();
@@ -413,6 +469,49 @@ export class TuiReporter implements Reporter {
       ...projection.entries.map(({ entry }) => entry),
     );
   }
+}
+
+export interface ExternalizedToolResultMetadata {
+  artifactRef?: string;
+  artifactPath?: string;
+  artifactId?: string;
+  originalChars?: number;
+  summary: string;
+}
+
+/** 只识别 observation processor 的结构化占位格式，不从普通工具文本猜路径。 */
+export function parseExternalizedToolResult(
+  result: string,
+): ExternalizedToolResultMetadata | undefined {
+  if (!result.startsWith("[大型工具输出已外部化]\n")) return undefined;
+  const lines = result.split("\n");
+  const summaryIndex = lines.indexOf("summary:");
+  const metadataLines = lines.slice(1, summaryIndex === -1 ? lines.length : summaryIndex);
+  const metadata = new Map<string, string>();
+  for (const line of metadataLines) {
+    const separator = line.indexOf(":");
+    if (separator <= 0) continue;
+    const key = line.slice(0, separator).trim();
+    const value = line.slice(separator + 1).trim();
+    if (value.length > 0) metadata.set(key, value);
+  }
+  const parsedSize = Number(metadata.get("originalChars"));
+  return {
+    ...(metadata.has("artifactUri") ? { artifactRef: metadata.get("artifactUri")! } : {}),
+    ...(metadata.has("artifactPath") ? { artifactPath: metadata.get("artifactPath")! } : {}),
+    ...(metadata.has("artifactId") ? { artifactId: metadata.get("artifactId")! } : {}),
+    ...(Number.isSafeInteger(parsedSize) && parsedSize >= 0 ? { originalChars: parsedSize } : {}),
+    summary:
+      summaryIndex === -1
+        ? "大型工具输出已保存到 artifact。"
+        : lines.slice(summaryIndex + 1).join("\n"),
+  };
+}
+
+function formatExternalizedResultSummary(metadata: ExternalizedToolResultMetadata): string {
+  const summary = metadata.summary.trim() || "大型工具输出已保存到 artifact。";
+  const location = metadata.artifactRef ?? metadata.artifactId;
+  return location ? `${summary}\n\n完整结果: ${location}` : summary;
 }
 
 function normalizeIdentity(value: string | undefined): string | undefined {
