@@ -54,11 +54,13 @@ export async function createTuiRuntimeState(
   const taskRegistry = new TaskRegistry();
   const skillRegistry = new SkillRegistry(workDir);
   await skillRegistry.init();
+  const goalManager = new GoalManager();
+  const unbindGoalManager = options.session.bindGoalManager(goalManager);
 
   return new DefaultTuiRuntimeState({
     workDir,
     sessionId: options.sessionId,
-    goalManager: new GoalManager(),
+    goalManager,
     todoStore: new TodoStore(workDir),
     toolDisclosure: options.toolDisclosure ?? new ToolDisclosure(),
     taskRegistry,
@@ -70,6 +72,7 @@ export async function createTuiRuntimeState(
       : undefined,
     fileIndex: FileIndex.create({ cwd: workDir }),
     steerQueue: new SteerQueue(),
+    unbindGoalManager,
   });
 }
 
@@ -86,6 +89,7 @@ interface DefaultTuiRuntimeStateOptions {
   memoryNudger: MemoryNudger | undefined;
   fileIndex: FileIndex;
   steerQueue: SteerQueue;
+  unbindGoalManager: () => void;
 }
 
 class DefaultTuiRuntimeState implements TuiRuntimeState {
@@ -101,6 +105,7 @@ class DefaultTuiRuntimeState implements TuiRuntimeState {
   readonly memoryNudger: MemoryNudger | undefined;
   readonly fileIndex: FileIndex;
   readonly steerQueue: SteerQueue;
+  private readonly unbindGoalManager: () => void;
   private disposed = false;
 
   constructor(options: DefaultTuiRuntimeStateOptions) {
@@ -116,6 +121,7 @@ class DefaultTuiRuntimeState implements TuiRuntimeState {
     this.memoryNudger = options.memoryNudger;
     this.fileIndex = options.fileIndex;
     this.steerQueue = options.steerQueue;
+    this.unbindGoalManager = options.unbindGoalManager;
   }
 
   assertCompatible(workDir: string, sessionId: string): void {
@@ -141,7 +147,15 @@ class DefaultTuiRuntimeState implements TuiRuntimeState {
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
-    const runningTasks = this.backgroundManager.list().filter((task) => task.status === "running");
-    await Promise.allSettled(runningTasks.map((task) => this.backgroundManager.stop(task.taskId)));
+    try {
+      const runningTasks = this.backgroundManager
+        .list()
+        .filter((task) => task.status === "running");
+      await Promise.allSettled(
+        runningTasks.map((task) => this.backgroundManager.stop(task.taskId)),
+      );
+    } finally {
+      this.unbindGoalManager();
+    }
   }
 }

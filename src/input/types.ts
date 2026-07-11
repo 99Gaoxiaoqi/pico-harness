@@ -30,7 +30,13 @@ export type LocalCommandAction =
   | "mcp"
   | "skills"
   | "agents"
+  | "resume"
   | "message";
+
+export interface ResumeSessionCommandData {
+  sessionId: string;
+  mode: "resume" | "fork";
+}
 
 export interface LocalCommandResult {
   type: "local";
