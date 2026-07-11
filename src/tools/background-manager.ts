@@ -31,6 +31,12 @@ export interface BackgroundManagerOptions {
   taskRegistry?: TaskRegistry;
 }
 
+export interface BackgroundTaskSpawnOptions {
+  /** 可信宿主生成的实际执行文件与参数，任务记录仍保留原始 command。 */
+  executable: string;
+  args: readonly string[];
+}
+
 interface ManagedTask {
   record: BackgroundTaskRecord;
   order: number;
@@ -60,7 +66,11 @@ export class BackgroundManager {
     this.taskRegistry = options.taskRegistry ?? new TaskRegistry();
   }
 
-  start(command: string, cwd: string): BackgroundTaskRecord {
+  start(
+    command: string,
+    cwd: string,
+    spawnOptions?: BackgroundTaskSpawnOptions,
+  ): BackgroundTaskRecord {
     const order = this.nextId;
     this.nextId++;
     const task = this.taskRegistry.create("local_bash", {
@@ -71,12 +81,16 @@ export class BackgroundManager {
     const shell = resolveShell();
     let child: ChildProcessByStdio<null, Readable, Readable>;
     try {
-      child = spawn(shell, shellCommandArgs(shell, command), {
-        cwd,
-        detached: !isWindows,
-        windowsHide: true,
-        stdio: ["ignore", "pipe", "pipe"],
-      });
+      child = spawn(
+        spawnOptions?.executable ?? shell,
+        spawnOptions ? [...spawnOptions.args] : shellCommandArgs(shell, command),
+        {
+          cwd,
+          detached: !isWindows,
+          windowsHide: true,
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
     } catch (err) {
       this.taskRegistry.fail(taskId, err);
       throw err;

@@ -3,29 +3,23 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 import { extractBashWritePaths } from "../approval/bash-paths.js";
 
 export type SandboxNetworkPolicy = "deny" | "allow";
-export type SandboxUnavailablePolicy = "deny" | "allow-unsandboxed";
 export type SandboxBackend = "macos-sandbox-exec" | "linux-bwrap" | "unavailable";
 
 export interface YoloSandboxConfig {
-  /** 为 false 时仅供宿主显式退出硬边界，默认开启。 */
-  enabled: boolean;
   /** 子进程网络策略，默认拒绝。 */
   network: SandboxNetworkPolicy;
-  /** 宿主无沙箱后端时的行为，默认 fail-closed。 */
-  unavailable: SandboxUnavailablePolicy;
 }
 
 export const DEFAULT_YOLO_SANDBOX_CONFIG: Readonly<YoloSandboxConfig> = Object.freeze({
-  enabled: true,
   network: "deny",
-  unavailable: "deny",
 });
 
 export type SandboxViolationCode =
   | "sandbox_unavailable"
   | "workspace_write_denied"
   | "sensitive_path_denied"
-  | "network_denied";
+  | "network_denied"
+  | "sandbox_runtime_denied";
 
 export class SandboxViolationError extends Error {
   override readonly name = "SandboxViolationError";
@@ -90,13 +84,8 @@ export function evaluateSandboxCommand(
 
 export function buildSandboxSpawnPlan(request: SandboxRequest): SandboxSpawnPlan {
   const config = normalizeSandboxConfig(request.config ?? {});
-  if (!config.enabled) {
-    return unsandboxedPlan(request);
-  }
-
   const backend = detectSandboxBackend(request.platform ?? process.platform);
   if (backend === "unavailable") {
-    if (config.unavailable === "allow-unsandboxed") return unsandboxedPlan(request);
     throw new SandboxViolationError(
       "sandbox_unavailable",
       "当前宿主没有可用的 OS 沙箱后端，已按 fail-closed 策略拒绝 Bash。",
@@ -168,11 +157,7 @@ function buildMacosProfile(roots: readonly string[], network: SandboxNetworkPoli
     '(allow file-write-data (literal "/dev/null"))',
     '(allow file-write-data (literal "/dev/tty"))',
     ...roots.map((root) => `(allow file-write* (subpath ${sbplString(root)}))`),
-    ...roots.flatMap((root) =>
-      [...SENSITIVE_DIRECTORY_NAMES].map(
-        (directory) => `(deny file-write* (subpath ${sbplString(resolve(root, directory))}))`,
-      ),
-    ),
+    `(deny file-write* (regex #"/(\\.git|\\.ssh|\\.gnupg|\\.aws|\\.docker)(/|$)" #"/(\\.env(\\.[^/]*)?|\\.npmrc|\\.pypirc|credentials|id_(rsa|ed25519|ecdsa)|[^/]*\\.(pem|key))$"))`,
   ];
   if (network === "allow") rules.push("(allow network*)");
   return rules.join("\n");
@@ -208,15 +193,6 @@ function findLinuxBwrap(): string {
   return "";
 }
 
-function unsandboxedPlan(request: SandboxRequest): SandboxSpawnPlan {
-  return {
-    backend: "unavailable",
-    command: request.shell,
-    args: [...request.shellArgs],
-    sandboxed: false,
-  };
-}
-
 function denied(code: SandboxViolationCode, reason: string): SandboxDecision {
   return { allowed: false, code, reason: `[sandbox:${code}] ${reason}` };
 }
@@ -234,8 +210,8 @@ function hasExplicitNetworkIntent(command: string): boolean {
   return EXPLICIT_NETWORK_COMMAND_RE.test(command) || NETWORK_URL_RE.test(command);
 }
 
-const SENSITIVE_DIRECTORY_NAMES = new Set([".git", ".ssh", ".gnupg", ".aws"]);
-const SENSITIVE_FILE_NAMES = new Set([".env", ".npmrc", ".pypirc", "credentials", "config.json"]);
+const SENSITIVE_DIRECTORY_NAMES = new Set([".git", ".ssh", ".gnupg", ".aws", ".docker"]);
+const SENSITIVE_FILE_NAMES = new Set([".env", ".npmrc", ".pypirc", "credentials"]);
 const PRIVATE_KEY_FILE_RE = /^(?:id_(?:rsa|ed25519|ecdsa)|.*\.(?:pem|key))$/iu;
 const EXPLICIT_NETWORK_COMMAND_RE =
   /(?:^|[;&|]\s*|\s)(?:curl|wget|nc|ncat|netcat|ssh|scp|sftp|ftp|telnet|ping)\b/iu;
