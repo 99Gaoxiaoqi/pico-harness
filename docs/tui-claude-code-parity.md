@@ -60,7 +60,6 @@ Pico 的 CLI session 以当前项目目录为边界：
 | `/model`       | 从已配置/发现的 `providerID/modelID` 路由中切换完整 provider、端点、凭证来源和模型。       |
 | `/thinking`    | 查看或切换思考强度：`off`、`low`、`medium`、`high`。别名：`/effort`。                      |
 | `/permissions` | `/mode` 的兼容别名；不再维护第二套权限状态。                                               |
-| `/tools`       | 列出核心、已披露和可搜索工具；`/tools <query>` 搜索可披露工具。                            |
 | `/help`        | 列出命令；`/help <command>` 查看单个命令用法。                                             |
 | `/clear`       | 清空本地 TUI transcript 视图。                                                             |
 | `/compact`     | 对当前 session 历史做摘要压缩；缺少模型配置时会说明不可用原因。                            |
@@ -133,7 +132,7 @@ pico --add-dir ../shared --add-dir /absolute/generated
   "keybindings": {
     "Global": {
       "ctrl+x": "app:exit",
-      "ctrl+k": "command:/tools"
+      "ctrl+k": "command:/status"
     },
     "Chat": {
       "meta+enter": "input:newline"
@@ -141,6 +140,8 @@ pico --add-dir ../shared --add-dir /absolute/generated
   }
 }
 ```
+
+模型工具由 Agent 按任务自动选择，并通过内部延迟披露机制按需加载；TUI 不提供 `/tools` 命令。MCP 连接状态使用 `/mcp`，审批策略使用 `/permissions`。
 
 键位值可以是内置 action、`command:/...` slash command，或 `null` 用于解绑默认键。已知字段会在启动时严格校验，错误会带配置路径和字段名；`commandsDir` 必须保持在项目目录内。
 

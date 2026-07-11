@@ -26,7 +26,6 @@ export type LocalCommandAction =
   | "status"
   | "model"
   | "thinking"
-  | "tools"
   | "mcp"
   | "skills"
   | "agents"
@@ -79,7 +78,6 @@ export type SlashCommandSource =
 export type SlashCommandCategory =
   | "session"
   | "workspace"
-  | "tools"
   | "model"
   | "permissions"
   | "help"

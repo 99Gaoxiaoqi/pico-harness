@@ -21,7 +21,6 @@ const CORE_HELP_COMMANDS = new Set([
   "doctor",
   "model",
   "thinking",
-  "tools",
   "mcp",
   "agents",
   "sessions",

@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "commandsDir": ".pico/commands",
+  "model": "deepseek/deepseek-v4-pro",
+  "providers": {
+    "deepseek": {
+      "protocol": "openai",
+      "baseURL": "https://api.deepseek.com",
+      "apiKeyEnv": "LLM_API_KEY",
+      "discoverModels": false,
+      "models": {
+        "deepseek-v4-pro": {
+          "context": 128000,
+          "output": 4096,
+          "reasoning": true,
+          "toolCall": true,
+          "cache": true
+        }
+      }
+    }
+  },
+  "permissions": {
+    "additionalDirectories": []
+  },
+  "sandbox": {
+    "network": "deny"
+  },
+  "lsp": {
+    "servers": []
+  },
+  "keybindings": {}
+}
