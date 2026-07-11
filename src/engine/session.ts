@@ -14,11 +14,23 @@
 import { mkdirSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
-import type { CanonicalUsage, Message } from "../schema/message.js";
+import { toCanonicalUsage, type CanonicalUsage, type Message } from "../schema/message.js";
 import type { CostStatus } from "../observability/pricing.js";
 import { logger } from "../observability/logger.js";
 import { SessionStore } from "./session-store.js";
 import { createSessionIdentity, type SessionIdentity } from "./session-identity.js";
+import type { GoalManager } from "./goal-manager.js";
+import {
+  createEmptyUsageSnapshot,
+  normalizeSessionRuntimeStatePatch,
+  SESSION_RUNTIME_STATE_VERSION,
+  type PersistedSessionSettings,
+  type SessionHydrationSnapshot,
+  type SessionRuntimePersistence,
+  type SessionRuntimeStatePatch,
+  type SessionRuntimeStateSnapshot,
+  type SessionUsageSnapshot,
+} from "./session-runtime.js";
 import { FTS5Store } from "../memory/fts5-store.js";
 import {
   createFileHistoryState,
@@ -41,7 +53,7 @@ function sanitizeFilePart(value: string): string {
  * Session:一次持续的人机交互过程。
  * 负责维护该会话的完整历史,并提供 WorkingMemory 提取。
  */
-export class Session {
+export class Session implements SessionRuntimePersistence {
   /** 会话标识(终端目录哈希 / 飞书 ChatID / 微信 OpenID) */
   readonly id: string;
   /** 该会话绑定的物理工作区 */
@@ -107,6 +119,12 @@ export class Session {
    * 会因缺失 message 导致历史丢失(对标 C1 竞态修复)。
    */
   private pendingWrites: Promise<void>[] = [];
+  /** truncate/undo/compaction 等复合持久化操作，供水合读取等待稳定边界。 */
+  private readonly pendingPersistenceOperations = new Set<Promise<void>>();
+
+  private persistedSettings?: PersistedSessionSettings;
+  private persistedGoal?: ReturnType<GoalManager["snapshot"]>;
+  private goalBinding?: { unsubscribe: () => void };
 
   /**
    * 并发安全:per-session 串行执行队列。
@@ -206,6 +224,7 @@ export class Session {
     // volatile message(易失事件,如流式片段)不重建进 history —— 4.3 cursor
     // 多端同步:它们仅用于 WS 实时推送,重放时丢弃。旧 JSONL 无此字段(按 false 处理)。
     let pending: Message[] = [];
+    let restoredUsage: SessionUsageSnapshot | undefined;
     for (const r of records) {
       if (r.type === "message") {
         if (r.volatile === true) continue;
@@ -216,9 +235,17 @@ export class Session {
         pending = this.applyUndoToHistory(pending, r.count);
       } else if (r.type === "rewind_to") {
         pending = pending.slice(0, r.messageIndex);
+      } else if (r.type === "runtime_state") {
+        if (r.patch.settings) this.persistedSettings = r.patch.settings;
+        if (r.patch.goal) this.persistedGoal = r.patch.goal;
+        if (r.patch.usage) restoredUsage = r.patch.usage;
       }
     }
     this.history = pending;
+    // 旧 JSONL 没有 runtime_state:从当前有效 assistant message.usage 回填 token。
+    // 旧数据无计价路由，成本只能保持 0/null。新日志取持久值与可恢复值的较大者，
+    // 容忍“message 已落盘、usage 记录末行撕裂”。
+    this.restoreUsage(mergeUsageWithHistory(restoredUsage, deriveUsageFromHistory(this.history)));
     // 3.1:重放后从 history 重建 toolResultMeta(cachedAt 未知,用当前时间;
     // accessCount 归零)。避免恢复后已有 ToolResult 丢失年龄追踪。
     this.rebuildToolResultMeta();
@@ -304,6 +331,113 @@ export class Session {
     if (costStatus) {
       this.lastCostStatus = costStatus;
     }
+    this.updateRuntimeState({ usage: this.getUsageSnapshot() });
+  }
+
+  /** 返回与内部状态隔离的运行态快照，供启动恢复和 TUI 状态水合。 */
+  getRuntimeStateSnapshot(): SessionRuntimeStateSnapshot {
+    const snapshot: SessionRuntimeStateSnapshot = {
+      stateVersion: SESSION_RUNTIME_STATE_VERSION,
+      ...(this.persistedSettings ? { settings: this.persistedSettings } : {}),
+      ...(this.persistedGoal ? { goal: this.persistedGoal } : {}),
+      usage: this.getUsageSnapshot(),
+    };
+    return structuredClone(snapshot);
+  }
+
+  /** 更新一个完整 section，内存立即生效，然后追加到现有 Session JSONL。 */
+  updateRuntimeState(patch: SessionRuntimeStatePatch): void {
+    const normalized = normalizeSessionRuntimeStatePatch(patch);
+    if (!normalized) {
+      logger.warn("[session] 忽略无效的 runtime_state 更新");
+      return;
+    }
+    if (normalized.settings) this.persistedSettings = normalized.settings;
+    if (normalized.goal) this.persistedGoal = normalized.goal;
+    if (normalized.usage) this.restoreUsage(normalized.usage);
+    this.updatedAt = new Date();
+
+    if (this.store) {
+      const seq = this.nextSeq++;
+      const writePromise = this.store
+        .appendRuntimeState(seq, normalized)
+        .catch((error) =>
+          logger.warn({ seq }, `[session] runtime_state 落盘失败: ${String(error)}`),
+        );
+      this.pendingWrites.push(writePromise);
+    }
+  }
+
+  /**
+   * 把会话 GoalManager 绑定到同一份 JSONL。返回解绑函数供 11.4 热切换使用。
+   * 有持久快照时先恢复；无快照时保存当前初始状态。
+   */
+  bindGoalManager(manager: GoalManager): () => void {
+    this.goalBinding?.unsubscribe();
+    if (this.persistedGoal) {
+      manager.restore(this.persistedGoal);
+    } else {
+      this.updateRuntimeState({ goal: manager.snapshot() });
+    }
+    const unsubscribe = manager.subscribe((goal) => {
+      this.updateRuntimeState({ goal });
+    });
+    const binding = { unsubscribe };
+    this.goalBinding = binding;
+    return () => {
+      if (this.goalBinding !== binding) return;
+      unsubscribe();
+      this.goalBinding = undefined;
+    };
+  }
+
+  /** 等待当前已排队的会话写入完成。 */
+  async flushPersistence(): Promise<void> {
+    while (this.pendingWrites.length > 0 || this.pendingPersistenceOperations.size > 0) {
+      const writes = this.pendingWrites;
+      this.pendingWrites = [];
+      await Promise.all([...writes, ...this.pendingPersistenceOperations]);
+    }
+  }
+
+  /** 单次返回对话与运行态的深拷贝，调用方无法反向修改 Session。 */
+  async readHydrationSnapshot(): Promise<SessionHydrationSnapshot> {
+    await this.flushPersistence();
+    return {
+      schemaVersion: 1,
+      sessionId: this.id,
+      conversationId: this.conversationId,
+      workDir: this.workDir,
+      identity: structuredClone(this.identity),
+      createdAt: this.createdAt.toISOString(),
+      updatedAt: this.updatedAt.toISOString(),
+      messages: structuredClone(this.history),
+      runtime: this.getRuntimeStateSnapshot(),
+    };
+  }
+
+  private getUsageSnapshot(): SessionUsageSnapshot {
+    return {
+      totalPromptTokens: this.totalPromptTokens,
+      totalCompletionTokens: this.totalCompletionTokens,
+      totalInputTokens: this.totalInputTokens,
+      totalCacheReadTokens: this.totalCacheReadTokens,
+      totalCacheWriteTokens: this.totalCacheWriteTokens,
+      totalReasoningTokens: this.totalReasoningTokens,
+      totalCostCNY: this.totalCostCNY,
+      lastCostStatus: this.lastCostStatus,
+    };
+  }
+
+  private restoreUsage(usage: SessionUsageSnapshot): void {
+    this.totalPromptTokens = usage.totalPromptTokens;
+    this.totalCompletionTokens = usage.totalCompletionTokens;
+    this.totalInputTokens = usage.totalInputTokens;
+    this.totalCacheReadTokens = usage.totalCacheReadTokens;
+    this.totalCacheWriteTokens = usage.totalCacheWriteTokens;
+    this.totalReasoningTokens = usage.totalReasoningTokens;
+    this.totalCostCNY = usage.totalCostCNY;
+    this.lastCostStatus = usage.lastCostStatus;
   }
 
   /**
@@ -409,13 +543,13 @@ export class Session {
       this.history = [];
       this.updatedAt = new Date();
       // 追加 truncate 事件(fromIndex = 历史长度 → 重放后为空)
-      void this.persistTruncate(fromIndex);
+      this.trackPersistenceOperation(this.persistTruncate(fromIndex));
       return;
     }
     this.history = this.history.slice(fromIndex);
     this.pruneToolResultMeta();
     this.updatedAt = new Date();
-    void this.persistTruncate(fromIndex);
+    this.trackPersistenceOperation(this.persistTruncate(fromIndex));
   }
 
   /**
@@ -436,7 +570,7 @@ export class Session {
     this.updatedAt = new Date();
     // 4.3: undo 重写历史,递增 epoch 让旧 cursor 的 WS client 感知世代已变。
     this.store?.bumpEpoch();
-    void this.persistUndoEvent(removedCount);
+    this.trackPersistenceOperation(this.persistUndoEvent(removedCount));
   }
 
   async beginRewindPoint(input: {
@@ -514,7 +648,7 @@ export class Session {
     this.pendingWrites = [];
     await Promise.all(pending);
     const seq = this.nextSeq++;
-    this.store
+    await this.store
       .appendTruncate(seq, fromIndex)
       .catch((err) => logger.warn({ seq }, `[session] truncate 落盘失败: ${String(err)}`));
   }
@@ -525,7 +659,7 @@ export class Session {
     this.pendingWrites = [];
     await Promise.all(pending);
     const seq = this.nextSeq++;
-    this.store
+    await this.store
       .appendUndoEvent(seq, count)
       .catch((err) => logger.warn({ seq }, `[session] undo 落盘失败: ${String(err)}`));
   }
@@ -621,7 +755,7 @@ export class Session {
     // 压缩后清理已消失 ToolResult 的 meta(被摘要吞掉的前缀条目)
     this.pruneToolResultMeta();
     this.updatedAt = new Date();
-    void this.persistCompaction(beforeLen, summaryMsg, retained);
+    this.trackPersistenceOperation(this.persistCompaction(beforeLen, summaryMsg, retained));
   }
 
   /**
@@ -670,7 +804,7 @@ export class Session {
 
   /** 返回全量历史的深拷贝(仅供调试 / 测试,不参与推理) */
   getHistory(): Message[] {
-    return this.history.map((m) => ({ ...m }));
+    return structuredClone(this.history);
   }
 
   /** 当前历史消息条数 */
@@ -778,11 +912,65 @@ export class Session {
    * 触发 EBUSY,必须释放后才能 rm 工作目录。幂等(重复调用安全)。
    */
   close(): void {
+    this.goalBinding?.unsubscribe();
+    this.goalBinding = undefined;
     if (this.fts5) {
       FTS5Store.release(this.workDir);
       this.fts5 = undefined;
     }
   }
+
+  private trackPersistenceOperation(operation: Promise<void>): void {
+    this.pendingPersistenceOperations.add(operation);
+    void operation.then(
+      () => this.pendingPersistenceOperations.delete(operation),
+      () => this.pendingPersistenceOperations.delete(operation),
+    );
+  }
+}
+
+function deriveUsageFromHistory(history: readonly Message[]): SessionUsageSnapshot {
+  const usage = createEmptyUsageSnapshot();
+  for (const message of history) {
+    if (!message.usage) continue;
+    const canonical = toCanonicalUsage(message.usage);
+    usage.totalPromptTokens += Math.max(0, canonical.totalPromptTokens);
+    usage.totalCompletionTokens += Math.max(0, canonical.totalCompletionTokens);
+    usage.totalInputTokens += canonical.inputTokens;
+    usage.totalCacheReadTokens += canonical.cacheReadTokens;
+    usage.totalCacheWriteTokens += canonical.cacheWriteTokens;
+    usage.totalReasoningTokens += canonical.reasoningTokens;
+  }
+  return usage;
+}
+
+function mergeUsageWithHistory(
+  persisted: SessionUsageSnapshot | undefined,
+  fromHistory: SessionUsageSnapshot,
+): SessionUsageSnapshot {
+  if (!persisted) return fromHistory;
+  return {
+    totalPromptTokens: Math.max(persisted.totalPromptTokens, fromHistory.totalPromptTokens),
+    totalCompletionTokens: Math.max(
+      persisted.totalCompletionTokens,
+      fromHistory.totalCompletionTokens,
+    ),
+    totalInputTokens: Math.max(persisted.totalInputTokens, fromHistory.totalInputTokens),
+    totalCacheReadTokens: Math.max(
+      persisted.totalCacheReadTokens,
+      fromHistory.totalCacheReadTokens,
+    ),
+    totalCacheWriteTokens: Math.max(
+      persisted.totalCacheWriteTokens,
+      fromHistory.totalCacheWriteTokens,
+    ),
+    totalReasoningTokens: Math.max(
+      persisted.totalReasoningTokens,
+      fromHistory.totalReasoningTokens,
+    ),
+    totalCostCNY: persisted.totalCostCNY,
+    lastCostStatus: persisted.lastCostStatus,
+  };
 }
 
 /**

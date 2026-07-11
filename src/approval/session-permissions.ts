@@ -1,6 +1,11 @@
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import type { ToolCall } from "../schema/message.js";
-import type { InteractionMode } from "../input/session-settings.js";
+import {
+  setSessionAdditionalDirectories,
+  setSessionMode,
+  type InteractionMode,
+  type SessionSettings,
+} from "../input/session-settings.js";
 import type { WorkspaceRoots } from "../tools/workspace-roots.js";
 import { bashCommandFromArgs, extractBashWritePaths } from "./bash-paths.js";
 
@@ -74,13 +79,14 @@ export async function applySessionPermissionScope(
       added.push(result.path);
     }
     if (options.settings.additionalDirectories !== undefined) {
-      options.settings.additionalDirectories = Object.freeze([
-        ...new Set([...options.settings.additionalDirectories, ...added]),
+      setSessionAdditionalDirectories(options.settings as SessionSettings, [
+        ...options.settings.additionalDirectories,
+        ...added,
       ]);
     }
-    if (scope.enableAutoEdits) options.settings.mode = "auto";
+    if (scope.enableAutoEdits) setSessionMode(options.settings as SessionSettings, "auto");
   } else if (scope.type === "all-edits") {
-    options.settings.mode = "auto";
+    setSessionMode(options.settings as SessionSettings, "auto");
   }
   // all-edits 由权威 mode=auto 表达，directory 由 WorkspaceRoots 表达；
   // 仅无法投影到这两者的规则进入结构化 grant store。
