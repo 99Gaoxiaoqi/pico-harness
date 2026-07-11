@@ -1,6 +1,5 @@
 import type { CostStatus } from "../observability/pricing.js";
 import type { ProviderKind } from "../provider/factory.js";
-import type { ThinkingEffort } from "../provider/thinking.js";
 import type { Message } from "../schema/message.js";
 import type { Goal, GoalManagerSnapshot, GoalStatus } from "./goal-manager.js";
 import type { SessionIdentity } from "./session-identity.js";
@@ -17,7 +16,8 @@ export interface PersistedSessionSettings {
   modelRouteId?: string;
   mode: PersistedInteractionMode;
   prePlanMode?: Exclude<PersistedInteractionMode, "plan">;
-  thinkingEffort: ThinkingEffort;
+  /** Current model reasoning level. Field name is retained for old session compatibility. */
+  thinkingEffort: string;
   thinkingEffortExplicit: boolean;
   additionalDirectories: readonly string[];
 }
@@ -170,7 +170,7 @@ function normalizePersistedSessionSettings(value: unknown): PersistedSessionSett
   if (!isProviderKind(provider) || typeof model !== "string" || model.trim().length === 0) {
     return undefined;
   }
-  if (!isInteractionMode(mode) || !isThinkingEffort(thinkingEffort)) return undefined;
+  if (!isInteractionMode(mode) || !isReasoningLevel(thinkingEffort)) return undefined;
   if (typeof thinkingEffortExplicit !== "boolean") return undefined;
   if (
     !Array.isArray(additionalDirectories) ||
@@ -326,8 +326,8 @@ function isNonPlanMode(value: unknown): value is Exclude<PersistedInteractionMod
   return value === "default" || value === "auto" || value === "yolo";
 }
 
-function isThinkingEffort(value: unknown): value is ThinkingEffort {
-  return value === "off" || value === "low" || value === "medium" || value === "high";
+function isReasoningLevel(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
 }
 
 function isCostStatus(value: unknown): value is CostStatus {
