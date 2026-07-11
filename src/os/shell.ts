@@ -13,7 +13,7 @@
 
 import { exec } from "node:child_process";
 import { existsSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
 import type { ExecOptions } from "node:child_process";
 
@@ -145,4 +145,13 @@ export function execOptions(extra?: ExecOptions): Utf8ExecOptions {
     windowsHide: true,
     encoding: "utf8",
   };
+}
+
+/** 以当前平台 shell 执行一段命令文本时使用的 argv。 */
+export function shellCommandArgs(shell: string, command: string): string[] {
+  const name = basename(shell).toLowerCase();
+  if (isWindows && name === "cmd.exe") {
+    return ["/d", "/s", "/c", command];
+  }
+  return ["-lc", command];
 }

@@ -1,16 +1,31 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   copyFile,
   mkdir,
   stat,
+  lstat,
   chmod,
   unlink,
   readFile,
+  readlink,
   writeFile,
   rename,
+  rm,
 } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
+import {
+  addFileChangeJournalWarning,
+  beginFileChangeJournal,
+  copyFileWithCloneFallback,
+  discardFileChangeJournal,
+  fileChangeJournalWarnings,
+  fileChangeJournalCoversPath,
+  fileMatchesPreimage,
+  inspectFileChangeJournal,
+  type FileChangeJournal,
+  type FileChangePreimage,
+} from "./file-change-journal.js";
 
 const DEFAULT_BASE_DIR = join(homedir(), ".pico", "file-history");
 const MAX_SNAPSHOTS = 100;
@@ -21,6 +36,7 @@ export interface FileHistoryBackup {
   backupTime: Date;
   originMtimeMs?: number;
   originSize?: number;
+  originMode?: number;
 }
 
 export interface FileHistorySnapshot {
@@ -36,6 +52,8 @@ export interface FileHistorySnapshot {
   interactionMode?: string;
   /** 本条用户消息执行期间实际触碰过的文件。 */
   editedFilePaths?: Set<string>;
+  /** 本条消息的文件事务未完整覆盖工作区时的可见警告。 */
+  journalWarnings?: string[];
 }
 
 export interface FileHistoryState {
@@ -43,6 +61,7 @@ export interface FileHistoryState {
   trackedFiles: Set<string>;
   snapshotSequence: number;
   pendingTrackEdits: Map<string, FileHistoryBackup>;
+  pendingJournalWarnings: Set<string>;
   currentMessageId?: string;
   fileVersions: Map<string, number>;
 }
@@ -62,6 +81,36 @@ export interface FileHistoryDiffStat {
   addedLines: number;
   removedLines: number;
   files: FileHistoryDiffFileStat[];
+  /** true 表示本轮存在无法完整捕获的文件范围。 */
+  incomplete?: boolean;
+  warnings?: string[];
+}
+
+export interface FileHistoryFilePatch extends FileHistoryDiffFileStat {
+  patch: string;
+  /** 预览时当前文件状态的指纹，单文件恢复前必须重新校验。 */
+  currentFingerprint: string;
+}
+
+export interface FileHistoryChanges extends Omit<FileHistoryDiffStat, "files"> {
+  files: FileHistoryFilePatch[];
+  /** 所有文件 patch 按路径排序后的完整文本。 */
+  patch: string;
+}
+
+export interface FileHistoryRestoreFileResult {
+  messageId: string;
+  filePath: string;
+  status: FileHistoryDiffFileStatus;
+  restored: true;
+}
+
+/** Engine 层只持有不透明句柄，捕获/扫描细节留在 file-change-journal。 */
+export type FileHistoryJournal = FileChangeJournal;
+
+export interface FileHistoryJournalCommitResult {
+  incomplete: boolean;
+  warnings: string[];
 }
 
 export function createFileHistoryState(): FileHistoryState {
@@ -70,6 +119,7 @@ export function createFileHistoryState(): FileHistoryState {
     trackedFiles: new Set(),
     snapshotSequence: 0,
     pendingTrackEdits: new Map(),
+    pendingJournalWarnings: new Set(),
     currentMessageId: undefined,
     fileVersions: new Map(),
   };
@@ -100,6 +150,38 @@ function resolveManifestPath(sessionId: string, baseDir: string = DEFAULT_BASE_D
   return join(baseDir, getSessionDirName(sessionId), "manifest.json");
 }
 
+/**
+ * 在工具批次开始前创建写前镜像。COPYFILE_FICLONE 在支持的文件系统上使用
+ * copy-on-write，其他文件系统自动回退为普通 copy。镜像位于工作区外，
+ * 不会被后续 formatter/script 一起改写。
+ */
+export async function fileHistoryBeginJournal(
+  roots: readonly string[],
+  sessionId: string,
+  signal?: AbortSignal,
+  baseDir: string = DEFAULT_BASE_DIR,
+): Promise<FileHistoryJournal> {
+  const stagingDir = join(baseDir, getSessionDirName(sessionId), ".transactions", randomUUID());
+  return beginFileChangeJournal(roots, stagingDir, signal);
+}
+
+/** 显式标记事务无法覆盖的副作用（如 background bash）。 */
+export function fileHistoryAddJournalWarning(journal: FileHistoryJournal, warning: string): void {
+  addFileChangeJournalWarning(journal, warning);
+}
+
+/** 当前活动事务已覆盖的精确路径无需再以中途状态创建备份。 */
+export function fileHistoryJournalCoversPath(
+  journal: FileHistoryJournal,
+  filePath: string,
+): boolean {
+  return fileChangeJournalCoversPath(journal, filePath);
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 export async function createBackup(
   filePath: string,
   version: number,
@@ -128,20 +210,24 @@ export async function restoreBackup(
   backupFileName: string,
   sessionId: string,
   baseDir: string = DEFAULT_BASE_DIR,
+  beforeCommit?: () => Promise<void>,
 ): Promise<void> {
   const backupPath = resolveBackupPath(sessionId, backupFileName, baseDir);
   const backupStat = await stat(backupPath);
-
+  const temporaryPath = join(dirname(filePath), `.pico-restore-${randomUUID()}.tmp`);
+  await mkdir(dirname(filePath), { recursive: true });
+  let committed = false;
   try {
-    await copyFile(backupPath, filePath);
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code;
-    if (code !== "ENOENT") throw err;
-    await mkdir(dirname(filePath), { recursive: true });
-    await copyFile(backupPath, filePath);
+    await copyFile(backupPath, temporaryPath);
+    await chmod(temporaryPath, backupStat.mode & 0o777);
+    await beforeCommit?.();
+    // 同目录临时文件 + rename 替换目录项，不会截断目标 hard link 的共享 inode，
+    // 也不会跟随 symlink 写到授权根之外。
+    await rename(temporaryPath, filePath);
+    committed = true;
+  } finally {
+    if (!committed) await rm(temporaryPath, { force: true }).catch(() => undefined);
   }
-
-  await chmod(filePath, backupStat.mode & 0o777);
 }
 
 export async function fileHistoryTrackEdit(
@@ -173,6 +259,7 @@ export async function fileHistoryTrackEdit(
           backupTime: new Date(),
           originMtimeMs: srcStat.mtimeMs,
           originSize: srcStat.size,
+          originMode: srcStat.mode & 0o777,
         };
       } catch (err) {
         const code = (err as NodeJS.ErrnoException).code;
@@ -191,6 +278,7 @@ export async function fileHistoryTrackEdit(
 
   if (state.currentMessageId !== messageId) {
     state.pendingTrackEdits = new Map();
+    state.pendingJournalWarnings = new Set();
     state.currentMessageId = messageId;
   }
 
@@ -210,6 +298,7 @@ export async function fileHistoryTrackEdit(
       backupTime: new Date(),
       originMtimeMs: srcStat.mtimeMs,
       originSize: srcStat.size,
+      originMode: srcStat.mode & 0o777,
     };
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
@@ -220,6 +309,216 @@ export async function fileHistoryTrackEdit(
   state.fileVersions.set(filePath, version);
   state.trackedFiles.add(filePath);
   state.pendingTrackEdits.set(filePath, backup);
+}
+
+/**
+ * 工具批次结束后提交事务：只将真正发生变化的路径写入 rewind point。
+ * 被覆盖/删除的文件使用事务开始时的 staged preimage，新建文件则记为 null。
+ */
+export async function fileHistoryCommitJournal(
+  state: FileHistoryState,
+  journal: FileHistoryJournal,
+  messageId: string,
+  sessionId: string,
+  baseDir: string = DEFAULT_BASE_DIR,
+): Promise<FileHistoryJournalCommitResult> {
+  let changed = false;
+  try {
+    const current = await inspectFileChangeJournal(journal);
+    const changedPreimages: Array<[string, FileChangePreimage]> = [];
+
+    for (const [filePath, preimage] of journal.preimages) {
+      const currentMetadata = current.files.get(filePath);
+      if (!currentMetadata || current.excludedPaths.has(filePath)) {
+        changedPreimages.push([filePath, preimage]);
+        continue;
+      }
+      if (preimage.size !== currentMetadata.size || preimage.mode !== currentMetadata.mode) {
+        changedPreimages.push([filePath, preimage]);
+        continue;
+      }
+      try {
+        if (!(await fileMatchesPreimage(filePath, preimage))) {
+          changedPreimages.push([filePath, preimage]);
+        }
+      } catch (error) {
+        addFileChangeJournalWarning(
+          journal,
+          `无法核对工具执行后内容 ${filePath}: ${errorMessage(error)}`,
+        );
+      }
+    }
+
+    for (const [filePath, baseline] of journal.baseline.files) {
+      if (journal.preimages.has(filePath)) continue;
+      const after = current.files.get(filePath);
+      if (
+        !after ||
+        current.excludedPaths.has(filePath) ||
+        baseline.size !== after.size ||
+        baseline.mode !== after.mode ||
+        baseline.mtimeMs !== after.mtimeMs
+      ) {
+        addFileChangeJournalWarning(
+          journal,
+          `未捕获写前内容的文件已变化，无法安全 rewind: ${filePath}`,
+        );
+      }
+    }
+
+    for (const [filePath] of current.files) {
+      if (
+        journal.baseline.files.has(filePath) ||
+        journal.baseline.excludedPaths.has(filePath) ||
+        !journal.baseline.complete ||
+        !current.complete
+      ) {
+        continue;
+      }
+      try {
+        if (await recordJournalChange(state, filePath, undefined, messageId, sessionId, baseDir)) {
+          changed = true;
+        }
+      } catch (error) {
+        addFileChangeJournalWarning(
+          journal,
+          `无法记录新建文件 ${filePath}: ${errorMessage(error)}`,
+        );
+      }
+    }
+
+    for (const [filePath, preimage] of changedPreimages) {
+      try {
+        if (await recordJournalChange(state, filePath, preimage, messageId, sessionId, baseDir)) {
+          changed = true;
+        }
+      } catch (error) {
+        addFileChangeJournalWarning(
+          journal,
+          `无法提交写前备份 ${filePath}: ${errorMessage(error)}`,
+        );
+      }
+    }
+
+    const warnings = fileChangeJournalWarnings(journal);
+    attachJournalWarnings(state, messageId, warnings);
+    if (changed || warnings.length > 0) {
+      await saveFileHistoryState(state, sessionId, baseDir);
+    }
+    return {
+      incomplete: warnings.length > 0,
+      warnings,
+    };
+  } finally {
+    await discardFileChangeJournal(journal);
+  }
+}
+
+async function recordJournalChange(
+  state: FileHistoryState,
+  filePath: string,
+  preimage: FileChangePreimage | undefined,
+  messageId: string,
+  sessionId: string,
+  baseDir: string,
+): Promise<boolean> {
+  const rewindPoint = state.snapshots.findLast(
+    (snapshot) => snapshot.messageId === messageId && snapshot.userPrompt !== undefined,
+  );
+  if (rewindPoint) {
+    const editedFilePaths = rewindPoint.editedFilePaths ?? new Set<string>();
+    rewindPoint.editedFilePaths = editedFilePaths;
+    if (editedFilePaths.has(filePath)) return false;
+    const existing = rewindPoint.trackedFileBackups.get(filePath);
+    if (!(await backupMatchesPreimage(existing, preimage, sessionId, baseDir))) {
+      const backup = await journalBackup(filePath, preimage, state, sessionId, baseDir);
+      rewindPoint.trackedFileBackups.set(filePath, backup);
+    }
+    state.trackedFiles.add(filePath);
+    editedFilePaths.add(filePath);
+    return true;
+  }
+
+  if (state.currentMessageId !== messageId) {
+    state.pendingTrackEdits = new Map();
+    state.pendingJournalWarnings = new Set();
+    state.currentMessageId = messageId;
+  }
+  if (state.pendingTrackEdits.has(filePath)) return false;
+  const backup = await journalBackup(filePath, preimage, state, sessionId, baseDir);
+  state.pendingTrackEdits.set(filePath, backup);
+  state.trackedFiles.add(filePath);
+  return true;
+}
+
+async function backupMatchesPreimage(
+  backup: FileHistoryBackup | undefined,
+  preimage: FileChangePreimage | undefined,
+  sessionId: string,
+  baseDir: string,
+): Promise<boolean> {
+  if (!backup) return false;
+  if (!preimage) return backup.backupFileName === null;
+  if (backup.backupFileName === null || backup.originMode !== preimage.mode) return false;
+  try {
+    return await fileMatchesPreimage(
+      resolveBackupPath(sessionId, backup.backupFileName, baseDir),
+      preimage,
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function journalBackup(
+  filePath: string,
+  preimage: FileChangePreimage | undefined,
+  state: FileHistoryState,
+  sessionId: string,
+  baseDir: string,
+): Promise<FileHistoryBackup> {
+  const version = (state.fileVersions.get(filePath) ?? 0) + 1;
+  state.fileVersions.set(filePath, version);
+  if (!preimage) {
+    return { backupFileName: null, version, backupTime: new Date() };
+  }
+
+  const backupFileName = getBackupFileName(filePath, version);
+  const backupPath = resolveBackupPath(sessionId, backupFileName, baseDir);
+  await mkdir(dirname(backupPath), { recursive: true });
+  await copyFileWithCloneFallback(preimage.stagedPath, backupPath);
+  await chmod(backupPath, preimage.mode);
+  return {
+    backupFileName,
+    version,
+    backupTime: new Date(),
+    originMtimeMs: preimage.mtimeMs,
+    originSize: preimage.size,
+    originMode: preimage.mode,
+  };
+}
+
+function attachJournalWarnings(
+  state: FileHistoryState,
+  messageId: string,
+  warnings: readonly string[],
+): void {
+  if (warnings.length === 0) return;
+  const rewindPoint = state.snapshots.findLast(
+    (snapshot) => snapshot.messageId === messageId && snapshot.userPrompt !== undefined,
+  );
+  if (rewindPoint) {
+    rewindPoint.journalWarnings = [
+      ...new Set([...(rewindPoint.journalWarnings ?? []), ...warnings]),
+    ];
+    return;
+  }
+  if (state.currentMessageId !== messageId) {
+    state.pendingTrackEdits = new Map();
+    state.pendingJournalWarnings = new Set();
+    state.currentMessageId = messageId;
+  }
+  for (const warning of warnings) state.pendingJournalWarnings.add(warning);
 }
 
 function findLastBackup(state: FileHistoryState, filePath: string): FileHistoryBackup | undefined {
@@ -280,6 +579,9 @@ export async function fileHistoryMakeSnapshot(
     trackedFileBackups: new Map(),
     timestamp: new Date(),
     editedFilePaths: new Set(),
+    ...(state.pendingJournalWarnings.size > 0
+      ? { journalWarnings: [...state.pendingJournalWarnings] }
+      : {}),
     ...(messageIndex !== undefined ? { messageIndex } : {}),
     ...(metadata !== undefined ? { userPrompt: metadata.userPrompt } : {}),
     ...(metadata?.transcriptIndex !== undefined
@@ -315,7 +617,8 @@ export async function fileHistoryMakeSnapshot(
     if (
       lastBackup &&
       lastBackup.originMtimeMs === currentStat.mtimeMs &&
-      lastBackup.originSize === currentStat.size
+      lastBackup.originSize === currentStat.size &&
+      lastBackup.originMode === (currentStat.mode & 0o777)
     ) {
       snapshot.trackedFileBackups.set(filePath, lastBackup);
     } else {
@@ -328,6 +631,7 @@ export async function fileHistoryMakeSnapshot(
         backupTime: new Date(),
         originMtimeMs: currentStat.mtimeMs,
         originSize: currentStat.size,
+        originMode: currentStat.mode & 0o777,
       });
     }
   }
@@ -335,6 +639,7 @@ export async function fileHistoryMakeSnapshot(
   state.snapshots.push(snapshot);
   state.snapshotSequence++;
   state.pendingTrackEdits = new Map();
+  state.pendingJournalWarnings = new Set();
   state.currentMessageId = metadata === undefined ? undefined : messageId;
 
   if (state.snapshots.length > MAX_SNAPSHOTS) {
@@ -381,6 +686,7 @@ export async function fileHistoryDiscardFrom(
   if (targetIndex === -1) return;
   state.snapshots = state.snapshots.slice(0, targetIndex);
   state.pendingTrackEdits = new Map();
+  state.pendingJournalWarnings = new Set();
   state.currentMessageId = undefined;
   await saveFileHistoryState(state, sessionId, baseDir);
 }
@@ -400,10 +706,22 @@ export async function fileHistoryRewind(
     const backup = target.trackedFileBackups.get(filePath) ?? findFirstBackup(state, filePath);
     if (!backup) continue;
     if (backup.backupFileName === null) {
-      await unlink(filePath).catch(() => {});
+      await removeCreatedFileForRewind(filePath);
     } else {
       await restoreBackup(filePath, backup.backupFileName, sessionId, baseDir);
     }
+  }
+}
+
+async function removeCreatedFileForRewind(filePath: string): Promise<void> {
+  try {
+    const info = await lstat(filePath);
+    if (!info.isFile() && !info.isSymbolicLink()) {
+      throw new Error(`FileHistory: ${filePath} 当前不是普通文件，拒绝递归删除`);
+    }
+    await unlink(filePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
 }
 
@@ -427,7 +745,12 @@ export async function fileHistoryDiffStat(
     const backup = target.trackedFileBackups.get(filePath) ?? findFirstBackup(state, filePath);
     const before = await readSnapshotFileContent(backup, sessionId, baseDir);
     const after = await readCurrentFileContent(filePath);
-    if (before === after) continue;
+    const afterMode = await readCurrentFileMode(filePath);
+    const modeChanged =
+      backup?.originMode !== undefined &&
+      afterMode !== undefined &&
+      backup.originMode !== afterMode;
+    if (before === after && !modeChanged) continue;
 
     const changes = countLineChanges(before ?? "", after ?? "");
     files.push({
@@ -444,7 +767,173 @@ export async function fileHistoryDiffStat(
     addedLines: files.reduce((sum, file) => sum + file.addedLines, 0),
     removedLines: files.reduce((sum, file) => sum + file.removedLines, 0),
     files,
+    ...(target.journalWarnings?.length
+      ? { incomplete: true, warnings: [...target.journalWarnings] }
+      : {}),
   };
+}
+
+/**
+ * 读取某个 rewind point 到当前磁盘的完整 patch，供 TUI Changes 面板使用。
+ * 此函数只读，不创建临时文件，也不改变 file-history state。
+ */
+export async function fileHistoryChanges(
+  state: FileHistoryState,
+  messageId: string,
+  sessionId: string,
+  baseDir: string = DEFAULT_BASE_DIR,
+): Promise<FileHistoryChanges> {
+  const target = state.snapshots.find((snapshot) => snapshot.messageId === messageId);
+  if (!target) {
+    throw new Error(`FileHistory: 找不到 messageId=${messageId} 的快照`);
+  }
+  const stat = await fileHistoryDiffStat(state, messageId, sessionId, baseDir);
+  const files: FileHistoryFilePatch[] = [];
+  for (const file of stat.files) {
+    const backup =
+      target.trackedFileBackups.get(file.filePath) ?? findFirstBackup(state, file.filePath);
+    const before = await readSnapshotFileContent(backup, sessionId, baseDir);
+    const current = await readCurrentFileState(file.filePath);
+    const after = current.content;
+    const afterMode = current.mode;
+    files.push({
+      ...file,
+      currentFingerprint: current.fingerprint,
+      patch: createUnifiedFilePatch({
+        filePath: file.filePath,
+        before,
+        after,
+        beforeMode: backup?.originMode,
+        afterMode,
+      }),
+    });
+  }
+  return {
+    ...stat,
+    files,
+    patch: files
+      .map((file) => file.patch)
+      .filter(Boolean)
+      .join("\n\n"),
+  };
+}
+
+/**
+ * 只恢复 Changes 面板中已确认属于该 rewind point 的单个变化文件。
+ * 任意未出现在当前 diff 的路径都会被拒绝，避免把 UI 字符串变成任意写入口。
+ */
+export async function fileHistoryRestoreFile(
+  state: FileHistoryState,
+  messageId: string,
+  filePath: string,
+  expectedCurrentFingerprint: string,
+  sessionId: string,
+  baseDir: string = DEFAULT_BASE_DIR,
+): Promise<FileHistoryRestoreFileResult> {
+  const target = state.snapshots.find((snapshot) => snapshot.messageId === messageId);
+  if (!target) {
+    throw new Error(`FileHistory: 找不到 messageId=${messageId} 的快照`);
+  }
+  const stat = await fileHistoryDiffStat(state, messageId, sessionId, baseDir);
+  const changedFile = stat.files.find((file) => file.filePath === filePath);
+  if (!changedFile) {
+    throw new Error(`FileHistory: ${filePath} 不属于快照 ${messageId} 的当前变化`);
+  }
+  const backup = target.trackedFileBackups.get(filePath) ?? findFirstBackup(state, filePath);
+  if (!backup) {
+    throw new Error(`FileHistory: ${filePath} 缺少可恢复的写前状态`);
+  }
+  const verifyCurrentState = async (): Promise<CurrentFileState> => {
+    const latest = await readCurrentFileState(filePath);
+    if (latest.fingerprint !== expectedCurrentFingerprint) {
+      throw new Error(`FileHistory: ${filePath} 在预览后又发生变化，请刷新 Changes 后重试`);
+    }
+    if (latest.kind !== "file" && latest.kind !== "missing") {
+      throw new Error(`FileHistory: ${filePath} 当前不是普通文件，拒绝执行单文件恢复`);
+    }
+    return latest;
+  };
+  await verifyCurrentState();
+  if (backup.backupFileName === null) {
+    const latest = await verifyCurrentState();
+    if (latest.kind === "file") await unlink(filePath);
+  } else {
+    await restoreBackup(filePath, backup.backupFileName, sessionId, baseDir, async () => {
+      await verifyCurrentState();
+    });
+  }
+  return { messageId, filePath, status: changedFile.status, restored: true };
+}
+
+interface CurrentFileState {
+  kind: "file" | "missing" | "directory" | "symlink" | "special";
+  content: string | undefined;
+  mode: number | undefined;
+  fingerprint: string;
+}
+
+/**
+ * 单次读取生成 Changes 的比较状态。非普通文件也有独立指纹，避免把 missing、
+ * 目录和 symlink 混为一谈后在恢复时递归删除后来出现的目录。
+ */
+async function readCurrentFileState(filePath: string): Promise<CurrentFileState> {
+  try {
+    const info = await lstat(filePath);
+    if (info.isFile()) {
+      const content = await readFile(filePath);
+      const mode = info.mode & 0o777;
+      return {
+        kind: "file",
+        content: content.toString("utf8"),
+        mode,
+        fingerprint: fileStateFingerprint("file", mode, content),
+      };
+    }
+    if (info.isSymbolicLink()) {
+      const target = await readlink(filePath);
+      return {
+        kind: "symlink",
+        content: undefined,
+        mode: undefined,
+        fingerprint: fileStateFingerprint("symlink", info.mode & 0o777, target),
+      };
+    }
+    const kind = info.isDirectory() ? "directory" : "special";
+    return {
+      kind,
+      content: undefined,
+      mode: undefined,
+      fingerprint: fileStateFingerprint(
+        kind,
+        info.mode & 0o777,
+        `${info.size}:${info.mtimeMs}:${info.ctimeMs}`,
+      ),
+    };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return {
+        kind: "missing",
+        content: undefined,
+        mode: undefined,
+        fingerprint: fileStateFingerprint("missing", undefined, ""),
+      };
+    }
+    throw error;
+  }
+}
+
+function fileStateFingerprint(
+  kind: "file" | "missing" | "directory" | "symlink" | "special",
+  mode: number | undefined,
+  content: string | Buffer,
+): string {
+  const hash = createHash("sha256");
+  hash.update(kind);
+  hash.update("\0");
+  hash.update(mode === undefined ? "" : String(mode));
+  hash.update("\0");
+  hash.update(content);
+  return hash.digest("hex");
 }
 
 /**
@@ -475,10 +964,16 @@ export async function fileHistoryMessageDiffStat(
     const beforeBackup =
       target.trackedFileBackups.get(filePath) ?? findFirstBackup(state, filePath);
     const before = await readSnapshotFileContent(beforeBackup, sessionId, baseDir);
+    const afterBackup = next?.trackedFileBackups.get(filePath);
     const after = next
-      ? await readSnapshotFileContent(next.trackedFileBackups.get(filePath), sessionId, baseDir)
+      ? await readSnapshotFileContent(afterBackup, sessionId, baseDir)
       : await readCurrentFileContent(filePath);
-    if (before === after) continue;
+    const afterMode = next ? afterBackup?.originMode : await readCurrentFileMode(filePath);
+    const modeChanged =
+      beforeBackup?.originMode !== undefined &&
+      afterMode !== undefined &&
+      beforeBackup.originMode !== afterMode;
+    if (before === after && !modeChanged) continue;
     const changes = countLineChanges(before ?? "", after ?? "");
     files.push({
       filePath,
@@ -494,6 +989,9 @@ export async function fileHistoryMessageDiffStat(
     addedLines: files.reduce((sum, file) => sum + file.addedLines, 0),
     removedLines: files.reduce((sum, file) => sum + file.removedLines, 0),
     files,
+    ...(target.journalWarnings?.length
+      ? { incomplete: true, warnings: [...target.journalWarnings] }
+      : {}),
   };
 }
 
@@ -508,11 +1006,23 @@ async function readSnapshotFileContent(
 
 async function readCurrentFileContent(filePath: string): Promise<string | undefined> {
   try {
+    const info = await lstat(filePath);
+    if (!info.isFile()) return undefined;
     return await readFile(filePath, "utf8");
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
     if (code === "ENOENT") return undefined;
     throw err;
+  }
+}
+
+async function readCurrentFileMode(filePath: string): Promise<number | undefined> {
+  try {
+    const info = await lstat(filePath);
+    return info.isFile() ? info.mode & 0o777 : undefined;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
   }
 }
 
@@ -525,6 +1035,155 @@ function classifyDiffFile(
   return "modified";
 }
 
+export function createUnifiedFilePatch(input: {
+  filePath: string;
+  before: string | undefined;
+  after: string | undefined;
+  beforeMode?: number;
+  afterMode?: number;
+}): string {
+  const beforeLabel = input.before === undefined ? "/dev/null" : input.filePath;
+  const afterLabel = input.after === undefined ? "/dev/null" : input.filePath;
+  const lines: string[] = [`--- ${beforeLabel}`, `+++ ${afterLabel}`];
+  if (input.before === undefined && input.afterMode !== undefined) {
+    lines.unshift(`new file mode ${formatFileMode(input.afterMode)}`);
+  } else if (input.after === undefined && input.beforeMode !== undefined) {
+    lines.unshift(`deleted file mode ${formatFileMode(input.beforeMode)}`);
+  } else if (
+    input.beforeMode !== undefined &&
+    input.afterMode !== undefined &&
+    input.beforeMode !== input.afterMode
+  ) {
+    lines.unshift(
+      `old mode ${formatFileMode(input.beforeMode)}`,
+      `new mode ${formatFileMode(input.afterMode)}`,
+    );
+  }
+
+  const beforeLines = splitDiffLines(input.before ?? "");
+  const afterLines = splitDiffLines(input.after ?? "");
+  if (input.before === input.after) return lines.join("\n");
+  const prefixLength = commonPrefixLength(beforeLines, afterLines);
+  const suffixLength = commonSuffixLength(beforeLines, afterLines, prefixLength);
+  const beforeMiddle = beforeLines.slice(prefixLength, beforeLines.length - suffixLength);
+  const afterMiddle = afterLines.slice(prefixLength, afterLines.length - suffixLength);
+  lines.push(
+    `@@ -${beforeLines.length === 0 ? 0 : 1},${beforeLines.length} +${
+      afterLines.length === 0 ? 0 : 1
+    },${afterLines.length} @@`,
+    ...beforeLines.slice(0, prefixLength).flatMap((line) => renderDiffLine(" ", line)),
+    ...buildLinePatch(beforeMiddle, afterMiddle),
+    ...beforeLines
+      .slice(beforeLines.length - suffixLength)
+      .flatMap((line) => renderDiffLine(" ", line)),
+  );
+  return lines.join("\n");
+}
+
+interface DiffTextLine {
+  text: string;
+  /** false 表示该行到 EOF 时没有换行符。 */
+  terminated: boolean;
+}
+
+/** Hirschberg LCS：保持完整、准确的上下文行，同时避免为大文件分配 O(n*m) 矩阵。 */
+function buildLinePatch(before: readonly DiffTextLine[], after: readonly DiffTextLine[]): string[] {
+  if (before.length === 0) return after.flatMap((line) => renderDiffLine("+", line));
+  if (after.length === 0) return before.flatMap((line) => renderDiffLine("-", line));
+
+  if (before.length === 1) {
+    const commonIndex = after.findIndex((line) => sameDiffLine(line, before[0]!));
+    if (commonIndex === -1) {
+      return [
+        ...renderDiffLine("-", before[0]!),
+        ...after.flatMap((line) => renderDiffLine("+", line)),
+      ];
+    }
+    return [
+      ...after.slice(0, commonIndex).flatMap((line) => renderDiffLine("+", line)),
+      ...renderDiffLine(" ", before[0]!),
+      ...after.slice(commonIndex + 1).flatMap((line) => renderDiffLine("+", line)),
+    ];
+  }
+  if (after.length === 1) {
+    const commonIndex = before.findIndex((line) => sameDiffLine(line, after[0]!));
+    if (commonIndex === -1) {
+      return [
+        ...before.flatMap((line) => renderDiffLine("-", line)),
+        ...renderDiffLine("+", after[0]!),
+      ];
+    }
+    return [
+      ...before.slice(0, commonIndex).flatMap((line) => renderDiffLine("-", line)),
+      ...renderDiffLine(" ", after[0]!),
+      ...before.slice(commonIndex + 1).flatMap((line) => renderDiffLine("-", line)),
+    ];
+  }
+
+  const beforeMiddle = Math.floor(before.length / 2);
+  const leftScores = lcsLengthRow(before.slice(0, beforeMiddle), after);
+  const rightScores = lcsLengthRow(before.slice(beforeMiddle).toReversed(), after.toReversed());
+  let afterMiddle = 0;
+  let bestScore = -1;
+  for (let index = 0; index <= after.length; index++) {
+    const score = leftScores[index]! + rightScores[after.length - index]!;
+    if (score > bestScore) {
+      bestScore = score;
+      afterMiddle = index;
+    }
+  }
+  return [
+    ...buildLinePatch(before.slice(0, beforeMiddle), after.slice(0, afterMiddle)),
+    ...buildLinePatch(before.slice(beforeMiddle), after.slice(afterMiddle)),
+  ];
+}
+
+function lcsLengthRow(left: readonly DiffTextLine[], right: readonly DiffTextLine[]): number[] {
+  let previous = new Array<number>(right.length + 1).fill(0);
+  for (const leftLine of left) {
+    const current = new Array<number>(right.length + 1).fill(0);
+    for (let index = 0; index < right.length; index++) {
+      current[index + 1] = sameDiffLine(leftLine, right[index]!)
+        ? previous[index]! + 1
+        : Math.max(previous[index + 1]!, current[index]!);
+    }
+    previous = current;
+  }
+  return previous;
+}
+
+function commonPrefixLength(left: readonly DiffTextLine[], right: readonly DiffTextLine[]): number {
+  let length = 0;
+  while (
+    length < left.length &&
+    length < right.length &&
+    sameDiffLine(left[length]!, right[length]!)
+  ) {
+    length++;
+  }
+  return length;
+}
+
+function commonSuffixLength(
+  left: readonly DiffTextLine[],
+  right: readonly DiffTextLine[],
+  prefixLength: number,
+): number {
+  let length = 0;
+  while (
+    length < left.length - prefixLength &&
+    length < right.length - prefixLength &&
+    sameDiffLine(left[left.length - length - 1]!, right[right.length - length - 1]!)
+  ) {
+    length++;
+  }
+  return length;
+}
+
+function formatFileMode(mode: number): string {
+  return `100${(mode & 0o777).toString(8).padStart(3, "0")}`;
+}
+
 function countLineChanges(
   before: string,
   after: string,
@@ -535,7 +1194,7 @@ function countLineChanges(
   while (
     prefix < beforeLines.length &&
     prefix < afterLines.length &&
-    beforeLines[prefix] === afterLines[prefix]
+    sameDiffLine(beforeLines[prefix]!, afterLines[prefix]!)
   ) {
     prefix++;
   }
@@ -545,7 +1204,7 @@ function countLineChanges(
   while (
     beforeEnd >= prefix &&
     afterEnd >= prefix &&
-    beforeLines[beforeEnd] === afterLines[afterEnd]
+    sameDiffLine(beforeLines[beforeEnd]!, afterLines[afterEnd]!)
   ) {
     beforeEnd--;
     afterEnd--;
@@ -560,26 +1219,33 @@ function countLineChanges(
   };
 }
 
-function splitDiffLines(value: string): string[] {
+function splitDiffLines(value: string): DiffTextLine[] {
   if (value.length === 0) return [];
+  const terminatedAtEof = value.endsWith("\n");
   const lines = value.split("\n");
-  if (lines.at(-1) === "") lines.pop();
-  return lines;
+  if (terminatedAtEof) lines.pop();
+  return lines.map((text, index) => ({
+    text,
+    terminated: index < lines.length - 1 || terminatedAtEof,
+  }));
 }
 
-function longestCommonSubsequenceLength(left: string[], right: string[]): number {
+function longestCommonSubsequenceLength(
+  left: readonly DiffTextLine[],
+  right: readonly DiffTextLine[],
+): number {
   if (left.length === 0 || right.length === 0) return 0;
+  return lcsLengthRow(left, right)[right.length]!;
+}
 
-  let previous = new Array<number>(right.length + 1).fill(0);
-  for (const leftLine of left) {
-    const current = new Array<number>(right.length + 1).fill(0);
-    for (let i = 0; i < right.length; i++) {
-      current[i + 1] =
-        leftLine === right[i] ? previous[i]! + 1 : Math.max(previous[i + 1]!, current[i]!);
-    }
-    previous = current;
-  }
-  return previous[right.length]!;
+function sameDiffLine(left: DiffTextLine, right: DiffTextLine): boolean {
+  return left.text === right.text && left.terminated === right.terminated;
+}
+
+function renderDiffLine(prefix: " " | "+" | "-", line: DiffTextLine): string[] {
+  return line.terminated
+    ? [`${prefix}${line.text}`]
+    : [`${prefix}${line.text}`, "\\ No newline at end of file"];
 }
 
 interface PersistedFileHistoryBackup {
@@ -588,6 +1254,7 @@ interface PersistedFileHistoryBackup {
   backupTime: string;
   originMtimeMs?: number;
   originSize?: number;
+  originMode?: number;
 }
 
 interface PersistedFileHistorySnapshot {
@@ -599,6 +1266,7 @@ interface PersistedFileHistorySnapshot {
   transcriptIndex?: number;
   interactionMode?: string;
   editedFilePaths?: string[];
+  journalWarnings?: string[];
 }
 
 interface PersistedFileHistoryState {
@@ -625,6 +1293,7 @@ async function saveFileHistoryState(
             backupTime: backup.backupTime.toISOString(),
             ...(backup.originMtimeMs !== undefined ? { originMtimeMs: backup.originMtimeMs } : {}),
             ...(backup.originSize !== undefined ? { originSize: backup.originSize } : {}),
+            ...(backup.originMode !== undefined ? { originMode: backup.originMode } : {}),
           },
         ],
       ),
@@ -639,6 +1308,9 @@ async function saveFileHistoryState(
         : {}),
       ...(snapshot.editedFilePaths !== undefined
         ? { editedFilePaths: Array.from(snapshot.editedFilePaths) }
+        : {}),
+      ...(snapshot.journalWarnings !== undefined
+        ? { journalWarnings: [...snapshot.journalWarnings] }
         : {}),
     })),
     trackedFiles: Array.from(state.trackedFiles),
@@ -679,12 +1351,16 @@ export async function fileHistoryLoadState(
           backupTime: new Date(backup.backupTime),
           ...(backup.originMtimeMs !== undefined ? { originMtimeMs: backup.originMtimeMs } : {}),
           ...(backup.originSize !== undefined ? { originSize: backup.originSize } : {}),
+          ...(backup.originMode !== undefined ? { originMode: backup.originMode } : {}),
         },
       ]),
     ),
     timestamp: new Date(snapshot.timestamp),
     ...(snapshot.editedFilePaths !== undefined
       ? { editedFilePaths: new Set(snapshot.editedFilePaths) }
+      : {}),
+    ...(snapshot.journalWarnings !== undefined
+      ? { journalWarnings: [...snapshot.journalWarnings] }
       : {}),
     ...(snapshot.messageIndex !== undefined ? { messageIndex: snapshot.messageIndex } : {}),
     ...(snapshot.userPrompt !== undefined ? { userPrompt: snapshot.userPrompt } : {}),
@@ -699,6 +1375,7 @@ export async function fileHistoryLoadState(
   state.snapshotSequence = manifest.snapshotSequence;
   state.fileVersions = new Map(manifest.fileVersions);
   state.pendingTrackEdits = new Map();
+  state.pendingJournalWarnings = new Set();
   state.currentMessageId = undefined;
   return true;
 }

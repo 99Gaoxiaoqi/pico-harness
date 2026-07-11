@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessByStdio } from "node:child_process";
-import { basename } from "node:path";
 import type { Readable } from "node:stream";
-import { isWindows, resolveShell } from "../os/shell.js";
+import { isWindows, resolveShell, shellCommandArgs } from "../os/shell.js";
+import { signalProcessTree } from "../os/process-tree.js";
 import { TaskRegistry } from "../tasks/task-registry.js";
 
 export type BackgroundTaskStatus = "running" | "exited" | "failed" | "stopped";
@@ -71,7 +71,7 @@ export class BackgroundManager {
     const shell = resolveShell();
     let child: ChildProcessByStdio<null, Readable, Readable>;
     try {
-      child = spawn(shell, shellArgs(shell, command), {
+      child = spawn(shell, shellCommandArgs(shell, command), {
         cwd,
         detached: !isWindows,
         windowsHide: true,
@@ -168,13 +168,15 @@ export class BackgroundManager {
     }
 
     task.stopping = true;
-    this.killTask(task, "SIGTERM");
-    return this.withTimeout(task.closePromise, this.stopTimeoutMs, async () => {
-      this.killTask(task, "SIGKILL");
-      return this.withTimeout(task.closePromise, this.stopTimeoutMs, () =>
-        this.forceStopRecord(task, "SIGKILL"),
-      );
-    });
+    await this.killTask(task, "SIGTERM");
+    const gracefulClose = await this.waitForClose(task.closePromise, this.stopTimeoutMs);
+    if (gracefulClose) return gracefulClose;
+
+    await this.killTask(task, "SIGKILL");
+    const forcedClose = await this.waitForClose(task.closePromise, this.stopTimeoutMs);
+    if (forcedClose) return forcedClose;
+
+    throw new Error(`后台任务 ${taskId} 在强制终止后仍未退出`);
   }
 
   private getTask(taskId: string): ManagedTask {
@@ -185,53 +187,25 @@ export class BackgroundManager {
     return task;
   }
 
-  private killTask(task: ManagedTask, signal: NodeJS.Signals): void {
-    const pid = task.child.pid;
-    if (!pid) return;
-    try {
-      if (isWindows) {
-        task.child.kill(signal);
-      } else {
-        process.kill(-pid, signal);
-      }
-    } catch {
-      try {
-        task.child.kill(signal);
-      } catch {
-        // Process may have exited between the process-group kill and fallback kill.
-      }
-    }
+  private killTask(task: ManagedTask, signal: NodeJS.Signals): Promise<boolean> {
+    return signalProcessTree(task.child, signal);
   }
 
-  private forceStopRecord(task: ManagedTask, signal: NodeJS.Signals): BackgroundTaskRecord {
-    if (task.record.status === "running") {
-      task.record.status = "stopped";
-      task.record.signal = signal;
-      task.record.endedAt = new Date();
-      this.taskRegistry.kill(task.record.taskId, "stopped", { data: { signal } });
-      this.pruneCompletedTasks();
-    }
-    return { ...task.record };
-  }
-
-  private async withTimeout(
+  private waitForClose(
     promise: Promise<BackgroundTaskRecord>,
     timeoutMs: number,
-    onTimeout: () => Promise<BackgroundTaskRecord> | BackgroundTaskRecord,
-  ): Promise<BackgroundTaskRecord> {
-    let timer: NodeJS.Timeout | undefined;
-    try {
-      return await Promise.race([
-        promise,
-        new Promise<BackgroundTaskRecord>((resolve) => {
-          timer = setTimeout(() => {
-            Promise.resolve(onTimeout()).then(resolve);
-          }, timeoutMs);
-        }),
-      ]);
-    } finally {
-      if (timer) clearTimeout(timer);
-    }
+  ): Promise<BackgroundTaskRecord | undefined> {
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (record?: BackgroundTaskRecord): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(record);
+      };
+      const timer = setTimeout(() => finish(), timeoutMs);
+      void promise.then((record) => finish(record));
+    });
   }
 
   private pruneCompletedTasks(): void {
@@ -259,12 +233,4 @@ function tailOutput(output: string, tail?: number): string {
     return output;
   }
   return output.slice(output.length - tail);
-}
-
-function shellArgs(shell: string, command: string): string[] {
-  const name = basename(shell).toLowerCase();
-  if (isWindows && name === "cmd.exe") {
-    return ["/d", "/s", "/c", command];
-  }
-  return ["-lc", command];
 }

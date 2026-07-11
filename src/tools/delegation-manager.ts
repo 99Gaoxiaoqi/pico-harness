@@ -17,7 +17,7 @@ export interface DelegationBatchResult {
   totalDurationMs: number;
 }
 
-export type DelegationRecordStatus = "running" | "completed" | "error";
+export type DelegationRecordStatus = "running" | "completed" | "error" | "cancelled";
 export type DelegationTaskStatus = "queued" | "running" | "done" | "error" | "cancelled";
 
 export interface DelegationManagerOptions {
@@ -70,12 +70,15 @@ interface DelegationRecord {
   completedAt?: number;
   result?: DelegationBatchResult;
   error?: string;
+  controller: AbortController;
   promise: Promise<void>;
 }
 
 export class DelegationManager {
   private readonly records = new Map<string, DelegationRecord>();
   private nextId = 1;
+  private disposed = false;
+  private disposePromise?: Promise<void>;
 
   readonly maxConcurrentChildren: number;
   private readonly maxAsyncChildren: number;
@@ -90,7 +93,7 @@ export class DelegationManager {
   }
 
   dispatch(
-    runner: () => Promise<DelegationBatchResult>,
+    runner: (signal: AbortSignal) => Promise<DelegationBatchResult>,
     taskInput: DelegationTaskRuntimeInput = {},
   ): {
     status: string;
@@ -99,6 +102,9 @@ export class DelegationManager {
     snapshot?: DelegationTaskSnapshot;
     error?: string;
   } {
+    if (this.disposed) {
+      return { status: "rejected", error: "委派运行时已关闭" };
+    }
     if (this.activeCount >= this.maxAsyncChildren) {
       return {
         status: "rejected",
@@ -119,18 +125,21 @@ export class DelegationManager {
       this.taskRegistry?.start(task.taskId);
     }
 
+    const controller = new AbortController();
     const record: DelegationRecord = {
       id,
       taskId: task?.taskId ?? id,
       status: "running",
       startedAt: now,
       updatedAt: now,
+      controller,
       promise: Promise.resolve(),
     };
 
     record.promise = Promise.resolve()
-      .then(runner)
+      .then(() => runner(controller.signal))
       .then((result) => {
+        controller.signal.throwIfAborted();
         record.status = "completed";
         record.result = result;
         record.completedAt = Date.now();
@@ -138,11 +147,15 @@ export class DelegationManager {
         this.taskRegistry?.complete(record.taskId, { data: { delegationId: id, result } });
       })
       .catch((err: unknown) => {
-        record.status = "error";
+        record.status = controller.signal.aborted ? "cancelled" : "error";
         record.error = err instanceof Error ? err.message : String(err);
         record.completedAt = Date.now();
         record.updatedAt = record.completedAt;
-        this.taskRegistry?.fail(record.taskId, record.error, { data: { delegationId: id } });
+        if (record.status === "cancelled") {
+          this.taskRegistry?.kill(record.taskId, record.error, { data: { delegationId: id } });
+        } else {
+          this.taskRegistry?.fail(record.taskId, record.error, { data: { delegationId: id } });
+        }
       });
 
     this.records.set(id, record);
@@ -165,6 +178,20 @@ export class DelegationManager {
 
   async wait(id: string): Promise<void> {
     await this.records.get(id)?.promise;
+  }
+
+  /** 禁止新委派，取消并等待所有已派发子任务真正收口。 */
+  dispose(reason = "delegation runtime disposed"): Promise<void> {
+    if (this.disposePromise) return this.disposePromise;
+    this.disposed = true;
+    const running = [...this.records.values()].filter((record) => record.status === "running");
+    for (const record of running) {
+      record.controller.abort(new DOMException(reason, "AbortError"));
+    }
+    this.disposePromise = Promise.allSettled(running.map((record) => record.promise)).then(
+      () => undefined,
+    );
+    return this.disposePromise;
   }
 
   private get activeCount(): number {
@@ -226,6 +253,7 @@ export class DelegationManager {
 function mapTaskStatus(status: DelegationRecordStatus): DelegationTaskStatus {
   if (status === "completed") return "done";
   if (status === "error") return "error";
+  if (status === "cancelled") return "cancelled";
   return "running";
 }
 

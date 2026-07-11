@@ -14,9 +14,8 @@
 //
 // 执行器韧性(对标 hermes ThreadPoolExecutor + 中断响应):
 //   - maxConcurrency: 并发名额上限,超出则进 queued 等名额释放(不报错、不丢弃)。
-//   - signal: AbortSignal,触发时排队的任务立即 reject,正在跑的任务也 reject 其
-//     外部句柄(调度层中断)。正在跑的工具执行本身跑到自然结束,真正中途取消是
-//     后续 runOneTool 内部检查 signal 的改动,不在此层。
+//   - signal: AbortSignal,触发时排队任务立即 reject；运行中任务默认快速 reject，
+//     明确 settleOnAbort 的任务则等物理取消完成后再 settle。
 
 import { ToolAccesses, type ToolAccesses as ToolAccessesType } from "./tool-access.js";
 
@@ -37,6 +36,8 @@ function makeAbortError(signal?: AbortSignal): Error {
 export interface ToolCallTask<R> {
   readonly accesses: ToolAccessesType;
   readonly start: () => Promise<R>;
+  /** abort 后等待 start Promise 物理收口，而不是立即拒绝外层句柄。 */
+  readonly settleOnAbort?: boolean;
 }
 
 interface ScheduledTask<R> extends ToolCallTask<R> {
@@ -57,7 +58,7 @@ export interface ToolSchedulerOptions {
   /**
    * 中止信号。abort 时:
    *   - queued 中所有任务立即 reject(不泄漏,否则 Promise.all 永久卡死)
-   *   - active 任务 reject 其外部句柄(让 Promise.all 快速收口)
+   *   - active 任务默认 reject 外部句柄；settleOnAbort 任务等待自主收口
    *   - 调度器进入终态,后续 add 也直接 reject
    */
   readonly signal?: AbortSignal;
@@ -224,23 +225,24 @@ export class ToolScheduler<R> {
   }
 
   /**
-   * 中止处理:把所有未结算的任务(queued + active 的外部句柄)全部 reject。
+   * 中止处理:立即收口 queued/非协作任务，保留协作任务等物理取消。
    *
    * queued:直接 reject(关键 —— 否则 Promise.all 永久卡死)。
-   * active:reject 外部 controlled promise,让 Promise.all 快速收口。
-   *         注意:无法取消正在跑的工具执行(start 返回的 promise 调度器只能等它 settle),
-   *         真正中途取消工具执行是 runOneTool 内部检查 signal 的职责,不在此层。
+   * active:默认 reject 外部句柄；明确 settleOnAbort 的工具保留在 active，
+   *        等其根据同一 signal 终止物理操作后自然 settle。
    */
   private abortRemaining(): void {
     if (this.aborted) return; // 幂等:重复 abort 不重复处理
     this.aborted = true;
     const err = makeAbortError(this.signal);
-    const rejectAll = (list: ScheduledTask<R>[]) => {
-      for (const task of list) task.reject(err);
-      list.length = 0;
-    };
-    rejectAll(this.queued);
-    rejectAll(this.active);
+    for (const task of this.queued) task.reject(err);
+    this.queued = [];
+    const settling: ScheduledTask<R>[] = [];
+    for (const task of this.active) {
+      if (task.settleOnAbort) settling.push(task);
+      else task.reject(err);
+    }
+    this.active.splice(0, this.active.length, ...settling);
     this.dispose();
   }
 }

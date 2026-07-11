@@ -11,8 +11,8 @@
 //    TodoStore 当年各 new 各的导致跨实例不可见 bug,这里从源头规避:
 //    host 创建唯一实例,经构造注入传到 registry 与 engine,杜绝跨实例。
 // 2. budget 复用 IterationBudget 的 BudgetConfig,不在本类重造 token 计数。
-//    本轮简化:Goal 只存 budget 配置,实际执行(每轮消耗判定)留后续接入;
-//    buildGoalContext 渲染配置供模型感知约束。
+// 3. GoalManager 仍只负责状态机；持久化由 Session 通过 snapshot/restore/subscribe
+//    边界接管，避免 Goal 自己创建第二套存储。
 //
 // 状态机:active(进行中) → paused(主动暂停) / blocked(被阻塞) → complete(完成)
 // 同一时刻最多一个 active goal(setActive 会把旧的置回 active 之外的状态)。
@@ -20,6 +20,7 @@
 import type { Usage } from "../schema/message.js";
 import { toCanonicalUsage } from "../schema/message.js";
 import type { BudgetConfig, BudgetDecision } from "./budget.js";
+import { normalizeGoalManagerSnapshot } from "./session-runtime.js";
 
 /** 目标状态机四态 */
 export type GoalStatus = "active" | "paused" | "blocked" | "complete";
@@ -49,6 +50,15 @@ export interface Goal {
   /** blocked 状态下的阻塞原因 */
   blockedReason?: string;
 }
+
+export interface GoalManagerSnapshot {
+  stateVersion: 1;
+  sequence: number;
+  activeGoalId: string | null;
+  goals: Goal[];
+}
+
+export type GoalManagerListener = (snapshot: GoalManagerSnapshot) => void;
 
 /** 合法状态白名单(校验用) */
 const VALID_STATUSES: ReadonlySet<GoalStatus> = new Set<GoalStatus>([
@@ -86,7 +96,7 @@ function formatBudget(config?: BudgetConfig): string {
 /**
  * Goal Mode 的核心:管理一组 Goal 的状态机与 budget 配置。
  *
- * 内存单例:状态不落盘(Goal 是会话级工作记忆,非跨会话持久化文档)。
+ * 内存单例:状态的存储交给 Session 会话日志。
  * 单例由 host 创建,经构造注入到 PromptComposer 与 3 个 Goal 工具,
  * 确保所有持有者操作的是同一份状态。
  */
@@ -98,6 +108,7 @@ export class GoalManager {
   /** 自增序列,保证 id 唯一且可读 */
   private seq = 0;
   private readonly now: () => number;
+  private readonly listeners = new Set<GoalManagerListener>();
 
   constructor(options: { now?: () => number } = {}) {
     this.now = options.now ?? Date.now;
@@ -129,8 +140,9 @@ export class GoalManager {
       ...(budgetConfig !== undefined ? { budgetConfig } : {}),
     };
     this.goals.set(goal.id, goal);
-    // 新 goal 成为 active;旧的 active 降级为 paused 让位
-    this.setActive(goal.id);
+    // 新 goal 成为 active;旧的 active 降级为 paused 让位。只发送一次变更。
+    this.activate(goal.id);
+    this.emitChange();
     return goal;
   }
 
@@ -188,12 +200,45 @@ export class GoalManager {
       }
     }
 
+    this.emitChange();
     return goal;
   }
 
   /** 返回全部目标(按创建顺序) */
   list(): Goal[] {
     return [...this.goals.values()];
+  }
+
+  /** 生成 JSON-safe 快照，返回值与内部可变状态隔离。 */
+  snapshot(): GoalManagerSnapshot {
+    return {
+      stateVersion: 1,
+      sequence: this.seq,
+      activeGoalId: this.activeGoalId,
+      goals: structuredClone([...this.goals.values()]),
+    };
+  }
+
+  /** 恢复已校验的快照。恢复本身不触发持久化回写。 */
+  restore(snapshot: GoalManagerSnapshot): void {
+    const normalized = normalizeGoalManagerSnapshot(snapshot);
+    if (!normalized) {
+      throw new Error("Goal 快照无效");
+    }
+    this.goals.clear();
+    for (const goal of normalized.goals) {
+      this.goals.set(goal.id, goal);
+    }
+    this.seq = normalized.sequence;
+    this.activeGoalId = normalized.activeGoalId;
+  }
+
+  /** 让 Session 订阅后续变更；监听器错误不影响 Goal 状态机。 */
+  subscribe(listener: GoalManagerListener): () => void {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
   }
 
   /** Check whether the active goal permits one more model turn. */
@@ -213,7 +258,10 @@ export class GoalManager {
     const decision = this.canStartTurn();
     if (!decision.allowed) return decision;
     const active = this.getActive();
-    if (active) active.budgetUsage.turns++;
+    if (active) {
+      active.budgetUsage.turns++;
+      this.emitChange();
+    }
     return { allowed: true };
   }
 
@@ -222,6 +270,7 @@ export class GoalManager {
     if (!active) return { allowed: true };
     const canonical = toCanonicalUsage(usage);
     active.budgetUsage.tokens += canonical.totalPromptTokens + canonical.totalCompletionTokens;
+    this.emitChange();
     return this.currentBudgetDecision();
   }
 
@@ -230,6 +279,7 @@ export class GoalManager {
     if (!active) return { allowed: true };
     if (Number.isFinite(costCNY) && costCNY > 0) {
       active.budgetUsage.costCNY += costCNY;
+      this.emitChange();
     }
     return this.currentBudgetDecision();
   }
@@ -259,6 +309,11 @@ export class GoalManager {
    * 目标若处于 complete 状态,禁止重新激活(需先 update 状态)。
    */
   setActive(id: string): void {
+    this.activate(id);
+    this.emitChange();
+  }
+
+  private activate(id: string): void {
     const goal = this.goals.get(id);
     if (!goal) {
       throw new Error(`未找到目标 ${id}`);
@@ -286,7 +341,20 @@ export class GoalManager {
     if (existed && this.activeGoalId === id) {
       this.activeGoalId = null;
     }
+    if (existed) this.emitChange();
     return existed;
+  }
+
+  private emitChange(): void {
+    if (this.listeners.size === 0) return;
+    const snapshot = this.snapshot();
+    for (const listener of this.listeners) {
+      try {
+        listener(structuredClone(snapshot));
+      } catch {
+        // 持久化/观察者失败不能破坏 Goal 状态机。
+      }
+    }
   }
 
   /**

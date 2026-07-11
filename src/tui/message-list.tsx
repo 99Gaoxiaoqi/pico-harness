@@ -104,7 +104,7 @@ export function MessageList({
         const showSeparator = entry.kind === "user" && prev !== undefined && rowsToSkip === 0;
         const entryVisibleRows = Math.max(0, visibleRows - (showSeparator ? separatorRows : 0));
         return (
-          <React.Fragment key={originalIndex}>
+          <React.Fragment key={item?.key ?? originalIndex}>
             {showSeparator && <Separator />}
             <MessageRow
               entry={visibleEntry}
