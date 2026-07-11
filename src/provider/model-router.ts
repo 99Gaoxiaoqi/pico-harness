@@ -1,5 +1,10 @@
 import type { ProviderConfig } from "./config.js";
 import type { ProviderKind } from "./factory.js";
+import {
+  resolveModelRouteCapabilities,
+  type ModelCapabilityConfig,
+  type ModelRouteCapabilities,
+} from "./model-capabilities.js";
 import type { ThinkingEffort } from "./thinking.js";
 
 const DEFAULT_DISCOVERY_TIMEOUT_MS = 3_000;
@@ -10,6 +15,8 @@ export interface ModelProviderConfig {
   apiKeyEnv: string;
   models: readonly string[];
   discoverModels: boolean;
+  /** Per-model metadata; absent on legacy configs and discovery-only entries. */
+  modelCapabilities?: Readonly<Record<string, ModelCapabilityConfig>>;
 }
 
 export interface ModelRoutingConfig {
@@ -27,6 +34,7 @@ export interface ModelRoute {
   /** Environment variable name only. Secret values never enter session settings or UI data. */
   apiKeyEnv: string;
   source: "config" | "discovered" | "legacy";
+  capabilities: ModelRouteCapabilities;
 }
 
 export interface LoadModelRouterOptions {
@@ -142,6 +150,7 @@ export class ModelRouter {
         baseURL: route.baseURL,
         apiKey,
         model: route.model,
+        capabilities: route.capabilities,
         ...(thinkingEffort !== undefined ? { thinkingEffort } : {}),
       },
       route,
@@ -176,6 +185,11 @@ export async function loadModelRouter(options: LoadModelRouterOptions): Promise<
       model,
       baseURL: provider.config.baseURL,
       apiKeyEnv: provider.config.apiKeyEnv,
+      capabilities: resolveModelRouteCapabilities(
+        provider.config.protocol,
+        model,
+        provider.config.modelCapabilities?.[model],
+      ),
       source:
         provider.source === "legacy"
           ? "legacy"

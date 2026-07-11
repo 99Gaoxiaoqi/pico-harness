@@ -3,11 +3,14 @@
 
 import type { ThinkingEffort } from "./thinking.js";
 import type { RateLimitInfo } from "./ratelimit.js";
+import type { ModelRouteCapabilities } from "./model-capabilities.js";
 
 export interface ProviderConfig {
   baseURL: string;
   apiKey: string;
   model: string;
+  /** Route-owned capability metadata. Legacy/direct callers may omit it. */
+  capabilities?: ModelRouteCapabilities;
   /**
    * 模型原生思考强度(第 N 讲:统一 ThinkingEffort)。
    * 不从环境变量加载 —— 由 CLI/调用方显式传入,保持本接口为纯网络配置 + 显式运行时参数。

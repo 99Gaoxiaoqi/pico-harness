@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { ModelProviderConfig } from "../provider/model-router.js";
+import type { ModelCapabilityConfig } from "../provider/model-capabilities.js";
 import type { ProviderKind } from "../provider/factory.js";
 import {
   KEYBINDING_ACTIONS,
@@ -101,13 +102,7 @@ function parseProviders(value: unknown, configPath: string): Record<string, Mode
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(apiKeyEnv)) {
       throw configError(configPath, `${field}.apiKeyEnv`, "must be an environment variable name");
     }
-    const rawModels = rawProvider["models"];
-    if (
-      rawModels !== undefined &&
-      (!Array.isArray(rawModels) || rawModels.some((model) => typeof model !== "string"))
-    ) {
-      throw configError(configPath, `${field}.models`, "must be a string array");
-    }
+    const parsedModels = parseModels(rawProvider["models"], configPath, `${field}.models`);
     const discoverModels = rawProvider["discoverModels"];
     if (discoverModels !== undefined && typeof discoverModels !== "boolean") {
       throw configError(configPath, `${field}.discoverModels`, "must be a boolean");
@@ -116,11 +111,112 @@ function parseProviders(value: unknown, configPath: string): Record<string, Mode
       protocol,
       baseURL,
       apiKeyEnv,
-      models: (rawModels ?? []).map((model) => model.trim()).filter(Boolean),
+      models: parsedModels.models,
       discoverModels: discoverModels ?? protocol === "openai",
+      ...(Object.keys(parsedModels.capabilities).length > 0
+        ? { modelCapabilities: parsedModels.capabilities }
+        : {}),
     };
   }
   return providers;
+}
+
+function parseModels(
+  value: unknown,
+  configPath: string,
+  field: string,
+): { models: string[]; capabilities: Record<string, ModelCapabilityConfig> } {
+  if (value === undefined) return { models: [], capabilities: {} };
+  if (Array.isArray(value)) {
+    if (value.some((model) => typeof model !== "string")) {
+      throw configError(configPath, field, "must be a string array or model capability object");
+    }
+    return {
+      models: value.map((model) => model.trim()).filter(Boolean),
+      capabilities: {},
+    };
+  }
+  if (!isRecord(value)) {
+    throw configError(configPath, field, "must be a string array or model capability object");
+  }
+
+  const models: string[] = [];
+  const capabilities: Record<string, ModelCapabilityConfig> = {};
+  for (const [rawModel, rawCapabilities] of Object.entries(value)) {
+    const model = rawModel.trim();
+    const modelField = `${field}.${rawModel}`;
+    if (!model) throw configError(configPath, modelField, "model id must not be empty");
+    if (!isRecord(rawCapabilities)) {
+      throw configError(configPath, modelField, "must be a capability object");
+    }
+    models.push(model);
+    capabilities[model] = parseModelCapabilities(rawCapabilities, configPath, modelField);
+  }
+  return { models, capabilities };
+}
+
+function parseModelCapabilities(
+  value: Record<string, unknown>,
+  configPath: string,
+  field: string,
+): ModelCapabilityConfig {
+  const result: ModelCapabilityConfig = {};
+  for (const key of ["context", "output"] as const) {
+    const candidate = value[key];
+    if (candidate === undefined) continue;
+    if (!Number.isSafeInteger(candidate) || (candidate as number) <= 0) {
+      throw configError(configPath, `${field}.${key}`, "must be a positive integer");
+    }
+    result[key] = candidate as number;
+  }
+  for (const key of ["vision", "reasoning", "toolCall", "cache"] as const) {
+    const candidate = value[key];
+    if (candidate === undefined) continue;
+    if (typeof candidate !== "boolean") {
+      throw configError(configPath, `${field}.${key}`, "must be a boolean");
+    }
+    result[key] = candidate;
+  }
+
+  const fallback = value["fallback"];
+  if (fallback !== undefined) {
+    if (fallback !== false && (typeof fallback !== "string" || fallback.trim().length === 0)) {
+      throw configError(configPath, `${field}.fallback`, "must be a non-empty string or false");
+    }
+    result.fallback = typeof fallback === "string" ? fallback.trim() : false;
+  }
+
+  const price = value["price"];
+  if (price !== undefined) {
+    if (!isRecord(price)) throw configError(configPath, `${field}.price`, "must be an object");
+    result.price = parseModelPrice(price, configPath, `${field}.price`);
+  }
+  return result;
+}
+
+function parseModelPrice(
+  value: Record<string, unknown>,
+  configPath: string,
+  field: string,
+): NonNullable<ModelCapabilityConfig["price"]> {
+  const keys = [
+    "inputPerMillion",
+    "outputPerMillion",
+    "cacheReadPerMillion",
+    "cacheWritePerMillion",
+  ] as const;
+  const result = {} as Record<(typeof keys)[number], number | null>;
+  for (const key of keys) {
+    const candidate = value[key];
+    if (
+      candidate !== null &&
+      (typeof candidate !== "number" || !Number.isFinite(candidate) || candidate < 0)
+    ) {
+      throw configError(configPath, `${field}.${key}`, "must be a non-negative number or null");
+    }
+    result[key] = candidate as number | null;
+  }
+  return result;
 }
 
 function parseRequiredString(value: unknown, configPath: string, field: string): string {
