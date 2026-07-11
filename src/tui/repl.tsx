@@ -103,7 +103,7 @@ import {
   type ApprovalPanelAction,
 } from "./approval-panel.js";
 import { createTuiRuntimeState, type TuiRuntimeState } from "./runtime-state.js";
-import { resolveTuiRenderStdout } from "./terminal-grid.js";
+import { createTuiTerminalGridSession } from "./terminal-grid.js";
 import { hydrateTuiReporter } from "./session-hydration.js";
 import { projectTuiEntriesForRendering } from "./tui-event-store.js";
 import { AskUserHandler } from "../tools/ask-user.js";
@@ -143,7 +143,7 @@ const APPROVAL_DIALOG_PRIORITY = 80;
 
 export const TUI_RENDER_OPTIONS = {
   alternateScreen: true,
-  patchConsole: false,
+  patchConsole: true,
   exitOnCtrlC: false,
 } as const satisfies RenderOptions;
 
@@ -595,8 +595,8 @@ function formatUnavailableCommandBlocked(command: string, disabledReason: string
 
 /** 启动 TUI REPL 循环 */
 export async function startTuiRepl(opts: ReplOptions): Promise<void> {
-  // 日志静默由 preload-env.ts 在模块加载前设 LOG_LEVEL=warn 完成
-  // (pino transport 是 worker thread,运行时改 logger.level 无效)。
+  // Pino 静默由 preload-env.ts 在模块加载前完成；console 由 Ink
+  // patchConsole 在清除/恢复帧的记录内协调,避免任何运行期日志移动 PTY 光标。
 
   // 诊断:hook process.stdout.write,记录 ink 实际输出的 ANSI(看擦除行为)
   if (process.env.TUI_DEBUG) {
@@ -1269,7 +1269,8 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
 
   // ChatGPT.app 可能先改变 xterm 网格、后端 PTY 却仍上报旧宽度。
   // Ink 接管 alt-screen 前先查询前端光标边界，避免隐式换行让擦行记账失步。
-  const renderStdout = await resolveTuiRenderStdout(process.stdin, process.stdout);
+  const terminalGrid = await createTuiTerminalGridSession(process.stdin, process.stdout);
+  const renderStdout = terminalGrid.stdout;
 
   // 启动前清掉当前可视区,避免上一次未正常退出的 TUI 帧或 shell scrollback
   // 留在首屏,造成 Logo/Header 看起来重复。
@@ -1279,13 +1280,15 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
 
   // alternateScreen 隔离 shell scrollback；根布局由 Yoga 按当前终端宽度保留右侧 1 列，
   // 缩放时不依赖 React 尚未更新的宽度状态。保持 Ink 默认全帧渲染，兼容中文与复杂布局。
-  // patchConsole:false 让 stderr 不被劫持。
-  const instance = render(<ReplApp />, { ...TUI_RENDER_OPTIONS, stdout: renderStdout });
-  instanceRef.current = instance;
+  // patchConsole 让剩余 console 输出先擦除当前帧,输出后再恢复,
+  // 不绕过 Ink 的光标记账。Pino fd2 已在预加载阶段独立静默。
   try {
+    const instance = render(<ReplApp />, { ...TUI_RENDER_OPTIONS, stdout: renderStdout });
+    instanceRef.current = instance;
     await instance.waitUntilExit();
   } finally {
     shuttingDown = true;
+    await terminalGrid.dispose();
     activeAbortControllerRef?.current?.abort(new DOMException("TUI shutting down", "AbortError"));
     while (pendingTuiSubmissions.size > 0) {
       await Promise.allSettled([...pendingTuiSubmissions]);

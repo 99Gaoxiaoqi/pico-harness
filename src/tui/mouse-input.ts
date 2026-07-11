@@ -3,7 +3,6 @@ import { useStdout } from "ink";
 
 export const ENABLE_MOUSE_TRACKING = "\u001b[?1000h\u001b[?1006h";
 export const DISABLE_MOUSE_TRACKING = "\u001b[?1006l\u001b[?1000l";
-const MOUSE_MODE_REFRESH_MS = 1_000;
 
 export type SgrMouseInput =
   | { kind: "wheel"; direction: "up" | "down"; column: number; row: number }
@@ -66,10 +65,7 @@ export function useTerminalMouseMode(): TerminalMouseMode {
     mounted.current = true;
     enable();
     stdout.on("resize", enable);
-    const refreshTimer = setInterval(enable, MOUSE_MODE_REFRESH_MS);
-    refreshTimer.unref();
     return () => {
-      clearInterval(refreshTimer);
       stdout.off("resize", enable);
       disable();
       mounted.current = false;
