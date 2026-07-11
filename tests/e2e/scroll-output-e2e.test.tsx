@@ -12,7 +12,7 @@ import type { LLMProvider } from "../../src/provider/interface.js";
 import type { Message, ToolDefinition } from "../../src/schema/message.js";
 import { App } from "../../src/tui/app.js";
 import { TUI_RENDER_OPTIONS } from "../../src/tui/repl.js";
-import { resolveTuiRenderStdout } from "../../src/tui/terminal-grid.js";
+import { createTuiTerminalGridSession } from "../../src/tui/terminal-grid.js";
 import type { TuiEntry } from "../../src/tui/tui-reporter.js";
 import { BashTool, ReadFileTool, ToolRegistry } from "../../src/tools/registry-impl.js";
 import { createToolResultObservationProcessor } from "../../src/tools/tool-result-observation.js";
@@ -242,7 +242,7 @@ describe("阶段 10：滚动窗口与大型工具输出集成验收", () => {
         model="local-model"
         provider="openai"
         workDir="/workspace/demo"
-        sessionMode="yolo"
+        sessionMode="new"
         permissionMode="yolo"
         entries={entries}
         running={running}
@@ -255,13 +255,26 @@ describe("阶段 10：滚动窗口与大型工具输出集成验收", () => {
     });
 
     try {
+      expect(harness.renderGrid()).toEqual({ columns: 87, rows: 40 });
       await harness.wait(280); // 让 80ms spinner 真实跨过多帧。
       await harness.resize(80, 17);
-      await harness.wait(120);
-      await harness.rerender(
-        app([user, { kind: "assistant", content: "FINAL_CJK_MARKER_这份skill来自工作区" }], true),
-      );
-      await harness.wait(120);
+      expect(harness.renderGrid()).toEqual({ columns: 80, rows: 40 });
+
+      // 启动 CPR 后前端窗口再次缩高。旧实现把 rows 永久冻结为 40，
+      // 后续每个全屏帧都会越过真实的 18 行并把首行 status 推进 scrollback。
+      terminal.resize(87, 18);
+      await harness.resize(80, 18);
+      expect(harness.renderGrid()).toEqual({ columns: 80, rows: 18 });
+
+      const streamed = [
+        "FINAL_CJK_MARKER_这份skill来自工作区",
+        "FINAL_CJK_MARKER_这份skill来自工作区\n- 正在读取 `SKILL.md`",
+        "FINAL_CJK_MARKER_这份skill来自工作区\n- 正在读取 `SKILL.md`\n- 已确认来源",
+        "FINAL_CJK_MARKER_这份skill来自工作区\n- 正在读取 `SKILL.md`\n- 已确认来源\n- 正在总结",
+      ];
+      for (const content of streamed) {
+        await harness.rerender(app([user, { kind: "assistant", content }], true));
+      }
       await harness.rerender(
         app(
           [
@@ -276,20 +289,20 @@ describe("阶段 10：滚动窗口与大型工具输出集成验收", () => {
       );
 
       const visible = terminal.visibleText();
-      expect(visible.match(/phase idle · mode yolo/gu)).toHaveLength(1);
-      expect(visible).not.toContain("phase running · mode yolo");
+      expect(visible.match(/phase idle · mode new · perm yolo/gu)).toHaveLength(1);
+      expect(visible).not.toContain("phase running · mode new · perm yolo");
       expect(visible.match(/USER_CJK_MARKER/gu)).toHaveLength(1);
       expect(visible.match(/FINAL_CJK_MARKER/gu)).toHaveLength(1);
       expect(visible.split("\n").filter((line) => /^─+$/u.test(line))).toEqual(["─".repeat(79)]);
-      expect(harness.probeQueries()).toBe(1);
+      expect(harness.probeQueries()).toBe(3);
       expect(harness.appFramesBeforeProbe()).toBe(0);
-      expect(harness.rawText().match(/phase running · mode yolo/gu)?.length ?? 0).toBeGreaterThan(
-        1,
-      );
+      expect(
+        harness.rawText().match(/phase running · mode new · perm yolo/gu)?.length ?? 0,
+      ).toBeGreaterThan(1);
       expect(terminal.wrapEvents).toBe(0);
       expect(terminal.scrollEvents).toBe(0);
       expect(terminal.scrollbackText()).not.toMatch(
-        /phase (?:running|idle) · mode yolo|USER_CJK_MARKER|FINAL_CJK_MARKER/u,
+        /phase (?:running|idle) · mode new · perm yolo|USER_CJK_MARKER|FINAL_CJK_MARKER/u,
       );
     } finally {
       await harness.cleanup();
@@ -385,6 +398,7 @@ async function createProductionFrameHarness(
   resize: (columns: number, rows: number) => Promise<void>;
   rerender: (node: React.ReactNode) => Promise<void>;
   rawText: () => string;
+  renderGrid: () => { columns: number; rows: number };
   probeQueries: () => number;
   appFramesBeforeProbe: () => number;
   cleanup: () => Promise<void>;
@@ -415,23 +429,24 @@ async function createProductionFrameHarness(
     rawOutput += output;
     terminal.write(output);
     if (!probeComplete && stripAnsi(output).includes("phase ")) appFramesBeforeProbe++;
-    if (!output.includes("\u001b[6n")) return;
-    probeQueries++;
-    const response = terminal.cursorPositionResponse();
-    const splitAt = Math.max(1, Math.floor(response.length / 2));
-    stdin.write(response.slice(0, splitAt));
-    queueMicrotask(() => {
-      stdin.write(response.slice(splitAt));
-      probeComplete = true;
-    });
+    for (const response of terminal.drainCursorPositionResponses()) {
+      probeQueries++;
+      const splitAt = Math.max(1, Math.floor(response.length / 2));
+      stdin.write(response.slice(0, splitAt));
+      queueMicrotask(() => {
+        stdin.write(response.slice(splitAt));
+        probeComplete = true;
+      });
+    }
   });
 
-  const renderStdout = await resolveTuiRenderStdout(
+  const terminalGrid = await createTuiTerminalGridSession(
     stdin as unknown as NodeJS.ReadStream,
     stdout as unknown as NodeJS.WriteStream,
     { CODEX_SHELL: "1" },
     50,
   );
+  const renderStdout = terminalGrid.stdout;
 
   const instance: Instance = render(node, {
     ...TUI_RENDER_OPTIONS,
@@ -452,19 +467,21 @@ async function createProductionFrameHarness(
     async resize(columns: number, rows: number): Promise<void> {
       Object.assign(stdout, { columns, rows });
       stdout.emit("resize");
-      await wait(50);
+      await wait(100);
     },
     async rerender(nextNode: React.ReactNode): Promise<void> {
       instance.rerender(nextNode);
       await wait(50);
     },
     rawText: () => stripAnsi(rawOutput),
+    renderGrid: () => ({ columns: renderStdout.columns, rows: renderStdout.rows }),
     probeQueries: () => probeQueries,
     appFramesBeforeProbe: () => appFramesBeforeProbe,
     async cleanup(): Promise<void> {
       instance.unmount();
       await instance.waitUntilExit();
       instance.cleanup();
+      await terminalGrid.dispose();
     },
   };
 }
@@ -481,11 +498,38 @@ class ImmediateWrapTerminal {
   private y = 0;
   private savedX = 0;
   private savedY = 0;
+  private cursorPositionResponses: string[] = [];
 
   constructor(columns: number, rows: number) {
     this.columns = columns;
     this.rows = rows;
     this.screen = Array.from({ length: rows }, () => this.blankLine());
+  }
+
+  resize(columns: number, rows: number): void {
+    const nextColumns = Math.max(1, Math.floor(columns));
+    const nextRows = Math.max(1, Math.floor(rows));
+    const previousRows = this.rows;
+    const removedTopRows = Math.max(0, previousRows - nextRows);
+    const retained =
+      nextRows < previousRows
+        ? this.screen.slice(previousRows - nextRows)
+        : [
+            ...this.screen,
+            ...Array.from({ length: nextRows - previousRows }, () => [] as string[]),
+          ];
+
+    this.columns = nextColumns;
+    this.rows = nextRows;
+    this.screen = retained.map((line) => {
+      const resized = line.slice(0, nextColumns);
+      while (resized.length < nextColumns) resized.push(" ");
+      return resized;
+    });
+    this.x = Math.min(nextColumns - 1, this.x);
+    this.savedX = Math.min(nextColumns - 1, this.savedX);
+    this.y = Math.min(nextRows - 1, Math.max(0, this.y - removedTopRows));
+    this.savedY = Math.min(nextRows - 1, Math.max(0, this.savedY - removedTopRows));
   }
 
   write(chunk: string): void {
@@ -551,8 +595,10 @@ class ImmediateWrapTerminal {
     return this.scrollback.join("\n");
   }
 
-  cursorPositionResponse(): string {
-    return `\u001b[${this.y + 1};${this.x + 1}R`;
+  drainCursorPositionResponses(): string[] {
+    const responses = this.cursorPositionResponses;
+    this.cursorPositionResponses = [];
+    return responses;
   }
 
   private applyCsi(parameters: string, final: string): void {
@@ -572,6 +618,10 @@ class ImmediateWrapTerminal {
     }
     if (privateMode && (final === "h" || final === "l")) return;
     if (final === "m") return;
+    if (final === "n" && amount === 6) {
+      this.cursorPositionResponses.push(`\u001b[${this.y + 1};${this.x + 1}R`);
+      return;
+    }
     if (final === "A") this.y = Math.max(0, this.y - amount);
     else if (final === "B") this.y = Math.min(this.rows - 1, this.y + amount);
     else if (final === "C") this.x = Math.min(this.columns - 1, this.x + amount);
