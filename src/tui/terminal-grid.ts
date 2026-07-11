@@ -3,8 +3,11 @@ import { EventEmitter } from "node:events";
 const CPR_QUERY = "\u001b[?1049h\u001b[?6l\u001b[r\u001b[999;999H\u001b[6n";
 const CPR_QUERY_CLEANUP = "\u001b[?1049l";
 const LIVE_CPR_QUERY = "\u001b[s\u001b[999;999H\u001b[6n\u001b[u";
+const BEGIN_SYNCHRONIZED_OUTPUT = "\u001b[?2026h";
+const CLEAR_TERMINAL = "\u001b[2J\u001b[3J\u001b[H";
 const DEFAULT_PROBE_TIMEOUT_MS = 180;
 const LATE_CPR_DRAIN_MS = 250;
+const RESIZE_STABILIZATION_MS = 750;
 const MIN_LIVE_COLUMNS = 10;
 const MIN_LIVE_ROWS = 3;
 const CPR_RESPONSE_PATTERN = new RegExp(
@@ -76,7 +79,7 @@ export async function probeTerminalGrid(
       }
     };
 
-    stdin.prependListener("readable", onReadable);
+    stdin.on("readable", onReadable);
     const timer = setTimeout(() => finish(null), Math.max(1, timeoutMs));
     try {
       stdin.setRawMode(true);
@@ -147,6 +150,7 @@ function createResizeAwareSession(
   const resizeEvents = new EventEmitter();
   let frontendGrid = normalizeGrid(initialFrontendGrid, { columns: 80, rows: 24 });
   let publishedGrid = effectiveTerminalGrid(stdout, frontendGrid);
+  let stabilizeFramesUntil = 0;
   let disposed = false;
   let resizeGeneration = 0;
   let resizeQueued = false;
@@ -267,6 +271,7 @@ function createResizeAwareSession(
   const onUnderlyingResize = (): void => {
     if (disposed) return;
     resizeGeneration++;
+    stabilizeFramesUntil = Date.now() + RESIZE_STABILIZATION_MS;
     if (resizeQueued) return;
     resizeQueued = true;
     queueMicrotask(() => {
@@ -284,6 +289,15 @@ function createResizeAwareSession(
         return (): [number, number] => {
           const grid = effectiveGrid();
           return [grid.columns, grid.rows];
+        };
+      }
+      if (property === "write") {
+        return (chunk: unknown, ...args: unknown[]) => {
+          const stabilizedChunk =
+            Date.now() <= stabilizeFramesUntil && chunk === BEGIN_SYNCHRONIZED_OUTPUT
+              ? BEGIN_SYNCHRONIZED_OUTPUT + CLEAR_TERMINAL
+              : chunk;
+          return Reflect.apply(target.write, target, [stabilizedChunk, ...args]);
         };
       }
       if (property === "on" || property === "addListener") {
@@ -328,7 +342,9 @@ function createResizeAwareSession(
     },
   });
 
-  stdin.prependListener("readable", onReadable);
+  // Register before Ink is rendered. Readable streams special-case .on()
+  // to arm readable notifications; EventEmitter.prependListener() bypasses it.
+  stdin.on("readable", onReadable);
   stdout.on("resize", onUnderlyingResize);
 
   return {
