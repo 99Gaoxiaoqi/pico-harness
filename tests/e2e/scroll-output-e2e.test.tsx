@@ -309,6 +309,70 @@ describe("阶段 10：滚动窗口与大型工具输出集成验收", () => {
       await harness.cleanup();
     }
   });
+
+  it("生产全屏在 CPR 失败时保守容纳子代理面板与流式帧", async () => {
+    const terminal = new ImmediateWrapTerminal(87, 18, { respondToCpr: false });
+    const user: TuiEntry = { kind: "user", content: "CPR_FAILED_USER_MARKER" };
+    const agents = [
+      { id: "main", kind: "main" as const, status: "running" as const, task: "Main" },
+      ...Array.from({ length: 4 }, (_, index) => ({
+        id: `agent-${index}`,
+        kind: "subagent" as const,
+        status: "running" as const,
+        task: `阅读超长目录和文件列表-${index}-${"路径".repeat(40)}`,
+        completionPolicy: "required" as const,
+      })),
+    ];
+    const app = (entries: TuiEntry[], running: boolean) => (
+      <App
+        model="local-model"
+        provider="openai"
+        workDir="/workspace/demo"
+        sessionMode="new"
+        permissionMode="yolo"
+        entries={entries}
+        agents={agents}
+        running={running}
+        onSubmit={() => undefined}
+      />
+    );
+    const harness = await createProductionFrameHarness(app([user], true), terminal, {
+      columns: 166,
+      rows: 40,
+    });
+
+    try {
+      expect(harness.renderGrid().columns).toBeLessThanOrEqual(87);
+      expect(harness.renderGrid().rows).toBeLessThanOrEqual(18);
+      await harness.wait(280);
+      await harness.resize(166, 40);
+
+      for (const content of [
+        "CPR_FAILED_FINAL_MARKER",
+        "CPR_FAILED_FINAL_MARKER\n- 正在读取",
+        "CPR_FAILED_FINAL_MARKER\n- 正在读取\n- 正在总结",
+      ]) {
+        await harness.rerender(app([user, { kind: "assistant", content }], true));
+      }
+      await harness.rerender(
+        app([user, { kind: "assistant", content: "CPR_FAILED_FINAL_MARKER 已完成" }], false),
+      );
+
+      const visible = terminal.visibleText();
+      expect(visible.match(/phase idle · mode new · perm yolo/gu)).toHaveLength(1);
+      expect(visible.match(/CPR_FAILED_USER_MARKER/gu)).toHaveLength(1);
+      expect(visible.match(/CPR_FAILED_FINAL_MARKER/gu)).toHaveLength(1);
+      expect(visible.match(/Agents · 5/gu)).toHaveLength(1);
+      expect(terminal.wrapEvents).toBe(0);
+      expect(terminal.scrollEvents).toBe(0);
+      expect(terminal.mouseTrackingEnabled()).toBe(true);
+      expect(terminal.scrollbackText()).not.toMatch(
+        /phase (?:running|idle)|CPR_FAILED_(?:USER|FINAL)_MARKER|Agents · 5/u,
+      );
+    } finally {
+      await harness.cleanup();
+    }
+  });
 });
 
 function requireObservation(messages: Message[], toolCallId: string): string {
@@ -506,7 +570,11 @@ class ImmediateWrapTerminal {
   private sgrMouseTracking = false;
   private cursorPositionResponses: string[] = [];
 
-  constructor(columns: number, rows: number) {
+  constructor(
+    columns: number,
+    rows: number,
+    private readonly options: { respondToCpr?: boolean } = {},
+  ) {
     this.columns = columns;
     this.rows = rows;
     this.screen = Array.from({ length: rows }, () => this.blankLine());
@@ -635,7 +703,7 @@ class ImmediateWrapTerminal {
       return;
     }
     if (final === "m") return;
-    if (final === "n" && amount === 6) {
+    if (final === "n" && amount === 6 && this.options.respondToCpr !== false) {
       this.cursorPositionResponses.push(`\u001b[${this.y + 1};${this.x + 1}R`);
       return;
     }
