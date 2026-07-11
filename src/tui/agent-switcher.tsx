@@ -40,7 +40,10 @@ const STATUS_PRESENTATION = {
   queued: { marker: "○", color: "gray", label: "queued" },
   running: { marker: "✽", color: "cyan", label: "running" },
   completed: { marker: "✓", color: "green", label: "completed" },
+  partial: { marker: "!", color: "yellow", label: "partial" },
   failed: { marker: "×", color: "red", label: "failed" },
+  timed_out: { marker: "×", color: "yellow", label: "timed out" },
+  cancelled: { marker: "−", color: "gray", label: "cancelled" },
 } as const;
 
 export function AgentSwitcher({

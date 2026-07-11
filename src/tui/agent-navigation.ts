@@ -2,7 +2,15 @@ import type { TuiProjection, TuiSubagentTraceItem } from "./tui-event-store.js";
 
 export const MAIN_AGENT_ID = "main";
 
-export type AgentNavigationStatus = "idle" | "queued" | "running" | "completed" | "failed";
+export type AgentNavigationStatus =
+  | "idle"
+  | "queued"
+  | "running"
+  | "completed"
+  | "partial"
+  | "failed"
+  | "timed_out"
+  | "cancelled";
 
 export type AgentTimelineItem =
   | { id: string; kind: "thinking"; content?: string }

@@ -9,7 +9,14 @@ import pc from "picocolors";
 
 const diffColors = pc.createColors(true);
 
-export type SubagentActivityStatus = "queued" | "running" | "completed" | "failed";
+export type SubagentActivityStatus =
+  | "queued"
+  | "running"
+  | "completed"
+  | "partial"
+  | "failed"
+  | "timed_out"
+  | "cancelled";
 export type AssistantResponseSuppressionReason =
   | "required-delegation"
   | "delegation-first-retry"

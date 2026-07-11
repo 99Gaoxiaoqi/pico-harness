@@ -213,7 +213,13 @@ export function shouldRenderStatically(
       // done/error 已 resolve → 固定;running → 动态
       return entry.status !== "running";
     case "subagent-activity":
-      return entry.status === "completed" || entry.status === "failed";
+      return (
+        entry.status === "completed" ||
+        entry.status === "partial" ||
+        entry.status === "failed" ||
+        entry.status === "timed_out" ||
+        entry.status === "cancelled"
+      );
     case "assistant":
       if (!isLast) return true; // 历史回复必然固定
       // 末条:流式中 → 动态;否则固定
