@@ -5,6 +5,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FetchURLTool, WebSearchTool, stripHtml } from "../../src/tools/web.js";
 import { ToolRegistry } from "../../src/tools/registry-impl.js";
 
+vi.mock("node:dns/promises", () => ({
+  lookup: vi.fn(async () => [{ address: "8.8.8.8", family: 4 }]),
+}));
+
 /** 构造一个最小的 Response-like mock(只暴露 fetch_url 用到的字段) */
 function mockResponse(opts: {
   ok?: boolean;
@@ -15,6 +19,12 @@ function mockResponse(opts: {
 }) {
   const headers = new Map<string, string>();
   if (opts.contentType !== undefined) headers.set("content-type", opts.contentType);
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(opts.text));
+      controller.close();
+    },
+  });
   return {
     ok: opts.ok ?? true,
     status: opts.status ?? 200,
@@ -22,10 +32,17 @@ function mockResponse(opts: {
     headers: {
       get: (name: string) => headers.get(name.toLowerCase()) ?? null,
     },
+    body,
     text: async () => opts.text,
     // web_search 走 resp.json();fetch_url 走 resp.text()
     json: async () => JSON.parse(opts.text),
   };
+}
+
+function createFetchURLTool(): FetchURLTool {
+  return new FetchURLTool({
+    request: (url, _addresses, signal) => fetch(url.href, { signal, redirect: "manual" }),
+  });
 }
 
 describe("FetchURLTool", () => {
@@ -46,7 +63,7 @@ describe("FetchURLTool", () => {
       }) as unknown as Response,
     );
 
-    const tool = new FetchURLTool();
+    const tool = createFetchURLTool();
     const out = await tool.execute(JSON.stringify({ url: "https://example.com" }));
 
     expect(out).toContain("Hello & world");
@@ -63,7 +80,7 @@ describe("FetchURLTool", () => {
       }) as unknown as Response,
     );
 
-    const tool = new FetchURLTool();
+    const tool = createFetchURLTool();
     const out = await tool.execute(JSON.stringify({ url: "https://api.example.com" }));
     expect(out).toContain('{"ok":true}');
   });
@@ -78,19 +95,19 @@ describe("FetchURLTool", () => {
       }) as unknown as Response,
     );
 
-    const tool = new FetchURLTool();
+    const tool = createFetchURLTool();
     await expect(
       tool.execute(JSON.stringify({ url: "https://example.com/missing" })),
     ).rejects.toThrow(/404/);
   });
 
   it("非法 URL 抛错", async () => {
-    const tool = new FetchURLTool();
+    const tool = createFetchURLTool();
     await expect(tool.execute(JSON.stringify({ url: "not-a-url" }))).rejects.toThrow(/非法 URL/);
   });
 
   it("拒绝非 http/https 协议(file://)", async () => {
-    const tool = new FetchURLTool();
+    const tool = createFetchURLTool();
     await expect(tool.execute(JSON.stringify({ url: "file:///etc/passwd" }))).rejects.toThrow(
       /http\/https/,
     );
@@ -102,7 +119,7 @@ describe("FetchURLTool", () => {
       mockResponse({ contentType: "text/html", text: long }) as unknown as Response,
     );
 
-    const tool = new FetchURLTool();
+    const tool = createFetchURLTool();
     const out = await tool.execute(JSON.stringify({ url: "https://example.com", max_chars: 50 }));
     expect(out).toContain("已截断");
     // 截断后的正文部分应不超过 50 字符 + 标注
@@ -110,7 +127,7 @@ describe("FetchURLTool", () => {
   });
 
   it("参数格式错误时抛出解析错误", async () => {
-    const tool = new FetchURLTool();
+    const tool = createFetchURLTool();
     await expect(tool.execute("not-json")).rejects.toThrow(/参数解析失败/);
   });
 
@@ -123,7 +140,7 @@ describe("FetchURLTool", () => {
     );
 
     const r = new ToolRegistry();
-    r.register(new FetchURLTool());
+    r.register(createFetchURLTool());
     const result = await r.execute({
       id: "c1",
       name: "fetch_url",
@@ -134,7 +151,7 @@ describe("FetchURLTool", () => {
   });
 
   it("readOnly=true 且 accesses 返回 none(可与其他工具并行)", () => {
-    const tool = new FetchURLTool();
+    const tool = createFetchURLTool();
     expect(tool.readOnly).toBe(true);
     expect(tool.accesses("{}")).toEqual([]);
   });
