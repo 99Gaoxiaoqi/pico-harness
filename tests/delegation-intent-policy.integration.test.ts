@@ -45,6 +45,8 @@ describe("explicit delegation intent input boundary", () => {
     "How do subagents work?",
     "Launch several subagents in the background without waiting.",
     "Why does the main agent spawn subagents before reading the project?",
+    "启动主 Agent 阅读项目并进行总结。",
+    "Launch an agent to inspect the project.",
     "Should we use subagents for this project?",
     "请你自己阅读项目并说明问题",
   ])("不把讨论或无委派要求的输入误判为执行意图: %s", (input) => {
