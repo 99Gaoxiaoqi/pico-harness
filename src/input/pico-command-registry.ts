@@ -55,7 +55,6 @@ import {
   type SessionSettings,
   type SessionToolStatus,
 } from "./session-settings.js";
-import type { ThinkingEffort } from "../provider/thinking.js";
 import type { McpStatusSnapshot } from "../mcp/manager.js";
 import type { GoalManager } from "../engine/goal-manager.js";
 import type { ModelRuntimeCommandService } from "../provider/model-runtime-report.js";
@@ -404,9 +403,7 @@ function createCompactCommand(
         try {
           const resolved = options.modelRouter.providerConfig(
             settings.modelRouteId,
-            effectiveSessionReasoningLevel(settings, options.modelRouter) as
-              | ThinkingEffort
-              | undefined,
+            effectiveSessionReasoningLevel(settings, options.modelRouter),
           );
           activeProvider = resolved.provider;
           activeConfig = resolved.config;
