@@ -974,34 +974,55 @@ export function createUnifiedFilePatch(input: {
     `@@ -${beforeLines.length === 0 ? 0 : 1},${beforeLines.length} +${
       afterLines.length === 0 ? 0 : 1
     },${afterLines.length} @@`,
-    ...beforeLines.slice(0, prefixLength).map((line) => ` ${line}`),
+    ...beforeLines.slice(0, prefixLength).flatMap((line) => renderDiffLine(" ", line)),
     ...buildLinePatch(beforeMiddle, afterMiddle),
-    ...beforeLines.slice(beforeLines.length - suffixLength).map((line) => ` ${line}`),
+    ...beforeLines
+      .slice(beforeLines.length - suffixLength)
+      .flatMap((line) => renderDiffLine(" ", line)),
   );
   return lines.join("\n");
 }
 
+interface DiffTextLine {
+  text: string;
+  /** false 表示该行到 EOF 时没有换行符。 */
+  terminated: boolean;
+}
+
 /** Hirschberg LCS：保持完整、准确的上下文行，同时避免为大文件分配 O(n*m) 矩阵。 */
-function buildLinePatch(before: readonly string[], after: readonly string[]): string[] {
-  if (before.length === 0) return after.map((line) => `+${line}`);
-  if (after.length === 0) return before.map((line) => `-${line}`);
+function buildLinePatch(
+  before: readonly DiffTextLine[],
+  after: readonly DiffTextLine[],
+): string[] {
+  if (before.length === 0) return after.flatMap((line) => renderDiffLine("+", line));
+  if (after.length === 0) return before.flatMap((line) => renderDiffLine("-", line));
 
   if (before.length === 1) {
-    const commonIndex = after.indexOf(before[0]!);
-    if (commonIndex === -1) return [`-${before[0]}`, ...after.map((line) => `+${line}`)];
+    const commonIndex = after.findIndex((line) => sameDiffLine(line, before[0]!));
+    if (commonIndex === -1) {
+      return [
+        ...renderDiffLine("-", before[0]!),
+        ...after.flatMap((line) => renderDiffLine("+", line)),
+      ];
+    }
     return [
-      ...after.slice(0, commonIndex).map((line) => `+${line}`),
-      ` ${before[0]}`,
-      ...after.slice(commonIndex + 1).map((line) => `+${line}`),
+      ...after.slice(0, commonIndex).flatMap((line) => renderDiffLine("+", line)),
+      ...renderDiffLine(" ", before[0]!),
+      ...after.slice(commonIndex + 1).flatMap((line) => renderDiffLine("+", line)),
     ];
   }
   if (after.length === 1) {
-    const commonIndex = before.indexOf(after[0]!);
-    if (commonIndex === -1) return [...before.map((line) => `-${line}`), `+${after[0]}`];
+    const commonIndex = before.findIndex((line) => sameDiffLine(line, after[0]!));
+    if (commonIndex === -1) {
+      return [
+        ...before.flatMap((line) => renderDiffLine("-", line)),
+        ...renderDiffLine("+", after[0]!),
+      ];
+    }
     return [
-      ...before.slice(0, commonIndex).map((line) => `-${line}`),
-      ` ${after[0]}`,
-      ...before.slice(commonIndex + 1).map((line) => `-${line}`),
+      ...before.slice(0, commonIndex).flatMap((line) => renderDiffLine("-", line)),
+      ...renderDiffLine(" ", after[0]!),
+      ...before.slice(commonIndex + 1).flatMap((line) => renderDiffLine("-", line)),
     ];
   }
 
@@ -1023,13 +1044,16 @@ function buildLinePatch(before: readonly string[], after: readonly string[]): st
   ];
 }
 
-function lcsLengthRow(left: readonly string[], right: readonly string[]): number[] {
+function lcsLengthRow(
+  left: readonly DiffTextLine[],
+  right: readonly DiffTextLine[],
+): number[] {
   let previous = new Array<number>(right.length + 1).fill(0);
   for (const leftLine of left) {
     const current = new Array<number>(right.length + 1).fill(0);
     for (let index = 0; index < right.length; index++) {
       current[index + 1] =
-        leftLine === right[index]
+        sameDiffLine(leftLine, right[index]!)
           ? previous[index]! + 1
           : Math.max(previous[index + 1]!, current[index]!);
     }
@@ -1038,24 +1062,31 @@ function lcsLengthRow(left: readonly string[], right: readonly string[]): number
   return previous;
 }
 
-function commonPrefixLength(left: readonly string[], right: readonly string[]): number {
+function commonPrefixLength(
+  left: readonly DiffTextLine[],
+  right: readonly DiffTextLine[],
+): number {
   let length = 0;
-  while (length < left.length && length < right.length && left[length] === right[length]) {
+  while (
+    length < left.length &&
+    length < right.length &&
+    sameDiffLine(left[length]!, right[length]!)
+  ) {
     length++;
   }
   return length;
 }
 
 function commonSuffixLength(
-  left: readonly string[],
-  right: readonly string[],
+  left: readonly DiffTextLine[],
+  right: readonly DiffTextLine[],
   prefixLength: number,
 ): number {
   let length = 0;
   while (
     length < left.length - prefixLength &&
     length < right.length - prefixLength &&
-    left[left.length - length - 1] === right[right.length - length - 1]
+    sameDiffLine(left[left.length - length - 1]!, right[right.length - length - 1]!)
   ) {
     length++;
   }
@@ -1076,7 +1107,7 @@ function countLineChanges(
   while (
     prefix < beforeLines.length &&
     prefix < afterLines.length &&
-    beforeLines[prefix] === afterLines[prefix]
+    sameDiffLine(beforeLines[prefix]!, afterLines[prefix]!)
   ) {
     prefix++;
   }
@@ -1086,7 +1117,7 @@ function countLineChanges(
   while (
     beforeEnd >= prefix &&
     afterEnd >= prefix &&
-    beforeLines[beforeEnd] === afterLines[afterEnd]
+    sameDiffLine(beforeLines[beforeEnd]!, afterLines[afterEnd]!)
   ) {
     beforeEnd--;
     afterEnd--;
@@ -1101,16 +1132,33 @@ function countLineChanges(
   };
 }
 
-function splitDiffLines(value: string): string[] {
+function splitDiffLines(value: string): DiffTextLine[] {
   if (value.length === 0) return [];
+  const terminatedAtEof = value.endsWith("\n");
   const lines = value.split("\n");
-  if (lines.at(-1) === "") lines.pop();
-  return lines;
+  if (terminatedAtEof) lines.pop();
+  return lines.map((text, index) => ({
+    text,
+    terminated: index < lines.length - 1 || terminatedAtEof,
+  }));
 }
 
-function longestCommonSubsequenceLength(left: string[], right: string[]): number {
+function longestCommonSubsequenceLength(
+  left: readonly DiffTextLine[],
+  right: readonly DiffTextLine[],
+): number {
   if (left.length === 0 || right.length === 0) return 0;
   return lcsLengthRow(left, right)[right.length]!;
+}
+
+function sameDiffLine(left: DiffTextLine, right: DiffTextLine): boolean {
+  return left.text === right.text && left.terminated === right.terminated;
+}
+
+function renderDiffLine(prefix: " " | "+" | "-", line: DiffTextLine): string[] {
+  return line.terminated
+    ? [`${prefix}${line.text}`]
+    : [`${prefix}${line.text}`, "\\ No newline at end of file"];
 }
 
 interface PersistedFileHistoryBackup {

@@ -57,8 +57,10 @@ export interface TuiToolCallProjection {
   readonly name: string;
   readonly args: string;
   readonly status: ToolCardStatus;
-  /** 按到达顺序保留的有界增量输出；chunk 字符串与事件共享，不复制正文。 */
-  readonly output: readonly TuiToolOutputChunk[];
+  /** 有界的已投影正文；reducer 每个固定大小 segment 只追加一次。 */
+  readonly output: string;
+  /** 保留 stdout/stderr 的到达顺序，不在每个 run 里重复正文。 */
+  readonly outputSegments: readonly TuiToolOutputSegment[];
   readonly outputChars: number;
   readonly droppedOutputChars: number;
   readonly outputTruncated: boolean;
@@ -71,12 +73,29 @@ export interface TuiToolCallProjection {
   readonly artifactPath?: string;
   readonly size?: number;
   readonly truncated: boolean;
+  /** Inspector 只根据该字段判断完整结果是否仍可用。 */
+  readonly resultAvailability?: "inline" | "artifact" | "unavailable";
 }
 
 export interface TuiToolOutputChunk {
   readonly stream: "stdout" | "stderr";
   readonly chunk: string;
 }
+
+export interface TuiToolOutputRun {
+  readonly stream: "stdout" | "stderr";
+  readonly length: number;
+}
+
+export interface TuiToolOutputSegment {
+  readonly content: string;
+  readonly runs: readonly TuiToolOutputRun[];
+}
+
+/** EventStore 也守住此上限，避免绕过 Reporter 时投影无界增长。 */
+export const TUI_TOOL_OUTPUT_PROJECTION_LIMIT_CHARS = 32_000;
+export const TUI_CHECKPOINT_INLINE_RESULT_BUDGET_CHARS = 128_000;
+export const TUI_CHECKPOINT_INLINE_RESULT_RECENT_COUNT = 8;
 
 /** append-only 事件流的确定性投影。 */
 export interface TuiProjection {
@@ -147,6 +166,12 @@ export type TuiEvent =
   | (TuiEventBase & {
       readonly type: "tool.output";
       readonly toolCallId: string;
+      readonly segment: TuiToolOutputSegment;
+    })
+  /** 兼容旧持久化日志；新 Reporter 只写 segment 形式。 */
+  | (TuiEventBase & {
+      readonly type: "tool.output";
+      readonly toolCallId: string;
       readonly stream: "stdout" | "stderr";
       readonly chunk: string;
     })
@@ -197,23 +222,33 @@ export interface TuiEventStoreOptions {
   now?: () => number;
   /** 从持久化日志水合；原有 eventId / sequence 保持不变。 */
   initialEvents?: readonly TuiEvent[];
+  /** 从 checkpoint + 当前事件段水合。 */
+  initialSnapshot?: TuiEventStoreSnapshot;
+  /** 当前事件段最大长度；达到后投影折叠为新 checkpoint。 */
+  maxSegmentEvents?: number;
+}
+
+export interface TuiEventStoreSnapshot {
+  readonly checkpoint: TuiProjection;
+  readonly events: readonly TuiEvent[];
 }
 
 export type TuiIdentityScope = "event" | "entry" | "phase" | "stream" | "tool";
 
 /**
- * append-only 内存事件库。
+ * 分段 append-only 内存事件库。
  *
  * append 时同步执行纯 reducer，因此常规更新不需要每次重放全部历史；
- * replay() 则从空状态重放，供持久化水合和一致性检查使用。
- * 本 store 只管当前内存 segment；长会话的 checkpoint/rollover 由 11.4
- * 的 Session 持久化层负责，调用方不应假设 getEvents() 可无界增长。
+ * replay() 从 checkpoint 只重放当前 segment。checkpoint + events
+ * 是可持久化的最小确定性回放单元，事件日志不会永久无界增长。
  */
 export class TuiEventStore {
   private readonly events: TuiEvent[] = [];
-  private projection: TuiProjection = initialTuiProjection();
+  private checkpoint: TuiProjection;
+  private projection: TuiProjection;
   private readonly idFactory: (scope: TuiIdentityScope) => string;
   private readonly now: () => number;
+  private readonly maxSegmentEvents: number;
   private readonly usedEventIds = new Set<string>();
   private readonly usedEntryIds = new Set<string>();
   private readonly usedPhaseIds = new Set<string>();
@@ -221,9 +256,20 @@ export class TuiEventStore {
   private readonly usedToolIds = new Set<string>();
 
   constructor(options: TuiEventStoreOptions = {}) {
+    if (options.initialEvents !== undefined && options.initialSnapshot !== undefined) {
+      throw new Error("TuiEventStore accepts either initialEvents or initialSnapshot, not both");
+    }
     this.idFactory = options.idFactory ?? createTuiIdFactory();
     this.now = options.now ?? Date.now;
-    for (const event of options.initialEvents ?? []) this.loadInitialEvent(event);
+    this.maxSegmentEvents = normalizeSegmentLimit(options.maxSegmentEvents);
+    this.checkpoint = cloneProjection(
+      options.initialSnapshot?.checkpoint ?? initialTuiProjection(),
+    );
+    this.projection = this.checkpoint;
+    this.rebuildIdentityReservations();
+    const initialEvents = options.initialSnapshot?.events ?? options.initialEvents ?? [];
+    for (const event of initialEvents) this.loadInitialEvent(event);
+    if (this.events.length >= this.maxSegmentEvents) this.rollover();
   }
 
   createId(scope: Exclude<TuiIdentityScope, "event">): string {
@@ -236,7 +282,7 @@ export class TuiEventStore {
     const event = freezeTuiEvent({
       ...identifiedDraft,
       eventId: this.idFactory("event"),
-      sequence: this.events.length + 1,
+      sequence: this.projection.sequence + 1,
       createdAt: this.now(),
     } as TuiEvent);
     this.assertEventIdentitiesAvailable(event);
@@ -244,11 +290,28 @@ export class TuiEventStore {
     this.reserveEventIdentities(event);
     this.events.push(event);
     this.projection = nextProjection;
+    if (
+      this.events.length >= this.maxSegmentEvents ||
+      event.type === "transcript.cleared" ||
+      event.type === "transcript.truncated" ||
+      event.type === "tool.completed"
+    ) {
+      this.rollover();
+    }
     return event;
   }
 
+  /** 只返回 checkpoint 之后的当前有界事件段。 */
   getEvents(): readonly TuiEvent[] {
     return Object.freeze([...this.events]);
+  }
+
+  /** 持久化/水合应使用该完整单元，不应单独保存 getEvents()。 */
+  getReplaySnapshot(): TuiEventStoreSnapshot {
+    return Object.freeze({
+      checkpoint: this.checkpoint,
+      events: Object.freeze([...this.events]),
+    });
   }
 
   getProjection(): TuiProjection {
@@ -256,17 +319,21 @@ export class TuiEventStore {
   }
 
   get size(): number {
+    return this.projection.sequence;
+  }
+
+  get segmentSize(): number {
     return this.events.length;
   }
 
   replay(): TuiProjection {
-    return projectTuiEvents(this.events);
+    return projectTuiEvents(this.events, this.checkpoint);
   }
 
   private loadInitialEvent(input: TuiEvent): void {
-    if (input.sequence !== this.events.length + 1) {
+    if (input.sequence !== this.projection.sequence + 1) {
       throw new Error(
-        `Invalid TUI event sequence during hydration: ${input.sequence}, expected ${this.events.length + 1}`,
+        `Invalid TUI event sequence during hydration: ${input.sequence}, expected ${this.projection.sequence + 1}`,
       );
     }
     const event = freezeTuiEvent(input);
@@ -275,6 +342,28 @@ export class TuiEventStore {
     this.reserveEventIdentities(event);
     this.events.push(event);
     this.projection = nextProjection;
+  }
+
+  private rollover(): void {
+    this.checkpoint = compactProjectionForCheckpoint(this.projection);
+    this.projection = this.checkpoint;
+    this.events.length = 0;
+    this.rebuildIdentityReservations();
+  }
+
+  private rebuildIdentityReservations(): void {
+    this.usedEventIds.clear();
+    this.usedEntryIds.clear();
+    this.usedPhaseIds.clear();
+    this.usedStreamIds.clear();
+    this.usedToolIds.clear();
+    if (this.projection.lastEventId) this.usedEventIds.add(this.projection.lastEventId);
+    this.usedPhaseIds.add(this.projection.phase.id);
+    for (const entry of this.projection.entries) this.usedEntryIds.add(entry.id);
+    for (const stream of Object.values(this.projection.streams)) {
+      this.usedStreamIds.add(stream.id);
+    }
+    for (const tool of Object.values(this.projection.toolCalls)) this.usedToolIds.add(tool.id);
   }
 
   private assertEventIdentitiesAvailable(event: TuiEvent): void {
@@ -349,8 +438,11 @@ export function initialTuiProjection(): TuiProjection {
 }
 
 /** 从事件历史确定性生成完整界面投影。 */
-export function projectTuiEvents(events: readonly TuiEvent[]): TuiProjection {
-  return events.reduce(reduceTuiEvent, initialTuiProjection());
+export function projectTuiEvents(
+  events: readonly TuiEvent[],
+  checkpoint: TuiProjection = initialTuiProjection(),
+): TuiProjection {
+  return events.reduce(reduceTuiEvent, checkpoint);
 }
 
 /** 纯 reducer：不修改旧 projection 或其 entry 对象。 */
@@ -460,7 +552,8 @@ export function reduceTuiEvent(state: TuiProjection, event: TuiEvent): TuiProjec
           name: event.name,
           args: event.args,
           status: "running" as const,
-          output: Object.freeze([]),
+          output: "",
+          outputSegments: Object.freeze([]),
           outputChars: 0,
           droppedOutputChars: 0,
           outputTruncated: false,
@@ -490,16 +583,20 @@ export function reduceTuiEvent(state: TuiProjection, event: TuiEvent): TuiProjec
 
     case "tool.output": {
       const tool = requirePendingTool(toolCalls, event.toolCallId);
-      const chunk = Object.freeze({ stream: event.stream, chunk: event.chunk });
-      const output = Object.freeze([...tool.output, chunk]);
-      const visibleOutput = joinToolOutput(output);
+      const segment = normalizeToolOutputSegment(event);
+      if (segment.content.length === 0) break;
+      if (tool.outputChars + segment.content.length > TUI_TOOL_OUTPUT_PROJECTION_LIMIT_CHARS) {
+        throw new Error(`TUI tool call ${event.toolCallId} output exceeds the projection limit`);
+      }
+      const output = tool.output + segment.content;
+      const outputSegments = Object.freeze([...tool.outputSegments, segment]);
       entries = replaceProjectedEntry(entries, tool.entryId, (current) => {
         if (current.entry.kind !== "tool") {
           throw new Error(`TUI tool call ${event.toolCallId} points to a non-tool entry`);
         }
         return projectedEntry(
           current.id,
-          { ...current.entry, summary: visibleOutput },
+          { ...current.entry, summary: output },
           { toolCallId: event.toolCallId },
         );
       });
@@ -508,7 +605,8 @@ export function reduceTuiEvent(state: TuiProjection, event: TuiEvent): TuiProjec
         [event.toolCallId]: Object.freeze({
           ...tool,
           output,
-          outputChars: tool.outputChars + event.chunk.length,
+          outputSegments,
+          outputChars: tool.outputChars + segment.content.length,
         }),
       };
       break;
@@ -532,14 +630,22 @@ export function reduceTuiEvent(state: TuiProjection, event: TuiEvent): TuiProjec
 
     case "tool.completed": {
       const tool = requirePendingTool(toolCalls, event.toolCallId);
-      const streamedResult = joinToolOutput(tool.output);
+      const streamedResult = tool.output;
       // 11.4 持久化日志中的旧 completion 事件没有 size/truncated，水合时按非截断摘要兼容。
       const truncated = event.truncated === true;
       const result =
         event.inlineResult ??
         (!truncated && streamedResult.length > 0 ? streamedResult : undefined);
+      const resultAvailability =
+        event.artifactRef !== undefined
+          ? ("artifact" as const)
+          : result !== undefined
+            ? ("inline" as const)
+            : ("unavailable" as const);
       const displayResult =
-        event.artifactRef !== undefined ? event.summary : (result ?? event.summary);
+        resultAvailability === "unavailable"
+          ? unavailableResultSummary(event.summary)
+          : event.summary;
       entries = replaceProjectedEntry(entries, tool.entryId, (current) => {
         if (current.entry.kind !== "tool") {
           throw new Error(`TUI tool call ${event.toolCallId} points to a non-tool entry`);
@@ -555,12 +661,15 @@ export function reduceTuiEvent(state: TuiProjection, event: TuiEvent): TuiProjec
         [event.toolCallId]: Object.freeze({
           ...tool,
           status: event.status,
+          output: "",
+          outputSegments: Object.freeze([]),
           ...(result !== undefined ? { result } : {}),
-          summary: event.summary,
+          summary: displayResult,
           ...(event.artifactRef !== undefined ? { artifactRef: event.artifactRef } : {}),
           ...(event.artifactPath !== undefined ? { artifactPath: event.artifactPath } : {}),
           size: event.size ?? result?.length ?? event.summary.length,
           truncated,
+          resultAvailability,
         }),
       };
       break;
@@ -659,8 +768,39 @@ function isPendingToolStatus(status: ToolCardStatus): boolean {
   return status === "queued" || status === "running" || status === "approval";
 }
 
-export function joinToolOutput(chunks: readonly TuiToolOutputChunk[]): string {
-  return chunks.map(({ chunk }) => chunk).join("");
+export function joinToolOutput(
+  output: string | readonly (TuiToolOutputChunk | TuiToolOutputSegment)[],
+): string {
+  if (typeof output === "string") return output;
+  return output.map((item) => ("content" in item ? item.content : item.chunk)).join("");
+}
+
+function normalizeToolOutputSegment(
+  event: Extract<TuiEvent, { type: "tool.output" }>,
+): TuiToolOutputSegment {
+  if (!("segment" in event)) {
+    return Object.freeze({
+      content: event.chunk,
+      runs: Object.freeze([
+        Object.freeze({ stream: event.stream, length: event.chunk.length }),
+      ]),
+    });
+  }
+
+  const content = event.segment.content;
+  const runs = event.segment.runs.map((run) => {
+    if (!Number.isSafeInteger(run.length) || run.length <= 0) {
+      throw new Error("TUI tool output run length must be a positive safe integer");
+    }
+    return Object.freeze({ stream: run.stream, length: run.length });
+  });
+  const runLength = runs.reduce((sum, run) => sum + run.length, 0);
+  if (runLength !== content.length) {
+    throw new Error(
+      `TUI tool output segment run length mismatch: ${runLength} != ${content.length}`,
+    );
+  }
+  return Object.freeze({ content, runs: Object.freeze(runs) });
 }
 
 function retainEntryIndexes(
@@ -686,7 +826,123 @@ function freezeTuiEvent(event: TuiEvent): TuiEvent {
   if (event.type === "entry.appended") {
     return Object.freeze({ ...event, entry: Object.freeze({ ...event.entry }) as TuiEntry });
   }
+  if (event.type === "tool.output" && "segment" in event) {
+    return Object.freeze({ ...event, segment: normalizeToolOutputSegment(event) });
+  }
   return Object.freeze({ ...event }) as TuiEvent;
+}
+
+function compactProjectionForCheckpoint(projection: TuiProjection): TuiProjection {
+  const retainedInlineResults = new Set<string>();
+  let remainingChars = TUI_CHECKPOINT_INLINE_RESULT_BUDGET_CHARS;
+  let remainingCount = TUI_CHECKPOINT_INLINE_RESULT_RECENT_COUNT;
+
+  for (const entry of projection.entries.toReversed()) {
+    if (entry.toolCallId === undefined) continue;
+    const tool = projection.toolCalls[entry.toolCallId];
+    if (
+      !tool ||
+      tool.resultAvailability !== "inline" ||
+      tool.result === undefined ||
+      remainingCount <= 0 ||
+      tool.result.length > remainingChars
+    ) {
+      continue;
+    }
+    retainedInlineResults.add(tool.id);
+    remainingChars -= tool.result.length;
+    remainingCount--;
+  }
+
+  const toolCalls = Object.fromEntries(
+    Object.entries(projection.toolCalls).map(([id, tool]) => {
+      if (isPendingToolStatus(tool.status)) return [id, tool];
+
+      const compactBase = {
+        ...tool,
+        output: "",
+        outputSegments: Object.freeze([]),
+      };
+      if (
+        tool.resultAvailability !== "inline" ||
+        tool.result === undefined ||
+        retainedInlineResults.has(tool.id)
+      ) {
+        return [id, Object.freeze(compactBase)];
+      }
+
+      return [
+        id,
+        Object.freeze({
+          ...compactBase,
+          result: undefined,
+          summary: unavailableResultSummary(tool.summary ?? "Tool result"),
+          resultAvailability: "unavailable" as const,
+        }),
+      ];
+    }),
+  );
+
+  const entries = projection.entries.map((entry) => {
+    if (entry.toolCallId === undefined || entry.entry.kind !== "tool") return entry;
+    const tool = toolCalls[entry.toolCallId];
+    if (!tool || tool.summary === entry.entry.summary) return entry;
+    return projectedEntry(
+      entry.id,
+      { ...entry.entry, summary: tool.summary },
+      { toolCallId: entry.toolCallId },
+    );
+  });
+
+  return freezeProjection({
+    ...projection,
+    entries,
+    toolCalls,
+  });
+}
+
+function unavailableResultSummary(summary: string): string {
+  const notice = "Complete inline result is no longer available in the Inspector.";
+  return summary.includes(notice) ? summary : `${summary}\n${notice}`;
+}
+
+function cloneProjection(projection: TuiProjection): TuiProjection {
+  const entries = projection.entries.map((item) =>
+    projectedEntry(item.id, item.entry, {
+      ...(item.streamId !== undefined ? { streamId: item.streamId } : {}),
+      ...(item.toolCallId !== undefined ? { toolCallId: item.toolCallId } : {}),
+    }),
+  );
+  const streams = Object.fromEntries(
+    Object.entries(projection.streams).map(([id, stream]) => [
+      id,
+      Object.freeze({ ...stream }),
+    ]),
+  );
+  const toolCalls = Object.fromEntries(
+    Object.entries(projection.toolCalls).map(([id, tool]) => [
+      id,
+      Object.freeze({
+        ...tool,
+        outputSegments: Object.freeze(
+          tool.outputSegments.map((segment) =>
+            Object.freeze({
+              content: segment.content,
+              runs: Object.freeze(segment.runs.map((run) => Object.freeze({ ...run }))),
+            }),
+          ),
+        ),
+      }),
+    ]),
+  );
+  return freezeProjection({
+    entries,
+    phase: { ...projection.phase },
+    streams,
+    toolCalls,
+    ...(projection.lastEventId !== undefined ? { lastEventId: projection.lastEventId } : {}),
+    sequence: projection.sequence,
+  });
 }
 
 function freezeProjection(projection: TuiProjection): TuiProjection {
@@ -703,6 +959,11 @@ function createTuiIdFactory(): (scope: TuiIdentityScope) => string {
   const namespace = randomUUID();
   let sequence = 0;
   return (scope) => `tui:${namespace}:${scope}:${++sequence}`;
+}
+
+function normalizeSegmentLimit(value: number | undefined): number {
+  if (value === undefined || !Number.isFinite(value)) return 1_024;
+  return Math.max(1, Math.floor(value));
 }
 
 function assertUnique(target: Set<string>, id: string, label: string): void {
