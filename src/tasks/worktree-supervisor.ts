@@ -4,6 +4,12 @@ import { mkdir, realpath, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 
 import { TaskRegistry, type TaskSnapshot, isTerminalTaskStatus } from "./task-registry.js";
+import {
+  buildSafeGitEnvironment,
+  createDisabledHooksPath,
+  hardenGitArgs,
+  UNSAFE_GIT_DRIVER_CONFIG_PATTERN,
+} from "./git-safety.js";
 
 export type WorktreeTaskStatus =
   | "preparing"
@@ -67,6 +73,8 @@ export interface WorktreeTaskSnapshot {
 export interface GitExecutionOptions {
   cwd: string;
   signal?: AbortSignal;
+  /** git config --get-regexp 等查询以 1 表示“无匹配”。 */
+  allowExitCodes?: readonly number[];
 }
 
 export interface GitExecutionResult {
@@ -170,7 +178,9 @@ export class WorktreeSupervisor {
     }
 
     this.taskRegistry = options.taskRegistry;
-    this.git = options.gitExecutor ?? executeGit;
+    const rawGit = options.gitExecutor ?? executeGit;
+    const disabledHooksPath = createDisabledHooksPath();
+    this.git = (args, gitOptions) => rawGit(hardenGitArgs(args, disabledHooksPath), gitOptions);
     this.now = options.now ?? Date.now;
     this.generateId = options.generateId ?? defaultResourceId;
     this.maxOutputChars = positiveInteger(
@@ -425,6 +435,7 @@ export class WorktreeSupervisor {
     if (await pathExists(record.worktreePath)) {
       throw new Error(`worktree 目标已存在: ${record.worktreePath}`);
     }
+    await this.assertNoExternalGitDrivers(this.repoRoot, record.controller.signal);
     await this.git(["check-ref-format", "--branch", record.branch], { cwd: this.repoRoot });
     const base = await this.git(["rev-parse", "--verify", `${record.baseRef}^{commit}`], {
       cwd: this.repoRoot,
@@ -495,6 +506,8 @@ export class WorktreeSupervisor {
     });
     if (status.stdout.trim().length === 0) return;
 
+    await this.assertNoExternalGitDrivers(record.worktreePath, record.controller.signal);
+
     await this.git(["add", "--all"], {
       cwd: record.worktreePath,
       signal: record.controller.signal,
@@ -507,11 +520,24 @@ export class WorktreeSupervisor {
         "-c",
         "user.email=pico-worker@localhost",
         "commit",
+        "--no-gpg-sign",
         "-m",
         workerCommitMessage(record.request.description),
       ],
       { cwd: record.worktreePath, signal: record.controller.signal },
     );
+  }
+
+  private async assertNoExternalGitDrivers(cwd: string, signal?: AbortSignal): Promise<void> {
+    const result = await this.git(
+      ["config", "--includes", "--get-regexp", UNSAFE_GIT_DRIVER_CONFIG_PATTERN],
+      { cwd, ...(signal ? { signal } : {}), allowExitCodes: [1] },
+    );
+    if (result.stdout.trim().length > 0) {
+      throw new Error(
+        "仓库配置了外部 Git filter/merge driver，拒绝在 worker 沙箱外自动 checkout 或提交；请人工审查后提交。",
+      );
+    }
   }
 
   private appendOutput(record: WorktreeTaskRecord, chunk: string): void {
@@ -642,10 +668,17 @@ function executeGit(
       {
         cwd: options.cwd,
         encoding: "utf8",
+        env: buildSafeGitEnvironment(),
+        maxBuffer: 4 * 1024 * 1024,
         ...(options.signal ? { signal: options.signal } : {}),
       },
       (error, stdout, stderr) => {
         if (error) {
+          const exitCode = typeof error.code === "number" ? error.code : undefined;
+          if (exitCode !== undefined && options.allowExitCodes?.includes(exitCode)) {
+            resolvePromise({ stdout: String(stdout), stderr: String(stderr) });
+            return;
+          }
           reject(
             new Error(`git ${args.join(" ")} 失败: ${String(stderr).trim() || error.message}`, {
               cause: error,
@@ -726,7 +759,11 @@ function isTerminal(status: WorktreeTaskStatus): boolean {
 }
 
 function workerCommitMessage(description: string): string {
-  const subject = description.replace(/[\0\r\n]+/gu, " ").trim().slice(0, 100) || "完成子任务";
+  const subject =
+    description
+      .replace(/[\0\r\n]+/gu, " ")
+      .trim()
+      .slice(0, 100) || "完成子任务";
   return `feat(worker): ${subject}`;
 }
 
