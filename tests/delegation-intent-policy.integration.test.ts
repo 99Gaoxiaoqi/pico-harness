@@ -1,0 +1,48 @@
+import { describe, expect, it } from "vitest";
+import {
+  createFirstTurnDelegationPolicy,
+  detectExplicitDelegationIntent,
+} from "../src/input/delegation-intent-policy.js";
+import { processUserInput } from "../src/input/process-user-input.js";
+
+describe("explicit delegation intent input boundary", () => {
+  it.each([
+    ["启动多个子代理阅读项目", "multiple"],
+    ["调用两个子 Agent 并行分析项目", "multiple"],
+    ["请让一个子代理检查鉴权实现", "single"],
+    ["Launch several subagents to inspect the project", "multiple"],
+    ["Delegate this review to sub-agents", "unspecified"],
+  ] as const)("把真实 prompt 输入 %s 转成 required 首动作策略", async (raw, count) => {
+    const processed = await processUserInput(raw);
+    expect(processed.type).toBe("prompt");
+    if (processed.type !== "prompt") throw new Error("预期真实用户输入被解析为 prompt");
+
+    const policy = createFirstTurnDelegationPolicy(processed.prompt);
+
+    expect(policy).toMatchObject({
+      kind: "required-first-delegation",
+      intent: { kind: "explicit-delegation", requestedCount: count },
+      toolName: "delegate_task",
+      completionPolicy: "required",
+      exclusive: true,
+    });
+    if (policy.kind !== "required-first-delegation") {
+      throw new Error("预期显式委派输入生成首轮约束");
+    }
+    expect(policy.hiddenConstraint).toContain("first and only action");
+    expect(policy.hiddenConstraint).toContain("Do not emit assistant prose");
+    expect(policy.hiddenConstraint).toContain("discover the project structure themselves");
+  });
+
+  it.each([
+    "子代理是什么？请解释它的工作原理",
+    "是否应该使用子代理？",
+    "Claude Code 的子代理是怎么设计的？",
+    "How do subagents work?",
+    "Should we use subagents for this project?",
+    "请你自己阅读项目并说明问题",
+  ])("不把讨论或无委派要求的输入误判为执行意图: %s", (input) => {
+    expect(detectExplicitDelegationIntent(input)).toBeNull();
+    expect(createFirstTurnDelegationPolicy(input)).toEqual({ kind: "none" });
+  });
+});
