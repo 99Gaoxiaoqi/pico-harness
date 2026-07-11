@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { SubagentActivityEvent } from "../engine/reporter.js";
+import type { SubagentActivityEvent, SubagentTraceEvent } from "../engine/reporter.js";
 import type { ToolCardStatus } from "./tool-card.js";
 import type { SpinnerMode } from "./spinner.js";
 
@@ -113,10 +113,41 @@ export interface TuiToolOutputSegment {
   readonly runs: readonly TuiToolOutputRun[];
 }
 
+export type TuiSubagentTraceItem =
+  | { readonly id: string; readonly kind: "thinking"; readonly createdAt: number }
+  | {
+      readonly id: string;
+      readonly kind: "message";
+      readonly content: string;
+      readonly createdAt: number;
+    }
+  | {
+      readonly id: string;
+      readonly kind: "tool";
+      readonly name: string;
+      readonly args: string;
+      readonly status: "running" | "success" | "error";
+      readonly result?: string;
+      readonly resultTruncated?: boolean;
+      readonly createdAt: number;
+      readonly completedAt?: number;
+    };
+
+export interface TuiSubagentProjection {
+  readonly activityId: string;
+  readonly entryId: string;
+  readonly activity: Omit<SubagentActivityEvent, "activityId">;
+  readonly timeline: readonly TuiSubagentTraceItem[];
+}
+
 /** EventStore 也守住此上限，避免绕过 Reporter 时投影无界增长。 */
 export const TUI_TOOL_OUTPUT_PROJECTION_LIMIT_CHARS = 32_000;
 export const TUI_CHECKPOINT_INLINE_RESULT_BUDGET_CHARS = 128_000;
 export const TUI_CHECKPOINT_INLINE_RESULT_RECENT_COUNT = 8;
+export const TUI_SUBAGENT_TRACE_MAX_ITEMS = 256;
+export const TUI_SUBAGENT_MESSAGE_LIMIT_CHARS = 12_000;
+export const TUI_SUBAGENT_TOOL_ARGS_LIMIT_CHARS = 8_000;
+export const TUI_SUBAGENT_TOOL_RESULT_LIMIT_CHARS = 32_000;
 
 /** append-only 事件流的确定性投影。 */
 export interface TuiProjection {
@@ -124,6 +155,8 @@ export interface TuiProjection {
   readonly phase: TuiPhaseProjection;
   readonly streams: Readonly<Record<string, TuiStreamProjection>>;
   readonly toolCalls: Readonly<Record<string, TuiToolCallProjection>>;
+  /** 子代理详情与主 transcript 分离，activityId 是稳定导航键。 */
+  readonly subagents: Readonly<Record<string, TuiSubagentProjection>>;
   readonly lastEventId?: string;
   readonly sequence: number;
 }
@@ -232,6 +265,10 @@ export type TuiEvent =
       /** 稳定关联键只在事件与投影内部使用，不进入可渲染数据。 */
       readonly activityId: string;
       readonly activity: Omit<SubagentActivityEvent, "activityId">;
+    })
+  | (TuiEventBase & {
+      readonly type: "subagent.trace.recorded";
+      readonly trace: SubagentTraceEvent;
     })
   | (TuiEventBase & {
       readonly type: "phase.changed";
@@ -430,6 +467,7 @@ export class TuiEventStore {
           assertUnique(this.usedEntryIds, event.entryId, "entry");
         }
         break;
+      case "subagent.trace.recorded":
       case "assistant.stream.delta":
       case "assistant.stream.completed":
       case "assistant.stream.interrupted":
@@ -467,6 +505,7 @@ export class TuiEventStore {
           this.usedEntryIds.add(event.entryId);
         }
         break;
+      case "subagent.trace.recorded":
       case "assistant.stream.delta":
       case "assistant.stream.completed":
       case "assistant.stream.interrupted":
@@ -487,6 +526,7 @@ export function initialTuiProjection(): TuiProjection {
     phase: { id: "phase:initial", mode: "idle" },
     streams: {},
     toolCalls: {},
+    subagents: {},
     sequence: 0,
   });
 }
@@ -510,6 +550,7 @@ export function reduceTuiEvent(state: TuiProjection, event: TuiEvent): TuiProjec
   let phase = state.phase;
   let streams = state.streams;
   let toolCalls = state.toolCalls;
+  let subagents = state.subagents ?? {};
 
   switch (event.type) {
     case "entry.appended":
@@ -748,6 +789,29 @@ export function reduceTuiEvent(state: TuiProjection, event: TuiEvent): TuiProjec
           projectedEntry(existing.id, nextEntry, { subagentActivityId: event.activityId }),
         );
       }
+      const previous = subagents[event.activityId];
+      subagents = {
+        ...subagents,
+        [event.activityId]: freezeSubagentProjection({
+          activityId: event.activityId,
+          entryId: event.entryId,
+          activity: event.activity,
+          timeline: previous?.timeline ?? [],
+        }),
+      };
+      break;
+    }
+
+    case "subagent.trace.recorded": {
+      const current = subagents[event.trace.activityId];
+      if (!current) {
+        throw new Error(`Unknown TUI subagent activity: ${event.trace.activityId}`);
+      }
+      const timeline = reduceSubagentTrace(current.timeline, event.trace, event.createdAt);
+      subagents = {
+        ...subagents,
+        [event.trace.activityId]: freezeSubagentProjection({ ...current, timeline }),
+      };
       break;
     }
 
@@ -759,6 +823,7 @@ export function reduceTuiEvent(state: TuiProjection, event: TuiEvent): TuiProjec
       const entryCount = Math.min(Math.max(0, event.entryCount), entries.length);
       entries = entries.slice(0, entryCount);
       ({ streams, toolCalls } = retainEntryIndexes(entries, streams, toolCalls));
+      subagents = retainSubagentIndexes(entries, subagents);
       break;
     }
 
@@ -766,6 +831,7 @@ export function reduceTuiEvent(state: TuiProjection, event: TuiEvent): TuiProjec
       entries = [];
       streams = {};
       toolCalls = {};
+      subagents = {};
       break;
   }
 
@@ -774,9 +840,89 @@ export function reduceTuiEvent(state: TuiProjection, event: TuiEvent): TuiProjec
     phase,
     streams,
     toolCalls,
+    subagents,
     lastEventId: event.eventId,
     sequence: event.sequence,
   });
+}
+
+function reduceSubagentTrace(
+  timeline: readonly TuiSubagentTraceItem[],
+  trace: SubagentTraceEvent,
+  createdAt: number,
+): readonly TuiSubagentTraceItem[] {
+  if (trace.type === "tool.completed") {
+    const index = timeline.findIndex((item) => item.id === trace.traceId);
+    if (index < 0) throw new Error(`Unknown TUI subagent trace ID: ${trace.traceId}`);
+    const current = timeline[index]!;
+    if (current.kind !== "tool" || current.status !== "running") {
+      throw new Error(`TUI subagent trace ${trace.traceId} is not a running tool`);
+    }
+    const result = trace.result.slice(0, TUI_SUBAGENT_TOOL_RESULT_LIMIT_CHARS);
+    const next = [...timeline];
+    next[index] = Object.freeze({
+      ...current,
+      status: trace.isError ? "error" : "success",
+      result,
+      ...(trace.truncated === true || result.length < trace.result.length
+        ? { resultTruncated: true }
+        : {}),
+      completedAt: createdAt,
+    });
+    return Object.freeze(next);
+  }
+
+  if (timeline.some((item) => item.id === trace.traceId)) {
+    throw new Error(`Duplicate TUI subagent trace ID: ${trace.traceId}`);
+  }
+  const item: TuiSubagentTraceItem =
+    trace.type === "thinking"
+      ? Object.freeze({ id: trace.traceId, kind: "thinking", createdAt })
+      : trace.type === "message"
+        ? Object.freeze({
+            id: trace.traceId,
+            kind: "message",
+            content: trace.content.slice(0, TUI_SUBAGENT_MESSAGE_LIMIT_CHARS),
+            createdAt,
+          })
+        : Object.freeze({
+            id: trace.traceId,
+            kind: "tool",
+            name: trace.name,
+            args: trace.args.slice(0, TUI_SUBAGENT_TOOL_ARGS_LIMIT_CHARS),
+            status: "running",
+            createdAt,
+          });
+  return boundSubagentTimeline([...timeline, item]);
+}
+
+function boundSubagentTimeline(
+  timeline: readonly TuiSubagentTraceItem[],
+): readonly TuiSubagentTraceItem[] {
+  if (timeline.length <= TUI_SUBAGENT_TRACE_MAX_ITEMS) return Object.freeze([...timeline]);
+  const removable = timeline.findIndex((item) => item.kind !== "tool" || item.status !== "running");
+  const index = removable >= 0 ? removable : 0;
+  return Object.freeze([...timeline.slice(0, index), ...timeline.slice(index + 1)]);
+}
+
+function freezeSubagentProjection(projection: TuiSubagentProjection): TuiSubagentProjection {
+  return Object.freeze({
+    ...projection,
+    activity: Object.freeze({ ...projection.activity }),
+    timeline: Object.freeze([...projection.timeline]),
+  });
+}
+
+function retainSubagentIndexes(
+  entries: readonly TuiProjectedEntry[],
+  subagents: Readonly<Record<string, TuiSubagentProjection>>,
+): Readonly<Record<string, TuiSubagentProjection>> {
+  const retained = new Set(
+    entries.flatMap((entry) =>
+      entry.subagentActivityId === undefined ? [] : [entry.subagentActivityId],
+    ),
+  );
+  return Object.fromEntries(Object.entries(subagents).filter(([id]) => retained.has(id)));
 }
 
 function projectedEntry(
@@ -906,6 +1052,9 @@ function freezeTuiEvent(event: TuiEvent): TuiEvent {
   if (event.type === "subagent.activity.updated") {
     return Object.freeze({ ...event, activity: Object.freeze({ ...event.activity }) });
   }
+  if (event.type === "subagent.trace.recorded") {
+    return Object.freeze({ ...event, trace: Object.freeze({ ...event.trace }) });
+  }
   if (event.type === "tool.output" && "segment" in event) {
     return Object.freeze({ ...event, segment: normalizeToolOutputSegment(event) });
   }
@@ -1015,11 +1164,21 @@ function cloneProjection(projection: TuiProjection): TuiProjection {
       }),
     ]),
   );
+  const subagents = Object.fromEntries(
+    Object.entries(projection.subagents ?? {}).map(([id, subagent]) => [
+      id,
+      freezeSubagentProjection({
+        ...subagent,
+        timeline: subagent.timeline.map((item) => Object.freeze({ ...item })),
+      }),
+    ]),
+  );
   return freezeProjection({
     entries,
     phase: { ...projection.phase },
     streams,
     toolCalls,
+    subagents,
     ...(projection.lastEventId !== undefined ? { lastEventId: projection.lastEventId } : {}),
     sequence: projection.sequence,
   });
@@ -1032,6 +1191,7 @@ function freezeProjection(projection: TuiProjection): TuiProjection {
     phase: Object.freeze({ ...projection.phase }),
     streams: Object.freeze({ ...projection.streams }),
     toolCalls: Object.freeze({ ...projection.toolCalls }),
+    subagents: Object.freeze({ ...(projection.subagents ?? {}) }),
   });
 }
 

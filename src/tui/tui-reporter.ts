@@ -12,10 +12,16 @@
 //
 // 不直接渲染 ink 组件(保持 reporter 纯数据层),渲染由 App.tsx 消费 state 完成。
 
-import type { Reporter, SubagentActivityEvent } from "../engine/reporter.js";
+import type { Reporter, SubagentActivityEvent, SubagentTraceEvent } from "../engine/reporter.js";
 import { formatOutputPreview } from "./diff-preview.js";
 import type { ToolCardStatus } from "./tool-card.js";
-import { TUI_TOOL_OUTPUT_PROJECTION_LIMIT_CHARS, TuiEventStore } from "./tui-event-store.js";
+import {
+  TUI_SUBAGENT_MESSAGE_LIMIT_CHARS,
+  TUI_SUBAGENT_TOOL_ARGS_LIMIT_CHARS,
+  TUI_SUBAGENT_TOOL_RESULT_LIMIT_CHARS,
+  TUI_TOOL_OUTPUT_PROJECTION_LIMIT_CHARS,
+  TuiEventStore,
+} from "./tui-event-store.js";
 import type {
   TuiEntry,
   TuiEvent,
@@ -42,6 +48,8 @@ export type {
   TuiProjectedEntry,
   TuiProjection,
   TuiStreamProjection,
+  TuiSubagentProjection,
+  TuiSubagentTraceItem,
   TuiToolCallProjection,
   UiMode,
 } from "./tui-event-store.js";
@@ -336,6 +344,28 @@ export class TuiReporter implements Reporter {
         ...(activity.summary !== undefined ? { summary: activity.summary } : {}),
       },
     });
+    this.emit();
+  }
+
+  onSubagentTrace(trace: SubagentTraceEvent): void {
+    const activityId = trace.activityId.trim();
+    const traceId = trace.traceId.trim();
+    if (!activityId || !traceId) throw new Error("Subagent trace identities must not be empty");
+    const boundedTrace: SubagentTraceEvent =
+      trace.type === "message"
+        ? { ...trace, content: trace.content.slice(0, TUI_SUBAGENT_MESSAGE_LIMIT_CHARS) }
+        : trace.type === "tool.started"
+          ? { ...trace, args: trace.args.slice(0, TUI_SUBAGENT_TOOL_ARGS_LIMIT_CHARS) }
+          : trace.type === "tool.completed"
+            ? {
+                ...trace,
+                result: trace.result.slice(0, TUI_SUBAGENT_TOOL_RESULT_LIMIT_CHARS),
+                ...(trace.result.length > TUI_SUBAGENT_TOOL_RESULT_LIMIT_CHARS
+                  ? { truncated: true }
+                  : {}),
+              }
+            : trace;
+    this.eventStore.append({ type: "subagent.trace.recorded", trace: boundedTrace });
     this.emit();
   }
 

@@ -22,6 +22,26 @@ export interface SubagentActivityEvent {
   summary?: string;
 }
 
+/** 子代理详情轨迹；traceId 在单个 activity 内稳定，工具完成事件用它更新原条目。 */
+export type SubagentTraceEvent =
+  | { activityId: string; traceId: string; type: "thinking" }
+  | { activityId: string; traceId: string; type: "message"; content: string }
+  | {
+      activityId: string;
+      traceId: string;
+      type: "tool.started";
+      name: string;
+      args: string;
+    }
+  | {
+      activityId: string;
+      traceId: string;
+      type: "tool.completed";
+      result: string;
+      isError: boolean;
+      truncated?: boolean;
+    };
+
 /** Agent 引擎向外界输出信息的规范 */
 export interface Reporter {
   /** 当 provider 输出原生 thinking/reasoning 时调用 */
@@ -44,6 +64,8 @@ export interface Reporter {
   ): void;
   /** 子代理活动的可替换快照，用于宿主展示并行 worker 进度。 */
   onSubagentActivity?(activity: SubagentActivityEvent): void;
+  /** 子代理的独立详情时间线，不进入主对话 transcript。 */
+  onSubagentTrace?(event: SubagentTraceEvent): void;
   /** 当模型宣告任务完成,向用户输出最终纯文本回答时调用 */
   onMessage(content: string): void;
   /** 引擎启动时调用 */

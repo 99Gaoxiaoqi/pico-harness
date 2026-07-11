@@ -10,20 +10,35 @@ import {
 } from "../../src/tools/subagent.js";
 import { MessageList } from "../../src/tui/message-list.js";
 import { buildTranscriptLayout } from "../../src/tui/transcript-layout.js";
-import { TuiReporter, type TuiEntry } from "../../src/tui/tui-reporter.js";
+import { TuiEventStore, TuiReporter, type TuiEntry } from "../../src/tui/tui-reporter.js";
 
 describe("subagent activity flow", () => {
   it("将两个并行委派的实时动作和结果投影为独立卡片", async () => {
     let entries: TuiEntry[] = [];
-    const reporter = new TuiReporter((next) => {
-      entries = next;
-    });
+    const reporter = new TuiReporter(
+      (next) => {
+        entries = next;
+      },
+      [],
+      { eventStore: new TuiEventStore({ maxSegmentEvents: 3 }) },
+    );
     const releases = new Map<string, () => void>();
     const runner: AgentRunner = {
       async runSub(taskPrompt, _registry, childReporter): Promise<SubagentResult> {
-        childReporter?.onToolCall("read_file", JSON.stringify({ path: `src/${taskPrompt}.ts` }));
+        childReporter?.onThinking();
+        childReporter?.onMessage(`working:${taskPrompt}`);
+        childReporter?.onToolCall(
+          "read_file",
+          JSON.stringify({ path: `src/${taskPrompt}.ts` }),
+          `call:${taskPrompt}`,
+        );
         await new Promise<void>((resolve) => releases.set(taskPrompt, resolve));
-        childReporter?.onToolResult("read_file", "ok", false);
+        childReporter?.onToolResult(
+          "read_file",
+          `contents:${taskPrompt}`,
+          false,
+          `call:${taskPrompt}`,
+        );
         return { summary: `done:${taskPrompt}`, artifacts: [] };
       },
     };
@@ -49,6 +64,21 @@ describe("subagent activity flow", () => {
     expect(running).toContain("cache · running");
     expect(running).toContain("read_file：src/cache.ts");
     expect(JSON.stringify(entries)).not.toContain("activityId");
+    const runningProjection = reporter.getProjection();
+    const auth = Object.values(runningProjection.subagents).find(
+      (subagent) => subagent.activity.task === "auth",
+    );
+    const cache = Object.values(runningProjection.subagents).find(
+      (subagent) => subagent.activity.task === "cache",
+    );
+    expect(auth?.timeline.map((item) => item.kind)).toEqual(["thinking", "message", "tool"]);
+    expect(cache?.timeline.map((item) => item.kind)).toEqual(["thinking", "message", "tool"]);
+    expect(auth?.timeline.find((item) => item.kind === "message")).toMatchObject({
+      content: "working:auth",
+    });
+    expect(cache?.timeline.find((item) => item.kind === "message")).toMatchObject({
+      content: "working:cache",
+    });
 
     releases.get("auth")?.();
     releases.get("cache")?.();
@@ -65,6 +95,21 @@ describe("subagent activity flow", () => {
     expect(completed).toContain("done:auth");
     expect(completed).toContain("cache · completed");
     expect(completed).toContain("done:cache");
+
+    const completedProjection = reporter.getProjection();
+    const completedAuth = Object.values(completedProjection.subagents).find(
+      (subagent) => subagent.activity.task === "auth",
+    );
+    const authTool = completedAuth?.timeline.find((item) => item.kind === "tool");
+    expect(authTool).toMatchObject({
+      status: "success",
+      result: "contents:auth",
+    });
+    expect(authTool?.id).toBe(auth?.timeline.find((item) => item.kind === "tool")?.id);
+    expect(JSON.stringify(entries)).not.toContain("working:auth");
+
+    const replayed = new TuiEventStore({ initialSnapshot: reporter.getReplaySnapshot() });
+    expect(replayed.getProjection().subagents).toEqual(completedProjection.subagents);
   });
 });
 
