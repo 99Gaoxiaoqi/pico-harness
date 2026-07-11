@@ -658,7 +658,11 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
       restoredSettings?.model ??
       picoConfig.model ??
       (opts.modelExplicit || process.env.LLM_MODEL ? opts.model : undefined);
-    const initialRoute = modelRouter.require(requestedModel);
+    // 配置从 legacy 环境变量迁移到 providerID/modelID 后，旧 session 仍可能保存
+    // legacy/<model>。优先恢复精确路由，失效时按模型名或项目默认路由平滑迁移。
+    const initialRoute =
+      modelRouter.resolve(requestedModel) ??
+      modelRouter.require(restoredSettings?.model ?? picoConfig.model);
     const workspaceRoots = await WorkspaceRoots.create(opts.workDir, [
       ...picoConfig.additionalDirectories,
       ...(opts.addDirs ?? []),
@@ -725,7 +729,6 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         thinkingEffort: settings.thinkingEffort,
         permissionMode: settings.permissionMode,
         tools: settings.tools,
-        toolDisclosure,
         mcpStatus: () => bundleRef.current?.latestMcpStatus,
         additionalDirectories: settings.additionalDirectories,
         additionalDirectoryManager: workspaceRoots,

@@ -22,7 +22,7 @@ describe("SuggestionList row model", () => {
         { value: "skills", description: "列出 skills" },
         { value: "status", description: "显示状态" },
         { value: "model", description: "显示模型" },
-        { value: "tools", description: "列出工具" },
+        { value: "agents", description: "列出代理" },
         { value: "exit", description: "退出" },
       ],
     };
@@ -35,7 +35,7 @@ describe("SuggestionList row model", () => {
       "/skills",
       "/status",
       "/model",
-      "/tools",
+      "/agents",
     ]);
     expect(rows[1]).toMatchObject({
       selected: true,

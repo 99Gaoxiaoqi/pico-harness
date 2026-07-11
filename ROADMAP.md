@@ -567,6 +567,11 @@ git worktree remove ../pico-1-streaming
 
 ## 📅 变更记录
 
+- 2026-07-11：收敛项目配置与工具入口
+  - 新增项目 `.pico/config.json`，将 DeepSeek provider、默认模型路由、能力限额和 LSP 自动发现策略放入 JSON；密钥仍仅通过 `LLM_API_KEY` 环境变量读取。
+  - 删除面向用户的 `/tools` 命令；模型内部 `search_tools` 延迟披露机制保持不变，MCP 状态和审批策略继续由 `/mcp`、`/permissions` 分别承载。
+  - LSP/Repo Map 保持宿主自动发现与降级，不增加要求用户操作的代码智能命令。
+
 - 2026-07-11：完成阶段 12 可信 YOLO 与代码智能
   - YOLO 普通工作区操作保持无审批；外部写入、敏感路径、网络和 hardline 由宿主策略确定性拒绝，macOS Bash 使用 OS 沙箱，缺少等价后端时 fail-closed。
   - 模型 route 记录能力、限额、价格与 fallback 来源；请求前预检图像、工具、reasoning 和 context，`/usage`、`/context` 区分 reported、estimated、partial 与 unknown。
