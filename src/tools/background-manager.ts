@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessByStdio } from "node:child_process";
-import { basename } from "node:path";
 import type { Readable } from "node:stream";
-import { isWindows, resolveShell } from "../os/shell.js";
+import { isWindows, resolveShell, shellCommandArgs } from "../os/shell.js";
+import { signalProcessTree } from "../os/process-tree.js";
 import { TaskRegistry } from "../tasks/task-registry.js";
 
 export type BackgroundTaskStatus = "running" | "exited" | "failed" | "stopped";
@@ -71,7 +71,7 @@ export class BackgroundManager {
     const shell = resolveShell();
     let child: ChildProcessByStdio<null, Readable, Readable>;
     try {
-      child = spawn(shell, shellArgs(shell, command), {
+      child = spawn(shell, shellCommandArgs(shell, command), {
         cwd,
         detached: !isWindows,
         windowsHide: true,
@@ -186,21 +186,7 @@ export class BackgroundManager {
   }
 
   private killTask(task: ManagedTask, signal: NodeJS.Signals): void {
-    const pid = task.child.pid;
-    if (!pid) return;
-    try {
-      if (isWindows) {
-        task.child.kill(signal);
-      } else {
-        process.kill(-pid, signal);
-      }
-    } catch {
-      try {
-        task.child.kill(signal);
-      } catch {
-        // Process may have exited between the process-group kill and fallback kill.
-      }
-    }
+    signalProcessTree(task.child, signal);
   }
 
   private forceStopRecord(task: ManagedTask, signal: NodeJS.Signals): BackgroundTaskRecord {
@@ -259,12 +245,4 @@ function tailOutput(output: string, tail?: number): string {
     return output;
   }
   return output.slice(output.length - tail);
-}
-
-function shellArgs(shell: string, command: string): string[] {
-  const name = basename(shell).toLowerCase();
-  if (isWindows && name === "cmd.exe") {
-    return ["/d", "/s", "/c", command];
-  }
-  return ["-lc", command];
 }

@@ -6,6 +6,24 @@
 import type { ToolCall, ToolDefinition, ToolResult } from "../schema/message.js";
 import type { ToolAccesses } from "./tool-access.js";
 
+export type ToolOutputStream = "stdout" | "stderr";
+
+export interface ToolOutputChunk {
+  readonly stream: ToolOutputStream;
+  readonly chunk: string;
+}
+
+/**
+ * 单次工具调用的运行时上下文。
+ *
+ * 上下文由 Engine 按 tool call 创建，Registry 只负责透传。工具实现应在
+ * 可中断的物理操作中直接使用 signal，不要只在 execute() 返回后检查。
+ */
+export interface ToolExecutionContext {
+  readonly signal?: AbortSignal;
+  readonly onOutput?: (output: ToolOutputChunk) => void;
+}
+
 /**
  * Middleware 中间件签名 (第 16 讲)。
  * 在 Registry 收到 ToolCall 后、真正调用 tool.execute() 之前运行。
@@ -25,6 +43,7 @@ export type RequestMiddleware = (call: ToolCall) => Promise<RequestMiddlewareRes
 export type ExecutionMiddleware = (
   call: ToolCall,
   next: (call: ToolCall) => Promise<string>,
+  context?: ToolExecutionContext,
 ) => Promise<string>;
 export type MiddlewareFunc = RequestMiddleware;
 
@@ -39,7 +58,9 @@ export interface BaseTool {
   /** 返回提交给大模型的工具元信息和参数 JSON Schema */
   definition(): ToolDefinition;
   /** 接收大模型吐出的 JSON 参数,执行具体业务逻辑 */
-  execute(args: string): Promise<string>;
+  execute(args: string, context?: ToolExecutionContext): Promise<string>;
+  /** true 表示工具会在 signal abort 后终止物理操作并 settle execute Promise。 */
+  handlesAbortSignal?: boolean;
   /**
    * 是否为只读工具 (第 08 讲并发调度用)。
    * 只读工具的批次可并行执行;含写操作的批次退化为串行。
@@ -79,13 +100,15 @@ export interface Registry {
   /** 返回当前系统挂载的所有工具的 Schema,供 Main Loop 交给 Provider */
   getAvailableTools(): ToolDefinition[];
   /** 实际路由并执行模型请求的工具调用 */
-  execute(call: ToolCall): Promise<ToolResult>;
+  execute(call: ToolCall, context?: ToolExecutionContext): Promise<ToolResult>;
   /**
    * 判断工具是否为只读 (第 08 讲)。
    * 引擎据此决定批次是否可并发:全只读则并行,有写操作则串行。
    * 默认返回 false (保守视为写操作)。
    */
   isReadOnlyTool?(name: string): boolean;
+  /** 工具是否会在 abort 后自主收口，供调度器决定是否等待物理终止。 */
+  handlesAbortSignal?(name: string): boolean;
   /**
    * 按 ToolCall 计算资源访问集(资源冲突图调度用)。
    * 带完整 call 而非仅 name,因为路径信息在 call.arguments 里。
