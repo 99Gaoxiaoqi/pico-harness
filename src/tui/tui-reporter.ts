@@ -16,7 +16,13 @@ import type { Reporter } from "../engine/reporter.js";
 import { formatOutputPreview } from "./diff-preview.js";
 import type { ToolCardStatus } from "./tool-card.js";
 import { TuiEventStore } from "./tui-event-store.js";
-import type { TuiEntry, TuiEvent, TuiProjection, UiMode } from "./tui-event-store.js";
+import type {
+  TuiEntry,
+  TuiEvent,
+  TuiProjection,
+  TuiToolCallProjection,
+  UiMode,
+} from "./tui-event-store.js";
 
 export { TuiEventStore };
 
@@ -48,10 +54,11 @@ export interface TuiReporterOptions {
 export class TuiReporter implements Reporter {
   private currentStream: { entryId: string; streamId: string } | null = null;
   /**
-   * 旧 Reporter 调用不携带 toolCallId 时的兼容队列。它只能按同名调用 FIFO
-   * 降级，无法判断并发同名工具的乱序完成；新调用应始终传 toolCallId。
+   * EventStore 内部 tool ID 的待完成索引。Provider call ID 仅作
+   * 当前 pending 队列的关联键，不作为事件全局 ID，因为 Gemini 会跨轮复用它。
    */
   private readonly pendingToolIdsByName = new Map<string, string[]>();
+  private readonly pendingToolIdsByProviderCallId = new Map<string, string[]>();
   private readonly eventStore: TuiEventStore;
   private readonly legacyEntries: TuiEntry[];
   private readonly onProjectionUpdate?: (projection: TuiProjection) => void;
@@ -72,6 +79,7 @@ export class TuiReporter implements Reporter {
     if (this.eventStore.size === 0) {
       for (const entry of entries) this.appendEntry(entry);
     }
+    this.rebuildRuntimeTracking();
     this.syncLegacyEntries(this.eventStore.getProjection());
   }
 
@@ -103,8 +111,9 @@ export class TuiReporter implements Reporter {
   truncateTo(entryIndex: number): void {
     const entryCount = this.eventStore.getProjection().entries.length;
     const safeIndex = Math.min(Math.max(0, entryIndex), entryCount);
+    this.interruptActiveStreams("truncate");
     this.eventStore.append({ type: "transcript.truncated", entryCount: safeIndex });
-    this.resetTurnTracking();
+    this.clearRuntimeTracking();
     this.appendPhase("idle", true);
     this.emit();
   }
@@ -138,8 +147,9 @@ export class TuiReporter implements Reporter {
 
   /** 清空 TUI 当前可见 transcript,不影响底层 session 历史。 */
   clear(): void {
+    this.interruptActiveStreams("clear");
     this.eventStore.append({ type: "transcript.cleared" });
-    this.resetTurnTracking();
+    this.clearRuntimeTracking();
     this.appendPhase("idle", true);
     this.emit();
   }
@@ -150,16 +160,16 @@ export class TuiReporter implements Reporter {
   }
 
   onStart(_workDir: string): void {
-    // 顶栏已展示 workDir/model,这里不重复;清空本轮追踪。
-    this.resetTurnTracking();
+    // 新请求不继承上一次异常退出的 streaming/pending 运行态。
+    this.interruptActiveStreams("new-request");
+    this.clearRuntimeTracking();
     this.appendPhase("requesting", true);
     this.emit();
   }
 
   onTurnStart(_turn: number): void {
     // 轮次分隔:结束未收到权威 onMessage 的旧流，确保新轮创建新 streamId。
-    this.completeCurrentStreamWithProjectedContent();
-    this.currentStream = null;
+    this.completeActiveStreams();
     this.appendPhase("requesting", true);
     this.emit();
   }
@@ -170,29 +180,34 @@ export class TuiReporter implements Reporter {
     this.emit();
   }
 
-  onToolCall(toolName: string, args: string, toolCallId?: string): void {
+  onToolCall(toolName: string, args: string, providerCallId?: string): void {
     this.appendPhase("tool-use");
-    const stableToolCallId = normalizeIdentity(toolCallId) ?? this.eventStore.createId("tool");
+    const normalizedProviderCallId = normalizeIdentity(providerCallId);
     const entryId = this.eventStore.createId("entry");
-    this.eventStore.append({
+    const event = this.eventStore.append({
       type: "tool.started",
       entryId,
-      toolCallId: stableToolCallId,
+      ...(normalizedProviderCallId !== undefined
+        ? { providerCallId: normalizedProviderCallId }
+        : {}),
       name: toolName,
       args,
     });
-    const pending = this.pendingToolIdsByName.get(toolName) ?? [];
-    pending.push(stableToolCallId);
-    this.pendingToolIdsByName.set(toolName, pending);
+    if (event.type !== "tool.started") {
+      throw new Error("TUI EventStore returned an unexpected event for tool.started");
+    }
+    const internalToolCallId = event.toolCallId;
+    const tool = this.eventStore.getProjection().toolCalls[internalToolCallId];
+    if (tool) this.registerPendingTool(tool);
     this.emit();
   }
 
-  onToolAwaitingApproval(toolName: string, args: string, toolCallId?: string): void {
-    const stableToolCallId = this.resolvePendingToolId(toolName, toolCallId, args);
-    if (stableToolCallId !== undefined) {
+  onToolAwaitingApproval(toolName: string, args: string, providerCallId?: string): void {
+    const internalToolCallId = this.resolvePendingToolId(toolName, providerCallId, args);
+    if (internalToolCallId !== undefined) {
       this.eventStore.append({
         type: "tool.approval.requested",
-        toolCallId: stableToolCallId,
+        toolCallId: internalToolCallId,
         summary: "等待审批",
       });
     }
@@ -200,35 +215,36 @@ export class TuiReporter implements Reporter {
     this.emit();
   }
 
-  onToolResult(toolName: string, result: string, isError: boolean, toolCallId?: string): void {
-    const stableToolCallId = this.resolvePendingToolId(toolName, toolCallId);
-    if (stableToolCallId === undefined) {
+  onToolResult(toolName: string, result: string, isError: boolean, providerCallId?: string): void {
+    const internalToolCallId = this.resolvePendingToolId(toolName, providerCallId);
+    if (internalToolCallId === undefined) {
       // rewind/clear 后到达的旧结果不再污染当前 transcript。
       this.emit();
       return;
     }
-    const tool = this.eventStore.getProjection().toolCalls[stableToolCallId];
+    const tool = this.eventStore.getProjection().toolCalls[internalToolCallId];
     if (!tool) {
-      this.removePendingToolId(toolName, stableToolCallId);
+      this.removePendingToolId(toolName, internalToolCallId, normalizeIdentity(providerCallId));
       this.emit();
       return;
     }
     this.eventStore.append({
       type: "tool.completed",
-      toolCallId: stableToolCallId,
+      toolCallId: internalToolCallId,
       status: resolveToolStatus(toolName, result, isError),
       summary: summarizeResult(toolName, tool.args, result, isError),
     });
-    this.removePendingToolId(toolName, stableToolCallId);
+    this.removePendingTool(tool);
     this.emit();
   }
 
   onMessage(content: string): void {
     if (this.currentStream) {
+      const projectedContent = this.projectedStreamContent(this.currentStream);
       this.eventStore.append({
         type: "assistant.stream.completed",
         ...this.currentStream,
-        content,
+        ...(projectedContent !== content ? { content } : {}),
       });
     } else {
       this.appendEntry({ kind: "assistant", content });
@@ -238,6 +254,7 @@ export class TuiReporter implements Reporter {
   }
 
   onFinish(): void {
+    this.completeActiveStreams();
     this.appendPhase("idle", true);
     this.emit();
   }
@@ -279,42 +296,83 @@ export class TuiReporter implements Reporter {
     });
   }
 
-  private completeCurrentStreamWithProjectedContent(): void {
-    if (!this.currentStream) return;
-    const currentStream = this.currentStream;
-    const projected = this.eventStore
-      .getProjection()
-      .entries.find((entry) => entry.id === currentStream.entryId);
-    if (!projected || projected.entry.kind !== "assistant") return;
-    this.eventStore.append({
-      type: "assistant.stream.completed",
-      ...currentStream,
-      content: projected.entry.content,
+  private completeActiveStreams(): void {
+    for (const stream of this.activeStreams()) {
+      this.eventStore.append({ type: "assistant.stream.completed", ...stream });
+    }
+    this.currentStream = null;
+  }
+
+  private interruptActiveStreams(reason: "new-request" | "clear" | "truncate"): void {
+    for (const stream of this.activeStreams()) {
+      this.eventStore.append({ type: "assistant.stream.interrupted", ...stream, reason });
+    }
+    this.currentStream = null;
+  }
+
+  private clearRuntimeTracking(): void {
+    this.currentStream = null;
+    this.pendingToolIdsByName.clear();
+    this.pendingToolIdsByProviderCallId.clear();
+  }
+
+  /** 从水合投影重建 reporter 的短命运行态，不依赖旧实例内存。 */
+  private rebuildRuntimeTracking(): void {
+    this.clearRuntimeTracking();
+    const projection = this.eventStore.getProjection();
+    for (const projected of projection.entries) {
+      if (projected.streamId !== undefined) {
+        const stream = projection.streams[projected.streamId];
+        if (stream?.status === "streaming") {
+          this.currentStream = { entryId: stream.entryId, streamId: stream.id };
+        }
+      }
+      if (projected.toolCallId !== undefined) {
+        const tool = projection.toolCalls[projected.toolCallId];
+        if (tool && isPendingToolStatus(tool.status)) this.registerPendingTool(tool);
+      }
+    }
+  }
+
+  private activeStreams(): Array<{ entryId: string; streamId: string }> {
+    const projection = this.eventStore.getProjection();
+    return projection.entries.flatMap((entry) => {
+      if (entry.streamId === undefined) return [];
+      const stream = projection.streams[entry.streamId];
+      return stream?.status === "streaming"
+        ? [{ entryId: stream.entryId, streamId: stream.id }]
+        : [];
     });
   }
 
-  private resetTurnTracking(): void {
-    this.currentStream = null;
-    this.pendingToolIdsByName.clear();
+  private projectedStreamContent(stream: { entryId: string }): string | undefined {
+    const projected = this.eventStore
+      .getProjection()
+      .entries.find((entry) => entry.id === stream.entryId);
+    return projected?.entry.kind === "assistant" ? projected.entry.content : undefined;
+  }
+
+  private registerPendingTool(tool: TuiToolCallProjection): void {
+    appendPendingId(this.pendingToolIdsByName, tool.name, tool.id);
+    if (tool.providerCallId !== undefined) {
+      appendPendingId(this.pendingToolIdsByProviderCallId, tool.providerCallId, tool.id);
+    }
   }
 
   private resolvePendingToolId(
     toolName: string,
-    toolCallId?: string,
+    providerCallId?: string,
     expectedArgs?: string,
   ): string | undefined {
-    const explicitId = normalizeIdentity(toolCallId);
+    const normalizedProviderCallId = normalizeIdentity(providerCallId);
     const projection = this.eventStore.getProjection();
-    if (explicitId !== undefined) {
-      const tool = projection.toolCalls[explicitId];
-      return tool && tool.name === toolName && isPendingToolStatus(tool.status)
-        ? explicitId
-        : undefined;
-    }
+    const pendingIds =
+      normalizedProviderCallId !== undefined
+        ? (this.pendingToolIdsByProviderCallId.get(normalizedProviderCallId) ?? [])
+        : (this.pendingToolIdsByName.get(toolName) ?? []);
 
-    // 兼容旧调用：审批优先选最早的同参数调用，结果选最早的同名调用。
-    // 不再从 entries 尾部倒序猜测。
-    const pendingIds = this.pendingToolIdsByName.get(toolName) ?? [];
+    // Provider ID 跨轮可复用，因此只在当前 pending 队列中 FIFO 解析；
+    // 无 ID 的旧调用则按同名工具 FIFO 降级。
     return pendingIds.find((id) => {
       const tool = projection.toolCalls[id];
       return (
@@ -325,12 +383,19 @@ export class TuiReporter implements Reporter {
     });
   }
 
-  private removePendingToolId(toolName: string, toolCallId: string): void {
-    const pending = this.pendingToolIdsByName.get(toolName);
-    if (!pending) return;
-    const next = pending.filter((id) => id !== toolCallId);
-    if (next.length === 0) this.pendingToolIdsByName.delete(toolName);
-    else this.pendingToolIdsByName.set(toolName, next);
+  private removePendingTool(tool: TuiToolCallProjection): void {
+    this.removePendingToolId(tool.name, tool.id, tool.providerCallId);
+  }
+
+  private removePendingToolId(
+    toolName: string,
+    internalToolCallId: string,
+    providerCallId?: string,
+  ): void {
+    removePendingId(this.pendingToolIdsByName, toolName, internalToolCallId);
+    if (providerCallId !== undefined) {
+      removePendingId(this.pendingToolIdsByProviderCallId, providerCallId, internalToolCallId);
+    }
   }
 
   /** 投影是唯一条目源；legacyEntries 仅作引用兼容镜像。 */
@@ -353,6 +418,20 @@ export class TuiReporter implements Reporter {
 function normalizeIdentity(value: string | undefined): string | undefined {
   const normalized = value?.trim();
   return normalized ? normalized : undefined;
+}
+
+function appendPendingId(index: Map<string, string[]>, key: string, id: string): void {
+  const pending = index.get(key) ?? [];
+  pending.push(id);
+  index.set(key, pending);
+}
+
+function removePendingId(index: Map<string, string[]>, key: string, id: string): void {
+  const pending = index.get(key);
+  if (!pending) return;
+  const next = pending.filter((candidate) => candidate !== id);
+  if (next.length === 0) index.delete(key);
+  else index.set(key, next);
 }
 
 /** 工具结果摘要:默认短输出;写入类和 bash 保留路径/命令上下文,错误保留可复制摘要。 */
