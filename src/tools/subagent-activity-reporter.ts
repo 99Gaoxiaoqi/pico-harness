@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { Reporter, SubagentActivityEvent } from "../engine/reporter.js";
 
 export interface SubagentActivityScope {
@@ -13,6 +14,8 @@ export interface SubagentActivityScope {
  */
 export class ScopedSubagentActivityReporter implements Reporter {
   private latestAction?: string;
+  private readonly pendingToolTraceIdsByProviderCallId = new Map<string, string[]>();
+  private readonly pendingToolTraceIdsByName = new Map<string, string[]>();
 
   constructor(
     private readonly reporter: Reporter,
@@ -20,15 +23,42 @@ export class ScopedSubagentActivityReporter implements Reporter {
   ) {}
 
   onThinking(): void {
+    this.reporter.onSubagentTrace?.({
+      activityId: this.scope.activityId,
+      traceId: randomUUID(),
+      type: "thinking",
+    });
     this.emit({ currentAction: `正在思考：${compact(this.scope.task, 48)}` });
   }
 
-  onToolCall(toolName: string, args: string): void {
+  onToolCall(toolName: string, args: string, providerCallId?: string): void {
+    const traceId = randomUUID();
+    appendPendingTraceId(this.pendingToolTraceIdsByName, toolName, traceId);
+    if (providerCallId) {
+      appendPendingTraceId(this.pendingToolTraceIdsByProviderCallId, providerCallId, traceId);
+    }
+    this.reporter.onSubagentTrace?.({
+      activityId: this.scope.activityId,
+      traceId,
+      type: "tool.started",
+      name: toolName,
+      args,
+    });
     this.latestAction = describeToolCall(toolName, args);
     this.emit({ currentAction: this.latestAction });
   }
 
-  onToolResult(toolName: string, _result: string, isError: boolean): void {
+  onToolResult(toolName: string, result: string, isError: boolean, providerCallId?: string): void {
+    const traceId = this.takePendingToolTraceId(toolName, providerCallId);
+    if (traceId) {
+      this.reporter.onSubagentTrace?.({
+        activityId: this.scope.activityId,
+        traceId,
+        type: "tool.completed",
+        result,
+        isError,
+      });
+    }
     const action = this.latestAction ?? compact(toolName, 40);
     this.emit({ currentAction: `${isError ? "工具失败" : "已完成"}：${action}` });
   }
@@ -36,6 +66,12 @@ export class ScopedSubagentActivityReporter implements Reporter {
   onToolOutput(): void {}
 
   onMessage(content: string): void {
+    this.reporter.onSubagentTrace?.({
+      activityId: this.scope.activityId,
+      traceId: randomUUID(),
+      type: "message",
+      content,
+    });
     const message = compact(content, 72);
     if (message) {
       this.latestAction = message;
@@ -58,6 +94,35 @@ export class ScopedSubagentActivityReporter implements Reporter {
       ...update,
     });
   }
+
+  private takePendingToolTraceId(toolName: string, providerCallId?: string): string | undefined {
+    const ids =
+      (providerCallId ? this.pendingToolTraceIdsByProviderCallId.get(providerCallId) : undefined) ??
+      this.pendingToolTraceIdsByName.get(toolName);
+    const traceId = ids?.shift();
+    if (!traceId) return undefined;
+    removePendingTraceId(this.pendingToolTraceIdsByName, toolName, traceId);
+    removePendingTraceIdEverywhere(this.pendingToolTraceIdsByProviderCallId, traceId);
+    return traceId;
+  }
+}
+
+function appendPendingTraceId(target: Map<string, string[]>, key: string, traceId: string): void {
+  const ids = target.get(key) ?? [];
+  ids.push(traceId);
+  target.set(key, ids);
+}
+
+function removePendingTraceId(target: Map<string, string[]>, key: string, traceId: string): void {
+  const ids = target.get(key);
+  if (!ids) return;
+  const next = ids.filter((id) => id !== traceId);
+  if (next.length === 0) target.delete(key);
+  else target.set(key, next);
+}
+
+function removePendingTraceIdEverywhere(target: Map<string, string[]>, traceId: string): void {
+  for (const key of target.keys()) removePendingTraceId(target, key, traceId);
 }
 
 export function compactActivityText(value: string, maxLength = 80): string {
