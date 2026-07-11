@@ -13,8 +13,8 @@ const MIN_LIVE_COLUMNS = 10;
 const MIN_LIVE_ROWS = 3;
 // CPR 没有返回时无法信任嵌入式终端的 PTY winsize。优先损失可见行数，
 // 也不让 Ink 按过大旧网格绘制并把整帧推入 scrollback。
-const CPR_FAILURE_COLUMNS = 80;
-const CPR_FAILURE_ROWS = 16;
+const CPR_FAILURE_COLUMNS = 60;
+const CPR_FAILURE_ROWS = 12;
 const CPR_RESPONSE_PATTERN = new RegExp(
   `${String.fromCharCode(27)}\\[(\\d{1,5});(\\d{1,5})R`,
   "gu",

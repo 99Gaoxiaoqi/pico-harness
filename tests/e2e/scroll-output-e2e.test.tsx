@@ -311,7 +311,7 @@ describe("阶段 10：滚动窗口与大型工具输出集成验收", () => {
   });
 
   it("生产全屏在 CPR 失败时保守容纳子代理面板与流式帧", async () => {
-    const terminal = new ImmediateWrapTerminal(87, 18, { respondToCpr: false });
+    const terminal = new ImmediateWrapTerminal(60, 12, { respondToCpr: false });
     const user: TuiEntry = { kind: "user", content: "CPR_FAILED_USER_MARKER" };
     const agents = [
       { id: "main", kind: "main" as const, status: "running" as const, task: "Main" },
@@ -342,10 +342,10 @@ describe("阶段 10：滚动窗口与大型工具输出集成验收", () => {
     });
 
     try {
-      expect(harness.renderGrid().columns).toBeLessThanOrEqual(87);
-      expect(harness.renderGrid().rows).toBeLessThanOrEqual(18);
+      expect(harness.renderGrid()).toEqual({ columns: 60, rows: 12 });
       await harness.wait(280);
       await harness.resize(166, 40);
+      expect(harness.renderGrid()).toEqual({ columns: 60, rows: 12 });
 
       for (const content of [
         "CPR_FAILED_FINAL_MARKER",
