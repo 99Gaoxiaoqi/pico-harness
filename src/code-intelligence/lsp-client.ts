@@ -8,6 +8,7 @@ import {
   type JsonRpcId,
   type LspJsonRpcNotification,
   type LspJsonRpcRequest,
+  type LspJsonRpcResponse,
   type LspServerMessage,
 } from "./lsp-protocol.js";
 
@@ -242,6 +243,57 @@ export class StdioLspClient {
       for (const handler of this.notificationHandlers.get(message.method) ?? []) {
         handler(message.params);
       }
+      return;
+    }
+    if ("method" in message && "id" in message) {
+      this.handleServerRequest(message);
+    }
+  }
+
+  private handleServerRequest(request: LspJsonRpcRequest): void {
+    const result = this.serverRequestResult(request.method, request.params);
+    if (result.supported) {
+      this.writeMessage({ jsonrpc: "2.0", id: request.id, result: result.value });
+      return;
+    }
+    this.writeMessage({
+      jsonrpc: "2.0",
+      id: request.id,
+      error: { code: -32601, message: `pico 不支持 LSP server 请求: ${request.method}` },
+    });
+  }
+
+  private serverRequestResult(
+    method: string,
+    params: unknown,
+  ): { supported: true; value: unknown } | { supported: false } {
+    switch (method) {
+      case "workspace/configuration": {
+        const count =
+          typeof params === "object" &&
+          params !== null &&
+          "items" in params &&
+          Array.isArray(params.items)
+            ? params.items.length
+            : 0;
+        return { supported: true, value: Array.from({ length: count }, () => null) };
+      }
+      case "workspace/workspaceFolders":
+        return {
+          supported: true,
+          value: [{ uri: pathToFileURL(this.rootDir).href, name: this.rootDir }],
+        };
+      case "client/registerCapability":
+      case "client/unregisterCapability":
+      case "window/workDoneProgress/create":
+        return { supported: true, value: null };
+      case "workspace/applyEdit":
+        return {
+          supported: true,
+          value: { applied: false, failureReason: "pico 代码智能客户端仅提供只读导航" },
+        };
+      default:
+        return { supported: false };
     }
   }
 
@@ -267,7 +319,9 @@ export class StdioLspClient {
     else pending.resolve(result);
   }
 
-  private writeMessage(message: LspJsonRpcRequest | LspJsonRpcNotification): void {
+  private writeMessage(
+    message: LspJsonRpcRequest | LspJsonRpcNotification | LspJsonRpcResponse,
+  ): void {
     const stdin = this.child?.stdin;
     if (!stdin?.writable) throw new Error(`LSP server ${this.config.id} stdin 不可写`);
     const body = Buffer.from(JSON.stringify(message), "utf8");
