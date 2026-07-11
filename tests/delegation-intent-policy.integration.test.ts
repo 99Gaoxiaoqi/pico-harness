@@ -11,6 +11,7 @@ describe("explicit delegation intent input boundary", () => {
     ["调用两个子 Agent 并行分析项目", "multiple"],
     ["请让一个子代理检查鉴权实现", "single"],
     ["用多个子代理阅读项目并总结", "multiple"],
+    ["请先解释子代理如何工作，然后启动多个子代理阅读项目", "multiple"],
     ["Launch several subagents to inspect the project", "multiple"],
     ["Delegate this review to sub-agents", "unspecified"],
   ] as const)("把真实 prompt 输入 %s 转成 required 首动作策略", async (raw, count) => {
@@ -47,6 +48,10 @@ describe("explicit delegation intent input boundary", () => {
     "Why does the main agent spawn subagents before reading the project?",
     "启动主 Agent 阅读项目并进行总结。",
     "Launch an agent to inspect the project.",
+    "不要启动子代理，请你自己阅读项目。",
+    "如果有必要，可以启动多个子代理阅读项目。",
+    "Do not launch subagents; inspect the project yourself.",
+    "If needed, you can launch several subagents.",
     "Should we use subagents for this project?",
     "请你自己阅读项目并说明问题",
   ])("不把讨论或无委派要求的输入误判为执行意图: %s", (input) => {

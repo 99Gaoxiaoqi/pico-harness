@@ -92,6 +92,63 @@ describe("required 委派的轮次工具策略", () => {
     ).toEqual([expect.objectContaining({ content: "基于两个子代理证据的唯一统一总结" })]);
   });
 
+  it("多子代理请求不接受空任务或单任务，且不解除首轮门禁", async () => {
+    const provider = new SequencedProvider([
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [
+          {
+            id: "empty-delegation",
+            name: "delegate_task",
+            arguments: JSON.stringify({ completion_policy: "required", tasks: [] }),
+          },
+        ],
+      },
+      requiredDelegation("single-delegation", ["explore"]),
+      {
+        role: "assistant",
+        content: "不应继续自行阅读",
+        toolCalls: [{ id: "late-read", name: "bash", arguments: '{"command":"ls"}' }],
+      },
+    ]);
+    const registry = new TemporalRegistry();
+
+    const output = await runEngine("启动多个子代理阅读项目", provider, registry);
+
+    expect(provider.requests).toHaveLength(2);
+    expect(provider.requests.every((request) => request.tools[0]?.name === "delegate_task")).toBe(
+      true,
+    );
+    expect(registry.executed).toEqual([]);
+    expect(output.at(-1)?.content).toContain("未能按用户的明确要求启动 required 子代理");
+  });
+
+  it("delegate_task 返回运行时错误时保持首轮门禁并有限失败收口", async () => {
+    const provider = new SequencedProvider([
+      requiredDelegation("failed-delegation-1", ["explore", "explore"]),
+      requiredDelegation("failed-delegation-2", ["explore", "explore"]),
+      {
+        role: "assistant",
+        content: "不应继续自行阅读",
+        toolCalls: [{ id: "late-read-after-error", name: "bash", arguments: '{"command":"ls"}' }],
+      },
+    ]);
+    const registry = new TemporalRegistry({
+      blockRequired: false,
+      delegationOutput: JSON.stringify({ error: "达到最大委派深度" }),
+    });
+
+    const output = await runEngine("启动多个子代理阅读项目", provider, registry);
+
+    expect(provider.requests).toHaveLength(2);
+    expect(provider.requests.every((request) => request.tools[0]?.name === "delegate_task")).toBe(
+      true,
+    );
+    expect(registry.executed.map((call) => call.name)).toEqual(["delegate_task", "delegate_task"]);
+    expect(output.at(-1)?.content).toContain("未能按用户的明确要求启动 required 子代理");
+  });
+
   it.each([
     { label: "worker", modes: ["worker", "worker"] as const },
     { label: "mixed", modes: ["explore", "worker"] as const },
@@ -170,6 +227,13 @@ class TemporalRegistry implements Registry {
   requiredStarted = false;
   private resolveRequired?: () => void;
 
+  constructor(
+    private readonly options: {
+      blockRequired?: boolean;
+      delegationOutput?: string;
+    } = {},
+  ) {}
+
   get ordinaryExecutions(): ToolCall[] {
     return this.executed.filter((call) => call.name !== "delegate_task");
   }
@@ -192,19 +256,23 @@ class TemporalRegistry implements Registry {
     }
 
     this.requiredStarted = true;
-    await new Promise<void>((resolve) => {
-      this.resolveRequired = resolve;
-    });
+    if (this.options.blockRequired !== false) {
+      await new Promise<void>((resolve) => {
+        this.resolveRequired = resolve;
+      });
+    }
     return {
       toolCallId: call.id,
-      output: JSON.stringify({
-        completed: 2,
-        failed: 0,
-        results: [
-          { task: "engine", status: "completed", summary: "engine evidence" },
-          { task: "tui", status: "completed", summary: "tui evidence" },
-        ],
-      }),
+      output:
+        this.options.delegationOutput ??
+        JSON.stringify({
+          completed: 2,
+          failed: 0,
+          results: [
+            { task: "engine", status: "completed", summary: "engine evidence" },
+            { task: "tui", status: "completed", summary: "tui evidence" },
+          ],
+        }),
       isError: false,
     };
   }
