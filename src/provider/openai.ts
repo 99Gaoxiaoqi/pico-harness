@@ -161,7 +161,16 @@ export class OpenAIProvider implements LLMProvider {
     if (!resp.ok) {
       const text = await resp.text();
       console.error(`[OpenAI] ❌ ${resp.status} 响应: ${text}`);
-      console.error(`[OpenAI] 请求体(前 2000 字符): ${bodyJson.slice(0, 2000)}`);
+      logger.debug(
+        {
+          model: this.config.model,
+          status: resp.status,
+          requestBytes: Buffer.byteLength(bodyJson, "utf8"),
+          messages: openaiMsgs.length,
+          tools: availableTools.length,
+        },
+        "[OpenAI] 请求失败，已省略可能包含源码或密钥的请求体",
+      );
       if (isContextOverflowStatus(resp.status, text)) {
         throw new ContextOverflowError(`OpenAI API 上下文溢出 [${resp.status}]: ${text}`);
       }

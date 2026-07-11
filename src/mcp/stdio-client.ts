@@ -29,7 +29,7 @@ import {
   type McpTool,
   type McpToolResult,
 } from "./types.js";
-import { redactSensitiveText, redactSensitiveValue } from "./redact.js";
+import { redactSensitiveArgs, redactSensitiveText, redactSensitiveValue } from "./redact.js";
 
 /** 默认请求超时:30s。MCP server 可能启动慢(如 npx 首次下载) */
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
@@ -83,7 +83,7 @@ export class StdioMcpClient implements McpClient {
     const childEnv = { ...process.env, ...env };
 
     const safeCommand = redactSensitiveText(command);
-    const safeArgs = args.map((arg) => redactSensitiveText(arg));
+    const safeArgs = redactSensitiveArgs(args);
     logger.info(
       {
         server: this.config.name,
