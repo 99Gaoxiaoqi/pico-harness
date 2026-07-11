@@ -18,6 +18,14 @@ export interface WorkspaceAccess {
   access: "read" | "write";
 }
 
+export interface AssertAllowedOptions {
+  /**
+   * 是否消耗一次性授权。写工具可先不消耗地校验父目录，
+   * 完成 mkdir 后再校验并消耗，缩小符号链接竞态窗口。
+   */
+  consumeAuthorization?: boolean;
+}
+
 export class WorkspaceRoots {
   private readonly oneCallPaths = new Map<string, number>();
 
@@ -109,15 +117,17 @@ export class WorkspaceRoots {
     }
   }
 
-  async assertAllowed(path: string): Promise<string> {
+  async assertAllowed(path: string, options: AssertAllowedOptions = {}): Promise<string> {
     const target = this.resolveUnchecked(path);
     let usedOneCallPermission = false;
     if (!this.isAllowed(target)) {
       const remaining = this.oneCallPaths.get(target) ?? 0;
       if (remaining <= 0) throw outsideWorkspaceError(path);
       usedOneCallPermission = true;
-      if (remaining === 1) this.oneCallPaths.delete(target);
-      else this.oneCallPaths.set(target, remaining - 1);
+      if (options.consumeAuthorization !== false) {
+        if (remaining === 1) this.oneCallPaths.delete(target);
+        else this.oneCallPaths.set(target, remaining - 1);
+      }
     }
     const existingAncestor = await nearestExistingAncestor(target);
     const canonicalAncestor = await realpathAsync(existingAncestor);
