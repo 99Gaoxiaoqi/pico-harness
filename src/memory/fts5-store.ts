@@ -16,16 +16,14 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "pathe";
 import { logger } from "../observability/logger.js";
 import type { Message } from "../schema/message.js";
+import type {
+  ConversationSearchStore,
+  MemoryBackendStatus,
+  MemorySearchResult,
+} from "./memory-store.js";
 
-/** 全文检索结果(带相关性打分) */
-export interface SearchResult {
-  sessionId: string;
-  turnIndex: number;
-  role: string;
-  content: string;
-  timestamp: string;
-  relevance: number; // FTS5 rank (负数,越接近 0 越相关)
-}
+/** @deprecated 请改用 MemorySearchResult。保留别名以兼容既有外部导入。 */
+export type SearchResult = MemorySearchResult;
 
 /** 会话摘要(对标 Hermes 的 Long-term Memory) */
 export interface SessionSummary {
@@ -46,6 +44,89 @@ export interface SkillStats {
   recentErrors: string[]; // 最近 5 条错误消息
 }
 
+interface ClassifiedInitError {
+  reason: string;
+  recommendation: string;
+}
+
+function errorCode(err: unknown): string | undefined {
+  if (!(err instanceof Error) || !("code" in err)) return undefined;
+  const code = err.code;
+  return typeof code === "string" ? code : undefined;
+}
+
+function classifyInitError(err: unknown): ClassifiedInitError {
+  const message = err instanceof Error ? err.message : String(err);
+  const normalized = message.toLowerCase();
+  const code = errorCode(err)?.toUpperCase();
+
+  if (
+    normalized.includes("node_module_version") ||
+    normalized.includes("different node.js version") ||
+    normalized.includes("module did not self-register") ||
+    normalized.includes("invalid elf header") ||
+    normalized.includes("incompatible architecture") ||
+    normalized.includes("wrong architecture") ||
+    normalized.includes("mach-o")
+  ) {
+    return {
+      reason: `better-sqlite3 原生模块与当前 Node ABI ${process.versions.modules ?? "unknown"} 不兼容`,
+      recommendation:
+        "请在当前 Node 环境运行 npm rebuild better-sqlite3；仍失败时重新运行 npm ci。不要跨设备复制 node_modules。",
+    };
+  }
+
+  if (
+    normalized.includes("could not locate the bindings file") ||
+    normalized.includes("cannot find module") ||
+    normalized.includes("better_sqlite3.node")
+  ) {
+    return {
+      reason: "better-sqlite3 原生绑定缺失或无法加载",
+      recommendation:
+        "请在当前 Node 环境运行 npm rebuild better-sqlite3；仍失败时重新运行 npm ci。",
+    };
+  }
+
+  if (
+    normalized.includes("no such module: fts5") ||
+    normalized.includes("no such tokenizer: trigram") ||
+    (normalized.includes("fts5") && normalized.includes("not available"))
+  ) {
+    return {
+      reason: "当前 SQLite 构建不支持所需的 FTS5/trigram 全文索引",
+      recommendation: "请重新安装带 FTS5 支持的 better-sqlite3，或使用 JSONL 记忆检索后端。",
+    };
+  }
+
+  if (
+    code === "EACCES" ||
+    code === "EPERM" ||
+    code === "EROFS" ||
+    code === "ENOSPC" ||
+    code === "SQLITE_READONLY" ||
+    code === "SQLITE_CANTOPEN" ||
+    code === "SQLITE_FULL" ||
+    normalized.includes("readonly") ||
+    normalized.includes("read-only") ||
+    normalized.includes("permission denied") ||
+    normalized.includes("unable to open database file") ||
+    normalized.includes("sqlite_cantopen")
+  ) {
+    return {
+      reason: "记忆数据库路径不可创建或不可写",
+      recommendation: "请检查工作区及 .claw 目录的路径、所有者、写权限和剩余磁盘空间。",
+    };
+  }
+
+  const errorKind = code ?? (err instanceof Error ? err.name : "UNKNOWN");
+  return {
+    reason: `SQLite FTS5 初始化失败（${errorKind}）`,
+    recommendation:
+      "请检查工作区写权限，并在当前 Node 环境运行 npm rebuild better-sqlite3 后重试。",
+  };
+}
+
 /**
  * FTS5Store: SQLite FTS5 全文检索存储层。
  *
@@ -57,9 +138,11 @@ export interface SkillStats {
  * N 个连接指向同一 sessions.db 文件,争抢文件锁且浪费 fd)。改造后连接数 O(workDir),
  * 通常 O(1)。Session.close() 调 release(),引用计数归零才真正 close db。
  */
-export class FTS5Store {
+export class FTS5Store implements ConversationSearchStore {
   /** workDir → 共享实例 + 引用计数 */
   private static readonly pool = new Map<string, { store: FTS5Store; refCount: number }>();
+  /** 避免同一工作目录的相同初始化错误在反复 acquire 时刷屏。 */
+  private static readonly loggedDegradations = new Set<string>();
 
   /**
    * 按 workDir 获取共享 FTS5Store 实例(引用计数 +1)。
@@ -102,6 +185,18 @@ export class FTS5Store {
 
   private db: Database.Database | null = null;
   private readonly dbPath: string;
+  private backendStatus: MemoryBackendStatus = {
+    backend: "sqlite_fts5",
+    state: "degraded",
+    persistentSource: "sqlite",
+    nodeVersion: process.version,
+    nodeModuleAbi: process.versions.modules,
+    reason: "SQLite FTS5 尚未初始化",
+  };
+
+  get status(): MemoryBackendStatus {
+    return { ...this.backendStatus };
+  }
 
   constructor(workDir: string) {
     this.dbPath = `${workDir}/.claw/sessions.db`;
@@ -112,11 +207,39 @@ export class FTS5Store {
       // 启用 WAL 模式(并发读写性能更好,断电恢复更安全)
       this.db.pragma("journal_mode = WAL");
       this.initSchema();
+      this.backendStatus = {
+        backend: "sqlite_fts5",
+        state: "healthy",
+        persistentSource: "sqlite",
+        nodeVersion: process.version,
+        nodeModuleAbi: process.versions.modules,
+      };
       logger.info({ dbPath: this.dbPath }, "[fts5] 数据库初始化成功");
     } catch (err) {
       // 降级:数据库初始化失败不抛异常,仅 warn,后续操作变为空操作
-      logger.warn({ err, dbPath: this.dbPath }, "[fts5] 数据库初始化失败,检索功能降级");
       this.db = null;
+      const classified = classifyInitError(err);
+      this.backendStatus = {
+        backend: "sqlite_fts5",
+        state: "degraded",
+        persistentSource: "sqlite",
+        nodeVersion: process.version,
+        nodeModuleAbi: process.versions.modules,
+        ...classified,
+      };
+      const warningKey = `${this.dbPath}\u0000${classified.reason}`;
+      if (!FTS5Store.loggedDegradations.has(warningKey)) {
+        FTS5Store.loggedDegradations.add(warningKey);
+        logger.warn(
+          {
+            dbPath: this.dbPath,
+            nodeVersion: process.version,
+            nodeModuleAbi: process.versions.modules,
+            ...classified,
+          },
+          "[fts5] 数据库初始化失败,检索功能降级",
+        );
+      }
     }
   }
 
@@ -192,6 +315,37 @@ export class FTS5Store {
   }
 
   /**
+   * 用当前完整消息替换指定会话的全文索引。
+   * 删除与重建在单个 SQLite 事务中完成；任一步失败都会整体回滚。
+   */
+  replaceSession(sessionId: string, messages: readonly Message[]): void {
+    if (!this.db) return;
+    try {
+      const deleteStmt = this.db.prepare("DELETE FROM conversation_chunks WHERE session_id = ?");
+      const insertStmt = this.db.prepare(`
+        INSERT INTO conversation_chunks (session_id, turn_index, role, content, timestamp)
+        VALUES (?, ?, ?, ?, ?)
+      `);
+      const replace = this.db.transaction((currentMessages: readonly Message[]) => {
+        deleteStmt.run(sessionId);
+        const timestamp = new Date().toISOString();
+        for (const [turnIndex, message] of currentMessages.entries()) {
+          insertStmt.run(
+            sessionId,
+            turnIndex,
+            message.role,
+            typeof message.content === "string" ? message.content : JSON.stringify(message.content),
+            timestamp,
+          );
+        }
+      });
+      replace(messages);
+    } catch (err) {
+      logger.warn({ err, sessionId }, "[fts5] 重建会话索引失败");
+    }
+  }
+
+  /**
    * 全文检索对话历史(FTS5 MATCH 语法)。
    *
    * @param query - 搜索关键词(支持 FTS5 查询语法:AND/OR/NOT/"短语")
@@ -208,7 +362,7 @@ export class FTS5Store {
    * 中文支持:trigram tokenizer 要求查询长度 ≥3 字符。
    * 对于短查询(<3 字符,如"驾驭"),降级为 LIKE 模糊匹配。
    */
-  search(query: string, limit = 10, sessionId?: string): SearchResult[] {
+  search(query: string, limit = 10, sessionId?: string): MemorySearchResult[] {
     if (!this.db) return [];
     try {
       // trigram tokenizer 要求查询长度 ≥3,对于短查询降级为 LIKE
@@ -230,7 +384,7 @@ export class FTS5Store {
           LIMIT ?
         `);
         const params = sessionId ? [`%${query}%`, sessionId, limit] : [`%${query}%`, limit];
-        return stmt.all(...params) as SearchResult[];
+        return stmt.all(...params) as MemorySearchResult[];
       }
 
       // 标准 FTS5 查询(trigram ≥3 字符)
@@ -251,7 +405,7 @@ export class FTS5Store {
         LIMIT ?
       `);
       const params = sessionId ? [query, sessionId, limit] : [query, limit];
-      return stmt.all(...params) as SearchResult[];
+      return stmt.all(...params) as MemorySearchResult[];
     } catch (err) {
       logger.warn({ err, query }, "[fts5] 搜索失败");
       return [];
@@ -398,6 +552,15 @@ export class FTS5Store {
         logger.warn({ err }, "[fts5] 关闭数据库失败");
       }
       this.db = null;
+      this.backendStatus = {
+        backend: "sqlite_fts5",
+        state: "degraded",
+        persistentSource: "sqlite",
+        nodeVersion: process.version,
+        nodeModuleAbi: process.versions.modules,
+        reason: "SQLite FTS5 连接已关闭",
+        recommendation: "需要继续检索时，请重新 acquire 记忆存储。",
+      };
     }
   }
 }
