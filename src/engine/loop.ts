@@ -748,7 +748,11 @@ export class AgentEngine implements AgentRunner {
           // ====================================================================
           const pendingSteer = this.steerQueue?.peek();
           if (pendingSteer) {
-            compactedContext.push({ role: "user", content: `[STEER] ${pendingSteer}` });
+            compactedContext.push({
+              role: "user",
+              content: `[STEER] ${pendingSteer}`,
+              providerData: { picoKind: "steer", picoHiddenFromTranscript: true },
+            });
           }
 
           const actionSpan = turnSpan?.startChild("LLM.Action", {
@@ -807,11 +811,25 @@ export class AgentEngine implements AgentRunner {
               lastMessage: responseMsg,
             });
             signal?.throwIfAborted();
+
+            // steer 可能在最后一次 provider 调用期间到达。必须在真正 stop
+            // 前同步 drain 并续接本轮，否则它会泄漏到下一次无关 run。
+            const stopSteers = this.steerQueue?.drain() ?? [];
+            for (const text of stopSteers) {
+              session.append({
+                role: "user",
+                content: text,
+                providerData: { picoKind: "steer" },
+              });
+            }
             if (decision?.continue) {
               session.append({
                 role: "user",
                 content: decision.continuePrompt ?? "请继续推进任务。",
+                providerData: { picoKind: "continuation", picoHiddenFromTranscript: true },
               });
+            }
+            if (stopSteers.length > 0 || decision?.continue) {
               continue; // 不 break,回 for(;;) 顶部继续下一轮
             }
             reporter.onFinish();
@@ -930,7 +948,11 @@ export class AgentEngine implements AgentRunner {
           // ====================================================================
           const steerTexts = this.steerQueue?.drain() ?? [];
           for (const text of steerTexts) {
-            session.append({ role: "user", content: text });
+            session.append({
+              role: "user",
+              content: text,
+              providerData: { picoKind: "steer" },
+            });
           }
         } finally {
           if (!userRewindPointId) {
@@ -1083,7 +1105,11 @@ export class AgentEngine implements AgentRunner {
       ? `\n\n${goalContext}\n请在总结中明确:当前目标达成到什么程度。`
       : "";
     const gracePrompt = `[SYSTEM] 已达执行预算: ${reason}。立即停止工具调用,用纯文本总结:1)已完成 2)未完成 3)下一步建议。${goalSection}`;
-    session.append({ role: "user", content: gracePrompt });
+    session.append({
+      role: "user",
+      content: gracePrompt,
+      providerData: { picoKind: "grace", picoHiddenFromTranscript: true },
+    });
     const graceSpan = parentSpan?.startChild("LLM.GraceCall", {
       reason,
       availableToolCount: 0,
@@ -1155,10 +1181,12 @@ export class AgentEngine implements AgentRunner {
   private async generateSubWithOverflowRetry(
     contextHistory: Message[],
     tools: ToolDefinition[],
+    signal?: AbortSignal,
   ): Promise<Message> {
     if (!this.compactor) {
       // 无 Compactor:子代理无法降级,叠加普通重试层(溢出则原样抛出)
       return generateWithRetry(this.provider, contextHistory, tools, {
+        signal,
         onRetry: this.makeRetryReporter(),
         onRateLimited: () => this.rotateProvider(),
       });
@@ -1170,6 +1198,7 @@ export class AgentEngine implements AgentRunner {
         // 【集成点】同 generateWithOverflowRetry,叠加普通重试层在内,
         // 响应式压缩在外(子代理版仅降字符预算,不改 WorkingMemory 条数)。
         return await generateWithRetry(this.provider, context, tools, {
+          signal,
           onRetry: this.makeRetryReporter(),
           onRateLimited: () => this.rotateProvider(),
         });
@@ -1244,6 +1273,8 @@ export class AgentEngine implements AgentRunner {
     opts: SubagentRunOptions = {},
   ): Promise<SubagentResult> {
     const rep = reporter ?? new SilentReporter();
+    const signal = opts.signal;
+    signal?.throwIfAborted();
     logger.info(
       { task: taskPrompt.slice(0, 100), thinkingEffort: this.thinkingEffort },
       `[Subagent] 🚀 拉起探路者,任务: ${taskPrompt.slice(0, 100)} (thinkingEffort: ${this.thinkingEffort},继承自主 Agent)`,
@@ -1252,6 +1283,7 @@ export class AgentEngine implements AgentRunner {
     const initialToolNames = new Set(readOnlyRegistry.getAvailableTools().map((tool) => tool.name));
     const canViewSkills = initialToolNames.has("skill_view");
     const skillIndex = canViewSkills ? await new SkillLoader(this.workDir).loadAll() : "";
+    signal?.throwIfAborted();
     const toolExamples = canViewSkills
       ? "bash 的 find/grep、read_file、skill_view"
       : "bash 的 find/grep、read_file";
@@ -1277,6 +1309,7 @@ export class AgentEngine implements AgentRunner {
     const artifactPaths: string[] = [];
 
     for (;;) {
+      signal?.throwIfAborted();
       turnCount++;
       if (turnCount > maxSubTurns) {
         throw new Error(
@@ -1292,7 +1325,11 @@ export class AgentEngine implements AgentRunner {
 
       // 响应式溢出重试:子代理用独立 contextHistory(非 Session 驱动),无法重取
       // WorkingMemory,故仅用更小的 maxChars 预算对 contextHistory 重新压缩重试。
-      const actionResp = await this.generateSubWithOverflowRetry(contextHistory, availableTools);
+      const actionResp = await this.generateSubWithOverflowRetry(
+        contextHistory,
+        availableTools,
+        signal,
+      );
       contextHistory.push(actionResp);
 
       if (actionResp.content) {
@@ -1316,7 +1353,11 @@ export class AgentEngine implements AgentRunner {
             { turns: turnCount, summaryLen: summary.length },
             `[Subagent] 📝 探路者总结过短,追加一轮扩写。`,
           );
-          const continuationResp = await this.generateSubWithOverflowRetry(contextHistory, []);
+          const continuationResp = await this.generateSubWithOverflowRetry(
+            contextHistory,
+            [],
+            signal,
+          );
           contextHistory.push(continuationResp);
           if (continuationResp.content && continuationResp.content.trim().length > 0) {
             summary = continuationResp.content;
@@ -1333,13 +1374,16 @@ export class AgentEngine implements AgentRunner {
       const getAccesses = readOnlyRegistry.getAccesses;
       const scheduler = new ToolScheduler<{ message: Message; artifactPath?: string }>({
         maxConcurrency: AgentEngine.MAX_TOOL_CONCURRENCY,
+        signal,
       });
       const scheduled = toolCalls.map((tc) =>
         scheduler.add({
           accesses: getAccesses ? getAccesses.call(readOnlyRegistry, tc) : ToolAccesses.all(),
+          settleOnAbort: true,
           start: async () => {
+            signal?.throwIfAborted();
             rep.onToolCall(`[Subagent] ${tc.name}`, tc.arguments, tc.id);
-            const result = await readOnlyRegistry.execute(tc);
+            const result = await readOnlyRegistry.execute(tc, { signal });
             let finalOutput = result.output;
             if (result.isError) {
               finalOutput = this.recovery.analyzeAndInject(tc.name, result.output);
@@ -1364,7 +1408,16 @@ export class AgentEngine implements AgentRunner {
           },
         }),
       );
-      const subResults = await Promise.all(scheduled);
+      let subResults: Array<{ message: Message; artifactPath?: string }>;
+      try {
+        subResults = await Promise.all(scheduled);
+        signal?.throwIfAborted();
+      } catch (error) {
+        if (signal?.aborted) await Promise.allSettled(scheduled);
+        throw error;
+      } finally {
+        scheduler.dispose();
+      }
 
       const observations: Message[] = new Array(toolCalls.length);
       for (let i = 0; i < subResults.length; i++) {

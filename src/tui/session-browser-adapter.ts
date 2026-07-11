@@ -35,8 +35,8 @@ export function searchSessionBrowserSessions(
   const normalized = query.trim().toLowerCase();
   if (!normalized) return [...sessions];
   return sessions.filter((session) =>
-    [session.id, session.cwd, session.title, session.firstMessage].some((value) =>
-      value?.toLowerCase().includes(normalized),
+    [session.id, session.cwd, session.title, session.firstMessage, session.lastMessage].some(
+      (value) => value?.toLowerCase().includes(normalized),
     ),
   );
 }
