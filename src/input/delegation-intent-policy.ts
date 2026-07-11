@@ -21,11 +21,22 @@ const CHINESE_DISCUSSION_PATTERNS = [
 
 const ENGLISH_DISCUSSION_PATTERNS = [
   new RegExp(
-    String.raw`\b(?:what (?:is|are)|explain|describe|compare|how (?:does|do|is|are)|difference between)\b.{0,40}\b${ENGLISH_AGENT}\b`,
+    String.raw`\b(?:what (?:is|are)|why|explain|describe|compare|how (?:does|do|is|are)|difference between)\b.{0,40}\b${ENGLISH_AGENT}\b`,
     "iu",
   ),
   new RegExp(
     String.raw`\b(?:should|would)\s+(?:i|we)\s+(?:use|call|run)\b.{0,20}\b${ENGLISH_AGENT}\b`,
+    "iu",
+  ),
+] as const;
+
+const EXPLICIT_BACKGROUND_PATTERNS = [
+  new RegExp(
+    String.raw`(?:后台|异步|不用等|无需等待|不要等待).{0,24}${CHINESE_AGENT}|${CHINESE_AGENT}.{0,24}(?:后台|异步|不用等|无需等待|不要等待)`,
+    "iu",
+  ),
+  new RegExp(
+    String.raw`\b(?:background|asynchronously|do not wait|don't wait|without waiting)\b.{0,40}\b${ENGLISH_AGENT}\b|\b${ENGLISH_AGENT}\b.{0,40}\b(?:in the background|asynchronously|without waiting)\b`,
     "iu",
   ),
 ] as const;
@@ -105,7 +116,13 @@ export function detectExplicitDelegationIntent(
   latestUserInput: string,
 ): ExplicitDelegationIntent | null {
   const normalized = normalizeInput(latestUserInput);
-  if (normalized.length === 0 || isDiscussionOnly(normalized)) return null;
+  if (
+    normalized.length === 0 ||
+    isDiscussionOnly(normalized) ||
+    EXPLICIT_BACKGROUND_PATTERNS.some((pattern) => pattern.test(normalized))
+  ) {
+    return null;
+  }
   if (!STRONG_EXECUTION_PATTERNS.some((pattern) => pattern.test(normalized))) return null;
 
   return {
