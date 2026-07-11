@@ -2,14 +2,12 @@
 //
 // 设计思路:MCP 工具是"黑盒"——它的副作用由 server 内部决定,
 // pico 无法静态分析(不像 read_file 能知道访问哪个文件)。
-// 因此 accesses() 返回 ToolAccesses.none(),让 Agent 调度器自行判断:
-//   - 不强制全局互斥(MCP 工具可与其他工具并行)
-//   - 但也不承诺无冲突(Agent 若担心副作用可自行串行)
+// 因此默认按未知副作用处理：全局串行，并让文件历史保守地记录工作区变化。
 //
 // 工具名限定:mcp__<server>__<tool>,防止多 server 工具名冲突。
 // execute() 接收 JSON 字符串(与所有 BaseTool 一致),解析后转发给 McpClient。
 
-import type { BaseTool } from "../tools/registry.js";
+import { WORKSPACE_FILE_SIDE_EFFECTS, type BaseTool } from "../tools/registry.js";
 import type { ToolDefinition } from "../schema/message.js";
 import { ToolAccesses } from "../tools/tool-access.js";
 import { logger } from "../observability/logger.js";
@@ -37,6 +35,7 @@ export interface McpToolBridgeOptions {
  */
 export class McpToolBridge implements BaseTool {
   readonly readOnly = false;
+  readonly fileSideEffects = WORKSPACE_FILE_SIDE_EFFECTS;
   readonly toolset = "mcp";
   readonly maxResultSizeChars: number;
 
@@ -66,13 +65,9 @@ export class McpToolBridge implements BaseTool {
     return this.toolDefinition;
   }
 
-  /**
-   * MCP 工具的副作用不可静态分析,但也不是必然全局互斥。
-   * 返回 ToolAccesses.none() 让调度器按默认规则处理(可与其他工具并行)。
-   * Agent 若需串行调用特定 MCP 工具,应由调用方在提示词中约束。
-   */
+  /** MCP 工具默认副作用未知，必须与其他工具全局互斥。 */
   accesses(_args: string): ToolAccesses {
-    return ToolAccesses.none();
+    return ToolAccesses.all();
   }
 
   async execute(args: string): Promise<string> {
