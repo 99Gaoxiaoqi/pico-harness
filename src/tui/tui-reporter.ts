@@ -628,6 +628,7 @@ function isRequiredDelegation(toolName: string, rawArgs: string): boolean {
   if (input["completion_policy"] === "optional" || input["completion_policy"] === "detached") {
     return false;
   }
+  if (input["completion_policy"] === "required") return true;
   return input["background"] !== true;
 }
 

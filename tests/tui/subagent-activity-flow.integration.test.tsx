@@ -21,6 +21,7 @@ describe("subagent activity flow", () => {
     const args = JSON.stringify({
       tasks: [{ goal: "检查流式边界" }],
       completion_policy: "required",
+      background: true,
     });
 
     reporter.onTurnStart(1);
