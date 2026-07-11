@@ -4,6 +4,10 @@ import { resolveProviderProfile } from "../provider/profile.js";
 import { isValidThinkingEffort, type ThinkingEffort } from "../provider/thinking.js";
 import type { Registry } from "../tools/registry.js";
 import { globalSessionPermissionGrants } from "../approval/session-permissions.js";
+import type {
+  PersistedSessionSettings,
+  SessionRuntimePersistence,
+} from "../engine/session-runtime.js";
 
 export interface SessionToolStatus {
   name: string;
@@ -54,7 +58,14 @@ export interface SessionSettingResult {
   message: string;
 }
 
+export interface SessionSettingsPersistenceOptions {
+  persistence: SessionRuntimePersistence;
+  /** 默认 true：已持久设置覆盖启动默认值。11.4 显式强制新值时可传 false。 */
+  restore?: boolean;
+}
+
 const settingsBySession = new Map<string, SessionSettings>();
+let persistenceBySettings = new WeakMap<SessionSettings, SessionRuntimePersistence>();
 const resolvedCliSessionSemantics = new Map<
   string,
   { sessionMode: SessionMode; forkFrom?: string }
@@ -95,13 +106,21 @@ export function createDefaultSessionSettings(defaults: SessionSettingsDefaults):
   return withPermissionModeAlias(settings);
 }
 
-export function getOrCreateSessionSettings(defaults: SessionSettingsDefaults): SessionSettings {
+export function getOrCreateSessionSettings(
+  defaults: SessionSettingsDefaults,
+  persistenceOptions?: SessionSettingsPersistenceOptions,
+): SessionSettings {
+  const restored =
+    persistenceOptions?.restore === false
+      ? undefined
+      : persistenceOptions?.persistence.getRuntimeStateSnapshot().settings;
   const existing = settingsBySession.get(defaults.sessionId);
   if (existing !== undefined) {
     if (existing.cwd !== defaults.cwd) {
       // session id 可能被不同项目复用；目录授权绝不能跨 cwd 继承。
       existing.additionalDirectories = createAdditionalDirectorySnapshot([]);
       globalSessionPermissionGrants.clear(existing.sessionId);
+      persistenceBySettings.delete(existing);
     }
     const resolvedSemantics = resolvedCliSessionSemantics.get(defaults.sessionId);
     const sessionMode = defaults.sessionMode ?? resolvedSemantics?.sessionMode;
@@ -115,24 +134,54 @@ export function getOrCreateSessionSettings(defaults: SessionSettingsDefaults): S
       delete existing.forkFrom;
     }
     existing.cwd = defaults.cwd;
-    existing.provider = defaults.provider;
-    const requestedMode = normalizeInteractionMode(defaults.mode ?? defaults.permissionMode);
-    if (requestedMode !== undefined && requestedMode !== existing.mode) {
-      setSessionMode(existing, requestedMode);
+    if (restored) {
+      applyPersistedSessionSettings(existing, restored);
+    } else {
+      existing.provider = defaults.provider;
+      if (persistenceOptions?.restore === false) {
+        existing.model = defaults.model;
+        if (defaults.modelRouteId !== undefined) {
+          existing.modelRouteId = defaults.modelRouteId;
+        } else {
+          delete existing.modelRouteId;
+        }
+      }
+      const requestedMode = normalizeInteractionMode(defaults.mode ?? defaults.permissionMode);
+      if (requestedMode !== undefined && requestedMode !== existing.mode) {
+        applySessionMode(existing, requestedMode);
+      }
+      if (defaults.thinkingEffort !== undefined) {
+        existing.thinkingEffort = defaults.thinkingEffort;
+        existing.thinkingEffortExplicit = true;
+      }
     }
     existing.tools = defaults.tools ?? existing.tools;
     for (const directory of defaults.additionalDirectories ?? []) {
-      addSessionAdditionalDirectory(existing, directory);
+      if (!existing.additionalDirectories.includes(directory)) {
+        existing.additionalDirectories = createAdditionalDirectorySnapshot([
+          ...existing.additionalDirectories,
+          directory,
+        ]);
+      }
     }
-    if (defaults.thinkingEffort !== undefined) {
-      existing.thinkingEffort = defaults.thinkingEffort;
-      existing.thinkingEffortExplicit = true;
-    }
+    bindSessionSettingsPersistence(existing, persistenceOptions?.persistence);
+    persistSessionSettings(existing);
     return existing;
   }
 
   const created = createDefaultSessionSettings(defaults);
+  if (restored) applyPersistedSessionSettings(created, restored);
+  for (const directory of defaults.additionalDirectories ?? []) {
+    if (!created.additionalDirectories.includes(directory)) {
+      created.additionalDirectories = createAdditionalDirectorySnapshot([
+        ...created.additionalDirectories,
+        directory,
+      ]);
+    }
+  }
   settingsBySession.set(defaults.sessionId, created);
+  bindSessionSettingsPersistence(created, persistenceOptions?.persistence);
+  persistSessionSettings(created);
   return created;
 }
 
@@ -155,6 +204,7 @@ export function resetSessionSettingsForTests(): void {
   settingsBySession.clear();
   resolvedCliSessionSemantics.clear();
   globalSessionPermissionGrants.clear();
+  persistenceBySettings = new WeakMap<SessionSettings, SessionRuntimePersistence>();
 }
 
 export function addSessionAdditionalDirectory(
@@ -169,6 +219,7 @@ export function addSessionAdditionalDirectory(
     ...settings.additionalDirectories,
     directory,
   ]);
+  persistSessionSettings(settings);
   return settings.additionalDirectories;
 }
 
@@ -177,6 +228,7 @@ export function setSessionAdditionalDirectories(
   directories: readonly string[],
 ): readonly string[] {
   settings.additionalDirectories = createAdditionalDirectorySnapshot(directories);
+  persistSessionSettings(settings);
   return settings.additionalDirectories;
 }
 
@@ -195,6 +247,8 @@ export function setSessionModel(settings: SessionSettings, model: string): Sessi
   }
 
   settings.model = normalized;
+  delete settings.modelRouteId;
+  persistSessionSettings(settings);
   return { ok: true, message: `Model set to ${settings.model}` };
 }
 
@@ -210,6 +264,7 @@ export function setSessionModelRoute(
   settings.modelRouteId = route.id;
   settings.provider = route.provider;
   settings.model = route.model;
+  persistSessionSettings(settings);
   return { ok: true, message: `Model set to ${route.id}` };
 }
 
@@ -222,12 +277,8 @@ export function setSessionMode(settings: SessionSettings, mode: string): Session
     };
   }
 
-  if (normalized === "plan" && settings.mode !== "plan") {
-    settings.prePlanMode = settings.mode;
-  } else if (normalized !== "plan") {
-    delete settings.prePlanMode;
-  }
-  settings.mode = normalized;
+  applySessionMode(settings, normalized);
+  persistSessionSettings(settings);
   return { ok: true, message: `Mode set to ${settings.mode}` };
 }
 
@@ -238,6 +289,7 @@ export function exitSessionPlanMode(settings: SessionSettings): SessionSettingRe
   const restored = settings.prePlanMode ?? DEFAULT_INTERACTION_MODE;
   delete settings.prePlanMode;
   settings.mode = restored;
+  persistSessionSettings(settings);
   return { ok: true, message: `Mode restored to ${settings.mode}` };
 }
 
@@ -271,6 +323,7 @@ export function setSessionThinkingEffort(
 
   settings.thinkingEffort = effort;
   settings.thinkingEffortExplicit = true;
+  persistSessionSettings(settings);
   return { ok: true, message: `Thinking effort set to ${settings.thinkingEffort}` };
 }
 
@@ -334,6 +387,65 @@ function createAdditionalDirectorySnapshot(directories: readonly string[]): read
   return Object.freeze([...new Set(directories)]);
 }
 
+export function snapshotSessionSettings(settings: SessionSettings): PersistedSessionSettings {
+  return {
+    provider: settings.provider,
+    model: settings.model,
+    ...(settings.modelRouteId !== undefined ? { modelRouteId: settings.modelRouteId } : {}),
+    mode: settings.mode,
+    ...(settings.prePlanMode !== undefined ? { prePlanMode: settings.prePlanMode } : {}),
+    thinkingEffort: settings.thinkingEffort,
+    thinkingEffortExplicit: settings.thinkingEffortExplicit,
+    additionalDirectories: [...settings.additionalDirectories],
+  };
+}
+
+function applyPersistedSessionSettings(
+  settings: SessionSettings,
+  persisted: PersistedSessionSettings,
+): void {
+  settings.provider = persisted.provider;
+  settings.model = persisted.model;
+  if (persisted.modelRouteId !== undefined) {
+    settings.modelRouteId = persisted.modelRouteId;
+  } else {
+    delete settings.modelRouteId;
+  }
+  settings.mode = persisted.mode;
+  if (persisted.prePlanMode !== undefined) {
+    settings.prePlanMode = persisted.prePlanMode;
+  } else {
+    delete settings.prePlanMode;
+  }
+  settings.thinkingEffort = persisted.thinkingEffort;
+  settings.thinkingEffortExplicit = persisted.thinkingEffortExplicit;
+  settings.additionalDirectories = createAdditionalDirectorySnapshot(
+    persisted.additionalDirectories,
+  );
+}
+
+function applySessionMode(settings: SessionSettings, mode: InteractionMode): void {
+  if (mode === "plan" && settings.mode !== "plan") {
+    settings.prePlanMode = settings.mode;
+  } else if (mode !== "plan") {
+    delete settings.prePlanMode;
+  }
+  settings.mode = mode;
+}
+
+function bindSessionSettingsPersistence(
+  settings: SessionSettings,
+  persistence: SessionRuntimePersistence | undefined,
+): void {
+  if (persistence) persistenceBySettings.set(settings, persistence);
+}
+
+function persistSessionSettings(settings: SessionSettings): void {
+  persistenceBySettings
+    .get(settings)
+    ?.updateRuntimeState({ settings: snapshotSessionSettings(settings) });
+}
+
 function withPermissionModeAlias(
   settings: Omit<SessionSettings, "permissionMode"> &
     Partial<Pick<SessionSettings, "permissionMode">>,
@@ -344,7 +456,10 @@ function withPermissionModeAlias(
     get: () => settings.mode,
     set: (value: string) => {
       const mode = normalizeInteractionMode(value);
-      if (mode !== undefined) settings.mode = mode;
+      if (mode !== undefined) {
+        applySessionMode(settings as SessionSettings, mode);
+        persistSessionSettings(settings as SessionSettings);
+      }
     },
   });
   return settings as SessionSettings;
