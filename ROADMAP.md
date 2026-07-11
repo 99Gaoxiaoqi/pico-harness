@@ -588,6 +588,8 @@ git worktree remove ../pico-1-streaming
 
 <!-- 开发过程中发现的新需求，追加到这里，注明发现日期 -->
 
+- [x] 2026-07-11：增加 Claude Code 风格的首次工作区信任门；信任通过前不读取项目 Session / Config / AGENTS / Skills，不启动 Provider / LSP / MCP / Hook；用户级信任库按 realpath 安全、原子持久化，非交互首启 fail-closed。
+
 - [x] 2026-07-10：参考 OpenCode 引入 `providerID/modelID` 模型路由；`.pico/config.json` provider map 关联协议、端点和凭证环境变量，`/model` 仅从配置/发现目录安全切换完整路由，旧 `LLM_*` 保持兼容；本地 HTTP 集成测试覆盖模型发现、非法路由拒绝和真实请求切换。
 
 - 2026-07-10（未排期）：SkillRegistry 如需新增指令更新 API，必须另行设计和验证；当前只承诺已实现的执行记录与检索，不声称会自动改写 Skill。
@@ -605,6 +607,11 @@ git worktree remove ../pico-1-streaming
 ---
 
 ## 📅 变更记录
+
+- 2026-07-11：增加工作区首次信任门
+  - CLI 得到真实工作目录后先完成信任确认，再读取 Session 并启动 TUI 项目级能力。
+  - 信任库写入 `~/.pico/trusted-workspaces.json`，目录与文件权限分别为 0700 / 0600，且使用同目录临时文件原子替换。
+  - 新增一条跨模块集成主链，覆盖首次信任、重启复用、项目不可自声明信任和非交互 fail-closed。
 
 - 2026-07-11：完成阶段 13 隔离式并行与 MCP 生命周期
   - 可写 worker 默认进入唯一 worktree/分支；TaskRegistry 持久化运行状态，`/tasks` 支持查看、追加指令、停止、重试、串行合并和安全清理。
