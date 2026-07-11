@@ -3,7 +3,7 @@ import type { Message, ToolDefinition } from "../schema/message.js";
 import { ModelCapabilityError } from "./errors.js";
 import type { LLMProvider, LLMProviderRequestOptions } from "./interface.js";
 import type { ModelRouteCapabilities } from "./model-capabilities.js";
-import type { ThinkingEffort } from "./thinking.js";
+import type { ReasoningLevel } from "./reasoning-capability.js";
 import { defaultIsRetryableError } from "./retry.js";
 
 const CONTEXT_SAFETY_MARGIN_TOKENS = 1024;
@@ -11,7 +11,7 @@ const CONTEXT_SAFETY_MARGIN_TOKENS = 1024;
 export interface CapabilityPreflightRequest {
   messages: readonly Message[];
   availableTools: readonly ToolDefinition[];
-  thinkingEffort: ThinkingEffort;
+  thinkingEffort: ReasoningLevel;
 }
 
 export interface CapabilityPreflightResult {
@@ -36,11 +36,31 @@ export function preflightModelRequest(
   if (capabilities.toolCall === false && request.availableTools.length > 0) {
     throw new ModelCapabilityError(routeId, "tool_call", `模型路由 ${routeId} 不支持工具调用。`);
   }
-  if (capabilities.reasoning === false && request.thinkingEffort !== "off") {
+  const requestedLevel = request.thinkingEffort.trim().toLowerCase();
+  const reasoningProfile = capabilities.reasoningProfile;
+  if (capabilities.reasoning === false && requestedLevel !== "off") {
     throw new ModelCapabilityError(
       routeId,
       "reasoning",
-      `模型路由 ${routeId} 不支持 reasoning，请将 thinking effort 设为 off。`,
+      `模型路由 ${routeId} 不支持思考，当前档位为 ${request.thinkingEffort}。`,
+    );
+  }
+  if (reasoningProfile.levels.length === 0 && requestedLevel !== "off") {
+    const support = reasoningProfile.enabled === "unknown" ? "能力未知" : "思考由模型固定控制";
+    throw new ModelCapabilityError(
+      routeId,
+      "reasoning",
+      `模型路由 ${routeId} ${support}，不能选择思考档位 ${request.thinkingEffort}。`,
+    );
+  }
+  if (
+    reasoningProfile.levels.length > 0 &&
+    !reasoningProfile.levels.some((level) => level.toLowerCase() === requestedLevel)
+  ) {
+    throw new ModelCapabilityError(
+      routeId,
+      "reasoning",
+      `模型路由 ${routeId} 不支持思考档位 ${request.thinkingEffort}，可用档位：${reasoningProfile.levels.join(", ")}。`,
     );
   }
 
@@ -72,7 +92,7 @@ export class CapabilityPreflightProvider implements LLMProvider {
     private readonly next: LLMProvider,
     private readonly routeId: string,
     private readonly capabilities: ModelRouteCapabilities,
-    private readonly thinkingEffort: ThinkingEffort,
+    private readonly thinkingEffort: ReasoningLevel,
   ) {}
 
   get modelName(): string | undefined {

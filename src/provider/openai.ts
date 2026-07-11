@@ -13,7 +13,8 @@ import {
 import type { Message, ToolCall, ToolDefinition, Usage } from "../schema/message.js";
 import type { ProviderConfig } from "./config.js";
 import { resolveProviderProfile, type ProviderProfile } from "./profile.js";
-import { toOpenAIReasoningEffort, type ThinkingEffort } from "./thinking.js";
+import { isLegacyThinkingEffort, toOpenAIReasoningEffort } from "./thinking.js";
+import { applyReasoningRequestPatch } from "./reasoning-capability.js";
 import { ContextOverflowError, isContextOverflowStatus, LLMStatusError } from "./errors.js";
 import { parseRateLimitHeaders } from "./ratelimit.js";
 import { logger } from "../observability/logger.js";
@@ -44,7 +45,7 @@ interface OpenAIChatResponse {
 /** OpenAI 兼容协议适配器 */
 export class OpenAIProvider implements LLMProvider {
   private readonly profile: ProviderProfile;
-  private readonly thinkingEffort: ThinkingEffort;
+  private readonly thinkingEffort: string;
 
   constructor(
     private readonly config: ProviderConfig,
@@ -139,14 +140,10 @@ export class OpenAIProvider implements LLMProvider {
         },
       }));
     }
-    // 统一思考强度:模型原生 reasoning_effort(off 时不发送,与旧行为一致)
-    const reasoningEffort = toOpenAIReasoningEffort(this.thinkingEffort);
-    if (reasoningEffort !== undefined) {
-      body.reasoning_effort = reasoningEffort;
-    }
+    const requestBody = this.applyThinkingLevel(body);
 
     // 3. 构建请求并发送
-    const bodyJson = JSON.stringify(body);
+    const bodyJson = JSON.stringify(requestBody);
     logger.debug(
       { model: this.config.model, messages: openaiMsgs.length, tools: availableTools.length },
       "[OpenAI] POST /chat/completions",
@@ -275,10 +272,7 @@ export class OpenAIProvider implements LLMProvider {
         function: { name: t.name, description: t.description, parameters: t.inputSchema },
       }));
     }
-    const reasoningEffort = toOpenAIReasoningEffort(this.thinkingEffort);
-    if (reasoningEffort !== undefined) {
-      body.reasoning_effort = reasoningEffort;
-    }
+    const requestBody = this.applyThinkingLevel(body);
 
     const resp = await fetch(`${this.config.baseURL}/chat/completions`, {
       method: "POST",
@@ -286,7 +280,7 @@ export class OpenAIProvider implements LLMProvider {
         Authorization: `Bearer ${this.config.apiKey}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify(body),
+      body: JSON.stringify(requestBody),
       signal: providerRequestSignal(options?.signal),
     });
 
@@ -426,5 +420,16 @@ export class OpenAIProvider implements LLMProvider {
       toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
       usage,
     };
+  }
+
+  /** 路由请求严格使用模型 profile；无 profile 的旧直连调用保留四档映射。 */
+  private applyThinkingLevel(body: Record<string, unknown>): Record<string, unknown> {
+    const capability = this.config.capabilities?.reasoningProfile;
+    if (capability) {
+      return applyReasoningRequestPatch(body, capability, this.thinkingEffort, "openai");
+    }
+    if (!isLegacyThinkingEffort(this.thinkingEffort)) return body;
+    const reasoningEffort = toOpenAIReasoningEffort(this.thinkingEffort);
+    return reasoningEffort === undefined ? body : { ...body, reasoning_effort: reasoningEffort };
   }
 }

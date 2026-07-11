@@ -5,7 +5,7 @@ import {
   type ModelCapabilityConfig,
   type ModelRouteCapabilities,
 } from "./model-capabilities.js";
-import type { ThinkingEffort } from "./thinking.js";
+import type { ReasoningLevel } from "./reasoning-capability.js";
 
 const DEFAULT_DISCOVERY_TIMEOUT_MS = 3_000;
 
@@ -132,7 +132,7 @@ export class ModelRouter {
 
   providerConfig(
     routeId: string | undefined,
-    thinkingEffort?: ThinkingEffort,
+    thinkingEffort?: ReasoningLevel,
   ): { provider: ProviderKind; config: ProviderConfig; route: ModelRoute } {
     const route = this.require(routeId);
     if (!route.baseURL) {
