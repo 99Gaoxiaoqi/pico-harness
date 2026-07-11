@@ -714,12 +714,12 @@ describe("McpToolBridge BaseTool 适配", () => {
     await client.close();
   });
 
-  it("accesses 返回 none(MCP 工具副作用不可静态分析)", async () => {
+  it("accesses 返回 all(MCP 未知副作用全局互斥)", async () => {
     const client = new StdioMcpClient(stdioConfig("bridge", ["--tools", "1"]));
     await client.connect();
     const tools = await client.listTools();
     const bridge = new McpToolBridge(client, "bridge", tools[0]!);
-    expect(bridge.accesses("{}")).toHaveLength(0);
+    expect(bridge.accesses("{}")).toEqual([{ kind: "all" }]);
     await client.close();
   });
 
