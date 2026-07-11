@@ -102,6 +102,8 @@ import {
 import { createTuiRuntimeState, type TuiRuntimeState } from "./runtime-state.js";
 import { resolveTuiRenderStdout } from "./terminal-grid.js";
 import { hydrateTuiEntries } from "./session-hydration.js";
+import { AskUserHandler } from "../tools/ask-user.js";
+import { bindAskUserDialogs } from "./ask-user-dialog.js";
 
 export interface ReplOptions {
   /** 工作区 */
@@ -195,6 +197,7 @@ interface TuiSessionBundle {
   readonly workspaceRoots: WorkspaceRoots;
   readonly registry: CommandRegistry;
   readonly reporter: TuiReporter;
+  readonly askUserHandler: AskUserHandler;
   latestMcpStatus?: McpStatusSnapshot;
 }
 
@@ -653,9 +656,11 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
 
     try {
       const { toolDisclosure, fileIndex } = runtimeState;
+      const askUserHandler = new AskUserHandler();
       const toolRegistry = buildDefaultToolRegistry(opts.workDir, {
         toolDisclosure,
         workspaceRoots,
+        askUserHandler,
       });
       let latestMcpStatus: McpStatusSnapshot | undefined;
       if (opts.mcpConfigPath) {
@@ -726,6 +731,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         workspaceRoots,
         registry,
         reporter,
+        askUserHandler,
         latestMcpStatus,
       };
       return bundle;
@@ -1022,6 +1028,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
               reporter,
               toolDisclosure,
               runtimeState,
+              askUserHandler: current.askUserHandler,
               openDialog: (request) => {
                 setDialogRequests((current) => [
                   ...current.filter((item) => item.id !== request.id),
@@ -1334,6 +1341,7 @@ export async function runTuiAgentPrompt(
     reporter: TuiReporter;
     toolDisclosure?: ToolDisclosure;
     runtimeState?: TuiRuntimeState;
+    askUserHandler?: AskUserHandler;
     mcpStatusSink?: (snapshot: McpStatusSnapshot) => void;
     toolStatusSink?: RunAgentCliDependencies["toolStatusSink"];
     openDialog?: (request: DialogRequest) => void;
@@ -1355,6 +1363,12 @@ export async function runTuiAgentPrompt(
     deps.closeDialog?.(id);
   };
   const closeApprovalOnAbort = () => closePendingApprovalDialogs();
+  const unbindAskUserDialogs = deps.askUserHandler
+    ? bindAskUserDialogs(deps.askUserHandler, {
+        openDialog: (request) => deps.openDialog?.(request),
+        closeDialog: (id) => deps.closeDialog?.(id),
+      })
+    : undefined;
   controller.signal.addEventListener("abort", closeApprovalOnAbort, { once: true });
   if (deps.abortControllerRef && ownsControllerSlot) deps.abortControllerRef.current = controller;
   try {
@@ -1375,6 +1389,7 @@ export async function runTuiAgentPrompt(
       },
       ...(deps.toolDisclosure ? { toolDisclosure: deps.toolDisclosure } : {}),
       ...(deps.runtimeState ? { runtimeState: deps.runtimeState } : {}),
+      ...(deps.askUserHandler ? { askUserHandler: deps.askUserHandler } : {}),
       ...(deps.mcpStatusSink ? { mcpStatusSink: deps.mcpStatusSink } : {}),
       ...(deps.toolStatusSink ? { toolStatusSink: deps.toolStatusSink } : {}),
     });
@@ -1384,6 +1399,8 @@ export async function runTuiAgentPrompt(
   } finally {
     controller.signal.removeEventListener("abort", closeApprovalOnAbort);
     closePendingApprovalDialogs();
+    deps.askUserHandler?.cancelAll("当前运行已结束。");
+    unbindAskUserDialogs?.();
     if (ownsControllerSlot && deps.abortControllerRef?.current === controller) {
       deps.abortControllerRef.current = null;
     }

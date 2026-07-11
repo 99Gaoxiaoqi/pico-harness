@@ -22,6 +22,8 @@ import { CreateGoalTool, GetGoalTool, UpdateGoalTool } from "./goal.js";
 import { FetchURLTool, WebSearchTool } from "./web.js";
 import { ToolDisclosure } from "./tool-disclosure.js";
 import { SearchToolsTool } from "./search-tools.js";
+import { registerAskUserTool } from "./ask-user.js";
+import type { AskUserHandler } from "./ask-user.js";
 import { WorkspaceRoots, buildWorkspaceBoundaryMiddleware } from "./workspace-roots.js";
 
 export interface DefaultToolRegistryOptions extends ToolRegistryOptions {
@@ -52,6 +54,8 @@ export interface DefaultToolRegistryOptions extends ToolRegistryOptions {
    * 未提供则不启用渐进披露(全量工具喂给 LLM,行为不变)。
    */
   toolDisclosure?: ToolDisclosure;
+  /** 仅在宿主提供结构化交互 UI 时注册 ask_user，避免无 UI 的运行永久等待。 */
+  askUserHandler?: AskUserHandler;
 }
 
 export function buildDefaultToolRegistry(
@@ -63,6 +67,7 @@ export function buildDefaultToolRegistry(
     goalManager,
     todoStore,
     toolDisclosure,
+    askUserHandler,
     workspaceRoots,
     deferWorkspaceBoundary = false,
     ...registryOptions
@@ -97,6 +102,7 @@ export function buildDefaultToolRegistry(
     registry.register(new GetGoalTool(goalManager));
     registry.register(new UpdateGoalTool(goalManager));
   }
+  if (askUserHandler) registerAskUserTool(registry, askUserHandler);
   registry.register(new FetchURLTool());
   registry.register(new WebSearchTool());
   // 渐进披露(ROADMAP 5.4):注入 disclosure 时注册 search_tools 元工具。
