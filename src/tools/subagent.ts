@@ -40,6 +40,8 @@ import {
  *   避免子代理读过大文件后,主 Agent 既看不到原文也无法定位。
  */
 export interface SubagentResult {
+  /** 未设置时按 completed 兼容旧 runner；partial 表示保留了轮次耗尽前的有效证据。 */
+  status?: "completed" | "partial";
   summary: string;
   artifacts: string[];
 }

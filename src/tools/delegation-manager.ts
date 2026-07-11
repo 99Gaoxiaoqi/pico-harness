@@ -2,9 +2,13 @@ import type { BaseTool } from "./registry.js";
 import type { ToolDefinition } from "../schema/message.js";
 import { TaskRegistry } from "../tasks/task-registry.js";
 
+export type DelegationResultStatus = "completed" | "partial" | "error" | "timed_out" | "cancelled";
+
+export type DelegationBatchStatus = Exclude<DelegationResultStatus, "cancelled"> | "cancelled";
+
 export interface DelegationResult {
   taskIndex: number;
-  status: "completed" | "error";
+  status: DelegationResultStatus;
   summary?: string;
   /** 子任务探索期间被外部化的大型工具输出磁盘路径(均在 workDir 内,主 Agent 可 read_file 回查) */
   artifacts?: string[];
@@ -13,6 +17,8 @@ export interface DelegationResult {
 }
 
 export interface DelegationBatchResult {
+  /** 迁移期可选；运行时聚合器负责在所有新结果上填充。 */
+  status?: DelegationBatchStatus;
   results: DelegationResult[];
   totalDurationMs: number;
   /** 为了遵守工具返回总预算而省略的 artifact 路径数。 */
@@ -23,8 +29,15 @@ export interface DelegationBatchResult {
 
 export type DelegationCompletionPolicy = "required" | "optional" | "detached";
 
-export type DelegationRecordStatus = "running" | "completed" | "error" | "cancelled";
-export type DelegationTaskStatus = "queued" | "running" | "done" | "error" | "cancelled";
+export type DelegationRecordStatus = "running" | DelegationBatchStatus;
+export type DelegationTaskStatus =
+  | "queued"
+  | "running"
+  | "done"
+  | "partial"
+  | "error"
+  | "timed_out"
+  | "cancelled";
 
 export interface DelegationManagerOptions {
   maxConcurrentChildren?: number;

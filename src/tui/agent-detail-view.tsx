@@ -16,7 +16,10 @@ const STATUS_MARKER = {
   queued: "○",
   running: "✽",
   completed: "✓",
+  partial: "!",
   failed: "×",
+  timed_out: "×",
+  cancelled: "−",
 } as const;
 
 export function AgentDetailView({
