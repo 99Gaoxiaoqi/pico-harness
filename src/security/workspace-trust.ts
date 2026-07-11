@@ -152,6 +152,10 @@ export class WorkspaceTrustStore {
 
   private async secureDirectory(): Promise<void> {
     await mkdir(this.directoryPath, { recursive: true, mode: TRUST_DIRECTORY_MODE });
+    const info = await lstat(this.directoryPath);
+    if (info.isSymbolicLink() || !info.isDirectory()) {
+      throw new Error(`工作区信任状态目录必须是普通目录，不能是符号链接: ${this.directoryPath}`);
+    }
     await chmod(this.directoryPath, TRUST_DIRECTORY_MODE);
   }
 }

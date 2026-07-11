@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
@@ -102,6 +102,23 @@ describe("workspace trust startup integration", () => {
     await expect(runCli(["--dir", untrustedWorkspace], closedRuntime)).resolves.toBe(1);
     expect(stderr.join("")).toMatch(/工作区尚未信任.*非交互环境.*交互式终端/su);
     expect(closedStart).not.toHaveBeenCalled();
+
+    if (process.platform !== "win32") {
+      const linkedStateParent = join(root, "linked-state");
+      const attackerDirectory = join(root, "attacker-state");
+      await Promise.all([
+        mkdir(linkedStateParent, { recursive: true }),
+        mkdir(attackerDirectory, { recursive: true }),
+      ]);
+      const linkedStateDirectory = join(linkedStateParent, ".pico");
+      await symlink(attackerDirectory, linkedStateDirectory, "dir");
+      await expect(
+        ensureWorkspaceTrusted(workspace, {
+          store: new WorkspaceTrustStore({ userStateDirectory: linkedStateDirectory }),
+          prompt,
+        }),
+      ).rejects.toThrow(/信任状态目录.*不能是符号链接/u);
+    }
   });
 });
 
