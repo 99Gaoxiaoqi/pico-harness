@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "pathe";
 import { logger } from "../observability/logger.js";
 import type { SessionSummaryStore, StoredSessionSummary } from "./memory-store.js";
@@ -101,9 +101,14 @@ export class FileSessionSummaryStore
     };
 
     try {
-      mkdirSync(directory, { recursive: true });
-      writeFileSync(temporaryPath, `${JSON.stringify(file, null, 2)}\n`, "utf8");
+      mkdirSync(directory, { recursive: true, mode: 0o700 });
+      chmodSync(directory, 0o700);
+      writeFileSync(temporaryPath, `${JSON.stringify(file, null, 2)}\n`, {
+        encoding: "utf8",
+        mode: 0o600,
+      });
       renameSync(temporaryPath, this.filePath);
+      chmodSync(this.filePath, 0o600);
       this.persistenceAvailable = true;
     } catch (error) {
       this.persistenceAvailable = false;

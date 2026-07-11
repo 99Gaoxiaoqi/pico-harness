@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readdir, realpath } from "node:fs/promises";
+import { lstat, mkdir, readdir, realpath } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { AgentEngine } from "../engine/loop.js";
 import type { GoalManager } from "../engine/goal-manager.js";
@@ -10,7 +10,6 @@ import { FullCompactor } from "../context/full-compactor.js";
 import { ToolResultArtifactStore } from "../context/artifact-store.js";
 import { createContextBudget, estimateTokenBudgetAsChars } from "../context/context-budget.js";
 import { PromptComposer } from "../context/composer.js";
-import { SkillLoader, SkillViewTool } from "../context/skill.js";
 import type { TodoStore } from "../context/todo-store.js";
 import { ToolDisclosure } from "../tools/tool-disclosure.js";
 import {
@@ -24,7 +23,7 @@ import type { ProviderConfig } from "../provider/config.js";
 import type { LLMProvider, LLMProviderRequestOptions } from "../provider/interface.js";
 import { resolveProviderProfile } from "../provider/profile.js";
 import type { ImagePart, Message, ToolDefinition } from "../schema/message.js";
-import { BashTool, ReadFileTool, ToolRegistry } from "../tools/registry-impl.js";
+import { ToolRegistry } from "../tools/registry-impl.js";
 import { buildDefaultToolRegistry } from "../tools/default-registry.js";
 import type { AskUserHandler } from "../tools/ask-user.js";
 import { WorkspaceRoots, workspaceAccessesFromCall } from "../tools/workspace-roots.js";
@@ -73,7 +72,7 @@ import {
 } from "../input/session-settings.js";
 import { loadPicoConfig } from "../input/pico-config.js";
 import { loadImage } from "../input/prepare-prompt.js";
-import { evaluateYoloToolCall, type YoloSandboxConfig } from "../safety/yolo-sandbox.js";
+import type { YoloSandboxConfig } from "../safety/yolo-sandbox.js";
 import { resolveCliSession, type CliSessionSelection } from "./session-resolver.js";
 import type { WorktreeSupervisor } from "../tasks/worktree-supervisor.js";
 
@@ -582,33 +581,6 @@ class CostTrackedModelFallbackProvider implements LLMProvider {
   }
 }
 
-function buildReadOnlyRegistry(
-  workDir: string,
-  workspaceRoots: WorkspaceRoots,
-  yoloSandbox: { config?: Partial<YoloSandboxConfig> },
-): ToolRegistry {
-  const registry = new ToolRegistry({ truncateResults: false });
-  registry.register(new ReadFileTool(workspaceRoots));
-  // Bash 只使用主工作目录作为 cwd，/add-dir 不改变 shell 运行起点。
-  registry.register(
-    new BashTool(workDir, undefined, {
-      allowBackground: false,
-      sandbox: {
-        workspaceRoots,
-        ...(yoloSandbox.config ? { config: yoloSandbox.config } : {}),
-      },
-    }),
-  );
-  registry.register(new SkillViewTool(new SkillLoader(workDir)));
-  registry.use(async (call) => {
-    const decision = evaluateYoloToolCall(call, workDir, workspaceRoots, yoloSandbox.config);
-    return decision.allowed
-      ? { allowed: true }
-      : { allowed: false, reason: decision.reason ?? "子代理沙箱边界拒绝。" };
-  });
-  return registry;
-}
-
 /** 加载工作区的自定义子代理角色(.claw/agents.yaml)。失败静默返回空。 */
 async function loadProfiles(workDir: string): Promise<AgentProfile[]> {
   try {
@@ -645,7 +617,10 @@ function registerDelegationTools(
   );
   registry.register(new DelegateStatusTool(manager));
   registry.register(
-    new SpawnSubagentTool(engine, buildReadOnlyRegistry(workDir, workspaceRoots, yoloSandbox)),
+    new SpawnSubagentTool(
+      engine,
+      registryFactory({ mode: "explore", role: "leaf", depth: 0, maxSpawnDepth: 1 }),
+    ),
   );
 }
 
@@ -691,7 +666,7 @@ export function buildApprovalMiddleware(
 ): MiddlewareFunc {
   return async (call) => {
     const mode = settings?.mode ?? "default";
-    const planModeDenial = planModeDenialReason(call, mode);
+    const planModeDenial = await planModeDenialReason(call, mode, workDir);
     if (planModeDenial !== undefined) {
       return {
         allowed: false,
@@ -811,14 +786,15 @@ async function externalAuthorizationDirectories(
   return [...new Set(directories)];
 }
 
-function planModeDenialReason(
+async function planModeDenialReason(
   call: { name: string; arguments: string },
   mode: SessionSettings["mode"],
-): string | undefined {
+  workDir: string,
+): Promise<string | undefined> {
   if (mode !== "plan") return undefined;
   if (call.name === "write_file" || call.name === "edit_file") {
     const path = parseJsonStringField(call.arguments, "path");
-    return path !== undefined && !isPlanModeAllowedPath(path)
+    return path !== undefined && !(await isPlanModeAllowedPath(path, workDir))
       ? "Plan Mode 守卫：当前处于 Plan Mode，只能修改 PLAN.md / TODO.md。"
       : undefined;
   }
@@ -829,6 +805,9 @@ function planModeDenialReason(
     return "Plan Mode 守卫：delegate_task 可能启动可写 worker 或递归委派，已拒绝执行；只读探索请使用 spawn_subagent。";
   }
   if (call.name !== "bash") return undefined;
+  if (parseJsonBooleanField(call.arguments, "background") === true) {
+    return "Plan Mode 守卫：只读 Bash 必须在前台完成，已拒绝后台进程。";
+  }
   const command = parseJsonStringField(call.arguments, "command");
   if (command === undefined) {
     return "Plan Mode 守卫：无法解析 Bash 命令，只允许可证明只读的命令。";
@@ -855,9 +834,25 @@ function parseJsonStringField(args: string, field: string): string | undefined {
   }
 }
 
-function isPlanModeAllowedPath(path: string): boolean {
-  const basename = path.split(/[\\/]/u).pop() ?? path;
-  return basename === "PLAN.md" || basename === "TODO.md";
+function parseJsonBooleanField(args: string, field: string): boolean | undefined {
+  try {
+    const parsed = JSON.parse(args) as Record<string, unknown>;
+    const value = parsed[field];
+    return typeof value === "boolean" ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function isPlanModeAllowedPath(path: string, workDir: string): Promise<boolean> {
+  const target = resolve(workDir, path);
+  const allowed = [resolve(workDir, "PLAN.md"), resolve(workDir, "TODO.md")];
+  if (!allowed.includes(target)) return false;
+  try {
+    return !(await lstat(target)).isSymbolicLink();
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT";
+  }
 }
 
 function markSharedPlanModeExited(settings: SessionSettings): void {

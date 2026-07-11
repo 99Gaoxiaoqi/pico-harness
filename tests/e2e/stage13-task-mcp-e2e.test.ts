@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -67,11 +67,9 @@ describe("stage 13 task and MCP host integration", () => {
       async (context) => {
         runnerEntered.resolve();
         await new Promise<void>((resolveStop) => {
-          context.signal.addEventListener(
-            "abort",
-            () => setTimeout(resolveStop, 25),
-            { once: true },
-          );
+          context.signal.addEventListener("abort", () => setTimeout(resolveStop, 25), {
+            once: true,
+          });
         });
       },
     );
@@ -144,6 +142,11 @@ describe("stage 13 task and MCP host integration", () => {
     const restoredRuntime = await TaskHostRuntime.create({ workDir: repo });
     cleanups.push(() => restoredRuntime.close());
     expect(restoredRuntime.get(started.taskId)?.status).toBe("completed");
+    if (process.platform !== "win32") {
+      const taskDir = join(repo, ".claw", "tasks");
+      expect((await stat(taskDir)).mode & 0o777).toBe(0o700);
+      expect((await stat(join(taskDir, "state.json"))).mode & 0o777).toBe(0o600);
+    }
   });
 });
 

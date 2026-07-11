@@ -178,6 +178,7 @@ function compileGlob(glob: string): (path: string) => boolean {
 async function collectFiles(
   root: string,
   globFilter?: (relPath: string) => boolean,
+  excludeSensitiveFiles = false,
 ): Promise<string[]> {
   const results: string[] = [];
 
@@ -199,6 +200,7 @@ async function collectFiles(
       }
       if (!entry.isFile()) continue;
       const rel = relative(root, join(dir, entry.name)).replace(/\\/g, "/");
+      if (excludeSensitiveFiles && isSensitiveRelativePath(rel)) continue;
       if (globFilter && !globFilter(rel)) continue;
       results.push(rel);
     }
@@ -232,6 +234,7 @@ function searchWithRg(opts: {
   caseSensitive: boolean;
   lineNumber: boolean;
   maxResults: number;
+  excludeSensitiveFiles?: boolean;
 }): Promise<string> {
   return new Promise((resolvePromise, reject) => {
     const args: string[] = ["--color=never", "--no-heading"];
@@ -241,6 +244,9 @@ function searchWithRg(opts: {
     args.push("-e", opts.pattern);
     if (opts.glob) {
       args.push("-g", opts.glob);
+    }
+    if (opts.excludeSensitiveFiles) {
+      for (const glob of SENSITIVE_GREP_GLOBS) args.push("-g", `!${glob}`);
     }
     // 限制匹配文件数与每文件行数不是 rg 的强项,这里靠后续截断 maxResults 控制
     args.push(opts.searchRoot);
@@ -326,8 +332,13 @@ async function searchWithNode(opts: {
   searchRoot: string;
   globFilter?: (relPath: string) => boolean;
   caseSensitive: boolean;
+  excludeSensitiveFiles?: boolean;
 }): Promise<RawMatch[]> {
-  const files = await collectFiles(opts.searchRoot, opts.globFilter);
+  const files = await collectFiles(
+    opts.searchRoot,
+    opts.globFilter,
+    opts.excludeSensitiveFiles === true,
+  );
 
   // 编译正则;失败则退化为字面匹配
   const regex = compileSearchPattern(opts.pattern, opts.caseSensitive);
@@ -383,7 +394,10 @@ export class GrepTool implements BaseTool {
   readonly readOnly = true;
   private readonly roots: WorkspaceRoots;
 
-  constructor(workDirOrRoots: string | WorkspaceRoots) {
+  constructor(
+    workDirOrRoots: string | WorkspaceRoots,
+    private readonly options: { excludeSensitiveFiles?: boolean } = {},
+  ) {
     this.roots =
       typeof workDirOrRoots === "string"
         ? WorkspaceRoots.createSync(workDirOrRoots)
@@ -457,6 +471,7 @@ export class GrepTool implements BaseTool {
           caseSensitive,
           lineNumber,
           maxResults,
+          excludeSensitiveFiles: this.options.excludeSensitiveFiles,
         });
         const matches = parseRgOutput(raw, lineNumber);
         return formatMatches(matches, maxResults, lineNumber);
@@ -474,7 +489,43 @@ export class GrepTool implements BaseTool {
       searchRoot,
       globFilter,
       caseSensitive,
+      excludeSensitiveFiles: this.options.excludeSensitiveFiles,
     });
     return formatMatches(matches, maxResults, lineNumber);
   }
+}
+
+const SENSITIVE_GREP_GLOBS = [
+  ".env",
+  ".env.*",
+  ".npmrc",
+  ".pypirc",
+  "credentials",
+  "id_rsa",
+  "id_ed25519",
+  "id_ecdsa",
+  "*.pem",
+  "*.key",
+  ".ssh/**",
+  ".gnupg/**",
+  ".aws/**",
+  ".kube/**",
+] as const;
+
+function isSensitiveRelativePath(relativePath: string): boolean {
+  const normalized = relativePath.replaceAll("\\", "/");
+  const segments = normalized.split("/");
+  const basename = segments.at(-1)?.toLowerCase() ?? "";
+  return (
+    segments.some((segment) =>
+      [".ssh", ".gnupg", ".aws", ".kube", ".docker"].includes(segment.toLowerCase()),
+    ) ||
+    basename === ".env" ||
+    basename.startsWith(".env.") ||
+    basename === ".npmrc" ||
+    basename === ".pypirc" ||
+    basename === "credentials" ||
+    /^id_(?:rsa|ed25519|ecdsa)$/u.test(basename) ||
+    /\.(?:pem|key)$/u.test(basename)
+  );
 }

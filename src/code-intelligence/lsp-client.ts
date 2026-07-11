@@ -2,6 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { logger } from "../observability/logger.js";
 import { buildMinimalChildProcessEnv } from "../os/child-process-env.js";
+import { redactSensitiveText } from "../mcp/redact.js";
 import type { LspServerConfig } from "./lsp-server-discovery.js";
 import {
   isJsonRpcNotification,
@@ -19,6 +20,8 @@ const CLOSE_TIMEOUT_MS = 500;
 const MAX_LSP_HEADER_BYTES = 64 * 1024;
 const MAX_LSP_MESSAGE_BYTES = 8 * 1024 * 1024;
 const MAX_LSP_BUFFER_BYTES = MAX_LSP_HEADER_BYTES + MAX_LSP_MESSAGE_BYTES;
+const MAX_LSP_STDERR_BYTES = 256 * 1024;
+const MAX_LSP_STDERR_LOG_CHARS = 4_096;
 
 interface PendingRequest {
   readonly method: string;
@@ -46,6 +49,8 @@ export class StdioLspClient {
   private readonly notificationHandlers = new Map<string, Set<LspNotificationHandler>>();
   private state: "new" | "starting" | "ready" | "closing" | "closed" = "new";
   private terminalError: Error | undefined;
+  private stderrBytes = 0;
+  private stderrLimitReported = false;
 
   constructor(
     private readonly rootDir: string,
@@ -180,9 +185,7 @@ export class StdioLspClient {
     child.stdout.on("data", (chunk: Buffer) => {
       if (this.inputBuffer.length + chunk.length > MAX_LSP_BUFFER_BYTES) {
         void this.forceClose(
-          new Error(
-            `LSP server ${this.config.id} 输入缓冲超过 ${MAX_LSP_BUFFER_BYTES} 字节上限`,
-          ),
+          new Error(`LSP server ${this.config.id} 输入缓冲超过 ${MAX_LSP_BUFFER_BYTES} 字节上限`),
         );
         return;
       }
@@ -191,7 +194,24 @@ export class StdioLspClient {
     });
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (chunk: string) => {
-      logger.debug({ server: this.config.id, stderr: chunk.trimEnd() }, "[LSP] server stderr");
+      if (this.stderrBytes >= MAX_LSP_STDERR_BYTES) {
+        if (!this.stderrLimitReported) {
+          this.stderrLimitReported = true;
+          logger.warn(
+            { server: this.config.id, limit: MAX_LSP_STDERR_BYTES },
+            "[LSP] server stderr 超过日志上限，已停止记录后续内容",
+          );
+        }
+        return;
+      }
+      this.stderrBytes += Buffer.byteLength(chunk);
+      logger.debug(
+        {
+          server: this.config.id,
+          stderr: redactSensitiveText(chunk).trimEnd().slice(0, MAX_LSP_STDERR_LOG_CHARS),
+        },
+        "[LSP] server stderr",
+      );
     });
     child.once("error", (error) => {
       void this.forceClose(toError(error, `LSP server ${this.config.id} 子进程错误`));
@@ -213,18 +233,14 @@ export class StdioLspClient {
         if (separator < 0) {
           if (this.inputBuffer.length > MAX_LSP_HEADER_BYTES) {
             void this.forceClose(
-              new Error(
-                `LSP server ${this.config.id} 消息头超过 ${MAX_LSP_HEADER_BYTES} 字节上限`,
-              ),
+              new Error(`LSP server ${this.config.id} 消息头超过 ${MAX_LSP_HEADER_BYTES} 字节上限`),
             );
           }
           return;
         }
         if (separator > MAX_LSP_HEADER_BYTES) {
           void this.forceClose(
-            new Error(
-              `LSP server ${this.config.id} 消息头超过 ${MAX_LSP_HEADER_BYTES} 字节上限`,
-            ),
+            new Error(`LSP server ${this.config.id} 消息头超过 ${MAX_LSP_HEADER_BYTES} 字节上限`),
           );
           return;
         }
@@ -240,9 +256,7 @@ export class StdioLspClient {
         const bodyLength = Number(match[1]);
         if (!Number.isSafeInteger(bodyLength) || bodyLength > MAX_LSP_MESSAGE_BYTES) {
           void this.forceClose(
-            new Error(
-              `LSP server ${this.config.id} 消息体超过 ${MAX_LSP_MESSAGE_BYTES} 字节上限`,
-            ),
+            new Error(`LSP server ${this.config.id} 消息体超过 ${MAX_LSP_MESSAGE_BYTES} 字节上限`),
           );
           return;
         }
@@ -363,6 +377,9 @@ export class StdioLspClient {
     const stdin = this.child?.stdin;
     if (!stdin?.writable) throw new Error(`LSP server ${this.config.id} stdin 不可写`);
     const body = Buffer.from(JSON.stringify(message), "utf8");
+    if (body.length > MAX_LSP_MESSAGE_BYTES) {
+      throw new Error(`LSP 出站消息超过 ${MAX_LSP_MESSAGE_BYTES} 字节上限`);
+    }
     stdin.write(`Content-Length: ${body.length}\r\n\r\n`);
     stdin.write(body);
   }

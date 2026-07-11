@@ -16,8 +16,15 @@ import { GlobTool } from "./glob.js";
 import { GrepTool } from "./grep.js";
 import { FetchURLTool, WebSearchTool } from "./web.js";
 import { WorkspaceRoots } from "./workspace-roots.js";
-import { evaluateYoloToolCall, type YoloSandboxConfig } from "../safety/yolo-sandbox.js";
+import {
+  evaluateYoloToolCall,
+  isSensitiveWritePath,
+  type YoloSandboxConfig,
+} from "../safety/yolo-sandbox.js";
 import type { WorktreeSupervisor } from "../tasks/worktree-supervisor.js";
+import { classifyBashCommand } from "../approval/bash-safety.js";
+import { bashCommandFromArgs } from "../approval/bash-paths.js";
+import { buildMinimalChildProcessEnv } from "../os/child-process-env.js";
 
 export interface SubagentRegistryFactoryConfig {
   workDir: string;
@@ -51,6 +58,7 @@ export const TOOL_CONSTRUCTORS: Record<string, ToolCtor> = {
   bash: (wd, roots, yoloSandbox) =>
     new BashTool(wd, undefined, {
       allowBackground: false,
+      env: buildMinimalChildProcessEnv(),
       ...(roots && yoloSandbox
         ? {
             sandbox: {
@@ -62,7 +70,7 @@ export const TOOL_CONSTRUCTORS: Record<string, ToolCtor> = {
     }),
   skill_view: (wd) => new SkillViewTool(new SkillLoader(wd)),
   glob: (wd, roots) => new GlobTool(roots ?? wd),
-  grep: (wd, roots) => new GrepTool(roots ?? wd),
+  grep: (wd, roots) => new GrepTool(roots ?? wd, { excludeSensitiveFiles: true }),
   fetch_url: () => new FetchURLTool(),
   web_search: () => new WebSearchTool(),
 };
@@ -111,12 +119,13 @@ function buildProfileRegistry(
 ): ToolRegistry {
   const registry = new ToolRegistry();
   for (const toolName of profile.tools) {
+    if (request.mode === "explore" && EXPLORE_WRITE_TOOLS.has(toolName)) continue;
     const ctor = TOOL_CONSTRUCTORS[toolName];
     if (ctor) registry.register(ctor(config.workDir, config.workspaceRoots, config.yoloSandbox));
   }
-  // 自定义角色仍挂安全 Middleware:高危命令拦截不因自定义放开
-  // 用 worker 档的 Middleware(允许普通写,拦 rm -rf / git push --force 等)
-  registry.use(buildSubagentSafetyMiddleware("worker", config));
+  // 自定义角色不得扩大请求 mode：explore 过滤写工具并使用只读 Bash 守卫，
+  // worker 才允许在独立 worktree 中普通写入。
+  registry.use(buildSubagentSafetyMiddleware(request.mode, config));
   registry.register(new DelegateStatusTool(config.manager));
 
   // orchestrator 仍可递归委派(若角色允许且未超深度)
@@ -135,6 +144,7 @@ function buildModeRegistry(
 
   const bash = new BashTool(config.workDir, undefined, {
     allowBackground: false,
+    env: buildMinimalChildProcessEnv(),
     ...(config.yoloSandbox
       ? {
           sandbox: {
@@ -151,7 +161,7 @@ function buildModeRegistry(
 
   // 阶段 2 只读工具:explore/worker 都需要搜文件,worker 写代码也要先定位文件
   registry.register(new GlobTool(config.workspaceRoots));
-  registry.register(new GrepTool(config.workspaceRoots));
+  registry.register(new GrepTool(config.workspaceRoots, { excludeSensitiveFiles: true }));
 
   if (request.mode === "explore") {
     // 探索语义:联网搜索是 explore 的合理扩展(全只读,无副作用)
@@ -196,6 +206,17 @@ function buildSubagentSafetyMiddleware(
   config: ResolvedSubagentRegistryFactoryConfig,
 ): RequestMiddleware {
   return async (call) => {
+    if (call.name === "read_file" || call.name === "grep") {
+      const path = jsonStringField(call.arguments, "path");
+      if (
+        path !== undefined &&
+        isSensitiveWritePath(config.workspaceRoots.resolveUnchecked(path), [
+          ...config.workspaceRoots.list(),
+        ])
+      ) {
+        return { allowed: false, reason: "子代理不允许读取密钥、.env 或凭据路径。" };
+      }
+    }
     if (config.yoloSandbox) {
       const decision = evaluateYoloToolCall(
         call,
@@ -207,11 +228,15 @@ function buildSubagentSafetyMiddleware(
         return { allowed: false, reason: decision.reason ?? "子代理沙箱边界拒绝。" };
       }
     }
-    if (mode === "explore" && call.name === "bash" && isBashMutation(call.arguments)) {
-      return {
-        allowed: false,
-        reason: "子代理只读模式禁止 bash 写入或破坏性命令。",
-      };
+    if (mode === "explore" && call.name === "bash") {
+      const command = bashCommandFromArgs(call.arguments);
+      const classification = command ? classifyBashCommand(command) : undefined;
+      if (classification?.kind !== "read-only") {
+        return {
+          allowed: false,
+          reason: `子代理只读模式只允许可证明只读的 Bash${classification ? `；${classification.reason}` : ""}。`,
+        };
+      }
     }
 
     if (
@@ -229,35 +254,13 @@ function buildSubagentSafetyMiddleware(
   };
 }
 
-function isBashMutation(args: string): boolean {
-  const command = extractBashCommand(args);
-  return BASH_MUTATION_PATTERNS.some((pattern) => pattern.test(command));
-}
+const EXPLORE_WRITE_TOOLS = new Set(["write_file", "edit_file"]);
 
-function extractBashCommand(args: string): string {
+function jsonStringField(args: string, field: string): string | undefined {
   try {
-    const parsed = JSON.parse(args) as { command?: string };
-    return parsed.command ?? args;
+    const value = (JSON.parse(args) as Record<string, unknown>)[field];
+    return typeof value === "string" ? value : undefined;
   } catch {
-    return args;
+    return undefined;
   }
 }
-
-const BASH_MUTATION_PATTERNS: RegExp[] = [
-  />|>>|&>|2>/,
-  /\btee\b/i,
-  /\btouch\b/i,
-  /\bmkdir\b/i,
-  /\bmv\b/i,
-  /\bcp\b/i,
-  /\brm\b/i,
-  /\brmdir\b/i,
-  /\bchmod\b/i,
-  /\bchown\b/i,
-  /\bsed\s+-i\b/i,
-  /\bperl\s+-pi\b/i,
-  /\bpython(?:3)?\b.*\b(open|write_text|unlink|rmtree|remove)\b/i,
-  /\bnode\b.*\b(writeFile|rmSync|unlinkSync|mkdirSync)\b/i,
-  /\bgit\s+(commit|push|reset|checkout|switch|merge|rebase|clean|apply|am)\b/i,
-  /\b(?:npm|pnpm|yarn)\s+(install|i|add|remove|uninstall|update|upgrade)\b/i,
-];

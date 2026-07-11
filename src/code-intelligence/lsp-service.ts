@@ -1,4 +1,5 @@
-import { readFile } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import { open, realpath } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { StdioLspClient } from "./lsp-client.js";
@@ -53,6 +54,8 @@ const DIAGNOSTIC_SEVERITIES: Readonly<Record<number, DiagnosticSeverity>> = {
   3: "information",
   4: "hint",
 };
+
+const MAX_LSP_DOCUMENT_BYTES = 4 * 1024 * 1024;
 
 export class LspCodeIntelligenceService implements CodeIntelligenceService {
   readonly backend = "lsp" as const;
@@ -173,13 +176,34 @@ export class LspCodeIntelligenceService implements CodeIntelligenceService {
   }
 
   private async ensureOpen(filePath: string): Promise<string> {
-    const absolutePath = path.resolve(this.rootDir, filePath);
-    const relativePath = path.relative(this.rootDir, absolutePath);
+    const rootPath = await realpath(this.rootDir);
+    const requestedPath = path.resolve(rootPath, filePath);
+    let physicalPath: string;
+    try {
+      physicalPath = await realpath(requestedPath);
+    } catch (error) {
+      throw new Error(`代码智能无法解析文件 ${filePath}: ${errorMessage(error)}`, {
+        cause: error,
+      });
+    }
+    const relativePath = path.relative(rootPath, physicalPath);
     if (relativePath.startsWith("..") || path.isAbsolute(relativePath)) {
       throw new Error(`代码智能查询越出工作区: ${filePath}`);
     }
-    const uri = pathToFileURL(absolutePath).href;
-    const text = await readFile(absolutePath, "utf8");
+    const flags = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0);
+    const handle = await open(physicalPath, flags);
+    let text: string;
+    try {
+      const info = await handle.stat();
+      if (!info.isFile()) throw new Error(`代码智能只能打开普通文件: ${filePath}`);
+      if (info.size > MAX_LSP_DOCUMENT_BYTES) {
+        throw new Error(`代码智能文件超过 ${MAX_LSP_DOCUMENT_BYTES} 字节上限: ${filePath}`);
+      }
+      text = await handle.readFile("utf8");
+    } finally {
+      await handle.close();
+    }
+    const uri = pathToFileURL(physicalPath).href;
     const opened = this.openedDocuments.get(uri);
     if (opened) {
       if (opened.text !== text) {
@@ -195,7 +219,7 @@ export class LspCodeIntelligenceService implements CodeIntelligenceService {
     this.client.notify("textDocument/didOpen", {
       textDocument: {
         uri,
-        languageId: languageIdForPath(absolutePath),
+        languageId: languageIdForPath(physicalPath),
         version: 1,
         text,
       },
@@ -210,6 +234,10 @@ export class LspCodeIntelligenceService implements CodeIntelligenceService {
     }
     this.diagnosticsByUri.set(params.uri, normalizeDiagnostics(params.uri, params.diagnostics));
   }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function signalOptions(options: CodeIntelligenceQueryOptions): { signal?: AbortSignal } {

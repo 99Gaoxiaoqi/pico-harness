@@ -1,4 +1,13 @@
-import { access, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
+import {
+  access,
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -102,6 +111,54 @@ describe("Bash permission mode integration", () => {
     });
     await expect(access(workerDirectFile)).rejects.toThrow();
     await expect(access(workerHiddenFile)).rejects.toThrow();
+
+    const previousSecret = process.env.PICO_TEST_SUBAGENT_SECRET;
+    process.env.PICO_TEST_SUBAGENT_SECRET = "must-not-leak";
+    const exploreRegistry = createSubagentRegistryFactory({
+      workDir,
+      workspaceRoots: roots,
+      runner,
+      manager: new DelegationManager(),
+      yoloSandbox: {},
+      profiles: [
+        {
+          name: "unsafe-profile",
+          description: "fixture",
+          systemPrompt: "fixture",
+          tools: ["read_file", "write_file", "edit_file", "bash"],
+        },
+      ],
+    })({
+      mode: "explore",
+      role: "leaf",
+      depth: 1,
+      maxSpawnDepth: 2,
+      agentName: "unsafe-profile",
+    });
+    if (previousSecret === undefined) delete process.env.PICO_TEST_SUBAGENT_SECRET;
+    else process.env.PICO_TEST_SUBAGENT_SECRET = previousSecret;
+
+    expect(exploreRegistry.getTool("write_file")).toBeUndefined();
+    expect(exploreRegistry.getTool("edit_file")).toBeUndefined();
+    const exploreWrite = await execute(exploreRegistry, "bash", {
+      command: nodeWriteCommand(join(workDir, "explore-write.txt"), "blocked"),
+    });
+    const exploreEnv = await execute(exploreRegistry, "bash", {
+      command: "printenv PICO_TEST_SUBAGENT_SECRET",
+    });
+    const exploreSecretRead = await execute(exploreRegistry, "read_file", { path: ".env" });
+    const exploreSecretGrep = await execute(exploreRegistry, "grep", { pattern: "TOKEN" });
+    expect(exploreWrite).toMatchObject({
+      isError: true,
+      output: expect.stringContaining("只允许可证明只读的 Bash"),
+    });
+    expect(exploreEnv.output).not.toContain("must-not-leak");
+    expect(exploreSecretRead).toMatchObject({
+      isError: true,
+      output: expect.stringContaining("不允许读取密钥"),
+    });
+    expect(exploreSecretGrep.output).not.toContain("TOKEN=yolo");
+    await expect(access(join(workDir, "explore-write.txt"))).rejects.toThrow();
   });
 
   it("default/auto 对不确定 Bash 请求审批，Plan 仅放行可证明只读命令", async () => {
@@ -146,6 +203,10 @@ describe("Bash permission mode integration", () => {
     const envSplit = await execute(planRegistry, "bash", {
       command: `env -S ${shellQuote(nodeWriteCommand(join(workDir, "env-split.txt"), "blocked"))}`,
     });
+    const backgroundRead = await execute(planRegistry, "bash", {
+      command: "pwd",
+      background: true,
+    });
     let mcpExecuted = false;
     planRegistry.register({
       name: () => "mcp__fixture__mutate",
@@ -177,6 +238,27 @@ describe("Bash permission mode integration", () => {
       goal: "write through worker",
       mode: "worker",
     });
+    const rootTodo = await execute(planRegistry, "write_file", {
+      path: "TODO.md",
+      content: "- [ ] safe plan task\n",
+    });
+    await expect(access(join(workDir, "PLAN.md"))).rejects.toThrow();
+    await mkdir(join(workDir, "src"), { recursive: true });
+    const nestedPlan = await execute(planRegistry, "write_file", {
+      path: "src/PLAN.md",
+      content: "blocked",
+    });
+    let linkedPlan: Awaited<ReturnType<typeof execute>> | undefined;
+    if (process.platform !== "win32") {
+      const codePath = join(workDir, "src", "app.ts");
+      await writeFile(codePath, "export const safe = true;\n", "utf8");
+      await symlink(codePath, join(workDir, "PLAN.md"));
+      linkedPlan = await execute(planRegistry, "write_file", {
+        path: "PLAN.md",
+        content: "overwritten",
+      });
+      await expect(readFile(codePath, "utf8")).resolves.toBe("export const safe = true;\n");
+    }
 
     expect(planReadOnly.isError).toBe(false);
     for (const rejected of [interpreter, redirect, envSplit]) {
@@ -195,9 +277,26 @@ describe("Bash permission mode integration", () => {
       output: expect.stringContaining("delegate_task 可能启动可写 worker"),
     });
     expect(delegateExecuted).toBe(false);
+    expect(rootTodo.isError).toBe(false);
+    await expect(readFile(join(workDir, "TODO.md"), "utf8")).resolves.toBe(
+      "- [ ] safe plan task\n",
+    );
+    expect(backgroundRead).toMatchObject({
+      isError: true,
+      output: expect.stringContaining("已拒绝后台进程"),
+    });
+    expect(nestedPlan).toMatchObject({
+      isError: true,
+      output: expect.stringContaining("只能修改 PLAN.md / TODO.md"),
+    });
+    if (linkedPlan) {
+      expect(linkedPlan).toMatchObject({
+        isError: true,
+        output: expect.stringContaining("只能修改 PLAN.md / TODO.md"),
+      });
+    }
     expect(planNotices).toHaveLength(0);
     await expect(access(join(workDir, "plan-indirect.txt"))).rejects.toThrow();
-    await expect(access(join(workDir, "PLAN.md"))).rejects.toThrow();
     await expect(access(join(workDir, "env-split.txt"))).rejects.toThrow();
   });
 });

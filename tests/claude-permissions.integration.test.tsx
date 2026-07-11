@@ -4,7 +4,10 @@ import { join } from "node:path";
 import React from "react";
 import { afterEach, describe, expect, it } from "vitest";
 import { globalApprovalManager, type ApprovalNotice } from "../src/approval/manager.js";
-import { globalSessionPermissionGrants } from "../src/approval/session-permissions.js";
+import {
+  globalSessionPermissionGrants,
+  SessionPermissionGrants,
+} from "../src/approval/session-permissions.js";
 import { runAgentFromCli, type RunAgentCliDependencies } from "../src/cli/run-agent.js";
 import { globalSessionManager } from "../src/engine/session.js";
 import {
@@ -40,6 +43,22 @@ afterEach(async () => {
 });
 
 describe("Claude-style permission integration", () => {
+  it("Bash session prefix 不吸收 shell 链、重定向或后台执行", () => {
+    const grants = new SessionPermissionGrants();
+    grants.add("grant", { type: "bash-command", command: "npm test", match: "prefix" });
+    const call = (command: string, background = false) => ({
+      id: "bash-grant",
+      name: "bash",
+      arguments: JSON.stringify({ command, background }),
+    });
+
+    expect(grants.allows("grant", call("npm test -- --runInBand"), process.cwd())).toBe(true);
+    expect(grants.allows("grant", call("npm test ; touch escaped"), process.cwd())).toBe(false);
+    expect(grants.allows("grant", call("npm test && touch escaped"), process.cwd())).toBe(false);
+    expect(grants.allows("grant", call("npm test > escaped.log"), process.cwd())).toBe(false);
+    expect(grants.allows("grant", call("npm test", true), process.cwd())).toBe(false);
+  });
+
   it("default 模式通过 TUI 一次选择原子授权外部目录并切换 session edits", async () => {
     const workDir = await realTempDir("pico-permission-default-");
     const outsideDir = await realTempDir("pico-permission-outside-");

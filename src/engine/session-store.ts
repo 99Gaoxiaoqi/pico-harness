@@ -13,7 +13,7 @@
 //   3. truncate 折叠:重放遇到 truncate record,丢弃 fromIndex 之前的 message。
 //   4. seq 单调递增:保证重放顺序,并防重复(幂等)。
 
-import { appendFile, readFile, stat } from "node:fs/promises";
+import { appendFile, chmod, readFile, stat } from "node:fs/promises";
 import type { Message } from "../schema/message.js";
 import { logger } from "../observability/logger.js";
 import type { SessionIdentity } from "./session-identity.js";
@@ -302,6 +302,7 @@ export class SessionStore {
     try {
       const existing = await stat(this.filePath);
       if (existing.size > 0) {
+        await chmod(this.filePath, 0o600);
         this.initialized = true;
         return;
       }
@@ -315,7 +316,8 @@ export class SessionStore {
       schemaVersion: CURRENT_SCHEMA_VERSION,
       ...identity,
     });
-    await appendFile(this.filePath, meta + "\n", "utf8");
+    await appendFile(this.filePath, meta + "\n", { encoding: "utf8", mode: 0o600 });
+    await chmod(this.filePath, 0o600);
     this.initialized = true;
   }
 }

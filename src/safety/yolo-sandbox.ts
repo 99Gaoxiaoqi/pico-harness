@@ -191,6 +191,7 @@ function buildMacosProfile(roots: readonly string[], network: SandboxNetworkPoli
     '(allow file-write-data (literal "/dev/null"))',
     '(allow file-write-data (literal "/dev/tty"))',
     ...roots.map((root) => `(allow file-write* (subpath ${sbplString(root)}))`),
+    `(deny file-read* (regex #"/(\\.ssh|\\.gnupg|\\.aws|\\.kube)(/|$)" #"/(\\.env(\\.[^/]*)?|\\.npmrc|\\.pypirc|credentials|id_(rsa|ed25519|ecdsa)|[^/]*\\.(pem|key))$"))`,
     `(deny file-write* (regex #"/(\\.git|\\.ssh|\\.gnupg|\\.aws|\\.docker)(/|$)" #"/(\\.env(\\.[^/]*)?|\\.npmrc|\\.pypirc|credentials|id_(rsa|ed25519|ecdsa)|[^/]*\\.(pem|key))$"))`,
   ];
   if (network === "allow") rules.push("(allow network*)");
