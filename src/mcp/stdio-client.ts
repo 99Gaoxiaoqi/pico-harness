@@ -36,6 +36,7 @@ import { redactSensitiveArgs, redactSensitiveText, redactSensitiveValue } from "
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const CLOSE_SIGTERM_TIMEOUT_MS = 200;
 const CLOSE_SIGKILL_TIMEOUT_MS = 1000;
+const MAX_STDIO_MESSAGE_BYTES = 8 * 1024 * 1024;
 
 interface PendingRequest {
   resolve: (value: unknown) => void;
@@ -216,7 +217,9 @@ export class StdioMcpClient implements McpClient {
 
     child.stdout?.on("data", (chunk: string) => {
       this.stdoutBuffer += chunk;
-      this.drainStdoutLines();
+      if (!this.drainStdoutLines()) {
+        this.failProtocol(`stdout JSON-RPC 消息超过 ${MAX_STDIO_MESSAGE_BYTES} 字节上限`);
+      }
     });
 
     child.stderr?.on("data", (chunk: string) => {
@@ -267,14 +270,17 @@ export class StdioMcpClient implements McpClient {
   }
 
   /** 把 stdout 缓冲按 \n 切分,每行尝试解析为 JSON-RPC 消息 */
-  private drainStdoutLines(): void {
+  private drainStdoutLines(): boolean {
     let idx: number;
     while ((idx = this.stdoutBuffer.indexOf("\n")) !== -1) {
-      const line = this.stdoutBuffer.slice(0, idx).trim();
+      const rawLine = this.stdoutBuffer.slice(0, idx);
       this.stdoutBuffer = this.stdoutBuffer.slice(idx + 1);
+      if (Buffer.byteLength(rawLine, "utf8") > MAX_STDIO_MESSAGE_BYTES) return false;
+      const line = rawLine.trim();
       if (line.length === 0) continue;
       this.handleMessage(line);
     }
+    return Buffer.byteLength(this.stdoutBuffer, "utf8") <= MAX_STDIO_MESSAGE_BYTES;
   }
 
   private handleMessage(line: string): void {
@@ -282,7 +288,10 @@ export class StdioMcpClient implements McpClient {
     try {
       msg = JSON.parse(line);
     } catch {
-      logger.warn({ server: this.config.name, line }, `[MCP] 无法解析 stdout 行为 JSON,已忽略`);
+      logger.warn(
+        { server: this.config.name, preview: redactSensitiveText(line.slice(0, 512)) },
+        `[MCP] 无法解析 stdout 行为 JSON,已忽略`,
+      );
       return;
     }
     if (typeof msg !== "object" || msg === null) return;
@@ -311,7 +320,11 @@ export class StdioMcpClient implements McpClient {
 
     if (response.error) {
       pending.reject(
-        new Error(`MCP server "${this.config.name}" 返回错误: ${response.error.message}`),
+        new Error(
+          redactSensitiveText(
+            `MCP server "${this.config.name}" 返回错误: ${response.error.message}`.slice(0, 4096),
+          ),
+        ),
       );
     } else {
       pending.resolve(response.result);
@@ -339,6 +352,16 @@ export class StdioMcpClient implements McpClient {
     }
   }
 
+  private failProtocol(reason: string): void {
+    const error = new Error(redactSensitiveText(`MCP server "${this.config.name}" ${reason}`));
+    this.stdoutBuffer = "";
+    this.connected = false;
+    this.failAllPending(error);
+    const child = this.child;
+    if (child && !isChildExited(child)) child.kill("SIGTERM");
+    this.emitError(error);
+  }
+
   /**
    * 发送 JSON-RPC request 并等待对应 id 的响应。
    * 超时拒绝,防子进程卡死。
@@ -350,6 +373,12 @@ export class StdioMcpClient implements McpClient {
     const id = this.nextId++;
     const req: JsonRpcRequest = { jsonrpc: "2.0", id, method, params };
     const timeoutMs = this.config.toolTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+    const line = JSON.stringify(req) + "\n";
+    if (Buffer.byteLength(line, "utf8") > MAX_STDIO_MESSAGE_BYTES) {
+      return Promise.reject(
+        new Error(`MCP server "${this.config.name}" 请求 ${method} 超过大小上限`),
+      );
+    }
 
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -358,7 +387,6 @@ export class StdioMcpClient implements McpClient {
       }, timeoutMs);
 
       this.pending.set(id, { resolve, reject, timer });
-      const line = JSON.stringify(req) + "\n";
       this.child!.stdin!.write(line, (err) => {
         if (err) {
           clearTimeout(timer);
@@ -373,7 +401,12 @@ export class StdioMcpClient implements McpClient {
   private notify(method: string, params: Record<string, unknown>): void {
     if (!this.child?.stdin?.writable) return;
     const msg = { jsonrpc: "2.0", method, params };
-    this.child.stdin.write(JSON.stringify(msg) + "\n");
+    const line = JSON.stringify(msg) + "\n";
+    if (Buffer.byteLength(line, "utf8") > MAX_STDIO_MESSAGE_BYTES) {
+      logger.warn({ server: this.config.name, method }, `[MCP] notification 超过大小上限,已忽略`);
+      return;
+    }
+    this.child.stdin.write(line);
   }
 
   /** MCP initialize 握手:声明客户端身份 + 协议版本 */
