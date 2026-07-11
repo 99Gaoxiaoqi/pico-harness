@@ -26,7 +26,6 @@ import type { SubagentRunOptions, SubagentResult } from "../tools/subagent.js";
 import type { Compactor } from "../context/compactor.js";
 import { ContextCompactionError } from "../context/compactor.js";
 import type { FullCompactor } from "../context/full-compactor.js";
-import type { ThinkingEffort } from "../provider/thinking.js";
 import { PromptComposer } from "../context/composer.js";
 import { SkillLoader } from "../context/skill.js";
 import { RecoveryManager } from "../context/recovery.js";
@@ -114,11 +113,11 @@ export interface AgentEngineOptions {
   /** Host-owned prompt composition with session-scoped memory and runtime state. */
   systemPromptFactory?: () => Promise<string>;
   /**
-   * 模型原生思考强度(off/low/medium/high)。
+   * 当前模型的原生思考档位。
    * 控制 provider 向模型发送 reasoning_effort / thinking.budget_tokens 参数。
    * 此字段在 engine 层仅用于子代理继承;provider 的实际参数注入在构造时已完成。
    */
-  thinkingEffort?: ThinkingEffort;
+  thinkingEffort?: string;
   /**
    * 计划模式开关 (第 13 讲)。
    * 开启后,每次 run 动态用 PromptComposer 组装 System Prompt,
@@ -235,7 +234,7 @@ export class AgentEngine implements AgentRunner {
   private readonly workspaceRoots?: WorkspaceRoots;
   private readonly systemPrompt: string;
   private readonly systemPromptFactory?: () => Promise<string>;
-  private readonly thinkingEffort: ThinkingEffort;
+  private readonly thinkingEffort: string;
   // planMode 非 readonly:ExitPlanMode 审批通过后由 exitPlanMode() 置 false。
   private planMode: boolean;
   private readonly workingMemoryLimit: number;

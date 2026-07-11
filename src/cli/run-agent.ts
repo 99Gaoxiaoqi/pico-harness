@@ -96,8 +96,8 @@ export interface RunAgentCliOptions {
   modelCapabilities?: ModelRouteCapabilities;
   /** Route-aware callers disable bare-model fallback because a fallback may need another endpoint. */
   allowModelFallback?: boolean;
-  /** Native model thinking effort: off/low/medium/high. */
-  thinkingEffort?: ThinkingEffort;
+  /** Active model reasoning level. Legacy CLI callers still pass off/low/medium/high. */
+  thinkingEffort?: string;
   planMode?: boolean;
   /** Enable per-request JSON trace export. Also enabled by PICO_TRACE=1. */
   trace?: boolean;
@@ -862,7 +862,9 @@ function resolveProviderConfig(
     model,
     ...(options.modelRouteId ? { routeId: options.modelRouteId } : {}),
     ...(options.modelCapabilities ? { capabilities: options.modelCapabilities } : {}),
-    ...(options.thinkingEffort !== undefined ? { thinkingEffort: options.thinkingEffort } : {}),
+    ...(options.thinkingEffort !== undefined
+      ? { thinkingEffort: options.thinkingEffort as ThinkingEffort }
+      : {}),
   };
 }
 

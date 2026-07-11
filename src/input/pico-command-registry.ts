@@ -40,8 +40,11 @@ import { loadApiKeys } from "../provider/config.js";
 import { buildDefaultToolRegistry } from "../tools/default-registry.js";
 import {
   formatSessionStatus,
+  formatSessionReasoningStatus,
+  effectiveSessionReasoningLevel,
   getOrCreateSessionSettings,
   parseThinkingEffortArg,
+  sessionReasoningCandidates,
   setSessionMode,
   setSessionModel,
   setSessionModelRoute,
@@ -85,7 +88,7 @@ export interface PicoCommandRegistryOptions {
   sessionId?: string;
   sessionMode?: SessionMode;
   forkFrom?: string;
-  thinkingEffort?: ThinkingEffort;
+  thinkingEffort?: string;
   permissionMode?: string;
   tools?: readonly SessionToolStatus[];
   mcpStatus?: McpStatusProvider;
@@ -134,7 +137,7 @@ export async function createPicoCommandRegistry(
     createDoctorCommand(options),
     createModelCommand(settings, options.modelRouter),
     createAddDirectoryCommand(settings, options.additionalDirectoryManager),
-    createThinkingCommand(settings),
+    createThinkingCommand(settings, options.modelRouter),
     createMcpCommand(options.mcpStatus),
     createAgentsCommand(options),
     createSessionsCommand(options),
@@ -222,13 +225,6 @@ const PERMISSION_CANDIDATES: readonly SlashArgumentCandidate[] = [
   { value: "auto", description: "Accept ordinary edits" },
   { value: "yolo", description: "Bypass ordinary permission prompts" },
   { value: "plan", description: "Plan without implementation writes" },
-];
-
-const THINKING_CANDIDATES: readonly SlashArgumentCandidate[] = [
-  { value: "off", description: "Disable native thinking effort" },
-  { value: "low", description: "Use low thinking effort" },
-  { value: "medium", description: "Use medium thinking effort" },
-  { value: "high", description: "Use high thinking effort" },
 ];
 
 function completeFromCandidates(
@@ -408,7 +404,9 @@ function createCompactCommand(
         try {
           const resolved = options.modelRouter.providerConfig(
             settings.modelRouteId,
-            settings.thinkingEffort,
+            effectiveSessionReasoningLevel(settings, options.modelRouter) as
+              | ThinkingEffort
+              | undefined,
           );
           activeProvider = resolved.provider;
           activeConfig = resolved.config;
@@ -600,28 +598,40 @@ function createPermissionsCommand(settings: SessionSettings): SlashCommand {
   };
 }
 
-function createThinkingCommand(settings: SessionSettings): SlashCommand {
+function createThinkingCommand(settings: SessionSettings, router?: ModelRouter): SlashCommand {
+  const candidates = (): readonly SlashArgumentCandidate[] =>
+    sessionReasoningCandidates(settings, router).map((level) => ({
+      value: level,
+      description: `Use ${level} reasoning for the current model`,
+    }));
   return {
     name: "thinking",
     aliases: ["effort"],
     description: "Show or change thinking effort",
-    usage: "/thinking <off|low|medium|high>",
-    argumentHint: "<off|low|medium|high>",
+    usage: "/thinking [level]",
+    argumentHint: "[model level]",
     category: "model",
-    argumentCompleter: completeFromCandidates(THINKING_CANDIDATES),
+    argumentCompleter: (query) => filterArgumentCandidates(candidates(), query),
     kind: "local",
     availability: "idle",
     execute: (input): LocalCommandResult => {
-      const effort = parseThinkingEffortArg(input.args);
-      if (effort === undefined) {
+      const raw = input.args.trim();
+      if (raw.length === 0) {
         return {
           type: "local",
           action: "thinking",
-          message: `Current thinking effort: ${settings.thinkingEffort}\nUsage: /thinking <off|low|medium|high>`,
+          message: formatSessionReasoningStatus(settings, router),
         };
       }
 
-      const result = setSessionThinkingEffort(settings, effort);
+      const effort = router ? raw : parseThinkingEffortArg(raw);
+      const result =
+        effort === undefined
+          ? {
+              ok: false,
+              message: formatSessionReasoningStatus(settings),
+            }
+          : setSessionThinkingEffort(settings, effort, router);
       return {
         type: "local",
         action: "thinking",

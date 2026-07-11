@@ -66,6 +66,8 @@ import { buildDefaultToolRegistry } from "../tools/default-registry.js";
 import type { ToolDisclosure } from "../tools/tool-disclosure.js";
 import {
   forgetSessionSettings,
+  coordinateSessionReasoningLevel,
+  effectiveSessionReasoningLevel,
   getOrCreateSessionSettings,
   setSessionAdditionalDirectories,
   setSessionMode,
@@ -128,7 +130,7 @@ export interface ReplOptions {
   /** Whether model came from an explicit --model argument rather than an environment/default. */
   modelExplicit?: boolean;
   /** Provider 原生思考强度 */
-  thinkingEffort?: ThinkingEffort;
+  thinkingEffort?: string;
   /** MCP 配置路径(可选,首轮传入) */
   mcpConfigPath?: string;
   /** CLI 已解析的 session 选择结果。 */
@@ -706,12 +708,13 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
           provider: initialRoute.provider,
           model: initialRoute.model,
           modelRouteId: initialRoute.id,
-          thinkingEffort: restoredSettings?.thinkingEffort ?? opts.thinkingEffort ?? "medium",
+          ...(opts.thinkingEffort !== undefined ? { thinkingEffort: opts.thinkingEffort } : {}),
           tools: toolStatusFromRegistry(toolRegistry),
           additionalDirectories: workspaceRoots.list().slice(1),
         },
         { persistence: session },
       );
+      coordinateSessionReasoningLevel(settings, modelRouter);
       setSessionAdditionalDirectories(settings, workspaceRoots.list().slice(1));
 
       const bundleRef: { current?: TuiSessionBundle } = {};
@@ -1125,9 +1128,10 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
             />
           ),
           runAgent: async (prompt, runOptions) => {
+            const reasoningLevel = effectiveSessionReasoningLevel(settings, modelRouter);
             const activeRoute = modelRouter.providerConfig(
               settings.modelRouteId,
-              settings.thinkingEffort,
+              reasoningLevel as ThinkingEffort | undefined,
             );
             const rewindContext = rewindContextRef.current;
             rewindContextRef.current = null;
@@ -1145,7 +1149,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
               modelRouteId: activeRoute.route.id,
               modelCapabilities: activeRoute.route.capabilities,
               allowModelFallback: false,
-              thinkingEffort: settings.thinkingEffort,
+              ...(reasoningLevel !== undefined ? { thinkingEffort: reasoningLevel } : {}),
               planMode: settings.mode === "plan",
               ...(runOptions?.images ? { images: runOptions.images } : {}),
               ...(rewindContext !== null ? { rewindPrompt: rewindContext.prompt } : {}),

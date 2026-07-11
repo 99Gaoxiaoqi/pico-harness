@@ -41,7 +41,7 @@ Start the interactive Pico TUI in the current directory.
 
 Options:
   --provider <openai|claude|gemini>  Provider protocol (default: openai)
-  --thinking <off|low|medium|high>   Native thinking effort (default: high)
+  --thinking <off|low|medium|high>   Override the model's default reasoning level
   --dir <path>                       Workspace directory (default: current directory)
   --model <provider/model|name>      Model route or legacy model name
   --mcp-config <path>                MCP server configuration file
@@ -67,7 +67,7 @@ export interface CliRuntime {
 
 interface ParsedCliOptions {
   provider: ProviderKind;
-  thinkingEffort: ThinkingEffort;
+  thinkingEffort?: ThinkingEffort;
   model?: string;
   mcpConfigPath?: string;
   addDirs?: string[];
@@ -114,7 +114,7 @@ export async function runCli(args: readonly string[], runtime: CliRuntime): Prom
       provider: options.provider,
       model,
       modelExplicit: options.model !== undefined,
-      thinkingEffort: options.thinkingEffort,
+      ...(options.thinkingEffort !== undefined ? { thinkingEffort: options.thinkingEffort } : {}),
       sessionSelection,
       ...(options.mcpConfigPath ? { mcpConfigPath: options.mcpConfigPath } : {}),
       ...(options.addDirs ? { addDirs: options.addDirs } : {}),
@@ -140,7 +140,7 @@ function parseCliOptions(args: readonly string[]): ParsedCliOptions {
       args: [...args],
       options: {
         provider: { type: "string", default: "openai" },
-        thinking: { type: "string", default: "true" },
+        thinking: { type: "string" },
         dir: { type: "string" },
         model: { type: "string" },
         "mcp-config": { type: "string" },
@@ -166,16 +166,12 @@ function parseCliOptions(args: readonly string[]): ParsedCliOptions {
     );
   }
 
-  let thinkingEffort: ThinkingEffort;
-  try {
-    thinkingEffort = resolveThinkingEffort(values.thinking);
-  } catch (error) {
-    throw new CliUsageError(error instanceof Error ? error.message : String(error));
-  }
+  const thinkingEffort =
+    values.thinking === undefined ? undefined : resolveThinkingEffort(values.thinking);
 
   return {
     provider,
-    thinkingEffort,
+    ...(thinkingEffort !== undefined ? { thinkingEffort } : {}),
     ...(typeof values.model === "string" ? { model: values.model } : {}),
     ...(typeof values["mcp-config"] === "string" ? { mcpConfigPath: values["mcp-config"] } : {}),
     ...(Array.isArray(values["add-dir"]) ? { addDirs: values["add-dir"] } : {}),

@@ -2,6 +2,10 @@ import type { ProviderKind } from "../provider/factory.js";
 import type { ModelRouter } from "../provider/model-router.js";
 import { resolveProviderProfile } from "../provider/profile.js";
 import { isValidThinkingEffort, type ThinkingEffort } from "../provider/thinking.js";
+import {
+  coordinateReasoningLevel,
+  type ResolvedModelReasoningCapability,
+} from "../provider/reasoning-capability.js";
 import type { Registry } from "../tools/registry.js";
 import { globalSessionPermissionGrants } from "../approval/session-permissions.js";
 import type {
@@ -30,7 +34,8 @@ export interface SessionSettings {
   model: string;
   /** Stable providerID/modelID identity. Endpoint and credentials stay in ModelRouter. */
   modelRouteId?: string;
-  thinkingEffort: ThinkingEffort;
+  /** Current model reasoning level. Field name is retained for persisted-session compatibility. */
+  thinkingEffort: string;
   thinkingEffortExplicit: boolean;
   /** @deprecated `/permissions` 兼容别名；读写都代理到 mode，不保存第二份状态。 */
   permissionMode: InteractionMode;
@@ -47,7 +52,7 @@ export interface SessionSettingsDefaults {
   mode?: InteractionMode;
   model: string;
   modelRouteId?: string;
-  thinkingEffort?: ThinkingEffort;
+  thinkingEffort?: string;
   permissionMode?: string;
   tools?: readonly SessionToolStatus[];
   additionalDirectories?: readonly string[];
@@ -273,8 +278,23 @@ export function setSessionModelRoute(
   settings.modelRouteId = route.id;
   settings.provider = route.provider;
   settings.model = route.model;
+  const previousLevel = settings.thinkingEffort;
+  const selection = coordinateReasoningLevel(
+    route.capabilities.reasoningProfile,
+    settings.thinkingEffortExplicit ? previousLevel : undefined,
+  );
+  if (selection.level !== undefined) settings.thinkingEffort = selection.level;
   persistSessionSettings(settings);
-  return { ok: true, message: `Model set to ${route.id}` };
+  const reasoningMessage = formatReasoningSelectionAfterModelSwitch(
+    route.capabilities.reasoningProfile,
+    previousLevel,
+    selection.level,
+    selection.reason,
+  );
+  return {
+    ok: true,
+    message: [`Model set to ${route.id}`, reasoningMessage].filter(Boolean).join("\n"),
+  };
 }
 
 export function setSessionMode(settings: SessionSettings, mode: string): SessionSettingResult {
@@ -320,20 +340,119 @@ export function setSessionPermissionMode(
 
 export function setSessionThinkingEffort(
   settings: SessionSettings,
-  effort: ThinkingEffort,
+  effort: string,
+  router?: ModelRouter,
 ): SessionSettingResult {
+  if (router) {
+    const route = resolveSessionModelRoute(settings, router);
+    if (!route) {
+      return {
+        ok: false,
+        message: `Current model route ${settings.modelRouteId ?? settings.model} is unavailable. Use /model to select an available route.`,
+      };
+    }
+    const capability = route.capabilities.reasoningProfile;
+    if (capability.enabled !== true || capability.levels.length === 0) {
+      return { ok: false, message: formatRouteReasoningStatus(route.id, capability) };
+    }
+    const normalized = effort.trim().toLowerCase();
+    const level = capability.levels.find((candidate) => candidate.toLowerCase() === normalized);
+    if (!level) {
+      return {
+        ok: false,
+        message: formatRouteReasoningStatus(route.id, capability, settings.thinkingEffort),
+      };
+    }
+    settings.thinkingEffort = level;
+    settings.thinkingEffortExplicit = true;
+    persistSessionSettings(settings);
+    return { ok: true, message: `Thinking level set to ${level} for ${route.id}` };
+  }
+
+  if (!isValidThinkingEffort(effort.trim().toLowerCase())) {
+    return {
+      ok: false,
+      message: `Current thinking effort: ${settings.thinkingEffort}\nUsage: /thinking <off|low|medium|high>`,
+    };
+  }
+  const legacyEffort = effort.trim().toLowerCase() as ThinkingEffort;
   const profile = resolveProviderProfile(toProfileProtocol(settings.provider), settings.model);
-  if (effort !== "off" && !profile.supportsThinkingControl) {
+  if (legacyEffort !== "off" && !profile.supportsThinkingControl) {
     return {
       ok: false,
       message: `${settings.provider}/${settings.model} does not support thinking effort. Current effort: ${settings.thinkingEffort}`,
     };
   }
 
-  settings.thinkingEffort = effort;
+  settings.thinkingEffort = legacyEffort;
   settings.thinkingEffortExplicit = true;
   persistSessionSettings(settings);
   return { ok: true, message: `Thinking effort set to ${settings.thinkingEffort}` };
+}
+
+/** Resolve the effective level that may be sent for the active route. */
+export function effectiveSessionReasoningLevel(
+  settings: SessionSettings,
+  router?: ModelRouter,
+): string | undefined {
+  if (!router) return settings.thinkingEffort;
+  const route = resolveSessionModelRoute(settings, router);
+  if (!route) return undefined;
+  return coordinateReasoningLevel(
+    route.capabilities.reasoningProfile,
+    settings.thinkingEffortExplicit ? settings.thinkingEffort : undefined,
+  ).level;
+}
+
+/** Reconcile startup/restored state with the active route and persist a real fallback level. */
+export function coordinateSessionReasoningLevel(
+  settings: SessionSettings,
+  router: ModelRouter,
+): string | undefined {
+  const route = resolveSessionModelRoute(settings, router);
+  if (!route) return undefined;
+  const selection = coordinateReasoningLevel(
+    route.capabilities.reasoningProfile,
+    settings.thinkingEffortExplicit ? settings.thinkingEffort : undefined,
+  );
+  if (selection.level !== undefined && selection.level !== settings.thinkingEffort) {
+    settings.thinkingEffort = selection.level;
+    persistSessionSettings(settings);
+  }
+  return selection.level;
+}
+
+export function formatSessionReasoningStatus(
+  settings: SessionSettings,
+  router?: ModelRouter,
+): string {
+  if (!router) {
+    return [
+      `Route: legacy/${settings.provider}/${settings.model}`,
+      "Reasoning controls: legacy",
+      "Supported levels: off, low, medium, high",
+      "Default level: high",
+      `Current level: ${settings.thinkingEffort}`,
+      "Usage: /thinking <off|low|medium|high>",
+    ].join("\n");
+  }
+  const route = resolveSessionModelRoute(settings, router);
+  if (!route) {
+    return `Reasoning controls unavailable: model route ${settings.modelRouteId ?? settings.model} was not found.`;
+  }
+  return formatRouteReasoningStatus(
+    route.id,
+    route.capabilities.reasoningProfile,
+    settings.thinkingEffortExplicit ? settings.thinkingEffort : undefined,
+  );
+}
+
+export function sessionReasoningCandidates(
+  settings: SessionSettings,
+  router?: ModelRouter,
+): readonly string[] {
+  if (!router) return ["off", "low", "medium", "high"];
+  return resolveSessionModelRoute(settings, router)?.capabilities.reasoningProfile.levels ?? [];
 }
 
 export function parseThinkingEffortArg(raw: string): ThinkingEffort | undefined {
@@ -381,6 +500,60 @@ export function toolStatusFromRegistry(registry: Registry): SessionToolStatus[] 
 
 function toProfileProtocol(provider: ProviderKind): "openai" | "claude" | "gemini" {
   return provider === "openai" ? "openai" : provider;
+}
+
+function resolveSessionModelRoute(settings: SessionSettings, router: ModelRouter) {
+  return router.resolve(settings.modelRouteId) ?? router.resolve(settings.model);
+}
+
+function formatThinkingUsage(capability: ResolvedModelReasoningCapability): string {
+  return capability.levels.length > 0 ? `/thinking <${capability.levels.join("|")}>` : "/thinking";
+}
+
+function formatRouteReasoningStatus(
+  routeId: string,
+  capability: ResolvedModelReasoningCapability,
+  storedLevel?: string,
+): string {
+  const lines = [`Route: ${routeId}`];
+  if (capability.enabled === false) {
+    lines.push("Reasoning: disabled for this model.", "Selectable levels: none");
+    return lines.join("\n");
+  }
+  if (capability.enabled === "unknown") {
+    lines.push(
+      "Reasoning controls: unknown (the model advertises no reasoning metadata).",
+      "Selectable levels: none",
+    );
+    return lines.join("\n");
+  }
+  if (capability.levels.length === 0) {
+    lines.push("Reasoning: fixed/model-controlled.", "Selectable levels: none");
+    return lines.join("\n");
+  }
+  const selection = coordinateReasoningLevel(capability, storedLevel);
+  lines.push(
+    `Supported levels: ${capability.levels.join(", ")}`,
+    `Default level: ${capability.defaultLevel ?? capability.levels[0]}`,
+    `Current level: ${selection.level ?? "none"}`,
+    `Usage: ${formatThinkingUsage(capability)}`,
+  );
+  return lines.join("\n");
+}
+
+function formatReasoningSelectionAfterModelSwitch(
+  capability: ResolvedModelReasoningCapability,
+  previousLevel: string,
+  level: string | undefined,
+  reason: "requested" | "default" | "fallback" | "not_adjustable",
+): string {
+  if (reason === "fallback" && level !== undefined) {
+    return `Thinking level ${previousLevel} is unsupported; using model default ${level}.`;
+  }
+  if (capability.enabled === false) return "Reasoning is disabled for this model.";
+  if (capability.enabled === "unknown") return "Reasoning controls are unknown for this model.";
+  if (capability.levels.length === 0) return "Reasoning is fixed/model-controlled for this model.";
+  return "";
 }
 
 export function normalizeInteractionMode(mode: string | undefined): InteractionMode | undefined {
