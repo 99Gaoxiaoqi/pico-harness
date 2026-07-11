@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { Box, Text, useInput } from "ink";
 import type { AskUserHandler, AskUserRequest, AskUserRequestId } from "../tools/ask-user.js";
 import type { DialogRequest } from "./dialog-arbiter.js";
-import { wrappedVisualRows } from "./terminal-width.js";
+import { truncateTerminalText, wrappedVisualRows } from "./terminal-width.js";
 
 const ASK_USER_DIALOG_PREFIX = "ask-user:pending:";
 export const ASK_USER_DIALOG_PRIORITY = 60;
@@ -16,6 +16,11 @@ export type AskUserDialogAction = "move-up" | "move-down" | "select" | "cancel";
 export interface AskUserDialogProps {
   readonly request: AskUserRequest;
   readonly selectedIndex?: number;
+  readonly selectionState?: { selectedIndex: number };
+  readonly maxVisibleOptions?: number;
+  readonly maxQuestionLines?: number;
+  readonly renderWidth?: number;
+  readonly showOverflowHint?: boolean;
   readonly onSelect: (optionId: string) => void;
   readonly onCancel: () => void;
 }
@@ -48,6 +53,7 @@ export function createAskUserDialogRequest(
   options: AskUserDialogRequestOptions = {},
 ): DialogRequest {
   const id = askUserDialogId(request.requestId);
+  const selectionState = { selectedIndex: 0 };
   const closeIfSettled = (settled: boolean): void => {
     if (settled) options.onClose?.(id);
   };
@@ -58,6 +64,7 @@ export function createAskUserDialogRequest(
     content: (
       <AskUserDialog
         request={request}
+        selectionState={selectionState}
         onSelect={(optionId) => {
           closeIfSettled(handler.select(request.requestId, optionId));
         }}
@@ -103,20 +110,28 @@ export function bindAskUserDialogs(handler: AskUserHandler, host: AskUserDialogH
 export function AskUserDialog({
   request,
   selectedIndex,
+  selectionState,
+  maxVisibleOptions = 3,
+  maxQuestionLines = 2,
+  renderWidth = 80,
+  showOverflowHint = true,
   onSelect,
   onCancel,
 }: AskUserDialogProps): React.ReactNode {
-  const [internalState, setInternalState] = useState<AskUserDialogState>({ selectedIndex: 0 });
+  const [internalState, setInternalState] = useState<AskUserDialogState>(() => ({
+    selectedIndex: selectionState?.selectedIndex ?? 0,
+  }));
   const submittedRequestId = useRef<AskUserRequestId | null>(null);
   const effectiveIndex = clampIndex(
-    selectedIndex ?? internalState.selectedIndex,
+    selectedIndex ?? selectionState?.selectedIndex ?? internalState.selectedIndex,
     request.options.length,
   );
 
   useEffect(() => {
     submittedRequestId.current = null;
-    setInternalState({ selectedIndex: 0 });
-  }, [request.requestId]);
+    const restoredIndex = selectionState?.selectedIndex ?? 0;
+    setInternalState({ selectedIndex: restoredIndex });
+  }, [request.requestId, selectionState]);
 
   useInput((input, key) => {
     const numberedIndex = resolveNumberedOption(input, request.options.length);
@@ -129,9 +144,19 @@ export function AskUserDialog({
     if (!action) return;
     if (action === "move-up" || action === "move-down") {
       if (selectedIndex === undefined) {
-        setInternalState((current) =>
-          nextAskUserDialogState(current, action, request.options.length),
-        );
+        if (selectionState) {
+          const next = nextAskUserDialogState(
+            { selectedIndex: selectionState.selectedIndex },
+            action,
+            request.options.length,
+          );
+          selectionState.selectedIndex = next.selectedIndex;
+          setInternalState(next);
+        } else {
+          setInternalState((current) =>
+            nextAskUserDialogState(current, action, request.options.length),
+          );
+        }
       }
       return;
     }
@@ -154,13 +179,62 @@ export function AskUserDialog({
 
   return (
     <Box flexDirection="column">
-      {formatAskUserDialog(request, effectiveIndex)
+      {formatAskUserDialogViewport(request, effectiveIndex, {
+        maxVisibleOptions,
+        maxQuestionLines,
+        renderWidth,
+        showOverflowHint,
+      })
         .split("\n")
         .map((line, index) => (
           <Text key={`${index}:${line}`}>{line}</Text>
         ))}
     </Box>
   );
+}
+
+function formatAskUserDialogViewport(
+  request: AskUserRequest,
+  selectedIndex: number,
+  options: {
+    maxVisibleOptions: number;
+    maxQuestionLines: number;
+    renderWidth: number;
+    showOverflowHint: boolean;
+  },
+): string {
+  const width = Math.max(1, Math.floor(options.renderWidth));
+  const safeIndex = clampIndex(selectedIndex, request.options.length);
+  const questionRows = wrappedVisualRows(request.question, width);
+  const visibleQuestionRows = questionRows.slice(0, Math.max(1, options.maxQuestionLines));
+  if (visibleQuestionRows.length < questionRows.length) {
+    const last = visibleQuestionRows.length - 1;
+    visibleQuestionRows[last] = truncateTerminalText(`${visibleQuestionRows[last] ?? ""}…`, width);
+  }
+  const optionCount = request.options.length;
+  const windowSize = Math.min(optionCount, Math.max(1, Math.floor(options.maxVisibleOptions)));
+  const start = Math.min(
+    Math.max(0, safeIndex - Math.floor(windowSize / 2)),
+    Math.max(0, optionCount - windowSize),
+  );
+  const lines = [
+    truncateTerminalText(request.header ? `? ${request.header}` : "? Question", width),
+    ...visibleQuestionRows,
+  ];
+  for (let index = start; index < start + windowSize; index++) {
+    const option = request.options[index];
+    if (!option) continue;
+    const marker = index === safeIndex ? "❯" : " ";
+    const description = option.description ? ` — ${option.description}` : "";
+    lines.push(
+      truncateTerminalText(`${marker} ${index + 1}. ${option.label}${description}`, width),
+    );
+  }
+  if (options.showOverflowHint && windowSize < optionCount) {
+    lines.push(truncateTerminalText(`… ${optionCount - windowSize} option(s) outside view`, width));
+  }
+  lines.push(truncateTerminalText("↑/↓ move · Enter/number select · Esc cancel", width));
+  return lines.join("\n");
 }
 
 export function formatAskUserDialog(request: AskUserRequest, selectedIndex = 0): string {

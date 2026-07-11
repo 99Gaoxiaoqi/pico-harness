@@ -11,7 +11,7 @@ export type UiMode = SpinnerMode | "idle";
  * 这个联合类型故意不嵌入事件 ID：旧的 onUpdate / entries 用法可以
  * 保持原样，稳定 ID 由 TuiProjectedEntry 与事件流承载。
  */
-export type TuiEntry =
+type TuiEntryData =
   | {
       kind: "logo";
       model?: string;
@@ -28,6 +28,15 @@ export type TuiEntry =
   | { kind: "assistant"; content: string }
   | { kind: "tool"; name: string; args: string; status: ToolCardStatus; summary?: string }
   | { kind: "thinking" };
+
+/** 仅供渲染边界使用；事件正文仍由 TuiProjectedEntry 持有权威身份。 */
+export interface TuiRenderIdentity {
+  readonly uiEntryId?: string;
+  readonly uiToolCallId?: string;
+  readonly uiToolCallIds?: readonly string[];
+}
+
+export type TuiEntry = TuiEntryData & TuiRenderIdentity;
 
 export interface TuiProjectedEntry {
   /** 条目从创建到流式完成、工具状态变更始终不变。 */
@@ -105,6 +114,18 @@ export interface TuiProjection {
   readonly toolCalls: Readonly<Record<string, TuiToolCallProjection>>;
   readonly lastEventId?: string;
   readonly sequence: number;
+}
+
+/** 将权威投影变成兼容现有组件的 view entries，同时保留稳定 React/tool 身份。 */
+export function projectTuiEntriesForRendering(projection: TuiProjection): TuiEntry[] {
+  return projection.entries.map(
+    (projected) =>
+      Object.freeze({
+        ...projected.entry,
+        uiEntryId: projected.id,
+        ...(projected.toolCallId !== undefined ? { uiToolCallId: projected.toolCallId } : {}),
+      }) as TuiEntry,
+  );
 }
 
 interface TuiEventBase {
@@ -781,9 +802,7 @@ function normalizeToolOutputSegment(
   if (!("segment" in event)) {
     return Object.freeze({
       content: event.chunk,
-      runs: Object.freeze([
-        Object.freeze({ stream: event.stream, length: event.chunk.length }),
-      ]),
+      runs: Object.freeze([Object.freeze({ stream: event.stream, length: event.chunk.length })]),
     });
   }
 
@@ -914,10 +933,7 @@ function cloneProjection(projection: TuiProjection): TuiProjection {
     }),
   );
   const streams = Object.fromEntries(
-    Object.entries(projection.streams).map(([id, stream]) => [
-      id,
-      Object.freeze({ ...stream }),
-    ]),
+    Object.entries(projection.streams).map(([id, stream]) => [id, Object.freeze({ ...stream })]),
   );
   const toolCalls = Object.fromEntries(
     Object.entries(projection.toolCalls).map(([id, tool]) => [

@@ -86,6 +86,19 @@ export interface Message {
   images?: ImagePart[];
 }
 
+export const PICO_TOOL_RESULT_ERROR_KEY = "picoToolResultIsError";
+
+/** 新记录使用结构化标记；`[ERROR]` 仅用于兼容旧 Session。 */
+export function isToolResultErrorMessage(message: Message): boolean {
+  if (
+    message.providerData &&
+    Object.prototype.hasOwnProperty.call(message.providerData, PICO_TOOL_RESULT_ERROR_KEY)
+  ) {
+    return message.providerData[PICO_TOOL_RESULT_ERROR_KEY] === true;
+  }
+  return message.content.startsWith("[ERROR]");
+}
+
 /** Engine 内部注入不应在 resume 后伪装成用户消息。 */
 export function isMessageHiddenFromTranscript(message: Message): boolean {
   if (message.providerData?.["picoHiddenFromTranscript"] === true) return true;
@@ -128,5 +141,10 @@ export function assistantMessage(content: string, toolCalls?: ToolCall[]): Messa
 
 /** 构造工具观察结果消息的便捷函数 */
 export function toolResultMessage(toolCallId: string, output: string, isError = false): Message {
-  return { role: "user", content: isError ? `[ERROR] ${output}` : output, toolCallId };
+  return {
+    role: "user",
+    content: isError ? `[ERROR] ${output}` : output,
+    toolCallId,
+    providerData: { [PICO_TOOL_RESULT_ERROR_KEY]: isError },
+  };
 }

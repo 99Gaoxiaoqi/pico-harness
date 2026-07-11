@@ -24,6 +24,7 @@ export function DiffPreview({ diff, maxLines }: DiffPreviewProps): React.ReactNo
           key={`${index}:${line.text}`}
           color={lineColor(line.kind)}
           dimColor={line.kind === "context"}
+          wrap="truncate"
         >
           {line.text}
         </Text>
