@@ -507,7 +507,7 @@ git worktree remove ../pico-1-streaming
 >
 > **执行计划**：`docs/plans/2026-07-11-stage12-trusted-yolo-code-intelligence.md`
 
-- [x] 12.1 权限与隔离收敛：主 YOLO 全放权；Plan 只读守卫和 hardline/Hook deny 不可审批绕过；worker 的 workspace-write、网络和敏感目录边界由 worktree + OS 沙箱强制
+- [x] 12.1 权限与隔离收敛：主 YOLO 全放权；Plan 只读、MCP 与可写/递归委派守卫和 hardline/Hook deny 不可审批绕过；worker 的 workspace-write、网络和敏感目录边界由 worktree + OS 沙箱强制
 - [x] 12.2 模型能力与 Usage：route 记录 context/output/vision/reasoning/tool-call/cache/price/fallback 能力；请求前预检；提供 `/context` 与 `/usage`
 - [x] 12.3 LSP 与 Repo Map：支持 definitions、references、symbols、diagnostics、调用层级和渐进式仓库地图，并接入现有工具披露机制
 
@@ -617,7 +617,7 @@ git worktree remove ../pico-1-streaming
 
 - 2026-07-11：完成并行全盘安全复审与任务执行收口
   - 增加首次工作区信任门；收紧 Project Config / AGENTS / Skills / MCP / LSP / Hook 的启动时机、子进程环境与本地文件权限。
-  - Plan 仅允许保守可证明的只读 Bash，MCP 不得绕过 Plan；主 YOLO 按 OS 用户权限全放权，worker 无论主 mode 都保持 worktree + OS 沙箱。
+  - Plan 仅允许保守可证明的只读 Bash，MCP 和可写/递归 `delegate_task` 不得绕过 Plan；主 YOLO 按 OS 用户权限全放权，worker 无论主 mode 都保持 worktree + OS 沙箱。
   - Fetch URL 增加 SSRF/凭据/重定向/DNS rebinding 防护；MCP HTTP/SSE/stdio、LSP、Hook 和 tool artifact 增加硬大小与资源上限。
   - Write/Edit 封闭符号链接竞态；MCP 未知工具不再伪装为无副作用；worker 改由宿主提交，stop 等待 runner 真正退出，缺少 supervisor 时 fail-closed。
 

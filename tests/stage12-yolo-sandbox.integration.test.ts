@@ -160,6 +160,23 @@ describe("Bash permission mode integration", () => {
       },
     });
     const mcpMutation = await execute(planRegistry, "mcp__fixture__mutate", {});
+    let delegateExecuted = false;
+    planRegistry.register({
+      name: () => "delegate_task",
+      definition: () => ({
+        name: "delegate_task",
+        description: "fixture",
+        inputSchema: { type: "object" },
+      }),
+      execute: async () => {
+        delegateExecuted = true;
+        return "unexpected";
+      },
+    });
+    const delegatedWorker = await execute(planRegistry, "delegate_task", {
+      goal: "write through worker",
+      mode: "worker",
+    });
 
     expect(planReadOnly.isError).toBe(false);
     for (const rejected of [interpreter, redirect, envSplit]) {
@@ -173,6 +190,11 @@ describe("Bash permission mode integration", () => {
       output: expect.stringContaining("MCP 工具的外部副作用无法证明为只读"),
     });
     expect(mcpExecuted).toBe(false);
+    expect(delegatedWorker).toMatchObject({
+      isError: true,
+      output: expect.stringContaining("delegate_task 可能启动可写 worker"),
+    });
+    expect(delegateExecuted).toBe(false);
     expect(planNotices).toHaveLength(0);
     await expect(access(join(workDir, "plan-indirect.txt"))).rejects.toThrow();
     await expect(access(join(workDir, "PLAN.md"))).rejects.toThrow();
