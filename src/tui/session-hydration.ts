@@ -1,5 +1,5 @@
 import type { SessionHydrationSnapshot } from "../engine/session-runtime.js";
-import type { Message, ToolCall } from "../schema/message.js";
+import { isMessageHiddenFromTranscript, type Message, type ToolCall } from "../schema/message.js";
 import type { TuiEntry } from "./tui-reporter.js";
 
 /**
@@ -11,7 +11,13 @@ export function hydrateTuiEntries(snapshot: SessionHydrationSnapshot): TuiEntry[
   const entries: TuiEntry[] = [];
 
   for (const message of snapshot.messages) {
-    if (message.role === "system" || message.toolCallId !== undefined) continue;
+    if (
+      message.role === "system" ||
+      message.toolCallId !== undefined ||
+      isMessageHiddenFromTranscript(message)
+    ) {
+      continue;
+    }
 
     if (message.role === "user") {
       const content = visibleText(message.content);
@@ -22,21 +28,30 @@ export function hydrateTuiEntries(snapshot: SessionHydrationSnapshot): TuiEntry[
     const content = visibleText(message.content);
     if (content) entries.push({ kind: "assistant", content });
     for (const call of message.toolCalls ?? []) {
-      entries.push(hydrateToolEntry(call, toolResults.get(call.id)));
+      entries.push(hydrateToolEntry(call, shiftToolResult(toolResults, call.id)));
     }
   }
 
   return entries;
 }
 
-function indexToolResults(messages: readonly Message[]): Map<string, Message> {
-  const results = new Map<string, Message>();
+function indexToolResults(messages: readonly Message[]): Map<string, Message[]> {
+  const results = new Map<string, Message[]>();
   for (const message of messages) {
     if (message.role === "user" && message.toolCallId !== undefined) {
-      results.set(message.toolCallId, message);
+      const ordered = results.get(message.toolCallId) ?? [];
+      ordered.push(message);
+      results.set(message.toolCallId, ordered);
     }
   }
   return results;
+}
+
+function shiftToolResult(results: Map<string, Message[]>, toolCallId: string): Message | undefined {
+  const ordered = results.get(toolCallId);
+  const result = ordered?.shift();
+  if (ordered?.length === 0) results.delete(toolCallId);
+  return result;
 }
 
 function hydrateToolEntry(call: ToolCall, result: Message | undefined): TuiEntry {

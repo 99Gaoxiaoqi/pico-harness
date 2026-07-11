@@ -94,7 +94,11 @@ export class ReminderInjector {
 3. 如果你确实无法通过系统工具解决当前问题,请直接结束任务并向用户说明你需要什么人工帮助,而不是继续盲目重试。`;
       // 【核心】必须是 RoleUser,以保证在下一次 API 请求时位于上下文最末尾,
       // 享受最高近因效应 (Recency Bias),彻底击碎局部执念。
-      return { role: "user", content: nudgeMsg };
+      return {
+        role: "user",
+        content: nudgeMsg,
+        providerData: { picoKind: "system_reminder", picoHiddenFromTranscript: true },
+      };
     }
 
     return null;
@@ -219,6 +223,7 @@ function makeReminder(content: string): Message {
   return {
     role: "user",
     content: `[SYSTEM REMINDER 警告]\n${content}`,
+    providerData: { picoKind: "system_reminder", picoHiddenFromTranscript: true },
   };
 }
 

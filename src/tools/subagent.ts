@@ -10,7 +10,7 @@
 // 防污染机制(爆炸半径限制):子智能体仅挂载只读工具(read_file/bash),
 // 绝对不给 edit_file/write_file,防止底层"莽夫"瞎改代码导致物理不可逆破坏。
 
-import type { BaseTool } from "./registry.js";
+import type { BaseTool, ToolExecutionContext } from "./registry.js";
 import { NO_FILE_SIDE_EFFECTS } from "./registry.js";
 import type { ToolDefinition } from "../schema/message.js";
 import type { Registry } from "./registry.js";
@@ -75,6 +75,8 @@ export interface SubagentRunOptions {
   systemPrompt?: string;
   /** true 时 systemPrompt 完全覆盖默认 prompt,而非追加。默认 false(追加)。 */
   systemPromptOverride?: boolean;
+  /** 宿主热切换或关闭时取消子代理的统一信号。 */
+  signal?: AbortSignal;
 }
 
 export interface SubagentRegistryRequest {
@@ -124,6 +126,7 @@ interface NormalizedDelegateTask {
  */
 export class SpawnSubagentTool implements BaseTool {
   readonly fileSideEffects = NO_FILE_SIDE_EFFECTS;
+  readonly handlesAbortSignal = true;
 
   constructor(
     private readonly runner: AgentRunner,
@@ -157,7 +160,7 @@ export class SpawnSubagentTool implements BaseTool {
   }
 
   /** 拉起完全物理隔离的子循环,仅提供 readOnlyRegistry */
-  async execute(args: string): Promise<string> {
+  async execute(args: string, context?: ToolExecutionContext): Promise<string> {
     let input: SubagentArgs;
     try {
       input = JSON.parse(args) as SubagentArgs;
@@ -184,6 +187,7 @@ export class SpawnSubagentTool implements BaseTool {
         depth: depth + 1,
         maxSpawnDepth,
         role: "leaf",
+        ...(context?.signal ? { signal: context.signal } : {}),
         // 透传调用方注入的自定义参数(程序化扩展点,非 LLM 可控)
         ...pickDefined({
           maxTurns: this.options.maxTurns,
@@ -216,6 +220,7 @@ export class SpawnSubagentTool implements BaseTool {
 export class DelegateTaskTool implements BaseTool {
   /** 用户自定义角色库(来自 .claw/agents.yaml),按 agent_name 查询。空=无自定义角色。 */
   private readonly profiles: AgentProfile[];
+  readonly handlesAbortSignal = true;
 
   constructor(
     private readonly runner: AgentRunner,
@@ -288,7 +293,7 @@ export class DelegateTaskTool implements BaseTool {
     };
   }
 
-  async execute(args: string): Promise<string> {
+  async execute(args: string, context?: ToolExecutionContext): Promise<string> {
     const input = parseDelegateArgs(args);
     const depth = this.options.depth ?? 0;
     const maxSpawnDepth = this.options.maxSpawnDepth ?? 2;
@@ -305,21 +310,23 @@ export class DelegateTaskTool implements BaseTool {
 
     if (input.background === true) {
       return JSON.stringify(
-        this.manager.dispatch(() => this.runBatch(tasks, depth, maxSpawnDepth)),
+        this.manager.dispatch((signal) => this.runBatch(tasks, depth, maxSpawnDepth, signal)),
       );
     }
 
-    return JSON.stringify(await this.runBatch(tasks, depth, maxSpawnDepth));
+    return JSON.stringify(await this.runBatch(tasks, depth, maxSpawnDepth, context?.signal));
   }
 
   private async runBatch(
     tasks: NormalizedDelegateTask[],
     depth: number,
     maxSpawnDepth: number,
+    signal?: AbortSignal,
   ): Promise<DelegationBatchResult> {
+    signal?.throwIfAborted();
     const startedAt = Date.now();
     const results = await mapLimit(tasks, this.manager.maxConcurrentChildren, (task, index) =>
-      this.runOne(task, index, depth, maxSpawnDepth),
+      this.runOne(task, index, depth, maxSpawnDepth, signal),
     );
     return {
       results,
@@ -332,7 +339,9 @@ export class DelegateTaskTool implements BaseTool {
     taskIndex: number,
     depth: number,
     maxSpawnDepth: number,
+    signal?: AbortSignal,
   ): Promise<DelegationBatchResult["results"][number]> {
+    signal?.throwIfAborted();
     const startedAt = Date.now();
     const childDepth = depth + 1;
     const prompt = task.context ? `${task.context}\n\n任务: ${task.goal}` : task.goal;
@@ -368,8 +377,10 @@ export class DelegateTaskTool implements BaseTool {
         depth: childDepth,
         maxSpawnDepth,
         role: task.role,
+        ...(signal ? { signal } : {}),
         ...customization,
       });
+      signal?.throwIfAborted();
       return {
         taskIndex,
         status: "completed",
@@ -378,6 +389,7 @@ export class DelegateTaskTool implements BaseTool {
         durationMs: Date.now() - startedAt,
       };
     } catch (err) {
+      signal?.throwIfAborted();
       const message = err instanceof Error ? err.message : String(err);
       return {
         taskIndex,
@@ -475,7 +487,7 @@ async function mapLimit<T, R>(
   let cursor = 0;
   const workerCount = Math.min(Math.max(1, limit), items.length);
 
-  await Promise.all(
+  const workers = await Promise.allSettled(
     Array.from({ length: workerCount }, async () => {
       while (cursor < items.length) {
         const index = cursor;
@@ -484,6 +496,10 @@ async function mapLimit<T, R>(
       }
     }),
   );
+  const failed = workers.find(
+    (worker): worker is PromiseRejectedResult => worker.status === "rejected",
+  );
+  if (failed) throw failed.reason;
 
   return results;
 }

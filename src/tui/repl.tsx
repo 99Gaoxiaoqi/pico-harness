@@ -34,7 +34,11 @@ import type {
 } from "../cli/run-agent.js";
 import { runAgentFromCli } from "../cli/run-agent.js";
 import { listRewindPointSummaries } from "../cli/file-history.js";
-import { createCliSessionId, type CliSessionSelection } from "../cli/session-resolver.js";
+import {
+  createCliSessionId,
+  removeCliSessionFile,
+  type CliSessionSelection,
+} from "../cli/session-resolver.js";
 import { loadPicoConfig } from "../input/pico-config.js";
 import {
   commandArgumentSuggestions,
@@ -60,6 +64,7 @@ import type { ThinkingEffort } from "../provider/thinking.js";
 import { buildDefaultToolRegistry } from "../tools/default-registry.js";
 import type { ToolDisclosure } from "../tools/tool-disclosure.js";
 import {
+  forgetSessionSettings,
   getOrCreateSessionSettings,
   setSessionAdditionalDirectories,
   setSessionMode,
@@ -77,7 +82,6 @@ import {
   createSessionBrowserState,
   moveSessionBrowserSelection,
   SessionBrowser,
-  toggleSessionBrowserScope,
   type SessionBrowserSession,
   type SessionBrowserState,
 } from "./session-browser.js";
@@ -148,6 +152,9 @@ export interface HandleTuiInputSubmissionDeps {
   modelOptions?: readonly ModelOption[];
   createModelSelectorContent?: (effect: LocalTuiModelSelectorDialogEffect) => React.ReactNode;
   commandAvailabilityState?: CommandInputState;
+  abortControllerRef?: TuiAbortControllerRef;
+  /** 异步解析后确认该输入仍属于当前 bundle generation。 */
+  isActive?: () => boolean;
 }
 
 export type LocalTuiCommandUiEffect = { kind: "none" } | LocalTuiModelSelectorDialogEffect;
@@ -167,7 +174,6 @@ export interface HandleTuiRunningInputSubmissionDeps extends HandleTuiInputSubmi
   onQueueStateChange?: (snapshot: RunningInputQueueSnapshot) => void;
   steerQueue?: SteerQueue;
   abortControllerRef?: TuiAbortControllerRef;
-  isActive?: () => boolean;
 }
 
 export type TuiRunAgent = (
@@ -180,6 +186,7 @@ export interface TuiAbortControllerRef {
 }
 
 interface TuiSessionBundle {
+  readonly generation: number;
   readonly selection: CliSessionSelection;
   readonly sessionId: string;
   readonly session: Session;
@@ -205,6 +212,7 @@ export async function handleTuiInputSubmission(
     ...deps,
     commandAvailabilityState: deps.commandAvailabilityState ?? "idle",
   });
+  if (deps.isActive && !deps.isActive()) return;
 
   switch (processed.type) {
     case "empty":
@@ -261,13 +269,15 @@ async function runPreparedUserPrompt(
   prompt: string,
   deps: Pick<
     HandleTuiInputSubmissionDeps,
-    "workDir" | "reporter" | "runAgent" | "setRewindContext"
+    "workDir" | "reporter" | "runAgent" | "setRewindContext" | "abortControllerRef"
   >,
   rewind: { rewindPrompt: string; rewindTranscriptIndex: number },
 ): Promise<void> {
   let prepared: PreparedUserPrompt;
   try {
+    deps.abortControllerRef?.current?.signal.throwIfAborted();
     prepared = await preparePromptForMessage(prompt, deps.workDir);
+    deps.abortControllerRef?.current?.signal.throwIfAborted();
   } catch (error) {
     appendTuiRunError(deps.reporter, error);
     return;
@@ -305,6 +315,7 @@ export async function handleTuiRunningInputSubmission(
     ...deps,
     commandAvailabilityState: availabilityState,
   });
+  if (deps.isActive && !deps.isActive()) return;
   if (!needsAgentRun(processed)) {
     await handleTuiInputSubmission(text, {
       ...deps,
@@ -320,6 +331,7 @@ export async function handleTuiRunningInputSubmission(
     if (deps.steerQueue) {
       deps.queue.inject(steerText, "steer");
       deps.steerQueue.push(steerText);
+      deps.reporter.pushUserMessage(steerText);
       emitRunningQueueState(deps);
       deps.reporter.pushSystemMessage("Steer accepted for the next model boundary.");
     } else {
@@ -344,12 +356,17 @@ async function runProcessedAgentInput(
   gen: number,
   options: { drainAfter: boolean },
 ): Promise<void> {
+  const controller = new AbortController();
+  if (deps.abortControllerRef) deps.abortControllerRef.current = controller;
   try {
     await handleTuiInputSubmission(text, {
       ...deps,
       processInput: async () => processed,
     });
   } finally {
+    if (deps.abortControllerRef?.current === controller) {
+      deps.abortControllerRef.current = null;
+    }
     if (deps.steerQueue && !deps.steerQueue.pending) deps.queue.acknowledgeSteers();
     emitRunningQueueState(deps);
     if (deps.guard.end(gen) && options.drainAfter) {
@@ -365,12 +382,15 @@ async function drainQueuedTuiInputs(deps: HandleTuiRunningInputSubmissionDeps): 
     for (const item of queued) {
       if (deps.isActive && !deps.isActive()) return;
       if (item.kind !== "normal" && item.kind !== "replace") continue;
-      const processed = item.processed ?? (await processTuiInput(item.text, deps));
+      const commandAvailabilityState = item.commandAvailabilityState ?? "idle";
+      const processed =
+        item.processed ?? (await processTuiInput(item.text, { ...deps, commandAvailabilityState }));
+      if (deps.isActive && !deps.isActive()) return;
       if (!needsAgentRun(processed)) {
         await handleTuiInputSubmission(item.text, {
           ...deps,
           processInput: async () => processed,
-          commandAvailabilityState: item.commandAvailabilityState ?? deps.commandAvailabilityState,
+          commandAvailabilityState,
         });
         continue;
       }
@@ -378,7 +398,7 @@ async function drainQueuedTuiInputs(deps: HandleTuiRunningInputSubmissionDeps): 
       const gen = deps.guard.tryStart();
       if (gen === null) {
         const queuedAgain = deps.queue.enqueue(item.text, processed, {
-          commandAvailabilityState: item.commandAvailabilityState ?? deps.commandAvailabilityState,
+          commandAvailabilityState,
         });
         if (queuedAgain.type === "rejected") {
           deps.reporter.pushSystemMessage(
@@ -395,7 +415,7 @@ async function drainQueuedTuiInputs(deps: HandleTuiRunningInputSubmissionDeps): 
         processed,
         {
           ...deps,
-          commandAvailabilityState: item.commandAvailabilityState ?? deps.commandAvailabilityState,
+          commandAvailabilityState,
         },
         gen,
         { drainAfter: false },
@@ -442,6 +462,7 @@ function applyRunningInputIntent(
     }
     deps.queue.inject(intent.text, "steer");
     deps.steerQueue.push(intent.text);
+    deps.reporter.pushUserMessage(intent.text);
     emitRunningQueueState(deps);
     deps.reporter.pushSystemMessage("Steer accepted for the next model boundary.");
     return;
@@ -596,8 +617,15 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
   // 旧 session 的延迟事件不会穿透到新 transcript。
   let setEntries: (e: TuiEntry[]) => void = () => {};
   let activeBundle: TuiSessionBundle | undefined;
+  let nextBundleGeneration = 0;
+  let shuttingDown = false;
+  const pendingSessionSwitches = new Set<Promise<void>>();
+  const pendingTuiSubmissions = new Set<Promise<void>>();
+  let activeAbortControllerRef: TuiAbortControllerRef | undefined;
 
-  const buildSessionBundle = async (selection: CliSessionSelection): Promise<TuiSessionBundle> => {
+  const buildSessionBundleUnsafe = async (
+    selection: CliSessionSelection,
+  ): Promise<TuiSessionBundle> => {
     const session = await globalSessionManager.getOrCreate(selection.sessionId, opts.workDir);
     if (selection.mode === "fork" && selection.sourceSessionId) {
       await seedTuiFork(session, selection.sourceSessionId, opts.workDir);
@@ -689,6 +717,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
       }, 33);
       reporter = new TuiReporter(scheduleEntriesUpdate, entries);
       bundle = {
+        generation: ++nextBundleGeneration,
         selection,
         sessionId: selection.sessionId,
         session,
@@ -702,6 +731,17 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
       return bundle;
     } catch (error) {
       await runtimeState.dispose();
+      throw error;
+    }
+  };
+
+  const buildSessionBundle = async (selection: CliSessionSelection): Promise<TuiSessionBundle> => {
+    try {
+      return await buildSessionBundleUnsafe(selection);
+    } catch (error) {
+      if (selection.mode === "fork") {
+        await discardFailedTuiFork(selection.sessionId, opts.workDir);
+      }
       throw error;
     }
   };
@@ -737,71 +777,106 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     const runningQueue = runningQueueRef.current;
     const [runningInputState, setRunningInputState] = useState(runningQueue.snapshot);
     const abortControllerRef = useRef<AbortController | null>(null);
+    activeAbortControllerRef = abortControllerRef;
     const rewindContextRef = useRef<{ prompt: string; transcriptIndex: number } | null>(null);
     const switchingRef = useRef(false);
     const status = useSyncExternalStore(guard.subscribe, guard.getSnapshot);
     const running = status !== "idle"; // 派生:非 idle 即视为运行中
 
     const switchSession = async (request: ResumeSessionCommandData): Promise<void> => {
-      const current = activeBundleRef.current;
-      if (guard.getSnapshot() !== "idle") {
-        current.reporter.pushSystemMessage("Session switching is only available while idle.");
-        return;
-      }
-      if (request.mode === "resume" && request.sessionId === current.sessionId) {
-        current.reporter.pushSystemMessage(`Session ${request.sessionId} is already active.`);
-        setDialogRequests([]);
-        return;
-      }
-      if (switchingRef.current) {
-        current.reporter.pushSystemMessage("A session switch is already in progress.");
-        return;
-      }
+      const operation = (async () => {
+        const current = activeBundleRef.current;
+        const currentGeneration = current.generation;
+        if (shuttingDown) return;
+        if (guard.getSnapshot() !== "idle") {
+          current.reporter.pushSystemMessage("Session switching is only available while idle.");
+          return;
+        }
+        if (request.mode === "resume" && request.sessionId === current.sessionId) {
+          current.reporter.pushSystemMessage(`Session ${request.sessionId} is already active.`);
+          setDialogRequests([]);
+          return;
+        }
+        if (switchingRef.current) {
+          current.reporter.pushSystemMessage("A session switch is already in progress.");
+          return;
+        }
 
-      switchingRef.current = true;
-      let next: TuiSessionBundle;
+        switchingRef.current = true;
+        let next: TuiSessionBundle | undefined;
+        try {
+          const selection: CliSessionSelection =
+            request.mode === "fork"
+              ? {
+                  mode: "fork",
+                  sessionId: createCliSessionId(),
+                  sourceSessionId: request.sessionId,
+                }
+              : { mode: "resume", sessionId: request.sessionId };
+          next = await buildSessionBundle(selection);
+
+          if (
+            shuttingDown ||
+            activeBundleRef.current !== current ||
+            activeBundleRef.current.generation !== currentGeneration ||
+            guard.getSnapshot() !== "idle"
+          ) {
+            await disposeUnpublishedTuiBundle(next, opts.workDir);
+            return;
+          }
+
+          // 切换前先取消并等待旧 runtime 的 background/delegation 收口，
+          // 防止旧子代理在新会话已可见后继续写入共享工作区。
+          await current.runtimeState.dispose();
+          await current.session
+            .flushPersistence()
+            .catch((error: unknown) => appendTuiRunError(current.reporter, error));
+
+          if (shuttingDown) {
+            await disposeUnpublishedTuiBundle(next, opts.workDir);
+            return;
+          }
+
+          // 新 bundle 已完整构建且旧 runtime 已收口，再一次替换引用。
+          activeBundleRef.current = next;
+          activeBundle = next;
+          runningQueue.clear();
+          rewindContextRef.current = null;
+          setDialogRequests([]);
+          setInputReplacement(undefined);
+          setRunningInputState(runningQueue.snapshot);
+          setEntries(next.reporter.getProjection().entries.map(({ entry }) => entry));
+          setBundle(next);
+          next.reporter.pushSystemMessage(
+            request.mode === "fork"
+              ? `Forked ${request.sessionId} as ${next.sessionId}.`
+              : `Resumed session ${next.sessionId}.`,
+          );
+        } catch (error) {
+          if (next && activeBundleRef.current !== next) {
+            await disposeUnpublishedTuiBundle(next, opts.workDir).catch(() => undefined);
+          }
+          appendTuiRunError(current.reporter, error);
+        } finally {
+          switchingRef.current = false;
+        }
+      })();
+
+      pendingSessionSwitches.add(operation);
       try {
-        const selection: CliSessionSelection =
-          request.mode === "fork"
-            ? {
-                mode: "fork",
-                sessionId: createCliSessionId(),
-                sourceSessionId: request.sessionId,
-              }
-            : { mode: "resume", sessionId: request.sessionId };
-        next = await buildSessionBundle(selection);
-      } catch (error) {
-        appendTuiRunError(current.reporter, error);
-        return;
+        await operation;
       } finally {
-        switchingRef.current = false;
+        pendingSessionSwitches.delete(operation);
       }
-
-      // 新 bundle 已完整构建后才一次替换所有可见/运行态引用。
-      // 任何构建失败都不会改动旧会话。
-      activeBundleRef.current = next;
-      activeBundle = next;
-      runningQueue.clear();
-      rewindContextRef.current = null;
-      setDialogRequests([]);
-      setInputReplacement(undefined);
-      setRunningInputState(runningQueue.snapshot);
-      setEntries(next.reporter.getProjection().entries.map(({ entry }) => entry));
-      setBundle(next);
-      next.reporter.pushSystemMessage(
-        request.mode === "fork"
-          ? `Forked ${request.sessionId} as ${next.sessionId}.`
-          : `Resumed session ${next.sessionId}.`,
-      );
-
-      void current.runtimeState
-        .dispose()
-        .then(() => current.session.flushPersistence())
-        .catch((error: unknown) => appendTuiRunError(next.reporter, error));
     };
 
     const handleSubmit = async (text: string): Promise<void> => {
       const current = activeBundleRef.current;
+      const isCurrentGeneration = (): boolean =>
+        !shuttingDown &&
+        !switchingRef.current &&
+        activeBundleRef.current === current &&
+        activeBundleRef.current.generation === current.generation;
       if (switchingRef.current) {
         current.reporter.pushSystemMessage("Session switch in progress; input was not submitted.");
         return;
@@ -816,7 +891,11 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
           onQueueStateChange: setRunningInputState,
           steerQueue: runtimeState.steerQueue,
           abortControllerRef,
-          isActive: () => activeBundleRef.current === current,
+          isActive: () =>
+            !shuttingDown &&
+            !switchingRef.current &&
+            activeBundleRef.current === current &&
+            activeBundleRef.current.generation === current.generation,
           registry,
           workDir: opts.workDir,
           exit,
@@ -834,12 +913,13 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
           closeDialog: (id) =>
             setDialogRequests((current) => current.filter((item) => item.id !== id)),
           dispatchInput: async (nextText) => {
-            await handleSubmit(nextText);
+            await submitTracked(nextText);
           },
           openLocalUiDialog: (result) => {
             if (result.ui?.kind !== "open-selector" || result.ui.selector !== "rewind") return;
             void listRewindPointSummaries(session)
               .then((snapshots) => {
+                if (!isCurrentGeneration()) return;
                 if (snapshots.length === 0) {
                   reporter.pushSystemMessage(
                     "No user-message checkpoints are available yet. Send a new prompt, then run /rewind again.",
@@ -849,9 +929,19 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
                 const request = createRewindCommandDialogRequest({
                   sessionId,
                   snapshots,
-                  getDiffStat: (messageId) => session.getRewindDiffStat(messageId),
-                  onClose: () => setDialogRequests([]),
+                  getDiffStat: async (messageId) => {
+                    if (!isCurrentGeneration()) {
+                      throw new Error(
+                        "The active session changed before rewind preview completed.",
+                      );
+                    }
+                    return session.getRewindDiffStat(messageId);
+                  },
+                  onClose: () => {
+                    if (isCurrentGeneration()) setDialogRequests([]);
+                  },
                   onRewind: async (snapshot, mode) => {
+                    if (!isCurrentGeneration()) return;
                     const rewind = await applyTuiRewind({
                       session,
                       reporter,
@@ -862,6 +952,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
                         if (!restored.ok) throw new Error(restored.message);
                       },
                     });
+                    if (!isCurrentGeneration()) return;
                     if (rewind.inputText !== undefined) {
                       setInputReplacement((current) => rewindInputReplacement(current, rewind));
                     }
@@ -872,7 +963,9 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
                   request,
                 ]);
               })
-              .catch((error: unknown) => appendTuiRunError(reporter, error));
+              .catch((error: unknown) => {
+                if (isCurrentGeneration()) appendTuiRunError(reporter, error);
+              });
           },
           currentModelId: settings.modelRouteId,
           modelOptions: buildModelOptions(modelRouter.routes),
@@ -890,7 +983,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
                   current.filter((item) => item.id !== effect.request.id),
                 );
                 dispatchModelSelectorSelection(modelId, (command) => {
-                  void handleSubmit(command);
+                  void submitTracked(command);
                 });
               }}
             />
@@ -956,6 +1049,16 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
       }
     };
 
+    const submitTracked = (text: string): Promise<void> => {
+      const operation = handleSubmit(text);
+      pendingTuiSubmissions.add(operation);
+      void operation.then(
+        () => pendingTuiSubmissions.delete(operation),
+        () => pendingTuiSubmissions.delete(operation),
+      );
+      return operation;
+    };
+
     return (
       <App
         model={bundle.settings.model}
@@ -987,7 +1090,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         dialogRequests={dialogRequests}
         inputReplacement={inputReplacement}
         redrawBlank={redrawBlank}
-        onSubmit={(text) => void handleSubmit(text)}
+        onSubmit={(text) => void submitTracked(text)}
         onInterrupt={() => {
           handleTuiInterrupt(
             abortControllerRef.current,
@@ -1026,12 +1129,39 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
   try {
     await instance.waitUntilExit();
   } finally {
+    shuttingDown = true;
+    activeAbortControllerRef?.current?.abort(new DOMException("TUI shutting down", "AbortError"));
+    while (pendingTuiSubmissions.size > 0) {
+      await Promise.allSettled([...pendingTuiSubmissions]);
+    }
+    while (pendingSessionSwitches.size > 0) {
+      await Promise.allSettled([...pendingSessionSwitches]);
+    }
     const finalBundle = activeBundle;
     if (finalBundle) {
       await finalBundle.runtimeState.dispose();
       await finalBundle.session.flushPersistence();
     }
   }
+}
+
+async function disposeUnpublishedTuiBundle(
+  bundle: TuiSessionBundle,
+  workDir: string,
+): Promise<void> {
+  await bundle.runtimeState.dispose();
+  if (bundle.selection.mode === "fork") {
+    await discardFailedTuiFork(bundle.sessionId, workDir);
+    return;
+  }
+  await bundle.session.flushPersistence();
+}
+
+async function discardFailedTuiFork(sessionId: string, workDir: string): Promise<void> {
+  const orphan = globalSessionManager.delete(sessionId, workDir);
+  await orphan?.close();
+  forgetSessionSettings(sessionId);
+  await removeCliSessionFile(workDir, sessionId);
 }
 
 async function seedTuiFork(
@@ -1212,7 +1342,9 @@ export async function runTuiAgentPrompt(
     abortControllerRef?: TuiAbortControllerRef;
   },
 ): Promise<void> {
-  const controller = new AbortController();
+  const existingController = deps.abortControllerRef?.current;
+  const controller = existingController ?? new AbortController();
+  const ownsControllerSlot = existingController === null || existingController === undefined;
   const pendingApprovalDialogs = new Set<string>();
   const closePendingApprovalDialogs = () => {
     for (const id of pendingApprovalDialogs) deps.closeDialog?.(id);
@@ -1224,7 +1356,7 @@ export async function runTuiAgentPrompt(
   };
   const closeApprovalOnAbort = () => closePendingApprovalDialogs();
   controller.signal.addEventListener("abort", closeApprovalOnAbort, { once: true });
-  if (deps.abortControllerRef) deps.abortControllerRef.current = controller;
+  if (deps.abortControllerRef && ownsControllerSlot) deps.abortControllerRef.current = controller;
   try {
     const result = await (deps.runAgent ?? runAgentFromCli)(cliOpts, {
       reporter: deps.reporter,
@@ -1252,7 +1384,7 @@ export async function runTuiAgentPrompt(
   } finally {
     controller.signal.removeEventListener("abort", closeApprovalOnAbort);
     closePendingApprovalDialogs();
-    if (deps.abortControllerRef?.current === controller) {
+    if (ownsControllerSlot && deps.abortControllerRef?.current === controller) {
       deps.abortControllerRef.current = null;
     }
   }
@@ -1486,11 +1618,6 @@ function TuiSessionBrowserDialog({
       return;
     }
 
-    if (input === "a") {
-      setState((current) => toggleSessionBrowserScope(current, visibleSessions, currentProjectCwd));
-      return;
-    }
-
     if (input === "/") {
       setSearch((current) => ({ ...current, active: true }));
       return;
@@ -1519,7 +1646,7 @@ function TuiSessionBrowserDialog({
           : search.query
             ? `Search: ${search.query}`
             : "/ search"}
-        {" · Enter resume · f fork · a scope"}
+        {" · Enter resume · f fork · current workspace"}
       </Text>
       <SessionBrowser
         currentProjectCwd={currentProjectCwd}

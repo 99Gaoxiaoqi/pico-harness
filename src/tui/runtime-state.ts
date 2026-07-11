@@ -106,7 +106,7 @@ class DefaultTuiRuntimeState implements TuiRuntimeState {
   readonly fileIndex: FileIndex;
   readonly steerQueue: SteerQueue;
   private readonly unbindGoalManager: () => void;
-  private disposed = false;
+  private disposePromise?: Promise<void>;
 
   constructor(options: DefaultTuiRuntimeStateOptions) {
     this.workDir = options.workDir;
@@ -145,17 +145,20 @@ class DefaultTuiRuntimeState implements TuiRuntimeState {
   }
 
   async dispose(): Promise<void> {
-    if (this.disposed) return;
-    this.disposed = true;
-    try {
-      const runningTasks = this.backgroundManager
-        .list()
-        .filter((task) => task.status === "running");
-      await Promise.allSettled(
-        runningTasks.map((task) => this.backgroundManager.stop(task.taskId)),
-      );
-    } finally {
-      this.unbindGoalManager();
-    }
+    if (this.disposePromise) return this.disposePromise;
+    this.disposePromise = (async () => {
+      try {
+        const runningTasks = this.backgroundManager
+          .list()
+          .filter((task) => task.status === "running");
+        await Promise.allSettled([
+          this.delegationManager.dispose(),
+          ...runningTasks.map((task) => this.backgroundManager.stop(task.taskId)),
+        ]);
+      } finally {
+        this.unbindGoalManager();
+      }
+    })();
+    return this.disposePromise;
   }
 }
