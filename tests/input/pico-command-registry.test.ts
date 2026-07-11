@@ -844,6 +844,27 @@ describe("Pico command registry", () => {
     );
   });
 
+  it("/tasks remains internal and is absent from commands, help and suggestions", async () => {
+    const registry = await createPicoCommandRegistry({
+      workDir: process.cwd(),
+      provider: "openai",
+      model: "glm-5.2",
+      sessionId: "session-tasks-internal",
+    });
+
+    const result = await processUserInput("/tasks", { registry });
+    const help = await processUserInput("/help", { registry });
+    const taskHelp = await processUserInput("/help tasks", { registry });
+
+    expect(result.type).toBe("unknown-command");
+    expect(registry.resolve("tasks")).toBeUndefined();
+    expect(help.type === "local-command" ? help.result.message : "").not.toContain("/tasks");
+    expect(taskHelp.type === "local-command" ? taskHelp.result.message : "").toBe(
+      "No help found for /tasks.",
+    );
+    expect(commandSuggestions(registry, "task").map((item) => item.value)).not.toContain("tasks");
+  });
+
   it("/goal is discoverable from help and remains available while the agent is running", async () => {
     const registry = await createPicoCommandRegistry({
       workDir: process.cwd(),
