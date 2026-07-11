@@ -1,6 +1,6 @@
 # 当前计划索引
 
-- [ ] **子代理活动可视化与 `/tasks` 退役**：移除面向用户的任务 ID 控制入口，保留内部 Task/worktree 运行时；为每个被委派子代理记录独立活动，并在 TUI 中展示角色、目标、当前动作、状态和结果。
+- [x] **子代理活动可视化与 `/tasks` 退役**：移除面向用户的任务 ID 控制入口，保留内部 Task/worktree 运行时；批量委派会展示每个子代理的角色、目标、当前动作、状态和结果。
 
 - [x] **Claude Code 风格 Skill 与 Workspace**：设计见 `docs/superpowers/specs/2026-07-10-claude-skill-workspace-design.md`，执行计划见 `docs/superpowers/plans/2026-07-10-claude-skill-workspace.md`。三条并行支线分别负责 Skill 激活、Workspace Roots、`/add-dir`，主协调者已完成共享接线和真实模型 E2E。
 - [x] **Pico Claude Code 高拟真交互后续阶段总任务单**：详见 `docs/plans/2026-07-09-pico-claude-code-full-parity-roadmap.md`。在第一轮基础集成之上，按阶段 2-7 继续拆分为视觉交互、命令体系、权限工具、回滚会话、子代理体验、真实项目验收；每阶段使用独立 worktree 和子代理推进。
@@ -25,6 +25,12 @@
 - 运行中卡片显示最近工具与目标，不向用户暴露 task ID。
 - 子代理完成后保留结果摘要，不影响主 Agent 获取原有 tool result。
 - 相关集成测试、lint、typecheck 和 build 通过。
+
+## 执行结果
+
+- 三条独立 worktree 支线已完成命令退役、活动事件链和 TUI 卡片，并合入集成分支。
+- 新增跨 `DelegateTaskTool → Reporter → EventStore → Ink` 的确定性集成主链，覆盖两个并行子代理的运行与完成。
+- 目标测试、lint、typecheck、build 和 high audit 通过；全量测试 1897 通过、53 个既有失败，主要来自当前 Node ABI 与 `better-sqlite3` 不兼容及旧断言。
 
 ---
 
