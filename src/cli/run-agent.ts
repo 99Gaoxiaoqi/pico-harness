@@ -825,6 +825,9 @@ function planModeDenialReason(
   if (isMcpToolName(call.name)) {
     return "Plan Mode 守卫：MCP 工具的外部副作用无法证明为只读，已拒绝执行。";
   }
+  if (call.name === "delegate_task") {
+    return "Plan Mode 守卫：delegate_task 可能启动可写 worker 或递归委派，已拒绝执行；只读探索请使用 spawn_subagent。";
+  }
   if (call.name !== "bash") return undefined;
   const command = parseJsonStringField(call.arguments, "command");
   if (command === undefined) {

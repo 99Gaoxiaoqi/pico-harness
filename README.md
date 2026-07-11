@@ -62,7 +62,7 @@ npx tsx --env-file=.env --import ./src/tui/preload-env.ts src/cli/main.ts \
 
 - `src/cli/run-agent.ts` 中的 `runAgentFromCli` 是 TUI 内部装配函数，不是可支持的 one-shot/headless CLI 入口。
 - `/rewind` 按用户消息列出提示词、时间和该轮文件变化，恢复后会同步截断对话并把原提示词放回输入框；`/snapshots` 保留为诊断入口。
-- 默认交互模式是 `yolo`：主 Agent 以当前 OS 用户权限执行普通读写、Bash 和网络操作，不弹日常审批。仅保留不可审批绕过的 hardline、Plan 写操作守卫和显式 Hook deny。需要逐次确认高风险操作时使用 `/mode default`。
+- 默认交互模式是 `yolo`：主 Agent 以当前 OS 用户权限执行普通读写、Bash 和网络操作，不弹日常审批。仅保留不可审批绕过的 hardline、Plan 写操作/可写委派守卫和显式 Hook deny。需要逐次确认高风险操作时使用 `/mode default`。
 - `/permissions` 是 `/mode` 的兼容别名，不再维护第二套权限状态。
 - `/usage` 展示 provider 实际报告的 token/成本覆盖，缺失字段保持 `unknown`；`/context` 展示当前 route 的上下文预算、来源和能力。
 - REST/WebSocket、ACP、飞书与 one-shot CLI 外壳曾在历史阶段完成，后已退役。

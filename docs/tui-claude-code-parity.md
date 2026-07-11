@@ -91,7 +91,7 @@ Skill 正文支持 Claude Code 风格参数：`$ARGUMENTS` 保留完整参数，
 
 - `yolo`（默认）：按启动 Pico 的 OS 用户权限执行普通 Read/Write/Edit/Bash/网络操作，工作区外与敏感路径不弹日常审批。
 - `default`：审批框显示目标和 diff，可选择 `Yes`、`Yes, allow … during this session` 或 `No`。`Yes` 只授权当前调用；session 选项才会把目录加入当前会话并对普通编辑切换为 `auto`。
-- `plan`：只允许宿主能保守证明为只读的工具调用；审批不能放行 Bash 或 MCP 写操作。
+- `plan`：只允许宿主能保守证明为只读的工具调用；审批不能放行 Bash、MCP 或 `delegate_task` 可写/递归委派。需要只读子代理时使用 `spawn_subagent`。
 - hardline 命令和显式 Hook deny 在任何 mode 下都不可通过审批绕过。
 
 也可以在执行前手动加入目录：
