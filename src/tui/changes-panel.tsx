@@ -44,18 +44,22 @@ export interface ChangesPanelProps {
   maxPatchLines?: number;
   /** 对话框中传入后高亮文件，并只显示它的 patch。 */
   selectedIndex?: number;
+  /** 选中模式下围绕当前文件的可见窗口。 */
+  maxVisibleFiles?: number;
 }
 
 export function ChangesPanel({
   model,
   maxPatchLines,
   selectedIndex,
+  maxVisibleFiles,
 }: ChangesPanelProps): React.ReactNode {
   const safeSelectedIndex =
     selectedIndex === undefined ? undefined : normalizeSelectedIndex(selectedIndex, model);
   const selectedFile = safeSelectedIndex === undefined ? undefined : model.files[safeSelectedIndex];
   const visiblePatch = selectedFile?.patch ?? model.fullPatch;
   const patchLineCount = visiblePatch.length === 0 ? 0 : visiblePatch.split("\n").length;
+  const visibleFiles = selectVisibleFiles(model, safeSelectedIndex, maxVisibleFiles);
   return (
     <Box flexDirection="column">
       <Text bold>Changes</Text>
@@ -68,14 +72,21 @@ export function ChangesPanel({
           ⚠ {warning}
         </Text>
       ))}
-      {model.files.map((file, index) => (
+      {visibleFiles.map(({ file, index }) => (
         <Box key={file.filePath} flexDirection="column">
           <Text inverse={selectedFile !== undefined && index === safeSelectedIndex}>
             {statusGlyph(file.status)} {file.filePath} +{file.addedLines} -{file.removedLines}
           </Text>
-          <Text dimColor>{file.restoreAction.description}</Text>
+          {safeSelectedIndex === undefined || index === safeSelectedIndex ? (
+            <Text dimColor>{file.restoreAction.description}</Text>
+          ) : null}
         </Box>
       ))}
+      {visibleFiles.length < model.files.length ? (
+        <Text dimColor>
+          … {model.files.length - visibleFiles.length} file(s) outside this window
+        </Text>
+      ) : null}
       {visiblePatch ? (
         <DiffPreview diff={visiblePatch} maxLines={maxPatchLines ?? Math.max(1, patchLineCount)} />
       ) : (
@@ -89,6 +100,7 @@ export function ChangesPanel({
 export interface ChangesDialogContentProps {
   model: ChangesPanelModel;
   maxPatchLines?: number;
+  maxVisibleFiles?: number;
   onRestoreFile: (action: ChangesRestoreFileAction) => void | Promise<void>;
   onJumpToRewind: (action: ChangesJumpToRewindAction) => void | Promise<void>;
   onClose: () => void;
@@ -96,7 +108,8 @@ export interface ChangesDialogContentProps {
 
 export function ChangesDialogContent({
   model,
-  maxPatchLines = 24,
+  maxPatchLines = 4,
+  maxVisibleFiles = 3,
   onRestoreFile,
   onJumpToRewind,
   onClose,
@@ -162,7 +175,12 @@ export function ChangesDialogContent({
 
   return (
     <Box flexDirection="column">
-      <ChangesPanel model={model} maxPatchLines={maxPatchLines} selectedIndex={selectedIndex} />
+      <ChangesPanel
+        model={model}
+        maxPatchLines={maxPatchLines}
+        selectedIndex={selectedIndex}
+        maxVisibleFiles={maxVisibleFiles}
+      />
       {pendingFilePath ? <Text dimColor>Restoring {pendingFilePath}…</Text> : null}
       {message ? <Text color="green">{message}</Text> : null}
       {error ? <Text color="red">{error}</Text> : null}
@@ -225,6 +243,21 @@ function fileName(filePath: string): string {
 function normalizeSelectedIndex(index: number, model: ChangesPanelModel): number {
   if (model.files.length === 0) return 0;
   return Math.min(Math.max(0, Math.floor(index)), model.files.length - 1);
+}
+
+function selectVisibleFiles(
+  model: ChangesPanelModel,
+  selectedIndex: number | undefined,
+  maxVisibleFiles: number | undefined,
+): Array<{ file: ChangesFileModel; index: number }> {
+  const indexed = model.files.map((file, index) => ({ file, index }));
+  if (selectedIndex === undefined || maxVisibleFiles === undefined) return indexed;
+  const windowSize = Math.min(model.files.length, Math.max(1, Math.floor(maxVisibleFiles)));
+  const start = Math.min(
+    Math.max(0, selectedIndex - Math.floor(windowSize / 2)),
+    Math.max(0, model.files.length - windowSize),
+  );
+  return indexed.slice(start, start + windowSize);
 }
 
 function toErrorMessage(error: unknown): string {

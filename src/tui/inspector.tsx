@@ -120,7 +120,7 @@ export interface InspectorDialogContentProps {
 export function InspectorDialogContent({
   source,
   pageBytes = DEFAULT_PAGE_BYTES,
-  visibleLines = 28,
+  visibleLines = 5,
   onClose,
   onCopy,
   onLocate,
