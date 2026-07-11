@@ -513,19 +513,19 @@ git worktree remove ../pico-1-streaming
 
 ---
 
-## 阶段 13：隔离式并行与 MCP 生命周期（进行中）
+## 阶段 13：隔离式并行与 MCP 生命周期（已完成）
 
 > **目标**：让写入型子代理和外部工具连接都成为可观察、可中止、可恢复的 TUI 内部能力。两个任务的 TUI 接线串行完成，避免并发修改 `runtime-state.ts` / `repl.tsx`。
 
-- [ ] 13.1.1 为 TaskRegistry 增加持久化快照、重启恢复、输出游标和遗留 running 任务收口
-- [ ] 13.1.2 实现 Agent Worktree Supervisor：创建唯一 branch/worktree、停止、重试、追加指令、完成通知和安全清理
-- [ ] 13.1.3 实现主代理串行合并队列：检查工作树/提交、按最新目标分支合并、冲突保留现场且禁止强推
-- [ ] 13.1.4 将 worker 子代理默认接入独立 worktree，并提供 `/tasks` 列表、详情、tail、stop、retry、message、merge 交互
-- [ ] 13.2.1 将 McpConnectionManager 提升到 TUI Runtime 生命周期，切换 Session 复用连接并在 TUI 退出时统一关闭
-- [ ] 13.2.2 支持 MCP reload、enable、disable、reconnect，并保持工具注册与状态快照一致
-- [ ] 13.2.3 扩展 MCP resources/prompts 的发现、读取与 TUI 命令展示
-- [ ] 13.2.4 增加 OAuth needs-auth 状态、宿主授权回调接口、重连流程和脱敏诊断
-- [ ] 13.3 用一条集成主链验证隔离任务控制/串行合并与 MCP 生命周期，完成构建、推送和临时资源清理
+- [x] 13.1.1 为 TaskRegistry 增加持久化快照、重启恢复、输出游标和遗留 running 任务收口
+- [x] 13.1.2 实现 Agent Worktree Supervisor：创建唯一 branch/worktree、停止、重试、追加指令、完成通知和安全清理
+- [x] 13.1.3 实现主代理串行合并队列：检查工作树/提交、按最新目标分支合并、冲突保留现场且禁止强推
+- [x] 13.1.4 将 worker 子代理默认接入独立 worktree，并提供 `/tasks` 列表、详情、tail、stop、retry、message、merge 交互
+- [x] 13.2.1 将 McpConnectionManager 提升到 TUI Runtime 生命周期，切换 Session 复用连接并在 TUI 退出时统一关闭
+- [x] 13.2.2 支持 MCP reload、enable、disable、reconnect，并保持工具注册与状态快照一致
+- [x] 13.2.3 扩展 MCP resources/prompts 的发现、读取与 TUI 命令展示
+- [x] 13.2.4 增加 OAuth needs-auth 状态、宿主授权回调接口、重连流程和脱敏诊断
+- [x] 13.3 用一条集成主链验证隔离任务控制/串行合并与 MCP 生命周期，完成构建、推送和临时资源清理
 
 ---
 
@@ -579,8 +579,8 @@ git worktree remove ../pico-1-streaming
 | 阶段 12      | 3        | 3       | ✅ 可信 YOLO 与代码智能完成         |
 | 阶段 12.5    | 6        | 6       | ✅ 模型级思考能力完成               |
 | 阶段 12.6    | 6        | 6       | ✅ 记忆存储韧性完成                 |
-| 阶段 13      | 9        | 0       | ⏳ 隔离式并行与 MCP 生命周期        |
-| **当前总计** | **114**  | **105** | ⏳ 当前：隔离式并行与 MCP 生命周期  |
+| 阶段 13      | 9        | 9       | ✅ 隔离式并行与 MCP 生命周期完成    |
+| **当前总计** | **114**  | **114** | ✅ 当前已排期任务全部完成           |
 
 ---
 
@@ -605,6 +605,12 @@ git worktree remove ../pico-1-streaming
 ---
 
 ## 📅 变更记录
+
+- 2026-07-11：完成阶段 13 隔离式并行与 MCP 生命周期
+  - 可写 worker 默认进入唯一 worktree/分支；TaskRegistry 持久化运行状态，`/tasks` 支持查看、追加指令、停止、重试、串行合并和安全清理。
+  - MCP 连接提升为 TUI 宿主级资源，Session 切换与每轮 Agent 只重绑 registry；`/mcp` 可重载、启停、重连并读取 resources/prompts。
+  - OAuth 失败显式进入 `needs_auth`，宿主回调返回凭据补丁后重连；诊断持续脱敏。
+  - 仅新增一条确定性集成主链；该场景、typecheck、变更文件 ESLint 与 build 通过。
 
 - 2026-07-11：完成记忆存储韧性
   - FTS5 暴露健康状态和 Node ABI 诊断；不可用时自动切换到由 Session JSONL 重建的有界内存索引。
