@@ -16,6 +16,7 @@ export const CORE_TOOLS: ReadonlySet<string> = new Set([
   "glob",
   "grep",
   "todo",
+  "ask_user",
 ]);
 
 /**
