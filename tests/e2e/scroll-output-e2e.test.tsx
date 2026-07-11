@@ -301,6 +301,7 @@ describe("阶段 10：滚动窗口与大型工具输出集成验收", () => {
       ).toBeGreaterThan(1);
       expect(terminal.wrapEvents).toBe(0);
       expect(terminal.scrollEvents).toBe(0);
+      expect(terminal.mouseTrackingEnabled()).toBe(true);
       expect(terminal.scrollbackText()).not.toMatch(
         /phase (?:running|idle) · mode new · perm yolo|USER_CJK_MARKER|FINAL_CJK_MARKER/u,
       );
@@ -501,6 +502,8 @@ class ImmediateWrapTerminal {
   private y = 0;
   private savedX = 0;
   private savedY = 0;
+  private normalMouseTracking = false;
+  private sgrMouseTracking = false;
   private cursorPositionResponses: string[] = [];
 
   constructor(columns: number, rows: number) {
@@ -598,6 +601,10 @@ class ImmediateWrapTerminal {
     return this.scrollback.join("\n");
   }
 
+  mouseTrackingEnabled(): boolean {
+    return this.normalMouseTracking && this.sgrMouseTracking;
+  }
+
   drainCursorPositionResponses(): string[] {
     const responses = this.cursorPositionResponses;
     this.cursorPositionResponses = [];
@@ -617,9 +624,16 @@ class ImmediateWrapTerminal {
       this.x = 0;
       this.y = 0;
       this.scrollEvents = 0;
+      this.normalMouseTracking = false;
+      this.sgrMouseTracking = false;
       return;
     }
-    if (privateMode && (final === "h" || final === "l")) return;
+    if (privateMode && (final === "h" || final === "l")) {
+      const enabled = final === "h";
+      if (values.includes(1000)) this.normalMouseTracking = enabled;
+      if (values.includes(1006)) this.sgrMouseTracking = enabled;
+      return;
+    }
     if (final === "m") return;
     if (final === "n" && amount === 6) {
       this.cursorPositionResponses.push(`\u001b[${this.y + 1};${this.x + 1}R`);
@@ -653,6 +667,10 @@ class ImmediateWrapTerminal {
   private eraseDisplay(mode: number): void {
     if (mode === 2 || mode === 3) {
       this.screen = Array.from({ length: this.rows }, () => this.blankLine());
+      // ChatGPT.app may lose private mouse modes when replacing a full frame.
+      // The production facade must re-arm them before synchronized output ends.
+      this.normalMouseTracking = false;
+      this.sgrMouseTracking = false;
       if (mode === 3) {
         this.scrollback = [];
         this.scrollEvents = 0;
