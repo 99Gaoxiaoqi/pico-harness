@@ -48,7 +48,6 @@ function runProcess(command: string, args: readonly string[], stdin?: string): P
     });
     let stderr = "";
     let settled = false;
-    let timer: NodeJS.Timeout | undefined;
     const settle = (error?: Error): void => {
       if (settled) return;
       settled = true;
@@ -58,7 +57,7 @@ function runProcess(command: string, args: readonly string[], stdin?: string): P
         reject(error);
       } else resolvePromise();
     };
-    timer = setTimeout(() => {
+    const timer = setTimeout(() => {
       child.kill();
       settle(new Error(`${command} timed out after ${ACTION_TIMEOUT_MS}ms`));
     }, ACTION_TIMEOUT_MS);
