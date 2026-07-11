@@ -25,6 +25,7 @@ import type {
 
 /** 默认 hook 超时(ms):60s。超时后 kill 子进程并 fail-open。 */
 const DEFAULT_HOOK_TIMEOUT_MS = 60_000;
+const MAX_HOOK_OUTPUT_BYTES = 1024 * 1024;
 
 /**
  * 钩子执行器。绑定到固定 workDir 与 HooksConfig(构造后不可变)。
@@ -173,6 +174,7 @@ export class HookRunner {
 
       let stdout = "";
       let stderr = "";
+      let outputBytes = 0;
       let settled = false;
       const finish = (result: HookOutput) => {
         if (settled) return;
@@ -189,9 +191,31 @@ export class HookRunner {
       }, timeoutMs);
 
       child.stdout?.on("data", (chunk: Buffer) => {
+        if (settled) return;
+        outputBytes += chunk.byteLength;
+        if (outputBytes > MAX_HOOK_OUTPUT_BYTES) {
+          killProcessTree(child);
+          logger.warn(
+            { command, maxBytes: MAX_HOOK_OUTPUT_BYTES },
+            `[Hook] 输出超过上限,fail-open 放行`,
+          );
+          finish({ decision: "allow" });
+          return;
+        }
         stdout += chunk.toString("utf8");
       });
       child.stderr?.on("data", (chunk: Buffer) => {
+        if (settled) return;
+        outputBytes += chunk.byteLength;
+        if (outputBytes > MAX_HOOK_OUTPUT_BYTES) {
+          killProcessTree(child);
+          logger.warn(
+            { command, maxBytes: MAX_HOOK_OUTPUT_BYTES },
+            `[Hook] 输出超过上限,fail-open 放行`,
+          );
+          finish({ decision: "allow" });
+          return;
+        }
         stderr += chunk.toString("utf8");
       });
 
