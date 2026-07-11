@@ -27,18 +27,28 @@ export type PermissionSessionScope =
 export class SessionPermissionGrants {
   private readonly bySession = new Map<string, PermissionSessionScope[]>();
 
-  allows(sessionId: string, call: ToolCall, workDir: string): boolean {
+  allows(
+    sessionId: string,
+    call: ToolCall,
+    workDir: string,
+    workspaceRoots?: WorkspaceRoots,
+  ): boolean {
     return (this.bySession.get(sessionId) ?? []).some((scope) =>
-      scopeAllowsCall(scope, call, workDir),
+      scopeAllowsCall(scope, call, workDir, workspaceRoots),
     );
   }
 
-  allowsSafetyOverride(sessionId: string, call: ToolCall, workDir: string): boolean {
+  allowsSafetyOverride(
+    sessionId: string,
+    call: ToolCall,
+    workDir: string,
+    workspaceRoots?: WorkspaceRoots,
+  ): boolean {
     return (this.bySession.get(sessionId) ?? []).some(
       (scope) =>
         (scope.type === "file" || scope.type === "bash-command") &&
         scope.safety === true &&
-        scopeAllowsCall(scope, call, workDir),
+        scopeAllowsCall(scope, call, workDir, workspaceRoots),
     );
   }
 
@@ -125,28 +135,59 @@ export function permissionScopeForCall(
   return { type: "tool", toolName: call.name };
 }
 
-/** Claude Code step 1g 同类：即使 yolo 也必须显式确认的文件安全路径。 */
-export function bypassImmuneSafetyPath(call: ToolCall, workDir: string): string | undefined {
+/** 非 YOLO 模式下必须显式确认的文件安全路径。 */
+export function bypassImmuneSafetyPath(
+  call: Pick<ToolCall, "name" | "arguments">,
+  workDir: string,
+  workspaceRoots?: WorkspaceRoots,
+): string | undefined {
+  const readAccess = call.name === "read_file" || call.name === "grep";
   const paths =
     call.name === "bash"
       ? extractBashWritePaths(bashCommandFromArgs(call.arguments) ?? "")
-      : call.name === "write_file" || call.name === "edit_file"
+      : call.name === "read_file" ||
+          call.name === "grep" ||
+          call.name === "write_file" ||
+          call.name === "edit_file"
         ? [filePathFromCall(call)].filter((path): path is string => path !== undefined)
         : [];
-  return paths.map((path) => resolve(workDir, path)).find(isBypassImmunePath);
+  return paths
+    .map((path) => workspaceRoots?.resolveUnchecked(path) ?? resolve(workDir, path))
+    .find(
+      (path) => isSensitiveCredentialPath(path) || (!readAccess && isControlPlaneSafetyPath(path)),
+    );
 }
 
-function isBypassImmunePath(absolutePath: string): boolean {
+/** 可能包含密钥的路径：读写都必须显式授权。 */
+export function isSensitiveCredentialPath(absolutePath: string): boolean {
   const normalized = absolutePath.replaceAll("\\", "/");
   const basename = normalized.split("/").at(-1) ?? normalized;
-  if (/(?:^|\/)\.(?:git|claude|vscode)(?:\/|$)/iu.test(normalized)) return true;
-  if (/^(?:\.env(?:\..*)?|\.npmrc|\.pypirc)$/iu.test(basename)) {
+  if (
+    /(?:^|\/)\.(?:ssh|gnupg|aws|kube|docker|azure)(?:\/|$)/iu.test(normalized) ||
+    /(?:^|\/)gcloud(?:\/|$)/iu.test(normalized)
+  ) {
+    return true;
+  }
+  if (/^(?:\.env(?:\..*)?|\.npmrc|\.pypirc|\.netrc|\.git-credentials)$/iu.test(basename)) {
     return !/^\.env\.(?:example|sample|template|dist)$/iu.test(basename);
   }
   if (/(?:id_rsa|id_ed25519|id_ecdsa|credentials|\.pem$|\.key$)/iu.test(normalized)) {
     return !/(?:id_rsa|id_ed25519|id_ecdsa)\.pub$/iu.test(normalized);
   }
   return false;
+}
+
+/** 能改变 Agent/仓库行为的控制面文件：可读，但写入必须显式授权。 */
+function isControlPlaneSafetyPath(absolutePath: string): boolean {
+  const normalized = absolutePath.replaceAll("\\", "/");
+  const basename = normalized.split("/").at(-1) ?? normalized;
+  return (
+    /(?:^|\/)\.(?:git|claude|vscode|pico)(?:\/|$)/iu.test(normalized) ||
+    /(?:^|\/)\.claw\/(?:settings(?:\.[^/]*)?\.json|mcp\.json|agents\.ya?ml|skills(?:\/|$))/iu.test(
+      normalized,
+    ) ||
+    /^AGENTS\.md$/iu.test(basename)
+  );
 }
 
 export function formatPermissionSessionScope(scope: PermissionSessionScope): string {
@@ -173,22 +214,27 @@ export function formatPermissionSessionScope(scope: PermissionSessionScope): str
   }
 }
 
-function scopeAllowsCall(scope: PermissionSessionScope, call: ToolCall, workDir: string): boolean {
+function scopeAllowsCall(
+  scope: PermissionSessionScope,
+  call: ToolCall,
+  workDir: string,
+  workspaceRoots?: WorkspaceRoots,
+): boolean {
   if (scope.type === "all-edits") return call.name === "write_file" || call.name === "edit_file";
   if (scope.type === "tool") return call.name === scope.toolName;
   if (scope.type === "bash-command") {
     if (call.name !== "bash") return false;
     if (bashBackgroundFromArgs(call.arguments)) return false;
-    const command = normalizeCommand(bashCommandFromArgs(call.arguments) ?? "");
-    return scope.match === "exact"
-      ? command === scope.command
-      : isSingleSimpleShellCommand(command) &&
-          (command === scope.command || command.startsWith(`${scope.command} `));
+    const rawCommand = (bashCommandFromArgs(call.arguments) ?? "").trim();
+    if (scope.match === "exact") return rawCommand === scope.command;
+    if (!isSingleSimpleShellCommand(rawCommand)) return false;
+    const normalized = normalizeCommand(rawCommand);
+    return normalized === scope.command || normalized.startsWith(`${scope.command} `);
   }
 
   const path = filePathFromCall(call);
   if (!path) return false;
-  const absolutePath = resolve(workDir, path);
+  const absolutePath = workspaceRoots?.resolveUnchecked(path) ?? resolve(workDir, path);
   if (scope.type === "file")
     return absolutePath === scope.path && accessMatches(scope.access, call);
   return (
@@ -210,7 +256,7 @@ function accessMatches(access: PermissionAccess, call: ToolCall): boolean {
   return call.name === "read_file" || call.name === "glob" || call.name === "grep";
 }
 
-function filePathFromCall(call: ToolCall): string | undefined {
+function filePathFromCall(call: Pick<ToolCall, "arguments">): string | undefined {
   try {
     const input = JSON.parse(call.arguments) as { path?: unknown };
     return typeof input.path === "string" ? input.path : undefined;
@@ -252,10 +298,11 @@ function cloneScope(scope: PermissionSessionScope): PermissionSessionScope {
 function bashSessionScope(
   command: string,
 ): Extract<PermissionSessionScope, { type: "bash-command" }> {
-  const normalized = normalizeCommand(command);
-  if (!isSingleSimpleShellCommand(normalized)) {
-    return { type: "bash-command", command: normalized, match: "exact" };
+  const rawCommand = command.trim();
+  if (!isSingleSimpleShellCommand(rawCommand)) {
+    return { type: "bash-command", command: rawCommand, match: "exact" };
   }
+  const normalized = normalizeCommand(rawCommand);
   const firstSegment = normalized.split(/&&|\|\||;|\n/u, 1)[0] ?? normalized;
   const tokens = [...firstSegment.matchAll(/"([^"]*)"|'([^']*)'|([^\s]+)/gu)].map(
     (match) => match[1] ?? match[2] ?? match[3] ?? "",
@@ -266,7 +313,7 @@ function bashSessionScope(
   if (executable && subcommand && SAFE_PREFIX_COMMANDS.has(executable)) {
     return { type: "bash-command", command: `${executable} ${subcommand}`, match: "prefix" };
   }
-  return { type: "bash-command", command: normalized, match: "exact" };
+  return { type: "bash-command", command: rawCommand, match: "exact" };
 }
 
 /** Prefix grant 只能覆盖单个静态 shell 命令，不得吸收后续链、重定向或命令替换。 */

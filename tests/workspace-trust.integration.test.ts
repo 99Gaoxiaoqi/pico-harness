@@ -28,12 +28,14 @@ describe("workspace trust startup integration", () => {
 
     await expect(
       prompt.requestTrust({
-        workspacePath: "/tmp/evil\u001b[2J\n[1] fake",
+        workspacePath: "/tmp/evil\u001b[2J\n[1] fake\u0085\u202e",
         risks: ["fixture"],
       }),
     ).resolves.toBe("deny");
     expect(output).not.toContain("\u001b");
-    expect(output).toContain("\\u001b[2J\\n[1] fake");
+    expect(output).not.toContain("\u0085");
+    expect(output).not.toContain("\u202e");
+    expect(output).toContain("\\u001b[2J\\n[1] fake\\u0085\\u202e");
   });
 
   it("首次显式信任后持久化，已信任工作区直接启动，非交互首启 fail-closed", async () => {

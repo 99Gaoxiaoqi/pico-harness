@@ -55,6 +55,7 @@ describe("Claude-style permission integration", () => {
     expect(grants.allows("grant", call("npm test -- --runInBand"), process.cwd())).toBe(true);
     expect(grants.allows("grant", call("npm test ; touch escaped"), process.cwd())).toBe(false);
     expect(grants.allows("grant", call("npm test && touch escaped"), process.cwd())).toBe(false);
+    expect(grants.allows("grant", call("npm test\ntouch escaped"), process.cwd())).toBe(false);
     expect(grants.allows("grant", call("npm test > escaped.log"), process.cwd())).toBe(false);
     expect(grants.allows("grant", call("npm test", true), process.cwd())).toBe(false);
   });

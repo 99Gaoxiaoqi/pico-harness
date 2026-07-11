@@ -3,7 +3,7 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { constants } from "node:fs";
-import { mkdir, open, readFile, stat, type FileHandle } from "node:fs/promises";
+import { mkdir, open, stat, type FileHandle } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import type {
   BaseTool,
@@ -415,6 +415,7 @@ const READ_FILE_DEFAULT_LIMIT_LINES = 500;
 const READ_FILE_MAX_LIMIT_LINES = 1000;
 const READ_FILE_MAX_PAGE_CHARS = 30_000;
 const READ_FILE_MAX_RENDERED_LINE_CHARS = 2000;
+const READ_FILE_MAX_BYTES = 16 * 1024 * 1024;
 
 /** 行尾风格 → 展示标签(供状态行输出,帮模型识别文件格式) */
 function lineEndingStyleLabel(style: "lf" | "crlf" | "mixed"): string {
@@ -500,8 +501,21 @@ export class ReadFileTool implements BaseTool {
     // 2. 所有文件访问统一经过共享工作区边界。
     const fullPath = await this.roots.assertAllowed(path);
 
-    // 3. 物理 IO
-    const raw = await readFile(fullPath, "utf8");
+    // 3. 先用不跟随符号链接的 FD 检查大小，避免分页之前就把超大文件读入内存。
+    const handle = await open(fullPath, constants.O_RDONLY | NO_FOLLOW_FLAG);
+    let raw: string;
+    try {
+      const info = await handle.stat();
+      if (!info.isFile()) throw new Error(`路径不是普通文件: ${path}`);
+      if (info.size > READ_FILE_MAX_BYTES) {
+        throw new Error(
+          `文件大小 ${info.size} 字节，超过 read_file 上限 ${READ_FILE_MAX_BYTES} 字节；请用 grep 先缩小范围。`,
+        );
+      }
+      raw = await handle.readFile({ encoding: "utf8" });
+    } finally {
+      await handle.close();
+    }
 
     // 4. 模型视图归一化:纯 CRLF → LF(模型只处理一种行尾,Edit 匹配才稳定);
     //    lf/mixed 原样返回,并记录原始行尾风格供 Edit 写回还原。

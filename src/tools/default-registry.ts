@@ -61,6 +61,8 @@ export interface DefaultToolRegistryOptions extends ToolRegistryOptions {
   toolDisclosure?: ToolDisclosure;
   /** 仅在宿主提供结构化交互 UI 时注册 ask_user，避免无 UI 的运行永久等待。 */
   askUserHandler?: AskUserHandler;
+  /** Plan/只读子代理可动态隐藏凭据文件；YOLO 主会话保持完整读权。 */
+  excludeSensitiveGrepFiles?: boolean | ((path: string | undefined) => boolean);
   /** 宿主启动后注入的 LSP / Repo Map 统一服务。 */
   codeIntelligence?: CodeIntelligenceService;
 }
@@ -75,6 +77,7 @@ export function buildDefaultToolRegistry(
     todoStore,
     toolDisclosure,
     askUserHandler,
+    excludeSensitiveGrepFiles,
     codeIntelligence,
     workspaceRoots,
     deferWorkspaceBoundary = false,
@@ -105,7 +108,13 @@ export function buildDefaultToolRegistry(
   registry.register(new TaskStopTool(backgroundManager));
   registry.register(new SkillViewTool(new SkillLoader(workDir)));
   registry.register(new GlobTool(roots));
-  registry.register(new GrepTool(roots));
+  registry.register(
+    new GrepTool(roots, {
+      ...(excludeSensitiveGrepFiles !== undefined
+        ? { excludeSensitiveFiles: excludeSensitiveGrepFiles }
+        : {}),
+    }),
+  );
   // TodoTool 持有 host 注入的 TodoStore 单例,与 PromptComposer 共享同一实例。
   // 未注入时降级为内部 new,保持向后兼容(单实例场景不受跨实例 bug 影响)。
   registry.register(new TodoTool(todoStore ?? new TodoStore(workDir)));

@@ -49,6 +49,7 @@ import {
   applySessionPermissionScope,
   bypassImmuneSafetyPath,
   globalSessionPermissionGrants,
+  isSensitiveCredentialPath,
   permissionScopeForCall,
   type PermissionRuntimeSettings,
 } from "../approval/session-permissions.js";
@@ -292,6 +293,11 @@ export async function runAgentFromCli(
     workspaceRoots,
     dependencies.askUserHandler,
     runtimeState.codeIntelligence,
+    (path) => {
+      if (settings.mode === "yolo") return false;
+      if (settings.mode === "plan" || path === undefined) return true;
+      return !isSensitiveCredentialPath(workspaceRoots.resolveUnchecked(path));
+    },
   );
   // 【任务 2.6】用户可配置 Shell Hooks:加载 .claw/settings.json 的 hooks 配置,
   // 存在则挂载 HookRunner 到 registry。fail-open:配置缺失/畸形均不启用 hook,零影响。
@@ -461,6 +467,7 @@ function buildRegistry(
   workspaceRoots?: WorkspaceRoots,
   askUserHandler?: AskUserHandler,
   codeIntelligence?: TuiRuntimeState["codeIntelligence"],
+  excludeSensitiveGrepFiles?: boolean | ((path: string | undefined) => boolean),
 ): ToolRegistry {
   return buildDefaultToolRegistry(workDir, {
     truncateResults: false,
@@ -472,6 +479,7 @@ function buildRegistry(
     ...(workspaceRoots !== undefined ? { workspaceRoots } : {}),
     ...(askUserHandler !== undefined ? { askUserHandler } : {}),
     ...(codeIntelligence !== undefined ? { codeIntelligence } : {}),
+    ...(excludeSensitiveGrepFiles !== undefined ? { excludeSensitiveGrepFiles } : {}),
   });
 }
 
@@ -666,7 +674,7 @@ export function buildApprovalMiddleware(
 ): MiddlewareFunc {
   return async (call) => {
     const mode = settings?.mode ?? "default";
-    const planModeDenial = await planModeDenialReason(call, mode, workDir);
+    const planModeDenial = await planModeDenialReason(call, mode, workDir, workspaceRoots);
     if (planModeDenial !== undefined) {
       return {
         allowed: false,
@@ -699,12 +707,18 @@ export function buildApprovalMiddleware(
     const externalDirectories = workspaceRoots
       ? await externalAuthorizationDirectories(externalAccesses, workspaceRoots)
       : [];
-    const safetyPath = bypassImmuneSafetyPath(call, workDir);
-    const hasSessionGrant = globalSessionPermissionGrants.allows(sessionId, call, workDir);
+    const safetyPath = bypassImmuneSafetyPath(call, workDir, workspaceRoots);
+    const hasSessionGrant = globalSessionPermissionGrants.allows(
+      sessionId,
+      call,
+      workDir,
+      workspaceRoots,
+    );
     const hasExplicitSafetyGrant = globalSessionPermissionGrants.allowsSafetyOverride(
       sessionId,
       call,
       workDir,
+      workspaceRoots,
     );
 
     if (
@@ -790,8 +804,15 @@ async function planModeDenialReason(
   call: { name: string; arguments: string },
   mode: SessionSettings["mode"],
   workDir: string,
+  workspaceRoots?: WorkspaceRoots,
 ): Promise<string | undefined> {
   if (mode !== "plan") return undefined;
+  if (
+    (call.name === "read_file" || call.name === "grep") &&
+    bypassImmuneSafetyPath(call, workDir, workspaceRoots) !== undefined
+  ) {
+    return "Plan Mode 守卫：密钥与凭据文件不属于计划阶段的可读边界。";
+  }
   if (call.name === "write_file" || call.name === "edit_file") {
     const path = parseJsonStringField(call.arguments, "path");
     return path !== undefined && !(await isPlanModeAllowedPath(path, workDir))
