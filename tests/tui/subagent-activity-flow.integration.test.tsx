@@ -13,6 +13,28 @@ import { buildTranscriptLayout } from "../../src/tui/transcript-layout.js";
 import { TuiEventStore, TuiReporter, type TuiEntry } from "../../src/tui/tui-reporter.js";
 
 describe("subagent activity flow", () => {
+  it("required 委派在 provider 未回传最终正文时也撤销临时流", () => {
+    let entries: TuiEntry[] = [];
+    const reporter = new TuiReporter((next) => {
+      entries = next;
+    });
+    const args = JSON.stringify({
+      tasks: [{ goal: "检查流式边界" }],
+      completion_policy: "required",
+    });
+
+    reporter.onTurnStart(1);
+    reporter.onTextDelta("委派前临时正文");
+    reporter.onToolCall("delegate_task", args, "delegate-stream-only");
+
+    expect(entries.some((entry) => entry.kind === "assistant")).toBe(false);
+    expect(entries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "tool", name: "delegate_task", status: "running" }),
+      ]),
+    );
+  });
+
   it("required 委派轮撤销已流式投影的主正文，保留委派卡与子代理详情", async () => {
     let entries: TuiEntry[] = [];
     const reporter = new TuiReporter((next) => {

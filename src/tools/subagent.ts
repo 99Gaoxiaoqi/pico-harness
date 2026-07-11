@@ -260,6 +260,7 @@ export class DelegateTaskTool implements BaseTool {
         "把一个或多个互不依赖的任务委派给隔离子智能体执行。默认 explore 模式只读分析;" +
         "mode=worker 时子智能体可使用受控 write_file/edit_file/bash 完成局部开发;" +
         "tasks 可批量并行执行。默认 completion_policy=required:以前台方式等待全部结果后再交还主 Agent;" +
+        "required 委派必须是该响应的唯一工具调用,不要同时输出解释正文或调用其他工具;" +
         "optional 允许本轮先结束,完成结果会在下一个模型边界自动进入主上下文;" +
         "detached 仅更新活动面板。不要主动轮询内部任务 ID。",
       inputSchema: {

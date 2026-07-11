@@ -9,6 +9,7 @@ import type {
   RequestMiddleware,
   ToolExecutionContext,
 } from "../src/tools/registry.js";
+import { TuiReporter, type TuiEntry } from "../src/tui/tui-reporter.js";
 
 const AGGREGATED_RESULT = JSON.stringify({
   completed: 2,
@@ -20,6 +21,52 @@ const AGGREGATED_RESULT = JSON.stringify({
 });
 
 describe("required delegation barrier integration", () => {
+  it("Engine 到 TUI 主链只保留委派卡和 join 后的统一总结", async () => {
+    const responses: Message[] = [
+      {
+        role: "assistant",
+        content: "委派前不应保留的长正文",
+        toolCalls: [requiredCall("delegate-tui")],
+      },
+      { role: "assistant", content: "join 后的唯一统一总结" },
+    ];
+    let responseIndex = 0;
+    const provider: LLMProvider = {
+      async generate(): Promise<Message> {
+        throw new Error("本场景必须使用 generateStream");
+      },
+      async generateStream(_messages, _tools, onDelta): Promise<Message> {
+        const response = responses[responseIndex++] ?? { role: "assistant", content: "done" };
+        if (response.content) onDelta(response.content);
+        return response;
+      },
+    };
+    let entries: TuiEntry[] = [];
+    const reporter = new TuiReporter((next) => {
+      entries = next;
+    });
+    const registry = new BarrierRegistry();
+    const session = createSession("engine-tui");
+
+    const running = new AgentEngine({ provider, registry, reporter, workDir: "/tmp" }).run(session);
+    await waitUntil(() => registry.startedRequired);
+
+    expect(entries.some((entry) => entry.kind === "assistant")).toBe(false);
+    expect(entries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "tool", name: "delegate_task", status: "running" }),
+      ]),
+    );
+
+    registry.releaseRequired();
+    await running;
+
+    expect(entries.filter((entry) => entry.kind === "assistant")).toEqual([
+      expect.objectContaining({ content: "join 后的唯一统一总结" }),
+    ]);
+    expect(JSON.stringify(entries)).not.toContain("委派前不应保留的长正文");
+  });
+
   it("required 与普通工具混合时只真实执行委派", async () => {
     const provider = new RecordingProvider([
       {
@@ -42,6 +89,11 @@ describe("required delegation barrier integration", () => {
 
     expect(registry.executed.map((call) => call.name)).toEqual(["delegate_task"]);
     expect(provider.receivedHistories).toHaveLength(2);
+    const resumedHistory = provider.receivedHistories[1] ?? [];
+    expect(resumedHistory.some((message) => message.content === "dispatching")).toBe(false);
+    expect(
+      resumedHistory.filter((message) => message.providerData?.["picoKind"] === "delegation_join"),
+    ).toHaveLength(1);
   });
 
   it("required 未完成前不再请求主 provider，完成后只注入一次聚合结果并统一总结", async () => {
