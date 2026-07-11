@@ -9,6 +9,19 @@ import pc from "picocolors";
 
 const diffColors = pc.createColors(true);
 
+export type SubagentActivityStatus = "queued" | "running" | "completed" | "failed";
+
+/** 宿主可见的子代理活动快照；activityId 只用于更新同一张卡片。 */
+export interface SubagentActivityEvent {
+  activityId: string;
+  task: string;
+  status: SubagentActivityStatus;
+  agentName?: string;
+  mode?: "explore" | "worker";
+  currentAction?: string;
+  summary?: string;
+}
+
 /** Agent 引擎向外界输出信息的规范 */
 export interface Reporter {
   /** 当 provider 输出原生 thinking/reasoning 时调用 */
@@ -29,6 +42,8 @@ export interface Reporter {
     chunk: string,
     providerCallId?: string,
   ): void;
+  /** 子代理活动的可替换快照，用于宿主展示并行 worker 进度。 */
+  onSubagentActivity?(activity: SubagentActivityEvent): void;
   /** 当模型宣告任务完成,向用户输出最终纯文本回答时调用 */
   onMessage(content: string): void;
   /** 引擎启动时调用 */
