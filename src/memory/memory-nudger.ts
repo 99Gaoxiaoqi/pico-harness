@@ -4,7 +4,7 @@
 // 核心职责：
 // - 周期性触发：每 10 轮对话生成一次记忆提醒
 // - 技能回顾：展示最近掌握的 Top 3 技能及其成功率
-// - 会话摘要：提取本次对话的关键要点（如果 FTS5 中有摘要）
+// - 会话摘要：提取本次对话的关键要点（如果摘要存储中有记录）
 // - 注入时机：在 PromptComposer 组装 system prompt 时动态插入
 //
 // 参考设计：
@@ -12,8 +12,14 @@
 // - Context7 的 Memory Injection 策略
 
 import type { SkillRegistry } from "./skill-registry.js";
-import type { FTS5Store } from "./fts5-store.js";
+import type { SessionSummaryStore, StoredSessionSummary } from "./memory-store.js";
 import { calculateSuccessRate } from "./skill-schema.js";
+
+interface LegacySessionSummaryReader {
+  getSummary(sessionId: string): StoredSessionSummary | string | null;
+}
+
+type SessionSummaryReader = Pick<SessionSummaryStore, "get"> | LegacySessionSummaryReader;
 
 /**
  * MemoryNudger: 周期性记忆提醒生成器。
@@ -25,7 +31,7 @@ export class MemoryNudger {
 
   constructor(
     private readonly skillRegistry: SkillRegistry,
-    private readonly fts5: FTS5Store,
+    private readonly summaryReader: SessionSummaryReader,
     options?: { nudgePeriod?: number },
   ) {
     this.nudgePeriod = options?.nudgePeriod ?? 10;
@@ -60,13 +66,22 @@ export class MemoryNudger {
     }
 
     // 2. 会话摘要（如果有）
-    const summary = this.fts5.getSummary(sessionId);
-    if (summary && typeof summary === "string") {
+    const summary = this.readSummary(sessionId);
+    if (summary) {
       parts.push("\n## 本次对话要点");
       parts.push(summary);
     }
 
     // 如果既没有技能也没有摘要，返回 null
     return parts.length > 1 ? parts.join("\n") : null;
+  }
+
+  private readSummary(sessionId: string): string | null {
+    if ("get" in this.summaryReader) {
+      return this.summaryReader.get(sessionId)?.summary ?? null;
+    }
+
+    const summary = this.summaryReader.getSummary(sessionId);
+    return typeof summary === "string" ? summary : (summary?.summary ?? null);
   }
 }
