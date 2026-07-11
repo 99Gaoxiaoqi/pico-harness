@@ -882,7 +882,7 @@ export class AgentEngine implements AgentRunner {
                 const settled = settledResults[index];
                 if (settled) return settled.message;
                 const content = "工具执行已取消:本轮运行被中止,未产生可用结果。";
-                reporter.onToolResult(toolCall.name, content, true);
+                reporter.onToolResult(toolCall.name, content, true, toolCall.id);
                 return {
                   role: "user" as const,
                   content,
@@ -981,7 +981,7 @@ export class AgentEngine implements AgentRunner {
     });
     try {
       signal?.throwIfAborted();
-      reporter.onToolCall(toolCall.name, toolCall.arguments);
+      reporter.onToolCall(toolCall.name, toolCall.arguments, toolCall.id);
       const guardDecision = this.guardrail.beforeCall(toolCall);
       let result: ToolResult;
       if (!guardDecision.allowed) {
@@ -992,7 +992,11 @@ export class AgentEngine implements AgentRunner {
         };
       } else {
         signal?.throwIfAborted();
-        result = await this.registry.execute(toolCall, { signal });
+        result = await this.registry.execute(toolCall, {
+          signal,
+          onOutput: ({ stream, chunk }) =>
+            reporter.onToolOutput?.(toolCall.name, stream, chunk, toolCall.id),
+        });
         signal?.throwIfAborted();
       }
 
@@ -1018,7 +1022,7 @@ export class AgentEngine implements AgentRunner {
         rawOutputPreview: finalOutput === result.output ? undefined : truncate(result.output, 500),
       });
 
-      reporter.onToolResult(toolCall.name, observationOutput, result.isError);
+      reporter.onToolResult(toolCall.name, observationOutput, result.isError, toolCall.id);
       const readOnly = this.registry.isReadOnlyTool?.(toolCall.name) ?? false;
       const reminder = this.guardrail.afterCall(toolCall, result, { readOnly });
       // ToolCallId 必须携带!这是维系大模型推理链条的关键
@@ -1334,7 +1338,7 @@ export class AgentEngine implements AgentRunner {
         scheduler.add({
           accesses: getAccesses ? getAccesses.call(readOnlyRegistry, tc) : ToolAccesses.all(),
           start: async () => {
-            rep.onToolCall(`[Subagent] ${tc.name}`, tc.arguments);
+            rep.onToolCall(`[Subagent] ${tc.name}`, tc.arguments, tc.id);
             const result = await readOnlyRegistry.execute(tc);
             let finalOutput = result.output;
             if (result.isError) {
@@ -1348,7 +1352,7 @@ export class AgentEngine implements AgentRunner {
             );
             // 从外部化占位文本中提取磁盘路径,回传给主 Agent 供其用 read_file 回查。
             const artifactPath = extractArtifactPath(observationOutput);
-            rep.onToolResult(`[Subagent] ${tc.name}`, observationOutput, result.isError);
+            rep.onToolResult(`[Subagent] ${tc.name}`, observationOutput, result.isError, tc.id);
             return {
               message: {
                 role: "user" as const,

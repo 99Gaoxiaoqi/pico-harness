@@ -22,6 +22,13 @@ export interface Reporter {
   /** 当工具在底层执行完毕并返回结果时调用 */
   /** providerCallId 应与 onToolCall 传入的 ID 相同。 */
   onToolResult(toolName: string, result: string, isError: boolean, providerCallId?: string): void;
+  /** 工具执行期间的增量输出；当前主要由前台 Bash 提供。 */
+  onToolOutput?(
+    toolName: string,
+    stream: "stdout" | "stderr",
+    chunk: string,
+    providerCallId?: string,
+  ): void;
   /** 当模型宣告任务完成,向用户输出最终纯文本回答时调用 */
   onMessage(content: string): void;
   /** 引擎启动时调用 */

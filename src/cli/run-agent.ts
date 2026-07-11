@@ -706,7 +706,7 @@ export function buildApprovalMiddleware(
       notifier,
       diff,
       signal,
-      { sessionScope: scope },
+      { sessionScope: scope, providerCallId: call.id },
     );
     if (!result.allowed || !workspaceRoots || !settings) return result;
 
