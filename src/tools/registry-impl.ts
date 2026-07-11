@@ -2,8 +2,9 @@
 // 对应课程第 05 讲:registryImpl + read_file 工具。
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { readFile, writeFile, mkdir, stat } from "node:fs/promises";
-import { isAbsolute, relative, resolve } from "node:path";
+import { constants } from "node:fs";
+import { mkdir, open, readFile, stat, type FileHandle } from "node:fs/promises";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
 import type {
   BaseTool,
   ExecutionMiddleware,
@@ -38,6 +39,7 @@ import {
 } from "../safety/yolo-sandbox.js";
 
 const DEFAULT_RESULT_SIZE_CHARS = 8000;
+const NO_FOLLOW_FLAG = constants.O_NOFOLLOW ?? 0;
 
 export interface ToolRegistryOptions {
   defaultResultSizeChars?: number;
@@ -685,11 +687,11 @@ export class WriteFileTool implements BaseTool {
       throw new Error("参数解析失败: 期望 JSON 含 path 和 content 字段");
     }
 
-    // 安全防线:限制在 WorkDir 下
+    // 先校验但不消耗一次性授权；创建父目录后重新解析真实路径，
+    // 防止父目录在 mkdir 期间被替换为越界符号链接。
+    const initialPath = await this.roots.assertAllowed(path, { consumeAuthorization: false });
+    await mkdir(dirname(initialPath), { recursive: true });
     const fullPath = await this.roots.assertAllowed(path);
-
-    // 自动创建缺失的父级目录
-    await mkdir(resolve(fullPath, ".."), { recursive: true });
 
     // 检查是新建还是覆盖
     let isNewFile = false;
@@ -699,8 +701,17 @@ export class WriteFileTool implements BaseTool {
       isNewFile = true; // 文件不存在 → 新建
     }
 
-    // 写入文件
-    await writeFile(fullPath, content, "utf8");
+    // O_NOFOLLOW 拒绝在最后一次校验后被替换的文件符号链接。
+    const handle = await open(
+      fullPath,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | NO_FOLLOW_FLAG,
+      0o666,
+    );
+    try {
+      await writeAllAtStart(handle, content);
+    } finally {
+      await handle.close();
+    }
 
     const action = isNewFile ? "新建" : "覆盖";
     const sizeInfo = `(${content.length} 字符)`;
@@ -1421,24 +1432,17 @@ export class EditFileTool implements BaseTool {
     }
 
     const fullPath = await this.roots.assertAllowed(path);
-
-    // 1. 读取原文件(原始字节流)
-    const raw = await readFile(fullPath, "utf8");
-
-    // 2. 模型视图归一化:纯 CRLF → LF 视图(模型只处理一种行尾,匹配才稳定);
-    //    lf/mixed 原样返回,并记录原始行尾风格供写回还原。
-    const modelView = toModelTextView(raw);
-    const content = modelView.text;
-
-    // 3. 多级模糊替换(在 LF 视图上操作)
+    const handle = await open(fullPath, constants.O_RDWR | NO_FOLLOW_FLAG);
     try {
+      // 在同一个已校验的文件描述符上完成读改写，避免路径在读后写前被换目标。
+      const raw = await handle.readFile("utf8");
+      const modelView = toModelTextView(raw);
+      const content = modelView.text;
       const { content: newContent, level } = fuzzyReplace(content, oldText, newText, replaceAll);
 
-      // 4. 写回磁盘:按记录的原始行尾风格还原(CRLF 文件写回仍是 CRLF)
-      await writeFile(
-        fullPath,
+      await writeAllAtStart(
+        handle,
         materializeModelText(newContent, modelView.lineEndingStyle),
-        "utf8",
       );
 
       // 5. 生成 diff 预览(简单 before/after 对比,供用户审批时查看)
@@ -1446,8 +1450,11 @@ export class EditFileTool implements BaseTool {
       const allNote = replaceAll ? ", 全部替换" : "";
       return `✅ 成功修改文件: ${path} (匹配级别 L${level}${allNote})\n\n${diffPreview}`;
     } catch (err) {
-      // 匹配全失败时附候选上下文,帮模型重定位(仅对"未找到"类错误生效)
-      throw this.enrichNotFoundError(err, content, oldText);
+      // 重新读取仅用于生成匹配失败提示，不再打开路径。
+      const current = await readOpenFileFromStart(handle).catch(() => "");
+      throw this.enrichNotFoundError(err, toModelTextView(current).text, oldText);
+    } finally {
+      await handle.close();
     }
   }
 
@@ -1467,6 +1474,30 @@ export class EditFileTool implements BaseTool {
     }
     return new Error(`${errMsg}${formatCandidateHint(hints)}`);
   }
+}
+
+async function readOpenFileFromStart(handle: FileHandle): Promise<string> {
+  const info = await handle.stat();
+  if (info.size > Number.MAX_SAFE_INTEGER) throw new Error("文件过大，无法读取");
+  const buffer = Buffer.alloc(Number(info.size));
+  let offset = 0;
+  while (offset < buffer.length) {
+    const { bytesRead } = await handle.read(buffer, offset, buffer.length - offset, offset);
+    if (bytesRead === 0) break;
+    offset += bytesRead;
+  }
+  return buffer.subarray(0, offset).toString("utf8");
+}
+
+async function writeAllAtStart(handle: FileHandle, content: string): Promise<void> {
+  const buffer = Buffer.from(content, "utf8");
+  let offset = 0;
+  while (offset < buffer.length) {
+    const { bytesWritten } = await handle.write(buffer, offset, buffer.length - offset, offset);
+    if (bytesWritten === 0) throw new Error("文件写入未取得进展");
+    offset += bytesWritten;
+  }
+  await handle.truncate(buffer.length);
 }
 
 // ==========================================
