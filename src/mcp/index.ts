@@ -9,7 +9,11 @@
 export { McpConnectionManager, DEFAULT_CONFIG_RELATIVE } from "./manager.js";
 export type {
   McpConnectionManagerOptions,
+  McpOAuthCredentials,
+  McpOAuthHandler,
+  McpOAuthRequest,
   McpServerStatus,
+  McpStatusListener,
   McpStatusSnapshot,
   McpStatusSummary,
 } from "./manager.js";
@@ -33,6 +37,14 @@ export type {
   McpConnectionStatus,
   McpContentBlock,
   McpToolResult,
+  McpResource,
+  McpResourceContents,
+  McpResourceListResult,
+  McpResourceReadResult,
+  McpPrompt,
+  McpPromptListResult,
+  McpPromptMessage,
+  McpPromptGetResult,
   McpClient,
   JsonRpcRequest,
   JsonRpcNotification,

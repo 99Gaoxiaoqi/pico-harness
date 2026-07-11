@@ -21,6 +21,10 @@ import {
   type JsonRpcRequest,
   type JsonRpcResponse,
   type McpClient,
+  type McpPromptGetResult,
+  type McpPromptListResult,
+  type McpResourceListResult,
+  type McpResourceReadResult,
   type McpServerConfig,
   type McpTool,
   type McpToolResult,
@@ -113,6 +117,54 @@ export class StdioMcpClient implements McpClient {
   async callTool(name: string, args: Record<string, unknown>): Promise<McpToolResult> {
     const result = await this.request("tools/call", { name, arguments: args });
     return this.normalizeToolResult(result);
+  }
+
+  async listResources(cursor?: string): Promise<McpResourceListResult> {
+    const result = (await this.request("resources/list", cursor ? { cursor } : {})) as {
+      resources?: unknown;
+      nextCursor?: unknown;
+    };
+    return {
+      resources: Array.isArray(result.resources)
+        ? (result.resources as McpResourceListResult["resources"])
+        : [],
+      ...(typeof result.nextCursor === "string" ? { nextCursor: result.nextCursor } : {}),
+    };
+  }
+
+  async readResource(uri: string): Promise<McpResourceReadResult> {
+    const result = (await this.request("resources/read", { uri })) as { contents?: unknown };
+    return {
+      contents: Array.isArray(result.contents)
+        ? (result.contents as McpResourceReadResult["contents"])
+        : [],
+    };
+  }
+
+  async listPrompts(cursor?: string): Promise<McpPromptListResult> {
+    const result = (await this.request("prompts/list", cursor ? { cursor } : {})) as {
+      prompts?: unknown;
+      nextCursor?: unknown;
+    };
+    return {
+      prompts: Array.isArray(result.prompts)
+        ? (result.prompts as McpPromptListResult["prompts"])
+        : [],
+      ...(typeof result.nextCursor === "string" ? { nextCursor: result.nextCursor } : {}),
+    };
+  }
+
+  async getPrompt(name: string, args?: Record<string, string>): Promise<McpPromptGetResult> {
+    const result = (await this.request("prompts/get", {
+      name,
+      ...(args !== undefined ? { arguments: args } : {}),
+    })) as { description?: unknown; messages?: unknown };
+    return {
+      ...(typeof result.description === "string" ? { description: result.description } : {}),
+      messages: Array.isArray(result.messages)
+        ? (result.messages as McpPromptGetResult["messages"])
+        : [],
+    };
   }
 
   async close(): Promise<void> {
