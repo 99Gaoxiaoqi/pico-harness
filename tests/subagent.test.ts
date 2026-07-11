@@ -25,11 +25,27 @@ import { WorkspaceRoots } from "../src/tools/workspace-roots.js";
 import type { LLMProvider } from "../src/provider/interface.js";
 import type { Message, ToolDefinition, ToolCall, ToolResult } from "../src/schema/message.js";
 import type { Registry } from "../src/tools/registry.js";
+import type { Reporter, SubagentActivityEvent } from "../src/engine/reporter.js";
 
 /** 可编程的 Mock Provider:按预设响应序列依次返回 */
 /** Wrap a plain summary into a SubagentResult for mock runners. */
 function subResult(summary: string, artifacts: string[] = []): SubagentResult {
   return { summary, artifacts };
+}
+
+function activityReporter(events: SubagentActivityEvent[]): Reporter {
+  return {
+    onThinking() {},
+    onToolCall() {},
+    onToolResult() {},
+    onMessage() {},
+    onStart() {},
+    onTurnStart() {},
+    onFinish() {},
+    onSubagentActivity(event) {
+      events.push(event);
+    },
+  };
 }
 
 class ScriptedProvider implements LLMProvider {
@@ -391,6 +407,71 @@ describe("DelegateTaskTool", () => {
     expect(parsed.results.map((result) => result.summary)).toEqual(["done:a", "done:b", "done:c"]);
   });
 
+  it("批量委派为每个子代理上报独立活动生命周期，不改变工具结果", async () => {
+    const events: SubagentActivityEvent[] = [];
+    const runner: AgentRunner = {
+      async runSub(taskPrompt, _registry, reporter) {
+        reporter?.onThinking();
+        reporter?.onToolCall("read_file", JSON.stringify({ path: `src/${taskPrompt}.ts` }));
+        reporter?.onToolResult("read_file", "file contents", false);
+        return subResult(`done:${taskPrompt}`);
+      },
+    };
+    const manager = new DelegationManager({ maxConcurrentChildren: 2 });
+    const tool = new DelegateTaskTool(runner, () => mockReadOnlyRegistry(), manager, {
+      reporter: activityReporter(events),
+    });
+
+    const output = JSON.parse(
+      await tool.execute(JSON.stringify({ tasks: [{ goal: "auth" }, { goal: "cache" }] })),
+    ) as { results: Array<{ summary: string }> };
+
+    expect(output.results.map((result) => result.summary)).toEqual(["done:auth", "done:cache"]);
+    const queued = events.filter((event) => event.status === "queued");
+    expect(queued).toHaveLength(2);
+    expect(new Set(queued.map((event) => event.activityId)).size).toBe(2);
+    for (const initial of queued) {
+      const lifecycle = events
+        .filter((event) => event.activityId === initial.activityId)
+        .map((event) => event.status);
+      expect(lifecycle[0]).toBe("queued");
+      expect(lifecycle).toContain("running");
+      expect(lifecycle.at(-1)).toBe("completed");
+    }
+    expect(events.some((event) => event.currentAction?.includes("read_file：src/"))).toBe(true);
+    expect(events.every((event) => !event.activityId.includes("auth"))).toBe(true);
+  });
+
+  it("worker 无隔离环境时上报 failed 并保留原错误结果", async () => {
+    const events: SubagentActivityEvent[] = [];
+    let called = false;
+    const runner: AgentRunner = {
+      async runSub() {
+        called = true;
+        return subResult("不应执行");
+      },
+    };
+    const tool = new DelegateTaskTool(
+      runner,
+      () => mockReadOnlyRegistry(),
+      new DelegationManager(),
+      { reporter: activityReporter(events) },
+    );
+
+    const output = JSON.parse(
+      await tool.execute(JSON.stringify({ goal: "修复问题", mode: "worker" })),
+    ) as {
+      results: Array<{ status: string; error: string }>;
+    };
+
+    expect(called).toBe(false);
+    expect(output.results[0]).toMatchObject({ status: "error" });
+    expect(output.results[0]!.error).toContain("worktree 隔离");
+    expect(events.map((event) => event.status)).toEqual(["queued", "running", "failed"]);
+    expect(events.every((event) => event.mode === "worker")).toBe(true);
+    expect(events.at(-1)?.summary).toContain("worktree 隔离");
+  });
+
   it("background=true 立即返回 handle,delegate_status 可查询完成结果", async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => {
@@ -403,7 +484,10 @@ describe("DelegateTaskTool", () => {
       },
     };
     const manager = new DelegationManager();
-    const tool = new DelegateTaskTool(runner, () => mockReadOnlyRegistry(), manager);
+    const events: SubagentActivityEvent[] = [];
+    const tool = new DelegateTaskTool(runner, () => mockReadOnlyRegistry(), manager, {
+      reporter: activityReporter(events),
+    });
     const statusTool = new DelegateStatusTool(manager);
 
     const dispatched = JSON.parse(
@@ -425,6 +509,7 @@ describe("DelegateTaskTool", () => {
     ) as { status: string; result: { results: Array<{ summary: string }> } };
     expect(completed.status).toBe("completed");
     expect(completed.result.results[0]!.summary).toBe("background complete");
+    expect(events.map((event) => event.status)).toEqual(["queued", "running", "completed"]);
   });
 
   it("background=true 返回 task registry 快照,并安全截断输出摘要", async () => {
