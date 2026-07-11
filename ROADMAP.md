@@ -595,6 +595,17 @@ git worktree remove ../pico-1-streaming
 - [ ] 2026-07-11：将 task merge 改为隔离集成 worktree 中的可恢复事务，增加 `/tasks resume` / `abort`，冲突时不在主工作区留下半合并状态。
 - [ ] 2026-07-11：将 `/tasks message` 从“下一个安全排水点读取”升级为运行中 worker 的可观察实时 steer，并明确已送达/已消费状态。
 
+### 工程与运行时后续收口（未排期）
+
+- [ ] 2026-07-11：删除只被测试引用的影子权限链 `approval/policy.ts` / `ApprovalPolicy`，把文档和验证统一到生产 `buildApprovalMiddleware`。
+- [ ] 2026-07-11：收敛两套 compaction/aux provider 实现，保留生产 `compactToBudget + FullCompactor` 单链路。
+- [ ] 2026-07-11：清理已退役但仍进入构建的 Plugin manager、孤立 Agent/Permission JSX 面板和 one-shot rewind CLI helper。
+- [ ] 2026-07-11：TUI 先渲染外壳，将 LSP / MCP / File Index 后台初始化并展示进度，避免慢服务阻塞首帧。
+- [ ] 2026-07-11：实现按语言路由的 LSP server pool；完成前明确产品语义为“单 LSP，启动不可用时整体降级 Repo Map”。
+- [ ] 2026-07-11：为所有 Repo Map fallback 查询返回 `complete/indexedFiles/totalFiles`，避免将局部无结果误判为全仓不存在。
+- [ ] 2026-07-11：批处理 TUI 流式 transcript 的 O(N²) 重新投影/测量热点，并为 Inspector 增加鼠标滚轮。
+- [ ] 2026-07-11：收敛 `/mcp auth` 与真实 OAuth handler 的差异，MCP resource/prompt 大输出复用 artifact/Inspector 分页链路。
+
 - [x] 2026-07-11：增加 Claude Code 风格的首次工作区信任门；信任通过前不读取项目 Session / Config / AGENTS / Skills，不启动 Provider / LSP / MCP / Hook；用户级信任库按 realpath 安全、原子持久化，非交互首启 fail-closed。
 
 - [x] 2026-07-10：参考 OpenCode 引入 `providerID/modelID` 模型路由；`.pico/config.json` provider map 关联协议、端点和凭证环境变量，`/model` 仅从配置/发现目录安全切换完整路由，旧 `LLM_*` 保持兼容；本地 HTTP 集成测试覆盖模型发现、非法路由拒绝和真实请求切换。
@@ -620,6 +631,9 @@ git worktree remove ../pico-1-streaming
   - Plan 仅允许保守可证明的只读 Bash，MCP 和可写/递归 `delegate_task` 不得绕过 Plan；主 YOLO 按 OS 用户权限全放权，worker 无论主 mode 都保持 worktree + OS 沙箱。
   - Fetch URL 增加 SSRF/凭据/重定向/DNS rebinding 防护；MCP HTTP/SSE/stdio、LSP、Hook 和 tool artifact 增加硬大小与资源上限。
   - Write/Edit 封闭符号链接竞态；MCP 未知工具不再伪装为无副作用；worker 改由宿主提交，stop 等待 runner 真正退出，缺少 supervisor 时 fail-closed。
+  - 非 YOLO 按 realpath 保护凭据读写和 Agent 控制面写入；Plan 移除可读密钥/执行 pager 的 Bash/Git 子命令，默认全树 Grep 不扫描凭据文件。
+  - 宿主自动 Git 使用最小环境，禁用 hooks/fsmonitor/签名/凭据助手，检测到 filter/merge driver 时 fail-closed；任务合并不再隐式 fetch。
+  - read_file 与 Repo Map 在读取前检查文件大小；工作区信任提示将 C1/双向文本控制字符显式转义。
 
 - 2026-07-11：增加工作区首次信任门
   - CLI 得到真实工作目录后先完成信任确认，再读取 Session 并启动 TUI 项目级能力。
