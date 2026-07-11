@@ -1,6 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { logger } from "../observability/logger.js";
+import { buildMinimalChildProcessEnv } from "../os/child-process-env.js";
 import type { LspServerConfig } from "./lsp-server-discovery.js";
 import {
   isJsonRpcNotification,
@@ -57,7 +58,7 @@ export class StdioLspClient {
     this.state = "starting";
     this.child = spawn(this.config.command, [...(this.config.args ?? [])], {
       cwd: this.rootDir,
-      env: { ...process.env, ...this.config.env },
+      env: buildMinimalChildProcessEnv(this.config.env),
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
     });

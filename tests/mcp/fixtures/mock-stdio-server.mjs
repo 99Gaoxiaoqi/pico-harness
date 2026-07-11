@@ -21,6 +21,7 @@ const { values } = parseArgs({
     "fail-startup": { type: "boolean", default: false },
     "ignore-sigterm": { type: "boolean", default: false },
     "pid-file": { type: "string" },
+    "env-snapshot": { type: "string" },
     stderr: { type: "string" },
   },
   allowPositionals: false,
@@ -32,6 +33,10 @@ const serverName = values.name;
 
 if (values["pid-file"]) {
   writeFileSync(values["pid-file"], String(process.pid));
+}
+
+if (values["env-snapshot"]) {
+  writeFileSync(values["env-snapshot"], JSON.stringify(process.env));
 }
 
 if (values["ignore-sigterm"]) {
