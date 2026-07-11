@@ -309,7 +309,9 @@ describe("fetch_url 本地 fixture", { timeout: 60000 }, () => {
         },
       } as unknown as Response;
     }) as unknown as typeof fetch;
-    const tool = new FetchURLTool();
+    const tool = new FetchURLTool({
+      request: (url, _addresses, signal) => fetch(url.href, { signal, redirect: "manual" }),
+    });
     const result = await tool.execute(
       JSON.stringify({ url: "https://fixture.test", max_chars: 2000 }),
     );

@@ -5,13 +5,17 @@
 // 两个工具均为 readOnly=true、accesses() 返回 ToolAccesses.none()
 // (网络访问不算本地文件系统副作用,不参与资源冲突图调度)。
 //
-// 不引入新依赖:仅用 Node 18+ 内置 fetch,HTML 标签剥离用正则最简实现。
+// 不引入新依赖:FetchURL 用 Node 内置 HTTP/TLS 固定已校验地址，WebSearch 用内置 fetch。
 
-import type { BaseTool } from "./registry.js";
-import type { ToolDefinition } from "../schema/message.js";
-import { ToolAccesses } from "./tool-access.js";
+import type { LookupAddress } from "node:dns";
 import { lookup } from "node:dns/promises";
-import { BlockList, isIP } from "node:net";
+import { request as httpRequest, type IncomingHttpHeaders } from "node:http";
+import { request as httpsRequest } from "node:https";
+import { BlockList, isIP, type LookupFunction } from "node:net";
+import { Readable } from "node:stream";
+import type { ToolDefinition } from "../schema/message.js";
+import type { BaseTool } from "./registry.js";
+import { ToolAccesses } from "./tool-access.js";
 
 // FetchURL 抓取超时(网络请求兜底,防永久挂起)
 const FETCH_URL_TIMEOUT_MS = 30_000;
@@ -51,6 +55,7 @@ for (const [network, prefix] of [
 for (const [network, prefix] of [
   ["::", 128],
   ["::1", 128],
+  ["64:ff9b::", 96],
   ["64:ff9b:1::", 48],
   ["100::", 64],
   ["2001::", 32],
@@ -71,6 +76,17 @@ const BLOCKED_METADATA_HOSTS = new Set([
   "metadata.google.internal",
   "metadata.azure.internal",
 ]);
+
+export type FetchURLRequest = (
+  url: URL,
+  addresses: readonly LookupAddress[],
+  signal: AbortSignal,
+) => Promise<Response>;
+
+export interface FetchURLToolOptions {
+  /** 仅供宿主替换传输层；默认实现会把连接固定到已经校验的 DNS 地址。 */
+  request?: FetchURLRequest;
+}
 
 /**
  * 校验字符串是否为合法 http(s) URL。
@@ -107,7 +123,7 @@ function isBlockedAddress(address: string, family: number): boolean {
 }
 
 /** 每次真正请求前解析并检查全部 A/AAAA 地址，避免任一候选落入宿主或保留网络。 */
-async function assertPublicTarget(url: URL): Promise<void> {
+async function resolvePublicTarget(url: URL): Promise<LookupAddress[]> {
   const hostname = normalizedHostname(url);
   if (
     hostname === "localhost" ||
@@ -120,7 +136,7 @@ async function assertPublicTarget(url: URL): Promise<void> {
   }
 
   const literalFamily = isIP(hostname);
-  let addresses: Array<{ address: string; family: number }>;
+  let addresses: LookupAddress[];
   if (literalFamily !== 0) {
     addresses = [{ address: hostname, family: literalFamily }];
   } else {
@@ -138,7 +154,92 @@ async function assertPublicTarget(url: URL): Promise<void> {
   if (addresses.some(({ address, family }) => isBlockedAddress(address, family))) {
     throw new Error(`拒绝抓取: 主机 '${hostname}' 解析到非公网或保留地址`);
   }
+  return addresses;
 }
+
+function requestedFamily(family: number | "IPv4" | "IPv6" | undefined): number {
+  if (family === 4 || family === "IPv4") return 4;
+  if (family === 6 || family === "IPv6") return 6;
+  return 0;
+}
+
+/** 将 HTTP/TLS 建连固定到本轮已经检查过的地址，消除检查后再次 DNS 解析的 rebinding 窗口。 */
+function createPinnedLookup(addresses: readonly LookupAddress[]): LookupFunction {
+  return (_hostname, options, callback) => {
+    const family = requestedFamily(options.family);
+    const candidates =
+      family === 0 ? [...addresses] : addresses.filter((item) => item.family === family);
+    if (candidates.length === 0) {
+      const error = Object.assign(new Error("没有符合请求地址族的已验证 DNS 地址"), {
+        code: "ENOTFOUND",
+      });
+      callback(error, options.all ? [] : "", family || undefined);
+      return;
+    }
+    if (options.all) {
+      callback(null, candidates);
+      return;
+    }
+    const selected = candidates[0];
+    if (!selected) {
+      callback(Object.assign(new Error("没有已验证 DNS 地址"), { code: "ENOTFOUND" }), "");
+      return;
+    }
+    callback(null, selected.address, selected.family);
+  };
+}
+
+function toWebHeaders(headers: IncomingHttpHeaders): Headers {
+  const result = new Headers();
+  for (const [name, value] of Object.entries(headers)) {
+    if (value === undefined) continue;
+    if (Array.isArray(value)) {
+      for (const item of value) result.append(name, item);
+    } else {
+      result.set(name, value);
+    }
+  }
+  return result;
+}
+
+const requestPinnedUrl: FetchURLRequest = async (url, addresses, signal) => {
+  const request = url.protocol === "https:" ? httpsRequest : httpRequest;
+  return new Promise<Response>((resolve, reject) => {
+    const outgoing = request(
+      url,
+      {
+        method: "GET",
+        signal,
+        lookup: createPinnedLookup(addresses),
+        maxHeaderSize: 64 * 1024,
+        headers: {
+          Accept: "text/html,application/xhtml+xml,application/json,text/plain;q=0.9,*/*;q=0.1",
+          "Accept-Encoding": "identity",
+          "User-Agent": "pico-harness/fetch_url",
+        },
+      },
+      (incoming) => {
+        const status = incoming.statusCode ?? 500;
+        const hasBody = status !== 204 && status !== 205 && status !== 304;
+        const body = hasBody ? (Readable.toWeb(incoming) as ReadableStream<Uint8Array>) : null;
+        try {
+          resolve(
+            new Response(body, {
+              status,
+              statusText: incoming.statusMessage,
+              headers: toWebHeaders(incoming.headers),
+            }),
+          );
+        } catch (error) {
+          incoming.destroy();
+          reject(error);
+        }
+      },
+    );
+    outgoing.once("error", reject);
+    outgoing.end();
+  });
+};
 
 function isRedirectStatus(status: number): boolean {
   return status === 301 || status === 302 || status === 303 || status === 307 || status === 308;
@@ -147,14 +248,12 @@ function isRedirectStatus(status: number): boolean {
 async function fetchWithValidatedRedirects(
   initialUrl: URL,
   signal: AbortSignal,
+  request: FetchURLRequest,
 ): Promise<{ response: Response; finalUrl: URL }> {
   let currentUrl = initialUrl;
   for (let redirectCount = 0; ; redirectCount += 1) {
-    await assertPublicTarget(currentUrl);
-    const response = await fetch(currentUrl.href, {
-      signal,
-      redirect: "manual",
-    });
+    const addresses = await resolvePublicTarget(currentUrl);
+    const response = await request(currentUrl, addresses, signal);
     if (!isRedirectStatus(response.status)) {
       return { response, finalUrl: currentUrl };
     }
@@ -269,6 +368,11 @@ function truncate(text: string, maxChars: number): string {
 
 export class FetchURLTool implements BaseTool {
   readonly readOnly = true;
+  private readonly request: FetchURLRequest;
+
+  constructor(options: FetchURLToolOptions = {}) {
+    this.request = options.request ?? requestPinnedUrl;
+  }
 
   name(): string {
     return "fetch_url";
@@ -324,6 +428,7 @@ export class FetchURLTool implements BaseTool {
     const { response: resp, finalUrl } = await fetchWithValidatedRedirects(
       parsed,
       AbortSignal.timeout(FETCH_URL_TIMEOUT_MS),
+      this.request,
     );
 
     if (!resp.ok) {
