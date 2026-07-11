@@ -182,6 +182,32 @@ describe("large ToolResult artifact externalization", () => {
     await safeRm(workDir);
   });
 
+  it("delegate_task 超过 10000 字符时外部化，普通工具仍保持 50000 阈值", async () => {
+    const store = new ToolResultArtifactStore({
+      baseDir: join(workDir, ".claw", "artifacts"),
+    });
+    const processor = createToolResultObservationProcessor({ store });
+    const output = "x".repeat(10_001);
+    const result: ToolResult = { toolCallId: "large", output, isError: false };
+
+    const delegateObservation = await processor({
+      toolCall: { id: "delegate-large", name: "delegate_task", arguments: "{}" },
+      result,
+      output,
+      sessionId: "delegate-threshold",
+    });
+    const ordinaryObservation = await processor({
+      toolCall: { id: "ordinary-large", name: "extension_tool", arguments: "{}" },
+      result,
+      output,
+      sessionId: "ordinary-threshold",
+    });
+
+    expect(delegateObservation).toContain("[大型工具输出已外部化]");
+    expect(delegateObservation).toContain("tool: delegate_task");
+    expect(ordinaryObservation).toBe(output);
+  });
+
   it("Bash 完整落盘大输出后可用 read_file 分页读取且不再外部化", async () => {
     const lines = Array.from(
       { length: 450 },
