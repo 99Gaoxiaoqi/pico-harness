@@ -504,6 +504,8 @@ git worktree remove ../pico-1-streaming
 ## 阶段 12：可信 YOLO 与代码智能（下一阶段）
 
 > **目标**：在默认无审批的交互模式下保留宿主硬边界，并让模型路由、上下文预算和代码理解建立在真实能力元数据之上。三个任务在阶段 11 接口稳定后使用独立 worktree 并行。
+>
+> **执行计划**：`docs/plans/2026-07-11-stage12-trusted-yolo-code-intelligence.md`
 
 - [ ] 12.1 YOLO 沙箱与策略：workspace-write、网络策略、敏感目录和危险命令边界；普通操作不弹审批，但越界不能仅靠模型或提示词约束
 - [ ] 12.2 模型能力与 Usage：route 记录 context/output/vision/reasoning/tool-call/cache/price/fallback 能力；请求前预检；提供 `/context` 与 `/usage`
