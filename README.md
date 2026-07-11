@@ -88,6 +88,12 @@ pico-harness/
 └── package.json
 ```
 
+## 🔐 工作区信任
+
+首次在一个工作区启动 `pico` 时，会在进入 TUI 前询问是否信任该真实目录。只有明确选择信任后，Pico 才会读取项目 `AGENTS.md` / Skills / Session，启用 `.pico/config.json` 中的 Provider 与 LSP，以及 `.claw` 中的 MCP 和 Hook。
+
+信任记录按 `realpath` 持久化到用户目录 `~/.pico/trusted-workspaces.json`；项目内文件不能自行声明信任。未信任工作区在非交互环境中会直接停止，不会默认放行。
+
 ## 🔧 环境变量
 
 | 变量           | 必填 | 说明                                      |

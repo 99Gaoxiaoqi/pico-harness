@@ -13,8 +13,15 @@ import { primeTokenizer } from "../context/token-counter.js";
 import { FTS5Store } from "../memory/fts5-store.js";
 import type { ProviderKind } from "../provider/factory.js";
 import { resolveThinkingEffort, type ThinkingEffort } from "../provider/thinking.js";
+import { ensureWorkspaceTrusted } from "../security/workspace-trust.js";
 import { startTuiRepl, type ReplOptions } from "../tui/repl.js";
-import { resolveCliStartupSession, type CliStartupSession } from "./session-args.js";
+import {
+  resolveCliStartupSession,
+  resolveCliWorkDir,
+  type CliStartupSession,
+  type ResolveCliStartupSessionOptions,
+} from "./session-args.js";
+import { createTerminalWorkspaceTrustPrompt } from "./workspace-trust-prompt.js";
 
 const RETIRED_OPTIONS = new Set([
   "--tui",
@@ -61,13 +68,19 @@ export interface CliRuntime {
   writeStdout(text: string): void;
   writeStderr(text: string): void;
   primeTokenizer(): Promise<void>;
-  resolveCliStartupSession(args: readonly string[]): Promise<CliStartupSession>;
+  resolveCliWorkDir(dir: string | undefined): Promise<string>;
+  ensureWorkspaceTrusted(workDir: string): Promise<void>;
+  resolveCliStartupSession(
+    args: readonly string[],
+    options?: ResolveCliStartupSessionOptions,
+  ): Promise<CliStartupSession>;
   startTuiRepl(options: ReplOptions): Promise<void>;
 }
 
 interface ParsedCliOptions {
   provider: ProviderKind;
   thinkingEffort?: ThinkingEffort;
+  dir?: string;
   model?: string;
   mcpConfigPath?: string;
   addDirs?: string[];
@@ -105,8 +118,14 @@ export async function runCli(args: readonly string[], runtime: CliRuntime): Prom
       return 0;
     }
 
+    // 只先解析真实路径；信任门通过前不读项目 session / config / Skills，
+    // 也不启动 Provider、LSP、MCP 或 Hook。
+    const workDir = await runtime.resolveCliWorkDir(options.dir);
+    await runtime.ensureWorkspaceTrusted(workDir);
     await runtime.primeTokenizer();
-    const { workDir, sessionSelection } = await runtime.resolveCliStartupSession(args);
+    const { sessionSelection } = await runtime.resolveCliStartupSession(args, {
+      trustedWorkDir: workDir,
+    });
     const model = options.model ?? runtime.env.LLM_MODEL ?? defaultModelForKind(options.provider);
 
     await runtime.startTuiRepl({
@@ -172,6 +191,7 @@ function parseCliOptions(args: readonly string[]): ParsedCliOptions {
   return {
     provider,
     ...(thinkingEffort !== undefined ? { thinkingEffort } : {}),
+    ...(typeof values.dir === "string" ? { dir: values.dir } : {}),
     ...(typeof values.model === "string" ? { model: values.model } : {}),
     ...(typeof values["mcp-config"] === "string" ? { mcpConfigPath: values["mcp-config"] } : {}),
     ...(Array.isArray(values["add-dir"]) ? { addDirs: values["add-dir"] } : {}),
@@ -258,6 +278,14 @@ async function executeEntrypoint(): Promise<void> {
     writeStdout: (text) => process.stdout.write(text),
     writeStderr: (text) => process.stderr.write(text),
     primeTokenizer,
+    resolveCliWorkDir,
+    ensureWorkspaceTrusted: async (workDir) => {
+      const prompt =
+        process.stdin.isTTY && process.stdout.isTTY
+          ? createTerminalWorkspaceTrustPrompt({ input: process.stdin, output: process.stdout })
+          : undefined;
+      await ensureWorkspaceTrusted(workDir, { ...(prompt ? { prompt } : {}) });
+    },
     resolveCliStartupSession,
     startTuiRepl,
   };

@@ -122,6 +122,8 @@ pico --add-dir ../shared --add-dir /absolute/generated
 
 `.pico/config.json` 还可以设置项目命令目录和 TUI 键位：
 
+Pico 首次打开一个工作区时会先显示信任确认。信任门通过前不会读取本项目配置、AGENTS / Skills 或 Session，也不会启动 LSP、MCP、Hook 和 Provider 发现。记录保存在用户目录 `~/.pico/trusted-workspaces.json`，项目本身不能声明已信任。
+
 ```json
 {
   "version": 1,
