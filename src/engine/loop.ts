@@ -65,6 +65,16 @@ const SUBAGENT_SUMMARY_MAX_CHARS = 5_000;
 const SUBAGENT_SUMMARY_CONTINUATION_PROMPT =
   "你上一轮的总结过于简短,主架构师无法据此决策。请重新输出一份结构完整、细节充分的总结汇报:包括你探索了哪些文件/发现了什么、关键结论、以及尚存的不确定点。不要调用任何工具,直接用纯文本回答。";
 
+const EXPLORE_SYNTHESIS_PROMPT =
+  "[DELEGATION SYNTHESIS] 本批 required 委派的实际任务均为 explore，子代理已全部收口。" +
+  "你现在只能基于上述聚合结果直接给出统一结论；不得调用任何工具，不得重新阅读、搜索或验证项目。";
+const EXPLORE_SYNTHESIS_RETRY_PROMPT =
+  "[DELEGATION SYNTHESIS RETRY] 上一次回复违反了纯文本总结协议，所有工具调用均已拒绝。" +
+  "请立即基于已有聚合结果输出最终统一总结，只输出纯文本。";
+const MAX_EXPLORE_SYNTHESIS_TOOL_RETRIES = 2;
+const EXPLORE_SYNTHESIS_FAILED_MESSAGE =
+  "子代理已完成探索，但主模型连续违反纯文本总结协议，本次未能生成可靠的统一总结。";
+
 function isBackgroundBashCall(call: ToolCall): boolean {
   if (call.name !== "bash") return false;
   try {
@@ -78,6 +88,12 @@ function isBackgroundBashCall(call: ToolCall): boolean {
 interface DelegateTaskPolicyInput {
   completion_policy?: unknown;
   background?: unknown;
+}
+
+interface DelegateTaskModeInput extends DelegateTaskPolicyInput {
+  goal?: unknown;
+  mode?: unknown;
+  tasks?: Array<{ goal?: unknown; mode?: unknown }>;
 }
 
 /**
@@ -103,6 +119,46 @@ function isRequiredDelegateTaskCall(call: ToolCall): boolean {
 function findRequiredDelegationIndex(toolCalls: readonly ToolCall[]): number | undefined {
   const index = toolCalls.findIndex(isRequiredDelegateTaskCall);
   return index >= 0 ? index : undefined;
+}
+
+/** 与 DelegateTaskTool 的任务归一化规则保持一致：省略/无效 mode 默认 explore。 */
+function isExploreOnlyRequiredDelegation(call: ToolCall): boolean {
+  if (!isRequiredDelegateTaskCall(call)) return false;
+  try {
+    const input = JSON.parse(call.arguments) as DelegateTaskModeInput;
+    const defaultMode = input.mode === "worker" ? "worker" : "explore";
+    const tasks =
+      Array.isArray(input.tasks) && input.tasks.length > 0
+        ? input.tasks.filter(
+            (task) =>
+              typeof task === "object" &&
+              task !== null &&
+              typeof task.goal === "string" &&
+              task.goal.trim().length > 0,
+          )
+        : typeof input.goal === "string" && input.goal.trim().length > 0
+          ? [{ goal: input.goal, mode: input.mode }]
+          : [];
+    return (
+      tasks.length > 0 &&
+      tasks.every(
+        (task) =>
+          (task.mode === "worker" || task.mode === "explore" ? task.mode : defaultMode) ===
+          "explore",
+      )
+    );
+  } catch {
+    return false;
+  }
+}
+
+function buildSynthesisToolRejection(toolCall: ToolCall): Message {
+  return {
+    role: "user",
+    content: "工具执行已拒绝：explore-only required 委派收口后必须直接基于聚合结果输出纯文本总结。",
+    toolCallId: toolCall.id,
+    providerData: { [PICO_TOOL_RESULT_ERROR_KEY]: true },
+  };
 }
 
 function buildExclusiveDelegationRejection(
@@ -659,6 +715,8 @@ export class AgentEngine implements AgentRunner {
     let turnCount = 0;
     let exhaustedReason: string | undefined;
     let hardResetTriggered = false;
+    let exploreSynthesisOnly = false;
+    let exploreSynthesisToolRetries = 0;
     const userRewindPointId = session.fileHistory.snapshots.findLast(
       (snapshot) =>
         snapshot.messageId === session.fileHistory.currentMessageId &&
@@ -736,6 +794,9 @@ export class AgentEngine implements AgentRunner {
           const availableTools = this.toolDisclosure
             ? [...this.toolDisclosure.pickForLLM(allTools), ...this.searchToolSchema(allTools)]
             : allTools;
+          // explore-only required 委派收口后不再给主模型任何工具，
+          // 从能力边界上阻断它重复阅读项目。worker/mixed 批次不受影响。
+          const providerTools = exploreSynthesisOnly ? [] : availableTools;
 
           // ====================================================================
           // 1. 上下文组装:System Prompt + 截取最近 N 条作为 WorkingMemory
@@ -790,7 +851,7 @@ export class AgentEngine implements AgentRunner {
             compactedMessageCount: compactedContext.length,
             contextChars,
             compactedChars,
-            availableToolCount: availableTools.length,
+            availableToolCount: providerTools.length,
           });
           recordCompaction(turnSpan, contextChars, compactedChars);
 
@@ -811,7 +872,7 @@ export class AgentEngine implements AgentRunner {
 
           const actionSpan = turnSpan?.startChild("LLM.Action", {
             inputMessageCount: compactedContext.length,
-            availableToolCount: availableTools.length,
+            availableToolCount: providerTools.length,
             ...(this.toolDisclosure ? { totalToolCount: allTools.length } : {}),
           });
           let responseMsg: Message;
@@ -820,7 +881,7 @@ export class AgentEngine implements AgentRunner {
             responseMsg = await this.generateWithOverflowRetry(
               session,
               systemPrompt,
-              availableTools,
+              providerTools,
               compactedContext,
               actionSpan,
               signal,
@@ -844,6 +905,48 @@ export class AgentEngine implements AgentRunner {
           }
 
           const toolCalls = responseMsg.toolCalls ?? [];
+          if (exploreSynthesisOnly && toolCalls.length > 0) {
+            // 某些 provider/模型可能在 tools=[] 时仍幻觉产生 tool_calls。
+            // 保留 assistant tool call 与逐一 tool result 的协议配对，但绝不进入 Registry。
+            const rejectedResponse: Message = {
+              ...responseMsg,
+              content: "",
+              providerData: {
+                ...responseMsg.providerData,
+                picoKind: "explore_synthesis_tool_rejected",
+                picoHiddenFromTranscript: true,
+              },
+            };
+            session.append(rejectedResponse);
+            this.onTurn?.({ turn: turnCount, message: rejectedResponse });
+            session.append(...toolCalls.map(buildSynthesisToolRejection));
+
+            if (exploreSynthesisToolRetries >= MAX_EXPLORE_SYNTHESIS_TOOL_RETRIES) {
+              const failedResponse: Message = {
+                role: "assistant",
+                content: EXPLORE_SYNTHESIS_FAILED_MESSAGE,
+              };
+              session.append(failedResponse);
+              reporter.onMessage(failedResponse.content);
+              reporter.onFinish();
+              break;
+            }
+
+            exploreSynthesisToolRetries++;
+            session.append({
+              role: "user",
+              content: EXPLORE_SYNTHESIS_RETRY_PROMPT,
+              providerData: {
+                picoKind: "explore_synthesis_retry",
+                picoHiddenFromTranscript: true,
+              },
+            });
+            continue;
+          }
+          if (exploreSynthesisOnly) {
+            exploreSynthesisOnly = false;
+            exploreSynthesisToolRetries = 0;
+          }
           const requiredDelegationIndex = findRequiredDelegationIndex(toolCalls);
           const requiredDelegation =
             requiredDelegationIndex !== undefined ? toolCalls[requiredDelegationIndex] : undefined;
@@ -1024,14 +1127,17 @@ export class AgentEngine implements AgentRunner {
           // 将所有 Observation 持久化到 Session,开启下一轮复盘与推理
           session.append(...observations);
           if (requiredDelegation) {
+            exploreSynthesisOnly = isExploreOnlyRequiredDelegation(requiredDelegation);
+            exploreSynthesisToolRetries = 0;
             session.append({
               role: "user",
-              content:
-                "[DELEGATION JOIN] required 子代理已全部收口（结果可能包含失败）。" +
-                "请吸收上述聚合结果并继续集成、定点验证或统一总结；" +
-                "不要重复子代理已完成范围的大规模探索。",
+              content: exploreSynthesisOnly
+                ? EXPLORE_SYNTHESIS_PROMPT
+                : "[DELEGATION JOIN] required 子代理已全部收口（结果可能包含失败）。" +
+                  "请吸收上述聚合结果并继续集成、定点验证或统一总结；" +
+                  "不要重复子代理已完成范围的大规模探索。",
               providerData: {
-                picoKind: "delegation_join",
+                picoKind: exploreSynthesisOnly ? "explore_delegation_synthesis" : "delegation_join",
                 picoHiddenFromTranscript: true,
               },
             });
