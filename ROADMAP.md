@@ -487,6 +487,39 @@ git worktree remove ../pico-1-streaming
 
 ---
 
+## 阶段 11：TUI 可靠执行闭环 🚧（2026-07-11 启动）
+
+> **目标**：先把已经公开的执行、会话、文件历史与 TUI 状态能力做成可靠闭环；本阶段不扩展第二入口，不新增单元测试，只在最终集成状态运行一条跨模块主链路。
+>
+> **并行边界**：第一波 11.1 / 11.2 / 11.3 使用独立 worktree 并行；第二波 11.4 / 11.5 等第一波合入集成分支后再启动。`ROADMAP.md`、共享依赖和最终 TUI 接线由主代理统一维护。
+
+- [ ] 11.1 执行事务层：AbortSignal 下沉到工具执行上下文；Bash 使用可流式回传、可杀进程树的执行方式；以每轮文件变化 journal 补齐 Bash / formatter / 脚本等写入的 rewind 记录
+- [ ] 11.2 Session 运行时持久化：保存并恢复 model route、mode、thinking、goal、usage/cost、授权目录和 transcript 水合所需状态
+- [ ] 11.3 TUI 事件投影：为消息、阶段和 tool call 建立唯一 ID 与 append-only event store；由 reducer 投影界面，消除重复渲染、同名工具错配和可变状态漂移
+- [ ] 11.4 Session 与运行中交互：启动水合、会话搜索/热切换/fork；区分 steer、queue、interrupt/replace；增加结构化 AskUser 交互
+- [ ] 11.5 Inspector 与 Changes：浏览完整工具输出和 artifact；按轮展示完整文件 patch、单文件恢复并可跳转 `/rewind`
+
+---
+
+## 阶段 12：可信 YOLO 与代码智能（待阶段 11 完成）
+
+> **目标**：在默认无审批的交互模式下保留宿主硬边界，并让模型路由、上下文预算和代码理解建立在真实能力元数据之上。三个任务在阶段 11 接口稳定后使用独立 worktree 并行。
+
+- [ ] 12.1 YOLO 沙箱与策略：workspace-write、网络策略、敏感目录和危险命令边界；普通操作不弹审批，但越界不能仅靠模型或提示词约束
+- [ ] 12.2 模型能力与 Usage：route 记录 context/output/vision/reasoning/tool-call/cache/price/fallback 能力；请求前预检；提供 `/context` 与 `/usage`
+- [ ] 12.3 LSP 与 Repo Map：支持 definitions、references、symbols、diagnostics、调用层级和渐进式仓库地图，并接入现有工具披露机制
+
+---
+
+## 阶段 13：隔离式并行与 MCP 生命周期（待阶段 12 完成）
+
+> **目标**：让写入型子代理和外部工具连接都成为可观察、可中止、可恢复的 TUI 内部能力。两个任务的 TUI 接线串行完成，避免并发修改 `runtime-state.ts` / `repl.tsx`。
+
+- [ ] 13.1 Agent Worktree Supervisor：写入型子代理默认独立 branch/worktree；提供 `/tasks` 状态、输出 tail、停止、重试、追加指令、完成通知和主代理串行合并
+- [ ] 13.2 MCP 生命周期：连接提升到 TUI 生命周期级；支持 reload、enable/disable、reconnect，并分步补齐 OAuth、resources 和 prompts
+
+---
+
 ## 📊 历史交付进度与当前收口
 
 | 阶段         | 总任务数 | 完成   | 状态                                |
@@ -503,7 +536,10 @@ git worktree remove ../pico-1-streaming
 | 阶段 8       | 8        | 8      | ✅ TUI-only 收口完成                |
 | 阶段 9       | 3        | 3      | ✅ 模型路由与核心交互完成           |
 | 阶段 10      | 7        | 7      | ✅ TUI 滚动与大型输出收敛完成       |
-| **当前总计** | **85**   | **85** | ✅ 阶段 1-10 交付并收口             |
+| 阶段 11      | 5        | 0      | 🚧 TUI 可靠执行闭环                 |
+| 阶段 12      | 3        | 0      | ⏳ 可信 YOLO 与代码智能             |
+| 阶段 13      | 2        | 0      | ⏳ 隔离式并行与 MCP 生命周期        |
+| **当前总计** | **95**   | **85** | 🚧 阶段 11 已启动                   |
 
 ---
 
@@ -528,6 +564,11 @@ git worktree remove ../pico-1-streaming
 ---
 
 ## 📅 变更记录
+
+- 2026-07-11：持久化阶段 11-13 开发任务
+  - 阶段 11 先收敛执行事务、Session、TUI 事件投影、运行中交互与 Changes/Inspector；第一波三个独立 worktree 并行，第二波在共享接口合入后启动。
+  - 阶段 12 增加 YOLO 硬沙箱、模型能力/Usage 和 LSP/Repo Map；阶段 13 增加 Agent Worktree Supervisor 与 MCP 常驻生命周期。
+  - 延续 TUI-only 边界；不恢复 headless CLI、REST/WebSocket、ACP、Cron、Docker 或 Plugin runtime；后续只新增跨模块集成验证。
 
 - 2026-07-11：修复 ChatGPT.app 166x17 全屏重复刷屏
   - ChatGPT.app 中 xterm 可能已缩至约 87 列，后端 PTY 却仍上报 166 列；Ink 启动前用 CPR 读取前端真实网格，并将它作为布局上限。
