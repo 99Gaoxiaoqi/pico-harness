@@ -140,7 +140,7 @@ describe("Claude-style permission integration", () => {
     });
   });
 
-  it("默认 yolo 不弹审批且确定性拒绝越界、安全文件与 hardline", async () => {
+  it("默认 yolo 不弹审批并放权普通操作，仅保留 hardline 红线", async () => {
     const workDir = await realTempDir("pico-permission-yolo-");
     const outsideDir = await realTempDir("pico-permission-yolo-outside-");
     const nestedDir = join(outsideDir, "new", "nested");
@@ -179,9 +179,10 @@ describe("Claude-style permission integration", () => {
     await run;
 
     expect(notices).toHaveLength(0);
-    await expect(readFile(outsideFile, "utf8")).rejects.toThrow();
-    await expect(readFile(join(workDir, ".env"), "utf8")).rejects.toThrow();
+    await expect(readFile(outsideFile, "utf8")).resolves.toBe("yolo-ok");
+    await expect(readFile(join(workDir, ".env"), "utf8")).resolves.toBe("TOKEN=blocked");
     expect(getStoredSessionSettings(sessionId)?.mode).toBe("yolo");
+    // 一次性工具通行不应污染会话的显式 additionalDirectories 配置。
     expect(getStoredSessionSettings(sessionId)?.additionalDirectories).not.toContain(outsideDir);
   });
 });
