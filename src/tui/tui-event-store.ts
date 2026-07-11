@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { SubagentActivityEvent } from "../engine/reporter.js";
 import type { ToolCardStatus } from "./tool-card.js";
 import type { SpinnerMode } from "./spinner.js";
 
@@ -27,6 +28,15 @@ type TuiEntryData =
   | { kind: "error"; message: string; retryable?: boolean; action?: string }
   | { kind: "assistant"; content: string }
   | { kind: "tool"; name: string; args: string; status: ToolCardStatus; summary?: string }
+  | {
+      kind: "subagent-activity";
+      task: string;
+      status: SubagentActivityEvent["status"];
+      agentName?: string;
+      mode?: SubagentActivityEvent["mode"];
+      currentAction?: string;
+      summary?: string;
+    }
   | { kind: "thinking" };
 
 /** 仅供渲染边界使用；事件正文仍由 TuiProjectedEntry 持有权威身份。 */
@@ -44,6 +54,8 @@ export interface TuiProjectedEntry {
   readonly entry: TuiEntry;
   readonly streamId?: string;
   readonly toolCallId?: string;
+  /** 仅供 reducer 关联同一活动，不会投影到 TuiEntry 或渲染层。 */
+  readonly subagentActivityId?: string;
 }
 
 export interface TuiPhaseProjection {
@@ -213,6 +225,13 @@ export type TuiEvent =
       readonly artifactPath?: string;
       readonly size: number;
       readonly truncated: boolean;
+    })
+  | (TuiEventBase & {
+      readonly type: "subagent.activity.updated";
+      readonly entryId: string;
+      /** 稳定关联键只在事件与投影内部使用，不进入可渲染数据。 */
+      readonly activityId: string;
+      readonly activity: Omit<SubagentActivityEvent, "activityId">;
     })
   | (TuiEventBase & {
       readonly type: "phase.changed";
@@ -404,6 +423,13 @@ export class TuiEventStore {
       case "phase.changed":
         assertUnique(this.usedPhaseIds, event.phaseId, "phase");
         break;
+      case "subagent.activity.updated":
+        if (
+          !this.projection.entries.some((entry) => entry.subagentActivityId === event.activityId)
+        ) {
+          assertUnique(this.usedEntryIds, event.entryId, "entry");
+        }
+        break;
       case "assistant.stream.delta":
       case "assistant.stream.completed":
       case "assistant.stream.interrupted":
@@ -433,6 +459,13 @@ export class TuiEventStore {
         break;
       case "phase.changed":
         this.usedPhaseIds.add(event.phaseId);
+        break;
+      case "subagent.activity.updated":
+        if (
+          !this.projection.entries.some((entry) => entry.subagentActivityId === event.activityId)
+        ) {
+          this.usedEntryIds.add(event.entryId);
+        }
         break;
       case "assistant.stream.delta":
       case "assistant.stream.completed":
@@ -696,6 +729,28 @@ export function reduceTuiEvent(state: TuiProjection, event: TuiEvent): TuiProjec
       break;
     }
 
+    case "subagent.activity.updated": {
+      const existing = entries.find((entry) => entry.subagentActivityId === event.activityId);
+      const nextEntry: TuiEntry = { kind: "subagent-activity", ...event.activity };
+      if (existing === undefined) {
+        assertNewEntryId(entries, event.entryId);
+        entries = [
+          ...entries,
+          projectedEntry(event.entryId, nextEntry, { subagentActivityId: event.activityId }),
+        ];
+      } else {
+        if (existing.id !== event.entryId) {
+          throw new Error(
+            `TUI subagent activity ${event.activityId} entry mismatch: ${existing.id} != ${event.entryId}`,
+          );
+        }
+        entries = replaceProjectedEntry(entries, existing.id, () =>
+          projectedEntry(existing.id, nextEntry, { subagentActivityId: event.activityId }),
+        );
+      }
+      break;
+    }
+
     case "phase.changed":
       phase = Object.freeze({ id: event.phaseId, mode: event.mode });
       break;
@@ -727,13 +782,16 @@ export function reduceTuiEvent(state: TuiProjection, event: TuiEvent): TuiProjec
 function projectedEntry(
   id: string,
   entry: TuiEntry,
-  metadata: { streamId?: string; toolCallId?: string } = {},
+  metadata: { streamId?: string; toolCallId?: string; subagentActivityId?: string } = {},
 ): TuiProjectedEntry {
   return Object.freeze({
     id,
     entry: Object.freeze({ ...entry }) as TuiEntry,
     ...(metadata.streamId !== undefined ? { streamId: metadata.streamId } : {}),
     ...(metadata.toolCallId !== undefined ? { toolCallId: metadata.toolCallId } : {}),
+    ...(metadata.subagentActivityId !== undefined
+      ? { subagentActivityId: metadata.subagentActivityId }
+      : {}),
   });
 }
 
@@ -845,6 +903,9 @@ function freezeTuiEvent(event: TuiEvent): TuiEvent {
   if (event.type === "entry.appended") {
     return Object.freeze({ ...event, entry: Object.freeze({ ...event.entry }) as TuiEntry });
   }
+  if (event.type === "subagent.activity.updated") {
+    return Object.freeze({ ...event, activity: Object.freeze({ ...event.activity }) });
+  }
   if (event.type === "tool.output" && "segment" in event) {
     return Object.freeze({ ...event, segment: normalizeToolOutputSegment(event) });
   }
@@ -930,6 +991,9 @@ function cloneProjection(projection: TuiProjection): TuiProjection {
     projectedEntry(item.id, item.entry, {
       ...(item.streamId !== undefined ? { streamId: item.streamId } : {}),
       ...(item.toolCallId !== undefined ? { toolCallId: item.toolCallId } : {}),
+      ...(item.subagentActivityId !== undefined
+        ? { subagentActivityId: item.subagentActivityId }
+        : {}),
     }),
   );
   const streams = Object.fromEntries(
