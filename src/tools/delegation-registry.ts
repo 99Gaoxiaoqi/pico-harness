@@ -17,6 +17,7 @@ import { GrepTool } from "./grep.js";
 import { FetchURLTool, WebSearchTool } from "./web.js";
 import { WorkspaceRoots } from "./workspace-roots.js";
 import { evaluateYoloToolCall, type YoloSandboxConfig } from "../safety/yolo-sandbox.js";
+import type { WorktreeSupervisor } from "../tasks/worktree-supervisor.js";
 
 export interface SubagentRegistryFactoryConfig {
   workDir: string;
@@ -29,6 +30,7 @@ export interface SubagentRegistryFactoryConfig {
   profiles?: AgentProfile[];
   /** 主 TUI 为 YOLO 时注入同一宿主边界，子代理不得绕过。 */
   yoloSandbox?: { config?: Partial<YoloSandboxConfig> };
+  worktreeSupervisor?: WorktreeSupervisor;
 }
 
 /**
@@ -76,17 +78,24 @@ export function createSubagentRegistryFactory(
 
   return (request: SubagentRegistryRequest) => {
     const registry = new ToolRegistry();
+    const activeConfig = request.workDir
+      ? {
+          ...resolvedConfig,
+          workDir: request.workDir,
+          workspaceRoots: WorkspaceRoots.createSync(request.workDir),
+        }
+      : resolvedConfig;
 
     // 优先分支:自定义角色(agent_name 命中 profile)
     const profile = request.agentName
       ? profiles.find((p) => p.name === request.agentName)
       : undefined;
     if (profile) {
-      return buildProfileRegistry(resolvedConfig, request, profile);
+      return buildProfileRegistry(activeConfig, request, profile);
     }
 
     // 默认分支:explore/worker 二档(向后兼容,未传 agent_name 或未命中时走此)
-    return buildModeRegistry(resolvedConfig, request, registry);
+    return buildModeRegistry(activeConfig, request, registry);
   };
 }
 
@@ -176,6 +185,7 @@ function maybeRegisterDelegateTool(
         maxSpawnDepth,
         role: request.role,
         ...(config.profiles ? { profiles: config.profiles } : {}),
+        ...(config.worktreeSupervisor ? { worktreeSupervisor: config.worktreeSupervisor } : {}),
       }),
     );
   }
