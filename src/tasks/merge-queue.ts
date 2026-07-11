@@ -137,6 +137,7 @@ export class WorktreeMergeQueue {
       entry.status = "queued";
       entry.error = undefined;
       entry.expectedTargetHead = currentHead;
+      entry.expectedUpstreamHead = await this.resolveOptionalUpstreamHead(entry.targetWorktree);
       entry.mergeAttempted = false;
       entry.startedAt = undefined;
       entry.finishedAt = undefined;
