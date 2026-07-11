@@ -84,7 +84,7 @@ export class CapabilityPreflightProvider implements LLMProvider {
     return this.next.isRetryableError?.(error) ?? defaultIsRetryableError(error);
   }
 
-  generate(
+  async generate(
     messages: Message[],
     availableTools: ToolDefinition[],
     options?: LLMProviderRequestOptions,
@@ -97,7 +97,7 @@ export class CapabilityPreflightProvider implements LLMProvider {
     return this.next.generate(messages, availableTools, options);
   }
 
-  generateStream(
+  async generateStream(
     messages: Message[],
     availableTools: ToolDefinition[],
     onDelta: (delta: string) => void,

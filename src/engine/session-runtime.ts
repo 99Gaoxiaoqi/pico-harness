@@ -32,6 +32,15 @@ export interface SessionUsageSnapshot {
   totalReasoningTokens: number;
   totalCostCNY: number;
   lastCostStatus: CostStatus | null;
+  totalProviderCalls: number;
+  totalUsageReports: number;
+  totalInputReports: number;
+  totalCacheReadReports: number;
+  totalCacheWriteReports: number;
+  totalReasoningReports: number;
+  totalEstimatedCostReports: number;
+  totalIncludedCostReports: number;
+  totalUnknownCostReports: number;
 }
 
 /** 每条 runtime_state 只携带发生变化的完整 section。 */
@@ -79,6 +88,15 @@ export function createEmptyUsageSnapshot(): SessionUsageSnapshot {
     totalReasoningTokens: 0,
     totalCostCNY: 0,
     lastCostStatus: null,
+    totalProviderCalls: 0,
+    totalUsageReports: 0,
+    totalInputReports: 0,
+    totalCacheReadReports: 0,
+    totalCacheWriteReports: 0,
+    totalReasoningReports: 0,
+    totalEstimatedCostReports: 0,
+    totalIncludedCostReports: 0,
+    totalUnknownCostReports: 0,
   };
 }
 
@@ -193,6 +211,23 @@ function normalizeSessionUsageSnapshot(value: unknown): SessionUsageSnapshot | u
   const lastCostStatus = value["lastCostStatus"];
   if (lastCostStatus !== null && !isCostStatus(lastCostStatus)) return undefined;
 
+  const legacyHadUsage =
+    (value["totalPromptTokens"] as number) > 0 || (value["totalCompletionTokens"] as number) > 0;
+  const reportKeys = [
+    "totalProviderCalls",
+    "totalUsageReports",
+    "totalInputReports",
+    "totalCacheReadReports",
+    "totalCacheWriteReports",
+    "totalReasoningReports",
+    "totalEstimatedCostReports",
+    "totalIncludedCostReports",
+    "totalUnknownCostReports",
+  ] as const;
+  for (const key of reportKeys) {
+    if (value[key] !== undefined && !isNonNegativeInteger(value[key])) return undefined;
+  }
+
   return {
     totalPromptTokens: value["totalPromptTokens"] as number,
     totalCompletionTokens: value["totalCompletionTokens"] as number,
@@ -202,6 +237,23 @@ function normalizeSessionUsageSnapshot(value: unknown): SessionUsageSnapshot | u
     totalReasoningTokens: value["totalReasoningTokens"] as number,
     totalCostCNY: value["totalCostCNY"] as number,
     lastCostStatus,
+    totalProviderCalls:
+      (value["totalProviderCalls"] as number | undefined) ?? (legacyHadUsage ? 1 : 0),
+    totalUsageReports:
+      (value["totalUsageReports"] as number | undefined) ?? (legacyHadUsage ? 1 : 0),
+    totalInputReports: (value["totalInputReports"] as number | undefined) ?? 0,
+    totalCacheReadReports: (value["totalCacheReadReports"] as number | undefined) ?? 0,
+    totalCacheWriteReports: (value["totalCacheWriteReports"] as number | undefined) ?? 0,
+    totalReasoningReports: (value["totalReasoningReports"] as number | undefined) ?? 0,
+    totalEstimatedCostReports:
+      (value["totalEstimatedCostReports"] as number | undefined) ??
+      (lastCostStatus === "estimated" && legacyHadUsage ? 1 : 0),
+    totalIncludedCostReports:
+      (value["totalIncludedCostReports"] as number | undefined) ??
+      (lastCostStatus === "included" && legacyHadUsage ? 1 : 0),
+    totalUnknownCostReports:
+      (value["totalUnknownCostReports"] as number | undefined) ??
+      (lastCostStatus === "unknown" && legacyHadUsage ? 1 : 0),
   };
 }
 

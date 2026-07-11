@@ -343,6 +343,12 @@ export class GeminiProvider implements LLMProvider {
       completionTokens: meta.candidatesTokenCount ?? 0,
       cacheReadTokens: meta.cachedContentTokenCount ?? 0,
       reasoningTokens: meta.thoughtsTokenCount ?? 0,
+      reportedFields: [
+        ...(typeof meta.promptTokenCount === "number" ? (["prompt"] as const) : []),
+        ...(typeof meta.candidatesTokenCount === "number" ? (["completion"] as const) : []),
+        ...(typeof meta.cachedContentTokenCount === "number" ? (["cacheRead"] as const) : []),
+        ...(typeof meta.thoughtsTokenCount === "number" ? (["reasoning"] as const) : []),
+      ],
     };
   }
 }
