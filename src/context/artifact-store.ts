@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, readdir, rmdir, unlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, readdir, rmdir, unlink, writeFile } from "node:fs/promises";
 // 用 pathe 替代 node:path:artifact 的 meta.path 会被持久化并跨平台对比,
 // 统一正斜杠后断言 .claw/artifacts/sessions/ / tool-results/ 才能稳定成立。
 import { join, resolve } from "pathe";
@@ -87,9 +87,19 @@ export class ToolResultArtifactStore {
       path,
     };
 
-    await mkdir(artifactDir, { recursive: true });
-    await writeFile(path, input.output, "utf8");
-    await writeFile(this.metaPath(id, safeSessionId), `${JSON.stringify(meta, null, 2)}\n`, "utf8");
+    await mkdir(artifactDir, { recursive: true, mode: 0o700 });
+    // mkdir 不会收紧已存在目录的权限；显式 chmod 避免旧目录继续受宽松 umask 影响。
+    await chmod(artifactDir, 0o700);
+    await writeFile(path, input.output, { encoding: "utf8", mode: 0o600 });
+    await writeFile(this.metaPath(id, safeSessionId), `${JSON.stringify(meta, null, 2)}\n`, {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+    // writeFile 会保留已存在文件的 mode，因此覆盖时再次收紧。
+    await Promise.all([
+      chmod(path, 0o600),
+      chmod(this.metaPath(id, safeSessionId), 0o600),
+    ]);
 
     return meta;
   }

@@ -6,8 +6,8 @@
 // 随后是 Markdown 格式的执行指令正文。
 // 渐进式暴露:启动时只加载元数据与正文,按需提供给智能体。
 
-import { readFile, readdir, stat } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { open, readdir, realpath, stat } from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import type { Dirent } from "node:fs";
 import * as yaml from "js-yaml";
 import type { BaseTool } from "../tools/registry.js";
@@ -17,6 +17,10 @@ import { logger } from "../observability/logger.js";
 // agentskills.io 规范的元数据长度上限,超长截断避免撑爆渐进式暴露清单
 const MAX_NAME_LENGTH = 64;
 const MAX_DESCRIPTION_LENGTH = 1024;
+const MAX_SKILL_FILE_BYTES = 256 * 1024;
+const MAX_SKILL_SCAN_DEPTH = 12;
+const MAX_SKILL_SCAN_DIRECTORIES = 1_000;
+const MAX_SKILL_FILES = 500;
 
 // 递归扫描时跳过的目录:VCS、依赖、虚拟环境、缓存、构建产物。
 // 与 Hermes EXCLUDED_SKILL_DIRS 对齐,避免误扫 node_modules 等巨型目录。
@@ -102,7 +106,7 @@ export class SkillLoader {
     const skills: Skill[] = [];
     for (const file of skillFiles) {
       try {
-        const content = await readFile(file, "utf8");
+        const content = await readBoundedUtf8(file, MAX_SKILL_FILE_BYTES);
         // frontmatter 无 name 时回退到 SKILL.md 所在目录名(对齐 Hermes)
         const fallbackName = basename(dirname(file));
         skills.push({ ...parseSkillMD(content, fallbackName), sourcePath: file });
@@ -193,10 +197,61 @@ export class SkillViewTool implements BaseTool {
 
 /**
  * 递归扫描技能目录,返回所有 SKILL.md 的绝对路径(已排除依赖/缓存等目录)。
- * 跟随符号链接:对 Dirent.isSymbolicLink 用 stat 确认真实目标是否目录,
- * 与 Hermes os.walk(followlinks=True) 行为一致。
+ * 只跟随仍位于技能根目录内的符号链接，并以真实路径去重。
+ * 这样既保留仓库内的链接组织方式，又避免读取工作区外的指令或进入链接环。
  */
 async function walkForSkillMd(dir: string): Promise<string[]> {
+  let physicalRoot: string;
+  try {
+    physicalRoot = await realpath(dir);
+  } catch (err) {
+    if (isErrnoException(err, "EACCES") || isErrnoException(err, "ENOENT")) return [];
+    logger.warn({ err, dir }, "解析技能根目录失败");
+    return [];
+  }
+
+  const state: SkillScanState = {
+    physicalRoot,
+    visitedDirectories: new Set<string>(),
+    directoryCount: 0,
+    fileCount: 0,
+  };
+  return walkSkillDirectory(dir, state, 0);
+}
+
+interface SkillScanState {
+  physicalRoot: string;
+  visitedDirectories: Set<string>;
+  directoryCount: number;
+  fileCount: number;
+}
+
+async function walkSkillDirectory(
+  dir: string,
+  state: SkillScanState,
+  depth: number,
+): Promise<string[]> {
+  if (depth > MAX_SKILL_SCAN_DEPTH || state.directoryCount >= MAX_SKILL_SCAN_DIRECTORIES) {
+    logger.warn({ dir }, "技能目录超出扫描上限，已停止该子树");
+    return [];
+  }
+
+  let physicalDirectory: string;
+  try {
+    physicalDirectory = await realpath(dir);
+  } catch (err) {
+    if (isErrnoException(err, "EACCES") || isErrnoException(err, "ENOENT")) return [];
+    logger.warn({ err, dir }, "解析技能子目录失败");
+    return [];
+  }
+  if (!isWithinPath(state.physicalRoot, physicalDirectory)) {
+    logger.warn({ dir, target: physicalDirectory }, "跳过指向技能根目录外的符号链接");
+    return [];
+  }
+  if (state.visitedDirectories.has(physicalDirectory)) return [];
+  state.visitedDirectories.add(physicalDirectory);
+  state.directoryCount++;
+
   let entries: Dirent[];
   try {
     entries = await readdir(dir, { withFileTypes: true });
@@ -210,6 +265,11 @@ async function walkForSkillMd(dir: string): Promise<string[]> {
   const results: string[] = [];
   for (const entry of entries) {
     if (entry.name === "SKILL.md" && entry.isFile()) {
+      if (state.fileCount >= MAX_SKILL_FILES) {
+        logger.warn({ dir }, "技能文件数超出上限，已停止继续扫描");
+        break;
+      }
+      state.fileCount++;
       results.push(join(dir, entry.name));
       continue;
     }
@@ -228,11 +288,30 @@ async function walkForSkillMd(dir: string): Promise<string[]> {
       }
     }
     if (isDir) {
-      const nested = await walkForSkillMd(join(dir, entry.name));
+      const nested = await walkSkillDirectory(join(dir, entry.name), state, depth + 1);
       for (const p of nested) results.push(p);
     }
   }
   return results;
+}
+
+async function readBoundedUtf8(file: string, maxBytes: number): Promise<string> {
+  const handle = await open(file, "r");
+  try {
+    const buffer = Buffer.allocUnsafe(maxBytes + 1);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    if (bytesRead > maxBytes) {
+      throw new Error(`SKILL.md 超过 ${maxBytes} 字节上限: ${file}`);
+    }
+    return buffer.subarray(0, bytesRead).toString("utf8");
+  } finally {
+    await handle.close();
+  }
+}
+
+function isWithinPath(root: string, target: string): boolean {
+  const rel = relative(root, target);
+  return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
 }
 
 /** 判断异常是否为指定 code 的 Node ErrnoException */
