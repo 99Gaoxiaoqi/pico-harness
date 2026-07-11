@@ -164,8 +164,25 @@ export function isSensitiveWritePath(
     if (rel === "" || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return false;
     const segments = rel.split(sep);
     const basename = segments.at(-1)?.toLowerCase() ?? "";
+    const normalizedSegments = segments.map((segment) => segment.toLowerCase());
+    const clawIndex = normalizedSegments.indexOf(".claw");
+    const clawControlPath =
+      clawIndex >= 0 &&
+      (() => {
+        const child = normalizedSegments[clawIndex + 1] ?? "";
+        return (
+          child === "mcp.json" ||
+          child === "agents.yaml" ||
+          child === "agents.yml" ||
+          child === "skills" ||
+          /^settings(?:\.[^/]*)?\.json$/u.test(child)
+        );
+      })();
     return (
-      segments.some((segment) => SENSITIVE_DIRECTORY_NAMES.has(segment.toLowerCase())) ||
+      normalizedSegments.some((segment) => SENSITIVE_DIRECTORY_NAMES.has(segment)) ||
+      normalizedSegments.includes(".pico") ||
+      basename === "agents.md" ||
+      clawControlPath ||
       SENSITIVE_FILE_NAMES.has(basename) ||
       basename.startsWith(".env.") ||
       PRIVATE_KEY_FILE_RE.test(basename)
@@ -191,8 +208,8 @@ function buildMacosProfile(roots: readonly string[], network: SandboxNetworkPoli
     '(allow file-write-data (literal "/dev/null"))',
     '(allow file-write-data (literal "/dev/tty"))',
     ...roots.map((root) => `(allow file-write* (subpath ${sbplString(root)}))`),
-    `(deny file-read* (regex #"/(\\.ssh|\\.gnupg|\\.aws|\\.kube)(/|$)" #"/(\\.env(\\.[^/]*)?|\\.npmrc|\\.pypirc|credentials|id_(rsa|ed25519|ecdsa)|[^/]*\\.(pem|key))$"))`,
-    `(deny file-write* (regex #"/(\\.git|\\.ssh|\\.gnupg|\\.aws|\\.docker)(/|$)" #"/(\\.env(\\.[^/]*)?|\\.npmrc|\\.pypirc|credentials|id_(rsa|ed25519|ecdsa)|[^/]*\\.(pem|key))$"))`,
+    `(deny file-read* (regex #"/(\\.ssh|\\.gnupg|\\.aws|\\.kube|\\.docker|\\.azure|gcloud)(/|$)" #"/(\\.env(\\.[^/]*)?|\\.npmrc|\\.pypirc|\\.netrc|\\.git-credentials|credentials|id_(rsa|ed25519|ecdsa)|[^/]*\\.(pem|key))$"))`,
+    `(deny file-write* (regex #"/(\\.git|\\.ssh|\\.gnupg|\\.aws|\\.kube|\\.docker|\\.azure|gcloud)(/|$)" #"/(\\.env(\\.[^/]*)?|\\.npmrc|\\.pypirc|\\.netrc|\\.git-credentials|credentials|id_(rsa|ed25519|ecdsa)|[^/]*\\.(pem|key))$"))`,
   ];
   if (network === "allow") rules.push("(allow network*)");
   return rules.join("\n");
@@ -224,8 +241,24 @@ function jsonStringField(args: string, field: string): string | undefined {
   }
 }
 
-const SENSITIVE_DIRECTORY_NAMES = new Set([".git", ".ssh", ".gnupg", ".aws", ".docker"]);
-const SENSITIVE_FILE_NAMES = new Set([".env", ".npmrc", ".pypirc", "credentials"]);
+const SENSITIVE_DIRECTORY_NAMES = new Set([
+  ".git",
+  ".ssh",
+  ".gnupg",
+  ".aws",
+  ".docker",
+  ".kube",
+  ".azure",
+  "gcloud",
+]);
+const SENSITIVE_FILE_NAMES = new Set([
+  ".env",
+  ".npmrc",
+  ".pypirc",
+  ".netrc",
+  ".git-credentials",
+  "credentials",
+]);
 const PRIVATE_KEY_FILE_RE = /^(?:id_(?:rsa|ed25519|ecdsa)|.*\.(?:pem|key))$/iu;
 const EXPLICIT_NETWORK_COMMAND_RE =
   /(?:^|[;&|]\s*|\s)(?:curl|wget|nc|ncat|netcat|ssh|scp|sftp|ftp|telnet|ping)\b/iu;

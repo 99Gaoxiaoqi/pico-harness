@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ApprovalManager, type ApprovalNotice } from "../src/approval/manager.js";
+import { isSensitiveCredentialPath } from "../src/approval/session-permissions.js";
 import { buildApprovalMiddleware } from "../src/cli/run-agent.js";
 import type { InteractionMode } from "../src/input/session-settings.js";
 import { DelegationManager } from "../src/tools/delegation-manager.js";
@@ -100,6 +101,14 @@ describe("Bash permission mode integration", () => {
     const workerHidden = await execute(workerRegistry, "bash", {
       command: nodeWriteCommand(workerHiddenFile, "blocked"),
     });
+    const workerAgentControl = await execute(workerRegistry, "write_file", {
+      path: "AGENTS.md",
+      content: "untrusted override\n",
+    });
+    const workerPicoControl = await execute(workerRegistry, "write_file", {
+      path: ".pico/config.json",
+      content: "{}\n",
+    });
 
     expect(workerDirect).toMatchObject({
       isError: true,
@@ -109,8 +118,16 @@ describe("Bash permission mode integration", () => {
       isError: true,
       output: expect.stringContaining("[sandbox:"),
     });
+    for (const rejected of [workerAgentControl, workerPicoControl]) {
+      expect(rejected).toMatchObject({
+        isError: true,
+        output: expect.stringContaining("[sandbox:sensitive_path_denied]"),
+      });
+    }
     await expect(access(workerDirectFile)).rejects.toThrow();
     await expect(access(workerHiddenFile)).rejects.toThrow();
+    await expect(access(join(workDir, "AGENTS.md"))).rejects.toThrow();
+    await expect(access(join(workDir, ".pico", "config.json"))).rejects.toThrow();
 
     const previousSecret = process.env.PICO_TEST_SUBAGENT_SECRET;
     process.env.PICO_TEST_SUBAGENT_SECRET = "must-not-leak";
@@ -164,6 +181,7 @@ describe("Bash permission mode integration", () => {
   it("default/auto 对不确定 Bash 请求审批，Plan 仅放行可证明只读命令", async () => {
     const workDir = await tempDir("pico-bash-permission-");
     const roots = await WorkspaceRoots.create(workDir);
+    await writeFile(join(workDir, ".env"), "API_KEY=plan-secret\n", "utf8");
 
     for (const mode of ["default", "auto"] as const) {
       const manager = new ApprovalManager(1_000);
@@ -194,6 +212,15 @@ describe("Bash permission mode integration", () => {
       planNotices.push(notice),
     );
     const planReadOnly = await execute(planRegistry, "bash", { command: "pwd | wc -l" });
+    const planSecretRead = await execute(planRegistry, "read_file", { path: ".env" });
+    const planSecretGrep = await execute(planRegistry, "grep", { pattern: "plan-secret" });
+    const planCut = await execute(planRegistry, "bash", { command: "cut -c1- .env" });
+    const planGitPager = await execute(planRegistry, "bash", {
+      command: "git grep --open-files-in-pager='printf PWN' import -- src/cli/main.ts",
+    });
+    const planGitShow = await execute(planRegistry, "bash", {
+      command: "git show HEAD:.env",
+    });
     const interpreter = await execute(planRegistry, "bash", {
       command: nodeWriteCommand(join(workDir, "plan-indirect.txt"), "must-not-run"),
     });
@@ -261,6 +288,17 @@ describe("Bash permission mode integration", () => {
     }
 
     expect(planReadOnly.isError).toBe(false);
+    expect(planSecretRead).toMatchObject({
+      isError: true,
+      output: expect.stringContaining("密钥与凭据"),
+    });
+    expect(planSecretGrep.output).not.toContain("plan-secret");
+    for (const rejected of [planCut, planGitPager, planGitShow]) {
+      expect(rejected).toMatchObject({
+        isError: true,
+        output: expect.stringContaining("只允许可证明只读的 Bash"),
+      });
+    }
     for (const rejected of [interpreter, redirect, envSplit]) {
       expect(rejected).toMatchObject({
         isError: true,
@@ -299,6 +337,53 @@ describe("Bash permission mode integration", () => {
     await expect(access(join(workDir, "plan-indirect.txt"))).rejects.toThrow();
     await expect(access(join(workDir, "env-split.txt"))).rejects.toThrow();
   });
+
+  it("非 YOLO 按真实路径审批凭据与控制面写入", async () => {
+    const workDir = await tempDir("pico-sensitive-approval-");
+    const roots = await WorkspaceRoots.create(workDir);
+    await writeFile(join(workDir, ".env"), "TOKEN=unchanged\n", "utf8");
+    await writeFile(join(workDir, "AGENTS.md"), "trusted instructions\n", "utf8");
+
+    const manager = new ApprovalManager(1_000);
+    const notices: ApprovalNotice[] = [];
+    const registry = registryForMode(workDir, roots, "auto", manager, (notice) => {
+      notices.push(notice);
+      queueMicrotask(() => manager.resolveApproval(notice.taskId, false, "integration reject"));
+    });
+
+    const agentRead = await execute(registry, "read_file", { path: "AGENTS.md" });
+    const secretRead = await execute(registry, "read_file", { path: ".env" });
+    const picoWrite = await execute(registry, "write_file", {
+      path: ".pico/config.json",
+      content: "{}\n",
+    });
+    const agentWrite = await execute(registry, "write_file", {
+      path: "AGENTS.md",
+      content: "replaced\n",
+    });
+
+    let aliasWrite: Awaited<ReturnType<typeof execute>> | undefined;
+    if (process.platform !== "win32") {
+      await symlink(join(workDir, ".env"), join(workDir, "alias.txt"));
+      aliasWrite = await execute(registry, "write_file", {
+        path: "alias.txt",
+        content: "TOKEN=replaced\n",
+      });
+    }
+
+    expect(agentRead.isError).toBe(false);
+    for (const rejected of [secretRead, picoWrite, agentWrite, aliasWrite].filter(
+      (result): result is Awaited<ReturnType<typeof execute>> => result !== undefined,
+    )) {
+      expect(rejected.isError).toBe(true);
+    }
+    expect(notices).toHaveLength(process.platform === "win32" ? 3 : 4);
+    await expect(readFile(join(workDir, ".env"), "utf8")).resolves.toBe("TOKEN=unchanged\n");
+    await expect(readFile(join(workDir, "AGENTS.md"), "utf8")).resolves.toBe(
+      "trusted instructions\n",
+    );
+    await expect(access(join(workDir, ".pico", "config.json"))).rejects.toThrow();
+  });
 });
 
 function registryForMode(
@@ -312,6 +397,11 @@ function registryForMode(
     truncateResults: false,
     deferWorkspaceBoundary: true,
     workspaceRoots: roots,
+    excludeSensitiveGrepFiles: (path) => {
+      if (mode === "yolo") return false;
+      if (mode === "plan" || path === undefined) return true;
+      return !isSensitiveCredentialPath(roots.resolveUnchecked(path));
+    },
   });
   registry.use(
     buildApprovalMiddleware(

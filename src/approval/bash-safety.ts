@@ -67,8 +67,8 @@ function parseConservativePipeline(command: string): ParsedPipeline {
         tokenStarted = true;
         continue;
       }
-      if (char === "`" || (char === "$" && (next === "(" || next === "{"))) {
-        return { kind: "unsupported", reason: "包含命令替换或动态 shell 展开" };
+      if (char === "`" || char === "$") {
+        return { kind: "unsupported", reason: "包含命令替换或环境变量展开" };
       }
       if (char === "\\") {
         if (next === undefined) {
@@ -94,8 +94,8 @@ function parseConservativePipeline(command: string): ParsedPipeline {
       tokenStarted = true;
       continue;
     }
-    if (char === "`" || (char === "$" && (next === "(" || next === "{"))) {
-      return { kind: "unsupported", reason: "包含命令替换或动态 shell 展开" };
+    if (char === "`" || char === "$") {
+      return { kind: "unsupported", reason: "包含命令替换或环境变量展开" };
     }
     if (char === "\\") {
       return { kind: "unsupported", reason: "包含无法静态确认的 shell 转义" };
@@ -149,9 +149,10 @@ function classifySimpleCommand(tokens: readonly string[]): BashSafetyClassificat
   const args = tokens.slice(1);
   if (ALWAYS_READ_ONLY_COMMANDS.has(executable)) return { kind: "read-only" };
   if (executable === "rg") {
-    return args.some((arg) => arg === "--pre" || arg.startsWith("--pre="))
-      ? { kind: "requires-approval", reason: "rg --pre 可以执行外部程序" }
-      : { kind: "read-only" };
+    return {
+      kind: "requires-approval",
+      reason: "rg 可读取授权工作区之外的文件，请使用受限 grep 工具",
+    };
   }
   if (executable === "command") {
     return args.length === 2 && (args[0] === "-v" || args[0] === "-V")
@@ -159,12 +160,10 @@ function classifySimpleCommand(tokens: readonly string[]): BashSafetyClassificat
       : { kind: "requires-approval", reason: "command 可能执行任意程序" };
   }
   if (executable === "env") {
-    return args.every((arg) => SAFE_ENV_READ_OPTIONS.has(arg))
-      ? { kind: "read-only" }
-      : {
-          kind: "requires-approval",
-          reason: "env 参数可能通过 -S/--split-string 执行任意程序",
-        };
+    return {
+      kind: "requires-approval",
+      reason: "env 会暴露宿主凭据或执行后续命令",
+    };
   }
   if (executable === "git") return classifyGitCommand(args);
 
@@ -218,24 +217,18 @@ function isGitWriteCapableOption(arg: string): boolean {
 
 const ALWAYS_READ_ONLY_COMMANDS: ReadonlySet<string> = new Set([
   "basename",
-  "cat",
-  "cut",
   "df",
   "dirname",
   "du",
   "echo",
   "file",
-  "grep",
-  "head",
   "id",
   "ls",
   "printf",
-  "printenv",
   "pwd",
   "readlink",
   "realpath",
   "stat",
-  "tail",
   "test",
   "tr",
   "type",
@@ -245,25 +238,12 @@ const ALWAYS_READ_ONLY_COMMANDS: ReadonlySet<string> = new Set([
   "whoami",
 ]);
 
-const SAFE_ENV_READ_OPTIONS: ReadonlySet<string> = new Set([
-  "-0",
-  "--null",
-  "-i",
-  "--ignore-environment",
-]);
-
 const GIT_READ_ONLY_SUBCOMMANDS: ReadonlySet<string> = new Set([
-  "cat-file",
   "describe",
-  "diff",
-  "grep",
-  "log",
   "ls-files",
   "ls-tree",
   "name-rev",
   "rev-list",
   "rev-parse",
   "shortlog",
-  "show",
-  "status",
 ]);

@@ -396,7 +396,9 @@ export class GrepTool implements BaseTool {
 
   constructor(
     workDirOrRoots: string | WorkspaceRoots,
-    private readonly options: { excludeSensitiveFiles?: boolean } = {},
+    private readonly options: {
+      excludeSensitiveFiles?: boolean | ((path: string | undefined) => boolean);
+    } = {},
   ) {
     this.roots =
       typeof workDirOrRoots === "string"
@@ -452,6 +454,10 @@ export class GrepTool implements BaseTool {
 
   async execute(args: string): Promise<string> {
     const { pattern, path, glob, caseSensitive, lineNumber, maxResults } = parseGrepArgs(args);
+    const excludeSensitiveFiles =
+      typeof this.options.excludeSensitiveFiles === "function"
+        ? this.options.excludeSensitiveFiles(path)
+        : this.options.excludeSensitiveFiles;
 
     // 路径防护:搜索根必须位于共享工作区根集合内
     const searchRoot = await this.roots.assertAllowed(path || ".");
@@ -471,7 +477,7 @@ export class GrepTool implements BaseTool {
           caseSensitive,
           lineNumber,
           maxResults,
-          excludeSensitiveFiles: this.options.excludeSensitiveFiles,
+          excludeSensitiveFiles,
         });
         const matches = parseRgOutput(raw, lineNumber);
         return formatMatches(matches, maxResults, lineNumber);
@@ -489,7 +495,7 @@ export class GrepTool implements BaseTool {
       searchRoot,
       globFilter,
       caseSensitive,
-      excludeSensitiveFiles: this.options.excludeSensitiveFiles,
+      excludeSensitiveFiles,
     });
     return formatMatches(matches, maxResults, lineNumber);
   }
@@ -500,16 +506,21 @@ const SENSITIVE_GREP_GLOBS = [
   ".env.*",
   ".npmrc",
   ".pypirc",
+  ".netrc",
+  ".git-credentials",
   "credentials",
   "id_rsa",
   "id_ed25519",
   "id_ecdsa",
   "*.pem",
   "*.key",
-  ".ssh/**",
-  ".gnupg/**",
-  ".aws/**",
-  ".kube/**",
+  "**/.ssh/**",
+  "**/.gnupg/**",
+  "**/.aws/**",
+  "**/.kube/**",
+  "**/.docker/**",
+  "**/.azure/**",
+  "**/gcloud/**",
 ] as const;
 
 function isSensitiveRelativePath(relativePath: string): boolean {
@@ -518,12 +529,16 @@ function isSensitiveRelativePath(relativePath: string): boolean {
   const basename = segments.at(-1)?.toLowerCase() ?? "";
   return (
     segments.some((segment) =>
-      [".ssh", ".gnupg", ".aws", ".kube", ".docker"].includes(segment.toLowerCase()),
+      [".ssh", ".gnupg", ".aws", ".kube", ".docker", ".azure", "gcloud"].includes(
+        segment.toLowerCase(),
+      ),
     ) ||
     basename === ".env" ||
     basename.startsWith(".env.") ||
     basename === ".npmrc" ||
     basename === ".pypirc" ||
+    basename === ".netrc" ||
+    basename === ".git-credentials" ||
     basename === "credentials" ||
     /^id_(?:rsa|ed25519|ecdsa)$/u.test(basename) ||
     /\.(?:pem|key)$/u.test(basename)

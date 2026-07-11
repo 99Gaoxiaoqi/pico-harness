@@ -1,4 +1,4 @@
-import { readFile, readdir } from "node:fs/promises";
+import { readFile, readdir, stat } from "node:fs/promises";
 import path from "node:path";
 import type { Dirent } from "node:fs";
 import type {
@@ -238,11 +238,12 @@ export class RepoMapService implements CodeIntelligenceService {
     throwIfAborted(signal);
     const absolutePath = this.safePath(filePath);
     const cached = this.indexedFiles.get(absolutePath);
-    const text = await readFile(absolutePath, "utf8");
-    if (cached?.text === text) return cached;
-    if (Buffer.byteLength(text, "utf8") > MAX_SOURCE_BYTES) {
+    const info = await stat(absolutePath);
+    if (!info.isFile() || info.size > MAX_SOURCE_BYTES) {
       throw new Error(`Repo Map 跳过超过 ${MAX_SOURCE_BYTES} 字节的文件: ${filePath}`);
     }
+    const text = await readFile(absolutePath, "utf8");
+    if (cached?.text === text) return cached;
     const lines = text.split(/\r?\n/);
     const symbols = parseSymbols(absolutePath, lines);
     const indexed = {
