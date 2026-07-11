@@ -13,6 +13,62 @@ import { buildTranscriptLayout } from "../../src/tui/transcript-layout.js";
 import { TuiEventStore, TuiReporter, type TuiEntry } from "../../src/tui/tui-reporter.js";
 
 describe("subagent activity flow", () => {
+  it("required 委派轮撤销已流式投影的主正文，保留委派卡与子代理详情", async () => {
+    let entries: TuiEntry[] = [];
+    const reporter = new TuiReporter((next) => {
+      entries = next;
+    });
+    const runner: AgentRunner = {
+      async runSub(taskPrompt, _registry, childReporter): Promise<SubagentResult> {
+        childReporter?.onMessage(`trace-only:${taskPrompt}`);
+        return { summary: `done:${taskPrompt}`, artifacts: [] };
+      },
+    };
+    const tool = new DelegateTaskTool(runner, () => new ToolRegistry(), new DelegationManager(), {
+      reporter,
+    });
+    const args = JSON.stringify({
+      tasks: [{ agent_name: "tui-worker", goal: "检查委派投影" }],
+      completion_policy: "required",
+    });
+
+    reporter.onTurnStart(1);
+    reporter.onTextDelta("我先自己详细分析项目，然后再启动子代理。");
+    reporter.onMessage("我先自己详细分析项目，然后再启动子代理。");
+    reporter.onToolCall("delegate_task", args, "delegate-call");
+    const result = await tool.execute(args);
+    reporter.onToolResult("delegate_task", result, false, "delegate-call");
+
+    expect(entries.some((entry) => entry.kind === "assistant")).toBe(false);
+    expect(entries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "tool", name: "delegate_task", status: "success" }),
+        expect.objectContaining({
+          kind: "subagent-activity",
+          agentName: "tui-worker",
+          status: "completed",
+        }),
+      ]),
+    );
+    expect(JSON.stringify(entries)).not.toContain("trace-only:");
+    const subagent = Object.values(reporter.getProjection().subagents)[0];
+    expect(subagent?.timeline).toEqual([
+      expect.objectContaining({ kind: "message", content: "trace-only:检查委派投影" }),
+    ]);
+
+    reporter.onTurnStart(2);
+    reporter.onTextDelta("委派已完成，这是最终答复。");
+    reporter.onMessage("委派已完成，这是最终答复。");
+    expect(entries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "assistant", content: "委派已完成，这是最终答复。" }),
+      ]),
+    );
+
+    const replayed = new TuiEventStore({ initialSnapshot: reporter.getReplaySnapshot() });
+    expect(replayed.getProjection().entries).toEqual(reporter.getProjection().entries);
+  });
+
   it("将两个并行委派的实时动作和结果投影为独立卡片", async () => {
     let entries: TuiEntry[] = [];
     const reporter = new TuiReporter(
