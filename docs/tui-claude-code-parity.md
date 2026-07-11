@@ -72,6 +72,7 @@ Pico 的 CLI session 以当前项目目录为边界：
 | `/undo`        | `/rewind` 的兼容入口；同样打开用户消息选择器，不再走隐藏的直接回滚路径。                   |
 | `/agents`      | 列出内置 Agent 和项目 `.claude/agents/*.md`。                                              |
 | `/agent`       | 把任务委派给指定 Agent：`/agent <name> <task>`。                                           |
+| `/tasks`       | 查看和控制当前 TUI 启动的隔离 worktree 任务。                                              |
 | `/skills`      | 列出当前项目 `.claw/skills` 中可用 Skill。                                                 |
 | `/skill`       | 显式激活 Skill 并交给 Agent 执行：`/skill <name> [arguments]`。                            |
 | `/add-dir`     | 列出或添加当前会话可访问的工作目录：`/add-dir [directory]`。                               |
@@ -86,11 +87,12 @@ Skill 正文支持 Claude Code 风格参数：`$ARGUMENTS` 保留完整参数，
 
 ### 附加工作目录
 
-外部路径授权与 Claude Code 对齐：
+主 Agent 的路径权限按 mode 处理：
 
-- `yolo`（默认）：普通外部 Read/Write/Edit 和可静态识别的 Bash 写目标会在当前会话静默授权，不弹日常审批。
+- `yolo`（默认）：按启动 Pico 的 OS 用户权限执行普通 Read/Write/Edit/Bash/网络操作，工作区外与敏感路径不弹日常审批。
 - `default`：审批框显示目标和 diff，可选择 `Yes`、`Yes, allow … during this session` 或 `No`。`Yes` 只授权当前调用；session 选项才会把目录加入当前会话并对普通编辑切换为 `auto`。
-- `.env`、密钥、`.git/.claude/.vscode` 等安全路径即使在 `yolo` 下也要明确确认；hardline 命令仍直接拒绝。
+- `plan`：只允许宿主能保守证明为只读的工具调用；审批不能放行 Bash 或 MCP 写操作。
+- hardline 命令和显式 Hook deny 在任何 mode 下都不可通过审批绕过。
 
 也可以在执行前手动加入目录：
 
@@ -117,6 +119,18 @@ pico --add-dir ../shared --add-dir /absolute/generated
 ```
 
 配置中的相对路径以项目根目录为基准。附加目录只扩展文件工具的访问边界，不会从外部目录加载 `AGENTS.md`、hooks 或命令配置。
+
+### 隔离任务
+
+`/tasks` 管理由当前 TUI 启动的可写 worker。worker 总是进入独立 branch/worktree 和 OS 沙箱，完成后由宿主统一提交；这个边界不随主会话的 `yolo` 放开。
+
+- `/tasks`：列出持久化的任务记录。
+- `/tasks <task-id>` 和 `/tasks tail <task-id>`：查看状态与当前进程的有界输出。
+- `/tasks message <task-id> <text>`：把补充指令放入队列，worker 在下一个安全排水点读取；目前不是实时 steer。
+- `/tasks stop <task-id>`：发送 AbortSignal 并等待 runner 真正退出；超时时保持 `stopping`，不伪装成已停止。
+- `/tasks retry|merge|cleanup <task-id>`：重试、串行合并或清理已合并的临时资源。
+
+`.claw/tasks/state.json` 当前持久化的是任务账本，用于重启后查看历史和将遗留 `running` 任务明确收口为失败；它不会复活上一个 Node/LLM 进程。真正的跨重启 resume、冲突合并隔离和实时 message steer 已列入后续任务。
 
 ### 项目配置与键位
 
