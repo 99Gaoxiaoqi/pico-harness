@@ -75,6 +75,53 @@ function isBackgroundBashCall(call: ToolCall): boolean {
   }
 }
 
+interface DelegateTaskPolicyInput {
+  completion_policy?: unknown;
+  background?: unknown;
+}
+
+/**
+ * required delegate_task 是引擎控制流边界，不是普通并行工具。
+ * 与 DelegateTaskTool 的兼容规则保持一致：明确 optional/detached 或旧式
+ * background=true 才是非阻塞，其余（包括省略策略与无效 JSON）均按 required
+ * 安全地独占执行。
+ */
+function isRequiredDelegateTaskCall(call: ToolCall): boolean {
+  if (call.name !== "delegate_task") return false;
+  try {
+    const input = JSON.parse(call.arguments) as DelegateTaskPolicyInput;
+    if (input.completion_policy === "optional" || input.completion_policy === "detached") {
+      return false;
+    }
+    if (input.completion_policy === "required") return true;
+    return input.background !== true;
+  } catch {
+    return true;
+  }
+}
+
+function findRequiredDelegationIndex(toolCalls: readonly ToolCall[]): number | undefined {
+  const index = toolCalls.findIndex(isRequiredDelegateTaskCall);
+  return index >= 0 ? index : undefined;
+}
+
+function buildExclusiveDelegationRejection(
+  toolCall: ToolCall,
+  requiredDelegation: ToolCall,
+): { message: Message } {
+  const content =
+    `工具执行已拒绝：同一模型响应中的 required delegate_task ` +
+    `(${requiredDelegation.id}) 必须独占执行并等待所有子代理收口。`;
+  return {
+    message: {
+      role: "user",
+      content,
+      toolCallId: toolCall.id,
+      providerData: { [PICO_TOOL_RESULT_ERROR_KEY]: true },
+    },
+  };
+}
+
 function fileSideEffectKind(registry: Registry, call: ToolCall): ToolFileSideEffects["kind"] {
   try {
     const effects = registry.getFileSideEffects?.(call);
@@ -850,11 +897,19 @@ export class AgentEngine implements AgentRunner {
           //   - 冲突(同文件含写 / kind:"all")→ 串行
           // 结果按 provider 原始顺序回传(add 顺序即 resolve 顺序)。
           const getAccesses = this.registry.getAccesses;
+          // Kimi AgentSwarm 式独占语义：required delegate_task 是这一轮唯一
+          // 允许真实执行的工具。保留原始 toolCalls 和每个对应 observation，
+          // 以维持 provider 要求的 tool-call/result 完整配对。
+          const requiredDelegationIndex = findRequiredDelegationIndex(toolCalls);
+          const requiredDelegation =
+            requiredDelegationIndex !== undefined ? toolCalls[requiredDelegationIndex] : undefined;
           // maxConcurrency 限制并发执行的工具数(对齐 hermes _MAX_TOOL_WORKERS=8),
           // 防止一批大量不冲突只读工具同时打 IO 把系统压垮。
           let turnFileJournal: FileHistoryJournal | undefined;
-          const fileSideEffectKinds = toolCalls.map((call) =>
-            fileSideEffectKind(this.registry, call),
+          const fileSideEffectKinds = toolCalls.map((call, index) =>
+            requiredDelegationIndex === undefined || index === requiredDelegationIndex
+              ? fileSideEffectKind(this.registry, call)
+              : "none",
           );
           const hasWorkspaceEffects = fileSideEffectKinds.includes("workspace");
           if (hasWorkspaceEffects && journalRoots.length > 0) {
@@ -865,7 +920,14 @@ export class AgentEngine implements AgentRunner {
             }
             const activeJournal = runFileJournal ?? turnFileJournal;
             activeFileJournal = activeJournal;
-            if (activeJournal && toolCalls.some(isBackgroundBashCall)) {
+            if (
+              activeJournal &&
+              toolCalls.some(
+                (call, index) =>
+                  (requiredDelegationIndex === undefined || index === requiredDelegationIndex) &&
+                  isBackgroundBashCall(call),
+              )
+            ) {
               fileHistoryAddJournalWarning(
                 activeJournal,
                 "background bash 在工具返回后仍可继续写入，本轮 rewind 只覆盖返回前的变化",
@@ -881,22 +943,26 @@ export class AgentEngine implements AgentRunner {
           let results: Array<{ message: Message; reminder?: Message }>;
           let scheduled: Array<Promise<{ message: Message; reminder?: Message }>> = [];
           try {
-            scheduled = toolCalls.map((tc, index) =>
-              scheduler
-                .add({
-                  accesses: getAccesses ? getAccesses.call(this.registry, tc) : ToolAccesses.all(),
-                  // 文件事务只能在活跃写任务的 start Promise 真实收口后提交。
-                  settleOnAbort: fileSideEffectKinds[index] !== "none",
-                  start: async () => {
-                    signal?.throwIfAborted();
-                    return this.runOneTool(tc, reporter, session.id, turnSpan, signal);
-                  },
-                })
-                .then((result) => {
-                  settledResults[index] = result;
-                  return result;
-                }),
-            );
+            scheduled = toolCalls.map((tc, index) => {
+              const execution =
+                requiredDelegation && index !== requiredDelegationIndex
+                  ? Promise.resolve(buildExclusiveDelegationRejection(tc, requiredDelegation))
+                  : scheduler.add({
+                      accesses: getAccesses
+                        ? getAccesses.call(this.registry, tc)
+                        : ToolAccesses.all(),
+                      // 文件事务只能在活跃写任务的 start Promise 真实收口后提交。
+                      settleOnAbort: fileSideEffectKinds[index] !== "none",
+                      start: async () => {
+                        signal?.throwIfAborted();
+                        return this.runOneTool(tc, reporter, session.id, turnSpan, signal);
+                      },
+                    });
+              return execution.then((result) => {
+                settledResults[index] = result;
+                return result;
+              });
+            });
             results = await Promise.all(scheduled);
             signal?.throwIfAborted();
           } catch (err) {
