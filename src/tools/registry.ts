@@ -24,6 +24,16 @@ export interface ToolExecutionContext {
   readonly onOutput?: (output: ToolOutputChunk) => void;
 }
 
+export type ToolFileSideEffects =
+  | { readonly kind: "none" }
+  | { readonly kind: "exact"; readonly paths: readonly string[] }
+  | { readonly kind: "workspace" };
+
+export const NO_FILE_SIDE_EFFECTS = { kind: "none" } as const satisfies ToolFileSideEffects;
+export const WORKSPACE_FILE_SIDE_EFFECTS = {
+  kind: "workspace",
+} as const satisfies ToolFileSideEffects;
+
 /**
  * Middleware 中间件签名 (第 16 讲)。
  * 在 Registry 收到 ToolCall 后、真正调用 tool.execute() 之前运行。
@@ -61,6 +71,8 @@ export interface BaseTool {
   execute(args: string, context?: ToolExecutionContext): Promise<string>;
   /** true 表示工具会在 signal abort 后终止物理操作并 settle execute Promise。 */
   handlesAbortSignal?: boolean;
+  /** 声明文件系统副作；未声明的非只读工具默认为 workspace。 */
+  fileSideEffects?: ToolFileSideEffects | ((args: string) => ToolFileSideEffects);
   /**
    * 是否为只读工具 (第 08 讲并发调度用)。
    * 只读工具的批次可并行执行;含写操作的批次退化为串行。
@@ -109,6 +121,8 @@ export interface Registry {
   isReadOnlyTool?(name: string): boolean;
   /** 工具是否会在 abort 后自主收口，供调度器决定是否等待物理终止。 */
   handlesAbortSignal?(name: string): boolean;
+  /** 解析单次调用的文件副作范围。 */
+  getFileSideEffects?(call: ToolCall): ToolFileSideEffects;
   /**
    * 按 ToolCall 计算资源访问集(资源冲突图调度用)。
    * 带完整 call 而非仅 name,因为路径信息在 call.arguments 里。

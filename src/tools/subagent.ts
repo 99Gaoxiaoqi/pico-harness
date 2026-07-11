@@ -11,6 +11,7 @@
 // 绝对不给 edit_file/write_file,防止底层"莽夫"瞎改代码导致物理不可逆破坏。
 
 import type { BaseTool } from "./registry.js";
+import { NO_FILE_SIDE_EFFECTS } from "./registry.js";
 import type { ToolDefinition } from "../schema/message.js";
 import type { Registry } from "./registry.js";
 import type { Reporter } from "../engine/reporter.js";
@@ -122,6 +123,8 @@ interface NormalizedDelegateTask {
  * 几万字的探索化作轻量 Summary,像普通 API 调用返回给主 Agent。
  */
 export class SpawnSubagentTool implements BaseTool {
+  readonly fileSideEffects = NO_FILE_SIDE_EFFECTS;
+
   constructor(
     private readonly runner: AgentRunner,
     private readonly readOnlyRegistry: Registry,

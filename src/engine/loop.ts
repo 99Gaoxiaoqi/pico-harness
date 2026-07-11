@@ -43,6 +43,7 @@ import {
   fileHistoryAddJournalWarning,
   fileHistoryBeginJournal,
   fileHistoryCommitJournal,
+  fileHistoryJournalCoversPath,
   fileHistoryTrackEdit,
   fileHistoryMakeSnapshot,
   type FileHistoryJournal,
@@ -64,6 +65,32 @@ function isBackgroundBashCall(call: ToolCall): boolean {
     return input.background === true;
   } catch {
     return false;
+  }
+}
+
+function hasWorkspaceFileSideEffects(registry: Registry, call: ToolCall): boolean {
+  const effects = registry.getFileSideEffects?.(call);
+  if (effects) return effects.kind === "workspace";
+  return !(registry.isReadOnlyTool?.(call.name) ?? false);
+}
+
+async function commitFileJournal(
+  session: Session,
+  journal: FileHistoryJournal,
+  messageId: string,
+): Promise<void> {
+  try {
+    const commit = await fileHistoryCommitJournal(
+      session.fileHistory,
+      journal,
+      messageId,
+      session.id,
+    );
+    if (commit.incomplete) {
+      logger.warn({ warnings: commit.warnings }, "[FileHistory] 本轮文件 journal 覆盖不完整");
+    }
+  } catch (err) {
+    logger.warn({ err: String(err) }, "[FileHistory] 本轮文件 journal 提交失败");
   }
 }
 
@@ -579,6 +606,10 @@ export class AgentEngine implements AgentRunner {
         snapshot.messageId === session.fileHistory.currentMessageId &&
         snapshot.userPrompt !== undefined,
     )?.messageId;
+    const journalRoots =
+      this.workspaceRoots?.list() ?? (this.registry.setPreWriteHook ? [this.workDir] : []);
+    let runFileJournal: FileHistoryJournal | undefined;
+    let activeFileJournal: FileHistoryJournal | undefined;
     const previousRuntimeReporter = this.runtimeReporter;
     this.runtimeReporter = reporter;
 
@@ -611,12 +642,24 @@ export class AgentEngine implements AgentRunner {
           userRewindPointId ?? `turn-${session.fileHistory.snapshotSequence + 1}`;
         this.registry.setPreWriteHook?.(async (toolName, args) => {
           try {
-            if (toolName === "write_file" || toolName === "edit_file") {
-              const { path } = JSON.parse(args) as { path?: string };
-              if (!path) return;
+            const effects = this.registry.getFileSideEffects?.({
+              id: `file-history:${currentMessageId}`,
+              name: toolName,
+              arguments: args,
+            });
+            if (effects?.kind !== "exact") return;
+            for (const path of effects.paths) {
+              const resolvedPath =
+                this.workspaceRoots?.resolve(path) ?? safeResolve(this.workDir, path);
+              if (
+                activeFileJournal &&
+                fileHistoryJournalCoversPath(activeFileJournal, resolvedPath)
+              ) {
+                continue;
+              }
               await fileHistoryTrackEdit(
                 session.fileHistory,
-                this.workspaceRoots?.resolve(path) ?? safeResolve(this.workDir, path),
+                resolvedPath,
                 currentMessageId,
                 session.id,
               );
@@ -780,17 +823,21 @@ export class AgentEngine implements AgentRunner {
           const getAccesses = this.registry.getAccesses;
           // maxConcurrency 限制并发执行的工具数(对齐 hermes _MAX_TOOL_WORKERS=8),
           // 防止一批大量不冲突只读工具同时打 IO 把系统压垮。
-          let fileJournal: FileHistoryJournal | undefined;
-          const journalRoots =
-            this.workspaceRoots?.list() ?? (this.registry.setPreWriteHook ? [this.workDir] : []);
-          const hasPotentialWrite = toolCalls.some(
-            (call) => !(this.registry.isReadOnlyTool?.(call.name) ?? false),
+          let turnFileJournal: FileHistoryJournal | undefined;
+          const hasWorkspaceEffects = toolCalls.some((call) =>
+            hasWorkspaceFileSideEffects(this.registry, call),
           );
-          if (hasPotentialWrite && journalRoots.length > 0) {
-            fileJournal = await fileHistoryBeginJournal(journalRoots, session.id, signal);
-            if (toolCalls.some(isBackgroundBashCall)) {
+          if (hasWorkspaceEffects && journalRoots.length > 0) {
+            if (userRewindPointId) {
+              runFileJournal ??= await fileHistoryBeginJournal(journalRoots, session.id, signal);
+            } else {
+              turnFileJournal = await fileHistoryBeginJournal(journalRoots, session.id, signal);
+            }
+            const activeJournal = runFileJournal ?? turnFileJournal;
+            activeFileJournal = activeJournal;
+            if (activeJournal && toolCalls.some(isBackgroundBashCall)) {
               fileHistoryAddJournalWarning(
-                fileJournal,
+                activeJournal,
                 "background bash 在工具返回后仍可继续写入，本轮 rewind 只覆盖返回前的变化",
               );
             }
@@ -844,24 +891,9 @@ export class AgentEngine implements AgentRunner {
             throw err;
           } finally {
             scheduler.dispose();
-            if (fileJournal) {
-              await fileHistoryCommitJournal(
-                session.fileHistory,
-                fileJournal,
-                currentMessageId,
-                session.id,
-              )
-                .then((commit) => {
-                  if (commit.incomplete) {
-                    logger.warn(
-                      { warnings: commit.warnings },
-                      "[FileHistory] 本轮文件 journal 覆盖不完整",
-                    );
-                  }
-                })
-                .catch((err) =>
-                  logger.warn({ err: String(err) }, "[FileHistory] 本轮文件 journal 提交失败"),
-                );
+            if (turnFileJournal) {
+              await commitFileJournal(session, turnFileJournal, currentMessageId);
+              activeFileJournal = runFileJournal;
             }
           }
 
@@ -909,6 +941,10 @@ export class AgentEngine implements AgentRunner {
         await this.runGraceCall(session, systemPrompt, exhaustedReason, reporter, rootSpan, signal);
       }
     } finally {
+      if (runFileJournal && userRewindPointId) {
+        await commitFileJournal(session, runFileJournal, userRewindPointId);
+      }
+      activeFileJournal = undefined;
       this.runtimeReporter = previousRuntimeReporter;
       rootSpan?.end();
       if (rootSpan) {

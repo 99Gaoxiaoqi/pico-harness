@@ -15,6 +15,7 @@
 // 与同批次任何工具均冲突,退化为串行执行。get 是只读,声明 none()。
 
 import type { BaseTool } from "./registry.js";
+import { NO_FILE_SIDE_EFFECTS } from "./registry.js";
 import type { ToolDefinition } from "../schema/message.js";
 import type { ToolAccesses } from "./tool-access.js";
 import { ToolAccesses as ToolAccessesNs } from "./tool-access.js";
@@ -117,6 +118,7 @@ function parseBudgetConfig(parsed: Record<string, unknown>): BudgetConfig | unde
 export class CreateGoalTool implements BaseTool {
   /** 非只读:create 改 GoalManager 全局状态 */
   readonly readOnly = false;
+  readonly fileSideEffects = NO_FILE_SIDE_EFFECTS;
 
   constructor(private readonly manager: GoalManager) {}
 
@@ -248,6 +250,7 @@ export class GetGoalTool implements BaseTool {
 export class UpdateGoalTool implements BaseTool {
   /** 非只读:update 改 GoalManager 全局状态 */
   readonly readOnly = false;
+  readonly fileSideEffects = NO_FILE_SIDE_EFFECTS;
 
   constructor(private readonly manager: GoalManager) {}
 

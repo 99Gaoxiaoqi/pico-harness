@@ -11,7 +11,9 @@ import type {
   Registry,
   RequestMiddleware,
   ToolExecutionContext,
+  ToolFileSideEffects,
 } from "./registry.js";
+import { NO_FILE_SIDE_EFFECTS, WORKSPACE_FILE_SIDE_EFFECTS } from "./registry.js";
 import type { ToolCall, ToolDefinition, ToolResult } from "../schema/message.js";
 import { logger } from "../observability/logger.js";
 import { ToolAccesses } from "./tool-access.js";
@@ -59,6 +61,18 @@ export function resolveReadablePath(workDir: string, path: string): string {
 
 function workspaceRootsFrom(input: string | WorkspaceRoots): WorkspaceRoots {
   return typeof input === "string" ? WorkspaceRoots.createSync(input) : input;
+}
+
+function exactPathSideEffects(args: string): ToolFileSideEffects {
+  try {
+    const { path } = JSON.parse(args) as { path?: unknown };
+    return {
+      kind: "exact",
+      paths: typeof path === "string" && path.length > 0 ? [path] : [],
+    };
+  } catch {
+    return { kind: "exact", paths: [] };
+  }
 }
 
 /**
@@ -169,6 +183,20 @@ export class ToolRegistry implements Registry {
     return (
       this.executionMiddlewares.length === 0 && (this.tools.get(name)?.handlesAbortSignal ?? false)
     );
+  }
+
+  getFileSideEffects(call: ToolCall): ToolFileSideEffects {
+    const tool = this.tools.get(call.name);
+    if (!tool) return NO_FILE_SIDE_EFFECTS;
+    const declared = tool.fileSideEffects;
+    if (declared !== undefined) {
+      try {
+        return typeof declared === "function" ? declared.call(tool, call.arguments) : declared;
+      } catch (err) {
+        logger.warn({ tool: call.name, err }, "[Registry] 文件副作声明解析失败，使用保守范围");
+      }
+    }
+    return tool.readOnly ? NO_FILE_SIDE_EFFECTS : WORKSPACE_FILE_SIDE_EFFECTS;
   }
 
   /**
@@ -613,6 +641,10 @@ export class WriteFileTool implements BaseTool {
     return "write_file";
   }
 
+  fileSideEffects(args: string): ToolFileSideEffects {
+    return exactPathSideEffects(args);
+  }
+
   /** 声明写 path 归一化后的绝对路径 —— 不同文件的写可并行 */
   accesses(args: string): ToolAccesses {
     const { path } = JSON.parse(args) as { path?: string };
@@ -685,6 +717,7 @@ export class BashTool implements BaseTool {
   // 完整已捕获输出必须交给 observation 外部化，Registry 不再提前截断。
   readonly maxResultSizeChars = Number.POSITIVE_INFINITY;
   readonly handlesAbortSignal = true;
+  readonly fileSideEffects = WORKSPACE_FILE_SIDE_EFFECTS;
 
   constructor(
     private readonly workDir: string,
@@ -995,6 +1028,7 @@ export class TaskOutputTool implements BaseTool {
 
 export class TaskStopTool implements BaseTool {
   readonly readOnly = false;
+  readonly fileSideEffects = NO_FILE_SIDE_EFFECTS;
 
   constructor(private readonly backgroundManager: BackgroundManager) {}
 
@@ -1264,6 +1298,10 @@ export class EditFileTool implements BaseTool {
 
   name(): string {
     return "edit_file";
+  }
+
+  fileSideEffects(args: string): ToolFileSideEffects {
+    return exactPathSideEffects(args);
   }
 
   /** 声明对 path 的读改写(Edit 必须先读后写,与并发写同文件冲突) */

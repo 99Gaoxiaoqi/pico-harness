@@ -10,6 +10,7 @@
 // 与同批次任何工具均冲突,退化为串行执行,避免清单覆盖写竞态。
 
 import type { BaseTool } from "./registry.js";
+import { NO_FILE_SIDE_EFFECTS } from "./registry.js";
 import type { ToolDefinition } from "../schema/message.js";
 import type { ToolAccesses } from "./tool-access.js";
 import { ToolAccesses as ToolAccessesNs } from "./tool-access.js";
@@ -50,6 +51,8 @@ function statusMark(status: TodoStatus): string {
 export class TodoTool implements BaseTool {
   /** 非只读:所有 action 都可能写 todo.json */
   readonly readOnly = false;
+  /** .claw/todo.json 是会话内部状态，不属于 code rewind 范围。 */
+  readonly fileSideEffects = NO_FILE_SIDE_EFFECTS;
 
   constructor(private readonly store: TodoStore) {}
 

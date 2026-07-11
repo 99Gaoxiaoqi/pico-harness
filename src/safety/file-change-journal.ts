@@ -1,12 +1,13 @@
 import { createHash } from "node:crypto";
 import { constants, createReadStream } from "node:fs";
 import { copyFile, mkdir, readdir, rm, stat, unlink } from "node:fs/promises";
-import { join } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
 const MAX_FILES = 20_000;
 const MAX_TOTAL_BYTES = 512 * 1024 * 1024;
 const MAX_FILE_BYTES = 64 * 1024 * 1024;
 const MAX_WARNINGS = 20;
+/** 明确不属于 code rewind 的策略排除项，不计为 incomplete。 */
 const IGNORED_NAMES: ReadonlySet<string> = new Set([
   ".git",
   ".claw",
@@ -45,7 +46,6 @@ export interface FileChangeJournal {
   readonly baseline: FileChangeScan;
   readonly preimages: Map<string, FileChangePreimage>;
   readonly warnings: string[];
-  readonly ignoredNames: Set<string>;
   warningOverflow: number;
   capturedBytes: number;
   nextEntryId: number;
@@ -63,7 +63,6 @@ export async function beginFileChangeJournal(
     baseline: emptyScan(),
     preimages: new Map(),
     warnings: [],
-    ignoredNames: new Set(),
     warningOverflow: 0,
     capturedBytes: 0,
     nextEntryId: 0,
@@ -83,7 +82,6 @@ export async function beginFileChangeJournal(
       signal?.throwIfAborted();
       await capturePreimage(journal, filePath, metadata, signal);
     }
-    appendIgnoredWarning(journal);
     return journal;
   } catch (error) {
     await discardFileChangeJournal(journal);
@@ -97,7 +95,6 @@ export async function inspectFileChangeJournal(
 ): Promise<FileChangeScan> {
   const current = emptyScan();
   await scanWorkspace(journal, current);
-  appendIgnoredWarning(journal);
   return current;
 }
 
@@ -116,6 +113,24 @@ export function fileChangeJournalWarnings(journal: FileChangeJournal): string[] 
     warnings.push(`另有 ${journal.warningOverflow} 条文件 journal 覆盖警告`);
   }
   return warnings;
+}
+
+/**
+ * 判断路径是否已由该 journal 的写前基线覆盖。
+ *
+ * 已捕获的普通文件可直接由 preimage 恢复；基线中不存在的路径只有在
+ * 扫描完整、位于授权根且不命中策略排除项时，才能安全视为“新建”。
+ */
+export function fileChangeJournalCoversPath(journal: FileChangeJournal, filePath: string): boolean {
+  if (journal.preimages.has(filePath)) return true;
+  if (
+    !journal.baseline.complete ||
+    journal.baseline.files.has(filePath) ||
+    journal.baseline.excludedPaths.has(filePath)
+  ) {
+    return false;
+  }
+  return journal.roots.some((root) => isPolicyCoveredPath(root, filePath));
 }
 
 export async function discardFileChangeJournal(journal: FileChangeJournal): Promise<void> {
@@ -145,6 +160,14 @@ export async function copyFileWithCloneFallback(source: string, target: string):
 
 function emptyScan(): FileChangeScan {
   return { files: new Map(), excludedPaths: new Set(), complete: true };
+}
+
+function isPolicyCoveredPath(root: string, filePath: string): boolean {
+  const pathFromRoot = relative(resolve(root), resolve(filePath));
+  if (pathFromRoot === ".." || pathFromRoot.startsWith(`..${sep}`) || isAbsolute(pathFromRoot)) {
+    return false;
+  }
+  return pathFromRoot.split(sep).every((part) => !IGNORED_NAMES.has(part));
 }
 
 async function scanWorkspace(
@@ -178,7 +201,7 @@ async function scanDirectory(
     signal?.throwIfAborted();
     const filePath = join(directory, entry.name);
     if (IGNORED_NAMES.has(entry.name)) {
-      journal.ignoredNames.add(entry.name);
+      continue;
     } else if (entry.isDirectory()) {
       await scanDirectory(journal, result, filePath, signal);
     } else if (!entry.isFile()) {
@@ -247,14 +270,6 @@ async function hashFile(filePath: string, signal?: AbortSignal): Promise<string>
   const stream = createReadStream(filePath, signal ? { signal } : undefined);
   for await (const chunk of stream) hash.update(chunk as Buffer);
   return hash.digest("hex");
-}
-
-function appendIgnoredWarning(journal: FileChangeJournal): void {
-  if (journal.ignoredNames.size === 0) return;
-  addFileChangeJournalWarning(
-    journal,
-    `rewind 按策略不覆盖: ${[...journal.ignoredNames].sort().join(", ")}`,
-  );
 }
 
 function message(error: unknown): string {
