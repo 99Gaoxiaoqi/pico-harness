@@ -20,6 +20,7 @@ import type { TuiEntry } from "./tui-reporter.js";
 import { CompletedText, StreamingText } from "./streaming-text.js";
 import { ToolCard } from "./tool-card.js";
 import { LogoPanel } from "./logo-panel.js";
+import { SubagentActivityCard } from "./subagent-activity-card.js";
 import { visualRows } from "./terminal-width.js";
 
 export interface MessageRowProps {
@@ -116,6 +117,16 @@ function MessageRowImpl({
           summary={entry.summary}
           isLast={isLast}
           focused={toolFocused}
+          startOffsetRows={toolStartOffsetRows}
+          visibleRows={toolVisibleRows}
+          wrapWidth={wrapWidth}
+        />
+      );
+
+    case "subagent-activity":
+      return (
+        <SubagentActivityCard
+          entry={entry}
           startOffsetRows={toolStartOffsetRows}
           visibleRows={toolVisibleRows}
           wrapWidth={wrapWidth}
@@ -278,6 +289,16 @@ function arePropsEqual(prev: MessageRowProps, next: MessageRowProps): boolean {
         a.name === b.name &&
         a.args === b.args &&
         a.status === b.status &&
+        a.summary === b.summary
+      );
+    case "subagent-activity":
+      return (
+        a.kind === "subagent-activity" &&
+        a.task === b.task &&
+        a.status === b.status &&
+        a.agentName === b.agentName &&
+        a.mode === b.mode &&
+        a.currentAction === b.currentAction &&
         a.summary === b.summary
       );
     case "thinking":

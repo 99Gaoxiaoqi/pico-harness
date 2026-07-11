@@ -145,7 +145,12 @@ function clipEntryTopRows(
 }
 
 function canClipInsideMessageRow(entry: TuiEntry): boolean {
-  return entry.kind === "tool" || entry.kind === "logo" || entry.kind === "error";
+  return (
+    entry.kind === "tool" ||
+    entry.kind === "logo" ||
+    entry.kind === "error" ||
+    entry.kind === "subagent-activity"
+  );
 }
 
 function clipTextTopRows(
@@ -207,6 +212,8 @@ export function shouldRenderStatically(
     case "tool":
       // done/error 已 resolve → 固定;running → 动态
       return entry.status !== "running";
+    case "subagent-activity":
+      return entry.status === "completed" || entry.status === "failed";
     case "assistant":
       if (!isLast) return true; // 历史回复必然固定
       // 末条:流式中 → 动态;否则固定

@@ -12,13 +12,10 @@
 //
 // 不直接渲染 ink 组件(保持 reporter 纯数据层),渲染由 App.tsx 消费 state 完成。
 
-import type { Reporter } from "../engine/reporter.js";
+import type { Reporter, SubagentActivityEvent } from "../engine/reporter.js";
 import { formatOutputPreview } from "./diff-preview.js";
 import type { ToolCardStatus } from "./tool-card.js";
-import {
-  TUI_TOOL_OUTPUT_PROJECTION_LIMIT_CHARS,
-  TuiEventStore,
-} from "./tui-event-store.js";
+import { TUI_TOOL_OUTPUT_PROJECTION_LIMIT_CHARS, TuiEventStore } from "./tui-event-store.js";
 import type {
   TuiEntry,
   TuiEvent,
@@ -30,8 +27,7 @@ import type {
 } from "./tui-event-store.js";
 
 /** Bash 的外部化阈值是 30k；多留少量余量后立即停止向 append-only 日志写正文。 */
-export const TUI_TOOL_OUTPUT_MEMORY_LIMIT_CHARS =
-  TUI_TOOL_OUTPUT_PROJECTION_LIMIT_CHARS;
+export const TUI_TOOL_OUTPUT_MEMORY_LIMIT_CHARS = TUI_TOOL_OUTPUT_PROJECTION_LIMIT_CHARS;
 export const TUI_INLINE_TOOL_RESULT_LIMIT_CHARS = 50_000;
 const TUI_TOOL_OUTPUT_EVENT_SEGMENT_CHARS = 2_048;
 
@@ -269,7 +265,7 @@ export class TuiReporter implements Reporter {
     }
     const droppedChars = chunk.length - retained.length;
     if (droppedChars > 0) {
-      projectionChanged = this.flushToolOutput(internalToolCallId) || projectionChanged;
+      this.flushToolOutput(internalToolCallId);
       this.eventStore.append({
         type: "tool.output.truncated",
         toolCallId: internalToolCallId,
@@ -319,6 +315,27 @@ export class TuiReporter implements Reporter {
       truncated,
     });
     this.removePendingTool(tool);
+    this.emit();
+  }
+
+  onSubagentActivity(activity: SubagentActivityEvent): void {
+    const activityId = activity.activityId.trim();
+    if (!activityId) throw new Error("Subagent activity ID must not be empty");
+    const projection = this.eventStore.getProjection();
+    const existing = projection.entries.find((entry) => entry.subagentActivityId === activityId);
+    this.eventStore.append({
+      type: "subagent.activity.updated",
+      entryId: existing?.id ?? this.eventStore.createId("entry"),
+      activityId,
+      activity: {
+        task: activity.task,
+        status: activity.status,
+        ...(activity.agentName !== undefined ? { agentName: activity.agentName } : {}),
+        ...(activity.mode !== undefined ? { mode: activity.mode } : {}),
+        ...(activity.currentAction !== undefined ? { currentAction: activity.currentAction } : {}),
+        ...(activity.summary !== undefined ? { summary: activity.summary } : {}),
+      },
+    });
     this.emit();
   }
 
