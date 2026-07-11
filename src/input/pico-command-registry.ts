@@ -108,21 +108,24 @@ export async function createPicoCommandRegistry(
 ): Promise<CommandRegistry> {
   const skillLoader = new SkillLoader(options.workDir);
   const tools = options.tools ?? toolStatusFromRegistry(buildDefaultToolRegistry(options.workDir));
-  const settings = getOrCreateSessionSettings({
-    sessionId: options.sessionId ?? `cwd:${options.workDir}`,
-    ...(options.sessionMode !== undefined ? { sessionMode: options.sessionMode } : {}),
-    ...(options.forkFrom !== undefined ? { forkFrom: options.forkFrom } : {}),
-    cwd: options.workDir,
-    provider: options.provider,
-    model: options.model,
-    ...(options.modelRouteId !== undefined ? { modelRouteId: options.modelRouteId } : {}),
-    ...(options.thinkingEffort !== undefined ? { thinkingEffort: options.thinkingEffort } : {}),
-    ...(options.permissionMode !== undefined ? { permissionMode: options.permissionMode } : {}),
-    tools,
-    ...(options.additionalDirectories !== undefined
-      ? { additionalDirectories: options.additionalDirectories }
-      : {}),
-  });
+  const settings = getOrCreateSessionSettings(
+    {
+      sessionId: options.sessionId ?? `cwd:${options.workDir}`,
+      ...(options.sessionMode !== undefined ? { sessionMode: options.sessionMode } : {}),
+      ...(options.forkFrom !== undefined ? { forkFrom: options.forkFrom } : {}),
+      cwd: options.workDir,
+      provider: options.provider,
+      model: options.model,
+      ...(options.modelRouteId !== undefined ? { modelRouteId: options.modelRouteId } : {}),
+      ...(options.thinkingEffort !== undefined ? { thinkingEffort: options.thinkingEffort } : {}),
+      ...(options.permissionMode !== undefined ? { permissionMode: options.permissionMode } : {}),
+      tools,
+      ...(options.additionalDirectories !== undefined
+        ? { additionalDirectories: options.additionalDirectories }
+        : {}),
+    },
+    options.session ? { persistence: options.session } : undefined,
+  );
   const builtins = createBuiltinCommands().filter(
     (command) => !OVERRIDDEN_BUILTIN_COMMANDS.has(command.name),
   );
@@ -143,6 +146,8 @@ export async function createPicoCommandRegistry(
     createAgentsCommand(options),
     createSessionsCommand(options),
     createResumeCommand(options),
+    createForkCommand(options),
+    ...createRunningInputCommands(),
     createSnapshotsCommand(options),
     createRewindCommand(options),
     createUndoCommand(options),
@@ -891,7 +896,7 @@ function createSessionsCommand(options: PicoCommandRegistryOptions): SlashComman
 function createResumeCommand(options: PicoCommandRegistryOptions): SlashCommand {
   return {
     name: "resume",
-    description: "Show how to resume a saved session",
+    description: "Switch this TUI to a saved session",
     usage: "/resume <session-id>",
     argumentHint: "<session-id>",
     category: "session",
@@ -899,7 +904,7 @@ function createResumeCommand(options: PicoCommandRegistryOptions): SlashCommand 
       filterArgumentCandidates(await loadSessionArgumentCandidates(options.workDir), query),
     kind: "local",
     availability: "idle",
-    execute: (input): LocalCommandResult => {
+    execute: async (input): Promise<LocalCommandResult> => {
       const sessionId = input.argv[0];
       if (!sessionId) {
         return {
@@ -913,18 +918,108 @@ function createResumeCommand(options: PicoCommandRegistryOptions): SlashCommand 
         };
       }
 
+      if (!(await sessionExists(options.workDir, sessionId))) {
+        return {
+          type: "local",
+          action: "message",
+          message: `Cannot resume session ${sessionId}: no saved session was found.`,
+        };
+      }
+
       return {
         type: "local",
-        action: "message",
-        message: [
-          `准备恢复 session: ${sessionId}`,
-          `请重启入口并传入启动参数: --session ${sessionId}`,
-          "也可以使用 --continue 继续当前项目最近会话。",
-          "当前会话不会热切换 running engine。",
-        ].join("\n"),
-        data: { sessionId },
+        action: "resume",
+        message: `Switching to session: ${sessionId}`,
+        data: { sessionId, mode: "resume" },
       };
     },
+  };
+}
+
+function createForkCommand(options: PicoCommandRegistryOptions): SlashCommand {
+  return {
+    name: "fork",
+    description: "Fork a saved session and switch this TUI to the new branch",
+    usage: "/fork <session-id>",
+    argumentHint: "<session-id>",
+    category: "session",
+    argumentCompleter: async (query) =>
+      filterArgumentCandidates(await loadSessionArgumentCandidates(options.workDir), query),
+    kind: "local",
+    availability: "idle",
+    execute: async (input): Promise<LocalCommandResult> => {
+      const sessionId = input.argv[0];
+      if (!sessionId) {
+        return {
+          type: "local",
+          action: "message",
+          message: "Usage: /fork <session-id>",
+        };
+      }
+      if (!(await sessionExists(options.workDir, sessionId))) {
+        return {
+          type: "local",
+          action: "message",
+          message: `Cannot fork session ${sessionId}: no saved session was found.`,
+        };
+      }
+      return {
+        type: "local",
+        action: "resume",
+        message: `Forking session: ${sessionId}`,
+        data: { sessionId, mode: "fork" },
+      };
+    },
+  };
+}
+
+async function sessionExists(workDir: string, sessionId: string): Promise<boolean> {
+  return (await listCliSessionSummaries(workDir)).some((session) => session.id === sessionId);
+}
+
+function createRunningInputCommands(): SlashCommand[] {
+  return [
+    runningInputCommand(
+      "steer",
+      "Guide the active run at the next model boundary",
+      "/steer <guidance>",
+    ),
+    runningInputCommand("queue", "Queue a prompt as the next user turn", "/queue <prompt>"),
+    runningInputCommand(
+      "replace",
+      "Interrupt the active run and replace it with a new prompt",
+      "/replace <prompt>",
+    ),
+    {
+      name: "interrupt",
+      description: "Interrupt the active run and drop queued input",
+      usage: "/interrupt",
+      category: "session",
+      kind: "local",
+      availability: "running",
+      execute: (): LocalCommandResult => ({
+        type: "local",
+        action: "message",
+        message: "Interrupting the active run.",
+      }),
+    },
+  ];
+}
+
+function runningInputCommand(name: string, description: string, usage: string): SlashCommand {
+  return {
+    name,
+    description,
+    usage,
+    argumentHint: "<text>",
+    category: "session",
+    kind: "local",
+    availability: "running",
+    execute: (input): LocalCommandResult => ({
+      type: "local",
+      action: "message",
+      message: input.args.trim().length > 0 ? `${name} input accepted.` : `Usage: ${usage}`,
+    }),
   };
 }
 

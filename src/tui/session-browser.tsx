@@ -10,6 +10,7 @@ export type SessionBrowserScope = "cwd" | "all";
 export interface SessionBrowserSession extends CliSessionSummary {
   title?: string;
   firstMessage?: string;
+  lastMessage?: string;
 }
 
 export interface SessionBrowserState {
@@ -140,6 +141,9 @@ export function formatSessionBrowser(
     lines.push(`  ${truncateInline(sessionTitle(session), titleWidth)}`);
     if (session.title && session.firstMessage && session.firstMessage !== session.title) {
       lines.push(`  ${truncateInline(session.firstMessage, titleWidth)}`);
+    }
+    if (session.lastMessage && session.lastMessage !== session.firstMessage) {
+      lines.push(`  last: ${truncateInline(session.lastMessage, Math.max(1, titleWidth - 6))}`);
     }
     lines.push(`  cwd=${truncateInline(session.cwd, cwdWidth)}`);
   }
