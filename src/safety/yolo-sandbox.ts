@@ -165,24 +165,9 @@ export function isSensitiveWritePath(
     const segments = rel.split(sep);
     const basename = segments.at(-1)?.toLowerCase() ?? "";
     const normalizedSegments = segments.map((segment) => segment.toLowerCase());
-    const clawIndex = normalizedSegments.indexOf(".claw");
-    const clawControlPath =
-      clawIndex >= 0 &&
-      (() => {
-        const child = normalizedSegments[clawIndex + 1] ?? "";
-        return (
-          child === "mcp.json" ||
-          child === "agents.yaml" ||
-          child === "agents.yml" ||
-          child === "skills" ||
-          /^settings(?:\.[^/]*)?\.json$/u.test(child)
-        );
-      })();
     return (
       normalizedSegments.some((segment) => SENSITIVE_DIRECTORY_NAMES.has(segment)) ||
-      normalizedSegments.includes(".pico") ||
       basename === "agents.md" ||
-      clawControlPath ||
       SENSITIVE_FILE_NAMES.has(basename) ||
       basename.startsWith(".env.") ||
       PRIVATE_KEY_FILE_RE.test(basename)
@@ -209,7 +194,7 @@ function buildMacosProfile(roots: readonly string[], network: SandboxNetworkPoli
     '(allow file-write-data (literal "/dev/tty"))',
     ...roots.map((root) => `(allow file-write* (subpath ${sbplString(root)}))`),
     `(deny file-read* (regex #"/(\\.ssh|\\.gnupg|\\.aws|\\.kube|\\.docker|\\.azure|gcloud)(/|$)" #"/(\\.env(\\.[^/]*)?|\\.npmrc|\\.pypirc|\\.netrc|\\.git-credentials|credentials|id_(rsa|ed25519|ecdsa)|[^/]*\\.(pem|key))$"))`,
-    `(deny file-write* (regex #"/(\\.git|\\.ssh|\\.gnupg|\\.aws|\\.kube|\\.docker|\\.azure|gcloud)(/|$)" #"/(\\.env(\\.[^/]*)?|\\.npmrc|\\.pypirc|\\.netrc|\\.git-credentials|credentials|id_(rsa|ed25519|ecdsa)|[^/]*\\.(pem|key))$"))`,
+    `(deny file-write* (regex #"/(\\.git|\\.ssh|\\.gnupg|\\.aws|\\.kube|\\.docker|\\.azure|\\.pico|\\.claude|\\.vscode|\\.claw|gcloud)(/|$)" #"/(AGENTS\\.md|\\.env(\\.[^/]*)?|\\.npmrc|\\.pypirc|\\.netrc|\\.git-credentials|credentials|id_(rsa|ed25519|ecdsa)|[^/]*\\.(pem|key))$"))`,
   ];
   if (network === "allow") rules.push("(allow network*)");
   return rules.join("\n");
@@ -243,6 +228,10 @@ function jsonStringField(args: string, field: string): string | undefined {
 
 const SENSITIVE_DIRECTORY_NAMES = new Set([
   ".git",
+  ".pico",
+  ".claude",
+  ".vscode",
+  ".claw",
   ".ssh",
   ".gnupg",
   ".aws",

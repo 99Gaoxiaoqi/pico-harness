@@ -85,6 +85,11 @@ describe("Bash permission mode integration", () => {
     const runner: AgentRunner = {
       runSub: async () => ({ summary: "unused", artifacts: [] }),
     };
+    await writeFile(join(workDir, "AGENTS.md"), "project rules\n", "utf8");
+    await mkdir(join(workDir, ".pico"), { recursive: true });
+    await writeFile(join(workDir, ".pico", "config.json"), '{"trusted":true}\n', "utf8");
+    await mkdir(join(workDir, "staging"), { recursive: true });
+    await writeFile(join(workDir, "staging", "settings.json"), "{}\n", "utf8");
     const workerRegistry = createSubagentRegistryFactory({
       workDir,
       workspaceRoots: roots,
@@ -109,6 +114,20 @@ describe("Bash permission mode integration", () => {
       path: ".pico/config.json",
       content: "{}\n",
     });
+    const workerClaudeControl = await execute(workerRegistry, "write_file", {
+      path: ".claude/agents/override.md",
+      content: "untrusted override\n",
+    });
+    const workerOpaqueAgent = await execute(workerRegistry, "bash", {
+      command: nodeWriteCommand(join(workDir, "AGENTS.md"), "opaque override\n"),
+    });
+    const workerOpaquePico = await execute(workerRegistry, "bash", {
+      command: nodeWriteCommand(join(workDir, ".pico", "config.json"), "{}\n"),
+    });
+    const workerOpaqueClaw = await execute(workerRegistry, "bash", {
+      command: nodeRenameCommand(join(workDir, "staging"), join(workDir, ".claw")),
+    });
+    const workerRulesRead = await execute(workerRegistry, "read_file", { path: "AGENTS.md" });
 
     expect(workerDirect).toMatchObject({
       isError: true,
@@ -118,16 +137,31 @@ describe("Bash permission mode integration", () => {
       isError: true,
       output: expect.stringContaining("[sandbox:"),
     });
-    for (const rejected of [workerAgentControl, workerPicoControl]) {
+    for (const rejected of [workerAgentControl, workerPicoControl, workerClaudeControl]) {
       expect(rejected).toMatchObject({
         isError: true,
         output: expect.stringContaining("[sandbox:sensitive_path_denied]"),
       });
     }
+    for (const rejected of [workerOpaqueAgent, workerOpaquePico, workerOpaqueClaw]) {
+      expect(rejected).toMatchObject({
+        isError: true,
+        output: expect.stringContaining("[sandbox:"),
+      });
+    }
+    expect(workerRulesRead).toMatchObject({
+      isError: false,
+      output: expect.stringContaining("project rules"),
+    });
     await expect(access(workerDirectFile)).rejects.toThrow();
     await expect(access(workerHiddenFile)).rejects.toThrow();
-    await expect(access(join(workDir, "AGENTS.md"))).rejects.toThrow();
-    await expect(access(join(workDir, ".pico", "config.json"))).rejects.toThrow();
+    await expect(readFile(join(workDir, "AGENTS.md"), "utf8")).resolves.toBe("project rules\n");
+    await expect(readFile(join(workDir, ".pico", "config.json"), "utf8")).resolves.toBe(
+      '{"trusted":true}\n',
+    );
+    await expect(access(join(workDir, ".claude", "agents", "override.md"))).rejects.toThrow();
+    await expect(readFile(join(workDir, "staging", "settings.json"), "utf8")).resolves.toBe("{}\n");
+    await expect(access(join(workDir, ".claw", "settings.json"))).rejects.toThrow();
 
     const previousSecret = process.env.PICO_TEST_SUBAGENT_SECRET;
     process.env.PICO_TEST_SUBAGENT_SECRET = "must-not-leak";
@@ -221,6 +255,9 @@ describe("Bash permission mode integration", () => {
     const planGitShow = await execute(planRegistry, "bash", {
       command: "git show HEAD:.env",
     });
+    const planRemoteUrl = await execute(planRegistry, "bash", {
+      command: "git remote get-url origin",
+    });
     const interpreter = await execute(planRegistry, "bash", {
       command: nodeWriteCommand(join(workDir, "plan-indirect.txt"), "must-not-run"),
     });
@@ -293,7 +330,7 @@ describe("Bash permission mode integration", () => {
       output: expect.stringContaining("密钥与凭据"),
     });
     expect(planSecretGrep.output).not.toContain("plan-secret");
-    for (const rejected of [planCut, planGitPager, planGitShow]) {
+    for (const rejected of [planCut, planGitPager, planGitShow, planRemoteUrl]) {
       expect(rejected).toMatchObject({
         isError: true,
         output: expect.stringContaining("只允许可证明只读的 Bash"),
@@ -432,6 +469,11 @@ async function execute(registry: Registry, name: string, input: object) {
 
 function nodeWriteCommand(path: string, content: string): string {
   const script = `require("node:fs").writeFileSync(${JSON.stringify(path)}, ${JSON.stringify(content)})`;
+  return `node -e ${shellQuote(script)}`;
+}
+
+function nodeRenameCommand(source: string, target: string): string {
+  const script = `require("node:fs").renameSync(${JSON.stringify(source)}, ${JSON.stringify(target)})`;
   return `node -e ${shellQuote(script)}`;
 }
 

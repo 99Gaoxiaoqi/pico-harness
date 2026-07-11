@@ -201,11 +201,23 @@ export class WorktreeMergeQueue {
 
       entry.targetHeadBefore = targetHead;
       entry.sourceHead = sourceHead;
-      entry.mergeAttempted = true;
       await this.assertNoExternalGitDrivers(entry.targetWorktree);
-      const merge = await this.git(["merge", "--no-ff", "--no-edit", "--", entry.sourceBranch], {
-        cwd: entry.targetWorktree,
-      });
+      await this.assertNoBranchMergeOptions(entry.targetWorktree, entry.targetBranch);
+      entry.mergeAttempted = true;
+      const merge = await this.git(
+        [
+          "merge",
+          "--no-ff",
+          "--no-edit",
+          "--no-gpg-sign",
+          "--no-verify-signatures",
+          "--",
+          entry.sourceBranch,
+        ],
+        {
+          cwd: entry.targetWorktree,
+        },
+      );
       if (merge.exitCode !== 0) {
         throw new Error(commandFailure("git merge 失败，已保留现场", merge));
       }
@@ -306,6 +318,21 @@ export class WorktreeMergeQueue {
     if (result.stdout.trim().length > 0) {
       throw new Error(
         "仓库配置了外部 Git filter/merge driver，拒绝在宿主进程中自动合并；请人工审查后处理。",
+      );
+    }
+  }
+
+  private async assertNoBranchMergeOptions(worktree: string, branch: string): Promise<void> {
+    const result = await this.git(
+      ["config", "--includes", "--get-all", `branch.${branch}.mergeOptions`],
+      { cwd: worktree },
+    );
+    if (result.exitCode !== 0 && result.exitCode !== 1) {
+      throw new Error(commandFailure("无法检查目标分支 mergeOptions", result));
+    }
+    if (result.stdout.trim().length > 0) {
+      throw new Error(
+        `目标分支 ${branch} 配置了 mergeOptions，无法证明不会签名或替换合并策略；请人工合并。`,
       );
     }
   }

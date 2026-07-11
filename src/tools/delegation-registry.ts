@@ -7,6 +7,7 @@ import {
 } from "./registry-impl.js";
 import type { BaseTool, RequestMiddleware } from "./registry.js";
 import { isDangerousCommand, isHardlineCommand } from "../approval/manager.js";
+import { isSensitiveCredentialPath } from "../approval/session-permissions.js";
 import { SkillLoader, SkillViewTool } from "../context/skill.js";
 import type { AgentRunner, SubagentRegistryFactory, SubagentRegistryRequest } from "./subagent.js";
 import { DelegateTaskTool } from "./subagent.js";
@@ -16,11 +17,7 @@ import { GlobTool } from "./glob.js";
 import { GrepTool } from "./grep.js";
 import { FetchURLTool, WebSearchTool } from "./web.js";
 import { WorkspaceRoots } from "./workspace-roots.js";
-import {
-  evaluateYoloToolCall,
-  isSensitiveWritePath,
-  type YoloSandboxConfig,
-} from "../safety/yolo-sandbox.js";
+import { evaluateYoloToolCall, type YoloSandboxConfig } from "../safety/yolo-sandbox.js";
 import type { WorktreeSupervisor } from "../tasks/worktree-supervisor.js";
 import { classifyBashCommand } from "../approval/bash-safety.js";
 import { bashCommandFromArgs } from "../approval/bash-paths.js";
@@ -210,9 +207,7 @@ function buildSubagentSafetyMiddleware(
       const path = jsonStringField(call.arguments, "path");
       if (
         path !== undefined &&
-        isSensitiveWritePath(config.workspaceRoots.resolveUnchecked(path), [
-          ...config.workspaceRoots.list(),
-        ])
+        isSensitiveCredentialPath(config.workspaceRoots.resolveUnchecked(path))
       ) {
         return { allowed: false, reason: "子代理不允许读取密钥、.env 或凭据路径。" };
       }

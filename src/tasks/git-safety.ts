@@ -24,18 +24,23 @@ export function hardenGitArgs(args: readonly string[], disabledHooksPath: string
     "-c",
     "tag.gpgSign=false",
     "-c",
+    "merge.verifySignatures=false",
+    "-c",
+    "maintenance.auto=false",
+    "-c",
+    "maintenance.autoDetach=false",
+    "-c",
+    "gc.auto=0",
+    "-c",
     "credential.helper=",
     ...args,
   ];
 }
 
-/** 宿主自动 Git 不继承 API key、SSH agent 或用户/系统 Git 配置。 */
+/** 宿主自动 Git 不继承 API key、SSH agent 或外部注入的 GIT_* 环境。 */
 export function buildSafeGitEnvironment(): NodeJS.ProcessEnv {
   const environment = buildMinimalChildProcessEnv({
     GIT_TERMINAL_PROMPT: "0",
-    GIT_CONFIG_NOSYSTEM: "1",
-    GIT_CONFIG_GLOBAL: process.platform === "win32" ? "NUL" : "/dev/null",
-    GIT_ATTR_NOSYSTEM: "1",
     GIT_PAGER: "cat",
   });
   const safePath = environment.PATH?.split(delimiter)
@@ -46,5 +51,4 @@ export function buildSafeGitEnvironment(): NodeJS.ProcessEnv {
   return environment;
 }
 
-export const UNSAFE_GIT_DRIVER_CONFIG_PATTERN =
-  "^(filter\\..*\\.(clean|smudge|process|required)|merge\\..*\\.driver)$";
+export const UNSAFE_GIT_DRIVER_CONFIG_PATTERN = "^merge\\..*\\.driver$";

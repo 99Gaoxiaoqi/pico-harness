@@ -193,11 +193,12 @@ function classifyGitCommand(args: readonly string[]): BashSafetyClassification {
       : { kind: "requires-approval", reason: "git branch 参数可能修改分支" };
   }
   if (subcommand === "remote") {
-    return subcommandArgs.length === 0 ||
-      subcommandArgs.every((arg) => arg === "-v" || arg === "--verbose") ||
-      subcommandArgs[0] === "get-url"
+    return subcommandArgs.length === 0
       ? { kind: "read-only" }
-      : { kind: "requires-approval", reason: "git remote 参数可能修改远端配置" };
+      : {
+          kind: "requires-approval",
+          reason: "git remote 详情可能暴露内嵌凭据或修改远端配置",
+        };
   }
   return { kind: "requires-approval", reason: `git ${subcommand} 不是只读子命令` };
 }
