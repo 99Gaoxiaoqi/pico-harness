@@ -54,9 +54,12 @@ describe("fetch_url 安全边界集成", () => {
         }),
       );
     globalThis.fetch = fetchMock;
+    const requestMock = vi.fn((url: URL, _addresses: readonly unknown[], signal: AbortSignal) =>
+      fetch(url.href, { signal, redirect: "manual" }),
+    );
 
     const registry = new ToolRegistry();
-    registry.register(new FetchURLTool());
+    registry.register(new FetchURLTool({ request: requestMock }));
 
     const success = await registry.execute({
       id: "fetch-safe",
@@ -72,6 +75,11 @@ describe("fetch_url 安全边界集成", () => {
     expect(success.output).toContain("已截断");
     expect(success.output.length).toBeLessThan(51_000);
     expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(requestMock).toHaveBeenCalledTimes(2);
+    expect(requestMock.mock.calls[0]?.[1]).toEqual([
+      { address: "8.8.8.8", family: 4 },
+      { address: "2606:4700:4700::1111", family: 6 },
+    ]);
     expect(fetchMock.mock.calls.every(([, init]) => init?.redirect === "manual")).toBe(true);
     expect(vi.mocked(lookup)).toHaveBeenCalledWith("start.example", {
       all: true,
@@ -92,5 +100,21 @@ describe("fetch_url 安全边界集成", () => {
       output: expect.stringContaining("非公网或保留地址"),
     });
     expect(fetchMock).toHaveBeenCalledTimes(3);
+
+    for (const [id, url] of [
+      ["fetch-mapped-loopback", "http://[::ffff:127.0.0.1]/"],
+      ["fetch-nat64-loopback", "http://[64:ff9b::7f00:1]/"],
+    ] as const) {
+      const result = await registry.execute({
+        id,
+        name: "fetch_url",
+        arguments: JSON.stringify({ url }),
+      });
+      expect(result).toMatchObject({
+        isError: true,
+        output: expect.stringContaining("非公网或保留地址"),
+      });
+    }
+    expect(requestMock).toHaveBeenCalledTimes(3);
   });
 });
