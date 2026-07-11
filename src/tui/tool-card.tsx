@@ -144,10 +144,11 @@ function buildStandardToolVisualRows(options: BuildToolCardVisualRowsOptions): T
   const target = summarizeToolTarget(name, args, 30);
   const grouped = args.includes('"groupedCount"');
   const failure = isFailureStatus(status);
-  const displaySummary = summary && failure ? ensureErrorSummary(summary) : summary;
+  const displaySummary = summary;
+  const headerSummary = summary && failure ? ensureErrorSummary(summary) : summary;
   const resultBadge =
-    displaySummary && (failure || grouped || !target)
-      ? toolResultBadge(displaySummary, failure)
+    headerSummary && (failure || grouped || !target)
+      ? toolResultBadge(headerSummary, failure)
       : undefined;
   const availableHeaderWidth = Math.max(1, Math.floor(wrapWidth) - 2);
   const header = buildPrioritizedHeader({
@@ -171,7 +172,7 @@ function buildStandardToolVisualRows(options: BuildToolCardVisualRowsOptions): T
   if (!displaySummary) return rows;
   rows.push({ kind: "result-label", text: "  结果" });
   rows.push(
-    ...visualRows(toolResultPreview(displaySummary, true), detailWidth).map((text) => ({
+    ...visualRows(displaySummary, detailWidth).map((text) => ({
       kind: "result" as const,
       text: `  ${text}`,
     })),
@@ -184,8 +185,9 @@ function buildAgentToolVisualRows(options: BuildToolCardVisualRowsOptions): Tool
   const canToggle = options.canToggle ?? isLast;
   const treeChar = isLast ? "└─" : "├─";
   const meta = agentToolMeta(name, args);
-  const resultText = status === "running" ? meta.task : agentResultText(status, summary);
-  const preview = agentResultHint(resultText);
+  const compactResult = status === "running" ? meta.task : agentResultText(status, summary);
+  const resultText = expanded && status !== "running" && summary ? summary : compactResult;
+  const preview = agentResultHint(compactResult);
   const availableHeaderWidth = Math.max(1, Math.floor(wrapWidth) - 1);
   const rows: ToolCardVisualRow[] = [
     {
@@ -371,11 +373,6 @@ function normalizeStatus(
 function isFailureStatus(status: ToolCardStatus): boolean {
   const normalized = normalizeStatus(status);
   return normalized === "error" || normalized === "denied";
-}
-
-function toolResultPreview(summary: string, expanded: boolean): string {
-  const preview = formatOutputPreview(summary, { maxLines: expanded ? 5 : 1, expanded });
-  return expanded ? preview : compactText(preview, 120);
 }
 
 function toolResultBadge(summary: string, failure = false): string {
