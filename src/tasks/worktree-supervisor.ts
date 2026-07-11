@@ -73,6 +73,7 @@ export interface WorktreeTaskSnapshot {
 export interface GitExecutionOptions {
   cwd: string;
   signal?: AbortSignal;
+  stdin?: string;
   /** git config --get-regexp 等查询以 1 表示“无匹配”。 */
   allowExitCodes?: readonly number[];
 }
@@ -435,7 +436,7 @@ export class WorktreeSupervisor {
     if (await pathExists(record.worktreePath)) {
       throw new Error(`worktree 目标已存在: ${record.worktreePath}`);
     }
-    await this.assertNoExternalGitDrivers(this.repoRoot, record.controller.signal);
+    await this.assertNoExternalGitMergeDrivers(this.repoRoot, record.controller.signal);
     await this.git(["check-ref-format", "--branch", record.branch], { cwd: this.repoRoot });
     const base = await this.git(["rev-parse", "--verify", `${record.baseRef}^{commit}`], {
       cwd: this.repoRoot,
@@ -445,6 +446,7 @@ export class WorktreeSupervisor {
     if (!/^[0-9a-fA-F]{40,64}$/.test(commit)) {
       throw new Error(`无法解析基准提交: ${record.baseRef}`);
     }
+    await this.assertNoActiveFilterAttributes(this.repoRoot, record.controller.signal, commit);
     await this.git(["worktree", "add", "-b", record.branch, record.worktreePath, commit], {
       cwd: this.repoRoot,
       signal: record.controller.signal,
@@ -506,12 +508,22 @@ export class WorktreeSupervisor {
     });
     if (status.stdout.trim().length === 0) return;
 
-    await this.assertNoExternalGitDrivers(record.worktreePath, record.controller.signal);
+    await this.assertNoExternalGitMergeDrivers(record.worktreePath, record.controller.signal);
 
-    await this.git(["add", "--all"], {
+    const filterOverrides = await this.buildDisabledFilterOverrides(
+      record.worktreePath,
+      record.controller.signal,
+    );
+    await this.git([...filterOverrides, "add", "--all"], {
       cwd: record.worktreePath,
       signal: record.controller.signal,
     });
+    await this.assertNoActiveFilterAttributes(
+      record.worktreePath,
+      record.controller.signal,
+      undefined,
+      true,
+    );
     record.controller.signal.throwIfAborted();
     await this.git(
       [
@@ -528,16 +540,108 @@ export class WorktreeSupervisor {
     );
   }
 
-  private async assertNoExternalGitDrivers(cwd: string, signal?: AbortSignal): Promise<void> {
+  private async assertNoExternalGitMergeDrivers(cwd: string, signal?: AbortSignal): Promise<void> {
     const result = await this.git(
       ["config", "--includes", "--get-regexp", UNSAFE_GIT_DRIVER_CONFIG_PATTERN],
       { cwd, ...(signal ? { signal } : {}), allowExitCodes: [1] },
     );
     if (result.stdout.trim().length > 0) {
       throw new Error(
-        "仓库配置了外部 Git filter/merge driver，拒绝在 worker 沙箱外自动 checkout 或提交；请人工审查后提交。",
+        "仓库配置了外部 Git merge driver，拒绝在 worker 沙箱外自动 checkout 或提交；请人工审查后提交。",
       );
     }
+  }
+
+  private async assertNoActiveFilterAttributes(
+    cwd: string,
+    signal?: AbortSignal,
+    source?: string,
+    cached = false,
+  ): Promise<void> {
+    if (source && cached) {
+      throw new Error("Git filter attribute 检查不能同时指定 source 与 cached。");
+    }
+    const listed = await this.git(
+      source
+        ? ["ls-tree", "-r", "--name-only", "-z", source]
+        : cached
+          ? ["ls-files", "-z", "--cached"]
+          : ["ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+      { cwd, ...(signal ? { signal } : {}) },
+    );
+    if (listed.stdout.includes("\ufffd")) {
+      throw new Error("Git 文件名包含无法安全解码的字节，拒绝自动 checkout/提交。");
+    }
+    const paths = listed.stdout.split("\0").filter(Boolean);
+    if (paths.length === 0) return;
+    const attributes = await this.git(
+      [
+        "check-attr",
+        "--stdin",
+        "-z",
+        ...(source ? ["--source", source] : []),
+        ...(cached ? ["--cached"] : []),
+        "filter",
+      ],
+      { cwd, stdin: listed.stdout, ...(signal ? { signal } : {}) },
+    );
+    const records = attributes.stdout.split("\0");
+    if (records.at(-1) === "") records.pop();
+    if (records.length !== paths.length * 3) {
+      throw new Error("Git filter attribute 检查返回了不完整结果，拒绝自动 checkout/提交。");
+    }
+    for (let recordIndex = 0; recordIndex < records.length; recordIndex += 3) {
+      const path = records[recordIndex] ?? "unknown";
+      const value = records[recordIndex + 2];
+      if (value !== "unspecified" && value !== "unset") {
+        throw new Error(
+          `文件 ${path} 启用了 Git filter=${value ?? "unknown"}，拒绝在 worker 沙箱外自动 checkout/提交；请人工处理。`,
+        );
+      }
+    }
+  }
+
+  /**
+   * Git add 会在宿主进程中执行 clean/process filter。先枚举所有生效的
+   * filter driver，再用命令行最高优先级配置将它们置空，避免 worker 在
+   * 检查与暂存之间更换 .gitattributes 导致外部程序逃逸沙箱。
+   */
+  private async buildDisabledFilterOverrides(cwd: string, signal?: AbortSignal): Promise<string[]> {
+    const result = await this.git(
+      [
+        "config",
+        "--includes",
+        "--null",
+        "--name-only",
+        "--get-regexp",
+        "^filter\\..*\\.(clean|smudge|process|required)$",
+      ],
+      { cwd, ...(signal ? { signal } : {}), allowExitCodes: [1] },
+    );
+    if (result.stdout.includes("\ufffd")) {
+      throw new Error("Git filter 配置名包含无法安全解码的字节，拒绝自动提交。");
+    }
+
+    const driverNames = new Set<string>();
+    for (const key of result.stdout.split("\0").filter(Boolean)) {
+      const match = /^filter\.(.+)\.(?:clean|smudge|process|required)$/u.exec(key);
+      const driverName = match?.[1];
+      if (!driverName || /[\0\r\n]/u.test(driverName)) {
+        throw new Error(`Git filter 配置名无法安全解析: ${key}`);
+      }
+      driverNames.add(driverName);
+    }
+
+    return [...driverNames].flatMap((driverName) => [
+      "-c",
+      `filter.${driverName}.clean=`,
+      "-c",
+      `filter.${driverName}.smudge=`,
+      "-c",
+      `filter.${driverName}.process=`,
+      "-c",
+      `filter.${driverName}.required=false`,
+    ]);
   }
 
   private appendOutput(record: WorktreeTaskRecord, chunk: string): void {
@@ -662,7 +766,7 @@ function executeGit(
   options: GitExecutionOptions,
 ): Promise<GitExecutionResult> {
   return new Promise((resolvePromise, reject) => {
-    execFile(
+    const child = execFile(
       "git",
       [...args],
       {
@@ -689,6 +793,12 @@ function executeGit(
         resolvePromise({ stdout: String(stdout), stderr: String(stderr) });
       },
     );
+    if (options.stdin !== undefined) {
+      child.stdin?.on("error", () => {
+        // Git 在输入写完前失败时可能关闭 pipe；最终错误由 execFile 回调统一返回。
+      });
+      child.stdin?.end(options.stdin);
+    }
   });
 }
 

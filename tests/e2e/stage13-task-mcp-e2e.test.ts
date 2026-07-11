@@ -49,6 +49,10 @@ describe("stage 13 task and MCP host integration", () => {
     await git(["config", "core.fsmonitor", ".githooks/pre-commit"], repo);
     await git(["config", "commit.gpgSign", "true"], repo);
     await git(["config", "gpg.program", ".githooks/pre-commit"], repo);
+    await git(["config", "maintenance.auto", "true"], repo);
+    await git(["config", "maintenance.autoDetach", "true"], repo);
+    await git(["config", "gc.auto", "1"], repo);
+    await git(["config", "gc.recentObjectsHook", hostileProgram], repo);
 
     const taskRuntime = await TaskHostRuntime.create({ workDir: repo });
     const gate = deferred();
@@ -93,19 +97,48 @@ describe("stage 13 task and MCP host integration", () => {
     expect(taskRuntime.supervisor.get(stoppable.taskId)?.status).toBe("stopping");
     await expect(stopPromise).resolves.toMatchObject({ status: "stopped" });
 
+    await git(["config", "branch.main.mergeOptions", "--strategy=ours"], repo);
+    const unsafeMergeOptionsTask = taskRuntime.start(
+      { description: "reject branch merge options", branchSlug: "unsafe-merge-options" },
+      async (context) => {
+        await writeFile(
+          join(context.worktreePath, "merge-options.txt"),
+          "must not merge\n",
+          "utf8",
+        );
+      },
+    );
+    await expect(taskRuntime.supervisor.wait(unsafeMergeOptionsTask.taskId)).resolves.toMatchObject(
+      { status: "completed" },
+    );
+    await taskRuntime.merge(unsafeMergeOptionsTask.taskId);
+    await taskRuntime.mergeQueue.waitForIdle();
+    expect(taskRuntime.mergeQueue.get(unsafeMergeOptionsTask.taskId)).toMatchObject({
+      status: "blocked",
+      error: expect.stringContaining("mergeOptions"),
+    });
+    await expect(access(join(repo, "merge-options.txt"))).rejects.toThrow();
+    await git(["config", "--unset-all", "branch.main.mergeOptions"], repo);
+
     await git(["config", "filter.evil.clean", hostileProgram], repo);
     let unsafeRunnerEntered = false;
     const unsafeFilterTask = taskRuntime.start(
       { description: "reject unsafe git filter", branchSlug: "unsafe-filter" },
-      async () => {
+      async (context) => {
         unsafeRunnerEntered = true;
+        await writeFile(
+          join(context.worktreePath, ".gitattributes"),
+          "*.bin filter=evil\n",
+          "utf8",
+        );
+        await writeFile(join(context.worktreePath, "payload.bin"), "must not filter\n", "utf8");
       },
     );
     await expect(taskRuntime.supervisor.wait(unsafeFilterTask.taskId)).resolves.toMatchObject({
       status: "failed",
-      error: expect.stringContaining("外部 Git filter/merge driver"),
+      error: expect.stringContaining("Git filter=evil"),
     });
-    expect(unsafeRunnerEntered).toBe(false);
+    expect(unsafeRunnerEntered).toBe(true);
     await expect(access(hostileSentinel)).rejects.toThrow();
 
     const { url, close } = await startMcpServer();
