@@ -159,9 +159,12 @@ function classifySimpleCommand(tokens: readonly string[]): BashSafetyClassificat
       : { kind: "requires-approval", reason: "command 可能执行任意程序" };
   }
   if (executable === "env") {
-    return args.every((arg) => arg.startsWith("-"))
+    return args.every((arg) => SAFE_ENV_READ_OPTIONS.has(arg))
       ? { kind: "read-only" }
-      : { kind: "requires-approval", reason: "env 后续参数可能执行任意程序" };
+      : {
+          kind: "requires-approval",
+          reason: "env 参数可能通过 -S/--split-string 执行任意程序",
+        };
   }
   if (executable === "git") return classifyGitCommand(args);
 
@@ -240,6 +243,13 @@ const ALWAYS_READ_ONLY_COMMANDS: ReadonlySet<string> = new Set([
   "wc",
   "which",
   "whoami",
+]);
+
+const SAFE_ENV_READ_OPTIONS: ReadonlySet<string> = new Set([
+  "-0",
+  "--null",
+  "-i",
+  "--ignore-environment",
 ]);
 
 const GIT_READ_ONLY_SUBCOMMANDS: ReadonlySet<string> = new Set([
