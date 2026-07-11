@@ -1,6 +1,12 @@
 import type { SessionHydrationSnapshot } from "../engine/session-runtime.js";
-import { isMessageHiddenFromTranscript, type Message, type ToolCall } from "../schema/message.js";
+import {
+  isMessageHiddenFromTranscript,
+  isToolResultErrorMessage,
+  type Message,
+  type ToolCall,
+} from "../schema/message.js";
 import type { TuiEntry } from "./tui-reporter.js";
+import type { TuiReporter } from "./tui-reporter.js";
 
 /**
  * Session JSONL 是模型上下文的权威源，TUI EventStore 是当前界面 segment。
@@ -35,6 +41,49 @@ export function hydrateTuiEntries(snapshot: SessionHydrationSnapshot): TuiEntry[
   return entries;
 }
 
+/**
+ * 用 Reporter 的领域事件重建权威投影。工具必须走 started/completed，
+ * 否则内部 tool ID、完整 inline result 与 artifactRef 会在热切换后丢失。
+ */
+export function hydrateTuiReporter(
+  reporter: Pick<
+    TuiReporter,
+    "pushUserMessage" | "onMessage" | "onToolCall" | "onToolResult" | "onFinish"
+  >,
+  snapshot: SessionHydrationSnapshot,
+): void {
+  const toolResults = indexToolResults(snapshot.messages);
+  for (const message of snapshot.messages) {
+    if (
+      message.role === "system" ||
+      message.toolCallId !== undefined ||
+      isMessageHiddenFromTranscript(message)
+    ) {
+      continue;
+    }
+
+    if (message.role === "user") {
+      const content = visibleText(message.content);
+      if (content) reporter.pushUserMessage(content);
+      continue;
+    }
+
+    const content = visibleText(message.content);
+    if (content) reporter.onMessage(content);
+    for (const call of message.toolCalls ?? []) {
+      const result = shiftToolResult(toolResults, call.id);
+      reporter.onToolCall(call.name, call.arguments, call.id);
+      reporter.onToolResult(
+        call.name,
+        result?.content ?? "Interrupted before a result was recorded.",
+        result === undefined || isHydratedToolError(result),
+        call.id,
+      );
+    }
+  }
+  reporter.onFinish();
+}
+
 function indexToolResults(messages: readonly Message[]): Map<string, Message[]> {
   const results = new Map<string, Message[]>();
   for (const message of messages) {
@@ -65,7 +114,7 @@ function hydrateToolEntry(call: ToolCall, result: Message | undefined): TuiEntry
     };
   }
 
-  const failed = result.content.startsWith("[ERROR]");
+  const failed = isHydratedToolError(result);
   return {
     kind: "tool",
     name: call.name,
@@ -73,6 +122,10 @@ function hydrateToolEntry(call: ToolCall, result: Message | undefined): TuiEntry
     status: failed ? "error" : "success",
     summary: compactToolResult(result.content),
   };
+}
+
+function isHydratedToolError(result: Message): boolean {
+  return isToolResultErrorMessage(result);
 }
 
 function visibleText(value: string): string {

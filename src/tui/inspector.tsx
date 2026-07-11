@@ -6,6 +6,7 @@ import { Box, Text, useInput } from "ink";
 import { hashToolResultArtifactArgs, ToolResultArtifactStore } from "../context/artifact-store.js";
 import type { TuiToolCallProjection } from "./tui-event-store.js";
 import type { DialogRequest } from "./dialog-arbiter.js";
+import { truncateTerminalText } from "./terminal-width.js";
 
 const DEFAULT_PAGE_BYTES = 16 * 1024;
 const MIN_PAGE_BYTES = 256;
@@ -70,9 +71,15 @@ export interface InspectorProps {
   page: InspectorPage;
   maxLines?: number;
   startLine?: number;
+  renderWidth?: number;
 }
 
-export function Inspector({ page, maxLines = 40, startLine = 0 }: InspectorProps): React.ReactNode {
+export function Inspector({
+  page,
+  maxLines = 40,
+  startLine = 0,
+  renderWidth = 80,
+}: InspectorProps): React.ReactNode {
   const allLines = page.content.split("\n");
   const safeMaxLines = Math.max(1, maxLines);
   const safeStartLine = Math.min(
@@ -82,12 +89,16 @@ export function Inspector({ page, maxLines = 40, startLine = 0 }: InspectorProps
   const visibleLines = allLines.slice(safeStartLine, safeStartLine + safeMaxLines);
   return (
     <Box flexDirection="column">
-      <Text bold>{page.title}</Text>
+      <Text bold>{truncateTerminalText(page.title, renderWidth)}</Text>
       <Text dimColor>
-        bytes {page.offsetBytes}-{page.nextOffsetBytes} / {page.totalBytes}
-        {allLines.length > safeMaxLines
-          ? ` · lines ${safeStartLine + 1}-${safeStartLine + visibleLines.length}/${allLines.length}`
-          : ""}
+        {truncateTerminalText(
+          `bytes ${page.offsetBytes}-${page.nextOffsetBytes} / ${page.totalBytes}${
+            allLines.length > safeMaxLines
+              ? ` · lines ${safeStartLine + 1}-${safeStartLine + visibleLines.length}/${allLines.length}`
+              : ""
+          }`,
+          renderWidth,
+        )}
       </Text>
       {visibleLines.map((line, index) => (
         <Text key={`${index}:${line}`} wrap="truncate">
@@ -95,12 +106,16 @@ export function Inspector({ page, maxLines = 40, startLine = 0 }: InspectorProps
         </Text>
       ))}
       <Text dimColor>
-        {page.availability === "unavailable"
-          ? "Complete result unavailable"
-          : page.eof
-            ? "End"
-            : "More bytes available"}
-        {page.artifactBinding === "tool-only-legacy" ? " · legacy tool-only binding" : ""}
+        {truncateTerminalText(
+          `${
+            page.availability === "unavailable"
+              ? "Complete result unavailable"
+              : page.eof
+                ? "End"
+                : "More bytes available"
+          }${page.artifactBinding === "tool-only-legacy" ? " · legacy tool-only binding" : ""}`,
+          renderWidth,
+        )}
       </Text>
     </Box>
   );
@@ -110,6 +125,8 @@ export interface InspectorDialogContentProps {
   source: InspectorSource;
   pageBytes?: number;
   visibleLines?: number;
+  renderWidth?: number;
+  compact?: boolean;
   onClose: () => void;
   onCopy?: (text: string) => void | Promise<void>;
   onLocate?: (path: string) => void | Promise<void>;
@@ -121,6 +138,8 @@ export function InspectorDialogContent({
   source,
   pageBytes = DEFAULT_PAGE_BYTES,
   visibleLines = 5,
+  renderWidth = 80,
+  compact = false,
   onClose,
   onCopy,
   onLocate,
@@ -233,18 +252,52 @@ export function InspectorDialogContent({
 
   return (
     <Box flexDirection="column">
-      {source.kind === "inline" && source.availability === "unavailable" ? (
-        <Text color="yellow">This view contains only a compact summary.</Text>
-      ) : null}
-      {!page ? <Text bold>{source.title}</Text> : null}
-      {page ? <Inspector page={page} maxLines={visibleLines} startLine={lineOffset} /> : null}
-      {loading ? <Text dimColor>Loading page…</Text> : null}
-      {error ? <Text color="red">{error}</Text> : null}
-      <Text dimColor>
-        ↑/↓ scroll · PgUp/[ previous bytes · PgDn/] next bytes
-        {onCopy ? " · c copy" : ""}
-        {onLocate && page?.locatePath ? " · l locate" : ""} · Esc close
-      </Text>
+      {compact ? (
+        <>
+          <Text bold>{truncateTerminalText(source.title, renderWidth)}</Text>
+          <Text color={error ? "red" : undefined} wrap="truncate">
+            {truncateTerminalText(
+              error ??
+                (page
+                  ? (page.content.split("\n")[lineOffset] ?? "")
+                  : loading
+                    ? "Loading page…"
+                    : "No content"),
+              renderWidth,
+            )}
+          </Text>
+          <Text dimColor>
+            {truncateTerminalText("↑/↓ scroll · PgUp/PgDn bytes · Esc close", renderWidth)}
+          </Text>
+        </>
+      ) : (
+        <>
+          {source.kind === "inline" && source.availability === "unavailable" ? (
+            <Text color="yellow">
+              {truncateTerminalText("This view contains only a compact summary.", renderWidth)}
+            </Text>
+          ) : null}
+          {!page ? <Text bold>{truncateTerminalText(source.title, renderWidth)}</Text> : null}
+          {page ? (
+            <Inspector
+              page={page}
+              maxLines={visibleLines}
+              startLine={lineOffset}
+              renderWidth={renderWidth}
+            />
+          ) : null}
+          {loading ? <Text dimColor>Loading page…</Text> : null}
+          {error ? <Text color="red">{truncateTerminalText(error, renderWidth)}</Text> : null}
+          <Text dimColor>
+            {truncateTerminalText(
+              `↑/↓ scroll · PgUp/[ previous bytes · PgDn/] next bytes${
+                onCopy ? " · c copy" : ""
+              }${onLocate && page?.locatePath ? " · l locate" : ""} · Esc close`,
+              renderWidth,
+            )}
+          </Text>
+        </>
+      )}
     </Box>
   );
 }

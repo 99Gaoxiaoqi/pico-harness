@@ -31,7 +31,12 @@ export type LocalCommandAction =
   | "skills"
   | "agents"
   | "resume"
+  | "changes"
   | "message";
+
+export interface ChangesCommandData {
+  messageId: string;
+}
 
 export interface ResumeSessionCommandData {
   sessionId: string;

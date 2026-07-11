@@ -148,6 +148,7 @@ export async function createPicoCommandRegistry(
     createResumeCommand(options),
     createForkCommand(options),
     ...createRunningInputCommands(),
+    createChangesCommand(options),
     createSnapshotsCommand(options),
     createRewindCommand(options),
     createUndoCommand(options),
@@ -1040,6 +1041,51 @@ function createSnapshotsCommand(options: PicoCommandRegistryOptions): SlashComma
         action: "message",
         message: formatRewindSelector(session.id, summaries),
         data: summaries,
+      };
+    },
+  };
+}
+
+function createChangesCommand(options: PicoCommandRegistryOptions): SlashCommand {
+  return {
+    name: "changes",
+    description: "Preview a message checkpoint and partially rewind one file",
+    usage: "/changes [message-id]",
+    argumentHint: "[message-id]",
+    category: "session",
+    kind: "local",
+    availability: "idle",
+    argumentCompleter: async (query) => {
+      const session = await resolveCommandSession(options);
+      return filterArgumentCandidates(
+        listFileHistorySnapshotSummaries(session).map((snapshot) => ({
+          value: snapshot.messageId,
+          description: snapshot.userPrompt ?? snapshot.changeSummary,
+        })),
+        query,
+      );
+    },
+    execute: async (input): Promise<LocalCommandResult> => {
+      const session = await resolveCommandSession(options);
+      const snapshots = listFileHistorySnapshotSummaries(session);
+      const requested = input.argv[0];
+      const target = requested
+        ? snapshots.find((snapshot) => snapshot.messageId === requested)
+        : (snapshots.findLast((snapshot) => !snapshot.legacy) ?? snapshots.at(-1));
+      if (!target) {
+        return {
+          type: "local",
+          action: "message",
+          message: requested
+            ? `Cannot open Changes: checkpoint ${requested} was not found.`
+            : "No message checkpoint is available yet.",
+        };
+      }
+      return {
+        type: "local",
+        action: "changes",
+        message: `Opening partial rewind preview for ${target.messageId}.`,
+        data: { messageId: target.messageId },
       };
     },
   };

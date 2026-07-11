@@ -7,6 +7,7 @@ import {
   chmod,
   unlink,
   readFile,
+  readlink,
   writeFile,
   rename,
   rm,
@@ -87,6 +88,8 @@ export interface FileHistoryDiffStat {
 
 export interface FileHistoryFilePatch extends FileHistoryDiffFileStat {
   patch: string;
+  /** 预览时当前文件状态的指纹，单文件恢复前必须重新校验。 */
+  currentFingerprint: string;
 }
 
 export interface FileHistoryChanges extends Omit<FileHistoryDiffStat, "files"> {
@@ -207,30 +210,24 @@ export async function restoreBackup(
   backupFileName: string,
   sessionId: string,
   baseDir: string = DEFAULT_BASE_DIR,
+  beforeCommit?: () => Promise<void>,
 ): Promise<void> {
   const backupPath = resolveBackupPath(sessionId, backupFileName, baseDir);
   const backupStat = await stat(backupPath);
-
+  const temporaryPath = join(dirname(filePath), `.pico-restore-${randomUUID()}.tmp`);
+  await mkdir(dirname(filePath), { recursive: true });
+  let committed = false;
   try {
-    const targetStat = await lstat(filePath);
-    if (!targetStat.isFile()) {
-      // 先移除 symlink/目录/特殊文件，避免 copyFile 跟随链接写出工作区。
-      await rm(filePath, { recursive: true, force: true });
-    }
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    await copyFile(backupPath, temporaryPath);
+    await chmod(temporaryPath, backupStat.mode & 0o777);
+    await beforeCommit?.();
+    // 同目录临时文件 + rename 替换目录项，不会截断目标 hard link 的共享 inode，
+    // 也不会跟随 symlink 写到授权根之外。
+    await rename(temporaryPath, filePath);
+    committed = true;
+  } finally {
+    if (!committed) await rm(temporaryPath, { force: true }).catch(() => undefined);
   }
-
-  try {
-    await copyFile(backupPath, filePath);
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code;
-    if (code !== "ENOENT") throw err;
-    await mkdir(dirname(filePath), { recursive: true });
-    await copyFile(backupPath, filePath);
-  }
-
-  await chmod(filePath, backupStat.mode & 0o777);
 }
 
 export async function fileHistoryTrackEdit(
@@ -709,10 +706,22 @@ export async function fileHistoryRewind(
     const backup = target.trackedFileBackups.get(filePath) ?? findFirstBackup(state, filePath);
     if (!backup) continue;
     if (backup.backupFileName === null) {
-      await rm(filePath, { recursive: true, force: true }).catch(() => {});
+      await removeCreatedFileForRewind(filePath);
     } else {
       await restoreBackup(filePath, backup.backupFileName, sessionId, baseDir);
     }
+  }
+}
+
+async function removeCreatedFileForRewind(filePath: string): Promise<void> {
+  try {
+    const info = await lstat(filePath);
+    if (!info.isFile() && !info.isSymbolicLink()) {
+      throw new Error(`FileHistory: ${filePath} 当前不是普通文件，拒绝递归删除`);
+    }
+    await unlink(filePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
 }
 
@@ -784,10 +793,12 @@ export async function fileHistoryChanges(
     const backup =
       target.trackedFileBackups.get(file.filePath) ?? findFirstBackup(state, file.filePath);
     const before = await readSnapshotFileContent(backup, sessionId, baseDir);
-    const after = await readCurrentFileContent(file.filePath);
-    const afterMode = await readCurrentFileMode(file.filePath);
+    const current = await readCurrentFileState(file.filePath);
+    const after = current.content;
+    const afterMode = current.mode;
     files.push({
       ...file,
+      currentFingerprint: current.fingerprint,
       patch: createUnifiedFilePatch({
         filePath: file.filePath,
         before,
@@ -815,6 +826,7 @@ export async function fileHistoryRestoreFile(
   state: FileHistoryState,
   messageId: string,
   filePath: string,
+  expectedCurrentFingerprint: string,
   sessionId: string,
   baseDir: string = DEFAULT_BASE_DIR,
 ): Promise<FileHistoryRestoreFileResult> {
@@ -831,12 +843,97 @@ export async function fileHistoryRestoreFile(
   if (!backup) {
     throw new Error(`FileHistory: ${filePath} 缺少可恢复的写前状态`);
   }
+  const verifyCurrentState = async (): Promise<CurrentFileState> => {
+    const latest = await readCurrentFileState(filePath);
+    if (latest.fingerprint !== expectedCurrentFingerprint) {
+      throw new Error(`FileHistory: ${filePath} 在预览后又发生变化，请刷新 Changes 后重试`);
+    }
+    if (latest.kind !== "file" && latest.kind !== "missing") {
+      throw new Error(`FileHistory: ${filePath} 当前不是普通文件，拒绝执行单文件恢复`);
+    }
+    return latest;
+  };
+  await verifyCurrentState();
   if (backup.backupFileName === null) {
-    await rm(filePath, { recursive: true, force: true });
+    const latest = await verifyCurrentState();
+    if (latest.kind === "file") await unlink(filePath);
   } else {
-    await restoreBackup(filePath, backup.backupFileName, sessionId, baseDir);
+    await restoreBackup(filePath, backup.backupFileName, sessionId, baseDir, async () => {
+      await verifyCurrentState();
+    });
   }
   return { messageId, filePath, status: changedFile.status, restored: true };
+}
+
+interface CurrentFileState {
+  kind: "file" | "missing" | "directory" | "symlink" | "special";
+  content: string | undefined;
+  mode: number | undefined;
+  fingerprint: string;
+}
+
+/**
+ * 单次读取生成 Changes 的比较状态。非普通文件也有独立指纹，避免把 missing、
+ * 目录和 symlink 混为一谈后在恢复时递归删除后来出现的目录。
+ */
+async function readCurrentFileState(filePath: string): Promise<CurrentFileState> {
+  try {
+    const info = await lstat(filePath);
+    if (info.isFile()) {
+      const content = await readFile(filePath);
+      const mode = info.mode & 0o777;
+      return {
+        kind: "file",
+        content: content.toString("utf8"),
+        mode,
+        fingerprint: fileStateFingerprint("file", mode, content),
+      };
+    }
+    if (info.isSymbolicLink()) {
+      const target = await readlink(filePath);
+      return {
+        kind: "symlink",
+        content: undefined,
+        mode: undefined,
+        fingerprint: fileStateFingerprint("symlink", info.mode & 0o777, target),
+      };
+    }
+    const kind = info.isDirectory() ? "directory" : "special";
+    return {
+      kind,
+      content: undefined,
+      mode: undefined,
+      fingerprint: fileStateFingerprint(
+        kind,
+        info.mode & 0o777,
+        `${info.size}:${info.mtimeMs}:${info.ctimeMs}`,
+      ),
+    };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return {
+        kind: "missing",
+        content: undefined,
+        mode: undefined,
+        fingerprint: fileStateFingerprint("missing", undefined, ""),
+      };
+    }
+    throw error;
+  }
+}
+
+function fileStateFingerprint(
+  kind: "file" | "missing" | "directory" | "symlink" | "special",
+  mode: number | undefined,
+  content: string | Buffer,
+): string {
+  const hash = createHash("sha256");
+  hash.update(kind);
+  hash.update("\0");
+  hash.update(mode === undefined ? "" : String(mode));
+  hash.update("\0");
+  hash.update(content);
+  return hash.digest("hex");
 }
 
 /**
@@ -990,10 +1087,7 @@ interface DiffTextLine {
 }
 
 /** Hirschberg LCS：保持完整、准确的上下文行，同时避免为大文件分配 O(n*m) 矩阵。 */
-function buildLinePatch(
-  before: readonly DiffTextLine[],
-  after: readonly DiffTextLine[],
-): string[] {
+function buildLinePatch(before: readonly DiffTextLine[], after: readonly DiffTextLine[]): string[] {
   if (before.length === 0) return after.flatMap((line) => renderDiffLine("+", line));
   if (after.length === 0) return before.flatMap((line) => renderDiffLine("-", line));
 
@@ -1044,28 +1138,21 @@ function buildLinePatch(
   ];
 }
 
-function lcsLengthRow(
-  left: readonly DiffTextLine[],
-  right: readonly DiffTextLine[],
-): number[] {
+function lcsLengthRow(left: readonly DiffTextLine[], right: readonly DiffTextLine[]): number[] {
   let previous = new Array<number>(right.length + 1).fill(0);
   for (const leftLine of left) {
     const current = new Array<number>(right.length + 1).fill(0);
     for (let index = 0; index < right.length; index++) {
-      current[index + 1] =
-        sameDiffLine(leftLine, right[index]!)
-          ? previous[index]! + 1
-          : Math.max(previous[index + 1]!, current[index]!);
+      current[index + 1] = sameDiffLine(leftLine, right[index]!)
+        ? previous[index]! + 1
+        : Math.max(previous[index + 1]!, current[index]!);
     }
     previous = current;
   }
   return previous;
 }
 
-function commonPrefixLength(
-  left: readonly DiffTextLine[],
-  right: readonly DiffTextLine[],
-): number {
+function commonPrefixLength(left: readonly DiffTextLine[], right: readonly DiffTextLine[]): number {
   let length = 0;
   while (
     length < left.length &&

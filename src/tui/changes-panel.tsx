@@ -7,11 +7,13 @@ import type {
 } from "../safety/file-history.js";
 import { DiffPreview } from "./diff-preview.js";
 import type { DialogRequest } from "./dialog-arbiter.js";
+import { truncateTerminalText } from "./terminal-width.js";
 
 export interface ChangesRestoreFileAction {
   kind: "restore-file";
   messageId: string;
   filePath: string;
+  expectedCurrentFingerprint: string;
   label: string;
   description: string;
 }
@@ -46,6 +48,10 @@ export interface ChangesPanelProps {
   selectedIndex?: number;
   /** 选中模式下围绕当前文件的可见窗口。 */
   maxVisibleFiles?: number;
+  compact?: boolean;
+  renderWidth?: number;
+  showPatch?: boolean;
+  showWarnings?: boolean;
 }
 
 export function ChangesPanel({
@@ -53,6 +59,10 @@ export function ChangesPanel({
   maxPatchLines,
   selectedIndex,
   maxVisibleFiles,
+  compact = false,
+  renderWidth = 80,
+  showPatch = true,
+  showWarnings = true,
 }: ChangesPanelProps): React.ReactNode {
   const safeSelectedIndex =
     selectedIndex === undefined ? undefined : normalizeSelectedIndex(selectedIndex, model);
@@ -60,31 +70,70 @@ export function ChangesPanel({
   const visiblePatch = selectedFile?.patch ?? model.fullPatch;
   const patchLineCount = visiblePatch.length === 0 ? 0 : visiblePatch.split("\n").length;
   const visibleFiles = selectVisibleFiles(model, safeSelectedIndex, maxVisibleFiles);
+  if (compact) {
+    return (
+      <Box flexDirection="column">
+        <Text bold>
+          {truncateTerminalText(
+            `Partial rewind · ${model.files.length} file(s) · +${model.addedLines} -${model.removedLines}`,
+            renderWidth,
+          )}
+        </Text>
+        {showWarnings && model.warnings[0] ? (
+          <Text color="yellow">{truncateTerminalText(`⚠ ${model.warnings[0]}`, renderWidth)}</Text>
+        ) : null}
+        {selectedFile ? (
+          <Text inverse>
+            {truncateTerminalText(
+              `${statusGlyph(selectedFile.status)} ${selectedFile.filePath} +${selectedFile.addedLines} -${selectedFile.removedLines}`,
+              renderWidth,
+            )}
+          </Text>
+        ) : (
+          <Text dimColor>No code changes.</Text>
+        )}
+        {showPatch && visiblePatch ? (
+          <DiffPreview diff={visiblePatch} maxLines={maxPatchLines ?? 1} />
+        ) : null}
+      </Box>
+    );
+  }
   return (
     <Box flexDirection="column">
-      <Text bold>Changes</Text>
+      <Text bold>Changes · partial rewind preview</Text>
       <Text color={model.partial ? "yellow" : undefined}>
-        {model.partial ? "Partial restore · " : ""}
+        {model.partial ? "Capture incomplete · " : ""}
         {model.files.length} file(s) · +{model.addedLines} -{model.removedLines}
       </Text>
-      {model.warnings.map((warning, index) => (
-        <Text key={`${index}:${warning}`} color="yellow">
-          ⚠ {warning}
+      {model.warnings[0] ? (
+        <Text color="yellow">{truncateTerminalText(`⚠ ${model.warnings[0]}`, renderWidth)}</Text>
+      ) : null}
+      {model.warnings.length > 1 ? (
+        <Text color="yellow">
+          {truncateTerminalText(`… ${model.warnings.length - 1} more warning(s)`, renderWidth)}
         </Text>
-      ))}
+      ) : null}
       {visibleFiles.map(({ file, index }) => (
         <Box key={file.filePath} flexDirection="column">
           <Text inverse={selectedFile !== undefined && index === safeSelectedIndex}>
-            {statusGlyph(file.status)} {file.filePath} +{file.addedLines} -{file.removedLines}
+            {truncateTerminalText(
+              `${statusGlyph(file.status)} ${file.filePath} +${file.addedLines} -${file.removedLines}`,
+              renderWidth,
+            )}
           </Text>
           {safeSelectedIndex === undefined || index === safeSelectedIndex ? (
-            <Text dimColor>{file.restoreAction.description}</Text>
+            <Text dimColor>
+              {truncateTerminalText(file.restoreAction.description, renderWidth)}
+            </Text>
           ) : null}
         </Box>
       ))}
       {visibleFiles.length < model.files.length ? (
         <Text dimColor>
-          … {model.files.length - visibleFiles.length} file(s) outside this window
+          {truncateTerminalText(
+            `… ${model.files.length - visibleFiles.length} file(s) outside this window`,
+            renderWidth,
+          )}
         </Text>
       ) : null}
       {visiblePatch ? (
@@ -92,7 +141,7 @@ export function ChangesPanel({
       ) : (
         <Text dimColor>No code changes.</Text>
       )}
-      <Text dimColor>{model.rewindAction.description}</Text>
+      <Text dimColor>{truncateTerminalText(model.rewindAction.description, renderWidth)}</Text>
     </Box>
   );
 }
@@ -101,6 +150,10 @@ export interface ChangesDialogContentProps {
   model: ChangesPanelModel;
   maxPatchLines?: number;
   maxVisibleFiles?: number;
+  compact?: boolean;
+  renderWidth?: number;
+  showPatch?: boolean;
+  showWarnings?: boolean;
   onRestoreFile: (action: ChangesRestoreFileAction) => void | Promise<void>;
   onJumpToRewind: (action: ChangesJumpToRewindAction) => void | Promise<void>;
   onClose: () => void;
@@ -110,6 +163,10 @@ export function ChangesDialogContent({
   model,
   maxPatchLines = 4,
   maxVisibleFiles = 3,
+  compact = false,
+  renderWidth = 80,
+  showPatch = true,
+  showWarnings = true,
   onRestoreFile,
   onJumpToRewind,
   onClose,
@@ -118,7 +175,8 @@ export function ChangesDialogContent({
   const [pendingFilePath, setPendingFilePath] = useState<string>();
   const [message, setMessage] = useState<string>();
   const [error, setError] = useState<string>();
-  const restorePending = useRef(false);
+  const [armedFilePath, setArmedFilePath] = useState<string>();
+  const actionPending = useRef(false);
   const mounted = useRef(true);
 
   useEffect(() => {
@@ -132,20 +190,35 @@ export function ChangesDialogContent({
   const selectedFile = model.files[normalizeSelectedIndex(selectedIndex, model)];
 
   useInput((input, key) => {
+    if (actionPending.current) return;
     if (key.escape || input === "\u001b") {
+      if (armedFilePath) {
+        setArmedFilePath(undefined);
+        setMessage(undefined);
+        return;
+      }
       onClose();
       return;
     }
     if (key.upArrow) {
+      setArmedFilePath(undefined);
       setSelectedIndex((current) => Math.max(0, current - 1));
       return;
     }
     if (key.downArrow) {
+      setArmedFilePath(undefined);
       setSelectedIndex((current) => Math.min(Math.max(0, model.files.length - 1), current + 1));
       return;
     }
-    if ((key.return || input === "r") && selectedFile && !restorePending.current) {
-      restorePending.current = true;
+    if ((key.return || input === "r") && selectedFile) {
+      if (armedFilePath !== selectedFile.filePath) {
+        setArmedFilePath(selectedFile.filePath);
+        setError(undefined);
+        setMessage("Press Enter/r again to confirm this partial rewind.");
+        return;
+      }
+      actionPending.current = true;
+      setArmedFilePath(undefined);
       setPendingFilePath(selectedFile.filePath);
       setError(undefined);
       setMessage(undefined);
@@ -158,17 +231,23 @@ export function ChangesDialogContent({
           if (mounted.current) setError(toErrorMessage(restoreError));
         })
         .finally(() => {
-          restorePending.current = false;
+          actionPending.current = false;
           if (mounted.current) setPendingFilePath(undefined);
         });
       return;
     }
     if (input === "w") {
+      actionPending.current = true;
       setError(undefined);
+      setMessage("Opening Rewind…");
       void Promise.resolve()
         .then(() => onJumpToRewind(model.rewindAction))
         .catch((rewindError: unknown) => {
           if (mounted.current) setError(toErrorMessage(rewindError));
+        })
+        .finally(() => {
+          actionPending.current = false;
+          if (mounted.current) setMessage(undefined);
         });
     }
   });
@@ -180,11 +259,28 @@ export function ChangesDialogContent({
         maxPatchLines={maxPatchLines}
         selectedIndex={selectedIndex}
         maxVisibleFiles={maxVisibleFiles}
+        compact={compact}
+        renderWidth={renderWidth}
+        showPatch={
+          showPatch &&
+          pendingFilePath === undefined &&
+          message === undefined &&
+          error === undefined &&
+          armedFilePath === undefined
+        }
+        showWarnings={showWarnings}
       />
       {pendingFilePath ? <Text dimColor>Restoring {pendingFilePath}…</Text> : null}
       {message ? <Text color="green">{message}</Text> : null}
       {error ? <Text color="red">{error}</Text> : null}
-      <Text dimColor>↑/↓ select file · Enter/r restore selected · w open Rewind · Esc close</Text>
+      <Text dimColor>
+        {truncateTerminalText(
+          armedFilePath
+            ? "Enter/r confirm · Esc cancel"
+            : "↑/↓ select · Enter/r partial rewind · w Rewind · Esc close",
+          renderWidth,
+        )}
+      </Text>
     </Box>
   );
 }
@@ -210,8 +306,9 @@ export function createChangesPanelModel(changes: FileHistoryChanges): ChangesPan
         kind: "restore-file",
         messageId: changes.messageId,
         filePath: file.filePath,
+        expectedCurrentFingerprint: file.currentFingerprint,
         label: `Restore ${fileName(file.filePath)}`,
-        description: `Restore only ${file.filePath} to its state before this rewind point.`,
+        description: `Partial rewind: restore ${file.filePath} to before this message; later edits to this file will be overwritten.`,
       },
     })),
     fullPatch: changes.patch,

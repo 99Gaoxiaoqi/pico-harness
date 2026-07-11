@@ -44,6 +44,9 @@ import {
   suspendProcessUntilContinued,
   useTerminalMouseMode,
 } from "./mouse-input.js";
+import { AskUserDialog, type AskUserDialogProps } from "./ask-user-dialog.js";
+import { ChangesDialogContent, type ChangesDialogContentProps } from "./changes-panel.js";
+import { InspectorDialogContent, type InspectorDialogContentProps } from "./inspector.js";
 
 /** 诊断日志:写文件(绕过 ink patchConsole 劫持),只在 TUI_DEBUG 时 */
 function dbg(msg: string): void {
@@ -86,6 +89,8 @@ export interface AppProps {
   /** 用户提交一条消息时触发(repl 调 engine.run) */
   onSubmit: (text: string) => void;
   onInterrupt?: () => void;
+  /** 权威内部 tool call ID；生产 TUI 用 Ctrl+E 打开完整 Inspector。 */
+  onInspectTool?: (toolCallId: string) => void;
   onExit?: () => void;
   onRedraw?: () => void;
   /** User keybinding overrides loaded once at TUI startup. */
@@ -112,6 +117,7 @@ export function App({
   dialogRequests = [],
   onSubmit,
   onInterrupt,
+  onInspectTool,
   onExit,
   onRedraw,
   keybindings,
@@ -124,8 +130,6 @@ export function App({
   const focusedDialog = pickFocusedDialog(dialogRequests);
   const inputDisabled = focusedDialog !== null;
   const inlineModal = focusedDialog?.layer === "modal" && isApprovalDialogId(focusedDialog.id);
-  const modal =
-    focusedDialog?.layer === "modal" && !inlineModal ? focusedDialog.content : undefined;
   const transcriptWrapWidth = Math.max(1, columns - 6);
   const approvalNotice = inlineModal ? approvalNoticeFromContent(focusedDialog.content) : undefined;
   const [approvalDiffExpanded, setApprovalDiffExpanded] = useState(true);
@@ -144,6 +148,7 @@ export function App({
   });
   const overlay =
     focusedDialog?.layer === "overlay" || inlineModal ? dialogLayout.content : undefined;
+  const modal = focusedDialog?.layer === "modal" && !inlineModal ? dialogLayout.content : undefined;
   const approvalRows = approvalNotice
     ? measureApprovalPanelRows(approvalNotice, {
         diffExpanded: approvalDiffExpanded,
@@ -183,6 +188,8 @@ export function App({
   );
   const focusedToolItem = transcriptLayout.items.find((item) => item.focusedTool);
   const focusedToolKey = focusedToolItem?.key ?? null;
+  const focusedToolCallId =
+    focusedToolItem?.entry.kind === "tool" ? focusedToolItem.entry.uiToolCallId : undefined;
   const focusedToolExpanded = focusedToolKey !== null && expandedToolKey === focusedToolKey;
   const inputDraft = useRef("");
   const [transcriptView, setTranscriptView] = useState<TranscriptViewState>({ mode: "follow" });
@@ -199,6 +206,10 @@ export function App({
       keybindings,
     });
     if (owner === "tool-card" && focusedToolKey) {
+      if (focusedToolCallId && onInspectTool) {
+        onInspectTool(focusedToolCallId);
+        return;
+      }
       if (focusedToolExpanded) {
         setExpandedToolKey(null);
         setTranscriptView({ mode: "follow" });
@@ -417,7 +428,7 @@ function measureGenericDialogLayout(
 ): GenericDialogLayout {
   if (!options.active) return { content, rows: 0 };
 
-  const maxRows = Math.max(3, options.rows - 9);
+  const maxRows = Math.max(4, options.rows - 9);
   const width = Math.max(1, options.columns - 8);
   if (
     React.isValidElement<InteractiveHelpPanelProps>(content) &&
@@ -436,6 +447,60 @@ function measureGenericDialogLayout(
         renderWidth: width,
       }),
       rows: fit.maxRenderedRows,
+    };
+  }
+
+  if (React.isValidElement<AskUserDialogProps>(content) && content.type === AskUserDialog) {
+    const maxQuestionLines = maxRows >= 8 ? 2 : 1;
+    const fixedRows = 2 + maxQuestionLines;
+    const optionCount = content.props.request.options.length;
+    let maxVisibleOptions = Math.max(1, Math.min(3, optionCount, maxRows - fixedRows));
+    const showOverflowHint = maxVisibleOptions < optionCount && maxRows - fixedRows >= 2;
+    if (showOverflowHint) {
+      maxVisibleOptions = Math.max(1, Math.min(maxVisibleOptions, maxRows - fixedRows - 1));
+    }
+    const renderedRows = fixedRows + maxVisibleOptions + (showOverflowHint ? 1 : 0);
+    return {
+      content: React.cloneElement(content, {
+        maxVisibleOptions,
+        maxQuestionLines,
+        renderWidth: width,
+        showOverflowHint,
+      }),
+      rows: renderedRows,
+    };
+  }
+
+  if (
+    React.isValidElement<InspectorDialogContentProps>(content) &&
+    content.type === InspectorDialogContent
+  ) {
+    return {
+      content: React.cloneElement(content, {
+        visibleLines: Math.max(1, maxRows - 7),
+        renderWidth: width,
+        compact: maxRows <= 5,
+      }),
+      rows: maxRows,
+    };
+  }
+
+  if (
+    React.isValidElement<ChangesDialogContentProps>(content) &&
+    content.type === ChangesDialogContent
+  ) {
+    const compact = maxRows <= 18;
+    const tiny = maxRows <= 5;
+    return {
+      content: React.cloneElement(content, {
+        compact,
+        renderWidth: width,
+        showPatch: !tiny || maxRows === 5,
+        showWarnings: !tiny,
+        maxVisibleFiles: compact ? 1 : Math.min(3, Math.max(1, maxRows - 10)),
+        maxPatchLines: compact ? Math.max(1, maxRows - 7) : Math.max(1, maxRows - 14),
+      }),
+      rows: maxRows,
     };
   }
 

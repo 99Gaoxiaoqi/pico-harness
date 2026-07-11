@@ -13,7 +13,13 @@
 import type { LLMProvider, LLMProviderRequestOptions } from "../provider/interface.js";
 import { ContextOverflowError } from "../provider/errors.js";
 import { generateWithRetry, type RetryInfo } from "../provider/retry.js";
-import type { Message, ToolCall, ToolDefinition, ToolResult } from "../schema/message.js";
+import {
+  PICO_TOOL_RESULT_ERROR_KEY,
+  type Message,
+  type ToolCall,
+  type ToolDefinition,
+  type ToolResult,
+} from "../schema/message.js";
 import type { Registry, ToolFileSideEffects } from "../tools/registry.js";
 import type { AgentRunner } from "../tools/subagent.js";
 import type { SubagentRunOptions, SubagentResult } from "../tools/subagent.js";
@@ -905,6 +911,7 @@ export class AgentEngine implements AgentRunner {
                   role: "user" as const,
                   content,
                   toolCallId: toolCall.id,
+                  providerData: { [PICO_TOOL_RESULT_ERROR_KEY]: true },
                 };
               });
               session.append(...abortedObservations);
@@ -1053,6 +1060,7 @@ export class AgentEngine implements AgentRunner {
           role: "user",
           content: observationOutput,
           toolCallId: toolCall.id,
+          providerData: { [PICO_TOOL_RESULT_ERROR_KEY]: result.isError },
         },
         result,
         ...(reminder ? { reminder } : {}),
@@ -1402,6 +1410,7 @@ export class AgentEngine implements AgentRunner {
                 role: "user" as const,
                 content: observationOutput,
                 toolCallId: tc.id,
+                providerData: { [PICO_TOOL_RESULT_ERROR_KEY]: result.isError },
               },
               ...(artifactPath !== undefined ? { artifactPath } : {}),
             };

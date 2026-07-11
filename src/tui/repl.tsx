@@ -91,7 +91,10 @@ import {
   sessionSelectionToCommand,
   type CliSessionBrowserSummary,
 } from "./session-browser-adapter.js";
-import { createRewindCommandDialogRequest } from "./rewind-command-dialog.js";
+import {
+  createRewindCommandDialogRequest,
+  type RewindCommandDialogState,
+} from "./rewind-command-dialog.js";
 import { applyTuiRewind, rewindInputReplacement } from "./rewind-runtime.js";
 import { globalApprovalManager, type ApprovalNotice } from "../approval/manager.js";
 import {
@@ -101,9 +104,18 @@ import {
 } from "./approval-panel.js";
 import { createTuiRuntimeState, type TuiRuntimeState } from "./runtime-state.js";
 import { resolveTuiRenderStdout } from "./terminal-grid.js";
-import { hydrateTuiEntries } from "./session-hydration.js";
+import { hydrateTuiReporter } from "./session-hydration.js";
+import { projectTuiEntriesForRendering } from "./tui-event-store.js";
 import { AskUserHandler } from "../tools/ask-user.js";
 import { bindAskUserDialogs } from "./ask-user-dialog.js";
+import {
+  createArtifactInspectorContext,
+  createInspectorDialogRequest,
+  createToolInspectorSource,
+} from "./inspector.js";
+import { copyTextToClipboard, locateFileInShell } from "./system-actions.js";
+import { fileHistoryChanges, fileHistoryRestoreFile } from "../safety/file-history.js";
+import { createChangesDialogRequest, createChangesPanelModel } from "./changes-panel.js";
 
 export interface ReplOptions {
   /** 工作区 */
@@ -125,6 +137,7 @@ export interface ReplOptions {
 }
 
 const SESSION_SELECTOR_DIALOG_ID = "local-ui:session-selector";
+const HISTORY_PREPARING_DIALOG_ID = "local-ui:history-preparing";
 const SELECTOR_DIALOG_PRIORITY = 40;
 const APPROVAL_DIALOG_PRIORITY = 80;
 
@@ -147,8 +160,9 @@ export interface HandleTuiInputSubmissionDeps {
   openDialog?: (request: DialogRequest) => void;
   closeDialog?: (id: string) => void;
   dispatchInput?: (text: string) => Promise<void> | void;
-  openLocalUiDialog?: (result: LocalCommandResult) => void;
+  openLocalUiDialog?: (result: LocalCommandResult) => Promise<void> | void;
   switchSession?: (selection: ResumeSessionCommandData) => Promise<void>;
+  openChanges?: (messageId: string) => Promise<void>;
   sessionId?: string;
   currentModelId?: string;
   modelOptions?: readonly ModelOption[];
@@ -624,6 +638,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
   let shuttingDown = false;
   const pendingSessionSwitches = new Set<Promise<void>>();
   const pendingTuiSubmissions = new Set<Promise<void>>();
+  const pendingTuiDialogActions = new Set<Promise<unknown>>();
   let activeAbortControllerRef: TuiAbortControllerRef | undefined;
 
   const buildSessionBundleUnsafe = async (
@@ -715,12 +730,15 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
       });
       await fileIndex.refresh().catch(() => undefined);
 
-      const entries = hydrateTuiEntries(hydration);
       let reporter!: TuiReporter;
       const scheduleEntriesUpdate = createTuiUpdateScheduler((next) => {
         if (activeBundle?.reporter === reporter) setEntries(next);
       }, 33);
-      reporter = new TuiReporter(scheduleEntriesUpdate, entries);
+      reporter = new TuiReporter(() => undefined, [], {
+        onProjectionUpdate: (projection) =>
+          scheduleEntriesUpdate(projectTuiEntriesForRendering(projection)),
+      });
+      hydrateTuiReporter(reporter, hydration);
       bundle = {
         generation: ++nextBundleGeneration,
         selection,
@@ -763,7 +781,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     const [bundle, setBundle] = useState(initialBundle);
     const activeBundleRef = useRef(initialBundle);
     const [stateEntries, setStateEntries] = useState<TuiEntry[]>(() =>
-      initialBundle.reporter.getProjection().entries.map(({ entry }) => entry),
+      projectTuiEntriesForRendering(initialBundle.reporter.getProjection()),
     );
     const [dialogRequests, setDialogRequests] = useState<DialogRequest[]>([]);
     const [inputReplacement, setInputReplacement] = useState<{
@@ -786,15 +804,30 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     activeAbortControllerRef = abortControllerRef;
     const rewindContextRef = useRef<{ prompt: string; transcriptIndex: number } | null>(null);
     const switchingRef = useRef(false);
+    const historyPreparationRef = useRef(false);
+    const historyMutationRef = useRef(false);
     const status = useSyncExternalStore(guard.subscribe, guard.getSnapshot);
     const running = status !== "idle"; // 派生:非 idle 即视为运行中
+    const trackDialogAction = <T,>(action: () => Promise<T>): Promise<T> => {
+      const operation = Promise.resolve().then(action);
+      pendingTuiDialogActions.add(operation);
+      void operation.then(
+        () => pendingTuiDialogActions.delete(operation),
+        () => pendingTuiDialogActions.delete(operation),
+      );
+      return operation;
+    };
 
     const switchSession = async (request: ResumeSessionCommandData): Promise<void> => {
       const operation = (async () => {
         const current = activeBundleRef.current;
         const currentGeneration = current.generation;
         if (shuttingDown) return;
-        if (guard.getSnapshot() !== "idle") {
+        if (
+          guard.getSnapshot() !== "idle" ||
+          historyPreparationRef.current ||
+          historyMutationRef.current
+        ) {
           current.reporter.pushSystemMessage("Session switching is only available while idle.");
           return;
         }
@@ -851,7 +884,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
           setDialogRequests([]);
           setInputReplacement(undefined);
           setRunningInputState(runningQueue.snapshot);
-          setEntries(next.reporter.getProjection().entries.map(({ entry }) => entry));
+          setEntries(projectTuiEntriesForRendering(next.reporter.getProjection()));
           setBundle(next);
           next.reporter.pushSystemMessage(
             request.mode === "fork"
@@ -889,6 +922,136 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
       }
       const { reporter, registry, runtimeState, session, sessionId, settings } = current;
       const { fileIndex, toolDisclosure } = runtimeState;
+      if (historyPreparationRef.current || historyMutationRef.current) {
+        reporter.pushSystemMessage(
+          "A history action is still in progress; input was not submitted.",
+        );
+        return;
+      }
+      const preparesHistoryDialog = isHistoryDialogCommand(text);
+      if (preparesHistoryDialog) {
+        historyPreparationRef.current = true;
+        setDialogRequests((items) => [
+          ...items.filter((item) => item.id !== HISTORY_PREPARING_DIALOG_ID),
+          {
+            id: HISTORY_PREPARING_DIALOG_ID,
+            layer: "modal",
+            priority: 50,
+            content: <Text>Preparing history view…</Text>,
+          },
+        ]);
+      }
+      const isCurrentIdleGeneration = (): boolean =>
+        isCurrentGeneration() && guard.getSnapshot() === "idle";
+      const runHistoryMutation = <T,>(action: () => Promise<T>): Promise<T> =>
+        trackDialogAction(async () => {
+          if (!isCurrentIdleGeneration()) {
+            throw new Error("History actions are only available while the session is idle.");
+          }
+          if (historyMutationRef.current) {
+            throw new Error("Another history action is already in progress.");
+          }
+          historyMutationRef.current = true;
+          try {
+            return await action();
+          } finally {
+            historyMutationRef.current = false;
+          }
+        });
+      const openRewindDialog = async (selectedMessageId?: string): Promise<void> => {
+        if (!isCurrentIdleGeneration()) {
+          throw new Error("Rewind is only available while the session is idle.");
+        }
+        const snapshots = await listRewindPointSummaries(session);
+        if (!isCurrentIdleGeneration()) {
+          throw new Error("The session started running before rewind preparation completed.");
+        }
+        if (snapshots.length === 0) {
+          reporter.pushSystemMessage(
+            "No user-message checkpoints are available yet. Send a new prompt, then run /rewind again.",
+          );
+          return;
+        }
+        const selectedIndex = selectedMessageId
+          ? snapshots.findIndex((snapshot) => snapshot.messageId === selectedMessageId)
+          : -1;
+        const initialState: RewindCommandDialogState | undefined =
+          selectedIndex >= 0
+            ? { selector: { phase: "select", selectedIndex }, status: "open" }
+            : undefined;
+        const dialogId = "local-ui:rewind-selector";
+        const request = createRewindCommandDialogRequest({
+          sessionId,
+          snapshots,
+          ...(initialState ? { initialState } : {}),
+          getDiffStat: async (messageId) => {
+            if (!isCurrentIdleGeneration()) {
+              throw new Error("The session changed or started running before preview completed.");
+            }
+            return session.getRewindDiffStat(messageId);
+          },
+          onClose: () => {
+            if (isCurrentGeneration()) {
+              setDialogRequests((items) => items.filter((item) => item.id !== dialogId));
+            }
+          },
+          onRewind: (snapshot, mode) =>
+            runHistoryMutation(async () => {
+              const rewind = await applyTuiRewind({
+                session,
+                reporter,
+                snapshot,
+                mode,
+                onRestoreInteractionMode: (interactionMode) => {
+                  const restored = setSessionMode(settings, interactionMode);
+                  if (!restored.ok) throw new Error(restored.message);
+                },
+              });
+              if (!isCurrentGeneration()) return;
+              if (rewind.inputText !== undefined) {
+                setInputReplacement((replacement) => rewindInputReplacement(replacement, rewind));
+              }
+            }),
+        });
+        setDialogRequests((items) => [...items.filter((item) => item.id !== request.id), request]);
+      };
+      const openChangesDialog = async (messageId: string): Promise<void> => {
+        if (!isCurrentIdleGeneration()) {
+          throw new Error("Changes is only available while the session is idle.");
+        }
+        const changes = await fileHistoryChanges(session.fileHistory, messageId, sessionId);
+        if (!isCurrentIdleGeneration()) {
+          throw new Error("The session started running before Changes preparation completed.");
+        }
+        const dialogId = "local-ui:changes";
+        const request = createChangesDialogRequest({
+          model: createChangesPanelModel(changes),
+          onClose: () => setDialogRequests((items) => items.filter((item) => item.id !== dialogId)),
+          onRestoreFile: (action) =>
+            runHistoryMutation(async () => {
+              await fileHistoryRestoreFile(
+                session.fileHistory,
+                action.messageId,
+                action.filePath,
+                action.expectedCurrentFingerprint,
+                sessionId,
+              );
+              if (!isCurrentGeneration()) return;
+              fileIndex.markDirty();
+              reporter.pushSystemMessage(`Partially rewound ${action.filePath}.`);
+              await openChangesDialog(action.messageId);
+            }),
+          onJumpToRewind: (action) =>
+            trackDialogAction(async () => {
+              if (!isCurrentIdleGeneration()) {
+                throw new Error("Rewind is only available while the session is idle.");
+              }
+              await openRewindDialog(action.messageId);
+              setDialogRequests((items) => items.filter((item) => item.id !== dialogId));
+            }),
+        });
+        setDialogRequests((items) => [...items.filter((item) => item.id !== request.id), request]);
+      };
       try {
         await handleTuiRunningInputSubmission(text, {
           reporter,
@@ -907,6 +1070,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
           exit,
           sessionId,
           switchSession,
+          openChanges: openChangesDialog,
           setRewindContext: (context) => {
             rewindContextRef.current = context;
           },
@@ -921,57 +1085,9 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
           dispatchInput: async (nextText) => {
             await submitTracked(nextText);
           },
-          openLocalUiDialog: (result) => {
+          openLocalUiDialog: async (result) => {
             if (result.ui?.kind !== "open-selector" || result.ui.selector !== "rewind") return;
-            void listRewindPointSummaries(session)
-              .then((snapshots) => {
-                if (!isCurrentGeneration()) return;
-                if (snapshots.length === 0) {
-                  reporter.pushSystemMessage(
-                    "No user-message checkpoints are available yet. Send a new prompt, then run /rewind again.",
-                  );
-                  return;
-                }
-                const request = createRewindCommandDialogRequest({
-                  sessionId,
-                  snapshots,
-                  getDiffStat: async (messageId) => {
-                    if (!isCurrentGeneration()) {
-                      throw new Error(
-                        "The active session changed before rewind preview completed.",
-                      );
-                    }
-                    return session.getRewindDiffStat(messageId);
-                  },
-                  onClose: () => {
-                    if (isCurrentGeneration()) setDialogRequests([]);
-                  },
-                  onRewind: async (snapshot, mode) => {
-                    if (!isCurrentGeneration()) return;
-                    const rewind = await applyTuiRewind({
-                      session,
-                      reporter,
-                      snapshot,
-                      mode,
-                      onRestoreInteractionMode: (interactionMode) => {
-                        const restored = setSessionMode(settings, interactionMode);
-                        if (!restored.ok) throw new Error(restored.message);
-                      },
-                    });
-                    if (!isCurrentGeneration()) return;
-                    if (rewind.inputText !== undefined) {
-                      setInputReplacement((current) => rewindInputReplacement(current, rewind));
-                    }
-                  },
-                });
-                setDialogRequests((current) => [
-                  ...current.filter((item) => item.id !== request.id),
-                  request,
-                ]);
-              })
-              .catch((error: unknown) => {
-                if (isCurrentGeneration()) appendTuiRunError(reporter, error);
-              });
+            await openRewindDialog();
           },
           currentModelId: settings.modelRouteId,
           modelOptions: buildModelOptions(modelRouter.routes),
@@ -1050,6 +1166,12 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
       } catch (err) {
         appendTuiRunError(reporter, err);
       } finally {
+        if (preparesHistoryDialog) {
+          historyPreparationRef.current = false;
+          setDialogRequests((items) =>
+            items.filter((item) => item.id !== HISTORY_PREPARING_DIALOG_ID),
+          );
+        }
         // Agent writes and external edits invalidate the startup snapshot. Refresh lazily
         // only when the user next opens @ suggestions.
         fileIndex.markDirty();
@@ -1098,6 +1220,33 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         inputReplacement={inputReplacement}
         redrawBlank={redrawBlank}
         onSubmit={(text) => void submitTracked(text)}
+        onInspectTool={(toolCallId) => {
+          const current = activeBundleRef.current;
+          const tool = current.reporter.getProjection().toolCalls[toolCallId];
+          if (!tool) {
+            current.reporter.pushSystemMessage("Tool result is no longer available.");
+            return;
+          }
+          const source = createToolInspectorSource(
+            tool,
+            createArtifactInspectorContext({ workDir: opts.workDir, sessionId: current.sessionId }),
+          );
+          if (!source) {
+            current.reporter.pushSystemMessage("This tool call has no inspectable output yet.");
+            return;
+          }
+          const request = createInspectorDialogRequest({
+            source,
+            onClose: () =>
+              setDialogRequests((items) => items.filter((item) => item.id !== request.id)),
+            onCopy: (text) => trackDialogAction(() => copyTextToClipboard(text)),
+            onLocate: (path) => trackDialogAction(() => locateFileInShell(path)),
+          });
+          setDialogRequests((items) => [
+            ...items.filter((item) => item.id !== request.id),
+            request,
+          ]);
+        }}
         onInterrupt={() => {
           handleTuiInterrupt(
             abortControllerRef.current,
@@ -1143,6 +1292,9 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     }
     while (pendingSessionSwitches.size > 0) {
       await Promise.allSettled([...pendingSessionSwitches]);
+    }
+    while (pendingTuiDialogActions.size > 0) {
+      await Promise.allSettled([...pendingTuiDialogActions]);
     }
     const finalBundle = activeBundle;
     if (finalBundle) {
@@ -1240,6 +1392,7 @@ async function handleLocalTuiCommand(
     | "openLocalUiDialog"
     | "commandAvailabilityState"
     | "switchSession"
+    | "openChanges"
   >,
 ): Promise<void> {
   const uiEffect = resolveLocalTuiCommandUiEffect(result, {
@@ -1287,6 +1440,16 @@ async function handleLocalTuiCommand(
     return;
   }
 
+  if (result.action === "changes") {
+    const messageId = changesCommandMessageId(result.data);
+    if (!messageId || !deps.openChanges) {
+      deps.reporter.pushSystemMessage("Changes is unavailable for this checkpoint.");
+      return;
+    }
+    await deps.openChanges(messageId);
+    return;
+  }
+
   switch (result.action) {
     case "clear":
       deps.reporter.clear();
@@ -1296,9 +1459,19 @@ async function handleLocalTuiCommand(
       return;
     default:
       deps.reporter.pushSystemMessage(result.message ?? "");
-      if (result.ui !== undefined) deps.openLocalUiDialog?.(result);
+      if (result.ui !== undefined) await deps.openLocalUiDialog?.(result);
       return;
   }
+}
+
+function changesCommandMessageId(value: unknown): string | undefined {
+  if (!isRecord(value) || typeof value.messageId !== "string") return undefined;
+  const messageId = value.messageId.trim();
+  return messageId || undefined;
+}
+
+function isHistoryDialogCommand(text: string): boolean {
+  return /^\/(?:changes|rewind|checkpoint|undo)(?:\s|$)/u.test(text.trim());
 }
 
 function resumeSessionCommandData(value: unknown): ResumeSessionCommandData | undefined {
@@ -1350,6 +1523,9 @@ export async function runTuiAgentPrompt(
     abortControllerRef?: TuiAbortControllerRef;
   },
 ): Promise<void> {
+  if (deps.askUserHandler && (!deps.openDialog || !deps.closeDialog)) {
+    throw new Error("AskUser requires both openDialog and closeDialog host callbacks.");
+  }
   const existingController = deps.abortControllerRef?.current;
   const controller = existingController ?? new AbortController();
   const ownsControllerSlot = existingController === null || existingController === undefined;
