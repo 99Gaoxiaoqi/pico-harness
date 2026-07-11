@@ -52,3 +52,34 @@ export function buildSafeGitEnvironment(): NodeJS.ProcessEnv {
 }
 
 export const UNSAFE_GIT_DRIVER_CONFIG_PATTERN = "^merge\\..*\\.driver$";
+export const GIT_FILTER_DRIVER_CONFIG_PATTERN = "^filter\\..*\\.(clean|smudge|process|required)$";
+
+const SAFE_FILTER_DRIVER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/u;
+
+/** 将 git config --null --name-only 的 filter 键转为命令级禁用参数。 */
+export function disabledGitFilterArgs(configKeys: string): string[] {
+  if (configKeys.includes("\ufffd")) {
+    throw new Error("Git filter 配置名包含无法安全解码的字节，拒绝自动操作。");
+  }
+
+  const driverNames = new Set<string>();
+  for (const key of configKeys.split("\0").filter(Boolean)) {
+    const match = /^filter\.(.+)\.(?:clean|smudge|process|required)$/u.exec(key);
+    const driverName = match?.[1];
+    if (!driverName || !SAFE_FILTER_DRIVER_NAME_RE.test(driverName)) {
+      throw new Error(`Git filter 配置名无法安全重建: ${key}`);
+    }
+    driverNames.add(driverName);
+  }
+
+  return [...driverNames].flatMap((driverName) => [
+    "-c",
+    `filter.${driverName}.clean=`,
+    "-c",
+    `filter.${driverName}.smudge=`,
+    "-c",
+    `filter.${driverName}.process=`,
+    "-c",
+    `filter.${driverName}.required=false`,
+  ]);
+}

@@ -5,6 +5,8 @@ import { isAbsolute, normalize, resolve } from "node:path";
 import {
   buildSafeGitEnvironment,
   createDisabledHooksPath,
+  disabledGitFilterArgs,
+  GIT_FILTER_DRIVER_CONFIG_PATTERN,
   hardenGitArgs,
   UNSAFE_GIT_DRIVER_CONFIG_PATTERN,
 } from "./git-safety.js";
@@ -201,11 +203,13 @@ export class WorktreeMergeQueue {
 
       entry.targetHeadBefore = targetHead;
       entry.sourceHead = sourceHead;
-      await this.assertNoExternalGitDrivers(entry.targetWorktree);
+      await this.assertNoExternalMergeDrivers(entry.targetWorktree);
       await this.assertNoBranchMergeOptions(entry.targetWorktree, entry.targetBranch);
+      const filterOverrides = await this.buildDisabledFilterOverrides(entry.targetWorktree);
       entry.mergeAttempted = true;
       const merge = await this.git(
         [
+          ...filterOverrides,
           "merge",
           "--no-ff",
           "--no-edit",
@@ -272,8 +276,9 @@ export class WorktreeMergeQueue {
   }
 
   private async assertClean(worktree: string, label: string): Promise<void> {
+    const filterOverrides = await this.buildDisabledFilterOverrides(worktree);
     const result = await this.runChecked(
-      ["status", "--porcelain=v1", "--untracked-files=normal"],
+      [...filterOverrides, "status", "--porcelain=v1", "--untracked-files=normal"],
       worktree,
       `无法检查${label}工作树`,
     );
@@ -307,19 +312,37 @@ export class WorktreeMergeQueue {
     return result.stdout.trim();
   }
 
-  private async assertNoExternalGitDrivers(worktree: string): Promise<void> {
+  private async assertNoExternalMergeDrivers(worktree: string): Promise<void> {
     const result = await this.git(
       ["config", "--includes", "--get-regexp", UNSAFE_GIT_DRIVER_CONFIG_PATTERN],
       { cwd: worktree },
     );
     if (result.exitCode !== 0 && result.exitCode !== 1) {
-      throw new Error(commandFailure("无法检查 Git filter/merge driver", result));
+      throw new Error(commandFailure("无法检查 Git merge driver", result));
     }
     if (result.stdout.trim().length > 0) {
       throw new Error(
-        "仓库配置了外部 Git filter/merge driver，拒绝在宿主进程中自动合并；请人工审查后处理。",
+        "仓库配置了外部 Git merge driver，拒绝在宿主进程中自动合并；请人工审查后处理。",
       );
     }
+  }
+
+  private async buildDisabledFilterOverrides(worktree: string): Promise<string[]> {
+    const result = await this.git(
+      [
+        "config",
+        "--includes",
+        "--null",
+        "--name-only",
+        "--get-regexp",
+        GIT_FILTER_DRIVER_CONFIG_PATTERN,
+      ],
+      { cwd: worktree },
+    );
+    if (result.exitCode !== 0 && result.exitCode !== 1) {
+      throw new Error(commandFailure("无法检查 Git filter driver", result));
+    }
+    return disabledGitFilterArgs(result.stdout);
   }
 
   private async assertNoBranchMergeOptions(worktree: string, branch: string): Promise<void> {
