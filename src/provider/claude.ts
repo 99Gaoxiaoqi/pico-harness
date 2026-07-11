@@ -24,8 +24,9 @@ import { resolveProviderProfile, type ProviderProfile } from "./profile.js";
 import {
   toAnthropicThinkingConfig,
   anthropicBudgetTokens,
-  type ThinkingEffort,
+  isLegacyThinkingEffort,
 } from "./thinking.js";
+import { applyReasoningRequestPatch } from "./reasoning-capability.js";
 import { ContextOverflowError, isContextOverflowStatus, LLMStatusError } from "./errors.js";
 import { applyAnthropicCacheControl } from "./anthropic-cache.js";
 import { parseRateLimitHeaders } from "./ratelimit.js";
@@ -52,7 +53,7 @@ interface AnthropicResponse {
 /** Anthropic (Claude) 兼容协议适配器 */
 export class ClaudeProvider implements LLMProvider {
   private readonly profile: ProviderProfile;
-  private readonly thinkingEffort: ThinkingEffort;
+  private readonly thinkingEffort: string;
 
   constructor(
     private readonly config: ProviderConfig,
@@ -327,8 +328,12 @@ export class ClaudeProvider implements LLMProvider {
 
     // 2. 工具 Schema 翻译:properties / required 分别填充
     // 统一思考强度:先算 budget,再据此保护 max_tokens(Anthropic 要求 max_tokens > budget_tokens)
-    const thinkingConfig = toAnthropicThinkingConfig(this.thinkingEffort);
-    const budgetTokens = anthropicBudgetTokens(this.thinkingEffort);
+    const legacyEffort =
+      !this.config.capabilities && isLegacyThinkingEffort(this.thinkingEffort)
+        ? this.thinkingEffort
+        : "off";
+    const thinkingConfig = toAnthropicThinkingConfig(legacyEffort);
+    const budgetTokens = anthropicBudgetTokens(legacyEffort);
     const maxTokens = thinkingConfig
       ? Math.max(this.profile.maxOutputTokens, budgetTokens + 1024)
       : this.profile.maxOutputTokens;
@@ -372,7 +377,11 @@ export class ClaudeProvider implements LLMProvider {
       }
     }
 
-    return body;
+    const capability = this.config.capabilities?.reasoningProfile;
+    const patched = capability
+      ? applyReasoningRequestPatch(body, capability, this.thinkingEffort, "claude")
+      : body;
+    return ensureThinkingBudgetFitsOutput(patched, this.profile.maxOutputTokens);
   }
 
   /**
@@ -544,4 +553,18 @@ export class ClaudeProvider implements LLMProvider {
         break;
     }
   }
+}
+
+function ensureThinkingBudgetFitsOutput(
+  body: Record<string, unknown>,
+  configuredMaxTokens: number,
+): Record<string, unknown> {
+  const thinking = body.thinking;
+  if (typeof thinking !== "object" || thinking === null || Array.isArray(thinking)) return body;
+  const budget = (thinking as Record<string, unknown>).budget_tokens;
+  if (typeof budget !== "number" || !Number.isFinite(budget) || budget <= 0) return body;
+  const current = typeof body.max_tokens === "number" ? body.max_tokens : configuredMaxTokens;
+  return current > budget
+    ? body
+    : { ...body, max_tokens: Math.max(configuredMaxTokens, budget + 1024) };
 }

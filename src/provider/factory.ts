@@ -5,7 +5,7 @@ import { ClaudeProvider } from "./claude.js";
 import { OpenAIProvider } from "./openai.js";
 import { GeminiProvider } from "./gemini.js";
 import type { LLMProvider } from "./interface.js";
-import type { ThinkingEffort } from "./thinking.js";
+import { coordinateReasoningLevel, type ReasoningLevel } from "./reasoning-capability.js";
 import { CredentialPool } from "./credential-pool.js";
 import { CapabilityPreflightProvider } from "./capability-preflight.js";
 import { providerProfileForRoute } from "./model-capabilities.js";
@@ -50,7 +50,7 @@ export function resetCredentialPool(): void {
  */
 function resolveConfig(
   config: ProviderConfig | undefined,
-  thinkingEffort: ThinkingEffort | undefined,
+  thinkingEffort: ReasoningLevel | undefined,
 ): ProviderConfig {
   let cfg: ProviderConfig;
   if (config === undefined) {
@@ -62,15 +62,17 @@ function resolveConfig(
   } else {
     cfg = config;
   }
-  if (thinkingEffort === undefined) return cfg;
-  return { ...cfg, thinkingEffort };
+  if (thinkingEffort !== undefined) return { ...cfg, thinkingEffort };
+  if (cfg.thinkingEffort !== undefined || !cfg.capabilities) return cfg;
+  const selected = coordinateReasoningLevel(cfg.capabilities.reasoningProfile);
+  return selected.level === undefined ? cfg : { ...cfg, thinkingEffort: selected.level };
 }
 
 /** 按协议类型创建 raw Provider;不传 config 时从环境变量读取;thinkingEffort 可单独覆盖 */
 export function createProvider(
   kind: ProviderKind,
   config?: ProviderConfig,
-  thinkingEffort?: ThinkingEffort,
+  thinkingEffort?: ReasoningLevel,
 ): LLMProvider {
   return createRawProvider(kind, config, thinkingEffort);
 }
@@ -79,7 +81,7 @@ export function createProvider(
 export function createRawProvider(
   kind: ProviderKind,
   config?: ProviderConfig,
-  thinkingEffort?: ThinkingEffort,
+  thinkingEffort?: ReasoningLevel,
 ): LLMProvider {
   const cfg = resolveConfig(config, thinkingEffort);
   const profile = cfg.capabilities

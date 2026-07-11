@@ -14,6 +14,11 @@ export const DEFAULT_THINKING_EFFORT: ThinkingEffort = "high";
 
 const VALID_EFFORTS = new Set<ThinkingEffort>(["off", "low", "medium", "high"]);
 
+/** 仅用于无模型能力元数据的旧直连调用。 */
+export function isLegacyThinkingEffort(value: string): value is ThinkingEffort {
+  return VALID_EFFORTS.has(value as ThinkingEffort);
+}
+
 // ── 厂商翻译:统一档位 → 各厂商请求参数 ──────────────────────────────
 
 /**
@@ -92,7 +97,7 @@ export function resolveThinkingEffort(raw: string | undefined): ThinkingEffort {
 
 /** 判断字符串是否为合法的 ThinkingEffort 档位(含 off) */
 export function isValidThinkingEffort(value: string): boolean {
-  return VALID_EFFORTS.has(value as ThinkingEffort);
+  return isLegacyThinkingEffort(value);
 }
 
 /**

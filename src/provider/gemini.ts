@@ -23,6 +23,7 @@ import type { ProviderConfig } from "./config.js";
 import { resolveProviderProfile, type ProviderProfile } from "./profile.js";
 import { ContextOverflowError, isContextOverflowStatus, LLMStatusError } from "./errors.js";
 import { parseRateLimitHeaders } from "./ratelimit.js";
+import { applyReasoningRequestPatch } from "./reasoning-capability.js";
 
 /** Gemini content part:文本 / 工具调用 / 工具响应 */
 interface GeminiPart {
@@ -306,7 +307,10 @@ export class GeminiProvider implements LLMProvider {
       ];
     }
     body.generationConfig = { maxOutputTokens: this.profile.maxOutputTokens };
-    return body;
+    const capability = this.config.capabilities?.reasoningProfile;
+    return capability
+      ? applyReasoningRequestPatch(body, capability, this.config.thinkingEffort ?? "off", "gemini")
+      : body;
   }
 
   /** 反向翻译:candidate.parts → 内部 schema.Message(非流式用) */
