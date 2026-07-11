@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -6,6 +6,7 @@ import { expect, it } from "vitest";
 import { CodeIntelligenceManager } from "../../src/code-intelligence/code-intelligence-manager.js";
 import { buildDefaultToolRegistry } from "../../src/tools/default-registry.js";
 import { ToolDisclosure } from "../../src/tools/tool-disclosure.js";
+import { loadPicoConfig } from "../../src/input/pico-config.js";
 
 const fixtureServer = fileURLToPath(new URL("./fixtures/mock-lsp-server.mjs", import.meta.url));
 
@@ -25,11 +26,24 @@ it("Stage 12 代码智能在真实临时仓库中完成 LSP 导航并确定性�
       '{"compilerOptions":{"strict":true}}',
       "utf8",
     );
+    await mkdir(path.join(workDir, ".pico"));
+    await writeFile(
+      path.join(workDir, ".pico", "config.json"),
+      JSON.stringify({
+        version: 1,
+        sandbox: { network: "deny" },
+        lsp: {
+          servers: [{ id: "integration-lsp", command: process.execPath, args: [fixtureServer] }],
+        },
+      }),
+      "utf8",
+    );
+    const config = await loadPicoConfig(workDir);
 
     const lspManager = new CodeIntelligenceManager({
       rootDir: workDir,
       pathEnv: "",
-      lspServers: [{ id: "integration-lsp", command: process.execPath, args: [fixtureServer] }],
+      lspServers: config.lspServers,
     });
     const [firstStart, secondStart] = await Promise.all([lspManager.start(), lspManager.start()]);
     expect(firstStart).toEqual(secondStart);

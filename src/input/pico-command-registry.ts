@@ -63,6 +63,7 @@ import {
 import { findMatchingTools } from "../tools/search-tools.js";
 import type { ToolDefinition } from "../schema/message.js";
 import type { GoalManager } from "../engine/goal-manager.js";
+import type { ModelRuntimeCommandService } from "../provider/model-runtime-report.js";
 
 const OVERRIDDEN_BUILTIN_COMMANDS = new Set([
   "skills",
@@ -101,6 +102,7 @@ export interface PicoCommandRegistryOptions {
   additionalDirectories?: readonly string[];
   additionalDirectoryManager?: AdditionalDirectoryManager;
   goalManager?: GoalManager;
+  modelRuntime?: () => Pick<ModelRuntimeCommandService, "execute"> | undefined;
 }
 
 export async function createPicoCommandRegistry(
@@ -132,6 +134,8 @@ export async function createPicoCommandRegistry(
   const registry = new CommandRegistry([
     ...builtins,
     createStatusCommand(settings, options.mcpStatus),
+    createModelRuntimeCommand("usage", options.modelRuntime),
+    createModelRuntimeCommand("context", options.modelRuntime),
     createGoalCommand(options.goalManager),
     createModeCommand(settings),
     createPermissionsCommand(settings),
@@ -300,6 +304,38 @@ function createStatusCommand(
       action: "status",
       message: formatStatusWithMcp(settings, mcpStatus),
     }),
+  };
+}
+
+function createModelRuntimeCommand(
+  command: "usage" | "context",
+  provider?: () => Pick<ModelRuntimeCommandService, "execute"> | undefined,
+): SlashCommand {
+  return {
+    name: command,
+    description:
+      command === "usage"
+        ? "Show measured model usage and cost coverage"
+        : "Show the active route context budget and capabilities",
+    usage: `/${command}`,
+    category: "model",
+    kind: "local",
+    availability: "always",
+    execute: (input): LocalCommandResult => {
+      if (input.args.trim()) {
+        return { type: "local", action: "message", message: `Usage: /${command}` };
+      }
+      const service = provider?.();
+      if (!service) {
+        return {
+          type: "local",
+          action: "message",
+          message: `/${command} unavailable: no active model route/session runtime.`,
+        };
+      }
+      const result = service.execute(command);
+      return { type: "local", action: "message", message: result.message, data: result.data };
+    },
   };
 }
 

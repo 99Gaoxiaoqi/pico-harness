@@ -3,6 +3,8 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { ModelProviderConfig } from "../provider/model-router.js";
 import type { ModelCapabilityConfig } from "../provider/model-capabilities.js";
 import type { ProviderKind } from "../provider/factory.js";
+import type { LspServerConfig } from "../code-intelligence/lsp-server-discovery.js";
+import type { YoloSandboxConfig } from "../safety/yolo-sandbox.js";
 import {
   KEYBINDING_ACTIONS,
   KEYBINDING_CONTEXTS,
@@ -26,6 +28,8 @@ export interface PicoConfig {
   /** Default model route in providerID/modelID form. */
   model?: string;
   providers: Record<string, ModelProviderConfig>;
+  sandbox: YoloSandboxConfig;
+  lspServers: LspServerConfig[];
 }
 
 export async function loadPicoConfig(workDir: string): Promise<PicoConfig> {
@@ -56,6 +60,8 @@ export async function loadPicoConfig(workDir: string): Promise<PicoConfig> {
     keybindings: parseKeybindings(parsed["keybindings"], configPath),
     ...(model !== undefined ? { model } : {}),
     providers: parseProviders(parsed["providers"], configPath),
+    sandbox: parseSandbox(parsed["sandbox"], configPath),
+    lspServers: parseLspServers(parsed["lsp"], configPath),
   };
 }
 
@@ -66,7 +72,81 @@ function defaultPicoConfig(workDir: string): PicoConfig {
     additionalDirectories: [],
     keybindings: {},
     providers: {},
+    sandbox: { network: "deny" },
+    lspServers: [],
   };
+}
+
+function parseSandbox(value: unknown, configPath: string): YoloSandboxConfig {
+  if (value === undefined) return { network: "deny" };
+  if (!isRecord(value)) throw configError(configPath, "sandbox", "must be an object");
+  const network = value["network"] ?? "deny";
+  if (network !== "deny" && network !== "allow") {
+    throw configError(configPath, "sandbox.network", "must be deny or allow");
+  }
+  return { network };
+}
+
+function parseLspServers(value: unknown, configPath: string): LspServerConfig[] {
+  if (value === undefined) return [];
+  if (!isRecord(value)) throw configError(configPath, "lsp", "must be an object");
+  const servers = value["servers"];
+  if (servers === undefined) return [];
+  if (!Array.isArray(servers)) {
+    throw configError(configPath, "lsp.servers", "must be an array");
+  }
+  return servers.map((server, index) => parseLspServer(server, configPath, index));
+}
+
+function parseLspServer(value: unknown, configPath: string, index: number): LspServerConfig {
+  const field = `lsp.servers.${index}`;
+  if (!isRecord(value)) throw configError(configPath, field, "must be an object");
+  const id = parseRequiredString(value["id"], configPath, `${field}.id`);
+  const command = parseRequiredString(value["command"], configPath, `${field}.command`);
+  const args = parseOptionalStringArray(value["args"], configPath, `${field}.args`);
+  const languages = parseOptionalStringArray(value["languages"], configPath, `${field}.languages`);
+  const requestTimeoutMs = parseOptionalPositiveInteger(
+    value["requestTimeoutMs"],
+    configPath,
+    `${field}.requestTimeoutMs`,
+  );
+  const startupTimeoutMs = parseOptionalPositiveInteger(
+    value["startupTimeoutMs"],
+    configPath,
+    `${field}.startupTimeoutMs`,
+  );
+  return {
+    id,
+    command,
+    ...(args ? { args } : {}),
+    ...(languages ? { languages } : {}),
+    ...(requestTimeoutMs !== undefined ? { requestTimeoutMs } : {}),
+    ...(startupTimeoutMs !== undefined ? { startupTimeoutMs } : {}),
+  };
+}
+
+function parseOptionalStringArray(
+  value: unknown,
+  configPath: string,
+  field: string,
+): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
+    throw configError(configPath, field, "must be a string array");
+  }
+  return value.map((item) => item.trim()).filter(Boolean);
+}
+
+function parseOptionalPositiveInteger(
+  value: unknown,
+  configPath: string,
+  field: string,
+): number | undefined {
+  if (value === undefined) return undefined;
+  if (!Number.isSafeInteger(value) || (value as number) <= 0) {
+    throw configError(configPath, field, "must be a positive integer");
+  }
+  return value as number;
 }
 
 function parseDefaultModel(value: unknown, configPath: string): string | undefined {
