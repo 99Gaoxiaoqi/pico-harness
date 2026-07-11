@@ -623,6 +623,12 @@ git worktree remove ../pico-1-streaming
 
 ## 📅 变更记录
 
+- 2026-07-12：子代理活动改为 Claude Code 风格的导航与详情视图
+  - 主 transcript 不再纵向展开所有子代理卡片；输入框下方常驻 Main + 子代理紧凑导航，展示 queued/running/completed/failed 与未读数。
+  - 空输入按 `↓` 或 `Tab` 进入选择，`↑/↓` 循环切换，`Enter` 打开独立详情，`Esc` 返回 Main；鼠标左键可按终端坐标选中代理。
+  - 每个 activity 在 EventStore 中保留独立、有界的 thinking/message/tool 时间线，工具完成原位更新，checkpoint/水合不丢失详情，同时不污染主对话。
+  - 三条独立 worktree 并行实现轨迹数据、导航/详情组件和鼠标解析，主代理在独立集成分支串行接入 App/REPL 焦点仲裁。
+
 - 2026-07-12：对齐 Claude Code 的核心编排工具披露边界
   - `delegate_task` 升级为 Core Tool，主 Agent 首轮直接获得批量子代理编排能力，不再依赖 `search_tools` 猜测发现。
   - MCP、插件和低频长尾工具仍保持渐进式披露，`delegate_status` / legacy `spawn_subagent` 不扩大为常驻入口。

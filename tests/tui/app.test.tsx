@@ -18,8 +18,86 @@ import {
   resolveTranscriptScrollKey,
 } from "../../src/tui/app.js";
 import { InteractiveApprovalPanel } from "../../src/tui/approval-panel.js";
+import { createMainAgentItem, type AgentNavigationItem } from "../../src/tui/agent-navigation.js";
 
 describe("App", () => {
+  it("将子代理收进底部导航，并用下键、回车和 Esc 切换详情", async () => {
+    const onRedraw = vi.fn();
+    const agents: AgentNavigationItem[] = [
+      createMainAgentItem({ status: "running" }),
+      {
+        id: "activity-engine",
+        kind: "subagent",
+        status: "running",
+        agentName: "engine-agent",
+        task: "检查引擎主循环",
+        mode: "explore",
+        currentAction: "DETAIL_ONLY_ACTION",
+        timeline: [
+          { id: "trace-thinking", kind: "thinking" },
+          {
+            id: "trace-tool",
+            kind: "tool",
+            name: "read_file",
+            status: "completed",
+            summary: "src/engine/loop.ts",
+          },
+        ],
+      },
+    ];
+    const app = (
+      <App
+        model="glm-5.2"
+        workDir="/workspace/demo"
+        entries={[
+          { kind: "assistant", content: "主代理仍在这里" },
+          {
+            kind: "subagent-activity",
+            task: "检查引擎主循环",
+            status: "running",
+            currentAction: "DETAIL_ONLY_ACTION",
+          },
+        ]}
+        agents={agents}
+        running
+        keybindings={{ Global: { tab: "app:redraw" } }}
+        onRedraw={onRedraw}
+        onSubmit={vi.fn()}
+      />
+    );
+    const harness = createInteractiveApp(app);
+
+    try {
+      let output = await harness.rerender(app);
+      expect(output).toContain("主代理仍在这里");
+      expect(output).toContain("Agents · 2");
+      expect(output).toContain("engine-agent · 检查引擎主循环");
+      expect(output).not.toContain("DETAIL_ONLY_ACTION");
+
+      await harness.write("\t");
+      expect(onRedraw).toHaveBeenCalledOnce();
+      await harness.write("\u001b[B");
+      output = await harness.write("\r");
+      expect(output).toContain("← Main / engine-agent");
+      expect(output).toContain("DETAIL_ONLY_ACTION");
+      expect(output).toContain("read_file · src/engine/loop.ts");
+      expect(output).toContain("Viewing subagent · Esc back to Main");
+
+      await harness.write("\u001b");
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      output = await harness.rerender(app);
+      expect(output).toContain("主代理仍在这里");
+      expect(output).not.toContain("DETAIL_ONLY_ACTION");
+
+      // 24 行终端中 switcher 占最后 3 行：标题、Main、子代理。
+      await harness.write("\u001b[<0;5;24M");
+      output = await harness.write("\r");
+      expect(output).toContain("← Main / engine-agent");
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
   it("renders history messages separately from the single bottom input box", () => {
     const output = renderToString(
       <App

@@ -19,7 +19,8 @@ import {
   type ModelOption,
   type ModelSelectorState,
 } from "./model-selector.js";
-import { TuiReporter, type TuiEntry } from "./tui-reporter.js";
+import { TuiReporter, type TuiEntry, type TuiProjection } from "./tui-reporter.js";
+import { projectAgentNavigationItems } from "./agent-navigation.js";
 import { QueryGuard } from "./query-guard.js";
 import {
   formatRunningInputQueue,
@@ -645,7 +646,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
   };
   // ink render 需要 setState 驱动重渲染。Reporter 回调只更新当前活跃 bundle，
   // 旧 session 的延迟事件不会穿透到新 transcript。
-  let setEntries: (e: TuiEntry[]) => void = () => {};
+  let setProjection: (projection: TuiProjection) => void = () => {};
   let activeBundle: TuiSessionBundle | undefined;
   let nextBundleGeneration = 0;
   let shuttingDown = false;
@@ -779,12 +780,11 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
       await fileIndex.refresh().catch(() => undefined);
 
       const reporterRef: { current?: TuiReporter } = {};
-      const scheduleEntriesUpdate = createTuiUpdateScheduler((next) => {
-        if (activeBundle?.reporter === reporterRef.current) setEntries(next);
+      const scheduleProjectionUpdate = createTuiUpdateScheduler((next: TuiProjection) => {
+        if (activeBundle?.reporter === reporterRef.current) setProjection(next);
       }, 33);
       const reporter = new TuiReporter(() => undefined, [], {
-        onProjectionUpdate: (projection) =>
-          scheduleEntriesUpdate(projectTuiEntriesForRendering(projection)),
+        onProjectionUpdate: scheduleProjectionUpdate,
       });
       reporterRef.current = reporter;
       hydrateTuiReporter(reporter, hydration);
@@ -832,15 +832,16 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     const { exit } = useApp();
     const [bundle, setBundle] = useState(initialBundle);
     const activeBundleRef = useRef(initialBundle);
-    const [stateEntries, setStateEntries] = useState<TuiEntry[]>(() =>
-      projectTuiEntriesForRendering(initialBundle.reporter.getProjection()),
+    const [stateProjection, setStateProjection] = useState<TuiProjection>(() =>
+      initialBundle.reporter.getProjection(),
     );
+    const stateEntries = projectTuiEntriesForRendering(stateProjection);
     const [dialogRequests, setDialogRequests] = useState<DialogRequest[]>([]);
     const [inputReplacement, setInputReplacement] = useState<{
       sequence: number;
       text: string;
     }>();
-    setEntries = setStateEntries;
+    setProjection = setStateProjection;
     activeBundle = activeBundleRef.current;
 
     // QueryGuard:三态状态机(idle/dispatching/running),useSyncExternalStore 订阅。
@@ -937,7 +938,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
           setDialogRequests([]);
           setInputReplacement(undefined);
           setRunningInputState(runningQueue.snapshot);
-          setEntries(projectTuiEntriesForRendering(next.reporter.getProjection()));
+          setProjection(next.reporter.getProjection());
           setBundle(next);
           next.reporter.pushSystemMessage(
             request.mode === "fork"
@@ -1255,6 +1256,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         taskSummary={formatRunningInputQueue(runningInputState)}
         queuedCount={0}
         entries={stateEntries}
+        agents={projectAgentNavigationItems(stateProjection, running ? "running" : "idle")}
         running={running}
         slashCommandSuggestions={(query) =>
           commandSuggestions(bundle.registry, query, {
@@ -1403,16 +1405,16 @@ async function seedTuiFork(
   await target.flushPersistence();
 }
 
-export function createTuiUpdateScheduler(
-  apply: (entries: TuiEntry[]) => void,
+export function createTuiUpdateScheduler<T>(
+  apply: (value: T) => void,
   minIntervalMs: number,
-): (entries: TuiEntry[]) => void {
-  let latest: TuiEntry[] | null = null;
+): (value: T) => void {
+  let latest: T | null = null;
   let timer: NodeJS.Timeout | null = null;
   let lastAppliedAt = 0;
 
-  return (entries) => {
-    latest = entries;
+  return (value) => {
+    latest = value;
     const now = Date.now();
     const elapsed = now - lastAppliedAt;
     if (elapsed >= minIntervalMs) {
@@ -1421,7 +1423,7 @@ export function createTuiUpdateScheduler(
         timer = null;
       }
       lastAppliedAt = now;
-      apply(entries);
+      apply(value);
       latest = null;
       return;
     }

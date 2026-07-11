@@ -12,10 +12,10 @@
 //   退出时恢复主屏),彻底杜绝重复输出。
 //   alt buffer 下 ink 只重绘可视区域(差分渲染),历史条目靠 React.memo 零 diff。
 
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Box, Text, useApp, useInput, useWindowSize } from "ink";
 import { appendFileSync } from "node:fs";
-import { InputBox } from "./input-box.js";
+import { InputBox, type InputBoxStateSnapshot } from "./input-box.js";
 import type { SlashArgumentSuggestionSource, SuggestionSource } from "./input-controller.js";
 import { pickFocusedDialog, type DialogRequest } from "./dialog-arbiter.js";
 import { Spinner } from "./spinner.js";
@@ -47,6 +47,22 @@ import {
 import { AskUserDialog, type AskUserDialogProps } from "./ask-user-dialog.js";
 import { ChangesDialogContent, type ChangesDialogContentProps } from "./changes-panel.js";
 import { InspectorDialogContent, type InspectorDialogContentProps } from "./inspector.js";
+import {
+  createAgentNavigationState,
+  MAIN_AGENT_ID,
+  normalizeAgentNavigationItems,
+  reconcileAgentNavigationState,
+  reduceAgentNavigation,
+  type AgentNavigationEvent,
+  type AgentNavigationItem,
+} from "./agent-navigation.js";
+import {
+  AgentSwitcher,
+  buildAgentSwitcherLayout,
+  hitTestAgentSwitcherRow,
+  measureAgentSwitcherRows,
+} from "./agent-switcher.js";
+import { AgentDetailView } from "./agent-detail-view.js";
 
 /** 诊断日志:写文件(绕过 ink patchConsole 劫持),只在 TUI_DEBUG 时 */
 function dbg(msg: string): void {
@@ -54,6 +70,8 @@ function dbg(msg: string): void {
     appendFileSync(".claw/tui-debug.log", `${new Date().toISOString()} ${msg}\n`);
   }
 }
+
+const EMPTY_AGENT_ITEMS: readonly AgentNavigationItem[] = Object.freeze([]);
 
 export interface AppProps {
   /** 模型名(Logo 展示) */
@@ -76,6 +94,8 @@ export interface AppProps {
   queuedCount?: number;
   /** 当前对话流条目(reporter 增量更新) */
   entries: TuiEntry[];
+  /** Main 与子代理的独立导航投影。 */
+  agents?: readonly AgentNavigationItem[];
   /** 是否正在运行(idle 时聚焦输入框) */
   running: boolean;
   /** Slash command 候选源 */
@@ -110,6 +130,7 @@ export function App({
   taskSummary,
   queuedCount = 0,
   entries,
+  agents = EMPTY_AGENT_ITEMS,
   running,
   slashCommandSuggestions,
   slashArgumentSuggestions,
@@ -128,7 +149,26 @@ export function App({
   const mouseMode = useTerminalMouseMode();
   const { rows, columns } = useWindowSize();
   const focusedDialog = pickFocusedDialog(dialogRequests);
-  const inputDisabled = focusedDialog !== null;
+  const normalizedAgentItems = useMemo(() => normalizeAgentNavigationItems(agents), [agents]);
+  const hasSubagents = normalizedAgentItems.length > 1;
+  const [agentNavigation, setAgentNavigation] = useState(createAgentNavigationState);
+  const [seenTimelineCounts, setSeenTimelineCounts] = useState<Record<string, number>>({});
+  const navigationItems = useMemo(
+    () =>
+      normalizedAgentItems.map((item) => ({
+        ...item,
+        unreadCount:
+          item.kind === "subagent" && agentNavigation.activeId !== item.id
+            ? Math.max(0, (item.timeline?.length ?? 0) - (seenTimelineCounts[item.id] ?? 0))
+            : 0,
+      })),
+    [agentNavigation.activeId, normalizedAgentItems, seenTimelineCounts],
+  );
+  const activeAgent =
+    agentNavigation.activeId === MAIN_AGENT_ID
+      ? undefined
+      : navigationItems.find((item) => item.id === agentNavigation.activeId);
+  const inputDisabled = focusedDialog !== null || activeAgent !== undefined;
   const inlineModal = focusedDialog?.layer === "modal" && isApprovalDialogId(focusedDialog.id);
   const transcriptWrapWidth = Math.max(1, columns - 6);
   const approvalNotice = inlineModal ? approvalNoticeFromContent(focusedDialog.content) : undefined;
@@ -157,6 +197,10 @@ export function App({
     : 0;
   const genericDialogRows = dialogLayout.rows;
   const [expandedToolKey, setExpandedToolKey] = useState<string | null>(null);
+  const mainEntries = useMemo(
+    () => entries.filter((entry) => entry.kind !== "subagent-activity"),
+    [entries],
+  );
   const transcriptEntries = useMemo<TuiEntry[]>(
     () => [
       {
@@ -168,9 +212,9 @@ export function App({
         mcpSummary,
         taskSummary,
       },
-      ...entries,
+      ...mainEntries,
     ],
-    [entries, mcpSummary, model, permissionMode, sessionMode, taskSummary, workDir],
+    [mainEntries, mcpSummary, model, permissionMode, sessionMode, taskSummary, workDir],
   );
   const transcriptLayout = useMemo(
     () =>
@@ -182,9 +226,13 @@ export function App({
     [approvalRows, expandedToolKey, transcriptEntries, transcriptWrapWidth],
   );
   const transcriptTotalRows = transcriptLayout.contentRows;
+  const maxVisibleAgentItems = Math.max(1, Math.min(4, rows - 12));
+  const agentSwitcherRows = hasSubagents
+    ? measureAgentSwitcherRows(navigationItems, maxVisibleAgentItems)
+    : 0;
   const transcriptRows = Math.max(
-    inputDisabled ? 0 : 6,
-    rows - 8 - genericDialogRows - transcriptLayout.approvalRows,
+    activeAgent ? 4 : inputDisabled ? 0 : 6,
+    rows - 8 - genericDialogRows - transcriptLayout.approvalRows - agentSwitcherRows,
   );
   const focusedToolItem = transcriptLayout.items.find((item) => item.focusedTool);
   const focusedToolKey = focusedToolItem?.key ?? null;
@@ -192,12 +240,71 @@ export function App({
     focusedToolItem?.entry.kind === "tool" ? focusedToolItem.entry.uiToolCallId : undefined;
   const focusedToolExpanded = focusedToolKey !== null && expandedToolKey === focusedToolKey;
   const inputDraft = useRef("");
+  const [inputState, setInputState] = useState<InputBoxStateSnapshot>({
+    text: "",
+    hasSuggestions: false,
+    historyIndex: null,
+  });
+  const handleInputStateChange = useCallback((snapshot: InputBoxStateSnapshot) => {
+    inputDraft.current = snapshot.text;
+    setInputState((current) =>
+      current.text === snapshot.text &&
+      current.hasSuggestions === snapshot.hasSuggestions &&
+      current.historyIndex === snapshot.historyIndex
+        ? current
+        : snapshot,
+    );
+  }, []);
   const [transcriptView, setTranscriptView] = useState<TranscriptViewState>({ mode: "follow" });
-  const previousEntries = useRef(entries);
+  const previousEntries = useRef(mainEntries);
   const newMessageCount = transcriptView.mode === "manual" ? transcriptView.newMessageCount : 0;
   const transcriptViewportRows = Math.max(1, transcriptRows - (newMessageCount > 0 ? 1 : 0));
+  const agentSwitcherLayout = buildAgentSwitcherLayout({
+    items: navigationItems,
+    selectedId: agentNavigation.selectedId,
+    activeId: agentNavigation.activeId,
+    focused: agentNavigation.focus === "picker",
+    renderWidth: Math.max(1, columns - 2),
+    maxVisibleItems: maxVisibleAgentItems,
+  });
 
   useInput((input, key) => {
+    const mouseInput = parseSgrMouseInput(input);
+    if (
+      hasSubagents &&
+      focusedDialog === null &&
+      mouseInput?.kind === "left-button" &&
+      mouseInput.action === "press"
+    ) {
+      const switcherTopRow = rows - agentSwitcherLayout.totalRows + 1;
+      const itemId = hitTestAgentSwitcherRow(agentSwitcherLayout, mouseInput.row - switcherTopRow);
+      if (itemId) {
+        setAgentNavigation((current) =>
+          reduceAgentNavigation(current, { type: "select", id: itemId }, navigationItems),
+        );
+        return;
+      }
+    }
+
+    const agentEvent = resolveAgentNavigationInput(input, key, {
+      state: agentNavigation,
+      inputState,
+      hasSubagents,
+      blocked:
+        focusedDialog !== null || resolveAppKeyEvent(input, key, running, keybindings) !== null,
+    });
+    if (agentEvent) {
+      setAgentNavigation((current) =>
+        applyAgentNavigationInput(current, agentEvent, navigationItems),
+      );
+      return;
+    }
+    if (agentNavigation.focus === "picker" && isPrintableInput(input, key)) {
+      setAgentNavigation((current) =>
+        reduceAgentNavigation(current, { type: "focus-input" }, navigationItems),
+      );
+    }
+
     const owner = resolveAppInputOwner(input, key, {
       running,
       modal: inputDisabled,
@@ -225,8 +332,8 @@ export function App({
     }
 
     if (owner === "transcript") {
-      const mouseInput = parseSgrMouseInput(input);
       if (mouseInput?.kind === "other") return;
+      if (mouseInput?.kind === "left-button") return;
       const transcriptAction =
         mouseInput?.kind === "wheel"
           ? mouseInput.direction === "up"
@@ -264,6 +371,18 @@ export function App({
   });
 
   useEffect(() => {
+    setAgentNavigation((current) => reconcileAgentNavigationState(current, navigationItems));
+  }, [navigationItems]);
+
+  useEffect(() => {
+    if (!activeAgent) return;
+    const count = activeAgent.timeline?.length ?? 0;
+    setSeenTimelineCounts((current) =>
+      current[activeAgent.id] === count ? current : { ...current, [activeAgent.id]: count },
+    );
+  }, [activeAgent]);
+
+  useEffect(() => {
     setTranscriptView((current) => {
       if (current.mode === "follow") return current;
       const offsetRows = clampScrollRows(
@@ -283,15 +402,15 @@ export function App({
 
   useEffect(() => {
     const previous = previousEntries.current;
-    previousEntries.current = entries;
-    if (entries === previous) return;
-    const addedEntries = Math.max(0, entries.length - previous.length);
+    previousEntries.current = mainEntries;
+    if (mainEntries === previous) return;
+    const addedEntries = Math.max(0, mainEntries.length - previous.length);
     setTranscriptView((current) => {
       if (current.mode === "tool-anchor") return { mode: "follow" };
       if (current.mode !== "manual" || addedEntries === 0) return current;
       return { ...current, newMessageCount: current.newMessageCount + addedEntries };
     });
-  }, [entries]);
+  }, [mainEntries]);
 
   useEffect(() => {
     setTranscriptView((current) => {
@@ -307,14 +426,14 @@ export function App({
   }, [approvalNotice?.taskId]);
 
   // 是否仍有"主动流式":running 且末尾是流式 assistant / thinking / running tool
-  const isStreaming = running && isActivelyStreaming(entries);
+  const isStreaming = running && isActivelyStreaming(mainEntries);
   // spinner 阶段:据末尾条目状态选
-  const spinnerMode = pickSpinnerMode(entries, isStreaming);
+  const spinnerMode = pickSpinnerMode(mainEntries, isStreaming);
   const showSpinner = running && !inputDisabled && spinnerMode !== "responding";
 
   // 诊断:记录每次渲染的 entries 状态
   dbg(`render: entries=${entries.length} running=${running} streaming=${isStreaming}`);
-  entries.forEach((e, i) => {
+  mainEntries.forEach((e, i) => {
     const c = e.kind === "user" || e.kind === "assistant" ? e.content.slice(0, 40) : e.kind;
     dbg(`  [${i}] ${e.kind}: ${c}`);
   });
@@ -341,20 +460,31 @@ export function App({
     <>
       {/* 消息列表:统一走 MessageList,由 shouldRenderStatically + MessageRow.memo 控制静态行。 */}
       <Box flexDirection="column" height={transcriptRows} overflowY="hidden" paddingX={1}>
-        {newMessageCount > 0 && <Text color="cyan">↓ {newMessageCount} new messages</Text>}
-        <ToolCardFocusProvider expanded={focusedToolExpanded}>
-          <MessageList
-            layout={transcriptLayout}
-            isStreaming={isStreaming}
-            viewportRows={transcriptViewportRows}
-            scrollOffsetRows={transcriptView.mode === "follow" ? 0 : transcriptView.offsetRows}
-            estimatedRowHeight={3}
-            overscanRows={0}
-            virtualizeThreshold={0}
-            scrollToBottom={transcriptView.mode === "follow"}
-            preserveVirtualSpacers={false}
+        {activeAgent ? (
+          <AgentDetailView
+            agent={activeAgent}
+            renderWidth={transcriptWrapWidth}
+            timelineLimit={Math.max(1, transcriptRows - 8)}
+            visibleRows={transcriptRows}
           />
-        </ToolCardFocusProvider>
+        ) : (
+          <>
+            {newMessageCount > 0 && <Text color="cyan">↓ {newMessageCount} new messages</Text>}
+            <ToolCardFocusProvider expanded={focusedToolExpanded}>
+              <MessageList
+                layout={transcriptLayout}
+                isStreaming={isStreaming}
+                viewportRows={transcriptViewportRows}
+                scrollOffsetRows={transcriptView.mode === "follow" ? 0 : transcriptView.offsetRows}
+                estimatedRowHeight={3}
+                overscanRows={0}
+                virtualizeThreshold={0}
+                scrollToBottom={transcriptView.mode === "follow"}
+                preserveVirtualSpacers={false}
+              />
+            </ToolCardFocusProvider>
+          </>
+        )}
       </Box>
 
       {/* 思考/spinner:据末尾状态显示对应 mode */}
@@ -366,41 +496,69 @@ export function App({
     </>
   );
   const bottom = (
-    <Box
-      flexDirection="column"
-      borderStyle="single"
-      borderTop={false}
-      borderLeft={false}
-      borderRight={false}
-      borderColor={inputDisabled ? "gray" : "green"}
-      paddingX={1}
-    >
-      <InputBox
-        disabled={inputDisabled}
-        disabledLabel="Use dialog controls"
-        acceptsInput={(input, key) =>
-          resolveAppInputOwner(input, key, {
-            running,
-            modal: inputDisabled,
-            canToggleTool: focusedToolKey !== null,
-            inputDraft: inputDraft.current,
-            keybindings,
-          }) === "input"
-        }
-        onTextChange={(text) => {
-          inputDraft.current = text;
-        }}
-        slashCommandSuggestions={slashCommandSuggestions}
-        slashArgumentSuggestions={slashArgumentSuggestions}
-        fileMentionSuggestions={fileMentionSuggestions}
-        keybindings={keybindings}
-        inputReplacement={inputReplacement}
-        onSubmit={(text) => {
-          setTranscriptView({ mode: "follow" });
-          setExpandedToolKey(null);
-          onSubmit(text);
-        }}
-      />
+    <Box flexDirection="column">
+      <Box
+        flexDirection="column"
+        borderStyle="single"
+        borderTop={false}
+        borderLeft={false}
+        borderRight={false}
+        borderColor={inputDisabled ? "gray" : "green"}
+        paddingX={1}
+      >
+        <InputBox
+          disabled={inputDisabled}
+          disabledLabel={
+            activeAgent ? "Viewing subagent · Esc back to Main" : "Use dialog controls"
+          }
+          acceptsInput={(input, key) => {
+            const agentEvent = resolveAgentNavigationInput(input, key, {
+              state: agentNavigation,
+              inputState,
+              hasSubagents,
+              blocked:
+                focusedDialog !== null ||
+                resolveAppKeyEvent(input, key, running, keybindings) !== null,
+            });
+            if (agentEvent) return false;
+            return (
+              resolveAppInputOwner(input, key, {
+                running,
+                modal: inputDisabled,
+                canToggleTool: focusedToolKey !== null,
+                inputDraft: inputDraft.current,
+                keybindings,
+              }) === "input"
+            );
+          }}
+          onTextChange={(text) => {
+            inputDraft.current = text;
+          }}
+          onStateChange={handleInputStateChange}
+          slashCommandSuggestions={slashCommandSuggestions}
+          slashArgumentSuggestions={slashArgumentSuggestions}
+          fileMentionSuggestions={fileMentionSuggestions}
+          keybindings={keybindings}
+          inputReplacement={inputReplacement}
+          onSubmit={(text) => {
+            setTranscriptView({ mode: "follow" });
+            setExpandedToolKey(null);
+            onSubmit(text);
+          }}
+        />
+      </Box>
+      {hasSubagents && (
+        <Box paddingX={1}>
+          <AgentSwitcher
+            items={navigationItems}
+            selectedId={agentNavigation.selectedId}
+            activeId={agentNavigation.activeId}
+            focused={agentNavigation.focus === "picker"}
+            renderWidth={Math.max(1, columns - 2)}
+            maxVisibleItems={maxVisibleAgentItems}
+          />
+        </Box>
+      )}
     </Box>
   );
 
@@ -542,6 +700,58 @@ interface AppInputKey {
   backspace?: boolean;
   delete?: boolean;
   escape?: boolean;
+}
+
+type AgentNavigationInputAction = AgentNavigationEvent | { type: "focus-next" };
+
+export function resolveAgentNavigationInput(
+  _input: string,
+  key: AppInputKey,
+  options: {
+    state: { focus: "input" | "picker"; activeId: string };
+    inputState: InputBoxStateSnapshot;
+    hasSubagents: boolean;
+    blocked: boolean;
+  },
+): AgentNavigationInputAction | null {
+  if (options.blocked || !options.hasSubagents) return null;
+  if (options.state.activeId !== MAIN_AGENT_ID && key.escape) return { type: "escape" };
+
+  if (options.state.focus === "picker") {
+    if (key.upArrow) return { type: "move-up" };
+    if (key.downArrow) return { type: "move-down" };
+    if (key.return) return { type: "open" };
+    if (key.escape || key.tab) return { type: "escape" };
+    return null;
+  }
+
+  if (options.inputState.text || options.inputState.hasSuggestions) return null;
+  if (key.tab) return { type: "focus-picker" };
+  // 空输入下的 ↓ 原本不会找到更新的历史，用它自然进入代理列表；
+  // ↑ 仍保留给输入历史。
+  if (key.downArrow && options.inputState.historyIndex === null) return { type: "focus-next" };
+  return null;
+}
+
+function applyAgentNavigationInput(
+  state: ReturnType<typeof createAgentNavigationState>,
+  action: AgentNavigationInputAction,
+  items: readonly AgentNavigationItem[],
+): ReturnType<typeof createAgentNavigationState> {
+  if (action.type !== "focus-next") return reduceAgentNavigation(state, action, items);
+  const focused = reduceAgentNavigation(state, { type: "focus-picker" }, items);
+  return reduceAgentNavigation(focused, { type: "move-down" }, items);
+}
+
+function isPrintableInput(input: string, key: AppInputKey): boolean {
+  return (
+    input.length > 0 &&
+    !input.startsWith("[") &&
+    !key.ctrl &&
+    !key.meta &&
+    !key.return &&
+    !key.escape
+  );
 }
 
 export function resolveAppInputOwner(

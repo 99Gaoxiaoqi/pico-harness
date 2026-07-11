@@ -73,7 +73,7 @@ describe("buildDefaultToolRegistry", () => {
     expect(tools).not.toContain("spawn_subagent");
   });
 
-  it("创建 registry 后动态注册的委派和 MCP 工具可被搜索并披露", async () => {
+  it("动态注册的核心委派直接可见，MCP 工具经搜索披露", async () => {
     const disclosure = new ToolDisclosure();
     const registry = buildDefaultToolRegistry(workDir, { toolDisclosure: disclosure });
     registry.register(extensionTool("delegate_task", "dispatch a worker subagent"));
@@ -85,11 +85,9 @@ describe("buildDefaultToolRegistry", () => {
       arguments: JSON.stringify({ query: "worker database" }),
     });
 
-    expect(result.output).toContain("delegate_task");
+    expect(result.output).not.toContain("delegate_task");
     expect(result.output).toContain("mcp__database__query");
-    expect(disclosure.getDisclosed()).toEqual(
-      expect.arrayContaining(["delegate_task", "mcp__database__query"]),
-    );
+    expect(disclosure.getDisclosed()).toEqual(["mcp__database__query"]);
     expect(disclosure.pickForLLM(registry.getAvailableTools()).map((tool) => tool.name)).toEqual(
       expect.arrayContaining(["delegate_task", "mcp__database__query"]),
     );

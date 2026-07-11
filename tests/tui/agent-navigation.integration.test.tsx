@@ -83,6 +83,25 @@ describe("agent navigation integration", () => {
     expect(detail).toContain("发现 session");
     expect(detail.split("\n").every((line) => terminalWidth(line) <= 22)).toBe(true);
 
+    const tailedDetail = renderToString(
+      <AgentDetailView
+        agent={{
+          ...items[1]!,
+          timeline: Array.from({ length: 10 }, (_, index) => ({
+            id: `message-${index}`,
+            kind: "message" as const,
+            content: `timeline-${index}`,
+          })),
+        }}
+        renderWidth={22}
+        visibleRows={5}
+      />,
+      { columns: 22 },
+    );
+    expect(tailedDetail).toContain("← Main / auth-agent");
+    expect(tailedDetail).toContain("timeline-9");
+    expect(tailedDetail).not.toContain("timeline-0");
+
     const layout = buildAgentSwitcherLayout({
       items,
       selectedId: "agent-auth",
