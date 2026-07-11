@@ -7,6 +7,7 @@ import { FileIndex } from "../input/file-index.js";
 import { MemoryNudger } from "../memory/memory-nudger.js";
 import { SkillRegistry } from "../memory/skill-registry.js";
 import { TaskRegistry } from "../tasks/task-registry.js";
+import type { TaskHostRuntime } from "../tasks/task-runtime.js";
 import { BackgroundManager } from "../tools/background-manager.js";
 import { DelegationManager } from "../tools/delegation-manager.js";
 import { ToolDisclosure } from "../tools/tool-disclosure.js";
@@ -22,6 +23,7 @@ export interface TuiRuntimeStateOptions {
   session: Session;
   toolDisclosure?: ToolDisclosure;
   lspServers?: readonly LspServerConfig[];
+  taskHostRuntime?: TaskHostRuntime;
 }
 
 export interface TuiRuntimeState {
@@ -31,6 +33,7 @@ export interface TuiRuntimeState {
   readonly todoStore: TodoStore;
   readonly toolDisclosure: ToolDisclosure;
   readonly taskRegistry: TaskRegistry;
+  readonly taskHostRuntime?: TaskHostRuntime;
   readonly backgroundManager: BackgroundManager;
   readonly delegationManager: DelegationManager;
   readonly skillRegistry: SkillRegistry;
@@ -59,7 +62,7 @@ export async function createTuiRuntimeState(
     );
   }
 
-  const taskRegistry = new TaskRegistry();
+  const taskRegistry = options.taskHostRuntime?.taskRegistry ?? new TaskRegistry();
   const skillRegistry = new SkillRegistry(workDir);
   await skillRegistry.init();
   const goalManager = new GoalManager();
@@ -83,6 +86,7 @@ export async function createTuiRuntimeState(
     todoStore: new TodoStore(workDir),
     toolDisclosure: options.toolDisclosure ?? new ToolDisclosure(),
     taskRegistry,
+    ...(options.taskHostRuntime ? { taskHostRuntime: options.taskHostRuntime } : {}),
     backgroundManager: new BackgroundManager({ taskRegistry }),
     delegationManager: new DelegationManager({ taskRegistry }),
     skillRegistry,
@@ -102,6 +106,7 @@ interface DefaultTuiRuntimeStateOptions {
   todoStore: TodoStore;
   toolDisclosure: ToolDisclosure;
   taskRegistry: TaskRegistry;
+  taskHostRuntime?: TaskHostRuntime;
   backgroundManager: BackgroundManager;
   delegationManager: DelegationManager;
   skillRegistry: SkillRegistry;
@@ -120,6 +125,7 @@ class DefaultTuiRuntimeState implements TuiRuntimeState {
   readonly todoStore: TodoStore;
   readonly toolDisclosure: ToolDisclosure;
   readonly taskRegistry: TaskRegistry;
+  readonly taskHostRuntime?: TaskHostRuntime;
   readonly backgroundManager: BackgroundManager;
   readonly delegationManager: DelegationManager;
   readonly skillRegistry: SkillRegistry;
@@ -138,6 +144,7 @@ class DefaultTuiRuntimeState implements TuiRuntimeState {
     this.todoStore = options.todoStore;
     this.toolDisclosure = options.toolDisclosure;
     this.taskRegistry = options.taskRegistry;
+    this.taskHostRuntime = options.taskHostRuntime;
     this.backgroundManager = options.backgroundManager;
     this.delegationManager = options.delegationManager;
     this.skillRegistry = options.skillRegistry;

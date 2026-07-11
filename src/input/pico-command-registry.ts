@@ -58,6 +58,8 @@ import {
 import type { McpStatusSnapshot } from "../mcp/manager.js";
 import type { GoalManager } from "../engine/goal-manager.js";
 import type { ModelRuntimeCommandService } from "../provider/model-runtime-report.js";
+import type { TaskHostRuntime } from "../tasks/task-runtime.js";
+import type { McpConnectionManager } from "../mcp/manager.js";
 
 const OVERRIDDEN_BUILTIN_COMMANDS = new Set([
   "skills",
@@ -72,6 +74,7 @@ const OVERRIDDEN_BUILTIN_COMMANDS = new Set([
   "mcp",
   "thinking",
   "agents",
+  "tasks",
 ]);
 
 export type McpStatusProvider = () => McpStatusSnapshot | undefined;
@@ -95,6 +98,8 @@ export interface PicoCommandRegistryOptions {
   additionalDirectoryManager?: AdditionalDirectoryManager;
   goalManager?: GoalManager;
   modelRuntime?: () => Pick<ModelRuntimeCommandService, "execute"> | undefined;
+  taskRuntime?: TaskHostRuntime;
+  mcpControl?: McpConnectionManager;
 }
 
 export async function createPicoCommandRegistry(
@@ -126,6 +131,7 @@ export async function createPicoCommandRegistry(
   const registry = new CommandRegistry([
     ...builtins,
     createStatusCommand(settings, options.session, options.mcpStatus),
+    createTasksCommand(options.taskRuntime),
     createModelRuntimeCommand("usage", options.modelRuntime),
     createModelRuntimeCommand("context", options.modelRuntime),
     createGoalCommand(options.goalManager),
@@ -137,7 +143,7 @@ export async function createPicoCommandRegistry(
     createModelCommand(settings, options.modelRouter),
     createAddDirectoryCommand(settings, options.additionalDirectoryManager),
     createThinkingCommand(settings, options.modelRouter),
-    createMcpCommand(options.mcpStatus),
+    createMcpCommand(options.mcpStatus, options.mcpControl),
     createAgentsCommand(options),
     createSessionsCommand(options),
     createResumeCommand(options),
@@ -641,19 +647,146 @@ function createThinkingCommand(settings: SessionSettings, router?: ModelRouter):
   };
 }
 
-function createMcpCommand(mcpStatus?: McpStatusProvider): SlashCommand {
+function createTasksCommand(taskRuntime?: TaskHostRuntime): SlashCommand {
+  return {
+    name: "tasks",
+    description: "Inspect and control isolated worktree tasks",
+    usage: "/tasks [task-id|tail|stop|retry|message|merge|cleanup]",
+    category: "session",
+    kind: "local",
+    availability: "always",
+    execute: async (input): Promise<LocalCommandResult> => {
+      if (!taskRuntime) {
+        return {
+          type: "local",
+          action: "message",
+          message: "Task supervisor unavailable: the current directory is not a Git worktree.",
+        };
+      }
+      const [action, taskId, ...rest] = input.argv;
+      try {
+        if (!action) {
+          const tasks = taskRuntime.list();
+          return {
+            type: "local",
+            action: "message",
+            message:
+              tasks.length === 0
+                ? "No supervised tasks."
+                : [
+                    "Supervised tasks",
+                    ...tasks.map(
+                      (task) =>
+                        `- ${task.taskId} ${task.status} · ${task.description}${task.error ? ` · ${task.error}` : ""}`,
+                    ),
+                  ].join("\n"),
+          };
+        }
+        if (!TASK_ACTIONS.has(action)) {
+          const task = taskRuntime.get(action);
+          return {
+            type: "local",
+            action: "message",
+            message: task ? JSON.stringify(task, null, 2) : `Unknown task: ${action}`,
+          };
+        }
+        if (!taskId) {
+          return { type: "local", action: "message", message: `Usage: /tasks ${action} <task-id>` };
+        }
+        if (action === "tail") {
+          const maxChars = rest[0] ? Number(rest[0]) : undefined;
+          return {
+            type: "local",
+            action: "message",
+            message: taskRuntime.tail(taskId, maxChars),
+          };
+        }
+        let result: unknown;
+        if (action === "stop") result = await taskRuntime.stop(taskId);
+        else if (action === "retry") result = taskRuntime.retry(taskId);
+        else if (action === "message") result = taskRuntime.sendMessage(taskId, rest.join(" "));
+        else if (action === "merge") {
+          await taskRuntime.merge(taskId);
+          await taskRuntime.mergeQueue.waitForIdle();
+          result = taskRuntime.mergeQueue.get(taskId);
+        } else if (action === "cleanup") {
+          await taskRuntime.cleanupMerged(taskId);
+          result = { taskId, cleaned: true };
+        }
+        return {
+          type: "local",
+          action: "message",
+          message: JSON.stringify(result ?? taskRuntime.get(taskId) ?? { taskId, action }, null, 2),
+        };
+      } catch (error) {
+        return {
+          type: "local",
+          action: "message",
+          message: `Task command failed: ${error instanceof Error ? error.message : String(error)}`,
+        };
+      }
+    },
+  };
+}
+
+const TASK_ACTIONS = new Set(["tail", "stop", "retry", "message", "merge", "cleanup"]);
+
+function createMcpCommand(
+  mcpStatus?: McpStatusProvider,
+  mcpControl?: McpConnectionManager,
+): SlashCommand {
   return {
     name: "mcp",
-    description: "Show MCP server connection status",
-    usage: "/mcp",
+    description: "Inspect and control MCP server connections",
+    usage: "/mcp [reload|enable|disable|reconnect|resources|read|prompts|prompt|auth]",
     category: "mcp",
     kind: "local",
-    execute: (): LocalCommandResult => ({
-      type: "local",
-      action: "mcp",
-      message: formatMcpStatus(mcpStatus?.()),
-    }),
+    execute: async (input): Promise<LocalCommandResult> => {
+      if (!input.argv[0]) {
+        return { type: "local", action: "mcp", message: formatMcpStatus(mcpStatus?.()) };
+      }
+      if (!mcpControl) {
+        return { type: "local", action: "mcp", message: "MCP lifecycle manager unavailable." };
+      }
+      const [action, server, value, ...rest] = input.argv;
+      try {
+        if (action === "reload") await mcpControl.reload(server);
+        else if (action === "enable" && server) await mcpControl.enable(server);
+        else if (action === "disable" && server) await mcpControl.disable(server);
+        else if (action === "reconnect" && server) await mcpControl.reconnect(server);
+        else if (action === "auth" && server) await mcpControl.authenticate(server);
+        else if (action === "resources" && server) {
+          return mcpResult(await mcpControl.listResources(server));
+        } else if (action === "read" && server && value) {
+          return mcpResult(await mcpControl.readResource(server, value));
+        } else if (action === "prompts" && server) {
+          return mcpResult(await mcpControl.listPrompts(server));
+        } else if (action === "prompt" && server && value) {
+          const rawArgs = rest.join(" ").trim();
+          const args = rawArgs ? (JSON.parse(rawArgs) as Record<string, string>) : undefined;
+          return mcpResult(await mcpControl.getPrompt(server, value, args));
+        } else {
+          return {
+            type: "local",
+            action: "mcp",
+            message:
+              "Usage: /mcp [reload [path]|enable <server>|disable <server>|reconnect <server>|resources <server>|read <server> <uri>|prompts <server>|prompt <server> <name> [json]|auth <server>]",
+          };
+        }
+        return { type: "local", action: "mcp", message: formatMcpStatus(mcpStatus?.()) };
+      } catch (error) {
+        return {
+          type: "local",
+          action: "mcp",
+          message: `MCP command failed: ${error instanceof Error ? error.message : String(error)}`,
+        };
+      }
+    },
   };
+}
+
+function mcpResult(value: unknown): LocalCommandResult {
+  return { type: "local", action: "mcp", message: JSON.stringify(value, null, 2) };
 }
 
 function formatMcpStatus(snapshot: McpStatusSnapshot | undefined): string {

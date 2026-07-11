@@ -62,6 +62,7 @@ import { isAbortError } from "../provider/errors.js";
 import { defaultIsRetryableError } from "../provider/retry.js";
 import { ModelRuntimeCommandService } from "../provider/model-runtime-report.js";
 import { buildDefaultToolRegistry } from "../tools/default-registry.js";
+import type { ToolRegistry } from "../tools/registry-impl.js";
 import type { ToolDisclosure } from "../tools/tool-disclosure.js";
 import {
   forgetSessionSettings,
@@ -118,6 +119,7 @@ import {
 import { copyTextToClipboard, locateFileInShell } from "./system-actions.js";
 import { fileHistoryChanges, fileHistoryRestoreFile } from "../safety/file-history.js";
 import { createChangesDialogRequest, createChangesPanelModel } from "./changes-panel.js";
+import { TaskHostRuntime } from "../tasks/task-runtime.js";
 
 export interface ReplOptions {
   /** 工作区 */
@@ -211,6 +213,7 @@ interface TuiSessionBundle {
   readonly runtimeState: TuiRuntimeState;
   readonly settings: SessionSettings;
   readonly workspaceRoots: WorkspaceRoots;
+  readonly toolRegistry: ToolRegistry;
   readonly registry: CommandRegistry;
   readonly reporter: TuiReporter;
   readonly askUserHandler: AskUserHandler;
@@ -628,6 +631,12 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     legacyModel: opts.model,
     legacyModelExplicit: opts.modelExplicit,
   });
+  const taskHostRuntime = await TaskHostRuntime.create({ workDir: opts.workDir }).catch(
+    () => undefined,
+  );
+  const sharedMcpManager = new McpConnectionManager(undefined, { stdioCwd: opts.workDir });
+  const mcpConfigPath = opts.mcpConfigPath ?? `${opts.workDir}/.claw/mcp.json`;
+  let mcpInitialized = false;
   const tuiSessionSelection: CliSessionSelection = opts.sessionSelection ?? {
     mode: "new",
     sessionId: createCliSessionId(),
@@ -642,6 +651,16 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
   const pendingTuiSubmissions = new Set<Promise<void>>();
   const pendingTuiDialogActions = new Set<Promise<unknown>>();
   let activeAbortControllerRef: TuiAbortControllerRef | undefined;
+  const unsubscribeMcpStatus = sharedMcpManager.subscribe((snapshot) => {
+    if (!activeBundle) return;
+    activeBundle.latestMcpStatus = snapshot;
+    setSessionTools(activeBundle.settings, toolStatusFromRegistry(activeBundle.toolRegistry));
+  });
+  const unsubscribeTaskCompletion = taskHostRuntime?.supervisor.subscribeCompletion((task) => {
+    activeBundle?.reporter.pushSystemMessage(
+      `Task ${task.taskId} ${task.status}: ${task.description}${task.error ? ` · ${task.error}` : ""}`,
+    );
+  });
 
   const buildSessionBundleUnsafe = async (
     selection: CliSessionSelection,
@@ -674,6 +693,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
       sessionId: selection.sessionId,
       session,
       lspServers: picoConfig.lspServers,
+      ...(taskHostRuntime ? { taskHostRuntime } : {}),
     });
 
     try {
@@ -685,16 +705,17 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         askUserHandler,
         codeIntelligence,
       });
-      let latestMcpStatus: McpStatusSnapshot | undefined;
-      if (opts.mcpConfigPath) {
-        const mcpStatusManager = new McpConnectionManager(toolRegistry, { stdioCwd: opts.workDir });
+      sharedMcpManager.attachRegistry(toolRegistry);
+      if (!mcpInitialized) {
+        mcpInitialized = true;
         try {
-          await mcpStatusManager.loadConfig(opts.mcpConfigPath);
+          await sharedMcpManager.loadConfig(mcpConfigPath);
+          await sharedMcpManager.connectAll();
         } catch {
-          // /mcp 展示解析错误;TUI 本身继续可用。
+          // /mcp 展示配置或连接错误；TUI 本身继续可用。
         }
-        latestMcpStatus = mcpStatusManager.getStatusSnapshot();
       }
+      const latestMcpStatus: McpStatusSnapshot = sharedMcpManager.getStatusSnapshot();
 
       const settings = getOrCreateSessionSettings(
         {
@@ -732,6 +753,8 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         permissionMode: settings.permissionMode,
         tools: settings.tools,
         mcpStatus: () => bundleRef.current?.latestMcpStatus,
+        mcpControl: sharedMcpManager,
+        ...(taskHostRuntime ? { taskRuntime: taskHostRuntime } : {}),
         additionalDirectories: settings.additionalDirectories,
         additionalDirectoryManager: workspaceRoots,
         goalManager: runtimeState.goalManager,
@@ -762,6 +785,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         runtimeState,
         settings,
         workspaceRoots,
+        toolRegistry,
         registry,
         reporter,
         askUserHandler,
@@ -779,6 +803,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     try {
       return await buildSessionBundleUnsafe(selection);
     } catch (error) {
+      if (activeBundle) sharedMcpManager.attachRegistry(activeBundle.toolRegistry);
       if (selection.mode === "fork") {
         await discardFailedTuiFork(selection.sessionId, opts.workDir);
       }
@@ -877,6 +902,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
             guard.getSnapshot() !== "idle"
           ) {
             await disposeUnpublishedTuiBundle(next, opts.workDir);
+            sharedMcpManager.attachRegistry(current.toolRegistry);
             return;
           }
 
@@ -1153,7 +1179,6 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
                 ? { rewindTranscriptIndex: rewindContext.transcriptIndex }
                 : {}),
               ...(rewindContext !== null ? { rewindInteractionMode: settings.mode } : {}),
-              ...(opts.mcpConfigPath ? { mcpConfigPath: opts.mcpConfigPath } : {}),
               addDirs: [...settings.additionalDirectories],
             };
             await runTuiAgentPrompt(cliOpts, {
@@ -1172,6 +1197,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
               mcpStatusSink: (snapshot) => {
                 current.latestMcpStatus = snapshot;
               },
+              mcpManager: sharedMcpManager,
               toolStatusSink: (tools) => {
                 setSessionTools(settings, tools);
               },
@@ -1182,6 +1208,8 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
       } catch (err) {
         appendTuiRunError(reporter, err);
       } finally {
+        sharedMcpManager.attachRegistry(current.toolRegistry);
+        setSessionTools(settings, toolStatusFromRegistry(current.toolRegistry));
         if (preparesHistoryDialog) {
           historyPreparationRef.current = false;
           setDialogRequests((items) =>
@@ -1320,6 +1348,10 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
       await finalBundle.runtimeState.dispose();
       await finalBundle.session.flushPersistence();
     }
+    unsubscribeTaskCompletion?.();
+    unsubscribeMcpStatus();
+    await taskHostRuntime?.close();
+    await sharedMcpManager.closeAll();
   }
 }
 
@@ -1535,6 +1567,7 @@ export async function runTuiAgentPrompt(
     runtimeState?: TuiRuntimeState;
     askUserHandler?: AskUserHandler;
     mcpStatusSink?: (snapshot: McpStatusSnapshot) => void;
+    mcpManager?: McpConnectionManager;
     toolStatusSink?: RunAgentCliDependencies["toolStatusSink"];
     openDialog?: (request: DialogRequest) => void;
     closeDialog?: (id: string) => void;
@@ -1586,6 +1619,7 @@ export async function runTuiAgentPrompt(
       ...(deps.runtimeState ? { runtimeState: deps.runtimeState } : {}),
       ...(deps.askUserHandler ? { askUserHandler: deps.askUserHandler } : {}),
       ...(deps.mcpStatusSink ? { mcpStatusSink: deps.mcpStatusSink } : {}),
+      ...(deps.mcpManager ? { mcpManager: deps.mcpManager } : {}),
       ...(deps.toolStatusSink ? { toolStatusSink: deps.toolStatusSink } : {}),
     });
     if (result.tracePath) {

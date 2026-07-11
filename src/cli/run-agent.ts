@@ -73,6 +73,7 @@ import { loadPicoConfig } from "../input/pico-config.js";
 import { loadImage } from "../input/prepare-prompt.js";
 import { evaluateYoloToolCall, type YoloSandboxConfig } from "../safety/yolo-sandbox.js";
 import { resolveCliSession, type CliSessionSelection } from "./session-resolver.js";
+import type { WorktreeSupervisor } from "../tasks/worktree-supervisor.js";
 
 export interface RunAgentCliOptions {
   prompt: string;
@@ -153,6 +154,8 @@ export interface RunAgentCliDependencies {
   /** Receives the complete registry after late delegation/MCP registration. */
   toolStatusSink?: (tools: readonly SessionToolStatus[]) => void;
   mcpStatusSink?: (snapshot: McpStatusSnapshot) => void;
+  /** TUI 宿主持有的 MCP manager；注入时本轮只换 registry，不重连或关闭 server。 */
+  mcpManager?: McpConnectionManager;
   /** 宿主本轮运行的中止信号。 */
   signal?: AbortSignal;
 }
@@ -362,6 +365,7 @@ export async function runAgentFromCli(
     delegationManager,
     workspaceRoots,
     settings.mode === "yolo" ? { config: picoConfig.sandbox } : undefined,
+    runtimeState.taskHostRuntime?.supervisor,
   );
   dependencies.toolStatusSink?.(toolStatusFromRegistry(registry));
 
@@ -381,10 +385,18 @@ export async function runAgentFromCli(
   // MCP 服务器:加载配置 → 并行连接 → 自动注册工具到 registry。
   // per-server 失败隔离,一个 server 挂了不影响其他。
   const mcpConfigPath = options.mcpConfigPath;
-  const mcpManager = mcpConfigPath
-    ? new McpConnectionManager(registry, { stdioCwd: workDir })
-    : undefined;
-  if (mcpManager && mcpConfigPath) {
+  const ownsMcpManager = dependencies.mcpManager === undefined;
+  const mcpManager =
+    dependencies.mcpManager ??
+    (mcpConfigPath ? new McpConnectionManager(registry, { stdioCwd: workDir }) : undefined);
+  const unsubscribeMcpStatus =
+    mcpManager && dependencies.mcpStatusSink
+      ? mcpManager.subscribe(dependencies.mcpStatusSink)
+      : undefined;
+  if (mcpManager && !ownsMcpManager) {
+    mcpManager.attachRegistry(registry);
+    dependencies.toolStatusSink?.(toolStatusFromRegistry(registry));
+  } else if (mcpManager && mcpConfigPath) {
     await mcpManager.loadConfig(mcpConfigPath);
     dependencies.mcpStatusSink?.(mcpManager.getStatusSnapshot());
     await mcpManager.connectAll();
@@ -427,8 +439,9 @@ export async function runAgentFromCli(
       return result;
     });
   } finally {
-    // Close MCP connections and child processes before returning.
-    if (mcpManager) {
+    unsubscribeMcpStatus?.();
+    // 非 TUI 调用仍按轮关闭；TUI 注入的 manager 由宿主在退出时统一关闭。
+    if (mcpManager && ownsMcpManager) {
       await mcpManager.closeAll();
       dependencies.mcpStatusSink?.(mcpManager.getStatusSnapshot());
     }
@@ -619,6 +632,7 @@ function registerDelegationTools(
   manager: DelegationManager,
   workspaceRoots: WorkspaceRoots,
   yoloSandbox?: { config?: Partial<YoloSandboxConfig> },
+  worktreeSupervisor?: WorktreeSupervisor,
 ): void {
   const registryFactory = createSubagentRegistryFactory({
     workDir,
@@ -626,11 +640,13 @@ function registerDelegationTools(
     runner: engine,
     manager,
     ...(yoloSandbox ? { yoloSandbox } : {}),
+    ...(worktreeSupervisor ? { worktreeSupervisor } : {}),
     ...(profiles.length > 0 ? { profiles } : {}),
   });
   registry.register(
     new DelegateTaskTool(engine, registryFactory, manager, {
       ...(profiles.length > 0 ? { profiles } : {}),
+      ...(worktreeSupervisor ? { worktreeSupervisor } : {}),
     }),
   );
   registry.register(new DelegateStatusTool(manager));

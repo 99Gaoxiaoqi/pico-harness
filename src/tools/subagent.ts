@@ -19,6 +19,7 @@ import { logger } from "../observability/logger.js";
 import type { DelegationBatchResult } from "./delegation-manager.js";
 import { DelegationManager } from "./delegation-manager.js";
 import type { AgentProfile } from "./agent-profile.js";
+import type { WorktreeSupervisor } from "../tasks/worktree-supervisor.js";
 
 /**
  * AgentRunner:打破循环依赖的抽象接口。
@@ -86,6 +87,8 @@ export interface SubagentRegistryRequest {
   maxSpawnDepth: number;
   /** 自定义角色名(来自 .claw/agents.yaml)。命中时用该角色的工具集和 prompt。 */
   agentName?: string;
+  /** worker 模式下覆盖工具实际操作目录。 */
+  workDir?: string;
 }
 
 export type SubagentRegistryFactory = (request: SubagentRegistryRequest) => Registry;
@@ -226,7 +229,10 @@ export class DelegateTaskTool implements BaseTool {
     private readonly runner: AgentRunner,
     private readonly registryFactory: SubagentRegistryFactory,
     private readonly manager: DelegationManager = new DelegationManager(),
-    private readonly options: SubagentRunOptions & { profiles?: AgentProfile[] } = {},
+    private readonly options: SubagentRunOptions & {
+      profiles?: AgentProfile[];
+      worktreeSupervisor?: WorktreeSupervisor;
+    } = {},
   ) {
     this.profiles = options.profiles ?? [];
   }
@@ -341,6 +347,93 @@ export class DelegateTaskTool implements BaseTool {
     maxSpawnDepth: number,
     signal?: AbortSignal,
   ): Promise<DelegationBatchResult["results"][number]> {
+    if (task.mode === "worker" && this.options.worktreeSupervisor) {
+      return this.runOneInWorktree(task, taskIndex, depth, maxSpawnDepth, signal);
+    }
+    return this.runOneDirect(task, taskIndex, depth, maxSpawnDepth, undefined, signal);
+  }
+
+  private async runOneInWorktree(
+    task: NormalizedDelegateTask,
+    taskIndex: number,
+    depth: number,
+    maxSpawnDepth: number,
+    signal?: AbortSignal,
+  ): Promise<DelegationBatchResult["results"][number]> {
+    const supervisor = this.options.worktreeSupervisor!;
+    const worktreeTask: NormalizedDelegateTask = {
+      ...task,
+      context: [
+        task.context,
+        "你正在独立 Git worktree 中开发。完成后运行最小相关验证，并将所有修改 git commit 到当前任务分支；不要 push，不要合并目标分支。",
+      ]
+        .filter(Boolean)
+        .join("\n\n"),
+    };
+    let delegatedResult: DelegationBatchResult["results"][number] | undefined;
+    const supervised = supervisor.start(
+      { description: task.goal, branchSlug: task.agentName ?? "worker" },
+      async (context) => {
+        const combinedSignal = signal ? AbortSignal.any([signal, context.signal]) : context.signal;
+        delegatedResult = await this.runOneDirect(
+          worktreeTask,
+          taskIndex,
+          depth,
+          maxSpawnDepth,
+          context.worktreePath,
+          combinedSignal,
+        );
+        if (delegatedResult.status === "error") {
+          throw new Error(delegatedResult.error ?? "worker 子代理执行失败");
+        }
+        context.appendOutput(`${delegatedResult.summary ?? "worker completed"}\n`);
+
+        const messages = context.drainMessages();
+        if (messages.length > 0) {
+          delegatedResult = await this.runOneDirect(
+            {
+              ...worktreeTask,
+              context: [worktreeTask.context, `主代理追加指令:\n${messages.join("\n")}`]
+                .filter(Boolean)
+                .join("\n\n"),
+            },
+            taskIndex,
+            depth,
+            maxSpawnDepth,
+            context.worktreePath,
+            combinedSignal,
+          );
+          if (delegatedResult.status === "error") {
+            throw new Error(delegatedResult.error ?? "worker 子代理追加指令执行失败");
+          }
+          context.appendOutput(`${delegatedResult.summary ?? "follow-up completed"}\n`);
+        }
+        return { summary: delegatedResult.summary };
+      },
+    );
+    const snapshot = await supervisor.wait(supervised.taskId);
+    if (snapshot.status !== "completed" || !delegatedResult) {
+      return {
+        taskIndex,
+        status: "error",
+        error: snapshot.error ?? `worktree worker ended as ${snapshot.status}`,
+        durationMs: snapshot.updatedAt - snapshot.startedAt,
+      };
+    }
+    return {
+      ...delegatedResult,
+      summary: `${delegatedResult.summary ?? ""}\n\n[worktree task: ${snapshot.taskId}; branch: ${snapshot.branch}]`,
+    };
+  }
+
+  private async runOneDirect(
+    task: NormalizedDelegateTask,
+    taskIndex: number,
+    depth: number,
+    maxSpawnDepth: number,
+    workDir?: string,
+    signal?: AbortSignal,
+  ): Promise<DelegationBatchResult["results"][number]> {
     signal?.throwIfAborted();
     const startedAt = Date.now();
     const childDepth = depth + 1;
@@ -357,6 +450,7 @@ export class DelegateTaskTool implements BaseTool {
       depth: childDepth,
       maxSpawnDepth,
       ...(task.agentName ? { agentName: task.agentName } : {}),
+      ...(workDir ? { workDir } : {}),
     });
 
     try {
