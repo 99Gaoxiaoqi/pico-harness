@@ -843,7 +843,24 @@ export class AgentEngine implements AgentRunner {
             actionSpan?.end();
           }
 
-          // 将大模型的行动响应持久化到 Session
+          const toolCalls = responseMsg.toolCalls ?? [];
+          const requiredDelegationIndex = findRequiredDelegationIndex(toolCalls);
+          const requiredDelegation =
+            requiredDelegationIndex !== undefined ? toolCalls[requiredDelegationIndex] : undefined;
+          if (requiredDelegation && responseMsg.content) {
+            responseMsg = {
+              ...responseMsg,
+              content: "",
+              providerData: {
+                ...responseMsg.providerData,
+                picoKind: "required_delegation_dispatch",
+                picoHiddenFromTranscript: true,
+              },
+            };
+          }
+
+          // 将大模型的行动响应持久化到 Session。required 委派轮只保留
+          // tool calls，不让委派前的解释正文再次进入主上下文。
           session.append(responseMsg);
           compactedContext.push(responseMsg);
           this.onTurn?.({ turn: turnCount, message: responseMsg });
@@ -857,7 +874,6 @@ export class AgentEngine implements AgentRunner {
           }
 
           // 3. 退出条件:模型没有请求任何工具调用,说明任务完成,挂起等待下一条指令
-          const toolCalls = responseMsg.toolCalls ?? [];
           if (toolCalls.length === 0) {
             // 3.7: host 可决定续接(返回 {continue:true} 则不退出,append 续接消息继续)
             const decision = await this.shouldContinueAfterStop?.({
@@ -900,9 +916,6 @@ export class AgentEngine implements AgentRunner {
           // Kimi AgentSwarm 式独占语义：required delegate_task 是这一轮唯一
           // 允许真实执行的工具。保留原始 toolCalls 和每个对应 observation，
           // 以维持 provider 要求的 tool-call/result 完整配对。
-          const requiredDelegationIndex = findRequiredDelegationIndex(toolCalls);
-          const requiredDelegation =
-            requiredDelegationIndex !== undefined ? toolCalls[requiredDelegationIndex] : undefined;
           // maxConcurrency 限制并发执行的工具数(对齐 hermes _MAX_TOOL_WORKERS=8),
           // 防止一批大量不冲突只读工具同时打 IO 把系统压垮。
           let turnFileJournal: FileHistoryJournal | undefined;
@@ -1010,6 +1023,19 @@ export class AgentEngine implements AgentRunner {
 
           // 将所有 Observation 持久化到 Session,开启下一轮复盘与推理
           session.append(...observations);
+          if (requiredDelegation) {
+            session.append({
+              role: "user",
+              content:
+                "[DELEGATION JOIN] required 子代理已全部收口（结果可能包含失败）。" +
+                "请吸收上述聚合结果并继续集成、定点验证或统一总结；" +
+                "不要重复子代理已完成范围的大规模探索。",
+              providerData: {
+                picoKind: "delegation_join",
+                picoHiddenFromTranscript: true,
+              },
+            });
+          }
           if (reminderMessages.length > 0) {
             session.append(...reminderMessages);
           }

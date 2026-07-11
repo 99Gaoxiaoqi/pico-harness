@@ -429,7 +429,7 @@ export class TuiReporter implements Reporter {
   }
 
   private suppressCurrentTurnAssistantResponse(): void {
-    const entryId = this.currentTurnAssistantEntryId;
+    const entryId = this.currentTurnAssistantEntryId ?? this.currentStream?.entryId ?? null;
     if (entryId === null) return;
     this.eventStore.append({
       type: "assistant.response.suppressed",
@@ -437,6 +437,7 @@ export class TuiReporter implements Reporter {
       reason: "required-delegation",
     });
     this.currentTurnAssistantEntryId = null;
+    this.currentStream = null;
   }
 
   private appendPhase(mode: UiMode, force = false): void {
@@ -620,9 +621,9 @@ function isRequiredDelegation(toolName: string, rawArgs: string): boolean {
   try {
     parsed = JSON.parse(rawArgs);
   } catch {
-    return false;
+    return true;
   }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return true;
   const input = parsed as Record<string, unknown>;
   if (input["completion_policy"] === "optional" || input["completion_policy"] === "detached") {
     return false;
