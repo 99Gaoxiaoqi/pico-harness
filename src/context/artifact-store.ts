@@ -175,6 +175,19 @@ export class ToolResultArtifactStore {
       }
     }
 
+    // pinned 表示“优先保留错误证据”，不能绕过整个存储硬上限。
+    // 只在清理所有可清理的非 pinned artifact 后仍超额时，才按时间删最旧 pinned。
+    if (totalBytes > this.maxTotalBytes) {
+      for (const artifact of ordered) {
+        if (totalBytes <= this.maxTotalBytes) break;
+        if (!artifact.meta.pinned || deletedKeys.has(artifact.key)) continue;
+        await this.deleteArtifact(artifact.meta.id, artifact.meta.safeSessionId);
+        deletedKeys.add(artifact.key);
+        deleted.push(artifact.meta.id);
+        totalBytes -= artifact.meta.sizeBytes;
+      }
+    }
+
     return {
       deleted,
       retained: ordered

@@ -94,7 +94,8 @@ export function createToolResultObservationProcessor(
 
     if (cleanupAfterWrite) {
       try {
-        await opts.store.cleanup(meta.sessionId ?? sessionId ?? DEFAULT_ARTIFACT_SESSION_ID);
+        // quota 是全局硬上限；若只扫当前 session，多 session 会无界累积。
+        await opts.store.cleanup();
       } catch (err) {
         logger.warn({ err }, "[ToolResult] artifact cleanup failed");
       }
