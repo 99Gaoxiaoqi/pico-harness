@@ -522,18 +522,18 @@ git worktree remove ../pico-1-streaming
 
 ---
 
-## 阶段 12.5：模型级思考能力（进行中）
+## 阶段 12.5：模型级思考能力（已完成）
 
 > **目标**：参考 Z Code 与 OpenCode，把全局固定思考强度改为模型级 reasoning profile；选中模型后自动解析默认档位、可选档位和协议请求映射。
 >
 > **并行边界**：能力 Schema/Resolver 先形成共享接口；Provider 请求映射和 TUI 交互在独立 worktree 并行；主代理只在独立集成 worktree 合并、接线并运行一条跨模块集成主链。
 
-- [ ] 12.5.1 定义 `defaultLevel + levels + providerOptionsByLevel` 的类型安全模型级 Reasoning Capability，并兼容旧 `reasoning: boolean`
-- [ ] 12.5.2 接通 `.pico/config.json` 解析、版本化模型 ID 归一化和 GLM 5.2 / DeepSeek V4 / toggle 模型内置规则
-- [ ] 12.5.3 将 OpenAI、Anthropic、Gemini 请求转换改为应用当前模型 level 的协议补丁，不再向所有模型统一发送 `reasoning_effort`
-- [ ] 12.5.4 将 `/thinking` 的显示、参数补全和校验改为读取当前 route 的真实 levels
-- [ ] 12.5.5 在 `/model` 切换时保留兼容 level；不兼容时自动切换到目标模型默认 level，并持久化有效状态
-- [ ] 12.5.6 在独立集成分支验证“切换模型 → 档位变化 → 请求体变化”主链，完成构建、合并、推送和临时资源清理
+- [x] 12.5.1 定义 `defaultLevel + levels + providerOptionsByLevel` 的类型安全模型级 Reasoning Capability，并兼容旧 `reasoning: boolean`
+- [x] 12.5.2 接通 `.pico/config.json` 解析、版本化模型 ID 归一化和 GLM 5.2 / DeepSeek V4 / toggle 模型内置规则
+- [x] 12.5.3 将 OpenAI、Anthropic、Gemini 请求转换改为应用当前模型 level 的协议补丁，不再向所有模型统一发送 `reasoning_effort`
+- [x] 12.5.4 将 `/thinking` 的显示、参数补全和校验改为读取当前 route 的真实 levels
+- [x] 12.5.5 在 `/model` 切换时保留兼容 level；不兼容时自动切换到目标模型默认 level，并持久化有效状态
+- [x] 12.5.6 在独立集成分支验证“切换模型 → 档位变化 → 请求体变化”主链，完成构建、合并、推送和临时资源清理
 
 ---
 
@@ -555,9 +555,9 @@ git worktree remove ../pico-1-streaming
 | 阶段 10      | 7        | 7      | ✅ TUI 滚动与大型输出收敛完成       |
 | 阶段 11      | 5        | 5      | ✅ TUI 可靠执行闭环完成             |
 | 阶段 12      | 3        | 3      | ✅ 可信 YOLO 与代码智能完成         |
-| 阶段 12.5    | 6        | 0      | ⏳ 模型级思考能力                   |
+| 阶段 12.5    | 6        | 6      | ✅ 模型级思考能力完成               |
 | 阶段 13      | 2        | 0      | ⏳ 隔离式并行与 MCP 生命周期        |
-| **当前总计** | **101**  | **93** | ⏳ 当前：模型级思考能力             |
+| **当前总计** | **101**  | **99** | ⏳ 当前：隔离式并行与 MCP 生命周期  |
 
 ---
 
@@ -582,6 +582,11 @@ git worktree remove ../pico-1-streaming
 ---
 
 ## 📅 变更记录
+
+- 2026-07-11：完成模型级思考能力
+  - `/thinking` 根据当前模型动态展示和校验档位；新会话采用模型默认档位，切模型时保留兼容档位或回落目标默认值。
+  - OpenAI、Anthropic、Gemini 在最终请求体应用模型级协议补丁；GLM 5.2 与 DeepSeek V4 支持带版本后缀的内置规则。
+  - 一条确定性集成主链覆盖模型切换、档位协调和实际 HTTP 请求体映射。
 
 - 2026-07-11：收敛项目配置与工具入口
   - 新增项目 `.pico/config.json`；默认选择火山方舟 Coding Plan，并从账号 `/models` 接口筛出 35 个支持文本输出与 Function Calling 的 Agent 模型，写入上下文、输出、视觉、reasoning、tool-call 和 cache 元数据；DeepSeek provider 保留为备用。
