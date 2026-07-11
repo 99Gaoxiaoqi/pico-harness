@@ -41,6 +41,16 @@ const EXPLICIT_BACKGROUND_PATTERNS = [
   ),
 ] as const;
 
+const NEGATED_EXECUTION_PATTERNS = [
+  /(?:不要|别|不必|无需|禁止).{0,20}(?:启动|调用|创建|派出|拉起|分派|委派|使用|用|让)/iu,
+  /\b(?:do not|don't|never|must not)\b.{0,32}\b(?:spawn|launch|start|create|dispatch|run|call|use|have|ask)\b/iu,
+] as const;
+
+const CONDITIONAL_EXECUTION_PATTERNS = [
+  /(?:如果|若|假如|必要时|视情况|可以|可考虑|有必要的话).{0,32}(?:启动|调用|创建|派出|拉起|分派|委派|使用|用|让)/iu,
+  /\b(?:if|when necessary|if needed|optionally|may|might|could|can)\b.{0,40}\b(?:spawn|launch|start|create|dispatch|run|call|use|have|ask)\b/iu,
+] as const;
+
 const STRONG_EXECUTION_PATTERNS = [
   new RegExp(
     String.raw`(?:启动|调用|创建|派出|拉起|召唤|分派|委派|安排).{0,18}${CHINESE_AGENT}`,
@@ -116,18 +126,21 @@ export function detectExplicitDelegationIntent(
   latestUserInput: string,
 ): ExplicitDelegationIntent | null {
   const normalized = normalizeInput(latestUserInput);
-  if (
-    normalized.length === 0 ||
-    isDiscussionOnly(normalized) ||
-    EXPLICIT_BACKGROUND_PATTERNS.some((pattern) => pattern.test(normalized))
-  ) {
-    return null;
-  }
-  if (!STRONG_EXECUTION_PATTERNS.some((pattern) => pattern.test(normalized))) return null;
+  if (normalized.length === 0) return null;
+
+  const actionableClauses = splitClauses(normalized).filter(
+    (clause) =>
+      STRONG_EXECUTION_PATTERNS.some((pattern) => pattern.test(clause)) &&
+      !isDiscussionOnly(clause) &&
+      !EXPLICIT_BACKGROUND_PATTERNS.some((pattern) => pattern.test(clause)) &&
+      !NEGATED_EXECUTION_PATTERNS.some((pattern) => pattern.test(clause)) &&
+      !CONDITIONAL_EXECUTION_PATTERNS.some((pattern) => pattern.test(clause)),
+  );
+  if (actionableClauses.length === 0) return null;
 
   return {
     kind: "explicit-delegation",
-    requestedCount: detectRequestedCount(normalized),
+    requestedCount: detectRequestedCount(actionableClauses.join(" ")),
   };
 }
 
@@ -165,6 +178,13 @@ export function buildRequiredFirstDelegationConstraint(): string {
 
 function normalizeInput(input: string): string {
   return input.normalize("NFKC").replace(/\s+/gu, " ").trim();
+}
+
+function splitClauses(input: string): string[] {
+  return input
+    .split(/[，。！？；,.!?;]|(?:然后|随后|接着)|\bthen\b/iu)
+    .map((clause) => clause.trim())
+    .filter((clause) => clause.length > 0);
 }
 
 function isDiscussionOnly(input: string): boolean {

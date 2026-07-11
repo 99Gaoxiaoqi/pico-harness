@@ -30,7 +30,10 @@ import { PromptComposer } from "../context/composer.js";
 import { SkillLoader } from "../context/skill.js";
 import { RecoveryManager } from "../context/recovery.js";
 import { TodoStore } from "../context/todo-store.js";
-import { createFirstTurnDelegationPolicy } from "../input/delegation-intent-policy.js";
+import {
+  createFirstTurnDelegationPolicy,
+  type RequestedDelegationCount,
+} from "../input/delegation-intent-policy.js";
 import { ToolDisclosure } from "../tools/tool-disclosure.js";
 import { SilentReporter, type Reporter } from "./reporter.js";
 import { SteerQueue } from "./steer-queue.js";
@@ -183,6 +186,50 @@ function latestVisibleUserInput(messages: readonly Message[]): string {
         message.providerData?.["picoHiddenFromTranscript"] !== true,
     )?.content ?? ""
   );
+}
+
+function requiredDelegationTaskCount(call: ToolCall): number {
+  try {
+    const input = JSON.parse(call.arguments) as DelegateTaskModeInput;
+    if (Array.isArray(input.tasks) && input.tasks.length > 0) {
+      return input.tasks.filter(
+        (task) =>
+          typeof task === "object" &&
+          task !== null &&
+          typeof task.goal === "string" &&
+          task.goal.trim().length > 0,
+      ).length;
+    }
+    return typeof input.goal === "string" && input.goal.trim().length > 0 ? 1 : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function satisfiesRequestedDelegationCount(
+  call: ToolCall,
+  requestedCount: RequestedDelegationCount,
+): boolean {
+  const actual = requiredDelegationTaskCount(call);
+  return requestedCount === "multiple" ? actual >= 2 : actual >= 1;
+}
+
+function completedDelegationResultCount(message: Message): number {
+  try {
+    const parsed = JSON.parse(message.content) as {
+      results?: unknown;
+      omittedResults?: unknown;
+      error?: unknown;
+    };
+    if (typeof parsed.error === "string" || !Array.isArray(parsed.results)) return 0;
+    const omitted =
+      typeof parsed.omittedResults === "number" && Number.isSafeInteger(parsed.omittedResults)
+        ? Math.max(0, parsed.omittedResults)
+        : 0;
+    return parsed.results.length + omitted;
+  } catch {
+    return 0;
+  }
 }
 
 function buildExclusiveDelegationRejection(
@@ -1002,7 +1049,14 @@ export class AgentEngine implements AgentRunner {
           const requiredDelegationIndex = findRequiredDelegationIndex(toolCalls);
           const requiredDelegation =
             requiredDelegationIndex !== undefined ? toolCalls[requiredDelegationIndex] : undefined;
-          if (requiredFirstDelegationActive && !requiredDelegation) {
+          const requestedDelegationCount =
+            firstTurnDelegationPolicy.kind === "required-first-delegation"
+              ? firstTurnDelegationPolicy.intent.requestedCount
+              : "unspecified";
+          const acceptedRequiredFirstDelegation =
+            requiredDelegation !== undefined &&
+            satisfiesRequestedDelegationCount(requiredDelegation, requestedDelegationCount);
+          if (requiredFirstDelegationActive && !acceptedRequiredFirstDelegation) {
             reporter.onAssistantResponseSuppressed?.("delegation-first-retry");
             const rejectedResponse: Message = {
               ...responseMsg,
@@ -1029,10 +1083,6 @@ export class AgentEngine implements AgentRunner {
               break;
             }
             continue;
-          }
-          if (requiredDelegation && requiredFirstDelegationActive) {
-            requiredFirstDelegationPending = false;
-            requiredFirstDelegationAttempts = 0;
           }
           if (requiredDelegation && responseMsg.content) {
             responseMsg = {
@@ -1210,6 +1260,34 @@ export class AgentEngine implements AgentRunner {
 
           // 将所有 Observation 持久化到 Session,开启下一轮复盘与推理
           session.append(...observations);
+          if (
+            requiredFirstDelegationActive &&
+            requiredDelegationIndex !== undefined &&
+            requiredDelegation
+          ) {
+            const expectedResults = requiredDelegationTaskCount(requiredDelegation);
+            const deliveredResults = completedDelegationResultCount(
+              observations[requiredDelegationIndex]!,
+            );
+            if (deliveredResults < expectedResults) {
+              requiredFirstDelegationAttempts++;
+              exploreSynthesisOnly = false;
+              exploreSynthesisToolRetries = 0;
+              if (requiredFirstDelegationAttempts >= MAX_REQUIRED_FIRST_DELEGATION_ATTEMPTS) {
+                const failedResponse: Message = {
+                  role: "assistant",
+                  content: REQUIRED_FIRST_DELEGATION_FAILED_MESSAGE,
+                };
+                session.append(failedResponse);
+                reporter.onMessage(failedResponse.content);
+                reporter.onFinish();
+                break;
+              }
+              continue;
+            }
+            requiredFirstDelegationPending = false;
+            requiredFirstDelegationAttempts = 0;
+          }
           if (requiredDelegation) {
             exploreSynthesisOnly = isExploreOnlyRequiredDelegation(requiredDelegation);
             exploreSynthesisToolRetries = 0;
