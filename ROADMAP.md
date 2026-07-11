@@ -594,6 +594,7 @@ git worktree remove ../pico-1-streaming
 
 ### 工程与运行时后续收口（未排期）
 
+- [x] 2026-07-12：限制子代理结果体积并修复 Agent 面板流式刷屏：单个 summary 上限 5,000 字符，required 批量委派最终 JSON 上限 10,000 字符，`delegate_task` 专用外部化阈值 10,000 字符；Codex 嵌入终端 CPR 失败时使用保守网格并继续响应后续 resize，覆盖 Main + 4 子代理 + 流式输出零换行、零滚屏主链。
 - [x] 2026-07-12：重构子代理完成语义：`delegate_task` 默认 `required` 并在子代理收口前阻塞返回；显式 `optional` 完成后把隐藏结果持久化到主会话，供下一个模型边界自动吸收，`detached` 只更新活动面板；旧 `background=true` 仅保留输入兼容，不再向模型暴露，TUI 展示 completion policy 且不暴露内部 ID。
 - [ ] 2026-07-11：删除只被测试引用的影子权限链 `approval/policy.ts` / `ApprovalPolicy`，把文档和验证统一到生产 `buildApprovalMiddleware`。
 - [ ] 2026-07-11：收敛两套 compaction/aux provider 实现，保留生产 `compactToBudget + FullCompactor` 单链路。
@@ -623,6 +624,12 @@ git worktree remove ../pico-1-streaming
 ---
 
 ## 📅 变更记录
+
+- 2026-07-12：收紧子代理输出预算并修复终端重复刷帧
+  - `AgentEngine.runSub` 将单个最终 summary 限制为 5,000 字符；委派工具对外部或 mock runner 同样执行防御性上限。
+  - required 批量委派按最终 JSON 转义后的实际长度分配文本预算，保证输出不超过 10,000 字符且保留 status、error、artifacts；`delegate_task` 超过 10,000 字符即进入 artifact 外部化链路，普通工具与 Bash 阈值不变。
+  - Codex 嵌入终端在启动 CPR 失败时不再直接相信过期 PTY 网格，临时使用不超过 PTY 的保守 80×16 网格，后续 resize/CPR 成功后恢复真实尺寸。
+  - 新增 production frame 集成场景，覆盖 CPR 失败、尺寸漂移、Main + 4 子代理、长任务名与连续流式更新，断言无物理换行、无 scrollback 污染且内容只显示一次。
 
 - 2026-07-12：收紧子代理完成与最终回答边界
   - `delegate_task` 新增 `required / optional / detached` 三种 completion policy，默认 `required` 以前台工具调用形成硬等待，避免主 Agent 在必需结果返回前结束。
