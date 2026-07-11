@@ -10,6 +10,7 @@
 // 防污染机制(爆炸半径限制):子智能体仅挂载只读工具(read_file/bash),
 // 绝对不给 edit_file/write_file,防止底层"莽夫"瞎改代码导致物理不可逆破坏。
 
+import { randomUUID } from "node:crypto";
 import type { BaseTool, ToolExecutionContext } from "./registry.js";
 import { NO_FILE_SIDE_EFFECTS } from "./registry.js";
 import type { ToolDefinition } from "../schema/message.js";
@@ -20,6 +21,11 @@ import type { DelegationBatchResult } from "./delegation-manager.js";
 import { DelegationManager } from "./delegation-manager.js";
 import type { AgentProfile } from "./agent-profile.js";
 import type { WorktreeSupervisor } from "../tasks/worktree-supervisor.js";
+import {
+  compactActivityText,
+  ScopedSubagentActivityReporter,
+  type SubagentActivityScope,
+} from "./subagent-activity-reporter.js";
 
 /**
  * AgentRunner:打破循环依赖的抽象接口。
@@ -232,6 +238,7 @@ export class DelegateTaskTool implements BaseTool {
     private readonly options: SubagentRunOptions & {
       profiles?: AgentProfile[];
       worktreeSupervisor?: WorktreeSupervisor;
+      reporter?: Reporter;
     } = {},
   ) {
     this.profiles = options.profiles ?? [];
@@ -314,17 +321,29 @@ export class DelegateTaskTool implements BaseTool {
       return JSON.stringify({ error: "delegate_task 需要 goal 或 tasks[].goal。" });
     }
 
+    const activities = tasks.map((task) => this.createActivity(task));
+    for (const activity of activities) {
+      this.emitActivity(activity, "queued", {
+        currentAction: `等待执行：${compactActivityText(activity.task, 48)}`,
+      });
+    }
+
     if (input.background === true) {
       return JSON.stringify(
-        this.manager.dispatch((signal) => this.runBatch(tasks, depth, maxSpawnDepth, signal)),
+        this.manager.dispatch((signal) =>
+          this.runBatch(tasks, activities, depth, maxSpawnDepth, signal),
+        ),
       );
     }
 
-    return JSON.stringify(await this.runBatch(tasks, depth, maxSpawnDepth, context?.signal));
+    return JSON.stringify(
+      await this.runBatch(tasks, activities, depth, maxSpawnDepth, context?.signal),
+    );
   }
 
   private async runBatch(
     tasks: NormalizedDelegateTask[],
+    activities: SubagentActivityScope[],
     depth: number,
     maxSpawnDepth: number,
     signal?: AbortSignal,
@@ -332,7 +351,7 @@ export class DelegateTaskTool implements BaseTool {
     signal?.throwIfAborted();
     const startedAt = Date.now();
     const results = await mapLimit(tasks, this.manager.maxConcurrentChildren, (task, index) =>
-      this.runOne(task, index, depth, maxSpawnDepth, signal),
+      this.runOne(task, activities[index]!, index, depth, maxSpawnDepth, signal),
     );
     return {
       results,
@@ -342,28 +361,68 @@ export class DelegateTaskTool implements BaseTool {
 
   private async runOne(
     task: NormalizedDelegateTask,
+    activity: SubagentActivityScope,
     taskIndex: number,
     depth: number,
     maxSpawnDepth: number,
     signal?: AbortSignal,
   ): Promise<DelegationBatchResult["results"][number]> {
-    if (task.mode === "worker") {
-      if (this.options.worktreeSupervisor) {
-        return this.runOneInWorktree(task, taskIndex, depth, maxSpawnDepth, signal);
+    this.emitActivity(activity, "running", {
+      currentAction: `开始执行：${compactActivityText(task.goal, 48)}`,
+    });
+    let result: DelegationBatchResult["results"][number];
+    try {
+      if (task.mode === "worker") {
+        if (this.options.worktreeSupervisor) {
+          result = await this.runOneInWorktree(
+            task,
+            activity,
+            taskIndex,
+            depth,
+            maxSpawnDepth,
+            signal,
+          );
+        } else {
+          result = {
+            taskIndex,
+            status: "error",
+            error:
+              "worker 需要 Git worktree 隔离，当前仓库监督器不可用。请先初始化 Git 并建立基线提交，然后重启 Pico；已拒绝降级为直接写主工作区。",
+            durationMs: 0,
+          };
+        }
+      } else {
+        result = await this.runOneDirect(
+          task,
+          activity,
+          taskIndex,
+          depth,
+          maxSpawnDepth,
+          undefined,
+          signal,
+        );
       }
-      return {
-        taskIndex,
-        status: "error",
-        error:
-          "worker 需要 Git worktree 隔离，当前仓库监督器不可用。请先初始化 Git 并建立基线提交，然后重启 Pico；已拒绝降级为直接写主工作区。",
-        durationMs: 0,
-      };
+    } catch (error) {
+      this.emitActivity(activity, "failed", {
+        summary: compactActivityText(error instanceof Error ? error.message : String(error), 160),
+      });
+      throw error;
     }
-    return this.runOneDirect(task, taskIndex, depth, maxSpawnDepth, undefined, signal);
+    if (result.status === "completed") {
+      this.emitActivity(activity, "completed", {
+        summary: compactActivityText(result.summary ?? "子代理已完成", 160),
+      });
+    } else {
+      this.emitActivity(activity, "failed", {
+        summary: compactActivityText(result.error ?? "子代理执行失败", 160),
+      });
+    }
+    return result;
   }
 
   private async runOneInWorktree(
     task: NormalizedDelegateTask,
+    activity: SubagentActivityScope,
     taskIndex: number,
     depth: number,
     maxSpawnDepth: number,
@@ -386,6 +445,7 @@ export class DelegateTaskTool implements BaseTool {
         const combinedSignal = signal ? AbortSignal.any([signal, context.signal]) : context.signal;
         delegatedResult = await this.runOneDirect(
           worktreeTask,
+          activity,
           taskIndex,
           depth,
           maxSpawnDepth,
@@ -406,6 +466,7 @@ export class DelegateTaskTool implements BaseTool {
                 .filter(Boolean)
                 .join("\n\n"),
             },
+            activity,
             taskIndex,
             depth,
             maxSpawnDepth,
@@ -437,6 +498,7 @@ export class DelegateTaskTool implements BaseTool {
 
   private async runOneDirect(
     task: NormalizedDelegateTask,
+    activity: SubagentActivityScope,
     taskIndex: number,
     depth: number,
     maxSpawnDepth: number,
@@ -476,7 +538,10 @@ export class DelegateTaskTool implements BaseTool {
             systemPromptOverride: this.options.systemPromptOverride,
           });
 
-      const subResult = await this.runner.runSub(prompt, registry, undefined, {
+      const childReporter = this.options.reporter
+        ? new ScopedSubagentActivityReporter(this.options.reporter, activity)
+        : undefined;
+      const subResult = await this.runner.runSub(prompt, registry, childReporter, {
         depth: childDepth,
         maxSpawnDepth,
         role: task.role,
@@ -501,6 +566,23 @@ export class DelegateTaskTool implements BaseTool {
         durationMs: Date.now() - startedAt,
       };
     }
+  }
+
+  private createActivity(task: NormalizedDelegateTask): SubagentActivityScope {
+    return {
+      activityId: randomUUID(),
+      task: compactActivityText(task.goal, 120),
+      mode: task.mode,
+      ...(task.agentName ? { agentName: task.agentName } : {}),
+    };
+  }
+
+  private emitActivity(
+    activity: SubagentActivityScope,
+    status: "queued" | "running" | "completed" | "failed",
+    update: { currentAction?: string; summary?: string } = {},
+  ): void {
+    this.options.reporter?.onSubagentActivity?.({ ...activity, status, ...update });
   }
 }
 

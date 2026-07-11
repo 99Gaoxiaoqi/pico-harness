@@ -325,6 +325,7 @@ export async function runAgentFromCli(
   // 辅助(廉价)模型:用于 FullCompactor 生成摘要,省主模型成本。
   // 配齐 AUX_LLM_BASE_URL / AUX_LLM_API_KEY / AUX_LLM_MODEL 才启用;缺则用主 provider。
   const auxProvider = loadAuxProvider(dependencies.env ?? process.env);
+  const reporter = dependencies.reporter ?? new TerminalReporter();
   const engine = new AgentEngine({
     provider: trackedProvider,
     registry,
@@ -346,7 +347,7 @@ export async function runAgentFromCli(
       ...(auxProvider ? { auxProvider } : {}),
     }),
     observationProcessor,
-    reporter: dependencies.reporter ?? new TerminalReporter(),
+    reporter,
     tracer: traceEnabled ? new Tracer() : undefined,
     steerQueue,
     ...(rebuildProvider ? { rebuildProvider } : {}),
@@ -373,6 +374,7 @@ export async function runAgentFromCli(
     // 必须始终使用 worktree + OS 沙箱，不得因 default/auto 模式退化为无沙箱 Bash。
     { config: picoConfig.sandbox },
     runtimeState.taskHostRuntime?.supervisor,
+    reporter,
   );
   dependencies.toolStatusSink?.(toolStatusFromRegistry(registry));
 
@@ -607,6 +609,7 @@ function registerDelegationTools(
   workspaceRoots: WorkspaceRoots,
   yoloSandbox: { config?: Partial<YoloSandboxConfig> },
   worktreeSupervisor?: WorktreeSupervisor,
+  reporter?: Reporter,
 ): void {
   const registryFactory = createSubagentRegistryFactory({
     workDir,
@@ -621,6 +624,7 @@ function registerDelegationTools(
     new DelegateTaskTool(engine, registryFactory, manager, {
       ...(profiles.length > 0 ? { profiles } : {}),
       ...(worktreeSupervisor ? { worktreeSupervisor } : {}),
+      ...(reporter ? { reporter } : {}),
     }),
   );
   registry.register(new DelegateStatusTool(manager));
