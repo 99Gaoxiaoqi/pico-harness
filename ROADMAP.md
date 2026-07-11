@@ -594,6 +594,7 @@ git worktree remove ../pico-1-streaming
 
 ### 工程与运行时后续收口（未排期）
 
+- [x] 2026-07-12：修复 required 屏障建立前主 Agent 先自行读项目：从最新用户输入识别中英文明确子代理执行意图，首轮只向 Provider 暴露 `delegate_task` 并强制 required 独占；普通工具幻觉调用仅生成协议拒绝、不进入 Registry；explore-only join 后下一轮 `tools=[]` 且只允许纯文本统一总结，worker/mixed 保留必要集成工具。
 - [x] 2026-07-12：将 required `delegate_task` 升级为 AgentSwarm 式独占控制流边界：同轮只真实执行首个 required 委派，其他工具仅生成协议 observation；子代理全部收口前不再请求主 Provider，委派轮正文不落主 Session/TUI，join 后只允许必要集成、定点验证和统一总结；optional/detached 保持非阻塞。
 - [x] 2026-07-12：限制子代理结果体积并修复 Agent 面板流式刷屏：单个 summary 上限 5,000 字符，required 批量委派最终 JSON 上限 10,000 字符，`delegate_task` 专用外部化阈值 10,000 字符；Codex 嵌入终端 CPR 失败时使用保守网格并继续响应后续 resize，覆盖 Main + 4 子代理 + 流式输出零换行、零滚屏主链。
 - [x] 2026-07-12：重构子代理完成语义：`delegate_task` 默认 `required` 并在子代理收口前阻塞返回；显式 `optional` 完成后把隐藏结果持久化到主会话，供下一个模型边界自动吸收，`detached` 只更新活动面板；旧 `background=true` 仅保留输入兼容，不再向模型暴露，TUI 展示 completion policy 且不暴露内部 ID。
@@ -625,6 +626,12 @@ git worktree remove ../pico-1-streaming
 ---
 
 ## 📅 变更记录
+
+- 2026-07-12：补齐明确子代理请求的 delegation-first / synthesis-only 门禁
+  - 真实 Session 回放确认旧流程先运行两个 `bash ls`，第二轮才委派；根因是 required 屏障只在模型已选择 `delegate_task` 后生效。
+  - 新增保守的明确委派意图策略，讨论“子代理是什么/是否应该使用”不触发；执行型请求首轮仅暴露 `delegate_task`，子代理自行发现项目结构。
+  - explore-only required 批次收口后主 Agent 以 `tools=[]` 纯文本统一总结；幻觉工具调用不执行、有限重试并撤销 TUI 临时正文，避免死循环和视觉残留。
+  - worker/mixed required 仍保留必要的合并、测试和定点验证工具；optional/detached 语义不变。
 
 - 2026-07-12：required 委派改为 AgentSwarm 式独占/join 主流程
   - 引擎识别显式或默认 required `delegate_task`，同一模型响应内的普通工具不再执行、不写 Reporter 也不建立文件 journal，但保留完整 tool-call/result 协议配对。

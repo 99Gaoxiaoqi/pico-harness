@@ -10,6 +10,7 @@ describe("explicit delegation intent input boundary", () => {
     ["启动多个子代理阅读项目", "multiple"],
     ["调用两个子 Agent 并行分析项目", "multiple"],
     ["请让一个子代理检查鉴权实现", "single"],
+    ["用多个子代理阅读项目并总结", "multiple"],
     ["Launch several subagents to inspect the project", "multiple"],
     ["Delegate this review to sub-agents", "unspecified"],
   ] as const)("把真实 prompt 输入 %s 转成 required 首动作策略", async (raw, count) => {
@@ -38,6 +39,8 @@ describe("explicit delegation intent input boundary", () => {
     "子代理是什么？请解释它的工作原理",
     "是否应该使用子代理？",
     "Claude Code 的子代理是怎么设计的？",
+    "为什么主 Agent 启动子代理后还会阅读项目？",
+    "使用子代理有什么好处？",
     "How do subagents work?",
     "Should we use subagents for this project?",
     "请你自己阅读项目并说明问题",

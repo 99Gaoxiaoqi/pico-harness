@@ -10,6 +10,10 @@ import pc from "picocolors";
 const diffColors = pc.createColors(true);
 
 export type SubagentActivityStatus = "queued" | "running" | "completed" | "failed";
+export type AssistantResponseSuppressionReason =
+  | "required-delegation"
+  | "delegation-first-retry"
+  | "explore-synthesis-retry";
 
 /** 宿主可见的子代理活动快照；activityId 只用于更新同一张卡片。 */
 export interface SubagentActivityEvent {
@@ -77,6 +81,8 @@ export interface Reporter {
   onFinish(): void;
   /** 流式输出:模型每生成一段文本就调用(仅 generateStream 时触发) */
   onTextDelta?(delta: string): void;
+  /** 控制流否决本轮模型正文时，撤销宿主已投影的临时流。 */
+  onAssistantResponseSuppressed?(reason: AssistantResponseSuppressionReason): void;
 }
 
 /** 默认终端 Reporter:把所有事件打印到控制台 */

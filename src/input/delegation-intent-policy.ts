@@ -6,11 +6,11 @@ const ENGLISH_AGENT = String.raw`(?:sub[\s-]?agents?|agents?)`;
 
 const CHINESE_DISCUSSION_PATTERNS = [
   new RegExp(
-    String.raw`(?:什么是|解释|介绍|讲讲|说说|原理|怎么设计|如何设计|怎么工作|如何工作|区别|对比).{0,24}${CHINESE_AGENT}`,
+    String.raw`(?:什么是|解释|介绍|讲讲|说说|原理|为什么|为何|怎么设计|如何设计|怎么工作|如何工作|区别|对比).{0,32}${CHINESE_AGENT}`,
     "iu",
   ),
   new RegExp(
-    String.raw`${CHINESE_AGENT}.{0,24}(?:是什么|的原理|怎么设计|如何设计|怎么工作|如何工作|有什么区别|的优缺点)`,
+    String.raw`${CHINESE_AGENT}.{0,32}(?:是什么|的原理|为什么|为何|怎么设计|如何设计|怎么工作|如何工作|有什么区别|有什么好处|适合什么|的优缺点)`,
     "iu",
   ),
   new RegExp(
@@ -41,6 +41,10 @@ const STRONG_EXECUTION_PATTERNS = [
   ),
   new RegExp(
     String.raw`让.{0,12}${CHINESE_AGENT}.{0,12}(?:处理|检查|阅读|分析|实现|修复|审查|调研|并行)`,
+    "iu",
+  ),
+  new RegExp(
+    String.raw`(?:使用|用).{0,12}${CHINESE_AGENT}.{0,16}(?:处理|检查|阅读|分析|实现|修复|审查|调研|开发|并行)`,
     "iu",
   ),
   new RegExp(
