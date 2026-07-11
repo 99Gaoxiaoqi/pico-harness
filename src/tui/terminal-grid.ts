@@ -88,19 +88,24 @@ export async function probeTerminalGrid(
   });
 }
 
-/** Use the smaller of the frontend probe and live PTY dimensions. */
+/**
+ * Start from the frontend grid as one coherent snapshot. The PTY can lag behind
+ * on both axes (for example frontend 87x40 while the PTY still says 166x17), so
+ * taking a per-axis minimum would invent a grid that exists in neither place.
+ * Width remains conservatively capped by the PTY to protect Ink from wrapping
+ * after a shrink; height stays authoritative to the frontend CPR snapshot.
+ */
 export function capTerminalGrid(
   stdout: NodeJS.WriteStream,
   frontendGrid: TerminalGrid,
 ): NodeJS.WriteStream {
-  const cap = {
+  const frontend = {
     columns: normalizeDimension(frontendGrid.columns, 80),
     rows: normalizeDimension(frontendGrid.rows, 24),
   };
-
   const effectiveGrid = (): TerminalGrid => ({
-    columns: Math.min(cap.columns, normalizeDimension(stdout.columns, cap.columns)),
-    rows: Math.min(cap.rows, normalizeDimension(stdout.rows, cap.rows)),
+    columns: Math.min(frontend.columns, normalizeDimension(stdout.columns, frontend.columns)),
+    rows: frontend.rows,
   });
 
   return new Proxy(stdout, {

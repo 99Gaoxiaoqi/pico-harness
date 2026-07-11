@@ -3,6 +3,7 @@ import { useStdout } from "ink";
 
 export const ENABLE_MOUSE_TRACKING = "\u001b[?1000h\u001b[?1006h";
 export const DISABLE_MOUSE_TRACKING = "\u001b[?1006l\u001b[?1000l";
+const MOUSE_MODE_REFRESH_MS = 1_000;
 
 export type SgrMouseInput =
   | { kind: "wheel"; direction: "up" | "down"; column: number; row: number }
@@ -50,7 +51,7 @@ export function useTerminalMouseMode(): TerminalMouseMode {
   const enabled = useRef(false);
 
   const enable = useCallback(() => {
-    if (!mounted.current || enabled.current || !stdout.isTTY) return;
+    if (!mounted.current || !stdout.isTTY) return;
     stdout.write(ENABLE_MOUSE_TRACKING);
     enabled.current = true;
   }, [stdout]);
@@ -64,7 +65,12 @@ export function useTerminalMouseMode(): TerminalMouseMode {
   useEffect(() => {
     mounted.current = true;
     enable();
+    stdout.on("resize", enable);
+    const refreshTimer = setInterval(enable, MOUSE_MODE_REFRESH_MS);
+    refreshTimer.unref();
     return () => {
+      clearInterval(refreshTimer);
+      stdout.off("resize", enable);
       disable();
       mounted.current = false;
     };
