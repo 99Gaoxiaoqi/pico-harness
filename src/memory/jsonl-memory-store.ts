@@ -17,6 +17,7 @@ export interface JsonlMemoryStoreOptions {
   recommendation?: string;
   nodeVersion?: string;
   nodeModuleAbi?: string;
+  persistentSource?: "session_jsonl" | "none";
 }
 
 interface IndexedMessage {
@@ -58,12 +59,14 @@ export class JsonlMemoryStore implements ConversationSearchStore {
     this.status = {
       backend: "jsonl_memory",
       state: "degraded",
-      persistentSource: "session_jsonl",
+      persistentSource: options.persistentSource ?? "session_jsonl",
       nodeVersion: options.nodeVersion ?? process.version,
       nodeModuleAbi: options.nodeModuleAbi ?? process.versions.modules,
       reason:
         options.reason ??
-        "SQLite FTS5 unavailable; the search index is rebuilt from Session JSONL and is not stored separately.",
+        (options.persistentSource === "none"
+          ? "SQLite FTS5 unavailable and Session persistence is disabled; the search index exists only in this process."
+          : "SQLite FTS5 unavailable; the search index is rebuilt from Session JSONL and is not stored separately."),
       ...(options.recommendation ? { recommendation: options.recommendation } : {}),
     };
   }

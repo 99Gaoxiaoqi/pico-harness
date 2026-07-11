@@ -8,7 +8,7 @@ export interface MemoryBackendStatus {
   backend: MemoryBackendKind;
   state: MemoryBackendState;
   /** Durable source from which the searchable index can be rebuilt. */
-  persistentSource: "sqlite" | "session_jsonl";
+  persistentSource: "sqlite" | "session_jsonl" | "none";
   nodeVersion: string;
   nodeModuleAbi?: string;
   reason?: string;

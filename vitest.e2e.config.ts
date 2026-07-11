@@ -8,6 +8,7 @@ export default defineConfig({
       "tests/e2e/file-history-e2e.test.ts",
       "tests/e2e/local-openai-e2e.test.ts",
       "tests/e2e/model-routing-e2e.test.ts",
+      "tests/e2e/memory-resilience-e2e.test.ts",
       "tests/e2e/stage12-model-capabilities-e2e.test.ts",
       "tests/e2e/stage12-code-intelligence-e2e.test.ts",
       "tests/e2e/scroll-output-e2e.test.tsx",
