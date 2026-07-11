@@ -217,6 +217,11 @@ export type TuiEvent =
       readonly reason: "new-request" | "clear" | "truncate";
     })
   | (TuiEventBase & {
+      readonly type: "assistant.response.suppressed";
+      readonly entryId: string;
+      readonly reason: "required-delegation";
+    })
+  | (TuiEventBase & {
       readonly type: "tool.started";
       readonly entryId: string;
       /** EventStore 内部 ID，不得直接使用 provider call ID。 */
@@ -472,6 +477,7 @@ export class TuiEventStore {
       case "assistant.stream.delta":
       case "assistant.stream.completed":
       case "assistant.stream.interrupted":
+      case "assistant.response.suppressed":
       case "tool.approval.requested":
       case "tool.output":
       case "tool.output.truncated":
@@ -510,6 +516,7 @@ export class TuiEventStore {
       case "assistant.stream.delta":
       case "assistant.stream.completed":
       case "assistant.stream.interrupted":
+      case "assistant.response.suppressed":
       case "tool.approval.requested":
       case "tool.output":
       case "tool.output.truncated":
@@ -625,6 +632,17 @@ export function reduceTuiEvent(state: TuiProjection, event: TuiEvent): TuiProjec
         ...streams,
         [event.streamId]: Object.freeze({ ...stream, status: "interrupted" as const }),
       };
+      break;
+    }
+
+    case "assistant.response.suppressed": {
+      const target = entries.find((entry) => entry.id === event.entryId);
+      if (!target) throw new Error(`Unknown TUI assistant entry ID: ${event.entryId}`);
+      if (target.entry.kind !== "assistant") {
+        throw new Error(`TUI entry ${event.entryId} is not an assistant response`);
+      }
+      entries = entries.filter((entry) => entry.id !== event.entryId);
+      ({ streams, toolCalls } = retainEntryIndexes(entries, streams, toolCalls));
       break;
     }
 
