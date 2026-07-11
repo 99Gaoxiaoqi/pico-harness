@@ -29,6 +29,11 @@ import {
 import { redactSensitiveText } from "./redact.js";
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+const MAX_REDIRECTS = 3;
+const MAX_HTTP_RESPONSE_BYTES = 8 * 1024 * 1024;
+const MAX_SSE_EVENT_BYTES = 1024 * 1024;
+const MAX_SSE_BUFFER_BYTES = 1024 * 1024;
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
 interface PendingRequest {
   resolve: (value: unknown) => void;
@@ -278,7 +283,7 @@ export class HttpMcpClient implements McpClient {
 
     try {
       this.activeControllers.add(controller);
-      const res = await fetch(url, {
+      const res = await this.fetchSameOrigin(url, {
         method: "POST",
         headers,
         body: JSON.stringify(msg),
@@ -298,12 +303,24 @@ export class HttpMcpClient implements McpClient {
 
       // JSON 响应:直接解析
       if (contentType.includes("application/json")) {
-        const body = (await res.json()) as JsonRpcResponse;
-        return body;
+        const text = await readLimitedResponseText(
+          res,
+          MAX_HTTP_RESPONSE_BYTES,
+          `MCP server "${this.config.name}" JSON 响应`,
+        );
+        try {
+          return JSON.parse(text) as JsonRpcResponse;
+        } catch {
+          throw new Error(`MCP server "${this.config.name}" 返回无法解析的 JSON 响应`);
+        }
       }
 
       // 兜底:当纯文本解析
-      const text = await res.text();
+      const text = await readLimitedResponseText(
+        res,
+        MAX_HTTP_RESPONSE_BYTES,
+        `MCP server "${this.config.name}" 文本响应`,
+      );
       try {
         return JSON.parse(text) as JsonRpcResponse;
       } catch {
@@ -335,22 +352,31 @@ export class HttpMcpClient implements McpClient {
     const reader = body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
+    let totalBytes = 0;
 
     try {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
+        totalBytes += value.byteLength;
+        if (totalBytes > MAX_HTTP_RESPONSE_BYTES) {
+          throw new Error(
+            `MCP server "${this.config.name}" HTTP SSE 响应超过 ${MAX_HTTP_RESPONSE_BYTES} 字节上限`,
+          );
+        }
         buffer += decoder.decode(value, { stream: true });
         let sep: number;
         while ((sep = findSseSeparator(buffer)) !== -1) {
           const separatorLength = sseSeparatorLength(buffer, sep);
           const eventBlock = buffer.slice(0, sep);
           buffer = buffer.slice(sep + separatorLength);
+          assertByteLimit(eventBlock, MAX_SSE_EVENT_BYTES, "HTTP SSE 事件");
           const parsed = this.parseSseEvent(eventBlock);
           if (parsed !== null && parsed.id === wantId) {
             return parsed;
           }
         }
+        assertByteLimit(buffer, MAX_SSE_BUFFER_BYTES, "HTTP SSE 累计缓冲区");
       }
       if (wantId !== undefined) {
         throw new Error(`missing response id ${String(wantId)} in HTTP SSE response`);
@@ -393,7 +419,7 @@ export class HttpMcpClient implements McpClient {
 
     // 不 await:读流是无限循环,只在 endpoint 到达后 resolve
     const ready = new Promise<void>((resolveReady, rejectReady) => {
-      fetch(this.config.url!, {
+      this.fetchSameOrigin(this.config.url!, {
         method: "GET",
         headers,
         signal: this.sseAbort!.signal,
@@ -410,14 +436,19 @@ export class HttpMcpClient implements McpClient {
             while (true) {
               const { done, value } = await reader.read();
               if (done) break;
+              if (value.byteLength > MAX_HTTP_RESPONSE_BYTES) {
+                throw new Error(`SSE 输入块超过 ${MAX_HTTP_RESPONSE_BYTES} 字节上限`);
+              }
               buffer += decoder.decode(value, { stream: true });
               let sep: number;
               while ((sep = findSseSeparator(buffer)) !== -1) {
                 const separatorLength = sseSeparatorLength(buffer, sep);
                 const eventBlock = buffer.slice(0, sep);
                 buffer = buffer.slice(sep + separatorLength);
+                assertByteLimit(eventBlock, MAX_SSE_EVENT_BYTES, "SSE 事件");
                 this.handleSseEvent(eventBlock, resolveReady);
               }
+              assertByteLimit(buffer, MAX_SSE_BUFFER_BYTES, "SSE 累计缓冲区");
             }
           } catch (err) {
             if (!this.closed) {
@@ -426,6 +457,7 @@ export class HttpMcpClient implements McpClient {
                   `SSE 流中断: ${err instanceof Error ? err.message : String(err)}`,
                 ),
               );
+              rejectReady(safeError);
               this.failAllPending(safeError);
               this.emitError(safeError);
             }
@@ -451,15 +483,21 @@ export class HttpMcpClient implements McpClient {
     });
 
     // 等 endpoint 事件到达(带超时)
-    await Promise.race([
-      ready,
-      new Promise<void>((_, reject) =>
-        setTimeout(
-          () => reject(new Error(`等待 SSE endpoint 事件超时`)),
-          this.config.startupTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
-        ),
-      ),
-    ]);
+    const timeoutMs = this.config.startupTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      await Promise.race([
+        ready,
+        new Promise<void>((_, reject) => {
+          timer = setTimeout(() => {
+            this.sseAbort?.abort();
+            reject(new Error(`等待 SSE endpoint 事件超时`));
+          }, timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
   }
 
   /** 处理 SSE 事件块:endpoint 事件设 POST 地址;message 事件派发给 pending */
@@ -476,7 +514,7 @@ export class HttpMcpClient implements McpClient {
     }
     if (event === "endpoint" && dataLines.length > 0) {
       // endpoint 事件:data 是 POST 地址(可能相对 URL)
-      this.postEndpoint = this.resolveUrl(dataLines[0]!);
+      this.postEndpoint = this.resolveSameOriginUrl(dataLines[0]!);
       onEndpoint();
       return;
     }
@@ -527,12 +565,62 @@ export class HttpMcpClient implements McpClient {
     }
   }
 
-  /** 把相对 URL 解析成绝对(sse endpoint 可能是相对路径) */
-  private resolveUrl(maybeRelative: string): string {
+  /** 把 SSE endpoint 解析成绝对 URL,并拒绝把凭据发到不同来源。 */
+  private resolveSameOriginUrl(maybeRelative: string): string {
+    const configured = parseHttpUrl(this.config.url!, this.config.name);
+    let resolved: URL;
     try {
-      return new URL(maybeRelative, this.config.url).toString();
+      resolved = new URL(maybeRelative, configured);
     } catch {
-      return maybeRelative;
+      throw new Error(`MCP server "${this.config.name}" 返回了无效的 SSE endpoint`);
+    }
+    if (resolved.origin !== configured.origin) {
+      throw new Error(
+        `拒绝 MCP server "${this.config.name}" 的跨源 SSE endpoint (${configured.origin} -> ${resolved.origin})`,
+      );
+    }
+    return resolved.toString();
+  }
+
+  /**
+   * Node fetch 默认会自动跟随重定向,且可能把自定义 Authorization 一并带走。
+   * MCP transport 仅允许在配置 URL 的同一 origin 内跳转,并限制跳转次数。
+   */
+  private async fetchSameOrigin(url: string, init: RequestInit): Promise<Response> {
+    const configured = parseHttpUrl(this.config.url!, this.config.name);
+    let current = parseHttpUrl(url, this.config.name);
+    if (current.origin !== configured.origin) {
+      throw new Error(
+        `拒绝 MCP server "${this.config.name}" 的跨源请求 (${configured.origin} -> ${current.origin})`,
+      );
+    }
+
+    for (let redirectCount = 0; ; redirectCount++) {
+      const response = await fetch(current, { ...init, redirect: "manual" });
+      if (!REDIRECT_STATUSES.has(response.status)) return response;
+
+      const location = response.headers.get("location");
+      if (!location) return response;
+      if (redirectCount >= MAX_REDIRECTS) {
+        await cancelResponseBody(response);
+        throw new Error(`MCP server "${this.config.name}" 重定向超过 ${MAX_REDIRECTS} 次上限`);
+      }
+
+      let next: URL;
+      try {
+        next = new URL(location, current);
+      } catch {
+        await cancelResponseBody(response);
+        throw new Error(`MCP server "${this.config.name}" 返回了无效的重定向地址`);
+      }
+      if (next.origin !== configured.origin) {
+        await cancelResponseBody(response);
+        throw new Error(
+          `拒绝 MCP server "${this.config.name}" 的跨源重定向 (${configured.origin} -> ${next.origin})`,
+        );
+      }
+      await cancelResponseBody(response);
+      current = next;
     }
   }
 
@@ -572,4 +660,63 @@ function sseSeparatorLength(buffer: string, index: number): number {
 
 function splitSseLines(block: string): string[] {
   return block.split(/\r?\n/);
+}
+
+function parseHttpUrl(value: string, serverName: string): URL {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("unsupported");
+    return url;
+  } catch {
+    throw new Error(`MCP server "${serverName}" 的 URL 必须是有效的 http/https 地址`);
+  }
+}
+
+function assertByteLimit(value: string, limit: number, label: string): void {
+  const bytes = Buffer.byteLength(value, "utf8");
+  if (bytes > limit) {
+    throw new Error(`${label}超过 ${limit} 字节上限`);
+  }
+}
+
+async function readLimitedResponseText(
+  response: Response,
+  limit: number,
+  label: string,
+): Promise<string> {
+  const contentLength = response.headers.get("content-length");
+  if (contentLength !== null) {
+    const declaredBytes = Number(contentLength);
+    if (Number.isFinite(declaredBytes) && declaredBytes > limit) {
+      await cancelResponseBody(response);
+      throw new Error(`${label}声明的体积超过 ${limit} 字节上限`);
+    }
+  }
+
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > limit) {
+        throw new Error(`${label}超过 ${limit} 字节上限`);
+      }
+      chunks.push(value);
+    }
+  } finally {
+    await reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
+  return Buffer.concat(
+    chunks.map((chunk) => Buffer.from(chunk)),
+    totalBytes,
+  ).toString("utf8");
+}
+
+async function cancelResponseBody(response: Response): Promise<void> {
+  await response.body?.cancel().catch(() => {});
 }
