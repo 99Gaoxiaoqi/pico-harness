@@ -15,6 +15,9 @@ import {
 const DEFAULT_REQUEST_TIMEOUT_MS = 5_000;
 const DEFAULT_STARTUP_TIMEOUT_MS = 8_000;
 const CLOSE_TIMEOUT_MS = 500;
+const MAX_LSP_HEADER_BYTES = 64 * 1024;
+const MAX_LSP_MESSAGE_BYTES = 8 * 1024 * 1024;
+const MAX_LSP_BUFFER_BYTES = MAX_LSP_HEADER_BYTES + MAX_LSP_MESSAGE_BYTES;
 
 interface PendingRequest {
   readonly method: string;
@@ -174,6 +177,14 @@ export class StdioLspClient {
 
   private wireChild(child: ChildProcessWithoutNullStreams): void {
     child.stdout.on("data", (chunk: Buffer) => {
+      if (this.inputBuffer.length + chunk.length > MAX_LSP_BUFFER_BYTES) {
+        void this.forceClose(
+          new Error(
+            `LSP server ${this.config.id} 输入缓冲超过 ${MAX_LSP_BUFFER_BYTES} 字节上限`,
+          ),
+        );
+        return;
+      }
       this.inputBuffer = Buffer.concat([this.inputBuffer, chunk]);
       this.drainFrames();
     });
@@ -198,7 +209,24 @@ export class StdioLspClient {
     while (true) {
       if (this.expectedBodyLength === undefined) {
         const separator = this.inputBuffer.indexOf("\r\n\r\n");
-        if (separator < 0) return;
+        if (separator < 0) {
+          if (this.inputBuffer.length > MAX_LSP_HEADER_BYTES) {
+            void this.forceClose(
+              new Error(
+                `LSP server ${this.config.id} 消息头超过 ${MAX_LSP_HEADER_BYTES} 字节上限`,
+              ),
+            );
+          }
+          return;
+        }
+        if (separator > MAX_LSP_HEADER_BYTES) {
+          void this.forceClose(
+            new Error(
+              `LSP server ${this.config.id} 消息头超过 ${MAX_LSP_HEADER_BYTES} 字节上限`,
+            ),
+          );
+          return;
+        }
         const headers = this.inputBuffer.subarray(0, separator).toString("ascii");
         this.inputBuffer = this.inputBuffer.subarray(separator + 4);
         const match = /(?:^|\r\n)Content-Length:\s*(\d+)/i.exec(headers);
@@ -208,7 +236,16 @@ export class StdioLspClient {
           );
           return;
         }
-        this.expectedBodyLength = Number(match[1]);
+        const bodyLength = Number(match[1]);
+        if (!Number.isSafeInteger(bodyLength) || bodyLength > MAX_LSP_MESSAGE_BYTES) {
+          void this.forceClose(
+            new Error(
+              `LSP server ${this.config.id} 消息体超过 ${MAX_LSP_MESSAGE_BYTES} 字节上限`,
+            ),
+          );
+          return;
+        }
+        this.expectedBodyLength = bodyLength;
       }
       if (this.inputBuffer.length < this.expectedBodyLength) return;
       const body = this.inputBuffer.subarray(0, this.expectedBodyLength).toString("utf8");
