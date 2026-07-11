@@ -450,6 +450,9 @@ async function createProductionFrameHarness(
 
   const instance: Instance = render(node, {
     ...TUI_RENDER_OPTIONS,
+    // Vitest replaces global console with a shim that has no Console constructor.
+    // Production keeps patchConsole enabled; this grid harness has no console output.
+    patchConsole: false,
     stdin: stdin as unknown as NodeJS.ReadStream,
     stdout: renderStdout,
     stderr: stderr as unknown as NodeJS.WriteStream,
@@ -650,7 +653,10 @@ class ImmediateWrapTerminal {
   private eraseDisplay(mode: number): void {
     if (mode === 2 || mode === 3) {
       this.screen = Array.from({ length: this.rows }, () => this.blankLine());
-      if (mode === 3) this.scrollback = [];
+      if (mode === 3) {
+        this.scrollback = [];
+        this.scrollEvents = 0;
+      }
       return;
     }
     for (let column = this.x; column < this.columns; column++) this.screen[this.y]![column] = " ";
