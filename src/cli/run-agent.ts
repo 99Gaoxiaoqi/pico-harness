@@ -54,6 +54,7 @@ import {
   type PermissionRuntimeSettings,
 } from "../approval/session-permissions.js";
 import { computeApprovalDiff } from "../approval/diff.js";
+import { classifyBashCommand } from "../approval/bash-safety.js";
 import { formatApprovalPanel } from "../tui/approval-panel.js";
 import { createTuiRuntimeState, type TuiRuntimeState } from "../tui/runtime-state.js";
 import type { MiddlewareFunc } from "../tools/registry.js";
@@ -291,7 +292,6 @@ export async function runAgentFromCli(
     workspaceRoots,
     dependencies.askUserHandler,
     runtimeState.codeIntelligence,
-    settings.mode === "yolo" ? { config: picoConfig.sandbox } : undefined,
   );
   // 【任务 2.6】用户可配置 Shell Hooks:加载 .claw/settings.json 的 hooks 配置,
   // 存在则挂载 HookRunner 到 registry。fail-open:配置缺失/畸形均不启用 hook,零影响。
@@ -354,7 +354,6 @@ export async function runAgentFromCli(
       globalApprovalManager,
       settings,
       workspaceRoots,
-      picoConfig.sandbox,
     ),
   );
   registerDelegationTools(
@@ -460,7 +459,6 @@ function buildRegistry(
   workspaceRoots?: WorkspaceRoots,
   askUserHandler?: AskUserHandler,
   codeIntelligence?: TuiRuntimeState["codeIntelligence"],
-  yoloSandbox?: { config?: Partial<YoloSandboxConfig> },
 ): ToolRegistry {
   return buildDefaultToolRegistry(workDir, {
     truncateResults: false,
@@ -472,7 +470,6 @@ function buildRegistry(
     ...(workspaceRoots !== undefined ? { workspaceRoots } : {}),
     ...(askUserHandler !== undefined ? { askUserHandler } : {}),
     ...(codeIntelligence !== undefined ? { codeIntelligence } : {}),
-    ...(yoloSandbox !== undefined ? { yoloSandbox } : {}),
   });
 }
 
@@ -694,13 +691,14 @@ export function buildApprovalMiddleware(
   settings?: Pick<SessionSettings, "sessionId" | "mode"> &
     Partial<Pick<SessionSettings, "additionalDirectories">>,
   workspaceRoots?: WorkspaceRoots,
-  yoloSandboxConfig: Partial<YoloSandboxConfig> = {},
 ): MiddlewareFunc {
   return async (call) => {
-    if (isPlanModeWriteDenied(call, settings)) {
+    const mode = settings?.mode ?? "default";
+    const planModeDenial = planModeDenialReason(call, mode);
+    if (planModeDenial !== undefined) {
       return {
         allowed: false,
-        reason: "Plan Mode 守卫：当前处于 Plan Mode，只能修改 PLAN.md / TODO.md。",
+        reason: planModeDenial,
       };
     }
     if (isHardlineCommand(call.name, call.arguments)) {
@@ -711,8 +709,18 @@ export function buildApprovalMiddleware(
     }
 
     const sessionId = settings?.sessionId ?? "cli";
-    const mode = settings?.mode ?? "default";
     const workspaceAccesses = workspaceAccessesFromCall(call);
+
+    // 主 TUI 的 YOLO 是全程放权：普通工具不审批，也不施加工作区、网络或
+    // 敏感写沙箱。直接文件工具仍需给自身的 WorkspaceRoots 一次性通行证；
+    // worker 使用独立 registry/worktree，继续保留显式沙箱隔离。
+    if (mode === "yolo") {
+      if (workspaceRoots) {
+        for (const access of workspaceAccesses) workspaceRoots.authorizeOnce(access.path);
+      }
+      return { allowed: true, reason: "YOLO 模式全程放行" };
+    }
+
     const externalAccesses = workspaceRoots
       ? workspaceAccesses.filter((access) => !workspaceRoots.isAllowedPath(access.path))
       : [];
@@ -727,17 +735,6 @@ export function buildApprovalMiddleware(
       workDir,
     );
 
-    // YOLO 只绕过普通审批，不自动扩大工作区，也不开放敏感/网络/hardline 边界。
-    if (mode === "yolo") {
-      if (workspaceRoots) {
-        const decision = evaluateYoloToolCall(call, workDir, workspaceRoots, yoloSandboxConfig);
-        if (!decision.allowed) {
-          return { allowed: false, reason: decision.reason ?? "YOLO 沙箱策略拒绝。" };
-        }
-      }
-      return { allowed: true, reason: "YOLO 模式在宿主边界内放行" };
-    }
-
     if (
       hasSessionGrant &&
       externalDirectories.length === 0 &&
@@ -749,6 +746,7 @@ export function buildApprovalMiddleware(
     const needsApproval =
       safetyPath !== undefined ||
       externalDirectories.length > 0 ||
+      bashNeedsApproval(call) ||
       (mode === "default" && isAgentOpsDangerousCommand(call.name, call.arguments)) ||
       (mode === "auto" && isDangerousCommand(call.name, call.arguments));
     if (!needsApproval) return { allowed: true, reason: `${mode} 模式自动放行` };
@@ -815,24 +813,32 @@ async function externalAuthorizationDirectories(
   return [...new Set(directories)];
 }
 
-function isPlanModeWriteDenied(
+function planModeDenialReason(
   call: { name: string; arguments: string },
-  settings: Pick<SessionSettings, "mode"> | undefined,
-): boolean {
-  if (settings?.mode !== "plan") return false;
+  mode: SessionSettings["mode"],
+): string | undefined {
+  if (mode !== "plan") return undefined;
   if (call.name === "write_file" || call.name === "edit_file") {
     const path = parseJsonStringField(call.arguments, "path");
-    return path !== undefined && !isPlanModeAllowedPath(path);
+    return path !== undefined && !isPlanModeAllowedPath(path)
+      ? "Plan Mode 守卫：当前处于 Plan Mode，只能修改 PLAN.md / TODO.md。"
+      : undefined;
   }
+  if (call.name !== "bash") return undefined;
+  const command = parseJsonStringField(call.arguments, "command");
+  if (command === undefined) {
+    return "Plan Mode 守卫：无法解析 Bash 命令，只允许可证明只读的命令。";
+  }
+  const classification = classifyBashCommand(command);
+  return classification.kind === "read-only"
+    ? undefined
+    : `Plan Mode 守卫：只允许可证明只读的 Bash；${classification.reason}。`;
+}
+
+function bashNeedsApproval(call: { name: string; arguments: string }): boolean {
   if (call.name !== "bash") return false;
   const command = parseJsonStringField(call.arguments, "command");
-  if (command === undefined) return false;
-  const redirects = command.matchAll(/\d*>>?\s*(?!&)([^\s|;&]+)/gu);
-  for (const redirect of redirects) {
-    const target = redirect[1];
-    if (target !== undefined && !isPlanModeAllowedPath(target)) return true;
-  }
-  return false;
+  return command === undefined || classifyBashCommand(command).kind !== "read-only";
 }
 
 function parseJsonStringField(args: string, field: string): string | undefined {
