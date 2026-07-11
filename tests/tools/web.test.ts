@@ -5,6 +5,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FetchURLTool, WebSearchTool, stripHtml } from "../../src/tools/web.js";
 import { ToolRegistry } from "../../src/tools/registry-impl.js";
 
+vi.mock("node:dns/promises", () => ({
+  lookup: vi.fn(async () => [{ address: "8.8.8.8", family: 4 }]),
+}));
+
 /** 构造一个最小的 Response-like mock(只暴露 fetch_url 用到的字段) */
 function mockResponse(opts: {
   ok?: boolean;
@@ -15,6 +19,12 @@ function mockResponse(opts: {
 }) {
   const headers = new Map<string, string>();
   if (opts.contentType !== undefined) headers.set("content-type", opts.contentType);
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(opts.text));
+      controller.close();
+    },
+  });
   return {
     ok: opts.ok ?? true,
     status: opts.status ?? 200,
@@ -22,6 +32,7 @@ function mockResponse(opts: {
     headers: {
       get: (name: string) => headers.get(name.toLowerCase()) ?? null,
     },
+    body,
     text: async () => opts.text,
     // web_search 走 resp.json();fetch_url 走 resp.text()
     json: async () => JSON.parse(opts.text),

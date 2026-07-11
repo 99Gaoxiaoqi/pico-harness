@@ -10,6 +10,8 @@
 import type { BaseTool } from "./registry.js";
 import type { ToolDefinition } from "../schema/message.js";
 import { ToolAccesses } from "./tool-access.js";
+import { lookup } from "node:dns/promises";
+import { BlockList, isIP } from "node:net";
 
 // FetchURL 抓取超时(网络请求兜底,防永久挂起)
 const FETCH_URL_TIMEOUT_MS = 30_000;
@@ -17,6 +19,58 @@ const FETCH_URL_TIMEOUT_MS = 30_000;
 const SEARCH_TIMEOUT_MS = 30_000;
 // FetchURL 默认最大返回字符数(与 Registry 默认截断一致)
 const DEFAULT_MAX_CHARS = 8000;
+// 防止模型把 max_chars 当成无限下载开关；与通用大工具输出阈值保持一致。
+const MAX_RETURN_CHARS = 50_000;
+// 即便最终只返回少量字符，也最多从网络读取 2 MiB，避免超大响应耗尽内存。
+const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
+const MAX_REDIRECTS = 5;
+
+const BLOCKED_NETWORKS = new BlockList();
+for (const [network, prefix] of [
+  ["0.0.0.0", 8],
+  ["10.0.0.0", 8],
+  ["100.64.0.0", 10],
+  ["127.0.0.0", 8],
+  ["169.254.0.0", 16],
+  ["172.16.0.0", 12],
+  ["192.0.0.0", 24],
+  ["192.0.2.0", 24],
+  ["192.31.196.0", 24],
+  ["192.52.193.0", 24],
+  ["192.88.99.0", 24],
+  ["192.168.0.0", 16],
+  ["192.175.48.0", 24],
+  ["198.18.0.0", 15],
+  ["198.51.100.0", 24],
+  ["203.0.113.0", 24],
+  ["224.0.0.0", 4],
+  ["240.0.0.0", 4],
+] as const) {
+  BLOCKED_NETWORKS.addSubnet(network, prefix, "ipv4");
+}
+for (const [network, prefix] of [
+  ["::", 128],
+  ["::1", 128],
+  ["64:ff9b:1::", 48],
+  ["100::", 64],
+  ["2001::", 32],
+  ["2001:2::", 48],
+  ["2001:10::", 28],
+  ["2001:20::", 28],
+  ["2001:db8::", 32],
+  ["2002::", 16],
+  ["fc00::", 7],
+  ["fe80::", 10],
+  ["ff00::", 8],
+] as const) {
+  BLOCKED_NETWORKS.addSubnet(network, prefix, "ipv6");
+}
+
+const BLOCKED_METADATA_HOSTS = new Set([
+  "instance-data.ec2.internal",
+  "metadata.google.internal",
+  "metadata.azure.internal",
+]);
 
 /**
  * 校验字符串是否为合法 http(s) URL。
@@ -33,7 +87,135 @@ function assertHttpUrl(raw: string): URL {
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     throw new Error(`仅支持 http/https 协议,收到: '${url.protocol}' (url=${raw})`);
   }
+  if (url.username !== "" || url.password !== "") {
+    throw new Error(`URL 不允许包含用户名或密码 (url=${raw})`);
+  }
   return url;
+}
+
+function normalizedHostname(url: URL): string {
+  return url.hostname
+    .replace(/^\[|\]$/g, "")
+    .replace(/\.$/, "")
+    .toLowerCase();
+}
+
+function isBlockedAddress(address: string, family: number): boolean {
+  if (family === 4) return BLOCKED_NETWORKS.check(address, "ipv4");
+  if (family === 6) return BLOCKED_NETWORKS.check(address, "ipv6");
+  return true;
+}
+
+/** 每次真正请求前解析并检查全部 A/AAAA 地址，避免任一候选落入宿主或保留网络。 */
+async function assertPublicTarget(url: URL): Promise<void> {
+  const hostname = normalizedHostname(url);
+  if (
+    hostname === "localhost" ||
+    hostname.endsWith(".localhost") ||
+    hostname === "local" ||
+    hostname.endsWith(".local") ||
+    BLOCKED_METADATA_HOSTS.has(hostname)
+  ) {
+    throw new Error(`拒绝抓取本地或元数据主机: '${hostname}'`);
+  }
+
+  const literalFamily = isIP(hostname);
+  let addresses: Array<{ address: string; family: number }>;
+  if (literalFamily !== 0) {
+    addresses = [{ address: hostname, family: literalFamily }];
+  } else {
+    try {
+      addresses = await lookup(hostname, { all: true, order: "verbatim" });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`DNS 解析失败: '${hostname}': ${message}`, { cause: error });
+    }
+  }
+
+  if (addresses.length === 0) {
+    throw new Error(`DNS 解析未返回地址: '${hostname}'`);
+  }
+  if (addresses.some(({ address, family }) => isBlockedAddress(address, family))) {
+    throw new Error(`拒绝抓取: 主机 '${hostname}' 解析到非公网或保留地址`);
+  }
+}
+
+function isRedirectStatus(status: number): boolean {
+  return status === 301 || status === 302 || status === 303 || status === 307 || status === 308;
+}
+
+async function fetchWithValidatedRedirects(
+  initialUrl: URL,
+  signal: AbortSignal,
+): Promise<{ response: Response; finalUrl: URL }> {
+  let currentUrl = initialUrl;
+  for (let redirectCount = 0; ; redirectCount += 1) {
+    await assertPublicTarget(currentUrl);
+    const response = await fetch(currentUrl.href, {
+      signal,
+      redirect: "manual",
+    });
+    if (!isRedirectStatus(response.status)) {
+      return { response, finalUrl: currentUrl };
+    }
+
+    const location = response.headers.get("location");
+    if (!location) {
+      return { response, finalUrl: currentUrl };
+    }
+    if (redirectCount >= MAX_REDIRECTS) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new Error(`抓取失败: 重定向超过 ${MAX_REDIRECTS} 次 (url=${initialUrl.href})`);
+    }
+
+    let nextUrl: URL;
+    try {
+      nextUrl = assertHttpUrl(new URL(location, currentUrl).href);
+    } catch (error) {
+      await response.body?.cancel().catch(() => undefined);
+      throw error;
+    }
+    await response.body?.cancel().catch(() => undefined);
+    currentUrl = nextUrl;
+  }
+}
+
+async function readResponseText(
+  response: Response,
+): Promise<{ text: string; bytesRead: number; byteLimitReached: boolean }> {
+  if (!response.body) {
+    return { text: "", bytesRead: 0, byteLimitReached: false };
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  const chunks: string[] = [];
+  let bytesRead = 0;
+  let byteLimitReached = false;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const remaining = MAX_RESPONSE_BYTES - bytesRead;
+      if (remaining === 0) {
+        byteLimitReached = true;
+        await reader.cancel().catch(() => undefined);
+        break;
+      }
+      const accepted = value.byteLength > remaining ? value.subarray(0, remaining) : value;
+      bytesRead += accepted.byteLength;
+      chunks.push(decoder.decode(accepted, { stream: true }));
+      if (value.byteLength > remaining) {
+        byteLimitReached = true;
+        await reader.cancel().catch(() => undefined);
+        break;
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  chunks.push(decoder.decode());
+  return { text: chunks.join(""), bytesRead, byteLimitReached };
 }
 
 /**
@@ -107,7 +289,9 @@ export class FetchURLTool implements BaseTool {
           url: { type: "string", description: "要抓取的网页 URL,必须是 http(s) 链接" },
           max_chars: {
             type: "number",
-            description: "最大返回字符数,超出截断(默认 8000)",
+            minimum: 1,
+            maximum: MAX_RETURN_CHARS,
+            description: `最大返回字符数,超出截断(默认 ${DEFAULT_MAX_CHARS},上限 ${MAX_RETURN_CHARS})`,
           },
         },
         required: ["url"],
@@ -123,7 +307,7 @@ export class FetchURLTool implements BaseTool {
       const input = JSON.parse(args) as { url?: string; max_chars?: number };
       url = input.url ?? "";
       if (typeof input.max_chars === "number" && Number.isFinite(input.max_chars)) {
-        maxChars = Math.max(0, Math.floor(input.max_chars));
+        maxChars = Math.min(MAX_RETURN_CHARS, Math.max(1, Math.floor(input.max_chars)));
       }
     } catch {
       throw new Error("参数解析失败: 期望 JSON 含 url 字段");
@@ -136,18 +320,19 @@ export class FetchURLTool implements BaseTool {
     // 2. URL 合法性校验(只允许 http/https)
     const parsed = assertHttpUrl(url);
 
-    // 3. 发起请求(遵循 Provider 风格:AbortSignal.timeout 防永久挂起)
-    const resp = await fetch(parsed.href, {
-      signal: AbortSignal.timeout(FETCH_URL_TIMEOUT_MS),
-      redirect: "follow",
-    });
+    // 3. 每一跳都重新校验 DNS 与地址；禁用 fetch 自动重定向，防止跳入内网。
+    const { response: resp, finalUrl } = await fetchWithValidatedRedirects(
+      parsed,
+      AbortSignal.timeout(FETCH_URL_TIMEOUT_MS),
+    );
 
     if (!resp.ok) {
-      throw new Error(`抓取失败: HTTP ${resp.status} ${resp.statusText} (url=${parsed.href})`);
+      throw new Error(`抓取失败: HTTP ${resp.status} ${resp.statusText} (url=${finalUrl.href})`);
     }
 
     const contentType = resp.headers.get("content-type") ?? "";
-    const raw = await resp.text();
+    const streamed = await readResponseText(resp);
+    const raw = streamed.text;
 
     // 4. 按 content-type 选择处理:
     //    - text/html → strip 标签
@@ -163,7 +348,10 @@ export class FetchURLTool implements BaseTool {
     // 5. 截断
     const truncated = truncate(body, maxChars);
 
-    return `[fetch_url] ${parsed.href} 返回 ${body.length} 字符\n${truncated}`;
+    const byteLimitNotice = streamed.byteLimitReached
+      ? `;响应超过 ${MAX_RESPONSE_BYTES} 字节,已停止读取`
+      : "";
+    return `[fetch_url] ${finalUrl.href} 读取 ${streamed.bytesRead} 字节,返回 ${body.length} 字符${byteLimitNotice}\n${truncated}`;
   }
 }
 
