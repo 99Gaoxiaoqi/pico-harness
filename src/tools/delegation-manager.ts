@@ -15,6 +15,10 @@ export interface DelegationResult {
 export interface DelegationBatchResult {
   results: DelegationResult[];
   totalDurationMs: number;
+  /** 为了遵守工具返回总预算而省略的 artifact 路径数。 */
+  omittedArtifacts?: number;
+  /** 极端大批次下为了遵守总预算而省略的结果数。 */
+  omittedResults?: number;
 }
 
 export type DelegationCompletionPolicy = "required" | "optional" | "detached";

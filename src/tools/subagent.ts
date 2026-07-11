@@ -640,9 +640,10 @@ function capSubagentResult(result: SubagentResult): SubagentResult {
 }
 
 /**
- * required 批量委派只压缩可膨胀的 summary/error 文本，状态、耗时和
- * artifacts 等结构化字段原样保留。短结果先满额保留，剩余预算按结果
- * 顺序在长文本之间均分，使输出公平、确定且始终可由 JSON.stringify 安全编码。
+ * required 批量委派先保留状态和耗时，再将剩余预算在
+ * summary/error 之间公平分配。artifact 路径本身导致结构超额时，
+ * 只返回省略计数；极端大批次连最小结果结构都容纳不下时，改为返回
+ * 省略的结果数。这样 JSON.stringify 后的实际工具结果始终不超过总预算。
  */
 function capDelegationBatchText(
   batch: DelegationBatchResult,
@@ -658,11 +659,36 @@ function capDelegationBatchText(
     }
     return fields;
   });
-  const results = batch.results.map((result) => ({ ...result }));
+  let results = batch.results.map((result) => ({ ...result }));
   for (const field of textFields) {
     results[field.resultIndex]![field.key] = "";
   }
-  const fixedChars = JSON.stringify({ ...batch, results }).length;
+
+  let omittedArtifacts = 0;
+  let structuralBatch: DelegationBatchResult = { ...batch, results };
+  if (JSON.stringify(structuralBatch).length > totalBudget) {
+    omittedArtifacts = results.reduce(
+      (count, result) => count + (result.artifacts?.length ?? 0),
+      0,
+    );
+    results = results.map(({ artifacts: _artifacts, ...result }) => result);
+    structuralBatch = {
+      ...batch,
+      results,
+      ...(omittedArtifacts > 0 ? { omittedArtifacts } : {}),
+    };
+  }
+
+  if (JSON.stringify(structuralBatch).length > totalBudget) {
+    return {
+      results: [],
+      totalDurationMs: batch.totalDurationMs,
+      omittedResults: batch.results.length,
+      ...(omittedArtifacts > 0 ? { omittedArtifacts } : {}),
+    };
+  }
+
+  const fixedChars = JSON.stringify(structuralBatch).length;
   const budgets = allocateFairTextBudgets(
     textFields.map((field) => jsonStringPayloadChars(field.value)),
     Math.max(0, totalBudget - fixedChars),
@@ -674,7 +700,7 @@ function capDelegationBatchText(
       budgets[index] ?? 0,
     );
   }
-  return { ...batch, results };
+  return { ...structuralBatch, results };
 }
 
 function truncateForJsonBudget(value: string, payloadBudget: number): string {
