@@ -11,6 +11,10 @@ const LATE_CPR_DRAIN_MS = 250;
 const RESIZE_STABILIZATION_MS = 750;
 const MIN_LIVE_COLUMNS = 10;
 const MIN_LIVE_ROWS = 3;
+// CPR 没有返回时无法信任嵌入式终端的 PTY winsize。优先损失可见行数，
+// 也不让 Ink 按过大旧网格绘制并把整帧推入 scrollback。
+const CPR_FAILURE_COLUMNS = 80;
+const CPR_FAILURE_ROWS = 16;
 const CPR_RESPONSE_PATTERN = new RegExp(
   `${String.fromCharCode(27)}\\[(\\d{1,5});(\\d{1,5})R`,
   "gu",
@@ -123,8 +127,12 @@ export async function createTuiTerminalGridSession(
 ): Promise<TuiTerminalGridSession> {
   if (env["CODEX_SHELL"] !== "1") return passthroughSession(stdout);
   const frontendGrid = await probeTerminalGrid(stdin, stdout, timeoutMs);
-  if (!frontendGrid) return passthroughSession(stdout);
-  return createResizeAwareSession(stdin, stdout, frontendGrid, timeoutMs);
+  return createResizeAwareSession(
+    stdin,
+    stdout,
+    frontendGrid ?? initialConservativeGrid(stdout),
+    timeoutMs,
+  );
 }
 
 /**
@@ -464,6 +472,13 @@ function conservativeFallbackGrid(
       normalizeDimension(stdout.columns, frontendGrid.columns),
     ),
     rows: Math.min(frontendGrid.rows, normalizeDimension(stdout.rows, frontendGrid.rows)),
+  };
+}
+
+function initialConservativeGrid(stdout: NodeJS.WriteStream): TerminalGrid {
+  return {
+    columns: Math.min(CPR_FAILURE_COLUMNS, normalizeDimension(stdout.columns, CPR_FAILURE_COLUMNS)),
+    rows: Math.min(CPR_FAILURE_ROWS, normalizeDimension(stdout.rows, CPR_FAILURE_ROWS)),
   };
 }
 
