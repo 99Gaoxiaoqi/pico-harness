@@ -431,6 +431,26 @@ export class TuiReporter implements Reporter {
     this.emit();
   }
 
+  onInterrupted(): void {
+    this.interruptActiveStreams("abort");
+    for (const tool of Object.values(this.eventStore.getProjection().toolCalls)) {
+      if (!isPendingToolStatus(tool.status)) continue;
+      this.flushToolOutput(tool.id);
+      this.eventStore.append({
+        type: "tool.completed",
+        toolCallId: tool.id,
+        status: "error",
+        summary: "Interrupted by user.",
+        size: 0,
+        truncated: false,
+      });
+      this.removePendingTool(tool);
+    }
+    this.clearRuntimeTracking();
+    this.appendPhase("idle", true);
+    this.emit();
+  }
+
   onTextDelta(delta: string): void {
     this.appendPhase("responding");
     if (this.currentStream) {
@@ -512,7 +532,7 @@ export class TuiReporter implements Reporter {
     this.currentStream = null;
   }
 
-  private interruptActiveStreams(reason: "new-request" | "clear" | "truncate"): void {
+  private interruptActiveStreams(reason: "new-request" | "clear" | "truncate" | "abort"): void {
     for (const stream of this.activeStreams()) {
       this.eventStore.append({ type: "assistant.stream.interrupted", ...stream, reason });
     }
