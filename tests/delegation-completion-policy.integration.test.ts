@@ -1,9 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { DelegationManager } from "../src/tools/delegation-manager.js";
+import { TaskRegistry } from "../src/tasks/task-registry.js";
+import {
+  aggregateDelegationStatus,
+  DelegationManager,
+  type DelegationCompletionEnvelope,
+} from "../src/tools/delegation-manager.js";
 import { ToolRegistry } from "../src/tools/registry-impl.js";
 import { DelegateTaskTool, type AgentRunner, type SubagentResult } from "../src/tools/subagent.js";
 import { TuiReporter } from "../src/tui/tui-reporter.js";
-import { createDelegationCompletionMessage } from "../src/tui/runtime-state.js";
+import {
+  createDelegationCompletionMessage,
+  DelegationCompletionWakeQueue,
+  DelegationWakeCoordinator,
+} from "../src/tui/runtime-state.js";
+import { runTuiAgentPrompt } from "../src/tui/repl.js";
 
 describe("delegation completion policy integration", () => {
   it("默认等待 required，并让 optional 自动回传而 detached 保持静默", async () => {
@@ -72,6 +82,200 @@ describe("delegation completion policy integration", () => {
       (subagent) => subagent.activity.completionPolicy,
     );
     expect(policies).toEqual(["required", "optional", "detached"]);
+  });
+
+  it("按 children 聚合 mixed/full-failure 并同步 Manager 与 TaskRegistry", async () => {
+    expect(
+      aggregateDelegationStatus([
+        { taskIndex: 0, status: "completed", durationMs: 1 },
+        { taskIndex: 1, status: "error", durationMs: 1 },
+      ]),
+    ).toBe("partial");
+    expect(
+      aggregateDelegationStatus([
+        { taskIndex: 0, status: "timed_out", durationMs: 1 },
+        { taskIndex: 1, status: "timed_out", durationMs: 1 },
+      ]),
+    ).toBe("timed_out");
+    expect(
+      aggregateDelegationStatus([
+        { taskIndex: 0, status: "cancelled", durationMs: 1 },
+        { taskIndex: 1, status: "cancelled", durationMs: 1 },
+      ]),
+    ).toBe("cancelled");
+
+    const taskRegistry = new TaskRegistry({ generateId: () => "a_aggregate" });
+    const manager = new DelegationManager({ taskRegistry });
+    const dispatched = manager.dispatch(async () => ({
+      // 即使 runner 错填 completed，Manager 也必须按 children 重算。
+      status: "completed",
+      results: [
+        { taskIndex: 0, status: "completed", summary: "kept", durationMs: 1 },
+        { taskIndex: 1, status: "error", error: "broken", durationMs: 1 },
+      ],
+      totalDurationMs: 2,
+    }));
+
+    await manager.wait(dispatched.delegationId!);
+
+    expect(manager.snapshot(dispatched.delegationId!)).toMatchObject({
+      status: "partial",
+      taskStatus: "partial",
+      result: { status: "partial", results: [{ status: "completed" }, { status: "error" }] },
+    });
+    expect(taskRegistry.get(dispatched.taskId!)).toMatchObject({
+      status: "failed",
+      data: { aggregateStatus: "partial", result: { status: "partial" } },
+    });
+
+    const runner: AgentRunner = {
+      async runSub() {
+        throw new Error("all failed");
+      },
+    };
+    const tool = new DelegateTaskTool(runner, () => new ToolRegistry());
+    const required = JSON.parse(
+      await tool.execute(JSON.stringify({ tasks: [{ goal: "one" }, { goal: "two" }] })),
+    ) as { status: string; results: Array<{ status: string }> };
+    expect(required).toMatchObject({
+      status: "error",
+      results: [{ status: "error" }, { status: "error" }],
+    });
+  });
+
+  it("optional 与 detached 失败写隐藏 completion，并在空闲时合并续跑一次", async () => {
+    const envelopes: DelegationCompletionEnvelope[] = [];
+    const hiddenMessages: ReturnType<typeof createDelegationCompletionMessage>[] = [];
+    const queue = new DelegationCompletionWakeQueue({
+      deliver: (completion) => {
+        envelopes.push(completion);
+        hiddenMessages.push(createDelegationCompletionMessage(completion));
+      },
+    });
+    let idle = false;
+    const resumed: Array<readonly number[]> = [];
+    const coordinator = new DelegationWakeCoordinator({
+      queue,
+      isIdle: () => idle,
+      resume: async (completionSeqs) => {
+        resumed.push(completionSeqs);
+      },
+    });
+    const manager = new DelegationManager({
+      onCompletion: (completion) => queue.enqueue(completion),
+    });
+    const runner: AgentRunner = {
+      async runSub(taskPrompt): Promise<SubagentResult> {
+        if (taskPrompt === "detached-success") {
+          return { summary: "silent success", artifacts: [] };
+        }
+        throw new Error(`failed:${taskPrompt}`);
+      },
+    };
+    const tool = new DelegateTaskTool(runner, () => new ToolRegistry(), manager);
+
+    await tool.execute(JSON.stringify({ goal: "optional-failure", completion_policy: "optional" }));
+    await tool.execute(JSON.stringify({ goal: "detached-failure", completion_policy: "detached" }));
+    await tool.execute(JSON.stringify({ goal: "detached-success", completion_policy: "detached" }));
+    await waitUntil(() => hiddenMessages.length === 2);
+
+    expect(resumed).toEqual([]);
+    expect(hiddenMessages.map((message) => message.providerData?.picoKind)).toEqual([
+      "subagent_completion",
+      "subagent_completion",
+    ]);
+    expect(hiddenMessages[0]?.content).toContain("最多重新委派一次");
+    expect(hiddenMessages[0]?.content).toContain("不要重做已完成范围");
+    expect(envelopes.map((completion) => [completion.completionPolicy, completion.status])).toEqual(
+      [
+        ["optional", "error"],
+        ["detached", "error"],
+      ],
+    );
+    expect(queue.enqueue(envelopes[0]!)).toBe(false);
+
+    idle = true;
+    coordinator.notifyIdle();
+    await waitUntil(() => resumed.length === 1);
+    expect(resumed[0]).toEqual(envelopes.map((completion) => completion.completionSeq));
+    coordinator.dispose();
+  });
+
+  it("将有界任务契约与可信 workDir 传给子代理", async () => {
+    const seenPrompts: string[] = [];
+    let seenWorkDir: string | undefined;
+    const runner: AgentRunner = {
+      async runSub(taskPrompt, _registry, _reporter, options) {
+        seenPrompts.push(taskPrompt);
+        seenWorkDir = options?.workDir;
+        return { summary: "bounded", artifacts: [] };
+      },
+    };
+    const tool = new DelegateTaskTool(runner, () => new ToolRegistry(), new DelegationManager(), {
+      workDir: "/trusted/project",
+    });
+    const definition = tool.definition();
+
+    expect(definition.description).toContain("禁止下达");
+    expect(definition.inputSchema.properties).toMatchObject({
+      roots: { type: "array" },
+      max_files: { maximum: 100 },
+      stopping_condition: { type: "string" },
+      expected_output: { type: "string" },
+    });
+
+    await tool.execute(JSON.stringify({ goal: "默认边界" }));
+    await tool.execute(
+      JSON.stringify({
+        goal: "检查认证边界",
+        roots: ["src/auth", "tests/auth"],
+        max_files: 999,
+        stopping_condition: "确认入口与失败路径后停止",
+        expected_output: "列出证据文件和风险",
+      }),
+    );
+
+    expect(seenPrompts[0]).toContain("允许根: .");
+    expect(seenPrompts[0]).toContain("最多检查文件: 30");
+    const seenPrompt = seenPrompts[1]!;
+    expect(seenPrompt).toContain("[有界任务契约]");
+    expect(seenPrompt).toContain("允许根: src/auth, tests/auth");
+    expect(seenPrompt).toContain("最多检查文件: 100");
+    expect(seenPrompt).toContain("停止条件: 确认入口与失败路径后停止");
+    expect(seenPrompt).toContain("期望输出: 列出证据文件和风险");
+    expect(seenWorkDir).toBe("/trusted/project");
+  });
+
+  it("TUI 内部续跑只透传 resume 标记，不追加可见用户输入", async () => {
+    const reporter = new TuiReporter(() => undefined);
+    let resumeExistingSession = false;
+
+    await runTuiAgentPrompt(
+      { prompt: "" },
+      {
+        reporter,
+        resumeExistingSession: true,
+        runAgent: async (options, dependencies) => {
+          expect(options.prompt).toBe("");
+          resumeExistingSession =
+            (dependencies as typeof dependencies & { resumeExistingSession?: boolean })
+              .resumeExistingSession === true;
+          return {
+            sessionId: "resume-session",
+            sessionSelection: { mode: "new", sessionId: "resume-session" },
+            workDir: "/tmp",
+            finalMessage: "resumed",
+            usage: { promptTokens: 0, completionTokens: 0, costCNY: 0 },
+            messages: [],
+          };
+        },
+      },
+    );
+
+    expect(resumeExistingSession).toBe(true);
+    expect(reporter.getProjection().entries.some((entry) => entry.entry.kind === "user")).toBe(
+      false,
+    );
   });
 });
 

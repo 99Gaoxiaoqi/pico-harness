@@ -41,6 +41,7 @@ export interface TuiRuntimeState {
   readonly taskHostRuntime?: TaskHostRuntime;
   readonly backgroundManager: BackgroundManager;
   readonly delegationManager: DelegationManager;
+  readonly delegationCompletionQueue: DelegationCompletionWakeQueue;
   readonly skillRegistry: SkillRegistry;
   readonly memoryNudger: MemoryNudger | undefined;
   readonly fileIndex: FileIndex;
@@ -63,6 +64,131 @@ export function createDelegationCompletionMessage(
       picoHiddenFromTranscript: true,
     },
   };
+}
+
+export interface DelegationCompletionWakeQueueOptions {
+  deliver: (completion: DelegationCompletionEnvelope) => void;
+}
+
+/**
+ * 将可续跑 completion 按 completionSeq 去重并合并为一次待消费 wake。
+ * seen 序号在消费后仍保留，迟到或重复通知不会再次驱动主 Agent。
+ */
+export class DelegationCompletionWakeQueue {
+  private readonly seenCompletionSeqs = new Set<number>();
+  private readonly pendingCompletionSeqs = new Set<number>();
+  private readonly subscribers = new Set<() => void>();
+  private readonly deliver: DelegationCompletionWakeQueueOptions["deliver"];
+  private closed = false;
+
+  constructor(options: DelegationCompletionWakeQueueOptions) {
+    this.deliver = options.deliver;
+  }
+
+  enqueue(completion: DelegationCompletionEnvelope): boolean {
+    if (
+      this.closed ||
+      this.seenCompletionSeqs.has(completion.completionSeq) ||
+      !shouldWakeForCompletion(completion)
+    ) {
+      return false;
+    }
+
+    this.deliver(completion);
+    this.seenCompletionSeqs.add(completion.completionSeq);
+    const shouldNotify = this.pendingCompletionSeqs.size === 0;
+    this.pendingCompletionSeqs.add(completion.completionSeq);
+    if (shouldNotify) {
+      for (const subscriber of this.subscribers) subscriber();
+    }
+    return true;
+  }
+
+  consumePendingCompletionSeqs(): readonly number[] {
+    const sequences = [...this.pendingCompletionSeqs].sort((left, right) => left - right);
+    this.pendingCompletionSeqs.clear();
+    return sequences;
+  }
+
+  get hasPending(): boolean {
+    return this.pendingCompletionSeqs.size > 0;
+  }
+
+  subscribe(subscriber: () => void): () => void {
+    if (this.closed) return () => undefined;
+    this.subscribers.add(subscriber);
+    return () => this.subscribers.delete(subscriber);
+  }
+
+  close(): void {
+    this.closed = true;
+    this.pendingCompletionSeqs.clear();
+    this.subscribers.clear();
+  }
+}
+
+export interface DelegationWakeCoordinatorOptions {
+  queue: DelegationCompletionWakeQueue;
+  isIdle: () => boolean;
+  resume: (completionSeqs: readonly number[]) => Promise<void>;
+  onError?: (error: unknown) => void;
+  schedule?: (callback: () => void) => void;
+}
+
+/** 空闲时消费一批 completion 并续跑一次；运行期间的新 completion 留给下一批。 */
+export class DelegationWakeCoordinator {
+  private readonly unsubscribe: () => void;
+  private readonly schedule: (callback: () => void) => void;
+  private scheduled = false;
+  private running = false;
+  private disposed = false;
+
+  constructor(private readonly options: DelegationWakeCoordinatorOptions) {
+    this.schedule = options.schedule ?? queueMicrotask;
+    this.unsubscribe = options.queue.subscribe(() => this.request());
+    if (options.queue.hasPending) this.request();
+  }
+
+  notifyIdle(): void {
+    this.request();
+  }
+
+  dispose(): void {
+    this.disposed = true;
+    this.unsubscribe();
+  }
+
+  private request(): void {
+    if (this.disposed || this.scheduled) return;
+    this.scheduled = true;
+    this.schedule(() => {
+      this.scheduled = false;
+      void this.resumePending();
+    });
+  }
+
+  private async resumePending(): Promise<void> {
+    if (this.disposed || this.running || !this.options.isIdle()) return;
+    const completionSeqs = this.options.queue.consumePendingCompletionSeqs();
+    if (completionSeqs.length === 0) return;
+
+    this.running = true;
+    try {
+      await this.options.resume(completionSeqs);
+    } catch (error) {
+      // completion 在 enqueue 时已先写入 Session。续跑失败不自动重试，避免无限唤醒；
+      // 隐藏消息仍留在历史中，下一次正常用户轮可继续消费。
+      this.options.onError?.(error);
+    } finally {
+      this.running = false;
+      if (this.options.queue.hasPending) this.request();
+    }
+  }
+}
+
+function shouldWakeForCompletion(completion: DelegationCompletionEnvelope): boolean {
+  if (completion.completionPolicy === "optional") return true;
+  return completion.completionPolicy === "detached" && completion.status !== "completed";
 }
 
 export async function createTuiRuntimeState(
@@ -98,6 +224,9 @@ export async function createTuiRuntimeState(
   }
 
   const steerQueue = new SteerQueue();
+  const delegationCompletionQueue = new DelegationCompletionWakeQueue({
+    deliver: (completion) => options.session.append(createDelegationCompletionMessage(completion)),
+  });
   return new DefaultTuiRuntimeState({
     workDir,
     sessionId: options.sessionId,
@@ -109,12 +238,9 @@ export async function createTuiRuntimeState(
     backgroundManager: new BackgroundManager({ taskRegistry }),
     delegationManager: new DelegationManager({
       taskRegistry,
-      onCompletion: (completion) => {
-        if (completion.completionPolicy === "optional") {
-          options.session.append(createDelegationCompletionMessage(completion));
-        }
-      },
+      onCompletion: (completion) => delegationCompletionQueue.enqueue(completion),
     }),
+    delegationCompletionQueue,
     skillRegistry,
     memoryNudger: new MemoryNudger(skillRegistry, options.session.sessionSummaryStore),
     fileIndex: FileIndex.create({ cwd: workDir }),
@@ -135,6 +261,7 @@ interface DefaultTuiRuntimeStateOptions {
   taskHostRuntime?: TaskHostRuntime;
   backgroundManager: BackgroundManager;
   delegationManager: DelegationManager;
+  delegationCompletionQueue: DelegationCompletionWakeQueue;
   skillRegistry: SkillRegistry;
   memoryNudger: MemoryNudger | undefined;
   fileIndex: FileIndex;
@@ -154,6 +281,7 @@ class DefaultTuiRuntimeState implements TuiRuntimeState {
   readonly taskHostRuntime?: TaskHostRuntime;
   readonly backgroundManager: BackgroundManager;
   readonly delegationManager: DelegationManager;
+  readonly delegationCompletionQueue: DelegationCompletionWakeQueue;
   readonly skillRegistry: SkillRegistry;
   readonly memoryNudger: MemoryNudger | undefined;
   readonly fileIndex: FileIndex;
@@ -173,6 +301,7 @@ class DefaultTuiRuntimeState implements TuiRuntimeState {
     this.taskHostRuntime = options.taskHostRuntime;
     this.backgroundManager = options.backgroundManager;
     this.delegationManager = options.delegationManager;
+    this.delegationCompletionQueue = options.delegationCompletionQueue;
     this.skillRegistry = options.skillRegistry;
     this.memoryNudger = options.memoryNudger;
     this.fileIndex = options.fileIndex;
@@ -215,6 +344,7 @@ class DefaultTuiRuntimeState implements TuiRuntimeState {
           ...runningTasks.map((task) => this.backgroundManager.stop(task.taskId)),
         ]);
       } finally {
+        this.delegationCompletionQueue.close();
         this.unbindGoalManager();
       }
     })();

@@ -11,6 +11,13 @@ import {
 import { MessageList } from "../../src/tui/message-list.js";
 import { buildTranscriptLayout } from "../../src/tui/transcript-layout.js";
 import { TuiEventStore, TuiReporter, type TuiEntry } from "../../src/tui/tui-reporter.js";
+import {
+  createAgentNavigationState,
+  projectAgentNavigationItems,
+  reconcileAgentNavigationState,
+  reduceAgentNavigation,
+  visibleAgentNavigationItems,
+} from "../../src/tui/agent-navigation.js";
 
 describe("subagent activity flow", () => {
   it("required 委派在 provider 未回传最终正文时也撤销临时流", () => {
@@ -75,9 +82,15 @@ describe("subagent activity flow", () => {
     );
     expect(JSON.stringify(entries)).not.toContain("trace-only:");
     const subagent = Object.values(reporter.getProjection().subagents)[0];
+    expect(subagent?.lifecycle).toBe("terminal_unconsumed");
     expect(subagent?.timeline).toEqual([
       expect.objectContaining({ kind: "message", content: "trace-only:检查委派投影" }),
     ]);
+    let navigation = reduceAgentNavigation(
+      createAgentNavigationState(),
+      { type: "open-item", id: subagent!.activityId },
+      projectAgentNavigationItems(reporter.getProjection()),
+    );
 
     reporter.onTurnStart(2);
     reporter.onTextDelta("委派已完成，这是最终答复。");
@@ -87,9 +100,23 @@ describe("subagent activity flow", () => {
         expect.objectContaining({ kind: "assistant", content: "委派已完成，这是最终答复。" }),
       ]),
     );
+    const archivedProjection = reporter.getProjection();
+    expect(archivedProjection.subagents[subagent!.activityId]).toMatchObject({
+      lifecycle: "archived",
+      timeline: [expect.objectContaining({ content: "trace-only:检查委派投影" })],
+    });
+    const archivedItems = projectAgentNavigationItems(archivedProjection);
+    const visibleWhileViewing = visibleAgentNavigationItems(archivedItems, navigation.activeId);
+    expect(visibleWhileViewing.map((item) => item.id)).toContain(subagent!.activityId);
+    navigation = reconcileAgentNavigationState(navigation, visibleWhileViewing);
+    expect(navigation.activeId).toBe(subagent!.activityId);
+    navigation = reduceAgentNavigation(navigation, { type: "escape" }, visibleWhileViewing);
+    expect(navigation.activeId).toBe("main");
+    expect(visibleAgentNavigationItems(archivedItems, navigation.activeId)).toHaveLength(1);
 
     const replayed = new TuiEventStore({ initialSnapshot: reporter.getReplaySnapshot() });
     expect(replayed.getProjection().entries).toEqual(reporter.getProjection().entries);
+    expect(replayed.getProjection().subagents).toEqual(archivedProjection.subagents);
   });
 
   it("将两个并行委派的实时动作和结果投影为独立卡片", async () => {
@@ -219,6 +246,90 @@ describe("subagent activity flow", () => {
       }),
     ).not.toThrow();
     expect(reporter.getProjection().subagents["many-running-tools"]?.timeline).toHaveLength(256);
+  });
+
+  it("dispatch rejected 时把已创建 queued activity 全部收口", async () => {
+    const reporter = new TuiReporter(() => undefined);
+    const runner: AgentRunner = {
+      async runSub() {
+        return { summary: "must not run", artifacts: [] };
+      },
+    };
+    const tool = new DelegateTaskTool(
+      runner,
+      () => new ToolRegistry(),
+      new DelegationManager({ maxAsyncChildren: 0 }),
+      { reporter },
+    );
+
+    const dispatch = JSON.parse(
+      await tool.execute(
+        JSON.stringify({
+          tasks: [{ goal: "one" }, { goal: "two" }],
+          completion_policy: "optional",
+        }),
+      ),
+    ) as { status: string; error?: string };
+
+    expect(dispatch.status).toBe("rejected");
+    expect(dispatch.error).toContain("上限");
+    const subagents = Object.values(reporter.getProjection().subagents);
+    expect(subagents).toHaveLength(2);
+    expect(subagents.map((subagent) => subagent.activity.status)).toEqual([
+      "cancelled",
+      "cancelled",
+    ]);
+    expect(subagents.every((subagent) => subagent.lifecycle === "terminal_unconsumed")).toBe(true);
+  });
+
+  it("外部 abort 保留已完成结果并取消运行中与 queued children", async () => {
+    const reporter = new TuiReporter(() => undefined);
+    const controller = new AbortController();
+    let secondStarted = false;
+    const runner: AgentRunner = {
+      async runSub(taskPrompt, _registry, _reporter, options) {
+        if (taskPrompt === "first") return { summary: "kept", artifacts: [] };
+        secondStarted = true;
+        await new Promise<void>((_resolve, reject) => {
+          const signal = options?.signal;
+          if (signal?.aborted) {
+            reject(signal.reason);
+            return;
+          }
+          signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+        });
+        return { summary: "unreachable", artifacts: [] };
+      },
+    };
+    const tool = new DelegateTaskTool(
+      runner,
+      () => new ToolRegistry(),
+      new DelegationManager({ maxConcurrentChildren: 1 }),
+      { reporter },
+    );
+    const execution = tool.execute(
+      JSON.stringify({ tasks: [{ goal: "first" }, { goal: "second" }, { goal: "third" }] }),
+      { signal: controller.signal },
+    );
+    await waitUntil(() => secondStarted);
+    controller.abort(new DOMException("stop batch", "AbortError"));
+
+    const result = JSON.parse(await execution) as {
+      status: string;
+      results: Array<{ status: string; summary?: string }>;
+    };
+    expect(result).toMatchObject({
+      status: "partial",
+      results: [
+        { status: "completed", summary: "kept" },
+        { status: "cancelled" },
+        { status: "cancelled" },
+      ],
+    });
+    const statuses = Object.values(reporter.getProjection().subagents).map(
+      (subagent) => subagent.activity.status,
+    );
+    expect(statuses).toEqual(["completed", "cancelled", "cancelled"]);
   });
 });
 

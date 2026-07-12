@@ -396,6 +396,7 @@ export class TuiReporter implements Reporter {
       this.currentTurnAssistantEntryId = this.appendEntry({ kind: "assistant", content });
     }
     this.currentStream = null;
+    this.archiveConsumedSubagents();
     this.emit();
   }
 
@@ -430,6 +431,18 @@ export class TuiReporter implements Reporter {
   onAssistantResponseSuppressed(reason: AssistantResponseSuppressionReason): void {
     this.suppressCurrentTurnAssistantResponse(reason);
     this.emit();
+  }
+
+  private archiveConsumedSubagents(): void {
+    const terminal = Object.values(this.eventStore.getProjection().subagents).filter(
+      (subagent) => subagent.lifecycle === "terminal_unconsumed",
+    );
+    for (const subagent of terminal) {
+      this.eventStore.append({
+        type: "subagent.activity.archived",
+        activityId: subagent.activityId,
+      });
+    }
   }
 
   private appendEntry(entry: TuiEntry): string {

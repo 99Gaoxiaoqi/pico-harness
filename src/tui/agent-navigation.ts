@@ -1,4 +1,8 @@
-import type { TuiProjection, TuiSubagentTraceItem } from "./tui-event-store.js";
+import type {
+  TuiProjection,
+  TuiSubagentLifecycle,
+  TuiSubagentTraceItem,
+} from "./tui-event-store.js";
 
 export const MAIN_AGENT_ID = "main";
 
@@ -36,6 +40,7 @@ export interface AgentNavigationItem {
   summary?: string;
   unreadCount?: number;
   timeline?: readonly AgentTimelineItem[];
+  lifecycle?: TuiSubagentLifecycle;
 }
 
 export type AgentNavigationFocus = "input" | "picker";
@@ -91,6 +96,7 @@ export function projectAgentNavigationItems(
         : {}),
       ...(subagent.activity.summary !== undefined ? { summary: subagent.activity.summary } : {}),
       timeline: subagent.timeline.map(projectTimelineItem),
+      lifecycle: subagent.lifecycle,
     }));
   return [createMainAgentItem({ status: mainStatus }), ...subagents];
 }
@@ -128,6 +134,16 @@ export function normalizeAgentNavigationItems(
     result.push(item);
   }
   return result;
+}
+
+/** archived 代理默认退出底部标签；正在查看的详情在返回 Main 前继续保留。 */
+export function visibleAgentNavigationItems(
+  items: readonly AgentNavigationItem[],
+  activeId: string,
+): AgentNavigationItem[] {
+  return items.filter(
+    (item) => item.kind === "main" || item.lifecycle !== "archived" || item.id === activeId,
+  );
 }
 
 export function reconcileAgentNavigationState(

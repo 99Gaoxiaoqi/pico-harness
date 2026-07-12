@@ -4,7 +4,7 @@ import { TaskRegistry } from "../tasks/task-registry.js";
 
 export type DelegationResultStatus = "completed" | "partial" | "error" | "timed_out" | "cancelled";
 
-export type DelegationBatchStatus = Exclude<DelegationResultStatus, "cancelled"> | "cancelled";
+export type DelegationBatchStatus = DelegationResultStatus;
 
 export interface DelegationResult {
   taskIndex: number;
@@ -17,8 +17,8 @@ export interface DelegationResult {
 }
 
 export interface DelegationBatchResult {
-  /** 迁移期可选；运行时聚合器负责在所有新结果上填充。 */
-  status?: DelegationBatchStatus;
+  /** 只由聚合器根据 children 终态生成，调用方不能用 resolved 代替成功。 */
+  status: DelegationBatchStatus;
   results: DelegationResult[];
   totalDurationMs: number;
   /** 为了遵守工具返回总预算而省略的 artifact 路径数。 */
@@ -62,8 +62,20 @@ export function formatDelegationCompletions(
     const detail = completion.outputSummary || completion.error || "子代理未返回摘要";
     return `${index + 1}. ${completion.status}: ${detail}`;
   });
+  const statuses = new Set(completions.map((completion) => completion.status));
+  const guidance = [
+    ...(statuses.has("completed") || statuses.has("partial")
+      ? ["对 completed/partial：吸收已保留结果并统一总结，不重复执行已有范围。"]
+      : []),
+    ...(statuses.has("error") || statuses.has("timed_out") || statuses.has("cancelled")
+      ? [
+          "对 error/timed_out/cancelled：优先缩小失败范围，最多重新委派一次；不要重做已完成范围，也不要改为大范围自行阅读项目。",
+        ]
+      : []),
+  ];
   return [
     "[SUBAGENT COMPLETION] 以下子代理已经收口。请吸收这些结果后继续推进；不要向用户暴露内部任务 ID。",
+    ...guidance,
     ...lines,
   ].join("\n");
 }
@@ -190,30 +202,30 @@ export class DelegationManager {
     record.promise = Promise.resolve()
       .then(() => runner(controller.signal))
       .then((result) => {
-        controller.signal.throwIfAborted();
-        record.status = "completed";
-        record.result = result;
+        const legacyResultWithoutStatus = result.status === undefined;
+        const normalizedResult = normalizeDelegationBatchResult(result);
+        if (
+          controller.signal.aborted &&
+          normalizedResult.status !== "partial" &&
+          normalizedResult.status !== "cancelled" &&
+          normalizedResult.status !== "timed_out"
+        ) {
+          throw controller.signal.reason ?? new DOMException("delegation aborted", "AbortError");
+        }
+        record.status = normalizedResult.status;
+        record.result = normalizedResult;
+        record.error = batchFailureMessage(normalizedResult);
         record.completedAt = Date.now();
         record.updatedAt = record.completedAt;
-        this.taskRegistry?.complete(record.taskId, {
-          data: { delegationId: id, completionPolicy, result },
-        });
+        this.settleTaskRegistry(record, legacyResultWithoutStatus ? result : normalizedResult);
         this.publishCompletion(record);
       })
       .catch((err: unknown) => {
-        record.status = controller.signal.aborted ? "cancelled" : "error";
+        record.status = delegationStatusFromError(err, controller.signal);
         record.error = err instanceof Error ? err.message : String(err);
         record.completedAt = Date.now();
         record.updatedAt = record.completedAt;
-        if (record.status === "cancelled") {
-          this.taskRegistry?.kill(record.taskId, record.error, {
-            data: { delegationId: id, completionPolicy },
-          });
-        } else {
-          this.taskRegistry?.fail(record.taskId, record.error, {
-            data: { delegationId: id, completionPolicy },
-          });
-        }
+        this.settleTaskRegistry(record);
         this.publishCompletion(record);
       });
 
@@ -274,7 +286,15 @@ export class DelegationManager {
       statusSnapshot: {
         status: taskStatus,
         mappedFrom: record.status,
-        allowedStatuses: ["queued", "running", "done", "error", "cancelled"],
+        allowedStatuses: [
+          "queued",
+          "running",
+          "done",
+          "partial",
+          "error",
+          "timed_out",
+          "cancelled",
+        ],
       },
       startedAt: record.startedAt,
       updatedAt: record.updatedAt,
@@ -296,10 +316,8 @@ export class DelegationManager {
   private outputSummary(record: DelegationRecord): string {
     if (record.result) {
       const lines = record.result.results.map((result) => {
-        if (result.status === "completed") {
-          return `task ${result.taskIndex} completed: ${result.summary ?? ""}`;
-        }
-        return `task ${result.taskIndex} error: ${result.error ?? ""}`;
+        const detail = result.summary ?? result.error ?? "";
+        return `task ${result.taskIndex} ${result.status}: ${detail}`;
       });
       return truncateSummary(lines.join("\n"), this.maxOutputSummaryChars);
     }
@@ -310,8 +328,8 @@ export class DelegationManager {
   }
 
   private publishCompletion(record: DelegationRecord): void {
+    if (record.completionPolicy === "detached" && record.status === "completed") return;
     record.completionSeq ??= this.nextCompletionSeq++;
-    if (record.completionPolicy === "detached") return;
     try {
       this.onCompletion?.(this.toCompletionEnvelope(record));
     } catch (error) {
@@ -332,13 +350,85 @@ export class DelegationManager {
       ...(record.error !== undefined ? { error: record.error } : {}),
     };
   }
+
+  private settleTaskRegistry(
+    record: DelegationRecord,
+    registryResult: DelegationBatchResult | undefined = record.result,
+  ): void {
+    if (!this.taskRegistry || record.status === "running") return;
+    const data = {
+      delegationId: record.id,
+      completionPolicy: record.completionPolicy,
+      aggregateStatus: record.status,
+      ...(registryResult !== undefined ? { result: registryResult } : {}),
+    };
+    if (record.status === "completed") {
+      this.taskRegistry.complete(record.taskId, { data });
+      return;
+    }
+    if (record.status === "cancelled") {
+      this.taskRegistry.kill(record.taskId, record.error ?? "delegation cancelled", { data });
+      return;
+    }
+    this.taskRegistry.fail(record.taskId, record.error ?? `delegation ended as ${record.status}`, {
+      data,
+    });
+  }
 }
 
 function mapTaskStatus(status: DelegationRecordStatus): DelegationTaskStatus {
   if (status === "completed") return "done";
+  if (status === "partial") return "partial";
   if (status === "error") return "error";
+  if (status === "timed_out") return "timed_out";
   if (status === "cancelled") return "cancelled";
   return "running";
+}
+
+/**
+ * 批次状态只由 children 决定。只要保留了部分有效结果就返回 partial；
+ * 全失败时按 error > timed_out > cancelled 的可处理优先级收口。
+ */
+export function aggregateDelegationStatus(
+  results: readonly DelegationResult[],
+): DelegationBatchStatus {
+  if (results.length === 0) return "error";
+  if (results.every((result) => result.status === "completed")) return "completed";
+  if (results.some((result) => result.status === "completed" || result.status === "partial")) {
+    return "partial";
+  }
+  if (results.some((result) => result.status === "error")) return "error";
+  if (results.some((result) => result.status === "timed_out")) return "timed_out";
+  return "cancelled";
+}
+
+export function normalizeDelegationBatchResult(
+  result: Omit<DelegationBatchResult, "status"> & { status?: DelegationBatchStatus },
+): DelegationBatchResult {
+  return {
+    ...result,
+    status: aggregateDelegationStatus(result.results),
+  };
+}
+
+function batchFailureMessage(result: DelegationBatchResult): string | undefined {
+  if (result.status === "completed") return undefined;
+  const firstFailure = result.results.find((child) => child.error?.trim());
+  return firstFailure?.error
+    ? `委派批次以 ${result.status} 收口: ${firstFailure.error}`
+    : `委派批次以 ${result.status} 收口`;
+}
+
+function delegationStatusFromError(
+  error: unknown,
+  signal?: AbortSignal,
+): Extract<DelegationBatchStatus, "error" | "timed_out" | "cancelled"> {
+  const reason = signal?.aborted ? signal.reason : error;
+  if (reason instanceof Error && reason.name === "TimeoutError") return "timed_out";
+  if (signal?.aborted || (error instanceof Error && error.name === "AbortError")) {
+    return "cancelled";
+  }
+  return "error";
 }
 
 function truncateSummary(value: string, maxChars: number): string {

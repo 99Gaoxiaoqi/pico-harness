@@ -15,10 +15,14 @@ import type { BaseTool, ToolExecutionContext } from "./registry.js";
 import { NO_FILE_SIDE_EFFECTS } from "./registry.js";
 import type { ToolDefinition } from "../schema/message.js";
 import type { Registry } from "./registry.js";
-import type { Reporter } from "../engine/reporter.js";
+import type { Reporter, SubagentActivityEvent } from "../engine/reporter.js";
 import { logger } from "../observability/logger.js";
-import type { DelegationBatchResult, DelegationCompletionPolicy } from "./delegation-manager.js";
-import { DelegationManager } from "./delegation-manager.js";
+import type {
+  DelegationBatchResult,
+  DelegationCompletionPolicy,
+  DelegationResult,
+} from "./delegation-manager.js";
+import { aggregateDelegationStatus, DelegationManager } from "./delegation-manager.js";
 import type { AgentProfile } from "./agent-profile.js";
 import type { WorktreeSupervisor } from "../tasks/worktree-supervisor.js";
 import {
@@ -86,6 +90,8 @@ export interface SubagentRunOptions {
   systemPromptOverride?: boolean;
   /** 宿主热切换或关闭时取消子代理的统一信号。 */
   signal?: AbortSignal;
+  /** 可信宿主注入的实际运行根目录；不得从模型 task context 推导。 */
+  workDir?: string;
 }
 
 export interface SubagentRegistryRequest {
@@ -113,6 +119,12 @@ interface DelegateTaskInput {
   role?: SubagentRole;
   /** 指定自定义子代理角色(来自 .claw/agents.yaml)。命中时用该角色的 prompt 和工具集。 */
   agent_name?: string;
+  /** 子代理允许聚焦的相对根目录；默认 ["."]。 */
+  roots?: string[];
+  /** 最多检查文件数，硬上限 100；默认 30。 */
+  max_files?: number;
+  stopping_condition?: string;
+  expected_output?: string;
 }
 
 interface DelegateTaskArgs extends DelegateTaskInput {
@@ -128,10 +140,20 @@ interface NormalizedDelegateTask {
   mode: SubagentMode;
   role: SubagentRole;
   agentName?: string;
+  roots: string[];
+  maxFiles: number;
+  stoppingCondition: string;
+  expectedOutput: string;
+  contractExplicit: boolean;
 }
 
 const SUBAGENT_SUMMARY_MAX_CHARS = 5_000;
 const REQUIRED_DELEGATION_TEXT_BUDGET_CHARS = 10_000;
+const DEFAULT_DELEGATION_ROOTS = ["."];
+const DEFAULT_DELEGATION_MAX_FILES = 30;
+const MAX_DELEGATION_FILES = 100;
+const DEFAULT_STOPPING_CONDITION = "找到足以回答目标的证据，或达到文件上限时立即停止。";
+const DEFAULT_EXPECTED_OUTPUT = "给出结论、关键证据路径和仍待确认的风险。";
 
 /**
  * SubagentTool:拉起子智能体的特殊"套娃"工具。
@@ -209,6 +231,7 @@ export class SpawnSubagentTool implements BaseTool {
           maxTurns: this.options.maxTurns,
           systemPrompt: this.options.systemPrompt,
           systemPromptOverride: this.options.systemPromptOverride,
+          workDir: this.options.workDir,
         }),
       });
     } catch (err) {
@@ -264,7 +287,8 @@ export class DelegateTaskTool implements BaseTool {
         "tasks 可批量并行执行。默认 completion_policy=required:以前台方式等待全部结果后再交还主 Agent;" +
         "required 委派必须是该响应的唯一工具调用,不要同时输出解释正文或调用其他工具;" +
         "optional 允许本轮先结束,完成结果会在下一个模型边界自动进入主上下文;" +
-        "detached 仅更新活动面板。不要主动轮询内部任务 ID。",
+        "detached 成功仅更新活动面板，失败会自动唤醒主 Agent。不要主动轮询内部任务 ID;" +
+        "禁止下达‘阅读整个项目/所有文件’之类无边界任务，必须用 roots/max_files/停止条件拆小。",
       inputSchema: {
         type: "object",
         properties: {
@@ -286,6 +310,11 @@ export class DelegateTaskTool implements BaseTool {
                 context: { type: "string" },
                 mode: { type: "string", enum: ["explore", "worker"] },
                 role: { type: "string", enum: ["leaf", "orchestrator"] },
+                agent_name: { type: "string" },
+                roots: { type: "array", items: { type: "string" } },
+                max_files: { type: "number", minimum: 1, maximum: MAX_DELEGATION_FILES },
+                stopping_condition: { type: "string" },
+                expected_output: { type: "string" },
               },
               required: ["goal"],
             },
@@ -306,6 +335,25 @@ export class DelegateTaskTool implements BaseTool {
             enum: ["leaf", "orchestrator"],
             description: "leaf 不再继续委派;orchestrator 在深度允许时可继续拆分任务。",
           },
+          roots: {
+            type: "array",
+            items: { type: "string" },
+            description: '允许聚焦的目录或文件根，默认 ["."]；批量任务可逐项覆盖。',
+          },
+          max_files: {
+            type: "number",
+            minimum: 1,
+            maximum: MAX_DELEGATION_FILES,
+            description: `最多检查文件数，默认 ${DEFAULT_DELEGATION_MAX_FILES}，上限 ${MAX_DELEGATION_FILES}。`,
+          },
+          stopping_condition: {
+            type: "string",
+            description: "何时停止继续搜索，避免无界探索。",
+          },
+          expected_output: {
+            type: "string",
+            description: "子代理最终应返回的结构和验收内容。",
+          },
           completion_policy: {
             type: "string",
             enum: ["required", "optional", "detached"],
@@ -323,13 +371,17 @@ export class DelegateTaskTool implements BaseTool {
     const maxSpawnDepth = this.options.maxSpawnDepth ?? 2;
     if (depth >= maxSpawnDepth) {
       return JSON.stringify({
+        status: "error",
         error: `达到最大委派深度 ${maxSpawnDepth},拒绝继续 delegate_task。`,
       });
     }
 
     const tasks = normalizeDelegateTasks(input);
     if (tasks.length === 0) {
-      return JSON.stringify({ error: "delegate_task 需要 goal 或 tasks[].goal。" });
+      return JSON.stringify({
+        status: "error",
+        error: "delegate_task 需要 goal 或 tasks[].goal。",
+      });
     }
 
     const completionPolicy = normalizeCompletionPolicy(input);
@@ -351,10 +403,25 @@ export class DelegateTaskTool implements BaseTool {
       );
     }
 
-    const dispatch = this.manager.dispatch(
-      (signal) => this.runBatch(tasks, activities, depth, maxSpawnDepth, signal),
-      { completionPolicy, description: summarizeDelegation(tasks) },
-    );
+    let dispatch: ReturnType<DelegationManager["dispatch"]>;
+    try {
+      dispatch = this.manager.dispatch(
+        (signal) => this.runBatch(tasks, activities, depth, maxSpawnDepth, signal),
+        { completionPolicy, description: summarizeDelegation(tasks) },
+      );
+    } catch (error) {
+      const message = errorMessage(error);
+      this.finishQueuedActivities(activities, "failed", message);
+      return JSON.stringify({
+        status: "rejected",
+        completionPolicy,
+        count: tasks.length,
+        error: message,
+      });
+    }
+    if (dispatch.status === "rejected") {
+      this.finishQueuedActivities(activities, "cancelled", dispatch.error ?? "委派未派发");
+    }
     return JSON.stringify({
       status: dispatch.status,
       completionPolicy,
@@ -370,12 +437,19 @@ export class DelegateTaskTool implements BaseTool {
     maxSpawnDepth: number,
     signal?: AbortSignal,
   ): Promise<DelegationBatchResult> {
-    signal?.throwIfAborted();
     const startedAt = Date.now();
-    const results = await mapLimit(tasks, this.manager.maxConcurrentChildren, (task, index) =>
-      this.runOne(task, activities[index]!, index, depth, maxSpawnDepth, signal),
+    const results = await mapLimit(
+      tasks,
+      this.manager.maxConcurrentChildren,
+      (task, index) => this.runOne(task, activities[index]!, index, depth, maxSpawnDepth, signal),
+      (error, index) => {
+        const result = delegationResultFromError(index, error, 0, signal);
+        this.emitResultActivity(activities[index]!, result);
+        return result;
+      },
     );
     return {
+      status: aggregateDelegationStatus(results),
       results,
       totalDurationMs: Date.now() - startedAt,
     };
@@ -389,6 +463,12 @@ export class DelegateTaskTool implements BaseTool {
     maxSpawnDepth: number,
     signal?: AbortSignal,
   ): Promise<DelegationBatchResult["results"][number]> {
+    const startedAt = Date.now();
+    if (signal?.aborted) {
+      const cancelled = delegationResultFromError(taskIndex, signal.reason, 0, signal);
+      this.emitResultActivity(activity, cancelled);
+      return cancelled;
+    }
     this.emitActivity(activity, "running", {
       currentAction: `开始执行：${compactActivityText(task.goal, 48)}`,
     });
@@ -425,24 +505,20 @@ export class DelegateTaskTool implements BaseTool {
         );
       }
     } catch (error) {
-      this.emitActivity(activity, "failed", {
-        summary: compactActivityText(error instanceof Error ? error.message : String(error), 160),
-      });
-      throw error;
+      result = delegationResultFromError(taskIndex, error, Date.now() - startedAt, signal);
     }
     if (result.status === "completed") {
       result = {
         ...result,
         summary: truncateWithMarker(result.summary ?? "", SUBAGENT_SUMMARY_MAX_CHARS),
       };
-      this.emitActivity(activity, "completed", {
-        summary: compactActivityText(result.summary ?? "子代理已完成", 160),
-      });
-    } else {
-      this.emitActivity(activity, "failed", {
-        summary: compactActivityText(result.error ?? "子代理执行失败", 160),
-      });
+    } else if (result.status === "partial" && result.summary !== undefined) {
+      result = {
+        ...result,
+        summary: truncateWithMarker(result.summary, SUBAGENT_SUMMARY_MAX_CHARS),
+      };
     }
+    this.emitResultActivity(activity, result);
     return result;
   }
 
@@ -478,8 +554,10 @@ export class DelegateTaskTool implements BaseTool {
           context.worktreePath,
           combinedSignal,
         );
-        if (delegatedResult.status === "error") {
-          throw new Error(delegatedResult.error ?? "worker 子代理执行失败");
+        if (delegatedResult.status !== "completed" && delegatedResult.status !== "partial") {
+          throw new Error(
+            delegatedResult.error ?? `worker 子代理以 ${delegatedResult.status} 收口`,
+          );
         }
         context.appendOutput(`${delegatedResult.summary ?? "worker completed"}\n`);
 
@@ -499,16 +577,49 @@ export class DelegateTaskTool implements BaseTool {
             context.worktreePath,
             combinedSignal,
           );
-          if (delegatedResult.status === "error") {
-            throw new Error(delegatedResult.error ?? "worker 子代理追加指令执行失败");
+          if (delegatedResult.status !== "completed" && delegatedResult.status !== "partial") {
+            throw new Error(
+              delegatedResult.error ?? `worker 子代理追加指令以 ${delegatedResult.status} 收口`,
+            );
           }
           context.appendOutput(`${delegatedResult.summary ?? "follow-up completed"}\n`);
         }
         return { summary: delegatedResult.summary };
       },
     );
-    const snapshot = await supervisor.wait(supervised.taskId);
-    if (snapshot.status !== "completed" || !delegatedResult) {
+    const stopOnAbort = (): void => {
+      void supervisor
+        .stop(supervised.taskId, errorMessage(signal?.reason ?? "delegation cancelled"))
+        .catch(() => undefined);
+    };
+    if (signal?.aborted) stopOnAbort();
+    else signal?.addEventListener("abort", stopOnAbort, { once: true });
+    const snapshot = await supervisor.wait(supervised.taskId).finally(() => {
+      signal?.removeEventListener("abort", stopOnAbort);
+    });
+    if (snapshot.status !== "completed") {
+      if (
+        delegatedResult &&
+        delegatedResult.status !== "completed" &&
+        delegatedResult.status !== "partial"
+      ) {
+        return {
+          ...delegatedResult,
+          durationMs: snapshot.updatedAt - snapshot.startedAt,
+        };
+      }
+      return delegationResultFromError(
+        taskIndex,
+        snapshot.error ?? `worktree worker ended as ${snapshot.status}`,
+        snapshot.updatedAt - snapshot.startedAt,
+        signal?.aborted
+          ? signal
+          : snapshot.status === "stopped"
+            ? abortedSignal(snapshot.error)
+            : undefined,
+      );
+    }
+    if (!delegatedResult) {
       return {
         taskIndex,
         status: "error",
@@ -534,7 +645,13 @@ export class DelegateTaskTool implements BaseTool {
     signal?.throwIfAborted();
     const startedAt = Date.now();
     const childDepth = depth + 1;
-    const prompt = task.context ? `${task.context}\n\n任务: ${task.goal}` : task.goal;
+    const effectiveWorkDir = workDir ?? this.options.workDir;
+    const prompt =
+      task.contractExplicit || effectiveWorkDir
+        ? renderBoundedTaskPrompt(task)
+        : task.context
+          ? `${task.context}\n\n任务: ${task.goal}`
+          : task.goal;
 
     // 自定义角色查询:agent_name 命中 profile 时,用其 prompt/maxTurns 覆盖 Tool 级默认
     const profile = task.agentName
@@ -572,25 +689,19 @@ export class DelegateTaskTool implements BaseTool {
         maxSpawnDepth,
         role: task.role,
         ...(signal ? { signal } : {}),
+        ...(effectiveWorkDir ? { workDir: effectiveWorkDir } : {}),
         ...customization,
       });
       signal?.throwIfAborted();
       return {
         taskIndex,
-        status: "completed",
+        status: subResult.status ?? "completed",
         summary: subResult.summary,
         ...(subResult.artifacts.length > 0 ? { artifacts: subResult.artifacts } : {}),
         durationMs: Date.now() - startedAt,
       };
     } catch (err) {
-      signal?.throwIfAborted();
-      const message = err instanceof Error ? err.message : String(err);
-      return {
-        taskIndex,
-        status: "error",
-        error: message,
-        durationMs: Date.now() - startedAt,
-      };
+      return delegationResultFromError(taskIndex, err, Date.now() - startedAt, signal);
     }
   }
 
@@ -609,10 +720,35 @@ export class DelegateTaskTool implements BaseTool {
 
   private emitActivity(
     activity: SubagentActivityScope,
-    status: "queued" | "running" | "completed" | "failed",
+    status: SubagentActivityEvent["status"],
     update: { currentAction?: string; summary?: string } = {},
   ): void {
-    this.options.reporter?.onSubagentActivity?.({ ...activity, status, ...update });
+    try {
+      this.options.reporter?.onSubagentActivity?.({ ...activity, status, ...update });
+    } catch (error) {
+      // 展示层是 best-effort，不能让 activity reporter 异常丢失 batch 已完成结果。
+      void error;
+    }
+  }
+
+  private emitResultActivity(activity: SubagentActivityScope, result: DelegationResult): void {
+    const summary =
+      result.summary ??
+      result.error ??
+      (result.status === "completed" ? "子代理已完成" : "子代理未完成");
+    this.emitActivity(activity, activityStatusForResult(result.status), {
+      summary: compactActivityText(summary, 160),
+    });
+  }
+
+  private finishQueuedActivities(
+    activities: readonly SubagentActivityScope[],
+    status: Extract<SubagentActivityEvent["status"], "failed" | "cancelled">,
+    summary: string,
+  ): void {
+    for (const activity of activities) {
+      this.emitActivity(activity, status, { summary: compactActivityText(summary, 160) });
+    }
   }
 }
 
@@ -684,6 +820,7 @@ function capDelegationBatchText(
 
   if (JSON.stringify(structuralBatch).length > totalBudget) {
     return {
+      status: batch.status,
       results: [],
       totalDurationMs: batch.totalDurationMs,
       omittedResults: batch.results.length,
@@ -777,6 +914,17 @@ function parseDelegateArgs(args: string): DelegateTaskArgs {
 function normalizeDelegateTasks(input: DelegateTaskArgs): NormalizedDelegateTask[] {
   const defaultMode = normalizeMode(input.mode);
   const defaultRole = normalizeRole(input.role);
+  const defaultRoots = normalizeDelegationRoots(input.roots, DEFAULT_DELEGATION_ROOTS);
+  const defaultMaxFiles = normalizeMaxFiles(input.max_files, DEFAULT_DELEGATION_MAX_FILES);
+  const defaultStoppingCondition = normalizeContractText(
+    input.stopping_condition,
+    DEFAULT_STOPPING_CONDITION,
+  );
+  const defaultExpectedOutput = normalizeContractText(
+    input.expected_output,
+    DEFAULT_EXPECTED_OUTPUT,
+  );
+  const topLevelContractExplicit = hasExplicitTaskContract(input);
   const rawTasks =
     input.tasks && input.tasks.length > 0
       ? input.tasks
@@ -787,6 +935,10 @@ function normalizeDelegateTasks(input: DelegateTaskArgs): NormalizedDelegateTask
             mode: input.mode,
             role: input.role,
             agent_name: input.agent_name,
+            roots: input.roots,
+            max_files: input.max_files,
+            stopping_condition: input.stopping_condition,
+            expected_output: input.expected_output,
           },
         ];
 
@@ -798,7 +950,55 @@ function normalizeDelegateTasks(input: DelegateTaskArgs): NormalizedDelegateTask
       mode: normalizeMode(task.mode, defaultMode),
       role: normalizeRole(task.role, defaultRole),
       ...(task.agent_name?.trim() ? { agentName: task.agent_name.trim() } : {}),
+      roots: normalizeDelegationRoots(task.roots, defaultRoots),
+      maxFiles: normalizeMaxFiles(task.max_files, defaultMaxFiles),
+      stoppingCondition: normalizeContractText(task.stopping_condition, defaultStoppingCondition),
+      expectedOutput: normalizeContractText(task.expected_output, defaultExpectedOutput),
+      contractExplicit: topLevelContractExplicit || hasExplicitTaskContract(task),
     }));
+}
+
+function normalizeDelegationRoots(value: string[] | undefined, fallback: string[]): string[] {
+  if (!Array.isArray(value)) return [...fallback];
+  const roots = [...new Set(value.map((root) => root.trim()).filter(Boolean))]
+    .slice(0, 20)
+    .map((root) => root.slice(0, 240));
+  return roots.length > 0 ? roots : [...fallback];
+}
+
+function normalizeMaxFiles(value: number | undefined, fallback: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+  return Math.min(MAX_DELEGATION_FILES, Math.max(1, Math.floor(value)));
+}
+
+function normalizeContractText(value: string | undefined, fallback: string): string {
+  const normalized = value?.replace(/\s+/gu, " ").trim();
+  return normalized ? normalized.slice(0, 500) : fallback;
+}
+
+function hasExplicitTaskContract(task: DelegateTaskInput): boolean {
+  return (
+    task.roots !== undefined ||
+    task.max_files !== undefined ||
+    task.stopping_condition !== undefined ||
+    task.expected_output !== undefined
+  );
+}
+
+function renderBoundedTaskPrompt(task: NormalizedDelegateTask): string {
+  return [
+    task.context,
+    `任务: ${task.goal}`,
+    "",
+    "[有界任务契约]",
+    `允许根: ${task.roots.join(", ")}`,
+    `最多检查文件: ${task.maxFiles}`,
+    `停止条件: ${task.stoppingCondition}`,
+    `期望输出: ${task.expectedOutput}`,
+    "禁止扩展为阅读整个项目或所有文件；超出边界时返回已确认内容和剩余风险。",
+  ]
+    .filter((line): line is string => line !== undefined)
+    .join("\n");
 }
 
 function normalizeMode(
@@ -828,6 +1028,42 @@ function summarizeDelegation(tasks: readonly NormalizedDelegateTask[]): string {
   return tasks.length === 1 ? first : `${first} 等 ${tasks.length} 个子任务`;
 }
 
+function delegationResultFromError(
+  taskIndex: number,
+  error: unknown,
+  durationMs: number,
+  signal?: AbortSignal,
+): DelegationResult {
+  const reason = signal?.aborted ? signal.reason : error;
+  const status =
+    reason instanceof Error && reason.name === "TimeoutError"
+      ? "timed_out"
+      : signal?.aborted || (error instanceof Error && error.name === "AbortError")
+        ? "cancelled"
+        : "error";
+  return {
+    taskIndex,
+    status,
+    error: errorMessage(reason),
+    durationMs,
+  };
+}
+
+function activityStatusForResult(
+  status: DelegationResult["status"],
+): SubagentActivityEvent["status"] {
+  if (status === "error") return "failed";
+  return status;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function abortedSignal(reason?: string): AbortSignal {
+  return AbortSignal.abort(new DOMException(reason ?? "cancelled", "AbortError"));
+}
+
 /**
  * 从对象中挑出值不为 undefined 的字段,用于构造可选 opts(避免重复的
  * `...(x !== undefined ? { x } : {})` 模式)。
@@ -844,24 +1080,25 @@ async function mapLimit<T, R>(
   items: T[],
   limit: number,
   worker: (item: T, index: number) => Promise<R>,
+  onRejected: (error: unknown, index: number) => R,
 ): Promise<R[]> {
   const results = new Array<R>(items.length);
   let cursor = 0;
   const workerCount = Math.min(Math.max(1, limit), items.length);
 
-  const workers = await Promise.allSettled(
+  await Promise.all(
     Array.from({ length: workerCount }, async () => {
       while (cursor < items.length) {
         const index = cursor;
         cursor++;
-        results[index] = await worker(items[index]!, index);
+        try {
+          results[index] = await worker(items[index]!, index);
+        } catch (error) {
+          results[index] = onRejected(error, index);
+        }
       }
     }),
   );
-  const failed = workers.find(
-    (worker): worker is PromiseRejectedResult => worker.status === "rejected",
-  );
-  if (failed) throw failed.reason;
 
   return results;
 }

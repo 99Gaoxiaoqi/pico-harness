@@ -138,11 +138,15 @@ export type TuiSubagentTraceItem =
       readonly completedAt?: number;
     };
 
+export type TuiSubagentLifecycle = "active" | "terminal_unconsumed" | "archived";
+
 export interface TuiSubagentProjection {
   readonly activityId: string;
   readonly entryId: string;
   readonly activity: Omit<SubagentActivityEvent, "activityId">;
   readonly timeline: readonly TuiSubagentTraceItem[];
+  /** archived 只影响底部导航可见性，activity 与 timeline 始终保留用于历史详情。 */
+  readonly lifecycle: TuiSubagentLifecycle;
 }
 
 /** EventStore 也守住此上限，避免绕过 Reporter 时投影无界增长。 */
@@ -279,6 +283,10 @@ export type TuiEvent =
   | (TuiEventBase & {
       readonly type: "subagent.trace.recorded";
       readonly trace: SubagentTraceEvent;
+    })
+  | (TuiEventBase & {
+      readonly type: "subagent.activity.archived";
+      readonly activityId: string;
     })
   | (TuiEventBase & {
       readonly type: "phase.changed";
@@ -478,6 +486,7 @@ export class TuiEventStore {
         }
         break;
       case "subagent.trace.recorded":
+      case "subagent.activity.archived":
       case "assistant.stream.delta":
       case "assistant.stream.completed":
       case "assistant.stream.interrupted":
@@ -517,6 +526,7 @@ export class TuiEventStore {
         }
         break;
       case "subagent.trace.recorded":
+      case "subagent.activity.archived":
       case "assistant.stream.delta":
       case "assistant.stream.completed":
       case "assistant.stream.interrupted":
@@ -813,6 +823,7 @@ export function reduceTuiEvent(state: TuiProjection, event: TuiEvent): TuiProjec
         );
       }
       const previous = subagents[event.activityId];
+      const lifecycle = subagentLifecycleForStatus(event.activity.status, previous?.lifecycle);
       subagents = {
         ...subagents,
         [event.activityId]: freezeSubagentProjection({
@@ -820,6 +831,7 @@ export function reduceTuiEvent(state: TuiProjection, event: TuiEvent): TuiProjec
           entryId: event.entryId,
           activity: event.activity,
           timeline: previous?.timeline ?? [],
+          lifecycle,
         }),
       };
       break;
@@ -834,6 +846,19 @@ export function reduceTuiEvent(state: TuiProjection, event: TuiEvent): TuiProjec
       subagents = {
         ...subagents,
         [event.trace.activityId]: freezeSubagentProjection({ ...current, timeline }),
+      };
+      break;
+    }
+
+    case "subagent.activity.archived": {
+      const current = subagents[event.activityId];
+      if (!current) throw new Error(`Unknown TUI subagent activity: ${event.activityId}`);
+      if (current.lifecycle === "active") {
+        throw new Error(`Cannot archive active TUI subagent activity: ${event.activityId}`);
+      }
+      subagents = {
+        ...subagents,
+        [event.activityId]: freezeSubagentProjection({ ...current, lifecycle: "archived" }),
       };
       break;
     }
@@ -936,6 +961,14 @@ function freezeSubagentProjection(projection: TuiSubagentProjection): TuiSubagen
     activity: Object.freeze({ ...projection.activity }),
     timeline: Object.freeze([...projection.timeline]),
   });
+}
+
+function subagentLifecycleForStatus(
+  status: SubagentActivityEvent["status"],
+  previous?: TuiSubagentLifecycle,
+): TuiSubagentLifecycle {
+  if (status === "queued" || status === "running") return "active";
+  return previous === "archived" ? "archived" : "terminal_unconsumed";
 }
 
 function retainSubagentIndexes(
@@ -1195,6 +1228,8 @@ function cloneProjection(projection: TuiProjection): TuiProjection {
       freezeSubagentProjection({
         ...subagent,
         timeline: subagent.timeline.map((item) => Object.freeze({ ...item })),
+        lifecycle:
+          subagent.lifecycle ?? subagentLifecycleForStatus(subagent.activity.status, undefined),
       }),
     ]),
   );
