@@ -19,8 +19,12 @@
     "prepack": "npm run build && npm run smoke:package",
     "smoke:package": "node scripts/package-bin-smoke.mjs",
     "typecheck": "tsc --noEmit",
+    "check:storage": "node scripts/check-storage-capability.mjs",
+    "pretest": "npm run check:storage",
     "test": "vitest run",
+    "pretest:e2e": "npm run check:storage",
     "test:e2e": "vitest run --config vitest.e2e.config.ts",
+    "pretest:llm-e2e": "npm run check:storage",
     "test:llm-e2e": "vitest run --config vitest.llm-e2e.config.ts",
     "test:watch": "vitest",
     "presmoke:tui": "npm run build",
@@ -30,7 +34,7 @@
     "format": "prettier --check src tests scripts .github/workflows docs README.md ROADMAP.md AGENTS.md package.json package-lock.json tsconfig.json tsconfig.build.json vitest.config.ts vitest.e2e.config.ts vitest.llm-e2e.config.ts"
   },
   "engines": {
-    "node": ">=22.0.0"
+    "node": "22.x"
   },
   "dependencies": {
     "better-sqlite3": "^12.11.1",

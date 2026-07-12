@@ -1,23 +1,40 @@
 // Mock FTS5Store for testing
 import { vi } from "vitest";
 import type { Message } from "../../src/schema/message.js";
+import type {
+  ConversationSearchStore,
+  MemoryBackendStatus,
+  MemorySearchResult,
+} from "../../src/memory/memory-store.js";
 
-/** FTS5 检索结果项 */
-export interface FTS5SearchResult {
+interface IndexedMessage {
   content: string;
-  turnIndex: number;
-  score?: number;
+  role: string;
+  timestamp: string;
 }
 
 /**
  * MockFTS5Store: FTS5Store 的测试 mock 实现。
  * 使用内存数组模拟索引和检索功能。
  */
-export class MockFTS5Store {
-  // 内存索引: sessionId -> turnIndex -> content
-  private index = new Map<string, Map<number, string>>();
+export class MockFTS5Store implements ConversationSearchStore {
+  readonly status: MemoryBackendStatus;
+
+  // 内存索引: sessionId -> turnIndex -> message
+  private index = new Map<string, Map<number, IndexedMessage>>();
   // 会话摘要
   private summaries = new Map<string, string>();
+
+  constructor(status?: Partial<MemoryBackendStatus>) {
+    this.status = {
+      backend: "sqlite_fts5",
+      state: "healthy",
+      persistentSource: "sqlite",
+      nodeVersion: process.version,
+      nodeModuleAbi: process.versions.modules,
+      ...status,
+    };
+  }
 
   insert = vi.fn((sessionId: string, turnIndex: number, message: Message) => {
     let sessionIndex = this.index.get(sessionId);
@@ -39,20 +56,35 @@ export class MockFTS5Store {
         .join(" ");
     }
 
-    sessionIndex.set(turnIndex, content);
+    sessionIndex.set(turnIndex, {
+      content,
+      role: message.role,
+      timestamp: new Date().toISOString(),
+    });
   });
 
-  search = vi.fn((query: string, limit = 10): FTS5SearchResult[] => {
-    const results: FTS5SearchResult[] = [];
+  replaceSession = vi.fn((sessionId: string, messages: readonly Message[]) => {
+    this.index.delete(sessionId);
+    messages.forEach((message, turnIndex) => {
+      this.insert(sessionId, turnIndex, message);
+    });
+  });
+
+  search = vi.fn((query: string, limit = 10, sessionId?: string): MemorySearchResult[] => {
+    const results: MemorySearchResult[] = [];
 
     // 简单的字符串匹配检索
-    for (const [_sessionId, sessionIndex] of this.index.entries()) {
-      for (const [turnIndex, content] of sessionIndex.entries()) {
-        if (content.toLowerCase().includes(query.toLowerCase())) {
+    for (const [indexedSessionId, sessionIndex] of this.index.entries()) {
+      if (sessionId && indexedSessionId !== sessionId) continue;
+      for (const [turnIndex, message] of sessionIndex.entries()) {
+        if (message.content.toLowerCase().includes(query.toLowerCase())) {
           results.push({
-            content,
+            sessionId: indexedSessionId,
             turnIndex,
-            score: 1.0,
+            role: message.role,
+            content: message.content,
+            timestamp: message.timestamp,
+            relevance: 0,
           });
         }
       }
