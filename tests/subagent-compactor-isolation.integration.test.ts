@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { Compactor } from "../src/context/compactor.js";
 import { AgentEngine } from "../src/engine/loop.js";
+import { Session } from "../src/engine/session.js";
 import type { LLMProvider } from "../src/provider/interface.js";
 import type { Message, ToolCall, ToolDefinition, ToolResult } from "../src/schema/message.js";
 import type {
@@ -31,6 +32,27 @@ describe("subagent compactor isolation integration", () => {
     expect(compactor.probeOutputs.get("sibling-a")).toContain("为了节省内存");
     expect(compactor.probeOutputs.get("sibling-b")).toContain("工具 probe 输出已清理");
     expect(compactor.probeOutputs.get("sibling-b")).not.toContain("为了节省内存");
+  });
+
+  it("从子代理异步域唤醒主 Agent 时显式恢复主 Compactor 状态", async () => {
+    const provider: LLMProvider = {
+      async generate(): Promise<Message> {
+        return { role: "assistant", content: "main resumed" };
+      },
+    };
+    const registry = new EmptyRegistry();
+    const compactor = new MainScopeProbeCompactor();
+    const engine = new AgentEngine({ provider, registry, workDir: "/tmp", compactor });
+    const session = new Session("compactor-main-scope", "/tmp", { persistence: false });
+    session.append({ role: "user", content: "main-run-probe" });
+
+    try {
+      await compactor.runSeededIsolatedScope(() => engine.run(session));
+      expect(compactor.mainProbeOutput).toContain("工具 probe 输出已清理");
+      expect(compactor.mainProbeOutput).not.toContain("为了节省内存");
+    } finally {
+      await session.close();
+    }
   });
 });
 
@@ -90,6 +112,30 @@ class SiblingBarrierProvider implements LLMProvider {
       await this.siblingAReleased;
     }
     return { role: "assistant", content: `summary:${task.includes("sibling-a") ? "a" : "b"}` };
+  }
+}
+
+class MainScopeProbeCompactor extends Compactor {
+  mainProbeOutput = "";
+
+  constructor() {
+    super({ maxChars: 200, retainLastMsgs: 0 });
+  }
+
+  runSeededIsolatedScope<T>(callback: () => T): T {
+    return this.runInIsolatedScope(() => {
+      super.compactToBudget(makeStrongerCompactTrace(), 180);
+      return callback();
+    });
+  }
+
+  override compactToBudget(messages: Message[], maxChars?: number): Message[] {
+    if (messages.some((message) => message.content.includes("main-run-probe"))) {
+      const probe = super.compact(makeRemoteToolTrace());
+      this.mainProbeOutput = probe.find((message) => message.toolCallId)?.content ?? "";
+      return structuredClone(messages);
+    }
+    return super.compactToBudget(messages, maxChars);
   }
 }
 

@@ -134,18 +134,47 @@ describe("subagent activity flow", () => {
       completionPolicy: "optional",
       summary: "等待主 Agent 消费",
     });
+    reporter.onSubagentActivity({
+      activityId: "other-optional-pending",
+      task: "另一项异步检查",
+      status: "completed",
+      completionPolicy: "optional",
+    });
 
     reporter.onMessage("当前主循环的无关答复");
     expect(reporter.getProjection().subagents["optional-pending-wake"]?.lifecycle).toBe(
       "terminal_unconsumed",
     );
 
-    reporter.markAsyncSubagentCompletionsDelivered();
+    reporter.onSubagentActivitiesClaimed(["optional-pending-wake"]);
     expect(reporter.getProjection().subagents["optional-pending-wake"]?.lifecycle).toBe(
       "terminal_claimed",
     );
     reporter.onMessage("已吸收异步检查结果");
     expect(reporter.getProjection().subagents["optional-pending-wake"]?.lifecycle).toBe("archived");
+    expect(reporter.getProjection().subagents["other-optional-pending"]?.lifecycle).toBe(
+      "terminal_unconsumed",
+    );
+  });
+
+  it("detached success 在主回复后完成也自动退出活跃导航", () => {
+    const reporter = new TuiReporter(() => undefined);
+    reporter.onMessage("主 Agent 已先完成");
+    reporter.onSubagentActivity({
+      activityId: "late-detached-success",
+      task: "迟到的独立任务",
+      status: "running",
+      completionPolicy: "detached",
+    });
+    reporter.onSubagentActivity({
+      activityId: "late-detached-success",
+      task: "迟到的独立任务",
+      status: "completed",
+      completionPolicy: "detached",
+      summary: "done",
+    });
+
+    expect(reporter.getProjection().subagents["late-detached-success"]?.lifecycle).toBe("archived");
   });
 
   it("将两个并行委派的实时动作和结果投影为独立卡片", async () => {
@@ -308,7 +337,13 @@ describe("subagent activity flow", () => {
       "cancelled",
       "cancelled",
     ]);
-    expect(subagents.every((subagent) => subagent.lifecycle === "terminal_unconsumed")).toBe(true);
+    expect(subagents.every((subagent) => subagent.lifecycle === "terminal_claimed")).toBe(true);
+    reporter.onMessage("委派未派发，已同步处理");
+    expect(
+      Object.values(reporter.getProjection().subagents).every(
+        (subagent) => subagent.lifecycle === "archived",
+      ),
+    ).toBe(true);
   });
 
   it("外部 abort 保留已完成结果并取消运行中与 queued children", async () => {

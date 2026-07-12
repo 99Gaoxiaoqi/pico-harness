@@ -334,6 +334,11 @@ export class Compactor {
     return this.runtimeStateStorage.run(createCompactorRuntimeState(), callback);
   }
 
+  /** 主 Agent 入口显式切回持久状态，阻断嵌套异步子代理的 AsyncLocalStorage 继承。 */
+  runInMainScope<T>(callback: () => T): T {
+    return this.runtimeStateStorage.run(this.defaultRuntimeState, callback);
+  }
+
   /**
    * 压缩准备发送给大模型的消息数组。
    * 若总长度未超标,直接返回(深拷贝);否则施加双重降级。

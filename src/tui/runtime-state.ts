@@ -111,13 +111,18 @@ export class DelegationCompletionWakeQueue {
    * 拿到 TUI 空闲执行权后才把对应 completion 写入 Session。
    * 先 deliver 再删除：若 Session 写入失败，未写入项仍可在下一次空闲边界重试。
    */
-  deliverPendingCompletionSeqs(sequences: readonly number[]): void {
+  deliverPendingCompletionSeqs(
+    sequences: readonly number[],
+  ): readonly DelegationCompletionEnvelope[] {
+    const delivered: DelegationCompletionEnvelope[] = [];
     for (const sequence of sequences) {
       const completion = this.pendingCompletions.get(sequence);
       if (!completion) continue;
       this.deliver(completion);
       this.pendingCompletions.delete(sequence);
+      delivered.push(completion);
     }
+    return delivered;
   }
 
   get hasPending(): boolean {
@@ -140,7 +145,10 @@ export class DelegationCompletionWakeQueue {
 export interface DelegationWakeCoordinatorOptions {
   queue: DelegationCompletionWakeQueue;
   isIdle: () => boolean;
-  resume: (completionSeqs: readonly number[], deliverCompletions: () => void) => Promise<void>;
+  resume: (
+    completionSeqs: readonly number[],
+    deliverCompletions: () => readonly DelegationCompletionEnvelope[],
+  ) => Promise<void>;
   onError?: (error: unknown) => void;
   schedule?: (callback: () => void) => void;
 }
@@ -183,12 +191,11 @@ export class DelegationWakeCoordinator {
     if (completionSeqs.length === 0) return;
 
     this.running = true;
-    let delivered = false;
+    let deliveredCompletions: readonly DelegationCompletionEnvelope[] | undefined;
     try {
       await this.options.resume(completionSeqs, () => {
-        if (delivered) return;
-        this.options.queue.deliverPendingCompletionSeqs(completionSeqs);
-        delivered = true;
+        deliveredCompletions ??= this.options.queue.deliverPendingCompletionSeqs(completionSeqs);
+        return deliveredCompletions;
       });
     } catch (error) {
       // 已 deliver 的 completion 保留在 Session，续跑失败不自动重试，避免无限唤醒；
@@ -198,7 +205,7 @@ export class DelegationWakeCoordinator {
       this.running = false;
       // 仅在本批已交付时主动调度运行期间新到的 completion；保留失败由下一次 idle 唤醒，
       // 避免 isIdle 仍为 true 的异常实现形成微任务自旋。
-      if (delivered && this.options.queue.hasPending) this.request();
+      if (deliveredCompletions !== undefined && this.options.queue.hasPending) this.request();
     }
   }
 }

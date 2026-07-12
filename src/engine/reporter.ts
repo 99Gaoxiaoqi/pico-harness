@@ -76,6 +76,8 @@ export interface Reporter {
   ): void;
   /** 子代理活动的可替换快照，用于宿主展示并行 worker 进度。 */
   onSubagentActivity?(activity: SubagentActivityEvent): void;
+  /** 对应结果已进入当前或下一次主 Agent 模型边界，可在主正文完成后归档。 */
+  onSubagentActivitiesClaimed?(activityIds: readonly string[]): void;
   /** 子代理的独立详情时间线，不进入主对话 transcript。 */
   onSubagentTrace?(event: SubagentTraceEvent): void;
   /** 当模型宣告任务完成,向用户输出最终纯文本回答时调用 */

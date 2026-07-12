@@ -147,12 +147,11 @@ export class TuiReporter implements Reporter {
    * 空闲 wake 已取得执行权并把异步 completion 写入 Session。
    * 先记录 claim，再等这次主 Agent 正文完成后归档，避免无关旧正文提前隐藏活动。
    */
-  markAsyncSubagentCompletionsDelivered(): void {
+  onSubagentActivitiesClaimed(activityIds: readonly string[]): void {
+    const requested = new Set(activityIds);
     const terminal = Object.values(this.eventStore.getProjection().subagents).filter(
       (subagent) =>
-        subagent.lifecycle === "terminal_unconsumed" &&
-        (subagent.activity.completionPolicy === "optional" ||
-          subagent.activity.completionPolicy === "detached"),
+        requested.has(subagent.activityId) && subagent.lifecycle === "terminal_unconsumed",
     );
     for (const subagent of terminal) {
       this.eventStore.append({
@@ -378,6 +377,12 @@ export class TuiReporter implements Reporter {
         ...(activity.summary !== undefined ? { summary: activity.summary } : {}),
       },
     });
+    if (activity.completionPolicy === "detached" && activity.status === "completed") {
+      this.eventStore.append({
+        type: "subagent.activity.archived",
+        activityId,
+      });
+    }
     this.emit();
   }
 
