@@ -596,7 +596,7 @@ git worktree remove ../pico-1-streaming
 
 - [x] 2026-07-12：修复 required 屏障建立前主 Agent 先自行读项目：从最新用户输入识别中英文明确子代理执行意图，首轮只向 Provider 暴露 `delegate_task` 并强制 required 独占；普通工具幻觉调用仅生成协议拒绝、不进入 Registry；explore-only join 后下一轮 `tools=[]` 且只允许纯文本统一总结，worker/mixed 保留必要集成工具。
 - [x] 2026-07-12：将 required `delegate_task` 升级为 AgentSwarm 式独占控制流边界：同轮只真实执行首个 required 委派，其他工具仅生成协议 observation；子代理全部收口前不再请求主 Provider，委派轮正文不落主 Session/TUI，join 后只允许必要集成、定点验证和统一总结；optional/detached 保持非阻塞。
-- [x] 2026-07-12：限制子代理结果体积并修复 Agent 面板流式刷屏：单个 summary 上限 5,000 字符，required 批量委派最终 JSON 上限 10,000 字符，`delegate_task` 专用外部化阈值 10,000 字符；Codex 嵌入终端 CPR 失败时使用保守网格并继续响应后续 resize，覆盖 Main + 4 子代理 + 流式输出零换行、零滚屏主链。
+- [x] 2026-07-12：限制子代理结果体积并修复 Agent 面板流式刷屏：单个 summary 常规目标 1,000–2,000 字符，超出部分完整落盘并保留 5,000 字符硬熔断；批量委派按失败、partial 和证据优先级动态收口到 6,000–8,000 字符，最终 JSON 硬上限及 `delegate_task` 外部化阈值均为 12,000 字符；Codex 嵌入终端 CPR 失败时使用保守网格并继续响应后续 resize，覆盖 Main + 4 子代理 + 流式输出零换行、零滚屏主链。
 - [x] 2026-07-12：重构子代理完成语义：`delegate_task` 默认 `required` 并在子代理收口前阻塞返回；显式 `optional` 完成后把隐藏结果持久化到主会话，供下一个模型边界自动吸收，`detached` 只更新活动面板；旧 `background=true` 仅保留输入兼容，不再向模型暴露，TUI 展示 completion policy 且不暴露内部 ID。
 - [x] 2026-07-12：收口子代理失败恢复与活动生命周期：统一 `completed / partial / error / timed_out / cancelled` 终态，失败同样在空闲边界唤醒主 Agent；completion 取得 QueryGuard 后再原子写入 Session，避免重复总结；终态卡片在对应结果被消费后退出活跃导航；并隔离子代理流式 Reporter、可信 workDir、Compactor 状态及 Provider 超时/429/fallback 并发恢复。
 - [ ] 2026-07-11：删除只被测试引用的影子权限链 `approval/policy.ts` / `ApprovalPolicy`，把文档和验证统一到生产 `buildApprovalMiddleware`。
@@ -631,7 +631,7 @@ git worktree remove ../pico-1-streaming
 - 2026-07-12：收口子代理失败恢复、统一汇总与面板生命周期
   - required 批次按子结果聚合终态；全失败只允许一次缩小范围的重新委派，之后由主 Agent 基于保留证据收口，不再自行大范围重读项目。optional 与 detached 失败会形成隐藏 completion，在 TUI 真正空闲并取得 QueryGuard 独占权后合并写入 Session、续跑一次。
   - completion 队列按序号去重，延迟到空闲保留成功后交付，避免正在运行的主循环先消费、空闲后又重复调用 Provider；活动采用 `active → terminal_unconsumed → terminal_claimed → archived`，未 claim 的异步结果不会被无关主回复提前隐藏。
-  - 子代理最后一轮固定为无工具 FINALIZE；超限或收口 Provider 失败时返回带证据的 `partial`，失败、超时和取消均能唤醒主 Agent。单个 summary 继续限制 5,000 字符，required 批次继续限制 10,000 字符。
+  - 子代理最后一轮固定为无工具 FINALIZE；超限或收口 Provider 失败时返回带证据的 `partial`，失败、超时和取消均能唤醒主 Agent。单个 summary 常规目标为 1,000–2,000 字符并完整落盘，5,000 仅作硬熔断；批次以 6,000–8,000 为动态目标、12,000 为硬上限。
   - 每个并行子代理独立 Reporter、可信 workDir 与 Compactor 运行状态；供应商层区分 timeout/cancel，timeout 仅重试一次，429 并发轮换幂等，fallback 初始化 singleflight，降低并发子代理偶发失败和交叉污染。
 
 - 2026-07-12：补齐明确子代理请求的 delegation-first / synthesis-only 门禁
@@ -647,8 +647,9 @@ git worktree remove ../pico-1-streaming
   - 新增屏障与 TUI 集成主链，覆盖 required 独占、join 等待、单次聚合、临时流撤销和 optional/detached 非阻塞回归。
 
 - 2026-07-12：收紧子代理输出预算并修复终端重复刷帧
-  - `AgentEngine.runSub` 将单个最终 summary 限制为 5,000 字符；委派工具对外部或 mock runner 同样执行防御性上限。
-  - required 批量委派按最终 JSON 转义后的实际长度分配文本预算，保证输出不超过 10,000 字符并优先保留 status、error、artifacts；artifact 路径本身超额时以省略计数代替。`delegate_task` 专用 artifact 外部化阈值同样为 10,000 字符，普通工具与 Bash 阈值不变。
+  - `AgentEngine.runSub` 要求结论优先的结构化汇报，常规目标 1,000–2,000 字符；长报告先完整写入 session-scoped artifact，再回灌头尾预览和路径。writer 不可用时保留 5,000 字符防御性硬上限。
+  - required / optional / detached 批量委派共用动态预算：按最终 JSON 转义后的实际长度核算，优先保留失败原因、partial、artifact 证据和状态，正常收口 6,000–8,000 字符，硬上限 12,000；artifact 路径本身超额时以省略计数代替。`delegate_task` 外部化阈值同步为 12,000 字符，普通工具与 Bash 阈值不变。
+  - 异步 completion 不再被旧 2,000 字符逻辑二次截断，回灌时按失败、partial、artifact、普通完成顺序排列。验证：相关 10 个集成文件 83 项通过；typecheck、lint、build、TUI/package smoke 和 audit 通过；独立复审无 P0/P1。
   - Codex 嵌入终端在启动 CPR 失败时不再直接相信过期 PTY 网格，临时使用不超过 PTY 的产品最小 60×12 网格，后续 resize/CPR 成功后恢复真实尺寸。
   - 新增 production frame 集成场景，覆盖 CPR 失败、尺寸漂移、Main + 4 子代理、长任务名与连续流式更新，断言无物理换行、无 scrollback 污染且内容只显示一次。
 
