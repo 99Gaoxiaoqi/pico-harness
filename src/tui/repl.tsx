@@ -125,6 +125,7 @@ import {
   createToolInspectorSource,
 } from "./inspector.js";
 import { copyTextToClipboard, locateFileInShell } from "./system-actions.js";
+import { imagePasteShortcutLabel } from "./system-actions.js";
 import { fileHistoryChanges, fileHistoryRestoreFile } from "../safety/file-history.js";
 import { createChangesDialogRequest, createChangesPanelModel } from "./changes-panel.js";
 import { TaskHostRuntime } from "../tasks/task-runtime.js";
@@ -1382,6 +1383,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         dialogRequests={dialogRequests}
         inputReplacement={inputReplacement}
         redrawBlank={redrawBlank}
+        imagePasteShortcutLabel={imagePasteShortcutLabel()}
         onSubmit={(submission) => void submitTracked(submission)}
         onInspectTool={(toolCallId) => {
           const current = activeBundleRef.current;
