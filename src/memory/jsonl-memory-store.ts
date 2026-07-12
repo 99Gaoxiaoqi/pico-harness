@@ -4,11 +4,16 @@ import type {
   MemoryBackendStatus,
   MemorySearchResult,
 } from "./memory-store.js";
+import {
+  DEFAULT_MEMORY_SEARCH_LIMIT,
+  MAX_MEMORY_SEARCH_LIMIT,
+  normalizeMemorySearchLimit,
+} from "./memory-store.js";
 
 export const DEFAULT_JSONL_MEMORY_MAX_ENTRIES = 10_000;
 export const DEFAULT_JSONL_MEMORY_MAX_CONTENT_LENGTH = 32_000;
-export const DEFAULT_JSONL_MEMORY_SEARCH_LIMIT = 10;
-export const MAX_JSONL_MEMORY_SEARCH_LIMIT = 100;
+export const DEFAULT_JSONL_MEMORY_SEARCH_LIMIT = DEFAULT_MEMORY_SEARCH_LIMIT;
+export const MAX_JSONL_MEMORY_SEARCH_LIMIT = MAX_MEMORY_SEARCH_LIMIT;
 
 export interface JsonlMemoryStoreOptions {
   maxEntries?: number;
@@ -93,7 +98,7 @@ export class JsonlMemoryStore implements ConversationSearchStore {
     if (!normalizedQuery) return [];
 
     const tokens = uniqueTokens(normalizedQuery);
-    const effectiveLimit = clampLimit(limit);
+    const effectiveLimit = normalizeMemorySearchLimit(limit);
     const scored: ScoredMessage[] = [];
 
     for (const entry of this.entries) {
@@ -142,11 +147,6 @@ export class JsonlMemoryStore implements ConversationSearchStore {
 function positiveInteger(value: number | undefined, fallback: number): number {
   if (value === undefined || !Number.isFinite(value) || value <= 0) return fallback;
   return Math.max(1, Math.trunc(value));
-}
-
-function clampLimit(limit: number): number {
-  if (!Number.isFinite(limit)) return DEFAULT_JSONL_MEMORY_SEARCH_LIMIT;
-  return Math.min(MAX_JSONL_MEMORY_SEARCH_LIMIT, Math.max(1, Math.trunc(limit)));
 }
 
 function normalize(value: string): string {
