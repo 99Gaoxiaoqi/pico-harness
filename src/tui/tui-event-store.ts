@@ -226,7 +226,7 @@ export type TuiEvent =
       readonly type: "assistant.stream.interrupted";
       readonly entryId: string;
       readonly streamId: string;
-      readonly reason: "new-request" | "clear" | "truncate";
+      readonly reason: "new-request" | "clear" | "truncate" | "abort";
     })
   | (TuiEventBase & {
       readonly type: "assistant.response.suppressed";
