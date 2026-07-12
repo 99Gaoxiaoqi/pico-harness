@@ -402,6 +402,7 @@ export async function handleTuiRunningInputSubmission(
     { ...deps, commandAvailabilityState: availabilityState },
     gen,
     { drainAfter: true },
+    attachments,
   );
 }
 
@@ -411,14 +412,19 @@ async function runProcessedAgentInput(
   deps: HandleTuiRunningInputSubmissionDeps,
   gen: number,
   options: { drainAfter: boolean },
+  attachments: readonly ImagePart[] = [],
 ): Promise<void> {
   const controller = new AbortController();
   if (deps.abortControllerRef) deps.abortControllerRef.current = controller;
   try {
-    await handleTuiInputSubmission(text, {
-      ...deps,
-      processInput: async () => processed,
-    });
+    await handleTuiInputSubmission(
+      text,
+      {
+        ...deps,
+        processInput: async () => processed,
+      },
+      attachments,
+    );
   } finally {
     const drainAfterAbort =
       !controller.signal.aborted ||
