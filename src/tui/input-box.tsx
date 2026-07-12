@@ -23,6 +23,7 @@ import {
 import type { ActiveSuggestionSession, InputSuggestion } from "./suggestions.js";
 import { SuggestionList } from "./suggestions.js";
 import type { UserKeybindingConfig } from "./keybindings/resolver.js";
+import { isImagePasteShortcut as isPlatformImagePasteShortcut } from "./system-actions.js";
 import {
   droppedImagePaths,
   imageAttachmentFromClipboard,
@@ -125,7 +126,7 @@ export function InputBox({
 
   useInput((input, key) => {
     if (acceptsInput && !acceptsInput(input, key)) return;
-    if (isImagePasteShortcut(input, key)) {
+    if (isPlatformImagePasteShortcut(input, { ctrl: key.ctrl, alt: key.meta })) {
       void attachImage(() => imageAttachmentFromClipboard());
       return;
     }
@@ -319,10 +320,6 @@ export function InputBox({
       {!disabled && <SuggestionList session={activeSuggestions} />}
     </Box>
   );
-}
-
-function isImagePasteShortcut(input: string, key: InputKey): boolean {
-  return key.ctrl === true && (input === "v" || input === "V" || input === "\u0016");
 }
 
 function scheduleAsyncSuggestions({
