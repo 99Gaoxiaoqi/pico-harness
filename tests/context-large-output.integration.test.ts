@@ -182,30 +182,38 @@ describe("large ToolResult artifact externalization", () => {
     await safeRm(workDir);
   });
 
-  it("delegate_task 超过 10000 字符时外部化，普通工具仍保持 50000 阈值", async () => {
+  it("delegate_task 在 12000 字符内直通，12001 才外部化", async () => {
     const store = new ToolResultArtifactStore({
       baseDir: join(workDir, ".claw", "artifacts"),
     });
     const processor = createToolResultObservationProcessor({ store });
-    const output = "x".repeat(10_001);
-    const result: ToolResult = { toolCallId: "large", output, isError: false };
+    const withinBudget = "x".repeat(12_000);
+    const overBudget = "x".repeat(12_001);
+    const result: ToolResult = { toolCallId: "large", output: overBudget, isError: false };
 
-    const delegateObservation = await processor({
+    const withinBudgetObservation = await processor({
+      toolCall: { id: "delegate-within-budget", name: "delegate_task", arguments: "{}" },
+      result,
+      output: withinBudget,
+      sessionId: "delegate-threshold",
+    });
+    const overBudgetObservation = await processor({
       toolCall: { id: "delegate-large", name: "delegate_task", arguments: "{}" },
       result,
-      output,
+      output: overBudget,
       sessionId: "delegate-threshold",
     });
     const ordinaryObservation = await processor({
       toolCall: { id: "ordinary-large", name: "extension_tool", arguments: "{}" },
       result,
-      output,
+      output: overBudget,
       sessionId: "ordinary-threshold",
     });
 
-    expect(delegateObservation).toContain("[大型工具输出已外部化]");
-    expect(delegateObservation).toContain("tool: delegate_task");
-    expect(ordinaryObservation).toBe(output);
+    expect(withinBudgetObservation).toBe(withinBudget);
+    expect(overBudgetObservation).toContain("[大型工具输出已外部化]");
+    expect(overBudgetObservation).toContain("tool: delegate_task");
+    expect(ordinaryObservation).toBe(overBudget);
   });
 
   it("Bash 完整落盘大输出后可用 read_file 分页读取且不再外部化", async () => {

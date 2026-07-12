@@ -1,6 +1,7 @@
 import type { BaseTool } from "./registry.js";
 import type { ToolDefinition } from "../schema/message.js";
 import { TaskRegistry } from "../tasks/task-registry.js";
+import { SUBAGENT_OUTPUT_BUDGET } from "./subagent-budget.js";
 
 export type DelegationResultStatus = "completed" | "partial" | "error" | "timed_out" | "cancelled";
 
@@ -150,7 +151,8 @@ export class DelegationManager {
   constructor(options: DelegationManagerOptions = {}) {
     this.maxConcurrentChildren = options.maxConcurrentChildren ?? 3;
     this.maxAsyncChildren = options.maxAsyncChildren ?? 3;
-    this.maxOutputSummaryChars = options.maxOutputSummaryChars ?? 2_000;
+    this.maxOutputSummaryChars =
+      options.maxOutputSummaryChars ?? SUBAGENT_OUTPUT_BUDGET.batch.hardMax;
     this.taskRegistry = options.taskRegistry;
     this.onCompletion = options.onCompletion;
   }
@@ -320,10 +322,24 @@ export class DelegationManager {
 
   private outputSummary(record: DelegationRecord): string {
     if (record.result) {
-      const lines = record.result.results.map((result) => {
-        const detail = result.summary ?? result.error ?? "";
-        return `task ${result.taskIndex} ${result.status}: ${detail}`;
-      });
+      const orderedResults = record.result.results.toSorted(
+        (left, right) =>
+          delegationCompletionPriority(left) - delegationCompletionPriority(right) ||
+          left.taskIndex - right.taskIndex,
+      );
+      const hasChildFailureDetail = orderedResults.some((result) => result.error?.trim());
+      const lines = [
+        ...(record.error && !hasChildFailureDetail
+          ? [`batch ${record.status}: ${record.error}`]
+          : []),
+        ...orderedResults.map(formatDelegationCompletionResult),
+        ...(record.result.omittedResults
+          ? [`omittedResults: ${record.result.omittedResults}`]
+          : []),
+        ...(record.result.omittedArtifacts
+          ? [`omittedArtifacts: ${record.result.omittedArtifacts}`]
+          : []),
+      ];
       return truncateSummary(lines.join("\n"), this.maxOutputSummaryChars);
     }
     if (record.error) {
@@ -411,10 +427,33 @@ export function aggregateDelegationStatus(
 export function normalizeDelegationBatchResult(
   result: Omit<DelegationBatchResult, "status"> & { status?: DelegationBatchStatus },
 ): DelegationBatchResult {
+  const preservedOmittedStatus =
+    result.results.length === 0 && (result.omittedResults ?? 0) > 0 && result.status !== undefined
+      ? result.status
+      : undefined;
   return {
     ...result,
-    status: aggregateDelegationStatus(result.results),
+    status: preservedOmittedStatus ?? aggregateDelegationStatus(result.results),
   };
+}
+
+function delegationCompletionPriority(result: DelegationResult): number {
+  if (result.status === "error" || result.status === "timed_out" || result.status === "cancelled") {
+    return 0;
+  }
+  if (result.status === "partial") return 1;
+  if ((result.artifacts?.length ?? 0) > 0) return 2;
+  return 3;
+}
+
+function formatDelegationCompletionResult(result: DelegationResult): string {
+  const lines = [`task ${result.taskIndex} ${result.status}:`];
+  if (result.artifacts?.length) {
+    lines.push("artifacts:", ...result.artifacts.map((artifact) => `- ${artifact}`));
+  }
+  const detail = result.error ?? result.summary;
+  if (detail) lines.push(detail);
+  return lines.join("\n");
 }
 
 function batchFailureMessage(result: DelegationBatchResult): string | undefined {
@@ -441,7 +480,17 @@ function truncateSummary(value: string, maxChars: number): string {
   if (value.length <= maxChars) return value;
   const marker = "\n[truncated]";
   if (maxChars <= marker.length) return marker.slice(0, Math.max(0, maxChars));
-  return value.slice(0, maxChars - marker.length) + marker;
+  return sliceUtf16Safe(value, maxChars - marker.length) + marker;
+}
+
+function sliceUtf16Safe(value: string, maxChars: number): string {
+  let end = Math.max(0, Math.min(value.length, maxChars));
+  if (end > 0 && end < value.length) {
+    const previous = value.charCodeAt(end - 1);
+    const next = value.charCodeAt(end);
+    if (previous >= 0xd800 && previous <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) end--;
+  }
+  return value.slice(0, end);
 }
 
 export class DelegateStatusTool implements BaseTool {

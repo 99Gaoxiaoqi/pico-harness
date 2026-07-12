@@ -30,6 +30,7 @@ import {
   ScopedSubagentActivityReporter,
   type SubagentActivityScope,
 } from "./subagent-activity-reporter.js";
+import { SUBAGENT_OUTPUT_BUDGET } from "./subagent-budget.js";
 
 /**
  * AgentRunner:打破循环依赖的抽象接口。
@@ -49,6 +50,18 @@ export interface SubagentResult {
   summary: string;
   artifacts: string[];
 }
+
+export interface SubagentReportArtifactInput {
+  taskPrompt: string;
+  report: string;
+  status: "completed" | "partial";
+  workDir: string;
+}
+
+/** 宿主注入的完整子代理报告写入器；返回可供主 Agent 回查的路径。 */
+export type SubagentReportArtifactWriter = (
+  input: SubagentReportArtifactInput,
+) => Promise<string | undefined>;
 
 export interface AgentRunner {
   /**
@@ -147,8 +160,6 @@ interface NormalizedDelegateTask {
   contractExplicit: boolean;
 }
 
-const SUBAGENT_SUMMARY_MAX_CHARS = 5_000;
-const REQUIRED_DELEGATION_TEXT_BUDGET_CHARS = 10_000;
 const DEFAULT_DELEGATION_ROOTS = ["."];
 const DEFAULT_DELEGATION_MAX_FILES = 30;
 const MAX_DELEGATION_FILES = 100;
@@ -396,17 +407,14 @@ export class DelegateTaskTool implements BaseTool {
     // 不会进入下一次推理，也就不可能提前结束整轮。
     if (completionPolicy === "required") {
       return JSON.stringify(
-        capDelegationBatchText(
-          await this.runBatch(tasks, activities, depth, maxSpawnDepth, context?.signal),
-          REQUIRED_DELEGATION_TEXT_BUDGET_CHARS,
-        ),
+        await this.runBudgetedBatch(tasks, activities, depth, maxSpawnDepth, context?.signal),
       );
     }
 
     let dispatch: ReturnType<DelegationManager["dispatch"]>;
     try {
       dispatch = this.manager.dispatch(
-        (signal) => this.runBatch(tasks, activities, depth, maxSpawnDepth, signal),
+        (signal) => this.runBudgetedBatch(tasks, activities, depth, maxSpawnDepth, signal),
         {
           completionPolicy,
           description: summarizeDelegation(tasks),
@@ -434,6 +442,18 @@ export class DelegateTaskTool implements BaseTool {
       count: tasks.length,
       ...(dispatch.error !== undefined ? { error: dispatch.error } : {}),
     });
+  }
+
+  private async runBudgetedBatch(
+    tasks: NormalizedDelegateTask[],
+    activities: SubagentActivityScope[],
+    depth: number,
+    maxSpawnDepth: number,
+    signal?: AbortSignal,
+  ): Promise<DelegationBatchResult> {
+    return capDelegationBatchText(
+      await this.runBatch(tasks, activities, depth, maxSpawnDepth, signal),
+    );
   }
 
   private async runBatch(
@@ -516,12 +536,12 @@ export class DelegateTaskTool implements BaseTool {
     if (result.status === "completed") {
       result = {
         ...result,
-        summary: truncateWithMarker(result.summary ?? "", SUBAGENT_SUMMARY_MAX_CHARS),
+        summary: truncateWithMarker(result.summary ?? "", SUBAGENT_OUTPUT_BUDGET.summary.hardMax),
       };
     } else if (result.status === "partial" && result.summary !== undefined) {
       result = {
         ...result,
-        summary: truncateWithMarker(result.summary, SUBAGENT_SUMMARY_MAX_CHARS),
+        summary: truncateWithMarker(result.summary, SUBAGENT_OUTPUT_BUDGET.summary.hardMax),
       };
     }
     this.emitResultActivity(activity, result);
@@ -791,27 +811,40 @@ function formatSubagentReport(header: string, result: SubagentResult): string {
 function capSubagentResult(result: SubagentResult): SubagentResult {
   return {
     ...result,
-    summary: truncateWithMarker(result.summary, SUBAGENT_SUMMARY_MAX_CHARS),
+    summary: truncateWithMarker(result.summary, SUBAGENT_OUTPUT_BUDGET.summary.hardMax),
   };
 }
 
+type DelegationTextPriority = 1 | 2 | 3 | 4;
+
+interface DelegationTextField {
+  resultIndex: number;
+  key: "summary" | "error";
+  value: string;
+  priority: DelegationTextPriority;
+  protectedChars: number;
+  preferredChars: number;
+}
+
 /**
- * required 批量委派先保留状态和耗时，再将剩余预算在
- * summary/error 之间公平分配。artifact 路径本身导致结构超额时，
- * 只返回省略计数；极端大批次连最小结果结构都容纳不下时，改为返回
- * 省略的结果数。这样 JSON.stringify 后的实际工具结果始终不超过总预算。
+ * 批量委派的正常结果按 6k–8k 动态软目标收口。12k 只是硬熔断：
+ * 在软目标容纳不下失败原因、partial 证据或 artifact 引用时才使用。
+ * 状态和耗时始终保留，文本按“失败 > partial > 带证据完成 > 普通完成”
+ * 分配，避免长日志与关键证据被等额切割。
  */
-function capDelegationBatchText(
-  batch: DelegationBatchResult,
-  totalBudget: number,
-): DelegationBatchResult {
+function capDelegationBatchText(batch: DelegationBatchResult): DelegationBatchResult {
+  const { softMin, softMax, hardMax } = SUBAGENT_OUTPUT_BUDGET.batch;
+  const serializedChars = JSON.stringify(batch).length;
+  const softTarget = calculateDelegationSoftTarget(batch, softMin, softMax);
+  if (serializedChars <= softTarget) return batch;
+
   const textFields = batch.results.flatMap((result, resultIndex) => {
-    const fields: Array<{ resultIndex: number; key: "summary" | "error"; value: string }> = [];
+    const fields: DelegationTextField[] = [];
     if (result.summary !== undefined) {
-      fields.push({ resultIndex, key: "summary", value: result.summary });
+      fields.push(buildDelegationTextField(result, resultIndex, "summary", result.summary));
     }
     if (result.error !== undefined) {
-      fields.push({ resultIndex, key: "error", value: result.error });
+      fields.push(buildDelegationTextField(result, resultIndex, "error", result.error));
     }
     return fields;
   });
@@ -822,7 +855,7 @@ function capDelegationBatchText(
 
   let omittedArtifacts = 0;
   let structuralBatch: DelegationBatchResult = { ...batch, results };
-  if (JSON.stringify(structuralBatch).length > totalBudget) {
+  if (JSON.stringify(structuralBatch).length > hardMax) {
     omittedArtifacts = results.reduce(
       (count, result) => count + (result.artifacts?.length ?? 0),
       0,
@@ -835,20 +868,19 @@ function capDelegationBatchText(
     };
   }
 
-  if (JSON.stringify(structuralBatch).length > totalBudget) {
-    return {
-      status: batch.status,
-      results: [],
-      totalDurationMs: batch.totalDurationMs,
-      omittedResults: batch.results.length,
-      ...(omittedArtifacts > 0 ? { omittedArtifacts } : {}),
-    };
+  if (JSON.stringify(structuralBatch).length > hardMax) {
+    return omitDelegationResults(batch, omittedArtifacts);
   }
 
   const fixedChars = JSON.stringify(structuralBatch).length;
-  const budgets = allocateFairTextBudgets(
-    textFields.map((field) => jsonStringPayloadChars(field.value)),
-    Math.max(0, totalBudget - fixedChars),
+  const protectedChars = textFields.reduce(
+    (sum, field) => sum + Math.min(jsonStringPayloadChars(field.value), field.protectedChars),
+    0,
+  );
+  const effectiveTarget = Math.min(hardMax, Math.max(softTarget, fixedChars + protectedChars));
+  const budgets = allocatePriorityTextBudgets(
+    textFields,
+    Math.max(0, effectiveTarget - fixedChars),
   );
   for (let index = 0; index < textFields.length; index++) {
     const field = textFields[index]!;
@@ -857,7 +889,171 @@ function capDelegationBatchText(
       budgets[index] ?? 0,
     );
   }
-  return { ...structuralBatch, results };
+  const capped = { ...structuralBatch, results };
+  if (JSON.stringify(capped).length <= hardMax) return capped;
+
+  logger.warn(
+    { hardMax, actualChars: JSON.stringify(capped).length },
+    "[Subagent] 批量委派结果超出硬上限，已启用结构化降级。",
+  );
+  return omitDelegationResults(batch, omittedArtifacts);
+}
+
+function calculateDelegationSoftTarget(
+  batch: DelegationBatchResult,
+  softMin: number,
+  softMax: number,
+): number {
+  const nonCompleted = batch.results.filter((result) => result.status !== "completed").length;
+  const withArtifacts = batch.results.filter(
+    (result) => (result.artifacts?.length ?? 0) > 0,
+  ).length;
+  const resultAllowance = Math.min(1_200, batch.results.length * 200);
+  const evidenceAllowance = nonCompleted * 400 + withArtifacts * 200;
+  return Math.min(softMax, softMin + resultAllowance + evidenceAllowance);
+}
+
+function buildDelegationTextField(
+  result: DelegationResult,
+  resultIndex: number,
+  key: "summary" | "error",
+  value: string,
+): DelegationTextField {
+  if (key === "error" || !["completed", "partial"].includes(result.status)) {
+    return {
+      resultIndex,
+      key,
+      value,
+      priority: 4,
+      protectedChars: 800,
+      preferredChars: 1_500,
+    };
+  }
+  if (result.status === "partial") {
+    return {
+      resultIndex,
+      key,
+      value,
+      priority: 3,
+      protectedChars: 1_200,
+      preferredChars: 2_200,
+    };
+  }
+  if ((result.artifacts?.length ?? 0) > 0) {
+    return {
+      resultIndex,
+      key,
+      value,
+      priority: 2,
+      protectedChars: 900,
+      preferredChars: 1_800,
+    };
+  }
+  return {
+    resultIndex,
+    key,
+    value,
+    priority: 1,
+    protectedChars: 400,
+    preferredChars: 1_200,
+  };
+}
+
+function allocatePriorityTextBudgets(
+  fields: readonly DelegationTextField[],
+  totalBudget: number,
+): number[] {
+  const lengths = fields.map((field) => jsonStringPayloadChars(field.value));
+  const budgets = new Array<number>(fields.length).fill(0);
+  let remaining = totalBudget;
+
+  remaining = grantTowardTargets(
+    budgets,
+    lengths.map((length) => Math.min(length, 120)),
+    fields.map((_, index) => index),
+    remaining,
+  );
+
+  for (const priority of [4, 3, 2, 1] as const) {
+    const indices = fields.flatMap((field, index) => (field.priority === priority ? [index] : []));
+    remaining = grantTowardTargets(
+      budgets,
+      fields.map((field, index) => Math.min(lengths[index]!, field.protectedChars)),
+      indices,
+      remaining,
+    );
+  }
+
+  for (const priority of [4, 3, 2, 1] as const) {
+    const indices = fields.flatMap((field, index) => (field.priority === priority ? [index] : []));
+    remaining = grantTowardTargets(
+      budgets,
+      fields.map((field, index) => Math.min(lengths[index]!, field.preferredChars)),
+      indices,
+      remaining,
+    );
+  }
+
+  allocateWeightedRemainder(budgets, lengths, fields, remaining);
+  return budgets;
+}
+
+function grantTowardTargets(
+  budgets: number[],
+  targets: readonly number[],
+  indices: readonly number[],
+  remaining: number,
+): number {
+  if (remaining <= 0 || indices.length === 0) return remaining;
+  const capacities = indices.map((index) => Math.max(0, targets[index]! - budgets[index]!));
+  const grants = allocateFairTextBudgets(capacities, remaining);
+  let spent = 0;
+  for (let offset = 0; offset < indices.length; offset++) {
+    const grant = grants[offset] ?? 0;
+    budgets[indices[offset]!]! += grant;
+    spent += grant;
+  }
+  return Math.max(0, remaining - spent);
+}
+
+function allocateWeightedRemainder(
+  budgets: number[],
+  lengths: readonly number[],
+  fields: readonly DelegationTextField[],
+  initialRemaining: number,
+): void {
+  let remaining = initialRemaining;
+  while (remaining > 0) {
+    const active = fields
+      .map((field, index) => ({ field, index }))
+      .filter(({ index }) => budgets[index]! < lengths[index]!);
+    if (active.length === 0) return;
+    const totalWeight = active.reduce((sum, { field }) => sum + field.priority, 0);
+    const unit = Math.max(1, Math.floor(remaining / totalWeight));
+    let spent = 0;
+    for (const { field, index } of active) {
+      if (remaining - spent <= 0) break;
+      const capacity = lengths[index]! - budgets[index]!;
+      const grant = Math.min(capacity, unit * field.priority, remaining - spent);
+      budgets[index]! += grant;
+      spent += grant;
+    }
+    if (spent === 0) return;
+    remaining -= spent;
+  }
+}
+
+function omitDelegationResults(
+  batch: DelegationBatchResult,
+  omittedArtifacts: number,
+): DelegationBatchResult {
+  return {
+    status: batch.status,
+    results: [],
+    totalDurationMs: batch.totalDurationMs,
+    omittedResults: batch.results.length,
+    ...(omittedArtifacts > 0 ? { omittedArtifacts } : {}),
+  };
 }
 
 function truncateForJsonBudget(value: string, payloadBudget: number): string {
@@ -869,17 +1065,20 @@ function truncateForJsonBudget(value: string, payloadBudget: number): string {
     return jsonStringPayloadChars("…") <= payloadBudget ? "…" : "";
   }
 
+  const codePoints = Array.from(value);
   let low = 0;
-  let high = value.length;
+  let high = codePoints.length;
   while (low < high) {
     const middle = Math.ceil((low + high) / 2);
-    if (jsonStringPayloadChars(`${value.slice(0, middle)}${marker}`) <= payloadBudget) {
+    if (
+      jsonStringPayloadChars(`${codePoints.slice(0, middle).join("")}${marker}`) <= payloadBudget
+    ) {
       low = middle;
     } else {
       high = middle - 1;
     }
   }
-  return `${value.slice(0, low)}${marker}`;
+  return `${codePoints.slice(0, low).join("")}${marker}`;
 }
 
 function jsonStringPayloadChars(value: string): number {
@@ -917,7 +1116,19 @@ function truncateWithMarker(value: string, maxChars: number): string {
   if (marker.length >= maxChars) {
     return "[已截断]".slice(0, maxChars);
   }
-  return `${value.slice(0, maxChars - marker.length)}${marker}`;
+  return `${sliceUtf16Safe(value, maxChars - marker.length)}${marker}`;
+}
+
+function sliceUtf16Safe(value: string, maxChars: number): string {
+  let end = Math.max(0, Math.min(value.length, maxChars));
+  if (end > 0 && end < value.length) {
+    const previous = value.charCodeAt(end - 1);
+    const next = value.charCodeAt(end);
+    if (previous >= 0xd800 && previous <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) {
+      end--;
+    }
+  }
+  return value.slice(0, end);
 }
 
 function parseDelegateArgs(args: string): DelegateTaskArgs {

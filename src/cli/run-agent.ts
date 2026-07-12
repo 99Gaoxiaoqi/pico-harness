@@ -32,12 +32,20 @@ import { ExitPlanModeTool } from "../tools/plan-exit.js";
 import { DelegationManager, DelegateStatusTool } from "../tools/delegation-manager.js";
 import { createSubagentRegistryFactory } from "../tools/delegation-registry.js";
 import { AgentProfileLoader, type AgentProfile } from "../tools/agent-profile.js";
-import { DelegateTaskTool, SpawnSubagentTool } from "../tools/subagent.js";
-import { createToolResultObservationProcessor } from "../tools/tool-result-observation.js";
+import {
+  DelegateTaskTool,
+  SpawnSubagentTool,
+  type SubagentReportArtifactWriter,
+} from "../tools/subagent.js";
+import {
+  createToolResultObservationProcessor,
+  type ToolObservationProcessor,
+} from "../tools/tool-result-observation.js";
 import { CostTracker } from "../observability/tracker.js";
 import type { BillingRoute } from "../observability/pricing.js";
 import type { ModelRouteCapabilities } from "../provider/model-capabilities.js";
 import { Tracer } from "../observability/trace.js";
+import { logger } from "../observability/logger.js";
 import {
   globalApprovalManager,
   isAgentOpsDangerousCommand,
@@ -312,7 +320,7 @@ export async function runAgentFromCli(
   if (hooksConfig) {
     registry.setHookRunner?.(new HookRunner(workDir, hooksConfig));
   }
-  const observationProcessor = buildObservationProcessor(workDir);
+  const artifactRuntime = buildArtifactRuntime(workDir, session.id);
   // Inject steer text into the session-scoped queue before the next provider turn.
   const steerQueue = runtimeState.steerQueue;
   if (options.steer) {
@@ -352,7 +360,8 @@ export async function runAgentFromCli(
       provider: trackedProvider,
       ...(auxProvider ? { auxProvider } : {}),
     }),
-    observationProcessor,
+    observationProcessor: artifactRuntime.observationProcessor,
+    subagentReportArtifactWriter: artifactRuntime.subagentReportArtifactWriter,
     reporter,
     tracer: traceEnabled ? new Tracer() : undefined,
     steerQueue,
@@ -699,11 +708,47 @@ function loadAuxProvider(env: RunAgentEnv): LLMProvider | undefined {
   return createProvider(kind, { baseURL, apiKey, model });
 }
 
-function buildObservationProcessor(workDir: string) {
+function buildArtifactRuntime(
+  workDir: string,
+  sessionId: string,
+): {
+  observationProcessor: ToolObservationProcessor;
+  subagentReportArtifactWriter: SubagentReportArtifactWriter;
+} {
   const store = new ToolResultArtifactStore({
     baseDir: join(workDir, ".claw", "artifacts"),
   });
-  return createToolResultObservationProcessor({ store });
+  const subagentReportArtifactWriter: SubagentReportArtifactWriter = async (input) => {
+    const meta = await store.write({
+      sessionId,
+      toolName: "subagent_report",
+      args: {
+        taskPrompt: input.taskPrompt,
+        status: input.status,
+        workDir: input.workDir,
+      },
+      output: input.report,
+      summary: `子代理 ${input.status} 完整报告，${input.report.length} 字符`,
+      pinned: input.status === "partial",
+    });
+    try {
+      const cleanup = await store.cleanup();
+      if (cleanup.deleted.includes(meta.id)) {
+        logger.warn(
+          { artifactId: meta.id },
+          "[Subagent] 完整报告因 artifact 全局配额被清理，回退到内联摘要。",
+        );
+        return undefined;
+      }
+    } catch (error) {
+      logger.warn({ error }, "[Subagent] 完整报告 artifact cleanup 失败");
+    }
+    return meta.path;
+  };
+  return {
+    observationProcessor: createToolResultObservationProcessor({ store }),
+    subagentReportArtifactWriter,
+  };
 }
 
 export function buildApprovalMiddleware(
