@@ -6,7 +6,7 @@
 
 import { access } from "node:fs/promises";
 import type React from "react";
-import { useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { render, Text, useApp, useInput, type Instance, type RenderOptions } from "ink";
 import { App } from "./app.js";
 import type { DialogRequest } from "./dialog-arbiter.js";
@@ -107,7 +107,11 @@ import {
   InteractiveApprovalPanel,
   type ApprovalPanelAction,
 } from "./approval-panel.js";
-import { createTuiRuntimeState, type TuiRuntimeState } from "./runtime-state.js";
+import {
+  createTuiRuntimeState,
+  DelegationWakeCoordinator,
+  type TuiRuntimeState,
+} from "./runtime-state.js";
 import { createTuiTerminalGridSession } from "./terminal-grid.js";
 import { hydrateTuiReporter } from "./session-hydration.js";
 import { projectTuiEntriesForRendering } from "./tui-event-store.js";
@@ -159,7 +163,10 @@ export interface HandleTuiInputSubmissionDeps {
   reporter: TuiReporter;
   registry: CommandRegistry;
   workDir: string;
-  runAgent: (prompt: string, options?: { images?: ImagePart[] }) => Promise<void>;
+  runAgent: (
+    prompt: string,
+    options?: { images?: ImagePart[]; resumeExistingSession?: boolean },
+  ) => Promise<void>;
   setRewindContext?: (context: { prompt: string; transcriptIndex: number }) => void;
   exit: () => void;
   processInput?: (text: string) => Promise<TuiInputProcessResult>;
@@ -652,6 +659,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
   let shuttingDown = false;
   const pendingSessionSwitches = new Set<Promise<void>>();
   const pendingTuiSubmissions = new Set<Promise<void>>();
+  const pendingDelegationWakes = new Set<Promise<void>>();
   const pendingTuiDialogActions = new Set<Promise<unknown>>();
   let activeAbortControllerRef: TuiAbortControllerRef | undefined;
   const unsubscribeMcpStatus = sharedMcpManager.subscribe((snapshot) => {
@@ -859,6 +867,8 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     const switchingRef = useRef(false);
     const historyPreparationRef = useRef(false);
     const historyMutationRef = useRef(false);
+    const runningInputDepsRef = useRef<HandleTuiRunningInputSubmissionDeps | null>(null);
+    const delegationWakeRef = useRef<DelegationWakeCoordinator | null>(null);
     const status = useSyncExternalStore(guard.subscribe, guard.getSnapshot);
     const running = status !== "idle"; // 派生:非 idle 即视为运行中
     const trackDialogAction = <T,>(action: () => Promise<T>): Promise<T> => {
@@ -870,6 +880,58 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
       );
       return operation;
     };
+
+    useEffect(() => {
+      const current = bundle;
+      const coordinator = new DelegationWakeCoordinator({
+        queue: current.runtimeState.delegationCompletionQueue,
+        isIdle: () =>
+          !shuttingDown &&
+          !switchingRef.current &&
+          !historyPreparationRef.current &&
+          !historyMutationRef.current &&
+          activeBundleRef.current === current &&
+          guard.getSnapshot() === "idle" &&
+          runningInputDepsRef.current !== null,
+        resume: async () => {
+          const deps = runningInputDepsRef.current;
+          if (!deps) throw new Error("Delegation wake has no active TUI runtime dependencies");
+          const generation = guard.tryStart();
+          if (generation === null) {
+            throw new Error("Delegation wake lost the idle runtime reservation");
+          }
+
+          const operation = (async () => {
+            try {
+              await deps.runAgent("", { resumeExistingSession: true });
+            } finally {
+              sharedMcpManager.attachRegistry(current.toolRegistry);
+              setSessionTools(current.settings, toolStatusFromRegistry(current.toolRegistry));
+              current.runtimeState.fileIndex.markDirty();
+              if (guard.end(generation)) await drainQueuedTuiInputs(deps);
+            }
+          })();
+          pendingDelegationWakes.add(operation);
+          try {
+            await operation;
+          } finally {
+            pendingDelegationWakes.delete(operation);
+          }
+        },
+        onError: (error) => {
+          if (activeBundleRef.current === current) appendTuiRunError(current.reporter, error);
+        },
+      });
+      delegationWakeRef.current = coordinator;
+      return () => {
+        coordinator.dispose();
+        if (delegationWakeRef.current === coordinator) delegationWakeRef.current = null;
+      };
+    }, [bundle, guard]);
+
+    useEffect(() => {
+      if (status === "idle") delegationWakeRef.current?.notifyIdle();
+    }, [bundle, status]);
 
     const switchSession = async (request: ResumeSessionCommandData): Promise<void> => {
       const operation = (async () => {
@@ -934,6 +996,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
           activeBundleRef.current = next;
           activeBundle = next;
           runningQueue.clear();
+          runningInputDepsRef.current = null;
           rewindContextRef.current = null;
           setDialogRequests([]);
           setInputReplacement(undefined);
@@ -1107,7 +1170,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         setDialogRequests((items) => [...items.filter((item) => item.id !== request.id), request]);
       };
       try {
-        await handleTuiRunningInputSubmission(text, {
+        const submissionDeps: HandleTuiRunningInputSubmissionDeps = {
           reporter,
           guard,
           queue: runningQueue,
@@ -1165,10 +1228,11 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
             />
           ),
           runAgent: async (prompt, runOptions) => {
+            const resumeExistingSession = runOptions?.resumeExistingSession === true;
             const reasoningLevel = effectiveSessionReasoningLevel(settings, modelRouter);
             const activeRoute = modelRouter.providerConfig(settings.modelRouteId, reasoningLevel);
-            const rewindContext = rewindContextRef.current;
-            rewindContextRef.current = null;
+            const rewindContext = resumeExistingSession ? null : rewindContextRef.current;
+            if (!resumeExistingSession) rewindContextRef.current = null;
             const cliOpts: RunAgentCliOptions = {
               prompt,
               provider: activeRoute.provider,
@@ -1214,9 +1278,12 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
                 setSessionTools(settings, tools);
               },
               abortControllerRef,
+              ...(resumeExistingSession ? { resumeExistingSession: true } : {}),
             });
           },
-        });
+        };
+        runningInputDepsRef.current = submissionDeps;
+        await handleTuiRunningInputSubmission(text, submissionDeps);
       } catch (err) {
         appendTuiRunError(reporter, err);
       } finally {
@@ -1349,6 +1416,9 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     activeAbortControllerRef?.current?.abort(new DOMException("TUI shutting down", "AbortError"));
     while (pendingTuiSubmissions.size > 0) {
       await Promise.allSettled([...pendingTuiSubmissions]);
+    }
+    while (pendingDelegationWakes.size > 0) {
+      await Promise.allSettled([...pendingDelegationWakes]);
     }
     while (pendingSessionSwitches.size > 0) {
       await Promise.allSettled([...pendingSessionSwitches]);
@@ -1586,6 +1656,8 @@ export async function runTuiAgentPrompt(
     closeDialog?: (id: string) => void;
     runAgent?: TuiRunAgent;
     abortControllerRef?: TuiAbortControllerRef;
+    /** 内部 completion 续跑：复用现有 Session，不追加或伪装用户输入。 */
+    resumeExistingSession?: boolean;
   },
 ): Promise<void> {
   if (deps.askUserHandler && (!deps.openDialog || !deps.closeDialog)) {
@@ -1613,7 +1685,7 @@ export async function runTuiAgentPrompt(
   controller.signal.addEventListener("abort", closeApprovalOnAbort, { once: true });
   if (deps.abortControllerRef && ownsControllerSlot) deps.abortControllerRef.current = controller;
   try {
-    const result = await (deps.runAgent ?? runAgentFromCli)(cliOpts, {
+    const runDependencies: RunAgentCliDependencies & { resumeExistingSession?: boolean } = {
       reporter: deps.reporter,
       signal: controller.signal,
       approvalNotifier: (notice) => {
@@ -1634,7 +1706,9 @@ export async function runTuiAgentPrompt(
       ...(deps.mcpStatusSink ? { mcpStatusSink: deps.mcpStatusSink } : {}),
       ...(deps.mcpManager ? { mcpManager: deps.mcpManager } : {}),
       ...(deps.toolStatusSink ? { toolStatusSink: deps.toolStatusSink } : {}),
-    });
+      ...(deps.resumeExistingSession ? { resumeExistingSession: true } : {}),
+    };
+    const result = await (deps.runAgent ?? runAgentFromCli)(cliOpts, runDependencies);
     if (result.tracePath) {
       deps.reporter.pushSystemMessage(`Trace saved: ${result.tracePath}`);
     }
