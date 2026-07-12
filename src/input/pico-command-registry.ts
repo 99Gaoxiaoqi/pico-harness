@@ -5,6 +5,7 @@ import { FullCompactor } from "../context/full-compactor.js";
 import { globalSessionManager, type Session } from "../engine/session.js";
 import { defaultCliSessionId, listFileHistorySnapshotSummaries } from "../cli/file-history.js";
 import { formatRewindSelector, formatRewindUsage } from "../tui/rewind-selector.js";
+import { formatSessionCandidateDetails, sessionDisplayTitle } from "../tui/session-presentation.js";
 import { listCliSessionSummaries } from "../cli/session-resolver.js";
 import { createBuiltinCommands } from "./builtin-commands.js";
 import { createAddDirectoryCommand, type AdditionalDirectoryManager } from "./add-directory.js";
@@ -49,6 +50,7 @@ import {
   setSessionModel,
   setSessionModelRoute,
   setSessionPermissionMode,
+  setSessionTitle,
   setSessionThinkingEffort,
   toolStatusFromRegistry,
   type SessionMode,
@@ -144,6 +146,7 @@ export async function createPicoCommandRegistry(
     createMcpCommand(options.mcpStatus, options.mcpControl),
     createAgentsCommand(options),
     createSessionsCommand(options),
+    createRenameCommand(settings),
     createResumeCommand(options),
     createForkCommand(options),
     ...createRunningInputCommands(),
@@ -246,6 +249,21 @@ function filterArgumentCandidates(
     .map((candidate) => ({ ...candidate }));
 }
 
+function filterSessionArgumentCandidates(
+  candidates: readonly SlashArgumentCandidate[],
+  query: string,
+): SlashArgumentCandidate[] {
+  const normalized = query.trimStart().toLowerCase();
+  if (!normalized) return candidates.map((candidate) => ({ ...candidate }));
+  return candidates
+    .filter((candidate) =>
+      [candidate.value, candidate.label, candidate.description].some((value) =>
+        value?.toLowerCase().includes(normalized),
+      ),
+    )
+    .map((candidate) => ({ ...candidate }));
+}
+
 async function loadSkillArgumentCandidates(
   loader: SkillLoader,
 ): Promise<readonly SlashArgumentCandidate[]> {
@@ -268,12 +286,23 @@ async function loadAgentArgumentCandidates(
 
 async function loadSessionArgumentCandidates(
   workDir: string,
+  currentSessionId?: string,
 ): Promise<readonly SlashArgumentCandidate[]> {
   const sessions = await listCliSessionSummaries(workDir);
-  return sessions.map((session) => ({
-    value: session.id,
-    description: `${session.messageCount} messages · ${session.updatedAt.toISOString()}`,
-  }));
+  const titlesById = new Map(sessions.map((session) => [session.id, sessionDisplayTitle(session)]));
+  return sessions.map((session) => {
+    const presentation = {
+      ...session,
+      ...(session.forkFrom ? { forkParentTitle: titlesById.get(session.forkFrom) } : {}),
+      isCurrent: session.id === currentSessionId,
+    };
+    return {
+      value: session.id,
+      insertText: session.id,
+      label: sessionDisplayTitle(presentation),
+      description: formatSessionCandidateDetails(presentation),
+    };
+  });
 }
 
 function createStatusCommand(
@@ -859,6 +888,27 @@ function createSessionsCommand(options: PicoCommandRegistryOptions): SlashComman
   };
 }
 
+function createRenameCommand(settings: SessionSettings): SlashCommand {
+  return {
+    name: "rename",
+    description: "Rename the current session",
+    usage: "/rename <title>",
+    argumentHint: "<title>",
+    category: "session",
+    kind: "local",
+    availability: "idle",
+    execute: (input): LocalCommandResult => {
+      const result = setSessionTitle(settings, input.args);
+      return {
+        type: "local",
+        action: "message",
+        message: result.message,
+        data: { ok: result.ok, title: settings.title },
+      };
+    },
+  };
+}
+
 function createResumeCommand(options: PicoCommandRegistryOptions): SlashCommand {
   return {
     name: "resume",
@@ -867,7 +917,10 @@ function createResumeCommand(options: PicoCommandRegistryOptions): SlashCommand 
     argumentHint: "<session-id>",
     category: "session",
     argumentCompleter: async (query) =>
-      filterArgumentCandidates(await loadSessionArgumentCandidates(options.workDir), query),
+      filterSessionArgumentCandidates(
+        await loadSessionArgumentCandidates(options.workDir, options.sessionId),
+        query,
+      ),
     kind: "local",
     availability: "idle",
     execute: async (input): Promise<LocalCommandResult> => {
@@ -910,7 +963,10 @@ function createForkCommand(options: PicoCommandRegistryOptions): SlashCommand {
     argumentHint: "<session-id>",
     category: "session",
     argumentCompleter: async (query) =>
-      filterArgumentCandidates(await loadSessionArgumentCandidates(options.workDir), query),
+      filterSessionArgumentCandidates(
+        await loadSessionArgumentCandidates(options.workDir, options.sessionId),
+        query,
+      ),
     kind: "local",
     availability: "idle",
     execute: async (input): Promise<LocalCommandResult> => {

@@ -39,6 +39,22 @@ describe("session-browser-adapter", () => {
     expect(session?.firstMessage).toBe("请继续完善 slash command");
   });
 
+  it("resolves fork parent title and marks the active session", () => {
+    const sessions = mapCliSessionsToBrowserSessions(
+      [
+        cliSessionSummary({ id: "cli-parent", title: "认证重构：Session 方案" }),
+        cliSessionSummary({ id: "cli-child", forkFrom: "cli-parent", title: "Fork of 认证重构" }),
+      ],
+      "cli-child",
+    );
+
+    expect(sessions[1]).toMatchObject({
+      forkFrom: "cli-parent",
+      forkParentTitle: "认证重构：Session 方案",
+      isCurrent: true,
+    });
+  });
+
   it("builds the resume slash command for a selected session", () => {
     expect(sessionSelectionToCommand("cli-current")).toBe("/resume cli-current");
   });
@@ -68,6 +84,7 @@ function cliSessionSummary(overrides: SessionSummaryOverrides = {}): CliSessionB
     ...optional("title", overrides.title),
     ...optional("firstMessage", overrides.firstMessage),
     ...optional("lastMessage", overrides.lastMessage),
+    ...optional("forkFrom", overrides.forkFrom),
   };
 }
 

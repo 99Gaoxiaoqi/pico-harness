@@ -65,8 +65,10 @@ Pico 的 CLI session 以当前项目目录为边界：
 | `/compact`     | 对当前 session 历史做摘要压缩；缺少模型配置时会说明不可用原因。                            |
 | `/init`        | 在当前项目创建轻量入口文件：`AGENTS.md` 和 `.pico/config.json`，不会覆盖已有 `AGENTS.md`。 |
 | `/doctor`      | 检查 cwd、`.env`、provider、model、`LLM_BASE_URL`、`LLM_API_KEY[S]` 和 Node 版本。         |
-| `/sessions`    | 列出当前项目可恢复 session。                                                               |
-| `/resume`      | 输出指定 session 的恢复提示。                                                              |
+| `/sessions`    | 打开当前项目的会话选择器；按标题、相对时间、消息数和 fork 来源识别会话。                   |
+| `/rename`      | 为当前 session 设置 1–120 字符的可读标题：`/rename <title>`。                              |
+| `/resume`      | 切换到指定 session；补全和选择器都优先展示会话标题。                                       |
+| `/fork`        | 从指定 session 创建对话分支；新分支会标记父会话，但仍共享同一个工作区文件。                |
 | `/snapshots`   | 诊断性列出当前 session 的文件历史数据。                                                    |
 | `/rewind`      | 打开用户消息选择器，按提示词/时间/文件变化恢复 code、conversation 或二者。                 |
 | `/undo`        | `/rewind` 的兼容入口；同样打开用户消息选择器，不再走隐藏的直接回滚路径。                   |

@@ -24,6 +24,8 @@ export type SessionMode = "new" | "continue" | "resume" | "fork";
 
 export interface SessionSettings {
   sessionId: string;
+  /** 用户显式命名的会话标题；未设置时列表回退到首条用户消息。 */
+  title?: string;
   sessionMode: SessionMode;
   forkFrom?: string;
   cwd: string;
@@ -45,6 +47,7 @@ export interface SessionSettings {
 
 export interface SessionSettingsDefaults {
   sessionId: string;
+  title?: string;
   sessionMode?: SessionMode;
   forkFrom?: string;
   cwd: string;
@@ -88,11 +91,13 @@ const permissionCommandModes = new Set([
 export function createDefaultSessionSettings(defaults: SessionSettingsDefaults): SessionSettings {
   const resolvedSemantics = resolvedCliSessionSemantics.get(defaults.sessionId);
   const forkFrom = defaults.forkFrom ?? resolvedSemantics?.forkFrom;
+  const title = normalizeSessionTitle(defaults.title);
   const mode =
     normalizeInteractionMode(defaults.mode ?? defaults.permissionMode) ?? DEFAULT_INTERACTION_MODE;
   const compatibilityPreviousMode = normalizeInteractionMode(defaults.permissionMode);
   const settings = {
     sessionId: defaults.sessionId,
+    ...(title !== undefined ? { title } : {}),
     sessionMode: defaults.sessionMode ?? resolvedSemantics?.sessionMode ?? "new",
     ...(forkFrom !== undefined ? { forkFrom } : {}),
     cwd: defaults.cwd,
@@ -159,6 +164,8 @@ export function getOrCreateSessionSettings(
         existing.thinkingEffort = defaults.thinkingEffort;
         existing.thinkingEffortExplicit = true;
       }
+      const title = normalizeSessionTitle(defaults.title);
+      if (title !== undefined) existing.title = title;
     }
     existing.tools = defaults.tools ?? existing.tools;
     for (const directory of defaults.additionalDirectories ?? []) {
@@ -264,6 +271,20 @@ export function setSessionModel(settings: SessionSettings, model: string): Sessi
   delete settings.modelRouteId;
   persistSessionSettings(settings);
   return { ok: true, message: `Model set to ${settings.model}` };
+}
+
+/** 更新会话的用户可识别标题，并同步写入 Session runtime_state。 */
+export function setSessionTitle(settings: SessionSettings, title: string): SessionSettingResult {
+  const normalized = normalizeSessionTitle(title);
+  if (normalized === undefined) {
+    return {
+      ok: false,
+      message: "Usage: /rename <title> (1-120 non-whitespace characters)",
+    };
+  }
+  settings.title = normalized;
+  persistSessionSettings(settings);
+  return { ok: true, message: `Session renamed to ${settings.title}` };
 }
 
 export function setSessionModelRoute(
@@ -468,6 +489,7 @@ export function formatSessionStatus(settings: SessionSettings): string {
     `Model route: ${settings.modelRouteId ?? "legacy"}`,
     `Thinking effort: ${settings.thinkingEffort}`,
     `Session: ${settings.sessionId}`,
+    `Title: ${settings.title ?? "-"}`,
     `sessionId: ${settings.sessionId}`,
     `sessionMode: ${settings.sessionMode}`,
     `forkFrom: ${settings.forkFrom ?? "-"}`,
@@ -571,6 +593,8 @@ function createAdditionalDirectorySnapshot(directories: readonly string[]): read
 
 export function snapshotSessionSettings(settings: SessionSettings): PersistedSessionSettings {
   return {
+    ...(settings.title !== undefined ? { title: settings.title } : {}),
+    ...(settings.forkFrom !== undefined ? { forkFrom: settings.forkFrom } : {}),
     provider: settings.provider,
     model: settings.model,
     ...(settings.modelRouteId !== undefined ? { modelRouteId: settings.modelRouteId } : {}),
@@ -586,6 +610,16 @@ function applyPersistedSessionSettings(
   settings: SessionSettings,
   persisted: PersistedSessionSettings,
 ): void {
+  if (persisted.title !== undefined) {
+    settings.title = persisted.title;
+  } else {
+    delete settings.title;
+  }
+  if (persisted.forkFrom !== undefined) {
+    settings.forkFrom = persisted.forkFrom;
+  } else {
+    delete settings.forkFrom;
+  }
   settings.provider = persisted.provider;
   settings.model = persisted.model;
   if (persisted.modelRouteId !== undefined) {
@@ -604,6 +638,12 @@ function applyPersistedSessionSettings(
   settings.additionalDirectories = createAdditionalDirectorySnapshot(
     persisted.additionalDirectories,
   );
+}
+
+function normalizeSessionTitle(value: string | undefined): string | undefined {
+  const compacted = value?.replace(/\s+/gu, " ").trim();
+  if (!compacted || compacted.length > 120) return undefined;
+  return compacted;
 }
 
 function applySessionMode(settings: SessionSettings, mode: InteractionMode): void {

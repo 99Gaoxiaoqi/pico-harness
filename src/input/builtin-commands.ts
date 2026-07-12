@@ -24,6 +24,7 @@ const CORE_HELP_COMMANDS = new Set([
   "mcp",
   "agents",
   "sessions",
+  "rename",
   "resume",
   "snapshots",
   "changes",

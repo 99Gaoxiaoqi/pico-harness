@@ -18,6 +18,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AgentEngine } from "../src/engine/loop.js";
 import { SessionManager } from "../src/engine/session.js";
+import { listCliSessionSummaries } from "../src/cli/session-resolver.js";
+import {
+  getOrCreateSessionSettings,
+  resetSessionSettingsForTests,
+  setSessionTitle,
+} from "../src/input/session-settings.js";
 import type { LLMProvider } from "../src/provider/interface.js";
 
 /** 跨平台安全删除:Windows 上 SQLite 句柄未释放时 rm 触发 EBUSY,退避重试兜底 */
@@ -99,6 +105,7 @@ describe("Session 持久化端到端集成", () => {
   });
 
   afterEach(async () => {
+    resetSessionSettingsForTests();
     await safeRm(workDir);
   });
 
@@ -180,6 +187,49 @@ describe("Session 持久化端到端集成", () => {
     expect(aContents).not.toContain("B 的首轮");
     expect(bContents).toContain("B 的首轮");
     expect(bContents).not.toContain("A 的首轮");
+  });
+
+  it("会话标题经 runtime_state 落盘，重启和会话列表均读取显式标题", async () => {
+    const sessionId = "named-session";
+    const manager1 = new SessionManager();
+    const session1 = await manager1.getOrCreate(sessionId, workDir, ON);
+    const settings1 = getOrCreateSessionSettings(
+      {
+        sessionId,
+        sessionMode: "fork",
+        forkFrom: "source-session",
+        cwd: workDir,
+        provider: "openai",
+        model: "test-model",
+      },
+      { persistence: session1 },
+    );
+
+    expect(setSessionTitle(settings1, "认证重构：Session 方案")).toMatchObject({ ok: true });
+    await session1.flushPersistence();
+
+    await expect(listCliSessionSummaries(workDir)).resolves.toMatchObject([
+      { id: sessionId, title: "认证重构：Session 方案", forkFrom: "source-session" },
+    ]);
+
+    await session1.close();
+    resetSessionSettingsForTests(); // 模拟进程重启后 input 层内存状态丢失。
+
+    const manager2 = new SessionManager();
+    const session2 = await manager2.getOrCreate(sessionId, workDir, ON);
+    const settings2 = getOrCreateSessionSettings(
+      {
+        sessionId,
+        cwd: workDir,
+        provider: "openai",
+        model: "fallback-model",
+      },
+      { persistence: session2 },
+    );
+
+    expect(settings2.title).toBe("认证重构：Session 方案");
+    expect(settings2.forkFrom).toBe("source-session");
+    await session2.close();
   });
 
   it("重启后恢复的历史触发 truncate,新引擎能基于折叠后的历史继续", async () => {
