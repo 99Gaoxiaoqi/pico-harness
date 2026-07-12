@@ -21,6 +21,7 @@ import type {
   MemoryBackendStatus,
   MemorySearchResult,
 } from "./memory-store.js";
+import { normalizeMemorySearchLimit } from "./memory-store.js";
 
 /** @deprecated 请改用 MemorySearchResult。保留别名以兼容既有外部导入。 */
 export type SearchResult = MemorySearchResult;
@@ -147,16 +148,17 @@ export class FTS5Store implements ConversationSearchStore {
   /**
    * 按 workDir 获取共享 FTS5Store 实例(引用计数 +1)。
    * 同一 workDir 的所有 Session 复用同一个 SQLite 连接,连接数从 O(sessions) 降到 O(1)。
-   * 初始化失败(workDir 不可写等)返回 null,降级为纯内存模式。
+   * 初始化失败时仍返回带 degraded status 的实例，便于调用方
+   * 保留准确的失败原因并切换到 JSONL 后端。
    */
-  static acquire(workDir: string): FTS5Store | null {
+  static acquire(workDir: string): FTS5Store {
     const entry = FTS5Store.pool.get(workDir);
     if (entry) {
       entry.refCount++;
       return entry.store;
     }
     const store = new FTS5Store(workDir);
-    // 初始化失败(db 为 null)不进池,直接返回该实例(其内部操作均为空操作)
+    // degraded 实例也入池：同一工作目录复用诊断结果，避免重复初始化和刷屏。
     FTS5Store.pool.set(workDir, { store, refCount: 1 });
     return store;
   }
@@ -219,6 +221,7 @@ export class FTS5Store implements ConversationSearchStore {
       logger.info({ dbPath: this.dbPath }, "[fts5] 数据库初始化成功");
     } catch (err) {
       // 降级:数据库初始化失败不抛异常,仅 warn,后续操作变为空操作
+      this.closeDatabaseAfterFailedInitialization();
       this.db = null;
       const classified = classifyInitError(err);
       this.backendStatus = {
@@ -312,6 +315,7 @@ export class FTS5Store implements ConversationSearchStore {
         new Date().toISOString(),
       );
     } catch (err) {
+      this.markRuntimeDegraded("插入消息", err);
       logger.warn({ err, sessionId, turnIndex }, "[fts5] 插入消息失败");
     }
   }
@@ -343,6 +347,7 @@ export class FTS5Store implements ConversationSearchStore {
       });
       replace(messages);
     } catch (err) {
+      this.markRuntimeDegraded("重建会话索引", err);
       logger.warn({ err, sessionId }, "[fts5] 重建会话索引失败");
     }
   }
@@ -353,7 +358,7 @@ export class FTS5Store implements ConversationSearchStore {
    * @param query - 搜索关键词(支持 FTS5 查询语法:AND/OR/NOT/"短语")
    * @param limit - 返回结果数上限(默认 10)
    * @param sessionId - 可选的 Session ID 过滤(不传则全局检索)
-   * @returns 按相关性排序的结果数组(relevance 越接近 0 越相关)
+   * @returns 按相关性降序的结果数组(relevance 越大越相关)
    *
    * 示例:
    * - search("驾驭工程") → trigram 自动匹配子串(≥3 字符)
@@ -366,9 +371,12 @@ export class FTS5Store implements ConversationSearchStore {
    */
   search(query: string, limit = 10, sessionId?: string): MemorySearchResult[] {
     if (!this.db) return [];
+    const normalizedQuery = query.trim();
+    if (!normalizedQuery) return [];
+    const effectiveLimit = normalizeMemorySearchLimit(limit);
     try {
       // trigram tokenizer 要求查询长度 ≥3,对于短查询降级为 LIKE
-      if (query.length < 3 && !/\b(AND|OR|NOT)\b|["()]/.test(query)) {
+      if (normalizedQuery.length < 3 && !/\b(AND|OR|NOT)\b|["()]/.test(normalizedQuery)) {
         // 短查询:用 LIKE 模糊匹配(性能略差,但能覆盖短词)
         const whereClause = sessionId
           ? "WHERE content LIKE ? AND session_id = ?"
@@ -380,12 +388,15 @@ export class FTS5Store implements ConversationSearchStore {
             role,
             content,
             timestamp,
-            0 AS relevance
+            1 AS relevance
           FROM conversation_chunks
           ${whereClause}
+          ORDER BY turn_index
           LIMIT ?
         `);
-        const params = sessionId ? [`%${query}%`, sessionId, limit] : [`%${query}%`, limit];
+        const params = sessionId
+          ? [`%${normalizedQuery}%`, sessionId, effectiveLimit]
+          : [`%${normalizedQuery}%`, effectiveLimit];
         return stmt.all(...params) as MemorySearchResult[];
       }
 
@@ -400,16 +411,19 @@ export class FTS5Store implements ConversationSearchStore {
           role,
           content,
           timestamp,
-          rank AS relevance
+          -rank AS relevance
         FROM conversation_chunks
         ${whereClause}
         ORDER BY rank
         LIMIT ?
       `);
-      const params = sessionId ? [query, sessionId, limit] : [query, limit];
+      const params = sessionId
+        ? [normalizedQuery, sessionId, effectiveLimit]
+        : [normalizedQuery, effectiveLimit];
       return stmt.all(...params) as MemorySearchResult[];
     } catch (err) {
-      logger.warn({ err, query }, "[fts5] 搜索失败");
+      this.markRuntimeDegraded("搜索", err);
+      logger.warn({ err, query: normalizedQuery }, "[fts5] 搜索失败");
       return [];
     }
   }
@@ -542,6 +556,32 @@ export class FTS5Store implements ConversationSearchStore {
    */
   close(): void {
     this.closeInternal();
+  }
+
+  /** 初始化中途失败时释放已成功打开的原生句柄。 */
+  private closeDatabaseAfterFailedInitialization(): void {
+    if (!this.db) return;
+    try {
+      this.db.close();
+    } catch (closeError) {
+      logger.warn({ closeError, dbPath: this.dbPath }, "[fts5] 初始化失败后关闭数据库句柄失败");
+    }
+  }
+
+  /** 运行期错误不阻断主流程，但必须对调用方暴露降级状态。 */
+  private markRuntimeDegraded(operation: string, err: unknown): void {
+    const code = errorCode(err);
+    const errorKind = code ?? (err instanceof Error ? err.name : "UNKNOWN");
+    const detail = err instanceof Error ? err.message : String(err);
+    this.backendStatus = {
+      backend: "sqlite_fts5",
+      state: "degraded",
+      persistentSource: "sqlite",
+      nodeVersion: process.version,
+      nodeModuleAbi: process.versions.modules,
+      reason: `SQLite FTS5 ${operation}失败（${errorKind}）: ${detail}`,
+      recommendation: "请运行 /doctor 检查内存后端；若错误持续，请重启会话并检查数据库完整性。",
+    };
   }
 
   /** 关闭数据库连接(内部实现,幂等)。 */
