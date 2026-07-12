@@ -183,9 +183,9 @@ describe("Session + FTS5 断点续传", () => {
     expect(s2.getHistory()[0]!.content).toBe("keep1");
     expect(s2.getHistory()[1]!.content).toBe("keep2");
 
-    // FTS5 仍保留全部历史(truncate 不删除 FTS5 索引)
-    const allResults = s2.search("old");
-    expect(allResults.length).toBeGreaterThan(0);
+    // 检索索引与可恢复历史一致，不保留已截断的消息。
+    expect(s2.search("old")).toEqual([]);
+    expect(s2.search("keep")).toHaveLength(2);
   });
 });
 
@@ -279,7 +279,7 @@ describe("WorkingMemory 与 FTS5 数据一致性", () => {
     expect(results[0]!.content).toBe("测试消息ABC");
   });
 
-  it("Session.truncateTo() 后 FTS5 不受影响(历史保留)", async () => {
+  it("Session.truncateTo() 后检索索引同步当前历史", async () => {
     const mgr = new SessionManager();
     const s = await mgr.getOrCreate("chat_2", workDir, ON);
 
@@ -294,12 +294,12 @@ describe("WorkingMemory 与 FTS5 数据一致性", () => {
     expect(s.length).toBe(1);
     expect(s.getHistory()[0]!.content).toBe("new_message");
 
-    // FTS5 仍保留 old_message(用于长期记忆检索)
-    const results = s.search("old_message");
-    expect(results.length).toBeGreaterThan(0);
+    // 已从当前可恢复历史删除的消息不再可检索。
+    expect(s.search("old_message")).toEqual([]);
+    expect(s.search("new_message")).toHaveLength(1);
   });
 
-  it("Session.applyCompaction() 后 FTS5 包含压缩前的原始消息", async () => {
+  it("Session.applyCompaction() 后检索索引反映压缩后的历史", async () => {
     const mgr = new SessionManager();
     const s = await mgr.getOrCreate("chat_compact", workDir, ON);
 
@@ -315,11 +315,11 @@ describe("WorkingMemory 与 FTS5 数据一致性", () => {
     expect(s.getHistory()[0]!.content).toContain("摘要");
     expect(s.getHistory()[1]!.content).toBe("原始消息3");
 
-    // FTS5 仍能检索到原始消息1和2(压缩前已索引)
-    const results1 = s.search("原始消息1");
-    const results2 = s.search("原始消息2");
-    expect(results1.length).toBeGreaterThan(0);
-    expect(results2.length).toBeGreaterThan(0);
+    // 原文已被摘要取代，仅摘要和保留的尾部消息可检索。
+    expect(s.search("原始消息1")).toEqual([]);
+    expect(s.search("原始消息2")).toEqual([]);
+    expect(s.search("摘要")).toHaveLength(1);
+    expect(s.search("原始消息3")).toHaveLength(1);
   });
 
   it("Session.search() 和 WorkingMemory.getWorkingMemory() 数据不冲突", async () => {
@@ -354,7 +354,7 @@ describe("持久化失败降级逻辑", () => {
     await safeRm(workDir);
   });
 
-  it("FTS5 初始化失败 → Session 正常工作, search() 返回空数组", async () => {
+  it("FTS5 初始化失败 → Session 降级后仍可检索", async () => {
     // 跨平台注入:把 .claw 占用一个普通文件(非目录),使 FTS5Store 构造时
     // new Database("<workDir>/.claw/sessions.db") 抛 ENOTDIR(父路径非目录)。
     // 旧的 chmod(0o444) 在 Windows 上对目录无效(只读位只阻止删目录,不阻止建文件),
@@ -365,13 +365,18 @@ describe("持久化失败降级逻辑", () => {
     const mgr = new SessionManager();
     const s = await mgr.getOrCreate("chat_fault", workDir, ON);
 
-    // Session 正常工作(降级为纯内存)
+    // Session 正常工作，检索降级为 JSONL/内存后端。
     s.append(userMsg("test message"));
     expect(s.length).toBe(1);
+    expect(s.memoryStatus).toMatchObject({
+      backend: "jsonl_memory",
+      state: "degraded",
+      persistentSource: "none",
+    });
 
-    // search() 返回空数组(FTS5 未初始化,this.fts5 被降级为 db=null)
     const results = s.search("test");
-    expect(results).toEqual([]);
+    expect(results).toHaveLength(1);
+    expect(results[0]!.content).toBe("test message");
   });
 
   it("FTS5 插入失败(磁盘满) → Session.append() 继续成功, 只记录 warn", async () => {
@@ -689,12 +694,13 @@ describe("真实场景模拟", () => {
     // WorkingMemory 压缩后只有 21 条(摘要 + 后 20 条)
     expect(session.length).toBe(21);
 
-    // FTS5 仍能检索到压缩前的消息
-    const results = session.search("request 5");
-    expect(results.length).toBeGreaterThan(0);
-    // FTS5 按相关性排序，只验证结果中包含目标消息
-    const hasTarget = results.some((r) => r.content === "request 5");
-    expect(hasTarget).toBe(true);
+    // 检索只反映压缩后的可恢复历史。
+    expect(session.search("request 5").some((result) => result.content === "request 5")).toBe(
+      false,
+    );
+    expect(session.search("request 25").some((result) => result.content === "request 25")).toBe(
+      true,
+    );
 
     // 重启后验证
     const mgr2 = new SessionManager();
@@ -703,9 +709,13 @@ describe("真实场景模拟", () => {
     // WorkingMemory 恢复压缩后的状态
     expect(session2.length).toBe(21);
 
-    // FTS5 仍能检索历史
-    const results2 = session2.search("request 5");
-    expect(results2.length).toBeGreaterThan(0);
+    // 重启重建后保持相同的检索语义。
+    expect(session2.search("request 5").some((result) => result.content === "request 5")).toBe(
+      false,
+    );
+    expect(session2.search("request 25").some((result) => result.content === "request 25")).toBe(
+      true,
+    );
   });
 
   it("跨 Session 断电恢复", async () => {
