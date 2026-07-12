@@ -189,10 +189,13 @@ describe("DelegateTaskTool", () => {
     expect(def.inputSchema.properties).not.toHaveProperty("background");
   });
 
-  it("worker 模式子代理可以通过受控工具集写文件", async () => {
+  it("worker 缺少 worktree 监督器时拒绝降级写主工作区", async () => {
     const workDir = await mkdtemp(join(tmpdir(), "pico-subagent-worker-"));
+    const target = join(workDir, "worker.txt");
+    let runnerCalled = false;
     const runner: AgentRunner = {
       async runSub(_task, registry) {
+        runnerCalled = true;
         const toolNames = registry.getAvailableTools().map((tool) => tool.name);
         expect(toolNames).toContain("write_file");
         const result = await registry.execute({
@@ -212,22 +215,33 @@ describe("DelegateTaskTool", () => {
     });
     const tool = new DelegateTaskTool(runner, registryFactory, manager);
 
-    const output = await tool.execute(JSON.stringify({ goal: "写文件", mode: "worker" }));
-    const parsed = JSON.parse(output) as { results: Array<{ summary: string }> };
+    try {
+      const output = JSON.parse(
+        await tool.execute(JSON.stringify({ goal: "写文件", mode: "worker" })),
+      ) as { status: string; results: Array<{ status: string; error?: string }> };
 
-    expect(parsed.results[0]!.summary).toBe("worker wrote file");
-    expect(await readFile(join(workDir, "worker.txt"), "utf8")).toBe("from worker");
+      expect(output.status).toBe("error");
+      expect(output.results[0]).toMatchObject({ status: "error" });
+      expect(output.results[0]!.error).toContain("Git worktree 隔离");
+      expect(output.results[0]!.error).toContain("已拒绝降级为直接写主工作区");
+      expect(runnerCalled).toBe(false);
+      await expect(readFile(target, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await rm(workDir, { recursive: true, force: true });
+    }
   });
 
-  it("worker 共享已授权 WorkspaceRoots,可在外部 root 实际写入并读取", async () => {
+  it("worker 即使共享已授权 WorkspaceRoots 也不绕过 worktree 隔离", async () => {
     const workDir = await mkdtemp(join(tmpdir(), "pico-subagent-root-primary-"));
     const additionalDir = await mkdtemp(join(tmpdir(), "pico-subagent-root-added-"));
     const target = join(additionalDir, "worker-external.txt");
     const workspaceRoots = await WorkspaceRoots.create(workDir, [additionalDir]);
+    let runnerCalled = false;
 
     try {
       const runner: AgentRunner = {
         async runSub(_task, registry) {
+          runnerCalled = true;
           const writeResult = await registry.execute({
             id: "write-external",
             name: "write_file",
@@ -256,28 +270,30 @@ describe("DelegateTaskTool", () => {
 
       const output = JSON.parse(
         await tool.execute(JSON.stringify({ goal: "读写授权的外部目录", mode: "worker" })),
-      ) as { results: Array<{ status: string; summary: string }> };
+      ) as { status: string; results: Array<{ status: string; error?: string }> };
 
-      expect(output.results[0]).toMatchObject({
-        status: "completed",
-        summary: "worker external read/write complete",
-      });
-      expect(await readFile(target, "utf8")).toBe("shared root");
+      expect(output.status).toBe("error");
+      expect(output.results[0]).toMatchObject({ status: "error" });
+      expect(output.results[0]!.error).toContain("Git worktree 隔离");
+      expect(runnerCalled).toBe(false);
+      await expect(readFile(target, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
     } finally {
       await rm(workDir, { recursive: true, force: true });
       await rm(additionalDir, { recursive: true, force: true });
     }
   });
 
-  it("worker 仍拒绝读写未授权的外部 root", async () => {
+  it("worker 缺少 worktree 监督器时不会触及未授权的外部 root", async () => {
     const workDir = await mkdtemp(join(tmpdir(), "pico-subagent-denied-primary-"));
     const outsideDir = await mkdtemp(join(tmpdir(), "pico-subagent-denied-outside-"));
     const target = join(outsideDir, "must-not-exist.txt");
     const workspaceRoots = await WorkspaceRoots.create(workDir);
+    let runnerCalled = false;
 
     try {
       const runner: AgentRunner = {
         async runSub(_task, registry) {
+          runnerCalled = true;
           const writeResult = await registry.execute({
             id: "write-denied",
             name: "write_file",
@@ -307,12 +323,12 @@ describe("DelegateTaskTool", () => {
 
       const output = JSON.parse(
         await tool.execute(JSON.stringify({ goal: "尝试读写未授权目录", mode: "worker" })),
-      ) as { results: Array<{ status: string; summary: string }> };
+      ) as { status: string; results: Array<{ status: string; error?: string }> };
 
-      expect(output.results[0]).toMatchObject({
-        status: "completed",
-        summary: "unauthorized root blocked",
-      });
+      expect(output.status).toBe("error");
+      expect(output.results[0]).toMatchObject({ status: "error" });
+      expect(output.results[0]!.error).toContain("Git worktree 隔离");
+      expect(runnerCalled).toBe(false);
       await expect(readFile(target, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
     } finally {
       await rm(workDir, { recursive: true, force: true });
@@ -696,15 +712,17 @@ describe("子代理注册表接通阶段 2 只读工具", () => {
     }
   });
 
-  it("递归 delegate_task 创建的 worker 继承同一个 WorkspaceRoots", async () => {
+  it("递归 delegate_task 创建 worker 时同样要求 worktree 监督器", async () => {
     const workDir = await mkdtemp(join(tmpdir(), "pico-recursive-root-primary-"));
     const additionalDir = await mkdtemp(join(tmpdir(), "pico-recursive-root-added-"));
     const target = join(additionalDir, "recursive-external.txt");
     const workspaceRoots = await WorkspaceRoots.create(workDir, [additionalDir]);
+    let runnerCalled = false;
 
     try {
       const runner: AgentRunner = {
         async runSub(_task, registry) {
+          runnerCalled = true;
           const writeResult = await registry.execute({
             id: "recursive-write",
             name: "write_file",
@@ -742,8 +760,15 @@ describe("子代理注册表接通阶段 2 只读工具", () => {
       });
 
       expect(delegated.isError).toBe(false);
-      expect(delegated.output).toContain("recursive worker complete");
-      expect(await readFile(target, "utf8")).toBe("recursive root");
+      const output = JSON.parse(delegated.output) as {
+        status: string;
+        results: Array<{ status: string; error?: string }>;
+      };
+      expect(output.status).toBe("error");
+      expect(output.results[0]).toMatchObject({ status: "error" });
+      expect(output.results[0]!.error).toContain("Git worktree 隔离");
+      expect(runnerCalled).toBe(false);
+      await expect(readFile(target, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
     } finally {
       await rm(workDir, { recursive: true, force: true });
       await rm(additionalDir, { recursive: true, force: true });
@@ -841,10 +866,12 @@ describe("AgentEngine.runSub", () => {
     expect(systemPrompt).not.toContain("npm run build");
   });
 
-  it("超过 maxSubTurns(10) 被强制召回", async () => {
-    // 每轮都调工具,永不退出 → 第 11 轮触发召回
+  it("耗尽 maxSubTurns(10) 时预留最后一轮收口并返回 partial", async () => {
+    // 前 9 轮调工具,第 10 轮禁用工具强制收口。
+    let providerCalls = 0;
     const provider = new (class implements LLMProvider {
       async generate(): Promise<Message> {
+        providerCalls++;
         return {
           role: "assistant",
           content: "继续找",
@@ -852,10 +879,17 @@ describe("AgentEngine.runSub", () => {
         };
       }
     })();
-    const registry = mockReadOnlyRegistry();
+    const executed: ToolCall[] = [];
+    const registry = mockReadOnlyRegistry(executed);
     const engine = makeEngine(provider, registry);
 
-    await expect(engine.runSub("无尽探索", registry)).rejects.toThrow("超过 10 轮");
+    const result = await engine.runSub("无尽探索", registry);
+
+    expect(result.status).toBe("partial");
+    expect(result.summary).toContain("继续找");
+    expect(result.artifacts).toEqual([]);
+    expect(providerCalls).toBe(10);
+    expect(executed).toHaveLength(9);
   });
 
   it("depth 等于 maxSpawnDepth 的子代理仍可执行但不能再委派", async () => {
@@ -928,9 +962,11 @@ describe("AgentEngine.runSub", () => {
   });
 
   it("maxTurns 覆盖默认的 10", async () => {
-    // 每轮都调工具永不退出,用 maxTurns=2 让它第 3 轮强制召回
+    // 每轮都调工具永不退出,maxTurns=2 时第 2 轮就必须收口。
+    let providerCalls = 0;
     const provider = new (class implements LLMProvider {
       async generate(): Promise<Message> {
+        providerCalls++;
         return {
           role: "assistant",
           content: "继续",
@@ -938,12 +974,17 @@ describe("AgentEngine.runSub", () => {
         };
       }
     })();
-    const registry = mockReadOnlyRegistry();
+    const executed: ToolCall[] = [];
+    const registry = mockReadOnlyRegistry(executed);
     const engine = makeEngine(provider, registry);
 
-    await expect(engine.runSub("无尽探索", registry, undefined, { maxTurns: 2 })).rejects.toThrow(
-      "超过 2 轮",
-    );
+    const result = await engine.runSub("无尽探索", registry, undefined, { maxTurns: 2 });
+
+    expect(result.status).toBe("partial");
+    expect(result.summary).toContain("继续");
+    expect(result.artifacts).toEqual([]);
+    expect(providerCalls).toBe(2);
+    expect(executed).toHaveLength(1);
   });
 
   it("不传新参数时行为不变(回归保护)", async () => {
