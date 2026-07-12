@@ -3,6 +3,7 @@ import type {
   TuiSubagentLifecycle,
   TuiSubagentTraceItem,
 } from "./tui-event-store.js";
+import { summarizeToolTarget } from "./tool-format.js";
 
 export const MAIN_AGENT_ID = "main";
 
@@ -24,7 +25,10 @@ export type AgentTimelineItem =
       kind: "tool";
       name: string;
       status: "running" | "completed" | "failed";
+      args?: string;
+      target?: string;
       summary?: string;
+      truncated?: boolean;
     };
 
 /** App 层只需把权威投影适配成该受控 ViewModel。 */
@@ -104,13 +108,18 @@ export function projectAgentNavigationItems(
 function projectTimelineItem(item: TuiSubagentTraceItem): AgentTimelineItem {
   if (item.kind === "thinking") return { id: item.id, kind: "thinking" };
   if (item.kind === "message") return { id: item.id, kind: "message", content: item.content };
+  const name = item.name.replace(/^\[Subagent\]\s*/u, "").trim() || item.name;
+  const target = summarizeToolTarget(name, item.args);
   return {
     id: item.id,
     kind: "tool",
-    name: item.name,
+    name,
     status:
       item.status === "success" ? "completed" : item.status === "error" ? "failed" : "running",
+    args: item.args,
+    ...(target !== undefined ? { target } : {}),
     ...(item.result !== undefined ? { summary: compactTimelineText(item.result, 240) } : {}),
+    ...(item.resultTruncated !== undefined ? { truncated: item.resultTruncated } : {}),
   };
 }
 
@@ -193,7 +202,7 @@ export function reduceAgentNavigation(
         : current;
     case "escape":
       if (current.activeId !== MAIN_AGENT_ID) {
-        return { ...current, activeId: MAIN_AGENT_ID, selectedId: MAIN_AGENT_ID, focus: "picker" };
+        return { ...current, activeId: MAIN_AGENT_ID, focus: "picker" };
       }
       return current.focus === "picker" ? { ...current, focus: "input" } : current;
   }
