@@ -71,9 +71,10 @@ describe("agent navigation integration", () => {
       />,
       { columns: 32 },
     );
-    expect(switcher).toContain("Agents · 3");
-    expect(switcher).toContain("›● ✽ auth-agent");
-    expect(switcher).toContain("+2");
+    expect(switcher).toContain("Agents · 2");
+    expect(switcher).toContain("› ✽ auth-ag");
+    expect(switcher).toContain("2 new");
+    expect(switcher).not.toContain("required");
 
     const detail = renderToString(<AgentDetailView agent={items[1]!} renderWidth={22} />, {
       columns: 22,
@@ -120,7 +121,7 @@ describe("agent navigation integration", () => {
     expect(layout.rows.every((row) => terminalWidth(row.text) <= 22)).toBe(true);
 
     state = reduceAgentNavigation(state, { type: "escape" }, items);
-    expect(state).toMatchObject({ activeId: "main", selectedId: "main", focus: "picker" });
+    expect(state).toMatchObject({ activeId: "main", selectedId: "agent-auth", focus: "picker" });
     state = reduceAgentNavigation(state, { type: "escape" }, items);
     expect(state.focus).toBe("input");
 
