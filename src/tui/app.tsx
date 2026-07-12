@@ -24,6 +24,7 @@ import { LayoutShell } from "./layout-shell.js";
 import { MessageList } from "./message-list.js";
 import { StatusBar } from "./status-bar.js";
 import type { TuiEntry } from "./tui-reporter.js";
+import { effectiveTuiRows } from "./viewport-rows.js";
 import { resolveKeybinding, type UserKeybindingConfig } from "./keybindings/resolver.js";
 import { ToolCardFocusProvider } from "./tool-card.js";
 import { buildTranscriptLayout } from "./transcript-layout.js";
@@ -151,7 +152,11 @@ export function App({
 }: AppProps): React.ReactNode {
   const { exit, suspendTerminal } = useApp();
   const mouseMode = useTerminalMouseMode();
-  const { rows, columns } = useWindowSize();
+  const { rows: terminalRows, columns } = useWindowSize();
+  // Ink 7.1 intentionally clears every full-height frame on Windows. Use the
+  // same reduced viewport for every budget and the shell so bottom controls
+  // stay visible while streaming updates remain incremental.
+  const rows = effectiveTuiRows(terminalRows);
   const focusedDialog = pickFocusedDialog(dialogRequests);
   const allAgentItems = useMemo(() => normalizeAgentNavigationItems(agents), [agents]);
   const [agentNavigation, setAgentNavigation] = useState(createAgentNavigationState);
