@@ -733,21 +733,6 @@ describe("Pico command registry", () => {
     expect(result.result.message).toContain("MCP: 1/2 connected, 1 failed, 1 tools");
   });
 
-  it("/image quotes paths with spaces before handing off to prompt preparation", async () => {
-    const registry = await createPicoCommandRegistry({
-      workDir: process.cwd(),
-      provider: "openai",
-      model: "glm-5.2",
-      sessionId: "session-image-command",
-    });
-
-    const result = await processUserInput("/image screen shot.png", { registry });
-
-    expect(result.type).toBe("prompt-command");
-    if (result.type !== "prompt-command") return;
-    expect(result.result.prompt).toBe('请查看这张图片。 @image:"screen shot.png"');
-  });
-
   it("/sessions lists resumable sessions for the current project", async () => {
     const workDir = mkdtempSync(join(tmpdir(), "pico-command-sessions-"));
     cleanup.push(() => rmSync(workDir, { recursive: true, force: true }));

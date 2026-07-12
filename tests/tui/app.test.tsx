@@ -1189,7 +1189,7 @@ describe("App", () => {
 
     try {
       await harness.write("first\r");
-      expect(onSubmit).toHaveBeenCalledWith("first");
+      expect(onSubmit).toHaveBeenCalledWith({ text: "first", attachments: [] });
       await harness.write("draft");
       const frame = await harness.write("\u001b[A");
 

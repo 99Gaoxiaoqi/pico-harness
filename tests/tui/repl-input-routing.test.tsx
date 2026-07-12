@@ -172,32 +172,6 @@ describe("TUI input routing", () => {
     ]);
   });
 
-  it("/help lists /image when using the full Pico command registry", async () => {
-    const registry = await createPicoCommandRegistry({
-      workDir: process.cwd(),
-      provider: "openai",
-      model: "glm-5.2",
-      sessionId: "tui-help-image",
-    });
-    const { reporter, snapshots, runAgent, exit, workDir } = harness();
-
-    await handleTuiInputSubmission("/help", {
-      reporter,
-      registry,
-      workDir,
-      runAgent,
-      exit,
-    });
-
-    expect(runAgent).not.toHaveBeenCalled();
-    expect(snapshots.at(-1)).toEqual([
-      {
-        kind: "system",
-        content: expect.stringContaining("/image - Attach a local image to this prompt"),
-      },
-    ]);
-  });
-
   it("/help opens the real HelpPanel dialog with command descriptor metadata", async () => {
     const registry = await createPicoCommandRegistry({
       workDir: process.cwd(),
@@ -1158,6 +1132,23 @@ describe("TUI input routing", () => {
     } finally {
       await rm(workDir, { recursive: true, force: true });
     }
+  });
+
+  it("输入框附件不受工作区路径限制，并随当前 prompt 发送给模型", async () => {
+    const { reporter, runAgent, exit, registry, workDir } = harness();
+    const image = {
+      type: "image_base64" as const,
+      mimeType: "image/png",
+      data: Buffer.from("outside-workspace-image").toString("base64"),
+    };
+
+    await handleTuiInputSubmission(
+      "分析这张截图",
+      { reporter, registry, workDir, runAgent, exit },
+      [image],
+    );
+
+    expect(runAgent).toHaveBeenCalledWith("分析这张截图", { images: [image] });
   });
 
   it("/sessions 打开 session selector dialog", async () => {

@@ -153,7 +153,6 @@ export async function createPicoCommandRegistry(
     createChangesCommand(options),
     createSnapshotsCommand(options),
     createRewindCommand(options),
-    createImageCommand(),
     createAgentCommand(options),
     createSkillsCommand(skillLoader),
     createSkillCommand(skillLoader),
@@ -835,31 +834,6 @@ function formatAgentSummaries(agents: readonly ClaudeAgentSummary[]): string {
 function formatAgentSource(source: ClaudeAgentSource | undefined): string {
   if (source === undefined) return "unknown";
   return source === "builtin" ? "built-in" : source;
-}
-
-function createImageCommand(): SlashCommand {
-  return {
-    name: "image",
-    description: "Attach a local image to this prompt",
-    usage: "/image <path>",
-    argumentHint: "<path>",
-    category: "workspace",
-    kind: "prompt",
-    execute: (input): PromptCommandResult | LocalCommandResult => {
-      const imagePath = input.args.trim();
-      if (imagePath.length === 0) {
-        return {
-          type: "local",
-          action: "message",
-          message: "Usage: /image <path>",
-        };
-      }
-      return {
-        type: "prompt",
-        prompt: `请查看这张图片。 @image:${JSON.stringify(imagePath)}`,
-      };
-    },
-  };
 }
 
 function createSessionsCommand(options: PicoCommandRegistryOptions): SlashCommand {
