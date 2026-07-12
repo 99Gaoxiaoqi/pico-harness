@@ -7,28 +7,24 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { MockFTS5Store } from "../mocks/fts5-store.mock.js";
 
-// Mock FTS5Store 以避免依赖真实实现（必须在顶层）
-vi.mock("../../src/memory/fts5-store.js", () => ({
-  FTS5Store: MockFTS5Store,
-}));
-
 import { Session } from "../../src/engine/session.js";
 import type { Message } from "../../src/schema/message.js";
-
-function disableFts5(target: Session): void {
-  (target as unknown as { fts5: Session["fts5Store"] }).fts5 = undefined;
-}
 
 describe("Session FTS5 集成", () => {
   let workDir: string;
   let session: Session;
+  let memoryStore: MockFTS5Store;
 
   beforeEach(() => {
     // 创建临时工作目录
     workDir = mkdtempSync(join(tmpdir(), "pico-session-fts5-"));
 
-    // 创建 Session（关闭持久化以简化测试）
-    session = new Session("test-session-fts5", workDir, { persistence: false });
+    // 通过公开 SessionOptions 注入完整的检索存储契约。
+    memoryStore = new MockFTS5Store();
+    session = new Session("test-session-fts5", workDir, {
+      persistence: false,
+      memorySearchStore: memoryStore,
+    });
   });
 
   afterEach(() => {
@@ -38,26 +34,27 @@ describe("Session FTS5 集成", () => {
   });
 
   describe("FTS5 初始化", () => {
-    it("Session 构造时自动初始化 FTS5", () => {
-      // fts5Store getter 应返回 FTS5 实例
-      expect(session.fts5Store).toBeDefined();
+    it("Session 构造时使用注入的检索后端", () => {
+      expect(session.memoryStatus).toEqual(memoryStore.status);
     });
 
-    it("FTS5 初始化失败时降级为 undefined", () => {
-      // 测试降级逻辑：直接修改 fts5 为 undefined 模拟初始化失败
+    it("降级检索后端不影响 Session 主流程", () => {
+      const degradedStore = new MockFTS5Store({
+        backend: "jsonl_memory",
+        state: "degraded",
+        persistentSource: "none",
+        reason: "SQLite FTS5 unavailable",
+      });
       const testSession = new Session("test-degraded", workDir, {
         persistence: false,
+        memorySearchStore: degradedStore,
       });
 
-      // 模拟初始化失败后的降级状态
-      disableFts5(testSession);
-
-      // 降级后应为 undefined
-      expect(testSession.fts5Store).toBeUndefined();
-
-      // 但 Session 本身应正常工作
+      expect(testSession.memoryStatus.state).toBe("degraded");
+      expect(testSession.memoryStatus.backend).toBe("jsonl_memory");
       testSession.append({ role: "user", content: "test" });
       expect(testSession.length).toBe(1);
+      expect(degradedStore.insert).toHaveBeenCalledOnce();
     });
   });
 
@@ -66,9 +63,8 @@ describe("Session FTS5 集成", () => {
       const msg: Message = { role: "user", content: "Hello, pico!" };
       session.append(msg);
 
-      const fts5 = session.fts5Store as unknown as MockFTS5Store;
-      expect(fts5.insert).toHaveBeenCalledTimes(1);
-      expect(fts5.insert).toHaveBeenCalledWith("test-session-fts5", 0, msg);
+      expect(memoryStore.insert).toHaveBeenCalledTimes(1);
+      expect(memoryStore.insert).toHaveBeenCalledWith("test-session-fts5", 0, msg);
     });
 
     it("append 批量消息时按顺序索引", () => {
@@ -79,11 +75,10 @@ describe("Session FTS5 集成", () => {
       ];
       session.append(...msgs);
 
-      const fts5 = session.fts5Store as unknown as MockFTS5Store;
-      expect(fts5.insert).toHaveBeenCalledTimes(3);
-      expect(fts5.insert).toHaveBeenNthCalledWith(1, "test-session-fts5", 0, msgs[0]);
-      expect(fts5.insert).toHaveBeenNthCalledWith(2, "test-session-fts5", 1, msgs[1]);
-      expect(fts5.insert).toHaveBeenNthCalledWith(3, "test-session-fts5", 2, msgs[2]);
+      expect(memoryStore.insert).toHaveBeenCalledTimes(3);
+      expect(memoryStore.insert).toHaveBeenNthCalledWith(1, "test-session-fts5", 0, msgs[0]);
+      expect(memoryStore.insert).toHaveBeenNthCalledWith(2, "test-session-fts5", 1, msgs[1]);
+      expect(memoryStore.insert).toHaveBeenNthCalledWith(3, "test-session-fts5", 2, msgs[2]);
     });
 
     it("多次 append 时 turnIndex 连续递增", () => {
@@ -91,18 +86,16 @@ describe("Session FTS5 集成", () => {
       session.append({ role: "assistant", content: "Second" });
       session.append({ role: "user", content: "Third" });
 
-      const fts5 = session.fts5Store as unknown as MockFTS5Store;
-      expect(fts5.insert).toHaveBeenCalledTimes(3);
+      expect(memoryStore.insert).toHaveBeenCalledTimes(3);
 
       // 验证 turnIndex 分别为 0, 1, 2
-      expect(vi.mocked(fts5.insert).mock.calls[0]![1]).toBe(0);
-      expect(vi.mocked(fts5.insert).mock.calls[1]![1]).toBe(1);
-      expect(vi.mocked(fts5.insert).mock.calls[2]![1]).toBe(2);
+      expect(vi.mocked(memoryStore.insert).mock.calls[0]![1]).toBe(0);
+      expect(vi.mocked(memoryStore.insert).mock.calls[1]![1]).toBe(1);
+      expect(vi.mocked(memoryStore.insert).mock.calls[2]![1]).toBe(2);
     });
 
     it("FTS5 索引失败时不影响 Session 主流程", () => {
-      const fts5 = session.fts5Store as unknown as MockFTS5Store;
-      fts5.insert.mockImplementation(() => {
+      memoryStore.insert.mockImplementation(() => {
         throw new Error("索引写入失败");
       });
 
@@ -115,16 +108,27 @@ describe("Session FTS5 集成", () => {
       expect(session.getHistory()[0]!.content).toBe("test");
     });
 
-    it("FTS5 未初始化时 append 不抛出异常", () => {
-      // 通过直接设置 fts5 为 undefined 模拟未初始化
-      // 由于 fts5 是 private，测试通过最小结构类型模拟降级状态
-      disableFts5(session);
+    it("降级检索后端时 append 不抛出异常", () => {
+      const degradedStore = new MockFTS5Store({
+        backend: "jsonl_memory",
+        state: "degraded",
+        persistentSource: "none",
+        reason: "SQLite FTS5 unavailable",
+      });
+      const degradedSession = new Session("test-degraded-append", workDir, {
+        persistence: false,
+        memorySearchStore: degradedStore,
+      });
 
       expect(() => {
-        session.append({ role: "user", content: "test" });
+        degradedSession.append({ role: "user", content: "test" });
       }).not.toThrow();
 
-      expect(session.length).toBeGreaterThan(0);
+      expect(degradedSession.length).toBe(1);
+      expect(degradedStore.insert).toHaveBeenCalledWith("test-degraded-append", 0, {
+        role: "user",
+        content: "test",
+      });
     });
   });
 
@@ -150,28 +154,25 @@ describe("Session FTS5 集成", () => {
       session.search("test");
 
       // MockFTS5Store.search 现在接收 3 个参数: query, limit, sessionId
-      const fts5 = session.fts5Store as unknown as MockFTS5Store;
-      expect(fts5.search).toHaveBeenCalledWith("test", 10, "test-session-fts5");
+      expect(memoryStore.search).toHaveBeenCalledWith("test", 10, "test-session-fts5");
     });
 
     it("search() 支持自定义 limit", () => {
       session.search("React", 5);
 
-      const fts5 = session.fts5Store as unknown as MockFTS5Store;
-      expect(fts5.search).toHaveBeenCalledWith("React", 5, "test-session-fts5");
+      expect(memoryStore.search).toHaveBeenCalledWith("React", 5, "test-session-fts5");
     });
 
-    it("FTS5 未初始化时 search 返回空数组", () => {
-      // 通过直接设置 fts5 为 undefined 模拟未初始化
-      disableFts5(session);
+    it("search 仅返回当前 Session 的结果", () => {
+      memoryStore.insert("another-session", 0, { role: "user", content: "TypeScript elsewhere" });
 
-      const results = session.search("test");
-      expect(results).toEqual([]);
+      const results = session.search("TypeScript");
+      expect(results).toHaveLength(2);
+      expect(results.every((result) => result.sessionId === "test-session-fts5")).toBe(true);
     });
 
     it("FTS5 检索失败时返回空数组", () => {
-      const fts5 = session.fts5Store as unknown as MockFTS5Store;
-      fts5.search.mockImplementation(() => {
+      memoryStore.search.mockImplementation(() => {
         throw new Error("查询语法错误");
       });
 
@@ -180,17 +181,38 @@ describe("Session FTS5 集成", () => {
     });
 
     it("search 结果包含 turnIndex", () => {
-      const fts5 = session.fts5Store as unknown as MockFTS5Store;
-      fts5.search.mockReturnValue([
-        { content: "Match 1", turnIndex: 5, score: 0.9 },
-        { content: "Match 2", turnIndex: 12, score: 0.7 },
+      memoryStore.search.mockReturnValue([
+        {
+          sessionId: "test-session-fts5",
+          content: "Match 1",
+          turnIndex: 5,
+          role: "user",
+          timestamp: "2026-01-01T00:00:00.000Z",
+          relevance: 0.1,
+        },
+        {
+          sessionId: "test-session-fts5",
+          content: "Match 2",
+          turnIndex: 12,
+          role: "assistant",
+          timestamp: "2026-01-01T00:00:01.000Z",
+          relevance: 0.2,
+        },
       ]);
 
       const results = session.search("keyword");
 
       expect(results).toHaveLength(2);
-      expect(results[0]).toEqual({ content: "Match 1", turnIndex: 5 });
-      expect(results[1]).toEqual({ content: "Match 2", turnIndex: 12 });
+      expect(results[0]).toEqual({
+        content: "Match 1",
+        turnIndex: 5,
+        sessionId: "test-session-fts5",
+      });
+      expect(results[1]).toEqual({
+        content: "Match 2",
+        turnIndex: 12,
+        sessionId: "test-session-fts5",
+      });
     });
   });
 
@@ -212,26 +234,19 @@ describe("Session FTS5 集成", () => {
       await Promise.all(promises);
 
       // 验证索引调用顺序和 turnIndex
-      const fts5 = session.fts5Store as unknown as MockFTS5Store;
-      expect(fts5.insert).toHaveBeenCalledTimes(3);
-      expect(vi.mocked(fts5.insert).mock.calls[0]![1]).toBe(0); // turnIndex=0
-      expect(vi.mocked(fts5.insert).mock.calls[1]![1]).toBe(1); // turnIndex=1
-      expect(vi.mocked(fts5.insert).mock.calls[2]![1]).toBe(2); // turnIndex=2
+      expect(memoryStore.insert).toHaveBeenCalledTimes(3);
+      expect(vi.mocked(memoryStore.insert).mock.calls[0]![1]).toBe(0); // turnIndex=0
+      expect(vi.mocked(memoryStore.insert).mock.calls[1]![1]).toBe(1); // turnIndex=1
+      expect(vi.mocked(memoryStore.insert).mock.calls[2]![1]).toBe(2); // turnIndex=2
     });
   });
 
-  describe("fts5Store getter", () => {
-    it("暴露 FTS5Store 实例供外部使用", () => {
-      const fts5 = session.fts5Store;
-
-      expect(fts5).toBeInstanceOf(MockFTS5Store);
-      expect(fts5).toBe(session.fts5Store); // 应返回同一实例
+  describe("memoryStatus getter", () => {
+    it("暴露当前检索后端状态", () => {
+      expect(session.memoryStatus).toEqual(memoryStore.status);
     });
 
-    it("FTS5 未初始化时返回 undefined", () => {
-      // 通过直接设置 fts5 为 undefined 模拟未初始化
-      disableFts5(session);
-
+    it("显式检索后端不伪装成 FTS5 租约", () => {
       expect(session.fts5Store).toBeUndefined();
     });
   });
