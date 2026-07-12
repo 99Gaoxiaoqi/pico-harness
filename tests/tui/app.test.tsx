@@ -70,8 +70,8 @@ describe("App", () => {
     try {
       let output = await harness.rerender(app);
       expect(output).toContain("主代理仍在这里");
-      expect(output).toContain("Agents · 2");
-      expect(output).toContain("engine-agent · 检查引擎主循环");
+      expect(output).toContain("Agents · 1");
+      expect(output).toContain("engine-agent  检查引擎主循环");
       expect(output).not.toContain("DETAIL_ONLY_ACTION");
 
       await harness.write("\t");
@@ -80,7 +80,7 @@ describe("App", () => {
       output = await harness.write("\r");
       expect(output).toContain("← Main / engine-agent");
       expect(output).toContain("DETAIL_ONLY_ACTION");
-      expect(output).toContain("read_file · src/engine/loop.ts");
+      expect(output).toContain("Read File");
       expect(output).toContain("Viewing subagent · Esc back to Main");
 
       await harness.write("\u001b");

@@ -167,7 +167,7 @@ function buildAgentDetailBlocks(
 ): DetailBlock[] {
   const width = normalizeWidth(options.renderWidth);
   const limit = normalizeTimelineLimit(options.timelineLimit);
-  const name = cleanDisplayText(agent.agentName?.trim() || agent.task?.trim() || "Agent");
+  const name = shortAgentTitle(agent, width);
   const completionPolicy =
     agent.completionPolicy === "optional" ? "background" : agent.completionPolicy;
   const metadata = [agent.status, agent.mode, completionPolicy].filter(Boolean).join(" · ");
@@ -238,11 +238,12 @@ function timelineRows(item: AgentTimelineItem, width: number, current: boolean):
     case "tool": {
       const marker = item.status === "failed" ? "×" : item.status === "completed" ? "✓" : "›";
       const toolName = formatToolName(cleanDisplayText(item.name));
+      const target = cleanDisplayText(item.target);
       // 成功工具的 summary 当前是原始 result，默认视图不把源码/搜索结果铺开。
       const failure = item.status === "failed" ? cleanDisplayText(item.summary) : "";
       return prefixedRows(
         `${marker} `,
-        `${toolName}${failure ? ` · ${failure}` : ""}`,
+        `${toolName}${target ? `  ${target}` : ""}${failure ? ` · ${failure}` : ""}`,
         width,
         2,
         tone,
@@ -301,6 +302,13 @@ function cleanDisplayText(value: string | undefined): string {
     .replace(/^\s*(?:\[Subagent\]\s*)+/giu, "")
     .replace(/\s+/gu, " ")
     .trim();
+}
+
+function shortAgentTitle(agent: AgentNavigationItem, width: number): string {
+  const explicit = cleanDisplayText(agent.agentName);
+  if (explicit) return explicit;
+  const task = cleanDisplayText(agent.task) || "Agent";
+  return truncateTerminalText(task, Math.max(8, Math.min(32, width - 9)));
 }
 
 function formatToolName(name: string): string {

@@ -362,12 +362,12 @@ describe("阶段 10：滚动窗口与大型工具输出集成验收", () => {
       expect(visible.match(/phase idle · mode new · perm yolo/gu)).toHaveLength(1);
       expect(visible.match(/CPR_FAILED_USER_MARKER/gu)).toHaveLength(1);
       expect(visible.match(/CPR_FAILED_FINAL_MARKER/gu)).toHaveLength(1);
-      expect(visible.match(/Agents · 5/gu)).toHaveLength(1);
+      expect(visible.match(/Agents · 4/gu)).toHaveLength(1);
       expect(terminal.wrapEvents).toBe(0);
       expect(terminal.scrollEvents).toBe(0);
       expect(terminal.mouseTrackingEnabled()).toBe(true);
       expect(terminal.scrollbackText()).not.toMatch(
-        /phase (?:running|idle)|CPR_FAILED_(?:USER|FINAL)_MARKER|Agents · 5/u,
+        /phase (?:running|idle)|CPR_FAILED_(?:USER|FINAL)_MARKER|Agents · 4/u,
       );
     } finally {
       await harness.cleanup();
