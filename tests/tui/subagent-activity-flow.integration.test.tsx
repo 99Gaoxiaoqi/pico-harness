@@ -119,6 +119,35 @@ describe("subagent activity flow", () => {
     expect(replayed.getProjection().subagents).toEqual(archivedProjection.subagents);
   });
 
+  it("optional 终态只在 completion 被空闲 wake claim 后归档", () => {
+    const reporter = new TuiReporter(() => undefined);
+    reporter.onSubagentActivity({
+      activityId: "optional-pending-wake",
+      task: "异步检查",
+      status: "running",
+      completionPolicy: "optional",
+    });
+    reporter.onSubagentActivity({
+      activityId: "optional-pending-wake",
+      task: "异步检查",
+      status: "completed",
+      completionPolicy: "optional",
+      summary: "等待主 Agent 消费",
+    });
+
+    reporter.onMessage("当前主循环的无关答复");
+    expect(reporter.getProjection().subagents["optional-pending-wake"]?.lifecycle).toBe(
+      "terminal_unconsumed",
+    );
+
+    reporter.markAsyncSubagentCompletionsDelivered();
+    expect(reporter.getProjection().subagents["optional-pending-wake"]?.lifecycle).toBe(
+      "terminal_claimed",
+    );
+    reporter.onMessage("已吸收异步检查结果");
+    expect(reporter.getProjection().subagents["optional-pending-wake"]?.lifecycle).toBe("archived");
+  });
+
   it("将两个并行委派的实时动作和结果投影为独立卡片", async () => {
     let entries: TuiEntry[] = [];
     const reporter = new TuiReporter(

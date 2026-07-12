@@ -138,7 +138,11 @@ export type TuiSubagentTraceItem =
       readonly completedAt?: number;
     };
 
-export type TuiSubagentLifecycle = "active" | "terminal_unconsumed" | "archived";
+export type TuiSubagentLifecycle =
+  | "active"
+  | "terminal_unconsumed"
+  | "terminal_claimed"
+  | "archived";
 
 export interface TuiSubagentProjection {
   readonly activityId: string;
@@ -283,6 +287,10 @@ export type TuiEvent =
   | (TuiEventBase & {
       readonly type: "subagent.trace.recorded";
       readonly trace: SubagentTraceEvent;
+    })
+  | (TuiEventBase & {
+      readonly type: "subagent.activity.claimed";
+      readonly activityId: string;
     })
   | (TuiEventBase & {
       readonly type: "subagent.activity.archived";
@@ -486,6 +494,7 @@ export class TuiEventStore {
         }
         break;
       case "subagent.trace.recorded":
+      case "subagent.activity.claimed":
       case "subagent.activity.archived":
       case "assistant.stream.delta":
       case "assistant.stream.completed":
@@ -526,6 +535,7 @@ export class TuiEventStore {
         }
         break;
       case "subagent.trace.recorded":
+      case "subagent.activity.claimed":
       case "subagent.activity.archived":
       case "assistant.stream.delta":
       case "assistant.stream.completed":
@@ -850,6 +860,24 @@ export function reduceTuiEvent(state: TuiProjection, event: TuiEvent): TuiProjec
       break;
     }
 
+    case "subagent.activity.claimed": {
+      const current = subagents[event.activityId];
+      if (!current) throw new Error(`Unknown TUI subagent activity: ${event.activityId}`);
+      if (current.lifecycle === "active") {
+        throw new Error(`Cannot claim active TUI subagent activity: ${event.activityId}`);
+      }
+      if (current.lifecycle !== "archived") {
+        subagents = {
+          ...subagents,
+          [event.activityId]: freezeSubagentProjection({
+            ...current,
+            lifecycle: "terminal_claimed",
+          }),
+        };
+      }
+      break;
+    }
+
     case "subagent.activity.archived": {
       const current = subagents[event.activityId];
       if (!current) throw new Error(`Unknown TUI subagent activity: ${event.activityId}`);
@@ -968,7 +996,9 @@ function subagentLifecycleForStatus(
   previous?: TuiSubagentLifecycle,
 ): TuiSubagentLifecycle {
   if (status === "queued" || status === "running") return "active";
-  return previous === "archived" ? "archived" : "terminal_unconsumed";
+  return previous === "archived" || previous === "terminal_claimed"
+    ? previous
+    : "terminal_unconsumed";
 }
 
 function retainSubagentIndexes(

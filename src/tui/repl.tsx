@@ -893,7 +893,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
           activeBundleRef.current === current &&
           guard.getSnapshot() === "idle" &&
           runningInputDepsRef.current !== null,
-        resume: async () => {
+        resume: async (_completionSeqs, deliverCompletions) => {
           const deps = runningInputDepsRef.current;
           if (!deps) throw new Error("Delegation wake has no active TUI runtime dependencies");
           const generation = guard.tryStart();
@@ -903,6 +903,10 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
 
           const operation = (async () => {
             try {
+              // 先拿到 QueryGuard 的独占执行权，再把 completion 写入 Session；
+              // 否则仍在运行的主循环可能先消费消息，idle 后又被重复续跑。
+              deliverCompletions();
+              current.reporter.markAsyncSubagentCompletionsDelivered();
               await deps.runAgent("", { resumeExistingSession: true });
             } finally {
               sharedMcpManager.attachRegistry(current.toolRegistry);

@@ -143,6 +143,26 @@ export class TuiReporter implements Reporter {
     return this.eventStore;
   }
 
+  /**
+   * 空闲 wake 已取得执行权并把异步 completion 写入 Session。
+   * 先记录 claim，再等这次主 Agent 正文完成后归档，避免无关旧正文提前隐藏活动。
+   */
+  markAsyncSubagentCompletionsDelivered(): void {
+    const terminal = Object.values(this.eventStore.getProjection().subagents).filter(
+      (subagent) =>
+        subagent.lifecycle === "terminal_unconsumed" &&
+        (subagent.activity.completionPolicy === "optional" ||
+          subagent.activity.completionPolicy === "detached"),
+    );
+    for (const subagent of terminal) {
+      this.eventStore.append({
+        type: "subagent.activity.claimed",
+        activityId: subagent.activityId,
+      });
+    }
+    if (terminal.length > 0) this.emit();
+  }
+
   /** 对话 rewind 后让可见 transcript 与 Session 使用同一截断边界。 */
   truncateTo(entryIndex: number): void {
     const entryCount = this.eventStore.getProjection().entries.length;
@@ -434,9 +454,17 @@ export class TuiReporter implements Reporter {
   }
 
   private archiveConsumedSubagents(): void {
-    const terminal = Object.values(this.eventStore.getProjection().subagents).filter(
-      (subagent) => subagent.lifecycle === "terminal_unconsumed",
-    );
+    const terminal = Object.values(this.eventStore.getProjection().subagents).filter((subagent) => {
+      if (subagent.lifecycle === "terminal_claimed") return true;
+      if (subagent.lifecycle !== "terminal_unconsumed") return false;
+      const policy = subagent.activity.completionPolicy;
+      // required/legacy 结果由当前工具轮同步消费；detached 成功无需进入主上下文。
+      return (
+        policy === undefined ||
+        policy === "required" ||
+        (policy === "detached" && subagent.activity.status === "completed")
+      );
+    });
     for (const subagent of terminal) {
       this.eventStore.append({
         type: "subagent.activity.archived",
