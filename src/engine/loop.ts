@@ -1816,6 +1816,18 @@ export class AgentEngine implements AgentRunner {
     reporter?: Reporter,
     opts: SubagentRunOptions = {},
   ): Promise<SubagentResult> {
+    const run = () =>
+      this.runSubInIsolatedCompactorScope(taskPrompt, readOnlyRegistry, reporter, opts);
+    return this.compactor ? this.compactor.runInIsolatedScope(run) : run();
+  }
+
+  /** 每个子代理保留注入 Compactor 的行为，但使用独立压缩进度。 */
+  private async runSubInIsolatedCompactorScope(
+    taskPrompt: string,
+    readOnlyRegistry: Registry,
+    reporter?: Reporter,
+    opts: SubagentRunOptions = {},
+  ): Promise<SubagentResult> {
     const rep = reporter ?? new SilentReporter();
     const signal = opts.signal;
     signal?.throwIfAborted();
