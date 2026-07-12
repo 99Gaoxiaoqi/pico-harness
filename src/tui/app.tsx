@@ -53,6 +53,7 @@ import {
   normalizeAgentNavigationItems,
   reconcileAgentNavigationState,
   reduceAgentNavigation,
+  visibleAgentNavigationItems,
   type AgentNavigationEvent,
   type AgentNavigationItem,
 } from "./agent-navigation.js";
@@ -149,9 +150,13 @@ export function App({
   const mouseMode = useTerminalMouseMode();
   const { rows, columns } = useWindowSize();
   const focusedDialog = pickFocusedDialog(dialogRequests);
-  const normalizedAgentItems = useMemo(() => normalizeAgentNavigationItems(agents), [agents]);
-  const hasSubagents = normalizedAgentItems.length > 1;
+  const allAgentItems = useMemo(() => normalizeAgentNavigationItems(agents), [agents]);
   const [agentNavigation, setAgentNavigation] = useState(createAgentNavigationState);
+  const normalizedAgentItems = useMemo(
+    () => visibleAgentNavigationItems(allAgentItems, agentNavigation.activeId),
+    [agentNavigation.activeId, allAgentItems],
+  );
+  const hasSubagents = normalizedAgentItems.length > 1;
   const [seenTimelineCounts, setSeenTimelineCounts] = useState<Record<string, number>>({});
   const navigationItems = useMemo(
     () =>
