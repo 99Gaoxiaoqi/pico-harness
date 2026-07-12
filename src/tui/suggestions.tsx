@@ -11,6 +11,8 @@ export type SuggestionKind = "slash" | "slash-argument" | "mention";
 export interface InputSuggestion {
   /** Candidate value without the leading "/" or "@". */
   value: string;
+  /** Optional human-facing label; `value` remains the matching/completion token. */
+  label?: string;
   /** Optional replacement text; defaults to value. */
   insertText?: string;
   /** Short help text rendered on the right. */
@@ -149,7 +151,7 @@ function truncateInline(value: string, maxLength: number): string {
 }
 
 function formatSuggestionLabel(item: InputSuggestion, kind: SuggestionKind): string {
-  const value = stripMarker(item.value, kind);
+  const value = stripMarker(item.label ?? item.value, kind);
   const label = `${markerForKind(kind)}${value}`;
   if (kind !== "slash") return label;
 

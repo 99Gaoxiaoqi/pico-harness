@@ -81,6 +81,26 @@ describe("InputBox input controller", () => {
     expect(state.activeSuggestions).toBeNull();
   });
 
+  it("会话候选显示标题时仍将真实 session ID 写入 /fork", () => {
+    const options: InputControllerOptions = {
+      slashArgumentSuggestions: (command) =>
+        command === "fork"
+          ? [
+              {
+                value: "cli-mrgt170i-275d600c",
+                insertText: "cli-mrgt170i-275d600c",
+                label: "优化 fork 会话选择体验",
+              },
+            ]
+          : [],
+    };
+    let state = typeText("/fork ", options);
+
+    state = reduceInputControllerEvent(state, "", key({ tab: true }), options).state;
+
+    expect(state.text).toBe("/fork cli-mrgt170i-275d600c ");
+  });
+
   it("Enter accepts the open slash suggestion instead of submitting the prompt", () => {
     const options: InputControllerOptions = {
       slashCommandSuggestions: (query) =>

@@ -90,6 +90,27 @@ describe("SuggestionList row model", () => {
     ]);
   });
 
+  it("renders a human-facing argument label while keeping its completion value separate", () => {
+    const rows = formatSuggestionRows({
+      kind: "slash-argument",
+      query: "",
+      replaceStart: 6,
+      replaceEnd: 6,
+      selectedIndex: 0,
+      items: [
+        {
+          value: "cli-mrgt170i-275d600c",
+          insertText: "cli-mrgt170i-275d600c",
+          label: "优化 fork 会话选择体验",
+          description: "19 messages · 5m ago · id=cli-mrgt170i-275d600c",
+        },
+      ],
+    });
+
+    expect(rows[0]?.left).toBe("优化 fork 会话选择体验");
+    expect(rows[0]?.description).toContain("19 messages");
+  });
+
   it("renders alias match source in slash command rows", () => {
     const session: ActiveSuggestionSession = {
       kind: "slash",

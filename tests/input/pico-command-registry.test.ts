@@ -85,6 +85,26 @@ describe("Pico command registry", () => {
     expect(result.result.message).toContain("Current mode: yolo");
   });
 
+  it("/rename 为当前 session 设置可持久化的可读标题", async () => {
+    const workDir = mkdtempSync(join(tmpdir(), "pico-command-rename-"));
+    cleanup.push(() => rmSync(workDir, { recursive: true, force: true }));
+    const session = new Session("session-rename", workDir, { persistence: false });
+    const registry = await createPicoCommandRegistry({
+      workDir,
+      provider: "openai",
+      model: "glm-5.2",
+      session,
+      sessionId: session.id,
+    });
+
+    const result = await processUserInput("/rename 认证重构：Session 方案", { registry });
+
+    expect(result.type).toBe("local-command");
+    if (result.type !== "local-command") return;
+    expect(result.result.message).toContain("认证重构：Session 方案");
+    expect(getStoredSessionSettings(session.id)?.title).toBe("认证重构：Session 方案");
+  });
+
   it("/goal shows the active goal from the shared TUI runtime", async () => {
     const goalManager = new GoalManager();
     const goal = goalManager.create("Ship TUI fixes", "Close the reported interaction gaps", {
@@ -505,8 +525,16 @@ describe("Pico command registry", () => {
     await expect(
       Promise.resolve(registry.resolve("resume")?.argumentCompleter?.("cli-r")),
     ).resolves.toEqual([
-      { value: "cli-review", description: "1 messages · 2026-07-09T02:00:00.000Z" },
+      expect.objectContaining({
+        value: "cli-review",
+        insertText: "cli-review",
+        label: "review me",
+        description: expect.stringContaining("id=cli-review"),
+      }),
     ]);
+    await expect(
+      Promise.resolve(registry.resolve("fork")?.argumentCompleter?.("review me")),
+    ).resolves.toEqual([expect.objectContaining({ value: "cli-review", label: "review me" })]);
     expect(registry.resolve("rewind")?.argumentCompleter).toBeUndefined();
   });
 
