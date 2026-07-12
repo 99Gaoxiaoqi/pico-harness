@@ -8,7 +8,6 @@ import { SilentReporter } from "../../src/engine/reporter.js";
 import { globalSessionManager } from "../../src/engine/session.js";
 import { FTS5Store } from "../../src/memory/fts5-store.js";
 import { createRawProvider } from "../../src/provider/factory.js";
-import { ModelCapabilityError } from "../../src/provider/errors.js";
 import { loadModelRouter } from "../../src/provider/model-router.js";
 import { ModelRuntimeCommandService } from "../../src/provider/model-runtime-report.js";
 import { loadPicoConfig } from "../../src/input/pico-config.js";
@@ -87,7 +86,10 @@ describe("stage 12 model capabilities integration", () => {
         ],
         [],
       ),
-    ).rejects.toBeInstanceOf(ModelCapabilityError);
+    ).rejects.toMatchObject({
+      code: "vision",
+      message: expect.stringContaining("图片未发送到模型"),
+    });
     expect(endpoint.requestCount).toBe(0);
 
     const sessionId = `stage12-model-${Date.now()}`;
