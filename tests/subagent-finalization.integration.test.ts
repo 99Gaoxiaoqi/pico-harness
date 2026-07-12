@@ -28,6 +28,8 @@ describe("subagent finalization integration", () => {
     expect(result.summary).toContain("evidence:probe-2");
     expect(registry.executed.map((call) => call.id)).toEqual(["probe-1", "probe-2"]);
     expect(provider.requests).toHaveLength(3);
+    expect(provider.requests[0]?.messages[1]?.content).toContain("[最终汇报合约]");
+    expect(provider.requests[0]?.messages[1]?.content).toContain("常规目标为 1000–2000 字符");
     expect(provider.requests[2]?.tools).toEqual([]);
     expect(
       provider.requests[2]?.messages.some(

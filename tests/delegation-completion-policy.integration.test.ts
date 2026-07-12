@@ -6,6 +6,7 @@ import { TaskRegistry } from "../src/tasks/task-registry.js";
 import {
   aggregateDelegationStatus,
   DelegationManager,
+  normalizeDelegationBatchResult,
   type DelegationCompletionEnvelope,
 } from "../src/tools/delegation-manager.js";
 import { ToolRegistry } from "../src/tools/registry-impl.js";
@@ -107,6 +108,14 @@ describe("delegation completion policy integration", () => {
         { taskIndex: 1, status: "cancelled", durationMs: 1 },
       ]),
     ).toBe("cancelled");
+    expect(
+      normalizeDelegationBatchResult({
+        status: "completed",
+        results: [],
+        omittedResults: 8,
+        totalDurationMs: 1,
+      }).status,
+    ).toBe("completed");
 
     const taskRegistry = new TaskRegistry({ generateId: () => "a_aggregate" });
     const manager = new DelegationManager({ taskRegistry });
@@ -145,6 +154,48 @@ describe("delegation completion policy integration", () => {
       status: "error",
       results: [{ status: "error" }, { status: "error" }],
     });
+  });
+
+  it("optional / detached 异步回灌优先保留后置失败和 artifact 路径", async () => {
+    const completions: DelegationCompletionEnvelope[] = [];
+    const manager = new DelegationManager({
+      onCompletion: (completion) => completions.push(completion),
+    });
+    const artifactPath = ".claw/artifacts/sessions/async/subagent-report.txt";
+    const runner: AgentRunner = {
+      async runSub(taskPrompt) {
+        if (taskPrompt === "late-failure") {
+          throw new Error(`LATE_FAILURE:${"E".repeat(6_000)}`);
+        }
+        if (taskPrompt === "with-artifact") {
+          return { summary: "A".repeat(6_000), artifacts: [artifactPath] };
+        }
+        return { summary: "C".repeat(6_000), artifacts: [] };
+      },
+    };
+    const tool = new DelegateTaskTool(runner, () => new ToolRegistry(), manager);
+
+    for (const completionPolicy of ["optional", "detached"] as const) {
+      await tool.execute(
+        JSON.stringify({
+          completion_policy: completionPolicy,
+          tasks: [{ goal: "long-completed" }, { goal: "with-artifact" }, { goal: "late-failure" }],
+        }),
+      );
+      await waitUntil(() => completions.length === (completionPolicy === "optional" ? 1 : 2));
+    }
+
+    expect(completions.map((completion) => completion.status)).toEqual(["partial", "partial"]);
+    for (const completion of completions) {
+      expect(completion.outputSummary.length).toBeGreaterThan(2_000);
+      expect(completion.outputSummary.length).toBeLessThanOrEqual(12_000);
+      expect(completion.outputSummary).toContain("LATE_FAILURE:");
+      expect(completion.outputSummary).toContain(artifactPath);
+      expect(completion.outputSummary.indexOf("task 2 error")).toBeLessThan(
+        completion.outputSummary.indexOf("task 0 completed"),
+      );
+      expect(createDelegationCompletionMessage(completion).content).toContain(artifactPath);
+    }
   });
 
   it("optional 与 detached 失败写隐藏 completion，并在空闲时合并续跑一次", async () => {

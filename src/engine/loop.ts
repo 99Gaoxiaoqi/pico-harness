@@ -21,8 +21,12 @@ import {
   type ToolResult,
 } from "../schema/message.js";
 import type { Registry, ToolFileSideEffects } from "../tools/registry.js";
-import type { AgentRunner } from "../tools/subagent.js";
-import type { SubagentRunOptions, SubagentResult } from "../tools/subagent.js";
+import type {
+  AgentRunner,
+  SubagentReportArtifactWriter,
+  SubagentRunOptions,
+  SubagentResult,
+} from "../tools/subagent.js";
 import type { Compactor } from "../context/compactor.js";
 import { ContextCompactionError } from "../context/compactor.js";
 import type { FullCompactor } from "../context/full-compactor.js";
@@ -48,6 +52,7 @@ import type { Session } from "./session.js";
 import type { ToolObservationProcessor } from "../tools/tool-result-observation.js";
 import { ToolAccesses } from "../tools/tool-access.js";
 import { ToolScheduler } from "../tools/tool-scheduler.js";
+import { SUBAGENT_OUTPUT_BUDGET } from "../tools/subagent-budget.js";
 import {
   fileHistoryAddJournalWarning,
   fileHistoryBeginJournal,
@@ -63,14 +68,12 @@ const DEFAULT_WORKING_MEMORY_LIMIT = 20;
 
 /** 子代理 summary 低于此字数则触发一轮扩写(对齐 Kimi Code SUMMARY_MIN_LENGTH) */
 const SUBAGENT_SUMMARY_MIN_CHARS = 200;
-/** 子代理单次最终汇报上限，避免过长结果回灌主上下文。 */
-const SUBAGENT_SUMMARY_MAX_CHARS = 5_000;
 /** summary 续写提示词:要求子代理把过短的总结扩写成完整汇报 */
 const SUBAGENT_SUMMARY_CONTINUATION_PROMPT =
-  "你上一轮的总结过于简短,主架构师无法据此决策。请重新输出一份结构完整、细节充分的总结汇报:包括你探索了哪些文件/发现了什么、关键结论、以及尚存的不确定点。不要调用任何工具,直接用纯文本回答。";
+  "你上一轮的总结过于简短,主架构师无法据此决策。请直接重写为结构化纯文本：先给结论，再列关键证据(文件:行号)、未验证风险和下一步。不要重放原始日志，不要调用任何工具。";
 const SUBAGENT_FINALIZE_PROMPT =
   "[FINALIZE] 已进入预留的最终收口轮。立即停止探索和工具调用，只基于当前上下文中已收集的证据输出纯文本汇报：" +
-  "1) 已确认的事实与证据；2) 未完成或未验证的部分；3) 主 Agent 可直接采取的下一步。";
+  "1) 结论；2) 已确认的事实与文件:行号证据；3) 未完成或未验证风险；4) 主 Agent 可直接采取的下一步。通常控制在 1000–2000 字符，简单任务可更短，不要重放原始日志。";
 const SUBAGENT_EMPTY_SUMMARY_FALLBACK =
   "子代理未能生成可用的最终总结；请主 Agent 根据已回传的工具证据和 artifact 继续收口。";
 
@@ -285,7 +288,7 @@ function assessRequiredDelegationResult(message: Message): RequiredDelegationAss
       Number.isSafeInteger(parsed.omittedResults) &&
       parsed.omittedResults > 0
     ) {
-      // 工具输出在 10k 总预算下可能只保留 omittedResults。顶层终态已证明
+      // 工具输出在批量总预算下可能只保留 omittedResults。顶层终态已证明
       // 这些结果可用，不能因为文本被预算裁剪就误判为整批失败并重复委派。
       usableResults += parsed.omittedResults;
     }
@@ -430,6 +433,8 @@ export interface AgentEngineOptions {
   reporter?: Reporter;
   /** 工具 Observation 入上下文前的处理器,用于大输出摘要与 artifact 外部化 */
   observationProcessor?: ToolObservationProcessor;
+  /** 子代理完整报告写入器；超过常规摘要目标时先落盘，再向主上下文回灌预览。 */
+  subagentReportArtifactWriter?: SubagentReportArtifactWriter;
   /**
    * 链路追踪器:记录决策树到 .claw/traces/ (第 19 讲)。
    * 未提供则不追踪。
@@ -494,6 +499,7 @@ export class AgentEngine implements AgentRunner {
   private readonly onPlanExit?: () => void;
   private readonly reporter: Reporter;
   private readonly observationProcessor?: ToolObservationProcessor;
+  private readonly subagentReportArtifactWriter?: SubagentReportArtifactWriter;
   private readonly tracer?: Tracer;
   /**
    * Steer 队列(运行时注入引导文本)。host 持有同一实例在 run 期间 push。
@@ -534,6 +540,7 @@ export class AgentEngine implements AgentRunner {
     this.onPlanExit = opts.onPlanExit;
     this.reporter = opts.reporter ?? new SilentReporter();
     this.observationProcessor = opts.observationProcessor;
+    this.subagentReportArtifactWriter = opts.subagentReportArtifactWriter;
     this.tracer = opts.tracer;
     this.steerQueue = opts.steerQueue;
     this.shouldContinueAfterStop = opts.shouldContinueAfterStop;
@@ -1920,14 +1927,13 @@ export class AgentEngine implements AgentRunner {
           { error: error instanceof Error ? error.message : String(error), turns: turnCount },
           `[Subagent] FINALIZE 调用失败，直接以 partial 返回已收集证据。`,
         );
-        return {
-          status: "partial",
-          summary: truncateSubagentSummary(
-            buildSubagentPartialSummary(contextHistory, artifactPaths),
-            SUBAGENT_SUMMARY_MAX_CHARS,
-          ),
-          artifacts: artifactPaths,
-        };
+        return this.finalizeSubagentResult(
+          "partial",
+          buildSubagentPartialSummary(contextHistory, artifactPaths),
+          artifactPaths,
+          taskPrompt,
+          runtimeWorkspaceRoot,
+        );
       }
       contextHistory.push(actionResp);
 
@@ -1947,11 +1953,13 @@ export class AgentEngine implements AgentRunner {
             { turns: turnCount, maxSubTurns },
             `[Subagent] 已进入预留收口轮，以 partial 状态返回已收集证据。`,
           );
-          return {
-            status: "partial",
-            summary: truncateSubagentSummary(summary, SUBAGENT_SUMMARY_MAX_CHARS),
-            artifacts: artifactPaths,
-          };
+          return this.finalizeSubagentResult(
+            "partial",
+            summary,
+            artifactPaths,
+            taskPrompt,
+            runtimeWorkspaceRoot,
+          );
         }
 
         // 【改动 B】summary 续写:子代理最终汇报过短(< 200 字)时,
@@ -1999,11 +2007,13 @@ export class AgentEngine implements AgentRunner {
           { turns: turnCount, status: completed ? "completed" : "partial" },
           `[Subagent] ✅ 探路者完成收口,返回总结。`,
         );
-        return {
-          status: completed ? "completed" : "partial",
-          summary: truncateSubagentSummary(summary, SUBAGENT_SUMMARY_MAX_CHARS),
-          artifacts: artifactPaths,
-        };
+        return this.finalizeSubagentResult(
+          completed ? "completed" : "partial",
+          summary,
+          artifactPaths,
+          taskPrompt,
+          runtimeWorkspaceRoot,
+        );
       }
 
       // 执行只读工具的并发循环(资源冲突图调度,复用主循环的调度策略)
@@ -2068,6 +2078,50 @@ export class AgentEngine implements AgentRunner {
       contextHistory.push(...observations);
     }
   }
+
+  private async finalizeSubagentResult(
+    status: "completed" | "partial",
+    report: string,
+    artifactPaths: readonly string[],
+    taskPrompt: string,
+    workDir: string,
+  ): Promise<SubagentResult> {
+    const artifacts = [...new Set(artifactPaths)];
+    let summary = report;
+
+    if (
+      report.length > SUBAGENT_OUTPUT_BUDGET.summary.softMax &&
+      this.subagentReportArtifactWriter
+    ) {
+      try {
+        const artifactPath = await this.subagentReportArtifactWriter({
+          taskPrompt,
+          report,
+          status,
+          workDir,
+        });
+        if (artifactPath) {
+          artifacts.push(artifactPath);
+          summary = buildExternalizedSubagentPreview(
+            report,
+            artifactPath,
+            SUBAGENT_OUTPUT_BUDGET.summary.softMax,
+          );
+        }
+      } catch (error) {
+        logger.warn(
+          { error: error instanceof Error ? error.message : String(error) },
+          "[Subagent] 完整报告外部化失败，回退到单次硬上限。",
+        );
+      }
+    }
+
+    return {
+      status,
+      summary: truncateSubagentSummary(summary, SUBAGENT_OUTPUT_BUDGET.summary.hardMax),
+      artifacts: [...new Set(artifacts)],
+    };
+  }
 }
 
 function persistSubagentContext(contextHistory: Message[], compacted: Message[]): Message[] {
@@ -2119,7 +2173,54 @@ function buildSubagentPartialSummary(
 function truncateSubagentSummary(summary: string, maxChars: number): string {
   if (summary.length <= maxChars) return summary;
   const marker = `\n[子代理总结已截断：原始 ${summary.length} 字符，上限 ${maxChars} 字符]`;
-  return `${summary.slice(0, Math.max(0, maxChars - marker.length))}${marker}`;
+  return `${sliceUtf16Safe(summary, Math.max(0, maxChars - marker.length))}${marker}`;
+}
+
+function buildExternalizedSubagentPreview(
+  report: string,
+  artifactPath: string,
+  maxChars: number,
+): string {
+  const marker = [
+    "",
+    "[完整子代理报告已外部化]",
+    `artifactPath: ${artifactPath}`,
+    `originalChars: ${report.length}`,
+    "当前仅保留结论/证据预览，需要细节时再按路径回查。",
+  ].join("\n");
+  if (marker.length >= maxChars) {
+    return truncateSubagentSummary(marker, maxChars);
+  }
+
+  const previewBudget = maxChars - marker.length;
+  const separator = "\n…\n";
+  if (report.length <= previewBudget) return `${report}${marker}`;
+  const headBudget = Math.max(0, Math.floor((previewBudget - separator.length) * 0.75));
+  const tailBudget = Math.max(0, previewBudget - separator.length - headBudget);
+  return `${sliceUtf16Safe(report, headBudget)}${separator}${sliceUtf16TailSafe(
+    report,
+    tailBudget,
+  )}${marker}`;
+}
+
+function sliceUtf16Safe(value: string, maxChars: number): string {
+  let end = Math.max(0, Math.min(value.length, maxChars));
+  if (end > 0 && end < value.length) {
+    const previous = value.charCodeAt(end - 1);
+    const next = value.charCodeAt(end);
+    if (previous >= 0xd800 && previous <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) end--;
+  }
+  return value.slice(0, end);
+}
+
+function sliceUtf16TailSafe(value: string, maxChars: number): string {
+  let start = Math.max(0, value.length - Math.max(0, maxChars));
+  if (start > 0 && start < value.length) {
+    const previous = value.charCodeAt(start - 1);
+    const next = value.charCodeAt(start);
+    if (previous >= 0xd800 && previous <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) start++;
+  }
+  return value.slice(start);
 }
 
 /**
@@ -2181,6 +2282,11 @@ function buildSubagentTaskPrompt(runtimeWorkspaceRoot: string, taskPrompt: strin
     "",
     "[任务]",
     taskPrompt,
+    "",
+    "[最终汇报合约]",
+    "- 先给可直接决策的结论，再列关键证据，不要重放搜索过程或原始日志。",
+    "- 证据尽量使用 `文件路径:行号`；明确标出未验证风险与建议下一步。",
+    `- 常规目标为 ${SUBAGENT_OUTPUT_BUDGET.summary.softMin}–${SUBAGENT_OUTPUT_BUDGET.summary.softMax} 字符；简单任务可以更短，单次硬上限 ${SUBAGENT_OUTPUT_BUDGET.summary.hardMax} 字符。`,
   ].join("\n");
 }
 

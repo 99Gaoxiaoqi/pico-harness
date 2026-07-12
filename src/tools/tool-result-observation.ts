@@ -1,6 +1,7 @@
 import { logger } from "../observability/logger.js";
 import type { ToolCall, ToolResult } from "../schema/message.js";
 import { summarizeToolResult } from "./result-summarizer.js";
+import { SUBAGENT_OUTPUT_BUDGET } from "./subagent-budget.js";
 
 /**
  * 未知与扩展工具的通用上下文保护阈值。
@@ -8,7 +9,6 @@ import { summarizeToolResult } from "./result-summarizer.js";
  */
 const DEFAULT_EXTERNALIZE_THRESHOLD_CHARS = 50_000;
 const BASH_EXTERNALIZE_THRESHOLD_CHARS = 30_000;
-const DELEGATE_TASK_EXTERNALIZE_THRESHOLD_CHARS = 10_000;
 const DEFAULT_SUMMARY_MAX_CHARS = 1600;
 const DEFAULT_ARTIFACT_SESSION_ID = "default";
 
@@ -72,7 +72,7 @@ export function createToolResultObservationProcessor(
       (toolCall.name === "bash"
         ? BASH_EXTERNALIZE_THRESHOLD_CHARS
         : toolCall.name === "delegate_task"
-          ? DELEGATE_TASK_EXTERNALIZE_THRESHOLD_CHARS
+          ? SUBAGENT_OUTPUT_BUDGET.batch.hardMax
           : DEFAULT_EXTERNALIZE_THRESHOLD_CHARS);
     if (output.length <= threshold) {
       return output;
