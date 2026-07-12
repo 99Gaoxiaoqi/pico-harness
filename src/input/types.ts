@@ -88,7 +88,11 @@ export type SlashCommandCategory =
   | (string & {});
 
 export interface SlashArgumentCandidate {
+  /** Human-facing text for the suggestion row; completion still inserts `value` or `insertText`. */
+  label?: string;
   value: string;
+  /** Optional text inserted into the input after a candidate is selected. */
+  insertText?: string;
   description?: string;
 }
 

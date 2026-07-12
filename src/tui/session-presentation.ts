@@ -53,6 +53,20 @@ export function formatSessionCandidateDescription(
   ].join(" · ");
 }
 
+/** Details for a candidate whose title is rendered separately as its label. */
+export function formatSessionCandidateDetails(
+  session: SessionPresentationInput,
+  options: SessionPresentationOptions = {},
+): string {
+  const presentation = presentSession(session, options);
+  return [
+    presentation.metadata,
+    ...(presentation.forkLabel ? [presentation.forkLabel] : []),
+    ...(presentation.isCurrent ? ["Current"] : []),
+    `id=${presentation.identifier}`,
+  ].join(" · ");
+}
+
 export function presentSession(
   session: SessionPresentationInput,
   options: SessionPresentationOptions = {},
@@ -79,7 +93,12 @@ export function presentSession(
 }
 
 export function sessionDisplayTitle(session: SessionPresentationInput): string {
-  return cleanText(session.title) ?? cleanText(session.firstMessage) ?? cleanText(session.lastMessage) ?? "(no title)";
+  return (
+    cleanText(session.title) ??
+    cleanText(session.firstMessage) ??
+    cleanText(session.lastMessage) ??
+    "(no title)"
+  );
 }
 
 export function formatMessageCount(messageCount: number): string {
