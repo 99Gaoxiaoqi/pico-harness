@@ -118,6 +118,8 @@ export interface AppProps {
   keybindings?: UserKeybindingConfig;
   /** /rewind 等外部动作请求替换输入草稿。 */
   inputReplacement?: { sequence: number; text: string };
+  /** 当前终端实际支持的剪贴板图片快捷键提示。 */
+  imagePasteShortcutLabel?: string;
   /** Ctrl+L 经 Ink renderer 输出的过渡空帧，避免绕过帧记账。 */
   redrawBlank?: boolean;
 }
@@ -144,6 +146,7 @@ export function App({
   onRedraw,
   keybindings,
   inputReplacement,
+  imagePasteShortcutLabel,
   redrawBlank = false,
 }: AppProps): React.ReactNode {
   const { exit, suspendTerminal } = useApp();
@@ -545,6 +548,7 @@ export function App({
           fileMentionSuggestions={fileMentionSuggestions}
           keybindings={keybindings}
           inputReplacement={inputReplacement}
+          imagePasteShortcutLabel={imagePasteShortcutLabel}
           onSubmit={(submission) => {
             setTranscriptView({ mode: "follow" });
             setExpandedToolKey(null);
