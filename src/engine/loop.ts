@@ -1826,10 +1826,8 @@ export class AgentEngine implements AgentRunner {
 
     const initialTools = readOnlyRegistry.getAvailableTools();
     const initialToolNames = new Set(initialTools.map((tool) => tool.name));
-    // 委派层会传入 host/worktree 的可信运行目录。基线接口暂未包含 workDir，
-    // 用局部交叉类型保持与新旧装配兼容；不从任务 context 或模型输出猜测根目录。
-    const runtimeWorkspaceRoot =
-      (opts as SubagentRunOptions & { workDir?: string }).workDir ?? this.workDir;
+    // 委派层会传入 host/worktree 的可信运行目录；不从任务 context 或模型输出猜测根目录。
+    const runtimeWorkspaceRoot = opts.workDir ?? this.workDir;
     const canViewSkills = initialToolNames.has("skill_view");
     const skillIndex = canViewSkills ? await new SkillLoader(runtimeWorkspaceRoot).loadAll() : "";
     signal?.throwIfAborted();

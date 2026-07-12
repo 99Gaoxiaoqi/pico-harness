@@ -1,3 +1,6 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { TaskRegistry } from "../src/tasks/task-registry.js";
 import {
@@ -6,6 +9,7 @@ import {
   type DelegationCompletionEnvelope,
 } from "../src/tools/delegation-manager.js";
 import { ToolRegistry } from "../src/tools/registry-impl.js";
+import { createSubagentRegistryFactory } from "../src/tools/delegation-registry.js";
 import { DelegateTaskTool, type AgentRunner, type SubagentResult } from "../src/tools/subagent.js";
 import { TuiReporter } from "../src/tui/tui-reporter.js";
 import {
@@ -228,7 +232,7 @@ describe("delegation completion policy integration", () => {
     await tool.execute(
       JSON.stringify({
         goal: "检查认证边界",
-        roots: ["src/auth", "tests/auth"],
+        roots: ["src/auth", "/stale/project/src", "../escape", "tests\\auth"],
         max_files: 999,
         stopping_condition: "确认入口与失败路径后停止",
         expected_output: "列出证据文件和风险",
@@ -244,6 +248,46 @@ describe("delegation completion policy integration", () => {
     expect(seenPrompt).toContain("停止条件: 确认入口与失败路径后停止");
     expect(seenPrompt).toContain("期望输出: 列出证据文件和风险");
     expect(seenWorkDir).toBe("/trusted/project");
+  });
+
+  it("递归委派继续继承当前子代理的可信 workDir", async () => {
+    const runtimeWorkDir = await mkdtemp(join(tmpdir(), "pico-recursive-delegation-"));
+    let seenWorkDir: string | undefined;
+    const runner: AgentRunner = {
+      async runSub(_taskPrompt, _registry, _reporter, options) {
+        seenWorkDir = options?.workDir;
+        return { summary: "nested result", artifacts: [] };
+      },
+    };
+
+    try {
+      const manager = new DelegationManager();
+      const factory = createSubagentRegistryFactory({
+        workDir: tmpdir(),
+        runner,
+        manager,
+      });
+      const registry = factory({
+        mode: "explore",
+        role: "orchestrator",
+        depth: 0,
+        maxSpawnDepth: 2,
+        workDir: runtimeWorkDir,
+      }) as ToolRegistry;
+
+      const nestedDelegate = registry.getTool("delegate_task");
+      expect(nestedDelegate).toBeDefined();
+      const result = JSON.parse(
+        await nestedDelegate!.execute(JSON.stringify({ goal: "继续排查" })),
+      ) as {
+        status: string;
+      };
+
+      expect(result.status).toBe("completed");
+      expect(seenWorkDir).toBe(runtimeWorkDir);
+    } finally {
+      await rm(runtimeWorkDir, { recursive: true, force: true });
+    }
   });
 
   it("TUI 内部续跑只透传 resume 标记，不追加可见用户输入", async () => {
