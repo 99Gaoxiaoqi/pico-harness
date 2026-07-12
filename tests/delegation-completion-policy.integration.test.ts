@@ -152,7 +152,6 @@ describe("delegation completion policy integration", () => {
     const hiddenMessages: ReturnType<typeof createDelegationCompletionMessage>[] = [];
     const queue = new DelegationCompletionWakeQueue({
       deliver: (completion) => {
-        envelopes.push(completion);
         hiddenMessages.push(createDelegationCompletionMessage(completion));
       },
     });
@@ -161,12 +160,16 @@ describe("delegation completion policy integration", () => {
     const coordinator = new DelegationWakeCoordinator({
       queue,
       isIdle: () => idle,
-      resume: async (completionSeqs) => {
+      resume: async (completionSeqs, deliverCompletions) => {
         resumed.push(completionSeqs);
+        deliverCompletions();
       },
     });
     const manager = new DelegationManager({
-      onCompletion: (completion) => queue.enqueue(completion),
+      onCompletion: (completion) => {
+        envelopes.push(completion);
+        queue.enqueue(completion);
+      },
     });
     const runner: AgentRunner = {
       async runSub(taskPrompt): Promise<SubagentResult> {
@@ -181,9 +184,17 @@ describe("delegation completion policy integration", () => {
     await tool.execute(JSON.stringify({ goal: "optional-failure", completion_policy: "optional" }));
     await tool.execute(JSON.stringify({ goal: "detached-failure", completion_policy: "detached" }));
     await tool.execute(JSON.stringify({ goal: "detached-success", completion_policy: "detached" }));
-    await waitUntil(() => hiddenMessages.length === 2);
+    await waitUntil(() => envelopes.length === 2);
 
     expect(resumed).toEqual([]);
+    // 主 Agent 仍运行时不写入 Session，避免当前 run 消费后 idle 再重复续跑。
+    expect(hiddenMessages).toEqual([]);
+    expect(queue.hasPending).toBe(true);
+    expect(queue.enqueue(envelopes[0]!)).toBe(false);
+
+    idle = true;
+    coordinator.notifyIdle();
+    await waitUntil(() => resumed.length === 1 && hiddenMessages.length === 2);
     expect(hiddenMessages.map((message) => message.providerData?.picoKind)).toEqual([
       "subagent_completion",
       "subagent_completion",
@@ -196,12 +207,8 @@ describe("delegation completion policy integration", () => {
         ["detached", "error"],
       ],
     );
-    expect(queue.enqueue(envelopes[0]!)).toBe(false);
-
-    idle = true;
-    coordinator.notifyIdle();
-    await waitUntil(() => resumed.length === 1);
     expect(resumed[0]).toEqual(envelopes.map((completion) => completion.completionSeq));
+    expect(queue.hasPending).toBe(false);
     coordinator.dispose();
   });
 
