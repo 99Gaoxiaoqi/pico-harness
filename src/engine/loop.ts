@@ -11,7 +11,7 @@
 // 每轮组装 = SystemPrompt + Session.GetWorkingMemory(N),严格限制 Context 规模。
 
 import type { LLMProvider, LLMProviderRequestOptions } from "../provider/interface.js";
-import { ContextOverflowError } from "../provider/errors.js";
+import { ContextOverflowError, isAbortError } from "../provider/errors.js";
 import { generateWithRetry, type RetryInfo } from "../provider/retry.js";
 import {
   PICO_TOOL_RESULT_ERROR_KEY,
@@ -68,6 +68,11 @@ const SUBAGENT_SUMMARY_MAX_CHARS = 5_000;
 /** summary 续写提示词:要求子代理把过短的总结扩写成完整汇报 */
 const SUBAGENT_SUMMARY_CONTINUATION_PROMPT =
   "你上一轮的总结过于简短,主架构师无法据此决策。请重新输出一份结构完整、细节充分的总结汇报:包括你探索了哪些文件/发现了什么、关键结论、以及尚存的不确定点。不要调用任何工具,直接用纯文本回答。";
+const SUBAGENT_FINALIZE_PROMPT =
+  "[FINALIZE] 已进入预留的最终收口轮。立即停止探索和工具调用，只基于当前上下文中已收集的证据输出纯文本汇报：" +
+  "1) 已确认的事实与证据；2) 未完成或未验证的部分；3) 主 Agent 可直接采取的下一步。";
+const SUBAGENT_EMPTY_SUMMARY_FALLBACK =
+  "子代理未能生成可用的最终总结；请主 Agent 根据已回传的工具证据和 artifact 继续收口。";
 
 const EXPLORE_SYNTHESIS_PROMPT =
   "[DELEGATION SYNTHESIS] 本批 required 委派的实际任务均为 explore，子代理已全部收口。" +
@@ -81,6 +86,12 @@ const EXPLORE_SYNTHESIS_FAILED_MESSAGE =
 const MAX_REQUIRED_FIRST_DELEGATION_ATTEMPTS = 2;
 const REQUIRED_FIRST_DELEGATION_FAILED_MESSAGE =
   "模型未能按用户的明确要求启动 required 子代理，已停止主 Agent 自行探索。";
+const REQUIRED_DELEGATION_RECOVERY_PROMPT =
+  "[DELEGATION RECOVERY] 上一批 required 委派没有产生可用的 completed/partial 证据。" +
+  "本轮只允许再调用一次 required delegate_task，将任务缩小为一个最关键、可独立验证的缺口；" +
+  "不得改用主 Agent 工具大范围重读项目，不得输出解释性正文。";
+const REQUIRED_DELEGATION_RECOVERY_FAILED_MESSAGE =
+  "required 子代理在一次缩小范围的恢复委派后仍未产生可用证据，已停止主 Agent 自行大范围重读。";
 
 function isBackgroundBashCall(call: ToolCall): boolean {
   if (call.name !== "bash") return false;
@@ -177,6 +188,15 @@ function buildRequiredFirstToolRejection(toolCall: ToolCall): Message {
   };
 }
 
+function buildDelegationRecoveryToolRejection(toolCall: ToolCall): Message {
+  return {
+    role: "user",
+    content: "工具执行已拒绝：required 委派恢复轮只允许一次缩小范围的 required delegate_task。",
+    toolCallId: toolCall.id,
+    providerData: { [PICO_TOOL_RESULT_ERROR_KEY]: true },
+  };
+}
+
 function latestVisibleUserInput(messages: readonly Message[]): string {
   return (
     messages.findLast(
@@ -186,6 +206,21 @@ function latestVisibleUserInput(messages: readonly Message[]): string {
         message.providerData?.["picoHiddenFromTranscript"] !== true,
     )?.content ?? ""
   );
+}
+
+function isSubagentCompletionWake(messages: readonly Message[]): boolean {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index]!;
+    if (message.providerData?.["picoKind"] === "subagent_completion") return true;
+    if (
+      message.role === "user" &&
+      message.toolCallId === undefined &&
+      message.providerData?.["picoHiddenFromTranscript"] !== true
+    ) {
+      return false;
+    }
+  }
+  return false;
 }
 
 function requiredDelegationTaskCount(call: ToolCall): number {
@@ -214,21 +249,49 @@ function satisfiesRequestedDelegationCount(
   return requestedCount === "multiple" ? actual >= 2 : actual >= 1;
 }
 
-function completedDelegationResultCount(message: Message): number {
+interface RequiredDelegationAssessment {
+  usableResults: number;
+  batchFailed: boolean;
+}
+
+function assessRequiredDelegationResult(message: Message): RequiredDelegationAssessment {
   try {
     const parsed = JSON.parse(message.content) as {
+      status?: unknown;
       results?: unknown;
       omittedResults?: unknown;
       error?: unknown;
     };
-    if (typeof parsed.error === "string" || !Array.isArray(parsed.results)) return 0;
-    const omitted =
-      typeof parsed.omittedResults === "number" && Number.isSafeInteger(parsed.omittedResults)
-        ? Math.max(0, parsed.omittedResults)
-        : 0;
-    return parsed.results.length + omitted;
+    const batchFailed =
+      typeof parsed.error === "string" ||
+      parsed.status === "error" ||
+      parsed.status === "timed_out" ||
+      parsed.status === "cancelled";
+    if (!Array.isArray(parsed.results)) return { usableResults: 0, batchFailed: true };
+
+    let usableResults = 0;
+    for (const result of parsed.results) {
+      if (typeof result !== "object" || result === null) continue;
+      const record = result as Record<string, unknown>;
+      if (record["status"] !== "completed" && record["status"] !== "partial") continue;
+      const hasSummary =
+        typeof record["summary"] === "string" && record["summary"].trim().length > 0;
+      const hasArtifacts = Array.isArray(record["artifacts"]) && record["artifacts"].length > 0;
+      if (hasSummary || hasArtifacts) usableResults++;
+    }
+    if (
+      (parsed.status === "completed" || parsed.status === "partial") &&
+      typeof parsed.omittedResults === "number" &&
+      Number.isSafeInteger(parsed.omittedResults) &&
+      parsed.omittedResults > 0
+    ) {
+      // 工具输出在 10k 总预算下可能只保留 omittedResults。顶层终态已证明
+      // 这些结果可用，不能因为文本被预算裁剪就误判为整批失败并重复委派。
+      usableResults += parsed.omittedResults;
+    }
+    return { usableResults, batchFailed };
   } catch {
-    return 0;
+    return { usableResults: 0, batchFailed: true };
   }
 }
 
@@ -430,7 +493,6 @@ export class AgentEngine implements AgentRunner {
   /** Plan Mode 退出回调(ExitPlanMode 审批通过后触发),供 host 监听 */
   private readonly onPlanExit?: () => void;
   private readonly reporter: Reporter;
-  private runtimeReporter?: Reporter;
   private readonly observationProcessor?: ToolObservationProcessor;
   private readonly tracer?: Tracer;
   /**
@@ -476,11 +538,16 @@ export class AgentEngine implements AgentRunner {
     this.steerQueue = opts.steerQueue;
     this.shouldContinueAfterStop = opts.shouldContinueAfterStop;
     this.rebuildProvider = opts.rebuildProvider;
-
-    this.provider = this.wrapStreamingProvider(this.provider);
   }
 
-  private wrapStreamingProvider(provider: LLMProvider): LLMProvider {
+  /**
+   * 为单次运行构造绑定 Reporter 的流式 Provider 视图。
+   *
+   * Reporter 是调用级状态，不能存在 AgentEngine 的可变字段上：同一 Engine
+   * 可能并行运行多个子代理，共享 reporter 会把 child delta 泄漏到主流或
+   * 另一个 child。这个包装器每次 generate 都闭包当前调用的 sink，无全局可变状态。
+   */
+  private providerForReporter(provider: LLMProvider, reporter: Reporter): LLMProvider {
     const generateStreamFn = provider.generateStream;
     if (!generateStreamFn) return provider;
     return {
@@ -489,25 +556,24 @@ export class AgentEngine implements AgentRunner {
           provider,
           msgs,
           tools,
-          (delta: string) => {
-            const reporter = this.runtimeReporter ?? this.reporter;
-            reporter.onTextDelta?.(delta);
-          },
+          (delta: string) => reporter.onTextDelta?.(delta),
           options,
         ),
       get modelName() {
         return provider.modelName;
       },
-      isRetryableError: provider.isRetryableError,
+      ...(provider.isRetryableError
+        ? { isRetryableError: provider.isRetryableError.bind(provider) }
+        : {}),
       generateStream: generateStreamFn.bind(provider),
     };
   }
 
-  private rotateProvider(): LLMProvider | undefined {
+  private rotateProvider(reporter: Reporter): LLMProvider | undefined {
     const provider = this.rebuildProvider?.();
     if (!provider) return undefined;
-    this.provider = this.wrapStreamingProvider(provider);
-    return this.provider;
+    this.provider = provider;
+    return this.providerForReporter(provider, reporter);
   }
 
   /**
@@ -634,6 +700,7 @@ export class AgentEngine implements AgentRunner {
     systemPrompt: string,
     tools: ToolDefinition[],
     baseContext: Message[],
+    reporter: Reporter,
     span?: Span,
     signal?: AbortSignal,
   ): Promise<Message> {
@@ -647,11 +714,16 @@ export class AgentEngine implements AgentRunner {
         // 【集成点】普通重试层(generateWithRetry)在内,响应式压缩在外:
         // 429/5xx/网络错误在此重试;ContextOverflowError 不被普通重试吞掉
         // (defaultIsRetryableError 已排除),冒泡到本方法 catch 做响应式降级。
-        return await generateWithRetry(this.provider, context, tools, {
-          signal,
-          onRetry: this.makeRetryReporter(span),
-          onRateLimited: () => this.rotateProvider(),
-        });
+        return await generateWithRetry(
+          this.providerForReporter(this.provider, reporter),
+          context,
+          tools,
+          {
+            signal,
+            onRetry: this.makeRetryReporter(span),
+            onRateLimited: () => this.rotateProvider(reporter),
+          },
+        );
       } catch (err) {
         // 非 overflow 错误直接抛(429/5xx 等普通重试已由 generateWithRetry 处理)
         if (!(err instanceof ContextOverflowError)) {
@@ -782,8 +854,9 @@ export class AgentEngine implements AgentRunner {
     const systemPrompt = await this.buildSystemPrompt();
     signal?.throwIfAborted();
 
+    const runHistory = session.getHistory();
     const firstTurnDelegationPolicy = createFirstTurnDelegationPolicy(
-      latestVisibleUserInput(session.getHistory()),
+      isSubagentCompletionWake(runHistory) ? "" : latestVisibleUserInput(runHistory),
     );
     let requiredFirstDelegationPending =
       firstTurnDelegationPolicy.kind === "required-first-delegation";
@@ -794,6 +867,8 @@ export class AgentEngine implements AgentRunner {
     let hardResetTriggered = false;
     let exploreSynthesisOnly = false;
     let exploreSynthesisToolRetries = 0;
+    let requiredDelegationRecoveryPending = false;
+    let requiredDelegationRecoveryExploreOnly = false;
     const userRewindPointId = session.fileHistory.snapshots.findLast(
       (snapshot) =>
         snapshot.messageId === session.fileHistory.currentMessageId &&
@@ -803,9 +878,6 @@ export class AgentEngine implements AgentRunner {
       this.workspaceRoots?.list() ?? (this.registry.setPreWriteHook ? [this.workDir] : []);
     let runFileJournal: FileHistoryJournal | undefined;
     let activeFileJournal: FileHistoryJournal | undefined;
-    const previousRuntimeReporter = this.runtimeReporter;
-    this.runtimeReporter = reporter;
-
     // The Main Loop:心跳开始 (ReAct 循环)
     try {
       for (;;) {
@@ -879,8 +951,8 @@ export class AgentEngine implements AgentRunner {
           // 从能力边界上阻断它重复阅读项目。worker/mixed 批次不受影响。
           const providerTools = exploreSynthesisOnly
             ? []
-            : requiredFirstDelegationActive
-              ? allTools.filter((tool) => tool.name === firstTurnDelegationPolicy.toolName)
+            : requiredFirstDelegationActive || requiredDelegationRecoveryPending
+              ? allTools.filter((tool) => tool.name === "delegate_task")
               : availableTools;
 
           // ====================================================================
@@ -956,6 +1028,7 @@ export class AgentEngine implements AgentRunner {
           }
           if (
             requiredFirstDelegationActive &&
+            !requiredDelegationRecoveryPending &&
             firstTurnDelegationPolicy.kind === "required-first-delegation"
           ) {
             compactedContext.push({
@@ -967,7 +1040,6 @@ export class AgentEngine implements AgentRunner {
               },
             });
           }
-
           const actionSpan = turnSpan?.startChild("LLM.Action", {
             inputMessageCount: compactedContext.length,
             availableToolCount: providerTools.length,
@@ -981,6 +1053,7 @@ export class AgentEngine implements AgentRunner {
               systemPrompt,
               providerTools,
               compactedContext,
+              reporter,
               actionSpan,
               signal,
             );
@@ -1053,9 +1126,38 @@ export class AgentEngine implements AgentRunner {
             firstTurnDelegationPolicy.kind === "required-first-delegation"
               ? firstTurnDelegationPolicy.intent.requestedCount
               : "unspecified";
+          const acceptedRecoveryDelegation =
+            requiredDelegation !== undefined && requiredDelegationTaskCount(requiredDelegation) > 0;
           const acceptedRequiredFirstDelegation =
             requiredDelegation !== undefined &&
-            satisfiesRequestedDelegationCount(requiredDelegation, requestedDelegationCount);
+            (requiredDelegationRecoveryPending
+              ? acceptedRecoveryDelegation
+              : satisfiesRequestedDelegationCount(requiredDelegation, requestedDelegationCount));
+          if (requiredDelegationRecoveryPending && !acceptedRecoveryDelegation) {
+            reporter.onAssistantResponseSuppressed?.("delegation-first-retry");
+            const rejectedResponse: Message = {
+              ...responseMsg,
+              content: "",
+              providerData: {
+                ...responseMsg.providerData,
+                picoKind: "required_delegation_recovery_rejected",
+                picoHiddenFromTranscript: true,
+              },
+            };
+            session.append(rejectedResponse);
+            this.onTurn?.({ turn: turnCount, message: rejectedResponse });
+            session.append(...toolCalls.map(buildDelegationRecoveryToolRejection));
+            const failedResponse: Message = {
+              role: "assistant",
+              content: requiredFirstDelegationActive
+                ? REQUIRED_FIRST_DELEGATION_FAILED_MESSAGE
+                : REQUIRED_DELEGATION_RECOVERY_FAILED_MESSAGE,
+            };
+            session.append(failedResponse);
+            reporter.onMessage(failedResponse.content);
+            reporter.onFinish();
+            break;
+          }
           if (requiredFirstDelegationActive && !acceptedRequiredFirstDelegation) {
             reporter.onAssistantResponseSuppressed?.("delegation-first-retry");
             const rejectedResponse: Message = {
@@ -1260,36 +1362,51 @@ export class AgentEngine implements AgentRunner {
 
           // 将所有 Observation 持久化到 Session,开启下一轮复盘与推理
           session.append(...observations);
-          if (
-            requiredFirstDelegationActive &&
-            requiredDelegationIndex !== undefined &&
-            requiredDelegation
-          ) {
-            const expectedResults = requiredDelegationTaskCount(requiredDelegation);
-            const deliveredResults = completedDelegationResultCount(
+          if (requiredDelegation && requiredDelegationIndex !== undefined) {
+            const assessment = assessRequiredDelegationResult(
               observations[requiredDelegationIndex]!,
             );
-            if (deliveredResults < expectedResults) {
-              requiredFirstDelegationAttempts++;
+            const hasUsableResult = !assessment.batchFailed && assessment.usableResults > 0;
+            if (!hasUsableResult) {
               exploreSynthesisOnly = false;
               exploreSynthesisToolRetries = 0;
-              if (requiredFirstDelegationAttempts >= MAX_REQUIRED_FIRST_DELEGATION_ATTEMPTS) {
+              if (requiredDelegationRecoveryPending) {
                 const failedResponse: Message = {
                   role: "assistant",
-                  content: REQUIRED_FIRST_DELEGATION_FAILED_MESSAGE,
+                  content: requiredFirstDelegationActive
+                    ? REQUIRED_FIRST_DELEGATION_FAILED_MESSAGE
+                    : REQUIRED_DELEGATION_RECOVERY_FAILED_MESSAGE,
                 };
                 session.append(failedResponse);
                 reporter.onMessage(failedResponse.content);
                 reporter.onFinish();
                 break;
               }
+
+              requiredDelegationRecoveryPending = true;
+              requiredDelegationRecoveryExploreOnly =
+                isExploreOnlyRequiredDelegation(requiredDelegation);
+              session.append({
+                role: "user",
+                content: REQUIRED_DELEGATION_RECOVERY_PROMPT,
+                providerData: {
+                  picoKind: "required_delegation_recovery",
+                  picoHiddenFromTranscript: true,
+                },
+              });
               continue;
             }
-            requiredFirstDelegationPending = false;
-            requiredFirstDelegationAttempts = 0;
-          }
-          if (requiredDelegation) {
-            exploreSynthesisOnly = isExploreOnlyRequiredDelegation(requiredDelegation);
+
+            const currentExploreOnly = isExploreOnlyRequiredDelegation(requiredDelegation);
+            exploreSynthesisOnly = requiredDelegationRecoveryPending
+              ? requiredDelegationRecoveryExploreOnly && currentExploreOnly
+              : currentExploreOnly;
+            requiredDelegationRecoveryPending = false;
+            requiredDelegationRecoveryExploreOnly = false;
+            if (requiredFirstDelegationActive) {
+              requiredFirstDelegationPending = false;
+              requiredFirstDelegationAttempts = 0;
+            }
             exploreSynthesisToolRetries = 0;
             session.append({
               role: "user",
@@ -1344,7 +1461,6 @@ export class AgentEngine implements AgentRunner {
         await commitFileJournal(session, runFileJournal, userRewindPointId);
       }
       activeFileJournal = undefined;
-      this.runtimeReporter = previousRuntimeReporter;
       rootSpan?.end();
       if (rootSpan) {
         const tracePath = exportTraceToFile(rootSpan, session.workDir, session.id);
@@ -1489,11 +1605,16 @@ export class AgentEngine implements AgentRunner {
         ...session.getWorkingMemory(this.workingMemoryLimit),
       ];
       const costBefore = session.totalCostCNY;
-      const response = await generateWithRetry(this.provider, context, [], {
-        signal,
-        onRetry: this.makeRetryReporter(graceSpan),
-        onRateLimited: () => this.rotateProvider(),
-      });
+      const response = await generateWithRetry(
+        this.providerForReporter(this.provider, reporter),
+        context,
+        [],
+        {
+          signal,
+          onRetry: this.makeRetryReporter(graceSpan),
+          onRateLimited: () => this.rotateProvider(reporter),
+        },
+      );
       signal?.throwIfAborted();
       recordLlmResponse(graceSpan, response);
       // Grace Call is the one permitted over-budget summary. It does not consume another
@@ -1550,15 +1671,21 @@ export class AgentEngine implements AgentRunner {
   private async generateSubWithOverflowRetry(
     contextHistory: Message[],
     tools: ToolDefinition[],
+    reporter: Reporter,
     signal?: AbortSignal,
   ): Promise<Message> {
     if (!this.compactor) {
       // 无 Compactor:子代理无法降级,叠加普通重试层(溢出则原样抛出)
-      return generateWithRetry(this.provider, contextHistory, tools, {
-        signal,
-        onRetry: this.makeRetryReporter(),
-        onRateLimited: () => this.rotateProvider(),
-      });
+      return generateWithRetry(
+        this.providerForReporter(this.provider, reporter),
+        contextHistory,
+        tools,
+        {
+          signal,
+          onRetry: this.makeRetryReporter(),
+          onRateLimited: () => this.rotateProvider(reporter),
+        },
+      );
     }
     // 首轮:用默认预算压缩(attempt 0,系数 1.0)
     let context = this.compactSubContext(contextHistory);
@@ -1566,11 +1693,16 @@ export class AgentEngine implements AgentRunner {
       try {
         // 【集成点】同 generateWithOverflowRetry,叠加普通重试层在内,
         // 响应式压缩在外(子代理版仅降字符预算,不改 WorkingMemory 条数)。
-        return await generateWithRetry(this.provider, context, tools, {
-          signal,
-          onRetry: this.makeRetryReporter(),
-          onRateLimited: () => this.rotateProvider(),
-        });
+        return await generateWithRetry(
+          this.providerForReporter(this.provider, reporter),
+          context,
+          tools,
+          {
+            signal,
+            onRetry: this.makeRetryReporter(),
+            onRateLimited: () => this.rotateProvider(reporter),
+          },
+        );
       } catch (err) {
         if (!(err instanceof ContextOverflowError)) {
           throw err;
@@ -1584,7 +1716,8 @@ export class AgentEngine implements AgentRunner {
         }
         const budgetFactor = AgentEngine.OVERFLOW_BUDGET_FACTORS[attempt + 1]!;
         const newBudget = Math.max(1, Math.floor(this.compactor.maxChars * budgetFactor));
-        // 始终从原始 contextHistory 重新压缩,避免对已压缩结果二次压缩丢失结构
+        // contextHistory 已持久化上一档压缩结果；继续缩紧预算时从该结构化历史降级，
+        // 避免下一轮又从未压缩原文开始并重复探索。
         context = this.compactSubContext(contextHistory, newBudget);
         logger.warn(
           { attempt: attempt + 1, budget: newBudget },
@@ -1596,26 +1729,68 @@ export class AgentEngine implements AgentRunner {
 
   /**
    * 子代理上下文压缩 + 硬重置兜底。
-   * compactToBudget 抛 ContextCompactionError 时,清空探索中间产物,
-   * 只保留 [system, taskPrompt](contextHistory 前 2 条)重新压缩。
-   * 二次仍失败则自然抛错(只剩 system+taskPrompt 不可恢复)。
+   *
+   * 子代理没有 Session，因此压缩结果必须回写到这次 runSub 的局部历史；
+   * 否则 provider 本轮虽看到压缩请求，下轮仍会从未压缩原文重新开始。
+   * compactToBudget 完全失败时，保留 system/task 和一条结构化 evidence snapshot；
+   * 若连 snapshot 也放不下，才退化到只保留 system/task。
    */
   private compactSubContext(contextHistory: Message[], budget?: number): Message[] {
+    // system prompt 不允许被 Compactor 裁剪。动态 workspace/tool 纪律可能使它大于
+    // 最低降级系数算出的预算；若不钳制可行下限，会在真正的 provider
+    // overflow 重试之前误抛 ContextCompactionError。
+    const effectiveBudget =
+      budget === undefined
+        ? undefined
+        : Math.max(budget, estimateTraceLength(contextHistory.slice(0, 1)) + 1);
     try {
-      return budget !== undefined
-        ? this.compactor!.compactToBudget(contextHistory, budget)
-        : this.compactor!.compactToBudget(contextHistory);
+      const compacted =
+        effectiveBudget !== undefined
+          ? this.compactor!.compactToBudget(contextHistory, effectiveBudget)
+          : this.compactor!.compactToBudget(contextHistory);
+      return persistSubagentContext(contextHistory, compacted);
     } catch (err) {
       if (err instanceof ContextCompactionError) {
+        const evidenceSnapshot = buildSubagentEvidenceSnapshot(contextHistory);
         logger.warn(
-          { beforeChars: err.beforeChars, afterChars: err.afterChars, maxChars: err.maxChars },
-          `[Subagent] ⚠ 压缩彻底失败,清空探索中间产物只留任务指令重试`,
+          {
+            beforeChars: err.beforeChars,
+            afterChars: err.afterChars,
+            maxChars: err.maxChars,
+            evidenceSnapshot: evidenceSnapshot !== undefined,
+          },
+          `[Subagent] ⚠ 压缩彻底失败,重置为任务指令与结构化证据快照`,
         );
-        // 只保留 [system, taskPrompt],丢弃所有探索中间产物
-        const reset = contextHistory.slice(0, 2);
-        return budget !== undefined
-          ? this.compactor!.compactToBudget(reset, budget)
-          : this.compactor!.compactToBudget(reset);
+        const taskBoundary = contextHistory.slice(0, 2);
+        const reset = evidenceSnapshot
+          ? [
+              ...taskBoundary,
+              {
+                role: "user" as const,
+                content: evidenceSnapshot,
+                providerData: {
+                  picoKind: "subagent_evidence_snapshot",
+                  picoHiddenFromTranscript: true,
+                },
+              },
+            ]
+          : taskBoundary;
+        try {
+          const compactedReset =
+            effectiveBudget !== undefined
+              ? this.compactor!.compactToBudget(reset, effectiveBudget)
+              : this.compactor!.compactToBudget(reset);
+          return persistSubagentContext(contextHistory, compactedReset);
+        } catch (resetError) {
+          if (!(resetError instanceof ContextCompactionError) || !evidenceSnapshot) {
+            throw resetError;
+          }
+          const compactedTask =
+            effectiveBudget !== undefined
+              ? this.compactor!.compactToBudget(taskBoundary, effectiveBudget)
+              : this.compactor!.compactToBudget(taskBoundary);
+          return persistSubagentContext(contextHistory, compactedTask);
+        }
       }
       throw err;
     }
@@ -1629,9 +1804,9 @@ export class AgentEngine implements AgentRunner {
    *
    * 防污染机制:
    * - 仅传入受限 Registry(只读/受控工具,爆炸半径限制)
-   * - 专属 System Prompt 严厉警告必须用工具不许偷懒,并暴露项目 Skill 索引
-   * - maxSubTurns=10 防卡死
-   * - 退出条件:不调工具 = 做好总结,返回 content
+   * - 专属 System/Task Prompt 注入可信 workspace root、实际工具定义与 Skill 索引
+   * - maxSubTurns 最后一轮预留为 tools=[] FINALIZE，耗尽时以 partial 返回证据
+   * - 正常退出条件:不调工具且生成非空总结
    *
    * @returns 子智能体的纯文本总结汇报及外部化产物引用
    */
@@ -1649,30 +1824,42 @@ export class AgentEngine implements AgentRunner {
       `[Subagent] 🚀 拉起探路者,任务: ${taskPrompt.slice(0, 100)} (thinkingEffort: ${this.thinkingEffort},继承自主 Agent)`,
     );
 
-    const initialToolNames = new Set(readOnlyRegistry.getAvailableTools().map((tool) => tool.name));
+    const initialTools = readOnlyRegistry.getAvailableTools();
+    const initialToolNames = new Set(initialTools.map((tool) => tool.name));
+    // 委派层会传入 host/worktree 的可信运行目录。基线接口暂未包含 workDir，
+    // 用局部交叉类型保持与新旧装配兼容；不从任务 context 或模型输出猜测根目录。
+    const runtimeWorkspaceRoot =
+      (opts as SubagentRunOptions & { workDir?: string }).workDir ?? this.workDir;
     const canViewSkills = initialToolNames.has("skill_view");
-    const skillIndex = canViewSkills ? await new SkillLoader(this.workDir).loadAll() : "";
+    const skillIndex = canViewSkills ? await new SkillLoader(runtimeWorkspaceRoot).loadAll() : "";
     signal?.throwIfAborted();
-    const toolExamples = canViewSkills
-      ? "bash 的 find/grep、read_file、skill_view"
-      : "bash 的 find/grep、read_file";
 
     // 子智能体专属 System Prompt:严厉警告必须用工具,不许凭空猜测。
     // 若工作区配置了 Skills,只注入 name/description 索引;正文仍由 skill_view 按需读取。
     // 支持调用方自定义:默认追加拼接(对标 kimi-code ROLE_ADDITIONAL),
     // systemPromptOverride=true 时完全覆盖(对标 hermes ephemeral_system_prompt)。
-    const subSystemPrompt = buildSubagentSystemPrompt(toolExamples, skillIndex, opts);
+    const subSystemPrompt = buildSubagentSystemPrompt(
+      initialTools,
+      skillIndex,
+      runtimeWorkspaceRoot,
+      opts,
+    );
+    const effectiveTaskPrompt = buildSubagentTaskPrompt(runtimeWorkspaceRoot, taskPrompt);
 
     // 全新纯净上下文:不共享主 Agent 的 Session
     const contextHistory: Message[] = [
       { role: "system", content: subSystemPrompt },
-      { role: "user", content: taskPrompt },
+      { role: "user", content: effectiveTaskPrompt },
     ];
 
-    // maxTurns 可由调用方覆盖(默认 10),子代理跑满此轮次仍没总结会被强制召回
-    const maxSubTurns = opts.maxTurns ?? 10;
+    // maxTurns 可由调用方覆盖(默认 10)。最后一轮始终预留为 tools=[] 收口，
+    // 不通过提高上限隐藏控制流问题。
+    const maxSubTurns = Math.max(1, opts.maxTurns ?? 10);
     const depth = opts.depth ?? 0;
     const maxSpawnDepth = opts.maxSpawnDepth ?? 2;
+    if (depth > maxSpawnDepth) {
+      throw new Error(`子智能体超过最大委派深度 ${maxSpawnDepth}`);
+    }
     let turnCount = 0;
     // 收集子代理探索期间被外部化的大型工具输出磁盘路径,回传给主 Agent 供回查。
     const artifactPaths: string[] = [];
@@ -1680,25 +1867,48 @@ export class AgentEngine implements AgentRunner {
     for (;;) {
       signal?.throwIfAborted();
       turnCount++;
-      if (turnCount > maxSubTurns) {
-        throw new Error(
-          `子智能体探索过于深入,超过 ${maxSubTurns} 轮被强制召回,请主 Agent 缩小探索范围或拆分任务。`,
-        );
-      }
-      if (depth > maxSpawnDepth) {
-        throw new Error(`子智能体超过最大委派深度 ${maxSpawnDepth}`);
+      const finalizing = turnCount >= maxSubTurns;
+      if (finalizing) {
+        contextHistory.push({
+          role: "user",
+          content: SUBAGENT_FINALIZE_PROMPT,
+          providerData: {
+            picoKind: "subagent_finalize",
+            picoHiddenFromTranscript: true,
+          },
+        });
       }
 
-      // 【驾驭底线】子智能体仅能获取传入的只读工具注册表
-      const availableTools = readOnlyRegistry.getAvailableTools();
+      // 【驾驭底线】普通探索轮仅能获取传入的受限 Registry；
+      // 预留收口轮从能力边界上禁用工具。
+      const availableTools = finalizing ? [] : readOnlyRegistry.getAvailableTools();
 
       // 响应式溢出重试:子代理用独立 contextHistory(非 Session 驱动),无法重取
       // WorkingMemory,故仅用更小的 maxChars 预算对 contextHistory 重新压缩重试。
-      const actionResp = await this.generateSubWithOverflowRetry(
-        contextHistory,
-        availableTools,
-        signal,
-      );
+      let actionResp: Message;
+      try {
+        actionResp = await this.generateSubWithOverflowRetry(
+          contextHistory,
+          availableTools,
+          rep,
+          signal,
+        );
+      } catch (error) {
+        signal?.throwIfAborted();
+        if (isAbortError(error) || !finalizing) throw error;
+        logger.warn(
+          { error: error instanceof Error ? error.message : String(error), turns: turnCount },
+          `[Subagent] FINALIZE 调用失败，直接以 partial 返回已收集证据。`,
+        );
+        return {
+          status: "partial",
+          summary: truncateSubagentSummary(
+            buildSubagentPartialSummary(contextHistory, artifactPaths),
+            SUBAGENT_SUMMARY_MAX_CHARS,
+          ),
+          artifacts: artifactPaths,
+        };
+      }
       contextHistory.push(actionResp);
 
       if (actionResp.content) {
@@ -1707,13 +1917,30 @@ export class AgentEngine implements AgentRunner {
 
       // 【核心退出条件】子智能体不调工具了,说明做好了总结汇报
       const toolCalls = actionResp.toolCalls ?? [];
-      if (toolCalls.length === 0) {
+      if (toolCalls.length === 0 || finalizing) {
+        if (finalizing) {
+          const summary =
+            toolCalls.length === 0 && usableSummary(actionResp.content)
+              ? actionResp.content
+              : buildSubagentPartialSummary(contextHistory, artifactPaths);
+          logger.warn(
+            { turns: turnCount, maxSubTurns },
+            `[Subagent] 已进入预留收口轮，以 partial 状态返回已收集证据。`,
+          );
+          return {
+            status: "partial",
+            summary: truncateSubagentSummary(summary, SUBAGENT_SUMMARY_MAX_CHARS),
+            artifacts: artifactPaths,
+          };
+        }
+
         // 【改动 B】summary 续写:子代理最终汇报过短(< 200 字)时,
         // 再给一轮强制扩写,防止主 Agent 因信息不足而"失忆"。
         // 对齐 Kimi Code 的 SUMMARY_MIN_LENGTH / SUMMARY_CONTINUATION_ATTEMPTS 设计。
         // 约束:最多续写 1 次,且复用 turnCount 预算,不会无限循环。
         let summary = actionResp.content;
         if (summary.length < SUBAGENT_SUMMARY_MIN_CHARS && turnCount < maxSubTurns) {
+          turnCount++;
           contextHistory.push({
             role: "user",
             content: SUBAGENT_SUMMARY_CONTINUATION_PROMPT,
@@ -1722,21 +1949,38 @@ export class AgentEngine implements AgentRunner {
             { turns: turnCount, summaryLen: summary.length },
             `[Subagent] 📝 探路者总结过短,追加一轮扩写。`,
           );
-          const continuationResp = await this.generateSubWithOverflowRetry(
-            contextHistory,
-            [],
-            signal,
-          );
-          contextHistory.push(continuationResp);
-          if (continuationResp.content && continuationResp.content.trim().length > 0) {
-            summary = continuationResp.content;
+          try {
+            const continuationResp = await this.generateSubWithOverflowRetry(
+              contextHistory,
+              [],
+              rep,
+              signal,
+            );
+            contextHistory.push(continuationResp);
+            if (
+              (continuationResp.toolCalls?.length ?? 0) === 0 &&
+              usableSummary(continuationResp.content)
+            ) {
+              summary = continuationResp.content;
+              rep.onMessage(`[Subagent] ${continuationResp.content}`);
+            }
+          } catch (error) {
+            signal?.throwIfAborted();
+            if (isAbortError(error)) throw error;
+            logger.warn(
+              { error: error instanceof Error ? error.message : String(error) },
+              `[Subagent] 总结扩写失败，保留上一版有效总结。`,
+            );
           }
         }
+        const completed = usableSummary(summary);
+        if (!completed) summary = buildSubagentPartialSummary(contextHistory, artifactPaths);
         logger.info(
-          { turns: turnCount },
-          `[Subagent] ✅ 探路者完成 ${turnCount} 轮探索,返回总结。`,
+          { turns: turnCount, status: completed ? "completed" : "partial" },
+          `[Subagent] ✅ 探路者完成收口,返回总结。`,
         );
         return {
+          status: completed ? "completed" : "partial",
           summary: truncateSubagentSummary(summary, SUBAGENT_SUMMARY_MAX_CHARS),
           artifacts: artifactPaths,
         };
@@ -1806,6 +2050,52 @@ export class AgentEngine implements AgentRunner {
   }
 }
 
+function persistSubagentContext(contextHistory: Message[], compacted: Message[]): Message[] {
+  contextHistory.splice(0, contextHistory.length, ...compacted);
+  return contextHistory;
+}
+
+function buildSubagentEvidenceSnapshot(contextHistory: readonly Message[]): string | undefined {
+  const toolNames = new Map<string, string>();
+  const evidence: string[] = [];
+  for (const message of contextHistory.slice(2)) {
+    if (message.role === "assistant") {
+      for (const call of message.toolCalls ?? []) toolNames.set(call.id, call.name);
+      if (message.content.trim()) {
+        evidence.push(`[assistant checkpoint] ${truncate(message.content.trim(), 400)}`);
+      }
+      continue;
+    }
+    if (message.role === "user" && message.toolCallId) {
+      const toolName = toolNames.get(message.toolCallId) ?? "unknown_tool";
+      evidence.push(
+        `[tool evidence: ${toolName}; call=${message.toolCallId}] ${truncate(message.content, 700)}`,
+      );
+    }
+  }
+  if (evidence.length === 0) return undefined;
+  return [
+    "[SUBAGENT EVIDENCE SNAPSHOT] 上下文已重置；以下是压缩前已收集的结构化证据，不要重复探索同一范围。",
+    ...evidence.slice(-8),
+  ].join("\n");
+}
+
+function usableSummary(summary: string): boolean {
+  return summary.trim().length > 0;
+}
+
+function buildSubagentPartialSummary(
+  contextHistory: readonly Message[],
+  artifactPaths: readonly string[],
+): string {
+  const evidence = buildSubagentEvidenceSnapshot(contextHistory);
+  const lines = [evidence ?? SUBAGENT_EMPTY_SUMMARY_FALLBACK];
+  if (artifactPaths.length > 0) {
+    lines.push("", "[已外部化证据]", ...artifactPaths.map((artifactPath) => `- ${artifactPath}`));
+  }
+  return lines.join("\n");
+}
+
 function truncateSubagentSummary(summary: string, maxChars: number): string {
   if (summary.length <= maxChars) return summary;
   const marker = `\n[子代理总结已截断：原始 ${summary.length} 字符，上限 ${maxChars} 字符]`;
@@ -1823,8 +2113,9 @@ function truncateSubagentSummary(summary: string, maxChars: number): string {
  *   (对标 hermes 的 ephemeral_system_prompt 替换语义),给需要完全定制的场景。
  */
 function buildSubagentSystemPrompt(
-  toolExamples: string,
+  tools: readonly ToolDefinition[],
   skillIndex: string,
+  runtimeWorkspaceRoot: string,
   opts: SubagentRunOptions,
 ): string {
   // 完全覆盖模式:调用方显式声明,直接用自定义 prompt 替换默认骨架
@@ -1832,18 +2123,45 @@ function buildSubagentSystemPrompt(
     return opts.systemPrompt;
   }
 
-  // 默认骨架(与原硬编码逐字一致,保证向后兼容)
+  const toolDiscipline = buildSubagentToolDiscipline(tools);
+
+  // 默认骨架：工作区与工具能力均从本次运行时注册表动态注入。
   const base = `你是专门负责深度探索的探路者 (Explorer Subagent)。
 你的任务是根据主架构师的指令,在当前工作区内仔细阅读代码、查阅日志,搜集足够的信息。
+【运行时工作区边界】
+- 唯一真实 workspace root: ${JSON.stringify(runtimeWorkspaceRoot)}
+- 所有相对路径都基于该 root。任务 context 中若出现与它冲突的绝对路径，那是过期上下文，必须忽略，不得读写、切换或推断为当前工作区。
+【本次实际工具】
+${toolDiscipline}
 【核心纪律】
-1. 你必须、且只能依靠内置工具(如 ${toolExamples})去寻找答案。绝对不允许凭空猜测。
-2. 如果你没有找到确切的答案,你必须继续使用工具深入搜索。
+1. 只能使用上面列出的实际工具；不得声称或调用未列出的工具。绝对不允许凭空猜测。
+2. 如果已注册可用工具且尚未找到确切答案，继续在真实 workspace root 内定点搜索；如果没有工具，明确报告证据边界。
 3. 当且仅当你找到了确切的线索后,停止调用工具,直接输出一段纯文本作为你的终极汇报。主架构师会根据你的汇报决定下一步。${
     skillIndex ? `\n\n${skillIndex}` : ""
   }`;
 
   // 追加模式:默认骨架 + 自定义片段
   return opts.systemPrompt ? `${base}\n\n${opts.systemPrompt}` : base;
+}
+
+function buildSubagentToolDiscipline(tools: readonly ToolDefinition[]): string {
+  if (tools.length === 0) {
+    return "- 本次 Registry 未注册任何工具。不得虚构任何工具；只能根据任务中已给出的证据总结。";
+  }
+  return tools
+    .map((tool) => `- ${tool.name}: ${truncate(tool.description.trim() || "无描述", 240)}`)
+    .join("\n");
+}
+
+function buildSubagentTaskPrompt(runtimeWorkspaceRoot: string, taskPrompt: string): string {
+  return [
+    "[RUNTIME WORKSPACE — AUTHORITATIVE]",
+    `workspace_root=${JSON.stringify(runtimeWorkspaceRoot)}`,
+    "该路径是本次执行的唯一权威工作区根。下方任务/context 中的其他绝对路径如与它冲突，必须忽略。",
+    "",
+    "[任务]",
+    taskPrompt,
+  ].join("\n");
 }
 
 /**
