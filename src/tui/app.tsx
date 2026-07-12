@@ -293,7 +293,7 @@ export function App({
       const itemId = hitTestAgentSwitcherRow(agentSwitcherLayout, mouseInput.row - switcherTopRow);
       if (itemId) {
         setAgentNavigation((current) =>
-          reduceAgentNavigation(current, { type: "select", id: itemId }, navigationItems),
+          reduceAgentNavigation(current, { type: "open-item", id: itemId }, navigationItems),
         );
         return;
       }
@@ -735,7 +735,8 @@ export function resolveAgentNavigationInput(
     if (key.upArrow) return { type: "move-up" };
     if (key.downArrow) return { type: "move-down" };
     if (key.return) return { type: "open" };
-    if (key.escape || key.tab) return { type: "escape" };
+    if (key.tab) return { type: "focus-input" };
+    if (key.escape) return { type: "escape" };
     return null;
   }
 
