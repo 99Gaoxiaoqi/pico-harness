@@ -12,6 +12,11 @@ export interface InputImageAttachment {
   readonly image: ImagePart;
 }
 
+export interface DroppedImageExtraction {
+  readonly paths: readonly string[];
+  readonly remainingText: string;
+}
+
 export function imageAttachmentFromPath(filePath: string): InputImageAttachment {
   const resolved = realpathSync(filePath);
   const stat = statSync(resolved);
@@ -42,8 +47,34 @@ export async function imageAttachmentFromClipboard(): Promise<InputImageAttachme
  * 换行、引号或反斜杠转义空格；这里保留路径本身，并只挑出绝对图片路径。
  */
 export function droppedImagePaths(text: string): readonly string[] {
-  const paths = splitDroppedPaths(text);
-  return paths.length > 0 && paths.every(isDroppedImagePath) ? paths : [];
+  const extracted = extractDroppedImagePaths(text);
+  return extracted.paths.length > 0 && extracted.remainingText.trim().length === 0
+    ? extracted.paths
+    : [];
+}
+
+/**
+ * 只解析本次终端粘贴/拖拽产生的文本片段，并保留其中的普通文本。
+ * InputBox 不应拿整个草稿反复猜测，否则已有提示词会让拖拽永远失效，
+ * 而逐字输入到一半的路径也容易被误判。
+ */
+export function extractDroppedImagePaths(text: string): DroppedImageExtraction {
+  const tokens = splitDroppedPathTokens(text);
+  const imageTokens = tokens.filter((token) => isDroppedImagePath(token.value));
+  if (imageTokens.length === 0) return { paths: [], remainingText: text };
+
+  let remainingText = "";
+  let cursor = 0;
+  for (const token of imageTokens) {
+    remainingText += text.slice(cursor, token.start);
+    cursor = token.end;
+  }
+  remainingText += text.slice(cursor);
+
+  return {
+    paths: imageTokens.map((token) => token.value),
+    remainingText: remainingText.trim().length === 0 ? "" : remainingText,
+  };
 }
 
 function imageAttachment(name: string, image: ImagePart): InputImageAttachment {
@@ -74,18 +105,29 @@ function inferImageMimeType(data: Buffer, path: string): string {
   throw new Error(`不支持的图片格式: ${path}`);
 }
 
-function splitDroppedPaths(value: string): string[] {
-  const paths: string[] = [];
+interface DroppedPathToken {
+  readonly value: string;
+  readonly start: number;
+  readonly end: number;
+}
+
+function splitDroppedPathTokens(value: string): DroppedPathToken[] {
+  const tokens: DroppedPathToken[] = [];
   let current = "";
   let quote: '"' | "'" | undefined;
+  let tokenStart: number | undefined;
 
-  const pushCurrent = (): void => {
-    if (current) paths.push(current);
+  const pushCurrent = (end: number): void => {
+    if (current && tokenStart !== undefined) {
+      tokens.push({ value: current, start: tokenStart, end });
+    }
     current = "";
+    tokenStart = undefined;
   };
 
   for (let index = 0; index < value.length; index += 1) {
     const character = value[index]!;
+    if (tokenStart === undefined && !/\s/u.test(character)) tokenStart = index;
     if (quote) {
       if (character === quote) {
         quote = undefined;
@@ -101,7 +143,7 @@ function splitDroppedPaths(value: string): string[] {
     if (character === '"' || character === "'") {
       quote = character;
     } else if (/\s/u.test(character)) {
-      pushCurrent();
+      pushCurrent(index);
     } else if (character === "\\" && canEscape(value[index + 1])) {
       current += value[index + 1];
       index += 1;
@@ -110,8 +152,8 @@ function splitDroppedPaths(value: string): string[] {
       current += character;
     }
   }
-  pushCurrent();
-  return paths;
+  pushCurrent(value.length);
+  return tokens;
 }
 
 function canEscape(value: string | undefined): value is string {

@@ -148,6 +148,19 @@ export function reduceInputControllerEvent(
   return { state };
 }
 
+/**
+ * Bracketed paste 已由终端明确标识，应将内容原子地插入草稿。
+ * 特别是末尾换行不能被当成 Enter 提交。
+ */
+export function insertPastedInput(
+  state: InputControllerState,
+  input: string,
+  options: InputControllerOptions = {},
+): InputControllerResult {
+  if (options.disabled || input.length === 0) return { state };
+  return insertText(state, normalizeInput(input), options);
+}
+
 export function getSuggestionContext(text: string, cursor = text.length): SuggestionContext | null {
   const safeCursor = clampCursor(cursor, text);
   const lineStart = text.lastIndexOf("\n", safeCursor - 1) + 1;
