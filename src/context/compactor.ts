@@ -17,6 +17,7 @@
 // 删掉 ToolResult 而保留 ToolCall,大模型会困惑"命令没发出去"而陷入死循环;
 // 掩码替换(而非删除)既释放内存又保住意图连贯。
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { LLMProvider } from "../provider/interface.js";
 import type { Message } from "../schema/message.js";
 import { logger } from "../observability/logger.js";
@@ -268,6 +269,22 @@ export interface CompactorOptions {
   postCompactRestore?: () => Message[];
 }
 
+interface CompactorRuntimeState {
+  ineffectiveCount: number;
+  usedStrongerCompact: boolean;
+  previousSummary: string | undefined;
+  summarizedRemoteCount: number;
+}
+
+function createCompactorRuntimeState(): CompactorRuntimeState {
+  return {
+    ineffectiveCount: 0,
+    usedStrongerCompact: false,
+    previousSummary: undefined,
+    summarizedRemoteCount: 0,
+  };
+}
+
 /**
  * Compactor:监控和压缩上下文内存,防止大模型发生 OOM。
  *
@@ -286,10 +303,10 @@ export class Compactor {
   /** MicroCompaction 3.1:保护区最近消息条数(默认 20) */
   private readonly retainLastMsgsMicro: number;
   private readonly postCompactRestore?: () => Message[];
-  private ineffectiveCount = 0;
-  private usedStrongerCompact = false;
-  private previousSummary: string | undefined;
-  private summarizedRemoteCount = 0;
+  /** 主 Agent 与非隔离调用沿用原有的持久状态语义。 */
+  private readonly defaultRuntimeState = createCompactorRuntimeState();
+  /** 并行子代理共享配置与自定义行为，但不共享压缩进度。 */
+  private readonly runtimeStateStorage = new AsyncLocalStorage<CompactorRuntimeState>();
 
   constructor(opts: CompactorOptions) {
     this.maxChars = opts.maxChars;
@@ -303,7 +320,18 @@ export class Compactor {
   }
 
   get ineffectiveCompressionCount(): number {
-    return this.ineffectiveCount;
+    return this.runtimeState.ineffectiveCount;
+  }
+
+  /**
+   * 在独立的压缩状态域中执行一次完整调用链。
+   *
+   * 不复制 Compactor 实例：调用方注入的子类覆写、summarizer 和
+   * metadata provider 仍按原样执行；只隔离 stronger compact、无效压缩
+   * 计数与增量摘要游标。AsyncLocalStorage 保证并行/嵌套子代理互不污染。
+   */
+  runInIsolatedScope<T>(callback: () => T): T {
+    return this.runtimeStateStorage.run(createCompactorRuntimeState(), callback);
   }
 
   /**
@@ -318,7 +346,7 @@ export class Compactor {
       return sanitizeToolPairs(msgs);
     }
 
-    if (this.ineffectiveCount >= 2) {
+    if (this.runtimeState.ineffectiveCount >= 2) {
       logger.warn("[Compactor] 连续压缩收益不足,本轮跳过压缩以避免反复抖动。");
       return sanitizeToolPairs(msgs);
     }
@@ -362,7 +390,7 @@ export class Compactor {
             // 第一档(温和):浓缩成 1 行摘要,保留工具名/退出码/规模语义
             //   对标 hermes tool pruning + kimi-code MicroCompaction
             // 第二档(激进):strongerCompact 已触发过 → 全量掩码,释放更多空间
-            newMsg.content = this.usedStrongerCompact
+            newMsg.content = this.runtimeState.usedStrongerCompact
               ? maskRemoteToolResult(msg.content.length)
               : makeToolResultSummary(msg, msgs, i);
           }
@@ -440,7 +468,8 @@ export class Compactor {
     const protectStartIndex = this.protectStartIndex(msgs);
     const remoteMsgs = msgs.slice(0, protectStartIndex);
     const protectedMsgs = msgs.slice(protectStartIndex);
-    const newMessages = remoteMsgs.slice(this.summarizedRemoteCount);
+    const runtimeState = this.runtimeState;
+    const newMessages = remoteMsgs.slice(runtimeState.summarizedRemoteCount);
 
     // 远期历史调小模型摘要
     let summaryText: string;
@@ -451,15 +480,15 @@ export class Compactor {
       );
       summaryText = await this.summarizer({
         newMessages,
-        ...(this.previousSummary ? { previousSummary: this.previousSummary } : {}),
+        ...(runtimeState.previousSummary ? { previousSummary: runtimeState.previousSummary } : {}),
         ...(this.focusTopic ? { focusTopic: this.focusTopic } : {}),
       });
     } catch (err) {
       logger.warn({ err }, `[Compactor] LLM 摘要失败,退回字符级掩码`);
       return this.appendPostCompactRestore(this.compactToBudget(msgs));
     }
-    this.previousSummary = summaryText;
-    this.summarizedRemoteCount = remoteMsgs.length;
+    runtimeState.previousSummary = summaryText;
+    runtimeState.summarizedRemoteCount = remoteMsgs.length;
 
     // 摘要消息替换远期历史,保护区走 compact 逻辑
     const summaryMsg: Message = {
@@ -536,7 +565,12 @@ export class Compactor {
 
   private recordCompressionEffect(before: number, after: number): void {
     const savingPct = before === 0 ? 100 : ((before - after) / before) * 100;
-    this.ineffectiveCount = savingPct < 10 ? this.ineffectiveCount + 1 : 0;
+    const runtimeState = this.runtimeState;
+    runtimeState.ineffectiveCount = savingPct < 10 ? runtimeState.ineffectiveCount + 1 : 0;
+  }
+
+  private get runtimeState(): CompactorRuntimeState {
+    return this.runtimeStateStorage.getStore() ?? this.defaultRuntimeState;
   }
 
   private appendPostCompactRestore(msgs: Message[]): Message[] {
@@ -558,7 +592,7 @@ export class Compactor {
 
   private strongerCompact(msgs: Message[], maxChars: number): Message[] {
     // 温和摘要已被证明不足以压进预算,后续 compact 直接采用全量掩码
-    this.usedStrongerCompact = true;
+    this.runtimeState.usedStrongerCompact = true;
     const lastOrdinaryIndex = findLastOrdinaryMessageIndex(msgs);
     const compacted = msgs.map((msg, index): Message => {
       const newMsg: Message = { ...msg };
