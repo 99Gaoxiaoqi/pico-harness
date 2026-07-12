@@ -58,7 +58,12 @@ export function isContextOverflowStatus(statusCode: number, message: string): bo
   return CONTEXT_OVERFLOW_PATTERNS.some((pattern) => pattern.test(lower));
 }
 
-/** 判定是否为 fetch / AbortSignal.timeout 产生的中止错误。 */
+/** 判定是否为宿主主动取消产生的 AbortError。 */
 export function isAbortError(err: unknown): boolean {
   return err instanceof Error && err.name === "AbortError";
+}
+
+/** 判定是否为 Node.js AbortSignal.timeout() 产生的 TimeoutError。 */
+export function isTimeoutError(err: unknown): boolean {
+  return err instanceof Error && err.name === "TimeoutError";
 }

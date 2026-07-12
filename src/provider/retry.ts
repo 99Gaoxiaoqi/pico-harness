@@ -8,7 +8,7 @@
 
 import type { LLMProvider } from "./interface.js";
 import type { Message, ToolDefinition } from "../schema/message.js";
-import { ContextOverflowError, isAbortError, LLMStatusError } from "./errors.js";
+import { ContextOverflowError, isAbortError, isTimeoutError, LLMStatusError } from "./errors.js";
 import { logger } from "../observability/logger.js";
 
 /** 默认最大尝试次数(含首次调用) */
@@ -18,6 +18,9 @@ export const DEFAULT_MAX_RETRY_ATTEMPTS = 3;
 const RETRY_MIN_TIMEOUT_MS = 300;
 const RETRY_MAX_TIMEOUT_MS = 5000;
 const RETRY_FACTOR = 2;
+
+/** Provider 内部超时代价较高，单次调用最多额外重试一次。 */
+const MAX_TIMEOUT_RETRIES = 1;
 
 /** 可重试的 HTTP 状态码白名单:限流 + 常见瞬时 5xx */
 const RETRYABLE_STATUS_CODES = new Set([429, 500, 502, 503, 504]);
@@ -35,7 +38,34 @@ export interface RetryOptions {
    * 或返回 undefined 表示无多凭证可轮换(回退到同 key 指数退避)。
    * 仅当配置了多 key(CredentialPool)时由调用方注入。
    */
-  onRateLimited?: () => LLMProvider | undefined;
+  onRateLimited?: (failure: RateLimitFailure) => LLMProvider | undefined;
+}
+
+export interface RateLimitFailure {
+  /** 真正发出失败请求的 provider（可能不是当前已切换的全局 provider）。 */
+  failedProvider: LLMProvider;
+  /** 原始 429 错误。 */
+  error: unknown;
+  /** 发出失败请求的凭证；只用于轮换，不应写入日志。 */
+  failedCredential?: string;
+  /** 发出失败请求的路由。 */
+  failedRouteId?: string;
+  /** 发出失败请求的模型。 */
+  failedModel?: string;
+}
+
+export interface ProviderRequestIdentity {
+  provider: LLMProvider;
+  credential?: string;
+  routeId?: string;
+  model?: string;
+}
+
+export type ProviderFailureStatus = "timed_out" | "cancelled" | "error";
+
+export interface ProviderErrorClassification {
+  status: ProviderFailureStatus;
+  retryable: boolean;
 }
 
 export interface RetryInfo {
@@ -50,6 +80,29 @@ export interface RetryInfo {
   error: unknown;
   /** 错误携带的 HTTP 状态码(若有) */
   statusCode?: number;
+  /** 统一失败分类，上层可据此区分超时与取消。 */
+  failureStatus: ProviderFailureStatus;
+}
+
+const providerRequestIdentities = new WeakMap<object, ProviderRequestIdentity>();
+let activeRateLimitFailure: RateLimitFailure | undefined;
+
+/** @internal 将实际失败路由绑定到错误，避免并发轮换误用全局当前路由。 */
+export function registerProviderRequestIdentity(
+  error: unknown,
+  identity: ProviderRequestIdentity,
+): void {
+  if (typeof error === "object" && error !== null) {
+    providerRequestIdentities.set(error, identity);
+  }
+}
+
+/**
+ * @internal 兼容当前 Engine 的无参 rebuildProvider 桥接。
+ * onRateLimited 是同步回调，因此栈式恢复可以保证并发调用不串路由。
+ */
+export function currentRateLimitFailure(): RateLimitFailure | undefined {
+  return activeRateLimitFailure;
 }
 
 /**
@@ -75,6 +128,7 @@ export async function generateWithRetry(
   const signal = options?.signal;
   const onRetry = options?.onRetry;
   const onRateLimited = options?.onRateLimited;
+  let timeoutRetries = 0;
 
   // 快路径:只允许调用一次,失败即抛(兜底失败日志仍记录)
   if (maxAttempts <= 1) {
@@ -104,23 +158,32 @@ export async function generateWithRetry(
       // Provider 可能不支持中途取消；若它在 abort 后才返回/抛错，
       // 优先恢复宿主的 AbortError 语义，不把它误判成普通重试失败。
       signal?.throwIfAborted();
-      const retryable =
-        typeof activeProvider.isRetryableError === "function"
+      const classification = classifyProviderError(error);
+      const retryable = isHardClassifiedError(error)
+        ? classification.retryable
+        : typeof activeProvider.isRetryableError === "function"
           ? activeProvider.isRetryableError(error)
-          : defaultIsRetryableError(error);
+          : classification.retryable;
+      const timeoutRetryLimitReached =
+        classification.status === "timed_out" && timeoutRetries >= MAX_TIMEOUT_RETRIES;
 
       // 不可重试或已达上限:记失败日志后抛出
-      if (attempt >= maxAttempts || !retryable) {
+      if (attempt >= maxAttempts || !retryable || timeoutRetryLimitReached) {
         logRequestFailure(error, attempt, maxAttempts, activeProvider.modelName, signal);
         throw error;
       }
+
+      if (classification.status === "timed_out") timeoutRetries++;
 
       // 凭证轮换(429 限流特化):若错误是 429 且注入了 onRateLimited,
       // 标记当前 key 限流、切换到下一个可用 key 重建 provider 重试。
       // 切换成功后跳过退避(新 key 通常立即可用),直接重试;
       // 切换失败(无多 key / 全限流)→ 回退到同 key 指数退避。
       if (maybeStatusCode(error) === 429 && onRateLimited) {
-        const rotated = onRateLimited();
+        const rotated = invokeRateLimitHandler(
+          onRateLimited,
+          buildRateLimitFailure(activeProvider, error),
+        );
         if (rotated && rotated !== activeProvider) {
           logger.warn(
             { attempt: `${attempt}/${maxAttempts}`, keyRotated: true },
@@ -143,6 +206,7 @@ export async function generateWithRetry(
         delayMs,
         error,
         statusCode: maybeStatusCode(error),
+        failureStatus: classification.status,
       };
       onRetry?.(info);
 
@@ -162,7 +226,17 @@ export async function generateWithRetry(
  *   (兼容未抛 LLMStatusError、把状态码埋字符串里的 provider)。
  */
 export function defaultIsRetryableError(error: unknown): boolean {
-  if (isAbortError(error)) return false;
+  return classifyProviderError(error).retryable;
+}
+
+/** 把 Provider 错误统一分类，供上层区分超时、主动取消与普通失败。 */
+export function classifyProviderError(error: unknown): ProviderErrorClassification {
+  if (isTimeoutError(error)) return { status: "timed_out", retryable: true };
+  if (isAbortError(error)) return { status: "cancelled", retryable: false };
+  return { status: "error", retryable: isDefaultRetryableError(error) };
+}
+
+function isDefaultRetryableError(error: unknown): boolean {
   if (error instanceof ContextOverflowError) return false;
   if (error instanceof LLMStatusError) {
     return RETRYABLE_STATUS_CODES.has(error.statusCode);
@@ -178,6 +252,35 @@ export function defaultIsRetryableError(error: unknown): boolean {
     }
   }
   return false;
+}
+
+function isHardClassifiedError(error: unknown): boolean {
+  return isAbortError(error) || isTimeoutError(error) || error instanceof ContextOverflowError;
+}
+
+function buildRateLimitFailure(activeProvider: LLMProvider, error: unknown): RateLimitFailure {
+  const identity =
+    typeof error === "object" && error !== null ? providerRequestIdentities.get(error) : undefined;
+  return {
+    failedProvider: identity?.provider ?? activeProvider,
+    error,
+    ...(identity?.credential !== undefined ? { failedCredential: identity.credential } : {}),
+    ...(identity?.routeId !== undefined ? { failedRouteId: identity.routeId } : {}),
+    ...(identity?.model !== undefined ? { failedModel: identity.model } : {}),
+  };
+}
+
+function invokeRateLimitHandler(
+  handler: NonNullable<RetryOptions["onRateLimited"]>,
+  failure: RateLimitFailure,
+): LLMProvider | undefined {
+  const previous = activeRateLimitFailure;
+  activeRateLimitFailure = failure;
+  try {
+    return handler(failure);
+  } finally {
+    activeRateLimitFailure = previous;
+  }
 }
 
 /**
