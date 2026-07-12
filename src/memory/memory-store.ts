@@ -1,5 +1,14 @@
 import type { Message } from "../schema/message.js";
 
+export const DEFAULT_MEMORY_SEARCH_LIMIT = 10;
+export const MAX_MEMORY_SEARCH_LIMIT = 100;
+
+/** Normalize the shared search limit contract for every memory backend. */
+export function normalizeMemorySearchLimit(limit: number | undefined): number {
+  if (limit === undefined || !Number.isFinite(limit)) return DEFAULT_MEMORY_SEARCH_LIMIT;
+  return Math.min(MAX_MEMORY_SEARCH_LIMIT, Math.max(1, Math.trunc(limit)));
+}
+
 export type MemoryBackendKind = "sqlite_fts5" | "jsonl_memory";
 export type MemoryBackendState = "healthy" | "degraded";
 
@@ -21,10 +30,16 @@ export interface MemorySearchResult {
   role: string;
   content: string;
   timestamp: string;
+  /** Backend-normalized relevance score; larger values are always more relevant. */
   relevance: number;
 }
 
-/** Search index contract; persistence remains owned by SQLite or Session JSONL. */
+/**
+ * Search index contract; persistence remains owned by SQLite or Session JSONL.
+ * Results are ordered by descending relevance and limit is clamped to 1..100.
+ * Query syntax remains backend-specific: SQLite accepts FTS5 operators while
+ * the JSONL fallback treats the query as normalized literal text/tokens.
+ */
 export interface ConversationSearchStore {
   readonly status: MemoryBackendStatus;
   insert(sessionId: string, turnIndex: number, message: Message): void;
