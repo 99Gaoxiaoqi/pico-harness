@@ -598,6 +598,7 @@ git worktree remove ../pico-1-streaming
 - [x] 2026-07-12：将 required `delegate_task` 升级为 AgentSwarm 式独占控制流边界：同轮只真实执行首个 required 委派，其他工具仅生成协议 observation；子代理全部收口前不再请求主 Provider，委派轮正文不落主 Session/TUI，join 后只允许必要集成、定点验证和统一总结；optional/detached 保持非阻塞。
 - [x] 2026-07-12：限制子代理结果体积并修复 Agent 面板流式刷屏：单个 summary 上限 5,000 字符，required 批量委派最终 JSON 上限 10,000 字符，`delegate_task` 专用外部化阈值 10,000 字符；Codex 嵌入终端 CPR 失败时使用保守网格并继续响应后续 resize，覆盖 Main + 4 子代理 + 流式输出零换行、零滚屏主链。
 - [x] 2026-07-12：重构子代理完成语义：`delegate_task` 默认 `required` 并在子代理收口前阻塞返回；显式 `optional` 完成后把隐藏结果持久化到主会话，供下一个模型边界自动吸收，`detached` 只更新活动面板；旧 `background=true` 仅保留输入兼容，不再向模型暴露，TUI 展示 completion policy 且不暴露内部 ID。
+- [x] 2026-07-12：收口子代理失败恢复与活动生命周期：统一 `completed / partial / error / timed_out / cancelled` 终态，失败同样在空闲边界唤醒主 Agent；completion 取得 QueryGuard 后再原子写入 Session，避免重复总结；终态卡片在对应结果被消费后退出活跃导航；并隔离子代理流式 Reporter、可信 workDir、Compactor 状态及 Provider 超时/429/fallback 并发恢复。
 - [ ] 2026-07-11：删除只被测试引用的影子权限链 `approval/policy.ts` / `ApprovalPolicy`，把文档和验证统一到生产 `buildApprovalMiddleware`。
 - [ ] 2026-07-11：收敛两套 compaction/aux provider 实现，保留生产 `compactToBudget + FullCompactor` 单链路。
 - [ ] 2026-07-11：清理已退役但仍进入构建的 Plugin manager、孤立 Agent/Permission JSX 面板和 one-shot rewind CLI helper。
@@ -626,6 +627,12 @@ git worktree remove ../pico-1-streaming
 ---
 
 ## 📅 变更记录
+
+- 2026-07-12：收口子代理失败恢复、统一汇总与面板生命周期
+  - required 批次按子结果聚合终态；全失败只允许一次缩小范围的重新委派，之后由主 Agent 基于保留证据收口，不再自行大范围重读项目。optional 与 detached 失败会形成隐藏 completion，在 TUI 真正空闲并取得 QueryGuard 独占权后合并写入 Session、续跑一次。
+  - completion 队列按序号去重，延迟到空闲保留成功后交付，避免正在运行的主循环先消费、空闲后又重复调用 Provider；活动采用 `active → terminal_unconsumed → terminal_claimed → archived`，未 claim 的异步结果不会被无关主回复提前隐藏。
+  - 子代理最后一轮固定为无工具 FINALIZE；超限或收口 Provider 失败时返回带证据的 `partial`，失败、超时和取消均能唤醒主 Agent。单个 summary 继续限制 5,000 字符，required 批次继续限制 10,000 字符。
+  - 每个并行子代理独立 Reporter、可信 workDir 与 Compactor 运行状态；供应商层区分 timeout/cancel，timeout 仅重试一次，429 并发轮换幂等，fallback 初始化 singleflight，降低并发子代理偶发失败和交叉污染。
 
 - 2026-07-12：补齐明确子代理请求的 delegation-first / synthesis-only 门禁
   - 真实 Session 回放确认旧流程先运行两个 `bash ls`，第二轮才委派；根因是 required 屏障只在模型已选择 `delegate_task` 后生效。
