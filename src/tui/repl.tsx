@@ -402,6 +402,7 @@ export async function handleTuiRunningInputSubmission(
     { ...deps, commandAvailabilityState: availabilityState },
     gen,
     { drainAfter: true },
+    attachments,
   );
 }
 
@@ -411,21 +412,34 @@ async function runProcessedAgentInput(
   deps: HandleTuiRunningInputSubmissionDeps,
   gen: number,
   options: { drainAfter: boolean },
+  attachments: readonly ImagePart[] = [],
 ): Promise<void> {
   const controller = new AbortController();
   if (deps.abortControllerRef) deps.abortControllerRef.current = controller;
   try {
-    await handleTuiInputSubmission(text, {
-      ...deps,
-      processInput: async () => processed,
-    });
+    await handleTuiInputSubmission(
+      text,
+      {
+        ...deps,
+        processInput: async () => processed,
+      },
+      attachments,
+    );
   } finally {
+    const drainAfterAbort =
+      !controller.signal.aborted ||
+      (controller.signal.reason instanceof DOMException &&
+        controller.signal.reason.message === "replaced");
+    if (!drainAfterAbort) {
+      deps.steerQueue?.drain();
+      deps.queue.clear();
+    }
     if (deps.abortControllerRef?.current === controller) {
       deps.abortControllerRef.current = null;
     }
     if (deps.steerQueue && !deps.steerQueue.pending) deps.queue.acknowledgeSteers();
     emitRunningQueueState(deps);
-    if (deps.guard.end(gen) && options.drainAfter) {
+    if (deps.guard.end(gen) && options.drainAfter && drainAfterAbort) {
       await drainQueuedTuiInputs(deps);
     }
   }
@@ -1780,12 +1794,13 @@ export async function runTuiAgentPrompt(
 export function handleTuiInterrupt(
   controller: AbortController | null,
   queue: RunningInputQueue,
-  reporter: Pick<TuiReporter, "pushSystemMessage">,
+  reporter: Pick<TuiReporter, "pushSystemMessage" | "onInterrupted">,
   onQueueSizeChange?: (size: number) => void,
   onQueueStateChange?: (snapshot: RunningInputQueueSnapshot) => void,
   steerQueue?: SteerQueue,
 ): void {
   controller?.abort(new DOMException("interrupted", "AbortError"));
+  reporter.onInterrupted();
   steerQueue?.drain();
   const dropped = queue.clear();
   onQueueSizeChange?.(queue.size);

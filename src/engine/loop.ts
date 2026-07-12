@@ -554,7 +554,11 @@ export class AgentEngine implements AgentRunner {
    * 可能并行运行多个子代理，共享 reporter 会把 child delta 泄漏到主流或
    * 另一个 child。这个包装器每次 generate 都闭包当前调用的 sink，无全局可变状态。
    */
-  private providerForReporter(provider: LLMProvider, reporter: Reporter): LLMProvider {
+  private providerForReporter(
+    provider: LLMProvider,
+    reporter: Reporter,
+    signal?: AbortSignal,
+  ): LLMProvider {
     const generateStreamFn = provider.generateStream;
     if (!generateStreamFn) return provider;
     return {
@@ -563,7 +567,9 @@ export class AgentEngine implements AgentRunner {
           provider,
           msgs,
           tools,
-          (delta: string) => reporter.onTextDelta?.(delta),
+          (delta: string) => {
+            if (!signal?.aborted) reporter.onTextDelta?.(delta);
+          },
           options,
         ),
       get modelName() {
@@ -576,11 +582,11 @@ export class AgentEngine implements AgentRunner {
     };
   }
 
-  private rotateProvider(reporter: Reporter): LLMProvider | undefined {
+  private rotateProvider(reporter: Reporter, signal?: AbortSignal): LLMProvider | undefined {
     const provider = this.rebuildProvider?.();
     if (!provider) return undefined;
     this.provider = provider;
-    return this.providerForReporter(provider, reporter);
+    return this.providerForReporter(provider, reporter, signal);
   }
 
   /**
@@ -722,13 +728,13 @@ export class AgentEngine implements AgentRunner {
         // 429/5xx/网络错误在此重试;ContextOverflowError 不被普通重试吞掉
         // (defaultIsRetryableError 已排除),冒泡到本方法 catch 做响应式降级。
         return await generateWithRetry(
-          this.providerForReporter(this.provider, reporter),
+          this.providerForReporter(this.provider, reporter, signal),
           context,
           tools,
           {
             signal,
             onRetry: this.makeRetryReporter(span),
-            onRateLimited: () => this.rotateProvider(reporter),
+            onRateLimited: () => this.rotateProvider(reporter, signal),
           },
         );
       } catch (err) {
@@ -1517,8 +1523,11 @@ export class AgentEngine implements AgentRunner {
         signal?.throwIfAborted();
         result = await this.registry.execute(toolCall, {
           signal,
-          onOutput: ({ stream, chunk }) =>
-            reporter.onToolOutput?.(toolCall.name, stream, chunk, toolCall.id),
+          onOutput: ({ stream, chunk }) => {
+            if (!signal?.aborted) {
+              reporter.onToolOutput?.(toolCall.name, stream, chunk, toolCall.id);
+            }
+          },
         });
         signal?.throwIfAborted();
       }
@@ -1623,13 +1632,13 @@ export class AgentEngine implements AgentRunner {
       ];
       const costBefore = session.totalCostCNY;
       const response = await generateWithRetry(
-        this.providerForReporter(this.provider, reporter),
+        this.providerForReporter(this.provider, reporter, signal),
         context,
         [],
         {
           signal,
           onRetry: this.makeRetryReporter(graceSpan),
-          onRateLimited: () => this.rotateProvider(reporter),
+          onRateLimited: () => this.rotateProvider(reporter, signal),
         },
       );
       signal?.throwIfAborted();
@@ -1694,13 +1703,13 @@ export class AgentEngine implements AgentRunner {
     if (!this.compactor) {
       // 无 Compactor:子代理无法降级,叠加普通重试层(溢出则原样抛出)
       return generateWithRetry(
-        this.providerForReporter(this.provider, reporter),
+        this.providerForReporter(this.provider, reporter, signal),
         contextHistory,
         tools,
         {
           signal,
           onRetry: this.makeRetryReporter(),
-          onRateLimited: () => this.rotateProvider(reporter),
+          onRateLimited: () => this.rotateProvider(reporter, signal),
         },
       );
     }
@@ -1711,13 +1720,13 @@ export class AgentEngine implements AgentRunner {
         // 【集成点】同 generateWithOverflowRetry,叠加普通重试层在内,
         // 响应式压缩在外(子代理版仅降字符预算,不改 WorkingMemory 条数)。
         return await generateWithRetry(
-          this.providerForReporter(this.provider, reporter),
+          this.providerForReporter(this.provider, reporter, signal),
           context,
           tools,
           {
             signal,
             onRetry: this.makeRetryReporter(),
-            onRateLimited: () => this.rotateProvider(reporter),
+            onRateLimited: () => this.rotateProvider(reporter, signal),
           },
         );
       } catch (err) {

@@ -88,6 +88,8 @@ export interface Reporter {
   onTurnStart(turn: number): void;
   /** 任务完成退出循环时调用 */
   onFinish(): void;
+  /** 宿主主动中止当前运行，用于立即收口临时流式 UI。 */
+  onInterrupted?(): void;
   /** 流式输出:模型每生成一段文本就调用(仅 generateStream 时触发) */
   onTextDelta?(delta: string): void;
   /** 控制流否决本轮模型正文时，撤销宿主已投影的临时流。 */
