@@ -9,6 +9,7 @@ import type React from "react";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { render, Text, useApp, useInput, type Instance, type RenderOptions } from "ink";
 import { App } from "./app.js";
+import type { InputBoxSubmission } from "./input-box.js";
 import type { DialogRequest } from "./dialog-arbiter.js";
 import { createLocalUiDialogRequest } from "./local-ui-dialog-host.js";
 import { buildModelOptions, modelSelectionToCommand } from "./model-options.js";
@@ -237,6 +238,7 @@ export function getTuiCommandAvailabilityState(status: string): CommandInputStat
 export async function handleTuiInputSubmission(
   text: string,
   deps: HandleTuiInputSubmissionDeps,
+  attachments: readonly ImagePart[] = [],
 ): Promise<void> {
   if (handleApprovalCommand(text, deps)) return;
 
@@ -252,10 +254,15 @@ export async function handleTuiInputSubmission(
     case "prompt": {
       const rewindTranscriptIndex = deps.reporter.getEntryCount();
       deps.reporter.pushUserMessage(processed.raw);
-      await runPreparedUserPrompt(processed.prompt, deps, {
-        rewindPrompt: processed.raw,
-        rewindTranscriptIndex,
-      });
+      await runPreparedUserPrompt(
+        processed.prompt,
+        deps,
+        {
+          rewindPrompt: processed.raw,
+          rewindTranscriptIndex,
+        },
+        attachments,
+      );
       return;
     }
     case "prompt-command": {
@@ -265,10 +272,15 @@ export async function handleTuiInputSubmission(
       if (skillActivation) {
         deps.reporter.pushSkillActivation(skillActivation);
       }
-      await runPreparedUserPrompt(processed.result.prompt, deps, {
-        rewindPrompt: processed.raw,
-        rewindTranscriptIndex,
-      });
+      await runPreparedUserPrompt(
+        processed.result.prompt,
+        deps,
+        {
+          rewindPrompt: processed.raw,
+          rewindTranscriptIndex,
+        },
+        attachments,
+      );
       return;
     }
     case "local-command":
@@ -304,6 +316,7 @@ async function runPreparedUserPrompt(
     "workDir" | "reporter" | "runAgent" | "setRewindContext" | "abortControllerRef"
   >,
   rewind: { rewindPrompt: string; rewindTranscriptIndex: number },
+  attachments: readonly ImagePart[],
 ): Promise<void> {
   let prepared: PreparedUserPrompt;
   try {
@@ -322,8 +335,9 @@ async function runPreparedUserPrompt(
     prompt: rewind.rewindPrompt,
     transcriptIndex: rewind.rewindTranscriptIndex,
   });
-  if (prepared.images) {
-    await deps.runAgent(prepared.prompt, { images: prepared.images });
+  const images = [...(prepared.images ?? []), ...attachments];
+  if (images.length > 0) {
+    await deps.runAgent(prepared.prompt, { images });
     return;
   }
   await deps.runAgent(prepared.prompt);
@@ -332,10 +346,15 @@ async function runPreparedUserPrompt(
 export async function handleTuiRunningInputSubmission(
   text: string,
   deps: HandleTuiRunningInputSubmissionDeps,
+  attachments: readonly ImagePart[] = [],
 ): Promise<void> {
   if (handleApprovalCommand(text, deps)) return;
 
   const running = deps.guard.getSnapshot() !== "idle";
+  if (running && attachments.length > 0) {
+    deps.reporter.pushSystemMessage("图片附件请在当前运行结束后提交。");
+    return;
+  }
   const availabilityState: CommandInputState = running ? "running" : "idle";
 
   if (running && isExplicitRunningInputCommand(text)) {
@@ -349,11 +368,15 @@ export async function handleTuiRunningInputSubmission(
   });
   if (deps.isActive && !deps.isActive()) return;
   if (!needsAgentRun(processed)) {
-    await handleTuiInputSubmission(text, {
-      ...deps,
-      processInput: async () => processed,
-      commandAvailabilityState: availabilityState,
-    });
+    await handleTuiInputSubmission(
+      text,
+      {
+        ...deps,
+        processInput: async () => processed,
+        commandAvailabilityState: availabilityState,
+      },
+      attachments,
+    );
     return;
   }
 
@@ -1037,7 +1060,8 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
       }
     };
 
-    const handleSubmit = async (text: string): Promise<void> => {
+    const handleSubmit = async (submission: InputBoxSubmission): Promise<void> => {
+      const { text, attachments } = submission;
       const current = activeBundleRef.current;
       const isCurrentGeneration = (): boolean =>
         !shuttingDown &&
@@ -1211,7 +1235,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
           closeDialog: (id) =>
             setDialogRequests((current) => current.filter((item) => item.id !== id)),
           dispatchInput: async (nextText) => {
-            await submitTracked(nextText);
+            await submitTracked({ text: nextText, attachments: [] });
           },
           openLocalUiDialog: async (result) => {
             if (result.ui?.kind !== "open-selector" || result.ui.selector !== "rewind") return;
@@ -1233,7 +1257,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
                   current.filter((item) => item.id !== effect.request.id),
                 );
                 dispatchModelSelectorSelection(modelId, (command) => {
-                  void submitTracked(command);
+                  void submitTracked({ text: command, attachments: [] });
                 });
               }}
             />
@@ -1294,7 +1318,11 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
           },
         };
         runningInputDepsRef.current = submissionDeps;
-        await handleTuiRunningInputSubmission(text, submissionDeps);
+        await handleTuiRunningInputSubmission(
+          text,
+          submissionDeps,
+          attachments.map((attachment) => attachment.image),
+        );
       } catch (err) {
         appendTuiRunError(reporter, err);
       } finally {
@@ -1312,8 +1340,8 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
       }
     };
 
-    const submitTracked = (text: string): Promise<void> => {
-      const operation = handleSubmit(text);
+    const submitTracked = (submission: InputBoxSubmission): Promise<void> => {
+      const operation = handleSubmit(submission);
       pendingTuiSubmissions.add(operation);
       void operation.then(
         () => pendingTuiSubmissions.delete(operation),
@@ -1354,7 +1382,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         dialogRequests={dialogRequests}
         inputReplacement={inputReplacement}
         redrawBlank={redrawBlank}
-        onSubmit={(text) => void submitTracked(text)}
+        onSubmit={(submission) => void submitTracked(submission)}
         onInspectTool={(toolCallId) => {
           const current = activeBundleRef.current;
           const tool = current.reporter.getProjection().toolCalls[toolCallId];

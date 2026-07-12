@@ -15,7 +15,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Box, Text, useApp, useInput, useWindowSize } from "ink";
 import { appendFileSync } from "node:fs";
-import { InputBox, type InputBoxStateSnapshot } from "./input-box.js";
+import { InputBox, type InputBoxStateSnapshot, type InputBoxSubmission } from "./input-box.js";
 import type { SlashArgumentSuggestionSource, SuggestionSource } from "./input-controller.js";
 import { pickFocusedDialog, type DialogRequest } from "./dialog-arbiter.js";
 import { Spinner } from "./spinner.js";
@@ -108,7 +108,7 @@ export interface AppProps {
   /** 当前请求展示的 overlay/modal,由 priority 仲裁出唯一焦点弹窗 */
   dialogRequests?: DialogRequest[];
   /** 用户提交一条消息时触发(repl 调 engine.run) */
-  onSubmit: (text: string) => void;
+  onSubmit: (submission: InputBoxSubmission) => void;
   onInterrupt?: () => void;
   /** 权威内部 tool call ID；生产 TUI 用 Ctrl+E 打开完整 Inspector。 */
   onInspectTool?: (toolCallId: string) => void;
@@ -545,10 +545,10 @@ export function App({
           fileMentionSuggestions={fileMentionSuggestions}
           keybindings={keybindings}
           inputReplacement={inputReplacement}
-          onSubmit={(text) => {
+          onSubmit={(submission) => {
             setTranscriptView({ mode: "follow" });
             setExpandedToolKey(null);
-            onSubmit(text);
+            onSubmit(submission);
           }}
         />
       </Box>

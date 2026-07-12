@@ -79,6 +79,10 @@ Pico 的 CLI session 以当前项目目录为边界：
 
 项目或用户自定义 Markdown 命令也会进入同一套 slash command registry。内置命令名优先保留，避免项目命令覆盖关键控制命令。
 
+### 图片附件
+
+复制图片后，在输入框按 `Ctrl+V` 可将剪贴板 PNG 作为本轮附件；不需要把图片放进项目目录。也可以把本地 PNG/JPEG/GIF/WebP 文件拖入终端：Pico 会把拖入的绝对路径转换成附件。输入框会显示附件名称，`Ctrl+Backspace` 可移除最后一张。图片会作为当前会话消息发送给模型，但不会写入工作区；Agent 运行期间请等待本轮结束后再提交图片。
+
 ### 显式 Skill 激活
 
 `/skill <name> [arguments]` 与动态的 `/<skill-name> [arguments]` 都会启动一次 Agent 请求，不再只是把 Skill 正文显示在本地。TUI 会先记录一条 `Skill activated` 事件，再把带来源、触发方式和参数的 Skill 指令作为用户请求交给模型。
