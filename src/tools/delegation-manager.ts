@@ -49,6 +49,8 @@ export interface DelegationManagerOptions {
 
 export interface DelegationCompletionEnvelope {
   completionSeq: number;
+  /** 本次 completion 精确对应的 TUI 活动；只用于宿主生命周期关联。 */
+  activityIds: readonly string[];
   completionPolicy: DelegationCompletionPolicy;
   status: Exclude<DelegationRecordStatus, "running">;
   outputSummary: string;
@@ -84,6 +86,7 @@ export interface DelegationTaskRuntimeInput {
   description?: string;
   toolUseId?: string;
   outputFile?: string;
+  activityIds?: readonly string[];
 }
 
 export interface DelegationResumeInfo {
@@ -120,6 +123,7 @@ interface DelegationRecord {
   taskId: string;
   status: DelegationRecordStatus;
   completionPolicy: DelegationCompletionPolicy;
+  activityIds: readonly string[];
   completionSeq?: number;
   startedAt: number;
   updatedAt: number;
@@ -193,6 +197,7 @@ export class DelegationManager {
       taskId: task?.taskId ?? id,
       status: "running",
       completionPolicy,
+      activityIds: Object.freeze([...(taskInput.activityIds ?? [])]),
       startedAt: now,
       updatedAt: now,
       controller,
@@ -344,6 +349,7 @@ export class DelegationManager {
     }
     return {
       completionSeq: record.completionSeq,
+      activityIds: record.activityIds,
       completionPolicy: record.completionPolicy,
       status: record.status,
       outputSummary: this.outputSummary(record),

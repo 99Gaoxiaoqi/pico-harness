@@ -407,11 +407,16 @@ export class DelegateTaskTool implements BaseTool {
     try {
       dispatch = this.manager.dispatch(
         (signal) => this.runBatch(tasks, activities, depth, maxSpawnDepth, signal),
-        { completionPolicy, description: summarizeDelegation(tasks) },
+        {
+          completionPolicy,
+          description: summarizeDelegation(tasks),
+          activityIds: activities.map((activity) => activity.activityId),
+        },
       );
     } catch (error) {
       const message = errorMessage(error);
       this.finishQueuedActivities(activities, "failed", message);
+      this.claimActivities(activities);
       return JSON.stringify({
         status: "rejected",
         completionPolicy,
@@ -421,6 +426,7 @@ export class DelegateTaskTool implements BaseTool {
     }
     if (dispatch.status === "rejected") {
       this.finishQueuedActivities(activities, "cancelled", dispatch.error ?? "委派未派发");
+      this.claimActivities(activities);
     }
     return JSON.stringify({
       status: dispatch.status,
@@ -748,6 +754,17 @@ export class DelegateTaskTool implements BaseTool {
   ): void {
     for (const activity of activities) {
       this.emitActivity(activity, status, { summary: compactActivityText(summary, 160) });
+    }
+  }
+
+  private claimActivities(activities: readonly SubagentActivityScope[]): void {
+    try {
+      this.options.reporter?.onSubagentActivitiesClaimed?.(
+        activities.map((activity) => activity.activityId),
+      );
+    } catch (error) {
+      // 展示层 claim 是 best-effort，不能改变同步 rejection 的工具结果。
+      void error;
     }
   }
 }

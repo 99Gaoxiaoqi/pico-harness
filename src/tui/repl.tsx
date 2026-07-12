@@ -905,8 +905,10 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
             try {
               // 先拿到 QueryGuard 的独占执行权，再把 completion 写入 Session；
               // 否则仍在运行的主循环可能先消费消息，idle 后又被重复续跑。
-              deliverCompletions();
-              current.reporter.markAsyncSubagentCompletionsDelivered();
+              const delivered = deliverCompletions();
+              current.reporter.onSubagentActivitiesClaimed(
+                delivered.flatMap((completion) => completion.activityIds),
+              );
               await deps.runAgent("", { resumeExistingSession: true });
             } finally {
               sharedMcpManager.attachRegistry(current.toolRegistry);

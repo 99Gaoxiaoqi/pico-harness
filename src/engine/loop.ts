@@ -836,6 +836,16 @@ export class AgentEngine implements AgentRunner {
     runtimeTracer?: Tracer,
     signal?: AbortSignal,
   ): Promise<Message[]> {
+    const run = () => this.runInMainCompactorScope(session, runtimeReporter, runtimeTracer, signal);
+    return this.compactor ? this.compactor.runInMainScope(run) : run();
+  }
+
+  private async runInMainCompactorScope(
+    session: Session,
+    runtimeReporter?: Reporter,
+    runtimeTracer?: Tracer,
+    signal?: AbortSignal,
+  ): Promise<Message[]> {
     signal?.throwIfAborted();
     const reporter = runtimeReporter ?? this.reporter;
     const tracer = runtimeTracer ?? this.tracer;

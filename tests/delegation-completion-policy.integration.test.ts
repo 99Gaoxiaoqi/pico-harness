@@ -157,12 +157,15 @@ describe("delegation completion policy integration", () => {
     });
     let idle = false;
     const resumed: Array<readonly number[]> = [];
+    const deliveredActivityIds: string[][] = [];
     const coordinator = new DelegationWakeCoordinator({
       queue,
       isIdle: () => idle,
       resume: async (completionSeqs, deliverCompletions) => {
         resumed.push(completionSeqs);
-        deliverCompletions();
+        deliveredActivityIds.push(
+          deliverCompletions().flatMap((completion) => completion.activityIds),
+        );
       },
     });
     const manager = new DelegationManager({
@@ -208,6 +211,9 @@ describe("delegation completion policy integration", () => {
       ],
     );
     expect(resumed[0]).toEqual(envelopes.map((completion) => completion.completionSeq));
+    expect(deliveredActivityIds[0]).toEqual(
+      envelopes.flatMap((completion) => completion.activityIds),
+    );
     expect(queue.hasPending).toBe(false);
     coordinator.dispose();
   });
