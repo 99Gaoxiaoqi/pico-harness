@@ -11,6 +11,10 @@ export type PersistedInteractionMode = "default" | "plan" | "auto" | "yolo";
 
 /** 会话恢复时需要覆盖启动默认值的设置。密钥、endpoint 和 tools 不落盘。 */
 export interface PersistedSessionSettings {
+  /** User-assigned, human-readable session name. Undefined falls back to conversation content. */
+  title?: string;
+  /** Source session ID when this conversation was forked. */
+  forkFrom?: string;
   provider: ProviderKind;
   model: string;
   modelRouteId?: string;
@@ -166,6 +170,8 @@ function normalizePersistedSessionSettings(value: unknown): PersistedSessionSett
   const thinkingEffortExplicit = value["thinkingEffortExplicit"];
   const additionalDirectories = value["additionalDirectories"];
   const modelRouteId = value["modelRouteId"];
+  const title = value["title"];
+  const forkFrom = value["forkFrom"];
 
   if (!isProviderKind(provider) || typeof model !== "string" || model.trim().length === 0) {
     return undefined;
@@ -179,10 +185,14 @@ function normalizePersistedSessionSettings(value: unknown): PersistedSessionSett
     return undefined;
   }
   if (modelRouteId !== undefined && typeof modelRouteId !== "string") return undefined;
+  if (title !== undefined && !isSessionTitle(title)) return undefined;
+  if (forkFrom !== undefined && !isNonBlankString(forkFrom)) return undefined;
   if (prePlanMode !== undefined && !isNonPlanMode(prePlanMode)) return undefined;
   if (mode !== "plan" && prePlanMode !== undefined) return undefined;
 
   return {
+    ...(title !== undefined ? { title } : {}),
+    ...(forkFrom !== undefined ? { forkFrom } : {}),
     provider,
     model,
     ...(modelRouteId !== undefined ? { modelRouteId } : {}),
@@ -192,6 +202,14 @@ function normalizePersistedSessionSettings(value: unknown): PersistedSessionSett
     thinkingEffortExplicit,
     additionalDirectories: [...new Set(additionalDirectories)],
   };
+}
+
+function isSessionTitle(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0 && value.length <= 120;
+}
+
+function isNonBlankString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
 }
 
 function normalizeSessionUsageSnapshot(value: unknown): SessionUsageSnapshot | undefined {

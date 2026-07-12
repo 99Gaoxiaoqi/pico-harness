@@ -73,6 +73,7 @@ import {
   getOrCreateSessionSettings,
   setSessionAdditionalDirectories,
   setSessionMode,
+  setSessionTitle,
   setSessionTools,
   toolStatusFromRegistry,
   type SessionSettings,
@@ -678,9 +679,10 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     selection: CliSessionSelection,
   ): Promise<TuiSessionBundle> => {
     const session = await globalSessionManager.getOrCreate(selection.sessionId, opts.workDir);
-    if (selection.mode === "fork" && selection.sourceSessionId) {
-      await seedTuiFork(session, selection.sourceSessionId, opts.workDir);
-    }
+    const forkSourceTitle =
+      selection.mode === "fork" && selection.sourceSessionId
+        ? await seedTuiFork(session, selection.sourceSessionId, opts.workDir)
+        : undefined;
 
     // 在 route / WorkspaceRoots / provider 装配前先冻结 Session 的消息与运行态。
     const hydration = await session.readHydrationSnapshot();
@@ -754,6 +756,9 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         },
         { persistence: session },
       );
+      if (selection.mode === "fork" && forkSourceTitle) {
+        setSessionTitle(settings, forkTitleFrom(forkSourceTitle));
+      }
       coordinateSessionReasoningLevel(settings, modelRouter);
       setSessionAdditionalDirectories(settings, workspaceRoots.list().slice(1));
 
@@ -1011,7 +1016,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
           setBundle(next);
           next.reporter.pushSystemMessage(
             request.mode === "fork"
-              ? `Forked ${request.sessionId} as ${next.sessionId}.`
+              ? `Forked as “${next.settings.title ?? next.sessionId}”. Workspace files are shared with the source session.`
               : `Resumed session ${next.sessionId}.`,
           );
         } catch (error) {
@@ -1467,18 +1472,30 @@ async function seedTuiFork(
   target: Session,
   sourceSessionId: string,
   workDir: string,
-): Promise<void> {
-  if (target.length > 0) return;
+): Promise<string | undefined> {
+  if (target.length > 0) return undefined;
   const source = await globalSessionManager.getOrCreate(sourceSessionId, workDir);
   const snapshot = await source.readHydrationSnapshot();
   if (snapshot.messages.length > 0) target.append(...snapshot.messages);
   if (snapshot.runtime.settings) {
-    target.updateRuntimeState({ settings: snapshot.runtime.settings });
+    target.updateRuntimeState({
+      settings: { ...snapshot.runtime.settings, forkFrom: sourceSessionId },
+    });
   }
   if (snapshot.runtime.goal) {
     target.updateRuntimeState({ goal: snapshot.runtime.goal });
   }
   await target.flushPersistence();
+  return (
+    snapshot.runtime.settings?.title ??
+    snapshot.messages.find((message) => message.role === "user" && message.content.trim())?.content
+  );
+}
+
+function forkTitleFrom(sourceTitle: string): string {
+  const compacted = sourceTitle.replace(/\s+/gu, " ").trim();
+  const prefix = "Fork of ";
+  return `${prefix}${compacted.slice(0, 120 - prefix.length)}`;
 }
 
 export function createTuiUpdateScheduler<T>(
@@ -1526,6 +1543,7 @@ async function handleLocalTuiCommand(
     | "openDialog"
     | "closeDialog"
     | "dispatchInput"
+    | "sessionId"
     | "currentModelId"
     | "modelOptions"
     | "createModelSelectorContent"
@@ -2008,9 +2026,15 @@ function isSessionSelectorResult(result: LocalCommandResult): result is LocalCom
 
 function createSessionSelectorDialogRequest(
   result: LocalCommandResult,
-  deps: Pick<HandleTuiInputSubmissionDeps, "workDir" | "closeDialog" | "dispatchInput">,
+  deps: Pick<
+    HandleTuiInputSubmissionDeps,
+    "workDir" | "closeDialog" | "dispatchInput" | "sessionId"
+  >,
 ): DialogRequest {
-  const sessions = mapCliSessionsToBrowserSessions(extractSessionSummaries(result.data));
+  const sessions = mapCliSessionsToBrowserSessions(
+    extractSessionSummaries(result.data),
+    deps.sessionId,
+  );
 
   return {
     id: SESSION_SELECTOR_DIALOG_ID,
@@ -2060,6 +2084,7 @@ function toSessionSummary(value: unknown): CliSessionBrowserSummary | null {
     ...(typeof value.title === "string" ? { title: value.title } : {}),
     ...(typeof value.firstMessage === "string" ? { firstMessage: value.firstMessage } : {}),
     ...(typeof value.lastMessage === "string" ? { lastMessage: value.lastMessage } : {}),
+    ...(typeof value.forkFrom === "string" ? { forkFrom: value.forkFrom } : {}),
   };
 }
 

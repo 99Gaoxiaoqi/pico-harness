@@ -22,6 +22,8 @@ export interface CliSessionSummary {
   title?: string;
   firstMessage?: string;
   lastMessage?: string;
+  /** Source session ID persisted with a forked conversation. */
+  forkFrom?: string;
 }
 
 export interface ResolveCliSessionOptions {
@@ -96,6 +98,7 @@ export async function listCliSessionSummaries(workDir: string): Promise<CliSessi
   for (const file of files) {
     const records = await new SessionStore(file.path).load();
     const messages = recoverSessionMessages(records);
+    const metadata = recoverSessionMetadata(records);
     const visibleUserMessages = messages.filter(
       (message) =>
         message.role === "user" &&
@@ -111,8 +114,14 @@ export async function listCliSessionSummaries(workDir: string): Promise<CliSessi
       createdAt: new Date(file.birthtimeMs > 0 ? file.birthtimeMs : file.ctimeMs),
       updatedAt: new Date(file.mtimeMs),
       messageCount: messages.length,
-      ...(firstMessage ? { title: firstMessage, firstMessage } : {}),
+      ...(metadata.title !== undefined
+        ? { title: metadata.title }
+        : firstMessage
+          ? { title: firstMessage }
+          : {}),
+      ...(firstMessage ? { firstMessage } : {}),
       ...(lastMessage ? { lastMessage } : {}),
+      ...(metadata.forkFrom !== undefined ? { forkFrom: metadata.forkFrom } : {}),
     });
   }
 
@@ -120,6 +129,27 @@ export async function listCliSessionSummaries(workDir: string): Promise<CliSessi
     (a, b) => b.updatedAt.getTime() - a.updatedAt.getTime() || b.id.localeCompare(a.id),
   );
   return summaries;
+}
+
+/** 最近一次完整 settings 快照中的用户可识别元数据。 */
+function recoverSessionMetadata(
+  records: readonly SessionRecord[],
+): Pick<CliSessionSummary, "title" | "forkFrom"> {
+  let title: string | undefined;
+  let forkFrom: string | undefined;
+  for (const record of records) {
+    if (record.type !== "runtime_state" || !record.patch.settings) continue;
+    if (record.patch.settings.title !== undefined) {
+      title = record.patch.settings.title;
+    }
+    if (record.patch.settings.forkFrom !== undefined) {
+      forkFrom = record.patch.settings.forkFrom;
+    }
+  }
+  return {
+    ...(title !== undefined ? { title } : {}),
+    ...(forkFrom !== undefined ? { forkFrom } : {}),
+  };
 }
 
 function assertSingleSessionMode(options: ResolveCliSessionOptions): void {
