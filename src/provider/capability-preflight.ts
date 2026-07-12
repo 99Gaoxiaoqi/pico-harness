@@ -31,7 +31,11 @@ export function preflightModelRequest(
     capabilities.vision === false &&
     request.messages.some((message) => (message.images?.length ?? 0) > 0)
   ) {
-    throw new ModelCapabilityError(routeId, "vision", `模型路由 ${routeId} 不支持图像输入。`);
+    throw new ModelCapabilityError(
+      routeId,
+      "vision",
+      `模型路由 ${routeId} 不支持图像输入；已在本地阻止请求，图片未发送到模型。请切换到支持视觉的模型后重试，并确认输入框显示 [Image #N] 附件；必要时可拖拽图片文件或使用当前平台的图片粘贴快捷键重新附加。`,
+    );
   }
   if (capabilities.toolCall === false && request.availableTools.length > 0) {
     throw new ModelCapabilityError(routeId, "tool_call", `模型路由 ${routeId} 不支持工具调用。`);
