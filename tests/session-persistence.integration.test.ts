@@ -22,9 +22,11 @@ import { listCliSessionSummaries } from "../src/cli/session-resolver.js";
 import {
   getOrCreateSessionSettings,
   resetSessionSettingsForTests,
+  setSessionModelRoute,
   setSessionTitle,
 } from "../src/input/session-settings.js";
 import type { LLMProvider } from "../src/provider/interface.js";
+import { loadModelRouter } from "../src/provider/model-router.js";
 
 /** 跨平台安全删除:Windows 上 SQLite 句柄未释放时 rm 触发 EBUSY,退避重试兜底 */
 async function safeRm(path: string): Promise<void> {
@@ -229,6 +231,82 @@ describe("Session 持久化端到端集成", () => {
 
     expect(settings2.title).toBe("认证重构：Session 方案");
     expect(settings2.forkFrom).toBe("source-session");
+    await session2.close();
+  });
+
+  it("切到固定、未知或禁用思考的模型时清理旧档位，并在重启后保持一致", async () => {
+    const sessionId = "reasoning-reset-session";
+    const router = await loadModelRouter({
+      config: {
+        model: "test/deepseek-v4-pro-260425",
+        providers: {
+          test: {
+            protocol: "openai",
+            baseURL: "https://example.invalid/v1",
+            apiKeyEnv: "TEST_API_KEY",
+            discoverModels: false,
+            models: [
+              "deepseek-v4-pro-260425",
+              "fixed-model",
+              "unknown-model",
+              "disabled-model",
+            ],
+            modelCapabilities: {
+              "fixed-model": { reasoning: true },
+              "disabled-model": { reasoning: false },
+            },
+          },
+        },
+      },
+      env: { TEST_API_KEY: "test-key" },
+      legacyProvider: "openai",
+      legacyModel: "unused",
+    });
+    const manager1 = new SessionManager();
+    const session1 = await manager1.getOrCreate(sessionId, workDir, ON);
+    const settings1 = getOrCreateSessionSettings(
+      {
+        sessionId,
+        cwd: workDir,
+        provider: "openai",
+        model: "deepseek-v4-pro-260425",
+        modelRouteId: "test/deepseek-v4-pro-260425",
+        thinkingEffort: "max",
+      },
+      { persistence: session1 },
+    );
+
+    for (const routeId of ["test/fixed-model", "test/unknown-model", "test/disabled-model"]) {
+      settings1.thinkingEffort = "max";
+      settings1.thinkingEffortExplicit = true;
+      expect(setSessionModelRoute(settings1, router, routeId)).toMatchObject({ ok: true });
+      expect(settings1.thinkingEffort).toBe("off");
+      expect(settings1.thinkingEffortExplicit).toBe(false);
+    }
+    expect(session1.getRuntimeStateSnapshot().settings).toMatchObject({
+      modelRouteId: "test/disabled-model",
+      thinkingEffort: "off",
+      thinkingEffortExplicit: false,
+    });
+    await session1.flushPersistence();
+    await session1.close();
+
+    resetSessionSettingsForTests();
+    const manager2 = new SessionManager();
+    const session2 = await manager2.getOrCreate(sessionId, workDir, ON);
+    const settings2 = getOrCreateSessionSettings(
+      {
+        sessionId,
+        cwd: workDir,
+        provider: "openai",
+        model: "fallback-model",
+      },
+      { persistence: session2 },
+    );
+
+    expect(settings2.modelRouteId).toBe("test/disabled-model");
+    expect(settings2.thinkingEffort).toBe("off");
+    expect(settings2.thinkingEffortExplicit).toBe(false);
     await session2.close();
   });
 

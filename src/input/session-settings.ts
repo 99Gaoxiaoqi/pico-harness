@@ -304,7 +304,7 @@ export function setSessionModelRoute(
     route.capabilities.reasoningProfile,
     settings.thinkingEffortExplicit ? previousLevel : undefined,
   );
-  if (selection.level !== undefined) settings.thinkingEffort = selection.level;
+  applyReasoningLevelSelection(settings, selection);
   persistSessionSettings(settings);
   const reasoningMessage = formatReasoningSelectionAfterModelSwitch(
     route.capabilities.reasoningProfile,
@@ -436,8 +436,7 @@ export function coordinateSessionReasoningLevel(
     route.capabilities.reasoningProfile,
     settings.thinkingEffortExplicit ? settings.thinkingEffort : undefined,
   );
-  if (selection.level !== undefined && selection.level !== settings.thinkingEffort) {
-    settings.thinkingEffort = selection.level;
+  if (applyReasoningLevelSelection(settings, selection)) {
     persistSessionSettings(settings);
   }
   return selection.level;
@@ -576,6 +575,27 @@ function formatReasoningSelectionAfterModelSwitch(
   if (capability.enabled === "unknown") return "Reasoning controls are unknown for this model.";
   if (capability.levels.length === 0) return "Reasoning is fixed/model-controlled for this model.";
   return "";
+}
+
+/**
+ * A route with fixed, disabled, or unknown reasoning controls must not inherit an explicit
+ * level from the previously selected model. Retaining it makes the persisted UI state disagree
+ * with the request capability preflight on the next turn.
+ */
+function applyReasoningLevelSelection(
+  settings: SessionSettings,
+  selection: ReturnType<typeof coordinateReasoningLevel>,
+): boolean {
+  if (selection.level === undefined) {
+    const changed = settings.thinkingEffort !== "off" || settings.thinkingEffortExplicit;
+    settings.thinkingEffort = "off";
+    settings.thinkingEffortExplicit = false;
+    return changed;
+  }
+
+  const changed = settings.thinkingEffort !== selection.level;
+  settings.thinkingEffort = selection.level;
+  return changed;
 }
 
 export function normalizeInteractionMode(mode: string | undefined): InteractionMode | undefined {
