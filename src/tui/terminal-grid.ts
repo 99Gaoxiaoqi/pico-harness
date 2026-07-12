@@ -3,12 +3,9 @@ import { EventEmitter } from "node:events";
 const CPR_QUERY = "\u001b[?1049h\u001b[?6l\u001b[r\u001b[999;999H\u001b[6n";
 const CPR_QUERY_CLEANUP = "\u001b[?1049l";
 const LIVE_CPR_QUERY = "\u001b[s\u001b[999;999H\u001b[6n\u001b[u";
-const BEGIN_SYNCHRONIZED_OUTPUT = "\u001b[?2026h";
 const END_SYNCHRONIZED_OUTPUT = "\u001b[?2026l";
-const CLEAR_TERMINAL = "\u001b[2J\u001b[3J\u001b[H";
 const DEFAULT_PROBE_TIMEOUT_MS = 180;
 const LATE_CPR_DRAIN_MS = 250;
-const RESIZE_STABILIZATION_MS = 750;
 const MIN_LIVE_COLUMNS = 10;
 const MIN_LIVE_ROWS = 3;
 // CPR 没有返回时无法信任嵌入式终端的 PTY winsize。优先损失可见行数，
@@ -174,7 +171,6 @@ function createResizeAwareSession(
   const resizeEvents = new EventEmitter();
   let frontendGrid = normalizeGrid(initialFrontendGrid, { columns: 80, rows: 24 });
   let publishedGrid = effectiveTerminalGrid(stdout, frontendGrid);
-  let stabilizeFramesUntil = 0;
   let mouseTrackingRequested = false;
   let disposed = false;
   let resizeGeneration = 0;
@@ -296,7 +292,6 @@ function createResizeAwareSession(
   const onUnderlyingResize = (): void => {
     if (disposed) return;
     resizeGeneration++;
-    stabilizeFramesUntil = Date.now() + RESIZE_STABILIZATION_MS;
     if (resizeQueued) return;
     resizeQueued = true;
     queueMicrotask(() => {
@@ -318,16 +313,14 @@ function createResizeAwareSession(
       }
       if (property === "write") {
         return (chunk: unknown, ...args: unknown[]) => {
-          let stabilizedChunk = chunk;
-          if (Date.now() <= stabilizeFramesUntil && chunk === BEGIN_SYNCHRONIZED_OUTPUT) {
-            stabilizedChunk = BEGIN_SYNCHRONIZED_OUTPUT + CLEAR_TERMINAL;
-          } else if (mouseTrackingRequested && chunk === END_SYNCHRONIZED_OUTPUT) {
+          let outputChunk = chunk;
+          if (mouseTrackingRequested && chunk === END_SYNCHRONIZED_OUTPUT) {
             // Some embedded terminal hosts drop mouse reporting after a full
             // frame. Re-arm it inside Ink's synchronized write instead of an
             // out-of-band timer that can desynchronize cursor bookkeeping.
-            stabilizedChunk = ENABLE_MOUSE_TRACKING + END_SYNCHRONIZED_OUTPUT;
+            outputChunk = ENABLE_MOUSE_TRACKING + END_SYNCHRONIZED_OUTPUT;
           }
-          return Reflect.apply(target.write, target, [stabilizedChunk, ...args]);
+          return Reflect.apply(target.write, target, [outputChunk, ...args]);
         };
       }
       if (property === "on" || property === "addListener") {
