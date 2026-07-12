@@ -1,6 +1,7 @@
 import React from "react";
 import { Box, Text } from "ink";
 import type { CliSessionSummary } from "../cli/session-resolver.js";
+import { presentSession } from "./session-presentation.js";
 
 export const SESSION_BROWSER_TITLE_WIDTH = 56;
 export const SESSION_BROWSER_CWD_WIDTH = 48;
@@ -11,6 +12,9 @@ export interface SessionBrowserSession extends CliSessionSummary {
   title?: string;
   firstMessage?: string;
   lastMessage?: string;
+  forkFrom?: string;
+  forkParentTitle?: string;
+  isCurrent?: boolean;
 }
 
 export interface SessionBrowserState {
@@ -109,6 +113,7 @@ export function formatSessionBrowser(
     maxItems?: number;
     maxTitleLength?: number;
     maxCwdLength?: number;
+    now?: Date;
   } = {},
 ): string {
   const state = options.state ?? createSessionBrowserState();
@@ -130,15 +135,14 @@ export function formatSessionBrowser(
     const session = shown[index]!;
     const visibleIndex = firstShownIndex + index;
     const marker = visibleIndex === selectedIndex ? ">" : " ";
-    lines.push(
-      [
-        marker,
-        formatUtcMinute(session.updatedAt),
-        truncateInline(session.id, 28),
-        `msgs=${session.messageCount}`,
-      ].join(" "),
-    );
-    lines.push(`  ${truncateInline(sessionTitle(session), titleWidth)}`);
+    const presentation = presentSession(session, {
+      maxTitleLength: titleWidth,
+      ...(options.now ? { now: options.now } : {}),
+    });
+    lines.push(`${marker} ${presentation.title}`);
+    lines.push(`  ${presentation.metadata}${presentation.isCurrent ? " · Current" : ""}`);
+    if (presentation.forkLabel) lines.push(`  ↳ ${presentation.forkLabel}`);
+    lines.push(`  id=${truncateInline(presentation.identifier, 28)}`);
     if (session.title && session.firstMessage && session.firstMessage !== session.title) {
       lines.push(`  ${truncateInline(session.firstMessage, titleWidth)}`);
     }
@@ -164,10 +168,6 @@ function filterSessions(
   return sessions.filter((session) => normalizeCwd(session.cwd) === normalized);
 }
 
-function sessionTitle(session: SessionBrowserSession): string {
-  return session.title || session.firstMessage || "(no title)";
-}
-
 function clampSelection(index: number, itemCount: number): number {
   if (itemCount <= 0) return 0;
   return Math.min(Math.max(0, index), itemCount - 1);
@@ -188,19 +188,6 @@ function normalizeCwd(value: string | undefined): string | undefined {
   if (!inline) return undefined;
   const normalized = inline.replace(/[\\/]+$/, "");
   return normalized.length > 0 ? normalized : inline;
-}
-
-function formatUtcMinute(date: Date): string {
-  const year = date.getUTCFullYear();
-  const month = pad2(date.getUTCMonth() + 1);
-  const day = pad2(date.getUTCDate());
-  const hour = pad2(date.getUTCHours());
-  const minute = pad2(date.getUTCMinutes());
-  return `${year}-${month}-${day} ${hour}:${minute}`;
-}
-
-function pad2(value: number): string {
-  return value.toString().padStart(2, "0");
 }
 
 function truncateInline(value: string, maxLength: number): string {

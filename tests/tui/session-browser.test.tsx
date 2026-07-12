@@ -37,12 +37,14 @@ describe("SessionBrowser", () => {
       {
         currentProjectCwd: "/tmp/project",
         state: createSessionBrowserState(),
+        now: new Date("2026-07-09T03:09:05.000Z"),
       },
     );
 
     expect(output).toContain("Sessions [cwd]");
     expect(output).toContain("1/2");
-    expect(output).toContain("> 2026-07-09 03:04");
+    expect(output).toContain("> 修复输入框焦点");
+    expect(output).toContain("4 messages · 5m ago");
     expect(output).toContain("修复输入框焦点");
     expect(output).toContain("请帮我修复 TUI 输入焦点丢失的问题");
     expect(output).toContain("/tmp/project");
@@ -92,8 +94,9 @@ describe("SessionBrowser", () => {
     const output = formatSessionBrowser(sessions, { state, maxItems: 5 });
     confirmSessionBrowserSelection(state, sessions, undefined, { onConfirm });
 
-    expect(output).toContain("> 2026-07-09 02:00 cli-11");
-    expect(output).not.toContain("cli-1 msgs=");
+    expect(output).toContain("> (no title)");
+    expect(output).toContain("id=cli-11");
+    expect(output).not.toContain("id=cli-1\n");
     expect(onConfirm).toHaveBeenCalledWith(sessions[10]);
   });
 
@@ -155,6 +158,28 @@ describe("SessionBrowser", () => {
     expect(output).toContain("Sessions [cwd]");
     expect(output).toContain("cli-one");
   });
+
+  it("展示当前会话和 fork 父会话标题，ID 保持次要信息", () => {
+    const output = formatSessionBrowser(
+      [
+        sessionSummary({
+          id: "cli-fork",
+          title: "验证 Session 方案",
+          forkFrom: "cli-parent",
+          forkParentTitle: "认证重构：基线调查",
+          isCurrent: true,
+          messageCount: 1,
+          updatedAt: "2026-07-09T01:59:30.000Z",
+        }),
+      ],
+      { state: createSessionBrowserState(), now: new Date("2026-07-09T02:00:00.000Z") },
+    );
+
+    expect(output).toContain("> 验证 Session 方案");
+    expect(output).toContain("1 message · just now · Current");
+    expect(output).toContain("↳ Fork of “认证重构：基线调查”");
+    expect(output).toContain("id=cli-fork");
+  });
 });
 
 function sessionSummary(overrides: SessionOverrides = {}): SessionBrowserSession {
@@ -172,6 +197,12 @@ function sessionSummary(overrides: SessionOverrides = {}): SessionBrowserSession
     messageCount: overrides.messageCount ?? 1,
     ...(overrides.title !== undefined ? { title: overrides.title } : {}),
     ...(overrides.firstMessage !== undefined ? { firstMessage: overrides.firstMessage } : {}),
+    ...(overrides.lastMessage !== undefined ? { lastMessage: overrides.lastMessage } : {}),
+    ...(overrides.forkFrom !== undefined ? { forkFrom: overrides.forkFrom } : {}),
+    ...(overrides.forkParentTitle !== undefined
+      ? { forkParentTitle: overrides.forkParentTitle }
+      : {}),
+    ...(overrides.isCurrent !== undefined ? { isCurrent: overrides.isCurrent } : {}),
   };
 }
 
