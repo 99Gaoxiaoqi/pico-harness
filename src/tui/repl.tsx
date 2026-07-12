@@ -156,6 +156,7 @@ const APPROVAL_DIALOG_PRIORITY = 80;
 
 export const TUI_RENDER_OPTIONS = {
   alternateScreen: true,
+  incrementalRendering: true,
   patchConsole: true,
   exitOnCtrlC: false,
 } as const satisfies RenderOptions;
@@ -1457,8 +1458,9 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     renderStdout.write("\x1b[2J\x1b[H");
   }
 
-  // alternateScreen 隔离 shell scrollback；根布局由 Yoga 按当前终端宽度保留右侧 1 列，
-  // 缩放时不依赖 React 尚未更新的宽度状态。保持 Ink 默认全帧渲染，兼容中文与复杂布局。
+  // alternateScreen 隔离 shell scrollback；incrementalRendering 只更新变化行，
+  // 避免发送、spinner 和流式 delta 每帧擦除整个视口。根布局保留右侧 1 列，
+  // 避免中文、Emoji 和长行在右边界立即换行时让差分行计数失配。
   // patchConsole 让剩余 console 输出先擦除当前帧,输出后再恢复,
   // 不绕过 Ink 的光标记账。Pino fd2 已在预加载阶段独立静默。
   try {
