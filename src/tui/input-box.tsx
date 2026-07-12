@@ -9,10 +9,11 @@
 // 支持:字符输入、基础光标编辑、Backspace/Delete、Enter 提交、Ctrl+C 退出(由 App 层处理)。
 
 import React, { useEffect, useRef, useState } from "react";
-import { Box, Text, useInput } from "ink";
+import { Box, Text, useInput, usePaste } from "ink";
 import {
   createInputControllerState,
   getSuggestionContext,
+  insertPastedInput,
   reduceInputControllerEvent,
   type InputControllerState,
   type InputKey,
@@ -25,7 +26,7 @@ import { SuggestionList } from "./suggestions.js";
 import type { UserKeybindingConfig } from "./keybindings/resolver.js";
 import { isImagePasteShortcut as isPlatformImagePasteShortcut } from "./system-actions.js";
 import {
-  droppedImagePaths,
+  extractDroppedImagePaths,
   imageAttachmentFromClipboard,
   imageAttachmentFromPath,
   type InputImageAttachment,
@@ -124,6 +125,15 @@ export function InputBox({
     onStateChange?.(inputBoxStateSnapshot(controllerRef.current));
   }, [onStateChange]);
 
+  usePaste(
+    (text) => {
+      const emptyKey: InputKey = {};
+      if (acceptsInput && !acceptsInput(text, emptyKey)) return;
+      handlePastedInput(text);
+    },
+    { isActive: !disabled },
+  );
+
   useInput((input, key) => {
     if (acceptsInput && !acceptsInput(input, key)) return;
     if (isPlatformImagePasteShortcut(input, { ctrl: key.ctrl, alt: key.meta })) {
@@ -132,6 +142,22 @@ export function InputBox({
     }
     if (handleAttachmentNavigation(key)) {
       return;
+    }
+    // 少数终端不支持 bracketed paste，仍会把拖拽路径作为一个
+    // 批量 input 事件送入。只检查这一批内容，不扫描整个草稿。
+    if (
+      input.length > 1 &&
+      !key.ctrl &&
+      !key.meta &&
+      !key.return &&
+      !key.backspace &&
+      !key.delete
+    ) {
+      const extracted = extractDroppedImagePaths(input);
+      if (extracted.paths.length > 0) {
+        handlePastedInput(input);
+        return;
+      }
     }
     const previousText = controllerRef.current.text;
     const suggestionOptions = {
@@ -144,25 +170,7 @@ export function InputBox({
       keybindings,
       ...suggestionOptions,
     });
-    controllerRef.current = result.state;
-    setController(result.state);
-    if (result.state.text !== previousText) onTextChange?.(result.state.text);
-    onStateChange?.(inputBoxStateSnapshot(result.state));
-    const droppedPaths = droppedImagePaths(result.state.text);
-    if (droppedPaths.length > 0) {
-      const droppedText = result.state.text;
-      void attachImages(droppedPaths, droppedText);
-    }
-    if (result.submittedText === undefined && !disabled && result.pendingSuggestion) {
-      scheduleAsyncSuggestions({
-        pending: result.pendingSuggestion,
-        requestSeq: suggestionRequestSeq,
-        mounted,
-        controllerRef,
-        setController,
-        onStateChange,
-      });
-    }
+    applyControllerResult(result, previousText);
     const attachmentOnlySubmission =
       result.submittedText === undefined &&
       key.return === true &&
@@ -177,6 +185,43 @@ export function InputBox({
       setAttachmentNotice(undefined);
     }
   });
+
+  function handlePastedInput(text: string): void {
+    const extracted = extractDroppedImagePaths(text);
+    const insertedText = extracted.paths.length > 0 ? extracted.remainingText : text;
+    if (insertedText.length > 0) {
+      const previousText = controllerRef.current.text;
+      const result = insertPastedInput(controllerRef.current, insertedText, {
+        disabled,
+        keybindings,
+        slashCommandSuggestions,
+        slashArgumentSuggestions,
+        fileMentionSuggestions,
+      });
+      applyControllerResult(result, previousText);
+    }
+    if (extracted.paths.length > 0) void attachImages(extracted.paths);
+  }
+
+  function applyControllerResult(
+    result: ReturnType<typeof reduceInputControllerEvent>,
+    previousText: string,
+  ): void {
+    controllerRef.current = result.state;
+    setController(result.state);
+    if (result.state.text !== previousText) onTextChange?.(result.state.text);
+    onStateChange?.(inputBoxStateSnapshot(result.state));
+    if (result.submittedText === undefined && !disabled && result.pendingSuggestion) {
+      scheduleAsyncSuggestions({
+        pending: result.pendingSuggestion,
+        requestSeq: suggestionRequestSeq,
+        mounted,
+        controllerRef,
+        setController,
+        onStateChange,
+      });
+    }
+  }
 
   function attachImage(loader: () => Promise<InputImageAttachment>, clearText?: string): void {
     if (attachingImage.current) return;
@@ -211,7 +256,7 @@ export function InputBox({
       });
   }
 
-  function attachImages(filePaths: readonly string[], clearText: string): void {
+  function attachImages(filePaths: readonly string[]): void {
     if (attachingImage.current) return;
     attachingImage.current = true;
     void Promise.allSettled(
@@ -234,20 +279,6 @@ export function InputBox({
         setAttachmentNotice(
           failures.length > 0 ? failures[0] : `已附加 ${nextAttachments.length} 张图片。`,
         );
-        if (nextAttachments.length > 0 && controllerRef.current.text === clearText) {
-          const next = {
-            ...controllerRef.current,
-            text: "",
-            cursor: 0,
-            activeSuggestions: null,
-            historyIndex: null,
-            draft: "",
-          };
-          controllerRef.current = next;
-          setController(next);
-          onTextChange?.(next.text);
-          onStateChange?.(inputBoxStateSnapshot(next));
-        }
       })
       .finally(() => {
         attachingImage.current = false;
