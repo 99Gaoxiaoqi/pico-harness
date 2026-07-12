@@ -6,7 +6,7 @@ import {
   type AgentNavigationItem,
   type AgentNavigationStatus,
 } from "./agent-navigation.js";
-import { truncateTerminalText } from "./terminal-width.js";
+import { terminalWidth, truncateTerminalText } from "./terminal-width.js";
 
 export interface AgentSwitcherProps {
   items: readonly AgentNavigationItem[];
@@ -26,6 +26,7 @@ export interface AgentSwitcherRow {
 }
 
 export interface AgentSwitcherLayout {
+  title: string;
   rows: readonly AgentSwitcherRow[];
   firstItemIndex: number;
   totalItems: number;
@@ -36,14 +37,14 @@ export interface AgentSwitcherLayout {
 }
 
 const STATUS_PRESENTATION = {
-  idle: { marker: "○", color: "gray", label: "idle" },
-  queued: { marker: "○", color: "gray", label: "queued" },
-  running: { marker: "✽", color: "cyan", label: "running" },
-  completed: { marker: "✓", color: "green", label: "completed" },
-  partial: { marker: "!", color: "yellow", label: "partial" },
-  failed: { marker: "×", color: "red", label: "failed" },
-  timed_out: { marker: "×", color: "yellow", label: "timed out" },
-  cancelled: { marker: "−", color: "gray", label: "cancelled" },
+  idle: { marker: "○", color: "gray" },
+  queued: { marker: "○", color: "gray" },
+  running: { marker: "✽", color: "cyan" },
+  completed: { marker: "✓", color: "green" },
+  partial: { marker: "!", color: "yellow" },
+  failed: { marker: "×", color: "red" },
+  timed_out: { marker: "×", color: "yellow" },
+  cancelled: { marker: "−", color: "gray" },
 } as const;
 
 export function AgentSwitcher({
@@ -62,20 +63,12 @@ export function AgentSwitcher({
     renderWidth,
     maxVisibleItems,
   });
-  const overflow = [
-    layout.hiddenAbove > 0 ? `↑${layout.hiddenAbove}` : "",
-    layout.hiddenBelow > 0 ? `↓${layout.hiddenBelow}` : "",
-  ]
-    .filter(Boolean)
-    .join(" ");
-
   return (
     <Box flexDirection="column">
       <Box>
-        <Text bold={focused} color={focused ? "cyan" : undefined}>
-          Agents
+        <Text bold={focused} color={focused ? "cyan" : undefined} wrap="truncate">
+          {layout.title}
         </Text>
-        <Text dimColor>{` · ${layout.totalItems}${overflow ? ` · ${overflow}` : ""}`}</Text>
       </Box>
       {layout.rows.map((row) => (
         <Text
@@ -101,35 +94,57 @@ export function buildAgentSwitcherLayout({
   maxVisibleItems = 4,
 }: AgentSwitcherProps): AgentSwitcherLayout {
   const items = normalizeAgentNavigationItems(sourceItems);
-  const visibleCount = Math.max(1, Math.min(items.length, normalizeMaxItems(maxVisibleItems)));
-  const selectedIndex = Math.max(
-    0,
-    items.findIndex((item) => item.id === selectedId),
-  );
-  const firstItemIndex = Math.min(
-    Math.max(0, selectedIndex - Math.floor(visibleCount / 2)),
-    Math.max(0, items.length - visibleCount),
-  );
   const width = normalizeWidth(renderWidth);
-  const visible = items.slice(firstItemIndex, firstItemIndex + visibleCount);
+  const visibleLimit = Math.max(1, Math.min(items.length, normalizeMaxItems(maxVisibleItems)));
+  const main = items[0]!;
+  const subagents = items.slice(1);
+  const selectedSubagentIndex = Math.max(
+    0,
+    subagents.findIndex((item) => item.id === selectedId),
+  );
+  const subagentCapacity = Math.max(0, visibleLimit - 1);
+  const firstItemIndex = Math.min(
+    Math.max(0, selectedSubagentIndex - Math.floor(subagentCapacity / 2)),
+    Math.max(0, subagents.length - subagentCapacity),
+  );
+  const visible =
+    subagentCapacity > 0
+      ? [main, ...subagents.slice(firstItemIndex, firstItemIndex + subagentCapacity)]
+      : [selectedId === MAIN_AGENT_ID ? main : (subagents[selectedSubagentIndex] ?? main)];
+  const nameColumnWidth = resolveNameColumnWidth(visible, width);
   const rows = visible.map((item) => {
     const selected = item.id === selectedId;
     const active = item.id === activeId;
     return {
       itemId: item.id,
-      text: formatSwitcherRow(item, { selected, active, focused, width }),
+      text: formatSwitcherRow(item, { selected, active, focused, width, nameColumnWidth }),
       status: item.status,
       selected,
       active,
     };
   });
 
+  const hiddenAbove = subagentCapacity > 0 ? firstItemIndex : selectedSubagentIndex;
+  const visibleSubagentCount = rows.filter((row) => row.itemId !== MAIN_AGENT_ID).length;
+  const hiddenBelow = Math.max(0, subagents.length - hiddenAbove - visibleSubagentCount);
+  const unreadCount = subagents.reduce(
+    (total, item) => total + normalizeUnread(item.unreadCount),
+    0,
+  );
+
   return {
+    title: formatSwitcherTitle({
+      subagentCount: subagents.length,
+      unreadCount,
+      hiddenAbove,
+      hiddenBelow,
+      width,
+    }),
     rows,
     firstItemIndex,
-    totalItems: items.length,
-    hiddenAbove: firstItemIndex,
-    hiddenBelow: Math.max(0, items.length - firstItemIndex - rows.length),
+    totalItems: subagents.length,
+    hiddenAbove,
+    hiddenBelow,
     totalRows: 1 + rows.length,
   };
 }
@@ -154,35 +169,68 @@ export function hitTestAgentSwitcherRow(
 
 function formatSwitcherRow(
   item: AgentNavigationItem,
-  options: { selected: boolean; active: boolean; focused: boolean; width: number },
+  options: {
+    selected: boolean;
+    active: boolean;
+    focused: boolean;
+    width: number;
+    nameColumnWidth: number;
+  },
 ): string {
   const presentation = STATUS_PRESENTATION[item.status];
-  const cursor = options.focused && options.selected ? "›" : " ";
-  const active = options.active ? "●" : " ";
-  const marker = item.id === MAIN_AGENT_ID ? " " : presentation.marker;
-  const prefix = `${cursor}${active} ${marker} `;
+  const indicator = options.focused && options.selected ? "›" : options.active ? "●" : " ";
+  const prefix = `${indicator} ${presentation.marker} `;
   const unread = normalizeUnread(item.unreadCount);
-  const suffixParts = [
-    options.width >= 40 && item.id !== MAIN_AGENT_ID ? presentation.label : "",
-    options.width >= 56 && item.id !== MAIN_AGENT_ID
-      ? presentCompletionPolicy(item.completionPolicy)
-      : "",
-    unread > 0 ? `+${unread}` : "",
-  ].filter(Boolean);
-  const suffix = suffixParts.length > 0 ? ` · ${suffixParts.join(" · ")}` : "";
-  const label = item.id === MAIN_AGENT_ID ? "Main" : formatAgentLabel(item);
-  return `${prefix}${truncateTerminalText(label, Math.max(1, options.width - prefix.length - suffix.length))}${suffix}`;
+  const unreadLabel = unread > 0 ? (options.width >= 32 ? `${unread} new` : `+${unread}`) : "";
+  const suffix = unreadLabel ? `  ${unreadLabel}` : "";
+  const contentWidth = Math.max(1, options.width - terminalWidth(prefix) - terminalWidth(suffix));
+
+  if (item.id === MAIN_AGENT_ID) {
+    return `${prefix}${truncateTerminalText("Main", contentWidth)}${suffix}`;
+  }
+
+  const name = normalizeLabel(item.agentName) || "Agent";
+  const task = normalizeLabel(item.task);
+  const nameWidth = Math.min(options.nameColumnWidth, contentWidth);
+  const renderedName = padTerminalText(truncateTerminalText(name, nameWidth), nameWidth);
+  const taskWidth = Math.max(0, contentWidth - nameWidth - (task ? 2 : 0));
+  const renderedTask = task && taskWidth > 0 ? `  ${truncateTerminalText(task, taskWidth)}` : "";
+  return `${prefix}${renderedName}${renderedTask}${suffix}`;
 }
 
-function presentCompletionPolicy(policy: AgentNavigationItem["completionPolicy"]): string {
-  return policy === "optional" ? "background" : (policy ?? "");
+function resolveNameColumnWidth(items: readonly AgentNavigationItem[], width: number): number {
+  const widest = Math.max(
+    4,
+    ...items
+      .filter((item) => item.id !== MAIN_AGENT_ID)
+      .map((item) => terminalWidth(normalizeLabel(item.agentName) || "Agent")),
+  );
+  const available = Math.max(4, width - terminalWidth("› ✽ ") - 4);
+  return Math.max(4, Math.min(12, widest, Math.floor(available * 0.35)));
 }
 
-function formatAgentLabel(item: AgentNavigationItem): string {
-  const agentName = item.agentName?.replace(/\s+/gu, " ").trim();
-  const task = item.task?.replace(/\s+/gu, " ").trim();
-  if (agentName && task) return `${agentName} · ${task}`;
-  return agentName || task || "Agent";
+function formatSwitcherTitle(options: {
+  subagentCount: number;
+  unreadCount: number;
+  hiddenAbove: number;
+  hiddenBelow: number;
+  width: number;
+}): string {
+  const parts = [`Agents · ${options.subagentCount}`];
+  if (options.hiddenAbove > 0) parts.push(`↑${options.hiddenAbove} hidden`);
+  if (options.hiddenBelow > 0) parts.push(`↓${options.hiddenBelow} hidden`);
+  if (options.unreadCount > 0) {
+    parts.push(options.width >= 24 ? `${options.unreadCount} new` : `+${options.unreadCount}`);
+  }
+  return truncateTerminalText(parts.join(" · "), options.width);
+}
+
+function normalizeLabel(value: string | undefined): string {
+  return value?.replace(/\s+/gu, " ").trim() ?? "";
+}
+
+function padTerminalText(value: string, width: number): string {
+  return `${value}${" ".repeat(Math.max(0, width - terminalWidth(value)))}`;
 }
 
 function normalizeUnread(value: number | undefined): number {
