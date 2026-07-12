@@ -37,14 +37,13 @@ export async function imageAttachmentFromClipboard(): Promise<InputImageAttachme
   return imageAttachment("clipboard-image.png", image);
 }
 
-/** 终端拖拽文件通常只会向 stdin 写入绝对路径；仅识别整段输入就是一个图片路径的情况。 */
-export function droppedImagePath(text: string): string | undefined {
-  const trimmed = text.trim();
-  if (!trimmed || trimmed.includes("\n")) return undefined;
-  const unquoted = unwrapShellPath(trimmed);
-  return isAbsolute(unquoted) && /\.(?:png|jpe?g|gif|webp)$/iu.test(unquoted)
-    ? unquoted
-    : undefined;
+/**
+ * 终端拖拽通常将一个或多个路径作为文本写入 stdin。终端种类会分别使用
+ * 换行、引号或反斜杠转义空格；这里保留路径本身，并只挑出绝对图片路径。
+ */
+export function droppedImagePaths(text: string): readonly string[] {
+  const paths = splitDroppedPaths(text);
+  return paths.length > 0 && paths.every(isDroppedImagePath) ? paths : [];
 }
 
 function imageAttachment(name: string, image: ImagePart): InputImageAttachment {
@@ -75,14 +74,65 @@ function inferImageMimeType(data: Buffer, path: string): string {
   throw new Error(`不支持的图片格式: ${path}`);
 }
 
-function unwrapShellPath(value: string): string {
-  if (
-    (value.startsWith('"') && value.endsWith('"')) ||
-    (value.startsWith("'") && value.endsWith("'"))
-  ) {
-    return value.slice(1, -1);
+function splitDroppedPaths(value: string): string[] {
+  const paths: string[] = [];
+  let current = "";
+  let quote: '"' | "'" | undefined;
+
+  const pushCurrent = (): void => {
+    if (current) paths.push(current);
+    current = "";
+  };
+
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index]!;
+    if (quote) {
+      if (character === quote) {
+        quote = undefined;
+      } else if (character === "\\" && canEscape(value[index + 1])) {
+        current += value[index + 1];
+        index += 1;
+      } else {
+        current += character;
+      }
+      continue;
+    }
+
+    if (character === '"' || character === "'") {
+      quote = character;
+    } else if (/\s/u.test(character)) {
+      pushCurrent();
+    } else if (character === "\\" && canEscape(value[index + 1])) {
+      current += value[index + 1];
+      index += 1;
+    } else {
+      // Windows 路径的反斜杠不是 shell 转义，例如 C:\\Users\\pico.png。
+      current += character;
+    }
   }
-  return value.replaceAll("\\ ", " ");
+  pushCurrent();
+  return paths;
+}
+
+function canEscape(value: string | undefined): value is string {
+  return (
+    value === " " ||
+    value === "\t" ||
+    value === "\n" ||
+    value === '"' ||
+    value === "'" ||
+    value === "\\"
+  );
+}
+
+function isPortableAbsolutePath(value: string): boolean {
+  return (
+    isAbsolute(value) || /^[A-Za-z]:[\\/]/u.test(value) || /^\\\\[^\\/]+[\\/][^\\/]+/u.test(value)
+  );
+}
+
+function isDroppedImagePath(value: string): boolean {
+  return isPortableAbsolutePath(value) && /\.(?:png|jpe?g|gif|webp)$/iu.test(value);
 }
 
 function formatBytes(bytes: number): string {

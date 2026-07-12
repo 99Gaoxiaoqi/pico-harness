@@ -23,8 +23,9 @@ import {
 import type { ActiveSuggestionSession, InputSuggestion } from "./suggestions.js";
 import { SuggestionList } from "./suggestions.js";
 import type { UserKeybindingConfig } from "./keybindings/resolver.js";
+import { isImagePasteShortcut as isPlatformImagePasteShortcut } from "./system-actions.js";
 import {
-  droppedImagePath,
+  droppedImagePaths,
   imageAttachmentFromClipboard,
   imageAttachmentFromPath,
   type InputImageAttachment,
@@ -53,6 +54,8 @@ export interface InputBoxProps {
   keybindings?: UserKeybindingConfig;
   /** /rewind 等外部动作请求原子替换当前草稿。 */
   inputReplacement?: { sequence: number; text: string };
+  /** 当前终端实际支持的剪贴板图片快捷键文案；未提供时不展示。 */
+  imagePasteShortcutLabel?: string;
 }
 
 export interface InputBoxSubmission {
@@ -78,6 +81,7 @@ export function InputBox({
   onSubmit,
   keybindings,
   inputReplacement,
+  imagePasteShortcutLabel,
 }: InputBoxProps): React.ReactNode {
   const initialController = useRef(createInputControllerState());
   const controllerRef = useRef(initialController.current);
@@ -87,6 +91,7 @@ export function InputBox({
   const mounted = useRef(true);
   const [controller, setController] = useState(initialController.current);
   const [attachments, setAttachments] = useState<readonly InputImageAttachment[]>([]);
+  const [attachmentCursor, setAttachmentCursor] = useState<number | undefined>(undefined);
   const [attachmentNotice, setAttachmentNotice] = useState<string | undefined>(undefined);
 
   useEffect(
@@ -121,13 +126,11 @@ export function InputBox({
 
   useInput((input, key) => {
     if (acceptsInput && !acceptsInput(input, key)) return;
-    if (isImagePasteShortcut(input, key)) {
+    if (isPlatformImagePasteShortcut(input, { ctrl: key.ctrl, alt: key.meta })) {
       void attachImage(() => imageAttachmentFromClipboard());
       return;
     }
-    if (key.ctrl && key.backspace && attachments.length > 0) {
-      setAttachments((current) => current.slice(0, -1));
-      setAttachmentNotice(undefined);
+    if (handleAttachmentNavigation(key)) {
       return;
     }
     const previousText = controllerRef.current.text;
@@ -145,12 +148,11 @@ export function InputBox({
     setController(result.state);
     if (result.state.text !== previousText) onTextChange?.(result.state.text);
     onStateChange?.(inputBoxStateSnapshot(result.state));
-    const droppedPath = droppedImagePath(result.state.text);
-    if (droppedPath !== undefined)
-      void attachImage(
-        () => Promise.resolve(imageAttachmentFromPath(droppedPath)),
-        result.state.text,
-      );
+    const droppedPaths = droppedImagePaths(result.state.text);
+    if (droppedPaths.length > 0) {
+      const droppedText = result.state.text;
+      void attachImages(droppedPaths, droppedText);
+    }
     if (result.submittedText === undefined && !disabled && result.pendingSuggestion) {
       scheduleAsyncSuggestions({
         pending: result.pendingSuggestion,
@@ -171,6 +173,7 @@ export function InputBox({
     if (result.submittedText !== undefined || attachmentOnlySubmission) {
       onSubmit({ text: result.submittedText ?? "请查看这张图片。", attachments });
       setAttachments([]);
+      setAttachmentCursor(undefined);
       setAttachmentNotice(undefined);
     }
   });
@@ -182,6 +185,7 @@ export function InputBox({
       .then((attachment) => {
         if (!mounted.current) return;
         setAttachments((current) => [...current, attachment]);
+        setAttachmentCursor(undefined);
         setAttachmentNotice(`已附加图片: ${attachment.name}`);
         if (clearText !== undefined && controllerRef.current.text === clearText) {
           const next = {
@@ -207,25 +211,115 @@ export function InputBox({
       });
   }
 
+  function attachImages(filePaths: readonly string[], clearText: string): void {
+    if (attachingImage.current) return;
+    attachingImage.current = true;
+    void Promise.allSettled(
+      filePaths.map((filePath) => Promise.resolve(imageAttachmentFromPath(filePath))),
+    )
+      .then((results) => {
+        if (!mounted.current) return;
+        const nextAttachments = results.flatMap((result) =>
+          result.status === "fulfilled" ? [result.value] : [],
+        );
+        const failures = results.flatMap((result) =>
+          result.status === "rejected"
+            ? [result.reason instanceof Error ? result.reason.message : String(result.reason)]
+            : [],
+        );
+        if (nextAttachments.length > 0) {
+          setAttachments((current) => [...current, ...nextAttachments]);
+          setAttachmentCursor(undefined);
+        }
+        setAttachmentNotice(
+          failures.length > 0 ? failures[0] : `已附加 ${nextAttachments.length} 张图片。`,
+        );
+        if (nextAttachments.length > 0 && controllerRef.current.text === clearText) {
+          const next = {
+            ...controllerRef.current,
+            text: "",
+            cursor: 0,
+            activeSuggestions: null,
+            historyIndex: null,
+            draft: "",
+          };
+          controllerRef.current = next;
+          setController(next);
+          onTextChange?.(next.text);
+          onStateChange?.(inputBoxStateSnapshot(next));
+        }
+      })
+      .finally(() => {
+        attachingImage.current = false;
+      });
+  }
+
+  function handleAttachmentNavigation(key: InputKey): boolean {
+    if (attachments.length === 0) return false;
+    const textIsAtStart = controllerRef.current.cursor === 0;
+    const selected = attachmentCursor ?? attachments.length - 1;
+
+    if (
+      key.backspace &&
+      (attachmentCursor !== undefined || controllerRef.current.text.length === 0)
+    ) {
+      removeAttachment(selected);
+      return true;
+    }
+    if (key.ctrl && key.backspace) {
+      removeAttachment(selected);
+      return true;
+    }
+    if (key.leftArrow && textIsAtStart) {
+      setAttachmentCursor(Math.max(0, selected - (attachmentCursor === undefined ? 0 : 1)));
+      return true;
+    }
+    if (key.rightArrow && attachmentCursor !== undefined) {
+      if (attachmentCursor >= attachments.length - 1) setAttachmentCursor(undefined);
+      else setAttachmentCursor(attachmentCursor + 1);
+      return true;
+    }
+    return false;
+  }
+
+  function removeAttachment(index: number): void {
+    setAttachments((current) => current.filter((_, currentIndex) => currentIndex !== index));
+    setAttachmentCursor((current) => {
+      if (attachments.length <= 1) return undefined;
+      if (current === undefined) return attachments.length - 2;
+      return Math.max(0, Math.min(current, attachments.length - 2));
+    });
+    setAttachmentNotice(undefined);
+  }
+
   const { text, cursor, activeSuggestions } = controller;
 
   return (
     <Box flexDirection="column">
       {renderInputPrompt({ disabled: Boolean(disabled), disabledLabel, text, cursor })}
       {attachments.length > 0 && (
-        <Text color="cyan">
-          📎 {attachments.map((attachment) => attachment.name).join(", ")} · Ctrl+Backspace
-          移除最后一张
+        <Box flexWrap="wrap">
+          {attachments.map((attachment, index) => (
+            <Text
+              key={attachment.id}
+              color={attachmentCursor === index ? "black" : "cyan"}
+              backgroundColor={attachmentCursor === index ? "cyan" : undefined}
+            >
+              {attachmentCursor === index ? " ▌" : " "}[Image #{index + 1}: {attachment.name}]
+            </Text>
+          ))}
+        </Box>
+      )}
+      {attachments.length > 0 && (
+        <Text dimColor>
+          ←/→ 选择附件 · Backspace 删除
+          {imagePasteShortcutLabel ? ` · ${imagePasteShortcutLabel} 粘贴图片` : ""}
         </Text>
       )}
       {attachmentNotice && <Text color="gray">{attachmentNotice}</Text>}
       {!disabled && <SuggestionList session={activeSuggestions} />}
     </Box>
   );
-}
-
-function isImagePasteShortcut(input: string, key: InputKey): boolean {
-  return key.ctrl === true && (input === "v" || input === "V" || input === "\u0016");
 }
 
 function scheduleAsyncSuggestions({
