@@ -664,7 +664,7 @@ export class DelegateTaskTool implements BaseTool {
       depth: childDepth,
       maxSpawnDepth,
       ...(task.agentName ? { agentName: task.agentName } : {}),
-      ...(workDir ? { workDir } : {}),
+      ...(effectiveWorkDir ? { workDir: effectiveWorkDir } : {}),
     });
 
     try {
@@ -960,10 +960,25 @@ function normalizeDelegateTasks(input: DelegateTaskArgs): NormalizedDelegateTask
 
 function normalizeDelegationRoots(value: string[] | undefined, fallback: string[]): string[] {
   if (!Array.isArray(value)) return [...fallback];
-  const roots = [...new Set(value.map((root) => root.trim()).filter(Boolean))]
-    .slice(0, 20)
-    .map((root) => root.slice(0, 240));
+  const roots = [
+    ...new Set(
+      value
+        .filter((root): root is string => typeof root === "string")
+        .map(normalizeDelegationRoot)
+        .filter((root): root is string => root !== undefined),
+    ),
+  ].slice(0, 20);
   return roots.length > 0 ? roots : [...fallback];
+}
+
+function normalizeDelegationRoot(value: string): string | undefined {
+  const root = value.trim().replaceAll("\\", "/");
+  if (!root || root.includes("\0")) return undefined;
+  // roots 是相对可信 workspace 的聚焦范围，不接受宿主绝对路径或路径穿越。
+  if (root.startsWith("/") || /^[A-Za-z]:\//u.test(root)) return undefined;
+  const segments = root.split("/").filter((segment) => segment !== "" && segment !== ".");
+  if (segments.includes("..")) return undefined;
+  return (segments.length > 0 ? segments.join("/") : ".").slice(0, 240);
 }
 
 function normalizeMaxFiles(value: number | undefined, fallback: number): number {

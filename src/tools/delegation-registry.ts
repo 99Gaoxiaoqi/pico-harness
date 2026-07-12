@@ -191,6 +191,7 @@ function maybeRegisterDelegateTool(
         depth: request.depth,
         maxSpawnDepth,
         role: request.role,
+        workDir: config.workDir,
         ...(config.profiles ? { profiles: config.profiles } : {}),
         ...(config.worktreeSupervisor ? { worktreeSupervisor: config.worktreeSupervisor } : {}),
       }),
