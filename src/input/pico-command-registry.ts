@@ -153,7 +153,6 @@ export async function createPicoCommandRegistry(
     createChangesCommand(options),
     createSnapshotsCommand(options),
     createRewindCommand(options),
-    createUndoCommand(options),
     createImageCommand(),
     createAgentCommand(options),
     createSkillsCommand(skillLoader),
@@ -1131,26 +1130,6 @@ function createRewindCommand(options: PicoCommandRegistryOptions): SlashCommand 
           input.argv.length === 0
             ? formatRewindUsage(session.id, summaries)
             : `直接 message-id 回滚已收敛到交互菜单。请在列表中选择目标消息。\n${formatRewindUsage(session.id, summaries)}`,
-        ui: { kind: "open-selector", selector: "rewind" },
-      };
-    },
-  };
-}
-
-function createUndoCommand(options: PicoCommandRegistryOptions): SlashCommand {
-  return {
-    name: "undo",
-    description: "Open the rewind menu (compatibility alias)",
-    usage: "/undo",
-    kind: "local",
-    availability: "idle",
-    execute: async (): Promise<LocalCommandResult> => {
-      const session = await resolveCommandSession(options);
-      const summaries = listFileHistorySnapshotSummaries(session);
-      return {
-        type: "local",
-        action: "message",
-        message: `/undo 已收敛为 /rewind 的兼容入口。\n${formatRewindUsage(session.id, summaries)}`,
         ui: { kind: "open-selector", selector: "rewind" },
       };
     },

@@ -38,7 +38,6 @@ const RETIRED_OPTIONS = new Set([
   "--rewind",
   "--rewind-mode",
   "--rollback",
-  "--undo",
   "--steer",
 ]);
 

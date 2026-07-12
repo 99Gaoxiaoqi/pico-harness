@@ -1054,47 +1054,6 @@ describe("Pico command registry", () => {
     expect(result.result.ui).toEqual({ kind: "open-selector", selector: "rewind" });
   });
 
-  it("/undo 收敛为同一个 rewind 交互入口", async () => {
-    const { registry, filePath } = await registryWithSnapshot("turn-2");
-
-    const result = await processUserInput("/undo", { registry });
-
-    expect(result.type).toBe("local-command");
-    if (result.type !== "local-command") return;
-    expect(result.command).toBe("undo");
-    expect(result.result.message).toContain("兼容入口");
-    expect(result.result.ui).toEqual({ kind: "open-selector", selector: "rewind" });
-    expect(readFileSync(filePath, "utf8")).toBe("after\n");
-  });
-
-  it("/undo 的旧参数不会绕过 TUI runtime", async () => {
-    const session = {
-      id: "fake-undo-session",
-      fileHistory: {
-        snapshots: [
-          {
-            messageId: "turn-1",
-            timestamp: new Date("2026-07-09T00:00:00.000Z"),
-            trackedFileBackups: new Map(),
-          },
-        ],
-      },
-    } as unknown as Session;
-    const registry = await createPicoCommandRegistry({
-      workDir: process.cwd(),
-      provider: "openai",
-      model: "glm-5.2",
-      session,
-      sessionId: session.id,
-    });
-
-    const result = await processUserInput("/undo turn-1 code", { registry });
-
-    expect(result.type).toBe("local-command");
-    if (result.type !== "local-command") return;
-    expect(result.result.ui).toEqual({ kind: "open-selector", selector: "rewind" });
-  });
-
   it("/compact 在无法安全触发摘要压缩时说明原因", async () => {
     const registry = await createPicoCommandRegistry({
       workDir: process.cwd(),
