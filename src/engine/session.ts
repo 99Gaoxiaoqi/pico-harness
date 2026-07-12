@@ -267,6 +267,7 @@ export class Session implements SessionRuntimePersistence {
   private initMemorySearch(explicit?: ConversationSearchStore): void {
     if (explicit) {
       this.searchStore = explicit;
+      this.switchMemorySearchToJsonlIfDegraded();
       return;
     }
     try {
@@ -276,22 +277,53 @@ export class Session implements SessionRuntimePersistence {
         this.searchStore = store;
         return;
       }
-      this.searchStore = new JsonlMemoryStore({
-        persistentSource: this.store ? "session_jsonl" : "none",
-        reason: store?.status.reason ?? "SQLite FTS5 unavailable",
-        ...(store?.status.recommendation ? { recommendation: store.status.recommendation } : {}),
-        nodeVersion: store?.status.nodeVersion,
-        nodeModuleAbi: store?.status.nodeModuleAbi,
-      });
+      this.searchStore = this.createJsonlMemoryFallback(store?.status);
     } catch (err) {
       logger.warn({ err }, "[session] FTS5 初始化失败,降级为 JSONL 重建索引");
-      this.searchStore = new JsonlMemoryStore({
-        persistentSource: this.store ? "session_jsonl" : "none",
+      this.searchStore = this.createJsonlMemoryFallback({
+        backend: "sqlite_fts5",
+        state: "degraded",
+        persistentSource: "sqlite",
+        nodeVersion: process.version,
+        nodeModuleAbi: process.versions.modules,
         reason: err instanceof Error ? err.message : String(err),
         recommendation:
           "请在当前 Node 环境运行 npm rebuild better-sqlite3；仍失败时重新运行 npm ci。",
       });
     }
+  }
+
+  private createJsonlMemoryFallback(status?: MemoryBackendStatus): JsonlMemoryStore {
+    return new JsonlMemoryStore({
+      persistentSource: this.store ? "session_jsonl" : "none",
+      reason: status?.reason ?? "SQLite FTS5 unavailable",
+      ...(status?.recommendation ? { recommendation: status.recommendation } : {}),
+      nodeVersion: status?.nodeVersion,
+      nodeModuleAbi: status?.nodeModuleAbi,
+    });
+  }
+
+  /** SQLite 在运行期失效时立即切换到可重建的 JSONL 内存索引。 */
+  private switchMemorySearchToJsonlIfDegraded(): boolean {
+    const current = this.searchStore;
+    const status = current.status;
+    if (status.state !== "degraded" || status.backend === "jsonl_memory") return false;
+
+    const fallback = this.createJsonlMemoryFallback(status);
+    fallback.replaceSession(this.id, this.history);
+    this.searchStore = fallback;
+
+    if (current === this.fts5Lease) {
+      FTS5Store.release(this.workDir);
+      this.fts5Lease = undefined;
+    } else {
+      current.close();
+    }
+    logger.warn(
+      { reason: status.reason, backend: status.backend },
+      "[session] 记忆索引运行期降级,已切换为 JSONL 重建索引",
+    );
+    return true;
   }
 
   /**
@@ -357,6 +389,7 @@ export class Session implements SessionRuntimePersistence {
 
   private rebuildSearchIndex(): void {
     this.searchStore.replaceSession(this.id, this.history);
+    this.switchMemorySearchToJsonlIfDegraded();
   }
 
   /**
@@ -649,6 +682,7 @@ export class Session implements SessionRuntimePersistence {
 
     try {
       this.searchStore.insert(this.id, beforeLen, msg);
+      this.switchMemorySearchToJsonlIfDegraded();
     } catch (err) {
       logger.warn({ err }, "[session] 记忆索引失败");
     }
@@ -945,7 +979,10 @@ export class Session implements SessionRuntimePersistence {
   ): Array<{ content: string; turnIndex: number; sessionId: string }> {
     try {
       // 传入 sessionId 过滤,只返回当前 Session 的消息
-      const results = this.searchStore.search(query, limit, this.id);
+      let results = this.searchStore.search(query, limit, this.id);
+      if (this.switchMemorySearchToJsonlIfDegraded()) {
+        results = this.searchStore.search(query, limit, this.id);
+      }
       return results.map((r) => ({
         content: r.content,
         turnIndex: r.turnIndex,

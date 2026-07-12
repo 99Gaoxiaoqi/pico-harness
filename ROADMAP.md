@@ -556,6 +556,7 @@ git worktree remove ../pico-1-streaming
 - [x] 12.6.4 新增独立摘要持久化，修复 MemoryNudger 摘要类型与读取链路
 - [x] 12.6.5 在 Session、`/status`、`/doctor` 接入后端选择、降级原因和修复建议
 - [x] 12.6.6 以一条集成主链验证 SQLite 故障、JSONL 恢复、检索和摘要跨重启，完成构建、合并、推送与临时资源清理
+- [x] 12.6.7 统一 FTS5/JSONL 检索契约，修复运行期降级切换、测试 Mock 漂移与 Node ABI 环境漂移
 
 ---
 
@@ -694,6 +695,11 @@ git worktree remove ../pico-1-streaming
   - MCP 连接提升为 TUI 宿主级资源，Session 切换与每轮 Agent 只重绑 registry；`/mcp` 可重载、启停、重连并读取 resources/prompts。
   - OAuth 失败显式进入 `needs_auth`，宿主回调返回凭据补丁后重连；诊断持续脱敏。
   - 仅新增一条确定性集成主链；该场景、typecheck、变更文件 ESLint 与 build 通过。
+
+- 2026-07-12：收口记忆存储兼容性
+  - Session 检索测试改用公开存储注入契约，移除对旧私有字段的篡改并补齐完整 Mock。
+  - FTS5 运行期故障会显式进入 degraded 并切换 JSONL；双后端统一 relevance 排序方向和 limit 边界。
+  - 项目固定 Node 22，测试前探测 better-sqlite3、FTS5 与 trigram，ABI 错配时立即给出修复建议。
 
 - 2026-07-11：完成记忆存储韧性
   - FTS5 暴露健康状态和 Node ABI 诊断；不可用时自动切换到由 Session JSONL 重建的有界内存索引。
