@@ -146,7 +146,12 @@ function visibleScrolledBlocks(
   const rows: DetailRow[] = [];
   for (let index = blockIndex; index < blocks.length; index += 1) {
     const block = blocks[index]!;
-    if (limit !== undefined && rows.length + block.rows.length > limit) break;
+    if (limit !== undefined && rows.length + block.rows.length > limit) {
+      // 视口起点可能吸附到一个比整个视口更高的事件。跳过它继续
+      // 寻找后续可完整展示的 block，不让详情区变成空白。
+      if (rows.length === 0) continue;
+      break;
+    }
     rows.push(...block.rows);
   }
   return rows;

@@ -73,6 +73,24 @@ describe("agent switcher layout integration", () => {
     expect(output.split("\n")).toHaveLength(3);
     expect(output.split("\n").every((line) => terminalWidth(line) <= 20)).toBe(true);
   });
+
+  it("高度预算只给一项时仍保留 Main 和当前 Subagent", () => {
+    const items: AgentNavigationItem[] = [
+      createMainAgentItem(),
+      createAgent("agent-current", "探索", "检查极低终端高度", 0),
+    ];
+    const layout = buildAgentSwitcherLayout({
+      items,
+      selectedId: "agent-current",
+      activeId: "agent-current",
+      focused: true,
+      renderWidth: 32,
+      maxVisibleItems: 1,
+    });
+
+    expect(layout.rows.map((row) => row.itemId)).toEqual(["main", "agent-current"]);
+    expect(layout.totalRows).toBe(3);
+  });
 });
 
 function createAgent(

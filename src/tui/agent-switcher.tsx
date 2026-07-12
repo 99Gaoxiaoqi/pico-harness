@@ -95,7 +95,9 @@ export function buildAgentSwitcherLayout({
 }: AgentSwitcherProps): AgentSwitcherLayout {
   const items = normalizeAgentNavigationItems(sourceItems);
   const width = normalizeWidth(renderWidth);
-  const visibleLimit = Math.max(1, Math.min(items.length, normalizeMaxItems(maxVisibleItems)));
+  // 只要存在 Subagent，即使终端高度非常紧张，也至少保留
+  // Main + 当前 Subagent，避免用户在详情视图中失去返回定位。
+  const visibleLimit = effectiveVisibleLimit(items.length, maxVisibleItems);
   const main = items[0]!;
   const subagents = items.slice(1);
   const selectedSubagentIndex = Math.max(
@@ -153,9 +155,7 @@ export function measureAgentSwitcherRows(
   items: readonly AgentNavigationItem[],
   maxVisibleItems = 4,
 ): number {
-  return (
-    1 + Math.min(normalizeAgentNavigationItems(items).length, normalizeMaxItems(maxVisibleItems))
-  );
+  return 1 + effectiveVisibleLimit(normalizeAgentNavigationItems(items).length, maxVisibleItems);
 }
 
 /** localRow 是相对 switcher 顶部的 0-based 行；第 0 行标题不可点击。 */
@@ -246,4 +246,10 @@ function normalizeWidth(value: number): number {
 function normalizeMaxItems(value: number): number {
   if (!Number.isFinite(value) || value < 1) return 4;
   return Math.floor(value);
+}
+
+function effectiveVisibleLimit(itemCount: number, maxVisibleItems: number): number {
+  if (itemCount <= 0) return 0;
+  const requested = Math.min(itemCount, normalizeMaxItems(maxVisibleItems));
+  return itemCount > 1 ? Math.max(2, requested) : 1;
 }

@@ -58,4 +58,22 @@ describe("subagent detail layout integration", () => {
     expect(scrolled).toMatch(/^✦ /u);
     expect(scrolled).toContain("› Grep");
   });
+
+  it("手动视口跳过超高 block，继续展示后续完整事件", () => {
+    const agent: AgentNavigationItem = {
+      id: "viewport-agent",
+      kind: "subagent",
+      status: "running",
+      agentName: "viewport-agent",
+      task: "这是一段会在窄屏上换成很多行的超长任务描述",
+      timeline: [{ id: "latest", kind: "tool", name: "grep", status: "running", target: "tests" }],
+    };
+    const output = renderToString(
+      <AgentDetailView agent={agent} renderWidth={20} startOffsetRows={2} visibleRows={2} />,
+      { columns: 20 },
+    );
+
+    expect(output).toContain("› Grep");
+    expect(output.trim()).not.toBe("");
+  });
 });
