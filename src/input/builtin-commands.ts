@@ -29,7 +29,6 @@ const CORE_HELP_COMMANDS = new Set([
   "snapshots",
   "changes",
   "rewind",
-  "undo",
   "image",
   "agent",
   "skills",

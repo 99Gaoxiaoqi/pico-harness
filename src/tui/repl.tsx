@@ -1629,7 +1629,7 @@ function changesCommandMessageId(value: unknown): string | undefined {
 }
 
 function isHistoryDialogCommand(text: string): boolean {
-  return /^\/(?:changes|rewind|checkpoint|undo)(?:\s|$)/u.test(text.trim());
+  return /^\/(?:changes|rewind|checkpoint)(?:\s|$)/u.test(text.trim());
 }
 
 function resumeSessionCommandData(value: unknown): ResumeSessionCommandData | undefined {
