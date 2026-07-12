@@ -21,6 +21,7 @@ import {
 import { fallbackModelFor, isModelUnavailableError } from "../provider/fallback.js";
 import type { ProviderConfig } from "../provider/config.js";
 import type { LLMProvider, LLMProviderRequestOptions } from "../provider/interface.js";
+import { CredentialRotationCoordinator } from "../provider/credential-rotation.js";
 import { resolveProviderProfile } from "../provider/profile.js";
 import type { ImagePart, Message, ToolDefinition } from "../schema/message.js";
 import { ToolRegistry } from "../tools/registry-impl.js";
@@ -160,6 +161,8 @@ export interface RunAgentCliDependencies {
   mcpManager?: McpConnectionManager;
   /** 宿主本轮运行的中止信号。 */
   signal?: AbortSignal;
+  /** @internal 继续已存在的未完成轮次，不新增 user 消息或 rewind point。 */
+  resumeExistingSession?: boolean;
 }
 
 export async function runAgentFromCli(
@@ -167,7 +170,8 @@ export async function runAgentFromCli(
   dependencies: RunAgentCliDependencies = {},
 ): Promise<RunAgentCliResult> {
   dependencies.signal?.throwIfAborted();
-  const prompt = normalizePrompt(options.prompt);
+  const resumeExistingSession = dependencies.resumeExistingSession === true;
+  const prompt = resumeExistingSession ? options.prompt : normalizePrompt(options.prompt);
   const kind = options.provider ?? "openai";
   const workDir = await resolveWorkDir(options.dir);
   const picoConfig = await loadPicoConfig(workDir);
@@ -218,8 +222,20 @@ export async function runAgentFromCli(
     dependencies.env ?? process.env,
     dependencies.provider !== undefined,
   );
-  const session = await globalSessionManager.getOrCreate(sessionSelection.sessionId, workDir);
-  if (sessionSelection.mode === "fork" && sessionSelection.sourceSessionId) {
+  const session = resumeExistingSession
+    ? globalSessionManager.get(sessionSelection.sessionId, workDir)
+    : await globalSessionManager.getOrCreate(sessionSelection.sessionId, workDir);
+  if (!session) {
+    throw new Error(`Cannot resume missing session: ${sessionSelection.sessionId}`);
+  }
+  if (resumeExistingSession && dependencies.runtimeState === undefined) {
+    throw new Error("resumeExistingSession requires an existing runtimeState.");
+  }
+  if (
+    !resumeExistingSession &&
+    sessionSelection.mode === "fork" &&
+    sessionSelection.sourceSessionId
+  ) {
     await seedForkedSession(session, sessionSelection.sourceSessionId, workDir);
   }
   const ownsRuntimeState = dependencies.runtimeState === undefined;
@@ -245,42 +261,32 @@ export async function runAgentFromCli(
   // 单 key / 注入 provider 时跳过(向后兼容)。pool 注入点集中在此,便于追踪 currentKey。
   const credentialPool = options.apiKey === undefined ? getCredentialPool() : undefined;
   let currentConfig: ProviderConfig = providerConfig;
-  let rebuildProvider: (() => LLMProvider | undefined) | undefined;
   if (credentialPool && credentialPool.size > 1 && dependencies.provider === undefined) {
     currentConfig = { ...providerConfig, apiKey: credentialPool.getNext() };
   }
-  const trackedProvider =
-    dependencies.provider !== undefined
-      ? new CostTracker(dependencies.provider, trackingRoute(kind, providerConfig), session)
-      : effectiveOptions.allowModelFallback === false
-        ? new CostTracker(
-            (dependencies.providerFactory ?? createRawProvider)(kind, currentConfig),
-            trackingRoute(kind, currentConfig),
-            session,
-          )
-        : createTrackedProviderWithFallback(
-            kind,
-            currentConfig,
-            dependencies.providerFactory ?? createRawProvider,
-            session,
-          );
-  if (credentialPool && credentialPool.size > 1 && dependencies.provider === undefined) {
-    rebuildProvider = (): LLMProvider | undefined => {
-      // 标记当前 key 限流 → 取下一个可用 key → 重建整条包装链
-      credentialPool.markRateLimited(currentConfig.apiKey);
-      const nextKey = credentialPool.getNextAvailable();
-      if (!nextKey || nextKey === currentConfig.apiKey) {
-        // 轮换无可用 key(所有 key cooling)→ 交给 retry 层指数退避
-        return undefined;
-      }
-      currentConfig = { ...currentConfig, apiKey: nextKey };
-      return createTrackedProviderWithFallback(
-        kind,
-        currentConfig,
-        dependencies.providerFactory ?? createRawProvider,
-        session,
-      );
-    };
+  const providerFactory = dependencies.providerFactory ?? createRawProvider;
+  const buildTrackedProvider = (config: ProviderConfig): LLMProvider =>
+    effectiveOptions.allowModelFallback === false
+      ? new CostTracker(providerFactory(kind, config), trackingRoute(kind, config), session)
+      : createTrackedProviderWithFallback(kind, config, providerFactory, session);
+  let trackedProvider: LLMProvider;
+  let rebuildProvider: (() => LLMProvider | undefined) | undefined;
+  if (dependencies.provider !== undefined) {
+    trackedProvider = new CostTracker(
+      dependencies.provider,
+      trackingRoute(kind, providerConfig),
+      session,
+    );
+  } else if (credentialPool && credentialPool.size > 1) {
+    const rotation = new CredentialRotationCoordinator(
+      credentialPool,
+      currentConfig,
+      buildTrackedProvider,
+    );
+    trackedProvider = rotation.provider;
+    rebuildProvider = () => rotation.rotate();
+  } else {
+    trackedProvider = buildTrackedProvider(currentConfig);
   }
   const { goalManager, todoStore, toolDisclosure, backgroundManager, delegationManager } =
     runtimeState;
@@ -416,23 +422,27 @@ export async function runAgentFromCli(
   try {
     return await session.serialize(async () => {
       dependencies.signal?.throwIfAborted();
-      const images: ImagePart[] | undefined =
-        effectiveOptions.images ??
-        (effectiveOptions.imagePath ? [loadImage(effectiveOptions.imagePath, workDir)] : undefined);
-      await session.beginRewindPoint({
-        userPrompt: effectiveOptions.rewindPrompt ?? prompt,
-        ...(effectiveOptions.rewindTranscriptIndex !== undefined
-          ? { transcriptIndex: effectiveOptions.rewindTranscriptIndex }
-          : {}),
-        ...(effectiveOptions.rewindInteractionMode !== undefined
-          ? { interactionMode: effectiveOptions.rewindInteractionMode }
-          : {}),
-      });
-      session.append({
-        role: "user",
-        content: prompt,
-        ...(images ? { images } : {}),
-      });
+      if (!resumeExistingSession) {
+        const images: ImagePart[] | undefined =
+          effectiveOptions.images ??
+          (effectiveOptions.imagePath
+            ? [loadImage(effectiveOptions.imagePath, workDir)]
+            : undefined);
+        await session.beginRewindPoint({
+          userPrompt: effectiveOptions.rewindPrompt ?? prompt,
+          ...(effectiveOptions.rewindTranscriptIndex !== undefined
+            ? { transcriptIndex: effectiveOptions.rewindTranscriptIndex }
+            : {}),
+          ...(effectiveOptions.rewindInteractionMode !== undefined
+            ? { interactionMode: effectiveOptions.rewindInteractionMode }
+            : {}),
+        });
+        session.append({
+          role: "user",
+          content: prompt,
+          ...(images ? { images } : {}),
+        });
+      }
 
       const messages = await engine.run(session, undefined, undefined, dependencies.signal);
       const result: RunAgentCliResult = {
@@ -507,10 +517,11 @@ function createTrackedProviderWithFallback(
   );
 }
 
-class CostTrackedModelFallbackProvider implements LLMProvider {
-  private activeProvider: LLMProvider;
-  private activeModel: string;
-  private switched = false;
+/** @internal 保持计费路由的模型 fallback 包装器。 */
+export class CostTrackedModelFallbackProvider implements LLMProvider {
+  private readonly primaryProvider: LLMProvider;
+  private fallbackProvider: LLMProvider | undefined;
+  private fallbackSwitch: Promise<LLMProvider> | undefined;
 
   constructor(
     private readonly kind: ProviderKind,
@@ -519,8 +530,12 @@ class CostTrackedModelFallbackProvider implements LLMProvider {
     private readonly providerFactory: RunAgentProviderFactory,
     private readonly session: Session,
   ) {
-    this.activeModel = primaryConfig.model;
-    this.activeProvider = this.createTrackedProvider(primaryConfig);
+    this.primaryProvider = this.createTrackedProvider(primaryConfig);
+  }
+
+  get modelName(): string {
+    if (this.fallbackProvider || this.fallbackSwitch) return this.fallbackModel;
+    return this.primaryProvider.modelName ?? this.primaryConfig.model;
   }
 
   async generate(
@@ -528,21 +543,19 @@ class CostTrackedModelFallbackProvider implements LLMProvider {
     availableTools: ToolDefinition[],
     options?: LLMProviderRequestOptions,
   ): Promise<Message> {
+    const provider = await this.providerForRequest();
     try {
-      return await this.activeProvider.generate(messages, availableTools, options);
+      return await provider.generate(messages, availableTools, options);
     } catch (err) {
-      if (this.switched || !isModelUnavailableError(err, this.activeModel)) {
+      if (
+        provider !== this.primaryProvider ||
+        !isModelUnavailableError(err, this.primaryConfig.model)
+      ) {
         throw err;
       }
 
-      console.warn(`[Provider] ${this.activeModel} 不可用,自动切换到 ${this.fallbackModel}`);
-      this.activeModel = this.fallbackModel;
-      this.activeProvider = this.createTrackedProvider({
-        ...this.primaryConfig,
-        model: this.fallbackModel,
-      });
-      this.switched = true;
-      return this.activeProvider.generate(messages, availableTools, options);
+      const fallback = await this.switchToFallback();
+      return fallback.generate(messages, availableTools, options);
     }
   }
 
@@ -552,28 +565,54 @@ class CostTrackedModelFallbackProvider implements LLMProvider {
     onDelta: (delta: string) => void,
     options?: LLMProviderRequestOptions,
   ): Promise<Message> {
+    const provider = await this.providerForRequest();
     try {
-      if (this.activeProvider.generateStream) {
-        return await this.activeProvider.generateStream(messages, availableTools, onDelta, options);
-      }
-      return await this.activeProvider.generate(messages, availableTools, options);
+      return await this.generateFrom(provider, messages, availableTools, onDelta, options);
     } catch (err) {
-      if (this.switched || !isModelUnavailableError(err, this.activeModel)) {
+      if (
+        provider !== this.primaryProvider ||
+        !isModelUnavailableError(err, this.primaryConfig.model)
+      ) {
         throw err;
       }
 
-      console.warn(`[Provider] ${this.activeModel} 不可用,自动切换到 ${this.fallbackModel}`);
-      this.activeModel = this.fallbackModel;
-      this.activeProvider = this.createTrackedProvider({
-        ...this.primaryConfig,
-        model: this.fallbackModel,
-      });
-      this.switched = true;
-      if (this.activeProvider.generateStream) {
-        return this.activeProvider.generateStream(messages, availableTools, onDelta, options);
-      }
-      return this.activeProvider.generate(messages, availableTools, options);
+      const fallback = await this.switchToFallback();
+      return this.generateFrom(fallback, messages, availableTools, onDelta, options);
     }
+  }
+
+  private providerForRequest(): Promise<LLMProvider> {
+    if (this.fallbackSwitch) return this.fallbackSwitch;
+    return Promise.resolve(this.primaryProvider);
+  }
+
+  private switchToFallback(): Promise<LLMProvider> {
+    if (!this.fallbackSwitch) {
+      console.warn(
+        `[Provider] ${this.primaryConfig.model} 不可用,自动切换到 ${this.fallbackModel}`,
+      );
+      this.fallbackSwitch = Promise.resolve().then(() => {
+        const provider = this.createTrackedProvider({
+          ...this.primaryConfig,
+          model: this.fallbackModel,
+        });
+        this.fallbackProvider = provider;
+        return provider;
+      });
+    }
+    return this.fallbackSwitch;
+  }
+
+  private generateFrom(
+    provider: LLMProvider,
+    messages: Message[],
+    availableTools: ToolDefinition[],
+    onDelta: (delta: string) => void,
+    options?: LLMProviderRequestOptions,
+  ): Promise<Message> {
+    return provider.generateStream
+      ? provider.generateStream(messages, availableTools, onDelta, options)
+      : provider.generate(messages, availableTools, options);
   }
 
   private createTrackedProvider(config: ProviderConfig): LLMProvider {
@@ -620,13 +659,13 @@ function registerDelegationTools(
     ...(worktreeSupervisor ? { worktreeSupervisor } : {}),
     ...(profiles.length > 0 ? { profiles } : {}),
   });
-  registry.register(
-    new DelegateTaskTool(engine, registryFactory, manager, {
-      ...(profiles.length > 0 ? { profiles } : {}),
-      ...(worktreeSupervisor ? { worktreeSupervisor } : {}),
-      ...(reporter ? { reporter } : {}),
-    }),
-  );
+  const delegateTaskOptions = {
+    workDir,
+    ...(profiles.length > 0 ? { profiles } : {}),
+    ...(worktreeSupervisor ? { worktreeSupervisor } : {}),
+    ...(reporter ? { reporter } : {}),
+  };
+  registry.register(new DelegateTaskTool(engine, registryFactory, manager, delegateTaskOptions));
   registry.register(new DelegateStatusTool(manager));
   registry.register(
     new SpawnSubagentTool(
