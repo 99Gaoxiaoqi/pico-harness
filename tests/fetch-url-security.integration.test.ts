@@ -117,4 +117,65 @@ describe("fetch_url 安全边界集成", () => {
     }
     expect(requestMock).toHaveBeenCalledTimes(3);
   });
+
+  it("逐跳工具网络 allowlist 允许 A→B，并在 DNS 前阻断 A→C", async () => {
+    vi.mocked(lookup).mockResolvedValue([{ address: "8.8.8.8", family: 4 }]);
+    const requestedUrls: string[] = [];
+    const requestMock = vi.fn(async (url: URL) => {
+      requestedUrls.push(url.href);
+      if (url.href === "https://a.example/allowed") {
+        return new Response(null, {
+          status: 302,
+          headers: { location: "https://b.example/final" },
+        });
+      }
+      if (url.href === "https://a.example/blocked") {
+        return new Response(null, {
+          status: 302,
+          headers: { location: "https://c.example/secret" },
+        });
+      }
+      return new Response("allowed", {
+        status: 200,
+        headers: { "content-type": "text/plain" },
+      });
+    });
+    const allowedHosts = new Set(["a.example", "b.example"]);
+    const registry = new ToolRegistry();
+    registry.register(
+      new FetchURLTool({
+        request: requestMock,
+        authorizeUrl: (url) => {
+          if (!allowedHosts.has(url.hostname)) throw new Error(`工具网络拒绝 ${url.hostname}`);
+        },
+      }),
+    );
+
+    const allowed = await registry.execute({
+      id: "allow-a-to-b",
+      name: "fetch_url",
+      arguments: JSON.stringify({ url: "https://a.example/allowed" }),
+    });
+    expect(allowed).toMatchObject({ isError: false });
+    expect(requestedUrls).toEqual([
+      "https://a.example/allowed",
+      "https://b.example/final",
+    ]);
+
+    const blocked = await registry.execute({
+      id: "block-a-to-c",
+      name: "fetch_url",
+      arguments: JSON.stringify({ url: "https://a.example/blocked" }),
+    });
+    expect(blocked).toMatchObject({
+      isError: true,
+      output: expect.stringContaining("工具网络拒绝 c.example"),
+    });
+    expect(requestedUrls).toEqual([
+      "https://a.example/allowed",
+      "https://b.example/final",
+      "https://a.example/blocked",
+    ]);
+    expect(vi.mocked(lookup)).not.toHaveBeenCalledWith("c.example", expect.anything());
+  });
 });

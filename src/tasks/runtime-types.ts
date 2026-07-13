@@ -1,3 +1,5 @@
+import type { BackgroundYoloPolicySnapshotData } from "../safety/background-yolo-policy-schema.js";
+
 export const JOB_STATUSES = [
   "queued",
   "running",
@@ -204,17 +206,7 @@ export interface JobWithAttempts {
  * 后台 Job 在创建时冻结的安全边界。它是审计事实，不是可变的全局配置引用。
  * daemon 可在每次启动 Run 前额外用当前策略重新校验此快照。
  */
-export interface YoloPolicySnapshot {
-  mode: "yolo";
-  backgroundEnabled: true;
-  trustedWorkspace: true;
-  networkPolicy: "disabled" | "allowlist";
-  allowedNetworkHosts?: string[];
-  allowedTools: string[];
-  hardlineVersion: string;
-  hookVersion: string;
-  createdAt: number;
-}
+export type YoloPolicySnapshot = BackgroundYoloPolicySnapshotData;
 
 export const CRON_RUN_STATUSES = [
   "queued",

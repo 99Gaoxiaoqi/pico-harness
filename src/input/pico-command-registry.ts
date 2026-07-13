@@ -1227,7 +1227,8 @@ function createCronCommand(
   return {
     name: "cron",
     description: "Manage persistent YOLO cron jobs for this workspace",
-    usage: "/cron <status|list|add|enable|disable|delete|runs> [arguments]",
+    usage:
+      "/cron <status|list|add|enable|disable|delete|runs> [--tool-network=disabled|allowlist:host1,host2] [arguments]",
     argumentHint: "<status|list|add|enable|disable|delete|runs>",
     category: "workspace",
     kind: "local",
@@ -1247,7 +1248,7 @@ function createCronCommand(
           const jobs = cron.list(options.workDir);
           const daemon = await cronDaemonStatus(options);
           return cronMessage(
-            `本地账本：${jobs.length} 个 Cron Job（${jobs.filter((job) => job.enabled).length} 个已启用）。\n${daemon}`,
+            `本地账本：${jobs.length} 个 Cron Job（${jobs.filter((job) => job.enabled).length} 个已启用）。\n工具网络策略只约束 Agent 工具；模型 Provider 调用仍需联网。\n${daemon}`,
           );
         }
         if (operation === "list") return cronMessage(formatCronJobs(cron.list(options.workDir)));
@@ -1267,9 +1268,12 @@ function createCronCommand(
               "Cron jobs require /mode yolo; interactive permission modes cannot run unattended.",
             );
           }
-          if (args.length < 6)
-            return cronMessage("Usage: /cron add <minute> <hour> <day> <month> <weekday> <prompt>");
-          const [minute, hour, day, month, weekday, ...promptParts] = args;
+          const toolNetwork = parseCronToolNetwork(args);
+          if (toolNetwork.args.length < 6)
+            return cronMessage(
+              "Usage: /cron add [--tool-network=disabled|allowlist:host1,host2] <minute> <hour> <day> <month> <weekday> <prompt>",
+            );
+          const [minute, hour, day, month, weekday, ...promptParts] = toolNetwork.args;
           const job = cron.create({
             workspacePath: options.workDir,
             schedule: [minute, hour, day, month, weekday].join(" "),
@@ -1278,7 +1282,10 @@ function createCronCommand(
               mode: "yolo",
               backgroundEnabled: true,
               trustedWorkspace: true,
-              networkPolicy: "disabled",
+              toolNetworkPolicy: toolNetwork.policy,
+              ...(toolNetwork.allowedHosts
+                ? { allowedToolNetworkHosts: toolNetwork.allowedHosts }
+                : {}),
               allowedTools: settings.tools.map((tool) => tool.name),
               hardlineVersion: "builtin-v1",
               hookVersion: "workspace-v1",
@@ -1287,7 +1294,7 @@ function createCronCommand(
           });
           const daemon = await registerCronWorkspace(options, job.cronJobId);
           return cronMessage(
-            `Cron job created: ${job.cronJobId}\n${job.schedule} · ${job.timeZone}\n${daemon}`,
+            `Cron job created: ${job.cronJobId}\n${job.schedule} · ${job.timeZone}\n${formatToolNetworkPolicy(job.policySnapshot)}\n${daemon}`,
           );
         }
         const cronJobId = args[0];
@@ -1340,6 +1347,37 @@ function cronMessage(message: string): LocalCommandResult {
   return { type: "local", action: "message", message };
 }
 
+function parseCronToolNetwork(args: string[]): {
+  args: string[];
+  policy: "disabled" | "allowlist";
+  allowedHosts?: string[];
+} {
+  const option = args[0];
+  if (!option?.startsWith("--tool-network=")) {
+    return { args, policy: "disabled" };
+  }
+  const value = option.slice("--tool-network=".length);
+  if (value === "disabled") return { args: args.slice(1), policy: "disabled" };
+  if (value.startsWith("allowlist:")) {
+    return {
+      args: args.slice(1),
+      policy: "allowlist",
+      allowedHosts: value.slice("allowlist:".length).split(","),
+    };
+  }
+  throw new Error(
+    "工具网络策略必须是 disabled 或 allowlist:host1,host2；它不控制模型 Provider 网络。",
+  );
+}
+
+function formatToolNetworkPolicy(
+  policy: import("../tasks/runtime-types.js").YoloPolicySnapshot,
+): string {
+  return policy.toolNetworkPolicy === "disabled"
+    ? "工具网络：关闭（模型 Provider 网络不受此项控制）"
+    : `工具网络：仅允许 ${policy.allowedToolNetworkHosts?.join(", ") ?? "<invalid>"}（模型 Provider 网络不受此项控制）`;
+}
+
 function formatCronJobs(
   jobs: readonly import("../tasks/runtime-types.js").CronJobRecord[],
 ): string {
@@ -1347,7 +1385,7 @@ function formatCronJobs(
   return jobs
     .map(
       (job) =>
-        `${job.cronJobId} · ${job.enabled ? "enabled" : "disabled"} · ${job.schedule} · ${job.timeZone}\n  ${job.prompt}`,
+        `${job.cronJobId} · ${job.enabled ? "enabled" : "disabled"} · ${job.schedule} · ${job.timeZone}\n  ${formatToolNetworkPolicy(job.policySnapshot)}\n  ${job.prompt}`,
     )
     .join("\n");
 }

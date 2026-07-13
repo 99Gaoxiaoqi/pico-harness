@@ -4,6 +4,7 @@ import { join } from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import { CronService, matchesCron } from "../../src/tasks/cron-service.js";
+import type { YoloPolicySnapshot } from "../../src/tasks/runtime-types.js";
 
 describe("CronService durable ledger integration", () => {
   const directories: string[] = [];
@@ -130,6 +131,59 @@ describe("CronService durable ledger integration", () => {
     expect(() => matchesCron("@daily", Date.now(), "UTC")).toThrow(/五段/);
   });
 
+  it("写入时拒绝空或非法工具网络 allowlist，并规范化旧版策略字段", () => {
+    const workDir = makeTempDir(directories);
+    const service = new CronService({ workDir });
+    closeables.push(service);
+    const base = yoloPolicy(Date.now());
+
+    for (const allowedToolNetworkHosts of [[], ["*.example.com"]]) {
+      expect(() =>
+        service.create({
+          workspacePath: workDir,
+          schedule: "0 12 * * *",
+          timeZone: "UTC",
+          prompt: "must not persist",
+          policySnapshot: {
+            ...base,
+            toolNetworkPolicy: "allowlist",
+            allowedToolNetworkHosts,
+          },
+        }),
+      ).toThrow(/allowlist|hostname/);
+    }
+    expect(service.list()).toEqual([]);
+
+    const { toolNetworkPolicy: _toolNetworkPolicy, ...legacyBase } = base;
+    const legacyPolicy = {
+      ...legacyBase,
+      networkPolicy: "allowlist",
+      allowedNetworkHosts: ["EXAMPLE.COM."],
+    } as unknown as YoloPolicySnapshot;
+    const migrated = service.create({
+      workspacePath: workDir,
+      schedule: "0 12 * * *",
+      timeZone: "UTC",
+      prompt: "legacy policy",
+      policySnapshot: legacyPolicy,
+    });
+    expect(migrated.policySnapshot).toMatchObject({
+      toolNetworkPolicy: "allowlist",
+      allowedToolNetworkHosts: ["example.com"],
+    });
+    expect(migrated.policySnapshot).not.toHaveProperty("networkPolicy");
+
+    const raw = new Database(service.store.databasePath);
+    raw
+      .prepare("UPDATE cron_jobs SET policy_snapshot_json = ? WHERE cron_job_id = ?")
+      .run(JSON.stringify(legacyPolicy), migrated.cronJobId);
+    raw.close();
+    expect(service.store.getCronJob(migrated.cronJobId)?.policySnapshot).toMatchObject({
+      toolNetworkPolicy: "allowlist",
+      allowedToolNetworkHosts: ["example.com"],
+    });
+  });
+
   it("仅删除已禁用且没有运行中 Run 的 Cron Job", () => {
     const workDir = makeTempDir(directories);
     const now = Date.UTC(2026, 0, 1, 12, 0);
@@ -216,7 +270,7 @@ function yoloPolicy(createdAt: number) {
     mode: "yolo" as const,
     backgroundEnabled: true as const,
     trustedWorkspace: true as const,
-    networkPolicy: "disabled" as const,
+    toolNetworkPolicy: "disabled" as const,
     allowedTools: ["bash", "read_file", "write_file"],
     hardlineVersion: "hardline-v1",
     hookVersion: "hook-v1",

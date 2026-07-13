@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import Database from "better-sqlite3";
 import { quarantineCorruptJson } from "../storage/atomic-json.js";
+import { parseBackgroundYoloPolicySnapshot } from "../safety/background-yolo-policy-schema.js";
 import {
   JOB_COMPLETION_POLICIES,
   JOB_EXECUTION_CLASSES,
@@ -774,7 +775,7 @@ export class RuntimeStore {
   }
 
   createCronJob(input: CreateCronJobInput): CronJobRecord {
-    assertYoloPolicySnapshot(input.policySnapshot);
+    const policySnapshot = parseBackgroundYoloPolicySnapshot(input.policySnapshot);
     const now = this.now();
     this.db
       .prepare(
@@ -790,7 +791,7 @@ export class RuntimeStore {
         input.timeZone,
         input.prompt,
         input.enabled === false ? 0 : 1,
-        JSON.stringify(input.policySnapshot),
+        JSON.stringify(policySnapshot),
         now,
         now,
       );
@@ -2344,35 +2345,7 @@ function mapRuntimeEvent(row: RuntimeEventRow): RuntimeEventRecord {
 
 function parseYoloPolicySnapshot(value: string): YoloPolicySnapshot {
   const parsed = JSON.parse(value) as unknown;
-  assertYoloPolicySnapshot(parsed);
-  return parsed;
-}
-
-function assertYoloPolicySnapshot(value: unknown): asserts value is YoloPolicySnapshot {
-  if (!isRecord(value)) throw new Error("Cron Job 的 policySnapshot 必须是对象");
-  if (
-    value["mode"] !== "yolo" ||
-    value["backgroundEnabled"] !== true ||
-    value["trustedWorkspace"] !== true ||
-    (value["networkPolicy"] !== "disabled" && value["networkPolicy"] !== "allowlist") ||
-    !Array.isArray(value["allowedTools"]) ||
-    !value["allowedTools"].every((tool) => typeof tool === "string") ||
-    typeof value["hardlineVersion"] !== "string" ||
-    typeof value["hookVersion"] !== "string" ||
-    typeof value["createdAt"] !== "number"
-  ) {
-    throw new Error("Cron Job 仅支持可信工作区的 yolo background policySnapshot");
-  }
-  if (value["networkPolicy"] === "disabled" && value["allowedNetworkHosts"] !== undefined) {
-    throw new Error("networkPolicy=disabled 时不得声明 allowedNetworkHosts");
-  }
-  if (
-    value["networkPolicy"] === "allowlist" &&
-    (!Array.isArray(value["allowedNetworkHosts"]) ||
-      !value["allowedNetworkHosts"].every((host) => typeof host === "string"))
-  ) {
-    throw new Error("networkPolicy=allowlist 时必须提供 allowedNetworkHosts");
-  }
+  return parseBackgroundYoloPolicySnapshot(parsed);
 }
 
 function stringifyJson(value: Record<string, unknown> | undefined): string | null {
