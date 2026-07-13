@@ -11,6 +11,7 @@ import {
   type FileHandle,
 } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
+import { OperationReferenceIndex } from "./operation-reference-index.js";
 
 const SHA256_DIGEST_RE = /^[0-9a-f]{64}$/;
 const COPY_BUFFER_BYTES = 64 * 1024;
@@ -153,6 +154,12 @@ export class FileHistoryBlobStore {
       if (!isNodeError(error) || error.code !== "EEXIST") throw error;
       const existing = await readBlobFile(path, digest);
       assertBlobIntegrity(existing, digest, path, sizeBytes);
+    }
+
+    // 只有由当前协议首次创建的 blob 才获得 GC 资格。去重命中的 EEXIST
+    // 可能是升级前数据，不能因为被新代码重新 put 就改变代际身份。
+    if (created) {
+      await new OperationReferenceIndex(this.baseDir).markNewBlobGcEligible(digest);
     }
 
     return {
