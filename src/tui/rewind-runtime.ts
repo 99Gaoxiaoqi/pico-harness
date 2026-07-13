@@ -5,6 +5,7 @@ import type { TuiReporter } from "./tui-reporter.js";
 export interface TuiRewindResult {
   inputText?: string;
   interactionMode?: string;
+  prePlanMode?: string;
 }
 
 export interface TuiInputReplacement {
@@ -32,7 +33,7 @@ export async function applyTuiRewind(input: {
   reporter: TuiReporter;
   snapshot: FileHistorySnapshotSummary;
   mode: RewindMode;
-  onRestoreInteractionMode?: (mode: string) => void;
+  onRestoreInteractionMode?: (mode: string, prePlanMode?: string) => void;
 }): Promise<TuiRewindResult> {
   const { session, reporter, snapshot, mode } = input;
   if (mode === "code") {
@@ -60,12 +61,13 @@ export async function applyTuiRewind(input: {
 
   reporter.truncateTo(transcriptIndex);
   if (snapshot.interactionMode) {
-    input.onRestoreInteractionMode?.(snapshot.interactionMode);
+    input.onRestoreInteractionMode?.(snapshot.interactionMode, snapshot.prePlanMode);
   }
   reporter.pushSystemMessage(formatRewindSuccess(snapshot, mode));
   return {
     inputText: snapshot.userPrompt,
     ...(snapshot.interactionMode ? { interactionMode: snapshot.interactionMode } : {}),
+    ...(snapshot.prePlanMode ? { prePlanMode: snapshot.prePlanMode } : {}),
   };
 }
 
