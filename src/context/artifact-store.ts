@@ -1,8 +1,21 @@
 import { createHash, randomUUID } from "node:crypto";
-import { chmod, mkdir, open, readFile, readdir, rename, rmdir, unlink } from "node:fs/promises";
+import { constants } from "node:fs";
+import {
+  chmod,
+  copyFile,
+  link,
+  lstat,
+  mkdir,
+  open,
+  readFile,
+  readdir,
+  rename,
+  rmdir,
+  unlink,
+} from "node:fs/promises";
 // 用 pathe 替代 node:path:artifact 的 meta.path 会被持久化并跨平台对比,
 // 统一正斜杠后断言 .claw/artifacts/sessions/ / tool-results/ 才能稳定成立。
-import { join, resolve } from "pathe";
+import { dirname, join, resolve } from "pathe";
 import { writeJsonAtomic } from "../storage/atomic-json.js";
 
 const DEFAULT_TTL_HOURS = 168;
@@ -40,6 +53,17 @@ export class ArtifactIntegrityError extends Error {
   }
 }
 
+export class ArtifactCloneConflictError extends Error {
+  constructor(
+    readonly artifactId: string,
+    readonly targetSessionId: string,
+    message: string,
+  ) {
+    super(`Artifact ${artifactId} cannot be cloned to ${targetSessionId}: ${message}`);
+    this.name = "ArtifactCloneConflictError";
+  }
+}
+
 export interface ToolResultArtifactStoreOptions {
   baseDir: string;
   ttlHours?: number;
@@ -60,6 +84,21 @@ export interface WriteToolResultArtifactInput {
 export interface CleanupResult {
   deleted: string[];
   retained: string[];
+}
+
+export interface ArtifactCloneMapping {
+  sourceId: string;
+  sourcePath: string;
+  targetId: string;
+  targetPath: string;
+  targetMeta: ToolResultArtifactMeta;
+  created: boolean;
+}
+
+export interface ArtifactCloneSessionResult {
+  sourceSessionId: string;
+  targetSessionId: string;
+  mappings: ArtifactCloneMapping[];
 }
 
 interface StoredArtifact {
@@ -261,6 +300,122 @@ export class ToolResultArtifactStore {
     };
   }
 
+  /**
+   * 为 fork 发布独立的 artifact metadata commit marker。正文优先 hard-link，
+   * 失败时才复制并 fsync；两个 session 之后的 cleanup 互不影响。
+   */
+  async cloneSession(
+    sourceSessionId: string,
+    targetSessionId: string,
+  ): Promise<ArtifactCloneSessionResult> {
+    const sourceSafeSessionId = toSafeSessionId(sourceSessionId);
+    const targetSafeSessionId = toSafeSessionId(targetSessionId);
+    const sourceArtifactDir = this.sessionArtifactDir(sourceSafeSessionId);
+    const targetArtifactDir = this.sessionArtifactDir(targetSafeSessionId);
+    const entries = await readDirIfExists(sourceArtifactDir);
+    const metaEntries = entries
+      .filter((entry) => entry.endsWith(".json"))
+      .toSorted((left, right) => left.localeCompare(right));
+    const mappings: ArtifactCloneMapping[] = [];
+
+    for (const entry of metaEntries) {
+      const id = safeArtifactIdFromFilename(entry, ".json");
+      if (!id) {
+        throw new ArtifactIntegrityError(entry, "invalid committed metadata filename");
+      }
+      const sourceMetaPath = this.metaPath(id, sourceSafeSessionId);
+      const sourcePath = this.contentPath(id, sourceSafeSessionId);
+      const sourceMeta = await readCommittedMetaStrict(
+        sourceMetaPath,
+        sourceSafeSessionId,
+        sourceSessionId,
+        sourcePath,
+      );
+      const sourceBytes =
+        sourceMeta.availability === "available"
+          ? await readArtifactBytesStrict(sourceMeta, sourcePath)
+          : undefined;
+      const targetPath = this.contentPath(id, targetSafeSessionId);
+      const targetMetaPath = this.metaPath(id, targetSafeSessionId);
+      const targetMeta: ToolResultArtifactMeta = {
+        ...sourceMeta,
+        sessionId: targetSessionId,
+        safeSessionId: targetSafeSessionId,
+        path: targetPath,
+        ...(sourceBytes
+          ? {
+              sizeBytes: sourceBytes.byteLength,
+              contentHash: hashBytes(sourceBytes),
+            }
+          : {}),
+      };
+
+      if (sourceSessionId === targetSessionId) {
+        mappings.push({
+          sourceId: id,
+          sourcePath,
+          targetId: id,
+          targetPath,
+          targetMeta,
+          created: false,
+        });
+        continue;
+      }
+
+      const existingMeta = await readTargetMetaForClone(
+        targetMetaPath,
+        targetSafeSessionId,
+        targetSessionId,
+        targetPath,
+        id,
+      );
+      if (existingMeta) {
+        if (!artifactMetaEquals(existingMeta, targetMeta)) {
+          throw new ArtifactCloneConflictError(id, targetSessionId, "metadata differs");
+        }
+        if (existingMeta.availability === "available") {
+          await readArtifactBytesStrict(existingMeta, targetPath);
+        } else if (await pathExists(targetPath)) {
+          throw new ArtifactCloneConflictError(id, targetSessionId, "evicted target has content");
+        }
+        mappings.push({
+          sourceId: id,
+          sourcePath,
+          targetId: id,
+          targetPath,
+          targetMeta: existingMeta,
+          created: false,
+        });
+        continue;
+      }
+
+      await mkdir(targetArtifactDir, { recursive: true, mode: 0o700 });
+      await chmod(targetArtifactDir, 0o700);
+      if (sourceBytes) {
+        await publishClonedArtifactContent(
+          sourcePath,
+          targetPath,
+          sourceBytes,
+          id,
+          targetSessionId,
+        );
+      } else if (await pathExists(targetPath)) {
+        throw new ArtifactCloneConflictError(id, targetSessionId, "target content already exists");
+      }
+      await writeJsonAtomic(targetMetaPath, targetMeta);
+      mappings.push({
+        sourceId: id,
+        sourcePath,
+        targetId: id,
+        targetPath,
+        targetMeta,
+        created: true,
+      });
+    }
+
+    return { sourceSessionId, targetSessionId, mappings };
+  }
+
   private async listArtifacts(sessionId?: string): Promise<StoredArtifact[]> {
     const sessionIds = sessionId === undefined ? await this.listSessionIds() : [sessionId];
     const artifacts: StoredArtifact[] = [];
@@ -326,6 +481,192 @@ export class ToolResultArtifactStore {
   private sessionDir(sessionId: string): string {
     return join(this.sessionsDir, sessionId);
   }
+}
+
+async function readCommittedMetaStrict(
+  metaPath: string,
+  expectedSafeSessionId: string,
+  expectedSessionId: string,
+  expectedContentPath: string,
+): Promise<ToolResultArtifactMeta> {
+  let parsedValue: unknown;
+  try {
+    parsedValue = JSON.parse(await readFile(metaPath, "utf8")) as unknown;
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ENOENT") throw error;
+    throw new ArtifactIntegrityError(
+      metaPath,
+      `committed metadata is unreadable: ${errorMessage(error)}`,
+    );
+  }
+  if (!isRecord(parsedValue) || parsedValue.schemaVersion !== 2) {
+    throw new ArtifactIntegrityError(metaPath, "committed metadata is not schema v2");
+  }
+  const meta = parseMeta(JSON.stringify(parsedValue), expectedSafeSessionId);
+  if (!meta) throw new ArtifactIntegrityError(metaPath, "committed metadata is invalid");
+  if (
+    meta.sessionId !== expectedSessionId ||
+    meta.safeSessionId !== expectedSafeSessionId ||
+    resolve(meta.path) !== resolve(expectedContentPath)
+  ) {
+    throw new ArtifactIntegrityError(meta.id, "metadata ownership or content path does not match");
+  }
+  if (meta.availability === "available" && !meta.contentHash) {
+    throw new ArtifactIntegrityError(meta.id, "available schema v2 metadata has no contentHash");
+  }
+  return meta;
+}
+
+async function readTargetMetaForClone(
+  metaPath: string,
+  expectedSafeSessionId: string,
+  expectedSessionId: string,
+  expectedContentPath: string,
+  artifactId: string,
+): Promise<ToolResultArtifactMeta | undefined> {
+  try {
+    return await readCommittedMetaStrict(
+      metaPath,
+      expectedSafeSessionId,
+      expectedSessionId,
+      expectedContentPath,
+    );
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ENOENT") return undefined;
+    throw new ArtifactCloneConflictError(
+      artifactId,
+      expectedSessionId,
+      `committed metadata is invalid: ${errorMessage(error)}`,
+    );
+  }
+}
+
+async function readArtifactBytesStrict(
+  meta: ToolResultArtifactMeta,
+  contentPath: string,
+): Promise<Buffer> {
+  let metadata;
+  let contents: Buffer;
+  try {
+    metadata = await lstat(contentPath);
+    contents = await readFile(contentPath);
+  } catch (error) {
+    throw new ArtifactIntegrityError(meta.id, `content is unreadable: ${errorMessage(error)}`);
+  }
+  if (!metadata.isFile() || metadata.isSymbolicLink()) {
+    throw new ArtifactIntegrityError(meta.id, "content path is not a regular file");
+  }
+  const contentHash = hashBytes(contents);
+  if (contents.byteLength !== meta.sizeBytes) {
+    throw new ArtifactIntegrityError(
+      meta.id,
+      `expected ${meta.sizeBytes} bytes, found ${contents.byteLength}`,
+    );
+  }
+  if (meta.contentHash !== contentHash) {
+    throw new ArtifactIntegrityError(meta.id, `expected ${meta.contentHash}, found ${contentHash}`);
+  }
+  return contents;
+}
+
+async function publishClonedArtifactContent(
+  sourcePath: string,
+  targetPath: string,
+  contents: Buffer,
+  artifactId: string,
+  targetSessionId: string,
+): Promise<void> {
+  try {
+    await link(sourcePath, targetPath);
+    await syncArtifactDirectory(dirname(targetPath));
+    return;
+  } catch (error) {
+    if (isNodeError(error) && error.code === "EEXIST") {
+      await assertTargetArtifactContent(contents, targetPath, artifactId, targetSessionId);
+      return;
+    }
+    if (!isHardLinkFallbackError(error)) throw error;
+  }
+
+  try {
+    await copyFile(sourcePath, targetPath, constants.COPYFILE_EXCL);
+  } catch (error) {
+    if (!isNodeError(error) || error.code !== "EEXIST") throw error;
+    await assertTargetArtifactContent(contents, targetPath, artifactId, targetSessionId);
+    return;
+  }
+
+  try {
+    const handle = await open(targetPath, "r+");
+    try {
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await chmod(targetPath, 0o600);
+    await syncArtifactDirectory(dirname(targetPath));
+  } catch (error) {
+    await unlink(targetPath).catch(() => undefined);
+    throw error;
+  }
+}
+
+async function assertTargetArtifactContent(
+  expected: Buffer,
+  targetPath: string,
+  artifactId: string,
+  targetSessionId: string,
+): Promise<void> {
+  const actual = await readFile(targetPath);
+  if (actual.byteLength !== expected.byteLength || hashBytes(actual) !== hashBytes(expected)) {
+    throw new ArtifactCloneConflictError(artifactId, targetSessionId, "content differs");
+  }
+}
+
+function artifactMetaEquals(left: ToolResultArtifactMeta, right: ToolResultArtifactMeta): boolean {
+  return stableStringify(left) === stableStringify(right);
+}
+
+function hashBytes(contents: Uint8Array): string {
+  return createHash("sha256").update(contents).digest("hex");
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await lstat(path);
+    return true;
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+function isHardLinkFallbackError(error: unknown): boolean {
+  return (
+    isNodeError(error) &&
+    new Set(["EACCES", "EXDEV", "ENOSYS", "ENOTSUP", "EPERM"]).has(error.code ?? "")
+  );
+}
+
+async function syncArtifactDirectory(directory: string): Promise<void> {
+  let handle;
+  try {
+    handle = await open(directory, "r");
+    await handle.sync();
+  } catch (error) {
+    if (
+      !isNodeError(error) ||
+      !new Set(["EACCES", "EINVAL", "EISDIR", "ENOTSUP", "EPERM"]).has(error.code ?? "")
+    ) {
+      throw error;
+    }
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function generateId(): string {
