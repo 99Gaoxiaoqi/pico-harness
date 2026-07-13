@@ -62,6 +62,7 @@ import type { GoalManager } from "../engine/goal-manager.js";
 import type { ModelRuntimeCommandService } from "../provider/model-runtime-report.js";
 import type { TaskHostRuntime } from "../tasks/task-runtime.js";
 import { CronService } from "../tasks/cron-service.js";
+import type { CronDaemonBridge } from "./cron-daemon-bridge.js";
 import type { McpConnectionManager } from "../mcp/manager.js";
 import { CostTracker } from "../observability/tracker.js";
 import { ensureSessionUsageBaseline } from "../observability/usage-baseline.js";
@@ -112,6 +113,8 @@ export interface PicoCommandRegistryOptions {
   taskRuntime?: TaskHostRuntime;
   /** 可选的本机 Cron 账本；未注入时 /cron 明确说明不可用。 */
   cronService?: CronService;
+  /** TUI 通过它把启用的 Cron 工作区交给本机 Runtime daemon。 */
+  cronDaemonBridge?: CronDaemonBridge;
   /** TaskHostRuntime 不可用时的宿主诊断；TUI 仍可在非 Git 目录运行。 */
   taskRuntimeDiagnostic?: string;
   /** 可注入的只读存储诊断器；默认扫描当前 workspace 和全局 File History。 */
@@ -1229,7 +1232,7 @@ function createCronCommand(
     category: "workspace",
     kind: "local",
     availability: "idle",
-    execute: (input): LocalCommandResult => {
+    execute: async (input): Promise<LocalCommandResult> => {
       const cron = options.cronService;
       if (!cron) {
         return {
@@ -1268,7 +1271,8 @@ function createCronCommand(
               createdAt: Date.now(),
             },
           });
-          return cronMessage(`Cron job created: ${job.cronJobId}\n${job.schedule} · ${job.timeZone}`);
+          const daemon = await registerCronWorkspace(options, job.cronJobId);
+          return cronMessage(`Cron job created: ${job.cronJobId}\n${job.schedule} · ${job.timeZone}\n${daemon}`);
         }
         const cronJobId = args[0];
         if (!cronJobId) return cronMessage(`Usage: /cron ${operation} <job-id>`);
@@ -1276,7 +1280,10 @@ function createCronCommand(
         if (!job) return cronMessage(`Unknown cron job: ${cronJobId}`);
         if (operation === "enable" || operation === "disable") {
           const updated = cron.setEnabled(cronJobId, job.version, operation === "enable");
-          return cronMessage(`Cron job ${updated.cronJobId} ${updated.enabled ? "enabled" : "disabled"}.`);
+          const daemon = updated.enabled
+            ? `\n${await registerCronWorkspace(options, updated.cronJobId)}`
+            : "";
+          return cronMessage(`Cron job ${updated.cronJobId} ${updated.enabled ? "enabled" : "disabled"}.${daemon}`);
         }
         if (operation === "delete") {
           const deleted = cron.delete(cronJobId, job.version);
@@ -1288,6 +1295,13 @@ function createCronCommand(
       }
     },
   };
+}
+
+async function registerCronWorkspace(options: PicoCommandRegistryOptions, cronJobId: string): Promise<string> {
+  if (!options.cronDaemonBridge) {
+    return `本机 Runtime daemon 未配置；任务 ${cronJobId} 仅已写入账本，尚不会自动执行。`;
+  }
+  return (await options.cronDaemonBridge.registerWorkspace(options.workDir)).message;
 }
 
 function cronMessage(message: string): LocalCommandResult {

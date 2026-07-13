@@ -129,6 +129,7 @@ import { fileHistoryChanges, fileHistoryRestoreFile } from "../safety/file-histo
 import { createChangesDialogRequest, createChangesPanelModel } from "./changes-panel.js";
 import { TaskHostRuntime } from "../tasks/task-runtime.js";
 import { CronService } from "../tasks/cron-service.js";
+import { LocalCronDaemonBridge } from "../input/cron-daemon-bridge.js";
 
 export interface ReplOptions {
   /** 工作区 */
@@ -880,6 +881,8 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
       return undefined;
     }
   })();
+  // 只在用户创建或启用任务时短连接 daemon；TUI 不接管后台 Runtime 生命周期。
+  const cronDaemonBridge = new LocalCronDaemonBridge();
   let taskRuntimeDiagnostic: string | undefined;
   const taskHostRuntime = await TaskHostRuntime.create({ workDir: opts.workDir }).catch((error) => {
     taskRuntimeDiagnostic = error instanceof Error ? error.message : String(error);
@@ -1035,6 +1038,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         mcpControl: sharedMcpManager,
         ...(taskHostRuntime ? { taskRuntime: taskHostRuntime } : {}),
         ...(cronService ? { cronService } : {}),
+        ...(cronService ? { cronDaemonBridge } : {}),
         ...(taskRuntimeDiagnostic ? { taskRuntimeDiagnostic } : {}),
         additionalDirectories: settings.additionalDirectories,
         additionalDirectoryManager: workspaceRoots,
