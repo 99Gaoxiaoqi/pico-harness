@@ -12,7 +12,9 @@ import { FileSessionSummaryStore } from "../src/memory/summary-store.js";
 import { ContentAddressedBlobGarbageCollector } from "../src/storage/blob-garbage-collector.js";
 import { FileHistoryBlobStore } from "../src/storage/file-history-blob-store.js";
 import { withFileHistoryMutationLease } from "../src/storage/file-history-mutation-lease.js";
+import { StorageOperationJournal } from "../src/storage/operation-journal.js";
 import { LeaseConflictError } from "../src/storage/owner-lease.js";
+import { RewindOperationCoordinator } from "../src/storage/rewind-operation-coordinator.js";
 import {
   DEFAULT_STORAGE_RETENTION_POLICY,
   assertStorageRetentionPolicy,
@@ -178,6 +180,69 @@ describe("storage governance integration", () => {
     await expect(stat(unreachable.path)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  it("keeps blobs referenced by an unfinished operation in another workspace", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pico-storage-gc-global-operation-"));
+    cleanup.push(root);
+    const workDirA = join(root, "workspace-a");
+    const workDirB = join(root, "workspace-b");
+    const fileHistoryDir = join(root, "shared-file-history");
+    const blobs = new FileHistoryBlobStore({ baseDir: fileHistoryDir });
+    const workBOnlyBlob = await blobs.put("only unfinished work-b rewind references this");
+    await utimes(workBOnlyBlob.path, new Date(0), new Date(0));
+
+    const workBJournal = new StorageOperationJournal({ workDir: workDirB });
+    const workBCoordinator = new RewindOperationCoordinator({
+      journal: workBJournal,
+      blobStore: blobs,
+      callbacks: {
+        resolveRoot: () => workDirB,
+        applyWorkspace: async () => undefined,
+        commitSession: async () => {
+          throw new Error("leave work-b rewind unfinished");
+        },
+        commitSidecars: async () => undefined,
+      },
+    });
+    await expect(
+      workBCoordinator.execute({
+        kind: "rewind",
+        operationId: "work-b-unfinished-rewind",
+        sessionId: "work-b-session",
+        mode: "code",
+        precondition: {
+          sessionLastSeq: 3,
+          effectiveHistoryDigest: createHash("sha256").update("history").digest("hex"),
+          fileHistoryRevision: 1,
+        },
+        target: { messageId: "message-1", messageIndex: 0 },
+        files: [
+          {
+            rootId: "workspace",
+            relativePath: "src/work-b.ts",
+            before: { kind: "missing" },
+            after: {
+              kind: "file",
+              blobSha256: workBOnlyBlob.ref.digest,
+              sizeBytes: workBOnlyBlob.ref.sizeBytes,
+              mode: 0o644,
+            },
+          },
+        ],
+      }),
+    ).rejects.toThrow("leave work-b rewind unfinished");
+
+    const result = await new ContentAddressedBlobGarbageCollector({
+      workDir: workDirA,
+      baseDir: fileHistoryDir,
+      gracePeriodMs: 0,
+      now: () => 120_000,
+    }).run({ apply: true });
+
+    expect(result).toMatchObject({ blocked: false, candidatePaths: [], deletedPaths: [] });
+    expect(result.reachableDigests).toContain(workBOnlyBlob.ref.digest);
+    await expect(stat(workBOnlyBlob.path)).resolves.toBeDefined();
+  });
+
   it("serializes manifest publication with applied CAS collection while dry-run stays read-only", async () => {
     const root = await mkdtemp(join(tmpdir(), "pico-storage-gc-mutation-"));
     cleanup.push(root);
@@ -262,10 +327,13 @@ describe("storage governance integration", () => {
     await utimes(oldBlob.path, new Date(0), new Date(0));
     const manifestPath = join(fileHistoryDir, "unknown-session", "manifest.json");
     const operationPath = join(workDir, ".claw", "storage-operations", "broken.json");
+    const globalOperationPath = join(fileHistoryDir, ".operation-references", "broken.json");
     await mkdir(dirname(manifestPath), { recursive: true });
     await mkdir(dirname(operationPath), { recursive: true });
+    await mkdir(dirname(globalOperationPath), { recursive: true });
     await writeFile(manifestPath, "{broken", "utf8");
     await writeFile(operationPath, "{broken", "utf8");
+    await writeFile(globalOperationPath, "{broken", "utf8");
     const collector = new ContentAddressedBlobGarbageCollector({
       workDir,
       baseDir: fileHistoryDir,
@@ -281,6 +349,7 @@ describe("storage governance integration", () => {
       deletedPaths: [],
       blockedReasons: [
         expect.objectContaining({ component: "file_history", path: manifestPath }),
+        expect.objectContaining({ component: "operation", path: globalOperationPath }),
         expect.objectContaining({ component: "operation", path: operationPath }),
       ],
     });

@@ -2,6 +2,7 @@ import { lstat, readFile, readdir, stat, unlink } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import { createFileHistoryState, fileHistoryLoadState } from "../safety/file-history.js";
 import { withFileHistoryMutationLease } from "./file-history-mutation-lease.js";
+import { OperationReferenceIndex } from "./operation-reference-index.js";
 import type { OwnerLease } from "./owner-lease.js";
 import { StorageOperationJournal } from "./operation-journal.js";
 
@@ -176,6 +177,30 @@ export class ContentAddressedBlobGarbageCollector {
           path,
           message: errorMessage(error),
         });
+      }
+    }
+
+    const globalOperationReferences = await new OperationReferenceIndex(this.baseDir).scan();
+    for (const failure of globalOperationReferences.failures) {
+      blockedReasons.push({
+        component: "operation",
+        path: failure.path,
+        message: failure.message,
+      });
+    }
+    for (const operation of globalOperationReferences.entries) {
+      if (TERMINAL_OPERATION_STATES.has(operation.state)) continue;
+      for (const digest of operation.referencedDigests) reachable.add(digest);
+      if (operation.kind === "fork" && operation.stagingDirectory) {
+        try {
+          await collectReferencesFromTree(operation.stagingDirectory, reachable, true);
+        } catch (error) {
+          blockedReasons.push({
+            component: "operation",
+            path: operation.stagingDirectory,
+            message: errorMessage(error),
+          });
+        }
       }
     }
 
