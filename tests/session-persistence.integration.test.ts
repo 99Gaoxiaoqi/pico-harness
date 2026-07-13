@@ -13,7 +13,7 @@
 // 用 mkdtemp 隔离。
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AgentEngine } from "../src/engine/loop.js";
@@ -164,6 +164,74 @@ describe("Session 持久化端到端集成", () => {
     expect(allContents).toContain("继续聊"); // 本轮新输入也在
   });
 
+  it("v3 规范事件与 legacy 记录混合时，Session 和会话列表使用同一重放结果", async () => {
+    const sessionId = "mixed-journal";
+    const sessionsDir = join(workDir, ".claw", "sessions");
+    await mkdir(sessionsDir, { recursive: true });
+    const summaryMessage: Message = {
+      role: "assistant",
+      content: "历史摘要",
+      providerData: { picoKind: "compaction_summary" },
+    };
+    const records = [
+      { type: "message", seq: 0, message: { role: "user", content: "legacy-old" } },
+      {
+        type: "event",
+        recordVersion: 1,
+        eventId: "seed-1",
+        seq: 1,
+        epoch: 0,
+        at: "2026-07-13T00:00:00.000Z",
+        kind: "session.seeded",
+        data: {
+          messages: [
+            { role: "user", content: "seed" },
+            { role: "assistant", content: "seed reply" },
+          ],
+        },
+      },
+      {
+        type: "event",
+        recordVersion: 1,
+        eventId: "compact-1",
+        seq: 2,
+        epoch: 1,
+        at: "2026-07-13T00:00:01.000Z",
+        kind: "history.compacted",
+        data: {
+          summaryMessage,
+          retainedMessages: [{ role: "user", content: "retained prompt" }],
+        },
+      },
+      { type: "message", seq: 3, message: { role: "user", content: "remove me" } },
+      { type: "undo", seq: 4, count: 1, at: "2026-07-13T00:00:02.000Z" },
+    ];
+    await writeFile(
+      join(sessionsDir, `${sessionId}.jsonl`),
+      `${records.map((record) => JSON.stringify(record)).join("\n")}\n`,
+      "utf8",
+    );
+
+    const manager = new SessionManager();
+    const session = await manager.getOrCreate(sessionId, workDir, ON);
+    const summaries = await listCliSessionSummaries(workDir);
+
+    expect(session.getHistory()).toEqual([
+      summaryMessage,
+      { role: "user", content: "retained prompt" },
+    ]);
+    expect(summaries).toMatchObject([
+      {
+        id: sessionId,
+        messageCount: 2,
+        title: "retained prompt",
+        firstMessage: "retained prompt",
+        lastMessage: "retained prompt",
+      },
+    ]);
+    await session.close();
+  });
+
   it("多会话隔离:两个会话各自落盘各自恢复,引擎不会串台", async () => {
     const mgr1 = new SessionManager();
     const sA = await mgr1.getOrCreate("chat-A", workDir, ON);
@@ -245,12 +313,7 @@ describe("Session 持久化端到端集成", () => {
             baseURL: "https://example.invalid/v1",
             apiKeyEnv: "TEST_API_KEY",
             discoverModels: false,
-            models: [
-              "deepseek-v4-pro-260425",
-              "fixed-model",
-              "unknown-model",
-              "disabled-model",
-            ],
+            models: ["deepseek-v4-pro-260425", "fixed-model", "unknown-model", "disabled-model"],
             modelCapabilities: {
               "fixed-model": { reasoning: true },
               "disabled-model": { reasoning: false },
