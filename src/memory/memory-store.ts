@@ -34,6 +34,13 @@ export interface MemorySearchResult {
   relevance: number;
 }
 
+export interface ConversationProjectionCursor {
+  logId: string;
+  seq: number;
+  epoch: number;
+  eventId: string;
+}
+
 /**
  * Search index contract; persistence remains owned by SQLite or Session JSONL.
  * Results are ordered by descending relevance and limit is clamped to 1..100.
@@ -44,6 +51,19 @@ export interface ConversationSearchStore {
   readonly status: MemoryBackendStatus;
   insert(sessionId: string, turnIndex: number, message: Message): void;
   replaceSession(sessionId: string, messages: readonly Message[]): void;
+  /** JSONL durable commit 之后的原子投影；索引与 cursor 同一事务。 */
+  projectInsert?(
+    sessionId: string,
+    turnIndex: number,
+    message: Message,
+    cursor: ConversationProjectionCursor,
+  ): void;
+  projectReplace?(
+    sessionId: string,
+    messages: readonly Message[],
+    cursor: ConversationProjectionCursor,
+  ): void;
+  getProjectionCursor?(sessionId: string): ConversationProjectionCursor | undefined;
   search(query: string, limit?: number, sessionId?: string): MemorySearchResult[];
   close(): void;
 }

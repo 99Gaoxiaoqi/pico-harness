@@ -67,7 +67,7 @@ export function createDelegationCompletionMessage(
 }
 
 export interface DelegationCompletionWakeQueueOptions {
-  deliver: (completion: DelegationCompletionEnvelope) => void;
+  deliver: (completion: DelegationCompletionEnvelope) => void | Promise<void>;
 }
 
 /**
@@ -111,14 +111,14 @@ export class DelegationCompletionWakeQueue {
    * 拿到 TUI 空闲执行权后才把对应 completion 写入 Session。
    * 先 deliver 再删除：若 Session 写入失败，未写入项仍可在下一次空闲边界重试。
    */
-  deliverPendingCompletionSeqs(
+  async deliverPendingCompletionSeqs(
     sequences: readonly number[],
-  ): readonly DelegationCompletionEnvelope[] {
+  ): Promise<readonly DelegationCompletionEnvelope[]> {
     const delivered: DelegationCompletionEnvelope[] = [];
     for (const sequence of sequences) {
       const completion = this.pendingCompletions.get(sequence);
       if (!completion) continue;
-      this.deliver(completion);
+      await this.deliver(completion);
       this.pendingCompletions.delete(sequence);
       delivered.push(completion);
     }
@@ -147,7 +147,7 @@ export interface DelegationWakeCoordinatorOptions {
   isIdle: () => boolean;
   resume: (
     completionSeqs: readonly number[],
-    deliverCompletions: () => readonly DelegationCompletionEnvelope[],
+    deliverCompletions: () => Promise<readonly DelegationCompletionEnvelope[]>,
   ) => Promise<void>;
   onError?: (error: unknown) => void;
   schedule?: (callback: () => void) => void;
@@ -193,8 +193,10 @@ export class DelegationWakeCoordinator {
     this.running = true;
     let deliveredCompletions: readonly DelegationCompletionEnvelope[] | undefined;
     try {
-      await this.options.resume(completionSeqs, () => {
-        deliveredCompletions ??= this.options.queue.deliverPendingCompletionSeqs(completionSeqs);
+      await this.options.resume(completionSeqs, async () => {
+        if (deliveredCompletions) return deliveredCompletions;
+        deliveredCompletions =
+          await this.options.queue.deliverPendingCompletionSeqs(completionSeqs);
         return deliveredCompletions;
       });
     } catch (error) {
@@ -249,7 +251,8 @@ export async function createTuiRuntimeState(
 
   const steerQueue = new SteerQueue();
   const delegationCompletionQueue = new DelegationCompletionWakeQueue({
-    deliver: (completion) => options.session.append(createDelegationCompletionMessage(completion)),
+    deliver: (completion) =>
+      options.session.commitMessages(createDelegationCompletionMessage(completion)),
   });
   return new DefaultTuiRuntimeState({
     workDir,
