@@ -7,7 +7,8 @@ import type { OwnerLease } from "./owner-lease.js";
 import { StorageOperationJournal } from "./operation-journal.js";
 
 const SHA256_RE = /^[a-f0-9]{64}$/u;
-const TERMINAL_OPERATION_STATES = new Set(["completed", "aborted", "needs_attention"]);
+// needs_attention 仍表示尚未被人工明确放弃或完成的 Saga，必须持续作为 GC root。
+const TERMINAL_OPERATION_STATES = new Set(["completed", "aborted"]);
 
 export interface BlobGarbageCollectorOptions {
   readonly workDir: string;
@@ -92,7 +93,11 @@ export class ContentAddressedBlobGarbageCollector {
     for (const path of blobPaths) {
       const digest = basename(path);
       const metadata = await stat(path);
-      if (reachable.has(digest) || this.now() - metadata.mtimeMs < this.gracePeriodMs) {
+      if (
+        !mark.gcEligible.has(digest) ||
+        reachable.has(digest) ||
+        this.now() - metadata.mtimeMs < this.gracePeriodMs
+      ) {
         retainedPaths.push(path);
         continue;
       }
@@ -116,6 +121,7 @@ export class ContentAddressedBlobGarbageCollector {
 
   private async collectReachableDigests(): Promise<{
     reachable: Set<string>;
+    gcEligible: Set<string>;
     blockedReasons: BlobGarbageCollectionBlock[];
   }> {
     const reachable = new Set<string>();
@@ -203,6 +209,7 @@ export class ContentAddressedBlobGarbageCollector {
         }
       }
     }
+    const gcEligible = new Set(globalOperationReferences.gcEligibleDigests);
 
     const defaultReferenceRoots = [
       join(this.workDir, ".claw", "memory", "summaries"),
@@ -211,7 +218,7 @@ export class ContentAddressedBlobGarbageCollector {
     for (const root of [...defaultReferenceRoots, ...this.additionalReferenceRoots]) {
       await collectReferencesFromTree(root, reachable, false);
     }
-    return { reachable, blockedReasons };
+    return { reachable, gcEligible, blockedReasons };
   }
 
   private async listBlobPaths(): Promise<string[]> {

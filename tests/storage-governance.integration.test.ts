@@ -11,7 +11,10 @@ import { createPicoCommandRegistry } from "../src/input/pico-command-registry.js
 import { processUserInput } from "../src/input/process-user-input.js";
 import { FileSessionSummaryStore } from "../src/memory/summary-store.js";
 import { ContentAddressedBlobGarbageCollector } from "../src/storage/blob-garbage-collector.js";
-import { FileHistoryBlobStore } from "../src/storage/file-history-blob-store.js";
+import {
+  FileHistoryBlobStore,
+  resolveFileHistoryBlobPath,
+} from "../src/storage/file-history-blob-store.js";
 import { withFileHistoryMutationLease } from "../src/storage/file-history-mutation-lease.js";
 import { StorageOperationJournal } from "../src/storage/operation-journal.js";
 import { LeaseConflictError } from "../src/storage/owner-lease.js";
@@ -275,6 +278,156 @@ describe("storage governance integration", () => {
     expect(result).toMatchObject({ blocked: false, candidatePaths: [], deletedPaths: [] });
     expect(result.reachableDigests).toContain(workBOnlyBlob.ref.digest);
     await expect(stat(workBOnlyBlob.path)).resolves.toBeDefined();
+  });
+
+  it("never sweeps an upgrade-era blob whose other-workspace operation predates the global index", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pico-storage-gc-legacy-operation-"));
+    cleanup.push(root);
+    const workDirA = join(root, "workspace-a");
+    const workDirB = join(root, "workspace-b");
+    const fileHistoryDir = join(root, "shared-file-history");
+    const contents = Buffer.from("legacy work-b operation is the only reference", "utf8");
+    const digest = createHash("sha256").update(contents).digest("hex");
+    const legacyBlobPath = resolveFileHistoryBlobPath(fileHistoryDir, digest);
+    await mkdir(dirname(legacyBlobPath), { recursive: true });
+    await writeFile(legacyBlobPath, contents);
+    await utimes(legacyBlobPath, new Date(0), new Date(0));
+    await expect(
+      new FileHistoryBlobStore({ baseDir: fileHistoryDir }).put(contents),
+    ).resolves.toMatchObject({
+      path: legacyBlobPath,
+      created: false,
+    });
+
+    // 直接落盘旧版本本地 journal：它位于另一 workspace，且升级前尚无
+    // .operation-references / protocol / eligibility marker。GC 不需要扫描该 workspace，
+    // 但也绝不能把“全局索引缺失”视为“没有引用”。
+    const legacyJournalPath = join(
+      workDirB,
+      ".claw",
+      "storage-operations",
+      "legacy-work-b-rewind.json",
+    );
+    await mkdir(dirname(legacyJournalPath), { recursive: true });
+    await writeFile(
+      legacyJournalPath,
+      `${JSON.stringify({
+        schemaVersion: 1,
+        operationId: "legacy-work-b-rewind",
+        version: 1,
+        state: "prepared",
+        sessionId: "legacy-session-b",
+        createdAt: "2026-07-12T00:00:00.000Z",
+        updatedAt: "2026-07-12T00:00:00.000Z",
+        kind: "rewind",
+        mode: "code",
+        precondition: {
+          sessionLastSeq: 1,
+          effectiveHistoryDigest: createHash("sha256").update("legacy").digest("hex"),
+          fileHistoryRevision: 1,
+        },
+        target: { messageId: "legacy-message", messageIndex: 0 },
+        files: [
+          {
+            rootId: "workspace",
+            relativePath: "src/legacy.ts",
+            before: { kind: "missing" },
+            after: {
+              kind: "file",
+              blobSha256: digest,
+              sizeBytes: contents.byteLength,
+              mode: 0o644,
+            },
+          },
+        ],
+      })}\n`,
+      "utf8",
+    );
+
+    const result = await new ContentAddressedBlobGarbageCollector({
+      workDir: workDirA,
+      baseDir: fileHistoryDir,
+      gracePeriodMs: 0,
+      now: () => 120_000,
+    }).run({ apply: true });
+
+    expect(result).toMatchObject({
+      blocked: false,
+      candidatePaths: [],
+      deletedPaths: [],
+      retainedPaths: [legacyBlobPath],
+    });
+    expect(result.reachableDigests).not.toContain(digest);
+    await expect(stat(legacyBlobPath)).resolves.toBeDefined();
+  });
+
+  it("keeps a needs_attention rewind as a global GC root across workspaces", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pico-storage-gc-needs-attention-"));
+    cleanup.push(root);
+    const workDirA = join(root, "workspace-a");
+    const workDirB = join(root, "workspace-b");
+    const fileHistoryDir = join(root, "shared-file-history");
+    const targetPath = join(workDirB, "src", "conflict.ts");
+    await mkdir(dirname(targetPath), { recursive: true });
+    await writeFile(targetPath, "external edit\n", { mode: 0o644 });
+
+    const blobs = new FileHistoryBlobStore({ baseDir: fileHistoryDir });
+    const preimage = await blobs.put("rewind preimage\n");
+    const journal = new StorageOperationJournal({ workDir: workDirB });
+    const coordinator = new RewindOperationCoordinator({
+      journal,
+      blobStore: blobs,
+      callbacks: {
+        resolveRoot: (rootId) => (rootId === "workspace" ? workDirB : undefined),
+        applyWorkspace: async () => {
+          throw new Error("conflict preflight must not apply workspace changes");
+        },
+        commitSession: async () => {
+          throw new Error("conflict preflight must not commit the session");
+        },
+        commitSidecars: async () => {
+          throw new Error("conflict preflight must not commit sidecars");
+        },
+      },
+    });
+    const operation = await coordinator.execute({
+      kind: "rewind",
+      operationId: "work-b-needs-attention",
+      sessionId: "work-b-session",
+      mode: "code",
+      precondition: {
+        sessionLastSeq: 2,
+        effectiveHistoryDigest: createHash("sha256").update("history").digest("hex"),
+        fileHistoryRevision: 1,
+      },
+      target: { messageId: "message-1", messageIndex: 0 },
+      files: [
+        {
+          rootId: "workspace",
+          relativePath: "src/conflict.ts",
+          before: {
+            kind: "file",
+            blobSha256: preimage.ref.digest,
+            sizeBytes: preimage.ref.sizeBytes,
+            mode: 0o644,
+          },
+          after: { kind: "missing" },
+        },
+      ],
+    });
+    expect(operation.state).toBe("needs_attention");
+    await utimes(preimage.path, new Date(0), new Date(0));
+
+    const result = await new ContentAddressedBlobGarbageCollector({
+      workDir: workDirA,
+      baseDir: fileHistoryDir,
+      gracePeriodMs: 0,
+      now: () => 120_000,
+    }).run({ apply: true });
+
+    expect(result).toMatchObject({ blocked: false, candidatePaths: [], deletedPaths: [] });
+    expect(result.reachableDigests).toContain(preimage.ref.digest);
+    await expect(stat(preimage.path)).resolves.toBeDefined();
   });
 
   it("serializes manifest publication with applied CAS collection while dry-run stays read-only", async () => {

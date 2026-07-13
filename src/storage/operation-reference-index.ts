@@ -1,14 +1,31 @@
-import { createHash } from "node:crypto";
-import { readFile, readdir } from "node:fs/promises";
-import { isAbsolute, join, resolve } from "node:path";
+import { createHash, randomUUID } from "node:crypto";
+import { constants, type Dirent } from "node:fs";
+import {
+  chmod,
+  link,
+  lstat,
+  mkdir,
+  open,
+  readFile,
+  readdir,
+  unlink,
+  type FileHandle,
+} from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { writeJsonAtomic } from "./atomic-json.js";
 import type { StorageOperation, StorageOperationState } from "./operation-journal.js";
 
-const OPERATION_REFERENCE_INDEX_VERSION = 1 as const;
+const LEGACY_OPERATION_REFERENCE_INDEX_VERSION = 1 as const;
+const OPERATION_REFERENCE_INDEX_VERSION = 2 as const;
+const GC_PROTOCOL_VERSION = 1 as const;
+const GC_ELIGIBILITY_VERSION = 1 as const;
+const GC_PROTOCOL_ID = "pico-cas-gc-operation-index" as const;
+const GC_PROTOCOL_FILE_NAME = "gc-protocol.json";
+const GC_ELIGIBILITY_DIRECTORY_NAME = "gc-eligible-blobs";
 const SHA256_RE = /^[a-f0-9]{64}$/u;
+const SHA256_PREFIX_RE = /^[a-f0-9]{2}$/u;
 
-export interface OperationReferenceIndexEntry {
-  readonly schemaVersion: typeof OPERATION_REFERENCE_INDEX_VERSION;
+interface OperationReferenceIndexEntryBase {
   readonly journalDirectory: string;
   readonly operationId: string;
   readonly operationVersion: number;
@@ -19,6 +36,32 @@ export interface OperationReferenceIndexEntry {
   readonly updatedAt: string;
 }
 
+export type OperationReferenceIndexEntry = OperationReferenceIndexEntryBase &
+  (
+    | {
+        readonly schemaVersion: typeof LEGACY_OPERATION_REFERENCE_INDEX_VERSION;
+      }
+    | {
+        readonly schemaVersion: typeof OPERATION_REFERENCE_INDEX_VERSION;
+        readonly protocolGeneration: string;
+      }
+  );
+
+interface GcProtocolMetadata {
+  readonly schemaVersion: typeof GC_PROTOCOL_VERSION;
+  readonly protocol: typeof GC_PROTOCOL_ID;
+  readonly generation: string;
+  readonly initializedAt: string;
+}
+
+interface BlobGcEligibilityMarker {
+  readonly schemaVersion: typeof GC_ELIGIBILITY_VERSION;
+  readonly protocolGeneration: string;
+  readonly algorithm: "sha256";
+  readonly digest: string;
+  readonly createdAt: string;
+}
+
 export interface OperationReferenceIndexFailure {
   readonly path: string;
   readonly message: string;
@@ -26,24 +69,32 @@ export interface OperationReferenceIndexFailure {
 
 export interface OperationReferenceIndexScan {
   readonly entries: readonly OperationReferenceIndexEntry[];
+  /** 只有同代、完整可解析的 marker 才会出现在此集合中。 */
+  readonly gcEligibleDigests: readonly string[];
   readonly failures: readonly OperationReferenceIndexFailure[];
 }
 
 /**
- * 共享 CAS 的全局 operation roots。每个 workspace 仍保留本地 journal，
- * 但 GC 只需扫描这个有界索引，无需发现或遍历其他 workspace。
+ * 共享 CAS 的全局 operation roots 与 GC 代际证明。所有扫描都限定在
+ * baseDir/.operation-references 内，不通过 workspace 或用户目录反向发现引用。
  */
 export class OperationReferenceIndex {
   readonly directory: string;
+  private readonly protocolPath: string;
+  private readonly eligibilityDirectory: string;
 
   constructor(baseDir: string) {
     this.directory = join(resolve(baseDir), ".operation-references");
+    this.protocolPath = join(this.directory, GC_PROTOCOL_FILE_NAME);
+    this.eligibilityDirectory = join(this.directory, GC_ELIGIBILITY_DIRECTORY_NAME);
   }
 
   async upsert(journalDirectory: string, operation: StorageOperation): Promise<void> {
+    const protocol = await this.ensureProtocol();
     const normalizedJournalDirectory = resolve(journalDirectory);
     const entry = {
       schemaVersion: OPERATION_REFERENCE_INDEX_VERSION,
+      protocolGeneration: protocol.generation,
       journalDirectory: normalizedJournalDirectory,
       operationId: operation.operationId,
       operationVersion: operation.version,
@@ -56,23 +107,69 @@ export class OperationReferenceIndex {
     await writeJsonAtomic(this.entryPath(normalizedJournalDirectory, operation.operationId), entry);
   }
 
+  /**
+   * 仅新建的 blob 可调用。EEXIST 的旧 blob 不得补 marker，否则会把
+   * 无法证明已纳入新索引协议的升级数据误当成可回收数据。
+   */
+  async markNewBlobGcEligible(digest: string): Promise<void> {
+    assertSha256Digest(digest);
+    const protocol = await this.ensureProtocol();
+    const marker = {
+      schemaVersion: GC_ELIGIBILITY_VERSION,
+      protocolGeneration: protocol.generation,
+      algorithm: "sha256",
+      digest,
+      createdAt: new Date().toISOString(),
+    } satisfies BlobGcEligibilityMarker;
+    const path = this.eligibilityMarkerPath(digest);
+    if (await writeJsonExclusiveAtomic(path, marker)) return;
+
+    const existing = parseBlobGcEligibilityMarker(await readRegularJson(path));
+    if (
+      !existing ||
+      existing.digest !== digest ||
+      existing.protocolGeneration !== protocol.generation
+    ) {
+      throw new Error(`Conflicting or malformed blob GC eligibility marker: ${path}`);
+    }
+  }
+
   async scan(): Promise<OperationReferenceIndexScan> {
-    let names: string[];
+    let directoryEntries: Dirent[];
     try {
-      names = await readdir(this.directory);
+      const metadata = await lstat(this.directory);
+      if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+        throw new Error("global operation reference index is not a regular directory");
+      }
+      directoryEntries = await readdir(this.directory, { withFileTypes: true });
     } catch (error) {
-      if (isNodeCode(error, "ENOENT")) return { entries: [], failures: [] };
-      throw error;
+      if (isNodeCode(error, "ENOENT")) {
+        return { entries: [], gcEligibleDigests: [], failures: [] };
+      }
+      return {
+        entries: [],
+        gcEligibleDigests: [],
+        failures: [{ path: this.directory, message: errorMessage(error) }],
+      };
     }
 
     const entries: OperationReferenceIndexEntry[] = [];
     const failures: OperationReferenceIndexFailure[] = [];
-    for (const name of names.toSorted()) {
-      if (!name.endsWith(".json")) continue;
+    const protocolEntry = directoryEntries.find((entry) => entry.name === GC_PROTOCOL_FILE_NAME);
+    const protocol = await this.readProtocolForScan(protocolEntry, failures);
+    for (const directoryEntry of directoryEntries.toSorted((left, right) =>
+      left.name.localeCompare(right.name),
+    )) {
+      const name = directoryEntry.name;
+      if (name === GC_PROTOCOL_FILE_NAME || !name.endsWith(".json")) continue;
       const path = join(this.directory, name);
       try {
+        if (!directoryEntry.isFile()) {
+          throw new Error("global operation reference entry is not a regular file");
+        }
         const entry = parseOperationReferenceIndexEntry(
-          JSON.parse(await readFile(path, "utf8")) as unknown,
+          await readRegularJson(path),
+          protocol?.generation,
         );
         if (!entry) throw new Error("malformed global operation reference entry");
         if (name !== this.entryName(entry.journalDirectory, entry.operationId)) {
@@ -83,7 +180,163 @@ export class OperationReferenceIndex {
         failures.push({ path, message: errorMessage(error) });
       }
     }
-    return { entries, failures };
+
+    const eligibilityEntry = directoryEntries.find(
+      (entry) => entry.name === GC_ELIGIBILITY_DIRECTORY_NAME,
+    );
+    const gcEligibleDigests = await this.scanEligibilityMarkers(
+      eligibilityEntry,
+      protocol,
+      failures,
+    );
+    return {
+      entries,
+      gcEligibleDigests: [...gcEligibleDigests].toSorted(),
+      failures,
+    };
+  }
+
+  private async ensureProtocol(): Promise<GcProtocolMetadata> {
+    await assertRegularDirectoryIfExists(this.directory);
+    try {
+      return await this.readProtocolRequired();
+    } catch (error) {
+      if (!isNodeCode(error, "ENOENT")) throw error;
+    }
+
+    await this.assertSafeToInitializeProtocol();
+    const candidate = {
+      schemaVersion: GC_PROTOCOL_VERSION,
+      protocol: GC_PROTOCOL_ID,
+      generation: randomUUID(),
+      initializedAt: new Date().toISOString(),
+    } satisfies GcProtocolMetadata;
+    if (await writeJsonExclusiveAtomic(this.protocolPath, candidate)) return candidate;
+    return this.readProtocolRequired();
+  }
+
+  private async readProtocolRequired(): Promise<GcProtocolMetadata> {
+    const protocol = parseGcProtocolMetadata(await readRegularJson(this.protocolPath));
+    if (!protocol) throw new Error(`Malformed CAS GC protocol metadata: ${this.protocolPath}`);
+    return protocol;
+  }
+
+  private async readProtocolForScan(
+    entry: Dirent | undefined,
+    failures: OperationReferenceIndexFailure[],
+  ): Promise<GcProtocolMetadata | undefined> {
+    if (!entry) return undefined;
+    try {
+      if (!entry.isFile()) throw new Error("CAS GC protocol metadata is not a regular file");
+      return await this.readProtocolRequired();
+    } catch (error) {
+      failures.push({ path: this.protocolPath, message: errorMessage(error) });
+      return undefined;
+    }
+  }
+
+  private async assertSafeToInitializeProtocol(): Promise<void> {
+    let entries: Dirent[];
+    try {
+      const metadata = await lstat(this.directory);
+      if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+        throw new Error("global operation reference index is not a regular directory");
+      }
+      entries = await readdir(this.directory, { withFileTypes: true });
+    } catch (error) {
+      if (isNodeCode(error, "ENOENT")) return;
+      throw error;
+    }
+
+    for (const entry of entries) {
+      if (entry.name === GC_PROTOCOL_FILE_NAME) {
+        throw new Error(
+          `CAS GC protocol metadata appeared during initialization: ${this.protocolPath}`,
+        );
+      }
+      if (entry.name === GC_ELIGIBILITY_DIRECTORY_NAME) {
+        if (!entry.isDirectory()) {
+          throw new Error(
+            `Cannot initialize CAS GC protocol with a non-directory eligibility root: ${this.eligibilityDirectory}`,
+          );
+        }
+        if (await directoryHasEntries(this.eligibilityDirectory)) {
+          throw new Error(
+            `Cannot initialize CAS GC protocol while eligibility markers lack metadata: ${this.eligibilityDirectory}`,
+          );
+        }
+        continue;
+      }
+      if (!entry.name.endsWith(".json")) continue;
+      const path = join(this.directory, entry.name);
+      let value: unknown;
+      try {
+        if (!entry.isFile()) {
+          throw new Error("operation index entry is not a regular file");
+        }
+        value = await readRegularJson(path);
+      } catch (error) {
+        throw new Error(
+          `Cannot initialize CAS GC protocol with an unreadable operation index entry: ${path}: ${errorMessage(error)}`,
+          { cause: error },
+        );
+      }
+      const legacy = parseOperationReferenceIndexEntry(value, undefined);
+      if (!legacy || legacy.schemaVersion !== LEGACY_OPERATION_REFERENCE_INDEX_VERSION) {
+        throw new Error(
+          `Cannot initialize CAS GC protocol with an unproven operation index entry: ${path}`,
+        );
+      }
+    }
+  }
+
+  private async scanEligibilityMarkers(
+    eligibilityEntry: Dirent | undefined,
+    protocol: GcProtocolMetadata | undefined,
+    failures: OperationReferenceIndexFailure[],
+  ): Promise<Set<string>> {
+    const eligible = new Set<string>();
+    if (!eligibilityEntry) return eligible;
+    if (!eligibilityEntry.isDirectory()) {
+      failures.push({
+        path: this.eligibilityDirectory,
+        message: "blob GC eligibility root is not a regular directory",
+      });
+      return eligible;
+    }
+    for (const prefix of await readDirectoryEntries(this.eligibilityDirectory)) {
+      const prefixPath = join(this.eligibilityDirectory, prefix.name);
+      if (!prefix.isDirectory() || !SHA256_PREFIX_RE.test(prefix.name)) {
+        failures.push({
+          path: prefixPath,
+          message: "malformed blob GC eligibility prefix entry",
+        });
+        continue;
+      }
+      for (const markerEntry of await readDirectoryEntries(prefixPath)) {
+        const path = join(prefixPath, markerEntry.name);
+        try {
+          if (!markerEntry.isFile() || !markerEntry.name.endsWith(".json")) {
+            throw new Error("malformed blob GC eligibility entry");
+          }
+          const digest = markerEntry.name.slice(0, -".json".length);
+          if (!SHA256_RE.test(digest) || !digest.startsWith(prefix.name)) {
+            throw new Error("blob GC eligibility identity does not match its path");
+          }
+          if (!protocol)
+            throw new Error("blob GC eligibility marker has no valid protocol metadata");
+          const marker = parseBlobGcEligibilityMarker(await readRegularJson(path));
+          if (!marker) throw new Error("malformed blob GC eligibility marker");
+          if (marker.digest !== digest || marker.protocolGeneration !== protocol.generation) {
+            throw new Error("blob GC eligibility marker belongs to another protocol generation");
+          }
+          eligible.add(digest);
+        } catch (error) {
+          failures.push({ path, message: errorMessage(error) });
+        }
+      }
+    }
+    return eligible;
   }
 
   private entryPath(journalDirectory: string, operationId: string): string {
@@ -96,6 +349,10 @@ export class OperationReferenceIndex {
       .update("\0")
       .update(operationId)
       .digest("hex")}.json`;
+  }
+
+  private eligibilityMarkerPath(digest: string): string {
+    return join(this.eligibilityDirectory, digest.slice(0, 2), `${digest}.json`);
   }
 }
 
@@ -111,10 +368,12 @@ function collectReferencedDigests(operation: StorageOperation): string[] {
 
 function parseOperationReferenceIndexEntry(
   value: unknown,
+  protocolGeneration: string | undefined,
 ): OperationReferenceIndexEntry | undefined {
   if (
     !isRecord(value) ||
-    value["schemaVersion"] !== OPERATION_REFERENCE_INDEX_VERSION ||
+    (value["schemaVersion"] !== LEGACY_OPERATION_REFERENCE_INDEX_VERSION &&
+      value["schemaVersion"] !== OPERATION_REFERENCE_INDEX_VERSION) ||
     typeof value["journalDirectory"] !== "string" ||
     !isAbsolute(value["journalDirectory"]) ||
     typeof value["operationId"] !== "string" ||
@@ -133,7 +392,140 @@ function parseOperationReferenceIndexEntry(
   }
   if (value["kind"] === "fork" && value["stagingDirectory"] === undefined) return undefined;
   if (value["kind"] === "rewind" && value["stagingDirectory"] !== undefined) return undefined;
+  if (value["schemaVersion"] === OPERATION_REFERENCE_INDEX_VERSION) {
+    if (
+      protocolGeneration === undefined ||
+      typeof value["protocolGeneration"] !== "string" ||
+      value["protocolGeneration"] !== protocolGeneration
+    ) {
+      return undefined;
+    }
+  }
   return structuredClone(value) as unknown as OperationReferenceIndexEntry;
+}
+
+function parseGcProtocolMetadata(value: unknown): GcProtocolMetadata | undefined {
+  if (
+    !isRecord(value) ||
+    value["schemaVersion"] !== GC_PROTOCOL_VERSION ||
+    value["protocol"] !== GC_PROTOCOL_ID ||
+    typeof value["generation"] !== "string" ||
+    value["generation"].length === 0 ||
+    typeof value["initializedAt"] !== "string"
+  ) {
+    return undefined;
+  }
+  return structuredClone(value) as unknown as GcProtocolMetadata;
+}
+
+function parseBlobGcEligibilityMarker(value: unknown): BlobGcEligibilityMarker | undefined {
+  if (
+    !isRecord(value) ||
+    value["schemaVersion"] !== GC_ELIGIBILITY_VERSION ||
+    typeof value["protocolGeneration"] !== "string" ||
+    value["protocolGeneration"].length === 0 ||
+    value["algorithm"] !== "sha256" ||
+    typeof value["digest"] !== "string" ||
+    !SHA256_RE.test(value["digest"]) ||
+    typeof value["createdAt"] !== "string"
+  ) {
+    return undefined;
+  }
+  return structuredClone(value) as unknown as BlobGcEligibilityMarker;
+}
+
+async function writeJsonExclusiveAtomic(path: string, value: unknown): Promise<boolean> {
+  const directory = dirname(path);
+  const temporaryPath = join(
+    directory,
+    `.${basename(path)}.${process.pid}.${Date.now()}.${randomUUID()}.tmp`,
+  );
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  await chmod(directory, 0o700);
+
+  let handle: FileHandle | undefined;
+  try {
+    handle = await open(temporaryPath, "wx", 0o600);
+    await handle.writeFile(`${JSON.stringify(value, null, 2)}\n`, "utf8");
+    await handle.sync();
+    await handle.close();
+    handle = undefined;
+    try {
+      await link(temporaryPath, path);
+    } catch (error) {
+      if (isNodeCode(error, "EEXIST")) return false;
+      throw error;
+    }
+    await chmod(path, 0o600);
+    await syncDirectory(directory);
+    return true;
+  } finally {
+    await handle?.close().catch(() => undefined);
+    await unlink(temporaryPath).catch(() => undefined);
+  }
+}
+
+async function syncDirectory(directory: string): Promise<void> {
+  let handle: FileHandle | undefined;
+  try {
+    handle = await open(directory, constants.O_RDONLY);
+    await handle.sync();
+  } catch (error) {
+    if (!isUnsupportedDirectorySync(error)) throw error;
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+async function directoryHasEntries(path: string): Promise<boolean> {
+  try {
+    const metadata = await lstat(path);
+    if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+      throw new Error(`Expected a regular directory: ${path}`);
+    }
+    return (await readdir(path)).length > 0;
+  } catch (error) {
+    if (isNodeCode(error, "ENOENT")) return false;
+    throw error;
+  }
+}
+
+async function readDirectoryEntries(path: string): Promise<Dirent[]> {
+  try {
+    const metadata = await lstat(path);
+    if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+      throw new Error(`Expected a regular directory: ${path}`);
+    }
+    return await readdir(path, { withFileTypes: true });
+  } catch (error) {
+    if (isNodeCode(error, "ENOENT")) return [];
+    throw error;
+  }
+}
+
+async function readRegularJson(path: string): Promise<unknown> {
+  const metadata = await lstat(path);
+  if (!metadata.isFile() || metadata.isSymbolicLink()) {
+    throw new Error(`Expected a regular JSON file: ${path}`);
+  }
+  return JSON.parse(await readFile(path, "utf8")) as unknown;
+}
+
+async function assertRegularDirectoryIfExists(path: string): Promise<void> {
+  try {
+    const metadata = await lstat(path);
+    if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+      throw new Error(`Expected a regular directory: ${path}`);
+    }
+  } catch (error) {
+    if (!isNodeCode(error, "ENOENT")) throw error;
+  }
+}
+
+function assertSha256Digest(digest: string): void {
+  if (!SHA256_RE.test(digest)) {
+    throw new TypeError("Blob GC eligibility digest must be 64 lowercase hexadecimal characters");
+  }
 }
 
 function isOperationKind(value: unknown): value is StorageOperation["kind"] {
@@ -162,6 +554,11 @@ function isPositiveInteger(value: unknown): value is number {
 
 function isNodeCode(error: unknown, code: string): boolean {
   return error instanceof Error && "code" in error && error.code === code;
+}
+
+function isUnsupportedDirectorySync(error: unknown): boolean {
+  if (!(error instanceof Error) || !("code" in error)) return false;
+  return new Set(["EACCES", "EINVAL", "EISDIR", "ENOTSUP", "EPERM"]).has(String(error.code));
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
