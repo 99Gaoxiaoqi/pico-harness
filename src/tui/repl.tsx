@@ -1522,7 +1522,7 @@ async function seedTuiFork(
   if (target.length > 0) return undefined;
   const source = await globalSessionManager.getOrCreate(sourceSessionId, workDir);
   const snapshot = await source.readHydrationSnapshot();
-  if (snapshot.messages.length > 0) await target.commitMessages(...snapshot.messages);
+  await target.seedForkFrom(source, snapshot.messages);
   if (snapshot.runtime.settings) {
     target.updateRuntimeState({
       settings: { ...snapshot.runtime.settings, forkFrom: sourceSessionId },

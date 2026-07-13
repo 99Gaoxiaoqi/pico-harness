@@ -15,6 +15,7 @@ import { chmodSync, mkdirSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
 import {
+  isMessageHiddenFromTranscript,
   toCanonicalUsage,
   type CanonicalUsage,
   type Message,
@@ -22,7 +23,12 @@ import {
 } from "../schema/message.js";
 import type { CostStatus } from "../observability/pricing.js";
 import { logger } from "../observability/logger.js";
-import { SessionStore, SessionWriteUncertainError, type CommitReceipt } from "./session-store.js";
+import {
+  SessionStore,
+  SessionWriteUncertainError,
+  type CommitReceipt,
+  type SessionLineage,
+} from "./session-store.js";
 import { findLegacyUndoCut, replaySessionRecords } from "./session-reducer.js";
 import { createSessionIdentity, type SessionIdentity } from "./session-identity.js";
 import type { GoalManager } from "./goal-manager.js";
@@ -56,6 +62,16 @@ import {
   fileHistoryMessageDiffStat,
   fileHistoryRewind,
 } from "../safety/file-history.js";
+import type {
+  SessionCatalog,
+  SessionCatalogEntry,
+  SessionCatalogLineage,
+} from "../storage/session-catalog.js";
+import {
+  getDefaultSessionCatalogProjector,
+  SessionCatalogProjector,
+  type SessionCatalogProjectionHealth,
+} from "../storage/session-catalog-projection.js";
 
 /** 清洗 sessionId 为安全文件名片段(/、: 等破坏路径的字符替换为 _) */
 function sanitizeFilePart(value: string): string {
@@ -108,6 +124,8 @@ export interface SessionOptions {
   identity?: SessionIdentity;
   /** Deterministic backend injection for integration and embedders. */
   memorySearchStore?: ConversationSearchStore;
+  /** Catalog 是 JSONL 的可重建投影；false 仅供无持久测试显式关闭。 */
+  sessionCatalog?: SessionCatalog | false;
 }
 
 /**
@@ -187,6 +205,8 @@ export class Session implements SessionRuntimePersistence {
    * 再串行接到 tail，因此物理落盘顺序与逻辑调用顺序一致。
    */
   private persistenceTail: Promise<void> = Promise.resolve();
+  /** Catalog 与 JSONL writer 解耦；失败只降级投影，close/flush 会等它收敛。 */
+  private catalogTail: Promise<void> = Promise.resolve();
   private compatibilityAppendTail: Promise<void> = Promise.resolve();
   private lifecycle: "open" | "write_uncertain" | "closing" | "closed" = "open";
   private persistenceFailure?: SessionWriteUncertainError;
@@ -210,6 +230,10 @@ export class Session implements SessionRuntimePersistence {
   private fts5Lease?: FTS5Store;
   private summaryStore!: SessionSummaryStore;
   private summaryStoreLeasePath?: string;
+  private catalogProjector?: SessionCatalogProjector;
+  private catalogHealthState?: SessionCatalogProjectionHealth;
+  private catalogEntryState?: SessionCatalogEntry;
+  private sessionLogPath?: string;
 
   constructor(id: string, workDir: string, options?: SessionOptions) {
     this.id = id;
@@ -227,6 +251,16 @@ export class Session implements SessionRuntimePersistence {
     this.createdAt = new Date();
     this.updatedAt = new Date();
     this.initPersistence(options?.persistence);
+    const defaultCatalogEnabled = process.env.PICO_SESSION_CATALOG !== "0";
+    if (
+      this.store &&
+      options?.sessionCatalog !== false &&
+      (options?.sessionCatalog !== undefined || defaultCatalogEnabled)
+    ) {
+      this.catalogProjector = options?.sessionCatalog
+        ? new SessionCatalogProjector(options.sessionCatalog)
+        : getDefaultSessionCatalogProjector();
+    }
     this.initMemorySearch(options?.memorySearchStore);
     const summaryPath = join(this.workDir, ".claw", "memory", "summaries.json");
     if (this.store) {
@@ -254,7 +288,8 @@ export class Session implements SessionRuntimePersistence {
       const dir = join(this.workDir, ".claw", "sessions");
       mkdirSync(dir, { recursive: true, mode: 0o700 });
       chmodSync(dir, 0o700);
-      this.store = new SessionStore(join(dir, `${sanitizeFilePart(this.id)}.jsonl`), this.identity);
+      this.sessionLogPath = join(dir, `${sanitizeFilePart(this.id)}.jsonl`);
+      this.store = new SessionStore(this.sessionLogPath, this.identity);
     } catch (error) {
       // 持久化初始化失败不应阻断会话本身,降级为纯内存
       logger.warn({ error: String(error) }, "[session] 持久化初始化失败,降级为纯内存");
@@ -349,6 +384,7 @@ export class Session implements SessionRuntimePersistence {
       this.markWriteUncertain("Session journal open/replay failed", error);
       throw error;
     }
+    await this.projectSessionCatalog({ openedAt: new Date().toISOString() });
     if (records.length === 0) {
       this.rebuildSearchIndex(this.store.getHeadCursor());
       return;
@@ -505,9 +541,11 @@ export class Session implements SessionRuntimePersistence {
       const persisted = structuredClone(normalized);
       void this.commitPersistence("runtime_state", (store, seq) =>
         store.commitRuntimeState(persisted, { expectedSeq: seq }),
-      ).catch((error: unknown) => {
-        logger.error({ error: String(error) }, "[session] runtime_state 持久化失败");
-      });
+      )
+        .then((receipt) => this.scheduleSessionCatalog(receipt))
+        .catch((error: unknown) => {
+          logger.error({ error: String(error) }, "[session] runtime_state 持久化失败");
+        });
     }
   }
 
@@ -538,6 +576,7 @@ export class Session implements SessionRuntimePersistence {
   async flushPersistence(): Promise<void> {
     await this.compatibilityAppendTail;
     await this.persistenceTail;
+    await this.catalogTail;
     if (this.persistenceFailure) throw this.persistenceFailure;
   }
 
@@ -627,6 +666,10 @@ export class Session implements SessionRuntimePersistence {
     const operation = this.commitPersistence("compatibility message", (store, seq) =>
       store.commitMessage(persisted, { expectedSeq: seq }),
     );
+    void operation.then(
+      (receipt) => this.scheduleSessionCatalog(receipt, { appendedMessage: msg }),
+      () => undefined,
+    );
     this.compatibilityAppendTail = Promise.all([this.compatibilityAppendTail, operation])
       .then(() => undefined)
       .catch((error: unknown) => {
@@ -651,6 +694,61 @@ export class Session implements SessionRuntimePersistence {
       return;
     }
     for (const msg of msgs) await this.appendOneDurable(msg);
+  }
+
+  /**
+   * 用父会话的 durable cursor 原子播种 fork。Catalog 重建时从
+   * session.seeded 事件取 parentLogId/forkEventId，不再依赖可变的标题。
+   */
+  async seedForkFrom(source: Session, messages: readonly Message[]): Promise<void> {
+    this.assertWritable();
+    if (this.history.length > 0) return;
+    const parent = await source.readDurableForkPoint();
+    const lineage = {
+      relation: "fork",
+      rootLogId: parent.rootLogId,
+      ...(parent.cursor ? { parent: parent.cursor } : {}),
+    } satisfies SessionLineage;
+    const seeded = [...structuredClone(messages)];
+    if (!this.store) {
+      for (const message of seeded) this.appendOneInMemory(message);
+      return;
+    }
+    const receipt = await this.commitPersistence("fork seed", (store, seq) =>
+      store.commitSeed(seeded, lineage, { expectedSeq: seq }),
+    );
+    this.history = seeded;
+    this.conversationId = `${receipt.cursor.logId}:${receipt.cursor.epoch}`;
+    this.updatedAt = new Date();
+    this.rebuildToolResultMeta();
+    this.rebuildSearchIndex(receipt.cursor);
+    this.scheduleSessionCatalog(receipt, {
+      rebuildSummary: true,
+      lineage: catalogLineageFromSession(lineage, source.id),
+    });
+  }
+
+  private async readDurableForkPoint(): Promise<{
+    readonly rootLogId: string;
+    readonly cursor?: CommitReceipt["cursor"];
+  }> {
+    await this.flushPersistence();
+    const store = this.store;
+    if (!store) return { rootLogId: this.id };
+    const snapshot = await store.inspectJournal();
+    let rootLogId =
+      snapshot.metadata && "lineage" in snapshot.metadata
+        ? snapshot.metadata.lineage.rootLogId
+        : store.getLogId();
+    for (const record of snapshot.records) {
+      if (record.type === "event" && record.kind === "session.seeded" && record.data.lineage) {
+        rootLogId = record.data.lineage.rootLogId;
+      }
+    }
+    return {
+      rootLogId,
+      ...(store.getHeadCursor() ? { cursor: store.getHeadCursor() } : {}),
+    };
   }
 
   private prepareAppend(msg: Message): {
@@ -755,6 +853,7 @@ export class Session implements SessionRuntimePersistence {
     } catch (err) {
       logger.warn({ err }, "[session] 记忆投影失败");
     }
+    this.scheduleSessionCatalog(receipt, { appendedMessage: msg });
   }
 
   /**
@@ -778,6 +877,7 @@ export class Session implements SessionRuntimePersistence {
     this.rebuildSearchIndex(receipt?.cursor);
     this.pruneToolResultMeta();
     this.updatedAt = new Date();
+    if (receipt) this.scheduleSessionCatalog(receipt, { rebuildSummary: true });
   }
 
   /**
@@ -807,6 +907,7 @@ export class Session implements SessionRuntimePersistence {
       ? `${receipt.cursor.logId}:${receipt.cursor.epoch}`
       : `${this.id}-${Date.now().toString(36)}`;
     this.updatedAt = new Date();
+    if (receipt) this.scheduleSessionCatalog(receipt, { rebuildSummary: true });
   }
 
   async beginRewindPoint(input: {
@@ -848,6 +949,7 @@ export class Session implements SessionRuntimePersistence {
       ? `${receipt.cursor.logId}:${receipt.cursor.epoch}`
       : `${this.id}-${Date.now().toString(36)}`;
     this.updatedAt = new Date();
+    if (receipt) this.scheduleSessionCatalog(receipt, { rebuildSummary: true });
   }
 
   async rewindCode(messageId: string): Promise<void> {
@@ -915,6 +1017,7 @@ export class Session implements SessionRuntimePersistence {
     // 压缩后清理已消失 ToolResult 的 meta(被摘要吞掉的前缀条目)
     this.pruneToolResultMeta();
     this.updatedAt = new Date();
+    if (receipt) this.scheduleSessionCatalog(receipt, { rebuildSummary: true });
   }
 
   /** 返回全量历史的深拷贝(仅供调试 / 测试,不参与推理) */
@@ -1013,6 +1116,10 @@ export class Session implements SessionRuntimePersistence {
     return this.searchStore.status;
   }
 
+  get sessionCatalogHealth(): SessionCatalogProjectionHealth | undefined {
+    return this.catalogHealthState;
+  }
+
   get sessionSummaryStore(): SessionSummaryStore {
     return this.summaryStore;
   }
@@ -1049,6 +1156,83 @@ export class Session implements SessionRuntimePersistence {
     );
     this.persistenceTail = settled;
     return operation;
+  }
+
+  private async projectSessionCatalog(options: { openedAt?: string } = {}): Promise<void> {
+    const projector = this.catalogProjector;
+    const logPath = this.sessionLogPath;
+    if (!projector || !logPath) return;
+    try {
+      const result = await projector.projectJournal(logPath, options);
+      this.catalogHealthState = result.health;
+      if (result.entry) this.catalogEntryState = result.entry;
+    } catch (error) {
+      // Projector 的契约是 fail-open，但 Session 边界仍不信任任何派生存储。
+      logger.warn(
+        { error: String(error), sessionId: this.id },
+        "[session-catalog] 目录同步失败，JSONL 仍是可恢复真源",
+      );
+    }
+  }
+
+  private scheduleSessionCatalog(
+    receipt: CommitReceipt,
+    update: {
+      readonly appendedMessage?: Message;
+      readonly rebuildSummary?: boolean;
+      readonly lineage?: SessionCatalogLineage;
+    } = {},
+  ): void {
+    const projector = this.catalogProjector;
+    const logPath = this.sessionLogPath;
+    if (!projector || !logPath) return;
+    const prior = this.catalogEntryState;
+    let firstUserMessage = prior?.firstUserMessage;
+    let lastUserMessage = prior?.lastUserMessage;
+    if (update.rebuildSummary) {
+      ({ firstUserMessage, lastUserMessage } = catalogUserSummary(this.history));
+    } else if (update.appendedMessage && isCatalogUserMessage(update.appendedMessage)) {
+      const content = compactCatalogText(update.appendedMessage.content);
+      firstUserMessage ??= content;
+      lastUserMessage = content;
+    }
+    const title = compactCatalogText(this.persistedSettings?.title) ?? firstUserMessage;
+    const lineage =
+      update.lineage ??
+      prior?.lineage ??
+      ({ relation: "root", rootLogId: receipt.cursor.logId } satisfies SessionCatalogLineage);
+    const entry = {
+      schemaVersion: 1,
+      logId: receipt.cursor.logId,
+      sessionId: this.id,
+      logPath,
+      identity: this.identity,
+      lineage,
+      ...(title ? { title } : {}),
+      ...(firstUserMessage ? { firstUserMessage } : {}),
+      ...(lastUserMessage ? { lastUserMessage } : {}),
+      messageCount: this.history.length,
+      createdAt: prior?.createdAt ?? this.createdAt.toISOString(),
+      updatedAt: this.updatedAt.toISOString(),
+      lastOpenedAt: prior?.lastOpenedAt ?? this.createdAt.toISOString(),
+      journalSchemaVersion: 3,
+      head: receipt.cursor,
+      health: "healthy",
+    } satisfies SessionCatalogEntry;
+    // 先更新进程内摘要，后续 commit 可在 O(1) 基础上继续投影。
+    this.catalogEntryState = entry;
+    this.catalogTail = this.catalogTail
+      .then(async () => {
+        const result = await projector.projectEntry(entry);
+        this.catalogHealthState = result.health;
+        if (result.entry && this.catalogEntryState?.head?.eventId === result.entry.head?.eventId) {
+          this.catalogEntryState = result.entry;
+        }
+      })
+      .catch((error: unknown) => {
+        // Catalog 绝不得把 durable Session 标记为 write_uncertain。
+        logger.warn({ error: String(error) }, "[session-catalog] 增量投影队列异常，已降级");
+      });
   }
 
   private assertWritable(): void {
@@ -1104,6 +1288,7 @@ export class Session implements SessionRuntimePersistence {
         this.lifecycle = "closed";
         return this.persistenceTail;
       })
+      .then(() => this.catalogTail)
       .then(() => {
         const store = this.store;
         this.store = undefined;
@@ -1112,6 +1297,50 @@ export class Session implements SessionRuntimePersistence {
     this.closePromise = registerSessionDrain(sessionEntryKey(this.id, this.workDir), drain);
     return this.closePromise;
   }
+}
+
+function catalogUserSummary(history: readonly Message[]): {
+  firstUserMessage?: string;
+  lastUserMessage?: string;
+} {
+  const visible = history.filter(isCatalogUserMessage);
+  const firstUserMessage = compactCatalogText(visible[0]?.content);
+  const lastUserMessage = compactCatalogText(visible.at(-1)?.content);
+  return {
+    ...(firstUserMessage ? { firstUserMessage } : {}),
+    ...(lastUserMessage ? { lastUserMessage } : {}),
+  };
+}
+
+function isCatalogUserMessage(message: Message): boolean {
+  return (
+    message.role === "user" &&
+    message.toolCallId === undefined &&
+    !isMessageHiddenFromTranscript(message) &&
+    message.content.trim().length > 0
+  );
+}
+
+function compactCatalogText(value: string | undefined): string | undefined {
+  const compacted = value?.replace(/\s+/gu, " ").trim();
+  if (!compacted) return undefined;
+  return compacted.length <= 240 ? compacted : `${compacted.slice(0, 239)}…`;
+}
+
+function catalogLineageFromSession(
+  lineage: SessionLineage,
+  parentSessionId?: string,
+): SessionCatalogLineage {
+  return {
+    relation: lineage.relation,
+    rootLogId: lineage.rootLogId,
+    ...(lineage.parent ? { parentLogId: lineage.parent.logId } : {}),
+    ...(lineage.relation === "fork" && lineage.parent
+      ? { forkEventId: lineage.parent.eventId }
+      : {}),
+    ...(parentSessionId ? { parentSessionId } : {}),
+    ...(lineage.parentTaskId ? { parentTaskId: lineage.parentTaskId } : {}),
+  };
 }
 
 function deriveUsageFromHistory(history: readonly Message[]): SessionUsageSnapshot {
