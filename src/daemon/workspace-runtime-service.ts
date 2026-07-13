@@ -43,6 +43,7 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
   private readonly eventStores = new Map<string, RuntimeStore>();
   private readonly maxRetainedEvents: number;
   private readonly registrationStore: WorkspaceRegistrationStore;
+  private registrationChanged?: () => Promise<void>;
 
   constructor(private readonly options: WorkspaceRuntimeServiceOptions) {
     this.maxRetainedEvents = Math.max(1, options.maxRetainedEvents ?? 2_000);
@@ -89,6 +90,7 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
           payload: { registered: true },
         }),
       );
+      await this.registrationChanged?.();
       return { workspacePath: registered, registered: true };
     }
     if (request.method === "workspace.unregister") {
@@ -103,6 +105,7 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
           payload: { registered: false },
         }),
       );
+      await this.registrationChanged?.();
       return { workspacePath: registered, registered: false };
     }
     if (request.method === "workspace.status") {
@@ -191,10 +194,20 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
     return () => this.listeners.delete(listener);
   }
 
+  /** Cron and IPC must share the same per-realpath runtime and active-run lock. */
+  async getWorkspaceRuntime(workspacePath: string): Promise<WorkspaceTaskRuntime> {
+    return this.registry.get(workspacePath);
+  }
+
+  setRegistrationChangedListener(listener: () => Promise<void>): void {
+    this.registrationChanged = listener;
+  }
+
   async close(): Promise<void> {
     for (const unsubscribe of this.unsubscribers.values()) unsubscribe();
     this.unsubscribers.clear();
     this.listeners.clear();
+    this.registrationChanged = undefined;
     await this.registry.close();
     for (const store of this.eventStores.values()) store.close();
     this.eventStores.clear();

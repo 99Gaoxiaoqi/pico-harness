@@ -7,6 +7,7 @@ import {
   LocalDaemonHost,
   LocalRuntimeClient,
   LocalRuntimeDaemon,
+  createProductionLocalDaemonHost,
   resolveLocalDaemonEndpoint,
   WorkspaceRegistrationStore,
   type CronWorkspaceRuntimeFactoryInput,
@@ -114,6 +115,27 @@ describe("LocalDaemonHost integration", () => {
       client.close();
     } finally {
       await legacy.stop();
+    }
+  });
+
+  it("生产装配以安全后台执行器启动内部 daemon，不依赖 TUI 生命周期", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pico-daemon-production-"));
+    cleanups.push(() => rm(root, { recursive: true, force: true }));
+    const endpoint = resolveLocalDaemonEndpoint({
+      runtimeDir: join(root, "runtime"),
+      userIdentity: "production-test",
+    });
+    const host = createProductionLocalDaemonHost({
+      endpoint,
+      registrationStore: new WorkspaceRegistrationStore(join(root, "workspaces.json")),
+    });
+    await host.start();
+    try {
+      const client = new LocalRuntimeClient(endpoint);
+      await expect(client.request("runtime.ping", {})).resolves.toEqual({ pong: true });
+      client.close();
+    } finally {
+      await host.stop();
     }
   });
 });

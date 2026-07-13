@@ -1,4 +1,10 @@
-import { LocalRuntimeClient, resolveLocalDaemonEndpoint } from "../daemon/index.js";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import {
+  createUserDaemonInstaller,
+  LocalRuntimeClient,
+  resolveLocalDaemonEndpoint,
+} from "../daemon/index.js";
 
 /** The small boundary between TUI commands and the local Runtime daemon. */
 export interface CronDaemonBridge {
@@ -21,6 +27,7 @@ export interface CronDaemonStatus {
 
 export interface LocalCronDaemonBridgeOptions {
   createClient?: () => Pick<LocalRuntimeClient, "request" | "close">;
+  startDaemon?: () => Promise<"installed" | "process">;
 }
 
 /**
@@ -30,24 +37,36 @@ export interface LocalCronDaemonBridgeOptions {
  */
 export class LocalCronDaemonBridge implements CronDaemonBridge {
   private readonly createClient: () => Pick<LocalRuntimeClient, "request" | "close">;
+  private readonly startDaemon?: () => Promise<"installed" | "process">;
 
   constructor(options: LocalCronDaemonBridgeOptions = {}) {
     this.createClient =
       options.createClient ?? (() => new LocalRuntimeClient(resolveLocalDaemonEndpoint()));
+    this.startDaemon =
+      options.startDaemon ?? (options.createClient ? undefined : startOrInstallLocalDaemon);
   }
 
   async registerWorkspace(workspacePath: string): Promise<CronDaemonRegistration> {
-    const client = this.createClient();
+    let client = this.createClient();
     try {
-      const request = client.request as (
-        method: string,
-        params: Record<string, unknown>,
-      ) => Promise<unknown>;
-      await request("runtime.ping", {});
+      let lifetime: "existing" | "installed" | "process" = "existing";
+      try {
+        await client.request("runtime.ping", {});
+      } catch (initialError) {
+        if (!this.startDaemon) throw initialError;
+        lifetime = await this.startDaemon();
+        client.close();
+        client = this.createClient();
+        await waitForDaemon(client);
+      }
+      const request = client.request.bind(client);
       await request("workspace.register", { workspacePath });
       return {
         available: true,
-        message: "本机 Runtime daemon 已连接；当前工作区已注册，TUI 退出后仍会由 daemon 调度。",
+        message:
+          lifetime === "process"
+            ? "本机 Runtime daemon 已启动并登记工作区；TUI 退出后仍会调度，系统重新登录后需再次启动。"
+            : "本机 Runtime daemon 已连接；当前工作区已注册，TUI 退出后仍会由 daemon 调度。",
       };
     } catch {
       return {
@@ -90,6 +109,43 @@ export class LocalCronDaemonBridge implements CronDaemonBridge {
       client.close();
     }
   }
+}
+
+async function startOrInstallLocalDaemon(): Promise<"installed" | "process"> {
+  const daemonMain = fileURLToPath(new URL("../daemon/main.js", import.meta.url));
+  const installer = createUserDaemonInstaller();
+  if (installer.install) {
+    await installer.install({
+      serviceName: "com.pico.runtime",
+      executable: process.execPath,
+      args: [daemonMain],
+    });
+    return "installed";
+  }
+  const child = spawn(process.execPath, [daemonMain], {
+    detached: true,
+    stdio: "ignore",
+    env: process.env,
+  });
+  child.unref();
+  return "process";
+}
+
+async function waitForDaemon(
+  client: Pick<LocalRuntimeClient, "request">,
+  attempts = 40,
+): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    try {
+      await client.request("runtime.ping", {});
+      return;
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error("daemon 启动超时");
 }
 
 function readWorkspaceStatus(value: unknown): { registered: boolean } | undefined {
