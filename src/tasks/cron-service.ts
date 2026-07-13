@@ -87,7 +87,9 @@ export class CronService {
   }
 
   list(workspacePath?: string): CronJobRecord[] {
-    return this.store.listCronJobs(workspacePath ? { workspacePath: realpathSync(workspacePath) } : {});
+    return this.store.listCronJobs(
+      workspacePath ? { workspacePath: realpathSync(workspacePath) } : {},
+    );
   }
 
   setEnabled(cronJobId: string, expectedVersion: number, enabled: boolean): CronJobRecord {
@@ -176,14 +178,23 @@ export class CronService {
     return run;
   }
 
-  runs(input: { cronJobId?: string; workspacePath?: string; limit?: number } = {}): CronRunRecord[] {
+  runs(
+    input: { cronJobId?: string; workspacePath?: string; limit?: number } = {},
+  ): CronRunRecord[] {
     return this.store.listCronRuns({
       ...input,
       ...(input.workspacePath ? { workspacePath: realpathSync(input.workspacePath) } : {}),
     });
   }
 
-  events(input: { afterEventId?: string; workspacePath?: string; limit?: number } = {}): RuntimeEventRecord[] {
+  /** daemon 启动恢复：只收口 lease 已过期的 running Run。 */
+  recoverInterruptedRuns(reason?: string): CronRunRecord[] {
+    return this.store.recoverInterruptedCronRuns(reason);
+  }
+
+  events(
+    input: { afterEventId?: string; workspacePath?: string; limit?: number } = {},
+  ): RuntimeEventRecord[] {
     return this.store.listRuntimeEvents({
       ...input,
       ...(input.workspacePath ? { workspacePath: realpathSync(input.workspacePath) } : {}),
@@ -211,7 +222,8 @@ export function floorToMinute(timestamp: number): number {
 export function matchesCron(schedule: string, timestamp: number, timeZone: string): boolean {
   const [minute, hour, dayOfMonth, month, dayOfWeek] = parseFivePartCron(schedule);
   const parts = zonedDateParts(timestamp, timeZone);
-  if (!minute.matches(parts.minute) || !hour.matches(parts.hour) || !month.matches(parts.month)) return false;
+  if (!minute.matches(parts.minute) || !hour.matches(parts.hour) || !month.matches(parts.month))
+    return false;
   const domMatches = dayOfMonth.matches(parts.dayOfMonth);
   const dowMatches = dayOfWeek.matches(parts.dayOfWeek);
   return dayOfMonth.wildcard && dayOfWeek.wildcard
@@ -232,7 +244,9 @@ interface CronField {
   matches(value: number): boolean;
 }
 
-function parseFivePartCron(schedule: string): [CronField, CronField, CronField, CronField, CronField] {
+function parseFivePartCron(
+  schedule: string,
+): [CronField, CronField, CronField, CronField, CronField] {
   const fields = schedule.trim().split(/\s+/);
   if (fields.length !== 5) throw new Error("Cron 表达式必须恰好有五段");
   return [
@@ -248,8 +262,10 @@ function parseField(source: string, min: number, max: number, name: string): Cro
   const values = new Set<number>();
   for (const item of source.split(",")) {
     const [rangeSource, stepSource] = item.split("/");
-    if (item.split("/").length > 2 || !rangeSource) throw new Error(`Cron ${name} 字段无效: ${source}`);
-    const step = stepSource === undefined ? 1 : parsePositiveInteger(stepSource, `Cron ${name} step`);
+    if (item.split("/").length > 2 || !rangeSource)
+      throw new Error(`Cron ${name} 字段无效: ${source}`);
+    const step =
+      stepSource === undefined ? 1 : parsePositiveInteger(stepSource, `Cron ${name} step`);
     let start: number;
     let end: number;
     if (rangeSource === "*") {
@@ -285,7 +301,10 @@ function parsePositiveInteger(value: string, name: string): number {
   return number;
 }
 
-function zonedDateParts(timestamp: number, timeZone: string): {
+function zonedDateParts(
+  timestamp: number,
+  timeZone: string,
+): {
   minute: number;
   hour: number;
   dayOfMonth: number;
@@ -308,7 +327,20 @@ function zonedDateParts(timestamp: number, timeZone: string): {
       .map((part) => [part.type, part.value]),
   );
   const weekday = values["weekday"];
-  const dayOfWeek = weekday === "Sun" ? 0 : weekday === "Mon" ? 1 : weekday === "Tue" ? 2 : weekday === "Wed" ? 3 : weekday === "Thu" ? 4 : weekday === "Fri" ? 5 : 6;
+  const dayOfWeek =
+    weekday === "Sun"
+      ? 0
+      : weekday === "Mon"
+        ? 1
+        : weekday === "Tue"
+          ? 2
+          : weekday === "Wed"
+            ? 3
+            : weekday === "Thu"
+              ? 4
+              : weekday === "Fri"
+                ? 5
+                : 6;
   return {
     minute: Number(values["minute"]),
     hour: Number(values["hour"]),

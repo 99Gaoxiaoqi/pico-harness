@@ -23,7 +23,8 @@ export function resolveLocalDaemonEndpoint(
   if (targetPlatform === "win32") {
     return { transport: "pipe", address: `\\\\.\\pipe\\pico-runtime-${digest}-v1` };
   }
-  const runtimeDir = options.runtimeDir ?? process.env.XDG_RUNTIME_DIR ?? join(tmpdir(), `pico-${digest}`);
+  const runtimeDir =
+    options.runtimeDir ?? process.env.XDG_RUNTIME_DIR ?? join(tmpdir(), `pico-${digest}`);
   return { transport: "unix", address: join(runtimeDir, "runtime-v1.sock") };
 }
 
@@ -32,7 +33,6 @@ export async function prepareLocalDaemonEndpoint(endpoint: LocalDaemonEndpoint):
   if (endpoint.transport !== "unix") return;
   await mkdir(dirname(endpoint.address), { recursive: true, mode: 0o700 });
   await chmod(dirname(endpoint.address), 0o700);
-  await rm(endpoint.address, { force: true });
 }
 
 export async function secureLocalDaemonEndpoint(endpoint: LocalDaemonEndpoint): Promise<void> {

@@ -11,7 +11,8 @@ describe("CronService durable ledger integration", () => {
 
   afterEach(() => {
     for (const closeable of closeables.splice(0)) closeable.close();
-    for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
+    for (const directory of directories.splice(0))
+      rmSync(directory, { recursive: true, force: true });
   });
 
   it("以五段 Cron、SQLite 租约与不可变 YOLO 快照记录运行，漏掉分钟不补跑", () => {
@@ -45,10 +46,16 @@ describe("CronService durable ledger integration", () => {
     const tick = service.tick();
     expect(tick.runs).toEqual([
       expect.objectContaining({ cronJobId: first.cronJobId, status: "queued" }),
-      expect.objectContaining({ cronJobId: second.cronJobId, status: "skipped", reason: "workspace_busy" }),
+      expect.objectContaining({
+        cronJobId: second.cronJobId,
+        status: "skipped",
+        reason: "workspace_busy",
+      }),
     ]);
     // 同一分钟多次 tick 不会生成重复 Run。
-    expect(service.tick().runs.map((run) => run.cronRunId)).toEqual(tick.runs.map((run) => run.cronRunId));
+    expect(service.tick().runs.map((run) => run.cronRunId)).toEqual(
+      tick.runs.map((run) => run.cronRunId),
+    );
 
     const claimed = service.claim(tick.runs[0]!.cronRunId, 60_000);
     expect(claimed).toMatchObject({
@@ -67,7 +74,13 @@ describe("CronService durable ledger integration", () => {
     now = Date.UTC(2026, 0, 1, 12, 6, 15);
     expect(service.tick().runs).toEqual([]); // 12:05 的遗漏 trigger 不补跑。
     expect(service.events({ workspacePath: workDir }).map((event) => event.topic)).toEqual(
-      expect.arrayContaining(["cron.job.created", "cron.run.queued", "cron.run.skipped", "cron.run.running", "cron.run.succeeded"]),
+      expect.arrayContaining([
+        "cron.job.created",
+        "cron.run.queued",
+        "cron.run.skipped",
+        "cron.run.running",
+        "cron.run.succeeded",
+      ]),
     );
   });
 
@@ -77,7 +90,9 @@ describe("CronService durable ledger integration", () => {
     const service = new CronService({
       workDir,
       now: () => Date.UTC(2026, 0, 1, 12, 0),
-      policyGuard: { evaluate: () => (allow ? { allowed: true } : { allowed: false, reason: "hook_denied" }) },
+      policyGuard: {
+        evaluate: () => (allow ? { allowed: true } : { allowed: false, reason: "hook_denied" }),
+      },
     });
     closeables.push(service);
     const job = service.create({
@@ -90,14 +105,18 @@ describe("CronService durable ledger integration", () => {
     const queued = service.tick().runs[0]!;
     allow = false;
     const blocked = service.claim(queued.cronRunId);
-    expect(blocked).toEqual({ run: expect.objectContaining({ status: "blocked", reason: "hook_denied" }) });
+    expect(blocked).toEqual({
+      run: expect.objectContaining({ status: "blocked", reason: "hook_denied" }),
+    });
     expect(service.runs({ cronJobId: job.cronJobId })).toHaveLength(1);
 
     service.close();
     closeables.pop();
     const databasePath = join(workDir, ".claw", "runtime.sqlite");
     const raw = new Database(databasePath);
-    raw.exec("DROP TABLE runtime_events; DROP TABLE cron_runs; DROP TABLE cron_jobs; DELETE FROM schema_migrations WHERE version = 3");
+    raw.exec(
+      "DROP TABLE runtime_events; DROP TABLE cron_runs; DROP TABLE cron_jobs; DELETE FROM schema_migrations WHERE version = 3",
+    );
     raw.close();
 
     const migrated = new CronService({ workDir });
@@ -135,12 +154,54 @@ describe("CronService durable ledger integration", () => {
       expectedVersion: running.run.version,
       status: "cancelled",
     });
-    expect(service.delete(job.cronJobId, disabled.version)).toMatchObject({ cronJobId: job.cronJobId });
+    expect(service.delete(job.cronJobId, disabled.version)).toMatchObject({
+      cronJobId: job.cronJobId,
+    });
     expect(service.list()).toEqual([]);
     expect(service.events().at(-1)).toMatchObject({
       topic: "cron.job.deleted",
       payload: { cronJobId: job.cronJobId },
     });
+  });
+
+  it("daemon 重启只收口 lease 已过期的 running Run，并解除工作区阻塞", () => {
+    const workDir = makeTempDir(directories);
+    let now = Date.UTC(2026, 0, 1, 12, 0, 0);
+    const first = new CronService({ workDir, now: () => now, ownerId: "daemon-before-crash" });
+    closeables.push(first);
+    const job = first.create({
+      workspacePath: workDir,
+      schedule: "* * * * *",
+      timeZone: "UTC",
+      prompt: "recover me",
+      policySnapshot: yoloPolicy(now),
+    });
+    const queued = first.tick(now).runs[0]!;
+    const claimed = first.claim(queued.cronRunId, 1_000);
+    now += 500;
+    first.heartbeat(queued.cronRunId, claimed.lease!.leaseEpoch, 1_000);
+
+    const restarted = new CronService({ workDir, now: () => now, ownerId: "daemon-after-crash" });
+    closeables.push(restarted);
+    expect(restarted.recoverInterruptedRuns()).toEqual([]);
+    now += 1_001;
+    expect(restarted.recoverInterruptedRuns()).toEqual([
+      expect.objectContaining({
+        cronRunId: queued.cronRunId,
+        status: "failed",
+        reason: "daemon_interrupted_after_lease_expiry",
+      }),
+    ]);
+    now = Date.UTC(2026, 0, 1, 12, 1, 0);
+    expect(restarted.tick(now).runs).toEqual([
+      expect.objectContaining({ cronJobId: job.cronJobId, status: "queued" }),
+    ]);
+    expect(restarted.events({ workspacePath: workDir }).at(-2)).toEqual(
+      expect.objectContaining({
+        topic: "cron.run.failed",
+        payload: expect.objectContaining({ recovered: true }),
+      }),
+    );
   });
 });
 

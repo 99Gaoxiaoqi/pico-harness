@@ -27,7 +27,9 @@ export interface LocalRuntimeDaemonOptions {
 /** Versioned, current-user local IPC daemon. It intentionally exposes no network transport. */
 export class LocalRuntimeDaemon {
   private readonly server: Server;
+  private readonly sockets = new Set<Socket>();
   private listening = false;
+  private ownsEndpoint = false;
 
   constructor(private readonly options: LocalRuntimeDaemonOptions) {
     this.server = createServer((socket) => this.handleConnection(socket));
@@ -50,9 +52,10 @@ export class LocalRuntimeDaemon {
       this.server.once("listening", onListening);
       this.server.listen(this.options.endpoint.address);
     });
+    this.listening = true;
+    this.ownsEndpoint = true;
     try {
       await secureLocalDaemonEndpoint(this.options.endpoint);
-      this.listening = true;
     } catch (error) {
       await this.stop();
       throw error;
@@ -61,21 +64,27 @@ export class LocalRuntimeDaemon {
 
   async stop(): Promise<void> {
     if (this.listening) {
+      for (const socket of this.sockets) socket.destroy();
       await new Promise<void>((resolve, reject) => {
         this.server.close((error) => (error ? reject(error) : resolve()));
       });
       this.listening = false;
     }
-    await removeLocalDaemonEndpoint(this.options.endpoint);
+    if (this.ownsEndpoint) {
+      await removeLocalDaemonEndpoint(this.options.endpoint);
+      this.ownsEndpoint = false;
+    }
   }
 
   private handleConnection(socket: Socket): void {
+    this.sockets.add(socket);
     const decoder = new RuntimeFrameDecoder();
     let unsubscribe: (() => void) | undefined;
     let closed = false;
     const close = () => {
       if (closed) return;
       closed = true;
+      this.sockets.delete(socket);
       unsubscribe?.();
       unsubscribe = undefined;
     };

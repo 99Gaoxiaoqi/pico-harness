@@ -977,6 +977,58 @@ export class RuntimeStore {
     ).map(mapCronRun);
   }
 
+  /**
+   * Atomically closes Cron Runs whose ownership lease has expired. The guarded
+   * UPDATE is intentionally repeated after discovery so a concurrent heartbeat
+   * that wins the SQLite write lock prevents recovery.
+   */
+  recoverInterruptedCronRuns(reason = "daemon_interrupted_after_lease_expiry"): CronRunRecord[] {
+    const recover = this.db.transaction(() => {
+      const now = this.now();
+      const candidates = this.db
+        .prepare(
+          `SELECT cron_runs.* FROM cron_runs
+           LEFT JOIN runtime_leases
+             ON runtime_leases.resource_key = 'cron-run:' || cron_runs.cron_run_id
+           WHERE cron_runs.status = 'running'
+             AND (runtime_leases.resource_key IS NULL OR runtime_leases.expires_at <= ?)`,
+        )
+        .all(now) as CronRunRow[];
+      const recovered: CronRunRecord[] = [];
+      for (const row of candidates) {
+        const result = this.db
+          .prepare(
+            `UPDATE cron_runs
+             SET status = 'failed', finished_at = ?, reason = ?, version = version + 1
+             WHERE cron_run_id = ? AND status = 'running' AND version = ?
+               AND NOT EXISTS (
+                 SELECT 1 FROM runtime_leases
+                 WHERE resource_key = 'cron-run:' || cron_runs.cron_run_id
+                   AND expires_at > ?
+               )`,
+          )
+          .run(now, reason, row.cron_run_id, row.version, now);
+        if (result.changes !== 1) continue;
+        this.db
+          .prepare(
+            `UPDATE runtime_leases SET expires_at = ?, version = version + 1
+             WHERE resource_key = ? AND expires_at <= ?`,
+          )
+          .run(now, `cron-run:${row.cron_run_id}`, now);
+        this.insertRuntimeEvent({
+          topic: "cron.run.failed",
+          workspacePath: row.workspace_path,
+          cronJobId: row.cron_job_id,
+          cronRunId: row.cron_run_id,
+          payload: { reason, recovered: true },
+        });
+        recovered.push(this.requireCronRun(row.cron_run_id));
+      }
+      return recovered;
+    });
+    return recover();
+  }
+
   claimCronRun(input: ClaimCronRunInput): CronRunRecord {
     const claim = this.db.transaction(() => {
       const current = this.requireCronRun(input.cronRunId);
