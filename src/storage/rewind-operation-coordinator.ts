@@ -71,6 +71,7 @@ export class RewindOperationCoordinator {
     this.journal = options.journal;
     this.blobStore = options.blobStore;
     this.callbacks = options.callbacks;
+    this.journal.attachReferenceIndex(this.blobStore.rootDirectory);
   }
 
   async execute(input: NewRewindStorageOperation): Promise<RewindStorageOperation> {
