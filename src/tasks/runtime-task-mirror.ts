@@ -6,7 +6,14 @@ import {
   type TaskStatus,
   type TaskType,
 } from "./task-registry.js";
-import type { JobCompletionPolicy, JobExecutionClass, TerminalJobStatus } from "./runtime-types.js";
+import type {
+  JobCompletionPolicy,
+  JobExecutionClass,
+  JobRecord,
+  JobStatus,
+  JobWithAttempts,
+  TerminalJobStatus,
+} from "./runtime-types.js";
 
 export interface RuntimeTaskMirrorOptions {
   leaseTtlMs?: number;
@@ -119,12 +126,13 @@ export class RuntimeTaskMirror {
           : {}),
       });
     } catch (error) {
-      // The bridge cannot roll back an executor that already changed state. Surface a durable
-      // diagnostic without throwing through TaskRegistry subscribers; Doctor will reconcile it.
-      logger.warn(
+      // SQLite 是权威控制面：不允许 Registry/TaskStore 在持久化失败后
+      // 继续装作成功。让同步调用方看到失败，同时保留诊断日志。
+      logger.error(
         { taskId: snapshot.taskId, status: snapshot.status, error: String(error) },
         "[runtime-store] 同步 TaskRegistry 状态失败",
       );
+      throw error;
     }
   }
 
@@ -205,8 +213,109 @@ function taskPayload(snapshot: TaskSnapshot): Record<string, unknown> {
       type: snapshot.type,
       startTime: snapshot.startTime,
       outputOffset: snapshot.outputOffset,
+      notified: snapshot.notified,
     },
   };
+}
+
+/** 从 runtime.sqlite 权威事实生成进程内 TaskRegistry 兼容投影。 */
+export function materializeRuntimeTaskSnapshots(jobs: JobService): TaskSnapshot[] {
+  return jobs.list().map((job) => {
+    const durable = jobs.get(job.jobId);
+    if (!durable) throw new Error(`持久任务 ${job.jobId} 在投影期间消失`);
+    return materializeRuntimeTaskSnapshot(durable);
+  });
+}
+
+export function materializeRuntimeTaskSnapshot(durable: JobWithAttempts): TaskSnapshot {
+  const { job } = durable;
+  const attempt = durable.attempts.at(-1);
+  const legacyTask = recordData(job.data, "legacyTask");
+  const legacyTaskStore = recordData(job.data, "legacyTaskStore");
+  const data: Record<string, unknown> = {
+    ...(job.data ?? {}),
+    ...(attempt?.result ?? {}),
+    runtimeStatus: job.status,
+    runtimeVersion: job.version,
+    executionClass: job.executionClass,
+    completionPolicy: job.completionPolicy,
+    ...(job.ownerSessionId ? { ownerSessionId: job.ownerSessionId } : {}),
+    ...(job.childSessionId ? { childSessionId: job.childSessionId } : {}),
+    ...(attempt ? { attemptId: attempt.attemptId, attemptNumber: attempt.attemptNumber } : {}),
+  };
+  return {
+    taskId: job.jobId,
+    type: taskTypeFromJob(job, legacyTask),
+    status: taskStatusFromJob(job.status),
+    description: job.description,
+    startTime: finiteNumber(legacyTask?.["startTime"]) ?? job.createdAt,
+    outputOffset:
+      attempt?.outputOffset ??
+      nonNegativeInteger(legacyTask?.["outputOffset"]) ??
+      nonNegativeInteger(legacyTaskStore?.["outputOffset"]) ??
+      0,
+    notified:
+      booleanValue(legacyTask?.["notified"]) ??
+      booleanValue(legacyTaskStore?.["notified"]) ??
+      false,
+    ...(job.toolUseId ? { toolUseId: job.toolUseId } : {}),
+    ...((attempt?.outputPath ?? job.outputPath)
+      ? { outputFile: attempt?.outputPath ?? job.outputPath }
+      : {}),
+    ...(job.terminalAt !== undefined ? { endTime: job.terminalAt } : {}),
+    ...((job.error ?? attempt?.error) ? { error: job.error ?? attempt?.error } : {}),
+    data,
+  };
+}
+
+function taskStatusFromJob(status: JobStatus): TaskStatus {
+  if (status === "queued") return "pending";
+  if (status === "running") return "running";
+  if (status === "succeeded") return "completed";
+  if (status === "cancelled") return "killed";
+  return "failed";
+}
+
+function taskTypeFromJob(
+  job: JobRecord,
+  legacyTask: Record<string, unknown> | undefined,
+): TaskType {
+  const legacyType = legacyTask?.["type"];
+  if (isTaskType(legacyType)) return legacyType;
+  if (isTaskType(job.type)) return job.type;
+  return job.type === "worker" ? "local_agent" : "local_workflow";
+}
+
+function isTaskType(value: unknown): value is TaskType {
+  return (
+    value === "local_bash" ||
+    value === "local_agent" ||
+    value === "remote_agent" ||
+    value === "local_workflow" ||
+    value === "monitor_mcp"
+  );
+}
+
+function recordData(
+  data: Record<string, unknown> | undefined,
+  key: string,
+): Record<string, unknown> | undefined {
+  const value = data?.[key];
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function finiteNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function nonNegativeInteger(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
+function booleanValue(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined;
 }
 
 function terminalResult(snapshot: TaskSnapshot): Record<string, unknown> {

@@ -4,7 +4,12 @@ import { logger } from "../observability/logger.js";
 import { TaskRegistry, type TaskSnapshot } from "./task-registry.js";
 import { TaskStore } from "./task-store.js";
 import { JobService } from "./job-service.js";
-import { RuntimeTaskMirror, type RuntimeTaskMirrorOptions } from "./runtime-task-mirror.js";
+import {
+  materializeRuntimeTaskSnapshot,
+  materializeRuntimeTaskSnapshots,
+  RuntimeTaskMirror,
+  type RuntimeTaskMirrorOptions,
+} from "./runtime-task-mirror.js";
 import { WorktreeMergeQueue, type WorktreeMergeSnapshot } from "./merge-queue.js";
 import {
   WorktreeSupervisor,
@@ -49,14 +54,17 @@ export class TaskHostRuntime {
     this.taskStore = new TaskStore({
       filePath: join(repoRoot, ".claw", "tasks", "state.json"),
     });
-    this.taskStore.loadInto(this.taskRegistry);
-    this.taskStore.bind(this.taskRegistry);
     this.jobService.reconcileExpiredJobs();
+    this.taskRegistry.hydrate(materializeRuntimeTaskSnapshots(this.jobService), {
+      preserveNonTerminal: true,
+    });
     this.runtimeMirror = new RuntimeTaskMirror(
       this.taskRegistry,
       this.jobService,
       runtimeMirrorOptions,
     );
+    // SQLite 先接收 Registry 变更，TaskStore 只在其后写兼容快照。
+    this.taskStore.bind(this.taskRegistry);
     this.mergeQueue = new WorktreeMergeQueue();
     this.supervisor = new WorktreeSupervisor({
       taskRegistry: this.taskRegistry,
@@ -101,11 +109,12 @@ export class TaskHostRuntime {
   }
 
   list(): TaskSnapshot[] {
-    return this.taskRegistry.list();
+    return materializeRuntimeTaskSnapshots(this.jobService);
   }
 
   get(taskId: string): TaskSnapshot | undefined {
-    return this.taskRegistry.get(taskId);
+    const durable = this.jobService.get(taskId);
+    return durable ? materializeRuntimeTaskSnapshot(durable) : undefined;
   }
 
   tail(taskId: string, maxChars?: number): string {
