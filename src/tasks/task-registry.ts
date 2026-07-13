@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 
 export type TaskType =
   | "local_bash"
@@ -175,6 +176,23 @@ export class TaskRegistry {
     options: RestoreTasksOptions = {},
   ): RestoreTasksResult {
     return this.restore(snapshots, options);
+  }
+
+  /**
+   * Replace one process-local presentation snapshot from an authoritative store.
+   * Equality is checked before emitting so periodic reconciliation stays idempotent.
+   */
+  replaceFromAuthority(snapshot: TaskSnapshot): boolean {
+    const current = this.tasks.get(snapshot.taskId);
+    if (current && isDeepStrictEqual(current.snapshot, snapshot)) return false;
+
+    const stored: StoredTask = {
+      snapshot: cloneSnapshot(snapshot),
+      order: current?.order ?? this.nextOrder++,
+    };
+    this.tasks.set(snapshot.taskId, stored);
+    this.emit(stored.snapshot);
+    return true;
   }
 
   start(taskId: string, input: UpdateTaskInput = {}): TaskSnapshot {

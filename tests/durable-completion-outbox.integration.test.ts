@@ -1,9 +1,9 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { SessionManager } from "../src/engine/session.js";
 import { JobService } from "../src/tasks/job-service.js";
 import { TaskHostRuntime } from "../src/tasks/task-runtime.js";
@@ -246,6 +246,108 @@ describe("durable completion outbox integration", () => {
       await taskRuntime.close();
     }
   });
+
+  it("活 TUI 内将 lease 过期收口同步到兼容视图并幂等唤醒 owner", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pico-live-expired-completion-"));
+    cleanups.push(root);
+    const repo = join(root, "repo");
+    await mkdir(repo);
+    await git(["init", "-b", "main"], repo);
+    await git(["config", "user.name", "Pico Integration"], repo);
+    await git(["config", "user.email", "pico@example.test"], repo);
+    await writeFile(join(repo, ".gitignore"), ".claw/\n.worktrees/\n", "utf8");
+    await writeFile(join(repo, "README.md"), "live completion\n", "utf8");
+    await git(["add", "."], repo);
+    await git(["commit", "-m", "initial"], repo);
+
+    let now = 1_000;
+    const producer = new JobService({ workDir: repo, ownerId: "expired-host", now: () => now });
+    const job = producer.dispatch({
+      jobId: "job-live-expired",
+      type: "local_agent",
+      executionClass: "host_bound",
+      completionPolicy: "required",
+      description: "live expired delegation",
+      ownerSessionId: "owner-session",
+      data: { activityIds: ["activity-live-expired"] },
+    });
+    producer.start(job.jobId, {
+      expectedVersion: job.version,
+      attemptId: "attempt-live-expired",
+      leaseTtlMs: 100,
+    });
+    producer.close();
+
+    const taskRuntime = await TaskHostRuntime.create({
+      workDir: repo,
+      reconcileIntervalMs: 10,
+      now: () => now,
+    });
+    const session = await new SessionManager().getOrCreate("owner-session", repo, {
+      persistence: true,
+    });
+    const tuiRuntime = await createTuiRuntimeState({
+      workDir: repo,
+      sessionId: session.id,
+      session,
+      taskHostRuntime: taskRuntime,
+      completionPollIntervalMs: 10,
+    });
+    const pendingSpy = vi.spyOn(taskRuntime.jobService, "pendingCompletions");
+    let wakeCount = 0;
+    const unsubscribe = tuiRuntime.delegationCompletionQueue.subscribe(() => wakeCount++);
+    try {
+      now = 1_101;
+      await waitUntil(
+        () =>
+          taskRuntime.jobService.get(job.jobId)?.job.status === "interrupted" &&
+          tuiRuntime.delegationCompletionQueue.hasPending,
+      );
+
+      expect(taskRuntime.taskRegistry.get(job.jobId)).toMatchObject({
+        status: "failed",
+        error: "owner_lost",
+        data: { runtimeStatus: "interrupted" },
+      });
+      const compatibility = JSON.parse(
+        await readFile(join(repo, ".claw", "tasks", "state.json"), "utf8"),
+      ) as { tasks: Array<{ taskId: string; status: string; data?: Record<string, unknown> }> };
+      expect(compatibility.tasks).toContainEqual(
+        expect.objectContaining({
+          taskId: job.jobId,
+          status: "failed",
+          data: expect.objectContaining({ runtimeStatus: "interrupted" }),
+        }),
+      );
+      expect(wakeCount).toBe(1);
+
+      const pending = tuiRuntime.delegationCompletionQueue.pendingCompletionSeqs();
+      expect(pending).toHaveLength(1);
+      await tuiRuntime.delegationCompletionQueue.deliverPendingCompletionSeqs(pending);
+      await delay(30);
+      expect(tuiRuntime.delegationCompletionQueue.hasPending).toBe(false);
+      expect(wakeCount).toBe(1);
+      expect(
+        taskRuntime.jobService.pendingCompletions({ ownerSessionId: "owner-session" }),
+      ).toEqual([]);
+      expect(
+        session
+          .getHistory()
+          .filter((message) => message.providerData?.picoKind === "subagent_completion"),
+      ).toHaveLength(1);
+
+      await tuiRuntime.dispose();
+      const callsAfterDispose = pendingSpy.mock.calls.length;
+      await delay(30);
+      expect(pendingSpy).toHaveBeenCalledTimes(callsAfterDispose);
+    } finally {
+      unsubscribe();
+      pendingSpy.mockRestore();
+      await tuiRuntime.dispose();
+      await session.close();
+      await taskRuntime.close();
+    }
+  });
 });
 
 function completionEnvelope(
@@ -289,4 +391,16 @@ function finishOptional(service: JobService, envelope: DelegationCompletionEnvel
 
 async function git(args: readonly string[], cwd: string): Promise<void> {
   await exec("git", [...args], { cwd, encoding: "utf8" });
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitUntil(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error("timed out waiting for live completion");
+    await delay(10);
+  }
 }

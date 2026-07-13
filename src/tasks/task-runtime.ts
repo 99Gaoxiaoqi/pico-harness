@@ -25,6 +25,7 @@ export interface TaskHostRuntimeOptions {
   repoRoot?: string;
   runtimeMirror?: RuntimeTaskMirrorOptions;
   reconcileIntervalMs?: number;
+  now?: () => number;
 }
 
 /** TUI-lifetime owner for durable task state and isolated worktree execution. */
@@ -74,7 +75,7 @@ export class TaskHostRuntime {
     this.reconcileTimer = setInterval(
       () => {
         try {
-          this.jobService.reconcileExpiredJobs();
+          this.reconcileRuntimeAuthority();
         } catch (error) {
           logger.warn({ error: String(error) }, "[runtime-store] 过期任务收口失败");
         }
@@ -94,6 +95,7 @@ export class TaskHostRuntime {
     const { service } = await JobService.create({
       workDir: repoRoot,
       ownerId: `tui-host:${process.pid}`,
+      ...(options.now ? { now: options.now } : {}),
     });
     return new TaskHostRuntime(
       repoRoot,
@@ -153,6 +155,14 @@ export class TaskHostRuntime {
     const merged = this.mergeQueue.get(taskId);
     if (merged?.status !== "merged") throw new Error(`任务 ${taskId} 尚未完成合并`);
     await this.supervisor.cleanup(taskId, { merged: true });
+  }
+
+  /** SQLite 先收口，再幂等刷新进程内视图与 legacy TaskStore 投影。 */
+  private reconcileRuntimeAuthority(): void {
+    this.jobService.reconcileExpiredJobs();
+    for (const snapshot of materializeRuntimeTaskSnapshots(this.jobService)) {
+      this.taskRegistry.replaceFromAuthority(snapshot);
+    }
   }
 
   private async finalizeWorktree(
