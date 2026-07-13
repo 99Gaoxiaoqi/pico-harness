@@ -13,6 +13,7 @@ import {
 } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { writeJsonAtomic } from "./atomic-json.js";
+import { isFileHistoryMutationLeaseHeld } from "./file-history-mutation-lease.js";
 import type { StorageOperation, StorageOperationState } from "./operation-journal.js";
 
 const LEGACY_OPERATION_REFERENCE_INDEX_VERSION = 1 as const;
@@ -80,11 +81,13 @@ export interface OperationReferenceIndexScan {
  */
 export class OperationReferenceIndex {
   readonly directory: string;
+  private readonly baseDir: string;
   private readonly protocolPath: string;
   private readonly eligibilityDirectory: string;
 
   constructor(baseDir: string) {
-    this.directory = join(resolve(baseDir), ".operation-references");
+    this.baseDir = resolve(baseDir);
+    this.directory = join(this.baseDir, ".operation-references");
     this.protocolPath = join(this.directory, GC_PROTOCOL_FILE_NAME);
     this.eligibilityDirectory = join(this.directory, GC_ELIGIBILITY_DIRECTORY_NAME);
   }
@@ -132,6 +135,43 @@ export class OperationReferenceIndex {
     ) {
       throw new Error(`Conflicting or malformed blob GC eligibility marker: ${path}`);
     }
+  }
+
+  /**
+   * 在删除 blob 前持久撤销其 GC 资格。调用方必须持有共享 mutation
+   * lease；若 marker 已不存在则返回 false，调用方必须保留 blob。
+   */
+  async revokeBlobGcEligibility(digest: string): Promise<boolean> {
+    assertSha256Digest(digest);
+    if (!isFileHistoryMutationLeaseHeld(this.baseDir)) {
+      throw new Error("Blob GC eligibility can only be revoked while holding the mutation lease");
+    }
+    const protocol = await this.readProtocolRequired();
+    const path = this.eligibilityMarkerPath(digest);
+    try {
+      const parsed = parseBlobGcEligibilityMarker(await readRegularJson(path));
+      if (
+        !parsed ||
+        parsed.digest !== digest ||
+        parsed.protocolGeneration !== protocol.generation
+      ) {
+        throw new Error(`Conflicting or malformed blob GC eligibility marker: ${path}`);
+      }
+    } catch (error) {
+      if (isNodeCode(error, "ENOENT")) return false;
+      throw error;
+    }
+
+    // marker 的 unlink + 目录 sync 必须先于 blob 删除持久化。任意一步失败
+    // 都会让调用方停在 blob 删除之前，最多遗留不可回收数据。
+    try {
+      await unlink(path);
+    } catch (error) {
+      if (isNodeCode(error, "ENOENT")) return false;
+      throw error;
+    }
+    await syncDirectoryStrict(dirname(path));
+    return true;
   }
 
   async scan(): Promise<OperationReferenceIndexScan> {
@@ -472,6 +512,17 @@ async function syncDirectory(directory: string): Promise<void> {
     await handle.sync();
   } catch (error) {
     if (!isUnsupportedDirectorySync(error)) throw error;
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+/** GC marker 撤销的目录同步不能降级为 best-effort。 */
+async function syncDirectoryStrict(directory: string): Promise<void> {
+  let handle: FileHandle | undefined;
+  try {
+    handle = await open(directory, constants.O_RDONLY);
+    await handle.sync();
   } finally {
     await handle?.close().catch(() => undefined);
   }

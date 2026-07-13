@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import Database from "better-sqlite3";
 import { ToolResultArtifactStore } from "../src/context/artifact-store.js";
 import { createSessionIdentity } from "../src/engine/session-identity.js";
@@ -16,6 +16,7 @@ import {
   resolveFileHistoryBlobPath,
 } from "../src/storage/file-history-blob-store.js";
 import { withFileHistoryMutationLease } from "../src/storage/file-history-mutation-lease.js";
+import { OperationReferenceIndex } from "../src/storage/operation-reference-index.js";
 import { StorageOperationJournal } from "../src/storage/operation-journal.js";
 import { LeaseConflictError } from "../src/storage/owner-lease.js";
 import { RewindOperationCoordinator } from "../src/storage/rewind-operation-coordinator.js";
@@ -30,6 +31,7 @@ describe("storage governance integration", () => {
   const cleanup: string[] = [];
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     await Promise.all(cleanup.splice(0).map((path) => rm(path, { recursive: true, force: true })));
   });
 
@@ -361,6 +363,137 @@ describe("storage governance integration", () => {
     await expect(stat(legacyBlobPath)).resolves.toBeDefined();
   });
 
+  it("revokes a deleted blob marker so a legacy recreation stays outside GC eligibility", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pico-storage-gc-legacy-recreation-"));
+    cleanup.push(root);
+    const workDirA = join(root, "workspace-a");
+    const workDirB = join(root, "workspace-b");
+    const fileHistoryDir = join(root, "shared-file-history");
+    const contents = Buffer.from("legacy writer recreates this digest", "utf8");
+    const blobs = new FileHistoryBlobStore({ baseDir: fileHistoryDir });
+    const first = await blobs.put(contents);
+    await utimes(first.path, new Date(0), new Date(0));
+    const collector = new ContentAddressedBlobGarbageCollector({
+      workDir: workDirA,
+      baseDir: fileHistoryDir,
+      gracePeriodMs: 0,
+      now: () => 120_000,
+    });
+
+    await expect(collector.run({ apply: true })).resolves.toMatchObject({
+      deletedPaths: [first.path],
+    });
+    await expect(stat(first.path)).rejects.toMatchObject({ code: "ENOENT" });
+
+    // 模拟升级前 writer：它会直接重建 blob 和本地 journal，但不会创建
+    // 新协议的 eligibility marker 或全局 operation reference index。
+    await mkdir(dirname(first.path), { recursive: true });
+    await writeFile(first.path, contents);
+    await utimes(first.path, new Date(0), new Date(0));
+    await writeLegacyRewindJournal({
+      workDir: workDirB,
+      operationId: "legacy-recreated-rewind",
+      digest: first.ref.digest,
+      sizeBytes: first.ref.sizeBytes,
+    });
+
+    const second = await collector.run({ apply: true });
+    expect(second).toMatchObject({
+      blocked: false,
+      candidatePaths: [],
+      deletedPaths: [],
+      retainedPaths: [first.path],
+    });
+    await expect(stat(first.path)).resolves.toBeDefined();
+  });
+
+  it("keeps the blob when eligibility revocation fails before deletion", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pico-storage-gc-revoke-failure-"));
+    cleanup.push(root);
+    const workDir = join(root, "workspace");
+    const fileHistoryDir = join(root, "file-history");
+    const blobs = new FileHistoryBlobStore({ baseDir: fileHistoryDir });
+    const blob = await blobs.put("marker deletion must fail closed");
+    await utimes(blob.path, new Date(0), new Date(0));
+    vi.spyOn(OperationReferenceIndex.prototype, "revokeBlobGcEligibility").mockRejectedValueOnce(
+      new Error("simulated marker unlink failure"),
+    );
+
+    await expect(
+      new ContentAddressedBlobGarbageCollector({
+        workDir,
+        baseDir: fileHistoryDir,
+        gracePeriodMs: 0,
+        now: () => 120_000,
+      }).run({ apply: true }),
+    ).rejects.toThrow("simulated marker unlink failure");
+
+    await expect(stat(blob.path)).resolves.toBeDefined();
+    await expect(new OperationReferenceIndex(fileHistoryDir).scan()).resolves.toMatchObject({
+      failures: [],
+      gcEligibleDigests: [blob.ref.digest],
+    });
+  });
+
+  it("serializes same-digest recreation behind an applied GC mutation", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pico-storage-gc-recreate-race-"));
+    cleanup.push(root);
+    const workDir = join(root, "workspace");
+    const fileHistoryDir = join(root, "file-history");
+    const contents = Buffer.from("same digest crosses a GC boundary", "utf8");
+    const blobs = new FileHistoryBlobStore({ baseDir: fileHistoryDir });
+    const original = await blobs.put(contents);
+    await utimes(original.path, new Date(0), new Date(0));
+    const collector = new ContentAddressedBlobGarbageCollector({
+      workDir,
+      baseDir: fileHistoryDir,
+      gracePeriodMs: 0,
+      now: () => 120_000,
+    });
+
+    let announceRevocation!: () => void;
+    let releaseRevocation!: () => void;
+    const revocationEntered = new Promise<void>((resolveEntered) => {
+      announceRevocation = resolveEntered;
+    });
+    const revocationGate = new Promise<void>((resolveGate) => {
+      releaseRevocation = resolveGate;
+    });
+    const revoke = OperationReferenceIndex.prototype.revokeBlobGcEligibility;
+    vi.spyOn(OperationReferenceIndex.prototype, "revokeBlobGcEligibility").mockImplementation(
+      async function (this: OperationReferenceIndex, digest: string) {
+        announceRevocation();
+        await revocationGate;
+        return revoke.call(this, digest);
+      },
+    );
+
+    const collection = collector.run({ apply: true });
+    await revocationEntered;
+    let recreationSettled = false;
+    const recreation = blobs.put(contents).then((result) => {
+      recreationSettled = true;
+      return result;
+    });
+    let settledWhileGcHeldLease: boolean;
+    try {
+      await new Promise<void>((resolveImmediate) => setImmediate(resolveImmediate));
+      settledWhileGcHeldLease = recreationSettled;
+    } finally {
+      releaseRevocation();
+    }
+
+    const [collected, recreated] = await Promise.all([collection, recreation]);
+    expect(settledWhileGcHeldLease).toBe(false);
+    expect(collected.deletedPaths).toEqual([original.path]);
+    expect(recreated).toMatchObject({ path: original.path, created: true });
+    await expect(stat(recreated.path)).resolves.toBeDefined();
+    await expect(new OperationReferenceIndex(fileHistoryDir).scan()).resolves.toMatchObject({
+      failures: [],
+      gcEligibleDigests: [original.ref.digest],
+    });
+  });
+
   it("keeps a needs_attention rewind as a global GC root across workspaces", async () => {
     const root = await mkdtemp(join(tmpdir(), "pico-storage-gc-needs-attention-"));
     cleanup.push(root);
@@ -639,6 +772,50 @@ async function writeManifest(
       trackedFiles: [],
       snapshotSequence: 1,
       fileVersions: [],
+    })}\n`,
+    "utf8",
+  );
+}
+
+async function writeLegacyRewindJournal(options: {
+  workDir: string;
+  operationId: string;
+  digest: string;
+  sizeBytes: number;
+}): Promise<void> {
+  const path = join(options.workDir, ".claw", "storage-operations", `${options.operationId}.json`);
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(
+    path,
+    `${JSON.stringify({
+      schemaVersion: 1,
+      operationId: options.operationId,
+      version: 1,
+      state: "prepared",
+      sessionId: "legacy-session",
+      createdAt: "2026-07-12T00:00:00.000Z",
+      updatedAt: "2026-07-12T00:00:00.000Z",
+      kind: "rewind",
+      mode: "code",
+      precondition: {
+        sessionLastSeq: 1,
+        effectiveHistoryDigest: createHash("sha256").update("legacy").digest("hex"),
+        fileHistoryRevision: 1,
+      },
+      target: { messageId: "legacy-message", messageIndex: 0 },
+      files: [
+        {
+          rootId: "workspace",
+          relativePath: "src/legacy.ts",
+          before: { kind: "missing" },
+          after: {
+            kind: "file",
+            blobSha256: options.digest,
+            sizeBytes: options.sizeBytes,
+            mode: 0o644,
+          },
+        },
+      ],
     })}\n`,
     "utf8",
   );
