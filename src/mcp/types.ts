@@ -135,7 +135,8 @@ export interface McpToolResult {
  * MCP 工具中止能证明的物理边界。
  *
  * process_tree: pico 持有本地 server 进程树，可在调用 settle 前确认其退出。
- * transport: 只能中止本地 HTTP/SSE IO 并发送 MCP cancellation；远程副作是协作式的。
+ * transport: 只能确认传输层/平台尽力中止；包括 HTTP/SSE 本地 IO
+ *   与 Windows stdio taskkill acknowledgement，都不对副作的物理停止做强承诺。
  */
 export type McpToolCancellationScope = "process_tree" | "transport";
 

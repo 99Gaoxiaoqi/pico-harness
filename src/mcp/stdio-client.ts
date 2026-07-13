@@ -270,6 +270,29 @@ export class StdioMcpClient implements McpClient {
       }
     });
 
+    const stdin = child.stdin;
+    const onStdinError = (err: Error): void => {
+      const safeError = new Error(
+        redactSensitiveText(`MCP server "${this.config.name}" stdin 错误: ${err.message}`),
+      );
+      if (this.child !== child || this.closed || this.closing || this.hasAbortingRequest()) {
+        // close/abort 主动关闭 pipe 时 EPIPE 是预期竞态；吸收 error 事件避免崩溃。
+        logger.debug(
+          { server: this.config.name, err: safeError.message },
+          `[MCP] 关闭期间 stdin error 已吸收`,
+        );
+        return;
+      }
+      logger.error(
+        { server: this.config.name, err: safeError.message },
+        `[MCP] stdin error: ${safeError.message}`,
+      );
+      this.connected = false;
+      this.startPhysicalTermination(safeError, Promise.resolve(), "error");
+    };
+    stdin?.on("error", onStdinError);
+    stdin?.once("close", () => stdin.removeListener("error", onStdinError));
+
     child.on("error", (err) => {
       const safeError = new Error(
         redactSensitiveText(`MCP server "${this.config.name}" 子进程错误: ${err.message}`),
@@ -453,7 +476,11 @@ export class StdioMcpClient implements McpClient {
           if (current?.abortReason) return;
           this.abortPendingRequest(
             id,
-            new Error(`MCP server "${this.config.name}" 写入 stdin 失败: ${err.message}`),
+            new Error(
+              redactSensitiveText(
+                `MCP server "${this.config.name}" 写入 stdin 失败: ${err.message}`,
+              ),
+            ),
           );
         }
       });
@@ -472,7 +499,7 @@ export class StdioMcpClient implements McpClient {
     this.child.stdin.write(line);
   }
 
-  /** 将 cancellation notification 交给 OS pipe 后再终止 server。 */
+  /** 将 cancellation notification 交给 OS pipe；具体终止顺序由平台边界决定。 */
   private notifyFlushed(method: string, params: Record<string, unknown>): Promise<void> {
     const stdin = this.child?.stdin;
     if (!stdin?.writable) return Promise.resolve();
@@ -491,10 +518,7 @@ export class StdioMcpClient implements McpClient {
     });
   }
 
-  /**
-   * stdio 工具的中止不仅 reject 本地 Promise：先发 MCP cancellation，
-   * 再终止整个本地 server 进程树。pending 只会在 exit 事件后被拒绝。
-   */
+  /** stdio 工具中止会发 MCP cancellation 并收口本地 server 进程树。 */
   private abortPendingRequest(id: number, reason: Error): void {
     const pending = this.pending.get(id);
     if (!pending || pending.abortReason) return;
@@ -539,9 +563,13 @@ export class StdioMcpClient implements McpClient {
       }
       return;
     }
-    const termination = terminateProcessTree(child, this.hasPendingToolCall());
+    const requireTreeProof = this.hasPendingToolCall();
+    // POSIX 先把 cancellation 交给 pipe 再终止进程组。Windows tools/call
+    // 为避免根进程先退出而无法 taskkill /T，与 cancellation flush 并行启动。
+    const concurrentTermination =
+      isWindows && requireTreeProof ? terminateProcessTree(child, requireTreeProof) : undefined;
     await cancellation;
-    const stopped = await termination;
+    const stopped = await (concurrentTermination ?? terminateProcessTree(child, requireTreeProof));
     if (!stopped) {
       // 不能证明物理副作已停止时 fail-closed：保持 pending，不伪造完成。
       logger.error(
@@ -551,6 +579,7 @@ export class StdioMcpClient implements McpClient {
       return;
     }
     // exit/error listener 在终止期间故意不 settle；只有进程组消失后才收口。
+    this.removeAllListeners();
     this.failAllPending(reason);
     if (this.child === child) this.child = undefined;
     if (!this.closed && !this.closing) {
