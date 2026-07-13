@@ -1,5 +1,6 @@
-import { lstat, readFile, readdir, stat, unlink } from "node:fs/promises";
-import { basename, join, resolve } from "node:path";
+import { constants } from "node:fs";
+import { lstat, open, readFile, readdir, stat, unlink, type FileHandle } from "node:fs/promises";
+import { basename, dirname, join, resolve } from "node:path";
 import { createFileHistoryState, fileHistoryLoadState } from "../safety/file-history.js";
 import { withFileHistoryMutationLease } from "./file-history-mutation-lease.js";
 import { OperationReferenceIndex } from "./operation-reference-index.js";
@@ -78,6 +79,7 @@ export class ContentAddressedBlobGarbageCollector {
     const retainedPaths: string[] = [];
     const candidatePaths: string[] = [];
     const deletedPaths: string[] = [];
+    const operationReferenceIndex = new OperationReferenceIndex(this.baseDir);
     const blobPaths = await this.listBlobPaths();
     if (mark.blockedReasons.length > 0) {
       return {
@@ -101,11 +103,20 @@ export class ContentAddressedBlobGarbageCollector {
         retainedPaths.push(path);
         continue;
       }
-      candidatePaths.push(path);
       if (apply) {
         await lease?.assertOwnership();
+        // marker 是 blob 当前 incarnation 的回收资格。必须先持久撤销，
+        // 再删除 blob；否则同 digest 被旧 writer 重建后会继承旧资格。
+        if (!(await operationReferenceIndex.revokeBlobGcEligibility(digest))) {
+          retainedPaths.push(path);
+          continue;
+        }
+        candidatePaths.push(path);
         await unlink(path);
+        await syncDirectory(dirname(path));
         deletedPaths.push(path);
+      } else {
+        candidatePaths.push(path);
       }
     }
     return {
@@ -239,6 +250,18 @@ export class ContentAddressedBlobGarbageCollector {
   }
 }
 
+async function syncDirectory(directory: string): Promise<void> {
+  let handle: FileHandle | undefined;
+  try {
+    handle = await open(directory, constants.O_RDONLY);
+    await handle.sync();
+  } catch (error) {
+    if (!isUnsupportedDirectorySync(error)) throw error;
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
 async function collectReferencesFromTree(
   path: string,
   target: Set<string>,
@@ -320,6 +343,11 @@ async function readDirectoryEntries(path: string) {
 
 function isNodeCode(error: unknown, code: string): boolean {
   return error instanceof Error && "code" in error && error.code === code;
+}
+
+function isUnsupportedDirectorySync(error: unknown): boolean {
+  if (!(error instanceof Error) || !("code" in error)) return false;
+  return new Set(["EACCES", "EINVAL", "EISDIR", "ENOTSUP", "EPERM"]).has(String(error.code));
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
