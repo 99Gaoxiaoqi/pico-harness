@@ -5,7 +5,10 @@ import { describe, expect, it } from "vitest";
 import { AgentEngine } from "../src/engine/loop.js";
 import { SilentReporter } from "../src/engine/reporter.js";
 import { Session } from "../src/engine/session.js";
+import { HttpMcpClient } from "../src/mcp/http-client.js";
 import { McpConnectionManager } from "../src/mcp/manager.js";
+import { StdioMcpClient } from "../src/mcp/stdio-client.js";
+import type { McpClient } from "../src/mcp/types.js";
 import type { LLMProvider } from "../src/provider/interface.js";
 import type { Message } from "../src/schema/message.js";
 import { ToolRegistry } from "../src/tools/registry-impl.js";
@@ -22,6 +25,48 @@ class RecordingReporter extends SilentReporter {
 
   override onToolOutput(_name: string, _stream: "stdout" | "stderr", chunk: string): void {
     this.output.push(chunk);
+  }
+}
+
+class RefusingCloseMcpClient implements McpClient {
+  readonly toolCancellationScope = "process_tree" as const;
+  closeCalls = 0;
+  private closeHandler: ((err?: Error) => void) | undefined;
+
+  async connect(): Promise<void> {}
+
+  async listTools() {
+    return [{ name: "write", description: "write", inputSchema: { type: "object" } }];
+  }
+
+  async callTool() {
+    return { content: [], isError: false };
+  }
+
+  async listResources() {
+    return { resources: [] };
+  }
+
+  async readResource() {
+    return { contents: [] };
+  }
+
+  async listPrompts() {
+    return { prompts: [] };
+  }
+
+  async getPrompt() {
+    return { messages: [] };
+  }
+
+  onClose(handler: (err?: Error) => void): void {
+    this.closeHandler = handler;
+  }
+
+  async close(): Promise<void> {
+    this.closeCalls++;
+    this.closeHandler?.(new Error("根进程 close 事件"));
+    throw new Error("进程树未能物理收口");
   }
 }
 
@@ -134,6 +179,283 @@ describe("MCP abort integration", () => {
       await rm(workDir, { recursive: true, force: true });
     }
   });
+
+  it("HTTP close 共享同一收口 Promise，等待工具与非工具 transport 并拒绝新请求", async () => {
+    const originalFetch = globalThis.fetch;
+    const methods: string[] = [];
+    const held = new Map<string, { id: number | string; resolve: (response: Response) => void }>();
+    const client = new HttpMcpClient({
+      name: "http-close",
+      transport: "http",
+      url: "https://mcp.example.test/rpc",
+      toolTimeoutMs: 5_000,
+    });
+
+    globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+      const message = JSON.parse(String(init?.body ?? "{}")) as {
+        id?: number | string;
+        method?: string;
+      };
+      const method = message.method ?? "unknown";
+      methods.push(method);
+      if (method === "initialize") {
+        return rpcResponse(message.id!, {
+          protocolVersion: "2024-11-05",
+          capabilities: {},
+          serverInfo: { name: "http-close", version: "1" },
+        });
+      }
+      if (method === "resources/list" || method === "tools/call") {
+        return new Promise<Response>((resolveResponse) => {
+          held.set(method, { id: message.id!, resolve: resolveResponse });
+        });
+      }
+      return notificationResponse();
+    }) as typeof fetch;
+
+    try {
+      await client.connect();
+      const resources = client.listResources();
+      const resourceOutcome = resources.catch((err: unknown) => err);
+      const toolCall = client.callTool("write", {});
+      const toolOutcome = toolCall.catch((err: unknown) => err);
+      await waitUntil(() => held.size === 2);
+
+      const closing = client.close();
+      const concurrentClose = client.close();
+      expect(concurrentClose).toBe(closing);
+      let closeSettled = false;
+      void closing.then(
+        () => {
+          closeSettled = true;
+        },
+        () => {
+          closeSettled = true;
+        },
+      );
+
+      const requestCountAfterClose = methods.length;
+      await expect(client.listTools()).rejects.toThrow(/已关闭/);
+      expect(methods).toHaveLength(requestCountAfterClose);
+      await flushMicrotasks();
+      expect(closeSettled).toBe(false);
+
+      const heldResources = held.get("resources/list");
+      const heldTool = held.get("tools/call");
+      if (!heldResources || !heldTool) throw new Error("未捕获并发 HTTP 请求");
+      heldResources.resolve(rpcResponse(heldResources.id, { resources: [] }));
+      heldTool.resolve(
+        rpcResponse(heldTool.id, {
+          content: [{ type: "text", text: "too late" }],
+          isError: false,
+        }),
+      );
+
+      await closing;
+      expect(await resourceOutcome).toBeInstanceOf(Error);
+      expect(await toolOutcome).toBeInstanceOf(Error);
+      expect(client.close()).toBe(closing);
+    } finally {
+      for (const request of held.values()) request.resolve(rpcResponse(request.id, {}));
+      await client.close().catch(() => {});
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("legacy SSE close 等待已就绪的后台流真正结束", async () => {
+    const originalFetch = globalThis.fetch;
+    let streamController: ReadableStreamDefaultController<Uint8Array> | undefined;
+    let streamClosed = false;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        streamController = controller;
+        controller.enqueue(new TextEncoder().encode("event: endpoint\ndata: /messages\n\n"));
+      },
+    });
+    const client = new HttpMcpClient({
+      name: "legacy-sse",
+      transport: "sse",
+      url: "https://mcp.example.test/events",
+    });
+
+    globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+      if ((init?.method ?? "GET") === "GET") {
+        return new Response(stream, { headers: { "Content-Type": "text/event-stream" } });
+      }
+      const message = JSON.parse(String(init?.body ?? "{}")) as {
+        id?: number | string;
+        method?: string;
+      };
+      if (message.method === "initialize") {
+        return rpcResponse(message.id!, {
+          protocolVersion: "2024-11-05",
+          capabilities: {},
+          serverInfo: { name: "legacy-sse", version: "1" },
+        });
+      }
+      return notificationResponse();
+    }) as typeof fetch;
+
+    try {
+      await client.connect();
+      const closing = client.close();
+      expect(client.close()).toBe(closing);
+      let closeSettled = false;
+      void closing.then(
+        () => {
+          closeSettled = true;
+        },
+        () => {
+          closeSettled = true;
+        },
+      );
+      await flushMicrotasks();
+      expect(closeSettled).toBe(false);
+
+      streamController?.close();
+      streamClosed = true;
+      await closing;
+    } finally {
+      if (!streamClosed) streamController?.close();
+      await client.close().catch(() => {});
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("legacy SSE 在 endpoint 就绪前 close 也会结束 connect", async () => {
+    const originalFetch = globalThis.fetch;
+    let streamController: ReadableStreamDefaultController<Uint8Array> | undefined;
+    let streamClosed = false;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        streamController = controller;
+      },
+    });
+    const client = new HttpMcpClient({
+      name: "starting-sse",
+      transport: "sse",
+      url: "https://mcp.example.test/events",
+    });
+    globalThis.fetch = (async () =>
+      new Response(stream, {
+        headers: { "Content-Type": "text/event-stream" },
+      })) as typeof fetch;
+
+    try {
+      const connecting = client.connect();
+      const connectionOutcome = connecting.catch((err: unknown) => err);
+      await waitUntil(() => streamController !== undefined);
+      const closing = client.close();
+
+      streamController?.close();
+      streamClosed = true;
+      await closing;
+      expect(await connectionOutcome).toBeInstanceOf(Error);
+    } finally {
+      if (!streamClosed) streamController?.close();
+      await client.close().catch(() => {});
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("manager 关闭失败时保留旧 client 并拒绝 reconnect/enable/load 创建新实例", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-mcp-close-failure-"));
+    const config = join(workDir, "mcp.json");
+    const replacementConfig = join(workDir, "replacement.json");
+    const clients: RefusingCloseMcpClient[] = [];
+    const registry = new ToolRegistry();
+    const manager = new McpConnectionManager(registry, {
+      clientFactory: () => {
+        const client = new RefusingCloseMcpClient();
+        clients.push(client);
+        return client;
+      },
+    });
+
+    try {
+      await writeFile(
+        config,
+        JSON.stringify({
+          mcpServers: { stubborn: { transport: "stdio", command: "unused" } },
+        }),
+      );
+      await writeFile(
+        replacementConfig,
+        JSON.stringify({
+          mcpServers: { replacement: { transport: "stdio", command: "unused" } },
+        }),
+      );
+      await manager.loadConfig(config);
+      await manager.connectAll();
+      expect(clients).toHaveLength(1);
+      expect(manager.getStatus().get("stubborn")?.status).toBe("connected");
+
+      await expect(manager.reconnect("stubborn")).rejects.toThrow(/物理收口/);
+      expect(clients).toHaveLength(1);
+      expect(manager.getStatus().get("stubborn")).toMatchObject({
+        status: "failed",
+        toolCount: 1,
+        error: expect.stringMatching(/物理收口/),
+      });
+      expect(registry.getAvailableTools()).toHaveLength(0);
+
+      await expect(manager.disable("stubborn")).rejects.toThrow(/物理收口/);
+      await expect(manager.enable("stubborn")).rejects.toThrow(/物理收口/);
+      expect(clients).toHaveLength(1);
+
+      await expect(manager.loadConfig(replacementConfig)).rejects.toBeInstanceOf(AggregateError);
+      expect(manager.getStatus().has("stubborn")).toBe(true);
+      expect(manager.getStatus().has("replacement")).toBe(false);
+      await expect(manager.closeAll()).rejects.toBeInstanceOf(AggregateError);
+      expect(clients[0]?.closeCalls).toBe(5);
+    } finally {
+      await rm(workDir, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.platform !== "win32")(
+    "Windows 根进程先退出且 taskkill 无法证明整树时，tools/call 保持 fail-closed",
+    async () => {
+      const workDir = await mkdtemp(join(tmpdir(), "pico-mcp-windows-proof-"));
+      const started = join(workDir, "started");
+      const workerPidFile = join(workDir, "worker.pid");
+      let workerPid: number | undefined;
+      const client = new StdioMcpClient({
+        name: "windows-proof",
+        transport: "stdio",
+        command: process.execPath,
+        args: [FIXTURE, "--started-file", started, "--worker-pid-file", workerPidFile],
+        toolTimeoutMs: 100,
+      });
+
+      try {
+        await client.connect();
+        expect(client.toolCancellationScope).toBe("transport");
+        let settled = false;
+        void client.callTool("exit_with_worker", {}).then(
+          () => {
+            settled = true;
+          },
+          () => {
+            settled = true;
+          },
+        );
+        await waitForFile(started);
+        await waitForFile(workerPidFile);
+        workerPid = Number(await readFile(workerPidFile, "utf8"));
+        await delay(300);
+
+        expect(settled).toBe(false);
+        expect(isProcessAlive(workerPid)).toBe(true);
+      } finally {
+        if (workerPid !== undefined && isProcessAlive(workerPid)) {
+          process.kill(workerPid, "SIGKILL");
+        }
+        await client.close().catch(() => {});
+        await rm(workDir, { recursive: true, force: true });
+      }
+    },
+  );
 });
 
 async function waitForFile(path: string): Promise<void> {
@@ -165,4 +487,29 @@ function isProcessAlive(pid: number): boolean {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
+}
+
+async function waitUntil(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error("timed out waiting for condition");
+    await delay(10);
+  }
+}
+
+function rpcResponse(id: number | string, result: unknown): Response {
+  return new Response(JSON.stringify({ jsonrpc: "2.0", id, result }), {
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+function notificationResponse(): Response {
+  return new Response(JSON.stringify({ jsonrpc: "2.0", result: {} }), {
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+async function flushMicrotasks(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
 }

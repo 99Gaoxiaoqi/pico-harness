@@ -69,6 +69,11 @@ function handleMessage(line) {
       tools: [
         { name: "hang", description: "hang", inputSchema: { type: "object" } },
         { name: "queued", description: "queued", inputSchema: { type: "object" } },
+        {
+          name: "exit_with_worker",
+          description: "exit after spawning worker",
+          inputSchema: { type: "object" },
+        },
       ],
     });
     return;
@@ -76,6 +81,13 @@ function handleMessage(line) {
   if (message.method !== "tools/call") return;
 
   const name = message.params?.name;
+  if (name === "exit_with_worker") {
+    const worker = spawnWorker();
+    writeMarker(values["worker-pid-file"], String(worker.pid));
+    writeMarker(values["started-file"], "worker-started-before-root-exit");
+    setImmediate(() => process.exit(1));
+    return;
+  }
   if (name === "queued") {
     writeMarker(values["queued-file"], "queued-started");
     respond(message.id, { content: [{ type: "text", text: "queued" }], isError: false });
@@ -83,14 +95,7 @@ function handleMessage(line) {
   }
   if (name !== "hang") return;
 
-  const workerArgs = [
-    import.meta.filename,
-    "--worker",
-    "--late-delay",
-    String(lateDelay),
-    ...(values["late-file"] ? ["--late-file", values["late-file"]] : []),
-  ];
-  const worker = spawn(process.execPath, workerArgs, { stdio: "ignore" });
+  const worker = spawnWorker();
   writeMarker(values["worker-pid-file"], String(worker.pid));
   writeMarker(values["started-file"], "hang-started");
 
@@ -101,6 +106,17 @@ function handleMessage(line) {
       isError: false,
     });
   }, lateDelay);
+}
+
+function spawnWorker() {
+  const workerArgs = [
+    import.meta.filename,
+    "--worker",
+    "--late-delay",
+    String(lateDelay),
+    ...(values["late-file"] ? ["--late-file", values["late-file"]] : []),
+  ];
+  return spawn(process.execPath, workerArgs, { stdio: "ignore" });
 }
 
 function respond(id, result) {

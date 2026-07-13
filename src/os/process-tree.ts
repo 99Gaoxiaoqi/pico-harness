@@ -11,13 +11,21 @@ const TASKKILL_TIMEOUT_MS = 1_000;
 export async function signalProcessTree(
   child: ChildProcess,
   signal: NodeJS.Signals,
+  options: { requireWindowsTreeProof?: boolean } = {},
 ): Promise<boolean> {
   const pid = child.pid;
-  if (pid === undefined || child.exitCode !== null || child.signalCode !== null) return true;
+  const childExited = child.exitCode !== null || child.signalCode !== null;
+
+  if (pid === undefined) return options.requireWindowsTreeProof !== true;
 
   if (isWindows) {
+    // tools/call 可能留下孙进程；根进程已退出不能单独证明整树已消失。
+    // 也不能对已退出的旧 PID 运行 taskkill，避免 PID 复用时误杀无关进程。
+    if (childExited) return options.requireWindowsTreeProof !== true;
     if (await runTaskkill(pid)) return true;
+    if (options.requireWindowsTreeProof === true) return false;
   } else {
+    if (childExited) return true;
     try {
       process.kill(-pid, signal);
       return true;
