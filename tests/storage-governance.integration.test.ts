@@ -108,6 +108,38 @@ describe("storage governance integration", () => {
     await expect(doctor.scan()).resolves.toMatchObject({ healthy: true, findings: [] });
   });
 
+  it("accepts a strictly replayable legacy Session and recommends non-destructive migration", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pico-storage-doctor-legacy-"));
+    cleanup.push(root);
+    const workDir = join(root, "workspace");
+    const sessionPath = join(workDir, ".claw", "sessions", "legacy.jsonl");
+    await mkdir(dirname(sessionPath), { recursive: true });
+    await writeFile(
+      sessionPath,
+      `${JSON.stringify({
+        type: "message",
+        seq: 0,
+        message: { role: "user", content: "legacy but valid" },
+      })}\n`,
+      "utf8",
+    );
+
+    const report = await new StorageDoctor({
+      workDir,
+      fileHistoryDir: join(root, "file-history"),
+    }).scan();
+    expect(report).toMatchObject({
+      healthy: true,
+      findings: [
+        expect.objectContaining({
+          code: "session_legacy",
+          severity: "warning",
+          authority: "authoritative",
+        }),
+      ],
+    });
+  });
+
   it("keeps reachable blobs and only deletes old unreachable blobs after explicit apply", async () => {
     const root = await mkdtemp(join(tmpdir(), "pico-storage-gc-"));
     cleanup.push(root);
@@ -140,6 +172,43 @@ describe("storage governance integration", () => {
     expect(applied.deletedPaths).toEqual([unreachable.path]);
     await expect(stat(reachable.path)).resolves.toBeDefined();
     await expect(stat(unreachable.path)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("blocks both dry-run and apply when authoritative references cannot be parsed", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pico-storage-gc-blocked-"));
+    cleanup.push(root);
+    const workDir = join(root, "workspace");
+    const fileHistoryDir = join(root, "file-history");
+    const blobs = new FileHistoryBlobStore({ baseDir: fileHistoryDir });
+    const oldBlob = await blobs.put("must remain while mark is uncertain");
+    await utimes(oldBlob.path, new Date(0), new Date(0));
+    const manifestPath = join(fileHistoryDir, "unknown-session", "manifest.json");
+    const operationPath = join(workDir, ".claw", "storage-operations", "broken.json");
+    await mkdir(dirname(manifestPath), { recursive: true });
+    await mkdir(dirname(operationPath), { recursive: true });
+    await writeFile(manifestPath, "{broken", "utf8");
+    await writeFile(operationPath, "{broken", "utf8");
+    const collector = new ContentAddressedBlobGarbageCollector({
+      workDir,
+      baseDir: fileHistoryDir,
+      gracePeriodMs: 1,
+      now: () => 120_000,
+    });
+
+    const dryRun = await collector.run();
+    expect(dryRun).toMatchObject({
+      dryRun: true,
+      blocked: true,
+      candidatePaths: [],
+      deletedPaths: [],
+      blockedReasons: [
+        expect.objectContaining({ component: "file_history", path: manifestPath }),
+        expect.objectContaining({ component: "operation", path: operationPath }),
+      ],
+    });
+    const apply = await collector.run({ apply: true });
+    expect(apply).toMatchObject({ dryRun: true, blocked: true, deletedPaths: [] });
+    await expect(stat(oldBlob.path)).resolves.toBeDefined();
   });
 });
 

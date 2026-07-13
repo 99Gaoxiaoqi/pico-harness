@@ -208,7 +208,7 @@ export class StorageDoctor {
         const nonEmptyLines = raw.split("\n").filter((line) => line.length > 0);
         if (nonEmptyLines.length === 0) throw new Error("empty journal");
         const first = parseJson(nonEmptyLines[0]!, "journal header");
-        if (!isRecord(first) || first["type"] !== "meta") throw new Error("missing meta header");
+        const legacy = !isRecord(first) || first["type"] !== "meta";
         if (!raw.endsWith("\n")) {
           try {
             JSON.parse(nonEmptyLines.at(-1)!);
@@ -226,7 +226,21 @@ export class StorageDoctor {
             );
           }
         }
-        await new SessionStore(path).loadStrict();
+        const records = await new SessionStore(path).loadStrict();
+        if (legacy) {
+          if (records.length === 0) throw new Error("legacy journal has no replayable records");
+          findings.push(
+            finding(
+              "session_legacy",
+              "warning",
+              "session",
+              path,
+              "Session journal uses the supported legacy format without a meta header",
+              "Migrate by publishing a new v3 Session journal; do not rewrite this source in place",
+              "authoritative",
+            ),
+          );
+        }
       } catch (error) {
         findings.push(
           finding(
