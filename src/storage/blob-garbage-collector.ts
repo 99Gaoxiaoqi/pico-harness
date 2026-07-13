@@ -1,6 +1,8 @@
 import { lstat, readFile, readdir, stat, unlink } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
+import { createFileHistoryState, fileHistoryLoadState } from "../safety/file-history.js";
 import { OwnerLease } from "./owner-lease.js";
+import { StorageOperationJournal } from "./operation-journal.js";
 
 const SHA256_RE = /^[a-f0-9]{64}$/u;
 const TERMINAL_OPERATION_STATES = new Set(["completed", "aborted", "needs_attention"]);
@@ -16,10 +18,18 @@ export interface BlobGarbageCollectorOptions {
 
 export interface BlobGarbageCollectionResult {
   readonly dryRun: boolean;
+  readonly blocked: boolean;
+  readonly blockedReasons: readonly BlobGarbageCollectionBlock[];
   readonly reachableDigests: readonly string[];
   readonly retainedPaths: readonly string[];
   readonly candidatePaths: readonly string[];
   readonly deletedPaths: readonly string[];
+}
+
+export interface BlobGarbageCollectionBlock {
+  readonly component: "file_history" | "operation";
+  readonly path: string;
+  readonly message: string;
 }
 
 export interface BlobGarbageCollectionRunOptions {
@@ -52,11 +62,24 @@ export class ContentAddressedBlobGarbageCollector {
       ownerId: `cas-gc:${process.pid}`,
     });
     try {
-      const reachable = await this.collectReachableDigests();
+      const mark = await this.collectReachableDigests();
+      const reachable = mark.reachable;
       const retainedPaths: string[] = [];
       const candidatePaths: string[] = [];
       const deletedPaths: string[] = [];
-      for (const path of await this.listBlobPaths()) {
+      const blobPaths = await this.listBlobPaths();
+      if (mark.blockedReasons.length > 0) {
+        return {
+          dryRun: true,
+          blocked: true,
+          blockedReasons: mark.blockedReasons.toSorted(compareBlocks),
+          reachableDigests: [...reachable].toSorted(),
+          retainedPaths: blobPaths,
+          candidatePaths: [],
+          deletedPaths: [],
+        };
+      }
+      for (const path of blobPaths) {
         const digest = basename(path);
         const metadata = await stat(path);
         if (reachable.has(digest) || this.now() - metadata.mtimeMs < this.gracePeriodMs) {
@@ -72,6 +95,8 @@ export class ContentAddressedBlobGarbageCollector {
       }
       return {
         dryRun: options.apply !== true,
+        blocked: false,
+        blockedReasons: [],
         reachableDigests: [...reachable].toSorted(),
         retainedPaths: retainedPaths.toSorted(),
         candidatePaths: candidatePaths.toSorted(),
@@ -82,10 +107,16 @@ export class ContentAddressedBlobGarbageCollector {
     }
   }
 
-  private async collectReachableDigests(): Promise<Set<string>> {
+  private async collectReachableDigests(): Promise<{
+    reachable: Set<string>;
+    blockedReasons: BlobGarbageCollectionBlock[];
+  }> {
     const reachable = new Set<string>();
+    const blockedReasons: BlobGarbageCollectionBlock[] = [];
     const fileHistoryDirectories = (await readDirectoryEntries(this.baseDir))
-      .filter((entry) => entry.isDirectory() && entry.name !== "blobs" && entry.name !== ".leases")
+      .filter(
+        (entry) => entry.isDirectory() && entry.name !== "blobs" && !entry.name.startsWith("."),
+      )
       .map((entry) => join(this.baseDir, entry.name, "manifest.json"));
     const operationsDirectory = join(this.workDir, ".claw", "storage-operations");
     const operationPaths = (await readDirectoryEntries(operationsDirectory))
@@ -93,14 +124,52 @@ export class ContentAddressedBlobGarbageCollector {
       .map((entry) => join(operationsDirectory, entry.name));
 
     for (const path of fileHistoryDirectories) {
-      await collectReferencesFromJsonFile(path, reachable, false);
+      try {
+        const value = await readJsonRequired(path);
+        if (
+          !isRecord(value) ||
+          value["schemaVersion"] !== 2 ||
+          typeof value["sessionId"] !== "string"
+        ) {
+          throw new Error("legacy or malformed manifest must be migrated before CAS GC");
+        }
+        const sessionId = value["sessionId"];
+        const state = createFileHistoryState();
+        if (!(await fileHistoryLoadState(state, sessionId, this.baseDir))) {
+          throw new Error("manifest disappeared during mark phase");
+        }
+        for (const snapshot of state.snapshots) {
+          for (const backup of snapshot.trackedFileBackups.values()) {
+            if (backup.blobRef) reachable.add(backup.blobRef.digest);
+          }
+        }
+      } catch (error) {
+        blockedReasons.push({
+          component: "file_history",
+          path,
+          message: errorMessage(error),
+        });
+      }
     }
+    const journal = new StorageOperationJournal({ workDir: this.workDir });
     for (const path of operationPaths) {
-      const value = await readJsonIfPossible(path);
-      if (!isRecord(value) || TERMINAL_OPERATION_STATES.has(String(value["state"]))) continue;
-      collectDigestReferences(value, reachable);
-      if (value["kind"] === "fork" && typeof value["stagingDirectory"] === "string") {
-        await collectReferencesFromTree(value["stagingDirectory"], reachable);
+      try {
+        const name = basename(path);
+        const operationId = name.slice(0, -".json".length);
+        if (!/^[A-Za-z0-9._-]+$/u.test(operationId)) throw new Error("invalid operation filename");
+        const operation = await journal.get(operationId);
+        if (!operation) throw new Error("operation disappeared during mark phase");
+        if (TERMINAL_OPERATION_STATES.has(operation.state)) continue;
+        collectDigestReferences(operation, reachable);
+        if (operation.kind === "fork") {
+          await collectReferencesFromTree(operation.stagingDirectory, reachable, true);
+        }
+      } catch (error) {
+        blockedReasons.push({
+          component: "operation",
+          path,
+          message: errorMessage(error),
+        });
       }
     }
 
@@ -109,9 +178,9 @@ export class ContentAddressedBlobGarbageCollector {
       join(this.workDir, ".claw", "artifacts"),
     ];
     for (const root of [...defaultReferenceRoots, ...this.additionalReferenceRoots]) {
-      await collectReferencesFromTree(root, reachable);
+      await collectReferencesFromTree(root, reachable, false);
     }
-    return reachable;
+    return { reachable, blockedReasons };
   }
 
   private async listBlobPaths(): Promise<string[]> {
@@ -132,22 +201,26 @@ export class ContentAddressedBlobGarbageCollector {
   }
 }
 
-async function collectReferencesFromTree(path: string, target: Set<string>): Promise<void> {
+async function collectReferencesFromTree(
+  path: string,
+  target: Set<string>,
+  required: boolean,
+): Promise<void> {
   let metadata;
   try {
     metadata = await lstat(path);
   } catch (error) {
-    if (isNodeCode(error, "ENOENT")) return;
+    if (isNodeCode(error, "ENOENT") && !required) return;
     throw error;
   }
   if (metadata.isSymbolicLink()) return;
   if (metadata.isFile()) {
-    if (path.endsWith(".json")) await collectReferencesFromJsonFile(path, target, false);
+    if (path.endsWith(".json")) await collectReferencesFromJsonFile(path, target, required);
     return;
   }
   if (!metadata.isDirectory()) return;
   for (const entry of await readdir(path, { withFileTypes: true })) {
-    await collectReferencesFromTree(join(path, entry.name), target);
+    await collectReferencesFromTree(join(path, entry.name), target, required);
   }
 }
 
@@ -193,6 +266,11 @@ async function readJsonIfPossible(path: string, throwOnInvalid = false): Promise
   }
 }
 
+async function readJsonRequired(path: string): Promise<unknown> {
+  const raw = await readFile(path, "utf8");
+  return JSON.parse(raw) as unknown;
+}
+
 async function readDirectoryEntries(path: string) {
   try {
     return await readdir(path, { withFileTypes: true });
@@ -208,4 +286,15 @@ function isNodeCode(error: unknown, code: string): boolean {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function compareBlocks(
+  left: BlobGarbageCollectionBlock,
+  right: BlobGarbageCollectionBlock,
+): number {
+  return left.component.localeCompare(right.component) || left.path.localeCompare(right.path);
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
