@@ -88,7 +88,7 @@ describe("TUI transcript scrolling integration", () => {
       await harness.write(WHEEL_UP);
       await harness.write("continue");
       frame = await harness.write("\r");
-      expect(onSubmit).toHaveBeenCalledWith("continue");
+      expect(onSubmit).toHaveBeenCalledWith({ text: "continue", attachments: [] });
       expect(frame).toContain("fresh-tail-marker");
     } finally {
       const teardown = await harness.cleanup();
@@ -118,7 +118,7 @@ describe("TUI transcript scrolling integration", () => {
 
       await harness.write("next turn");
       frame = await harness.write("\r");
-      expect(onSubmit).toHaveBeenCalledWith("next turn");
+      expect(onSubmit).toHaveBeenCalledWith({ text: "next turn", attachments: [] });
       expect(frame).not.toContain("expanded-tool-detail");
       expect(frame).toContain("answer-49");
 

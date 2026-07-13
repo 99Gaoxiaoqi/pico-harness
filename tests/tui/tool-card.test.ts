@@ -91,7 +91,7 @@ describe("ToolCard agent tool detection", () => {
     expect(bashOutput).toContain("npm test -- --run");
   });
 
-  it("长输出默认折叠,展开后保留截断提示", () => {
+  it("长输出默认折叠,展开后保留完整摘要", () => {
     const summary = Array.from({ length: 6 }, (_, i) => `+ line ${i}`).join("\n");
     const folded = renderToString(
       React.createElement(ToolCard, {
@@ -115,7 +115,8 @@ describe("ToolCard agent tool detection", () => {
     expect(folded).not.toContain("+ line 4");
     expect(folded).not.toContain("已截断");
     expect(expanded).toContain("+ line 4");
-    expect(expanded).toContain("已截断");
+    expect(expanded).toContain("+ line 5");
+    expect(expanded).not.toContain("已截断");
   });
 
   it("长结果折叠态只占一行,目标已足够时不铺开输出", () => {

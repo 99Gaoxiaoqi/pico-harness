@@ -20,7 +20,7 @@ interface FakeArtifactMeta {
 
 class FakeArtifactStore {
   readonly writes: FakeWriteInput[] = [];
-  readonly cleanupSessionIds: Array<string | undefined> = [];
+  cleanupCalls = 0;
 
   constructor(
     private readonly meta: FakeArtifactMeta = { id: "artifact-123", path: "/tmp/a.txt" },
@@ -31,8 +31,8 @@ class FakeArtifactStore {
     return this.meta;
   }
 
-  async cleanup(sessionId?: string): Promise<void> {
-    this.cleanupSessionIds.push(sessionId);
+  async cleanup(): Promise<void> {
+    this.cleanupCalls++;
   }
 }
 
@@ -67,7 +67,7 @@ describe("createToolResultObservationProcessor", () => {
 
     expect(observation).toBe("tiny");
     expect(store.writes).toHaveLength(0);
-    expect(store.cleanupSessionIds).toHaveLength(0);
+    expect(store.cleanupCalls).toBe(0);
   });
 
   it("does not externalize output equal to the threshold", async () => {
@@ -118,7 +118,7 @@ describe("createToolResultObservationProcessor", () => {
       pinned: true,
     });
     expect(store.writes[0]?.summary).toContain("FAIL expected one thing");
-    expect(store.cleanupSessionIds).toEqual(["session/with space"]);
+    expect(store.cleanupCalls).toBe(1);
 
     expect(observation).toContain("artifactId: artifact-abc");
     expect(observation).toContain("artifactUri: artifact://session%2Fwith%20space/artifact-abc");
@@ -165,7 +165,7 @@ describe("createToolResultObservationProcessor", () => {
       sessionId: "session-1",
     });
 
-    expect(store.cleanupSessionIds).toHaveLength(0);
+    expect(store.cleanupCalls).toBe(0);
   });
 
   it("lets cleanupAfterWrite take precedence over the deprecated cleanup alias", async () => {
@@ -184,6 +184,6 @@ describe("createToolResultObservationProcessor", () => {
       sessionId: "session-1",
     });
 
-    expect(store.cleanupSessionIds).toEqual(["session-1"]);
+    expect(store.cleanupCalls).toBe(1);
   });
 });
