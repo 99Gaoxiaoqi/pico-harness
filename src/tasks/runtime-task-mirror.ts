@@ -107,11 +107,13 @@ export class RuntimeTaskMirror {
         expectedJobVersion: durable.job.version,
         expectedAttemptVersion: attempt.version,
         leaseEpoch: attempt.leaseEpoch,
-        completionId: `completion:${durable.job.jobId}:${attempt.attemptNumber}`,
+        completionId:
+          stringData(snapshot, "completionId") ??
+          `completion:${durable.job.jobId}:${attempt.attemptNumber}`,
         outputOffset: snapshot.outputOffset,
         ...(snapshot.error ? { error: snapshot.error } : {}),
         result: terminalResult(snapshot),
-        completionPayload: terminalPayload(snapshot),
+        completionPayload: terminalPayload(snapshot, durable.job.ownerSessionId),
         ...(snapshot.data?.["internalCompletion"] === true
           ? { completionAlreadyDelivered: true }
           : {}),
@@ -214,14 +216,70 @@ function terminalResult(snapshot: TaskSnapshot): Record<string, unknown> {
   };
 }
 
-function terminalPayload(snapshot: TaskSnapshot): Record<string, unknown> {
+function terminalPayload(
+  snapshot: TaskSnapshot,
+  ownerSessionId: string | undefined,
+): Record<string, unknown> {
+  const aggregateStatus = snapshot.data?.["aggregateStatus"];
+  const completionId = stringData(snapshot, "completionId");
+  const activityIds = snapshot.data?.["activityIds"];
+  const outputSummary = snapshot.data?.["outputSummary"];
+  const completionPolicy = completionPolicyFromData(snapshot);
   return {
     description: snapshot.description,
     legacyStatus: snapshot.status,
     outputOffset: snapshot.outputOffset,
+    ...(completionId
+      ? {
+          delegationCompletion: {
+            completionId,
+            jobId: snapshot.taskId,
+            ...(ownerSessionId ? { ownerSessionId } : {}),
+            completionSeq: numericData(snapshot, "completionSeq") ?? 0,
+            activityIds: Array.isArray(activityIds)
+              ? activityIds.filter((value): value is string => typeof value === "string")
+              : [],
+            completionPolicy,
+            status: isDelegationTerminalStatus(aggregateStatus)
+              ? aggregateStatus
+              : delegationStatusFromSnapshot(snapshot),
+            outputSummary: typeof outputSummary === "string" ? outputSummary : "",
+            ...(snapshot.error ? { error: snapshot.error } : {}),
+          },
+        }
+      : {}),
     ...(snapshot.error ? { error: snapshot.error } : {}),
     ...(snapshot.data ? { data: snapshot.data } : {}),
   };
+}
+
+function completionPolicyFromData(snapshot: TaskSnapshot): JobCompletionPolicy {
+  return completionPolicy(snapshot);
+}
+
+function numericData(snapshot: TaskSnapshot, key: string): number | undefined {
+  const value = snapshot.data?.[key];
+  return typeof value === "number" && Number.isSafeInteger(value) ? value : undefined;
+}
+
+function isDelegationTerminalStatus(
+  value: unknown,
+): value is "completed" | "partial" | "error" | "timed_out" | "cancelled" {
+  return (
+    value === "completed" ||
+    value === "partial" ||
+    value === "error" ||
+    value === "timed_out" ||
+    value === "cancelled"
+  );
+}
+
+function delegationStatusFromSnapshot(
+  snapshot: TaskSnapshot,
+): "completed" | "error" | "cancelled" {
+  if (snapshot.status === "completed") return "completed";
+  if (snapshot.status === "killed") return "cancelled";
+  return "error";
 }
 
 function stringData(snapshot: TaskSnapshot, key: string): string | undefined {

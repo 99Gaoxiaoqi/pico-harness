@@ -242,8 +242,10 @@ export class JobService {
     return this.store.markCommandDelivered(commandId);
   }
 
-  pendingCompletions(limit?: number): CompletionOutboxRecord[] {
-    return this.store.listPendingCompletions(limit);
+  pendingCompletions(
+    input?: number | { limit?: number; ownerSessionId?: string },
+  ): CompletionOutboxRecord[] {
+    return this.store.listPendingCompletions(input);
   }
 
   markCompletionDelivered(completionId: string): CompletionOutboxRecord {
