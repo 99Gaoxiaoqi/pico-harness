@@ -91,7 +91,11 @@ export class LocalRuntimeDaemon {
       }
       for (const message of messages) {
         if (message.kind !== "request") {
-          socket.write(encodeRuntimeFrame(createRuntimeError("unknown", "invalid_message", "只接受 request 消息")));
+          socket.write(
+            encodeRuntimeFrame(
+              createRuntimeError("unknown", "invalid_message", "只接受 request 消息"),
+            ),
+          );
           continue;
         }
         void this.handleRequest(socket, message, (dispose) => {
@@ -118,10 +122,13 @@ export class LocalRuntimeDaemon {
         const dispose = this.options.service.subscribe((event) => this.writeEvent(socket, event));
         setSubscription(dispose);
         const events = await this.options.service.replayEvents(cursor);
-        this.write(socket, success(request, {
-          subscribed: true,
-          events: events.map(serializeRuntimeEvent),
-        }));
+        this.write(
+          socket,
+          success(request, {
+            subscribed: true,
+            events: events.map(serializeRuntimeEvent),
+          }),
+        );
         return;
       }
       const result = await this.options.service.handle(request);
@@ -156,5 +163,12 @@ function readCursor(params: import("./protocol.js").JsonValue): RuntimeEventCurs
   if (afterEventId !== undefined && typeof afterEventId !== "string") {
     throw new RuntimeProtocolError("afterEventId 必须是字符串");
   }
-  return afterEventId === undefined ? {} : { afterEventId };
+  const workspacePath = params.workspacePath;
+  if (workspacePath !== undefined && typeof workspacePath !== "string") {
+    throw new RuntimeProtocolError("workspacePath 必须是字符串");
+  }
+  return {
+    ...(afterEventId === undefined ? {} : { afterEventId }),
+    ...(workspacePath === undefined ? {} : { workspacePath }),
+  };
 }

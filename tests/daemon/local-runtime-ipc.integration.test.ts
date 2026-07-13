@@ -1,18 +1,22 @@
-import { mkdtemp, mkdir, rm, stat } from "node:fs/promises";
+import { mkdtemp, mkdir, realpath, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   createRuntimeEvent,
+  createRuntimeRequest,
   LocalRuntimeClient,
   LocalRuntimeDaemon,
   resolveLocalDaemonEndpoint,
+  WorkspaceRegistrationStore,
   WorkspaceRuntimeRegistry,
+  WorkspaceRuntimeService,
   type JsonValue,
   type LocalRuntimeService,
   type RuntimeEvent,
   type RuntimeRequest,
 } from "../../src/daemon/index.js";
+import type { WorkspaceRuntimeEvent } from "../../src/runtime/workspace-runtime.js";
 
 describe("local runtime daemon IPC integration", () => {
   const cleanup: string[] = [];
@@ -26,7 +30,10 @@ describe("local runtime daemon IPC integration", () => {
     const workspace = join(root, "workspace");
     await mkdir(workspace);
     const service = new FixtureRuntimeService(workspace);
-    const endpoint = resolveLocalDaemonEndpoint({ runtimeDir: join(root, "runtime"), userIdentity: "test-user" });
+    const endpoint = resolveLocalDaemonEndpoint({
+      runtimeDir: join(root, "runtime"),
+      userIdentity: "test-user",
+    });
     const daemon = new LocalRuntimeDaemon({ endpoint, service });
     const client = new LocalRuntimeClient(endpoint);
     try {
@@ -35,7 +42,9 @@ describe("local runtime daemon IPC integration", () => {
         expect((await stat(endpoint.address)).mode & 0o777).toBe(0o600);
       }
 
-      await expect(client.request("runtime.ping", { probe: true })).resolves.toEqual({ pong: true });
+      await expect(client.request("runtime.ping", { probe: true })).resolves.toEqual({
+        pong: true,
+      });
       const replayed = await client.request("events.replay", {});
       expect(replayed).toEqual({ events: [service.events[0]] });
 
@@ -74,12 +83,113 @@ describe("local runtime daemon IPC integration", () => {
     }
   });
 
+  it("persists workspace Runtime events in SQLite so a restarted daemon replays them by eventId", async () => {
+    const root = await temporaryRoot();
+    const workspace = join(root, "workspace");
+    await mkdir(workspace);
+    const canonicalWorkspace = await realpath(workspace);
+    const registrations = new WorkspaceRegistrationStore(join(root, "daemon-workspaces.json"));
+    const runtime = new EventingWorkspaceRuntime(canonicalWorkspace);
+    const service = new WorkspaceRuntimeService({
+      execute: async () => undefined,
+      createWorkspaceRuntime: async () => runtime as never,
+      registrationStore: registrations,
+    });
+    try {
+      await service.handle(
+        createRuntimeRequest("workspace.register", { workspacePath: workspace }),
+      );
+      await service.handle(createRuntimeRequest("runs.list", { workspacePath: workspace }));
+      expect(runtime.listenerCount).toBe(1);
+      runtime.emit("run.finished", "run-event-1");
+      const initial = await service.replayEvents({ workspacePath: workspace });
+      const registered = initial.find((event) => event.topic === "workspace.registered");
+      const finished = initial.find((event) => event.topic === "run.finished");
+      expect(registered).toBeDefined();
+      expect(finished).toBeDefined();
+      await service.close();
+
+      const restarted = new WorkspaceRuntimeService({
+        execute: async () => undefined,
+        registrationStore: registrations,
+      });
+      try {
+        const replayed = await restarted.replayEvents({
+          workspacePath: workspace,
+          afterEventId: registered!.eventId,
+        });
+        expect(replayed).toEqual([
+          expect.objectContaining({
+            eventId: finished!.eventId,
+            topic: "run.finished",
+            scope: { workspacePath: canonicalWorkspace, runId: "run-1" },
+          }),
+        ]);
+      } finally {
+        await restarted.close();
+      }
+    } finally {
+      await service.close();
+    }
+  });
+
   async function temporaryRoot(): Promise<string> {
     const root = await mkdtemp(join(tmpdir(), "pico-daemon-ipc-"));
     cleanup.push(root);
     return root;
   }
 });
+
+class EventingWorkspaceRuntime {
+  readonly workspacePath: string;
+  readonly workspace: string;
+  private readonly listeners = new Set<(event: WorkspaceRuntimeEvent) => void>();
+
+  constructor(workspace: string) {
+    this.workspace = workspace;
+    this.workspacePath = workspace;
+  }
+
+  get listenerCount(): number {
+    return this.listeners.size;
+  }
+
+  subscribe(listener: (event: WorkspaceRuntimeEvent) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  listRuns() {
+    return [];
+  }
+
+  listTasks() {
+    return [];
+  }
+
+  async close(): Promise<void> {}
+
+  emit(type: WorkspaceRuntimeEvent["type"], eventId: string): void {
+    const event: WorkspaceRuntimeEvent = {
+      eventId,
+      type,
+      workspace: this.workspace,
+      at: Date.now(),
+      resourceVersion: 2,
+      run: {
+        runId: "run-1",
+        workspace: this.workspace,
+        description: "persisted run",
+        status: "succeeded",
+        startedAt: 1,
+        updatedAt: 2,
+        finishedAt: 2,
+        version: 2,
+      },
+    };
+    for (const listener of this.listeners) listener(event);
+  }
+}
 
 class FixtureRuntimeService implements LocalRuntimeService {
   readonly events: RuntimeEvent[];

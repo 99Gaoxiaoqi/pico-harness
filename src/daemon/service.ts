@@ -3,6 +3,11 @@ import type { JsonValue, RuntimeEvent, RuntimeRequest } from "./protocol.js";
 export interface RuntimeEventCursor {
   /** Exclusive event ID cursor. Omit it to read from the oldest retained event. */
   afterEventId?: string;
+  /**
+   * A durable cursor belongs to one workspace SQLite ledger. Callers observing more
+   * than one workspace should replay each ledger independently.
+   */
+  workspacePath?: string;
 }
 
 export interface LocalRuntimeService {
