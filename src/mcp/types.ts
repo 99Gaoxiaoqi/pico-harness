@@ -9,6 +9,8 @@
 // 本文件定义协议层类型 + transport-agnostic 的 McpClient 接口。
 // 具体工具桥接(BaseTool 适配)在 mcp-tool.ts,连接编排在 manager.ts。
 
+import type { ToolExecutionContext } from "../tools/registry.js";
+
 /**
  * MCP 工具定义:由 server 的 tools/list 方法返回。
  * inputSchema 是 JSON Schema 对象,描述工具参数。
@@ -130,17 +132,31 @@ export interface McpToolResult {
 }
 
 /**
+ * MCP 工具中止能证明的物理边界。
+ *
+ * process_tree: pico 持有本地 server 进程树，可在调用 settle 前确认其退出。
+ * transport: 只能中止本地 HTTP/SSE IO 并发送 MCP cancellation；远程副作是协作式的。
+ */
+export type McpToolCancellationScope = "process_tree" | "transport";
+
+/**
  * Transport-agnostic 的 MCP 客户端接口。
  * StdioMcpClient / HttpMcpClient 都实现此接口,
  * 让 McpConnectionManager 不关心具体 transport。
  */
 export interface McpClient {
+  /** 中止后本 client 能证明的底层收口边界。 */
+  readonly toolCancellationScope: McpToolCancellationScope;
   /** 建立连接 + 完成 initialize 握手 */
   connect(): Promise<void>;
   /** 列出 server 暴露的所有工具 */
   listTools(): Promise<McpTool[]>;
-  /** 调用指定工具,返回内容块数组 */
-  callTool(name: string, args: Record<string, unknown>): Promise<McpToolResult>;
+  /** 调用指定工具；必须把 Registry 的运行时中止上下文透传到 transport。 */
+  callTool(
+    name: string,
+    args: Record<string, unknown>,
+    context?: ToolExecutionContext,
+  ): Promise<McpToolResult>;
   /** 列出 server 公开的资源。 */
   listResources(cursor?: string): Promise<McpResourceListResult>;
   /** 读取指定 URI 的资源。 */

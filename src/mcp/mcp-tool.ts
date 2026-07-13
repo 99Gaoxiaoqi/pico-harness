@@ -7,7 +7,11 @@
 // 工具名限定:mcp__<server>__<tool>,防止多 server 工具名冲突。
 // execute() 接收 JSON 字符串(与所有 BaseTool 一致),解析后转发给 McpClient。
 
-import { WORKSPACE_FILE_SIDE_EFFECTS, type BaseTool } from "../tools/registry.js";
+import {
+  WORKSPACE_FILE_SIDE_EFFECTS,
+  type BaseTool,
+  type ToolExecutionContext,
+} from "../tools/registry.js";
 import type { ToolDefinition } from "../schema/message.js";
 import { ToolAccesses } from "../tools/tool-access.js";
 import { logger } from "../observability/logger.js";
@@ -38,6 +42,11 @@ export class McpToolBridge implements BaseTool {
   readonly fileSideEffects = WORKSPACE_FILE_SIDE_EFFECTS;
   readonly toolset = "mcp";
   readonly maxResultSizeChars: number;
+
+  /** 只有本地 stdio 进程树可对“物理已停止”做强承诺。 */
+  get handlesAbortSignal(): boolean {
+    return this.client.toolCancellationScope === "process_tree";
+  }
 
   private readonly qualifiedName: string;
   private readonly toolDefinition: ToolDefinition;
@@ -70,7 +79,8 @@ export class McpToolBridge implements BaseTool {
     return ToolAccesses.all();
   }
 
-  async execute(args: string): Promise<string> {
+  async execute(args: string, context?: ToolExecutionContext): Promise<string> {
+    context?.signal?.throwIfAborted();
     let parsedArgs: Record<string, unknown>;
     try {
       parsedArgs = args.trim() === "" ? {} : (JSON.parse(args) as Record<string, unknown>);
@@ -80,7 +90,8 @@ export class McpToolBridge implements BaseTool {
     }
 
     try {
-      const result = await this.client.callTool(this.tool.name, parsedArgs);
+      const result = await this.client.callTool(this.tool.name, parsedArgs, context);
+      context?.signal?.throwIfAborted();
       if (result.isError) {
         // server 报 isError:把内容拼成错误信息返回(不抛异常,保持 BaseTool 契约)
         const text = mcpResultToText(result);
@@ -91,6 +102,7 @@ export class McpToolBridge implements BaseTool {
       const text = mcpResultToText(result);
       return this.truncate(text);
     } catch (err) {
+      context?.signal?.throwIfAborted();
       const msg = err instanceof Error ? err.message : String(err);
       logger.warn(
         { server: this.serverName, tool: this.tool.name, err: msg },

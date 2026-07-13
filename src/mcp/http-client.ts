@@ -12,6 +12,7 @@
 // 接口与 StdioMcpClient 一致(McpClient),让 McpConnectionManager 无感切换。
 
 import { logger } from "../observability/logger.js";
+import type { ToolExecutionContext } from "../tools/registry.js";
 import {
   MCP_PROTOCOL_VERSION,
   PICO_MCP_CLIENT_INFO,
@@ -33,13 +34,20 @@ const MAX_REDIRECTS = 3;
 const MAX_HTTP_RESPONSE_BYTES = 8 * 1024 * 1024;
 const MAX_SSE_EVENT_BYTES = 1024 * 1024;
 const MAX_SSE_BUFFER_BYTES = 1024 * 1024;
+const CANCELLATION_POST_TIMEOUT_MS = 1_000;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
 interface PendingRequest {
+  method: string;
   resolve: (value: unknown) => void;
   reject: (reason: Error) => void;
   timer: NodeJS.Timeout;
   controller: AbortController;
+  signal?: AbortSignal;
+  abortListener?: () => void;
+  abortReason?: Error;
+  transport?: Promise<void>;
+  abortTask?: Promise<void>;
 }
 
 /**
@@ -50,6 +58,11 @@ interface PendingRequest {
  *   请求 POST 到 server 告知的 endpoint。
  */
 export class HttpMcpClient implements McpClient {
+  /**
+   * HTTP 只能证明本地 fetch/stream 已中止并发出 cancellation。
+   * 远程 server 是否真正停止副作仍取决于它的协作实现。
+   */
+  readonly toolCancellationScope = "transport" as const;
   private nextId = 1;
   private readonly pending = new Map<number, PendingRequest>();
   private connected = false;
@@ -96,8 +109,12 @@ export class HttpMcpClient implements McpClient {
     return tools.map((t) => this.normalizeTool(t));
   }
 
-  async callTool(name: string, args: Record<string, unknown>): Promise<McpToolResult> {
-    const result = await this.request("tools/call", { name, arguments: args });
+  async callTool(
+    name: string,
+    args: Record<string, unknown>,
+    context?: ToolExecutionContext,
+  ): Promise<McpToolResult> {
+    const result = await this.request("tools/call", { name, arguments: args }, context?.signal);
     return this.normalizeToolResult(result);
   }
 
@@ -153,23 +170,33 @@ export class HttpMcpClient implements McpClient {
     if (this.closed) return;
     this.closed = true;
     this.connected = false;
+    const closeError = new Error(`MCP server "${this.config.name}" 已关闭`);
 
     // 中止 SSE 流
     if (this.sseAbort) {
       this.sseAbort.abort();
       this.sseAbort = undefined;
     }
-    for (const controller of this.activeControllers) {
-      controller.abort();
+    const pending = [...this.pending.entries()];
+    for (const controller of [...this.activeControllers]) controller.abort();
+    for (const [id, request] of pending) {
+      if (request.method === "tools/call") this.abortPendingRequest(id, closeError);
+      else this.abortNonToolRequest(id, closeError);
     }
+    // 不在 abort() 后立即假装完成：等所有本地 transport Promise 真正 settle。
+    await Promise.allSettled(
+      pending.flatMap(([, request]) => {
+        if (request.method !== "tools/call") return [];
+        return [request.transport, request.abortTask].filter(
+          (task): task is Promise<void> => task !== undefined,
+        );
+      }),
+    );
     this.activeControllers.clear();
-    // 拒绝所有 pending
-    for (const [, pending] of this.pending) {
-      clearTimeout(pending.timer);
-      pending.controller.abort();
-      pending.reject(new Error(`MCP server "${this.config.name}" 已关闭`));
+    for (const [id, request] of this.pending) {
+      this.takePending(id);
+      request.reject(closeError);
     }
-    this.pending.clear();
   }
 
   onClose(handler: (err?: Error) => void): void {
@@ -217,7 +244,12 @@ export class HttpMcpClient implements McpClient {
    * - http:POST 本次请求,直接从响应体(JSON 或 SSE)拿结果。
    * - sse:POST 到 endpoint,响应走已建立的 SSE 流。
    */
-  private request(method: string, params: Record<string, unknown>): Promise<unknown> {
+  private request(
+    method: string,
+    params: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<unknown> {
+    signal?.throwIfAborted();
     const id = this.nextId++;
     const req: JsonRpcRequest = { jsonrpc: "2.0", id, method, params };
     const timeoutMs = this.config.toolTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
@@ -225,43 +257,121 @@ export class HttpMcpClient implements McpClient {
 
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
-        this.pending.delete(id);
-        controller.abort();
-        reject(new Error(`MCP server "${this.config.name}" 请求 ${method} 超时(${timeoutMs}ms)`));
+        const timeoutError = new Error(
+          `MCP server "${this.config.name}" 请求 ${method} 超时(${timeoutMs}ms)`,
+        );
+        if (method === "tools/call") this.abortPendingRequest(id, timeoutError);
+        else this.abortNonToolRequest(id, timeoutError);
       }, timeoutMs);
 
-      this.pending.set(id, { resolve, reject, timer, controller });
+      const pending: PendingRequest = {
+        method,
+        resolve,
+        reject,
+        timer,
+        controller,
+        ...(signal ? { signal } : {}),
+      };
+      if (signal) {
+        pending.abortListener = () => this.abortPendingRequest(id, abortReason(signal));
+        signal.addEventListener("abort", pending.abortListener, { once: true });
+      }
+      this.pending.set(id, pending);
+      if (signal?.aborted) {
+        pending.abortListener?.();
+        return;
+      }
 
       const send = this.config.transport === "sse" ? this.postEndpoint : undefined;
       // http:sendHttpPost 会从响应体直接 resolve;sse:仅 POST,响应走 SSE 流
-      this.sendHttpPost(req, send, controller)
-        .then((directResult) => {
-          // http transport:响应体已包含结果,直接 resolve
-          if (directResult !== undefined) {
-            clearTimeout(timer);
-            this.pending.delete(id);
-            if (directResult.error) {
-              reject(
-                new Error(
-                  `MCP server "${this.config.name}" 返回错误: ${directResult.error.message}`,
-                ),
-              );
-            } else {
-              resolve(directResult.result);
-            }
-          }
-          // sse transport:directResult 为 undefined,等 SSE 流 resolve
-        })
-        .catch((err) => {
-          clearTimeout(timer);
-          this.pending.delete(id);
-          reject(
-            new Error(
-              redactSensitiveText(`MCP server "${this.config.name}" 发送请求失败: ${err.message}`),
-            ),
-          );
-        });
+      pending.transport = this.performRequest(id, req, send, controller);
     });
+  }
+
+  private async performRequest(
+    id: number,
+    request: JsonRpcRequest,
+    targetUrl: string | undefined,
+    controller: AbortController,
+  ): Promise<void> {
+    try {
+      const directResult = await this.sendHttpPost(request, targetUrl, controller);
+      const pending = this.pending.get(id);
+      if (!pending || pending.abortReason || directResult === undefined) return;
+      this.takePending(id);
+      if (directResult.error) {
+        pending.reject(
+          new Error(`MCP server "${this.config.name}" 返回错误: ${directResult.error.message}`),
+        );
+      } else {
+        pending.resolve(directResult.result);
+      }
+    } catch (err) {
+      const pending = this.pending.get(id);
+      // abort 路径由 finishAbortedRequest 在 transport 真正 settle 后统一拒绝。
+      if (!pending || pending.abortReason) return;
+      this.takePending(id);
+      pending.reject(
+        new Error(
+          redactSensitiveText(
+            `MCP server "${this.config.name}" 发送请求失败: ${errorMessage(err)}`,
+          ),
+        ),
+      );
+    }
+  }
+
+  private abortPendingRequest(id: number, reason: Error): void {
+    const pending = this.pending.get(id);
+    if (!pending || pending.abortReason) return;
+    pending.abortReason = reason;
+    clearTimeout(pending.timer);
+    pending.abortTask = this.finishAbortedRequest(id, pending, reason);
+  }
+
+  /** initialize/list 等无文件副作请求只需立即中止本地 IO。 */
+  private abortNonToolRequest(id: number, reason: Error): void {
+    const pending = this.takePending(id);
+    if (!pending) return;
+    pending.controller.abort(reason);
+    pending.reject(reason);
+  }
+
+  private async finishAbortedRequest(
+    id: number,
+    pending: PendingRequest,
+    reason: Error,
+  ): Promise<void> {
+    // 先启动协议取消，再中止原 fetch/stream；两者都真正 settle 后才 reject。
+    const cancellation = this.sendCancellation(id, reason);
+    pending.controller.abort(reason);
+    await pending.transport?.catch(() => {});
+    await cancellation;
+    const current = this.takePending(id);
+    current?.reject(reason);
+  }
+
+  private async sendCancellation(requestId: number, reason: Error): Promise<void> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), CANCELLATION_POST_TIMEOUT_MS);
+    try {
+      await this.sendHttpPost(
+        {
+          jsonrpc: "2.0",
+          method: "notifications/cancelled",
+          params: { requestId, reason: reason.message },
+        },
+        this.config.transport === "sse" ? this.postEndpoint : undefined,
+        controller,
+      );
+    } catch (err) {
+      logger.debug(
+        { server: this.config.name, err: errorMessage(err) },
+        `[MCP] HTTP cancellation notification 未获得响应`,
+      );
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   /**
@@ -533,8 +643,8 @@ export class HttpMcpClient implements McpClient {
     const id = typeof response.id === "number" ? response.id : Number(response.id);
     const pending = this.pending.get(id);
     if (!pending) return;
-    clearTimeout(pending.timer);
-    this.pending.delete(id);
+    if (pending.abortReason) return;
+    this.takePending(id);
     if (response.error) {
       pending.reject(
         new Error(`MCP server "${this.config.name}" 返回错误: ${response.error.message}`),
@@ -545,12 +655,23 @@ export class HttpMcpClient implements McpClient {
   }
 
   private failAllPending(err: Error): void {
-    for (const [, pending] of this.pending) {
-      clearTimeout(pending.timer);
+    for (const [id, pending] of this.pending) {
+      if (pending.abortReason && pending.abortTask) continue;
+      this.takePending(id);
       pending.controller.abort();
       pending.reject(err);
     }
-    this.pending.clear();
+  }
+
+  private takePending(id: number): PendingRequest | undefined {
+    const pending = this.pending.get(id);
+    if (!pending) return undefined;
+    clearTimeout(pending.timer);
+    if (pending.signal && pending.abortListener) {
+      pending.signal.removeEventListener("abort", pending.abortListener);
+    }
+    this.pending.delete(id);
+    return pending;
   }
 
   private emitClose(err?: Error): void {
@@ -719,4 +840,14 @@ async function readLimitedResponseText(
 
 async function cancelResponseBody(response: Response): Promise<void> {
   await response.body?.cancel().catch(() => {});
+}
+
+function abortReason(signal: AbortSignal): Error {
+  return signal.reason instanceof Error
+    ? signal.reason
+    : new DOMException("MCP tool call aborted", "AbortError");
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

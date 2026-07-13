@@ -37,6 +37,7 @@ export type {
   McpConnectionStatus,
   McpContentBlock,
   McpToolResult,
+  McpToolCancellationScope,
   McpResource,
   McpResourceContents,
   McpResourceListResult,
