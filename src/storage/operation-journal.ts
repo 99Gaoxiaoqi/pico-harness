@@ -132,6 +132,11 @@ export class StorageOperationJournal {
     } as StorageOperation;
     const parsed = parseStorageOperation(operation);
     if (!parsed) throw new Error("Invalid storage operation");
+    if (hasCasBlobReferences(parsed) && !this.referenceIndex) {
+      throw new Error(
+        "CAS-bearing rewind operation must attach the shared operation reference index before creation",
+      );
+    }
     // 先发布全局 root：后续本地 journal 写入失败只会多保留 blob，
     // 不会留下已存在但 GC 无法看到的未完成 operation。
     await this.referenceIndex?.upsert(this.directory, parsed);
@@ -223,6 +228,13 @@ export class StorageOperationJournal {
       throw new Error(`Invalid operation ID: ${operationId}`);
     return join(this.directory, `${operationId}.json`);
   }
+}
+
+function hasCasBlobReferences(operation: StorageOperation): boolean {
+  return (
+    operation.kind === "rewind" &&
+    operation.files.some((file) => file.before.kind === "file" || file.after.kind === "file")
+  );
 }
 
 export function isTerminalStorageOperation(state: StorageOperationState): boolean {
