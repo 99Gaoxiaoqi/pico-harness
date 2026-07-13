@@ -168,13 +168,26 @@ describe("createToolResultObservationProcessor", () => {
     expect(store.cleanupCalls).toBe(0);
   });
 
-  it("lets cleanupAfterWrite take precedence over the deprecated cleanup alias", async () => {
+  it.each([
+    {
+      label: "cleanupAfterWrite=true overrides cleanup=false",
+      cleanupAfterWrite: true,
+      cleanup: false,
+      expectedCleanupCalls: 1,
+    },
+    {
+      label: "cleanupAfterWrite=false overrides cleanup=true",
+      cleanupAfterWrite: false,
+      cleanup: true,
+      expectedCleanupCalls: 0,
+    },
+  ])("$label", async ({ cleanupAfterWrite, cleanup, expectedCleanupCalls }) => {
     const store = new FakeArtifactStore();
     const processor = createToolResultObservationProcessor({
       store,
       externalizeThresholdChars: 1,
-      cleanup: false,
-      cleanupAfterWrite: true,
+      cleanup,
+      cleanupAfterWrite,
     });
 
     await processor({
@@ -184,6 +197,6 @@ describe("createToolResultObservationProcessor", () => {
       sessionId: "session-1",
     });
 
-    expect(store.cleanupCalls).toBe(1);
+    expect(store.cleanupCalls).toBe(expectedCleanupCalls);
   });
 });
