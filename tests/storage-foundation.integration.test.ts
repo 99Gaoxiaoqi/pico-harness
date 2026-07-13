@@ -73,6 +73,7 @@ describe("storage foundation integration", () => {
     const root = await mkdtemp(join(tmpdir(), "pico-operation-journal-"));
     cleanup.push(root);
     const journal = new StorageOperationJournal({ workDir: root });
+    journal.attachReferenceIndex(join(root, "file-history"));
     const prepared = await journal.create({
       operationId: "rewind-1",
       kind: "rewind",
