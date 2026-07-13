@@ -3,7 +3,7 @@ import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
-import { render, type Instance } from "ink";
+import { render, type Instance, type RenderOptions } from "ink";
 import { afterEach, describe, expect, it } from "vitest";
 import { ToolResultArtifactStore } from "../../src/context/artifact-store.js";
 import { AgentEngine } from "../../src/engine/loop.js";
@@ -11,7 +11,7 @@ import { Session } from "../../src/engine/session.js";
 import type { LLMProvider } from "../../src/provider/interface.js";
 import type { Message, ToolDefinition } from "../../src/schema/message.js";
 import { App } from "../../src/tui/app.js";
-import { resolveTuiRenderOptions, TUI_RENDER_OPTIONS } from "../../src/tui/repl.js";
+import { requiresTuiLineMode, TUI_RENDER_OPTIONS } from "../../src/tui/repl.js";
 import { createTuiTerminalGridSession } from "../../src/tui/terminal-grid.js";
 import type { TuiEntry } from "../../src/tui/tui-reporter.js";
 import { BashTool, ReadFileTool, ToolRegistry } from "../../src/tools/registry-impl.js";
@@ -21,6 +21,7 @@ const MOUSE_ENABLE = "\u001b[?1000h\u001b[?1006h";
 const MOUSE_DISABLE = "\u001b[?1006l\u001b[?1000l";
 const WHEEL_UP = "\u001b[<64;10;10M";
 const WHEEL_DOWN = "\u001b[<65;10;10M";
+const INK_FRAME_CURSOR_CONTROL = new RegExp(`${String.fromCharCode(27)}\\[\\d*(?:A|G|K)`, "u");
 
 class PagingScenarioProvider implements LLMProvider {
   readonly toolSnapshots: ToolDefinition[][] = [];
@@ -374,17 +375,11 @@ describe("阶段 10：滚动窗口与大型工具输出集成验收", () => {
     }
   });
 
-  it("Codex/TERM=dumb 以全帧路径处理逐字输入和连续回退，不残留旧候选帧", async () => {
-    const regularOptions = resolveTuiRenderOptions({ TERM: "xterm-256color" });
-    const compatibilityOptions = resolveTuiRenderOptions({ CODEX_SHELL: "1", TERM: "dumb" });
-    expect(regularOptions).toMatchObject({ alternateScreen: true, incrementalRendering: true });
-    expect(compatibilityOptions).toMatchObject({
-      alternateScreen: false,
-      incrementalRendering: false,
-    });
-    expect("interactive" in compatibilityOptions).toBe(false);
+  it("忽略光标控制的宿主会让 Ink 全帧路径残留候选，因此 TERM=dumb 必须切 line-mode", async () => {
+    expect(requiresTuiLineMode({ TERM: "dumb", CODEX_SHELL: "1" })).toBe(true);
+    expect(requiresTuiLineMode({ TERM: "xterm-256color", CODEX_SHELL: "1" })).toBe(false);
 
-    const terminal = new ImmediateWrapTerminal(96, 24);
+    const terminal = new ImmediateWrapTerminal(96, 80, { ignoreFrameCursorControls: true });
     const slashCommandSuggestions = (query: string) => {
       if (query.length === 0) {
         return [
@@ -422,22 +417,27 @@ describe("阶段 10：滚动窗口与大型工具输出集成验收", () => {
     const harness = await createProductionFrameHarness(
       app,
       terminal,
-      { columns: 96, rows: 24 },
-      { env: { CODEX_SHELL: "1", TERM: "dumb" }, renderOptions: compatibilityOptions },
+      { columns: 96, rows: 80 },
+      {
+        env: { CODEX_SHELL: "1", TERM: "xterm-256color" },
+        renderOptions: {
+          ...TUI_RENDER_OPTIONS,
+          alternateScreen: false,
+          incrementalRendering: false,
+        },
+      },
     );
 
     try {
       for (const character of "/rename") await harness.write(character);
-      expect(terminal.visibleText()).toContain("RENAME_STALE_SUGGESTION_MARKER");
 
       for (let index = 0; index < "rename".length; index++) await harness.write("\u007f");
 
-      const visible = terminal.visibleText();
-      expect(visible).toContain("❯ /▋");
-      expect(visible).toContain("CLEAR_CURRENT_SUGGESTION_MARKER");
-      expect(visible).not.toContain("RENAME_STALE_SUGGESTION_MARKER");
-      expect(terminal.scrollbackText()).not.toContain("RENAME_STALE_SUGGESTION_MARKER");
-      expect(harness.rawOutput()).not.toContain("\u001b[?1049h");
+      // 这正是用户截图中的根因：即使 incrementalRendering=false，Ink 的
+      // 标准 renderer 仍会发 cursor-up / erase，失明宿主便将旧帧推入历史。
+      expect(harness.rawOutput()).toMatch(INK_FRAME_CURSOR_CONTROL);
+      expect(terminal.scrollbackText()).toContain("RENAME_STALE_SUGGESTION_MARKER");
+      expect(terminal.scrollbackText()).toContain("CLEAR_CURRENT_SUGGESTION_MARKER");
     } finally {
       await harness.cleanup();
     }
@@ -529,7 +529,7 @@ async function createProductionFrameHarness(
   reportedDimensions: { columns: number; rows: number },
   options: {
     env?: NodeJS.ProcessEnv;
-    renderOptions?: ReturnType<typeof resolveTuiRenderOptions>;
+    renderOptions?: RenderOptions;
   } = {},
 ): Promise<{
   wait: (milliseconds: number) => Promise<void>;
@@ -654,7 +654,7 @@ class ImmediateWrapTerminal {
   constructor(
     columns: number,
     rows: number,
-    private readonly options: { respondToCpr?: boolean } = {},
+    private readonly options: { respondToCpr?: boolean; ignoreFrameCursorControls?: boolean } = {},
   ) {
     this.columns = columns;
     this.rows = rows;
@@ -786,6 +786,12 @@ class ImmediateWrapTerminal {
     if (final === "m") return;
     if (final === "n" && amount === 6 && this.options.respondToCpr !== false) {
       this.cursorPositionResponses.push(`\u001b[${this.y + 1};${this.x + 1}R`);
+      return;
+    }
+    if (
+      this.options.ignoreFrameCursorControls &&
+      ["A", "B", "C", "D", "E", "F", "G", "J", "K"].includes(final)
+    ) {
       return;
     }
     if (final === "A") this.y = Math.max(0, this.y - amount);

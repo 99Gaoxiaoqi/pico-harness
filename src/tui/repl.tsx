@@ -5,6 +5,7 @@
 // QueryGuard prevents overlapping submissions from racing cleanup state.
 
 import { access } from "node:fs/promises";
+import { createInterface } from "node:readline/promises";
 import type React from "react";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { render, Text, useApp, useInput, type Instance, type RenderOptions } from "ink";
@@ -78,6 +79,7 @@ import {
 import { WorkspaceRoots } from "../tools/workspace-roots.js";
 import { globalSessionManager, type Session } from "../engine/session.js";
 import { SessionForkService } from "../engine/session-fork-service.js";
+import type { Reporter } from "../engine/reporter.js";
 import type { SteerQueue } from "../engine/steer-queue.js";
 import { McpConnectionManager, type McpStatusSnapshot } from "../mcp/manager.js";
 import { hasLocalUiCommandAction } from "./local-ui-command.js";
@@ -159,24 +161,12 @@ export const TUI_RENDER_OPTIONS = {
 } as const satisfies RenderOptions;
 
 /**
- * Ink 的增量帧依赖终端准确执行光标上移、擦行和 synchronized-output。
- * Codex 的嵌入式命令面会以 TERM=dumb 标识自身；继续按 xterm 能力做
- * 差分渲染会把每一帧当作普通日志追加。此时保留交互输入，但使用 Ink 的
- * 全帧路径，并避免切入可能未实现的 alternate screen。
- *
- * 不在这里强制 interactive:true：Ink 应继续依据真实 stdin/stdout 的 TTY
- * 状态决定是否可交互，避免把管道或 CI 强行当作终端。
+ * TERM=dumb 没有 Ink 多帧重绘所需的光标控制保证。此环境必须走
+ * line-mode，而不是尝试通过 interactive:true 或关闭增量渲染来补救；
+ * 标准 Ink renderer 同样依赖 cursor-up / erase。
  */
-export function resolveTuiRenderOptions(env: NodeJS.ProcessEnv = process.env): RenderOptions {
-  const terminal = env.TERM?.trim().toLowerCase();
-  const needsConservativeFrames = terminal === "dumb" || env.CODEX_SHELL === "1";
-  if (!needsConservativeFrames) return TUI_RENDER_OPTIONS;
-
-  return {
-    ...TUI_RENDER_OPTIONS,
-    alternateScreen: false,
-    incrementalRendering: false,
-  };
+export function requiresTuiLineMode(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.TERM?.trim().toLowerCase() === "dumb";
 }
 
 export type TuiInputProcessResult = InputProcessResult;
@@ -666,8 +656,133 @@ function formatUnavailableCommandBlocked(command: string, disabledReason: string
   return `Cannot run /${command}: ${disabledReason}`;
 }
 
+/**
+ * TERM=dumb 的最小可用入口。它故意不用 Ink：即使关闭增量渲染，Ink 的
+ * 标准 renderer 仍需要 cursor-up / erase，无法防止宿主把每帧追加成日志。
+ * 行模式保留可靠的多轮文本会话；依赖实时重绘的候选、面板、图片和鼠标交互
+ * 明确不提供，避免给用户一个会损坏屏幕状态的半成品 TUI。
+ */
+async function startLineModeRepl(opts: ReplOptions): Promise<void> {
+  const input = createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    terminal: Boolean(process.stdin.isTTY && process.stdout.isTTY),
+  });
+  let selection: CliSessionSelection = opts.sessionSelection ?? {
+    mode: "new",
+    sessionId: createCliSessionId(),
+  };
+  const onSigint = () => input.close();
+  input.on("SIGINT", onSigint);
+
+  process.stdout.write(
+    "Pico 已切换到兼容行模式（TERM=dumb）：支持文本对话和多轮会话；动态候选、面板、图片输入不可用。\n",
+  );
+  process.stdout.write("输入 /help 查看限制，/exit 或 Ctrl+C 退出。\n");
+  input.setPrompt("pico> ");
+  input.prompt();
+
+  try {
+    for await (const rawInput of input) {
+      const text = rawInput.trim();
+      if (text.length === 0) {
+        input.prompt();
+        continue;
+      }
+      if (text === "/exit" || text === "/q") break;
+      if (text === "/help") {
+        process.stdout.write(
+          "兼容行模式仅支持普通文本提示词；/exit、/q、/help 可用。请在支持完整 ANSI 的终端使用完整 TUI。\n",
+        );
+        input.prompt();
+        continue;
+      }
+      if (text.startsWith("/")) {
+        process.stdout.write("兼容行模式不执行斜杠命令；请输入普通文本，或使用 /help。\n");
+        input.prompt();
+        continue;
+      }
+
+      try {
+        const result = await runAgentFromCli(
+          {
+            prompt: rawInput,
+            dir: opts.workDir,
+            provider: opts.provider,
+            model: opts.model,
+            ...(opts.thinkingEffort !== undefined ? { thinkingEffort: opts.thinkingEffort } : {}),
+            ...(opts.mcpConfigPath !== undefined ? { mcpConfigPath: opts.mcpConfigPath } : {}),
+            ...(opts.addDirs !== undefined ? { addDirs: opts.addDirs } : {}),
+            sessionSelection: selection,
+          },
+          { reporter: new LineModeReporter(process.stdout) },
+        );
+        selection = { mode: "resume", sessionId: result.sessionId };
+      } catch (error) {
+        process.stdout.write(
+          `请求失败：${error instanceof Error ? error.message : String(error)}\n`,
+        );
+      }
+      input.prompt();
+    }
+  } finally {
+    input.off("SIGINT", onSigint);
+    input.close();
+  }
+}
+
+class LineModeReporter implements Reporter {
+  private wroteStreamingText = false;
+
+  constructor(private readonly output: NodeJS.WriteStream) {}
+
+  onStart(workDir: string): void {
+    this.output.write(`工作区：${workDir}\n`);
+  }
+
+  onTurnStart(turn: number): void {
+    this.output.write(`第 ${turn} 轮\n`);
+  }
+
+  onThinking(): void {
+    this.output.write("思考中…\n");
+  }
+
+  onToolCall(toolName: string): void {
+    this.output.write(`执行工具：${toolName}\n`);
+  }
+
+  onToolResult(toolName: string, result: string, isError: boolean): void {
+    const summary = result.replace(/\s+/gu, " ").trim().slice(0, 180);
+    this.output.write(
+      `${isError ? "工具失败" : "工具完成"}：${toolName}${summary ? ` · ${summary}` : ""}\n`,
+    );
+  }
+
+  onMessage(content: string): void {
+    if (this.wroteStreamingText) {
+      this.output.write("\n");
+      this.wroteStreamingText = false;
+      return;
+    }
+    this.output.write(`回复：${content}\n`);
+  }
+
+  onFinish(): void {}
+
+  onTextDelta(delta: string): void {
+    this.wroteStreamingText = true;
+    this.output.write(delta);
+  }
+}
+
 /** 启动 TUI REPL 循环 */
 export async function startTuiRepl(opts: ReplOptions): Promise<void> {
+  if (requiresTuiLineMode()) {
+    await startLineModeRepl(opts);
+    return;
+  }
+
   // Pino 静默由 preload-env.ts 在模块加载前完成；console 由 Ink
   // patchConsole 在清除/恢复帧的记录内协调,避免任何运行期日志移动 PTY 光标。
 
@@ -1529,16 +1644,12 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     renderStdout.write("\x1b[2J\x1b[H");
   }
 
-  // 普通 xterm 使用 alternateScreen + incrementalRendering 避免流式帧闪烁；
-  // Codex/TERM=dumb 则降为完整帧，避免宿主把差分控制序列当作追加输出。
+  // 普通 xterm 使用 alternateScreen + incrementalRendering 避免流式帧闪烁。
   // 根布局保留右侧 1 列，避免中文、Emoji 和长行在右边界立即换行时失配。
   // patchConsole 让剩余 console 输出先擦除当前帧,输出后再恢复,
   // 不绕过 Ink 的光标记账。Pino fd2 已在预加载阶段独立静默。
   try {
-    const instance = render(<ReplApp />, {
-      ...resolveTuiRenderOptions(),
-      stdout: renderStdout,
-    });
+    const instance = render(<ReplApp />, { ...TUI_RENDER_OPTIONS, stdout: renderStdout });
     instanceRef.current = instance;
     await instance.waitUntilExit();
   } finally {

@@ -77,7 +77,7 @@ describe("TUI resize 同步帧集成", () => {
     expect(session.stdout.getWindowSize()).toEqual([100, 30]);
   });
 
-  it("Codex 或 TERM=dumb 用原地 CPR 探测，避免短暂切入 alternate screen", async () => {
+  it("TERM=dumb 用原地 CPR 探测，避免短暂切入 alternate screen", async () => {
     const stdin = new PassThrough();
     const stdout = new PassThrough();
     Object.defineProperties(stdin, {
