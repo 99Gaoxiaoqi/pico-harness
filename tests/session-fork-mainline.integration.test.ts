@@ -53,10 +53,7 @@ describe("session fork published mainline", () => {
       output: "durable artifact body",
     });
     const sourceUri =
-      "artifact://" +
-      encodeURIComponent(sourceId) +
-      "/" +
-      encodeURIComponent(sourceArtifact.id);
+      "artifact://" + encodeURIComponent(sourceId) + "/" + encodeURIComponent(sourceArtifact.id);
     await source.commitMessages(
       { role: "user", content: "实现存储架构演进" },
       {
@@ -192,11 +189,15 @@ describe("session fork published mainline", () => {
     await expect(restarted.reconcileUnfinished()).resolves.toEqual([
       { operationId, state: "completed" },
     ]);
-    const publishedHash = createHash("sha256").update(await readFile(targetPath)).digest("hex");
+    const publishedHash = createHash("sha256")
+      .update(await readFile(targetPath))
+      .digest("hex");
     await expect(restarted.reconcileUnfinished()).resolves.toEqual([]);
-    expect(createHash("sha256").update(await readFile(targetPath)).digest("hex")).toBe(
-      publishedHash,
-    );
+    expect(
+      createHash("sha256")
+        .update(await readFile(targetPath))
+        .digest("hex"),
+    ).toBe(publishedHash);
 
     const prepared = await new SessionStore(targetPath).inspectJournal({ strict: true });
     expect(prepared.records.map((record) => record.type === "event" && record.kind)).toEqual([
@@ -214,10 +215,7 @@ describe("session fork published mainline", () => {
     const targetArtifact = (await artifactStore.readMeta(sourceArtifact.id, targetId))!;
     expect(hydration.messages[1]?.content).toContain(targetArtifact.path);
     expect(hydration.messages[1]?.content).toContain(
-      "artifact://" +
-        encodeURIComponent(targetId) +
-        "/" +
-        encodeURIComponent(sourceArtifact.id),
+      "artifact://" + encodeURIComponent(targetId) + "/" + encodeURIComponent(sourceArtifact.id),
     );
     expect(hydration.messages[1]?.providerData).toMatchObject({
       artifactPath: targetArtifact.path,
@@ -245,9 +243,7 @@ describe("session fork published mainline", () => {
     ).resolves.toBe(true);
     expect(targetFileHistory.snapshots).toHaveLength(1);
     expect(
-      new FileSessionSummaryStore(join(workDir, ".claw", "memory", "summaries.json")).get(
-        targetId,
-      ),
+      new FileSessionSummaryStore(join(workDir, ".claw", "memory", "summaries.json")).get(targetId),
     ).toMatchObject({
       summary: "source summary",
       basis: { throughEventId: sourceForkPoint.cursor.eventId, messageCount: 2 },

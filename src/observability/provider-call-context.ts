@@ -17,10 +17,7 @@ export interface ProviderCallContext {
 const providerCallContext = new AsyncLocalStorage<ProviderCallContext>();
 
 /** 在当前异步调用链中显式覆盖 Provider 调用归属。嵌套调用继承未覆盖字段。 */
-export function withProviderCallContext<T>(
-  context: ProviderCallContext,
-  run: () => T,
-): T {
+export function withProviderCallContext<T>(context: ProviderCallContext, run: () => T): T {
   const parent = providerCallContext.getStore();
   return providerCallContext.run({ ...parent, ...context }, run);
 }

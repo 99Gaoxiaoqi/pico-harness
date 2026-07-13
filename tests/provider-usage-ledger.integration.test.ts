@@ -111,10 +111,7 @@ describe("provider usage ledger integration", () => {
       trackerOptions,
     );
     seedCompactionHistory(session);
-    await new FullCompactor({ provider: compactionProvider, maxAttempts: 1 }).compact(
-      session,
-      1,
-    );
+    await new FullCompactor({ provider: compactionProvider, maxAttempts: 1 }).compact(session, 1);
 
     const auxProvider = new CostTracker(
       new SequenceProvider([response("辅助模型摘要", 6, 2)]),

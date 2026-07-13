@@ -184,11 +184,7 @@ function parseLeaseRecord(value: unknown): OwnerLeaseRecord | undefined {
   };
 }
 
-function canProveOwnerIsDead(
-  owner: OwnerLeaseRecord,
-  now: number,
-  staleAfterMs: number,
-): boolean {
+function canProveOwnerIsDead(owner: OwnerLeaseRecord, now: number, staleAfterMs: number): boolean {
   if (owner.hostname !== hostname()) return false;
   const heartbeatAt = Date.parse(owner.heartbeatAt);
   if (!Number.isFinite(heartbeatAt) || now - heartbeatAt < staleAfterMs) return false;

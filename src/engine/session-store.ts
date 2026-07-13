@@ -828,7 +828,11 @@ function sameCanonicalEvent(left: SessionEvent, right: SessionEvent): boolean {
   return left.kind === right.kind && isDeepStrictEqual(left.data, right.data);
 }
 
-async function writeAll(file: FileHandle, bytes: Uint8Array, maxWriteBytes?: number): Promise<void> {
+async function writeAll(
+  file: FileHandle,
+  bytes: Uint8Array,
+  maxWriteBytes?: number,
+): Promise<void> {
   const chunkLimit =
     maxWriteBytes === undefined
       ? bytes.byteLength
@@ -856,7 +860,9 @@ async function syncSessionDirectory(directory: string): Promise<void> {
 
 function isUnsupportedDirectorySync(error: unknown): boolean {
   const code = (error as NodeJS.ErrnoException).code;
-  return code !== undefined && new Set(["EACCES", "EINVAL", "EISDIR", "ENOTSUP", "EPERM"]).has(code);
+  return (
+    code !== undefined && new Set(["EACCES", "EINVAL", "EISDIR", "ENOTSUP", "EPERM"]).has(code)
+  );
 }
 
 function effectiveEpoch(record: LegacySessionRecord | SessionEvent, current: number): number {

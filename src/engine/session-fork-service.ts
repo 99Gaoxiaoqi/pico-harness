@@ -5,10 +5,7 @@ import { isDeepStrictEqual } from "node:util";
 import { ToolResultArtifactStore, type ArtifactCloneMapping } from "../context/artifact-store.js";
 import { FileSessionSummaryStore } from "../memory/summary-store.js";
 import type { Message } from "../schema/message.js";
-import {
-  fileHistoryCloneSession,
-  fileHistoryDefaultBaseDir,
-} from "../safety/file-history.js";
+import { fileHistoryCloneSession, fileHistoryDefaultBaseDir } from "../safety/file-history.js";
 import {
   ForkOperationCoordinator,
   ForkOperationConflictError,
@@ -17,7 +14,10 @@ import {
   type ForkReconciliationResult,
   type ForkTargetSessionIdentity,
 } from "../storage/fork-operation-coordinator.js";
-import { StorageOperationJournal, type ForkStorageOperation } from "../storage/operation-journal.js";
+import {
+  StorageOperationJournal,
+  type ForkStorageOperation,
+} from "../storage/operation-journal.js";
 import {
   getDefaultSessionCatalogProjector,
   type SessionCatalogProjector,
@@ -121,8 +121,7 @@ export class SessionForkService {
     this.fileHistoryBaseDir = options.fileHistoryBaseDir ?? fileHistoryDefaultBaseDir();
     this.summaryIndexPath =
       options.summaryIndexPath ?? join(this.workDir, ".claw", "memory", "summaries.json");
-    this.artifactBaseDir =
-      options.artifactBaseDir ?? join(this.workDir, ".claw", "artifacts");
+    this.artifactBaseDir = options.artifactBaseDir ?? join(this.workDir, ".claw", "artifacts");
     this.hooks = options.hooks;
     this.createOperationId = options.createOperationId ?? randomUUID;
     this.coordinator = new ForkOperationCoordinator({
@@ -307,11 +306,7 @@ export class SessionForkService {
       this.workDir,
       ".claw",
       "sessions",
-      "." +
-        operation.targetSessionId +
-        ".fork-" +
-        operation.operationId +
-        ".jsonl",
+      "." + operation.targetSessionId + ".fork-" + operation.operationId + ".jsonl",
     );
   }
 
@@ -392,7 +387,10 @@ function rewriteArtifactReferences(
   return rewriteStrings(structuredClone(messages), replacements) as Message[];
 }
 
-function rewriteStrings(value: unknown, replacements: readonly (readonly [string, string])[]): unknown {
+function rewriteStrings(
+  value: unknown,
+  replacements: readonly (readonly [string, string])[],
+): unknown {
   if (typeof value === "string") {
     return replacements.reduce(
       (current, [source, target]) => current.replaceAll(source, target),
