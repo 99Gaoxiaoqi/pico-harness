@@ -388,6 +388,7 @@ export async function runAgentFromCli(
     // 主会话的 mode 只控制主 Agent 权限。worker/explore 是独立的不可信执行边界，
     // 必须始终使用 worktree + OS 沙箱，不得因 default/auto 模式退化为无沙箱 Bash。
     { config: picoConfig.sandbox },
+    session.id,
     runtimeState.taskHostRuntime?.supervisor,
     reporter,
   );
@@ -656,6 +657,7 @@ function registerDelegationTools(
   manager: DelegationManager,
   workspaceRoots: WorkspaceRoots,
   yoloSandbox: { config?: Partial<YoloSandboxConfig> },
+  ownerSessionId: string,
   worktreeSupervisor?: WorktreeSupervisor,
   reporter?: Reporter,
 ): void {
@@ -665,6 +667,7 @@ function registerDelegationTools(
     runner: engine,
     manager,
     yoloSandbox,
+    ownerSessionId,
     ...(worktreeSupervisor ? { worktreeSupervisor } : {}),
     ...(profiles.length > 0 ? { profiles } : {}),
   });
@@ -673,6 +676,7 @@ function registerDelegationTools(
     ...(profiles.length > 0 ? { profiles } : {}),
     ...(worktreeSupervisor ? { worktreeSupervisor } : {}),
     ...(reporter ? { reporter } : {}),
+    ownerSessionId,
   };
   registry.register(new DelegateTaskTool(engine, registryFactory, manager, delegateTaskOptions));
   registry.register(new DelegateStatusTool(manager));

@@ -88,6 +88,8 @@ export interface DelegationTaskRuntimeInput {
   toolUseId?: string;
   outputFile?: string;
   activityIds?: readonly string[];
+  ownerSessionId?: string;
+  childSessionId?: string;
 }
 
 export interface DelegationResumeInfo {
@@ -187,7 +189,12 @@ export class DelegationManager {
       description: taskInput.description ?? "delegate_task",
       toolUseId: taskInput.toolUseId,
       outputFile: taskInput.outputFile,
-      data: { delegationId: id, completionPolicy },
+      data: {
+        delegationId: id,
+        completionPolicy,
+        ...(taskInput.ownerSessionId ? { ownerSessionId: taskInput.ownerSessionId } : {}),
+        ...(taskInput.childSessionId ? { childSessionId: taskInput.childSessionId } : {}),
+      },
     });
     if (task) {
       this.taskRegistry?.start(task.taskId);

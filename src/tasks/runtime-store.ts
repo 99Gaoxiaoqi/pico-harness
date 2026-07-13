@@ -30,7 +30,7 @@ import {
   isTerminalJobStatus,
 } from "./runtime-types.js";
 
-const RUNTIME_SCHEMA_VERSION = 1;
+const RUNTIME_SCHEMA_VERSION = 2;
 const DEFAULT_LEASE_TTL_MS = 30_000;
 
 export class RuntimeConflictError extends Error {
@@ -80,6 +80,7 @@ export interface FinishJobInput {
   error?: string;
   result?: Record<string, unknown>;
   completionPayload?: Record<string, unknown>;
+  completionAlreadyDelivered?: boolean;
 }
 
 export interface FinishJobResult {
@@ -432,7 +433,16 @@ export class RuntimeStore {
         existingCompletion?.jobId === input.jobId &&
         existingCompletion.attemptId === input.attemptId
       ) {
-        return { job: currentJob, attempt: currentAttempt, completion: existingCompletion };
+        if (input.completionAlreadyDelivered && existingCompletion.deliveredAt === undefined) {
+          this.db
+            .prepare("UPDATE completion_outbox SET delivered_at = ? WHERE completion_id = ?")
+            .run(this.now(), input.completionId);
+        }
+        return {
+          job: currentJob,
+          attempt: currentAttempt,
+          completion: this.requireCompletion(input.completionId),
+        };
       }
       if (currentJob.status !== "running" || currentAttempt.status !== "running") {
         throw new RuntimeConflictError(
@@ -494,6 +504,11 @@ export class RuntimeStore {
         payload: input.completionPayload,
         createdAt: now,
       });
+      if (input.completionAlreadyDelivered) {
+        this.db
+          .prepare("UPDATE completion_outbox SET delivered_at = ? WHERE completion_id = ?")
+          .run(now, input.completionId);
+      }
       return {
         job: this.requireJob(input.jobId),
         attempt: this.requireAttempt(input.attemptId),
@@ -602,7 +617,7 @@ export class RuntimeStore {
           attemptId: attempt.attempt_id,
           policy: job.completionPolicy,
           status: "interrupted",
-          payload: { reason },
+          payload: { reason, executionClass: row.execution_class },
           createdAt: now,
         });
         interrupted.push(job);
@@ -936,6 +951,12 @@ export class RuntimeStore {
           .prepare("INSERT INTO schema_migrations(version, name, applied_at) VALUES (1, ?, ?)")
           .run("runtime_control_plane", this.now());
       }
+      if (current < 2) {
+        this.db.exec(SCHEMA_V2);
+        this.db
+          .prepare("INSERT INTO schema_migrations(version, name, applied_at) VALUES (2, ?, ?)")
+          .run("merge_not_needed_status", this.now());
+      }
     });
     migrate();
   }
@@ -1167,6 +1188,35 @@ const SCHEMA_V1 = `
     imported_at INTEGER NOT NULL,
     source_json TEXT
   );
+`;
+
+const SCHEMA_V2 = `
+  ALTER TABLE merge_requests RENAME TO merge_requests_v1;
+  CREATE TABLE merge_requests (
+    merge_request_id TEXT PRIMARY KEY,
+    job_id TEXT NOT NULL REFERENCES jobs(job_id) ON DELETE CASCADE,
+    attempt_id TEXT REFERENCES job_attempts(attempt_id) ON DELETE SET NULL,
+    source_branch TEXT NOT NULL,
+    source_worktree TEXT NOT NULL,
+    target_branch TEXT NOT NULL,
+    target_worktree TEXT NOT NULL,
+    source_head TEXT,
+    status TEXT NOT NULL CHECK (status IN (${sqlValues(MERGE_REQUEST_STATUSES)})),
+    error TEXT,
+    version INTEGER NOT NULL CHECK (version > 0),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  INSERT INTO merge_requests (
+    merge_request_id, job_id, attempt_id, source_branch, source_worktree,
+    target_branch, target_worktree, source_head, status, error, version, created_at, updated_at
+  )
+  SELECT
+    merge_request_id, job_id, attempt_id, source_branch, source_worktree,
+    target_branch, target_worktree, source_head, status, error, version, created_at, updated_at
+  FROM merge_requests_v1;
+  DROP TABLE merge_requests_v1;
+  CREATE INDEX merge_requests_job_idx ON merge_requests(job_id, created_at);
 `;
 
 function mapJob(row: JobRow): JobRecord {

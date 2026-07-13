@@ -35,6 +35,7 @@ export interface SubagentRegistryFactoryConfig {
   /** 可写 worker/explore 的独立宿主边界；TUI 无论主会话 mode 都应注入。 */
   yoloSandbox?: { config?: Partial<YoloSandboxConfig> };
   worktreeSupervisor?: WorktreeSupervisor;
+  ownerSessionId?: string;
 }
 
 /**
@@ -194,6 +195,7 @@ function maybeRegisterDelegateTool(
         workDir: config.workDir,
         ...(config.profiles ? { profiles: config.profiles } : {}),
         ...(config.worktreeSupervisor ? { worktreeSupervisor: config.worktreeSupervisor } : {}),
+        ...(config.ownerSessionId ? { ownerSessionId: config.ownerSessionId } : {}),
       }),
     );
   }
