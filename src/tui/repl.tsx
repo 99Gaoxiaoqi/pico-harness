@@ -69,8 +69,8 @@ import {
   DEFAULT_INTERACTION_MODE,
   effectiveSessionReasoningLevel,
   getOrCreateSessionSettings,
+  restoreSessionInteractionMode,
   setSessionAdditionalDirectories,
-  setSessionMode,
   setSessionTools,
   toolStatusFromRegistry,
   type SessionSettings,
@@ -1211,8 +1211,12 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
                 reporter,
                 snapshot,
                 mode,
-                onRestoreInteractionMode: (interactionMode) => {
-                  const restored = setSessionMode(settings, interactionMode);
+                onRestoreInteractionMode: (interactionMode, prePlanMode) => {
+                  const restored = restoreSessionInteractionMode(
+                    settings,
+                    interactionMode,
+                    prePlanMode,
+                  );
                   if (!restored.ok) throw new Error(restored.message);
                 },
               });
@@ -1347,6 +1351,11 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
                 ? { rewindTranscriptIndex: rewindContext.transcriptIndex }
                 : {}),
               ...(rewindContext !== null ? { rewindInteractionMode: settings.mode } : {}),
+              ...(rewindContext !== null &&
+              settings.mode === "plan" &&
+              settings.prePlanMode !== undefined
+                ? { rewindPrePlanMode: settings.prePlanMode }
+                : {}),
               addDirs: [...settings.additionalDirectories],
             };
             await runTuiAgentPrompt(cliOpts, {

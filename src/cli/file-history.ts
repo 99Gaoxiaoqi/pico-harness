@@ -14,6 +14,7 @@ export interface FileHistorySnapshotSummary {
   messageIndex?: number;
   transcriptIndex?: number;
   interactionMode?: string;
+  prePlanMode?: string;
   changedFileCount?: number;
   addedLines?: number;
   removedLines?: number;
@@ -85,6 +86,7 @@ export function listFileHistorySnapshotSummaries(session: Session): FileHistoryS
       ...(snapshot.interactionMode !== undefined
         ? { interactionMode: snapshot.interactionMode }
         : {}),
+      ...(snapshot.prePlanMode !== undefined ? { prePlanMode: snapshot.prePlanMode } : {}),
       ...(snapshot.journalWarnings?.length
         ? { incomplete: true, warnings: [...snapshot.journalWarnings] }
         : {}),
