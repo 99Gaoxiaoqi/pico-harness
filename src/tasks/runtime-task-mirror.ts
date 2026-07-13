@@ -6,11 +6,17 @@ import {
   type TaskStatus,
   type TaskType,
 } from "./task-registry.js";
-import type {
-  JobCompletionPolicy,
-  JobExecutionClass,
-  TerminalJobStatus,
-} from "./runtime-types.js";
+import type { JobCompletionPolicy, JobExecutionClass, TerminalJobStatus } from "./runtime-types.js";
+
+export interface RuntimeTaskMirrorOptions {
+  leaseTtlMs?: number;
+  heartbeatIntervalMs?: number;
+}
+
+interface HeartbeatHandle {
+  leaseEpoch: number;
+  timer: ReturnType<typeof setInterval>;
+}
 
 /**
  * Compatibility bridge while Background/Delegation/Worktree still publish TaskRegistry snapshots.
@@ -18,12 +24,24 @@ import type {
  */
 export class RuntimeTaskMirror {
   private readonly unsubscribe: () => void;
+  private readonly heartbeats = new Map<string, HeartbeatHandle>();
+  private readonly leaseTtlMs: number;
+  private readonly heartbeatIntervalMs: number;
   private closed = false;
 
   constructor(
     registry: TaskRegistry,
     private readonly jobs: JobService,
+    options: RuntimeTaskMirrorOptions = {},
   ) {
+    this.leaseTtlMs = positiveDuration(options.leaseTtlMs ?? 30_000, "leaseTtlMs");
+    this.heartbeatIntervalMs = positiveDuration(
+      options.heartbeatIntervalMs ?? Math.max(1_000, Math.floor(this.leaseTtlMs / 3)),
+      "heartbeatIntervalMs",
+    );
+    if (this.heartbeatIntervalMs >= this.leaseTtlMs) {
+      throw new Error("heartbeatIntervalMs 必须小于 leaseTtlMs");
+    }
     this.unsubscribe = registry.subscribe((snapshot) => this.mirror(snapshot));
     for (const snapshot of registry.list()) this.mirror(snapshot);
   }
@@ -32,6 +50,7 @@ export class RuntimeTaskMirror {
     if (this.closed) return;
     this.closed = true;
     this.unsubscribe();
+    for (const taskId of this.heartbeats.keys()) this.stopHeartbeat(taskId);
   }
 
   private mirror(snapshot: TaskSnapshot): void {
@@ -42,40 +61,60 @@ export class RuntimeTaskMirror {
         this.jobs.dispatch({
           jobId: snapshot.taskId,
           type: snapshot.type,
-          executionClass: executionClass(snapshot),
+          executionClass: executionClass(),
           completionPolicy: completionPolicy(snapshot),
           description: snapshot.description,
+          ...(stringData(snapshot, "ownerSessionId")
+            ? { ownerSessionId: stringData(snapshot, "ownerSessionId") }
+            : {}),
+          ...(stringData(snapshot, "childSessionId")
+            ? { childSessionId: stringData(snapshot, "childSessionId") }
+            : {}),
           ...(snapshot.toolUseId ? { toolUseId: snapshot.toolUseId } : {}),
           ...(snapshot.outputFile ? { outputPath: snapshot.outputFile } : {}),
-          ...(snapshot.data ? { data: snapshot.data } : {}),
+          data: taskPayload(snapshot),
         });
         durable = this.jobs.get(snapshot.taskId);
       }
       if (!durable) throw new Error(`无法创建持久任务 ${snapshot.taskId}`);
 
       if (snapshot.status === "running" && durable.job.status === "queued") {
-        this.jobs.start(snapshot.taskId, {
+        const started = this.jobs.start(snapshot.taskId, {
           expectedVersion: durable.job.version,
           ...(snapshot.outputFile ? { outputPath: snapshot.outputFile } : {}),
+          leaseTtlMs: this.leaseTtlMs,
         });
+        this.startHeartbeat(snapshot.taskId, started.lease.leaseEpoch);
+        return;
+      }
+      if (snapshot.status === "running" && durable.job.status === "running") {
+        const attempt = durable.attempts.at(-1);
+        if (attempt?.ownerId === this.jobs.ownerId) {
+          this.startHeartbeat(snapshot.taskId, attempt.leaseEpoch);
+        }
         return;
       }
       if (!isLegacyTerminal(snapshot.status) || isDurableTerminal(durable.job.status)) return;
 
-      durable = ensureAttempt(this.jobs, durable, snapshot);
+      durable = ensureAttempt(this.jobs, durable, snapshot, this.leaseTtlMs);
       const attempt = durable.attempts.at(-1);
       if (!attempt || durable.job.status !== "running") return;
+      this.stopHeartbeat(snapshot.taskId);
       this.jobs.terminal({
         jobId: durable.job.jobId,
         attemptId: attempt.attemptId,
-        status: terminalStatus(snapshot.status),
+        status: terminalStatus(snapshot),
         expectedJobVersion: durable.job.version,
         expectedAttemptVersion: attempt.version,
         leaseEpoch: attempt.leaseEpoch,
         completionId: `completion:${durable.job.jobId}:${attempt.attemptNumber}`,
         outputOffset: snapshot.outputOffset,
         ...(snapshot.error ? { error: snapshot.error } : {}),
-        ...(snapshot.data ? { result: snapshot.data } : {}),
+        result: terminalResult(snapshot),
+        completionPayload: terminalPayload(snapshot),
+        ...(snapshot.data?.["internalCompletion"] === true
+          ? { completionAlreadyDelivered: true }
+          : {}),
       });
     } catch (error) {
       // The bridge cannot roll back an executor that already changed state. Surface a durable
@@ -86,27 +125,55 @@ export class RuntimeTaskMirror {
       );
     }
   }
+
+  private startHeartbeat(taskId: string, leaseEpoch: number): void {
+    const existing = this.heartbeats.get(taskId);
+    if (existing?.leaseEpoch === leaseEpoch) return;
+    this.stopHeartbeat(taskId);
+    const timer = setInterval(() => {
+      try {
+        this.jobs.heartbeat(taskId, leaseEpoch, this.leaseTtlMs);
+      } catch (error) {
+        this.stopHeartbeat(taskId);
+        logger.warn(
+          { taskId, leaseEpoch, error: String(error) },
+          "[runtime-store] 任务 heartbeat 失败，已停止续租",
+        );
+      }
+    }, this.heartbeatIntervalMs);
+    timer.unref?.();
+    this.heartbeats.set(taskId, { leaseEpoch, timer });
+  }
+
+  stopHeartbeat(taskId: string): void {
+    const heartbeat = this.heartbeats.get(taskId);
+    if (!heartbeat) return;
+    clearInterval(heartbeat.timer);
+    this.heartbeats.delete(taskId);
+  }
 }
 
 function ensureAttempt(
   jobs: JobService,
   durable: NonNullable<ReturnType<JobService["get"]>>,
   snapshot: TaskSnapshot,
+  leaseTtlMs: number,
 ): NonNullable<ReturnType<JobService["get"]>> {
   if (durable.job.status !== "queued") return durable;
   jobs.start(durable.job.jobId, {
     expectedVersion: durable.job.version,
     ...(snapshot.outputFile ? { outputPath: snapshot.outputFile } : {}),
+    leaseTtlMs,
   });
   const started = jobs.get(durable.job.jobId);
   if (!started) throw new Error(`持久任务 ${durable.job.jobId} 启动后消失`);
   return started;
 }
 
-function executionClass(snapshot: TaskSnapshot): JobExecutionClass {
-  return snapshot.type === "remote_agent" || snapshot.type === "monitor_mcp"
-    ? "host_bound"
-    : "recoverable";
+function executionClass(): JobExecutionClass {
+  // 当前 executor 都没有可持久 resume contract。未来只有在生产者明确标记并
+  // 实现恢复适配器后，才允许进入 recoverable 车道。
+  return "host_bound";
 }
 
 function completionPolicy(snapshot: TaskSnapshot): JobCompletionPolicy {
@@ -121,10 +188,61 @@ function defaultCompletionPolicy(type: TaskType): JobCompletionPolicy {
   return type === "local_bash" || type === "monitor_mcp" ? "detached" : "required";
 }
 
-function terminalStatus(status: Extract<TaskStatus, "completed" | "failed" | "killed">): TerminalJobStatus {
-  if (status === "completed") return "succeeded";
-  if (status === "killed") return "cancelled";
+function terminalStatus(snapshot: TaskSnapshot): TerminalJobStatus {
+  const explicit = snapshot.data?.["terminalStatus"];
+  if (isTerminalStatus(explicit)) return explicit;
+  if (snapshot.status === "completed") return "succeeded";
+  if (snapshot.status === "killed") return "cancelled";
   return "failed";
+}
+
+function taskPayload(snapshot: TaskSnapshot): Record<string, unknown> {
+  return {
+    ...(snapshot.data ?? {}),
+    legacyTask: {
+      type: snapshot.type,
+      startTime: snapshot.startTime,
+      outputOffset: snapshot.outputOffset,
+    },
+  };
+}
+
+function terminalResult(snapshot: TaskSnapshot): Record<string, unknown> {
+  return {
+    legacyStatus: snapshot.status,
+    ...(snapshot.data ?? {}),
+  };
+}
+
+function terminalPayload(snapshot: TaskSnapshot): Record<string, unknown> {
+  return {
+    description: snapshot.description,
+    legacyStatus: snapshot.status,
+    outputOffset: snapshot.outputOffset,
+    ...(snapshot.error ? { error: snapshot.error } : {}),
+    ...(snapshot.data ? { data: snapshot.data } : {}),
+  };
+}
+
+function stringData(snapshot: TaskSnapshot, key: string): string | undefined {
+  const value = snapshot.data?.[key];
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function isTerminalStatus(value: unknown): value is TerminalJobStatus {
+  return (
+    value === "succeeded" ||
+    value === "partial" ||
+    value === "failed" ||
+    value === "timed_out" ||
+    value === "cancelled" ||
+    value === "interrupted"
+  );
+}
+
+function positiveDuration(value: number, name: string): number {
+  if (!Number.isFinite(value) || value <= 0) throw new Error(`${name} 必须为正数`);
+  return value;
 }
 
 function isLegacyTerminal(

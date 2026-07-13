@@ -1,12 +1,15 @@
 import { execFile } from "node:child_process";
 import { join, resolve } from "node:path";
+import { logger } from "../observability/logger.js";
 import { TaskRegistry, type TaskSnapshot } from "./task-registry.js";
 import { TaskStore } from "./task-store.js";
 import { JobService } from "./job-service.js";
-import { RuntimeTaskMirror } from "./runtime-task-mirror.js";
+import { RuntimeTaskMirror, type RuntimeTaskMirrorOptions } from "./runtime-task-mirror.js";
 import { WorktreeMergeQueue, type WorktreeMergeSnapshot } from "./merge-queue.js";
 import {
   WorktreeSupervisor,
+  type WorktreeTaskFinalization,
+  type WorktreeTaskFinalizationInput,
   type WorktreeTaskRequest,
   type WorktreeTaskRunner,
   type WorktreeTaskSnapshot,
@@ -15,6 +18,8 @@ import {
 export interface TaskHostRuntimeOptions {
   workDir: string;
   repoRoot?: string;
+  runtimeMirror?: RuntimeTaskMirrorOptions;
+  reconcileIntervalMs?: number;
 }
 
 /** TUI-lifetime owner for durable task state and isolated worktree execution. */
@@ -28,8 +33,15 @@ export class TaskHostRuntime {
   readonly targetBranch: string;
 
   private readonly runtimeMirror: RuntimeTaskMirror;
+  private readonly reconcileTimer: ReturnType<typeof setInterval>;
 
-  private constructor(repoRoot: string, targetBranch: string, jobService: JobService) {
+  private constructor(
+    repoRoot: string,
+    targetBranch: string,
+    jobService: JobService,
+    runtimeMirrorOptions: RuntimeTaskMirrorOptions = {},
+    reconcileIntervalMs = 5_000,
+  ) {
     this.repoRoot = repoRoot;
     this.targetBranch = targetBranch;
     this.jobService = jobService;
@@ -39,13 +51,29 @@ export class TaskHostRuntime {
     });
     this.taskStore.loadInto(this.taskRegistry);
     this.taskStore.bind(this.taskRegistry);
-    this.jobService.reconcileExpiredJobs("owner_lost");
-    this.runtimeMirror = new RuntimeTaskMirror(this.taskRegistry, this.jobService);
+    this.jobService.reconcileExpiredJobs();
+    this.runtimeMirror = new RuntimeTaskMirror(
+      this.taskRegistry,
+      this.jobService,
+      runtimeMirrorOptions,
+    );
+    this.mergeQueue = new WorktreeMergeQueue();
     this.supervisor = new WorktreeSupervisor({
       taskRegistry: this.taskRegistry,
       repoRoot,
+      finalizer: (input) => this.finalizeWorktree(input),
     });
-    this.mergeQueue = new WorktreeMergeQueue();
+    this.reconcileTimer = setInterval(
+      () => {
+        try {
+          this.jobService.reconcileExpiredJobs();
+        } catch (error) {
+          logger.warn({ error: String(error) }, "[runtime-store] 过期任务收口失败");
+        }
+      },
+      positiveDuration(reconcileIntervalMs, "reconcileIntervalMs"),
+    );
+    this.reconcileTimer.unref?.();
   }
 
   static async create(options: TaskHostRuntimeOptions): Promise<TaskHostRuntime> {
@@ -59,7 +87,13 @@ export class TaskHostRuntime {
       workDir: repoRoot,
       ownerId: `tui-host:${process.pid}`,
     });
-    return new TaskHostRuntime(repoRoot, targetBranch, service);
+    return new TaskHostRuntime(
+      repoRoot,
+      targetBranch,
+      service,
+      options.runtimeMirror ?? {},
+      options.reconcileIntervalMs ?? 5_000,
+    );
   }
 
   start(request: WorktreeTaskRequest, runner: WorktreeTaskRunner): WorktreeTaskSnapshot {
@@ -112,7 +146,114 @@ export class TaskHostRuntime {
     await this.supervisor.cleanup(taskId, { merged: true });
   }
 
+  private async finalizeWorktree(
+    input: WorktreeTaskFinalizationInput,
+  ): Promise<WorktreeTaskFinalization> {
+    const durable = this.jobService.get(input.taskId);
+    if (!durable) throw new Error(`持久任务 ${input.taskId} 不存在，拒绝无记录合并`);
+    const attempt = durable.attempts.at(-1);
+    if (!attempt || durable.job.status !== "running") {
+      throw new Error(`持久任务 ${input.taskId} 没有 running attempt，拒绝合并`);
+    }
+
+    let merge = this.jobService.enqueueMerge({
+      jobId: input.taskId,
+      attemptId: attempt.attemptId,
+      sourceBranch: input.sourceBranch,
+      sourceWorktree: input.sourceWorktree,
+      targetBranch: this.targetBranch,
+      targetWorktree: this.repoRoot,
+      sourceHead: input.sourceHead,
+    });
+
+    try {
+      if (await gitIsAncestor(input.sourceHead, this.targetBranch, this.repoRoot)) {
+        merge = this.jobService.updateMerge(merge.mergeRequestId, merge.version, "not_needed");
+        return this.settleWorktreeFinalization(durable, attempt.attemptId, {
+          status: "not_needed",
+          mergeRequestId: merge.mergeRequestId,
+        });
+      }
+
+      await this.mergeQueue.enqueue({
+        taskId: input.taskId,
+        sourceBranch: input.sourceBranch,
+        sourceWorktree: input.sourceWorktree,
+        targetBranch: this.targetBranch,
+        targetWorktree: this.repoRoot,
+      });
+      merge = this.jobService.updateMerge(merge.mergeRequestId, merge.version, "running");
+      await this.mergeQueue.waitForIdle();
+      const result = this.mergeQueue.get(input.taskId);
+      if (result?.status === "merged") {
+        merge = this.jobService.updateMerge(merge.mergeRequestId, merge.version, "merged");
+        return this.settleWorktreeFinalization(durable, attempt.attemptId, {
+          status: "merged",
+          mergeRequestId: merge.mergeRequestId,
+          ...(result.mergeHead ? { mergeHead: result.mergeHead } : {}),
+        });
+      }
+      const error =
+        result?.error ??
+        (result?.status === "queued"
+          ? "串行合并队列被早先的 blocked 任务阻塞"
+          : "合并队列未生成终态");
+      merge = this.jobService.updateMerge(merge.mergeRequestId, merge.version, "blocked", error);
+      return this.settleWorktreeFinalization(durable, attempt.attemptId, {
+        status: "blocked",
+        mergeRequestId: merge.mergeRequestId,
+        error,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (merge.status === "queued" || merge.status === "running") {
+        merge = this.jobService.updateMerge(merge.mergeRequestId, merge.version, "failed", message);
+      }
+      return this.settleWorktreeFinalization(durable, attempt.attemptId, {
+        status: "failed",
+        mergeRequestId: merge.mergeRequestId,
+        error: message,
+      });
+    }
+  }
+
+  private settleWorktreeFinalization(
+    initial: NonNullable<ReturnType<JobService["get"]>>,
+    attemptId: string,
+    finalization: WorktreeTaskFinalization,
+  ): WorktreeTaskFinalization {
+    const current = this.jobService.get(initial.job.jobId);
+    const attempt = current?.attempts.find((candidate) => candidate.attemptId === attemptId);
+    if (!current || current.job.status !== "running" || !attempt || attempt.status !== "running") {
+      throw new Error(`持久任务 ${initial.job.jobId} 在宿主收口前已丢失 running attempt`);
+    }
+    const status =
+      finalization.status === "merged" || finalization.status === "not_needed"
+        ? "succeeded"
+        : finalization.status === "blocked"
+          ? "partial"
+          : "failed";
+    this.runtimeMirror.stopHeartbeat(current.job.jobId);
+    this.jobService.terminal({
+      jobId: current.job.jobId,
+      attemptId: attempt.attemptId,
+      status,
+      expectedJobVersion: current.job.version,
+      expectedAttemptVersion: attempt.version,
+      leaseEpoch: attempt.leaseEpoch,
+      completionId: `completion:${current.job.jobId}:${attempt.attemptNumber}`,
+      ...(finalization.error ? { error: finalization.error } : {}),
+      result: { finalization },
+      completionPayload: { finalization },
+      ...(current.job.data?.["internalCompletion"] === true
+        ? { completionAlreadyDelivered: true }
+        : {}),
+    });
+    return finalization;
+  }
+
   async close(): Promise<void> {
+    clearInterval(this.reconcileTimer);
     const running = this.supervisor
       .list()
       .filter(
@@ -129,6 +270,11 @@ export class TaskHostRuntime {
   }
 }
 
+function positiveDuration(value: number, name: string): number {
+  if (!Number.isFinite(value) || value <= 0) throw new Error(`${name} 必须为正数`);
+  return value;
+}
+
 function gitOutput(args: readonly string[], cwd: string): Promise<string> {
   return new Promise((resolveOutput, reject) => {
     execFile("git", [...args], { cwd, encoding: "utf8" }, (error, stdout, stderr) => {
@@ -138,5 +284,26 @@ function gitOutput(args: readonly string[], cwd: string): Promise<string> {
       }
       resolveOutput(stdout.trim());
     });
+  });
+}
+
+function gitIsAncestor(source: string, target: string, cwd: string): Promise<boolean> {
+  return new Promise((resolveResult, reject) => {
+    execFile(
+      "git",
+      ["merge-base", "--is-ancestor", source, target],
+      { cwd, encoding: "utf8" },
+      (error, _stdout, stderr) => {
+        if (!error) {
+          resolveResult(true);
+          return;
+        }
+        if (typeof error.code === "number" && error.code === 1) {
+          resolveResult(false);
+          return;
+        }
+        reject(new Error(stderr.trim() || error.message));
+      },
+    );
   });
 }

@@ -21,12 +21,38 @@ export type WorktreeTaskStatus =
   | "failed"
   | "stopped";
 
+export type WorktreeCompletionMode = "worktree_only" | "merge_to_host";
+
+export type WorktreeFinalizationStatus = "merged" | "not_needed" | "blocked" | "failed";
+
+export interface WorktreeTaskFinalization {
+  status: WorktreeFinalizationStatus;
+  mergeRequestId?: string;
+  mergeHead?: string;
+  error?: string;
+}
+
+export interface WorktreeTaskFinalizationInput {
+  taskId: string;
+  attempt: number;
+  sourceBranch: string;
+  sourceWorktree: string;
+  sourceHead: string;
+  baseRef: string;
+}
+
+export type WorktreeTaskFinalizer = (
+  input: WorktreeTaskFinalizationInput,
+) => Promise<WorktreeTaskFinalization>;
+
 export interface WorktreeTaskRequest {
   description: string;
   /** 用来创建新分支的 Git ref，默认为调用 start/retry 时的 HEAD。 */
   baseRef?: string;
   /** 可读的分支名片段；监督器会再加任务 ID 和 attempt 确保唯一。 */
   branchSlug?: string;
+  /** worker 的完成边界；默认仅产出独立 worktree，不改变历史手动 merge 语义。 */
+  completionMode?: WorktreeCompletionMode;
   data?: Record<string, unknown>;
 }
 
@@ -68,6 +94,7 @@ export interface WorktreeTaskSnapshot {
   dirty?: boolean;
   error?: string;
   result?: WorktreeRunnerResult;
+  finalization?: WorktreeTaskFinalization;
   cleanedAt?: number;
   registry: TaskSnapshot;
 }
@@ -101,6 +128,8 @@ export interface WorktreeSupervisorOptions {
   maxOutputChars?: number;
   maxPendingMessages?: number;
   stopTimeoutMs?: number;
+  /** 由宿主实现的串行 merge 边界；监督器本身不直接修改主工作树。 */
+  finalizer?: WorktreeTaskFinalizer;
 }
 
 export interface CleanupOptions {
@@ -139,6 +168,7 @@ interface WorktreeTaskRecord {
   dirty?: boolean;
   error?: string;
   result?: WorktreeRunnerResult;
+  finalization?: WorktreeTaskFinalization;
   cleanedAt?: number;
   completionNotified: boolean;
   settled: boolean;
@@ -164,6 +194,7 @@ export class WorktreeSupervisor {
   private readonly maxOutputChars: number;
   private readonly maxPendingMessages: number;
   private readonly stopTimeoutMs: number;
+  private readonly finalizer?: WorktreeTaskFinalizer;
   private readonly records = new Map<string, WorktreeTaskRecord>();
   private readonly completionSubscribers = new Set<CompletionSubscriber>();
 
@@ -198,6 +229,7 @@ export class WorktreeSupervisor {
       options.stopTimeoutMs ?? DEFAULT_STOP_TIMEOUT_MS,
       "stopTimeoutMs",
     );
+    this.finalizer = options.finalizer;
   }
 
   start(request: WorktreeTaskRequest, runner: WorktreeTaskRunner): WorktreeTaskSnapshot {
@@ -415,11 +447,15 @@ export class WorktreeSupervisor {
         await this.commitPendingChanges(record);
       }
       await this.captureRepositoryState(record, true);
-      record.settled = true;
       if (record.controller.signal.aborted) {
         this.finish(record, "stopped", { error: abortReason(record.controller.signal) });
       } else {
-        this.finish(record, "completed");
+        await this.finalizeCompletion(record);
+        if (record.controller.signal.aborted) {
+          this.finish(record, "stopped", { error: abortReason(record.controller.signal) });
+        } else {
+          this.finish(record, "completed");
+        }
       }
     } catch (error) {
       await this.captureRepositoryState(record, false);
@@ -511,6 +547,34 @@ export class WorktreeSupervisor {
       if (required) throw error;
       this.appendOutput(record, `\n[supervisor] 无法读取 worktree 状态: ${errorMessage(error)}\n`);
     }
+  }
+
+  private async finalizeCompletion(record: WorktreeTaskRecord): Promise<void> {
+    if ((record.request.completionMode ?? "worktree_only") !== "merge_to_host") return;
+    if (!this.finalizer) {
+      record.finalization = {
+        status: "failed",
+        error: "worker 要求 merge_to_host，但宿主未配置 finalizer",
+      };
+      throw new Error(record.finalization.error);
+    }
+    if (!record.commitHash) throw new Error(`无法确认 worker ${record.taskId} 的源提交`);
+    try {
+      record.finalization = await this.finalizer({
+        taskId: record.taskId,
+        attempt: record.attempt,
+        sourceBranch: record.branch,
+        sourceWorktree: record.worktreePath,
+        sourceHead: record.commitHash,
+        baseRef: record.baseRef,
+      });
+    } catch (error) {
+      record.finalization = { status: "failed", error: errorMessage(error) };
+    }
+    if (record.finalization.status === "merged" || record.finalization.status === "not_needed") {
+      return;
+    }
+    throw new Error(record.finalization.error ?? `worker 收口为 ${record.finalization.status}`);
   }
 
   /** 由宿主在沙箱外把 worker 的已隔离变更打包成原子提交。 */
@@ -698,6 +762,8 @@ export class WorktreeSupervisor {
       ...(record.commitHash ? { commitHash: record.commitHash } : {}),
       ...(record.dirty !== undefined ? { dirty: record.dirty } : {}),
       ...(record.result ? { result: cloneResult(record.result) } : {}),
+      ...(record.finalization ? { finalization: { ...record.finalization } } : {}),
+      ...(record.finalization?.status === "blocked" ? { terminalStatus: "partial" } : {}),
     };
   }
 
@@ -722,6 +788,7 @@ export class WorktreeSupervisor {
       ...(record.dirty !== undefined ? { dirty: record.dirty } : {}),
       ...(record.error ? { error: record.error } : {}),
       ...(record.result ? { result: cloneResult(record.result) } : {}),
+      ...(record.finalization ? { finalization: { ...record.finalization } } : {}),
       ...(record.cleanedAt !== undefined ? { cleanedAt: record.cleanedAt } : {}),
       registry,
     };
