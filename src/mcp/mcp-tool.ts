@@ -43,7 +43,7 @@ export class McpToolBridge implements BaseTool {
   readonly toolset = "mcp";
   readonly maxResultSizeChars: number;
 
-  /** 只有本地 stdio 进程树可对“物理已停止”做强承诺。 */
+  /** 只有声明 process_tree 的 client（当前为 POSIX stdio）可做物理收口强承诺。 */
   get handlesAbortSignal(): boolean {
     return this.client.toolCancellationScope === "process_tree";
   }

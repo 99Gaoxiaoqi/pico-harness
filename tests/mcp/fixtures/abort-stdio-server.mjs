@@ -2,7 +2,7 @@
 // 用延迟写文件验证 client 必须物理终止整个进程组。
 
 import { spawn } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { closeSync, writeFileSync } from "node:fs";
 import { parseArgs } from "node:util";
 
 const { values } = parseArgs({
@@ -13,6 +13,7 @@ const { values } = parseArgs({
     "late-file": { type: "string" },
     "server-pid-file": { type: "string" },
     "worker-pid-file": { type: "string" },
+    "stdin-closed-file": { type: "string" },
     "late-delay": { type: "string", default: "800" },
     worker: { type: "boolean", default: false },
   },
@@ -74,6 +75,11 @@ function handleMessage(line) {
           description: "exit after spawning worker",
           inputSchema: { type: "object" },
         },
+        {
+          name: "close_stdin",
+          description: "close the request pipe while keeping the server alive",
+          inputSchema: { type: "object" },
+        },
       ],
     });
     return;
@@ -86,6 +92,20 @@ function handleMessage(line) {
     writeMarker(values["worker-pid-file"], String(worker.pid));
     writeMarker(values["started-file"], "worker-started-before-root-exit");
     setImmediate(() => process.exit(1));
+    return;
+  }
+  if (name === "close_stdin") {
+    respond(
+      message.id,
+      { content: [{ type: "text", text: "stdin closing" }], isError: false },
+      () => {
+        process.stdin.on("error", () => {});
+        closeSync(0);
+        process.stdin.destroy();
+        writeMarker(values["stdin-closed-file"], "stdin-closed");
+        setInterval(() => {}, 1_000);
+      },
+    );
     return;
   }
   if (name === "queued") {
@@ -119,8 +139,10 @@ function spawnWorker() {
   return spawn(process.execPath, workerArgs, { stdio: "ignore" });
 }
 
-function respond(id, result) {
-  process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id, result })}\n`);
+function respond(id, result, onFlushed) {
+  const line = `${JSON.stringify({ jsonrpc: "2.0", id, result })}\n`;
+  if (onFlushed) process.stdout.write(line, onFlushed);
+  else process.stdout.write(line);
 }
 
 function writeMarker(path, content) {
