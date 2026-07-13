@@ -16,6 +16,9 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { logger } from "../observability/logger.js";
 import { buildMinimalChildProcessEnv } from "../os/child-process-env.js";
+import { signalProcessTree } from "../os/process-tree.js";
+import { isWindows } from "../os/shell.js";
+import type { ToolExecutionContext } from "../tools/registry.js";
 import {
   MCP_PROTOCOL_VERSION,
   PICO_MCP_CLIENT_INFO,
@@ -36,12 +39,16 @@ import { redactSensitiveArgs, redactSensitiveText, redactSensitiveValue } from "
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const CLOSE_SIGTERM_TIMEOUT_MS = 200;
 const CLOSE_SIGKILL_TIMEOUT_MS = 1000;
+const CANCELLATION_FLUSH_TIMEOUT_MS = 25;
 const MAX_STDIO_MESSAGE_BYTES = 8 * 1024 * 1024;
 
 interface PendingRequest {
   resolve: (value: unknown) => void;
   reject: (reason: Error) => void;
   timer: NodeJS.Timeout;
+  signal?: AbortSignal;
+  abortListener?: () => void;
+  abortReason?: Error;
 }
 
 /**
@@ -51,6 +58,7 @@ interface PendingRequest {
  * 保持 pico-harness 零外部依赖的风格。
  */
 export class StdioMcpClient implements McpClient {
+  readonly toolCancellationScope = "process_tree" as const;
   private child: ChildProcess | undefined;
   private nextId = 1;
   private readonly pending = new Map<number, PendingRequest>();
@@ -60,6 +68,8 @@ export class StdioMcpClient implements McpClient {
   private stderrBuffer = "";
   private connected = false;
   private closed = false;
+  private closing: Promise<void> | undefined;
+  private abortTermination: Promise<void> | undefined;
   private readonly closeHandlers: Array<(err?: Error) => void> = [];
   private readonly errorHandlers: Array<(err: Error) => void> = [];
 
@@ -75,6 +85,15 @@ export class StdioMcpClient implements McpClient {
   async connect(): Promise<void> {
     if (this.closed) throw new Error(`MCP server "${this.config.name}" 已关闭,无法重连`);
     if (this.connected) return;
+    if (this.closing) throw new Error(`MCP server "${this.config.name}" 正在关闭`);
+    if (this.abortTermination || this.pending.size > 0 || this.child) {
+      throw new Error(`MCP server "${this.config.name}" 上一个进程树尚未收口,拒绝重连`);
+    }
+
+    // 同一 client 在非主动退出后重连时，不复用上一个进程的终止状态。
+    this.abortTermination = undefined;
+    this.stdoutBuffer = "";
+    this.stderrBuffer = "";
 
     const { args = [], env, cwd } = this.config;
     const command = this.config.command;
@@ -97,6 +116,7 @@ export class StdioMcpClient implements McpClient {
     this.child = spawn(command, args, {
       stdio: ["pipe", "pipe", "pipe"],
       env: childEnv,
+      detached: !isWindows,
       ...(cwd !== undefined ? { cwd } : {}),
     });
 
@@ -115,8 +135,12 @@ export class StdioMcpClient implements McpClient {
     return tools.map((t) => this.normalizeTool(t));
   }
 
-  async callTool(name: string, args: Record<string, unknown>): Promise<McpToolResult> {
-    const result = await this.request("tools/call", { name, arguments: args });
+  async callTool(
+    name: string,
+    args: Record<string, unknown>,
+    context?: ToolExecutionContext,
+  ): Promise<McpToolResult> {
+    const result = await this.request("tools/call", { name, arguments: args }, context?.signal);
     return this.normalizeToolResult(result);
   }
 
@@ -168,31 +192,37 @@ export class StdioMcpClient implements McpClient {
     };
   }
 
-  async close(): Promise<void> {
-    if (this.closed) return;
-    this.closed = true;
-    this.connected = false;
+  close(): Promise<void> {
+    if (this.closed) return Promise.resolve();
+    if (this.closing) return this.closing;
+    const closing = this.closeInternal();
+    this.closing = closing;
+    void closing.then(
+      () => {
+        if (this.closing === closing) this.closing = undefined;
+      },
+      () => {
+        if (this.closing === closing) this.closing = undefined;
+      },
+    );
+    return closing;
+  }
 
-    // 拒绝所有 pending 请求,让调用方尽快感知关闭
-    for (const [, pending] of this.pending) {
-      clearTimeout(pending.timer);
-      pending.reject(new Error(`MCP server "${this.config.name}" 已关闭`));
-    }
-    this.pending.clear();
+  private async closeInternal(): Promise<void> {
+    this.connected = false;
 
     const child = this.child;
     if (child) {
+      child.stdin?.end();
+      const stopped = await terminateProcessTree(child);
+      if (!stopped) {
+        throw new Error(`MCP server "${this.config.name}" 进程树未能物理收口`);
+      }
       this.removeAllListeners();
       this.child = undefined;
-      child.stdin?.end();
-      if (!isChildExited(child)) {
-        child.kill("SIGTERM");
-      }
-      if (!(await waitForChildExit(child, CLOSE_SIGTERM_TIMEOUT_MS)) && !isChildExited(child)) {
-        child.kill("SIGKILL");
-        await waitForChildExit(child, CLOSE_SIGKILL_TIMEOUT_MS).catch(() => false);
-      }
     }
+    this.failAllPending(new Error(`MCP server "${this.config.name}" 已关闭`));
+    this.closed = true;
   }
 
   /** 返回 stderr 尾部快照(失败诊断用) */
@@ -238,8 +268,9 @@ export class StdioMcpClient implements McpClient {
         { server: this.config.name, err: safeError.message },
         `[MCP] 子进程 error: ${safeError.message}`,
       );
-      this.failAllPending(safeError);
-      this.emitError(safeError);
+      this.connected = false;
+      if (this.closing || this.hasAbortingRequest()) return;
+      this.startPhysicalTermination(safeError, Promise.resolve(), "error");
     });
 
     child.on("exit", (code, signal) => {
@@ -247,16 +278,16 @@ export class StdioMcpClient implements McpClient {
         { server: this.config.name, code, signal },
         `[MCP] 子进程退出 code=${code} signal=${signal}`,
       );
-      if (!this.closed) {
-        // 非主动关闭 → 异常退出,拒绝所有 pending
+      this.connected = false;
+      if (!this.closed && !this.closing) {
+        if (this.hasAbortingRequest()) return;
+        // server 主进程退出不代表孙进程已停止；先收口进程组再拒绝 pending。
         const msg = `MCP server "${this.config.name}" 子进程意外退出(code=${code} signal=${signal})`;
         const err = new Error(redactSensitiveText(msg));
         if (this.stderrBuffer.length > 0) {
           err.message += `\nstderr: ${redactSensitiveText(this.stderrBuffer.trimEnd())}`;
         }
-        this.failAllPending(err);
-        this.connected = false;
-        this.emitClose(err);
+        this.startPhysicalTermination(err, Promise.resolve(), "close");
       }
     });
   }
@@ -315,8 +346,9 @@ export class StdioMcpClient implements McpClient {
       logger.warn({ server: this.config.name, id }, `[MCP] 收到未知 id=${id} 的响应,已忽略`);
       return;
     }
-    clearTimeout(pending.timer);
-    this.pending.delete(id);
+    // abort 后即使 server 抢先回复，也必须等进程树退出，不得伪造已收口。
+    if (pending.abortReason) return;
+    this.takePending(id);
 
     if (response.error) {
       pending.reject(
@@ -333,11 +365,10 @@ export class StdioMcpClient implements McpClient {
 
   /** 拒绝所有 pending(子进程挂了时调用) */
   private failAllPending(err: Error): void {
-    for (const [, pending] of this.pending) {
-      clearTimeout(pending.timer);
-      pending.reject(err);
+    for (const [id, pending] of this.pending) {
+      this.takePending(id);
+      pending.reject(pending.abortReason ?? err);
     }
-    this.pending.clear();
   }
 
   private emitClose(err?: Error): void {
@@ -356,17 +387,19 @@ export class StdioMcpClient implements McpClient {
     const error = new Error(redactSensitiveText(`MCP server "${this.config.name}" ${reason}`));
     this.stdoutBuffer = "";
     this.connected = false;
-    this.failAllPending(error);
-    const child = this.child;
-    if (child && !isChildExited(child)) child.kill("SIGTERM");
-    this.emitError(error);
+    this.startPhysicalTermination(error, Promise.resolve(), "error");
   }
 
   /**
    * 发送 JSON-RPC request 并等待对应 id 的响应。
    * 超时拒绝,防子进程卡死。
    */
-  private request(method: string, params: Record<string, unknown>): Promise<unknown> {
+  private request(
+    method: string,
+    params: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<unknown> {
+    signal?.throwIfAborted();
     if (!this.child?.stdin?.writable) {
       return Promise.reject(new Error(`MCP server "${this.config.name}" stdin 不可写`));
     }
@@ -382,16 +415,30 @@ export class StdioMcpClient implements McpClient {
 
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
-        this.pending.delete(id);
-        reject(new Error(`MCP server "${this.config.name}" 请求 ${method} 超时(${timeoutMs}ms)`));
+        this.abortPendingRequest(
+          id,
+          new Error(`MCP server "${this.config.name}" 请求 ${method} 超时(${timeoutMs}ms)`),
+        );
       }, timeoutMs);
 
-      this.pending.set(id, { resolve, reject, timer });
+      const pending: PendingRequest = { resolve, reject, timer, ...(signal ? { signal } : {}) };
+      if (signal) {
+        pending.abortListener = () => this.abortPendingRequest(id, abortReason(signal));
+        signal.addEventListener("abort", pending.abortListener, { once: true });
+      }
+      this.pending.set(id, pending);
+      if (signal?.aborted) {
+        pending.abortListener?.();
+        return;
+      }
       this.child!.stdin!.write(line, (err) => {
         if (err) {
-          clearTimeout(timer);
-          this.pending.delete(id);
-          reject(new Error(`MCP server "${this.config.name}" 写入 stdin 失败: ${err.message}`));
+          const current = this.pending.get(id);
+          if (current?.abortReason) return;
+          this.abortPendingRequest(
+            id,
+            new Error(`MCP server "${this.config.name}" 写入 stdin 失败: ${err.message}`),
+          );
         }
       });
     });
@@ -407,6 +454,109 @@ export class StdioMcpClient implements McpClient {
       return;
     }
     this.child.stdin.write(line);
+  }
+
+  /** 将 cancellation notification 交给 OS pipe 后再终止 server。 */
+  private notifyFlushed(method: string, params: Record<string, unknown>): Promise<void> {
+    const stdin = this.child?.stdin;
+    if (!stdin?.writable) return Promise.resolve();
+    const line = JSON.stringify({ jsonrpc: "2.0", method, params }) + "\n";
+    if (Buffer.byteLength(line, "utf8") > MAX_STDIO_MESSAGE_BYTES) return Promise.resolve();
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve();
+      };
+      const timer = setTimeout(finish, CANCELLATION_FLUSH_TIMEOUT_MS);
+      stdin.write(line, finish);
+    });
+  }
+
+  /**
+   * stdio 工具的中止不仅 reject 本地 Promise：先发 MCP cancellation，
+   * 再终止整个本地 server 进程树。pending 只会在 exit 事件后被拒绝。
+   */
+  private abortPendingRequest(id: number, reason: Error): void {
+    const pending = this.pending.get(id);
+    if (!pending || pending.abortReason) return;
+    pending.abortReason = reason;
+    clearTimeout(pending.timer);
+    const cancellation = this.notifyFlushed("notifications/cancelled", {
+      requestId: id,
+      reason: reason.message,
+    });
+    this.startPhysicalTermination(reason, cancellation, "close");
+  }
+
+  private startPhysicalTermination(
+    reason: Error,
+    cancellation: Promise<void>,
+    event: "close" | "error",
+  ): void {
+    if (this.abortTermination) return;
+    const termination = this.terminateAndSettle(reason, cancellation, event);
+    this.abortTermination = termination;
+    void termination.then(
+      () => {
+        if (this.abortTermination === termination) this.abortTermination = undefined;
+      },
+      () => {
+        if (this.abortTermination === termination) this.abortTermination = undefined;
+      },
+    );
+  }
+
+  private async terminateAndSettle(
+    reason: Error,
+    cancellation: Promise<void>,
+    event: "close" | "error",
+  ): Promise<void> {
+    const child = this.child;
+    if (!child) {
+      this.failAllPending(reason);
+      if (!this.closed && !this.closing) {
+        if (event === "error") this.emitError(reason);
+        else this.emitClose(reason);
+      }
+      return;
+    }
+    await cancellation;
+    const stopped = await terminateProcessTree(child);
+    if (!stopped) {
+      // 不能证明物理副作已停止时 fail-closed：保持 pending，不伪造完成。
+      logger.error(
+        { server: this.config.name },
+        `[MCP] 中止后 server 进程树未能物理收口，保持调用挂起`,
+      );
+      return;
+    }
+    // exit/error listener 在终止期间故意不 settle；只有进程组消失后才收口。
+    this.failAllPending(reason);
+    if (this.child === child) this.child = undefined;
+    if (!this.closed && !this.closing) {
+      if (event === "error") this.emitError(reason);
+      else this.emitClose(reason);
+    }
+  }
+
+  private hasAbortingRequest(): boolean {
+    return (
+      this.abortTermination !== undefined || [...this.pending.values()].some((p) => p.abortReason)
+    );
+  }
+
+  private takePending(id: number): PendingRequest | undefined {
+    const pending = this.pending.get(id);
+    if (!pending) return undefined;
+    clearTimeout(pending.timer);
+    if (pending.signal && pending.abortListener) {
+      pending.signal.removeEventListener("abort", pending.abortListener);
+    }
+    this.pending.delete(id);
+    return pending;
   }
 
   /** MCP initialize 握手:声明客户端身份 + 协议版本 */
@@ -451,6 +601,76 @@ export class StdioMcpClient implements McpClient {
 
 function isChildExited(child: ChildProcess): boolean {
   return child.exitCode !== null || child.signalCode !== null;
+}
+
+function abortReason(signal: AbortSignal): Error {
+  return signal.reason instanceof Error
+    ? signal.reason
+    : new DOMException("MCP tool call aborted", "AbortError");
+}
+
+async function terminateProcessTree(child: ChildProcess): Promise<boolean> {
+  if (isWindows) {
+    if (isChildExited(child)) return true;
+    await signalProcessTree(child, "SIGTERM").catch(() => false);
+    return waitForChildExit(child, CLOSE_SIGKILL_TIMEOUT_MS);
+  }
+
+  const pid = child.pid;
+  if (pid === undefined) return isChildExited(child);
+  if (isChildExited(child) && !isProcessGroupAlive(pid)) return true;
+
+  signalDetachedProcessGroup(pid, "SIGTERM");
+  if (await waitForProcessGroupExit(child, pid, CLOSE_SIGTERM_TIMEOUT_MS)) return true;
+  signalDetachedProcessGroup(pid, "SIGKILL");
+  return waitForProcessGroupExit(child, pid, CLOSE_SIGKILL_TIMEOUT_MS);
+}
+
+function signalDetachedProcessGroup(pid: number, signal: NodeJS.Signals): void {
+  try {
+    process.kill(-pid, signal);
+  } catch {
+    // ESRCH 表示进程组已消失；其它失败会在后续存活检查中 fail-closed。
+  }
+}
+
+function isProcessGroupAlive(pid: number): boolean {
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
+function waitForProcessGroupExit(
+  child: ChildProcess,
+  pid: number,
+  timeoutMs: number,
+): Promise<boolean> {
+  if (isChildExited(child) && !isProcessGroupAlive(pid)) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let settled = false;
+    const poll = setInterval(check, 10);
+    const timer = setTimeout(
+      () => finish(isChildExited(child) && !isProcessGroupAlive(pid)),
+      timeoutMs,
+    );
+    const onExit = () => check();
+    child.once("exit", onExit);
+
+    function check(): void {
+      if (isChildExited(child) && !isProcessGroupAlive(pid)) finish(true);
+    }
+    function finish(stopped: boolean): void {
+      if (settled) return;
+      settled = true;
+      clearInterval(poll);
+      clearTimeout(timer);
+      child.removeListener("exit", onExit);
+      resolve(stopped);
+    }
+  });
 }
 
 function waitForChildExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
