@@ -2,18 +2,15 @@ import { homedir } from "node:os";
 import { readFile, readdir, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { SessionIdentity } from "../engine/session-identity.js";
-import { writeJsonAtomic } from "./atomic-json.js";
+import { quarantineCorruptJson, writeJsonAtomic } from "./atomic-json.js";
 
 const SESSION_CATALOG_VERSION = 1 as const;
 const SAFE_LOG_ID = /^[A-Za-z0-9._-]+$/u;
 
-export type SessionCatalogHealth =
-  | "healthy"
-  | "stale"
-  | "quarantined"
-  | "incompatible";
+export type SessionCatalogHealth = "healthy" | "stale" | "quarantined" | "incompatible";
 
 export interface SessionCatalogCursor {
+  logId: string;
   epoch: number;
   seq: number;
   eventId: string;
@@ -23,6 +20,8 @@ export interface SessionCatalogLineage {
   relation: "root" | "fork" | "spawn" | "salvage";
   rootLogId: string;
   parentLogId?: string;
+  /** fork 时父日志的 durable head eventId，不是可变的 sessionId别名。 */
+  forkEventId?: string;
   parentSessionId?: string;
   parentTaskId?: string;
 }
@@ -52,11 +51,14 @@ export interface SessionCatalogOptions {
 }
 
 export class SessionCatalog {
+  readonly baseDirectory: string;
   readonly entriesDirectory: string;
 
   constructor(options: SessionCatalogOptions = {}) {
-    const baseDirectory = resolve(options.baseDirectory ?? join(homedir(), ".pico", "session-catalog"));
-    this.entriesDirectory = join(baseDirectory, "entries");
+    this.baseDirectory = resolve(
+      options.baseDirectory ?? join(homedir(), ".pico", "session-catalog"),
+    );
+    this.entriesDirectory = join(this.baseDirectory, "entries");
   }
 
   async upsert(entry: SessionCatalogEntry): Promise<void> {
@@ -67,17 +69,23 @@ export class SessionCatalog {
   async get(logId: string): Promise<SessionCatalogEntry | undefined> {
     const path = this.entryPath(logId);
     try {
-      return parseEntry(JSON.parse(await readFile(path, "utf8")) as unknown);
+      const parsed = parseEntry(JSON.parse(await readFile(path, "utf8")) as unknown);
+      if (parsed) return parsed;
+      await this.quarantineEntry(path, "catalog entry schema is invalid");
+      return undefined;
     } catch (error) {
       if (isNodeCode(error, "ENOENT")) return undefined;
-      throw error;
+      await this.quarantineEntry(path, describeError(error)).catch(() => undefined);
+      return undefined;
     }
   }
 
-  async list(options: {
-    sessionProjectDir?: string;
-    includeUnhealthy?: boolean;
-  } = {}): Promise<SessionCatalogEntry[]> {
+  async list(
+    options: {
+      sessionProjectDir?: string;
+      includeUnhealthy?: boolean;
+    } = {},
+  ): Promise<SessionCatalogEntry[]> {
     let names: string[];
     try {
       names = await readdir(this.entriesDirectory);
@@ -96,12 +104,21 @@ export class SessionCatalog {
         const parsed = parseEntry(
           JSON.parse(await readFile(join(this.entriesDirectory, name), "utf8")) as unknown,
         );
-        if (!parsed) continue;
+        if (!parsed) {
+          await this.quarantineEntry(
+            join(this.entriesDirectory, name),
+            "catalog entry schema is invalid",
+          );
+          continue;
+        }
         if (!options.includeUnhealthy && parsed.health !== "healthy") continue;
         if (projectDir && parsed.identity.sessionProjectDir !== projectDir) continue;
         entries.push(parsed);
-      } catch {
-        // Catalog is a derived index. A malformed entry is ignored and can be rebuilt by Doctor.
+      } catch (error) {
+        // Catalog is a derived index. Quarantine malformed entries; JSONL remains recoverable.
+        await this.quarantineEntry(join(this.entriesDirectory, name), describeError(error)).catch(
+          () => undefined,
+        );
       }
     }
     return entries.toSorted(
@@ -118,6 +135,14 @@ export class SessionCatalog {
   private entryPath(logId: string): string {
     if (!SAFE_LOG_ID.test(logId)) throw new Error(`Invalid session log ID: ${logId}`);
     return join(this.entriesDirectory, `${logId}.json`);
+  }
+
+  private async quarantineEntry(path: string, reason: string): Promise<void> {
+    await quarantineCorruptJson(path, {
+      component: "session-catalog",
+      reason,
+      recommendation: "Run /doctor or reopen /sessions to rebuild this derived entry from JSONL.",
+    });
   }
 }
 
@@ -196,28 +221,33 @@ function parseIdentity(value: unknown): SessionIdentity | undefined {
 }
 
 function parseLineage(value: unknown): SessionCatalogLineage | undefined {
-  if (!isRecord(value) || !isRelation(value["relation"]) || typeof value["rootLogId"] !== "string") {
+  if (
+    !isRecord(value) ||
+    !isRelation(value["relation"]) ||
+    typeof value["rootLogId"] !== "string"
+  ) {
     return undefined;
   }
-  for (const key of ["parentLogId", "parentSessionId", "parentTaskId"] as const) {
+  for (const key of ["parentLogId", "forkEventId", "parentSessionId", "parentTaskId"] as const) {
     if (!isOptionalString(value[key])) return undefined;
   }
   return {
     relation: value["relation"],
     rootLogId: value["rootLogId"],
     ...(typeof value["parentLogId"] === "string" ? { parentLogId: value["parentLogId"] } : {}),
+    ...(typeof value["forkEventId"] === "string" ? { forkEventId: value["forkEventId"] } : {}),
     ...(typeof value["parentSessionId"] === "string"
       ? { parentSessionId: value["parentSessionId"] }
       : {}),
-    ...(typeof value["parentTaskId"] === "string"
-      ? { parentTaskId: value["parentTaskId"] }
-      : {}),
+    ...(typeof value["parentTaskId"] === "string" ? { parentTaskId: value["parentTaskId"] } : {}),
   };
 }
 
 function parseCursor(value: unknown): SessionCatalogCursor | undefined {
   if (
     !isRecord(value) ||
+    typeof value["logId"] !== "string" ||
+    value["logId"].length === 0 ||
     !isNonNegativeInteger(value["epoch"]) ||
     !isNonNegativeInteger(value["seq"]) ||
     typeof value["eventId"] !== "string" ||
@@ -225,7 +255,12 @@ function parseCursor(value: unknown): SessionCatalogCursor | undefined {
   ) {
     return undefined;
   }
-  return { epoch: value["epoch"], seq: value["seq"], eventId: value["eventId"] };
+  return {
+    logId: value["logId"],
+    epoch: value["epoch"],
+    seq: value["seq"],
+    eventId: value["eventId"],
+  };
 }
 
 function isRelation(value: unknown): value is SessionCatalogLineage["relation"] {
@@ -234,10 +269,7 @@ function isRelation(value: unknown): value is SessionCatalogLineage["relation"] 
 
 function isCatalogHealth(value: unknown): value is SessionCatalogHealth {
   return (
-    value === "healthy" ||
-    value === "stale" ||
-    value === "quarantined" ||
-    value === "incompatible"
+    value === "healthy" || value === "stale" || value === "quarantined" || value === "incompatible"
   );
 }
 
@@ -255,4 +287,8 @@ function isNodeCode(error: unknown, code: string): boolean {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
