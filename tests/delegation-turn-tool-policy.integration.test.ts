@@ -321,9 +321,10 @@ function requiredDelegation(id: string, modes: readonly ("explore" | "worker")[]
 }
 
 async function waitUntil(predicate: () => boolean): Promise<void> {
-  for (let attempt = 0; attempt < 100; attempt++) {
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
     if (predicate()) return;
-    await new Promise<void>((resolve) => setImmediate(resolve));
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
   }
   throw new Error("等待 required 委派启动超时");
 }

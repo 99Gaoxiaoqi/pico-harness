@@ -21,6 +21,7 @@ import {
   fileHistoryRewind,
   fileHistoryDiffStat,
   fileHistoryLoadState,
+  fileHistoryDefaultBaseDir,
   type FileHistoryState,
 } from "../../src/safety/file-history.js";
 
@@ -79,10 +80,9 @@ describe("FileHistory 1.5.1 数据结构与存储层", () => {
       expect(rel).toMatch(/^[0-9a-f]{32}$/);
     });
 
-    it("默认 baseDir 为 ~/.pico/file-history", () => {
+    it("默认 baseDir 使用当前运行环境的 FileHistory 根目录", () => {
       const p = resolveBackupPath(sessionId, "x@v1");
-      expect(p).toContain(".pico");
-      expect(p).toContain("file-history");
+      expect(p.startsWith(fileHistoryDefaultBaseDir())).toBe(true);
     });
   });
 
