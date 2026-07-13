@@ -53,6 +53,7 @@ export interface RewindStorageOperation extends StorageOperationBase {
     userPrompt?: string;
     transcriptIndex?: number;
     interactionMode?: "default" | "plan" | "auto" | "yolo";
+    prePlanMode?: "default" | "auto" | "yolo";
   };
   files: Array<{
     rootId: string;
@@ -290,6 +291,8 @@ function parseRewindOperation(value: Record<string, unknown>): RewindStorageOper
     !isOptionalString(target["userPrompt"]) ||
     !isOptionalNonNegativeInteger(target["transcriptIndex"]) ||
     !isOptionalInteractionMode(target["interactionMode"]) ||
+    !isOptionalPrePlanMode(target["prePlanMode"]) ||
+    (target["prePlanMode"] !== undefined && target["interactionMode"] !== "plan") ||
     !Array.isArray(files) ||
     !files.every(isStoredFileTransition)
   ) {
@@ -383,6 +386,10 @@ function isOptionalInteractionMode(value: unknown): boolean {
     value === "auto" ||
     value === "yolo"
   );
+}
+
+function isOptionalPrePlanMode(value: unknown): boolean {
+  return value === undefined || value === "default" || value === "auto" || value === "yolo";
 }
 
 function isOptionalNonNegativeInteger(value: unknown): boolean {

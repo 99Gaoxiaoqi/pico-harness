@@ -99,6 +99,8 @@ export interface FileHistorySnapshot {
   transcriptIndex?: number;
   /** 预留给宿主恢复 default/plan/yolo 等交互模式。 */
   interactionMode?: string;
+  /** 进入 plan 前的交互模式；旧 manifest 不包含该字段。 */
+  prePlanMode?: string;
   /** 本条用户消息执行期间实际触碰过的文件。 */
   editedFilePaths?: Set<string>;
   /** 本条消息的文件事务未完整覆盖工作区时的可见警告。 */
@@ -697,6 +699,7 @@ export async function fileHistoryMakeSnapshot(
     userPrompt: string;
     transcriptIndex?: number;
     interactionMode?: string;
+    prePlanMode?: string;
     sourceMessageEventId?: string;
     beforeSessionSeq?: number;
   },
@@ -717,6 +720,7 @@ export async function fileHistoryMakeSnapshot(
     ...(metadata?.interactionMode !== undefined
       ? { interactionMode: metadata.interactionMode }
       : {}),
+    ...(metadata?.prePlanMode !== undefined ? { prePlanMode: metadata.prePlanMode } : {}),
     ...(metadata?.sourceMessageEventId !== undefined
       ? { sourceMessageEventId: metadata.sourceMessageEventId }
       : {}),
@@ -797,6 +801,7 @@ export async function fileHistoryBeginRewindPoint(
     messageIndex: number;
     transcriptIndex?: number;
     interactionMode?: string;
+    prePlanMode?: string;
     sourceMessageEventId?: string;
     beforeSessionSeq?: number;
   },
@@ -807,6 +812,7 @@ export async function fileHistoryBeginRewindPoint(
     userPrompt: input.userPrompt,
     ...(input.transcriptIndex !== undefined ? { transcriptIndex: input.transcriptIndex } : {}),
     ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
+    ...(input.prePlanMode !== undefined ? { prePlanMode: input.prePlanMode } : {}),
     ...(input.sourceMessageEventId !== undefined
       ? { sourceMessageEventId: input.sourceMessageEventId }
       : {}),
@@ -1499,6 +1505,7 @@ interface PersistedFileHistorySnapshotV1 {
   userPrompt?: string;
   transcriptIndex?: number;
   interactionMode?: string;
+  prePlanMode?: string;
   editedFilePaths?: string[];
   journalWarnings?: string[];
 }
@@ -1549,6 +1556,7 @@ interface PersistedFileHistorySnapshotV2 {
   userPrompt?: string;
   transcriptIndex?: number;
   interactionMode?: string;
+  prePlanMode?: string;
   editedFilePaths?: PersistedFileLocationV2[];
   journalWarnings?: string[];
 }
@@ -1620,6 +1628,7 @@ async function saveFileHistoryStateUnlocked(
       ...(snapshot.interactionMode !== undefined
         ? { interactionMode: snapshot.interactionMode }
         : {}),
+      ...(snapshot.prePlanMode !== undefined ? { prePlanMode: snapshot.prePlanMode } : {}),
       ...(snapshot.editedFilePaths !== undefined
         ? {
             editedFilePaths: Array.from(snapshot.editedFilePaths, (filePath) =>
@@ -1869,6 +1878,7 @@ function hydrateFileHistoryV1(
     ...(snapshot.interactionMode !== undefined
       ? { interactionMode: snapshot.interactionMode }
       : {}),
+    ...(snapshot.prePlanMode !== undefined ? { prePlanMode: snapshot.prePlanMode } : {}),
   }));
   state.trackedFiles = new Set(manifest.trackedFiles);
   state.snapshotSequence = manifest.snapshotSequence;
@@ -1905,6 +1915,7 @@ function hydrateFileHistoryV2(
     ...(snapshot.interactionMode !== undefined
       ? { interactionMode: snapshot.interactionMode }
       : {}),
+    ...(snapshot.prePlanMode !== undefined ? { prePlanMode: snapshot.prePlanMode } : {}),
     ...(snapshot.editedFilePaths !== undefined
       ? {
           editedFilePaths: new Set(
@@ -2288,6 +2299,7 @@ function optionalSnapshotFieldsV1(
     ...optionalStringField(snapshot, "userPrompt", `snapshots[${index}]`),
     ...optionalIntegerField(snapshot, "transcriptIndex", `snapshots[${index}]`),
     ...optionalStringField(snapshot, "interactionMode", `snapshots[${index}]`),
+    ...optionalStringField(snapshot, "prePlanMode", `snapshots[${index}]`),
     ...optionalStringArrayField(snapshot, "editedFilePaths", `snapshots[${index}]`, true),
     ...optionalStringArrayField(snapshot, "journalWarnings", `snapshots[${index}]`, false),
   };
@@ -2307,6 +2319,7 @@ function optionalSnapshotFieldsV2(
     ...optionalStringField(snapshot, "userPrompt", `snapshots[${index}]`),
     ...optionalIntegerField(snapshot, "transcriptIndex", `snapshots[${index}]`),
     ...optionalStringField(snapshot, "interactionMode", `snapshots[${index}]`),
+    ...optionalStringField(snapshot, "prePlanMode", `snapshots[${index}]`),
     ...(edited !== undefined
       ? {
           editedFilePaths: requireArray(edited, `snapshots[${index}].editedFilePaths`).map(

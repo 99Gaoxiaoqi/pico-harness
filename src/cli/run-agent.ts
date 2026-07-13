@@ -131,7 +131,9 @@ export interface RunAgentCliOptions {
   /** 用户消息写入可见 transcript 前的条目下标。 */
   rewindTranscriptIndex?: number;
   /** 宿主可选记录该消息发送时的交互模式。 */
-  rewindInteractionMode?: string;
+  rewindInteractionMode?: SessionSettings["mode"];
+  /** 该消息在 plan 模式下发送时，记录进入 plan 前的模式。 */
+  rewindPrePlanMode?: NonNullable<SessionSettings["prePlanMode"]>;
 }
 
 export { loadImage } from "../input/prepare-prompt.js";
@@ -511,6 +513,9 @@ export async function runAgentFromCli(
             : {}),
           ...(effectiveOptions.rewindInteractionMode !== undefined
             ? { interactionMode: effectiveOptions.rewindInteractionMode }
+            : {}),
+          ...(effectiveOptions.rewindPrePlanMode !== undefined
+            ? { prePlanMode: effectiveOptions.rewindPrePlanMode }
             : {}),
         });
         const userReceipt = await session.commitMessageOnce(`user-message:${rewindPointId}`, {

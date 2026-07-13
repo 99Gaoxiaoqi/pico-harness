@@ -12,8 +12,11 @@ import {
   createPicoCommandRegistry,
 } from "../src/input/pico-command-registry.js";
 import {
+  exitSessionPlanMode,
   getOrCreateSessionSettings,
   resetSessionSettingsForTests,
+  restoreSessionInteractionMode,
+  setSessionMode,
 } from "../src/input/session-settings.js";
 import type { LLMProvider } from "../src/provider/interface.js";
 import type { Message, ToolDefinition } from "../src/schema/message.js";
@@ -106,6 +109,7 @@ describe("Claude Code style rewind integration", () => {
           rewindPrompt: rewind.prompt,
           rewindTranscriptIndex: rewind.transcriptIndex,
           rewindInteractionMode: runCount === 0 ? "default" : "plan",
+          ...(runCount === 1 ? { rewindPrePlanMode: "default" } : {}),
         },
         { provider, reporter },
       );
@@ -128,6 +132,7 @@ describe("Claude Code style rewind integration", () => {
 
     const points = await listRewindPointSummaries(session);
     expect(points.map((point) => point.userPrompt)).toEqual(["把 note 改成第一版", "再改成第二版"]);
+    expect(points[1]).toMatchObject({ interactionMode: "plan", prePlanMode: "default" });
     expect(
       points.map((point) => [point.changedFileCount, point.addedLines, point.removedLines]),
     ).toEqual([
@@ -255,6 +260,78 @@ describe("Claude Code style rewind integration", () => {
         data: { patch: { settings: { mode: "default" } } },
       },
     ]);
+  });
+
+  it("rewind 后退出 plan 会恢复该消息原始的权限模式", async () => {
+    workDir = await realpath(await mkdtemp(join(tmpdir(), "pico-rewind-pre-plan-")));
+    const sessionId = `rewind-pre-plan-${Date.now()}`;
+    const session = await globalSessionManager.getOrCreate(sessionId, workDir, {
+      persistence: true,
+    });
+    const settings = getOrCreateSessionSettings(
+      {
+        sessionId,
+        cwd: workDir,
+        provider: "openai",
+        model: "test-model",
+        mode: "plan",
+        permissionMode: "default",
+      },
+      { persistence: session },
+    );
+    expect(settings).toMatchObject({ mode: "plan", prePlanMode: "default" });
+    await session.flushPersistence();
+
+    const messageId = await session.beginRewindPoint({
+      userPrompt: "inspect before editing",
+      transcriptIndex: 0,
+      interactionMode: settings.mode,
+      prePlanMode: settings.prePlanMode,
+    });
+    const user = await session.commitMessageOnce(`user-message:${messageId}`, {
+      role: "user",
+      content: "inspect before editing",
+    });
+    await session.bindRewindPointSource(messageId, user);
+    await session.commitMessages({ role: "assistant", content: "plan ready" });
+
+    expect(setSessionMode(settings, "yolo")).toMatchObject({ ok: true });
+    await session.flushPersistence();
+    const [snapshot] = await listRewindPointSummaries(session);
+    if (!snapshot) throw new Error("missing rewind snapshot");
+    expect(snapshot).toMatchObject({
+      interactionMode: "plan",
+      prePlanMode: "default",
+    });
+
+    const reporter = new TuiReporter(() => undefined, []);
+    const rewind = await applyTuiRewind({
+      session,
+      reporter,
+      snapshot,
+      mode: "conversation",
+      onRestoreInteractionMode: (interactionMode, prePlanMode) => {
+        const restored = restoreSessionInteractionMode(settings, interactionMode, prePlanMode);
+        expect(restored.ok).toBe(true);
+      },
+    });
+
+    expect(rewind).toMatchObject({
+      inputText: "inspect before editing",
+      interactionMode: "plan",
+      prePlanMode: "default",
+    });
+    expect(session.getRuntimeStateSnapshot().settings).toMatchObject({
+      mode: "plan",
+      prePlanMode: "default",
+    });
+    await expect(session.getPendingTuiRewindHandoff()).resolves.toMatchObject({
+      interactionMode: "plan",
+      prePlanMode: "default",
+    });
+    expect(settings).toMatchObject({ mode: "plan", prePlanMode: "default" });
+    expect(exitSessionPlanMode(settings)).toMatchObject({ ok: true });
+    expect(settings.mode).toBe("default");
   });
 });
 
