@@ -12,8 +12,9 @@
 // 依靠喂给它的 Session 推理 —— 随时休眠、随时被唤醒的记忆连续体。
 
 import { chmodSync, mkdirSync } from "node:fs";
-import { randomUUID } from "node:crypto";
-import { join, resolve } from "node:path";
+import { createHash, randomUUID } from "node:crypto";
+import { lstat, mkdir, open, rename, unlink, type FileHandle } from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import {
   isMessageHiddenFromTranscript,
   toCanonicalUsage,
@@ -28,6 +29,7 @@ import {
   SessionWriteUncertainError,
   type CommitReceipt,
   type SessionLineage,
+  type SessionRecord,
 } from "./session-store.js";
 import { findLegacyUndoCut, replaySessionRecords } from "./session-reducer.js";
 import { createSessionIdentity, type SessionIdentity } from "./session-identity.js";
@@ -53,14 +55,19 @@ import type {
 import { createSessionSummaryStore } from "../memory/summary-store.js";
 import {
   createFileHistoryState,
+  type FileHistoryBackup,
   type FileHistoryState,
   type FileHistoryDiffStat,
   fileHistoryBeginRewindPoint,
+  fileHistoryBindSourceEvent,
+  fileHistoryDefaultBaseDir,
   fileHistoryDiscardFrom,
   fileHistoryDiffStat,
   fileHistoryLoadState,
   fileHistoryMessageDiffStat,
-  fileHistoryRewind,
+  fileHistoryPrepareRewind,
+  fileHistoryRegisterRoot,
+  resolveBackupPath,
 } from "../safety/file-history.js";
 import type {
   SessionCatalog,
@@ -72,6 +79,18 @@ import {
   SessionCatalogProjector,
   type SessionCatalogProjectionHealth,
 } from "../storage/session-catalog-projection.js";
+import { FileHistoryBlobStore } from "../storage/file-history-blob-store.js";
+import {
+  StorageOperationJournal,
+  type RewindStorageOperation,
+  type StoredFileState,
+} from "../storage/operation-journal.js";
+import {
+  RewindOperationCoordinator,
+  RewindOperationConflictError,
+  type NewRewindStorageOperation,
+  type RewindWorkspaceTarget,
+} from "../storage/rewind-operation-coordinator.js";
 
 /** 清洗 sessionId 为安全文件名片段(/、: 等破坏路径的字符替换为 _) */
 function sanitizeFilePart(value: string): string {
@@ -250,6 +269,7 @@ export class Session implements SessionRuntimePersistence {
     this.conversationId = id;
     this.createdAt = new Date();
     this.updatedAt = new Date();
+    fileHistoryRegisterRoot(this.fileHistory, "workspace", resolve(workDir));
     this.initPersistence(options?.persistence);
     const defaultCatalogEnabled = process.env.PICO_SESSION_CATALOG !== "0";
     if (
@@ -387,6 +407,7 @@ export class Session implements SessionRuntimePersistence {
     await this.projectSessionCatalog({ openedAt: new Date().toISOString() });
     if (records.length === 0) {
       this.rebuildSearchIndex(this.store.getHeadCursor());
+      await this.recoverStorageOperations();
       return;
     }
 
@@ -404,7 +425,9 @@ export class Session implements SessionRuntimePersistence {
     // accessCount 归零)。避免恢复后已有 ToolResult 丢失年龄追踪。
     this.rebuildToolResultMeta();
     this.nextSeq = replay.maxSeq + 1;
+    await this.recoverRewindPointBindings(records);
     this.rebuildSearchIndex(this.store.getHeadCursor());
+    await this.recoverStorageOperations();
   }
 
   private rebuildSearchIndex(cursor?: CommitReceipt["cursor"]): void {
@@ -451,8 +474,48 @@ export class Session implements SessionRuntimePersistence {
   private async recoverFileHistory(): Promise<void> {
     try {
       await fileHistoryLoadState(this.fileHistory, this.id);
+      if (!this.fileHistory.roots.has("workspace")) {
+        fileHistoryRegisterRoot(this.fileHistory, "workspace", resolve(this.workDir));
+      }
     } catch (error) {
       logger.warn({ error: String(error) }, "[session] 文件历史恢复失败,降级为空快照");
+    }
+  }
+
+  private async recoverRewindPointBindings(records: readonly SessionRecord[]): Promise<void> {
+    const events = new Map(
+      records
+        .filter(
+          (record) => record.type === "event" && record.kind === "message.appended",
+        )
+        .map((record) => [record.eventId, record] as const),
+    );
+    for (const snapshot of this.fileHistory.snapshots) {
+      if (snapshot.sourceMessageEventId) continue;
+      const eventId = `user-message:${snapshot.messageId}`;
+      const event = events.get(eventId);
+      if (!event) continue;
+      await fileHistoryBindSourceEvent(
+        this.fileHistory,
+        {
+          messageId: snapshot.messageId,
+          sourceMessageEventId: event.eventId,
+          beforeSessionSeq: snapshot.beforeSessionSeq ?? event.seq,
+        },
+        this.id,
+      );
+    }
+  }
+
+  private async recoverStorageOperations(): Promise<void> {
+    const results = await this.createRewindCoordinator().reconcileUnfinished(this.id);
+    for (const result of results) {
+      if (result.state === "needs_attention") {
+        logger.warn(
+          { operationId: result.operationId, sessionId: this.id },
+          "[rewind] 未完成操作检测到外部冲突，等待人工处理",
+        );
+      }
     }
   }
 
@@ -697,6 +760,33 @@ export class Session implements SessionRuntimePersistence {
   }
 
   /**
+   * 以宿主提供的稳定 eventId 追加一条消息。同 ID+同 payload 重试只返回
+   * 首次 durable receipt，不分配新 seq；同 ID 被不同 payload 复用则失败关闭。
+   */
+  async commitMessageOnce(eventId: string, message: Message): Promise<CommitReceipt> {
+    this.assertWritable();
+    if (!eventId.trim()) throw new Error("Session eventId 不能为空");
+    if (!this.store) {
+      throw new Error("Exactly-once message commit requires Session persistence");
+    }
+    const prepared = this.prepareAppend(message);
+    if (prepared.deferred) {
+      throw new Error("Exactly-once message cannot be deferred behind incomplete tool results");
+    }
+    const receipt = await this.commitAppend(message, eventId);
+    if (
+      prepared.toolResult &&
+      this.pendingToolCallIds.size === 0 &&
+      this.deferredMessages.length > 0
+    ) {
+      const pending = this.deferredMessages;
+      this.deferredMessages = [];
+      for (const deferred of pending) await this.appendOneDurable(deferred);
+    }
+    return receipt;
+  }
+
+  /**
    * 用父会话的 durable cursor 原子播种 fork。Catalog 重建时从
    * session.seeded 事件取 parentLogId/forkEventId，不再依赖可变的标题。
    */
@@ -834,12 +924,13 @@ export class Session implements SessionRuntimePersistence {
     }
   }
 
-  private async commitAppend(msg: Message): Promise<void> {
+  private async commitAppend(msg: Message, eventId?: string): Promise<CommitReceipt> {
     const beforeLen = this.history.length;
     const persisted = structuredClone(msg);
     const receipt = await this.commitPersistence("message", (store, seq) =>
-      store.commitMessage(persisted, { expectedSeq: seq }),
+      store.commitMessage(persisted, { expectedSeq: seq, ...(eventId ? { eventId } : {}) }),
     );
+    if (!receipt.inserted) return receipt;
     this.history.push(msg);
     this.conversationId = `${receipt.cursor.logId}:${receipt.cursor.epoch}`;
     this.updatedAt = new Date();
@@ -854,6 +945,7 @@ export class Session implements SessionRuntimePersistence {
       logger.warn({ err }, "[session] 记忆投影失败");
     }
     this.scheduleSessionCatalog(receipt, { appendedMessage: msg });
+    return receipt;
   }
 
   /**
@@ -866,7 +958,6 @@ export class Session implements SessionRuntimePersistence {
     this.assertWritable();
     if (fromIndex < 0) fromIndex = 0;
     const nextHistory = fromIndex >= this.history.length ? [] : this.history.slice(fromIndex);
-    this.store?.bumpEpoch();
     const receipt = this.store
       ? await this.commitPersistence("truncate", (store, seq) =>
           store.commitTruncate(fromIndex, { expectedSeq: seq }),
@@ -891,7 +982,6 @@ export class Session implements SessionRuntimePersistence {
     const { cutIndex, removedCount } = findLegacyUndoCut(this.history, count);
     if (removedCount === 0) return;
     const nextHistory = this.history.slice(0, cutIndex);
-    this.store?.bumpEpoch();
     const receipt = this.store
       ? await this.commitPersistence("rewind", (store, seq) =>
           store.commitRewind(cutIndex, { expectedSeq: seq }),
@@ -917,6 +1007,7 @@ export class Session implements SessionRuntimePersistence {
     messageId?: string;
   }): Promise<string> {
     const messageId = input.messageId ?? randomUUID();
+    const beforeSessionSeq = this.nextSeq;
     await fileHistoryBeginRewindPoint(
       this.fileHistory,
       {
@@ -925,19 +1016,48 @@ export class Session implements SessionRuntimePersistence {
         messageIndex: this.history.length,
         ...(input.transcriptIndex !== undefined ? { transcriptIndex: input.transcriptIndex } : {}),
         ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
+        beforeSessionSeq,
       },
       this.id,
     );
     return messageId;
   }
 
+  async bindRewindPointSource(messageId: string, receipt: CommitReceipt): Promise<void> {
+    const snapshot = this.fileHistory.snapshots.find((candidate) => candidate.messageId === messageId);
+    await fileHistoryBindSourceEvent(
+      this.fileHistory,
+      {
+        messageId,
+        sourceMessageEventId: receipt.eventId,
+        beforeSessionSeq: snapshot?.beforeSessionSeq ?? receipt.cursor.seq,
+      },
+      this.id,
+    );
+  }
+
   async rewindTo(messageIndex: number): Promise<void> {
+    await this.rewindConversationOnce(undefined, messageIndex);
+  }
+
+  /** Rewind Saga 以 operationId 作事件幂等键。 */
+  async rewindOnce(operationId: string, messageIndex: number): Promise<CommitReceipt | undefined> {
+    if (!operationId.trim()) throw new Error("Rewind operationId 不能为空");
+    return this.rewindConversationOnce(`rewind:${operationId}`, messageIndex);
+  }
+
+  private async rewindConversationOnce(
+    eventId: string | undefined,
+    messageIndex: number,
+  ): Promise<CommitReceipt | undefined> {
     this.assertWritable();
     const nextHistory = this.history.slice(0, messageIndex);
-    this.store?.bumpEpoch();
     const receipt = this.store
       ? await this.commitPersistence("rewind", (store, seq) =>
-          store.commitRewind(messageIndex, { expectedSeq: seq }),
+          store.commitRewind(messageIndex, {
+            expectedSeq: seq,
+            ...(eventId ? { eventId } : {}),
+          }),
         )
       : undefined;
     this.history = nextHistory;
@@ -950,10 +1070,12 @@ export class Session implements SessionRuntimePersistence {
       : `${this.id}-${Date.now().toString(36)}`;
     this.updatedAt = new Date();
     if (receipt) this.scheduleSessionCatalog(receipt, { rebuildSummary: true });
+    return receipt;
   }
 
   async rewindCode(messageId: string): Promise<void> {
-    await fileHistoryRewind(this.fileHistory, messageId, this.id);
+    const snapshot = this.requireRewindSnapshot(messageId);
+    await this.executeRewindOperation("code", snapshot, snapshot.messageIndex ?? this.history.length);
   }
 
   async getRewindDiffStat(messageId: string): Promise<FileHistoryDiffStat> {
@@ -965,16 +1087,162 @@ export class Session implements SessionRuntimePersistence {
   }
 
   async rewindConversation(messageIndex: number, messageId?: string): Promise<void> {
-    await this.rewindTo(messageIndex);
-    if (messageId) {
-      await fileHistoryDiscardFrom(this.fileHistory, messageId, this.id);
+    if (!messageId) {
+      await this.rewindTo(messageIndex);
+      return;
     }
+    await this.executeRewindOperation(
+      "conversation",
+      this.requireRewindSnapshot(messageId),
+      messageIndex,
+    );
   }
 
   async rewindBoth(messageId: string, messageIndex: number): Promise<void> {
-    await fileHistoryRewind(this.fileHistory, messageId, this.id);
-    await this.rewindTo(messageIndex);
-    await fileHistoryDiscardFrom(this.fileHistory, messageId, this.id);
+    await this.executeRewindOperation("both", this.requireRewindSnapshot(messageId), messageIndex);
+  }
+
+  private requireRewindSnapshot(messageId: string): FileHistoryState["snapshots"][number] {
+    const snapshot = this.fileHistory.snapshots.find((candidate) => candidate.messageId === messageId);
+    if (!snapshot) throw new Error(`FileHistory: 找不到 messageId=${messageId} 的快照`);
+    return snapshot;
+  }
+
+  private async executeRewindOperation(
+    mode: NewRewindStorageOperation["mode"],
+    snapshot: FileHistoryState["snapshots"][number],
+    messageIndex: number,
+    operationId = randomUUID(),
+  ): Promise<void> {
+    await this.flushPersistence();
+    const coordinator = this.createRewindCoordinator();
+    const files =
+      mode === "conversation"
+        ? []
+        : await this.buildRewindFileTransitions(snapshot.messageId);
+    const head = this.store?.getHeadCursor();
+    const operation = await coordinator.execute({
+      operationId,
+      kind: "rewind",
+      sessionId: this.id,
+      mode,
+      precondition: {
+        sessionLastSeq: Math.max(0, head?.seq ?? 0),
+        effectiveHistoryDigest: sessionHistoryDigest(this.history),
+        fileHistoryRevision: this.fileHistory.revision,
+      },
+      target: {
+        messageId: snapshot.messageId,
+        ...(snapshot.sourceMessageEventId
+          ? { sourceMessageEventId: snapshot.sourceMessageEventId }
+          : {}),
+        messageIndex,
+      },
+      files,
+    });
+    if (operation.state === "needs_attention") {
+      const conflicts = operation.error?.conflictingPaths?.join(", ");
+      throw new Error(
+        conflicts
+          ? `Rewind 需要人工处理：工作区已发生外部变化 (${conflicts})`
+          : `Rewind 需要人工处理：${operation.error?.message ?? "unknown conflict"}`,
+      );
+    }
+  }
+
+  private createRewindCoordinator(): RewindOperationCoordinator {
+    const baseDir = fileHistoryDefaultBaseDir();
+    return new RewindOperationCoordinator({
+      journal: new StorageOperationJournal({ workDir: this.workDir }),
+      blobStore: new FileHistoryBlobStore({ baseDir }),
+      callbacks: {
+        resolveRoot: (rootId) => this.fileHistory.roots.get(rootId),
+        validatePrecondition: async (operation) => {
+          await this.validateRewindPrecondition(operation);
+        },
+        applyWorkspace: async (operation, targets) => {
+          await applyRewindWorkspaceTargets(operation.operationId, targets);
+        },
+        commitSession: async (operation) => {
+          if (operation.sessionId !== this.id) {
+            throw new Error(`Rewind operation ${operation.operationId} 不属于当前 Session`);
+          }
+          if (operation.mode !== "code") {
+            await this.rewindOnce(operation.operationId, operation.target.messageIndex);
+          }
+        },
+        commitSidecars: async (operation) => {
+          if (operation.mode === "code") return;
+          await fileHistoryDiscardFrom(this.fileHistory, operation.target.messageId, this.id);
+          this.summaryStore.invalidateIfBeyond?.(this.id, {
+            throughEventId: operation.target.sourceMessageEventId ?? null,
+            messageCount: operation.target.messageIndex,
+            prefixDigest: null,
+          });
+        },
+      },
+    });
+  }
+
+  private async buildRewindFileTransitions(
+    messageId: string,
+  ): Promise<NewRewindStorageOperation["files"]> {
+    const baseDir = fileHistoryDefaultBaseDir();
+    const prepared = await fileHistoryPrepareRewind(this.fileHistory, messageId, this.id, baseDir);
+    const blobStore = new FileHistoryBlobStore({ baseDir });
+    const files: NewRewindStorageOperation["files"] = [];
+    for (const file of prepared.files) {
+      const location = resolveFileHistoryLocation(this.fileHistory.roots, file.filePath);
+      const before = await storedPreimageState(file.backup, this.id, baseDir, blobStore);
+      const after = await storedCurrentState(file.filePath, blobStore);
+      files.push({ ...location, before, after });
+    }
+    return files;
+  }
+
+  private async validateRewindPrecondition(
+    operation: RewindStorageOperation,
+  ): Promise<void> {
+    const records = this.store ? (await this.store.inspectJournal({ strict: true })).records : [];
+    const existing = records.find(
+      (record) => record.type === "event" && record.eventId === `rewind:${operation.operationId}`,
+    );
+    if (existing) {
+      if (
+        existing.type === "event" &&
+        existing.kind === "history.rewound" &&
+        existing.data.messageIndex === operation.target.messageIndex
+      ) {
+        return;
+      }
+      throw new RewindOperationConflictError(
+        `Rewind operationId ${operation.operationId} 已被其他 Session 事件使用`,
+        [],
+      );
+    }
+
+    const currentSeq = Math.max(0, this.store?.getHeadCursor()?.seq ?? this.nextSeq - 1);
+    const currentDigest = sessionHistoryDigest(this.history);
+    const mismatches = [
+      ...(currentSeq !== operation.precondition.sessionLastSeq
+        ? [`session seq ${currentSeq} != ${operation.precondition.sessionLastSeq}`]
+        : []),
+      ...(currentDigest !== operation.precondition.effectiveHistoryDigest
+        ? ["effective history digest changed"]
+        : []),
+      ...(operation.state === "prepared" &&
+      this.fileHistory.revision !== operation.precondition.fileHistoryRevision
+        ? [
+            `file history revision ${this.fileHistory.revision} != ${operation.precondition.fileHistoryRevision}`,
+          ]
+        : []),
+    ];
+    if (mismatches.length > 0) {
+      throw new RewindOperationConflictError(
+        `Rewind precondition drifted: ${mismatches.join("; ")}`,
+        [],
+      );
+    }
   }
 
   /**
@@ -1005,7 +1273,6 @@ export class Session implements SessionRuntimePersistence {
       providerData: { picoKind: "compaction_summary" },
     };
     const nextHistory = [summaryMsg, ...retained];
-    this.store?.bumpEpoch();
     const receipt = this.store
       ? await this.commitPersistence("compaction", (store, seq) =>
           store.commitCompaction(summaryMsg, retained, { expectedSeq: seq }),
@@ -1146,12 +1413,16 @@ export class Session implements SessionRuntimePersistence {
     const store = this.store;
     if (!store) throw new Error("Session persistence is disabled");
 
-    const seq = this.nextSeq++;
-    const operation = this.persistenceTail.then(() => write(store, seq));
+    const operation = this.persistenceTail.then(async () => {
+      const seq = this.nextSeq;
+      const receipt = await write(store, seq);
+      this.nextSeq = Math.max(this.nextSeq, receipt.cursor.seq + 1);
+      return receipt;
+    });
     const settled = operation.then(
       () => undefined,
       (error: unknown) => {
-        this.markWriteUncertain(`${kind} durable commit failed at seq ${seq}`, error);
+        this.markWriteUncertain(`${kind} durable commit failed`, error);
       },
     );
     this.persistenceTail = settled;
@@ -1296,6 +1567,140 @@ export class Session implements SessionRuntimePersistence {
       });
     this.closePromise = registerSessionDrain(sessionEntryKey(this.id, this.workDir), drain);
     return this.closePromise;
+  }
+}
+
+async function storedPreimageState(
+  backup: FileHistoryBackup,
+  sessionId: string,
+  baseDir: string,
+  blobStore: FileHistoryBlobStore,
+): Promise<StoredFileState> {
+  if (backup.backupFileName === null) return { kind: "missing" };
+  const ref =
+    backup.blobRef ??
+    (await blobStore.putFile(resolveBackupPath(sessionId, backup.backupFileName, baseDir))).ref;
+  return {
+    kind: "file",
+    blobSha256: ref.digest,
+    sizeBytes: ref.sizeBytes,
+    mode: backup.originMode ?? 0o644,
+  };
+}
+
+async function storedCurrentState(
+  filePath: string,
+  blobStore: FileHistoryBlobStore,
+): Promise<StoredFileState> {
+  try {
+    const metadata = await lstat(filePath);
+    if (!metadata.isFile() || metadata.isSymbolicLink()) {
+      throw new Error(`FileHistory: ${filePath} 当前不是可恢复的普通文件`);
+    }
+    const { ref } = await blobStore.putFile(filePath);
+    return {
+      kind: "file",
+      blobSha256: ref.digest,
+      sizeBytes: ref.sizeBytes,
+      mode: metadata.mode & 0o777,
+    };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { kind: "missing" };
+    throw error;
+  }
+}
+
+function resolveFileHistoryLocation(
+  roots: ReadonlyMap<string, string>,
+  filePath: string,
+): { rootId: string; relativePath: string } {
+  const absolutePath = resolve(filePath);
+  const matches = [...roots.entries()]
+    .map(([rootId, root]) => ({ rootId, root: resolve(root), relativePath: relative(root, absolutePath) }))
+    .filter(
+      (candidate) =>
+        candidate.relativePath.length > 0 &&
+        !candidate.relativePath.startsWith("..") &&
+        !isAbsolute(candidate.relativePath),
+    )
+    .toSorted((left, right) => right.root.length - left.root.length);
+  const selected = matches[0];
+  if (!selected) throw new Error(`FileHistory: ${filePath} 不属于已信任 workspace root`);
+  return {
+    rootId: selected.rootId,
+    relativePath: selected.relativePath.split("\\").join("/"),
+  };
+}
+
+async function applyRewindWorkspaceTargets(
+  operationId: string,
+  targets: readonly RewindWorkspaceTarget[],
+): Promise<void> {
+  for (const target of targets) {
+    if (target.state.kind === "missing") {
+      try {
+        const current = await lstat(target.absolutePath);
+        if (!current.isFile() && !current.isSymbolicLink()) {
+          throw new Error(`Rewind 拒绝删除非文件路径: ${target.absolutePath}`);
+        }
+        await unlink(target.absolutePath);
+        await syncRewindDirectory(dirname(target.absolutePath));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+      continue;
+    }
+    if (!target.contents) throw new Error(`Rewind 缺少 CAS 内容: ${target.absolutePath}`);
+    const directory = dirname(target.absolutePath);
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    const temporary = join(
+      directory,
+      `.${basename(target.absolutePath)}.pico-rewind-${operationId}-${randomUUID()}.tmp`,
+    );
+    let handle: FileHandle | undefined;
+    let published = false;
+    try {
+      handle = await open(temporary, "wx", 0o600);
+      await writeAllRewindFile(handle, target.contents);
+      await handle.chmod(target.state.mode);
+      await handle.sync();
+      await handle.close();
+      handle = undefined;
+      await rename(temporary, target.absolutePath);
+      published = true;
+      await syncRewindDirectory(directory);
+    } finally {
+      await handle?.close().catch(() => undefined);
+      if (!published) await unlink(temporary).catch(() => undefined);
+    }
+  }
+}
+
+function sessionHistoryDigest(history: readonly Message[]): string {
+  return createHash("sha256").update(JSON.stringify(history)).digest("hex");
+}
+
+async function writeAllRewindFile(handle: FileHandle, bytes: Uint8Array): Promise<void> {
+  let offset = 0;
+  while (offset < bytes.byteLength) {
+    const { bytesWritten } = await handle.write(bytes, offset, bytes.byteLength - offset, null);
+    if (bytesWritten <= 0) throw new Error("Rewind temporary file write made no progress");
+    offset += bytesWritten;
+  }
+}
+
+async function syncRewindDirectory(directory: string): Promise<void> {
+  let handle: FileHandle | undefined;
+  try {
+    handle = await open(directory, "r");
+    await handle.sync();
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (!code || !new Set(["EACCES", "EINVAL", "EISDIR", "ENOTSUP", "EPERM"]).has(code)) {
+      throw error;
+    }
+  } finally {
+    await handle?.close().catch(() => undefined);
   }
 }
 

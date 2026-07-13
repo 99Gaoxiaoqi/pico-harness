@@ -23,6 +23,8 @@ export interface RewindWorkspaceTarget {
 export interface RewindOperationCallbacks {
   /** rootId 必须由当前已信任 workspace roots 解析，不能直接使用 journal 字符串。 */
   resolveRoot(rootId: string): string | undefined;
+  /** 首次副作用前验证 Session/FileHistory 未偏移；已提交同 operationId 须幂等通过。 */
+  validatePrecondition?(operation: RewindStorageOperation): Promise<void>;
   /** 必须幂等；协调器可在进程崩溃后重复调用。 */
   applyWorkspace(
     operation: RewindStorageOperation,
@@ -77,10 +79,11 @@ export class RewindOperationCoordinator {
   }
 
   /** 启动时只协调 rewind；fork 由独立发布协调器处理。 */
-  async reconcileUnfinished(): Promise<RewindReconciliationResult[]> {
+  async reconcileUnfinished(sessionId?: string): Promise<RewindReconciliationResult[]> {
     const results: RewindReconciliationResult[] = [];
     for (const operation of await this.journal.listUnfinished()) {
       if (operation.kind !== "rewind") continue;
+      if (sessionId !== undefined && operation.sessionId !== sessionId) continue;
       const result = await this.forward(operation);
       results.push({ operationId: result.operationId, state: result.state });
     }
@@ -90,6 +93,9 @@ export class RewindOperationCoordinator {
   private async forward(initial: RewindStorageOperation): Promise<RewindStorageOperation> {
     let operation = initial;
     try {
+      if (operation.state === "prepared" || operation.state === "workspace_applied") {
+        await this.callbacks.validatePrecondition?.(operation);
+      }
       if (operation.state === "prepared") {
         if (operation.mode !== "conversation") {
           const preflight = await this.preflightWorkspace(operation);
@@ -119,6 +125,21 @@ export class RewindOperationCoordinator {
             }
           }
           operation = await this.advance(operation, "workspace_applied");
+        }
+      }
+
+      // 若崩溃发生在 workspace_applied 之后，恢复时仍要先确认工作区保持
+      // 已恢复状态；外部编辑不能被当成已完成的 Session rewind。
+      if (operation.state === "workspace_applied" && operation.mode !== "conversation") {
+        const verified = await this.preflightWorkspace(operation);
+        const conflicts = verified
+          .filter((file) => file.current !== "before")
+          .map((file) => file.target.absolutePath);
+        if (conflicts.length > 0) {
+          throw new RewindOperationConflictError(
+            "Workspace changed after the rewind workspace phase",
+            conflicts,
+          );
         }
       }
 
