@@ -535,7 +535,7 @@ git worktree remove ../pico-1-streaming
 
 - [x] 14.1 确立“Session JSONL 是对话真源，Catalog / FTS 是可重建投影”的存储边界；投影故障不反向改写真源
 - [x] 14.2 将 Session 日志升级为 v3 canonical event 协议，以 `logId + epoch + seq + eventId` 标识耐久提交，并统一 legacy/v3 reducer 重放
-- [x] 14.3 接入单写者 OwnerLease、串行 append + `fdatasync`、严格 seq 校验、torn-tail 容错与 `write_uncertain` 禁写状态，避免未证明提交继续覆写日志
+- [x] 14.3 接入单写者 OwnerLease（candidate 原子发布 + stale tombstone 防 ABA）、串行 append + `fdatasync`、严格 seq 校验、torn-tail 容错与 `write_uncertain` 禁写状态，避免未证明提交继续覆写日志
 - [x] 14.4 增加全局 Session Catalog 及 JSONL→Catalog 单向投影；健康目录走 source marker/head 快路，过期或损坏项可隔离并从 JSONL backfill
 - [x] 14.5 把 FTS5 改为 JSONL 提交后的 cursor 投影，索引与 cursor 同事务更新；启动时可从 Session 重建，原生 SQLite 不可用时继续降级到 JSONL 内存检索
 

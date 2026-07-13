@@ -1,10 +1,11 @@
+import { createHash, randomUUID } from "node:crypto";
+import { lstat, mkdir, readFile, rename, rm } from "node:fs/promises";
 import { hostname } from "node:os";
-import { mkdir, readFile, rm } from "node:fs/promises";
-import { dirname, join } from "node:path";
-import { randomUUID } from "node:crypto";
+import { basename, dirname, join } from "node:path";
 import { writeJsonAtomic } from "./atomic-json.js";
 
 const LEASE_SCHEMA_VERSION = 1 as const;
+const ACQUIRE_RETRY_LIMIT = 8;
 
 export interface OwnerLeaseOptions {
   leaseDirectory: string;
@@ -53,10 +54,18 @@ export class OwnerLease {
 
   static async acquire(options: OwnerLeaseOptions): Promise<OwnerLease> {
     const lease = new OwnerLease(options);
-    await lease.acquireDirectory();
-    await lease.writeRecord();
-    lease.startHeartbeat();
-    return lease;
+    const candidateDirectory = await lease.prepareCandidate();
+    let published = false;
+    try {
+      await lease.acquireDirectory(candidateDirectory);
+      published = true;
+      lease.startHeartbeat();
+      return lease;
+    } finally {
+      if (!published) {
+        await rm(candidateDirectory, { recursive: true, force: true }).catch(() => undefined);
+      }
+    }
   }
 
   get id(): string {
@@ -82,32 +91,54 @@ export class OwnerLease {
     await rm(this.options.leaseDirectory, { recursive: true, force: true });
   }
 
-  private async acquireDirectory(): Promise<void> {
-    await mkdir(dirname(this.options.leaseDirectory), { recursive: true, mode: 0o700 });
-    try {
-      await mkdir(this.options.leaseDirectory);
-      return;
-    } catch (error) {
-      if (!isNodeCode(error, "EEXIST")) throw error;
-    }
-
-    const existing = await readLeaseRecord(this.ownerPath).catch(() => undefined);
-    if (existing && canProveOwnerIsDead(existing, this.now(), this.staleAfterMs)) {
-      await rm(this.options.leaseDirectory, { recursive: true, force: true });
-      try {
-        await mkdir(this.options.leaseDirectory);
-        return;
-      } catch (error) {
-        if (!isNodeCode(error, "EEXIST")) throw error;
-      }
-    }
-
-    throw new LeaseConflictError(
-      existing
-        ? `Lease is owned by ${existing.ownerId} (${existing.hostname}:${existing.pid})`
-        : "Lease directory exists but its owner cannot be verified",
-      existing,
+  private async prepareCandidate(): Promise<string> {
+    const parentDirectory = dirname(this.options.leaseDirectory);
+    await mkdir(parentDirectory, { recursive: true, mode: 0o700 });
+    const candidateDirectory = join(
+      parentDirectory,
+      `.${basename(this.options.leaseDirectory)}.candidate-${this.leaseId}`,
     );
+    await mkdir(candidateDirectory, { mode: 0o700 });
+    try {
+      await this.writeRecord(join(candidateDirectory, "owner.json"));
+      return candidateDirectory;
+    } catch (error) {
+      await rm(candidateDirectory, { recursive: true, force: true }).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  private async acquireDirectory(candidateDirectory: string): Promise<void> {
+    for (let attempt = 0; attempt < ACQUIRE_RETRY_LIMIT; attempt += 1) {
+      const existing = await inspectLease(this.options.leaseDirectory, this.ownerPath);
+      if (existing.state === "absent") {
+        if (await publishCandidate(candidateDirectory, this.options.leaseDirectory)) return;
+        continue;
+      }
+      if (existing.state === "unverifiable") {
+        throw new LeaseConflictError("Lease directory exists but its owner cannot be verified");
+      }
+      if (!canProveOwnerIsDead(existing.owner, this.now(), this.staleAfterMs)) {
+        throw leaseConflict(existing.owner);
+      }
+
+      await moveStaleLeaseToTombstone({
+        leaseDirectory: this.options.leaseDirectory,
+        ownerPath: this.ownerPath,
+        expectedOwner: existing.owner,
+        now: this.now(),
+        staleAfterMs: this.staleAfterMs,
+      });
+      if (await publishCandidate(candidateDirectory, this.options.leaseDirectory)) return;
+
+      const current = await inspectLease(this.options.leaseDirectory, this.ownerPath);
+      if (current.state === "absent") continue;
+      if (current.state === "unverifiable") {
+        throw new LeaseConflictError("Lease directory exists but its owner cannot be verified");
+      }
+      throw leaseConflict(current.owner);
+    }
+    throw new LeaseConflictError("Lease acquisition did not converge");
   }
 
   private startHeartbeat(): void {
@@ -125,9 +156,9 @@ export class OwnerLease {
     await this.writeRecord();
   }
 
-  private async writeRecord(): Promise<void> {
+  private async writeRecord(path = this.ownerPath): Promise<void> {
     const now = new Date(this.now()).toISOString();
-    const existing = await readLeaseRecord(this.ownerPath).catch(() => undefined);
+    const existing = await readLeaseRecord(path).catch(() => undefined);
     const record: OwnerLeaseRecord = {
       schemaVersion: LEASE_SCHEMA_VERSION,
       leaseId: this.leaseId,
@@ -141,8 +172,83 @@ export class OwnerLease {
       acquiredAt: existing?.leaseId === this.leaseId ? existing.acquiredAt : now,
       heartbeatAt: now,
     };
-    await writeJsonAtomic(this.ownerPath, record);
+    await writeJsonAtomic(path, record);
   }
+}
+
+type LeaseInspection =
+  | { state: "absent" }
+  | { state: "unverifiable" }
+  | { state: "owned"; owner: OwnerLeaseRecord };
+
+async function inspectLease(leaseDirectory: string, ownerPath: string): Promise<LeaseInspection> {
+  const owner = await readLeaseRecord(ownerPath);
+  if (owner) return { state: "owned", owner };
+  return (await pathExists(leaseDirectory)) ? { state: "unverifiable" } : { state: "absent" };
+}
+
+async function publishCandidate(
+  candidateDirectory: string,
+  leaseDirectory: string,
+): Promise<boolean> {
+  // Node does not expose renameat2(RENAME_NOREPLACE). All directories published by this
+  // protocol are non-empty, while the explicit existence check preserves fail-closed
+  // behavior for a legacy empty/malformed lease directory.
+  if (await pathExists(leaseDirectory)) return false;
+  try {
+    await rename(candidateDirectory, leaseDirectory);
+    return true;
+  } catch (error) {
+    if (await pathExists(leaseDirectory)) return false;
+    throw error;
+  }
+}
+
+interface MoveStaleLeaseOptions {
+  leaseDirectory: string;
+  ownerPath: string;
+  expectedOwner: OwnerLeaseRecord;
+  now: number;
+  staleAfterMs: number;
+}
+
+async function moveStaleLeaseToTombstone(options: MoveStaleLeaseOptions): Promise<boolean> {
+  const current = await readLeaseRecord(options.ownerPath);
+  if (
+    current?.leaseId !== options.expectedOwner.leaseId ||
+    !canProveOwnerIsDead(current, options.now, options.staleAfterMs)
+  ) {
+    return false;
+  }
+
+  const tombstonePath = resolveOwnerLeaseTombstonePath(
+    options.leaseDirectory,
+    options.expectedOwner.leaseId,
+  );
+  // Tombstones are intentionally retained. A delayed contender for the old leaseId can
+  // therefore never rename a newly-published lease into the old tombstone (ABA).
+  if (await pathExists(tombstonePath)) return false;
+  try {
+    await rename(options.leaseDirectory, tombstonePath);
+    return true;
+  } catch (error) {
+    if ((await pathExists(tombstonePath)) || !(await pathExists(options.leaseDirectory))) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+export function resolveOwnerLeaseTombstonePath(leaseDirectory: string, leaseId: string): string {
+  const leaseIdDigest = createHash("sha256").update(leaseId).digest("hex");
+  return join(dirname(leaseDirectory), `.${basename(leaseDirectory)}.tombstone-${leaseIdDigest}`);
+}
+
+function leaseConflict(owner: OwnerLeaseRecord): LeaseConflictError {
+  return new LeaseConflictError(
+    `Lease is owned by ${owner.ownerId} (${owner.hostname}:${owner.pid})`,
+    owner,
+  );
 }
 
 async function readLeaseRecord(path: string): Promise<OwnerLeaseRecord | undefined> {
@@ -151,6 +257,7 @@ async function readLeaseRecord(path: string): Promise<OwnerLeaseRecord | undefin
     parsed = JSON.parse(await readFile(path, "utf8")) as unknown;
   } catch (error) {
     if (isNodeCode(error, "ENOENT")) return undefined;
+    if (error instanceof SyntaxError) return undefined;
     throw error;
   }
   return parseLeaseRecord(parsed);
@@ -202,6 +309,16 @@ function isProcessAlive(pid: number): boolean {
 
 function isNodeCode(error: unknown, code: string): boolean {
   return error instanceof Error && "code" in error && error.code === code;
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await lstat(path);
+    return true;
+  } catch (error) {
+    if (isNodeCode(error, "ENOENT")) return false;
+    throw error;
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
