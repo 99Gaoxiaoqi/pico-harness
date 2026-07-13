@@ -88,9 +88,24 @@ import type { YoloSandboxConfig } from "../safety/yolo-sandbox.js";
 import { resolveCliSession, type CliSessionSelection } from "../cli/session-resolver.js";
 import type { WorktreeSupervisor } from "../tasks/worktree-supervisor.js";
 import { RuntimeStore } from "../tasks/runtime-store.js";
+import { WorkspaceTrustStore } from "../security/workspace-trust.js";
+import {
+  BackgroundPolicyViolationError,
+  buildBackgroundYoloMiddleware,
+  prepareBackgroundYoloPolicy,
+  type BackgroundWorkspaceTrustVerifier,
+  type BackgroundYoloPolicySnapshot,
+  type PreparedBackgroundYoloPolicy,
+} from "../safety/background-yolo-policy.js";
+
+export type RuntimeExecution =
+  | { readonly kind: "foreground" }
+  | { readonly kind: "background"; readonly policy: BackgroundYoloPolicySnapshot };
 
 export interface RunAgentCliOptions {
   prompt: string;
+  /** 默认 foreground；daemon/Cron 必须显式提供完整 background policy。 */
+  execution?: RuntimeExecution;
   dir?: string;
   /** 兼容旧 --session:按指定 id 恢复会话 */
   session?: string;
@@ -193,6 +208,8 @@ export interface RunAgentCliDependencies extends RuntimeHost {
   signal?: AbortSignal;
   /** @internal 继续已存在的未完成轮次，不新增 user 消息或 rewind point。 */
   resumeExistingSession?: boolean;
+  /** 仅用于后台执行的实时信任校验；生产默认读取用户级 WorkspaceTrustStore。 */
+  backgroundTrustStore?: BackgroundWorkspaceTrustVerifier;
 }
 
 /** Runtime-first entry point. CLI/TUI compatibility wrappers call this method. */
@@ -218,6 +235,11 @@ export async function executeAgentRuntime(
   const prompt = resumeExistingSession ? options.prompt : normalizePrompt(options.prompt);
   const kind = options.provider ?? "openai";
   const workDir = await resolveWorkDir(options.dir);
+  const execution = options.execution ?? ({ kind: "foreground" } as const);
+  const backgroundPolicy =
+    execution.kind === "background"
+      ? await prepareBackgroundExecution(execution, workDir, options, dependencies)
+      : undefined;
   const picoConfig = await loadPicoConfig(workDir);
   const configuredAdditionalDirectories = picoConfig.additionalDirectories;
   const sessionSelection =
@@ -270,15 +292,16 @@ export async function executeAgentRuntime(
         : {}),
       cwd: workDir,
       provider: kind,
+      ...(backgroundPolicy ? { mode: "yolo" as const } : {}),
       model: defaultConfigModel,
       ...(options.modelRouteId !== undefined ? { modelRouteId: options.modelRouteId } : {}),
       ...(options.thinkingEffort !== undefined ? { thinkingEffort: options.thinkingEffort } : {}),
     },
-    { persistence: session },
+    { persistence: session, ...(backgroundPolicy ? { restore: false } : {}) },
   );
   const workspaceRoots = await WorkspaceRoots.create(
     workDir,
-    sessionSelection.mode === "fork"
+    backgroundPolicy || sessionSelection.mode === "fork"
       ? []
       : [
           ...configuredAdditionalDirectories,
@@ -295,9 +318,9 @@ export async function executeAgentRuntime(
     session: sessionSelection.sessionId,
     sessionSelection,
     model: options.model ?? settings.model,
-    planMode: options.planMode ?? settings.mode === "plan",
+    planMode: backgroundPolicy ? false : (options.planMode ?? settings.mode === "plan"),
     trace: traceEnabled,
-    addDirs: [...settings.additionalDirectories],
+    addDirs: backgroundPolicy ? [] : [...settings.additionalDirectories],
     ...(options.thinkingEffort !== undefined
       ? { thinkingEffort: options.thinkingEffort }
       : settings.thinkingEffortExplicit
@@ -319,7 +342,8 @@ export async function executeAgentRuntime(
       ...(dependencies.toolDisclosure !== undefined
         ? { toolDisclosure: dependencies.toolDisclosure }
         : {}),
-      lspServers: picoConfig.lspServers,
+      // LSP 是项目配置启动的子进程；后台策略尚未为其提供网络/写入沙箱。
+      lspServers: backgroundPolicy ? [] : picoConfig.lspServers,
     }));
   runtimeState.assertCompatible(workDir, session.id);
   if (
@@ -415,13 +439,16 @@ export async function executeAgentRuntime(
       if (settings.mode === "plan" || path === undefined) return true;
       return !isSensitiveCredentialPath(workspaceRoots.resolveUnchecked(path));
     },
+    backgroundPolicy ? { config: { network: "deny" } } : undefined,
   );
   // 【任务 2.6】用户可配置 Shell Hooks:加载 .claw/settings.json 的 hooks 配置,
   // 存在则挂载 HookRunner 到 registry。fail-open:配置缺失/畸形均不启用 hook,零影响。
   registry.setSessionId?.(session.id);
-  const hooksConfig = await loadHooksConfig(workDir);
-  if (hooksConfig) {
-    registry.setHookRunner?.(new HookRunner(workDir, hooksConfig));
+  if (!backgroundPolicy) {
+    const hooksConfig = await loadHooksConfig(workDir);
+    if (hooksConfig) {
+      registry.setHookRunner?.(new HookRunner(workDir, hooksConfig));
+    }
   }
   const artifactRuntime = buildArtifactRuntime(workDir, session.id);
   // Inject steer text into the session-scoped queue before the next provider turn.
@@ -474,14 +501,20 @@ export async function executeAgentRuntime(
   });
 
   registry.use(
-    buildApprovalMiddleware(
-      approvalNotifier,
-      workDir,
-      dependencies.signal,
-      globalApprovalManager,
-      settings,
-      workspaceRoots,
-    ),
+    backgroundPolicy
+      ? buildBackgroundYoloMiddleware({
+          policy: backgroundPolicy,
+          workspaceRoots,
+          sessionId: session.id,
+        })
+      : buildApprovalMiddleware(
+          approvalNotifier,
+          workDir,
+          dependencies.signal,
+          globalApprovalManager,
+          settings,
+          workspaceRoots,
+        ),
   );
   registerDelegationTools(
     registry,
@@ -497,6 +530,7 @@ export async function executeAgentRuntime(
     runtimeState.taskHostRuntime?.supervisor,
     reporter,
   );
+  if (backgroundPolicy) pruneRegistryToBackgroundAllowlist(registry, backgroundPolicy);
   dependencies.toolStatusSink?.(toolStatusFromRegistry(registry));
 
   // 3.6 Plan Review:把 ExitPlanModeTool 的退出回调接到 engine.exitPlanMode,
@@ -574,7 +608,12 @@ export async function executeAgentRuntime(
         ...(traceEnabled ? { tracePath: await findTracePath(workDir, session.id) } : {}),
       };
 
-      dependencies.onEvent?.({ type: "run.finished", sessionId: session.id, workDir, at: Date.now() });
+      dependencies.onEvent?.({
+        type: "run.finished",
+        sessionId: session.id,
+        workDir,
+        at: Date.now(),
+      });
       return result;
     });
   } catch (error) {
@@ -610,6 +649,7 @@ function buildRegistry(
   askUserHandler?: AskUserHandler,
   codeIntelligence?: SessionRuntime["codeIntelligence"],
   excludeSensitiveGrepFiles?: boolean | ((path: string | undefined) => boolean),
+  yoloSandbox?: { config?: Partial<YoloSandboxConfig> },
 ): ToolRegistry {
   return buildDefaultToolRegistry(workDir, {
     truncateResults: false,
@@ -622,7 +662,51 @@ function buildRegistry(
     ...(askUserHandler !== undefined ? { askUserHandler } : {}),
     ...(codeIntelligence !== undefined ? { codeIntelligence } : {}),
     ...(excludeSensitiveGrepFiles !== undefined ? { excludeSensitiveGrepFiles } : {}),
+    ...(yoloSandbox !== undefined ? { yoloSandbox } : {}),
   });
+}
+
+async function prepareBackgroundExecution(
+  execution: Extract<RuntimeExecution, { kind: "background" }>,
+  workDir: string,
+  options: RunAgentCliOptions,
+  dependencies: RunAgentCliDependencies,
+): Promise<PreparedBackgroundYoloPolicy> {
+  if (options.planMode === true) {
+    throw new BackgroundPolicyViolationError("invalid_policy", "后台 YOLO 不支持 planMode。");
+  }
+  if ((options.addDirs?.length ?? 0) > 0) {
+    throw new BackgroundPolicyViolationError(
+      "invalid_policy",
+      "后台执行只允许访问 Job 绑定的真实工作区，不接受 addDirs。",
+    );
+  }
+  if (options.mcpConfigPath) {
+    throw new BackgroundPolicyViolationError(
+      "invalid_policy",
+      "后台执行暂不加载无法继承网络 allowlist 的 MCP 配置。",
+    );
+  }
+  if (dependencies.runtimeState || dependencies.resumeExistingSession) {
+    throw new BackgroundPolicyViolationError(
+      "invalid_policy",
+      "后台执行不得复用可能携带前台 LSP、权限或未完成轮次的 runtimeState。",
+    );
+  }
+  return prepareBackgroundYoloPolicy({
+    workDir,
+    policy: execution.policy,
+    trustStore: dependencies.backgroundTrustStore ?? new WorkspaceTrustStore(),
+  });
+}
+
+function pruneRegistryToBackgroundAllowlist(
+  registry: ToolRegistry,
+  policy: PreparedBackgroundYoloPolicy,
+): void {
+  for (const tool of registry.getAvailableTools()) {
+    if (!policy.allowedTools.has(tool.name)) registry.unregister(tool.name);
+  }
 }
 
 function createTrackedProviderWithFallback(

@@ -1,0 +1,651 @@
+import { spawn, type ChildProcess } from "node:child_process";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { isHardlineCommand } from "../approval/manager.js";
+import { matcherMatches } from "../hooks/runner.js";
+import type { HookHandler, HookInput, HookMatcherGroup, HooksConfig } from "../hooks/types.js";
+import type { ToolCall } from "../schema/message.js";
+import type { RequestMiddleware, RequestMiddlewareResult } from "../tools/registry.js";
+import { WorkspaceRoots, workspaceAccessesFromCall } from "../tools/workspace-roots.js";
+import type { WorkspaceTrustStore } from "../security/workspace-trust.js";
+import {
+  buildSandboxSpawnPlan,
+  evaluateYoloToolCall,
+  type SandboxSpawnPlan,
+} from "./yolo-sandbox.js";
+
+export const BACKGROUND_HARDLINE_VERSION = "builtin-v1" as const;
+export const BACKGROUND_HOOK_VERSION = "workspace-v1" as const;
+
+const DEFAULT_HOOK_TIMEOUT_MS = 60_000;
+const MAX_HOOK_OUTPUT_BYTES = 1024 * 1024;
+const UNSAFE_BACKGROUND_TOOLS = new Set(["ask_user", "delegate_task", "spawn_subagent"]);
+
+export interface BackgroundYoloPolicySnapshot {
+  readonly mode: "yolo";
+  readonly backgroundEnabled: true;
+  readonly trustedWorkspace: true;
+  readonly networkPolicy: "disabled" | "allowlist";
+  readonly allowedNetworkHosts?: readonly string[];
+  readonly allowedTools: readonly string[];
+  readonly hardlineVersion: string;
+  readonly hookVersion: string;
+  readonly createdAt: number;
+}
+
+export interface BackgroundWorkspaceTrustVerifier {
+  canonicalize(workspacePath: string): Promise<string>;
+  isTrusted(canonicalWorkspacePath: string): Promise<boolean>;
+}
+
+export interface PreparedBackgroundYoloPolicy {
+  readonly snapshot: BackgroundYoloPolicySnapshot;
+  readonly workspacePath: string;
+  readonly allowedTools: ReadonlySet<string>;
+  readonly allowedNetworkHosts: ReadonlySet<string>;
+  readonly hookRunner?: StrictBackgroundHookRunner;
+}
+
+export type BackgroundPolicyViolationCode =
+  | "missing_policy"
+  | "invalid_policy"
+  | "policy_version_mismatch"
+  | "workspace_untrusted"
+  | "hook_config_invalid"
+  | "hook_unavailable";
+
+export class BackgroundPolicyViolationError extends Error {
+  override readonly name = "BackgroundPolicyViolationError";
+
+  constructor(
+    readonly code: BackgroundPolicyViolationCode,
+    message: string,
+    options?: ErrorOptions,
+  ) {
+    super(`[background:${code}] ${message}`, options);
+  }
+}
+
+export async function prepareBackgroundYoloPolicy(input: {
+  workDir: string;
+  policy: unknown;
+  trustStore: BackgroundWorkspaceTrustVerifier | WorkspaceTrustStore;
+}): Promise<PreparedBackgroundYoloPolicy> {
+  const snapshot = assertBackgroundYoloPolicy(input.policy);
+  if (snapshot.hardlineVersion !== BACKGROUND_HARDLINE_VERSION) {
+    throw new BackgroundPolicyViolationError(
+      "policy_version_mismatch",
+      `hardline 策略版本不匹配: ${snapshot.hardlineVersion}`,
+    );
+  }
+  if (snapshot.hookVersion !== BACKGROUND_HOOK_VERSION) {
+    throw new BackgroundPolicyViolationError(
+      "policy_version_mismatch",
+      `Hook 策略版本不匹配: ${snapshot.hookVersion}`,
+    );
+  }
+
+  let workspacePath: string;
+  let trusted: boolean;
+  try {
+    workspacePath = await input.trustStore.canonicalize(input.workDir);
+    trusted = await input.trustStore.isTrusted(workspacePath);
+  } catch (error) {
+    throw new BackgroundPolicyViolationError(
+      "workspace_untrusted",
+      "无法验证工作区信任状态，后台执行已停止。",
+      { cause: error },
+    );
+  }
+  if (!trusted) {
+    throw new BackgroundPolicyViolationError(
+      "workspace_untrusted",
+      `工作区已不再受信任: ${workspacePath}`,
+    );
+  }
+
+  const hooks = await loadStrictHooksConfig(workspacePath);
+  let hookRunner: StrictBackgroundHookRunner | undefined;
+  if (hasPreToolHooks(hooks)) {
+    try {
+      hookRunner = new StrictBackgroundHookRunner(workspacePath, hooks);
+    } catch (error) {
+      throw new BackgroundPolicyViolationError(
+        "hook_unavailable",
+        "当前环境无法为后台 Hook 建立强制沙箱。",
+        { cause: error },
+      );
+    }
+  }
+
+  return {
+    snapshot,
+    workspacePath,
+    // Delegation/交互工具尚不能把同一 policy 传递给下一执行边界，后台不可暴露。
+    allowedTools: new Set(
+      snapshot.allowedTools.filter((tool) => !UNSAFE_BACKGROUND_TOOLS.has(tool)),
+    ),
+    allowedNetworkHosts: new Set(snapshot.allowedNetworkHosts ?? []),
+    ...(hookRunner ? { hookRunner } : {}),
+  };
+}
+
+export function buildBackgroundYoloMiddleware(input: {
+  policy: PreparedBackgroundYoloPolicy;
+  workspaceRoots: WorkspaceRoots;
+  sessionId: string;
+}): RequestMiddleware {
+  return async (call) => {
+    const initial = validateBackgroundToolCall(call, input.policy, input.workspaceRoots);
+    if (!initial.allowed) return initial;
+
+    const hookResult = await input.policy.hookRunner?.runPreToolUse(
+      call.name,
+      parseToolInput(call.arguments),
+      input.sessionId,
+    );
+    if (!hookResult) return initial;
+    if (hookResult.decision === "deny") {
+      return {
+        allowed: false,
+        reason: `[background:hook_denied] ${hookResult.reason ?? "PreToolUse Hook 已阻断"}`,
+      };
+    }
+    if (hookResult.modifiedInput === undefined) return initial;
+
+    let rewrittenArguments: string;
+    try {
+      rewrittenArguments = JSON.stringify(hookResult.modifiedInput);
+      if (rewrittenArguments === undefined) throw new Error("modifiedInput 无法序列化");
+    } catch (error) {
+      return {
+        allowed: false,
+        reason: `[background:hook_invalid] Hook 返回了无法验证的 modifiedInput: ${errorMessage(error)}`,
+      };
+    }
+    const rewrittenCall = { ...call, arguments: rewrittenArguments };
+    const rewritten = validateBackgroundToolCall(rewrittenCall, input.policy, input.workspaceRoots);
+    return rewritten.allowed ? { ...rewritten, call: rewrittenCall } : rewritten;
+  };
+}
+
+function validateBackgroundToolCall(
+  call: ToolCall,
+  policy: PreparedBackgroundYoloPolicy,
+  workspaceRoots: WorkspaceRoots,
+): RequestMiddlewareResult {
+  if (!policy.allowedTools.has(call.name)) {
+    return {
+      allowed: false,
+      reason: `[background:tool_denied] 工具 ${call.name} 不在 Job 的 allowedTools 中。`,
+    };
+  }
+  if (UNSAFE_BACKGROUND_TOOLS.has(call.name)) {
+    return {
+      allowed: false,
+      reason: `[background:tool_denied] 工具 ${call.name} 尚未支持继承后台安全策略。`,
+    };
+  }
+  if (isHardlineCommand(call.name, call.arguments)) {
+    return {
+      allowed: false,
+      reason: "[background:hardline_denied] Hardline 高危命令不可由后台 YOLO 绕过。",
+    };
+  }
+  for (const access of workspaceAccessesFromCall(call)) {
+    if (!workspaceRoots.isAllowedPath(access.path)) {
+      return {
+        allowed: false,
+        reason: `[background:workspace_denied] 路径不在后台 Job 的真实工作区: ${access.path}`,
+      };
+    }
+  }
+
+  const sandboxDecision = evaluateYoloToolCall(call, policy.workspacePath, workspaceRoots, {
+    // Bash 永远保持网络关闭。allowlist 只开放可验证目标的原生网络工具。
+    network: "deny",
+  });
+  if (!sandboxDecision.allowed) {
+    return { allowed: false, reason: sandboxDecision.reason ?? "后台沙箱拒绝工具调用" };
+  }
+  return validateNetworkToolCall(call, policy);
+}
+
+function validateNetworkToolCall(
+  call: ToolCall,
+  policy: PreparedBackgroundYoloPolicy,
+): RequestMiddlewareResult {
+  if (call.name === "web_search") {
+    return {
+      allowed: false,
+      reason:
+        policy.snapshot.networkPolicy === "disabled"
+          ? "[background:network_denied] 当前 Job 禁止网络访问。"
+          : "[background:network_denied] web_search 无法证明仅访问 allowlist，已安全拒绝。",
+    };
+  }
+  if (call.name !== "fetch_url") return { allowed: true };
+  if (policy.snapshot.networkPolicy === "disabled") {
+    return { allowed: false, reason: "[background:network_denied] 当前 Job 禁止网络访问。" };
+  }
+  const rawUrl = jsonStringField(call.arguments, "url");
+  if (!rawUrl) {
+    return { allowed: false, reason: "[background:network_denied] fetch_url 缺少可验证 URL。" };
+  }
+  let hostname: string;
+  try {
+    const url = new URL(rawUrl);
+    if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("协议不受支持");
+    hostname = normalizeHostname(url.hostname);
+  } catch {
+    return { allowed: false, reason: "[background:network_denied] fetch_url URL 无法验证。" };
+  }
+  if (!policy.allowedNetworkHosts.has(hostname)) {
+    return {
+      allowed: false,
+      reason: `[background:network_denied] 主机 ${hostname} 不在 Job 网络 allowlist 中。`,
+    };
+  }
+  // FetchURL 会跟随重定向；当前工具边界无法把 allowlist 注入每一跳。允许首跳会使
+  // allowlist 被 30x 绕过，因此在 transport 支持逐跳 allowlist 前必须 fail-closed。
+  return {
+    allowed: false,
+    reason: "[background:network_denied] 当前 fetch_url transport 无法验证重定向逐跳 allowlist。",
+  };
+}
+
+function assertBackgroundYoloPolicy(value: unknown): BackgroundYoloPolicySnapshot {
+  if (!isRecord(value)) {
+    throw new BackgroundPolicyViolationError("missing_policy", "后台执行缺少 policySnapshot。 ");
+  }
+  const allowedTools = value["allowedTools"];
+  const allowedNetworkHosts = value["allowedNetworkHosts"];
+  if (
+    value["mode"] !== "yolo" ||
+    value["backgroundEnabled"] !== true ||
+    value["trustedWorkspace"] !== true ||
+    (value["networkPolicy"] !== "disabled" && value["networkPolicy"] !== "allowlist") ||
+    !Array.isArray(allowedTools) ||
+    !allowedTools.every(isNonEmptyString) ||
+    typeof value["hardlineVersion"] !== "string" ||
+    typeof value["hookVersion"] !== "string" ||
+    typeof value["createdAt"] !== "number" ||
+    !Number.isFinite(value["createdAt"])
+  ) {
+    throw new BackgroundPolicyViolationError(
+      "invalid_policy",
+      "后台执行只接受完整的 trusted workspace + yolo policySnapshot。",
+    );
+  }
+  if (value["networkPolicy"] === "disabled" && allowedNetworkHosts !== undefined) {
+    throw new BackgroundPolicyViolationError(
+      "invalid_policy",
+      "networkPolicy=disabled 时不得声明 allowedNetworkHosts。",
+    );
+  }
+  if (
+    value["networkPolicy"] === "allowlist" &&
+    (!Array.isArray(allowedNetworkHosts) ||
+      allowedNetworkHosts.length === 0 ||
+      !allowedNetworkHosts.every(isValidHostname))
+  ) {
+    throw new BackgroundPolicyViolationError(
+      "invalid_policy",
+      "networkPolicy=allowlist 时必须提供合法且非空的 allowedNetworkHosts。",
+    );
+  }
+  return {
+    mode: "yolo",
+    backgroundEnabled: true,
+    trustedWorkspace: true,
+    networkPolicy: value["networkPolicy"],
+    ...(Array.isArray(allowedNetworkHosts)
+      ? { allowedNetworkHosts: [...new Set(allowedNetworkHosts.map(normalizeHostname))] }
+      : {}),
+    allowedTools: [...new Set(allowedTools)],
+    hardlineVersion: value["hardlineVersion"],
+    hookVersion: value["hookVersion"],
+    createdAt: value["createdAt"],
+  };
+}
+
+async function loadStrictHooksConfig(workDir: string): Promise<HooksConfig> {
+  const settingsPath = join(workDir, ".claw", "settings.json");
+  let raw: string;
+  try {
+    raw = await readFile(settingsPath, "utf8");
+  } catch (error) {
+    if (isErrnoCode(error, "ENOENT")) return {};
+    throw new BackgroundPolicyViolationError(
+      "hook_config_invalid",
+      `无法读取 Hook 配置: ${settingsPath}`,
+      { cause: error },
+    );
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw) as unknown;
+  } catch (error) {
+    throw new BackgroundPolicyViolationError(
+      "hook_config_invalid",
+      `Hook 配置不是合法 JSON: ${settingsPath}`,
+      { cause: error },
+    );
+  }
+  if (!isRecord(parsed)) {
+    throw new BackgroundPolicyViolationError("hook_config_invalid", "settings.json 必须是对象。");
+  }
+  const hooks = parsed["hooks"];
+  if (hooks === undefined || hooks === null) return {};
+  if (!isRecord(hooks)) {
+    throw new BackgroundPolicyViolationError("hook_config_invalid", "hooks 必须是对象。");
+  }
+
+  const result: HooksConfig = {};
+  for (const [event, groups] of Object.entries(hooks)) {
+    if (event !== "PreToolUse" && event !== "PostToolUse") {
+      throw new BackgroundPolicyViolationError(
+        "hook_config_invalid",
+        `无法验证的 Hook 事件: ${event}`,
+      );
+    }
+    result[event] = assertHookGroups(groups, event);
+  }
+  return result;
+}
+
+function assertHookGroups(value: unknown, event: string): HookMatcherGroup[] {
+  if (!Array.isArray(value)) {
+    throw new BackgroundPolicyViolationError("hook_config_invalid", `${event} Hook 必须是数组。`);
+  }
+  return value.map((group, groupIndex) => {
+    if (!isRecord(group) || !Array.isArray(group["hooks"]) || group["hooks"].length === 0) {
+      throw new BackgroundPolicyViolationError(
+        "hook_config_invalid",
+        `${event}[${groupIndex}] 必须包含非空 hooks 数组。`,
+      );
+    }
+    const matcher = group["matcher"];
+    if (matcher !== undefined && typeof matcher !== "string") {
+      throw new BackgroundPolicyViolationError(
+        "hook_config_invalid",
+        `${event}[${groupIndex}].matcher 必须是字符串。`,
+      );
+    }
+    if (
+      typeof matcher === "string" &&
+      matcher !== "" &&
+      matcher !== "*" &&
+      !/^[A-Za-z0-9_|]+$/.test(matcher)
+    ) {
+      try {
+        new RegExp(matcher);
+      } catch (error) {
+        throw new BackgroundPolicyViolationError(
+          "hook_config_invalid",
+          `${event}[${groupIndex}].matcher 不是合法正则。`,
+          { cause: error },
+        );
+      }
+    }
+    return {
+      ...(typeof matcher === "string" ? { matcher } : {}),
+      hooks: group["hooks"].map((handler, handlerIndex) =>
+        assertHookHandler(handler, event, groupIndex, handlerIndex),
+      ),
+    };
+  });
+}
+
+function assertHookHandler(
+  value: unknown,
+  event: string,
+  groupIndex: number,
+  handlerIndex: number,
+): HookHandler {
+  if (
+    !isRecord(value) ||
+    value["type"] !== "command" ||
+    !isNonEmptyString(value["command"]) ||
+    (value["timeout"] !== undefined &&
+      (typeof value["timeout"] !== "number" ||
+        !Number.isFinite(value["timeout"]) ||
+        value["timeout"] <= 0))
+  ) {
+    throw new BackgroundPolicyViolationError(
+      "hook_config_invalid",
+      `${event}[${groupIndex}].hooks[${handlerIndex}] 无法验证。`,
+    );
+  }
+  return {
+    type: "command",
+    command: value["command"],
+    ...(typeof value["timeout"] === "number" ? { timeout: value["timeout"] } : {}),
+  };
+}
+
+interface StrictHookResult {
+  decision: "allow" | "deny";
+  reason?: string;
+  modifiedInput?: unknown;
+}
+
+export class StrictBackgroundHookRunner {
+  private readonly plans = new Map<HookHandler, SandboxSpawnPlan>();
+
+  constructor(
+    private readonly workDir: string,
+    private readonly config: HooksConfig,
+  ) {
+    for (const groups of Object.values(config)) {
+      for (const group of groups ?? []) {
+        for (const handler of group.hooks) {
+          this.plans.set(
+            handler,
+            buildSandboxSpawnPlan({
+              command: handler.command,
+              shell: "/bin/sh",
+              shellArgs: ["-lc", handler.command],
+              cwd: workDir,
+              writableRoots: [workDir],
+              config: { network: "deny" },
+            }),
+          );
+        }
+      }
+    }
+  }
+
+  async runPreToolUse(
+    toolName: string,
+    toolInput: unknown,
+    sessionId: string,
+  ): Promise<StrictHookResult> {
+    let modifiedInput: unknown;
+    for (const group of this.config.PreToolUse ?? []) {
+      if (!matcherMatches(group, toolName)) continue;
+      for (const handler of group.hooks) {
+        const result = await this.execute(handler, {
+          session_id: sessionId,
+          cwd: this.workDir,
+          hook_event_name: "PreToolUse",
+          tool_name: toolName,
+          tool_input: modifiedInput ?? toolInput,
+        });
+        if (result.decision === "deny") return result;
+        if (modifiedInput === undefined && result.modifiedInput !== undefined) {
+          modifiedInput = result.modifiedInput;
+        }
+      }
+    }
+    return {
+      decision: "allow",
+      ...(modifiedInput !== undefined ? { modifiedInput } : {}),
+    };
+  }
+
+  private execute(handler: HookHandler, input: HookInput): Promise<StrictHookResult> {
+    const plan = this.plans.get(handler);
+    if (!plan) {
+      return Promise.resolve({
+        decision: "deny",
+        reason: "Hook 执行计划缺失，已按 fail-closed 阻断。",
+      });
+    }
+    return new Promise((resolve) => {
+      let child: ChildProcess;
+      try {
+        child = spawn(plan.command, plan.args, {
+          cwd: this.workDir,
+          windowsHide: true,
+          stdio: ["pipe", "pipe", "pipe"],
+        });
+      } catch (error) {
+        resolve({ decision: "deny", reason: `Hook 无法启动: ${errorMessage(error)}` });
+        return;
+      }
+      let stdout = "";
+      let stderr = "";
+      let outputBytes = 0;
+      let settled = false;
+      const finish = (result: StrictHookResult) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(result);
+      };
+      const fail = (reason: string) => {
+        killChild(child);
+        finish({ decision: "deny", reason });
+      };
+      const timer = setTimeout(
+        () => fail("Hook 超时，已按 fail-closed 阻断。"),
+        handler.timeout ?? DEFAULT_HOOK_TIMEOUT_MS,
+      );
+      const capture = (target: "stdout" | "stderr", chunk: Buffer) => {
+        if (settled) return;
+        outputBytes += chunk.byteLength;
+        if (outputBytes > MAX_HOOK_OUTPUT_BYTES) {
+          fail("Hook 输出超过限制，已按 fail-closed 阻断。");
+          return;
+        }
+        if (target === "stdout") stdout += chunk.toString("utf8");
+        else stderr += chunk.toString("utf8");
+      };
+      child.stdout?.on("data", (chunk: Buffer) => capture("stdout", chunk));
+      child.stderr?.on("data", (chunk: Buffer) => capture("stderr", chunk));
+      child.once("error", (error) => fail(`Hook 执行失败: ${errorMessage(error)}`));
+      child.once("close", (code) => finish(interpretStrictHookExit(code, stdout, stderr)));
+      child.stdin?.once("error", (error) => fail(`Hook stdin 失败: ${errorMessage(error)}`));
+      try {
+        child.stdin?.end(JSON.stringify(input));
+      } catch (error) {
+        fail(`Hook 输入失败: ${errorMessage(error)}`);
+      }
+    });
+  }
+}
+
+function interpretStrictHookExit(
+  code: number | null,
+  stdout: string,
+  stderr: string,
+): StrictHookResult {
+  if (code === 2) {
+    return { decision: "deny", reason: stderr.trim() || "PreToolUse Hook 阻断(exit 2)" };
+  }
+  if (code !== 0) {
+    return {
+      decision: "deny",
+      reason: `Hook 异常退出(${code === null ? "signal" : code})，已按 fail-closed 阻断。`,
+    };
+  }
+  const trimmed = stdout.trim();
+  if (!trimmed) return { decision: "allow" };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed) as unknown;
+  } catch {
+    return { decision: "deny", reason: "Hook stdout 不是合法 JSON，已按 fail-closed 阻断。" };
+  }
+  if (!isRecord(parsed)) {
+    return { decision: "deny", reason: "Hook stdout 不是对象，已按 fail-closed 阻断。" };
+  }
+  if (parsed["permissionDecision"] === "deny" || parsed["decision"] === "block") {
+    return {
+      decision: "deny",
+      reason:
+        stringValue(parsed["permissionDecisionReason"]) ??
+        stringValue(parsed["reason"]) ??
+        "PreToolUse Hook 阻断",
+    };
+  }
+  return {
+    decision: "allow",
+    ...(Object.hasOwn(parsed, "modifiedInput") ? { modifiedInput: parsed["modifiedInput"] } : {}),
+  };
+}
+
+function hasPreToolHooks(config: HooksConfig): boolean {
+  return (config.PreToolUse?.length ?? 0) > 0;
+}
+
+function parseToolInput(argumentsJson: string): unknown {
+  try {
+    return JSON.parse(argumentsJson) as unknown;
+  } catch {
+    return {};
+  }
+}
+
+function jsonStringField(argumentsJson: string, field: string): string | undefined {
+  const input = parseToolInput(argumentsJson);
+  return isRecord(input) && typeof input[field] === "string" ? input[field] : undefined;
+}
+
+function normalizeHostname(value: string): string {
+  return value
+    .replace(/^\[|\]$/g, "")
+    .replace(/\.$/, "")
+    .toLowerCase();
+}
+
+function isValidHostname(value: unknown): value is string {
+  if (!isNonEmptyString(value)) return false;
+  const normalized = normalizeHostname(value);
+  return (
+    normalized === value.toLowerCase() &&
+    normalized.length <= 253 &&
+    !normalized.includes("://") &&
+    /^[a-z0-9.:_-]+$/i.test(normalized)
+  );
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isErrnoCode(error: unknown, code: string): boolean {
+  return isRecord(error) && error["code"] === code;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function killChild(child: ChildProcess): void {
+  if (child.killed) return;
+  try {
+    child.kill("SIGKILL");
+  } catch {
+    // The child already exited; the close event will settle the promise.
+  }
+}
