@@ -178,15 +178,15 @@ describe("TuiReporter", () => {
     expect(assistants[1]).toMatchObject({ content: "最终结果" });
   });
 
-  it("并发同名工具:onToolResult 更新最后一个 running 的", () => {
+  it("并发同名工具:无 providerCallId 时按 FIFO 更新", () => {
     const { reporter, last } = harness();
     reporter.onToolCall("read_file", '{"path":"a"}');
     reporter.onToolCall("read_file", '{"path":"b"}');
     reporter.onToolResult("read_file", "内容a", false);
     const entries = last()!;
-    // 第一个仍 running,第二个 success
-    expect(entries[0]).toMatchObject({ status: "running" });
-    expect(entries[1]).toMatchObject({ status: "success" });
+    // 无 providerCallId 的旧调用按启动顺序降级配对。
+    expect(entries[0]).toMatchObject({ status: "success" });
+    expect(entries[1]).toMatchObject({ status: "running" });
   });
 
   it("onUpdate 每次回调传入新数组引用(触发 ink 重渲染)", () => {

@@ -72,7 +72,7 @@ describe("transcript layout", () => {
     expect(layout.totalRows).toBe(layout.contentRows + 7);
   });
 
-  it("uses the same truncated args and five-line result rows as the real ToolCard", () => {
+  it("uses the same truncated args and complete summary rows as the real ToolCard", () => {
     const entry: Extract<TuiEntry, { kind: "tool" }> = {
       kind: "tool",
       name: "read_file",
@@ -95,8 +95,8 @@ describe("transcript layout", () => {
       { columns: 18 },
     );
 
-    expect(output.replace(/\s+/gu, " ")).toContain("已截断 3 行");
-    expect(output).not.toContain("result-5");
+    expect(output).toContain("result-7");
+    expect(output).not.toContain("已截断");
     expect(expanded.items[0]?.rows).toBe(output.split("\n").length);
   });
 

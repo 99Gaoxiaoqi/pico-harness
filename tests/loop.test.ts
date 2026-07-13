@@ -14,7 +14,7 @@ import type { Reporter } from "../src/engine/reporter.js";
 import { LLMStatusError } from "../src/provider/errors.js";
 import type { LLMProvider } from "../src/provider/interface.js";
 import type { Message, ToolCall, ToolDefinition, ToolResult } from "../src/schema/message.js";
-import type { BaseTool, Registry } from "../src/tools/registry.js";
+import type { BaseTool, Registry, ToolExecutionContext } from "../src/tools/registry.js";
 import { ToolAccesses } from "../src/tools/tool-access.js";
 import { resolve } from "node:path";
 
@@ -173,11 +173,15 @@ describe("AgentEngine Main Loop", () => {
   it("中止本轮工具批次时拒绝排队工具", async () => {
     let releaseFirst!: () => void;
     let firstStarted!: () => void;
+    let firstObservedAbort!: () => void;
     const firstStart = new Promise<void>((resolve) => {
       firstStarted = resolve;
     });
     const firstRelease = new Promise<void>((resolve) => {
       releaseFirst = resolve;
+    });
+    const firstAbort = new Promise<void>((resolve) => {
+      firstObservedAbort = resolve;
     });
     const provider = new ScriptedProvider([
       {
@@ -191,10 +195,14 @@ describe("AgentEngine Main Loop", () => {
       { role: "assistant", content: "done" },
     ]);
     const registry = new (class extends MockRegistry {
-      override async execute(call: ToolCall): Promise<ToolResult> {
+      override async execute(call: ToolCall, context?: ToolExecutionContext): Promise<ToolResult> {
         this.executed.push(call);
         if (call.id === "c1") {
           firstStarted();
+          const signal = context?.signal;
+          if (!signal) throw new Error("测试工具未收到 AbortSignal");
+          if (signal.aborted) firstObservedAbort();
+          else signal.addEventListener("abort", firstObservedAbort, { once: true });
           await firstRelease;
         }
         return { toolCallId: call.id, output: `out-${call.id}`, isError: false };
@@ -207,25 +215,26 @@ describe("AgentEngine Main Loop", () => {
 
     await firstStart;
     controller.abort(reason);
-    const outcome = await Promise.race([
-      run.catch((error: unknown) => error),
-      new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 50)),
-    ]);
+    await firstAbort;
+    // settleOnAbort 会等底层物理执行收口，收口后 run 才拒绝。
     releaseFirst();
-    await run.catch(() => undefined);
+    await expect(run).rejects.toBe(reason);
 
-    expect(outcome).toMatchObject({ name: "AbortError" });
     expect(registry.executed.map((call) => call.id)).toEqual(["c1"]);
   });
 
   it("工具批次中止后同一 Session 可继续且 tool calls/results 保持配对", async () => {
     let releaseTool!: () => void;
     let toolStarted!: () => void;
+    let toolObservedAbort!: () => void;
     const started = new Promise<void>((resolve) => {
       toolStarted = resolve;
     });
     const release = new Promise<void>((resolve) => {
       releaseTool = resolve;
+    });
+    const aborted = new Promise<void>((resolve) => {
+      toolObservedAbort = resolve;
     });
     const contexts: Message[][] = [];
     let providerCalls = 0;
@@ -247,10 +256,14 @@ describe("AgentEngine Main Loop", () => {
       },
     };
     const registry = new (class extends MockRegistry {
-      override async execute(call: ToolCall): Promise<ToolResult> {
+      override async execute(call: ToolCall, context?: ToolExecutionContext): Promise<ToolResult> {
         this.executed.push(call);
         if (call.id === "abort-c1") {
           toolStarted();
+          const signal = context?.signal;
+          if (!signal) throw new Error("测试工具未收到 AbortSignal");
+          if (signal.aborted) toolObservedAbort();
+          else signal.addEventListener("abort", toolObservedAbort, { once: true });
           await release;
         }
         return { toolCallId: call.id, output: `out-${call.id}`, isError: false };
@@ -263,13 +276,16 @@ describe("AgentEngine Main Loop", () => {
 
     await started;
     controller.abort(new DOMException("interrupted", "AbortError"));
-    await expect(firstRun).rejects.toMatchObject({ name: "AbortError" });
+    await aborted;
+    // 先模拟可中止工具的物理执行收口，再等待本轮 run 拒绝。
     releaseTool();
+    await expect(firstRun).rejects.toMatchObject({ name: "AbortError" });
 
     session.append({ role: "user", content: "continue after abort" });
     const secondRun = await engine.run(session);
 
     expect(secondRun.at(-1)?.content).toBe("continued safely");
+    expect(registry.executed.map((call) => call.id)).toEqual(["abort-c1"]);
     const secondContext = contexts[1] ?? [];
     const toolCallIds = secondContext.flatMap(
       (message) => message.toolCalls?.map((call) => call.id) ?? [],
