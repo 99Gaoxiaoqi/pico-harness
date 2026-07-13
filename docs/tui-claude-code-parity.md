@@ -41,13 +41,13 @@ PICO_TRACE=1 pico
 
 Pico 的 CLI session 以当前项目目录为边界：
 
-| 模式        | 启动方式               | 语义                                               |
-| ----------- | ---------------------- | -------------------------------------------------- |
-| new         | `pico`                 | 在当前项目启动 TUI，并创建或复用当前 TUI session。 |
-| browse      | `/sessions`            | 在 TUI 内查看当前项目可恢复的 session。            |
-| resume hint | `/resume <session-id>` | 输出恢复提示；当前运行中的 engine 不做热切换。     |
+| 模式   | 启动方式               | 语义                                               |
+| ------ | ---------------------- | -------------------------------------------------- |
+| new    | `pico`                 | 在当前项目启动 TUI，并创建或复用当前 TUI session。 |
+| browse | `/sessions`            | 在 TUI 内查看当前项目可恢复的 session。            |
+| resume | `/resume <session-id>` | 在当前 TUI 内热切换到已保存的 session。            |
 
-交互内可以先用 `/sessions` 查看当前项目可恢复的 session，再用 `/resume <session-id>` 获取提示。当前运行中的 engine 不做热切换。
+交互内可以先用 `/sessions` 查看当前项目可恢复的 session，再用 `/resume <session-id>` 直接热切换；也可以在启动 Pico 时用 `--session <session-id>` 或 `--continue` 恢复。
 
 ## Slash Commands
 

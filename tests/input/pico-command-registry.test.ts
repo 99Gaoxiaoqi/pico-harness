@@ -764,9 +764,14 @@ describe("Pico command registry", () => {
     );
   });
 
-  it("/resume gives a restart hint instead of hot-switching the running engine", async () => {
+  it("/resume requests a hot switch to an existing session", async () => {
+    const workDir = mkdtempSync(join(tmpdir(), "pico-command-resume-"));
+    cleanup.push(() => rmSync(workDir, { recursive: true, force: true }));
+    writeSessionLog(workDir, "cli-known", "2026-07-09T03:00:00.000Z", [
+      { type: "message", seq: 0, message: { role: "user", content: "resume me" } },
+    ]);
     const registry = await createPicoCommandRegistry({
-      workDir: process.cwd(),
+      workDir,
       provider: "openai",
       model: "glm-5.2",
       sessionId: "cli-active",
@@ -777,10 +782,9 @@ describe("Pico command registry", () => {
     expect(result.type).toBe("local-command");
     if (result.type !== "local-command") return;
     expect(result.command).toBe("resume");
-    expect(result.result.message).toContain("cli-known");
-    expect(result.result.message).toContain("--session cli-known");
-    expect(result.result.message).toContain("--continue");
-    expect(result.result.message).toContain("当前会话不会热切换");
+    expect(result.result.action).toBe("resume");
+    expect(result.result.message).toBe("Switching to session: cli-known");
+    expect(result.result.data).toEqual({ sessionId: "cli-known", mode: "resume" });
   });
 
   it("/resume without args points to current session startup flags", async () => {
@@ -849,10 +853,13 @@ describe("Pico command registry", () => {
     expect(mcpHelp.type).toBe("local-command");
     if (mcpHelp.type !== "local-command") return;
     expect(mcpHelp.result.message).toContain("Command: /mcp");
+    expect(mcpHelp.result.message).toContain(
+      "Description: Inspect and control MCP server connections",
+    );
     expect(commandSuggestions(registry, "mc")).toContainEqual(
       expect.objectContaining({
         value: "mcp",
-        description: "Show MCP server connection status",
+        description: "Inspect and control MCP server connections",
       }),
     );
   });
