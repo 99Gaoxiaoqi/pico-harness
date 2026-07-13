@@ -56,7 +56,7 @@ describe("storage foundation integration", () => {
       updatedAt: "2026-07-13T00:00:01.000Z",
       lastOpenedAt: "2026-07-13T00:00:01.000Z",
       journalSchemaVersion: 3,
-      head: { epoch: 0, seq: 1, eventId: "event-1" },
+      head: { logId: "log-a", epoch: 0, seq: 1, eventId: "event-1" },
       health: "healthy",
     } satisfies SessionCatalogEntry;
     await catalog.upsert(entry);

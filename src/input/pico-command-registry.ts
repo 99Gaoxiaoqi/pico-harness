@@ -62,6 +62,10 @@ import type { GoalManager } from "../engine/goal-manager.js";
 import type { ModelRuntimeCommandService } from "../provider/model-runtime-report.js";
 import type { TaskHostRuntime } from "../tasks/task-runtime.js";
 import type { McpConnectionManager } from "../mcp/manager.js";
+import {
+  getDefaultSessionCatalogProjector,
+  readSessionCatalogProjectionHealth,
+} from "../storage/session-catalog-projection.js";
 
 const OVERRIDDEN_BUILTIN_COMMANDS = new Set([
   "skills",
@@ -507,10 +511,10 @@ function createDoctorCommand(options: PicoCommandRegistryOptions): SlashCommand 
     usage: "/doctor",
     kind: "local",
     availability: "idle",
-    execute: (): LocalCommandResult => ({
+    execute: async (): Promise<LocalCommandResult> => ({
       type: "local",
       action: "message",
-      message: formatDoctorReport(options),
+      message: await formatDoctorReport(options),
     }),
   };
 }
@@ -1392,13 +1396,18 @@ function initializeProjectEntrypoints(workDir: string): string {
   return messages.join("\n");
 }
 
-function formatDoctorReport(options: PicoCommandRegistryOptions): string {
+async function formatDoctorReport(options: PicoCommandRegistryOptions): Promise<string> {
   const envPath = join(options.workDir, ".env");
   const apiKeys = loadApiKeys();
   const nodeMajor = Number(process.versions.node.split(".")[0] ?? "0");
   const nodeOk = nodeMajor >= 22;
   const cwdOk = existsSync(options.workDir);
   const envModel = process.env.LLM_MODEL;
+  const catalogHealth =
+    process.env.PICO_SESSION_CATALOG === "0"
+      ? (options.session?.sessionCatalogHealth ??
+        (await readSessionCatalogProjectionHealth(options.workDir)))
+      : (await getDefaultSessionCatalogProjector().syncWorkspace(options.workDir)).health;
 
   return [
     `CWD: ${options.workDir} (${cwdOk ? "ok" : "missing"})`,
@@ -1408,6 +1417,11 @@ function formatDoctorReport(options: PicoCommandRegistryOptions): string {
     `LLM_BASE_URL: ${process.env.LLM_BASE_URL ? "set" : "missing"}`,
     `LLM_API_KEY[S]: ${apiKeys.length > 0 ? `${apiKeys.length} configured` : "missing"}`,
     `Node: ${process.version} (${nodeOk ? "ok" : "requires >=22.0.0"})`,
+    `Session catalog: ${catalogHealth.state}`,
+    ...(catalogHealth.diagnostic ? [`Session catalog reason: ${catalogHealth.diagnostic}`] : []),
+    ...(catalogHealth.state !== "healthy"
+      ? [`Session catalog recommendation: ${catalogHealth.recommendation}`]
+      : []),
     ...formatMemoryBackend(options.session, true),
   ].join("\n");
 }

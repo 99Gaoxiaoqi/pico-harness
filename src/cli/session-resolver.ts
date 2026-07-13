@@ -5,6 +5,11 @@ import { SessionStore } from "../engine/session-store.js";
 import { replaySessionRecords } from "../engine/session-reducer.js";
 import { isMessageHiddenFromTranscript } from "../schema/message.js";
 import { rememberResolvedCliSession } from "../input/session-settings.js";
+import type { SessionCatalog } from "../storage/session-catalog.js";
+import {
+  getDefaultSessionCatalogProjector,
+  SessionCatalogProjector,
+} from "../storage/session-catalog-projection.js";
 
 export type CliSessionMode = "new" | "continue" | "resume" | "fork";
 
@@ -25,6 +30,16 @@ export interface CliSessionSummary {
   lastMessage?: string;
   /** Source session ID persisted with a forked conversation. */
   forkFrom?: string;
+  /** Durable journal identity; sessionId remains the human-facing compatibility key. */
+  logId?: string;
+  parentLogId?: string;
+  forkEventId?: string;
+}
+
+export interface ListCliSessionSummariesOptions {
+  /** Integration/embedded override; production defaults to ~/.pico/session-catalog. */
+  catalog?: SessionCatalog;
+  projector?: SessionCatalogProjector;
 }
 
 export interface ResolveCliSessionOptions {
@@ -93,7 +108,19 @@ export function createCliSessionId(): string {
   return `cli-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`;
 }
 
-export async function listCliSessionSummaries(workDir: string): Promise<CliSessionSummary[]> {
+export async function listCliSessionSummaries(
+  workDir: string,
+  options: ListCliSessionSummariesOptions = {},
+): Promise<CliSessionSummary[]> {
+  const projector =
+    options.projector ??
+    (options.catalog
+      ? new SessionCatalogProjector(options.catalog)
+      : process.env.PICO_SESSION_CATALOG === "0"
+        ? undefined
+        : getDefaultSessionCatalogProjector());
+  const catalogEntries = projector ? (await projector.syncWorkspace(workDir)).entries : [];
+  const catalogBySession = new Map(catalogEntries.map((entry) => [entry.sessionId, entry]));
   const files = await listSessionFiles(workDir);
   const summaries: CliSessionSummary[] = [];
   for (const file of files) {
@@ -101,6 +128,7 @@ export async function listCliSessionSummaries(workDir: string): Promise<CliSessi
     const replay = replaySessionRecords(records);
     const messages = replay.history;
     const metadata = recoverSessionMetadata(replay.runtime.settings);
+    const catalog = catalogBySession.get(file.sessionId);
     const visibleUserMessages = messages.filter(
       (message) =>
         message.role === "user" &&
@@ -123,7 +151,12 @@ export async function listCliSessionSummaries(workDir: string): Promise<CliSessi
           : {}),
       ...(firstMessage ? { firstMessage } : {}),
       ...(lastMessage ? { lastMessage } : {}),
-      ...(metadata.forkFrom !== undefined ? { forkFrom: metadata.forkFrom } : {}),
+      ...((metadata.forkFrom ?? catalog?.lineage.parentSessionId)
+        ? { forkFrom: metadata.forkFrom ?? catalog?.lineage.parentSessionId }
+        : {}),
+      ...(catalog ? { logId: catalog.logId } : {}),
+      ...(catalog?.lineage.parentLogId ? { parentLogId: catalog.lineage.parentLogId } : {}),
+      ...(catalog?.lineage.forkEventId ? { forkEventId: catalog.lineage.forkEventId } : {}),
     });
   }
 

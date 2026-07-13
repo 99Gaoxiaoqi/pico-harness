@@ -1047,9 +1047,7 @@ async function seedForkedSession(
 
   const source = await globalSessionManager.getOrCreate(sourceSessionId, workDir);
   const history = source.getHistory();
-  if (history.length === 0) return;
-
-  await target.commitMessages(...history);
+  await target.seedForkFrom(source, history);
 }
 
 function defaultModel(kind: ProviderKind): string {

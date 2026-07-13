@@ -123,7 +123,11 @@ export type SessionEvent =
     })
   | (SessionEventBase & {
       readonly kind: "session.seeded";
-      readonly data: { readonly messages: readonly Message[] };
+      readonly data: {
+        readonly messages: readonly Message[];
+        /** fork/spawn 来源的 durable cursor，用于重建 Catalog lineage。 */
+        readonly lineage?: SessionLineage;
+      };
     });
 
 /** 持久化的事件记录:每行一个,带 type 判别联合。 */
@@ -207,7 +211,7 @@ interface DurableWriter {
   state: "open" | "write_uncertain" | "closed";
 }
 
-interface ParsedJournal {
+export interface SessionJournalSnapshot {
   readonly records: Array<LegacySessionRecord | SessionEvent>;
   readonly metadata?: SessionMetadata | SessionMetaV3;
 }
@@ -361,6 +365,21 @@ export class SessionStore {
     );
   }
 
+  async commitSeed(
+    messages: readonly Message[],
+    lineage: SessionLineage,
+    options?: CommitEventOptions,
+  ): Promise<CommitReceipt> {
+    return this.commitEvent(
+      "session.seeded",
+      {
+        messages: structuredClone(messages),
+        lineage: structuredClone(lineage),
+      },
+      options,
+    );
+  }
+
   /** v0-v2 兼容 writer；生产 Session 不再调用这些方法。 */
   async appendMessage(seq: number, message: Message, volatile?: boolean): Promise<void> {
     const record: SessionRecord = {
@@ -422,6 +441,18 @@ export class SessionStore {
   /** 生产恢复使用：拒绝中间损坏、seq 缺口/重复和 eventId 冲突。 */
   async loadStrict(): Promise<SessionRecord[]> {
     return (await this.readJournal(true)).records;
+  }
+
+  /**
+   * 供 Catalog / Doctor 等可重建投影使用的日志快照。
+   * 它只读 JSONL 真源，不获取 writer lease，也不会创建新日志。
+   */
+  async inspectJournal(options: { strict?: boolean } = {}): Promise<SessionJournalSnapshot> {
+    const snapshot = await this.readJournal(options.strict === true);
+    return {
+      records: structuredClone(snapshot.records),
+      ...(snapshot.metadata ? { metadata: structuredClone(snapshot.metadata) } : {}),
+    };
   }
 
   async loadMetadata(): Promise<SessionMetadata | undefined> {
@@ -648,7 +679,7 @@ export class SessionStore {
     };
   }
 
-  private async readJournal(strict: boolean): Promise<ParsedJournal> {
+  private async readJournal(strict: boolean): Promise<SessionJournalSnapshot> {
     let content: string;
     try {
       content = await readFile(this.filePath, "utf8");
