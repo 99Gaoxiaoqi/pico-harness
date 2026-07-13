@@ -3,7 +3,7 @@
 // 对标 kimi-code packages/agent-core/src/agent/records/persistence.ts
 // (FileSystemAgentRecordPersistence),但极简化:
 //   - 无 write-behind 批处理(pico 单进程,append 直接落盘够用)
-//   - 无 fsync/syncDir(OS page cache flush 足够;末行撕裂容忍兜底)
+//   - 生产提交使用 O_APPEND FileHandle + fdatasync，末行撕裂仅作崩溃兜底
 //   - 无 blob 内容寻址分离(工具产物由 artifact-store.ts 外部化,不进 session)
 //
 // 设计要点(对标 kimi-code wire.jsonl):
@@ -13,9 +13,13 @@
 //   3. truncate 折叠:重放遇到 truncate record,丢弃 fromIndex 之前的 message。
 //   4. seq 单调递增:保证重放顺序,并防重复(幂等)。
 
-import { appendFile, chmod, readFile, stat } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { constants } from "node:fs";
+import { chmod, mkdir, open, readFile, stat, type FileHandle } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
 import type { Message } from "../schema/message.js";
 import { logger } from "../observability/logger.js";
+import { OwnerLease } from "../storage/owner-lease.js";
 import type { SessionIdentity } from "./session-identity.js";
 import {
   normalizeSessionRuntimeStatePatch,
@@ -56,6 +60,7 @@ export interface SessionCursor {
   readonly logId: string;
   readonly seq: number;
   readonly epoch: number;
+  readonly eventId: string;
 }
 
 export interface SessionMetaV3 {
@@ -172,31 +177,79 @@ export type SessionRecord =
  */
 export type SessionRecordListener = (record: SessionRecord, seq: number, epoch: number) => void;
 
+export class SessionJournalIntegrityError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SessionJournalIntegrityError";
+  }
+}
+
+export class SessionWriteUncertainError extends Error {
+  constructor(
+    message: string,
+    readonly uncertainCause?: unknown,
+  ) {
+    super(message);
+    this.name = "SessionWriteUncertainError";
+  }
+}
+
+interface DurableWriter {
+  readonly file: FileHandle;
+  readonly lease: OwnerLease;
+  readonly logId: string;
+  readonly eventIds: Set<string>;
+  refs: number;
+  headSeq: number;
+  headEventId: string;
+  epoch: number;
+  tail: Promise<void>;
+  state: "open" | "write_uncertain" | "closed";
+}
+
+interface ParsedJournal {
+  readonly records: Array<LegacySessionRecord | SessionEvent>;
+  readonly metadata?: SessionMetadata | SessionMetaV3;
+}
+
+export interface CommitEventOptions {
+  readonly eventId?: string;
+  readonly expectedSeq?: number;
+}
+
+export interface SessionStoreDurabilityHooks {
+  /** 仅用于故障注入集成测试；位于 write 之后、fdatasync 之前。 */
+  readonly beforeDatasync?: () => void | Promise<void>;
+}
+
 /**
  * 单个 Session 的 JSONL 事件日志读写器。
  * 文件路径由调用方决定(通常是 workDir/.claw/sessions/<id>.jsonl)。
  */
 export class SessionStore {
+  private static readonly writers = new Map<string, Promise<DurableWriter>>();
+
   /**
    * epoch(4.3 cursor 多端同步):fork/rewind 时 bumpEpoch() 递增。
    * 同 sessionId 在 fork/rewind 后世代不同,旧 cursor 的 client 据此感知
    * 历史已被改写,需重新拉全量而非增量。纯私有字段,不影响 Session 类语义。
    */
   private epoch = 0;
+  private logId: string;
   /** record 落盘监听器集合(WS 层订阅) */
   private readonly listeners = new Set<SessionRecordListener>();
-  /**
-   * 首次写入标志(5.8a schema 版本号)。
-   * 第一次 appendLine 时先写 meta 头行,之后置 true。
-   * 仅内存标志,不感知外部对文件的改动(每次新 SessionStore 实例默认未初始化)。
-   */
-  private initialized = false;
-  private initPromise?: Promise<void>;
+  /** 实例按需引用进程级 durable writer pool。 */
+  private writer?: DurableWriter;
+  private writerPromise?: Promise<DurableWriter>;
+  private released = false;
 
   constructor(
     private readonly filePath: string,
     private readonly metadata?: SessionMetadataInput,
-  ) {}
+    private readonly durabilityHooks?: SessionStoreDurabilityHooks,
+  ) {
+    this.logId = metadata?.sessionId ?? basename(filePath, ".jsonl");
+  }
 
   /** 递增 epoch(fork/rewind 时调用)。纯游标概念,不改写已落盘的 JSONL。 */
   bumpEpoch(): void {
@@ -206,6 +259,26 @@ export class SessionStore {
   /** 读取当前 epoch(WS 层连接握手时回传给 client)。 */
   getEpoch(): number {
     return this.epoch;
+  }
+
+  getLogId(): string {
+    return this.logId;
+  }
+
+  getHeadCursor(): SessionCursor | undefined {
+    const writer = this.writer;
+    if (!writer || writer.headSeq < 0) return undefined;
+    return {
+      logId: writer.logId,
+      seq: writer.headSeq,
+      epoch: writer.epoch,
+      eventId: writer.headEventId,
+    };
+  }
+
+  get state(): "open" | "write_uncertain" | "closed" {
+    if (this.released) return "closed";
+    return this.writer?.state ?? "open";
   }
 
   /** 订阅 record 落盘事件。返回取消订阅函数。 */
@@ -228,7 +301,67 @@ export class SessionStore {
     }
   }
 
-  /** 追加一条 message 事件。失败由调用方 catch(fire-and-forget)。 */
+  /**
+   * 取得每日志唯一 writer lease。同进程的 SessionStore 共享一个
+   * O_APPEND FileHandle，跨进程由 OwnerLease 仲裁。
+   */
+  async openWriter(): Promise<void> {
+    await this.acquireWriter();
+  }
+
+  /** v3 生产接口：JSONL fdatasync 完成后才返回 durable receipt。 */
+  async commitMessage(
+    message: Message,
+    options?: CommitEventOptions & { readonly volatile?: boolean },
+  ): Promise<CommitReceipt> {
+    return this.commitEvent(
+      "message.appended",
+      {
+        message: structuredClone(message),
+        ...(options?.volatile === true ? { volatile: true } : {}),
+      },
+      options,
+    );
+  }
+
+  async commitTruncate(fromIndex: number, options?: CommitEventOptions): Promise<CommitReceipt> {
+    return this.commitEvent("history.truncated", { fromIndex }, options);
+  }
+
+  async commitRewind(messageIndex: number, options?: CommitEventOptions): Promise<CommitReceipt> {
+    return this.commitEvent("history.rewound", { messageIndex }, options);
+  }
+
+  async commitCompaction(
+    summaryMessage: Message,
+    retainedMessages: readonly Message[],
+    options?: CommitEventOptions,
+  ): Promise<CommitReceipt> {
+    return this.commitEvent(
+      "history.compacted",
+      {
+        summaryMessage: structuredClone(summaryMessage),
+        retainedMessages: structuredClone(retainedMessages),
+      },
+      options,
+    );
+  }
+
+  async commitRuntimeState(
+    patch: SessionRuntimeStatePatch,
+    options?: CommitEventOptions,
+  ): Promise<CommitReceipt> {
+    return this.commitEvent(
+      "runtime.checkpoint",
+      {
+        stateVersion: SESSION_RUNTIME_STATE_VERSION,
+        patch: structuredClone(patch),
+      },
+      options,
+    );
+  }
+
+  /** v0-v2 兼容 writer；生产 Session 不再调用这些方法。 */
   async appendMessage(seq: number, message: Message, volatile?: boolean): Promise<void> {
     const record: SessionRecord = {
       type: "message",
@@ -236,21 +369,18 @@ export class SessionStore {
       message,
       ...(volatile ? { volatile: true } : {}),
     };
-    await this.appendLine(JSON.stringify(record));
-    this.emit(record, seq);
+    await this.appendLegacyRecord(record);
   }
 
   /** 追加一条 truncate 事件(fromIndex 之前的 message 在重放时被丢弃)。 */
   async appendTruncate(seq: number, fromIndex: number): Promise<void> {
     const record: SessionRecord = { type: "truncate", seq, fromIndex };
-    await this.appendLine(JSON.stringify(record));
-    this.emit(record, seq);
+    await this.appendLegacyRecord(record);
   }
 
   async appendUndoEvent(seq: number, count: number): Promise<void> {
     const record: SessionRecord = { type: "undo", seq, count, at: new Date().toISOString() };
-    await this.appendLine(JSON.stringify(record));
-    this.emit(record, seq);
+    await this.appendLegacyRecord(record);
   }
 
   async appendRewindTo(seq: number, messageIndex: number): Promise<void> {
@@ -260,8 +390,7 @@ export class SessionStore {
       messageIndex,
       at: new Date().toISOString(),
     };
-    await this.appendLine(JSON.stringify(record));
-    this.emit(record, seq);
+    await this.appendLegacyRecord(record);
   }
 
   /** 追加一个会话运行态 section 快照，与消息共用同一 seq 序列。 */
@@ -273,8 +402,7 @@ export class SessionStore {
       stateVersion: SESSION_RUNTIME_STATE_VERSION,
       patch: structuredClone(patch),
     };
-    await this.appendLine(JSON.stringify(record));
-    this.emit(record, seq);
+    await this.appendLegacyRecord(record);
   }
 
   /**
@@ -288,52 +416,12 @@ export class SessionStore {
    * "写入顺序"与"逻辑顺序"。
    */
   async load(): Promise<SessionRecord[]> {
-    let content: string;
-    try {
-      content = await readFile(this.filePath, "utf8");
-    } catch {
-      return []; // 文件不存在(首次启动)视为空日志
-    }
+    return (await this.readJournal(false)).records;
+  }
 
-    const lines = content.split("\n");
-    // 末尾空行(文件以 \n 结尾的正常情况)先剔掉
-    if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
-
-    const records: SessionRecord[] = [];
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
-      if (!line) continue;
-      let parsed: SessionRecord;
-      try {
-        const candidate: unknown = JSON.parse(line);
-        if (isRuntimeStateCandidate(candidate)) {
-          const runtimeRecord = normalizeRuntimeStateRecord(candidate);
-          if (!runtimeRecord) {
-            logger.warn({ line: i + 1 }, `[session] 第 ${i + 1} 行 runtime_state 无效,已跳过`);
-            continue;
-          }
-          parsed = runtimeRecord;
-        } else {
-          parsed = candidate as SessionRecord;
-        }
-      } catch (error) {
-        if (i === lines.length - 1) {
-          // 末行撕裂:append 写一半的典型表现,容忍跳过
-          break;
-        }
-        // 中间行损坏:跳过该行继续解析(warn 不 throw),保住其余有效记录。
-        // 旧实现 throw 会让 recover 全量丢弃,第 50 行损坏 → 前 49 条有效记录丢失(M2)。
-        logger.warn({ line: i + 1 }, `[session] 第 ${i + 1} 行损坏,跳过: ${String(error)}`);
-        continue;
-      }
-      // meta 头行(5.8a schema 版本号):不参与重放,跳过(版本信息由 getSchemaVersion 另读)。
-      if (parsed.type === "meta") continue;
-      records.push(parsed);
-    }
-    // 关键:按 seq 排序,消除 fire-and-forget 落盘乱序的影响。
-    // meta 行已在上一步跳过,这里剩余元素都带 seq。
-    records.sort((a, b) => ("seq" in a ? a.seq : -1) - ("seq" in b ? b.seq : -1));
-    return records;
+  /** 生产恢复使用：拒绝中间损坏、seq 缺口/重复和 eventId 冲突。 */
+  async loadStrict(): Promise<SessionRecord[]> {
+    return (await this.readJournal(true)).records;
   }
 
   async loadMetadata(): Promise<SessionMetadata | undefined> {
@@ -358,6 +446,9 @@ export class SessionStore {
         continue;
       }
       if (parsed.type === "meta") {
+        if ("identity" in parsed) {
+          return { schemaVersion: parsed.schemaVersion, ...parsed.identity };
+        }
         const { type: _type, ...metadata } = parsed;
         return metadata;
       }
@@ -366,41 +457,294 @@ export class SessionStore {
     return undefined;
   }
 
-  private async appendLine(line: string): Promise<void> {
-    await this.ensureInitialized();
-    await appendFile(this.filePath, line + "\n", "utf8");
+  async close(): Promise<void> {
+    if (this.released) return;
+    this.released = true;
+    const writer = await this.writerPromise?.catch(() => undefined);
+    if (!writer) return;
+    await writer.tail.catch(() => undefined);
+    writer.refs--;
+    if (writer.refs > 0) return;
+    writer.state = "closed";
+    SessionStore.writers.delete(this.filePath);
+    await writer.file.close().catch(() => undefined);
+    await writer.lease.release().catch(() => undefined);
   }
 
-  private async ensureInitialized(): Promise<void> {
-    if (this.initialized) return;
-    this.initPromise ??= this.writeMetadataOnce().catch((error: unknown) => {
-      this.initPromise = undefined;
-      throw error;
+  private async commitEvent<K extends SessionEvent["kind"]>(
+    kind: K,
+    data: Extract<SessionEvent, { readonly kind: K }>["data"],
+    options?: CommitEventOptions,
+  ): Promise<CommitReceipt> {
+    const writer = await this.acquireWriter();
+    const seq = options?.expectedSeq ?? writer.headSeq + 1;
+    const eventId = options?.eventId ?? randomUUID();
+    const event = {
+      type: "event",
+      recordVersion: 1,
+      eventId,
+      seq,
+      epoch: this.epoch,
+      at: new Date().toISOString(),
+      kind,
+      data,
+    } as Extract<SessionEvent, { readonly kind: K }>;
+    await this.appendDurable(writer, event);
+    const committedAt = new Date().toISOString();
+    return {
+      eventId,
+      cursor: { logId: writer.logId, seq, epoch: event.epoch, eventId },
+      committedAt,
+      durable: true,
+    };
+  }
+
+  private async appendLegacyRecord(record: LegacySessionRecord): Promise<void> {
+    const writer = await this.acquireWriter();
+    // v0-v2 公开接口历史上允许首条 seq 从 1 或其他基线开始。
+    if (writer.headSeq < 0 && writer.eventIds.size === 0) writer.headSeq = record.seq - 1;
+    writer.epoch = Math.max(writer.epoch, this.epoch);
+    await this.appendDurable(writer, record);
+  }
+
+  private async appendDurable(writer: DurableWriter, record: LegacySessionRecord | SessionEvent) {
+    let resolveOperation!: () => void;
+    let rejectOperation!: (error: unknown) => void;
+    const operation = new Promise<void>((resolve, reject) => {
+      resolveOperation = resolve;
+      rejectOperation = reject;
     });
-    await this.initPromise;
-  }
-
-  private async writeMetadataOnce(): Promise<void> {
-    try {
-      const existing = await stat(this.filePath);
-      if (existing.size > 0) {
-        await chmod(this.filePath, 0o600);
-        this.initialized = true;
-        return;
+    const run = writer.tail.then(async () => {
+      if (writer.state !== "open") {
+        throw new SessionWriteUncertainError("Session journal is not writable");
       }
-    } catch (error) {
-      if (!isNotFoundError(error)) throw error;
-    }
-
-    const { schemaVersion: _ignored, ...identity } = this.metadata ?? {};
-    const meta = JSON.stringify({
-      type: "meta",
-      schemaVersion: CURRENT_SCHEMA_VERSION,
-      ...identity,
+      const expectedSeq = writer.headSeq + 1;
+      if (record.seq !== expectedSeq) {
+        throw new SessionJournalIntegrityError(
+          `Session seq conflict: received ${record.seq}, expected ${expectedSeq}`,
+        );
+      }
+      const eventId = recordEventId(record);
+      if (writer.eventIds.has(eventId)) {
+        throw new SessionJournalIntegrityError(`Duplicate session eventId: ${eventId}`);
+      }
+      if (record.type === "event" && record.epoch < writer.epoch) {
+        throw new SessionJournalIntegrityError(
+          `Session epoch regressed: received ${record.epoch}, current ${writer.epoch}`,
+        );
+      }
+      await writer.lease.assertOwnership();
+      await writer.file.write(`${JSON.stringify(record)}\n`);
+      await this.durabilityHooks?.beforeDatasync?.();
+      await writer.file.datasync();
+      writer.headSeq = record.seq;
+      writer.headEventId = eventId;
+      writer.eventIds.add(eventId);
+      writer.epoch = effectiveEpoch(record, writer.epoch);
+      this.epoch = writer.epoch;
+      this.emit(record, record.seq);
     });
-    await appendFile(this.filePath, meta + "\n", { encoding: "utf8", mode: 0o600 });
-    await chmod(this.filePath, 0o600);
-    this.initialized = true;
+    writer.tail = run.then(resolveOperation, (error: unknown) => {
+      writer.state = "write_uncertain";
+      rejectOperation(new SessionWriteUncertainError("Session durable append failed", error));
+    });
+    await operation;
+  }
+
+  private async acquireWriter(): Promise<DurableWriter> {
+    if (this.released) throw new SessionWriteUncertainError("Session store is closed");
+    if (this.writer) {
+      if (this.writer.state !== "open") {
+        throw new SessionWriteUncertainError("Session journal is write_uncertain");
+      }
+      return this.writer;
+    }
+    this.writerPromise ??= this.acquirePooledWriter();
+    const writer = await this.writerPromise;
+    this.writer = writer;
+    this.logId = writer.logId;
+    this.epoch = Math.max(this.epoch, writer.epoch);
+    return writer;
+  }
+
+  private async acquirePooledWriter(): Promise<DurableWriter> {
+    const pooled = SessionStore.writers.get(this.filePath);
+    if (pooled) {
+      const writer = await pooled;
+      writer.refs++;
+      return writer;
+    }
+    const opening = this.createWriter();
+    SessionStore.writers.set(this.filePath, opening);
+    try {
+      return await opening;
+    } catch (error) {
+      SessionStore.writers.delete(this.filePath);
+      throw error;
+    }
+  }
+
+  private async createWriter(): Promise<DurableWriter> {
+    await mkdir(dirname(this.filePath), { recursive: true, mode: 0o700 });
+    const lease = await OwnerLease.acquire({
+      leaseDirectory: join(dirname(this.filePath), ".leases", basename(this.filePath)),
+      ownerId: `session:${this.metadata?.sessionId ?? basename(this.filePath)}`,
+    });
+    let file: FileHandle | undefined;
+    try {
+      file = await open(
+        this.filePath,
+        constants.O_APPEND | constants.O_CREAT | constants.O_WRONLY,
+        0o600,
+      );
+      await chmod(this.filePath, 0o600);
+      const existing = await stat(this.filePath);
+      if (existing.size === 0) {
+        const metadata = this.createMetadata();
+        await file.write(`${JSON.stringify(metadata)}\n`);
+        await file.datasync();
+      }
+      const journal = await this.readJournal(true);
+      const head = journal.records.at(-1);
+      const eventIds = new Set(journal.records.map(recordEventId));
+      const epoch = journal.records.reduce((current, record) => effectiveEpoch(record, current), 0);
+      const meta = journal.metadata;
+      const logId = meta && "logId" in meta ? meta.logId : this.logId;
+      return {
+        file,
+        lease,
+        logId,
+        eventIds,
+        refs: 1,
+        headSeq: head?.seq ?? -1,
+        headEventId: head ? recordEventId(head) : "",
+        epoch,
+        tail: Promise.resolve(),
+        state: "open",
+      };
+    } catch (error) {
+      await file?.close().catch(() => undefined);
+      await lease.release().catch(() => undefined);
+      throw error;
+    }
+  }
+
+  private createMetadata(): Extract<SessionRecord, { readonly type: "meta" }> {
+    if (!this.metadata?.sessionId || this.metadata.schemaVersion !== undefined) {
+      const { schemaVersion: _ignored, ...identity } = this.metadata ?? {};
+      return { type: "meta", schemaVersion: CURRENT_SCHEMA_VERSION, ...identity };
+    }
+    const identity = this.metadata as SessionIdentity;
+    const logId = randomUUID();
+    this.logId = logId;
+    return {
+      type: "meta",
+      schemaVersion: 3,
+      logId,
+      sessionId: identity.sessionId,
+      createdAt: new Date().toISOString(),
+      identity,
+      lineage: { relation: "root", rootLogId: logId },
+    };
+  }
+
+  private async readJournal(strict: boolean): Promise<ParsedJournal> {
+    let content: string;
+    try {
+      content = await readFile(this.filePath, "utf8");
+    } catch (error) {
+      if (isNotFoundError(error)) return { records: [] };
+      throw error;
+    }
+    const lines = content.split("\n");
+    if (lines.at(-1) === "") lines.pop();
+    const records: Array<LegacySessionRecord | SessionEvent> = [];
+    let metadata: SessionMetadata | SessionMetaV3 | undefined;
+    for (let index = 0; index < lines.length; index++) {
+      const line = lines[index];
+      if (!line) continue;
+      let parsed: SessionRecord;
+      try {
+        const candidate: unknown = JSON.parse(line);
+        if (isRuntimeStateCandidate(candidate)) {
+          const runtimeRecord = normalizeRuntimeStateRecord(candidate);
+          if (!runtimeRecord) throw new Error("invalid runtime_state");
+          parsed = runtimeRecord;
+        } else {
+          parsed = candidate as SessionRecord;
+        }
+      } catch (error) {
+        if (index === lines.length - 1) break;
+        if (strict) {
+          throw new SessionJournalIntegrityError(
+            `Session journal line ${index + 1} is corrupt: ${String(error)}`,
+          );
+        }
+        logger.warn({ line: index + 1 }, `[session] 第 ${index + 1} 行损坏,已跳过`);
+        continue;
+      }
+      if (parsed.type === "meta") {
+        metadata = parsed;
+        if ("logId" in parsed) this.logId = parsed.logId;
+        continue;
+      }
+      records.push(parsed as LegacySessionRecord | SessionEvent);
+    }
+    records.sort((left, right) => left.seq - right.seq);
+    if (strict) validateRecordSequence(records);
+    this.epoch = records.reduce((current, record) => effectiveEpoch(record, current), 0);
+    return { records, ...(metadata ? { metadata } : {}) };
+  }
+}
+
+function recordEventId(record: LegacySessionRecord | SessionEvent): string {
+  return record.type === "event" ? record.eventId : `legacy:${record.seq}:${record.type}`;
+}
+
+function effectiveEpoch(record: LegacySessionRecord | SessionEvent, current: number): number {
+  if (record.type === "event") return Math.max(current, record.epoch);
+  return record.type === "truncate" || record.type === "undo" || record.type === "rewind_to"
+    ? current + 1
+    : current;
+}
+
+function validateRecordSequence(records: readonly (LegacySessionRecord | SessionEvent)[]): void {
+  const eventIds = new Set<string>();
+  let expectedSeq = records[0]?.seq ?? 0;
+  let epoch = 0;
+  for (const record of records) {
+    if (!Number.isSafeInteger(record.seq) || record.seq < 0) {
+      throw new SessionJournalIntegrityError(`Invalid session seq: ${String(record.seq)}`);
+    }
+    if (record.seq !== expectedSeq) {
+      throw new SessionJournalIntegrityError(
+        `Session seq gap or conflict: received ${record.seq}, expected ${expectedSeq}`,
+      );
+    }
+    const eventId = recordEventId(record);
+    if (record.type === "event") {
+      if (
+        record.recordVersion !== 1 ||
+        typeof record.eventId !== "string" ||
+        record.eventId.length === 0 ||
+        !Number.isSafeInteger(record.epoch) ||
+        record.epoch < epoch ||
+        record.epoch > epoch + 1 ||
+        typeof record.at !== "string"
+      ) {
+        throw new SessionJournalIntegrityError(
+          `Invalid canonical session event at seq ${record.seq}`,
+        );
+      }
+      epoch = record.epoch;
+    } else {
+      epoch = effectiveEpoch(record, epoch);
+    }
+    if (eventIds.has(eventId)) {
+      throw new SessionJournalIntegrityError(`Duplicate session eventId: ${eventId}`);
+    }
+    eventIds.add(eventId);
+    expectedSeq++;
   }
 }
 

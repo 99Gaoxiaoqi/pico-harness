@@ -104,7 +104,7 @@ describe("Session + FTS5 断点续传", () => {
       toolResultMsg("文件不存在"),
       assistantMsg("我来创建 package.json"),
     );
-    await flush();
+    await s1.flushPersistence();
     expect(s1.length).toBe(5);
 
     // 模拟 Session 关闭(进程重启)
@@ -127,7 +127,7 @@ describe("Session + FTS5 断点续传", () => {
     const mgr = new SessionManager();
     const session = await mgr.getOrCreate("identity_001", workDir, ON);
     session.append(userMsg("hello identity"));
-    await flush();
+    await session.flushPersistence();
 
     const storePath = join(workDir, ".claw", "sessions", "identity_001.jsonl");
     const metadata = await new SessionStore(storePath).loadMetadata();
@@ -534,7 +534,7 @@ describe("并发 Session 测试", () => {
     });
 
     const sessions = await Promise.all(tasks);
-    await flush();
+    await Promise.all(sessions.map((session) => session.flushPersistence()));
 
     // 验证每个 Session 的数据独立
     for (let i = 0; i < 10; i++) {
@@ -551,7 +551,7 @@ describe("并发 Session 测试", () => {
     for (let i = 0; i < 100; i++) {
       s.append(userMsg(`message ${i}`));
     }
-    await flush();
+    await s.flushPersistence();
 
     // 并发执行 50 次检索（传入 limit=100）
     const searchTasks = Array.from({ length: 50 }, () => {
@@ -573,10 +573,10 @@ describe("并发 Session 测试", () => {
     const tasks = Array.from({ length: 20 }, async (_, i) => {
       const s = await mgr1.getOrCreate(`persist_${i}`, workDir, ON);
       s.append(userMsg(`persistent ${i}`));
+      await s.flushPersistence();
     });
 
     await Promise.all(tasks);
-    await flush();
 
     // 重启后验证所有 Session 都恢复了
     const mgr2 = new SessionManager();
@@ -683,13 +683,13 @@ describe("真实场景模拟", () => {
       session.append(userMsg(`request ${i}`));
       session.append(assistantMsg(`response ${i}`));
     }
-    await flush();
+    await session.flushPersistence();
 
     expect(session.length).toBe(60);
 
     // 应用压缩:前 40 条压缩为摘要
-    session.applyCompaction("摘要:前 20 轮讨论了各种功能实现", 40);
-    await flush();
+    await session.applyCompaction("摘要:前 20 轮讨论了各种功能实现", 40);
+    await session.flushPersistence();
 
     // WorkingMemory 压缩后只有 21 条(摘要 + 后 20 条)
     expect(session.length).toBe(21);
@@ -729,7 +729,7 @@ describe("真实场景模拟", () => {
     s1.append(userMsg("user A request"));
     s2.append(userMsg("user B request"));
     s3.append(userMsg("user C request"));
-    await flush();
+    await Promise.all([s1.flushPersistence(), s2.flushPersistence(), s3.flushPersistence()]);
 
     // 模拟断电(所有 Session 对象销毁)
 

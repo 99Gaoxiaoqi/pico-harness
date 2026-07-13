@@ -188,7 +188,7 @@ export class FullCompactor {
     // 应用压缩:用 REFERENCE-ONLY 前后标记包装摘要,替换 session.history 前 compactedCount 条。
     // 包装职责归 FullCompactor(表现层),Session.applyCompaction 只做纯存储。
     const wrappedSummary = `${SUMMARY_PREFIX}\n\n${summary}\n\n${SUMMARY_END_MARKER}`;
-    session.applyCompaction(wrappedSummary, compactedCount);
+    await session.applyCompaction(wrappedSummary, compactedCount);
     session.saveMemorySummary(summary, compactedCount);
     // previousSummary 存原始摘要(不带包装标记),供下次迭代增量更新
     this.previousSummary = summary;

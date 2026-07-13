@@ -446,7 +446,7 @@ export async function runAgentFromCli(
             ? { interactionMode: effectiveOptions.rewindInteractionMode }
             : {}),
         });
-        session.append({
+        await session.commitMessages({
           role: "user",
           content: prompt,
           ...(images ? { images } : {}),
@@ -1049,7 +1049,7 @@ async function seedForkedSession(
   const history = source.getHistory();
   if (history.length === 0) return;
 
-  target.append(...history);
+  await target.commitMessages(...history);
 }
 
 function defaultModel(kind: ProviderKind): string {

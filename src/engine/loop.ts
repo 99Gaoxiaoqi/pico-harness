@@ -860,6 +860,7 @@ export class AgentEngine implements AgentRunner {
     signal?: AbortSignal,
   ): Promise<Message[]> {
     signal?.throwIfAborted();
+    await session.flushPersistence();
     const reporter = runtimeReporter ?? this.reporter;
     const tracer = runtimeTracer ?? this.tracer;
     const rootSpan = tracer?.startRoot("Agent.Run", {
@@ -1018,7 +1019,7 @@ export class AgentEngine implements AgentRunner {
                   maxChars: err.maxChars,
                 })
                 ?.end();
-              session.truncateTo(beforeLen - 1);
+              await session.truncateTo(beforeLen - 1);
               // 硬重置改变了 session 起点,更新 beforeLen 让返回值切片正确
               beforeLen = session.length - 1;
               continue;
@@ -1112,23 +1113,23 @@ export class AgentEngine implements AgentRunner {
                 picoHiddenFromTranscript: true,
               },
             };
-            session.append(rejectedResponse);
+            await session.commitMessages(rejectedResponse);
             this.onTurn?.({ turn: turnCount, message: rejectedResponse });
-            session.append(...toolCalls.map(buildSynthesisToolRejection));
+            await session.commitMessages(...toolCalls.map(buildSynthesisToolRejection));
 
             if (exploreSynthesisToolRetries >= MAX_EXPLORE_SYNTHESIS_TOOL_RETRIES) {
               const failedResponse: Message = {
                 role: "assistant",
                 content: EXPLORE_SYNTHESIS_FAILED_MESSAGE,
               };
-              session.append(failedResponse);
+              await session.commitMessages(failedResponse);
               reporter.onMessage(failedResponse.content);
               reporter.onFinish();
               break;
             }
 
             exploreSynthesisToolRetries++;
-            session.append({
+            await session.commitMessages({
               role: "user",
               content: EXPLORE_SYNTHESIS_RETRY_PROMPT,
               providerData: {
@@ -1167,16 +1168,16 @@ export class AgentEngine implements AgentRunner {
                 picoHiddenFromTranscript: true,
               },
             };
-            session.append(rejectedResponse);
+            await session.commitMessages(rejectedResponse);
             this.onTurn?.({ turn: turnCount, message: rejectedResponse });
-            session.append(...toolCalls.map(buildDelegationRecoveryToolRejection));
+            await session.commitMessages(...toolCalls.map(buildDelegationRecoveryToolRejection));
             const failedResponse: Message = {
               role: "assistant",
               content: requiredFirstDelegationActive
                 ? REQUIRED_FIRST_DELEGATION_FAILED_MESSAGE
                 : REQUIRED_DELEGATION_RECOVERY_FAILED_MESSAGE,
             };
-            session.append(failedResponse);
+            await session.commitMessages(failedResponse);
             reporter.onMessage(failedResponse.content);
             reporter.onFinish();
             break;
@@ -1192,9 +1193,9 @@ export class AgentEngine implements AgentRunner {
                 picoHiddenFromTranscript: true,
               },
             };
-            session.append(rejectedResponse);
+            await session.commitMessages(rejectedResponse);
             this.onTurn?.({ turn: turnCount, message: rejectedResponse });
-            session.append(...toolCalls.map(buildRequiredFirstToolRejection));
+            await session.commitMessages(...toolCalls.map(buildRequiredFirstToolRejection));
             requiredFirstDelegationAttempts++;
 
             if (requiredFirstDelegationAttempts >= MAX_REQUIRED_FIRST_DELEGATION_ATTEMPTS) {
@@ -1202,7 +1203,7 @@ export class AgentEngine implements AgentRunner {
                 role: "assistant",
                 content: REQUIRED_FIRST_DELEGATION_FAILED_MESSAGE,
               };
-              session.append(failedResponse);
+              await session.commitMessages(failedResponse);
               reporter.onMessage(failedResponse.content);
               reporter.onFinish();
               break;
@@ -1223,7 +1224,7 @@ export class AgentEngine implements AgentRunner {
 
           // 将大模型的行动响应持久化到 Session。required 委派轮只保留
           // tool calls，不让委派前的解释正文再次进入主上下文。
-          session.append(responseMsg);
+          await session.commitMessages(responseMsg);
           compactedContext.push(responseMsg);
           this.onTurn?.({ turn: turnCount, message: responseMsg });
           if (exhaustedReason) {
@@ -1248,14 +1249,14 @@ export class AgentEngine implements AgentRunner {
             // 前同步 drain 并续接本轮，否则它会泄漏到下一次无关 run。
             const stopSteers = this.steerQueue?.drain() ?? [];
             for (const text of stopSteers) {
-              session.append({
+              await session.commitMessages({
                 role: "user",
                 content: text,
                 providerData: { picoKind: "steer" },
               });
             }
             if (decision?.continue) {
-              session.append({
+              await session.commitMessages({
                 role: "user",
                 content: decision.continuePrompt ?? "请继续推进任务。",
                 providerData: { picoKind: "continuation", picoHiddenFromTranscript: true },
@@ -1356,12 +1357,12 @@ export class AgentEngine implements AgentRunner {
                   providerData: { [PICO_TOOL_RESULT_ERROR_KEY]: true },
                 };
               });
-              session.append(...abortedObservations);
+              await session.commitMessages(...abortedObservations);
               const settledReminders = settledResults.flatMap((result) =>
                 result?.reminder ? [result.reminder] : [],
               );
               if (settledReminders.length > 0) {
-                session.append(...settledReminders);
+                await session.commitMessages(...settledReminders);
               }
             }
             throw err;
@@ -1384,7 +1385,7 @@ export class AgentEngine implements AgentRunner {
           }
 
           // 将所有 Observation 持久化到 Session,开启下一轮复盘与推理
-          session.append(...observations);
+          await session.commitMessages(...observations);
           if (requiredDelegation && requiredDelegationIndex !== undefined) {
             const assessment = assessRequiredDelegationResult(
               observations[requiredDelegationIndex]!,
@@ -1400,7 +1401,7 @@ export class AgentEngine implements AgentRunner {
                     ? REQUIRED_FIRST_DELEGATION_FAILED_MESSAGE
                     : REQUIRED_DELEGATION_RECOVERY_FAILED_MESSAGE,
                 };
-                session.append(failedResponse);
+                await session.commitMessages(failedResponse);
                 reporter.onMessage(failedResponse.content);
                 reporter.onFinish();
                 break;
@@ -1409,7 +1410,7 @@ export class AgentEngine implements AgentRunner {
               requiredDelegationRecoveryPending = true;
               requiredDelegationRecoveryExploreOnly =
                 isExploreOnlyRequiredDelegation(requiredDelegation);
-              session.append({
+              await session.commitMessages({
                 role: "user",
                 content: REQUIRED_DELEGATION_RECOVERY_PROMPT,
                 providerData: {
@@ -1431,7 +1432,7 @@ export class AgentEngine implements AgentRunner {
               requiredFirstDelegationAttempts = 0;
             }
             exploreSynthesisToolRetries = 0;
-            session.append({
+            await session.commitMessages({
               role: "user",
               content: exploreSynthesisOnly
                 ? EXPLORE_SYNTHESIS_PROMPT
@@ -1445,7 +1446,7 @@ export class AgentEngine implements AgentRunner {
             });
           }
           if (reminderMessages.length > 0) {
-            session.append(...reminderMessages);
+            await session.commitMessages(...reminderMessages);
           }
 
           // ====================================================================
@@ -1456,7 +1457,7 @@ export class AgentEngine implements AgentRunner {
           // ====================================================================
           const steerTexts = this.steerQueue?.drain() ?? [];
           for (const text of steerTexts) {
-            session.append({
+            await session.commitMessages({
               role: "user",
               content: text,
               providerData: { picoKind: "steer" },
@@ -1616,7 +1617,7 @@ export class AgentEngine implements AgentRunner {
       ? `\n\n${goalContext}\n请在总结中明确:当前目标达成到什么程度。`
       : "";
     const gracePrompt = `[SYSTEM] 已达执行预算: ${reason}。立即停止工具调用,用纯文本总结:1)已完成 2)未完成 3)下一步建议。${goalSection}`;
-    session.append({
+    await session.commitMessages({
       role: "user",
       content: gracePrompt,
       providerData: { picoKind: "grace", picoHiddenFromTranscript: true },
@@ -1646,7 +1647,7 @@ export class AgentEngine implements AgentRunner {
       // Grace Call is the one permitted over-budget summary. It does not consume another
       // goal turn, but its measurable token/cost usage remains part of the goal totals.
       this.consumeResponseBudget(session, response, costBefore);
-      session.append(response);
+      await session.commitMessages(response);
       if (response.content) {
         reporter.onMessage(response.content);
       }
