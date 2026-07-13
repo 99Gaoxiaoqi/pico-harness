@@ -10,6 +10,7 @@ import {
   type ResolvedKeybinding,
   type UserKeybindingConfig,
 } from "./keybindings/resolver.js";
+import { isPartialSlashCommandName, isSlashCommandName } from "../input/slash-parser.js";
 
 const HISTORY_MAX = 20;
 
@@ -172,10 +173,12 @@ export function getSuggestionContext(text: string, cursor = text.length): Sugges
   if (line.startsWith("/") && cursorInLine > 0) {
     const commandMatch = /^\/([^\s]+)\s+([^\s]*)$/.exec(line.slice(0, cursorInLine));
     if (commandMatch !== null) {
+      const command = commandMatch[1] ?? "";
+      if (!isSlashCommandName(command)) return null;
       const argStart = lineStart + cursorInLine - (commandMatch[2]?.length ?? 0);
       return {
         kind: "slash-argument",
-        command: commandMatch[1] ?? "",
+        command,
         query: commandMatch[2] ?? "",
         replaceStart: argStart,
         replaceEnd: lineStart + findTokenEnd(line, cursorInLine),
@@ -183,10 +186,15 @@ export function getSuggestionContext(text: string, cursor = text.length): Sugges
     }
 
     const tokenEnd = findTokenEnd(line, cursorInLine);
-    if (cursorInLine <= tokenEnd && !/\s/.test(line.slice(0, cursorInLine))) {
+    const query = line.slice(1, cursorInLine);
+    if (
+      cursorInLine <= tokenEnd &&
+      !/\s/.test(line.slice(0, cursorInLine)) &&
+      (query.length === 0 || isPartialSlashCommandName(query))
+    ) {
       return {
         kind: "slash",
-        query: line.slice(1, cursorInLine),
+        query,
         replaceStart: lineStart,
         replaceEnd: lineStart + tokenEnd,
       };

@@ -285,7 +285,7 @@ describe("CommandRegistry", () => {
     );
   });
 
-  it("未知命令建议优先 alias 匹配,再按编辑距离排序", () => {
+  it("提交未知命令时只保留合理的拼写纠错", () => {
     const registry = new CommandRegistry([
       localCommand("help", ["h"]),
       localCommand("status", ["st"]),
@@ -293,6 +293,6 @@ describe("CommandRegistry", () => {
     ]);
 
     expect(registry.suggestions("sta")).toEqual(["status"]);
-    expect(registry.suggestions("hlep").slice(0, 2)).toEqual(["help", "model"]);
+    expect(registry.suggestions("hlep")).toEqual(["help"]);
   });
 });

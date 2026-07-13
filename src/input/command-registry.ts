@@ -3,6 +3,7 @@ import {
   type CommandAvailability,
   type CommandInputState,
 } from "./command-availability.js";
+import { isPartialSlashCommandName } from "./slash-parser.js";
 import type {
   CommandListOptions,
   SlashCommandCategory,
@@ -34,6 +35,10 @@ export interface CommandSuggestion {
 
 export interface CommandSuggestionOptions {
   availabilityState?: CommandInputState;
+  /**
+   * 输入框只展示文本命中；用户已经提交未知命令后才提供有限的拼写纠错。
+   */
+  matchMode?: "autocomplete" | "recovery";
 }
 
 export interface CommandSourceGroup {
@@ -110,7 +115,9 @@ export class CommandRegistry {
   }
 
   suggestions(name: string): readonly string[] {
-    return this.detailedSuggestions(name).map((suggestion) => suggestion.name);
+    return this.detailedSuggestions(name, { matchMode: "recovery" }).map(
+      (suggestion) => suggestion.name,
+    );
   }
 
   detailedSuggestions(
@@ -123,6 +130,7 @@ export class CommandRegistry {
         suggestionFromCommand(command),
       );
     }
+    if (!isPartialSlashCommandName(normalized)) return [];
 
     const candidates = this.list()
       .map((command, index) => ({
@@ -131,10 +139,15 @@ export class CommandRegistry {
         match: bestMatch(command, normalized),
       }))
       .filter((candidate) => candidate.match !== null);
-    const hasTextMatch = candidates.some((candidate) => (candidate.match?.rank ?? 3) < 3);
+    const hasTextMatch = candidates.some((candidate) => isTextMatch(candidate.match));
+    const allowFuzzyRecovery = options.matchMode === "recovery";
 
     const matches = candidates
-      .filter((candidate) => !hasTextMatch || (candidate.match?.rank ?? 3) < 3)
+      .filter((candidate) => {
+        if (isTextMatch(candidate.match)) return true;
+        if (hasTextMatch || !allowFuzzyRecovery || candidate.match === null) return false;
+        return isPlausibleTypo(normalized, candidate.match.distance);
+      })
       .sort((left, right) => compareMatches(left, right));
     const commands = withAvailability(
       matches.map((candidate) => candidate.command),
@@ -280,6 +293,16 @@ function compareSuggestionMatch(
   if (left === null) return 1;
   if (right === null) return -1;
   return left.rank - right.rank || left.distance - right.distance;
+}
+
+function isTextMatch(match: SuggestionMatch | null): boolean {
+  return (match?.rank ?? 3) < 3;
+}
+
+function isPlausibleTypo(query: string, distance: number): boolean {
+  if (query.length < 3) return false;
+  const maxDistance = query.length >= 12 ? 3 : 2;
+  return distance <= maxDistance;
 }
 
 function editDistance(left: string, right: string): number {

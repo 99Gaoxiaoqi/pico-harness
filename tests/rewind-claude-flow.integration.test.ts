@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -11,6 +11,7 @@ import {
   commandSuggestions,
   createPicoCommandRegistry,
 } from "../src/input/pico-command-registry.js";
+import { processUserInput } from "../src/input/process-user-input.js";
 import {
   exitSessionPlanMode,
   getOrCreateSessionSettings,
@@ -332,6 +333,47 @@ describe("Claude Code style rewind integration", () => {
     expect(settings).toMatchObject({ mode: "plan", prePlanMode: "default" });
     expect(exitSessionPlanMode(settings)).toMatchObject({ ok: true });
     expect(settings.mode).toBe("default");
+  });
+
+  it("slash 输入只补全合法命令 token，并保留命名空间、别名与提交后的纠错", async () => {
+    workDir = await realpath(await mkdtemp(join(tmpdir(), "pico-slash-completion-")));
+    await mkdir(join(workDir, ".pico", "commands", "trailofbits-skills", "plugins"), {
+      recursive: true,
+    });
+    await writeFile(
+      join(workDir, ".pico", "commands", "trailofbits-skills", "plugins", "inspect.md"),
+      "Inspect the current workspace.",
+    );
+
+    const registry = await createPicoCommandRegistry({
+      workDir,
+      provider: "openai",
+      model: "test-model",
+      sessionId: "slash-completion-integration",
+    });
+    const inputOptions = {
+      slashCommandSuggestions: (query: string) => commandSuggestions(registry, query),
+      slashArgumentSuggestions: (command: string, query: string) =>
+        commandArgumentSuggestions(registry, command, query),
+    };
+    const type = (text: string) =>
+      reduceInputControllerEvent(createInputControllerState(), text, {}, inputOptions).state;
+
+    expect(type("/吃").activeSuggestions).toBeNull();
+    expect(type("/吃 le").activeSuggestions).toBeNull();
+    expect(type("/qwerty").activeSuggestions).toBeNull();
+
+    expect(type("/re").activeSuggestions?.items.map((item) => item.value)).toContain("rewind");
+    expect(type("/?").activeSuggestions?.items.map((item) => item.value)).toContain("help");
+    expect(
+      type("/trailofbits-skills:plugins:").activeSuggestions?.items.map((item) => item.value),
+    ).toContain("trailofbits-skills:plugins:inspect");
+
+    const submittedTypo = await processUserInput("/hlep", { registry });
+    expect(submittedTypo).toMatchObject({
+      type: "unknown-command",
+      suggestions: expect.arrayContaining(["help"]),
+    });
   });
 });
 

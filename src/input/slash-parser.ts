@@ -1,7 +1,26 @@
 import type { ParsedSlashInput } from "./types.js";
 
-const NAME_RE =
-  /^\/([A-Za-z0-9_?][A-Za-z0-9_-]*(?::[A-Za-z0-9][A-Za-z0-9_-]*)*|\?)(?:\s+([\s\S]*))?$/;
+const COMMAND_NAME = "[A-Za-z0-9_?][A-Za-z0-9_-]*(?::[A-Za-z0-9][A-Za-z0-9_-]*)*|\\?";
+const NAME_RE = new RegExp(`^/(${COMMAND_NAME})(?:\\s+([\\s\\S]*))?$`);
+const COMMAND_NAME_RE = new RegExp(`^(?:${COMMAND_NAME})$`);
+const PARTIAL_COMMAND_NAME_RE =
+  /^(?:[A-Za-z0-9_?][A-Za-z0-9_-]*(?::[A-Za-z0-9][A-Za-z0-9_-]*)*:?)$/;
+
+/**
+ * 判断一个已输入完整的 slash command token 是否可被执行。
+ * 命令名保持 ASCII，冒号用于 markdown/plugin 命令的层级命名空间。
+ */
+export function isSlashCommandName(name: string): boolean {
+  return COMMAND_NAME_RE.test(name);
+}
+
+/**
+ * 判断输入中的 command token 是否仍可能成为合法命令。
+ * 唯一允许的不完整状态是层级命令末尾的 `:`，例如 `plugin:`。
+ */
+export function isPartialSlashCommandName(name: string): boolean {
+  return PARTIAL_COMMAND_NAME_RE.test(name);
+}
 
 export function parseSlashInput(input: string): ParsedSlashInput | null {
   const raw = input;
