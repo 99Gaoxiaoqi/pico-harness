@@ -71,9 +71,9 @@ describe("durable completion outbox integration", () => {
         .getHistory()
         .filter((message) => message.providerData?.picoKind === "subagent_completion");
       expect(injected).toHaveLength(1);
-      expect(taskRuntime.jobService.pendingCompletions({ ownerSessionId: "owner-session" })).toEqual(
-        [],
-      );
+      expect(
+        taskRuntime.jobService.pendingCompletions({ ownerSessionId: "owner-session" }),
+      ).toEqual([]);
       expect(
         taskRuntime.jobService.pendingCompletions({ ownerSessionId: "other-session" }),
       ).toHaveLength(1);
@@ -146,6 +146,103 @@ describe("durable completion outbox integration", () => {
     } finally {
       await consumedRuntime.dispose();
       await reopened.close();
+      await taskRuntime.close();
+    }
+  });
+
+  it("将过期委派收口为原 owner 的 error completion 并且只注入一次", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pico-expired-delegation-completion-"));
+    cleanups.push(root);
+    const repo = join(root, "repo");
+    await mkdir(repo);
+    await git(["init", "-b", "main"], repo);
+    await git(["config", "user.name", "Pico Integration"], repo);
+    await git(["config", "user.email", "pico@example.test"], repo);
+    await writeFile(join(repo, ".gitignore"), ".claw/\n.worktrees/\n", "utf8");
+    await writeFile(join(repo, "README.md"), "expired delegation completion\n", "utf8");
+    await git(["add", "."], repo);
+    await git(["commit", "-m", "initial"], repo);
+
+    let now = 1_000;
+    const expiredOwner = new JobService({ workDir: repo, ownerId: "expired-host", now: () => now });
+    const job = expiredOwner.dispatch({
+      jobId: "job-expired",
+      type: "local_agent",
+      executionClass: "host_bound",
+      completionPolicy: "required",
+      description: "expired delegation",
+      ownerSessionId: "owner-session",
+      data: { activityIds: ["activity-expired"] },
+    });
+    expiredOwner.start(job.jobId, {
+      expectedVersion: job.version,
+      attemptId: "attempt-expired",
+      leaseTtlMs: 100,
+    });
+    now = 1_101;
+    const reconciler = new JobService({ workDir: repo, ownerId: "reconciler", now: () => now });
+    expect(reconciler.reconcileExpiredJobs()).toEqual([
+      expect.objectContaining({ jobId: job.jobId, status: "interrupted" }),
+    ]);
+    expiredOwner.close();
+    reconciler.close();
+
+    const taskRuntime = await TaskHostRuntime.create({ workDir: repo });
+    const otherSession = await new SessionManager().getOrCreate("other-session", repo, {
+      persistence: true,
+    });
+    const otherRuntime = await createTuiRuntimeState({
+      workDir: repo,
+      sessionId: otherSession.id,
+      session: otherSession,
+      taskHostRuntime: taskRuntime,
+    });
+    try {
+      expect(otherRuntime.delegationCompletionQueue.hasPending).toBe(false);
+      expect(
+        taskRuntime.jobService.pendingCompletions({ ownerSessionId: "owner-session" }),
+      ).toHaveLength(1);
+    } finally {
+      await otherRuntime.dispose();
+      await otherSession.close();
+    }
+
+    const ownerSession = await new SessionManager().getOrCreate("owner-session", repo, {
+      persistence: true,
+    });
+    const ownerRuntime = await createTuiRuntimeState({
+      workDir: repo,
+      sessionId: ownerSession.id,
+      session: ownerSession,
+      taskHostRuntime: taskRuntime,
+    });
+    try {
+      const pending = ownerRuntime.delegationCompletionQueue.pendingCompletionSeqs();
+      expect(pending).toHaveLength(1);
+      await ownerRuntime.delegationCompletionQueue.deliverPendingCompletionSeqs(pending);
+      await expect(
+        ownerRuntime.delegationCompletionQueue.deliverPendingCompletionSeqs(pending),
+      ).resolves.toEqual([]);
+
+      const injected = ownerSession
+        .getHistory()
+        .filter((message) => message.providerData?.picoKind === "subagent_completion");
+      expect(injected).toEqual([
+        expect.objectContaining({
+          content: expect.stringContaining("owner_lost"),
+          providerData: expect.objectContaining({
+            picoCompletionOwnerSessionId: "owner-session",
+            picoCompletionStatus: "error",
+            picoCompletionActivityIds: ["activity-expired"],
+          }),
+        }),
+      ]);
+      expect(
+        taskRuntime.jobService.pendingCompletions({ ownerSessionId: "owner-session" }),
+      ).toEqual([]);
+    } finally {
+      await ownerRuntime.dispose();
+      await ownerSession.close();
       await taskRuntime.close();
     }
   });
