@@ -34,7 +34,9 @@ import {
   type FileChangePreimage,
 } from "./file-change-journal.js";
 
-const DEFAULT_BASE_DIR = join(homedir(), ".pico", "file-history");
+const DEFAULT_BASE_DIR = resolve(
+  process.env.PICO_FILE_HISTORY_DIR ?? join(homedir(), ".pico", "file-history"),
+);
 const MAX_SNAPSHOTS = 100;
 const FILE_HISTORY_MANIFEST_VERSION = 2 as const;
 

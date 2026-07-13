@@ -15,6 +15,7 @@ import { chmodSync, mkdirSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, open, rename, unlink, type FileHandle } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import {
   isMessageHiddenFromTranscript,
   toCanonicalUsage,
@@ -215,6 +216,11 @@ export class Session implements SessionRuntimePersistence {
   private deferredMessages: Message[] = [];
   /** 正在等待 ToolResult 的 toolCallId 集合。非空表示有 toolCalls 尚未配对。 */
   private pendingToolCallIds: Set<string> = new Set();
+  private readonly inMemoryCommitReceipts = new Map<
+    string,
+    { readonly message: Message; readonly receipt: CommitReceipt }
+  >();
+  private inMemoryCommitSeq = 0;
 
   readonly fileHistory: FileHistoryState = createFileHistoryState();
 
@@ -824,13 +830,52 @@ export class Session implements SessionRuntimePersistence {
 
   /**
    * 以宿主提供的稳定 eventId 追加一条消息。同 ID+同 payload 重试只返回
-   * 首次 durable receipt，不分配新 seq；同 ID 被不同 payload 复用则失败关闭。
+   * 首次 receipt，不分配新 seq；同 ID 被不同 payload 复用则失败关闭。
+   * persistence:false 只提供进程内幂等，receipt.durable=false。
    */
   async commitMessageOnce(eventId: string, message: Message): Promise<CommitReceipt> {
     this.assertWritable();
     if (!eventId.trim()) throw new Error("Session eventId 不能为空");
     if (!this.store) {
-      throw new Error("Exactly-once message commit requires Session persistence");
+      const existing = this.inMemoryCommitReceipts.get(eventId);
+      if (existing) {
+        if (!isDeepStrictEqual(existing.message, message)) {
+          throw new Error(`Session eventId conflict: ${eventId} is already bound to another event`);
+        }
+        return { ...existing.receipt, inserted: false };
+      }
+      const prepared = this.prepareAppend(message);
+      if (prepared.deferred) {
+        throw new Error("Exactly-once message cannot be deferred behind incomplete tool results");
+      }
+      this.doAppend(message);
+      const committedAt = new Date().toISOString();
+      const receipt: CommitReceipt = {
+        eventId,
+        cursor: {
+          logId: `in-memory:${this.id}`,
+          seq: this.inMemoryCommitSeq++,
+          epoch: 0,
+          eventId,
+        },
+        committedAt,
+        durable: false,
+        inserted: true,
+      };
+      this.inMemoryCommitReceipts.set(eventId, {
+        message: structuredClone(message),
+        receipt,
+      });
+      if (
+        prepared.toolResult &&
+        this.pendingToolCallIds.size === 0 &&
+        this.deferredMessages.length > 0
+      ) {
+        const pending = this.deferredMessages;
+        this.deferredMessages = [];
+        for (const deferred of pending) this.appendOneInMemory(deferred);
+      }
+      return receipt;
     }
     const prepared = this.prepareAppend(message);
     if (prepared.deferred) {
