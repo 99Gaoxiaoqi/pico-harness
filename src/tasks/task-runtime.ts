@@ -2,6 +2,8 @@ import { execFile } from "node:child_process";
 import { join, resolve } from "node:path";
 import { TaskRegistry, type TaskSnapshot } from "./task-registry.js";
 import { TaskStore } from "./task-store.js";
+import { JobService } from "./job-service.js";
+import { RuntimeTaskMirror } from "./runtime-task-mirror.js";
 import { WorktreeMergeQueue, type WorktreeMergeSnapshot } from "./merge-queue.js";
 import {
   WorktreeSupervisor,
@@ -21,18 +23,24 @@ export class TaskHostRuntime {
   readonly taskStore: TaskStore;
   readonly supervisor: WorktreeSupervisor;
   readonly mergeQueue: WorktreeMergeQueue;
+  readonly jobService: JobService;
   readonly repoRoot: string;
   readonly targetBranch: string;
 
-  private constructor(repoRoot: string, targetBranch: string) {
+  private readonly runtimeMirror: RuntimeTaskMirror;
+
+  private constructor(repoRoot: string, targetBranch: string, jobService: JobService) {
     this.repoRoot = repoRoot;
     this.targetBranch = targetBranch;
+    this.jobService = jobService;
     this.taskRegistry = new TaskRegistry();
     this.taskStore = new TaskStore({
       filePath: join(repoRoot, ".claw", "tasks", "state.json"),
     });
     this.taskStore.loadInto(this.taskRegistry);
     this.taskStore.bind(this.taskRegistry);
+    this.jobService.reconcileExpiredJobs("owner_lost");
+    this.runtimeMirror = new RuntimeTaskMirror(this.taskRegistry, this.jobService);
     this.supervisor = new WorktreeSupervisor({
       taskRegistry: this.taskRegistry,
       repoRoot,
@@ -47,7 +55,11 @@ export class TaskHostRuntime {
       : await gitOutput(["rev-parse", "--show-toplevel"], cwd);
     const targetBranch = await gitOutput(["branch", "--show-current"], repoRoot);
     if (!targetBranch) throw new Error("当前 Git 工作树处于 detached HEAD，无法启动任务监督器");
-    return new TaskHostRuntime(repoRoot, targetBranch);
+    const { service } = await JobService.create({
+      workDir: repoRoot,
+      ownerId: `tui-host:${process.pid}`,
+    });
+    return new TaskHostRuntime(repoRoot, targetBranch, service);
   }
 
   start(request: WorktreeTaskRequest, runner: WorktreeTaskRunner): WorktreeTaskSnapshot {
@@ -112,6 +124,8 @@ export class TaskHostRuntime {
     );
     await this.mergeQueue.waitForIdle();
     this.taskStore.close();
+    this.runtimeMirror.close();
+    this.jobService.close();
   }
 }
 
