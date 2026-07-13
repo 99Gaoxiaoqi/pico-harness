@@ -67,6 +67,8 @@ export interface ForkStorageOperation extends StorageOperationBase {
     eventId: string;
   };
   targetSessionId: string;
+  /** 恢复 prepared 操作时不能猜测的目标会话交互模式。 */
+  targetMode?: "default" | "plan" | "auto" | "yolo";
   stagingDirectory: string;
 }
 
@@ -266,6 +268,11 @@ function parseForkOperation(value: Record<string, unknown>): ForkStorageOperatio
   if (
     typeof value["sourceSessionId"] !== "string" ||
     typeof value["targetSessionId"] !== "string" ||
+    (value["targetMode"] !== undefined &&
+      value["targetMode"] !== "default" &&
+      value["targetMode"] !== "yolo" &&
+      value["targetMode"] !== "auto" &&
+      value["targetMode"] !== "plan") ||
     typeof value["stagingDirectory"] !== "string" ||
     !isRecord(cursor) ||
     typeof cursor["logId"] !== "string" ||
