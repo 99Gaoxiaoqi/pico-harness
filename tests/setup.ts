@@ -7,6 +7,9 @@
 process.env.PICO_PERSISTENCE = "0";
 // 全局 Catalog 默认写 ~/.pico；测试只能通过显式注入的临时 Catalog 验证。
 process.env.PICO_SESSION_CATALOG = "0";
+// File History 默认落在 ~/.pico；测试 worker 必须按 PID 隔离，既不读写
+// 用户真实历史，也避免 Vitest 多进程争抢同一 CAS mutation lease。
+process.env.PICO_FILE_HISTORY_DIR ??= `${process.env.TMPDIR ?? "/tmp"}/pico-vitest-file-history-${process.pid}`;
 
 // FTS5Store 连接池是模块级单例,测试间若复用同一 workDir(如 /tmp)会跨用例泄漏实例。
 // 每个测试结束后清空池 + 关闭所有 SQLite 句柄,保证完全隔离(并释放 Windows 句柄)。

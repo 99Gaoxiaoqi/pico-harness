@@ -78,7 +78,8 @@ export interface CommitReceipt {
   readonly eventId: string;
   readonly cursor: SessionCursor;
   readonly committedAt: string;
-  readonly durable: true;
+  /** persistence:false 兼容会话只能保证进程内幂等。 */
+  readonly durable: boolean;
   /** false 表示同 eventId 的相同事件已耐久落盘，本次只返回原 receipt。 */
   readonly inserted: boolean;
 }
