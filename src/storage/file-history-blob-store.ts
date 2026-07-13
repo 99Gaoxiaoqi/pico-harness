@@ -56,6 +56,11 @@ export class FileHistoryBlobStore {
     this.stagingDir = join(this.baseDir, ".staging");
   }
 
+  /** 供必须与 CAS GC 共享 mutation lease 的组装层使用。 */
+  get rootDirectory(): string {
+    return this.baseDir;
+  }
+
   resolveBlobPath(digest: string): string {
     return resolveFileHistoryBlobPath(this.baseDir, digest);
   }

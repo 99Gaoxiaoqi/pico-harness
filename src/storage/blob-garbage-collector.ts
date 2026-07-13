@@ -1,7 +1,8 @@
 import { lstat, readFile, readdir, stat, unlink } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import { createFileHistoryState, fileHistoryLoadState } from "../safety/file-history.js";
-import { OwnerLease } from "./owner-lease.js";
+import { withFileHistoryMutationLease } from "./file-history-mutation-lease.js";
+import type { OwnerLease } from "./owner-lease.js";
 import { StorageOperationJournal } from "./operation-journal.js";
 
 const SHA256_RE = /^[a-f0-9]{64}$/u;
@@ -57,54 +58,56 @@ export class ContentAddressedBlobGarbageCollector {
   }
 
   async run(options: BlobGarbageCollectionRunOptions = {}): Promise<BlobGarbageCollectionResult> {
-    const lease = await OwnerLease.acquire({
-      leaseDirectory: join(this.baseDir, ".leases", "cas-gc"),
-      ownerId: `cas-gc:${process.pid}`,
-    });
-    try {
-      const mark = await this.collectReachableDigests();
-      const reachable = mark.reachable;
-      const retainedPaths: string[] = [];
-      const candidatePaths: string[] = [];
-      const deletedPaths: string[] = [];
-      const blobPaths = await this.listBlobPaths();
-      if (mark.blockedReasons.length > 0) {
-        return {
-          dryRun: true,
-          blocked: true,
-          blockedReasons: mark.blockedReasons.toSorted(compareBlocks),
-          reachableDigests: [...reachable].toSorted(),
-          retainedPaths: blobPaths,
-          candidatePaths: [],
-          deletedPaths: [],
-        };
-      }
-      for (const path of blobPaths) {
-        const digest = basename(path);
-        const metadata = await stat(path);
-        if (reachable.has(digest) || this.now() - metadata.mtimeMs < this.gracePeriodMs) {
-          retainedPaths.push(path);
-          continue;
-        }
-        candidatePaths.push(path);
-        if (options.apply === true) {
-          await lease.assertOwnership();
-          await unlink(path);
-          deletedPaths.push(path);
-        }
-      }
+    if (options.apply !== true) return this.collectAndSweep(false);
+    return withFileHistoryMutationLease(this.baseDir, `cas-gc:${process.pid}`, async (lease) =>
+      this.collectAndSweep(true, lease),
+    );
+  }
+
+  private async collectAndSweep(
+    apply: boolean,
+    lease?: OwnerLease,
+  ): Promise<BlobGarbageCollectionResult> {
+    const mark = await this.collectReachableDigests();
+    const reachable = mark.reachable;
+    const retainedPaths: string[] = [];
+    const candidatePaths: string[] = [];
+    const deletedPaths: string[] = [];
+    const blobPaths = await this.listBlobPaths();
+    if (mark.blockedReasons.length > 0) {
       return {
-        dryRun: options.apply !== true,
-        blocked: false,
-        blockedReasons: [],
+        dryRun: true,
+        blocked: true,
+        blockedReasons: mark.blockedReasons.toSorted(compareBlocks),
         reachableDigests: [...reachable].toSorted(),
-        retainedPaths: retainedPaths.toSorted(),
-        candidatePaths: candidatePaths.toSorted(),
-        deletedPaths: deletedPaths.toSorted(),
+        retainedPaths: blobPaths,
+        candidatePaths: [],
+        deletedPaths: [],
       };
-    } finally {
-      await lease.release();
     }
+    for (const path of blobPaths) {
+      const digest = basename(path);
+      const metadata = await stat(path);
+      if (reachable.has(digest) || this.now() - metadata.mtimeMs < this.gracePeriodMs) {
+        retainedPaths.push(path);
+        continue;
+      }
+      candidatePaths.push(path);
+      if (apply) {
+        await lease?.assertOwnership();
+        await unlink(path);
+        deletedPaths.push(path);
+      }
+    }
+    return {
+      dryRun: !apply,
+      blocked: false,
+      blockedReasons: [],
+      reachableDigests: [...reachable].toSorted(),
+      retainedPaths: retainedPaths.toSorted(),
+      candidatePaths: candidatePaths.toSorted(),
+      deletedPaths: deletedPaths.toSorted(),
+    };
   }
 
   private async collectReachableDigests(): Promise<{

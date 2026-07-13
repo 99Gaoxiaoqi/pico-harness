@@ -20,6 +20,7 @@ import {
   type FileHistoryBlobRef,
 } from "../storage/file-history-blob-store.js";
 import { writeJsonAtomic } from "../storage/atomic-json.js";
+import { withFileHistoryMutationLease } from "../storage/file-history-mutation-lease.js";
 import {
   addFileChangeJournalWarning,
   beginFileChangeJournal,
@@ -1566,6 +1567,18 @@ async function saveFileHistoryState(
   sessionId: string,
   baseDir: string,
 ): Promise<void> {
+  await withFileHistoryMutationLease(
+    baseDir,
+    `file-history-save:${sessionId}:${process.pid}`,
+    async () => saveFileHistoryStateUnlocked(state, sessionId, baseDir),
+  );
+}
+
+async function saveFileHistoryStateUnlocked(
+  state: FileHistoryState,
+  sessionId: string,
+  baseDir: string,
+): Promise<void> {
   if (state.storageStatus === "degraded") {
     throw new FileHistoryDegradedError(state.storageError ?? "File History 处于只读降级状态");
   }
@@ -1697,6 +1710,18 @@ export async function fileHistoryCloneSession(
   targetSessionId: string,
   baseDir: string = DEFAULT_BASE_DIR,
 ): Promise<FileHistoryCloneResult> {
+  return withFileHistoryMutationLease(
+    baseDir,
+    `file-history-clone:${sourceSessionId}:${targetSessionId}:${process.pid}`,
+    async () => fileHistoryCloneSessionUnlocked(sourceSessionId, targetSessionId, baseDir),
+  );
+}
+
+async function fileHistoryCloneSessionUnlocked(
+  sourceSessionId: string,
+  targetSessionId: string,
+  baseDir: string,
+): Promise<FileHistoryCloneResult> {
   const state = createFileHistoryState();
   const loaded = await fileHistoryLoadState(state, sourceSessionId, baseDir);
   if (!loaded) {
@@ -1716,7 +1741,7 @@ export async function fileHistoryCloneSession(
   if (migratedLegacySource) {
     // save 会先验证每个 legacy backup 并物化为 CAS；任一缺失都会
     // 将 state 标记为 degraded 并拒绝发布 v2 manifest。
-    await saveFileHistoryState(state, sourceSessionId, baseDir);
+    await saveFileHistoryStateUnlocked(state, sourceSessionId, baseDir);
   }
 
   const sourceManifestPath = resolveManifestPath(sourceSessionId, baseDir);
