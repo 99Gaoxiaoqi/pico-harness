@@ -17,6 +17,7 @@ import { dirname } from "pathe";
 import { logger } from "../observability/logger.js";
 import type { Message } from "../schema/message.js";
 import type {
+  ConversationProjectionCursor,
   ConversationSearchStore,
   MemoryBackendStatus,
   MemorySearchResult,
@@ -264,6 +265,15 @@ export class FTS5Store implements ConversationSearchStore {
         timestamp UNINDEXED,
         tokenize='trigram'
       );
+
+      CREATE TABLE IF NOT EXISTS session_projection_cursor (
+        session_id TEXT PRIMARY KEY,
+        log_id TEXT NOT NULL,
+        seq INTEGER NOT NULL,
+        epoch INTEGER NOT NULL,
+        event_id TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
     `);
 
     // 会话摘要表
@@ -350,6 +360,112 @@ export class FTS5Store implements ConversationSearchStore {
       this.markRuntimeDegraded("重建会话索引", err);
       logger.warn({ err, sessionId }, "[fts5] 重建会话索引失败");
     }
+  }
+
+  projectInsert(
+    sessionId: string,
+    turnIndex: number,
+    message: Message,
+    cursor: ConversationProjectionCursor,
+  ): void {
+    if (!this.db) return;
+    try {
+      const insert = this.db.prepare(`
+        INSERT INTO conversation_chunks (session_id, turn_index, role, content, timestamp)
+        VALUES (?, ?, ?, ?, ?)
+      `);
+      const upsertCursor = this.prepareProjectionCursorUpsert();
+      this.db.transaction(() => {
+        insert.run(
+          sessionId,
+          turnIndex,
+          message.role,
+          typeof message.content === "string" ? message.content : JSON.stringify(message.content),
+          new Date().toISOString(),
+        );
+        upsertCursor.run(
+          sessionId,
+          cursor.logId,
+          cursor.seq,
+          cursor.epoch,
+          cursor.eventId,
+          new Date().toISOString(),
+        );
+      })();
+    } catch (err) {
+      this.markRuntimeDegraded("投影消息与游标", err);
+      logger.warn({ err, sessionId, turnIndex }, "[fts5] 消息投影失败");
+    }
+  }
+
+  projectReplace(
+    sessionId: string,
+    messages: readonly Message[],
+    cursor: ConversationProjectionCursor,
+  ): void {
+    if (!this.db) return;
+    try {
+      const deleteStmt = this.db.prepare("DELETE FROM conversation_chunks WHERE session_id = ?");
+      const insertStmt = this.db.prepare(`
+        INSERT INTO conversation_chunks (session_id, turn_index, role, content, timestamp)
+        VALUES (?, ?, ?, ?, ?)
+      `);
+      const upsertCursor = this.prepareProjectionCursorUpsert();
+      this.db.transaction(() => {
+        deleteStmt.run(sessionId);
+        const timestamp = new Date().toISOString();
+        for (const [turnIndex, message] of messages.entries()) {
+          insertStmt.run(
+            sessionId,
+            turnIndex,
+            message.role,
+            typeof message.content === "string" ? message.content : JSON.stringify(message.content),
+            timestamp,
+          );
+        }
+        upsertCursor.run(
+          sessionId,
+          cursor.logId,
+          cursor.seq,
+          cursor.epoch,
+          cursor.eventId,
+          timestamp,
+        );
+      })();
+    } catch (err) {
+      this.markRuntimeDegraded("重建投影与游标", err);
+      logger.warn({ err, sessionId }, "[fts5] 会话投影重建失败");
+    }
+  }
+
+  getProjectionCursor(sessionId: string): ConversationProjectionCursor | undefined {
+    if (!this.db) return undefined;
+    try {
+      return this.db
+        .prepare(
+          `SELECT log_id AS logId, seq, epoch, event_id AS eventId
+           FROM session_projection_cursor WHERE session_id = ?`,
+        )
+        .get(sessionId) as ConversationProjectionCursor | undefined;
+    } catch (err) {
+      this.markRuntimeDegraded("读取投影游标", err);
+      return undefined;
+    }
+  }
+
+  private prepareProjectionCursorUpsert(): Database.Statement {
+    if (!this.db) throw new Error("FTS5 database is unavailable");
+    return this.db.prepare(`
+      INSERT INTO session_projection_cursor
+        (session_id, log_id, seq, epoch, event_id, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(session_id) DO UPDATE SET
+        log_id = excluded.log_id,
+        seq = excluded.seq,
+        epoch = excluded.epoch,
+        event_id = excluded.event_id,
+        updated_at = excluded.updated_at
+    `);
   }
 
   /**
