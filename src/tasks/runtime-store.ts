@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, mkdirSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -967,6 +967,23 @@ export class RuntimeStore {
     const importAll = this.db.transaction(() => {
       for (const task of legacy.tasks) {
         const mapped = mapLegacyStatus(task.status);
+        const current = this.getJob(task.taskId);
+        if (current) {
+          const decision = legacyReconciliationDecision(task, current);
+          if (decision === "skip") {
+            skipped++;
+            continue;
+          }
+          this.reconcileLegacyTerminal(task, current, mapped.status);
+          imported++;
+          continue;
+        }
+
+        const fingerprint = legacyTaskFingerprint(task);
+        const terminal = isTerminalJobStatus(mapped.status);
+        const attemptNumber = terminal ? 1 : 0;
+        const leaseEpoch = terminal ? 1 : 0;
+        const terminalAt = terminal ? (task.endTime ?? this.now()) : undefined;
         const result = this.db
           .prepare(
             `INSERT OR IGNORE INTO jobs (
@@ -985,13 +1002,27 @@ export class RuntimeStore {
             stringifyJson({
               ...(task.data ?? {}),
               legacyTaskStore: { notified: task.notified, outputOffset: task.outputOffset },
+              legacyTaskStoreImport: legacyImportMarker(task, fingerprint, 0, this.now()),
             }),
             task.startTime,
-            task.endTime ?? task.startTime,
-            isTerminalJobStatus(mapped.status) ? (task.endTime ?? this.now()) : null,
+            terminalAt ?? task.startTime,
+            terminalAt ?? null,
             mapped.error ?? task.error ?? null,
           );
         if (result.changes === 1) {
+          if (isTerminalJobStatus(mapped.status)) {
+            this.db
+              .prepare(`UPDATE jobs SET lease_epoch = ?, attempt_count = ? WHERE job_id = ?`)
+              .run(leaseEpoch, attemptNumber, task.taskId);
+            this.insertLegacyTerminalAttempt(
+              task,
+              mapped.status,
+              attemptNumber,
+              leaseEpoch,
+              fingerprint,
+              terminalAt!,
+            );
+          }
           imported++;
           if (mapped.status === "interrupted") interrupted++;
         } else {
@@ -1001,6 +1032,211 @@ export class RuntimeStore {
     });
     importAll();
     return { imported, skipped, interrupted };
+  }
+
+  private reconcileLegacyTerminal(task: LegacyTask, current: JobRecord, status: JobStatus): void {
+    if (!isTerminalJobStatus(status) || task.endTime === undefined) {
+      throw new RuntimeConflictError(`legacy 任务 ${task.taskId} 缺少可安全前滚的终态证据`);
+    }
+
+    const now = this.now();
+    const fingerprint = legacyTaskFingerprint(task);
+    const error = mapLegacyStatus(task.status).error ?? task.error;
+    let attemptNumber = current.attemptCount;
+    let leaseEpoch = Math.max(current.leaseEpoch, 1);
+    let attemptId: string;
+    const runningAttempt =
+      current.status === "running"
+        ? (this.db
+            .prepare(
+              `SELECT * FROM job_attempts
+               WHERE job_id = ? AND status = 'running'
+               ORDER BY attempt_number DESC LIMIT 1`,
+            )
+            .get(task.taskId) as AttemptRow | undefined)
+        : undefined;
+
+    if (current.status === "running" && !runningAttempt) {
+      throw new RuntimeConflictError(
+        `runtime 任务 ${task.taskId} 缺少 running attempt，拒绝从 legacy 终态前滚`,
+      );
+    }
+
+    if (runningAttempt) {
+      attemptId = runningAttempt.attempt_id;
+      leaseEpoch = runningAttempt.lease_epoch;
+      const attemptUpdate = this.db
+        .prepare(
+          `UPDATE job_attempts
+           SET status = ?, output_path = COALESCE(?, output_path), output_offset = ?,
+               error = ?, result_json = ?, finished_at = ?, updated_at = ?, version = version + 1
+           WHERE attempt_id = ? AND status = 'running' AND version = ?`,
+        )
+        .run(
+          status,
+          task.outputFile ?? null,
+          task.outputOffset,
+          error ?? null,
+          stringifyJson(legacyTerminalResult(task, fingerprint)),
+          task.endTime,
+          now,
+          runningAttempt.attempt_id,
+          runningAttempt.version,
+        );
+      if (attemptUpdate.changes !== 1) {
+        throw new RuntimeConflictError(
+          `legacy 任务 ${task.taskId} 的 running attempt 前滚 CAS 失败`,
+        );
+      }
+    } else {
+      attemptNumber++;
+      attemptId = this.insertLegacyTerminalAttempt(
+        task,
+        status,
+        attemptNumber,
+        leaseEpoch,
+        fingerprint,
+        task.endTime,
+      );
+    }
+
+    const data = {
+      ...(current.data ?? {}),
+      ...(task.data ?? {}),
+      legacyTaskStore: { notified: task.notified, outputOffset: task.outputOffset },
+      legacyTaskStoreImport: legacyImportMarker(task, fingerprint, current.version, now),
+    };
+    const jobUpdate = this.db
+      .prepare(
+        `UPDATE jobs
+         SET status = ?, description = ?, tool_use_id = COALESCE(?, tool_use_id),
+             output_path = COALESCE(?, output_path), data_json = ?, lease_epoch = ?,
+             attempt_count = ?, terminal_at = ?, error = ?, updated_at = ?, version = version + 1
+         WHERE job_id = ? AND status = ? AND version = ?`,
+      )
+      .run(
+        status,
+        task.description,
+        task.toolUseId ?? null,
+        task.outputFile ?? null,
+        stringifyJson(data),
+        leaseEpoch,
+        attemptNumber,
+        task.endTime,
+        error ?? null,
+        now,
+        task.taskId,
+        current.status,
+        current.version,
+      );
+    if (jobUpdate.changes !== 1) {
+      throw new RuntimeConflictError(`legacy 任务 ${task.taskId} 前滚 CAS 失败`);
+    }
+    this.insertLegacyCompletion(task, current, status, attemptId, fingerprint, now);
+    this.db
+      .prepare(
+        `UPDATE runtime_leases
+         SET expires_at = MIN(expires_at, ?), version = version + 1
+         WHERE resource_key = ?`,
+      )
+      .run(now, `job:${task.taskId}`);
+  }
+
+  private insertLegacyTerminalAttempt(
+    task: LegacyTask,
+    status: TerminalJobStatus,
+    attemptNumber: number,
+    leaseEpoch: number,
+    fingerprint: string,
+    terminalAt: number,
+  ): string {
+    const error = mapLegacyStatus(task.status).error ?? task.error;
+    const attemptId = `legacy:${task.taskId}:${attemptNumber}:${fingerprint.slice(0, 12)}`;
+    this.db
+      .prepare(
+        `INSERT INTO job_attempts (
+           attempt_id, job_id, attempt_number, status, owner_id, lease_epoch,
+           output_path, output_offset, started_at, updated_at, finished_at,
+           error, result_json, version
+         ) VALUES (?, ?, ?, ?, 'legacy-task-store', ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+      )
+      .run(
+        attemptId,
+        task.taskId,
+        attemptNumber,
+        status,
+        leaseEpoch,
+        task.outputFile ?? null,
+        task.outputOffset,
+        task.startTime,
+        terminalAt,
+        terminalAt,
+        error ?? null,
+        stringifyJson(legacyTerminalResult(task, fingerprint)),
+      );
+    return attemptId;
+  }
+
+  private insertLegacyCompletion(
+    task: LegacyTask,
+    current: JobRecord,
+    status: TerminalJobStatus,
+    attemptId: string,
+    fingerprint: string,
+    createdAt: number,
+  ): void {
+    if (
+      !current.ownerSessionId ||
+      (current.type !== "local_agent" && task.type !== "local_agent")
+    ) {
+      return;
+    }
+    const completionStatus = legacyDelegationStatus(task);
+    if (current.completionPolicy === "detached" && completionStatus === "completed") return;
+
+    const explicitCompletionId = nonEmptyString(task.data?.["completionId"]);
+    const completionId =
+      explicitCompletionId ?? `completion:legacy:${task.taskId}:${fingerprint.slice(0, 16)}`;
+    const activityIds = Array.isArray(task.data?.["activityIds"])
+      ? task.data["activityIds"].filter((value): value is string => typeof value === "string")
+      : [];
+    const error = mapLegacyStatus(task.status).error ?? task.error;
+    this.insertCompletion({
+      completionId,
+      jobId: task.taskId,
+      attemptId,
+      policy: current.completionPolicy,
+      status,
+      payload: {
+        legacyTaskStoreReconciliation: true,
+        delegationCompletion: {
+          completionId,
+          jobId: task.taskId,
+          ownerSessionId: current.ownerSessionId,
+          completionSeq: safeInteger(task.data?.["completionSeq"]) ?? task.endTime ?? createdAt,
+          activityIds,
+          completionPolicy: current.completionPolicy,
+          status: completionStatus,
+          outputSummary:
+            typeof task.data?.["outputSummary"] === "string"
+              ? task.data["outputSummary"]
+              : task.description,
+          ...(error ? { error } : {}),
+        },
+      },
+      createdAt,
+    });
+    const isSynchronousRequiredSuccess =
+      current.completionPolicy === "required" && completionStatus === "completed";
+    if (
+      task.notified ||
+      task.data?.["internalCompletion"] === true ||
+      isSynchronousRequiredSuccess
+    ) {
+      this.db
+        .prepare("UPDATE completion_outbox SET delivered_at = ? WHERE completion_id = ?")
+        .run(createdAt, completionId);
+    }
   }
 
   private migrate(): void {
@@ -1497,6 +1733,114 @@ interface LegacyTask {
   notified: boolean;
   error?: string;
   data?: Record<string, unknown>;
+}
+
+type LegacyReconciliationDecision = "reconcile" | "skip";
+
+function legacyReconciliationDecision(
+  task: LegacyTask,
+  current: JobRecord,
+): LegacyReconciliationDecision {
+  if (!isLegacyTerminalStatus(task.status) || isTerminalJobStatus(current.status)) return "skip";
+
+  const fingerprint = legacyTaskFingerprint(task);
+  const priorImport = recordValue(current.data?.["legacyTaskStoreImport"]);
+  if (priorImport?.["fingerprint"] === fingerprint) return "skip";
+  if (task.endTime === undefined) {
+    throw new RuntimeConflictError(
+      `legacy 任务 ${task.taskId} 的终态缺少 endTime，拒绝覆盖 runtime ${current.status}`,
+    );
+  }
+
+  const legacyVersion = positiveInteger(task.data?.["runtimeVersion"]);
+  const timeComparison = Math.sign(task.endTime - current.updatedAt);
+  const versionComparison =
+    legacyVersion === undefined ? undefined : Math.sign(legacyVersion - current.version);
+
+  if (
+    versionComparison !== undefined &&
+    versionComparison !== 0 &&
+    timeComparison !== 0 &&
+    versionComparison !== timeComparison
+  ) {
+    throw new RuntimeConflictError(
+      `legacy 任务 ${task.taskId} 的版本与时间证据冲突，拒绝覆盖 runtime`,
+    );
+  }
+  if (versionComparison !== undefined && versionComparison < 0) return "skip";
+  if (timeComparison < 0) return "skip";
+  if (timeComparison === 0 && (versionComparison === undefined || versionComparison === 0)) {
+    throw new RuntimeConflictError(`legacy 任务 ${task.taskId} 与 runtime 无法判定新旧，拒绝覆盖`);
+  }
+  return "reconcile";
+}
+
+function legacyTaskFingerprint(task: LegacyTask): string {
+  return createHash("sha256").update(JSON.stringify(task)).digest("hex");
+}
+
+function legacyImportMarker(
+  task: LegacyTask,
+  fingerprint: string,
+  runtimeVersionBefore: number,
+  reconciledAt: number,
+): Record<string, unknown> {
+  return {
+    version: 1,
+    fingerprint,
+    legacyStatus: task.status,
+    ...(task.endTime !== undefined ? { legacyEndTime: task.endTime } : {}),
+    runtimeVersionBefore,
+    reconciledAt,
+  };
+}
+
+function legacyTerminalResult(task: LegacyTask, fingerprint: string): Record<string, unknown> {
+  return {
+    legacyStatus: task.status,
+    legacyTaskStoreFingerprint: fingerprint,
+    ...(task.data ?? {}),
+  };
+}
+
+function isLegacyTerminalStatus(
+  status: LegacyTask["status"],
+): status is Extract<LegacyTask["status"], "completed" | "failed" | "killed"> {
+  return status === "completed" || status === "failed" || status === "killed";
+}
+
+function positiveInteger(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : undefined;
+}
+
+function safeInteger(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) ? value : undefined;
+}
+
+function nonEmptyString(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function legacyDelegationStatus(
+  task: LegacyTask,
+): "completed" | "partial" | "error" | "timed_out" | "cancelled" {
+  const aggregate = task.data?.["aggregateStatus"];
+  if (
+    aggregate === "completed" ||
+    aggregate === "partial" ||
+    aggregate === "error" ||
+    aggregate === "timed_out" ||
+    aggregate === "cancelled"
+  ) {
+    return aggregate;
+  }
+  if (task.status === "completed") return "completed";
+  if (task.status === "killed") return "cancelled";
+  return "error";
+}
+
+function recordValue(value: unknown): Record<string, unknown> | undefined {
+  return isRecord(value) ? value : undefined;
 }
 
 function assertLegacyTaskStore(value: unknown): asserts value is LegacyTaskStoreFile {
