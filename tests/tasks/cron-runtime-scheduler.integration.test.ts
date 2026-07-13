@@ -35,6 +35,7 @@ describe("CronRuntimeScheduler integration", () => {
     const scheduler = new CronRuntimeScheduler({
       cronService: cron,
       getWorkspaceRuntime: async () => runtime,
+      canRun: async () => ({ allowed: true }),
       execute: async (_job, context) => {
         context.signal.throwIfAborted();
         return { summary: "completed by daemon runtime" };
