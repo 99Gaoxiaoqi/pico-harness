@@ -200,6 +200,90 @@ export interface JobWithAttempts {
   attempts: JobAttemptRecord[];
 }
 
+/**
+ * 后台 Job 在创建时冻结的安全边界。它是审计事实，不是可变的全局配置引用。
+ * daemon 可在每次启动 Run 前额外用当前策略重新校验此快照。
+ */
+export interface YoloPolicySnapshot {
+  mode: "yolo";
+  backgroundEnabled: true;
+  trustedWorkspace: true;
+  networkPolicy: "disabled" | "allowlist";
+  allowedNetworkHosts?: string[];
+  allowedTools: string[];
+  hardlineVersion: string;
+  hookVersion: string;
+  createdAt: number;
+}
+
+export const CRON_RUN_STATUSES = [
+  "queued",
+  "running",
+  "succeeded",
+  "failed",
+  "cancelled",
+  "blocked",
+  "skipped",
+] as const;
+export type CronRunStatus = (typeof CRON_RUN_STATUSES)[number];
+
+export const TERMINAL_CRON_RUN_STATUSES = [
+  "succeeded",
+  "failed",
+  "cancelled",
+  "blocked",
+  "skipped",
+] as const satisfies readonly CronRunStatus[];
+export type TerminalCronRunStatus = (typeof TERMINAL_CRON_RUN_STATUSES)[number];
+
+export interface CronJobRecord {
+  cronJobId: string;
+  workspacePath: string;
+  schedule: string;
+  timeZone: string;
+  prompt: string;
+  enabled: boolean;
+  policySnapshot: YoloPolicySnapshot;
+  version: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface CronRunRecord {
+  cronRunId: string;
+  cronJobId: string;
+  workspacePath: string;
+  scheduledFor: number;
+  status: CronRunStatus;
+  ownerId?: string;
+  leaseEpoch: number;
+  createdAt: number;
+  startedAt?: number;
+  finishedAt?: number;
+  reason?: string;
+  result?: Record<string, unknown>;
+  version: number;
+}
+
+export interface RuntimeEventRecord {
+  eventId: string;
+  topic: string;
+  workspacePath: string;
+  cronJobId?: string;
+  cronRunId?: string;
+  payload?: Record<string, unknown>;
+  createdAt: number;
+}
+
+export interface CronRunWithJob {
+  job: CronJobRecord;
+  run: CronRunRecord;
+}
+
+export function isTerminalCronRunStatus(status: CronRunStatus): status is TerminalCronRunStatus {
+  return (TERMINAL_CRON_RUN_STATUSES as readonly CronRunStatus[]).includes(status);
+}
+
 export function isTerminalJobStatus(status: JobStatus): status is TerminalJobStatus {
   return (TERMINAL_JOB_STATUSES as readonly JobStatus[]).includes(status);
 }

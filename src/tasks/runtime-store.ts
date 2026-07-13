@@ -9,10 +9,14 @@ import {
   JOB_COMPLETION_POLICIES,
   JOB_EXECUTION_CLASSES,
   JOB_STATUSES,
+  CRON_RUN_STATUSES,
   MERGE_REQUEST_STATUSES,
   PROVIDER_CALL_PURPOSES,
   PROVIDER_CALL_STATUSES,
   type CompletionOutboxRecord,
+  type CronJobRecord,
+  type CronRunRecord,
+  type CronRunStatus,
   type JobAttemptRecord,
   type JobCommandKind,
   type JobCommandRecord,
@@ -25,15 +29,17 @@ import {
   type MergeRequestStatus,
   type ProviderCallRecord,
   type RuntimeLeaseRecord,
+  type RuntimeEventRecord,
   type TerminalJobStatus,
   type UsageBaselineRecord,
   type UsageLedgerFilter,
   type UsageLedgerSummary,
   type UsageLedgerTotals,
+  type YoloPolicySnapshot,
   isTerminalJobStatus,
 } from "./runtime-types.js";
 
-const RUNTIME_SCHEMA_VERSION = 2;
+const RUNTIME_SCHEMA_VERSION = 3;
 const DEFAULT_LEASE_TTL_MS = 30_000;
 
 export class RuntimeConflictError extends Error {
@@ -106,6 +112,40 @@ export interface LegacyTaskImportResult {
   skipped: number;
   interrupted: number;
   quarantinePath?: string;
+}
+
+export interface CreateCronJobInput {
+  cronJobId: string;
+  workspacePath: string;
+  schedule: string;
+  timeZone: string;
+  prompt: string;
+  policySnapshot: YoloPolicySnapshot;
+  enabled?: boolean;
+}
+
+export interface CreateCronRunInput {
+  cronRunId: string;
+  cronJobId: string;
+  scheduledFor: number;
+  status: Extract<CronRunStatus, "queued" | "blocked" | "skipped">;
+  reason?: string;
+}
+
+export interface ClaimCronRunInput {
+  cronRunId: string;
+  ownerId: string;
+  leaseEpoch: number;
+}
+
+export interface FinishCronRunInput {
+  cronRunId: string;
+  ownerId: string;
+  leaseEpoch: number;
+  expectedVersion: number;
+  status: Extract<CronRunStatus, "succeeded" | "failed" | "cancelled" | "blocked">;
+  reason?: string;
+  result?: Record<string, unknown>;
 }
 
 interface JobRow {
@@ -223,6 +263,45 @@ interface BaselineRow {
   cost: number;
   imported_at: number;
   source_json: string | null;
+}
+
+interface CronJobRow {
+  cron_job_id: string;
+  workspace_path: string;
+  schedule: string;
+  time_zone: string;
+  prompt: string;
+  enabled: number;
+  policy_snapshot_json: string;
+  version: number;
+  created_at: number;
+  updated_at: number;
+}
+
+interface CronRunRow {
+  cron_run_id: string;
+  cron_job_id: string;
+  workspace_path: string;
+  scheduled_for: number;
+  status: string;
+  owner_id: string | null;
+  lease_epoch: number;
+  created_at: number;
+  started_at: number | null;
+  finished_at: number | null;
+  reason: string | null;
+  result_json: string | null;
+  version: number;
+}
+
+interface RuntimeEventRow {
+  event_id: string;
+  topic: string;
+  workspace_path: string;
+  cron_job_id: string | null;
+  cron_run_id: string | null;
+  payload_json: string | null;
+  created_at: number;
 }
 
 /** SQLite control plane for recoverable tasks. Session JSONL remains a separate source of truth. */
@@ -692,6 +771,279 @@ export class RuntimeStore {
         .prepare(`SELECT * FROM jobs ${where} ORDER BY created_at, job_id LIMIT ?`)
         .all(...values) as JobRow[]
     ).map(mapJob);
+  }
+
+  createCronJob(input: CreateCronJobInput): CronJobRecord {
+    assertYoloPolicySnapshot(input.policySnapshot);
+    const now = this.now();
+    this.db
+      .prepare(
+        `INSERT INTO cron_jobs (
+           cron_job_id, workspace_path, schedule, time_zone, prompt, enabled,
+           policy_snapshot_json, version, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+      )
+      .run(
+        input.cronJobId,
+        input.workspacePath,
+        input.schedule,
+        input.timeZone,
+        input.prompt,
+        input.enabled === false ? 0 : 1,
+        JSON.stringify(input.policySnapshot),
+        now,
+        now,
+      );
+    this.insertRuntimeEvent({
+      topic: "cron.job.created",
+      workspacePath: input.workspacePath,
+      cronJobId: input.cronJobId,
+      payload: { enabled: input.enabled !== false, schedule: input.schedule, timeZone: input.timeZone },
+    });
+    return this.requireCronJob(input.cronJobId);
+  }
+
+  getCronJob(cronJobId: string): CronJobRecord | undefined {
+    const row = this.db.prepare("SELECT * FROM cron_jobs WHERE cron_job_id = ?").get(cronJobId) as
+      | CronJobRow
+      | undefined;
+    return row ? mapCronJob(row) : undefined;
+  }
+
+  listCronJobs(input: { workspacePath?: string; enabled?: boolean } = {}): CronJobRecord[] {
+    const clauses: string[] = [];
+    const params: Array<string | number> = [];
+    if (input.workspacePath !== undefined) {
+      clauses.push("workspace_path = ?");
+      params.push(input.workspacePath);
+    }
+    if (input.enabled !== undefined) {
+      clauses.push("enabled = ?");
+      params.push(input.enabled ? 1 : 0);
+    }
+    const where = clauses.length > 0 ? ` WHERE ${clauses.join(" AND ")}` : "";
+    return (
+      this.db.prepare(`SELECT * FROM cron_jobs${where} ORDER BY created_at, cron_job_id`).all(...params) as CronJobRow[]
+    ).map(mapCronJob);
+  }
+
+  setCronJobEnabled(cronJobId: string, expectedVersion: number, enabled: boolean): CronJobRecord {
+    const current = this.requireCronJob(cronJobId);
+    const result = this.db
+      .prepare(
+        `UPDATE cron_jobs SET enabled = ?, updated_at = ?, version = version + 1
+         WHERE cron_job_id = ? AND version = ?`,
+      )
+      .run(enabled ? 1 : 0, this.now(), cronJobId, expectedVersion);
+    if (result.changes !== 1) {
+      throw new RuntimeConflictError(`Cron Job ${cronJobId} 的版本已变化`);
+    }
+    this.insertRuntimeEvent({
+      topic: enabled ? "cron.job.enabled" : "cron.job.disabled",
+      workspacePath: current.workspacePath,
+      cronJobId,
+    });
+    return this.requireCronJob(cronJobId);
+  }
+
+  /**
+   * 对同一个 schedule minute 幂等；不会回填历史分钟。若工作区已有活跃 Run，
+   * 当前触发写成 skipped，以保留完整审计而不是排队。
+   */
+  createCronRun(input: CreateCronRunInput): CronRunRecord {
+    const create = this.db.transaction(() => {
+      const job = this.requireCronJob(input.cronJobId);
+      const existing = this.db
+        .prepare("SELECT * FROM cron_runs WHERE cron_job_id = ? AND scheduled_for = ?")
+        .get(input.cronJobId, input.scheduledFor) as CronRunRow | undefined;
+      if (existing) return mapCronRun(existing);
+
+      let status = input.status;
+      let reason = input.reason;
+      if (status === "queued") {
+        const active = this.db
+          .prepare(
+            `SELECT cron_run_id FROM cron_runs
+             WHERE workspace_path = ? AND status IN ('queued', 'running') LIMIT 1`,
+          )
+          .get(job.workspacePath) as { cron_run_id: string } | undefined;
+        if (active) {
+          status = "skipped";
+          reason = "workspace_busy";
+        }
+      }
+      const now = this.now();
+      const terminalAt = status === "queued" ? null : now;
+      this.db
+        .prepare(
+          `INSERT INTO cron_runs (
+             cron_run_id, cron_job_id, workspace_path, scheduled_for, status, owner_id,
+             lease_epoch, created_at, started_at, finished_at, reason, result_json, version
+           ) VALUES (?, ?, ?, ?, ?, NULL, 0, ?, NULL, ?, ?, NULL, 1)`,
+        )
+        .run(
+          input.cronRunId,
+          input.cronJobId,
+          job.workspacePath,
+          input.scheduledFor,
+          status,
+          now,
+          terminalAt,
+          reason ?? null,
+        );
+        this.insertRuntimeEvent({
+          topic: `cron.run.${status}`,
+          workspacePath: job.workspacePath,
+          cronJobId: job.cronJobId,
+          cronRunId: input.cronRunId,
+          payload: { scheduledFor: input.scheduledFor, ...(reason ? { reason } : {}) },
+        });
+        return this.requireCronRun(input.cronRunId);
+    });
+    return create();
+  }
+
+  getCronRun(cronRunId: string): CronRunRecord | undefined {
+    const row = this.db.prepare("SELECT * FROM cron_runs WHERE cron_run_id = ?").get(cronRunId) as
+      | CronRunRow
+      | undefined;
+    return row ? mapCronRun(row) : undefined;
+  }
+
+  listCronRuns(input: { cronJobId?: string; workspacePath?: string; limit?: number } = {}): CronRunRecord[] {
+    const clauses: string[] = [];
+    const params: Array<string | number> = [];
+    if (input.cronJobId !== undefined) {
+      clauses.push("cron_job_id = ?");
+      params.push(input.cronJobId);
+    }
+    if (input.workspacePath !== undefined) {
+      clauses.push("workspace_path = ?");
+      params.push(input.workspacePath);
+    }
+    const limit = Math.max(1, Math.min(input.limit ?? 100, 10_000));
+    params.push(limit);
+    const where = clauses.length > 0 ? ` WHERE ${clauses.join(" AND ")}` : "";
+    return (
+      this.db
+        .prepare(`SELECT * FROM cron_runs${where} ORDER BY scheduled_for DESC, cron_run_id DESC LIMIT ?`)
+        .all(...params) as CronRunRow[]
+    ).map(mapCronRun);
+  }
+
+  claimCronRun(input: ClaimCronRunInput): CronRunRecord {
+    const claim = this.db.transaction(() => {
+      const current = this.requireCronRun(input.cronRunId);
+      if (current.status !== "queued") {
+        throw new RuntimeConflictError(`Cron Run ${input.cronRunId} 当前为 ${current.status}，不能启动`);
+      }
+      this.assertLease(`cron-run:${input.cronRunId}`, input.ownerId, input.leaseEpoch);
+      const now = this.now();
+      const result = this.db
+        .prepare(
+          `UPDATE cron_runs SET status = 'running', owner_id = ?, lease_epoch = ?, started_at = ?, version = version + 1
+           WHERE cron_run_id = ? AND status = 'queued' AND version = ?`,
+        )
+        .run(input.ownerId, input.leaseEpoch, now, input.cronRunId, current.version);
+      if (result.changes !== 1) throw new RuntimeConflictError(`Cron Run ${input.cronRunId} 启动 CAS 失败`);
+      this.insertRuntimeEvent({
+        topic: "cron.run.running",
+        workspacePath: current.workspacePath,
+        cronJobId: current.cronJobId,
+        cronRunId: current.cronRunId,
+      });
+      return this.requireCronRun(input.cronRunId);
+    });
+    return claim();
+  }
+
+  finishCronRun(input: FinishCronRunInput): CronRunRecord {
+    const finish = this.db.transaction(() => {
+      const current = this.requireCronRun(input.cronRunId);
+      if (
+        current.status !== "running" ||
+        current.ownerId !== input.ownerId ||
+        current.leaseEpoch !== input.leaseEpoch ||
+        current.version !== input.expectedVersion
+      ) {
+        throw new RuntimeConflictError(`Cron Run ${input.cronRunId} 的 owner/version/lease 已变化`);
+      }
+      this.assertLease(`cron-run:${input.cronRunId}`, input.ownerId, input.leaseEpoch);
+      const now = this.now();
+      const result = this.db
+        .prepare(
+          `UPDATE cron_runs SET status = ?, finished_at = ?, reason = ?, result_json = ?, version = version + 1
+           WHERE cron_run_id = ? AND status = 'running' AND version = ? AND owner_id = ? AND lease_epoch = ?`,
+        )
+        .run(
+          input.status,
+          now,
+          input.reason ?? null,
+          stringifyJson(input.result),
+          input.cronRunId,
+          input.expectedVersion,
+          input.ownerId,
+          input.leaseEpoch,
+        );
+      if (result.changes !== 1) throw new RuntimeConflictError(`Cron Run ${input.cronRunId} 收口 CAS 失败`);
+      this.insertRuntimeEvent({
+        topic: `cron.run.${input.status}`,
+        workspacePath: current.workspacePath,
+        cronJobId: current.cronJobId,
+        cronRunId: current.cronRunId,
+        payload: { ...(input.reason ? { reason: input.reason } : {}) },
+      });
+      return this.requireCronRun(input.cronRunId);
+    });
+    return finish();
+  }
+
+  blockQueuedCronRun(cronRunId: string, reason: string): CronRunRecord {
+    const block = this.db.transaction(() => {
+      const current = this.requireCronRun(cronRunId);
+      if (current.status === "blocked") return current;
+      if (current.status !== "queued") {
+        throw new RuntimeConflictError(`Cron Run ${cronRunId} 已进入 ${current.status}，不能阻断`);
+      }
+      const now = this.now();
+      const result = this.db
+        .prepare(
+          `UPDATE cron_runs SET status = 'blocked', reason = ?, finished_at = ?, version = version + 1
+           WHERE cron_run_id = ? AND status = 'queued' AND version = ?`,
+        )
+        .run(reason, now, cronRunId, current.version);
+      if (result.changes !== 1) throw new RuntimeConflictError(`Cron Run ${cronRunId} 阻断 CAS 失败`);
+      this.insertRuntimeEvent({
+        topic: "cron.run.blocked",
+        workspacePath: current.workspacePath,
+        cronJobId: current.cronJobId,
+        cronRunId,
+        payload: { reason },
+      });
+      return this.requireCronRun(cronRunId);
+    });
+    return block();
+  }
+
+  listRuntimeEvents(input: { afterEventId?: string; workspacePath?: string; limit?: number } = {}): RuntimeEventRecord[] {
+    const clauses: string[] = [];
+    const params: Array<string | number> = [];
+    if (input.afterEventId !== undefined) {
+      clauses.push("event_id > ?");
+      params.push(input.afterEventId);
+    }
+    if (input.workspacePath !== undefined) {
+      clauses.push("workspace_path = ?");
+      params.push(input.workspacePath);
+    }
+    const limit = Math.max(1, Math.min(input.limit ?? 100, 10_000));
+    params.push(limit);
+    const where = clauses.length > 0 ? ` WHERE ${clauses.join(" AND ")}` : "";
+    return (
+      this.db
+        .prepare(`SELECT * FROM runtime_events${where} ORDER BY created_at, event_id LIMIT ?`)
+        .all(...params) as RuntimeEventRow[]
+    ).map(mapRuntimeEvent);
   }
 
   insertCommand(input: {
@@ -1269,6 +1621,12 @@ export class RuntimeStore {
           .prepare("INSERT INTO schema_migrations(version, name, applied_at) VALUES (2, ?, ?)")
           .run("merge_not_needed_status", this.now());
       }
+      if (current < 3) {
+        this.db.exec(SCHEMA_V3);
+        this.db
+          .prepare("INSERT INTO schema_migrations(version, name, applied_at) VALUES (3, ?, ?)")
+          .run("cron_job_run_ledger", this.now());
+      }
     });
     migrate();
   }
@@ -1369,6 +1727,50 @@ export class RuntimeStore {
       .get(baselineId) as BaselineRow | undefined;
     if (!row) throw new Error(`未知 usage baseline: ${baselineId}`);
     return mapBaseline(row);
+  }
+
+  private requireCronJob(cronJobId: string): CronJobRecord {
+    const job = this.getCronJob(cronJobId);
+    if (!job) throw new Error(`未知 Cron Job: ${cronJobId}`);
+    return job;
+  }
+
+  private requireCronRun(cronRunId: string): CronRunRecord {
+    const run = this.getCronRun(cronRunId);
+    if (!run) throw new Error(`未知 Cron Run: ${cronRunId}`);
+    return run;
+  }
+
+  private insertRuntimeEvent(input: Omit<RuntimeEventRecord, "eventId" | "createdAt"> & {
+    eventId?: string;
+    createdAt?: number;
+  }): RuntimeEventRecord {
+    const eventId = input.eventId ?? generateRuntimeId("event");
+    const createdAt = input.createdAt ?? this.now();
+    this.db
+      .prepare(
+        `INSERT INTO runtime_events (
+           event_id, topic, workspace_path, cron_job_id, cron_run_id, payload_json, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        eventId,
+        input.topic,
+        input.workspacePath,
+        input.cronJobId ?? null,
+        input.cronRunId ?? null,
+        stringifyJson(input.payload),
+        createdAt,
+      );
+    return {
+      eventId,
+      topic: input.topic,
+      workspacePath: input.workspacePath,
+      ...(input.cronJobId ? { cronJobId: input.cronJobId } : {}),
+      ...(input.cronRunId ? { cronRunId: input.cronRunId } : {}),
+      ...(input.payload ? { payload: input.payload } : {}),
+      createdAt,
+    };
   }
 }
 
@@ -1531,6 +1933,52 @@ const SCHEMA_V2 = `
   CREATE INDEX merge_requests_job_idx ON merge_requests(job_id, created_at);
 `;
 
+const SCHEMA_V3 = `
+  CREATE TABLE cron_jobs (
+    cron_job_id TEXT PRIMARY KEY,
+    workspace_path TEXT NOT NULL,
+    schedule TEXT NOT NULL,
+    time_zone TEXT NOT NULL,
+    prompt TEXT NOT NULL,
+    enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+    policy_snapshot_json TEXT NOT NULL,
+    version INTEGER NOT NULL CHECK (version > 0),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  CREATE INDEX cron_jobs_workspace_enabled_idx ON cron_jobs(workspace_path, enabled, created_at);
+
+  CREATE TABLE cron_runs (
+    cron_run_id TEXT PRIMARY KEY,
+    cron_job_id TEXT NOT NULL REFERENCES cron_jobs(cron_job_id) ON DELETE CASCADE,
+    workspace_path TEXT NOT NULL,
+    scheduled_for INTEGER NOT NULL,
+    status TEXT NOT NULL CHECK (status IN (${sqlValues(CRON_RUN_STATUSES)})),
+    owner_id TEXT,
+    lease_epoch INTEGER NOT NULL CHECK (lease_epoch >= 0),
+    created_at INTEGER NOT NULL,
+    started_at INTEGER,
+    finished_at INTEGER,
+    reason TEXT,
+    result_json TEXT,
+    version INTEGER NOT NULL CHECK (version > 0),
+    UNIQUE(cron_job_id, scheduled_for)
+  );
+  CREATE INDEX cron_runs_job_scheduled_idx ON cron_runs(cron_job_id, scheduled_for DESC);
+  CREATE INDEX cron_runs_workspace_status_idx ON cron_runs(workspace_path, status, scheduled_for);
+
+  CREATE TABLE runtime_events (
+    event_id TEXT PRIMARY KEY,
+    topic TEXT NOT NULL,
+    workspace_path TEXT NOT NULL,
+    cron_job_id TEXT REFERENCES cron_jobs(cron_job_id) ON DELETE SET NULL,
+    cron_run_id TEXT REFERENCES cron_runs(cron_run_id) ON DELETE SET NULL,
+    payload_json TEXT,
+    created_at INTEGER NOT NULL
+  );
+  CREATE INDEX runtime_events_workspace_cursor_idx ON runtime_events(workspace_path, created_at, event_id);
+`;
+
 function mapJob(row: JobRow): JobRecord {
   return compact({
     jobId: row.job_id,
@@ -1690,6 +2138,87 @@ function mapBaseline(row: BaselineRow): UsageBaselineRecord {
     importedAt: row.imported_at,
     source: parseJsonRecord(row.source_json),
   });
+}
+
+function mapCronJob(row: CronJobRow): CronJobRecord {
+  return {
+    cronJobId: row.cron_job_id,
+    workspacePath: row.workspace_path,
+    schedule: row.schedule,
+    timeZone: row.time_zone,
+    prompt: row.prompt,
+    enabled: row.enabled === 1,
+    policySnapshot: parseYoloPolicySnapshot(row.policy_snapshot_json),
+    version: row.version,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function mapCronRun(row: CronRunRow): CronRunRecord {
+  return compact({
+    cronRunId: row.cron_run_id,
+    cronJobId: row.cron_job_id,
+    workspacePath: row.workspace_path,
+    scheduledFor: row.scheduled_for,
+    status: row.status as CronRunStatus,
+    ownerId: nullToUndefined(row.owner_id),
+    leaseEpoch: row.lease_epoch,
+    createdAt: row.created_at,
+    startedAt: nullToUndefined(row.started_at),
+    finishedAt: nullToUndefined(row.finished_at),
+    reason: nullToUndefined(row.reason),
+    result: parseJsonRecord(row.result_json),
+    version: row.version,
+  });
+}
+
+function mapRuntimeEvent(row: RuntimeEventRow): RuntimeEventRecord {
+  return compact({
+    eventId: row.event_id,
+    topic: row.topic,
+    workspacePath: row.workspace_path,
+    cronJobId: nullToUndefined(row.cron_job_id),
+    cronRunId: nullToUndefined(row.cron_run_id),
+    payload: parseJsonRecord(row.payload_json),
+    createdAt: row.created_at,
+  });
+}
+
+function parseYoloPolicySnapshot(value: string): YoloPolicySnapshot {
+  const parsed = JSON.parse(value) as unknown;
+  assertYoloPolicySnapshot(parsed);
+  return parsed;
+}
+
+function assertYoloPolicySnapshot(value: unknown): asserts value is YoloPolicySnapshot {
+  if (!isRecord(value)) throw new Error("Cron Job 的 policySnapshot 必须是对象");
+  if (
+    value["mode"] !== "yolo" ||
+    value["backgroundEnabled"] !== true ||
+    value["trustedWorkspace"] !== true ||
+    (value["networkPolicy"] !== "disabled" && value["networkPolicy"] !== "allowlist") ||
+    !Array.isArray(value["allowedTools"]) ||
+    !value["allowedTools"].every((tool) => typeof tool === "string") ||
+    typeof value["hardlineVersion"] !== "string" ||
+    typeof value["hookVersion"] !== "string" ||
+    typeof value["createdAt"] !== "number"
+  ) {
+    throw new Error("Cron Job 仅支持可信工作区的 yolo background policySnapshot");
+  }
+  if (
+    value["networkPolicy"] === "disabled" &&
+    value["allowedNetworkHosts"] !== undefined
+  ) {
+    throw new Error("networkPolicy=disabled 时不得声明 allowedNetworkHosts");
+  }
+  if (
+    value["networkPolicy"] === "allowlist" &&
+    (!Array.isArray(value["allowedNetworkHosts"]) ||
+      !value["allowedNetworkHosts"].every((host) => typeof host === "string"))
+  ) {
+    throw new Error("networkPolicy=allowlist 时必须提供 allowedNetworkHosts");
+  }
 }
 
 function stringifyJson(value: Record<string, unknown> | undefined): string | null {
