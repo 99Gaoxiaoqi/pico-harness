@@ -15,7 +15,7 @@
 
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { chmod, mkdir, open, readFile, stat, type FileHandle } from "node:fs/promises";
+import { chmod, mkdir, open, readFile, type FileHandle } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type { Message } from "../schema/message.js";
@@ -671,11 +671,12 @@ export class SessionStore {
     try {
       file = await open(
         this.filePath,
-        constants.O_APPEND | constants.O_CREAT | constants.O_WRONLY,
+        constants.O_APPEND | constants.O_CREAT | constants.O_RDWR,
         0o600,
       );
       await chmod(this.filePath, 0o600);
-      const existing = await stat(this.filePath);
+      await repairTornJournalTail(file);
+      const existing = await file.stat();
       if (existing.size === 0) {
         const metadata = this.createMetadata();
         await writeAll(
@@ -745,6 +746,7 @@ export class SessionStore {
       throw error;
     }
     const lines = content.split("\n");
+    const hasTornTail = content.length > 0 && !content.endsWith("\n");
     if (lines.at(-1) === "") lines.pop();
     const records: Array<LegacySessionRecord | SessionEvent> = [];
     let metadata: SessionMetadata | SessionMetaV3 | undefined;
@@ -762,7 +764,7 @@ export class SessionStore {
           parsed = candidate as SessionRecord;
         }
       } catch (error) {
-        if (index === lines.length - 1) break;
+        if (index === lines.length - 1 && hasTornTail) break;
         if (strict) {
           throw new SessionJournalIntegrityError(
             `Session journal line ${index + 1} is corrupt: ${String(error)}`,
@@ -783,6 +785,38 @@ export class SessionStore {
     this.epoch = records.reduce((current, record) => effectiveEpoch(record, current), 0);
     return { records, ...(metadata ? { metadata } : {}) };
   }
+}
+
+/**
+ * Writer lease 内修复唯一可兼容的物理损坏：未以换行结束的末行。
+ * 完整 JSON 只补换行；无法解析的残尾截断到上一条耐久记录边界。
+ * 中间行不在此处修复，后续 strict replay 会 fail-closed。
+ */
+async function repairTornJournalTail(file: FileHandle): Promise<void> {
+  const { size } = await file.stat();
+  if (size === 0) return;
+
+  const bytes = Buffer.allocUnsafe(size);
+  let offset = 0;
+  while (offset < size) {
+    const { bytesRead } = await file.read(bytes, offset, size - offset, offset);
+    if (bytesRead <= 0) throw new Error("Session journal read made no progress");
+    offset += bytesRead;
+  }
+  if (bytes[bytes.length - 1] === 0x0a) return;
+
+  const tailStart = bytes.lastIndexOf(0x0a) + 1;
+  const tail = bytes.subarray(tailStart).toString("utf8");
+  try {
+    JSON.parse(tail);
+  } catch {
+    await file.truncate(tailStart);
+    await file.datasync();
+    return;
+  }
+
+  await writeAll(file, Buffer.from("\n", "utf8"));
+  await file.datasync();
 }
 
 function recordEventId(record: LegacySessionRecord | SessionEvent): string {

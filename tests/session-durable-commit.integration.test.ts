@@ -51,6 +51,31 @@ describe("Session durable commit integration", () => {
     await reopened.close();
   });
 
+  it("repairs a torn JSONL tail before appending and strictly replays the new event", async () => {
+    const filePath = join(workDir, ".claw", "sessions", "torn-tail.jsonl");
+    const identity = createSessionIdentity({ sessionId: "torn-tail", cwd: workDir });
+    const first = new SessionStore(filePath, identity);
+    await first.commitMessage({ role: "user", content: "before crash" });
+    await first.close();
+
+    await writeFile(filePath, '{"type":"event","recordVersion":1', { flag: "a" });
+
+    const recovered = new SessionStore(filePath, identity);
+    const appended = await recovered.commitMessage({ role: "assistant", content: "after crash" });
+    expect(appended.cursor.seq).toBe(1);
+    await recovered.close();
+
+    const replayed = await new SessionStore(filePath, identity).loadStrict();
+    expect(replayed).toHaveLength(2);
+    expect(
+      replayed.map((record) =>
+        record.type === "event" && record.kind === "message.appended"
+          ? record.data.message.content
+          : undefined,
+      ),
+    ).toEqual(["before crash", "after crash"]);
+  });
+
   it("reuses a stable eventId without allocating a seq and rejects mismatched payloads", async () => {
     const filePath = join(workDir, ".claw", "sessions", "idempotent.jsonl");
     const store = new SessionStore(filePath, undefined, { maxWriteBytes: 3 });
@@ -75,7 +100,7 @@ describe("Session durable commit integration", () => {
     await store.close();
   });
 
-  it("rejects seq gaps and becomes fail-closed when durability is uncertain", async () => {
+  it("rejects non-torn corruption and becomes fail-closed when durability is uncertain", async () => {
     const corruptPath = join(workDir, "gap.jsonl");
     await writeFile(
       corruptPath,
@@ -87,6 +112,20 @@ describe("Session durable commit integration", () => {
       "utf8",
     );
     await expect(new SessionStore(corruptPath).loadStrict()).rejects.toBeInstanceOf(
+      SessionJournalIntegrityError,
+    );
+
+    const malformedPath = join(workDir, "malformed-complete-line.jsonl");
+    await writeFile(
+      malformedPath,
+      [
+        JSON.stringify({ type: "message", seq: 0, message: { role: "user", content: "a" } }),
+        '{"type":"message"',
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    await expect(new SessionStore(malformedPath).openWriter()).rejects.toBeInstanceOf(
       SessionJournalIntegrityError,
     );
 
