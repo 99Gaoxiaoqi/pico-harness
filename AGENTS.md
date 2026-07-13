@@ -61,3 +61,7 @@
 - [x] 阶段 5-7:历史功能迭代已收口，当前公开产品边界以 TUI 为准
 - [x] 阶段 8:TUI-only 文档与产品边界收口
 - [x] 阶段 9:OpenCode 风格模型路由 + Claude Code 风格 Rewind / 审批 / 单一模式
+- [x] 阶段 10-13:TUI 可靠执行、主会话放权、worker 隔离、代理编排与 MCP 生命周期
+- [x] 阶段 14:Session 选择性事件溯源 + Catalog/FTS 可重建投影
+- [x] 阶段 15:可恢复任务运行时 + CAS/sidecar v2 + rewind/fork Saga
+- [x] 阶段 16:Provider 用量账本 + StorageDoctor + Retention/GC 治理
