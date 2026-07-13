@@ -28,6 +28,7 @@ import {
   SessionStore,
   SessionWriteUncertainError,
   type CommitReceipt,
+  type SessionCursor,
   type SessionLineage,
   type SessionRecord,
 } from "./session-store.js";
@@ -145,6 +146,13 @@ export interface SessionOptions {
   memorySearchStore?: ConversationSearchStore;
   /** Catalog 是 JSONL 的可重建投影；false 仅供无持久测试显式关闭。 */
   sessionCatalog?: SessionCatalog | false;
+}
+
+/** fork 只读边界：hydration 与父日志游标必须指向同一次 durable flush。 */
+export interface DurableSessionForkSnapshot {
+  readonly hydration: SessionHydrationSnapshot;
+  readonly cursor: SessionCursor;
+  readonly rootLogId: string;
 }
 
 /**
@@ -659,6 +667,61 @@ export class Session implements SessionRuntimePersistence {
     };
     const barrier = this.persistenceTail;
     return barrier.then(() => snapshot);
+  }
+
+  /**
+   * 在 fork 前把 source 的兼容写、JSONL 和 Catalog 队列全部 drain，
+   * 再从同一条 JSONL 真源解析精确 head。返回后 source 可继续追加，
+   * 调用方必须以 cursor 作为已冻结 bundle 的父边界。
+   */
+  async readDurableForkSnapshot(): Promise<DurableSessionForkSnapshot> {
+    await this.flushPersistence();
+    const hydration = await this.readHydrationSnapshot();
+    const store = this.store;
+    if (!store || hydration.persistenceSequence === null) {
+      throw new Error(`Session ${this.id} 还没有可用于 fork 的 durable event`);
+    }
+
+    const journal = await store.inspectJournal({ strict: true });
+    const record = journal.records.find(
+      (candidate) => candidate.seq === hydration.persistenceSequence,
+    );
+    if (!record) {
+      throw new Error(
+        `Session ${this.id} 的 fork 游标 ${hydration.persistenceSequence} 无法从 JSONL 恢复`,
+      );
+    }
+    let epoch = 0;
+    let rootLogId = store.getLogId();
+    if (journal.metadata && "lineage" in journal.metadata) {
+      rootLogId = journal.metadata.lineage.rootLogId;
+    }
+    for (const candidate of journal.records) {
+      if (candidate.seq > record.seq) break;
+      if (candidate.type === "event") {
+        epoch = Math.max(epoch, candidate.epoch);
+        if (candidate.kind === "session.seeded" && candidate.data.lineage) {
+          rootLogId = candidate.data.lineage.rootLogId;
+        }
+      } else if (
+        candidate.type === "truncate" ||
+        candidate.type === "undo" ||
+        candidate.type === "rewind_to"
+      ) {
+        epoch++;
+      }
+    }
+    return {
+      hydration,
+      rootLogId,
+      cursor: {
+        logId: store.getLogId(),
+        seq: record.seq,
+        epoch,
+        eventId:
+          record.type === "event" ? record.eventId : `legacy:${record.seq}:${record.type}`,
+      },
+    };
   }
 
   private getUsageSnapshot(): SessionUsageSnapshot {

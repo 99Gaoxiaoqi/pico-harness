@@ -39,7 +39,6 @@ import { runAgentFromCli } from "../cli/run-agent.js";
 import { listRewindPointSummaries } from "../cli/file-history.js";
 import {
   createCliSessionId,
-  removeCliSessionFile,
   type CliSessionSelection,
 } from "../cli/session-resolver.js";
 import { loadPicoConfig } from "../input/pico-config.js";
@@ -70,17 +69,18 @@ import type { ToolDisclosure } from "../tools/tool-disclosure.js";
 import {
   forgetSessionSettings,
   coordinateSessionReasoningLevel,
+  DEFAULT_INTERACTION_MODE,
   effectiveSessionReasoningLevel,
   getOrCreateSessionSettings,
   setSessionAdditionalDirectories,
   setSessionMode,
-  setSessionTitle,
   setSessionTools,
   toolStatusFromRegistry,
   type SessionSettings,
 } from "../input/session-settings.js";
 import { WorkspaceRoots } from "../tools/workspace-roots.js";
 import { globalSessionManager, type Session } from "../engine/session.js";
+import { SessionForkService } from "../engine/session-fork-service.js";
 import type { SteerQueue } from "../engine/steer-queue.js";
 import { McpConnectionManager, type McpStatusSnapshot } from "../mcp/manager.js";
 import { hasLocalUiCommandAction } from "./local-ui-command.js";
@@ -719,11 +719,22 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
   const buildSessionBundleUnsafe = async (
     selection: CliSessionSelection,
   ): Promise<TuiSessionBundle> => {
-    const session = await globalSessionManager.getOrCreate(selection.sessionId, opts.workDir);
-    const forkSourceTitle =
-      selection.mode === "fork" && selection.sourceSessionId
-        ? await seedTuiFork(session, selection.sourceSessionId, opts.workDir)
-        : undefined;
+    let session = globalSessionManager.get(selection.sessionId, opts.workDir);
+    if (selection.mode === "fork" && selection.sourceSessionId && !session) {
+      const targetPath = `${opts.workDir}/.claw/sessions/${selection.sessionId}.jsonl`;
+      const targetPublished = await access(targetPath).then(
+        () => true,
+        () => false,
+      );
+      if (!targetPublished) {
+        await new SessionForkService({ workDir: opts.workDir }).fork({
+          sourceSessionId: selection.sourceSessionId,
+          targetSessionId: selection.sessionId,
+          targetMode: DEFAULT_INTERACTION_MODE,
+        });
+      }
+    }
+    session ??= await globalSessionManager.getOrCreate(selection.sessionId, opts.workDir);
 
     // 在 route / WorkspaceRoots / provider 装配前先冻结 Session 的消息与运行态。
     const hydration = await session.readHydrationSnapshot();
@@ -738,11 +749,16 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     const initialRoute =
       modelRouter.resolve(requestedModel) ??
       modelRouter.require(restoredSettings?.model ?? picoConfig.model);
-    const workspaceRoots = await WorkspaceRoots.create(opts.workDir, [
-      ...picoConfig.additionalDirectories,
-      ...(opts.addDirs ?? []),
-      ...(restoredSettings?.additionalDirectories ?? []),
-    ]);
+    const workspaceRoots = await WorkspaceRoots.create(
+      opts.workDir,
+      selection.mode === "fork"
+        ? []
+        : [
+            ...picoConfig.additionalDirectories,
+            ...(opts.addDirs ?? []),
+            ...(restoredSettings?.additionalDirectories ?? []),
+          ],
+    );
     const runtimeState = await createTuiRuntimeState({
       workDir: opts.workDir,
       sessionId: selection.sessionId,
@@ -797,9 +813,6 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         },
         { persistence: session },
       );
-      if (selection.mode === "fork" && forkSourceTitle) {
-        setSessionTitle(settings, forkTitleFrom(forkSourceTitle));
-      }
       coordinateSessionReasoningLevel(settings, modelRouter);
       setSessionAdditionalDirectories(settings, workspaceRoots.list().slice(1));
 
@@ -1519,37 +1532,6 @@ async function discardFailedTuiFork(sessionId: string, workDir: string): Promise
   const orphan = globalSessionManager.delete(sessionId, workDir);
   await orphan?.close();
   forgetSessionSettings(sessionId);
-  await removeCliSessionFile(workDir, sessionId);
-}
-
-async function seedTuiFork(
-  target: Session,
-  sourceSessionId: string,
-  workDir: string,
-): Promise<string | undefined> {
-  if (target.length > 0) return undefined;
-  const source = await globalSessionManager.getOrCreate(sourceSessionId, workDir);
-  const snapshot = await source.readHydrationSnapshot();
-  await target.seedForkFrom(source, snapshot.messages);
-  if (snapshot.runtime.settings) {
-    target.updateRuntimeState({
-      settings: { ...snapshot.runtime.settings, forkFrom: sourceSessionId },
-    });
-  }
-  if (snapshot.runtime.goal) {
-    target.updateRuntimeState({ goal: snapshot.runtime.goal });
-  }
-  await target.flushPersistence();
-  return (
-    snapshot.runtime.settings?.title ??
-    snapshot.messages.find((message) => message.role === "user" && message.content.trim())?.content
-  );
-}
-
-function forkTitleFrom(sourceTitle: string): string {
-  const compacted = sourceTitle.replace(/\s+/gu, " ").trim();
-  const prefix = "Fork of ";
-  return `${prefix}${compacted.slice(0, 120 - prefix.length)}`;
 }
 
 export function createTuiUpdateScheduler<T>(

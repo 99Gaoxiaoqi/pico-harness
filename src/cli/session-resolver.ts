@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { SessionStore } from "../engine/session-store.js";
 import { replaySessionRecords } from "../engine/session-reducer.js";
+import { reconcileUnfinishedSessionForks } from "../engine/session-fork-service.js";
 import { isMessageHiddenFromTranscript } from "../schema/message.js";
 import { rememberResolvedCliSession } from "../input/session-settings.js";
 import type { SessionCatalog, SessionCatalogEntry } from "../storage/session-catalog.js";
@@ -62,6 +63,7 @@ interface SessionFileInfo {
 export async function resolveCliSession(
   options: ResolveCliSessionOptions,
 ): Promise<CliSessionSelection> {
+  await reconcileUnfinishedSessionForks(options.workDir);
   assertSingleSessionMode(options);
 
   if (options.resumeSession) {
@@ -113,6 +115,7 @@ export async function listCliSessionSummaries(
   workDir: string,
   options: ListCliSessionSummariesOptions = {},
 ): Promise<CliSessionSummary[]> {
+  await reconcileUnfinishedSessionForks(workDir);
   const projector =
     options.projector ??
     (options.catalog

@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { lstat, mkdir, readdir, realpath } from "node:fs/promises";
+import { lstat, mkdir, readdir, realpath, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { AgentEngine } from "../engine/loop.js";
 import type { GoalManager } from "../engine/goal-manager.js";
 import { globalSessionManager, type Session } from "../engine/session.js";
+import { SessionForkService } from "../engine/session-fork-service.js";
 import { TerminalReporter, type Reporter } from "../engine/reporter.js";
 import { Compactor } from "../context/compactor.js";
 import { FullCompactor } from "../context/full-compactor.js";
@@ -75,6 +76,7 @@ import { loadHooksConfig } from "../hooks/config.js";
 import { HookRunner } from "../hooks/runner.js";
 import {
   getOrCreateSessionSettings,
+  DEFAULT_INTERACTION_MODE,
   exitSessionPlanMode,
   setSessionAdditionalDirectories,
   toolStatusFromRegistry,
@@ -197,18 +199,53 @@ export async function runAgentFromCli(
     }));
   const defaultConfigModel =
     options.model ?? (dependencies.env ?? process.env).LLM_MODEL ?? defaultModel(kind);
+  const existingSession = globalSessionManager.get(sessionSelection.sessionId, workDir);
+  const targetPublished = await stat(
+    join(workDir, ".claw", "sessions", `${sessionSelection.sessionId}.jsonl`),
+  ).then(
+    (info) => info.isFile(),
+    () => false,
+  );
+  if (
+    !resumeExistingSession &&
+    !existingSession &&
+    !targetPublished &&
+    sessionSelection.mode === "fork" &&
+    sessionSelection.sourceSessionId
+  ) {
+    await new SessionForkService({ workDir }).fork({
+      sourceSessionId: sessionSelection.sourceSessionId,
+      targetSessionId: sessionSelection.sessionId,
+      targetMode: options.planMode === true ? "plan" : DEFAULT_INTERACTION_MODE,
+    });
+  }
+  const session = resumeExistingSession
+    ? globalSessionManager.get(sessionSelection.sessionId, workDir)
+    : (existingSession ??
+      (await globalSessionManager.getOrCreate(sessionSelection.sessionId, workDir)));
+  if (!session) {
+    throw new Error(`Cannot resume missing session: ${sessionSelection.sessionId}`);
+  }
+  if (resumeExistingSession && dependencies.runtimeState === undefined) {
+    throw new Error("resumeExistingSession requires an existing runtimeState.");
+  }
   const settings = getOrCreateSessionSettings({
     sessionId: sessionSelection.sessionId,
     cwd: workDir,
     provider: kind,
     model: defaultConfigModel,
     ...(options.thinkingEffort !== undefined ? { thinkingEffort: options.thinkingEffort } : {}),
-  });
-  const workspaceRoots = await WorkspaceRoots.create(workDir, [
-    ...configuredAdditionalDirectories,
-    ...(options.addDirs ?? []),
-    ...settings.additionalDirectories,
-  ]);
+  }, { persistence: session });
+  const workspaceRoots = await WorkspaceRoots.create(
+    workDir,
+    sessionSelection.mode === "fork"
+      ? []
+      : [
+          ...configuredAdditionalDirectories,
+          ...(options.addDirs ?? []),
+          ...settings.additionalDirectories,
+        ],
+  );
   setSessionAdditionalDirectories(settings, workspaceRoots.list().slice(1));
   const traceEnabled =
     options.trace === true || isTruthyEnv((dependencies.env ?? process.env).PICO_TRACE);
@@ -232,22 +269,6 @@ export async function runAgentFromCli(
     dependencies.env ?? process.env,
     dependencies.provider !== undefined,
   );
-  const session = resumeExistingSession
-    ? globalSessionManager.get(sessionSelection.sessionId, workDir)
-    : await globalSessionManager.getOrCreate(sessionSelection.sessionId, workDir);
-  if (!session) {
-    throw new Error(`Cannot resume missing session: ${sessionSelection.sessionId}`);
-  }
-  if (resumeExistingSession && dependencies.runtimeState === undefined) {
-    throw new Error("resumeExistingSession requires an existing runtimeState.");
-  }
-  if (
-    !resumeExistingSession &&
-    sessionSelection.mode === "fork" &&
-    sessionSelection.sourceSessionId
-  ) {
-    await seedForkedSession(session, sessionSelection.sourceSessionId, workDir);
-  }
   const ownsRuntimeState = dependencies.runtimeState === undefined;
   const runtimeState =
     dependencies.runtimeState ??
@@ -1107,18 +1128,6 @@ function normalizePrompt(prompt: string): string {
   }
 
   return prompt;
-}
-
-async function seedForkedSession(
-  target: Session,
-  sourceSessionId: string,
-  workDir: string,
-): Promise<void> {
-  if (target.length > 0) return;
-
-  const source = await globalSessionManager.getOrCreate(sourceSessionId, workDir);
-  const history = source.getHistory();
-  await target.seedForkFrom(source, history);
 }
 
 function defaultModel(kind: ProviderKind): string {
