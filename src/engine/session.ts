@@ -1116,29 +1116,31 @@ export class Session implements SessionRuntimePersistence {
   ): Promise<void> {
     await this.flushPersistence();
     const coordinator = this.createRewindCoordinator();
-    const files =
-      mode === "conversation"
-        ? []
-        : await this.buildRewindFileTransitions(snapshot.messageId);
-    const head = this.store?.getHeadCursor();
-    const operation = await coordinator.execute({
-      operationId,
-      kind: "rewind",
-      sessionId: this.id,
-      mode,
-      precondition: {
-        sessionLastSeq: Math.max(0, head?.seq ?? 0),
-        effectiveHistoryDigest: sessionHistoryDigest(this.history),
-        fileHistoryRevision: this.fileHistory.revision,
-      },
-      target: {
-        messageId: snapshot.messageId,
-        ...(snapshot.sourceMessageEventId
-          ? { sourceMessageEventId: snapshot.sourceMessageEventId }
-          : {}),
-        messageIndex,
-      },
-      files,
+    const operation = await coordinator.executePrepared(async () => {
+      const files =
+        mode === "conversation"
+          ? []
+          : await this.buildRewindFileTransitions(snapshot.messageId);
+      const head = this.store?.getHeadCursor();
+      return {
+        operationId,
+        kind: "rewind",
+        sessionId: this.id,
+        mode,
+        precondition: {
+          sessionLastSeq: Math.max(0, head?.seq ?? 0),
+          effectiveHistoryDigest: sessionHistoryDigest(this.history),
+          fileHistoryRevision: this.fileHistory.revision,
+        },
+        target: {
+          messageId: snapshot.messageId,
+          ...(snapshot.sourceMessageEventId
+            ? { sourceMessageEventId: snapshot.sourceMessageEventId }
+            : {}),
+          messageIndex,
+        },
+        files,
+      };
     });
     if (operation.state === "needs_attention") {
       const conflicts = operation.error?.conflictingPaths?.join(", ");
