@@ -22,7 +22,7 @@ import {
 } from "../schema/message.js";
 import type { CostStatus } from "../observability/pricing.js";
 import { logger } from "../observability/logger.js";
-import { SessionStore } from "./session-store.js";
+import { SessionStore, SessionWriteUncertainError, type CommitReceipt } from "./session-store.js";
 import { findLegacyUndoCut, replaySessionRecords } from "./session-reducer.js";
 import { createSessionIdentity, type SessionIdentity } from "./session-identity.js";
 import type { GoalManager } from "./goal-manager.js";
@@ -187,7 +187,9 @@ export class Session implements SessionRuntimePersistence {
    * 再串行接到 tail，因此物理落盘顺序与逻辑调用顺序一致。
    */
   private persistenceTail: Promise<void> = Promise.resolve();
-  private lifecycle: "open" | "closing" | "closed" = "open";
+  private compatibilityAppendTail: Promise<void> = Promise.resolve();
+  private lifecycle: "open" | "write_uncertain" | "closing" | "closed" = "open";
+  private persistenceFailure?: SessionWriteUncertainError;
   private closePromise?: Promise<void>;
 
   private persistedSettings?: PersistedSessionSettings;
@@ -340,14 +342,15 @@ export class Session implements SessionRuntimePersistence {
     }
     let records;
     try {
-      records = await this.store.load();
+      await this.store.openWriter();
+      records = await this.store.loadStrict();
+      this.conversationId = `${this.store.getLogId()}:${this.store.getEpoch()}`;
     } catch (error) {
-      // 兜底:load 内部已对中间行损坏改为跳过+warn,这里只会捕获未预期的致命错误
-      logger.warn({ error: String(error) }, "[session] 日志重放失败,降级为空历史");
-      return;
+      this.markWriteUncertain("Session journal open/replay failed", error);
+      throw error;
     }
     if (records.length === 0) {
-      this.rebuildSearchIndex();
+      this.rebuildSearchIndex(this.store.getHeadCursor());
       return;
     }
 
@@ -365,11 +368,15 @@ export class Session implements SessionRuntimePersistence {
     // accessCount 归零)。避免恢复后已有 ToolResult 丢失年龄追踪。
     this.rebuildToolResultMeta();
     this.nextSeq = replay.maxSeq + 1;
-    this.rebuildSearchIndex();
+    this.rebuildSearchIndex(this.store.getHeadCursor());
   }
 
-  private rebuildSearchIndex(): void {
-    this.searchStore.replaceSession(this.id, this.history);
+  private rebuildSearchIndex(cursor?: CommitReceipt["cursor"]): void {
+    if (cursor && this.searchStore.projectReplace) {
+      this.searchStore.projectReplace(this.id, this.history, cursor);
+    } else {
+      this.searchStore.replaceSession(this.id, this.history);
+    }
     this.switchMemorySearchToJsonlIfDegraded();
   }
 
@@ -496,9 +503,11 @@ export class Session implements SessionRuntimePersistence {
 
     if (this.store) {
       const persisted = structuredClone(normalized);
-      this.enqueuePersistence("runtime_state", (store, seq) =>
-        store.appendRuntimeState(seq, persisted),
-      );
+      void this.commitPersistence("runtime_state", (store, seq) =>
+        store.commitRuntimeState(persisted, { expectedSeq: seq }),
+      ).catch((error: unknown) => {
+        logger.error({ error: String(error) }, "[session] runtime_state 持久化失败");
+      });
     }
   }
 
@@ -527,8 +536,9 @@ export class Session implements SessionRuntimePersistence {
 
   /** 等待当前已排队的会话写入完成。 */
   async flushPersistence(): Promise<void> {
-    const barrier = this.persistenceTail;
-    await barrier;
+    await this.compatibilityAppendTail;
+    await this.persistenceTail;
+    if (this.persistenceFailure) throw this.persistenceFailure;
   }
 
   /** 在首个 await 前同步冻结状态与当前 tail，不被后来写入污染边界。 */
@@ -600,14 +610,53 @@ export class Session implements SessionRuntimePersistence {
    * - 其他消息:若 pendingToolCallIds 非空,暂存到 deferredMessages 不入 history;
    *   否则正常入 history
    */
+  /** @deprecated 仅供 legacy 同步调用方；生产路径必须 await commitMessages。 */
   append(...msgs: Message[]): void {
-    for (const msg of msgs) {
-      this.appendOne(msg);
+    if (this.store) {
+      for (const msg of msgs) this.appendOneCompatibility(msg);
+      return;
+    }
+    for (const msg of msgs) this.appendOneInMemory(msg);
+  }
+
+  private appendOneCompatibility(msg: Message): void {
+    const prepared = this.prepareAppend(msg);
+    if (prepared.deferred) return;
+    this.doAppend(msg);
+    const persisted = structuredClone(msg);
+    const operation = this.commitPersistence("compatibility message", (store, seq) =>
+      store.commitMessage(persisted, { expectedSeq: seq }),
+    );
+    this.compatibilityAppendTail = Promise.all([this.compatibilityAppendTail, operation])
+      .then(() => undefined)
+      .catch((error: unknown) => {
+        logger.error({ error: String(error) }, "[session] 兼容 append 持久化失败");
+      });
+    if (
+      prepared.toolResult &&
+      this.pendingToolCallIds.size === 0 &&
+      this.deferredMessages.length > 0
+    ) {
+      const pending = this.deferredMessages;
+      this.deferredMessages = [];
+      for (const deferred of pending) this.appendOneCompatibility(deferred);
     }
   }
 
-  /** 单条消息追加:核心逻辑,处理 deferred + toolResultMeta 登记 */
-  private appendOne(msg: Message): void {
+  /** 生产接口：每条消息在 JSONL fdatasync 后才进入正式 history/FTS。 */
+  async commitMessages(...msgs: Message[]): Promise<void> {
+    this.assertWritable();
+    if (!this.store) {
+      for (const msg of msgs) this.appendOneInMemory(msg);
+      return;
+    }
+    for (const msg of msgs) await this.appendOneDurable(msg);
+  }
+
+  private prepareAppend(msg: Message): {
+    readonly deferred: boolean;
+    readonly toolResult: boolean;
+  } {
     const hasToolCalls =
       msg.role === "assistant" && msg.toolCalls !== undefined && msg.toolCalls.length > 0;
     const isToolResult = msg.role === "user" && msg.toolCallId !== undefined;
@@ -638,24 +687,42 @@ export class Session implements SessionRuntimePersistence {
     const isDeferredCandidate = !isToolResult && !hasToolCalls;
     if (isDeferredCandidate && this.pendingToolCallIds.size > 0) {
       this.deferredMessages.push(msg);
-      return;
+      return { deferred: true, toolResult: isToolResult };
     }
+    return { deferred: false, toolResult: isToolResult };
+  }
 
-    // 4. 正常入 history
+  private appendOneInMemory(msg: Message): void {
+    const prepared = this.prepareAppend(msg);
+    if (prepared.deferred) return;
     this.doAppend(msg);
-
-    // 5. 若 pending 刚清空且有 deferred 待 flush,逐条重新走 append 正常路径
-    //    (此时 pendingToolCallIds.size === 0,新消息会直接入 history)
-    if (isToolResult && this.pendingToolCallIds.size === 0 && this.deferredMessages.length > 0) {
+    if (
+      prepared.toolResult &&
+      this.pendingToolCallIds.size === 0 &&
+      this.deferredMessages.length > 0
+    ) {
       const pending = this.deferredMessages;
       this.deferredMessages = [];
-      for (const deferred of pending) {
-        this.appendOne(deferred);
-      }
+      for (const deferred of pending) this.appendOneInMemory(deferred);
     }
   }
 
-  /** 实际写入 history + FTS5 + JSONL 落盘 */
+  private async appendOneDurable(msg: Message): Promise<void> {
+    const prepared = this.prepareAppend(msg);
+    if (prepared.deferred) return;
+    await this.commitAppend(msg);
+    if (
+      prepared.toolResult &&
+      this.pendingToolCallIds.size === 0 &&
+      this.deferredMessages.length > 0
+    ) {
+      const pending = this.deferredMessages;
+      this.deferredMessages = [];
+      for (const deferred of pending) await this.appendOneDurable(deferred);
+    }
+  }
+
+  /** persistence:false 兼容路径。 */
   private doAppend(msg: Message): void {
     const beforeLen = this.history.length;
     this.history.push(msg);
@@ -667,11 +734,26 @@ export class Session implements SessionRuntimePersistence {
     } catch (err) {
       logger.warn({ err }, "[session] 记忆索引失败");
     }
+  }
 
-    // 事件追加落盘:payload 在逻辑变更点复制，再进入唯一串行队列。
-    if (this.store) {
-      const persisted = structuredClone(msg);
-      this.enqueuePersistence("message", (store, seq) => store.appendMessage(seq, persisted));
+  private async commitAppend(msg: Message): Promise<void> {
+    const beforeLen = this.history.length;
+    const persisted = structuredClone(msg);
+    const receipt = await this.commitPersistence("message", (store, seq) =>
+      store.commitMessage(persisted, { expectedSeq: seq }),
+    );
+    this.history.push(msg);
+    this.conversationId = `${receipt.cursor.logId}:${receipt.cursor.epoch}`;
+    this.updatedAt = new Date();
+    try {
+      if (this.searchStore.projectInsert) {
+        this.searchStore.projectInsert(this.id, beforeLen, msg, receipt.cursor);
+      } else {
+        this.searchStore.insert(this.id, beforeLen, msg);
+      }
+      this.switchMemorySearchToJsonlIfDegraded();
+    } catch (err) {
+      logger.warn({ err }, "[session] 记忆投影失败");
     }
   }
 
@@ -681,25 +763,21 @@ export class Session implements SessionRuntimePersistence {
    * 仅保留本轮用户输入(history[beforeLen])让模型重新规划。
    * 累计成本统计保留(对齐 kimi-code clear 不碰 usage 的语义)。
    */
-  truncateTo(fromIndex: number): void {
+  async truncateTo(fromIndex: number): Promise<void> {
+    this.assertWritable();
     if (fromIndex < 0) fromIndex = 0;
-    if (fromIndex >= this.history.length) {
-      this.history = [];
-      this.rebuildSearchIndex();
-      this.updatedAt = new Date();
-      // 追加 truncate 事件(fromIndex = 历史长度 → 重放后为空)
-      if (this.store) {
-        this.enqueuePersistence("truncate", (store, seq) => store.appendTruncate(seq, fromIndex));
-      }
-      return;
-    }
-    this.history = this.history.slice(fromIndex);
-    this.rebuildSearchIndex();
+    const nextHistory = fromIndex >= this.history.length ? [] : this.history.slice(fromIndex);
+    this.store?.bumpEpoch();
+    const receipt = this.store
+      ? await this.commitPersistence("truncate", (store, seq) =>
+          store.commitTruncate(fromIndex, { expectedSeq: seq }),
+        )
+      : undefined;
+    this.history = nextHistory;
+    if (receipt) this.conversationId = `${receipt.cursor.logId}:${receipt.cursor.epoch}`;
+    this.rebuildSearchIndex(receipt?.cursor);
     this.pruneToolResultMeta();
     this.updatedAt = new Date();
-    if (this.store) {
-      this.enqueuePersistence("truncate", (store, seq) => store.appendTruncate(seq, fromIndex));
-    }
   }
 
   /**
@@ -707,23 +785,28 @@ export class Session implements SessionRuntimePersistence {
    * 跳过 system injection 消息,遇到 compaction 边界停止。
    * fork 语义:生成新 conversationId,旧 JSONL 保留在磁盘。
    */
-  undo(count: number): void {
+  async undo(count: number): Promise<void> {
+    this.assertWritable();
     if (count <= 0) return;
     const { cutIndex, removedCount } = findLegacyUndoCut(this.history, count);
     if (removedCount === 0) return;
-    this.history = this.history.slice(0, cutIndex);
-    this.rebuildSearchIndex();
+    const nextHistory = this.history.slice(0, cutIndex);
+    this.store?.bumpEpoch();
+    const receipt = this.store
+      ? await this.commitPersistence("rewind", (store, seq) =>
+          store.commitRewind(cutIndex, { expectedSeq: seq }),
+        )
+      : undefined;
+    this.history = nextHistory;
+    this.rebuildSearchIndex(receipt?.cursor);
     this.pruneToolResultMeta();
     // 3.4: undo 时清空 deferred 与 pending,避免遗留半截 tool 配对状态
     this.deferredMessages = [];
     this.pendingToolCallIds.clear();
-    this.conversationId = `${this.id}-${Date.now().toString(36)}`;
+    this.conversationId = receipt
+      ? `${receipt.cursor.logId}:${receipt.cursor.epoch}`
+      : `${this.id}-${Date.now().toString(36)}`;
     this.updatedAt = new Date();
-    // 4.3: undo 重写历史,递增 epoch 让旧 cursor 的 WS client 感知世代已变。
-    this.store?.bumpEpoch();
-    if (this.store) {
-      this.enqueuePersistence("undo", (store, seq) => store.appendUndoEvent(seq, removedCount));
-    }
   }
 
   async beginRewindPoint(input: {
@@ -748,22 +831,23 @@ export class Session implements SessionRuntimePersistence {
   }
 
   async rewindTo(messageIndex: number): Promise<void> {
-    this.history = this.history.slice(0, messageIndex);
-    this.rebuildSearchIndex();
+    this.assertWritable();
+    const nextHistory = this.history.slice(0, messageIndex);
+    this.store?.bumpEpoch();
+    const receipt = this.store
+      ? await this.commitPersistence("rewind", (store, seq) =>
+          store.commitRewind(messageIndex, { expectedSeq: seq }),
+        )
+      : undefined;
+    this.history = nextHistory;
+    this.rebuildSearchIndex(receipt?.cursor);
     this.pruneToolResultMeta();
     this.deferredMessages = [];
     this.pendingToolCallIds.clear();
-    this.conversationId = `${this.id}-${Date.now().toString(36)}`;
+    this.conversationId = receipt
+      ? `${receipt.cursor.logId}:${receipt.cursor.epoch}`
+      : `${this.id}-${Date.now().toString(36)}`;
     this.updatedAt = new Date();
-    // 4.3: rewind 重写历史,递增 epoch 让旧 cursor 的 WS client 感知世代已变。
-    this.store?.bumpEpoch();
-    // 精确记录截断下标；不能折叠成 undo(count)，否则 tool result / injection
-    // 边界在恢复时可能漂移。
-    if (this.store) {
-      await this.enqueuePersistence("rewind_to", (store, seq) =>
-        store.appendRewindTo(seq, messageIndex),
-      );
-    }
   }
 
   async rewindCode(messageId: string): Promise<void> {
@@ -799,25 +883,18 @@ export class Session implements SessionRuntimePersistence {
    * 内存语义:history = [summaryMsg, ...history.slice(compactedCount)]。
    * 保留尾部(从 compactedCount 起的消息)不动,前缀浓缩成一条摘要。
    *
-   * 持久化顺序(全部在本方法的同步逻辑点入队):
-   *   1. append truncate(beforeLen) —— 丢弃当前累积的全部 beforeLen 条
-   *   2. append summary message —— 重放后成为新 history 的第一条
-   *   3. append retained tail —— 重放后跟在 summary 之后
-   * 重放结果:[summary, ...retained],与内存一致。
-   *
-   * 用 truncate + 重写尾部而非"前插 summary",因为本 JSONL 只支持
-   * message(push)+ truncate(slice)两种 record,无法表达"在头部插入"。
-   * 压缩是低频事件,重写尾部(retainLastN 通常很小)开销可接受。
+   * 持久化使用单个 history.compacted canonical event，其 JSONL fdatasync
+   * 成功后才替换正式内存 history 并重建投影。
    *
    * 本方法只做纯存储,summary 内容的 REFERENCE-ONLY 包装由调用方(FullCompactor)负责。
    *
    * @param summary 摘要消息正文(已由调用方套上 REFERENCE-ONLY 前后标记)
    * @param compactedCount 被压缩的前缀条数(0..history.length)
    */
-  applyCompaction(summary: string, compactedCount: number): void {
+  async applyCompaction(summary: string, compactedCount: number): Promise<void> {
+    this.assertWritable();
     if (compactedCount < 0) compactedCount = 0;
     if (compactedCount > this.history.length) compactedCount = this.history.length;
-    const beforeLen = this.history.length;
     const retained = this.history.slice(compactedCount);
     // 摘要消息:role=assistant(对标 kimi-code compaction_summary)
     const summaryMsg: Message = {
@@ -825,27 +902,19 @@ export class Session implements SessionRuntimePersistence {
       content: summary,
       providerData: { picoKind: "compaction_summary" },
     };
-    // 内存:用 summary 替换前 compactedCount 条
-    this.history = [summaryMsg, ...retained];
-    this.rebuildSearchIndex();
+    const nextHistory = [summaryMsg, ...retained];
+    this.store?.bumpEpoch();
+    const receipt = this.store
+      ? await this.commitPersistence("compaction", (store, seq) =>
+          store.commitCompaction(summaryMsg, retained, { expectedSeq: seq }),
+        )
+      : undefined;
+    this.history = nextHistory;
+    if (receipt) this.conversationId = `${receipt.cursor.logId}:${receipt.cursor.epoch}`;
+    this.rebuildSearchIndex(receipt?.cursor);
     // 压缩后清理已消失 ToolResult 的 meta(被摘要吞掉的前缀条目)
     this.pruneToolResultMeta();
     this.updatedAt = new Date();
-    if (this.store) {
-      const persistedSummary = structuredClone(summaryMsg);
-      const persistedRetained = structuredClone(retained);
-      this.enqueuePersistence("compaction truncate", (store, seq) =>
-        store.appendTruncate(seq, beforeLen),
-      );
-      this.enqueuePersistence("compaction summary", (store, seq) =>
-        store.appendMessage(seq, persistedSummary),
-      );
-      for (const message of persistedRetained) {
-        this.enqueuePersistence("compaction retained", (store, seq) =>
-          store.appendMessage(seq, message),
-        );
-      }
-    }
   }
 
   /** 返回全量历史的深拷贝(仅供调试 / 测试,不参与推理) */
@@ -961,21 +1030,45 @@ export class Session implements SessionRuntimePersistence {
     return this.store;
   }
 
-  /** 在当前调用栈内分配 seq，并把写入串行接到唯一 tail。 */
-  private enqueuePersistence(
+  /** 所有 canonical event 共用一条队列，保证 seq 分配与物理 append 顺序一致。 */
+  private commitPersistence(
     kind: string,
-    write: (store: SessionStore, seq: number) => Promise<void>,
-  ): Promise<void> {
+    write: (store: SessionStore, seq: number) => Promise<CommitReceipt>,
+  ): Promise<CommitReceipt> {
+    this.assertWritable();
     const store = this.store;
-    if (!store || this.lifecycle === "closed") return this.persistenceTail;
+    if (!store) throw new Error("Session persistence is disabled");
 
     const seq = this.nextSeq++;
     const operation = this.persistenceTail.then(() => write(store, seq));
-    const settled = operation.catch((error: unknown) => {
-      logger.warn({ seq, kind }, `[session] ${kind} 落盘失败: ${String(error)}`);
-    });
+    const settled = operation.then(
+      () => undefined,
+      (error: unknown) => {
+        this.markWriteUncertain(`${kind} durable commit failed at seq ${seq}`, error);
+      },
+    );
     this.persistenceTail = settled;
-    return settled;
+    return operation;
+  }
+
+  private assertWritable(): void {
+    if (this.lifecycle === "write_uncertain" && this.persistenceFailure) {
+      throw this.persistenceFailure;
+    }
+    if (this.lifecycle !== "open") {
+      throw new SessionWriteUncertainError(`Session is not writable (${this.lifecycle})`);
+    }
+  }
+
+  private markWriteUncertain(message: string, cause: unknown): void {
+    if (this.lifecycle === "closed" || this.lifecycle === "closing") return;
+    const error =
+      cause instanceof SessionWriteUncertainError
+        ? cause
+        : new SessionWriteUncertainError(message, cause);
+    this.persistenceFailure ??= error;
+    this.lifecycle = "write_uncertain";
+    logger.error({ error: String(cause) }, `[session] ${message}; 已进入 write_uncertain`);
   }
 
   /**
@@ -1004,6 +1097,7 @@ export class Session implements SessionRuntimePersistence {
     }
 
     const drain = this.runQueue
+      .then(() => this.compatibilityAppendTail)
       .then(() => {
         // 已排队 run 全部结束后，在同一同步边界禁止后续写入并冻结最终 tail。
         // 若先捕获 tail、再异步标记 closed，窗口内的新写入会逃出 close 的 drain。
@@ -1011,7 +1105,9 @@ export class Session implements SessionRuntimePersistence {
         return this.persistenceTail;
       })
       .then(() => {
+        const store = this.store;
         this.store = undefined;
+        return store?.close();
       });
     this.closePromise = registerSessionDrain(sessionEntryKey(this.id, this.workDir), drain);
     return this.closePromise;

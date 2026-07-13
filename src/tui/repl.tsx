@@ -949,7 +949,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
             try {
               // 先拿到 QueryGuard 的独占执行权，再把 completion 写入 Session；
               // 否则仍在运行的主循环可能先消费消息，idle 后又被重复续跑。
-              const delivered = deliverCompletions();
+              const delivered = await deliverCompletions();
               current.reporter.onSubagentActivitiesClaimed(
                 delivered.flatMap((completion) => completion.activityIds),
               );
@@ -1522,7 +1522,7 @@ async function seedTuiFork(
   if (target.length > 0) return undefined;
   const source = await globalSessionManager.getOrCreate(sourceSessionId, workDir);
   const snapshot = await source.readHydrationSnapshot();
-  if (snapshot.messages.length > 0) target.append(...snapshot.messages);
+  if (snapshot.messages.length > 0) await target.commitMessages(...snapshot.messages);
   if (snapshot.runtime.settings) {
     target.updateRuntimeState({
       settings: { ...snapshot.runtime.settings, forkFrom: sourceSessionId },
