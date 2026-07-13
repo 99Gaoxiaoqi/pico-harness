@@ -77,6 +77,8 @@ export interface RestoreTasksOptions {
   /** Non-terminal work cannot survive a host process restart. */
   interruptedStatus?: Extract<TaskStatus, "failed" | "killed">;
   interruptedReason?: string;
+  /** RuntimeStore 已完成 lease 对账时，保留其权威的 queued/running 投影。 */
+  preserveNonTerminal?: boolean;
 }
 
 export interface RestoreTasksResult {
@@ -152,7 +154,7 @@ export class TaskRegistry {
       }
 
       const snapshot = cloneSnapshot(candidate);
-      if (!isTerminalTaskStatus(snapshot.status)) {
+      if (!options.preserveNonTerminal && !isTerminalTaskStatus(snapshot.status)) {
         snapshot.status = interruptedStatus;
         snapshot.endTime = this.now();
         snapshot.error = interruptedReason;
