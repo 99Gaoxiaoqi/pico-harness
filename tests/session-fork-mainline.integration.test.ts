@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { access, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { globalSessionPermissionGrants } from "../src/approval/session-permissions.js";
 import { ToolResultArtifactStore } from "../src/context/artifact-store.js";
 import { SessionForkService } from "../src/engine/session-fork-service.js";
@@ -330,6 +330,113 @@ describe("session fork published mainline", () => {
       forkFrom: source.id,
     });
     await target.close();
+    await source.close();
+  });
+
+  it("freezes File History in the same source-session boundary as the JSONL cursor", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pico-session-fork-atomic-scene-"));
+    cleanup.push(root);
+    const workDir = join(root, "workspace");
+    const fileHistoryBaseDir = join(root, "file-history");
+    const manager = new SessionManager();
+    const sourceId = "atomic-source";
+    const targetId = "atomic-target";
+    const source = await manager.getOrCreate(sourceId, workDir, {
+      persistence: true,
+      sessionCatalog: false,
+    });
+    await source.commitMessages({ role: "user", content: "冻结这一幕" });
+    await source.flushPersistence();
+    const initialSnapshot = await source.readDurableForkSnapshot();
+    const fileHistory = createFileHistoryState();
+    await fileHistoryBeginRewindPoint(
+      fileHistory,
+      {
+        messageId: "initial-point",
+        userPrompt: "冻结这一幕",
+        messageIndex: 0,
+        sourceMessageEventId: initialSnapshot.cursor.eventId,
+        beforeSessionSeq: initialSnapshot.cursor.seq,
+      },
+      sourceId,
+      fileHistoryBaseDir,
+    );
+
+    const originalReadSnapshot = source.readDurableForkSnapshot.bind(source);
+    let signalSnapshotRead!: () => void;
+    let releaseSnapshot!: () => void;
+    const snapshotRead = new Promise<void>((resolve) => {
+      signalSnapshotRead = resolve;
+    });
+    const snapshotGate = new Promise<void>((resolve) => {
+      releaseSnapshot = resolve;
+    });
+    let firstRead = true;
+    vi.spyOn(source, "readDurableForkSnapshot").mockImplementation(async () => {
+      const snapshot = await originalReadSnapshot();
+      if (firstRead) {
+        firstRead = false;
+        signalSnapshotRead();
+        await snapshotGate;
+      }
+      return snapshot;
+    });
+
+    const service = new SessionForkService({
+      workDir,
+      sessionManager: manager,
+      fileHistoryBaseDir,
+      catalogProjector: new SessionCatalogProjector(
+        new SessionCatalog({ baseDirectory: join(root, "catalog") }),
+      ),
+    });
+    const fork = service.fork({
+      sourceSessionId: sourceId,
+      targetSessionId: targetId,
+      targetMode: "yolo",
+    });
+    await snapshotRead;
+
+    const laterSourceMutation = source.serialize(async () => {
+      await fileHistoryBeginRewindPoint(
+        fileHistory,
+        {
+          messageId: "future-point",
+          userPrompt: "fork 后的新一轮",
+          messageIndex: 1,
+          sourceMessageEventId: initialSnapshot.cursor.eventId,
+          beforeSessionSeq: initialSnapshot.cursor.seq,
+        },
+        sourceId,
+        fileHistoryBaseDir,
+      );
+    });
+    // 未持有 source.serialize 的旧实现会在这个窗口完成 mutation，并把
+    // future-point 克隆到旧 cursor 的 target。新实现中 mutation 必须排队。
+    await Promise.race([
+      laterSourceMutation,
+      new Promise<void>((resolve) => setTimeout(resolve, 50)),
+    ]);
+    releaseSnapshot();
+    await fork;
+    await laterSourceMutation;
+
+    const targetFileHistory = createFileHistoryState();
+    await expect(
+      fileHistoryLoadState(targetFileHistory, targetId, fileHistoryBaseDir),
+    ).resolves.toBe(true);
+    expect(targetFileHistory.snapshots.map((snapshot) => snapshot.messageId)).toEqual([
+      "initial-point",
+    ]);
+
+    const sourceFileHistory = createFileHistoryState();
+    await expect(
+      fileHistoryLoadState(sourceFileHistory, sourceId, fileHistoryBaseDir),
+    ).resolves.toBe(true);
+    expect(sourceFileHistory.snapshots.map((snapshot) => snapshot.messageId)).toEqual([
+      "initial-point",
+      "future-point",
+    ]);
     await source.close();
   });
 });

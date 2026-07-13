@@ -136,36 +136,50 @@ export class SessionForkService {
     if (input.sourceSessionId === input.targetSessionId) {
       throw new Error("Fork source 与 target sessionId 不能相同");
     }
-    await assertTargetNotPublished(this.sessionPath(input.targetSessionId));
-
     const source = await this.sessionManager.getOrCreate(input.sourceSessionId, this.workDir);
-    const snapshot = await source.readDurableForkSnapshot();
-    const operationId = this.createOperationId();
-    this.frozenByOperation.set(operationId, {
-      ...input,
-      snapshot,
-    });
+    return source.serialize(async () => {
+      // JSONL cursor、File History、Summary 与 Artifact 必须属于同一源会话
+      // 串行边界。否则 cursor 冻结后新产生的 sidecar 会被克隆进旧对话 fork。
+      await assertTargetNotPublished(this.sessionPath(input.targetSessionId));
+      const snapshot = await source.readDurableForkSnapshot();
+      const operationId = this.createOperationId();
+      this.frozenByOperation.set(operationId, {
+        ...input,
+        snapshot,
+      });
 
-    const operation = await this.coordinator.execute({
-      kind: "fork",
-      operationId,
-      sessionId: input.sourceSessionId,
-      sourceSessionId: input.sourceSessionId,
-      sourceCursor: snapshot.cursor,
-      targetSessionId: input.targetSessionId,
-      targetMode: input.targetMode,
-      stagingDirectory: join(this.workDir, ".claw", "fork-staging", operationId),
+      const operation = await this.coordinator.execute({
+        kind: "fork",
+        operationId,
+        sessionId: input.sourceSessionId,
+        sourceSessionId: input.sourceSessionId,
+        sourceCursor: snapshot.cursor,
+        targetSessionId: input.targetSessionId,
+        targetMode: input.targetMode,
+        stagingDirectory: join(this.workDir, ".claw", "fork-staging", operationId),
+      });
+      if (operation.state === "needs_attention") {
+        throw new SessionForkNeedsAttentionError(operation);
+      }
+      const sourceTitle = sourceDisplayTitle(snapshot);
+      return {
+        operation,
+        ...(sourceTitle ? { sourceTitle, targetTitle: forkTitleFrom(sourceTitle) } : {}),
+      };
     });
-    if (operation.state === "needs_attention") throw new SessionForkNeedsAttentionError(operation);
-    const sourceTitle = sourceDisplayTitle(snapshot);
-    return {
-      operation,
-      ...(sourceTitle ? { sourceTitle, targetTitle: forkTitleFrom(sourceTitle) } : {}),
-    };
   }
 
   async reconcileUnfinished(): Promise<ForkReconciliationResult[]> {
-    return this.coordinator.reconcileUnfinished();
+    const results: ForkReconciliationResult[] = [];
+    for (const operation of await this.journal.listUnfinished()) {
+      if (operation.kind !== "fork") continue;
+      const source = await this.sessionManager.getOrCreate(operation.sourceSessionId, this.workDir);
+      const reconciled = await source.serialize(() =>
+        this.coordinator.reconcile(operation.operationId),
+      );
+      results.push({ operationId: reconciled.operationId, state: reconciled.state });
+    }
+    return results;
   }
 
   private createCallbacks(): ForkOperationCallbacks {
