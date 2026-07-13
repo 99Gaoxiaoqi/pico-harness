@@ -477,14 +477,14 @@ export class SessionStore {
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
       if (!line) continue;
-      let parsed: SessionRecord;
+      let parsed: SessionRecord | undefined;
       try {
-        parsed = JSON.parse(line) as SessionRecord;
+        parsed = normalizeSessionRecord(JSON.parse(line) as unknown);
       } catch {
         if (i === lines.length - 1) break;
         continue;
       }
-      if (parsed.type === "meta") {
+      if (parsed?.type === "meta") {
         if ("identity" in parsed) {
           return { schemaVersion: parsed.schemaVersion, ...parsed.identity };
         }
@@ -756,13 +756,9 @@ export class SessionStore {
       let parsed: SessionRecord;
       try {
         const candidate: unknown = JSON.parse(line);
-        if (isRuntimeStateCandidate(candidate)) {
-          const runtimeRecord = normalizeRuntimeStateRecord(candidate);
-          if (!runtimeRecord) throw new Error("invalid runtime_state");
-          parsed = runtimeRecord;
-        } else {
-          parsed = candidate as SessionRecord;
-        }
+        const normalized = normalizeSessionRecord(candidate);
+        if (!normalized) throw new Error("unsupported or malformed session record");
+        parsed = normalized;
       } catch (error) {
         if (index === lines.length - 1 && hasTornTail) break;
         if (strict) {
@@ -912,13 +908,253 @@ function validateRecordSequence(records: readonly (LegacySessionRecord | Session
   }
 }
 
-function isRuntimeStateCandidate(value: unknown): value is Record<string, unknown> {
+/** JSONL 是权威源；未知版本、kind 或 payload 必须在进入 reducer 前失败关闭。 */
+function normalizeSessionRecord(value: unknown): SessionRecord | undefined {
+  if (!isRecord(value) || typeof value["type"] !== "string") return undefined;
+  switch (value["type"]) {
+    case "meta":
+      return normalizeSessionMetadata(value);
+    case "runtime_state":
+      return normalizeRuntimeStateRecord(value);
+    case "message":
+      if (
+        !isNonNegativeInteger(value["seq"]) ||
+        !isMessageValue(value["message"]) ||
+        !isOptionalBoolean(value["volatile"])
+      ) {
+        return undefined;
+      }
+      return structuredClone(value) as LegacySessionRecord;
+    case "truncate":
+      if (!isNonNegativeInteger(value["seq"]) || !isNonNegativeInteger(value["fromIndex"])) {
+        return undefined;
+      }
+      return structuredClone(value) as LegacySessionRecord;
+    case "undo":
+      if (
+        !isNonNegativeInteger(value["seq"]) ||
+        !isNonNegativeInteger(value["count"]) ||
+        typeof value["at"] !== "string"
+      ) {
+        return undefined;
+      }
+      return structuredClone(value) as LegacySessionRecord;
+    case "rewind_to":
+      if (
+        !isNonNegativeInteger(value["seq"]) ||
+        !isNonNegativeInteger(value["messageIndex"]) ||
+        typeof value["at"] !== "string"
+      ) {
+        return undefined;
+      }
+      return structuredClone(value) as LegacySessionRecord;
+    case "event":
+      return normalizeSessionEvent(value);
+    default:
+      return undefined;
+  }
+}
+
+function normalizeSessionMetadata(
+  value: Record<string, unknown>,
+): Extract<SessionRecord, { readonly type: "meta" }> | undefined {
+  const schemaVersion = value["schemaVersion"];
+  if (schemaVersion === 3) {
+    const identity = value["identity"];
+    const lineage = value["lineage"];
+    if (
+      !isNonEmptyString(value["logId"]) ||
+      !isNonEmptyString(value["sessionId"]) ||
+      typeof value["createdAt"] !== "string" ||
+      !isSessionIdentityValue(identity) ||
+      identity["sessionId"] !== value["sessionId"] ||
+      !isSessionLineageValue(lineage)
+    ) {
+      return undefined;
+    }
+    return structuredClone(value) as unknown as SessionMetaV3;
+  }
+  if (schemaVersion !== 1 && schemaVersion !== CURRENT_SCHEMA_VERSION) return undefined;
+  for (const field of ["sessionId", "originalCwd", "projectRoot", "cwd", "sessionProjectDir"]) {
+    if (value[field] !== undefined && typeof value[field] !== "string") return undefined;
+  }
+  return structuredClone(value) as unknown as Extract<SessionRecord, { readonly type: "meta" }>;
+}
+
+function normalizeSessionEvent(value: Record<string, unknown>): SessionEvent | undefined {
+  if (
+    value["recordVersion"] !== 1 ||
+    !isNonEmptyString(value["eventId"]) ||
+    !isNonNegativeInteger(value["seq"]) ||
+    !isNonNegativeInteger(value["epoch"]) ||
+    typeof value["at"] !== "string" ||
+    !isRecord(value["data"])
+  ) {
+    return undefined;
+  }
+  const data = value["data"];
+  switch (value["kind"]) {
+    case "message.appended":
+      if (!isMessageValue(data["message"]) || !isOptionalBoolean(data["volatile"])) {
+        return undefined;
+      }
+      break;
+    case "history.truncated":
+      if (!isNonNegativeInteger(data["fromIndex"])) return undefined;
+      break;
+    case "history.rewound":
+      if (!isNonNegativeInteger(data["messageIndex"])) return undefined;
+      break;
+    case "history.compacted":
+      if (
+        !isMessageValue(data["summaryMessage"]) ||
+        !Array.isArray(data["retainedMessages"]) ||
+        !data["retainedMessages"].every(isMessageValue)
+      ) {
+        return undefined;
+      }
+      break;
+    case "legacy.undo":
+      if (!isNonNegativeInteger(data["count"])) return undefined;
+      break;
+    case "runtime.checkpoint": {
+      if (data["stateVersion"] !== SESSION_RUNTIME_STATE_VERSION) return undefined;
+      const patch = normalizeSessionRuntimeStatePatch(data["patch"]);
+      if (!patch) return undefined;
+      return {
+        ...structuredClone(value),
+        data: { stateVersion: SESSION_RUNTIME_STATE_VERSION, patch },
+      } as SessionEvent;
+    }
+    case "session.seeded":
+      if (
+        !Array.isArray(data["messages"]) ||
+        !data["messages"].every(isMessageValue) ||
+        (data["lineage"] !== undefined && !isSessionLineageValue(data["lineage"]))
+      ) {
+        return undefined;
+      }
+      break;
+    default:
+      return undefined;
+  }
+  return structuredClone(value) as unknown as SessionEvent;
+}
+
+function isSessionIdentityValue(value: unknown): value is Record<string, string> {
   return (
-    typeof value === "object" &&
-    value !== null &&
-    !Array.isArray(value) &&
-    (value as Record<string, unknown>)["type"] === "runtime_state"
+    isRecord(value) &&
+    ["sessionId", "originalCwd", "projectRoot", "cwd", "sessionProjectDir"].every(
+      (field) => typeof value[field] === "string" && value[field].length > 0,
+    )
   );
+}
+
+function isSessionLineageValue(value: unknown): value is SessionLineage {
+  if (
+    !isRecord(value) ||
+    !new Set(["root", "fork", "spawn", "salvage"]).has(String(value["relation"]))
+  ) {
+    return false;
+  }
+  if (!isNonEmptyString(value["rootLogId"])) return false;
+  if (value["parent"] !== undefined && !isSessionCursorValue(value["parent"])) return false;
+  return value["parentTaskId"] === undefined || isNonEmptyString(value["parentTaskId"]);
+}
+
+function isSessionCursorValue(value: unknown): value is SessionCursor {
+  return (
+    isRecord(value) &&
+    isNonEmptyString(value["logId"]) &&
+    isNonNegativeInteger(value["seq"]) &&
+    isNonNegativeInteger(value["epoch"]) &&
+    isNonEmptyString(value["eventId"])
+  );
+}
+
+function isMessageValue(value: unknown): value is Message {
+  if (
+    !isRecord(value) ||
+    !new Set(["system", "user", "assistant"]).has(String(value["role"])) ||
+    typeof value["content"] !== "string"
+  ) {
+    return false;
+  }
+  if (
+    value["toolCalls"] !== undefined &&
+    (!Array.isArray(value["toolCalls"]) ||
+      !value["toolCalls"].every(
+        (call) =>
+          isRecord(call) &&
+          isNonEmptyString(call["id"]) &&
+          isNonEmptyString(call["name"]) &&
+          typeof call["arguments"] === "string",
+      ))
+  ) {
+    return false;
+  }
+  if (value["toolCallId"] !== undefined && typeof value["toolCallId"] !== "string") return false;
+  if (value["reasoning"] !== undefined && typeof value["reasoning"] !== "string") return false;
+  if (value["providerData"] !== undefined && !isRecord(value["providerData"])) return false;
+  if (value["usage"] !== undefined && !isUsageValue(value["usage"])) return false;
+  if (
+    value["images"] !== undefined &&
+    (!Array.isArray(value["images"]) || !value["images"].every(isImagePartValue))
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function isUsageValue(value: unknown): boolean {
+  if (
+    !isRecord(value) ||
+    !isFiniteNumber(value["promptTokens"]) ||
+    !isFiniteNumber(value["completionTokens"])
+  ) {
+    return false;
+  }
+  for (const field of ["inputTokens", "cacheReadTokens", "cacheWriteTokens", "reasoningTokens"]) {
+    if (value[field] !== undefined && !isFiniteNumber(value[field])) return false;
+  }
+  const reported = value["reportedFields"];
+  return (
+    reported === undefined ||
+    (Array.isArray(reported) &&
+      reported.every((field) =>
+        new Set(["prompt", "completion", "input", "cacheRead", "cacheWrite", "reasoning"]).has(
+          String(field),
+        ),
+      ))
+  );
+}
+
+function isImagePartValue(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  if (value["type"] === "image_base64") {
+    return typeof value["mimeType"] === "string" && typeof value["data"] === "string";
+  }
+  return value["type"] === "image_url" && typeof value["url"] === "string";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+function isOptionalBoolean(value: unknown): boolean {
+  return value === undefined || typeof value === "boolean";
 }
 
 function normalizeRuntimeStateRecord(
