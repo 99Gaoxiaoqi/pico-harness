@@ -640,37 +640,43 @@ describe("真实场景模拟", () => {
     {
       const mgr = new SessionManager();
       const session = await mgr.getOrCreate("user_001", workDir, ON);
-      session.append(userMsg("帮我写个 HTTP Server"));
-      session.append(assistantMsg("好的,我先创建 package.json"));
-      session.append(toolUseMsg("write_file"));
-      session.append(toolResultMsg("文件创建成功"));
-      session.append(userMsg("用 TypeScript"));
-      await flush();
+      try {
+        session.append(userMsg("帮我写个 HTTP Server"));
+        session.append(assistantMsg("好的,我先创建 package.json"));
+        session.append(toolUseMsg("write_file"));
+        session.append(toolResultMsg("文件创建成功"));
+        session.append(userMsg("用 TypeScript"));
+        await session.flushPersistence();
 
-      expect(session.length).toBe(5);
-
-      // 模拟崩溃:Session 对象销毁(内存丢失)
+        expect(session.length).toBe(5);
+      } finally {
+        // 同进程测试不会因离开代码块就销毁 Session，显式释放 writer 才是可重现的重启边界。
+        await session.close();
+      }
     }
 
     // 重启后恢复(模拟崩溃后)
     {
       const mgr = new SessionManager();
       const session = await mgr.getOrCreate("user_001", workDir, ON);
+      try {
+        // WorkingMemory 自动恢复(recover 在 getOrCreate 时自动调用)
+        expect(session.length).toBe(5);
+        expect(session.getHistory()[0]!.content).toBe("帮我写个 HTTP Server");
+        expect(session.getHistory()[4]!.content).toBe("用 TypeScript");
 
-      // WorkingMemory 自动恢复(recover 在 getOrCreate 时自动调用)
-      expect(session.length).toBe(5);
-      expect(session.getHistory()[0]!.content).toBe("帮我写个 HTTP Server");
-      expect(session.getHistory()[4]!.content).toBe("用 TypeScript");
+        // FTS5 自动恢复
+        const results = session.search("HTTP Server");
+        expect(results.length).toBeGreaterThan(0);
+        expect(results[0]!.content).toContain("HTTP Server");
 
-      // FTS5 自动恢复
-      const results = session.search("HTTP Server");
-      expect(results.length).toBeGreaterThan(0);
-      expect(results[0]!.content).toContain("HTTP Server");
-
-      // 可以继续对话
-      session.append(assistantMsg("好的,我用 TypeScript 重写"));
-      await flush();
-      expect(session.length).toBe(6);
+        // 可以继续对话
+        session.append(assistantMsg("好的,我用 TypeScript 重写"));
+        await session.flushPersistence();
+        expect(session.length).toBe(6);
+      } finally {
+        await session.close();
+      }
     }
   });
 
