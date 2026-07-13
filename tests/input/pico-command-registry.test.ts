@@ -24,6 +24,7 @@ import {
   resetSessionSettingsForTests,
 } from "../../src/input/session-settings.js";
 import { fileHistoryMakeSnapshot, fileHistoryTrackEdit } from "../../src/safety/file-history.js";
+import { CronService } from "../../src/tasks/cron-service.js";
 
 describe("Pico command registry", () => {
   const cleanup: Array<() => void> = [];
@@ -83,6 +84,31 @@ describe("Pico command registry", () => {
     if (result.type !== "local-command") return;
     expect(result.command).toBe("mode");
     expect(result.result.message).toContain("Current mode: yolo");
+  });
+
+  it("/cron 在 YOLO 工作区创建并列出持久任务", async () => {
+    const workDir = mkdtempSync(join(tmpdir(), "pico-command-cron-"));
+    const cron = new CronService({ workDir });
+    cleanup.push(() => {
+      cron.close();
+      rmSync(workDir, { recursive: true, force: true });
+    });
+    const registry = await createPicoCommandRegistry({
+      workDir,
+      provider: "openai",
+      model: "glm-5.2",
+      sessionId: "session-cron",
+      cronService: cron,
+    });
+
+    const created = await processUserInput("/cron add */5 * * * * 检查未提交的改动", { registry });
+    expect(created.type === "local-command" ? created.result.message : undefined).toContain(
+      "Cron job created",
+    );
+    const listed = await processUserInput("/cron list", { registry });
+    expect(listed.type === "local-command" ? listed.result.message : undefined).toContain(
+      "检查未提交的改动",
+    );
   });
 
   it("/rename 为当前 session 设置可持久化的可读标题", async () => {

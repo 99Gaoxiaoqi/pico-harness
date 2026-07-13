@@ -103,6 +103,11 @@ export class WorkspaceTaskRuntime {
   private eventSequence = 0;
   private closed = false;
 
+  /** Compatibility name used by the daemon's generic canonical-workspace registry. */
+  get workspacePath(): string {
+    return this.workspace;
+  }
+
   private constructor(
     workspace: string,
     taskHostRuntime: TaskHostRuntime,

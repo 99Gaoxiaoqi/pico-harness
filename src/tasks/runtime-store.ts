@@ -1056,12 +1056,46 @@ export class RuntimeStore {
     return block();
   }
 
+  /** 工作区正被前台或其他后台 Run 占用时，不排队，直接留下本次跳过的审计记录。 */
+  skipQueuedCronRun(cronRunId: string, reason = "workspace_busy"): CronRunRecord {
+    const skip = this.db.transaction(() => {
+      const current = this.requireCronRun(cronRunId);
+      if (current.status === "skipped") return current;
+      if (current.status !== "queued") {
+        throw new RuntimeConflictError(`Cron Run ${cronRunId} 已进入 ${current.status}，不能跳过`);
+      }
+      const now = this.now();
+      const result = this.db
+        .prepare(
+          `UPDATE cron_runs SET status = 'skipped', reason = ?, finished_at = ?, version = version + 1
+           WHERE cron_run_id = ? AND status = 'queued' AND version = ?`,
+        )
+        .run(reason, now, cronRunId, current.version);
+      if (result.changes !== 1) throw new RuntimeConflictError(`Cron Run ${cronRunId} 跳过 CAS 失败`);
+      this.insertRuntimeEvent({
+        topic: "cron.run.skipped",
+        workspacePath: current.workspacePath,
+        cronJobId: current.cronJobId,
+        cronRunId,
+        payload: { reason },
+      });
+      return this.requireCronRun(cronRunId);
+    });
+    return skip();
+  }
+
   listRuntimeEvents(input: { afterEventId?: string; workspacePath?: string; limit?: number } = {}): RuntimeEventRecord[] {
     const clauses: string[] = [];
     const params: Array<string | number> = [];
     if (input.afterEventId !== undefined) {
-      clauses.push("event_id > ?");
-      params.push(input.afterEventId);
+      const cursor = this.db
+        .prepare("SELECT rowid AS row_id FROM runtime_events WHERE event_id = ?")
+        .get(input.afterEventId) as { row_id: number } | undefined;
+      // Event IDs are random, so their lexical order is not a valid replay cursor.
+      // SQLite rowid preserves this ledger's append order within one database.
+      if (!cursor) return [];
+      clauses.push("rowid > ?");
+      params.push(cursor.row_id);
     }
     if (input.workspacePath !== undefined) {
       clauses.push("workspace_path = ?");
@@ -1072,7 +1106,7 @@ export class RuntimeStore {
     const where = clauses.length > 0 ? ` WHERE ${clauses.join(" AND ")}` : "";
     return (
       this.db
-        .prepare(`SELECT * FROM runtime_events${where} ORDER BY created_at, event_id LIMIT ?`)
+        .prepare(`SELECT * FROM runtime_events${where} ORDER BY rowid LIMIT ?`)
         .all(...params) as RuntimeEventRow[]
     ).map(mapRuntimeEvent);
   }
