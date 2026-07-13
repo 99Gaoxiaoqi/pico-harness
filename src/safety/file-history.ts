@@ -14,6 +14,7 @@ import {
 } from "node:fs/promises";
 import { join, dirname, isAbsolute, parse, relative, resolve, sep } from "node:path";
 import { homedir } from "node:os";
+import { isDeepStrictEqual } from "node:util";
 import {
   FileHistoryBlobStore,
   type FileHistoryBlobRef,
@@ -46,6 +47,27 @@ export class FileHistoryDegradedError extends Error {
     super(message);
     this.name = "FileHistoryDegradedError";
   }
+}
+
+export class FileHistoryCloneConflictError extends Error {
+  constructor(
+    readonly sourceSessionId: string,
+    readonly targetSessionId: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = "FileHistoryCloneConflictError";
+  }
+}
+
+export interface FileHistoryCloneResult {
+  sourceSessionId: string;
+  targetSessionId: string;
+  sourceManifestPath?: string;
+  targetManifestPath?: string;
+  created: boolean;
+  migratedLegacySource: boolean;
+  blobCount: number;
 }
 
 export interface FileHistoryBackup {
@@ -1631,6 +1653,126 @@ export async function fileHistoryLoadState(
     state.storageError = `File History manifest 无效，已转为只读降级: ${errorMessage(error)}`;
     throw new FileHistoryDegradedError(state.storageError, error);
   }
+}
+
+/**
+ * Fork 仅发布一份新 manifest，不复制不可变 CAS blob。这个 API 刻意
+ * 不暴露 FileHistoryState，避免调用方在 clone 期间意外改写源会话。
+ */
+export async function fileHistoryCloneSession(
+  sourceSessionId: string,
+  targetSessionId: string,
+  baseDir: string = DEFAULT_BASE_DIR,
+): Promise<FileHistoryCloneResult> {
+  const state = createFileHistoryState();
+  const loaded = await fileHistoryLoadState(state, sourceSessionId, baseDir);
+  if (!loaded) {
+    return {
+      sourceSessionId,
+      targetSessionId,
+      created: false,
+      migratedLegacySource: false,
+      blobCount: 0,
+    };
+  }
+  if (state.storageStatus === "degraded") {
+    throw new FileHistoryDegradedError(state.storageError ?? "File History 源会话处于只读降级状态");
+  }
+
+  const migratedLegacySource = state.storageStatus === "legacy";
+  if (migratedLegacySource) {
+    // save 会先验证每个 legacy backup 并物化为 CAS；任一缺失都会
+    // 将 state 标记为 degraded 并拒绝发布 v2 manifest。
+    await saveFileHistoryState(state, sourceSessionId, baseDir);
+  }
+
+  const sourceManifestPath = resolveManifestPath(sourceSessionId, baseDir);
+  const targetManifestPath = resolveManifestPath(targetSessionId, baseDir);
+  const sourceManifest = parseFileHistoryManifestV2(
+    JSON.parse(await readFile(sourceManifestPath, "utf8")) as unknown,
+    sourceSessionId,
+  );
+  const targetManifest: PersistedFileHistoryStateV2 = {
+    ...sourceManifest,
+    sessionId: targetSessionId,
+  };
+  const blobRefs = collectManifestBlobRefs(sourceManifest);
+  const blobStore = new FileHistoryBlobStore({ baseDir });
+  await Promise.all([...blobRefs.values()].map((ref) => blobStore.read(ref)));
+
+  if (sourceSessionId === targetSessionId) {
+    return {
+      sourceSessionId,
+      targetSessionId,
+      sourceManifestPath,
+      targetManifestPath,
+      created: false,
+      migratedLegacySource,
+      blobCount: blobRefs.size,
+    };
+  }
+
+  try {
+    const existing = parseFileHistoryManifestV2(
+      JSON.parse(await readFile(targetManifestPath, "utf8")) as unknown,
+      targetSessionId,
+    );
+    if (!isDeepStrictEqual(existing, targetManifest)) {
+      throw new FileHistoryCloneConflictError(
+        sourceSessionId,
+        targetSessionId,
+        `File History 目标会话已存在不同 manifest: ${targetManifestPath}`,
+      );
+    }
+    return {
+      sourceSessionId,
+      targetSessionId,
+      sourceManifestPath,
+      targetManifestPath,
+      created: false,
+      migratedLegacySource,
+      blobCount: blobRefs.size,
+    };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      if (error instanceof FileHistoryCloneConflictError) throw error;
+      throw new FileHistoryCloneConflictError(
+        sourceSessionId,
+        targetSessionId,
+        `File History 目标 manifest 无法作为幂等 fork 结果: ${errorMessage(error)}`,
+      );
+    }
+  }
+
+  await writeJsonAtomic(targetManifestPath, targetManifest);
+  return {
+    sourceSessionId,
+    targetSessionId,
+    sourceManifestPath,
+    targetManifestPath,
+    created: true,
+    migratedLegacySource,
+    blobCount: blobRefs.size,
+  };
+}
+
+function collectManifestBlobRefs(
+  manifest: PersistedFileHistoryStateV2,
+): Map<string, FileHistoryBlobRef> {
+  const refs = new Map<string, FileHistoryBlobRef>();
+  for (const snapshot of manifest.snapshots) {
+    for (const { backup } of snapshot.trackedFileBackups) {
+      if (backup.kind !== "blob") continue;
+      const existing = refs.get(backup.blob.digest);
+      if (existing && existing.sizeBytes !== backup.blob.sizeBytes) {
+        throw new FileHistoryDegradedError(
+          `File History CAS 引用的同一 digest 声明了不同大小: ${backup.blob.digest}`,
+        );
+      }
+      refs.set(backup.blob.digest, backup.blob);
+    }
+  }
+  return refs;
 }
 
 function hydrateFileHistoryV1(

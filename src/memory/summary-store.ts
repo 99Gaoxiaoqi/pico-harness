@@ -12,6 +12,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { basename, dirname, join } from "pathe";
+import { isDeepStrictEqual } from "node:util";
 import { logger } from "../observability/logger.js";
 import type {
   SessionSummaryBasis,
@@ -37,6 +38,35 @@ export interface SessionSummaryStoreOptions {
   persistent: boolean;
   /** legacy 聚合文件路径；v2 会在同级 summaries/ 中按 session 分文件保存。 */
   filePath: string;
+}
+
+export class SummaryCloneConflictError extends Error {
+  constructor(
+    readonly sourceSessionId: string,
+    readonly targetSessionId: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = "SummaryCloneConflictError";
+  }
+}
+
+export class SummaryIntegrityError extends Error {
+  constructor(
+    readonly sessionId: string,
+    message: string,
+    override readonly cause?: unknown,
+  ) {
+    super(message);
+    this.name = "SummaryIntegrityError";
+  }
+}
+
+export interface SummaryCloneResult {
+  sourceSessionId: string;
+  targetSessionId: string;
+  created: boolean;
+  summary: StoredSessionSummary | null;
 }
 
 /** Process-local summary storage used when durable persistence is disabled. */
@@ -88,6 +118,7 @@ export class FileSessionSummaryStore
   private temporaryFileSequence = 0;
   private readonly summariesDirectory: string;
   private readonly compatibilityFallbacks = new Map<string, StoredSessionSummary>();
+  private compatibilityIndexError: unknown;
 
   constructor(private readonly filePath: string) {
     super();
@@ -173,6 +204,101 @@ export class FileSessionSummaryStore
     }
   }
 
+  /** Fork 保留摘要的 basis，但为目标会话发布独立 commit marker。 */
+  cloneSession(sourceSessionId: string, targetSessionId: string): SummaryCloneResult {
+    const source = this.resolveCloneSource(sourceSessionId);
+    if (!source) {
+      return { sourceSessionId, targetSessionId, created: false, summary: null };
+    }
+    const clonedSummary: StoredSessionSummary & { basis: SessionSummaryBasis } = {
+      ...source.summary,
+      sessionId: targetSessionId,
+      basis: { ...source.summary.basis },
+    };
+    const targetFile = {
+      schemaVersion: SUMMARY_FILE_VERSION,
+      sessionId: targetSessionId,
+      summary: clonedSummary,
+    } satisfies SummaryFileV2;
+    const targetPath = this.sessionPath(targetSessionId);
+
+    if (existsSync(targetPath)) {
+      const existing = this.readSummaryFileStrict(targetPath, targetSessionId);
+      if (!isDeepStrictEqual(existing, targetFile)) {
+        throw new SummaryCloneConflictError(
+          sourceSessionId,
+          targetSessionId,
+          `目标会话已存在不同的摘要: ${targetPath}`,
+        );
+      }
+      this.summaries.set(targetSessionId, clonedSummary);
+      return {
+        sourceSessionId,
+        targetSessionId,
+        created: false,
+        summary: cloneSummary(clonedSummary),
+      };
+    }
+
+    writeJsonAtomicSync(targetPath, targetFile, this.temporaryFileSequence++);
+    this.summaries.set(targetSessionId, clonedSummary);
+    this.compatibilityFallbacks.delete(targetSessionId);
+    this.persistCompatibilityIndex();
+    return {
+      sourceSessionId,
+      targetSessionId,
+      created: true,
+      summary: cloneSummary(clonedSummary),
+    };
+  }
+
+  private resolveCloneSource(sessionId: string): SummaryFileV2 | undefined {
+    const path = this.sessionPath(sessionId);
+    if (existsSync(path)) return this.readSummaryFileStrict(path, sessionId);
+    if (this.compatibilityIndexError) {
+      throw new SummaryIntegrityError(
+        sessionId,
+        `会话摘要兼容索引损坏，无法判定源摘要是否存在: ${this.filePath}`,
+        this.compatibilityIndexError,
+      );
+    }
+    const fallback = this.compatibilityFallbacks.get(sessionId);
+    if (!fallback) return undefined;
+
+    const migratedSummary: StoredSessionSummary & { basis: SessionSummaryBasis } = {
+      ...fallback,
+      basis: fallback.basis
+        ? { ...fallback.basis }
+        : {
+            throughEventId: null,
+            messageCount: fallback.messageCount,
+            prefixDigest: null,
+          },
+    };
+    const migrated = {
+      schemaVersion: SUMMARY_FILE_VERSION,
+      sessionId,
+      summary: migratedSummary,
+    } satisfies SummaryFileV2;
+    try {
+      writeJsonAtomicSync(path, migrated, this.temporaryFileSequence++);
+      this.summaries.set(sessionId, migratedSummary);
+      this.compatibilityFallbacks.delete(sessionId);
+      this.persistCompatibilityIndex();
+      return migrated;
+    } catch (error) {
+      throw new SummaryIntegrityError(sessionId, `迁移 legacy 会话摘要失败: ${path}`, error);
+    }
+  }
+
+  private readSummaryFileStrict(path: string, sessionId: string): SummaryFileV2 {
+    try {
+      return parseSummaryFileV2(JSON.parse(readFileSync(path, "utf8")) as unknown, sessionId);
+    } catch (error) {
+      throw new SummaryIntegrityError(sessionId, `会话摘要损坏，拒绝克隆: ${path}`, error);
+    }
+  }
+
   private loadCompatibilityIndex(): void {
     try {
       const parsed: unknown = JSON.parse(readFileSync(this.filePath, "utf8"));
@@ -183,6 +309,7 @@ export class FileSessionSummaryStore
     } catch (error) {
       if (getErrorCode(error) === "ENOENT") return;
       // 聚合索引不再是权威源；损坏不禁用 per-session 读取。
+      this.compatibilityIndexError = error;
       logger.warn({ error, filePath: this.filePath }, "会话摘要兼容索引无效");
     }
   }
@@ -196,6 +323,7 @@ export class FileSessionSummaryStore
       } satisfies SummaryCompatibilityIndexV2,
       this.temporaryFileSequence++,
     );
+    this.compatibilityIndexError = undefined;
   }
 
   private sessionPath(sessionId: string): string {
