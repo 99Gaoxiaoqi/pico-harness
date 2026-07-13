@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readdir, stat } from "node:fs/promises";
+import { open, readdir, stat } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { replaySessionRecords } from "../engine/session-reducer.js";
 import {
@@ -64,8 +64,12 @@ export class SessionCatalogProjector {
   async projectEntry(entry: SessionCatalogEntry): Promise<SessionCatalogProjectionResult> {
     const workDir = workDirFromLogPath(entry.logPath);
     try {
+      const source = await stat(entry.logPath);
+      if (!source.isFile()) throw new Error(`Session JSONL is not a file: ${entry.logPath}`);
       const projected = {
         ...entry,
+        sourceMtimeMs: source.mtimeMs,
+        sourceSizeBytes: source.size,
         health: "healthy",
         diagnostic: undefined,
       } satisfies SessionCatalogEntry;
@@ -126,9 +130,10 @@ export class SessionCatalogProjector {
         const info = await stat(logPath);
         const prior = existingByPath.get(logPath);
         if (
-          prior?.health === "healthy" &&
-          prior.updatedAt === info.mtime.toISOString() &&
-          prior.journalSchemaVersion >= 0
+          prior &&
+          catalogSourceMatches(prior, info) &&
+          catalogHeadIsCoherent(prior) &&
+          (await catalogHeadMatchesJournal(logPath, prior, info.size))
         ) {
           candidates.push({ entry: prior, needsWrite: false });
           continue;
@@ -309,6 +314,8 @@ async function deriveJournalCandidate(
     updatedAt,
     lastOpenedAt: options.openedAt ?? existing?.lastOpenedAt ?? updatedAt,
     journalSchemaVersion: metadata?.schemaVersion ?? 0,
+    sourceMtimeMs: info.mtimeMs,
+    sourceSizeBytes: info.size,
     ...(head ? { head } : {}),
     health: "healthy",
   } satisfies SessionCatalogEntry;
@@ -431,6 +438,93 @@ function legacyIdentity(
 
 function legacyLogId(logPath: string): string {
   return `legacy-${createHash("sha256").update(resolve(logPath)).digest("hex").slice(0, 24)}`;
+}
+
+function catalogSourceMatches(
+  entry: SessionCatalogEntry,
+  source: { readonly mtimeMs: number; readonly size: number },
+): boolean {
+  return (
+    entry.health === "healthy" &&
+    entry.sourceMtimeMs === source.mtimeMs &&
+    entry.sourceSizeBytes === source.size
+  );
+}
+
+function catalogHeadIsCoherent(entry: SessionCatalogEntry): boolean {
+  if (!entry.head) return entry.messageCount === 0;
+  return entry.head.logId === entry.logId;
+}
+
+async function catalogHeadMatchesJournal(
+  logPath: string,
+  entry: SessionCatalogEntry,
+  sourceSizeBytes: number,
+): Promise<boolean> {
+  const tail = await readLastJournalRecord(logPath, sourceSizeBytes);
+  if (!tail) return false;
+  if (tail["type"] === "meta") return entry.head === undefined && entry.messageCount === 0;
+  const head = entry.head;
+  if (!head || typeof tail["seq"] !== "number" || tail["seq"] !== head.seq) return false;
+  if (tail["type"] === "event") {
+    return (
+      typeof tail["eventId"] === "string" &&
+      tail["eventId"] === head.eventId &&
+      typeof tail["epoch"] === "number" &&
+      tail["epoch"] === head.epoch
+    );
+  }
+  if (!isLegacyJournalRecordType(tail["type"])) return false;
+  return head.eventId === `legacy:${head.seq}:${tail["type"]}`;
+}
+
+/** Reads only the final physical JSONL record; large records expand one block at a time. */
+async function readLastJournalRecord(
+  logPath: string,
+  sourceSizeBytes: number,
+): Promise<Record<string, unknown> | undefined> {
+  if (sourceSizeBytes === 0) return undefined;
+  const file = await open(logPath, "r");
+  try {
+    let position = sourceSizeBytes;
+    let suffix = Buffer.alloc(0);
+    while (position > 0) {
+      const length = Math.min(position, 64 * 1024);
+      position -= length;
+      const chunk = Buffer.allocUnsafe(length);
+      const { bytesRead } = await file.read(chunk, 0, length, position);
+      suffix = Buffer.concat([chunk.subarray(0, bytesRead), suffix]);
+
+      let logicalEnd = suffix.length;
+      while (
+        logicalEnd > 0 &&
+        (suffix[logicalEnd - 1] === 0x0a || suffix[logicalEnd - 1] === 0x0d)
+      ) {
+        logicalEnd--;
+      }
+      const separator = suffix.lastIndexOf(0x0a, logicalEnd - 1);
+      if (separator < 0 && position > 0) continue;
+      const line = suffix.subarray(separator + 1, logicalEnd).toString("utf8");
+      if (!line) return undefined;
+      const value: unknown = JSON.parse(line);
+      return isRecord(value) ? value : undefined;
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  } finally {
+    await file.close();
+  }
+}
+
+function isLegacyJournalRecordType(value: unknown): value is LegacySessionRecord["type"] {
+  return (
+    value === "message" ||
+    value === "truncate" ||
+    value === "undo" ||
+    value === "rewind_to" ||
+    value === "runtime_state"
+  );
 }
 
 async function listSessionLogPaths(workDir: string): Promise<string[]> {
