@@ -37,6 +37,10 @@ const DEFAULT_BASE_DIR = join(homedir(), ".pico", "file-history");
 const MAX_SNAPSHOTS = 100;
 const FILE_HISTORY_MANIFEST_VERSION = 2 as const;
 
+export function fileHistoryDefaultBaseDir(): string {
+  return DEFAULT_BASE_DIR;
+}
+
 export type FileHistoryStorageStatus = "healthy" | "legacy" | "degraded";
 
 export class FileHistoryDegradedError extends Error {
@@ -805,6 +809,35 @@ export async function fileHistoryBeginRewindPoint(
       : {}),
     ...(input.beforeSessionSeq !== undefined ? { beforeSessionSeq: input.beforeSessionSeq } : {}),
   });
+}
+
+/**
+ * 用用户消息的 durable receipt 绑定已建立的 rewind point。崩溃后重试会覆写
+ * 相同值；若同 messageId 被绑到另一个事件则拒绝猜测。
+ */
+export async function fileHistoryBindSourceEvent(
+  state: FileHistoryState,
+  input: { messageId: string; sourceMessageEventId: string; beforeSessionSeq: number },
+  sessionId: string,
+  baseDir: string = DEFAULT_BASE_DIR,
+): Promise<void> {
+  const snapshot = state.snapshots.find((candidate) => candidate.messageId === input.messageId);
+  if (!snapshot) throw new Error(`FileHistory: 找不到 messageId=${input.messageId} 的快照`);
+  if (
+    snapshot.sourceMessageEventId !== undefined &&
+    snapshot.sourceMessageEventId !== input.sourceMessageEventId
+  ) {
+    throw new Error(`FileHistory: ${input.messageId} 已绑定另一个 Session event`);
+  }
+  if (
+    snapshot.beforeSessionSeq !== undefined &&
+    snapshot.beforeSessionSeq !== input.beforeSessionSeq
+  ) {
+    throw new Error(`FileHistory: ${input.messageId} 的 Session 边界不一致`);
+  }
+  snapshot.sourceMessageEventId = input.sourceMessageEventId;
+  snapshot.beforeSessionSeq = input.beforeSessionSeq;
+  await saveFileHistoryState(state, sessionId, baseDir);
 }
 
 /** 对话 fork 后只保留目标消息之前的活动 rewind points。 */

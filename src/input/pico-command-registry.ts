@@ -106,6 +106,8 @@ export interface PicoCommandRegistryOptions {
   goalManager?: GoalManager;
   modelRuntime?: () => Pick<ModelRuntimeCommandService, "execute"> | undefined;
   taskRuntime?: TaskHostRuntime;
+  /** TaskHostRuntime 不可用时的宿主诊断；TUI 仍可在非 Git 目录运行。 */
+  taskRuntimeDiagnostic?: string;
   mcpControl?: McpConnectionManager;
 }
 
@@ -1446,6 +1448,10 @@ async function formatDoctorReport(options: PicoCommandRegistryOptions): Promise<
     ...(catalogHealth.diagnostic ? [`Session catalog reason: ${catalogHealth.diagnostic}`] : []),
     ...(catalogHealth.state !== "healthy"
       ? [`Session catalog recommendation: ${catalogHealth.recommendation}`]
+      : []),
+    `Task runtime: ${options.taskRuntime ? "healthy" : "unavailable"}`,
+    ...(options.taskRuntimeDiagnostic
+      ? [`Task runtime reason: ${options.taskRuntimeDiagnostic}`]
       : []),
     ...formatMemoryBackend(options.session, true),
   ].join("\n");

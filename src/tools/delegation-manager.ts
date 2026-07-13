@@ -49,6 +49,10 @@ export interface DelegationManagerOptions {
 }
 
 export interface DelegationCompletionEnvelope {
+  /** Runtime completion_outbox 与 Session event 共用的稳定幂等键。 */
+  completionId: string;
+  jobId: string;
+  ownerSessionId?: string;
   completionSeq: number;
   /** 本次 completion 精确对应的 TUI 活动；只用于宿主生命周期关联。 */
   activityIds: readonly string[];
@@ -126,6 +130,7 @@ interface DelegationRecord {
   taskId: string;
   status: DelegationRecordStatus;
   completionPolicy: DelegationCompletionPolicy;
+  ownerSessionId?: string;
   activityIds: readonly string[];
   completionSeq?: number;
   startedAt: number;
@@ -206,6 +211,7 @@ export class DelegationManager {
       taskId: task?.taskId ?? id,
       status: "running",
       completionPolicy,
+      ...(taskInput.ownerSessionId ? { ownerSessionId: taskInput.ownerSessionId } : {}),
       activityIds: Object.freeze([...(taskInput.activityIds ?? [])]),
       startedAt: now,
       updatedAt: now,
@@ -231,6 +237,7 @@ export class DelegationManager {
         record.error = batchFailureMessage(normalizedResult);
         record.completedAt = Date.now();
         record.updatedAt = record.completedAt;
+        record.completionSeq ??= this.nextCompletionSeq++;
         this.settleTaskRegistry(record, legacyResultWithoutStatus ? result : normalizedResult);
         this.publishCompletion(record);
       })
@@ -239,6 +246,7 @@ export class DelegationManager {
         record.error = err instanceof Error ? err.message : String(err);
         record.completedAt = Date.now();
         record.updatedAt = record.completedAt;
+        record.completionSeq ??= this.nextCompletionSeq++;
         this.settleTaskRegistry(record);
         this.publishCompletion(record);
       });
@@ -371,6 +379,9 @@ export class DelegationManager {
       throw new Error("Delegation completion is not settled");
     }
     return {
+      completionId: `completion:${record.taskId}:1`,
+      jobId: record.taskId,
+      ...(record.ownerSessionId ? { ownerSessionId: record.ownerSessionId } : {}),
       completionSeq: record.completionSeq,
       activityIds: record.activityIds,
       completionPolicy: record.completionPolicy,
@@ -389,6 +400,15 @@ export class DelegationManager {
       delegationId: record.id,
       completionPolicy: record.completionPolicy,
       aggregateStatus: record.status,
+      completionId: `completion:${record.taskId}:1`,
+      ...(record.completionSeq !== undefined ? { completionSeq: record.completionSeq } : {}),
+      activityIds: [...record.activityIds],
+      outputSummary: this.outputSummary(record),
+      ...(record.ownerSessionId ? { ownerSessionId: record.ownerSessionId } : {}),
+      ...(record.completionPolicy === "required" ||
+      (record.completionPolicy === "detached" && record.status === "completed")
+        ? { internalCompletion: true }
+        : {}),
       ...(registryResult !== undefined ? { result: registryResult } : {}),
     };
     if (record.status === "completed") {

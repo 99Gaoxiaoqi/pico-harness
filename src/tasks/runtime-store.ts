@@ -728,14 +728,30 @@ export class RuntimeStore {
     return row ? mapCompletion(row) : undefined;
   }
 
-  listPendingCompletions(limit = 100): CompletionOutboxRecord[] {
+  listPendingCompletions(
+    input: number | { limit?: number; ownerSessionId?: string } = 100,
+  ): CompletionOutboxRecord[] {
+    const options = typeof input === "number" ? { limit: input } : input;
+    const limit = Math.max(1, Math.min(options.limit ?? 100, 10_000));
+    if (options.ownerSessionId) {
+      return (
+        this.db
+          .prepare(
+            `SELECT completion_outbox.* FROM completion_outbox
+             INNER JOIN jobs ON jobs.job_id = completion_outbox.job_id
+             WHERE completion_outbox.delivered_at IS NULL AND jobs.owner_session_id = ?
+             ORDER BY completion_outbox.created_at, completion_outbox.completion_id LIMIT ?`,
+          )
+          .all(options.ownerSessionId, limit) as CompletionRow[]
+      ).map(mapCompletion);
+    }
     return (
       this.db
         .prepare(
           `SELECT * FROM completion_outbox
            WHERE delivered_at IS NULL ORDER BY created_at, completion_id LIMIT ?`,
         )
-        .all(Math.max(1, Math.min(limit, 10_000))) as CompletionRow[]
+        .all(limit) as CompletionRow[]
     ).map(mapCompletion);
   }
 

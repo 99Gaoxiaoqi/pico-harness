@@ -88,4 +88,5 @@ export interface SessionSummaryStore {
   readonly persistent: boolean;
   save(sessionId: string, summary: string, messageCount: number, basis?: SessionSummaryBasis): void;
   get(sessionId: string): StoredSessionSummary | null;
+  invalidateIfBeyond?(sessionId: string, boundary: SessionSummaryBasis): boolean;
 }
