@@ -149,12 +149,27 @@ describe("RuntimeStore + JobService integration", () => {
       completionPolicy: "optional",
       description: "shared",
     });
-    first.start(queued.jobId, {
+    const started = first.start(queued.jobId, {
       expectedVersion: queued.version,
       attemptId: "attempt-shared",
       leaseTtlMs: 100,
     });
     expect(() => second.start(queued.jobId, { expectedVersion: 2 })).toThrow(/已由 host-a 持有/);
+    expect(() =>
+      second.terminal({
+        jobId: queued.jobId,
+        attemptId: started.attempt.attemptId,
+        status: "failed",
+        expectedJobVersion: started.job.version,
+        expectedAttemptVersion: started.attempt.version,
+        leaseEpoch: started.lease.leaseEpoch,
+        error: "owner-b must not settle owner-a attempt",
+      }),
+    ).toThrow(/ownerId\/leaseEpoch/);
+    expect(first.get(queued.jobId)).toMatchObject({
+      job: { status: "running" },
+      attempts: [{ status: "running", ownerId: "host-a" }],
+    });
 
     const firstMessage = first.sendMessage(queued.jobId, "继续", "command-same");
     expect(firstMessage.inserted).toBe(true);

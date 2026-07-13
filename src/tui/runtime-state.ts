@@ -224,7 +224,7 @@ export class DelegationWakeCoordinator {
 
 function shouldWakeForCompletion(completion: DelegationCompletionEnvelope): boolean {
   if (completion.completionPolicy === "optional") return true;
-  return completion.completionPolicy === "detached" && completion.status !== "completed";
+  return completion.status !== "completed";
 }
 
 export async function createTuiRuntimeState(
@@ -351,7 +351,7 @@ function delegationEnvelopeFromOutbox(
   if (
     completionId !== completion.completionId ||
     typeof jobId !== "string" ||
-    (payloadOwner !== undefined && payloadOwner !== ownerSessionId) ||
+    payloadOwner !== ownerSessionId ||
     (completionPolicy !== "required" &&
       completionPolicy !== "optional" &&
       completionPolicy !== "detached") ||
