@@ -243,11 +243,18 @@ describe("Claude Code style rewind integration", () => {
       .trim()
       .split("\n")
       .map((line) => JSON.parse(line) as Record<string, unknown>);
-    expect(records.at(-1)).toMatchObject({
-      type: "event",
-      kind: "history.rewound",
-      data: { messageIndex: 0 },
-    });
+    expect(records.slice(-2)).toMatchObject([
+      {
+        type: "event",
+        kind: "history.rewound",
+        data: { messageIndex: 0 },
+      },
+      {
+        type: "event",
+        kind: "runtime.checkpoint",
+        data: { patch: { settings: { mode: "default" } } },
+      },
+    ]);
   });
 });
 

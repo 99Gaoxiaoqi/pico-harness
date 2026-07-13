@@ -190,6 +190,61 @@ describe("Session durable commit integration", () => {
     await second.close();
   });
 
+  it("persists rewind mode and original-input handoff across a TUI crash", async () => {
+    const sessionId = `rewind-handoff-${Date.now()}`;
+    const first = await new SessionManager().getOrCreate(sessionId, workDir, {
+      persistence: true,
+    });
+    first.updateRuntimeState({
+      settings: {
+        provider: "openai",
+        model: "glm-5.2",
+        mode: "yolo",
+        thinkingEffort: "high",
+        thinkingEffortExplicit: true,
+        additionalDirectories: [],
+      },
+    });
+    await first.flushPersistence();
+    const messageId = await first.beginRewindPoint({
+      userPrompt: "restore this prompt",
+      transcriptIndex: 7,
+      interactionMode: "plan",
+    });
+    const user = await first.commitMessageOnce(`user-message:${messageId}`, {
+      role: "user",
+      content: "restore this prompt",
+    });
+    await first.bindRewindPointSource(messageId, user);
+    await first.commitMessages({ role: "assistant", content: "later answer" });
+
+    await first.rewindConversation(0, messageId);
+    expect(first.getRuntimeStateSnapshot().settings).toMatchObject({
+      mode: "plan",
+      prePlanMode: "yolo",
+    });
+    await expect(first.getPendingTuiRewindHandoff()).resolves.toMatchObject({
+      inputText: "restore this prompt",
+      transcriptIndex: 7,
+      interactionMode: "plan",
+    });
+    await first.close();
+
+    const reopened = await new SessionManager().getOrCreate(sessionId, workDir, {
+      persistence: true,
+    });
+    expect((await reopened.readHydrationSnapshot()).runtime.settings).toMatchObject({
+      mode: "plan",
+      prePlanMode: "yolo",
+    });
+    await expect(reopened.getPendingTuiRewindHandoff()).resolves.toMatchObject({
+      inputText: "restore this prompt",
+    });
+    await reopened.commitMessages({ role: "user", content: "replacement prompt" });
+    await expect(reopened.getPendingTuiRewindHandoff()).resolves.toBeUndefined();
+    await reopened.close();
+  });
+
   it("marks a prepared rewind for attention when later session messages drift the precondition", async () => {
     const sessionId = `rewind-drift-${Date.now()}`;
     const first = await new SessionManager().getOrCreate(sessionId, workDir, {
@@ -210,9 +265,7 @@ describe("Session durable commit integration", () => {
       mode: "conversation",
       precondition: {
         sessionLastSeq: user.cursor.seq,
-        effectiveHistoryDigest: createHash("sha256")
-          .update(JSON.stringify(before))
-          .digest("hex"),
+        effectiveHistoryDigest: createHash("sha256").update(JSON.stringify(before)).digest("hex"),
         fileHistoryRevision: first.fileHistory.revision,
       },
       target: {

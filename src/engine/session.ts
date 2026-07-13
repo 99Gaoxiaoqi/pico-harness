@@ -156,6 +156,13 @@ export interface DurableSessionForkSnapshot {
   readonly rootLogId: string;
 }
 
+export interface DurableTuiRewindHandoff {
+  readonly operationId: string;
+  readonly inputText: string;
+  readonly transcriptIndex: number;
+  readonly interactionMode?: PersistedSessionSettings["mode"];
+}
+
 /**
  * Session:一次持续的人机交互过程。
  * 负责维护该会话的完整历史,并提供 WorkingMemory 提取。
@@ -499,9 +506,7 @@ export class Session implements SessionRuntimePersistence {
   private async recoverRewindPointBindings(records: readonly SessionRecord[]): Promise<void> {
     const events = new Map(
       records
-        .filter(
-          (record) => record.type === "event" && record.kind === "message.appended",
-        )
+        .filter((record) => record.type === "event" && record.kind === "message.appended")
         .map((record) => [record.eventId, record] as const),
     );
     for (const snapshot of this.fileHistory.snapshots) {
@@ -724,8 +729,7 @@ export class Session implements SessionRuntimePersistence {
         logId: store.getLogId(),
         seq: record.seq,
         epoch,
-        eventId:
-          record.type === "event" ? record.eventId : `legacy:${record.seq}:${record.type}`,
+        eventId: record.type === "event" ? record.eventId : `legacy:${record.seq}:${record.type}`,
       },
     };
   }
@@ -1132,7 +1136,9 @@ export class Session implements SessionRuntimePersistence {
   }
 
   async bindRewindPointSource(messageId: string, receipt: CommitReceipt): Promise<void> {
-    const snapshot = this.fileHistory.snapshots.find((candidate) => candidate.messageId === messageId);
+    const snapshot = this.fileHistory.snapshots.find(
+      (candidate) => candidate.messageId === messageId,
+    );
     await fileHistoryBindSourceEvent(
       this.fileHistory,
       {
@@ -1183,7 +1189,11 @@ export class Session implements SessionRuntimePersistence {
 
   async rewindCode(messageId: string): Promise<void> {
     const snapshot = this.requireRewindSnapshot(messageId);
-    await this.executeRewindOperation("code", snapshot, snapshot.messageIndex ?? this.history.length);
+    await this.executeRewindOperation(
+      "code",
+      snapshot,
+      snapshot.messageIndex ?? this.history.length,
+    );
   }
 
   async getRewindDiffStat(messageId: string): Promise<FileHistoryDiffStat> {
@@ -1211,7 +1221,9 @@ export class Session implements SessionRuntimePersistence {
   }
 
   private requireRewindSnapshot(messageId: string): FileHistoryState["snapshots"][number] {
-    const snapshot = this.fileHistory.snapshots.find((candidate) => candidate.messageId === messageId);
+    const snapshot = this.fileHistory.snapshots.find(
+      (candidate) => candidate.messageId === messageId,
+    );
     if (!snapshot) throw new Error(`FileHistory: 找不到 messageId=${messageId} 的快照`);
     return snapshot;
   }
@@ -1226,9 +1238,7 @@ export class Session implements SessionRuntimePersistence {
     const coordinator = this.createRewindCoordinator();
     const operation = await coordinator.executePrepared(async () => {
       const files =
-        mode === "conversation"
-          ? []
-          : await this.buildRewindFileTransitions(snapshot.messageId);
+        mode === "conversation" ? [] : await this.buildRewindFileTransitions(snapshot.messageId);
       const head = this.store?.getHeadCursor();
       return {
         operationId,
@@ -1246,6 +1256,13 @@ export class Session implements SessionRuntimePersistence {
             ? { sourceMessageEventId: snapshot.sourceMessageEventId }
             : {}),
           messageIndex,
+          ...(snapshot.userPrompt !== undefined ? { userPrompt: snapshot.userPrompt } : {}),
+          ...(snapshot.transcriptIndex !== undefined
+            ? { transcriptIndex: snapshot.transcriptIndex }
+            : {}),
+          ...(isPersistedInteractionMode(snapshot.interactionMode)
+            ? { interactionMode: snapshot.interactionMode }
+            : {}),
         },
         files,
       };
@@ -1279,6 +1296,7 @@ export class Session implements SessionRuntimePersistence {
           }
           if (operation.mode !== "code") {
             await this.rewindOnce(operation.operationId, operation.target.messageIndex);
+            await this.commitRewindRuntimeMode(operation);
           }
         },
         commitSidecars: async (operation) => {
@@ -1292,6 +1310,69 @@ export class Session implements SessionRuntimePersistence {
         },
       },
     });
+  }
+
+  /**
+   * completed rewind 在下一条显式用户消息提交前持续作为 TUI handoff。
+   * 因此 UI 应用后立即崩溃也不会丢失原 prompt；重启只会幂等回填。
+   */
+  async getPendingTuiRewindHandoff(): Promise<DurableTuiRewindHandoff | undefined> {
+    if (!this.store) return undefined;
+    await this.flushPersistence();
+    const operations = (await new StorageOperationJournal({ workDir: this.workDir }).list()).filter(
+      (operation): operation is RewindStorageOperation =>
+        operation.kind === "rewind" &&
+        operation.sessionId === this.id &&
+        operation.state === "completed" &&
+        operation.mode !== "code" &&
+        typeof operation.target.userPrompt === "string" &&
+        operation.target.transcriptIndex !== undefined,
+    );
+    if (operations.length === 0) return undefined;
+    const records = (await this.store.inspectJournal({ strict: true })).records;
+    for (const operation of operations.toReversed()) {
+      const rewind = records.find(
+        (record) => record.type === "event" && record.eventId === `rewind:${operation.operationId}`,
+      );
+      if (!rewind || rewind.type !== "event") continue;
+      const superseded = records.some(
+        (record) =>
+          record.type === "event" &&
+          record.seq > rewind.seq &&
+          record.kind === "message.appended" &&
+          record.data.message.role === "user" &&
+          record.data.message.toolCallId === undefined &&
+          !isMessageHiddenFromTranscript(record.data.message),
+      );
+      if (superseded) return undefined;
+      return {
+        operationId: operation.operationId,
+        inputText: operation.target.userPrompt!,
+        transcriptIndex: operation.target.transcriptIndex!,
+        ...(operation.target.interactionMode
+          ? { interactionMode: operation.target.interactionMode }
+          : {}),
+      };
+    }
+    return undefined;
+  }
+
+  private async commitRewindRuntimeMode(operation: RewindStorageOperation): Promise<void> {
+    const mode = operation.target.interactionMode;
+    if (!mode || !this.persistedSettings) return;
+    const settings = restorePersistedInteractionMode(this.persistedSettings, mode);
+    const patch: SessionRuntimeStatePatch = { settings };
+    const receipt = this.store
+      ? await this.commitPersistence("rewind runtime", (store, seq) =>
+          store.commitRuntimeState(patch, {
+            expectedSeq: seq,
+            eventId: `rewind:${operation.operationId}:runtime`,
+          }),
+        )
+      : undefined;
+    this.persistedSettings = settings;
+    this.updatedAt = new Date();
+    if (receipt) this.scheduleSessionCatalog(receipt);
   }
 
   private async buildRewindFileTransitions(
@@ -1310,9 +1391,7 @@ export class Session implements SessionRuntimePersistence {
     return files;
   }
 
-  private async validateRewindPrecondition(
-    operation: RewindStorageOperation,
-  ): Promise<void> {
+  private async validateRewindPrecondition(operation: RewindStorageOperation): Promise<void> {
     const records = this.store ? (await this.store.inspectJournal({ strict: true })).records : [];
     const existing = records.find(
       (record) => record.type === "event" && record.eventId === `rewind:${operation.operationId}`,
@@ -1726,7 +1805,11 @@ function resolveFileHistoryLocation(
 ): { rootId: string; relativePath: string } {
   const absolutePath = resolve(filePath);
   const matches = [...roots.entries()]
-    .map(([rootId, root]) => ({ rootId, root: resolve(root), relativePath: relative(root, absolutePath) }))
+    .map(([rootId, root]) => ({
+      rootId,
+      root: resolve(root),
+      relativePath: relative(root, absolutePath),
+    }))
     .filter(
       (candidate) =>
         candidate.relativePath.length > 0 &&
@@ -1927,8 +2010,26 @@ function mergeUsageWithHistory(
   };
 }
 
+function isPersistedInteractionMode(value: unknown): value is PersistedSessionSettings["mode"] {
+  return value === "default" || value === "plan" || value === "auto" || value === "yolo";
+}
+
+function restorePersistedInteractionMode(
+  current: PersistedSessionSettings,
+  mode: PersistedSessionSettings["mode"],
+): PersistedSessionSettings {
+  const next = structuredClone(current);
+  if (mode === "plan") {
+    next.prePlanMode = current.mode === "plan" ? (current.prePlanMode ?? "yolo") : current.mode;
+  } else {
+    delete next.prePlanMode;
+  }
+  next.mode = mode;
+  return next;
+}
+
 /**
- * SessionManager:全局会话管理器,负责多用户 / 多终���的物理隔离。
+ * SessionManager:全局会话管理器,负责多用户 / 多终端的物理隔离。
  * 以 sessionId 为 key,O(1) 路由到对应 Session 实例。
  *
  * 【内存治理】LRU + TTL 双重驱逐,防长跑内存膨胀:
