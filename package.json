@@ -31,7 +31,7 @@
     "smoke:tui": "node scripts/tui-built-smoke.mjs",
     "smoke:tui:source": "node scripts/tui-smoke.mjs",
     "lint": "eslint src tests scripts eslint.config.js vitest.config.ts vitest.e2e.config.ts vitest.llm-e2e.config.ts",
-    "format": "prettier --check src tests scripts .github/workflows docs README.md ROADMAP.md AGENTS.md package.json package-lock.json tsconfig.json tsconfig.build.json vitest.config.ts vitest.e2e.config.ts vitest.llm-e2e.config.ts"
+    "format": "prettier --check src tests scripts .github/workflows docs README.md AGENTS.md package.json package-lock.json tsconfig.json tsconfig.build.json vitest.config.ts vitest.e2e.config.ts vitest.llm-e2e.config.ts"
   },
   "engines": {
     "node": "22.x"
