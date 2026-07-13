@@ -114,20 +114,32 @@ describe("Pico command registry", () => {
       cronDaemonBridge: bridge,
     });
 
-    const created = await processUserInput("/cron add */5 * * * * 检查未提交的改动", { registry });
+    const created = await processUserInput(
+      "/cron add --tool-network=allowlist:api.example.com */5 * * * * 检查未提交的改动",
+      { registry },
+    );
     expect(created.type === "local-command" ? created.result.message : undefined).toContain(
       "Cron job created",
     );
     expect(created.type === "local-command" ? created.result.message : undefined).toContain(
       "daemon registered",
     );
+    expect(created.type === "local-command" ? created.result.message : undefined).toContain(
+      "工具网络：仅允许 api.example.com",
+    );
     const listed = await processUserInput("/cron list", { registry });
     expect(listed.type === "local-command" ? listed.result.message : undefined).toContain(
       "检查未提交的改动",
     );
+    expect(listed.type === "local-command" ? listed.result.message : undefined).toContain(
+      "工具网络：仅允许 api.example.com",
+    );
     const status = await processUserInput("/cron status", { registry });
     expect(status.type === "local-command" ? status.result.message : undefined).toContain(
       "daemon connected; workspace registered; scheduler unknown",
+    );
+    expect(status.type === "local-command" ? status.result.message : undefined).toContain(
+      "模型 Provider 调用仍需联网",
     );
   });
 

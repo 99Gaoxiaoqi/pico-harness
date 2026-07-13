@@ -30,6 +30,7 @@ import { buildDefaultToolRegistry } from "../tools/default-registry.js";
 import type { AskUserHandler } from "../tools/ask-user.js";
 import { WorkspaceRoots, workspaceAccessesFromCall } from "../tools/workspace-roots.js";
 import { ExitPlanModeTool } from "../tools/plan-exit.js";
+import { FetchURLTool } from "../tools/web.js";
 import { DelegationManager, DelegateStatusTool } from "../tools/delegation-manager.js";
 import { createSubagentRegistryFactory } from "../tools/delegation-registry.js";
 import { AgentProfileLoader, type AgentProfile } from "../tools/agent-profile.js";
@@ -706,6 +707,17 @@ function pruneRegistryToBackgroundAllowlist(
 ): void {
   for (const tool of registry.getAvailableTools()) {
     if (!policy.allowedTools.has(tool.name)) registry.unregister(tool.name);
+  }
+  const fetchUrl = registry.getTool("fetch_url");
+  if (fetchUrl instanceof FetchURLTool) {
+    fetchUrl.setAuthorizeUrl((url) => {
+      const hostname = url.hostname.replace(/^\[|\]$/g, "").replace(/\.$/, "").toLowerCase();
+      if (!policy.allowedToolNetworkHosts.has(hostname)) {
+        throw new Error(
+          `[background:network_denied] 重定向主机 ${hostname} 不在 Job 工具网络 allowlist 中。`,
+        );
+      }
+    });
   }
 }
 

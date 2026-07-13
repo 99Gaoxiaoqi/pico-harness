@@ -99,7 +99,7 @@ function backgroundPolicy(allowedTools: string[]): BackgroundYoloPolicySnapshot 
     mode: "yolo",
     backgroundEnabled: true,
     trustedWorkspace: true,
-    networkPolicy: "disabled",
+    toolNetworkPolicy: "disabled",
     allowedTools,
     hardlineVersion: BACKGROUND_HARDLINE_VERSION,
     hookVersion: BACKGROUND_HOOK_VERSION,

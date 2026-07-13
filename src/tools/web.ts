@@ -83,9 +83,14 @@ export type FetchURLRequest = (
   signal: AbortSignal,
 ) => Promise<Response>;
 
+/** 每个重定向目标在 DNS 解析与网络请求前都必须通过宿主授权。 */
+export type FetchURLAuthorizer = (url: URL, redirectCount: number) => void | Promise<void>;
+
 export interface FetchURLToolOptions {
   /** 仅供宿主替换传输层；默认实现会把连接固定到已经校验的 DNS 地址。 */
   request?: FetchURLRequest;
+  /** 后台宿主注入的逐跳工具网络策略；不影响 Provider 网络。 */
+  authorizeUrl?: FetchURLAuthorizer;
 }
 
 /**
@@ -249,9 +254,12 @@ async function fetchWithValidatedRedirects(
   initialUrl: URL,
   signal: AbortSignal,
   request: FetchURLRequest,
+  authorizeUrl?: FetchURLAuthorizer,
 ): Promise<{ response: Response; finalUrl: URL }> {
   let currentUrl = initialUrl;
   for (let redirectCount = 0; ; redirectCount += 1) {
+    // 授权必须发生在 DNS 之前；失败时该跳既不会解析，也不会发送请求。
+    await authorizeUrl?.(currentUrl, redirectCount);
     const addresses = await resolvePublicTarget(currentUrl);
     const response = await request(currentUrl, addresses, signal);
     if (!isRedirectStatus(response.status)) {
@@ -369,9 +377,16 @@ function truncate(text: string, maxChars: number): string {
 export class FetchURLTool implements BaseTool {
   readonly readOnly = true;
   private readonly request: FetchURLRequest;
+  private authorizeUrl?: FetchURLAuthorizer;
 
   constructor(options: FetchURLToolOptions = {}) {
     this.request = options.request ?? requestPinnedUrl;
+    this.authorizeUrl = options.authorizeUrl;
+  }
+
+  /** AgentRuntime 在后台 Job 装配完成后注入，不改变前台默认行为。 */
+  setAuthorizeUrl(authorizeUrl: FetchURLAuthorizer): void {
+    this.authorizeUrl = authorizeUrl;
   }
 
   name(): string {
@@ -429,6 +444,7 @@ export class FetchURLTool implements BaseTool {
       parsed,
       AbortSignal.timeout(FETCH_URL_TIMEOUT_MS),
       this.request,
+      this.authorizeUrl,
     );
 
     if (!resp.ok) {

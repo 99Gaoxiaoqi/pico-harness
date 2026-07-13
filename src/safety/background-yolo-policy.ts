@@ -13,6 +13,12 @@ import {
   evaluateYoloToolCall,
   type SandboxSpawnPlan,
 } from "./yolo-sandbox.js";
+import {
+  BackgroundYoloPolicySnapshotError,
+  normalizeExactHostname,
+  parseBackgroundYoloPolicySnapshot,
+  type BackgroundYoloPolicySnapshotData,
+} from "./background-yolo-policy-schema.js";
 
 export const BACKGROUND_HARDLINE_VERSION = "builtin-v1" as const;
 export const BACKGROUND_HOOK_VERSION = "workspace-v1" as const;
@@ -21,17 +27,7 @@ const DEFAULT_HOOK_TIMEOUT_MS = 60_000;
 const MAX_HOOK_OUTPUT_BYTES = 1024 * 1024;
 const UNSAFE_BACKGROUND_TOOLS = new Set(["ask_user", "delegate_task", "spawn_subagent"]);
 
-export interface BackgroundYoloPolicySnapshot {
-  readonly mode: "yolo";
-  readonly backgroundEnabled: true;
-  readonly trustedWorkspace: true;
-  readonly networkPolicy: "disabled" | "allowlist";
-  readonly allowedNetworkHosts?: readonly string[];
-  readonly allowedTools: readonly string[];
-  readonly hardlineVersion: string;
-  readonly hookVersion: string;
-  readonly createdAt: number;
-}
+export type BackgroundYoloPolicySnapshot = BackgroundYoloPolicySnapshotData;
 
 export interface BackgroundWorkspaceTrustVerifier {
   canonicalize(workspacePath: string): Promise<string>;
@@ -42,7 +38,7 @@ export interface PreparedBackgroundYoloPolicy {
   readonly snapshot: BackgroundYoloPolicySnapshot;
   readonly workspacePath: string;
   readonly allowedTools: ReadonlySet<string>;
-  readonly allowedNetworkHosts: ReadonlySet<string>;
+  readonly allowedToolNetworkHosts: ReadonlySet<string>;
   readonly hookRunner?: StrictBackgroundHookRunner;
 }
 
@@ -125,7 +121,7 @@ export async function prepareBackgroundYoloPolicy(input: {
     allowedTools: new Set(
       snapshot.allowedTools.filter((tool) => !UNSAFE_BACKGROUND_TOOLS.has(tool)),
     ),
-    allowedNetworkHosts: new Set(snapshot.allowedNetworkHosts ?? []),
+    allowedToolNetworkHosts: new Set(snapshot.allowedToolNetworkHosts ?? []),
     ...(hookRunner ? { hookRunner } : {}),
   };
 }
@@ -219,14 +215,14 @@ function validateNetworkToolCall(
     return {
       allowed: false,
       reason:
-        policy.snapshot.networkPolicy === "disabled"
-          ? "[background:network_denied] 当前 Job 禁止网络访问。"
+        policy.snapshot.toolNetworkPolicy === "disabled"
+          ? "[background:network_denied] 当前 Job 禁止工具网络访问。"
           : "[background:network_denied] web_search 无法证明仅访问 allowlist，已安全拒绝。",
     };
   }
   if (call.name !== "fetch_url") return { allowed: true };
-  if (policy.snapshot.networkPolicy === "disabled") {
-    return { allowed: false, reason: "[background:network_denied] 当前 Job 禁止网络访问。" };
+  if (policy.snapshot.toolNetworkPolicy === "disabled") {
+    return { allowed: false, reason: "[background:network_denied] 当前 Job 禁止工具网络访问。" };
   }
   const rawUrl = jsonStringField(call.arguments, "url");
   if (!rawUrl) {
@@ -236,77 +232,30 @@ function validateNetworkToolCall(
   try {
     const url = new URL(rawUrl);
     if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("协议不受支持");
-    hostname = normalizeHostname(url.hostname);
+    hostname = normalizeExactHostname(url.hostname.replace(/^\[|\]$/g, ""));
   } catch {
     return { allowed: false, reason: "[background:network_denied] fetch_url URL 无法验证。" };
   }
-  if (!policy.allowedNetworkHosts.has(hostname)) {
+  if (!policy.allowedToolNetworkHosts.has(hostname)) {
     return {
       allowed: false,
       reason: `[background:network_denied] 主机 ${hostname} 不在 Job 网络 allowlist 中。`,
     };
   }
-  // FetchURL 会跟随重定向；当前工具边界无法把 allowlist 注入每一跳。允许首跳会使
-  // allowlist 被 30x 绕过，因此在 transport 支持逐跳 allowlist 前必须 fail-closed。
-  return {
-    allowed: false,
-    reason: "[background:network_denied] 当前 fetch_url transport 无法验证重定向逐跳 allowlist。",
-  };
+  // 这里只做首跳快速拒绝；FetchURLTool 自身会在 DNS 与请求前逐跳重复授权。
+  return { allowed: true };
 }
 
 function assertBackgroundYoloPolicy(value: unknown): BackgroundYoloPolicySnapshot {
   if (!isRecord(value)) {
     throw new BackgroundPolicyViolationError("missing_policy", "后台执行缺少 policySnapshot。 ");
   }
-  const allowedTools = value["allowedTools"];
-  const allowedNetworkHosts = value["allowedNetworkHosts"];
-  if (
-    value["mode"] !== "yolo" ||
-    value["backgroundEnabled"] !== true ||
-    value["trustedWorkspace"] !== true ||
-    (value["networkPolicy"] !== "disabled" && value["networkPolicy"] !== "allowlist") ||
-    !Array.isArray(allowedTools) ||
-    !allowedTools.every(isNonEmptyString) ||
-    typeof value["hardlineVersion"] !== "string" ||
-    typeof value["hookVersion"] !== "string" ||
-    typeof value["createdAt"] !== "number" ||
-    !Number.isFinite(value["createdAt"])
-  ) {
-    throw new BackgroundPolicyViolationError(
-      "invalid_policy",
-      "后台执行只接受完整的 trusted workspace + yolo policySnapshot。",
-    );
+  try {
+    return parseBackgroundYoloPolicySnapshot(value);
+  } catch (error) {
+    if (!(error instanceof BackgroundYoloPolicySnapshotError)) throw error;
+    throw new BackgroundPolicyViolationError("invalid_policy", error.message, { cause: error });
   }
-  if (value["networkPolicy"] === "disabled" && allowedNetworkHosts !== undefined) {
-    throw new BackgroundPolicyViolationError(
-      "invalid_policy",
-      "networkPolicy=disabled 时不得声明 allowedNetworkHosts。",
-    );
-  }
-  if (
-    value["networkPolicy"] === "allowlist" &&
-    (!Array.isArray(allowedNetworkHosts) ||
-      allowedNetworkHosts.length === 0 ||
-      !allowedNetworkHosts.every(isValidHostname))
-  ) {
-    throw new BackgroundPolicyViolationError(
-      "invalid_policy",
-      "networkPolicy=allowlist 时必须提供合法且非空的 allowedNetworkHosts。",
-    );
-  }
-  return {
-    mode: "yolo",
-    backgroundEnabled: true,
-    trustedWorkspace: true,
-    networkPolicy: value["networkPolicy"],
-    ...(Array.isArray(allowedNetworkHosts)
-      ? { allowedNetworkHosts: [...new Set(allowedNetworkHosts.map(normalizeHostname))] }
-      : {}),
-    allowedTools: [...new Set(allowedTools)],
-    hardlineVersion: value["hardlineVersion"],
-    hookVersion: value["hookVersion"],
-    createdAt: value["createdAt"],
-  };
 }
 
 async function loadStrictHooksConfig(workDir: string): Promise<HooksConfig> {
@@ -601,24 +550,6 @@ function parseToolInput(argumentsJson: string): unknown {
 function jsonStringField(argumentsJson: string, field: string): string | undefined {
   const input = parseToolInput(argumentsJson);
   return isRecord(input) && typeof input[field] === "string" ? input[field] : undefined;
-}
-
-function normalizeHostname(value: string): string {
-  return value
-    .replace(/^\[|\]$/g, "")
-    .replace(/\.$/, "")
-    .toLowerCase();
-}
-
-function isValidHostname(value: unknown): value is string {
-  if (!isNonEmptyString(value)) return false;
-  const normalized = normalizeHostname(value);
-  return (
-    normalized === value.toLowerCase() &&
-    normalized.length <= 253 &&
-    !normalized.includes("://") &&
-    /^[a-z0-9.:_-]+$/i.test(normalized)
-  );
 }
 
 function isNonEmptyString(value: unknown): value is string {

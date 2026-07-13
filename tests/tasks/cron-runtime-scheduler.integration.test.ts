@@ -77,7 +77,7 @@ function yoloPolicy(createdAt: number) {
     mode: "yolo" as const,
     backgroundEnabled: true as const,
     trustedWorkspace: true as const,
-    networkPolicy: "disabled" as const,
+    toolNetworkPolicy: "disabled" as const,
     allowedTools: ["read_file"],
     hardlineVersion: "hardline-v1",
     hookVersion: "hook-v1",
