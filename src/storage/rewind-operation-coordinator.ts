@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { lstat, readFile } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import { FileHistoryBlobStore } from "./file-history-blob-store.js";
+import { withFileHistoryMutationLease } from "./file-history-mutation-lease.js";
 import {
   StorageOperationJournal,
   type NewStorageOperation,
@@ -73,7 +74,22 @@ export class RewindOperationCoordinator {
   }
 
   async execute(input: NewRewindStorageOperation): Promise<RewindStorageOperation> {
-    const operation = await this.journal.create(input);
+    return this.executePrepared(async () => input);
+  }
+
+  /**
+   * 供需要先把当前工作区内容写入 CAS 的调用方使用。prepare 与
+   * operation journal 发布持有同一 mutation lease，随后释放租约再执行
+   * Session/sidecar forward，避免 commitSidecars 内的 FileHistory save 嵌套取锁。
+   */
+  async executePrepared(
+    prepare: () => Promise<NewRewindStorageOperation>,
+  ): Promise<RewindStorageOperation> {
+    const operation = await withFileHistoryMutationLease(
+      this.blobStore.rootDirectory,
+      `rewind-reference:${process.pid}`,
+      async () => this.journal.create(await prepare()),
+    );
     if (operation.kind !== "rewind") throw new Error("Expected rewind operation");
     return this.forward(operation);
   }
