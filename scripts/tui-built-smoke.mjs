@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, rm } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -14,12 +14,39 @@ async function main() {
   const pty = await loadNodePty();
   const repoRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
   const entry = join(repoRoot, "dist", "cli", "main.js");
+  await runBuiltTuiScenario({ pty, repoRoot, entry, term: "xterm-256color" });
+  await runBuiltTuiScenario({ pty, repoRoot, entry, term: "dumb" });
+  await runBuiltTuiScenario({ pty, repoRoot, entry, term: "dumb", interrupt: true });
+}
+
+async function runBuiltTuiScenario({ pty, repoRoot, entry, term, interrupt = false }) {
   const workDir = await mkdtemp(join(tmpdir(), "pico-built-tui-smoke-"));
   const homeDir = await mkdtemp(join(tmpdir(), "pico-built-tui-home-"));
-  const fakeServer = await startFakeOpenAiServer({ content: EXPECTED });
+  const fakeServer = await startFakeOpenAiServer({
+    content: EXPECTED,
+    ...(interrupt ? { delayMs: 1_200 } : {}),
+  });
   let terminal;
 
   try {
+    if (term === "dumb") {
+      await mkdir(join(workDir, ".pico"), { recursive: true });
+      await writeFile(
+        join(workDir, ".pico", "config.json"),
+        JSON.stringify({
+          model: "configured/fake-configured-model",
+          providers: {
+            configured: {
+              protocol: "openai",
+              baseURL: fakeServer.baseURL,
+              apiKeyEnv: "PICO_TUI_SMOKE_CONFIGURED_KEY",
+              models: ["fake-configured-model"],
+              discoverModels: false,
+            },
+          },
+        }),
+      );
+    }
     terminal = pty.spawn(
       process.execPath,
       [
@@ -34,16 +61,14 @@ async function main() {
         "false",
       ],
       {
-        // node-pty 用 name 覆盖子进程 TERM；必须设为 dumb 才能覆盖兼容入口。
-        name: "dumb",
+        // node-pty 用 name 覆盖子进程 TERM；两种入口都必须走真实 PTY。
+        name: term,
         cols: 100,
         rows: 30,
         cwd: repoRoot,
         env: {
           ...process.env,
-          // 覆盖 Codex 内嵌终端的保守渲染分支：终端仍由 node-pty 提供
-          // 交互输入，但应用不可假定 alternate screen/增量差分可用。
-          TERM: "dumb",
+          TERM: term,
           CODEX_SHELL: "1",
           CI: "false",
           LOG_LEVEL: "error",
@@ -53,22 +78,65 @@ async function main() {
           LLM_BASE_URL: fakeServer.baseURL,
           LLM_API_KEY: "local-test-key",
           LLM_MODEL: "fake-model",
+          PICO_TUI_SMOKE_CONFIGURED_KEY: "configured-test-key",
         },
       },
     );
 
-    const output = await driveTerminal(terminal);
+    const output = await driveTerminal(terminal, { lineMode: term === "dumb", interrupt });
     const plainOutput = stripAnsi(output);
-    if (!plainOutput.includes(EXPECTED)) {
-      throw new Error(`built TUI never rendered ${EXPECTED}\n${tail(plainOutput)}`);
+    if (!interrupt && !plainOutput.includes(EXPECTED)) {
+      throw new Error(`built TUI (${term}) never rendered ${EXPECTED}\n${tail(plainOutput)}`);
     }
-    if (!plainOutput.includes("兼容行模式")) {
+    if (term === "dumb" && !plainOutput.includes("兼容行模式")) {
       throw new Error(`built TUI did not enter TERM=dumb line mode\n${tail(plainOutput)}`);
+    }
+    if (term !== "dumb" && plainOutput.includes("兼容行模式")) {
+      throw new Error(
+        `built TUI unexpectedly left the full Ink entry (${term})\n${tail(plainOutput)}`,
+      );
     }
     if (fakeServer.requestCount === 0) {
       throw new Error("built TUI made zero requests to the local fake OpenAI endpoint");
     }
-    console.log(`PASS built TUI PTY smoke (${fakeServer.requestCount} local request(s))`);
+    if (interrupt) {
+      if (!plainOutput.includes("当前请求已中断。")) {
+        throw new Error(`TERM=dumb Ctrl+C did not abort the active run\n${tail(plainOutput)}`);
+      }
+      if (fakeServer.requestCount !== 1) {
+        throw new Error(
+          `TERM=dumb Ctrl+C expected one interrupted request, got ${fakeServer.requestCount}`,
+        );
+      }
+      console.log("PASS built TUI dumb Ctrl+C abort smoke");
+      return;
+    }
+    if (term === "dumb") {
+      if (output.includes(`${String.fromCharCode(27)}[`)) {
+        throw new Error(`TERM=dumb line mode emitted CSI output\n${tail(output)}`);
+      }
+      if (fakeServer.requestCount !== 2) {
+        throw new Error(`TERM=dumb expected two turns, got ${fakeServer.requestCount}`);
+      }
+      const serializedRequests = fakeServer.requests.map((request) => JSON.stringify(request));
+      if (!serializedRequests[0]?.includes("first corrected prompt")) {
+        throw new Error("TERM=dumb did not submit the backspace-corrected first prompt");
+      }
+      if (serializedRequests[0]?.includes("first corrected promptX")) {
+        throw new Error("TERM=dumb sent the character that Backspace should have removed");
+      }
+      if (
+        !serializedRequests[1]?.includes("second continuation prompt") ||
+        !serializedRequests[1]?.includes("first corrected prompt") ||
+        !serializedRequests[1]?.includes(EXPECTED)
+      ) {
+        throw new Error("TERM=dumb second request did not continue the first session conversation");
+      }
+      if (fakeServer.requests.some((request) => request.model !== "fake-configured-model")) {
+        throw new Error("TERM=dumb did not reuse the configured model route");
+      }
+    }
+    console.log(`PASS built TUI ${term} PTY smoke (${fakeServer.requestCount} local request(s))`);
   } finally {
     try {
       terminal?.kill();
@@ -114,14 +182,19 @@ async function loadNodePty() {
   }
 }
 
-function driveTerminal(terminal) {
+function driveTerminal(terminal, { lineMode, interrupt }) {
   return new Promise((resolvePromise, reject) => {
     let output = "";
     let trustAccepted = false;
     let promptScheduled = false;
-    let stopScheduled = false;
+    let helpScheduled = false;
+    let firstPromptScheduled = false;
+    let secondPromptScheduled = false;
+    let interruptPromptScheduled = false;
+    let interruptScheduled = false;
+    let exitScheduled = false;
     let promptTimer;
-    let stopTimer;
+    let actionTimer;
     const timer = setTimeout(() => {
       reject(new Error(`built TUI smoke timed out\n${tail(stripAnsi(output))}`));
     }, TIMEOUT_MS);
@@ -133,7 +206,7 @@ function driveTerminal(terminal) {
         trustAccepted = true;
         terminal.write("1\r");
       }
-      if (!promptScheduled && (/Try .*for commands/iu.test(plain) || plain.includes("pico> "))) {
+      if (!lineMode && !promptScheduled && /Try .*for commands/iu.test(plain)) {
         promptScheduled = true;
         // Wait until Ink has installed raw-mode input handlers. Writing on the
         // first rendered byte can race with mount and lose the submitted line.
@@ -141,17 +214,78 @@ function driveTerminal(terminal) {
           terminal.write("Reply with the required smoke marker. Do not use tools.\r");
         }, 250);
       }
-      if (!stopScheduled && plain.includes(EXPECTED)) {
-        stopScheduled = true;
-        stopTimer = setTimeout(() => terminal.write("\x04"), 100);
+      if (!lineMode && !exitScheduled && plain.includes(EXPECTED)) {
+        exitScheduled = true;
+        actionTimer = setTimeout(() => terminal.write("\x04"), 100);
+      }
+      if (lineMode && interrupt && !interruptPromptScheduled && plain.includes("pico> ")) {
+        interruptPromptScheduled = true;
+        actionTimer = setTimeout(() => {
+          terminal.write("interrupt this active request\r");
+          actionTimer = setTimeout(() => terminal.write("\x03"), 250);
+          interruptScheduled = true;
+        }, 100);
+      }
+      if (
+        lineMode &&
+        interrupt &&
+        interruptScheduled &&
+        !exitScheduled &&
+        plain.includes("当前请求已中断。") &&
+        occurrences(plain, "pico> ") >= 2
+      ) {
+        exitScheduled = true;
+        actionTimer = setTimeout(() => terminal.write("/exit\r"), 100);
+      }
+      if (lineMode && !interrupt && !helpScheduled && plain.includes("pico> ")) {
+        helpScheduled = true;
+        actionTimer = setTimeout(() => terminal.write("/help\r"), 100);
+      }
+      if (
+        lineMode &&
+        !interrupt &&
+        helpScheduled &&
+        !firstPromptScheduled &&
+        plain.includes("兼容行模式仅支持")
+      ) {
+        firstPromptScheduled = true;
+        actionTimer = setTimeout(() => {
+          // terminal:false 下由 TTY canonical discipline 消化 DEL；这条断言覆盖
+          // 用户真实输入的退格编辑，而不是只检查画面中有没有 ANSI。
+          terminal.write("first corrected promptX\x7f\r");
+        }, 100);
+      }
+      const promptCount = occurrences(plain, "pico> ");
+      const responseCount = occurrences(plain, EXPECTED);
+      if (
+        lineMode &&
+        !interrupt &&
+        firstPromptScheduled &&
+        !secondPromptScheduled &&
+        responseCount >= 1 &&
+        promptCount >= 3
+      ) {
+        secondPromptScheduled = true;
+        actionTimer = setTimeout(() => terminal.write("second continuation prompt\r"), 100);
+      }
+      if (
+        lineMode &&
+        !interrupt &&
+        secondPromptScheduled &&
+        !exitScheduled &&
+        responseCount >= 2 &&
+        promptCount >= 4
+      ) {
+        exitScheduled = true;
+        actionTimer = setTimeout(() => terminal.write("/exit\r"), 100);
       }
     });
 
     terminal.onExit(({ exitCode, signal }) => {
       clearTimeout(timer);
       clearTimeout(promptTimer);
-      clearTimeout(stopTimer);
-      if (!stopScheduled) {
+      clearTimeout(actionTimer);
+      if (!exitScheduled) {
         reject(
           new Error(
             `built TUI exited before rendering the expected response (exit=${exitCode}, signal=${signal})\n${tail(stripAnsi(output))}`,
@@ -162,6 +296,10 @@ function driveTerminal(terminal) {
       resolvePromise(output);
     });
   });
+}
+
+function occurrences(text, needle) {
+  return text.split(needle).length - 1;
 }
 
 function stripAnsi(text) {
