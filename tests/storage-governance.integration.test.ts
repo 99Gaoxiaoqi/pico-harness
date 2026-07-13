@@ -217,6 +217,41 @@ describe("storage governance integration", () => {
     await expect(stat(newlyReferenced.path)).resolves.toBeDefined();
   });
 
+  it("queues independent in-process CAS mutations without allowing nested re-entry", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pico-storage-mutation-queue-"));
+    cleanup.push(root);
+    const events: string[] = [];
+    let releaseFirst!: () => void;
+    let firstEntered!: () => void;
+    const entered = new Promise<void>((resolveEntered) => {
+      firstEntered = resolveEntered;
+    });
+    const gate = new Promise<void>((resolveGate) => {
+      releaseFirst = resolveGate;
+    });
+    const first = withFileHistoryMutationLease(root, "first-writer", async () => {
+      events.push("first:start");
+      firstEntered();
+      await gate;
+      events.push("first:end");
+    });
+    await entered;
+    const second = withFileHistoryMutationLease(root, "second-writer", async () => {
+      events.push("second");
+    });
+    await new Promise<void>((resolveImmediate) => setImmediate(resolveImmediate));
+    expect(events).toEqual(["first:start"]);
+    releaseFirst();
+    await Promise.all([first, second]);
+    expect(events).toEqual(["first:start", "first:end", "second"]);
+
+    await withFileHistoryMutationLease(root, "outer", async () => {
+      await expect(
+        withFileHistoryMutationLease(root, "nested", async () => undefined),
+      ).rejects.toBeInstanceOf(LeaseConflictError);
+    });
+  });
+
   it("blocks both dry-run and apply when authoritative references cannot be parsed", async () => {
     const root = await mkdtemp(join(tmpdir(), "pico-storage-gc-blocked-"));
     cleanup.push(root);

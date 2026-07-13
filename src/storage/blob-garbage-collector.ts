@@ -59,8 +59,11 @@ export class ContentAddressedBlobGarbageCollector {
 
   async run(options: BlobGarbageCollectionRunOptions = {}): Promise<BlobGarbageCollectionResult> {
     if (options.apply !== true) return this.collectAndSweep(false);
-    return withFileHistoryMutationLease(this.baseDir, `cas-gc:${process.pid}`, async (lease) =>
-      this.collectAndSweep(true, lease),
+    return withFileHistoryMutationLease(
+      this.baseDir,
+      `cas-gc:${process.pid}`,
+      async (lease) => this.collectAndSweep(true, lease),
+      { waitForExternalLease: false },
     );
   }
 
