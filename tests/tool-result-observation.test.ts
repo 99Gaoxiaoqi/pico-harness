@@ -20,7 +20,7 @@ interface FakeArtifactMeta {
 
 class FakeArtifactStore {
   readonly writes: FakeWriteInput[] = [];
-  cleanupCalls = 0;
+  readonly cleanupCalls: Array<string | undefined> = [];
 
   constructor(
     private readonly meta: FakeArtifactMeta = { id: "artifact-123", path: "/tmp/a.txt" },
@@ -31,8 +31,8 @@ class FakeArtifactStore {
     return this.meta;
   }
 
-  async cleanup(): Promise<void> {
-    this.cleanupCalls++;
+  async cleanup(sessionId?: string): Promise<void> {
+    this.cleanupCalls.push(sessionId);
   }
 }
 
@@ -67,7 +67,7 @@ describe("createToolResultObservationProcessor", () => {
 
     expect(observation).toBe("tiny");
     expect(store.writes).toHaveLength(0);
-    expect(store.cleanupCalls).toBe(0);
+    expect(store.cleanupCalls).toHaveLength(0);
   });
 
   it("does not externalize output equal to the threshold", async () => {
@@ -118,7 +118,7 @@ describe("createToolResultObservationProcessor", () => {
       pinned: true,
     });
     expect(store.writes[0]?.summary).toContain("FAIL expected one thing");
-    expect(store.cleanupCalls).toBe(1);
+    expect(store.cleanupCalls).toEqual([undefined]);
 
     expect(observation).toContain("artifactId: artifact-abc");
     expect(observation).toContain("artifactUri: artifact://session%2Fwith%20space/artifact-abc");
@@ -165,7 +165,7 @@ describe("createToolResultObservationProcessor", () => {
       sessionId: "session-1",
     });
 
-    expect(store.cleanupCalls).toBe(0);
+    expect(store.cleanupCalls).toHaveLength(0);
   });
 
   it.each([
@@ -197,6 +197,6 @@ describe("createToolResultObservationProcessor", () => {
       sessionId: "session-1",
     });
 
-    expect(store.cleanupCalls).toBe(expectedCleanupCalls);
+    expect(store.cleanupCalls).toHaveLength(expectedCleanupCalls);
   });
 });
