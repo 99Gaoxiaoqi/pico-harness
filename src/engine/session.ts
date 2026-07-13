@@ -23,6 +23,7 @@ import {
 import type { CostStatus } from "../observability/pricing.js";
 import { logger } from "../observability/logger.js";
 import { SessionStore } from "./session-store.js";
+import { findLegacyUndoCut, replaySessionRecords } from "./session-reducer.js";
 import { createSessionIdentity, type SessionIdentity } from "./session-identity.js";
 import type { GoalManager } from "./goal-manager.js";
 import {
@@ -350,40 +351,20 @@ export class Session implements SessionRuntimePersistence {
       return;
     }
 
-    // 重放:message 累积进 pending,truncate 则截断 pending(对标 wire 折叠语义)
-    // volatile message(易失事件,如流式片段)不重建进 history —— 4.3 cursor
-    // 多端同步:它们仅用于 WS 实时推送,重放时丢弃。旧 JSONL 无此字段(按 false 处理)。
-    let pending: Message[] = [];
-    let restoredUsage: SessionUsageSnapshot | undefined;
-    for (const r of records) {
-      if (r.type === "message") {
-        if (r.volatile === true) continue;
-        pending.push(r.message);
-      } else if (r.type === "truncate") {
-        pending = pending.slice(r.fromIndex);
-      } else if (r.type === "undo") {
-        pending = this.applyUndoToHistory(pending, r.count);
-      } else if (r.type === "rewind_to") {
-        pending = pending.slice(0, r.messageIndex);
-      } else if (r.type === "runtime_state") {
-        if (r.patch.settings) this.persistedSettings = r.patch.settings;
-        if (r.patch.goal) this.persistedGoal = r.patch.goal;
-        if (r.patch.usage) restoredUsage = r.patch.usage;
-      }
-    }
-    this.history = pending;
+    const replay = replaySessionRecords(records);
+    this.history = replay.history;
+    this.persistedSettings = replay.runtime.settings;
+    this.persistedGoal = replay.runtime.goal;
     // 旧 JSONL 没有 runtime_state:从当前有效 assistant message.usage 回填 token。
     // 旧数据无计价路由，成本只能保持 0/null。新日志取持久值与可恢复值的较大者，
     // 容忍“message 已落盘、usage 记录末行撕裂”。
-    this.restoreUsage(mergeUsageWithHistory(restoredUsage, deriveUsageFromHistory(this.history)));
+    this.restoreUsage(
+      mergeUsageWithHistory(replay.runtime.usage, deriveUsageFromHistory(this.history)),
+    );
     // 3.1:重放后从 history 重建 toolResultMeta(cachedAt 未知,用当前时间;
     // accessCount 归零)。避免恢复后已有 ToolResult 丢失年龄追踪。
     this.rebuildToolResultMeta();
-    this.nextSeq =
-      records.reduce(
-        (maxSeq, record) => ("seq" in record ? Math.max(maxSeq, record.seq) : maxSeq),
-        -1,
-      ) + 1;
+    this.nextSeq = replay.maxSeq + 1;
     this.rebuildSearchIndex();
   }
 
@@ -728,7 +709,7 @@ export class Session implements SessionRuntimePersistence {
    */
   undo(count: number): void {
     if (count <= 0) return;
-    const { cutIndex, removedCount } = this.findUndoCut(this.history, count);
+    const { cutIndex, removedCount } = findLegacyUndoCut(this.history, count);
     if (removedCount === 0) return;
     this.history = this.history.slice(0, cutIndex);
     this.rebuildSearchIndex();
@@ -808,46 +789,6 @@ export class Session implements SessionRuntimePersistence {
     await fileHistoryRewind(this.fileHistory, messageId, this.id);
     await this.rewindTo(messageIndex);
     await fileHistoryDiscardFrom(this.fileHistory, messageId, this.id);
-  }
-
-  private applyUndoToHistory(history: Message[], count: number): Message[] {
-    if (count <= 0) return history;
-    const { cutIndex, removedCount } = this.findUndoCut(history, count);
-    if (removedCount === 0) return history;
-    return history.slice(0, cutIndex);
-  }
-
-  private findUndoCut(
-    history: Message[],
-    count: number,
-  ): { cutIndex: number; removedCount: number } {
-    let removedCount = 0;
-    let cutIndex = 0;
-    for (let i = history.length - 1; i >= 0; i--) {
-      const msg = history[i]!;
-      if (this.isCompactionSummaryMessage(msg)) {
-        return { cutIndex: i + 1, removedCount };
-      }
-      if (msg.role === "system") continue;
-      if (msg.role === "user") {
-        removedCount++;
-        if (removedCount === count) {
-          cutIndex = i;
-          break;
-        }
-      }
-    }
-    return { cutIndex, removedCount };
-  }
-
-  private isCompactionSummaryMessage(message: Message): boolean {
-    if (message.role !== "assistant") return false;
-    const marker = message.providerData?.["picoKind"];
-    return (
-      marker === "compaction_summary" ||
-      message.content.startsWith("[上下文压缩") ||
-      message.content.includes("--- 历史摘要结束")
-    );
   }
 
   /**
