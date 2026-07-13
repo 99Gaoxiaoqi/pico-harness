@@ -484,7 +484,7 @@ export async function runAgentFromCli(
           (effectiveOptions.imagePath
             ? [loadImage(effectiveOptions.imagePath, workDir)]
             : undefined);
-        await session.beginRewindPoint({
+        const rewindPointId = await session.beginRewindPoint({
           userPrompt: effectiveOptions.rewindPrompt ?? prompt,
           ...(effectiveOptions.rewindTranscriptIndex !== undefined
             ? { transcriptIndex: effectiveOptions.rewindTranscriptIndex }
@@ -493,11 +493,12 @@ export async function runAgentFromCli(
             ? { interactionMode: effectiveOptions.rewindInteractionMode }
             : {}),
         });
-        await session.commitMessages({
+        const userReceipt = await session.commitMessageOnce(`user-message:${rewindPointId}`, {
           role: "user",
           content: prompt,
           ...(images ? { images } : {}),
         });
+        await session.bindRewindPointSource(rewindPointId, userReceipt);
       }
 
       const messages = await engine.run(session, undefined, undefined, dependencies.signal);
