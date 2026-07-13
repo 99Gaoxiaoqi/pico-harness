@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -26,6 +26,8 @@ async function runBuiltTuiScenario({ pty, repoRoot, entry, term, interrupt = fal
     content: EXPECTED,
     ...(interrupt ? { delayMs: 1_200 } : {}),
   });
+  const alternateFakeServer =
+    term === "dumb" ? await startFakeOpenAiServer({ content: "WRONG_ROUTE" }) : undefined;
   let terminal;
 
   try {
@@ -34,13 +36,20 @@ async function runBuiltTuiScenario({ pty, repoRoot, entry, term, interrupt = fal
       await writeFile(
         join(workDir, ".pico", "config.json"),
         JSON.stringify({
-          model: "configured/fake-configured-model",
+          model: "configured-primary/shared-model",
           providers: {
-            configured: {
+            "configured-primary": {
               protocol: "openai",
               baseURL: fakeServer.baseURL,
               apiKeyEnv: "PICO_TUI_SMOKE_CONFIGURED_KEY",
-              models: ["fake-configured-model"],
+              models: ["shared-model"],
+              discoverModels: false,
+            },
+            "configured-secondary": {
+              protocol: "openai",
+              baseURL: alternateFakeServer.baseURL,
+              apiKeyEnv: "PICO_TUI_SMOKE_CONFIGURED_KEY",
+              models: ["shared-model"],
               discoverModels: false,
             },
           },
@@ -72,7 +81,9 @@ async function runBuiltTuiScenario({ pty, repoRoot, entry, term, interrupt = fal
           CODEX_SHELL: "1",
           CI: "false",
           LOG_LEVEL: "error",
-          PICO_PERSISTENCE: "0",
+          // 双 provider 场景需要验证首轮 route ID 已写回会话；xterm 冒烟仍可
+          // 关闭持久化以保持原有的最小启动路径。
+          PICO_PERSISTENCE: term === "dumb" ? "1" : "0",
           HOME: homeDir,
           USERPROFILE: homeDir,
           LLM_BASE_URL: fakeServer.baseURL,
@@ -132,8 +143,15 @@ async function runBuiltTuiScenario({ pty, repoRoot, entry, term, interrupt = fal
       ) {
         throw new Error("TERM=dumb second request did not continue the first session conversation");
       }
-      if (fakeServer.requests.some((request) => request.model !== "fake-configured-model")) {
+      if (fakeServer.requests.some((request) => request.model !== "shared-model")) {
         throw new Error("TERM=dumb did not reuse the configured model route");
+      }
+      if (alternateFakeServer.requestCount !== 0) {
+        throw new Error("TERM=dumb routed a same-name model turn to the wrong configured endpoint");
+      }
+      const persistedSession = await readPersistedSession(workDir);
+      if (!persistedSession.includes('"modelRouteId":"configured-primary/shared-model"')) {
+        throw new Error("TERM=dumb did not persist the selected provider/model route identity");
       }
     }
     console.log(`PASS built TUI ${term} PTY smoke (${fakeServer.requestCount} local request(s))`);
@@ -144,9 +162,18 @@ async function runBuiltTuiScenario({ pty, repoRoot, entry, term, interrupt = fal
       // The PTY may already have exited after Ctrl+C.
     }
     await fakeServer.close();
+    await alternateFakeServer?.close();
     await rm(workDir, { recursive: true, force: true });
     await rm(homeDir, { recursive: true, force: true });
   }
+}
+
+async function readPersistedSession(workDir) {
+  const sessionsDir = join(workDir, ".claw", "sessions");
+  const files = (await readdir(sessionsDir)).filter((file) => file.endsWith(".jsonl"));
+  return (await Promise.all(files.map((file) => readFile(join(sessionsDir, file), "utf8")))).join(
+    "\n",
+  );
 }
 
 async function ensureNodePtyHelperExecutable() {

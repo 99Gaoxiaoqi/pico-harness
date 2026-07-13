@@ -234,9 +234,14 @@ export async function runAgentFromCli(
   const settings = getOrCreateSessionSettings(
     {
       sessionId: sessionSelection.sessionId,
+      sessionMode: sessionSelection.mode,
+      ...(sessionSelection.sourceSessionId !== undefined
+        ? { forkFrom: sessionSelection.sourceSessionId }
+        : {}),
       cwd: workDir,
       provider: kind,
       model: defaultConfigModel,
+      ...(options.modelRouteId !== undefined ? { modelRouteId: options.modelRouteId } : {}),
       ...(options.thinkingEffort !== undefined ? { thinkingEffort: options.thinkingEffort } : {}),
     },
     { persistence: session },
