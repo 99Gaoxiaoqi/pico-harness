@@ -10,7 +10,10 @@ export interface CronRuntimeSchedulerOptions {
   cronService: CronService;
   /** daemon owns runtimes; scheduler merely asks for the workspace selected by a Job. */
   getWorkspaceRuntime(workspacePath: string): Promise<WorkspaceTaskRuntime>;
-  execute(job: CronJobRecord, context: WorkspaceRunContext): Promise<Record<string, unknown> | void>;
+  execute(
+    job: CronJobRecord,
+    context: WorkspaceRunContext,
+  ): Promise<Record<string, unknown> | void>;
   /** Revalidates trust/hardline/hooks immediately before a background run starts. */
   canRun(job: CronJobRecord): Promise<{ allowed: boolean; reason?: string }>;
   /** Must stay shorter than the SQLite lease TTL used by CronService. */
@@ -28,6 +31,7 @@ export class CronRuntimeScheduler {
   private readonly leaseHeartbeatMs: number;
   private timer?: ReturnType<typeof setTimeout>;
   private running = false;
+  private readonly activeTicks = new Set<Promise<void>>();
 
   constructor(private readonly options: CronRuntimeSchedulerOptions) {
     this.now = options.now ?? Date.now;
@@ -44,7 +48,7 @@ export class CronRuntimeScheduler {
   start(): void {
     if (this.running) return;
     this.running = true;
-    void this.tick().catch(() => undefined);
+    this.launchTick();
     this.scheduleNextMinute();
   }
 
@@ -54,12 +58,29 @@ export class CronRuntimeScheduler {
     this.timer = undefined;
   }
 
+  async stopAndWait(): Promise<void> {
+    this.stop();
+    await Promise.allSettled([...this.activeTicks]);
+  }
+
   private scheduleNextMinute(): void {
     if (!this.running) return;
     const delay = 60_000 - (this.now() % 60_000) + 5;
     this.timer = setTimeout(() => {
-      void this.tick().catch(() => undefined).finally(() => this.scheduleNextMinute());
+      this.launchTick(true);
     }, delay);
+  }
+
+  private launchTick(scheduleAfter = false): void {
+    const active = this.tick().then(
+      () => undefined,
+      () => undefined,
+    );
+    this.activeTicks.add(active);
+    void active.finally(() => {
+      this.activeTicks.delete(active);
+      if (scheduleAfter) this.scheduleNextMinute();
+    });
   }
 
   private async dispatch(initial: CronRunRecord): Promise<void> {
@@ -83,7 +104,9 @@ export class CronRuntimeScheduler {
     if (claimed.run.status !== "running" || !claimed.lease) return;
     let run: WorkspaceRunSnapshot;
     try {
-      run = runtime.startRun({ description: job.prompt }, (context) => this.options.execute(job, context));
+      run = runtime.startRun({ description: job.prompt }, (context) =>
+        this.options.execute(job, context),
+      );
     } catch (error) {
       this.options.cronService.finish({
         cronRunId: claimed.run.cronRunId,
@@ -110,7 +133,12 @@ export class CronRuntimeScheduler {
         cronRunId: claimed.run.cronRunId,
         leaseEpoch: claimed.lease.leaseEpoch,
         expectedVersion: claimed.run.version,
-        status: terminal.status === "succeeded" ? "succeeded" : terminal.status === "cancelled" ? "cancelled" : "failed",
+        status:
+          terminal.status === "succeeded"
+            ? "succeeded"
+            : terminal.status === "cancelled"
+              ? "cancelled"
+              : "failed",
         ...(terminal.error ? { reason: terminal.error } : {}),
         ...(terminal.result ? { result: terminal.result } : {}),
       });
