@@ -21,6 +21,7 @@ import {
 } from "../provider/factory.js";
 import { fallbackModelFor, isModelUnavailableError } from "../provider/fallback.js";
 import type { ProviderConfig } from "../provider/config.js";
+import type { CredentialRef, CredentialResolver } from "../provider/credential-vault.js";
 import type { LLMProvider, LLMProviderRequestOptions } from "../provider/interface.js";
 import { CredentialRotationCoordinator } from "../provider/credential-rotation.js";
 import { resolveProviderProfile } from "../provider/profile.js";
@@ -121,6 +122,8 @@ export interface RunAgentCliOptions {
   provider?: ProviderKind;
   baseURL?: string;
   apiKey?: string;
+  /** 后台执行只持有非秘密引用；明文由 Runtime Host 在系统凭证库边界解析。 */
+  credentialRef?: CredentialRef;
   model?: string;
   modelRouteId?: string;
   modelCapabilities?: ModelRouteCapabilities;
@@ -211,6 +214,8 @@ export interface RunAgentCliDependencies extends RuntimeHost {
   resumeExistingSession?: boolean;
   /** 仅用于后台执行的实时信任校验；生产默认读取用户级 WorkspaceTrustStore。 */
   backgroundTrustStore?: BackgroundWorkspaceTrustVerifier;
+  /** daemon/Cron 注入的系统凭证库读取边界；前台 BYOK 不需要。 */
+  credentialResolver?: CredentialResolver;
 }
 
 /** Runtime-first entry point. CLI/TUI compatibility wrappers call this method. */
@@ -241,6 +246,7 @@ export async function executeAgentRuntime(
     execution.kind === "background"
       ? await prepareBackgroundExecution(execution, workDir, options, dependencies)
       : undefined;
+  const backgroundApiKey = await resolveBackgroundCredential(options, execution, dependencies);
   const picoConfig = await loadPicoConfig(workDir);
   const configuredAdditionalDirectories = picoConfig.additionalDirectories;
   const sessionSelection =
@@ -315,6 +321,7 @@ export async function executeAgentRuntime(
     options.trace === true || isTruthyEnv((dependencies.env ?? process.env).PICO_TRACE);
   const effectiveOptions: RunAgentCliOptions = {
     ...options,
+    ...(backgroundApiKey !== undefined ? { apiKey: backgroundApiKey } : {}),
     dir: workDir,
     session: sessionSelection.sessionId,
     sessionSelection,
@@ -389,7 +396,7 @@ export async function executeAgentRuntime(
   };
   // 凭证轮换(4.2):多 key 时从池取首个 key 覆盖 config.apiKey,并构建轮换回调。
   // 单 key / 注入 provider 时跳过(向后兼容)。pool 注入点集中在此,便于追踪 currentKey。
-  const credentialPool = options.apiKey === undefined ? getCredentialPool() : undefined;
+  const credentialPool = effectiveOptions.apiKey === undefined ? getCredentialPool() : undefined;
   let currentConfig: ProviderConfig = providerConfig;
   if (credentialPool && credentialPool.size > 1 && dependencies.provider === undefined) {
     currentConfig = { ...providerConfig, apiKey: credentialPool.getNext() };
@@ -1217,6 +1224,21 @@ const failClosedApprovalNotifier: ApprovalNotifier = (notice) => {
     );
   });
 };
+
+async function resolveBackgroundCredential(
+  options: RunAgentCliOptions,
+  execution: RuntimeExecution,
+  dependencies: RunAgentCliDependencies,
+): Promise<string | undefined> {
+  if (execution.kind === "foreground" || dependencies.provider !== undefined) return undefined;
+  if (options.apiKey !== undefined) {
+    throw new Error("后台执行拒绝直接传入 apiKey；请使用 credentialRef 和系统凭证库。");
+  }
+  if (options.credentialRef === undefined || dependencies.credentialResolver === undefined) {
+    throw new Error("后台执行缺少 credentialRef 或系统凭证解析器，已按 fail-closed 拒绝。");
+  }
+  return dependencies.credentialResolver.resolve(options.credentialRef);
+}
 
 function resolveProviderConfig(
   options: RunAgentCliOptions,

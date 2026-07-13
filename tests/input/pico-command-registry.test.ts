@@ -26,6 +26,12 @@ import {
 import { fileHistoryMakeSnapshot, fileHistoryTrackEdit } from "../../src/safety/file-history.js";
 import { CronService } from "../../src/tasks/cron-service.js";
 import type { CronDaemonBridge } from "../../src/input/cron-daemon-bridge.js";
+import { ModelRouter } from "../../src/provider/model-router.js";
+import { resolveModelRouteCapabilities } from "../../src/provider/model-capabilities.js";
+import type {
+  CredentialRef,
+  CredentialVault,
+} from "../../src/provider/credential-vault.js";
 
 describe("Pico command registry", () => {
   const cleanup: Array<() => void> = [];
@@ -105,15 +111,53 @@ describe("Pico command registry", () => {
         message: "daemon connected; workspace registered; scheduler unknown",
       }),
     };
+    const secrets = new Map<CredentialRef, string>();
+    const credentialVault: CredentialVault = {
+      capability: () => ({
+        available: true,
+        backend: "macos-keychain",
+        diagnostic: "test keychain",
+      }),
+      put: async (ref, secret) => void secrets.set(ref, secret),
+      resolve: async (ref) => secrets.get(ref) ?? Promise.reject(new Error("missing")),
+      has: async (ref) => secrets.has(ref),
+    };
+    const modelRouter = new ModelRouter(
+      [
+        {
+          id: "configured/glm-5.2",
+          providerId: "configured",
+          provider: "openai",
+          model: "glm-5.2",
+          baseURL: "https://example.test/v1",
+          apiKeyEnv: "TEST_CRON_API_KEY",
+          source: "config",
+          capabilities: resolveModelRouteCapabilities("openai", "glm-5.2"),
+        },
+      ],
+      { TEST_CRON_API_KEY: "secret-never-rendered" },
+      "configured/glm-5.2",
+    );
     const registry = await createPicoCommandRegistry({
       workDir,
       provider: "openai",
       model: "glm-5.2",
+      modelRouteId: "configured/glm-5.2",
+      modelRouter,
       sessionId: "session-cron",
       cronService: cron,
       cronDaemonBridge: bridge,
+      credentialVault,
+      credentialEnv: { TEST_CRON_API_KEY: "secret-never-rendered" },
     });
 
+    const imported = await processUserInput("/cron credential import", { registry });
+    expect(imported.type === "local-command" ? imported.result.message : undefined).toContain(
+      "安全导入系统凭证库",
+    );
+    expect(imported.type === "local-command" ? imported.result.message : undefined).not.toContain(
+      "secret-never-rendered",
+    );
     const created = await processUserInput(
       "/cron add --tool-network=allowlist:api.example.com */5 * * * * 检查未提交的改动",
       { registry },
@@ -127,6 +171,7 @@ describe("Pico command registry", () => {
     expect(created.type === "local-command" ? created.result.message : undefined).toContain(
       "工具网络：仅允许 api.example.com",
     );
+    expect(cron.list(workDir)[0]?.credentialRef).toMatch(/^pico-keychain:\/\/model-route\//u);
     const listed = await processUserInput("/cron list", { registry });
     expect(listed.type === "local-command" ? listed.result.message : undefined).toContain(
       "检查未提交的改动",

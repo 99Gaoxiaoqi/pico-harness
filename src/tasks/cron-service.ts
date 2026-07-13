@@ -1,4 +1,5 @@
 import { realpathSync } from "node:fs";
+import type { CredentialRef } from "../provider/credential-vault.js";
 import {
   RuntimeConflictError,
   RuntimeStore,
@@ -38,6 +39,7 @@ export interface CreateCronJobInput {
   timeZone?: string;
   prompt: string;
   policySnapshot: YoloPolicySnapshot;
+  credentialRef?: CredentialRef;
   enabled?: boolean;
 }
 
@@ -82,6 +84,7 @@ export class CronService {
       timeZone,
       prompt: input.prompt,
       policySnapshot: input.policySnapshot,
+      credentialRef: input.credentialRef,
       enabled: input.enabled,
     });
   }

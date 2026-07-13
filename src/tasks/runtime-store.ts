@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import Database from "better-sqlite3";
+import { parseCredentialRef, type CredentialRef } from "../provider/credential-vault.js";
 import { quarantineCorruptJson } from "../storage/atomic-json.js";
 import { parseBackgroundYoloPolicySnapshot } from "../safety/background-yolo-policy-schema.js";
 import {
@@ -40,7 +41,7 @@ import {
   isTerminalJobStatus,
 } from "./runtime-types.js";
 
-const RUNTIME_SCHEMA_VERSION = 3;
+const RUNTIME_SCHEMA_VERSION = 4;
 const DEFAULT_LEASE_TTL_MS = 30_000;
 
 export class RuntimeConflictError extends Error {
@@ -122,6 +123,7 @@ export interface CreateCronJobInput {
   timeZone: string;
   prompt: string;
   policySnapshot: YoloPolicySnapshot;
+  credentialRef?: CredentialRef;
   enabled?: boolean;
 }
 
@@ -274,6 +276,7 @@ interface CronJobRow {
   prompt: string;
   enabled: number;
   policy_snapshot_json: string;
+  credential_ref: string | null;
   version: number;
   created_at: number;
   updated_at: number;
@@ -776,13 +779,14 @@ export class RuntimeStore {
 
   createCronJob(input: CreateCronJobInput): CronJobRecord {
     const policySnapshot = parseBackgroundYoloPolicySnapshot(input.policySnapshot);
+    if (input.credentialRef !== undefined) parseCredentialRef(input.credentialRef);
     const now = this.now();
     this.db
       .prepare(
         `INSERT INTO cron_jobs (
            cron_job_id, workspace_path, schedule, time_zone, prompt, enabled,
-           policy_snapshot_json, version, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+           policy_snapshot_json, credential_ref, version, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
       )
       .run(
         input.cronJobId,
@@ -792,6 +796,7 @@ export class RuntimeStore {
         input.prompt,
         input.enabled === false ? 0 : 1,
         JSON.stringify(policySnapshot),
+        input.credentialRef ?? null,
         now,
         now,
       );
@@ -1783,6 +1788,12 @@ export class RuntimeStore {
           .prepare("INSERT INTO schema_migrations(version, name, applied_at) VALUES (3, ?, ?)")
           .run("cron_job_run_ledger", this.now());
       }
+      if (current < 4) {
+        this.db.exec(SCHEMA_V4);
+        this.db
+          .prepare("INSERT INTO schema_migrations(version, name, applied_at) VALUES (4, ?, ?)")
+          .run("cron_provider_credential_ref", this.now());
+      }
     });
     migrate();
   }
@@ -2137,6 +2148,10 @@ const SCHEMA_V3 = `
   CREATE INDEX runtime_events_workspace_cursor_idx ON runtime_events(workspace_path, created_at, event_id);
 `;
 
+const SCHEMA_V4 = `
+  ALTER TABLE cron_jobs ADD COLUMN credential_ref TEXT;
+`;
+
 function mapJob(row: JobRow): JobRecord {
   return compact({
     jobId: row.job_id,
@@ -2307,6 +2322,7 @@ function mapCronJob(row: CronJobRow): CronJobRecord {
     prompt: row.prompt,
     enabled: row.enabled === 1,
     policySnapshot: parseYoloPolicySnapshot(row.policy_snapshot_json),
+    ...(row.credential_ref ? { credentialRef: parseCredentialRef(row.credential_ref).ref } : {}),
     version: row.version,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
