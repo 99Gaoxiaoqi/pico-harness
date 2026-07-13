@@ -8,12 +8,17 @@ import {
   unlink,
   readFile,
   readlink,
-  writeFile,
   rename,
   rm,
+  open,
 } from "node:fs/promises";
-import { join, dirname } from "node:path";
+import { join, dirname, isAbsolute, parse, relative, resolve, sep } from "node:path";
 import { homedir } from "node:os";
+import {
+  FileHistoryBlobStore,
+  type FileHistoryBlobRef,
+} from "../storage/file-history-blob-store.js";
+import { writeJsonAtomic } from "../storage/atomic-json.js";
 import {
   addFileChangeJournalWarning,
   beginFileChangeJournal,
@@ -29,9 +34,24 @@ import {
 
 const DEFAULT_BASE_DIR = join(homedir(), ".pico", "file-history");
 const MAX_SNAPSHOTS = 100;
+const FILE_HISTORY_MANIFEST_VERSION = 2 as const;
+
+export type FileHistoryStorageStatus = "healthy" | "legacy" | "degraded";
+
+export class FileHistoryDegradedError extends Error {
+  constructor(
+    message: string,
+    override readonly cause?: unknown,
+  ) {
+    super(message);
+    this.name = "FileHistoryDegradedError";
+  }
+}
 
 export interface FileHistoryBackup {
   backupFileName: string | null;
+  /** v2 manifest 的权威内容引用；backupFileName 仅作 v1 兼容。 */
+  blobRef?: FileHistoryBlobRef;
   version: number;
   backupTime: Date;
   originMtimeMs?: number;
@@ -54,6 +74,10 @@ export interface FileHistorySnapshot {
   editedFilePaths?: Set<string>;
   /** 本条消息的文件事务未完整覆盖工作区时的可见警告。 */
   journalWarnings?: string[];
+  /** 对应顶层用户消息的 durable Session event。 */
+  sourceMessageEventId?: string;
+  /** 建立 rewind point 前的 durable Session seq。 */
+  beforeSessionSeq?: number;
 }
 
 export interface FileHistoryState {
@@ -64,6 +88,12 @@ export interface FileHistoryState {
   pendingJournalWarnings: Set<string>;
   currentMessageId?: string;
   fileVersions: Map<string, number>;
+  /** manifest v2 修订号，每次耐久写递增。 */
+  revision: number;
+  storageStatus: FileHistoryStorageStatus;
+  storageError?: string;
+  /** rootId -> 已信任绝对根目录；接线层可注册 workspace/additional roots。 */
+  roots: Map<string, string>;
 }
 
 export type FileHistoryDiffFileStatus = "modified" | "created" | "deleted";
@@ -122,7 +152,24 @@ export function createFileHistoryState(): FileHistoryState {
     pendingJournalWarnings: new Set(),
     currentMessageId: undefined,
     fileVersions: new Map(),
+    revision: 0,
+    storageStatus: "healthy",
+    roots: new Map(),
   };
+}
+
+export function fileHistoryRegisterRoot(
+  state: FileHistoryState,
+  rootId: string,
+  absolutePath: string,
+): void {
+  if (!/^[A-Za-z0-9._-]+$/u.test(rootId)) throw new Error(`File History rootId 无效: ${rootId}`);
+  if (!isAbsolute(absolutePath))
+    throw new Error(`File History root 必须是绝对路径: ${absolutePath}`);
+  const normalized = resolve(absolutePath);
+  const previous = state.roots.get(rootId);
+  if (previous && previous !== normalized) throw new Error(`File History rootId 重复: ${rootId}`);
+  state.roots.set(rootId, normalized);
 }
 
 export function getBackupFileName(filePath: string, version: number): string {
@@ -228,6 +275,51 @@ export async function restoreBackup(
   } finally {
     if (!committed) await rm(temporaryPath, { force: true }).catch(() => undefined);
   }
+}
+
+async function restoreBlobBackup(
+  filePath: string,
+  ref: FileHistoryBlobRef,
+  mode: number | undefined,
+  baseDir: string,
+  beforeCommit?: () => Promise<void>,
+): Promise<void> {
+  const bytes = await new FileHistoryBlobStore({ baseDir }).read(ref);
+  const temporaryPath = join(dirname(filePath), `.pico-restore-${randomUUID()}.tmp`);
+  await mkdir(dirname(filePath), { recursive: true });
+  let committed = false;
+  try {
+    const handle = await open(temporaryPath, "wx", mode ?? 0o600);
+    try {
+      await handle.writeFile(bytes);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    if (mode !== undefined) await chmod(temporaryPath, mode);
+    await beforeCommit?.();
+    await rename(temporaryPath, filePath);
+    committed = true;
+  } finally {
+    if (!committed) await rm(temporaryPath, { force: true }).catch(() => undefined);
+  }
+}
+
+async function restoreFileHistoryBackup(
+  filePath: string,
+  backup: FileHistoryBackup,
+  sessionId: string,
+  baseDir: string,
+  beforeCommit?: () => Promise<void>,
+): Promise<void> {
+  if (backup.blobRef) {
+    await restoreBlobBackup(filePath, backup.blobRef, backup.originMode, baseDir, beforeCommit);
+    return;
+  }
+  if (backup.backupFileName === null) {
+    throw new Error(`FileHistory: ${filePath} 的缺失状态不能作为文件恢复`);
+  }
+  await restoreBackup(filePath, backup.backupFileName, sessionId, baseDir, beforeCommit);
 }
 
 export async function fileHistoryTrackEdit(
@@ -572,7 +664,13 @@ export async function fileHistoryMakeSnapshot(
   sessionId: string,
   baseDir: string = DEFAULT_BASE_DIR,
   messageIndex?: number,
-  metadata?: { userPrompt: string; transcriptIndex?: number; interactionMode?: string },
+  metadata?: {
+    userPrompt: string;
+    transcriptIndex?: number;
+    interactionMode?: string;
+    sourceMessageEventId?: string;
+    beforeSessionSeq?: number;
+  },
 ): Promise<void> {
   const snapshot: FileHistorySnapshot = {
     messageId,
@@ -589,6 +687,12 @@ export async function fileHistoryMakeSnapshot(
       : {}),
     ...(metadata?.interactionMode !== undefined
       ? { interactionMode: metadata.interactionMode }
+      : {}),
+    ...(metadata?.sourceMessageEventId !== undefined
+      ? { sourceMessageEventId: metadata.sourceMessageEventId }
+      : {}),
+    ...(metadata?.beforeSessionSeq !== undefined
+      ? { beforeSessionSeq: metadata.beforeSessionSeq }
       : {}),
   };
 
@@ -664,6 +768,8 @@ export async function fileHistoryBeginRewindPoint(
     messageIndex: number;
     transcriptIndex?: number;
     interactionMode?: string;
+    sourceMessageEventId?: string;
+    beforeSessionSeq?: number;
   },
   sessionId: string,
   baseDir: string = DEFAULT_BASE_DIR,
@@ -672,6 +778,10 @@ export async function fileHistoryBeginRewindPoint(
     userPrompt: input.userPrompt,
     ...(input.transcriptIndex !== undefined ? { transcriptIndex: input.transcriptIndex } : {}),
     ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
+    ...(input.sourceMessageEventId !== undefined
+      ? { sourceMessageEventId: input.sourceMessageEventId }
+      : {}),
+    ...(input.beforeSessionSeq !== undefined ? { beforeSessionSeq: input.beforeSessionSeq } : {}),
   });
 }
 
@@ -696,20 +806,83 @@ export async function fileHistoryRewind(
   messageId: string,
   sessionId: string,
   baseDir: string = DEFAULT_BASE_DIR,
+  options: { expectedCurrentFingerprints?: ReadonlyMap<string, string> } = {},
 ): Promise<void> {
-  const target = state.snapshots.find((s) => s.messageId === messageId);
-  if (!target) {
-    throw new Error(`FileHistory: 找不到 messageId=${messageId} 的快照`);
-  }
+  const prepared = await fileHistoryPrepareRewind(state, messageId, sessionId, baseDir, options);
 
-  for (const filePath of state.trackedFiles) {
-    const backup = target.trackedFileBackups.get(filePath) ?? findFirstBackup(state, filePath);
-    if (!backup) continue;
+  // 在任何修改前再整体校验一次，避免预检后的外部写入造成部分恢复。
+  await assertPreparedRewindFingerprints(prepared);
+  for (const { filePath, backup } of prepared.files) {
     if (backup.backupFileName === null) {
       await removeCreatedFileForRewind(filePath);
     } else {
-      await restoreBackup(filePath, backup.backupFileName, sessionId, baseDir);
+      await restoreFileHistoryBackup(filePath, backup, sessionId, baseDir);
     }
+  }
+}
+
+export interface FileHistoryPreparedRewindFile {
+  filePath: string;
+  backup: FileHistoryBackup;
+  currentFingerprint: string;
+}
+
+export interface FileHistoryPreparedRewind {
+  messageId: string;
+  revision: number;
+  files: FileHistoryPreparedRewindFile[];
+}
+
+/**
+ * 完整读取所有 CAS/legacy preimage 并捕获当前工作区指纹。
+ * 该函数不修改工作区，可用于 operation journal 的 prepared 阶段。
+ */
+export async function fileHistoryPrepareRewind(
+  state: FileHistoryState,
+  messageId: string,
+  sessionId: string,
+  baseDir: string = DEFAULT_BASE_DIR,
+  options: { expectedCurrentFingerprints?: ReadonlyMap<string, string> } = {},
+): Promise<FileHistoryPreparedRewind> {
+  const target = state.snapshots.find((snapshot) => snapshot.messageId === messageId);
+  if (!target) throw new Error(`FileHistory: 找不到 messageId=${messageId} 的快照`);
+  if (state.storageStatus === "degraded") {
+    throw new FileHistoryDegradedError(state.storageError ?? "File History 处于只读降级状态");
+  }
+
+  const files: FileHistoryPreparedRewindFile[] = [];
+  const filePaths = new Set([...state.trackedFiles, ...target.trackedFileBackups.keys()]);
+  for (const filePath of [...filePaths].toSorted()) {
+    const backup = target.trackedFileBackups.get(filePath) ?? findFirstBackup(state, filePath);
+    if (!backup) continue;
+    if (backup.backupFileName !== null) {
+      if (backup.blobRef) {
+        await new FileHistoryBlobStore({ baseDir }).read(backup.blobRef);
+      } else {
+        await readFile(resolveBackupPath(sessionId, backup.backupFileName, baseDir));
+      }
+    }
+    const current = await readCurrentFileState(filePath);
+    const expected = options.expectedCurrentFingerprints?.get(filePath);
+    if (expected !== undefined && expected !== current.fingerprint) {
+      throw new Error(`FileHistory: ${filePath} 在 rewind 预检前已发生外部变化`);
+    }
+    files.push({ filePath, backup, currentFingerprint: current.fingerprint });
+  }
+  return { messageId, revision: state.revision, files };
+}
+
+async function assertPreparedRewindFingerprints(
+  prepared: FileHistoryPreparedRewind,
+): Promise<void> {
+  const conflicts: string[] = [];
+  for (const file of prepared.files) {
+    if ((await readCurrentFileState(file.filePath)).fingerprint !== file.currentFingerprint) {
+      conflicts.push(file.filePath);
+    }
+  }
+  if (conflicts.length > 0) {
+    throw new Error(`FileHistory: rewind 预检后文件又发生变化: ${conflicts.join(", ")}`);
   }
 }
 
@@ -858,7 +1031,7 @@ export async function fileHistoryRestoreFile(
     const latest = await verifyCurrentState();
     if (latest.kind === "file") await unlink(filePath);
   } else {
-    await restoreBackup(filePath, backup.backupFileName, sessionId, baseDir, async () => {
+    await restoreFileHistoryBackup(filePath, backup, sessionId, baseDir, async () => {
       await verifyCurrentState();
     });
   }
@@ -1001,6 +1174,9 @@ async function readSnapshotFileContent(
   baseDir: string,
 ): Promise<string | undefined> {
   if (!backup || backup.backupFileName === null) return undefined;
+  if (backup.blobRef) {
+    return (await new FileHistoryBlobStore({ baseDir }).read(backup.blobRef)).toString("utf8");
+  }
   return readFile(resolveBackupPath(sessionId, backup.backupFileName, baseDir), "utf8");
 }
 
@@ -1248,7 +1424,7 @@ function renderDiffLine(prefix: " " | "+" | "-", line: DiffTextLine): string[] {
     : [`${prefix}${line.text}`, "\\ No newline at end of file"];
 }
 
-interface PersistedFileHistoryBackup {
+interface PersistedFileHistoryBackupV1 {
   backupFileName: string | null;
   version: number;
   backupTime: string;
@@ -1257,9 +1433,9 @@ interface PersistedFileHistoryBackup {
   originMode?: number;
 }
 
-interface PersistedFileHistorySnapshot {
+interface PersistedFileHistorySnapshotV1 {
   messageId: string;
-  trackedFileBackups: Array<[string, PersistedFileHistoryBackup]>;
+  trackedFileBackups: Array<[string, PersistedFileHistoryBackupV1]>;
   timestamp: string;
   messageIndex?: number;
   userPrompt?: string;
@@ -1269,11 +1445,65 @@ interface PersistedFileHistorySnapshot {
   journalWarnings?: string[];
 }
 
-interface PersistedFileHistoryState {
-  snapshots: PersistedFileHistorySnapshot[];
+interface PersistedFileHistoryStateV1 {
+  snapshots: PersistedFileHistorySnapshotV1[];
   trackedFiles: string[];
   snapshotSequence: number;
   fileVersions: Array<[string, number]>;
+}
+
+interface PersistedFileLocationV2 {
+  rootId: string;
+  relativePath: string;
+}
+
+interface PersistedFileHistoryRootV2 {
+  rootId: string;
+  absolutePath: string;
+}
+
+interface PersistedFileHistoryBackupBaseV2 {
+  version: number;
+  backupTime: string;
+  originMtimeMs?: number;
+  originSize?: number;
+  originMode?: number;
+}
+
+type PersistedFileHistoryBackupV2 =
+  | (PersistedFileHistoryBackupBaseV2 & { kind: "missing" })
+  | (PersistedFileHistoryBackupBaseV2 & {
+      kind: "blob";
+      blob: FileHistoryBlobRef;
+      legacyBackupFileName?: string;
+    });
+
+interface PersistedFileHistorySnapshotV2 {
+  messageId: string;
+  sourceMessageEventId: string | null;
+  beforeSessionSeq: number | null;
+  trackedFileBackups: Array<{
+    location: PersistedFileLocationV2;
+    backup: PersistedFileHistoryBackupV2;
+  }>;
+  timestamp: string;
+  messageIndex?: number;
+  userPrompt?: string;
+  transcriptIndex?: number;
+  interactionMode?: string;
+  editedFilePaths?: PersistedFileLocationV2[];
+  journalWarnings?: string[];
+}
+
+interface PersistedFileHistoryStateV2 {
+  schemaVersion: typeof FILE_HISTORY_MANIFEST_VERSION;
+  revision: number;
+  sessionId: string;
+  roots: PersistedFileHistoryRootV2[];
+  snapshots: PersistedFileHistorySnapshotV2[];
+  trackedFiles: PersistedFileLocationV2[];
+  snapshotSequence: number;
+  fileVersions: Array<{ location: PersistedFileLocationV2; version: number }>;
 }
 
 async function saveFileHistoryState(
@@ -1281,22 +1511,36 @@ async function saveFileHistoryState(
   sessionId: string,
   baseDir: string,
 ): Promise<void> {
-  const manifest: PersistedFileHistoryState = {
+  if (state.storageStatus === "degraded") {
+    throw new FileHistoryDegradedError(state.storageError ?? "File History 处于只读降级状态");
+  }
+  const manifestPath = resolveManifestPath(sessionId, baseDir);
+  try {
+    if (state.storageStatus === "legacy") {
+      await preserveLegacyManifest(manifestPath);
+    }
+    await materializeFileHistoryBlobs(state, sessionId, baseDir);
+  } catch (error) {
+    state.storageStatus = "degraded";
+    state.storageError = `File History v1 迁移失败: ${errorMessage(error)}`;
+    throw new FileHistoryDegradedError(state.storageError, error);
+  }
+
+  const roots = collectManifestRoots(state);
+  const nextRevision = state.revision + 1;
+  const manifest: PersistedFileHistoryStateV2 = {
+    schemaVersion: FILE_HISTORY_MANIFEST_VERSION,
+    revision: nextRevision,
+    sessionId,
+    roots: [...roots.values()].toSorted((left, right) => left.rootId.localeCompare(right.rootId)),
     snapshots: state.snapshots.map((snapshot) => ({
       messageId: snapshot.messageId,
-      trackedFileBackups: Array.from(snapshot.trackedFileBackups.entries()).map(
-        ([filePath, backup]) => [
-          filePath,
-          {
-            backupFileName: backup.backupFileName,
-            version: backup.version,
-            backupTime: backup.backupTime.toISOString(),
-            ...(backup.originMtimeMs !== undefined ? { originMtimeMs: backup.originMtimeMs } : {}),
-            ...(backup.originSize !== undefined ? { originSize: backup.originSize } : {}),
-            ...(backup.originMode !== undefined ? { originMode: backup.originMode } : {}),
-          },
-        ],
-      ),
+      sourceMessageEventId: snapshot.sourceMessageEventId ?? null,
+      beforeSessionSeq: snapshot.beforeSessionSeq ?? null,
+      trackedFileBackups: Array.from(snapshot.trackedFileBackups, ([filePath, backup]) => ({
+        location: encodeFileLocation(filePath, roots),
+        backup: encodeBackupV2(backup),
+      })),
       timestamp: snapshot.timestamp.toISOString(),
       ...(snapshot.messageIndex !== undefined ? { messageIndex: snapshot.messageIndex } : {}),
       ...(snapshot.userPrompt !== undefined ? { userPrompt: snapshot.userPrompt } : {}),
@@ -1307,22 +1551,52 @@ async function saveFileHistoryState(
         ? { interactionMode: snapshot.interactionMode }
         : {}),
       ...(snapshot.editedFilePaths !== undefined
-        ? { editedFilePaths: Array.from(snapshot.editedFilePaths) }
+        ? {
+            editedFilePaths: Array.from(snapshot.editedFilePaths, (filePath) =>
+              encodeFileLocation(filePath, roots),
+            ),
+          }
         : {}),
       ...(snapshot.journalWarnings !== undefined
         ? { journalWarnings: [...snapshot.journalWarnings] }
         : {}),
     })),
-    trackedFiles: Array.from(state.trackedFiles),
+    trackedFiles: Array.from(state.trackedFiles, (filePath) => encodeFileLocation(filePath, roots)),
     snapshotSequence: state.snapshotSequence,
-    fileVersions: Array.from(state.fileVersions.entries()),
+    fileVersions: Array.from(state.fileVersions, ([filePath, version]) => ({
+      location: encodeFileLocation(filePath, roots),
+      version,
+    })),
   };
 
-  const manifestPath = resolveManifestPath(sessionId, baseDir);
-  const tempPath = `${manifestPath}.${process.pid}.${Date.now()}.tmp`;
-  await mkdir(dirname(manifestPath), { recursive: true });
-  await writeFile(tempPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
-  await rename(tempPath, manifestPath);
+  try {
+    await writeJsonAtomic(manifestPath, manifest);
+    state.revision = nextRevision;
+    state.storageStatus = "healthy";
+    state.storageError = undefined;
+  } catch (error) {
+    state.storageStatus = "degraded";
+    state.storageError = `File History manifest v2 写入失败: ${errorMessage(error)}`;
+    throw new FileHistoryDegradedError(state.storageError, error);
+  }
+}
+
+function encodeBackupV2(backup: FileHistoryBackup): PersistedFileHistoryBackupV2 {
+  const metadata: PersistedFileHistoryBackupBaseV2 = {
+    version: backup.version,
+    backupTime: backup.backupTime.toISOString(),
+    ...(backup.originMtimeMs !== undefined ? { originMtimeMs: backup.originMtimeMs } : {}),
+    ...(backup.originSize !== undefined ? { originSize: backup.originSize } : {}),
+    ...(backup.originMode !== undefined ? { originMode: backup.originMode } : {}),
+  };
+  if (backup.backupFileName === null) return { kind: "missing", ...metadata };
+  if (!backup.blobRef) throw new Error("File History backup 缺少 CAS 引用");
+  return {
+    kind: "blob",
+    blob: backup.blobRef,
+    legacyBackupFileName: backup.backupFileName,
+    ...metadata,
+  };
 }
 
 export async function fileHistoryLoadState(
@@ -1339,7 +1613,30 @@ export async function fileHistoryLoadState(
     throw err;
   }
 
-  const manifest = JSON.parse(raw) as PersistedFileHistoryState;
+  try {
+    const value = JSON.parse(raw) as unknown;
+    if (isRecordValue(value) && value["schemaVersion"] === FILE_HISTORY_MANIFEST_VERSION) {
+      hydrateFileHistoryV2(state, parseFileHistoryManifestV2(value, sessionId));
+      state.storageStatus = "healthy";
+      state.storageError = undefined;
+      return true;
+    }
+    hydrateFileHistoryV1(state, parseFileHistoryManifestV1(value));
+    state.revision = 0;
+    state.storageStatus = "legacy";
+    state.storageError = undefined;
+    return true;
+  } catch (error) {
+    state.storageStatus = "degraded";
+    state.storageError = `File History manifest 无效，已转为只读降级: ${errorMessage(error)}`;
+    throw new FileHistoryDegradedError(state.storageError, error);
+  }
+}
+
+function hydrateFileHistoryV1(
+  state: FileHistoryState,
+  manifest: PersistedFileHistoryStateV1,
+): void {
   state.snapshots = manifest.snapshots.map((snapshot) => ({
     messageId: snapshot.messageId,
     trackedFileBackups: new Map(
@@ -1377,5 +1674,546 @@ export async function fileHistoryLoadState(
   state.pendingTrackEdits = new Map();
   state.pendingJournalWarnings = new Set();
   state.currentMessageId = undefined;
-  return true;
+  state.roots = new Map();
+}
+
+function hydrateFileHistoryV2(
+  state: FileHistoryState,
+  manifest: PersistedFileHistoryStateV2,
+): void {
+  const roots = new Map(manifest.roots.map((root) => [root.rootId, root.absolutePath]));
+  state.snapshots = manifest.snapshots.map((snapshot) => ({
+    messageId: snapshot.messageId,
+    trackedFileBackups: new Map(
+      snapshot.trackedFileBackups.map(({ location, backup }) => [
+        decodeFileLocation(location, roots),
+        decodeBackupV2(backup),
+      ]),
+    ),
+    timestamp: new Date(snapshot.timestamp),
+    ...(snapshot.sourceMessageEventId !== null
+      ? { sourceMessageEventId: snapshot.sourceMessageEventId }
+      : {}),
+    ...(snapshot.beforeSessionSeq !== null ? { beforeSessionSeq: snapshot.beforeSessionSeq } : {}),
+    ...(snapshot.messageIndex !== undefined ? { messageIndex: snapshot.messageIndex } : {}),
+    ...(snapshot.userPrompt !== undefined ? { userPrompt: snapshot.userPrompt } : {}),
+    ...(snapshot.transcriptIndex !== undefined
+      ? { transcriptIndex: snapshot.transcriptIndex }
+      : {}),
+    ...(snapshot.interactionMode !== undefined
+      ? { interactionMode: snapshot.interactionMode }
+      : {}),
+    ...(snapshot.editedFilePaths !== undefined
+      ? {
+          editedFilePaths: new Set(
+            snapshot.editedFilePaths.map((location) => decodeFileLocation(location, roots)),
+          ),
+        }
+      : {}),
+    ...(snapshot.journalWarnings !== undefined
+      ? { journalWarnings: [...snapshot.journalWarnings] }
+      : {}),
+  }));
+  state.trackedFiles = new Set(
+    manifest.trackedFiles.map((location) => decodeFileLocation(location, roots)),
+  );
+  state.snapshotSequence = manifest.snapshotSequence;
+  state.fileVersions = new Map(
+    manifest.fileVersions.map(({ location, version }) => [
+      decodeFileLocation(location, roots),
+      version,
+    ]),
+  );
+  state.pendingTrackEdits = new Map();
+  state.pendingJournalWarnings = new Set();
+  state.currentMessageId = undefined;
+  state.revision = manifest.revision;
+  state.roots = roots;
+}
+
+async function materializeFileHistoryBlobs(
+  state: FileHistoryState,
+  sessionId: string,
+  baseDir: string,
+): Promise<void> {
+  const store = new FileHistoryBlobStore({ baseDir });
+  const backups = new Set<FileHistoryBackup>();
+  for (const snapshot of state.snapshots) {
+    for (const backup of snapshot.trackedFileBackups.values()) backups.add(backup);
+  }
+  for (const backup of state.pendingTrackEdits.values()) backups.add(backup);
+  for (const backup of backups) {
+    if (backup.backupFileName === null || backup.blobRef) continue;
+    backup.blobRef = (
+      await store.putFile(resolveBackupPath(sessionId, backup.backupFileName, baseDir))
+    ).ref;
+  }
+}
+
+async function preserveLegacyManifest(manifestPath: string): Promise<void> {
+  const backupPath = `${manifestPath}.v1.bak`;
+  const raw = await readFile(manifestPath);
+  let handle;
+  try {
+    handle = await open(backupPath, "wx", 0o600);
+    await handle.writeFile(raw);
+    await handle.sync();
+    await handle.close();
+    handle = undefined;
+    await syncFileHistoryDirectory(dirname(backupPath));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    const existing = await readFile(backupPath);
+    if (!existing.equals(raw)) {
+      throw new Error(`File History v1 备份已存在且内容不一致: ${backupPath}`, {
+        cause: error,
+      });
+    }
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+async function syncFileHistoryDirectory(directory: string): Promise<void> {
+  let handle;
+  try {
+    handle = await open(directory, "r");
+    await handle.sync();
+  } catch (error) {
+    if (
+      !new Set(["EACCES", "EINVAL", "EISDIR", "ENOTSUP", "EPERM"]).has(
+        (error as NodeJS.ErrnoException).code ?? "",
+      )
+    ) {
+      throw error;
+    }
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+function collectManifestRoots(state: FileHistoryState): Map<string, PersistedFileHistoryRootV2> {
+  const roots = new Map<string, PersistedFileHistoryRootV2>();
+  for (const [rootId, absolutePath] of state.roots) {
+    if (!/^[A-Za-z0-9._-]+$/u.test(rootId) || !isAbsolute(absolutePath)) {
+      throw new Error(`File History 注册根无效: ${rootId}`);
+    }
+    roots.set(rootId, { rootId, absolutePath: resolve(absolutePath) });
+  }
+  const paths = new Set<string>([...state.trackedFiles, ...state.fileVersions.keys()]);
+  for (const snapshot of state.snapshots) {
+    for (const path of snapshot.trackedFileBackups.keys()) paths.add(path);
+    for (const path of snapshot.editedFilePaths ?? []) paths.add(path);
+  }
+  for (const filePath of paths) {
+    if (!isAbsolute(filePath)) throw new Error(`File History 路径必须是绝对路径: ${filePath}`);
+    const absolute = resolve(filePath);
+    if ([...roots.values()].some((root) => isPathWithinRoot(root.absolutePath, absolute))) {
+      continue;
+    }
+    const absolutePath = parse(absolute).root;
+    const fallbackRootId = manifestRootId(absolutePath);
+    const previous = roots.get(fallbackRootId);
+    if (previous && previous.absolutePath !== absolutePath) {
+      throw new Error(`File History rootId 冲突: ${fallbackRootId}`);
+    }
+    roots.set(fallbackRootId, { rootId: fallbackRootId, absolutePath });
+  }
+  return roots;
+}
+
+function manifestRootId(absolutePath: string): string {
+  return `root-${createHash("sha256").update(absolutePath).digest("hex").slice(0, 16)}`;
+}
+
+function encodeFileLocation(
+  filePath: string,
+  roots: ReadonlyMap<string, PersistedFileHistoryRootV2>,
+): PersistedFileLocationV2 {
+  const absolute = resolve(filePath);
+  const root = [...roots.values()]
+    .filter((candidate) => isPathWithinRoot(candidate.absolutePath, absolute))
+    .toSorted((left, right) => right.absolutePath.length - left.absolutePath.length)[0];
+  if (!root) {
+    throw new Error(`File History 缺少路径根: ${filePath}`);
+  }
+  const relativePath = relative(root.absolutePath, absolute).split(sep).join("/");
+  assertSafeRelativePath(relativePath);
+  return { rootId: root.rootId, relativePath };
+}
+
+function decodeFileLocation(
+  location: PersistedFileLocationV2,
+  roots: ReadonlyMap<string, string>,
+): string {
+  const root = roots.get(location.rootId);
+  if (!root) throw new Error(`File History 引用了未知 rootId: ${location.rootId}`);
+  assertSafeRelativePath(location.relativePath);
+  const decoded = resolve(root, ...location.relativePath.split("/"));
+  const relativeToRoot = relative(root, decoded);
+  if (relativeToRoot.startsWith("..") || isAbsolute(relativeToRoot)) {
+    throw new Error(`File History 路径越界: ${location.relativePath}`);
+  }
+  return decoded;
+}
+
+function assertSafeRelativePath(path: string): void {
+  if (
+    path.length === 0 ||
+    path.startsWith("/") ||
+    path.includes("\\") ||
+    path.split("/").some((part) => part === "" || part === "." || part === "..")
+  ) {
+    throw new Error(`File History relativePath 无效: ${path}`);
+  }
+}
+
+function isPathWithinRoot(root: string, path: string): boolean {
+  const relativePath = relative(resolve(root), resolve(path));
+  return relativePath !== "" && !relativePath.startsWith("..") && !isAbsolute(relativePath);
+}
+
+function parseFileHistoryManifestV1(value: unknown): PersistedFileHistoryStateV1 {
+  const record = requireRecord(value, "v1 manifest");
+  const snapshots = requireArray(record["snapshots"], "snapshots").map((candidate, index) => {
+    const snapshot = requireRecord(candidate, `snapshots[${index}]`);
+    return {
+      messageId: requireString(snapshot["messageId"], `snapshots[${index}].messageId`),
+      trackedFileBackups: requireArray(
+        snapshot["trackedFileBackups"],
+        `snapshots[${index}].trackedFileBackups`,
+      ).map((entry, backupIndex) => {
+        if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== "string") {
+          throw new Error(`snapshots[${index}].trackedFileBackups[${backupIndex}] 无效`);
+        }
+        return [
+          requireAbsolutePath(entry[0], `snapshots[${index}].trackedFileBackups path`),
+          parseBackupV1(entry[1], `snapshots[${index}].trackedFileBackups backup`),
+        ] satisfies [string, PersistedFileHistoryBackupV1];
+      }),
+      timestamp: requireDateString(snapshot["timestamp"], `snapshots[${index}].timestamp`),
+      ...optionalSnapshotFieldsV1(snapshot, index),
+    } satisfies PersistedFileHistorySnapshotV1;
+  });
+  const trackedFiles = requireArray(record["trackedFiles"], "trackedFiles").map((path, index) =>
+    requireAbsolutePath(path, `trackedFiles[${index}]`),
+  );
+  const fileVersions = requireArray(record["fileVersions"], "fileVersions").map((entry, index) => {
+    if (!Array.isArray(entry) || entry.length !== 2) {
+      throw new Error(`fileVersions[${index}] 无效`);
+    }
+    return [
+      requireAbsolutePath(entry[0], `fileVersions[${index}][0]`),
+      requireNonNegativeInteger(entry[1], `fileVersions[${index}][1]`),
+    ] satisfies [string, number];
+  });
+  return {
+    snapshots,
+    trackedFiles,
+    snapshotSequence: requireNonNegativeInteger(record["snapshotSequence"], "snapshotSequence"),
+    fileVersions,
+  };
+}
+
+function parseFileHistoryManifestV2(
+  value: unknown,
+  expectedSessionId: string,
+): PersistedFileHistoryStateV2 {
+  const record = requireRecord(value, "v2 manifest");
+  if (record["schemaVersion"] !== FILE_HISTORY_MANIFEST_VERSION) {
+    throw new Error("File History manifest schemaVersion 不支持");
+  }
+  const sessionId = requireString(record["sessionId"], "sessionId");
+  if (sessionId !== expectedSessionId) throw new Error("File History manifest sessionId 不匹配");
+  const roots = requireArray(record["roots"], "roots").map((candidate, index) => {
+    const root = requireRecord(candidate, `roots[${index}]`);
+    const parsed = {
+      rootId: requireString(root["rootId"], `roots[${index}].rootId`),
+      absolutePath: requireAbsolutePath(root["absolutePath"], `roots[${index}].absolutePath`),
+    } satisfies PersistedFileHistoryRootV2;
+    if (!/^[A-Za-z0-9._-]+$/u.test(parsed.rootId)) throw new Error("File History rootId 无效");
+    if (
+      /^root-[a-f0-9]{16}$/u.test(parsed.rootId) &&
+      manifestRootId(parsed.absolutePath) !== parsed.rootId
+    ) {
+      throw new Error("File History rootId 与 absolutePath 不匹配");
+    }
+    return parsed;
+  });
+  if (new Set(roots.map((root) => root.rootId)).size !== roots.length) {
+    throw new Error("File History roots 存在重复 rootId");
+  }
+  const rootIds = new Set(roots.map((root) => root.rootId));
+  const parseLocation = (candidate: unknown, label: string): PersistedFileLocationV2 => {
+    const location = requireRecord(candidate, label);
+    const parsed = {
+      rootId: requireString(location["rootId"], `${label}.rootId`),
+      relativePath: requireString(location["relativePath"], `${label}.relativePath`),
+    } satisfies PersistedFileLocationV2;
+    if (!rootIds.has(parsed.rootId)) throw new Error(`${label}.rootId 未定义`);
+    assertSafeRelativePath(parsed.relativePath);
+    return parsed;
+  };
+  const snapshots = requireArray(record["snapshots"], "snapshots").map((candidate, index) => {
+    const snapshot = requireRecord(candidate, `snapshots[${index}]`);
+    return {
+      messageId: requireString(snapshot["messageId"], `snapshots[${index}].messageId`),
+      sourceMessageEventId: requireNullableString(
+        snapshot["sourceMessageEventId"],
+        `snapshots[${index}].sourceMessageEventId`,
+      ),
+      beforeSessionSeq: requireNullableNonNegativeInteger(
+        snapshot["beforeSessionSeq"],
+        `snapshots[${index}].beforeSessionSeq`,
+      ),
+      trackedFileBackups: requireArray(
+        snapshot["trackedFileBackups"],
+        `snapshots[${index}].trackedFileBackups`,
+      ).map((entry, backupIndex) => {
+        const backup = requireRecord(entry, `trackedFileBackups[${backupIndex}]`);
+        return {
+          location: parseLocation(
+            backup["location"],
+            `trackedFileBackups[${backupIndex}].location`,
+          ),
+          backup: parseBackupV2(backup["backup"], `trackedFileBackups[${backupIndex}].backup`),
+        };
+      }),
+      timestamp: requireDateString(snapshot["timestamp"], `snapshots[${index}].timestamp`),
+      ...optionalSnapshotFieldsV2(snapshot, index, parseLocation),
+    } satisfies PersistedFileHistorySnapshotV2;
+  });
+  return {
+    schemaVersion: FILE_HISTORY_MANIFEST_VERSION,
+    revision: requirePositiveInteger(record["revision"], "revision"),
+    sessionId,
+    roots,
+    snapshots,
+    trackedFiles: requireArray(record["trackedFiles"], "trackedFiles").map((entry, index) =>
+      parseLocation(entry, `trackedFiles[${index}]`),
+    ),
+    snapshotSequence: requireNonNegativeInteger(record["snapshotSequence"], "snapshotSequence"),
+    fileVersions: requireArray(record["fileVersions"], "fileVersions").map((entry, index) => {
+      const item = requireRecord(entry, `fileVersions[${index}]`);
+      return {
+        location: parseLocation(item["location"], `fileVersions[${index}].location`),
+        version: requireNonNegativeInteger(item["version"], `fileVersions[${index}].version`),
+      };
+    }),
+  };
+}
+
+function parseBackupV1(value: unknown, label: string): PersistedFileHistoryBackupV1 {
+  const backup = requireRecord(value, label);
+  const backupFileName = backup["backupFileName"];
+  if (backupFileName !== null && typeof backupFileName !== "string") {
+    throw new Error(`${label}.backupFileName 无效`);
+  }
+  return {
+    backupFileName,
+    version: requireNonNegativeInteger(backup["version"], `${label}.version`),
+    backupTime: requireDateString(backup["backupTime"], `${label}.backupTime`),
+    ...parseBackupMetadata(backup, label),
+  };
+}
+
+function parseBackupV2(value: unknown, label: string): PersistedFileHistoryBackupV2 {
+  const backup = requireRecord(value, label);
+  const metadata = {
+    version: requireNonNegativeInteger(backup["version"], `${label}.version`),
+    backupTime: requireDateString(backup["backupTime"], `${label}.backupTime`),
+    ...parseBackupMetadata(backup, label),
+  } satisfies PersistedFileHistoryBackupBaseV2;
+  if (backup["kind"] === "missing") return { kind: "missing", ...metadata };
+  if (backup["kind"] !== "blob") throw new Error(`${label}.kind 无效`);
+  const blob = requireRecord(backup["blob"], `${label}.blob`);
+  const ref = {
+    algorithm: blob["algorithm"],
+    digest: requireString(blob["digest"], `${label}.blob.digest`),
+    sizeBytes: requireNonNegativeInteger(blob["sizeBytes"], `${label}.blob.sizeBytes`),
+  };
+  if (ref.algorithm !== "sha256" || !/^[a-f0-9]{64}$/u.test(ref.digest)) {
+    throw new Error(`${label}.blob 无效`);
+  }
+  const legacy = backup["legacyBackupFileName"];
+  if (legacy !== undefined && typeof legacy !== "string") {
+    throw new Error(`${label}.legacyBackupFileName 无效`);
+  }
+  return {
+    kind: "blob",
+    blob: ref as FileHistoryBlobRef,
+    ...(typeof legacy === "string" ? { legacyBackupFileName: legacy } : {}),
+    ...metadata,
+  };
+}
+
+function decodeBackupV2(backup: PersistedFileHistoryBackupV2): FileHistoryBackup {
+  return {
+    backupFileName: backup.kind === "missing" ? null : (backup.legacyBackupFileName ?? "cas"),
+    ...(backup.kind === "blob" ? { blobRef: backup.blob } : {}),
+    version: backup.version,
+    backupTime: new Date(backup.backupTime),
+    ...(backup.originMtimeMs !== undefined ? { originMtimeMs: backup.originMtimeMs } : {}),
+    ...(backup.originSize !== undefined ? { originSize: backup.originSize } : {}),
+    ...(backup.originMode !== undefined ? { originMode: backup.originMode } : {}),
+  };
+}
+
+function parseBackupMetadata(
+  backup: Record<string, unknown>,
+  label: string,
+): Pick<PersistedFileHistoryBackupBaseV2, "originMtimeMs" | "originSize" | "originMode"> {
+  const originMtimeMs = requireOptionalNonNegativeNumber(
+    backup["originMtimeMs"],
+    `${label}.originMtimeMs`,
+  );
+  const originSize = requireOptionalNonNegativeInteger(backup["originSize"], `${label}.originSize`);
+  const originMode = requireOptionalNonNegativeInteger(backup["originMode"], `${label}.originMode`);
+  if (originMode !== undefined && originMode > 0o777) throw new Error(`${label}.originMode 无效`);
+  return {
+    ...(originMtimeMs !== undefined ? { originMtimeMs } : {}),
+    ...(originSize !== undefined ? { originSize } : {}),
+    ...(originMode !== undefined ? { originMode } : {}),
+  };
+}
+
+function optionalSnapshotFieldsV1(
+  snapshot: Record<string, unknown>,
+  index: number,
+): Omit<PersistedFileHistorySnapshotV1, "messageId" | "trackedFileBackups" | "timestamp"> {
+  return {
+    ...optionalIntegerField(snapshot, "messageIndex", `snapshots[${index}]`),
+    ...optionalStringField(snapshot, "userPrompt", `snapshots[${index}]`),
+    ...optionalIntegerField(snapshot, "transcriptIndex", `snapshots[${index}]`),
+    ...optionalStringField(snapshot, "interactionMode", `snapshots[${index}]`),
+    ...optionalStringArrayField(snapshot, "editedFilePaths", `snapshots[${index}]`, true),
+    ...optionalStringArrayField(snapshot, "journalWarnings", `snapshots[${index}]`, false),
+  };
+}
+
+function optionalSnapshotFieldsV2(
+  snapshot: Record<string, unknown>,
+  index: number,
+  parseLocation: (value: unknown, label: string) => PersistedFileLocationV2,
+): Omit<
+  PersistedFileHistorySnapshotV2,
+  "messageId" | "sourceMessageEventId" | "beforeSessionSeq" | "trackedFileBackups" | "timestamp"
+> {
+  const edited = snapshot["editedFilePaths"];
+  return {
+    ...optionalIntegerField(snapshot, "messageIndex", `snapshots[${index}]`),
+    ...optionalStringField(snapshot, "userPrompt", `snapshots[${index}]`),
+    ...optionalIntegerField(snapshot, "transcriptIndex", `snapshots[${index}]`),
+    ...optionalStringField(snapshot, "interactionMode", `snapshots[${index}]`),
+    ...(edited !== undefined
+      ? {
+          editedFilePaths: requireArray(edited, `snapshots[${index}].editedFilePaths`).map(
+            (value, pathIndex) =>
+              parseLocation(value, `snapshots[${index}].editedFilePaths[${pathIndex}]`),
+          ),
+        }
+      : {}),
+    ...optionalStringArrayField(snapshot, "journalWarnings", `snapshots[${index}]`, false),
+  };
+}
+
+function optionalStringField(
+  record: Record<string, unknown>,
+  key: string,
+  label: string,
+): Record<string, string> {
+  const value = record[key];
+  if (value === undefined) return {};
+  return { [key]: requireString(value, `${label}.${key}`) };
+}
+
+function optionalIntegerField(
+  record: Record<string, unknown>,
+  key: string,
+  label: string,
+): Record<string, number> {
+  const value = record[key];
+  if (value === undefined) return {};
+  return { [key]: requireNonNegativeInteger(value, `${label}.${key}`) };
+}
+
+function optionalStringArrayField(
+  record: Record<string, unknown>,
+  key: string,
+  label: string,
+  absolutePaths: boolean,
+): Record<string, string[]> {
+  const value = record[key];
+  if (value === undefined) return {};
+  return {
+    [key]: requireArray(value, `${label}.${key}`).map((item, index) =>
+      absolutePaths
+        ? requireAbsolutePath(item, `${label}.${key}[${index}]`)
+        : requireString(item, `${label}.${key}[${index}]`),
+    ),
+  };
+}
+
+function requireRecord(value: unknown, label: string): Record<string, unknown> {
+  if (!isRecordValue(value)) throw new Error(`${label} 必须是 object`);
+  return value;
+}
+
+function requireArray(value: unknown, label: string): unknown[] {
+  if (!Array.isArray(value)) throw new Error(`${label} 必须是 array`);
+  return value;
+}
+
+function requireString(value: unknown, label: string): string {
+  if (typeof value !== "string" || value.length === 0) throw new Error(`${label} 必须是非空字符串`);
+  return value;
+}
+
+function requireAbsolutePath(value: unknown, label: string): string {
+  const path = requireString(value, label);
+  if (!isAbsolute(path)) throw new Error(`${label} 必须是绝对路径`);
+  return resolve(path);
+}
+
+function requireDateString(value: unknown, label: string): string {
+  const date = requireString(value, label);
+  if (!Number.isFinite(Date.parse(date))) throw new Error(`${label} 无效`);
+  return date;
+}
+
+function requireNonNegativeInteger(value: unknown, label: string): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`${label} 必须是非负安全整数`);
+  }
+  return value;
+}
+
+function requirePositiveInteger(value: unknown, label: string): number {
+  const parsed = requireNonNegativeInteger(value, label);
+  if (parsed === 0) throw new Error(`${label} 必须大于 0`);
+  return parsed;
+}
+
+function requireNullableString(value: unknown, label: string): string | null {
+  return value === null ? null : requireString(value, label);
+}
+
+function requireNullableNonNegativeInteger(value: unknown, label: string): number | null {
+  return value === null ? null : requireNonNegativeInteger(value, label);
+}
+
+function requireOptionalNonNegativeInteger(value: unknown, label: string): number | undefined {
+  return value === undefined ? undefined : requireNonNegativeInteger(value, label);
+}
+
+function requireOptionalNonNegativeNumber(value: unknown, label: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    throw new Error(`${label} 必须是非负数`);
+  }
+  return value;
+}
+
+function isRecordValue(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
