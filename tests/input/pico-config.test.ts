@@ -14,6 +14,8 @@ describe("loadPicoConfig", () => {
       additionalDirectories: [],
       keybindings: {},
       providers: {},
+      sandbox: { network: "deny" },
+      lspServers: [],
     });
   });
 
@@ -51,6 +53,8 @@ describe("loadPicoConfig", () => {
         },
       },
       providers: {},
+      sandbox: { network: "deny" },
+      lspServers: [],
     });
   });
 

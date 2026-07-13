@@ -414,26 +414,26 @@ describe("runAgentFromCli", () => {
     await expect(readFile(join(workDir, "approval.txt"), "utf8")).rejects.toThrow();
   });
 
-  it("默认 yolo 不弹审批且拒绝未授权外部写入", async () => {
+  it("默认 yolo 不弹审批且允许普通外部写入", async () => {
     const workDir = await mkdtemp(join(tmpdir(), "pico-cli-boundary-root-"));
     const outsideDir = await mkdtemp(join(tmpdir(), "pico-cli-boundary-outside-"));
-    const outsideFile = join(outsideDir, "blocked.txt");
+    const outsideFile = join(outsideDir, "allowed.txt");
     const provider = new ScriptedProvider([
       {
         role: "assistant",
         content: "I will write outside.",
         toolCalls: [
           {
-            id: "call_outside_blocked",
+            id: "call_outside_yolo",
             name: "write_file",
-            arguments: JSON.stringify({ path: outsideFile, content: "blocked" }),
+            arguments: JSON.stringify({ path: outsideFile, content: "allowed" }),
           },
         ],
         usage: { promptTokens: 1, completionTokens: 1 },
       },
       {
         role: "assistant",
-        content: "Boundary explained.",
+        content: "Outside write done.",
         usage: { promptTokens: 1, completionTokens: 1 },
       },
     ]);
@@ -449,9 +449,9 @@ describe("runAgentFromCli", () => {
       { provider, approvalNotifier },
     );
 
-    expect(result.finalMessage).toBe("Boundary explained.");
+    expect(result.finalMessage).toBe("Outside write done.");
     expect(approvalNotifier).not.toHaveBeenCalled();
-    await expect(readFile(outsideFile, "utf8")).rejects.toThrow();
+    await expect(readFile(outsideFile, "utf8")).resolves.toBe("allowed");
   });
 
   it("附加目录中的写入进入正常审批并可执行", async () => {
