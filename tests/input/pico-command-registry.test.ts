@@ -25,6 +25,7 @@ import {
 } from "../../src/input/session-settings.js";
 import { fileHistoryMakeSnapshot, fileHistoryTrackEdit } from "../../src/safety/file-history.js";
 import { CronService } from "../../src/tasks/cron-service.js";
+import type { CronDaemonBridge } from "../../src/input/cron-daemon-bridge.js";
 
 describe("Pico command registry", () => {
   const cleanup: Array<() => void> = [];
@@ -93,17 +94,27 @@ describe("Pico command registry", () => {
       cron.close();
       rmSync(workDir, { recursive: true, force: true });
     });
+    const bridge: CronDaemonBridge = {
+      registerWorkspace: async (workspacePath) => ({
+        available: true,
+        message: `daemon registered ${workspacePath}`,
+      }),
+    };
     const registry = await createPicoCommandRegistry({
       workDir,
       provider: "openai",
       model: "glm-5.2",
       sessionId: "session-cron",
       cronService: cron,
+      cronDaemonBridge: bridge,
     });
 
     const created = await processUserInput("/cron add */5 * * * * 检查未提交的改动", { registry });
     expect(created.type === "local-command" ? created.result.message : undefined).toContain(
       "Cron job created",
+    );
+    expect(created.type === "local-command" ? created.result.message : undefined).toContain(
+      "daemon registered",
     );
     const listed = await processUserInput("/cron list", { registry });
     expect(listed.type === "local-command" ? listed.result.message : undefined).toContain(
