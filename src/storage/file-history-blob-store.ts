@@ -11,6 +11,10 @@ import {
   type FileHandle,
 } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
+import {
+  isFileHistoryMutationLeaseHeld,
+  withFileHistoryMutationLease,
+} from "./file-history-mutation-lease.js";
 import { OperationReferenceIndex } from "./operation-reference-index.js";
 
 const SHA256_DIGEST_RE = /^[0-9a-f]{64}$/;
@@ -135,6 +139,24 @@ export class FileHistoryBlobStore {
   }
 
   private async publishTemporaryBlob(
+    temporaryPath: string,
+    digest: string,
+    sizeBytes: number,
+  ): Promise<FileHistoryBlobWriteResult> {
+    if (isFileHistoryMutationLeaseHeld(this.baseDir)) {
+      return this.publishTemporaryBlobUnlocked(temporaryPath, digest, sizeBytes);
+    }
+    return withFileHistoryMutationLease(
+      this.baseDir,
+      `cas-blob-put:${process.pid}:${digest.slice(0, 12)}`,
+      async (lease) => {
+        await lease.assertOwnership();
+        return this.publishTemporaryBlobUnlocked(temporaryPath, digest, sizeBytes);
+      },
+    );
+  }
+
+  private async publishTemporaryBlobUnlocked(
     temporaryPath: string,
     digest: string,
     sizeBytes: number,
