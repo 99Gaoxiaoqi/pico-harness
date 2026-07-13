@@ -548,10 +548,10 @@ git worktree remove ../pico-1-streaming
 - [x] 15.1 建立 `.claw/runtime.sqlite` 权威控制面，持久化 jobs、attempts、commands、completion outbox、merge requests、provider calls 和 usage baselines
 - [x] 15.2 提供 JobService 与宿主租约，启动时对账过期 running 记录、导入 legacy TaskStore，并保留 TaskRegistry/TaskStore 作为运行期兼容视图
 - [x] 15.3 将 worker 结果与串行 merge request 绑定：只有已合并或明确 `not_needed` 才进入成功终态，冲突保留现场并收口为 partial
-- [x] 15.4 接通按 Session 隔离的 durable completion outbox；以 completion ID 幂等写入 Session，耐久 append 成功后再标记 delivered
+- [x] 15.4 接通按 Session 隔离的 durable completion outbox；以 completion ID 幂等写入 Session，耐久 append 成功后再标记 delivered，并在重启时恢复“已确认但尚未驱动模型”的 resume-only 窗口
 - [x] 15.5 建立逐 Provider 调用账本，覆盖主循环、子代理和 compaction 等已接入路径，区分 reported/unknown 并用 baseline 差额导入避免旧累计值双计
 - [x] 15.6 将 File History 升级为 SHA-256 CAS + manifest v2，Summary 与 Artifact 使用严格 v2 sidecar；fork clone 复用不可变 blob，校验完整性并保持幂等
-- [x] 15.7 将公开 rewind 路径接入 operation journal + forward-only Saga，协调 workspace / Session / sidecar 并支持未完操作对账；同时完成 fork 的 staged JSONL、sidecar clone、Catalog publish 与原子发布协调器，但当前 TUI fork 仍走现有 `seedForkFrom` 组装路径，不宣称已切换到该 Saga
+- [x] 15.7 将公开 rewind 与 fork 路径接入 operation journal + forward-only Saga：rewind 协调 workspace / Session / sidecar 并支持未完操作对账；TUI/CLI fork 在创建目标 Session 前冻结源游标，先提交 File History / Summary / Artifact，再原子发布 staged JSONL 与 Catalog，且不继承 usage、permission、task/outbox 或额外授权目录
 
 ---
 
