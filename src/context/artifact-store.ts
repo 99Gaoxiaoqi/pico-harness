@@ -1,8 +1,9 @@
-import { createHash } from "node:crypto";
-import { chmod, mkdir, readFile, readdir, rmdir, unlink, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { chmod, mkdir, open, readFile, readdir, rename, rmdir, unlink } from "node:fs/promises";
 // 用 pathe 替代 node:path:artifact 的 meta.path 会被持久化并跨平台对比,
 // 统一正斜杠后断言 .claw/artifacts/sessions/ / tool-results/ 才能稳定成立。
 import { join, resolve } from "pathe";
+import { writeJsonAtomic } from "../storage/atomic-json.js";
 
 const DEFAULT_TTL_HOURS = 168;
 const DEFAULT_MAX_TOTAL_BYTES = 200 * 1024 * 1024;
@@ -13,6 +14,7 @@ const UNSAFE_SESSION_CHAR_RE = /[^A-Za-z0-9._-]/g;
 let generatedIdCounter = 0;
 
 export interface ToolResultArtifactMeta {
+  schemaVersion: 2;
   id: string;
   sessionId: string;
   safeSessionId: string;
@@ -24,6 +26,18 @@ export interface ToolResultArtifactMeta {
   pinned: boolean;
   summary?: string;
   path: string;
+  contentHash?: string;
+  availability: "available" | "evicted";
+}
+
+export class ArtifactIntegrityError extends Error {
+  constructor(
+    readonly artifactId: string,
+    message: string,
+  ) {
+    super(`Artifact ${artifactId} failed integrity validation: ${message}`);
+    this.name = "ArtifactIntegrityError";
+  }
 }
 
 export interface ToolResultArtifactStoreOptions {
@@ -74,6 +88,7 @@ export class ToolResultArtifactStore {
     const createdAt = new Date().toISOString();
     const ttlHours = input.ttlHours ?? this.ttlHours;
     const meta: ToolResultArtifactMeta = {
+      schemaVersion: 2,
       id,
       sessionId,
       safeSessionId,
@@ -85,34 +100,44 @@ export class ToolResultArtifactStore {
       pinned: input.pinned ?? false,
       ...(input.summary !== undefined ? { summary: input.summary } : {}),
       path,
+      contentHash: hashText(input.output),
+      availability: "available",
     };
 
     await mkdir(artifactDir, { recursive: true, mode: 0o700 });
     // mkdir 不会收紧已存在目录的权限；显式 chmod 避免旧目录继续受宽松 umask 影响。
     await chmod(artifactDir, 0o700);
-    await writeFile(path, input.output, { encoding: "utf8", mode: 0o600 });
-    await writeFile(this.metaPath(id, safeSessionId), `${JSON.stringify(meta, null, 2)}\n`, {
-      encoding: "utf8",
-      mode: 0o600,
-    });
-    // writeFile 会保留已存在文件的 mode，因此覆盖时再次收紧。
-    await Promise.all([
-      chmod(path, 0o600),
-      chmod(this.metaPath(id, safeSessionId), 0o600),
-    ]);
+    const metaPath = this.metaPath(id, safeSessionId);
+    // metadata 是 commit marker：先移除旧 marker，再发布并 fsync 正文，最后原子发布 meta。
+    await unlinkCommitMarker(metaPath);
+    await writeArtifactContentAtomic(path, input.output);
+    await writeJsonAtomic(metaPath, meta);
 
     return meta;
   }
 
   async read(metaOrId: ToolResultArtifactMeta | string): Promise<string | undefined> {
-    const id = typeof metaOrId === "string" ? metaOrId : metaOrId.id;
-    const sessionId =
-      typeof metaOrId === "string"
-        ? toSafeSessionId(DEFAULT_SESSION_ID)
-        : (metaOrId.safeSessionId ?? toSafeSessionId(metaOrId.sessionId));
+    const meta =
+      typeof metaOrId === "string" ? await this.readMeta(metaOrId) : normalizeMeta(metaOrId);
+    if (!meta || meta.availability === "evicted") return undefined;
+    const id = meta.id;
+    const sessionId = meta.safeSessionId;
 
     try {
-      return await readFile(this.contentPath(assertSafeId(id), sessionId), "utf8");
+      const contents = await readFile(this.contentPath(assertSafeId(id), sessionId));
+      if (contents.byteLength !== meta.sizeBytes) {
+        throw new ArtifactIntegrityError(
+          id,
+          `expected ${meta.sizeBytes} bytes, found ${contents.byteLength}`,
+        );
+      }
+      if (meta.contentHash) {
+        const actual = createHash("sha256").update(contents).digest("hex");
+        if (actual !== meta.contentHash) {
+          throw new ArtifactIntegrityError(id, `expected ${meta.contentHash}, found ${actual}`);
+        }
+      }
+      return contents.toString("utf8");
     } catch (err) {
       if (isNodeError(err) && err.code === "ENOENT") {
         return undefined;
@@ -133,6 +158,21 @@ export class ToolResultArtifactStore {
       }
       throw err;
     }
+  }
+
+  /** 先持久化 evicted marker 再删正文，崩溃时不会出现一个声称 available 的空引用。 */
+  async markEvicted(id: string, sessionId?: string): Promise<ToolResultArtifactMeta | undefined> {
+    const safeSessionId = toSafeSessionId(sessionId ?? DEFAULT_SESSION_ID);
+    const meta = await this.readMeta(id, sessionId);
+    if (!meta) return undefined;
+    const evicted = {
+      ...meta,
+      schemaVersion: 2,
+      availability: "evicted",
+    } satisfies ToolResultArtifactMeta;
+    await writeJsonAtomic(this.metaPath(assertSafeId(id), safeSessionId), evicted);
+    await unlinkIfExists(this.contentPath(id, safeSessionId));
+    return evicted;
   }
 
   async cleanup(sessionId: string, now?: Date): Promise<CleanupResult>;
@@ -367,6 +407,9 @@ function parseMeta(raw: string, safeSessionId: string): ToolResultArtifactMeta |
   const pinned = parsed.pinned;
   const summary = parsed.summary;
   const path = parsed.path;
+  const schemaVersion = parsed.schemaVersion;
+  const contentHash = parsed.contentHash;
+  const availability = parsed.availability;
 
   if (
     typeof id !== "string" ||
@@ -383,7 +426,19 @@ function parseMeta(raw: string, safeSessionId: string): ToolResultArtifactMeta |
     return undefined;
   }
 
+  if (schemaVersion !== undefined && schemaVersion !== 2) return undefined;
+  if (
+    contentHash !== undefined &&
+    (typeof contentHash !== "string" || !/^[a-f0-9]{64}$/u.test(contentHash))
+  ) {
+    return undefined;
+  }
+  if (availability !== undefined && availability !== "available" && availability !== "evicted") {
+    return undefined;
+  }
+
   return {
+    schemaVersion: 2,
     id,
     sessionId: typeof sessionId === "string" ? sessionId : safeSessionId,
     safeSessionId: typeof parsedSafeSessionId === "string" ? parsedSafeSessionId : safeSessionId,
@@ -395,7 +450,43 @@ function parseMeta(raw: string, safeSessionId: string): ToolResultArtifactMeta |
     pinned,
     ...(typeof summary === "string" ? { summary } : {}),
     path,
+    ...(typeof contentHash === "string" ? { contentHash } : {}),
+    availability:
+      availability === "available" || availability === "evicted" ? availability : "available",
   };
+}
+
+function normalizeMeta(meta: ToolResultArtifactMeta): ToolResultArtifactMeta {
+  return {
+    ...meta,
+    schemaVersion: 2,
+    availability: meta.availability ?? "available",
+  };
+}
+
+async function unlinkCommitMarker(path: string): Promise<void> {
+  try {
+    await unlink(path);
+  } catch (error) {
+    if (!isNodeError(error) || error.code !== "ENOENT") throw error;
+  }
+}
+
+async function writeArtifactContentAtomic(path: string, output: string): Promise<void> {
+  const temporaryPath = `${path}.${process.pid}.${Date.now()}.${randomUUID()}.tmp`;
+  let published = false;
+  const handle = await open(temporaryPath, "wx", 0o600);
+  try {
+    await handle.writeFile(output, "utf8");
+    await handle.sync();
+    await handle.close();
+    await rename(temporaryPath, path);
+    published = true;
+    await chmod(path, 0o600);
+  } finally {
+    await handle.close().catch(() => undefined);
+    if (!published) await unlink(temporaryPath).catch(() => undefined);
+  }
 }
 
 function isExpired(meta: ToolResultArtifactMeta, now: Date): boolean {
