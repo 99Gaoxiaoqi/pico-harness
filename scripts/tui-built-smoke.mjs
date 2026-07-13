@@ -34,7 +34,8 @@ async function main() {
         "false",
       ],
       {
-        name: "xterm-256color",
+        // node-pty 用 name 覆盖子进程 TERM；必须设为 dumb 才能覆盖兼容入口。
+        name: "dumb",
         cols: 100,
         rows: 30,
         cwd: repoRoot,
@@ -57,8 +58,12 @@ async function main() {
     );
 
     const output = await driveTerminal(terminal);
-    if (!stripAnsi(output).includes(EXPECTED)) {
-      throw new Error(`built TUI never rendered ${EXPECTED}\n${tail(stripAnsi(output))}`);
+    const plainOutput = stripAnsi(output);
+    if (!plainOutput.includes(EXPECTED)) {
+      throw new Error(`built TUI never rendered ${EXPECTED}\n${tail(plainOutput)}`);
+    }
+    if (!plainOutput.includes("兼容行模式")) {
+      throw new Error(`built TUI did not enter TERM=dumb line mode\n${tail(plainOutput)}`);
     }
     if (fakeServer.requestCount === 0) {
       throw new Error("built TUI made zero requests to the local fake OpenAI endpoint");
@@ -128,7 +133,7 @@ function driveTerminal(terminal) {
         trustAccepted = true;
         terminal.write("1\r");
       }
-      if (!promptScheduled && /Try .*for commands/iu.test(plain)) {
+      if (!promptScheduled && (/Try .*for commands/iu.test(plain) || plain.includes("pico> "))) {
         promptScheduled = true;
         // Wait until Ink has installed raw-mode input handlers. Writing on the
         // first rendered byte can race with mount and lose the submitted line.

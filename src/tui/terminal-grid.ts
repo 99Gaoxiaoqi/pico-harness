@@ -125,10 +125,10 @@ export async function createTuiTerminalGridSession(
 ): Promise<TuiTerminalGridSession> {
   if (env["CODEX_SHELL"] !== "1") return passthroughSession(stdout);
   const terminal = env.TERM?.trim().toLowerCase();
-  // TERM=dumb/Codex 兼容路径不应为了网格探测短暂进入 alt screen：这些
-  // 宿主正是最可能将全屏控制序列降级为追加输出的环境。仍使用原地 CPR
-  // 获得尺寸，超时则沿用已有保守 fallback。
-  const useAlternateProbe = terminal !== "dumb" && env.CODEX_SHELL !== "1";
+  // TERM=dumb 兼容路径不应为了网格探测短暂进入 alt screen：这些宿主
+  // 会改走不重绘的 line-mode。仍使用原地 CPR 获得尺寸，超时则沿用
+  // 已有保守 fallback。CODEX_SHELL+xterm 仍使用原有 alternate probe。
+  const useAlternateProbe = terminal !== "dumb";
   const frontendGrid = await probeTerminalGrid(stdin, stdout, timeoutMs, useAlternateProbe);
   return createResizeAwareSession(
     stdin,
