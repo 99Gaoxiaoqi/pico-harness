@@ -63,6 +63,13 @@ export function createDelegationCompletionMessage(
     providerData: {
       picoKind: "subagent_completion",
       picoHiddenFromTranscript: true,
+      picoCompletionId: completion.completionId,
+      picoCompletionSeq: completion.completionSeq,
+      picoCompletionOwnerSessionId: completion.ownerSessionId,
+      picoCompletionJobId: completion.jobId,
+      picoCompletionActivityIds: [...completion.activityIds],
+      picoCompletionPolicy: completion.completionPolicy,
+      picoCompletionStatus: completion.status,
     },
   };
 }
@@ -260,8 +267,17 @@ export async function createTuiRuntimeState(
         const pending = jobService
           .pendingCompletions({ ownerSessionId: options.sessionId, limit: 1_000 })
           .find((candidate) => candidate.completionId === completion.completionId);
-        // Durable outbox 是权威源；已 ack 的迟到进程内通知不得再注入。
+        // Durable outbox 是新 completion 的权威源。如果消息已经入会话且
+        // outbox 已 ack，这是崩溃恢复的 resume-only wake，不得重复注入。
         if (!pending) {
+          const alreadyCommitted = options.session
+            .getHistory()
+            .some(
+              (message) =>
+                message.providerData?.["picoKind"] === "subagent_completion" &&
+                message.providerData?.["picoCompletionId"] === completion.completionId,
+            );
+          if (alreadyCommitted) return;
           throw new Error(
             `Delegation completion ${completion.completionId} has no pending durable outbox record`,
           );
@@ -283,6 +299,12 @@ export async function createTuiRuntimeState(
     })) {
       const envelope = delegationEnvelopeFromOutbox(completion, options.sessionId);
       if (envelope) delegationCompletionQueue.enqueue(envelope);
+    }
+    for (const completion of unconsumedDelegationCompletions(
+      options.session.getHistory(),
+      options.sessionId,
+    )) {
+      delegationCompletionQueue.enqueue(completion);
     }
   }
   return new DefaultTuiRuntimeState({
@@ -357,6 +379,77 @@ function delegationEnvelopeFromOutbox(
     status,
     outputSummary,
     ...(typeof payload["error"] === "string" ? { error: payload["error"] } : {}),
+  };
+}
+
+/**
+ * 恢复“Session 已持久化 + outbox 已 ack，但 Agent 还没真正续跑”的窄崩溃窗口。
+ * 只查看最近一条 assistant 响应之后的隐藏 completion；一旦看到新的显式
+ * 用户输入就停止，避免越过独立的用户轮次自动续跑。
+ */
+function unconsumedDelegationCompletions(
+  history: readonly Message[],
+  ownerSessionId: string,
+): readonly DelegationCompletionEnvelope[] {
+  const recovered: DelegationCompletionEnvelope[] = [];
+  for (let index = history.length - 1; index >= 0; index--) {
+    const message = history[index]!;
+    if (message.role === "assistant") break;
+    if (
+      message.role === "user" &&
+      message.toolCallId === undefined &&
+      message.providerData?.["picoHiddenFromTranscript"] !== true
+    ) {
+      break;
+    }
+    if (message.providerData?.["picoKind"] !== "subagent_completion") continue;
+    const completion = delegationEnvelopeFromCommittedMessage(message, ownerSessionId);
+    if (completion) recovered.unshift(completion);
+  }
+  return recovered;
+}
+
+function delegationEnvelopeFromCommittedMessage(
+  message: Message,
+  ownerSessionId: string,
+): DelegationCompletionEnvelope | undefined {
+  const data = message.providerData;
+  if (!data) return undefined;
+  const completionId = data["picoCompletionId"];
+  const completionSeq = data["picoCompletionSeq"];
+  const payloadOwner = data["picoCompletionOwnerSessionId"];
+  const jobId = data["picoCompletionJobId"];
+  const activityIds = data["picoCompletionActivityIds"];
+  const completionPolicy = data["picoCompletionPolicy"];
+  const status = data["picoCompletionStatus"];
+  if (
+    typeof completionId !== "string" ||
+    typeof completionSeq !== "number" ||
+    !Number.isSafeInteger(completionSeq) ||
+    payloadOwner !== ownerSessionId ||
+    typeof jobId !== "string" ||
+    !Array.isArray(activityIds) ||
+    !activityIds.every((value) => typeof value === "string") ||
+    (completionPolicy !== "required" &&
+      completionPolicy !== "optional" &&
+      completionPolicy !== "detached") ||
+    (status !== "completed" &&
+      status !== "partial" &&
+      status !== "error" &&
+      status !== "timed_out" &&
+      status !== "cancelled")
+  ) {
+    return undefined;
+  }
+  return {
+    completionId,
+    completionSeq,
+    ownerSessionId,
+    jobId,
+    activityIds,
+    completionPolicy,
+    status,
+    outputSummary: message.content,
   };
 }
 

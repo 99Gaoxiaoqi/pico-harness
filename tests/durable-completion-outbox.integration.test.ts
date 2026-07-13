@@ -83,6 +83,72 @@ describe("durable completion outbox integration", () => {
       await taskRuntime.close();
     }
   });
+
+  it("resumes an acked completion after restart until an assistant response exists", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pico-completion-resume-only-"));
+    cleanups.push(root);
+    const repo = join(root, "repo");
+    await mkdir(repo);
+    await git(["init", "-b", "main"], repo);
+    await git(["config", "user.name", "Pico Integration"], repo);
+    await git(["config", "user.email", "pico@example.test"], repo);
+    await writeFile(join(repo, ".gitignore"), ".claw/\n.worktrees/\n", "utf8");
+    await writeFile(join(repo, "README.md"), "resume-only completion\n", "utf8");
+    await git(["add", "."], repo);
+    await git(["commit", "-m", "initial"], repo);
+
+    const firstJobs = await JobService.create({ workDir: repo, ownerId: "first-host" });
+    const envelope = completionEnvelope("job-resume-only", "owner-session", 21);
+    finishOptional(firstJobs.service, envelope);
+    const firstSession = await new SessionManager().getOrCreate("owner-session", repo, {
+      persistence: true,
+    });
+    await firstSession.commitMessageOnce(
+      envelope.completionId,
+      createDelegationCompletionMessage(envelope),
+    );
+    firstJobs.service.markCompletionDelivered(envelope.completionId);
+    await firstSession.close();
+    firstJobs.service.close();
+
+    const taskRuntime = await TaskHostRuntime.create({ workDir: repo });
+    const reopened = await new SessionManager().getOrCreate("owner-session", repo, {
+      persistence: true,
+    });
+    const tuiRuntime = await createTuiRuntimeState({
+      workDir: repo,
+      sessionId: reopened.id,
+      session: reopened,
+      taskHostRuntime: taskRuntime,
+    });
+    try {
+      const pending = tuiRuntime.delegationCompletionQueue.pendingCompletionSeqs();
+      expect(pending).toEqual([envelope.completionSeq]);
+      await tuiRuntime.delegationCompletionQueue.deliverPendingCompletionSeqs(pending);
+      expect(
+        reopened
+          .getHistory()
+          .filter((message) => message.providerData?.picoKind === "subagent_completion"),
+      ).toHaveLength(1);
+    } finally {
+      await tuiRuntime.dispose();
+    }
+
+    await reopened.commitMessages({ role: "assistant", content: "completion consumed" });
+    const consumedRuntime = await createTuiRuntimeState({
+      workDir: repo,
+      sessionId: reopened.id,
+      session: reopened,
+      taskHostRuntime: taskRuntime,
+    });
+    try {
+      expect(consumedRuntime.delegationCompletionQueue.hasPending).toBe(false);
+    } finally {
+      await consumedRuntime.dispose();
+      await reopened.close();
+      await taskRuntime.close();
+    }
+  });
 });
 
 function completionEnvelope(
