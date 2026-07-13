@@ -21,6 +21,11 @@ export function fileHistoryMutationLeaseDirectory(baseDir: string): string {
   return join(resolve(baseDir), ".leases", FILE_HISTORY_MUTATION_LEASE_NAME);
 }
 
+/** 供底层 CAS writer 复用上层已获取的 mutation lease，避免嵌套取锁。 */
+export function isFileHistoryMutationLeaseHeld(baseDir: string): boolean {
+  return activeMutationLeases.getStore()?.has(fileHistoryMutationLeaseDirectory(baseDir)) ?? false;
+}
+
 /**
  * 把“创建 CAS 内容 + 发布引用”组成一个互斥的耐久临界区。
  * 同一进程内的独立操作先按 baseDir 排队，再竞争跨进程 OwnerLease；
