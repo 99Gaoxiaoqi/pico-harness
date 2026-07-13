@@ -145,6 +145,41 @@ describe("Session durable commit integration", () => {
     await store.close();
   });
 
+  it("rejects future metadata and unknown canonical event variants", async () => {
+    const futurePath = join(workDir, "future-schema.jsonl");
+    await writeFile(
+      futurePath,
+      `${JSON.stringify({ type: "meta", schemaVersion: 999 })}\n`,
+      "utf8",
+    );
+    await expect(new SessionStore(futurePath).loadStrict()).rejects.toBeInstanceOf(
+      SessionJournalIntegrityError,
+    );
+
+    const unknownEventPath = join(workDir, "unknown-event.jsonl");
+    await writeFile(
+      unknownEventPath,
+      [
+        JSON.stringify({ type: "meta", schemaVersion: 1 }),
+        JSON.stringify({
+          type: "event",
+          recordVersion: 1,
+          eventId: "future-event",
+          seq: 0,
+          epoch: 0,
+          at: new Date().toISOString(),
+          kind: "future.event",
+          data: {},
+        }),
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    await expect(new SessionStore(unknownEventPath).loadStrict()).rejects.toBeInstanceOf(
+      SessionJournalIntegrityError,
+    );
+  });
+
   it("arbitrates the same journal across real processes", async () => {
     const filePath = join(workDir, "cross-process.jsonl");
     const moduleUrl = pathToFileURL(join(process.cwd(), "src", "engine", "session-store.ts")).href;

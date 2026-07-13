@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/p
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import Database from "better-sqlite3";
 import { ToolResultArtifactStore } from "../src/context/artifact-store.js";
 import { createSessionIdentity } from "../src/engine/session-identity.js";
 import { SessionStore } from "../src/engine/session-store.js";
@@ -144,6 +145,39 @@ describe("storage governance integration", () => {
         }),
       ],
     });
+  });
+
+  it("fails closed for future Session and runtime schemas", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pico-storage-doctor-future-schema-"));
+    cleanup.push(root);
+    const workDir = join(root, "workspace");
+    const sessionPath = join(workDir, ".claw", "sessions", "future.jsonl");
+    await mkdir(dirname(sessionPath), { recursive: true });
+    await writeFile(
+      sessionPath,
+      `${JSON.stringify({ type: "meta", schemaVersion: 999 })}\n`,
+      "utf8",
+    );
+
+    const runtime = new RuntimeStore({ workDir });
+    runtime.close();
+    const database = new Database(join(workDir, ".claw", "runtime.sqlite"));
+    database
+      .prepare("INSERT INTO schema_migrations(version, name, applied_at) VALUES (?, ?, ?)")
+      .run(999, "future_schema", Date.now());
+    database.close();
+
+    const report = await new StorageDoctor({
+      workDir,
+      fileHistoryDir: join(root, "file-history"),
+    }).scan();
+    expect(report.healthy).toBe(false);
+    expect(report.findings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "session_replay_failed", severity: "critical" }),
+        expect.objectContaining({ code: "runtime_schema_unsupported", severity: "critical" }),
+      ]),
+    );
   });
 
   it("keeps reachable blobs and only deletes old unreachable blobs after explicit apply", async () => {
