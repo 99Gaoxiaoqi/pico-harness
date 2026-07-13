@@ -1,6 +1,6 @@
 import { hostname } from "node:os";
 import { mkdir, readFile, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { writeJsonAtomic } from "./atomic-json.js";
 
@@ -83,6 +83,7 @@ export class OwnerLease {
   }
 
   private async acquireDirectory(): Promise<void> {
+    await mkdir(dirname(this.options.leaseDirectory), { recursive: true, mode: 0o700 });
     try {
       await mkdir(this.options.leaseDirectory);
       return;
