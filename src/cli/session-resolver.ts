@@ -5,7 +5,7 @@ import { SessionStore } from "../engine/session-store.js";
 import { replaySessionRecords } from "../engine/session-reducer.js";
 import { isMessageHiddenFromTranscript } from "../schema/message.js";
 import { rememberResolvedCliSession } from "../input/session-settings.js";
-import type { SessionCatalog } from "../storage/session-catalog.js";
+import type { SessionCatalog, SessionCatalogEntry } from "../storage/session-catalog.js";
 import {
   getDefaultSessionCatalogProjector,
   SessionCatalogProjector,
@@ -56,6 +56,7 @@ interface SessionFileInfo {
   ctimeMs: number;
   birthtimeMs: number;
   mtimeMs: number;
+  sizeBytes: number;
 }
 
 export async function resolveCliSession(
@@ -124,11 +125,15 @@ export async function listCliSessionSummaries(
   const files = await listSessionFiles(workDir);
   const summaries: CliSessionSummary[] = [];
   for (const file of files) {
+    const catalog = catalogBySession.get(file.sessionId);
+    if (catalog && catalogMatchesSessionFile(catalog, file)) {
+      summaries.push(summaryFromCatalog(workDir, file, catalog));
+      continue;
+    }
     const records = await new SessionStore(file.path).load();
     const replay = replaySessionRecords(records);
     const messages = replay.history;
     const metadata = recoverSessionMetadata(replay.runtime.settings);
-    const catalog = catalogBySession.get(file.sessionId);
     const visibleUserMessages = messages.filter(
       (message) =>
         message.role === "user" &&
@@ -214,11 +219,44 @@ async function listSessionFiles(workDir: string): Promise<SessionFileInfo[]> {
       ctimeMs: info.ctimeMs,
       birthtimeMs: info.birthtimeMs,
       mtimeMs: info.mtimeMs,
+      sizeBytes: info.size,
     });
   }
 
   candidates.sort((a, b) => b.mtimeMs - a.mtimeMs || b.sessionId.localeCompare(a.sessionId));
   return candidates;
+}
+
+function catalogMatchesSessionFile(entry: SessionCatalogEntry, file: SessionFileInfo): boolean {
+  return (
+    entry.health === "healthy" &&
+    entry.sessionId === file.sessionId &&
+    entry.logPath === file.path &&
+    entry.sourceMtimeMs === file.mtimeMs &&
+    entry.sourceSizeBytes === file.sizeBytes &&
+    (entry.head ? entry.head.logId === entry.logId : entry.messageCount === 0)
+  );
+}
+
+function summaryFromCatalog(
+  workDir: string,
+  file: SessionFileInfo,
+  entry: SessionCatalogEntry,
+): CliSessionSummary {
+  return {
+    id: file.sessionId,
+    cwd: workDir,
+    createdAt: new Date(file.birthtimeMs > 0 ? file.birthtimeMs : file.ctimeMs),
+    updatedAt: new Date(file.mtimeMs),
+    messageCount: entry.messageCount,
+    ...(entry.title ? { title: entry.title } : {}),
+    ...(entry.firstUserMessage ? { firstMessage: entry.firstUserMessage } : {}),
+    ...(entry.lastUserMessage ? { lastMessage: entry.lastUserMessage } : {}),
+    ...(entry.lineage.parentSessionId ? { forkFrom: entry.lineage.parentSessionId } : {}),
+    logId: entry.logId,
+    ...(entry.lineage.parentLogId ? { parentLogId: entry.lineage.parentLogId } : {}),
+    ...(entry.lineage.forkEventId ? { forkEventId: entry.lineage.forkEventId } : {}),
+  };
 }
 
 function compactSessionText(value: string | undefined): string | undefined {
