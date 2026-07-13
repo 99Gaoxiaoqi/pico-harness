@@ -197,6 +197,7 @@ export class DelegationManager {
       data: {
         delegationId: id,
         completionPolicy,
+        activityIds: [...(taskInput.activityIds ?? [])],
         ...(taskInput.ownerSessionId ? { ownerSessionId: taskInput.ownerSessionId } : {}),
         ...(taskInput.childSessionId ? { childSessionId: taskInput.childSessionId } : {}),
       },

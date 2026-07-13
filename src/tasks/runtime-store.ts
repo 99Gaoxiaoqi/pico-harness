@@ -74,6 +74,8 @@ export interface StartJobInput {
 export interface FinishJobInput {
   jobId: string;
   attemptId: string;
+  /** 调用 terminal 的宿主身份，必须与 attempt 及活跃 lease 的 owner 一致。 */
+  ownerId: string;
   status: TerminalJobStatus;
   expectedJobVersion: number;
   expectedAttemptVersion: number;
@@ -430,6 +432,14 @@ export class RuntimeStore {
       const currentAttempt = this.requireAttempt(input.attemptId);
       const existingCompletion = this.getCompletion(input.completionId);
       if (
+        currentAttempt.jobId !== input.jobId ||
+        currentAttempt.ownerId !== input.ownerId ||
+        currentJob.leaseEpoch !== input.leaseEpoch ||
+        currentAttempt.leaseEpoch !== input.leaseEpoch
+      ) {
+        throw new RuntimeConflictError(`任务 ${input.jobId} 的 ownerId/leaseEpoch 与调用者不一致`);
+      }
+      if (
         isTerminalJobStatus(currentJob.status) &&
         currentJob.status === input.status &&
         currentAttempt.status === input.status &&
@@ -460,14 +470,15 @@ export class RuntimeStore {
       ) {
         throw new RuntimeConflictError(`任务 ${input.jobId} 的 version/leaseEpoch CAS 失败`);
       }
-      this.assertLease(`job:${input.jobId}`, currentAttempt.ownerId, input.leaseEpoch);
+      this.assertLease(`job:${input.jobId}`, input.ownerId, input.leaseEpoch);
       const now = this.now();
       const attemptUpdate = this.db
         .prepare(
           `UPDATE job_attempts
            SET status = ?, output_offset = COALESCE(?, output_offset), error = ?,
                result_json = ?, finished_at = ?, updated_at = ?, version = version + 1
-           WHERE attempt_id = ? AND status = 'running' AND version = ? AND lease_epoch = ?`,
+           WHERE attempt_id = ? AND status = 'running' AND version = ?
+             AND owner_id = ? AND lease_epoch = ?`,
         )
         .run(
           input.status,
@@ -478,6 +489,7 @@ export class RuntimeStore {
           now,
           input.attemptId,
           input.expectedAttemptVersion,
+          input.ownerId,
           input.leaseEpoch,
         );
       const jobUpdate = this.db
@@ -620,7 +632,12 @@ export class RuntimeStore {
           attemptId: attempt.attempt_id,
           policy: job.completionPolicy,
           status: "interrupted",
-          payload: { reason, executionClass: row.execution_class },
+          payload: interruptedCompletionPayload(
+            job,
+            `completion:${attempt.attempt_id}`,
+            reason,
+            now,
+          ),
           createdAt: now,
         });
         interrupted.push(job);
@@ -1353,6 +1370,34 @@ function mapCompletion(row: CompletionRow): CompletionOutboxRecord {
     createdAt: row.created_at,
     deliveredAt: nullToUndefined(row.delivered_at),
   });
+}
+
+function interruptedCompletionPayload(
+  job: JobRecord,
+  completionId: string,
+  reason: string,
+  completionSeq: number,
+): Record<string, unknown> {
+  const base = { reason, executionClass: job.executionClass };
+  if (job.type !== "local_agent" || !job.ownerSessionId) return base;
+  const activityIds = Array.isArray(job.data?.["activityIds"])
+    ? job.data["activityIds"].filter((value): value is string => typeof value === "string")
+    : [];
+  const error = `子代理运行时 lease 过期，已中断：${reason}`;
+  return {
+    ...base,
+    delegationCompletion: {
+      completionId,
+      jobId: job.jobId,
+      ownerSessionId: job.ownerSessionId,
+      completionSeq,
+      activityIds,
+      completionPolicy: job.completionPolicy,
+      status: "error",
+      outputSummary: error,
+      error: reason,
+    },
+  };
 }
 
 function mapMerge(row: MergeRow): MergeRequestRecord {
