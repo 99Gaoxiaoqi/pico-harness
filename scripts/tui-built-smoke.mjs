@@ -40,7 +40,10 @@ async function main() {
         cwd: repoRoot,
         env: {
           ...process.env,
-          TERM: "xterm-256color",
+          // 覆盖 Codex 内嵌终端的保守渲染分支：终端仍由 node-pty 提供
+          // 交互输入，但应用不可假定 alternate screen/增量差分可用。
+          TERM: "dumb",
+          CODEX_SHELL: "1",
           CI: "false",
           LOG_LEVEL: "error",
           PICO_PERSISTENCE: "0",

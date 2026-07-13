@@ -51,6 +51,7 @@ export async function probeTerminalGrid(
   stdin: NodeJS.ReadStream,
   stdout: NodeJS.WriteStream,
   timeoutMs = DEFAULT_PROBE_TIMEOUT_MS,
+  useAlternateScreen = true,
 ): Promise<TerminalGrid | null> {
   if (!stdin.isTTY || !stdout.isTTY || typeof stdin.setRawMode !== "function") return null;
 
@@ -100,8 +101,8 @@ export async function probeTerminalGrid(
     const timer = setTimeout(() => finish(null), Math.max(1, timeoutMs));
     try {
       stdin.setRawMode(true);
-      enteredAlternateScreen = true;
-      stdout.write(CPR_QUERY);
+      enteredAlternateScreen = useAlternateScreen;
+      stdout.write(useAlternateScreen ? CPR_QUERY : LIVE_CPR_QUERY);
     } catch {
       finish(null);
     }
@@ -123,7 +124,12 @@ export async function createTuiTerminalGridSession(
   timeoutMs = DEFAULT_PROBE_TIMEOUT_MS,
 ): Promise<TuiTerminalGridSession> {
   if (env["CODEX_SHELL"] !== "1") return passthroughSession(stdout);
-  const frontendGrid = await probeTerminalGrid(stdin, stdout, timeoutMs);
+  const terminal = env.TERM?.trim().toLowerCase();
+  // TERM=dumb/Codex 兼容路径不应为了网格探测短暂进入 alt screen：这些
+  // 宿主正是最可能将全屏控制序列降级为追加输出的环境。仍使用原地 CPR
+  // 获得尺寸，超时则沿用已有保守 fallback。
+  const useAlternateProbe = terminal !== "dumb" && env.CODEX_SHELL !== "1";
+  const frontendGrid = await probeTerminalGrid(stdin, stdout, timeoutMs, useAlternateProbe);
   return createResizeAwareSession(
     stdin,
     stdout,

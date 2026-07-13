@@ -158,6 +158,27 @@ export const TUI_RENDER_OPTIONS = {
   exitOnCtrlC: false,
 } as const satisfies RenderOptions;
 
+/**
+ * Ink 的增量帧依赖终端准确执行光标上移、擦行和 synchronized-output。
+ * Codex 的嵌入式命令面会以 TERM=dumb 标识自身；继续按 xterm 能力做
+ * 差分渲染会把每一帧当作普通日志追加。此时保留交互输入，但使用 Ink 的
+ * 全帧路径，并避免切入可能未实现的 alternate screen。
+ *
+ * 不在这里强制 interactive:true：Ink 应继续依据真实 stdin/stdout 的 TTY
+ * 状态决定是否可交互，避免把管道或 CI 强行当作终端。
+ */
+export function resolveTuiRenderOptions(env: NodeJS.ProcessEnv = process.env): RenderOptions {
+  const terminal = env.TERM?.trim().toLowerCase();
+  const needsConservativeFrames = terminal === "dumb" || env.CODEX_SHELL === "1";
+  if (!needsConservativeFrames) return TUI_RENDER_OPTIONS;
+
+  return {
+    ...TUI_RENDER_OPTIONS,
+    alternateScreen: false,
+    incrementalRendering: false,
+  };
+}
+
 export type TuiInputProcessResult = InputProcessResult;
 
 export interface HandleTuiInputSubmissionDeps {
@@ -1508,13 +1529,16 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     renderStdout.write("\x1b[2J\x1b[H");
   }
 
-  // alternateScreen 隔离 shell scrollback；incrementalRendering 只更新变化行，
-  // 避免发送、spinner 和流式 delta 每帧擦除整个视口。根布局保留右侧 1 列，
-  // 避免中文、Emoji 和长行在右边界立即换行时让差分行计数失配。
+  // 普通 xterm 使用 alternateScreen + incrementalRendering 避免流式帧闪烁；
+  // Codex/TERM=dumb 则降为完整帧，避免宿主把差分控制序列当作追加输出。
+  // 根布局保留右侧 1 列，避免中文、Emoji 和长行在右边界立即换行时失配。
   // patchConsole 让剩余 console 输出先擦除当前帧,输出后再恢复,
   // 不绕过 Ink 的光标记账。Pino fd2 已在预加载阶段独立静默。
   try {
-    const instance = render(<ReplApp />, { ...TUI_RENDER_OPTIONS, stdout: renderStdout });
+    const instance = render(<ReplApp />, {
+      ...resolveTuiRenderOptions(),
+      stdout: renderStdout,
+    });
     instanceRef.current = instance;
     await instance.waitUntilExit();
   } finally {

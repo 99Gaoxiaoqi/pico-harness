@@ -11,7 +11,7 @@ import { Session } from "../../src/engine/session.js";
 import type { LLMProvider } from "../../src/provider/interface.js";
 import type { Message, ToolDefinition } from "../../src/schema/message.js";
 import { App } from "../../src/tui/app.js";
-import { TUI_RENDER_OPTIONS } from "../../src/tui/repl.js";
+import { resolveTuiRenderOptions, TUI_RENDER_OPTIONS } from "../../src/tui/repl.js";
 import { createTuiTerminalGridSession } from "../../src/tui/terminal-grid.js";
 import type { TuiEntry } from "../../src/tui/tui-reporter.js";
 import { BashTool, ReadFileTool, ToolRegistry } from "../../src/tools/registry-impl.js";
@@ -373,6 +373,75 @@ describe("阶段 10：滚动窗口与大型工具输出集成验收", () => {
       await harness.cleanup();
     }
   });
+
+  it("Codex/TERM=dumb 以全帧路径处理逐字输入和连续回退，不残留旧候选帧", async () => {
+    const regularOptions = resolveTuiRenderOptions({ TERM: "xterm-256color" });
+    const compatibilityOptions = resolveTuiRenderOptions({ CODEX_SHELL: "1", TERM: "dumb" });
+    expect(regularOptions).toMatchObject({ alternateScreen: true, incrementalRendering: true });
+    expect(compatibilityOptions).toMatchObject({
+      alternateScreen: false,
+      incrementalRendering: false,
+    });
+    expect("interactive" in compatibilityOptions).toBe(false);
+
+    const terminal = new ImmediateWrapTerminal(96, 24);
+    const slashCommandSuggestions = (query: string) => {
+      if (query.length === 0) {
+        return [
+          {
+            value: "clear",
+            description: "CLEAR_CURRENT_SUGGESTION_MARKER",
+            source: "builtin",
+          },
+        ];
+      }
+      if ("rename".startsWith(query)) {
+        return [
+          {
+            value: "rename",
+            description: "RENAME_STALE_SUGGESTION_MARKER",
+            source: "builtin",
+          },
+        ];
+      }
+      return [];
+    };
+    const app = (
+      <App
+        model="compat-model"
+        provider="openai"
+        workDir="/workspace/compat"
+        sessionMode="new"
+        permissionMode="yolo"
+        entries={[]}
+        running={false}
+        slashCommandSuggestions={slashCommandSuggestions}
+        onSubmit={() => undefined}
+      />
+    );
+    const harness = await createProductionFrameHarness(
+      app,
+      terminal,
+      { columns: 96, rows: 24 },
+      { env: { CODEX_SHELL: "1", TERM: "dumb" }, renderOptions: compatibilityOptions },
+    );
+
+    try {
+      for (const character of "/rename") await harness.write(character);
+      expect(terminal.visibleText()).toContain("RENAME_STALE_SUGGESTION_MARKER");
+
+      for (let index = 0; index < "rename".length; index++) await harness.write("\u007f");
+
+      const visible = terminal.visibleText();
+      expect(visible).toContain("❯ /▋");
+      expect(visible).toContain("CLEAR_CURRENT_SUGGESTION_MARKER");
+      expect(visible).not.toContain("RENAME_STALE_SUGGESTION_MARKER");
+      expect(terminal.scrollbackText()).not.toContain("RENAME_STALE_SUGGESTION_MARKER");
+      expect(harness.rawOutput()).not.toContain("\u001b[?1049h");
+    } finally {
+      await harness.cleanup();
+    }
+  });
 });
 
 function requireObservation(messages: Message[], toolCallId: string): string {
@@ -458,10 +527,16 @@ async function createProductionFrameHarness(
   node: React.ReactNode,
   terminal: ImmediateWrapTerminal,
   reportedDimensions: { columns: number; rows: number },
+  options: {
+    env?: NodeJS.ProcessEnv;
+    renderOptions?: ReturnType<typeof resolveTuiRenderOptions>;
+  } = {},
 ): Promise<{
   wait: (milliseconds: number) => Promise<void>;
+  write: (input: string) => Promise<void>;
   resize: (columns: number, rows: number) => Promise<void>;
   rerender: (node: React.ReactNode) => Promise<void>;
+  rawOutput: () => string;
   rawText: () => string;
   renderGrid: () => { columns: number; rows: number };
   probeQueries: () => number;
@@ -505,16 +580,17 @@ async function createProductionFrameHarness(
     }
   });
 
+  const environment = options.env ?? { CODEX_SHELL: "1", TERM: "xterm-256color" };
   const terminalGrid = await createTuiTerminalGridSession(
     stdin as unknown as NodeJS.ReadStream,
     stdout as unknown as NodeJS.WriteStream,
-    { CODEX_SHELL: "1" },
+    environment,
     50,
   );
   const renderStdout = terminalGrid.stdout;
 
   const instance: Instance = render(node, {
-    ...TUI_RENDER_OPTIONS,
+    ...(options.renderOptions ?? TUI_RENDER_OPTIONS),
     // Vitest replaces global console with a shim that has no Console constructor.
     // Production keeps patchConsole enabled; this grid harness has no console output.
     patchConsole: false,
@@ -532,6 +608,10 @@ async function createProductionFrameHarness(
 
   return {
     wait,
+    async write(input: string): Promise<void> {
+      stdin.write(input);
+      await wait(50);
+    },
     async resize(columns: number, rows: number): Promise<void> {
       Object.assign(stdout, { columns, rows });
       stdout.emit("resize");
@@ -541,6 +621,7 @@ async function createProductionFrameHarness(
       instance.rerender(nextNode);
       await wait(50);
     },
+    rawOutput: () => rawOutput,
     rawText: () => stripAnsi(rawOutput),
     renderGrid: () => ({ columns: renderStdout.columns, rows: renderStdout.rows }),
     probeQueries: () => probeQueries,
