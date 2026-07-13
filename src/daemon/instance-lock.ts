@@ -4,12 +4,14 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { connect } from "node:net";
 import {
+  createRuntimeAuthRequest,
   createRuntimeRequest,
   encodeRuntimeFrame,
   isJsonObject,
   RuntimeFrameDecoder,
 } from "./protocol.js";
 import type { LocalDaemonEndpoint } from "./endpoint.js";
+import { createLocalIpcAuthTokenStore } from "./ipc-auth.js";
 
 const LOCK_MODE = 0o700;
 const OWNER_MODE = 0o600;
@@ -120,6 +122,21 @@ export async function pingLocalRuntimeDaemon(
   endpoint: LocalDaemonEndpoint,
   timeoutMs = 500,
 ): Promise<boolean> {
+  try {
+    const token = await createLocalIpcAuthTokenStore(endpoint).read();
+    if (await probeRuntimeDaemon(endpoint, timeoutMs, token)) return true;
+  } catch {
+    // An unavailable token may indicate a pre-authentication daemon. Probe it below only for
+    // singleton migration; current daemons never service an unauthenticated ping.
+  }
+  return await probeRuntimeDaemon(endpoint, timeoutMs);
+}
+
+async function probeRuntimeDaemon(
+  endpoint: LocalDaemonEndpoint,
+  timeoutMs: number,
+  authToken?: string,
+): Promise<boolean> {
   return await new Promise<boolean>((resolve) => {
     const socket = connect(endpoint.address);
     const request = createRuntimeRequest("runtime.ping", {});
@@ -133,11 +150,18 @@ export async function pingLocalRuntimeDaemon(
       resolve(result);
     };
     const timeout = setTimeout(() => finish(false), timeoutMs);
-    socket.once("connect", () => socket.write(encodeRuntimeFrame(request)));
+    socket.once("connect", () => {
+      socket.write(encodeRuntimeFrame(authToken ? createRuntimeAuthRequest(authToken) : request));
+    });
     socket.once("error", () => finish(false));
     socket.on("data", (chunk: Buffer) => {
       try {
         for (const message of decoder.push(chunk)) {
+          if (message.kind === "auth_result") {
+            if (!message.ok) finish(false);
+            else socket.write(encodeRuntimeFrame(request));
+            continue;
+          }
           if (message.kind !== "response" || message.requestId !== request.requestId) continue;
           finish(message.ok && isJsonObject(message.result) && message.result.pong === true);
         }

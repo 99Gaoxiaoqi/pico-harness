@@ -2,6 +2,7 @@ export * from "./client.js";
 export * from "./cron-workspace-runtime.js";
 export * from "./endpoint.js";
 export * from "./instance-lock.js";
+export * from "./ipc-auth.js";
 export * from "./protocol.js";
 export * from "./runtime-host.js";
 export * from "./server.js";

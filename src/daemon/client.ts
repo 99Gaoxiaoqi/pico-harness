@@ -1,5 +1,6 @@
 import { connect, type Socket } from "node:net";
 import {
+  createRuntimeAuthRequest,
   createRuntimeRequest,
   encodeRuntimeFrame,
   type JsonValue,
@@ -10,6 +11,11 @@ import {
   isJsonObject,
 } from "./protocol.js";
 import type { LocalDaemonEndpoint } from "./endpoint.js";
+import { createLocalIpcAuthTokenStore, type LocalIpcAuthTokenStore } from "./ipc-auth.js";
+
+export interface LocalRuntimeClientOptions {
+  authTokenStore?: LocalIpcAuthTokenStore;
+}
 
 export class LocalRuntimeClient {
   private socket?: Socket;
@@ -19,11 +25,30 @@ export class LocalRuntimeClient {
   >();
   private readonly listeners = new Set<(event: RuntimeEvent) => void>();
   private readonly decoder = new RuntimeFrameDecoder();
+  private readonly authTokenStore: LocalIpcAuthTokenStore;
+  private connecting?: Promise<void>;
+  private authentication?: { resolve: () => void; reject: (error: Error) => void };
 
-  constructor(private readonly endpoint: LocalDaemonEndpoint) {}
+  constructor(
+    private readonly endpoint: LocalDaemonEndpoint,
+    options: LocalRuntimeClientOptions = {},
+  ) {
+    this.authTokenStore = options.authTokenStore ?? createLocalIpcAuthTokenStore(endpoint);
+  }
 
   async connect(): Promise<void> {
     if (this.socket && !this.socket.destroyed) return;
+    if (this.connecting) return await this.connecting;
+    this.connecting = this.connectAuthenticated();
+    try {
+      await this.connecting;
+    } finally {
+      this.connecting = undefined;
+    }
+  }
+
+  private async connectAuthenticated(): Promise<void> {
+    const token = await this.authTokenStore.read();
     const socket = await new Promise<Socket>((resolve, reject) => {
       const candidate = connect(this.endpoint.address);
       candidate.once("connect", () => {
@@ -35,8 +60,16 @@ export class LocalRuntimeClient {
     });
     this.socket = socket;
     socket.on("data", (chunk: Buffer) => this.handleData(chunk));
-    socket.on("error", (error) => this.rejectPending(error));
-    socket.on("close", () => this.rejectPending(new Error("本机 Runtime daemon 连接已关闭")));
+    socket.on("error", (error) => this.rejectAll(error));
+    socket.on("close", () => this.rejectAll(new Error("本机 Runtime daemon 连接已关闭")));
+    await new Promise<void>((resolve, reject) => {
+      this.authentication = { resolve, reject };
+      socket.write(encodeRuntimeFrame(createRuntimeAuthRequest(token)));
+    }).catch((error: unknown) => {
+      socket.destroy();
+      this.socket = undefined;
+      throw error;
+    });
   }
 
   async request(method: RuntimeMethod, params: JsonValue): Promise<JsonValue> {
@@ -74,12 +107,18 @@ export class LocalRuntimeClient {
     this.socket?.end();
     this.socket = undefined;
     this.listeners.clear();
-    this.rejectPending(new Error("本机 Runtime client 已关闭"));
+    this.rejectAll(new Error("本机 Runtime client 已关闭"));
   }
 
   private handleData(chunk: Buffer): void {
     for (const message of this.decoder.push(chunk)) {
-      if (message.kind === "event") {
+      if (message.kind === "auth_result") {
+        const authentication = this.authentication;
+        this.authentication = undefined;
+        if (!authentication) continue;
+        if (message.ok) authentication.resolve();
+        else authentication.reject(new Error("本机 Runtime IPC 认证失败"));
+      } else if (message.kind === "event") {
         for (const listener of this.listeners) listener(message.event);
       } else if (message.kind === "response") {
         const pending = this.pending.get(message.requestId);
@@ -91,7 +130,9 @@ export class LocalRuntimeClient {
     }
   }
 
-  private rejectPending(error: Error): void {
+  private rejectAll(error: Error): void {
+    this.authentication?.reject(error);
+    this.authentication = undefined;
     for (const pending of this.pending.values()) pending.reject(error);
     this.pending.clear();
   }

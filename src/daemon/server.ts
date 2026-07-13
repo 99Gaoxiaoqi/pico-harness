@@ -1,5 +1,7 @@
+import { timingSafeEqual } from "node:crypto";
 import { createServer, type Server, type Socket } from "node:net";
 import {
+  createRuntimeAuthResult,
   createRuntimeError,
   encodeRuntimeFrame,
   type RuntimeEvent,
@@ -17,11 +19,13 @@ import {
   secureLocalDaemonEndpoint,
   type LocalDaemonEndpoint,
 } from "./endpoint.js";
+import { createLocalIpcAuthTokenStore, type LocalIpcAuthTokenStore } from "./ipc-auth.js";
 import type { LocalRuntimeService, RuntimeEventCursor } from "./service.js";
 
 export interface LocalRuntimeDaemonOptions {
   endpoint: LocalDaemonEndpoint;
   service: LocalRuntimeService;
+  authTokenStore?: LocalIpcAuthTokenStore;
 }
 
 /** Versioned, current-user local IPC daemon. It intentionally exposes no network transport. */
@@ -30,8 +34,11 @@ export class LocalRuntimeDaemon {
   private readonly sockets = new Set<Socket>();
   private listening = false;
   private ownsEndpoint = false;
+  private authToken?: string;
+  private readonly authTokenStore: LocalIpcAuthTokenStore;
 
   constructor(private readonly options: LocalRuntimeDaemonOptions) {
+    this.authTokenStore = options.authTokenStore ?? createLocalIpcAuthTokenStore(options.endpoint);
     this.server = createServer((socket) => this.handleConnection(socket));
     this.server.on("error", () => undefined);
   }
@@ -39,6 +46,7 @@ export class LocalRuntimeDaemon {
   async start(): Promise<void> {
     if (this.listening) return;
     await prepareLocalDaemonEndpoint(this.options.endpoint);
+    this.authToken = await this.authTokenStore.rotate();
     await new Promise<void>((resolve, reject) => {
       const onError = (error: Error) => {
         this.server.off("listening", onListening);
@@ -50,7 +58,14 @@ export class LocalRuntimeDaemon {
       };
       this.server.once("error", onError);
       this.server.once("listening", onListening);
-      this.server.listen(this.options.endpoint.address);
+      this.server.listen({
+        path: this.options.endpoint.address,
+        exclusive: true,
+        // Node does not expose a Windows SECURITY_DESCRIPTOR. Keep its broadening switches
+        // explicitly disabled and require the application-layer auth handshake below.
+        readableAll: false,
+        writableAll: false,
+      });
     });
     this.listening = true;
     this.ownsEndpoint = true;
@@ -74,16 +89,20 @@ export class LocalRuntimeDaemon {
       await removeLocalDaemonEndpoint(this.options.endpoint);
       this.ownsEndpoint = false;
     }
+    this.authToken = undefined;
   }
 
   private handleConnection(socket: Socket): void {
     this.sockets.add(socket);
     const decoder = new RuntimeFrameDecoder();
     let unsubscribe: (() => void) | undefined;
+    let authenticated = false;
     let closed = false;
+    const authenticationTimeout = setTimeout(() => socket.destroy(), 5_000);
     const close = () => {
       if (closed) return;
       closed = true;
+      clearTimeout(authenticationTimeout);
       this.sockets.delete(socket);
       unsubscribe?.();
       unsubscribe = undefined;
@@ -99,6 +118,16 @@ export class LocalRuntimeDaemon {
         return;
       }
       for (const message of messages) {
+        if (!authenticated) {
+          if (message.kind !== "auth" || !this.verifyAuthToken(message.token)) {
+            socket.end(encodeRuntimeFrame(createRuntimeAuthResult(false)));
+            return;
+          }
+          authenticated = true;
+          clearTimeout(authenticationTimeout);
+          socket.write(encodeRuntimeFrame(createRuntimeAuthResult(true)));
+          continue;
+        }
         if (message.kind !== "request") {
           socket.write(
             encodeRuntimeFrame(
@@ -113,6 +142,13 @@ export class LocalRuntimeDaemon {
         });
       }
     });
+  }
+
+  private verifyAuthToken(candidate: string): boolean {
+    if (!this.authToken) return false;
+    const expected = Buffer.from(this.authToken, "utf8");
+    const received = Buffer.from(candidate, "utf8");
+    return expected.byteLength === received.byteLength && timingSafeEqual(expected, received);
   }
 
   private async handleRequest(
