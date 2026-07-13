@@ -101,7 +101,11 @@ export class RuntimeTaskMirror {
         }
         return;
       }
-      if (!isLegacyTerminal(snapshot.status) || isDurableTerminal(durable.job.status)) return;
+      if (!isLegacyTerminal(snapshot.status)) return;
+      if (isDurableTerminal(durable.job.status)) {
+        this.stopHeartbeat(snapshot.taskId);
+        return;
+      }
 
       durable = ensureAttempt(this.jobs, durable, snapshot, this.leaseTtlMs);
       const attempt = durable.attempts.at(-1);
