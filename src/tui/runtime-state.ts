@@ -9,6 +9,7 @@ import { MemoryNudger } from "../memory/memory-nudger.js";
 import { SkillRegistry } from "../memory/skill-registry.js";
 import { TaskRegistry } from "../tasks/task-registry.js";
 import type { TaskHostRuntime } from "../tasks/task-runtime.js";
+import type { CompletionOutboxRecord } from "../tasks/runtime-types.js";
 import { BackgroundManager } from "../tools/background-manager.js";
 import {
   DelegationManager,
@@ -75,7 +76,7 @@ export interface DelegationCompletionWakeQueueOptions {
  * seen 序号在消费后仍保留，迟到或重复通知不会再次驱动主 Agent。
  */
 export class DelegationCompletionWakeQueue {
-  private readonly seenCompletionSeqs = new Set<number>();
+  private readonly seenCompletionIds = new Set<string>();
   private readonly pendingCompletions = new Map<number, DelegationCompletionEnvelope>();
   private readonly subscribers = new Set<() => void>();
   private readonly deliver: DelegationCompletionWakeQueueOptions["deliver"];
@@ -88,15 +89,17 @@ export class DelegationCompletionWakeQueue {
   enqueue(completion: DelegationCompletionEnvelope): boolean {
     if (
       this.closed ||
-      this.seenCompletionSeqs.has(completion.completionSeq) ||
+      this.seenCompletionIds.has(completion.completionId) ||
       !shouldWakeForCompletion(completion)
     ) {
       return false;
     }
 
-    this.seenCompletionSeqs.add(completion.completionSeq);
+    this.seenCompletionIds.add(completion.completionId);
     const shouldNotify = this.pendingCompletions.size === 0;
-    this.pendingCompletions.set(completion.completionSeq, completion);
+    let queueSequence = completion.completionSeq;
+    while (this.pendingCompletions.has(queueSequence)) queueSequence++;
+    this.pendingCompletions.set(queueSequence, completion);
     if (shouldNotify) {
       for (const subscriber of this.subscribers) subscriber();
     }
@@ -250,10 +253,38 @@ export async function createTuiRuntimeState(
   }
 
   const steerQueue = new SteerQueue();
+  const jobService = options.taskHostRuntime?.jobService;
   const delegationCompletionQueue = new DelegationCompletionWakeQueue({
-    deliver: (completion) =>
-      options.session.commitMessages(createDelegationCompletionMessage(completion)),
+    deliver: async (completion) => {
+      if (jobService) {
+        const pending = jobService
+          .pendingCompletions({ ownerSessionId: options.sessionId, limit: 1_000 })
+          .find((candidate) => candidate.completionId === completion.completionId);
+        // Durable outbox 是权威源；已 ack 的迟到进程内通知不得再注入。
+        if (!pending) {
+          throw new Error(
+            `Delegation completion ${completion.completionId} has no pending durable outbox record`,
+          );
+        }
+        await options.session.commitMessageOnce(
+          completion.completionId,
+          createDelegationCompletionMessage(completion),
+        );
+        jobService.markCompletionDelivered(completion.completionId);
+        return;
+      }
+      await options.session.commitMessages(createDelegationCompletionMessage(completion));
+    },
   });
+  if (jobService) {
+    for (const completion of jobService.pendingCompletions({
+      ownerSessionId: options.sessionId,
+      limit: 1_000,
+    })) {
+      const envelope = delegationEnvelopeFromOutbox(completion, options.sessionId);
+      if (envelope) delegationCompletionQueue.enqueue(envelope);
+    }
+  }
   return new DefaultTuiRuntimeState({
     workDir,
     sessionId: options.sessionId,
@@ -262,7 +293,10 @@ export async function createTuiRuntimeState(
     toolDisclosure: options.toolDisclosure ?? new ToolDisclosure(),
     taskRegistry,
     ...(options.taskHostRuntime ? { taskHostRuntime: options.taskHostRuntime } : {}),
-    backgroundManager: new BackgroundManager({ taskRegistry }),
+    backgroundManager: new BackgroundManager({
+      taskRegistry,
+      ownerSessionId: options.sessionId,
+    }),
     delegationManager: new DelegationManager({
       taskRegistry,
       onCompletion: (completion) => delegationCompletionQueue.enqueue(completion),
@@ -276,6 +310,58 @@ export async function createTuiRuntimeState(
     codeIntelligenceManager,
     unbindGoalManager,
   });
+}
+
+function delegationEnvelopeFromOutbox(
+  completion: CompletionOutboxRecord,
+  ownerSessionId: string,
+): DelegationCompletionEnvelope | undefined {
+  const payload = completion.payload?.["delegationCompletion"];
+  if (!isRecord(payload)) return undefined;
+  const completionId = payload["completionId"];
+  const jobId = payload["jobId"];
+  const completionSeq = payload["completionSeq"];
+  const completionPolicy = payload["completionPolicy"];
+  const status = payload["status"];
+  const outputSummary = payload["outputSummary"];
+  const activityIds = payload["activityIds"];
+  const payloadOwner = payload["ownerSessionId"];
+  if (
+    completionId !== completion.completionId ||
+    typeof jobId !== "string" ||
+    (payloadOwner !== undefined && payloadOwner !== ownerSessionId) ||
+    (completionPolicy !== "required" &&
+      completionPolicy !== "optional" &&
+      completionPolicy !== "detached") ||
+    (status !== "completed" &&
+      status !== "partial" &&
+      status !== "error" &&
+      status !== "timed_out" &&
+      status !== "cancelled") ||
+    typeof outputSummary !== "string" ||
+    !Array.isArray(activityIds) ||
+    !activityIds.every((value) => typeof value === "string")
+  ) {
+    return undefined;
+  }
+  return {
+    completionId,
+    jobId,
+    ownerSessionId,
+    completionSeq:
+      typeof completionSeq === "number" && Number.isSafeInteger(completionSeq)
+        ? completionSeq
+        : completion.createdAt,
+    activityIds,
+    completionPolicy,
+    status,
+    outputSummary,
+    ...(typeof payload["error"] === "string" ? { error: payload["error"] } : {}),
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 interface DefaultTuiRuntimeStateOptions {
