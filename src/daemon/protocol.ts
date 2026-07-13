@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 export const LOCAL_RUNTIME_PROTOCOL_VERSION = 1;
+export const LOCAL_RUNTIME_AUTH_VERSION = 1;
 export const MAX_RUNTIME_FRAME_BYTES = 1024 * 1024;
 
 export type JsonScalar = boolean | null | number | string;
@@ -64,12 +65,46 @@ export interface RuntimeEventMessage {
   event: RuntimeEvent;
 }
 
+export interface RuntimeAuthRequest {
+  kind: "auth";
+  protocolVersion: typeof LOCAL_RUNTIME_PROTOCOL_VERSION;
+  authVersion: typeof LOCAL_RUNTIME_AUTH_VERSION;
+  token: string;
+}
+
+export interface RuntimeAuthResult {
+  kind: "auth_result";
+  protocolVersion: typeof LOCAL_RUNTIME_PROTOCOL_VERSION;
+  authVersion: typeof LOCAL_RUNTIME_AUTH_VERSION;
+  ok: boolean;
+}
+
 export type RuntimeMessage =
+  | RuntimeAuthRequest
+  | RuntimeAuthResult
   | RuntimeRequest
   | RuntimeSuccessResponse
   | RuntimeErrorResponse
   | RuntimeEventMessage;
 export type RuntimeResponse = RuntimeSuccessResponse | RuntimeErrorResponse;
+
+export function createRuntimeAuthRequest(token: string): RuntimeAuthRequest {
+  return {
+    kind: "auth",
+    protocolVersion: LOCAL_RUNTIME_PROTOCOL_VERSION,
+    authVersion: LOCAL_RUNTIME_AUTH_VERSION,
+    token,
+  };
+}
+
+export function createRuntimeAuthResult(ok: boolean): RuntimeAuthResult {
+  return {
+    kind: "auth_result",
+    protocolVersion: LOCAL_RUNTIME_PROTOCOL_VERSION,
+    authVersion: LOCAL_RUNTIME_AUTH_VERSION,
+    ok,
+  };
+}
 
 export const RUNTIME_METHODS = [
   "runtime.ping",
@@ -191,7 +226,27 @@ export function parseRuntimeMessage(raw: string): RuntimeMessage {
   if (parsed.kind === "request") return assertRequest(parsed);
   if (parsed.kind === "response") return assertResponse(parsed);
   if (parsed.kind === "event") return assertEventMessage(parsed);
+  if (parsed.kind === "auth") return assertAuthRequest(parsed);
+  if (parsed.kind === "auth_result") return assertAuthResult(parsed);
   throw new RuntimeProtocolError("IPC 消息 kind 无效");
+}
+
+function assertAuthRequest(value: Record<string, unknown>): RuntimeAuthRequest {
+  if (
+    value.authVersion !== LOCAL_RUNTIME_AUTH_VERSION ||
+    typeof value.token !== "string" ||
+    value.token.length < 43
+  ) {
+    throw new RuntimeProtocolError("IPC auth 消息无效");
+  }
+  return value as unknown as RuntimeAuthRequest;
+}
+
+function assertAuthResult(value: Record<string, unknown>): RuntimeAuthResult {
+  if (value.authVersion !== LOCAL_RUNTIME_AUTH_VERSION || typeof value.ok !== "boolean") {
+    throw new RuntimeProtocolError("IPC auth_result 消息无效");
+  }
+  return value as unknown as RuntimeAuthResult;
 }
 
 function assertRequest(value: Record<string, unknown>): RuntimeRequest {

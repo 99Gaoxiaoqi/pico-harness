@@ -6,6 +6,8 @@ import { dirname, join } from "node:path";
 export interface LocalDaemonEndpoint {
   readonly transport: "pipe" | "unix";
   readonly address: string;
+  /** Private bearer-token file used by the versioned IPC authentication handshake. */
+  readonly authTokenPath: string;
 }
 
 export interface LocalDaemonEndpointOptions {
@@ -21,11 +23,22 @@ export function resolveLocalDaemonEndpoint(
   const identity = options.userIdentity ?? currentUserIdentity();
   const digest = createHash("sha256").update(identity).digest("hex").slice(0, 16);
   if (targetPlatform === "win32") {
-    return { transport: "pipe", address: `\\\\.\\pipe\\pico-runtime-${digest}-v1` };
+    const runtimeDir =
+      options.runtimeDir ??
+      join(process.env.LOCALAPPDATA ?? join(homedir(), "AppData", "Local"), "Pico", "runtime");
+    return {
+      transport: "pipe",
+      address: `\\\\.\\pipe\\pico-runtime-${digest}-v1`,
+      authTokenPath: join(runtimeDir, `runtime-${digest}-v1.auth`),
+    };
   }
   const runtimeDir =
     options.runtimeDir ?? process.env.XDG_RUNTIME_DIR ?? join(tmpdir(), `pico-${digest}`);
-  return { transport: "unix", address: join(runtimeDir, "runtime-v1.sock") };
+  return {
+    transport: "unix",
+    address: join(runtimeDir, "runtime-v1.sock"),
+    authTokenPath: join(runtimeDir, "runtime-v1.auth"),
+  };
 }
 
 /** Prepares a current-user-only POSIX socket parent. No-op for Windows named pipes. */
