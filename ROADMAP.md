@@ -529,6 +529,43 @@ git worktree remove ../pico-1-streaming
 
 ---
 
+## 阶段 14：选择性事件溯源与 Session 真源收口 ✅（2026-07-13）
+
+> **边界**：本阶段只把 Session 对话及其运行状态演进建模为 canonical events。任务、File History、Summary/Artifact 和项目配置仍使用各自的专用存储，因此这是 selective event sourcing，不是全系统 Event Sourcing。
+
+- [x] 14.1 确立“Session JSONL 是对话真源，Catalog / FTS 是可重建投影”的存储边界；投影故障不反向改写真源
+- [x] 14.2 将 Session 日志升级为 v3 canonical event 协议，以 `logId + epoch + seq + eventId` 标识耐久提交，并统一 legacy/v3 reducer 重放
+- [x] 14.3 接入单写者 OwnerLease、串行 append + `fdatasync`、严格 seq 校验、torn-tail 容错与 `write_uncertain` 禁写状态，避免未证明提交继续覆写日志
+- [x] 14.4 增加全局 Session Catalog 及 JSONL→Catalog 单向投影；健康目录走 source marker/head 快路，过期或损坏项可隔离并从 JSONL backfill
+- [x] 14.5 把 FTS5 改为 JSONL 提交后的 cursor 投影，索引与 cursor 同事务更新；启动时可从 Session 重建，原生 SQLite 不可用时继续降级到 JSONL 内存检索
+
+---
+
+## 阶段 15：可恢复运行时与跨存储操作 ✅（2026-07-13）
+
+> **语义**：“可恢复”指任务意图、attempt、completion、用量与合并结果可在重启后对账/向前收敛，不表示 TUI 退出后留下 daemon 或继续运行原进程。
+
+- [x] 15.1 建立 `.claw/runtime.sqlite` 权威控制面，持久化 jobs、attempts、commands、completion outbox、merge requests、provider calls 和 usage baselines
+- [x] 15.2 提供 JobService 与宿主租约，启动时对账过期 running 记录、导入 legacy TaskStore，并保留 TaskRegistry/TaskStore 作为运行期兼容视图
+- [x] 15.3 将 worker 结果与串行 merge request 绑定：只有已合并或明确 `not_needed` 才进入成功终态，冲突保留现场并收口为 partial
+- [x] 15.4 接通按 Session 隔离的 durable completion outbox；以 completion ID 幂等写入 Session，耐久 append 成功后再标记 delivered
+- [x] 15.5 建立逐 Provider 调用账本，覆盖主循环、子代理和 compaction 等已接入路径，区分 reported/unknown 并用 baseline 差额导入避免旧累计值双计
+- [x] 15.6 将 File History 升级为 SHA-256 CAS + manifest v2，Summary 与 Artifact 使用严格 v2 sidecar；fork clone 复用不可变 blob，校验完整性并保持幂等
+- [x] 15.7 将公开 rewind 路径接入 operation journal + forward-only Saga，协调 workspace / Session / sidecar 并支持未完操作对账；同时完成 fork 的 staged JSONL、sidecar clone、Catalog publish 与原子发布协调器，但当前 TUI fork 仍走现有 `seedForkFrom` 组装路径，不宣称已切换到该 Saga
+
+---
+
+## 阶段 16：存储治理与可观测性 ✅（2026-07-13）
+
+> **执行边界**：治理默认只读、显式执行、fail-closed；不启动定时器/daemon，不把声明式 retention policy 描述成已自动清理 Session、Task 或 Artifact。
+
+- [x] 16.1 实现只读 StorageDoctor，扫描 Session、runtime SQLite、未完 operation、File History、Summary 与 Artifact；权威数据损坏只诊断，不自动隔离或改写
+- [x] 16.2 公开 `/doctor` 保留 Catalog / Memory / Task runtime 信息并增加存储健康、组件计数、严重度汇总和高优先诊断建议；scan 失败显示 diagnostic，不默认 repair 或 GC
+- [x] 16.3 定义并校验 Session / Task / Artifact / Blob 的声明式 Retention Policy；当前只提供策略契约，具体 cleanup 需由调用方显式执行
+- [x] 16.4 实现 CAS 保守型 mark-and-sweep；dry-run 不取写锁，apply 与 blob 引用发布共享 mutation lease，遇到损坏/不确定引用或租约冲突时不删除数据
+
+---
+
 ## 阶段 12.5：模型级思考能力（已完成）
 
 > **目标**：参考 Z Code 与 OpenCode，把全局固定思考强度改为模型级 reasoning profile；选中模型后自动解析默认档位、可选档位和协议请求映射。
@@ -562,26 +599,29 @@ git worktree remove ../pico-1-streaming
 
 ## 📊 历史交付进度与当前收口
 
-| 阶段         | 总任务数 | 完成    | 状态                                |
-| ------------ | -------- | ------- | ----------------------------------- |
-| 阶段 1       | 5        | 5       | ✅ 完成                             |
-| 阶段 1.5     | 8        | 8       | ✅ 完成                             |
-| 阶段 2       | 7        | 7       | ✅ 完成                             |
-| 阶段 3       | 7        | 7       | ✅ 完成                             |
-| 阶段 4       | 5        | 5       | ✅ 历史完成；多端外壳已退役         |
-| 阶段 5       | 8        | 8       | ✅ 历史闭环（5.2 不做；5.4 已实现） |
-| 阶段 5.1     | 11       | 11      | ✅ 完成                             |
-| 阶段 6       | 8        | 8       | ✅ 完成                             |
-| 阶段 7       | 8        | 8       | ✅ 完成                             |
-| 阶段 8       | 8        | 8       | ✅ TUI-only 收口完成                |
-| 阶段 9       | 3        | 3       | ✅ 模型路由与核心交互完成           |
-| 阶段 10      | 7        | 7       | ✅ TUI 滚动与大型输出收敛完成       |
-| 阶段 11      | 5        | 5       | ✅ TUI 可靠执行闭环完成             |
-| 阶段 12      | 3        | 3       | ✅ 主 YOLO 放权与 worker 隔离完成   |
-| 阶段 12.5    | 6        | 6       | ✅ 模型级思考能力完成               |
-| 阶段 12.6    | 6        | 6       | ✅ 记忆存储韧性完成                 |
-| 阶段 13      | 9        | 9       | ✅ 隔离式并行与 MCP 生命周期完成    |
-| **当前总计** | **114**  | **114** | ✅ 当前已排期任务全部完成           |
+| 阶段         | 总任务数 | 完成    | 状态                                     |
+| ------------ | -------- | ------- | ---------------------------------------- |
+| 阶段 1       | 5        | 5       | ✅ 完成                                  |
+| 阶段 1.5     | 8        | 8       | ✅ 完成                                  |
+| 阶段 2       | 7        | 7       | ✅ 完成                                  |
+| 阶段 3       | 7        | 7       | ✅ 完成                                  |
+| 阶段 4       | 5        | 5       | ✅ 历史完成；多端外壳已退役              |
+| 阶段 5       | 8        | 8       | ✅ 历史闭环（5.2 不做；5.4 已实现）      |
+| 阶段 5.1     | 11       | 11      | ✅ 完成                                  |
+| 阶段 6       | 8        | 8       | ✅ 完成                                  |
+| 阶段 7       | 8        | 8       | ✅ 完成                                  |
+| 阶段 8       | 8        | 8       | ✅ TUI-only 收口完成                     |
+| 阶段 9       | 3        | 3       | ✅ 模型路由与核心交互完成                |
+| 阶段 10      | 7        | 7       | ✅ TUI 滚动与大型输出收敛完成            |
+| 阶段 11      | 5        | 5       | ✅ TUI 可靠执行闭环完成                  |
+| 阶段 12      | 3        | 3       | ✅ 主 YOLO 放权与 worker 隔离完成        |
+| 阶段 12.5    | 6        | 6       | ✅ 模型级思考能力完成                    |
+| 阶段 12.6    | 6        | 6       | ✅ 记忆存储韧性完成                      |
+| 阶段 13      | 9        | 9       | ✅ 隔离式并行与 MCP 生命周期完成         |
+| 阶段 14      | 5        | 5       | ✅ 选择性事件溯源与 Session 真源收口完成 |
+| 阶段 15      | 7        | 7       | ✅ 可恢复运行时与跨存储操作完成          |
+| 阶段 16      | 4        | 4       | ✅ 存储治理与可观测性完成                |
+| **当前总计** | **130**  | **130** | ✅ 当前已排期任务全部完成                |
 
 ---
 
