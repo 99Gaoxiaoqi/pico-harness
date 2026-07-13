@@ -10,6 +10,7 @@ import {
 const BEGIN_SYNCHRONIZED_OUTPUT = "\u001b[?2026h";
 const END_SYNCHRONIZED_OUTPUT = "\u001b[?2026l";
 const CLEAR_TERMINAL = "\u001b[2J\u001b[3J\u001b[H";
+const ENTER_ALTERNATE_SCREEN = "\u001b[?1049h";
 
 describe("TUI resize 同步帧集成", () => {
   let session: TuiTerminalGridSession | undefined;
@@ -74,6 +75,43 @@ describe("TUI resize 同步帧集成", () => {
     expect(count(output, ENABLE_MOUSE_TRACKING)).toBe(4);
     expect(output).toContain(BEGIN_SYNCHRONIZED_OUTPUT + "frame-one" + ENABLE_MOUSE_TRACKING);
     expect(session.stdout.getWindowSize()).toEqual([100, 30]);
+  });
+
+  it("Codex 或 TERM=dumb 用原地 CPR 探测，避免短暂切入 alternate screen", async () => {
+    const stdin = new PassThrough();
+    const stdout = new PassThrough();
+    Object.defineProperties(stdin, {
+      isTTY: { value: true },
+      isRaw: { value: false, writable: true },
+    });
+    Object.assign(stdin, {
+      setRawMode: () => undefined,
+      ref: () => undefined,
+      unref: () => undefined,
+    });
+    Object.defineProperties(stdout, {
+      isTTY: { value: true },
+      columns: { value: 80, writable: true },
+      rows: { value: 24, writable: true },
+    });
+
+    let output = "";
+    stdout.on("data", (chunk) => {
+      const value = String(chunk);
+      output += value;
+      if (value.includes("\u001b[6n")) queueMicrotask(() => stdin.write("\u001b[24;80R"));
+    });
+
+    session = await createTuiTerminalGridSession(
+      stdin as unknown as NodeJS.ReadStream,
+      stdout as unknown as NodeJS.WriteStream,
+      { CODEX_SHELL: "1", TERM: "dumb" },
+      50,
+    );
+
+    expect(session.stdout.getWindowSize()).toEqual([80, 24]);
+    expect(output).toContain("\u001b[s\u001b[999;999H\u001b[6n\u001b[u");
+    expect(output).not.toContain(ENTER_ALTERNATE_SCREEN);
   });
 });
 
