@@ -1227,8 +1227,8 @@ function createCronCommand(
   return {
     name: "cron",
     description: "Manage persistent YOLO cron jobs for this workspace",
-    usage: "/cron <list|add|enable|disable|delete|runs> [arguments]",
-    argumentHint: "<list|add|enable|disable|delete|runs>",
+    usage: "/cron <status|list|add|enable|disable|delete|runs> [arguments]",
+    argumentHint: "<status|list|add|enable|disable|delete|runs>",
     category: "workspace",
     kind: "local",
     availability: "idle",
@@ -1243,18 +1243,32 @@ function createCronCommand(
       }
       const [operation = "list", ...args] = input.argv;
       try {
+        if (operation === "status") {
+          const jobs = cron.list(options.workDir);
+          const daemon = await cronDaemonStatus(options);
+          return cronMessage(
+            `本地账本：${jobs.length} 个 Cron Job（${jobs.filter((job) => job.enabled).length} 个已启用）。\n${daemon}`,
+          );
+        }
         if (operation === "list") return cronMessage(formatCronJobs(cron.list(options.workDir)));
         if (operation === "runs") {
-          return cronMessage(formatCronRuns(cron.runs({
-            workspacePath: options.workDir,
-            ...(args[0] ? { cronJobId: args[0] } : {}),
-          })));
+          return cronMessage(
+            formatCronRuns(
+              cron.runs({
+                workspacePath: options.workDir,
+                ...(args[0] ? { cronJobId: args[0] } : {}),
+              }),
+            ),
+          );
         }
         if (operation === "add") {
           if (settings.mode !== "yolo") {
-            return cronMessage("Cron jobs require /mode yolo; interactive permission modes cannot run unattended.");
+            return cronMessage(
+              "Cron jobs require /mode yolo; interactive permission modes cannot run unattended.",
+            );
           }
-          if (args.length < 6) return cronMessage("Usage: /cron add <minute> <hour> <day> <month> <weekday> <prompt>");
+          if (args.length < 6)
+            return cronMessage("Usage: /cron add <minute> <hour> <day> <month> <weekday> <prompt>");
           const [minute, hour, day, month, weekday, ...promptParts] = args;
           const job = cron.create({
             workspacePath: options.workDir,
@@ -1272,53 +1286,81 @@ function createCronCommand(
             },
           });
           const daemon = await registerCronWorkspace(options, job.cronJobId);
-          return cronMessage(`Cron job created: ${job.cronJobId}\n${job.schedule} · ${job.timeZone}\n${daemon}`);
+          return cronMessage(
+            `Cron job created: ${job.cronJobId}\n${job.schedule} · ${job.timeZone}\n${daemon}`,
+          );
         }
         const cronJobId = args[0];
         if (!cronJobId) return cronMessage(`Usage: /cron ${operation} <job-id>`);
-        const job = cron.list(options.workDir).find((candidate) => candidate.cronJobId === cronJobId);
+        const job = cron
+          .list(options.workDir)
+          .find((candidate) => candidate.cronJobId === cronJobId);
         if (!job) return cronMessage(`Unknown cron job: ${cronJobId}`);
         if (operation === "enable" || operation === "disable") {
           const updated = cron.setEnabled(cronJobId, job.version, operation === "enable");
           const daemon = updated.enabled
             ? `\n${await registerCronWorkspace(options, updated.cronJobId)}`
             : "";
-          return cronMessage(`Cron job ${updated.cronJobId} ${updated.enabled ? "enabled" : "disabled"}.${daemon}`);
+          return cronMessage(
+            `Cron job ${updated.cronJobId} ${updated.enabled ? "enabled" : "disabled"}.${daemon}`,
+          );
         }
         if (operation === "delete") {
           const deleted = cron.delete(cronJobId, job.version);
           return cronMessage(`Cron job ${deleted.cronJobId} deleted.`);
         }
-        return cronMessage("Usage: /cron <list|add|enable|disable|delete|runs> [arguments]");
+        return cronMessage("Usage: /cron <status|list|add|enable|disable|delete|runs> [arguments]");
       } catch (error) {
-        return cronMessage(`Cron failed: ${error instanceof Error ? error.message : String(error)}`);
+        return cronMessage(
+          `Cron failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
       }
     },
   };
 }
 
-async function registerCronWorkspace(options: PicoCommandRegistryOptions, cronJobId: string): Promise<string> {
+async function registerCronWorkspace(
+  options: PicoCommandRegistryOptions,
+  cronJobId: string,
+): Promise<string> {
   if (!options.cronDaemonBridge) {
     return `本机 Runtime daemon 未配置；任务 ${cronJobId} 仅已写入账本，尚不会自动执行。`;
   }
   return (await options.cronDaemonBridge.registerWorkspace(options.workDir)).message;
 }
 
+async function cronDaemonStatus(options: PicoCommandRegistryOptions): Promise<string> {
+  if (!options.cronDaemonBridge) {
+    return "本机 Runtime daemon 未配置；守护状态未知，任务仅保存在本地账本中。";
+  }
+  return (await options.cronDaemonBridge.statusWorkspace(options.workDir)).message;
+}
+
 function cronMessage(message: string): LocalCommandResult {
   return { type: "local", action: "message", message };
 }
 
-function formatCronJobs(jobs: readonly import("../tasks/runtime-types.js").CronJobRecord[]): string {
+function formatCronJobs(
+  jobs: readonly import("../tasks/runtime-types.js").CronJobRecord[],
+): string {
   if (jobs.length === 0) return "No cron jobs for this workspace.";
   return jobs
-    .map((job) => `${job.cronJobId} · ${job.enabled ? "enabled" : "disabled"} · ${job.schedule} · ${job.timeZone}\n  ${job.prompt}`)
+    .map(
+      (job) =>
+        `${job.cronJobId} · ${job.enabled ? "enabled" : "disabled"} · ${job.schedule} · ${job.timeZone}\n  ${job.prompt}`,
+    )
     .join("\n");
 }
 
-function formatCronRuns(runs: readonly import("../tasks/runtime-types.js").CronRunRecord[]): string {
+function formatCronRuns(
+  runs: readonly import("../tasks/runtime-types.js").CronRunRecord[],
+): string {
   if (runs.length === 0) return "No cron runs for this workspace.";
   return runs
-    .map((run) => `${run.cronRunId} · ${run.status} · ${new Date(run.scheduledFor).toISOString()}${run.reason ? ` · ${run.reason}` : ""}`)
+    .map(
+      (run) =>
+        `${run.cronRunId} · ${run.status} · ${new Date(run.scheduledFor).toISOString()}${run.reason ? ` · ${run.reason}` : ""}`,
+    )
     .join("\n");
 }
 

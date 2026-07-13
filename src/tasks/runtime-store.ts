@@ -798,7 +798,11 @@ export class RuntimeStore {
       topic: "cron.job.created",
       workspacePath: input.workspacePath,
       cronJobId: input.cronJobId,
-      payload: { enabled: input.enabled !== false, schedule: input.schedule, timeZone: input.timeZone },
+      payload: {
+        enabled: input.enabled !== false,
+        schedule: input.schedule,
+        timeZone: input.timeZone,
+      },
     });
     return this.requireCronJob(input.cronJobId);
   }
@@ -823,7 +827,9 @@ export class RuntimeStore {
     }
     const where = clauses.length > 0 ? ` WHERE ${clauses.join(" AND ")}` : "";
     return (
-      this.db.prepare(`SELECT * FROM cron_jobs${where} ORDER BY created_at, cron_job_id`).all(...params) as CronJobRow[]
+      this.db
+        .prepare(`SELECT * FROM cron_jobs${where} ORDER BY created_at, cron_job_id`)
+        .all(...params) as CronJobRow[]
     ).map(mapCronJob);
   }
 
@@ -857,15 +863,20 @@ export class RuntimeStore {
         throw new RuntimeConflictError(`Cron Job ${cronJobId} 的版本已变化`);
       }
       const running = this.db
-        .prepare("SELECT cron_run_id FROM cron_runs WHERE cron_job_id = ? AND status = 'running' LIMIT 1")
+        .prepare(
+          "SELECT cron_run_id FROM cron_runs WHERE cron_job_id = ? AND status = 'running' LIMIT 1",
+        )
         .get(cronJobId) as { cron_run_id: string } | undefined;
       if (running) {
-        throw new RuntimeConflictError(`Cron Job ${cronJobId} 仍有运行中的 Run ${running.cron_run_id}`);
+        throw new RuntimeConflictError(
+          `Cron Job ${cronJobId} 仍有运行中的 Run ${running.cron_run_id}`,
+        );
       }
       const result = this.db
         .prepare("DELETE FROM cron_jobs WHERE cron_job_id = ? AND version = ? AND enabled = 0")
         .run(cronJobId, expectedVersion);
-      if (result.changes !== 1) throw new RuntimeConflictError(`Cron Job ${cronJobId} 删除 CAS 失败`);
+      if (result.changes !== 1)
+        throw new RuntimeConflictError(`Cron Job ${cronJobId} 删除 CAS 失败`);
       // Job 行删除后不能保留 FK；以 payload 保存被删除的 ID 作为审计事实。
       this.insertRuntimeEvent({
         topic: "cron.job.deleted",
@@ -922,14 +933,14 @@ export class RuntimeStore {
           terminalAt,
           reason ?? null,
         );
-        this.insertRuntimeEvent({
-          topic: `cron.run.${status}`,
-          workspacePath: job.workspacePath,
-          cronJobId: job.cronJobId,
-          cronRunId: input.cronRunId,
-          payload: { scheduledFor: input.scheduledFor, ...(reason ? { reason } : {}) },
-        });
-        return this.requireCronRun(input.cronRunId);
+      this.insertRuntimeEvent({
+        topic: `cron.run.${status}`,
+        workspacePath: job.workspacePath,
+        cronJobId: job.cronJobId,
+        cronRunId: input.cronRunId,
+        payload: { scheduledFor: input.scheduledFor, ...(reason ? { reason } : {}) },
+      });
+      return this.requireCronRun(input.cronRunId);
     });
     return create();
   }
@@ -941,7 +952,9 @@ export class RuntimeStore {
     return row ? mapCronRun(row) : undefined;
   }
 
-  listCronRuns(input: { cronJobId?: string; workspacePath?: string; limit?: number } = {}): CronRunRecord[] {
+  listCronRuns(
+    input: { cronJobId?: string; workspacePath?: string; limit?: number } = {},
+  ): CronRunRecord[] {
     const clauses: string[] = [];
     const params: Array<string | number> = [];
     if (input.cronJobId !== undefined) {
@@ -957,7 +970,9 @@ export class RuntimeStore {
     const where = clauses.length > 0 ? ` WHERE ${clauses.join(" AND ")}` : "";
     return (
       this.db
-        .prepare(`SELECT * FROM cron_runs${where} ORDER BY scheduled_for DESC, cron_run_id DESC LIMIT ?`)
+        .prepare(
+          `SELECT * FROM cron_runs${where} ORDER BY scheduled_for DESC, cron_run_id DESC LIMIT ?`,
+        )
         .all(...params) as CronRunRow[]
     ).map(mapCronRun);
   }
@@ -966,7 +981,9 @@ export class RuntimeStore {
     const claim = this.db.transaction(() => {
       const current = this.requireCronRun(input.cronRunId);
       if (current.status !== "queued") {
-        throw new RuntimeConflictError(`Cron Run ${input.cronRunId} 当前为 ${current.status}，不能启动`);
+        throw new RuntimeConflictError(
+          `Cron Run ${input.cronRunId} 当前为 ${current.status}，不能启动`,
+        );
       }
       this.assertLease(`cron-run:${input.cronRunId}`, input.ownerId, input.leaseEpoch);
       const now = this.now();
@@ -976,7 +993,8 @@ export class RuntimeStore {
            WHERE cron_run_id = ? AND status = 'queued' AND version = ?`,
         )
         .run(input.ownerId, input.leaseEpoch, now, input.cronRunId, current.version);
-      if (result.changes !== 1) throw new RuntimeConflictError(`Cron Run ${input.cronRunId} 启动 CAS 失败`);
+      if (result.changes !== 1)
+        throw new RuntimeConflictError(`Cron Run ${input.cronRunId} 启动 CAS 失败`);
       this.insertRuntimeEvent({
         topic: "cron.run.running",
         workspacePath: current.workspacePath,
@@ -1016,7 +1034,8 @@ export class RuntimeStore {
           input.ownerId,
           input.leaseEpoch,
         );
-      if (result.changes !== 1) throw new RuntimeConflictError(`Cron Run ${input.cronRunId} 收口 CAS 失败`);
+      if (result.changes !== 1)
+        throw new RuntimeConflictError(`Cron Run ${input.cronRunId} 收口 CAS 失败`);
       this.insertRuntimeEvent({
         topic: `cron.run.${input.status}`,
         workspacePath: current.workspacePath,
@@ -1043,7 +1062,8 @@ export class RuntimeStore {
            WHERE cron_run_id = ? AND status = 'queued' AND version = ?`,
         )
         .run(reason, now, cronRunId, current.version);
-      if (result.changes !== 1) throw new RuntimeConflictError(`Cron Run ${cronRunId} 阻断 CAS 失败`);
+      if (result.changes !== 1)
+        throw new RuntimeConflictError(`Cron Run ${cronRunId} 阻断 CAS 失败`);
       this.insertRuntimeEvent({
         topic: "cron.run.blocked",
         workspacePath: current.workspacePath,
@@ -1071,7 +1091,8 @@ export class RuntimeStore {
            WHERE cron_run_id = ? AND status = 'queued' AND version = ?`,
         )
         .run(reason, now, cronRunId, current.version);
-      if (result.changes !== 1) throw new RuntimeConflictError(`Cron Run ${cronRunId} 跳过 CAS 失败`);
+      if (result.changes !== 1)
+        throw new RuntimeConflictError(`Cron Run ${cronRunId} 跳过 CAS 失败`);
       this.insertRuntimeEvent({
         topic: "cron.run.skipped",
         workspacePath: current.workspacePath,
@@ -1084,7 +1105,9 @@ export class RuntimeStore {
     return skip();
   }
 
-  listRuntimeEvents(input: { afterEventId?: string; workspacePath?: string; limit?: number } = {}): RuntimeEventRecord[] {
+  listRuntimeEvents(
+    input: { afterEventId?: string; workspacePath?: string; limit?: number } = {},
+  ): RuntimeEventRecord[] {
     const clauses: string[] = [];
     const params: Array<string | number> = [];
     if (input.afterEventId !== undefined) {
@@ -1109,6 +1132,21 @@ export class RuntimeStore {
         .prepare(`SELECT * FROM runtime_events${where} ORDER BY rowid LIMIT ?`)
         .all(...params) as RuntimeEventRow[]
     ).map(mapRuntimeEvent);
+  }
+
+  /**
+   * 供 Runtime/IPC 写入非 Cron 生命周期事件。
+   *
+   * 事件账本与 Cron 共用同一个 append-only 表：这样 daemon 重启后，客户端仍可
+   * 用 eventId 拉回 Run、工作区登记和 Cron 的完整可见历史，而不依赖进程内缓存。
+   */
+  appendRuntimeEvent(
+    input: Omit<RuntimeEventRecord, "eventId" | "createdAt"> & {
+      eventId?: string;
+      createdAt?: number;
+    },
+  ): RuntimeEventRecord {
+    return this.insertRuntimeEvent(input);
   }
 
   insertCommand(input: {
@@ -1806,10 +1844,12 @@ export class RuntimeStore {
     return run;
   }
 
-  private insertRuntimeEvent(input: Omit<RuntimeEventRecord, "eventId" | "createdAt"> & {
-    eventId?: string;
-    createdAt?: number;
-  }): RuntimeEventRecord {
+  private insertRuntimeEvent(
+    input: Omit<RuntimeEventRecord, "eventId" | "createdAt"> & {
+      eventId?: string;
+      createdAt?: number;
+    },
+  ): RuntimeEventRecord {
     const eventId = input.eventId ?? generateRuntimeId("event");
     const createdAt = input.createdAt ?? this.now();
     this.db
@@ -2271,10 +2311,7 @@ function assertYoloPolicySnapshot(value: unknown): asserts value is YoloPolicySn
   ) {
     throw new Error("Cron Job 仅支持可信工作区的 yolo background policySnapshot");
   }
-  if (
-    value["networkPolicy"] === "disabled" &&
-    value["allowedNetworkHosts"] !== undefined
-  ) {
+  if (value["networkPolicy"] === "disabled" && value["allowedNetworkHosts"] !== undefined) {
     throw new Error("networkPolicy=disabled 时不得声明 allowedNetworkHosts");
   }
   if (

@@ -99,6 +99,11 @@ describe("Pico command registry", () => {
         available: true,
         message: `daemon registered ${workspacePath}`,
       }),
+      statusWorkspace: async () => ({
+        available: true,
+        registered: true,
+        message: "daemon connected; workspace registered; scheduler unknown",
+      }),
     };
     const registry = await createPicoCommandRegistry({
       workDir,
@@ -119,6 +124,10 @@ describe("Pico command registry", () => {
     const listed = await processUserInput("/cron list", { registry });
     expect(listed.type === "local-command" ? listed.result.message : undefined).toContain(
       "检查未提交的改动",
+    );
+    const status = await processUserInput("/cron status", { registry });
+    expect(status.type === "local-command" ? status.result.message : undefined).toContain(
+      "daemon connected; workspace registered; scheduler unknown",
     );
   });
 

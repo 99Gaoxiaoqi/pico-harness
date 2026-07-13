@@ -53,10 +53,14 @@ export class LocalRuntimeClient {
   async subscribe(
     listener: (event: RuntimeEvent) => void,
     afterEventId?: string,
+    workspacePath?: string,
   ): Promise<readonly RuntimeEvent[]> {
     this.listeners.add(listener);
     try {
-      const result = await this.request("events.subscribe", afterEventId ? { afterEventId } : {});
+      const result = await this.request("events.subscribe", {
+        ...(afterEventId ? { afterEventId } : {}),
+        ...(workspacePath ? { workspacePath } : {}),
+      });
       const events = readSubscribedEvents(result);
       if (!events) throw new Error("daemon 返回了无效事件订阅结果");
       return events;
@@ -111,12 +115,14 @@ function readRuntimeEvent(value: JsonValue): RuntimeEvent | undefined {
     !isJsonObject(scope) ||
     typeof scope.workspacePath !== "string" ||
     !isJsonValue(payload)
-  ) return undefined;
+  )
+    return undefined;
   if (
     (scope.sessionId !== undefined && typeof scope.sessionId !== "string") ||
     (scope.runId !== undefined && typeof scope.runId !== "string") ||
     (scope.jobId !== undefined && typeof scope.jobId !== "string")
-  ) return undefined;
+  )
+    return undefined;
   return {
     protocolVersion: 1,
     eventId,

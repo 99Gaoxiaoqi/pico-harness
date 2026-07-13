@@ -22,6 +22,18 @@ export interface RuntimeEvent {
   payload: JsonValue;
 }
 
+/** Typed request payload for durable daemon workspace registration. */
+export interface WorkspaceRegistrationParams {
+  workspacePath: string;
+}
+
+/** The daemon deliberately reports scheduler installation as unknown until platform adapters own it. */
+export interface WorkspaceStatusResult {
+  workspacePath: string;
+  registered: boolean;
+  schedulerStatus: "unknown";
+}
+
 export interface RuntimeRequest {
   kind: "request";
   protocolVersion: typeof LOCAL_RUNTIME_PROTOCOL_VERSION;
@@ -52,7 +64,11 @@ export interface RuntimeEventMessage {
   event: RuntimeEvent;
 }
 
-export type RuntimeMessage = RuntimeRequest | RuntimeSuccessResponse | RuntimeErrorResponse | RuntimeEventMessage;
+export type RuntimeMessage =
+  | RuntimeRequest
+  | RuntimeSuccessResponse
+  | RuntimeErrorResponse
+  | RuntimeEventMessage;
 export type RuntimeResponse = RuntimeSuccessResponse | RuntimeErrorResponse;
 
 export const RUNTIME_METHODS = [
@@ -62,6 +78,7 @@ export const RUNTIME_METHODS = [
   "run.steer",
   "workspace.register",
   "workspace.unregister",
+  "workspace.status",
   "jobs.list",
   "runs.list",
   "events.replay",
@@ -147,7 +164,11 @@ export function serializeRuntimeEvent(event: RuntimeEvent): JsonValue {
   };
 }
 
-export function createRuntimeError(requestId: string, code: string, message: string): RuntimeErrorResponse {
+export function createRuntimeError(
+  requestId: string,
+  code: string,
+  message: string,
+): RuntimeErrorResponse {
   return {
     kind: "response",
     protocolVersion: LOCAL_RUNTIME_PROTOCOL_VERSION,
