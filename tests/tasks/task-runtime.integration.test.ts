@@ -3,7 +3,7 @@ import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { JobService } from "../../src/tasks/job-service.js";
 import { TaskHostRuntime } from "../../src/tasks/task-runtime.js";
 import { DelegationManager } from "../../src/tools/delegation-manager.js";
@@ -22,14 +22,23 @@ describe("TaskHostRuntime durable executor integration", () => {
   it("长时间 worker 持续 heartbeat，并以宿主合并作为成功终态", async () => {
     const { root, repo } = await createRepository();
     cleanups.push(() => rm(root, { recursive: true, force: true }));
+    const leaseTtlMs = 60;
+    let now = 1_000;
     const runtime = await TaskHostRuntime.create({
       workDir: repo,
-      runtimeMirror: { leaseTtlMs: 60, heartbeatIntervalMs: 15 },
+      runtimeMirror: { leaseTtlMs, heartbeatIntervalMs: 15 },
       reconcileIntervalMs: 10,
+      now: () => now,
     });
     cleanups.push(() => runtime.close());
+    const heartbeat = vi.spyOn(runtime.jobService, "heartbeat");
 
     const entered = deferred();
+    const release = deferred();
+    cleanups.push(() => {
+      release.resolve();
+      return Promise.resolve();
+    });
     const task = runtime.start(
       {
         description: "durable worker",
@@ -44,12 +53,34 @@ describe("TaskHostRuntime durable executor integration", () => {
       },
       async (context) => {
         entered.resolve();
-        await delay(140);
+        await release.promise;
         await writeFile(join(context.worktreePath, "worker.txt"), "merged\n", "utf8");
         return { summary: "worker completed", data: { childSessionId: "child-a" } };
       },
     );
     await entered.promise;
+    expect(runtime.jobService.get(task.taskId)?.job.status).toBe("running");
+
+    const initialLeaseExpiresAt = now + leaseTtlMs;
+    now = initialLeaseExpiresAt - 10;
+    const renewedLeaseExpiresAt = now + leaseTtlMs;
+    await vi.waitFor(() => {
+      expect(heartbeat).toHaveReturnedWith(
+        expect.objectContaining({
+          heartbeatAt: now,
+          expiresAt: renewedLeaseExpiresAt,
+        }),
+      );
+    });
+
+    // 跨过初始 lease 后主动执行回收，任务仍受续租 lease 保护。
+    now = initialLeaseExpiresAt + 10;
+    expect(now).toBeGreaterThan(initialLeaseExpiresAt);
+    expect(now).toBeLessThan(renewedLeaseExpiresAt);
+    expect(runtime.jobService.reconcileExpiredJobs()).toEqual([]);
+    expect(runtime.jobService.get(task.taskId)?.job.status).toBe("running");
+
+    release.resolve();
 
     const completed = await runtime.supervisor.wait(task.taskId);
     expect(completed).toMatchObject({
@@ -240,10 +271,6 @@ async function createRepository(): Promise<{ root: string; repo: string }> {
 async function git(args: readonly string[], cwd: string): Promise<string> {
   const result = await exec("git", [...args], { cwd, encoding: "utf8" });
   return result.stdout.trim();
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function deferred(): { promise: Promise<void>; resolve(): void } {

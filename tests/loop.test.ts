@@ -482,7 +482,8 @@ describe("AgentEngine Main Loop", () => {
       { role: "assistant", content: "完成" },
     ]);
 
-    // 每个工具执行延迟 50ms;若并行总耗时约 50ms,若串行约 150ms
+    let executionSequence = 0;
+    const executionWindows: Array<{ started: number; finished?: number }> = [];
     const registry = new (class implements Registry {
       readonly executed: ToolCall[] = [];
       register(): void {}
@@ -492,7 +493,12 @@ describe("AgentEngine Main Loop", () => {
       }
       async execute(call: ToolCall): Promise<ToolResult> {
         this.executed.push(call);
-        await new Promise((r) => setTimeout(r, 50));
+        const window: { started: number; finished?: number } = {
+          started: ++executionSequence,
+        };
+        executionWindows.push(window);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        window.finished = ++executionSequence;
         return { toolCallId: call.id, output: `out-${call.id}`, isError: false };
       }
       // 资源冲突图调度:read 不同路径 → 不冲突 → 并行
@@ -503,15 +509,15 @@ describe("AgentEngine Main Loop", () => {
     })();
 
     const engine = new AgentEngine({ provider, registry, workDir: "/tmp" });
-    const start = Date.now();
     const session = newSession("并发读");
     await engine.run(session);
-    const elapsed = Date.now() - start;
 
     // 三个工具都执行了
     expect(registry.executed).toHaveLength(3);
-    // 并行:总耗时应明显小于 3*50=150ms (留余量取 120ms)
-    expect(elapsed).toBeLessThan(120);
+    // 并行:所有工具都在任意一个完成前已启动,不依赖机器墙钟。
+    expect(Math.max(...executionWindows.map((window) => window.started))).toBeLessThan(
+      Math.min(...executionWindows.map((window) => window.finished ?? Number.POSITIVE_INFINITY)),
+    );
     // 观察结果按原始顺序 c1/c2/c3 保留(调度器保证 provider order)
     const obs = session.getHistory().filter((m) => m.toolCallId);
     expect(obs.map((m) => m.toolCallId)).toEqual(["c1", "c2", "c3"]);
@@ -579,6 +585,8 @@ describe("AgentEngine Main Loop", () => {
       { role: "assistant", content: "完成" },
     ]);
 
+    let executionSequence = 0;
+    const executionWindows: Array<{ started: number; finished?: number }> = [];
     const registry = new (class implements Registry {
       readonly executed: ToolCall[] = [];
       register(): void {}
@@ -588,7 +596,12 @@ describe("AgentEngine Main Loop", () => {
       }
       async execute(call: ToolCall): Promise<ToolResult> {
         this.executed.push(call);
-        await new Promise((r) => setTimeout(r, 50));
+        const window: { started: number; finished?: number } = {
+          started: ++executionSequence,
+        };
+        executionWindows.push(window);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        window.finished = ++executionSequence;
         return { toolCallId: call.id, output: `out-${call.id}`, isError: false };
       }
       getAccesses(call: ToolCall): ToolAccesses {
@@ -598,12 +611,12 @@ describe("AgentEngine Main Loop", () => {
     })();
 
     const engine = new AgentEngine({ provider, registry, workDir: "/tmp" });
-    const start = Date.now();
     await engine.run(newSession("并发写不同文件"));
-    const elapsed = Date.now() - start;
 
-    // 并行:两个写不同文件不冲突,耗时约 50ms (远小于串行的 100ms)
-    expect(elapsed).toBeLessThan(120);
+    // 并行:两个写不同文件不冲突,它们的执行区间应真实重叠。
+    expect(Math.max(...executionWindows.map((window) => window.started))).toBeLessThan(
+      Math.min(...executionWindows.map((window) => window.finished ?? Number.POSITIVE_INFINITY)),
+    );
     expect(registry.executed).toHaveLength(2);
   });
 
