@@ -41,6 +41,10 @@ export interface SessionCatalogEntry {
   updatedAt: string;
   lastOpenedAt: string;
   journalSchemaVersion: number;
+  /** JSONL source marker. Optional only for catalog entries written before this field existed. */
+  sourceMtimeMs?: number;
+  /** JSONL source marker. Optional only for catalog entries written before this field existed. */
+  sourceSizeBytes?: number;
   head?: SessionCatalogCursor;
   health: SessionCatalogHealth;
   diagnostic?: string;
@@ -171,6 +175,8 @@ function parseEntry(value: unknown): SessionCatalogEntry | undefined {
     typeof value["updatedAt"] !== "string" ||
     typeof value["lastOpenedAt"] !== "string" ||
     !isNonNegativeInteger(value["journalSchemaVersion"]) ||
+    !isOptionalNonNegativeNumber(value["sourceMtimeMs"]) ||
+    !isOptionalNonNegativeInteger(value["sourceSizeBytes"]) ||
     !isCatalogHealth(health) ||
     (value["head"] !== undefined && !head) ||
     !isOptionalString(value["title"]) ||
@@ -199,6 +205,12 @@ function parseEntry(value: unknown): SessionCatalogEntry | undefined {
     updatedAt: value["updatedAt"],
     lastOpenedAt: value["lastOpenedAt"],
     journalSchemaVersion: value["journalSchemaVersion"],
+    ...(typeof value["sourceMtimeMs"] === "number"
+      ? { sourceMtimeMs: value["sourceMtimeMs"] }
+      : {}),
+    ...(typeof value["sourceSizeBytes"] === "number"
+      ? { sourceSizeBytes: value["sourceSizeBytes"] }
+      : {}),
     ...(head ? { head } : {}),
     health,
     ...(typeof value["diagnostic"] === "string" ? { diagnostic: value["diagnostic"] } : {}),
@@ -279,6 +291,14 @@ function isOptionalString(value: unknown): boolean {
 
 function isNonNegativeInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isOptionalNonNegativeInteger(value: unknown): boolean {
+  return value === undefined || isNonNegativeInteger(value);
+}
+
+function isOptionalNonNegativeNumber(value: unknown): boolean {
+  return value === undefined || (typeof value === "number" && Number.isFinite(value) && value >= 0);
 }
 
 function isNodeCode(error: unknown, code: string): boolean {

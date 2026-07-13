@@ -1,9 +1,10 @@
-import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { listCliSessionSummaries } from "../src/cli/session-resolver.js";
 import { SessionManager } from "../src/engine/session.js";
+import { SessionStore } from "../src/engine/session-store.js";
 import type { PersistedSessionSettings } from "../src/engine/session-runtime.js";
 import { SessionCatalog } from "../src/storage/session-catalog.js";
 import { readSessionCatalogProjectionHealth } from "../src/storage/session-catalog-projection.js";
@@ -12,7 +13,78 @@ describe("Session Catalog integration", () => {
   const cleanup: string[] = [];
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     await Promise.all(cleanup.splice(0).map((path) => rm(path, { recursive: true, force: true })));
+  });
+
+  it("uses healthy source markers without replay and rebuilds changed or new journals", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pico-session-catalog-fast-path-"));
+    cleanup.push(root);
+    const workDir = join(root, "workspace");
+    const catalog = new SessionCatalog({ baseDirectory: join(root, "catalog") });
+    const manager = new SessionManager();
+
+    for (const [sessionId, content] of [
+      ["first", "第一个健康会话"],
+      ["second", "第二个健康会话"],
+    ] as const) {
+      const session = await manager.getOrCreate(sessionId, workDir, {
+        persistence: true,
+        sessionCatalog: catalog,
+      });
+      await session.commitMessages({ role: "user", content });
+      await session.flushPersistence();
+      await session.close();
+    }
+
+    const firstPath = join(workDir, ".claw", "sessions", "first.jsonl");
+    const firstInfo = await stat(firstPath);
+    await expect(catalog.list({ sessionProjectDir: workDir })).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          sessionId: "first",
+          sourceMtimeMs: firstInfo.mtimeMs,
+          sourceSizeBytes: firstInfo.size,
+        }),
+      ]),
+    );
+
+    const inspectSpy = vi.spyOn(SessionStore.prototype, "inspectJournal");
+    const loadSpy = vi.spyOn(SessionStore.prototype, "load");
+    await expect(listCliSessionSummaries(workDir, { catalog })).resolves.toHaveLength(2);
+    expect(inspectSpy).not.toHaveBeenCalled();
+    expect(loadSpy).not.toHaveBeenCalled();
+
+    const changed = new SessionStore(firstPath);
+    await changed.commitMessage({ role: "user", content: "绕过 Catalog 追加的新消息" });
+    await changed.close();
+    const newPath = join(workDir, ".claw", "sessions", "third.jsonl");
+    await mkdir(join(workDir, ".claw", "sessions"), { recursive: true });
+    await writeFile(
+      newPath,
+      [
+        JSON.stringify({ type: "meta", schemaVersion: 1 }),
+        JSON.stringify({
+          type: "message",
+          seq: 0,
+          message: { role: "user", content: "目录之外新增的会话" },
+        }),
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    inspectSpy.mockClear();
+    loadSpy.mockClear();
+    await expect(listCliSessionSummaries(workDir, { catalog })).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "first", messageCount: 2 }),
+        expect.objectContaining({ id: "second", messageCount: 1 }),
+        expect.objectContaining({ id: "third", messageCount: 1 }),
+      ]),
+    );
+    expect(inspectSpy).toHaveBeenCalledTimes(2);
+    expect(loadSpy).not.toHaveBeenCalled();
   });
 
   it("projects durable commits and fork lineage without replacing JSONL identity", async () => {
