@@ -150,6 +150,7 @@ export class JobService {
   terminal(input: TerminalJobInput): FinishJobResult {
     const result = this.store.finishJob({
       ...input,
+      ownerId: this.ownerId,
       completionId: input.completionId ?? `completion:${input.attemptId}`,
     });
     try {
