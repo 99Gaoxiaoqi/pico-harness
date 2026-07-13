@@ -44,6 +44,83 @@ export type SessionMetadataInput = Omit<SessionMetadata, "schemaVersion"> & {
   readonly schemaVersion?: number;
 };
 
+/** v3 会话身份与派生关系；仅描述事实，不引入运行时句柄。 */
+export interface SessionLineage {
+  readonly relation: "root" | "fork" | "spawn" | "salvage";
+  readonly rootLogId: string;
+  readonly parent?: SessionCursor;
+  readonly parentTaskId?: string;
+}
+
+export interface SessionCursor {
+  readonly logId: string;
+  readonly seq: number;
+  readonly epoch: number;
+}
+
+export interface SessionMetaV3 {
+  readonly type: "meta";
+  readonly schemaVersion: 3;
+  readonly logId: string;
+  readonly sessionId: string;
+  readonly createdAt: string;
+  readonly identity: SessionIdentity;
+  readonly lineage: SessionLineage;
+}
+
+export interface CommitReceipt {
+  readonly eventId: string;
+  readonly cursor: SessionCursor;
+  readonly committedAt: string;
+  readonly durable: true;
+}
+
+interface SessionEventBase {
+  readonly type: "event";
+  readonly recordVersion: 1;
+  readonly eventId: string;
+  readonly seq: number;
+  readonly epoch: number;
+  readonly at: string;
+}
+
+export type SessionEvent =
+  | (SessionEventBase & {
+      readonly kind: "message.appended";
+      readonly data: { readonly message: Message; readonly volatile?: boolean };
+    })
+  | (SessionEventBase & {
+      readonly kind: "history.truncated";
+      readonly data: { readonly fromIndex: number };
+    })
+  | (SessionEventBase & {
+      readonly kind: "history.rewound";
+      readonly data: { readonly messageIndex: number };
+    })
+  | (SessionEventBase & {
+      readonly kind: "history.compacted";
+      readonly data: {
+        readonly summaryMessage: Message;
+        readonly retainedMessages: readonly Message[];
+      };
+    })
+  | (SessionEventBase & {
+      /** 只供 v0-v2 adapter 使用；v3 writer 不得生成该事件。 */
+      readonly kind: "legacy.undo";
+      readonly data: { readonly count: number };
+    })
+  | (SessionEventBase & {
+      readonly kind: "runtime.checkpoint";
+      readonly data: {
+        readonly stateVersion: typeof SESSION_RUNTIME_STATE_VERSION;
+        readonly patch: SessionRuntimeStatePatch;
+      };
+    })
+  | (SessionEventBase & {
+      readonly kind: "session.seeded";
+      readonly data: { readonly messages: readonly Message[] };
+    });
+
 /** 持久化的事件记录:每行一个,带 type 判别联合。 */
 /**
  * message record 的可选 `volatile` 字段(4.3 cursor 多端同步):
@@ -52,7 +129,7 @@ export type SessionMetadataInput = Omit<SessionMetadata, "schemaVersion"> & {
  *   - false/缺省:持久事件,推进 seq,重放时进入 history。
  *   向后兼容:旧 JSONL 无此字段,load/recover 时按 false 处理(即全部当作持久)。
  */
-export type SessionRecord =
+export type LegacySessionRecord =
   | {
       readonly type: "message";
       readonly seq: number;
@@ -73,8 +150,13 @@ export type SessionRecord =
       readonly at: string;
       readonly stateVersion: typeof SESSION_RUNTIME_STATE_VERSION;
       readonly patch: SessionRuntimeStatePatch;
-    }
-  | ({ readonly type: "meta" } & SessionMetadata);
+    };
+
+export type SessionRecord =
+  | LegacySessionRecord
+  | SessionEvent
+  | ({ readonly type: "meta" } & SessionMetadata)
+  | SessionMetaV3;
 
 /**
  * record 落盘监听器(4.3 cursor 多端同步)。
@@ -250,7 +332,7 @@ export class SessionStore {
     }
     // 关键:按 seq 排序,消除 fire-and-forget 落盘乱序的影响。
     // meta 行已在上一步跳过,这里剩余元素都带 seq。
-    records.sort((a, b) => (a as { seq: number }).seq - (b as { seq: number }).seq);
+    records.sort((a, b) => ("seq" in a ? a.seq : -1) - ("seq" in b ? b.seq : -1));
     return records;
   }
 
