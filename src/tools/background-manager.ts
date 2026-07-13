@@ -29,6 +29,7 @@ export interface BackgroundManagerOptions {
   stopTimeoutMs?: number;
   maxCompletedTasks?: number;
   taskRegistry?: TaskRegistry;
+  ownerSessionId?: string;
 }
 
 export interface BackgroundTaskSpawnOptions {
@@ -59,6 +60,7 @@ export class BackgroundManager {
   private readonly stopTimeoutMs: number;
   private readonly maxCompletedTasks: number;
   readonly taskRegistry: TaskRegistry;
+  private readonly ownerSessionId?: string;
   private nextId = 1;
 
   constructor(options: BackgroundManagerOptions = {}) {
@@ -66,6 +68,7 @@ export class BackgroundManager {
     this.stopTimeoutMs = options.stopTimeoutMs ?? DEFAULT_STOP_TIMEOUT_MS;
     this.maxCompletedTasks = options.maxCompletedTasks ?? DEFAULT_MAX_COMPLETED_TASKS;
     this.taskRegistry = options.taskRegistry ?? new TaskRegistry();
+    this.ownerSessionId = options.ownerSessionId;
   }
 
   start(
@@ -77,7 +80,11 @@ export class BackgroundManager {
     this.nextId++;
     const task = this.taskRegistry.create("local_bash", {
       description: command,
-      data: { command, cwd },
+      data: {
+        command,
+        cwd,
+        ...(this.ownerSessionId ? { ownerSessionId: this.ownerSessionId } : {}),
+      },
     });
     const taskId = task.taskId;
     const shell = resolveShell();

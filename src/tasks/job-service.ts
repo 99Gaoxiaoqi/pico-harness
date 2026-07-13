@@ -74,6 +74,8 @@ export interface TerminalJobInput {
   error?: string;
   result?: Record<string, unknown>;
   completionPayload?: Record<string, unknown>;
+  /** 结果由外层编排器同步交付时，在同一事务中将 outbox 标为已交付。 */
+  completionAlreadyDelivered?: boolean;
 }
 
 export interface CancelJobInput {

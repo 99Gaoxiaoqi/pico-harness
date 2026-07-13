@@ -41,6 +41,7 @@ export const MERGE_REQUEST_STATUSES = [
   "queued",
   "running",
   "merged",
+  "not_needed",
   "blocked",
   "failed",
   "cancelled",
