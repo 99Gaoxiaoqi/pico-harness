@@ -975,7 +975,7 @@ describe("Pico command registry", () => {
     expect(result.type).toBe("unknown-command");
     if (result.type !== "unknown-command") return;
     expect(result.command).toBe("mode");
-    expect(result.suggestions).toContain("help");
+    expect(result.suggestions).toEqual([]);
   });
 
   it("/snapshots 展示当前 session 可回滚点", async () => {
