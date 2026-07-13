@@ -6,6 +6,7 @@ import { SteerQueue } from "../engine/steer-queue.js";
 import type { Message } from "../schema/message.js";
 import { FileIndex } from "../input/file-index.js";
 import { MemoryNudger } from "../memory/memory-nudger.js";
+import { logger } from "../observability/logger.js";
 import { SkillRegistry } from "../memory/skill-registry.js";
 import { TaskRegistry } from "../tasks/task-registry.js";
 import type { TaskHostRuntime } from "../tasks/task-runtime.js";
@@ -30,6 +31,8 @@ export interface TuiRuntimeStateOptions {
   toolDisclosure?: ToolDisclosure;
   lspServers?: readonly LspServerConfig[];
   taskHostRuntime?: TaskHostRuntime;
+  /** Durable completion outbox 的活态发现间隔。 */
+  completionPollIntervalMs?: number;
 }
 
 export interface TuiRuntimeState {
@@ -231,6 +234,9 @@ export async function createTuiRuntimeState(
   options: TuiRuntimeStateOptions,
 ): Promise<TuiRuntimeState> {
   const workDir = resolve(options.workDir);
+  const completionPollIntervalMs = options.taskHostRuntime
+    ? positiveDuration(options.completionPollIntervalMs ?? 250, "completionPollIntervalMs")
+    : undefined;
   if (options.session.id !== options.sessionId) {
     throw new Error(
       `TUI runtime session mismatch: expected ${options.sessionId}, received ${options.session.id}`,
@@ -292,14 +298,30 @@ export async function createTuiRuntimeState(
       await options.session.commitMessages(createDelegationCompletionMessage(completion));
     },
   });
+  let completionPollTimer: ReturnType<typeof setInterval> | undefined;
   if (jobService) {
-    for (const completion of jobService.pendingCompletions({
-      ownerSessionId: options.sessionId,
-      limit: 1_000,
-    })) {
-      const envelope = delegationEnvelopeFromOutbox(completion, options.sessionId);
-      if (envelope) delegationCompletionQueue.enqueue(envelope);
+    if (completionPollIntervalMs === undefined) {
+      throw new Error("taskHostRuntime 缺少 completion poll 配置");
     }
+    const scanDurableCompletions = (): void => {
+      try {
+        for (const completion of jobService.pendingCompletions({
+          ownerSessionId: options.sessionId,
+          limit: 1_000,
+        })) {
+          const envelope = delegationEnvelopeFromOutbox(completion, options.sessionId);
+          if (envelope) delegationCompletionQueue.enqueue(envelope);
+        }
+      } catch (error) {
+        logger.warn(
+          { sessionId: options.sessionId, error: String(error) },
+          "[runtime-store] 扫描 durable completion outbox 失败",
+        );
+      }
+    };
+    scanDurableCompletions();
+    completionPollTimer = setInterval(scanDurableCompletions, completionPollIntervalMs);
+    completionPollTimer.unref?.();
     for (const completion of unconsumedDelegationCompletions(
       options.session.getHistory(),
       options.sessionId,
@@ -331,6 +353,10 @@ export async function createTuiRuntimeState(
     codeIntelligence,
     codeIntelligenceManager,
     unbindGoalManager,
+    stopDelegationCompletionPolling: () => {
+      if (completionPollTimer) clearInterval(completionPollTimer);
+      completionPollTimer = undefined;
+    },
   });
 }
 
@@ -475,6 +501,7 @@ interface DefaultTuiRuntimeStateOptions {
   codeIntelligence: CodeIntelligenceService;
   codeIntelligenceManager: CodeIntelligenceManager;
   unbindGoalManager: () => void;
+  stopDelegationCompletionPolling: () => void;
 }
 
 class DefaultTuiRuntimeState implements TuiRuntimeState {
@@ -495,6 +522,7 @@ class DefaultTuiRuntimeState implements TuiRuntimeState {
   readonly codeIntelligence: CodeIntelligenceService;
   readonly codeIntelligenceManager: CodeIntelligenceManager;
   private readonly unbindGoalManager: () => void;
+  private readonly stopDelegationCompletionPolling: () => void;
   private disposePromise?: Promise<void>;
 
   constructor(options: DefaultTuiRuntimeStateOptions) {
@@ -515,6 +543,7 @@ class DefaultTuiRuntimeState implements TuiRuntimeState {
     this.codeIntelligence = options.codeIntelligence;
     this.codeIntelligenceManager = options.codeIntelligenceManager;
     this.unbindGoalManager = options.unbindGoalManager;
+    this.stopDelegationCompletionPolling = options.stopDelegationCompletionPolling;
   }
 
   assertCompatible(workDir: string, sessionId: string): void {
@@ -540,6 +569,7 @@ class DefaultTuiRuntimeState implements TuiRuntimeState {
   async dispose(): Promise<void> {
     if (this.disposePromise) return this.disposePromise;
     this.disposePromise = (async () => {
+      this.stopDelegationCompletionPolling();
       try {
         const runningTasks = this.backgroundManager
           .list()
@@ -556,4 +586,9 @@ class DefaultTuiRuntimeState implements TuiRuntimeState {
     })();
     return this.disposePromise;
   }
+}
+
+function positiveDuration(value: number, name: string): number {
+  if (!Number.isFinite(value) || value <= 0) throw new Error(`${name} 必须为正数`);
+  return value;
 }
