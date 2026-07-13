@@ -8,7 +8,7 @@
 // 用 mkdtemp 创建独立临时目录,不污染工作区。
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
+import { appendFile, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionManager } from "../src/engine/session.js";
@@ -180,34 +180,37 @@ describe("SessionStore 末行撕裂容忍", () => {
     await safeRm(workDir);
   });
 
-  async function flush(): Promise<void> {
-    await new Promise((resolve) => setTimeout(resolve, 60));
-  }
-
-  it("最后一行损坏(撕裂)时,recover 容忍跳过,不报错", async () => {
-    const { readFile, writeFile } = await import("node:fs/promises");
+  it("最后一行损坏(撕裂)时,重启修复残尾并保留完整记录", async () => {
     const mgr1 = new SessionManager();
     const s1 = await mgr1.getOrCreate("chat-tear", workDir, ON);
-    s1.append(userMsg("good-1"), userMsg("good-2"));
-    await flush();
+    try {
+      s1.append(userMsg("good-1"), userMsg("good-2"));
+      // 以公开 durability 契约冻结已提交边界。固定 sleep 在全量 IO
+      // 压力下可能只等到第一条 fdatasync。
+      await s1.flushPersistence();
+    } finally {
+      // close 同时释放 pooled writer / OwnerLease / FTS，建立真实重启边界。
+      await s1.close();
+    }
 
     // 人为撕裂:把文件末尾追加一行半截 JSON,模拟崩溃时 append 写一半
-    // (不修改已有行,避免与 fire-and-forget 落盘顺序假设耦合)
-    const file = `${workDir}/.claw/sessions/chat-tear.jsonl`;
-    const content = await readFile(file, "utf8");
-    // 末尾追加一个半截损坏行(未闭合的 JSON),模拟 append 写一半崩溃
-    const torn = `${content}{"type":"message","seq":999,"message":{"ro`;
-    await writeFile(file, torn);
+    const file = join(workDir, ".claw", "sessions", "chat-tear.jsonl");
+    await appendFile(file, '{"type":"message","seq":999,"message":{"ro', "utf8");
 
-    // 重启恢复:末行撕裂应被容忍,保留能解析的两条完整消息
+    // 重启恢复:新 writer 先修复撕裂末行,再严格重放两条完整消息。
     const mgr2 = new SessionManager();
     const s2 = await mgr2.getOrCreate("chat-tear", workDir, ON);
-    expect(s2.length).toBe(2); // good-1 + good-2,撕裂行被跳过
-    const contents = s2
-      .getHistory()
-      .map((m) => m.content)
-      .sort();
-    expect(contents).toEqual(["good-1", "good-2"]);
+    try {
+      expect(s2.length).toBe(2); // good-1 + good-2,撕裂行被修复
+      const contents = s2
+        .getHistory()
+        .map((m) => m.content)
+        .sort();
+      expect(contents).toEqual(["good-1", "good-2"]);
+      expect(await readFile(file, "utf8")).not.toContain('"seq":999');
+    } finally {
+      await s2.close();
+    }
   });
 
   it("首次启动(无文件)recover 为空历史,不报错", async () => {
