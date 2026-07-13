@@ -27,6 +27,9 @@ import {
   type RuntimeLeaseRecord,
   type TerminalJobStatus,
   type UsageBaselineRecord,
+  type UsageLedgerFilter,
+  type UsageLedgerSummary,
+  type UsageLedgerTotals,
   isTerminalJobStatus,
 } from "./runtime-types.js";
 
@@ -804,6 +807,14 @@ export class RuntimeStore {
     record: ProviderCallRecord;
     inserted: boolean;
   } {
+    if (record.jobId && record.attemptId) {
+      const attempt = this.requireAttempt(record.attemptId);
+      if (attempt.jobId !== record.jobId) {
+        throw new RuntimeConflictError(
+          `Provider call ${record.callId} 的 attempt ${record.attemptId} 不属于 job ${record.jobId}`,
+        );
+      }
+    }
     const result = this.db
       .prepare(
         `INSERT OR IGNORE INTO provider_calls (
@@ -863,6 +874,38 @@ export class RuntimeStore {
         stringifyJson(record.source),
       );
     return { record: this.requireBaseline(record.baselineId), inserted: result.changes === 1 };
+  }
+
+  listProviderCalls(filter: UsageLedgerFilter = {}): ProviderCallRecord[] {
+    const { where, params } = usageWhere(filter, true);
+    const rows = this.db
+      .prepare(`SELECT * FROM provider_calls${where} ORDER BY created_at, call_id`)
+      .all(...params) as ProviderCallRow[];
+    return rows.map(mapProviderCall);
+  }
+
+  listUsageBaselines(filter: Omit<UsageLedgerFilter, "jobId"> = {}): UsageBaselineRecord[] {
+    const { where, params } = usageWhere(filter, false);
+    const rows = this.db
+      .prepare(`SELECT * FROM usage_baselines${where} ORDER BY imported_at, baseline_id`)
+      .all(...params) as BaselineRow[];
+    return rows.map(mapBaseline);
+  }
+
+  /** baseline 与之后的逐调用事实只相加一次，避免再叠加 Session 聚合造成双计。 */
+  getUsageSummary(filter: UsageLedgerFilter = {}): UsageLedgerSummary {
+    const providerCalls = this.listProviderCalls(filter);
+    // baseline 只属于 session/goal 历史，不能摊入某个 job。
+    const baselines = filter.jobId ? [] : this.listUsageBaselines(filter);
+    const providerTotals = sumUsage(providerCalls);
+    const baselineTotals = sumUsage(baselines);
+    return {
+      providerCallCount: providerCalls.length,
+      baselineCount: baselines.length,
+      providerCalls: providerTotals,
+      baselines: baselineTotals,
+      total: addUsage(providerTotals, baselineTotals),
+    };
   }
 
   async importLegacyTaskStore(filePath: string): Promise<LegacyTaskImportResult> {
@@ -1482,6 +1525,56 @@ function sameProviderCall(
     stored.cost === input.cost &&
     isDeepStrictEqual(stored.reported, input.reported)
   );
+}
+
+function usageWhere(
+  filter: UsageLedgerFilter | Omit<UsageLedgerFilter, "jobId">,
+  includeJob: boolean,
+): { where: string; params: string[] } {
+  const clauses: string[] = [];
+  const params: string[] = [];
+  if (filter.sessionId !== undefined) {
+    clauses.push("session_id = ?");
+    params.push(filter.sessionId);
+  }
+  if (filter.goalId !== undefined) {
+    clauses.push("goal_id = ?");
+    params.push(filter.goalId);
+  }
+  if (includeJob && "jobId" in filter && filter.jobId !== undefined) {
+    clauses.push("job_id = ?");
+    params.push(filter.jobId);
+  }
+  return { where: clauses.length > 0 ? ` WHERE ${clauses.join(" AND ")}` : "", params };
+}
+
+function sumUsage(
+  records: readonly (ProviderCallRecord | UsageBaselineRecord)[],
+): UsageLedgerTotals {
+  return records.reduce<UsageLedgerTotals>(
+    (total, record) => ({
+      inputTokens: total.inputTokens + record.inputTokens,
+      outputTokens: total.outputTokens + record.outputTokens,
+      cacheReadTokens: total.cacheReadTokens + record.cacheReadTokens,
+      cacheWriteTokens: total.cacheWriteTokens + record.cacheWriteTokens,
+      cost: total.cost + record.cost,
+    }),
+    emptyUsage(),
+  );
+}
+
+function addUsage(left: UsageLedgerTotals, right: UsageLedgerTotals): UsageLedgerTotals {
+  return {
+    inputTokens: left.inputTokens + right.inputTokens,
+    outputTokens: left.outputTokens + right.outputTokens,
+    cacheReadTokens: left.cacheReadTokens + right.cacheReadTokens,
+    cacheWriteTokens: left.cacheWriteTokens + right.cacheWriteTokens,
+    cost: left.cost + right.cost,
+  };
+}
+
+function emptyUsage(): UsageLedgerTotals {
+  return { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, cost: 0 };
 }
 
 export function generateRuntimeId(prefix: string): string {

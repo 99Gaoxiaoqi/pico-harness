@@ -19,6 +19,7 @@
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { LLMProvider } from "../provider/interface.js";
+import { withProviderCallContext } from "../observability/provider-call-context.js";
 import type { Message } from "../schema/message.js";
 import { logger } from "../observability/logger.js";
 import { countTokens } from "./token-counter.js";
@@ -196,7 +197,9 @@ export function createAuxSummarizer(provider: LLMProvider): Summarizer {
         content: `请压缩以下对话历史:\n\n${historyText}${previousSummaryBlock}${focusTopicBlock}`,
       },
     ];
-    const result = await provider.generate(messages, []);
+    const result = await withProviderCallContext({ purpose: "aux" }, () =>
+      provider.generate(messages, []),
+    );
     return result.content;
   };
 }

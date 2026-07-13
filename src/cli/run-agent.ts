@@ -41,7 +41,8 @@ import {
   createToolResultObservationProcessor,
   type ToolObservationProcessor,
 } from "../tools/tool-result-observation.js";
-import { CostTracker } from "../observability/tracker.js";
+import { CostTracker, type CostTrackerOptions } from "../observability/tracker.js";
+import { ensureSessionUsageBaseline } from "../observability/usage-baseline.js";
 import type { BillingRoute } from "../observability/pricing.js";
 import type { ModelRouteCapabilities } from "../provider/model-capabilities.js";
 import { Tracer } from "../observability/trace.js";
@@ -85,6 +86,7 @@ import { loadImage } from "../input/prepare-prompt.js";
 import type { YoloSandboxConfig } from "../safety/yolo-sandbox.js";
 import { resolveCliSession, type CliSessionSelection } from "./session-resolver.js";
 import type { WorktreeSupervisor } from "../tasks/worktree-supervisor.js";
+import { RuntimeStore } from "../tasks/runtime-store.js";
 
 export interface RunAgentCliOptions {
   prompt: string;
@@ -265,6 +267,40 @@ export async function runAgentFromCli(
   ) {
     throw new Error("runtimeState.toolDisclosure must match dependencies.toolDisclosure");
   }
+  let ownedUsageStore: RuntimeStore | undefined;
+  if (!runtimeState.taskHostRuntime) {
+    try {
+      ownedUsageStore = new RuntimeStore({ workDir });
+    } catch (error) {
+      logger.error(
+        { workDir, error: error instanceof Error ? error.message : String(error) },
+        "[Tracker] runtime usage ledger 初始化失败",
+      );
+    }
+  }
+  const usageLedger = runtimeState.taskHostRuntime?.jobService ?? ownedUsageStore;
+  if (usageLedger) {
+    try {
+      ensureSessionUsageBaseline(usageLedger, session);
+    } catch (error) {
+      logger.error(
+        { sessionId: session.id, error: error instanceof Error ? error.message : String(error) },
+        "[Tracker] Session usage baseline 导入失败",
+      );
+    }
+  }
+  const trackerOptions: CostTrackerOptions = {
+    ...(usageLedger ? { ledger: usageLedger } : {}),
+    context: () => {
+      const goalId = runtimeState.goalManager.getActive()?.id;
+      return {
+        purpose: "main",
+        sessionId: session.id,
+        conversationId: session.conversationId,
+        ...(goalId ? { goalId } : {}),
+      };
+    },
+  };
   // 凭证轮换(4.2):多 key 时从池取首个 key 覆盖 config.apiKey,并构建轮换回调。
   // 单 key / 注入 provider 时跳过(向后兼容)。pool 注入点集中在此,便于追踪 currentKey。
   const credentialPool = options.apiKey === undefined ? getCredentialPool() : undefined;
@@ -275,8 +311,13 @@ export async function runAgentFromCli(
   const providerFactory = dependencies.providerFactory ?? createRawProvider;
   const buildTrackedProvider = (config: ProviderConfig): LLMProvider =>
     effectiveOptions.allowModelFallback === false
-      ? new CostTracker(providerFactory(kind, config), trackingRoute(kind, config), session)
-      : createTrackedProviderWithFallback(kind, config, providerFactory, session);
+      ? new CostTracker(
+          providerFactory(kind, config),
+          trackingRoute(kind, config),
+          session,
+          trackerOptions,
+        )
+      : createTrackedProviderWithFallback(kind, config, providerFactory, session, trackerOptions);
   let trackedProvider: LLMProvider;
   let rebuildProvider: (() => LLMProvider | undefined) | undefined;
   if (dependencies.provider !== undefined) {
@@ -284,6 +325,7 @@ export async function runAgentFromCli(
       dependencies.provider,
       trackingRoute(kind, providerConfig),
       session,
+      trackerOptions,
     );
   } else if (credentialPool && credentialPool.size > 1) {
     const rotation = new CredentialRotationCoordinator(
@@ -338,7 +380,11 @@ export async function runAgentFromCli(
     }).build(runtimeState.conversationTurnCount(session));
   // 辅助(廉价)模型:用于 FullCompactor 生成摘要,省主模型成本。
   // 配齐 AUX_LLM_BASE_URL / AUX_LLM_API_KEY / AUX_LLM_MODEL 才启用;缺则用主 provider。
-  const auxProvider = loadAuxProvider(dependencies.env ?? process.env);
+  const auxProvider = loadAuxProvider(
+    dependencies.env ?? process.env,
+    session,
+    trackerOptions,
+  );
   const reporter = dependencies.reporter ?? new TerminalReporter();
   const engine = new AgentEngine({
     provider: trackedProvider,
@@ -477,6 +523,7 @@ export async function runAgentFromCli(
     if (ownsRuntimeState) {
       await runtimeState.dispose();
     }
+    ownedUsageStore?.close();
   }
 }
 
@@ -510,12 +557,18 @@ function createTrackedProviderWithFallback(
   config: ProviderConfig,
   providerFactory: RunAgentProviderFactory,
   session: Session,
+  trackerOptions: CostTrackerOptions,
 ): LLMProvider {
   const fallbackModel = config.capabilities
     ? config.capabilities.fallbackModel
     : fallbackModelFor(config.model);
   if (!fallbackModel) {
-    return new CostTracker(providerFactory(kind, config), trackingRoute(kind, config), session);
+    return new CostTracker(
+      providerFactory(kind, config),
+      trackingRoute(kind, config),
+      session,
+      trackerOptions,
+    );
   }
 
   return new CostTrackedModelFallbackProvider(
@@ -524,6 +577,7 @@ function createTrackedProviderWithFallback(
     fallbackModel,
     providerFactory,
     session,
+    trackerOptions,
   );
 }
 
@@ -539,6 +593,7 @@ export class CostTrackedModelFallbackProvider implements LLMProvider {
     private readonly fallbackModel: string,
     private readonly providerFactory: RunAgentProviderFactory,
     private readonly session: Session,
+    private readonly trackerOptions: CostTrackerOptions = {},
   ) {
     this.primaryProvider = this.createTrackedProvider(primaryConfig);
   }
@@ -636,6 +691,7 @@ export class CostTrackedModelFallbackProvider implements LLMProvider {
       this.providerFactory(this.kind, fallbackConfig),
       trackingRoute(this.kind, fallbackConfig),
       this.session,
+      this.trackerOptions,
     );
   }
 }
@@ -703,13 +759,23 @@ function buildCompactor(kind: ProviderKind, model: string): Compactor {
  * 配齐 AUX_LLM_BASE_URL / AUX_LLM_API_KEY / AUX_LLM_MODEL 三项才启用;
  * 缺任意一项则返回 undefined(FullCompactor 回退到主 provider)。
  */
-function loadAuxProvider(env: RunAgentEnv): LLMProvider | undefined {
+function loadAuxProvider(
+  env: RunAgentEnv,
+  session: Session,
+  trackerOptions: CostTrackerOptions,
+): LLMProvider | undefined {
   const baseURL = env.AUX_LLM_BASE_URL;
   const apiKey = env.AUX_LLM_API_KEY;
   const model = env.AUX_LLM_MODEL;
   if (!baseURL || !apiKey || !model) return undefined;
   const kind = (env.AUX_LLM_PROVIDER as ProviderKind | undefined) ?? "openai";
-  return createProvider(kind, { baseURL, apiKey, model });
+  const config = { baseURL, apiKey, model };
+  return new CostTracker(
+    createProvider(kind, config),
+    trackingRoute(kind, config),
+    session,
+    trackerOptions,
+  );
 }
 
 function buildArtifactRuntime(
