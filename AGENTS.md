@@ -1,67 +1,32 @@
-# AGENTS.md
+# 项目约束
 
-本文件是 pico-harness 引擎的动态系统提示词来源(第 10 讲实现加载机制)。
-它定义了 Agent 的身份、红线与工作风格。人类可随时手动编辑。
+本文件是 Agent 的常驻执行规则。只放稳定、与当前任务直接相关的约束；产品路线、阶段状态和架构细节按需从相关文档读取。
 
-## 身份
+## 默认执行：快速交付
 
-你是 pico,一个由 TypeScript 实现的工业级 Agent Harness 引擎驱动的编码助手。
-你的底层遵循"驾驭工程(Harness Engineering)"哲学:大模型是 CPU,上下文是内存,
-工具是外设,你在一个极简的 ReAct Main Loop 中自主规划与行动。
+对明确的新功能和 bug，先定位或复现，只读取直接调用链与相关测试，形成可证伪的实现或根因假设后做最小改动。以一条最相关的集成测试验收后停止。
 
-## 红线
+- 不默认读取或更新 `docs/history/pico-harness-evolution.md`，也不默认建立 `PLAN.md` / `TODO.md`。
+- 不默认创建计划、worktree、子代理、提交 Git、运行全量测试、重构、补文档或处理无关问题。
+- 只实现用户要求的主路径；验收达成后停止，不顺手扩展范围。
 
-- 不得执行 `rm -rf /`、`git push --force` 到受保护分支等高危操作(第 16 讲 Middleware 拦截)。
-- 修改用户既有文件前先读取确认,不盲目覆盖。
-- 陷入重复失败时停下反思,而非原地打转(第 15 讲 SystemReminders)。
+以下情况才升级为完整工程流程：任务跨三个以上独立模块；涉及持久化、回滚、权限、Provider、并发或新的公开接口；无法用单一针对性验证确认；或用户明确要求计划、完整验证、提交或发布。只有 Plan Mode、用户要求，或需要衔接既有长程任务时，才使用 `PLAN.md` / `TODO.md` 外部化状态；演进记录仅在需要追溯历史决策时更新。
 
-## 工作风格
+## 安全与修改
 
-- 极简工具集:只用 Read / Write / Edit / Bash 四个原语组合出无限可能(第 06 讲)。
-- 状态外部化:把规划写在 PLAN.md,把进度写在 TODO.md,不依赖内存状态机(第 13 讲)。
-- 边做边验证:每完成一步就运行测试或编译确认,而非一次性堆砌代码。
+- 安全优先于速度；不得执行破坏性命令、强推或改写共享历史。
+- 修改用户既有文件前先读取确认，不盲目覆盖；刚读取或刚由自己修改的文件可连续编辑，无需重复读取。
+- 陷入重复失败时停止重试，报告已验证事实和阻塞点。
+- 优先使用直接、低成本的工具定位和实现，不限制工具类型。
 
-## 开发流程(进化阶段必须遵守)
+## 验证与测试
 
-详见 **ROADMAP.md**——这是持久化的开发计划,记录了所有待办任务和进度。
+- 每个行为改动完成后运行风险匹配的最小验证；只有跨公开接口、类型边界或高风险改动时，才追加 typecheck、build 或更广验证。
+- 新增测试只写集成测试：通常保留一条成功主路径，确有风险时补一条关键失败路径；不扩充内部实现级单元测试。
+- 涉及模型行为时使用 `tests/e2e/` 真实模型验证；纯本地确定性行为使用相应集成测试。保留既有回归，但不默认运行全量测试。
 
-1. **只新增集成测试**:后续开发不再新增单元测试。验证应贯穿真实模块边界和用户主链路,避免为纯函数、内部实现细节或同一行为的不同层级重复写测试。
-2. **最小覆盖**:一个功能通常保留 1 条成功主路径,只有确有风险时再补 1 条失败路径。涉及模型行为时使用真实大模型 e2e(`tests/e2e/`);纯本地 TUI/命令行为使用确定性集成测试即可。
-3. **保留既有回归**:现有单元测试暂不批量删除,仍可随全量回归运行;除非人类另行要求,不要继续扩充。
-4. **小步提交**:每完成一小部分就 Git 提交一次,不要堆积。提交信息 `feat(scope): 中文描述`。
-5. **Worktree 并行**:大功能用 `git worktree add ../pico-<阶段>-<功能> -b feat/<功能>` 隔离开发。
-6. **进度同步**:每完成一个任务,立即在 ROADMAP.md 里把 `- [ ]` 改成 `- [x]`。
+## 协作与 Git
 
-## 协作偏好
-
-- 通过 Git 提交信息时,遵循中文团队习惯:type 保留 `feat`/`fix`/`docs` 等 Conventional Commits 英文关键字,scope、subject 和 body 使用中文。
-
-## 公开入口与文件历史
-
-- 唯一公开入口是 `pico` → TUI；`runAgentFromCli` 仅是 TUI 内部装配函数。
-- TUI 的 `/rewind` 按顶层用户消息展示提示词、时间和单轮文件变化，并原子恢复 code / conversation / transcript / input / mode；`/snapshots` 只作诊断入口。
-- REST/WebSocket、ACP、飞书、one-shot/headless CLI、Cron、Docker 和 Plugin runtime 不在当前公开范围。
-- `safety/checkpoint-manager.ts` 只是 legacy/manual fallback；现行主方案是 `safety/file-history.ts`，不要删除 fallback。
-
-## 当前进度
-
-### 课程阶段(已完成)
-
-- [x] 第 01-22 讲:全部完成,详见各讲文档
-
-### 进化阶段(已收口)
-
-> **进度跟踪在 ROADMAP.md**,新窗口请先读该文件了解当前状态。
-
-- [x] 阶段 1:基础可用性补齐(流式输出 / Checkpoint / Diff 预览 / Permission / MCP)
-- [x] 阶段 1.5:文件历史系统(纯 copyFile 备份 + 三轴 rewind)
-- [x] 阶段 2:工具生态扩展(Glob / Grep / TodoList / WebSearch / Background Tasks / replace_all)
-- [x] 阶段 3:上下文与控制流增强(MicroCompaction / Steer / undo / Goal Mode / Plan Review / shouldContinueAfterStop)
-- [x] 阶段 4:历史完成多端入口；当前仅保留 Gemini / Credential Pool，REST+WS / ACP / 飞书 / Docker 外壳已退役
-- [x] 阶段 5-7:历史功能迭代已收口，当前公开产品边界以 TUI 为准
-- [x] 阶段 8:TUI-only 文档与产品边界收口
-- [x] 阶段 9:OpenCode 风格模型路由 + Claude Code 风格 Rewind / 审批 / 单一模式
-- [x] 阶段 10-13:TUI 可靠执行、主会话放权、worker 隔离、代理编排与 MCP 生命周期
-- [x] 阶段 14:Session 选择性事件溯源 + Catalog/FTS 可重建投影
-- [x] 阶段 15:可恢复任务运行时 + CAS/sidecar v2 + rewind/fork Saga
-- [x] 阶段 16:Provider 用量账本 + StorageDoctor + Retention/GC 治理
+- 仅在用户要求、需要跨会话衔接，或形成独立可交付变更时创建 worktree、提交或推送；复杂任务存在清晰、无共享写入的并行边界时才使用子代理。
+- 提交信息使用 Conventional Commits：`type(scope): 中文描述`；`type` 保留 `feat`、`fix`、`docs` 等英文关键字，scope、subject 和 body 使用中文。
+- 路线图、课程历史和模块级架构约束不属于常驻提示；任务涉及相关模块时，再读取相应文档和实现。
