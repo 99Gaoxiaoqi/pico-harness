@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { readFile, readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { writeJsonAtomic } from "./atomic-json.js";
+import { OperationReferenceIndex } from "./operation-reference-index.js";
 
 const STORAGE_OPERATION_VERSION = 1 as const;
 const SAFE_OPERATION_ID = /^[A-Za-z0-9._-]+$/u;
@@ -98,10 +99,20 @@ export interface OperationJournalOptions {
 export class StorageOperationJournal {
   readonly directory: string;
   private readonly now: () => Date;
+  private referenceIndex?: OperationReferenceIndex;
 
   constructor(options: OperationJournalOptions) {
     this.directory = join(resolve(options.workDir), ".claw", "storage-operations");
     this.now = options.now ?? (() => new Date());
+  }
+
+  /** 把该 workspace journal 的 CAS roots 发布到共享 baseDir 的全局索引。 */
+  attachReferenceIndex(baseDir: string): void {
+    const next = new OperationReferenceIndex(baseDir);
+    if (this.referenceIndex && this.referenceIndex.directory !== next.directory) {
+      throw new Error("Storage operation journal is already attached to another reference index");
+    }
+    this.referenceIndex = next;
   }
 
   async create(input: NewStorageOperation): Promise<StorageOperation> {
@@ -120,6 +131,9 @@ export class StorageOperationJournal {
     } as StorageOperation;
     const parsed = parseStorageOperation(operation);
     if (!parsed) throw new Error("Invalid storage operation");
+    // 先发布全局 root：后续本地 journal 写入失败只会多保留 blob，
+    // 不会留下已存在但 GC 无法看到的未完成 operation。
+    await this.referenceIndex?.upsert(this.directory, parsed);
     await this.write(parsed);
     return parsed;
   }
@@ -162,6 +176,9 @@ export class StorageOperationJournal {
       ...(input.error ? { error: input.error } : {}),
     } satisfies StorageOperation;
     await this.write(next);
+    // 状态推进时先落本地权威 journal，再更新全局索引。
+    // 崩溃或写入失败会使索引更保守，不会过早回收。
+    await this.referenceIndex?.upsert(this.directory, next);
     return next;
   }
 
