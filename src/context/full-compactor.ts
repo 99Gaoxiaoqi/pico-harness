@@ -19,6 +19,8 @@ import { isAbortError } from "../provider/errors.js";
 import type { Message } from "../schema/message.js";
 import type { Session } from "../engine/session.js";
 import { logger } from "../observability/logger.js";
+import { withProviderCallContext } from "../observability/provider-call-context.js";
+import type { ProviderCallPurpose } from "../tasks/runtime-types.js";
 
 /** 摘要消息前缀:REFERENCE-ONLY,明确告诉模型这是历史提要,不要回答里面的内容 */
 const SUMMARY_PREFIX =
@@ -95,6 +97,7 @@ export interface FullCompactorOptions {
 export class FullCompactor {
   /** 生成摘要的 provider:优先用 auxProvider(辅助廉价模型),未提供则用主 provider */
   private readonly provider: LLMProvider;
+  private readonly providerPurpose: Extract<ProviderCallPurpose, "compaction" | "aux">;
   private readonly maxAttempts: number;
   /** 上一次摘要,用于迭代增量更新(hermes 第 1475-1489 行语义) */
   private previousSummary?: string;
@@ -102,6 +105,7 @@ export class FullCompactor {
   constructor(opts: FullCompactorOptions) {
     // 有 aux 用 aux(辅助廉价模型),无则用主 —— 向后兼容
     this.provider = opts.auxProvider ?? opts.provider;
+    this.providerPurpose = opts.auxProvider ? "aux" : "compaction";
     this.maxAttempts = opts.maxAttempts ?? 3;
   }
 
@@ -156,13 +160,21 @@ export class FullCompactor {
     for (let attempt = 0; attempt < this.maxAttempts; attempt++) {
       signal?.throwIfAborted();
       try {
-        const resp = await this.provider.generate(
-          [
-            { role: "system", content: COMPACTION_SYSTEM_PROMPT },
-            { role: "user", content: instruction },
-          ],
-          [],
-          { signal },
+        const resp = await withProviderCallContext(
+          {
+            purpose: this.providerPurpose,
+            sessionId: session.id,
+            conversationId: session.conversationId,
+          },
+          () =>
+            this.provider.generate(
+              [
+                { role: "system", content: COMPACTION_SYSTEM_PROMPT },
+                { role: "user", content: instruction },
+              ],
+              [],
+              { signal },
+            ),
         );
         signal?.throwIfAborted();
         summary = extractSummary(resp);

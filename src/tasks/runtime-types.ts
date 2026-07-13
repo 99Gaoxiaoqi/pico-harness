@@ -165,6 +165,29 @@ export interface UsageBaselineRecord {
   source?: Record<string, unknown>;
 }
 
+export interface UsageLedgerFilter {
+  sessionId?: string;
+  goalId?: string;
+  jobId?: string;
+}
+
+export interface UsageLedgerTotals {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  cost: number;
+}
+
+export interface UsageLedgerSummary {
+  providerCallCount: number;
+  baselineCount: number;
+  providerCalls: UsageLedgerTotals;
+  baselines: UsageLedgerTotals;
+  /** baseline + baseline 导入后逐调用明细；调用方无需再叠加 Session 累计值。 */
+  total: UsageLedgerTotals;
+}
+
 export interface JobListFilter {
   statuses?: readonly JobStatus[];
   ownerSessionId?: string;

@@ -30,6 +30,7 @@ import type {
 import type { Compactor } from "../context/compactor.js";
 import { ContextCompactionError } from "../context/compactor.js";
 import type { FullCompactor } from "../context/full-compactor.js";
+import { withProviderCallContext } from "../observability/provider-call-context.js";
 import { PromptComposer } from "../context/composer.js";
 import { SkillLoader } from "../context/skill.js";
 import { RecoveryManager } from "../context/recovery.js";
@@ -1632,15 +1633,17 @@ export class AgentEngine implements AgentRunner {
         ...session.getWorkingMemory(this.workingMemoryLimit),
       ];
       const costBefore = session.totalCostCNY;
-      const response = await generateWithRetry(
-        this.providerForReporter(this.provider, reporter, signal),
-        context,
-        [],
-        {
-          signal,
-          onRetry: this.makeRetryReporter(graceSpan),
-          onRateLimited: () => this.rotateProvider(reporter, signal),
-        },
+      const response = await withProviderCallContext({ purpose: "grace" }, () =>
+        generateWithRetry(
+          this.providerForReporter(this.provider, reporter, signal),
+          context,
+          [],
+          {
+            signal,
+            onRetry: this.makeRetryReporter(graceSpan),
+            onRateLimited: () => this.rotateProvider(reporter, signal),
+          },
+        ),
       );
       signal?.throwIfAborted();
       recordLlmResponse(graceSpan, response);
@@ -1845,7 +1848,12 @@ export class AgentEngine implements AgentRunner {
   ): Promise<SubagentResult> {
     const run = () =>
       this.runSubInIsolatedCompactorScope(taskPrompt, readOnlyRegistry, reporter, opts);
-    return this.compactor ? this.compactor.runInIsolatedScope(run) : run();
+    const runAttributed = () =>
+      withProviderCallContext(
+        { purpose: "subagent", ...(opts.usageAttribution ?? {}) },
+        () => (this.compactor ? this.compactor.runInIsolatedScope(run) : run()),
+      );
+    return runAttributed();
   }
 
   /** 每个子代理保留注入 Compactor 的行为，但使用独立压缩进度。 */
