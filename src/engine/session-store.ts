@@ -1072,11 +1072,11 @@ function isSessionCursorValue(value: unknown): value is SessionCursor {
   );
 }
 
-function isMessageValue(value: unknown): value is Message {
+function isMessageValue(value: unknown): boolean {
   if (
     !isRecord(value) ||
     !new Set(["system", "user", "assistant"]).has(String(value["role"])) ||
-    typeof value["content"] !== "string"
+    (typeof value["content"] !== "string" && !isLegacyMessageContent(value["content"]))
   ) {
     return false;
   }
@@ -1104,6 +1104,14 @@ function isMessageValue(value: unknown): value is Message {
     return false;
   }
   return true;
+}
+
+/** v0-v2 曾把 provider-native content blocks 直接写入 Message.content。 */
+function isLegacyMessageContent(value: unknown): boolean {
+  return (
+    Array.isArray(value) &&
+    value.every((block) => isRecord(block) && isNonEmptyString(block["type"]))
+  );
 }
 
 function isUsageValue(value: unknown): boolean {
