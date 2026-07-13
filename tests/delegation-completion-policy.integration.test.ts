@@ -215,7 +215,7 @@ describe("delegation completion policy integration", () => {
       resume: async (completionSeqs, deliverCompletions) => {
         resumed.push(completionSeqs);
         deliveredActivityIds.push(
-          deliverCompletions().flatMap((completion) => completion.activityIds),
+          (await deliverCompletions()).flatMap((completion) => completion.activityIds),
         );
       },
     });
