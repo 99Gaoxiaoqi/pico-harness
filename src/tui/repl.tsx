@@ -128,6 +128,7 @@ import { imagePasteShortcutLabel } from "./system-actions.js";
 import { fileHistoryChanges, fileHistoryRestoreFile } from "../safety/file-history.js";
 import { createChangesDialogRequest, createChangesPanelModel } from "./changes-panel.js";
 import { TaskHostRuntime } from "../tasks/task-runtime.js";
+import { CronService } from "../tasks/cron-service.js";
 
 export interface ReplOptions {
   /** 工作区 */
@@ -870,6 +871,15 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     legacyModel: opts.model,
     legacyModelExplicit: opts.modelExplicit,
   });
+  let cronRuntimeDiagnostic: string | undefined;
+  const cronService = (() => {
+    try {
+      return new CronService({ workDir: opts.workDir });
+    } catch (error) {
+      cronRuntimeDiagnostic = error instanceof Error ? error.message : String(error);
+      return undefined;
+    }
+  })();
   let taskRuntimeDiagnostic: string | undefined;
   const taskHostRuntime = await TaskHostRuntime.create({ workDir: opts.workDir }).catch((error) => {
     taskRuntimeDiagnostic = error instanceof Error ? error.message : String(error);
@@ -1024,6 +1034,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         mcpStatus: () => bundleRef.current?.latestMcpStatus,
         mcpControl: sharedMcpManager,
         ...(taskHostRuntime ? { taskRuntime: taskHostRuntime } : {}),
+        ...(cronService ? { cronService } : {}),
         ...(taskRuntimeDiagnostic ? { taskRuntimeDiagnostic } : {}),
         additionalDirectories: settings.additionalDirectories,
         additionalDirectoryManager: workspaceRoots,
@@ -1056,6 +1067,9 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         reporter.pushSystemMessage(
           `Task runtime unavailable; background/worker persistence is disabled. ${taskRuntimeDiagnostic}`,
         );
+      }
+      if (cronRuntimeDiagnostic) {
+        reporter.pushSystemMessage(`Cron unavailable. ${cronRuntimeDiagnostic}`);
       }
       const bundle: TuiSessionBundle = {
         generation: ++nextBundleGeneration,
@@ -1732,6 +1746,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     unsubscribeTaskCompletion?.();
     unsubscribeMcpStatus();
     await taskHostRuntime?.close();
+    cronService?.close();
     await sharedMcpManager.closeAll();
   }
 }

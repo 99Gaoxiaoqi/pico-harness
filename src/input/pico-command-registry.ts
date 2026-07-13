@@ -4,8 +4,8 @@ import { SkillLoader } from "../context/skill.js";
 import { FullCompactor } from "../context/full-compactor.js";
 import { globalSessionManager, type Session } from "../engine/session.js";
 import { defaultCliSessionId, listFileHistorySnapshotSummaries } from "../cli/file-history.js";
-import { formatRewindSelector, formatRewindUsage } from "../tui/rewind-selector.js";
-import { formatSessionCandidateDetails, sessionDisplayTitle } from "../tui/session-presentation.js";
+import { formatRewindSelector, formatRewindUsage } from "./rewind-presentation.js";
+import { formatSessionCandidateDetails, sessionDisplayTitle } from "./session-presentation.js";
 import { listCliSessionSummaries } from "../cli/session-resolver.js";
 import { createBuiltinCommands } from "./builtin-commands.js";
 import { createAddDirectoryCommand, type AdditionalDirectoryManager } from "./add-directory.js";
@@ -61,6 +61,7 @@ import type { McpStatusSnapshot } from "../mcp/manager.js";
 import type { GoalManager } from "../engine/goal-manager.js";
 import type { ModelRuntimeCommandService } from "../provider/model-runtime-report.js";
 import type { TaskHostRuntime } from "../tasks/task-runtime.js";
+import { CronService } from "../tasks/cron-service.js";
 import type { McpConnectionManager } from "../mcp/manager.js";
 import { CostTracker } from "../observability/tracker.js";
 import { ensureSessionUsageBaseline } from "../observability/usage-baseline.js";
@@ -109,6 +110,8 @@ export interface PicoCommandRegistryOptions {
   goalManager?: GoalManager;
   modelRuntime?: () => Pick<ModelRuntimeCommandService, "execute"> | undefined;
   taskRuntime?: TaskHostRuntime;
+  /** 可选的本机 Cron 账本；未注入时 /cron 明确说明不可用。 */
+  cronService?: CronService;
   /** TaskHostRuntime 不可用时的宿主诊断；TUI 仍可在非 Git 目录运行。 */
   taskRuntimeDiagnostic?: string;
   /** 可注入的只读存储诊断器；默认扫描当前 workspace 和全局 File History。 */
@@ -167,6 +170,7 @@ export async function createPicoCommandRegistry(
     createSnapshotsCommand(options),
     createRewindCommand(options),
     createAgentCommand(options),
+    createCronCommand(options, settings),
     createSkillsCommand(skillLoader),
     createSkillCommand(skillLoader),
   ]);
@@ -1211,6 +1215,97 @@ function createSkillCommand(loader: SkillLoader): SlashCommand {
       };
     },
   };
+}
+
+function createCronCommand(
+  options: PicoCommandRegistryOptions,
+  settings: SessionSettings,
+): SlashCommand {
+  return {
+    name: "cron",
+    description: "Manage persistent YOLO cron jobs for this workspace",
+    usage: "/cron <list|add|enable|disable|delete|runs> [arguments]",
+    argumentHint: "<list|add|enable|disable|delete|runs>",
+    category: "workspace",
+    kind: "local",
+    availability: "idle",
+    execute: (input): LocalCommandResult => {
+      const cron = options.cronService;
+      if (!cron) {
+        return {
+          type: "local",
+          action: "message",
+          message: "Cron unavailable: this workspace runtime is not connected.",
+        };
+      }
+      const [operation = "list", ...args] = input.argv;
+      try {
+        if (operation === "list") return cronMessage(formatCronJobs(cron.list(options.workDir)));
+        if (operation === "runs") {
+          return cronMessage(formatCronRuns(cron.runs({
+            workspacePath: options.workDir,
+            ...(args[0] ? { cronJobId: args[0] } : {}),
+          })));
+        }
+        if (operation === "add") {
+          if (settings.mode !== "yolo") {
+            return cronMessage("Cron jobs require /mode yolo; interactive permission modes cannot run unattended.");
+          }
+          if (args.length < 6) return cronMessage("Usage: /cron add <minute> <hour> <day> <month> <weekday> <prompt>");
+          const [minute, hour, day, month, weekday, ...promptParts] = args;
+          const job = cron.create({
+            workspacePath: options.workDir,
+            schedule: [minute, hour, day, month, weekday].join(" "),
+            prompt: promptParts.join(" "),
+            policySnapshot: {
+              mode: "yolo",
+              backgroundEnabled: true,
+              trustedWorkspace: true,
+              networkPolicy: "disabled",
+              allowedTools: settings.tools.map((tool) => tool.name),
+              hardlineVersion: "builtin-v1",
+              hookVersion: "workspace-v1",
+              createdAt: Date.now(),
+            },
+          });
+          return cronMessage(`Cron job created: ${job.cronJobId}\n${job.schedule} · ${job.timeZone}`);
+        }
+        const cronJobId = args[0];
+        if (!cronJobId) return cronMessage(`Usage: /cron ${operation} <job-id>`);
+        const job = cron.list(options.workDir).find((candidate) => candidate.cronJobId === cronJobId);
+        if (!job) return cronMessage(`Unknown cron job: ${cronJobId}`);
+        if (operation === "enable" || operation === "disable") {
+          const updated = cron.setEnabled(cronJobId, job.version, operation === "enable");
+          return cronMessage(`Cron job ${updated.cronJobId} ${updated.enabled ? "enabled" : "disabled"}.`);
+        }
+        if (operation === "delete") {
+          const deleted = cron.delete(cronJobId, job.version);
+          return cronMessage(`Cron job ${deleted.cronJobId} deleted.`);
+        }
+        return cronMessage("Usage: /cron <list|add|enable|disable|delete|runs> [arguments]");
+      } catch (error) {
+        return cronMessage(`Cron failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    },
+  };
+}
+
+function cronMessage(message: string): LocalCommandResult {
+  return { type: "local", action: "message", message };
+}
+
+function formatCronJobs(jobs: readonly import("../tasks/runtime-types.js").CronJobRecord[]): string {
+  if (jobs.length === 0) return "No cron jobs for this workspace.";
+  return jobs
+    .map((job) => `${job.cronJobId} · ${job.enabled ? "enabled" : "disabled"} · ${job.schedule} · ${job.timeZone}\n  ${job.prompt}`)
+    .join("\n");
+}
+
+function formatCronRuns(runs: readonly import("../tasks/runtime-types.js").CronRunRecord[]): string {
+  if (runs.length === 0) return "No cron runs for this workspace.";
+  return runs
+    .map((run) => `${run.cronRunId} · ${run.status} · ${new Date(run.scheduledFor).toISOString()}${run.reason ? ` · ${run.reason}` : ""}`)
+    .join("\n");
 }
 
 function createAgentCommand(options: PicoCommandRegistryOptions): SlashCommand {

@@ -151,6 +151,14 @@ export class CronService {
     return this.store.heartbeatLease(`cron-run:${cronRunId}`, this.ownerId, leaseEpoch, ttlMs);
   }
 
+  block(cronRunId: string, reason: string): CronRunRecord {
+    return this.store.blockQueuedCronRun(cronRunId, reason);
+  }
+
+  skip(cronRunId: string, reason = "workspace_busy"): CronRunRecord {
+    return this.store.skipQueuedCronRun(cronRunId, reason);
+  }
+
   finish(input: {
     cronRunId: string;
     leaseEpoch: number;
@@ -169,11 +177,17 @@ export class CronService {
   }
 
   runs(input: { cronJobId?: string; workspacePath?: string; limit?: number } = {}): CronRunRecord[] {
-    return this.store.listCronRuns(input);
+    return this.store.listCronRuns({
+      ...input,
+      ...(input.workspacePath ? { workspacePath: realpathSync(input.workspacePath) } : {}),
+    });
   }
 
   events(input: { afterEventId?: string; workspacePath?: string; limit?: number } = {}): RuntimeEventRecord[] {
-    return this.store.listRuntimeEvents(input);
+    return this.store.listRuntimeEvents({
+      ...input,
+      ...(input.workspacePath ? { workspacePath: realpathSync(input.workspacePath) } : {}),
+    });
   }
 
   close(): void {

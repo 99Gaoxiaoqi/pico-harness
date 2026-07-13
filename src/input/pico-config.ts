@@ -19,7 +19,7 @@ import {
   type KeybindingContext,
   type KeybindingMap,
   type KeybindingValue,
-} from "../tui/keybindings/schema.js";
+} from "./keybindings-schema.js";
 
 const CONFIG_VERSION = 1 as const;
 
