@@ -105,6 +105,14 @@ export interface SubagentRunOptions {
   signal?: AbortSignal;
   /** 可信宿主注入的实际运行根目录；不得从模型 task context 推导。 */
   workDir?: string;
+  /**
+   * 可选的持久任务归属。只有掌握 RuntimeStore 真值的宿主才能传入；
+   * runSub 不会从 workDir、prompt 或展示层 task id 推导。
+   */
+  usageAttribution?: {
+    jobId?: string;
+    attemptId?: string;
+  };
 }
 
 export interface SubagentRegistryRequest {
@@ -579,6 +587,7 @@ export class DelegateTaskTool implements BaseTool {
           maxSpawnDepth,
           context.worktreePath,
           combinedSignal,
+          { jobId: context.taskId },
         );
         if (delegatedResult.status !== "completed" && delegatedResult.status !== "partial") {
           throw new Error(
@@ -602,6 +611,7 @@ export class DelegateTaskTool implements BaseTool {
             maxSpawnDepth,
             context.worktreePath,
             combinedSignal,
+            { jobId: context.taskId },
           );
           if (delegatedResult.status !== "completed" && delegatedResult.status !== "partial") {
             throw new Error(
@@ -667,6 +677,7 @@ export class DelegateTaskTool implements BaseTool {
     maxSpawnDepth: number,
     workDir?: string,
     signal?: AbortSignal,
+    usageAttribution?: SubagentRunOptions["usageAttribution"],
   ): Promise<DelegationBatchResult["results"][number]> {
     signal?.throwIfAborted();
     const startedAt = Date.now();
@@ -716,6 +727,7 @@ export class DelegateTaskTool implements BaseTool {
         role: task.role,
         ...(signal ? { signal } : {}),
         ...(effectiveWorkDir ? { workDir: effectiveWorkDir } : {}),
+        ...(usageAttribution ? { usageAttribution } : {}),
         ...customization,
       });
       signal?.throwIfAborted();

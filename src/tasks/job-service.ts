@@ -23,6 +23,8 @@ import {
   type RuntimeLeaseRecord,
   type TerminalJobStatus,
   type UsageBaselineRecord,
+  type UsageLedgerFilter,
+  type UsageLedgerSummary,
 } from "./runtime-types.js";
 
 export interface JobServiceOptions extends RuntimeStoreOptions {
@@ -258,6 +260,10 @@ export class JobService {
     inserted: boolean;
   } {
     return this.store.putUsageBaseline(record);
+  }
+
+  getUsageSummary(filter: UsageLedgerFilter = {}): UsageLedgerSummary {
+    return this.store.getUsageSummary(filter);
   }
 
   enqueueMerge(

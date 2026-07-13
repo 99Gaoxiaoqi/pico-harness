@@ -62,6 +62,8 @@ import type { GoalManager } from "../engine/goal-manager.js";
 import type { ModelRuntimeCommandService } from "../provider/model-runtime-report.js";
 import type { TaskHostRuntime } from "../tasks/task-runtime.js";
 import type { McpConnectionManager } from "../mcp/manager.js";
+import { CostTracker } from "../observability/tracker.js";
+import { ensureSessionUsageBaseline } from "../observability/usage-baseline.js";
 
 const OVERRIDDEN_BUILTIN_COMMANDS = new Set([
   "skills",
@@ -420,13 +422,14 @@ function createCompactCommand(
           message: "Compact unavailable: no live session was provided to the command registry.",
         };
       }
+      const session = options.session;
 
       const retainLastN = 6;
-      if (options.session.length <= retainLastN) {
+      if (session.length <= retainLastN) {
         return {
           type: "local",
           action: "message",
-          message: `Compact skipped: session has ${options.session.length} messages; keeping the last ${retainLastN} would leave no history prefix to compact.`,
+          message: `Compact skipped: session has ${session.length} messages; keeping the last ${retainLastN} would leave no history prefix to compact.`,
         };
       }
 
@@ -460,18 +463,40 @@ function createCompactCommand(
       }
 
       try {
-        const before = options.session.length;
-        const provider = createProvider(activeProvider, {
+        const before = session.length;
+        const model = activeConfig?.model ?? settings.model;
+        const rawProvider = createProvider(activeProvider, {
           baseURL,
           apiKey,
-          model: activeConfig?.model ?? settings.model,
+          model,
         });
-        const ok = await new FullCompactor({ provider }).compact(options.session, retainLastN);
+        const jobs = options.taskRuntime?.jobService;
+        if (jobs) ensureSessionUsageBaseline(jobs, session);
+        const provider = jobs
+          ? new CostTracker(
+              rawProvider,
+              { provider: activeProvider, model, baseUrl: baseURL },
+              session,
+              {
+                ledger: jobs,
+                context: () => {
+                  const goalId = options.goalManager?.getActive()?.id;
+                  return {
+                    purpose: "main",
+                    sessionId: session.id,
+                    conversationId: session.conversationId,
+                    ...(goalId ? { goalId } : {}),
+                  };
+                },
+              },
+            )
+          : rawProvider;
+        const ok = await new FullCompactor({ provider }).compact(session, retainLastN);
         return {
           type: "local",
           action: "message",
           message: ok
-            ? `Compact complete: session history ${before} -> ${options.session.length} messages.`
+            ? `Compact complete: session history ${before} -> ${session.length} messages.`
             : "Compact unavailable: FullCompactor could not produce a valid summary.",
         };
       } catch (error) {
