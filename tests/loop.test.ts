@@ -212,14 +212,26 @@ describe("AgentEngine Main Loop", () => {
     const controller = new AbortController();
     const reason = new DOMException("interrupted", "AbortError");
     const run = engine.run(newSession("hi"), undefined, undefined, controller.signal);
+    let runSettled = false;
+    void run.then(
+      () => {
+        runSettled = true;
+      },
+      () => {
+        runSettled = true;
+      },
+    );
 
     await firstStart;
     controller.abort(reason);
     await firstAbort;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(runSettled).toBe(false);
     // settleOnAbort 会等底层物理执行收口，收口后 run 才拒绝。
     releaseFirst();
     await expect(run).rejects.toBe(reason);
 
+    expect(runSettled).toBe(true);
     expect(registry.executed.map((call) => call.id)).toEqual(["c1"]);
   });
 
@@ -273,28 +285,43 @@ describe("AgentEngine Main Loop", () => {
     const session = newSession("first run");
     const controller = new AbortController();
     const firstRun = engine.run(session, undefined, undefined, controller.signal);
+    let firstRunSettled = false;
+    void firstRun.then(
+      () => {
+        firstRunSettled = true;
+      },
+      () => {
+        firstRunSettled = true;
+      },
+    );
 
     await started;
     controller.abort(new DOMException("interrupted", "AbortError"));
     await aborted;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(firstRunSettled).toBe(false);
+    expect(contexts).toHaveLength(1);
+    expect(providerCalls).toBe(1);
     // 先模拟可中止工具的物理执行收口，再等待本轮 run 拒绝。
     releaseTool();
     await expect(firstRun).rejects.toMatchObject({ name: "AbortError" });
+    expect(firstRunSettled).toBe(true);
 
     session.append({ role: "user", content: "continue after abort" });
     const secondRun = await engine.run(session);
 
     expect(secondRun.at(-1)?.content).toBe("continued safely");
+    expect(providerCalls).toBe(2);
     expect(registry.executed.map((call) => call.id)).toEqual(["abort-c1"]);
     const secondContext = contexts[1] ?? [];
     const toolCallIds = secondContext.flatMap(
       (message) => message.toolCalls?.map((call) => call.id) ?? [],
     );
-    const toolResultIds = new Set(
-      secondContext.flatMap((message) => (message.toolCallId ? [message.toolCallId] : [])),
+    const toolResultIds = secondContext.flatMap((message) =>
+      message.toolCallId ? [message.toolCallId] : [],
     );
     expect(toolCallIds).toEqual(["abort-c1", "abort-c2"]);
-    expect(toolCallIds.every((id) => toolResultIds.has(id))).toBe(true);
+    expect(toolResultIds).toEqual(["abort-c1", "abort-c2"]);
     expect(
       secondContext.some(
         (message) => message.role === "user" && message.content === "continue after abort",
