@@ -43,6 +43,7 @@ const CANCELLATION_FLUSH_TIMEOUT_MS = 25;
 const MAX_STDIO_MESSAGE_BYTES = 8 * 1024 * 1024;
 
 interface PendingRequest {
+  method: string;
   resolve: (value: unknown) => void;
   reject: (reason: Error) => void;
   timer: NodeJS.Timeout;
@@ -58,7 +59,9 @@ interface PendingRequest {
  * 保持 pico-harness 零外部依赖的风格。
  */
 export class StdioMcpClient implements McpClient {
-  readonly toolCancellationScope = "process_tree" as const;
+  readonly toolCancellationScope: "process_tree" | "transport" = isWindows
+    ? "transport"
+    : "process_tree";
   private child: ChildProcess | undefined;
   private nextId = 1;
   private readonly pending = new Map<number, PendingRequest>();
@@ -195,8 +198,14 @@ export class StdioMcpClient implements McpClient {
   close(): Promise<void> {
     if (this.closed) return Promise.resolve();
     if (this.closing) return this.closing;
-    const closing = this.closeInternal();
+    let resolveClose!: () => void;
+    let rejectClose!: (reason?: unknown) => void;
+    const closing = new Promise<void>((resolvePromise, rejectPromise) => {
+      resolveClose = resolvePromise;
+      rejectClose = rejectPromise;
+    });
     this.closing = closing;
+    void this.closeInternal().then(resolveClose, rejectClose);
     void closing.then(
       () => {
         if (this.closing === closing) this.closing = undefined;
@@ -214,7 +223,8 @@ export class StdioMcpClient implements McpClient {
     const child = this.child;
     if (child) {
       child.stdin?.end();
-      const stopped = await terminateProcessTree(child);
+      // 主动 close 可以是 reconnect 的前置；必须确认整树收口才能放行新实例。
+      const stopped = await terminateProcessTree(child, true);
       if (!stopped) {
         throw new Error(`MCP server "${this.config.name}" 进程树未能物理收口`);
       }
@@ -421,7 +431,13 @@ export class StdioMcpClient implements McpClient {
         );
       }, timeoutMs);
 
-      const pending: PendingRequest = { resolve, reject, timer, ...(signal ? { signal } : {}) };
+      const pending: PendingRequest = {
+        method,
+        resolve,
+        reject,
+        timer,
+        ...(signal ? { signal } : {}),
+      };
       if (signal) {
         pending.abortListener = () => this.abortPendingRequest(id, abortReason(signal));
         signal.addEventListener("abort", pending.abortListener, { once: true });
@@ -523,8 +539,9 @@ export class StdioMcpClient implements McpClient {
       }
       return;
     }
+    const termination = terminateProcessTree(child, this.hasPendingToolCall());
     await cancellation;
-    const stopped = await terminateProcessTree(child);
+    const stopped = await termination;
     if (!stopped) {
       // 不能证明物理副作已停止时 fail-closed：保持 pending，不伪造完成。
       logger.error(
@@ -546,6 +563,10 @@ export class StdioMcpClient implements McpClient {
     return (
       this.abortTermination !== undefined || [...this.pending.values()].some((p) => p.abortReason)
     );
+  }
+
+  private hasPendingToolCall(): boolean {
+    return [...this.pending.values()].some((pending) => pending.method === "tools/call");
   }
 
   private takePending(id: number): PendingRequest | undefined {
@@ -609,10 +630,15 @@ function abortReason(signal: AbortSignal): Error {
     : new DOMException("MCP tool call aborted", "AbortError");
 }
 
-async function terminateProcessTree(child: ChildProcess): Promise<boolean> {
+async function terminateProcessTree(
+  child: ChildProcess,
+  requireWindowsTreeProof: boolean,
+): Promise<boolean> {
   if (isWindows) {
-    if (isChildExited(child)) return true;
-    await signalProcessTree(child, "SIGTERM").catch(() => false);
+    const signalled = await signalProcessTree(child, "SIGTERM", {
+      requireWindowsTreeProof,
+    }).catch(() => false);
+    if (!signalled) return false;
     return waitForChildExit(child, CLOSE_SIGKILL_TIMEOUT_MS);
   }
 

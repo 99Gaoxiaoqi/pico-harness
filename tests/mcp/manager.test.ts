@@ -536,7 +536,13 @@ describe("HttpMcpClient SSE 解析", () => {
     let signal: AbortSignal | undefined;
     globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
       signal = init?.signal ?? undefined;
-      return new Promise<Response>(() => {});
+      return new Promise<Response>((_resolve, reject) => {
+        signal?.addEventListener(
+          "abort",
+          () => reject(signal?.reason ?? new DOMException("aborted", "AbortError")),
+          { once: true },
+        );
+      });
     }) as typeof fetch;
 
     const client = new HttpMcpClient({
@@ -560,7 +566,13 @@ describe("HttpMcpClient SSE 解析", () => {
     let signal: AbortSignal | undefined;
     globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
       signal = init?.signal ?? undefined;
-      return new Promise<Response>(() => {});
+      return new Promise<Response>((_resolve, reject) => {
+        signal?.addEventListener(
+          "abort",
+          () => reject(signal?.reason ?? new DOMException("aborted", "AbortError")),
+          { once: true },
+        );
+      });
     }) as typeof fetch;
 
     const client = new HttpMcpClient({
@@ -571,10 +583,11 @@ describe("HttpMcpClient SSE 解析", () => {
     });
 
     const connecting = client.connect();
+    const connectionFailure = expect(connecting).rejects.toThrow(/已关闭/);
     await waitUntil(() => signal !== undefined, 200);
     await client.close();
 
-    await expect(connecting).rejects.toThrow(/已关闭/);
+    await connectionFailure;
     expect(signal?.aborted).toBe(true);
     globalThis.fetch = originalFetch;
   });

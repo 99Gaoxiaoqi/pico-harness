@@ -67,11 +67,13 @@ export class HttpMcpClient implements McpClient {
   private readonly pending = new Map<number, PendingRequest>();
   private connected = false;
   private closed = false;
+  private closePromise: Promise<void> | undefined;
   /** sse 模式:POST 请求的目标地址(由 server 的 endpoint 事件告知) */
   private postEndpoint: string | undefined;
   /** sse 模式:读 SSE 流的 AbortController,close() 时中止 */
   private sseAbort: AbortController | undefined;
   private readonly activeControllers = new Set<AbortController>();
+  private readonly activeTransports = new Set<Promise<unknown>>();
   private readonly closeHandlers: Array<(err?: Error) => void> = [];
   private readonly errorHandlers: Array<(err: Error) => void> = [];
 
@@ -95,6 +97,7 @@ export class HttpMcpClient implements McpClient {
     // http transport 无需预连接,initialize 时直接 POST
 
     await this.initialize();
+    if (this.closed) throw new Error(`MCP server "${this.config.name}" 已关闭,无法重连`);
     this.connected = true;
     logger.info(
       { server: this.config.name, transport: this.config.transport },
@@ -166,8 +169,20 @@ export class HttpMcpClient implements McpClient {
     };
   }
 
-  async close(): Promise<void> {
-    if (this.closed) return;
+  close(): Promise<void> {
+    if (this.closePromise) return this.closePromise;
+    let resolveClose!: () => void;
+    let rejectClose!: (reason?: unknown) => void;
+    const closing = new Promise<void>((resolvePromise, rejectPromise) => {
+      resolveClose = resolvePromise;
+      rejectClose = rejectPromise;
+    });
+    this.closePromise = closing;
+    void this.closeInternal().then(resolveClose, rejectClose);
+    return closing;
+  }
+
+  private async closeInternal(): Promise<void> {
     this.closed = true;
     this.connected = false;
     const closeError = new Error(`MCP server "${this.config.name}" 已关闭`);
@@ -175,7 +190,6 @@ export class HttpMcpClient implements McpClient {
     // 中止 SSE 流
     if (this.sseAbort) {
       this.sseAbort.abort();
-      this.sseAbort = undefined;
     }
     const pending = [...this.pending.entries()];
     for (const controller of [...this.activeControllers]) controller.abort();
@@ -183,15 +197,13 @@ export class HttpMcpClient implements McpClient {
       if (request.method === "tools/call") this.abortPendingRequest(id, closeError);
       else this.abortNonToolRequest(id, closeError);
     }
-    // 不在 abort() 后立即假装完成：等所有本地 transport Promise 真正 settle。
-    await Promise.allSettled(
-      pending.flatMap(([, request]) => {
-        if (request.method !== "tools/call") return [];
-        return [request.transport, request.abortTask].filter(
-          (task): task is Promise<void> => task !== undefined,
-        );
-      }),
-    );
+    // 不在 abort() 后立即假装完成：等所有本地 POST/stream 真正 settle。
+    const transports = [...this.activeTransports];
+    const abortTasks = pending
+      .map(([, request]) => request.abortTask)
+      .filter((task): task is Promise<void> => task !== undefined);
+    await Promise.allSettled([...transports, ...abortTasks]);
+    this.sseAbort = undefined;
     this.activeControllers.clear();
     for (const [id, request] of this.pending) {
       this.takePending(id);
@@ -249,6 +261,9 @@ export class HttpMcpClient implements McpClient {
     params: Record<string, unknown>,
     signal?: AbortSignal,
   ): Promise<unknown> {
+    if (this.closed) {
+      return Promise.reject(new Error(`MCP server "${this.config.name}" 已关闭`));
+    }
     signal?.throwIfAborted();
     const id = this.nextId++;
     const req: JsonRpcRequest = { jsonrpc: "2.0", id, method, params };
@@ -363,6 +378,7 @@ export class HttpMcpClient implements McpClient {
         },
         this.config.transport === "sse" ? this.postEndpoint : undefined,
         controller,
+        true,
       );
     } catch (err) {
       logger.debug(
@@ -379,10 +395,22 @@ export class HttpMcpClient implements McpClient {
    * @param targetUrl 目标地址;sse 模式用 server 告知的 endpoint,http 模式就是 config.url
    * @returns http 模式返回解析后的 JsonRpcResponse;sse 模式返回 undefined(响应走 SSE 流)
    */
-  private async sendHttpPost(
+  private sendHttpPost(
     msg: JsonRpcRequest | { jsonrpc: "2.0"; method: string; params: Record<string, unknown> },
     targetUrl?: string,
     controller = new AbortController(),
+    allowWhileClosing = false,
+  ): Promise<JsonRpcResponse | undefined> {
+    if (this.closed && !allowWhileClosing) {
+      return Promise.reject(new Error(`MCP server "${this.config.name}" 已关闭`));
+    }
+    return this.trackTransport(this.sendHttpPostInternal(msg, targetUrl, controller));
+  }
+
+  private async sendHttpPostInternal(
+    msg: JsonRpcRequest | { jsonrpc: "2.0"; method: string; params: Record<string, unknown> },
+    targetUrl: string | undefined,
+    controller: AbortController,
   ): Promise<JsonRpcResponse | undefined> {
     const url = targetUrl ?? this.config.url!;
     const headers: Record<string, string> = {
@@ -529,7 +557,7 @@ export class HttpMcpClient implements McpClient {
 
     // 不 await:读流是无限循环,只在 endpoint 到达后 resolve
     const ready = new Promise<void>((resolveReady, rejectReady) => {
-      this.fetchSameOrigin(this.config.url!, {
+      const stream = this.fetchSameOrigin(this.config.url!, {
         method: "GET",
         headers,
         signal: this.sseAbort!.signal,
@@ -561,35 +589,43 @@ export class HttpMcpClient implements McpClient {
               assertByteLimit(buffer, MAX_SSE_BUFFER_BYTES, "SSE 累计缓冲区");
             }
           } catch (err) {
+            const safeError = new Error(
+              redactSensitiveText(
+                `SSE 流中断: ${err instanceof Error ? err.message : String(err)}`,
+              ),
+            );
+            rejectReady(safeError);
             if (!this.closed) {
-              const safeError = new Error(
-                redactSensitiveText(
-                  `SSE 流中断: ${err instanceof Error ? err.message : String(err)}`,
-                ),
-              );
-              rejectReady(safeError);
               this.failAllPending(safeError);
               this.emitError(safeError);
             }
           } finally {
             await reader.cancel().catch(() => {});
             reader.releaseLock();
+            rejectReady(
+              new Error(
+                this.closed
+                  ? `MCP server "${this.config.name}" 已关闭`
+                  : `MCP server "${this.config.name}" SSE 流在 endpoint 就绪前已关闭`,
+              ),
+            );
             if (!this.closed && this.connected) {
               this.emitClose(new Error(`MCP server "${this.config.name}" SSE 流已关闭`));
             }
           }
         })
         .catch((err) => {
+          const safeError = new Error(
+            redactSensitiveText(
+              `SSE 连接失败: ${err instanceof Error ? err.message : String(err)}`,
+            ),
+          );
+          rejectReady(safeError);
           if (!this.closed) {
-            const safeError = new Error(
-              redactSensitiveText(
-                `SSE 连接失败: ${err instanceof Error ? err.message : String(err)}`,
-              ),
-            );
-            rejectReady(safeError);
             this.emitError(safeError);
           }
         });
+      this.trackTransport(stream);
     });
 
     // 等 endpoint 事件到达(带超时)
@@ -684,6 +720,15 @@ export class HttpMcpClient implements McpClient {
     for (const handler of this.errorHandlers) {
       handler(err);
     }
+  }
+
+  private trackTransport<T>(transport: Promise<T>): Promise<T> {
+    this.activeTransports.add(transport);
+    void transport.then(
+      () => this.activeTransports.delete(transport),
+      () => this.activeTransports.delete(transport),
+    );
+    return transport;
   }
 
   /** 把 SSE endpoint 解析成绝对 URL,并拒绝把凭据发到不同来源。 */

@@ -30,6 +30,7 @@ interface ServerEntry {
   config: McpServerConfig;
   status: McpConnectionStatus;
   client?: McpClient;
+  closingClient?: McpClient;
   tools: McpTool[];
   toolNames: string[];
   error?: string;
@@ -82,6 +83,8 @@ export interface McpConnectionManagerOptions {
   stdioCwd?: string;
   /** 由 TUI 宿主实现的 OAuth 交互，manager 不保存中间 token。 */
   oauthHandler?: McpOAuthHandler;
+  /** 测试/宿主可注入等价 client；仍由 manager 独占其生命周期。 */
+  clientFactory?: (config: McpServerConfig) => McpClient;
 }
 
 /**
@@ -172,6 +175,8 @@ export class McpConnectionManager {
         this.emitSnapshot();
         return;
       }
+      await this.closeEntryClient(entry);
+      this.clearEntryTools(entry);
       entry.status = "pending";
       entry.error = undefined;
       this.emitSnapshot();
@@ -219,7 +224,7 @@ export class McpConnectionManager {
         transport: entry.config.transport,
         ...(entry.config.url !== undefined ? { url: entry.config.url } : {}),
       });
-      entry.config = {
+      const nextConfig: McpServerConfig = {
         ...entry.config,
         ...(credentials.headers !== undefined
           ? { headers: { ...entry.config.headers, ...credentials.headers } }
@@ -230,6 +235,7 @@ export class McpConnectionManager {
         enabled: true,
       };
       await this.closeEntryClient(entry);
+      entry.config = nextConfig;
       this.clearEntryTools(entry);
       entry.status = "pending";
       entry.error = undefined;
@@ -360,6 +366,14 @@ export class McpConnectionManager {
   }
 
   private async connectOne(entry: ServerEntry): Promise<void> {
+    if (entry.client) {
+      const error = new Error(`MCP server "${entry.name}" 上一客户端尚未成功关闭，拒绝创建新实例`);
+      this.unregisterEntryTools(entry);
+      entry.status = "failed";
+      entry.error = error.message;
+      this.emitSnapshot();
+      throw error;
+    }
     const timeoutMs = entry.config.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS;
     const client = this.createClient(entry.config);
     entry.client = client;
@@ -396,8 +410,19 @@ export class McpConnectionManager {
       );
     } catch (err) {
       if (entry.client !== client) return;
-      entry.client = undefined;
-      await client.close().catch(() => {});
+      try {
+        await this.closeEntryClient(entry);
+      } catch (closeError) {
+        logger.error(
+          {
+            server: entry.name,
+            err: safeErrorMessage(err),
+            closeErr: safeErrorMessage(closeError),
+          },
+          `[MCP] server "${entry.name}" 连接失败且旧客户端未能关闭`,
+        );
+        throw closeError;
+      }
       this.clearEntryTools(entry);
       const message = safeErrorMessage(err);
       entry.status = isAuthenticationError(message) ? "needs_auth" : "failed";
@@ -411,7 +436,7 @@ export class McpConnectionManager {
   }
 
   private async closeEntries(): Promise<void> {
-    await Promise.allSettled(
+    const results = await Promise.allSettled(
       [...this.entries.values()].map(async (entry) => {
         await this.closeEntryClient(entry);
         this.clearEntryTools(entry);
@@ -420,12 +445,33 @@ export class McpConnectionManager {
       }),
     );
     this.emitSnapshot();
+    const failures = results
+      .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+      .map((result) => result.reason);
+    if (failures.length > 0) {
+      throw new AggregateError(failures, `${failures.length} 个 MCP server 未能完成关闭`);
+    }
   }
 
   private async closeEntryClient(entry: ServerEntry): Promise<void> {
     const client = entry.client;
-    entry.client = undefined;
-    if (client) await client.close().catch(() => {});
+    if (!client) return;
+    this.unregisterEntryTools(entry);
+    entry.closingClient = client;
+    try {
+      await client.close();
+      if (entry.client === client) entry.client = undefined;
+    } catch (err) {
+      const closeError = new Error(safeErrorMessage(err), { cause: err });
+      if (entry.client === client) {
+        entry.status = "failed";
+        entry.error = closeError.message;
+        this.emitSnapshot();
+      }
+      throw closeError;
+    } finally {
+      if (entry.closingClient === client) entry.closingClient = undefined;
+    }
   }
 
   private clearEntryTools(entry: ServerEntry): void {
@@ -453,6 +499,7 @@ export class McpConnectionManager {
   private attachLifecycle(entry: ServerEntry, client: McpClient): void {
     const markFailed = (err?: Error) => {
       if (entry.client !== client || entry.status !== "connected") return;
+      if (entry.closingClient === client) return;
       entry.client = undefined;
       this.clearEntryTools(entry);
       const message = safeErrorMessage(err ?? new Error(`MCP server "${entry.name}" 连接已关闭`));
@@ -491,17 +538,21 @@ export class McpConnectionManager {
   }
 
   private createClient(config: McpServerConfig): McpClient {
-    switch (config.transport) {
+    const resolvedConfig =
+      config.transport === "stdio" &&
+      config.cwd === undefined &&
+      this.options.stdioCwd !== undefined
+        ? { ...config, cwd: this.options.stdioCwd }
+        : config;
+    if (this.options.clientFactory) return this.options.clientFactory(resolvedConfig);
+
+    switch (resolvedConfig.transport) {
       case "stdio": {
-        const merged =
-          config.cwd === undefined && this.options.stdioCwd !== undefined
-            ? { ...config, cwd: this.options.stdioCwd }
-            : config;
-        return new StdioMcpClient(merged);
+        return new StdioMcpClient(resolvedConfig);
       }
       case "http":
       case "sse":
-        return new HttpMcpClient(config);
+        return new HttpMcpClient(resolvedConfig);
     }
   }
 
