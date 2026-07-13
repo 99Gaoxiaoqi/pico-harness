@@ -280,6 +280,7 @@ export class DelegateTaskTool implements BaseTool {
       profiles?: AgentProfile[];
       worktreeSupervisor?: WorktreeSupervisor;
       reporter?: Reporter;
+      ownerSessionId?: string;
     } = {},
   ) {
     this.profiles = options.profiles ?? [];
@@ -419,6 +420,7 @@ export class DelegateTaskTool implements BaseTool {
           completionPolicy,
           description: summarizeDelegation(tasks),
           activityIds: activities.map((activity) => activity.activityId),
+          ...(this.options.ownerSessionId ? { ownerSessionId: this.options.ownerSessionId } : {}),
         },
       );
     } catch (error) {
@@ -568,7 +570,16 @@ export class DelegateTaskTool implements BaseTool {
     };
     let delegatedResult: DelegationBatchResult["results"][number] | undefined;
     const supervised = supervisor.start(
-      { description: task.goal, branchSlug: task.agentName ?? "worker" },
+      {
+        description: task.goal,
+        branchSlug: task.agentName ?? "worker",
+        completionMode: "merge_to_host",
+        data: {
+          completionPolicy: "detached",
+          internalCompletion: true,
+          ...(this.options.ownerSessionId ? { ownerSessionId: this.options.ownerSessionId } : {}),
+        },
+      },
       async (context) => {
         const combinedSignal = signal ? AbortSignal.any([signal, context.signal]) : context.signal;
         delegatedResult = await this.runOneDirect(
@@ -610,7 +621,10 @@ export class DelegateTaskTool implements BaseTool {
           }
           context.appendOutput(`${delegatedResult.summary ?? "follow-up completed"}\n`);
         }
-        return { summary: delegatedResult.summary };
+        return {
+          summary: delegatedResult.summary,
+          data: { delegatedStatus: delegatedResult.status },
+        };
       },
     );
     const stopOnAbort = (): void => {
@@ -624,6 +638,18 @@ export class DelegateTaskTool implements BaseTool {
       signal?.removeEventListener("abort", stopOnAbort);
     });
     if (snapshot.status !== "completed") {
+      if (
+        snapshot.finalization?.status === "blocked" &&
+        delegatedResult &&
+        (delegatedResult.status === "completed" || delegatedResult.status === "partial")
+      ) {
+        return {
+          ...delegatedResult,
+          status: "partial",
+          error: snapshot.error ?? "worker 变更已保留，但宿主合并被阻塞",
+          durationMs: snapshot.updatedAt - snapshot.startedAt,
+        };
+      }
       if (
         delegatedResult &&
         delegatedResult.status !== "completed" &&
