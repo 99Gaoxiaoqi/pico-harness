@@ -58,6 +58,7 @@ import type {
 import type { ImagePart } from "../schema/message.js";
 import type { ProviderKind } from "../provider/factory.js";
 import { loadModelRouter } from "../provider/model-router.js";
+import { createPlatformCredentialVault } from "../provider/credential-vault.js";
 import { isAbortError } from "../provider/errors.js";
 import { defaultIsRetryableError } from "../provider/retry.js";
 import { ModelRuntimeCommandService } from "../provider/model-runtime-report.js";
@@ -883,6 +884,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
   })();
   // 只在用户创建或启用任务时短连接 daemon；TUI 不接管后台 Runtime 生命周期。
   const cronDaemonBridge = new LocalCronDaemonBridge();
+  const credentialVault = createPlatformCredentialVault();
   let taskRuntimeDiagnostic: string | undefined;
   const taskHostRuntime = await TaskHostRuntime.create({ workDir: opts.workDir }).catch((error) => {
     taskRuntimeDiagnostic = error instanceof Error ? error.message : String(error);
@@ -1039,6 +1041,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         ...(taskHostRuntime ? { taskRuntime: taskHostRuntime } : {}),
         ...(cronService ? { cronService } : {}),
         ...(cronService ? { cronDaemonBridge } : {}),
+        ...(cronService ? { credentialVault } : {}),
         ...(taskRuntimeDiagnostic ? { taskRuntimeDiagnostic } : {}),
         additionalDirectories: settings.additionalDirectories,
         additionalDirectoryManager: workspaceRoots,

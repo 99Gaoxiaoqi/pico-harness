@@ -7,6 +7,7 @@ import { SilentReporter } from "../../src/engine/reporter.js";
 import { globalSessionManager } from "../../src/engine/session.js";
 import { resetSessionSettingsForTests } from "../../src/input/session-settings.js";
 import type { LLMProvider } from "../../src/provider/interface.js";
+import { credentialRefForModelRoute } from "../../src/provider/credential-vault.js";
 import { AgentRuntime, type RuntimeExecution } from "../../src/runtime/agent-runtime.js";
 import {
   BACKGROUND_HARDLINE_VERSION,
@@ -91,6 +92,41 @@ describe("AgentRuntime background YOLO integration", () => {
     expect(result.finalMessage).toBe("write was denied");
     expect(provider.calls[0]?.tools.map((tool) => tool.name)).toEqual(["read_file"]);
     await expect(access(deniedFile)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("后台 Provider 只按 credentialRef 取钥，缺少 resolver 时在构建 Provider 前失败", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-background-credential-"));
+    const ref = credentialRefForModelRoute("configured/model");
+    const provider = new ScriptedProvider([{ role: "assistant", content: "vault resolved" }]);
+    const providerConfigs: string[] = [];
+    const options = {
+      prompt: "run",
+      dir: workDir,
+      baseURL: "https://provider.test/v1",
+      model: "model",
+      credentialRef: ref,
+      execution: { kind: "background", policy: backgroundPolicy([]) } as const,
+    };
+
+    const result = await new AgentRuntime().execute(options, {
+      providerFactory: (_kind, config) => {
+        providerConfigs.push(config.apiKey);
+        return provider;
+      },
+      credentialResolver: { resolve: async () => "resolved-only-at-runtime" },
+      reporter: new SilentReporter(),
+      backgroundTrustStore: trustedWorkspaceVerifier(),
+    });
+    expect(result.finalMessage).toBe("vault resolved");
+    expect(providerConfigs).toEqual(["resolved-only-at-runtime"]);
+
+    await expect(
+      new AgentRuntime().execute(options, {
+        providerFactory: () => provider,
+        reporter: new SilentReporter(),
+        backgroundTrustStore: trustedWorkspaceVerifier(),
+      }),
+    ).rejects.toThrow(/credentialRef.*凭证解析器/u);
   });
 });
 

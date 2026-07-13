@@ -37,6 +37,12 @@ import type {
 } from "./types.js";
 import { createProvider, type ProviderKind } from "../provider/factory.js";
 import { type ModelRouter } from "../provider/model-router.js";
+import {
+  credentialRefForModelRoute,
+  importModelRouteCredential,
+  type CredentialRef,
+  type CredentialVault,
+} from "../provider/credential-vault.js";
 import { loadApiKeys } from "../provider/config.js";
 import { buildDefaultToolRegistry } from "../tools/default-registry.js";
 import {
@@ -115,6 +121,9 @@ export interface PicoCommandRegistryOptions {
   cronService?: CronService;
   /** TUI 通过它把启用的 Cron 工作区交给本机 Runtime daemon。 */
   cronDaemonBridge?: CronDaemonBridge;
+  /** TUI 专用系统凭证库；导入仅从进程环境读取，命令参数永不接收 secret。 */
+  credentialVault?: CredentialVault;
+  credentialEnv?: Readonly<Record<string, string | undefined>>;
   /** TaskHostRuntime 不可用时的宿主诊断；TUI 仍可在非 Git 目录运行。 */
   taskRuntimeDiagnostic?: string;
   /** 可注入的只读存储诊断器；默认扫描当前 workspace 和全局 File History。 */
@@ -1228,8 +1237,8 @@ function createCronCommand(
     name: "cron",
     description: "Manage persistent YOLO cron jobs for this workspace",
     usage:
-      "/cron <status|list|add|enable|disable|delete|runs> [--tool-network=disabled|allowlist:host1,host2] [arguments]",
-    argumentHint: "<status|list|add|enable|disable|delete|runs>",
+      "/cron <status|list|credential|add|enable|disable|delete|runs> [--tool-network=disabled|allowlist:host1,host2] [arguments]",
+    argumentHint: "<status|list|credential|add|enable|disable|delete|runs>",
     category: "workspace",
     kind: "local",
     availability: "idle",
@@ -1262,6 +1271,9 @@ function createCronCommand(
             ),
           );
         }
+        if (operation === "credential") {
+          return cronMessage(await manageCronCredential(options, settings, args));
+        }
         if (operation === "add") {
           if (settings.mode !== "yolo") {
             return cronMessage(
@@ -1274,10 +1286,12 @@ function createCronCommand(
               "Usage: /cron add [--tool-network=disabled|allowlist:host1,host2] <minute> <hour> <day> <month> <weekday> <prompt>",
             );
           const [minute, hour, day, month, weekday, ...promptParts] = toolNetwork.args;
+          const credentialRef = await requireCronCredential(options, settings);
           const job = cron.create({
             workspacePath: options.workDir,
             schedule: [minute, hour, day, month, weekday].join(" "),
             prompt: promptParts.join(" "),
+            credentialRef,
             policySnapshot: {
               mode: "yolo",
               backgroundEnabled: true,
@@ -1316,7 +1330,9 @@ function createCronCommand(
           const deleted = cron.delete(cronJobId, job.version);
           return cronMessage(`Cron job ${deleted.cronJobId} deleted.`);
         }
-        return cronMessage("Usage: /cron <status|list|add|enable|disable|delete|runs> [arguments]");
+        return cronMessage(
+          "Usage: /cron <status|list|credential|add|enable|disable|delete|runs> [arguments]",
+        );
       } catch (error) {
         return cronMessage(
           `Cron failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -1324,6 +1340,57 @@ function createCronCommand(
       }
     },
   };
+}
+
+async function manageCronCredential(
+  options: PicoCommandRegistryOptions,
+  settings: SessionSettings,
+  args: readonly string[],
+): Promise<string> {
+  const vault = options.credentialVault;
+  if (!vault) return "系统凭证库未配置，后台 Provider 凭证已禁用。";
+  const capability = vault.capability();
+  if (!capability.available) return capability.diagnostic;
+  const [action = "status", requestedRoute] = args;
+  const route = options.modelRouter?.require(requestedRoute ?? settings.modelRouteId);
+  if (!route) return "当前没有可导入的配置模型路由。";
+  if (route.source === "legacy") {
+    return "持久 Cron 不支持 legacy 环境变量路由；请先在 .pico/config.json 配置 provider。";
+  }
+  const ref = credentialRefForModelRoute(route.id);
+  if (action === "status") {
+    return `${capability.diagnostic}\n${route.id}: ${(await vault.has(ref)) ? "已导入" : "未导入"}`;
+  }
+  if (action !== "import") {
+    return "Usage: /cron credential <status|import> [providerID/modelID]";
+  }
+  await importModelRouteCredential({
+    route,
+    vault,
+    env: options.credentialEnv ?? process.env,
+  });
+  return `已将 ${route.apiKeyEnv} 安全导入系统凭证库，引用：${ref}`;
+}
+
+async function requireCronCredential(
+  options: PicoCommandRegistryOptions,
+  settings: SessionSettings,
+): Promise<CredentialRef> {
+  const vault = options.credentialVault;
+  if (!vault?.capability().available) {
+    throw new Error(vault?.capability().diagnostic ?? "系统凭证库未配置");
+  }
+  const route = options.modelRouter?.require(settings.modelRouteId);
+  if (!route || route.source === "legacy") {
+    throw new Error(
+      "持久 Cron 需要 .pico/config.json 中的 providerID/modelID 路由，不能依赖 shell legacy 配置。",
+    );
+  }
+  const ref = credentialRefForModelRoute(route.id);
+  if (!(await vault.has(ref))) {
+    throw new Error(`模型路由 ${route.id} 尚未导入系统凭证库；请先执行 /cron credential import。`);
+  }
+  return ref;
 }
 
 async function registerCronWorkspace(

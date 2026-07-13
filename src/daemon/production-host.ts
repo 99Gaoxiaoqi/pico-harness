@@ -1,5 +1,12 @@
 import { AgentRuntime } from "../runtime/agent-runtime.js";
 import { SilentReporter } from "../engine/reporter.js";
+import { loadPicoConfig } from "../input/pico-config.js";
+import {
+  createPlatformCredentialVault,
+  parseCredentialRef,
+  type CredentialVault,
+} from "../provider/credential-vault.js";
+import { resolveModelRouteCapabilities } from "../provider/model-capabilities.js";
 import {
   BACKGROUND_HARDLINE_VERSION,
   BACKGROUND_HOOK_VERSION,
@@ -18,6 +25,7 @@ export interface ProductionLocalDaemonHostOptions {
   registrationStore?: WorkspaceRegistrationStore;
   trustStore?: WorkspaceTrustStore;
   agentRuntime?: AgentRuntime;
+  credentialVault?: CredentialVault;
 }
 
 /**
@@ -30,6 +38,7 @@ export function createProductionLocalDaemonHost(
 ): LocalDaemonHost {
   const trustStore = options.trustStore ?? new WorkspaceTrustStore();
   const agentRuntime = options.agentRuntime ?? new AgentRuntime();
+  const credentialVault = options.credentialVault ?? createPlatformCredentialVault();
   const registrationStore = options.registrationStore ?? new WorkspaceRegistrationStore();
   const service = new WorkspaceRuntimeService({
     registrationStore,
@@ -44,6 +53,11 @@ export function createProductionLocalDaemonHost(
         policy: job.policySnapshot,
         trustStore,
       });
+      if (!job.credentialRef) throw new Error("Cron Job 缺少 credentialRef");
+      await resolveCronModelRoute(job);
+      if (!(await credentialVault.has(job.credentialRef))) {
+        throw new Error(`系统凭证库中不存在 ${job.credentialRef}`);
+      }
       return { allowed: true };
     } catch (error) {
       return { allowed: false, reason: error instanceof Error ? error.message : String(error) };
@@ -60,13 +74,27 @@ export function createProductionLocalDaemonHost(
           : { allowed: false, reason: "background_policy_version_mismatch" },
     },
     execute: async (job, context) => {
+      if (!job.credentialRef) throw new Error("Cron Job 缺少 credentialRef");
+      const route = await resolveCronModelRoute(job);
       const result = await agentRuntime.execute(
         {
           prompt: job.prompt,
           dir: job.workspacePath,
+          provider: route.provider,
+          baseURL: route.baseURL,
+          model: route.model,
+          modelRouteId: route.modelRouteId,
+          modelCapabilities: route.capabilities,
+          allowModelFallback: false,
+          credentialRef: job.credentialRef,
           execution: { kind: "background", policy: job.policySnapshot },
         },
-        { signal: context.signal, reporter: new SilentReporter(), backgroundTrustStore: trustStore },
+        {
+          signal: context.signal,
+          reporter: new SilentReporter(),
+          backgroundTrustStore: trustStore,
+          credentialResolver: credentialVault,
+        },
       );
       return {
         sessionId: result.sessionId,
@@ -83,4 +111,29 @@ export function createProductionLocalDaemonHost(
   });
   service.setRegistrationChangedListener(() => host.refreshRegisteredWorkspaces());
   return host;
+}
+
+async function resolveCronModelRoute(job: CronJobRecord) {
+  if (!job.credentialRef) throw new Error("Cron Job 缺少 credentialRef");
+  const { modelRouteId } = parseCredentialRef(job.credentialRef);
+  const slash = modelRouteId.indexOf("/");
+  const providerId = modelRouteId.slice(0, slash);
+  const model = modelRouteId.slice(slash + 1);
+  const config = await loadPicoConfig(job.workspacePath);
+  const provider = config.providers[providerId];
+  if (!provider) throw new Error(`配置模型路由 ${modelRouteId} 的 provider 已不存在`);
+  if (!provider.models.includes(model)) {
+    throw new Error(`配置模型路由 ${modelRouteId} 不在显式 models 列表中`);
+  }
+  return {
+    provider: provider.protocol,
+    baseURL: provider.baseURL,
+    model,
+    modelRouteId,
+    capabilities: resolveModelRouteCapabilities(
+      provider.protocol,
+      model,
+      provider.modelCapabilities?.[model],
+    ),
+  };
 }

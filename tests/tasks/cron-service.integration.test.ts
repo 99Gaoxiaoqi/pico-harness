@@ -116,7 +116,7 @@ describe("CronService durable ledger integration", () => {
     const databasePath = join(workDir, ".claw", "runtime.sqlite");
     const raw = new Database(databasePath);
     raw.exec(
-      "DROP TABLE runtime_events; DROP TABLE cron_runs; DROP TABLE cron_jobs; DELETE FROM schema_migrations WHERE version = 3",
+      "DROP TABLE runtime_events; DROP TABLE cron_runs; DROP TABLE cron_jobs; DELETE FROM schema_migrations WHERE version >= 3",
     );
     raw.close();
 

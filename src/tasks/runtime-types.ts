@@ -236,6 +236,8 @@ export interface CronJobRecord {
   prompt: string;
   enabled: boolean;
   policySnapshot: YoloPolicySnapshot;
+  /** 非秘密的系统凭证库引用；旧 Job 迁移后可能为空并由 daemon fail-closed。 */
+  credentialRef?: CredentialRef;
   version: number;
   createdAt: number;
   updatedAt: number;
@@ -279,3 +281,4 @@ export function isTerminalCronRunStatus(status: CronRunStatus): status is Termin
 export function isTerminalJobStatus(status: JobStatus): status is TerminalJobStatus {
   return (TERMINAL_JOB_STATUSES as readonly JobStatus[]).includes(status);
 }
+import type { CredentialRef } from "../provider/credential-vault.js";
