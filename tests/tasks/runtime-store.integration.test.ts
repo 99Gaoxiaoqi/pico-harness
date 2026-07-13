@@ -288,6 +288,171 @@ describe("RuntimeStore + JobService integration", () => {
     expect(readdirSync(legacyDir).some((name) => name.endsWith(".diagnostic.json"))).toBe(true);
     expect(store.listJobs()).toHaveLength(2);
   });
+
+  it("仅将证据更新的 legacy 终态前滚到 runtime，且不回滚后续权威更新", async () => {
+    const workDir = makeTempDir(tempDirs);
+    let now = 100;
+    const service = new JobService({ workDir, ownerId: "cutover-host", now: () => now });
+    closeables.push(service);
+    const queued = service.dispatch({
+      jobId: "cutover-job",
+      type: "local_agent",
+      executionClass: "host_bound",
+      completionPolicy: "optional",
+      description: "queued in sqlite",
+      ownerSessionId: "owner-session",
+    });
+    const alreadyNotified = service.dispatch({
+      jobId: "cutover-notified",
+      type: "local_agent",
+      executionClass: "host_bound",
+      completionPolicy: "optional",
+      description: "already delivered before cutover",
+      ownerSessionId: "owner-session",
+    });
+    const legacyPath = join(workDir, ".claw", "tasks", "state.json");
+    mkdirSync(join(workDir, ".claw", "tasks"), { recursive: true });
+    const legacyTerminal = {
+      taskId: queued.jobId,
+      type: "local_agent",
+      status: "completed",
+      description: "completed before cutover",
+      startTime: 100,
+      endTime: 200,
+      outputOffset: 17,
+      notified: false,
+      data: {
+        runtimeVersion: queued.version,
+        completionId: "completion:cutover-job:1",
+        completionSeq: 7,
+        completionPolicy: "optional",
+        aggregateStatus: "completed",
+        activityIds: ["activity-cutover"],
+        outputSummary: "legacy result",
+      },
+    } as const;
+    writeFileSync(
+      legacyPath,
+      JSON.stringify({
+        version: 1,
+        tasks: [
+          legacyTerminal,
+          {
+            ...legacyTerminal,
+            taskId: alreadyNotified.jobId,
+            endTime: 210,
+            notified: true,
+            data: {
+              ...legacyTerminal.data,
+              completionId: "completion:cutover-notified:1",
+            },
+          },
+        ],
+      }),
+      "utf8",
+    );
+
+    now = 300;
+    await expect(service.store.importLegacyTaskStore(legacyPath)).resolves.toEqual({
+      imported: 2,
+      skipped: 0,
+      interrupted: 0,
+    });
+    expect(service.get(queued.jobId)).toMatchObject({
+      job: {
+        status: "succeeded",
+        version: 2,
+        attemptCount: 1,
+        terminalAt: 200,
+        data: {
+          legacyTaskStoreImport: {
+            legacyStatus: "completed",
+            runtimeVersionBefore: 1,
+          },
+        },
+      },
+      attempts: [
+        expect.objectContaining({
+          status: "succeeded",
+          attemptNumber: 1,
+          outputOffset: 17,
+          finishedAt: 200,
+        }),
+      ],
+    });
+    expect(service.pendingCompletions({ ownerSessionId: "owner-session" })).toEqual([
+      expect.objectContaining({
+        completionId: "completion:cutover-job:1",
+        status: "succeeded",
+      }),
+    ]);
+    expect(service.store.getCompletion("completion:cutover-notified:1")).toMatchObject({
+      jobId: alreadyNotified.jobId,
+      deliveredAt: 300,
+    });
+
+    writeFileSync(legacyPath, JSON.stringify({ version: 1, tasks: [legacyTerminal] }), "utf8");
+    await expect(service.store.importLegacyTaskStore(legacyPath)).resolves.toEqual({
+      imported: 0,
+      skipped: 1,
+      interrupted: 0,
+    });
+    now = 400;
+    expect(service.retry(queued.jobId, 2)).toMatchObject({ status: "queued", version: 3 });
+    writeFileSync(
+      legacyPath,
+      JSON.stringify({
+        version: 1,
+        tasks: [{ ...legacyTerminal, description: "stale terminal rewritten" }],
+      }),
+      "utf8",
+    );
+    await expect(service.store.importLegacyTaskStore(legacyPath)).resolves.toEqual({
+      imported: 0,
+      skipped: 1,
+      interrupted: 0,
+    });
+    expect(service.get(queued.jobId)?.job).toMatchObject({ status: "queued", version: 3 });
+  });
+
+  it("无法判定 legacy 终态新旧时保留原文件并拒绝覆盖 runtime", async () => {
+    const workDir = makeTempDir(tempDirs);
+    const service = new JobService({ workDir, ownerId: "cutover-host", now: () => 100 });
+    closeables.push(service);
+    service.dispatch({
+      jobId: "ambiguous-job",
+      type: "local_agent",
+      executionClass: "host_bound",
+      completionPolicy: "required",
+      description: "authoritative queued",
+    });
+    const legacyPath = join(workDir, ".claw", "tasks", "state.json");
+    mkdirSync(join(workDir, ".claw", "tasks"), { recursive: true });
+    writeFileSync(
+      legacyPath,
+      JSON.stringify({
+        version: 1,
+        tasks: [
+          {
+            taskId: "ambiguous-job",
+            type: "local_agent",
+            status: "failed",
+            description: "missing terminal timestamp",
+            startTime: 100,
+            outputOffset: 0,
+            notified: false,
+          },
+        ],
+      }),
+      "utf8",
+    );
+
+    await expect(service.store.importLegacyTaskStore(legacyPath)).rejects.toThrow(
+      /endTime.*runtime queued/,
+    );
+    expect(service.get("ambiguous-job")?.job).toMatchObject({ status: "queued", version: 1 });
+    expect(existsSync(legacyPath)).toBe(true);
+  });
 });
 
 function makeTempDir(tempDirs: string[]): string {
