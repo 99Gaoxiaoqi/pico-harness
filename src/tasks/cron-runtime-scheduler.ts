@@ -12,7 +12,9 @@ export interface CronRuntimeSchedulerOptions {
   getWorkspaceRuntime(workspacePath: string): Promise<WorkspaceTaskRuntime>;
   execute(job: CronJobRecord, context: WorkspaceRunContext): Promise<Record<string, unknown> | void>;
   /** Revalidates trust/hardline/hooks immediately before a background run starts. */
-  canRun?(job: CronJobRecord): Promise<{ allowed: boolean; reason?: string }>;
+  canRun(job: CronJobRecord): Promise<{ allowed: boolean; reason?: string }>;
+  /** Must stay shorter than the SQLite lease TTL used by CronService. */
+  leaseHeartbeatMs?: number;
   now?: () => number;
 }
 
@@ -23,11 +25,13 @@ export interface CronRuntimeSchedulerOptions {
  */
 export class CronRuntimeScheduler {
   private readonly now: () => number;
+  private readonly leaseHeartbeatMs: number;
   private timer?: ReturnType<typeof setTimeout>;
   private running = false;
 
   constructor(private readonly options: CronRuntimeSchedulerOptions) {
     this.now = options.now ?? Date.now;
+    this.leaseHeartbeatMs = Math.max(1_000, options.leaseHeartbeatMs ?? 10_000);
   }
 
   async tick(at = this.now()): Promise<CronTickResult> {
@@ -65,8 +69,8 @@ export class CronRuntimeScheduler {
       this.options.cronService.block(initial.cronRunId, "job_missing");
       return;
     }
-    const decision = await this.options.canRun?.(job);
-    if (decision && !decision.allowed) {
+    const decision = await this.options.canRun(job);
+    if (!decision.allowed) {
       this.options.cronService.block(initial.cronRunId, decision.reason ?? "policy_blocked");
       return;
     }
@@ -90,15 +94,29 @@ export class CronRuntimeScheduler {
       });
       return;
     }
-    const terminal = await runtime.waitForRun(run.runId);
-    this.options.cronService.finish({
-      cronRunId: claimed.run.cronRunId,
-      leaseEpoch: claimed.lease.leaseEpoch,
-      expectedVersion: claimed.run.version,
-      status: terminal.status === "succeeded" ? "succeeded" : terminal.status === "cancelled" ? "cancelled" : "failed",
-      ...(terminal.error ? { reason: terminal.error } : {}),
-      ...(terminal.result ? { result: terminal.result } : {}),
-    });
+    const heartbeat = setInterval(() => {
+      try {
+        this.options.cronService.heartbeat(claimed.run.cronRunId, claimed.lease!.leaseEpoch);
+      } catch {
+        // The completion CAS below is authoritative. Do not silently extend an
+        // ownership lease after another daemon has taken it.
+        runtime.cancel(run.runId, "cron lease lost");
+      }
+    }, this.leaseHeartbeatMs);
+    heartbeat.unref?.();
+    try {
+      const terminal = await runtime.waitForRun(run.runId);
+      this.options.cronService.finish({
+        cronRunId: claimed.run.cronRunId,
+        leaseEpoch: claimed.lease.leaseEpoch,
+        expectedVersion: claimed.run.version,
+        status: terminal.status === "succeeded" ? "succeeded" : terminal.status === "cancelled" ? "cancelled" : "failed",
+        ...(terminal.error ? { reason: terminal.error } : {}),
+        ...(terminal.result ? { result: terminal.result } : {}),
+      });
+    } finally {
+      clearInterval(heartbeat);
+    }
   }
 }
 
