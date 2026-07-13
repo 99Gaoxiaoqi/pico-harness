@@ -1,8 +1,9 @@
 import { readdir, rm, stat } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
-import { SessionStore, type SessionRecord } from "../engine/session-store.js";
-import { isMessageHiddenFromTranscript, type Message } from "../schema/message.js";
+import { SessionStore } from "../engine/session-store.js";
+import { replaySessionRecords } from "../engine/session-reducer.js";
+import { isMessageHiddenFromTranscript } from "../schema/message.js";
 import { rememberResolvedCliSession } from "../input/session-settings.js";
 
 export type CliSessionMode = "new" | "continue" | "resume" | "fork";
@@ -97,8 +98,9 @@ export async function listCliSessionSummaries(workDir: string): Promise<CliSessi
   const summaries: CliSessionSummary[] = [];
   for (const file of files) {
     const records = await new SessionStore(file.path).load();
-    const messages = recoverSessionMessages(records);
-    const metadata = recoverSessionMetadata(records);
+    const replay = replaySessionRecords(records);
+    const messages = replay.history;
+    const metadata = recoverSessionMetadata(replay.runtime.settings);
     const visibleUserMessages = messages.filter(
       (message) =>
         message.role === "user" &&
@@ -133,22 +135,11 @@ export async function listCliSessionSummaries(workDir: string): Promise<CliSessi
 
 /** 最近一次完整 settings 快照中的用户可识别元数据。 */
 function recoverSessionMetadata(
-  records: readonly SessionRecord[],
+  settings: ReturnType<typeof replaySessionRecords>["runtime"]["settings"],
 ): Pick<CliSessionSummary, "title" | "forkFrom"> {
-  let title: string | undefined;
-  let forkFrom: string | undefined;
-  for (const record of records) {
-    if (record.type !== "runtime_state" || !record.patch.settings) continue;
-    if (record.patch.settings.title !== undefined) {
-      title = record.patch.settings.title;
-    }
-    if (record.patch.settings.forkFrom !== undefined) {
-      forkFrom = record.patch.settings.forkFrom;
-    }
-  }
   return {
-    ...(title !== undefined ? { title } : {}),
-    ...(forkFrom !== undefined ? { forkFrom } : {}),
+    ...(settings?.title !== undefined ? { title: settings.title } : {}),
+    ...(settings?.forkFrom !== undefined ? { forkFrom: settings.forkFrom } : {}),
   };
 }
 
@@ -197,45 +188,10 @@ async function listSessionFiles(workDir: string): Promise<SessionFileInfo[]> {
   return candidates;
 }
 
-function recoverSessionMessages(records: readonly SessionRecord[]): Message[] {
-  let history: Message[] = [];
-  for (const record of records) {
-    if (record.type === "message") {
-      if (record.volatile === true) continue;
-      history.push(record.message);
-    } else if (record.type === "truncate") {
-      history = history.slice(record.fromIndex);
-    } else if (record.type === "undo") {
-      history = applyUndoToHistory(history, record.count);
-    } else if (record.type === "rewind_to") {
-      history = history.slice(0, record.messageIndex);
-    }
-  }
-  return history;
-}
-
 function compactSessionText(value: string | undefined): string | undefined {
   const compacted = value?.replace(/\s+/gu, " ").trim();
   if (!compacted) return undefined;
   return compacted.length <= 240 ? compacted : `${compacted.slice(0, 239)}…`;
-}
-
-function applyUndoToHistory(history: readonly Message[], count: number): Message[] {
-  if (count <= 0) return [...history];
-  let removedCount = 0;
-  let cutIndex = 0;
-  for (let index = history.length - 1; index >= 0; index--) {
-    const message = history[index]!;
-    if (message.role === "system") continue;
-    if (message.role === "user") {
-      removedCount++;
-      if (removedCount === count) {
-        cutIndex = index;
-        break;
-      }
-    }
-  }
-  return removedCount === 0 ? [...history] : history.slice(0, cutIndex);
 }
 
 async function assertSessionFileExists(
