@@ -177,6 +177,7 @@ describe("session fork published mainline", () => {
     await expect(crashing.journal.get(operationId)).resolves.toMatchObject({
       state: "workspace_applied",
       sourceCursor: sourceForkPoint.cursor,
+      targetMode: "yolo",
     });
 
     // workspace_applied 后 source 可继续推进；重启只能发布已经冻结的 bundle。
@@ -275,6 +276,63 @@ describe("session fork published mainline", () => {
     expect(jobs.list({ ownerSessionId: targetId })).toHaveLength(0);
 
     jobs.close();
+    await target.close();
+    await source.close();
+  });
+
+  it("keeps the requested target mode when a prepared fork is reconciled after restart", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pico-session-fork-mode-recovery-"));
+    cleanup.push(root);
+    const workDir = join(root, "workspace");
+    const manager = new SessionManager();
+    const source = await manager.getOrCreate("mode-source", workDir, {
+      persistence: true,
+      sessionCatalog: false,
+    });
+    await source.commitMessages({ role: "user", content: "先形成计划" });
+    source.updateRuntimeState({
+      settings: {
+        provider: "openai",
+        model: "glm-5.2",
+        mode: "yolo",
+        thinkingEffort: "high",
+        thinkingEffortExplicit: true,
+        additionalDirectories: [],
+      },
+    });
+    await source.flushPersistence();
+    const snapshot = await source.readDurableForkSnapshot();
+    const service = new SessionForkService({
+      workDir,
+      sessionManager: manager,
+      fileHistoryBaseDir: join(root, "file-history"),
+      catalogProjector: new SessionCatalogProjector(
+        new SessionCatalog({ baseDirectory: join(root, "catalog") }),
+      ),
+    });
+    await service.journal.create({
+      kind: "fork",
+      operationId: "prepared-plan-fork",
+      sessionId: source.id,
+      sourceSessionId: source.id,
+      sourceCursor: snapshot.cursor,
+      targetSessionId: "mode-target",
+      targetMode: "plan",
+      stagingDirectory: join(workDir, ".claw", "fork-staging", "prepared-plan-fork"),
+    });
+
+    await expect(service.reconcileUnfinished()).resolves.toEqual([
+      { operationId: "prepared-plan-fork", state: "completed" },
+    ]);
+    const target = await manager.getOrCreate("mode-target", workDir, {
+      persistence: true,
+      sessionCatalog: false,
+    });
+    expect((await target.readHydrationSnapshot()).runtime.settings).toMatchObject({
+      mode: "plan",
+      prePlanMode: "yolo",
+      forkFrom: source.id,
+    });
     await target.close();
     await source.close();
   });

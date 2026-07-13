@@ -154,6 +154,7 @@ export class SessionForkService {
       sourceSessionId: input.sourceSessionId,
       sourceCursor: snapshot.cursor,
       targetSessionId: input.targetSessionId,
+      targetMode: input.targetMode,
       stagingDirectory: join(this.workDir, ".claw", "fork-staging", operationId),
     });
     if (operation.state === "needs_attention") throw new SessionForkNeedsAttentionError(operation);
@@ -180,7 +181,7 @@ export class SessionForkService {
           this.frozenByOperation.set(operation.operationId, {
             sourceSessionId: operation.sourceSessionId,
             targetSessionId: operation.targetSessionId,
-            targetMode: "yolo",
+            targetMode: operation.targetMode ?? "yolo",
             snapshot,
           });
         }
@@ -278,7 +279,7 @@ export class SessionForkService {
     const frozen = {
       sourceSessionId: operation.sourceSessionId,
       targetSessionId: operation.targetSessionId,
-      targetMode: "yolo",
+      targetMode: operation.targetMode ?? "yolo",
       snapshot,
     } satisfies FrozenForkSource;
     this.frozenByOperation.set(operation.operationId, frozen);
