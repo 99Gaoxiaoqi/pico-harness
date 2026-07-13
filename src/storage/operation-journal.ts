@@ -48,6 +48,10 @@ export interface RewindStorageOperation extends StorageOperationBase {
     messageId: string;
     sourceMessageEventId?: string;
     messageIndex: number;
+    /** TUI 崩溃恢复 handoff；旧 operation 可缺省。 */
+    userPrompt?: string;
+    transcriptIndex?: number;
+    interactionMode?: "default" | "plan" | "auto" | "yolo";
   };
   files: Array<{
     rootId: string;
@@ -75,16 +79,16 @@ export interface ForkStorageOperation extends StorageOperationBase {
 export type StorageOperation = RewindStorageOperation | ForkStorageOperation;
 
 export type NewStorageOperation =
-  | Omit<RewindStorageOperation, keyof StorageOperationBase | "kind"> & {
+  | (Omit<RewindStorageOperation, keyof StorageOperationBase | "kind"> & {
       kind: "rewind";
       sessionId: string;
       operationId?: string;
-    }
-  | Omit<ForkStorageOperation, keyof StorageOperationBase | "kind"> & {
+    })
+  | (Omit<ForkStorageOperation, keyof StorageOperationBase | "kind"> & {
       kind: "fork";
       sessionId: string;
       operationId?: string;
-    };
+    });
 
 export interface OperationJournalOptions {
   workDir: string;
@@ -102,7 +106,8 @@ export class StorageOperationJournal {
 
   async create(input: NewStorageOperation): Promise<StorageOperation> {
     const operationId = input.operationId ?? randomUUID();
-    if (!SAFE_OPERATION_ID.test(operationId)) throw new Error(`Invalid operation ID: ${operationId}`);
+    if (!SAFE_OPERATION_ID.test(operationId))
+      throw new Error(`Invalid operation ID: ${operationId}`);
     const now = this.now().toISOString();
     const operation = {
       ...input,
@@ -145,7 +150,9 @@ export class StorageOperationJournal {
       );
     }
     if (!canTransition(current.state, input.nextState)) {
-      throw new Error(`Invalid storage operation transition: ${current.state} -> ${input.nextState}`);
+      throw new Error(
+        `Invalid storage operation transition: ${current.state} -> ${input.nextState}`,
+      );
     }
     const next = {
       ...current,
@@ -159,6 +166,11 @@ export class StorageOperationJournal {
   }
 
   async listUnfinished(): Promise<StorageOperation[]> {
+    return (await this.list()).filter((operation) => !isTerminal(operation.state));
+  }
+
+  /** Doctor / TUI handoff 使用的全量只读视图；损坏记录由 Doctor 单独报告。 */
+  async list(): Promise<StorageOperation[]> {
     let names: string[];
     try {
       names = await readdir(this.directory);
@@ -174,7 +186,7 @@ export class StorageOperationJournal {
         const parsed = parseStorageOperation(
           JSON.parse(await readFile(join(this.directory, name), "utf8")) as unknown,
         );
-        if (parsed && !isTerminal(parsed.state)) operations.push(parsed);
+        if (parsed) operations.push(parsed);
       } catch {
         // Doctor reports malformed journals separately. Normal startup cannot guess their intent.
       }
@@ -189,7 +201,8 @@ export class StorageOperationJournal {
   }
 
   private operationPath(operationId: string): string {
-    if (!SAFE_OPERATION_ID.test(operationId)) throw new Error(`Invalid operation ID: ${operationId}`);
+    if (!SAFE_OPERATION_ID.test(operationId))
+      throw new Error(`Invalid operation ID: ${operationId}`);
     return join(this.directory, `${operationId}.json`);
   }
 }
@@ -204,7 +217,9 @@ function canTransition(from: StorageOperationState, to: StorageOperationState): 
   if (to === "needs_attention" || to === "aborted") return true;
   switch (from) {
     case "prepared":
-      return to === "workspace_applied" || to === "session_committed" || to === "sidecars_committed";
+      return (
+        to === "workspace_applied" || to === "session_committed" || to === "sidecars_committed"
+      );
     case "workspace_applied":
       return to === "session_committed" || to === "sidecars_committed";
     case "session_committed":
@@ -255,6 +270,9 @@ function parseRewindOperation(value: Record<string, unknown>): RewindStorageOper
     typeof target["messageId"] !== "string" ||
     !isOptionalString(target["sourceMessageEventId"]) ||
     !isNonNegativeInteger(target["messageIndex"]) ||
+    !isOptionalString(target["userPrompt"]) ||
+    !isOptionalNonNegativeInteger(target["transcriptIndex"]) ||
+    !isOptionalInteractionMode(target["interactionMode"]) ||
     !Array.isArray(files) ||
     !files.every(isStoredFileTransition)
   ) {
@@ -338,6 +356,20 @@ function isRewindMode(value: unknown): value is RewindStorageOperation["mode"] {
 
 function isOptionalString(value: unknown): boolean {
   return value === undefined || typeof value === "string";
+}
+
+function isOptionalInteractionMode(value: unknown): boolean {
+  return (
+    value === undefined ||
+    value === "default" ||
+    value === "plan" ||
+    value === "auto" ||
+    value === "yolo"
+  );
+}
+
+function isOptionalNonNegativeInteger(value: unknown): boolean {
+  return value === undefined || isNonNegativeInteger(value);
 }
 
 function isNonNegativeInteger(value: unknown): value is number {

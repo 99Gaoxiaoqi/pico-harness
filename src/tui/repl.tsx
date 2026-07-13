@@ -37,10 +37,7 @@ import type {
 } from "../cli/run-agent.js";
 import { runAgentFromCli } from "../cli/run-agent.js";
 import { listRewindPointSummaries } from "../cli/file-history.js";
-import {
-  createCliSessionId,
-  type CliSessionSelection,
-} from "../cli/session-resolver.js";
+import { createCliSessionId, type CliSessionSelection } from "../cli/session-resolver.js";
 import { loadPicoConfig } from "../input/pico-config.js";
 import {
   commandArgumentSuggestions,
@@ -230,6 +227,7 @@ interface TuiSessionBundle {
   readonly registry: CommandRegistry;
   readonly reporter: TuiReporter;
   readonly askUserHandler: AskUserHandler;
+  readonly recoveredRewindInputText?: string;
   latestMcpStatus?: McpStatusSnapshot;
 }
 
@@ -856,6 +854,12 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
       });
       reporterRef.current = reporter;
       hydrateTuiReporter(reporter, hydration);
+      const recoveredRewind = await session.getPendingTuiRewindHandoff();
+      if (recoveredRewind) {
+        reporter.pushSystemMessage(
+          `Recovered rewind ${recoveredRewind.operationId}. Original prompt is ready to edit.`,
+        );
+      }
       if (taskRuntimeDiagnostic) {
         reporter.pushSystemMessage(
           `Task runtime unavailable; background/worker persistence is disabled. ${taskRuntimeDiagnostic}`,
@@ -873,6 +877,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         registry,
         reporter,
         askUserHandler,
+        ...(recoveredRewind ? { recoveredRewindInputText: recoveredRewind.inputText } : {}),
         latestMcpStatus,
       };
       bundleRef.current = bundle;
@@ -910,10 +915,17 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     );
     const stateEntries = projectTuiEntriesForRendering(stateProjection);
     const [dialogRequests, setDialogRequests] = useState<DialogRequest[]>([]);
-    const [inputReplacement, setInputReplacement] = useState<{
-      sequence: number;
-      text: string;
-    }>();
+    const [inputReplacement, setInputReplacement] = useState<
+      | {
+          sequence: number;
+          text: string;
+        }
+      | undefined
+    >(() =>
+      initialBundle.recoveredRewindInputText
+        ? { sequence: 1, text: initialBundle.recoveredRewindInputText }
+        : undefined,
+    );
     setProjection = setStateProjection;
     activeBundle = activeBundleRef.current;
 
@@ -1066,11 +1078,19 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
           // 新 bundle 已完整构建且旧 runtime 已收口，再一次替换引用。
           activeBundleRef.current = next;
           activeBundle = next;
+          const recoveredRewindInputText = next.recoveredRewindInputText;
           runningQueue.clear();
           runningInputDepsRef.current = null;
           rewindContextRef.current = null;
           setDialogRequests([]);
-          setInputReplacement(undefined);
+          setInputReplacement((current) =>
+            recoveredRewindInputText
+              ? {
+                  sequence: (current?.sequence ?? 0) + 1,
+                  text: recoveredRewindInputText,
+                }
+              : undefined,
+          );
           setRunningInputState(runningQueue.snapshot);
           setProjection(next.reporter.getProjection());
           setBundle(next);
