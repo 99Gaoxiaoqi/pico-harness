@@ -17,6 +17,7 @@ import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { chmod, mkdir, open, readFile, stat, type FileHandle } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import type { Message } from "../schema/message.js";
 import { logger } from "../observability/logger.js";
 import { OwnerLease } from "../storage/owner-lease.js";
@@ -78,6 +79,8 @@ export interface CommitReceipt {
   readonly cursor: SessionCursor;
   readonly committedAt: string;
   readonly durable: true;
+  /** false 表示同 eventId 的相同事件已耐久落盘，本次只返回原 receipt。 */
+  readonly inserted: boolean;
 }
 
 interface SessionEventBase {
@@ -203,6 +206,7 @@ interface DurableWriter {
   readonly lease: OwnerLease;
   readonly logId: string;
   readonly eventIds: Set<string>;
+  readonly eventsById: Map<string, SessionEvent>;
   refs: number;
   headSeq: number;
   headEventId: string;
@@ -224,6 +228,8 @@ export interface CommitEventOptions {
 export interface SessionStoreDurabilityHooks {
   /** 仅用于故障注入集成测试；位于 write 之后、fdatasync 之前。 */
   readonly beforeDatasync?: () => void | Promise<void>;
+  /** 仅用于集成测试强制分块，覆盖 FileHandle.write 可能短写的路径。 */
+  readonly maxWriteBytes?: number;
 }
 
 /**
@@ -329,11 +335,11 @@ export class SessionStore {
   }
 
   async commitTruncate(fromIndex: number, options?: CommitEventOptions): Promise<CommitReceipt> {
-    return this.commitEvent("history.truncated", { fromIndex }, options);
+    return this.commitEvent("history.truncated", { fromIndex }, options, true);
   }
 
   async commitRewind(messageIndex: number, options?: CommitEventOptions): Promise<CommitReceipt> {
-    return this.commitEvent("history.rewound", { messageIndex }, options);
+    return this.commitEvent("history.rewound", { messageIndex }, options, true);
   }
 
   async commitCompaction(
@@ -348,6 +354,7 @@ export class SessionStore {
         retainedMessages: structuredClone(retainedMessages),
       },
       options,
+      true,
     );
   }
 
@@ -506,6 +513,7 @@ export class SessionStore {
     kind: K,
     data: Extract<SessionEvent, { readonly kind: K }>["data"],
     options?: CommitEventOptions,
+    rewritesHistory = false,
   ): Promise<CommitReceipt> {
     const writer = await this.acquireWriter();
     const seq = options?.expectedSeq ?? writer.headSeq + 1;
@@ -515,18 +523,29 @@ export class SessionStore {
       recordVersion: 1,
       eventId,
       seq,
-      epoch: this.epoch,
+      epoch: rewritesHistory
+        ? Math.max(this.epoch, writer.epoch + 1)
+        : Math.max(this.epoch, writer.epoch),
       at: new Date().toISOString(),
       kind,
       data,
     } as Extract<SessionEvent, { readonly kind: K }>;
-    await this.appendDurable(writer, event);
-    const committedAt = new Date().toISOString();
+    const committed = await this.appendDurable(writer, event);
+    const durableEvent = committed.record;
+    if (durableEvent.type !== "event") {
+      throw new SessionJournalIntegrityError(`Expected canonical event for ${eventId}`);
+    }
     return {
-      eventId,
-      cursor: { logId: writer.logId, seq, epoch: event.epoch, eventId },
-      committedAt,
+      eventId: durableEvent.eventId,
+      cursor: {
+        logId: writer.logId,
+        seq: durableEvent.seq,
+        epoch: durableEvent.epoch,
+        eventId: durableEvent.eventId,
+      },
+      committedAt: durableEvent.at,
       durable: true,
+      inserted: committed.inserted,
     };
   }
 
@@ -538,10 +557,19 @@ export class SessionStore {
     await this.appendDurable(writer, record);
   }
 
-  private async appendDurable(writer: DurableWriter, record: LegacySessionRecord | SessionEvent) {
-    let resolveOperation!: () => void;
+  private async appendDurable(
+    writer: DurableWriter,
+    record: LegacySessionRecord | SessionEvent,
+  ): Promise<{ inserted: boolean; record: LegacySessionRecord | SessionEvent }> {
+    let resolveOperation!: (result: {
+      inserted: boolean;
+      record: LegacySessionRecord | SessionEvent;
+    }) => void;
     let rejectOperation!: (error: unknown) => void;
-    const operation = new Promise<void>((resolve, reject) => {
+    const operation = new Promise<{
+      inserted: boolean;
+      record: LegacySessionRecord | SessionEvent;
+    }>((resolve, reject) => {
       resolveOperation = resolve;
       rejectOperation = reject;
     });
@@ -549,15 +577,21 @@ export class SessionStore {
       if (writer.state !== "open") {
         throw new SessionWriteUncertainError("Session journal is not writable");
       }
+      const eventId = recordEventId(record);
+      if (writer.eventIds.has(eventId)) {
+        const existing = writer.eventsById.get(eventId);
+        if (record.type === "event" && existing && sameCanonicalEvent(existing, record)) {
+          return { inserted: false, record: existing };
+        }
+        throw new SessionJournalIntegrityError(
+          `Session eventId conflict: ${eventId} is already bound to another event`,
+        );
+      }
       const expectedSeq = writer.headSeq + 1;
       if (record.seq !== expectedSeq) {
         throw new SessionJournalIntegrityError(
           `Session seq conflict: received ${record.seq}, expected ${expectedSeq}`,
         );
-      }
-      const eventId = recordEventId(record);
-      if (writer.eventIds.has(eventId)) {
-        throw new SessionJournalIntegrityError(`Duplicate session eventId: ${eventId}`);
       }
       if (record.type === "event" && record.epoch < writer.epoch) {
         throw new SessionJournalIntegrityError(
@@ -565,21 +599,32 @@ export class SessionStore {
         );
       }
       await writer.lease.assertOwnership();
-      await writer.file.write(`${JSON.stringify(record)}\n`);
+      await writeAll(
+        writer.file,
+        Buffer.from(`${JSON.stringify(record)}\n`, "utf8"),
+        this.durabilityHooks?.maxWriteBytes,
+      );
       await this.durabilityHooks?.beforeDatasync?.();
       await writer.file.datasync();
       writer.headSeq = record.seq;
       writer.headEventId = eventId;
       writer.eventIds.add(eventId);
+      if (record.type === "event") writer.eventsById.set(eventId, structuredClone(record));
       writer.epoch = effectiveEpoch(record, writer.epoch);
       this.epoch = writer.epoch;
       this.emit(record, record.seq);
+      return { inserted: true, record };
     });
-    writer.tail = run.then(resolveOperation, (error: unknown) => {
-      writer.state = "write_uncertain";
-      rejectOperation(new SessionWriteUncertainError("Session durable append failed", error));
-    });
-    await operation;
+    writer.tail = run.then(
+      (result) => {
+        resolveOperation(result);
+      },
+      (error: unknown) => {
+        writer.state = "write_uncertain";
+        rejectOperation(new SessionWriteUncertainError("Session durable append failed", error));
+      },
+    );
+    return operation;
   }
 
   private async acquireWriter(): Promise<DurableWriter> {
@@ -632,12 +677,22 @@ export class SessionStore {
       const existing = await stat(this.filePath);
       if (existing.size === 0) {
         const metadata = this.createMetadata();
-        await file.write(`${JSON.stringify(metadata)}\n`);
+        await writeAll(
+          file,
+          Buffer.from(`${JSON.stringify(metadata)}\n`, "utf8"),
+          this.durabilityHooks?.maxWriteBytes,
+        );
         await file.datasync();
+        await syncSessionDirectory(dirname(this.filePath));
       }
       const journal = await this.readJournal(true);
       const head = journal.records.at(-1);
       const eventIds = new Set(journal.records.map(recordEventId));
+      const eventsById = new Map(
+        journal.records
+          .filter((record): record is SessionEvent => record.type === "event")
+          .map((record) => [record.eventId, structuredClone(record)] as const),
+      );
       const epoch = journal.records.reduce((current, record) => effectiveEpoch(record, current), 0);
       const meta = journal.metadata;
       const logId = meta && "logId" in meta ? meta.logId : this.logId;
@@ -646,6 +701,7 @@ export class SessionStore {
         lease,
         logId,
         eventIds,
+        eventsById,
         refs: 1,
         headSeq: head?.seq ?? -1,
         headEventId: head ? recordEventId(head) : "",
@@ -730,6 +786,42 @@ export class SessionStore {
 
 function recordEventId(record: LegacySessionRecord | SessionEvent): string {
   return record.type === "event" ? record.eventId : `legacy:${record.seq}:${record.type}`;
+}
+
+/** eventId 是业务幂等键；时间、seq 和 epoch 是首次提交的耐久事实，不参与重试比较。 */
+function sameCanonicalEvent(left: SessionEvent, right: SessionEvent): boolean {
+  return left.kind === right.kind && isDeepStrictEqual(left.data, right.data);
+}
+
+async function writeAll(file: FileHandle, bytes: Uint8Array, maxWriteBytes?: number): Promise<void> {
+  const chunkLimit =
+    maxWriteBytes === undefined
+      ? bytes.byteLength
+      : Math.max(1, Math.min(Math.floor(maxWriteBytes), bytes.byteLength));
+  let offset = 0;
+  while (offset < bytes.byteLength) {
+    const requested = Math.min(chunkLimit, bytes.byteLength - offset);
+    const { bytesWritten } = await file.write(bytes, offset, requested, null);
+    if (bytesWritten <= 0) throw new Error("Session journal write made no progress");
+    offset += bytesWritten;
+  }
+}
+
+async function syncSessionDirectory(directory: string): Promise<void> {
+  let handle: FileHandle | undefined;
+  try {
+    handle = await open(directory, constants.O_RDONLY);
+    await handle.sync();
+  } catch (error) {
+    if (!isUnsupportedDirectorySync(error)) throw error;
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+function isUnsupportedDirectorySync(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException).code;
+  return code !== undefined && new Set(["EACCES", "EINVAL", "EISDIR", "ENOTSUP", "EPERM"]).has(code);
 }
 
 function effectiveEpoch(record: LegacySessionRecord | SessionEvent, current: number): number {

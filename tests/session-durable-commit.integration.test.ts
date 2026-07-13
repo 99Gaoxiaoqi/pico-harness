@@ -1,4 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -12,6 +13,7 @@ import {
 import { createSessionIdentity } from "../src/engine/session-identity.js";
 import { FTS5Store } from "../src/memory/fts5-store.js";
 import { SessionManager } from "../src/engine/session.js";
+import { StorageOperationJournal } from "../src/storage/operation-journal.js";
 import Database from "better-sqlite3";
 
 describe("Session durable commit integration", () => {
@@ -47,6 +49,30 @@ describe("Session durable commit integration", () => {
     const next = await reopened.commitMessage({ role: "user", content: "after restart" });
     expect(next.cursor).toMatchObject({ seq: 2, epoch: 1 });
     await reopened.close();
+  });
+
+  it("reuses a stable eventId without allocating a seq and rejects mismatched payloads", async () => {
+    const filePath = join(workDir, ".claw", "sessions", "idempotent.jsonl");
+    const store = new SessionStore(filePath, undefined, { maxWriteBytes: 3 });
+    const first = await store.commitMessage(
+      { role: "user", content: "deliver once" },
+      { eventId: "completion:job-a:1" },
+    );
+    const retry = await store.commitMessage(
+      { role: "user", content: "deliver once" },
+      { eventId: "completion:job-a:1", expectedSeq: 99 },
+    );
+    expect(first).toMatchObject({ inserted: true, cursor: { seq: 0 } });
+    expect(retry).toEqual({ ...first, inserted: false });
+    const next = await store.commitMessage({ role: "assistant", content: "next" });
+    expect(next.cursor.seq).toBe(1);
+    await expect(
+      store.commitMessage(
+        { role: "user", content: "different" },
+        { eventId: "completion:job-a:1" },
+      ),
+    ).rejects.toBeInstanceOf(SessionWriteUncertainError);
+    await store.close();
   });
 
   it("rejects seq gaps and becomes fail-closed when durability is uncertain", async () => {
@@ -162,6 +188,55 @@ describe("Session durable commit integration", () => {
     verify.close();
     expect(cursor).toEqual(head);
     await second.close();
+  });
+
+  it("marks a prepared rewind for attention when later session messages drift the precondition", async () => {
+    const sessionId = `rewind-drift-${Date.now()}`;
+    const first = await new SessionManager().getOrCreate(sessionId, workDir, {
+      persistence: true,
+    });
+    const messageId = await first.beginRewindPoint({ userPrompt: "original request" });
+    const user = await first.commitMessageOnce(`user-message:${messageId}`, {
+      role: "user",
+      content: "original request",
+    });
+    await first.bindRewindPointSource(messageId, user);
+    const before = first.getHistory();
+    const journal = new StorageOperationJournal({ workDir });
+    await journal.create({
+      operationId: "rewind-session-drift",
+      kind: "rewind",
+      sessionId,
+      mode: "conversation",
+      precondition: {
+        sessionLastSeq: user.cursor.seq,
+        effectiveHistoryDigest: createHash("sha256")
+          .update(JSON.stringify(before))
+          .digest("hex"),
+        fileHistoryRevision: first.fileHistory.revision,
+      },
+      target: {
+        messageId,
+        sourceMessageEventId: user.eventId,
+        messageIndex: 0,
+      },
+      files: [],
+    });
+    await first.commitMessages({ role: "assistant", content: "later durable message" });
+    await first.close();
+
+    const reopened = await new SessionManager().getOrCreate(sessionId, workDir, {
+      persistence: true,
+    });
+    expect(reopened.getHistory().map((message) => message.content)).toEqual([
+      "original request",
+      "later durable message",
+    ]);
+    await expect(journal.get("rewind-session-drift")).resolves.toMatchObject({
+      state: "needs_attention",
+      error: { message: expect.stringContaining("precondition drifted") },
+    });
+    await reopened.close();
   });
 });
 
