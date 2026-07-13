@@ -64,10 +64,13 @@ import type { TaskHostRuntime } from "../tasks/task-runtime.js";
 import type { McpConnectionManager } from "../mcp/manager.js";
 import { CostTracker } from "../observability/tracker.js";
 import { ensureSessionUsageBaseline } from "../observability/usage-baseline.js";
+import { readSessionCatalogProjectionHealth } from "../storage/session-catalog-projection.js";
 import {
-  getDefaultSessionCatalogProjector,
-  readSessionCatalogProjectionHealth,
-} from "../storage/session-catalog-projection.js";
+  STORAGE_DOCTOR_COMPONENTS,
+  StorageDoctor,
+  type StorageDoctorFinding,
+  type StorageDoctorReport,
+} from "../storage/storage-doctor.js";
 
 const OVERRIDDEN_BUILTIN_COMMANDS = new Set([
   "skills",
@@ -108,6 +111,8 @@ export interface PicoCommandRegistryOptions {
   taskRuntime?: TaskHostRuntime;
   /** TaskHostRuntime 不可用时的宿主诊断；TUI 仍可在非 Git 目录运行。 */
   taskRuntimeDiagnostic?: string;
+  /** 可注入的只读存储诊断器；默认扫描当前 workspace 和全局 File History。 */
+  storageDoctor?: Pick<StorageDoctor, "scan">;
   mcpControl?: McpConnectionManager;
 }
 
@@ -1430,11 +1435,11 @@ async function formatDoctorReport(options: PicoCommandRegistryOptions): Promise<
   const nodeOk = nodeMajor >= 22;
   const cwdOk = existsSync(options.workDir);
   const envModel = process.env.LLM_MODEL;
+  // /doctor 只读：不为获取状态而触发 Catalog backfill/重建。
   const catalogHealth =
-    process.env.PICO_SESSION_CATALOG === "0"
-      ? (options.session?.sessionCatalogHealth ??
-        (await readSessionCatalogProjectionHealth(options.workDir)))
-      : (await getDefaultSessionCatalogProjector().syncWorkspace(options.workDir)).health;
+    options.session?.sessionCatalogHealth ??
+    (await readSessionCatalogProjectionHealth(options.workDir));
+  const storageDiagnostics = await formatStorageDoctorReport(options);
 
   return [
     `CWD: ${options.workDir} (${cwdOk ? "ok" : "missing"})`,
@@ -1454,7 +1459,58 @@ async function formatDoctorReport(options: PicoCommandRegistryOptions): Promise<
       ? [`Task runtime reason: ${options.taskRuntimeDiagnostic}`]
       : []),
     ...formatMemoryBackend(options.session, true),
+    ...storageDiagnostics,
   ].join("\n");
+}
+
+async function formatStorageDoctorReport(options: PicoCommandRegistryOptions): Promise<string[]> {
+  try {
+    const report = await (
+      options.storageDoctor ?? new StorageDoctor({ workDir: options.workDir })
+    ).scan();
+    return renderStorageDoctorReport(report);
+  } catch (error) {
+    return [
+      "Storage: diagnostic unavailable",
+      `Storage diagnostic: ${error instanceof Error ? error.message : String(error)}`,
+      "Storage recommendation: retry /doctor after checking storage permissions; no repair or GC was run.",
+    ];
+  }
+}
+
+function renderStorageDoctorReport(report: StorageDoctorReport): string[] {
+  const severityCounts = {
+    critical: countStorageFindings(report.findings, "critical"),
+    error: countStorageFindings(report.findings, "error"),
+    warning: countStorageFindings(report.findings, "warning"),
+  };
+  const sessionTruthHealthy = !report.findings.some(
+    (finding) =>
+      finding.component === "session" &&
+      (finding.severity === "critical" || finding.severity === "error"),
+  );
+  const priorityFindings = report.findings
+    .filter((finding) => finding.severity !== "info")
+    .slice(0, 5);
+  return [
+    `Storage: ${report.healthy ? "healthy" : "degraded"}`,
+    `Storage scanned: ${STORAGE_DOCTOR_COMPONENTS.map(
+      (component) => `${component}=${report.scanned[component]}`,
+    ).join(", ")}`,
+    `Storage severity: critical=${severityCounts.critical}, error=${severityCounts.error}, warning=${severityCounts.warning}`,
+    `Storage Session truth: ${sessionTruthHealthy ? "healthy" : "degraded"} (scanned=${report.scanned.session})`,
+    ...priorityFindings.flatMap((finding, index) => [
+      `Storage finding ${index + 1}: [${finding.severity}/${finding.component}/${finding.code}] ${finding.message} (${finding.path})`,
+      `Storage recommendation ${index + 1}: ${finding.recommendation}`,
+    ]),
+  ];
+}
+
+function countStorageFindings(
+  findings: readonly StorageDoctorFinding[],
+  severity: StorageDoctorFinding["severity"],
+): number {
+  return findings.filter((finding) => finding.severity === severity).length;
 }
 
 function formatMemoryBackend(

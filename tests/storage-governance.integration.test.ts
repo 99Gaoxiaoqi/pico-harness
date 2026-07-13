@@ -6,9 +6,13 @@ import { afterEach, describe, expect, it } from "vitest";
 import { ToolResultArtifactStore } from "../src/context/artifact-store.js";
 import { createSessionIdentity } from "../src/engine/session-identity.js";
 import { SessionStore } from "../src/engine/session-store.js";
+import { createPicoCommandRegistry } from "../src/input/pico-command-registry.js";
+import { processUserInput } from "../src/input/process-user-input.js";
 import { FileSessionSummaryStore } from "../src/memory/summary-store.js";
 import { ContentAddressedBlobGarbageCollector } from "../src/storage/blob-garbage-collector.js";
 import { FileHistoryBlobStore } from "../src/storage/file-history-blob-store.js";
+import { withFileHistoryMutationLease } from "../src/storage/file-history-mutation-lease.js";
+import { LeaseConflictError } from "../src/storage/owner-lease.js";
 import {
   DEFAULT_STORAGE_RETENTION_POLICY,
   assertStorageRetentionPolicy,
@@ -174,6 +178,45 @@ describe("storage governance integration", () => {
     await expect(stat(unreachable.path)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  it("serializes manifest publication with applied CAS collection while dry-run stays read-only", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pico-storage-gc-mutation-"));
+    cleanup.push(root);
+    const workDir = join(root, "workspace");
+    const fileHistoryDir = join(root, "file-history");
+    const blobs = new FileHistoryBlobStore({ baseDir: fileHistoryDir });
+    const newlyReferenced = await blobs.put("publish after competing sweep");
+    await utimes(newlyReferenced.path, new Date(0), new Date(0));
+    const collector = new ContentAddressedBlobGarbageCollector({
+      workDir,
+      baseDir: fileHistoryDir,
+      gracePeriodMs: 0,
+      now: () => 120_000,
+    });
+
+    await withFileHistoryMutationLease(fileHistoryDir, "manifest-writer", async () => {
+      await expect(collector.run()).resolves.toMatchObject({
+        dryRun: true,
+        candidatePaths: [newlyReferenced.path],
+        deletedPaths: [],
+      });
+      await expect(collector.run({ apply: true })).rejects.toBeInstanceOf(LeaseConflictError);
+      await expect(stat(newlyReferenced.path)).resolves.toBeDefined();
+      await writeManifest(
+        fileHistoryDir,
+        "session-published-during-conflict",
+        newlyReferenced.ref.digest,
+        newlyReferenced.ref.sizeBytes,
+      );
+    });
+
+    await expect(collector.run({ apply: true })).resolves.toMatchObject({
+      blocked: false,
+      deletedPaths: [],
+      retainedPaths: [newlyReferenced.path],
+    });
+    await expect(stat(newlyReferenced.path)).resolves.toBeDefined();
+  });
+
   it("blocks both dry-run and apply when authoritative references cannot be parsed", async () => {
     const root = await mkdtemp(join(tmpdir(), "pico-storage-gc-blocked-"));
     cleanup.push(root);
@@ -209,6 +252,61 @@ describe("storage governance integration", () => {
     const apply = await collector.run({ apply: true });
     expect(apply).toMatchObject({ dryRun: true, blocked: true, deletedPaths: [] });
     await expect(stat(oldBlob.path)).resolves.toBeDefined();
+  });
+
+  it("renders sidecar findings without hiding a healthy Session truth or crashing on scan failure", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pico-storage-doctor-command-"));
+    cleanup.push(root);
+    const workDir = join(root, "workspace");
+    const fileHistoryDir = join(root, "file-history");
+    const sessionPath = join(workDir, ".claw", "sessions", "session-a.jsonl");
+    const sessionStore = new SessionStore(
+      sessionPath,
+      createSessionIdentity({ sessionId: "session-a", cwd: workDir }),
+    );
+    await sessionStore.commitMessage({ role: "user", content: "authoritative truth" });
+    await sessionStore.close();
+    const badSummaryPath = join(
+      workDir,
+      ".claw",
+      "memory",
+      "summaries",
+      `${createHash("sha256").update("session-a").digest("hex")}.json`,
+    );
+    await mkdir(dirname(badSummaryPath), { recursive: true });
+    await writeFile(badSummaryPath, "{broken", "utf8");
+
+    const registry = await createPicoCommandRegistry({
+      workDir,
+      provider: "openai",
+      model: "doctor-model",
+      storageDoctor: new StorageDoctor({ workDir, fileHistoryDir }),
+    });
+    const result = await processUserInput("/doctor", { registry });
+    expect(result.type).toBe("local-command");
+    if (result.type !== "local-command") return;
+    expect(result.result.message).toContain("Storage: degraded");
+    expect(result.result.message).toContain("Storage Session truth: healthy (scanned=1)");
+    expect(result.result.message).toContain("[error/summary/summary_malformed]");
+    expect(result.result.message).toContain("Storage recommendation 1:");
+    expect(result.result.message).toContain(`CWD: ${workDir}`);
+
+    const unavailableRegistry = await createPicoCommandRegistry({
+      workDir,
+      provider: "openai",
+      model: "doctor-model",
+      storageDoctor: {
+        scan: async () => {
+          throw new Error("simulated storage scan failure");
+        },
+      },
+    });
+    const unavailable = await processUserInput("/doctor", { registry: unavailableRegistry });
+    expect(unavailable.type).toBe("local-command");
+    if (unavailable.type !== "local-command") return;
+    expect(unavailable.result.message).toContain("Storage: diagnostic unavailable");
+    expect(unavailable.result.message).toContain("simulated storage scan failure");
+    expect(unavailable.result.message).toContain("no repair or GC was run");
   });
 });
 
