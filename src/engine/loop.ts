@@ -1634,16 +1634,11 @@ export class AgentEngine implements AgentRunner {
       ];
       const costBefore = session.totalCostCNY;
       const response = await withProviderCallContext({ purpose: "grace" }, () =>
-        generateWithRetry(
-          this.providerForReporter(this.provider, reporter, signal),
-          context,
-          [],
-          {
-            signal,
-            onRetry: this.makeRetryReporter(graceSpan),
-            onRateLimited: () => this.rotateProvider(reporter, signal),
-          },
-        ),
+        generateWithRetry(this.providerForReporter(this.provider, reporter, signal), context, [], {
+          signal,
+          onRetry: this.makeRetryReporter(graceSpan),
+          onRateLimited: () => this.rotateProvider(reporter, signal),
+        }),
       );
       signal?.throwIfAborted();
       recordLlmResponse(graceSpan, response);
@@ -1849,9 +1844,8 @@ export class AgentEngine implements AgentRunner {
     const run = () =>
       this.runSubInIsolatedCompactorScope(taskPrompt, readOnlyRegistry, reporter, opts);
     const runAttributed = () =>
-      withProviderCallContext(
-        { purpose: "subagent", ...(opts.usageAttribution ?? {}) },
-        () => (this.compactor ? this.compactor.runInIsolatedScope(run) : run()),
+      withProviderCallContext({ purpose: "subagent", ...(opts.usageAttribution ?? {}) }, () =>
+        this.compactor ? this.compactor.runInIsolatedScope(run) : run(),
       );
     return runAttributed();
   }

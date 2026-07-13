@@ -40,23 +40,17 @@ describe("fork operation coordinator integration", () => {
         callbacks: createCallbacks(fixture, durableEffects, () => crashAfter),
       });
 
-    await expect(restart("prepare").execute(fixture.input)).rejects.toThrow(
-      "crash after prepare",
-    );
+    await expect(restart("prepare").execute(fixture.input)).rejects.toThrow("crash after prepare");
     await expect(fixture.targetExists()).resolves.toBe(false);
     expect(durableEffects.catalog.size).toBe(0);
     await expect(fixture.operationState()).resolves.toBe("prepared");
 
-    await expect(restart("sidecars").reconcileUnfinished()).rejects.toThrow(
-      "crash after sidecars",
-    );
+    await expect(restart("sidecars").reconcileUnfinished()).rejects.toThrow("crash after sidecars");
     await expect(fixture.targetExists()).resolves.toBe(false);
     expect(durableEffects.catalog.size).toBe(0);
     await expect(fixture.operationState()).resolves.toBe("workspace_applied");
 
-    await expect(restart("catalog").reconcileUnfinished()).rejects.toThrow(
-      "crash after catalog",
-    );
+    await expect(restart("catalog").reconcileUnfinished()).rejects.toThrow("crash after catalog");
     await expect(fixture.targetExists()).resolves.toBe(true);
     expect(durableEffects.sidecars).toEqual(new Set([fixture.operationId]));
     expect(durableEffects.catalog).toEqual(new Set([fixture.operationId]));
@@ -77,12 +71,10 @@ describe("fork operation coordinator integration", () => {
 
   it("moves source drift, corrupted staging and conflicting targets to needs_attention", async () => {
     const sourceChanged = await createFixture(cleanup, "source-changed");
-    const sourceCallbacks = createCallbacks(
-      sourceChanged,
-      emptyEffects(),
-      () => undefined,
-      { ...SOURCE_CURSOR, seq: SOURCE_CURSOR.seq + 1 },
-    );
+    const sourceCallbacks = createCallbacks(sourceChanged, emptyEffects(), () => undefined, {
+      ...SOURCE_CURSOR,
+      seq: SOURCE_CURSOR.seq + 1,
+    });
     await expect(
       new ForkOperationCoordinator({
         journal: sourceChanged.journal,
@@ -101,9 +93,7 @@ describe("fork operation coordinator integration", () => {
         corruptCrash ? "sidecars" : undefined,
       ),
     });
-    await expect(corruptCoordinator.execute(corrupt.input)).rejects.toThrow(
-      "crash after sidecars",
-    );
+    await expect(corruptCoordinator.execute(corrupt.input)).rejects.toThrow("crash after sidecars");
     corruptCrash = false;
     await writeFile(corrupt.stagedPath, "corrupted\n");
     await expect(corruptCoordinator.reconcileUnfinished()).resolves.toEqual([

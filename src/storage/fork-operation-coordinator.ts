@@ -1,14 +1,6 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import {
-  lstat,
-  mkdir,
-  open,
-  readFile,
-  rename,
-  rm,
-  type FileHandle,
-} from "node:fs/promises";
+import { lstat, mkdir, open, readFile, rename, rm, type FileHandle } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, parse, resolve } from "node:path";
 import { readVersionedJson, writeJsonAtomic } from "./atomic-json.js";
 import {
@@ -140,7 +132,8 @@ export class ForkOperationCoordinator {
   async reconcile(operationId: string): Promise<ForkStorageOperation> {
     const operation = await this.journal.get(operationId);
     if (!operation) throw new Error(`Storage operation not found: ${operationId}`);
-    if (operation.kind !== "fork") throw new Error(`Storage operation is not a fork: ${operationId}`);
+    if (operation.kind !== "fork")
+      throw new Error(`Storage operation is not a fork: ${operationId}`);
     if (operation.state === "completed") {
       await this.cleanupStaging(operation);
       return operation;
@@ -333,11 +326,9 @@ export class ForkOperationCoordinator {
       bundle = await readVersionedJson(this.manifestPath(operation), parseBundleManifest);
     } catch (error) {
       if (isNodeCode(error, "ENOENT")) {
-        throw new ForkOperationConflictError(
-          "Fork bundle manifest is missing",
-          "staging_corrupt",
-          [this.manifestPath(operation)],
-        );
+        throw new ForkOperationConflictError("Fork bundle manifest is missing", "staging_corrupt", [
+          this.manifestPath(operation),
+        ]);
       }
       if (error instanceof ForkOperationConflictError) throw error;
       throw new ForkOperationConflictError(
@@ -503,11 +494,7 @@ function expectedTargetIdentity(
 function parseTargetIdentity(value: unknown): ForkTargetSessionIdentity | undefined {
   if (!isRecord(value)) return undefined;
   const cursor = parseCursor(value["forkedFrom"]);
-  if (
-    typeof value["sessionId"] !== "string" ||
-    typeof value["logId"] !== "string" ||
-    !cursor
-  ) {
+  if (typeof value["sessionId"] !== "string" || typeof value["logId"] !== "string" || !cursor) {
     return undefined;
   }
   return { sessionId: value["sessionId"], logId: value["logId"], forkedFrom: cursor };
@@ -553,9 +540,7 @@ function sameCursor(left: ForkSourceCursor, right: ForkSourceCursor): boolean {
 }
 
 function formatCursor(cursor: ForkSourceCursor | undefined): string {
-  return cursor
-    ? `${cursor.logId}:${cursor.epoch}:${cursor.seq}:${cursor.eventId}`
-    : "missing";
+  return cursor ? `${cursor.logId}:${cursor.epoch}:${cursor.seq}:${cursor.eventId}` : "missing";
 }
 
 function assertSafeStagingDirectory(path: string): string {
@@ -584,11 +569,9 @@ async function readRegularFile(
   try {
     const metadata = await lstat(path);
     if (!metadata.isFile() || metadata.isSymbolicLink()) {
-      throw new ForkOperationConflictError(
-        "Fork Session path is not a regular file",
-        reason,
-        [path],
-      );
+      throw new ForkOperationConflictError("Fork Session path is not a regular file", reason, [
+        path,
+      ]);
     }
     return await readFile(path);
   } catch (error) {

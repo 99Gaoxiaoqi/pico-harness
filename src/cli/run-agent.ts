@@ -229,13 +229,16 @@ export async function runAgentFromCli(
   if (resumeExistingSession && dependencies.runtimeState === undefined) {
     throw new Error("resumeExistingSession requires an existing runtimeState.");
   }
-  const settings = getOrCreateSessionSettings({
-    sessionId: sessionSelection.sessionId,
-    cwd: workDir,
-    provider: kind,
-    model: defaultConfigModel,
-    ...(options.thinkingEffort !== undefined ? { thinkingEffort: options.thinkingEffort } : {}),
-  }, { persistence: session });
+  const settings = getOrCreateSessionSettings(
+    {
+      sessionId: sessionSelection.sessionId,
+      cwd: workDir,
+      provider: kind,
+      model: defaultConfigModel,
+      ...(options.thinkingEffort !== undefined ? { thinkingEffort: options.thinkingEffort } : {}),
+    },
+    { persistence: session },
+  );
   const workspaceRoots = await WorkspaceRoots.create(
     workDir,
     sessionSelection.mode === "fork"
@@ -401,11 +404,7 @@ export async function runAgentFromCli(
     }).build(runtimeState.conversationTurnCount(session));
   // 辅助(廉价)模型:用于 FullCompactor 生成摘要,省主模型成本。
   // 配齐 AUX_LLM_BASE_URL / AUX_LLM_API_KEY / AUX_LLM_MODEL 才启用;缺则用主 provider。
-  const auxProvider = loadAuxProvider(
-    dependencies.env ?? process.env,
-    session,
-    trackerOptions,
-  );
+  const auxProvider = loadAuxProvider(dependencies.env ?? process.env, session, trackerOptions);
   const reporter = dependencies.reporter ?? new TerminalReporter();
   const engine = new AgentEngine({
     provider: trackedProvider,

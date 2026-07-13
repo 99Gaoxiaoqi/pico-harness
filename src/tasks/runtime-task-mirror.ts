@@ -274,9 +274,7 @@ function isDelegationTerminalStatus(
   );
 }
 
-function delegationStatusFromSnapshot(
-  snapshot: TaskSnapshot,
-): "completed" | "error" | "cancelled" {
+function delegationStatusFromSnapshot(snapshot: TaskSnapshot): "completed" | "error" | "cancelled" {
   if (snapshot.status === "completed") return "completed";
   if (snapshot.status === "killed") return "cancelled";
   return "error";

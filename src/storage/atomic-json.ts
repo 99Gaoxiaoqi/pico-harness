@@ -1,13 +1,5 @@
 import { randomUUID } from "node:crypto";
-import {
-  chmod,
-  mkdir,
-  open,
-  readFile,
-  rename,
-  unlink,
-  type FileHandle,
-} from "node:fs/promises";
+import { chmod, mkdir, open, readFile, rename, unlink, type FileHandle } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 
 export type JsonDecoder<T> = (value: unknown) => T;
