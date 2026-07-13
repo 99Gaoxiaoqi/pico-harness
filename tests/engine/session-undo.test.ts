@@ -124,15 +124,19 @@ describe("FileHistory 1.5.6 对话 undo", () => {
     persisted.append({ role: "user", content: "u2" }, { role: "assistant", content: "a2" });
     await flushPersistence();
 
-    persisted.undo(1);
-    await flushPersistence();
+    await persisted.undo(1);
+    await persisted.flushPersistence();
 
     const lines = readFileSync(sessionJsonlPath(workDir, "undo-persist"), "utf8")
       .trim()
       .split("\n");
-    const records = lines.map((line) => JSON.parse(line) as { type: string; count?: number });
-    expect(records.filter((r) => r.type === "message")).toHaveLength(4);
-    expect(records.at(-1)).toMatchObject({ type: "undo", count: 1 });
+    const records = lines.map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(records.filter((r) => r["kind"] === "message.appended")).toHaveLength(4);
+    expect(records.at(-1)).toMatchObject({
+      type: "event",
+      kind: "history.rewound",
+      data: { messageIndex: 2 },
+    });
   });
 
   it("rewindTo 精确持久化 messageIndex", async () => {
@@ -141,15 +145,19 @@ describe("FileHistory 1.5.6 对话 undo", () => {
     persisted.append({ role: "user", content: "u2" }, { role: "assistant", content: "a2" });
     await flushPersistence();
 
-    persisted.rewindTo(2);
-    await flushPersistence();
+    await persisted.rewindTo(2);
+    await persisted.flushPersistence();
 
     const lines = readFileSync(sessionJsonlPath(workDir, "rewind-persist"), "utf8")
       .trim()
       .split("\n");
-    const records = lines.map((line) => JSON.parse(line) as { type: string; count?: number });
-    expect(records.filter((r) => r.type === "message")).toHaveLength(4);
-    expect(records.at(-1)).toMatchObject({ type: "rewind_to", messageIndex: 2 });
+    const records = lines.map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(records.filter((r) => r["kind"] === "message.appended")).toHaveLength(4);
+    expect(records.at(-1)).toMatchObject({
+      type: "event",
+      kind: "history.rewound",
+      data: { messageIndex: 2 },
+    });
   });
 
   it("rewindConversation 截掉仅 assistant 后缀后可精确恢复", async () => {
@@ -173,8 +181,8 @@ describe("FileHistory 1.5.6 对话 undo", () => {
     persisted.append({ role: "user", content: "u1" }, { role: "assistant", content: "a1" });
     persisted.append({ role: "user", content: "u2" }, { role: "assistant", content: "a2" });
     await flushPersistence();
-    persisted.undo(1);
-    await flushPersistence();
+    await persisted.undo(1);
+    await persisted.flushPersistence();
 
     const recovered = await new SessionManager().getOrCreate("undo-recover", workDir, {
       persistence: true,
@@ -190,11 +198,11 @@ describe("FileHistory 1.5.6 对话 undo", () => {
     persisted.append({ role: "user", content: "u2" }, { role: "assistant", content: "a2" });
     persisted.append({ role: "user", content: "u3" }, { role: "assistant", content: "a3" });
     await flushPersistence();
-    persisted.applyCompaction("summary", 4);
-    await flushPersistence();
+    await persisted.applyCompaction("summary", 4);
+    await persisted.flushPersistence();
 
-    persisted.undo(10);
-    await flushPersistence();
+    await persisted.undo(10);
+    await persisted.flushPersistence();
 
     expect(persisted.getHistory().map((m) => m.content)).toEqual(["summary"]);
     const recovered = await new SessionManager().getOrCreate("undo-compaction", workDir, {

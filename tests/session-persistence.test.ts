@@ -237,8 +237,8 @@ describe("truncate 竞态保护(pendingWrites 顺序保证)", () => {
     const s1 = await mgr1.getOrCreate("race-chat", workDir, ON);
     s1.append(userMsg("m0"), userMsg("m1"), userMsg("m2"), userMsg("m3"));
     // 不 flush!立即 truncate(模拟连续快速调用)
-    s1.truncateTo(2);
-    await flush(); // 现在等所有落盘完成
+    await s1.truncateTo(2);
+    await s1.flushPersistence();
     expect(s1.length).toBe(2);
 
     // 重启恢复:应得到 m2, m3(证明 appends 先于 truncate 落盘)
@@ -253,8 +253,8 @@ describe("truncate 竞态保护(pendingWrites 顺序保证)", () => {
     const mgr1 = new SessionManager();
     const s1 = await mgr1.getOrCreate("race-seq", workDir, ON);
     s1.append(userMsg("a0"), userMsg("a1"));
-    s1.truncateTo(1); // 只保留 a1
-    await flush();
+    await s1.truncateTo(1); // 只保留 a1
+    await s1.flushPersistence();
     // truncate 后再 append
     s1.append(userMsg("a2"));
     await flush();
@@ -281,8 +281,8 @@ describe("truncate 竞态保护(pendingWrites 顺序保证)", () => {
     const s = await mgr.getOrCreate("race-order", workDir, ON);
     s.append(userMsg("m0"), userMsg("m1"), userMsg("m2"), userMsg("m3"));
     // 不 flush!立即 truncate —— 触发 pendingWrites await 路径
-    s.truncateTo(2);
-    await flush();
+    await s.truncateTo(2);
+    await s.flushPersistence();
 
     // 直接读原始 JSONL,检查物理行顺序(不依赖 load() 的 seq 排序)
     const file = join(workDir, ".claw", "sessions", "race-order.jsonl");
@@ -297,11 +297,14 @@ describe("truncate 竞态保护(pendingWrites 顺序保证)", () => {
     // 前 4 行必须全是 message(证明 appends 先落盘)
     for (let i = 0; i < 4; i++) {
       const rec = dataRecords[i]!;
-      expect(rec.type).toBe("message");
+      expect(rec).toMatchObject({ type: "event", kind: "message.appended" });
     }
     // 最后一行必须是 truncate(证明 truncate 没有抢跑到 message 前面)
     const last = dataRecords[4]!;
-    expect(last.type).toBe("truncate");
-    expect(last.fromIndex).toBe(2);
+    expect(last).toMatchObject({
+      type: "event",
+      kind: "history.truncated",
+      data: { fromIndex: 2 },
+    });
   });
 });

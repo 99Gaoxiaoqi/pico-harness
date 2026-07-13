@@ -235,12 +235,12 @@ describe("旧 JSONL(无 volatile)重放兼容", () => {
     await new Promise((r) => setTimeout(r, 80));
 
     // undo 触发 epoch bump
-    s.undo(1);
+    await s.undo(1);
     expect(store.getEpoch()).toBe(1);
 
     // rewindTo 再次 bump
-    s.rewindTo(0);
+    await s.rewindTo(0);
     expect(store.getEpoch()).toBe(2);
-    s.close();
+    await s.close();
   });
 });
