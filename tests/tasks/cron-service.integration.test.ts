@@ -110,6 +110,38 @@ describe("CronService durable ledger integration", () => {
     expect(matchesCron("0 20 * * *", Date.UTC(2026, 0, 1, 12, 0), "Asia/Shanghai")).toBe(true);
     expect(() => matchesCron("@daily", Date.now(), "UTC")).toThrow(/五段/);
   });
+
+  it("仅删除已禁用且没有运行中 Run 的 Cron Job", () => {
+    const workDir = makeTempDir(directories);
+    const now = Date.UTC(2026, 0, 1, 12, 0);
+    const service = new CronService({ workDir, now: () => now });
+    closeables.push(service);
+    const job = service.create({
+      workspacePath: workDir,
+      schedule: "0 12 * * *",
+      timeZone: "UTC",
+      prompt: "delete safely",
+      policySnapshot: yoloPolicy(now),
+    });
+    expect(() => service.delete(job.cronJobId, job.version)).toThrow(/先禁用/);
+
+    const running = service.claim(service.tick().runs[0]!.cronRunId);
+    const disabled = service.setEnabled(job.cronJobId, job.version, false);
+    expect(() => service.delete(job.cronJobId, disabled.version)).toThrow(/运行中的 Run/);
+
+    service.finish({
+      cronRunId: running.run.cronRunId,
+      leaseEpoch: running.lease!.leaseEpoch,
+      expectedVersion: running.run.version,
+      status: "cancelled",
+    });
+    expect(service.delete(job.cronJobId, disabled.version)).toMatchObject({ cronJobId: job.cronJobId });
+    expect(service.list()).toEqual([]);
+    expect(service.events().at(-1)).toMatchObject({
+      topic: "cron.job.deleted",
+      payload: { cronJobId: job.cronJobId },
+    });
+  });
 });
 
 function makeTempDir(directories: string[]): string {
