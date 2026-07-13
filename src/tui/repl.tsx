@@ -663,17 +663,60 @@ function formatUnavailableCommandBlocked(command: string, disabledReason: string
  * 明确不提供，避免给用户一个会损坏屏幕状态的半成品 TUI。
  */
 async function startLineModeRepl(opts: ReplOptions): Promise<void> {
+  const provider = opts.provider ?? "openai";
+  const picoConfig = await loadPicoConfig(opts.workDir);
+  const modelRouter = await loadModelRouter({
+    config: picoConfig,
+    legacyProvider: provider,
+    legacyModel: opts.model,
+    legacyModelExplicit: opts.modelExplicit,
+  });
   const input = createInterface({
     input: process.stdin,
     output: process.stdout,
-    terminal: Boolean(process.stdin.isTTY && process.stdout.isTTY),
+    // TERM=dumb 宿主不能可靠处理 readline 的 inline-edit ANSI 序列。
+    // 关闭 readline terminal 模式，让内核负责最基本的行编辑与回显。
+    terminal: false,
   });
   let selection: CliSessionSelection = opts.sessionSelection ?? {
     mode: "new",
     sessionId: createCliSessionId(),
   };
-  const onSigint = () => input.close();
+  let activeAbortController: AbortController | undefined;
+  const onSigint = () => {
+    if (activeAbortController) {
+      if (!activeAbortController.signal.aborted) {
+        process.stdout.write("正在中断当前请求…\n");
+        activeAbortController.abort();
+      }
+      return;
+    }
+    input.close();
+  };
+  // terminal:false 时 Ctrl+C 通常作为进程信号送达；保留 readline 监听以
+  // 兼容能把它交给 readline 的 PTY 实现。
   input.on("SIGINT", onSigint);
+  process.on("SIGINT", onSigint);
+
+  const resolveActiveRoute = async () => {
+    let requestedModel =
+      picoConfig.model ?? (opts.modelExplicit || process.env.LLM_MODEL ? opts.model : undefined);
+    // 第二轮开始读取会话已持久化的模型选择，与完整 TUI 的 bundle 装配保持一致。
+    // fork 首轮由 runAgentFromCli 先执行 Saga，此时目标会话尚不可安全预创建。
+    if (selection.mode !== "fork") {
+      const session =
+        globalSessionManager.get(selection.sessionId, opts.workDir) ??
+        (await globalSessionManager.getOrCreate(selection.sessionId, opts.workDir));
+      const restoredSettings = (await session.readHydrationSnapshot()).runtime.settings;
+      requestedModel =
+        restoredSettings?.modelRouteId ??
+        restoredSettings?.model ??
+        picoConfig.model ??
+        (opts.modelExplicit || process.env.LLM_MODEL ? opts.model : undefined);
+    }
+    const route = modelRouter.resolve(requestedModel) ?? modelRouter.require(opts.model);
+    return modelRouter.providerConfig(route.id, opts.thinkingEffort);
+  };
 
   process.stdout.write(
     "Pico 已切换到兼容行模式（TERM=dumb）：支持文本对话和多轮会话；动态候选、面板、图片输入不可用。\n",
@@ -704,29 +747,42 @@ async function startLineModeRepl(opts: ReplOptions): Promise<void> {
       }
 
       try {
+        const activeRoute = await resolveActiveRoute();
+        const abortController = new AbortController();
+        activeAbortController = abortController;
         const result = await runAgentFromCli(
           {
             prompt: rawInput,
             dir: opts.workDir,
-            provider: opts.provider,
-            model: opts.model,
+            provider: activeRoute.provider,
+            baseURL: activeRoute.config.baseURL,
+            ...(activeRoute.route.source === "legacy" ? {} : { apiKey: activeRoute.config.apiKey }),
+            model: activeRoute.config.model,
+            modelRouteId: activeRoute.route.id,
+            modelCapabilities: activeRoute.route.capabilities,
+            allowModelFallback: false,
             ...(opts.thinkingEffort !== undefined ? { thinkingEffort: opts.thinkingEffort } : {}),
             ...(opts.mcpConfigPath !== undefined ? { mcpConfigPath: opts.mcpConfigPath } : {}),
             ...(opts.addDirs !== undefined ? { addDirs: opts.addDirs } : {}),
             sessionSelection: selection,
           },
-          { reporter: new LineModeReporter(process.stdout) },
+          { reporter: new LineModeReporter(process.stdout), signal: abortController.signal },
         );
         selection = { mode: "resume", sessionId: result.sessionId };
       } catch (error) {
         process.stdout.write(
-          `请求失败：${error instanceof Error ? error.message : String(error)}\n`,
+          isAbortError(error)
+            ? "当前请求已中断。\n"
+            : `请求失败：${error instanceof Error ? error.message : String(error)}\n`,
         );
+      } finally {
+        activeAbortController = undefined;
       }
       input.prompt();
     }
   } finally {
     input.off("SIGINT", onSigint);
+    process.off("SIGINT", onSigint);
     input.close();
   }
 }

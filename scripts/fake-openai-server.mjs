@@ -2,7 +2,9 @@ import { createServer } from "node:http";
 
 export async function startFakeOpenAiServer(options = {}) {
   const content = options.content ?? "PICO_LOCAL_OPENAI_OK";
+  const delayMs = options.delayMs ?? 0;
   let requestCount = 0;
+  const requests = [];
 
   const server = createServer(async (request, response) => {
     if (request.method !== "POST" || request.url !== "/v1/chat/completions") {
@@ -12,6 +14,10 @@ export async function startFakeOpenAiServer(options = {}) {
 
     requestCount += 1;
     const body = await readJsonBody(request);
+    requests.push(body);
+    if (delayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
     if (body.stream === true) {
       response.writeHead(200, {
         "Content-Type": "text/event-stream",
@@ -52,6 +58,9 @@ export async function startFakeOpenAiServer(options = {}) {
     baseURL: `http://127.0.0.1:${address.port}/v1`,
     get requestCount() {
       return requestCount;
+    },
+    get requests() {
+      return requests;
     },
     async close() {
       await new Promise((resolve, reject) => {
