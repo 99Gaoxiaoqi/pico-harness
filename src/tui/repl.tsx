@@ -680,9 +680,11 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     legacyModel: opts.model,
     legacyModelExplicit: opts.modelExplicit,
   });
-  const taskHostRuntime = await TaskHostRuntime.create({ workDir: opts.workDir }).catch(
-    () => undefined,
-  );
+  let taskRuntimeDiagnostic: string | undefined;
+  const taskHostRuntime = await TaskHostRuntime.create({ workDir: opts.workDir }).catch((error) => {
+    taskRuntimeDiagnostic = error instanceof Error ? error.message : String(error);
+    return undefined;
+  });
   const sharedMcpManager = new McpConnectionManager(undefined, { stdioCwd: opts.workDir });
   const mcpConfigPath = opts.mcpConfigPath ?? `${opts.workDir}/.claw/mcp.json`;
   let mcpInitialized = false;
@@ -819,6 +821,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         mcpStatus: () => bundleRef.current?.latestMcpStatus,
         mcpControl: sharedMcpManager,
         ...(taskHostRuntime ? { taskRuntime: taskHostRuntime } : {}),
+        ...(taskRuntimeDiagnostic ? { taskRuntimeDiagnostic } : {}),
         additionalDirectories: settings.additionalDirectories,
         additionalDirectoryManager: workspaceRoots,
         goalManager: runtimeState.goalManager,
@@ -840,6 +843,11 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
       });
       reporterRef.current = reporter;
       hydrateTuiReporter(reporter, hydration);
+      if (taskRuntimeDiagnostic) {
+        reporter.pushSystemMessage(
+          `Task runtime unavailable; background/worker persistence is disabled. ${taskRuntimeDiagnostic}`,
+        );
+      }
       const bundle: TuiSessionBundle = {
         generation: ++nextBundleGeneration,
         selection,
