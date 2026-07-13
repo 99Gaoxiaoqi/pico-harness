@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createSessionIdentity } from "../src/engine/session-identity.js";
 import { readVersionedJson, writeJsonAtomic } from "../src/storage/atomic-json.js";
 import { LeaseConflictError, OwnerLease } from "../src/storage/owner-lease.js";
+import { StorageOperationJournal } from "../src/storage/operation-journal.js";
 import { SessionCatalog, type SessionCatalogEntry } from "../src/storage/session-catalog.js";
 
 describe("storage foundation integration", () => {
@@ -66,6 +67,52 @@ describe("storage foundation integration", () => {
       version: 1,
       value: "durable",
     });
+  });
+
+  it("persists a rewind saga and rejects stale or backward transitions", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pico-operation-journal-"));
+    cleanup.push(root);
+    const journal = new StorageOperationJournal({ workDir: root });
+    const prepared = await journal.create({
+      operationId: "rewind-1",
+      kind: "rewind",
+      sessionId: "session-a",
+      mode: "both",
+      precondition: {
+        sessionLastSeq: 4,
+        effectiveHistoryDigest: "history-digest",
+        fileHistoryRevision: 2,
+      },
+      target: { messageId: "message-a", sourceMessageEventId: "event-a", messageIndex: 1 },
+      files: [
+        {
+          rootId: "root",
+          relativePath: "src/a.ts",
+          before: { kind: "file", blobSha256: "a".repeat(64), sizeBytes: 4, mode: 0o644 },
+          after: { kind: "file", blobSha256: "b".repeat(64), sizeBytes: 5, mode: 0o644 },
+        },
+      ],
+    });
+    const workspaceApplied = await journal.advance({
+      operationId: prepared.operationId,
+      expectedVersion: prepared.version,
+      nextState: "workspace_applied",
+    });
+    await expect(
+      journal.advance({
+        operationId: prepared.operationId,
+        expectedVersion: prepared.version,
+        nextState: "completed",
+      }),
+    ).rejects.toThrow("version conflict");
+    await expect(
+      journal.advance({
+        operationId: prepared.operationId,
+        expectedVersion: workspaceApplied.version,
+        nextState: "prepared",
+      }),
+    ).rejects.toThrow("Invalid storage operation transition");
+    await expect(journal.listUnfinished()).resolves.toEqual([workspaceApplied]);
   });
 });
 
