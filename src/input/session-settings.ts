@@ -319,6 +319,15 @@ export function setSessionModelRoute(
 }
 
 export function setSessionMode(settings: SessionSettings, mode: string): SessionSettingResult {
+  return restoreSessionInteractionMode(settings, mode);
+}
+
+/** Rewind 恢复交互模式时，可精确回填进入 plan 前的模式。 */
+export function restoreSessionInteractionMode(
+  settings: SessionSettings,
+  mode: string,
+  prePlanMode?: string,
+): SessionSettingResult {
   const normalized = normalizeInteractionMode(mode);
   if (normalized === undefined) {
     return {
@@ -326,8 +335,27 @@ export function setSessionMode(settings: SessionSettings, mode: string): Session
       message: `Current mode: ${settings.mode}\nUsage: /mode <default|plan|auto|yolo>`,
     };
   }
+  const normalizedPrePlanMode = normalizeInteractionMode(prePlanMode);
+  if (
+    prePlanMode !== undefined &&
+    (normalized !== "plan" ||
+      normalizedPrePlanMode === undefined ||
+      normalizedPrePlanMode === "plan")
+  ) {
+    return {
+      ok: false,
+      message: "prePlanMode must be default, auto, or yolo and requires mode=plan",
+    };
+  }
 
   applySessionMode(settings, normalized);
+  if (
+    normalized === "plan" &&
+    normalizedPrePlanMode !== undefined &&
+    normalizedPrePlanMode !== "plan"
+  ) {
+    settings.prePlanMode = normalizedPrePlanMode;
+  }
   persistSessionSettings(settings);
   return { ok: true, message: `Mode set to ${settings.mode}` };
 }

@@ -161,6 +161,7 @@ export interface DurableTuiRewindHandoff {
   readonly inputText: string;
   readonly transcriptIndex: number;
   readonly interactionMode?: PersistedSessionSettings["mode"];
+  readonly prePlanMode?: NonNullable<PersistedSessionSettings["prePlanMode"]>;
 }
 
 /**
@@ -1115,9 +1116,13 @@ export class Session implements SessionRuntimePersistence {
   async beginRewindPoint(input: {
     userPrompt: string;
     transcriptIndex?: number;
-    interactionMode?: string;
+    interactionMode?: PersistedSessionSettings["mode"];
+    prePlanMode?: NonNullable<PersistedSessionSettings["prePlanMode"]>;
     messageId?: string;
   }): Promise<string> {
+    if (input.prePlanMode !== undefined && input.interactionMode !== "plan") {
+      throw new Error("prePlanMode requires interactionMode=plan");
+    }
     const messageId = input.messageId ?? randomUUID();
     const beforeSessionSeq = this.nextSeq;
     await fileHistoryBeginRewindPoint(
@@ -1128,6 +1133,7 @@ export class Session implements SessionRuntimePersistence {
         messageIndex: this.history.length,
         ...(input.transcriptIndex !== undefined ? { transcriptIndex: input.transcriptIndex } : {}),
         ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
+        ...(input.prePlanMode !== undefined ? { prePlanMode: input.prePlanMode } : {}),
         beforeSessionSeq,
       },
       this.id,
@@ -1263,6 +1269,9 @@ export class Session implements SessionRuntimePersistence {
           ...(isPersistedInteractionMode(snapshot.interactionMode)
             ? { interactionMode: snapshot.interactionMode }
             : {}),
+          ...(snapshot.interactionMode === "plan" && isPersistedPrePlanMode(snapshot.prePlanMode)
+            ? { prePlanMode: snapshot.prePlanMode }
+            : {}),
         },
         files,
       };
@@ -1352,6 +1361,7 @@ export class Session implements SessionRuntimePersistence {
         ...(operation.target.interactionMode
           ? { interactionMode: operation.target.interactionMode }
           : {}),
+        ...(operation.target.prePlanMode ? { prePlanMode: operation.target.prePlanMode } : {}),
       };
     }
     return undefined;
@@ -1360,7 +1370,11 @@ export class Session implements SessionRuntimePersistence {
   private async commitRewindRuntimeMode(operation: RewindStorageOperation): Promise<void> {
     const mode = operation.target.interactionMode;
     if (!mode || !this.persistedSettings) return;
-    const settings = restorePersistedInteractionMode(this.persistedSettings, mode);
+    const settings = restorePersistedInteractionMode(
+      this.persistedSettings,
+      mode,
+      operation.target.prePlanMode,
+    );
     const patch: SessionRuntimeStatePatch = { settings };
     const receipt = this.store
       ? await this.commitPersistence("rewind runtime", (store, seq) =>
@@ -2014,13 +2028,21 @@ function isPersistedInteractionMode(value: unknown): value is PersistedSessionSe
   return value === "default" || value === "plan" || value === "auto" || value === "yolo";
 }
 
+function isPersistedPrePlanMode(
+  value: unknown,
+): value is NonNullable<PersistedSessionSettings["prePlanMode"]> {
+  return value === "default" || value === "auto" || value === "yolo";
+}
+
 function restorePersistedInteractionMode(
   current: PersistedSessionSettings,
   mode: PersistedSessionSettings["mode"],
+  prePlanMode?: NonNullable<PersistedSessionSettings["prePlanMode"]>,
 ): PersistedSessionSettings {
   const next = structuredClone(current);
   if (mode === "plan") {
-    next.prePlanMode = current.mode === "plan" ? (current.prePlanMode ?? "yolo") : current.mode;
+    next.prePlanMode =
+      prePlanMode ?? (current.mode === "plan" ? (current.prePlanMode ?? "yolo") : current.mode);
   } else {
     delete next.prePlanMode;
   }
