@@ -8,6 +8,7 @@ import {
 } from "./protocol.js";
 import type { LocalRuntimeService } from "./service.js";
 import { WorkspaceRuntimeRegistry } from "./workspace-registry.js";
+import { WorkspaceRegistrationStore } from "./workspace-registration.js";
 
 export interface DaemonRunExecutor {
   (input: {
@@ -22,6 +23,7 @@ export interface WorkspaceRuntimeServiceOptions {
   createWorkspaceRuntime?: (workspacePath: string) => Promise<WorkspaceTaskRuntime>;
   now?: () => number;
   maxRetainedEvents?: number;
+  registrationStore?: WorkspaceRegistrationStore;
 }
 
 /**
@@ -67,6 +69,16 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
   async handle(request: RuntimeRequest): Promise<JsonValue> {
     if (request.method === "runtime.ping") return { pong: true };
     const params = objectParams(request.params);
+    if (request.method === "workspace.register") {
+      const workspacePath = requiredString(params, "workspacePath");
+      const registered = await (this.options.registrationStore ?? new WorkspaceRegistrationStore()).register(workspacePath);
+      return { workspacePath: registered, registered: true };
+    }
+    if (request.method === "workspace.unregister") {
+      const workspacePath = requiredString(params, "workspacePath");
+      const registered = await (this.options.registrationStore ?? new WorkspaceRegistrationStore()).unregister(workspacePath);
+      return { workspacePath: registered, registered: false };
+    }
     if (request.method === "run.start") {
       const workspacePath = requiredString(params, "workspacePath");
       const prompt = requiredString(params, "prompt");

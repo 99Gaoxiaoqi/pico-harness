@@ -60,6 +60,8 @@ export const RUNTIME_METHODS = [
   "run.start",
   "run.cancel",
   "run.steer",
+  "workspace.register",
+  "workspace.unregister",
   "jobs.list",
   "runs.list",
   "events.replay",
