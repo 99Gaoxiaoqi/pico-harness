@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
+import { JobService } from "../../src/tasks/job-service.js";
 import { TaskHostRuntime } from "../../src/tasks/task-runtime.js";
 import { DelegationManager } from "../../src/tools/delegation-manager.js";
 import { ToolRegistry } from "../../src/tools/registry-impl.js";
@@ -157,6 +158,69 @@ describe("TaskHostRuntime durable executor integration", () => {
     expect(await readFile(join(repo, "shared.txt"), "utf8")).toContain("<<<<<<< HEAD");
     await expect(access(blocked.worktreePath)).resolves.toBeUndefined();
     expect(runtime.jobService.pendingCompletions()).toEqual([]);
+  });
+
+  it("runtime.sqlite 独有的 queued/running 任务在重启后投影为可见兼容视图", async () => {
+    const { root, repo } = await createRepository();
+    cleanups.push(() => rm(root, { recursive: true, force: true }));
+    const first = await JobService.create({ workDir: repo, ownerId: "first-host" });
+    first.service.dispatch({
+      jobId: "sqlite-only-queued",
+      type: "local_agent",
+      executionClass: "recoverable",
+      completionPolicy: "optional",
+      description: "queued only in sqlite",
+      ownerSessionId: "owner-session",
+    });
+    const running = first.service.dispatch({
+      jobId: "sqlite-only-running",
+      type: "worker",
+      executionClass: "recoverable",
+      completionPolicy: "required",
+      description: "running only in sqlite",
+      ownerSessionId: "owner-session",
+    });
+    first.service.start(running.jobId, {
+      expectedVersion: running.version,
+      attemptId: "attempt-running",
+      leaseTtlMs: 60_000,
+    });
+    first.service.close();
+
+    const restored = await TaskHostRuntime.create({ workDir: repo });
+    cleanups.push(() => restored.close());
+
+    expect(restored.list()).toEqual([
+      expect.objectContaining({
+        taskId: "sqlite-only-queued",
+        type: "local_agent",
+        status: "pending",
+      }),
+      expect.objectContaining({
+        taskId: "sqlite-only-running",
+        type: "local_agent",
+        status: "running",
+        data: expect.objectContaining({
+          runtimeStatus: "running",
+          executionClass: "recoverable",
+        }),
+      }),
+    ]);
+    expect(restored.taskRegistry.get("sqlite-only-running")).toMatchObject({
+      status: "running",
+    });
+    expect(restored.get("sqlite-only-running")).toMatchObject({
+      status: "running",
+      data: { attemptId: "attempt-running" },
+    });
+
+    const compatibility = JSON.parse(
+      await readFile(join(repo, ".claw", "tasks", "state.json"), "utf8"),
+    ) as { tasks: Array<{ taskId: string }> };
+    expect(compatibility.tasks.map((task) => task.taskId)).toEqual([
+      "sqlite-only-queued",
+      "sqlite-only-running",
+    ]);
   });
 });
 
