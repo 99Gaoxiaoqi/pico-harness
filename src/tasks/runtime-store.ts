@@ -846,6 +846,37 @@ export class RuntimeStore {
     return this.requireCronJob(cronJobId);
   }
 
+  /** 删除前必须显式禁用；运行中的 Run 不能被级联抹除。 */
+  deleteCronJob(cronJobId: string, expectedVersion: number): CronJobRecord {
+    const remove = this.db.transaction(() => {
+      const current = this.requireCronJob(cronJobId);
+      if (current.enabled) {
+        throw new RuntimeConflictError(`Cron Job ${cronJobId} 必须先禁用才能删除`);
+      }
+      if (current.version !== expectedVersion) {
+        throw new RuntimeConflictError(`Cron Job ${cronJobId} 的版本已变化`);
+      }
+      const running = this.db
+        .prepare("SELECT cron_run_id FROM cron_runs WHERE cron_job_id = ? AND status = 'running' LIMIT 1")
+        .get(cronJobId) as { cron_run_id: string } | undefined;
+      if (running) {
+        throw new RuntimeConflictError(`Cron Job ${cronJobId} 仍有运行中的 Run ${running.cron_run_id}`);
+      }
+      const result = this.db
+        .prepare("DELETE FROM cron_jobs WHERE cron_job_id = ? AND version = ? AND enabled = 0")
+        .run(cronJobId, expectedVersion);
+      if (result.changes !== 1) throw new RuntimeConflictError(`Cron Job ${cronJobId} 删除 CAS 失败`);
+      // Job 行删除后不能保留 FK；以 payload 保存被删除的 ID 作为审计事实。
+      this.insertRuntimeEvent({
+        topic: "cron.job.deleted",
+        workspacePath: current.workspacePath,
+        payload: { cronJobId },
+      });
+      return current;
+    });
+    return remove();
+  }
+
   /**
    * 对同一个 schedule minute 幂等；不会回填历史分钟。若工作区已有活跃 Run，
    * 当前触发写成 skipped，以保留完整审计而不是排队。

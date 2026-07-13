@@ -94,6 +94,10 @@ export class CronService {
     return this.store.setCronJobEnabled(cronJobId, expectedVersion, enabled);
   }
 
+  delete(cronJobId: string, expectedVersion: number): CronJobRecord {
+    return this.store.deleteCronJob(cronJobId, expectedVersion);
+  }
+
   /** 仅扫描当前分钟；即使上次 tick 很早以前，也绝不补跑遗漏分钟。 */
   tick(at = this.now()): CronTickResult {
     const scheduledFor = floorToMinute(at);
