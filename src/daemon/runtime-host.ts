@@ -35,6 +35,7 @@ export class LocalDaemonHost {
   private instanceLock?: LocalDaemonInstanceLock;
   private state: HostState = "stopped";
   private serviceClosed = false;
+  private reconcileQueue: Promise<void> = Promise.resolve();
 
   constructor(private readonly options: LocalDaemonHostOptions) {
     this.endpoint = options.endpoint ?? resolveLocalDaemonEndpoint();
@@ -88,6 +89,18 @@ export class LocalDaemonHost {
   }
 
   private async reconcileRegisteredWorkspaces(): Promise<void> {
+    const queued = this.reconcileQueue.then(
+      () => this.performReconcileRegisteredWorkspaces(),
+      () => this.performReconcileRegisteredWorkspaces(),
+    );
+    this.reconcileQueue = queued.then(
+      () => undefined,
+      () => undefined,
+    );
+    await queued;
+  }
+
+  private async performReconcileRegisteredWorkspaces(): Promise<void> {
     const registered = new Set(await this.registrationStore.list());
     for (const [workspacePath, runtime] of this.cronRuntimes) {
       if (registered.has(workspacePath)) continue;
@@ -111,6 +124,7 @@ export class LocalDaemonHost {
   }
 
   private async closeResources(): Promise<void> {
+    await this.reconcileQueue;
     await this.daemon.stop().catch(() => undefined);
     const runtimes = [...this.cronRuntimes.values()];
     this.cronRuntimes.clear();
