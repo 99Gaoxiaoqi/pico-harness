@@ -78,6 +78,7 @@ export function createProductionLocalDaemonHost(
       }
       const route = await resolveDesktopModelRoute(workspacePath, credentialVault);
       const targetSessionId = sessionId ?? createCliSessionId();
+      context.bindSession(targetSessionId);
       const session =
         globalSessionManager.get(targetSessionId, workspacePath) ??
         (await globalSessionManager.getOrCreate(targetSessionId, workspacePath));
@@ -135,6 +136,7 @@ export function createProductionLocalDaemonHost(
             approvalNotifier: broker.notifyApproval,
             approvalManager: broker.approvalManager,
             askUserHandler: broker.askUserHandler,
+            rewindPointSink: context.bindCheckpoint,
           },
         );
         return {

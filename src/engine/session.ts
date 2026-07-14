@@ -1193,12 +1193,17 @@ export class Session implements SessionRuntimePersistence {
     return receipt;
   }
 
-  async rewindCode(messageId: string): Promise<void> {
+  async rewindCode(
+    messageId: string,
+    expectedCurrentFingerprints?: ReadonlyMap<string, string>,
+  ): Promise<void> {
     const snapshot = this.requireRewindSnapshot(messageId);
     await this.executeRewindOperation(
       "code",
       snapshot,
       snapshot.messageIndex ?? this.history.length,
+      randomUUID(),
+      expectedCurrentFingerprints,
     );
   }
 
@@ -1222,8 +1227,18 @@ export class Session implements SessionRuntimePersistence {
     );
   }
 
-  async rewindBoth(messageId: string, messageIndex: number): Promise<void> {
-    await this.executeRewindOperation("both", this.requireRewindSnapshot(messageId), messageIndex);
+  async rewindBoth(
+    messageId: string,
+    messageIndex: number,
+    expectedCurrentFingerprints?: ReadonlyMap<string, string>,
+  ): Promise<void> {
+    await this.executeRewindOperation(
+      "both",
+      this.requireRewindSnapshot(messageId),
+      messageIndex,
+      randomUUID(),
+      expectedCurrentFingerprints,
+    );
   }
 
   private requireRewindSnapshot(messageId: string): FileHistoryState["snapshots"][number] {
@@ -1239,12 +1254,15 @@ export class Session implements SessionRuntimePersistence {
     snapshot: FileHistoryState["snapshots"][number],
     messageIndex: number,
     operationId = randomUUID(),
+    expectedCurrentFingerprints?: ReadonlyMap<string, string>,
   ): Promise<void> {
     await this.flushPersistence();
     const coordinator = this.createRewindCoordinator();
     const operation = await coordinator.executePrepared(async () => {
       const files =
-        mode === "conversation" ? [] : await this.buildRewindFileTransitions(snapshot.messageId);
+        mode === "conversation"
+          ? []
+          : await this.buildRewindFileTransitions(snapshot.messageId, expectedCurrentFingerprints);
       const head = this.store?.getHeadCursor();
       return {
         operationId,
@@ -1391,9 +1409,12 @@ export class Session implements SessionRuntimePersistence {
 
   private async buildRewindFileTransitions(
     messageId: string,
+    expectedCurrentFingerprints?: ReadonlyMap<string, string>,
   ): Promise<NewRewindStorageOperation["files"]> {
     const baseDir = fileHistoryDefaultBaseDir();
-    const prepared = await fileHistoryPrepareRewind(this.fileHistory, messageId, this.id, baseDir);
+    const prepared = await fileHistoryPrepareRewind(this.fileHistory, messageId, this.id, baseDir, {
+      ...(expectedCurrentFingerprints ? { expectedCurrentFingerprints } : {}),
+    });
     const blobStore = new FileHistoryBlobStore({ baseDir });
     const files: NewRewindStorageOperation["files"] = [];
     for (const file of prepared.files) {
