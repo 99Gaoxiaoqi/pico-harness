@@ -134,7 +134,7 @@ describe("session fork published mainline", () => {
       sourceId,
       fileHistoryBaseDir,
     );
-    globalSessionPermissionGrants.add(sourceId, { type: "tool", toolName: "bash" });
+    globalSessionPermissionGrants.add(sourceId, workDir, { type: "tool", toolName: "bash" });
     const jobs = new JobService({ workDir });
     jobs.dispatch({
       jobId: "source-job",

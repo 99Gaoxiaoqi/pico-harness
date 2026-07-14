@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import React from "react";
@@ -9,14 +9,16 @@ import {
   SessionPermissionGrants,
 } from "../src/approval/session-permissions.js";
 import { runAgentFromCli, type RunAgentCliDependencies } from "../src/cli/run-agent.js";
+import { resolveCliSession } from "../src/cli/session-resolver.js";
 import { globalSessionManager } from "../src/engine/session.js";
 import {
+  createDefaultSessionSettings,
   getOrCreateSessionSettings,
   getStoredSessionSettings,
   resetSessionSettingsForTests,
 } from "../src/input/session-settings.js";
 import type { LLMProvider } from "../src/provider/interface.js";
-import type { Message } from "../src/schema/message.js";
+import type { Message, ToolCall } from "../src/schema/message.js";
 import type { DialogRequest } from "../src/tui/dialog-arbiter.js";
 import { formatApprovalPanel, type ApprovalPanelAction } from "../src/tui/approval-panel.js";
 import { runTuiAgentPrompt, type TuiRunAgent } from "../src/tui/repl.js";
@@ -45,7 +47,11 @@ afterEach(async () => {
 describe("Claude-style permission integration", () => {
   it("Bash session prefix 不吸收 shell 链、重定向或后台执行", () => {
     const grants = new SessionPermissionGrants();
-    grants.add("grant", { type: "bash-command", command: "npm test", match: "prefix" });
+    grants.add("grant", process.cwd(), {
+      type: "bash-command",
+      command: "npm test",
+      match: "prefix",
+    });
     const call = (command: string, background = false) => ({
       id: "bash-grant",
       name: "bash",
@@ -58,6 +64,49 @@ describe("Claude-style permission integration", () => {
     expect(grants.allows("grant", call("npm test\ntouch escaped"), process.cwd())).toBe(false);
     expect(grants.allows("grant", call("npm test > escaped.log"), process.cwd())).toBe(false);
     expect(grants.allows("grant", call("npm test", true), process.cwd())).toBe(false);
+  });
+
+  it("相同 sessionId 的授权与 CLI 语义按真实 cwd 隔离", async () => {
+    const root = await realTempDir("pico-permission-session-scope-");
+    const workDirA = join(root, "workspace-a");
+    const workDirB = join(root, "workspace-b");
+    const workDirAlias = join(root, "workspace-a-alias");
+    await Promise.all([mkdir(workDirA), mkdir(workDirB)]);
+    await symlink(workDirA, workDirAlias, "dir");
+    const sessionId = "same-explicit-session";
+    const bashCall = {
+      id: "scoped-bash",
+      name: "bash",
+      arguments: JSON.stringify({ command: "npm test" }),
+    } satisfies ToolCall;
+    const grants = new SessionPermissionGrants();
+
+    grants.add(sessionId, workDirA, {
+      type: "bash-command",
+      command: "npm test",
+      match: "exact",
+    });
+    await resolveCliSession({ workDir: workDirA, session: sessionId });
+
+    expect(grants.allows(sessionId, bashCall, workDirA)).toBe(true);
+    expect(grants.allows(sessionId, bashCall, workDirAlias)).toBe(true);
+    expect(grants.allows(sessionId, bashCall, workDirB)).toBe(false);
+    expect(
+      createDefaultSessionSettings({
+        sessionId,
+        cwd: workDirAlias,
+        provider: "openai",
+        model: "test-model",
+      }).sessionMode,
+    ).toBe("resume");
+    expect(
+      createDefaultSessionSettings({
+        sessionId,
+        cwd: workDirB,
+        provider: "openai",
+        model: "test-model",
+      }).sessionMode,
+    ).toBe("new");
   });
 
   it("default 模式通过 TUI 一次选择原子授权外部目录并切换 session edits", async () => {
