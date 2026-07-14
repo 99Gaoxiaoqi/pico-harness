@@ -51,7 +51,7 @@ function statusMark(status: TodoStatus): string {
 export class TodoTool implements BaseTool {
   /** 非只读:所有 action 都可能写 todo.json */
   readonly readOnly = false;
-  /** .claw/todo.json 是会话内部状态，不属于 code rewind 范围。 */
+  /** Todo 是会话内部状态，不属于 code rewind 范围。 */
   readonly fileSideEffects = NO_FILE_SIDE_EFFECTS;
 
   constructor(private readonly store: TodoStore) {}
@@ -64,7 +64,7 @@ export class TodoTool implements BaseTool {
     return {
       name: "todo",
       description:
-        "管理任务清单,支持 add/update/toggle/remove/list 操作,状态持久化到 .claw/todo.json",
+        "管理任务清单,支持 add/update/toggle/remove/list 操作,状态持久化到当前 Pico workspace state",
       inputSchema: {
         type: "object",
         properties: {

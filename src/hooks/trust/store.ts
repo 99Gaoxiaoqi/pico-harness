@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { lstat, readFile, realpath } from "node:fs/promises";
-import { homedir } from "node:os";
 import { dirname, join, normalize, resolve } from "node:path";
+import { resolvePicoHome } from "../../paths/pico-paths.js";
 import type { HookHandler, HookSource, ResolvedHookHandler } from "../types.js";
 import {
   assertRegularNonSymlink,
@@ -46,8 +46,8 @@ export class HookTrustStore {
   readonly filePath: string;
 
   constructor(options: HookTrustStoreOptions = {}) {
-    this.filePath =
-      options.filePath ?? join(options.userHome ?? homedir(), ".pico", "trusted-hooks.json");
+    const picoHome = options.userHome ? join(options.userHome, ".pico") : resolvePicoHome();
+    this.filePath = options.filePath ?? join(picoHome, "trusted-hooks.json");
   }
 
   async status(subject: HookTrustSubject): Promise<HookTrustStatus> {

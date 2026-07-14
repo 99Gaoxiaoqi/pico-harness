@@ -14,14 +14,30 @@ async function main() {
   const pty = await loadNodePty();
   const repoRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
   const entry = join(repoRoot, "dist", "cli", "main.js");
-  await runBuiltTuiScenario({ pty, repoRoot, entry, term: "xterm-256color" });
-  await runBuiltTuiScenario({ pty, repoRoot, entry, term: "dumb" });
-  await runBuiltTuiScenario({ pty, repoRoot, entry, term: "dumb", interrupt: true });
+  const { resolvePicoPaths } = await import("../dist/paths/pico-paths.js");
+  await runBuiltTuiScenario({ pty, repoRoot, entry, resolvePicoPaths, term: "xterm-256color" });
+  await runBuiltTuiScenario({ pty, repoRoot, entry, resolvePicoPaths, term: "dumb" });
+  await runBuiltTuiScenario({
+    pty,
+    repoRoot,
+    entry,
+    resolvePicoPaths,
+    term: "dumb",
+    interrupt: true,
+  });
 }
 
-async function runBuiltTuiScenario({ pty, repoRoot, entry, term, interrupt = false }) {
+async function runBuiltTuiScenario({
+  pty,
+  repoRoot,
+  entry,
+  resolvePicoPaths,
+  term,
+  interrupt = false,
+}) {
   const workDir = await mkdtemp(join(tmpdir(), "pico-built-tui-smoke-"));
   const homeDir = await mkdtemp(join(tmpdir(), "pico-built-tui-home-"));
+  const picoHome = join(homeDir, "pico-home");
   const fakeServer = await startFakeOpenAiServer({
     content: EXPECTED,
     ...(interrupt ? { delayMs: 1_200 } : {}),
@@ -85,6 +101,7 @@ async function runBuiltTuiScenario({ pty, repoRoot, entry, term, interrupt = fal
           PICO_PERSISTENCE: term === "dumb" ? "1" : "0",
           HOME: homeDir,
           USERPROFILE: homeDir,
+          PICO_HOME: picoHome,
           LLM_BASE_URL: fakeServer.baseURL,
           LLM_API_KEY: "local-test-key",
           LLM_MODEL: "fake-model",
@@ -148,7 +165,7 @@ async function runBuiltTuiScenario({ pty, repoRoot, entry, term, interrupt = fal
       if (alternateFakeServer.requestCount !== 0) {
         throw new Error("TERM=dumb routed a same-name model turn to the wrong configured endpoint");
       }
-      const persistedSession = await readPersistedSession(workDir);
+      const persistedSession = await readPersistedSession(workDir, picoHome, resolvePicoPaths);
       if (!persistedSession.includes('"modelRouteId":"configured-primary/shared-model"')) {
         throw new Error("TERM=dumb did not persist the selected provider/model route identity");
       }
@@ -167,8 +184,8 @@ async function runBuiltTuiScenario({ pty, repoRoot, entry, term, interrupt = fal
   }
 }
 
-async function readPersistedSession(workDir) {
-  const sessionsDir = join(workDir, ".claw", "sessions");
+async function readPersistedSession(workDir, picoHome, resolvePicoPaths) {
+  const sessionsDir = resolvePicoPaths(workDir, { picoHome }).workspace.sessions;
   const files = (await readdir(sessionsDir)).filter((file) => file.endsWith(".jsonl"));
   return (await Promise.all(files.map((file) => readFile(join(sessionsDir, file), "utf8")))).join(
     "\n",

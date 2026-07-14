@@ -27,6 +27,10 @@ export interface PicoHomePaths {
   readonly plugins: string;
   readonly pluginData: string;
   readonly workspaces: string;
+  readonly trustedWorkspaces: string;
+  readonly trustedHooks: string;
+  readonly fileHistory: string;
+  readonly daemonWorkspaces: string;
 }
 
 export interface PicoWorkspacePaths {
@@ -120,6 +124,10 @@ export function resolvePicoPaths(
       plugins: join(picoHome, "plugins"),
       pluginData: join(picoHome, "plugin-data"),
       workspaces: join(picoHome, "workspaces"),
+      trustedWorkspaces: join(picoHome, "trusted-workspaces.json"),
+      trustedHooks: join(picoHome, "trusted-hooks.json"),
+      fileHistory: join(picoHome, "file-history"),
+      daemonWorkspaces: join(picoHome, "daemon-workspaces.json"),
     },
     workspace: {
       id: workspaceId,
