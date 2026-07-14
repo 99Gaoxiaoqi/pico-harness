@@ -450,7 +450,6 @@ describe("DesktopRuntimeService integration", () => {
         persistence: true,
         sessionCatalog: false,
       });
-      await session.commitMessages({ role: "user", content: prompt });
       await session.commitMessages({ role: "assistant", content: `reply:${prompt}` });
       await session.flushPersistence();
       return { sessionId };
@@ -548,6 +547,40 @@ describe("DesktopRuntimeService integration", () => {
         .filter((item) => item.kind === "runBoundary")
         .map((item) => item.status),
     ).toEqual(["running", "succeeded", "running", "succeeded"]);
+    await fixture.service.close();
+  });
+
+  it("工作区已有活动 Run 时首次发送不创建空 Session", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const fixture = await createFixture(async () => {
+      await gate;
+    });
+    const existing = (await fixture.runtime.startForegroundRun({
+      workspacePath: fixture.workspace,
+      prompt: "existing run",
+    })) as { runId: string };
+
+    await expect(
+      fixture.service.handle(
+        createRuntimeRequest("session.send", {
+          workspacePath: fixture.workspace,
+          input: { text: "should not create a session" },
+          idempotencyKey: "blocked-first-send",
+        }),
+      ),
+    ).rejects.toMatchObject({ code: RUNTIME_ERROR_CODES.CONFLICT });
+    await expect(
+      fixture.service.handle(
+        createRuntimeRequest("session.list", { workspacePath: fixture.workspace }),
+      ),
+    ).resolves.toEqual({ sessions: [] });
+
+    release();
+    const workspaceRuntime = await fixture.runtime.getWorkspaceRuntime(fixture.workspace);
+    await workspaceRuntime.waitForRun(existing.runId);
     await fixture.service.close();
   });
 

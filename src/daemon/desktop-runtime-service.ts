@@ -708,6 +708,15 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const initialResolution = params.sessionId
       ? undefined
       : await this.resolveRuntimeUserInput(params.workspacePath, params.input);
+    if (!params.sessionId) {
+      const activeWorkspaceRun = await this.findActiveWorkspaceRun(params.workspacePath);
+      if (activeWorkspaceRun) {
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.CONFLICT,
+          `当前工作区已有活动 Run ${String(activeWorkspaceRun["runId"])}，未创建空 Session`,
+        );
+      }
+    }
     const session = params.sessionId
       ? await this.requireSession(params.workspacePath, params.sessionId)
       : await this.createSessionForMessage(params.workspacePath, runtimeInputTitle(params.input));
@@ -778,6 +787,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       sessionId,
       params.input,
       initialResolution,
+      params.idempotencyKey,
     );
     return { session: sessionRecord, run, disposition: "started" };
   }
@@ -896,20 +906,41 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       .find((run) => !isTerminalRunStatus(String(run["status"] ?? "")));
   }
 
+  private async findActiveWorkspaceRun(workspacePath: string): Promise<JsonObject | undefined> {
+    const value = requireJsonRecord(
+      await this.options.runtimeService.handle(
+        createRuntimeRequest("runs.list", { workspacePath }),
+      ),
+      "runs.list result",
+    );
+    const runs = Array.isArray(value["runs"]) ? value["runs"] : [];
+    return runs
+      .filter(isJsonRecord)
+      .find((run) => !isTerminalRunStatus(String(run["status"] ?? "")));
+  }
+
   private async startSessionRun(
     workspacePath: string,
     sessionId: string,
     input: RuntimeUserInput,
     resolvedInput?: ResolvedRuntimeUserInput,
+    inputIdempotencyKey?: string,
   ): Promise<JsonObject> {
     try {
       const resolved = resolvedInput ?? (await this.resolveRuntimeUserInput(workspacePath, input));
+      await this.commitSessionInputOnce(
+        workspacePath,
+        sessionId,
+        resolved.prompt,
+        runtimeInputDisplay(input),
+        inputIdempotencyKey ?? `run:${createHash("sha256").update(resolved.prompt).digest("hex")}`,
+      );
       return requireJsonRecord(
         await this.options.runtimeService.startForegroundRun({
           workspacePath,
           sessionId,
           prompt: resolved.prompt,
-          ...(resolved.execution ? { execution: resolved.execution } : {}),
+          execution: { ...(resolved.execution ?? {}), resumeExistingSession: true },
         }),
         "run.start result",
       );
@@ -922,11 +953,51 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     }
   }
 
+  private async commitSessionInputOnce(
+    workspacePath: string,
+    sessionId: string,
+    prompt: string,
+    displayText: string,
+    idempotencyKey: string,
+  ): Promise<void> {
+    const digest = createHash("sha256")
+      .update(`${workspacePath}\0${sessionId}\0${idempotencyKey}`)
+      .digest("hex");
+    const messageId = `desktop-input:${digest}`;
+    await this.withSession(workspacePath, sessionId, async (session) => {
+      if (
+        session
+          .getHistory()
+          .some(
+            (message) =>
+              message.role === "user" && message.providerData?.["picoDesktopInputId"] === messageId,
+          )
+      ) {
+        return;
+      }
+      if (!session.fileHistory.snapshots.some((snapshot) => snapshot.messageId === messageId)) {
+        await session.beginRewindPoint({ userPrompt: displayText, messageId });
+      }
+      const receipt = await session.commitMessageOnce(`user-message:${messageId}`, {
+        role: "user",
+        content: prompt,
+        providerData: {
+          picoKind: "desktop_user_input",
+          picoDesktopInputId: messageId,
+          displayText,
+        },
+      });
+      await session.bindRewindPointSource(messageId, receipt);
+      await session.flushPersistence();
+    });
+    this.publishTranscriptUpdate(workspacePath, sessionId, "reload");
+  }
+
   private async consumeNextQueued(workspacePath: string, sessionId: string): Promise<void> {
     const [next] = await this.conversationStateStore.listQueued(workspacePath, sessionId);
     if (!next) return;
     if (await this.findActiveSessionRun(workspacePath, sessionId)) return;
-    await this.startSessionRun(workspacePath, sessionId, next.input);
+    await this.startSessionRun(workspacePath, sessionId, next.input, undefined, next.queueId);
     await this.conversationStateStore.removeQueued(next.queueId);
   }
 
@@ -2045,6 +2116,14 @@ function runtimeInputTitle(input: RuntimeUserInput): string {
     return [`/${input.name}`, input.args?.trim()].filter(Boolean).join(" ");
   }
   return input.text;
+}
+
+function runtimeInputDisplay(input: RuntimeUserInput): string {
+  if (input.kind === "agent") return [`@${input.name}`, input.task.trim()].join(" ");
+  if (input.kind === "skill") {
+    return [`/${input.name}`, input.args?.trim()].filter(Boolean).join(" ");
+  }
+  return input.text.trim();
 }
 
 async function loadDesktopSkillLoader(

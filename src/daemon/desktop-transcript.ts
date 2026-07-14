@@ -63,7 +63,14 @@ function projectVisibleItems(snapshot: SessionHydrationSnapshot): RuntimeConvers
       return;
     }
 
-    const content = message.content.trim();
+    const desktopDisplayText =
+      message.role === "user" && message.providerData?.["picoKind"] === "desktop_user_input"
+        ? message.providerData["displayText"]
+        : undefined;
+    const content =
+      typeof desktopDisplayText === "string" && desktopDisplayText.trim()
+        ? desktopDisplayText.trim()
+        : message.content.trim();
     if (message.role === "user") {
       if (content) {
         items.push({
