@@ -295,6 +295,83 @@ describe("LocalDaemonHost integration", () => {
     }
   });
 
+  it("生产桌面 Run 使用 Session 选择的模型、模式和思考档位", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pico-ds-"));
+    cleanups.push(() => rm(root, { recursive: true, force: true }));
+    const workspace = join(root, "workspace");
+    await mkdir(join(workspace, ".pico"), { recursive: true });
+    execFileSync("git", ["init", "--quiet"], { cwd: workspace });
+    await writeFile(
+      join(workspace, ".pico", "config.json"),
+      JSON.stringify({
+        version: 1,
+        model: "local/coder",
+        providers: {
+          local: {
+            protocol: "openai",
+            baseURL: "https://provider.example.test/v1",
+            apiKeyEnv: "PICO_DESKTOP_TEST_KEY",
+            models: {
+              coder: {},
+              reasoner: {
+                reasoning: {
+                  enabled: true,
+                  defaultLevel: "high",
+                  levels: ["off", "high", "max"],
+                },
+              },
+            },
+          },
+        },
+      }),
+    );
+    const trustStore = new WorkspaceTrustStore({ userStateDirectory: join(root, "trust") });
+    await trustStore.trust(await trustStore.canonicalize(workspace));
+    const endpoint = resolveLocalDaemonEndpoint({
+      runtimeDir: join(root, "runtime"),
+      userIdentity: "settings",
+    });
+    const agentRuntime = new CapturingSettingsAgentRuntime();
+    const host = createProductionLocalDaemonHost({
+      endpoint,
+      trustStore,
+      agentRuntime,
+      credentialVault: new AvailableCredentialVault(),
+      registrationStore: new WorkspaceRegistrationStore(join(root, "workspaces.json")),
+    });
+    await host.start();
+    const client = new LocalRuntimeClient(endpoint);
+    try {
+      const created = (await client.request("session.create", {
+        workspacePath: workspace,
+      })) as { session: { sessionId: string } };
+      await client.request("session.settings.update", {
+        workspacePath: workspace,
+        sessionId: created.session.sessionId,
+        modelRouteId: "local/reasoner",
+        permissions: "plan",
+        thinkingEffort: "max",
+      });
+      await client.request("run.start", {
+        workspacePath: workspace,
+        sessionId: created.session.sessionId,
+        prompt: "按计划检查项目",
+      });
+
+      await expect(agentRuntime.received.promise).resolves.toMatchObject({
+        session: created.session.sessionId,
+        model: "reasoner",
+        modelRouteId: "local/reasoner",
+        thinkingEffort: "max",
+        planMode: true,
+        rewindInteractionMode: "plan",
+      });
+    } finally {
+      client.close();
+      await host.stop();
+    }
+  });
+
   it("生产 daemon 通过 IPC 创建、执行并审计桌面 Automation", async () => {
     const root = await mkdtemp(join(tmpdir(), "pico-auto-"));
     cleanups.push(() => rm(root, { recursive: true, force: true }));
@@ -564,6 +641,26 @@ class AutomationFakeAgentRuntime extends AgentRuntime {
       workDir: options.dir ?? process.cwd(),
       finalMessage: "repository healthy",
       usage: { promptTokens: 8, completionTokens: 2, costCNY: 0.001 },
+      messages: [],
+    };
+  }
+}
+
+class CapturingSettingsAgentRuntime extends AgentRuntime {
+  readonly received = deferred<RunAgentCliOptions>();
+
+  override async execute(
+    options: RunAgentCliOptions,
+    _dependencies: RunAgentCliDependencies = {},
+  ): Promise<RunAgentCliResult> {
+    this.received.resolve(options);
+    const sessionId = options.session ?? "missing-session";
+    return {
+      sessionId,
+      sessionSelection: { mode: "resume", sessionId },
+      workDir: options.dir ?? process.cwd(),
+      finalMessage: "settings applied",
+      usage: { promptTokens: 1, completionTokens: 1, costCNY: 0 },
       messages: [],
     };
   }

@@ -56,6 +56,9 @@ describe("desktop runtime protocol contract", () => {
         "session.rename",
         "session.fork",
         "session.compact",
+        "session.settings.get",
+        "session.settings.update",
+        "goal.get",
         "session.send",
         "session.transcript",
         "run.start",
@@ -141,6 +144,9 @@ describe("desktop runtime protocol contract", () => {
     type SessionSendParams = RuntimeParams<"session.send">;
     type TranscriptResult = RuntimeResult<"session.transcript">;
     type CompactResult = RuntimeResult<"session.compact">;
+    type SettingsUpdate = RuntimeParams<"session.settings.update">;
+    type SettingsResult = RuntimeResult<"session.settings.get">;
+    type GoalResult = RuntimeResult<"goal.get">;
 
     expectTypeOf<StartParams>().toMatchTypeOf<{
       workspacePath: string;
@@ -153,6 +159,15 @@ describe("desktop runtime protocol contract", () => {
     >();
     expectTypeOf<TranscriptResult["revision"]>().toEqualTypeOf<string>();
     expectTypeOf<CompactResult["compacted"]>().toEqualTypeOf<true>();
+    expectTypeOf<SettingsUpdate["permissions"]>().toEqualTypeOf<
+      "default" | "plan" | "auto" | "yolo" | undefined
+    >();
+    expectTypeOf<SettingsResult["settings"]["permissions"]>().toEqualTypeOf<
+      SettingsResult["settings"]["mode"]
+    >();
+    expectTypeOf<GoalResult["goal"]>().toMatchTypeOf<{
+      readonly activeGoalId: string | null;
+    } | null>();
     expectTypeOf<keyof RuntimeMethodMap>().toEqualTypeOf<(typeof RUNTIME_METHODS)[number]>();
 
     const request = createTypedRuntimeRequest("run.start", {
