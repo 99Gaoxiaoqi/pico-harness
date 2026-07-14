@@ -236,6 +236,8 @@ export interface RunAgentCliDependencies extends RuntimeHost {
   mcpManager?: McpConnectionManager;
   /** 宿主本轮运行的中止信号。 */
   signal?: AbortSignal;
+  /** Host-owned gate used by desktop Pause at tool-safe execution boundaries. */
+  waitAtSafeBoundary?: () => Promise<void>;
   /** Receives the exact durable rewind point created for this top-level prompt. */
   rewindPointSink?: (checkpointId: string) => void;
   /** @internal 继续已存在的未完成轮次，不新增 user 消息或 rewind point。 */
@@ -719,6 +721,9 @@ export async function executeAgentRuntime(
       reporter,
       tracer: traceEnabled ? new Tracer() : undefined,
       steerQueue,
+      ...(dependencies.waitAtSafeBoundary
+        ? { waitAtSafeBoundary: dependencies.waitAtSafeBoundary }
+        : {}),
       ...(runtimeState.hookService ? { hookService: runtimeState.hookService } : {}),
       skillLoaderFactory,
       ...(rebuildProvider ? { rebuildProvider } : {}),

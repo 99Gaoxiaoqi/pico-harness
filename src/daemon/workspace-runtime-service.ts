@@ -148,6 +148,14 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
         runtime.cancel(requiredString(params, "runId"), optionalString(params, "reason")),
       );
     }
+    if (request.method === "run.pause") {
+      const runtime = await this.registry.get(requiredString(params, "workspacePath"));
+      return runPayload(runtime.pause(requiredString(params, "runId")));
+    }
+    if (request.method === "run.resume") {
+      const runtime = await this.registry.get(requiredString(params, "workspacePath"));
+      return runPayload(runtime.resume(requiredString(params, "runId")));
+    }
     if (request.method === "run.steer") {
       const runtime = await this.registry.get(requiredString(params, "workspacePath"));
       return runPayload(

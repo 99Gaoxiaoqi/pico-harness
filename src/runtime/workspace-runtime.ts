@@ -11,6 +11,8 @@ import type {
 
 export const WORKSPACE_RUN_STATUSES = [
   "running",
+  "pause_requested",
+  "paused",
   "cancelling",
   "succeeded",
   "failed",
@@ -47,6 +49,8 @@ export interface WorkspaceRunContext {
   drainSteers(): string[];
   /** 在 executor 需要立即响应引导时订阅后续消息。 */
   onSteer(listener: (message: string) => void): () => void;
+  /** Wait at a host-defined safe boundary while a user pause request is active. */
+  waitAtSafeBoundary(): Promise<void>;
   /** Bind once the executor has resolved the concrete session. Conflicting rebinds fail closed. */
   bindSession(sessionId: string): void;
   /** Bind the exact rewind point created by the executor. Conflicting rebinds fail closed. */
@@ -63,6 +67,9 @@ export interface WorkspaceRuntimeEvent {
     | "workspace.ready"
     | "run.started"
     | "run.steer_requested"
+    | "run.pause_requested"
+    | "run.paused"
+    | "run.resumed"
     | "run.cancel_requested"
     | "run.finished"
     | "task.updated";
@@ -89,6 +96,8 @@ interface WorkspaceRunRecord {
   controller: AbortController;
   steers: string[];
   steerSubscribers: Set<(message: string) => void>;
+  pauseRequested: boolean;
+  resumePause?: () => void;
   promise: Promise<void>;
 }
 
@@ -177,6 +186,7 @@ export class WorkspaceTaskRuntime {
       controller: new AbortController(),
       steers: [],
       steerSubscribers: new Set(),
+      pauseRequested: false,
       promise: Promise.resolve(),
     };
     this.runs.set(runId, record);
@@ -214,12 +224,50 @@ export class WorkspaceTaskRuntime {
     if (record.snapshot.status !== "cancelling") {
       record.snapshot = updateRun(record.snapshot, { status: "cancelling" }, this.now());
       record.controller.abort(new DOMException(reason, "AbortError"));
+      record.pauseRequested = false;
+      record.resumePause?.();
+      record.resumePause = undefined;
       this.publish({
         type: "run.cancel_requested",
         resourceVersion: record.snapshot.version,
         run: cloneRun(record.snapshot),
       });
     }
+    return cloneRun(record.snapshot);
+  }
+
+  pause(runId: string): WorkspaceRunSnapshot {
+    const record = this.requireRun(runId);
+    if (isTerminalRunStatus(record.snapshot.status) || record.snapshot.status === "cancelling") {
+      return cloneRun(record.snapshot);
+    }
+    if (record.pauseRequested || record.snapshot.status === "paused") {
+      return cloneRun(record.snapshot);
+    }
+    record.pauseRequested = true;
+    record.snapshot = updateRun(record.snapshot, { status: "pause_requested" }, this.now());
+    this.publish({
+      type: "run.pause_requested",
+      resourceVersion: record.snapshot.version,
+      run: cloneRun(record.snapshot),
+    });
+    return cloneRun(record.snapshot);
+  }
+
+  resume(runId: string): WorkspaceRunSnapshot {
+    const record = this.requireRun(runId);
+    if (!record.pauseRequested && record.snapshot.status !== "paused") {
+      return cloneRun(record.snapshot);
+    }
+    record.pauseRequested = false;
+    record.resumePause?.();
+    record.resumePause = undefined;
+    record.snapshot = updateRun(record.snapshot, { status: "running" }, this.now());
+    this.publish({
+      type: "run.resumed",
+      resourceVersion: record.snapshot.version,
+      run: cloneRun(record.snapshot),
+    });
     return cloneRun(record.snapshot);
   }
 
@@ -289,6 +337,7 @@ export class WorkspaceTaskRuntime {
           record.steerSubscribers.add(subscriber);
           return () => record.steerSubscribers.delete(subscriber);
         },
+        waitAtSafeBoundary: () => this.waitAtSafeBoundary(record),
         bindSession: (sessionId) => this.bindRunIdentifier(record, "sessionId", sessionId),
         bindCheckpoint: (checkpointId) =>
           this.bindRunIdentifier(record, "checkpointId", checkpointId),
@@ -303,7 +352,30 @@ export class WorkspaceTaskRuntime {
       );
     } finally {
       record.steerSubscribers.clear();
+      record.resumePause?.();
+      record.resumePause = undefined;
     }
+  }
+
+  private async waitAtSafeBoundary(record: WorkspaceRunRecord): Promise<void> {
+    if (!record.pauseRequested) return;
+    record.controller.signal.throwIfAborted();
+    if (record.snapshot.status !== "paused") {
+      record.snapshot = updateRun(record.snapshot, { status: "paused" }, this.now());
+      this.publish({
+        type: "run.paused",
+        resourceVersion: record.snapshot.version,
+        run: cloneRun(record.snapshot),
+      });
+    }
+    await new Promise<void>((resolve) => {
+      if (!record.pauseRequested || record.controller.signal.aborted) {
+        resolve();
+        return;
+      }
+      record.resumePause = resolve;
+    });
+    record.controller.signal.throwIfAborted();
   }
 
   private bindRunIdentifier(
@@ -353,6 +425,9 @@ export class WorkspaceTaskRuntime {
   private cancelDuringClose(record: WorkspaceRunRecord): void {
     record.snapshot = updateRun(record.snapshot, { status: "cancelling" }, this.now());
     record.controller.abort(new DOMException("workspace runtime closed", "AbortError"));
+    record.pauseRequested = false;
+    record.resumePause?.();
+    record.resumePause = undefined;
   }
 
   private publish(input: Omit<WorkspaceRuntimeEvent, "eventId" | "workspace" | "at">): void {
