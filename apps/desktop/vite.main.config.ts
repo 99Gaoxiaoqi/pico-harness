@@ -5,6 +5,7 @@ export default defineConfig({
     sourcemap: true,
     rollupOptions: {
       external: ["electron", "better-sqlite3", "node-pty"],
+      output: { entryFileNames: "main.js" },
     },
   },
 });
