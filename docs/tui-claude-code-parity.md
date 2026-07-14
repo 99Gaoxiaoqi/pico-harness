@@ -128,7 +128,7 @@ pico --add-dir ../shared --add-dir /absolute/generated
 
 主 Agent 批量委派时，TUI 会为每个子代理显示独立活动卡片：任务目标、角色/模式、queued/running/completed/failed 状态、最近工具目标和完成摘要。同一子代理的更新原位替换同一张卡片，多个子代理可并行展示。
 
-Task ID、TaskRegistry、worktree supervisor 和合并队列是主 Agent 的内部能力，不作为用户 slash command 暴露。可写 worker 仍总是进入独立 branch/worktree 和 OS 沙箱，完成后由宿主统一提交；这个边界不随主会话的 `yolo` 放开。
+Task ID、TaskRegistry、worktree supervisor 和合并队列是主 Agent 的内部能力，不作为用户 slash command 暴露。目标产品契约中，可写 Worker 默认在 Shared Folder 内按 `writeScopes` 和文件 OCC 协作；高冲突、动态写、强隔离或独立交付时才升级到 branch/worktree 和 OS 沙箱。没有 Git 只关闭 branch、commit、merge、PR 与 worktree，不关闭 Shared Worker。当前 Worker 代码仍强制 worktree，属于迁移阶段；切换默认值前必须完成 OCC 验收，详见[多 Agent 共享工作区并发规范](architecture/08-multi-agent-concurrency.md)。
 
 `.claw/tasks/state.json` 持久化内部任务账本，并将重启后遗留的 `running` 记录明确收口为失败；它不会复活上一个 Node/LLM 进程。宿主提交/合并不执行仓库 hooks、fsmonitor、签名程序或凭据助手；检测到自定义 clean/smudge/process filter 或 merge driver 时 fail-closed。
 

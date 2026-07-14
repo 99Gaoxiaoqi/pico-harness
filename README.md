@@ -16,14 +16,14 @@
 - **Two-Stage ReAct**:独立 Thinking 阶段剥离,空 tools 强制纯文本规划,再恢复工具执行
 - **双协议 Provider**:OpenAI 兼容 + Claude 原生,统一 Message Schema 双向翻译
 - **极简工具集**:read_file / write_file / edit_file / bash 四原语,多级模糊匹配容错
-- **Fork-Join 并行**:全只读批次 Promise.all 并发,含写操作退化为串行
+- **资源感知并行**:单 Agent 单轮按 ToolAccesses 调度,不同文件可并发,冲突路径自动串行
 - **Session 物理隔离**:TUI 单入口按项目目录绑定会话,WorkingMemory 滑动窗口 + 孤儿 ToolResult 丢弃
 - **阶梯降级 Compactor**:远期历史全量掩码 + 保护区掐头去尾,防 Context OOM
 - **Plan Mode 状态外部化**:PLAN.md / TODO.md 持久化记忆,断点续传 + 零成本人机协同
 - **ErrorRecovery 锦囊**:工具报错时按类型注入恢复建议,引导模型走向正确排障 SOP
 - **SystemReminders 防死循环**:MD5 哈希指纹监控连续失败,3 次同参数失败强行打断
 - **Middleware 高危审批**:rm/sudo 等命令挂起执行流,在 TUI 中展示审批提示
-- **Subagent 任务委派**:spawn_subagent 拉起隔离上下文子智能体干脏活,爆炸半径只读限制
+- **Subagent 任务委派**:Explore 保持只读,可写 Worker 按 Shared Folder / Isolated Worktree 分层演进
 - **CostTracker 成本追踪**:装饰器模式无侵入拦截 Token 消耗与耗时,按模型计费
 - **Tracing 链路追踪**:决策树导出 JSON,逐帧复盘 Agent 失败时的全量决策路径
 
@@ -189,9 +189,9 @@ export ZHIPU_API_KEY=your-zhipu-key
 }
 ```
 
-`sandbox.network` 只约束 Pico 创建的 explore/worker 子代理，不约束主 TUI 的 YOLO。worker 无论主会话处于 `default` / `auto` / `plan` / `yolo` 都使用独立 worktree 和 OS 沙箱；默认禁止 worker Bash 联网，需要时可将 `sandbox.network` 设为 `allow`。macOS 使用 `sandbox-exec`；当前 Linux 没有等价后端时，worker Bash 按 fail-closed 拒绝，主 Agent 的 YOLO 不受影响。
+`sandbox.network` 只约束 Pico 创建的 explore/worker 子代理，不约束主 TUI 的 YOLO。目标架构中，Worker 默认在 Shared Folder 内按任务范围和文件 OCC 写入，高冲突、动态写、强隔离或独立交付才升级到 worktree；当前代码仍处于强制 worktree 的迁移阶段。默认禁止 Worker Bash 联网，需要时可将 `sandbox.network` 设为 `allow`。macOS 使用 `sandbox-exec`；当前 Linux 没有等价后端时，受策略约束的 Worker Bash 按 fail-closed 拒绝，主 Agent 的 YOLO 不受影响。详见[多 Agent 共享工作区并发规范](./docs/architecture/08-multi-agent-concurrency.md)。
 
-worker 完成后由宿主在最小环境中提交，禁用 Git hooks、fsmonitor、签名和凭据助手；仓库启用自定义 filter/merge driver 时拒绝自动提交/合并。任务关联和合并队列是主 Agent 的内部能力，不向用户暴露 task ID 命令。
+Isolated Worker 完成后可由宿主在最小环境中提交，禁用 Git hooks、fsmonitor、签名和凭据助手；仓库启用自定义 filter/merge driver 时拒绝自动提交/合并。Shared Worker 不需要 Git，也不自动创建提交。任务关联和合并队列是主 Agent 的内部能力，不向用户暴露 task ID 命令。
 
 代码智能优先使用项目配置的 LSP server，其次发现 PATH 中已安装的 TypeScript/Python/Rust/Go server；不可用时快速降级为渐进式 Repo Map。当前每个 TUI Session 只启动第一个匹配的 LSP，`languages` 尚未实现多 server 路由；混合语言 server pool 已列入后续收口。`lsp.servers[].command` 是宿主直接启动的 language-server 可执行文件，`args` 是其参数；它不是 shell 脚本，也不是 TUI slash command。`code_definition`、`code_references`、`code_symbols`、`code_diagnostics`、`code_call_hierarchy` 和 `repo_map` 属于模型按需激活的内部工具，用户无需手动执行 `/lsp`。
 

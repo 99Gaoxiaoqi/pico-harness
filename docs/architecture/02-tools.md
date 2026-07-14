@@ -67,6 +67,8 @@ execute(call)
 
 ## 2. 资源冲突图调度 (`tool-access.ts` + `tool-scheduler.ts`)
 
+`ToolScheduler` 的作用域是单个 Agent、单次模型响应产生的一批 `toolCalls`。它不跨 Agent 共享，也不是 workspace 级文件锁；跨 Agent 正确性由任务 `writeScopes`、文件 OCC 和可选 worktree 负责，见[多 Agent 共享工作区并发规范](./08-multi-agent-concurrency.md)。
+
 ### ToolAccesses 原语
 
 ```ts
@@ -157,10 +159,12 @@ L4 逐行去缩进 + 缩进重对齐
 
 ### explore vs worker
 
-| 模式    | 工具                                                               | 限制                              |
-| ------- | ------------------------------------------------------------------ | --------------------------------- |
-| explore | read_file/skill_view/bash(强制只读)/glob/grep/fetch_url/web_search | 禁止任何写操作                    |
-| worker  | 上述 + write_file/edit_file                                        | 禁高危命令（rm/sudo/git push 等） |
+| 模式    | 工具                                                               | 限制                                                              |
+| ------- | ------------------------------------------------------------------ | ----------------------------------------------------------------- |
+| explore | read_file/skill_view/bash(强制只读)/glob/grep/fetch_url/web_search | 禁止任何写操作                                                    |
+| worker  | 上述 + write_file/edit_file                                        | 目标为 shared/worktree 分层执行；当前仍处于强制 worktree 迁移阶段 |
+
+Shared Worker 不依赖 Git，但必须具备明确 `writeScopes` 和文件版本校验；高冲突、动态写或独立交付才升级为 worktree。具体目标契约以[多 Agent 共享工作区并发规范](./08-multi-agent-concurrency.md)为准。
 
 ### 自定义角色 (`.claw/agents.yaml`)
 

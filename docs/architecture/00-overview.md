@@ -54,15 +54,16 @@ pico-harness 是一个用 TypeScript 实现的**工业级 Agent Harness 引擎**
 
 ## 文档索引
 
-| 文档                                           | 内容                                                           |
-| ---------------------------------------------- | -------------------------------------------------------------- |
-| [01-engine.md](./01-engine.md)                 | 核心引擎层：主循环、会话、预算、死循环探测、Goal、Steer        |
-| [02-tools.md](./02-tools.md)                   | 工具层：Registry 接口、内置工具、调度、子代理、渐进披露、Hooks |
-| [03-context.md](./03-context.md)               | 上下文层：Prompt 组装、两级压缩、状态存储、技能记忆            |
-| [04-provider-entry.md](./04-provider-entry.md) | Provider 适配 + 当前 TUI 单入口装配                            |
-| [05-infra-safety.md](./05-infra-safety.md)     | 基础设施：文件历史、审批系统、MCP、可观测性、Schema            |
-| [06-data-flow.md](./06-data-flow.md)           | 数据流：一轮 ReAct 循环的完整时序、压缩协作、凭证轮换链路      |
-| [07-hooks.md](./07-hooks.md)                   | Hook 事件、多来源配置、执行信任、热重载与前后台边界            |
+| 文档                                                             | 内容                                                            |
+| ---------------------------------------------------------------- | --------------------------------------------------------------- |
+| [01-engine.md](./01-engine.md)                                   | 核心引擎层：主循环、会话、预算、死循环探测、Goal、Steer         |
+| [02-tools.md](./02-tools.md)                                     | 工具层：Registry 接口、内置工具、调度、子代理、渐进披露、Hooks  |
+| [03-context.md](./03-context.md)                                 | 上下文层：Prompt 组装、两级压缩、状态存储、技能记忆             |
+| [04-provider-entry.md](./04-provider-entry.md)                   | Provider 适配 + 当前 TUI 单入口装配                             |
+| [05-infra-safety.md](./05-infra-safety.md)                       | 基础设施：文件历史、审批系统、MCP、可观测性、Schema             |
+| [06-data-flow.md](./06-data-flow.md)                             | 数据流：一轮 ReAct 循环的完整时序、压缩协作、凭证轮换链路       |
+| [07-hooks.md](./07-hooks.md)                                     | Hook 事件、多来源配置、执行信任、热重载与前后台边界             |
+| [08-multi-agent-concurrency.md](./08-multi-agent-concurrency.md) | 多 Agent 共享写入、文件 OCC、动态写入与可选 worktree 的权威规范 |
 
 ## 技术栈
 
