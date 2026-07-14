@@ -281,7 +281,7 @@ describe("markdown command loader", () => {
     });
   });
 
-  it("skips skill projections with invalid command names", async () => {
+  it("accepts namespaced skill commands and skips invalid names", async () => {
     await writeSkill("valid", "valid skill", "Valid prompt");
     await writeClaudeSkill(
       "bad name",
@@ -289,7 +289,7 @@ describe("markdown command loader", () => {
     );
     await writeClaudeSkill(
       "nested",
-      "---\nname: git:review\ndescription: invalid nested command\n---\n\nNested prompt",
+      "---\nname: git:review\ndescription: namespaced command\n---\n\nNested prompt",
     );
 
     const commands = await loadMarkdownCommands({
@@ -299,6 +299,7 @@ describe("markdown command loader", () => {
     });
 
     expect(commands.map((command) => [command.name, command.prompt])).toEqual([
+      ["git:review", "Nested prompt"],
       ["valid", "Valid prompt"],
     ]);
   });

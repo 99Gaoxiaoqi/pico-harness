@@ -64,7 +64,7 @@ export class TodoTool implements BaseTool {
     return {
       name: "todo",
       description:
-        "管理任务清单,支持 add/update/toggle/remove/list 操作,状态持久化到当前 Pico workspace state",
+        "管理任务清单,支持 add/update/toggle/remove/list 操作,状态持久化到当前 Pico workspace state 的 todo.json",
       inputSchema: {
         type: "object",
         properties: {
