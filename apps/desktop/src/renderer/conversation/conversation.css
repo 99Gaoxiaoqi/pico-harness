@@ -191,6 +191,57 @@
   font-size: 11px;
 }
 
+.conversation-catalog-list,
+.conversation-catalog-list section {
+  display: grid;
+  gap: 10px;
+}
+
+.conversation-catalog-list section + section {
+  margin-top: 18px;
+}
+
+.conversation-catalog-list button {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid var(--conversation-line);
+  border-radius: 9px;
+  background: var(--conversation-bg);
+  color: var(--conversation-ink);
+  text-align: left;
+}
+
+.conversation-catalog-list button:hover {
+  background: var(--conversation-bg-subtle);
+}
+
+.conversation-catalog-list button span {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.conversation-catalog-list button small {
+  color: var(--conversation-ink-muted);
+  overflow-wrap: anywhere;
+}
+
+.conversation-activation-chip {
+  max-width: 190px;
+  padding: 4px 8px;
+  border: 1px solid var(--conversation-line);
+  border-radius: 999px;
+  background: var(--conversation-bg-subtle);
+  color: var(--conversation-ink-muted);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .conversation-transcript__item[data-kind="runBoundary"] {
   margin: 4px 0 -4px;
 }

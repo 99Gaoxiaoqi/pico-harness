@@ -220,6 +220,21 @@ export const previewData: AppData = {
     { id: "openai/gpt-5.4", label: "gpt-5.4" },
     { id: "openai/gpt-5.4-mini", label: "gpt-5.4 mini" },
   ],
+  catalogAgents: [
+    {
+      name: "explore",
+      description: "只读探索代码库并返回聚焦结论。",
+      source: "builtin",
+      tools: ["read_file", "grep", "glob"],
+    },
+  ],
+  catalogSkills: [
+    {
+      name: "code-review",
+      description: "审查正确性、安全边界和回归风险。",
+      allowedTools: ["read_file", "grep"],
+    },
+  ],
   usage: {
     inputTokens: 128_400,
     outputTokens: 22_760,

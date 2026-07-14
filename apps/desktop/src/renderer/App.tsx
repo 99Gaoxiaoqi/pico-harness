@@ -610,6 +610,10 @@ function ConversationPage() {
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
   const [confirmCompact, setConfirmCompact] = useState(false);
+  const [activation, setActivation] = useState<
+    | { readonly kind: "skill"; readonly name: string }
+    | { readonly kind: "agent"; readonly name: string }
+  >();
   const sendingRef = useRef(false);
 
   useEffect(() => {
@@ -625,6 +629,7 @@ function ConversationPage() {
     setSelectedPromptId(undefined);
     setEditingTitle(false);
     setConfirmCompact(false);
+    setActivation(undefined);
   }, [sessionId]);
 
   const session = data.sessions.find((item) => item.id === sessionId);
@@ -711,13 +716,72 @@ function ConversationPage() {
         text,
         behavior: nextBehavior,
         ...(activeRun ? { expectedRunId: activeRun.id } : {}),
+        ...(activation ? { activation } : {}),
       });
       if (!resolvedSessionId) return;
       setDraft("");
+      setActivation(undefined);
       if (!sessionId) navigate(`/session/${resolvedSessionId}`, { replace: true });
     } finally {
       sendingRef.current = false;
     }
+  };
+
+  const openCatalog = () => {
+    setInspector({
+      title: "添加到会话",
+      subtitle: "来自当前 Runtime 的真实目录",
+      content: (
+        <div className="conversation-catalog-list">
+          <section>
+            <h3>Skills</h3>
+            {data.catalogSkills.length === 0 ? (
+              <p>当前工作区没有可用 Skill。</p>
+            ) : (
+              data.catalogSkills.map((skill) => (
+                <button
+                  type="button"
+                  key={`skill:${skill.name}`}
+                  onClick={() => {
+                    setActivation({ kind: "skill", name: skill.name });
+                    setInspector(undefined);
+                  }}
+                >
+                  <WandSparkles aria-hidden="true" />
+                  <span>
+                    <strong>{skill.name}</strong>
+                    <small>{skill.description}</small>
+                  </span>
+                </button>
+              ))
+            )}
+          </section>
+          <section>
+            <h3>子代理</h3>
+            {data.catalogAgents.length === 0 ? (
+              <p>当前 Runtime 没有发现可用 Agent。</p>
+            ) : (
+              data.catalogAgents.map((agent) => (
+                <button
+                  type="button"
+                  key={`agent:${agent.name}`}
+                  onClick={() => {
+                    setActivation({ kind: "agent", name: agent.name });
+                    setInspector(undefined);
+                  }}
+                >
+                  <Bot aria-hidden="true" />
+                  <span>
+                    <strong>{agent.name}</strong>
+                    <small>{agent.description}</small>
+                  </span>
+                </button>
+              ))
+            )}
+          </section>
+        </div>
+      ),
+    });
   };
 
   const openItem = (item: ConversationItemView) => {
@@ -869,7 +933,15 @@ function ConversationPage() {
           onBehaviorChange={setBehavior}
           busy={busy === "send-message"}
           disabled={Boolean(conversation?.loadError)}
-          placeholder={sessionId ? "继续对话，或在运行中调整方向…" : "向 Pico 发送消息…"}
+          placeholder={
+            activation?.kind === "skill"
+              ? `输入 ${activation.name} 的参数或补充要求…`
+              : activation?.kind === "agent"
+                ? `描述要委派给 ${activation.name} 的任务…`
+                : sessionId
+                  ? "继续对话，或在运行中调整方向…"
+                  : "向 Pico 发送消息…"
+          }
           statusText={
             data.conversations[sessionId ?? ""]?.queuedCount
               ? `${data.conversations[sessionId ?? ""]?.queuedCount} 条消息正在排队`
@@ -878,6 +950,19 @@ function ConversationPage() {
           onPause={activeRun ? () => void actions.pauseRun(activeRun.id) : undefined}
           onResume={activeRun ? () => void actions.resumeRun(activeRun.id) : undefined}
           onStop={activeRun ? () => void actions.stopRun(activeRun.id) : undefined}
+          onAttach={composerStatus === "idle" ? openCatalog : undefined}
+          trailingAccessory={
+            activation ? (
+              <button
+                type="button"
+                className="conversation-activation-chip"
+                onClick={() => setActivation(undefined)}
+                aria-label={`移除 ${activation.kind === "skill" ? "Skill" : "子代理"} ${activation.name}`}
+              >
+                {activation.kind === "skill" ? "Skill" : "Agent"}: {activation.name} ×
+              </button>
+            ) : undefined
+          }
           leadingAccessory={
             <>
               <span className="conversation-context-label">
@@ -1612,6 +1697,7 @@ function UsagePage() {
 function SettingsPage() {
   const { data, actions, busy } = useRuntime();
   const [background, setBackground] = useState<"" | "enabled" | "disabled">("");
+  const [diagnosticOutput, setDiagnosticOutput] = useState<string>();
   return (
     <div className="page-stack settings-page">
       <section className="page-intro">
@@ -1664,6 +1750,43 @@ function SettingsPage() {
             </select>
           </SettingRow>
         </div>
+      </section>
+      <section className="settings-section">
+        <h3>项目与诊断</h3>
+        <div className="settings-list">
+          <SettingRow title="初始化 Pico 项目" detail="仅创建缺失的 AGENTS.md 与 .pico/config.json">
+            <Button
+              disabled={Boolean(busy)}
+              onClick={() => {
+                if (window.confirm(`在 ${data.workspacePath ?? "当前工作区"} 初始化 Pico 项目？`))
+                  void actions.initializeWorkspace();
+              }}
+            >
+              初始化
+            </Button>
+          </SettingRow>
+          <SettingRow title="Runtime 诊断" detail="只读检查配置、存储和运行能力">
+            <Button
+              disabled={Boolean(busy)}
+              onClick={() => void actions.runDiagnostics("runtime").then(setDiagnosticOutput)}
+            >
+              运行诊断
+            </Button>
+          </SettingRow>
+          <SettingRow title="资源扫描" detail="只读列出 Pico 与兼容资源，不执行修复或清理">
+            <Button
+              disabled={Boolean(busy)}
+              onClick={() => void actions.runDiagnostics("resources").then(setDiagnosticOutput)}
+            >
+              扫描资源
+            </Button>
+          </SettingRow>
+        </div>
+        {diagnosticOutput && (
+          <pre className="settings-diagnostic-output" aria-label="诊断结果">
+            {diagnosticOutput}
+          </pre>
+        )}
       </section>
       <section className="settings-section">
         <h3>安全</h3>

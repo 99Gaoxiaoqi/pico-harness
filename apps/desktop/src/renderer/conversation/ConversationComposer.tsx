@@ -1,4 +1,4 @@
-import { ArrowUp, Paperclip, Pause, Play, Square } from "lucide-react";
+import { ArrowUp, Pause, Play, Plus, Square } from "lucide-react";
 import { useId, type ChangeEvent, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
 import type {
   ComposerBehavior,
@@ -114,9 +114,9 @@ export function ConversationComposer({
               type="button"
               className="conversation-icon-button"
               onClick={onAttach}
-              aria-label="添加附件"
+              aria-label="添加 Skill 或子代理"
             >
-              <Paperclip aria-hidden="true" />
+              <Plus aria-hidden="true" />
             </button>
           )}
           {leadingAccessory}

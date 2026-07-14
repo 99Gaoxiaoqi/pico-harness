@@ -3,6 +3,8 @@ import {
   emptyData,
   folderWorkspaceCapabilities,
   type AppData,
+  type CatalogAgentView,
+  type CatalogSkillView,
   type ChangeView,
   type ConnectionState,
   type ConversationView,
@@ -292,6 +294,31 @@ function parseModelRoutes(value: unknown): readonly ModelRouteView[] {
   });
 }
 
+function parseCatalogAgents(value: unknown): readonly CatalogAgentView[] {
+  const result = isRecord(value) ? value : {};
+  return recordArray(result.agents).map((agent) => ({
+    name: stringValue(agent.name, "未命名 Agent"),
+    description: stringValue(agent.description, "由当前 Runtime 提供。"),
+    source: stringValue(agent.source, "runtime"),
+    tools: Array.isArray(agent.tools)
+      ? agent.tools.map((tool) => stringValue(tool)).filter(Boolean)
+      : [],
+    modelRouteId: stringValue(agent.modelRouteId) || undefined,
+  }));
+}
+
+function parseCatalogSkills(value: unknown): readonly CatalogSkillView[] {
+  const result = isRecord(value) ? value : {};
+  return recordArray(result.skills).map((skill) => ({
+    name: stringValue(skill.name, "未命名 Skill"),
+    description: stringValue(skill.description, "由当前 Runtime 提供。"),
+    allowedTools: Array.isArray(skill.allowedTools)
+      ? skill.allowedTools.map((tool) => stringValue(tool)).filter(Boolean)
+      : [],
+    model: stringValue(skill.model) || undefined,
+  }));
+}
+
 function parseChanges(value: unknown): {
   readonly changes: readonly ChangeView[];
   readonly fingerprint?: string | undefined;
@@ -418,6 +445,8 @@ function mergeLoadedData(base: AppData, results: Readonly<Record<string, unknown
   const usageTotal = isRecord(usage.total) ? usage.total : usage;
   const configResult = isRecord(results.config) ? results.config : {};
   const changeResult = isRecord(results.changes) ? results.changes : {};
+  const agentCatalogResult = isRecord(results.agentCatalog) ? results.agentCatalog : {};
+  const skillCatalogResult = isRecord(results.skillCatalog) ? results.skillCatalog : {};
 
   return {
     ...base,
@@ -455,6 +484,8 @@ function mergeLoadedData(base: AppData, results: Readonly<Record<string, unknown
     mcpServers: recordArray(mcpResult.servers).map(capability),
     providers: recordArray(providerResult.providers).map(capability),
     modelRoutes: parseModelRoutes(providerResult),
+    catalogAgents: parseCatalogAgents(agentCatalogResult),
+    catalogSkills: parseCatalogSkills(skillCatalogResult),
     changes: recordArray(changeResult.changes).map((item) => ({
       path: stringValue(item.path),
       status:
@@ -487,6 +518,9 @@ export interface RuntimeActions {
     readonly text: string;
     readonly behavior?: ComposerBehavior;
     readonly expectedRunId?: string;
+    readonly activation?:
+      | { readonly kind: "skill"; readonly name: string }
+      | { readonly kind: "agent"; readonly name: string };
   }): Promise<string | undefined>;
   renameSession(sessionId: string, title: string): Promise<void>;
   forkSession(sessionId: string): Promise<string | undefined>;
@@ -533,6 +567,8 @@ export interface RuntimeActions {
   setLaunchAtLogin(enabled: boolean): Promise<void>;
   setBackgroundMode(enabled: boolean): Promise<void>;
   openWorkspace(): Promise<void>;
+  initializeWorkspace(): Promise<void>;
+  runDiagnostics(kind: "runtime" | "resources"): Promise<string | undefined>;
 }
 
 export interface RuntimeStore {
@@ -571,6 +607,8 @@ export function useRuntimeStore(): RuntimeStore {
         ["skills", "config.skills", params],
         ["mcp", "config.mcpServers", params],
         ["providers", "config.providers", params],
+        ["agentCatalog", "catalog.agents", params],
+        ["skillCatalog", "catalog.skills", params],
         ["usage", "usage.get", params],
         ["config", "config.get", params],
       ].map(async ([key, method, invocationParams]) => {
@@ -959,7 +997,12 @@ export function useRuntimeStore(): RuntimeStore {
           const value = await invoke(bridge, "session.send", {
             workspacePath,
             ...(input.sessionId ? { sessionId: input.sessionId } : {}),
-            input: { text: input.text.trim() },
+            input:
+              input.activation?.kind === "skill"
+                ? { kind: "skill", name: input.activation.name, args: input.text.trim() }
+                : input.activation?.kind === "agent"
+                  ? { kind: "agent", name: input.activation.name, task: input.text.trim() }
+                  : { kind: "text", text: input.text.trim() },
             behavior: input.behavior ?? "auto",
             ...(input.expectedRunId ? { expectedRunId: input.expectedRunId } : {}),
             idempotencyKey: crypto.randomUUID(),
@@ -1331,6 +1374,33 @@ export function useRuntimeStore(): RuntimeStore {
           const result = await bridge.platform.openDirectory(workspacePath);
           if (!result.ok) throw new Error(result.error.message);
         });
+      },
+      async initializeWorkspace() {
+        const workspacePath = dataRef.current.workspacePath;
+        if (!workspacePath) return;
+        await perform("workspace-init", async (bridge) => {
+          if (!preview) await invoke(bridge, "workspace.init", { workspacePath });
+          setMessage("Pico 项目入口已初始化；已存在的文件保持不变。");
+        });
+      },
+      async runDiagnostics(kind) {
+        const workspacePath = dataRef.current.workspacePath;
+        if (!workspacePath) return undefined;
+        let output: string | undefined;
+        await perform("diagnostics", async (bridge) => {
+          if (preview) {
+            output = "Preview 模式不运行本机诊断。";
+            return;
+          }
+          const value = await invoke(
+            bridge,
+            kind === "resources" ? "diagnostics.resources" : "diagnostics.run",
+            { workspacePath },
+          );
+          const result = isRecord(value) ? value : {};
+          output = stringValue(result.output, "诊断完成，未返回文本报告。");
+        });
+        return output;
       },
     }),
     [bootstrap, loadConversation, loadWorkspace, perform, preview],
