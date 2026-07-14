@@ -21,7 +21,10 @@ import { SessionManager } from "../src/engine/session.js";
 import { listCliSessionSummaries } from "../src/cli/session-resolver.js";
 import {
   getOrCreateSessionSettings,
+  getStoredSessionSettings,
+  migrateSessionModelRoute,
   resetSessionSettingsForTests,
+  resolveRestoredSessionModelRoute,
   setSessionModelRoute,
   setSessionTitle,
 } from "../src/input/session-settings.js";
@@ -299,6 +302,141 @@ describe("Session 持久化端到端集成", () => {
 
     expect(settings2.title).toBe("认证重构：Session 方案");
     expect(settings2.forkFrom).toBe("source-session");
+    await session2.close();
+  });
+
+  it("相同 sessionId 在不同 cwd 中保持独立设置和持久化绑定", async () => {
+    const sessionId = "same-id-across-workspaces";
+    const workDirA = join(workDir, "workspace-a");
+    const workDirB = join(workDir, "workspace-b");
+    await Promise.all([mkdir(workDirA), mkdir(workDirB)]);
+    const manager = new SessionManager();
+    const [sessionA, sessionB] = await Promise.all([
+      manager.getOrCreate(sessionId, workDirA, ON),
+      manager.getOrCreate(sessionId, workDirB, ON),
+    ]);
+
+    const settingsA = getOrCreateSessionSettings(
+      {
+        sessionId,
+        cwd: workDirA,
+        provider: "openai",
+        mode: "default",
+        model: "model-a",
+        modelRouteId: "provider-a/model-a",
+        thinkingEffort: "high",
+        additionalDirectories: [join(workDirA, "shared")],
+      },
+      { persistence: sessionA },
+    );
+    const settingsB = getOrCreateSessionSettings(
+      {
+        sessionId,
+        cwd: workDirB,
+        provider: "claude",
+        mode: "plan",
+        model: "model-b",
+        modelRouteId: "provider-b/model-b",
+        thinkingEffort: "low",
+        additionalDirectories: [join(workDirB, "shared")],
+      },
+      { persistence: sessionB },
+    );
+
+    expect(settingsB).not.toBe(settingsA);
+    expect(getStoredSessionSettings(sessionId, workDirA)).toMatchObject({
+      cwd: workDirA,
+      mode: "default",
+      modelRouteId: "provider-a/model-a",
+      thinkingEffort: "high",
+      additionalDirectories: [join(workDirA, "shared")],
+    });
+    expect(getStoredSessionSettings(sessionId, workDirB)).toMatchObject({
+      cwd: workDirB,
+      mode: "plan",
+      modelRouteId: "provider-b/model-b",
+      thinkingEffort: "low",
+      additionalDirectories: [join(workDirB, "shared")],
+    });
+    expect(sessionA.getRuntimeStateSnapshot().settings).toMatchObject({
+      mode: "default",
+      modelRouteId: "provider-a/model-a",
+      thinkingEffort: "high",
+      additionalDirectories: [join(workDirA, "shared")],
+    });
+    expect(sessionB.getRuntimeStateSnapshot().settings).toMatchObject({
+      mode: "plan",
+      modelRouteId: "provider-b/model-b",
+      thinkingEffort: "low",
+      additionalDirectories: [join(workDirB, "shared")],
+    });
+
+    await Promise.all([sessionA.close(), sessionB.close()]);
+  });
+
+  it("旧模型路由失效时迁移到项目默认路由并持久化", async () => {
+    const sessionId = "stale-model-route";
+    const manager1 = new SessionManager();
+    const session1 = await manager1.getOrCreate(sessionId, workDir, ON);
+    getOrCreateSessionSettings(
+      {
+        sessionId,
+        cwd: workDir,
+        provider: "openai",
+        model: "retired-model",
+        modelRouteId: "retired/retired-model",
+        thinkingEffort: "high",
+      },
+      { persistence: session1 },
+    );
+    await session1.flushPersistence();
+    await session1.close();
+    resetSessionSettingsForTests();
+
+    const router = await loadModelRouter({
+      config: {
+        model: "current/current-model",
+        providers: {
+          current: {
+            protocol: "openai",
+            baseURL: "https://example.invalid/v1",
+            apiKeyEnv: "CURRENT_API_KEY",
+            models: ["current-model"],
+            discoverModels: false,
+          },
+        },
+      },
+      env: {},
+      legacyProvider: "openai",
+      legacyModel: "unused",
+    });
+    const manager2 = new SessionManager();
+    const session2 = await manager2.getOrCreate(sessionId, workDir, ON);
+    const restored = (await session2.readHydrationSnapshot()).runtime.settings;
+    const route = resolveRestoredSessionModelRoute(router, restored, router.defaultRouteId);
+    const settings2 = getOrCreateSessionSettings(
+      {
+        sessionId,
+        cwd: workDir,
+        provider: route.provider,
+        model: route.model,
+        modelRouteId: route.id,
+      },
+      { persistence: session2 },
+    );
+
+    expect(settings2.modelRouteId).toBe("retired/retired-model");
+    migrateSessionModelRoute(settings2, route);
+    expect(settings2).toMatchObject({
+      provider: "openai",
+      model: "current-model",
+      modelRouteId: "current/current-model",
+    });
+    expect(session2.getRuntimeStateSnapshot().settings).toMatchObject({
+      provider: "openai",
+      model: "current-model",
+      modelRouteId: "current/current-model",
+    });
     await session2.close();
   });
 
