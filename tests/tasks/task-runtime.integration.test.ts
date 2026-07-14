@@ -9,6 +9,7 @@ import { TaskHostRuntime } from "../../src/tasks/task-runtime.js";
 import { DelegationManager } from "../../src/tools/delegation-manager.js";
 import { ToolRegistry } from "../../src/tools/registry-impl.js";
 import { DelegateTaskTool, type AgentRunner } from "../../src/tools/subagent.js";
+import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 
 const exec = promisify(execFile);
 
@@ -246,7 +247,7 @@ describe("TaskHostRuntime durable executor integration", () => {
     });
 
     const compatibility = JSON.parse(
-      await readFile(join(repo, ".claw", "tasks", "state.json"), "utf8"),
+      await readFile(join(resolvePicoPaths(repo).workspace.tasks, "state.json"), "utf8"),
     ) as { tasks: Array<{ taskId: string }> };
     expect(compatibility.tasks.map((task) => task.taskId)).toEqual([
       "sqlite-only-queued",

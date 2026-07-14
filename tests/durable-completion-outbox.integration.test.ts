@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SessionManager } from "../src/engine/session.js";
+import { resolvePicoPaths } from "../src/paths/pico-paths.js";
 import { JobService } from "../src/tasks/job-service.js";
 import { TaskHostRuntime } from "../src/tasks/task-runtime.js";
 import type { DelegationCompletionEnvelope } from "../src/tools/delegation-manager.js";
@@ -310,7 +311,7 @@ describe("durable completion outbox integration", () => {
         data: { runtimeStatus: "interrupted" },
       });
       const compatibility = JSON.parse(
-        await readFile(join(repo, ".claw", "tasks", "state.json"), "utf8"),
+        await readFile(join(resolvePicoPaths(repo).workspace.tasks, "state.json"), "utf8"),
       ) as { tasks: Array<{ taskId: string; status: string; data?: Record<string, unknown> }> };
       expect(compatibility.tasks).toContainEqual(
         expect.objectContaining({

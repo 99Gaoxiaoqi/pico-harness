@@ -16,6 +16,11 @@ import { tmpdir } from "node:os";
 import { join } from "pathe";
 import { SkillRegistry } from "../../src/memory/skill-registry.js";
 import { logger } from "../../src/observability/logger.js";
+import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
+
+function skillStateDirectory(workDir: string): string {
+  return join(resolvePicoPaths(workDir).workspace.memory, "skills");
+}
 
 describe("SkillRegistry 集成测试", () => {
   let testDir: string;
@@ -68,7 +73,7 @@ describe("SkillRegistry 集成测试", () => {
       expect(updated?.stats.lastUsed).not.toBeNull();
 
       // 4. 验证持久化（文件存在）
-      const skillFile = join(testDir, ".claw", "skills", `${skill.id}.json`);
+      const skillFile = join(skillStateDirectory(testDir), `${skill.id}.json`);
       const content = await readFile(skillFile, "utf8");
       const parsed = JSON.parse(content);
       expect(parsed.stats.successCount).toBe(3);
@@ -364,7 +369,7 @@ describe("SkillRegistry 集成测试", () => {
       expect(skill.name).toBe("HTTP/2 推送 (Push:Async)");
 
       // 验证文件名安全（ID 不含特殊字符）
-      const skillFile = join(testDir, ".claw", "skills", `${skill.id}.json`);
+      const skillFile = join(skillStateDirectory(testDir), `${skill.id}.json`);
       expect(skillFile).toMatch(/skill_[a-f0-9]{12}\.json$/);
     });
 
@@ -409,7 +414,7 @@ describe("SkillRegistry 集成测试", () => {
       const skill = await registry.add("损坏测试", "trigger", "inst", "auto");
 
       // 手动损坏文件
-      const skillFile = join(testDir, ".claw", "skills", `${skill.id}.json`);
+      const skillFile = join(skillStateDirectory(testDir), `${skill.id}.json`);
       const { writeFile } = await import("node:fs/promises");
       await writeFile(skillFile, "{ invalid json", "utf8");
 
@@ -590,7 +595,7 @@ describe("SkillRegistry 集成测试", () => {
       await registry.add("测试", "trigger", "inst", "auto");
 
       // 验证目录被创建
-      const files = await readdir(join(nonExistentDir, ".claw", "skills"));
+      const files = await readdir(skillStateDirectory(nonExistentDir));
       expect(files.length).toBeGreaterThan(0);
     });
 

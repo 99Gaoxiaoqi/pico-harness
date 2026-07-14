@@ -12,6 +12,7 @@ import { appendFile, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionManager } from "../src/engine/session.js";
+import { resolvePicoPaths } from "../src/paths/pico-paths.js";
 import type { Message } from "../src/schema/message.js";
 
 /** 显式开启持久化的 getOrCreate 选项 */
@@ -185,7 +186,7 @@ describe("SessionStore 末行撕裂容忍", () => {
     }
 
     // 人为撕裂:把文件末尾追加一行半截 JSON,模拟崩溃时 append 写一半
-    const file = join(workDir, ".claw", "sessions", "chat-tear.jsonl");
+    const file = join(resolvePicoPaths(workDir).workspace.sessions, "chat-tear.jsonl");
     await appendFile(file, '{"type":"message","seq":999,"message":{"ro', "utf8");
 
     // 重启恢复:新 writer 先修复撕裂末行,再严格重放两条完整消息。
@@ -275,7 +276,7 @@ describe("truncate 竞态保护(pendingWrites 顺序保证)", () => {
     await s.flushPersistence();
 
     // 直接读原始 JSONL,检查物理行顺序(不依赖 load() 的 seq 排序)
-    const file = join(workDir, ".claw", "sessions", "race-order.jsonl");
+    const file = join(resolvePicoPaths(workDir).workspace.sessions, "race-order.jsonl");
     const content = await readFile(file, "utf8");
     const lines = content.trim().split("\n");
     const records = lines.map((line) => JSON.parse(line) as { type: string; fromIndex?: number });

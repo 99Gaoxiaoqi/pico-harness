@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
+import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 import { JobService } from "../../src/tasks/job-service.js";
 import { RuntimeConflictError, RuntimeStore } from "../../src/tasks/runtime-store.js";
 
@@ -27,7 +28,7 @@ describe("RuntimeStore + JobService integration", () => {
     });
     closeables.push(service);
 
-    expect(service.store.databasePath).toBe(join(workDir, ".claw", "runtime.sqlite"));
+    expect(service.store.databasePath).toBe(resolvePicoPaths(workDir).workspace.runtimeDatabase);
     expect(service.store.pragmas).toEqual({
       journalMode: "wal",
       foreignKeys: 1,
@@ -463,7 +464,7 @@ describe("RuntimeStore + JobService integration", () => {
 
   it("从 v4 原子迁移 provider_calls 并接受 hook purpose", () => {
     const workDir = makeTempDir(tempDirs);
-    const databasePath = join(workDir, ".claw", "runtime.sqlite");
+    const databasePath = resolvePicoPaths(workDir).workspace.runtimeDatabase;
     const initial = new RuntimeStore({ workDir });
     initial.close();
 

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { open, readdir, stat } from "node:fs/promises";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { replaySessionRecords } from "../engine/session-reducer.js";
 import {
   SessionStore,
@@ -20,6 +20,7 @@ import {
   type SessionCatalogEntry,
   type SessionCatalogLineage,
 } from "./session-catalog.js";
+import { resolvePicoPaths } from "../paths/pico-paths.js";
 
 const PROJECTION_HEALTH_VERSION = 1 as const;
 const CATALOG_RECOMMENDATION =
@@ -62,7 +63,7 @@ export class SessionCatalogProjector {
 
   /** durable commit 热路径：直接写 Session 已维护的 O(1) 摘要，不重放 JSONL。 */
   async projectEntry(entry: SessionCatalogEntry): Promise<SessionCatalogProjectionResult> {
-    const workDir = workDirFromLogPath(entry.logPath);
+    const workDir = resolve(entry.identity.sessionProjectDir).normalize("NFC");
     try {
       const source = await stat(entry.logPath);
       if (!source.isFile()) throw new Error(`Session JSONL is not a file: ${entry.logPath}`);
@@ -88,10 +89,11 @@ export class SessionCatalogProjector {
 
   async projectJournal(
     logPath: string,
+    sessionProjectDir: string,
     options: { openedAt?: string } = {},
   ): Promise<SessionCatalogProjectionResult> {
     const normalizedLogPath = resolve(logPath).normalize("NFC");
-    const workDir = workDirFromLogPath(normalizedLogPath);
+    const workDir = resolve(sessionProjectDir).normalize("NFC");
     try {
       const existing = await this.catalog.list({
         sessionProjectDir: workDir,
@@ -528,7 +530,7 @@ function isLegacyJournalRecordType(value: unknown): value is LegacySessionRecord
 }
 
 async function listSessionLogPaths(workDir: string): Promise<string[]> {
-  const directory = join(workDir, ".claw", "sessions");
+  const directory = resolvePicoPaths(workDir).workspace.sessions;
   let names: string[];
   try {
     names = await readdir(directory);
@@ -546,11 +548,8 @@ async function listSessionLogPaths(workDir: string): Promise<string[]> {
   return paths;
 }
 
-function workDirFromLogPath(logPath: string): string {
-  return resolve(dirname(dirname(dirname(logPath)))).normalize("NFC");
-}
 function projectionHealthPath(workDir: string): string {
-  return join(workDir, ".claw", "session-catalog-health.json");
+  return join(resolvePicoPaths(workDir).workspace.root, "session-catalog-health.json");
 }
 
 async function readPersistedHealth(

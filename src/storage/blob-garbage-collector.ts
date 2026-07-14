@@ -6,6 +6,7 @@ import { withFileHistoryMutationLease } from "./file-history-mutation-lease.js";
 import { OperationReferenceIndex } from "./operation-reference-index.js";
 import type { OwnerLease } from "./owner-lease.js";
 import { StorageOperationJournal } from "./operation-journal.js";
+import { resolvePicoPaths } from "../paths/pico-paths.js";
 
 const SHA256_RE = /^[a-f0-9]{64}$/u;
 // needs_attention 仍表示尚未被人工明确放弃或完成的 Saga，必须持续作为 GC root。
@@ -142,7 +143,8 @@ export class ContentAddressedBlobGarbageCollector {
         (entry) => entry.isDirectory() && entry.name !== "blobs" && !entry.name.startsWith("."),
       )
       .map((entry) => join(this.baseDir, entry.name, "manifest.json"));
-    const operationsDirectory = join(this.workDir, ".claw", "storage-operations");
+    const workspacePaths = resolvePicoPaths(this.workDir).workspace;
+    const operationsDirectory = workspacePaths.storageOperations;
     const operationPaths = (await readDirectoryEntries(operationsDirectory))
       .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
       .map((entry) => join(operationsDirectory, entry.name));
@@ -222,10 +224,7 @@ export class ContentAddressedBlobGarbageCollector {
     }
     const gcEligible = new Set(globalOperationReferences.gcEligibleDigests);
 
-    const defaultReferenceRoots = [
-      join(this.workDir, ".claw", "memory", "summaries"),
-      join(this.workDir, ".claw", "artifacts"),
-    ];
+    const defaultReferenceRoots = [workspacePaths.summaries, workspacePaths.artifacts];
     for (const root of [...defaultReferenceRoots, ...this.additionalReferenceRoots]) {
       await collectReferencesFromTree(root, reachable, false);
     }

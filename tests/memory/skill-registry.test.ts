@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { SkillRegistry } from "../../src/memory/skill-registry.js";
 import { calculateSuccessRate } from "../../src/memory/skill-schema.js";
 import type { LearnedSkill } from "../../src/memory/skill-schema.js";
+import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 
 describe("SkillRegistry", () => {
   let workDir: string;
@@ -26,8 +27,8 @@ describe("SkillRegistry", () => {
   });
 
   describe("初始化", () => {
-    it("创建 .claw/skills 目录", async () => {
-      const skillsDir = join(workDir, ".claw", "skills");
+    it("创建 workspace memory/skills 目录", async () => {
+      const skillsDir = join(resolvePicoPaths(workDir).workspace.memory, "skills");
       // 验证目录存在（通过 readdir 验证）
       await expect(readdir(skillsDir)).resolves.toBeDefined();
     });
@@ -66,7 +67,11 @@ describe("SkillRegistry", () => {
     it("添加的技能自动持久化到磁盘", async () => {
       const skill = await registry.add("测试技能", "test", "执行测试", "auto");
 
-      const filePath = join(workDir, ".claw", "skills", `${skill.id}.json`);
+      const filePath = join(
+        resolvePicoPaths(workDir).workspace.memory,
+        "skills",
+        `${skill.id}.json`,
+      );
       const content = await readFile(filePath, "utf8");
       const loaded = JSON.parse(content) as LearnedSkill;
 
@@ -76,7 +81,11 @@ describe("SkillRegistry", () => {
 
     it("持久化的 JSON 带有缩进（便于人工查看）", async () => {
       const skill = await registry.add("格式化测试", "format", "指令", "manual");
-      const filePath = join(workDir, ".claw", "skills", `${skill.id}.json`);
+      const filePath = join(
+        resolvePicoPaths(workDir).workspace.memory,
+        "skills",
+        `${skill.id}.json`,
+      );
       const content = await readFile(filePath, "utf8");
 
       // 验证包含缩进（非压缩格式）

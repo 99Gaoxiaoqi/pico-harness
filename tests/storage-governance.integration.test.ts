@@ -10,6 +10,7 @@ import { SessionStore } from "../src/engine/session-store.js";
 import { createPicoCommandRegistry } from "../src/input/pico-command-registry.js";
 import { processUserInput } from "../src/input/process-user-input.js";
 import { FileSessionSummaryStore } from "../src/memory/summary-store.js";
+import { resolvePicoPaths } from "../src/paths/pico-paths.js";
 import { ContentAddressedBlobGarbageCollector } from "../src/storage/blob-garbage-collector.js";
 import {
   FileHistoryBlobStore,
@@ -40,7 +41,9 @@ describe("storage governance integration", () => {
     cleanup.push(root);
     const workDir = join(root, "workspace");
     const fileHistoryDir = join(root, "file-history");
-    const sessionPath = join(workDir, ".claw", "sessions", "session-a.jsonl");
+    await mkdir(workDir, { recursive: true });
+    const workspacePaths = resolvePicoPaths(workDir).workspace;
+    const sessionPath = join(workspacePaths.sessions, "session-a.jsonl");
     const sessionStore = new SessionStore(
       sessionPath,
       createSessionIdentity({ sessionId: "session-a", cwd: workDir }),
@@ -55,14 +58,14 @@ describe("storage governance integration", () => {
     const blob = await blobStore.put("before\n");
     await writeManifest(fileHistoryDir, "session-a", blob.ref.digest, blob.ref.sizeBytes);
 
-    const summaryIndex = join(workDir, ".claw", "memory", "summaries.json");
+    const summaryIndex = join(workspacePaths.memory, "summaries.json");
     new FileSessionSummaryStore(summaryIndex).save("session-a", "summary", 1, {
       throughEventId: "event-1",
       messageCount: 1,
       prefixDigest: createHash("sha256").update("prefix").digest("hex"),
     });
     await new ToolResultArtifactStore({
-      baseDir: join(workDir, ".claw", "artifacts"),
+      baseDir: workspacePaths.artifacts,
     }).write({
       id: "artifact-a",
       sessionId: "session-a",
@@ -88,7 +91,8 @@ describe("storage governance integration", () => {
     const root = await mkdtemp(join(tmpdir(), "pico-storage-doctor-repair-"));
     cleanup.push(root);
     const workDir = join(root, "workspace");
-    const sessionPath = join(workDir, ".claw", "sessions", "session-a.jsonl");
+    const workspacePaths = resolvePicoPaths(workDir).workspace;
+    const sessionPath = join(workspacePaths.sessions, "session-a.jsonl");
     const sessionStore = new SessionStore(
       sessionPath,
       createSessionIdentity({ sessionId: "session-a", cwd: workDir }),
@@ -98,10 +102,7 @@ describe("storage governance integration", () => {
     const before = await readFile(sessionPath);
 
     const badSummaryPath = join(
-      workDir,
-      ".claw",
-      "memory",
-      "summaries",
+      workspacePaths.summaries,
       `${createHash("sha256").update("session-a").digest("hex")}.json`,
     );
     await mkdir(dirname(badSummaryPath), { recursive: true });
@@ -124,7 +125,7 @@ describe("storage governance integration", () => {
     const root = await mkdtemp(join(tmpdir(), "pico-storage-doctor-legacy-"));
     cleanup.push(root);
     const workDir = join(root, "workspace");
-    const sessionPath = join(workDir, ".claw", "sessions", "legacy.jsonl");
+    const sessionPath = join(resolvePicoPaths(workDir).workspace.sessions, "legacy.jsonl");
     await mkdir(dirname(sessionPath), { recursive: true });
     await writeFile(
       sessionPath,
@@ -156,7 +157,8 @@ describe("storage governance integration", () => {
     const root = await mkdtemp(join(tmpdir(), "pico-storage-doctor-future-schema-"));
     cleanup.push(root);
     const workDir = join(root, "workspace");
-    const sessionPath = join(workDir, ".claw", "sessions", "future.jsonl");
+    const workspacePaths = resolvePicoPaths(workDir).workspace;
+    const sessionPath = join(workspacePaths.sessions, "future.jsonl");
     await mkdir(dirname(sessionPath), { recursive: true });
     await writeFile(
       sessionPath,
@@ -166,7 +168,7 @@ describe("storage governance integration", () => {
 
     const runtime = new RuntimeStore({ workDir });
     runtime.close();
-    const database = new Database(join(workDir, ".claw", "runtime.sqlite"));
+    const database = new Database(workspacePaths.runtimeDatabase);
     database
       .prepare("INSERT INTO schema_migrations(version, name, applied_at) VALUES (?, ?, ?)")
       .run(999, "future_schema", Date.now());
@@ -646,7 +648,10 @@ describe("storage governance integration", () => {
     const oldBlob = await blobs.put("must remain while mark is uncertain");
     await utimes(oldBlob.path, new Date(0), new Date(0));
     const manifestPath = join(fileHistoryDir, "unknown-session", "manifest.json");
-    const operationPath = join(workDir, ".claw", "storage-operations", "broken.json");
+    const operationPath = join(
+      resolvePicoPaths(workDir).workspace.storageOperations,
+      "broken.json",
+    );
     const globalOperationPath = join(fileHistoryDir, ".operation-references", "broken.json");
     await mkdir(dirname(manifestPath), { recursive: true });
     await mkdir(dirname(operationPath), { recursive: true });
@@ -683,7 +688,9 @@ describe("storage governance integration", () => {
     cleanup.push(root);
     const workDir = join(root, "workspace");
     const fileHistoryDir = join(root, "file-history");
-    const sessionPath = join(workDir, ".claw", "sessions", "session-a.jsonl");
+    await mkdir(workDir, { recursive: true });
+    const workspacePaths = resolvePicoPaths(workDir).workspace;
+    const sessionPath = join(workspacePaths.sessions, "session-a.jsonl");
     const sessionStore = new SessionStore(
       sessionPath,
       createSessionIdentity({ sessionId: "session-a", cwd: workDir }),
@@ -691,10 +698,7 @@ describe("storage governance integration", () => {
     await sessionStore.commitMessage({ role: "user", content: "authoritative truth" });
     await sessionStore.close();
     const badSummaryPath = join(
-      workDir,
-      ".claw",
-      "memory",
-      "summaries",
+      workspacePaths.summaries,
       `${createHash("sha256").update("session-a").digest("hex")}.json`,
     );
     await mkdir(dirname(badSummaryPath), { recursive: true });
