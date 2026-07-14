@@ -24,6 +24,8 @@ import type { LLMProvider } from "../src/provider/interface.js";
 import type { Message, ToolDefinition, ToolCall, ToolResult } from "../src/schema/message.js";
 import type { Registry } from "../src/tools/registry.js";
 import type { Reporter, SubagentActivityEvent } from "../src/engine/reporter.js";
+import { HookService } from "../src/hooks/service.js";
+import { HOOK_EVENTS, type HookSnapshot, type ResolvedHookHandler } from "../src/hooks/types.js";
 
 function subResult(summary: string): SubagentResult {
   return { summary, artifacts: [] };
@@ -55,6 +57,49 @@ function mockRegistry(): Registry {
       return true;
     },
   };
+}
+
+function agentHookSnapshot(agents: readonly { componentId: string; path: string }[]): HookSnapshot {
+  const handlers = Object.fromEntries(HOOK_EVENTS.map((event) => [event, []])) as Record<
+    (typeof HOOK_EVENTS)[number],
+    ResolvedHookHandler[]
+  >;
+  for (const [order, agent] of agents.entries()) {
+    handlers.PreToolUse.push({
+      id: `agent:${agent.componentId}`,
+      event: "PreToolUse",
+      source: { kind: "agent", path: agent.path, componentId: agent.componentId, version: 1 },
+      order,
+      matcher: "capture",
+      handler: { type: "command", command: `check-${agent.componentId}` },
+      trusted: true,
+    });
+  }
+  return {
+    id: "agent-scope-test",
+    version: 1,
+    createdAt: new Date(0).toISOString(),
+    handlers,
+    diagnostics: [],
+  };
+}
+
+function captureRegistry(hookService: HookService): ToolRegistry {
+  const registry = new ToolRegistry({ truncateResults: false });
+  registry.register({
+    name: () => "capture",
+    definition: () => ({
+      name: "capture",
+      description: "capture",
+      inputSchema: { type: "object", properties: {} },
+    }),
+    readOnly: true,
+    async execute() {
+      return "captured";
+    },
+  });
+  registry.setHookService(hookService);
+  return registry;
 }
 
 // ─── 第一层:Tool 层透传验证 ───────────────────────────────────────
@@ -176,7 +221,7 @@ describe("子代理自定义 opts 的 Tool 层透传", () => {
     });
   });
 
-  it("持久 Agent Hook 按并发子代理运行独立持有并在结束时退租", async () => {
+  it("两个持久 Agent 并发工具调用只命中自身 Hook，并独立退租", async () => {
     let activeLeases = 0;
     let releasedLeases = 0;
     let startedTasks = 0;
@@ -190,24 +235,56 @@ describe("子代理自定义 opts 的 Tool 层透传", () => {
     });
     const profiles = [
       {
-        name: "reviewer",
-        description: "review",
-        systemPrompt: "review",
+        name: "reviewer-a",
+        description: "review a",
+        systemPrompt: "review a",
         tools: ["read_file"],
         hooks: { PreToolUse: [] },
-        sourcePath: "/workspace/.claude/agents/reviewer.md",
+        sourcePath: "/workspace/.claude/agents/reviewer-a.md",
+      },
+      {
+        name: "reviewer-b",
+        description: "review b",
+        systemPrompt: "review b",
+        tools: ["read_file"],
+        hooks: { PreToolUse: [] },
+        sourcePath: "/workspace/.claude/agents/reviewer-b.md",
       },
     ];
+    const seenHandlers: string[] = [];
+    const hookService = new HookService({
+      workDir: "/workspace",
+      sessionId: "agent-scope-concurrent",
+      snapshot: agentHookSnapshot(
+        profiles.map((profile) => ({
+          componentId: profile.name,
+          path: profile.sourcePath,
+        })),
+      ),
+      executor: {
+        async execute(entry, input) {
+          const agent = (input.tool_input as { agent: string }).agent;
+          seenHandlers.push(`${agent}:${entry.source.componentId ?? "unknown"}`);
+          return { decision: "allow" };
+        },
+      },
+    });
     const runner: AgentRunner = {
-      async runSub() {
+      async runSub(task, registry) {
         startedTasks++;
         if (startedTasks === 2) notifyStarted();
         await taskGate;
+        await registry.execute({
+          id: `capture-${task}`,
+          name: "capture",
+          arguments: JSON.stringify({ agent: task }),
+        });
         return subResult("done");
       },
     };
-    const tool = new DelegateTaskTool(runner, () => mockRegistry(), undefined, {
+    const tool = new DelegateTaskTool(runner, () => captureRegistry(hookService), undefined, {
       profiles,
+      hookService,
       activateAgentHooks: async () => {
         activeLeases++;
         let active = true;
@@ -223,8 +300,8 @@ describe("子代理自定义 opts 的 Tool 层透传", () => {
     const execution = tool.execute(
       JSON.stringify({
         tasks: [
-          { goal: "review-a", agent_name: "reviewer" },
-          { goal: "review-b", agent_name: "reviewer" },
+          { goal: "review-a", agent_name: "reviewer-a" },
+          { goal: "review-b", agent_name: "reviewer-b" },
         ],
       }),
     );
@@ -235,10 +312,12 @@ describe("子代理自定义 opts 的 Tool 层透传", () => {
     await execution;
     expect(activeLeases).toBe(0);
     expect(releasedLeases).toBe(2);
+    expect(seenHandlers.sort()).toEqual(["review-a:reviewer-a", "review-b:reviewer-b"]);
   });
 
-  it("Agent Hook 在子代理失败时仍会退租", async () => {
+  it("Agent Hook 在子代理失败时退租且不泄漏异步作用域", async () => {
     let released = false;
+    let executions = 0;
     const profile = {
       name: "reviewer",
       description: "review",
@@ -247,13 +326,29 @@ describe("子代理自定义 opts 的 Tool 层透传", () => {
       hooks: { PreToolUse: [] },
       sourcePath: "/workspace/.claude/agents/reviewer.md",
     };
+    const hookService = new HookService({
+      workDir: "/workspace",
+      sessionId: "agent-scope-failure",
+      snapshot: agentHookSnapshot([{ componentId: profile.name, path: profile.sourcePath }]),
+      executor: {
+        async execute() {
+          executions++;
+          return { decision: "allow" };
+        },
+      },
+    });
     const runner: AgentRunner = {
       async runSub() {
+        await hookService.dispatch("PreToolUse", {
+          tool_name: "capture",
+          tool_input: { agent: "reviewer" },
+        });
         throw new Error("child failed");
       },
     };
     const tool = new DelegateTaskTool(runner, () => mockRegistry(), undefined, {
       profiles: [profile],
+      hookService,
       activateAgentHooks: async () => async () => {
         released = true;
       },
@@ -265,6 +360,13 @@ describe("子代理自定义 opts 的 Tool 层透传", () => {
 
     expect(result.status).toBe("error");
     expect(released).toBe(true);
+    expect(executions).toBe(1);
+
+    await hookService.dispatch("PreToolUse", {
+      tool_name: "capture",
+      tool_input: { agent: "outside" },
+    });
+    expect(executions).toBe(1);
   });
 
   it("不传自定义 opts 时,透传的 opts 不含新字段(回归保护)", async () => {

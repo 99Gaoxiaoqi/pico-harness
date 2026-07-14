@@ -33,6 +33,7 @@ import {
 } from "./subagent-activity-reporter.js";
 import { SUBAGENT_OUTPUT_BUDGET } from "./subagent-budget.js";
 import { parseEphemeralAgentSpec, type EphemeralAgentSpec } from "./subagent-spec.js";
+import type { HookService } from "../hooks/service.js";
 
 /**
  * AgentRunner:打破循环依赖的抽象接口。
@@ -306,6 +307,7 @@ export class DelegateTaskTool implements BaseTool {
       reporter?: Reporter;
       ownerSessionId?: string;
       activateAgentHooks?: (profile: AgentProfile) => Promise<() => void | Promise<void>>;
+      hookService?: HookService;
     } = {},
   ) {
     this.profiles = options.profiles ?? [];
@@ -792,16 +794,28 @@ export class DelegateTaskTool implements BaseTool {
       const childReporter = this.options.reporter
         ? new ScopedSubagentActivityReporter(this.options.reporter, activity)
         : undefined;
-      const subResult = await this.runner.runSub(prompt, registry, childReporter, {
-        depth: childDepth,
-        maxSpawnDepth,
-        role: task.role,
-        ...(signal ? { signal } : {}),
-        ...(effectiveWorkDir ? { workDir: effectiveWorkDir } : {}),
-        ...(usageAttribution ? { usageAttribution } : {}),
-        ...modelSelectionOptions(task.ephemeralAgent, profile),
-        ...customization,
-      });
+      const runSub = async (): Promise<SubagentResult> =>
+        await this.runner.runSub(prompt, registry, childReporter, {
+          depth: childDepth,
+          maxSpawnDepth,
+          role: task.role,
+          ...(signal ? { signal } : {}),
+          ...(effectiveWorkDir ? { workDir: effectiveWorkDir } : {}),
+          ...(usageAttribution ? { usageAttribution } : {}),
+          ...modelSelectionOptions(task.ephemeralAgent, profile),
+          ...customization,
+        });
+      const subResult =
+        profile?.sourcePath && this.options.hookService
+          ? await this.options.hookService.runInAgentComponentScope(
+              {
+                kind: "agent",
+                componentId: profile.name,
+                path: profile.sourcePath,
+              },
+              runSub,
+            )
+          : await runSub();
       signal?.throwIfAborted();
       return {
         taskIndex,

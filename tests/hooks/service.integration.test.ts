@@ -36,6 +36,18 @@ function agent(id: string, order: number): ResolvedHookHandler {
   };
 }
 
+function component(
+  kind: "agent" | "skill",
+  componentId: string,
+  path: string,
+  order: number,
+): ResolvedHookHandler {
+  return {
+    ...command(`${kind}-${componentId}`, order),
+    source: { kind, componentId, path, version: 1 },
+  };
+}
+
 describe("HookService integration", () => {
   it("并行执行命中 handler，并按配置顺序聚合上下文与最高优先级决策", async () => {
     const started: string[] = [];
@@ -157,5 +169,39 @@ describe("HookService integration", () => {
         { signal: controller.signal },
       ),
     ).rejects.toThrow("parent cancelled");
+  });
+
+  it("Agent component handler 只在精确作用域生效，静态与 Skill handler 语义不变", async () => {
+    const seen: string[] = [];
+    const service = new HookService({
+      workDir: "/workspace",
+      sessionId: "component-scope",
+      snapshot: snapshot([
+        command("static", 0),
+        component("skill", "guard", "/workspace/guard.md", 1),
+        component("agent", "reviewer-a", "/workspace/reviewer-a.md", 2),
+        component("agent", "reviewer-b", "/workspace/reviewer-b.md", 3),
+      ]),
+      executor: {
+        async execute(entry) {
+          seen.push(entry.id);
+          return { decision: "allow" };
+        },
+      },
+    });
+
+    await service.dispatch("PreToolUse", { tool_name: "bash", tool_input: {} });
+    expect(seen).toEqual(["static", "skill-guard"]);
+
+    seen.length = 0;
+    await service.runInAgentComponentScope(
+      {
+        kind: "agent",
+        componentId: "reviewer-a",
+        path: "/workspace/reviewer-a.md",
+      },
+      async () => await service.dispatch("PreToolUse", { tool_name: "bash", tool_input: {} }),
+    );
+    expect(seen).toEqual(["static", "skill-guard", "agent-reviewer-a"]);
   });
 });
