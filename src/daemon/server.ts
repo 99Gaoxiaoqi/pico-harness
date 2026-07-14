@@ -180,7 +180,7 @@ export class LocalRuntimeDaemon {
       this.write(socket, success(request, result));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      const code = error instanceof RuntimeProtocolError ? "invalid_request" : "runtime_error";
+      const code = error instanceof RuntimeProtocolError ? error.code : "INTERNAL_ERROR";
       this.write(socket, createRuntimeError(request.requestId, code, message));
     }
   }
@@ -212,8 +212,16 @@ function readCursor(params: import("./protocol.js").JsonValue): RuntimeEventCurs
   if (workspacePath !== undefined && typeof workspacePath !== "string") {
     throw new RuntimeProtocolError("workspacePath 必须是字符串");
   }
+  const limit = params.limit;
+  if (
+    limit !== undefined &&
+    (typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1 || limit > 10_000)
+  ) {
+    throw new RuntimeProtocolError("INVALID_PARAMS", "limit 必须是 1 到 10000 的整数");
+  }
   return {
     ...(afterEventId === undefined ? {} : { afterEventId }),
     ...(workspacePath === undefined ? {} : { workspacePath }),
+    ...(limit === undefined ? {} : { limit }),
   };
 }

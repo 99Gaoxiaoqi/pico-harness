@@ -70,6 +70,7 @@ export class WorkspaceTrustStore {
   readonly directoryPath: string;
   readonly filePath: string;
   private readonly now: () => Date;
+  private mutationQueue: Promise<void> = Promise.resolve();
 
   constructor(options: WorkspaceTrustStoreOptions = {}) {
     this.directoryPath = options.userStateDirectory ?? join(homedir(), ".pico");
@@ -87,20 +88,36 @@ export class WorkspaceTrustStore {
   }
 
   async trust(canonicalWorkspacePath: string): Promise<void> {
+    await this.setTrusted(canonicalWorkspacePath, true);
+  }
+
+  /**
+   * Desktop 的信任设置与 CLI 共用同一用户级真源。撤销信任只删除记录，
+   * 不会改动工作区文件或自动停止已在运行的进程。
+   */
+  async setTrusted(canonicalWorkspacePath: string, trusted: boolean): Promise<void> {
     if (!isAbsolute(canonicalWorkspacePath)) {
       throw new Error(`工作区信任记录必须使用绝对真实路径: ${canonicalWorkspacePath}`);
     }
-    const state = await this.read();
-    if (state.workspaces.some((record) => record.path === canonicalWorkspacePath)) return;
+    const operation = async () => {
+      const state = await this.read();
+      const exists = state.workspaces.some((record) => record.path === canonicalWorkspacePath);
+      if (exists === trusted) return;
 
-    const next = {
-      version: TRUST_STORE_VERSION,
-      workspaces: [
-        ...state.workspaces,
-        { path: canonicalWorkspacePath, trustedAt: this.now().toISOString() },
-      ],
-    } satisfies WorkspaceTrustFile;
-    await this.write(next);
+      const workspaces = trusted
+        ? [
+            ...state.workspaces,
+            { path: canonicalWorkspacePath, trustedAt: this.now().toISOString() },
+          ]
+        : state.workspaces.filter((record) => record.path !== canonicalWorkspacePath);
+      await this.write({ version: TRUST_STORE_VERSION, workspaces });
+    };
+    const queued = this.mutationQueue.then(operation, operation);
+    this.mutationQueue = queued.then(
+      () => undefined,
+      () => undefined,
+    );
+    await queued;
   }
 
   private async read(): Promise<WorkspaceTrustFile> {
