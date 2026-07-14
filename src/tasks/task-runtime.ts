@@ -88,9 +88,17 @@ export class TaskHostRuntime {
 
   static async create(options: TaskHostRuntimeOptions): Promise<TaskHostRuntime> {
     const cwd = resolve(options.workDir);
-    const repoRoot = options.repoRoot
-      ? resolve(options.repoRoot)
-      : await gitOutput(["rev-parse", "--show-toplevel"], cwd);
+    let repoRoot: string;
+    try {
+      repoRoot = options.repoRoot
+        ? resolve(options.repoRoot)
+        : await gitOutput(["rev-parse", "--show-toplevel"], cwd);
+    } catch (error) {
+      throw new Error(
+        gitWorkspaceError(cwd, error),
+        error instanceof Error ? { cause: error } : {},
+      );
+    }
     const targetBranch = await gitOutput(["branch", "--show-current"], repoRoot);
     if (!targetBranch) throw new Error("当前 Git 工作树处于 detached HEAD，无法启动任务监督器");
     const { service } = await JobService.create({
@@ -293,6 +301,17 @@ export class TaskHostRuntime {
 function positiveDuration(value: number, name: string): number {
   if (!Number.isFinite(value) || value <= 0) throw new Error(`${name} 必须为正数`);
   return value;
+}
+
+function gitWorkspaceError(cwd: string, error: unknown): string {
+  const detail = error instanceof Error ? error.message : String(error);
+  if (/\bENOENT\b|not found|不是内部或外部命令/iu.test(detail)) {
+    return "Pico 未找到 Git。请先安装 Git，并重新启动 Pico。";
+  }
+  if (/not a git repository/iu.test(detail)) {
+    return `所选文件夹不是 Git 仓库：${cwd}。请选择包含 .git 的项目文件夹，或先在该目录运行 git init。`;
+  }
+  return `Pico 无法检查 Git 工作区 ${cwd}：${detail}`;
 }
 
 function gitOutput(args: readonly string[], cwd: string): Promise<string> {

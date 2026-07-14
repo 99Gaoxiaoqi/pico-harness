@@ -617,6 +617,7 @@ describe("DesktopRuntimeService integration", () => {
     cleanups.push(root);
     const workspace = join(root, "workspace");
     await mkdir(workspace);
+    await execFile("git", ["init", "-q"], { cwd: workspace });
     const canonicalWorkspace = await import("node:fs/promises").then(({ realpath }) =>
       realpath(workspace),
     );

@@ -20,6 +20,15 @@ describe("TaskHostRuntime durable executor integration", () => {
     await Promise.allSettled(cleanups.splice(0).map((cleanup) => cleanup()));
   });
 
+  it("非 Git 目录在创建任务宿主前返回可操作的错误", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "pico-runtime-nongit-"));
+    cleanups.push(() => rm(directory, { recursive: true, force: true }));
+
+    await expect(TaskHostRuntime.create({ workDir: directory })).rejects.toThrow(
+      `所选文件夹不是 Git 仓库：${directory}。请选择包含 .git 的项目文件夹，或先在该目录运行 git init。`,
+    );
+  });
+
   it("长时间 worker 持续 heartbeat，并以宿主合并作为成功终态", async () => {
     const { root, repo } = await createRepository();
     cleanups.push(() => rm(root, { recursive: true, force: true }));

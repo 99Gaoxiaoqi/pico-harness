@@ -3,6 +3,8 @@ import {
   createRuntimeEvent,
   isJsonObject,
   LOCAL_RUNTIME_PROTOCOL_VERSION,
+  RUNTIME_ERROR_CODES,
+  RuntimeProtocolError,
   type JsonValue,
   type RuntimeEvent,
   type RuntimeRequest,
@@ -81,7 +83,8 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
     const params = objectParams(request.params);
     if (request.method === "workspace.register") {
       const workspacePath = requiredString(params, "workspacePath");
-      const registered = await this.registrationStore.register(workspacePath);
+      const runtime = await this.getRuntime(workspacePath);
+      const registered = await this.registrationStore.register(runtime.workspace);
       this.publish(
         createRuntimeEvent({
           topic: "workspace.registered",
@@ -131,7 +134,7 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
       const workspacePath = requiredString(params, "workspacePath");
       const prompt = requiredString(params, "prompt");
       const sessionId = optionalString(params, "sessionId");
-      const runtime = await this.registry.get(workspacePath);
+      const runtime = await this.getRuntime(workspacePath);
       const run = runtime.startRun({ description: prompt }, (context) =>
         this.options.execute({
           workspacePath: runtime.workspace,
@@ -143,31 +146,31 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
       return runPayload(run);
     }
     if (request.method === "run.cancel") {
-      const runtime = await this.registry.get(requiredString(params, "workspacePath"));
+      const runtime = await this.getRuntime(requiredString(params, "workspacePath"));
       return runPayload(
         runtime.cancel(requiredString(params, "runId"), optionalString(params, "reason")),
       );
     }
     if (request.method === "run.pause") {
-      const runtime = await this.registry.get(requiredString(params, "workspacePath"));
+      const runtime = await this.getRuntime(requiredString(params, "workspacePath"));
       return runPayload(runtime.pause(requiredString(params, "runId")));
     }
     if (request.method === "run.resume") {
-      const runtime = await this.registry.get(requiredString(params, "workspacePath"));
+      const runtime = await this.getRuntime(requiredString(params, "workspacePath"));
       return runPayload(runtime.resume(requiredString(params, "runId")));
     }
     if (request.method === "run.steer") {
-      const runtime = await this.registry.get(requiredString(params, "workspacePath"));
+      const runtime = await this.getRuntime(requiredString(params, "workspacePath"));
       return runPayload(
         runtime.steer(requiredString(params, "runId"), requiredString(params, "message")),
       );
     }
     if (request.method === "runs.list") {
-      const runtime = await this.registry.get(requiredString(params, "workspacePath"));
+      const runtime = await this.getRuntime(requiredString(params, "workspacePath"));
       return { runs: runtime.listRuns().map(runPayload) };
     }
     if (request.method === "jobs.list") {
-      const runtime = await this.registry.get(requiredString(params, "workspacePath"));
+      const runtime = await this.getRuntime(requiredString(params, "workspacePath"));
       return {
         jobs: runtime.listTasks().map((task) => ({
           taskId: task.taskId,
@@ -212,12 +215,12 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
 
   /** Cron and IPC must share the same per-realpath runtime and active-run lock. */
   async getWorkspaceRuntime(workspacePath: string): Promise<WorkspaceTaskRuntime> {
-    return this.registry.get(workspacePath);
+    return this.getRuntime(workspacePath);
   }
 
   /** Read-only lookup for adapters that project a Run's durable Session state. */
   async getWorkspaceRun(workspacePath: string, runId: string) {
-    const runtime = await this.registry.get(workspacePath);
+    const runtime = await this.getRuntime(workspacePath);
     return runtime.getRun(runId);
   }
 
@@ -256,6 +259,18 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
     if (this.events.length > this.maxRetainedEvents)
       this.events.splice(0, this.events.length - this.maxRetainedEvents);
     for (const listener of this.listeners) listener(event);
+  }
+
+  private async getRuntime(workspacePath: string): Promise<WorkspaceTaskRuntime> {
+    try {
+      return await this.registry.get(workspacePath);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.startsWith("所选文件夹不是 Git 仓库") || message.startsWith("Pico 未找到 Git")) {
+        throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.INVALID_PARAMS, message);
+      }
+      throw error;
+    }
   }
 
   private eventStore(workspacePath: string): RuntimeStore {

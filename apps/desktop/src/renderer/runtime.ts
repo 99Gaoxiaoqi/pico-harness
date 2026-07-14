@@ -338,10 +338,24 @@ export function useRuntimeStore(): RuntimeStore {
       await invoke(bridge, "runtime.ping", {});
       const workspaceValue = await invoke(bridge, "workspace.list", {});
       const workspaces = parseWorkspaceList(workspaceValue);
-      const first = workspaces.find((item) => booleanValue(item.registered, true));
-      const workspacePath = first ? stringValue(first.workspacePath) : "";
+      let workspacePath = "";
+      let unavailableWorkspace = "";
+      for (const workspace of workspaces.filter((item) => booleanValue(item.registered, true))) {
+        const candidate = stringValue(workspace.workspacePath);
+        if (!candidate) continue;
+        try {
+          await invoke(bridge, "runs.list", { workspacePath: candidate });
+          workspacePath = candidate;
+          break;
+        } catch (error) {
+          unavailableWorkspace = errorMessage(error);
+        }
+      }
       if (workspacePath) await loadWorkspace(bridge, workspacePath);
-      else setData(emptyData);
+      else {
+        setData(emptyData);
+        if (unavailableWorkspace) setMessage(unavailableWorkspace);
+      }
       setConnection({ kind: "ready" });
     } catch (error) {
       setConnection({ kind: "error", detail: errorMessage(error), retryable: true });
@@ -456,9 +470,13 @@ export function useRuntimeStore(): RuntimeStore {
           const result = await bridge.platform.chooseWorkspace();
           if (!result.ok) throw new Error(result.error.message);
           if (!result.value) return;
-          await invoke(bridge, "workspace.register", { workspacePath: result.value });
-          setData({ ...emptyData, workspacePath: result.value });
-          if (!preview) await loadWorkspace(bridge, result.value);
+          const registeredValue = await invoke(bridge, "workspace.register", {
+            workspacePath: result.value,
+          });
+          const registered = isRecord(registeredValue) ? registeredValue : {};
+          const workspacePath = stringValue(registered.workspacePath, result.value);
+          setData({ ...emptyData, workspacePath });
+          if (!preview) await loadWorkspace(bridge, workspacePath);
         });
       },
       async trustWorkspace(trusted) {
@@ -479,17 +497,9 @@ export function useRuntimeStore(): RuntimeStore {
             createdId = "run-atlas";
             return;
           }
-          const sessionValue = await invoke(bridge, "session.create", {
-            workspacePath,
-            title: prompt.trim().slice(0, 64),
-          });
-          const session =
-            isRecord(sessionValue) && isRecord(sessionValue.session) ? sessionValue.session : {};
-          const sessionId = stringValue(session.sessionId);
           const runValue = await invoke(bridge, "run.start", {
             workspacePath,
             prompt: prompt.trim(),
-            ...(sessionId ? { sessionId } : {}),
             idempotencyKey: crypto.randomUUID(),
           });
           const run = isRecord(runValue) ? runValue : {};
