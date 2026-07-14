@@ -7,6 +7,10 @@ export interface SubagentActivityScope {
   agentName?: string;
   mode: "explore" | "worker";
   completionPolicy: "required" | "optional" | "detached";
+  requestedModelRoute?: string;
+  resolvedModelRoute?: string;
+  thinkingEffort?: string;
+  modelSelectionSource?: "ephemeral" | "profile" | "parent";
 }
 
 /**
@@ -15,6 +19,10 @@ export interface SubagentActivityScope {
  */
 export class ScopedSubagentActivityReporter implements Reporter {
   private latestAction?: string;
+  private modelSnapshot: Pick<
+    SubagentActivityEvent,
+    "requestedModelRoute" | "resolvedModelRoute" | "thinkingEffort" | "modelSelectionSource"
+  > = {};
   private readonly pendingToolTraceIdsByProviderCallId = new Map<string, string[]>();
   private readonly pendingToolTraceIdsByName = new Map<string, string[]>();
 
@@ -88,9 +96,36 @@ export class ScopedSubagentActivityReporter implements Reporter {
 
   onTextDelta(): void {}
 
-  private emit(update: Pick<SubagentActivityEvent, "currentAction">): void {
+  onSubagentModelResolved(model: {
+    requestedModelRoute?: string;
+    resolvedModelRoute: string;
+    thinkingEffort?: string;
+    source: "ephemeral" | "profile" | "parent";
+  }): void {
+    this.scope.requestedModelRoute = model.requestedModelRoute ?? this.scope.requestedModelRoute;
+    this.scope.resolvedModelRoute = model.resolvedModelRoute;
+    this.scope.thinkingEffort = model.thinkingEffort;
+    this.scope.modelSelectionSource = model.source;
+    this.modelSnapshot = {
+      ...model,
+      modelSelectionSource: model.source,
+    };
+    this.emit({});
+  }
+
+  private emit(
+    update: Pick<
+      SubagentActivityEvent,
+      | "currentAction"
+      | "requestedModelRoute"
+      | "resolvedModelRoute"
+      | "thinkingEffort"
+      | "modelSelectionSource"
+    >,
+  ): void {
     this.reporter.onSubagentActivity?.({
       ...this.scope,
+      ...this.modelSnapshot,
       status: "running",
       ...update,
     });

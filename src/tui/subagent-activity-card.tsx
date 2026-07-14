@@ -71,7 +71,11 @@ export function buildSubagentActivityCardRows(
   const presentation = STATUS_PRESENTATION[entry.status];
   const completionPolicy =
     entry.completionPolicy === "optional" ? "background" : entry.completionPolicy;
-  const details = [entry.agentName, entry.mode, completionPolicy].filter(isVisibleText).join(" · ");
+  const model = formatModelRoute(entry.requestedModelRoute, entry.resolvedModelRoute);
+  const thinking = entry.thinkingEffort ? `thinking:${entry.thinkingEffort}` : undefined;
+  const details = [entry.agentName, entry.mode, completionPolicy, model, thinking]
+    .filter(isVisibleText)
+    .join(" · ");
   const logicalRows = [
     `${entry.task} · ${presentation.label}`,
     details,
@@ -80,6 +84,12 @@ export function buildSubagentActivityCardRows(
   ].filter(isVisibleText);
   const contentWidth = Math.max(1, normalizeWrapWidth(wrapWidth) - 2);
   return logicalRows.flatMap((row) => visualRows(row, contentWidth));
+}
+
+function formatModelRoute(requested: string | undefined, resolved: string | undefined) {
+  if (!requested) return resolved ? `model:${resolved}` : undefined;
+  if (!resolved || requested === resolved) return `model:${requested}`;
+  return `model:${requested}→${resolved}`;
 }
 
 function clipRows(rows: string[], startOffsetRows = 0, visibleRows?: number): string[] {

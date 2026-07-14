@@ -32,6 +32,10 @@ export interface SubagentActivityEvent {
   completionPolicy?: "required" | "optional" | "detached";
   currentAction?: string;
   summary?: string;
+  requestedModelRoute?: string;
+  resolvedModelRoute?: string;
+  thinkingEffort?: string;
+  modelSelectionSource?: "ephemeral" | "profile" | "parent";
 }
 
 /** 子代理详情轨迹；traceId 在单个 activity 内稳定，工具完成事件用它更新原条目。 */
@@ -80,6 +84,13 @@ export interface Reporter {
   onSubagentActivitiesClaimed?(activityIds: readonly string[]): void;
   /** 子代理的独立详情时间线，不进入主对话 transcript。 */
   onSubagentTrace?(event: SubagentTraceEvent): void;
+  /** 子代理 Provider 创建完成后的可信路由快照。 */
+  onSubagentModelResolved?(model: {
+    requestedModelRoute?: string;
+    resolvedModelRoute: string;
+    thinkingEffort?: string;
+    source: "ephemeral" | "profile" | "parent";
+  }): void;
   /** 当模型宣告任务完成,向用户输出最终纯文本回答时调用 */
   onMessage(content: string): void;
   /** 引擎启动时调用 */

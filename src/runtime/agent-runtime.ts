@@ -40,6 +40,7 @@ import { AgentProfileLoader, type AgentProfile } from "../tools/agent-profile.js
 import {
   DelegateTaskTool,
   SpawnSubagentTool,
+  type SubagentModelSelectionRequest,
   type SubagentReportArtifactWriter,
 } from "../tools/subagent.js";
 import {
@@ -49,7 +50,11 @@ import {
 import { CostTracker, type CostTrackerOptions } from "../observability/tracker.js";
 import { ensureSessionUsageBaseline } from "../observability/usage-baseline.js";
 import type { BillingRoute } from "../observability/pricing.js";
-import type { ModelRouteCapabilities } from "../provider/model-capabilities.js";
+import {
+  resolveModelRouteCapabilities,
+  type ModelRouteCapabilities,
+} from "../provider/model-capabilities.js";
+import { ModelRouter } from "../provider/model-router.js";
 import { Tracer } from "../observability/trace.js";
 import { logger } from "../observability/logger.js";
 import {
@@ -105,6 +110,8 @@ import {
   type BackgroundYoloPolicySnapshot,
   type PreparedBackgroundYoloPolicy,
 } from "../safety/background-yolo-policy.js";
+import { resolveSubagentModelSelection } from "./subagent-model-selection.js";
+import { createSubagentModelRuntime } from "./subagent-model-runtime.js";
 
 export type RuntimeExecution =
   | { readonly kind: "foreground" }
@@ -204,6 +211,8 @@ export interface RunAgentCliDependencies extends RuntimeHost {
   env?: RunAgentEnv;
   provider?: LLMProvider;
   providerFactory?: RunAgentProviderFactory;
+  /** 前台宿主持有的完整可信模型目录；子代理不得自行读取 endpoint 或凭证。 */
+  modelRouter?: ModelRouter;
   toolDisclosure?: ToolDisclosure;
   /** Session-scoped services owned by the caller and reused across prompts. */
   runtimeState?: SessionRuntime;
@@ -419,6 +428,51 @@ export async function executeAgentRuntime(
     currentConfig = { ...providerConfig, apiKey: credentialPool.getNext() };
   }
   const providerFactory = dependencies.providerFactory ?? createRawProvider;
+  const subagentModelRouter =
+    dependencies.modelRouter ??
+    (effectiveOptions.modelRouteId && dependencies.provider === undefined
+      ? activeRouteModelRouter(kind, providerConfig, effectiveOptions.modelRouteId)
+      : undefined);
+  const parentModelRouteId = effectiveOptions.modelRouteId;
+  const resolveSubagentModelRuntime =
+    subagentModelRouter && parentModelRouteId && dependencies.provider === undefined
+      ? (request?: SubagentModelSelectionRequest) => {
+          const requestedModelRoute = request?.ephemeralRouteId ?? request?.profileRouteId;
+          const selection = resolveSubagentModelSelection({
+            router: subagentModelRouter,
+            parentRouteId: parentModelRouteId,
+            ...(request?.ephemeralRouteId !== undefined
+              ? { ephemeralRouteId: request.ephemeralRouteId }
+              : {}),
+            ...(request?.profileRouteId !== undefined
+              ? { profileRouteId: request.profileRouteId }
+              : {}),
+            ...(request?.ephemeralThinkingEffort !== undefined
+              ? { ephemeralThinkingEffort: request.ephemeralThinkingEffort }
+              : {}),
+            ...(request?.profileThinkingEffort !== undefined
+              ? { profileThinkingEffort: request.profileThinkingEffort }
+              : {}),
+            parentThinkingEffort: effectiveOptions.thinkingEffort ?? "off",
+            allowRouteOverride: !backgroundPolicy,
+          });
+          const runtime = createSubagentModelRuntime({
+            router: subagentModelRouter,
+            selection,
+            session,
+            providerFactory,
+            trackerOptions,
+          });
+          return {
+            provider: runtime.provider,
+            compactor: runtime.compactor,
+            thinkingEffort: runtime.thinkingEffort ?? "off",
+            ...(requestedModelRoute ? { requestedModelRoute } : {}),
+            resolvedModelRoute: runtime.route.id,
+            source: selection.source,
+          };
+        }
+      : undefined;
   const buildTrackedProvider = (config: ProviderConfig): LLMProvider =>
     effectiveOptions.allowModelFallback === false
       ? new CostTracker(
@@ -591,6 +645,10 @@ export async function executeAgentRuntime(
     ...(effectiveOptions.thinkingEffort !== undefined
       ? { thinkingEffort: effectiveOptions.thinkingEffort }
       : {}),
+    ...(effectiveOptions.modelRouteId !== undefined
+      ? { modelRouteId: effectiveOptions.modelRouteId }
+      : {}),
+    ...(resolveSubagentModelRuntime ? { resolveSubagentModelRuntime } : {}),
     planMode: effectiveOptions.planMode ?? false,
     systemPromptFactory,
     goalManager,
@@ -1165,6 +1223,31 @@ function hookPurposeProvider(provider: LLMProvider): LLMProvider {
         }
       : {}),
   };
+}
+
+function activeRouteModelRouter(
+  kind: ProviderKind,
+  config: ProviderConfig,
+  routeId: string,
+): ModelRouter {
+  const apiKeyEnv = "PICO_ACTIVE_MODEL_API_KEY";
+  return new ModelRouter(
+    [
+      {
+        id: routeId,
+        providerId: routeId.split("/", 1)[0] || "active",
+        provider: kind,
+        model: config.model,
+        baseURL: config.baseURL,
+        apiKeyEnv,
+        source: "config",
+        capabilities:
+          config.capabilities ?? resolveModelRouteCapabilities(kind, config.model, undefined),
+      },
+    ],
+    { [apiKeyEnv]: config.apiKey },
+    routeId,
+  );
 }
 
 /**
