@@ -443,6 +443,70 @@ describe("DesktopRuntimeService integration", () => {
     await fixture.service.close();
   });
 
+  it("显式中断会清空当前 Session 的持久化 Queue", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const fixture = await createFixture(async ({ sessionId, context }) => {
+      if (!sessionId) throw new Error("sessionId is required");
+      context.bindSession(sessionId);
+      await gate;
+      return { sessionId };
+    });
+    const first = (await fixture.service.handle(
+      createRuntimeRequest("session.send", {
+        workspacePath: fixture.workspace,
+        input: { text: "开始长任务" },
+        idempotencyKey: "interrupt-first",
+      }),
+    )) as { session: { sessionId: string }; run: { runId: string } };
+    managedSessions.push({
+      sessionId: first.session.sessionId,
+      workspacePath: fixture.canonicalWorkspace,
+    });
+
+    await fixture.service.handle(
+      createRuntimeRequest("session.send", {
+        workspacePath: fixture.workspace,
+        sessionId: first.session.sessionId,
+        input: { text: "下一轮" },
+        behavior: "queue",
+        expectedRunId: first.run.runId,
+        idempotencyKey: "interrupt-queue",
+      }),
+    );
+    await expect(
+      fixture.service.handle(
+        createRuntimeRequest("session.transcript", {
+          workspacePath: fixture.workspace,
+          sessionId: first.session.sessionId,
+        }),
+      ),
+    ).resolves.toMatchObject({ queuedInputs: [{ input: { text: "下一轮" } }] });
+
+    await fixture.service.handle(
+      createRuntimeRequest("run.cancel", {
+        workspacePath: fixture.workspace,
+        runId: first.run.runId,
+        reason: "user interrupt",
+      }),
+    );
+    await expect(
+      fixture.service.handle(
+        createRuntimeRequest("session.transcript", {
+          workspacePath: fixture.workspace,
+          sessionId: first.session.sessionId,
+        }),
+      ),
+    ).resolves.toMatchObject({ queuedInputs: [] });
+
+    release();
+    const workspaceRuntime = await fixture.runtime.getWorkspaceRuntime(fixture.workspace);
+    await workspaceRuntime.waitForRun(first.run.runId);
+    await fixture.service.close();
+  });
+
   it("从 Runtime SQLite 返回真实用量，时间区间不伪造无法归属的历史 baseline", async () => {
     const fixture = await createFixture();
     const ledger = new RuntimeStore({ workDir: fixture.workspace });
