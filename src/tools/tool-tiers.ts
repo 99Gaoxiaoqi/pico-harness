@@ -20,6 +20,7 @@ export const CORE_TOOLS: ReadonlySet<string> = new Set([
   "todo",
   "ask_user",
   "delegate_task",
+  "schedule_task",
 ]);
 
 /**
