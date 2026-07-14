@@ -164,7 +164,11 @@ export class LocalRuntimeDaemon {
       }
       if (request.method === "events.subscribe") {
         const cursor = readCursor(request.params);
-        const dispose = this.options.service.subscribe((event) => this.writeEvent(socket, event));
+        const dispose = this.options.service.subscribe((event) => {
+          if (!cursor.workspacePath || event.scope.workspacePath === cursor.workspacePath) {
+            this.writeEvent(socket, event);
+          }
+        });
         setSubscription(dispose);
         const events = await this.options.service.replayEvents(cursor);
         this.write(
