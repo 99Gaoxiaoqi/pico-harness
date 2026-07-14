@@ -1941,6 +1941,20 @@
     background: var(--surface-raised);
     color: var(--ink);
   }
+  .settings-diagnostic-output {
+    max-height: 320px;
+    margin-top: 12px;
+    padding: 14px;
+    overflow: auto;
+    overscroll-behavior: contain;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--surface-muted);
+    color: var(--ink-secondary);
+    font-size: 11px;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
 }
 
 @layer utilities {

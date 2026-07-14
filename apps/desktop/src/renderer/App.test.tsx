@@ -124,7 +124,7 @@ describe("DesktopApp renderer", () => {
                           runId: "run-folder",
                           sessionId: "session-folder",
                           description: "整理会议记录",
-                          status: "running",
+                          status: "succeeded",
                           startedAt: Date.now(),
                           updatedAt: Date.now(),
                         },
@@ -144,7 +144,7 @@ describe("DesktopApp renderer", () => {
                     runId: "run-folder",
                     sessionId: "session-folder",
                     description: "整理会议记录",
-                    status: "running",
+                    status: "succeeded",
                     startedAt: Date.now(),
                     updatedAt: Date.now(),
                   },
@@ -172,6 +172,18 @@ describe("DesktopApp renderer", () => {
                 return { jobs: [] };
               case "config.skills":
                 return { skills: [] };
+              case "catalog.skills":
+                return {
+                  skills: [
+                    {
+                      name: "review",
+                      description: "审查指定文件",
+                      allowedTools: ["read_file"],
+                    },
+                  ],
+                };
+              case "catalog.agents":
+                return { agents: [] };
               case "config.mcpServers":
                 return { servers: [] };
               case "config.providers":
@@ -230,6 +242,16 @@ describe("DesktopApp renderer", () => {
     expect(calls.some((call) => call.method === "session.send")).toBe(true);
     expect(calls.some((call) => call.method === "session.transcript")).toBe(true);
     expect(calls.some((call) => call.method === "session.create")).toBe(false);
+
+    await user.click(screen.getByRole("button", { name: "添加 Skill 或子代理" }));
+    await user.click(screen.getByRole("button", { name: /review/ }));
+    await user.type(screen.getByRole("textbox", { name: "消息" }), "src/runtime.ts");
+    await user.click(screen.getByRole("button", { name: "发送消息" }));
+    expect(calls.filter((call) => call.method === "session.send").at(-1)?.params.input).toEqual({
+      kind: "skill",
+      name: "review",
+      args: "src/runtime.ts",
+    });
   });
 
   it("按 Session 隔离 Changes，并使用所属 Run 的指纹审批", async () => {

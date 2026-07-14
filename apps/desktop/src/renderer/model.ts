@@ -65,6 +65,21 @@ export interface ModelRouteView {
   readonly label: string;
 }
 
+export interface CatalogAgentView {
+  readonly name: string;
+  readonly description: string;
+  readonly source: string;
+  readonly tools: readonly string[];
+  readonly modelRouteId?: string | undefined;
+}
+
+export interface CatalogSkillView {
+  readonly name: string;
+  readonly description: string;
+  readonly allowedTools: readonly string[];
+  readonly model?: string | undefined;
+}
+
 export interface ApprovalView {
   readonly id: string;
   readonly runId: string;
@@ -149,6 +164,8 @@ export interface AppData {
   readonly mcpServers: readonly CapabilityView[];
   readonly providers: readonly CapabilityView[];
   readonly modelRoutes: readonly ModelRouteView[];
+  readonly catalogAgents: readonly CatalogAgentView[];
+  readonly catalogSkills: readonly CatalogSkillView[];
   readonly usage: UsageView;
   readonly configVersion: number;
   readonly launchAtLogin?: boolean | undefined;
@@ -170,6 +187,8 @@ export const emptyData: AppData = {
   mcpServers: [],
   providers: [],
   modelRoutes: [],
+  catalogAgents: [],
+  catalogSkills: [],
   usage: {},
   configVersion: 0,
   notices: {},
