@@ -1422,7 +1422,7 @@ function modelRouteSchema(catalog?: SubagentModelCatalog): Record<string, unknow
     : undefined;
 
   return {
-    enum: ["inherit", ...routeIds],
+    ...(catalog.truncated ? {} : { enum: ["inherit", ...routeIds] }),
     description: [
       "选择 inherit 或下列规范 provider/model 路由；alias 仅帮助理解自然语言，不可作为参数值；不能携带 endpoint/凭证。",
       `inherit → ${catalog.parentRouteId}`,
