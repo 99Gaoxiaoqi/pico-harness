@@ -1,5 +1,6 @@
 export * from "./client.js";
 export * from "./cron-workspace-runtime.js";
+export * from "./desktop-automation-service.js";
 export * from "./desktop-runtime-service.js";
 export * from "./desktop-session-state.js";
 export * from "./endpoint.js";

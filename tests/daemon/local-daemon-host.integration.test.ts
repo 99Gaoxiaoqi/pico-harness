@@ -262,6 +262,84 @@ describe("LocalDaemonHost integration", () => {
     }
   });
 
+  it("生产 daemon 通过 IPC 创建、执行并审计桌面 Automation", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pico-auto-"));
+    cleanups.push(() => rm(root, { recursive: true, force: true }));
+    const workspace = join(root, "workspace");
+    await mkdir(join(workspace, ".pico"), { recursive: true });
+    execFileSync("git", ["init", "--quiet"], { cwd: workspace });
+    await writeFile(
+      join(workspace, ".pico", "config.json"),
+      JSON.stringify({
+        version: 1,
+        model: "local/coder",
+        providers: {
+          local: {
+            protocol: "openai",
+            baseURL: "https://provider.example.test/v1",
+            apiKeyEnv: "PICO_DESKTOP_TEST_KEY",
+            models: ["coder"],
+          },
+        },
+      }),
+    );
+    const trustStore = new WorkspaceTrustStore({ userStateDirectory: join(root, "trust") });
+    await trustStore.trust(await trustStore.canonicalize(workspace));
+    const endpoint = resolveLocalDaemonEndpoint({
+      runtimeDir: join(root, "runtime"),
+      userIdentity: "auto-test",
+    });
+    const host = createProductionLocalDaemonHost({
+      endpoint,
+      trustStore,
+      agentRuntime: new AutomationFakeAgentRuntime(),
+      credentialVault: new AvailableCredentialVault(),
+      registrationStore: new WorkspaceRegistrationStore(join(root, "workspaces.json")),
+    });
+    await host.start();
+    const client = new LocalRuntimeClient(endpoint);
+    try {
+      const created = (await client.request("jobs.create", {
+        workspacePath: workspace,
+        name: "Repository health",
+        prompt: "summarize repository health",
+        schedule: "0 0 1 1 *",
+      })) as { job: { jobId: string; enabled: boolean } };
+      expect(created.job.enabled).toBe(true);
+      expect(host.registeredWorkspaces).toHaveLength(1);
+
+      const receipt = (await client.request("jobs.runNow", {
+        workspacePath: workspace,
+        jobId: created.job.jobId,
+      })) as { runId: string };
+      await expect
+        .poll(async () => {
+          const history = (await client.request("jobs.history", {
+            workspacePath: workspace,
+            jobId: created.job.jobId,
+          })) as { runs: Array<{ runId: string; status: string; error?: string }> };
+          const run = history.runs.find((candidate) => candidate.runId === receipt.runId);
+          return run ? `${run.status}:${run.error ?? ""}` : undefined;
+        })
+        .toBe("succeeded:");
+
+      await client.request("jobs.setEnabled", {
+        workspacePath: workspace,
+        jobId: created.job.jobId,
+        enabled: false,
+      });
+      await expect(
+        client.request("jobs.delete", {
+          workspacePath: workspace,
+          jobId: created.job.jobId,
+        }),
+      ).resolves.toEqual({ deleted: true });
+    } finally {
+      client.close();
+      await host.stop();
+    }
+  });
+
   it("并发登记与取消登记不丢失更新", async () => {
     const root = await mkdtemp(join(tmpdir(), "pico-daemon-registration-"));
     cleanups.push(() => rm(root, { recursive: true, force: true }));
@@ -430,6 +508,26 @@ class InteractiveFakeAgentRuntime extends AgentRuntime {
       workDir,
       finalMessage: "已保留兼容并完成验证。",
       usage: { promptTokens: 12, completionTokens: 6, costCNY: 0.01 },
+      messages: [],
+    };
+  }
+}
+
+class AutomationFakeAgentRuntime extends AgentRuntime {
+  override async execute(
+    options: RunAgentCliOptions,
+    _dependencies: RunAgentCliDependencies = {},
+  ): Promise<RunAgentCliResult> {
+    if (options.execution?.kind !== "background") {
+      throw new Error("automation must use the background execution boundary");
+    }
+    const sessionId = options.session ?? "automation-session";
+    return {
+      sessionId,
+      sessionSelection: { mode: "new", sessionId },
+      workDir: options.dir ?? process.cwd(),
+      finalMessage: "repository healthy",
+      usage: { promptTokens: 8, completionTokens: 2, costCNY: 0.001 },
       messages: [],
     };
   }

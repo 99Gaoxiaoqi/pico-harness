@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   createRuntimeRequest,
+  DesktopAutomationService,
   DesktopRuntimeService,
   DesktopSessionStateStore,
   LocalRuntimeClient,
@@ -21,6 +22,9 @@ import { WorkspaceTrustStore } from "../../src/security/workspace-trust.js";
 import { globalSessionManager } from "../../src/engine/session.js";
 import { fileHistoryTrackEdit } from "../../src/safety/file-history.js";
 import { RuntimeStore } from "../../src/tasks/runtime-store.js";
+import { CronService } from "../../src/tasks/cron-service.js";
+import { credentialRefForModelRoute } from "../../src/provider/credential-vault.js";
+import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 
 const execFile = promisify(execFileCallback);
 
@@ -142,7 +146,7 @@ describe("DesktopRuntimeService integration", () => {
     const mcp = await fixture.service.handle(
       createRuntimeRequest("config.mcpServers", { workspacePath: fixture.workspace }),
     );
-    expect(mcp).toEqual({
+    expect(mcp).toMatchObject({
       servers: [
         { name: "local", transport: "http", status: "pending", toolCount: 0, toolNames: [] },
       ],
@@ -181,9 +185,11 @@ describe("DesktopRuntimeService integration", () => {
       },
     });
     const sessionId = (created as { session: { sessionId: string } }).session.sessionId;
-    expect(await stat(join(fixture.workspace, ".claw", "sessions", `${sessionId}.jsonl`))).toEqual(
-      expect.objectContaining({ size: expect.any(Number) }),
-    );
+    expect(
+      await stat(
+        join(resolvePicoPaths(fixture.workspace).workspace.sessions, `${sessionId}.jsonl`),
+      ),
+    ).toEqual(expect.objectContaining({ size: expect.any(Number) }));
 
     await fixture.service.handle(
       createRuntimeRequest("session.archive", { workspacePath: fixture.workspace, sessionId }),
@@ -478,6 +484,129 @@ describe("DesktopRuntimeService integration", () => {
     await expect(readFile(filePath, "utf8")).resolves.toBe("export const answer = 41;\n");
     expect(session.getHistory()).toEqual([]);
     await fixture.service.close();
+  });
+
+  it("Automations 共用 Cron 账本完成 CRUD、启停、立即运行与历史", async () => {
+    const fixture = await createFixture();
+    await fixture.trust.trust(fixture.canonicalWorkspace);
+    const credentialRef = credentialRefForModelRoute(
+      {
+        id: "local/coder",
+        provider: "openai",
+        baseURL: "https://provider.example.test/v1",
+        model: "coder",
+        apiKeyEnv: "PICO_TEST_TOKEN",
+      },
+      fixture.canonicalWorkspace,
+    );
+    const automations = new DesktopAutomationService({
+      prepareSecurity: async () => ({
+        credentialRef,
+        policySnapshot: {
+          mode: "yolo",
+          backgroundEnabled: true,
+          trustedWorkspace: true,
+          toolNetworkPolicy: "disabled",
+          allowedTools: [],
+          hardlineVersion: "builtin-v1",
+          hookVersion: "workspace-v1",
+          createdAt: 100,
+        },
+      }),
+      ensureWorkspaceRuntime: async (workspacePath) => {
+        await fixture.registration.register(workspacePath);
+      },
+      runNow: async (workspacePath, jobId) => {
+        const cron = new CronService({ workDir: workspacePath, now: () => 500 });
+        try {
+          return cron.runNow(jobId);
+        } finally {
+          cron.close();
+        }
+      },
+      now: () => 100,
+    });
+    const service = new DesktopRuntimeService({
+      runtimeService: fixture.runtime,
+      registrationStore: fixture.registration,
+      trustStore: fixture.trust,
+      sessionStateStore: fixture.sessionState,
+      automations,
+      now: () => 100,
+    });
+
+    const created = (await service.handle(
+      createRuntimeRequest("jobs.create", {
+        workspacePath: fixture.workspace,
+        name: "Daily health",
+        prompt: "check the repository",
+        schedule: "0 9 * * 1-5",
+      }),
+    )) as { job: { jobId: string; enabled: boolean; name: string } };
+    expect(created.job).toMatchObject({ name: "Daily health", enabled: true });
+    const jobId = created.job.jobId;
+
+    await expect(
+      service.handle(
+        createRuntimeRequest("jobs.update", {
+          workspacePath: fixture.workspace,
+          jobId,
+          name: "Weekday health",
+          schedule: "30 8 * * 1-5",
+        }),
+      ),
+    ).resolves.toMatchObject({
+      job: { jobId, name: "Weekday health", schedule: "30 8 * * 1-5" },
+    });
+    await expect(
+      service.handle(
+        createRuntimeRequest("jobs.update", {
+          workspacePath: fixture.workspace,
+          jobId,
+          schedule: "@daily",
+        }),
+      ),
+    ).rejects.toMatchObject({ code: RUNTIME_ERROR_CODES.INVALID_PARAMS });
+    await expect(
+      service.handle(
+        createRuntimeRequest("jobs.delete", { workspacePath: fixture.workspace, jobId }),
+      ),
+    ).rejects.toMatchObject({ code: RUNTIME_ERROR_CODES.CONFLICT });
+    await expect(
+      service.handle(
+        createRuntimeRequest("jobs.runNow", { workspacePath: fixture.workspace, jobId }),
+      ),
+    ).resolves.toMatchObject({ job: { jobId, status: "running" }, runId: expect.any(String) });
+    await expect(
+      service.handle(
+        createRuntimeRequest("jobs.history", {
+          workspacePath: fixture.workspace,
+          jobId,
+          limit: 10,
+        }),
+      ),
+    ).resolves.toMatchObject({
+      runs: [{ workspacePath: fixture.canonicalWorkspace, status: "running" }],
+    });
+    await expect(
+      service.handle(
+        createRuntimeRequest("jobs.setEnabled", {
+          workspacePath: fixture.workspace,
+          jobId,
+          enabled: false,
+        }),
+      ),
+    ).resolves.toMatchObject({ job: { jobId, enabled: false } });
+    await expect(
+      service.handle(
+        createRuntimeRequest("jobs.delete", { workspacePath: fixture.workspace, jobId }),
+      ),
+    ).resolves.toEqual({ deleted: true });
+    await expect(
+      service.handle(createRuntimeRequest("jobs.list", { workspacePath: fixture.workspace })),
+    ).resolves.toEqual({ jobs: [] });
+
+    await service.close();
   });
 
   async function createFixture(

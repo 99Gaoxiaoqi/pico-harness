@@ -55,6 +55,37 @@ describe("CronRuntimeScheduler integration", () => {
     );
   });
 
+  it("立即运行先持久化回执，再在同一调度边界异步执行", async () => {
+    const { root, repo } = await createRepository();
+    cleanups.push(() => rm(root, { recursive: true, force: true }));
+    const now = Date.UTC(2026, 0, 1, 12, 0, 15);
+    const cron = new CronService({ workDir: repo, now: () => now, ownerId: "manual-test" });
+    cleanups.push(() => cron.close());
+    const runtime = await WorkspaceTaskRuntime.create({ workDir: repo });
+    cleanups.push(() => runtime.close());
+    const job = cron.create({
+      workspacePath: repo,
+      schedule: "0 0 1 1 *",
+      timeZone: "UTC",
+      prompt: "run on demand",
+      enabled: false,
+      policySnapshot: yoloPolicy(now),
+    });
+    const scheduler = new CronRuntimeScheduler({
+      cronService: cron,
+      getWorkspaceRuntime: async () => runtime,
+      canRun: async () => ({ allowed: true }),
+      execute: async () => ({ summary: "manual completed" }),
+    });
+
+    const receipt = scheduler.runNow(job.cronJobId);
+    expect(receipt).toMatchObject({ cronJobId: job.cronJobId, status: "queued" });
+    await expect.poll(() => cron.runs({ cronJobId: job.cronJobId })[0]?.status).toBe("succeeded");
+    expect(cron.runs({ cronJobId: job.cronJobId })[0]?.result).toEqual({
+      summary: "manual completed",
+    });
+  });
+
   it.each(["canRun", "getWorkspaceRuntime", "listRuns", "claim"] as const)(
     "%s 异常会收口 queued Run，不阻塞下一分钟",
     async (failurePoint) => {
