@@ -3,6 +3,7 @@
 import { readFile } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import { logger } from "../observability/logger.js";
+import type { ToolExecutionContext } from "../tools/registry.js";
 import type { ToolRegistry } from "../tools/registry-impl.js";
 import { HttpMcpClient } from "./http-client.js";
 import { McpToolBridge } from "./mcp-tool.js";
@@ -20,6 +21,7 @@ import {
   type McpResourceReadResult,
   type McpServerConfig,
   type McpTool,
+  type McpToolResult,
 } from "./types.js";
 
 const DEFAULT_CONFIG_RELATIVE = ".claw/mcp.json";
@@ -262,6 +264,30 @@ export class McpConnectionManager {
     args?: Record<string, string>,
   ): Promise<McpPromptGetResult> {
     return this.callServer(serverName, (client) => client.getPrompt(promptName, args));
+  }
+
+  /**
+   * Hook handler 使用的窄调用面：只允许调用当前已连接且已发现的工具。
+   * 该方法不进入 lifecycle 队列，不会触发 OAuth、重连或配置重载。
+   */
+  async invokeConnectedTool(
+    serverName: string,
+    toolName: string,
+    input: Record<string, unknown>,
+    context?: ToolExecutionContext,
+  ): Promise<McpToolResult> {
+    const entry = this.requireEntry(serverName);
+    if (entry.status !== "connected" || !entry.client) {
+      throw new Error(`MCP server "${serverName}" 未连接(当前状态: ${entry.status})`);
+    }
+    if (!entry.tools.some((tool) => tool.name === toolName)) {
+      throw new Error(`MCP server "${serverName}" 未发现工具 "${toolName}"`);
+    }
+    try {
+      return await entry.client.callTool(toolName, input, context);
+    } catch (err) {
+      throw new Error(safeErrorMessage(err), { cause: err });
+    }
   }
 
   /** 幂等关闭全部连接，保留配置以便后续 connectAll。 */
