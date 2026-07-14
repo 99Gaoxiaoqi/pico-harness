@@ -9,6 +9,8 @@ import type {
   ManagedCronWorkspaceRuntime,
 } from "./cron-workspace-runtime.js";
 import { WorkspaceRegistrationStore } from "./workspace-registration.js";
+import { canonicalizeWorkspacePath } from "./workspace-registry.js";
+import type { CronRunRecord } from "../tasks/runtime-types.js";
 
 type HostState = "stopped" | "starting" | "running" | "stopping";
 
@@ -78,6 +80,14 @@ export class LocalDaemonHost {
   async refreshRegisteredWorkspaces(): Promise<void> {
     if (this.state !== "running") throw new Error("daemon 尚未运行");
     await this.reconcileRegisteredWorkspaces();
+  }
+
+  async runCronJobNow(workspacePath: string, cronJobId: string): Promise<CronRunRecord> {
+    const canonical = await canonicalizeWorkspacePath(workspacePath);
+    const runtime = this.cronRuntimes.get(canonical);
+    if (!runtime) throw new Error(`工作区尚未启动 Cron runtime: ${canonical}`);
+    if (!runtime.runNow) throw new Error("当前 Cron runtime 不支持立即运行");
+    return runtime.runNow(cronJobId);
   }
 
   async stop(): Promise<void> {

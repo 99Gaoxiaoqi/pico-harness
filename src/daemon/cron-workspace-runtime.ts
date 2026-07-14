@@ -44,6 +44,11 @@ export class CronWorkspaceRuntime {
     return this.cronService.recoverInterruptedRuns(reason);
   }
 
+  runNow(cronJobId: string): CronRunRecord {
+    if (this.closed) throw new Error("Cron workspace runtime 已关闭");
+    return this.scheduler.runNow(cronJobId);
+  }
+
   start(): void {
     if (this.closed) throw new Error("Cron workspace runtime 已关闭");
     this.scheduler.start();
@@ -64,6 +69,8 @@ export interface CronWorkspaceRuntimeFactoryInput {
 
 export interface ManagedCronWorkspaceRuntime {
   recoverInterruptedRuns(reason?: string): readonly CronRunRecord[];
+  /** Optional for legacy/test factories; production runtimes always implement it. */
+  runNow?(cronJobId: string): CronRunRecord;
   start(): void;
   close(): Promise<void>;
 }
