@@ -3,6 +3,7 @@ import type { ProviderKind } from "../provider/factory.js";
 import type { Message } from "../schema/message.js";
 import type { Goal, GoalManagerSnapshot, GoalStatus } from "./goal-manager.js";
 import type { SessionIdentity } from "./session-identity.js";
+import type { TranscriptEvent } from "../presentation/transcript-event-store.js";
 
 /** runtime_state 记录自身的 schema 版本，与 JSONL meta 版本独立演进。 */
 export const SESSION_RUNTIME_STATE_VERSION = 1 as const;
@@ -73,6 +74,8 @@ export interface SessionHydrationSnapshot {
   createdAt: string;
   updatedAt: string;
   messages: Message[];
+  /** Session JSONL 中的结构化 Transcript 事件，由共享 projector 重放。 */
+  transcriptEvents: readonly TranscriptEvent[];
   runtime: SessionRuntimeStateSnapshot;
 }
 

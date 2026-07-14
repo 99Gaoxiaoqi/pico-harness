@@ -9,7 +9,14 @@ export type TranscriptPhaseMode = "idle" | "requesting" | "thinking" | "tool-use
 
 /** 工具调用在 transcript 中的标准状态。 */
 export type TranscriptToolCallStatus =
-  "queued" | "running" | "approval" | "success" | "error" | "denied" | "done" | "failed";
+  | "queued"
+  | "running"
+  | "approval"
+  | "success"
+  | "error"
+  | "denied"
+  | "done"
+  | "failed";
 
 /**
  * 现有渲染层消费的条目数据。
@@ -17,7 +24,7 @@ export type TranscriptToolCallStatus =
  * 这个联合类型故意不嵌入事件 ID：旧的 onUpdate / entries 用法可以
  * 保持原样，稳定 ID 由 TranscriptProjectedEntry 与事件流承载。
  */
-type TranscriptEntryData =
+export type TranscriptEntryData =
   | {
       kind: "logo";
       model?: string;
@@ -33,6 +40,34 @@ type TranscriptEntryData =
   | { kind: "error"; message: string; retryable?: boolean; action?: string }
   | { kind: "assistant"; content: string }
   | { kind: "tool"; name: string; args: string; status: TranscriptToolCallStatus; summary?: string }
+  | {
+      kind: "plan";
+      title: string;
+      detail?: string;
+      state?: "waiting" | "active" | "done" | "failed";
+    }
+  | {
+      kind: "approval" | "prompt" | "changes";
+      title: string;
+      detail?: string;
+      state?: string;
+      data?: Readonly<Record<string, unknown>>;
+    }
+  | {
+      kind: "run-boundary";
+      runId: string;
+      status:
+        | "queued"
+        | "running"
+        | "pause_requested"
+        | "paused"
+        | "cancelling"
+        | "cancelled"
+        | "failed"
+        | "succeeded";
+      startedAt: number;
+      finishedAt?: number;
+    }
   | {
       kind: "subagent-activity";
       task: string;
@@ -144,7 +179,10 @@ export type TranscriptSubagentTraceItem =
     };
 
 export type TranscriptSubagentLifecycle =
-  "active" | "terminal_unconsumed" | "terminal_claimed" | "archived";
+  | "active"
+  | "terminal_unconsumed"
+  | "terminal_claimed"
+  | "archived";
 
 export interface TranscriptSubagentProjection {
   readonly activityId: string;
