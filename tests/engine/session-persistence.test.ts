@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionManager } from "../../src/engine/session.js";
 import { SessionStore } from "../../src/engine/session-store.js";
+import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 import type { Message } from "../../src/schema/message.js";
 import {
   corruptDatabase,
@@ -129,7 +130,7 @@ describe("Session + FTS5 断点续传", () => {
     session.append(userMsg("hello identity"));
     await session.flushPersistence();
 
-    const storePath = join(workDir, ".claw", "sessions", "identity_001.jsonl");
+    const storePath = join(resolvePicoPaths(workDir).workspace.sessions, "identity_001.jsonl");
     const metadata = await new SessionStore(storePath).loadMetadata();
 
     expect(metadata).toMatchObject({
@@ -355,12 +356,13 @@ describe("持久化失败降级逻辑", () => {
   });
 
   it("FTS5 初始化失败 → Session 降级后仍可检索", async () => {
-    // 跨平台注入:把 .claw 占用一个普通文件(非目录),使 FTS5Store 构造时
-    // new Database("<workDir>/.claw/sessions.db") 抛 ENOTDIR(父路径非目录)。
+    // 跨平台注入:把 workspace state root 占用为普通文件，使 FTS5Store 构造失败。
     // 旧的 chmod(0o444) 在 Windows 上对目录无效(只读位只阻止删目录,不阻止建文件),
     // 用"文件占位"是 POSIX/Windows 都确定能触发降级 catch 的方案。
-    const { writeFileSync } = await import("node:fs");
-    writeFileSync(join(workDir, ".claw"), "blocker");
+    const { mkdirSync, writeFileSync } = await import("node:fs");
+    const paths = resolvePicoPaths(workDir);
+    mkdirSync(paths.home.workspaces, { recursive: true });
+    writeFileSync(paths.workspace.root, "blocker");
 
     const mgr = new SessionManager();
     const s = await mgr.getOrCreate("chat_fault", workDir, ON);
@@ -387,7 +389,7 @@ describe("持久化失败降级逻辑", () => {
     await flush();
 
     // 模拟磁盘满(改为只读)
-    const dbPath = join(workDir, ".claw", "sessions.db");
+    const dbPath = join(resolvePicoPaths(workDir).workspace.root, "sessions.db");
     simulateDiskFull(dbPath);
 
     // 继续 append(应该成功,即使 FTS5 失败)
@@ -421,7 +423,7 @@ describe("持久化失败降级逻辑", () => {
 
     // 删除 WAL 三件套的全部附属文件,再损坏主 db。
     // 只删 -wal 不够:-shm 还在时 SQLite 可能用共享内存恢复;必须连同删掉。
-    const dbPath = join(workDir, ".claw", "sessions.db");
+    const dbPath = join(resolvePicoPaths(workDir).workspace.root, "sessions.db");
     const { unlinkSync, existsSync } = await import("node:fs");
     for (const suffix of ["-wal", "-shm"]) {
       const p = `${dbPath}${suffix}`;

@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TodoStore } from "../../src/context/todo-store.js";
 import { logger } from "../../src/observability/logger.js";
+import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 
 // 仅在 "save 失败" 测试中激活:用 hoisted 标志位控制是否注入抛错的 writeFile。
 // vi.mock 提升到文件顶部,模块路径固定,故用运行时开关避免影响其他测试。
@@ -227,7 +228,7 @@ describe("TodoStore", () => {
 
   describe("降级", () => {
     it("todo.json 含非法 JSON,load 返回空 state 不抛", async () => {
-      const todoDir = join(workDir, ".claw");
+      const todoDir = resolvePicoPaths(workDir).workspace.root;
       const { mkdir } = await import("node:fs/promises");
       await mkdir(todoDir, { recursive: true });
       await writeFile(join(todoDir, "todo.json"), "{这不是合法JSON");
@@ -238,7 +239,7 @@ describe("TodoStore", () => {
     });
 
     it("todo.json 结构非法(字段缺失),load 返回空 state", async () => {
-      const todoDir = join(workDir, ".claw");
+      const todoDir = resolvePicoPaths(workDir).workspace.root;
       const { mkdir } = await import("node:fs/promises");
       await mkdir(todoDir, { recursive: true });
       // items 不是数组 / nextId 缺失
@@ -250,7 +251,7 @@ describe("TodoStore", () => {
     });
 
     it("todo.json 含畸形条目,load 丢弃畸形项保留合法项", async () => {
-      const todoDir = join(workDir, ".claw");
+      const todoDir = resolvePicoPaths(workDir).workspace.root;
       const { mkdir } = await import("node:fs/promises");
       await mkdir(todoDir, { recursive: true });
       const raw = {

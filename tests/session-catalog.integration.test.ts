@@ -6,6 +6,7 @@ import { listCliSessionSummaries } from "../src/cli/session-resolver.js";
 import { SessionManager } from "../src/engine/session.js";
 import { SessionStore } from "../src/engine/session-store.js";
 import type { PersistedSessionSettings } from "../src/engine/session-runtime.js";
+import { resolvePicoPaths } from "../src/paths/pico-paths.js";
 import { SessionCatalog } from "../src/storage/session-catalog.js";
 import { readSessionCatalogProjectionHealth } from "../src/storage/session-catalog-projection.js";
 
@@ -37,7 +38,8 @@ describe("Session Catalog integration", () => {
       await session.close();
     }
 
-    const firstPath = join(workDir, ".claw", "sessions", "first.jsonl");
+    const sessionsDirectory = resolvePicoPaths(workDir).workspace.sessions;
+    const firstPath = join(sessionsDirectory, "first.jsonl");
     const firstInfo = await stat(firstPath);
     await expect(catalog.list({ sessionProjectDir: workDir })).resolves.toEqual(
       expect.arrayContaining([
@@ -58,8 +60,8 @@ describe("Session Catalog integration", () => {
     const changed = new SessionStore(firstPath);
     await changed.commitMessage({ role: "user", content: "绕过 Catalog 追加的新消息" });
     await changed.close();
-    const newPath = join(workDir, ".claw", "sessions", "third.jsonl");
-    await mkdir(join(workDir, ".claw", "sessions"), { recursive: true });
+    const newPath = join(sessionsDirectory, "third.jsonl");
+    await mkdir(sessionsDirectory, { recursive: true });
     await writeFile(
       newPath,
       [

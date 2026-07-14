@@ -15,6 +15,7 @@ import { FTS5Store } from "../src/memory/fts5-store.js";
 import { SessionManager } from "../src/engine/session.js";
 import { StorageOperationJournal } from "../src/storage/operation-journal.js";
 import Database from "better-sqlite3";
+import { resolvePicoPaths } from "../src/paths/pico-paths.js";
 
 describe("Session durable commit integration", () => {
   let workDir: string;
@@ -242,7 +243,7 @@ describe("Session durable commit integration", () => {
     expect(head).toBeDefined();
     await first.close();
 
-    const dbPath = join(workDir, ".claw", "sessions.db");
+    const dbPath = join(resolvePicoPaths(workDir).workspace.root, "sessions.db");
     const db = new Database(dbPath);
     db.prepare("DELETE FROM conversation_chunks WHERE session_id = ?").run("catch-up");
     db.prepare("DELETE FROM session_projection_cursor WHERE session_id = ?").run("catch-up");

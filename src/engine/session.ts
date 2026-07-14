@@ -93,6 +93,7 @@ import {
   type NewRewindStorageOperation,
   type RewindWorkspaceTarget,
 } from "../storage/rewind-operation-coordinator.js";
+import { resolvePicoPaths } from "../paths/pico-paths.js";
 
 /** 清洗 sessionId 为安全文件名片段(/、: 等破坏路径的字符替换为 _) */
 function sanitizeFilePart(value: string): string {
@@ -304,7 +305,7 @@ export class Session implements SessionRuntimePersistence {
         : getDefaultSessionCatalogProjector();
     }
     this.initMemorySearch(options?.memorySearchStore);
-    const summaryPath = join(this.workDir, ".claw", "memory", "summaries.json");
+    const summaryPath = join(resolvePicoPaths(this.workDir).workspace.memory, "summaries.json");
     if (this.store) {
       this.summaryStore = acquireSummaryStore(summaryPath);
       this.summaryStoreLeasePath = summaryPath;
@@ -319,15 +320,14 @@ export class Session implements SessionRuntimePersistence {
    *      并行测试间相互污染(vitest 默认并行跑文件,共享 process.env 不安全)。
    *   2. 环境变量 PICO_PERSISTENCE —— 生产入口的全局默认,=0 关闭。
    *   3. 默认开启。
-   * 文件落点复用 .claw/ 约定:<workDir>/.claw/sessions/<id>.jsonl,
-   * 与 traces/、artifacts/、skills/ 同级。
+   * 文件落点使用隔离的 workspace state sessions/<id>.jsonl。
    */
   private initPersistence(explicit?: boolean): void {
     // 显式参数优先;未传时回落到环境变量,再回落到默认开启
     const enabled = explicit ?? process.env.PICO_PERSISTENCE !== "0";
     if (!enabled) return;
     try {
-      const dir = join(this.workDir, ".claw", "sessions");
+      const dir = resolvePicoPaths(this.workDir).workspace.sessions;
       mkdirSync(dir, { recursive: true, mode: 0o700 });
       chmodSync(dir, 0o700);
       this.sessionLogPath = join(dir, `${sanitizeFilePart(this.id)}.jsonl`);
@@ -1637,7 +1637,7 @@ export class Session implements SessionRuntimePersistence {
     const logPath = this.sessionLogPath;
     if (!projector || !logPath) return;
     try {
-      const result = await projector.projectJournal(logPath, options);
+      const result = await projector.projectJournal(logPath, this.workDir, options);
       this.catalogHealthState = result.health;
       if (result.entry) this.catalogEntryState = result.entry;
     } catch (error) {

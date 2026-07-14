@@ -1,5 +1,6 @@
 import { closeSync, fstatSync, openSync, readSync } from "node:fs";
 import { join } from "node:path";
+import { resolvePicoPaths } from "../paths/pico-paths.js";
 import {
   RuntimeConflictError,
   RuntimeStore,
@@ -110,7 +111,8 @@ export class JobService {
   static async create(options: JobServiceOptions): Promise<JobServiceCreateResult> {
     const service = new JobService(options);
     const legacyPath =
-      options.legacyTaskStorePath ?? join(options.workDir, ".claw", "tasks", "state.json");
+      options.legacyTaskStorePath ??
+      join(resolvePicoPaths(options.workDir).workspace.tasks, "state.json");
     const legacyImport = await service.store.importLegacyTaskStore(legacyPath);
     return { service, legacyImport };
   }

@@ -13,6 +13,7 @@ import {
   isSameSessionProjectGroup,
 } from "../src/engine/session-identity.js";
 import { resolveCliStartupSession } from "../src/cli/session-args.js";
+import { resolvePicoPaths } from "../src/paths/pico-paths.js";
 
 describe("resolveCliSession", () => {
   it("默认每次启动都创建新的 session id", async () => {
@@ -230,7 +231,7 @@ async function touchSessionFile(
   sessionId: string,
   timestamp: string,
 ): Promise<void> {
-  const dir = join(workDir, ".claw", "sessions");
+  const dir = resolvePicoPaths(workDir).workspace.sessions;
   await mkdir(dir, { recursive: true });
   await writeFile(join(dir, `${sessionId}.jsonl`), `{"type":"meta","schemaVersion":1}\n`, "utf8");
   const time = new Date(timestamp);
@@ -243,7 +244,7 @@ async function writeSessionFile(
   timestamp: string,
   records: readonly unknown[],
 ): Promise<void> {
-  const dir = join(workDir, ".claw", "sessions");
+  const dir = resolvePicoPaths(workDir).workspace.sessions;
   const path = join(dir, `${sessionId}.jsonl`);
   await mkdir(dir, { recursive: true });
   await writeFile(path, `${records.map((record) => JSON.stringify(record)).join("\n")}\n`, "utf8");

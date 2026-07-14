@@ -11,6 +11,7 @@ import {
   getDefaultSessionCatalogProjector,
   SessionCatalogProjector,
 } from "../storage/session-catalog-projection.js";
+import { resolvePicoPaths } from "../paths/pico-paths.js";
 
 export type CliSessionMode = "new" | "continue" | "resume" | "fork";
 
@@ -283,7 +284,7 @@ function rememberSelection(selection: CliSessionSelection, workDir: string): Cli
 }
 
 function sessionsDirectory(workDir: string): string {
-  return join(workDir, ".claw", "sessions");
+  return resolvePicoPaths(workDir).workspace.sessions;
 }
 
 function sessionFilePath(workDir: string, sessionId: string): string {

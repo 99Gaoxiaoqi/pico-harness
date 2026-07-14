@@ -9,11 +9,12 @@
 //
 // Main loop spans use explicit parent references. Tracer still keeps a
 // startSpan/endSpan stack for simple sequential callers. JSON exports are saved
-// under .claw/traces/.
+// under the workspace state traces directory.
 
 import { chmodSync, writeFileSync, mkdirSync } from "node:fs";
 // pathe keeps trace paths stable in tests by using POSIX separators.
 import { join } from "pathe";
+import { resolvePicoPaths } from "../paths/pico-paths.js";
 
 export type TraceAttributes = Record<string, unknown>;
 
@@ -161,7 +162,7 @@ export function exportTraceToFile(
   sessionId: string,
   timestamp: number = Date.now(),
 ): string {
-  const traceDir = join(workDir, ".claw", "traces");
+  const traceDir = resolvePicoPaths(workDir).workspace.traces;
   mkdirSync(traceDir, { recursive: true, mode: 0o700 });
   chmodSync(traceDir, 0o700);
   const filename = `trace_${sanitizeFilePart(sessionId)}_${timestamp}.json`;

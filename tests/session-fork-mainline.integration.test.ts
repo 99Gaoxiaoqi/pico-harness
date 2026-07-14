@@ -9,6 +9,7 @@ import { SessionForkService } from "../src/engine/session-fork-service.js";
 import { SessionManager } from "../src/engine/session.js";
 import { SessionStore } from "../src/engine/session-store.js";
 import { FileSessionSummaryStore } from "../src/memory/summary-store.js";
+import { resolvePicoPaths } from "../src/paths/pico-paths.js";
 import {
   createFileHistoryState,
   fileHistoryBeginRewindPoint,
@@ -31,6 +32,7 @@ describe("session fork published mainline", () => {
     const root = await mkdtemp(join(tmpdir(), "pico-session-fork-mainline-"));
     cleanup.push(root);
     const workDir = join(root, "workspace");
+    const workspacePaths = resolvePicoPaths(workDir).workspace;
     const fileHistoryBaseDir = join(root, "file-history");
     const catalog = new SessionCatalog({ baseDirectory: join(root, "catalog") });
     const projector = new SessionCatalogProjector(catalog);
@@ -43,7 +45,7 @@ describe("session fork published mainline", () => {
       sessionCatalog: false,
     });
     const artifactStore = new ToolResultArtifactStore({
-      baseDir: join(workDir, ".claw", "artifacts"),
+      baseDir: workspacePaths.artifacts,
     });
     const sourceArtifact = await artifactStore.write({
       id: "artifact-mainline",
@@ -168,7 +170,7 @@ describe("session fork published mainline", () => {
       }),
     ).rejects.toThrow("injected crash after sidecars");
 
-    const targetPath = join(workDir, ".claw", "sessions", targetId + ".jsonl");
+    const targetPath = join(workspacePaths.sessions, targetId + ".jsonl");
     await expect(access(targetPath)).rejects.toMatchObject({ code: "ENOENT" });
     await expect(catalog.list({ sessionProjectDir: workDir })).resolves.toEqual([]);
     await expect(crashing.journal.get(operationId)).resolves.toMatchObject({
@@ -243,7 +245,7 @@ describe("session fork published mainline", () => {
     ).resolves.toBe(true);
     expect(targetFileHistory.snapshots).toHaveLength(1);
     expect(
-      new FileSessionSummaryStore(join(workDir, ".claw", "memory", "summaries.json")).get(targetId),
+      new FileSessionSummaryStore(join(workspacePaths.memory, "summaries.json")).get(targetId),
     ).toMatchObject({
       summary: "source summary",
       basis: { throughEventId: sourceForkPoint.cursor.eventId, messageCount: 2 },
@@ -280,6 +282,7 @@ describe("session fork published mainline", () => {
     const root = await mkdtemp(join(tmpdir(), "pico-session-fork-mode-recovery-"));
     cleanup.push(root);
     const workDir = join(root, "workspace");
+    const workspacePaths = resolvePicoPaths(workDir).workspace;
     const manager = new SessionManager();
     const source = await manager.getOrCreate("mode-source", workDir, {
       persistence: true,
@@ -314,7 +317,7 @@ describe("session fork published mainline", () => {
       sourceCursor: snapshot.cursor,
       targetSessionId: "mode-target",
       targetMode: "plan",
-      stagingDirectory: join(workDir, ".claw", "fork-staging", "prepared-plan-fork"),
+      stagingDirectory: join(workspacePaths.forkStaging, "prepared-plan-fork"),
     });
 
     await expect(service.reconcileUnfinished()).resolves.toEqual([

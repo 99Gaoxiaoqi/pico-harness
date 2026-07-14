@@ -18,6 +18,7 @@ import {
   resetSessionSettingsForTests,
 } from "../src/input/session-settings.js";
 import { createTuiRuntimeState } from "../src/tui/runtime-state.js";
+import { resolvePicoPaths } from "../src/paths/pico-paths.js";
 
 class ScriptedProvider implements LLMProvider {
   readonly calls: Array<{ messages: Message[]; toolNames: string[] }> = [];
@@ -411,8 +412,9 @@ describe("runAgentFromCli", () => {
         completionTokens: 7,
       },
     });
-    expect(result.tracePath).toContain(join(".claw", "traces"));
-    expect(await readdir(join(workDir, ".claw", "traces"))).toHaveLength(1);
+    const tracesDirectory = resolvePicoPaths(workDir).workspace.traces;
+    expect(result.tracePath).toContain(tracesDirectory);
+    expect(await readdir(tracesDirectory)).toHaveLength(1);
     expect(provider.calls[0]?.toolNames).toEqual(
       expect.arrayContaining([
         "bash",
@@ -1364,8 +1366,9 @@ describe("runAgentFromCli", () => {
     );
 
     expect(result.finalMessage).toBe("Trace env works.");
-    expect(result.tracePath).toContain(join(".claw", "traces"));
-    expect(await readdir(join(workDir, ".claw", "traces"))).toHaveLength(1);
+    const tracesDirectory = resolvePicoPaths(workDir).workspace.traces;
+    expect(result.tracePath).toContain(tracesDirectory);
+    expect(await readdir(tracesDirectory)).toHaveLength(1);
   });
 
   it("从环境与参数解析 Provider 配置并允许命令行覆盖模型", async () => {

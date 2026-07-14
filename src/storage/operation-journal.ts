@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { readFile, readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { resolvePicoPaths } from "../paths/pico-paths.js";
 import { writeJsonAtomic } from "./atomic-json.js";
 import { OperationReferenceIndex } from "./operation-reference-index.js";
 
@@ -103,7 +104,7 @@ export class StorageOperationJournal {
   private referenceIndex?: OperationReferenceIndex;
 
   constructor(options: OperationJournalOptions) {
-    this.directory = join(resolve(options.workDir), ".claw", "storage-operations");
+    this.directory = resolvePicoPaths(resolve(options.workDir)).workspace.storageOperations;
     this.now = options.now ?? (() => new Date());
   }
 
