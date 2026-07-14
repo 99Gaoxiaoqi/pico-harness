@@ -4,7 +4,15 @@ import tseslint from "typescript-eslint";
 
 export default [
   {
-    ignores: ["dist/**", "node_modules/**", ".worktrees/**", "scripts/test-fts5-*.mjs"],
+    ignores: [
+      "dist/**",
+      "node_modules/**",
+      ".worktrees/**",
+      "**/.tsbuild/**",
+      "**/.vite/**",
+      "apps/desktop/out/**",
+      "scripts/test-fts5-*.mjs",
+    ],
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,
