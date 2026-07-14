@@ -142,7 +142,12 @@ describe("LocalDaemonHost integration", () => {
     await host.start();
     try {
       const client = new LocalRuntimeClient(endpoint);
-      await expect(client.request("runtime.ping", {})).resolves.toEqual({ pong: true });
+      await expect(client.request("runtime.ping", {})).resolves.toEqual(
+        expect.objectContaining({
+          pong: true,
+          capabilities: expect.arrayContaining(["session-conversation-v1"]),
+        }),
+      );
       client.close();
     } finally {
       await host.stop();
