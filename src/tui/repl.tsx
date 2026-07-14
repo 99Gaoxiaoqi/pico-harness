@@ -57,7 +57,7 @@ import type {
 } from "../input/types.js";
 import type { ImagePart } from "../schema/message.js";
 import type { ProviderKind } from "../provider/factory.js";
-import { loadModelRouter, type ModelRouter } from "../provider/model-router.js";
+import { loadModelRouter, type ModelRoute, type ModelRouter } from "../provider/model-router.js";
 import { createPlatformCredentialVault } from "../provider/credential-vault.js";
 import { isAbortError } from "../provider/errors.js";
 import { defaultIsRetryableError } from "../provider/retry.js";
@@ -81,6 +81,7 @@ import {
 } from "../input/session-settings.js";
 import { WorkspaceRoots } from "../tools/workspace-roots.js";
 import { globalSessionManager, type Session } from "../engine/session.js";
+import type { PersistedSessionSettings } from "../engine/session-runtime.js";
 import { SessionForkService } from "../engine/session-fork-service.js";
 import type { Reporter } from "../engine/reporter.js";
 import type { SteerQueue } from "../engine/steer-queue.js";
@@ -163,6 +164,50 @@ export interface ReplOptions {
   sessionSelection?: CliSessionSelection;
   /** CLI --add-dir 提供的附加工作目录。 */
   addDirs?: string[];
+}
+
+interface TuiStartupModelOptions {
+  cliModel: string;
+  modelExplicit?: boolean;
+  projectDefaultRouteId?: string;
+}
+
+/**
+ * Resolve the initial route with the same precedence in Ink and TERM=dumb:
+ * an explicit CLI override wins, otherwise a restorable session wins before defaults.
+ */
+export function resolveTuiStartupModelRoute(
+  router: ModelRouter,
+  restored: PersistedSessionSettings | undefined,
+  options: TuiStartupModelOptions,
+): ModelRoute {
+  if (options.modelExplicit) return router.require(options.cliModel);
+  return resolveRestoredSessionModelRoute(
+    router,
+    restored,
+    options.projectDefaultRouteId ?? options.cliModel,
+  );
+}
+
+/** Apply explicit startup overrides after hydration, then persist a coordinated route/level. */
+export function coordinateTuiStartupSettings(
+  settings: SessionSettings,
+  router: ModelRouter,
+  route: ModelRoute,
+  thinkingEffort?: string,
+): string | undefined {
+  const routeChanged =
+    settings.modelRouteId !== route.id ||
+    settings.model !== route.model ||
+    settings.provider !== route.provider;
+  if (thinkingEffort !== undefined) {
+    settings.thinkingEffort = thinkingEffort;
+    settings.thinkingEffortExplicit = true;
+  }
+  if (routeChanged || thinkingEffort !== undefined) {
+    migrateSessionModelRoute(settings, route);
+  }
+  return coordinateSessionReasoningLevel(settings, router);
 }
 
 const SESSION_SELECTOR_DIALOG_ID = "local-ui:session-selector";
@@ -749,8 +794,6 @@ async function startLineModeRepl(opts: ReplOptions): Promise<void> {
   process.on("SIGINT", onSigint);
 
   const resolveActiveRoute = async () => {
-    const fallbackRouteId =
-      picoConfig.model ?? (opts.modelExplicit || process.env.LLM_MODEL ? opts.model : undefined);
     // 第二轮开始读取会话已持久化的模型选择，与完整 TUI 的 bundle 装配保持一致。
     // fork 首轮由 runAgentFromCli 先执行 Saga，此时目标会话尚不可安全预创建。
     if (selection.mode !== "fork") {
@@ -758,11 +801,11 @@ async function startLineModeRepl(opts: ReplOptions): Promise<void> {
         globalSessionManager.get(selection.sessionId, opts.workDir) ??
         (await globalSessionManager.getOrCreate(selection.sessionId, opts.workDir));
       const restoredSettings = (await session.readHydrationSnapshot()).runtime.settings;
-      const route = resolveRestoredSessionModelRoute(
-        modelRouter,
-        restoredSettings,
-        fallbackRouteId,
-      );
+      const route = resolveTuiStartupModelRoute(modelRouter, restoredSettings, {
+        cliModel: opts.model,
+        modelExplicit: opts.modelExplicit,
+        projectDefaultRouteId: picoConfig.model,
+      });
       const settings = getOrCreateSessionSettings(
         {
           sessionId: selection.sessionId,
@@ -775,16 +818,17 @@ async function startLineModeRepl(opts: ReplOptions): Promise<void> {
         },
         { persistence: session },
       );
-      if (
-        settings.modelRouteId !== route.id ||
-        settings.model !== route.model ||
-        settings.provider !== route.provider
-      ) {
-        migrateSessionModelRoute(settings, route);
-      }
-      return modelRouter.providerConfig(route.id, opts.thinkingEffort);
+      const thinkingEffort = coordinateTuiStartupSettings(
+        settings,
+        modelRouter,
+        route,
+        opts.thinkingEffort,
+      );
+      return modelRouter.providerConfig(route.id, thinkingEffort);
     }
-    const route = modelRouter.require(fallbackRouteId);
+    const route = modelRouter.require(
+      opts.modelExplicit ? opts.model : (picoConfig.model ?? opts.model),
+    );
     return modelRouter.providerConfig(route.id, opts.thinkingEffort);
   };
 
@@ -831,7 +875,9 @@ async function startLineModeRepl(opts: ReplOptions): Promise<void> {
             modelRouteId: activeRoute.route.id,
             modelCapabilities: activeRoute.route.capabilities,
             allowModelFallback: false,
-            ...(opts.thinkingEffort !== undefined ? { thinkingEffort: opts.thinkingEffort } : {}),
+            ...(activeRoute.config.thinkingEffort !== undefined
+              ? { thinkingEffort: activeRoute.config.thinkingEffort }
+              : {}),
             ...(opts.mcpConfigPath !== undefined ? { mcpConfigPath: opts.mcpConfigPath } : {}),
             ...(opts.addDirs !== undefined ? { addDirs: opts.addDirs } : {}),
             sessionSelection: selection,
@@ -1035,11 +1081,11 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     const restoredSettings = hydration.runtime.settings;
     // 配置从 legacy 环境变量迁移到 providerID/modelID 后，旧 session 仍可能保存
     // legacy/<model>。优先恢复精确路由，失效时按模型名或项目默认路由平滑迁移。
-    const initialRoute = resolveRestoredSessionModelRoute(
-      modelRouter,
-      restoredSettings,
-      picoConfig.model ?? (opts.modelExplicit || process.env.LLM_MODEL ? opts.model : undefined),
-    );
+    const initialRoute = resolveTuiStartupModelRoute(modelRouter, restoredSettings, {
+      cliModel: opts.model,
+      modelExplicit: opts.modelExplicit,
+      projectDefaultRouteId: picoConfig.model,
+    });
     const workspaceRoots = await WorkspaceRoots.create(
       opts.workDir,
       selection.mode === "fork"
@@ -1105,14 +1151,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         },
         { persistence: session },
       );
-      if (
-        settings.modelRouteId !== initialRoute.id ||
-        settings.model !== initialRoute.model ||
-        settings.provider !== initialRoute.provider
-      ) {
-        migrateSessionModelRoute(settings, initialRoute);
-      }
-      coordinateSessionReasoningLevel(settings, modelRouter);
+      coordinateTuiStartupSettings(settings, modelRouter, initialRoute, opts.thinkingEffort);
       setSessionAdditionalDirectories(settings, workspaceRoots.list().slice(1));
 
       const scheduleDraft = cronService
@@ -1828,6 +1867,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     return (
       <App
         model={bundle.settings.model}
+        modelRouteId={bundle.settings.modelRouteId}
         provider={bundle.settings.provider}
         workDir={opts.workDir}
         sessionMode={bundle.selection.mode}
