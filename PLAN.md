@@ -63,6 +63,42 @@
 
 ---
 
+# Pico 原生内核与 Claude Code 资源兼容计划
+
+## 目标与架构
+
+- Pico 配置、运行状态、信任、模型路由和生命周期保持原生，不依赖 Claude Code CLI、SDK 或安装目录。
+- 项目资源统一到 `.pico/`，用户资源统一到 `$PICO_HOME`，工作区状态统一到 `$PICO_HOME/workspaces/<workspace-id>/`。
+- `.claude` 与 `.claude-plugin` 仅作为只读兼容输入，经统一资源编译管线转换为 Pico 内部贡献模型。
+- 声明型资源自动发现；Hook、MCP、LSP、Shell 插值和可执行文件必须经过工作区信任和内容指纹授权。
+
+## 实现任务
+
+- [ ] 建立 Pico Home、项目资源和工作区状态路径抽象，迁移 `.claw` 原生配置与运行状态。
+- [ ] 合并 Skill、Command、Agent 的重复扫描器，固定项目 Pico > 项目 Claude > 用户 Pico > 用户 Claude > builtin 的优先级。
+- [ ] 实现 Pico 原生 Plugin manifest 与 Claude Code Plugin 适配器，支持默认目录、可选 manifest、根 `SKILL.md` 和自定义组件路径。
+- [ ] 将 Plugin Skills、Commands、Agents、Hooks、MCP、LSP、`bin/`、用户配置和本地依赖接入现有运行时。
+- [ ] 为 Plugin 执行型贡献实现内容指纹、授权失效、路径边界和符号链接保护。
+- [ ] 将 Claude Plugin Agent 纳入统一 Agent Catalog 和自然语言委派，兼容 `inherit` 与 Claude 模型别名。
+- [ ] 增加 Plugin 管理命令、资源来源和兼容状态诊断；未支持组件必须显示 degraded/blocked。
+- [ ] 完成迁移、兼容导入、信任、命名空间、变量、模型路由和无 Claude CLI 环境的集成测试。
+
+## 默认兼容边界
+
+- 默认读取项目和用户的 Claude Skills、Commands、Agents；Pico 原生资源始终优先。
+- Claude Plugin 可原样放入 `.pico/plugins/<name>` 或 `$PICO_HOME/plugins/<name>`，也可通过显式本地路径加载。
+- 第一阶段支持 Skills、Commands、Agents、Hooks、MCP、LSP、用户配置和本地依赖。
+- `outputStyles`、themes、monitors、channels 和远程 marketplace 暂不实现，但不得静默忽略。
+
+## 协作与验收
+
+- 公共路径、配置 Schema、统一贡献类型和运行时接线由集成分支单一所有者维护。
+- 并行任务只修改独立模块；`markdown-command-loader`、资源 Catalog、锁文件和共享配置串行集成。
+- 验收要求包括原样 Claude Plugin fixture、自然语言 Claude Agent 委派、执行型贡献信任、`.claw` 迁移与 worktree 状态隔离。
+- 最终在最新 `origin/main` 上通过 lint、typecheck、build、全量测试、安全审计和无 `claude` CLI 的打包 smoke。
+
+---
+
 # 2026-07-14 main 全面 Review 修复计划
 
 ## 目标与决策
