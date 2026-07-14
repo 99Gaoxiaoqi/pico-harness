@@ -1155,7 +1155,7 @@ export class AgentEngine implements AgentRunner {
                 content: EXPLORE_SYNTHESIS_FAILED_MESSAGE,
               };
               await session.commitMessages(failedResponse);
-              reporter.onMessage(failedResponse.content);
+              await this.reportMessage(reporter, failedResponse.content, signal);
               reporter.onFinish();
               break;
             }
@@ -1210,7 +1210,7 @@ export class AgentEngine implements AgentRunner {
                 : REQUIRED_DELEGATION_RECOVERY_FAILED_MESSAGE,
             };
             await session.commitMessages(failedResponse);
-            reporter.onMessage(failedResponse.content);
+            await this.reportMessage(reporter, failedResponse.content, signal);
             reporter.onFinish();
             break;
           }
@@ -1236,7 +1236,7 @@ export class AgentEngine implements AgentRunner {
                 content: REQUIRED_FIRST_DELEGATION_FAILED_MESSAGE,
               };
               await session.commitMessages(failedResponse);
-              reporter.onMessage(failedResponse.content);
+              await this.reportMessage(reporter, failedResponse.content, signal);
               reporter.onFinish();
               break;
             }
@@ -1265,7 +1265,7 @@ export class AgentEngine implements AgentRunner {
 
           // 模型回复纯文本时广播 (通常是思考过程或最终结果)
           if (responseMsg.content) {
-            reporter.onMessage(responseMsg.content);
+            await this.reportMessage(reporter, responseMsg.content, signal);
           }
 
           // 3. 退出条件:模型没有请求任何工具调用,说明任务完成,挂起等待下一条指令
@@ -1478,7 +1478,7 @@ export class AgentEngine implements AgentRunner {
                     : REQUIRED_DELEGATION_RECOVERY_FAILED_MESSAGE,
                 };
                 await session.commitMessages(failedResponse);
-                reporter.onMessage(failedResponse.content);
+                await this.reportMessage(reporter, failedResponse.content, signal);
                 reporter.onFinish();
                 break;
               }
@@ -1739,7 +1739,7 @@ export class AgentEngine implements AgentRunner {
       this.consumeResponseBudget(session, response, costBefore);
       await session.commitMessages(response);
       if (response.content) {
-        reporter.onMessage(response.content);
+        await this.reportMessage(reporter, response.content, signal);
       }
       reporter.onFinish();
     } catch (err) {
@@ -1927,6 +1927,19 @@ export class AgentEngine implements AgentRunner {
    *
    * @returns 子智能体的纯文本总结汇报及外部化产物引用
    */
+  private async reportMessage(
+    reporter: Reporter,
+    content: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    reporter.onMessage(content);
+    await this.hookService?.dispatch(
+      "MessageDisplay",
+      { role: "assistant", content },
+      { signal },
+    );
+  }
+
   async runSub(
     taskPrompt: string,
     readOnlyRegistry: Registry,

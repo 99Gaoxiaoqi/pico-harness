@@ -53,7 +53,7 @@ function createHookifyCommand(hookify: HookCommandAdapterOptions["hookify"]): Sl
   return {
     name: "hookify",
     description: "Propose a restricted Hookify rule from natural language",
-    usage: "/hookify <description>",
+    usage: "/hookify <description>|confirm|cancel",
     argumentHint: "<description>",
     category: "system",
     kind: "local",
@@ -65,7 +65,13 @@ function createHookifyCommand(hookify: HookCommandAdapterOptions["hookify"]): Sl
         ...message(
           result.applied
             ? `Hookify rule applied: ${result.proposal.targetPath}`
-            : "Hookify proposal rejected; no file was written.",
+            : input.args.trim().toLowerCase() === "cancel"
+              ? "Hookify proposal cancelled; no file was written."
+              : [
+                  "Hookify proposal (not applied):",
+                  result.proposal.diff,
+                  "Run /hookify confirm to apply, or /hookify cancel to reject.",
+                ].join("\n"),
         ),
         data: result.proposal,
       };

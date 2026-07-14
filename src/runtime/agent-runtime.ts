@@ -360,6 +360,8 @@ export async function executeAgentRuntime(
         sessionSelection.mode === "resume" || sessionSelection.mode === "continue"
           ? "resume"
           : "startup",
+      ...(backgroundPolicy ? { hooks: false as const } : {}),
+      ...(dependencies.hookService ? { hookService: dependencies.hookService } : {}),
     }));
   runtimeState.assertCompatible(workDir, session.id);
   if (dependencies.hookService) runtimeState.attachHookService(dependencies.hookService);
@@ -440,6 +442,56 @@ export async function executeAgentRuntime(
   } else {
     trackedProvider = buildTrackedProvider(currentConfig);
   }
+  let activeMcpManager = dependencies.mcpManager;
+  runtimeState.bindHookRuntime({
+    provider: trackedProvider,
+    mcpInvoker: {
+      async invokeConnectedTool(server, tool, input, context) {
+        if (!activeMcpManager) throw new Error("MCP manager 尚未连接");
+        return await activeMcpManager.invokeConnectedTool(server, tool, input, context);
+      },
+    },
+    agentVerifier: {
+      async verify(request) {
+        const verifierEngine = new AgentEngine({
+          provider: hookPurposeProvider(trackedProvider),
+          registry: new ToolRegistry(),
+          workDir,
+          workspaceRoots,
+        });
+        const verifierRegistry = createSubagentRegistryFactory({
+          workDir,
+          workspaceRoots,
+          runner: verifierEngine,
+          manager: runtimeState.delegationManager,
+          maxSpawnDepth: 0,
+          yoloSandbox: { config: picoConfig.sandbox },
+          ownerSessionId: session.id,
+        })({ mode: "explore", role: "leaf", depth: 0, maxSpawnDepth: 0 });
+        const task = [
+          request.prompt,
+          "",
+          "只读核验以下 Hook input。最终只输出单个 JSON 对象：",
+          '{"ok": boolean, "reason": string}',
+          JSON.stringify(request.input),
+        ].join("\n");
+        const result = await verifierEngine.runSub(task, verifierRegistry, undefined, {
+          maxTurns: request.maxTurns,
+          role: "leaf",
+          depth: 0,
+          maxSpawnDepth: 0,
+          signal: request.signal,
+          workDir,
+        });
+        return result.summary;
+      },
+    },
+    onAsyncRewake(handler, output) {
+      runtimeState.steerQueue.push(
+        `[Hook asyncRewake ${handler.id}] ${output.reason ?? output.additionalContext ?? output.decision}`,
+      );
+    },
+  });
   const { goalManager, todoStore, toolDisclosure, backgroundManager, delegationManager } =
     runtimeState;
   const registry = buildRegistry(
@@ -586,6 +638,7 @@ export async function executeAgentRuntime(
   const mcpManager =
     dependencies.mcpManager ??
     (mcpConfigPath ? new McpConnectionManager(registry, { stdioCwd: workDir }) : undefined);
+  activeMcpManager = mcpManager;
   const unsubscribeMcpStatus =
     mcpManager && dependencies.mcpStatusSink
       ? mcpManager.subscribe(dependencies.mcpStatusSink)
@@ -1015,6 +1068,24 @@ function buildCompactor(kind: ProviderKind, model: string): Compactor {
     maxChars: estimateTokenBudgetAsChars(budget.inputBudgetTokens),
     retainLastMsgs: 6,
   });
+}
+
+/** Hook verifier 的所有模型调用都显式覆盖为 purpose=hook。 */
+function hookPurposeProvider(provider: LLMProvider): LLMProvider {
+  return {
+    ...(provider.modelName ? { modelName: provider.modelName } : {}),
+    generate: (messages, tools, options) =>
+      provider.generate(messages, tools, { ...options, purpose: "hook" }),
+    ...(provider.generateStream
+      ? {
+          generateStream: (messages, tools, onDelta, options) =>
+            provider.generateStream!(messages, tools, onDelta, {
+              ...options,
+              purpose: "hook",
+            }),
+        }
+      : {}),
+  };
 }
 
 /**

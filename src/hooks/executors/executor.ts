@@ -59,6 +59,18 @@ export interface HookHandlerExecutorOptions {
 export class DefaultHookExecutor implements HookExecutor {
   constructor(private readonly options: HookHandlerExecutorOptions) {}
 
+  /** SessionRuntime 每轮重建 Provider/MCP/Engine 时更新活态依赖，HookService 本身保持不变。 */
+  bind(
+    dependencies: Partial<
+      Pick<
+        HookHandlerExecutorOptions,
+        "provider" | "mcpInvoker" | "agentVerifier" | "onAsyncRewake"
+      >
+    >,
+  ): void {
+    Object.assign(this.options, dependencies);
+  }
+
   async execute(
     resolved: ResolvedHookHandler,
     input: HookInput,

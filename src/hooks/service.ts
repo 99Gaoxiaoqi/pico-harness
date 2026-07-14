@@ -21,6 +21,13 @@ export interface HookExecutor {
   ): Promise<HookOutput>;
 }
 
+export interface HookDecisionProvider {
+  evaluate<E extends HookEvent>(
+    event: E,
+    payload: HookEventPayloadMap[E],
+  ): HookOutput | Promise<HookOutput>;
+}
+
 export interface HookServiceOptions {
   workDir: string;
   sessionId: string;
@@ -28,6 +35,7 @@ export interface HookServiceOptions {
   snapshot?: HookSnapshot;
   concurrency?: number;
   agentConcurrency?: number;
+  decisionProviders?: readonly HookDecisionProvider[];
 }
 
 const DECISION_RANK: Readonly<Record<HookOutput["decision"], number>> = {
@@ -67,6 +75,11 @@ export class HookService {
     if (context.suppressHooks || this.hookScope.getStore()) return { decision: "allow" };
 
     const snapshot = this.snapshot;
+    const providerOutputs = await Promise.all(
+      (this.options.decisionProviders ?? []).map(async (provider) =>
+        provider.evaluate(event, payload),
+      ),
+    );
     const candidates = snapshot.handlers[event]
       .filter((entry) => entry.handler.enabled !== false)
       .filter((entry) => entry.trusted || !isExecutable(entry.handler))
@@ -74,7 +87,7 @@ export class HookService {
       .filter((entry) => conditionMatches(entry.groupCondition, payload))
       .filter((entry) => conditionMatches(entry.handler.if, payload));
     const handlers = deduplicate(candidates);
-    if (handlers.length === 0) return { decision: "allow" };
+    if (handlers.length === 0) return aggregateHookOutputs(providerOutputs);
 
     const input = makeInput(this.options.sessionId, this.options.workDir, event, payload);
     return await this.hookScope.run(true, async () => {
@@ -102,7 +115,7 @@ export class HookService {
           }
         },
       );
-      return aggregateHookOutputs(results);
+      return aggregateHookOutputs([...providerOutputs, ...results]);
     });
   }
 }
