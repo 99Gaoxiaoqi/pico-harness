@@ -71,14 +71,18 @@ export function createProductionLocalDaemonHost(
   const nextDesktopResourceVersion = () => ++desktopResourceVersion;
   const service = new WorkspaceRuntimeService({
     registrationStore,
-    execute: async ({ workspacePath, workspaceRuntime, prompt, sessionId, context }) => {
+    execute: async ({ workspacePath, workspaceRuntime, prompt, sessionId, execution, context }) => {
       if (!(await trustStore.isTrusted(workspacePath))) {
         throw new RuntimeProtocolError(
           RUNTIME_ERROR_CODES.FORBIDDEN,
           `工作区尚未信任，拒绝启动前台 Run: ${workspacePath}`,
         );
       }
-      const route = await resolveDesktopModelRoute(workspacePath, credentialVault);
+      const route = await resolveDesktopModelRoute(
+        workspacePath,
+        credentialVault,
+        execution?.requestedModel,
+      );
       const targetSessionId = sessionId ?? createCliSessionId();
       context.bindSession(targetSessionId);
       const session =
@@ -120,6 +124,15 @@ export function createProductionLocalDaemonHost(
       for (const steer of context.drainSteers()) runtimeState.steerQueue.push(steer);
       const unsubscribeSteer = context.onSteer((message) => runtimeState.steerQueue.push(message));
       try {
+        const skillActivation = execution?.skillActivation;
+        if (skillActivation?.sourcePath && skillActivation.hooks !== undefined) {
+          await runtimeState.activateComponentHooks({
+            kind: "skill",
+            path: skillActivation.sourcePath,
+            componentId: skillActivation.name,
+            inlineHooks: skillActivation.hooks,
+          });
+        }
         const result = await agentRuntime.execute(
           {
             prompt,
@@ -132,6 +145,7 @@ export function createProductionLocalDaemonHost(
             modelRouteId: route.modelRouteId,
             modelCapabilities: route.capabilities,
             allowModelFallback: false,
+            ...(execution?.allowedTools ? { allowedTools: execution.allowedTools } : {}),
             ...(await existingMcpConfig(workspacePath)),
           },
           {
@@ -395,9 +409,13 @@ interface PendingInteraction {
   readonly sessionId: string;
 }
 
-async function resolveDesktopModelRoute(workspacePath: string, credentialVault: CredentialVault) {
+async function resolveDesktopModelRoute(
+  workspacePath: string,
+  credentialVault: CredentialVault,
+  requestedModel?: string,
+) {
   const config = await loadPicoConfig(workspacePath);
-  const modelRouteId = config.model;
+  const modelRouteId = resolveDesktopRequestedModel(config, requestedModel);
   if (!modelRouteId) {
     throw new RuntimeProtocolError(
       RUNTIME_ERROR_CODES.FORBIDDEN,
@@ -441,6 +459,29 @@ async function resolveDesktopModelRoute(workspacePath: string, credentialVault: 
     );
   }
   return { ...route, apiKey: await credentialVault.resolve(credentialRef) };
+}
+
+function resolveDesktopRequestedModel(
+  config: Awaited<ReturnType<typeof loadPicoConfig>>,
+  requestedModel?: string,
+): string | undefined {
+  const requested = requestedModel?.trim();
+  if (!requested || requested === "inherit") return config.model;
+  const aliased = config.compatibility.claude.enabled
+    ? (config.compatibility.claude.modelAliases[requested] ?? requested)
+    : requested;
+  if (aliased.includes("/")) return aliased;
+  const matches = Object.entries(config.providers)
+    .filter(([, provider]) => provider.models.includes(aliased))
+    .map(([providerId]) => `${providerId}/${aliased}`);
+  if (matches.length === 1) return matches[0];
+  if (matches.length > 1) {
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.INVALID_PARAMS,
+      `Skill 模型 ${aliased} 匹配多个 Provider，请使用 provider/model 路由`,
+    );
+  }
+  return aliased;
 }
 
 async function existingMcpConfig(

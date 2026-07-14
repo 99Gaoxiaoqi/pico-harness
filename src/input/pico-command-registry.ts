@@ -22,6 +22,7 @@ import {
   resolveSkillCommand,
 } from "./skill-commands.js";
 import { renderSkillActivation } from "./skill-activation.js";
+import { renderAgentDispatchPrompt } from "./agent-activation.js";
 import {
   findAgentProfile,
   loadAgentCatalog,
@@ -601,10 +602,7 @@ function createCompactCommand(
           inputBudgetTokens: budget.inputBudgetTokens,
           targetRetainedTokens: Math.max(
             1,
-            Math.min(
-              Math.floor(budget.inputBudgetTokens * 0.5),
-              Math.floor(historyTokens * 0.5),
-            ),
+            Math.min(Math.floor(budget.inputBudgetTokens * 0.5), Math.floor(historyTokens * 0.5)),
           ),
           trigger: "manual",
         });
@@ -1698,21 +1696,6 @@ function closestAgentName(name: string, candidates: readonly string[]): string |
     }
   }
   return best?.name;
-}
-
-function renderAgentDispatchPrompt(agent: CatalogAgentProfile, task: string): string {
-  const args = {
-    agent_name: agent.name,
-    goal: task,
-  };
-
-  return [
-    "请把下面任务委派给指定 Agent 执行,不要由主 Agent 直接完成。",
-    "必须调用工具: delegate_task",
-    "",
-    "建议调用参数:",
-    JSON.stringify(args, null, 2),
-  ].join("\n");
 }
 
 function editDistance(left: string, right: string): number {
