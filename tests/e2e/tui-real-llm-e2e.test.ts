@@ -18,6 +18,8 @@ import {
   type TuiRunAgent,
 } from "../../src/tui/repl.js";
 import { TuiReporter, type TuiEntry } from "../../src/tui/tui-reporter.js";
+import type { ScheduleDraftCoordinator } from "../../src/tasks/cron-draft.js";
+import { ScheduleDraftReviewHandler } from "../../src/tui/schedule-draft-review.js";
 
 function readDotEnv(path: string): Record<string, string> {
   try {
@@ -149,6 +151,7 @@ interface TuiRealHarness {
       abortControllerRef?: TuiAbortControllerRef;
       openDialog?: (request: DialogRequest) => void;
       closeDialog?: (id: string) => void;
+      scheduleDraftCoordinator?: ScheduleDraftCoordinator;
     },
   ) => Promise<void>;
 }
@@ -240,6 +243,14 @@ describeRealLLM("TUI productization real LLM e2e", { timeout: 240000 }, () => {
               : {}),
             ...(options.openDialog ? { openDialog: options.openDialog } : {}),
             ...(options.closeDialog ? { closeDialog: options.closeDialog } : {}),
+            ...(options.scheduleDraftCoordinator
+              ? {
+                  scheduleDraft: {
+                    handler: new ScheduleDraftReviewHandler(),
+                    coordinator: options.scheduleDraftCoordinator,
+                  },
+                }
+              : {}),
           },
         );
       },
@@ -254,6 +265,47 @@ describeRealLLM("TUI productization real LLM e2e", { timeout: 240000 }, () => {
     const entries = harness.entries();
     expect(entries.some((entry) => entry.kind === "tool")).toBe(false);
     expect(assistantText(entries)).toContain("PICO_TUI_HELLO_OK");
+  });
+
+  it("明确中文周期任务调用 schedule_task，普通 Cron 讨论不创建", async () => {
+    const realProvider = new OpenAIProvider({
+      baseURL: realEnv.LLM_BASE_URL!,
+      apiKey: realEnv.LLM_API_KEY!,
+      model: realEnv.LLM_MODEL!,
+    });
+    const scheduleOnlyProvider = new ToolFilteringProvider(
+      realProvider,
+      new Set(["schedule_task"]),
+    );
+    const propose = vi
+      .fn<ScheduleDraftCoordinator["propose"]>()
+      .mockResolvedValue({ kind: "cancelled" });
+    const coordinator: ScheduleDraftCoordinator = { propose };
+    const explicit = createHarness("schedule-create");
+
+    await explicit.runPrompt("请创建一个定时任务：每个工作日上午九点生成工作日报。", {
+      provider: scheduleOnlyProvider,
+      scheduleDraftCoordinator: coordinator,
+      openDialog: () => {},
+      closeDialog: () => {},
+    });
+
+    expect(propose).toHaveBeenCalledOnce();
+    expect(propose.mock.calls[0]?.[0]).toMatchObject({
+      cronExpression: expect.any(String),
+      scheduleText: expect.any(String),
+      prompt: expect.any(String),
+    });
+
+    propose.mockClear();
+    const discussion = createHarness("schedule-discussion");
+    await discussion.runPrompt("请解释 Cron 五段表达式的语法和运行原理，不要创建任务。", {
+      provider: scheduleOnlyProvider,
+      scheduleDraftCoordinator: coordinator,
+      openDialog: () => {},
+      closeDialog: () => {},
+    });
+    expect(propose).not.toHaveBeenCalled();
   });
 
   it("触发写入时出现真实审批请求且拒绝后文件不变", async () => {

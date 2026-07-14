@@ -130,6 +130,7 @@ import { fileHistoryChanges, fileHistoryRestoreFile } from "../safety/file-histo
 import { createChangesDialogRequest, createChangesPanelModel } from "./changes-panel.js";
 import { TaskHostRuntime } from "../tasks/task-runtime.js";
 import { CronService } from "../tasks/cron-service.js";
+import type { ScheduleDraftCoordinator as ScheduleDraftCoordinatorContract } from "../tasks/cron-draft.js";
 import {
   CronDraftApplication,
   type CronDraftApplicationOptions,
@@ -255,7 +256,7 @@ interface TuiSessionBundle {
 
 interface TuiScheduleDraftRuntime {
   readonly handler: ScheduleDraftReviewHandler;
-  readonly coordinator: ScheduleDraftCoordinator;
+  readonly coordinator: ScheduleDraftCoordinatorContract;
 }
 
 function createTuiScheduleDraftRuntime(
