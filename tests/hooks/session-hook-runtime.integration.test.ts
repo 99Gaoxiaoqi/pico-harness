@@ -98,6 +98,40 @@ describe("SessionHookRuntime integration", () => {
     }
   });
 
+  it("受信 Plugin Hook 在会话启动时作为扩展来源加载", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pico-plugin-hooks-"));
+    cleanup.push(root);
+    const workDir = join(root, "workspace");
+    const userHome = join(root, "home");
+    await Promise.all([mkdir(workDir, { recursive: true }), mkdir(userHome, { recursive: true })]);
+    const runtime = await createSessionHookRuntime({
+      workDir,
+      userHome,
+      sessionId: "plugin-hooks",
+      extensionSources: [
+        {
+          kind: "plugin",
+          path: join(root, "plugins", "guard", "hooks.json"),
+          componentId: "guard",
+          inlineHooks: {
+            PreToolUse: [
+              { matcher: "bash", hooks: [{ type: "command", command: "echo checked" }] },
+            ],
+          },
+        },
+      ],
+    });
+    try {
+      expect(runtime.service.currentSnapshot().handlers.PreToolUse[0]?.source).toMatchObject({
+        kind: "plugin",
+        componentId: "guard",
+      });
+      expect(runtime.service.currentSnapshot().handlers.PreToolUse[0]?.trusted).toBe(false);
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
   it("并发组件租约独立释放，不会覆盖仍活跃的 Hook source", async () => {
     const root = await mkdtemp(join(tmpdir(), "pico-component-hooks-concurrent-"));
     cleanup.push(root);

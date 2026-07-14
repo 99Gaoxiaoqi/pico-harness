@@ -6,6 +6,7 @@ import { mkdtempSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FTS5Store } from "../src/memory/fts5-store.js";
+import { resolvePicoPaths } from "../src/paths/pico-paths.js";
 
 let tempDir: string;
 
@@ -55,7 +56,7 @@ describe("FTS5Store 连接池化", () => {
     const a = FTS5Store.acquire(dir)!;
     FTS5Store.acquire(dir); // rc=2
     a.insert("s1", 0, { role: "user", content: "测试池化" });
-    const dbPath = join(dir, ".claw", "sessions.db");
+    const dbPath = join(resolvePicoPaths(dir).workspace.root, "sessions.db");
     expect(existsSync(dbPath)).toBe(true);
 
     // 第一次 release:rc=1,实例仍在池中

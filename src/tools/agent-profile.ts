@@ -10,13 +10,15 @@
 // - maxTurns 上限:超过 50 拒绝(防无限跑)
 // - name 唯一:重名后者覆盖前者 + warn
 
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import * as yaml from "js-yaml";
 import { logger } from "../observability/logger.js";
 import { MAX_SUBAGENT_TURNS } from "./subagent-spec.js";
 
-/** 允许在 .claw/agents.yaml 的 tools 里声明的工具名白名单 */
+const MAX_AGENT_PROFILE_FILE_BYTES = 512 * 1024;
+
+/** 允许在 Pico 原生 agents.yaml 的 tools 里声明的工具名白名单 */
 export const KNOWN_TOOL_NAMES: ReadonlySet<string> = new Set([
   "read_file",
   "write_file",
@@ -48,6 +50,10 @@ export interface AgentProfile {
   readonly thinkingEffort?: string;
   /** 该角色可用的工具名列表(必须是 KNOWN_TOOL_NAMES 子集) */
   readonly tools: string[];
+  /** 目录适配后保留的内联 Hook 声明；native YAML 可省略。 */
+  readonly hooks?: unknown;
+  /** Hook 信任与热加载使用的稳定来源路径。 */
+  readonly sourcePath?: string;
 }
 
 export interface AgentProfileLoadResult {
@@ -57,6 +63,11 @@ export interface AgentProfileLoadResult {
    * Claude/builtin Profile 回落，键已按大小写不敏感归一化。
    */
   readonly tombstoneNames: string[];
+}
+
+export interface AgentProfileLoaderOptions {
+  /** 显式原生 Agent YAML；省略时保持旧 `.claw/agents.yaml` 兼容入口。 */
+  readonly filePath?: string;
 }
 
 /** YAML 文件的原始结构 */
@@ -77,7 +88,7 @@ interface RawAgent {
 }
 
 /**
- * AgentProfileLoader:从 <workDir>/.claw/agents.yaml 加载自定义子代理角色。
+ * AgentProfileLoader:从指定 Pico agents.yaml 加载自定义子代理角色；默认保留 .claw 兼容入口。
  *
  * 设计对标 SkillLoader:
  * - 文件不存在静默返回 [](ENOENT 不报错,工作区没配就是没自定义角色)
@@ -85,7 +96,11 @@ interface RawAgent {
  * - 校验:name 必填且唯一、tools 白名单子集、maxTurns 上限
  */
 export class AgentProfileLoader {
-  constructor(private readonly workDir: string) {}
+  private readonly filePath: string;
+
+  constructor(workDir: string, options: AgentProfileLoaderOptions = {}) {
+    this.filePath = options.filePath ?? join(workDir, ".claw", "agents.yaml");
+  }
 
   /**
    * 加载并校验全部自定义角色。
@@ -97,9 +112,17 @@ export class AgentProfileLoader {
 
   /** 加载 Profile 及必须在统一目录中保留的 fail-closed tombstone。 */
   async loadWithTombstones(): Promise<AgentProfileLoadResult> {
-    const filePath = join(this.workDir, ".claw", "agents.yaml");
+    const filePath = this.filePath;
     let content: string;
     try {
+      const fileStat = await stat(filePath);
+      if (fileStat.size > MAX_AGENT_PROFILE_FILE_BYTES) {
+        logger.warn(
+          { filePath, size: fileStat.size, limit: MAX_AGENT_PROFILE_FILE_BYTES },
+          "[agent-profile] 配置文件超过大小上限，已忽略",
+        );
+        return emptyLoadResult();
+      }
       content = await readFile(filePath, "utf8");
     } catch (err) {
       // ENOENT:工作区未配置自定义角色,静默返回空

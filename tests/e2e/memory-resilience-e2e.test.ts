@@ -15,6 +15,7 @@ import type {
 import { MemoryNudger } from "../../src/memory/memory-nudger.js";
 import type { Message } from "../../src/schema/message.js";
 import { SkillRegistry } from "../../src/memory/skill-registry.js";
+import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 
 class RuntimeDegradingStore implements ConversationSearchStore {
   status: MemoryBackendStatus = {
@@ -125,12 +126,10 @@ describe("memory resilience integration", () => {
     expect(doctorMessage).toContain(`ABI ${process.versions.modules}`);
     expect(doctorMessage).toContain(recommendation);
 
-    const sessionLog = await readFile(
-      join(workDir, ".claw", "sessions", `${sessionId}.jsonl`),
-      "utf8",
-    );
+    const workspacePaths = resolvePicoPaths(workDir).workspace;
+    const sessionLog = await readFile(join(workspacePaths.sessions, `${sessionId}.jsonl`), "utf8");
     expect(sessionLog).toContain("青铜猫头鹰计划");
-    const summaries = await readFile(join(workDir, ".claw", "memory", "summaries.json"), "utf8");
+    const summaries = await readFile(join(workspacePaths.memory, "summaries.json"), "utf8");
     expect(summaries).toContain("用户确定了青铜猫头鹰计划");
 
     await restored.close();

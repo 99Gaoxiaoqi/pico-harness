@@ -26,11 +26,12 @@ import {
   type McpToolResult,
 } from "./types.js";
 
-const DEFAULT_CONFIG_RELATIVE = ".claw/mcp.json";
+const DEFAULT_CONFIG_RELATIVE = ".pico/mcp.json";
 const DEFAULT_STARTUP_TIMEOUT_MS = 30_000;
 
 interface ServerEntry {
   name: string;
+  sourceId: string;
   config: McpServerConfig;
   status: McpConnectionStatus;
   client?: McpClient;
@@ -42,6 +43,7 @@ interface ServerEntry {
 
 export interface McpServerStatus {
   readonly name: string;
+  readonly sourceId: string;
   readonly transport: string;
   readonly status: McpConnectionStatus;
   readonly toolCount: number;
@@ -61,9 +63,19 @@ export interface McpStatusSummary {
 
 export interface McpStatusSnapshot {
   readonly configPath?: string;
+  readonly configSources?: readonly string[];
   readonly loadError?: string;
   readonly servers: readonly McpServerStatus[];
   readonly summary: McpStatusSummary;
+}
+
+export interface McpConfigSource {
+  /** Stable diagnostic identity, for example project or plugin:formatter. */
+  readonly id: string;
+  readonly path?: string;
+  readonly config?: McpConfig;
+  /** Missing optional files do not turn the whole source set into an error. */
+  readonly optional?: boolean;
 }
 
 /** OAuth 宿主只能返回可安全合并到 transport 的凭据补丁。 */
@@ -104,6 +116,7 @@ export class McpConnectionManager {
   private readonly listeners = new Set<McpStatusListener>();
   private registry: ToolRegistry | undefined;
   private configPath: string | undefined;
+  private configSources: readonly string[] | undefined;
   private loadError: string | undefined;
   private lifecycleTail: Promise<void> = Promise.resolve();
   private reloadPromise: Promise<void> | undefined;
@@ -150,7 +163,34 @@ export class McpConnectionManager {
     return this.enqueueLifecycle(async () => {
       await this.closeEntries();
       this.entries.clear();
+      this.configSources = undefined;
       await this.loadConfigInternal(configPath);
+    });
+  }
+
+  /** Atomically replace the project and enabled Plugin MCP contribution snapshot. */
+  async replaceSources(sources: readonly McpConfigSource[]): Promise<void> {
+    return this.enqueueLifecycle(async () => {
+      if (this.options.expectedConfigFingerprint !== undefined && sources.length !== 1) {
+        throw new Error("带冻结指纹的后台 MCP 只允许加载一个项目配置源");
+      }
+      await this.closeEntries();
+      this.entries.clear();
+      this.configPath = undefined;
+      this.configSources = Object.freeze(sources.map((source) => source.id));
+      this.loadError = undefined;
+      this.emitSnapshot();
+      for (const source of sources) {
+        if ((source.path === undefined) === (source.config === undefined)) {
+          throw new Error(`MCP source ${source.id} 必须且只能声明 path 或 config`);
+        }
+        if (source.path !== undefined) {
+          await this.loadConfigInternal(source.path, source.id, source.optional === true);
+        } else {
+          this.addValidatedConfig(source.config, source.id);
+        }
+      }
+      this.emitSnapshot();
     });
   }
 
@@ -317,6 +357,7 @@ export class McpConnectionManager {
     const summary = Object.freeze(summarizeServers(servers));
     return Object.freeze({
       ...(this.configPath !== undefined ? { configPath: this.configPath } : {}),
+      ...(this.configSources !== undefined ? { configSources: this.configSources } : {}),
       ...(this.loadError !== undefined ? { loadError: this.loadError } : {}),
       servers,
       summary,
@@ -331,7 +372,11 @@ export class McpConnectionManager {
     return count;
   }
 
-  private async loadConfigInternal(configPath: string): Promise<void> {
+  private async loadConfigInternal(
+    configPath: string,
+    sourceId = "project",
+    optional = false,
+  ): Promise<void> {
     const baseDir = this.options.stdioCwd ?? process.cwd();
     const absPath = isAbsolute(configPath) ? configPath : resolve(baseDir, configPath);
     this.configPath = absPath;
@@ -343,7 +388,7 @@ export class McpConnectionManager {
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
       if (code === "ENOENT") {
-        this.loadError = `配置文件不存在: ${absPath}`;
+        if (!optional) this.loadError = `配置文件不存在: ${absPath}`;
         this.emitSnapshot();
         logger.warn({ path: absPath }, `[MCP] 配置文件不存在，跳过 MCP 加载`);
         return;
@@ -376,16 +421,7 @@ export class McpConnectionManager {
 
     try {
       const config = this.validateConfig(data, absPath);
-      for (const [name, serverConfig] of Object.entries(config.mcpServers)) {
-        const disabled = serverConfig.enabled === false;
-        this.entries.set(name, {
-          name,
-          config: { ...serverConfig, name },
-          status: disabled ? "disabled" : "pending",
-          tools: [],
-          toolNames: [],
-        });
-      }
+      this.addValidatedConfig(config, sourceId);
     } catch (err) {
       this.loadError = redactSensitiveText(err instanceof Error ? err.message : String(err));
       this.emitSnapshot();
@@ -396,6 +432,28 @@ export class McpConnectionManager {
       { count: this.entries.size },
       `[MCP] 已加载 ${this.entries.size} 个 server 配置(${absPath})`,
     );
+  }
+
+  private addValidatedConfig(config: McpConfig | undefined, sourceId: string): void {
+    if (!config) throw new Error(`MCP source ${sourceId} 缺少 config`);
+    const normalized = this.validateConfig(config, sourceId);
+    for (const [name, serverConfig] of Object.entries(normalized.mcpServers)) {
+      const current = this.entries.get(name);
+      if (current) {
+        throw new Error(
+          `MCP server "${name}" 同时来自 ${current.sourceId} 与 ${sourceId}，拒绝静默覆盖`,
+        );
+      }
+      const disabled = serverConfig.enabled === false;
+      this.entries.set(name, {
+        name,
+        sourceId,
+        config: { ...serverConfig, name },
+        status: disabled ? "disabled" : "pending",
+        tools: [],
+        toolNames: [],
+      });
+    }
   }
 
   private async connectAllInternal(): Promise<void> {
@@ -703,6 +761,7 @@ export class McpConnectionManager {
 function freezeServerStatus(entry: ServerEntry): McpServerStatus {
   return Object.freeze({
     name: entry.name,
+    sourceId: entry.sourceId,
     transport: entry.config.transport,
     status: entry.status,
     toolCount: entry.toolNames.length,

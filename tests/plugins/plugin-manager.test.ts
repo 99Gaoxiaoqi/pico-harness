@@ -1,7 +1,8 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 import { PluginManager } from "../../src/plugins/plugin-manager.js";
 
 describe("PluginManager", () => {
@@ -30,18 +31,21 @@ describe("PluginManager", () => {
       scope: "project",
     });
     expect(await manager.list()).toEqual([
-      {
+      expect.objectContaining({
         id: "formatter",
         scope: "project",
         manifest: { name: "formatter", version: "1.2.3" },
-        installPath: pluginDir,
+        installPath: await realpath(pluginDir),
         enabled: false,
-      },
+        manifestSource: "claude-compatible",
+        compatibility: "compatible",
+        resourceFingerprint: expect.objectContaining({ algorithm: "sha256", fileCount: 1 }),
+      }),
     ]);
 
     const persisted = JSON.parse(await readFile(statePath, "utf8"));
     expect(persisted.plugins.formatter.project).toMatchObject({
-      installPath: pluginDir,
+      installPath: await realpath(pluginDir),
       manifest: { name: "formatter", version: "1.2.3" },
     });
   });
@@ -78,7 +82,7 @@ describe("PluginManager", () => {
     ]);
   });
 
-  it("拒绝缺少 name 或 version 的 manifest", async () => {
+  it("拒绝缺少 name，但允许省略 version", async () => {
     const missingName = await createPluginWithManifest({ version: "1.0.0" });
     const missingVersion = await createPluginWithManifest({ name: "nameless-version" });
     const manager = new PluginManager({ statePath });
@@ -89,9 +93,37 @@ describe("PluginManager", () => {
       scope: "local",
     });
     await expect(manager.installFromDirectory(missingVersion, "local")).resolves.toMatchObject({
-      success: false,
-      message: expect.stringMatching(/version/i),
+      success: true,
+      pluginId: "nameless-version",
       scope: "local",
+    });
+  });
+
+  it("无 manifest 时从目录名派生插件名", async () => {
+    const pluginDir = join(workDir, "manifestless-plugin");
+    await mkdir(pluginDir, { recursive: true });
+    await writeFile(join(pluginDir, "SKILL.md"), "# Manifestless\n");
+    const manager = new PluginManager({ statePath });
+
+    await expect(manager.installFromDirectory(pluginDir, "local")).resolves.toMatchObject({
+      success: true,
+      pluginId: "manifestless-plugin",
+    });
+    expect((await manager.list())[0]).toMatchObject({
+      manifest: { name: "manifestless-plugin" },
+      manifestSource: "manifestless",
+    });
+  });
+
+  it("未指定 statePath 时使用 PicoPaths workspace pluginState", async () => {
+    const picoHome = join(workDir, "pico-home");
+    const pluginDir = await createPlugin("portable-state", "1.0.0");
+    const manager = new PluginManager({ workDir, picoHome });
+    await manager.installFromDirectory(pluginDir, "project");
+
+    const expected = resolvePicoPaths(workDir, { picoHome }).workspace.pluginState;
+    expect(JSON.parse(await readFile(expected, "utf8"))).toMatchObject({
+      plugins: { "portable-state": { project: { enabled: false } } },
     });
   });
 

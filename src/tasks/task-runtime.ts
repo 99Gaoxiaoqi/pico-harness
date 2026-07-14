@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { join, resolve } from "node:path";
 import { logger } from "../observability/logger.js";
+import { resolvePicoPaths } from "../paths/pico-paths.js";
 import { TaskRegistry, type TaskSnapshot } from "./task-registry.js";
 import { TaskStore } from "./task-store.js";
 import { JobService } from "./job-service.js";
@@ -53,7 +54,7 @@ export class TaskHostRuntime {
     this.jobService = jobService;
     this.taskRegistry = new TaskRegistry();
     this.taskStore = new TaskStore({
-      filePath: join(repoRoot, ".claw", "tasks", "state.json"),
+      filePath: join(resolvePicoPaths(repoRoot).workspace.tasks, "state.json"),
     });
     this.jobService.reconcileExpiredJobs();
     this.taskRegistry.hydrate(materializeRuntimeTaskSnapshots(this.jobService), {

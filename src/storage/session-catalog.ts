@@ -1,8 +1,8 @@
-import { homedir } from "node:os";
 import { readFile, readdir, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { SessionIdentity } from "../engine/session-identity.js";
 import { quarantineCorruptJson, writeJsonAtomic } from "./atomic-json.js";
+import { resolvePicoHome } from "../paths/pico-paths.js";
 
 const SESSION_CATALOG_VERSION = 1 as const;
 const SAFE_LOG_ID = /^[A-Za-z0-9._-]+$/u;
@@ -60,7 +60,7 @@ export class SessionCatalog {
 
   constructor(options: SessionCatalogOptions = {}) {
     this.baseDirectory = resolve(
-      options.baseDirectory ?? join(homedir(), ".pico", "session-catalog"),
+      options.baseDirectory ?? join(resolvePicoHome(), "session-catalog"),
     );
     this.entriesDirectory = join(this.baseDirectory, "entries");
   }

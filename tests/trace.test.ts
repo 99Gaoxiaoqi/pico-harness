@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { AgentEngine } from "../src/engine/loop.js";
 import { Session } from "../src/engine/session.js";
 import { Span, Tracer, exportTraceToFile } from "../src/observability/trace.js";
+import { resolvePicoPaths } from "../src/paths/pico-paths.js";
 import type { LLMProvider } from "../src/provider/interface.js";
 import type { Message, ToolCall, ToolDefinition, ToolResult } from "../src/schema/message.js";
 
@@ -86,7 +87,7 @@ describe("trace export", () => {
     try {
       const tracePath = exportTraceToFile(root, workDir, "console:/tmp/project");
 
-      expect(tracePath).toContain(".claw/traces");
+      expect(tracePath).toContain(resolvePicoPaths(workDir).workspace.traces);
       expect(basename(tracePath)).toMatch(/^trace_console__tmp_project_\d+\.json$/);
       expect(JSON.parse(await readFile(tracePath, "utf8"))).toMatchObject({
         name: "Agent.Run",
@@ -96,7 +97,7 @@ describe("trace export", () => {
     }
   });
 
-  it("records the engine run, turn, model, and tool spans under .claw/traces", async () => {
+  it("records the engine run, turn, model, and tool spans under workspace traces", async () => {
     const workDir = await mkdtemp(join(tmpdir(), "pico-trace-run-"));
     const session = new Session("trace:session/001", workDir);
     const tracer = new Tracer();
@@ -113,12 +114,13 @@ describe("trace export", () => {
     try {
       await engine.run(session);
 
-      const traceFiles = await readdir(join(workDir, ".claw", "traces"));
+      const tracesDirectory = resolvePicoPaths(workDir).workspace.traces;
+      const traceFiles = await readdir(tracesDirectory);
       expect(traceFiles).toHaveLength(1);
       expect(traceFiles[0]).toMatch(/^trace_trace_session_001_\d+\.json$/);
 
       const exported = JSON.parse(
-        await readFile(join(workDir, ".claw", "traces", traceFiles[0]!), "utf8"),
+        await readFile(join(tracesDirectory, traceFiles[0]!), "utf8"),
       ) as {
         name?: string;
         attributes?: Record<string, unknown>;

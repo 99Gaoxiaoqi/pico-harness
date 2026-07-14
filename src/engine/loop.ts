@@ -455,7 +455,7 @@ export interface AgentEngineOptions {
   /** 子代理完整报告写入器；超过常规摘要目标时先落盘，再向主上下文回灌预览。 */
   subagentReportArtifactWriter?: SubagentReportArtifactWriter;
   /**
-   * 链路追踪器:记录决策树到 .claw/traces/ (第 19 讲)。
+   * 链路追踪器：记录决策树到 workspace traces 目录（第 19 讲）。
    * 未提供则不追踪。
    */
   tracer?: Tracer;
@@ -489,6 +489,8 @@ export interface AgentEngineOptions {
   rebuildProvider?: () => LLMProvider | undefined;
   /** 主会话 Hook 生命周期；子代 verifier/agent 不注入以防递归。 */
   hookService?: HookService;
+  /** 为主工作区及隔离 worktree 构建同策略 Skill Catalog。 */
+  skillLoaderFactory?: (workDir: string) => SkillLoader;
 }
 
 export interface SubagentExecutionRuntime {
@@ -557,6 +559,7 @@ export class AgentEngine implements AgentRunner {
   /** 凭证轮换回调(4.2):429 时切换 key 重建 provider;无多 key 时为 undefined */
   private readonly rebuildProvider?: () => LLMProvider | undefined;
   private readonly hookService?: HookService;
+  private readonly skillLoaderFactory?: (workDir: string) => SkillLoader;
 
   constructor(opts: AgentEngineOptions) {
     this.provider = opts.provider;
@@ -596,6 +599,7 @@ export class AgentEngine implements AgentRunner {
     this.shouldContinueAfterStop = opts.shouldContinueAfterStop;
     this.rebuildProvider = opts.rebuildProvider;
     this.hookService = opts.hookService;
+    this.skillLoaderFactory = opts.skillLoaderFactory;
   }
 
   /**
@@ -2096,7 +2100,11 @@ export class AgentEngine implements AgentRunner {
     // 委派层会传入 host/worktree 的可信运行目录；不从任务 context 或模型输出猜测根目录。
     const runtimeWorkspaceRoot = opts.workDir ?? this.workDir;
     const canViewSkills = initialToolNames.has("skill_view");
-    const skillIndex = canViewSkills ? await new SkillLoader(runtimeWorkspaceRoot).loadAll() : "";
+    const skillIndex = canViewSkills
+      ? await (
+          this.skillLoaderFactory?.(runtimeWorkspaceRoot) ?? new SkillLoader(runtimeWorkspaceRoot)
+        ).loadAll()
+      : "";
     signal?.throwIfAborted();
 
     // 子智能体专属 System Prompt:严厉警告必须用工具,不许凭空猜测。

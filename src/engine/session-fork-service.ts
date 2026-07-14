@@ -39,6 +39,7 @@ import {
   type SessionLineage,
   type SessionMetaV3,
 } from "./session-store.js";
+import { resolvePicoPaths } from "../paths/pico-paths.js";
 
 const SAFE_SESSION_ID = /^[A-Za-z0-9._-]+$/u;
 
@@ -119,9 +120,10 @@ export class SessionForkService {
     this.journal = options.journal ?? new StorageOperationJournal({ workDir: this.workDir });
     this.catalogProjector = options.catalogProjector ?? getDefaultSessionCatalogProjector();
     this.fileHistoryBaseDir = options.fileHistoryBaseDir ?? fileHistoryDefaultBaseDir();
+    const workspacePaths = resolvePicoPaths(this.workDir).workspace;
     this.summaryIndexPath =
-      options.summaryIndexPath ?? join(this.workDir, ".claw", "memory", "summaries.json");
-    this.artifactBaseDir = options.artifactBaseDir ?? join(this.workDir, ".claw", "artifacts");
+      options.summaryIndexPath ?? join(workspacePaths.memory, "summaries.json");
+    this.artifactBaseDir = options.artifactBaseDir ?? workspacePaths.artifacts;
     this.hooks = options.hooks;
     this.createOperationId = options.createOperationId ?? randomUUID;
     this.coordinator = new ForkOperationCoordinator({
@@ -156,7 +158,7 @@ export class SessionForkService {
         sourceCursor: snapshot.cursor,
         targetSessionId: input.targetSessionId,
         targetMode: input.targetMode,
-        stagingDirectory: join(this.workDir, ".claw", "fork-staging", operationId),
+        stagingDirectory: join(resolvePicoPaths(this.workDir).workspace.forkStaging, operationId),
       });
       if (operation.state === "needs_attention") {
         throw new SessionForkNeedsAttentionError(operation);
@@ -211,8 +213,11 @@ export class SessionForkService {
       publishCatalog: async (operation, bundle) => {
         // 先补父日志投影，否则全新 Catalog 会把已有 durable
         // parent cursor 的 fork 降级为只含 sessionId 的 stale 条目。
-        await this.catalogProjector.projectJournal(this.sessionPath(operation.sourceSessionId));
-        await this.catalogProjector.projectJournal(bundle.targetSessionPath);
+        await this.catalogProjector.projectJournal(
+          this.sessionPath(operation.sourceSessionId),
+          this.workDir,
+        );
+        await this.catalogProjector.projectJournal(bundle.targetSessionPath, this.workDir);
       },
     };
   }
@@ -246,7 +251,10 @@ export class SessionForkService {
     } satisfies SessionLineage;
     const stagedSessionPath = this.stagedSessionPath(operation);
     const targetSessionPath = this.sessionPath(operation.targetSessionId);
-    await mkdir(join(this.workDir, ".claw", "sessions"), { recursive: true, mode: 0o700 });
+    await mkdir(resolvePicoPaths(this.workDir).workspace.sessions, {
+      recursive: true,
+      mode: 0o700,
+    });
 
     if (
       !(await isCompletePreparedJournal(
@@ -317,15 +325,13 @@ export class SessionForkService {
 
   private stagedSessionPath(operation: ForkStorageOperation): string {
     return join(
-      this.workDir,
-      ".claw",
-      "sessions",
+      resolvePicoPaths(this.workDir).workspace.sessions,
       "." + operation.targetSessionId + ".fork-" + operation.operationId + ".jsonl",
     );
   }
 
   private sessionPath(sessionId: string): string {
-    return join(this.workDir, ".claw", "sessions", sessionId + ".jsonl");
+    return join(resolvePicoPaths(this.workDir).workspace.sessions, sessionId + ".jsonl");
   }
 }
 

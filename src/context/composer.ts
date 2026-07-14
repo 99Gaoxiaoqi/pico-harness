@@ -63,11 +63,12 @@ export class PromptComposer {
       memoryNudger?: IMemoryNudger;
       goalManager?: GoalManager;
       todoStore?: TodoStore;
+      skillLoader?: SkillLoader;
       onInstructionsLoaded?: (paths: readonly string[]) => void | Promise<void>;
     },
   ) {
     this.workDir = workDir;
-    this.skillLoader = new SkillLoader(workDir);
+    this.skillLoader = options?.skillLoader ?? new SkillLoader(workDir);
     this.planMode = planMode;
     this.planStore = new PlanStore(workDir);
     // host 注入 TodoStore 单例,与 TodoTool 共享同一实例(对标 GoalManager 范式)。
@@ -199,7 +200,7 @@ ${agentsContent}
         return null;
       }
 
-      const parts = ["# 已掌握的技能 (来自 .claw/skills/)"];
+      const parts = ["# 已掌握的技能 (来自 Pico workspace memory)"];
 
       for (const skill of topSkills) {
         const { successCount, failCount } = skill.stats;

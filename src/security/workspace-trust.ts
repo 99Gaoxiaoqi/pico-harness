@@ -9,8 +9,8 @@ import {
   unlink,
   writeFile,
 } from "node:fs/promises";
-import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
+import { resolvePicoHome } from "../paths/pico-paths.js";
 
 const TRUST_STORE_VERSION = 1 as const;
 const TRUST_DIRECTORY_MODE = 0o700;
@@ -19,7 +19,7 @@ const TRUST_FILE_MODE = 0o600;
 export const WORKSPACE_TRUST_RISKS = Object.freeze([
   "读取 AGENTS.md 以及项目 Skills，并把它们作为 Agent 指令",
   "启动 .pico/config.json 配置的 LSP 进程和 Provider 端点",
-  "启动 .claw 配置的 MCP 服务与 Hook 命令",
+  "启动项目配置的 MCP 服务与 Hook 命令",
   "使用项目配置的凭证环境变量和额外工作区目录",
 ] as const);
 
@@ -38,7 +38,7 @@ export interface WorkspaceTrustPrompt {
 }
 
 export interface WorkspaceTrustStoreOptions {
-  /** 只由宿主注入的用户状态目录；生产默认为 ~/.pico。 */
+  /** 只由宿主注入的用户状态目录；生产默认为 PICO_HOME。 */
   readonly userStateDirectory?: string;
   readonly now?: () => Date;
 }
@@ -73,7 +73,7 @@ export class WorkspaceTrustStore {
   private mutationQueue: Promise<void> = Promise.resolve();
 
   constructor(options: WorkspaceTrustStoreOptions = {}) {
-    this.directoryPath = options.userStateDirectory ?? join(homedir(), ".pico");
+    this.directoryPath = options.userStateDirectory ?? resolvePicoHome();
     this.filePath = join(this.directoryPath, "trusted-workspaces.json");
     this.now = options.now ?? (() => new Date());
   }

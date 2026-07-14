@@ -1,14 +1,17 @@
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { readFile } from "node:fs/promises";
+import { resolvePicoPaths } from "../paths/pico-paths.js";
+import { writeJsonAtomic } from "../storage/atomic-json.js";
+import { resolvePluginContributions } from "./plugin-resolver.js";
+import type {
+  PluginCompatibility,
+  PluginDiagnostic,
+  PluginManifest,
+  PluginManifestSource,
+  PluginResourceFingerprint,
+  PluginScope,
+} from "./plugin-types.js";
 
-export type PluginScope = "user" | "project" | "local";
-
-export interface PluginManifest {
-  name: string;
-  version: string;
-  description?: string;
-  [key: string]: unknown;
-}
+export type { PluginManifest, PluginScope } from "./plugin-types.js";
 
 export interface PluginOperationResult {
   success: boolean;
@@ -24,12 +27,20 @@ export interface InstalledPlugin {
   manifest: PluginManifest;
   installPath: string;
   enabled: boolean;
+  manifestSource: PluginManifestSource;
+  compatibility: PluginCompatibility;
+  diagnostics: readonly PluginDiagnostic[];
+  resourceFingerprint: PluginResourceFingerprint;
 }
 
 const SCOPE_ORDER: PluginScope[] = ["user", "project", "local"];
 
-interface PluginManagerOptions {
+export interface PluginManagerOptions {
   statePath?: string;
+  workDir?: string;
+  picoHome?: string;
+  homeDir?: string;
+  env?: Readonly<Record<string, string | undefined>>;
 }
 
 interface PluginState {
@@ -40,45 +51,60 @@ interface StoredPlugin {
   installPath: string;
   manifest: PluginManifest;
   enabled: boolean;
+  manifestSource: PluginManifestSource;
+  compatibility: PluginCompatibility;
+  diagnostics: readonly PluginDiagnostic[];
+  resourceFingerprint: PluginResourceFingerprint;
 }
 
 export class PluginManager {
   private readonly statePath: string;
 
   constructor(options: PluginManagerOptions = {}) {
-    this.statePath = options.statePath ?? resolve(process.cwd(), ".pico", "plugins.json");
+    this.statePath =
+      options.statePath ??
+      resolvePicoPaths(options.workDir ?? process.cwd(), {
+        ...(options.picoHome ? { picoHome: options.picoHome } : {}),
+        ...(options.homeDir ? { homeDir: options.homeDir } : {}),
+        ...(options.env ? { env: options.env } : {}),
+      }).workspace.pluginState;
   }
 
   async installFromDirectory(
     directoryPath: string,
     scope: PluginScope,
   ): Promise<PluginOperationResult> {
-    const resolvedPath = resolve(directoryPath);
-    const manifestResult = await this.loadManifest(resolvedPath);
-    if (!manifestResult.success) {
+    const resolution = await resolvePluginContributions(directoryPath);
+    if (resolution.compatibility === "blocked" || !resolution.fingerprint) {
       return {
         success: false,
-        message: manifestResult.message,
+        message:
+          resolution.diagnostics.find((item) => item.compatibility === "blocked")?.message ??
+          `Plugin ${directoryPath} could not be resolved.`,
         scope,
       };
     }
 
-    const manifest = manifestResult.manifest;
+    const manifest = resolution.manifest;
     const state = await this.readState();
     const current = state.plugins[manifest.name]?.[scope];
     state.plugins[manifest.name] = {
       ...(state.plugins[manifest.name] ?? {}),
       [scope]: {
-        installPath: resolvedPath,
+        installPath: resolution.plugin.root,
         manifest,
         enabled: current?.enabled ?? false,
+        manifestSource: resolution.plugin.manifestSource,
+        compatibility: resolution.compatibility,
+        diagnostics: resolution.diagnostics,
+        resourceFingerprint: resolution.fingerprint,
       },
     };
     await this.writeState(state);
 
     return {
       success: true,
-      message: `Installed plugin ${manifest.name}@${manifest.version} to ${scope}.`,
+      message: `Installed plugin ${manifest.name}${manifest.version ? `@${manifest.version}` : ""} to ${scope}.`,
       pluginId: manifest.name,
       pluginName: manifest.name,
       scope,
@@ -107,6 +133,10 @@ export class PluginManager {
               manifest: { ...plugin.manifest },
               installPath: plugin.installPath,
               enabled: plugin.enabled,
+              manifestSource: plugin.manifestSource,
+              compatibility: plugin.compatibility,
+              diagnostics: plugin.diagnostics,
+              resourceFingerprint: plugin.resourceFingerprint,
             },
           ];
         }),
@@ -141,62 +171,13 @@ export class PluginManager {
     };
   }
 
-  private async loadManifest(
-    pluginPath: string,
-  ): Promise<{ success: true; manifest: PluginManifest } | { success: false; message: string }> {
-    const dir = await stat(pluginPath).catch(() => undefined);
-    if (!dir?.isDirectory()) {
-      return { success: false, message: `Plugin directory not found: ${pluginPath}` };
-    }
-
-    const manifestPath = await findManifestPath(pluginPath);
-    if (!manifestPath) {
-      return {
-        success: false,
-        message: `Plugin manifest not found: ${join(pluginPath, ".claude-plugin", "plugin.json")}`,
-      };
-    }
-
-    let raw: string;
-    try {
-      raw = await readFile(manifestPath, "utf8");
-    } catch (error) {
-      return { success: false, message: `Failed to read plugin manifest: ${errorMessage(error)}` };
-    }
-
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(raw);
-    } catch (error) {
-      return { success: false, message: `Invalid plugin manifest JSON: ${errorMessage(error)}` };
-    }
-
-    if (!isRecord(parsed)) {
-      return { success: false, message: "Plugin manifest must be a JSON object." };
-    }
-    if (typeof parsed.name !== "string" || parsed.name.trim() === "") {
-      return { success: false, message: "Plugin manifest requires a non-empty name." };
-    }
-    if (typeof parsed.version !== "string" || parsed.version.trim() === "") {
-      return { success: false, message: "Plugin manifest requires a non-empty version." };
-    }
-
-    return {
-      success: true,
-      manifest: {
-        ...parsed,
-        name: parsed.name,
-        version: parsed.version,
-      },
-    };
-  }
-
   private async readState(): Promise<PluginState> {
     let raw: string;
     try {
       raw = await readFile(this.statePath, "utf8");
-    } catch {
-      return { plugins: {} };
+    } catch (error) {
+      if (isErrno(error, "ENOENT")) return { plugins: {} };
+      throw error;
     }
 
     try {
@@ -205,27 +186,14 @@ export class PluginManager {
         return { plugins: {} };
       }
       return { plugins: parsed.plugins as PluginState["plugins"] };
-    } catch {
-      return { plugins: {} };
+    } catch (error) {
+      throw new Error(`Plugin state ${this.statePath} is invalid`, { cause: error });
     }
   }
 
   private async writeState(state: PluginState): Promise<void> {
-    await mkdir(dirname(this.statePath), { recursive: true });
-    await writeFile(this.statePath, `${JSON.stringify(state, null, 2)}\n`);
+    await writeJsonAtomic(this.statePath, state);
   }
-}
-
-async function findManifestPath(pluginPath: string): Promise<string | undefined> {
-  const candidates = [
-    join(pluginPath, ".claude-plugin", "plugin.json"),
-    join(pluginPath, "plugin.json"),
-  ];
-  for (const candidate of candidates) {
-    const candidateStat = await stat(candidate).catch(() => undefined);
-    if (candidateStat?.isFile()) return candidate;
-  }
-  return undefined;
 }
 
 function scopeRank(scope: PluginScope): number {
@@ -236,6 +204,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+function isErrno(error: unknown, code: string): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error && error.code === code;
 }

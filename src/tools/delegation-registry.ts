@@ -25,6 +25,9 @@ import { classifyBashCommand } from "../approval/bash-safety.js";
 import { bashCommandFromArgs } from "../approval/bash-paths.js";
 import { buildMinimalChildProcessEnv } from "../os/child-process-env.js";
 import { TodoTool } from "./todo.js";
+import type { HookService } from "../hooks/service.js";
+import { ReadArtifactTool } from "./artifact-read.js";
+import { resolvePicoPaths } from "../paths/pico-paths.js";
 
 export interface SubagentRegistryFactoryConfig {
   workDir: string;
@@ -41,6 +44,14 @@ export interface SubagentRegistryFactoryConfig {
   ownerSessionId?: string;
   /** 是否由长生命周期宿主持有 optional/detached 委派。 */
   allowAsyncCompletion?: boolean;
+  /** 与宿主同源的 Skill Catalog，保留用户、Plugin 与兼容开关语义。 */
+  skillLoaderFactory?: (workDir: string) => SkillLoader;
+  /** 子代理工具调用与主会话共享同一 HookService 快照。 */
+  hookService?: HookService;
+  /** 持久 Agent 按每次运行激活内联 Hook 的租约工厂。 */
+  activateAgentHooks?: (profile: AgentProfile) => Promise<() => void | Promise<void>>;
+  /** 父会话的受信 artifact 根；worker worktree 不得改变此边界。 */
+  artifactBaseDir?: string;
 }
 
 /**
@@ -85,6 +96,7 @@ export function createSubagentRegistryFactory(
   const resolvedConfig: ResolvedSubagentRegistryFactoryConfig = {
     ...config,
     workspaceRoots: config.workspaceRoots ?? WorkspaceRoots.createSync(config.workDir),
+    artifactBaseDir: config.artifactBaseDir ?? resolvePicoPaths(config.workDir).workspace.artifacts,
   };
   const profiles = resolvedConfig.profiles ?? [];
 
@@ -115,6 +127,7 @@ export function createSubagentRegistryFactory(
 
 interface ResolvedSubagentRegistryFactoryConfig extends SubagentRegistryFactoryConfig {
   workspaceRoots: WorkspaceRoots;
+  artifactBaseDir: string;
 }
 
 /** 按 profile.tools 构造自定义角色的 registry */
@@ -124,8 +137,13 @@ function buildProfileRegistry(
   profile: AgentProfile,
 ): ToolRegistry {
   const registry = new ToolRegistry();
+  registry.register(new ReadArtifactTool(config.workDir, config.artifactBaseDir));
   for (const toolName of profile.tools) {
     if (request.mode === "explore" && EXPLORE_WRITE_TOOLS.has(toolName)) continue;
+    if (toolName === "skill_view" && config.skillLoaderFactory) {
+      registry.register(new SkillViewTool(config.skillLoaderFactory(config.workDir)));
+      continue;
+    }
     const ctor = TOOL_CONSTRUCTORS[toolName];
     if (ctor) registry.register(ctor(config.workDir, config.workspaceRoots, config.yoloSandbox));
   }
@@ -136,7 +154,7 @@ function buildProfileRegistry(
 
   // orchestrator 仍可递归委派(若角色允许且未超深度)
   maybeRegisterDelegateTool(config, request, registry);
-  return registry;
+  return attachHookService(registry, config.hookService);
 }
 
 /** 默认的 explore/worker 二档构造(原有逻辑) */
@@ -146,7 +164,12 @@ function buildModeRegistry(
   registry: ToolRegistry,
 ): ToolRegistry {
   registry.register(new ReadFileTool(config.workspaceRoots));
-  registry.register(new SkillViewTool(new SkillLoader(config.workDir)));
+  registry.register(new ReadArtifactTool(config.workDir, config.artifactBaseDir));
+  registry.register(
+    new SkillViewTool(
+      config.skillLoaderFactory?.(config.workDir) ?? new SkillLoader(config.workDir),
+    ),
+  );
 
   const bash = new BashTool(config.workDir, undefined, {
     allowBackground: false,
@@ -184,7 +207,7 @@ function buildModeRegistry(
   registry.register(new DelegateStatusTool(config.manager));
 
   maybeRegisterDelegateTool(config, request, registry);
-  return registry;
+  return attachHookService(registry, config.hookService);
 }
 
 /** orchestrator 角色且未超深度时,注册 delegate_task(允许递归委派) */
@@ -207,9 +230,16 @@ function maybeRegisterDelegateTool(
         ...(config.allowAsyncCompletion !== undefined
           ? { allowAsyncCompletion: config.allowAsyncCompletion }
           : {}),
+        ...(config.activateAgentHooks ? { activateAgentHooks: config.activateAgentHooks } : {}),
+        ...(config.hookService ? { hookService: config.hookService } : {}),
       }),
     );
   }
+}
+
+function attachHookService(registry: ToolRegistry, hookService?: HookService): ToolRegistry {
+  if (hookService) registry.setHookService(hookService);
+  return registry;
 }
 
 function buildSubagentSafetyMiddleware(

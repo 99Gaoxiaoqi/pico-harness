@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
 import { open, realpath } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Box, Text, useInput } from "ink";
 import { hashToolResultArtifactArgs, ToolResultArtifactStore } from "../context/artifact-store.js";
+import { resolvePicoPaths } from "../paths/pico-paths.js";
 import type { TuiToolCallProjection } from "./tui-event-store.js";
 import type { DialogRequest } from "./dialog-arbiter.js";
 import { truncateTerminalText } from "./terminal-width.js";
@@ -37,7 +38,7 @@ export interface ArtifactInspectorSource {
   expectedSessionId: string;
   expectedToolName: string;
   expectedArgsHash: string;
-  /** 必须由宿主显式传入，一般为 <workDir>/.claw/artifacts。 */
+  /** 必须由宿主显式传入，一般为当前 workspace 的 artifacts 目录。 */
   trustedRoot: string;
   /** 仅用于降级展示；分页和 locate 从可信 meta 重新解析，绝不直接使用它。 */
   markerPath?: string;
@@ -327,7 +328,7 @@ export function createArtifactInspectorContext(input: {
   if (!input.sessionId.trim()) throw new Error("Inspector sessionId must not be empty");
   return Object.freeze({
     expectedSessionId: input.sessionId,
-    trustedRoot: resolve(input.trustedRoot ?? join(input.workDir, ".claw", "artifacts")),
+    trustedRoot: resolve(input.trustedRoot ?? resolvePicoPaths(input.workDir).workspace.artifacts),
   });
 }
 

@@ -33,6 +33,7 @@ import {
 } from "./subagent-activity-reporter.js";
 import { SUBAGENT_OUTPUT_BUDGET } from "./subagent-budget.js";
 import { parseEphemeralAgentSpec, type EphemeralAgentSpec } from "./subagent-spec.js";
+import type { HookService } from "../hooks/service.js";
 
 /**
  * AgentRunner:打破循环依赖的抽象接口。
@@ -43,7 +44,7 @@ import { parseEphemeralAgentSpec, type EphemeralAgentSpec } from "./subagent-spe
  * 子智能体执行结果。
  * - summary: 最终纯文本总结汇报(主 Agent 直接可见)
  * - artifacts: 探索期间被外部化的大型工具输出磁盘路径(相对 workDir)。
- *   这些文件落在 workDir/.claw/artifacts/ 内,主 Agent 可用 read_file 直接回查,
+ *   这些文件落在当前 workspace artifacts 内，主 Agent 可用 read_artifact 分页回查，
  *   避免子代理读过大文件后,主 Agent 既看不到原文也无法定位。
  */
 export interface SubagentResult {
@@ -305,6 +306,8 @@ export class DelegateTaskTool implements BaseTool {
       worktreeSupervisor?: WorktreeSupervisor;
       reporter?: Reporter;
       ownerSessionId?: string;
+      activateAgentHooks?: (profile: AgentProfile) => Promise<() => void | Promise<void>>;
+      hookService?: HookService;
     } = {},
   ) {
     this.profiles = options.profiles ?? [];
@@ -315,6 +318,7 @@ export class DelegateTaskTool implements BaseTool {
   }
 
   definition(): ToolDefinition {
+    const agentNameSchema = persistentAgentNameSchema(this.profiles);
     return {
       name: "delegate_task",
       description:
@@ -346,7 +350,7 @@ export class DelegateTaskTool implements BaseTool {
                 context: { type: "string" },
                 mode: { type: "string", enum: ["explore", "worker"] },
                 role: { type: "string", enum: ["leaf", "orchestrator"] },
-                agent_name: { type: "string" },
+                agent_name: agentNameSchema,
                 agent: ephemeralAgentSchema(),
                 roots: { type: "array", items: { type: "string" } },
                 max_files: { type: "number", minimum: 1, maximum: MAX_DELEGATION_FILES },
@@ -361,12 +365,7 @@ export class DelegateTaskTool implements BaseTool {
             enum: ["explore", "worker"],
             description: "子智能体工具集。explore=只读探索,worker=受控读写开发。",
           },
-          agent_name: {
-            type: "string",
-            description:
-              "持久子代理角色名（来自统一 Agent 目录）。" +
-              "指定后使用该角色的 systemPrompt 和工具集；未找到时 fail closed。",
-          },
+          agent_name: agentNameSchema,
           agent: ephemeralAgentSchema(),
           role: {
             type: "string",
@@ -759,16 +758,20 @@ export class DelegateTaskTool implements BaseTool {
     // 自定义角色查询:agent_name 命中 profile 时,用其 prompt/maxTurns 覆盖 Tool 级默认
     const profile = task.agentName ? findAgentProfile(this.profiles, task.agentName) : undefined;
 
-    const registry = this.registryFactory({
-      mode: task.mode,
-      role: task.role,
-      depth: childDepth,
-      maxSpawnDepth,
-      ...(task.agentName ? { agentName: task.agentName } : {}),
-      ...(effectiveWorkDir ? { workDir: effectiveWorkDir } : {}),
-    });
-
+    let releaseAgentHooks: (() => void | Promise<void>) | undefined;
     try {
+      if (profile?.hooks !== undefined && profile.sourcePath && this.options.activateAgentHooks) {
+        releaseAgentHooks = await this.options.activateAgentHooks(profile);
+      }
+      const registry = this.registryFactory({
+        mode: task.mode,
+        role: task.role,
+        depth: childDepth,
+        maxSpawnDepth,
+        ...(task.agentName ? { agentName: task.agentName } : {}),
+        ...(effectiveWorkDir ? { workDir: effectiveWorkDir } : {}),
+      });
+
       // 自定义角色命中时,用 profile 的 prompt/maxTurns;否则用 Tool 级 options
       const customization = profile
         ? pickDefined({
@@ -791,16 +794,28 @@ export class DelegateTaskTool implements BaseTool {
       const childReporter = this.options.reporter
         ? new ScopedSubagentActivityReporter(this.options.reporter, activity)
         : undefined;
-      const subResult = await this.runner.runSub(prompt, registry, childReporter, {
-        depth: childDepth,
-        maxSpawnDepth,
-        role: task.role,
-        ...(signal ? { signal } : {}),
-        ...(effectiveWorkDir ? { workDir: effectiveWorkDir } : {}),
-        ...(usageAttribution ? { usageAttribution } : {}),
-        ...modelSelectionOptions(task.ephemeralAgent, profile),
-        ...customization,
-      });
+      const runSub = async (): Promise<SubagentResult> =>
+        await this.runner.runSub(prompt, registry, childReporter, {
+          depth: childDepth,
+          maxSpawnDepth,
+          role: task.role,
+          ...(signal ? { signal } : {}),
+          ...(effectiveWorkDir ? { workDir: effectiveWorkDir } : {}),
+          ...(usageAttribution ? { usageAttribution } : {}),
+          ...modelSelectionOptions(task.ephemeralAgent, profile),
+          ...customization,
+        });
+      const subResult =
+        profile?.sourcePath && this.options.hookService
+          ? await this.options.hookService.runInAgentComponentScope(
+              {
+                kind: "agent",
+                componentId: profile.name,
+                path: profile.sourcePath,
+              },
+              runSub,
+            )
+          : await runSub();
       signal?.throwIfAborted();
       return {
         taskIndex,
@@ -811,6 +826,14 @@ export class DelegateTaskTool implements BaseTool {
       };
     } catch (err) {
       return delegationResultFromError(taskIndex, err, Date.now() - startedAt, signal);
+    } finally {
+      if (releaseAgentHooks) {
+        try {
+          await releaseAgentHooks();
+        } catch (error) {
+          logger.warn({ error: String(error) }, "[Subagent] Agent Hook 租约释放失败");
+        }
+      }
     }
   }
 
@@ -1349,6 +1372,27 @@ function ephemeralAgentSchema(): Record<string, unknown> {
     },
     additionalProperties: false,
   };
+}
+
+function persistentAgentNameSchema(profiles: readonly AgentProfile[]): Record<string, unknown> {
+  const names = profiles.map((profile) => profile.name);
+  const catalog = profiles
+    .map((profile) => `${profile.name}: ${singleLine(profile.description).slice(0, 160)}`)
+    .join("\n")
+    .slice(0, 8_000);
+  return {
+    type: "string",
+    ...(names.length > 0 ? { enum: names } : {}),
+    description: [
+      "持久子代理角色名（来自宿主统一 Agent Catalog）。",
+      "指定后使用该角色的 systemPrompt 和工具集；未找到时 fail closed。",
+      catalog ? `可用 Agent:\n${catalog}` : "当前没有可用的持久 Agent。",
+    ].join("\n"),
+  };
+}
+
+function singleLine(value: string): string {
+  return value.replace(/\s+/gu, " ").trim();
 }
 
 function normalizeDelegationRoots(value: string[] | undefined, fallback: string[]): string[] {

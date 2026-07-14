@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { FTS5Store } from "../../src/memory/fts5-store.js";
 import { JsonlMemoryStore } from "../../src/memory/jsonl-memory-store.js";
 import type { ConversationSearchStore } from "../../src/memory/memory-store.js";
+import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 
 describe("conversation search backend integration", () => {
   const tempDirs: string[] = [];
@@ -54,9 +55,9 @@ describe("conversation search backend integration", () => {
   it("closes an opened SQLite handle when schema initialization fails", () => {
     const workDir = mkdtempSync(join(tmpdir(), "pico-memory-init-"));
     tempDirs.push(workDir);
-    const clawDir = join(workDir, ".claw");
-    const dbPath = join(clawDir, "sessions.db");
-    mkdirSync(clawDir, { recursive: true });
+    const workspaceRoot = resolvePicoPaths(workDir).workspace.root;
+    const dbPath = join(workspaceRoot, "sessions.db");
+    mkdirSync(workspaceRoot, { recursive: true });
 
     const setup = new Database(dbPath);
     setup.exec("CREATE VIEW skill_usage AS SELECT 1 AS id");

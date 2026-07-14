@@ -2,7 +2,7 @@
 // 对应课程第 23 讲：自我改进 AI 系统
 //
 // 核心职责：
-// - 技能持久化：每个技能一个 JSON 文件存储在 .claw/skills/
+// - 技能持久化：每个技能一个 JSON 文件存储在 workspace memory/skills/
 // - 执行追踪：记录成功/失败次数、执行时间、失败模式
 // - 智能排序：按成功率和使用频次排序技能搜索结果
 // - 失败分析：自动去重相似错误，累积到 3 次时触发警告
@@ -14,6 +14,7 @@
 import { chmod, readFile, readdir, writeFile, mkdir } from "node:fs/promises";
 import { join } from "pathe";
 import { logger } from "../observability/logger.js";
+import { resolvePicoPaths } from "../paths/pico-paths.js";
 import type { LearnedSkill } from "./skill-schema.js";
 import { createLearnedSkill, calculateSuccessRate } from "./skill-schema.js";
 
@@ -27,7 +28,7 @@ const FAILURE_WARNING_THRESHOLD = 3;
  * 技能注册表：管理学习到的技能的生命周期
  *
  * 设计约定：
- * - 技能文件路径：<workDir>/.claw/skills/<skillId>.json
+ * - 技能文件路径：workspace state memory/skills/<skillId>.json
  * - 并发安全：内存缓存 + 每次变更即刻落盘
  * - 持久化失败：记 warn 但不阻断主流程（优雅降级）
  */
@@ -42,7 +43,7 @@ export class SkillRegistry {
   private initialized = false;
 
   constructor(workDir: string) {
-    this.skillsDir = join(workDir, ".claw", "skills");
+    this.skillsDir = join(resolvePicoPaths(workDir).workspace.memory, "skills");
   }
 
   /**

@@ -28,6 +28,7 @@ import { WorkspaceRoots, buildWorkspaceBoundaryMiddleware } from "./workspace-ro
 import type { CodeIntelligenceService } from "../code-intelligence/types.js";
 import { createCodeIntelligenceTools } from "./code-intelligence.js";
 import type { YoloSandboxConfig } from "../safety/yolo-sandbox.js";
+import { ReadArtifactTool } from "./artifact-read.js";
 
 export interface DefaultToolRegistryOptions extends ToolRegistryOptions {
   /** Read/Write/Edit/Glob/Grep 与请求边界共享的工作区根集合。 */
@@ -67,6 +68,8 @@ export interface DefaultToolRegistryOptions extends ToolRegistryOptions {
   codeIntelligence?: CodeIntelligenceService;
   /** Skill frontmatter hooks 只在当前 Agent run 激活。 */
   activateSkillHooks?: (skill: Skill) => void | Promise<void>;
+  /** 宿主冻结的统一 Skill Catalog（含受信 Plugin 来源）。 */
+  skillLoader?: SkillLoader;
 }
 
 export function buildDefaultToolRegistry(
@@ -82,6 +85,7 @@ export function buildDefaultToolRegistry(
     excludeSensitiveGrepFiles,
     codeIntelligence,
     activateSkillHooks,
+    skillLoader,
     workspaceRoots,
     deferWorkspaceBoundary = false,
     yoloSandbox,
@@ -92,6 +96,7 @@ export function buildDefaultToolRegistry(
   // 必须先于 host 后续挂载的审批中间件,避免一次审批扩大文件系统边界。
   if (!deferWorkspaceBoundary) registry.useRequest(buildWorkspaceBoundaryMiddleware(roots));
   registry.register(new ReadFileTool(roots));
+  registry.register(new ReadArtifactTool(workDir));
   registry.register(new WriteFileTool(roots));
   registry.register(new EditFileTool(roots));
   registry.register(
@@ -109,7 +114,7 @@ export function buildDefaultToolRegistry(
   registry.register(new TaskListTool(backgroundManager));
   registry.register(new TaskOutputTool(backgroundManager));
   registry.register(new TaskStopTool(backgroundManager));
-  registry.register(new SkillViewTool(new SkillLoader(workDir), activateSkillHooks));
+  registry.register(new SkillViewTool(skillLoader ?? new SkillLoader(workDir), activateSkillHooks));
   registry.register(new GlobTool(roots));
   registry.register(
     new GrepTool(roots, {

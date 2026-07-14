@@ -8,13 +8,14 @@
 // 2. session_summaries: 会话摘要表,存储每个 session 的浓缩总结
 // 3. skill_usage: 技能使用记录表,追踪哪些 skill 成功/失败,供自愈参考
 //
-// 路径约定:<workDir>/.claw/sessions.db(与 session-store.jsonl 同级,数据集中化)
+// 路径约定:workspace state/sessions.db(与 session-store.jsonl 集中在同一状态根)
 // 错误处理:初始化/插入/查询失败时降级,记 warn 不抛异常,不阻断主流程。
 
 import Database from "better-sqlite3";
 import { chmodSync, mkdirSync } from "node:fs";
-import { dirname } from "pathe";
+import { dirname, join } from "pathe";
 import { logger } from "../observability/logger.js";
+import { resolvePicoPaths } from "../paths/pico-paths.js";
 import type { Message } from "../schema/message.js";
 import type {
   ConversationProjectionCursor,
@@ -117,7 +118,7 @@ function classifyInitError(err: unknown): ClassifiedInitError {
   ) {
     return {
       reason: "记忆数据库路径不可创建或不可写",
-      recommendation: "请检查工作区及 .claw 目录的路径、所有者、写权限和剩余磁盘空间。",
+      recommendation: "请检查 Pico workspace state 目录的路径、所有者、写权限和剩余磁盘空间。",
     };
   }
 
@@ -202,9 +203,9 @@ export class FTS5Store implements ConversationSearchStore {
   }
 
   constructor(workDir: string) {
-    this.dbPath = `${workDir}/.claw/sessions.db`;
+    this.dbPath = join(resolvePicoPaths(workDir).workspace.root, "sessions.db");
     try {
-      // 确保 .claw/ 目录存在
+      // 确保 workspace state 目录存在
       mkdirSync(dirname(this.dbPath), { recursive: true, mode: 0o700 });
       chmodSync(dirname(this.dbPath), 0o700);
       this.db = new Database(this.dbPath);

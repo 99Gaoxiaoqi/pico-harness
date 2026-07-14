@@ -2,8 +2,16 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { isHardlineCommand } from "../approval/manager.js";
+import { normalizeCanonicalHooksConfig } from "../hooks/config.js";
 import { matcherMatches } from "../hooks/runner.js";
-import type { HookHandler, HookInput, HookMatcherGroup, HooksConfig } from "../hooks/types.js";
+import { HookTrustStore } from "../hooks/trust/store.js";
+import type {
+  HookHandler,
+  HookInput,
+  HookMatcherGroup,
+  HooksConfig,
+  HookSource,
+} from "../hooks/types.js";
 import { logger } from "../observability/logger.js";
 import type { ToolCall } from "../schema/message.js";
 import type {
@@ -96,6 +104,7 @@ export async function prepareBackgroundYoloPolicy(input: {
   workDir: string;
   policy: unknown;
   trustStore: BackgroundWorkspaceTrustVerifier | WorkspaceTrustStore;
+  hookTrustStore?: HookTrustStore;
 }): Promise<PreparedBackgroundYoloPolicy> {
   const snapshot = assertBackgroundYoloPolicy(input.policy);
   if (snapshot.hardlineVersion !== BACKGROUND_HARDLINE_VERSION) {
@@ -146,7 +155,16 @@ export async function prepareBackgroundYoloPolicy(input: {
     }
   }
 
-  const hooks = await loadStrictHooksConfig(workspacePath);
+  const loadedHooks = await loadStrictHooksConfig(workspacePath);
+  const hooks = loadedHooks.config;
+  if (loadedHooks.nativeSource && hasToolHooks(hooks)) {
+    await assertNativeHooksTrusted(
+      workspacePath,
+      loadedHooks.nativeSource,
+      hooks,
+      input.hookTrustStore ?? new HookTrustStore(),
+    );
+  }
   let hookRunner: StrictBackgroundHookRunner | undefined;
   if (hasToolHooks(hooks)) {
     try {
@@ -343,13 +361,49 @@ function assertBackgroundYoloPolicy(value: unknown): BackgroundYoloPolicySnapsho
   }
 }
 
-async function loadStrictHooksConfig(workDir: string): Promise<HooksConfig> {
+interface StrictHooksConfigLoad {
+  readonly config: HooksConfig;
+  readonly nativeSource?: HookSource;
+}
+
+async function loadStrictHooksConfig(workDir: string): Promise<StrictHooksConfigLoad> {
+  const nativePath = join(workDir, ".pico", "hooks.json");
+  let nativeRaw: string | undefined;
+  try {
+    nativeRaw = await readFile(nativePath, "utf8");
+  } catch (error) {
+    if (!isErrnoCode(error, "ENOENT")) {
+      throw new BackgroundPolicyViolationError(
+        "hook_config_invalid",
+        `无法读取原生 Hook 配置: ${nativePath}`,
+        { cause: error },
+      );
+    }
+  }
+  if (nativeRaw !== undefined) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(nativeRaw) as unknown;
+      const config = strictNativeToolHooks(normalizeCanonicalHooksConfig(parsed) ?? {});
+      return {
+        config,
+        nativeSource: { kind: "project", path: nativePath, version: 1 },
+      };
+    } catch (error) {
+      throw new BackgroundPolicyViolationError(
+        "hook_config_invalid",
+        `原生 Hook 配置无效: ${nativePath}: ${errorMessage(error)}`,
+        { cause: error },
+      );
+    }
+  }
+
   const settingsPath = join(workDir, ".claw", "settings.json");
   let raw: string;
   try {
     raw = await readFile(settingsPath, "utf8");
   } catch (error) {
-    if (isErrnoCode(error, "ENOENT")) return {};
+    if (isErrnoCode(error, "ENOENT")) return { config: {} };
     throw new BackgroundPolicyViolationError(
       "hook_config_invalid",
       `无法读取 Hook 配置: ${settingsPath}`,
@@ -370,7 +424,7 @@ async function loadStrictHooksConfig(workDir: string): Promise<HooksConfig> {
     throw new BackgroundPolicyViolationError("hook_config_invalid", "settings.json 必须是对象。");
   }
   const hooks = parsed["hooks"];
-  if (hooks === undefined || hooks === null) return {};
+  if (hooks === undefined || hooks === null) return { config: {} };
   if (!isRecord(hooks)) {
     throw new BackgroundPolicyViolationError("hook_config_invalid", "hooks 必须是对象。");
   }
@@ -385,7 +439,78 @@ async function loadStrictHooksConfig(workDir: string): Promise<HooksConfig> {
     }
     result[event] = assertHookGroups(groups, event);
   }
+  return { config: result };
+}
+
+function strictNativeToolHooks(config: HooksConfig): HooksConfig {
+  const result: HooksConfig = {};
+  for (const event of ["PreToolUse", "PostToolUse"] as const) {
+    const groups: HookMatcherGroup[] = [];
+    for (const group of config[event] ?? []) {
+      if (group.if !== undefined) {
+        throw new Error(`后台 ${event} 暂不支持 matcher group 条件`);
+      }
+      const handlers = group.hooks.filter((handler) => handler.enabled !== false);
+      for (const handler of handlers) {
+        if (handler.type !== "command") {
+          throw new Error(`后台模式仅支持 command hook，收到 ${handler.type}`);
+        }
+        if (
+          handler.if !== undefined ||
+          handler.args !== undefined ||
+          handler.env !== undefined ||
+          handler.async !== undefined ||
+          handler.asyncRewake !== undefined
+        ) {
+          throw new Error("后台 command hook 仅支持 command、timeout 与 enabled 字段");
+        }
+      }
+      if (handlers.length > 0) {
+        groups.push({
+          ...(group.matcher === undefined ? {} : { matcher: group.matcher }),
+          hooks: handlers,
+        });
+      }
+    }
+    if (groups.length > 0) result[event] = groups;
+  }
   return result;
+}
+
+async function assertNativeHooksTrusted(
+  workspace: string,
+  source: HookSource,
+  config: HooksConfig,
+  trustStore: HookTrustStore,
+): Promise<void> {
+  for (const event of ["PreToolUse", "PostToolUse"] as const) {
+    for (const group of config[event] ?? []) {
+      for (const handler of group.hooks) {
+        if (handler.type !== "command") {
+          throw new BackgroundPolicyViolationError(
+            "hook_config_invalid",
+            `后台模式仅支持 command hook，收到 ${handler.type}。`,
+          );
+        }
+        let status: "active" | "pending";
+        try {
+          status = await trustStore.status({ workspace, source, handler });
+        } catch (error) {
+          throw new BackgroundPolicyViolationError(
+            "hook_unavailable",
+            "无法验证原生 Hook 信任状态，后台执行已停止。",
+            { cause: error },
+          );
+        }
+        if (status !== "active") {
+          throw new BackgroundPolicyViolationError(
+            "hook_unavailable",
+            `原生 Hook 尚未受信任: ${source.path}`,
+          );
+        }
+      }
+    }
+  }
 }
 
 function assertHookGroups(value: unknown, event: string): HookMatcherGroup[] {
@@ -597,7 +722,7 @@ export class StrictBackgroundHookRunner {
       };
       const timer = setTimeout(
         () => fail("Hook 超时，已按 fail-closed 阻断。"),
-        handler.timeout ?? DEFAULT_HOOK_TIMEOUT_MS,
+        handler.timeoutMs ?? handler.timeout ?? DEFAULT_HOOK_TIMEOUT_MS,
       );
       const capture = (target: "stdout" | "stderr", chunk: Buffer) => {
         if (settled) return;

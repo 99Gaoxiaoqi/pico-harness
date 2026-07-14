@@ -16,6 +16,14 @@ describe("loadPicoConfig", () => {
       providers: {},
       sandbox: { network: "deny" },
       lspServers: [],
+      compatibility: {
+        claude: {
+          enabled: true,
+          projectResources: true,
+          userResources: true,
+          modelAliases: {},
+        },
+      },
     });
   });
 
@@ -55,6 +63,38 @@ describe("loadPicoConfig", () => {
       providers: {},
       sandbox: { network: "deny" },
       lspServers: [],
+      compatibility: {
+        claude: {
+          enabled: true,
+          projectResources: true,
+          userResources: true,
+          modelAliases: {},
+        },
+      },
+    });
+  });
+
+  it("loads Claude compatibility switches and normalized model aliases", async () => {
+    const workDir = await createConfig({
+      compatibility: {
+        claude: {
+          enabled: true,
+          projectResources: false,
+          userResources: true,
+          modelAliases: { Sonnet: "anthropic/claude-sonnet-4-5" },
+        },
+      },
+    });
+
+    await expect(loadPicoConfig(workDir)).resolves.toMatchObject({
+      compatibility: {
+        claude: {
+          enabled: true,
+          projectResources: false,
+          userResources: true,
+          modelAliases: { sonnet: "anthropic/claude-sonnet-4-5" },
+        },
+      },
     });
   });
 
@@ -65,6 +105,11 @@ describe("loadPicoConfig", () => {
     [{ keybindings: { Unknown: { x: "app:exit" } } }, "keybindings.Unknown"],
     [{ keybindings: { Chat: { x: "unknown:action" } } }, "keybindings.Chat.x"],
     [{ keybindings: { Chat: { x: "command:" } } }, "keybindings.Chat.x"],
+    [{ compatibility: { claude: { enabled: "yes" } } }, "compatibility.claude.enabled"],
+    [
+      { compatibility: { claude: { modelAliases: { sonnet: "" } } } },
+      "compatibility.claude.modelAliases.sonnet",
+    ],
   ])("rejects invalid known fields with a field path", async (config, fieldPath) => {
     const workDir = await createConfig(config);
 
