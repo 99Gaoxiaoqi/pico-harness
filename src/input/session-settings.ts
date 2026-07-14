@@ -1,5 +1,6 @@
+import { resolve } from "node:path";
 import type { ProviderKind } from "../provider/factory.js";
-import type { ModelRouter } from "../provider/model-router.js";
+import type { ModelRoute, ModelRouter } from "../provider/model-router.js";
 import { resolveProviderProfile } from "../provider/profile.js";
 import { isValidThinkingEffort, type ThinkingEffort } from "../provider/thinking.js";
 import {
@@ -124,14 +125,9 @@ export function getOrCreateSessionSettings(
     persistenceOptions?.restore === false
       ? undefined
       : persistenceOptions?.persistence.getRuntimeStateSnapshot().settings;
-  const existing = settingsBySession.get(defaults.sessionId);
+  const key = sessionSettingsKey(defaults.sessionId, defaults.cwd);
+  const existing = settingsBySession.get(key);
   if (existing !== undefined) {
-    if (existing.cwd !== defaults.cwd) {
-      // session id 可能被不同项目复用；目录授权绝不能跨 cwd 继承。
-      existing.additionalDirectories = createAdditionalDirectorySnapshot([]);
-      globalSessionPermissionGrants.clear(existing.sessionId);
-      persistenceBySettings.delete(existing);
-    }
     const resolvedSemantics = resolvedCliSessionSemantics.get(defaults.sessionId);
     const sessionMode = defaults.sessionMode ?? resolvedSemantics?.sessionMode;
     const forkFrom = defaults.forkFrom ?? resolvedSemantics?.forkFrom;
@@ -143,7 +139,6 @@ export function getOrCreateSessionSettings(
     } else if (sessionMode !== "fork" && defaults.sessionMode !== undefined) {
       delete existing.forkFrom;
     }
-    existing.cwd = defaults.cwd;
     if (restored) {
       applyPersistedSessionSettings(existing, restored);
     } else {
@@ -191,7 +186,7 @@ export function getOrCreateSessionSettings(
       ]);
     }
   }
-  settingsBySession.set(defaults.sessionId, created);
+  settingsBySession.set(key, created);
   bindSessionSettingsPersistence(created, persistenceOptions?.persistence);
   persistSessionSettings(created);
   return created;
@@ -208,15 +203,31 @@ export function rememberResolvedCliSession(selection: {
   });
 }
 
-export function getStoredSessionSettings(sessionId: string): SessionSettings | undefined {
-  return settingsBySession.get(sessionId);
+export function getStoredSessionSettings(
+  sessionId: string,
+  cwd?: string,
+): SessionSettings | undefined {
+  if (cwd !== undefined) return settingsBySession.get(sessionSettingsKey(sessionId, cwd));
+  for (const settings of [...settingsBySession.values()].reverse()) {
+    if (settings.sessionId === sessionId) return settings;
+  }
+  return undefined;
 }
 
 /** 新 fork 在公布前失败时，同步移除其未对外可见的运行态。 */
-export function forgetSessionSettings(sessionId: string): void {
-  const settings = settingsBySession.get(sessionId);
-  if (settings) persistenceBySettings.delete(settings);
-  settingsBySession.delete(sessionId);
+export function forgetSessionSettings(sessionId: string, cwd?: string): void {
+  if (cwd !== undefined) {
+    const key = sessionSettingsKey(sessionId, cwd);
+    const settings = settingsBySession.get(key);
+    if (settings) persistenceBySettings.delete(settings);
+    settingsBySession.delete(key);
+  } else {
+    for (const [key, settings] of settingsBySession) {
+      if (settings.sessionId !== sessionId) continue;
+      persistenceBySettings.delete(settings);
+      settingsBySession.delete(key);
+    }
+  }
   resolvedCliSessionSemantics.delete(sessionId);
   globalSessionPermissionGrants.clear(sessionId);
 }
@@ -296,16 +307,7 @@ export function setSessionModelRoute(
   if (!validation.ok) return { ok: false, message: validation.message };
 
   const { route } = validation;
-  settings.modelRouteId = route.id;
-  settings.provider = route.provider;
-  settings.model = route.model;
-  const previousLevel = settings.thinkingEffort;
-  const selection = coordinateReasoningLevel(
-    route.capabilities.reasoningProfile,
-    settings.thinkingEffortExplicit ? previousLevel : undefined,
-  );
-  applyReasoningLevelSelection(settings, selection);
-  persistSessionSettings(settings);
+  const { previousLevel, selection } = applySessionModelRoute(settings, route);
   const reasoningMessage = formatReasoningSelectionAfterModelSwitch(
     route.capabilities.reasoningProfile,
     previousLevel,
@@ -316,6 +318,38 @@ export function setSessionModelRoute(
     ok: true,
     message: [`Model set to ${route.id}`, reasoningMessage].filter(Boolean).join("\n"),
   };
+}
+
+/** 恢复旧会话时将已解析的兼容路由写回运行态，不因凭证缺失阻断 TUI 自救。 */
+export function migrateSessionModelRoute(settings: SessionSettings, route: ModelRoute): void {
+  applySessionModelRoute(settings, route);
+}
+
+export function resolveRestoredSessionModelRoute(
+  router: ModelRouter,
+  restored: PersistedSessionSettings | undefined,
+  fallbackRouteId?: string,
+): ModelRoute {
+  return (
+    router.resolve(restored?.modelRouteId) ??
+    router.resolve(restored?.model) ??
+    router.resolve(fallbackRouteId) ??
+    router.require(undefined)
+  );
+}
+
+function applySessionModelRoute(settings: SessionSettings, route: ModelRoute) {
+  settings.modelRouteId = route.id;
+  settings.provider = route.provider;
+  settings.model = route.model;
+  const previousLevel = settings.thinkingEffort;
+  const selection = coordinateReasoningLevel(
+    route.capabilities.reasoningProfile,
+    settings.thinkingEffortExplicit ? previousLevel : undefined,
+  );
+  applyReasoningLevelSelection(settings, selection);
+  persistSessionSettings(settings);
+  return { previousLevel, selection };
 }
 
 export function setSessionMode(settings: SessionSettings, mode: string): SessionSettingResult {
@@ -637,6 +671,10 @@ export function normalizeInteractionMode(mode: string | undefined): InteractionM
 
 function createAdditionalDirectorySnapshot(directories: readonly string[]): readonly string[] {
   return Object.freeze([...new Set(directories)]);
+}
+
+function sessionSettingsKey(sessionId: string, cwd: string): string {
+  return JSON.stringify([resolve(cwd), sessionId]);
 }
 
 export function snapshotSessionSettings(settings: SessionSettings): PersistedSessionSettings {
