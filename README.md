@@ -66,7 +66,9 @@ npx tsx --env-file=.env --import ./src/tui/preload-env.ts src/cli/main.ts \
 - `/permissions` 是 `/mode` 的兼容别名，不再维护第二套权限状态。
 - `/usage` 展示 provider 实际报告的 token/成本覆盖，缺失字段保持 `unknown`；`/context` 展示当前 route 的上下文预算、来源和能力。
 - REST/WebSocket、ACP、飞书与 one-shot CLI 外壳曾在历史阶段完成，后已退役。
-- Cron/headless 调度、Docker 部署和 Plugin runtime 不在当前产品范围。
+- `/cron` 是 TUI 内的持久定时任务入口；任务由当前 OS 用户的本机 daemon 执行，不新增 one-shot/headless 公共 CLI。持久 Cron 仅接受可信工作区的 YOLO Job，Provider 凭证通过 `/cron credential import` 导入系统凭证库，SQLite 只保存非秘密 `credentialRef`。
+- Cron 的“工具网络”只约束 `fetch_url`、Bash、Hook、MCP 等额外出口，不会关闭模型 Provider 请求；可用 `/cron add --tool-network=disabled|allowlist:host1,host2 ...` 显式配置。`web_search` 在后台仍保持关闭。
+- Docker 部署和 Plugin runtime 不在当前产品范围。
 
 ## 🏗️ 架构概览
 

@@ -1357,7 +1357,7 @@ async function manageCronCredential(
   if (route.source === "legacy") {
     return "持久 Cron 不支持 legacy 环境变量路由；请先在 .pico/config.json 配置 provider。";
   }
-  const ref = credentialRefForModelRoute(route.id);
+  const ref = credentialRefForModelRoute(route, options.workDir);
   if (action === "status") {
     return `${capability.diagnostic}\n${route.id}: ${(await vault.has(ref)) ? "已导入" : "未导入"}`;
   }
@@ -1366,6 +1366,7 @@ async function manageCronCredential(
   }
   await importModelRouteCredential({
     route,
+    workspacePath: options.workDir,
     vault,
     env: options.credentialEnv ?? process.env,
   });
@@ -1386,7 +1387,7 @@ async function requireCronCredential(
       "持久 Cron 需要 .pico/config.json 中的 providerID/modelID 路由，不能依赖 shell legacy 配置。",
     );
   }
-  const ref = credentialRefForModelRoute(route.id);
+  const ref = credentialRefForModelRoute(route, options.workDir);
   if (!(await vault.has(ref))) {
     throw new Error(`模型路由 ${route.id} 尚未导入系统凭证库；请先执行 /cron credential import。`);
   }

@@ -1,7 +1,10 @@
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
+import { realpathSync } from "node:fs";
 import type { ModelRoute } from "./model-router.js";
 
 const CREDENTIAL_REF_PREFIX = "pico-keychain://model-route/";
+const CREDENTIAL_REF_VERSION = "v1";
 const KEYCHAIN_SERVICE = "dev.pico.runtime.provider";
 
 declare const credentialRefBrand: unique symbol;
@@ -39,17 +42,51 @@ export class CredentialNotFoundError extends Error {
   }
 }
 
-export function credentialRefForModelRoute(routeId: string): CredentialRef {
-  const normalized = routeId.trim();
+export type CredentialRouteIdentity = Pick<ModelRoute, "id" | "provider" | "baseURL" | "model">;
+
+export function credentialRefForModelRoute(
+  route: CredentialRouteIdentity,
+  workspacePath: string,
+): CredentialRef {
+  const normalized = route.id.trim();
   if (!/^[^/\s]+\/.+$/u.test(normalized)) {
     throw new Error("credentialRef 只接受 providerID/modelID 路由");
   }
-  return `${CREDENTIAL_REF_PREFIX}${encodeURIComponent(normalized)}` as CredentialRef;
+  const workspaceFingerprint = fingerprint(realpathSync(workspacePath));
+  const routeFingerprint = fingerprint(
+    JSON.stringify([
+      normalized,
+      route.provider,
+      route.baseURL.trim().replace(/\/+$/u, ""),
+      route.model.trim(),
+    ]),
+  );
+  return `${CREDENTIAL_REF_PREFIX}${CREDENTIAL_REF_VERSION}/${workspaceFingerprint}/${routeFingerprint}/${encodeURIComponent(normalized)}` as CredentialRef;
 }
 
-export function parseCredentialRef(ref: string): { ref: CredentialRef; modelRouteId: string } {
+export function parseCredentialRef(ref: string): {
+  ref: CredentialRef;
+  modelRouteId: string;
+  workspaceFingerprint: string;
+  routeFingerprint: string;
+} {
   if (!ref.startsWith(CREDENTIAL_REF_PREFIX)) throw new Error("不支持的 credentialRef");
-  const encoded = ref.slice(CREDENTIAL_REF_PREFIX.length);
+  const parts = ref.slice(CREDENTIAL_REF_PREFIX.length).split("/");
+  if (
+    parts.length !== 4 ||
+    parts[0] !== CREDENTIAL_REF_VERSION ||
+    !isFingerprint(parts[1]) ||
+    !isFingerprint(parts[2]) ||
+    !parts[3]
+  ) {
+    throw new Error("credentialRef 结构无效");
+  }
+  const [, workspaceFingerprint, routeFingerprint, encoded] = parts as [
+    string,
+    string,
+    string,
+    string,
+  ];
   let modelRouteId: string;
   try {
     modelRouteId = decodeURIComponent(encoded);
@@ -57,11 +94,23 @@ export function parseCredentialRef(ref: string): { ref: CredentialRef; modelRout
     throw new Error("credentialRef 编码无效");
   }
   if (!/^[^/\s]+\/.+$/u.test(modelRouteId)) throw new Error("credentialRef 路由无效");
-  return { ref: ref as CredentialRef, modelRouteId };
+  return { ref: ref as CredentialRef, modelRouteId, workspaceFingerprint, routeFingerprint };
+}
+
+export function assertCredentialRefMatchesModelRoute(
+  ref: CredentialRef,
+  route: CredentialRouteIdentity,
+  workspacePath: string,
+): void {
+  const expected = credentialRefForModelRoute(route, workspacePath);
+  if (ref !== expected) {
+    throw new Error("credentialRef 与当前工作区或模型路由不匹配，后台执行已阻断");
+  }
 }
 
 export async function importModelRouteCredential(input: {
   route: ModelRoute;
+  workspacePath: string;
   vault: CredentialVault;
   env?: Readonly<Record<string, string | undefined>>;
 }): Promise<CredentialRef> {
@@ -71,11 +120,22 @@ export async function importModelRouteCredential(input: {
     );
   }
   const raw = (input.env ?? process.env)[input.route.apiKeyEnv]?.trim();
-  const secret = raw?.split(",").map((value) => value.trim()).find(Boolean);
+  const secret = raw
+    ?.split(",")
+    .map((value) => value.trim())
+    .find(Boolean);
   if (!secret) throw new Error(`缺少凭证环境变量 ${input.route.apiKeyEnv}，无法导入。`);
-  const ref = credentialRefForModelRoute(input.route.id);
+  const ref = credentialRefForModelRoute(input.route, input.workspacePath);
   await input.vault.put(ref, secret);
   return ref;
+}
+
+function fingerprint(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function isFingerprint(value: string | undefined): value is string {
+  return typeof value === "string" && /^[a-f0-9]{64}$/u.test(value);
 }
 
 export function createPlatformCredentialVault(
@@ -189,7 +249,10 @@ class MacSecurityCommandRunner implements SecurityCommandRunner {
       child.once("error", reject);
       child.once("close", (code) => {
         if (code === 0) resolve(stdout);
-        else reject(new Error(`macOS Keychain 命令失败（exit ${code ?? "unknown"}）：${stderr.trim()}`));
+        else
+          reject(
+            new Error(`macOS Keychain 命令失败（exit ${code ?? "unknown"}）：${stderr.trim()}`),
+          );
       });
       childStdin.end(stdin);
     });
