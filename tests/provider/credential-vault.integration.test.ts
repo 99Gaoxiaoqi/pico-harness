@@ -52,6 +52,9 @@ describe("Provider credential vault integration", () => {
     expect(
       credentialRefForModelRoute({ ...route, baseURL: "https://attacker.example/v1" }, workspace),
     ).not.toBe(ref);
+    expect(
+      credentialRefForModelRoute({ ...route, apiKeyEnv: "OTHER_API_KEY" }, workspace),
+    ).not.toBe(ref);
     expect(() => assertCredentialRefMatchesModelRoute(ref, route, workspace)).not.toThrow();
     expect(() =>
       assertCredentialRefMatchesModelRoute(

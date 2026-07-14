@@ -42,7 +42,10 @@ export class CredentialNotFoundError extends Error {
   }
 }
 
-export type CredentialRouteIdentity = Pick<ModelRoute, "id" | "provider" | "baseURL" | "model">;
+export type CredentialRouteIdentity = Pick<
+  ModelRoute,
+  "id" | "provider" | "baseURL" | "model" | "apiKeyEnv"
+>;
 
 export function credentialRefForModelRoute(
   route: CredentialRouteIdentity,
@@ -59,6 +62,7 @@ export function credentialRefForModelRoute(
       route.provider,
       route.baseURL.trim().replace(/\/+$/u, ""),
       route.model.trim(),
+      route.apiKeyEnv.trim(),
     ]),
   );
   return `${CREDENTIAL_REF_PREFIX}${CREDENTIAL_REF_VERSION}/${workspaceFingerprint}/${routeFingerprint}/${encodeURIComponent(normalized)}` as CredentialRef;

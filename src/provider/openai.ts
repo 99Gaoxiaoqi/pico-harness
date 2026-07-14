@@ -160,7 +160,6 @@ export class OpenAIProvider implements LLMProvider {
 
     if (!resp.ok) {
       const text = await resp.text();
-      console.error(`[OpenAI] ❌ ${resp.status} 响应: ${text}`);
       logger.debug(
         {
           model: this.config.model,

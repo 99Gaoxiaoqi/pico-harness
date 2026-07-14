@@ -131,6 +131,7 @@ async function resolveCronModelRoute(job: CronJobRecord) {
     provider: provider.protocol,
     baseURL: provider.baseURL,
     model,
+    apiKeyEnv: provider.apiKeyEnv,
     modelRouteId,
     capabilities: resolveModelRouteCapabilities(
       provider.protocol,

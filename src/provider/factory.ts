@@ -9,6 +9,7 @@ import { coordinateReasoningLevel, type ReasoningLevel } from "./reasoning-capab
 import { CredentialPool } from "./credential-pool.js";
 import { CapabilityPreflightProvider } from "./capability-preflight.js";
 import { providerProfileForRoute } from "./model-capabilities.js";
+import { withProviderErrorRedaction } from "./error-redaction.js";
 
 export type ProviderKind = "openai" | "claude" | "gemini";
 
@@ -99,6 +100,7 @@ export function createRawProvider(
       provider = new GeminiProvider(cfg, profile);
       break;
   }
+  provider = withProviderErrorRedaction(provider, [cfg.apiKey]);
   return cfg.capabilities
     ? new CapabilityPreflightProvider(
         provider,
