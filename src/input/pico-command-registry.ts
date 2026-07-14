@@ -92,6 +92,10 @@ import {
   type StorageDoctorFinding,
   type StorageDoctorReport,
 } from "../storage/storage-doctor.js";
+import {
+  createPluginCommand,
+  type PluginManagementCommandService,
+} from "../plugins/plugin-commands.js";
 
 const OVERRIDDEN_BUILTIN_COMMANDS = new Set([
   "skills",
@@ -145,6 +149,8 @@ export interface PicoCommandRegistryOptions {
   hookService?: HookService;
   hookCommands?: readonly SlashCommand[];
   mcpControl?: McpConnectionManager;
+  /** Plugin 管理命令可注入测试/宿主单例；未注入时按 workDir 创建。 */
+  pluginManagement?: PluginManagementCommandService;
 }
 
 export async function createPicoCommandRegistry(
@@ -189,6 +195,10 @@ export async function createPicoCommandRegistry(
     createAddDirectoryCommand(settings, options.additionalDirectoryManager),
     createThinkingCommand(settings, options.modelRouter),
     createMcpCommand(options.mcpStatus, options.mcpControl),
+    createPluginCommand({
+      workDir: options.workDir,
+      ...(options.pluginManagement ? { service: options.pluginManagement } : {}),
+    }),
     createAgentsCommand(options),
     createSessionsCommand(options),
     createRenameCommand(settings),
