@@ -36,7 +36,8 @@ import { ExitPlanModeTool } from "../tools/plan-exit.js";
 import { FetchURLTool } from "../tools/web.js";
 import { DelegationManager, DelegateStatusTool } from "../tools/delegation-manager.js";
 import { createSubagentRegistryFactory } from "../tools/delegation-registry.js";
-import { AgentProfileLoader, type AgentProfile } from "../tools/agent-profile.js";
+import type { AgentProfile } from "../tools/agent-profile.js";
+import { loadAgentCatalog } from "../agents/catalog.js";
 import {
   DelegateTaskTool,
   SpawnSubagentTool,
@@ -1184,10 +1185,10 @@ export class CostTrackedModelFallbackProvider implements LLMProvider {
   }
 }
 
-/** 加载工作区的自定义子代理角色(.claw/agents.yaml)。失败静默返回空。 */
+/** 加载原生 Profile 与 Claude 兼容输入合并后的统一 Agent 目录。 */
 async function loadProfiles(workDir: string): Promise<AgentProfile[]> {
   try {
-    return await new AgentProfileLoader(workDir).load();
+    return await loadAgentCatalog({ workDir, includeBuiltins: true });
   } catch {
     return [];
   }

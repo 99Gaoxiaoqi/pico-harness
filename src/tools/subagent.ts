@@ -24,6 +24,7 @@ import type {
 } from "./delegation-manager.js";
 import { aggregateDelegationStatus, DelegationManager } from "./delegation-manager.js";
 import type { AgentProfile } from "./agent-profile.js";
+import { findAgentProfile } from "../agents/catalog.js";
 import type { WorktreeSupervisor } from "../tasks/worktree-supervisor.js";
 import {
   compactActivityText,
@@ -130,7 +131,7 @@ export interface SubagentRegistryRequest {
   role: SubagentRole;
   depth: number;
   maxSpawnDepth: number;
-  /** 自定义角色名(来自 .claw/agents.yaml)。命中时用该角色的工具集和 prompt。 */
+  /** 持久 Agent Profile 名（来自宿主统一 Agent 目录）。 */
   agentName?: string;
   /** worker 模式下覆盖工具实际操作目录。 */
   workDir?: string;
@@ -148,7 +149,7 @@ interface DelegateTaskInput {
   context?: string;
   mode?: SubagentMode;
   role?: SubagentRole;
-  /** 指定自定义子代理角色(来自 .claw/agents.yaml)。命中时用该角色的 prompt 和工具集。 */
+  /** 指定宿主统一 Agent 目录中的持久子代理角色。 */
   agent_name?: string;
   /** 主 Agent 可根据用户自然语言生成的一次性角色；不含工具、endpoint 或凭证。 */
   agent?: unknown;
@@ -289,7 +290,7 @@ export class SpawnSubagentTool implements BaseTool {
  * - role + depth 约束,防止无限递归委派
  */
 export class DelegateTaskTool implements BaseTool {
-  /** 用户自定义角色库(来自 .claw/agents.yaml),按 agent_name 查询。空=无自定义角色。 */
+  /** 宿主统一 Agent 目录，按 agent_name 查询。 */
   private readonly profiles: AgentProfile[];
   readonly handlesAbortSignal = true;
 
@@ -361,8 +362,8 @@ export class DelegateTaskTool implements BaseTool {
           agent_name: {
             type: "string",
             description:
-              "自定义子代理角色名(来自工作区 .claw/agents.yaml 配置)。" +
-              "指定后使用该角色的 systemPrompt 和工具集,覆盖 mode 的默认工具集分配。",
+              "持久子代理角色名（来自统一 Agent 目录）。" +
+              "指定后使用该角色的 systemPrompt 和工具集；未找到时 fail closed。",
           },
           agent: ephemeralAgentSchema(),
           role: {
@@ -416,6 +417,16 @@ export class DelegateTaskTool implements BaseTool {
       return JSON.stringify({
         status: "error",
         error: "delegate_task 需要 goal 或 tasks[].goal。",
+      });
+    }
+
+    const unknownAgent = tasks.find(
+      (task) => task.agentName && !findAgentProfile(this.profiles, task.agentName),
+    )?.agentName;
+    if (unknownAgent) {
+      return JSON.stringify({
+        status: "error",
+        error: `未找到 Agent Profile: ${unknownAgent}，已拒绝回落到默认工具集。`,
       });
     }
 
@@ -732,9 +743,7 @@ export class DelegateTaskTool implements BaseTool {
           : task.goal;
 
     // 自定义角色查询:agent_name 命中 profile 时,用其 prompt/maxTurns 覆盖 Tool 级默认
-    const profile = task.agentName
-      ? this.profiles.find((p) => p.name === task.agentName)
-      : undefined;
+    const profile = task.agentName ? findAgentProfile(this.profiles, task.agentName) : undefined;
 
     const registry = this.registryFactory({
       mode: task.mode,
@@ -1306,7 +1315,7 @@ function profileRouteForTask(
   profiles: readonly AgentProfile[],
 ): string | undefined {
   if (!task.agentName) return undefined;
-  return profiles.find((profile) => profile.name === task.agentName)?.modelRouteId;
+  return findAgentProfile(profiles, task.agentName)?.modelRouteId;
 }
 
 function ephemeralAgentSchema(): Record<string, unknown> {

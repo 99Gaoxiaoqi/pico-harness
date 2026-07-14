@@ -1,12 +1,12 @@
 import React from "react";
 import { Box, Text } from "ink";
-import type { ClaudeAgentSource, ClaudeAgentSummary } from "../input/agent-loader.js";
+import type { AgentCatalogSource, AgentProfileSummary } from "../agents/catalog.js";
 
 export const AGENT_NAME_WIDTH = 24;
 export const AGENT_DESCRIPTION_WIDTH = 56;
 
 export interface AgentListProps {
-  agents: readonly ClaudeAgentSummary[];
+  agents: readonly AgentProfileSummary[];
 }
 
 export interface AgentRow {
@@ -49,7 +49,7 @@ export function AgentList({ agents }: AgentListProps): React.ReactNode {
   );
 }
 
-export function formatAgentRows(agents: readonly ClaudeAgentSummary[]): AgentRow[] {
+export function formatAgentRows(agents: readonly AgentProfileSummary[]): AgentRow[] {
   return agents.map((agent, index) => ({
     key: `${agent.source}:${agent.name}:${index}`,
     name: truncateInline(agent.name, AGENT_NAME_WIDTH),
@@ -59,9 +59,12 @@ export function formatAgentRows(agents: readonly ClaudeAgentSummary[]): AgentRow
   }));
 }
 
-function formatAgentSource(source: ClaudeAgentSource | undefined): string {
+function formatAgentSource(source: AgentCatalogSource | undefined): string {
   if (source === undefined) return "unknown";
-  return source === "builtin" ? "built-in" : source;
+  if (source === "builtin") return "built-in";
+  if (source === "project-native") return "project/native";
+  if (source === "project-claude") return "project/claude";
+  return "user/claude";
 }
 
 function truncateInline(value: string, maxLength: number): string {
