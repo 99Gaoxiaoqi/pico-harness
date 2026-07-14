@@ -35,7 +35,12 @@ import {
   runTuiAgentPrompt,
   type TuiInputProcessResult,
   handleTuiRunningInputSubmission,
+  coordinateTuiStartupSettings,
+  resolveTuiStartupModelRoute,
 } from "../../src/tui/repl.js";
+import { ModelRouter, type ModelRoute } from "../../src/provider/model-router.js";
+import { resolveModelRouteCapabilities } from "../../src/provider/model-capabilities.js";
+import { createDefaultSessionSettings } from "../../src/input/session-settings.js";
 
 class ScriptedTuiProvider implements LLMProvider {
   constructor(private readonly responses: Message[]) {}
@@ -58,6 +63,21 @@ function tuiRunResult(finalMessage: string) {
   };
 }
 
+function testRoute(id: string): ModelRoute {
+  const [providerId, ...modelParts] = id.split("/");
+  const model = modelParts.join("/");
+  return {
+    id,
+    providerId: providerId!,
+    provider: "openai",
+    model,
+    baseURL: "https://example.invalid/v1",
+    apiKeyEnv: "TEST_API_KEY",
+    source: "config",
+    capabilities: resolveModelRouteCapabilities("openai", model),
+  };
+}
+
 describe("TUI input routing", () => {
   function harness() {
     const snapshots: unknown[][] = [];
@@ -68,6 +88,60 @@ describe("TUI input routing", () => {
     const workDir = process.cwd();
     return { reporter, snapshots, runAgent, exit, registry, workDir };
   }
+
+  it("启动时显式 CLI 模型覆盖 session 和项目默认，未显式时仍恢复 session", () => {
+    const routes = [
+      testRoute("project/default-model"),
+      testRoute("session/restored-model"),
+      testRoute("cli/override-model"),
+    ];
+    const router = new ModelRouter(routes, { TEST_API_KEY: "test-key" }, routes[0]!.id);
+    const restored = {
+      model: routes[1]!.model,
+      modelRouteId: routes[1]!.id,
+    };
+
+    expect(
+      resolveTuiStartupModelRoute(router, restored, {
+        cliModel: routes[2]!.id,
+        modelExplicit: true,
+        projectDefaultRouteId: routes[0]!.id,
+      }).id,
+    ).toBe(routes[2]!.id);
+    expect(
+      resolveTuiStartupModelRoute(router, restored, {
+        cliModel: routes[0]!.model,
+        modelExplicit: false,
+        projectDefaultRouteId: routes[0]!.id,
+      }).id,
+    ).toBe(routes[1]!.id);
+  });
+
+  it("启动时显式 thinking 覆盖恢复值，未显式时保留恢复值", () => {
+    const route = testRoute("test/deepseek-v4-pro-260425");
+    const router = new ModelRouter([route], { TEST_API_KEY: "test-key" }, route.id);
+    const explicit = createDefaultSessionSettings({
+      sessionId: "explicit-thinking",
+      cwd: "/workspace/explicit",
+      provider: route.provider,
+      model: route.model,
+      modelRouteId: route.id,
+      thinkingEffort: "high",
+    });
+    const restored = createDefaultSessionSettings({
+      sessionId: "restored-thinking",
+      cwd: "/workspace/restored",
+      provider: route.provider,
+      model: route.model,
+      modelRouteId: route.id,
+      thinkingEffort: "high",
+    });
+
+    expect(coordinateTuiStartupSettings(explicit, router, route, "off")).toBe("off");
+    expect(explicit).toMatchObject({ thinkingEffort: "off", thinkingEffortExplicit: true });
+    expect(coordinateTuiStartupSettings(restored, router, route)).toBe("high");
+    expect(restored).toMatchObject({ thinkingEffort: "high", thinkingEffortExplicit: true });
+  });
 
   it("AbortError 不生成普通执行失败内容", () => {
     expect(formatTuiRunErrorEntry(new DOMException("interrupted", "AbortError"))).toBeUndefined();
