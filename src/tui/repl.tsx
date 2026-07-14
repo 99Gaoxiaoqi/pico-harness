@@ -41,6 +41,7 @@ import { runAgentFromCli } from "../cli/run-agent.js";
 import { listRewindPointSummaries } from "../cli/file-history.js";
 import { createCliSessionId, type CliSessionSelection } from "../cli/session-resolver.js";
 import { loadPicoConfig } from "../input/pico-config.js";
+import { resolveCompatibleModelRoute } from "../provider/compatible-model-route.js";
 import {
   commandArgumentSuggestions,
   commandSuggestions,
@@ -224,10 +225,18 @@ export function resolveTuiPromptModelRoute(
   router: ModelRouter,
   settings: SessionSettings,
   requestedModel?: string,
+  claudeCompatibility?: {
+    enabled: boolean;
+    modelAliases: Readonly<Record<string, string>>;
+  },
 ): { route: ModelRoute; reasoningLevel?: string } {
   const requested = requestedModel?.trim();
   const inheritsModel = !requested || requested === "inherit";
-  const route = router.require(inheritsModel ? settings.modelRouteId : requested);
+  const route = inheritsModel
+    ? router.require(settings.modelRouteId)
+    : claudeCompatibility?.enabled
+      ? resolveCompatibleModelRoute(router, requested, claudeCompatibility.modelAliases)
+      : router.require(requested);
   const reasoningLevel = inheritsModel
     ? effectiveSessionReasoningLevel(settings, router)
     : coordinateReasoningLevel(
@@ -1786,10 +1795,9 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
             rewindContextRef.current = context;
           },
           activateAgentHooks: async (metadata) => {
-            const isSkill = metadata["skillHookConfig"] !== undefined;
-            const componentId = isSkill ? metadata["skillName"] : metadata["agentName"];
-            const path = isSkill ? metadata["skillSourcePath"] : metadata["sourcePath"];
-            const inlineHooks = isSkill ? metadata["skillHookConfig"] : metadata["agentHookConfig"];
+            const componentId = metadata["skillName"];
+            const path = metadata["skillSourcePath"];
+            const inlineHooks = metadata["skillHookConfig"];
             if (
               typeof componentId !== "string" ||
               typeof path !== "string" ||
@@ -1798,7 +1806,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
               return;
             }
             await runtimeState.activateComponentHooks({
-              kind: isSkill ? "skill" : "agent",
+              kind: "skill",
               path,
               componentId,
               inlineHooks,
@@ -1861,6 +1869,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
               modelRouter,
               settings,
               runOptions?.model,
+              picoConfig.compatibility.claude,
             );
             const activeRoute = modelRouter.providerConfig(route.id, reasoningLevel);
             const rewindContext = resumeExistingSession ? null : rewindContextRef.current;

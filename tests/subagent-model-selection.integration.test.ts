@@ -82,6 +82,21 @@ describe("子代理模型选择集成", () => {
 
     expect(() => resolveCompatibleModelRoute(aliasRouter, "sonnet")).toThrow("匹配多个 Pico 路由");
   });
+
+  it("关闭 Claude 兼容时不解析 family 短名", () => {
+    const sonnet = route("anthropic/claude-sonnet-4-5", "claude-sonnet-4-5");
+    const aliasRouter = new ModelRouter([parent, sonnet], {}, parent.id);
+
+    expect(() =>
+      resolveSubagentModelSelection({
+        router: aliasRouter,
+        parentRouteId: parent.id,
+        profileRouteId: "sonnet",
+        claudeCompatibilityEnabled: false,
+        allowRouteOverride: true,
+      }),
+    ).toThrow("不在当前可用路由中");
+  });
 });
 
 function route(id: string, model: string): ModelRoute {

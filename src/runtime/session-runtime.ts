@@ -84,6 +84,8 @@ export interface SessionRuntime {
   /** 同一实例可幂等挂载；运行中替换实例会抛错。 */
   attachHookService(service: HookService): void;
   bindHookRuntime(dependencies: HookRuntimeBinding): void;
+  /** 按单次运行持有组件 Hook，调用方必须在 finally 释放返回的租约。 */
+  activateComponentHookLease(source: HookConfigSourceSpec): Promise<() => Promise<void>>;
   activateComponentHooks(source: HookConfigSourceSpec): Promise<void>;
   clearComponentHooks(): Promise<void>;
   dispatchHook<E extends HookEvent>(
@@ -798,9 +800,13 @@ class DefaultSessionRuntime implements SessionRuntime {
     this.ensureSessionStart();
   }
 
+  async activateComponentHookLease(source: HookConfigSourceSpec): Promise<() => Promise<void>> {
+    if (!this.hookRuntime) return async () => undefined;
+    return await this.hookRuntime.activateComponentSource(source);
+  }
+
   async activateComponentHooks(source: HookConfigSourceSpec): Promise<void> {
-    if (!this.hookRuntime) return;
-    this.componentHookDisposers.push(await this.hookRuntime.activateComponentSource(source));
+    this.componentHookDisposers.push(await this.activateComponentHookLease(source));
   }
 
   async clearComponentHooks(): Promise<void> {
@@ -812,7 +818,6 @@ class DefaultSessionRuntime implements SessionRuntime {
         logger.warn({ error: String(error) }, "[Hook] 组件 Hook source 释放失败");
       }
     }
-    await this.hookRuntime?.clearComponentSources();
   }
 
   async dispatchHook<E extends HookEvent>(
@@ -861,6 +866,7 @@ class DefaultSessionRuntime implements SessionRuntime {
       this.unsubscribeWorktreeHooks?.();
       try {
         await this.clearComponentHooks();
+        await this.hookRuntime?.clearComponentSources();
         this.ensureSessionStart();
         await this.drainHookEvents();
         const runningTasks = this.backgroundManager

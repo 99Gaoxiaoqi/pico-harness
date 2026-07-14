@@ -25,6 +25,7 @@ import { classifyBashCommand } from "../approval/bash-safety.js";
 import { bashCommandFromArgs } from "../approval/bash-paths.js";
 import { buildMinimalChildProcessEnv } from "../os/child-process-env.js";
 import { TodoTool } from "./todo.js";
+import type { HookService } from "../hooks/service.js";
 
 export interface SubagentRegistryFactoryConfig {
   workDir: string;
@@ -43,6 +44,10 @@ export interface SubagentRegistryFactoryConfig {
   allowAsyncCompletion?: boolean;
   /** 与宿主同源的 Skill Catalog，保留用户、Plugin 与兼容开关语义。 */
   skillLoaderFactory?: (workDir: string) => SkillLoader;
+  /** 子代理工具调用与主会话共享同一 HookService 快照。 */
+  hookService?: HookService;
+  /** 持久 Agent 按每次运行激活内联 Hook 的租约工厂。 */
+  activateAgentHooks?: (profile: AgentProfile) => Promise<() => void | Promise<void>>;
 }
 
 /**
@@ -142,7 +147,7 @@ function buildProfileRegistry(
 
   // orchestrator 仍可递归委派(若角色允许且未超深度)
   maybeRegisterDelegateTool(config, request, registry);
-  return registry;
+  return attachHookService(registry, config.hookService);
 }
 
 /** 默认的 explore/worker 二档构造(原有逻辑) */
@@ -194,7 +199,7 @@ function buildModeRegistry(
   registry.register(new DelegateStatusTool(config.manager));
 
   maybeRegisterDelegateTool(config, request, registry);
-  return registry;
+  return attachHookService(registry, config.hookService);
 }
 
 /** orchestrator 角色且未超深度时,注册 delegate_task(允许递归委派) */
@@ -217,9 +222,15 @@ function maybeRegisterDelegateTool(
         ...(config.allowAsyncCompletion !== undefined
           ? { allowAsyncCompletion: config.allowAsyncCompletion }
           : {}),
+        ...(config.activateAgentHooks ? { activateAgentHooks: config.activateAgentHooks } : {}),
       }),
     );
   }
+}
+
+function attachHookService(registry: ToolRegistry, hookService?: HookService): ToolRegistry {
+  if (hookService) registry.setHookService(hookService);
+  return registry;
 }
 
 function buildSubagentSafetyMiddleware(

@@ -50,6 +50,10 @@ export interface AgentProfile {
   readonly thinkingEffort?: string;
   /** 该角色可用的工具名列表(必须是 KNOWN_TOOL_NAMES 子集) */
   readonly tools: string[];
+  /** 目录适配后保留的内联 Hook 声明；native YAML 可省略。 */
+  readonly hooks?: unknown;
+  /** Hook 信任与热加载使用的稳定来源路径。 */
+  readonly sourcePath?: string;
 }
 
 export interface AgentProfileLoadResult {

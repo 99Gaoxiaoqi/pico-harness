@@ -147,7 +147,12 @@ describe("TUI input routing", () => {
   it("Markdown command 模型只覆盖本轮，未知路由失败且不改写 Session", () => {
     const current = testRoute("project/current-model");
     const command = testRoute("review/command-model");
-    const router = new ModelRouter([current, command], { TEST_API_KEY: "test-key" }, current.id);
+    const sonnet = testRoute("anthropic/claude-sonnet-4-5");
+    const router = new ModelRouter(
+      [current, command, sonnet],
+      { TEST_API_KEY: "test-key" },
+      current.id,
+    );
     const settings = createDefaultSessionSettings({
       sessionId: "command-model",
       cwd: "/workspace/command-model",
@@ -159,6 +164,18 @@ describe("TUI input routing", () => {
 
     expect(resolveTuiPromptModelRoute(router, settings, command.id).route.id).toBe(command.id);
     expect(resolveTuiPromptModelRoute(router, settings, "inherit").route.id).toBe(current.id);
+    expect(
+      resolveTuiPromptModelRoute(router, settings, "sonnet", {
+        enabled: true,
+        modelAliases: {},
+      }).route.id,
+    ).toBe(sonnet.id);
+    expect(
+      resolveTuiPromptModelRoute(router, settings, "review-alias", {
+        enabled: true,
+        modelAliases: { "review-alias": command.id },
+      }).route.id,
+    ).toBe(command.id);
     expect(() => resolveTuiPromptModelRoute(router, settings, "claude-alias")).toThrow(
       "不在当前可用路由中",
     );

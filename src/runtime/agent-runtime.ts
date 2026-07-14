@@ -495,6 +495,7 @@ export async function executeAgentRuntime(
                 : {}),
               parentThinkingEffort: effectiveOptions.thinkingEffort ?? "off",
               modelAliases: picoConfig.compatibility.claude.modelAliases,
+              claudeCompatibilityEnabled: picoConfig.compatibility.claude.enabled,
               allowRouteOverride: !backgroundPolicy,
             });
             const runtime = createSubagentModelRuntime({
@@ -769,6 +770,16 @@ export async function executeAgentRuntime(
       runtimeState.taskHostRuntime?.supervisor,
       reporter,
       skillLoaderFactory,
+      runtimeState.hookService,
+      async (profile) => {
+        if (!profile.sourcePath || profile.hooks === undefined) return async () => undefined;
+        return await runtimeState.activateComponentHookLease({
+          kind: "agent",
+          path: profile.sourcePath,
+          componentId: profile.name,
+          inlineHooks: profile.hooks,
+        });
+      },
     );
     if (backgroundPolicy) pruneRegistryToBackgroundAllowlist(registry, backgroundPolicy);
     dependencies.toolStatusSink?.(toolStatusFromRegistry(registry));
@@ -1305,6 +1316,8 @@ function registerDelegationTools(
   worktreeSupervisor?: WorktreeSupervisor,
   reporter?: Reporter,
   skillLoaderFactory?: (workDir: string) => SkillLoader,
+  hookService?: HookService,
+  activateAgentHooks?: (profile: AgentProfile) => Promise<() => void | Promise<void>>,
 ): void {
   const registryFactory = createSubagentRegistryFactory({
     workDir,
@@ -1315,6 +1328,8 @@ function registerDelegationTools(
     ownerSessionId,
     allowAsyncCompletion,
     ...(skillLoaderFactory ? { skillLoaderFactory } : {}),
+    ...(hookService ? { hookService } : {}),
+    ...(activateAgentHooks ? { activateAgentHooks } : {}),
     ...(worktreeSupervisor ? { worktreeSupervisor } : {}),
     ...(profiles.length > 0 ? { profiles } : {}),
   });
@@ -1325,6 +1340,7 @@ function registerDelegationTools(
     ...(reporter ? { reporter } : {}),
     ownerSessionId,
     allowAsyncCompletion,
+    ...(activateAgentHooks ? { activateAgentHooks } : {}),
   };
   registry.register(new DelegateTaskTool(engine, registryFactory, manager, delegateTaskOptions));
   registry.register(new DelegateStatusTool(manager));

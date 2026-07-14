@@ -176,6 +176,97 @@ describe("子代理自定义 opts 的 Tool 层透传", () => {
     });
   });
 
+  it("持久 Agent Hook 按并发子代理运行独立持有并在结束时退租", async () => {
+    let activeLeases = 0;
+    let releasedLeases = 0;
+    let startedTasks = 0;
+    let notifyStarted!: () => void;
+    const allStarted = new Promise<void>((resolve) => {
+      notifyStarted = resolve;
+    });
+    let unblockTasks!: () => void;
+    const taskGate = new Promise<void>((resolve) => {
+      unblockTasks = resolve;
+    });
+    const profiles = [
+      {
+        name: "reviewer",
+        description: "review",
+        systemPrompt: "review",
+        tools: ["read_file"],
+        hooks: { PreToolUse: [] },
+        sourcePath: "/workspace/.claude/agents/reviewer.md",
+      },
+    ];
+    const runner: AgentRunner = {
+      async runSub() {
+        startedTasks++;
+        if (startedTasks === 2) notifyStarted();
+        await taskGate;
+        return subResult("done");
+      },
+    };
+    const tool = new DelegateTaskTool(runner, () => mockRegistry(), undefined, {
+      profiles,
+      activateAgentHooks: async () => {
+        activeLeases++;
+        let active = true;
+        return async () => {
+          if (!active) return;
+          active = false;
+          activeLeases--;
+          releasedLeases++;
+        };
+      },
+    });
+
+    const execution = tool.execute(
+      JSON.stringify({
+        tasks: [
+          { goal: "review-a", agent_name: "reviewer" },
+          { goal: "review-b", agent_name: "reviewer" },
+        ],
+      }),
+    );
+    await allStarted;
+    expect(activeLeases).toBe(2);
+
+    unblockTasks();
+    await execution;
+    expect(activeLeases).toBe(0);
+    expect(releasedLeases).toBe(2);
+  });
+
+  it("Agent Hook 在子代理失败时仍会退租", async () => {
+    let released = false;
+    const profile = {
+      name: "reviewer",
+      description: "review",
+      systemPrompt: "review",
+      tools: ["read_file"],
+      hooks: { PreToolUse: [] },
+      sourcePath: "/workspace/.claude/agents/reviewer.md",
+    };
+    const runner: AgentRunner = {
+      async runSub() {
+        throw new Error("child failed");
+      },
+    };
+    const tool = new DelegateTaskTool(runner, () => mockRegistry(), undefined, {
+      profiles: [profile],
+      activateAgentHooks: async () => async () => {
+        released = true;
+      },
+    });
+
+    const result = JSON.parse(
+      await tool.execute(JSON.stringify({ goal: "review", agent_name: "reviewer" })),
+    ) as { status: string };
+
+    expect(result.status).toBe("error");
+    expect(released).toBe(true);
+  });
+
   it("不传自定义 opts 时,透传的 opts 不含新字段(回归保护)", async () => {
     const { runner, seenOpts } = recordingRunner();
     const tool = new SpawnSubagentTool(runner, mockRegistry());
