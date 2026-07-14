@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   loadClaudeAgents,
   parseClaudeAgent,
@@ -16,6 +16,7 @@ describe("Claude agent loader", () => {
   });
 
   afterEach(async () => {
+    vi.unstubAllEnvs();
     await rm(workDir, { recursive: true, force: true });
   });
 
@@ -35,6 +36,16 @@ describe("Claude agent loader", () => {
       sourcePath: "/tmp/reviewer.md",
       tools: ["Read", "Grep"],
     });
+  });
+
+  it("保留显式空工具列表以支持 fail-closed 适配", () => {
+    const agent = parseClaudeAgent(
+      "---\nname: locked\ntools: []\n---\n\nNo tools.",
+      "fallback",
+      "/tmp/locked.md",
+    );
+
+    expect(agent.tools).toEqual([]);
   });
 
   it("loads .claude/agents/*.md from the project", async () => {
@@ -105,6 +116,30 @@ describe("Claude agent loader", () => {
       ["writer", "User writer", "Writer prompt"],
     ]);
     await rm(fakeHome, { recursive: true, force: true });
+  });
+
+  it("默认加载当前用户的 ~/.claude/agents", async () => {
+    const fakeHome = await mkdtemp(join(tmpdir(), "pico-agent-default-home-"));
+    try {
+      await mkdir(join(fakeHome, ".claude", "agents"), { recursive: true });
+      await writeFile(
+        join(fakeHome, ".claude", "agents", "personal.md"),
+        "---\ndescription: Personal agent\n---\n\nPersonal prompt",
+      );
+      vi.stubEnv("HOME", fakeHome);
+
+      const agents = await loadClaudeAgents({ workDir });
+
+      expect(agents).toEqual([
+        expect.objectContaining({
+          name: "personal",
+          prompt: "Personal prompt",
+          source: "user",
+        }),
+      ]);
+    } finally {
+      await rm(fakeHome, { recursive: true, force: true });
+    }
   });
 
   it("summarizes agents with tools and source", () => {

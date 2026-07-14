@@ -2,7 +2,7 @@ import React from "react";
 import { renderToString } from "ink";
 import { describe, expect, it } from "vitest";
 import { AGENT_DESCRIPTION_WIDTH, AgentList, formatAgentRows } from "../../src/tui/agent-list.js";
-import type { ClaudeAgentSummary } from "../../src/input/agent-loader.js";
+import type { AgentProfileSummary } from "../../src/agents/catalog.js";
 
 describe("AgentList", () => {
   it("renders an empty state", () => {
@@ -11,11 +11,11 @@ describe("AgentList", () => {
   });
 
   it("renders source tags and tools", () => {
-    const agents: ClaudeAgentSummary[] = [
+    const agents: AgentProfileSummary[] = [
       {
         description: "Review code",
         name: "reviewer",
-        source: "project",
+        source: "project-claude",
         sourcePath: "/tmp/reviewer.md",
         tools: ["Read", "Grep"],
       },
@@ -30,20 +30,21 @@ describe("AgentList", () => {
 
     const output = renderToString(<AgentList agents={agents} />);
 
-    expect(output).toContain("[project]");
+    expect(output).toContain("[project/claude]");
     expect(output).toContain("[built-in]");
     expect(output).toContain("tools: Read, Grep");
     expect(output).toContain("tools: Read, Grep, Glob");
   });
 
   it("truncates long descriptions for stable rows", () => {
-    const agents: ClaudeAgentSummary[] = [
+    const agents: AgentProfileSummary[] = [
       {
         description:
           "This description is intentionally long enough to overflow the compact agent list row.",
         name: "long-agent",
-        source: "project",
+        source: "project-claude",
         sourcePath: "/tmp/long-agent.md",
+        tools: [],
       },
     ];
 

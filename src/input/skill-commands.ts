@@ -1,10 +1,10 @@
 import type { SkillLoader, SkillSummary } from "../context/skill.js";
 import {
-  loadClaudeAgents,
-  summarizeClaudeAgents,
-  type LoadClaudeAgentsOptions,
-  type ClaudeAgentSummary,
-} from "./agent-loader.js";
+  loadAgentCatalog,
+  summarizeAgentProfiles,
+  type AgentProfileSummary,
+  type LoadAgentCatalogOptions,
+} from "../agents/catalog.js";
 
 export type SkillCommandResolution =
   | { found: true; name: string; body: string }
@@ -12,7 +12,7 @@ export type SkillCommandResolution =
 
 export interface AgentListCommandResult {
   message: string;
-  data: ClaudeAgentSummary[];
+  data: AgentProfileSummary[];
 }
 
 export async function renderSkillListCommand(loader: SkillLoader): Promise<string> {
@@ -27,9 +27,11 @@ export async function renderSkillListCommand(loader: SkillLoader): Promise<strin
 }
 
 export async function renderAgentListCommand(
-  options: LoadClaudeAgentsOptions,
+  options: LoadAgentCatalogOptions,
 ): Promise<AgentListCommandResult> {
-  const agents = summarizeClaudeAgents(await loadClaudeAgents(options));
+  const agents = summarizeAgentProfiles(
+    await loadAgentCatalog({ ...options, includeBuiltins: options.includeBuiltins ?? false }),
+  );
   if (agents.length === 0) {
     return {
       data: [],

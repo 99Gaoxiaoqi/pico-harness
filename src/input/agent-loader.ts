@@ -28,6 +28,7 @@ export interface ClaudeAgentSummary {
 
 export interface LoadClaudeAgentsOptions {
   workDir: string;
+  /** 用户级 Claude Agent 根目录；省略时使用当前用户主目录。 */
   homeDir?: string;
   includeBuiltins?: boolean;
 }
@@ -70,10 +71,10 @@ const BUILTIN_AGENTS: readonly ClaudeAgent[] = [
 ];
 
 export async function loadClaudeAgents(options: LoadClaudeAgentsOptions): Promise<ClaudeAgent[]> {
-  const userDir = options.homeDir ? [join(options.homeDir ?? homedir(), ".claude", "agents")] : [];
+  const userDir = join(options.homeDir ?? homedir(), ".claude", "agents");
   const groups = await Promise.all([
     loadAgentsFromDir(join(options.workDir, ".claude", "agents"), "project"),
-    ...userDir.map((dir) => loadAgentsFromDir(dir, "user")),
+    loadAgentsFromDir(userDir, "user"),
   ]);
 
   return resolveAgentConflicts([
@@ -169,10 +170,11 @@ function parseFrontmatter(text: string): Record<string, unknown> {
 function optionalTools(value: unknown): Partial<ClaudeAgent> {
   if (Array.isArray(value)) {
     const tools = value.map(normalizeString).filter(Boolean);
-    return tools.length > 0 ? { tools } : {};
+    return { tools };
   }
+  if (value === undefined) return {};
   const normalized = normalizeString(value);
-  if (!normalized) return {};
+  if (!normalized) return { tools: [] };
   return {
     tools: normalized
       .split(",")

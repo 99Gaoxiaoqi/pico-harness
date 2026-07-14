@@ -2,6 +2,7 @@ import React from "react";
 import { renderToString } from "ink";
 import { describe, expect, it } from "vitest";
 import { DelegationManager } from "../../src/tools/delegation-manager.js";
+import type { AgentProfile } from "../../src/tools/agent-profile.js";
 import { ToolRegistry } from "../../src/tools/registry-impl.js";
 import {
   DelegateTaskTool,
@@ -54,8 +55,17 @@ describe("subagent activity flow", () => {
         return { summary: `done:${taskPrompt}`, artifacts: [] };
       },
     };
+    const profiles: AgentProfile[] = [
+      {
+        name: "tui-worker",
+        description: "TUI 投影测试子代理",
+        systemPrompt: "检查委派投影。",
+        tools: ["read_file"],
+      },
+    ];
     const tool = new DelegateTaskTool(runner, () => new ToolRegistry(), new DelegationManager(), {
       reporter,
+      profiles,
     });
     const args = JSON.stringify({
       tasks: [{ agent_name: "tui-worker", goal: "检查委派投影" }],

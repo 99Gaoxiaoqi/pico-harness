@@ -22,12 +22,13 @@ import {
 } from "./skill-commands.js";
 import { renderSkillActivation } from "./skill-activation.js";
 import {
-  loadClaudeAgents,
-  summarizeClaudeAgents,
-  type ClaudeAgent,
-  type ClaudeAgentSummary,
-  type ClaudeAgentSource,
-} from "./agent-loader.js";
+  findAgentProfile,
+  loadAgentCatalog,
+  summarizeAgentProfiles,
+  type AgentCatalogSource,
+  type AgentProfileSummary,
+  type CatalogAgentProfile,
+} from "../agents/catalog.js";
 import type {
   CommandListOptions,
   LocalCommandResult,
@@ -314,8 +315,8 @@ async function loadSkillArgumentCandidates(
 async function loadAgentArgumentCandidates(
   workDir: string,
 ): Promise<readonly SlashArgumentCandidate[]> {
-  const agents = await loadClaudeAgents({ workDir, includeBuiltins: true });
-  return summarizeClaudeAgents(agents).map((agent) => ({
+  const agents = await loadAgentCatalog({ workDir, includeBuiltins: true });
+  return summarizeAgentProfiles(agents).map((agent) => ({
     value: agent.name,
     description: agent.description,
   }));
@@ -874,9 +875,8 @@ function createAgentsCommand(options: PicoCommandRegistryOptions): SlashCommand 
     kind: "local",
     availability: "idle",
     execute: async (): Promise<LocalCommandResult> => {
-      const agents = summarizeClaudeAgents(
-        await loadClaudeAgents({ workDir: options.workDir, includeBuiltins: true }),
-        { includeSource: true },
+      const agents = summarizeAgentProfiles(
+        await loadAgentCatalog({ workDir: options.workDir, includeBuiltins: true }),
       );
       return {
         type: "local",
@@ -888,7 +888,7 @@ function createAgentsCommand(options: PicoCommandRegistryOptions): SlashCommand 
   };
 }
 
-function formatAgentSummaries(agents: readonly ClaudeAgentSummary[]): string {
+function formatAgentSummaries(agents: readonly AgentProfileSummary[]): string {
   if (agents.length === 0) return "No agents available.";
 
   return [
@@ -897,15 +897,18 @@ function formatAgentSummaries(agents: readonly ClaudeAgentSummary[]): string {
       const description = agent.description ? `: ${agent.description}` : "";
       const tools =
         agent.tools && agent.tools.length > 0 ? ` (tools: ${agent.tools.join(", ")})` : "";
-      const model = agent.model ? ` (model: ${agent.model})` : "";
+      const model = agent.modelRouteId ? ` (model: ${agent.modelRouteId})` : "";
       return `- ${agent.name} [${formatAgentSource(agent.source)}]${description}${tools}${model}`;
     }),
   ].join("\n");
 }
 
-function formatAgentSource(source: ClaudeAgentSource | undefined): string {
+function formatAgentSource(source: AgentCatalogSource | undefined): string {
   if (source === undefined) return "unknown";
-  return source === "builtin" ? "built-in" : source;
+  if (source === "builtin") return "built-in";
+  if (source === "project-native") return "project/native";
+  if (source === "project-claude") return "project/claude";
+  return "user/claude";
 }
 
 function createSessionsCommand(options: PicoCommandRegistryOptions): SlashCommand {
@@ -1533,8 +1536,8 @@ function createAgentCommand(options: PicoCommandRegistryOptions): SlashCommand {
         };
       }
 
-      const agents = await loadClaudeAgents({ workDir: options.workDir, includeBuiltins: true });
-      const agent = findAgentByName(agents, agentName);
+      const agents = await loadAgentCatalog({ workDir: options.workDir, includeBuiltins: true });
+      const agent = findAgentProfile(agents, agentName);
       if (!agent) {
         return {
           type: "local",
@@ -1562,14 +1565,7 @@ function formatAgentUsage(): string {
   return "Usage: /agent <name> <task>\n先用 /agents 查看可用 Agent。";
 }
 
-function findAgentByName(agents: readonly ClaudeAgent[], name: string): ClaudeAgent | undefined {
-  return (
-    agents.find((agent) => agent.name === name) ??
-    agents.find((agent) => agent.name.toLowerCase() === name.toLowerCase())
-  );
-}
-
-function formatAgentNotFound(name: string, agents: readonly ClaudeAgent[]): string {
+function formatAgentNotFound(name: string, agents: readonly CatalogAgentProfile[]): string {
   if (agents.length === 0) {
     return `未找到 Agent: ${name}\n当前没有可用 Agents。\n${formatAgentUsage()}`;
   }
@@ -1599,23 +1595,10 @@ function closestAgentName(name: string, candidates: readonly string[]): string |
   return best?.name;
 }
 
-function renderAgentDispatchPrompt(agent: ClaudeAgent, task: string): string {
-  const context = [
-    `Claude agent profile: ${agent.name}`,
-    agent.description ? `Description: ${agent.description}` : undefined,
-    `Source: ${agent.sourcePath}`,
-    agent.tools && agent.tools.length > 0 ? `Declared tools: ${agent.tools.join(", ")}` : undefined,
-    "",
-    "Agent instructions:",
-    agent.prompt || "(empty)",
-  ]
-    .filter((line): line is string => line !== undefined)
-    .join("\n");
+function renderAgentDispatchPrompt(agent: CatalogAgentProfile, task: string): string {
   const args = {
     agent_name: agent.name,
     goal: task,
-    context,
-    ...(agent.model ? { agent: { model_route: agent.model } } : {}),
   };
 
   return [
