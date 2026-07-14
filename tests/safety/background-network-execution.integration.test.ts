@@ -1,12 +1,14 @@
-import { mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   BACKGROUND_HARDLINE_VERSION,
   BACKGROUND_HOOK_VERSION,
+  buildBackgroundYoloHookExecutionMiddleware,
   buildBackgroundYoloMiddleware,
   prepareBackgroundYoloPolicy,
+  type BackgroundHookRunner,
   type BackgroundYoloPolicySnapshot,
 } from "../../src/safety/background-yolo-policy.js";
 import { WorkspaceRoots } from "../../src/tools/workspace-roots.js";
@@ -75,6 +77,68 @@ describe("background unrestricted network execution policy integration", () => {
 
     const unsafe = await fixture(policy("allow", ["schedule_task", "ask_user"]));
     expect(unsafe.prepared.allowedTools.size).toBe(0);
+  });
+
+  it("仅配置 PostToolUse 时也创建受沙箱约束的后台 runner", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "pico-background-post-hook-"));
+    cleanup.push(workspace);
+    await mkdir(join(workspace, ".claw"), { recursive: true });
+    await writeFile(
+      join(workspace, ".claw", "settings.json"),
+      JSON.stringify({
+        hooks: {
+          PostToolUse: [
+            {
+              matcher: "read_file",
+              hooks: [{ type: "command", command: "printf post > .post-hook-ran" }],
+            },
+          ],
+        },
+      }),
+    );
+
+    const prepared = await prepareBackgroundYoloPolicy({
+      workDir: workspace,
+      policy: policy("disabled", ["read_file"]),
+      trustStore: {
+        canonicalize: (path) => realpath(path),
+        isTrusted: async () => true,
+      },
+    });
+
+    expect(prepared.hookRunner).toBeDefined();
+    await prepared.hookRunner!.runPostToolUse("read_file", { path: "a.txt" }, "content", "job-1");
+    await expect(readFile(join(workspace, ".post-hook-ran"), "utf8")).resolves.toBe("post");
+  });
+
+  it("execution middleware 在工具成功和失败后都执行 PostToolUse，不改写原结果", async () => {
+    const postCalls: Array<{ toolResponse: string; toolInput: unknown }> = [];
+    const hookRunner: BackgroundHookRunner = {
+      async runPreToolUse() {
+        return { decision: "allow" };
+      },
+      async runPostToolUse(_toolName, toolInput, toolResponse) {
+        postCalls.push({ toolInput, toolResponse });
+      },
+    };
+    const middleware = buildBackgroundYoloHookExecutionMiddleware({
+      policy: { hookRunner },
+      sessionId: "background-post-test",
+    });
+    const call = { id: "read", name: "read_file", arguments: '{"path":"a.txt"}' };
+
+    await expect(middleware(call, async () => "tool-ok")).resolves.toBe("tool-ok");
+    const failure = new Error("tool-failed");
+    await expect(
+      middleware(call, async () => {
+        throw failure;
+      }),
+    ).rejects.toBe(failure);
+
+    expect(postCalls).toEqual([
+      { toolInput: { path: "a.txt" }, toolResponse: "tool-ok" },
+      { toolInput: { path: "a.txt" }, toolResponse: "[tool_error] tool-failed" },
+    ]);
   });
 
   async function fixture(snapshot: BackgroundYoloPolicySnapshot) {
