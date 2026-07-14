@@ -77,7 +77,11 @@ import {
 import { computeApprovalDiff } from "../approval/diff.js";
 import { classifyBashCommand } from "../approval/bash-safety.js";
 import { createSessionRuntime, type SessionRuntime } from "./session-runtime.js";
-import { buildSubagentModelCatalog, type SubagentModelCatalog } from "./subagent-model-catalog.js";
+import {
+  buildSubagentModelCatalog,
+  createInheritOnlySubagentModelCatalog,
+  type SubagentModelCatalog,
+} from "./subagent-model-catalog.js";
 import type { MiddlewareFunc } from "../tools/registry.js";
 import { McpConnectionManager, type McpStatusSnapshot } from "../mcp/manager.js";
 import { isMcpToolName } from "../mcp/types.js";
@@ -475,6 +479,8 @@ export async function executeAgentRuntime(
         ? activeRouteModelRouter(kind, providerConfig, effectiveOptions.modelRouteId)
         : undefined);
     const parentModelRouteId = effectiveOptions.modelRouteId;
+    const parentModelDisplayId =
+      parentModelRouteId ?? dependencies.provider?.modelName ?? providerConfig.model;
     const allowSubagentModelRouteOverride =
       dependencies.modelRouter !== undefined &&
       dependencies.provider === undefined &&
@@ -487,7 +493,7 @@ export async function executeAgentRuntime(
             aliases: claudeCompatibility.enabled ? claudeCompatibility.modelAliases : {},
             allowRouteOverride: allowSubagentModelRouteOverride,
           })
-        : undefined;
+        : createInheritOnlySubagentModelCatalog(parentModelDisplayId);
     const resolveSubagentModelRuntime =
       subagentModelRouter && parentModelRouteId && dependencies.provider === undefined
         ? (request?: SubagentModelSelectionRequest) => {

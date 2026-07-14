@@ -130,33 +130,40 @@ describe("子代理模型目录接线", () => {
     });
   });
 
-  it("宿主注入固定 Provider 时只向 delegate_task 披露 inherit", async () => {
-    const parentRoute = modelRoute("deepseek/deepseek-v4-pro", "deepseek-v4-pro", "PARENT_KEY");
-    const childRoute = modelRoute("zhipu/glm-5.2", "glm-5.2", "CHILD_KEY");
-    const modelRouter = new ModelRouter(
-      [parentRoute, childRoute],
-      { PARENT_KEY: "parent-secret", CHILD_KEY: "child-secret" },
-      parentRoute.id,
-    );
-    const provider = new CapturingProvider();
+  it.each([true, false])(
+    "宿主注入固定 Provider 时只向 delegate_task 披露 inherit（注入 ModelRouter=%s）",
+    async (injectModelRouter) => {
+      const parentRoute = modelRoute("deepseek/deepseek-v4-pro", "deepseek-v4-pro", "PARENT_KEY");
+      const childRoute = modelRoute("zhipu/glm-5.2", "glm-5.2", "CHILD_KEY");
+      const modelRouter = new ModelRouter(
+        [parentRoute, childRoute],
+        { PARENT_KEY: "parent-secret", CHILD_KEY: "child-secret" },
+        parentRoute.id,
+      );
+      const provider = new CapturingProvider();
 
-    await new AgentRuntime().execute(
-      {
-        prompt: "使用 GLM-5.2 创建审查子代理",
-        dir: await mkdtemp(join(tmpdir(), "pico-subagent-fixed-provider-catalog-")),
-        provider: parentRoute.provider,
-        baseURL: parentRoute.baseURL,
-        apiKey: "parent-secret",
-        model: parentRoute.model,
-        modelRouteId: parentRoute.id,
-        modelCapabilities: parentRoute.capabilities,
-        allowModelFallback: false,
-      },
-      { provider, reporter: new SilentReporter(), modelRouter },
-    );
+      await new AgentRuntime().execute(
+        {
+          prompt: "使用 GLM-5.2 创建审查子代理",
+          dir: await mkdtemp(join(tmpdir(), "pico-subagent-fixed-provider-catalog-")),
+          provider: parentRoute.provider,
+          baseURL: parentRoute.baseURL,
+          apiKey: "parent-secret",
+          model: parentRoute.model,
+          modelRouteId: parentRoute.id,
+          modelCapabilities: parentRoute.capabilities,
+          allowModelFallback: false,
+        },
+        {
+          provider,
+          reporter: new SilentReporter(),
+          ...(injectModelRouter ? { modelRouter } : {}),
+        },
+      );
 
-    expect(provider.tools.find((tool) => tool.name === "delegate_task")?.inputSchema).toMatchObject(
-      {
+      expect(
+        provider.tools.find((tool) => tool.name === "delegate_task")?.inputSchema,
+      ).toMatchObject({
         properties: {
           agent: {
             properties: {
@@ -166,9 +173,9 @@ describe("子代理模型目录接线", () => {
             },
           },
         },
-      },
-    );
-  });
+      });
+    },
+  );
 });
 
 class CapturingProvider implements LLMProvider {

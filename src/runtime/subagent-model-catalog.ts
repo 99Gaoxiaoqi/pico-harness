@@ -65,6 +65,17 @@ export function buildSubagentModelCatalog(
   });
 }
 
+/** 完整 ModelRouter 不可用时，只向 Agent 披露安全的父模型继承能力。 */
+export function createInheritOnlySubagentModelCatalog(parentRouteId: string): SubagentModelCatalog {
+  return Object.freeze({
+    routes: Object.freeze([]),
+    parentRouteId,
+    allowRouteOverride: false,
+    totalSelectableRoutes: 0,
+    truncated: false,
+  });
+}
+
 function validatedUniqueRoutes(router: ModelRouter): ModelRoute[] {
   const byId = new Map<string, ModelRoute>();
   for (const candidate of router.routes) {
