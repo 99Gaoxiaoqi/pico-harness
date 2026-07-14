@@ -43,7 +43,13 @@ const transcript: readonly ConversationItemView[] = [
     detail: "认证回归路径正常",
     tone: "success",
   },
-  { id: "assistant-1", kind: "assistantMessage", text: "问题来自过期的访问令牌。" },
+  {
+    id: "assistant-1",
+    kind: "assistantMessage",
+    text: "问题来自过期的访问令牌。",
+    truncated: true,
+    originalBytes: 1_200_000,
+  },
 ];
 
 describe("Conversation components", () => {
@@ -58,6 +64,7 @@ describe("Conversation components", () => {
     expect(screen.getByText("复现失败路径")).toBeTruthy();
     expect(screen.getByText("测试已通过")).toBeTruthy();
     expect(screen.getByText("问题来自过期的访问令牌。")).toBeTruthy();
+    expect(screen.getByRole("note").textContent).toContain("1,200,000 字节");
 
     await user.click(screen.getByRole("button", { name: "查看 Tesla 的会话" }));
     expect(onOpenItem).toHaveBeenCalledWith(transcript[4]);

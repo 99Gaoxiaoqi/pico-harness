@@ -185,6 +185,12 @@
   min-width: 0;
 }
 
+.conversation-truncated-notice {
+  margin-top: 8px;
+  color: var(--conversation-ink-muted);
+  font-size: 11px;
+}
+
 .conversation-transcript__item[data-kind="runBoundary"] {
   margin: 4px 0 -4px;
 }

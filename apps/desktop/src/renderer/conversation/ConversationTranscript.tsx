@@ -281,6 +281,12 @@ export function ConversationTranscript({
         return (
           <li className="conversation-transcript__item" data-kind={item.kind} key={item.id}>
             {renderItem ? renderItem(item, fallback) : fallback}
+            {item.truncated && (
+              <p className="conversation-truncated-notice" role="note">
+                这条记录超过桌面传输上限，已安全截断
+                {item.originalBytes ? `（原始 ${item.originalBytes.toLocaleString()} 字节）` : ""}。
+              </p>
+            )}
           </li>
         );
       })}
