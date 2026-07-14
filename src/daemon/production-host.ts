@@ -2,6 +2,7 @@ import { AgentRuntime } from "../runtime/agent-runtime.js";
 import { SilentReporter } from "../engine/reporter.js";
 import { loadPicoConfig } from "../input/pico-config.js";
 import {
+  assertCredentialRefMatchesModelRoute,
   createPlatformCredentialVault,
   parseCredentialRef,
   type CredentialVault,
@@ -125,7 +126,8 @@ async function resolveCronModelRoute(job: CronJobRecord) {
   if (!provider.models.includes(model)) {
     throw new Error(`配置模型路由 ${modelRouteId} 不在显式 models 列表中`);
   }
-  return {
+  const resolved = {
+    id: modelRouteId,
     provider: provider.protocol,
     baseURL: provider.baseURL,
     model,
@@ -136,4 +138,6 @@ async function resolveCronModelRoute(job: CronJobRecord) {
       provider.modelCapabilities?.[model],
     ),
   };
+  assertCredentialRefMatchesModelRoute(job.credentialRef, resolved, job.workspacePath);
+  return resolved;
 }

@@ -8,6 +8,7 @@ import { globalSessionManager } from "../../src/engine/session.js";
 import { resetSessionSettingsForTests } from "../../src/input/session-settings.js";
 import type { LLMProvider } from "../../src/provider/interface.js";
 import { credentialRefForModelRoute } from "../../src/provider/credential-vault.js";
+import { resolveModelRouteCapabilities } from "../../src/provider/model-capabilities.js";
 import { AgentRuntime, type RuntimeExecution } from "../../src/runtime/agent-runtime.js";
 import {
   BACKGROUND_HARDLINE_VERSION,
@@ -96,7 +97,19 @@ describe("AgentRuntime background YOLO integration", () => {
 
   it("后台 Provider 只按 credentialRef 取钥，缺少 resolver 时在构建 Provider 前失败", async () => {
     const workDir = await mkdtemp(join(tmpdir(), "pico-background-credential-"));
-    const ref = credentialRefForModelRoute("configured/model");
+    const ref = credentialRefForModelRoute(
+      {
+        id: "configured/model",
+        providerId: "configured",
+        provider: "openai",
+        model: "model",
+        baseURL: "https://provider.test/v1",
+        apiKeyEnv: "TEST_API_KEY",
+        source: "config",
+        capabilities: resolveModelRouteCapabilities("openai", "model"),
+      },
+      workDir,
+    );
     const provider = new ScriptedProvider([{ role: "assistant", content: "vault resolved" }]);
     const providerConfigs: string[] = [];
     const options = {
