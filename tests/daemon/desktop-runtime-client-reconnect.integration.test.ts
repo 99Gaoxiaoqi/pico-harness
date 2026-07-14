@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, realpath, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -29,11 +29,14 @@ describe("LocalDaemonRuntimeClientAdapter", () => {
     cleanup.push(root);
     const workspacePath = join(root, "workspace");
     await mkdir(workspacePath);
+    const canonicalWorkspacePath = await realpath(workspacePath);
+    const workspaceAliasPath = join(root, "workspace-alias");
+    await symlink(workspacePath, workspaceAliasPath, "dir");
     const endpoint = resolveLocalDaemonEndpoint({
       runtimeDir: join(root, "runtime"),
       userIdentity: "desktop-runtime-client-test",
     });
-    const service = new ReconnectFixtureService(workspacePath);
+    const service = new ReconnectFixtureService(canonicalWorkspacePath);
     let daemon = new LocalRuntimeDaemon({ endpoint, service });
     const client = new LocalDaemonRuntimeClientAdapter(endpoint, {
       reconnectDelayMs: 10,
@@ -43,7 +46,7 @@ describe("LocalDaemonRuntimeClientAdapter", () => {
     try {
       await daemon.start();
       const received: string[] = [];
-      const connected = await client.subscribe({ workspacePath }, (event) => {
+      const connected = await client.subscribe({ workspacePath: workspaceAliasPath }, (event) => {
         received.push(event.eventId);
       });
       subscription = connected;
@@ -64,7 +67,7 @@ describe("LocalDaemonRuntimeClientAdapter", () => {
       await waitFor(() => received.includes(liveAfterRestart.eventId));
 
       expect(service.replayCursors.at(-1)).toEqual({
-        workspacePath,
+        workspacePath: canonicalWorkspacePath,
         afterEventId: liveBeforeRestart.eventId,
       });
       expect(received).toEqual([

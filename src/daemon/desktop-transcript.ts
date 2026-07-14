@@ -52,7 +52,12 @@ export class TranscriptRevisionConflict extends Error {
 
 function projectVisibleItems(snapshot: SessionHydrationSnapshot): RuntimeConversationItem[] {
   const toolResults = indexToolResults(snapshot.messages);
-  const items: RuntimeConversationItem[] = [];
+  const items: OrderedConversationItem[] = [];
+  let ordinal = 0;
+
+  const append = (item: RuntimeConversationItem, sequence: number): void => {
+    items.push({ item, sequence, ordinal: ordinal++ });
+  };
 
   snapshot.messages.forEach((message, messageIndex) => {
     if (
@@ -71,89 +76,127 @@ function projectVisibleItems(snapshot: SessionHydrationSnapshot): RuntimeConvers
       typeof desktopDisplayText === "string" && desktopDisplayText.trim()
         ? desktopDisplayText.trim()
         : message.content.trim();
+    const sequence = snapshot.messageSequences[messageIndex] ?? messageIndex + 1;
     if (message.role === "user") {
       if (content) {
-        items.push({
-          id: stableItemId(snapshot.sessionId, messageIndex, "user", content),
-          kind: "userMessage",
-          content,
-        });
+        append(
+          {
+            id: stableItemId(snapshot.sessionId, messageIndex, "user", content),
+            kind: "userMessage",
+            content,
+          },
+          sequence,
+        );
       }
       return;
     }
 
     if (content) {
-      items.push({
-        id: stableItemId(snapshot.sessionId, messageIndex, "assistant", content),
-        kind: "assistantMessage",
-        content,
-      });
+      append(
+        {
+          id: stableItemId(snapshot.sessionId, messageIndex, "assistant", content),
+          kind: "assistantMessage",
+          content,
+        },
+        sequence,
+      );
     }
     for (const call of message.toolCalls ?? []) {
       const result = toolResults.get(call.id)?.shift();
       const failed = result === undefined || isToolResultErrorMessage(result);
-      items.push({
-        id: stableItemId(snapshot.sessionId, messageIndex, `tool:${call.id}`, call.arguments),
-        kind: "tool",
-        name: call.name,
-        args: call.arguments,
-        status: failed ? "error" : "success",
-        summary:
-          result === undefined
-            ? "Interrupted before a result was recorded."
-            : `${failed ? "Tool failed" : "Tool completed"} · ${Buffer.byteLength(result.content, "utf8")} bytes`,
-      });
+      append(
+        {
+          id: stableItemId(snapshot.sessionId, messageIndex, `tool:${call.id}`, call.arguments),
+          kind: "tool",
+          name: call.name,
+          args: call.arguments,
+          status: failed ? "error" : "success",
+          summary:
+            result === undefined
+              ? "Interrupted before a result was recorded."
+              : `${failed ? "Tool failed" : "Tool completed"} · ${Buffer.byteLength(result.content, "utf8")} bytes`,
+        },
+        sequence,
+      );
     }
   });
 
   const activeGoal = snapshot.runtime.goal?.goals.find((goal) => goal.status === "active");
   if (activeGoal) {
-    items.push({
-      id: `goal:${activeGoal.id}`,
-      kind: "goal",
-      title: activeGoal.title,
-      detail: activeGoal.progress ?? activeGoal.description,
-      state: activeGoal.status,
-      data: { goalId: activeGoal.id },
-    });
+    append(
+      {
+        id: `goal:${activeGoal.id}`,
+        kind: "goal",
+        title: activeGoal.title,
+        detail: activeGoal.progress ?? activeGoal.description,
+        state: activeGoal.status,
+        data: { goalId: activeGoal.id },
+      },
+      Number.MAX_SAFE_INTEGER,
+    );
   }
   items.push(...projectStructuredItems(snapshot));
-  return items;
+  items.sort((left, right) => left.sequence - right.sequence || left.ordinal - right.ordinal);
+  return items.map(({ item }) => item);
 }
 
-function projectStructuredItems(snapshot: SessionHydrationSnapshot): RuntimeConversationItem[] {
+interface OrderedConversationItem {
+  readonly item: RuntimeConversationItem;
+  readonly sequence: number;
+  readonly ordinal: number;
+}
+
+function projectStructuredItems(snapshot: SessionHydrationSnapshot): OrderedConversationItem[] {
   if (snapshot.transcriptEvents.length === 0) return [];
   const projection = projectTranscriptEvents(snapshot.transcriptEvents);
   const createdAtByEntryId = new Map<string, number>();
-  for (const event of snapshot.transcriptEvents) {
-    if ("entryId" in event) createdAtByEntryId.set(event.entryId, event.createdAt);
+  const sequenceByEntryId = new Map<string, number>();
+  for (const [eventIndex, event] of snapshot.transcriptEvents.entries()) {
+    if (!("entryId" in event)) continue;
+    if (!createdAtByEntryId.has(event.entryId)) {
+      createdAtByEntryId.set(event.entryId, event.createdAt);
+    }
+    if (!sequenceByEntryId.has(event.entryId)) {
+      sequenceByEntryId.set(
+        event.entryId,
+        snapshot.transcriptEventSequences[eventIndex] ?? snapshot.messages.length + eventIndex + 1,
+      );
+    }
   }
   const messageToolSignatures = new Set(
     snapshot.messages.flatMap((message) =>
       (message.toolCalls ?? []).map((call) => `${call.name}\0${call.arguments}`),
     ),
   );
-  const items: RuntimeConversationItem[] = [];
+  const items: OrderedConversationItem[] = [];
   const coalescedIndexes = new Map<string, number>();
-  for (const projected of projection.entries) {
+  for (const [projectedIndex, projected] of projection.entries.entries()) {
     const entry = projected.entry;
     const at = createdAtByEntryId.get(projected.id);
+    const sequence = sequenceByEntryId.get(projected.id) ?? Number.MAX_SAFE_INTEGER - 1;
+    const ordered = (item: RuntimeConversationItem): OrderedConversationItem => ({
+      item,
+      sequence,
+      ordinal: projectedIndex,
+    });
     switch (entry.kind) {
       case "plan":
-        items.push({
-          id: projected.id,
-          kind: "plan",
-          title: entry.title,
-          ...(entry.detail ? { detail: entry.detail } : {}),
-          ...(entry.state ? { state: entry.state } : {}),
-          ...(at === undefined ? {} : { at }),
-        });
+        items.push(
+          ordered({
+            id: projected.id,
+            kind: "plan",
+            title: entry.title,
+            ...(entry.detail ? { detail: entry.detail } : {}),
+            ...(entry.state ? { state: entry.state } : {}),
+            ...(at === undefined ? {} : { at }),
+          }),
+        );
         break;
       case "approval":
       case "prompt":
       case "changes": {
         const data = toJsonObject(entry.data);
-        const item: RuntimeConversationItem = {
+        const item = ordered({
           id: projected.id,
           kind: entry.kind,
           title: entry.title,
@@ -161,72 +204,87 @@ function projectStructuredItems(snapshot: SessionHydrationSnapshot): RuntimeConv
           ...(entry.state ? { state: entry.state } : {}),
           ...(at === undefined ? {} : { at }),
           ...(data ? { data } : {}),
-        };
+        });
         const key = structuredItemKey(entry.kind, data);
         const priorIndex = key ? coalescedIndexes.get(key) : undefined;
         if (priorIndex === undefined) {
           if (key) coalescedIndexes.set(key, items.length);
           items.push(item);
         } else {
-          items[priorIndex] = item;
+          const prior = items[priorIndex]!;
+          items[priorIndex] = {
+            ...item,
+            sequence: Math.min(prior.sequence, item.sequence),
+            ordinal: prior.ordinal,
+          };
         }
         break;
       }
       case "run-boundary":
-        items.push({
-          id: projected.id,
-          kind: "runBoundary",
-          runId: entry.runId,
-          status: entry.status,
-          startedAt: entry.startedAt,
-          ...(entry.finishedAt === undefined ? {} : { finishedAt: entry.finishedAt }),
-        });
+        items.push(
+          ordered({
+            id: projected.id,
+            kind: "runBoundary",
+            runId: entry.runId,
+            status: entry.status,
+            startedAt: entry.startedAt,
+            ...(entry.finishedAt === undefined ? {} : { finishedAt: entry.finishedAt }),
+          }),
+        );
         break;
       case "subagent-activity":
-        items.push({
-          id: projected.id,
-          kind: "subagent",
-          title: entry.agentName ? `${entry.agentName}: ${entry.task}` : entry.task,
-          ...((entry.summary ?? entry.currentAction)
-            ? { detail: entry.summary ?? entry.currentAction }
-            : {}),
-          state: entry.status,
-          ...(at === undefined ? {} : { at }),
-          data: {
-            ...(projected.subagentActivityId ? { activityId: projected.subagentActivityId } : {}),
-            ...(entry.mode ? { mode: entry.mode } : {}),
-          },
-        });
+        items.push(
+          ordered({
+            id: projected.id,
+            kind: "subagent",
+            title: entry.agentName ? `${entry.agentName}: ${entry.task}` : entry.task,
+            ...((entry.summary ?? entry.currentAction)
+              ? { detail: entry.summary ?? entry.currentAction }
+              : {}),
+            state: entry.status,
+            ...(at === undefined ? {} : { at }),
+            data: {
+              ...(projected.subagentActivityId ? { activityId: projected.subagentActivityId } : {}),
+              ...(entry.mode ? { mode: entry.mode } : {}),
+            },
+          }),
+        );
         break;
       case "skill":
-        items.push({
-          id: projected.id,
-          kind: "skill",
-          name: entry.name,
-          args: entry.args,
-          trigger: entry.trigger,
-          ...(at === undefined ? {} : { at }),
-        });
+        items.push(
+          ordered({
+            id: projected.id,
+            kind: "skill",
+            name: entry.name,
+            args: entry.args,
+            trigger: entry.trigger,
+            ...(at === undefined ? {} : { at }),
+          }),
+        );
         break;
       case "tool":
         if (messageToolSignatures.has(`${entry.name}\0${entry.args}`)) break;
-        items.push({
-          id: projected.id,
-          kind: "tool",
-          name: entry.name,
-          args: entry.args,
-          status: transcriptToolStatus(entry.status),
-          ...(entry.summary ? { summary: entry.summary } : {}),
-          ...(at === undefined ? {} : { at }),
-        });
+        items.push(
+          ordered({
+            id: projected.id,
+            kind: "tool",
+            name: entry.name,
+            args: entry.args,
+            status: transcriptToolStatus(entry.status),
+            ...(entry.summary ? { summary: entry.summary } : {}),
+            ...(at === undefined ? {} : { at }),
+          }),
+        );
         break;
       case "error":
-        items.push({
-          id: projected.id,
-          kind: "error",
-          content: entry.message,
-          ...(at === undefined ? {} : { at }),
-        });
+        items.push(
+          ordered({
+            id: projected.id,
+            kind: "error",
+            content: entry.message,
+            ...(at === undefined ? {} : { at }),
+          }),
+        );
         break;
       case "logo":
       case "user":
