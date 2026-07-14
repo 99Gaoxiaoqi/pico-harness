@@ -726,6 +726,7 @@ export async function executeAgentRuntime(
       // 必须始终使用 worktree + OS 沙箱，不得因 default/auto 模式退化为无沙箱 Bash。
       { config: picoConfig.sandbox },
       session.id,
+      !ownsRuntimeState,
       runtimeState.taskHostRuntime?.supervisor,
       reporter,
     );
@@ -1235,6 +1236,7 @@ function registerDelegationTools(
   workspaceRoots: WorkspaceRoots,
   yoloSandbox: { config?: Partial<YoloSandboxConfig> },
   ownerSessionId: string,
+  allowAsyncCompletion: boolean,
   worktreeSupervisor?: WorktreeSupervisor,
   reporter?: Reporter,
 ): void {
@@ -1245,6 +1247,7 @@ function registerDelegationTools(
     manager,
     yoloSandbox,
     ownerSessionId,
+    allowAsyncCompletion,
     ...(worktreeSupervisor ? { worktreeSupervisor } : {}),
     ...(profiles.length > 0 ? { profiles } : {}),
   });
@@ -1254,6 +1257,7 @@ function registerDelegationTools(
     ...(worktreeSupervisor ? { worktreeSupervisor } : {}),
     ...(reporter ? { reporter } : {}),
     ownerSessionId,
+    allowAsyncCompletion,
   };
   registry.register(new DelegateTaskTool(engine, registryFactory, manager, delegateTaskOptions));
   registry.register(new DelegateStatusTool(manager));
