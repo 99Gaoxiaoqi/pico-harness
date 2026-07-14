@@ -4,11 +4,17 @@ import {
   folderWorkspaceCapabilities,
   type AppData,
   type ConnectionState,
+  type ConversationView,
   type JsonRecord,
   type WorkspaceCapabilities,
   type WorkspaceMode,
 } from "./model.js";
 import { previewData } from "./fixture.js";
+import type {
+  ComposerBehavior,
+  ConversationItemView,
+  ConversationProgressState,
+} from "./conversation/types.js";
 
 type DesktopResult<T> =
   | { readonly ok: true; readonly value: T }
@@ -76,6 +82,147 @@ function booleanValue(value: unknown, fallback = false): boolean {
 
 function recordArray(value: unknown): readonly JsonRecord[] {
   return Array.isArray(value) ? value.filter(isRecord) : [];
+}
+
+function progressState(value: unknown): ConversationProgressState {
+  return value === "done" || value === "failed" || value === "waiting" ? value : "active";
+}
+
+function conversationItem(item: JsonRecord, index: number): ConversationItemView | undefined {
+  const id = stringValue(item.id, `conversation-item-${index}`);
+  const at = numberValue(item.at) || undefined;
+  if (item.kind === "userMessage" || item.kind === "assistantMessage") {
+    const text = stringValue(item.content);
+    if (!text) return undefined;
+    return {
+      id,
+      kind: item.kind,
+      text,
+      ...(at ? { at } : {}),
+    };
+  }
+  if (item.kind === "tool") {
+    return {
+      id,
+      kind: "tool",
+      toolName: stringValue(item.name, "tool"),
+      title: stringValue(item.name, "工具调用"),
+      detail: stringValue(item.args) || undefined,
+      output: stringValue(item.summary) || undefined,
+      state: item.status === "success" ? "done" : item.status === "error" ? "failed" : "active",
+      ...(at ? { at } : {}),
+    };
+  }
+  if (item.kind === "plan") {
+    return {
+      id,
+      kind: "plan",
+      title: stringValue(item.title, "执行计划"),
+      steps: [
+        {
+          id: `${id}:step`,
+          title: stringValue(item.detail ?? item.title, "计划已更新"),
+          state: progressState(item.state),
+        },
+      ],
+      ...(at ? { at } : {}),
+    };
+  }
+  if (item.kind === "runBoundary") {
+    const status = stringValue(item.status);
+    return {
+      id,
+      kind: "runBoundary",
+      status:
+        status === "failed"
+          ? "failed"
+          : status === "cancelled"
+            ? "interrupted"
+            : status === "succeeded"
+              ? "completed"
+              : "started",
+      label: stringValue(item.label, status === "succeeded" ? "运行完成" : "Pico 正在处理"),
+      ...(at ? { at } : {}),
+    };
+  }
+  if (item.kind === "goal") {
+    return {
+      id,
+      kind: "goal",
+      title: stringValue(item.title, "当前目标"),
+      detail: stringValue(item.detail) || undefined,
+      state: progressState(item.state),
+      ...(at ? { at } : {}),
+    };
+  }
+  if (item.kind === "subagent") {
+    return {
+      id,
+      kind: "subagent",
+      name: stringValue(item.name, "Agent"),
+      title: stringValue(item.title, "子代理活动"),
+      detail: stringValue(item.detail) || undefined,
+      state: progressState(item.state),
+      ...(at ? { at } : {}),
+    };
+  }
+  if (item.kind === "approval") {
+    return {
+      id,
+      kind: "approval",
+      title: stringValue(item.title, "需要你的批准"),
+      detail: stringValue(item.detail, "Runtime 请求执行受保护操作。"),
+      state: item.state === "allowed" || item.state === "denied" ? item.state : "pending",
+      ...(at ? { at } : {}),
+    };
+  }
+  if (item.kind === "prompt") {
+    return {
+      id,
+      kind: "prompt",
+      question: stringValue(item.title, "Pico 需要你的回答"),
+      detail: stringValue(item.detail) || undefined,
+      state: item.state === "answered" ? "answered" : "pending",
+      ...(at ? { at } : {}),
+    };
+  }
+  if (item.kind === "changes") {
+    const data = isRecord(item.data) ? item.data : {};
+    return {
+      id,
+      kind: "changes",
+      title: stringValue(item.title, "文件已修改"),
+      detail: stringValue(item.detail) || undefined,
+      files: Array.isArray(data.files)
+        ? data.files.map((file) => stringValue(file)).filter(Boolean)
+        : [],
+      state: item.state === "applied" || item.state === "conflict" ? item.state : "pending",
+      ...(at ? { at } : {}),
+    };
+  }
+  if (item.kind === "systemNotice" || item.kind === "error") {
+    return {
+      id,
+      kind: "status",
+      title: stringValue(item.content, item.kind === "error" ? "运行失败" : "状态更新"),
+      tone: item.kind === "error" ? "error" : "neutral",
+      ...(at ? { at } : {}),
+    };
+  }
+  return undefined;
+}
+
+function parseConversation(value: unknown, sessionId: string): ConversationView {
+  const result = isRecord(value) ? value : {};
+  return {
+    sessionId,
+    items: recordArray(result.items)
+      .map(conversationItem)
+      .filter((item): item is ConversationItemView => item !== undefined),
+    revision: stringValue(result.revision) || undefined,
+    nextBefore: stringValue(result.nextBefore) || undefined,
+    queuedCount: recordArray(result.queuedInputs).length,
+  };
 }
 
 function capability(item: JsonRecord, index: number) {
@@ -233,7 +380,13 @@ export interface RuntimeActions {
   chooseWorkspace(): Promise<void>;
   trustWorkspace(trusted: boolean): Promise<void>;
   reload(): Promise<void>;
-  createTask(prompt: string): Promise<string | undefined>;
+  loadSession(sessionId: string): Promise<void>;
+  sendMessage(input: {
+    readonly sessionId?: string;
+    readonly text: string;
+    readonly behavior?: ComposerBehavior;
+    readonly expectedRunId?: string;
+  }): Promise<string | undefined>;
   setSessionArchived(sessionId: string, archived: boolean): Promise<void>;
   pauseRun(runId: string): Promise<void>;
   resumeRun(runId: string): Promise<void>;
@@ -368,6 +521,38 @@ export function useRuntimeStore(): RuntimeStore {
     );
   }, []);
 
+  const loadConversation = useCallback(
+    async (bridge: RendererBridge, workspacePath: string, sessionId: string) => {
+      if (preview) return;
+      const value = await invoke(bridge, "session.transcript", {
+        workspacePath,
+        sessionId,
+        limit: 200,
+      });
+      const record = isRecord(value) ? value : {};
+      const conversation = parseConversation(record, sessionId);
+      const activeRun = isRecord(record.activeRun) ? record.activeRun : undefined;
+      setData((current) => ({
+        ...current,
+        conversations: { ...current.conversations, [sessionId]: conversation },
+        runs: activeRun
+          ? [
+              {
+                id: stringValue(activeRun.runId),
+                sessionId: stringValue(activeRun.sessionId, sessionId),
+                description: stringValue(activeRun.description, "会话运行"),
+                status: stringValue(activeRun.status, "running"),
+                startedAt: numberValue(activeRun.startedAt, Date.now()),
+                updatedAt: numberValue(activeRun.updatedAt, Date.now()),
+              },
+              ...current.runs.filter((run) => run.id !== stringValue(activeRun.runId)),
+            ]
+          : current.runs,
+      }));
+    },
+    [preview],
+  );
+
   const bootstrap = useCallback(async () => {
     if (preview) return;
     setConnection({ kind: "loading" });
@@ -381,7 +566,14 @@ export function useRuntimeStore(): RuntimeStore {
       return;
     }
     try {
-      await invoke(bridge, "runtime.ping", {});
+      const pingValue = await invoke(bridge, "runtime.ping", {});
+      const ping = isRecord(pingValue) ? pingValue : {};
+      const capabilities = Array.isArray(ping.capabilities)
+        ? ping.capabilities.map((capability) => stringValue(capability))
+        : [];
+      if (!capabilities.includes("session-conversation-v1")) {
+        throw new Error("当前 Runtime 缺少会话能力。请完全退出并重新启动 Pico。");
+      }
       const workspaceValue = await invoke(bridge, "workspace.list", {});
       const workspaces = parseWorkspaceList(workspaceValue);
       const workspacePath = stringValue(
@@ -410,6 +602,7 @@ export function useRuntimeStore(): RuntimeStore {
     const subscription = bridge.events.subscribe({ workspacePath: data.workspacePath }, (event) => {
       if (!isRecord(event)) return;
       const payload = isRecord(event.payload) ? event.payload : {};
+      const scope = isRecord(event.scope) ? event.scope : {};
       const topic = stringValue(event.topic);
       if (topic === "approval.requested") {
         const request = isRecord(payload.request) ? payload.request : {};
@@ -465,19 +658,26 @@ export function useRuntimeStore(): RuntimeStore {
               detail: stringValue(item.detail),
               state: item.state === "failed" ? "failed" : item.state === "done" ? "done" : "active",
               at: numberValue(event.at, Date.now()),
+              sessionId: stringValue(scope.sessionId) || undefined,
+              runId: stringValue(scope.runId ?? payload.runId) || undefined,
+              eventType: stringValue(item.eventType) || undefined,
             },
           ],
         }));
       } else if (topic.startsWith("run.") || topic.startsWith("session.")) {
         const workspace = dataRef.current.workspacePath;
-        if (workspace) void loadWorkspace(bridge, workspace);
+        if (workspace) {
+          void loadWorkspace(bridge, workspace);
+          const sessionId = stringValue(scope.sessionId);
+          if (sessionId) void loadConversation(bridge, workspace, sessionId);
+        }
       }
     });
     void subscription.ready.then((result) => {
       if (!result.ok) setMessage(`事件订阅失败：${result.error.message}`);
     });
     return () => subscription.dispose();
-  }, [connection.kind, data.workspacePath, loadWorkspace, preview]);
+  }, [connection.kind, data.workspacePath, loadConversation, loadWorkspace, preview]);
 
   const perform = useCallback(
     async (label: string, operation: (bridge: RendererBridge) => Promise<void>) => {
@@ -525,25 +725,66 @@ export function useRuntimeStore(): RuntimeStore {
         });
       },
       reload: bootstrap,
-      async createTask(prompt) {
+      async loadSession(sessionId) {
         const workspacePath = dataRef.current.workspacePath;
-        if (!workspacePath || !prompt.trim()) return undefined;
-        let createdId: string | undefined;
-        await perform("create-task", async (bridge) => {
+        if (!workspacePath || !sessionId) return;
+        await perform("load-session", async (bridge) => {
+          if (!preview) await loadConversation(bridge, workspacePath, sessionId);
+        });
+      },
+      async sendMessage(input) {
+        const workspacePath = dataRef.current.workspacePath;
+        if (!workspacePath || !input.text.trim()) return undefined;
+        let resolvedSessionId = input.sessionId;
+        await perform("send-message", async (bridge) => {
           if (preview) {
-            createdId = "run-atlas";
+            resolvedSessionId ??= "session-atlas";
+            const sessionId = resolvedSessionId;
+            if (!sessionId) return;
+            setData((current) => {
+              const conversation = current.conversations[sessionId] ?? {
+                sessionId,
+                items: [],
+                queuedCount: 0,
+              };
+              return {
+                ...current,
+                conversations: {
+                  ...current.conversations,
+                  [sessionId]: {
+                    ...conversation,
+                    items: [
+                      ...conversation.items,
+                      {
+                        id: `preview-user-${Date.now()}`,
+                        kind: "userMessage" as const,
+                        text: input.text.trim(),
+                        at: Date.now(),
+                      },
+                    ],
+                  },
+                },
+              };
+            });
             return;
           }
-          const runValue = await invoke(bridge, "run.start", {
+          const value = await invoke(bridge, "session.send", {
             workspacePath,
-            prompt: prompt.trim(),
+            ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+            input: { text: input.text.trim() },
+            behavior: input.behavior ?? "auto",
+            ...(input.expectedRunId ? { expectedRunId: input.expectedRunId } : {}),
             idempotencyKey: crypto.randomUUID(),
           });
-          const run = isRecord(runValue) ? runValue : {};
-          createdId = stringValue(run.runId);
+          const result = isRecord(value) ? value : {};
+          const session = isRecord(result.session) ? result.session : {};
+          resolvedSessionId = stringValue(session.sessionId, input.sessionId);
           await loadWorkspace(bridge, workspacePath);
+          if (resolvedSessionId) {
+            await loadConversation(bridge, workspacePath, resolvedSessionId);
+          }
         });
-        return createdId;
+        return resolvedSessionId;
       },
       async setSessionArchived(sessionId, archived) {
         const workspacePath = dataRef.current.workspacePath;
@@ -840,7 +1081,7 @@ export function useRuntimeStore(): RuntimeStore {
         });
       },
     }),
-    [bootstrap, loadWorkspace, perform, preview],
+    [bootstrap, loadConversation, loadWorkspace, perform, preview],
   );
 
   return { preview, connection, data, busy, message, actions };

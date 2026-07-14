@@ -46,6 +46,36 @@
   background: color-mix(in srgb, var(--conversation-bg) 92%, transparent);
 }
 
+.page--conversation {
+  padding: 0;
+  overflow: hidden;
+}
+
+.session-conversation {
+  min-height: 100%;
+}
+
+.conversation-session-header {
+  display: flex;
+  min-height: 58px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 9px clamp(20px, 4vw, 48px);
+}
+
+.conversation-session-header h2,
+.conversation-session-header .eyebrow {
+  margin: 0;
+}
+
+.conversation-session-header h2 {
+  margin-top: 2px;
+  font-size: 14px;
+  font-weight: 650;
+  letter-spacing: -0.015em;
+}
+
 .conversation-surface__scroll {
   min-height: 0;
   overflow: auto;
@@ -566,6 +596,41 @@
   font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.conversation-context-label {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 190px;
+  align-items: center;
+  gap: 5px;
+  overflow: hidden;
+  color: var(--conversation-ink-faint);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conversation-context-label svg {
+  width: 14px;
+  height: 14px;
+  flex: none;
+}
+
+.home-conversation-composer {
+  width: 100%;
+  margin-top: 8px;
+}
+
+.conversation-inspector-output {
+  padding: 12px;
+  margin: 0;
+  overflow: auto;
+  border-radius: 8px;
+  background: #272725;
+  color: #f0efeb;
+  font: 11px/1.55 var(--font-mono, ui-monospace, monospace);
+  white-space: pre-wrap;
 }
 
 .conversation-inspector {

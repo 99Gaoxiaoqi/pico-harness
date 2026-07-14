@@ -30,7 +30,7 @@ describe("DesktopApp renderer", () => {
     render(<DesktopApp />);
 
     expect(await screen.findByText("Preview")).toBeTruthy();
-    await user.click(screen.getByRole("button", { name: "查看审批" }));
+    await user.click(screen.getByRole("button", { name: "处理审批" }));
     expect(screen.getByRole("dialog", { name: "允许执行测试命令？" })).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "仅允许这次" }));
     await waitFor(() =>
@@ -60,7 +60,7 @@ describe("DesktopApp renderer", () => {
     expect(document.activeElement).toBe(screen.getByRole("link", { name: "设置" }));
   });
 
-  it("让普通文件夹完成选择、信任和开始任务的主路径", async () => {
+  it("让普通文件夹完成选择、信任和首次会话发送的主路径", async () => {
     const user = userEvent.setup();
     const calls: Array<{
       readonly method: string;
@@ -79,7 +79,10 @@ describe("DesktopApp renderer", () => {
           const value = (() => {
             switch (method) {
               case "runtime.ping":
-                return { version: "test" };
+                return {
+                  version: "test",
+                  capabilities: ["session-conversation-v1", "runtime-events-v1"],
+                };
               case "workspace.list":
                 return { workspaces: [] };
               case "workspace.register":
@@ -101,13 +104,25 @@ describe("DesktopApp renderer", () => {
                 trusted = Boolean(params.trusted);
                 return { trusted };
               case "session.list":
-                return { sessions: [] };
+                return {
+                  sessions: started
+                    ? [
+                        {
+                          sessionId: "session-folder",
+                          title: "整理会议记录",
+                          status: "active",
+                          updatedAt: Date.now(),
+                        },
+                      ]
+                    : [],
+                };
               case "runs.list":
                 return {
                   runs: started
                     ? [
                         {
                           runId: "run-folder",
+                          sessionId: "session-folder",
                           description: "整理会议记录",
                           status: "running",
                           startedAt: Date.now(),
@@ -116,9 +131,43 @@ describe("DesktopApp renderer", () => {
                       ]
                     : [],
                 };
-              case "run.start":
+              case "session.send":
                 started = true;
-                return { runId: "run-folder" };
+                return {
+                  session: {
+                    sessionId: "session-folder",
+                    title: "整理会议记录",
+                    status: "active",
+                    updatedAt: Date.now(),
+                  },
+                  run: {
+                    runId: "run-folder",
+                    sessionId: "session-folder",
+                    description: "整理会议记录",
+                    status: "running",
+                    startedAt: Date.now(),
+                    updatedAt: Date.now(),
+                  },
+                  disposition: "started",
+                };
+              case "session.transcript":
+                return {
+                  session: {
+                    sessionId: "session-folder",
+                    title: "整理会议记录",
+                    status: "active",
+                    updatedAt: Date.now(),
+                  },
+                  items: [
+                    {
+                      id: "message-folder",
+                      kind: "userMessage",
+                      content: "整理会议记录",
+                    },
+                  ],
+                  queuedInputs: [],
+                  revision: "revision-folder",
+                };
               case "jobs.list":
                 return { jobs: [] };
               case "config.skills":
@@ -171,21 +220,23 @@ describe("DesktopApp renderer", () => {
 
     await user.click(screen.getByRole("button", { name: "信任并继续" }));
     expect(await screen.findByRole("heading", { name: "今天想推进什么？" })).toBeTruthy();
-    expect(screen.getByText(/文件处理与安全回退正常可用/)).toBeTruthy();
+    expect(screen.getByText(/共享文件夹支持对话、工具和并行子代理/)).toBeTruthy();
 
-    await user.type(screen.getByLabelText("任务描述"), "整理会议记录");
-    await user.click(screen.getByRole("button", { name: "开始任务" }));
-    expect(await screen.findByRole("heading", { name: "整理会议记录" })).toBeTruthy();
-    expect(screen.getByText("当前任务会正常执行")).toBeTruthy();
+    await user.type(screen.getByRole("textbox", { name: "消息" }), "整理会议记录");
+    await user.click(screen.getByRole("button", { name: "发送消息" }));
+    expect((await screen.findAllByText("整理会议记录")).length).toBeGreaterThan(0);
+    expect(window.location.hash).toBe("#/session/session-folder");
     expect(calls.some((call) => call.method === "workspace.register")).toBe(true);
-    expect(calls.some((call) => call.method === "run.start")).toBe(true);
+    expect(calls.some((call) => call.method === "session.send")).toBe(true);
+    expect(calls.some((call) => call.method === "session.transcript")).toBe(true);
     expect(calls.some((call) => call.method === "session.create")).toBe(false);
   });
 
   it.each([
     ["/", "今天想推进什么？"],
-    ["/task/new", "新任务"],
-    ["/task/run-atlas", "修复同步冲突，并为关键失败路径补一条集成测试"],
+    ["/task/new", "今天想一起做什么？"],
+    ["/task/run-atlas", "修复同步冲突并补充回归测试"],
+    ["/session/session-atlas", "修复同步冲突并补充回归测试"],
     ["/review", "更改审阅"],
     ["/sessions", "会话工作库"],
     ["/automations", "Automations"],
