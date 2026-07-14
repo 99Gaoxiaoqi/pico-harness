@@ -373,6 +373,17 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "Runtime 返回了未知错误。";
 }
 
+class RuntimeInvocationError extends Error {
+  constructor(
+    readonly code: string,
+    message: string,
+    readonly retryable: boolean,
+  ) {
+    super(`${code}: ${message}`);
+    this.name = "RuntimeInvocationError";
+  }
+}
+
 async function invoke(
   bridge: RendererBridge,
   method: string,
@@ -381,7 +392,13 @@ async function invoke(
   const call = bridge.runtime[method];
   if (!call) throw new Error(`当前 Runtime 不支持 ${method}`);
   const result = await call(params);
-  if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`);
+  if (!result.ok) {
+    throw new RuntimeInvocationError(
+      result.error.code,
+      result.error.message,
+      result.error.retryable,
+    );
+  }
   return result.value;
 }
 
@@ -513,6 +530,7 @@ export interface RuntimeActions {
   trustWorkspace(trusted: boolean): Promise<void>;
   reload(): Promise<void>;
   loadSession(sessionId: string): Promise<void>;
+  loadEarlierSession(sessionId: string): Promise<void>;
   sendMessage(input: {
     readonly sessionId?: string;
     readonly text: string;
@@ -521,7 +539,10 @@ export interface RuntimeActions {
     readonly activation?:
       | { readonly kind: "skill"; readonly name: string }
       | { readonly kind: "agent"; readonly name: string };
-  }): Promise<string | undefined>;
+  }): Promise<{
+    readonly succeeded: boolean;
+    readonly sessionId?: string | undefined;
+  }>;
   renameSession(sessionId: string, title: string): Promise<void>;
   forkSession(sessionId: string): Promise<string | undefined>;
   compactSession(sessionId: string): Promise<void>;
@@ -590,6 +611,10 @@ export function useRuntimeStore(): RuntimeStore {
   const [message, setMessage] = useState<string>();
   const dataRef = useRef(data);
   const seenEventIdsRef = useRef(new Set<string>());
+  const pendingSendRef = useRef<{
+    readonly identity: string;
+    readonly idempotencyKey: string;
+  }>();
   dataRef.current = data;
 
   const reportFailure = useCallback((error: unknown) => {
@@ -812,11 +837,13 @@ export function useRuntimeStore(): RuntimeStore {
     if (!bridge) return;
     const subscription = bridge.events.subscribe({ workspacePath: data.workspacePath }, (event) => {
       if (!isRecord(event)) return;
+      const scope = isRecord(event.scope) ? event.scope : {};
+      const scopedWorkspacePath = stringValue(scope.workspacePath);
+      if (scopedWorkspacePath && scopedWorkspacePath !== dataRef.current.workspacePath) return;
       const eventId = stringValue(event.eventId);
       if (eventId && seenEventIdsRef.current.has(eventId)) return;
       if (eventId) seenEventIdsRef.current.add(eventId);
       const payload = isRecord(event.payload) ? event.payload : {};
-      const scope = isRecord(event.scope) ? event.scope : {};
       const topic = stringValue(event.topic);
       if (topic === "approval.requested") {
         const request = isRecord(payload.request) ? payload.request : {};
@@ -906,19 +933,24 @@ export function useRuntimeStore(): RuntimeStore {
   }, [connection.kind, data.workspacePath, loadConversation, loadWorkspace, preview]);
 
   const perform = useCallback(
-    async (label: string, operation: (bridge: RendererBridge) => Promise<void>) => {
+    async (
+      label: string,
+      operation: (bridge: RendererBridge) => Promise<void>,
+    ): Promise<boolean> => {
       setBusy(label);
       setMessage(undefined);
       try {
         if (preview) {
           await operation(createPreviewBridge());
-          return;
+          return true;
         }
         const bridge = getBridge();
         if (!bridge) throw new Error("桌面安全桥接不可用。");
         await operation(bridge);
+        return true;
       } catch (error) {
         reportFailure(error);
+        return false;
       } finally {
         setBusy(undefined);
       }
@@ -958,11 +990,78 @@ export function useRuntimeStore(): RuntimeStore {
           if (!preview) await loadConversation(bridge, workspacePath, sessionId);
         });
       },
+      async loadEarlierSession(sessionId) {
+        const workspacePath = dataRef.current.workspacePath;
+        const conversation = dataRef.current.conversations[sessionId];
+        const before = conversation?.nextBefore;
+        const expectedRevision = conversation?.revision;
+        if (!workspacePath || !before || !expectedRevision) return;
+        await perform("load-earlier-session", async (bridge) => {
+          if (preview) return;
+          let value: unknown;
+          try {
+            value = await invoke(bridge, "session.transcript", {
+              workspacePath,
+              sessionId,
+              before,
+              limit: 200,
+              expectedRevision,
+            });
+          } catch (error) {
+            if (error instanceof RuntimeInvocationError && error.code === "CONFLICT") {
+              await loadConversation(bridge, workspacePath, sessionId);
+              setMessage("会话历史已更新，已从最新版本重新加载。");
+              return;
+            }
+            throw error;
+          }
+          const page = parseConversation(value, sessionId);
+          if (
+            page.revision !== expectedRevision ||
+            dataRef.current.conversations[sessionId]?.revision !== expectedRevision
+          ) {
+            await loadConversation(bridge, workspacePath, sessionId);
+            setMessage("会话历史已更新，已从最新版本重新加载。");
+            return;
+          }
+          setData((current) => {
+            const latest = current.conversations[sessionId];
+            if (!latest || latest.revision !== expectedRevision) return current;
+            const existingIds = new Set(latest.items.map((item) => item.id));
+            const olderItems = page.items.filter((item) => !existingIds.has(item.id));
+            return {
+              ...current,
+              conversations: {
+                ...current.conversations,
+                [sessionId]: {
+                  ...latest,
+                  items: [...olderItems, ...latest.items],
+                  nextBefore: page.nextBefore,
+                  queuedCount: page.queuedCount,
+                },
+              },
+            };
+          });
+        });
+      },
       async sendMessage(input) {
         const workspacePath = dataRef.current.workspacePath;
-        if (!workspacePath || !input.text.trim()) return undefined;
+        if (!workspacePath || !input.text.trim()) return { succeeded: false };
         let resolvedSessionId = input.sessionId;
-        await perform("send-message", async (bridge) => {
+        const sendIdentity = JSON.stringify({
+          workspacePath,
+          sessionId: input.sessionId,
+          text: input.text.trim(),
+          behavior: input.behavior ?? "auto",
+          expectedRunId: input.expectedRunId,
+          activation: input.activation,
+        });
+        const idempotencyKey =
+          pendingSendRef.current?.identity === sendIdentity
+            ? pendingSendRef.current.idempotencyKey
+            : crypto.randomUUID();
+        pendingSendRef.current = { identity: sendIdentity, idempotencyKey };
+        const succeeded = await perform("send-message", async (bridge) => {
           if (preview) {
             resolvedSessionId ??= "session-atlas";
             const sessionId = resolvedSessionId;
@@ -1005,7 +1104,7 @@ export function useRuntimeStore(): RuntimeStore {
                   : { kind: "text", text: input.text.trim() },
             behavior: input.behavior ?? "auto",
             ...(input.expectedRunId ? { expectedRunId: input.expectedRunId } : {}),
-            idempotencyKey: crypto.randomUUID(),
+            idempotencyKey,
           });
           const result = isRecord(value) ? value : {};
           const session = isRecord(result.session) ? result.session : {};
@@ -1015,7 +1114,13 @@ export function useRuntimeStore(): RuntimeStore {
             await loadConversation(bridge, workspacePath, resolvedSessionId);
           }
         });
-        return resolvedSessionId;
+        if (succeeded && pendingSendRef.current?.identity === sendIdentity) {
+          pendingSendRef.current = undefined;
+        }
+        return {
+          succeeded,
+          ...(resolvedSessionId ? { sessionId: resolvedSessionId } : {}),
+        };
       },
       async renameSession(sessionId, title) {
         const workspacePath = dataRef.current.workspacePath;

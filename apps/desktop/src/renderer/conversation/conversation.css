@@ -176,6 +176,14 @@
   list-style: none;
 }
 
+.conversation-history-pagination {
+  display: flex;
+  width: min(100%, 820px);
+  justify-content: center;
+  padding: 20px clamp(20px, 5vw, 64px) 0;
+  margin: 0 auto -14px;
+}
+
 .conversation-transcript--empty {
   align-items: center;
   justify-content: center;
