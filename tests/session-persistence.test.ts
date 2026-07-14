@@ -60,21 +60,12 @@ describe("Session 持久化(事件溯源 JSONL)", () => {
     await safeRm(workDir);
   });
 
-  /**
-   * 关键:append 是 fire-and-forget 异步落盘。测试要可靠地等到磁盘写完,
-   * 用 setTimeout 让真实 IO(appendFile 经 libuv 线程池)走完。
-   * 微任务(await Promise.resolve())等不住真实文件 IO,必须让出事件循环。
-   */
-  async function flush(): Promise<void> {
-    await new Promise((resolve) => setTimeout(resolve, 60));
-  }
-
   it("append 落盘后,新进程 getOrCreate 能重建历史", async () => {
     // 第一次:创建会话,append 两条
     const mgr1 = new SessionManager();
     const s1 = await mgr1.getOrCreate("chat-X", workDir, ON);
     s1.append(userMsg("hello"), assistantMsg("world"));
-    await flush();
+    await s1.flushPersistence();
     expect(s1.length).toBe(2);
 
     // 模拟重启:新建 SessionManager(内存清空),同 id 重建
@@ -90,10 +81,10 @@ describe("Session 持久化(事件溯源 JSONL)", () => {
     const mgr1 = new SessionManager();
     const s1 = await mgr1.getOrCreate("chat-trunc", workDir, ON);
     s1.append(userMsg("m0"), userMsg("m1"), userMsg("m2"), userMsg("m3"));
-    await flush();
+    await s1.flushPersistence();
     // 截断,只保留 index=2 起(m2, m3)
     s1.truncateTo(2);
-    await flush();
+    await s1.flushPersistence();
     expect(s1.length).toBe(2);
 
     // 重启恢复
@@ -108,14 +99,14 @@ describe("Session 持久化(事件溯源 JSONL)", () => {
     const mgr1 = new SessionManager();
     const s1 = await mgr1.getOrCreate("chat-seq", workDir, ON);
     s1.append(userMsg("first"));
-    await flush();
+    await s1.flushPersistence();
 
     // 重启恢复,再 append 一条
     const mgr2 = new SessionManager();
     const s2 = await mgr2.getOrCreate("chat-seq", workDir, ON);
     expect(s2.length).toBe(1);
     s2.append(userMsg("second"));
-    await flush();
+    await s2.flushPersistence();
 
     // 再重启,应看到两条(证明 seq 续上了,没有覆盖)
     const mgr3 = new SessionManager();
@@ -131,7 +122,7 @@ describe("Session 持久化(事件溯源 JSONL)", () => {
     const sB = await mgr1.getOrCreate("feishu:群B", workDir, ON);
     sA.append(userMsg("群A的消息"));
     sB.append(userMsg("群B的消息"));
-    await flush();
+    await Promise.all([sA.flushPersistence(), sB.flushPersistence()]);
 
     // 重启恢复:两个会话互不串
     const mgr2 = new SessionManager();
@@ -148,7 +139,7 @@ describe("Session 持久化(事件溯源 JSONL)", () => {
     const mgr1 = new SessionManager();
     const s1 = await mgr1.getOrCreate("feishu:群/1", workDir, ON);
     s1.append(userMsg("特殊 id"));
-    await flush();
+    await s1.flushPersistence();
 
     const mgr2 = new SessionManager();
     const s2 = await mgr2.getOrCreate("feishu:群/1", workDir, ON);
@@ -160,7 +151,7 @@ describe("Session 持久化(事件溯源 JSONL)", () => {
     const mgr1 = new SessionManager();
     const s1 = await mgr1.getOrCreate("chat-off", workDir, OFF);
     s1.append(userMsg("不会落盘"));
-    await flush();
+    await s1.flushPersistence();
 
     const mgr2 = new SessionManager();
     const s2 = await mgr2.getOrCreate("chat-off", workDir, OFF);
@@ -231,10 +222,6 @@ describe("truncate 竞态保护(pendingWrites 顺序保证)", () => {
     await safeRm(workDir);
   });
 
-  async function flush(): Promise<void> {
-    await new Promise((resolve) => setTimeout(resolve, 60));
-  }
-
   it("truncate 前的 appends 已落盘,truncate 不会抢跑导致 message 丢失", async () => {
     const mgr1 = new SessionManager();
     const s1 = await mgr1.getOrCreate("race-chat", workDir, ON);
@@ -260,7 +247,7 @@ describe("truncate 竞态保护(pendingWrites 顺序保证)", () => {
     await s1.flushPersistence();
     // truncate 后再 append
     s1.append(userMsg("a2"));
-    await flush();
+    await s1.flushPersistence();
     expect(s1.length).toBe(2);
 
     const mgr2 = new SessionManager();
