@@ -11,14 +11,20 @@ import { globalSessionManager, Session } from "../engine/session.js";
 import {
   DEFAULT_INTERACTION_MODE,
   getOrCreateSessionSettings,
+  migrateSessionModelRoute,
+  normalizeInteractionMode,
+  sessionReasoningCandidates,
+  setSessionMode,
+  setSessionThinkingEffort,
   setSessionTitle,
+  type SessionSettings,
 } from "../input/session-settings.js";
 import { loadPicoConfig, type PicoConfig } from "../input/pico-config.js";
 import { McpConnectionManager } from "../mcp/manager.js";
 import { CostTracker } from "../observability/tracker.js";
 import { ensureSessionUsageBaseline } from "../observability/usage-baseline.js";
 import { createProvider, type ProviderKind } from "../provider/factory.js";
-import { loadModelRouter } from "../provider/model-router.js";
+import { loadModelRouter, type ModelRoute, type ModelRouter } from "../provider/model-router.js";
 import { resolveProviderProfile } from "../provider/profile.js";
 import { WorkspaceTrustStore } from "../security/workspace-trust.js";
 import {
@@ -160,6 +166,15 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         return this.forkSession(request.params.workspacePath, request.params.sessionId);
       case "session.compact":
         return this.compactSession(request.params.workspacePath, request.params.sessionId);
+      case "session.settings.get":
+        return this.getRuntimeSessionSettings(
+          request.params.workspacePath,
+          request.params.sessionId,
+        );
+      case "session.settings.update":
+        return this.updateRuntimeSessionSettings(request.params);
+      case "goal.get":
+        return this.getGoal(request.params.workspacePath, request.params.sessionId);
       case "session.send":
         return this.sendSession(request.params);
       case "session.transcript":
@@ -387,6 +402,103 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     this.publishSession(session);
     this.publishTranscriptUpdate(canonical, targetSessionId, "reload");
     return { session, sourceSessionId: sessionId };
+  }
+
+  private async getRuntimeSessionSettings(
+    workspacePath: string,
+    sessionId: string,
+  ): Promise<JsonValue> {
+    const canonical = await this.requireTrustedSession(workspacePath, sessionId);
+    return this.withSession(canonical, sessionId, async (session) => {
+      const settings = await this.getSessionSettings(canonical, session);
+      const router = await this.getSessionModelRouter(canonical, settings);
+      return { settings: runtimeSessionSettings(settings, router) };
+    });
+  }
+
+  private async updateRuntimeSessionSettings(params: {
+    readonly workspacePath: string;
+    readonly sessionId: string;
+    readonly modelRouteId?: string;
+    readonly mode?: string;
+    readonly permissions?: string;
+    readonly thinkingEffort?: string;
+  }): Promise<JsonValue> {
+    if (
+      params.modelRouteId === undefined &&
+      params.mode === undefined &&
+      params.permissions === undefined &&
+      params.thinkingEffort === undefined
+    ) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.INVALID_PARAMS,
+        "session.settings.update 至少需要一个设置字段",
+      );
+    }
+    const requestedMode = normalizeInteractionMode(params.mode ?? params.permissions);
+    if ((params.mode !== undefined || params.permissions !== undefined) && !requestedMode) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.INVALID_PARAMS,
+        "mode/permissions 必须是 default、plan、auto 或 yolo",
+      );
+    }
+    if (
+      params.mode !== undefined &&
+      params.permissions !== undefined &&
+      normalizeInteractionMode(params.mode) !== normalizeInteractionMode(params.permissions)
+    ) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.INVALID_PARAMS,
+        "permissions 是 mode 的别名，二者不能指定不同值",
+      );
+    }
+
+    const canonical = await this.requireIdleTrustedSession(
+      params.workspacePath,
+      params.sessionId,
+      "修改会话设置",
+    );
+    const settings = await this.withSession(canonical, params.sessionId, async (session) => {
+      const current = await this.getSessionSettings(canonical, session);
+      const router = await this.getSessionModelRouter(canonical, current);
+      const selectedRoute = resolveRequestedModelRoute(router, params.modelRouteId);
+      if (params.thinkingEffort !== undefined) {
+        validateRequestedThinkingEffort(
+          selectedRoute ?? resolveCurrentModelRoute(router, current),
+          params.thinkingEffort,
+        );
+      }
+
+      if (selectedRoute) migrateSessionModelRoute(current, selectedRoute);
+      if (requestedMode) {
+        const result = setSessionMode(current, requestedMode);
+        if (!result.ok) throw invalidSessionSetting(result.message);
+      }
+      if (params.thinkingEffort !== undefined) {
+        const result = setSessionThinkingEffort(current, params.thinkingEffort, router);
+        if (!result.ok) throw invalidSessionSetting(result.message);
+      }
+      await session.flushPersistence();
+      return runtimeSessionSettings(current, router);
+    });
+    this.publish(
+      createRuntimeEvent({
+        topic: "session.settingsUpdated",
+        scope: { workspacePath: canonical, sessionId: params.sessionId },
+        resourceVersion: this.nextResourceVersion(),
+        at: this.now(),
+        payload: { sessionId: params.sessionId, settings },
+      }),
+    );
+    return { settings };
+  }
+
+  private async getGoal(workspacePath: string, sessionId: string): Promise<JsonValue> {
+    const canonical = await this.requireTrustedSession(workspacePath, sessionId);
+    return this.withSession(canonical, sessionId, async (session) => {
+      const hydration = await session.readHydrationSnapshot();
+      return { goal: hydration.runtime.goal ? toJsonValue(hydration.runtime.goal) : null };
+    });
   }
 
   private async compactSession(workspacePath: string, sessionId: string): Promise<JsonValue> {
@@ -1080,6 +1192,30 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     );
   }
 
+  private async getSessionModelRouter(
+    workspacePath: string,
+    settings: SessionSettings,
+  ): Promise<ModelRouter> {
+    const config = await loadPicoConfig(workspacePath);
+    return loadModelRouter({
+      // Settings reads must be local and deterministic. Explicit project models are the Desktop
+      // selection allowlist; provider discovery remains a separate config/providers concern.
+      config: {
+        ...config,
+        providers: Object.fromEntries(
+          Object.entries(config.providers).map(([id, provider]) => [
+            id,
+            { ...provider, discoverModels: false },
+          ]),
+        ),
+      },
+      env: this.env,
+      legacyProvider: settings.provider,
+      legacyModel: settings.model,
+      legacyModelExplicit: true,
+    });
+  }
+
   private async withSession<T>(
     workspacePath: string,
     sessionId: string,
@@ -1268,6 +1404,68 @@ function sessionPayload(
     ...(summary.lastMessage ? { lastMessage: summary.lastMessage } : {}),
     ...(summary.forkFrom ? { forkFrom: summary.forkFrom } : {}),
   };
+}
+
+function runtimeSessionSettings(settings: SessionSettings, router: ModelRouter): JsonObject {
+  return {
+    sessionId: settings.sessionId,
+    provider: settings.provider,
+    model: settings.model,
+    ...(settings.modelRouteId ? { modelRouteId: settings.modelRouteId } : {}),
+    mode: settings.mode,
+    // Deliberately derived from mode: `/permissions` does not own persisted state.
+    permissions: settings.mode,
+    thinkingEffort: settings.thinkingEffort,
+    thinkingEffortExplicit: settings.thinkingEffortExplicit,
+    reasoningLevels: [...sessionReasoningCandidates(settings, router)],
+  };
+}
+
+function resolveRequestedModelRoute(
+  router: ModelRouter,
+  modelRouteId: string | undefined,
+): ModelRoute | undefined {
+  if (modelRouteId === undefined) return undefined;
+  const normalized = modelRouteId.trim();
+  const route = router.routes.find((candidate) => candidate.id === normalized);
+  if (!route) {
+    const available = router.routes.map((candidate) => candidate.id).join(", ") || "none";
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.INVALID_PARAMS,
+      `模型路由 ${normalized || "(empty)"} 不可用。可用模型: ${available}。`,
+    );
+  }
+  if (!route.baseURL.trim()) {
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.INVALID_PARAMS,
+      `模型路由 ${route.id} 缺少 baseURL`,
+    );
+  }
+  return route;
+}
+
+function resolveCurrentModelRoute(router: ModelRouter, settings: SessionSettings): ModelRoute {
+  const route = router.resolve(settings.modelRouteId) ?? router.resolve(settings.model);
+  if (route) return route;
+  throw new RuntimeProtocolError(
+    RUNTIME_ERROR_CODES.CONFLICT,
+    `当前模型路由 ${settings.modelRouteId ?? settings.model} 已不可用，请先选择有效模型`,
+  );
+}
+
+function validateRequestedThinkingEffort(route: ModelRoute, thinkingEffort: string): void {
+  const normalized = thinkingEffort.trim().toLowerCase();
+  if (!route.capabilities.reasoningProfile.levels.includes(normalized)) {
+    const levels = route.capabilities.reasoningProfile.levels.join(", ") || "none";
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.INVALID_PARAMS,
+      `模型路由 ${route.id} 不支持 thinking=${normalized || "(empty)"}；可选档位: ${levels}`,
+    );
+  }
+}
+
+function invalidSessionSetting(message: string): RuntimeProtocolError {
+  return new RuntimeProtocolError(RUNTIME_ERROR_CODES.INVALID_PARAMS, message);
 }
 
 function sessionSettingDefaults(
