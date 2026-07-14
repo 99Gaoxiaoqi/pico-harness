@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { emptyData, type AppData, type ConnectionState, type JsonRecord } from "./model.js";
+import {
+  emptyData,
+  folderWorkspaceCapabilities,
+  type AppData,
+  type ConnectionState,
+  type JsonRecord,
+  type WorkspaceCapabilities,
+  type WorkspaceMode,
+} from "./model.js";
 import { previewData } from "./fixture.js";
 
 type DesktopResult<T> =
@@ -120,7 +128,38 @@ function parseWorkspaceList(value: unknown): readonly JsonRecord[] {
   return recordArray(value.workspaces);
 }
 
+function parseWorkspaceMode(value: unknown, fallback?: WorkspaceMode): WorkspaceMode | undefined {
+  return value === "git" || value === "folder" ? value : fallback;
+}
+
+function parseWorkspaceCapabilities(
+  value: unknown,
+  mode: WorkspaceMode | undefined,
+  fallback: WorkspaceCapabilities,
+): WorkspaceCapabilities {
+  const capabilities = isRecord(value) ? value : {};
+  const defaults =
+    mode === "git"
+      ? {
+          foregroundRuns: true,
+          fileHistory: true,
+          isolatedWorktrees: true,
+          branchMerge: true,
+        }
+      : mode === "folder"
+        ? folderWorkspaceCapabilities
+        : fallback;
+  return {
+    foregroundRuns: booleanValue(capabilities.foregroundRuns, defaults.foregroundRuns),
+    fileHistory: booleanValue(capabilities.fileHistory, defaults.fileHistory),
+    isolatedWorktrees: booleanValue(capabilities.isolatedWorktrees, defaults.isolatedWorktrees),
+    branchMerge: booleanValue(capabilities.branchMerge, defaults.branchMerge),
+  };
+}
+
 function mergeLoadedData(base: AppData, results: Readonly<Record<string, unknown>>): AppData {
+  const workspaceResult = isRecord(results.workspace) ? results.workspace : {};
+  const workspaceMode = parseWorkspaceMode(workspaceResult.mode, base.workspaceMode);
   const sessionResult = isRecord(results.sessions) ? results.sessions : {};
   const runResult = isRecord(results.runs) ? results.runs : {};
   const jobResult = isRecord(results.jobs) ? results.jobs : {};
@@ -135,6 +174,12 @@ function mergeLoadedData(base: AppData, results: Readonly<Record<string, unknown
 
   return {
     ...base,
+    workspaceMode,
+    workspaceCapabilities: parseWorkspaceCapabilities(
+      workspaceResult.capabilities,
+      workspaceMode,
+      base.workspaceCapabilities,
+    ),
     sessions: recordArray(sessionResult.sessions).map((item, index) => ({
       id: stringValue(item.sessionId ?? item.id, `session-${index}`),
       title: stringValue(item.title, "未命名任务"),
@@ -249,6 +294,7 @@ export function useRuntimeStore(): RuntimeStore {
     const params = { workspacePath };
     const entries = await Promise.all(
       [
+        ["workspace", "workspace.status", params],
         ["sessions", "session.list", { ...params, includeArchived: true }],
         ["runs", "runs.list", params],
         ["jobs", "jobs.list", params],
@@ -338,24 +384,15 @@ export function useRuntimeStore(): RuntimeStore {
       await invoke(bridge, "runtime.ping", {});
       const workspaceValue = await invoke(bridge, "workspace.list", {});
       const workspaces = parseWorkspaceList(workspaceValue);
-      let workspacePath = "";
-      let unavailableWorkspace = "";
-      for (const workspace of workspaces.filter((item) => booleanValue(item.registered, true))) {
-        const candidate = stringValue(workspace.workspacePath);
-        if (!candidate) continue;
-        try {
-          await invoke(bridge, "runs.list", { workspacePath: candidate });
-          workspacePath = candidate;
-          break;
-        } catch (error) {
-          unavailableWorkspace = errorMessage(error);
-        }
-      }
+      const workspacePath = stringValue(
+        workspaces.find(
+          (workspace) =>
+            booleanValue(workspace.registered, true) &&
+            Boolean(stringValue(workspace.workspacePath)),
+        )?.workspacePath,
+      );
       if (workspacePath) await loadWorkspace(bridge, workspacePath);
-      else {
-        setData(emptyData);
-        if (unavailableWorkspace) setMessage(unavailableWorkspace);
-      }
+      else setData(emptyData);
       setConnection({ kind: "ready" });
     } catch (error) {
       setConnection({ kind: "error", detail: errorMessage(error), retryable: true });
