@@ -39,6 +39,8 @@ agents:
     systemPrompt: "你是审查员"
     systemPromptOverride: true
     maxTurns: 5
+    modelRouteId: volcengine/deepseek-v4-pro
+    thinkingEffort: high
     tools:
       - read_file
       - bash
@@ -55,6 +57,8 @@ agents:
     expect(profiles[0]!.name).toBe("auditor");
     expect(profiles[0]!.systemPromptOverride).toBe(true);
     expect(profiles[0]!.maxTurns).toBe(5);
+    expect(profiles[0]!.modelRouteId).toBe("volcengine/deepseek-v4-pro");
+    expect(profiles[0]!.thinkingEffort).toBe("high");
     expect(profiles[0]!.tools).toEqual(["read_file", "bash"]);
     expect(profiles[1]!.name).toBe("tester");
     expect(profiles[1]!.systemPromptOverride).toBeUndefined();

@@ -21,13 +21,14 @@ describe("Claude agent loader", () => {
 
   it("parses Claude agent markdown frontmatter and prompt body", () => {
     const agent = parseClaudeAgent(
-      "---\nname: reviewer\ndescription: Review code\ntools: Read, Grep\n---\n\nYou review code.",
+      "---\nname: reviewer\ndescription: Review code\nmodel: volcengine/deepseek-v4-pro\ntools: Read, Grep\n---\n\nYou review code.",
       "fallback",
       "/tmp/reviewer.md",
     );
 
     expect(agent).toEqual({
       description: "Review code",
+      model: "volcengine/deepseek-v4-pro",
       name: "reviewer",
       prompt: "You review code.",
       source: "project",
@@ -108,7 +109,7 @@ describe("Claude agent loader", () => {
 
   it("summarizes agents with tools and source", () => {
     const agent = parseClaudeAgent(
-      "---\nname: reviewer\ndescription: Review code\ntools: Read, Grep\n---\n\nPrompt",
+      "---\nname: reviewer\ndescription: Review code\nmodel: inherit\ntools: Read, Grep\n---\n\nPrompt",
       "fallback",
       "/tmp/reviewer.md",
     );
@@ -116,6 +117,7 @@ describe("Claude agent loader", () => {
     expect(summarizeClaudeAgents([agent], { includeSource: true })).toEqual([
       {
         description: "Review code",
+        model: "inherit",
         name: "reviewer",
         source: "project",
         sourcePath: "/tmp/reviewer.md",
