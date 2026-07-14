@@ -652,6 +652,49 @@ describe("DesktopRuntimeService integration", () => {
     await fixture.service.close();
   });
 
+  it("关闭 Desktop Runtime 时持久化活动 Run 的取消边界", async () => {
+    let executionStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      executionStarted = resolve;
+    });
+    const fixture = await createFixture(async ({ context }) => {
+      executionStarted();
+      await new Promise<never>((_resolve, reject) => {
+        const rejectOnAbort = () => reject(context.signal.reason ?? new Error("runtime closed"));
+        if (context.signal.aborted) {
+          rejectOnAbort();
+          return;
+        }
+        context.signal.addEventListener("abort", rejectOnAbort, { once: true });
+      });
+    });
+
+    const sent = (await fixture.service.handle(
+      createRuntimeRequest("session.send", {
+        workspacePath: fixture.workspace,
+        input: { text: "执行一个长任务" },
+        idempotencyKey: "close-active-run",
+      }),
+    )) as { session: { sessionId: string } };
+    managedSessions.push({
+      sessionId: sent.session.sessionId,
+      workspacePath: fixture.canonicalWorkspace,
+    });
+    await started;
+
+    await fixture.service.close();
+
+    const sessionLog = await readFile(
+      join(
+        resolvePicoPaths(fixture.workspace).workspace.sessions,
+        `${sent.session.sessionId}.jsonl`,
+      ),
+      "utf8",
+    );
+    expect(sessionLog).toContain('"kind":"run-boundary"');
+    expect(sessionLog).toContain('"status":"cancelled"');
+  });
+
   it("显式中断会清空当前 Session 的持久化 Queue", async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => {

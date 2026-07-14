@@ -202,6 +202,43 @@ describe("local runtime daemon IPC integration", () => {
     }
   });
 
+  it("preserves durable event order when workspace events share a timestamp", async () => {
+    const root = await temporaryRoot();
+    const workspace = join(root, "workspace");
+    await mkdir(workspace);
+    const canonicalWorkspace = await realpath(workspace);
+    const service = new WorkspaceRuntimeService({ execute: async () => undefined });
+    try {
+      service.publishDesktopEvent(
+        createRuntimeEvent({
+          eventId: "z-started",
+          topic: "run.started",
+          scope: { workspacePath: canonicalWorkspace, runId: "run-1" },
+          resourceVersion: 1,
+          at: 1_000,
+          payload: { runId: "run-1" },
+        }),
+      );
+      service.publishDesktopEvent(
+        createRuntimeEvent({
+          eventId: "a-finished",
+          topic: "run.finished",
+          scope: { workspacePath: canonicalWorkspace, runId: "run-1" },
+          resourceVersion: 2,
+          at: 1_000,
+          payload: { runId: "run-1" },
+        }),
+      );
+
+      await expect(service.replayEvents({ workspacePath: workspace })).resolves.toMatchObject([
+        { eventId: "z-started", topic: "run.started" },
+        { eventId: "a-finished", topic: "run.finished" },
+      ]);
+    } finally {
+      await service.close();
+    }
+  });
+
   async function temporaryRoot(): Promise<string> {
     const root = await mkdtemp(join(tmpdir(), "pico-daemon-ipc-"));
     cleanup.push(root);
