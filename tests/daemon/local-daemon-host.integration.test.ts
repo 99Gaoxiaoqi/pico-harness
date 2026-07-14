@@ -155,6 +155,20 @@ describe("LocalDaemonHost integration", () => {
     const workspace = join(root, "workspace");
     await mkdir(join(workspace, ".pico"), { recursive: true });
     execFileSync("git", ["init", "--quiet"], { cwd: workspace });
+    execFileSync(
+      "git",
+      [
+        "-c",
+        "user.name=Pico Integration",
+        "-c",
+        "user.email=pico@example.test",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "initial",
+      ],
+      { cwd: workspace },
+    );
     await writeFile(
       join(workspace, ".pico", "config.json"),
       JSON.stringify({
@@ -472,6 +486,9 @@ class InteractiveFakeAgentRuntime extends AgentRuntime {
       throw new Error("desktop approval boundary missing");
     }
     if (!dependencies.askUserHandler) throw new Error("desktop AskUser boundary missing");
+    if (!dependencies.runtimeState?.taskHostRuntime) {
+      throw new Error("desktop Git workspace task host missing");
+    }
     const sessionId = options.session ?? "missing-session";
     const workDir = options.dir ?? process.cwd();
     dependencies.reporter?.onStart(workDir);
