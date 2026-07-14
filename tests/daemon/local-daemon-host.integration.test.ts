@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -12,6 +12,8 @@ import {
 } from "../../src/runtime/agent-runtime.js";
 import type { AskUserRequestId } from "../../src/tools/ask-user.js";
 import { WorkspaceTrustStore } from "../../src/security/workspace-trust.js";
+import { globalSessionManager } from "../../src/engine/session.js";
+import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 import {
   LocalDaemonAlreadyRunningError,
   LocalDaemonHost,
@@ -197,15 +199,17 @@ describe("LocalDaemonHost integration", () => {
       runtimeDir: join(root, "runtime"),
       userIdentity: "desktop-run-test",
     });
-    const host = createProductionLocalDaemonHost({
+    const hostOptions = {
       endpoint,
       trustStore,
       agentRuntime: new InteractiveFakeAgentRuntime(),
       credentialVault: new AvailableCredentialVault(),
       registrationStore: new WorkspaceRegistrationStore(join(root, "workspaces.json")),
-    });
+    } satisfies Parameters<typeof createProductionLocalDaemonHost>[0];
+    const host = createProductionLocalDaemonHost(hostOptions);
     await host.start();
     const client = new LocalRuntimeClient(endpoint);
+    let persistedSessionId: string | undefined;
     try {
       const approvalEvent = deferred<RuntimeEvent>();
       const promptEvent = deferred<RuntimeEvent>();
@@ -220,9 +224,15 @@ describe("LocalDaemonHost integration", () => {
         workspace,
       );
 
+      const created = (await client.request("session.create", {
+        workspacePath: workspace,
+        title: "Structured transcript",
+      })) as { session: { sessionId: string } };
+      const sessionId = created.session.sessionId;
+      persistedSessionId = sessionId;
       const run = (await client.request("run.start", {
         workspacePath: workspace,
-        sessionId: "desktop-session-1",
+        sessionId,
         prompt: "检查项目并给出结论",
       })) as { runId: string };
       const approval = await approvalEvent.promise;
@@ -289,9 +299,75 @@ describe("LocalDaemonHost integration", () => {
           }),
         ]),
       );
+      expect(JSON.stringify(timelineEvents)).not.toContain("SECRET_RAW_TOOL_RESULT");
+      expect(JSON.stringify(timelineEvents)).not.toContain("SECRET_SUBAGENT_TOOL_RESULT");
+
+      const transcript = (await client.request("session.transcript", {
+        workspacePath: workspace,
+        sessionId,
+      })) as { items: Array<{ kind: string; state?: string; summary?: string }> };
+      expect(transcript.items.map((item) => item.kind)).toEqual(
+        expect.arrayContaining(["runBoundary", "plan", "tool", "approval", "prompt", "subagent"]),
+      );
+      expect(transcript.items.find((item) => item.kind === "tool")).toMatchObject({
+        summary: expect.stringContaining("bytes"),
+      });
+      expect(transcript.items.find((item) => item.kind === "approval")).toMatchObject({
+        state: "allow_once",
+      });
+      expect(transcript.items.find((item) => item.kind === "prompt")).toMatchObject({
+        state: "resolved",
+      });
+      expect(transcript.items.find((item) => item.kind === "subagent")).toMatchObject({
+        state: "completed",
+      });
+      expect(JSON.stringify(transcript)).not.toContain("SECRET_RAW_TOOL_RESULT");
+      expect(JSON.stringify(transcript)).not.toContain("SECRET_SUBAGENT_TOOL_RESULT");
     } finally {
       client.close();
       await host.stop();
+    }
+    if (!persistedSessionId) throw new Error("production transcript session was not created");
+    const journal = await readFile(
+      join(resolvePicoPaths(workspace).workspace.sessions, `${persistedSessionId}.jsonl`),
+      "utf8",
+    );
+    expect(journal).not.toContain("SECRET_RAW_PLAN_TOOL_RESULT");
+    expect(journal).not.toContain("SECRET_RAW_TOOL_RESULT");
+    expect(journal).not.toContain("SECRET_SUBAGENT_TOOL_RESULT");
+    const transcriptEventIds = journal
+      .trim()
+      .split("\n")
+      .map((line): unknown => JSON.parse(line))
+      .flatMap((record) => {
+        if (!isRecord(record) || record["type"] !== "event") return [];
+        const data = isRecord(record["data"]) ? record["data"] : undefined;
+        const transcriptEvent = data && isRecord(data["event"]) ? data["event"] : undefined;
+        const eventId = transcriptEvent?.["eventId"];
+        return typeof eventId === "string" && eventId.startsWith("runtime:") ? [eventId] : [];
+      });
+    expect(new Set(transcriptEventIds).size).toBe(transcriptEventIds.length);
+    globalSessionManager.delete(persistedSessionId, workspace);
+
+    const restartedHost = createProductionLocalDaemonHost(hostOptions);
+    await restartedHost.start();
+    const restartedClient = new LocalRuntimeClient(endpoint);
+    try {
+      const restored = (await restartedClient.request("session.transcript", {
+        workspacePath: workspace,
+        sessionId: persistedSessionId,
+      })) as { items: Array<{ kind: string; state?: string }> };
+      expect(restored.items.map((item) => item.kind)).toEqual(
+        expect.arrayContaining(["plan", "tool", "approval", "prompt", "subagent"]),
+      );
+      expect(restored.items.find((item) => item.kind === "approval")?.state).toBe("allow_once");
+      expect(restored.items.find((item) => item.kind === "prompt")?.state).toBe("resolved");
+      expect(JSON.stringify(restored)).not.toContain("SECRET_RAW_TOOL_RESULT");
+      expect(JSON.stringify(restored)).not.toContain("SECRET_SUBAGENT_TOOL_RESULT");
+    } finally {
+      restartedClient.close();
+      await restartedHost.stop();
+      globalSessionManager.delete(persistedSessionId, workspace);
     }
   });
 
@@ -598,6 +674,10 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 class PingService implements LocalRuntimeService {
   async handle(request: RuntimeRequest): Promise<JsonValue> {
     if (request.method !== "runtime.ping") throw new Error(`unexpected method ${request.method}`);
@@ -658,6 +738,33 @@ class InteractiveFakeAgentRuntime extends AgentRuntime {
     const sessionId = options.session ?? "missing-session";
     const workDir = options.dir ?? process.cwd();
     dependencies.reporter?.onStart(workDir);
+    dependencies.reporter?.onToolCall(
+      "todo",
+      '{"action":"add","content":"Persist structured transcript"}',
+      "plan-call",
+    );
+    dependencies.reporter?.onToolResult("todo", "SECRET_RAW_PLAN_TOOL_RESULT", false, "plan-call");
+    dependencies.reporter?.onSubagentActivity?.({
+      activityId: "activity-1",
+      task: "Review transcript persistence",
+      status: "running",
+      agentName: "Reviewer",
+      currentAction: "Inspecting the event chain",
+    });
+    dependencies.reporter?.onSubagentTrace?.({
+      activityId: "activity-1",
+      traceId: "trace-tool-1",
+      type: "tool.started",
+      name: "read_file",
+      args: '{"path":"src/daemon/desktop-runtime-service.ts"}',
+    });
+    dependencies.reporter?.onSubagentTrace?.({
+      activityId: "activity-1",
+      traceId: "trace-tool-1",
+      type: "tool.completed",
+      result: "SECRET_SUBAGENT_TOOL_RESULT",
+      isError: false,
+    });
     dependencies.reporter?.onToolCall("bash", '{"command":"npm test"}', "call-1");
     const approval = dependencies.approvalManager.waitForApproval(
       "approval-1",
@@ -682,7 +789,15 @@ class InteractiveFakeAgentRuntime extends AgentRuntime {
     if (!approvalResult.allowed || promptResult.kind !== "selected") {
       throw new Error("desktop interaction rejected");
     }
-    dependencies.reporter?.onToolResult("bash", "tests passed", false, "call-1");
+    dependencies.reporter?.onToolResult("bash", "SECRET_RAW_TOOL_RESULT", false, "call-1");
+    dependencies.reporter?.onSubagentActivity?.({
+      activityId: "activity-1",
+      task: "Review transcript persistence",
+      status: "completed",
+      agentName: "Reviewer",
+      summary: "Persistence is consistent",
+    });
+    dependencies.reporter?.onSubagentActivitiesClaimed?.(["activity-1"]);
     dependencies.reporter?.onMessage("已保留兼容并完成验证。\n");
     dependencies.reporter?.onFinish();
     return {
