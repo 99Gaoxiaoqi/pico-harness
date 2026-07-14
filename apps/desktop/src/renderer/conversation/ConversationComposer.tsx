@@ -97,6 +97,8 @@ export function ConversationComposer({
       </label>
       <textarea
         id={textareaId}
+        name="message"
+        autoComplete="off"
         value={value}
         rows={1}
         disabled={disabled}
@@ -122,6 +124,7 @@ export function ConversationComposer({
             <label className="conversation-behavior">
               <span className="conversation-sr-only">运行中消息行为</span>
               <select
+                name="send-behavior"
                 value={effectiveBehavior}
                 disabled={disabled || !onBehaviorChange}
                 onChange={handleBehaviorChange}
@@ -138,6 +141,7 @@ export function ConversationComposer({
             <label className="conversation-context-option">
               <span className="conversation-sr-only">会话选项</span>
               <select
+                name="conversation-option"
                 value={selectedOption}
                 disabled={disabled || !onOptionChange}
                 onChange={(event) => onOptionChange?.(event.target.value)}
