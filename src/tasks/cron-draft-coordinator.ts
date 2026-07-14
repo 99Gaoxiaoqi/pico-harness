@@ -151,8 +151,9 @@ function requireNonEmptyString(value: unknown, name: string): string {
 
 function assertRecurringScheduleText(scheduleText: string): void {
   const explicitlyRecurring =
-    /\b(?:every|each|daily|weekly|monthly|yearly|weekdays?|weekends?)\b/iu.test(scheduleText) ||
-    /(?:每|工作日|周末|定期)/u.test(scheduleText);
+    /\b(?:every|each|daily|weekly|monthly|yearly|weekdays?|weekends?|recurring|periodic)\b/iu.test(
+      scheduleText,
+    ) || /(?:每|工作日|周末|定期|周期)/u.test(scheduleText);
   const explicitOneTime =
     /(?:^|\s)(?:once|today|tomorrow|tonight|next\s+(?:week|month|year|monday|tuesday|wednesday|thursday|friday|saturday|sunday))(?:\s|$)/iu.test(
       scheduleText,
@@ -160,7 +161,7 @@ function assertRecurringScheduleText(scheduleText: string): void {
     /(?:仅?一次|只(?:执行|运行)一次|今天|今晚|明天|后天|下(?:周|个月|月|年)|\d{4}[年/-]\d{1,2}(?:[月/-]\d{1,2})?)/u.test(
       scheduleText,
     );
-  if (explicitOneTime && !explicitlyRecurring) {
+  if (explicitOneTime || !explicitlyRecurring) {
     throw new Error("仅支持重复调度；一次性任务不会创建 Cron 草案");
   }
 }

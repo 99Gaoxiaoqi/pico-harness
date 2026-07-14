@@ -45,6 +45,8 @@ describe("CronDraftApplication integration", () => {
     const job = cron.list(workspace)[0]!;
     expect(enabledAtRegistration).toEqual([false]);
     expect(receipt.enabled).toBe(true);
+    expect(receipt.nextRun).toBe(Date.UTC(1970, 0, 1, 1, 0));
+    expect(receipt.nextRun).not.toBe(1_000);
     expect(job.enabled).toBe(true);
     expect(job.policySnapshot.toolNetworkPolicy).toBe("allow");
     expect(job.policySnapshot.allowedTools).toEqual(["bash", "fetch_url"]);

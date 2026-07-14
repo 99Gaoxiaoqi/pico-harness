@@ -116,6 +116,7 @@ describe("ScheduleDraftCoordinator integration", () => {
     const invalid: ScheduleTaskProposal[] = [
       { ...proposal, title: "  " },
       { ...proposal, scheduleText: "明天上午九点" },
+      { ...proposal, scheduleText: "7月15日上午九点", cronExpression: "0 9 15 7 *" },
       { ...proposal, cronExpression: "0 0 9 * * *" },
       { ...proposal, timeZone: "Mars/Olympus" },
     ];
@@ -123,6 +124,7 @@ describe("ScheduleDraftCoordinator integration", () => {
     const outcomes = await Promise.all(invalid.map((item) => coordinator.propose(item)));
     expect(outcomes).toEqual([
       { kind: "rejected", reason: expect.stringMatching(/title/) },
+      { kind: "rejected", reason: expect.stringMatching(/一次性/) },
       { kind: "rejected", reason: expect.stringMatching(/一次性/) },
       { kind: "rejected", reason: expect.stringMatching(/五段/) },
       { kind: "rejected", reason: expect.stringMatching(/时区/) },

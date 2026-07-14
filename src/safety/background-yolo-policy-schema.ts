@@ -33,12 +33,21 @@ export class BackgroundYoloPolicySnapshotError extends Error {
   override readonly name = "BackgroundYoloPolicySnapshotError";
 }
 
+export interface ParseBackgroundYoloPolicySnapshotOptions {
+  /**
+   * 旧账本可能在后台 MCP 支持前保存过 mcp__ 工具，但没有配置指纹。
+   * 读取时移除这些当时本就不可执行的工具；新写入仍严格要求指纹。
+   */
+  allowLegacyMcpWithoutFingerprint?: boolean;
+}
+
 /**
  * Job 创建与后台执行共用的严格解析器，避免“保存成功、执行时才 blocked”。
  * 返回值始终是规范化的新字段形态，可直接持久化。
  */
 export function parseBackgroundYoloPolicySnapshot(
   value: unknown,
+  options: ParseBackgroundYoloPolicySnapshotOptions = {},
 ): BackgroundYoloPolicySnapshotData {
   if (!isRecord(value)) throw invalid("policySnapshot 必须是对象");
 
@@ -90,7 +99,8 @@ export function parseBackgroundYoloPolicySnapshot(
     throw invalid("mcpConfigFingerprint 必须是小写 SHA-256");
   }
   const hasMcpTools = allowedTools.some((tool) => tool.startsWith("mcp__"));
-  if (hasMcpTools && mcpConfigFingerprint === undefined) {
+  const legacyMcpWithoutFingerprint = hasMcpTools && mcpConfigFingerprint === undefined;
+  if (legacyMcpWithoutFingerprint && !options.allowLegacyMcpWithoutFingerprint) {
     throw invalid("后台 MCP 工具必须绑定 .claw/mcp.json 的 SHA-256 指纹");
   }
   if (!hasMcpTools && mcpConfigFingerprint !== undefined) {
@@ -116,7 +126,13 @@ export function parseBackgroundYoloPolicySnapshot(
     toolNetworkPolicy,
     ...(allowedToolNetworkHosts ? { allowedToolNetworkHosts } : {}),
     ...(typeof mcpConfigFingerprint === "string" ? { mcpConfigFingerprint } : {}),
-    allowedTools: [...new Set(allowedTools)],
+    allowedTools: [
+      ...new Set(
+        legacyMcpWithoutFingerprint
+          ? allowedTools.filter((tool) => !tool.startsWith("mcp__"))
+          : allowedTools,
+      ),
+    ],
     hardlineVersion: value["hardlineVersion"],
     hookVersion: value["hookVersion"],
     createdAt: value["createdAt"],

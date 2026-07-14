@@ -59,6 +59,26 @@ describe("background network and MCP policy integration", () => {
     ).toThrow(/不得声明/u);
   });
 
+  it("读取旧账本时裁剪未绑定指纹的 MCP 工具，新写入仍 fail-closed", () => {
+    const legacy = {
+      mode: "yolo",
+      backgroundEnabled: true,
+      trustedWorkspace: true,
+      toolNetworkPolicy: "disabled",
+      allowedTools: ["read_file", "mcp__legacy__query"],
+      hardlineVersion: "builtin-v1",
+      hookVersion: "workspace-v1",
+      createdAt: 1,
+    } as const;
+
+    expect(() => parseBackgroundYoloPolicySnapshot(legacy)).toThrow(/必须绑定/u);
+    expect(
+      parseBackgroundYoloPolicySnapshot(legacy, {
+        allowLegacyMcpWithoutFingerprint: true,
+      }).allowedTools,
+    ).toEqual(["read_file"]);
+  });
+
   it("只接受固定工作区 MCP 配置且在内容漂移后 fail-closed", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "pico-background-mcp-"));
     cleanup.push(workspace);

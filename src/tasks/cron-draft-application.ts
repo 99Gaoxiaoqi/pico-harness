@@ -11,7 +11,7 @@ import {
   filterBackgroundEligibleTools,
 } from "../safety/background-yolo-policy.js";
 import type { CronCreationReceipt, CronDraft } from "./cron-draft.js";
-import type { CronService } from "./cron-service.js";
+import { nextCronRuns, type CronService } from "./cron-service.js";
 
 export interface CronWorkspaceRegistrar {
   registerWorkspace(workspacePath: string): Promise<{ available: boolean; message: string }>;
@@ -122,12 +122,13 @@ export class CronDraftApplication {
     const finalJob = registration.available
       ? this.options.cronService.setEnabled(job.cronJobId, job.version, true)
       : job;
+    const nextRun = nextCronRuns(finalJob.schedule, finalJob.timeZone, this.now(), 1)[0];
     return {
       cronJobId: finalJob.cronJobId,
       enabled: finalJob.enabled,
       schedule: finalJob.schedule,
       timeZone: finalJob.timeZone,
-      ...(draft.nextRuns[0] !== undefined ? { nextRun: draft.nextRuns[0] } : {}),
+      ...(nextRun !== undefined ? { nextRun } : {}),
       daemonMessage: registration.message,
     };
   }

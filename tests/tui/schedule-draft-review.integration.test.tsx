@@ -99,6 +99,8 @@ describe("schedule draft TUI review", () => {
       "Daemon 状态: running",
       "未来三次运行",
       "详情:",
+      "任务 Prompt:",
+      "汇总今天的 AI 新闻",
       "Cron: 0 9 * * *",
       "Enter/Y 确认",
     ]) {

@@ -182,6 +182,19 @@ describe("CronService durable ledger integration", () => {
       toolNetworkPolicy: "allowlist",
       allowedToolNetworkHosts: ["example.com"],
     });
+
+    const legacyMcpPolicy = {
+      ...base,
+      allowedTools: ["read_file", "mcp__legacy__query"],
+    };
+    const rawMcp = new Database(service.store.databasePath);
+    rawMcp
+      .prepare("UPDATE cron_jobs SET policy_snapshot_json = ? WHERE cron_job_id = ?")
+      .run(JSON.stringify(legacyMcpPolicy), migrated.cronJobId);
+    rawMcp.close();
+    expect(service.store.getCronJob(migrated.cronJobId)?.policySnapshot.allowedTools).toEqual([
+      "read_file",
+    ]);
   });
 
   it("仅删除已禁用且没有运行中 Run 的 Cron Job", () => {
