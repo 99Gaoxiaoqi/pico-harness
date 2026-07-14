@@ -10,7 +10,7 @@ export interface LLMProviderRequestOptions {
   /** 宿主中止信号。Provider 应将它与自身超时合并后传给网络请求。 */
   signal?: AbortSignal;
   /** 请求用途，供计费、审计与可观测层区分普通 Agent 与 Hook 判定。 */
-  purpose?: "agent" | "hook";
+  purpose?: "hook";
 }
 
 /** 合并宿主中止与 Provider 默认超时，任一触发即取消请求。 */
