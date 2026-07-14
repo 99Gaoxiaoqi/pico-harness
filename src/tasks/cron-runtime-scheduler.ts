@@ -85,22 +85,31 @@ export class CronRuntimeScheduler {
 
   private async dispatch(initial: CronRunRecord): Promise<void> {
     if (initial.status !== "queued") return;
-    const job = this.options.cronService.store.getCronJob(initial.cronJobId);
-    if (!job) {
-      this.options.cronService.block(initial.cronRunId, "job_missing");
+    let job: CronJobRecord;
+    let runtime: WorkspaceTaskRuntime;
+    let claimed: ReturnType<CronService["claim"]>;
+    try {
+      const currentJob = this.options.cronService.store.getCronJob(initial.cronJobId);
+      if (!currentJob) {
+        this.options.cronService.block(initial.cronRunId, "job_missing");
+        return;
+      }
+      job = currentJob;
+      const decision = await this.options.canRun(job);
+      if (!decision.allowed) {
+        this.options.cronService.block(initial.cronRunId, decision.reason ?? "policy_blocked");
+        return;
+      }
+      runtime = await this.options.getWorkspaceRuntime(job.workspacePath);
+      if (runtime.listRuns().some((run) => !isTerminal(run))) {
+        this.options.cronService.skip(initial.cronRunId);
+        return;
+      }
+      claimed = this.options.cronService.claim(initial.cronRunId);
+    } catch (error) {
+      this.blockQueuedAfterPreflightFailure(initial.cronRunId, error);
       return;
     }
-    const decision = await this.options.canRun(job);
-    if (!decision.allowed) {
-      this.options.cronService.block(initial.cronRunId, decision.reason ?? "policy_blocked");
-      return;
-    }
-    const runtime = await this.options.getWorkspaceRuntime(job.workspacePath);
-    if (runtime.listRuns().some((run) => !isTerminal(run))) {
-      this.options.cronService.skip(initial.cronRunId);
-      return;
-    }
-    const claimed = this.options.cronService.claim(initial.cronRunId);
     if (claimed.run.status !== "running" || !claimed.lease) return;
     let run: WorkspaceRunSnapshot;
     try {
@@ -144,6 +153,20 @@ export class CronRuntimeScheduler {
       });
     } finally {
       clearInterval(heartbeat);
+    }
+  }
+
+  private blockQueuedAfterPreflightFailure(cronRunId: string, error: unknown): void {
+    const current = this.options.cronService.store.getCronRun(cronRunId);
+    if (current?.status !== "queued") return;
+    try {
+      this.options.cronService.block(
+        cronRunId,
+        `scheduler_preflight_failed:${errorMessage(error)}`,
+      );
+    } catch {
+      // Another scheduler may have claimed or terminalized the run after the read.
+      // Its durable state is authoritative, so never overwrite it here.
     }
   }
 }
