@@ -110,6 +110,7 @@ describe("delegate_task 子代理模型目录 Schema", () => {
 
     const { modelRoute } = schemas(catalog);
 
+    expect(modelRoute.enum).toBeUndefined();
     expect(modelRoute.description).toContain("共 87 条可选路由，当前披露 1 条");
     expect(modelRoute.description).toContain("完整 provider/model 路由");
     expect(modelRoute.description).toContain("reasoning=unsupported");
