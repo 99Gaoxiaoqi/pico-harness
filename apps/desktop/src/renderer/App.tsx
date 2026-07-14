@@ -1,4 +1,5 @@
 import {
+  AlertTriangle,
   Archive,
   Bot,
   Box,
@@ -12,25 +13,22 @@ import {
   Folder,
   FolderGit2,
   Gauge,
+  GitFork,
   History,
   Home,
   Layers3,
-  ListChecks,
   MessageSquareMore,
+  Minimize2,
   Network,
-  Pause,
-  Play,
   Plus,
+  Pencil,
   RefreshCw,
   RotateCcw,
   Search,
-  Send,
   Settings,
   ShieldCheck,
   Sparkles,
-  Square,
   TerminalSquare,
-  UserRoundCheck,
   WandSparkles,
   Workflow,
 } from "lucide-react";
@@ -38,6 +36,9 @@ import {
   Component,
   createContext,
   useContext,
+  useEffect,
+  useMemo,
+  useRef,
   useState,
   type KeyboardEvent,
   type ReactNode,
@@ -45,6 +46,7 @@ import {
 import {
   HashRouter,
   Link,
+  Navigate,
   NavLink,
   Outlet,
   Route,
@@ -62,9 +64,23 @@ import {
   PathButton,
   PromptDialog,
   StatusPill,
-  StepState,
 } from "./components.js";
-import type { CapabilityView, ChangeView, SessionView, WorkspaceMode } from "./model.js";
+import {
+  ConversationComposer,
+  ConversationInspector,
+  ConversationSurface,
+  ConversationTranscript,
+  type ComposerBehavior,
+  type ConversationInspectorView,
+  type ConversationItemView,
+} from "./conversation/index.js";
+import type {
+  CapabilityView,
+  ChangeView,
+  SessionView,
+  TimelineItem,
+  WorkspaceMode,
+} from "./model.js";
 import { useRuntimeStore, type RuntimeStore } from "./runtime.js";
 
 const RuntimeContext = createContext<RuntimeStore | null>(null);
@@ -131,6 +147,7 @@ function AppStateRouter() {
         <Route index element={<HomePage />} />
         <Route path="task/new" element={<NewTaskPage />} />
         <Route path="task/:runId" element={<TaskPage />} />
+        <Route path="session/:sessionId" element={<ConversationPage />} />
         <Route path="review" element={<ReviewPage />} />
         <Route path="sessions" element={<SessionsPage />} />
         <Route path="automations" element={<AutomationsPage />} />
@@ -307,6 +324,8 @@ function AppShell() {
   const { data, preview, message, actions } = useRuntime();
   const location = useLocation();
   const pageTitle = routeTitle(location.pathname);
+  const conversationRoute =
+    location.pathname === "/task/new" || location.pathname.startsWith("/session/");
   const handleNavKeys = (event: KeyboardEvent<HTMLElement>) => {
     if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
     const links = Array.from(
@@ -375,7 +394,11 @@ function AppShell() {
             {message}
           </div>
         )}
-        <main className="page" id="main-content" tabIndex={-1}>
+        <main
+          className={`page ${conversationRoute ? "page--conversation" : ""}`}
+          id="main-content"
+          tabIndex={-1}
+        >
           <Outlet />
         </main>
       </div>
@@ -444,7 +467,7 @@ function WorkspaceModeCard({ mode }: { readonly mode: WorkspaceMode | undefined 
       <p>
         {protectedMode
           ? "Pico 可以隔离并行任务，并在确认后合并它们的更改。"
-          : "Pico 仍可读取、修改和回退文件；并行子任务与变更合并暂不可用。"}
+          : "Pico 可以直接读写文件并运行并行子代理；只有分支、提交和独立合并需要 Git。"}
       </p>
       {!protectedMode && (
         <small>版本保护是一项进阶能力，由 Git 提供；不了解它也不影响现在开始。</small>
@@ -465,7 +488,7 @@ function HomePage() {
         {data.workspaceMode === "folder" && (
           <div className="workspace-mode-notice" role="note">
             <WorkspaceModeBadge mode={data.workspaceMode} />
-            <span>文件处理与安全回退正常可用；并行子任务和变更合并需要版本保护。</span>
+            <span>共享文件夹支持对话、工具和并行子代理；Git 只用于分支与独立合并。</span>
           </div>
         )}
         <TaskComposer compact />
@@ -490,7 +513,10 @@ function HomePage() {
         <section className="panel">
           <PanelHeader title="当前运行" detail={latestRun ? "实时状态" : "没有运行中的任务"} />
           {latestRun ? (
-            <Link className="active-run-card" to={`/task/${latestRun.id}`}>
+            <Link
+              className="active-run-card"
+              to={latestRun.sessionId ? `/session/${latestRun.sessionId}` : `/task/${latestRun.id}`}
+            >
               <span className="active-run-card__icon">
                 <Bot aria-hidden="true" />
               </span>
@@ -527,281 +553,653 @@ function HomePage() {
 }
 
 function NewTaskPage() {
-  return (
-    <div className="new-task-page">
-      <div className="new-task-page__copy">
-        <span className="eyebrow">新任务</span>
-        <h2>
-          把结果说清楚，
-          <br />
-          其余交给 Pico。
-        </h2>
-        <p>可以附上限制、验收标准或不希望改动的部分。任务开始后仍可随时 Steer。</p>
-      </div>
-      <TaskComposer />
-    </div>
-  );
+  return <ConversationPage />;
 }
 
 function TaskComposer({ compact = false }: { readonly compact?: boolean }) {
   const { actions, busy, data } = useRuntime();
   const navigate = useNavigate();
   const [prompt, setPrompt] = useState("");
-  const submit = async () => {
-    const id = await actions.createTask(prompt);
-    if (id) navigate(`/task/${id}`);
+  const sendingRef = useRef(false);
+  const submit = async (text: string) => {
+    if (sendingRef.current) return;
+    sendingRef.current = true;
+    try {
+      const result = await actions.sendMessage({ text });
+      if (!result.succeeded) return;
+      setPrompt("");
+      if (result.sessionId) navigate(`/session/${result.sessionId}`);
+    } finally {
+      sendingRef.current = false;
+    }
   };
   return (
-    <form
-      className={`task-composer ${compact ? "task-composer--compact" : ""}`}
-      onSubmit={(event) => {
-        event.preventDefault();
-        void submit();
-      }}
-    >
-      <label htmlFor={compact ? "quick-task" : "new-task"}>任务描述</label>
-      <textarea
-        id={compact ? "quick-task" : "new-task"}
+    <div className={`home-conversation-composer ${compact ? "is-compact" : ""}`}>
+      <ConversationComposer
         value={prompt}
-        autoComplete="off"
-        onChange={(event) => setPrompt(event.target.value)}
-        placeholder="例如：修复离线同步冲突，并补一条关键失败路径测试…"
-        rows={compact ? 3 : 8}
-      />
-      <div className="task-composer__footer">
-        <div className="composer-context">
-          {data.workspaceMode === "git" ? (
-            <FolderGit2 aria-hidden="true" size={15} />
-          ) : (
-            <Folder aria-hidden="true" size={15} />
-          )}
-          <span>{data.workspacePath?.split(/[\\/]/).at(-1)}</span>
-          <span>{data.workspaceMode === "git" ? "版本保护" : "基础模式"}</span>
-        </div>
-        <Button type="submit" variant="primary" disabled={!prompt.trim() || busy === "create-task"}>
-          {busy === "create-task" ? "正在创建…" : "开始任务"}
-          <Send aria-hidden="true" size={15} />
-        </Button>
-      </div>
-    </form>
-  );
-}
-
-function TaskPage() {
-  const { runId } = useParams();
-  const { data, actions, busy } = useRuntime();
-  const run = data.runs.find((item) => item.id === runId) ?? data.runs[0];
-  const approval = data.approvals.find((item) => !run || item.runId === run.id);
-  const prompt = data.prompts.find((item) => !run || item.runId === run.id);
-  const [approvalOpen, setApprovalOpen] = useState(false);
-  const [promptOpen, setPromptOpen] = useState(false);
-  const [steer, setSteer] = useState("");
-  const planItems = data.timeline.filter((item) => item.kind === "plan");
-  const agentItems = data.timeline.filter((item) => item.kind === "agent");
-  if (!run)
-    return <EmptyState title="找不到这次运行" detail="它可能已被归档，或 Runtime 尚未同步完成。" />;
-  const paused = ["paused", "pause_requested"].includes(run.status);
-  const terminal = ["cancelled", "failed", "succeeded"].includes(run.status);
-  return (
-    <div className="task-layout">
-      <div className="task-main page-stack">
-        <section className="task-heading">
-          <div>
-            <div className="task-heading__meta">
-              <StatusPill status={run.status} />
-              <span>{formatElapsed(run.startedAt)}</span>
-            </div>
-            <h2>{run.description}</h2>
-          </div>
-          <div className="task-controls" aria-label="运行控制">
-            <Button
-              onClick={() => void (paused ? actions.resumeRun(run.id) : actions.pauseRun(run.id))}
-              disabled={Boolean(busy) || terminal || run.status === "cancelling"}
-            >
-              {paused ? (
-                <Play aria-hidden="true" size={15} />
-              ) : (
-                <Pause aria-hidden="true" size={15} />
-              )}
-              {paused ? "继续" : "暂停"}
-            </Button>
-            <Button
-              variant="danger"
-              onClick={() => void actions.stopRun(run.id)}
-              disabled={Boolean(busy) || terminal || run.status === "cancelling"}
-            >
-              <Square aria-hidden="true" size={14} />
-              停止
-            </Button>
-          </div>
-        </section>
-        {(approval || prompt) && (
-          <section className="attention-banner">
-            <div>
-              <UserRoundCheck aria-hidden="true" />
-              <div>
-                <strong>Pico 正在等待你</strong>
-                <span>{[approval, prompt].filter(Boolean).length} 项决定会影响接下来的执行</span>
-              </div>
-            </div>
-            <div className="button-row">
-              {approval && (
-                <Button variant="primary" onClick={() => setApprovalOpen(true)}>
-                  查看审批
-                </Button>
-              )}
-              {prompt && <Button onClick={() => setPromptOpen(true)}>回答问题</Button>}
-            </div>
-          </section>
-        )}
-        <section className="panel plan-panel">
-          <PanelHeader title="执行计划" detail="Runtime 会随着发现更新步骤" />
-          {planItems.length === 0 ? (
-            <EmptyState
-              icon={<ListChecks />}
-              title="Runtime 尚未给出计划"
-              detail="计划事件到达后会显示在这里；Pico 不会用预设步骤代替。"
-            />
-          ) : (
-            <div className="plan-steps">
-              {planItems.map((item, index) => (
-                <div
-                  className={`plan-step ${item.state === "done" ? "is-done" : item.state === "active" ? "is-active" : ""}`}
-                  key={item.id}
-                >
-                  <StepState state={item.state ?? "waiting"} />
-                  <span>{index + 1}</span>
-                  <div>
-                    <strong>{item.title}</strong>
-                    {item.detail && <p>{item.detail}</p>}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </section>
-        <section className="panel timeline-panel">
-          <PanelHeader title="运行时间线" detail="思考内容不会暴露，仅显示可验证的行动" />
-          {data.timeline.length === 0 ? (
-            <EmptyState title="等待第一条进度" detail="Runtime 事件到达后会实时显示。" />
-          ) : (
-            <ol className="timeline">
-              {data.timeline.map((item) => (
-                <li key={item.id}>
-                  <StepState state={item.state ?? "waiting"} />
-                  <div>
-                    <div className="row-title">
-                      <strong>{item.title}</strong>
-                      <time>{formatTime(item.at)}</time>
-                    </div>
-                    {item.detail && <p>{item.detail}</p>}
-                  </div>
-                </li>
-              ))}
-            </ol>
-          )}
-        </section>
-        <form
-          className="steer-box"
-          onSubmit={(event) => {
-            event.preventDefault();
-            void actions.steerRun(run.id, steer).then(() => setSteer(""));
-          }}
-        >
-          <label htmlFor="steer-input">调整方向</label>
-          <div className="input-action">
-            <input
-              id="steer-input"
-              value={steer}
-              autoComplete="off"
-              onChange={(event) => setSteer(event.target.value)}
-              placeholder="补充限制，或告诉 Pico 下一步优先做什么…"
-            />
-            <Button type="submit" disabled={!steer.trim() || Boolean(busy)}>
-              <Send aria-hidden="true" size={15} />
-              Steer
-            </Button>
-          </div>
-        </form>
-      </div>
-      <aside className="task-aside">
-        {!data.workspaceCapabilities.isolatedWorktrees ? (
-          <section className="side-card side-card--muted">
-            <span className="side-card__icon">
-              <Folder aria-hidden="true" />
-            </span>
-            <span className="eyebrow">基础模式</span>
-            <h3>当前任务会正常执行</h3>
-            <p>并行子任务与结果合并需要版本保护，当前不会创建隔离的子代理工作区。</p>
-          </section>
-        ) : agentItems.length === 0 ? (
-          <section className="side-card">
-            <span className="side-card__icon">
-              <Bot aria-hidden="true" />
-            </span>
-            <span className="eyebrow">子代理</span>
-            <h3>没有活跃子代理</h3>
-            <p>Runtime 创建子代理后，职责与状态会显示在这里。</p>
-          </section>
-        ) : (
-          agentItems.slice(-2).map((item) => (
-            <section className="side-card" key={item.id}>
-              <span className="side-card__icon">
-                <Bot aria-hidden="true" />
-              </span>
-              <span className="eyebrow">子代理</span>
-              <h3>{item.title}</h3>
-              {item.detail && <p>{item.detail}</p>}
-              <StatusPill status={item.state ?? "active"} />
-            </section>
-          ))
-        )}
-        <section className="side-card usage-mini">
-          <div className="row-title">
-            <span>本次用量</span>
-            <CircleDollarSign aria-hidden="true" size={16} />
-          </div>
-          <strong>
-            {formatCompact((data.usage.inputTokens ?? 0) + (data.usage.outputTokens ?? 0))}
-          </strong>
-          <span>tokens</span>
-          <Link to="/usage">查看用量明细</Link>
-        </section>
-        <Link className="review-link" to="/review">
-          <FileDiff aria-hidden="true" />
-          <span>
-            <strong>审阅更改</strong>
-            <small>{data.changes.length} 个文件</small>
+        onValueChange={setPrompt}
+        onSubmit={(value) => void submit(value.text)}
+        status="idle"
+        busy={busy === "send-message"}
+        placeholder="向 Pico 描述你想推进的事情…"
+        leadingAccessory={
+          <span className="conversation-context-label">
+            {data.workspaceMode === "git" ? (
+              <FolderGit2 aria-hidden="true" size={15} />
+            ) : (
+              <Folder aria-hidden="true" size={15} />
+            )}
+            <span>{data.workspacePath?.split(/[\\/]/).at(-1)}</span>
           </span>
-        </Link>
-      </aside>
-      <ApprovalDialog
-        approval={approval}
-        open={approvalOpen}
-        onOpenChange={setApprovalOpen}
-        busy={busy === "approval"}
-        onDecision={(decision) =>
-          void actions
-            .respondApproval(approval?.id ?? "", decision)
-            .then(() => setApprovalOpen(false))
-        }
-      />
-      <PromptDialog
-        prompt={prompt}
-        open={promptOpen}
-        onOpenChange={setPromptOpen}
-        busy={busy === "prompt"}
-        onAnswer={(answer) =>
-          void actions.respondPrompt(prompt?.id ?? "", answer).then(() => setPromptOpen(false))
         }
       />
     </div>
   );
 }
 
+function ConversationPage() {
+  const { sessionId } = useParams();
+  const { data, actions, busy } = useRuntime();
+  const navigate = useNavigate();
+  const [draft, setDraft] = useState("");
+  const [behavior, setBehavior] = useState<ComposerBehavior>("steer");
+  const [approvalOpen, setApprovalOpen] = useState(false);
+  const [promptOpen, setPromptOpen] = useState(false);
+  const [selectedApprovalId, setSelectedApprovalId] = useState<string>();
+  const [selectedPromptId, setSelectedPromptId] = useState<string>();
+  const [inspector, setInspector] = useState<ConversationInspectorView>();
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [titleDraft, setTitleDraft] = useState("");
+  const [confirmCompact, setConfirmCompact] = useState(false);
+  const [activation, setActivation] = useState<
+    | { readonly kind: "skill"; readonly name: string }
+    | { readonly kind: "agent"; readonly name: string }
+  >();
+  const sendingRef = useRef(false);
+
+  useEffect(() => {
+    if (sessionId) void actions.loadSession(sessionId);
+  }, [actions, sessionId]);
+
+  useEffect(() => {
+    setDraft("");
+    setInspector(undefined);
+    setApprovalOpen(false);
+    setPromptOpen(false);
+    setSelectedApprovalId(undefined);
+    setSelectedPromptId(undefined);
+    setEditingTitle(false);
+    setConfirmCompact(false);
+    setActivation(undefined);
+  }, [sessionId]);
+
+  const session = data.sessions.find((item) => item.id === sessionId);
+  const conversation = sessionId ? data.conversations[sessionId] : undefined;
+  const sessionRuns = data.runs.filter((run) => run.sessionId === sessionId);
+  const activeRun = sessionRuns.find((run) => !isTerminalRun(run.status));
+  const selectedApproval = data.approvals.find((item) => item.id === selectedApprovalId);
+  const selectedPrompt = data.prompts.find((item) => item.id === selectedPromptId);
+  const composerStatus = activeRun
+    ? ["paused", "pause_requested"].includes(activeRun.status)
+      ? "paused"
+      : "running"
+    : "idle";
+
+  useEffect(() => {
+    if (!editingTitle) setTitleDraft(session?.title ?? "");
+  }, [editingTitle, session?.title]);
+
+  const items = useMemo<readonly ConversationItemView[]>(() => {
+    const persisted = conversation?.items ?? [];
+    const live = activeRun
+      ? data.timeline
+          .filter((item) => item.runId === activeRun.id)
+          .map(timelineItemToConversationItem)
+      : [];
+    const runIds = new Set(sessionRuns.map((run) => run.id));
+    const decisions: ConversationItemView[] = [
+      ...data.approvals
+        .filter((approval) => runIds.has(approval.runId))
+        .map(
+          (approval): ConversationItemView => ({
+            id: `approval:${approval.id}`,
+            kind: "approval",
+            title: approval.title,
+            detail: approval.detail,
+            state: "pending",
+          }),
+        ),
+      ...data.prompts
+        .filter((prompt) => runIds.has(prompt.runId))
+        .map(
+          (prompt): ConversationItemView => ({
+            id: `prompt:${prompt.id}`,
+            kind: "prompt",
+            question: prompt.question,
+            state: "pending",
+          }),
+        ),
+    ];
+    const changes: ConversationItemView[] =
+      conversation?.runId && conversation.changes && conversation.changes.length > 0
+        ? [
+            {
+              id: `changes:${conversation.runId}`,
+              kind: "changes",
+              title: "本轮文件更改",
+              detail: "在应用前审阅 Runtime 生成的差异。",
+              files: conversation.changes.map((change) => change.path),
+              state: "pending",
+            },
+          ]
+        : [];
+    const goal =
+      conversation?.goalItem && !persisted.some((item) => item.kind === "goal")
+        ? [conversation.goalItem]
+        : [];
+    return [...persisted, ...goal, ...live, ...decisions, ...changes];
+  }, [
+    activeRun,
+    data.approvals,
+    conversation,
+    data.prompts,
+    data.timeline,
+    sessionId,
+    sessionRuns,
+  ]);
+
+  const submit = async (text: string, nextBehavior: ComposerBehavior) => {
+    if (sendingRef.current) return;
+    sendingRef.current = true;
+    try {
+      const result = await actions.sendMessage({
+        ...(sessionId ? { sessionId } : {}),
+        text,
+        behavior: nextBehavior,
+        ...(activeRun ? { expectedRunId: activeRun.id } : {}),
+        ...(activation ? { activation } : {}),
+      });
+      if (!result.succeeded) return;
+      setDraft("");
+      setActivation(undefined);
+      if (!sessionId && result.sessionId) {
+        navigate(`/session/${result.sessionId}`, { replace: true });
+      }
+    } finally {
+      sendingRef.current = false;
+    }
+  };
+
+  const openCatalog = () => {
+    setInspector({
+      title: "添加到会话",
+      subtitle: "来自当前 Runtime 的真实目录",
+      content: (
+        <div className="conversation-catalog-list">
+          <section>
+            <h3>Skills</h3>
+            {data.catalogSkills.length === 0 ? (
+              <p>当前工作区没有可用 Skill。</p>
+            ) : (
+              data.catalogSkills.map((skill) => (
+                <button
+                  type="button"
+                  key={`skill:${skill.name}`}
+                  onClick={() => {
+                    setActivation({ kind: "skill", name: skill.name });
+                    setInspector(undefined);
+                  }}
+                >
+                  <WandSparkles aria-hidden="true" />
+                  <span>
+                    <strong>{skill.name}</strong>
+                    <small>{skill.description}</small>
+                  </span>
+                </button>
+              ))
+            )}
+          </section>
+          <section>
+            <h3>子代理</h3>
+            {data.catalogAgents.length === 0 ? (
+              <p>当前 Runtime 没有发现可用 Agent。</p>
+            ) : (
+              data.catalogAgents.map((agent) => (
+                <button
+                  type="button"
+                  key={`agent:${agent.name}`}
+                  onClick={() => {
+                    setActivation({ kind: "agent", name: agent.name });
+                    setInspector(undefined);
+                  }}
+                >
+                  <Bot aria-hidden="true" />
+                  <span>
+                    <strong>{agent.name}</strong>
+                    <small>{agent.description}</small>
+                  </span>
+                </button>
+              ))
+            )}
+          </section>
+        </div>
+      ),
+    });
+  };
+
+  const openItem = (item: ConversationItemView) => {
+    if (item.kind === "approval") {
+      setSelectedApprovalId(item.id.replace(/^approval:/, ""));
+      setApprovalOpen(true);
+      return;
+    }
+    if (item.kind === "prompt") {
+      setSelectedPromptId(item.id.replace(/^prompt:/, ""));
+      setPromptOpen(true);
+      return;
+    }
+    if (item.kind === "changes") {
+      navigate(`/review${sessionId ? `?sessionId=${encodeURIComponent(sessionId)}` : ""}`);
+      return;
+    }
+    if (item.kind === "tool") {
+      setInspector({
+        title: item.title,
+        subtitle: item.toolName,
+        content: (
+          <pre className="conversation-inspector-output">
+            {item.output ?? item.detail ?? "没有可显示的输出。"}
+          </pre>
+        ),
+      });
+      return;
+    }
+    if (item.kind === "subagent") {
+      setInspector({
+        title: item.name,
+        subtitle: "子代理会话",
+        content: <p>{item.detail ?? "详细会话仍在 Runtime 中同步。"}</p>,
+      });
+    }
+  };
+
+  return (
+    <ConversationSurface
+      className="session-conversation"
+      header={
+        <div className="conversation-session-header">
+          <div>
+            <span className="eyebrow">{sessionId ? "会话" : "新会话"}</span>
+            {editingTitle && sessionId ? (
+              <form
+                className="conversation-title-editor"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void actions
+                    .renameSession(sessionId, titleDraft)
+                    .then(() => setEditingTitle(false));
+                }}
+              >
+                <label className="conversation-sr-only" htmlFor="conversation-title">
+                  会话标题
+                </label>
+                <input
+                  id="conversation-title"
+                  name="conversation-title"
+                  autoComplete="off"
+                  value={titleDraft}
+                  autoFocus
+                  onChange={(event) => setTitleDraft(event.target.value)}
+                />
+                <Button
+                  type="submit"
+                  variant="quiet"
+                  disabled={!titleDraft.trim() || Boolean(busy)}
+                >
+                  保存
+                </Button>
+                <Button type="button" variant="quiet" onClick={() => setEditingTitle(false)}>
+                  取消
+                </Button>
+              </form>
+            ) : (
+              <h2>{session?.title ?? (sessionId ? "正在载入会话…" : "今天想一起做什么？")}</h2>
+            )}
+          </div>
+          <div className="conversation-session-header__meta">
+            {conversation?.usage && (
+              <span>
+                {formatCompact(
+                  (conversation.usage.inputTokens ?? 0) + (conversation.usage.outputTokens ?? 0),
+                )}{" "}
+                tokens
+              </span>
+            )}
+            {activeRun && <StatusPill status={activeRun.status} />}
+            {sessionId && (
+              <div className="conversation-session-actions" aria-label="会话操作">
+                <button
+                  type="button"
+                  disabled={Boolean(activeRun) || Boolean(busy)}
+                  onClick={() => setEditingTitle(true)}
+                >
+                  <Pencil aria-hidden="true" /> 重命名
+                </button>
+                <button
+                  type="button"
+                  disabled={Boolean(activeRun) || Boolean(busy)}
+                  onClick={() =>
+                    void actions
+                      .forkSession(sessionId)
+                      .then((forkedId) => forkedId && navigate(`/session/${forkedId}`))
+                  }
+                >
+                  <GitFork aria-hidden="true" /> 分叉
+                </button>
+                <button
+                  type="button"
+                  disabled={Boolean(activeRun) || Boolean(busy)}
+                  onClick={() => {
+                    if (!confirmCompact) {
+                      setConfirmCompact(true);
+                      return;
+                    }
+                    void actions.compactSession(sessionId).then(() => setConfirmCompact(false));
+                  }}
+                >
+                  <Minimize2 aria-hidden="true" /> {confirmCompact ? "确认压缩" : "压缩"}
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      }
+      inspector={
+        inspector ? (
+          <ConversationInspector
+            open
+            title={inspector.title}
+            subtitle={inspector.subtitle}
+            onClose={() => setInspector(undefined)}
+          >
+            {inspector.content}
+          </ConversationInspector>
+        ) : undefined
+      }
+      composer={
+        <ConversationComposer
+          value={draft}
+          onValueChange={setDraft}
+          onSubmit={(value) => void submit(value.text, value.behavior)}
+          status={composerStatus}
+          behavior={behavior}
+          onBehaviorChange={setBehavior}
+          busy={busy === "send-message"}
+          disabled={Boolean(conversation?.loadError)}
+          placeholder={
+            activation?.kind === "skill"
+              ? `输入 ${activation.name} 的参数或补充要求…`
+              : activation?.kind === "agent"
+                ? `描述要委派给 ${activation.name} 的任务…`
+                : sessionId
+                  ? "继续对话，或在运行中调整方向…"
+                  : "向 Pico 发送消息…"
+          }
+          statusText={
+            data.conversations[sessionId ?? ""]?.queuedCount
+              ? `${data.conversations[sessionId ?? ""]?.queuedCount} 条消息正在排队`
+              : undefined
+          }
+          onPause={activeRun ? () => void actions.pauseRun(activeRun.id) : undefined}
+          onResume={activeRun ? () => void actions.resumeRun(activeRun.id) : undefined}
+          onStop={activeRun ? () => void actions.stopRun(activeRun.id) : undefined}
+          onAttach={composerStatus === "idle" ? openCatalog : undefined}
+          trailingAccessory={
+            activation ? (
+              <button
+                type="button"
+                className="conversation-activation-chip"
+                onClick={() => setActivation(undefined)}
+                aria-label={`移除 ${activation.kind === "skill" ? "Skill" : "子代理"} ${activation.name}`}
+              >
+                {activation.kind === "skill" ? "Skill" : "Agent"}: {activation.name} ×
+              </button>
+            ) : undefined
+          }
+          leadingAccessory={
+            <>
+              <span className="conversation-context-label">
+                {data.workspaceMode === "git" ? (
+                  <FolderGit2 aria-hidden="true" />
+                ) : (
+                  <Folder aria-hidden="true" />
+                )}
+                {data.workspacePath?.split(/[\\/]/).at(-1)}
+              </span>
+              {sessionId && conversation?.settings && (
+                <>
+                  <label className="conversation-context-option">
+                    <span className="conversation-sr-only">模型</span>
+                    <select
+                      name="model-route"
+                      aria-label="模型"
+                      value={conversation.settings.modelRouteId ?? ""}
+                      disabled={Boolean(activeRun) || Boolean(busy)}
+                      onChange={(event) =>
+                        void actions.updateSessionSettings(sessionId, {
+                          modelRouteId: event.target.value,
+                        })
+                      }
+                    >
+                      {!data.modelRoutes.some(
+                        (route) => route.id === conversation.settings?.modelRouteId,
+                      ) && (
+                        <option value={conversation.settings.modelRouteId ?? ""}>
+                          {conversation.settings.model}
+                        </option>
+                      )}
+                      {data.modelRoutes.map((route) => (
+                        <option key={route.id} value={route.id}>
+                          {route.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="conversation-context-option">
+                    <span className="conversation-sr-only">权限模式</span>
+                    <select
+                      name="interaction-mode"
+                      aria-label="权限模式"
+                      value={conversation.settings.mode}
+                      disabled={Boolean(activeRun) || Boolean(busy)}
+                      onChange={(event) =>
+                        void actions.updateSessionSettings(sessionId, {
+                          mode: event.target.value as "default" | "plan" | "auto" | "yolo",
+                        })
+                      }
+                    >
+                      <option value="default">默认</option>
+                      <option value="plan">计划</option>
+                      <option value="auto">自动</option>
+                      <option value="yolo">完全访问</option>
+                    </select>
+                  </label>
+                  {conversation.settings.reasoningLevels.length > 0 && (
+                    <label className="conversation-context-option">
+                      <span className="conversation-sr-only">Thinking</span>
+                      <select
+                        name="thinking-effort"
+                        aria-label="Thinking"
+                        value={conversation.settings.thinkingEffort}
+                        disabled={Boolean(activeRun) || Boolean(busy)}
+                        onChange={(event) =>
+                          void actions.updateSessionSettings(sessionId, {
+                            thinkingEffort: event.target.value,
+                          })
+                        }
+                      >
+                        {conversation.settings.reasoningLevels.map((level) => (
+                          <option key={level} value={level}>
+                            {level}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
+                </>
+              )}
+            </>
+          }
+        />
+      }
+    >
+      {conversation?.loadError ? (
+        <div className="conversation-empty-state" role="alert">
+          <AlertTriangle aria-hidden="true" />
+          <h3>无法恢复这个会话</h3>
+          <p>{conversation.loadError}</p>
+          <Button
+            disabled={Boolean(busy)}
+            onClick={() => sessionId && actions.loadSession(sessionId)}
+          >
+            重新载入
+          </Button>
+        </div>
+      ) : (
+        <>
+          {sessionId && conversation?.nextBefore && (
+            <div className="conversation-history-pagination">
+              <Button
+                variant="quiet"
+                disabled={Boolean(busy)}
+                onClick={() => void actions.loadEarlierSession(sessionId)}
+              >
+                {busy === "load-earlier-session" ? "正在加载…" : "加载更早记录"}
+              </Button>
+            </div>
+          )}
+          <ConversationTranscript
+            items={items}
+            onOpenItem={openItem}
+            emptyState={
+              <div className="conversation-empty-state">
+                <Sparkles aria-hidden="true" />
+                <h3>{sessionId ? "这个会话还没有可见消息" : "从一条消息开始"}</h3>
+                <p>可以像在 TUI 里一样交代目标、追问方案，或先让 Pico 阅读项目。</p>
+              </div>
+            }
+          />
+        </>
+      )}
+      <ApprovalDialog
+        approval={selectedApproval}
+        open={approvalOpen}
+        onOpenChange={setApprovalOpen}
+        busy={busy === "approval"}
+        onDecision={(decision) =>
+          void actions
+            .respondApproval(selectedApproval?.id ?? "", decision)
+            .then(() => setApprovalOpen(false))
+        }
+      />
+      <PromptDialog
+        prompt={selectedPrompt}
+        open={promptOpen}
+        onOpenChange={setPromptOpen}
+        busy={busy === "prompt"}
+        onAnswer={(answer) =>
+          void actions
+            .respondPrompt(selectedPrompt?.id ?? "", answer)
+            .then(() => setPromptOpen(false))
+        }
+      />
+    </ConversationSurface>
+  );
+}
+
+function timelineItemToConversationItem(item: TimelineItem): ConversationItemView {
+  if (item.kind === "plan") {
+    return {
+      id: item.id,
+      kind: "plan",
+      title: item.title,
+      steps: [
+        { id: `${item.id}:step`, title: item.detail ?? item.title, state: item.state ?? "active" },
+      ],
+      at: item.at,
+    };
+  }
+  if (item.kind === "tool") {
+    return {
+      id: item.id,
+      kind: "tool",
+      toolName: item.title,
+      title: item.title,
+      detail: item.detail,
+      state: item.state ?? "active",
+      at: item.at,
+    };
+  }
+  if (item.kind === "agent") {
+    return {
+      id: item.id,
+      kind: "subagent",
+      name: item.title,
+      title: item.title,
+      detail: item.detail,
+      state: item.state ?? "active",
+      at: item.at,
+    };
+  }
+  if (item.eventType === "assistant.message") {
+    return { id: item.id, kind: "assistantMessage", text: item.detail ?? item.title, at: item.at };
+  }
+  return {
+    id: item.id,
+    kind: "status",
+    title: item.title,
+    detail: item.detail,
+    tone: item.state === "failed" ? "error" : item.state === "done" ? "success" : "neutral",
+    at: item.at,
+  };
+}
+
+function isTerminalRun(status: string): boolean {
+  return ["cancelled", "failed", "succeeded", "completed"].includes(status);
+}
+
+function TaskPage() {
+  const { runId } = useParams();
+  const { data } = useRuntime();
+  const run = data.runs.find((item) => item.id === runId);
+  if (!run)
+    return <EmptyState title="找不到这次运行" detail="它可能已被归档，或 Runtime 尚未同步完成。" />;
+  if (run.sessionId) return <Navigate replace to={`/session/${run.sessionId}`} />;
+  return (
+    <EmptyState
+      icon={<History />}
+      title="这是旧版运行记录"
+      detail="它没有可恢复的 Session 标识。Pico 不会用其他运行的时间线或更改冒充这次记录。"
+      action={
+        <Link className="button" to="/sessions">
+          返回会话库
+        </Link>
+      }
+    />
+  );
+}
+
 function ReviewPage() {
   const { data, actions, busy } = useRuntime();
-  const [selectedPath, setSelectedPath] = useState(data.changes[0]?.path);
+  const location = useLocation();
+  const sessionId = new URLSearchParams(location.search).get("sessionId") ?? undefined;
+  const conversation = sessionId ? data.conversations[sessionId] : undefined;
+  const changes = conversation?.changes ?? (sessionId ? [] : data.changes);
+  const fingerprint =
+    conversation?.changeFingerprint ?? (sessionId ? undefined : data.changeFingerprint);
+  const runId = conversation?.runId ?? (sessionId ? undefined : data.runs[0]?.id);
+  const target = runId && fingerprint ? { runId, fingerprint } : undefined;
+  const [selectedPath, setSelectedPath] = useState(changes[0]?.path);
   const [comment, setComment] = useState("");
   const [rewindOpen, setRewindOpen] = useState(false);
   const [rewindPreview, setRewindPreview] = useState<{
@@ -809,7 +1207,10 @@ function ReviewPage() {
     readonly fingerprint: string;
     readonly changeCount: number;
   }>();
-  const selected = data.changes.find((change) => change.path === selectedPath);
+  useEffect(() => {
+    if (!selectedPath && changes[0]) setSelectedPath(changes[0].path);
+  }, [changes, selectedPath]);
+  const selected = changes.find((change) => change.path === selectedPath);
   if (data.notices.changes)
     return <CapabilityUnavailable title="无法读取更改" detail={data.notices.changes} />;
   if (!selected)
@@ -825,9 +1226,9 @@ function ReviewPage() {
       <aside className="file-list" aria-label="已更改文件">
         <div className="file-list__header">
           <strong>更改</strong>
-          <span>{data.changes.length} 个文件</span>
+          <span>{changes.length} 个文件</span>
         </div>
-        {data.changes.map((change) => (
+        {changes.map((change) => (
           <button
             key={change.path}
             type="button"
@@ -878,7 +1279,6 @@ function ReviewPage() {
                 variant="danger"
                 disabled={Boolean(busy)}
                 onClick={() => {
-                  const sessionId = data.runs[0]?.sessionId;
                   if (sessionId)
                     void actions.applyRewind(
                       sessionId,
@@ -891,9 +1291,8 @@ function ReviewPage() {
               </Button>
             ) : (
               <Button
-                disabled={Boolean(busy) || !data.runs[0]?.sessionId}
+                disabled={Boolean(busy) || !sessionId}
                 onClick={() => {
-                  const sessionId = data.runs[0]?.sessionId;
                   if (sessionId) void actions.previewRewind(sessionId).then(setRewindPreview);
                 }}
               >
@@ -918,7 +1317,9 @@ function ReviewPage() {
             <Button
               disabled={!comment.trim() || Boolean(busy)}
               onClick={() =>
-                void actions.reviewChanges("request_changes", comment).then(() => setComment(""))
+                void actions
+                  .reviewChanges("request_changes", comment, target)
+                  .then(() => setComment(""))
               }
             >
               发送意见
@@ -927,16 +1328,19 @@ function ReviewPage() {
         </div>
         <footer className="review-footer">
           <span>
-            指纹 <code>{data.changeFingerprint ?? "Runtime 未提供"}</code>
+            指纹 <code>{fingerprint ?? "Runtime 未提供"}</code>
           </span>
           <div className="button-row">
-            <Button disabled={Boolean(busy)} onClick={() => void actions.reviewChanges("approve")}>
+            <Button
+              disabled={Boolean(busy) || !target}
+              onClick={() => void actions.reviewChanges("approve", undefined, target)}
+            >
               批准更改
             </Button>
             <Button
               variant="primary"
-              disabled={Boolean(busy) || !data.changeFingerprint}
-              onClick={() => void actions.applyChanges()}
+              disabled={Boolean(busy) || !target}
+              onClick={() => void actions.applyChanges(target)}
             >
               批准并应用
             </Button>
@@ -974,10 +1378,11 @@ function SessionsPage() {
           <Search aria-hidden="true" />
           <span className="sr-only">搜索会话</span>
           <input
+            name="session-search"
             value={query}
             autoComplete="off"
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="搜索会话"
+            placeholder="搜索会话…"
           />
         </label>
         <label className="check-control">
@@ -1027,7 +1432,7 @@ function SessionRow({
 }) {
   return (
     <div className="session-row-wrap">
-      <Link className="session-row" to={session.status === "active" ? "/" : "/sessions"}>
+      <Link className="session-row" to={`/session/${session.id}`}>
         <span className="session-row__icon">
           {session.status === "archived" ? (
             <Archive aria-hidden="true" />
@@ -1089,7 +1494,7 @@ function AutomationsPage() {
               name="name"
               required
               autoComplete="off"
-              placeholder="例如：每周依赖检查"
+              placeholder="例如：每周依赖检查…"
             />
           </div>
           <div>
@@ -1099,7 +1504,7 @@ function AutomationsPage() {
               name="schedule"
               required
               autoComplete="off"
-              placeholder="例如：0 9 * * 1"
+              placeholder="例如：0 9 * * 1…"
             />
           </div>
           <div className="automation-form__prompt">
@@ -1308,6 +1713,7 @@ function UsagePage() {
 function SettingsPage() {
   const { data, actions, busy } = useRuntime();
   const [background, setBackground] = useState<"" | "enabled" | "disabled">("");
+  const [diagnosticOutput, setDiagnosticOutput] = useState<string>();
   return (
     <div className="page-stack settings-page">
       <section className="page-intro">
@@ -1341,6 +1747,7 @@ function SettingsPage() {
           </SettingRow>
           <SettingRow title="关闭后行为" detail="主进程暂不提供状态读取；请选择要应用的行为">
             <select
+              name="background-mode"
               className="select-control"
               value={background}
               disabled={Boolean(busy)}
@@ -1361,6 +1768,43 @@ function SettingsPage() {
         </div>
       </section>
       <section className="settings-section">
+        <h3>项目与诊断</h3>
+        <div className="settings-list">
+          <SettingRow title="初始化 Pico 项目" detail="仅创建缺失的 AGENTS.md 与 .pico/config.json">
+            <Button
+              disabled={Boolean(busy)}
+              onClick={() => {
+                if (window.confirm(`在 ${data.workspacePath ?? "当前工作区"} 初始化 Pico 项目？`))
+                  void actions.initializeWorkspace();
+              }}
+            >
+              初始化
+            </Button>
+          </SettingRow>
+          <SettingRow title="Runtime 诊断" detail="只读检查配置、存储和运行能力">
+            <Button
+              disabled={Boolean(busy)}
+              onClick={() => void actions.runDiagnostics("runtime").then(setDiagnosticOutput)}
+            >
+              运行诊断
+            </Button>
+          </SettingRow>
+          <SettingRow title="资源扫描" detail="只读列出 Pico 与兼容资源，不执行修复或清理">
+            <Button
+              disabled={Boolean(busy)}
+              onClick={() => void actions.runDiagnostics("resources").then(setDiagnosticOutput)}
+            >
+              扫描资源
+            </Button>
+          </SettingRow>
+        </div>
+        {diagnosticOutput && (
+          <pre className="settings-diagnostic-output" aria-label="诊断结果">
+            {diagnosticOutput}
+          </pre>
+        )}
+      </section>
+      <section className="settings-section">
         <h3>安全</h3>
         <div className="settings-list">
           <SettingRow title="当前工作区" detail={data.workspacePath ?? "未选择"}>
@@ -1377,7 +1821,7 @@ function SettingsPage() {
             detail={
               data.workspaceMode === "git"
                 ? "已启用并行任务隔离与变更合并"
-                : "文件处理与安全回退可用；并行子任务与变更合并暂不可用"
+                : "对话、工具和并行子代理可用；分支、提交和独立合并不可用"
             }
           >
             <WorkspaceModeBadge mode={data.workspaceMode} />
@@ -1507,6 +1951,7 @@ function NotFound() {
 
 function routeTitle(pathname: string): string {
   if (pathname.startsWith("/task/")) return pathname === "/task/new" ? "新任务" : "任务运行";
+  if (pathname.startsWith("/session/")) return "会话";
   return (
     (
       {
@@ -1541,10 +1986,6 @@ function formatRelative(value: number): string {
 function formatElapsed(value: number): string {
   const minutes = Math.max(1, Math.floor((Date.now() - value) / 60_000));
   return `已运行 ${minutes} 分钟`;
-}
-
-function formatTime(value: number): string {
-  return new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit" }).format(value);
 }
 
 function renderPatch(change: ChangeView): string {

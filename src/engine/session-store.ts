@@ -20,6 +20,7 @@ import { basename, dirname, join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type { Message } from "../schema/message.js";
 import { logger } from "../observability/logger.js";
+import type { TranscriptEvent } from "../presentation/transcript-event-store.js";
 import { OwnerLease } from "../storage/owner-lease.js";
 import type { SessionIdentity } from "./session-identity.js";
 import {
@@ -132,6 +133,11 @@ export type SessionEvent =
         /** fork/spawn 来源的 durable cursor，用于重建 Catalog lineage。 */
         readonly lineage?: SessionLineage;
       };
+    })
+  | (SessionEventBase & {
+      /** UI-neutral Transcript 领域事件，与消息共用 Session JSONL 真源。 */
+      readonly kind: "transcript.event.recorded";
+      readonly data: { readonly event: TranscriptEvent };
     });
 
 /** 持久化的事件记录:每行一个,带 type 判别联合。 */
@@ -384,6 +390,17 @@ export class SessionStore {
         messages: structuredClone(messages),
         lineage: structuredClone(lineage),
       },
+      options,
+    );
+  }
+
+  async commitTranscriptEvent(
+    event: TranscriptEvent,
+    options?: CommitEventOptions,
+  ): Promise<CommitReceipt> {
+    return this.commitEvent(
+      "transcript.event.recorded",
+      { event: structuredClone(event) },
       options,
     );
   }
@@ -1035,10 +1052,161 @@ function normalizeSessionEvent(value: Record<string, unknown>): SessionEvent | u
         return undefined;
       }
       break;
+    case "transcript.event.recorded":
+      if (!isTranscriptEventValue(data["event"])) return undefined;
+      break;
     default:
       return undefined;
   }
   return structuredClone(value) as unknown as SessionEvent;
+}
+
+function isTranscriptEventValue(value: unknown): value is TranscriptEvent {
+  if (
+    !isRecord(value) ||
+    !isNonEmptyString(value["eventId"]) ||
+    !isNonNegativeInteger(value["sequence"]) ||
+    value["sequence"] === 0 ||
+    !isFiniteNumber(value["createdAt"]) ||
+    typeof value["type"] !== "string"
+  ) {
+    return false;
+  }
+  const stringFields = (...fields: readonly string[]) =>
+    fields.every((field) => typeof value[field] === "string");
+  switch (value["type"]) {
+    case "entry.appended":
+      return stringFields("entryId") && isTranscriptEntryValue(value["entry"]);
+    case "assistant.stream.started":
+      return stringFields("entryId", "streamId", "delta");
+    case "assistant.stream.delta":
+      return stringFields("entryId", "streamId", "delta");
+    case "assistant.stream.completed":
+      return (
+        stringFields("entryId", "streamId") &&
+        (value["content"] === undefined || typeof value["content"] === "string")
+      );
+    case "assistant.stream.interrupted":
+      return (
+        stringFields("entryId", "streamId") &&
+        new Set(["new-request", "clear", "truncate", "abort"]).has(String(value["reason"]))
+      );
+    case "assistant.response.suppressed":
+      return stringFields("entryId", "reason");
+    case "tool.started":
+      return (
+        stringFields("entryId", "toolCallId", "name", "args") &&
+        (value["providerCallId"] === undefined || typeof value["providerCallId"] === "string")
+      );
+    case "tool.approval.requested":
+      return stringFields("toolCallId", "summary");
+    case "tool.output":
+      return stringFields("toolCallId") && isTranscriptToolOutputValue(value);
+    case "tool.output.truncated":
+      return stringFields("toolCallId") && isNonNegativeInteger(value["droppedChars"]);
+    case "tool.completed":
+      return (
+        stringFields("toolCallId", "status", "summary") &&
+        isNonNegativeInteger(value["size"]) &&
+        typeof value["truncated"] === "boolean" &&
+        ["inlineResult", "artifactRef", "artifactPath"].every(
+          (field) => value[field] === undefined || typeof value[field] === "string",
+        )
+      );
+    case "subagent.activity.updated":
+      return (
+        stringFields("entryId", "activityId") &&
+        isRecord(value["activity"]) &&
+        isJsonCompatibleValue(value["activity"])
+      );
+    case "subagent.trace.recorded":
+      return isRecord(value["trace"]) && isJsonCompatibleValue(value["trace"]);
+    case "subagent.activity.claimed":
+    case "subagent.activity.archived":
+      return stringFields("activityId");
+    case "phase.changed":
+      return stringFields("phaseId", "mode");
+    case "transcript.truncated":
+      return isNonNegativeInteger(value["entryCount"]);
+    case "transcript.cleared":
+      return true;
+    default:
+      return false;
+  }
+}
+
+function isTranscriptEntryValue(value: unknown): boolean {
+  if (!isRecord(value) || typeof value["kind"] !== "string") return false;
+  if (!isJsonCompatibleValue(value)) return false;
+  switch (value["kind"]) {
+    case "logo":
+    case "thinking":
+      return true;
+    case "user":
+    case "system":
+    case "assistant":
+      return typeof value["content"] === "string";
+    case "error":
+      return typeof value["message"] === "string";
+    case "skill":
+      return typeof value["name"] === "string" && typeof value["args"] === "string";
+    case "tool":
+      return (
+        typeof value["name"] === "string" &&
+        typeof value["args"] === "string" &&
+        typeof value["status"] === "string"
+      );
+    case "subagent-activity":
+      return typeof value["task"] === "string" && typeof value["status"] === "string";
+    case "plan":
+      return typeof value["title"] === "string";
+    case "approval":
+    case "prompt":
+    case "changes":
+      return typeof value["title"] === "string";
+    case "run-boundary":
+      return (
+        typeof value["runId"] === "string" &&
+        typeof value["status"] === "string" &&
+        isFiniteNumber(value["startedAt"])
+      );
+    default:
+      return false;
+  }
+}
+
+function isTranscriptToolOutputValue(value: Record<string, unknown>): boolean {
+  if ("segment" in value) {
+    const segment = value["segment"];
+    return (
+      isRecord(segment) &&
+      typeof segment["content"] === "string" &&
+      Array.isArray(segment["runs"]) &&
+      segment["runs"].every(
+        (run) =>
+          isRecord(run) &&
+          new Set(["stdout", "stderr"]).has(String(run["stream"])) &&
+          isNonNegativeInteger(run["length"]) &&
+          (run["length"] as number) > 0,
+      )
+    );
+  }
+  return (
+    new Set(["stdout", "stderr"]).has(String(value["stream"])) && typeof value["chunk"] === "string"
+  );
+}
+
+function isJsonCompatibleValue(value: unknown): boolean {
+  if (
+    value === null ||
+    typeof value === "string" ||
+    typeof value === "boolean" ||
+    isFiniteNumber(value)
+  ) {
+    return true;
+  }
+  if (Array.isArray(value)) return value.every(isJsonCompatibleValue);
+  return isRecord(value) && Object.values(value).every(isJsonCompatibleValue);
 }
 
 function isSessionIdentityValue(value: unknown): value is Record<string, string> {

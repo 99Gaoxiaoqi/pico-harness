@@ -3,10 +3,42 @@ import { readFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { listRewindPointSummaries } from "../cli/file-history.js";
 import { createCliSessionId, listCliSessionSummaries } from "../cli/session-resolver.js";
+import { createContextBudget, estimateMessagesTokens } from "../context/context-budget.js";
+import { FullCompactor } from "../context/full-compactor.js";
 import { SkillLoader } from "../context/skill.js";
+import { findAgentProfile, loadAgentCatalog, summarizeAgentProfiles } from "../agents/catalog.js";
+import { ResourceDoctor, renderResourceDoctorReport } from "../diagnostics/resource-doctor.js";
+import { runWorkspaceDoctor } from "../diagnostics/workspace-doctor.js";
+import { SessionForkService } from "../engine/session-fork-service.js";
 import { globalSessionManager, Session } from "../engine/session.js";
+import type { SubagentActivityEvent, SubagentTraceEvent } from "../engine/reporter.js";
+import type { SessionHydrationSnapshot } from "../engine/session-runtime.js";
+import {
+  DEFAULT_INTERACTION_MODE,
+  getOrCreateSessionSettings,
+  migrateSessionModelRoute,
+  normalizeInteractionMode,
+  sessionReasoningCandidates,
+  setSessionMode,
+  setSessionThinkingEffort,
+  setSessionTitle,
+  type SessionSettings,
+} from "../input/session-settings.js";
 import { loadPicoConfig, type PicoConfig } from "../input/pico-config.js";
+import { renderAgentDispatchPrompt } from "../input/agent-activation.js";
+import { renderSkillActivation } from "../input/skill-activation.js";
+import { initializeProjectEntrypoints } from "../input/project-initializer.js";
 import { McpConnectionManager } from "../mcp/manager.js";
+import { CostTracker } from "../observability/tracker.js";
+import { ensureSessionUsageBaseline } from "../observability/usage-baseline.js";
+import {
+  projectTranscriptEvents,
+  type TranscriptEntry,
+  type TranscriptEvent,
+} from "../presentation/transcript-event-store.js";
+import { createProvider, type ProviderKind } from "../provider/factory.js";
+import { loadModelRouter, type ModelRoute, type ModelRouter } from "../provider/model-router.js";
+import { resolveProviderProfile } from "../provider/profile.js";
 import { WorkspaceTrustStore } from "../security/workspace-trust.js";
 import {
   fileHistoryChanges,
@@ -23,18 +55,26 @@ import {
   createRuntimeEvent,
   createRuntimeRequest,
   isJsonValue,
+  MAX_RUNTIME_FRAME_BYTES,
   RUNTIME_ERROR_CODES,
   RuntimeProtocolError,
   type JsonValue,
   type JsonObject,
   type RuntimeEvent,
   type RuntimeRequest,
+  type RuntimeUserInput,
 } from "./protocol.js";
 import type { DisposableLocalRuntimeService, RuntimeEventCursor } from "./service.js";
 import { DesktopSessionStateStore } from "./desktop-session-state.js";
+import { DesktopConversationStateStore } from "./desktop-conversation-state.js";
+import { projectRuntimeTranscript, TranscriptRevisionConflict } from "./desktop-transcript.js";
 import { canonicalizeWorkspacePath } from "./workspace-registry.js";
 import { WorkspaceRegistrationStore } from "./workspace-registration.js";
-import { WorkspaceRuntimeService, workspaceStatusResult } from "./workspace-runtime-service.js";
+import {
+  WorkspaceRuntimeService,
+  workspaceStatusResult,
+  type DaemonRunExecution,
+} from "./workspace-runtime-service.js";
 import { DesktopAutomationService } from "./desktop-automation-service.js";
 
 const UNSUPPORTED_DESKTOP_METHODS: ReadonlySet<string> = new Set([
@@ -43,23 +83,37 @@ const UNSUPPORTED_DESKTOP_METHODS: ReadonlySet<string> = new Set([
   "config.update",
 ] as const);
 
+interface ResolvedRuntimeUserInput {
+  readonly prompt: string;
+  readonly execution?: DaemonRunExecution;
+}
+
 export interface DesktopRuntimeServiceOptions {
   readonly runtimeService: WorkspaceRuntimeService;
   readonly registrationStore?: WorkspaceRegistrationStore;
   readonly trustStore?: WorkspaceTrustStore;
   readonly sessionStateStore?: DesktopSessionStateStore;
+  readonly conversationStateStore?: DesktopConversationStateStore;
   readonly interactions?: DesktopRuntimeInteractions;
   readonly automations?: DesktopAutomationService;
+  readonly env?: Readonly<Record<string, string | undefined>>;
+  readonly providerFactory?: typeof createProvider;
+  readonly createSessionId?: () => string;
   readonly now?: () => number;
 }
 
 export interface DesktopRuntimeInteractions {
   respondApproval(input: {
+    readonly workspacePath: string;
     readonly approvalId: string;
     readonly decision: "allow_once" | "allow_session" | "deny";
     readonly reason?: string;
   }): { readonly accepted: boolean; readonly alreadyResolved: boolean };
-  respondPrompt(input: { readonly promptId: string; readonly answer: JsonValue }): {
+  respondPrompt(input: {
+    readonly workspacePath: string;
+    readonly promptId: string;
+    readonly answer: JsonValue;
+  }): {
     readonly accepted: boolean;
     readonly alreadyResolved: boolean;
   };
@@ -73,18 +127,58 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   private readonly registrationStore: WorkspaceRegistrationStore;
   private readonly trustStore: WorkspaceTrustStore;
   private readonly sessionStateStore: DesktopSessionStateStore;
+  private readonly conversationStateStore: DesktopConversationStateStore;
+  private readonly env: Readonly<Record<string, string | undefined>>;
+  private readonly providerFactory: typeof createProvider;
+  private readonly createSessionId: () => string;
   private readonly now: () => number;
+  private readonly unsubscribeRuntimeEvents: () => void;
+  private readonly pendingSends = new Map<string, Promise<JsonObject>>();
+  private transcriptPersistenceTail: Promise<void> = Promise.resolve();
   private resourceVersion = 0;
 
   constructor(private readonly options: DesktopRuntimeServiceOptions) {
     this.registrationStore = options.registrationStore ?? new WorkspaceRegistrationStore();
     this.trustStore = options.trustStore ?? new WorkspaceTrustStore();
     this.sessionStateStore = options.sessionStateStore ?? new DesktopSessionStateStore();
+    this.conversationStateStore =
+      options.conversationStateStore ?? new DesktopConversationStateStore();
+    this.env = options.env ?? process.env;
+    this.providerFactory = options.providerFactory ?? createProvider;
+    this.createSessionId = options.createSessionId ?? createCliSessionId;
     this.now = options.now ?? Date.now;
+    this.unsubscribeRuntimeEvents = options.runtimeService.subscribe((event) => {
+      const sessionId = event.scope.sessionId;
+      if (!sessionId) return;
+      if (isPersistedConversationTopic(event.topic)) {
+        this.transcriptPersistenceTail = this.transcriptPersistenceTail.then(
+          () => this.persistRuntimeEvent(event),
+          () => this.persistRuntimeEvent(event),
+        );
+        void this.transcriptPersistenceTail.catch((error: unknown) =>
+          this.publishConversationFailure(event.scope.workspacePath, error),
+        );
+      }
+      if (event.topic !== "run.finished") return;
+      void this.transcriptPersistenceTail
+        .then(
+          () => this.consumeNextQueued(event.scope.workspacePath, sessionId),
+          () => this.consumeNextQueued(event.scope.workspacePath, sessionId),
+        )
+        .catch((error: unknown) =>
+          this.publishConversationFailure(event.scope.workspacePath, error),
+        );
+    });
   }
 
   async handle(request: RuntimeRequest): Promise<JsonValue> {
     switch (request.method) {
+      case "workspace.init":
+        return this.initializeWorkspace(request.params.workspacePath);
+      case "diagnostics.run":
+        return this.runDiagnostics(request.params.workspacePath);
+      case "diagnostics.resources":
+        return this.runResourceDiagnostics(request.params.workspacePath);
       case "workspace.list":
         return this.listWorkspaces();
       case "workspace.trustStatus":
@@ -109,12 +203,45 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
           request.params.sessionId,
           false,
         );
+      case "session.rename":
+        return this.renameSession(
+          request.params.workspacePath,
+          request.params.sessionId,
+          request.params.title,
+        );
+      case "session.fork":
+        return this.forkSession(request.params.workspacePath, request.params.sessionId);
+      case "session.compact":
+        return this.compactSession(request.params.workspacePath, request.params.sessionId);
+      case "session.settings.get":
+        return this.getRuntimeSessionSettings(
+          request.params.workspacePath,
+          request.params.sessionId,
+        );
+      case "session.settings.update":
+        return this.updateRuntimeSessionSettings(request.params);
+      case "goal.get":
+        return this.getGoal(request.params.workspacePath, request.params.sessionId);
+      case "session.send":
+        return this.sendSession(request.params);
+      case "session.transcript":
+        return this.getSessionTranscript(request.params);
+      case "run.cancel":
+        return this.cancelRun(
+          request.params.workspacePath,
+          request.params.runId,
+          request.params.reason,
+        );
       case "config.get":
         return this.getConfig(request.params.workspacePath);
       case "config.providers":
         return this.listProviders(request.params.workspacePath);
+      case "catalog.agents":
+        return this.listAgents(request.params.workspacePath);
+      case "catalog.skills":
+        return this.listSkills(request.params.workspacePath, true);
       case "config.skills":
-        return this.listSkills(request.params.workspacePath);
+        return this.listSkills(request.params.workspacePath, false);
       case "config.mcpServers":
         return this.listMcpServers(request.params.workspacePath);
       case "usage.get":
@@ -196,8 +323,10 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     return this.options.runtimeService.subscribe(listener);
   }
 
-  close(): Promise<void> {
-    return this.options.runtimeService.close();
+  async close(): Promise<void> {
+    this.unsubscribeRuntimeEvents();
+    await this.transcriptPersistenceTail.catch(() => undefined);
+    await this.options.runtimeService.close();
   }
 
   private async listWorkspaces(): Promise<JsonValue> {
@@ -210,6 +339,67 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       ),
     );
     return { workspaces };
+  }
+
+  private async initializeWorkspace(workspacePath: string): Promise<JsonValue> {
+    const canonical = await this.requireTrustedWorkspace(workspacePath);
+    const listed = requireJsonRecord(
+      await this.options.runtimeService.handle(
+        createRuntimeRequest("runs.list", { workspacePath: canonical }),
+      ),
+      "runs.list result",
+    );
+    const runs = Array.isArray(listed["runs"]) ? listed["runs"] : [];
+    if (
+      runs.filter(isJsonRecord).some((run) => !isTerminalRunStatus(String(run["status"] ?? "")))
+    ) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.CONFLICT,
+        "工作区仍有活动 Run，不能执行初始化",
+      );
+    }
+    try {
+      const result = await initializeProjectEntrypoints(canonical);
+      this.publish(
+        createRuntimeEvent({
+          topic: "workspace.initialized",
+          scope: { workspacePath: canonical },
+          resourceVersion: this.nextResourceVersion(),
+          at: this.now(),
+          payload: toJsonValue(result),
+        }),
+      );
+      return toJsonValue(result);
+    } catch (error) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.CONFLICT,
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  }
+
+  private async runDiagnostics(workspacePath: string): Promise<JsonValue> {
+    const canonical = await this.requireTrustedWorkspace(workspacePath);
+    const config = await loadPicoConfig(canonical);
+    const defaults = sessionSettingDefaults(config, this.env);
+    return toJsonValue(
+      await runWorkspaceDoctor({
+        workDir: canonical,
+        provider: defaults.provider,
+        model: defaults.model,
+        env: this.env,
+        taskRuntimeAvailable: true,
+      }),
+    );
+  }
+
+  private async runResourceDiagnostics(workspacePath: string): Promise<JsonValue> {
+    const canonical = await this.requireTrustedWorkspace(workspacePath);
+    const report = await new ResourceDoctor({ workDir: canonical }).scan();
+    return toJsonValue({
+      ...report,
+      output: renderResourceDoctorReport(report).join("\n"),
+    });
   }
 
   private async trustStatus(workspacePath: string): Promise<JsonValue> {
@@ -287,6 +477,1019 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     return { session };
   }
 
+  private async renameSession(
+    workspacePath: string,
+    sessionId: string,
+    title: string,
+  ): Promise<JsonValue> {
+    const canonical = await this.requireIdleTrustedSession(workspacePath, sessionId, "重命名");
+    const normalizedTitle = requireText(title, "title");
+    await this.withSession(canonical, sessionId, async (session) => {
+      const settings = await this.getSessionSettings(canonical, session);
+      const result = setSessionTitle(settings, normalizedTitle);
+      if (!result.ok) {
+        throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.INVALID_PARAMS, result.message);
+      }
+      await session.flushPersistence();
+    });
+    // 旧版 Desktop 可能已经保存过展示标题；同步更新，避免它遮蔽 JSONL 真源。
+    await this.sessionStateStore.update(canonical, sessionId, { title: normalizedTitle });
+    const session = await this.requireSession(canonical, sessionId);
+    this.publishSession(session);
+    return { session };
+  }
+
+  private async forkSession(workspacePath: string, sessionId: string): Promise<JsonValue> {
+    const canonical = await this.requireIdleTrustedSession(workspacePath, sessionId, "分叉");
+    const source = await globalSessionManager.getOrCreate(sessionId, canonical, {
+      persistence: true,
+      sessionCatalog: false,
+    });
+    const targetSessionId = this.createSessionId();
+    await new SessionForkService({ workDir: canonical }).fork({
+      sourceSessionId: sessionId,
+      targetSessionId,
+      targetMode: source.getRuntimeStateSnapshot().settings?.mode ?? DEFAULT_INTERACTION_MODE,
+    });
+    const session = await this.requireSession(canonical, targetSessionId);
+    this.publishSession(session);
+    this.publishTranscriptUpdate(canonical, targetSessionId, "reload");
+    return { session, sourceSessionId: sessionId };
+  }
+
+  private async getRuntimeSessionSettings(
+    workspacePath: string,
+    sessionId: string,
+  ): Promise<JsonValue> {
+    const canonical = await this.requireTrustedSession(workspacePath, sessionId);
+    return this.withSession(canonical, sessionId, async (session) => {
+      const settings = await this.getSessionSettings(canonical, session);
+      const router = await this.getSessionModelRouter(canonical, settings);
+      return { settings: runtimeSessionSettings(settings, router) };
+    });
+  }
+
+  private async updateRuntimeSessionSettings(params: {
+    readonly workspacePath: string;
+    readonly sessionId: string;
+    readonly modelRouteId?: string;
+    readonly mode?: string;
+    readonly permissions?: string;
+    readonly thinkingEffort?: string;
+  }): Promise<JsonValue> {
+    if (
+      params.modelRouteId === undefined &&
+      params.mode === undefined &&
+      params.permissions === undefined &&
+      params.thinkingEffort === undefined
+    ) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.INVALID_PARAMS,
+        "session.settings.update 至少需要一个设置字段",
+      );
+    }
+    const requestedMode = normalizeInteractionMode(params.mode ?? params.permissions);
+    if ((params.mode !== undefined || params.permissions !== undefined) && !requestedMode) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.INVALID_PARAMS,
+        "mode/permissions 必须是 default、plan、auto 或 yolo",
+      );
+    }
+    if (
+      params.mode !== undefined &&
+      params.permissions !== undefined &&
+      normalizeInteractionMode(params.mode) !== normalizeInteractionMode(params.permissions)
+    ) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.INVALID_PARAMS,
+        "permissions 是 mode 的别名，二者不能指定不同值",
+      );
+    }
+
+    const canonical = await this.requireIdleTrustedSession(
+      params.workspacePath,
+      params.sessionId,
+      "修改会话设置",
+    );
+    const settings = await this.withSession(canonical, params.sessionId, async (session) => {
+      const current = await this.getSessionSettings(canonical, session);
+      const router = await this.getSessionModelRouter(canonical, current);
+      const selectedRoute = resolveRequestedModelRoute(router, params.modelRouteId);
+      if (params.thinkingEffort !== undefined) {
+        validateRequestedThinkingEffort(
+          selectedRoute ?? resolveCurrentModelRoute(router, current),
+          params.thinkingEffort,
+        );
+      }
+
+      if (selectedRoute) migrateSessionModelRoute(current, selectedRoute);
+      if (requestedMode) {
+        const result = setSessionMode(current, requestedMode);
+        if (!result.ok) throw invalidSessionSetting(result.message);
+      }
+      if (params.thinkingEffort !== undefined) {
+        const result = setSessionThinkingEffort(current, params.thinkingEffort, router);
+        if (!result.ok) throw invalidSessionSetting(result.message);
+      }
+      await session.flushPersistence();
+      return runtimeSessionSettings(current, router);
+    });
+    this.publish(
+      createRuntimeEvent({
+        topic: "session.settingsUpdated",
+        scope: { workspacePath: canonical, sessionId: params.sessionId },
+        resourceVersion: this.nextResourceVersion(),
+        at: this.now(),
+        payload: { sessionId: params.sessionId, settings },
+      }),
+    );
+    return { settings };
+  }
+
+  private async getGoal(workspacePath: string, sessionId: string): Promise<JsonValue> {
+    const canonical = await this.requireTrustedSession(workspacePath, sessionId);
+    return this.withSession(canonical, sessionId, async (session) => {
+      const hydration = await session.readHydrationSnapshot();
+      return { goal: hydration.runtime.goal ? toJsonValue(hydration.runtime.goal) : null };
+    });
+  }
+
+  private async compactSession(workspacePath: string, sessionId: string): Promise<JsonValue> {
+    const canonical = await this.requireIdleTrustedSession(workspacePath, sessionId, "压缩");
+    const result = await this.withSession(canonical, sessionId, async (session) => {
+      const settings = await this.getSessionSettings(canonical, session);
+      const config = await loadPicoConfig(canonical);
+      const router = await loadModelRouter({
+        config,
+        env: this.env,
+        legacyProvider: settings.provider,
+        legacyModel: settings.model,
+        legacyModelExplicit: true,
+      });
+      const active = router.providerConfig(settings.modelRouteId ?? config.model);
+      const rawProvider = this.providerFactory(active.provider, active.config);
+      const ledger = new RuntimeStore({ workDir: canonical, now: this.now });
+      try {
+        ensureSessionUsageBaseline(ledger, session);
+        const provider = new CostTracker(
+          rawProvider,
+          {
+            provider: active.provider,
+            model: active.config.model,
+            baseUrl: active.config.baseURL,
+          },
+          session,
+          {
+            ledger,
+            context: {
+              purpose: "compaction",
+              sessionId: session.id,
+              conversationId: session.conversationId,
+            },
+          },
+        );
+        const beforeMessageCount = session.length;
+        const historyTokens = estimateMessagesTokens(session.getHistory());
+        const profile = resolveProviderProfile(active.provider, active.config.model);
+        const budget = createContextBudget(profile);
+        const compacted = await new FullCompactor({ provider }).compact(session, {
+          inputBudgetTokens: budget.inputBudgetTokens,
+          targetRetainedTokens: Math.max(
+            1,
+            Math.min(Math.floor(budget.inputBudgetTokens * 0.5), Math.floor(historyTokens * 0.5)),
+          ),
+          trigger: "manual",
+        });
+        if (!compacted) {
+          throw new RuntimeProtocolError(
+            RUNTIME_ERROR_CODES.CONFLICT,
+            "当前会话没有可安全压缩的历史边界，或摘要模型未返回有效结果",
+          );
+        }
+        await session.flushPersistence();
+        return { beforeMessageCount, afterMessageCount: session.length };
+      } finally {
+        ledger.close();
+      }
+    });
+    const session = await this.requireSession(canonical, sessionId);
+    this.publishSession(session);
+    this.publishTranscriptUpdate(canonical, sessionId, "truncate");
+    return { session, compacted: true, ...result };
+  }
+
+  private async sendSession(params: {
+    readonly workspacePath: string;
+    readonly sessionId?: string;
+    readonly input: RuntimeUserInput;
+    readonly behavior?: "auto" | "steer" | "queue" | "replace";
+    readonly expectedRunId?: string;
+    readonly idempotencyKey: string;
+  }): Promise<JsonValue> {
+    const canonical = await canonicalizeWorkspacePath(params.workspacePath);
+    const input = normalizeRuntimeUserInput(params.input);
+    const idempotencyKey = requireText(params.idempotencyKey, "idempotencyKey");
+    const stored = await this.conversationStateStore.getIdempotent(canonical, idempotencyKey);
+    if (stored) return stored;
+
+    const pendingKey = `${canonical}\0${idempotencyKey}`;
+    const pending = this.pendingSends.get(pendingKey);
+    if (pending) return pending;
+    const operation = this.sendSessionOnce({ ...params, workspacePath: canonical, input })
+      .then(async (result) => {
+        await this.conversationStateStore.rememberIdempotent(canonical, idempotencyKey, result);
+        return result;
+      })
+      .finally(() => this.pendingSends.delete(pendingKey));
+    this.pendingSends.set(pendingKey, operation);
+    return operation;
+  }
+
+  private async sendSessionOnce(params: {
+    readonly workspacePath: string;
+    readonly sessionId?: string;
+    readonly input: RuntimeUserInput;
+    readonly behavior?: "auto" | "steer" | "queue" | "replace";
+    readonly expectedRunId?: string;
+    readonly idempotencyKey: string;
+  }): Promise<JsonObject> {
+    const behavior = params.behavior ?? "auto";
+    // Resolve a first-message activation before creating durable session metadata. Invalid
+    // catalog selections must not leave behind an empty session.
+    const initialResolution = params.sessionId
+      ? undefined
+      : await this.resolveRuntimeUserInput(params.workspacePath, params.input);
+    if (!params.sessionId) {
+      const activeWorkspaceRun = await this.findActiveWorkspaceRun(params.workspacePath);
+      if (activeWorkspaceRun) {
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.CONFLICT,
+          `当前工作区已有活动 Run ${String(activeWorkspaceRun["runId"])}，未创建空 Session`,
+        );
+      }
+    }
+    const session = params.sessionId
+      ? await this.requireSession(params.workspacePath, params.sessionId)
+      : await this.createSessionForMessage(params.workspacePath, runtimeInputTitle(params.input));
+    const sessionRecord = requireJsonRecord(session, "session");
+    const sessionId = requireText(sessionRecord["sessionId"], "session.sessionId");
+    const activeRun = await this.findActiveSessionRun(params.workspacePath, sessionId);
+
+    if (params.expectedRunId !== undefined && activeRun?.["runId"] !== params.expectedRunId) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.CONFLICT,
+        `当前活动 Run 已变化，期望 ${params.expectedRunId}，实际 ${String(activeRun?.["runId"] ?? "none")}`,
+      );
+    }
+
+    if (activeRun) {
+      const runId = requireText(activeRun["runId"], "run.runId");
+      const activation = params.input.kind === "agent" || params.input.kind === "skill";
+      if (activation && behavior === "steer") {
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.CONFLICT,
+          "Agent/Skill 激活必须在新 Run 中应用；请选择 Queue 或 Replace",
+        );
+      }
+      if (activation) await this.resolveRuntimeUserInput(params.workspacePath, params.input);
+      if (behavior === "queue" || behavior === "replace" || activation) {
+        await this.conversationStateStore.enqueue(params.workspacePath, sessionId, params.input);
+        const run =
+          behavior === "replace"
+            ? await this.options.runtimeService.handle(
+                createRuntimeRequest("run.cancel", {
+                  workspacePath: params.workspacePath,
+                  runId,
+                  reason: "replaced by a newer user message",
+                }),
+              )
+            : activeRun;
+        return {
+          session: sessionRecord,
+          run: requireJsonRecord(run, "run"),
+          disposition: behavior === "replace" ? "replaced" : "queued",
+        };
+      }
+      if (params.input.kind !== undefined && params.input.kind !== "text") {
+        throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.INVALID_PARAMS, "无法 Steer 非文本输入");
+      }
+      const run = await this.options.runtimeService.handle(
+        createRuntimeRequest("run.steer", {
+          workspacePath: params.workspacePath,
+          runId,
+          message: params.input.text,
+        }),
+      );
+      return {
+        session: sessionRecord,
+        run: requireJsonRecord(run, "run"),
+        disposition: "steered",
+      };
+    }
+
+    if (behavior === "steer" && params.expectedRunId !== undefined) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.CONFLICT,
+        "目标 Run 已结束，无法继续 Steer；请作为下一轮发送",
+      );
+    }
+    const run = await this.startSessionRun(
+      params.workspacePath,
+      sessionId,
+      params.input,
+      initialResolution,
+      params.idempotencyKey,
+    );
+    return { session: sessionRecord, run, disposition: "started" };
+  }
+
+  private async cancelRun(
+    workspacePath: string,
+    runId: string,
+    reason?: string,
+  ): Promise<JsonValue> {
+    const result = requireJsonRecord(
+      await this.options.runtimeService.handle(
+        createRuntimeRequest("run.cancel", {
+          workspacePath,
+          runId,
+          ...(reason ? { reason } : {}),
+        }),
+      ),
+      "run.cancel result",
+    );
+    const sessionId = typeof result["sessionId"] === "string" ? result["sessionId"] : undefined;
+    if (sessionId) {
+      const canonical = await canonicalizeWorkspacePath(workspacePath);
+      await this.conversationStateStore.clearQueued(canonical, sessionId);
+    }
+    return result;
+  }
+
+  private async getSessionTranscript(params: {
+    readonly workspacePath: string;
+    readonly sessionId: string;
+    readonly before?: string;
+    readonly limit?: number;
+    readonly expectedRevision?: string;
+  }): Promise<JsonValue> {
+    const canonical = await canonicalizeWorkspacePath(params.workspacePath);
+    await this.transcriptPersistenceTail;
+    const session = await this.requireSession(canonical, params.sessionId);
+    const runtimeSession = await globalSessionManager.getOrCreate(params.sessionId, canonical, {
+      persistence: true,
+    });
+    const snapshot = await runtimeSession.readHydrationSnapshot();
+    const activeRun = await this.findActiveSessionRun(canonical, params.sessionId);
+    const queuedInputs = (
+      await this.conversationStateStore.listQueued(canonical, params.sessionId)
+    ).map((input) => ({
+      queueId: input.queueId,
+      sessionId: input.sessionId,
+      input: input.input,
+      createdAt: input.createdAt,
+    }));
+    const fixedBytes = Buffer.byteLength(
+      JSON.stringify({ session, ...(activeRun ? { activeRun } : {}), queuedInputs }),
+      "utf8",
+    );
+    const transcriptBudget = MAX_RUNTIME_FRAME_BYTES - fixedBytes - 1024;
+    if (transcriptBudget < 1024) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.FRAME_TOO_LARGE,
+        "会话队列元数据已超过单帧预算，请先处理排队输入",
+      );
+    }
+    let page;
+    try {
+      page = projectRuntimeTranscript(snapshot, { ...params, maxBytes: transcriptBudget });
+    } catch (error) {
+      if (error instanceof TranscriptRevisionConflict) {
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.CONFLICT,
+          `会话历史已变化，请重新加载（current=${error.currentRevision}）`,
+        );
+      }
+      throw error;
+    }
+    const result = {
+      session,
+      items: page.items,
+      ...(activeRun ? { activeRun } : {}),
+      queuedInputs,
+      ...(page.nextBefore ? { nextBefore: page.nextBefore } : {}),
+      revision: page.revision,
+    };
+    if (Buffer.byteLength(JSON.stringify(result), "utf8") > MAX_RUNTIME_FRAME_BYTES) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.FRAME_TOO_LARGE,
+        "会话 Transcript 无法安全装入单个 IPC 帧",
+      );
+    }
+    return result;
+  }
+
+  private async createSessionForMessage(
+    workspacePath: string,
+    message: string,
+  ): Promise<JsonValue> {
+    const title = message.replace(/\s+/gu, " ").trim().slice(0, 80);
+    const created = requireJsonRecord(
+      await this.createSession(workspacePath, title),
+      "session.create result",
+    );
+    return requireJsonRecord(created["session"], "session.create session");
+  }
+
+  private async findActiveSessionRun(
+    workspacePath: string,
+    sessionId: string,
+  ): Promise<JsonObject | undefined> {
+    const value = requireJsonRecord(
+      await this.options.runtimeService.handle(
+        createRuntimeRequest("runs.list", { workspacePath, sessionId }),
+      ),
+      "runs.list result",
+    );
+    const runs = Array.isArray(value["runs"]) ? value["runs"] : [];
+    return runs
+      .filter(isJsonRecord)
+      .find((run) => !isTerminalRunStatus(String(run["status"] ?? "")));
+  }
+
+  private async findActiveWorkspaceRun(workspacePath: string): Promise<JsonObject | undefined> {
+    const value = requireJsonRecord(
+      await this.options.runtimeService.handle(
+        createRuntimeRequest("runs.list", { workspacePath }),
+      ),
+      "runs.list result",
+    );
+    const runs = Array.isArray(value["runs"]) ? value["runs"] : [];
+    return runs
+      .filter(isJsonRecord)
+      .find((run) => !isTerminalRunStatus(String(run["status"] ?? "")));
+  }
+
+  private async startSessionRun(
+    workspacePath: string,
+    sessionId: string,
+    input: RuntimeUserInput,
+    resolvedInput?: ResolvedRuntimeUserInput,
+    inputIdempotencyKey?: string,
+  ): Promise<JsonObject> {
+    try {
+      const resolved = resolvedInput ?? (await this.resolveRuntimeUserInput(workspacePath, input));
+      await this.commitSessionInputOnce(
+        workspacePath,
+        sessionId,
+        resolved.prompt,
+        runtimeInputDisplay(input),
+        inputIdempotencyKey ?? `run:${createHash("sha256").update(resolved.prompt).digest("hex")}`,
+      );
+      return requireJsonRecord(
+        await this.options.runtimeService.startForegroundRun({
+          workspacePath,
+          sessionId,
+          prompt: resolved.prompt,
+          execution: { ...(resolved.execution ?? {}), resumeExistingSession: true },
+        }),
+        "run.start result",
+      );
+    } catch (error) {
+      if (error instanceof RuntimeProtocolError) throw error;
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.CONFLICT,
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  }
+
+  private async commitSessionInputOnce(
+    workspacePath: string,
+    sessionId: string,
+    prompt: string,
+    displayText: string,
+    idempotencyKey: string,
+  ): Promise<void> {
+    const digest = createHash("sha256")
+      .update(`${workspacePath}\0${sessionId}\0${idempotencyKey}`)
+      .digest("hex");
+    const messageId = `desktop-input:${digest}`;
+    await this.withSession(workspacePath, sessionId, async (session) => {
+      if (
+        session
+          .getHistory()
+          .some(
+            (message) =>
+              message.role === "user" && message.providerData?.["picoDesktopInputId"] === messageId,
+          )
+      ) {
+        return;
+      }
+      if (!session.fileHistory.snapshots.some((snapshot) => snapshot.messageId === messageId)) {
+        await session.beginRewindPoint({ userPrompt: displayText, messageId });
+      }
+      const receipt = await session.commitMessageOnce(`user-message:${messageId}`, {
+        role: "user",
+        content: prompt,
+        providerData: {
+          picoKind: "desktop_user_input",
+          picoDesktopInputId: messageId,
+          displayText,
+        },
+      });
+      await session.bindRewindPointSource(messageId, receipt);
+      await session.flushPersistence();
+    });
+    this.publishTranscriptUpdate(workspacePath, sessionId, "reload");
+  }
+
+  private async consumeNextQueued(workspacePath: string, sessionId: string): Promise<void> {
+    const [next] = await this.conversationStateStore.listQueued(workspacePath, sessionId);
+    if (!next) return;
+    if (await this.findActiveSessionRun(workspacePath, sessionId)) return;
+    await this.startSessionRun(workspacePath, sessionId, next.input, undefined, next.queueId);
+    await this.conversationStateStore.removeQueued(next.queueId);
+  }
+
+  private async persistRuntimeEvent(event: RuntimeEvent): Promise<void> {
+    if (isRunBoundaryTopic(event.topic)) {
+      await this.persistRunBoundary(event);
+      return;
+    }
+    switch (event.topic) {
+      case "run.timeline":
+        await this.persistTimelineEvent(event);
+        return;
+      case "approval.requested":
+        await this.persistApprovalRequested(event);
+        return;
+      case "approval.resolved":
+        await this.persistApprovalResolved(event);
+        return;
+      case "prompt.requested":
+        await this.persistPromptRequested(event);
+        return;
+      case "prompt.resolved":
+        await this.persistPromptResolved(event);
+        return;
+      case "changes.updated":
+      case "changes.applied":
+        await this.persistChangesEvent(event);
+        return;
+    }
+  }
+
+  private async persistRunBoundary(event: RuntimeEvent): Promise<void> {
+    const sessionId = event.scope.sessionId;
+    const runId = event.scope.runId;
+    if (!sessionId || !runId) return;
+    const payload = isJsonRecord(event.payload) ? event.payload : undefined;
+    const run = payload && isJsonRecord(payload["run"]) ? payload["run"] : undefined;
+    if (
+      !run ||
+      run["runId"] !== runId ||
+      run["sessionId"] !== sessionId ||
+      !isRuntimeRunStatus(run["status"]) ||
+      typeof run["startedAt"] !== "number" ||
+      !Number.isFinite(run["startedAt"]) ||
+      !Number.isSafeInteger(run["version"])
+    ) {
+      return;
+    }
+    await this.persistTranscriptEntry({
+      workspacePath: event.scope.workspacePath,
+      sessionId,
+      sourceEventId: event.eventId,
+      entryId: `run:${runId}:${run["version"]}:${event.topic}`,
+      createdAt: event.at,
+      entry: {
+        kind: "run-boundary",
+        runId,
+        status: run["status"],
+        startedAt: run["startedAt"],
+        ...(typeof run["finishedAt"] === "number" ? { finishedAt: run["finishedAt"] } : {}),
+      },
+    });
+  }
+
+  private async persistTimelineEvent(event: RuntimeEvent): Promise<void> {
+    const sessionId = event.scope.sessionId;
+    const runId = event.scope.runId;
+    const payload = isJsonRecord(event.payload) ? event.payload : undefined;
+    const item = payload && isJsonRecord(payload["item"]) ? payload["item"] : undefined;
+    const eventType = item && typeof item["eventType"] === "string" ? item["eventType"] : undefined;
+    const data = item && isJsonRecord(item["data"]) ? item["data"] : undefined;
+    if (!sessionId || !runId || !eventType || !data) return;
+
+    if (eventType === "tool.started") {
+      const name = optionalNonEmptyText(data["toolName"]);
+      const args = typeof data["args"] === "string" ? data["args"] : "";
+      if (!name) return;
+      if (isPlanTimelineTool(name)) {
+        const detail = safePlanDetail(args);
+        await this.persistTranscriptEntry({
+          workspacePath: event.scope.workspacePath,
+          sessionId,
+          sourceEventId: event.eventId,
+          entryId: runtimeTranscriptId("plan", runId, event.eventId),
+          createdAt: event.at,
+          entry: {
+            kind: "plan",
+            title: planTimelineTitle(name),
+            ...(detail ? { detail } : {}),
+            state: "active",
+          },
+        });
+        return;
+      }
+      const providerCallId = optionalNonEmptyText(data["providerCallId"]);
+      await this.persistTranscriptEvent({
+        workspacePath: event.scope.workspacePath,
+        sessionId,
+        sourceEventId: event.eventId,
+        create: (_snapshot, sequence, eventId) => ({
+          eventId,
+          sequence,
+          createdAt: event.at,
+          type: "tool.started",
+          entryId: runtimeTranscriptId("tool-entry", runId, event.eventId),
+          toolCallId: runtimeTranscriptId("tool-call", runId, event.eventId),
+          ...(providerCallId ? { providerCallId } : {}),
+          name,
+          args,
+        }),
+      });
+      return;
+    }
+
+    if (eventType === "tool.completed") {
+      const name = optionalNonEmptyText(data["toolName"]);
+      if (!name || isPlanTimelineTool(name)) return;
+      const providerCallId = optionalNonEmptyText(data["providerCallId"]);
+      const isError = data["isError"] === true;
+      const size = safeToolResultBytes(data);
+      const truncated = data["truncated"] === true;
+      await this.persistTranscriptEvent({
+        workspacePath: event.scope.workspacePath,
+        sessionId,
+        sourceEventId: event.eventId,
+        create: (snapshot, sequence, eventId) => {
+          const toolCallId = findPendingRuntimeTool(snapshot, name, providerCallId);
+          if (!toolCallId) return undefined;
+          return {
+            eventId,
+            sequence,
+            createdAt: event.at,
+            type: "tool.completed",
+            toolCallId,
+            status: isError ? "error" : "success",
+            summary: `${isError ? "Tool failed" : "Tool completed"} · ${size} bytes${truncated ? " · truncated" : ""}`,
+            size,
+            truncated,
+          };
+        },
+      });
+      return;
+    }
+
+    // Raw stdout/stderr and ToolResult text are deliberately absent from the durable
+    // renderer projection. tool.completed above records only a bounded status summary.
+    if (eventType === "tool.output") return;
+
+    if (eventType === "subagent.activity") {
+      const activity = runtimeSubagentActivity(data);
+      if (!activity) return;
+      await this.persistTranscriptEvent({
+        workspacePath: event.scope.workspacePath,
+        sessionId,
+        sourceEventId: event.eventId,
+        create: (_snapshot, sequence, eventId) => ({
+          eventId,
+          sequence,
+          createdAt: event.at,
+          type: "subagent.activity.updated",
+          entryId: runtimeTranscriptId("subagent", runId, activity.activityId),
+          activityId: activity.activityId,
+          activity: activity.activity,
+        }),
+      });
+      return;
+    }
+
+    if (eventType === "subagent.trace") {
+      const trace = runtimeSubagentTrace(data);
+      if (!trace) return;
+      await this.persistTranscriptEvent({
+        workspacePath: event.scope.workspacePath,
+        sessionId,
+        sourceEventId: event.eventId,
+        create: (_snapshot, sequence, eventId) => ({
+          eventId,
+          sequence,
+          createdAt: event.at,
+          type: "subagent.trace.recorded",
+          trace,
+        }),
+      });
+      return;
+    }
+
+    if (eventType === "subagent.claimed") {
+      const activityIds = Array.isArray(data["activityIds"])
+        ? data["activityIds"].filter(
+            (value): value is string => typeof value === "string" && value.length > 0,
+          )
+        : [];
+      for (const [index, activityId] of activityIds.entries()) {
+        await this.persistTranscriptEvent({
+          workspacePath: event.scope.workspacePath,
+          sessionId,
+          sourceEventId: `${event.eventId}:${index}`,
+          create: (_snapshot, sequence, eventId) => ({
+            eventId,
+            sequence,
+            createdAt: event.at,
+            type: "subagent.activity.claimed",
+            activityId,
+          }),
+        });
+      }
+    }
+  }
+
+  private async persistApprovalRequested(event: RuntimeEvent): Promise<void> {
+    const sessionId = event.scope.sessionId;
+    const payload = isJsonRecord(event.payload) ? event.payload : undefined;
+    const approvalId = payload && optionalNonEmptyText(payload["approvalId"]);
+    const request = payload && isJsonRecord(payload["request"]) ? payload["request"] : undefined;
+    if (!sessionId || !approvalId || !request) return;
+    const title = optionalNonEmptyText(request["title"]) ?? "Approval required";
+    const detail = optionalNonEmptyText(request["detail"]);
+    await this.persistTranscriptEntry({
+      workspacePath: event.scope.workspacePath,
+      sessionId,
+      sourceEventId: event.eventId,
+      entryId: runtimeTranscriptId("approval-requested", approvalId, event.eventId),
+      createdAt: event.at,
+      entry: {
+        kind: "approval",
+        title,
+        ...(detail ? { detail } : {}),
+        state: "waiting",
+        data: compactInteractionData({
+          approvalId,
+          runId: event.scope.runId,
+          toolName: request["toolName"],
+          command: request["command"],
+          risk: request["risk"],
+        }),
+      },
+    });
+  }
+
+  private async persistApprovalResolved(event: RuntimeEvent): Promise<void> {
+    const sessionId = event.scope.sessionId;
+    const payload = isJsonRecord(event.payload) ? event.payload : undefined;
+    const approvalId = payload && optionalNonEmptyText(payload["approvalId"]);
+    const decision = payload && optionalNonEmptyText(payload["decision"]);
+    if (!sessionId || !approvalId || !decision) return;
+    await this.persistTranscriptEntry({
+      workspacePath: event.scope.workspacePath,
+      sessionId,
+      sourceEventId: event.eventId,
+      entryId: runtimeTranscriptId("approval-resolved", approvalId, event.eventId),
+      createdAt: event.at,
+      entry: {
+        kind: "approval",
+        title: decision === "deny" ? "Approval denied" : "Approval granted",
+        state: decision,
+        data: compactInteractionData({ approvalId, runId: event.scope.runId, decision }),
+      },
+    });
+  }
+
+  private async persistPromptRequested(event: RuntimeEvent): Promise<void> {
+    const sessionId = event.scope.sessionId;
+    const payload = isJsonRecord(event.payload) ? event.payload : undefined;
+    const promptId = payload && optionalNonEmptyText(payload["promptId"]);
+    const prompt = payload && isJsonRecord(payload["prompt"]) ? payload["prompt"] : undefined;
+    if (!sessionId || !promptId || !prompt) return;
+    const question = optionalNonEmptyText(prompt["question"]) ?? "Pico needs your input";
+    await this.persistTranscriptEntry({
+      workspacePath: event.scope.workspacePath,
+      sessionId,
+      sourceEventId: event.eventId,
+      entryId: runtimeTranscriptId("prompt-requested", promptId, event.eventId),
+      createdAt: event.at,
+      entry: {
+        kind: "prompt",
+        title: optionalNonEmptyText(prompt["header"]) ?? question,
+        ...(optionalNonEmptyText(prompt["header"]) ? { detail: question } : {}),
+        state: "waiting",
+        data: compactInteractionData({
+          promptId,
+          runId: event.scope.runId,
+          options: prompt["options"],
+        }),
+      },
+    });
+  }
+
+  private async persistPromptResolved(event: RuntimeEvent): Promise<void> {
+    const sessionId = event.scope.sessionId;
+    const payload = isJsonRecord(event.payload) ? event.payload : undefined;
+    const promptId = payload && optionalNonEmptyText(payload["promptId"]);
+    if (!sessionId || !promptId) return;
+    await this.persistTranscriptEntry({
+      workspacePath: event.scope.workspacePath,
+      sessionId,
+      sourceEventId: event.eventId,
+      entryId: runtimeTranscriptId("prompt-resolved", promptId, event.eventId),
+      createdAt: event.at,
+      entry: {
+        kind: "prompt",
+        title: "Question answered",
+        state: "resolved",
+        data: compactInteractionData({ promptId, runId: event.scope.runId }),
+      },
+    });
+  }
+
+  private async persistChangesEvent(event: RuntimeEvent): Promise<void> {
+    const sessionId = event.scope.sessionId;
+    const payload = isJsonRecord(event.payload) ? event.payload : undefined;
+    const runId = (payload && optionalNonEmptyText(payload["runId"])) ?? event.scope.runId;
+    const fingerprint = payload && optionalNonEmptyText(payload["fingerprint"]);
+    if (!sessionId || !runId || !fingerprint) return;
+    const applied = event.topic === "changes.applied";
+    await this.persistTranscriptEntry({
+      workspacePath: event.scope.workspacePath,
+      sessionId,
+      sourceEventId: event.eventId,
+      entryId: runtimeTranscriptId(
+        applied ? "changes-applied" : "changes-updated",
+        runId,
+        event.eventId,
+      ),
+      createdAt: event.at,
+      entry: {
+        kind: "changes",
+        title: applied ? "Changes applied" : "Changes updated",
+        state: applied ? "applied" : "ready",
+        data: { runId, fingerprint },
+      },
+    });
+  }
+
+  private async persistTranscriptEntry(input: {
+    readonly workspacePath: string;
+    readonly sessionId: string;
+    readonly sourceEventId: string;
+    readonly entryId: string;
+    readonly createdAt: number;
+    readonly entry: TranscriptEntry;
+  }): Promise<void> {
+    await this.persistTranscriptEvent({
+      ...input,
+      create: (snapshot, sequence, eventId) => {
+        if (
+          snapshot.transcriptEvents.some(
+            (event) => event.type === "entry.appended" && event.entryId === input.entryId,
+          )
+        ) {
+          return undefined;
+        }
+        return {
+          eventId,
+          sequence,
+          createdAt: input.createdAt,
+          type: "entry.appended",
+          entryId: input.entryId,
+          entry: input.entry,
+        };
+      },
+    });
+  }
+
+  private async persistTranscriptEvent(input: {
+    readonly workspacePath: string;
+    readonly sessionId: string;
+    readonly sourceEventId: string;
+    readonly create: (
+      snapshot: SessionHydrationSnapshot,
+      sequence: number,
+      eventId: string,
+    ) => TranscriptEvent | undefined;
+  }): Promise<void> {
+    const persisted = await this.withSession(
+      input.workspacePath,
+      input.sessionId,
+      async (session) => {
+        const snapshot = await session.readHydrationSnapshot();
+        const eventId = `runtime:${input.sourceEventId}`;
+        if (snapshot.transcriptEvents.some((event) => event.eventId === eventId)) return false;
+        const sequence = (snapshot.transcriptEvents.at(-1)?.sequence ?? 0) + 1;
+        const event = input.create(snapshot, sequence, eventId);
+        if (!event) return false;
+        // Validate the full append-only projection before committing bytes to the Session journal.
+        // A malformed or out-of-order runtime event therefore fails closed.
+        projectTranscriptEvents([...snapshot.transcriptEvents, event]);
+        await session.recordTranscriptEvent(event, {
+          journalEventId: `transcript:${input.sourceEventId}`,
+        });
+        return true;
+      },
+    );
+    if (persisted) this.publishTranscriptUpdate(input.workspacePath, input.sessionId, "reload");
+  }
+
+  private async resolveRuntimeUserInput(
+    workspacePath: string,
+    input: RuntimeUserInput,
+  ): Promise<ResolvedRuntimeUserInput> {
+    if (input.kind === undefined || input.kind === "text") return { prompt: input.text };
+    const canonical = await this.requireTrustedWorkspace(workspacePath);
+    const config = await loadPicoConfig(canonical);
+    const compatibility = config.compatibility.claude;
+    if (input.kind === "agent") {
+      const profiles = await loadAgentCatalog({
+        workDir: canonical,
+        includeBuiltins: true,
+        includeClaudeProjectResources: compatibility.enabled && compatibility.projectResources,
+        includeClaudeUserResources: compatibility.enabled && compatibility.userResources,
+        env: this.env,
+      });
+      const profile = findAgentProfile(profiles, input.name);
+      if (!profile) {
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.NOT_FOUND,
+          `未找到 Agent: ${input.name}。可用 Agents: ${profiles.map((item) => item.name).join(", ") || "none"}`,
+        );
+      }
+      return {
+        prompt: renderAgentDispatchPrompt(profile, input.task),
+        execution: { allowedTools: ["delegate_task"] },
+      };
+    }
+    const skillName = requireText(input["name"], "input.name");
+    const skillArgs = typeof input["args"] === "string" ? input["args"] : "";
+    const loader = new SkillLoader(canonical, {
+      includeUserResources: true,
+      includeClaudeProjectResources: compatibility.enabled && compatibility.projectResources,
+      includeClaudeUserResources: compatibility.enabled && compatibility.userResources,
+      env: this.env,
+    });
+    const skill = await loader.view(skillName);
+    if (!skill) {
+      const available = (await loader.listSummaries()).map((item) => item.name).join(", ");
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.NOT_FOUND,
+        `未找到 Skill: ${skillName}。可用 Skills: ${available || "none"}`,
+      );
+    }
+    const activation = renderSkillActivation({
+      name: skill.name,
+      args: skillArgs,
+      body: skill.body,
+      sourcePath: skill.sourcePath,
+      trigger: "user-slash",
+    });
+    const execution: DaemonRunExecution = {
+      ...(skill.model ? { requestedModel: skill.model } : {}),
+      ...(skill.allowedTools ? { allowedTools: skill.allowedTools } : {}),
+      ...(skill.sourcePath && skill.hooks !== undefined
+        ? {
+            skillActivation: {
+              name: skill.name,
+              sourcePath: skill.sourcePath,
+              hooks: skill.hooks,
+            },
+          }
+        : {}),
+    };
+    return {
+      prompt: activation.prompt,
+      ...(Object.keys(execution).length > 0 ? { execution } : {}),
+    };
+  }
+
+  private publishConversationFailure(workspacePath: string, error: unknown): void {
+    this.publish(
+      createRuntimeEvent({
+        topic: "runtime.error",
+        scope: { workspacePath },
+        resourceVersion: this.nextResourceVersion(),
+        at: this.now(),
+        payload: {
+          code: RUNTIME_ERROR_CODES.INTERNAL_ERROR,
+          message: error instanceof Error ? error.message : String(error),
+          recoverable: true,
+        },
+      }),
+    );
+  }
+
   private async requireSession(workspacePath: string, sessionId: string): Promise<JsonValue> {
     const summaries = await listCliSessionSummaries(workspacePath);
     const summary = summaries.find((candidate) => candidate.id === sessionId);
@@ -318,17 +1521,39 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     };
   }
 
-  private async listSkills(workspacePath: string): Promise<JsonValue> {
+  private async listAgents(workspacePath: string): Promise<JsonValue> {
     const canonical = await this.requireTrustedWorkspace(workspacePath);
-    const loader = new SkillLoader(canonical);
-    const summaries = await loader.listSummaries();
+    const config = await loadPicoConfig(canonical);
+    const compatibility = config.compatibility.claude;
+    const agents = await loadAgentCatalog({
+      workDir: canonical,
+      includeBuiltins: true,
+      includeClaudeProjectResources: compatibility.enabled && compatibility.projectResources,
+      includeClaudeUserResources: compatibility.enabled && compatibility.userResources,
+      env: this.env,
+    });
+    return { agents: toJsonValue(summarizeAgentProfiles(agents)) };
+  }
+
+  private async listSkills(
+    workspacePath: string,
+    includeUserResources: boolean,
+  ): Promise<JsonValue> {
+    const canonical = await this.requireTrustedWorkspace(workspacePath);
+    const loader = includeUserResources
+      ? await loadDesktopSkillLoader(canonical, this.env)
+      : new SkillLoader(canonical);
+    const skills = await loader.list();
     return {
-      skills: await Promise.all(
-        summaries.map(async (skill) => ({
-          ...skill,
-          sourcePath: await loader.viewSourcePath(skill.name),
+      skills: toJsonValue(
+        skills.map((skill) => ({
+          name: skill.name,
+          description: skill.description,
+          ...(skill.sourcePath ? { sourcePath: skill.sourcePath } : {}),
+          ...(skill.allowedTools ? { allowedTools: skill.allowedTools } : {}),
+          ...(skill.model ? { model: skill.model } : {}),
         })),
-      ).then(toJsonValue),
+      ),
     };
   }
 
@@ -649,6 +1874,62 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     return canonical;
   }
 
+  private async requireIdleTrustedSession(
+    workspacePath: string,
+    sessionId: string,
+    operation: string,
+  ): Promise<string> {
+    const canonical = await this.requireTrustedSession(workspacePath, sessionId);
+    const activeRun = await this.findActiveSessionRun(canonical, sessionId);
+    if (activeRun) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.CONFLICT,
+        `Session ${sessionId} 仍有活动 Run，不能${operation}`,
+      );
+    }
+    return canonical;
+  }
+
+  private async getSessionSettings(workspacePath: string, session: Session) {
+    const persisted = session.getRuntimeStateSnapshot().settings;
+    const defaults =
+      persisted ?? sessionSettingDefaults(await loadPicoConfig(workspacePath), this.env);
+    return getOrCreateSessionSettings(
+      {
+        sessionId: session.id,
+        cwd: workspacePath,
+        provider: defaults.provider,
+        model: defaults.model,
+        ...(defaults.modelRouteId ? { modelRouteId: defaults.modelRouteId } : {}),
+      },
+      { persistence: session },
+    );
+  }
+
+  private async getSessionModelRouter(
+    workspacePath: string,
+    settings: SessionSettings,
+  ): Promise<ModelRouter> {
+    const config = await loadPicoConfig(workspacePath);
+    return loadModelRouter({
+      // Settings reads must be local and deterministic. Explicit project models are the Desktop
+      // selection allowlist; provider discovery remains a separate config/providers concern.
+      config: {
+        ...config,
+        providers: Object.fromEntries(
+          Object.entries(config.providers).map(([id, provider]) => [
+            id,
+            { ...provider, discoverModels: false },
+          ]),
+        ),
+      },
+      env: this.env,
+      legacyProvider: settings.provider,
+      legacyModel: settings.model,
+      legacyModelExplicit: true,
+    });
+  }
+
   private async withSession<T>(
     workspacePath: string,
     sessionId: string,
@@ -780,6 +2061,22 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     );
   }
 
+  private publishTranscriptUpdate(
+    workspacePath: string,
+    sessionId: string,
+    operation: "reload" | "truncate",
+  ): void {
+    this.publish(
+      createRuntimeEvent({
+        topic: "session.transcriptUpdated",
+        scope: { workspacePath, sessionId },
+        resourceVersion: this.nextResourceVersion(),
+        at: this.now(),
+        payload: { sessionId, operation },
+      }),
+    );
+  }
+
   private publishJob(job: JsonValue): void {
     if (!isJsonRecord(job)) return;
     const workspacePath = job["workspacePath"];
@@ -821,6 +2118,100 @@ function sessionPayload(
     ...(summary.lastMessage ? { lastMessage: summary.lastMessage } : {}),
     ...(summary.forkFrom ? { forkFrom: summary.forkFrom } : {}),
   };
+}
+
+function runtimeSessionSettings(settings: SessionSettings, router: ModelRouter): JsonObject {
+  return {
+    sessionId: settings.sessionId,
+    provider: settings.provider,
+    model: settings.model,
+    ...(settings.modelRouteId ? { modelRouteId: settings.modelRouteId } : {}),
+    mode: settings.mode,
+    // Deliberately derived from mode: `/permissions` does not own persisted state.
+    permissions: settings.mode,
+    thinkingEffort: settings.thinkingEffort,
+    thinkingEffortExplicit: settings.thinkingEffortExplicit,
+    reasoningLevels: [...sessionReasoningCandidates(settings, router)],
+  };
+}
+
+function resolveRequestedModelRoute(
+  router: ModelRouter,
+  modelRouteId: string | undefined,
+): ModelRoute | undefined {
+  if (modelRouteId === undefined) return undefined;
+  const normalized = modelRouteId.trim();
+  const route = router.routes.find((candidate) => candidate.id === normalized);
+  if (!route) {
+    const available = router.routes.map((candidate) => candidate.id).join(", ") || "none";
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.INVALID_PARAMS,
+      `模型路由 ${normalized || "(empty)"} 不可用。可用模型: ${available}。`,
+    );
+  }
+  if (!route.baseURL.trim()) {
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.INVALID_PARAMS,
+      `模型路由 ${route.id} 缺少 baseURL`,
+    );
+  }
+  return route;
+}
+
+function resolveCurrentModelRoute(router: ModelRouter, settings: SessionSettings): ModelRoute {
+  const route = router.resolve(settings.modelRouteId) ?? router.resolve(settings.model);
+  if (route) return route;
+  throw new RuntimeProtocolError(
+    RUNTIME_ERROR_CODES.CONFLICT,
+    `当前模型路由 ${settings.modelRouteId ?? settings.model} 已不可用，请先选择有效模型`,
+  );
+}
+
+function validateRequestedThinkingEffort(route: ModelRoute, thinkingEffort: string): void {
+  const normalized = thinkingEffort.trim().toLowerCase();
+  if (!route.capabilities.reasoningProfile.levels.includes(normalized)) {
+    const levels = route.capabilities.reasoningProfile.levels.join(", ") || "none";
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.INVALID_PARAMS,
+      `模型路由 ${route.id} 不支持 thinking=${normalized || "(empty)"}；可选档位: ${levels}`,
+    );
+  }
+}
+
+function invalidSessionSetting(message: string): RuntimeProtocolError {
+  return new RuntimeProtocolError(RUNTIME_ERROR_CODES.INVALID_PARAMS, message);
+}
+
+function sessionSettingDefaults(
+  config: PicoConfig,
+  env: Readonly<Record<string, string | undefined>>,
+): { provider: ProviderKind; model: string; modelRouteId?: string } {
+  const routeId = config.model?.trim();
+  if (routeId) {
+    const separator = routeId.indexOf("/");
+    const providerId = separator > 0 ? routeId.slice(0, separator) : undefined;
+    const configured = providerId ? config.providers[providerId] : undefined;
+    if (configured) {
+      return {
+        provider: configured.protocol,
+        model: separator > 0 ? routeId.slice(separator + 1) : routeId,
+        modelRouteId: routeId,
+      };
+    }
+  }
+  const firstProvider = Object.entries(config.providers)[0];
+  if (firstProvider) {
+    const [providerId, provider] = firstProvider;
+    const model = provider.models[0] ?? env["LLM_MODEL"]?.trim();
+    if (model) {
+      return {
+        provider: provider.protocol,
+        model,
+        modelRouteId: `${providerId}/${model}`,
+      };
+    }
+  }
+  return { provider: "openai", model: env["LLM_MODEL"]?.trim() || "glm-5.2" };
 }
 
 function safeConfig(config: PicoConfig): JsonValue {
@@ -980,7 +2371,306 @@ function toJsonValue(value: unknown): JsonValue {
   return parsed;
 }
 
-function isJsonRecord(value: JsonValue): value is Record<string, JsonValue> {
+function requireJsonRecord(value: unknown, label: string): JsonObject {
+  if (!isJsonRecord(value)) {
+    throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.INTERNAL_ERROR, `${label} 必须是对象`);
+  }
+  return value;
+}
+
+function requireText(value: unknown, label: string): string {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.INVALID_PARAMS, `${label} 必须是非空字符串`);
+  }
+  return value.trim();
+}
+
+function normalizeRuntimeUserInput(value: RuntimeUserInput): RuntimeUserInput {
+  if (!isJsonRecord(value)) {
+    throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.INVALID_PARAMS, "input 必须是对象");
+  }
+  const kind = value["kind"];
+  if (kind === undefined || kind === "text") {
+    return {
+      ...(kind === "text" ? { kind } : {}),
+      text: requireText(value["text"], "input.text"),
+    };
+  }
+  if (kind === "skill") {
+    const args = value["args"];
+    if (args !== undefined && typeof args !== "string") {
+      throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.INVALID_PARAMS, "input.args 必须是字符串");
+    }
+    return {
+      kind,
+      name: requireText(value["name"], "input.name"),
+      ...(typeof args === "string" ? { args } : {}),
+    };
+  }
+  if (kind === "agent") {
+    return {
+      kind,
+      name: requireText(value["name"], "input.name"),
+      task: requireText(value["task"], "input.task"),
+    };
+  }
+  throw new RuntimeProtocolError(
+    RUNTIME_ERROR_CODES.INVALID_PARAMS,
+    `input.kind 不支持: ${String(kind)}`,
+  );
+}
+
+function runtimeInputTitle(input: RuntimeUserInput): string {
+  if (input.kind === "agent") return input.task;
+  if (input.kind === "skill") {
+    return [`/${input.name}`, input.args?.trim()].filter(Boolean).join(" ");
+  }
+  return input.text;
+}
+
+function runtimeInputDisplay(input: RuntimeUserInput): string {
+  if (input.kind === "agent") return [`@${input.name}`, input.task.trim()].join(" ");
+  if (input.kind === "skill") {
+    return [`/${input.name}`, input.args?.trim()].filter(Boolean).join(" ");
+  }
+  return input.text.trim();
+}
+
+function runtimeTranscriptId(prefix: string, ...parts: readonly string[]): string {
+  const digest = createHash("sha256").update(parts.join("\0")).digest("hex").slice(0, 24);
+  return `${prefix}:${digest}`;
+}
+
+function optionalNonEmptyText(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function compactInteractionData(
+  input: Readonly<Record<string, unknown>>,
+): Readonly<Record<string, unknown>> {
+  return Object.fromEntries(
+    Object.entries(input).filter((entry): entry is [string, JsonValue] => isJsonValue(entry[1])),
+  );
+}
+
+function isPlanTimelineTool(name: string): boolean {
+  return name === "todo" || name === "update_plan" || name === "exit_plan_mode";
+}
+
+function planTimelineTitle(name: string): string {
+  if (name === "exit_plan_mode") return "Plan ready for approval";
+  return name === "todo" ? "Plan updated" : "Plan";
+}
+
+function safePlanDetail(args: string): string | undefined {
+  if (!args.trim()) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(args);
+    if (isJsonRecord(parsed) && Array.isArray(parsed["plan"])) {
+      const lines = parsed["plan"].flatMap((value) => {
+        if (!isJsonRecord(value)) return [];
+        const step = optionalNonEmptyText(value["step"]);
+        if (!step) return [];
+        const status = optionalNonEmptyText(value["status"]);
+        return [`${status ? `[${status}] ` : ""}${step}`];
+      });
+      if (lines.length > 0) return lines.join("\n").slice(0, 16_000);
+    }
+    if (isJsonRecord(parsed)) {
+      const action = optionalNonEmptyText(parsed["action"]);
+      const content = optionalNonEmptyText(parsed["content"]);
+      if (action || content) return [action, content].filter(Boolean).join(": ").slice(0, 16_000);
+    }
+  } catch {
+    // Invalid model arguments are still useful as a bounded diagnostic summary.
+  }
+  return args.slice(0, 16_000);
+}
+
+function safeToolResultBytes(data: JsonObject): number {
+  const reported = data["resultBytes"];
+  if (typeof reported === "number" && Number.isSafeInteger(reported) && reported >= 0) {
+    return reported;
+  }
+  return typeof data["result"] === "string" ? Buffer.byteLength(data["result"], "utf8") : 0;
+}
+
+function findPendingRuntimeTool(
+  snapshot: SessionHydrationSnapshot,
+  name: string,
+  providerCallId: string | undefined,
+): string | undefined {
+  const projection = projectTranscriptEvents(snapshot.transcriptEvents);
+  return Object.values(projection.toolCalls)
+    .toReversed()
+    .find(
+      (tool) =>
+        tool.name === name &&
+        !isTerminalTranscriptToolStatus(tool.status) &&
+        (providerCallId === undefined || tool.providerCallId === providerCallId),
+    )?.id;
+}
+
+function isTerminalTranscriptToolStatus(status: string): boolean {
+  return (
+    status === "success" ||
+    status === "error" ||
+    status === "denied" ||
+    status === "done" ||
+    status === "failed"
+  );
+}
+
+function runtimeSubagentActivity(data: JsonObject):
+  | {
+      readonly activityId: string;
+      readonly activity: Omit<SubagentActivityEvent, "activityId">;
+    }
+  | undefined {
+  const activityId = optionalNonEmptyText(data["activityId"]);
+  const task = optionalNonEmptyText(data["task"]);
+  const status = data["status"];
+  if (!activityId || !task || !isSubagentActivityStatus(status)) return undefined;
+  const agentName = optionalNonEmptyText(data["agentName"]);
+  const currentAction = optionalNonEmptyText(data["currentAction"]);
+  const summary = optionalNonEmptyText(data["summary"]);
+  const requestedModelRoute = optionalNonEmptyText(data["requestedModelRoute"]);
+  const resolvedModelRoute = optionalNonEmptyText(data["resolvedModelRoute"]);
+  const thinkingEffort = optionalNonEmptyText(data["thinkingEffort"]);
+  const activity: Omit<SubagentActivityEvent, "activityId"> = {
+    task,
+    status,
+    ...(agentName ? { agentName } : {}),
+    ...(isOneOf(data["mode"], ["explore", "worker"]) ? { mode: data["mode"] } : {}),
+    ...(isOneOf(data["completionPolicy"], ["required", "optional", "detached"])
+      ? { completionPolicy: data["completionPolicy"] }
+      : {}),
+    ...(currentAction ? { currentAction } : {}),
+    ...(summary ? { summary } : {}),
+    ...(requestedModelRoute ? { requestedModelRoute } : {}),
+    ...(resolvedModelRoute ? { resolvedModelRoute } : {}),
+    ...(thinkingEffort ? { thinkingEffort } : {}),
+    ...(isOneOf(data["modelSelectionSource"], ["ephemeral", "profile", "parent"])
+      ? { modelSelectionSource: data["modelSelectionSource"] }
+      : {}),
+  };
+  return { activityId, activity };
+}
+
+function runtimeSubagentTrace(data: JsonObject): SubagentTraceEvent | undefined {
+  const activityId = optionalNonEmptyText(data["activityId"]);
+  const traceId = optionalNonEmptyText(data["traceId"]);
+  const type = data["type"];
+  if (!activityId || !traceId) return undefined;
+  if (type === "thinking") return { activityId, traceId, type };
+  if (type === "message" && typeof data["content"] === "string") {
+    return { activityId, traceId, type, content: data["content"].slice(0, 12_000) };
+  }
+  if (
+    type === "tool.started" &&
+    typeof data["name"] === "string" &&
+    typeof data["args"] === "string"
+  ) {
+    return {
+      activityId,
+      traceId,
+      type,
+      name: data["name"],
+      args: data["args"].slice(0, 8_000),
+    };
+  }
+  if (type === "tool.completed") {
+    const isError = data["isError"] === true;
+    const bytes = safeToolResultBytes(data);
+    return {
+      activityId,
+      traceId,
+      type,
+      result: `${isError ? "Tool failed" : "Tool completed"} · ${bytes} bytes`,
+      isError,
+      ...(data["truncated"] === true ? { truncated: true } : {}),
+    };
+  }
+  return undefined;
+}
+
+function isSubagentActivityStatus(value: unknown): value is SubagentActivityEvent["status"] {
+  return isOneOf(value, [
+    "queued",
+    "running",
+    "completed",
+    "partial",
+    "failed",
+    "timed_out",
+    "cancelled",
+  ]);
+}
+
+function isOneOf<const Values extends readonly unknown[]>(
+  value: unknown,
+  values: Values,
+): value is Values[number] {
+  return values.includes(value);
+}
+
+async function loadDesktopSkillLoader(
+  workspacePath: string,
+  env: Readonly<Record<string, string | undefined>>,
+): Promise<SkillLoader> {
+  const config = await loadPicoConfig(workspacePath);
+  const compatibility = config.compatibility.claude;
+  return new SkillLoader(workspacePath, {
+    includeUserResources: true,
+    includeClaudeProjectResources: compatibility.enabled && compatibility.projectResources,
+    includeClaudeUserResources: compatibility.enabled && compatibility.userResources,
+    env,
+  });
+}
+
+function isTerminalRunStatus(status: string): boolean {
+  return status === "cancelled" || status === "failed" || status === "succeeded";
+}
+
+function isPersistedConversationTopic(topic: string): boolean {
+  return (
+    isRunBoundaryTopic(topic) ||
+    topic === "run.timeline" ||
+    topic === "approval.requested" ||
+    topic === "approval.resolved" ||
+    topic === "prompt.requested" ||
+    topic === "prompt.resolved" ||
+    topic === "changes.updated" ||
+    topic === "changes.applied"
+  );
+}
+
+function isRunBoundaryTopic(topic: string): boolean {
+  return new Set([
+    "run.started",
+    "run.pause_requested",
+    "run.paused",
+    "run.resumed",
+    "run.cancel_requested",
+    "run.finished",
+  ]).has(topic);
+}
+
+function isRuntimeRunStatus(
+  value: unknown,
+): value is Extract<TranscriptEntry, { kind: "run-boundary" }>["status"] {
+  return new Set([
+    "queued",
+    "running",
+    "pause_requested",
+    "paused",
+    "cancelling",
+    "cancelled",
+    "failed",
+    "succeeded",
+  ]).has(String(value));
+}
+
+function isJsonRecord(value: unknown): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 

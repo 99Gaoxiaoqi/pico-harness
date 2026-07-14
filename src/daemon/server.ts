@@ -21,6 +21,7 @@ import {
 } from "./endpoint.js";
 import { createLocalIpcAuthTokenStore, type LocalIpcAuthTokenStore } from "./ipc-auth.js";
 import type { LocalRuntimeService, RuntimeEventCursor } from "./service.js";
+import { canonicalizeWorkspacePath } from "./workspace-registry.js";
 
 export interface LocalRuntimeDaemonOptions {
   endpoint: LocalDaemonEndpoint;
@@ -164,7 +165,18 @@ export class LocalRuntimeDaemon {
       }
       if (request.method === "events.subscribe") {
         const cursor = readCursor(request.params);
-        const dispose = this.options.service.subscribe((event) => this.writeEvent(socket, event));
+        const subscribedWorkspacePath = cursor.workspacePath
+          ? await canonicalizeWorkspacePath(cursor.workspacePath)
+          : undefined;
+        const dispose = this.options.service.subscribe((event) => {
+          if (
+            !subscribedWorkspacePath ||
+            event.scope.workspacePath === cursor.workspacePath ||
+            event.scope.workspacePath === subscribedWorkspacePath
+          ) {
+            this.writeEvent(socket, event);
+          }
+        });
         setSubscription(dispose);
         const events = await this.options.service.replayEvents(cursor);
         this.write(

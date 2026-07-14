@@ -52,7 +52,18 @@ describe("desktop runtime protocol contract", () => {
     expect(RUNTIME_METHODS).toEqual(
       expect.arrayContaining([
         "runtime.ping",
+        "workspace.init",
+        "diagnostics.run",
+        "diagnostics.resources",
         "session.list",
+        "session.rename",
+        "session.fork",
+        "session.compact",
+        "session.settings.get",
+        "session.settings.update",
+        "goal.get",
+        "session.send",
+        "session.transcript",
         "run.start",
         "run.pause",
         "run.resume",
@@ -66,6 +77,8 @@ describe("desktop runtime protocol contract", () => {
         "jobs.list",
         "jobs.create",
         "config.get",
+        "catalog.agents",
+        "catalog.skills",
         "usage.get",
         "workspace.register",
         "workspace.status",
@@ -133,6 +146,16 @@ describe("desktop runtime protocol contract", () => {
     type StartParams = RuntimeParams<"run.start">;
     type StartResult = RuntimeResult<"run.start">;
     type ApprovalPayload = RuntimeEventMap["approval.requested"];
+    type SessionSendParams = RuntimeParams<"session.send">;
+    type TranscriptResult = RuntimeResult<"session.transcript">;
+    type CompactResult = RuntimeResult<"session.compact">;
+    type SettingsUpdate = RuntimeParams<"session.settings.update">;
+    type SettingsResult = RuntimeResult<"session.settings.get">;
+    type GoalResult = RuntimeResult<"goal.get">;
+    type AgentCatalogResult = RuntimeResult<"catalog.agents">;
+    type WorkspaceInitResult = RuntimeResult<"workspace.init">;
+    type DiagnosticsResult = RuntimeResult<"diagnostics.run">;
+    type ResourceDiagnosticsResult = RuntimeResult<"diagnostics.resources">;
 
     expectTypeOf<StartParams>().toMatchTypeOf<{
       workspacePath: string;
@@ -140,6 +163,37 @@ describe("desktop runtime protocol contract", () => {
     }>();
     expectTypeOf<StartResult["runId"]>().toMatchTypeOf<string>();
     expectTypeOf<ApprovalPayload["request"]>().toMatchTypeOf<Record<string, unknown>>();
+    expectTypeOf<SessionSendParams["behavior"]>().toEqualTypeOf<
+      "auto" | "steer" | "queue" | "replace" | undefined
+    >();
+    expectTypeOf<TranscriptResult["revision"]>().toEqualTypeOf<string>();
+    expectTypeOf<CompactResult["compacted"]>().toEqualTypeOf<true>();
+    expectTypeOf<SettingsUpdate["permissions"]>().toEqualTypeOf<
+      "default" | "plan" | "auto" | "yolo" | undefined
+    >();
+    expectTypeOf<SettingsResult["settings"]["permissions"]>().toEqualTypeOf<
+      SettingsResult["settings"]["mode"]
+    >();
+    expectTypeOf<GoalResult["goal"]>().toMatchTypeOf<{
+      readonly activeGoalId: string | null;
+    } | null>();
+    expectTypeOf<SessionSendParams["input"]>().toMatchTypeOf<
+      | { kind?: "text"; text: string }
+      | { kind: "skill"; name: string; args?: string }
+      | { kind: "agent"; name: string; task: string }
+    >();
+    expectTypeOf<AgentCatalogResult["agents"][number]["tools"]>().toEqualTypeOf<
+      readonly string[]
+    >();
+    expectTypeOf<WorkspaceInitResult["files"][number]["status"]>().toEqualTypeOf<
+      "created" | "existing"
+    >();
+    expectTypeOf<DiagnosticsResult["checks"][number]["status"]>().toEqualTypeOf<
+      "ok" | "warning" | "error" | "unavailable"
+    >();
+    expectTypeOf<ResourceDiagnosticsResult["entries"][number]["origin"]>().toEqualTypeOf<
+      "claude-compat" | "legacy" | "pico-native" | "runtime-state"
+    >();
     expectTypeOf<keyof RuntimeMethodMap>().toEqualTypeOf<(typeof RUNTIME_METHODS)[number]>();
 
     const request = createTypedRuntimeRequest("run.start", {

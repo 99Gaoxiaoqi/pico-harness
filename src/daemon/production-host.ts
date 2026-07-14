@@ -1,5 +1,6 @@
+import { realpathSync } from "node:fs";
 import { stat } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { createCliSessionId } from "../cli/session-resolver.js";
 import { globalSessionManager } from "../engine/session.js";
 import { AgentRuntime } from "../runtime/agent-runtime.js";
@@ -14,6 +15,7 @@ import {
   type CredentialVault,
 } from "../provider/credential-vault.js";
 import { resolveModelRouteCapabilities } from "../provider/model-capabilities.js";
+import { coordinateReasoningLevel } from "../provider/reasoning-capability.js";
 import {
   BACKGROUND_HARDLINE_VERSION,
   BACKGROUND_HOOK_VERSION,
@@ -70,19 +72,28 @@ export function createProductionLocalDaemonHost(
   const nextDesktopResourceVersion = () => ++desktopResourceVersion;
   const service = new WorkspaceRuntimeService({
     registrationStore,
-    execute: async ({ workspacePath, workspaceRuntime, prompt, sessionId, context }) => {
+    execute: async ({ workspacePath, workspaceRuntime, prompt, sessionId, execution, context }) => {
       if (!(await trustStore.isTrusted(workspacePath))) {
         throw new RuntimeProtocolError(
           RUNTIME_ERROR_CODES.FORBIDDEN,
           `工作区尚未信任，拒绝启动前台 Run: ${workspacePath}`,
         );
       }
-      const route = await resolveDesktopModelRoute(workspacePath, credentialVault);
       const targetSessionId = sessionId ?? createCliSessionId();
       context.bindSession(targetSessionId);
       const session =
         globalSessionManager.get(targetSessionId, workspacePath) ??
         (await globalSessionManager.getOrCreate(targetSessionId, workspacePath));
+      const persistedSettings = (await session.readHydrationSnapshot()).runtime.settings;
+      const route = await resolveDesktopModelRoute(
+        workspacePath,
+        credentialVault,
+        execution?.requestedModel ?? persistedSettings?.modelRouteId ?? persistedSettings?.model,
+      );
+      const reasoningLevel = coordinateReasoningLevel(
+        route.capabilities.reasoningProfile,
+        persistedSettings?.thinkingEffortExplicit ? persistedSettings.thinkingEffort : undefined,
+      ).level;
       const runtimeState = await createSessionRuntime({
         workDir: workspacePath,
         sessionId: targetSessionId,
@@ -119,6 +130,15 @@ export function createProductionLocalDaemonHost(
       for (const steer of context.drainSteers()) runtimeState.steerQueue.push(steer);
       const unsubscribeSteer = context.onSteer((message) => runtimeState.steerQueue.push(message));
       try {
+        const skillActivation = execution?.skillActivation;
+        if (skillActivation?.sourcePath && skillActivation.hooks !== undefined) {
+          await runtimeState.activateComponentHooks({
+            kind: "skill",
+            path: skillActivation.sourcePath,
+            componentId: skillActivation.name,
+            inlineHooks: skillActivation.hooks,
+          });
+        }
         const result = await agentRuntime.execute(
           {
             prompt,
@@ -131,6 +151,13 @@ export function createProductionLocalDaemonHost(
             modelRouteId: route.modelRouteId,
             modelCapabilities: route.capabilities,
             allowModelFallback: false,
+            ...(reasoningLevel !== undefined ? { thinkingEffort: reasoningLevel } : {}),
+            ...(persistedSettings?.mode === "plan" ? { planMode: true } : {}),
+            ...(persistedSettings?.mode ? { rewindInteractionMode: persistedSettings.mode } : {}),
+            ...(persistedSettings?.mode === "plan" && persistedSettings.prePlanMode
+              ? { rewindPrePlanMode: persistedSettings.prePlanMode }
+              : {}),
+            ...(execution?.allowedTools ? { allowedTools: execution.allowedTools } : {}),
             ...(await existingMcpConfig(workspacePath)),
           },
           {
@@ -140,6 +167,7 @@ export function createProductionLocalDaemonHost(
             approvalNotifier: broker.notifyApproval,
             approvalManager: broker.approvalManager,
             askUserHandler: broker.askUserHandler,
+            ...(execution?.resumeExistingSession ? { resumeExistingSession: true } : {}),
             waitAtSafeBoundary: context.waitAtSafeBoundary,
             rewindPointSink: context.bindCheckpoint,
           },
@@ -214,12 +242,13 @@ export function createProductionLocalDaemonHost(
     trustStore,
     automations,
     interactions: {
-      respondApproval: ({ approvalId, decision, reason }) => {
+      respondApproval: ({ workspacePath, approvalId, decision, reason }) => {
         const pending = pendingApprovals.get(approvalId);
         if (!pending) {
           if (resolvedApprovals.has(approvalId)) return { accepted: true, alreadyResolved: true };
           throw unknownInteraction("Approval", approvalId);
         }
+        assertInteractionWorkspace(pending, workspacePath, "Approval", approvalId);
         const accepted = pending.broker.resolveApproval({
           taskId: approvalId,
           decision:
@@ -238,12 +267,13 @@ export function createProductionLocalDaemonHost(
         }
         return { accepted, alreadyResolved: false };
       },
-      respondPrompt: ({ promptId, answer }) => {
+      respondPrompt: ({ workspacePath, promptId, answer }) => {
         const pending = pendingPrompts.get(promptId);
         if (!pending) {
           if (resolvedPrompts.has(promptId)) return { accepted: true, alreadyResolved: true };
           throw unknownInteraction("Prompt", promptId);
         }
+        assertInteractionWorkspace(pending, workspacePath, "Prompt", promptId);
         if (typeof answer !== "string" || !answer.trim()) {
           throw new RuntimeProtocolError(
             RUNTIME_ERROR_CODES.INVALID_PARAMS,
@@ -392,9 +422,13 @@ interface PendingInteraction {
   readonly sessionId: string;
 }
 
-async function resolveDesktopModelRoute(workspacePath: string, credentialVault: CredentialVault) {
+async function resolveDesktopModelRoute(
+  workspacePath: string,
+  credentialVault: CredentialVault,
+  requestedModel?: string,
+) {
   const config = await loadPicoConfig(workspacePath);
-  const modelRouteId = config.model;
+  const modelRouteId = resolveDesktopRequestedModel(config, requestedModel);
   if (!modelRouteId) {
     throw new RuntimeProtocolError(
       RUNTIME_ERROR_CODES.FORBIDDEN,
@@ -438,6 +472,29 @@ async function resolveDesktopModelRoute(workspacePath: string, credentialVault: 
     );
   }
   return { ...route, apiKey: await credentialVault.resolve(credentialRef) };
+}
+
+function resolveDesktopRequestedModel(
+  config: Awaited<ReturnType<typeof loadPicoConfig>>,
+  requestedModel?: string,
+): string | undefined {
+  const requested = requestedModel?.trim();
+  if (!requested || requested === "inherit") return config.model;
+  const aliased = config.compatibility.claude.enabled
+    ? (config.compatibility.claude.modelAliases[requested] ?? requested)
+    : requested;
+  if (aliased.includes("/")) return aliased;
+  const matches = Object.entries(config.providers)
+    .filter(([, provider]) => provider.models.includes(aliased))
+    .map(([providerId]) => `${providerId}/${aliased}`);
+  if (matches.length === 1) return matches[0];
+  if (matches.length > 1) {
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.INVALID_PARAMS,
+      `Skill 模型 ${aliased} 匹配多个 Provider，请使用 provider/model 路由`,
+    );
+  }
+  return aliased;
 }
 
 async function existingMcpConfig(
@@ -484,20 +541,71 @@ function timelineItem(event: DesktopReporterEvent): JsonObject {
       : "status";
   const state =
     event.type.endsWith("completed") || event.type === "run.finished" ? "done" : "active";
+  const safePayload = safeTimelinePayload(event.type, event.payload);
   const detail = firstString(
-    event.payload["content"],
-    event.payload["result"],
-    event.payload["currentAction"],
-    event.payload["summary"],
+    safePayload["content"],
+    safePayload["resultSummary"],
+    safePayload["outputSummary"],
+    safePayload["currentAction"],
+    safePayload["summary"],
   );
   return jsonObject({
     kind,
-    title: timelineTitle(event.type, event.payload),
+    title: timelineTitle(event.type, safePayload),
     ...(detail ? { detail } : {}),
     state,
     eventType: event.type,
-    data: event.payload,
+    data: safePayload,
   });
+}
+
+function safeTimelinePayload(
+  type: string,
+  payload: Readonly<Record<string, unknown>>,
+): Readonly<Record<string, unknown>> {
+  if (type === "tool.completed") {
+    const resultBytes =
+      typeof payload["result"] === "string" ? Buffer.byteLength(payload["result"], "utf8") : 0;
+    const isError = payload["isError"] === true;
+    return {
+      toolName: payload["toolName"],
+      isError,
+      truncated: payload["truncated"] === true,
+      resultBytes,
+      resultSummary: `${isError ? "Tool failed" : "Tool completed"} · ${resultBytes} bytes`,
+      ...(typeof payload["providerCallId"] === "string"
+        ? { providerCallId: payload["providerCallId"] }
+        : {}),
+    };
+  }
+  if (type === "tool.output") {
+    const outputBytes =
+      typeof payload["chunk"] === "string" ? Buffer.byteLength(payload["chunk"], "utf8") : 0;
+    return {
+      toolName: payload["toolName"],
+      stream: payload["stream"],
+      outputBytes,
+      outputSummary: `${String(payload["stream"] ?? "output")} · ${outputBytes} bytes`,
+      ...(typeof payload["providerCallId"] === "string"
+        ? { providerCallId: payload["providerCallId"] }
+        : {}),
+    };
+  }
+  if (type === "subagent.trace" && payload["type"] === "tool.completed") {
+    const resultBytes =
+      typeof payload["result"] === "string" ? Buffer.byteLength(payload["result"], "utf8") : 0;
+    const isError = payload["isError"] === true;
+    return {
+      activityId: payload["activityId"],
+      traceId: payload["traceId"],
+      type: payload["type"],
+      isError,
+      truncated: payload["truncated"] === true,
+      resultBytes,
+      resultSummary: `${isError ? "Tool failed" : "Tool completed"} · ${resultBytes} bytes`,
+    };
+  }
+  return payload;
 }
 
 function timelineTitle(type: string, payload: Readonly<Record<string, unknown>>): string {
@@ -615,6 +723,30 @@ function publishInteractionEvent(
 
 function unknownInteraction(kind: "Approval" | "Prompt", id: string): RuntimeProtocolError {
   return new RuntimeProtocolError(RUNTIME_ERROR_CODES.NOT_FOUND, `${kind} ${id} 不存在或已过期`);
+}
+
+function assertInteractionWorkspace(
+  interaction: PendingInteraction,
+  workspacePath: string,
+  kind: "Approval" | "Prompt",
+  id: string,
+): void {
+  if (
+    canonicalInteractionPath(interaction.workspacePath) === canonicalInteractionPath(workspacePath)
+  )
+    return;
+  throw new RuntimeProtocolError(
+    RUNTIME_ERROR_CODES.FORBIDDEN,
+    `${kind} ${id} 不属于请求中的工作区`,
+  );
+}
+
+function canonicalInteractionPath(workspacePath: string): string {
+  try {
+    return realpathSync(workspacePath).normalize("NFC");
+  } catch {
+    return resolve(workspacePath).normalize("NFC");
+  }
 }
 
 function removeBrokerInteractions(

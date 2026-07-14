@@ -34,6 +34,153 @@ export type RuntimeRunStatus =
   | "succeeded";
 export type RuntimeSessionStatus = "active" | "archived";
 export type RuntimeJobStatus = "idle" | "running" | "failed" | "succeeded";
+export type SessionSendBehavior = "auto" | "steer" | "queue" | "replace";
+export type SessionSendDisposition = "started" | "steered" | "queued" | "replaced";
+export type RuntimeInteractionMode = "default" | "plan" | "auto" | "yolo";
+export type RuntimeProviderKind = "openai" | "claude" | "gemini";
+
+export type RuntimeSessionSettings = {
+  readonly sessionId: SessionId;
+  readonly provider: RuntimeProviderKind;
+  readonly model: string;
+  readonly modelRouteId?: string;
+  readonly mode: RuntimeInteractionMode;
+  /** `/permissions` is a UI alias of mode, never an independently persisted value. */
+  readonly permissions: RuntimeInteractionMode;
+  readonly thinkingEffort: string;
+  readonly thinkingEffortExplicit: boolean;
+  readonly reasoningLevels: readonly string[];
+};
+
+export type RuntimeGoalStatus = "active" | "paused" | "blocked" | "complete";
+
+export type RuntimeGoal = {
+  readonly id: string;
+  readonly title: string;
+  readonly description: string;
+  readonly status: RuntimeGoalStatus;
+  readonly createdAt: number;
+  readonly budgetConfig?: {
+    readonly maxTurns?: number;
+    readonly maxTokens?: number;
+    readonly maxCostCNY?: number;
+    readonly maxWallClockMs?: number;
+  };
+  readonly budgetUsage: {
+    readonly turns: number;
+    readonly tokens: number;
+    readonly costCNY: number;
+    readonly startedAt: number;
+  };
+  readonly progress?: string;
+  readonly blockedReason?: string;
+};
+
+export type RuntimeGoalSnapshot = {
+  readonly stateVersion: 1;
+  readonly sequence: number;
+  readonly activeGoalId: string | null;
+  readonly goals: readonly RuntimeGoal[];
+};
+
+export type RuntimeTextUserInput = JsonObject & {
+  /** Omitted by legacy desktop clients; new clients should send the explicit discriminator. */
+  readonly kind?: "text";
+  readonly text: string;
+};
+
+export type RuntimeSkillUserInput = JsonObject & {
+  readonly kind: "skill";
+  readonly name: string;
+  readonly args?: string;
+};
+
+export type RuntimeAgentUserInput = JsonObject & {
+  readonly kind: "agent";
+  readonly name: string;
+  readonly task: string;
+};
+
+export type RuntimeUserInput = RuntimeTextUserInput | RuntimeSkillUserInput | RuntimeAgentUserInput;
+
+export type RuntimeCatalogAgent = JsonObject & {
+  readonly name: string;
+  readonly description: string;
+  readonly source: string;
+  readonly sourcePath: string;
+  readonly tools: readonly string[];
+  readonly modelRouteId?: string;
+};
+
+export type RuntimeCatalogSkill = JsonObject & {
+  readonly name: string;
+  readonly description: string;
+  readonly sourcePath?: string;
+  readonly allowedTools?: readonly string[];
+  readonly model?: string;
+};
+
+export type RuntimeQueuedInput = JsonObject & {
+  readonly queueId: string;
+  readonly sessionId: SessionId;
+  readonly input: RuntimeUserInput;
+  readonly createdAt: number;
+};
+
+export type RuntimeConversationItem = (
+  | (JsonObject & {
+      readonly id: string;
+      readonly kind: "userMessage" | "assistantMessage" | "systemNotice" | "error";
+      readonly content: string;
+      readonly at?: number;
+    })
+  | (JsonObject & {
+      readonly id: string;
+      readonly kind: "skill";
+      readonly name: string;
+      readonly args: string;
+      readonly trigger: "user-slash" | "model-tool";
+      readonly at?: number;
+    })
+  | (JsonObject & {
+      readonly id: string;
+      readonly kind: "plan";
+      readonly title: string;
+      readonly detail?: string;
+      readonly state?: "waiting" | "active" | "done" | "failed";
+      readonly at?: number;
+    })
+  | (JsonObject & {
+      readonly id: string;
+      readonly kind: "tool";
+      readonly name: string;
+      readonly args: string;
+      readonly status: "running" | "success" | "error";
+      readonly summary?: string;
+      readonly at?: number;
+    })
+  | (JsonObject & {
+      readonly id: string;
+      readonly kind: "runBoundary";
+      readonly runId?: RunId;
+      readonly status: RuntimeRunStatus;
+      readonly startedAt: number;
+      readonly finishedAt?: number;
+    })
+  | (JsonObject & {
+      readonly id: string;
+      readonly kind: "approval" | "prompt" | "changes" | "subagent" | "goal";
+      readonly title: string;
+      readonly detail?: string;
+      readonly state?: string;
+      readonly at?: number;
+      readonly data?: JsonObject;
+    })
+) & {
+  /** 单条目超出 IPC 字节预算时的诚实降级标记。 */
+  readonly truncated?: true;
+  readonly originalBytes?: number;
+};
 
 export type RuntimeRun = JsonObject & {
   readonly runId: RunId;
@@ -75,10 +222,68 @@ export type RuntimeChange = JsonObject & {
   readonly deletions: number;
 };
 
+export type RuntimeWorkspaceInitResult = {
+  readonly workspacePath: string;
+  readonly files: readonly {
+    readonly path: "AGENTS.md" | ".pico/config.json";
+    readonly status: "created" | "existing";
+  }[];
+  readonly message: string;
+};
+
+export type RuntimeDiagnosticCheck = {
+  readonly id: string;
+  readonly label: string;
+  readonly status: "ok" | "warning" | "error" | "unavailable";
+  readonly summary: string;
+  readonly recommendation?: string;
+};
+
+export type RuntimeDiagnosticsReport = {
+  readonly workspacePath: string;
+  readonly healthy: boolean;
+  readonly checks: readonly RuntimeDiagnosticCheck[];
+  readonly output: string;
+};
+
+export type RuntimeResourceDiagnosticEntry = {
+  readonly kind: string;
+  readonly origin: "claude-compat" | "legacy" | "pico-native" | "runtime-state";
+  readonly path: string;
+  readonly status: "missing" | "present" | "unsafe";
+  readonly authority: boolean;
+  readonly reason?: string;
+};
+
+export type RuntimeResourceDiagnosticsReport = {
+  readonly workDir: string;
+  readonly picoHome: string;
+  readonly workspaceStateRoot: string;
+  readonly entries: readonly RuntimeResourceDiagnosticEntry[];
+  readonly findings: readonly string[];
+  readonly output: string;
+};
+
 export type RuntimeMethodMap = {
   readonly "runtime.ping": {
     readonly params: JsonObject;
-    readonly result: { readonly pong: true };
+    readonly result: {
+      readonly pong: true;
+      readonly protocolVersion: typeof LOCAL_RUNTIME_PROTOCOL_VERSION;
+      readonly capabilities: readonly string[];
+    };
+  };
+  readonly "workspace.init": {
+    readonly params: WorkspaceParams;
+    readonly result: RuntimeWorkspaceInitResult;
+  };
+  readonly "diagnostics.run": {
+    readonly params: WorkspaceParams;
+    readonly result: RuntimeDiagnosticsReport;
+  };
+  readonly "diagnostics.resources": {
+    readonly params: WorkspaceParams;
+    readonly result: RuntimeResourceDiagnosticsReport;
   };
   readonly "session.list": {
     readonly params: WorkspaceParams & { readonly includeArchived?: boolean };
@@ -99,6 +304,72 @@ export type RuntimeMethodMap = {
   readonly "session.restore": {
     readonly params: WorkspaceParams & { readonly sessionId: SessionId };
     readonly result: { readonly session: RuntimeSession };
+  };
+  readonly "session.rename": {
+    readonly params: WorkspaceParams & { readonly sessionId: SessionId; readonly title: string };
+    readonly result: { readonly session: RuntimeSession };
+  };
+  readonly "session.fork": {
+    readonly params: WorkspaceParams & { readonly sessionId: SessionId };
+    readonly result: { readonly session: RuntimeSession; readonly sourceSessionId: SessionId };
+  };
+  readonly "session.compact": {
+    readonly params: WorkspaceParams & { readonly sessionId: SessionId };
+    readonly result: {
+      readonly session: RuntimeSession;
+      readonly compacted: true;
+      readonly beforeMessageCount: number;
+      readonly afterMessageCount: number;
+    };
+  };
+  readonly "session.settings.get": {
+    readonly params: WorkspaceParams & { readonly sessionId: SessionId };
+    readonly result: { readonly settings: RuntimeSessionSettings };
+  };
+  readonly "session.settings.update": {
+    readonly params: WorkspaceParams & {
+      readonly sessionId: SessionId;
+      readonly modelRouteId?: string;
+      readonly mode?: RuntimeInteractionMode;
+      /** Compatibility UI alias. If mode is also present both values must match. */
+      readonly permissions?: RuntimeInteractionMode;
+      readonly thinkingEffort?: string;
+    };
+    readonly result: { readonly settings: RuntimeSessionSettings };
+  };
+  readonly "goal.get": {
+    readonly params: WorkspaceParams & { readonly sessionId: SessionId };
+    readonly result: { readonly goal: RuntimeGoalSnapshot | null };
+  };
+  readonly "session.send": {
+    readonly params: WorkspaceParams & {
+      readonly sessionId?: SessionId;
+      readonly input: RuntimeUserInput;
+      readonly behavior?: SessionSendBehavior;
+      readonly expectedRunId?: RunId;
+      readonly idempotencyKey: string;
+    };
+    readonly result: {
+      readonly session: RuntimeSession;
+      readonly run?: RuntimeRun;
+      readonly disposition: SessionSendDisposition;
+    };
+  };
+  readonly "session.transcript": {
+    readonly params: WorkspaceParams & {
+      readonly sessionId: SessionId;
+      readonly before?: string;
+      readonly limit?: number;
+      readonly expectedRevision?: string;
+    };
+    readonly result: {
+      readonly session: RuntimeSession;
+      readonly items: readonly RuntimeConversationItem[];
+      readonly activeRun?: RuntimeRun;
+      readonly queuedInputs: readonly RuntimeQueuedInput[];
+      readonly nextBefore?: string;
+      readonly revision: string;
+    };
   };
   readonly "run.start": {
     readonly params: WorkspaceParams & {
@@ -256,6 +527,14 @@ export type RuntimeMethodMap = {
     readonly params: WorkspaceParams;
     readonly result: { readonly providers: readonly JsonObject[] };
   };
+  readonly "catalog.agents": {
+    readonly params: WorkspaceParams;
+    readonly result: { readonly agents: readonly RuntimeCatalogAgent[] };
+  };
+  readonly "catalog.skills": {
+    readonly params: WorkspaceParams;
+    readonly result: { readonly skills: readonly RuntimeCatalogSkill[] };
+  };
   readonly "config.skills": {
     readonly params: WorkspaceParams;
     readonly result: { readonly skills: readonly JsonObject[] };
@@ -315,11 +594,22 @@ export type RuntimeMethodMap = {
 
 export const RUNTIME_METHODS = [
   "runtime.ping",
+  "workspace.init",
+  "diagnostics.run",
+  "diagnostics.resources",
   "session.list",
   "session.get",
   "session.create",
   "session.archive",
   "session.restore",
+  "session.rename",
+  "session.fork",
+  "session.compact",
+  "session.settings.get",
+  "session.settings.update",
+  "goal.get",
+  "session.send",
+  "session.transcript",
   "run.start",
   "run.cancel",
   "run.pause",
@@ -345,6 +635,8 @@ export const RUNTIME_METHODS = [
   "config.get",
   "config.update",
   "config.providers",
+  "catalog.agents",
+  "catalog.skills",
   "config.skills",
   "config.mcpServers",
   "usage.get",
@@ -367,7 +659,17 @@ export type RuntimeEventMap = {
   readonly "workspace.registered": { readonly registered: true };
   readonly "workspace.unregistered": { readonly registered: false };
   readonly "workspace.trustChanged": { readonly trusted: boolean };
+  readonly "workspace.initialized": RuntimeWorkspaceInitResult;
   readonly "session.updated": { readonly session: RuntimeSession };
+  readonly "session.settingsUpdated": {
+    readonly sessionId: SessionId;
+    readonly settings: RuntimeSessionSettings;
+  };
+  readonly "session.transcriptUpdated": {
+    readonly sessionId: SessionId;
+    readonly operation: "reload" | "truncate";
+    readonly revision?: string;
+  };
   readonly "run.started": { readonly run: RuntimeRun };
   readonly "run.updated": { readonly run: RuntimeRun };
   readonly "run.finished": { readonly run: RuntimeRun };
