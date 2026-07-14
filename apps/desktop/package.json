@@ -10,7 +10,7 @@
     "make": "electron-forge make",
     "pretypecheck": "npm run build --workspace @pico/protocol",
     "typecheck": "tsc -b",
-    "test": "vitest run"
+    "test": "vitest run --config vitest.config.ts"
   },
   "dependencies": {
     "@pico/protocol": "*",
