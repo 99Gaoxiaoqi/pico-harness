@@ -1,4 +1,5 @@
 import {
+  AlertTriangle,
   Archive,
   Bot,
   Box,
@@ -865,6 +866,7 @@ function ConversationPage() {
           behavior={behavior}
           onBehaviorChange={setBehavior}
           busy={busy === "send-message"}
+          disabled={Boolean(conversation?.loadError)}
           placeholder={sessionId ? "继续对话，或在运行中调整方向…" : "向 Pico 发送消息…"}
           statusText={
             data.conversations[sessionId ?? ""]?.queuedCount
@@ -958,17 +960,31 @@ function ConversationPage() {
         />
       }
     >
-      <ConversationTranscript
-        items={items}
-        onOpenItem={openItem}
-        emptyState={
-          <div className="conversation-empty-state">
-            <Sparkles aria-hidden="true" />
-            <h3>{sessionId ? "这个会话还没有可见消息" : "从一条消息开始"}</h3>
-            <p>可以像在 TUI 里一样交代目标、追问方案，或先让 Pico 阅读项目。</p>
-          </div>
-        }
-      />
+      {conversation?.loadError ? (
+        <div className="conversation-empty-state" role="alert">
+          <AlertTriangle aria-hidden="true" />
+          <h3>无法恢复这个会话</h3>
+          <p>{conversation.loadError}</p>
+          <Button
+            disabled={Boolean(busy)}
+            onClick={() => sessionId && actions.loadSession(sessionId)}
+          >
+            重新载入
+          </Button>
+        </div>
+      ) : (
+        <ConversationTranscript
+          items={items}
+          onOpenItem={openItem}
+          emptyState={
+            <div className="conversation-empty-state">
+              <Sparkles aria-hidden="true" />
+              <h3>{sessionId ? "这个会话还没有可见消息" : "从一条消息开始"}</h3>
+              <p>可以像在 TUI 里一样交代目标、追问方案，或先让 Pico 阅读项目。</p>
+            </div>
+          }
+        />
+      )}
       <ApprovalDialog
         approval={selectedApproval}
         open={approvalOpen}

@@ -372,6 +372,76 @@ describe("DesktopApp renderer", () => {
     ]);
   });
 
+  it("会话不存在时显示可重试的恢复错误，不回到首页冒充成功", async () => {
+    const workspacePath = "/Users/chen/Documents/project";
+    const success = <T,>(value: T) => Promise.resolve({ ok: true as const, value });
+    const runtime = new Proxy(
+      {},
+      {
+        get: (_target, property) => async () => {
+          const method = String(property);
+          if (method === "session.transcript") {
+            return {
+              ok: false as const,
+              error: { code: "NOT_FOUND", message: "Session missing 不存在", retryable: false },
+            };
+          }
+          const value =
+            method === "runtime.ping"
+              ? { capabilities: ["session-conversation-v1", "runtime-events-v1"] }
+              : method === "workspace.list"
+                ? { workspaces: [{ workspacePath }] }
+                : method === "workspace.status"
+                  ? { workspacePath, mode: "folder" }
+                  : method === "workspace.trustStatus"
+                    ? { trusted: true }
+                    : method === "session.list"
+                      ? { sessions: [] }
+                      : method === "runs.list"
+                        ? { runs: [] }
+                        : method === "config.skills"
+                          ? { skills: [] }
+                          : method === "config.mcpServers"
+                            ? { servers: [] }
+                            : method === "config.providers"
+                              ? { providers: [] }
+                              : method === "jobs.list"
+                                ? { jobs: [] }
+                                : method === "config.get"
+                                  ? { version: 0 }
+                                  : method === "usage.get"
+                                    ? { usage: {} }
+                                    : {};
+          return { ok: true as const, value };
+        },
+      },
+    ) as RendererBridge["runtime"];
+    (window as unknown as { pico?: RendererBridge }).pico = {
+      runtime,
+      events: {
+        subscribe: () => ({ ready: success({ subscribed: true }), dispose: vi.fn() }),
+      },
+      platform: {
+        chooseWorkspace: () => success(undefined),
+        openDirectory: () => success(undefined),
+        getLaunchAtLogin: () => success(false),
+        setLaunchAtLogin: () => success(undefined),
+      },
+      lifecycle: {
+        setBackgroundMode: () => success(undefined),
+        quit: () => success(undefined),
+      },
+    };
+    window.history.replaceState({}, "", "/#/session/missing");
+
+    render(<DesktopApp />);
+
+    expect(await screen.findByRole("heading", { name: "无法恢复这个会话" })).toBeTruthy();
+    expect(screen.getAllByText(/Session missing 不存在/).length).toBeGreaterThan(0);
+    expect(screen.getByRole("button", { name: "重新载入" })).toBeTruthy();
+    expect(window.location.hash).toBe("#/session/missing");
+  });
+
   it.each([
     ["/", "今天想推进什么？"],
     ["/task/new", "今天想一起做什么？"],
