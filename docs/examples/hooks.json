@@ -1,0 +1,37 @@
+{
+  "PreToolUse": [
+    {
+      "matcher": "Bash|Write|Edit",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "./scripts/check-tool.sh",
+          "args": [],
+          "timeout": 10
+        },
+        {
+          "type": "http",
+          "url": "http://127.0.0.1:4319/hooks",
+          "headers": {
+            "Authorization": "Bearer ${PICO_HOOK_TOKEN}"
+          },
+          "allowedEnv": ["PICO_HOOK_TOKEN"],
+          "timeout": 5,
+          "maxResponseBytes": 1048576,
+          "maxRedirects": 2
+        }
+      ]
+    }
+  ],
+  "Stop": [
+    {
+      "hooks": [
+        {
+          "type": "prompt",
+          "prompt": "Return {\"ok\":true} only when the response has addressed the user's explicit acceptance criteria.",
+          "timeout": 20
+        }
+      ]
+    }
+  ]
+}

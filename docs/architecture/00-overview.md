@@ -62,6 +62,7 @@ pico-harness 是一个用 TypeScript 实现的**工业级 Agent Harness 引擎**
 | [04-provider-entry.md](./04-provider-entry.md) | Provider 适配 + 当前 TUI 单入口装配                            |
 | [05-infra-safety.md](./05-infra-safety.md)     | 基础设施：文件历史、审批系统、MCP、可观测性、Schema            |
 | [06-data-flow.md](./06-data-flow.md)           | 数据流：一轮 ReAct 循环的完整时序、压缩协作、凭证轮换链路      |
+| [07-hooks.md](./07-hooks.md)                   | Hook 事件、多来源配置、执行信任、热重载与前后台边界            |
 
 ## 技术栈
 
