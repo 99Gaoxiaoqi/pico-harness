@@ -26,7 +26,7 @@ import {
   type McpToolResult,
 } from "./types.js";
 
-const DEFAULT_CONFIG_RELATIVE = ".claw/mcp.json";
+const DEFAULT_CONFIG_RELATIVE = ".pico/mcp.json";
 const DEFAULT_STARTUP_TIMEOUT_MS = 30_000;
 
 interface ServerEntry {

@@ -15,7 +15,7 @@ export interface BackgroundYoloPolicySnapshotData {
   trustedWorkspace: true;
   toolNetworkPolicy: ToolNetworkPolicy;
   allowedToolNetworkHosts?: string[];
-  /** SHA-256 of the fixed workspace .claw/mcp.json used by this Job. */
+  /** SHA-256 of the fixed workspace .pico/mcp.json used by this Job. */
   mcpConfigFingerprint?: string;
   allowedTools: string[];
   hardlineVersion: string;
@@ -101,7 +101,7 @@ export function parseBackgroundYoloPolicySnapshot(
   const hasMcpTools = allowedTools.some((tool) => tool.startsWith("mcp__"));
   const legacyMcpWithoutFingerprint = hasMcpTools && mcpConfigFingerprint === undefined;
   if (legacyMcpWithoutFingerprint && !options.allowLegacyMcpWithoutFingerprint) {
-    throw invalid("后台 MCP 工具必须绑定 .claw/mcp.json 的 SHA-256 指纹");
+    throw invalid("后台 MCP 工具必须绑定 .pico/mcp.json 的 SHA-256 指纹");
   }
   if (!hasMcpTools && mcpConfigFingerprint !== undefined) {
     throw invalid("未授权 MCP 工具时不得声明 mcpConfigFingerprint");

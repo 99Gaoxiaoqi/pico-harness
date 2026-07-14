@@ -50,7 +50,7 @@ export interface McpServerConfig {
   enabled?: boolean;
 }
 
-/** MCP 配置文件根结构(对标 .claw/mcp.json) */
+/** MCP 配置文件根结构（Pico 原生路径为 .pico/mcp.json）。 */
 export interface McpConfig {
   mcpServers: Record<string, McpServerConfig>;
 }
