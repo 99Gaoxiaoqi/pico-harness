@@ -28,10 +28,7 @@ import { CronService } from "../../src/tasks/cron-service.js";
 import type { CronDaemonBridge } from "../../src/input/cron-daemon-bridge.js";
 import { ModelRouter } from "../../src/provider/model-router.js";
 import { resolveModelRouteCapabilities } from "../../src/provider/model-capabilities.js";
-import type {
-  CredentialRef,
-  CredentialVault,
-} from "../../src/provider/credential-vault.js";
+import type { CredentialRef, CredentialVault } from "../../src/provider/credential-vault.js";
 
 describe("Pico command registry", () => {
   const cleanup: Array<() => void> = [];

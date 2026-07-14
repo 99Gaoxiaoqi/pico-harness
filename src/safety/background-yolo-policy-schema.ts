@@ -124,12 +124,14 @@ export function normalizeExactHostname(value: string): string {
   if (
     ascii.length === 0 ||
     ascii.length > 253 ||
-    ascii.split(".").some(
-      (label) =>
-        label.length === 0 ||
-        label.length > 63 ||
-        !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i.test(label),
-    )
+    ascii
+      .split(".")
+      .some(
+        (label) =>
+          label.length === 0 ||
+          label.length > 63 ||
+          !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i.test(label),
+      )
   ) {
     throw invalid(`非法 hostname: ${JSON.stringify(value)}`);
   }

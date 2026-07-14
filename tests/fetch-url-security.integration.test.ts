@@ -157,10 +157,7 @@ describe("fetch_url 安全边界集成", () => {
       arguments: JSON.stringify({ url: "https://a.example/allowed" }),
     });
     expect(allowed).toMatchObject({ isError: false });
-    expect(requestedUrls).toEqual([
-      "https://a.example/allowed",
-      "https://b.example/final",
-    ]);
+    expect(requestedUrls).toEqual(["https://a.example/allowed", "https://b.example/final"]);
 
     const blocked = await registry.execute({
       id: "block-a-to-c",

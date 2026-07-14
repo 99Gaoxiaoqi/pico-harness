@@ -718,7 +718,10 @@ function pruneRegistryToBackgroundAllowlist(
   const fetchUrl = registry.getTool("fetch_url");
   if (fetchUrl instanceof FetchURLTool) {
     fetchUrl.setAuthorizeUrl((url) => {
-      const hostname = url.hostname.replace(/^\[|\]$/g, "").replace(/\.$/, "").toLowerCase();
+      const hostname = url.hostname
+        .replace(/^\[|\]$/g, "")
+        .replace(/\.$/, "")
+        .toLowerCase();
       if (!policy.allowedToolNetworkHosts.has(hostname)) {
         throw new Error(
           `[background:network_denied] 重定向主机 ${hostname} 不在 Job 工具网络 allowlist 中。`,
