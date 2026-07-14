@@ -52,6 +52,9 @@ describe("desktop runtime protocol contract", () => {
     expect(RUNTIME_METHODS).toEqual(
       expect.arrayContaining([
         "runtime.ping",
+        "workspace.init",
+        "diagnostics.run",
+        "diagnostics.resources",
         "session.list",
         "session.rename",
         "session.fork",
@@ -150,6 +153,9 @@ describe("desktop runtime protocol contract", () => {
     type SettingsResult = RuntimeResult<"session.settings.get">;
     type GoalResult = RuntimeResult<"goal.get">;
     type AgentCatalogResult = RuntimeResult<"catalog.agents">;
+    type WorkspaceInitResult = RuntimeResult<"workspace.init">;
+    type DiagnosticsResult = RuntimeResult<"diagnostics.run">;
+    type ResourceDiagnosticsResult = RuntimeResult<"diagnostics.resources">;
 
     expectTypeOf<StartParams>().toMatchTypeOf<{
       workspacePath: string;
@@ -178,6 +184,15 @@ describe("desktop runtime protocol contract", () => {
     >();
     expectTypeOf<AgentCatalogResult["agents"][number]["tools"]>().toEqualTypeOf<
       readonly string[]
+    >();
+    expectTypeOf<WorkspaceInitResult["files"][number]["status"]>().toEqualTypeOf<
+      "created" | "existing"
+    >();
+    expectTypeOf<DiagnosticsResult["checks"][number]["status"]>().toEqualTypeOf<
+      "ok" | "warning" | "error" | "unavailable"
+    >();
+    expectTypeOf<ResourceDiagnosticsResult["entries"][number]["origin"]>().toEqualTypeOf<
+      "claude-compat" | "legacy" | "pico-native" | "runtime-state"
     >();
     expectTypeOf<keyof RuntimeMethodMap>().toEqualTypeOf<(typeof RUNTIME_METHODS)[number]>();
 

@@ -2,6 +2,9 @@ import type { RuntimeEvent, RuntimeMethod, RuntimeParams, RuntimeResult } from "
 
 export const DESKTOP_RUNTIME_METHODS = [
   "runtime.ping",
+  "workspace.init",
+  "diagnostics.run",
+  "diagnostics.resources",
   "session.list",
   "session.get",
   "session.create",
