@@ -74,8 +74,12 @@ export interface SessionHydrationSnapshot {
   createdAt: string;
   updatedAt: string;
   messages: Message[];
+  /** Effective message positions in the shared Session JSONL sequence. */
+  messageSequences: readonly number[];
   /** Session JSONL 中的结构化 Transcript 事件，由共享 projector 重放。 */
   transcriptEvents: readonly TranscriptEvent[];
+  /** JSONL sequence for each transcriptEvents entry, aligned by index. */
+  transcriptEventSequences: readonly number[];
   runtime: SessionRuntimeStateSnapshot;
 }
 

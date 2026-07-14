@@ -13,7 +13,9 @@ import type { LegacySessionRecord, SessionEvent, SessionRecord } from "./session
  */
 export interface SessionReplayState {
   readonly history: Message[];
+  readonly historySequences: readonly number[];
   readonly transcriptEvents: readonly TranscriptEvent[];
+  readonly transcriptEventSequences: readonly number[];
   readonly runtime: SessionRuntimeStateSnapshot;
   readonly maxSeq: number;
   readonly epoch: number;
@@ -25,7 +27,9 @@ export function replaySessionRecords(records: readonly SessionRecord[]): Session
     .sort((a, b) => a.seq - b.seq);
   let state: MutableReplayState = {
     history: [],
+    historySequences: [],
     transcriptEvents: [],
+    transcriptEventSequences: [],
     runtime: {
       stateVersion: SESSION_RUNTIME_STATE_VERSION,
       usage: createEmptyUsageSnapshot(),
@@ -41,7 +45,9 @@ export function replaySessionRecords(records: readonly SessionRecord[]): Session
 
   return {
     history: structuredClone(state.history),
+    historySequences: [...state.historySequences],
     transcriptEvents: structuredClone(state.transcriptEvents),
+    transcriptEventSequences: [...state.transcriptEventSequences],
     runtime: structuredClone(state.runtime),
     maxSeq: state.maxSeq,
     epoch: state.epoch,
@@ -126,7 +132,9 @@ export function findLegacyUndoCut(
 
 interface MutableReplayState {
   history: Message[];
+  historySequences: number[];
   transcriptEvents: TranscriptEvent[];
+  transcriptEventSequences: number[];
   runtime: SessionRuntimeStateSnapshot;
   maxSeq: number;
   epoch: number;
@@ -134,27 +142,41 @@ interface MutableReplayState {
 
 function applySessionEvent(state: MutableReplayState, event: SessionEvent): MutableReplayState {
   let history = state.history;
+  let historySequences = state.historySequences;
   let transcriptEvents = state.transcriptEvents;
+  let transcriptEventSequences = state.transcriptEventSequences;
   let runtime = state.runtime;
   switch (event.kind) {
     case "message.appended":
-      if (event.data.volatile !== true) history = [...history, structuredClone(event.data.message)];
+      if (event.data.volatile !== true) {
+        history = [...history, structuredClone(event.data.message)];
+        historySequences = [...historySequences, event.seq];
+      }
       break;
     case "history.truncated":
       history = history.slice(event.data.fromIndex);
+      historySequences = historySequences.slice(event.data.fromIndex);
       break;
     case "history.rewound":
       history = history.slice(0, event.data.messageIndex);
+      historySequences = historySequences.slice(0, event.data.messageIndex);
       break;
-    case "history.compacted":
+    case "history.compacted": {
+      const retainedSequences =
+        event.data.retainedMessages.length === 0
+          ? []
+          : historySequences.slice(-event.data.retainedMessages.length);
       history = [
         structuredClone(event.data.summaryMessage),
         ...structuredClone(event.data.retainedMessages),
       ];
+      historySequences = [event.seq, ...retainedSequences];
       break;
+    }
     case "legacy.undo": {
       const { cutIndex, removedCount } = findLegacyUndoCut(history, event.data.count);
       if (removedCount > 0) history = history.slice(0, cutIndex);
+      if (removedCount > 0) historySequences = historySequences.slice(0, cutIndex);
       break;
     }
     case "runtime.checkpoint":
@@ -169,14 +191,18 @@ function applySessionEvent(state: MutableReplayState, event: SessionEvent): Muta
       break;
     case "session.seeded":
       history = [...structuredClone(event.data.messages)];
+      historySequences = event.data.messages.map(() => event.seq);
       break;
     case "transcript.event.recorded":
       transcriptEvents = [...transcriptEvents, structuredClone(event.data.event)];
+      transcriptEventSequences = [...transcriptEventSequences, event.seq];
       break;
   }
   return {
     history,
+    historySequences,
     transcriptEvents,
+    transcriptEventSequences,
     runtime,
     maxSeq: Math.max(state.maxSeq, event.seq),
     epoch: Math.max(state.epoch, event.epoch),

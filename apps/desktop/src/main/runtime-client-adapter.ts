@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readFile, realpath } from "node:fs/promises";
 import { connect, type Socket } from "node:net";
 import { homedir, platform, tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
@@ -128,17 +128,20 @@ export class LocalDaemonRuntimeClientAdapter implements RuntimeClientAdapter {
     readonly replay: RuntimeResult<"events.subscribe">;
     readonly dispose: () => void;
   }> {
+    const normalizedParams = params.workspacePath
+      ? { ...params, workspacePath: await realpath(params.workspacePath) }
+      : params;
     const subscriptionId = this.nextSubscriptionId++;
     const state: RuntimeSubscriptionState = {
-      params,
+      params: normalizedParams,
       listener,
       seenEventIds: new Set(),
       pendingLiveEvents: [],
-      ...(params.afterEventId ? { lastEventId: params.afterEventId } : {}),
+      ...(normalizedParams.afterEventId ? { lastEventId: normalizedParams.afterEventId } : {}),
       bufferingLiveEvents: false,
       disposed: false,
     };
-    if (params.afterEventId) rememberEventId(state, params.afterEventId);
+    if (normalizedParams.afterEventId) rememberEventId(state, normalizedParams.afterEventId);
     this.subscriptions.set(subscriptionId, state);
     try {
       const replay = await this.subscribeTransport(state, false);

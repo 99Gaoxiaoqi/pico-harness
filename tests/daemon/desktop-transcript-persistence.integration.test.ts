@@ -31,19 +31,6 @@ describe("Desktop Transcript durable projection integration", () => {
     const filePath = join(workDir, "session.jsonl");
     const identity = createSessionIdentity({ sessionId: "desktop-restart", cwd: workDir });
     const first = new SessionStore(filePath, identity);
-    await first.commitMessage({ role: "user", content: "visible user message" });
-    await first.commitMessage({ role: "system", content: "SECRET_SYSTEM_INJECTION" });
-    await first.commitMessage({
-      role: "assistant",
-      content: "",
-      toolCalls: [{ id: "tool-1", name: "read_file", arguments: '{"path":"README.md"}' }],
-    });
-    await first.commitMessage({
-      role: "user",
-      content: "SECRET_RAW_TOOL_RESULT",
-      toolCallId: "tool-1",
-    });
-
     const events: TranscriptEvent[] = [
       entryEvent(1, "plan", {
         kind: "plan",
@@ -91,21 +78,41 @@ describe("Desktop Transcript durable projection integration", () => {
         },
       },
     ];
-    for (const event of events) await first.commitTranscriptEvent(event);
+    await first.commitMessage({ role: "user", content: "visible user message" });
+    await first.commitMessage({ role: "system", content: "SECRET_SYSTEM_INJECTION" });
+    await first.commitTranscriptEvent(events[0]!);
+    await first.commitMessage({
+      role: "assistant",
+      content: "",
+      toolCalls: [{ id: "tool-1", name: "read_file", arguments: '{"path":"README.md"}' }],
+    });
+    await first.commitMessage({
+      role: "user",
+      content: "SECRET_RAW_TOOL_RESULT",
+      toolCallId: "tool-1",
+    });
+    for (const event of events.slice(1)) await first.commitTranscriptEvent(event);
     await first.close();
 
     const restarted = new SessionStore(filePath, identity);
     const replay = replaySessionRecords(await restarted.loadStrict());
     await restarted.close();
     const page = projectRuntimeTranscript(
-      hydration(workDir, replay.history, replay.transcriptEvents, replay.maxSeq),
+      hydration(
+        workDir,
+        replay.history,
+        replay.historySequences,
+        replay.transcriptEvents,
+        replay.transcriptEventSequences,
+        replay.maxSeq,
+      ),
       { limit: 100 },
     );
 
     expect(page.items.map((item) => item.kind)).toEqual([
       "userMessage",
-      "tool",
       "plan",
+      "tool",
       "approval",
       "prompt",
       "changes",
@@ -124,7 +131,7 @@ describe("Desktop Transcript durable projection integration", () => {
     const workDir = "/tmp/pico-transcript-byte-budget";
     const hugeMultibyteMessage = "汉🤖".repeat(350_000);
     const page = projectRuntimeTranscript(
-      hydration(workDir, [{ role: "assistant", content: hugeMultibyteMessage }], [], 1),
+      hydration(workDir, [{ role: "assistant", content: hugeMultibyteMessage }], [1], [], [], 1),
       { limit: 100, maxBytes: 8 * 1024 },
     );
 
@@ -144,7 +151,9 @@ describe("Desktop Transcript durable projection integration", () => {
       { role: "assistant", content: "a".repeat(620_000) },
       { role: "assistant", content: "b".repeat(620_000) },
     ];
-    const page = projectRuntimeTranscript(hydration(workDir, messages, [], 2), { limit: 100 });
+    const page = projectRuntimeTranscript(hydration(workDir, messages, [], [], [], 2), {
+      limit: 100,
+    });
 
     expect(Buffer.byteLength(JSON.stringify(page), "utf8")).toBeLessThan(1024 * 1024);
     expect(page.items).toHaveLength(1);
@@ -183,7 +192,9 @@ function entryEvent(
 function hydration(
   workDir: string,
   messages: readonly Message[],
+  messageSequences: readonly number[],
   transcriptEvents: readonly TranscriptEvent[],
+  transcriptEventSequences: readonly number[],
   persistenceSequence: number,
 ): SessionHydrationSnapshot {
   return {
@@ -196,7 +207,9 @@ function hydration(
     createdAt: "2026-07-15T00:00:00.000Z",
     updatedAt: "2026-07-15T00:00:01.000Z",
     messages: structuredClone(messages),
+    messageSequences: [...messageSequences],
     transcriptEvents: structuredClone(transcriptEvents),
+    transcriptEventSequences: [...transcriptEventSequences],
     runtime: { stateVersion: 1, usage: createEmptyUsageSnapshot() },
   };
 }
