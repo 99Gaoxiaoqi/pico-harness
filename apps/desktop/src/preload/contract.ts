@@ -1,9 +1,4 @@
-import type {
-  RuntimeEvent,
-  RuntimeMethod,
-  RuntimeParams,
-  RuntimeResult,
-} from "@pico/protocol";
+import type { RuntimeEvent, RuntimeMethod, RuntimeParams, RuntimeResult } from "@pico/protocol";
 
 export const DESKTOP_RUNTIME_METHODS = [
   "runtime.ping",

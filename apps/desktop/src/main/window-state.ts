@@ -68,7 +68,9 @@ function isValidBounds(value: unknown): value is Rectangle {
 }
 
 function isVisibleOnAnyDisplay(bounds: Rectangle): boolean {
-  return screen.getAllDisplays().some(({ workArea }) => intersectionArea(bounds, workArea) >= 10_000);
+  return screen
+    .getAllDisplays()
+    .some(({ workArea }) => intersectionArea(bounds, workArea) >= 10_000);
 }
 
 function intersectionArea(left: Rectangle, right: Rectangle): number {

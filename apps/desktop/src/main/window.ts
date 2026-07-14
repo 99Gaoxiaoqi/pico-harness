@@ -83,5 +83,4 @@ function configureWebContentsSecurity(window: BrowserWindow): void {
     callback(false);
   });
   session.defaultSession.setPermissionCheckHandler(() => false);
-
 }

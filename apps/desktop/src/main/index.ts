@@ -45,24 +45,27 @@ if (!app.requestSingleInstanceLock()) {
     else lifecycle.showWindow();
   });
 
-  void app.whenReady().then(async () => {
-    if (process.platform === "win32") app.setAppUserModelId("com.squirrel.pico.Pico");
-    installApplicationMenu(() => mainWindow);
-    await daemon.start();
-    const platform = createPlatformServices();
-    disposeIpc = registerDesktopIpcHandlers({
-      ipcMain,
-      getTrustedWebContents: () => mainWindow?.webContents,
-      runtime,
-      platform,
-      lifecycle,
+  void app
+    .whenReady()
+    .then(async () => {
+      if (process.platform === "win32") app.setAppUserModelId("com.squirrel.pico.Pico");
+      installApplicationMenu(() => mainWindow);
+      await daemon.start();
+      const platform = createPlatformServices();
+      disposeIpc = registerDesktopIpcHandlers({
+        ipcMain,
+        getTrustedWebContents: () => mainWindow?.webContents,
+        runtime,
+        platform,
+        lifecycle,
+      });
+      disposeUpdater = configureAutoUpdates(() => lifecycle.markQuitting());
+      await openMainWindow();
+    })
+    .catch((error: unknown) => {
+      console.error("Pico desktop failed to start", error);
+      app.exit(1);
     });
-    disposeUpdater = configureAutoUpdates(() => lifecycle.markQuitting());
-    await openMainWindow();
-  }).catch((error: unknown) => {
-    console.error("Pico desktop failed to start", error);
-    app.exit(1);
-  });
 }
 
 async function openMainWindow(): Promise<void> {
