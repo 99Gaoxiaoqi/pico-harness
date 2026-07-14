@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { loadAgentCatalog } from "../src/agents/catalog.js";
+import { SkillLoader } from "../src/context/skill.js";
 import { createSubagentRegistryFactory } from "../src/tools/delegation-registry.js";
 import { DelegationManager } from "../src/tools/delegation-manager.js";
 import { DelegateTaskTool, type AgentRunner, type SubagentResult } from "../src/tools/subagent.js";
@@ -49,6 +50,40 @@ describe("统一 Agent 目录集成", () => {
     expect(result.status).toBe("completed");
     expect(seen.systemPrompt).toBe("只报告安全问题。");
     expect(seen.tools).toEqual(["delegate_status", "grep", "read_file"]);
+  });
+
+  it("子代理 skill_view 复用宿主的 Plugin Skill Catalog", async () => {
+    const { workDir } = await createWorkspace();
+    const pluginRoot = join(workDir, "plugin-skills", "review");
+    await mkdir(pluginRoot, { recursive: true });
+    await writeFile(
+      join(pluginRoot, "SKILL.md"),
+      "---\nname: review\ndescription: plugin review\n---\nPlugin review body",
+    );
+    const source = {
+      id: "plugin:quality:skill",
+      scope: "external" as const,
+      format: "pico-native" as const,
+      root: join(workDir, "plugin-skills"),
+      priority: 35,
+      namespace: "quality:",
+    };
+    const manager = new DelegationManager();
+    const runner: AgentRunner = {
+      async runSub(): Promise<SubagentResult> {
+        return { summary: "ok", artifacts: [] };
+      },
+    };
+    const registry = createSubagentRegistryFactory({
+      workDir,
+      runner,
+      manager,
+      skillLoaderFactory: (root) => new SkillLoader(root, { externalSources: [source] }),
+    })({ mode: "explore", role: "leaf", depth: 1, maxSpawnDepth: 2 });
+
+    await expect(
+      registry.getTool("skill_view")?.execute(JSON.stringify({ name: "quality:review" })),
+    ).resolves.toBe("Plugin review body");
   });
 
   it("按 native > project Claude > user Claude > builtin 整条覆盖，不拼接字段", async () => {

@@ -766,6 +766,7 @@ export async function executeAgentRuntime(
       !ownsRuntimeState,
       runtimeState.taskHostRuntime?.supervisor,
       reporter,
+      skillLoaderFactory,
     );
     if (backgroundPolicy) pruneRegistryToBackgroundAllowlist(registry, backgroundPolicy);
     dependencies.toolStatusSink?.(toolStatusFromRegistry(registry));
@@ -1298,6 +1299,7 @@ function registerDelegationTools(
   allowAsyncCompletion: boolean,
   worktreeSupervisor?: WorktreeSupervisor,
   reporter?: Reporter,
+  skillLoaderFactory?: (workDir: string) => SkillLoader,
 ): void {
   const registryFactory = createSubagentRegistryFactory({
     workDir,
@@ -1307,6 +1309,7 @@ function registerDelegationTools(
     yoloSandbox,
     ownerSessionId,
     allowAsyncCompletion,
+    ...(skillLoaderFactory ? { skillLoaderFactory } : {}),
     ...(worktreeSupervisor ? { worktreeSupervisor } : {}),
     ...(profiles.length > 0 ? { profiles } : {}),
   });

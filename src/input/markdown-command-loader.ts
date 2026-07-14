@@ -55,7 +55,6 @@ const COMMAND_PRIORITIES: Record<MarkdownCommandSource, number> = {
   external: 15,
 };
 
-const COMMAND_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 const COMMAND_PATH_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]*(?::[A-Za-z0-9][A-Za-z0-9_-]*)*$/;
 const NON_COMMAND_DIRS = new Set([
   "README",
@@ -283,7 +282,7 @@ async function loadSkillProjectionCommands(
 
 function parseSkillProjectionCommand(skill: Skill): MarkdownPromptCommand | undefined {
   const name = skill.name;
-  if (!COMMAND_NAME_PATTERN.test(name)) return undefined;
+  if (!COMMAND_PATH_PATTERN.test(name)) return undefined;
 
   return {
     description: skill.description,

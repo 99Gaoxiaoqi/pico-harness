@@ -269,7 +269,14 @@ async function loadExternalAgentSource(
       value: adaptClaudeAgent({ ...agent, name: `${source.namespace ?? ""}${agent.name}` }, source),
     }));
   }
-  return await loadAgentSource(source);
+  return (await loadAgentSource(source)).map((candidate) => {
+    const name = `${source.namespace ?? ""}${candidate.name}`;
+    return {
+      ...candidate,
+      name,
+      ...(candidate.value ? { value: { ...candidate.value, name } } : {}),
+    };
+  });
 }
 
 function agentSource(

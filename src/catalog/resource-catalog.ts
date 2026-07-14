@@ -22,7 +22,8 @@ export interface ResourceCatalogSource {
  */
 export interface ExternalResourceCatalogSource extends ResourceCatalogSource {
   readonly scope: "external";
-  readonly format: "external";
+  /** 外部来源仍保留内容方言，便于在 Catalog 边界完成兼容转换。 */
+  readonly format: "external" | "pico-native" | "claude-compat";
 }
 
 export interface ResourceCatalogCandidate<T> {

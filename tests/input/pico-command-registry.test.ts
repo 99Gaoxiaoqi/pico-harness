@@ -628,7 +628,7 @@ describe("Pico command registry", () => {
     mkdirSync(join(workDir, ".claude", "skills", "review"), { recursive: true });
     writeFileSync(
       sourcePath,
-      "---\nname: review\ndescription: review files\nhooks:\n  PreToolUse:\n    - matcher: bash\n      hooks:\n        - type: prompt\n          prompt: Check command\n---\n\nReview $0 carefully.",
+      "---\nname: review\ndescription: review files\nmodel: review/model\nallowed-tools: Read, Bash\nhooks:\n  PreToolUse:\n    - matcher: bash\n      hooks:\n        - type: prompt\n          prompt: Check command\n---\n\nReview $0 carefully.",
     );
     const registry = await createPicoCommandRegistry({
       workDir,
@@ -650,6 +650,10 @@ describe("Pico command registry", () => {
         skillHookConfig: {
           PreToolUse: [{ matcher: "bash", hooks: [{ type: "prompt", prompt: "Check command" }] }],
         },
+      });
+      expect(result.result.execution).toEqual({
+        model: "review/model",
+        allowedTools: ["read_file", "bash"],
       });
     }
   });
