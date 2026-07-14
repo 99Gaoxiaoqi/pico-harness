@@ -1,7 +1,17 @@
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import type { CredentialRef, CredentialVault } from "../../src/provider/credential-vault.js";
+import {
+  AgentRuntime,
+  type RunAgentCliDependencies,
+  type RunAgentCliOptions,
+  type RunAgentCliResult,
+} from "../../src/runtime/agent-runtime.js";
+import type { AskUserRequestId } from "../../src/tools/ask-user.js";
+import { WorkspaceTrustStore } from "../../src/security/workspace-trust.js";
 import {
   LocalDaemonAlreadyRunningError,
   LocalDaemonHost,
@@ -139,6 +149,119 @@ describe("LocalDaemonHost integration", () => {
     }
   });
 
+  it("受信任桌面 Run 使用真实交互边界并幂等接收审批与 Ask User", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pico-daemon-desktop-run-"));
+    cleanups.push(() => rm(root, { recursive: true, force: true }));
+    const workspace = join(root, "workspace");
+    await mkdir(join(workspace, ".pico"), { recursive: true });
+    execFileSync("git", ["init", "--quiet"], { cwd: workspace });
+    await writeFile(
+      join(workspace, ".pico", "config.json"),
+      JSON.stringify({
+        version: 1,
+        model: "local/coder",
+        providers: {
+          local: {
+            protocol: "openai",
+            baseURL: "https://provider.example.test/v1",
+            apiKeyEnv: "PICO_DESKTOP_TEST_KEY",
+            models: ["coder"],
+          },
+        },
+      }),
+    );
+    const trustStore = new WorkspaceTrustStore({
+      userStateDirectory: join(root, "trust"),
+    });
+    await trustStore.trust(await trustStore.canonicalize(workspace));
+    const endpoint = resolveLocalDaemonEndpoint({
+      runtimeDir: join(root, "runtime"),
+      userIdentity: "desktop-run-test",
+    });
+    const host = createProductionLocalDaemonHost({
+      endpoint,
+      trustStore,
+      agentRuntime: new InteractiveFakeAgentRuntime(),
+      credentialVault: new AvailableCredentialVault(),
+      registrationStore: new WorkspaceRegistrationStore(join(root, "workspaces.json")),
+    });
+    await host.start();
+    const client = new LocalRuntimeClient(endpoint);
+    try {
+      const approvalEvent = deferred<RuntimeEvent>();
+      const promptEvent = deferred<RuntimeEvent>();
+      const timelineEvents: RuntimeEvent[] = [];
+      await client.subscribe(
+        (event) => {
+          if (event.topic === "approval.requested") approvalEvent.resolve(event);
+          if (event.topic === "prompt.requested") promptEvent.resolve(event);
+          if (event.topic === "run.timeline") timelineEvents.push(event);
+        },
+        undefined,
+        workspace,
+      );
+
+      const run = (await client.request("run.start", {
+        workspacePath: workspace,
+        sessionId: "desktop-session-1",
+        prompt: "检查项目并给出结论",
+      })) as { runId: string };
+      const approval = await approvalEvent.promise;
+      const prompt = await promptEvent.promise;
+      expect(approval.scope.runId).toBe(run.runId);
+      expect(prompt.scope.runId).toBe(run.runId);
+
+      await expect(
+        client.request("approval.respond", {
+          workspacePath: workspace,
+          approvalId: "approval-1",
+          decision: "allow_once",
+        }),
+      ).resolves.toEqual({ accepted: true, alreadyResolved: false });
+      await expect(
+        client.request("approval.respond", {
+          workspacePath: workspace,
+          approvalId: "approval-1",
+          decision: "allow_once",
+        }),
+      ).resolves.toEqual({ accepted: true, alreadyResolved: true });
+      await expect(
+        client.request("prompt.respond", {
+          workspacePath: workspace,
+          promptId: "prompt-1",
+          answer: "任意自由文本",
+        }),
+      ).rejects.toThrow(/^INVALID_PARAMS:/u);
+      await expect(
+        client.request("prompt.respond", {
+          workspacePath: workspace,
+          promptId: "prompt-1",
+          answer: "保留兼容",
+        }),
+      ).resolves.toEqual({ accepted: true, alreadyResolved: false });
+
+      await expect
+        .poll(async () => {
+          const listed = (await client.request("runs.list", {
+            workspacePath: workspace,
+          })) as { runs: Array<{ runId: string; status: string }> };
+          return listed.runs.find((candidate) => candidate.runId === run.runId)?.status;
+        })
+        .toBe("succeeded");
+      expect(timelineEvents.map((event) => event.payload)).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ item: expect.objectContaining({ eventType: "tool.started" }) }),
+          expect.objectContaining({
+            item: expect.objectContaining({ eventType: "tool.completed" }),
+          }),
+        ]),
+      );
+    } finally {
+      client.close();
+      await host.stop();
+    }
+  });
+
   it("并发登记与取消登记不丢失更新", async () => {
     const root = await mkdtemp(join(tmpdir(), "pico-daemon-registration-"));
     cleanups.push(() => rm(root, { recursive: true, force: true }));
@@ -240,4 +363,74 @@ class EmptyCronRuntime implements ManagedCronWorkspaceRuntime {
   start(): void {}
 
   async close(): Promise<void> {}
+}
+
+class AvailableCredentialVault implements CredentialVault {
+  capability() {
+    return {
+      available: true,
+      backend: "macos-keychain" as const,
+      diagnostic: "test vault",
+    };
+  }
+
+  async put(): Promise<void> {}
+
+  async has(): Promise<boolean> {
+    return true;
+  }
+
+  async resolve(_ref: CredentialRef): Promise<string> {
+    return "desktop-test-secret";
+  }
+}
+
+class InteractiveFakeAgentRuntime extends AgentRuntime {
+  override async execute(
+    options: RunAgentCliOptions,
+    dependencies: RunAgentCliDependencies = {},
+  ): Promise<RunAgentCliResult> {
+    if (!dependencies.approvalManager || !dependencies.approvalNotifier) {
+      throw new Error("desktop approval boundary missing");
+    }
+    if (!dependencies.askUserHandler) throw new Error("desktop AskUser boundary missing");
+    const sessionId = options.session ?? "missing-session";
+    const workDir = options.dir ?? process.cwd();
+    dependencies.reporter?.onStart(workDir);
+    dependencies.reporter?.onToolCall("bash", '{"command":"npm test"}', "call-1");
+    const approval = dependencies.approvalManager.waitForApproval(
+      "approval-1",
+      "bash",
+      '{"command":"npm test"}',
+      dependencies.approvalNotifier,
+      undefined,
+      dependencies.signal,
+    );
+    const answer = dependencies.askUserHandler.waitForAnswer(
+      {
+        requestId: "prompt-1" as AskUserRequestId,
+        question: "如何处理兼容性？",
+        options: [
+          { optionId: "keep", label: "保留兼容" },
+          { optionId: "break", label: "允许破坏" },
+        ],
+      },
+      dependencies.signal,
+    );
+    const [approvalResult, promptResult] = await Promise.all([approval, answer]);
+    if (!approvalResult.allowed || promptResult.kind !== "selected") {
+      throw new Error("desktop interaction rejected");
+    }
+    dependencies.reporter?.onToolResult("bash", "tests passed", false, "call-1");
+    dependencies.reporter?.onMessage("已保留兼容并完成验证。\n");
+    dependencies.reporter?.onFinish();
+    return {
+      sessionId,
+      sessionSelection: { mode: "resume", sessionId },
+      workDir,
+      finalMessage: "已保留兼容并完成验证。",
+      usage: { promptTokens: 12, completionTokens: 6, costCNY: 0.01 },
+      messages: [],
+    };
+  }
 }

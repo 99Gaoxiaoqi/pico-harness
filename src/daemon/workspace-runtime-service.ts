@@ -18,6 +18,7 @@ export interface DaemonRunExecutor {
   (input: {
     workspacePath: string;
     prompt: string;
+    sessionId?: string;
     context: WorkspaceRunContext;
   }): Promise<Record<string, unknown> | void>;
 }
@@ -129,9 +130,15 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
     if (request.method === "run.start") {
       const workspacePath = requiredString(params, "workspacePath");
       const prompt = requiredString(params, "prompt");
+      const sessionId = optionalString(params, "sessionId");
       const runtime = await this.registry.get(workspacePath);
       const run = runtime.startRun({ description: prompt }, (context) =>
-        this.options.execute({ workspacePath: runtime.workspace, prompt, context }),
+        this.options.execute({
+          workspacePath: runtime.workspace,
+          prompt,
+          ...(sessionId ? { sessionId } : {}),
+          context,
+        }),
       );
       return runPayload(run);
     }

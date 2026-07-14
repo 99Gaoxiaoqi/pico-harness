@@ -222,6 +222,8 @@ export interface RunAgentCliDependencies extends RuntimeHost {
   runtimeState?: SessionRuntime;
   /** 仅由可展示结构化问题的 TUI bundle 提供。 */
   askUserHandler?: AskUserHandler;
+  /** Host-owned approval state, required when decisions are settled outside the TUI process. */
+  approvalManager?: ApprovalManager;
   /** Receives the complete registry after late delegation/MCP registration. */
   toolStatusSink?: (tools: readonly SessionToolStatus[]) => void;
   mcpStatusSink?: (snapshot: McpStatusSnapshot) => void;
@@ -708,7 +710,7 @@ export async function executeAgentRuntime(
           approvalNotifier,
           workDir,
           dependencies.signal,
-          globalApprovalManager,
+          dependencies.approvalManager ?? globalApprovalManager,
           settings,
           workspaceRoots,
           runtimeState.hookService,
