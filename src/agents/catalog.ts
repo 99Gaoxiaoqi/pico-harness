@@ -97,7 +97,11 @@ export async function loadAgentCatalog(
   const paths = resolvePicoPaths(options.workDir, {
     homeDir,
     env: options.env ?? process.env,
-    ...(options.picoHome ? { picoHome: options.picoHome } : {}),
+    ...(options.picoHome
+      ? { picoHome: options.picoHome }
+      : options.homeDir
+        ? { picoHome: join(homeDir, ".pico") }
+        : {}),
   });
   const sources = [
     agentSource("project-pico", "project", "pico-native", paths.project.agents, 50),

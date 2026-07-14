@@ -819,7 +819,7 @@ export async function executeAgentRuntime(
       mcpManager.attachRegistry(registry);
       dependencies.toolStatusSink?.(toolStatusFromRegistry(registry));
     } else if (mcpManager && (mcpConfigPath || pluginMcpSources.length > 0)) {
-      if (backgroundPolicy && mcpConfigPath) {
+      if (mcpConfigPath && (backgroundPolicy || pluginMcpSources.length === 0)) {
         await mcpManager.loadConfig(mcpConfigPath);
       } else {
         await mcpManager.replaceSources([

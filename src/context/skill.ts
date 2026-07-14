@@ -190,7 +190,11 @@ export class SkillLoader {
     const paths = resolvePicoPaths(this.workDir, {
       homeDir,
       env: this.options.env ?? process.env,
-      ...(this.options.picoHome ? { picoHome: this.options.picoHome } : {}),
+      ...(this.options.picoHome
+        ? { picoHome: this.options.picoHome }
+        : this.options.homeDir
+          ? { picoHome: join(homeDir, ".pico") }
+          : {}),
     });
     const includeUserResources =
       this.options.includeUserResources === true ||

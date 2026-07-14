@@ -244,6 +244,7 @@ export async function createPicoCommandRegistry(
       : {}),
     includeSkillCommands: true,
     skillLoader,
+    ...(options.picoHome ? { picoHome: options.picoHome } : {}),
     ...(options.homeDir ? { homeDir: options.homeDir } : {}),
     ...(options.includeClaudeProjectResources !== undefined
       ? { includeClaudeProjectResources: options.includeClaudeProjectResources }
