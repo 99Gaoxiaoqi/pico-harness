@@ -962,9 +962,7 @@ function createAgentsCommand(options: PicoCommandRegistryOptions): SlashCommand 
     kind: "local",
     availability: "idle",
     execute: async (): Promise<LocalCommandResult> => {
-      const agents = summarizeAgentProfiles(
-        await loadRegistryAgents(options),
-      );
+      const agents = summarizeAgentProfiles(await loadRegistryAgents(options));
       return {
         type: "local",
         action: "agents",

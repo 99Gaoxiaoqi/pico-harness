@@ -7,10 +7,7 @@ import type { HookConfigSourceSpec } from "../hooks/config.js";
 import type { McpConfigSource } from "../mcp/manager.js";
 import type { McpConfig, McpServerConfig } from "../mcp/types.js";
 import { PluginManagementService } from "./plugin-management-service.js";
-import {
-  createPluginVariableMap,
-  substitutePluginVariablesDeep,
-} from "./plugin-resolver.js";
+import { createPluginVariableMap, substitutePluginVariablesDeep } from "./plugin-resolver.js";
 import type {
   PluginConfigContribution,
   PluginContributionSet,
@@ -64,9 +61,7 @@ export async function loadPluginRuntimeSnapshot(
     const priority = pluginPriority(installed.scope);
     skillSources.push(...pathSources(contributions, contributions.skills, "skill", priority));
     commandSources.push(...pathSources(contributions, contributions.commands, "command", priority));
-    agentSources.push(
-      ...(await agentPathSources(contributions, contributions.agents, priority)),
-    );
+    agentSources.push(...(await agentPathSources(contributions, contributions.agents, priority)));
     const variables = createPluginVariableMap(contributions.plugin, options.workDir, options);
 
     for (const contribution of contributions.hooks) {
@@ -150,7 +145,7 @@ async function agentPathSources(
       root: contribution.path,
       priority,
       namespace: contribution.namespace,
-      adapter: await isYamlFile(contribution.path)
+      adapter: (await isYamlFile(contribution.path))
         ? ("pico-agent-yaml" as const)
         : ("claude-agent-directory" as const),
     })),
@@ -193,9 +188,10 @@ function parseLspServers(pluginId: string, input: unknown): LspServerConfig[] {
   const value = root["lspServers"] ?? root["servers"] ?? root;
   const candidates: Array<{ id?: string; server: unknown }> = Array.isArray(value)
     ? value.map((server) => ({ server }))
-    : Object.entries(requireRecord(value, "LSP servers 必须是数组或对象")).map(
-        ([id, server]) => ({ id, server }),
-      );
+    : Object.entries(requireRecord(value, "LSP servers 必须是数组或对象")).map(([id, server]) => ({
+        id,
+        server,
+      }));
   return candidates.map(({ id, server }, index) => {
     const config = requireRecord(server, `LSP server ${id ?? index} 必须是对象`);
     const rawId = optionalString(config["id"]) ?? id;

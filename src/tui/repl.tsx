@@ -447,12 +447,7 @@ async function runPreparedUserPrompt(
   prompt: string,
   deps: Pick<
     HandleTuiInputSubmissionDeps,
-    | "workDir"
-    | "reporter"
-    | "runAgent"
-    | "setRewindContext"
-    | "abortControllerRef"
-    | "skillLoader"
+    "workDir" | "reporter" | "runAgent" | "setRewindContext" | "abortControllerRef" | "skillLoader"
   >,
   rewind: { rewindPrompt: string; rewindTranscriptIndex: number },
   attachments: readonly ImagePart[],
@@ -1046,8 +1041,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
       includeUserResources: true,
       includeClaudeProjectResources:
         claudeCompatibility.enabled && claudeCompatibility.projectResources,
-      includeClaudeUserResources:
-        claudeCompatibility.enabled && claudeCompatibility.userResources,
+      includeClaudeUserResources: claudeCompatibility.enabled && claudeCompatibility.userResources,
       externalSources: pluginSnapshot.skillSources,
     });
   const modelRouter = await loadModelRouter({

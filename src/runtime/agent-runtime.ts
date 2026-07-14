@@ -288,11 +288,8 @@ export async function executeAgentRuntime(
       includeUserResources: true,
       includeClaudeProjectResources:
         claudeCompatibility.enabled && claudeCompatibility.projectResources,
-      includeClaudeUserResources:
-        claudeCompatibility.enabled && claudeCompatibility.userResources,
-      ...(pluginSnapshot?.skillSources
-        ? { externalSources: pluginSnapshot.skillSources }
-        : {}),
+      includeClaudeUserResources: claudeCompatibility.enabled && claudeCompatibility.userResources,
+      ...(pluginSnapshot?.skillSources ? { externalSources: pluginSnapshot.skillSources } : {}),
       env: dependencies.env ?? process.env,
     });
   const configuredAdditionalDirectories = picoConfig.additionalDirectories;

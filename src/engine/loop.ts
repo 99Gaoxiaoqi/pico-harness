@@ -2101,7 +2101,9 @@ export class AgentEngine implements AgentRunner {
     const runtimeWorkspaceRoot = opts.workDir ?? this.workDir;
     const canViewSkills = initialToolNames.has("skill_view");
     const skillIndex = canViewSkills
-      ? await (this.skillLoaderFactory?.(runtimeWorkspaceRoot) ?? new SkillLoader(runtimeWorkspaceRoot)).loadAll()
+      ? await (
+          this.skillLoaderFactory?.(runtimeWorkspaceRoot) ?? new SkillLoader(runtimeWorkspaceRoot)
+        ).loadAll()
       : "";
     signal?.throwIfAborted();
 

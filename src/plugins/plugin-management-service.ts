@@ -43,7 +43,9 @@ export class PluginManagementService {
   }
 
   async list(): Promise<readonly ManagedPluginInspection[]> {
-    return await Promise.all((await this.manager.list()).map((plugin) => this.inspectInstalled(plugin)));
+    return await Promise.all(
+      (await this.manager.list()).map((plugin) => this.inspectInstalled(plugin)),
+    );
   }
 
   async inspect(reference: PluginReference): Promise<ManagedPluginInspection> {
@@ -52,8 +54,13 @@ export class PluginManagementService {
 
   async prepareTrust(reference: PluginReference): Promise<PluginTrustProposal> {
     const inspection = await this.inspect(reference);
-    if (inspection.contributions.compatibility === "blocked" || !inspection.contributions.fingerprint) {
-      throw new Error(`Plugin ${reference.id} 当前不可信任: ${inspection.contributions.compatibility}`);
+    if (
+      inspection.contributions.compatibility === "blocked" ||
+      !inspection.contributions.fingerprint
+    ) {
+      throw new Error(
+        `Plugin ${reference.id} 当前不可信任: ${inspection.contributions.compatibility}`,
+      );
     }
     if (inspection.changedSinceInstall) {
       const refreshed = await this.manager.installFromDirectory(

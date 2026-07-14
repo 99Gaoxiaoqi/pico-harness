@@ -43,7 +43,10 @@ describe("Plugin runtime snapshot", () => {
       join(pluginDir, "SKILL.md"),
       "---\nname: review\ndescription: Review code\n---\nReview carefully.\n",
     );
-    await writeFile(join(pluginDir, "review.md"), "---\ndescription: Review\n---\nReview $ARGUMENTS\n");
+    await writeFile(
+      join(pluginDir, "review.md"),
+      "---\ndescription: Review\n---\nReview $ARGUMENTS\n",
+    );
     await writeFile(
       join(pluginDir, "reviewer.md"),
       "---\nname: reviewer\ndescription: Reviewer\ntools: Read, Grep\n---\nReview the code.\n",
@@ -53,9 +56,7 @@ describe("Plugin runtime snapshot", () => {
 
     const service = new PluginManagementService({ workDir, picoHome });
     await service.install(pluginDir, "project");
-    expect(
-      (await loadPluginRuntimeSnapshot({ workDir, picoHome, service })).pluginIds,
-    ).toEqual([]);
+    expect((await loadPluginRuntimeSnapshot({ workDir, picoHome, service })).pluginIds).toEqual([]);
     const proposal = await service.prepareTrust({ id: "quality", scope: "project" });
     await service.trust(proposal);
     await service.enable({ id: "quality", scope: "project" });
@@ -63,8 +64,9 @@ describe("Plugin runtime snapshot", () => {
     const snapshot = await loadPluginRuntimeSnapshot({ workDir, picoHome, service });
     expect(snapshot.pluginIds).toEqual(["quality"]);
     expect(snapshot.diagnostics).toEqual([]);
-    expect((await new SkillLoader(workDir, { externalSources: snapshot.skillSources }).list())[0])
-      .toMatchObject({ name: "quality:review", body: "Review carefully." });
+    expect(
+      (await new SkillLoader(workDir, { externalSources: snapshot.skillSources }).list())[0],
+    ).toMatchObject({ name: "quality:review", body: "Review carefully." });
     expect(
       (
         await loadMarkdownCommands({
