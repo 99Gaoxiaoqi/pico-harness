@@ -1337,6 +1337,14 @@ function createSkillCommand(loader: SkillLoader): SlashCommand {
           ...activation.metadata,
           ...(skill?.hooks === undefined ? {} : { skillHookConfig: skill.hooks }),
         },
+        ...(skill && (skill.model !== undefined || skill.allowedTools !== undefined)
+          ? {
+              execution: {
+                ...(skill.model === undefined ? {} : { model: skill.model }),
+                ...(skill.allowedTools === undefined ? {} : { allowedTools: skill.allowedTools }),
+              },
+            }
+          : {}),
       };
     },
   };

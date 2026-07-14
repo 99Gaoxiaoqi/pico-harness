@@ -128,6 +128,33 @@ describe("Pico resource catalog", () => {
     ]);
   });
 
+  it("namespaces Pico YAML Agent contributions from Plugins", async () => {
+    const { homeDir, workDir } = await workspace();
+    const pluginAgents = join(workDir, "plugin", "agents.yaml");
+    await writeNativeAgents(pluginAgents, "plugin prompt");
+
+    const profiles = await loadAgentCatalog({
+      workDir,
+      homeDir,
+      includeBuiltins: false,
+      externalSources: [
+        {
+          id: "plugin:quality:agent",
+          scope: "external",
+          format: "pico-native",
+          root: pluginAgents,
+          priority: 35,
+          namespace: "quality:",
+          adapter: "pico-agent-yaml",
+        },
+      ],
+    });
+
+    expect(profiles).toEqual([
+      expect.objectContaining({ name: "quality:reviewer", systemPrompt: "plugin prompt" }),
+    ]);
+  });
+
   it("discloses persistent Agent names and bounded descriptions in delegate_task schema", async () => {
     const profiles: AgentProfile[] = [
       {

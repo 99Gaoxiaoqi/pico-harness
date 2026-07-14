@@ -41,11 +41,11 @@ describe("Plugin runtime snapshot", () => {
     });
     await writeFile(
       join(pluginDir, "SKILL.md"),
-      "---\nname: review\ndescription: Review code\n---\nReview carefully.\n",
+      "---\nname: skill-review\ndescription: Review code\nallowed-tools: Read, Bash\n---\nReview carefully.\n",
     );
     await writeFile(
       join(pluginDir, "review.md"),
-      "---\ndescription: Review\n---\nReview $ARGUMENTS\n",
+      "---\ndescription: Review\nallowed-tools: Read, Bash\n---\nReview $ARGUMENTS\n",
     );
     await writeFile(
       join(pluginDir, "reviewer.md"),
@@ -66,17 +66,31 @@ describe("Plugin runtime snapshot", () => {
     expect(snapshot.diagnostics).toEqual([]);
     expect(
       (await new SkillLoader(workDir, { externalSources: snapshot.skillSources }).list())[0],
-    ).toMatchObject({ name: "quality:review", body: "Review carefully." });
-    expect(
-      (
-        await loadMarkdownCommands({
-          workDir,
-          homeDir: picoHome,
-          includeSkillCommands: false,
-          externalSources: snapshot.commandSources,
-        })
-      ).map((command) => command.name),
-    ).toContain("quality:review");
+    ).toMatchObject({
+      name: "quality:skill-review",
+      body: "Review carefully.",
+      allowedTools: ["read_file", "bash"],
+    });
+    const commands = await loadMarkdownCommands({
+      workDir,
+      homeDir: picoHome,
+      includeSkillCommands: true,
+      skillLoader: new SkillLoader(workDir, { externalSources: snapshot.skillSources }),
+      externalSources: snapshot.commandSources,
+    });
+    expect(commands).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: "quality:review",
+          allowedTools: ["read_file", "bash"],
+        }),
+        expect.objectContaining({
+          name: "quality:skill-review",
+          source: "skill",
+          allowedTools: ["read_file", "bash"],
+        }),
+      ]),
+    );
     expect(
       (
         await loadAgentCatalog({

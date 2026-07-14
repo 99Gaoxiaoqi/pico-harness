@@ -128,11 +128,17 @@ function pathSources(
   return contributions.map((contribution, index) => ({
     id: contributionId(plugin.plugin.id, kind, contribution, index),
     scope: "external",
-    format: "external",
+    format: pluginResourceFormat(plugin),
     root: contribution.path,
     priority,
     namespace: contribution.namespace,
   }));
+}
+
+function pluginResourceFormat(
+  plugin: PluginContributionSet,
+): ExternalResourceCatalogSource["format"] {
+  return plugin.plugin.manifestSource === "claude-compatible" ? "claude-compat" : "pico-native";
 }
 
 async function agentPathSources(

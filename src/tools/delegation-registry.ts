@@ -41,6 +41,8 @@ export interface SubagentRegistryFactoryConfig {
   ownerSessionId?: string;
   /** 是否由长生命周期宿主持有 optional/detached 委派。 */
   allowAsyncCompletion?: boolean;
+  /** 与宿主同源的 Skill Catalog，保留用户、Plugin 与兼容开关语义。 */
+  skillLoaderFactory?: (workDir: string) => SkillLoader;
 }
 
 /**
@@ -126,6 +128,10 @@ function buildProfileRegistry(
   const registry = new ToolRegistry();
   for (const toolName of profile.tools) {
     if (request.mode === "explore" && EXPLORE_WRITE_TOOLS.has(toolName)) continue;
+    if (toolName === "skill_view" && config.skillLoaderFactory) {
+      registry.register(new SkillViewTool(config.skillLoaderFactory(config.workDir)));
+      continue;
+    }
     const ctor = TOOL_CONSTRUCTORS[toolName];
     if (ctor) registry.register(ctor(config.workDir, config.workspaceRoots, config.yoloSandbox));
   }
@@ -146,7 +152,11 @@ function buildModeRegistry(
   registry: ToolRegistry,
 ): ToolRegistry {
   registry.register(new ReadFileTool(config.workspaceRoots));
-  registry.register(new SkillViewTool(new SkillLoader(config.workDir)));
+  registry.register(
+    new SkillViewTool(
+      config.skillLoaderFactory?.(config.workDir) ?? new SkillLoader(config.workDir),
+    ),
+  );
 
   const bash = new BashTool(config.workDir, undefined, {
     allowBackground: false,
