@@ -12,6 +12,8 @@ export interface ClaudeAgent {
   sourcePath: string;
   source: ClaudeAgentSource;
   tools?: string[];
+  /** Claude frontmatter 的 model 值；运行时再解析为 Pico model route。 */
+  model?: string;
 }
 
 export interface ClaudeAgentSummary {
@@ -20,6 +22,7 @@ export interface ClaudeAgentSummary {
   sourcePath: string;
   source?: ClaudeAgentSource;
   tools?: string[];
+  model?: string;
 }
 
 export interface LoadClaudeAgentsOptions {
@@ -96,6 +99,7 @@ export function parseClaudeAgent(
     prompt,
     source,
     sourcePath,
+    ...optionalString("model", frontmatter.model),
     ...optionalTools(frontmatter.tools),
   };
 }
@@ -104,12 +108,13 @@ export function summarizeClaudeAgents(
   agents: ClaudeAgent[],
   options: SummarizeClaudeAgentsOptions = {},
 ): ClaudeAgentSummary[] {
-  return agents.map(({ description, name, source, sourcePath, tools }) => ({
+  return agents.map(({ description, model, name, source, sourcePath, tools }) => ({
     description,
     name,
     sourcePath,
     ...(options.includeSource ? { source } : {}),
     ...(tools !== undefined ? { tools } : {}),
+    ...(model !== undefined ? { model } : {}),
   }));
 }
 
@@ -172,6 +177,14 @@ function optionalTools(value: unknown): Partial<ClaudeAgent> {
       .map((tool) => tool.trim())
       .filter(Boolean),
   };
+}
+
+function optionalString<K extends keyof ClaudeAgent>(
+  key: K,
+  value: unknown,
+): Partial<Pick<ClaudeAgent, K>> {
+  const normalized = normalizeString(value);
+  return normalized ? ({ [key]: normalized } as Partial<Pick<ClaudeAgent, K>>) : {};
 }
 
 function normalizeString(value: unknown): string {

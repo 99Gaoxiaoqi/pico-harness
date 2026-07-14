@@ -486,7 +486,7 @@ describe("Pico command registry", () => {
     const sourcePath = join(workDir, ".claude", "agents", "reviewer.md");
     writeFileSync(
       sourcePath,
-      "---\ndescription: 审查代码\ntools: read_file, grep\n---\n\n# Reviewer\n只输出高风险问题。",
+      "---\ndescription: 审查代码\nmodel: volcengine/deepseek-v4-pro\ntools: read_file, grep\n---\n\n# Reviewer\n只输出高风险问题。",
     );
 
     const registry = await createPicoCommandRegistry({
@@ -503,6 +503,7 @@ describe("Pico command registry", () => {
     expect(result.result.prompt).toContain("delegate_task");
     expect(result.result.prompt).toContain('"agent_name": "reviewer"');
     expect(result.result.prompt).toContain('"goal": "检查 src/input"');
+    expect(result.result.prompt).toContain('"model_route": "volcengine/deepseek-v4-pro"');
     expect(result.result.prompt).toContain("只输出高风险问题。");
     expect(result.result.metadata).toEqual({
       agentName: "reviewer",
