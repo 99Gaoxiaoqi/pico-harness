@@ -15,6 +15,7 @@ import {
   type CredentialVault,
 } from "../provider/credential-vault.js";
 import { resolveModelRouteCapabilities } from "../provider/model-capabilities.js";
+import { coordinateReasoningLevel } from "../provider/reasoning-capability.js";
 import {
   BACKGROUND_HARDLINE_VERSION,
   BACKGROUND_HOOK_VERSION,
@@ -78,12 +79,21 @@ export function createProductionLocalDaemonHost(
           `工作区尚未信任，拒绝启动前台 Run: ${workspacePath}`,
         );
       }
-      const route = await resolveDesktopModelRoute(workspacePath, credentialVault);
       const targetSessionId = sessionId ?? createCliSessionId();
       context.bindSession(targetSessionId);
       const session =
         globalSessionManager.get(targetSessionId, workspacePath) ??
         (await globalSessionManager.getOrCreate(targetSessionId, workspacePath));
+      const persistedSettings = (await session.readHydrationSnapshot()).runtime.settings;
+      const route = await resolveDesktopModelRoute(
+        workspacePath,
+        credentialVault,
+        persistedSettings?.modelRouteId ?? persistedSettings?.model,
+      );
+      const reasoningLevel = coordinateReasoningLevel(
+        route.capabilities.reasoningProfile,
+        persistedSettings?.thinkingEffortExplicit ? persistedSettings.thinkingEffort : undefined,
+      ).level;
       const runtimeState = await createSessionRuntime({
         workDir: workspacePath,
         sessionId: targetSessionId,
@@ -132,6 +142,12 @@ export function createProductionLocalDaemonHost(
             modelRouteId: route.modelRouteId,
             modelCapabilities: route.capabilities,
             allowModelFallback: false,
+            ...(reasoningLevel !== undefined ? { thinkingEffort: reasoningLevel } : {}),
+            ...(persistedSettings?.mode === "plan" ? { planMode: true } : {}),
+            ...(persistedSettings?.mode ? { rewindInteractionMode: persistedSettings.mode } : {}),
+            ...(persistedSettings?.mode === "plan" && persistedSettings.prePlanMode
+              ? { rewindPrePlanMode: persistedSettings.prePlanMode }
+              : {}),
             ...(await existingMcpConfig(workspacePath)),
           },
           {
@@ -395,9 +411,13 @@ interface PendingInteraction {
   readonly sessionId: string;
 }
 
-async function resolveDesktopModelRoute(workspacePath: string, credentialVault: CredentialVault) {
+async function resolveDesktopModelRoute(
+  workspacePath: string,
+  credentialVault: CredentialVault,
+  requestedModel?: string,
+) {
   const config = await loadPicoConfig(workspacePath);
-  const modelRouteId = config.model;
+  const modelRouteId = resolveConfiguredModelRoute(config, requestedModel);
   if (!modelRouteId) {
     throw new RuntimeProtocolError(
       RUNTIME_ERROR_CODES.FORBIDDEN,
@@ -441,6 +461,26 @@ async function resolveDesktopModelRoute(workspacePath: string, credentialVault: 
     );
   }
   return { ...route, apiKey: await credentialVault.resolve(credentialRef) };
+}
+
+function resolveConfiguredModelRoute(
+  config: Awaited<ReturnType<typeof loadPicoConfig>>,
+  requestedModel: string | undefined,
+): string | undefined {
+  const requested = requestedModel?.trim();
+  if (!requested) return config.model;
+  if (requested.includes("/")) return requested;
+  const matches = Object.entries(config.providers).flatMap(([providerId, provider]) =>
+    provider.models.includes(requested) ? [`${providerId}/${requested}`] : [],
+  );
+  if (matches.length === 1) return matches[0];
+  if (matches.length > 1) {
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.CONFLICT,
+      `会话模型 ${requested} 对应多个路由，请重新选择完整 provider/model 路由`,
+    );
+  }
+  return requested;
 }
 
 async function existingMcpConfig(

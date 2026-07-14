@@ -47,6 +47,11 @@ describe("createDesktopBridge", () => {
       sessionId: "session-1",
       title: "Renamed",
     });
+    await bridge.runtime["session.settings.update"]({
+      workspacePath: "/workspace",
+      sessionId: "session-1",
+      permissions: "plan",
+    });
 
     expect(mock.invoke).toHaveBeenCalledWith(DESKTOP_IPC_CHANNELS.runtimeInvoke, {
       method: "runtime.ping",
@@ -55,6 +60,10 @@ describe("createDesktopBridge", () => {
     expect(mock.invoke).toHaveBeenCalledWith(DESKTOP_IPC_CHANNELS.runtimeInvoke, {
       method: "session.rename",
       params: { workspacePath: "/workspace", sessionId: "session-1", title: "Renamed" },
+    });
+    expect(mock.invoke).toHaveBeenCalledWith(DESKTOP_IPC_CHANNELS.runtimeInvoke, {
+      method: "session.settings.update",
+      params: { workspacePath: "/workspace", sessionId: "session-1", permissions: "plan" },
     });
   });
 
