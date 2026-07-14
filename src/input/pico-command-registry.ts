@@ -68,7 +68,13 @@ import type { GoalManager } from "../engine/goal-manager.js";
 import type { ModelRuntimeCommandService } from "../provider/model-runtime-report.js";
 import type { TaskHostRuntime } from "../tasks/task-runtime.js";
 import { CronService } from "../tasks/cron-service.js";
-import type { CronDaemonBridge } from "./cron-daemon-bridge.js";
+import type { CronDaemonBridge, CronDaemonRegistration } from "./cron-daemon-bridge.js";
+import { fingerprintBackgroundMcpConfig } from "../safety/background-mcp-policy.js";
+import {
+  BACKGROUND_HARDLINE_VERSION,
+  BACKGROUND_HOOK_VERSION,
+  filterBackgroundEligibleTools,
+} from "../safety/background-yolo-policy.js";
 import type { McpConnectionManager } from "../mcp/manager.js";
 import { CostTracker } from "../observability/tracker.js";
 import { ensureSessionUsageBaseline } from "../observability/usage-baseline.js";
@@ -524,7 +530,9 @@ function createCompactCommand(
           : rawProvider;
         const ok = await new FullCompactor({
           provider,
-          ...(options.hookService ? { hookService: options.hookService, hookSource: "manual" } : {}),
+          ...(options.hookService
+            ? { hookService: options.hookService, hookSource: "manual" }
+            : {}),
         }).compact(session, retainLastN);
         return {
           type: "local",
@@ -1248,7 +1256,7 @@ function createCronCommand(
     name: "cron",
     description: "Manage persistent YOLO cron jobs for this workspace",
     usage:
-      "/cron <status|list|credential|add|enable|disable|delete|runs> [--tool-network=disabled|allowlist:host1,host2] [arguments]",
+      "/cron <status|list|credential|add|enable|disable|delete|runs> [--tool-network=allow|disabled|allowlist:host1,host2] [arguments]",
     argumentHint: "<status|list|credential|add|enable|disable|delete|runs>",
     category: "workspace",
     kind: "local",
@@ -1294,15 +1302,22 @@ function createCronCommand(
           const toolNetwork = parseCronToolNetwork(args);
           if (toolNetwork.args.length < 6)
             return cronMessage(
-              "Usage: /cron add [--tool-network=disabled|allowlist:host1,host2] <minute> <hour> <day> <month> <weekday> <prompt>",
+              "Usage: /cron add [--tool-network=allow|disabled|allowlist:host1,host2] <minute> <hour> <day> <month> <weekday> <prompt>",
             );
           const [minute, hour, day, month, weekday, ...promptParts] = toolNetwork.args;
           const credentialRef = await requireCronCredential(options, settings);
+          const allowedTools = filterBackgroundEligibleTools(
+            settings.tools.map((tool) => tool.name),
+          );
+          const mcpConfigFingerprint = allowedTools.some((tool) => tool.startsWith("mcp__"))
+            ? await fingerprintBackgroundMcpConfig(options.workDir)
+            : undefined;
           const job = cron.create({
             workspacePath: options.workDir,
             schedule: [minute, hour, day, month, weekday].join(" "),
             prompt: promptParts.join(" "),
             credentialRef,
+            enabled: false,
             policySnapshot: {
               mode: "yolo",
               backgroundEnabled: true,
@@ -1311,15 +1326,19 @@ function createCronCommand(
               ...(toolNetwork.allowedHosts
                 ? { allowedToolNetworkHosts: toolNetwork.allowedHosts }
                 : {}),
-              allowedTools: settings.tools.map((tool) => tool.name),
-              hardlineVersion: "builtin-v1",
-              hookVersion: "workspace-v1",
+              ...(mcpConfigFingerprint ? { mcpConfigFingerprint } : {}),
+              allowedTools,
+              hardlineVersion: BACKGROUND_HARDLINE_VERSION,
+              hookVersion: BACKGROUND_HOOK_VERSION,
               createdAt: Date.now(),
             },
           });
-          const daemon = await registerCronWorkspace(options, job.cronJobId);
+          const registration = await registerCronWorkspace(options, job.cronJobId);
+          const finalJob = registration.available
+            ? cron.setEnabled(job.cronJobId, job.version, true)
+            : job;
           return cronMessage(
-            `Cron job created: ${job.cronJobId}\n${job.schedule} · ${job.timeZone}\n${formatToolNetworkPolicy(job.policySnapshot)}\n${daemon}`,
+            `Cron job created: ${finalJob.cronJobId} (${finalJob.enabled ? "enabled" : "disabled"})\n${finalJob.schedule} · ${finalJob.timeZone}\n${formatToolNetworkPolicy(finalJob.policySnapshot)}\n${registration.message}`,
           );
         }
         const cronJobId = args[0];
@@ -1329,13 +1348,18 @@ function createCronCommand(
           .find((candidate) => candidate.cronJobId === cronJobId);
         if (!job) return cronMessage(`Unknown cron job: ${cronJobId}`);
         if (operation === "enable" || operation === "disable") {
-          const updated = cron.setEnabled(cronJobId, job.version, operation === "enable");
-          const daemon = updated.enabled
-            ? `\n${await registerCronWorkspace(options, updated.cronJobId)}`
-            : "";
-          return cronMessage(
-            `Cron job ${updated.cronJobId} ${updated.enabled ? "enabled" : "disabled"}.${daemon}`,
-          );
+          if (operation === "enable") {
+            const registration = await registerCronWorkspace(options, job.cronJobId);
+            if (!registration.available) {
+              return cronMessage(
+                `Cron job ${job.cronJobId} remains disabled.\n${registration.message}`,
+              );
+            }
+            const updated = cron.setEnabled(cronJobId, job.version, true);
+            return cronMessage(`Cron job ${updated.cronJobId} enabled.\n${registration.message}`);
+          }
+          const updated = cron.setEnabled(cronJobId, job.version, false);
+          return cronMessage(`Cron job ${updated.cronJobId} disabled.`);
         }
         if (operation === "delete") {
           const deleted = cron.delete(cronJobId, job.version);
@@ -1408,11 +1432,14 @@ async function requireCronCredential(
 async function registerCronWorkspace(
   options: PicoCommandRegistryOptions,
   cronJobId: string,
-): Promise<string> {
+): Promise<CronDaemonRegistration> {
   if (!options.cronDaemonBridge) {
-    return `本机 Runtime daemon 未配置；任务 ${cronJobId} 仅已写入账本，尚不会自动执行。`;
+    return {
+      available: false,
+      message: `本机 Runtime daemon 未配置；任务 ${cronJobId} 仅已写入账本，尚不会自动执行。`,
+    };
   }
-  return (await options.cronDaemonBridge.registerWorkspace(options.workDir)).message;
+  return await options.cronDaemonBridge.registerWorkspace(options.workDir);
 }
 
 async function cronDaemonStatus(options: PicoCommandRegistryOptions): Promise<string> {
@@ -1428,14 +1455,15 @@ function cronMessage(message: string): LocalCommandResult {
 
 function parseCronToolNetwork(args: string[]): {
   args: string[];
-  policy: "disabled" | "allowlist";
+  policy: "allow" | "disabled" | "allowlist";
   allowedHosts?: string[];
 } {
   const option = args[0];
   if (!option?.startsWith("--tool-network=")) {
-    return { args, policy: "disabled" };
+    return { args, policy: "allow" };
   }
   const value = option.slice("--tool-network=".length);
+  if (value === "allow") return { args: args.slice(1), policy: "allow" };
   if (value === "disabled") return { args: args.slice(1), policy: "disabled" };
   if (value.startsWith("allowlist:")) {
     return {
@@ -1445,7 +1473,7 @@ function parseCronToolNetwork(args: string[]): {
     };
   }
   throw new Error(
-    "工具网络策略必须是 disabled 或 allowlist:host1,host2；它不控制模型 Provider 网络。",
+    "工具网络策略必须是 allow、disabled 或 allowlist:host1,host2；它不控制模型 Provider 网络。",
   );
 }
 
@@ -1454,7 +1482,9 @@ function formatToolNetworkPolicy(
 ): string {
   return policy.toolNetworkPolicy === "disabled"
     ? "工具网络：关闭（模型 Provider 网络不受此项控制）"
-    : `工具网络：仅允许 ${policy.allowedToolNetworkHosts?.join(", ") ?? "<invalid>"}（模型 Provider 网络不受此项控制）`;
+    : policy.toolNetworkPolicy === "allow"
+      ? "工具网络：允许所有符合后台资格的工具联网（模型 Provider 网络独立）"
+      : `工具网络：仅允许 ${policy.allowedToolNetworkHosts?.join(", ") ?? "<invalid>"}（模型 Provider 网络不受此项控制）`;
 }
 
 function formatCronJobs(

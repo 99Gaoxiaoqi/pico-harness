@@ -8,17 +8,10 @@ import { fingerprintBackgroundMcpConfig } from "../safety/background-mcp-policy.
 import {
   BACKGROUND_HARDLINE_VERSION,
   BACKGROUND_HOOK_VERSION,
+  filterBackgroundEligibleTools,
 } from "../safety/background-yolo-policy.js";
 import type { CronCreationReceipt, CronDraft } from "./cron-draft.js";
 import type { CronService } from "./cron-service.js";
-
-const BACKGROUND_INELIGIBLE_TOOLS = new Set([
-  "ask_user",
-  "delegate_task",
-  "delegate_status",
-  "spawn_subagent",
-  "schedule_task",
-]);
 
 export interface CronWorkspaceRegistrar {
   registerWorkspace(workspacePath: string): Promise<{ available: boolean; message: string }>;
@@ -52,7 +45,7 @@ export class CronDraftApplication {
     daemonStatus: string;
   }> {
     const route = this.requireConfiguredRoute();
-    const allowedTools = eligibleTools(this.options.listAllowedTools());
+    const allowedTools = filterBackgroundEligibleTools(this.options.listAllowedTools());
     const capability = this.options.credentialVault.capability();
     let credentialStatus: CronDraft["credentialStatus"] = "unavailable";
     if (capability.available) {
@@ -80,7 +73,7 @@ export class CronDraftApplication {
     if (route.id !== draft.modelRouteId) {
       throw new Error("草案创建后模型路由已变化，请重新提交定时任务");
     }
-    const currentTools = eligibleTools(this.options.listAllowedTools());
+    const currentTools = filterBackgroundEligibleTools(this.options.listAllowedTools());
     if (!sameStringSet(currentTools, draft.allowedTools)) {
       throw new Error("草案创建后可用工具已变化，请重新提交定时任务");
     }
@@ -146,12 +139,6 @@ export class CronDraftApplication {
     }
     return route;
   }
-}
-
-function eligibleTools(tools: readonly string[]): string[] {
-  return [
-    ...new Set(tools.filter((tool) => tool && !BACKGROUND_INELIGIBLE_TOOLS.has(tool))),
-  ].sort();
 }
 
 function sameStringSet(left: readonly string[], right: readonly string[]): boolean {
