@@ -3,6 +3,9 @@ node_modules/
 
 # Build output
 dist/
+**/.tsbuild/
+**/.vite/
+apps/desktop/out/
 
 # Environment variables(含密钥,绝不提交)
 .env
