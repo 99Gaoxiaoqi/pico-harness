@@ -78,6 +78,8 @@ const EMPTY_AGENT_ITEMS: readonly AgentNavigationItem[] = Object.freeze([]);
 export interface AppProps {
   /** 模型名(Logo 展示) */
   model: string;
+  /** 实际 providerID/modelID 路由(Logo 展示) */
+  modelRouteId?: string;
   /** Provider 名称(状态区展示) */
   provider?: string;
   /** 工作区(Logo 展示) */
@@ -127,9 +129,12 @@ export interface AppProps {
 
 export function App({
   model,
+  modelRouteId,
+  provider,
   workDir,
   sessionMode = "new",
   permissionMode = "yolo",
+  thinkingEffort,
   mcpSummary,
   taskSummary,
   queuedCount = 0,
@@ -214,11 +219,16 @@ export function App({
     () => entries.filter((entry) => entry.kind !== "subagent-activity"),
     [entries],
   );
+  const runtimeModelSummary = [
+    modelRouteId ?? model,
+    ...(provider ? [`provider ${provider}`] : []),
+    ...(thinkingEffort ? [`think ${thinkingEffort}`] : []),
+  ].join(" · ");
   const transcriptEntries = useMemo<TuiEntry[]>(
     () => [
       {
         kind: "logo",
-        model,
+        model: runtimeModelSummary,
         cwd: workDir,
         sessionMode,
         permissionMode,
@@ -227,7 +237,15 @@ export function App({
       },
       ...mainEntries,
     ],
-    [mainEntries, mcpSummary, model, permissionMode, sessionMode, taskSummary, workDir],
+    [
+      mainEntries,
+      mcpSummary,
+      permissionMode,
+      runtimeModelSummary,
+      sessionMode,
+      taskSummary,
+      workDir,
+    ],
   );
   const transcriptLayout = useMemo(
     () =>

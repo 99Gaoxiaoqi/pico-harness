@@ -116,7 +116,7 @@ describe("App", () => {
 
     expect(output).toContain("你好");
     expect(output).toContain("你好！");
-    expect(countOccurrences(output, "pico · glm-5.2 · /workspace/demo")).toBe(1);
+    expect(countOccurrences(output, "pico · glm-5.2 · provider openai · /workspace/demo")).toBe(1);
     expect(output).toContain("phase idle");
     expect(output).toContain("mode new");
     expect(output).toContain("perm yolo");
@@ -757,6 +757,7 @@ describe("App", () => {
     const output = renderToString(
       <App
         model="claude-sonnet"
+        modelRouteId="anthropic/claude-sonnet"
         provider="claude"
         workDir="/workspace/demo"
         sessionMode="resume"
@@ -770,7 +771,9 @@ describe("App", () => {
       />,
     );
 
-    expect(output).toContain("pico · claude-sonnet · /workspace/demo");
+    expect(output).toContain("pico · anthropic/claude-sonnet · provider claude · think high");
+    expect(output).toContain("/workspace");
+    expect(output).toContain("/demo");
     expect(output).toContain("MCP");
     expect(output).toContain("task");
     expect(output).toContain("phase idle");
@@ -778,8 +781,8 @@ describe("App", () => {
     expect(output).toContain("perm acceptEdits");
     expect(output).toContain("task task");
     expect(output).not.toContain("ctx claude");
-    expect(output).not.toContain("think high");
-    expect(output).not.toContain("claude-sonnet/claude");
+    expect(output).toContain("provider claude");
+    expect(output).toContain("think high");
   });
 
   it("maps global Ctrl shortcuts to interrupt, exit, and redraw semantics", () => {
