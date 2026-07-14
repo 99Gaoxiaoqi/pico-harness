@@ -129,9 +129,9 @@ export class DefaultHookExecutor implements HookExecutor {
       this.options.env ?? process.env,
       signal,
     );
-    await running.started;
-    if (handler.async || handler.asyncRewake) {
-      const tracked = running.completion
+    const runsInBackground = handler.async || handler.asyncRewake;
+    if (runsInBackground) {
+      const trackedCommand = running.completion
         .then(async (output) => {
           if (!this.disposed && handler.asyncRewake && this.options.onAsyncRewake) {
             try {
@@ -156,8 +156,16 @@ export class DefaultHookExecutor implements HookExecutor {
             );
           }
         })
-        .finally(() => this.asyncCommands.delete(tracked));
-      this.asyncCommands.add(tracked);
+        .finally(() => this.asyncCommands.delete(trackedCommand));
+      this.asyncCommands.add(trackedCommand);
+    }
+    try {
+      await running.started;
+    } catch (err) {
+      await running.completion.catch(() => undefined);
+      throw err;
+    }
+    if (runsInBackground) {
       return { decision: "allow" };
     }
     return await running.completion;
@@ -318,6 +326,7 @@ function startCommand(
     let settled = false;
     let terminationReason: unknown;
     let terminationRequested = false;
+    let terminationBarrier: Promise<void> | undefined;
     const finish = (result: HookOutput) => {
       if (settled) return;
       settled = true;
@@ -334,7 +343,7 @@ function startCommand(
       if (terminationRequested) return;
       terminationRequested = true;
       terminationReason = reason;
-      terminateProcessTree(child);
+      terminationBarrier = terminateProcessTree(child);
     };
     const onAbort = () => {
       startReject?.(abortReason(signal));
@@ -367,7 +376,7 @@ function startCommand(
     child.once("close", (code) => {
       if (settled) return;
       if (terminationRequested) {
-        fail(terminationReason);
+        void (terminationBarrier ?? Promise.resolve()).then(() => fail(terminationReason));
         return;
       }
       try {
@@ -500,8 +509,8 @@ function boundedInteger(
   return Math.min(max, Math.max(min, Math.trunc(value)));
 }
 
-function terminateProcessTree(child: ChildProcess): void {
-  if (child.pid === undefined) return;
+function terminateProcessTree(child: ChildProcess): Promise<void> {
+  if (child.pid === undefined) return Promise.resolve();
   const pid = child.pid;
   const signalProcess = (signal: NodeJS.Signals) => {
     try {
@@ -520,9 +529,12 @@ function terminateProcessTree(child: ChildProcess): void {
     }
   };
   signalProcess("SIGTERM");
-  const forceTimer = setTimeout(() => signalProcess("SIGKILL"), ABORT_KILL_GRACE_MS);
-  forceTimer.unref();
-  child.once("close", () => clearTimeout(forceTimer));
+  return new Promise((resolve) => {
+    setTimeout(() => {
+      signalProcess("SIGKILL");
+      resolve();
+    }, ABORT_KILL_GRACE_MS);
+  });
 }
 
 function resolveHeaders(
