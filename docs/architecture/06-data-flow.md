@@ -184,6 +184,8 @@ session.rewindBoth(messageId, messageIndex):
 
 ## 5. 子代理委派流程
 
+下面只展示 `explore` 的只读数据流，不代表所有 Worker 都只读。可写 Shared/Isolated Worker 的任务范围、OCC、动态写入和隔离升级流程见[多 Agent 共享工作区并发规范](./08-multi-agent-concurrency.md)。
+
 ```
 主 Agent: "搜索所有 TODO 注释并总结"
     │

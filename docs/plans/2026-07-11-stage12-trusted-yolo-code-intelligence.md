@@ -1,6 +1,6 @@
 # 阶段 12：可信 YOLO 与代码智能开发计划
 
-> 历史计划说明：本文记录阶段 12 当时的实现语义。2026-07-11 安全复审后，当前产品语义已收敛为“主 TUI YOLO 按 OS 用户权限全放权；worker 始终 worktree + OS 沙箱”。当前行为以 README、ROADMAP 和代码为准，下方 checklist 不再作现行权限规范。
+> 历史计划说明：本文记录阶段 12 当时“worker 始终 worktree + OS 沙箱”的实现语义，下方 checklist 不再作现行权限规范。新的目标产品契约已改为 Shared Worker 默认、worktree 按风险升级；以[多 Agent 共享工作区并发规范](../architecture/08-multi-agent-concurrency.md)为准。
 
 ## Approach
 

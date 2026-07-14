@@ -246,6 +246,8 @@ function findClosestLines(content, oldText) {
 
 当 Agent 一次性调用多个工具时（比如同时读三个文件），顺序执行是浪费。三个 `read_file` 调用完全可以同时进行。
 
+这里的调度边界必须说清楚：每个 `ToolScheduler` 只管理**一个 Agent、一次模型响应产生的工具调用批次**。资源图不会跨 Agent 共享，也不会在下一轮或整个任务期间持有路径锁。跨 Agent 写入由任务范围、文件版本校验和可选 worktree 共同处理，详见[多 Agent 共享工作区并发规范](architecture/08-multi-agent-concurrency.md)。
+
 但并行不是无条件的。如果 Agent 同时调用了 `read_file("src/a.ts")` 和 `write_file("src/a.ts", ...)`，它们操作同一个文件——必须先读后写，否则读到的是旧内容还是新内容是不确定的。
 
 我需要一个调度器，它知道每个工具访问了哪些资源，并据此决定哪些可以并行、哪些必须串行。
@@ -352,6 +354,8 @@ const results = await Promise.all(
 - **bash**：30 秒超时 + 工作区锁定 + 错误回传
 
 加上 **ToolAccesses** 冲突模型和 **ToolScheduler** 贪心调度器，Agent 可以在同一轮中安全地并行执行多个不冲突的工具，在冲突时自动串行。
+
+这里的“安全”仅指同一 Agent 本轮内的启动顺序正确；其他 Agent、用户或外部进程仍可能修改文件，最终写入必须另外经过文件级 OCC 校验。
 
 Agent 现在能读、能写、能改、能跑命令。但它还有两个问题：
 
