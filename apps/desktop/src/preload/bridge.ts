@@ -1,5 +1,5 @@
 import type { IpcRenderer } from "electron";
-import type { RuntimeEvent, RuntimeParams } from "@pico/protocol";
+import type { RuntimeEvent, RuntimeParams, RuntimeResult } from "@pico/protocol";
 import {
   DESKTOP_IPC_CHANNELS,
   DESKTOP_RUNTIME_METHODS,
@@ -34,18 +34,36 @@ export function createDesktopBridge(ipcRenderer: IpcRenderer): DesktopBridge {
         listener: (event: RuntimeEvent) => void,
       ) {
         const subscriptionId = crypto.randomUUID();
+        const pendingEvents: RuntimeEvent[] = [];
+        const seenEventIds = new Set<string>();
+        let readySettled = false;
+        const dispatch = (event: RuntimeEvent) => {
+          if (seenEventIds.has(event.eventId)) return;
+          seenEventIds.add(event.eventId);
+          listener(event);
+        };
         const onEvent = (_electronEvent: unknown, envelope: unknown) => {
           if (!isRuntimeEventEnvelope(envelope) || envelope.subscriptionId !== subscriptionId)
             return;
-          listener(envelope.event);
+          if (readySettled) dispatch(envelope.event);
+          else pendingEvents.push(envelope.event);
         };
         ipcRenderer.on(DESKTOP_IPC_CHANNELS.runtimeEvent, onEvent);
-        const ready = ipcRenderer.invoke(DESKTOP_IPC_CHANNELS.runtimeSubscribe, {
-          subscriptionId,
-          params,
-        }) as Promise<DesktopResult<unknown>>;
+        const ready = (
+          ipcRenderer.invoke(DESKTOP_IPC_CHANNELS.runtimeSubscribe, {
+            subscriptionId,
+            params,
+          }) as Promise<DesktopResult<RuntimeResult<"events.subscribe">>>
+        ).then((result) => {
+          if (result.ok) {
+            for (const event of result.value.events) dispatch(event);
+          }
+          readySettled = true;
+          for (const event of pendingEvents.splice(0)) dispatch(event);
+          return result;
+        });
         return Object.freeze({
-          ready: ready as ReturnType<DesktopBridge["events"]["subscribe"]>["ready"],
+          ready,
           dispose() {
             ipcRenderer.removeListener(DESKTOP_IPC_CHANNELS.runtimeEvent, onEvent);
             ipcRenderer.send(DESKTOP_IPC_CHANNELS.runtimeUnsubscribe, { subscriptionId });
@@ -57,8 +75,7 @@ export function createDesktopBridge(ipcRenderer: IpcRenderer): DesktopBridge {
       chooseWorkspace: () => ipcRenderer.invoke(DESKTOP_IPC_CHANNELS.chooseWorkspace),
       showNotification: (input: { readonly title: string; readonly body: string }) =>
         ipcRenderer.invoke(DESKTOP_IPC_CHANNELS.showNotification, input),
-      openDirectory: (path: string) =>
-        ipcRenderer.invoke(DESKTOP_IPC_CHANNELS.openDirectory, path),
+      openDirectory: (path: string) => ipcRenderer.invoke(DESKTOP_IPC_CHANNELS.openDirectory, path),
       getLaunchAtLogin: () => ipcRenderer.invoke(DESKTOP_IPC_CHANNELS.getLaunchAtLogin),
       setLaunchAtLogin: (enabled: boolean) =>
         ipcRenderer.invoke(DESKTOP_IPC_CHANNELS.setLaunchAtLogin, enabled),

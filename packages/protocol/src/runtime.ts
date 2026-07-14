@@ -306,7 +306,10 @@ export type RuntimeMethodMap = {
   };
   readonly "events.subscribe": {
     readonly params: { readonly workspacePath?: string; readonly afterEventId?: string };
-    readonly result: { readonly subscribed: true };
+    readonly result: {
+      readonly subscribed: true;
+      readonly events: readonly RuntimeEvent[];
+    };
   };
 };
 

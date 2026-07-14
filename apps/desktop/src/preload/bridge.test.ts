@@ -6,7 +6,10 @@ import { DESKTOP_IPC_CHANNELS, DESKTOP_RUNTIME_METHODS } from "./contract.js";
 function createIpcRendererMock() {
   const listeners = new Map<string, Set<(...args: readonly unknown[]) => void>>();
   return {
-    invoke: vi.fn().mockResolvedValue({ ok: true, value: {} }),
+    invoke: vi.fn().mockResolvedValue({
+      ok: true,
+      value: { subscribed: true, events: [] },
+    }),
     on: vi.fn((channel: string, listener: (...args: readonly unknown[]) => void) => {
       const channelListeners = listeners.get(channel) ?? new Set();
       channelListeners.add(listener);
@@ -59,5 +62,37 @@ describe("createDesktopBridge", () => {
       DESKTOP_IPC_CHANNELS.runtimeUnsubscribe,
       expect.objectContaining({ subscriptionId: expect.any(String) }),
     );
+  });
+
+  it("delivers replay before buffered live events and removes duplicates", async () => {
+    const mock = createIpcRendererMock();
+    let resolveReady: ((value: unknown) => void) | undefined;
+    mock.invoke.mockImplementationOnce(() => new Promise((resolve) => (resolveReady = resolve)));
+    const bridge = createDesktopBridge(mock as unknown as IpcRenderer);
+    const received: string[] = [];
+    const event = (eventId: string, resourceVersion: number) => ({
+      protocolVersion: 1 as const,
+      eventId,
+      topic: "run.timeline" as const,
+      scope: { workspacePath: "/workspace" },
+      resourceVersion,
+      at: resourceVersion,
+      payload: {},
+    });
+
+    const subscription = bridge.events.subscribe({}, (value) => received.push(value.eventId));
+    const subscriptionId = (mock.invoke.mock.calls[0]?.[1] as { readonly subscriptionId: string })
+      .subscriptionId;
+    mock.emit(DESKTOP_IPC_CHANNELS.runtimeEvent, {
+      subscriptionId,
+      event: event("live", 2),
+    });
+    resolveReady?.({
+      ok: true,
+      value: { subscribed: true, events: [event("replay", 1), event("live", 2)] },
+    });
+
+    await subscription.ready;
+    expect(received).toEqual(["replay", "live"]);
   });
 });

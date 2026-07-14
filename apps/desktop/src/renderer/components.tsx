@@ -230,27 +230,6 @@ export function PromptDialog({
               </button>
             ))}
           </div>
-          <form
-            className="custom-answer"
-            onSubmit={(event) => {
-              event.preventDefault();
-              const answer = new FormData(event.currentTarget).get("answer");
-              if (typeof answer === "string" && answer.trim()) onAnswer(answer);
-            }}
-          >
-            <label htmlFor="custom-answer">或者输入自己的回答</label>
-            <div className="input-action">
-              <input
-                id="custom-answer"
-                name="answer"
-                autoComplete="off"
-                placeholder="补充上下文…"
-              />
-              <Button type="submit" variant="primary" disabled={busy}>
-                回答
-              </Button>
-            </div>
-          </form>
           <Dialog.Close asChild>
             <IconButton className="dialog__close" label="关闭问题窗口">
               <X aria-hidden="true" size={18} />

@@ -129,6 +129,7 @@ function mergeLoadedData(base: AppData, results: Readonly<Record<string, unknown
   const providerResult = isRecord(results.providers) ? results.providers : {};
   const usageResult = isRecord(results.usage) ? results.usage : {};
   const usage = isRecord(usageResult.usage) ? usageResult.usage : {};
+  const usageTotal = isRecord(usage.total) ? usage.total : usage;
   const configResult = isRecord(results.config) ? results.config : {};
   const changeResult = isRecord(results.changes) ? results.changes : {};
 
@@ -173,11 +174,11 @@ function mergeLoadedData(base: AppData, results: Readonly<Record<string, unknown
     })),
     changeFingerprint: stringValue(changeResult.fingerprint) || undefined,
     usage: {
-      inputTokens: numberValue(usage.inputTokens || usage.input_tokens) || undefined,
-      outputTokens: numberValue(usage.outputTokens || usage.output_tokens) || undefined,
-      cachedTokens: numberValue(usage.cachedTokens || usage.cached_tokens) || undefined,
-      cost: numberValue(usage.cost) || undefined,
-      period: stringValue(usage.period),
+      inputTokens: numberValue(usageTotal.inputTokens || usageTotal.input_tokens) || undefined,
+      outputTokens: numberValue(usageTotal.outputTokens || usageTotal.output_tokens) || undefined,
+      cachedTokens: numberValue(usageTotal.cachedTokens || usageTotal.cached_tokens) || undefined,
+      cost: numberValue(usageTotal.cost) || undefined,
+      period: stringValue(usage.period || usage.rangeAccuracy),
     },
     configVersion: numberValue(configResult.version),
   };
@@ -808,7 +809,10 @@ function createPreviewBridge(): RendererBridge {
       },
     ),
     events: {
-      subscribe: () => ({ ready: success({ subscribed: true }), dispose: () => undefined }),
+      subscribe: () => ({
+        ready: success({ subscribed: true, events: [] }),
+        dispose: () => undefined,
+      }),
     },
     platform: {
       chooseWorkspace: () => success(previewData.workspacePath),
