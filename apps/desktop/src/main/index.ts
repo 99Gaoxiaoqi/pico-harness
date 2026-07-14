@@ -5,6 +5,7 @@ import { DesktopLifecycleController } from "./lifecycle.js";
 import { LocalDaemonRuntimeClientAdapter } from "./runtime-client-adapter.js";
 import { createDesktopWindow } from "./window.js";
 import { configureAutoUpdates } from "./updater.js";
+import { installApplicationMenu } from "./menu.js";
 
 let mainWindow: BrowserWindow | undefined;
 let disposeIpc: (() => void) | undefined;
@@ -32,6 +33,7 @@ if (!app.requestSingleInstanceLock()) {
 
   void app.whenReady().then(async () => {
     if (process.platform === "win32") app.setAppUserModelId("com.squirrel.pico.Pico");
+    installApplicationMenu(() => mainWindow);
     const platform = createPlatformServices();
     disposeIpc = registerDesktopIpcHandlers({
       ipcMain,
