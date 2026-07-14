@@ -1,5 +1,6 @@
+import { realpathSync } from "node:fs";
 import { stat } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { createCliSessionId } from "../cli/session-resolver.js";
 import { globalSessionManager } from "../engine/session.js";
 import { AgentRuntime } from "../runtime/agent-runtime.js";
@@ -214,12 +215,13 @@ export function createProductionLocalDaemonHost(
     trustStore,
     automations,
     interactions: {
-      respondApproval: ({ approvalId, decision, reason }) => {
+      respondApproval: ({ workspacePath, approvalId, decision, reason }) => {
         const pending = pendingApprovals.get(approvalId);
         if (!pending) {
           if (resolvedApprovals.has(approvalId)) return { accepted: true, alreadyResolved: true };
           throw unknownInteraction("Approval", approvalId);
         }
+        assertInteractionWorkspace(pending, workspacePath, "Approval", approvalId);
         const accepted = pending.broker.resolveApproval({
           taskId: approvalId,
           decision:
@@ -238,12 +240,13 @@ export function createProductionLocalDaemonHost(
         }
         return { accepted, alreadyResolved: false };
       },
-      respondPrompt: ({ promptId, answer }) => {
+      respondPrompt: ({ workspacePath, promptId, answer }) => {
         const pending = pendingPrompts.get(promptId);
         if (!pending) {
           if (resolvedPrompts.has(promptId)) return { accepted: true, alreadyResolved: true };
           throw unknownInteraction("Prompt", promptId);
         }
+        assertInteractionWorkspace(pending, workspacePath, "Prompt", promptId);
         if (typeof answer !== "string" || !answer.trim()) {
           throw new RuntimeProtocolError(
             RUNTIME_ERROR_CODES.INVALID_PARAMS,
@@ -615,6 +618,30 @@ function publishInteractionEvent(
 
 function unknownInteraction(kind: "Approval" | "Prompt", id: string): RuntimeProtocolError {
   return new RuntimeProtocolError(RUNTIME_ERROR_CODES.NOT_FOUND, `${kind} ${id} 不存在或已过期`);
+}
+
+function assertInteractionWorkspace(
+  interaction: PendingInteraction,
+  workspacePath: string,
+  kind: "Approval" | "Prompt",
+  id: string,
+): void {
+  if (
+    canonicalInteractionPath(interaction.workspacePath) === canonicalInteractionPath(workspacePath)
+  )
+    return;
+  throw new RuntimeProtocolError(
+    RUNTIME_ERROR_CODES.FORBIDDEN,
+    `${kind} ${id} 不属于请求中的工作区`,
+  );
+}
+
+function canonicalInteractionPath(workspacePath: string): string {
+  try {
+    return realpathSync(workspacePath).normalize("NFC");
+  } catch {
+    return resolve(workspacePath).normalize("NFC");
+  }
 }
 
 function removeBrokerInteractions(

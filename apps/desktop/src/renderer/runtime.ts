@@ -3,9 +3,11 @@ import {
   emptyData,
   folderWorkspaceCapabilities,
   type AppData,
+  type ChangeView,
   type ConnectionState,
   type ConversationView,
   type JsonRecord,
+  type UsageView,
   type WorkspaceCapabilities,
   type WorkspaceMode,
 } from "./model.js";
@@ -225,6 +227,39 @@ function parseConversation(value: unknown, sessionId: string): ConversationView 
   };
 }
 
+function parseChanges(value: unknown): {
+  readonly changes: readonly ChangeView[];
+  readonly fingerprint?: string | undefined;
+} {
+  const result = isRecord(value) ? value : {};
+  return {
+    changes: recordArray(result.changes).map((item) => ({
+      path: stringValue(item.path),
+      status:
+        item.status === "added" || item.status === "deleted" || item.status === "renamed"
+          ? item.status
+          : "modified",
+      additions: numberValue(item.additions),
+      deletions: numberValue(item.deletions),
+      patch: stringValue(item.patch) || undefined,
+    })),
+    fingerprint: stringValue(result.fingerprint) || undefined,
+  };
+}
+
+function parseUsage(value: unknown): UsageView {
+  const result = isRecord(value) ? value : {};
+  const usage = isRecord(result.usage) ? result.usage : result;
+  const total = isRecord(usage.total) ? usage.total : usage;
+  return {
+    inputTokens: numberValue(total.inputTokens || total.input_tokens) || undefined,
+    outputTokens: numberValue(total.outputTokens || total.output_tokens) || undefined,
+    cachedTokens: numberValue(total.cachedTokens || total.cached_tokens) || undefined,
+    cost: numberValue(total.cost) || undefined,
+    period: stringValue(usage.period || usage.rangeAccuracy),
+  };
+}
+
 function capability(item: JsonRecord, index: number) {
   const enabled = item.enabled;
   const configured = item.configured;
@@ -394,8 +429,12 @@ export interface RuntimeActions {
   steerRun(runId: string, message: string): Promise<void>;
   respondApproval(id: string, decision: "allow_once" | "allow_session" | "deny"): Promise<void>;
   respondPrompt(id: string, answer: string): Promise<void>;
-  reviewChanges(decision: "approve" | "request_changes", message?: string): Promise<void>;
-  applyChanges(): Promise<void>;
+  reviewChanges(
+    decision: "approve" | "request_changes",
+    message?: string,
+    target?: { readonly runId: string; readonly fingerprint: string },
+  ): Promise<void>;
+  applyChanges(target?: { readonly runId: string; readonly fingerprint: string }): Promise<void>;
   previewRewind(sessionId: string): Promise<
     | {
         readonly checkpointId: string;
@@ -530,8 +569,41 @@ export function useRuntimeStore(): RuntimeStore {
         limit: 200,
       });
       const record = isRecord(value) ? value : {};
-      const conversation = parseConversation(record, sessionId);
       const activeRun = isRecord(record.activeRun) ? record.activeRun : undefined;
+      const runId =
+        stringValue(activeRun?.runId) ||
+        dataRef.current.runs.find((run) => run.sessionId === sessionId)?.id;
+      const sessionUsage = await optionalInvoke(bridge, "usage.get", { workspacePath, sessionId });
+      let conversation: ConversationView = {
+        ...parseConversation(record, sessionId),
+        ...(!sessionUsage.error ? { usage: parseUsage(sessionUsage.value) } : {}),
+      };
+      if (runId) {
+        const changeList = await optionalInvoke(bridge, "changes.list", { workspacePath, runId });
+        if (!changeList.error) {
+          const listValue = isRecord(changeList.value) ? changeList.value : {};
+          const changes = await Promise.all(
+            recordArray(listValue.changes).map(async (change) => {
+              const path = stringValue(change.path);
+              if (!path) return change;
+              const diff = await optionalInvoke(bridge, "changes.diff", {
+                workspacePath,
+                runId,
+                path,
+              });
+              const diffValue = isRecord(diff.value) ? diff.value : {};
+              return { ...change, patch: stringValue(diffValue.patch) || undefined };
+            }),
+          );
+          const parsed = parseChanges({ ...listValue, changes });
+          conversation = {
+            ...conversation,
+            runId,
+            changes: parsed.changes,
+            changeFingerprint: parsed.fingerprint,
+          };
+        }
+      }
       setData((current) => ({
         ...current,
         conversations: { ...current.conversations, [sessionId]: conversation },
@@ -641,6 +713,18 @@ export function useRuntimeStore(): RuntimeStore {
               options,
             },
           ],
+        }));
+      } else if (topic === "approval.resolved") {
+        const approvalId = stringValue(payload.approvalId);
+        setData((current) => ({
+          ...current,
+          approvals: current.approvals.filter((approval) => approval.id !== approvalId),
+        }));
+      } else if (topic === "prompt.resolved") {
+        const promptId = stringValue(payload.promptId);
+        setData((current) => ({
+          ...current,
+          prompts: current.prompts.filter((prompt) => prompt.id !== promptId),
         }));
       } else if (topic === "run.timeline") {
         const item = isRecord(payload.item) ? payload.item : {};
@@ -891,10 +975,10 @@ export function useRuntimeStore(): RuntimeStore {
           }));
         });
       },
-      async reviewChanges(decision, reviewMessage) {
+      async reviewChanges(decision, reviewMessage, target) {
         const workspacePath = dataRef.current.workspacePath;
-        const runId = dataRef.current.runs[0]?.id;
-        const expectedFingerprint = dataRef.current.changeFingerprint;
+        const runId = target?.runId ?? dataRef.current.runs[0]?.id;
+        const expectedFingerprint = target?.fingerprint ?? dataRef.current.changeFingerprint;
         if (!workspacePath || !runId || !expectedFingerprint) return;
         await perform("review", async (bridge) => {
           if (!preview)
@@ -908,10 +992,10 @@ export function useRuntimeStore(): RuntimeStore {
           setMessage(decision === "approve" ? "更改已批准，等待应用。" : "修改意见已发回任务。");
         });
       },
-      async applyChanges() {
+      async applyChanges(target) {
         const workspacePath = dataRef.current.workspacePath;
-        const runId = dataRef.current.runs[0]?.id;
-        const expectedFingerprint = dataRef.current.changeFingerprint;
+        const runId = target?.runId ?? dataRef.current.runs[0]?.id;
+        const expectedFingerprint = target?.fingerprint ?? dataRef.current.changeFingerprint;
         if (!workspacePath || !runId || !expectedFingerprint) return;
         await perform("apply", async (bridge) => {
           if (!preview)

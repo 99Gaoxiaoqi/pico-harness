@@ -15,22 +15,16 @@ import {
   History,
   Home,
   Layers3,
-  ListChecks,
   MessageSquareMore,
   Network,
-  Pause,
-  Play,
   Plus,
   RefreshCw,
   RotateCcw,
   Search,
-  Send,
   Settings,
   ShieldCheck,
   Sparkles,
-  Square,
   TerminalSquare,
-  UserRoundCheck,
   WandSparkles,
   Workflow,
 } from "lucide-react";
@@ -65,7 +59,6 @@ import {
   PathButton,
   PromptDialog,
   StatusPill,
-  StepState,
 } from "./components.js";
 import {
   ConversationComposer,
@@ -607,7 +600,17 @@ function ConversationPage() {
     if (sessionId) void actions.loadSession(sessionId);
   }, [actions, sessionId]);
 
+  useEffect(() => {
+    setDraft("");
+    setInspector(undefined);
+    setApprovalOpen(false);
+    setPromptOpen(false);
+    setSelectedApprovalId(undefined);
+    setSelectedPromptId(undefined);
+  }, [sessionId]);
+
   const session = data.sessions.find((item) => item.id === sessionId);
+  const conversation = sessionId ? data.conversations[sessionId] : undefined;
   const sessionRuns = data.runs.filter((run) => run.sessionId === sessionId);
   const activeRun = sessionRuns.find((run) => !isTerminalRun(run.status));
   const selectedApproval = data.approvals.find((item) => item.id === selectedApprovalId);
@@ -619,7 +622,7 @@ function ConversationPage() {
     : "idle";
 
   const items = useMemo<readonly ConversationItemView[]>(() => {
-    const persisted = sessionId ? (data.conversations[sessionId]?.items ?? []) : [];
+    const persisted = conversation?.items ?? [];
     const live = activeRun
       ? data.timeline
           .filter((item) => item.runId === activeRun.id)
@@ -649,16 +652,15 @@ function ConversationPage() {
           }),
         ),
     ];
-    const latestWorkspaceRun = data.runs[0];
     const changes: ConversationItemView[] =
-      sessionId && latestWorkspaceRun?.sessionId === sessionId && data.changes.length > 0
+      conversation?.runId && conversation.changes && conversation.changes.length > 0
         ? [
             {
-              id: `changes:${latestWorkspaceRun.id}`,
+              id: `changes:${conversation.runId}`,
               kind: "changes",
               title: "本轮文件更改",
               detail: "在应用前审阅 Runtime 生成的差异。",
-              files: data.changes.map((change) => change.path),
+              files: conversation.changes.map((change) => change.path),
               state: "pending",
             },
           ]
@@ -667,10 +669,8 @@ function ConversationPage() {
   }, [
     activeRun,
     data.approvals,
-    data.changes,
-    data.conversations,
+    conversation,
     data.prompts,
-    data.runs,
     data.timeline,
     sessionId,
     sessionRuns,
@@ -733,7 +733,17 @@ function ConversationPage() {
             <span className="eyebrow">{sessionId ? "会话" : "新会话"}</span>
             <h2>{session?.title ?? (sessionId ? "正在载入会话…" : "今天想一起做什么？")}</h2>
           </div>
-          {activeRun && <StatusPill status={activeRun.status} />}
+          <div className="conversation-session-header__meta">
+            {conversation?.usage && (
+              <span>
+                {formatCompact(
+                  (conversation.usage.inputTokens ?? 0) + (conversation.usage.outputTokens ?? 0),
+                )}{" "}
+                tokens
+              </span>
+            )}
+            {activeRun && <StatusPill status={activeRun.status} />}
+          </div>
         </div>
       }
       inspector={
@@ -869,220 +879,36 @@ function isTerminalRun(status: string): boolean {
 
 function TaskPage() {
   const { runId } = useParams();
-  const { data, actions, busy } = useRuntime();
+  const { data } = useRuntime();
   const run = data.runs.find((item) => item.id === runId);
-  const approval = data.approvals.find((item) => !run || item.runId === run.id);
-  const prompt = data.prompts.find((item) => !run || item.runId === run.id);
-  const [approvalOpen, setApprovalOpen] = useState(false);
-  const [promptOpen, setPromptOpen] = useState(false);
-  const [steer, setSteer] = useState("");
-  const planItems = data.timeline.filter((item) => item.kind === "plan");
-  const agentItems = data.timeline.filter((item) => item.kind === "agent");
   if (!run)
     return <EmptyState title="找不到这次运行" detail="它可能已被归档，或 Runtime 尚未同步完成。" />;
   if (run.sessionId) return <Navigate replace to={`/session/${run.sessionId}`} />;
-  const paused = ["paused", "pause_requested"].includes(run.status);
-  const terminal = ["cancelled", "failed", "succeeded"].includes(run.status);
   return (
-    <div className="task-layout">
-      <div className="task-main page-stack">
-        <section className="task-heading">
-          <div>
-            <div className="task-heading__meta">
-              <StatusPill status={run.status} />
-              <span>{formatElapsed(run.startedAt)}</span>
-            </div>
-            <h2>{run.description}</h2>
-          </div>
-          <div className="task-controls" aria-label="运行控制">
-            <Button
-              onClick={() => void (paused ? actions.resumeRun(run.id) : actions.pauseRun(run.id))}
-              disabled={Boolean(busy) || terminal || run.status === "cancelling"}
-            >
-              {paused ? (
-                <Play aria-hidden="true" size={15} />
-              ) : (
-                <Pause aria-hidden="true" size={15} />
-              )}
-              {paused ? "继续" : "暂停"}
-            </Button>
-            <Button
-              variant="danger"
-              onClick={() => void actions.stopRun(run.id)}
-              disabled={Boolean(busy) || terminal || run.status === "cancelling"}
-            >
-              <Square aria-hidden="true" size={14} />
-              停止
-            </Button>
-          </div>
-        </section>
-        {(approval || prompt) && (
-          <section className="attention-banner">
-            <div>
-              <UserRoundCheck aria-hidden="true" />
-              <div>
-                <strong>Pico 正在等待你</strong>
-                <span>{[approval, prompt].filter(Boolean).length} 项决定会影响接下来的执行</span>
-              </div>
-            </div>
-            <div className="button-row">
-              {approval && (
-                <Button variant="primary" onClick={() => setApprovalOpen(true)}>
-                  查看审批
-                </Button>
-              )}
-              {prompt && <Button onClick={() => setPromptOpen(true)}>回答问题</Button>}
-            </div>
-          </section>
-        )}
-        <section className="panel plan-panel">
-          <PanelHeader title="执行计划" detail="Runtime 会随着发现更新步骤" />
-          {planItems.length === 0 ? (
-            <EmptyState
-              icon={<ListChecks />}
-              title="Runtime 尚未给出计划"
-              detail="计划事件到达后会显示在这里；Pico 不会用预设步骤代替。"
-            />
-          ) : (
-            <div className="plan-steps">
-              {planItems.map((item, index) => (
-                <div
-                  className={`plan-step ${item.state === "done" ? "is-done" : item.state === "active" ? "is-active" : ""}`}
-                  key={item.id}
-                >
-                  <StepState state={item.state ?? "waiting"} />
-                  <span>{index + 1}</span>
-                  <div>
-                    <strong>{item.title}</strong>
-                    {item.detail && <p>{item.detail}</p>}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </section>
-        <section className="panel timeline-panel">
-          <PanelHeader title="运行时间线" detail="思考内容不会暴露，仅显示可验证的行动" />
-          {data.timeline.length === 0 ? (
-            <EmptyState title="等待第一条进度" detail="Runtime 事件到达后会实时显示。" />
-          ) : (
-            <ol className="timeline">
-              {data.timeline.map((item) => (
-                <li key={item.id}>
-                  <StepState state={item.state ?? "waiting"} />
-                  <div>
-                    <div className="row-title">
-                      <strong>{item.title}</strong>
-                      <time>{formatTime(item.at)}</time>
-                    </div>
-                    {item.detail && <p>{item.detail}</p>}
-                  </div>
-                </li>
-              ))}
-            </ol>
-          )}
-        </section>
-        <form
-          className="steer-box"
-          onSubmit={(event) => {
-            event.preventDefault();
-            void actions.steerRun(run.id, steer).then(() => setSteer(""));
-          }}
-        >
-          <label htmlFor="steer-input">调整方向</label>
-          <div className="input-action">
-            <input
-              id="steer-input"
-              value={steer}
-              autoComplete="off"
-              onChange={(event) => setSteer(event.target.value)}
-              placeholder="补充限制，或告诉 Pico 下一步优先做什么…"
-            />
-            <Button type="submit" disabled={!steer.trim() || Boolean(busy)}>
-              <Send aria-hidden="true" size={15} />
-              Steer
-            </Button>
-          </div>
-        </form>
-      </div>
-      <aside className="task-aside">
-        {!data.workspaceCapabilities.isolatedWorktrees ? (
-          <section className="side-card side-card--muted">
-            <span className="side-card__icon">
-              <Folder aria-hidden="true" />
-            </span>
-            <span className="eyebrow">基础模式</span>
-            <h3>当前任务会正常执行</h3>
-            <p>并行子代理可在共享文件夹中工作；高冲突任务才需要 Git worktree 隔离。</p>
-          </section>
-        ) : agentItems.length === 0 ? (
-          <section className="side-card">
-            <span className="side-card__icon">
-              <Bot aria-hidden="true" />
-            </span>
-            <span className="eyebrow">子代理</span>
-            <h3>没有活跃子代理</h3>
-            <p>Runtime 创建子代理后，职责与状态会显示在这里。</p>
-          </section>
-        ) : (
-          agentItems.slice(-2).map((item) => (
-            <section className="side-card" key={item.id}>
-              <span className="side-card__icon">
-                <Bot aria-hidden="true" />
-              </span>
-              <span className="eyebrow">子代理</span>
-              <h3>{item.title}</h3>
-              {item.detail && <p>{item.detail}</p>}
-              <StatusPill status={item.state ?? "active"} />
-            </section>
-          ))
-        )}
-        <section className="side-card usage-mini">
-          <div className="row-title">
-            <span>本次用量</span>
-            <CircleDollarSign aria-hidden="true" size={16} />
-          </div>
-          <strong>
-            {formatCompact((data.usage.inputTokens ?? 0) + (data.usage.outputTokens ?? 0))}
-          </strong>
-          <span>tokens</span>
-          <Link to="/usage">查看用量明细</Link>
-        </section>
-        <Link className="review-link" to="/review">
-          <FileDiff aria-hidden="true" />
-          <span>
-            <strong>审阅更改</strong>
-            <small>{data.changes.length} 个文件</small>
-          </span>
+    <EmptyState
+      icon={<History />}
+      title="这是旧版运行记录"
+      detail="它没有可恢复的 Session 标识。Pico 不会用其他运行的时间线或更改冒充这次记录。"
+      action={
+        <Link className="button" to="/sessions">
+          返回会话库
         </Link>
-      </aside>
-      <ApprovalDialog
-        approval={approval}
-        open={approvalOpen}
-        onOpenChange={setApprovalOpen}
-        busy={busy === "approval"}
-        onDecision={(decision) =>
-          void actions
-            .respondApproval(approval?.id ?? "", decision)
-            .then(() => setApprovalOpen(false))
-        }
-      />
-      <PromptDialog
-        prompt={prompt}
-        open={promptOpen}
-        onOpenChange={setPromptOpen}
-        busy={busy === "prompt"}
-        onAnswer={(answer) =>
-          void actions.respondPrompt(prompt?.id ?? "", answer).then(() => setPromptOpen(false))
-        }
-      />
-    </div>
+      }
+    />
   );
 }
 
 function ReviewPage() {
   const { data, actions, busy } = useRuntime();
-  const [selectedPath, setSelectedPath] = useState(data.changes[0]?.path);
+  const location = useLocation();
+  const sessionId = new URLSearchParams(location.search).get("sessionId") ?? undefined;
+  const conversation = sessionId ? data.conversations[sessionId] : undefined;
+  const changes = conversation?.changes ?? (sessionId ? [] : data.changes);
+  const fingerprint =
+    conversation?.changeFingerprint ?? (sessionId ? undefined : data.changeFingerprint);
+  const runId = conversation?.runId ?? (sessionId ? undefined : data.runs[0]?.id);
+  const target = runId && fingerprint ? { runId, fingerprint } : undefined;
+  const [selectedPath, setSelectedPath] = useState(changes[0]?.path);
   const [comment, setComment] = useState("");
   const [rewindOpen, setRewindOpen] = useState(false);
   const [rewindPreview, setRewindPreview] = useState<{
@@ -1090,7 +916,10 @@ function ReviewPage() {
     readonly fingerprint: string;
     readonly changeCount: number;
   }>();
-  const selected = data.changes.find((change) => change.path === selectedPath);
+  useEffect(() => {
+    if (!selectedPath && changes[0]) setSelectedPath(changes[0].path);
+  }, [changes, selectedPath]);
+  const selected = changes.find((change) => change.path === selectedPath);
   if (data.notices.changes)
     return <CapabilityUnavailable title="无法读取更改" detail={data.notices.changes} />;
   if (!selected)
@@ -1106,9 +935,9 @@ function ReviewPage() {
       <aside className="file-list" aria-label="已更改文件">
         <div className="file-list__header">
           <strong>更改</strong>
-          <span>{data.changes.length} 个文件</span>
+          <span>{changes.length} 个文件</span>
         </div>
-        {data.changes.map((change) => (
+        {changes.map((change) => (
           <button
             key={change.path}
             type="button"
@@ -1159,7 +988,6 @@ function ReviewPage() {
                 variant="danger"
                 disabled={Boolean(busy)}
                 onClick={() => {
-                  const sessionId = data.runs[0]?.sessionId;
                   if (sessionId)
                     void actions.applyRewind(
                       sessionId,
@@ -1172,9 +1000,8 @@ function ReviewPage() {
               </Button>
             ) : (
               <Button
-                disabled={Boolean(busy) || !data.runs[0]?.sessionId}
+                disabled={Boolean(busy) || !sessionId}
                 onClick={() => {
-                  const sessionId = data.runs[0]?.sessionId;
                   if (sessionId) void actions.previewRewind(sessionId).then(setRewindPreview);
                 }}
               >
@@ -1199,7 +1026,9 @@ function ReviewPage() {
             <Button
               disabled={!comment.trim() || Boolean(busy)}
               onClick={() =>
-                void actions.reviewChanges("request_changes", comment).then(() => setComment(""))
+                void actions
+                  .reviewChanges("request_changes", comment, target)
+                  .then(() => setComment(""))
               }
             >
               发送意见
@@ -1208,16 +1037,19 @@ function ReviewPage() {
         </div>
         <footer className="review-footer">
           <span>
-            指纹 <code>{data.changeFingerprint ?? "Runtime 未提供"}</code>
+            指纹 <code>{fingerprint ?? "Runtime 未提供"}</code>
           </span>
           <div className="button-row">
-            <Button disabled={Boolean(busy)} onClick={() => void actions.reviewChanges("approve")}>
+            <Button
+              disabled={Boolean(busy) || !target}
+              onClick={() => void actions.reviewChanges("approve", undefined, target)}
+            >
               批准更改
             </Button>
             <Button
               variant="primary"
-              disabled={Boolean(busy) || !data.changeFingerprint}
-              onClick={() => void actions.applyChanges()}
+              disabled={Boolean(busy) || !target}
+              onClick={() => void actions.applyChanges(target)}
             >
               批准并应用
             </Button>
@@ -1823,10 +1655,6 @@ function formatRelative(value: number): string {
 function formatElapsed(value: number): string {
   const minutes = Math.max(1, Math.floor((Date.now() - value) / 60_000));
   return `已运行 ${minutes} 分钟`;
-}
-
-function formatTime(value: number): string {
-  return new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit" }).format(value);
 }
 
 function renderPatch(change: ChangeView): string {

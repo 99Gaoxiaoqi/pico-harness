@@ -232,6 +232,13 @@ describe("LocalDaemonHost integration", () => {
 
       await expect(
         client.request("approval.respond", {
+          workspacePath: join(root, "other-workspace"),
+          approvalId: "approval-1",
+          decision: "allow_once",
+        }),
+      ).rejects.toThrow(/^FORBIDDEN:/u);
+      await expect(
+        client.request("approval.respond", {
           workspacePath: workspace,
           approvalId: "approval-1",
           decision: "allow_once",
@@ -244,6 +251,13 @@ describe("LocalDaemonHost integration", () => {
           decision: "allow_once",
         }),
       ).resolves.toEqual({ accepted: true, alreadyResolved: true });
+      await expect(
+        client.request("prompt.respond", {
+          workspacePath: join(root, "other-workspace"),
+          promptId: "prompt-1",
+          answer: "保留兼容",
+        }),
+      ).rejects.toThrow(/^FORBIDDEN:/u);
       await expect(
         client.request("prompt.respond", {
           workspacePath: workspace,
