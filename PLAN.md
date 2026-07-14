@@ -74,17 +74,24 @@
 
 ## 第一批并行任务
 
-- [ ] `codex/review-session-tui`：按 `(cwd, sessionId)` 隔离 SessionSettings；修复失效模型路由恢复迁移；补集成测试。
-- [ ] `codex/review-cron-daemon`：避免 claim 前异常遗留 queued Run；串行化 workspace registration 与 runtime refresh；补并发/恢复测试。
-- [ ] `codex/review-runtime-budget`：将 AgentRuntime 初始化纳入可靠清理边界；让子代理计入 Token/成本预算；补失败与预算测试。
+- [x] `codex/review-session-tui`：按 `(cwd, sessionId)` 隔离 SessionSettings；修复失效模型路由恢复迁移；补集成测试。
+- [x] `codex/review-cron-daemon`：避免 claim 前异常遗留 queued Run；串行化 workspace registration 与 runtime refresh；补并发/恢复测试。
+- [x] `codex/review-runtime-budget`：将 AgentRuntime 初始化纳入可靠清理边界；让子代理计入 Token/成本预算；补失败与预算测试。
 
 ## 串行集成任务
 
-- [ ] 在 `codex/review-fixes-integration` 审查并合并三个任务分支。
-- [ ] 统一 `.claude/agents` 兼容导入与 `.claw/agents.yaml` 原生 Profile 的解析、优先级和权限语义。
-- [ ] 处理剩余中风险契约：子代理 fallback/lifecycle、command/Skill/Hook 元数据、CLI 参数优先级。
-- [ ] 更新真实模型 E2E 的过期契约、Schema 与安全 fixture；恢复测试门禁。
+- [x] 在 `codex/review-fixes-integration` 审查并合并三个任务分支。
+- [x] 统一 `.claude/agents` 兼容导入与 `.claw/agents.yaml` 原生 Profile 的解析、优先级和权限语义。
+- [ ] 处理剩余中风险契约：Markdown command 的模型/工具收窄、显式 Skill Hooks、短生命周期异步委派拒绝。
+- [x] 处理 CLI 参数优先级，并修正 TERM=dumb 恢复与 TUI 路由展示。
+- [x] 更新真实模型 E2E 的过期契约、Schema 与安全 fixture；恢复本地测试契约。
 - [ ] 在最终代码状态运行 lint、typecheck、build、全量集成测试、PR-safe E2E、相关真实模型 E2E 和格式检查。
+
+## 已确认的后续增强（不阻断本轮）
+
+- 子代理显式 route 的 route-aware fallback 与多凭证轮换：必须继续通过 ModelRouter 校验 endpoint/凭证，不恢复裸模型 fallback。
+- Worker 子代理 provider call 的 durable `attemptId` 归属：需由 RuntimeStore/WorktreeSupervisor 传入可信 attempt 真值。
+- 自定义 embedding host 的 `credentialRef` 二次校验；当前第一方 production host 已 fail-closed，生产路径不可达。
 
 ## 合并与冲突约束
 
