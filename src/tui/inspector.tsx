@@ -38,7 +38,7 @@ export interface ArtifactInspectorSource {
   expectedSessionId: string;
   expectedToolName: string;
   expectedArgsHash: string;
-  /** 必须由宿主显式传入，一般为 <workDir>/.claw/artifacts。 */
+  /** 必须由宿主显式传入，一般为当前 workspace 的 artifacts 目录。 */
   trustedRoot: string;
   /** 仅用于降级展示；分页和 locate 从可信 meta 重新解析，绝不直接使用它。 */
   markerPath?: string;

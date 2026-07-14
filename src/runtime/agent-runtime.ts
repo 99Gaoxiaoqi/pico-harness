@@ -635,7 +635,7 @@ export async function executeAgentRuntime(
     if (!backgroundPolicy && dependencies.scheduleDraftCoordinator) {
       registry.register(new ScheduleTaskTool(dependencies.scheduleDraftCoordinator));
     }
-    // 【任务 2.6】用户可配置 Shell Hooks:加载 .claw/settings.json 的 hooks 配置,
+    // 【任务 2.6】用户可配置 Shell Hooks：原生 .pico 配置优先，并兼容 legacy 配置，
     // 存在则挂载 HookRunner 到 registry。fail-open:配置缺失/畸形均不启用 hook,零影响。
     registry.setSessionId?.(session.id);
     if (runtimeState.hookService) {

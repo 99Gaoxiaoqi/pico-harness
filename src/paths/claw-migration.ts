@@ -105,6 +105,16 @@ interface MigrationLocations {
   readonly lockPath: string;
 }
 
+interface MigrationLockOwner {
+  readonly pid: number;
+  readonly token: string;
+  readonly startedAt: string;
+}
+
+interface MigrationLock {
+  release(): Promise<void>;
+}
+
 /**
  * Copies the legacy workspace layout into Pico's split project/state layout.
  *
@@ -189,8 +199,7 @@ export async function migrateLegacyClawWorkspace(
       ignoredLegacyEntries,
     };
   } finally {
-    await lock.close().catch(() => undefined);
-    await rm(locations.lockPath, { force: true });
+    await lock.release();
   }
 }
 
@@ -212,17 +221,100 @@ function migrationLocations(paths: PicoPaths): MigrationLocations {
   };
 }
 
-async function acquireMigrationLock(lockPath: string) {
+async function acquireMigrationLock(lockPath: string): Promise<MigrationLock> {
+  const owner: MigrationLockOwner = {
+    pid: process.pid,
+    token: randomUUID(),
+    startedAt: new Date().toISOString(),
+  };
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      await mkdir(lockPath, { mode: 0o700 });
+      const ownerPath = join(lockPath, "owner.json");
+      try {
+        const handle = await open(ownerPath, "wx", 0o600);
+        try {
+          await handle.writeFile(`${JSON.stringify(owner)}\n`);
+          await handle.sync();
+        } finally {
+          await handle.close();
+        }
+      } catch (error) {
+        await rm(lockPath, { recursive: true, force: true });
+        throw error;
+      }
+      return {
+        async release() {
+          const current = await readMigrationLockOwner(lockPath);
+          if (current?.token === owner.token) {
+            await rm(lockPath, { recursive: true, force: true });
+          }
+        },
+      };
+    } catch (error) {
+      if (!isErrnoCode(error, "EEXIST")) throw error;
+    }
+
+    const existing = await readMigrationLockOwner(lockPath);
+    if (!existing || isProcessAlive(existing.pid)) throw new ClawMigrationLockedError(lockPath);
+
+    const stalePath = `${lockPath}.stale-${owner.token}`;
+    try {
+      await rename(lockPath, stalePath);
+    } catch (error) {
+      if (isErrnoCode(error, "ENOENT")) continue;
+      throw new ClawMigrationLockedError(lockPath);
+    }
+    const moved = await readMigrationLockOwner(stalePath);
+    if (moved?.token !== existing.token) {
+      await rename(stalePath, lockPath).catch(() => undefined);
+      throw new ClawMigrationLockedError(lockPath);
+    }
+    await rm(stalePath, { recursive: true, force: true });
+  }
+  throw new ClawMigrationLockedError(lockPath);
+}
+
+async function readMigrationLockOwner(lockPath: string): Promise<MigrationLockOwner | undefined> {
+  let raw: string;
   try {
-    const handle = await open(lockPath, "wx", 0o600);
-    await handle.writeFile(
-      `${JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() })}\n`,
-    );
-    await handle.sync();
-    return handle;
+    const info = await lstat(lockPath);
+    if (info.isSymbolicLink()) return undefined;
+    raw = await readFile(info.isDirectory() ? join(lockPath, "owner.json") : lockPath, "utf8");
   } catch (error) {
-    if (isErrnoCode(error, "EEXIST")) throw new ClawMigrationLockedError(lockPath);
-    throw error;
+    if (isErrnoCode(error, "ENOENT")) return undefined;
+    return undefined;
+  }
+  try {
+    const value: unknown = JSON.parse(raw);
+    if (
+      !isRecord(value) ||
+      !Number.isSafeInteger(value["pid"]) ||
+      (value["pid"] as number) <= 0 ||
+      typeof value["startedAt"] !== "string"
+    ) {
+      return undefined;
+    }
+    const token =
+      typeof value["token"] === "string" && value["token"].length > 0
+        ? value["token"]
+        : `legacy:${hashBytes(Buffer.from(raw))}`;
+    return {
+      pid: value["pid"] as number,
+      token,
+      startedAt: value["startedAt"],
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return !isErrnoCode(error, "ESRCH");
   }
 }
 
@@ -323,7 +415,7 @@ async function addSkills(
   const files = await listRegularFiles(sourceRoot);
   for (const sourcePath of files) {
     const relativePath = relative(sourceRoot, sourcePath);
-    const isState = extname(sourcePath).toLowerCase() === ".json";
+    const isState = await isDefiniteLegacySkillState(sourceRoot, sourcePath);
     await addKnownFile(
       sourcePath,
       isState
@@ -334,6 +426,35 @@ async function addSkills(
       items,
     );
   }
+}
+
+async function isDefiniteLegacySkillState(
+  sourceRoot: string,
+  sourcePath: string,
+): Promise<boolean> {
+  const relativePath = relative(sourceRoot, sourcePath);
+  if (relativePath.includes(sep) || extname(sourcePath).toLowerCase() !== ".json") return false;
+  let value: unknown;
+  try {
+    value = JSON.parse(await readFile(sourcePath, "utf8")) as unknown;
+  } catch {
+    return false;
+  }
+  if (!isRecord(value) || !isRecord(value["stats"])) return false;
+  return (
+    typeof value["id"] === "string" &&
+    basename(sourcePath, ".json") === value["id"] &&
+    typeof value["name"] === "string" &&
+    typeof value["trigger"] === "string" &&
+    typeof value["instructions"] === "string" &&
+    (value["source"] === "auto" || value["source"] === "manual") &&
+    typeof value["createdAt"] === "string" &&
+    typeof value["updatedAt"] === "string" &&
+    typeof value["stats"]["successCount"] === "number" &&
+    typeof value["stats"]["failCount"] === "number" &&
+    Array.isArray(value["knownFailures"]) &&
+    Array.isArray(value["versions"])
+  );
 }
 
 async function addArtifactFiles(

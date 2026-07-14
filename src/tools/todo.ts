@@ -4,7 +4,7 @@
 // 持有存储层(TodoStore)引用,不进 registry-impl.ts。
 //
 // 提供给大模型的能力:add/update/toggle/remove/list,操作结果持久化到
-// .claw/todo.json,并由 PromptComposer 注入 system prompt(见 composer.ts)。
+// workspace todo 状态文件，并由 PromptComposer 注入 system prompt（见 composer.ts）。
 //
 // 并发安全:所有 action 都写同一个 todo.json,故声明 ToolAccesses.all(),
 // 与同批次任何工具均冲突,退化为串行执行,避免清单覆盖写竞态。

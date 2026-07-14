@@ -44,7 +44,7 @@ import type { HookService } from "../hooks/service.js";
  * 子智能体执行结果。
  * - summary: 最终纯文本总结汇报(主 Agent 直接可见)
  * - artifacts: 探索期间被外部化的大型工具输出磁盘路径(相对 workDir)。
- *   这些文件落在 workDir/.claw/artifacts/ 内,主 Agent 可用 read_file 直接回查,
+ *   这些文件落在当前 workspace artifacts 内，主 Agent 可用 read_artifact 分页回查，
  *   避免子代理读过大文件后,主 Agent 既看不到原文也无法定位。
  */
 export interface SubagentResult {

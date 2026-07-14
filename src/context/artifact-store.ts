@@ -14,7 +14,7 @@ import {
   unlink,
 } from "node:fs/promises";
 // 用 pathe 替代 node:path:artifact 的 meta.path 会被持久化并跨平台对比,
-// 统一正斜杠后断言 .claw/artifacts/sessions/ / tool-results/ 才能稳定成立。
+// 统一正斜杠后断言 artifacts/sessions/ / tool-results/ 才能稳定成立。
 import { dirname, join, relative, resolve } from "pathe";
 import { writeJsonAtomic } from "../storage/atomic-json.js";
 
