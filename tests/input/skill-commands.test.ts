@@ -143,12 +143,16 @@ describe("skill command helpers", () => {
       {
         description: "审查代码",
         name: "reviewer",
+        source: "project-claude",
         sourcePath: join(workDir, ".claude", "agents", "reviewer.md"),
+        tools: ["read_file", "glob", "grep"],
       },
       {
         description: "撰写文档",
         name: "writer",
+        source: "project-claude",
         sourcePath: join(workDir, ".claude", "agents", "writer.md"),
+        tools: ["read_file", "glob", "grep"],
       },
     ]);
   });

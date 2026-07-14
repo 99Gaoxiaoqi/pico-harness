@@ -138,17 +138,18 @@ describe("delegate_task 的 agent_name 自定义角色(集成)", () => {
     expect(seenOpts[0]!.maxTurns).toBeUndefined();
   });
 
-  it("传了不存在的 agent_name,回落到默认(忽略 profile)", async () => {
+  it("传了不存在的 agent_name 时 fail closed", async () => {
     const { runner, manager, seenOpts, seenRequests, factory } = setup();
     const tool = new DelegateTaskTool(runner, factory as never, manager, { profiles: PROFILES });
 
-    await tool.execute(JSON.stringify({ goal: "任务", agent_name: "nonexistent" }));
+    const result = JSON.parse(
+      await tool.execute(JSON.stringify({ goal: "任务", agent_name: "nonexistent" })),
+    ) as { status: string; error: string };
 
-    // agentName 仍透传给 factory(factory 内部会回落到 explore/worker)
-    expect(seenRequests[0]!.agentName).toBe("nonexistent");
-    // 但 profile 未命中 → 不注入 profile 的 prompt/maxTurns
-    expect(seenOpts[0]!.systemPrompt).toBeUndefined();
-    expect(seenOpts[0]!.maxTurns).toBeUndefined();
+    expect(result).toMatchObject({ status: "error" });
+    expect(result.error).toContain("拒绝回落到默认工具集");
+    expect(seenRequests).toEqual([]);
+    expect(seenOpts).toEqual([]);
   });
 
   it("tasks 数组里的每个任务可独立指定 agent_name", async () => {
