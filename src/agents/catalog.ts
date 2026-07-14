@@ -44,6 +44,8 @@ export interface LoadAgentCatalogOptions {
   readonly picoHome?: string;
   readonly env?: Readonly<Record<string, string | undefined>>;
   readonly externalSources?: readonly AgentExternalCatalogSource[];
+  readonly includeClaudeProjectResources?: boolean;
+  readonly includeClaudeUserResources?: boolean;
 }
 
 export interface AgentExternalCatalogSource extends ExternalResourceCatalogSource {
@@ -106,15 +108,29 @@ export async function loadAgentCatalog(
       join(options.workDir, ".claw", "agents.yaml"),
       45,
     ),
-    agentSource(
-      "project-claude",
-      "project",
-      "claude-compat",
-      join(options.workDir, ".claude", "agents"),
-      40,
-    ),
+    ...(options.includeClaudeProjectResources === false
+      ? []
+      : [
+          agentSource(
+            "project-claude",
+            "project",
+            "claude-compat",
+            join(options.workDir, ".claude", "agents"),
+            40,
+          ),
+        ]),
     agentSource("user-pico", "user", "pico-native", paths.home.agents, 30),
-    agentSource("user-claude", "user", "claude-compat", join(homeDir, ".claude", "agents"), 20),
+    ...(options.includeClaudeUserResources === false
+      ? []
+      : [
+          agentSource(
+            "user-claude",
+            "user",
+            "claude-compat",
+            join(homeDir, ".claude", "agents"),
+            20,
+          ),
+        ]),
   ];
   const loaded = await Promise.all(sources.map(loadAgentSource));
   const candidates: ResourceCatalogCandidate<CatalogAgentProfile>[] = loaded.flat();

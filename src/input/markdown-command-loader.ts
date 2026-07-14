@@ -40,6 +40,8 @@ export interface LoadMarkdownCommandsOptions {
   builtinNames?: Iterable<string>;
   /** 由 Plugin 管理层预先验证边界后显式注入，Catalog 不自行发现 Plugin。 */
   externalSources?: readonly ExternalResourceCatalogSource[];
+  includeClaudeProjectResources?: boolean;
+  includeClaudeUserResources?: boolean;
 }
 
 const COMMAND_PRIORITIES: Record<MarkdownCommandSource, number> = {
@@ -80,13 +82,17 @@ export async function loadMarkdownCommands(
       options.projectCommandsDir ?? paths.project.commands,
       50,
     ),
-    commandSource(
-      "project-claude",
-      "project",
-      "claude-compat",
-      join(options.workDir, ".claude", "commands"),
-      40,
-    ),
+    ...(options.includeClaudeProjectResources === false
+      ? []
+      : [
+          commandSource(
+            "project-claude",
+            "project",
+            "claude-compat",
+            join(options.workDir, ".claude", "commands"),
+            40,
+          ),
+        ]),
   ];
   commandSources.push(
     commandSource(
@@ -96,7 +102,8 @@ export async function loadMarkdownCommands(
       options.userCommandsDir ?? paths.home.commands,
       30,
     ),
-    ...(options.userCommandsDir && options.homeDir === undefined
+    ...(options.includeClaudeUserResources === false ||
+    (options.userCommandsDir && options.homeDir === undefined)
       ? []
       : [
           commandSource(

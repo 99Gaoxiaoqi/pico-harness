@@ -75,6 +75,8 @@ export interface SkillLoaderOptions {
   readonly externalSources?: readonly ExternalResourceCatalogSource[];
   /** 显式开启用户 Pico/Claude Skills；传入 homeDir/picoHome 时也自动开启。 */
   readonly includeUserResources?: boolean;
+  readonly includeClaudeProjectResources?: boolean;
+  readonly includeClaudeUserResources?: boolean;
 }
 
 /** 负责从本地文件系统中加载并解析符合规范的技能模板 */
@@ -209,17 +211,31 @@ export class SkillLoader {
         join(this.workDir, ".claw", "skills"),
         45,
       ),
-      source(
-        "project-claude",
-        "project",
-        "claude-compat",
-        join(this.workDir, ".claude", "skills"),
-        40,
-      ),
+      ...(this.options.includeClaudeProjectResources === false
+        ? []
+        : [
+            source(
+              "project-claude",
+              "project",
+              "claude-compat",
+              join(this.workDir, ".claude", "skills"),
+              40,
+            ),
+          ]),
       ...(includeUserResources
         ? [
             source("user-pico", "user", "pico-native", paths.home.skills, 30),
-            source("user-claude", "user", "claude-compat", join(homeDir, ".claude", "skills"), 20),
+            ...(this.options.includeClaudeUserResources === false
+              ? []
+              : [
+                  source(
+                    "user-claude",
+                    "user",
+                    "claude-compat",
+                    join(homeDir, ".claude", "skills"),
+                    20,
+                  ),
+                ]),
           ]
         : []),
       ...(this.options.externalSources ?? []),
