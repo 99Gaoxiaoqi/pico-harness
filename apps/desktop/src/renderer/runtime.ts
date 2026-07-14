@@ -3,12 +3,24 @@ import {
   emptyData,
   folderWorkspaceCapabilities,
   type AppData,
+  type CatalogAgentView,
+  type CatalogSkillView,
+  type ChangeView,
   type ConnectionState,
+  type ConversationView,
   type JsonRecord,
+  type ModelRouteView,
+  type SessionSettingsView,
+  type UsageView,
   type WorkspaceCapabilities,
   type WorkspaceMode,
 } from "./model.js";
 import { previewData } from "./fixture.js";
+import type {
+  ComposerBehavior,
+  ConversationItemView,
+  ConversationProgressState,
+} from "./conversation/types.js";
 
 type DesktopResult<T> =
   | { readonly ok: true; readonly value: T }
@@ -78,6 +90,268 @@ function recordArray(value: unknown): readonly JsonRecord[] {
   return Array.isArray(value) ? value.filter(isRecord) : [];
 }
 
+function progressState(value: unknown): ConversationProgressState {
+  return value === "done" || value === "failed" || value === "waiting" ? value : "active";
+}
+
+function conversationItem(item: JsonRecord, index: number): ConversationItemView | undefined {
+  const id = stringValue(item.id, `conversation-item-${index}`);
+  const at = numberValue(item.at) || undefined;
+  const meta = {
+    ...(at ? { at } : {}),
+    ...(item.truncated === true
+      ? { truncated: true, originalBytes: numberValue(item.originalBytes) || undefined }
+      : {}),
+  };
+  if (item.kind === "userMessage" || item.kind === "assistantMessage") {
+    const text = stringValue(item.content);
+    if (!text) return undefined;
+    return {
+      id,
+      kind: item.kind,
+      text,
+      ...meta,
+    };
+  }
+  if (item.kind === "tool") {
+    return {
+      id,
+      kind: "tool",
+      toolName: stringValue(item.name, "tool"),
+      title: stringValue(item.name, "工具调用"),
+      detail: stringValue(item.args) || undefined,
+      output: stringValue(item.summary) || undefined,
+      state: item.status === "success" ? "done" : item.status === "error" ? "failed" : "active",
+      ...meta,
+    };
+  }
+  if (item.kind === "plan") {
+    return {
+      id,
+      kind: "plan",
+      title: stringValue(item.title, "执行计划"),
+      steps: [
+        {
+          id: `${id}:step`,
+          title: stringValue(item.detail ?? item.title, "计划已更新"),
+          state: progressState(item.state),
+        },
+      ],
+      ...meta,
+    };
+  }
+  if (item.kind === "runBoundary") {
+    const status = stringValue(item.status);
+    return {
+      id,
+      kind: "runBoundary",
+      status:
+        status === "failed"
+          ? "failed"
+          : status === "cancelled"
+            ? "interrupted"
+            : status === "succeeded"
+              ? "completed"
+              : "started",
+      label: stringValue(item.label, status === "succeeded" ? "运行完成" : "Pico 正在处理"),
+      ...meta,
+    };
+  }
+  if (item.kind === "goal") {
+    return {
+      id,
+      kind: "goal",
+      title: stringValue(item.title, "当前目标"),
+      detail: stringValue(item.detail) || undefined,
+      state: progressState(item.state),
+      ...meta,
+    };
+  }
+  if (item.kind === "subagent") {
+    return {
+      id,
+      kind: "subagent",
+      name: stringValue(item.name, "Agent"),
+      title: stringValue(item.title, "子代理活动"),
+      detail: stringValue(item.detail) || undefined,
+      state: progressState(item.state),
+      ...meta,
+    };
+  }
+  if (item.kind === "approval") {
+    return {
+      id,
+      kind: "approval",
+      title: stringValue(item.title, "需要你的批准"),
+      detail: stringValue(item.detail, "Runtime 请求执行受保护操作。"),
+      state: item.state === "allowed" || item.state === "denied" ? item.state : "pending",
+      ...meta,
+    };
+  }
+  if (item.kind === "prompt") {
+    return {
+      id,
+      kind: "prompt",
+      question: stringValue(item.title, "Pico 需要你的回答"),
+      detail: stringValue(item.detail) || undefined,
+      state: item.state === "answered" ? "answered" : "pending",
+      ...meta,
+    };
+  }
+  if (item.kind === "changes") {
+    const data = isRecord(item.data) ? item.data : {};
+    return {
+      id,
+      kind: "changes",
+      title: stringValue(item.title, "文件已修改"),
+      detail: stringValue(item.detail) || undefined,
+      files: Array.isArray(data.files)
+        ? data.files.map((file) => stringValue(file)).filter(Boolean)
+        : [],
+      state: item.state === "applied" || item.state === "conflict" ? item.state : "pending",
+      ...meta,
+    };
+  }
+  if (item.kind === "systemNotice" || item.kind === "error") {
+    return {
+      id,
+      kind: "status",
+      title: stringValue(item.content, item.kind === "error" ? "运行失败" : "状态更新"),
+      tone: item.kind === "error" ? "error" : "neutral",
+      ...meta,
+    };
+  }
+  return undefined;
+}
+
+function parseConversation(value: unknown, sessionId: string): ConversationView {
+  const result = isRecord(value) ? value : {};
+  return {
+    sessionId,
+    items: recordArray(result.items)
+      .map(conversationItem)
+      .filter((item): item is ConversationItemView => item !== undefined),
+    revision: stringValue(result.revision) || undefined,
+    nextBefore: stringValue(result.nextBefore) || undefined,
+    queuedCount: recordArray(result.queuedInputs).length,
+  };
+}
+
+function parseSessionSettings(value: unknown): SessionSettingsView | undefined {
+  const result = isRecord(value) ? value : {};
+  const settings = isRecord(result.settings) ? result.settings : result;
+  const model = stringValue(settings.model);
+  const mode = settings.mode;
+  if (!model || (mode !== "default" && mode !== "plan" && mode !== "auto" && mode !== "yolo")) {
+    return undefined;
+  }
+  return {
+    modelRouteId: stringValue(settings.modelRouteId) || undefined,
+    model,
+    mode,
+    thinkingEffort: stringValue(settings.thinkingEffort, "off"),
+    reasoningLevels: Array.isArray(settings.reasoningLevels)
+      ? settings.reasoningLevels.map((level) => stringValue(level)).filter(Boolean)
+      : [],
+  };
+}
+
+function parseGoalItem(value: unknown): ConversationItemView | undefined {
+  const result = isRecord(value) ? value : {};
+  const snapshot = isRecord(result.goal) ? result.goal : undefined;
+  if (!snapshot) return undefined;
+  const activeGoalId = stringValue(snapshot.activeGoalId);
+  const goal = recordArray(snapshot.goals).find(
+    (candidate) => stringValue(candidate.id) === activeGoalId,
+  );
+  if (!goal) return undefined;
+  const status = stringValue(goal.status);
+  return {
+    id: `goal:${activeGoalId}`,
+    kind: "goal",
+    title: stringValue(goal.title, "当前目标"),
+    detail: stringValue(goal.progress ?? goal.description) || undefined,
+    state:
+      status === "complete"
+        ? "done"
+        : status === "blocked"
+          ? "failed"
+          : status === "paused"
+            ? "waiting"
+            : "active",
+  };
+}
+
+function parseModelRoutes(value: unknown): readonly ModelRouteView[] {
+  const result = isRecord(value) ? value : {};
+  return recordArray(result.providers).flatMap((provider) => {
+    const providerId = stringValue(provider.id);
+    if (!providerId || !Array.isArray(provider.models)) return [];
+    return provider.models
+      .map((model) => stringValue(model))
+      .filter(Boolean)
+      .map((model) => ({ id: `${providerId}/${model}`, label: model }));
+  });
+}
+
+function parseCatalogAgents(value: unknown): readonly CatalogAgentView[] {
+  const result = isRecord(value) ? value : {};
+  return recordArray(result.agents).map((agent) => ({
+    name: stringValue(agent.name, "未命名 Agent"),
+    description: stringValue(agent.description, "由当前 Runtime 提供。"),
+    source: stringValue(agent.source, "runtime"),
+    tools: Array.isArray(agent.tools)
+      ? agent.tools.map((tool) => stringValue(tool)).filter(Boolean)
+      : [],
+    modelRouteId: stringValue(agent.modelRouteId) || undefined,
+  }));
+}
+
+function parseCatalogSkills(value: unknown): readonly CatalogSkillView[] {
+  const result = isRecord(value) ? value : {};
+  return recordArray(result.skills).map((skill) => ({
+    name: stringValue(skill.name, "未命名 Skill"),
+    description: stringValue(skill.description, "由当前 Runtime 提供。"),
+    allowedTools: Array.isArray(skill.allowedTools)
+      ? skill.allowedTools.map((tool) => stringValue(tool)).filter(Boolean)
+      : [],
+    model: stringValue(skill.model) || undefined,
+  }));
+}
+
+function parseChanges(value: unknown): {
+  readonly changes: readonly ChangeView[];
+  readonly fingerprint?: string | undefined;
+} {
+  const result = isRecord(value) ? value : {};
+  return {
+    changes: recordArray(result.changes).map((item) => ({
+      path: stringValue(item.path),
+      status:
+        item.status === "added" || item.status === "deleted" || item.status === "renamed"
+          ? item.status
+          : "modified",
+      additions: numberValue(item.additions),
+      deletions: numberValue(item.deletions),
+      patch: stringValue(item.patch) || undefined,
+    })),
+    fingerprint: stringValue(result.fingerprint) || undefined,
+  };
+}
+
+function parseUsage(value: unknown): UsageView {
+  const result = isRecord(value) ? value : {};
+  const usage = isRecord(result.usage) ? result.usage : result;
+  const total = isRecord(usage.total) ? usage.total : usage;
+  return {
+    inputTokens: numberValue(total.inputTokens || total.input_tokens) || undefined,
+    outputTokens: numberValue(total.outputTokens || total.output_tokens) || undefined,
+    cachedTokens: numberValue(total.cachedTokens || total.cached_tokens) || undefined,
+    cost: numberValue(total.cost) || undefined,
+    period: stringValue(usage.period || usage.rangeAccuracy),
+  };
+}
+
 function capability(item: JsonRecord, index: number) {
   const enabled = item.enabled;
   const configured = item.configured;
@@ -99,6 +373,17 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "Runtime 返回了未知错误。";
 }
 
+class RuntimeInvocationError extends Error {
+  constructor(
+    readonly code: string,
+    message: string,
+    readonly retryable: boolean,
+  ) {
+    super(`${code}: ${message}`);
+    this.name = "RuntimeInvocationError";
+  }
+}
+
 async function invoke(
   bridge: RendererBridge,
   method: string,
@@ -107,7 +392,13 @@ async function invoke(
   const call = bridge.runtime[method];
   if (!call) throw new Error(`当前 Runtime 不支持 ${method}`);
   const result = await call(params);
-  if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`);
+  if (!result.ok) {
+    throw new RuntimeInvocationError(
+      result.error.code,
+      result.error.message,
+      result.error.retryable,
+    );
+  }
   return result.value;
 }
 
@@ -171,6 +462,8 @@ function mergeLoadedData(base: AppData, results: Readonly<Record<string, unknown
   const usageTotal = isRecord(usage.total) ? usage.total : usage;
   const configResult = isRecord(results.config) ? results.config : {};
   const changeResult = isRecord(results.changes) ? results.changes : {};
+  const agentCatalogResult = isRecord(results.agentCatalog) ? results.agentCatalog : {};
+  const skillCatalogResult = isRecord(results.skillCatalog) ? results.skillCatalog : {};
 
   return {
     ...base,
@@ -207,6 +500,9 @@ function mergeLoadedData(base: AppData, results: Readonly<Record<string, unknown
     skills: recordArray(skillResult.skills).map(capability),
     mcpServers: recordArray(mcpResult.servers).map(capability),
     providers: recordArray(providerResult.providers).map(capability),
+    modelRoutes: parseModelRoutes(providerResult),
+    catalogAgents: parseCatalogAgents(agentCatalogResult),
+    catalogSkills: parseCatalogSkills(skillCatalogResult),
     changes: recordArray(changeResult.changes).map((item) => ({
       path: stringValue(item.path),
       status:
@@ -233,7 +529,31 @@ export interface RuntimeActions {
   chooseWorkspace(): Promise<void>;
   trustWorkspace(trusted: boolean): Promise<void>;
   reload(): Promise<void>;
-  createTask(prompt: string): Promise<string | undefined>;
+  loadSession(sessionId: string): Promise<void>;
+  loadEarlierSession(sessionId: string): Promise<void>;
+  sendMessage(input: {
+    readonly sessionId?: string;
+    readonly text: string;
+    readonly behavior?: ComposerBehavior;
+    readonly expectedRunId?: string;
+    readonly activation?:
+      | { readonly kind: "skill"; readonly name: string }
+      | { readonly kind: "agent"; readonly name: string };
+  }): Promise<{
+    readonly succeeded: boolean;
+    readonly sessionId?: string | undefined;
+  }>;
+  renameSession(sessionId: string, title: string): Promise<void>;
+  forkSession(sessionId: string): Promise<string | undefined>;
+  compactSession(sessionId: string): Promise<void>;
+  updateSessionSettings(
+    sessionId: string,
+    patch: Readonly<{
+      modelRouteId?: string;
+      mode?: "default" | "plan" | "auto" | "yolo";
+      thinkingEffort?: string;
+    }>,
+  ): Promise<void>;
   setSessionArchived(sessionId: string, archived: boolean): Promise<void>;
   pauseRun(runId: string): Promise<void>;
   resumeRun(runId: string): Promise<void>;
@@ -241,8 +561,12 @@ export interface RuntimeActions {
   steerRun(runId: string, message: string): Promise<void>;
   respondApproval(id: string, decision: "allow_once" | "allow_session" | "deny"): Promise<void>;
   respondPrompt(id: string, answer: string): Promise<void>;
-  reviewChanges(decision: "approve" | "request_changes", message?: string): Promise<void>;
-  applyChanges(): Promise<void>;
+  reviewChanges(
+    decision: "approve" | "request_changes",
+    message?: string,
+    target?: { readonly runId: string; readonly fingerprint: string },
+  ): Promise<void>;
+  applyChanges(target?: { readonly runId: string; readonly fingerprint: string }): Promise<void>;
   previewRewind(sessionId: string): Promise<
     | {
         readonly checkpointId: string;
@@ -264,6 +588,8 @@ export interface RuntimeActions {
   setLaunchAtLogin(enabled: boolean): Promise<void>;
   setBackgroundMode(enabled: boolean): Promise<void>;
   openWorkspace(): Promise<void>;
+  initializeWorkspace(): Promise<void>;
+  runDiagnostics(kind: "runtime" | "resources"): Promise<string | undefined>;
 }
 
 export interface RuntimeStore {
@@ -284,6 +610,11 @@ export function useRuntimeStore(): RuntimeStore {
   const [busy, setBusy] = useState<string>();
   const [message, setMessage] = useState<string>();
   const dataRef = useRef(data);
+  const seenEventIdsRef = useRef(new Set<string>());
+  const pendingSendRef = useRef<{
+    readonly identity: string;
+    readonly idempotencyKey: string;
+  }>();
   dataRef.current = data;
 
   const reportFailure = useCallback((error: unknown) => {
@@ -301,6 +632,8 @@ export function useRuntimeStore(): RuntimeStore {
         ["skills", "config.skills", params],
         ["mcp", "config.mcpServers", params],
         ["providers", "config.providers", params],
+        ["agentCatalog", "catalog.agents", params],
+        ["skillCatalog", "catalog.skills", params],
         ["usage", "usage.get", params],
         ["config", "config.get", params],
       ].map(async ([key, method, invocationParams]) => {
@@ -368,6 +701,94 @@ export function useRuntimeStore(): RuntimeStore {
     );
   }, []);
 
+  const loadConversation = useCallback(
+    async (bridge: RendererBridge, workspacePath: string, sessionId: string) => {
+      if (preview) return;
+      let value: unknown;
+      try {
+        value = await invoke(bridge, "session.transcript", {
+          workspacePath,
+          sessionId,
+          limit: 200,
+        });
+      } catch (error) {
+        setData((current) => ({
+          ...current,
+          conversations: {
+            ...current.conversations,
+            [sessionId]: {
+              sessionId,
+              items: [],
+              queuedCount: 0,
+              loadError: errorMessage(error),
+            },
+          },
+        }));
+        throw error;
+      }
+      const record = isRecord(value) ? value : {};
+      const activeRun = isRecord(record.activeRun) ? record.activeRun : undefined;
+      const runId =
+        stringValue(activeRun?.runId) ||
+        dataRef.current.runs.find((run) => run.sessionId === sessionId)?.id;
+      const [sessionUsage, settingsResult, goalResult] = await Promise.all([
+        optionalInvoke(bridge, "usage.get", { workspacePath, sessionId }),
+        optionalInvoke(bridge, "session.settings.get", { workspacePath, sessionId }),
+        optionalInvoke(bridge, "goal.get", { workspacePath, sessionId }),
+      ]);
+      let conversation: ConversationView = {
+        ...parseConversation(record, sessionId),
+        ...(!sessionUsage.error ? { usage: parseUsage(sessionUsage.value) } : {}),
+        ...(!settingsResult.error ? { settings: parseSessionSettings(settingsResult.value) } : {}),
+        ...(!goalResult.error ? { goalItem: parseGoalItem(goalResult.value) } : {}),
+      };
+      if (runId) {
+        const changeList = await optionalInvoke(bridge, "changes.list", { workspacePath, runId });
+        if (!changeList.error) {
+          const listValue = isRecord(changeList.value) ? changeList.value : {};
+          const changes = await Promise.all(
+            recordArray(listValue.changes).map(async (change) => {
+              const path = stringValue(change.path);
+              if (!path) return change;
+              const diff = await optionalInvoke(bridge, "changes.diff", {
+                workspacePath,
+                runId,
+                path,
+              });
+              const diffValue = isRecord(diff.value) ? diff.value : {};
+              return { ...change, patch: stringValue(diffValue.patch) || undefined };
+            }),
+          );
+          const parsed = parseChanges({ ...listValue, changes });
+          conversation = {
+            ...conversation,
+            runId,
+            changes: parsed.changes,
+            changeFingerprint: parsed.fingerprint,
+          };
+        }
+      }
+      setData((current) => ({
+        ...current,
+        conversations: { ...current.conversations, [sessionId]: conversation },
+        runs: activeRun
+          ? [
+              {
+                id: stringValue(activeRun.runId),
+                sessionId: stringValue(activeRun.sessionId, sessionId),
+                description: stringValue(activeRun.description, "会话运行"),
+                status: stringValue(activeRun.status, "running"),
+                startedAt: numberValue(activeRun.startedAt, Date.now()),
+                updatedAt: numberValue(activeRun.updatedAt, Date.now()),
+              },
+              ...current.runs.filter((run) => run.id !== stringValue(activeRun.runId)),
+            ]
+          : current.runs,
+      }));
+    },
+    [preview],
+  );
+
   const bootstrap = useCallback(async () => {
     if (preview) return;
     setConnection({ kind: "loading" });
@@ -381,7 +802,14 @@ export function useRuntimeStore(): RuntimeStore {
       return;
     }
     try {
-      await invoke(bridge, "runtime.ping", {});
+      const pingValue = await invoke(bridge, "runtime.ping", {});
+      const ping = isRecord(pingValue) ? pingValue : {};
+      const capabilities = Array.isArray(ping.capabilities)
+        ? ping.capabilities.map((capability) => stringValue(capability))
+        : [];
+      if (!capabilities.includes("session-conversation-v1")) {
+        throw new Error("当前 Runtime 缺少会话能力。请完全退出并重新启动 Pico。");
+      }
       const workspaceValue = await invoke(bridge, "workspace.list", {});
       const workspaces = parseWorkspaceList(workspaceValue);
       const workspacePath = stringValue(
@@ -409,6 +837,12 @@ export function useRuntimeStore(): RuntimeStore {
     if (!bridge) return;
     const subscription = bridge.events.subscribe({ workspacePath: data.workspacePath }, (event) => {
       if (!isRecord(event)) return;
+      const scope = isRecord(event.scope) ? event.scope : {};
+      const scopedWorkspacePath = stringValue(scope.workspacePath);
+      if (scopedWorkspacePath && scopedWorkspacePath !== dataRef.current.workspacePath) return;
+      const eventId = stringValue(event.eventId);
+      if (eventId && seenEventIdsRef.current.has(eventId)) return;
+      if (eventId) seenEventIdsRef.current.add(eventId);
       const payload = isRecord(event.payload) ? event.payload : {};
       const topic = stringValue(event.topic);
       if (topic === "approval.requested") {
@@ -449,6 +883,18 @@ export function useRuntimeStore(): RuntimeStore {
             },
           ],
         }));
+      } else if (topic === "approval.resolved") {
+        const approvalId = stringValue(payload.approvalId);
+        setData((current) => ({
+          ...current,
+          approvals: current.approvals.filter((approval) => approval.id !== approvalId),
+        }));
+      } else if (topic === "prompt.resolved") {
+        const promptId = stringValue(payload.promptId);
+        setData((current) => ({
+          ...current,
+          prompts: current.prompts.filter((prompt) => prompt.id !== promptId),
+        }));
       } else if (topic === "run.timeline") {
         const item = isRecord(payload.item) ? payload.item : {};
         setData((current) => ({
@@ -465,34 +911,46 @@ export function useRuntimeStore(): RuntimeStore {
               detail: stringValue(item.detail),
               state: item.state === "failed" ? "failed" : item.state === "done" ? "done" : "active",
               at: numberValue(event.at, Date.now()),
+              sessionId: stringValue(scope.sessionId) || undefined,
+              runId: stringValue(scope.runId ?? payload.runId) || undefined,
+              eventType: stringValue(item.eventType) || undefined,
             },
           ],
         }));
       } else if (topic.startsWith("run.") || topic.startsWith("session.")) {
         const workspace = dataRef.current.workspacePath;
-        if (workspace) void loadWorkspace(bridge, workspace);
+        if (workspace) {
+          void loadWorkspace(bridge, workspace);
+          const sessionId = stringValue(scope.sessionId);
+          if (sessionId) void loadConversation(bridge, workspace, sessionId);
+        }
       }
     });
     void subscription.ready.then((result) => {
       if (!result.ok) setMessage(`事件订阅失败：${result.error.message}`);
     });
     return () => subscription.dispose();
-  }, [connection.kind, data.workspacePath, loadWorkspace, preview]);
+  }, [connection.kind, data.workspacePath, loadConversation, loadWorkspace, preview]);
 
   const perform = useCallback(
-    async (label: string, operation: (bridge: RendererBridge) => Promise<void>) => {
+    async (
+      label: string,
+      operation: (bridge: RendererBridge) => Promise<void>,
+    ): Promise<boolean> => {
       setBusy(label);
       setMessage(undefined);
       try {
         if (preview) {
           await operation(createPreviewBridge());
-          return;
+          return true;
         }
         const bridge = getBridge();
         if (!bridge) throw new Error("桌面安全桥接不可用。");
         await operation(bridge);
+        return true;
       } catch (error) {
         reportFailure(error);
+        return false;
       } finally {
         setBusy(undefined);
       }
@@ -525,25 +983,208 @@ export function useRuntimeStore(): RuntimeStore {
         });
       },
       reload: bootstrap,
-      async createTask(prompt) {
+      async loadSession(sessionId) {
         const workspacePath = dataRef.current.workspacePath;
-        if (!workspacePath || !prompt.trim()) return undefined;
-        let createdId: string | undefined;
-        await perform("create-task", async (bridge) => {
-          if (preview) {
-            createdId = "run-atlas";
+        if (!workspacePath || !sessionId) return;
+        await perform("load-session", async (bridge) => {
+          if (!preview) await loadConversation(bridge, workspacePath, sessionId);
+        });
+      },
+      async loadEarlierSession(sessionId) {
+        const workspacePath = dataRef.current.workspacePath;
+        const conversation = dataRef.current.conversations[sessionId];
+        const before = conversation?.nextBefore;
+        const expectedRevision = conversation?.revision;
+        if (!workspacePath || !before || !expectedRevision) return;
+        await perform("load-earlier-session", async (bridge) => {
+          if (preview) return;
+          let value: unknown;
+          try {
+            value = await invoke(bridge, "session.transcript", {
+              workspacePath,
+              sessionId,
+              before,
+              limit: 200,
+              expectedRevision,
+            });
+          } catch (error) {
+            if (error instanceof RuntimeInvocationError && error.code === "CONFLICT") {
+              await loadConversation(bridge, workspacePath, sessionId);
+              setMessage("会话历史已更新，已从最新版本重新加载。");
+              return;
+            }
+            throw error;
+          }
+          const page = parseConversation(value, sessionId);
+          if (
+            page.revision !== expectedRevision ||
+            dataRef.current.conversations[sessionId]?.revision !== expectedRevision
+          ) {
+            await loadConversation(bridge, workspacePath, sessionId);
+            setMessage("会话历史已更新，已从最新版本重新加载。");
             return;
           }
-          const runValue = await invoke(bridge, "run.start", {
-            workspacePath,
-            prompt: prompt.trim(),
-            idempotencyKey: crypto.randomUUID(),
+          setData((current) => {
+            const latest = current.conversations[sessionId];
+            if (!latest || latest.revision !== expectedRevision) return current;
+            const existingIds = new Set(latest.items.map((item) => item.id));
+            const olderItems = page.items.filter((item) => !existingIds.has(item.id));
+            return {
+              ...current,
+              conversations: {
+                ...current.conversations,
+                [sessionId]: {
+                  ...latest,
+                  items: [...olderItems, ...latest.items],
+                  nextBefore: page.nextBefore,
+                  queuedCount: page.queuedCount,
+                },
+              },
+            };
           });
-          const run = isRecord(runValue) ? runValue : {};
-          createdId = stringValue(run.runId);
-          await loadWorkspace(bridge, workspacePath);
         });
-        return createdId;
+      },
+      async sendMessage(input) {
+        const workspacePath = dataRef.current.workspacePath;
+        if (!workspacePath || !input.text.trim()) return { succeeded: false };
+        let resolvedSessionId = input.sessionId;
+        const sendIdentity = JSON.stringify({
+          workspacePath,
+          sessionId: input.sessionId,
+          text: input.text.trim(),
+          behavior: input.behavior ?? "auto",
+          expectedRunId: input.expectedRunId,
+          activation: input.activation,
+        });
+        const idempotencyKey =
+          pendingSendRef.current?.identity === sendIdentity
+            ? pendingSendRef.current.idempotencyKey
+            : crypto.randomUUID();
+        pendingSendRef.current = { identity: sendIdentity, idempotencyKey };
+        const succeeded = await perform("send-message", async (bridge) => {
+          if (preview) {
+            resolvedSessionId ??= "session-atlas";
+            const sessionId = resolvedSessionId;
+            if (!sessionId) return;
+            setData((current) => {
+              const conversation = current.conversations[sessionId] ?? {
+                sessionId,
+                items: [],
+                queuedCount: 0,
+              };
+              return {
+                ...current,
+                conversations: {
+                  ...current.conversations,
+                  [sessionId]: {
+                    ...conversation,
+                    items: [
+                      ...conversation.items,
+                      {
+                        id: `preview-user-${Date.now()}`,
+                        kind: "userMessage" as const,
+                        text: input.text.trim(),
+                        at: Date.now(),
+                      },
+                    ],
+                  },
+                },
+              };
+            });
+            return;
+          }
+          const value = await invoke(bridge, "session.send", {
+            workspacePath,
+            ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+            input:
+              input.activation?.kind === "skill"
+                ? { kind: "skill", name: input.activation.name, args: input.text.trim() }
+                : input.activation?.kind === "agent"
+                  ? { kind: "agent", name: input.activation.name, task: input.text.trim() }
+                  : { kind: "text", text: input.text.trim() },
+            behavior: input.behavior ?? "auto",
+            ...(input.expectedRunId ? { expectedRunId: input.expectedRunId } : {}),
+            idempotencyKey,
+          });
+          const result = isRecord(value) ? value : {};
+          const session = isRecord(result.session) ? result.session : {};
+          resolvedSessionId = stringValue(session.sessionId, input.sessionId);
+          await loadWorkspace(bridge, workspacePath);
+          if (resolvedSessionId) {
+            await loadConversation(bridge, workspacePath, resolvedSessionId);
+          }
+        });
+        if (succeeded && pendingSendRef.current?.identity === sendIdentity) {
+          pendingSendRef.current = undefined;
+        }
+        return {
+          succeeded,
+          ...(resolvedSessionId ? { sessionId: resolvedSessionId } : {}),
+        };
+      },
+      async renameSession(sessionId, title) {
+        const workspacePath = dataRef.current.workspacePath;
+        if (!workspacePath || !title.trim()) return;
+        await perform("rename-session", async (bridge) => {
+          if (!preview) {
+            await invoke(bridge, "session.rename", {
+              workspacePath,
+              sessionId,
+              title: title.trim(),
+            });
+            await loadWorkspace(bridge, workspacePath);
+            return;
+          }
+          setData((current) => ({
+            ...current,
+            sessions: current.sessions.map((session) =>
+              session.id === sessionId ? { ...session, title: title.trim() } : session,
+            ),
+          }));
+        });
+      },
+      async forkSession(sessionId) {
+        const workspacePath = dataRef.current.workspacePath;
+        if (!workspacePath) return undefined;
+        let forkedSessionId: string | undefined;
+        await perform("fork-session", async (bridge) => {
+          if (preview) {
+            forkedSessionId = `${sessionId}-fork`;
+            return;
+          }
+          const value = await invoke(bridge, "session.fork", { workspacePath, sessionId });
+          const result = isRecord(value) ? value : {};
+          const session = isRecord(result.session) ? result.session : {};
+          forkedSessionId = stringValue(session.sessionId);
+          await loadWorkspace(bridge, workspacePath);
+          if (forkedSessionId) await loadConversation(bridge, workspacePath, forkedSessionId);
+        });
+        return forkedSessionId;
+      },
+      async compactSession(sessionId) {
+        const workspacePath = dataRef.current.workspacePath;
+        if (!workspacePath) return;
+        await perform("compact-session", async (bridge) => {
+          if (!preview) {
+            await invoke(bridge, "session.compact", { workspacePath, sessionId });
+            await loadConversation(bridge, workspacePath, sessionId);
+          }
+          setMessage("会话上下文已压缩，可见历史已从 Runtime 重新加载。");
+        });
+      },
+      async updateSessionSettings(sessionId, patch) {
+        const workspacePath = dataRef.current.workspacePath;
+        if (!workspacePath) return;
+        await perform("session-settings", async (bridge) => {
+          if (!preview) {
+            await invoke(bridge, "session.settings.update", {
+              workspacePath,
+              sessionId,
+              ...patch,
+            });
+            await loadConversation(bridge, workspacePath, sessionId);
+          }
+        });
       },
       async setSessionArchived(sessionId, archived) {
         const workspacePath = dataRef.current.workspacePath;
@@ -650,10 +1291,10 @@ export function useRuntimeStore(): RuntimeStore {
           }));
         });
       },
-      async reviewChanges(decision, reviewMessage) {
+      async reviewChanges(decision, reviewMessage, target) {
         const workspacePath = dataRef.current.workspacePath;
-        const runId = dataRef.current.runs[0]?.id;
-        const expectedFingerprint = dataRef.current.changeFingerprint;
+        const runId = target?.runId ?? dataRef.current.runs[0]?.id;
+        const expectedFingerprint = target?.fingerprint ?? dataRef.current.changeFingerprint;
         if (!workspacePath || !runId || !expectedFingerprint) return;
         await perform("review", async (bridge) => {
           if (!preview)
@@ -667,10 +1308,10 @@ export function useRuntimeStore(): RuntimeStore {
           setMessage(decision === "approve" ? "更改已批准，等待应用。" : "修改意见已发回任务。");
         });
       },
-      async applyChanges() {
+      async applyChanges(target) {
         const workspacePath = dataRef.current.workspacePath;
-        const runId = dataRef.current.runs[0]?.id;
-        const expectedFingerprint = dataRef.current.changeFingerprint;
+        const runId = target?.runId ?? dataRef.current.runs[0]?.id;
+        const expectedFingerprint = target?.fingerprint ?? dataRef.current.changeFingerprint;
         if (!workspacePath || !runId || !expectedFingerprint) return;
         await perform("apply", async (bridge) => {
           if (!preview)
@@ -730,7 +1371,10 @@ export function useRuntimeStore(): RuntimeStore {
               expectedFingerprint: fingerprint,
             });
           setMessage("已回到检查点。Runtime 已使用预览指纹重新验证。");
-          if (!preview) await loadWorkspace(bridge, workspacePath);
+          if (!preview) {
+            await loadWorkspace(bridge, workspacePath);
+            await loadConversation(bridge, workspacePath, sessionId);
+          }
         });
       },
       async toggleJob(id, enabled) {
@@ -839,8 +1483,35 @@ export function useRuntimeStore(): RuntimeStore {
           if (!result.ok) throw new Error(result.error.message);
         });
       },
+      async initializeWorkspace() {
+        const workspacePath = dataRef.current.workspacePath;
+        if (!workspacePath) return;
+        await perform("workspace-init", async (bridge) => {
+          if (!preview) await invoke(bridge, "workspace.init", { workspacePath });
+          setMessage("Pico 项目入口已初始化；已存在的文件保持不变。");
+        });
+      },
+      async runDiagnostics(kind) {
+        const workspacePath = dataRef.current.workspacePath;
+        if (!workspacePath) return undefined;
+        let output: string | undefined;
+        await perform("diagnostics", async (bridge) => {
+          if (preview) {
+            output = "Preview 模式不运行本机诊断。";
+            return;
+          }
+          const value = await invoke(
+            bridge,
+            kind === "resources" ? "diagnostics.resources" : "diagnostics.run",
+            { workspacePath },
+          );
+          const result = isRecord(value) ? value : {};
+          output = stringValue(result.output, "诊断完成，未返回文本报告。");
+        });
+        return output;
+      },
     }),
-    [bootstrap, loadWorkspace, perform, preview],
+    [bootstrap, loadConversation, loadWorkspace, perform, preview],
   );
 
   return { preview, connection, data, busy, message, actions };

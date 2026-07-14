@@ -40,6 +40,8 @@ export interface WorkspaceRunSnapshot {
 
 export interface WorkspaceRunRequest {
   description: string;
+  /** Known durable Session linkage. Desktop supplies this before run.started is published. */
+  sessionId?: string;
 }
 
 export interface WorkspaceRunContext {
@@ -203,6 +205,7 @@ export class WorkspaceTaskRuntime {
       snapshot: {
         runId,
         workspace: this.workspace,
+        ...(request.sessionId ? { sessionId: request.sessionId } : {}),
         description,
         status: "running",
         startedAt,

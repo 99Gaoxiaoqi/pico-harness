@@ -24,6 +24,7 @@ import {
 } from "../schema/message.js";
 import type { CostStatus } from "../observability/pricing.js";
 import { logger } from "../observability/logger.js";
+import type { TranscriptEvent } from "../presentation/transcript-event-store.js";
 import {
   SessionStore,
   SessionWriteUncertainError,
@@ -206,6 +207,10 @@ export class Session implements SessionRuntimePersistence {
   totalUnknownCostReports = 0;
 
   private history: Message[] = [];
+  private historySequences: number[] = [];
+  /** 与 history 共用 Session JSONL 的 UI-neutral 结构化事件。 */
+  private transcriptEvents: TranscriptEvent[] = [];
+  private transcriptEventSequences: number[] = [];
 
   /**
    * ToolResult 外挂元数据(按 toolCallId 索引),供 MicroCompaction 判断
@@ -435,6 +440,9 @@ export class Session implements SessionRuntimePersistence {
 
     const replay = replaySessionRecords(records);
     this.history = replay.history;
+    this.historySequences = [...replay.historySequences];
+    this.transcriptEvents = [...replay.transcriptEvents];
+    this.transcriptEventSequences = [...replay.transcriptEventSequences];
     this.persistedSettings = replay.runtime.settings;
     this.persistedGoal = replay.runtime.goal;
     // 旧 JSONL 没有 runtime_state:从当前有效 assistant message.usage 回填 token。
@@ -675,6 +683,9 @@ export class Session implements SessionRuntimePersistence {
       createdAt: this.createdAt.toISOString(),
       updatedAt: this.updatedAt.toISOString(),
       messages: structuredClone(this.history),
+      messageSequences: [...this.historySequences],
+      transcriptEvents: structuredClone(this.transcriptEvents),
+      transcriptEventSequences: [...this.transcriptEventSequences],
       runtime: this.getRuntimeStateSnapshot(),
     };
     const barrier = this.persistenceTail;
@@ -921,6 +932,7 @@ export class Session implements SessionRuntimePersistence {
       store.commitSeed(seeded, lineage, { expectedSeq: seq }),
     );
     this.history = seeded;
+    this.historySequences = seeded.map(() => receipt.cursor.seq);
     this.conversationId = `${receipt.cursor.logId}:${receipt.cursor.epoch}`;
     this.updatedAt = new Date();
     this.rebuildToolResultMeta();
@@ -1027,6 +1039,9 @@ export class Session implements SessionRuntimePersistence {
   private doAppend(msg: Message): void {
     const beforeLen = this.history.length;
     this.history.push(msg);
+    // 同步兼容 append 先更新内存、再把 durable write 排队。这里只记录预计位置，
+    // 不能推进 JSONL nextSeq，否则后台提交会跳号并进入 write_uncertain。
+    this.historySequences.push(this.nextSeq);
     this.updatedAt = new Date();
 
     try {
@@ -1045,6 +1060,7 @@ export class Session implements SessionRuntimePersistence {
     );
     if (!receipt.inserted) return receipt;
     this.history.push(msg);
+    this.historySequences.push(receipt.cursor.seq);
     this.conversationId = `${receipt.cursor.logId}:${receipt.cursor.epoch}`;
     this.updatedAt = new Date();
     try {
@@ -1071,12 +1087,15 @@ export class Session implements SessionRuntimePersistence {
     this.assertWritable();
     if (fromIndex < 0) fromIndex = 0;
     const nextHistory = fromIndex >= this.history.length ? [] : this.history.slice(fromIndex);
+    const nextSequences =
+      fromIndex >= this.historySequences.length ? [] : this.historySequences.slice(fromIndex);
     const receipt = this.store
       ? await this.commitPersistence("truncate", (store, seq) =>
           store.commitTruncate(fromIndex, { expectedSeq: seq }),
         )
       : undefined;
     this.history = nextHistory;
+    this.historySequences = nextSequences;
     if (receipt) this.conversationId = `${receipt.cursor.logId}:${receipt.cursor.epoch}`;
     this.rebuildSearchIndex(receipt?.cursor);
     this.pruneToolResultMeta();
@@ -1095,12 +1114,15 @@ export class Session implements SessionRuntimePersistence {
     const { cutIndex, removedCount } = findLegacyUndoCut(this.history, count);
     if (removedCount === 0) return;
     const nextHistory = this.history.slice(0, cutIndex);
+    const nextSequences = this.historySequences.slice(0, cutIndex);
     const receipt = this.store
       ? await this.commitPersistence("rewind", (store, seq) =>
           store.commitRewind(cutIndex, { expectedSeq: seq }),
         )
       : undefined;
     this.history = nextHistory;
+    this.historySequences = nextSequences;
+    this.pruneTranscriptAfterHistory(nextSequences);
     this.rebuildSearchIndex(receipt?.cursor);
     this.pruneToolResultMeta();
     // 3.4: undo 时清空 deferred 与 pending,避免遗留半截 tool 配对状态
@@ -1172,6 +1194,7 @@ export class Session implements SessionRuntimePersistence {
   ): Promise<CommitReceipt | undefined> {
     this.assertWritable();
     const nextHistory = this.history.slice(0, messageIndex);
+    const nextSequences = this.historySequences.slice(0, messageIndex);
     const receipt = this.store
       ? await this.commitPersistence("rewind", (store, seq) =>
           store.commitRewind(messageIndex, {
@@ -1181,6 +1204,8 @@ export class Session implements SessionRuntimePersistence {
         )
       : undefined;
     this.history = nextHistory;
+    this.historySequences = nextSequences;
+    this.pruneTranscriptAfterHistory(nextSequences);
     this.rebuildSearchIndex(receipt?.cursor);
     this.pruneToolResultMeta();
     this.deferredMessages = [];
@@ -1490,6 +1515,7 @@ export class Session implements SessionRuntimePersistence {
     if (compactedCount < 0) compactedCount = 0;
     if (compactedCount > this.history.length) compactedCount = this.history.length;
     const retained = this.history.slice(compactedCount);
+    const retainedSequences = this.historySequences.slice(compactedCount);
     // 摘要消息:role=assistant(对标 kimi-code compaction_summary)
     const summaryMsg: Message = {
       role: "assistant",
@@ -1503,6 +1529,12 @@ export class Session implements SessionRuntimePersistence {
         )
       : undefined;
     this.history = nextHistory;
+    this.historySequences = [
+      retainedSequences.length > 0
+        ? retainedSequences[0]! - 0.5
+        : (receipt?.cursor.seq ?? this.nextSeq),
+      ...retainedSequences,
+    ];
     if (receipt) this.conversationId = `${receipt.cursor.logId}:${receipt.cursor.epoch}`;
     this.rebuildSearchIndex(receipt?.cursor);
     // 压缩后清理已消失 ToolResult 的 meta(被摘要吞掉的前缀条目)
@@ -1514,6 +1546,26 @@ export class Session implements SessionRuntimePersistence {
   /** 返回全量历史的深拷贝(仅供调试 / 测试,不参与推理) */
   getHistory(): Message[] {
     return structuredClone(this.history);
+  }
+
+  private pruneTranscriptAfterHistory(messageSequences: readonly number[]): void {
+    const cutoffSequence = messageSequences.at(-1);
+    if (cutoffSequence === undefined) {
+      this.transcriptEvents = [];
+      this.transcriptEventSequences = [];
+      return;
+    }
+    const retainedEvents: TranscriptEvent[] = [];
+    const retainedSequences: number[] = [];
+    this.transcriptEventSequences.forEach((sequence, index) => {
+      if (sequence > cutoffSequence) return;
+      const event = this.transcriptEvents[index];
+      if (!event) return;
+      retainedEvents.push(event);
+      retainedSequences.push(sequence);
+    });
+    this.transcriptEvents = retainedEvents;
+    this.transcriptEventSequences = retainedSequences;
   }
 
   /** 当前历史消息条数 */
@@ -1647,6 +1699,35 @@ export class Session implements SessionRuntimePersistence {
    */
   get recordStore(): SessionStore | undefined {
     return this.store;
+  }
+
+  /**
+   * 将完整 Transcript 事件追加到 Session JSONL。调用方不能跳号，
+   * 以便重启后可由共享 projector 确定性恢复。
+   */
+  async recordTranscriptEvent(
+    event: TranscriptEvent,
+    options?: { readonly journalEventId?: string },
+  ): Promise<CommitReceipt> {
+    const expectedSequence = (this.transcriptEvents.at(-1)?.sequence ?? 0) + 1;
+    if (event.sequence !== expectedSequence) {
+      throw new Error(
+        `Transcript event sequence mismatch: ${event.sequence}, expected ${expectedSequence}`,
+      );
+    }
+    const durableEvent = structuredClone(event);
+    const receipt = await this.commitPersistence("transcript.event.recorded", (store, seq) =>
+      store.commitTranscriptEvent(durableEvent, {
+        expectedSeq: seq,
+        ...(options?.journalEventId ? { eventId: options.journalEventId } : {}),
+      }),
+    );
+    if (receipt.inserted) {
+      this.transcriptEvents.push(durableEvent);
+      this.transcriptEventSequences.push(receipt.cursor.seq);
+    }
+    this.updatedAt = new Date();
+    return receipt;
   }
 
   /** 所有 canonical event 共用一条队列，保证 seq 分配与物理 append 顺序一致。 */

@@ -1,12 +1,14 @@
 import { createHash } from "node:crypto";
 import { execFile as execFileCallback } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  createRuntimeEvent,
   createRuntimeRequest,
+  DesktopConversationStateStore,
   DesktopAutomationService,
   DesktopRuntimeService,
   DesktopSessionStateStore,
@@ -45,6 +47,108 @@ describe("DesktopRuntimeService integration", () => {
       );
     }
     await Promise.all(cleanups.splice(0).map((path) => rm(path, { recursive: true, force: true })));
+  });
+
+  it("仅在信任工作区安全初始化入口文件，并提供只诊断不修复的 Doctor 结果", async () => {
+    const fixture = await createFixture(undefined, {
+      env: {
+        ...process.env,
+        LLM_PROVIDER: "openai",
+        LLM_MODEL: "gpt-test",
+        LLM_API_KEY: "test-only",
+      },
+    });
+    const observedTopics: string[] = [];
+    const unsubscribe = fixture.service.subscribe((event) => observedTopics.push(event.topic));
+
+    for (const method of ["workspace.init", "diagnostics.run", "diagnostics.resources"] as const) {
+      await expect(
+        fixture.service.handle(createRuntimeRequest(method, { workspacePath: fixture.workspace })),
+      ).rejects.toMatchObject({ code: RUNTIME_ERROR_CODES.FORBIDDEN });
+    }
+
+    await fixture.trust.trust(fixture.canonicalWorkspace);
+    await writeFile(join(fixture.workspace, "AGENTS.md"), "# Existing guidance\n");
+    const initialized = await fixture.service.handle(
+      createRuntimeRequest("workspace.init", { workspacePath: fixture.workspace }),
+    );
+    expect(initialized).toMatchObject({
+      workspacePath: fixture.canonicalWorkspace,
+      files: [
+        { path: "AGENTS.md", status: "existing" },
+        { path: ".pico/config.json", status: "created" },
+      ],
+    });
+    await expect(readFile(join(fixture.workspace, "AGENTS.md"), "utf8")).resolves.toBe(
+      "# Existing guidance\n",
+    );
+    await expect(
+      fixture.service.handle(
+        createRuntimeRequest("workspace.init", { workspacePath: fixture.workspace }),
+      ),
+    ).resolves.toMatchObject({
+      files: [
+        { path: "AGENTS.md", status: "existing" },
+        { path: ".pico/config.json", status: "existing" },
+      ],
+    });
+
+    await mkdir(join(fixture.workspace, ".pico", "skills", "review"), { recursive: true });
+    const diagnostics = await fixture.service.handle(
+      createRuntimeRequest("diagnostics.run", { workspacePath: fixture.workspace }),
+    );
+    expect(diagnostics).toMatchObject({
+      workspacePath: fixture.canonicalWorkspace,
+      checks: expect.arrayContaining([
+        expect.objectContaining({ id: "cwd", status: "ok" }),
+        expect.objectContaining({ id: "session-catalog" }),
+        expect.objectContaining({ id: "storage" }),
+      ]),
+      output: expect.stringContaining(`CWD: ${fixture.canonicalWorkspace} (ok)`),
+    });
+
+    const resources = await fixture.service.handle(
+      createRuntimeRequest("diagnostics.resources", { workspacePath: fixture.workspace }),
+    );
+    expect(resources).toMatchObject({
+      workDir: fixture.canonicalWorkspace,
+      entries: expect.arrayContaining([
+        expect.objectContaining({
+          kind: "skills",
+          origin: "pico-native",
+          status: "present",
+          authority: true,
+        }),
+      ]),
+      output: expect.stringContaining("Resource skills: pico-native"),
+    });
+    expect(observedTopics).toContain("workspace.initialized");
+
+    unsubscribe();
+    await fixture.service.close();
+  });
+
+  it("初始化在 .pico 符号链接越出工作区时失败并且不写入外部目录", async () => {
+    const fixture = await createFixture();
+    const outside = join(fixture.root, "outside");
+    await mkdir(outside);
+    await symlink(outside, join(fixture.workspace, ".pico"));
+    await fixture.trust.trust(fixture.canonicalWorkspace);
+
+    await expect(
+      fixture.service.handle(
+        createRuntimeRequest("workspace.init", { workspacePath: fixture.workspace }),
+      ),
+    ).rejects.toMatchObject({
+      code: RUNTIME_ERROR_CODES.CONFLICT,
+      message: expect.stringContaining("工作区边界外"),
+    });
+    await expect(stat(join(outside, "config.json"))).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(stat(join(fixture.workspace, "AGENTS.md"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+
+    await fixture.service.close();
   });
 
   it("共用登记与信任真源，只在信任后投影脱敏配置、Skills 与 MCP", async () => {
@@ -229,6 +333,571 @@ describe("DesktopRuntimeService integration", () => {
     if (process.platform !== "win32") {
       expect((await stat(fixture.sessionState.filePath)).mode & 0o777).toBe(0o600);
     }
+    await fixture.service.close();
+  });
+
+  it("复用 Session 真源完成重命名、分叉与手动压缩", async () => {
+    const summaryProvider = {
+      async generate() {
+        return { role: "assistant" as const, content: "## 历史任务快照\n已完成前缀压缩" };
+      },
+    };
+    const fixture = await createFixture(undefined, {
+      env: { PICO_TEST_TOKEN: "test-token" },
+      providerFactory: () => summaryProvider,
+      createSessionId: () => "desktop-fork-target",
+    });
+    await mkdir(join(fixture.workspace, ".pico"));
+    await writeFile(
+      join(fixture.workspace, ".pico", "config.json"),
+      JSON.stringify({
+        version: 1,
+        model: "local/coder",
+        providers: {
+          local: {
+            protocol: "openai",
+            baseURL: "https://provider.example.test/v1",
+            apiKeyEnv: "PICO_TEST_TOKEN",
+            models: ["coder"],
+            discoverModels: false,
+          },
+        },
+      }),
+    );
+    await fixture.trust.trust(fixture.canonicalWorkspace);
+    const created = (await fixture.service.handle(
+      createRuntimeRequest("session.create", {
+        workspacePath: fixture.workspace,
+        title: "Desktop seed",
+      }),
+    )) as { session: { sessionId: string } };
+    const sourceSessionId = created.session.sessionId;
+    managedSessions.push({ sessionId: sourceSessionId, workspacePath: fixture.canonicalWorkspace });
+    const source = await globalSessionManager.getOrCreate(
+      sourceSessionId,
+      fixture.canonicalWorkspace,
+      { persistence: true, sessionCatalog: false },
+    );
+    await source.commitMessages({ role: "user", content: "task one" });
+    await source.commitMessages({ role: "assistant", content: "step one" });
+    await source.commitMessages({ role: "user", content: "task two" });
+    await source.commitMessages({ role: "assistant", content: "step two" });
+    await source.commitMessages({ role: "user", content: "recent request" });
+    await source.flushPersistence();
+
+    await expect(
+      fixture.service.handle(
+        createRuntimeRequest("session.rename", {
+          workspacePath: fixture.workspace,
+          sessionId: sourceSessionId,
+          title: "  主会话   重构  ",
+        }),
+      ),
+    ).resolves.toMatchObject({ session: { sessionId: sourceSessionId, title: "主会话 重构" } });
+    expect(source.getRuntimeStateSnapshot().settings?.title).toBe("主会话 重构");
+
+    const forked = await fixture.service.handle(
+      createRuntimeRequest("session.fork", {
+        workspacePath: fixture.workspace,
+        sessionId: sourceSessionId,
+      }),
+    );
+    expect(forked).toMatchObject({
+      sourceSessionId,
+      session: {
+        sessionId: "desktop-fork-target",
+        forkFrom: sourceSessionId,
+        title: expect.stringContaining("主会话 重构"),
+      },
+    });
+    managedSessions.push({
+      sessionId: "desktop-fork-target",
+      workspacePath: fixture.canonicalWorkspace,
+    });
+
+    await expect(
+      fixture.service.handle(
+        createRuntimeRequest("session.compact", {
+          workspacePath: fixture.workspace,
+          sessionId: "desktop-fork-target",
+        }),
+      ),
+    ).resolves.toMatchObject({
+      compacted: true,
+      beforeMessageCount: 5,
+      afterMessageCount: 4,
+      session: { sessionId: "desktop-fork-target" },
+    });
+    const target = await globalSessionManager.getOrCreate(
+      "desktop-fork-target",
+      fixture.canonicalWorkspace,
+      { persistence: true, sessionCatalog: false },
+    );
+    expect(target.getHistory()[0]?.content).toContain("上下文压缩");
+    expect(source.length).toBe(5);
+
+    const events = await fixture.service.replayEvents({ workspacePath: fixture.workspace });
+    expect(events.map((event) => event.topic)).toEqual(
+      expect.arrayContaining(["session.updated", "session.transcriptUpdated"]),
+    );
+    await fixture.service.close();
+  });
+
+  it("以 Session 为主体幂等发送多轮消息，并从 JSONL 分页恢复可见 Transcript", async () => {
+    const fixture = await createFixture(async ({ workspacePath, sessionId, prompt, context }) => {
+      if (!sessionId) throw new Error("session.send 必须预先绑定 Session");
+      context.bindSession(sessionId);
+      const session = await globalSessionManager.getOrCreate(sessionId, workspacePath, {
+        persistence: true,
+        sessionCatalog: false,
+      });
+      await session.commitMessages({ role: "assistant", content: `reply:${prompt}` });
+      await session.flushPersistence();
+      return { sessionId };
+    });
+
+    const first = await fixture.service.handle(
+      createRuntimeRequest("session.send", {
+        workspacePath: fixture.workspace,
+        input: { text: "检查项目" },
+        behavior: "auto",
+        idempotencyKey: "send-first",
+      }),
+    );
+    expect(first).toMatchObject({
+      disposition: "started",
+      session: { title: "检查项目" },
+      run: { sessionId: expect.any(String), status: "running" },
+    });
+    const firstResult = first as {
+      session: { sessionId: string };
+      run: { runId: string };
+    };
+    managedSessions.push({
+      sessionId: firstResult.session.sessionId,
+      workspacePath: fixture.canonicalWorkspace,
+    });
+    const workspaceRuntime = await fixture.runtime.getWorkspaceRuntime(fixture.workspace);
+    await workspaceRuntime.waitForRun(firstResult.run.runId);
+
+    await expect(
+      fixture.service.handle(
+        createRuntimeRequest("session.send", {
+          workspacePath: fixture.workspace,
+          input: { text: "检查项目" },
+          behavior: "auto",
+          idempotencyKey: "send-first",
+        }),
+      ),
+    ).resolves.toEqual(first);
+
+    const firstPage = await fixture.service.handle(
+      createRuntimeRequest("session.transcript", {
+        workspacePath: fixture.workspace,
+        sessionId: firstResult.session.sessionId,
+        limit: 1,
+      }),
+    );
+    expect(firstPage).toMatchObject({
+      items: [{ kind: "runBoundary", status: "succeeded" }],
+      nextBefore: expect.any(String),
+      revision: expect.any(String),
+      queuedInputs: [],
+    });
+    const revision = (firstPage as { revision: string }).revision;
+
+    const second = await fixture.service.handle(
+      createRuntimeRequest("session.send", {
+        workspacePath: fixture.workspace,
+        sessionId: firstResult.session.sessionId,
+        input: { text: "继续解释" },
+        behavior: "auto",
+        idempotencyKey: "send-second",
+      }),
+    );
+    const secondRunId = (second as { run: { runId: string } }).run.runId;
+    await workspaceRuntime.waitForRun(secondRunId);
+    fixture.runtime.publishDesktopEvent(
+      createRuntimeEvent({
+        topic: "changes.updated",
+        scope: {
+          workspacePath: fixture.canonicalWorkspace,
+          sessionId: firstResult.session.sessionId,
+          runId: secondRunId,
+        },
+        resourceVersion: 100,
+        at: 100,
+        payload: { runId: secondRunId, fingerprint: "fingerprint-1" },
+      }),
+    );
+    fixture.runtime.publishDesktopEvent(
+      createRuntimeEvent({
+        topic: "changes.applied",
+        scope: {
+          workspacePath: fixture.canonicalWorkspace,
+          sessionId: firstResult.session.sessionId,
+          runId: secondRunId,
+        },
+        resourceVersion: 101,
+        at: 101,
+        payload: { runId: secondRunId, fingerprint: "fingerprint-1" },
+      }),
+    );
+
+    await expect(
+      fixture.service.handle(
+        createRuntimeRequest("session.transcript", {
+          workspacePath: fixture.workspace,
+          sessionId: firstResult.session.sessionId,
+          expectedRevision: revision,
+        }),
+      ),
+    ).rejects.toMatchObject({ code: RUNTIME_ERROR_CODES.CONFLICT });
+    const completeTranscript = (await fixture.service.handle(
+      createRuntimeRequest("session.transcript", {
+        workspacePath: fixture.workspace,
+        sessionId: firstResult.session.sessionId,
+      }),
+    )) as { items: Array<{ kind: string; content?: string; status?: string; state?: string }> };
+    expect(
+      completeTranscript.items
+        .filter((item) => item.kind === "userMessage" || item.kind === "assistantMessage")
+        .map(({ kind, content }) => ({ kind, content })),
+    ).toEqual([
+      { kind: "userMessage", content: "检查项目" },
+      { kind: "assistantMessage", content: "reply:检查项目" },
+      { kind: "userMessage", content: "继续解释" },
+      { kind: "assistantMessage", content: "reply:继续解释" },
+    ]);
+    expect(completeTranscript.items.find((item) => item.kind === "changes")).toMatchObject({
+      kind: "changes",
+      state: "applied",
+    });
+    expect(
+      completeTranscript.items
+        .filter((item) => item.kind === "runBoundary")
+        .map((item) => item.status),
+    ).toEqual(["running", "succeeded", "running", "succeeded"]);
+    await fixture.service.close();
+  });
+
+  it("工作区已有活动 Run 时首次发送不创建空 Session", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const fixture = await createFixture(async () => {
+      await gate;
+    });
+    const existing = (await fixture.runtime.startForegroundRun({
+      workspacePath: fixture.workspace,
+      prompt: "existing run",
+    })) as { runId: string };
+
+    await expect(
+      fixture.service.handle(
+        createRuntimeRequest("session.send", {
+          workspacePath: fixture.workspace,
+          input: { text: "should not create a session" },
+          idempotencyKey: "blocked-first-send",
+        }),
+      ),
+    ).rejects.toMatchObject({ code: RUNTIME_ERROR_CODES.CONFLICT });
+    await expect(
+      fixture.service.handle(
+        createRuntimeRequest("session.list", { workspacePath: fixture.workspace }),
+      ),
+    ).resolves.toEqual({ sessions: [] });
+
+    release();
+    const workspaceRuntime = await fixture.runtime.getWorkspaceRuntime(fixture.workspace);
+    await workspaceRuntime.waitForRun(existing.runId);
+    await fixture.service.close();
+  });
+
+  it("显式中断会清空当前 Session 的持久化 Queue", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const fixture = await createFixture(async ({ sessionId, context }) => {
+      if (!sessionId) throw new Error("sessionId is required");
+      context.bindSession(sessionId);
+      await gate;
+      return { sessionId };
+    });
+    const first = (await fixture.service.handle(
+      createRuntimeRequest("session.send", {
+        workspacePath: fixture.workspace,
+        input: { text: "开始长任务" },
+        idempotencyKey: "interrupt-first",
+      }),
+    )) as { session: { sessionId: string }; run: { runId: string } };
+    managedSessions.push({
+      sessionId: first.session.sessionId,
+      workspacePath: fixture.canonicalWorkspace,
+    });
+
+    await fixture.service.handle(
+      createRuntimeRequest("session.send", {
+        workspacePath: fixture.workspace,
+        sessionId: first.session.sessionId,
+        input: { text: "下一轮" },
+        behavior: "queue",
+        expectedRunId: first.run.runId,
+        idempotencyKey: "interrupt-queue",
+      }),
+    );
+    await expect(
+      fixture.service.handle(
+        createRuntimeRequest("session.transcript", {
+          workspacePath: fixture.workspace,
+          sessionId: first.session.sessionId,
+        }),
+      ),
+    ).resolves.toMatchObject({ queuedInputs: [{ input: { text: "下一轮" } }] });
+
+    await fixture.service.handle(
+      createRuntimeRequest("run.cancel", {
+        workspacePath: fixture.workspace,
+        runId: first.run.runId,
+        reason: "user interrupt",
+      }),
+    );
+    await expect(
+      fixture.service.handle(
+        createRuntimeRequest("session.transcript", {
+          workspacePath: fixture.workspace,
+          sessionId: first.session.sessionId,
+        }),
+      ),
+    ).resolves.toMatchObject({ queuedInputs: [] });
+
+    release();
+    const workspaceRuntime = await fixture.runtime.getWorkspaceRuntime(fixture.workspace);
+    await workspaceRuntime.waitForRun(first.run.runId);
+    await fixture.service.close();
+  });
+
+  it("Queue 消费写盘失败重试时只写入一条用户消息", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let executionCount = 0;
+    const fixture = await createFixture(async ({ workspacePath, sessionId, prompt, context }) => {
+      if (!sessionId) throw new Error("sessionId is required");
+      context.bindSession(sessionId);
+      executionCount += 1;
+      if (executionCount === 1) await gate;
+      const session = await globalSessionManager.getOrCreate(sessionId, workspacePath, {
+        persistence: true,
+        sessionCatalog: false,
+      });
+      await session.commitMessages({ role: "assistant", content: `reply:${prompt}` });
+      await session.flushPersistence();
+      return { sessionId };
+    });
+    const first = (await fixture.service.handle(
+      createRuntimeRequest("session.send", {
+        workspacePath: fixture.workspace,
+        input: { text: "first" },
+        idempotencyKey: "queue-retry-first",
+      }),
+    )) as { session: { sessionId: string }; run: { runId: string } };
+    managedSessions.push({
+      sessionId: first.session.sessionId,
+      workspacePath: fixture.canonicalWorkspace,
+    });
+    await fixture.service.handle(
+      createRuntimeRequest("session.send", {
+        workspacePath: fixture.workspace,
+        sessionId: first.session.sessionId,
+        input: { text: "queued once" },
+        behavior: "queue",
+        expectedRunId: first.run.runId,
+        idempotencyKey: "queue-retry-enqueue",
+      }),
+    );
+    vi.spyOn(fixture.conversationState, "removeQueued").mockRejectedValueOnce(
+      new Error("simulated queue state write failure"),
+    );
+
+    release();
+    const workspaceRuntime = await fixture.runtime.getWorkspaceRuntime(fixture.workspace);
+    await workspaceRuntime.waitForRun(first.run.runId);
+    await expect
+      .poll(async () => {
+        const transcript = (await fixture.service.handle(
+          createRuntimeRequest("session.transcript", {
+            workspacePath: fixture.workspace,
+            sessionId: first.session.sessionId,
+          }),
+        )) as { items: Array<{ kind: string; content?: string }>; queuedInputs: unknown[] };
+        return {
+          queued: transcript.queuedInputs.length,
+          queuedMessages: transcript.items.filter(
+            (item) => item.kind === "userMessage" && item.content === "queued once",
+          ).length,
+        };
+      })
+      .toEqual({ queued: 0, queuedMessages: 1 });
+    expect(executionCount).toBeGreaterThanOrEqual(2);
+    await fixture.service.close();
+  });
+
+  it("从 Session 真源读写模型模式与思考档位，并从 hydration 快照读取 Goal", async () => {
+    const fixture = await createFixture(async () => undefined, {
+      createSessionId: () => "desktop-settings-session",
+      env: { PICO_TEST_TOKEN: "test-secret" },
+    });
+    await mkdir(join(fixture.workspace, ".pico"), { recursive: true });
+    await writeFile(
+      join(fixture.workspace, ".pico", "config.json"),
+      JSON.stringify({
+        version: 1,
+        model: "local/coder",
+        providers: {
+          local: {
+            protocol: "openai",
+            baseURL: "https://provider.example.test/v1",
+            apiKeyEnv: "PICO_TEST_TOKEN",
+            models: {
+              coder: {},
+              reasoner: {
+                reasoning: {
+                  enabled: true,
+                  defaultLevel: "high",
+                  levels: ["off", "high", "max"],
+                },
+              },
+              fixed: { reasoning: true },
+            },
+          },
+        },
+      }),
+    );
+    await fixture.trust.trust(fixture.canonicalWorkspace);
+    const created = (await fixture.service.handle(
+      createRuntimeRequest("session.create", { workspacePath: fixture.workspace }),
+    )) as { session: { sessionId: string } };
+    const sessionId = created.session.sessionId;
+    managedSessions.push({ sessionId, workspacePath: fixture.canonicalWorkspace });
+    const session = await globalSessionManager.getOrCreate(sessionId, fixture.canonicalWorkspace, {
+      persistence: true,
+      sessionCatalog: false,
+    });
+    session.updateRuntimeState({
+      goal: {
+        stateVersion: 1,
+        sequence: 1,
+        activeGoalId: "goal-1",
+        goals: [
+          {
+            id: "goal-1",
+            title: "完成桌面会话化",
+            description: "保持 TUI 与 Desktop 的运行真源一致",
+            status: "active",
+            createdAt: 100,
+            budgetUsage: { turns: 2, tokens: 300, costCNY: 0.2, startedAt: 100 },
+            progress: "已接通协议",
+          },
+        ],
+      },
+    });
+    await session.flushPersistence();
+
+    await expect(
+      fixture.service.handle(
+        createRuntimeRequest("session.settings.update", {
+          workspacePath: fixture.workspace,
+          sessionId,
+          modelRouteId: "local/reasoner",
+          permissions: "plan",
+          thinkingEffort: "max",
+        }),
+      ),
+    ).resolves.toEqual({
+      settings: {
+        sessionId,
+        provider: "openai",
+        model: "reasoner",
+        modelRouteId: "local/reasoner",
+        mode: "plan",
+        permissions: "plan",
+        thinkingEffort: "max",
+        thinkingEffortExplicit: true,
+        reasoningLevels: ["off", "high", "max"],
+      },
+    });
+    expect(session.getRuntimeStateSnapshot().settings).toMatchObject({
+      modelRouteId: "local/reasoner",
+      mode: "plan",
+      thinkingEffort: "max",
+    });
+    expect(session.getRuntimeStateSnapshot().settings).not.toHaveProperty("permissions");
+    expect(session.getRuntimeStateSnapshot().settings).not.toHaveProperty("permissionMode");
+    await expect(
+      fixture.service.handle(
+        createRuntimeRequest("session.settings.get", {
+          workspacePath: fixture.workspace,
+          sessionId,
+        }),
+      ),
+    ).resolves.toMatchObject({
+      settings: { modelRouteId: "local/reasoner", mode: "plan", permissions: "plan" },
+    });
+    await expect(
+      fixture.service.handle(
+        createRuntimeRequest("goal.get", { workspacePath: fixture.workspace, sessionId }),
+      ),
+    ).resolves.toEqual({
+      goal: expect.objectContaining({
+        activeGoalId: "goal-1",
+        goals: [expect.objectContaining({ title: "完成桌面会话化", progress: "已接通协议" })],
+      }),
+    });
+
+    await expect(
+      fixture.service.handle(
+        createRuntimeRequest("session.settings.update", {
+          workspacePath: fixture.workspace,
+          sessionId,
+          mode: "auto",
+          permissions: "yolo",
+        }),
+      ),
+    ).rejects.toMatchObject({ code: RUNTIME_ERROR_CODES.INVALID_PARAMS });
+    await expect(
+      fixture.service.handle(
+        createRuntimeRequest("session.settings.update", {
+          workspacePath: fixture.workspace,
+          sessionId,
+          modelRouteId: "local/fixed",
+          thinkingEffort: "max",
+        }),
+      ),
+    ).rejects.toMatchObject({ code: RUNTIME_ERROR_CODES.INVALID_PARAMS });
+    await expect(
+      fixture.service.handle(
+        createRuntimeRequest("session.settings.get", {
+          workspacePath: fixture.workspace,
+          sessionId,
+        }),
+      ),
+    ).resolves.toMatchObject({
+      settings: { modelRouteId: "local/reasoner", thinkingEffort: "max" },
+    });
+
+    const events = await fixture.service.replayEvents({ workspacePath: fixture.workspace });
+    expect(events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          topic: "session.settingsUpdated",
+          payload: expect.objectContaining({ sessionId }),
+        }),
+      ]),
+    );
     await fixture.service.close();
   });
 
@@ -619,6 +1288,10 @@ describe("DesktopRuntimeService integration", () => {
   async function createFixture(
     execute: ConstructorParameters<typeof WorkspaceRuntimeService>[0]["execute"] = async () =>
       undefined,
+    desktopOptions: Pick<
+      ConstructorParameters<typeof DesktopRuntimeService>[0],
+      "env" | "providerFactory" | "createSessionId"
+    > = {},
   ) {
     const root = await mkdtemp(join(tmpdir(), "pico-desktop-runtime-"));
     cleanups.push(root);
@@ -647,6 +1320,9 @@ describe("DesktopRuntimeService integration", () => {
     const sessionState = new DesktopSessionStateStore({
       filePath: join(root, "state", "desktop-sessions.json"),
     });
+    const conversationState = new DesktopConversationStateStore({
+      filePath: join(root, "state", "desktop-conversations.json"),
+    });
     const runtime = new WorkspaceRuntimeService({
       execute,
       registrationStore: registration,
@@ -656,6 +1332,8 @@ describe("DesktopRuntimeService integration", () => {
       registrationStore: registration,
       trustStore: trust,
       sessionStateStore: sessionState,
+      conversationStateStore: conversationState,
+      ...desktopOptions,
     });
     return {
       root,
@@ -664,6 +1342,7 @@ describe("DesktopRuntimeService integration", () => {
       registration,
       trust,
       sessionState,
+      conversationState,
       runtime,
       service,
     };
