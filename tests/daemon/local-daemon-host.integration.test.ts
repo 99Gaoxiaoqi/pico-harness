@@ -138,7 +138,84 @@ describe("LocalDaemonHost integration", () => {
       await host.stop();
     }
   });
+
+  it("并发登记与取消登记不丢失更新", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pico-daemon-registration-"));
+    cleanups.push(() => rm(root, { recursive: true, force: true }));
+    const workspaces = ["a", "b", "c"].map((name) => join(root, name));
+    await Promise.all(workspaces.map((workspace) => mkdir(workspace)));
+    const registration = new WorkspaceRegistrationStore(join(root, "workspaces.json"));
+
+    const [a, b] = await Promise.all([
+      registration.register(workspaces[0]!),
+      registration.register(workspaces[1]!),
+    ]);
+    const [, c] = await Promise.all([
+      registration.unregister(workspaces[0]!),
+      registration.register(workspaces[2]!),
+    ]);
+
+    await expect(registration.list()).resolves.toEqual([b, c].sort());
+    expect(a).not.toBe(b);
+  });
+
+  it("并发 refresh 串行 reconcile，相同工作区只创建一个 runtime", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pico-daemon-refresh-"));
+    cleanups.push(() => rm(root, { recursive: true, force: true }));
+    const workspace = join(root, "workspace");
+    await mkdir(workspace);
+    const registration = new WorkspaceRegistrationStore(join(root, "workspaces.json"));
+    const endpoint = resolveLocalDaemonEndpoint({
+      runtimeDir: join(root, "runtime"),
+      userIdentity: "refresh-test",
+    });
+    const createStarted = deferred<void>();
+    const allowCreate = deferred<void>();
+    let created = 0;
+    let closed = 0;
+    const host = new LocalDaemonHost({
+      endpoint,
+      service: new PingService(),
+      registrationStore: registration,
+      cronRuntimeFactory: {
+        create: async () => {
+          created += 1;
+          createStarted.resolve();
+          await allowCreate.promise;
+          return {
+            recoverInterruptedRuns: () => [],
+            start: () => undefined,
+            close: async () => {
+              closed += 1;
+            },
+          };
+        },
+      },
+    });
+    cleanups.push(() => host.stop());
+    await host.start();
+    const canonical = await registration.register(workspace);
+
+    const first = host.refreshRegisteredWorkspaces();
+    await createStarted.promise;
+    const second = host.refreshRegisteredWorkspaces();
+    allowCreate.resolve();
+    await Promise.all([first, second]);
+
+    expect(host.registeredWorkspaces).toEqual([canonical]);
+    expect(created).toBe(1);
+    await host.stop();
+    expect(closed).toBe(1);
+  });
 });
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
+}
 
 class PingService implements LocalRuntimeService {
   async handle(request: RuntimeRequest): Promise<JsonValue> {

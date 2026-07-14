@@ -10,6 +10,7 @@ const VERSION = 1 as const;
 /** User-level discovery index; the authoritative Jobs/Runs remain in each workspace SQLite ledger. */
 export class WorkspaceRegistrationStore {
   readonly filePath: string;
+  private mutationQueue: Promise<void> = Promise.resolve();
 
   constructor(filePath = join(homedir(), ".pico", "daemon-workspaces.json")) {
     this.filePath = filePath;
@@ -21,20 +22,36 @@ export class WorkspaceRegistrationStore {
 
   async register(workspacePath: string): Promise<string> {
     const canonical = await realpath(workspacePath);
-    const state = await this.read();
-    if (!state.workspaces.includes(canonical)) {
-      await this.write({ version: VERSION, workspaces: [...state.workspaces, canonical].sort() });
-    }
+    await this.mutate(async () => {
+      const state = await this.read();
+      if (!state.workspaces.includes(canonical)) {
+        await this.write({ version: VERSION, workspaces: [...state.workspaces, canonical].sort() });
+      }
+    });
     return canonical;
   }
 
   async unregister(workspacePath: string): Promise<string> {
     const canonical = await realpath(workspacePath);
-    const state = await this.read();
-    if (state.workspaces.includes(canonical)) {
-      await this.write({ version: VERSION, workspaces: state.workspaces.filter((path) => path !== canonical) });
-    }
+    await this.mutate(async () => {
+      const state = await this.read();
+      if (state.workspaces.includes(canonical)) {
+        await this.write({
+          version: VERSION,
+          workspaces: state.workspaces.filter((path) => path !== canonical),
+        });
+      }
+    });
     return canonical;
+  }
+
+  private async mutate(operation: () => Promise<void>): Promise<void> {
+    const queued = this.mutationQueue.then(operation, operation);
+    this.mutationQueue = queued.then(
+      () => undefined,
+      () => undefined,
+    );
+    await queued;
   }
 
   private async read(): Promise<{ version: typeof VERSION; workspaces: string[] }> {
@@ -49,10 +66,17 @@ export class WorkspaceRegistrationStore {
     }
   }
 
-  private async write(state: { version: typeof VERSION; workspaces: readonly string[] }): Promise<void> {
+  private async write(state: {
+    version: typeof VERSION;
+    workspaces: readonly string[];
+  }): Promise<void> {
     const temporary = `${this.filePath}.${process.pid}.${randomUUID()}.tmp`;
     try {
-      await writeFile(temporary, `${JSON.stringify(state, null, 2)}\n`, { encoding: "utf8", mode: FILE_MODE, flag: "wx" });
+      await writeFile(temporary, `${JSON.stringify(state, null, 2)}\n`, {
+        encoding: "utf8",
+        mode: FILE_MODE,
+        flag: "wx",
+      });
       await chmod(temporary, FILE_MODE);
       await rename(temporary, this.filePath);
       await chmod(this.filePath, FILE_MODE);
@@ -65,10 +89,13 @@ export class WorkspaceRegistrationStore {
 }
 
 function isState(value: unknown): value is { version: typeof VERSION; workspaces: string[] } {
-  return typeof value === "object" && value !== null &&
+  return (
+    typeof value === "object" &&
+    value !== null &&
     (value as { version?: unknown }).version === VERSION &&
     Array.isArray((value as { workspaces?: unknown }).workspaces) &&
-    (value as { workspaces: unknown[] }).workspaces.every((path) => typeof path === "string");
+    (value as { workspaces: unknown[] }).workspaces.every((path) => typeof path === "string")
+  );
 }
 
 function isErrno(error: unknown, code: string): boolean {
