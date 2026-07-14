@@ -4,6 +4,13 @@ const now = Date.now();
 
 export const previewData: AppData = {
   workspacePath: "/Users/chen/Projects/atlas-notes",
+  workspaceMode: "git",
+  workspaceCapabilities: {
+    foregroundRuns: true,
+    fileHistory: true,
+    isolatedWorktrees: true,
+    branchMerge: true,
+  },
   trusted: true,
   sessions: [
     {

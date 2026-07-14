@@ -82,8 +82,26 @@ export interface UsageView {
   readonly period?: string | undefined;
 }
 
+export type WorkspaceMode = "folder" | "git";
+
+export interface WorkspaceCapabilities {
+  readonly foregroundRuns: boolean;
+  readonly fileHistory: boolean;
+  readonly isolatedWorktrees: boolean;
+  readonly branchMerge: boolean;
+}
+
+export const folderWorkspaceCapabilities: WorkspaceCapabilities = {
+  foregroundRuns: true,
+  fileHistory: true,
+  isolatedWorktrees: false,
+  branchMerge: false,
+};
+
 export interface AppData {
   readonly workspacePath?: string | undefined;
+  readonly workspaceMode?: WorkspaceMode | undefined;
+  readonly workspaceCapabilities: WorkspaceCapabilities;
   readonly trusted: boolean;
   readonly sessions: readonly SessionView[];
   readonly runs: readonly RunView[];
@@ -103,6 +121,7 @@ export interface AppData {
 }
 
 export const emptyData: AppData = {
+  workspaceCapabilities: folderWorkspaceCapabilities,
   trusted: false,
   sessions: [],
   runs: [],
