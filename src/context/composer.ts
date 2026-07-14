@@ -42,6 +42,7 @@ export class PromptComposer {
   private readonly sessionId?: string;
   /** GoalManager 单例(可选):由 host 注入,注入后把 active goal 渲染进 prompt */
   private readonly goalManager?: GoalManager;
+  private readonly onInstructionsLoaded?: (paths: readonly string[]) => void | Promise<void>;
 
   /**
    * @param workDir 工作目录
@@ -62,6 +63,7 @@ export class PromptComposer {
       memoryNudger?: IMemoryNudger;
       goalManager?: GoalManager;
       todoStore?: TodoStore;
+      onInstructionsLoaded?: (paths: readonly string[]) => void | Promise<void>;
     },
   ) {
     this.workDir = workDir;
@@ -82,6 +84,7 @@ export class PromptComposer {
 
     // GoalManager（可选注入）
     this.goalManager = options?.goalManager;
+    this.onInstructionsLoaded = options?.onInstructionsLoaded;
   }
 
   /**
@@ -90,6 +93,7 @@ export class PromptComposer {
    */
   async build(turnCount = 0): Promise<string> {
     const parts: string[] = [];
+    const loadedInstructionPaths: string[] = [];
 
     // 1. 极简内核:仅确立基本身份与最底线红线纪律
     parts.push(`# 核心身份
@@ -121,6 +125,7 @@ export class PromptComposer {
     const agentsPath = join(this.workDir, "AGENTS.md");
     try {
       const agentsContent = await readFile(agentsPath, "utf8");
+      loadedInstructionPaths.push(agentsPath);
       parts.push(`# 项目专属指南 (来自 AGENTS.md)
 以下是当前工作区特有的架构规范与注意事项,你的行为必须绝对遵守:
 \`\`\`markdown
@@ -179,6 +184,7 @@ ${agentsContent}
       }
     }
 
+    await this.onInstructionsLoaded?.(loadedInstructionPaths);
     return parts.join("\n\n");
   }
 

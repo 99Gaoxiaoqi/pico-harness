@@ -389,6 +389,12 @@ export class StrictBackgroundHookRunner {
     for (const groups of Object.values(config)) {
       for (const group of groups ?? []) {
         for (const handler of group.hooks) {
+          if (handler.type !== "command") {
+            throw new BackgroundPolicyViolationError(
+              "hook_config_invalid",
+              `后台模式仅支持 command hook，收到 ${handler.type}。`,
+            );
+          }
           this.plans.set(
             handler,
             buildSandboxSpawnPlan({
@@ -418,6 +424,10 @@ export class StrictBackgroundHookRunner {
           session_id: sessionId,
           cwd: this.workDir,
           hook_event_name: "PreToolUse",
+          payload: {
+            tool_name: toolName,
+            tool_input: modifiedInput ?? toolInput,
+          },
           tool_name: toolName,
           tool_input: modifiedInput ?? toolInput,
         });

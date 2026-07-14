@@ -21,6 +21,7 @@ import type { Session } from "../engine/session.js";
 import { logger } from "../observability/logger.js";
 import { withProviderCallContext } from "../observability/provider-call-context.js";
 import type { ProviderCallPurpose } from "../tasks/runtime-types.js";
+import type { HookService } from "../hooks/service.js";
 
 /** 摘要消息前缀:REFERENCE-ONLY,明确告诉模型这是历史提要,不要回答里面的内容 */
 const SUMMARY_PREFIX =
@@ -85,6 +86,8 @@ export interface FullCompactorOptions {
   maxAttempts?: number;
   /** 触发阈值(预留,响应式场景由 loop 调用方决定) */
   triggerTokenRatio?: number;
+  hookService?: HookService;
+  hookSource?: "auto" | "manual";
 }
 
 /**
@@ -101,12 +104,16 @@ export class FullCompactor {
   private readonly maxAttempts: number;
   /** 上一次摘要,用于迭代增量更新(hermes 第 1475-1489 行语义) */
   private previousSummary?: string;
+  private readonly hookService?: HookService;
+  private readonly hookSource: "auto" | "manual";
 
   constructor(opts: FullCompactorOptions) {
     // 有 aux 用 aux(辅助廉价模型),无则用主 —— 向后兼容
     this.provider = opts.auxProvider ?? opts.provider;
     this.providerPurpose = opts.auxProvider ? "aux" : "compaction";
     this.maxAttempts = opts.maxAttempts ?? 3;
+    this.hookService = opts.hookService;
+    this.hookSource = opts.hookSource ?? "auto";
   }
 
   /**
@@ -129,6 +136,12 @@ export class FullCompactor {
       );
       return false;
     }
+
+    await this.hookService?.dispatch(
+      "PreCompact",
+      { source: this.hookSource, messageCount: history.length },
+      { signal },
+    );
 
     // 边界矫正:若保留区首条是孤儿 ToolResult(其 ToolCall 已被压入前缀),
     // 把它并入压缩前缀,避免压缩后产生孤儿 ToolResult 导致 API 400
@@ -204,6 +217,11 @@ export class FullCompactor {
     session.saveMemorySummary(summary, compactedCount);
     // previousSummary 存原始摘要(不带包装标记),供下次迭代增量更新
     this.previousSummary = summary;
+    await this.hookService?.dispatch(
+      "PostCompact",
+      { source: this.hookSource, messageCount: session.length },
+      { signal },
+    );
     logger.info(
       { compactedCount, retainLastN, summaryLen: summary.length },
       "[FullCompactor] ✅ 模型摘要压缩完成",

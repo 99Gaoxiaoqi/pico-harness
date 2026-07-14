@@ -201,6 +201,13 @@ describe("RuntimeStore + JobService integration", () => {
     expect(() => first.recordProviderCall({ ...providerCall, provider: "other" })).toThrow(
       RuntimeConflictError,
     );
+    expect(
+      first.recordProviderCall({
+        ...providerCall,
+        callId: "call-hook-1",
+        purpose: "hook",
+      }).inserted,
+    ).toBe(true);
 
     const baseline = {
       baselineId: "legacy-usage",
@@ -452,6 +459,58 @@ describe("RuntimeStore + JobService integration", () => {
     );
     expect(service.get("ambiguous-job")?.job).toMatchObject({ status: "queued", version: 1 });
     expect(existsSync(legacyPath)).toBe(true);
+  });
+
+  it("从 v4 原子迁移 provider_calls 并接受 hook purpose", () => {
+    const workDir = makeTempDir(tempDirs);
+    const databasePath = join(workDir, ".claw", "runtime.sqlite");
+    const initial = new RuntimeStore({ workDir });
+    initial.close();
+
+    const legacy = new Database(databasePath);
+    legacy.pragma("foreign_keys = OFF");
+    legacy.exec(`
+      DROP INDEX provider_calls_session_idx;
+      DROP INDEX provider_calls_goal_idx;
+      DROP INDEX provider_calls_job_idx;
+      ALTER TABLE provider_calls RENAME TO provider_calls_v5;
+      CREATE TABLE provider_calls (
+        call_id TEXT PRIMARY KEY, session_id TEXT, conversation_id TEXT, goal_id TEXT,
+        job_id TEXT REFERENCES jobs(job_id) ON DELETE SET NULL,
+        attempt_id TEXT REFERENCES job_attempts(attempt_id) ON DELETE SET NULL,
+        purpose TEXT NOT NULL CHECK (purpose IN ('main','subagent','compaction','aux','grace')),
+        provider TEXT NOT NULL, model TEXT NOT NULL, route TEXT,
+        status TEXT NOT NULL CHECK (status IN ('succeeded','failed','cancelled')),
+        input_tokens INTEGER NOT NULL CHECK (input_tokens >= 0),
+        output_tokens INTEGER NOT NULL CHECK (output_tokens >= 0),
+        cache_read_tokens INTEGER NOT NULL CHECK (cache_read_tokens >= 0),
+        cache_write_tokens INTEGER NOT NULL CHECK (cache_write_tokens >= 0),
+        cost REAL NOT NULL CHECK (cost >= 0), reported_json TEXT, created_at INTEGER NOT NULL
+      );
+      DROP TABLE provider_calls_v5;
+      CREATE INDEX provider_calls_session_idx ON provider_calls(session_id, created_at);
+      CREATE INDEX provider_calls_goal_idx ON provider_calls(goal_id, created_at);
+      CREATE INDEX provider_calls_job_idx ON provider_calls(job_id, created_at);
+      DELETE FROM schema_migrations WHERE version = 5;
+    `);
+    legacy.close();
+
+    const migrated = new RuntimeStore({ workDir });
+    closeables.push(migrated);
+    expect(
+      migrated.recordProviderCall({
+        callId: "hook-after-migration",
+        purpose: "hook",
+        provider: "openai",
+        model: "test",
+        status: "succeeded",
+        inputTokens: 1,
+        outputTokens: 1,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        cost: 0,
+      }).inserted,
+    ).toBe(true);
   });
 });
 

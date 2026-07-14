@@ -59,7 +59,12 @@ export class CostTracker implements LLMProvider {
     availableTools: ToolDefinition[],
     options?: LLMProviderRequestOptions,
   ): Promise<Message> {
-    return this.track(() => this.next.generate(messages, availableTools, options), options?.signal);
+    return this.track(
+      () => this.next.generate(messages, availableTools, options),
+      options?.signal,
+      false,
+      options?.purpose,
+    );
   }
 
   /** 转发流式生成（透传 onDelta，同时用 generate 的成本追踪逻辑） */
@@ -78,6 +83,7 @@ export class CostTracker implements LLMProvider {
       () => this.next.generateStream!(messages, availableTools, onDelta, options),
       options?.signal,
       true,
+      options?.purpose,
     );
   }
 
@@ -85,9 +91,10 @@ export class CostTracker implements LLMProvider {
     invoke: () => Promise<Message>,
     signal?: AbortSignal,
     streaming = false,
+    purpose?: LLMProviderRequestOptions["purpose"],
   ): Promise<Message> {
     const callId = this.options.callId?.() ?? `call_${randomUUID()}`;
-    const context = this.resolveContext();
+    const context = this.resolveContext(purpose);
     const start = Date.now();
     try {
       const response = await invoke();
@@ -109,11 +116,12 @@ export class CostTracker implements LLMProvider {
     }
   }
 
-  private resolveContext(): ProviderCallContext {
+  private resolveContext(purpose?: LLMProviderRequestOptions["purpose"]): ProviderCallContext {
     const configured =
       typeof this.options.context === "function" ? this.options.context() : this.options.context;
     const scoped = getProviderCallContext();
-    return { purpose: "main", ...configured, ...scoped };
+    const context = { purpose: "main", ...configured, ...scoped } satisfies ProviderCallContext;
+    return purpose === "hook" ? { ...context, purpose: "hook" } : context;
   }
 
   private recordSessionUsage(response: Message, latencyMs: number, streaming: boolean): void {
