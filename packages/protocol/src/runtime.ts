@@ -34,6 +34,69 @@ export type RuntimeRunStatus =
   | "succeeded";
 export type RuntimeSessionStatus = "active" | "archived";
 export type RuntimeJobStatus = "idle" | "running" | "failed" | "succeeded";
+export type SessionSendBehavior = "auto" | "steer" | "queue" | "replace";
+export type SessionSendDisposition = "started" | "steered" | "queued" | "replaced";
+
+export type RuntimeUserInput = JsonObject & {
+  readonly text: string;
+};
+
+export type RuntimeQueuedInput = JsonObject & {
+  readonly queueId: string;
+  readonly sessionId: SessionId;
+  readonly input: RuntimeUserInput;
+  readonly createdAt: number;
+};
+
+export type RuntimeConversationItem =
+  | (JsonObject & {
+      readonly id: string;
+      readonly kind: "userMessage" | "assistantMessage" | "systemNotice" | "error";
+      readonly content: string;
+      readonly at?: number;
+    })
+  | (JsonObject & {
+      readonly id: string;
+      readonly kind: "skill";
+      readonly name: string;
+      readonly args: string;
+      readonly trigger: "user-slash" | "model-tool";
+      readonly at?: number;
+    })
+  | (JsonObject & {
+      readonly id: string;
+      readonly kind: "plan";
+      readonly title: string;
+      readonly detail?: string;
+      readonly state?: "waiting" | "active" | "done" | "failed";
+      readonly at?: number;
+    })
+  | (JsonObject & {
+      readonly id: string;
+      readonly kind: "tool";
+      readonly name: string;
+      readonly args: string;
+      readonly status: "running" | "success" | "error";
+      readonly summary?: string;
+      readonly at?: number;
+    })
+  | (JsonObject & {
+      readonly id: string;
+      readonly kind: "runBoundary";
+      readonly runId?: RunId;
+      readonly status: RuntimeRunStatus;
+      readonly startedAt: number;
+      readonly finishedAt?: number;
+    })
+  | (JsonObject & {
+      readonly id: string;
+      readonly kind: "approval" | "prompt" | "changes" | "subagent" | "goal";
+      readonly title: string;
+      readonly detail?: string;
+      readonly state?: string;
+      readonly at?: number;
+      readonly data?: JsonObject;
+    });
 
 export type RuntimeRun = JsonObject & {
   readonly runId: RunId;
@@ -78,7 +141,11 @@ export type RuntimeChange = JsonObject & {
 export type RuntimeMethodMap = {
   readonly "runtime.ping": {
     readonly params: JsonObject;
-    readonly result: { readonly pong: true };
+    readonly result: {
+      readonly pong: true;
+      readonly protocolVersion: typeof LOCAL_RUNTIME_PROTOCOL_VERSION;
+      readonly capabilities: readonly string[];
+    };
   };
   readonly "session.list": {
     readonly params: WorkspaceParams & { readonly includeArchived?: boolean };
@@ -99,6 +166,36 @@ export type RuntimeMethodMap = {
   readonly "session.restore": {
     readonly params: WorkspaceParams & { readonly sessionId: SessionId };
     readonly result: { readonly session: RuntimeSession };
+  };
+  readonly "session.send": {
+    readonly params: WorkspaceParams & {
+      readonly sessionId?: SessionId;
+      readonly input: RuntimeUserInput;
+      readonly behavior?: SessionSendBehavior;
+      readonly expectedRunId?: RunId;
+      readonly idempotencyKey: string;
+    };
+    readonly result: {
+      readonly session: RuntimeSession;
+      readonly run?: RuntimeRun;
+      readonly disposition: SessionSendDisposition;
+    };
+  };
+  readonly "session.transcript": {
+    readonly params: WorkspaceParams & {
+      readonly sessionId: SessionId;
+      readonly before?: string;
+      readonly limit?: number;
+      readonly expectedRevision?: string;
+    };
+    readonly result: {
+      readonly session: RuntimeSession;
+      readonly items: readonly RuntimeConversationItem[];
+      readonly activeRun?: RuntimeRun;
+      readonly queuedInputs: readonly RuntimeQueuedInput[];
+      readonly nextBefore?: string;
+      readonly revision: string;
+    };
   };
   readonly "run.start": {
     readonly params: WorkspaceParams & {
@@ -320,6 +417,8 @@ export const RUNTIME_METHODS = [
   "session.create",
   "session.archive",
   "session.restore",
+  "session.send",
+  "session.transcript",
   "run.start",
   "run.cancel",
   "run.pause",
@@ -368,6 +467,11 @@ export type RuntimeEventMap = {
   readonly "workspace.unregistered": { readonly registered: false };
   readonly "workspace.trustChanged": { readonly trusted: boolean };
   readonly "session.updated": { readonly session: RuntimeSession };
+  readonly "session.transcriptUpdated": {
+    readonly sessionId: SessionId;
+    readonly operation: "reload" | "truncate";
+    readonly revision?: string;
+  };
   readonly "run.started": { readonly run: RuntimeRun };
   readonly "run.updated": { readonly run: RuntimeRun };
   readonly "run.finished": { readonly run: RuntimeRun };

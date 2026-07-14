@@ -7,6 +7,8 @@ export const DESKTOP_RUNTIME_METHODS = [
   "session.create",
   "session.archive",
   "session.restore",
+  "session.send",
+  "session.transcript",
   "run.start",
   "run.cancel",
   "run.pause",

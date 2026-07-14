@@ -65,6 +65,7 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
                 topic: event.type,
                 scope: {
                   workspacePath: event.workspace,
+                  ...(event.run?.sessionId ? { sessionId: event.run.sessionId } : {}),
                   ...(event.run ? { runId: event.run.runId } : {}),
                 },
                 resourceVersion: event.resourceVersion,
@@ -80,7 +81,13 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
   }
 
   async handle(request: RuntimeRequest): Promise<JsonValue> {
-    if (request.method === "runtime.ping") return { pong: true };
+    if (request.method === "runtime.ping") {
+      return {
+        pong: true,
+        protocolVersion: LOCAL_RUNTIME_PROTOCOL_VERSION,
+        capabilities: ["session-conversation-v1", "runtime-events-v1"],
+      };
+    }
     const params = objectParams(request.params);
     if (request.method === "workspace.register") {
       const workspacePath = requiredString(params, "workspacePath");
@@ -130,14 +137,16 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
       const prompt = requiredString(params, "prompt");
       const sessionId = optionalString(params, "sessionId");
       const runtime = await this.getRuntime(workspacePath);
-      const run = runtime.startRun({ description: prompt }, (context) =>
-        this.options.execute({
-          workspacePath: runtime.workspace,
-          workspaceRuntime: runtime,
-          prompt,
-          ...(sessionId ? { sessionId } : {}),
-          context,
-        }),
+      const run = runtime.startRun(
+        { description: prompt, ...(sessionId ? { sessionId } : {}) },
+        (context) =>
+          this.options.execute({
+            workspacePath: runtime.workspace,
+            workspaceRuntime: runtime,
+            prompt,
+            ...(sessionId ? { sessionId } : {}),
+            context,
+          }),
       );
       return runPayload(run);
     }
@@ -163,7 +172,13 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
     }
     if (request.method === "runs.list") {
       const runtime = await this.getRuntime(requiredString(params, "workspacePath"));
-      return { runs: runtime.listRuns().map(runPayload) };
+      const sessionId = optionalString(params, "sessionId");
+      return {
+        runs: runtime
+          .listRuns()
+          .filter((run) => sessionId === undefined || run.sessionId === sessionId)
+          .map(runPayload),
+      };
     }
     if (request.method === "jobs.list") {
       const runtime = await this.getRuntime(requiredString(params, "workspacePath"));
