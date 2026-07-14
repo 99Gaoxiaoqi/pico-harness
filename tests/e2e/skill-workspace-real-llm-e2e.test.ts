@@ -9,7 +9,11 @@ import { processUserInput } from "../../src/input/process-user-input.js";
 import { getOrCreateSessionSettings } from "../../src/input/session-settings.js";
 import type { LLMProvider, LLMProviderRequestOptions } from "../../src/provider/interface.js";
 import { OpenAIProvider } from "../../src/provider/openai.js";
-import type { Message, ToolDefinition } from "../../src/schema/message.js";
+import {
+  isToolResultErrorMessage,
+  type Message,
+  type ToolDefinition,
+} from "../../src/schema/message.js";
 
 function readDotEnv(path: string): Record<string, string> {
   try {
@@ -157,7 +161,7 @@ describeRealLLM("explicit skill and additional workspace real LLM e2e", { timeou
     expect(blockedNotices).toHaveLength(1);
     expect(
       blocked.messages.some(
-        (message) => message.toolCallId !== undefined && message.content.startsWith("[ERROR]"),
+        (message) => message.toolCallId !== undefined && isToolResultErrorMessage(message),
       ),
     ).toBe(true);
     expect(() => readFileSync(outsideFile, "utf8")).toThrow();
