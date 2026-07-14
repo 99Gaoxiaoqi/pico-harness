@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { resolveModelRouteCapabilities } from "../src/provider/model-capabilities.js";
 import { ModelRouter, type ModelRoute } from "../src/provider/model-router.js";
-import { resolveSubagentModelSelection } from "../src/runtime/subagent-model-selection.js";
+import {
+  resolveCompatibleModelRoute,
+  resolveSubagentModelSelection,
+} from "../src/runtime/subagent-model-selection.js";
 
 describe("子代理模型选择集成", () => {
   const parent = route("volcengine/deepseek-v4-pro", "deepseek-v4-pro");
@@ -52,6 +55,34 @@ describe("子代理模型选择集成", () => {
         allowRouteOverride: false,
       }),
     ).toThrow(`只允许子代理继承父模型路由 ${parent.id}`);
+  });
+
+  it("通过显式配置或唯一 family 匹配解析 Claude Agent 模型别名", () => {
+    const sonnet = route("anthropic/claude-sonnet-4-5", "claude-sonnet-4-5");
+    const aliasRouter = new ModelRouter([parent, child, sonnet], {}, parent.id);
+
+    expect(resolveCompatibleModelRoute(aliasRouter, "sonnet").id).toBe(sonnet.id);
+    expect(
+      resolveCompatibleModelRoute(aliasRouter, "review-model", {
+        "review-model": child.id,
+      }).id,
+    ).toBe(child.id);
+  });
+
+  it("Claude family 匹配多个路由时保持 fail-closed", () => {
+    const aliasRouter = new ModelRouter(
+      [
+        parent,
+        route("anthropic/claude-sonnet-4-5", "claude-sonnet-4-5"),
+        route("gateway/claude-sonnet-4", "claude-sonnet-4"),
+      ],
+      {},
+      parent.id,
+    );
+
+    expect(() => resolveCompatibleModelRoute(aliasRouter, "sonnet")).toThrow(
+      "匹配多个 Pico 路由",
+    );
   });
 });
 
