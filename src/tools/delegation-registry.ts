@@ -223,6 +223,7 @@ function maybeRegisterDelegateTool(
           ? { allowAsyncCompletion: config.allowAsyncCompletion }
           : {}),
         ...(config.activateAgentHooks ? { activateAgentHooks: config.activateAgentHooks } : {}),
+        ...(config.hookService ? { hookService: config.hookService } : {}),
       }),
     );
   }

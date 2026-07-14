@@ -1341,6 +1341,7 @@ function registerDelegationTools(
     ownerSessionId,
     allowAsyncCompletion,
     ...(activateAgentHooks ? { activateAgentHooks } : {}),
+    ...(hookService ? { hookService } : {}),
   };
   registry.register(new DelegateTaskTool(engine, registryFactory, manager, delegateTaskOptions));
   registry.register(new DelegateStatusTool(manager));
