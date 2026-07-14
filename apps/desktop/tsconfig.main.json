@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2024"],
+    "outDir": ".tsbuild/main",
+    "rootDir": ".",
+    "types": ["node", "electron"]
+  },
+  "include": [
+    "forge.config.ts",
+    "vite.*.config.ts",
+    "src/main/**/*.ts",
+    "src/platform/**/*.ts",
+    "src/preload/contract.ts"
+  ]
+}
