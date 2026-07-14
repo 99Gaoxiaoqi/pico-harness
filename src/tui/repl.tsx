@@ -130,7 +130,14 @@ import { fileHistoryChanges, fileHistoryRestoreFile } from "../safety/file-histo
 import { createChangesDialogRequest, createChangesPanelModel } from "./changes-panel.js";
 import { TaskHostRuntime } from "../tasks/task-runtime.js";
 import { CronService } from "../tasks/cron-service.js";
+import {
+  CronDraftApplication,
+  type CronDraftApplicationOptions,
+} from "../tasks/cron-draft-application.js";
+import { ScheduleDraftCoordinator } from "../tasks/cron-draft-coordinator.js";
 import { LocalCronDaemonBridge } from "../input/cron-daemon-bridge.js";
+import { ScheduleDraftReviewHandler } from "./schedule-draft-review.js";
+import { bindScheduleDraftDialogs } from "./schedule-draft-dialog.js";
 
 export interface ReplOptions {
   /** 工作区 */
@@ -241,8 +248,27 @@ interface TuiSessionBundle {
   readonly registry: CommandRegistry;
   readonly reporter: TuiReporter;
   readonly askUserHandler: AskUserHandler;
+  readonly scheduleDraft?: TuiScheduleDraftRuntime;
   readonly recoveredRewindInputText?: string;
   latestMcpStatus?: McpStatusSnapshot;
+}
+
+interface TuiScheduleDraftRuntime {
+  readonly handler: ScheduleDraftReviewHandler;
+  readonly coordinator: ScheduleDraftCoordinator;
+}
+
+function createTuiScheduleDraftRuntime(
+  options: CronDraftApplicationOptions,
+): TuiScheduleDraftRuntime {
+  const handler = new ScheduleDraftReviewHandler();
+  const application = new CronDraftApplication(options);
+  const coordinator = new ScheduleDraftCoordinator({
+    reviewer: handler,
+    resolveContext: () => application.context(),
+    commit: (draft, signal) => application.commit(draft, signal),
+  });
+  return { handler, coordinator };
 }
 
 export function getTuiCommandAvailabilityState(status: string): CommandInputState {
@@ -1021,6 +1047,17 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
       coordinateSessionReasoningLevel(settings, modelRouter);
       setSessionAdditionalDirectories(settings, workspaceRoots.list().slice(1));
 
+      const scheduleDraft = cronService
+        ? createTuiScheduleDraftRuntime({
+            cronService,
+            workspacePath: opts.workDir,
+            resolveModelRoute: () => modelRouter.require(settings.modelRouteId),
+            listAllowedTools: () => settings.tools.map((tool) => tool.name),
+            credentialVault,
+            workspaceRegistrar: cronDaemonBridge,
+          })
+        : undefined;
+
       const bundleRef: { current?: TuiSessionBundle } = {};
       const registry = await createPicoCommandRegistry({
         workDir: opts.workDir,
@@ -1092,6 +1129,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         registry,
         reporter,
         askUserHandler,
+        ...(scheduleDraft ? { scheduleDraft } : {}),
         ...(recoveredRewind ? { recoveredRewindInputText: recoveredRewind.inputText } : {}),
         latestMcpStatus,
       };
@@ -1590,6 +1628,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
                 current.latestMcpStatus = snapshot;
               },
               mcpManager: sharedMcpManager,
+              ...(current.scheduleDraft ? { scheduleDraft: current.scheduleDraft } : {}),
               toolStatusSink: (tools) => {
                 setSessionTools(settings, tools);
               },
@@ -1953,6 +1992,7 @@ export async function runTuiAgentPrompt(
     toolDisclosure?: ToolDisclosure;
     runtimeState?: TuiRuntimeState;
     askUserHandler?: AskUserHandler;
+    scheduleDraft?: TuiScheduleDraftRuntime;
     mcpStatusSink?: (snapshot: McpStatusSnapshot) => void;
     mcpManager?: McpConnectionManager;
     toolStatusSink?: RunAgentCliDependencies["toolStatusSink"];
@@ -1966,6 +2006,11 @@ export async function runTuiAgentPrompt(
 ): Promise<void> {
   if (deps.askUserHandler && (!deps.openDialog || !deps.closeDialog)) {
     throw new Error("AskUser requires both openDialog and closeDialog host callbacks.");
+  }
+  if (deps.scheduleDraft && (!deps.openDialog || !deps.closeDialog)) {
+    throw new Error(
+      "Schedule draft review requires both openDialog and closeDialog host callbacks.",
+    );
   }
   const existingController = deps.abortControllerRef?.current;
   const controller = existingController ?? new AbortController();
@@ -1982,6 +2027,12 @@ export async function runTuiAgentPrompt(
   const closeApprovalOnAbort = () => closePendingApprovalDialogs();
   const unbindAskUserDialogs = deps.askUserHandler
     ? bindAskUserDialogs(deps.askUserHandler, {
+        openDialog: (request) => deps.openDialog?.(request),
+        closeDialog: (id) => deps.closeDialog?.(id),
+      })
+    : undefined;
+  const unbindScheduleDraftDialogs = deps.scheduleDraft
+    ? bindScheduleDraftDialogs(deps.scheduleDraft.handler, {
         openDialog: (request) => deps.openDialog?.(request),
         closeDialog: (id) => deps.closeDialog?.(id),
       })
@@ -2007,6 +2058,7 @@ export async function runTuiAgentPrompt(
       ...(deps.toolDisclosure ? { toolDisclosure: deps.toolDisclosure } : {}),
       ...(deps.runtimeState ? { runtimeState: deps.runtimeState } : {}),
       ...(deps.askUserHandler ? { askUserHandler: deps.askUserHandler } : {}),
+      ...(deps.scheduleDraft ? { scheduleDraftCoordinator: deps.scheduleDraft.coordinator } : {}),
       ...(deps.mcpStatusSink ? { mcpStatusSink: deps.mcpStatusSink } : {}),
       ...(deps.mcpManager ? { mcpManager: deps.mcpManager } : {}),
       ...(deps.toolStatusSink ? { toolStatusSink: deps.toolStatusSink } : {}),
@@ -2020,6 +2072,8 @@ export async function runTuiAgentPrompt(
     controller.signal.removeEventListener("abort", closeApprovalOnAbort);
     closePendingApprovalDialogs();
     deps.askUserHandler?.cancelAll("当前运行已结束。");
+    deps.scheduleDraft?.handler.cancelAll();
+    unbindScheduleDraftDialogs?.();
     unbindAskUserDialogs?.();
     if (ownsControllerSlot && deps.abortControllerRef?.current === controller) {
       deps.abortControllerRef.current = null;
