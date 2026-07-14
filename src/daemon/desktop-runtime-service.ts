@@ -6,6 +6,8 @@ import { createCliSessionId, listCliSessionSummaries } from "../cli/session-reso
 import { createContextBudget, estimateMessagesTokens } from "../context/context-budget.js";
 import { FullCompactor } from "../context/full-compactor.js";
 import { SkillLoader } from "../context/skill.js";
+import { ResourceDoctor, renderResourceDoctorReport } from "../diagnostics/resource-doctor.js";
+import { runWorkspaceDoctor } from "../diagnostics/workspace-doctor.js";
 import { SessionForkService } from "../engine/session-fork-service.js";
 import { globalSessionManager, Session } from "../engine/session.js";
 import {
@@ -20,6 +22,7 @@ import {
   type SessionSettings,
 } from "../input/session-settings.js";
 import { loadPicoConfig, type PicoConfig } from "../input/pico-config.js";
+import { initializeProjectEntrypoints } from "../input/project-initializer.js";
 import { McpConnectionManager } from "../mcp/manager.js";
 import { CostTracker } from "../observability/tracker.js";
 import { ensureSessionUsageBaseline } from "../observability/usage-baseline.js";
@@ -132,6 +135,12 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
 
   async handle(request: RuntimeRequest): Promise<JsonValue> {
     switch (request.method) {
+      case "workspace.init":
+        return this.initializeWorkspace(request.params.workspacePath);
+      case "diagnostics.run":
+        return this.runDiagnostics(request.params.workspacePath);
+      case "diagnostics.resources":
+        return this.runResourceDiagnostics(request.params.workspacePath);
       case "workspace.list":
         return this.listWorkspaces();
       case "workspace.trustStatus":
@@ -287,6 +296,67 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       ),
     );
     return { workspaces };
+  }
+
+  private async initializeWorkspace(workspacePath: string): Promise<JsonValue> {
+    const canonical = await this.requireTrustedWorkspace(workspacePath);
+    const listed = requireJsonRecord(
+      await this.options.runtimeService.handle(
+        createRuntimeRequest("runs.list", { workspacePath: canonical }),
+      ),
+      "runs.list result",
+    );
+    const runs = Array.isArray(listed["runs"]) ? listed["runs"] : [];
+    if (
+      runs.filter(isJsonRecord).some((run) => !isTerminalRunStatus(String(run["status"] ?? "")))
+    ) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.CONFLICT,
+        "工作区仍有活动 Run，不能执行初始化",
+      );
+    }
+    try {
+      const result = await initializeProjectEntrypoints(canonical);
+      this.publish(
+        createRuntimeEvent({
+          topic: "workspace.initialized",
+          scope: { workspacePath: canonical },
+          resourceVersion: this.nextResourceVersion(),
+          at: this.now(),
+          payload: toJsonValue(result),
+        }),
+      );
+      return toJsonValue(result);
+    } catch (error) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.CONFLICT,
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  }
+
+  private async runDiagnostics(workspacePath: string): Promise<JsonValue> {
+    const canonical = await this.requireTrustedWorkspace(workspacePath);
+    const config = await loadPicoConfig(canonical);
+    const defaults = sessionSettingDefaults(config, this.env);
+    return toJsonValue(
+      await runWorkspaceDoctor({
+        workDir: canonical,
+        provider: defaults.provider,
+        model: defaults.model,
+        env: this.env,
+        taskRuntimeAvailable: true,
+      }),
+    );
+  }
+
+  private async runResourceDiagnostics(workspacePath: string): Promise<JsonValue> {
+    const canonical = await this.requireTrustedWorkspace(workspacePath);
+    const report = await new ResourceDoctor({ workDir: canonical }).scan();
+    return toJsonValue({
+      ...report,
+      output: renderResourceDoctorReport(report).join("\n"),
+    });
   }
 
   private async trustStatus(workspacePath: string): Promise<JsonValue> {

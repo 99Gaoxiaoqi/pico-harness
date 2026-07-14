@@ -90,6 +90,7 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
           "session-management-v1",
           "session-settings-v1",
           "session-goal-v1",
+          "workspace-diagnostics-v1",
           "runtime-events-v1",
         ],
       };

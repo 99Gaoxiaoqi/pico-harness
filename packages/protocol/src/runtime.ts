@@ -184,6 +184,48 @@ export type RuntimeChange = JsonObject & {
   readonly deletions: number;
 };
 
+export type RuntimeWorkspaceInitResult = {
+  readonly workspacePath: string;
+  readonly files: readonly {
+    readonly path: "AGENTS.md" | ".pico/config.json";
+    readonly status: "created" | "existing";
+  }[];
+  readonly message: string;
+};
+
+export type RuntimeDiagnosticCheck = {
+  readonly id: string;
+  readonly label: string;
+  readonly status: "ok" | "warning" | "error" | "unavailable";
+  readonly summary: string;
+  readonly recommendation?: string;
+};
+
+export type RuntimeDiagnosticsReport = {
+  readonly workspacePath: string;
+  readonly healthy: boolean;
+  readonly checks: readonly RuntimeDiagnosticCheck[];
+  readonly output: string;
+};
+
+export type RuntimeResourceDiagnosticEntry = {
+  readonly kind: string;
+  readonly origin: "claude-compat" | "legacy" | "pico-native" | "runtime-state";
+  readonly path: string;
+  readonly status: "missing" | "present" | "unsafe";
+  readonly authority: boolean;
+  readonly reason?: string;
+};
+
+export type RuntimeResourceDiagnosticsReport = {
+  readonly workDir: string;
+  readonly picoHome: string;
+  readonly workspaceStateRoot: string;
+  readonly entries: readonly RuntimeResourceDiagnosticEntry[];
+  readonly findings: readonly string[];
+  readonly output: string;
+};
+
 export type RuntimeMethodMap = {
   readonly "runtime.ping": {
     readonly params: JsonObject;
@@ -192,6 +234,18 @@ export type RuntimeMethodMap = {
       readonly protocolVersion: typeof LOCAL_RUNTIME_PROTOCOL_VERSION;
       readonly capabilities: readonly string[];
     };
+  };
+  readonly "workspace.init": {
+    readonly params: WorkspaceParams;
+    readonly result: RuntimeWorkspaceInitResult;
+  };
+  readonly "diagnostics.run": {
+    readonly params: WorkspaceParams;
+    readonly result: RuntimeDiagnosticsReport;
+  };
+  readonly "diagnostics.resources": {
+    readonly params: WorkspaceParams;
+    readonly result: RuntimeResourceDiagnosticsReport;
   };
   readonly "session.list": {
     readonly params: WorkspaceParams & { readonly includeArchived?: boolean };
@@ -494,6 +548,9 @@ export type RuntimeMethodMap = {
 
 export const RUNTIME_METHODS = [
   "runtime.ping",
+  "workspace.init",
+  "diagnostics.run",
+  "diagnostics.resources",
   "session.list",
   "session.get",
   "session.create",
@@ -554,6 +611,7 @@ export type RuntimeEventMap = {
   readonly "workspace.registered": { readonly registered: true };
   readonly "workspace.unregistered": { readonly registered: false };
   readonly "workspace.trustChanged": { readonly trusted: boolean };
+  readonly "workspace.initialized": RuntimeWorkspaceInitResult;
   readonly "session.updated": { readonly session: RuntimeSession };
   readonly "session.settingsUpdated": {
     readonly sessionId: SessionId;

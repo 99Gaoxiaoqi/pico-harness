@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { execFile as execFileCallback } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -46,6 +46,108 @@ describe("DesktopRuntimeService integration", () => {
       );
     }
     await Promise.all(cleanups.splice(0).map((path) => rm(path, { recursive: true, force: true })));
+  });
+
+  it("仅在信任工作区安全初始化入口文件，并提供只诊断不修复的 Doctor 结果", async () => {
+    const fixture = await createFixture(undefined, {
+      env: {
+        ...process.env,
+        LLM_PROVIDER: "openai",
+        LLM_MODEL: "gpt-test",
+        LLM_API_KEY: "test-only",
+      },
+    });
+    const observedTopics: string[] = [];
+    const unsubscribe = fixture.service.subscribe((event) => observedTopics.push(event.topic));
+
+    for (const method of ["workspace.init", "diagnostics.run", "diagnostics.resources"] as const) {
+      await expect(
+        fixture.service.handle(createRuntimeRequest(method, { workspacePath: fixture.workspace })),
+      ).rejects.toMatchObject({ code: RUNTIME_ERROR_CODES.FORBIDDEN });
+    }
+
+    await fixture.trust.trust(fixture.canonicalWorkspace);
+    await writeFile(join(fixture.workspace, "AGENTS.md"), "# Existing guidance\n");
+    const initialized = await fixture.service.handle(
+      createRuntimeRequest("workspace.init", { workspacePath: fixture.workspace }),
+    );
+    expect(initialized).toMatchObject({
+      workspacePath: fixture.canonicalWorkspace,
+      files: [
+        { path: "AGENTS.md", status: "existing" },
+        { path: ".pico/config.json", status: "created" },
+      ],
+    });
+    await expect(readFile(join(fixture.workspace, "AGENTS.md"), "utf8")).resolves.toBe(
+      "# Existing guidance\n",
+    );
+    await expect(
+      fixture.service.handle(
+        createRuntimeRequest("workspace.init", { workspacePath: fixture.workspace }),
+      ),
+    ).resolves.toMatchObject({
+      files: [
+        { path: "AGENTS.md", status: "existing" },
+        { path: ".pico/config.json", status: "existing" },
+      ],
+    });
+
+    await mkdir(join(fixture.workspace, ".pico", "skills", "review"), { recursive: true });
+    const diagnostics = await fixture.service.handle(
+      createRuntimeRequest("diagnostics.run", { workspacePath: fixture.workspace }),
+    );
+    expect(diagnostics).toMatchObject({
+      workspacePath: fixture.canonicalWorkspace,
+      checks: expect.arrayContaining([
+        expect.objectContaining({ id: "cwd", status: "ok" }),
+        expect.objectContaining({ id: "session-catalog" }),
+        expect.objectContaining({ id: "storage" }),
+      ]),
+      output: expect.stringContaining(`CWD: ${fixture.canonicalWorkspace} (ok)`),
+    });
+
+    const resources = await fixture.service.handle(
+      createRuntimeRequest("diagnostics.resources", { workspacePath: fixture.workspace }),
+    );
+    expect(resources).toMatchObject({
+      workDir: fixture.canonicalWorkspace,
+      entries: expect.arrayContaining([
+        expect.objectContaining({
+          kind: "skills",
+          origin: "pico-native",
+          status: "present",
+          authority: true,
+        }),
+      ]),
+      output: expect.stringContaining("Resource skills: pico-native"),
+    });
+    expect(observedTopics).toContain("workspace.initialized");
+
+    unsubscribe();
+    await fixture.service.close();
+  });
+
+  it("初始化在 .pico 符号链接越出工作区时失败并且不写入外部目录", async () => {
+    const fixture = await createFixture();
+    const outside = join(fixture.root, "outside");
+    await mkdir(outside);
+    await symlink(outside, join(fixture.workspace, ".pico"));
+    await fixture.trust.trust(fixture.canonicalWorkspace);
+
+    await expect(
+      fixture.service.handle(
+        createRuntimeRequest("workspace.init", { workspacePath: fixture.workspace }),
+      ),
+    ).rejects.toMatchObject({
+      code: RUNTIME_ERROR_CODES.CONFLICT,
+      message: expect.stringContaining("工作区边界外"),
+    });
+    await expect(stat(join(outside, "config.json"))).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(stat(join(fixture.workspace, "AGENTS.md"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+
+    await fixture.service.close();
   });
 
   it("共用登记与信任真源，只在信任后投影脱敏配置、Skills 与 MCP", async () => {

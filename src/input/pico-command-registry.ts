@@ -1,5 +1,3 @@
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 import { SkillLoader } from "../context/skill.js";
 import { FullCompactor } from "../context/full-compactor.js";
 import { createContextBudget, estimateMessagesTokens } from "../context/context-budget.js";
@@ -49,6 +47,7 @@ import {
   type CredentialVault,
 } from "../provider/credential-vault.js";
 import { loadApiKeys } from "../provider/config.js";
+import { initializeProjectEntrypoints } from "./project-initializer.js";
 import { buildDefaultToolRegistry } from "../tools/default-registry.js";
 import {
   formatSessionStatus,
@@ -83,19 +82,14 @@ import {
 import type { McpConnectionManager } from "../mcp/manager.js";
 import { CostTracker } from "../observability/tracker.js";
 import { ensureSessionUsageBaseline } from "../observability/usage-baseline.js";
-import { readSessionCatalogProjectionHealth } from "../storage/session-catalog-projection.js";
 import type { HookService } from "../hooks/service.js";
 import {
   ResourceDoctor,
   renderResourceDoctorReport,
   type ResourceDoctorReport,
 } from "../diagnostics/resource-doctor.js";
-import {
-  STORAGE_DOCTOR_COMPONENTS,
-  StorageDoctor,
-  type StorageDoctorFinding,
-  type StorageDoctorReport,
-} from "../storage/storage-doctor.js";
+import type { StorageDoctor } from "../storage/storage-doctor.js";
+import { runWorkspaceDoctor } from "../diagnostics/workspace-doctor.js";
 import {
   createPluginCommand,
   type PluginManagementCommandService,
@@ -601,10 +595,7 @@ function createCompactCommand(
           inputBudgetTokens: budget.inputBudgetTokens,
           targetRetainedTokens: Math.max(
             1,
-            Math.min(
-              Math.floor(budget.inputBudgetTokens * 0.5),
-              Math.floor(historyTokens * 0.5),
-            ),
+            Math.min(Math.floor(budget.inputBudgetTokens * 0.5), Math.floor(historyTokens * 0.5)),
           ),
           trigger: "manual",
         });
@@ -634,12 +625,13 @@ function createInitCommand(options: PicoCommandRegistryOptions): SlashCommand {
     kind: "local",
     availability: "idle",
     execute: async (): Promise<LocalCommandResult> => {
-      const message = initializeProjectEntrypoints(options.workDir);
+      const result = await initializeProjectEntrypoints(options.workDir);
       await options.hookService?.dispatch("Setup", { action: "init" });
       return {
         type: "local",
         action: "message",
-        message,
+        message: result.message,
+        data: result,
       };
     },
   };
@@ -656,7 +648,21 @@ function createDoctorCommand(options: PicoCommandRegistryOptions): SlashCommand 
     execute: async (input): Promise<LocalCommandResult> => {
       const subcommand = input.args.trim();
       if (!subcommand) {
-        return { type: "local", action: "message", message: await formatDoctorReport(options) };
+        const report = await runWorkspaceDoctor({
+          workDir: options.workDir,
+          provider: options.provider,
+          model: options.model,
+          ...(options.session?.sessionCatalogHealth
+            ? { catalogHealth: options.session.sessionCatalogHealth }
+            : {}),
+          taskRuntimeAvailable: options.taskRuntime !== undefined,
+          ...(options.taskRuntimeDiagnostic
+            ? { taskRuntimeDiagnostic: options.taskRuntimeDiagnostic }
+            : {}),
+          ...(options.session ? { memoryStatus: options.session.memoryStatus } : {}),
+          ...(options.storageDoctor ? { storageDoctor: options.storageDoctor } : {}),
+        });
+        return { type: "local", action: "message", message: report.output, data: report };
       }
       if (subcommand !== "resources") {
         return { type: "local", action: "message", message: "Usage: /doctor [resources]" };
@@ -1785,137 +1791,6 @@ function commandExecution(
     ...(command.model === undefined ? {} : { model: command.model }),
     ...(command.allowedTools === undefined ? {} : { allowedTools: command.allowedTools }),
   };
-}
-
-function initializeProjectEntrypoints(workDir: string): string {
-  const messages: string[] = [];
-  const agentsPath = join(workDir, "AGENTS.md");
-  const picoDir = join(workDir, ".pico");
-  const configPath = join(picoDir, "config.json");
-
-  if (existsSync(agentsPath)) {
-    messages.push("AGENTS.md already exists");
-  } else {
-    writeFileSync(
-      agentsPath,
-      [
-        "# AGENTS.md",
-        "",
-        "## Project Guidance",
-        "",
-        "- Keep changes small and easy to review.",
-        "- Prefer existing project conventions before adding new patterns.",
-        "",
-      ].join("\n"),
-    );
-    messages.push("Created AGENTS.md");
-  }
-
-  mkdirSync(picoDir, { recursive: true });
-  if (existsSync(configPath)) {
-    messages.push(".pico/config.json already exists");
-  } else {
-    writeFileSync(
-      configPath,
-      `${JSON.stringify(
-        {
-          version: 1,
-          commandsDir: ".pico/commands",
-          keybindings: {},
-        },
-        null,
-        2,
-      )}\n`,
-    );
-    messages.push("Created .pico/config.json");
-  }
-
-  return messages.join("\n");
-}
-
-async function formatDoctorReport(options: PicoCommandRegistryOptions): Promise<string> {
-  const envPath = join(options.workDir, ".env");
-  const apiKeys = loadApiKeys();
-  const nodeMajor = Number(process.versions.node.split(".")[0] ?? "0");
-  const nodeOk = nodeMajor >= 22;
-  const cwdOk = existsSync(options.workDir);
-  const envModel = process.env.LLM_MODEL;
-  // /doctor 只读：不为获取状态而触发 Catalog backfill/重建。
-  const catalogHealth =
-    options.session?.sessionCatalogHealth ??
-    (await readSessionCatalogProjectionHealth(options.workDir));
-  const storageDiagnostics = await formatStorageDoctorReport(options);
-
-  return [
-    `CWD: ${options.workDir} (${cwdOk ? "ok" : "missing"})`,
-    `.env: ${existsSync(envPath) ? "found" : "missing"}`,
-    `Provider: ${options.provider}`,
-    `Model: ${options.model}${envModel && envModel !== options.model ? ` (env: ${envModel})` : ""}`,
-    `LLM_BASE_URL: ${process.env.LLM_BASE_URL ? "set" : "missing"}`,
-    `LLM_API_KEY[S]: ${apiKeys.length > 0 ? `${apiKeys.length} configured` : "missing"}`,
-    `Node: ${process.version} (${nodeOk ? "ok" : "requires >=22.0.0"})`,
-    `Session catalog: ${catalogHealth.state}`,
-    ...(catalogHealth.diagnostic ? [`Session catalog reason: ${catalogHealth.diagnostic}`] : []),
-    ...(catalogHealth.state !== "healthy"
-      ? [`Session catalog recommendation: ${catalogHealth.recommendation}`]
-      : []),
-    `Task runtime: ${options.taskRuntime ? "healthy" : "unavailable"}`,
-    ...(options.taskRuntimeDiagnostic
-      ? [`Task runtime reason: ${options.taskRuntimeDiagnostic}`]
-      : []),
-    ...formatMemoryBackend(options.session, true),
-    ...storageDiagnostics,
-  ].join("\n");
-}
-
-async function formatStorageDoctorReport(options: PicoCommandRegistryOptions): Promise<string[]> {
-  try {
-    const report = await (
-      options.storageDoctor ?? new StorageDoctor({ workDir: options.workDir })
-    ).scan();
-    return renderStorageDoctorReport(report);
-  } catch (error) {
-    return [
-      "Storage: diagnostic unavailable",
-      `Storage diagnostic: ${error instanceof Error ? error.message : String(error)}`,
-      "Storage recommendation: retry /doctor after checking storage permissions; no repair or GC was run.",
-    ];
-  }
-}
-
-function renderStorageDoctorReport(report: StorageDoctorReport): string[] {
-  const severityCounts = {
-    critical: countStorageFindings(report.findings, "critical"),
-    error: countStorageFindings(report.findings, "error"),
-    warning: countStorageFindings(report.findings, "warning"),
-  };
-  const sessionTruthHealthy = !report.findings.some(
-    (finding) =>
-      finding.component === "session" &&
-      (finding.severity === "critical" || finding.severity === "error"),
-  );
-  const priorityFindings = report.findings
-    .filter((finding) => finding.severity !== "info")
-    .slice(0, 5);
-  return [
-    `Storage: ${report.healthy ? "healthy" : "degraded"}`,
-    `Storage scanned: ${STORAGE_DOCTOR_COMPONENTS.map(
-      (component) => `${component}=${report.scanned[component]}`,
-    ).join(", ")}`,
-    `Storage severity: critical=${severityCounts.critical}, error=${severityCounts.error}, warning=${severityCounts.warning}`,
-    `Storage Session truth: ${sessionTruthHealthy ? "healthy" : "degraded"} (scanned=${report.scanned.session})`,
-    ...priorityFindings.flatMap((finding, index) => [
-      `Storage finding ${index + 1}: [${finding.severity}/${finding.component}/${finding.code}] ${finding.message} (${finding.path})`,
-      `Storage recommendation ${index + 1}: ${finding.recommendation}`,
-    ]),
-  ];
-}
-
-function countStorageFindings(
-  findings: readonly StorageDoctorFinding[],
-  severity: StorageDoctorFinding["severity"],
-): number {
-  return findings.filter((finding) => finding.severity === severity).length;
 }
 
 function formatMemoryBackend(
