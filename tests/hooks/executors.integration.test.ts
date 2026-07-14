@@ -158,7 +158,6 @@ describe("DefaultHookExecutor command", () => {
   });
 
   it("dispose 终止 async command 进程树并拒绝迟到 rewake", async () => {
-    if (process.platform === "win32") return;
     const workDir = await mkdtemp(join(tmpdir(), "pico-hook-async-dispose-"));
     const sentinel = join(workDir, "descendant-ran");
     const pidFile = join(workDir, "parent.pid");
@@ -208,7 +207,9 @@ describe("DefaultHookExecutor command", () => {
       await executor.dispose();
 
       expect(rewake).not.toHaveBeenCalled();
-      expect(Date.now() - disposeStarted).toBeGreaterThanOrEqual(200);
+      if (process.platform !== "win32") {
+        expect(Date.now() - disposeStarted).toBeGreaterThanOrEqual(200);
+      }
       expect(() => process.kill(parentPid!, 0)).toThrow();
       await expectProcessExit(descendantPid!);
       await expect(access(sentinel)).rejects.toMatchObject({ code: "ENOENT" });

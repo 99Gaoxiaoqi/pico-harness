@@ -14,6 +14,7 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { logger } from "../observability/logger.js";
+import { signalProcessTree } from "../os/process-tree.js";
 import type {
   HookEvent,
   HookHandler,
@@ -38,6 +39,8 @@ const MAX_HOOK_OUTPUT_BYTES = 1024 * 1024;
  *   await runner.runPostToolUse(toolName, toolInput, toolResponse, sessionId);
  */
 export class HookRunner {
+  private readonly pendingPostToolUse = new Set<Promise<HookOutput>>();
+
   constructor(
     private readonly workDir: string,
     private readonly config: HooksConfig,
@@ -71,7 +74,20 @@ export class HookRunner {
     sessionId: string,
   ): Promise<void> {
     // PostToolUse 永远不阻断:复用 runEvent 但忽略其 deny 决策
-    await this.runEvent("PostToolUse", toolName, toolInput, sessionId, toolResponse);
+    const execution = this.runEvent("PostToolUse", toolName, toolInput, sessionId, toolResponse);
+    this.pendingPostToolUse.add(execution);
+    try {
+      await execution;
+    } finally {
+      this.pendingPostToolUse.delete(execution);
+    }
+  }
+
+  /** 等待 Registry 已启动的 fire-and-forget PostToolUse 真正收口。 */
+  async drain(): Promise<void> {
+    while (this.pendingPostToolUse.size > 0) {
+      await Promise.allSettled([...this.pendingPostToolUse]);
+    }
   }
 
   /**
@@ -174,6 +190,7 @@ export class HookRunner {
           shell: true,
           cwd: this.workDir,
           windowsHide: true,
+          detached: process.platform !== "win32",
           // 让子进程继承关闭的 stdio:stdin 可写、stdout/stderr 可读
           stdio: ["pipe", "pipe", "pipe"],
         });
@@ -187,44 +204,57 @@ export class HookRunner {
       let stderr = "";
       let outputBytes = 0;
       let settled = false;
+      let terminating = false;
       const finish = (result: HookOutput) => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
         resolve(result);
       };
+      const terminateAndFinish = (result: HookOutput, message: string) => {
+        if (settled || terminating) return;
+        terminating = true;
+        clearTimeout(timer);
+        void killProcessTree(child).then(
+          () => finish(result),
+          (error: unknown) => {
+            logger.error(
+              { err: String(error), pid: child.pid },
+              `[Hook] ${message}，但进程树终止无法确认`,
+            );
+            finish(result);
+          },
+        );
+      };
 
       // 超时:kill 子进程后 fail-open
       const timer = setTimeout(() => {
-        killProcessTree(child);
         logger.warn({ timeoutMs, command }, `[Hook] 超时,fail-open 放行`);
-        finish({ decision: "allow" });
+        terminateAndFinish({ decision: "allow" }, "超时");
       }, timeoutMs);
 
       child.stdout?.on("data", (chunk: Buffer) => {
-        if (settled) return;
+        if (settled || terminating) return;
         outputBytes += chunk.byteLength;
         if (outputBytes > MAX_HOOK_OUTPUT_BYTES) {
-          killProcessTree(child);
           logger.warn(
             { command, maxBytes: MAX_HOOK_OUTPUT_BYTES },
             `[Hook] 输出超过上限,fail-open 放行`,
           );
-          finish({ decision: "allow" });
+          terminateAndFinish({ decision: "allow" }, "输出超过上限");
           return;
         }
         stdout += chunk.toString("utf8");
       });
       child.stderr?.on("data", (chunk: Buffer) => {
-        if (settled) return;
+        if (settled || terminating) return;
         outputBytes += chunk.byteLength;
         if (outputBytes > MAX_HOOK_OUTPUT_BYTES) {
-          killProcessTree(child);
           logger.warn(
             { command, maxBytes: MAX_HOOK_OUTPUT_BYTES },
             `[Hook] 输出超过上限,fail-open 放行`,
           );
-          finish({ decision: "allow" });
+          terminateAndFinish({ decision: "allow" }, "输出超过上限");
           return;
         }
         stderr += chunk.toString("utf8");
@@ -237,6 +267,7 @@ export class HookRunner {
       });
 
       child.on("close", (code: number | null) => {
+        if (terminating) return;
         finish(interpretExit(code, stdout, stderr));
       });
 
@@ -245,8 +276,7 @@ export class HookRunner {
       // remain fail-open instead of becoming an unhandled EPIPE.
       child.stdin?.once("error", (err) => {
         logger.warn({ err: String(err), command }, `[Hook] stdin error,fail-open 放行`);
-        killProcessTree(child);
-        finish({ decision: "allow" });
+        terminateAndFinish({ decision: "allow" }, "stdin error");
       });
 
       // 写 stdin(JSON 输入)。同步写失败也按 fail-open 处理。
@@ -254,8 +284,7 @@ export class HookRunner {
         child.stdin?.write(JSON.stringify(input));
         child.stdin?.end();
       } catch {
-        killProcessTree(child);
-        finish({ decision: "allow" });
+        terminateAndFinish({ decision: "allow" }, "stdin write error");
       }
     });
   }
@@ -362,34 +391,12 @@ export function matcherMatches(group: HookMatcherGroup, toolName: string): boole
   }
 }
 
-// ==========================================
-// 进程树 kill(跨平台,已知限制)
-// ==========================================
-
-/**
- * kill 子进程(含其进程树,尽力而为)。
- *
- * 已知限制(任务说明约定):Windows 上 shell:true 会拉起 cmd.exe → 目标 shell,
- * 直接 kill child 只杀到 cmd 层,孙进程可能残留。极简方案下接受此限制,
- * 仅 kill 直接子进程并记 warn。POSIX 上用负 pid 杀进程组(spawn 默认不新建进程组,
- * 此处退化为 kill 直接 pid)。
- */
-function killProcessTree(child: ChildProcess): void {
-  if (child.pid === undefined) return;
-  try {
-    if (process.platform === "win32") {
-      // Windows:杀进程树。taskkill /T 杀子树,/F 强制。
-      // 注意:shell:true 下孙子进程可能残留(见函数注释限制)。
-      spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
-        windowsHide: true,
-        stdio: "ignore",
-      });
-    } else {
-      // POSIX:SIGKILL 直接 pid(spawn 默认不新建进程组,孙进程靠子进程自身回收)
-      process.kill(child.pid, "SIGKILL");
-    }
-  } catch (err) {
-    // kill 失败忽略:子进程最终会随 timeout 后自行退出或被 OS 回收
-    logger.warn({ err: String(err), pid: child.pid }, `[Hook] kill 子进程失败`);
-  }
+/** 终止 Hook 进程树，并等待跨平台终止原语完成。 */
+async function killProcessTree(child: ChildProcess): Promise<void> {
+  const pid = child.pid;
+  if (pid === undefined) return;
+  const terminated = await signalProcessTree(child, "SIGKILL", {
+    requireWindowsTreeProof: process.platform === "win32",
+  });
+  if (!terminated) throw new Error(`无法确认 Hook 进程树 ${pid} 已终止`);
 }

@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
+import { signalProcessTree } from "../../os/process-tree.js";
 import { logger } from "../../observability/logger.js";
 import type { LLMProvider } from "../../provider/interface.js";
 import type { Message } from "../../schema/message.js";
@@ -376,7 +377,25 @@ function startCommand(
     child.once("close", (code) => {
       if (settled) return;
       if (terminationRequested) {
-        void (terminationBarrier ?? Promise.resolve()).then(() => fail(terminationReason));
+        void (terminationBarrier ?? Promise.resolve()).then(
+          () => fail(terminationReason),
+          (terminationError: unknown) => {
+            logger.error(
+              {
+                err: errorMessage(terminationError),
+                handlerId: resolved.id,
+                source: resolved.source.path,
+              },
+              "[Hook] 进程树终止无法确认",
+            );
+            fail(
+              new AggregateError(
+                [terminationReason, terminationError],
+                "Hook command 失败且进程树终止无法确认",
+              ),
+            );
+          },
+        );
         return;
       }
       try {
@@ -512,18 +531,19 @@ function boundedInteger(
 function terminateProcessTree(child: ChildProcess): Promise<void> {
   if (child.pid === undefined) return Promise.resolve();
   const pid = child.pid;
+  if (process.platform === "win32") {
+    // Windows 没有可供 Node 直接持有的可移植 Job Object handle；在根进程尚活着时
+    // 立即启动 taskkill /T /F，并等待 taskkill close/error。不再延迟 250ms，
+    // 避免根进程先退出后丢失子树归属，也避免对可能复用的旧 PID 操作。
+    return signalProcessTree(child, "SIGKILL", { requireWindowsTreeProof: true }).then(
+      (terminated) => {
+        if (!terminated) throw new Error(`无法确认 Windows Hook 进程树 ${pid} 已终止`);
+      },
+    );
+  }
   const signalProcess = (signal: NodeJS.Signals) => {
     try {
-      if (process.platform === "win32") {
-        if (signal === "SIGKILL") {
-          spawn("taskkill", ["/pid", String(pid), "/T", "/F"], {
-            windowsHide: true,
-            stdio: "ignore",
-          });
-        }
-      } else {
-        process.kill(-pid, signal);
-      }
+      process.kill(-pid, signal);
     } catch {
       // 进程可能已经退出，kill 保持幂等。
     }

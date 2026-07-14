@@ -136,8 +136,9 @@ export class ToolRegistry implements Registry {
   }
 
   async drainHookEvents(): Promise<void> {
-    // 新 HookService 路径不再启动裸 fire-and-forget；保留方法作为
-    // Registry 生命周期的稳定 drain 边界，便于后续引入有界队列。
+    // 新 HookService 路径不启动裸 fire-and-forget；降级 HookRunner 仍需
+    // 在 Runtime 清理边界等待 PostToolUse，防止会话结束后遗留脚本。
+    await this.hookRunner?.drain();
   }
 
   /** 设置传给 hook stdin 的 session_id(无则默认空串) */
