@@ -77,6 +77,11 @@ import {
 import { computeApprovalDiff } from "../approval/diff.js";
 import { classifyBashCommand } from "../approval/bash-safety.js";
 import { createSessionRuntime, type SessionRuntime } from "./session-runtime.js";
+import {
+  buildSubagentModelCatalog,
+  createInheritOnlySubagentModelCatalog,
+  type SubagentModelCatalog,
+} from "./subagent-model-catalog.js";
 import type { MiddlewareFunc } from "../tools/registry.js";
 import { McpConnectionManager, type McpStatusSnapshot } from "../mcp/manager.js";
 import { isMcpToolName } from "../mcp/types.js";
@@ -480,6 +485,21 @@ export async function executeAgentRuntime(
         ? activeRouteModelRouter(kind, providerConfig, effectiveOptions.modelRouteId)
         : undefined);
     const parentModelRouteId = effectiveOptions.modelRouteId;
+    const parentModelDisplayId =
+      parentModelRouteId ?? dependencies.provider?.modelName ?? providerConfig.model;
+    const allowSubagentModelRouteOverride =
+      dependencies.modelRouter !== undefined &&
+      dependencies.provider === undefined &&
+      !backgroundPolicy;
+    const subagentModelCatalog =
+      subagentModelRouter && parentModelRouteId
+        ? buildSubagentModelCatalog({
+            router: subagentModelRouter,
+            parentRouteId: parentModelRouteId,
+            aliases: claudeCompatibility.enabled ? claudeCompatibility.modelAliases : {},
+            allowRouteOverride: allowSubagentModelRouteOverride,
+          })
+        : createInheritOnlySubagentModelCatalog(parentModelDisplayId);
     const resolveSubagentModelRuntime =
       subagentModelRouter && parentModelRouteId && dependencies.provider === undefined
         ? (request?: SubagentModelSelectionRequest) => {
@@ -502,7 +522,7 @@ export async function executeAgentRuntime(
               parentThinkingEffort: effectiveOptions.thinkingEffort ?? "off",
               modelAliases: picoConfig.compatibility.claude.modelAliases,
               claudeCompatibilityEnabled: picoConfig.compatibility.claude.enabled,
-              allowRouteOverride: !backgroundPolicy,
+              allowRouteOverride: allowSubagentModelRouteOverride,
             });
             const runtime = createSubagentModelRuntime({
               router: subagentModelRouter,
@@ -780,6 +800,7 @@ export async function executeAgentRuntime(
       reporter,
       skillLoaderFactory,
       runtimeState.hookService,
+      subagentModelCatalog,
       async (profile) => {
         if (!profile.sourcePath || profile.hooks === undefined) return async () => undefined;
         return await runtimeState.activateComponentHookLease({
@@ -1327,6 +1348,7 @@ function registerDelegationTools(
   reporter?: Reporter,
   skillLoaderFactory?: (workDir: string) => SkillLoader,
   hookService?: HookService,
+  modelCatalog?: SubagentModelCatalog,
   activateAgentHooks?: (profile: AgentProfile) => Promise<() => void | Promise<void>>,
 ): void {
   const registryFactory = createSubagentRegistryFactory({
@@ -1339,6 +1361,7 @@ function registerDelegationTools(
     allowAsyncCompletion,
     ...(skillLoaderFactory ? { skillLoaderFactory } : {}),
     ...(hookService ? { hookService } : {}),
+    ...(modelCatalog ? { modelCatalog } : {}),
     ...(activateAgentHooks ? { activateAgentHooks } : {}),
     ...(worktreeSupervisor ? { worktreeSupervisor } : {}),
     ...(profiles.length > 0 ? { profiles } : {}),
@@ -1352,6 +1375,7 @@ function registerDelegationTools(
     allowAsyncCompletion,
     ...(activateAgentHooks ? { activateAgentHooks } : {}),
     ...(hookService ? { hookService } : {}),
+    ...(modelCatalog ? { modelCatalog } : {}),
   };
   registry.register(new DelegateTaskTool(engine, registryFactory, manager, delegateTaskOptions));
   registry.register(new DelegateStatusTool(manager));

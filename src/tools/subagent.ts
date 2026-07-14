@@ -34,6 +34,7 @@ import {
 import { SUBAGENT_OUTPUT_BUDGET } from "./subagent-budget.js";
 import { parseEphemeralAgentSpec, type EphemeralAgentSpec } from "./subagent-spec.js";
 import type { HookService } from "../hooks/service.js";
+import type { SubagentModelCatalog } from "../runtime/subagent-model-catalog.js";
 
 /**
  * AgentRunner:打破循环依赖的抽象接口。
@@ -188,6 +189,9 @@ interface NormalizedDelegateTask {
 const DEFAULT_DELEGATION_ROOTS = ["."];
 const DEFAULT_DELEGATION_MAX_FILES = 30;
 const MAX_DELEGATION_FILES = 100;
+const MAX_DISCLOSED_MODEL_ALIASES = 8;
+const MAX_DISCLOSED_MODEL_ALIAS_LENGTH = 80;
+const MAX_MODEL_ROUTE_CATALOG_DESCRIPTION = 7_000;
 const DEFAULT_STOPPING_CONDITION = "找到足以回答目标的证据，或达到文件上限时立即停止。";
 const DEFAULT_EXPECTED_OUTPUT = "给出结论、关键证据路径和仍待确认的风险。";
 
@@ -308,6 +312,7 @@ export class DelegateTaskTool implements BaseTool {
       ownerSessionId?: string;
       activateAgentHooks?: (profile: AgentProfile) => Promise<() => void | Promise<void>>;
       hookService?: HookService;
+      modelCatalog?: SubagentModelCatalog;
     } = {},
   ) {
     this.profiles = options.profiles ?? [];
@@ -319,6 +324,7 @@ export class DelegateTaskTool implements BaseTool {
 
   definition(): ToolDefinition {
     const agentNameSchema = persistentAgentNameSchema(this.profiles);
+    const agentSchema = ephemeralAgentSchema(this.options.modelCatalog);
     return {
       name: "delegate_task",
       description:
@@ -351,7 +357,7 @@ export class DelegateTaskTool implements BaseTool {
                 mode: { type: "string", enum: ["explore", "worker"] },
                 role: { type: "string", enum: ["leaf", "orchestrator"] },
                 agent_name: agentNameSchema,
-                agent: ephemeralAgentSchema(),
+                agent: agentSchema,
                 roots: { type: "array", items: { type: "string" } },
                 max_files: { type: "number", minimum: 1, maximum: MAX_DELEGATION_FILES },
                 stopping_condition: { type: "string" },
@@ -366,7 +372,7 @@ export class DelegateTaskTool implements BaseTool {
             description: "子智能体工具集。explore=只读探索,worker=受控读写开发。",
           },
           agent_name: agentNameSchema,
-          agent: ephemeralAgentSchema(),
+          agent: agentSchema,
           role: {
             type: "string",
             enum: ["leaf", "orchestrator"],
@@ -1355,7 +1361,7 @@ function profileRouteForTask(
   return findAgentProfile(profiles, task.agentName)?.modelRouteId;
 }
 
-function ephemeralAgentSchema(): Record<string, unknown> {
+function ephemeralAgentSchema(catalog?: SubagentModelCatalog): Record<string, unknown> {
   return {
     type: "object",
     description:
@@ -1365,13 +1371,87 @@ function ephemeralAgentSchema(): Record<string, unknown> {
       instructions: { type: "string", description: "追加到安全骨架后的角色要求。" },
       model_route: {
         type: "string",
-        description: "宿主已有 provider/model 路由或 inherit；不能携带 endpoint/凭证。",
+        ...modelRouteSchema(catalog),
       },
       thinking_effort: { type: "string", description: "由所选模型能力校验的思考档位。" },
       max_turns: { type: "number", minimum: 1, maximum: 50 },
     },
     additionalProperties: false,
   };
+}
+
+function modelRouteSchema(catalog?: SubagentModelCatalog): Record<string, unknown> {
+  if (!catalog) {
+    return {
+      description: "宿主已有 provider/model 路由或 inherit；不能携带 endpoint/凭证。",
+    };
+  }
+
+  if (!catalog.allowRouteOverride) {
+    return {
+      enum: ["inherit"],
+      description: [
+        "当前宿主不允许子代理覆盖模型，只能使用 inherit；不能携带 endpoint/凭证。",
+        `inherit 将继承父 Agent 路由 ${catalog.parentRouteId}。`,
+      ].join("\n"),
+    };
+  }
+
+  const routeIds = [...new Set(catalog.routes.map((route) => route.id))];
+  const routeLines = catalog.routes.map((route) => {
+    const disclosedAliases = route.aliases.slice(0, MAX_DISCLOSED_MODEL_ALIASES);
+    const aliases = disclosedAliases
+      .map(
+        (alias) => `${singleLine(alias).slice(0, MAX_DISCLOSED_MODEL_ALIAS_LENGTH)} → ${route.id}`,
+      )
+      .join("，");
+    const omittedAliases = route.aliases.length - disclosedAliases.length;
+    return [
+      `- ${route.id}: model=${route.model}; reasoning=${formatReasoning(route.reasoning)}`,
+      aliases ? `; aliases=${aliases}` : "",
+      omittedAliases > 0 ? `（另有 ${omittedAliases} 个 alias 未披露）` : "",
+    ].join("");
+  });
+  const disclosedRouteLines = boundedCatalogLines(routeLines);
+  const routeDescriptionNotice =
+    disclosedRouteLines.length < routeLines.length
+      ? `模型说明受长度限制，当前说明 ${disclosedRouteLines.length}/${routeLines.length} 条；最终路由仍由 Runtime 权威校验。`
+      : undefined;
+  const truncationNotice = catalog.truncated
+    ? `模型目录已截断：共 ${catalog.totalSelectableRoutes} 条可选路由，当前披露 ${catalog.routes.length} 条；未披露模型可使用完整 provider/model 路由。`
+    : undefined;
+
+  return {
+    ...(catalog.truncated ? {} : { enum: ["inherit", ...routeIds] }),
+    description: [
+      "选择 inherit 或下列规范 provider/model 路由；alias 仅帮助理解自然语言，不可作为参数值；不能携带 endpoint/凭证。",
+      `inherit → ${catalog.parentRouteId}`,
+      disclosedRouteLines.length > 0
+        ? `可用规范路由：\n${disclosedRouteLines.join("\n")}`
+        : "当前没有可覆盖的模型路由。",
+      routeDescriptionNotice,
+      truncationNotice,
+    ]
+      .filter((line): line is string => line !== undefined)
+      .join("\n"),
+  };
+}
+
+function boundedCatalogLines(lines: readonly string[]): string[] {
+  const disclosed: string[] = [];
+  let length = 0;
+  for (const line of lines) {
+    const nextLength = length + line.length + (disclosed.length > 0 ? 1 : 0);
+    if (nextLength > MAX_MODEL_ROUTE_CATALOG_DESCRIPTION) break;
+    disclosed.push(line);
+    length = nextLength;
+  }
+  return disclosed;
+}
+
+function formatReasoning(reasoning: boolean | "unknown"): string {
+  if (reasoning === "unknown") return "unknown";
+  return reasoning ? "supported" : "unsupported";
 }
 
 function persistentAgentNameSchema(profiles: readonly AgentProfile[]): Record<string, unknown> {
