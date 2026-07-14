@@ -82,6 +82,11 @@ import { ensureSessionUsageBaseline } from "../observability/usage-baseline.js";
 import { readSessionCatalogProjectionHealth } from "../storage/session-catalog-projection.js";
 import type { HookService } from "../hooks/service.js";
 import {
+  ResourceDoctor,
+  renderResourceDoctorReport,
+  type ResourceDoctorReport,
+} from "../diagnostics/resource-doctor.js";
+import {
   STORAGE_DOCTOR_COMPONENTS,
   StorageDoctor,
   type StorageDoctorFinding,
@@ -136,6 +141,7 @@ export interface PicoCommandRegistryOptions {
   taskRuntimeDiagnostic?: string;
   /** 可注入的只读存储诊断器；默认扫描当前 workspace 和全局 File History。 */
   storageDoctor?: Pick<StorageDoctor, "scan">;
+  resourceDoctor?: { scan(): Promise<ResourceDoctorReport> };
   hookService?: HookService;
   hookCommands?: readonly SlashCommand[];
   mcpControl?: McpConnectionManager;
@@ -576,14 +582,36 @@ function createDoctorCommand(options: PicoCommandRegistryOptions): SlashCommand 
   return {
     name: "doctor",
     description: "Diagnose local Pico configuration",
-    usage: "/doctor",
+    usage: "/doctor [resources]",
+    argumentHint: "[resources]",
     kind: "local",
     availability: "idle",
-    execute: async (): Promise<LocalCommandResult> => ({
-      type: "local",
-      action: "message",
-      message: await formatDoctorReport(options),
-    }),
+    execute: async (input): Promise<LocalCommandResult> => {
+      const subcommand = input.args.trim();
+      if (!subcommand) {
+        return { type: "local", action: "message", message: await formatDoctorReport(options) };
+      }
+      if (subcommand !== "resources") {
+        return { type: "local", action: "message", message: "Usage: /doctor [resources]" };
+      }
+      try {
+        const report = await (
+          options.resourceDoctor ?? new ResourceDoctor({ workDir: options.workDir })
+        ).scan();
+        return {
+          type: "local",
+          action: "message",
+          message: renderResourceDoctorReport(report).join("\n"),
+          data: report,
+        };
+      } catch (error) {
+        return {
+          type: "local",
+          action: "message",
+          message: `Resource diagnostic unavailable: ${error instanceof Error ? error.message : String(error)}`,
+        };
+      }
+    },
   };
 }
 
