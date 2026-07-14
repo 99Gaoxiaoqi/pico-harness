@@ -105,6 +105,7 @@ import { RuntimeStore } from "../tasks/runtime-store.js";
 import { WorkspaceTrustStore } from "../security/workspace-trust.js";
 import {
   BackgroundPolicyViolationError,
+  buildBackgroundYoloHookExecutionMiddleware,
   buildBackgroundYoloMiddleware,
   prepareBackgroundYoloPolicy,
   type BackgroundWorkspaceTrustVerifier,
@@ -689,6 +690,12 @@ export async function executeAgentRuntime(
         buildBackgroundYoloMiddleware({
           policy: backgroundPolicy,
           workspaceRoots,
+          sessionId: session.id,
+        }),
+      );
+      registry.useExecution?.(
+        buildBackgroundYoloHookExecutionMiddleware({
+          policy: backgroundPolicy,
           sessionId: session.id,
         }),
       );
