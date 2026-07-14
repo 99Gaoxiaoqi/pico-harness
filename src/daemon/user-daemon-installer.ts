@@ -38,7 +38,10 @@ export class LaunchdUserDaemonInstaller implements UserDaemonInstaller {
       filePath,
       content: renderLaunchdPlist(input),
       commands: [
-        { command: "launchctl", args: ["bootout", `gui/${process.getuid?.() ?? 0}`, input.serviceName] },
+        {
+          command: "launchctl",
+          args: ["bootout", `gui/${process.getuid?.() ?? 0}`, input.serviceName],
+        },
         {
           command: "launchctl",
           args: ["bootstrap", `gui/${process.getuid?.() ?? 0}`, filePath],
@@ -51,12 +54,18 @@ export class LaunchdUserDaemonInstaller implements UserDaemonInstaller {
     const spec = this.generate(input);
     if (!spec.filePath || !spec.content) throw new Error("launchd spec 不完整");
     await mkdir(join(homedir(), "Library", "LaunchAgents"), { recursive: true, mode: 0o700 });
-    await execFileAsync("launchctl", ["bootout", `gui/${process.getuid?.() ?? 0}`, input.serviceName]).catch(
-      () => undefined,
-    );
+    await execFileAsync("launchctl", [
+      "bootout",
+      `gui/${process.getuid?.() ?? 0}`,
+      input.serviceName,
+    ]).catch(() => undefined);
     await writeFile(spec.filePath, spec.content, { encoding: "utf8", mode: 0o600 });
     await chmod(spec.filePath, 0o600);
-    await execFileAsync("launchctl", ["bootstrap", `gui/${process.getuid?.() ?? 0}`, spec.filePath]);
+    await execFileAsync("launchctl", [
+      "bootstrap",
+      `gui/${process.getuid?.() ?? 0}`,
+      spec.filePath,
+    ]);
     return spec;
   }
 }
@@ -83,7 +92,10 @@ export class SystemdUserDaemonInstaller implements UserDaemonInstaller {
       ].join("\n"),
       commands: [
         { command: "systemctl", args: ["--user", "daemon-reload"] },
-        { command: "systemctl", args: ["--user", "enable", "--now", `${input.serviceName}.service`] },
+        {
+          command: "systemctl",
+          args: ["--user", "enable", "--now", `${input.serviceName}.service`],
+        },
       ],
     };
   }
@@ -155,7 +167,8 @@ function renderLaunchdPlist(input: UserDaemonInstallInput): string {
 }
 
 function assertServiceName(serviceName: string): void {
-  if (!/^[A-Za-z0-9._-]+$/.test(serviceName)) throw new Error("serviceName 只能包含字母、数字、点、下划线和连字符");
+  if (!/^[A-Za-z0-9._-]+$/.test(serviceName))
+    throw new Error("serviceName 只能包含字母、数字、点、下划线和连字符");
 }
 
 function xmlEscape(value: string): string {

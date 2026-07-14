@@ -264,7 +264,12 @@ export class ToolRegistry implements Registry {
       forceApproval = false,
     ): Promise<ToolResult | undefined> => {
       for (const mw of middlewares) {
-        const { allowed, reason, call: rewrittenCall, denialSource } = await mw(currentCall, {
+        const {
+          allowed,
+          reason,
+          call: rewrittenCall,
+          denialSource,
+        } = await mw(currentCall, {
           forceApproval,
         });
         if (!allowed) {
@@ -294,10 +299,7 @@ export class ToolRegistry implements Registry {
     if (initialRejection) return initialRejection;
     const usesLegacyHookPipeline = !this.hookService && this.hookRunner !== undefined;
     if (usesLegacyHookPipeline) {
-      const legacyRequestRejection = await runMiddlewares(
-        this.requestMiddlewares,
-        "permission",
-      );
+      const legacyRequestRejection = await runMiddlewares(this.requestMiddlewares, "permission");
       if (legacyRequestRejection) return legacyRequestRejection;
     }
 
@@ -370,20 +372,14 @@ export class ToolRegistry implements Registry {
         toolInput = hookResult.modifiedInput;
         const rewrittenRejection = await runMiddlewares(this.safetyMiddlewares, "safety");
         if (rewrittenRejection) return rewrittenRejection;
-        const legacyRequestRejection = await runMiddlewares(
-          this.requestMiddlewares,
-          "permission",
-        );
+        const legacyRequestRejection = await runMiddlewares(this.requestMiddlewares, "permission");
         if (legacyRequestRejection) return legacyRequestRejection;
       }
     }
 
     // 4. Hook 改写并重过安全门后，才进入权限 Hook/人工审批。
     const permissionRejection = await runMiddlewares(
-      [
-        ...this.permissionMiddlewares,
-        ...(usesLegacyHookPipeline ? [] : this.requestMiddlewares),
-      ],
+      [...this.permissionMiddlewares, ...(usesLegacyHookPipeline ? [] : this.requestMiddlewares)],
       "permission",
       forceApproval,
     );

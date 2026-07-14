@@ -23,7 +23,9 @@ async function isEntrypoint(): Promise<boolean> {
 
 if (await isEntrypoint()) {
   await runLocalDaemon().catch((error: unknown) => {
-    process.stderr.write(`Pico daemon 启动失败: ${error instanceof Error ? error.message : String(error)}\n`);
+    process.stderr.write(
+      `Pico daemon 启动失败: ${error instanceof Error ? error.message : String(error)}\n`,
+    );
     process.exitCode = 1;
   });
 }

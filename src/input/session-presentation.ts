@@ -12,13 +12,23 @@ export interface SessionPresentationInput {
 }
 
 export function sessionDisplayTitle(session: SessionPresentationInput): string {
-  return cleanText(session.title) ?? cleanText(session.firstMessage) ?? cleanText(session.lastMessage) ?? "(no title)";
+  return (
+    cleanText(session.title) ??
+    cleanText(session.firstMessage) ??
+    cleanText(session.lastMessage) ??
+    "(no title)"
+  );
 }
 
 export function formatSessionCandidateDetails(session: SessionPresentationInput): string {
   const elapsed = Math.max(0, Date.now() - session.updatedAt.getTime());
   const minutes = Math.floor(elapsed / 60_000);
-  const updated = minutes < 1 ? "just now" : minutes < 60 ? `${minutes}m ago` : `${Math.floor(minutes / 60)}h ago`;
+  const updated =
+    minutes < 1
+      ? "just now"
+      : minutes < 60
+        ? `${minutes}m ago`
+        : `${Math.floor(minutes / 60)}h ago`;
   const title = session.forkFrom
     ? session.forkParentTitle
       ? `Fork of “${truncate(cleanText(session.forkParentTitle) ?? "(no title)", 36)}”`

@@ -4,11 +4,7 @@ import { Session } from "../../src/engine/session.js";
 import { createBuiltinCommandRegistry } from "../../src/input/builtin-commands.js";
 import type { LLMProvider } from "../../src/provider/interface.js";
 import type { Message, ToolCall, ToolDefinition, ToolResult } from "../../src/schema/message.js";
-import type {
-  BaseTool,
-  Registry,
-  ToolExecutionContext,
-} from "../../src/tools/registry.js";
+import type { BaseTool, Registry, ToolExecutionContext } from "../../src/tools/registry.js";
 import { QueryGuard } from "../../src/tui/query-guard.js";
 import {
   handleTuiInterrupt,
@@ -22,10 +18,7 @@ class RecordingRegistry implements Registry {
   readonly executed: ToolCall[] = [];
 
   constructor(
-    private readonly run: (
-      call: ToolCall,
-      context?: ToolExecutionContext,
-    ) => Promise<ToolResult>,
+    private readonly run: (call: ToolCall, context?: ToolExecutionContext) => Promise<ToolResult>,
   ) {}
 
   register(_tool: BaseTool): void {}
