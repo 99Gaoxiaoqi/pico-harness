@@ -223,8 +223,84 @@ export function floorToMinute(timestamp: number): number {
 
 /** 5-field Cron parser: *, ranges, lists and steps; day-of-month/day-of-week follow classic OR semantics. */
 export function matchesCron(schedule: string, timestamp: number, timeZone: string): boolean {
-  const [minute, hour, dayOfMonth, month, dayOfWeek] = parseFivePartCron(schedule);
-  const parts = zonedDateParts(timestamp, timeZone);
+  return matchesParsedCron(parseFivePartCron(schedule), zonedDateParts(timestamp, timeZone));
+}
+
+export function assertFivePartCron(schedule: string): void {
+  parseFivePartCron(schedule);
+}
+
+/**
+ * 计算严格晚于 from 的未来运行分钟。沿用 matchesCron 的五段语义与时区规则，
+ * 并限制在八年内，足以覆盖闰日调度，同时让永不可能运行的表达式确定性失败。
+ */
+export function nextCronRuns(
+  schedule: string,
+  timeZone: string,
+  from: number,
+  count = 3,
+): number[] {
+  if (!Number.isFinite(from)) throw new Error("Cron 起始时间必须是有限时间戳");
+  if (!Number.isSafeInteger(count) || count <= 0) throw new Error("Cron 运行次数必须为正整数");
+  const parsed = parseFivePartCron(schedule);
+  assertTimeZone(timeZone);
+  const formatter = createZonedDateFormatter(timeZone);
+  const results: number[] = [];
+  const fromParts = zonedDateParts(from, formatter);
+  const localDate = new Date(Date.UTC(fromParts.year, fromParts.month - 1, fromParts.dayOfMonth));
+  const searchDays = 8 * 366;
+  for (let dayOffset = 0; dayOffset <= searchDays && results.length < count; dayOffset++) {
+    if (dateMatchesParsedCron(parsed, localDate)) {
+      const dayInstants: number[] = [];
+      for (const hour of parsed[1].values) {
+        for (const minute of parsed[0].values) {
+          dayInstants.push(
+            ...wallClockInstants(
+              localDate.getUTCFullYear(),
+              localDate.getUTCMonth() + 1,
+              localDate.getUTCDate(),
+              hour,
+              minute,
+              formatter,
+            ),
+          );
+        }
+      }
+      for (const candidate of dayInstants.sort((left, right) => left - right)) {
+        if (candidate <= from) continue;
+        results.push(candidate);
+        if (results.length === count) return results;
+      }
+    }
+    localDate.setUTCDate(localDate.getUTCDate() + 1);
+  }
+  throw new Error(`Cron 表达式在未来八年内不足 ${count} 次运行`);
+}
+
+interface CronField {
+  wildcard: boolean;
+  values: readonly number[];
+  matches(value: number): boolean;
+}
+
+type ParsedCron = [CronField, CronField, CronField, CronField, CronField];
+
+function parseFivePartCron(schedule: string): ParsedCron {
+  const fields = schedule.trim().split(/\s+/);
+  if (fields.length !== 5) throw new Error("Cron 表达式必须恰好有五段");
+  return [
+    parseField(fields[0]!, 0, 59, "minute"),
+    parseField(fields[1]!, 0, 23, "hour"),
+    parseField(fields[2]!, 1, 31, "day-of-month"),
+    parseField(fields[3]!, 1, 12, "month"),
+    parseField(fields[4]!, 0, 6, "day-of-week"),
+  ];
+}
+
+function matchesParsedCron(
+  [minute, hour, dayOfMonth, month, dayOfWeek]: ParsedCron,
+  parts: ReturnType<typeof zonedDateParts>,
+): boolean {
   if (!minute.matches(parts.minute) || !hour.matches(parts.hour) || !month.matches(parts.month))
     return false;
   const domMatches = dayOfMonth.matches(parts.dayOfMonth);
@@ -238,27 +314,20 @@ export function matchesCron(schedule: string, timestamp: number, timeZone: strin
         : domMatches || dowMatches;
 }
 
-export function assertFivePartCron(schedule: string): void {
-  parseFivePartCron(schedule);
-}
-
-interface CronField {
-  wildcard: boolean;
-  matches(value: number): boolean;
-}
-
-function parseFivePartCron(
-  schedule: string,
-): [CronField, CronField, CronField, CronField, CronField] {
-  const fields = schedule.trim().split(/\s+/);
-  if (fields.length !== 5) throw new Error("Cron 表达式必须恰好有五段");
-  return [
-    parseField(fields[0]!, 0, 59, "minute"),
-    parseField(fields[1]!, 0, 23, "hour"),
-    parseField(fields[2]!, 1, 31, "day-of-month"),
-    parseField(fields[3]!, 1, 12, "month"),
-    parseField(fields[4]!, 0, 6, "day-of-week"),
-  ];
+function dateMatchesParsedCron(
+  [, , dayOfMonth, month, dayOfWeek]: ParsedCron,
+  localDate: Date,
+): boolean {
+  if (!month.matches(localDate.getUTCMonth() + 1)) return false;
+  const domMatches = dayOfMonth.matches(localDate.getUTCDate());
+  const dowMatches = dayOfWeek.matches(localDate.getUTCDay());
+  return dayOfMonth.wildcard && dayOfWeek.wildcard
+    ? true
+    : dayOfMonth.wildcard
+      ? dowMatches
+      : dayOfWeek.wildcard
+        ? domMatches
+        : domMatches || dowMatches;
 }
 
 function parseField(source: string, min: number, max: number, name: string): CronField {
@@ -287,7 +356,11 @@ function parseField(source: string, min: number, max: number, name: string): Cro
     for (let value = start; value <= end; value += step) values.add(value);
   }
   if (values.size === 0) throw new Error(`Cron ${name} 字段不能为空`);
-  return { wildcard: source === "*", matches: (value) => values.has(value) };
+  return {
+    wildcard: source === "*",
+    values: [...values].sort((left, right) => left - right),
+    matches: (value) => values.has(value),
+  };
 }
 
 function parseCronNumber(value: string, min: number, max: number, name: string): number {
@@ -306,23 +379,19 @@ function parsePositiveInteger(value: string, name: string): number {
 
 function zonedDateParts(
   timestamp: number,
-  timeZone: string,
+  timeZoneOrFormatter: string | Intl.DateTimeFormat,
 ): {
+  year: number;
   minute: number;
   hour: number;
   dayOfMonth: number;
   month: number;
   dayOfWeek: number;
 } {
-  const formatter = new Intl.DateTimeFormat("en-US", {
-    timeZone,
-    hourCycle: "h23",
-    weekday: "short",
-    month: "numeric",
-    day: "numeric",
-    hour: "numeric",
-    minute: "numeric",
-  });
+  const formatter =
+    typeof timeZoneOrFormatter === "string"
+      ? createZonedDateFormatter(timeZoneOrFormatter)
+      : timeZoneOrFormatter;
   const values = Object.fromEntries(
     formatter
       .formatToParts(new Date(timestamp))
@@ -345,6 +414,7 @@ function zonedDateParts(
                 ? 5
                 : 6;
   return {
+    year: Number(values["year"]),
     minute: Number(values["minute"]),
     hour: Number(values["hour"]),
     dayOfMonth: Number(values["day"]),
@@ -353,7 +423,58 @@ function zonedDateParts(
   };
 }
 
-function assertTimeZone(timeZone: string): void {
+function createZonedDateFormatter(timeZone: string): Intl.DateTimeFormat {
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hourCycle: "h23",
+    weekday: "short",
+    year: "numeric",
+    month: "numeric",
+    day: "numeric",
+    hour: "numeric",
+    minute: "numeric",
+  });
+}
+
+/** 求一个本地墙上时间对应的真实时间；DST 跳过返回空数组，回拨可返回两个。 */
+function wallClockInstants(
+  year: number,
+  month: number,
+  dayOfMonth: number,
+  hour: number,
+  minute: number,
+  formatter: Intl.DateTimeFormat,
+): number[] {
+  const wallTimestamp = Date.UTC(year, month - 1, dayOfMonth, hour, minute);
+  const offsets = new Set<number>();
+  for (const sampleDelta of [-2, -1, 0, 1, 2]) {
+    const sample = wallTimestamp + sampleDelta * 24 * 60 * 60_000;
+    const parts = zonedDateParts(sample, formatter);
+    const displayedAsUtc = Date.UTC(
+      parts.year,
+      parts.month - 1,
+      parts.dayOfMonth,
+      parts.hour,
+      parts.minute,
+    );
+    offsets.add(displayedAsUtc - floorToMinute(sample));
+  }
+  return [...offsets]
+    .map((offset) => wallTimestamp - offset)
+    .filter((candidate) => {
+      const parts = zonedDateParts(candidate, formatter);
+      return (
+        parts.year === year &&
+        parts.month === month &&
+        parts.dayOfMonth === dayOfMonth &&
+        parts.hour === hour &&
+        parts.minute === minute
+      );
+    })
+    .sort((left, right) => left - right);
+}
+
+export function assertTimeZone(timeZone: string): void {
   try {
     new Intl.DateTimeFormat("en-US", { timeZone }).format();
   } catch {
