@@ -627,7 +627,7 @@ describe("Pico command registry", () => {
     mkdirSync(join(workDir, ".claude", "skills", "review"), { recursive: true });
     writeFileSync(
       sourcePath,
-      "---\nname: review\ndescription: review files\n---\n\nReview $0 carefully.",
+      "---\nname: review\ndescription: review files\nhooks:\n  PreToolUse:\n    - matcher: bash\n      hooks:\n        - type: prompt\n          prompt: Check command\n---\n\nReview $0 carefully.",
     );
     const registry = await createPicoCommandRegistry({
       workDir,
@@ -646,8 +646,36 @@ describe("Pico command registry", () => {
         skillArgs: "src/a.ts",
         skillSourcePath: sourcePath,
         skillTrigger: "user-slash",
+        skillHookConfig: {
+          PreToolUse: [{ matcher: "bash", hooks: [{ type: "prompt", prompt: "Check command" }] }],
+        },
       });
     }
+  });
+
+  it("Markdown command 将 model 与 allowed-tools 作为单轮执行约束", async () => {
+    const workDir = mkdtempSync(join(tmpdir(), "pico-command-execution-"));
+    cleanup.push(() => rmSync(workDir, { recursive: true, force: true }));
+    mkdirSync(join(workDir, ".pico", "commands"), { recursive: true });
+    writeFileSync(
+      join(workDir, ".pico", "commands", "review.md"),
+      "---\ndescription: review safely\nmodel: review/model\nallowed-tools: [read_file]\n---\n\nReview $ARGUMENTS",
+    );
+    const registry = await createPicoCommandRegistry({
+      workDir,
+      provider: "openai",
+      model: "glm-5.2",
+    });
+
+    const result = await processUserInput("/review src/a.ts", { registry });
+
+    expect(result.type).toBe("prompt-command");
+    if (result.type !== "prompt-command") return;
+    expect(result.result.prompt).toBe("Review src/a.ts");
+    expect(result.result.execution).toEqual({
+      model: "review/model",
+      allowedTools: ["read_file"],
+    });
   });
 
   it("command descriptors provide dynamic skill, agent, and session argument candidates", async () => {

@@ -1236,17 +1236,21 @@ function createSkillCommand(loader: SkillLoader): SlashCommand {
         };
       }
       const skillArgs = input.args.match(/^\S+(?:\s+([\s\S]*))?$/)?.[1] ?? "";
+      const skill = await loader.view(resolved.name);
       const activation = renderSkillActivation({
         name: resolved.name,
         args: skillArgs,
         body: resolved.body,
-        sourcePath: await loader.viewSourcePath(resolved.name),
+        sourcePath: skill?.sourcePath,
         trigger: "user-slash",
       });
       return {
         type: "prompt",
         prompt: activation.prompt,
-        metadata: { ...activation.metadata },
+        metadata: {
+          ...activation.metadata,
+          ...(skill?.hooks === undefined ? {} : { skillHookConfig: skill.hooks }),
+        },
       };
     },
   };
@@ -1637,11 +1641,15 @@ function createMarkdownPromptCommand(command: MarkdownPromptCommand): SlashComma
     source: command.source,
     category: command.source === "skill" ? "skill" : "workspace",
     execute: (input): PromptCommandResult => {
+      const execution = commandExecution(command);
       const baseMetadata = {
         source: command.source,
         sourcePath: command.sourcePath,
         allowedTools: command.allowedTools,
         model: command.model,
+        ...(command.source === "skill" && command.hooks !== undefined
+          ? { skillHookConfig: command.hooks }
+          : {}),
       };
       if (command.source === "skill") {
         const activation = renderSkillActivation({
@@ -1655,14 +1663,26 @@ function createMarkdownPromptCommand(command: MarkdownPromptCommand): SlashComma
           type: "prompt",
           prompt: activation.prompt,
           metadata: { ...baseMetadata, ...activation.metadata },
+          ...(execution ? { execution } : {}),
         };
       }
       return {
         type: "prompt",
         prompt: renderMarkdownCommandPrompt(command, input.args),
         metadata: baseMetadata,
+        ...(execution ? { execution } : {}),
       };
     },
+  };
+}
+
+function commandExecution(
+  command: Pick<MarkdownPromptCommand, "model" | "allowedTools">,
+): PromptCommandResult["execution"] {
+  if (command.model === undefined && command.allowedTools === undefined) return undefined;
+  return {
+    ...(command.model === undefined ? {} : { model: command.model }),
+    ...(command.allowedTools === undefined ? {} : { allowedTools: command.allowedTools }),
   };
 }
 

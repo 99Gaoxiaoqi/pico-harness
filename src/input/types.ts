@@ -54,6 +54,11 @@ export interface PromptCommandResult {
   type: "prompt";
   prompt: string;
   metadata?: Record<string, unknown>;
+  /** Per-run restrictions from command frontmatter. They never mutate session settings. */
+  execution?: {
+    model?: string;
+    allowedTools?: readonly string[];
+  };
 }
 
 export interface CommandRegistryView {

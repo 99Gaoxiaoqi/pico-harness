@@ -37,6 +37,7 @@ import {
   handleTuiRunningInputSubmission,
   coordinateTuiStartupSettings,
   resolveTuiStartupModelRoute,
+  resolveTuiPromptModelRoute,
 } from "../../src/tui/repl.js";
 import { ModelRouter, type ModelRoute } from "../../src/provider/model-router.js";
 import { resolveModelRouteCapabilities } from "../../src/provider/model-capabilities.js";
@@ -141,6 +142,27 @@ describe("TUI input routing", () => {
     expect(explicit).toMatchObject({ thinkingEffort: "off", thinkingEffortExplicit: true });
     expect(coordinateTuiStartupSettings(restored, router, route)).toBe("high");
     expect(restored).toMatchObject({ thinkingEffort: "high", thinkingEffortExplicit: true });
+  });
+
+  it("Markdown command 模型只覆盖本轮，未知路由失败且不改写 Session", () => {
+    const current = testRoute("project/current-model");
+    const command = testRoute("review/command-model");
+    const router = new ModelRouter([current, command], { TEST_API_KEY: "test-key" }, current.id);
+    const settings = createDefaultSessionSettings({
+      sessionId: "command-model",
+      cwd: "/workspace/command-model",
+      provider: current.provider,
+      model: current.model,
+      modelRouteId: current.id,
+    });
+    const before = { model: settings.model, modelRouteId: settings.modelRouteId };
+
+    expect(resolveTuiPromptModelRoute(router, settings, command.id).route.id).toBe(command.id);
+    expect(resolveTuiPromptModelRoute(router, settings, "inherit").route.id).toBe(current.id);
+    expect(() => resolveTuiPromptModelRoute(router, settings, "claude-alias")).toThrow(
+      "不在当前可用路由中",
+    );
+    expect(settings).toMatchObject(before);
   });
 
   it("AbortError 不生成普通执行失败内容", () => {
@@ -673,6 +695,77 @@ describe("TUI input routing", () => {
 
     expect(runAgent).toHaveBeenCalledWith("Review the current changes.");
     expect(snapshots.at(0)).toEqual([{ kind: "user", content: "/review" }]);
+  });
+
+  it("prompt command 将单轮模型与工具约束传给 runtime", async () => {
+    const { reporter, runAgent, exit, registry, workDir } = harness();
+    const processInput = vi.fn(
+      async (): Promise<TuiInputProcessResult> => ({
+        type: "prompt-command",
+        raw: "/review",
+        command: "review",
+        args: "",
+        argv: [],
+        result: {
+          type: "prompt",
+          prompt: "Review safely.",
+          execution: { model: "review/model", allowedTools: ["read_file"] },
+        },
+      }),
+    );
+
+    await handleTuiInputSubmission("/review", {
+      reporter,
+      registry,
+      workDir,
+      runAgent,
+      exit,
+      processInput,
+    });
+
+    expect(runAgent).toHaveBeenCalledWith("Review safely.", {
+      model: "review/model",
+      allowedTools: ["read_file"],
+    });
+  });
+
+  it("Skill hooks 只在当前 prompt command 运行期激活", async () => {
+    const { reporter, exit, registry, workDir } = harness();
+    const events: string[] = [];
+    const metadata = {
+      skillName: "guard",
+      skillArgs: "",
+      skillTrigger: "user-slash" as const,
+      skillSourcePath: "/workspace/.claw/skills/guard/SKILL.md",
+      skillHookConfig: { PreToolUse: [] },
+    };
+
+    await handleTuiInputSubmission("/guard", {
+      reporter,
+      registry,
+      workDir,
+      exit,
+      processInput: async () => ({
+        type: "prompt-command",
+        raw: "/guard",
+        command: "guard",
+        args: "",
+        argv: [],
+        result: { type: "prompt", prompt: "Guard", metadata },
+      }),
+      activateAgentHooks: async (received) => {
+        expect(received).toBe(metadata);
+        events.push("activate");
+      },
+      runAgent: async () => {
+        events.push("run");
+      },
+      clearComponentHooks: async () => {
+        events.push("clear");
+      },
+    });
+
+    expect(events).toEqual(["activate", "run", "clear"]);
   });
 
   it("显式 Skill 在运行 Agent 前写入结构化 transcript 条目", async () => {
