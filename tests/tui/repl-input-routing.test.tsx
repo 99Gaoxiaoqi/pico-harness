@@ -19,6 +19,9 @@ import { RunningInputQueue } from "../../src/tui/running-input-queue.js";
 import type { CliSessionBrowserSummary } from "../../src/tui/session-browser-adapter.js";
 import { TuiReporter } from "../../src/tui/tui-reporter.js";
 import { WorkspaceRoots } from "../../src/tools/workspace-roots.js";
+import { ScheduleDraftCoordinator } from "../../src/tasks/cron-draft-coordinator.js";
+import type { CronDraftId } from "../../src/tasks/cron-draft.js";
+import { ScheduleDraftReviewHandler } from "../../src/tui/schedule-draft-review.js";
 import {
   appendTuiRunError,
   createTuiUpdateScheduler,
@@ -42,6 +45,17 @@ class ScriptedTuiProvider implements LLMProvider {
     if (!response) throw new Error("No scripted TUI response left.");
     return Promise.resolve(response);
   }
+}
+
+function tuiRunResult(finalMessage: string) {
+  return {
+    sessionId: "tui-session",
+    sessionSelection: { mode: "new" as const, sessionId: "tui-session" },
+    workDir: process.cwd(),
+    finalMessage,
+    usage: { promptTokens: 0, completionTokens: 0, costCNY: 0 },
+    messages: [],
+  };
 }
 
 describe("TUI input routing", () => {
@@ -664,6 +678,120 @@ describe("TUI input routing", () => {
     expect(snapshots.at(-1)).toEqual([
       expect.objectContaining({ kind: "tool", name: "write_file", status: "approval" }),
     ]);
+  });
+
+  it("runTuiAgentPrompt 将定时草案绑定到 TUI dialog，确认后再提交", async () => {
+    const { reporter } = harness();
+    const openDialog = vi.fn();
+    const closeDialog = vi.fn();
+    const commit = vi.fn(async () => ({
+      cronJobId: "cron-confirmed",
+      enabled: true,
+      schedule: "0 9 * * *",
+      timeZone: "Asia/Shanghai",
+      daemonMessage: "daemon ready",
+    }));
+    const handler = new ScheduleDraftReviewHandler();
+    const coordinator = new ScheduleDraftCoordinator({
+      reviewer: handler,
+      resolveContext: async () => ({
+        workspacePath: process.cwd(),
+        modelRouteId: "test/model",
+        allowedTools: ["fetch_url"],
+        credentialStatus: "available",
+        daemonStatus: "daemon ready",
+      }),
+      commit,
+      generateDraftId: () => "draft-tui-confirm" as CronDraftId,
+    });
+    const runAgent = vi.fn(async (_options, deps) => {
+      const outcome = await deps.scheduleDraftCoordinator!.propose(
+        {
+          title: "日报",
+          prompt: "生成日报",
+          scheduleText: "每天上午九点",
+          cronExpression: "0 9 * * *",
+          timeZone: "Asia/Shanghai",
+        },
+        { signal: deps.signal },
+      );
+      expect(outcome.kind).toBe("created");
+      return tuiRunResult("created");
+    });
+
+    const running = runTuiAgentPrompt(
+      { prompt: "创建每日日报", dir: process.cwd(), session: "tui-schedule-confirm" },
+      {
+        reporter,
+        runAgent,
+        openDialog,
+        closeDialog,
+        scheduleDraft: { handler, coordinator },
+      },
+    );
+    await vi.waitFor(() => expect(openDialog).toHaveBeenCalledOnce());
+    const request = openDialog.mock.calls[0]?.[0];
+    expect(request.id).toBe("schedule-draft:pending:draft-tui-confirm");
+    const props = request.content.props as { onDecision: (kind: "confirm") => void };
+    props.onDecision("confirm");
+    await running;
+
+    expect(commit).toHaveBeenCalledOnce();
+    expect(closeDialog).toHaveBeenCalledWith(request.id);
+    expect(handler.pendingCount).toBe(0);
+  });
+
+  it("中断运行会关闭未决的定时草案 dialog 且不提交", async () => {
+    const { reporter } = harness();
+    const openDialog = vi.fn();
+    const closeDialog = vi.fn();
+    const commit = vi.fn();
+    const abortControllerRef = { current: null as AbortController | null };
+    const handler = new ScheduleDraftReviewHandler();
+    const coordinator = new ScheduleDraftCoordinator({
+      reviewer: handler,
+      resolveContext: async () => ({
+        workspacePath: process.cwd(),
+        modelRouteId: "test/model",
+        allowedTools: [],
+        credentialStatus: "available",
+        daemonStatus: "daemon ready",
+      }),
+      commit,
+      generateDraftId: () => "draft-tui-abort" as CronDraftId,
+    });
+    const runAgent = vi.fn(async (_options, deps) => {
+      const outcome = await deps.scheduleDraftCoordinator!.propose(
+        {
+          title: "日报",
+          prompt: "生成日报",
+          scheduleText: "每天上午九点",
+          cronExpression: "0 9 * * *",
+        },
+        { signal: deps.signal },
+      );
+      expect(outcome.kind).toBe("cancelled");
+      return tuiRunResult("cancelled");
+    });
+
+    const running = runTuiAgentPrompt(
+      { prompt: "创建每日日报", dir: process.cwd(), session: "tui-schedule-abort" },
+      {
+        reporter,
+        runAgent,
+        openDialog,
+        closeDialog,
+        abortControllerRef,
+        scheduleDraft: { handler, coordinator },
+      },
+    );
+    await vi.waitFor(() => expect(openDialog).toHaveBeenCalledOnce());
+    abortControllerRef.current?.abort(new DOMException("interrupted", "AbortError"));
+    await running;
+
+    expect(commit).not.toHaveBeenCalled();
+    expect(closeDialog).toHaveBeenCalledWith("schedule-draft:pending:draft-tui-abort");
+    expect(handler.pendingCount).toBe(0);
   });
 
   it("组合校验 yolo 外部写与 default TUI Enter 审批闭环", async () => {
