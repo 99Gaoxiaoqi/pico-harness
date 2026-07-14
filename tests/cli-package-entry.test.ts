@@ -10,7 +10,7 @@ async function readJson(path: string): Promise<Record<string, unknown>> {
 }
 
 describe("installable CLI package entry", () => {
-  it("package scripts 使用独立 build config，并在 prepack 时执行 bin smoke", async () => {
+  it("package scripts 使用独立 build config，并在 prepack 时执行发布物 smoke", async () => {
     const pkg = await readJson("package.json");
     const scripts = pkg.scripts as Record<string, string>;
 
@@ -19,7 +19,9 @@ describe("installable CLI package entry", () => {
     expect(scripts.build).toBe("tsc -p tsconfig.build.json");
     expect(scripts.prebuild).toBe("npm run clean && npm run build:protocol");
     expect(scripts.prepack).toBe("npm run build && npm run smoke:package");
-    expect(scripts["smoke:package"]).toBe("node scripts/package-bin-smoke.mjs");
+    expect(scripts["smoke:package"]).toBe(
+      "node scripts/package-bin-smoke.mjs && node scripts/package-install-smoke.mjs",
+    );
   });
 
   it("build config 把 src 直接编译到 dist，不产生 dist/src 层", async () => {
