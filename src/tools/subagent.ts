@@ -305,6 +305,7 @@ export class DelegateTaskTool implements BaseTool {
       worktreeSupervisor?: WorktreeSupervisor;
       reporter?: Reporter;
       ownerSessionId?: string;
+      activateAgentHooks?: (profile: AgentProfile) => Promise<() => void | Promise<void>>;
     } = {},
   ) {
     this.profiles = options.profiles ?? [];
@@ -755,16 +756,20 @@ export class DelegateTaskTool implements BaseTool {
     // 自定义角色查询:agent_name 命中 profile 时,用其 prompt/maxTurns 覆盖 Tool 级默认
     const profile = task.agentName ? findAgentProfile(this.profiles, task.agentName) : undefined;
 
-    const registry = this.registryFactory({
-      mode: task.mode,
-      role: task.role,
-      depth: childDepth,
-      maxSpawnDepth,
-      ...(task.agentName ? { agentName: task.agentName } : {}),
-      ...(effectiveWorkDir ? { workDir: effectiveWorkDir } : {}),
-    });
-
+    let releaseAgentHooks: (() => void | Promise<void>) | undefined;
     try {
+      if (profile?.hooks !== undefined && profile.sourcePath && this.options.activateAgentHooks) {
+        releaseAgentHooks = await this.options.activateAgentHooks(profile);
+      }
+      const registry = this.registryFactory({
+        mode: task.mode,
+        role: task.role,
+        depth: childDepth,
+        maxSpawnDepth,
+        ...(task.agentName ? { agentName: task.agentName } : {}),
+        ...(effectiveWorkDir ? { workDir: effectiveWorkDir } : {}),
+      });
+
       // 自定义角色命中时,用 profile 的 prompt/maxTurns;否则用 Tool 级 options
       const customization = profile
         ? pickDefined({
@@ -807,6 +812,14 @@ export class DelegateTaskTool implements BaseTool {
       };
     } catch (err) {
       return delegationResultFromError(taskIndex, err, Date.now() - startedAt, signal);
+    } finally {
+      if (releaseAgentHooks) {
+        try {
+          await releaseAgentHooks();
+        } catch (error) {
+          logger.warn({ error: String(error) }, "[Subagent] Agent Hook 租约释放失败");
+        }
+      }
     }
   }
 
