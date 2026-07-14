@@ -638,6 +638,102 @@ describe("DesktopApp renderer", () => {
     ]);
   });
 
+  it("Rewind 成功后立即重新加载当前 Session Transcript", async () => {
+    const user = userEvent.setup();
+    const workspacePath = "/Users/chen/Documents/rewind-project";
+    let transcriptLoads = 0;
+    const runtime = new Proxy(
+      {},
+      {
+        get: (_target, property) => async (params: Readonly<Record<string, unknown>>) => {
+          const method = String(property);
+          const value = (() => {
+            if (method === "runtime.ping")
+              return { capabilities: ["session-conversation-v1", "runtime-events-v1"] };
+            if (method === "workspace.list") return { workspaces: [{ workspacePath }] };
+            if (method === "workspace.status") return { workspacePath, mode: "folder" };
+            if (method === "workspace.trustStatus") return { trusted: true };
+            if (method === "session.list")
+              return {
+                sessions: [{ sessionId: "session-rewind", title: "回滚会话", updatedAt: 2 }],
+              };
+            if (method === "runs.list")
+              return {
+                runs: [
+                  {
+                    runId: "run-rewind",
+                    sessionId: "session-rewind",
+                    description: "回滚会话",
+                    status: "succeeded",
+                  },
+                ],
+              };
+            if (method === "session.transcript") {
+              transcriptLoads += 1;
+              return {
+                session: { sessionId: "session-rewind", title: "回滚会话", updatedAt: 2 },
+                items: [
+                  {
+                    id: `message-${transcriptLoads}`,
+                    kind: "assistantMessage",
+                    content: transcriptLoads > 1 ? "回滚后的对话" : "即将回滚的对话",
+                  },
+                ],
+                activeRun: {
+                  runId: "run-rewind",
+                  sessionId: "session-rewind",
+                  description: "回滚会话",
+                  status: "succeeded",
+                },
+                queuedInputs: [],
+                revision: `revision-${transcriptLoads}`,
+              };
+            }
+            if (method === "changes.list")
+              return {
+                changes: [
+                  {
+                    path: "src/rewind.ts",
+                    status: "modified",
+                    additions: 2,
+                    deletions: 1,
+                  },
+                ],
+                fingerprint: "changes-fingerprint",
+              };
+            if (method === "changes.diff")
+              return { path: params.path, patch: "+replacement\n-obsolete" };
+            if (method === "rewind.list")
+              return { checkpoints: [{ checkpointId: "checkpoint-1", createdAt: 2 }] };
+            if (method === "rewind.preview")
+              return { fingerprint: "rewind-fingerprint", changes: [{ path: "src/rewind.ts" }] };
+            if (method === "rewind.apply") return { applied: true };
+            if (method === "jobs.list") return { jobs: [] };
+            if (method === "config.skills") return { skills: [] };
+            if (method === "config.mcpServers") return { servers: [] };
+            if (method === "config.providers") return { providers: [] };
+            if (method === "config.get") return { version: 0 };
+            if (method === "usage.get") return { usage: {} };
+            return {};
+          })();
+          return successful(value);
+        },
+      },
+    ) as RendererBridge["runtime"];
+    installBridge(runtime);
+    window.history.replaceState({}, "", "/#/session/session-rewind");
+
+    render(<DesktopApp />);
+    await screen.findByText("即将回滚的对话");
+    await user.click(screen.getByRole("button", { name: "审阅更改" }));
+    await user.click(await screen.findByRole("button", { name: "Rewind" }));
+    await user.click(screen.getByRole("button", { name: "预览 Rewind" }));
+    await user.click(await screen.findByRole("button", { name: "确认 Rewind" }));
+
+    await waitFor(() => expect(transcriptLoads).toBeGreaterThanOrEqual(2));
+    expect(screen.getByText(/已回到检查点/)).toBeTruthy();
+  });
+
   it("会话不存在时显示可重试的恢复错误，不回到首页冒充成功", async () => {
     const workspacePath = "/Users/chen/Documents/project";
     const success = <T,>(value: T) => Promise.resolve({ ok: true as const, value });

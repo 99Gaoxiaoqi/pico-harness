@@ -1371,7 +1371,10 @@ export function useRuntimeStore(): RuntimeStore {
               expectedFingerprint: fingerprint,
             });
           setMessage("已回到检查点。Runtime 已使用预览指纹重新验证。");
-          if (!preview) await loadWorkspace(bridge, workspacePath);
+          if (!preview) {
+            await loadWorkspace(bridge, workspacePath);
+            await loadConversation(bridge, workspacePath, sessionId);
+          }
         });
       },
       async toggleJob(id, enabled) {
