@@ -34,15 +34,19 @@ describe("WorkspaceTaskRuntime integration", () => {
     runtime.subscribe((event) => events.push(event));
     const gate = deferred();
     let contextSteers: string[] = [];
-    const run = runtime.startRun({ description: "long running agent" }, async (context) => {
-      await gate.promise;
-      contextSteers = context.drainSteers();
-      context.signal.throwIfAborted();
-      return { completed: true };
-    });
+    const run = runtime.startRun(
+      { description: "long running agent", sessionId: "session-workspace" },
+      async (context) => {
+        await gate.promise;
+        contextSteers = context.drainSteers();
+        context.signal.throwIfAborted();
+        return { completed: true };
+      },
+    );
 
     expect(run).toMatchObject({
       runId: "run_workspace",
+      sessionId: "session-workspace",
       workspace: runtime.workspace,
       status: "running",
     });
@@ -86,7 +90,7 @@ describe("WorkspaceTaskRuntime integration", () => {
       expect.arrayContaining([
         expect.objectContaining({
           type: "run.started",
-          run: expect.objectContaining({ runId: run.runId }),
+          run: expect.objectContaining({ runId: run.runId, sessionId: "session-workspace" }),
         }),
         expect.objectContaining({
           type: "run.steer_requested",

@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   createRuntimeRequest,
+  DesktopConversationStateStore,
   DesktopAutomationService,
   DesktopRuntimeService,
   DesktopSessionStateStore,
@@ -229,6 +230,109 @@ describe("DesktopRuntimeService integration", () => {
     if (process.platform !== "win32") {
       expect((await stat(fixture.sessionState.filePath)).mode & 0o777).toBe(0o600);
     }
+    await fixture.service.close();
+  });
+
+  it("以 Session 为主体幂等发送多轮消息，并从 JSONL 分页恢复可见 Transcript", async () => {
+    const fixture = await createFixture(async ({ workspacePath, sessionId, prompt, context }) => {
+      if (!sessionId) throw new Error("session.send 必须预先绑定 Session");
+      context.bindSession(sessionId);
+      const session = await globalSessionManager.getOrCreate(sessionId, workspacePath, {
+        persistence: true,
+        sessionCatalog: false,
+      });
+      await session.commitMessages({ role: "user", content: prompt });
+      await session.commitMessages({ role: "assistant", content: `reply:${prompt}` });
+      await session.flushPersistence();
+      return { sessionId };
+    });
+
+    const first = await fixture.service.handle(
+      createRuntimeRequest("session.send", {
+        workspacePath: fixture.workspace,
+        input: { text: "检查项目" },
+        behavior: "auto",
+        idempotencyKey: "send-first",
+      }),
+    );
+    expect(first).toMatchObject({
+      disposition: "started",
+      session: { title: "检查项目" },
+      run: { sessionId: expect.any(String), status: "running" },
+    });
+    const firstResult = first as {
+      session: { sessionId: string };
+      run: { runId: string };
+    };
+    managedSessions.push({
+      sessionId: firstResult.session.sessionId,
+      workspacePath: fixture.canonicalWorkspace,
+    });
+    const workspaceRuntime = await fixture.runtime.getWorkspaceRuntime(fixture.workspace);
+    await workspaceRuntime.waitForRun(firstResult.run.runId);
+
+    await expect(
+      fixture.service.handle(
+        createRuntimeRequest("session.send", {
+          workspacePath: fixture.workspace,
+          input: { text: "检查项目" },
+          behavior: "auto",
+          idempotencyKey: "send-first",
+        }),
+      ),
+    ).resolves.toEqual(first);
+
+    const firstPage = await fixture.service.handle(
+      createRuntimeRequest("session.transcript", {
+        workspacePath: fixture.workspace,
+        sessionId: firstResult.session.sessionId,
+        limit: 1,
+      }),
+    );
+    expect(firstPage).toMatchObject({
+      items: [{ kind: "assistantMessage", content: "reply:检查项目" }],
+      nextBefore: expect.any(String),
+      revision: expect.any(String),
+      queuedInputs: [],
+    });
+    const revision = (firstPage as { revision: string }).revision;
+
+    const second = await fixture.service.handle(
+      createRuntimeRequest("session.send", {
+        workspacePath: fixture.workspace,
+        sessionId: firstResult.session.sessionId,
+        input: { text: "继续解释" },
+        behavior: "auto",
+        idempotencyKey: "send-second",
+      }),
+    );
+    const secondRunId = (second as { run: { runId: string } }).run.runId;
+    await workspaceRuntime.waitForRun(secondRunId);
+
+    await expect(
+      fixture.service.handle(
+        createRuntimeRequest("session.transcript", {
+          workspacePath: fixture.workspace,
+          sessionId: firstResult.session.sessionId,
+          expectedRevision: revision,
+        }),
+      ),
+    ).rejects.toMatchObject({ code: RUNTIME_ERROR_CODES.CONFLICT });
+    await expect(
+      fixture.service.handle(
+        createRuntimeRequest("session.transcript", {
+          workspacePath: fixture.workspace,
+          sessionId: firstResult.session.sessionId,
+        }),
+      ),
+    ).resolves.toMatchObject({
+      items: [
+        { kind: "userMessage", content: "检查项目" },
+        { kind: "assistantMessage", content: "reply:检查项目" },
+        { kind: "userMessage", content: "继续解释" },
+        { kind: "assistantMessage", content: "reply:继续解释" },
+      ],
+    });
     await fixture.service.close();
   });
 
@@ -647,6 +751,9 @@ describe("DesktopRuntimeService integration", () => {
     const sessionState = new DesktopSessionStateStore({
       filePath: join(root, "state", "desktop-sessions.json"),
     });
+    const conversationState = new DesktopConversationStateStore({
+      filePath: join(root, "state", "desktop-conversations.json"),
+    });
     const runtime = new WorkspaceRuntimeService({
       execute,
       registrationStore: registration,
@@ -656,6 +763,7 @@ describe("DesktopRuntimeService integration", () => {
       registrationStore: registration,
       trustStore: trust,
       sessionStateStore: sessionState,
+      conversationStateStore: conversationState,
     });
     return {
       root,
@@ -664,6 +772,7 @@ describe("DesktopRuntimeService integration", () => {
       registration,
       trust,
       sessionState,
+      conversationState,
       runtime,
       service,
     };

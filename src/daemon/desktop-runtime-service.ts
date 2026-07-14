@@ -32,6 +32,8 @@ import {
 } from "./protocol.js";
 import type { DisposableLocalRuntimeService, RuntimeEventCursor } from "./service.js";
 import { DesktopSessionStateStore } from "./desktop-session-state.js";
+import { DesktopConversationStateStore } from "./desktop-conversation-state.js";
+import { projectRuntimeTranscript, TranscriptRevisionConflict } from "./desktop-transcript.js";
 import { canonicalizeWorkspacePath } from "./workspace-registry.js";
 import { WorkspaceRegistrationStore } from "./workspace-registration.js";
 import { WorkspaceRuntimeService, workspaceStatusResult } from "./workspace-runtime-service.js";
@@ -48,6 +50,7 @@ export interface DesktopRuntimeServiceOptions {
   readonly registrationStore?: WorkspaceRegistrationStore;
   readonly trustStore?: WorkspaceTrustStore;
   readonly sessionStateStore?: DesktopSessionStateStore;
+  readonly conversationStateStore?: DesktopConversationStateStore;
   readonly interactions?: DesktopRuntimeInteractions;
   readonly automations?: DesktopAutomationService;
   readonly now?: () => number;
@@ -73,14 +76,25 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   private readonly registrationStore: WorkspaceRegistrationStore;
   private readonly trustStore: WorkspaceTrustStore;
   private readonly sessionStateStore: DesktopSessionStateStore;
+  private readonly conversationStateStore: DesktopConversationStateStore;
   private readonly now: () => number;
+  private readonly unsubscribeRuntimeEvents: () => void;
+  private readonly pendingSends = new Map<string, Promise<JsonObject>>();
   private resourceVersion = 0;
 
   constructor(private readonly options: DesktopRuntimeServiceOptions) {
     this.registrationStore = options.registrationStore ?? new WorkspaceRegistrationStore();
     this.trustStore = options.trustStore ?? new WorkspaceTrustStore();
     this.sessionStateStore = options.sessionStateStore ?? new DesktopSessionStateStore();
+    this.conversationStateStore =
+      options.conversationStateStore ?? new DesktopConversationStateStore();
     this.now = options.now ?? Date.now;
+    this.unsubscribeRuntimeEvents = options.runtimeService.subscribe((event) => {
+      if (event.topic !== "run.finished" || !event.scope.sessionId) return;
+      void this.consumeNextQueued(event.scope.workspacePath, event.scope.sessionId).catch(
+        (error: unknown) => this.publishConversationFailure(event.scope.workspacePath, error),
+      );
+    });
   }
 
   async handle(request: RuntimeRequest): Promise<JsonValue> {
@@ -109,6 +123,10 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
           request.params.sessionId,
           false,
         );
+      case "session.send":
+        return this.sendSession(request.params);
+      case "session.transcript":
+        return this.getSessionTranscript(request.params);
       case "config.get":
         return this.getConfig(request.params.workspacePath);
       case "config.providers":
@@ -197,6 +215,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   }
 
   close(): Promise<void> {
+    this.unsubscribeRuntimeEvents();
     return this.options.runtimeService.close();
   }
 
@@ -285,6 +304,216 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const session = await this.requireSession(canonical, sessionId);
     this.publishSession(session);
     return { session };
+  }
+
+  private async sendSession(params: {
+    readonly workspacePath: string;
+    readonly sessionId?: string;
+    readonly input: { readonly text: string };
+    readonly behavior?: "auto" | "steer" | "queue" | "replace";
+    readonly expectedRunId?: string;
+    readonly idempotencyKey: string;
+  }): Promise<JsonValue> {
+    const canonical = await canonicalizeWorkspacePath(params.workspacePath);
+    const text = requireText(params.input?.text, "input.text");
+    const idempotencyKey = requireText(params.idempotencyKey, "idempotencyKey");
+    const stored = await this.conversationStateStore.getIdempotent(canonical, idempotencyKey);
+    if (stored) return stored;
+
+    const pendingKey = `${canonical}\0${idempotencyKey}`;
+    const pending = this.pendingSends.get(pendingKey);
+    if (pending) return pending;
+    const operation = this.sendSessionOnce({ ...params, workspacePath: canonical, text })
+      .then(async (result) => {
+        await this.conversationStateStore.rememberIdempotent(canonical, idempotencyKey, result);
+        return result;
+      })
+      .finally(() => this.pendingSends.delete(pendingKey));
+    this.pendingSends.set(pendingKey, operation);
+    return operation;
+  }
+
+  private async sendSessionOnce(params: {
+    readonly workspacePath: string;
+    readonly sessionId?: string;
+    readonly input: { readonly text: string };
+    readonly behavior?: "auto" | "steer" | "queue" | "replace";
+    readonly expectedRunId?: string;
+    readonly idempotencyKey: string;
+    readonly text: string;
+  }): Promise<JsonObject> {
+    const behavior = params.behavior ?? "auto";
+    const session = params.sessionId
+      ? await this.requireSession(params.workspacePath, params.sessionId)
+      : await this.createSessionForMessage(params.workspacePath, params.text);
+    const sessionRecord = requireJsonRecord(session, "session");
+    const sessionId = requireText(sessionRecord["sessionId"], "session.sessionId");
+    const activeRun = await this.findActiveSessionRun(params.workspacePath, sessionId);
+
+    if (params.expectedRunId !== undefined && activeRun?.["runId"] !== params.expectedRunId) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.CONFLICT,
+        `当前活动 Run 已变化，期望 ${params.expectedRunId}，实际 ${String(activeRun?.["runId"] ?? "none")}`,
+      );
+    }
+
+    if (activeRun) {
+      const runId = requireText(activeRun["runId"], "run.runId");
+      if (behavior === "queue" || behavior === "replace") {
+        await this.conversationStateStore.enqueue(params.workspacePath, sessionId, params.text);
+        const run =
+          behavior === "replace"
+            ? await this.options.runtimeService.handle(
+                createRuntimeRequest("run.cancel", {
+                  workspacePath: params.workspacePath,
+                  runId,
+                  reason: "replaced by a newer user message",
+                }),
+              )
+            : activeRun;
+        return {
+          session: sessionRecord,
+          run: requireJsonRecord(run, "run"),
+          disposition: behavior === "replace" ? "replaced" : "queued",
+        };
+      }
+      const run = await this.options.runtimeService.handle(
+        createRuntimeRequest("run.steer", {
+          workspacePath: params.workspacePath,
+          runId,
+          message: params.text,
+        }),
+      );
+      return {
+        session: sessionRecord,
+        run: requireJsonRecord(run, "run"),
+        disposition: "steered",
+      };
+    }
+
+    if (behavior === "steer" && params.expectedRunId !== undefined) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.CONFLICT,
+        "目标 Run 已结束，无法继续 Steer；请作为下一轮发送",
+      );
+    }
+    const run = await this.startSessionRun(params.workspacePath, sessionId, params.text);
+    return { session: sessionRecord, run, disposition: "started" };
+  }
+
+  private async getSessionTranscript(params: {
+    readonly workspacePath: string;
+    readonly sessionId: string;
+    readonly before?: string;
+    readonly limit?: number;
+    readonly expectedRevision?: string;
+  }): Promise<JsonValue> {
+    const canonical = await canonicalizeWorkspacePath(params.workspacePath);
+    const session = await this.requireSession(canonical, params.sessionId);
+    const runtimeSession = await globalSessionManager.getOrCreate(params.sessionId, canonical, {
+      persistence: true,
+    });
+    const snapshot = await runtimeSession.readHydrationSnapshot();
+    let page;
+    try {
+      page = projectRuntimeTranscript(snapshot, params);
+    } catch (error) {
+      if (error instanceof TranscriptRevisionConflict) {
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.CONFLICT,
+          `会话历史已变化，请重新加载（current=${error.currentRevision}）`,
+        );
+      }
+      throw error;
+    }
+    const activeRun = await this.findActiveSessionRun(canonical, params.sessionId);
+    const queuedInputs = await this.conversationStateStore.listQueued(canonical, params.sessionId);
+    return {
+      session,
+      items: page.items,
+      ...(activeRun ? { activeRun } : {}),
+      queuedInputs: queuedInputs.map((input) => ({
+        queueId: input.queueId,
+        sessionId: input.sessionId,
+        input: { text: input.text },
+        createdAt: input.createdAt,
+      })),
+      ...(page.nextBefore ? { nextBefore: page.nextBefore } : {}),
+      revision: page.revision,
+    };
+  }
+
+  private async createSessionForMessage(
+    workspacePath: string,
+    message: string,
+  ): Promise<JsonValue> {
+    const title = message.replace(/\s+/gu, " ").trim().slice(0, 80);
+    const created = requireJsonRecord(
+      await this.createSession(workspacePath, title),
+      "session.create result",
+    );
+    return requireJsonRecord(created["session"], "session.create session");
+  }
+
+  private async findActiveSessionRun(
+    workspacePath: string,
+    sessionId: string,
+  ): Promise<JsonObject | undefined> {
+    const value = requireJsonRecord(
+      await this.options.runtimeService.handle(
+        createRuntimeRequest("runs.list", { workspacePath, sessionId }),
+      ),
+      "runs.list result",
+    );
+    const runs = Array.isArray(value["runs"]) ? value["runs"] : [];
+    return runs
+      .filter(isJsonRecord)
+      .find((run) => !isTerminalRunStatus(String(run["status"] ?? "")));
+  }
+
+  private async startSessionRun(
+    workspacePath: string,
+    sessionId: string,
+    prompt: string,
+  ): Promise<JsonObject> {
+    try {
+      return requireJsonRecord(
+        await this.options.runtimeService.handle(
+          createRuntimeRequest("run.start", { workspacePath, sessionId, prompt }),
+        ),
+        "run.start result",
+      );
+    } catch (error) {
+      if (error instanceof RuntimeProtocolError) throw error;
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.CONFLICT,
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  }
+
+  private async consumeNextQueued(workspacePath: string, sessionId: string): Promise<void> {
+    const [next] = await this.conversationStateStore.listQueued(workspacePath, sessionId);
+    if (!next) return;
+    if (await this.findActiveSessionRun(workspacePath, sessionId)) return;
+    await this.startSessionRun(workspacePath, sessionId, next.text);
+    await this.conversationStateStore.removeQueued(next.queueId);
+  }
+
+  private publishConversationFailure(workspacePath: string, error: unknown): void {
+    this.publish(
+      createRuntimeEvent({
+        topic: "runtime.error",
+        scope: { workspacePath },
+        resourceVersion: this.nextResourceVersion(),
+        at: this.now(),
+        payload: {
+          code: RUNTIME_ERROR_CODES.INTERNAL_ERROR,
+          message: error instanceof Error ? error.message : String(error),
+          recoverable: true,
+        },
+      }),
+    );
   }
 
   private async requireSession(workspacePath: string, sessionId: string): Promise<JsonValue> {
@@ -980,7 +1209,25 @@ function toJsonValue(value: unknown): JsonValue {
   return parsed;
 }
 
-function isJsonRecord(value: JsonValue): value is Record<string, JsonValue> {
+function requireJsonRecord(value: unknown, label: string): JsonObject {
+  if (!isJsonRecord(value)) {
+    throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.INTERNAL_ERROR, `${label} 必须是对象`);
+  }
+  return value;
+}
+
+function requireText(value: unknown, label: string): string {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.INVALID_PARAMS, `${label} 必须是非空字符串`);
+  }
+  return value.trim();
+}
+
+function isTerminalRunStatus(status: string): boolean {
+  return status === "cancelled" || status === "failed" || status === "succeeded";
+}
+
+function isJsonRecord(value: unknown): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 

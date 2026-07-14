@@ -53,6 +53,8 @@ describe("desktop runtime protocol contract", () => {
       expect.arrayContaining([
         "runtime.ping",
         "session.list",
+        "session.send",
+        "session.transcript",
         "run.start",
         "run.pause",
         "run.resume",
@@ -133,6 +135,8 @@ describe("desktop runtime protocol contract", () => {
     type StartParams = RuntimeParams<"run.start">;
     type StartResult = RuntimeResult<"run.start">;
     type ApprovalPayload = RuntimeEventMap["approval.requested"];
+    type SessionSendParams = RuntimeParams<"session.send">;
+    type TranscriptResult = RuntimeResult<"session.transcript">;
 
     expectTypeOf<StartParams>().toMatchTypeOf<{
       workspacePath: string;
@@ -140,6 +144,10 @@ describe("desktop runtime protocol contract", () => {
     }>();
     expectTypeOf<StartResult["runId"]>().toMatchTypeOf<string>();
     expectTypeOf<ApprovalPayload["request"]>().toMatchTypeOf<Record<string, unknown>>();
+    expectTypeOf<SessionSendParams["behavior"]>().toEqualTypeOf<
+      "auto" | "steer" | "queue" | "replace" | undefined
+    >();
+    expectTypeOf<TranscriptResult["revision"]>().toEqualTypeOf<string>();
     expectTypeOf<keyof RuntimeMethodMap>().toEqualTypeOf<(typeof RUNTIME_METHODS)[number]>();
 
     const request = createTypedRuntimeRequest("run.start", {
