@@ -466,6 +466,8 @@ export interface AgentEngineOptions {
    * 未提供则引擎无 steer 能力,行为不变。
    */
   steerQueue?: SteerQueue;
+  /** Host pause gate. The engine awaits it only at boundaries where no tool is in flight. */
+  waitAtSafeBoundary?: () => Promise<void>;
   /**
    * 非工具停止后,host 可决定是否续接(ROADMAP 3.7)。
    * 模型跑完一轮没调工具(toolCalls.length === 0)时,正常是 onFinish + break 退出。
@@ -554,6 +556,7 @@ export class AgentEngine implements AgentRunner {
    * 非 readonly:飞书等 host 由 factory 构造 engine 后,经 setSteerQueue 挂载。
    */
   private steerQueue?: SteerQueue;
+  private readonly waitAtSafeBoundary?: () => Promise<void>;
   /** 非工具停止后续接回调(ROADMAP 3.7):host 可决定让 Agent 接着跑 */
   private readonly shouldContinueAfterStop?: AgentEngineOptions["shouldContinueAfterStop"];
   /** 凭证轮换回调(4.2):429 时切换 key 重建 provider;无多 key 时为 undefined */
@@ -596,6 +599,7 @@ export class AgentEngine implements AgentRunner {
     this.subagentReportArtifactWriter = opts.subagentReportArtifactWriter;
     this.tracer = opts.tracer;
     this.steerQueue = opts.steerQueue;
+    this.waitAtSafeBoundary = opts.waitAtSafeBoundary;
     this.shouldContinueAfterStop = opts.shouldContinueAfterStop;
     this.rebuildProvider = opts.rebuildProvider;
     this.hookService = opts.hookService;
@@ -977,6 +981,8 @@ export class AgentEngine implements AgentRunner {
     try {
       for (;;) {
         signal?.throwIfAborted();
+        await this.waitAtSafeBoundary?.();
+        signal?.throwIfAborted();
         turnCount++;
         const turnBudget = this.budget.canStartTurn(turnCount);
         if (!turnBudget.allowed) {
@@ -1357,6 +1363,12 @@ export class AgentEngine implements AgentRunner {
             reporter.onFinish();
             break;
           }
+
+          // A pause requested during provider inference takes effect before any new tool starts.
+          // A pause requested while tools are running is observed at the next loop boundary,
+          // after the whole scheduled batch and file journal have safely settled.
+          await this.waitAtSafeBoundary?.();
+          signal?.throwIfAborted();
 
           // 4. 执行行动 (Action) 与 获取观察结果 (Observation)
           // 资源冲突图调度(对标 kimi-code ToolScheduler):工具按文件路径 × 操作类型

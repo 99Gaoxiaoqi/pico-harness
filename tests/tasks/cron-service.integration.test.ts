@@ -232,6 +232,46 @@ describe("CronService durable ledger integration", () => {
     });
   });
 
+  it("持久化桌面名称、CAS 更新并记录立即运行", () => {
+    const workDir = makeTempDir(directories);
+    const now = Date.UTC(2026, 0, 1, 12, 0, 15);
+    const service = new CronService({ workDir, now: () => now });
+    closeables.push(service);
+    const created = service.create({
+      workspacePath: workDir,
+      name: "Daily repository health",
+      schedule: "0 12 * * *",
+      timeZone: "UTC",
+      prompt: "check the repository",
+      enabled: false,
+      policySnapshot: yoloPolicy(now),
+    });
+    expect(created.name).toBe("Daily repository health");
+
+    const updated = service.update(created.cronJobId, created.version, {
+      name: "Morning health",
+      prompt: "check and summarize the repository",
+      schedule: "30 8 * * 1-5",
+    });
+    expect(updated).toMatchObject({
+      name: "Morning health",
+      prompt: "check and summarize the repository",
+      schedule: "30 8 * * 1-5",
+      version: created.version + 1,
+    });
+    expect(() =>
+      service.update(created.cronJobId, created.version, { name: "stale write" }),
+    ).toThrow(/版本已变化/u);
+
+    const manual = service.runNow(created.cronJobId);
+    expect(manual).toMatchObject({ cronJobId: created.cronJobId, status: "queued" });
+    expect(manual.scheduledFor).toBe(now);
+    const repeated = service.runNow(created.cronJobId);
+    expect(repeated).toMatchObject({ cronJobId: created.cronJobId, status: "skipped" });
+    expect(repeated.cronRunId).not.toBe(manual.cronRunId);
+    expect(repeated.scheduledFor).toBe(now + 1);
+  });
+
   it("daemon 重启只收口 lease 已过期的 running Run，并解除工作区阻塞", () => {
     const workDir = makeTempDir(directories);
     let now = Date.UTC(2026, 0, 1, 12, 0, 0);

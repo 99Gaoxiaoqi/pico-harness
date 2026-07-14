@@ -44,6 +44,13 @@ export class CronRuntimeScheduler {
     return tick;
   }
 
+  /** Persist a manual trigger and dispatch it without blocking the IPC response. */
+  runNow(cronJobId: string): CronRunRecord {
+    const run = this.options.cronService.runNow(cronJobId);
+    this.track(this.dispatch(run));
+    return run;
+  }
+
   /** Starts a minute-aligned loop. Calling it twice is idempotent. */
   start(): void {
     if (this.running) return;
@@ -76,9 +83,17 @@ export class CronRuntimeScheduler {
       () => undefined,
       () => undefined,
     );
-    this.activeTicks.add(active);
-    void active.finally(() => {
-      this.activeTicks.delete(active);
+    this.track(active, scheduleAfter);
+  }
+
+  private track(active: Promise<void>, scheduleAfter = false): void {
+    const settled = active.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.activeTicks.add(settled);
+    void settled.finally(() => {
+      this.activeTicks.delete(settled);
       if (scheduleAfter) this.scheduleNextMinute();
     });
   }

@@ -34,6 +34,7 @@ export interface CronServiceOptions extends RuntimeStoreOptions {
 export interface CreateCronJobInput {
   cronJobId?: string;
   workspacePath: string;
+  name?: string;
   schedule: string;
   /** IANA zone，在创建时固定，默认当前系统时区。 */
   timeZone?: string;
@@ -80,6 +81,7 @@ export class CronService {
     return this.store.createCronJob({
       cronJobId: input.cronJobId ?? this.generateId("cron_job"),
       workspacePath: realpathSync(input.workspacePath),
+      ...(input.name ? { name: input.name } : {}),
       schedule: input.schedule,
       timeZone,
       prompt: input.prompt,
@@ -87,6 +89,15 @@ export class CronService {
       credentialRef: input.credentialRef,
       enabled: input.enabled,
     });
+  }
+
+  update(
+    cronJobId: string,
+    expectedVersion: number,
+    patch: { name?: string; schedule?: string; prompt?: string },
+  ): CronJobRecord {
+    if (patch.schedule !== undefined) assertFivePartCron(patch.schedule);
+    return this.store.updateCronJob({ cronJobId, expectedVersion, ...patch });
   }
 
   list(workspacePath?: string): CronJobRecord[] {
@@ -121,6 +132,28 @@ export class CronService {
       );
     }
     return { evaluatedAt: at, runs };
+  }
+
+  /** Manual triggers are durable but use the exact invocation time, not a schedule minute. */
+  runNow(cronJobId: string): CronRunRecord {
+    const job = this.store.getCronJob(cronJobId);
+    if (!job) throw new Error(`未知 Cron Job: ${cronJobId}`);
+    const decision = this.evaluate(job);
+    let scheduledFor = this.now();
+    // scheduled_for is the durable idempotency key for schedule ticks. A manual
+    // invocation is a new request, so avoid aliasing a tick at the same millisecond.
+    for (;;) {
+      const cronRunId = this.generateId("cron_run");
+      const run = this.store.createCronRun({
+        cronRunId,
+        cronJobId,
+        scheduledFor,
+        status: decision.allowed ? "queued" : "blocked",
+        ...(decision.reason ? { reason: decision.reason } : {}),
+      });
+      if (run.cronRunId === cronRunId) return run;
+      scheduledFor += 1;
+    }
   }
 
   claim(cronRunId: string, leaseTtlMs?: number): ClaimCronRunResult {

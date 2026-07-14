@@ -18,6 +18,7 @@ export interface DaemonRunExecutor {
   (input: {
     workspacePath: string;
     prompt: string;
+    sessionId?: string;
     context: WorkspaceRunContext;
   }): Promise<Record<string, unknown> | void>;
 }
@@ -129,9 +130,15 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
     if (request.method === "run.start") {
       const workspacePath = requiredString(params, "workspacePath");
       const prompt = requiredString(params, "prompt");
+      const sessionId = optionalString(params, "sessionId");
       const runtime = await this.registry.get(workspacePath);
       const run = runtime.startRun({ description: prompt }, (context) =>
-        this.options.execute({ workspacePath: runtime.workspace, prompt, context }),
+        this.options.execute({
+          workspacePath: runtime.workspace,
+          prompt,
+          ...(sessionId ? { sessionId } : {}),
+          context,
+        }),
       );
       return runPayload(run);
     }
@@ -140,6 +147,14 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
       return runPayload(
         runtime.cancel(requiredString(params, "runId"), optionalString(params, "reason")),
       );
+    }
+    if (request.method === "run.pause") {
+      const runtime = await this.registry.get(requiredString(params, "workspacePath"));
+      return runPayload(runtime.pause(requiredString(params, "runId")));
+    }
+    if (request.method === "run.resume") {
+      const runtime = await this.registry.get(requiredString(params, "workspacePath"));
+      return runPayload(runtime.resume(requiredString(params, "runId")));
     }
     if (request.method === "run.steer") {
       const runtime = await this.registry.get(requiredString(params, "workspacePath"));
@@ -177,16 +192,17 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
           .listRuntimeEvents({
             ...(cursor.afterEventId ? { afterEventId: cursor.afterEventId } : {}),
             workspacePath,
-            limit: 10_000,
+            limit: cursor.limit ?? 10_000,
           })
           .map(runtimeEventFromLedger),
       );
     }
     // Event IDs are random. Timestamp plus ID gives a deterministic cross-workspace
     // presentation order; callers needing a resumable cursor use workspacePath.
-    return events.sort(
+    const sorted = events.sort(
       (left, right) => left.at - right.at || left.eventId.localeCompare(right.eventId),
     );
+    return cursor.limit === undefined ? sorted : sorted.slice(0, cursor.limit);
   }
 
   subscribe(listener: (event: RuntimeEvent) => void): () => void {
@@ -199,8 +215,19 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
     return this.registry.get(workspacePath);
   }
 
+  /** Read-only lookup for adapters that project a Run's durable Session state. */
+  async getWorkspaceRun(workspacePath: string, runId: string) {
+    const runtime = await this.registry.get(workspacePath);
+    return runtime.getRun(runId);
+  }
+
   setRegistrationChangedListener(listener: () => Promise<void>): void {
     this.registrationChanged = listener;
+  }
+
+  /** Persists and broadcasts events projected by non-Run desktop adapters. */
+  publishDesktopEvent(event: RuntimeEvent): void {
+    this.publish(event);
   }
 
   async close(): Promise<void> {
@@ -283,6 +310,7 @@ function eventPayload(
 function runPayload(run: {
   runId: string;
   workspace: string;
+  sessionId?: string;
   description: string;
   status: string;
   startedAt: number;
@@ -295,6 +323,7 @@ function runPayload(run: {
   return {
     runId: run.runId,
     workspace: run.workspace,
+    ...(run.sessionId !== undefined ? { sessionId: run.sessionId } : {}),
     description: run.description,
     status: run.status,
     startedAt: run.startedAt,

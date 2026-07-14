@@ -1,0 +1,61 @@
+name: Desktop macOS Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version under validation
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  make-macos:
+    name: macOS ${{ matrix.arch }} signed package
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: '["self-hosted", "macOS", "ARM64", "pico-signing"]'
+          - arch: x64
+            runner: '["self-hosted", "macOS", "X64", "pico-signing"]'
+    runs-on: ${{ fromJSON(matrix.runner) }}
+    env:
+      PICO_MAC_SIGN_IDENTITY: ${{ secrets.PICO_MAC_SIGN_IDENTITY }}
+      PICO_APPLE_ID: ${{ secrets.PICO_APPLE_ID }}
+      PICO_APPLE_ID_PASSWORD: ${{ secrets.PICO_APPLE_ID_PASSWORD }}
+      PICO_APPLE_TEAM_ID: ${{ secrets.PICO_APPLE_TEAM_ID }}
+      PICO_UPDATE_BASE_URL: ${{ vars.PICO_UPDATE_BASE_URL }}
+      PICO_UPDATE_FEED_URL: ${{ vars.PICO_UPDATE_FEED_URL }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+      - run: npm audit --omit=dev --audit-level=high
+      - run: npm run desktop:typecheck
+      - run: npm run lint
+      - run: npm test --workspace @pico/desktop
+      - run: npm run desktop:make -- --arch=${{ matrix.arch }}
+
+      - name: Verify signature and notarization ticket
+        shell: bash
+        run: |
+          APP_PATH="$(find apps/desktop/out -type d -name Pico.app -print -quit)"
+          test -n "$APP_PATH"
+          codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+          spctl --assess --type execute --verbose=2 "$APP_PATH"
+          xcrun stapler validate "$APP_PATH"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pico-macos-${{ matrix.arch }}-${{ inputs.version }}
+          path: apps/desktop/out/make/**
+          if-no-files-found: error
