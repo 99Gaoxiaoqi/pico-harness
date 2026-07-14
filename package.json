@@ -3,6 +3,10 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
   "description": "A TypeScript Agent Harness built lesson by lesson from the《从0开始构建Agent Harness》course.",
   "bin": {
     "pico": "./dist/cli/main.js"
@@ -12,6 +16,10 @@
   ],
   "scripts": {
     "dev": "tsx --env-file=.env --import ./src/tui/preload-env.ts src/cli/main.ts",
+    "desktop:dev": "npm run start --workspace @pico/desktop",
+    "desktop:package": "npm run package --workspace @pico/desktop",
+    "desktop:make": "npm run make --workspace @pico/desktop",
+    "desktop:typecheck": "npm run typecheck --workspace @pico/desktop",
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "prebuild": "npm run clean",
     "build": "tsc -p tsconfig.build.json",
@@ -30,8 +38,8 @@
     "presmoke:tui": "npm run build",
     "smoke:tui": "node scripts/tui-built-smoke.mjs",
     "smoke:tui:source": "node scripts/tui-smoke.mjs",
-    "lint": "eslint src tests scripts eslint.config.js vitest.config.ts vitest.e2e.config.ts vitest.llm-e2e.config.ts",
-    "format": "prettier --check src tests scripts .github/workflows docs README.md AGENTS.md package.json package-lock.json tsconfig.json tsconfig.build.json vitest.config.ts vitest.e2e.config.ts vitest.llm-e2e.config.ts"
+    "lint": "eslint src tests scripts 'apps/**/*.{ts,tsx}' 'packages/**/*.{ts,tsx}' eslint.config.js vitest.config.ts vitest.e2e.config.ts vitest.llm-e2e.config.ts --no-error-on-unmatched-pattern",
+    "format": "prettier --check src tests scripts apps packages .github/workflows docs README.md AGENTS.md package.json package-lock.json tsconfig.json tsconfig.build.json vitest.config.ts vitest.e2e.config.ts vitest.llm-e2e.config.ts"
   },
   "engines": {
     "node": "22.x"
@@ -48,7 +56,9 @@
     "wrap-ansi": "^10.0.0"
   },
   "overrides": {
-    "axios": "^1.18.0"
+    "axios": "^1.18.0",
+    "tar": "^7.5.20",
+    "tmp": "^0.2.7"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
