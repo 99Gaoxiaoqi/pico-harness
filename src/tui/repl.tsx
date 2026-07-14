@@ -1053,7 +1053,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
       })(request, context);
     },
   });
-  const mcpConfigPath = opts.mcpConfigPath ?? `${opts.workDir}/.claw/mcp.json`;
+  const mcpConfigPath = opts.mcpConfigPath ?? `${opts.workDir}/.pico/mcp.json`;
   let mcpInitialized = false;
   let mcpStatusVisible = opts.mcpConfigPath !== undefined;
   const tuiSessionSelection: CliSessionSelection = opts.sessionSelection ?? {
