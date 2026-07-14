@@ -85,7 +85,13 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
       return {
         pong: true,
         protocolVersion: LOCAL_RUNTIME_PROTOCOL_VERSION,
-        capabilities: ["session-conversation-v1", "session-management-v1", "runtime-events-v1"],
+        capabilities: [
+          "session-conversation-v1",
+          "session-management-v1",
+          "session-settings-v1",
+          "session-goal-v1",
+          "runtime-events-v1",
+        ],
       };
     }
     const params = objectParams(request.params);

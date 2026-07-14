@@ -36,6 +36,52 @@ export type RuntimeSessionStatus = "active" | "archived";
 export type RuntimeJobStatus = "idle" | "running" | "failed" | "succeeded";
 export type SessionSendBehavior = "auto" | "steer" | "queue" | "replace";
 export type SessionSendDisposition = "started" | "steered" | "queued" | "replaced";
+export type RuntimeInteractionMode = "default" | "plan" | "auto" | "yolo";
+export type RuntimeProviderKind = "openai" | "claude" | "gemini";
+
+export type RuntimeSessionSettings = {
+  readonly sessionId: SessionId;
+  readonly provider: RuntimeProviderKind;
+  readonly model: string;
+  readonly modelRouteId?: string;
+  readonly mode: RuntimeInteractionMode;
+  /** `/permissions` is a UI alias of mode, never an independently persisted value. */
+  readonly permissions: RuntimeInteractionMode;
+  readonly thinkingEffort: string;
+  readonly thinkingEffortExplicit: boolean;
+  readonly reasoningLevels: readonly string[];
+};
+
+export type RuntimeGoalStatus = "active" | "paused" | "blocked" | "complete";
+
+export type RuntimeGoal = {
+  readonly id: string;
+  readonly title: string;
+  readonly description: string;
+  readonly status: RuntimeGoalStatus;
+  readonly createdAt: number;
+  readonly budgetConfig?: {
+    readonly maxTurns?: number;
+    readonly maxTokens?: number;
+    readonly maxCostCNY?: number;
+    readonly maxWallClockMs?: number;
+  };
+  readonly budgetUsage: {
+    readonly turns: number;
+    readonly tokens: number;
+    readonly costCNY: number;
+    readonly startedAt: number;
+  };
+  readonly progress?: string;
+  readonly blockedReason?: string;
+};
+
+export type RuntimeGoalSnapshot = {
+  readonly stateVersion: 1;
+  readonly sequence: number;
+  readonly activeGoalId: string | null;
+  readonly goals: readonly RuntimeGoal[];
+};
 
 export type RuntimeUserInput = JsonObject & {
   readonly text: string;
@@ -183,6 +229,25 @@ export type RuntimeMethodMap = {
       readonly beforeMessageCount: number;
       readonly afterMessageCount: number;
     };
+  };
+  readonly "session.settings.get": {
+    readonly params: WorkspaceParams & { readonly sessionId: SessionId };
+    readonly result: { readonly settings: RuntimeSessionSettings };
+  };
+  readonly "session.settings.update": {
+    readonly params: WorkspaceParams & {
+      readonly sessionId: SessionId;
+      readonly modelRouteId?: string;
+      readonly mode?: RuntimeInteractionMode;
+      /** Compatibility UI alias. If mode is also present both values must match. */
+      readonly permissions?: RuntimeInteractionMode;
+      readonly thinkingEffort?: string;
+    };
+    readonly result: { readonly settings: RuntimeSessionSettings };
+  };
+  readonly "goal.get": {
+    readonly params: WorkspaceParams & { readonly sessionId: SessionId };
+    readonly result: { readonly goal: RuntimeGoalSnapshot | null };
   };
   readonly "session.send": {
     readonly params: WorkspaceParams & {
@@ -437,6 +502,9 @@ export const RUNTIME_METHODS = [
   "session.rename",
   "session.fork",
   "session.compact",
+  "session.settings.get",
+  "session.settings.update",
+  "goal.get",
   "session.send",
   "session.transcript",
   "run.start",
@@ -487,6 +555,10 @@ export type RuntimeEventMap = {
   readonly "workspace.unregistered": { readonly registered: false };
   readonly "workspace.trustChanged": { readonly trusted: boolean };
   readonly "session.updated": { readonly session: RuntimeSession };
+  readonly "session.settingsUpdated": {
+    readonly sessionId: SessionId;
+    readonly settings: RuntimeSessionSettings;
+  };
   readonly "session.transcriptUpdated": {
     readonly sessionId: SessionId;
     readonly operation: "reload" | "truncate";

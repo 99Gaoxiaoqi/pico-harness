@@ -443,6 +443,161 @@ describe("DesktopRuntimeService integration", () => {
     await fixture.service.close();
   });
 
+  it("从 Session 真源读写模型模式与思考档位，并从 hydration 快照读取 Goal", async () => {
+    const fixture = await createFixture(async () => undefined, {
+      createSessionId: () => "desktop-settings-session",
+      env: { PICO_TEST_TOKEN: "test-secret" },
+    });
+    await mkdir(join(fixture.workspace, ".pico"), { recursive: true });
+    await writeFile(
+      join(fixture.workspace, ".pico", "config.json"),
+      JSON.stringify({
+        version: 1,
+        model: "local/coder",
+        providers: {
+          local: {
+            protocol: "openai",
+            baseURL: "https://provider.example.test/v1",
+            apiKeyEnv: "PICO_TEST_TOKEN",
+            models: {
+              coder: {},
+              reasoner: {
+                reasoning: {
+                  enabled: true,
+                  defaultLevel: "high",
+                  levels: ["off", "high", "max"],
+                },
+              },
+              fixed: { reasoning: true },
+            },
+          },
+        },
+      }),
+    );
+    await fixture.trust.trust(fixture.canonicalWorkspace);
+    const created = (await fixture.service.handle(
+      createRuntimeRequest("session.create", { workspacePath: fixture.workspace }),
+    )) as { session: { sessionId: string } };
+    const sessionId = created.session.sessionId;
+    managedSessions.push({ sessionId, workspacePath: fixture.canonicalWorkspace });
+    const session = await globalSessionManager.getOrCreate(sessionId, fixture.canonicalWorkspace, {
+      persistence: true,
+      sessionCatalog: false,
+    });
+    session.updateRuntimeState({
+      goal: {
+        stateVersion: 1,
+        sequence: 1,
+        activeGoalId: "goal-1",
+        goals: [
+          {
+            id: "goal-1",
+            title: "完成桌面会话化",
+            description: "保持 TUI 与 Desktop 的运行真源一致",
+            status: "active",
+            createdAt: 100,
+            budgetUsage: { turns: 2, tokens: 300, costCNY: 0.2, startedAt: 100 },
+            progress: "已接通协议",
+          },
+        ],
+      },
+    });
+    await session.flushPersistence();
+
+    await expect(
+      fixture.service.handle(
+        createRuntimeRequest("session.settings.update", {
+          workspacePath: fixture.workspace,
+          sessionId,
+          modelRouteId: "local/reasoner",
+          permissions: "plan",
+          thinkingEffort: "max",
+        }),
+      ),
+    ).resolves.toEqual({
+      settings: {
+        sessionId,
+        provider: "openai",
+        model: "reasoner",
+        modelRouteId: "local/reasoner",
+        mode: "plan",
+        permissions: "plan",
+        thinkingEffort: "max",
+        thinkingEffortExplicit: true,
+        reasoningLevels: ["off", "high", "max"],
+      },
+    });
+    expect(session.getRuntimeStateSnapshot().settings).toMatchObject({
+      modelRouteId: "local/reasoner",
+      mode: "plan",
+      thinkingEffort: "max",
+    });
+    expect(session.getRuntimeStateSnapshot().settings).not.toHaveProperty("permissions");
+    expect(session.getRuntimeStateSnapshot().settings).not.toHaveProperty("permissionMode");
+    await expect(
+      fixture.service.handle(
+        createRuntimeRequest("session.settings.get", {
+          workspacePath: fixture.workspace,
+          sessionId,
+        }),
+      ),
+    ).resolves.toMatchObject({
+      settings: { modelRouteId: "local/reasoner", mode: "plan", permissions: "plan" },
+    });
+    await expect(
+      fixture.service.handle(
+        createRuntimeRequest("goal.get", { workspacePath: fixture.workspace, sessionId }),
+      ),
+    ).resolves.toEqual({
+      goal: expect.objectContaining({
+        activeGoalId: "goal-1",
+        goals: [expect.objectContaining({ title: "完成桌面会话化", progress: "已接通协议" })],
+      }),
+    });
+
+    await expect(
+      fixture.service.handle(
+        createRuntimeRequest("session.settings.update", {
+          workspacePath: fixture.workspace,
+          sessionId,
+          mode: "auto",
+          permissions: "yolo",
+        }),
+      ),
+    ).rejects.toMatchObject({ code: RUNTIME_ERROR_CODES.INVALID_PARAMS });
+    await expect(
+      fixture.service.handle(
+        createRuntimeRequest("session.settings.update", {
+          workspacePath: fixture.workspace,
+          sessionId,
+          modelRouteId: "local/fixed",
+          thinkingEffort: "max",
+        }),
+      ),
+    ).rejects.toMatchObject({ code: RUNTIME_ERROR_CODES.INVALID_PARAMS });
+    await expect(
+      fixture.service.handle(
+        createRuntimeRequest("session.settings.get", {
+          workspacePath: fixture.workspace,
+          sessionId,
+        }),
+      ),
+    ).resolves.toMatchObject({
+      settings: { modelRouteId: "local/reasoner", thinkingEffort: "max" },
+    });
+
+    const events = await fixture.service.replayEvents({ workspacePath: fixture.workspace });
+    expect(events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          topic: "session.settingsUpdated",
+          payload: expect.objectContaining({ sessionId }),
+        }),
+      ]),
+    );
+    await fixture.service.close();
+  });
+
   it("从 Runtime SQLite 返回真实用量，时间区间不伪造无法归属的历史 baseline", async () => {
     const fixture = await createFixture();
     const ledger = new RuntimeStore({ workDir: fixture.workspace });
