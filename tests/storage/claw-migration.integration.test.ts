@@ -30,7 +30,13 @@ describe("legacy .claw workspace migration", () => {
     const { home, paths, workDir } = await fixture();
     await writeLegacy(workDir, "skills/review/SKILL.md", "# Review\n");
     await writeLegacy(workDir, "skills/review/reference.md", "reference\n");
-    await writeLegacy(workDir, "skills/review/state.json", '{"runs":2}\n');
+    await writeLegacy(workDir, "skills/review/schema.json", '{"type":"object"}\n');
+    await writeLegacy(workDir, "skills/config.json", '{"enabled":true}\n');
+    await writeLegacy(
+      workDir,
+      "skills/skill_review.json",
+      `${JSON.stringify(legacyLearnedSkill("skill_review"))}\n`,
+    );
     await writeLegacy(workDir, "agents.yaml", "version: 1\nagents: []\n");
     await writeLegacy(workDir, "mcp.json", '{"mcpServers":{}}\n');
     await writeLegacy(workDir, "sessions/session-a.jsonl", '{"role":"user"}\n');
@@ -49,8 +55,14 @@ describe("legacy .claw workspace migration", () => {
       readFile(join(paths.project.skills, "review", "reference.md"), "utf8"),
     ).resolves.toBe("reference\n");
     await expect(
-      readFile(join(paths.workspace.memory, "skills", "review", "state.json"), "utf8"),
-    ).resolves.toBe('{"runs":2}\n');
+      readFile(join(paths.project.skills, "review", "schema.json"), "utf8"),
+    ).resolves.toBe('{"type":"object"}\n');
+    await expect(readFile(join(paths.project.skills, "config.json"), "utf8")).resolves.toBe(
+      '{"enabled":true}\n',
+    );
+    await expect(
+      readFile(join(paths.workspace.memory, "skills", "skill_review.json"), "utf8"),
+    ).resolves.toContain('"id":"skill_review"');
     await expect(readFile(paths.project.agents, "utf8")).resolves.toContain("version: 1");
     await expect(readFile(paths.project.mcp, "utf8")).resolves.toContain("mcpServers");
     await expect(
@@ -129,7 +141,11 @@ describe("legacy .claw workspace migration", () => {
   it("honors the workspace migration lock", async () => {
     const { home, paths, workDir } = await fixture();
     const lockPath = join(paths.workspace.migrations, "claw-v1.lock");
-    await writePath(lockPath, '{"pid":1}\n');
+    await mkdir(lockPath, { recursive: true });
+    await writePath(
+      join(lockPath, "owner.json"),
+      `${JSON.stringify({ pid: process.pid, token: "live-owner", startedAt: new Date().toISOString() })}\n`,
+    );
 
     await expect(migrateLegacyClawWorkspace(workDir, { picoHome: home })).rejects.toEqual(
       expect.objectContaining<Partial<ClawMigrationLockedError>>({
@@ -137,7 +153,53 @@ describe("legacy .claw workspace migration", () => {
         lockPath,
       }),
     );
-    await expect(readFile(lockPath, "utf8")).resolves.toContain("pid");
+    await expect(readFile(join(lockPath, "owner.json"), "utf8")).resolves.toContain("live-owner");
+  });
+
+  it("safely takes over a stale migration lock", async () => {
+    const { home, paths, workDir } = await fixture();
+    const lockPath = join(paths.workspace.migrations, "claw-v1.lock");
+    await mkdir(lockPath, { recursive: true });
+    await writePath(
+      join(lockPath, "owner.json"),
+      `${JSON.stringify({ pid: 99_999_999, token: "stale-owner", startedAt: new Date(0).toISOString() })}\n`,
+    );
+    await writeLegacy(workDir, "mcp.json", '{"mcpServers":{}}\n');
+
+    await expect(migrateLegacyClawWorkspace(workDir, { picoHome: home })).resolves.toMatchObject({
+      status: "migrated",
+    });
+    await expect(access(lockPath)).rejects.toThrow();
+  });
+
+  it("keeps a live legacy lock file without an owner token", async () => {
+    const { home, paths, workDir } = await fixture();
+    const lockPath = join(paths.workspace.migrations, "claw-v1.lock");
+    await writePath(
+      lockPath,
+      `${JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() })}\n`,
+    );
+
+    await expect(migrateLegacyClawWorkspace(workDir, { picoHome: home })).rejects.toMatchObject({
+      name: "ClawMigrationLockedError",
+      lockPath,
+    });
+    await expect(readFile(lockPath, "utf8")).resolves.toContain(`"pid":${process.pid}`);
+  });
+
+  it("takes over a stale legacy lock file after verifying its original bytes", async () => {
+    const { home, paths, workDir } = await fixture();
+    const lockPath = join(paths.workspace.migrations, "claw-v1.lock");
+    await writePath(
+      lockPath,
+      `${JSON.stringify({ pid: 99_999_999, startedAt: new Date(0).toISOString() })}\n`,
+    );
+    await writeLegacy(workDir, "mcp.json", '{"mcpServers":{}}\n');
+
+    await expect(migrateLegacyClawWorkspace(workDir, { picoHome: home })).resolves.toMatchObject({
+      status: "migrated",
+    });
+    await expect(access(lockPath)).rejects.toThrow();
   });
 
   it("resumes a verified journal after a copy completed before marker creation", async () => {
@@ -261,3 +323,18 @@ describe("legacy .claw workspace migration", () => {
     await writeFile(path, content);
   }
 });
+
+function legacyLearnedSkill(id: string) {
+  return {
+    id,
+    name: "Review",
+    trigger: "review",
+    instructions: "Review carefully",
+    source: "manual",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+    stats: { successCount: 0, failCount: 0, lastUsed: null, avgExecutionTime: 0 },
+    knownFailures: [],
+    versions: [],
+  };
+}

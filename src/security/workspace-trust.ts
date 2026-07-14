@@ -19,7 +19,7 @@ const TRUST_FILE_MODE = 0o600;
 export const WORKSPACE_TRUST_RISKS = Object.freeze([
   "读取 AGENTS.md 以及项目 Skills，并把它们作为 Agent 指令",
   "启动 .pico/config.json 配置的 LSP 进程和 Provider 端点",
-  "启动 .claw 配置的 MCP 服务与 Hook 命令",
+  "启动项目配置的 MCP 服务与 Hook 命令",
   "使用项目配置的凭证环境变量和额外工作区目录",
 ] as const);
 

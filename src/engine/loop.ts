@@ -455,7 +455,7 @@ export interface AgentEngineOptions {
   /** 子代理完整报告写入器；超过常规摘要目标时先落盘，再向主上下文回灌预览。 */
   subagentReportArtifactWriter?: SubagentReportArtifactWriter;
   /**
-   * 链路追踪器:记录决策树到 .claw/traces/ (第 19 讲)。
+   * 链路追踪器：记录决策树到 workspace traces 目录（第 19 讲）。
    * 未提供则不追踪。
    */
   tracer?: Tracer;

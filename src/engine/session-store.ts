@@ -235,7 +235,7 @@ export interface SessionStoreDurabilityHooks {
 
 /**
  * 单个 Session 的 JSONL 事件日志读写器。
- * 文件路径由调用方决定(通常是 workDir/.claw/sessions/<id>.jsonl)。
+ * 文件路径由调用方决定（通常位于 PICO_HOME 的 workspace sessions 目录）。
  */
 export class SessionStore {
   private static readonly writers = new Map<string, Promise<DurableWriter>>();
