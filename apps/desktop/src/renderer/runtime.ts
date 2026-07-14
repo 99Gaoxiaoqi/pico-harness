@@ -479,6 +479,7 @@ export function useRuntimeStore(): RuntimeStore {
   const [busy, setBusy] = useState<string>();
   const [message, setMessage] = useState<string>();
   const dataRef = useRef(data);
+  const seenEventIdsRef = useRef(new Set<string>());
   dataRef.current = data;
 
   const reportFailure = useCallback((error: unknown) => {
@@ -676,6 +677,9 @@ export function useRuntimeStore(): RuntimeStore {
     if (!bridge) return;
     const subscription = bridge.events.subscribe({ workspacePath: data.workspacePath }, (event) => {
       if (!isRecord(event)) return;
+      const eventId = stringValue(event.eventId);
+      if (eventId && seenEventIdsRef.current.has(eventId)) return;
+      if (eventId) seenEventIdsRef.current.add(eventId);
       const payload = isRecord(event.payload) ? event.payload : {};
       const scope = isRecord(event.scope) ? event.scope : {};
       const topic = stringValue(event.topic);

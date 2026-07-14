@@ -37,6 +37,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type KeyboardEvent,
   type ReactNode,
@@ -558,10 +559,17 @@ function TaskComposer({ compact = false }: { readonly compact?: boolean }) {
   const { actions, busy, data } = useRuntime();
   const navigate = useNavigate();
   const [prompt, setPrompt] = useState("");
+  const sendingRef = useRef(false);
   const submit = async (text: string) => {
-    const sessionId = await actions.sendMessage({ text });
-    if (sessionId) navigate(`/session/${sessionId}`);
-    setPrompt("");
+    if (sendingRef.current) return;
+    sendingRef.current = true;
+    try {
+      const sessionId = await actions.sendMessage({ text });
+      if (sessionId) navigate(`/session/${sessionId}`);
+      setPrompt("");
+    } finally {
+      sendingRef.current = false;
+    }
   };
   return (
     <div className={`home-conversation-composer ${compact ? "is-compact" : ""}`}>
@@ -601,6 +609,7 @@ function ConversationPage() {
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
   const [confirmCompact, setConfirmCompact] = useState(false);
+  const sendingRef = useRef(false);
 
   useEffect(() => {
     if (sessionId) void actions.loadSession(sessionId);
@@ -689,15 +698,21 @@ function ConversationPage() {
   ]);
 
   const submit = async (text: string, nextBehavior: ComposerBehavior) => {
-    const resolvedSessionId = await actions.sendMessage({
-      ...(sessionId ? { sessionId } : {}),
-      text,
-      behavior: nextBehavior,
-      ...(activeRun ? { expectedRunId: activeRun.id } : {}),
-    });
-    if (!resolvedSessionId) return;
-    setDraft("");
-    if (!sessionId) navigate(`/session/${resolvedSessionId}`, { replace: true });
+    if (sendingRef.current) return;
+    sendingRef.current = true;
+    try {
+      const resolvedSessionId = await actions.sendMessage({
+        ...(sessionId ? { sessionId } : {}),
+        text,
+        behavior: nextBehavior,
+        ...(activeRun ? { expectedRunId: activeRun.id } : {}),
+      });
+      if (!resolvedSessionId) return;
+      setDraft("");
+      if (!sessionId) navigate(`/session/${resolvedSessionId}`, { replace: true });
+    } finally {
+      sendingRef.current = false;
+    }
   };
 
   const openItem = (item: ConversationItemView) => {
