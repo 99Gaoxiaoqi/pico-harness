@@ -1031,19 +1031,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
   const provider = opts.provider ?? "openai";
   const picoConfig = await loadPicoConfig(opts.workDir);
   const pluginManagement = new PluginManagementService({ workDir: opts.workDir });
-  const pluginSnapshot = await loadPluginRuntimeSnapshot({
-    workDir: opts.workDir,
-    service: pluginManagement,
-  });
   const claudeCompatibility = picoConfig.compatibility.claude;
-  const createRuntimeSkillLoader = (workDir: string): SkillLoader =>
-    new SkillLoader(workDir, {
-      includeUserResources: true,
-      includeClaudeProjectResources:
-        claudeCompatibility.enabled && claudeCompatibility.projectResources,
-      includeClaudeUserResources: claudeCompatibility.enabled && claudeCompatibility.userResources,
-      externalSources: pluginSnapshot.skillSources,
-    });
   const modelRouter = await loadModelRouter({
     config: picoConfig,
     legacyProvider: provider,
@@ -1067,6 +1055,18 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     taskRuntimeDiagnostic = error instanceof Error ? error.message : String(error);
     return undefined;
   });
+  const pluginSnapshot = await loadPluginRuntimeSnapshot({
+    workDir: opts.workDir,
+    service: pluginManagement,
+  });
+  const createRuntimeSkillLoader = (workDir: string): SkillLoader =>
+    new SkillLoader(workDir, {
+      includeUserResources: true,
+      includeClaudeProjectResources:
+        claudeCompatibility.enabled && claudeCompatibility.projectResources,
+      includeClaudeUserResources: claudeCompatibility.enabled && claudeCompatibility.userResources,
+      externalSources: pluginSnapshot.skillSources,
+    });
   let activeBundle: TuiSessionBundle | undefined;
   const sharedMcpManager = new McpConnectionManager(undefined, {
     stdioCwd: opts.workDir,
@@ -2062,33 +2062,37 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     await instance.waitUntilExit();
   } finally {
     shuttingDown = true;
-    await terminalGrid.dispose();
-    activeAbortControllerRef?.current?.abort(new DOMException("TUI shutting down", "AbortError"));
-    while (pendingTuiSubmissions.size > 0) {
-      await Promise.allSettled([...pendingTuiSubmissions]);
+    try {
+      await terminalGrid.dispose();
+      activeAbortControllerRef?.current?.abort(new DOMException("TUI shutting down", "AbortError"));
+      while (pendingTuiSubmissions.size > 0) {
+        await Promise.allSettled([...pendingTuiSubmissions]);
+      }
+      while (pendingDelegationWakes.size > 0) {
+        await Promise.allSettled([...pendingDelegationWakes]);
+      }
+      while (pendingHookWakes.size > 0) {
+        await Promise.allSettled([...pendingHookWakes]);
+      }
+      while (pendingSessionSwitches.size > 0) {
+        await Promise.allSettled([...pendingSessionSwitches]);
+      }
+      while (pendingTuiDialogActions.size > 0) {
+        await Promise.allSettled([...pendingTuiDialogActions]);
+      }
+      const finalBundle = activeBundle;
+      if (finalBundle) {
+        await finalBundle.runtimeState.dispose();
+        await finalBundle.session.flushPersistence();
+      }
+      unsubscribeTaskCompletion?.();
+      unsubscribeMcpStatus();
+      await taskHostRuntime?.close();
+      cronService?.close();
+      await sharedMcpManager.closeAll();
+    } finally {
+      await pluginSnapshot.dispose();
     }
-    while (pendingDelegationWakes.size > 0) {
-      await Promise.allSettled([...pendingDelegationWakes]);
-    }
-    while (pendingHookWakes.size > 0) {
-      await Promise.allSettled([...pendingHookWakes]);
-    }
-    while (pendingSessionSwitches.size > 0) {
-      await Promise.allSettled([...pendingSessionSwitches]);
-    }
-    while (pendingTuiDialogActions.size > 0) {
-      await Promise.allSettled([...pendingTuiDialogActions]);
-    }
-    const finalBundle = activeBundle;
-    if (finalBundle) {
-      await finalBundle.runtimeState.dispose();
-      await finalBundle.session.flushPersistence();
-    }
-    unsubscribeTaskCompletion?.();
-    unsubscribeMcpStatus();
-    await taskHostRuntime?.close();
-    cronService?.close();
-    await sharedMcpManager.closeAll();
   }
 }
 

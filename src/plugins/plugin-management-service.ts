@@ -1,6 +1,13 @@
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
+import { resolvePicoPaths } from "../paths/pico-paths.js";
 import { PluginManager, type InstalledPlugin } from "./plugin-manager.js";
 import { resolvePluginContributions } from "./plugin-resolver.js";
+import {
+  createPluginRuntimeHostRoot,
+  createVerifiedPluginRuntimeCopy,
+  removePluginRuntimeHostRoot,
+  runtimeCopyDirectoryName,
+} from "./plugin-runtime-copy.js";
 import {
   PluginTrustStore,
   type PluginTrustProposal,
@@ -30,13 +37,35 @@ export interface PluginManagementServiceOptions {
   readonly env?: Readonly<Record<string, string | undefined>>;
 }
 
+export interface MaterializedRuntimePlugin {
+  readonly installed: InstalledPlugin;
+  readonly contributions: PluginContributionSet;
+}
+
+export interface PluginRuntimeMaterializationDiagnostic {
+  readonly pluginId: string;
+  readonly sourcePath: string;
+  readonly message: string;
+}
+
+export interface PluginRuntimeMaterialization {
+  readonly plugins: readonly MaterializedRuntimePlugin[];
+  readonly diagnostics: readonly PluginRuntimeMaterializationDiagnostic[];
+  dispose(): Promise<void>;
+}
+
 export class PluginManagementService {
   private readonly manager: PluginManager;
   private readonly trustStore: PluginTrustStore;
   private readonly workDir: string;
+  private readonly runtimeParent: string;
 
   constructor(options: PluginManagementServiceOptions) {
     this.workDir = resolve(options.workDir);
+    this.runtimeParent = join(
+      resolvePicoPaths(this.workDir, options).workspace.root,
+      "plugin-runtime",
+    );
     this.manager = options.manager ?? new PluginManager(options);
     this.trustStore = options.trustStore ?? new PluginTrustStore(options);
   }
@@ -102,6 +131,59 @@ export class PluginManagementService {
     return plugins.filter((plugin) => plugin.active).map((plugin) => plugin.contributions);
   }
 
+  /**
+   * Freeze the highest-priority enabled plugin for each id into one host-private runtime tree.
+   * A changed or untrusted winner blocks fallback to a lower scope for the same id.
+   */
+  async materializeRuntimePlugins(): Promise<PluginRuntimeMaterialization> {
+    const winners = highestPriorityEnabledPlugins(await this.manager.list());
+    const plugins: MaterializedRuntimePlugin[] = [];
+    const diagnostics: PluginRuntimeMaterializationDiagnostic[] = [];
+    let hostRoot: string | undefined;
+    let disposed = false;
+
+    for (const installed of winners) {
+      try {
+        if ((await this.trustStore.status(installed)) !== "active") {
+          throw new Error("Plugin is not trusted for its installed fingerprint");
+        }
+        hostRoot ??= await createPluginRuntimeHostRoot(this.runtimeParent);
+        const destinationRoot = join(
+          hostRoot,
+          runtimeCopyDirectoryName(installed.id, installed.scope),
+        );
+        try {
+          const contributions = await createVerifiedPluginRuntimeCopy({
+            sourceRoot: installed.installPath,
+            destinationRoot,
+            expectedPluginId: installed.id,
+            expectedFingerprint: installed.resourceFingerprint,
+          });
+          plugins.push(Object.freeze({ installed, contributions }));
+        } catch (error) {
+          await removePluginRuntimeHostRoot(destinationRoot);
+          throw error;
+        }
+      } catch (error) {
+        diagnostics.push({
+          pluginId: installed.id,
+          sourcePath: installed.installPath,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
+    return Object.freeze({
+      plugins: Object.freeze(plugins),
+      diagnostics: Object.freeze(diagnostics),
+      async dispose(): Promise<void> {
+        if (disposed) return;
+        disposed = true;
+        if (hostRoot) await removePluginRuntimeHostRoot(hostRoot);
+      },
+    });
+  }
+
   private async inspectInstalled(plugin: InstalledPlugin): Promise<ManagedPluginInspection> {
     const contributions = await resolvePluginContributions(plugin.installPath);
     const changedSinceInstall =
@@ -127,4 +209,24 @@ export class PluginManagementService {
     if (!plugin) throw new Error(`Plugin ${reference.id} is not installed in ${reference.scope}`);
     return plugin;
   }
+}
+
+function highestPriorityEnabledPlugins(
+  installed: readonly InstalledPlugin[],
+): readonly InstalledPlugin[] {
+  const winners = new Map<string, InstalledPlugin>();
+  for (const plugin of installed) {
+    if (!plugin.enabled) continue;
+    const current = winners.get(plugin.id);
+    if (!current || scopePriority(plugin.scope) > scopePriority(current.scope)) {
+      winners.set(plugin.id, plugin);
+    }
+  }
+  return [...winners.values()].sort((left, right) => left.id.localeCompare(right.id));
+}
+
+function scopePriority(scope: PluginScope): number {
+  if (scope === "local") return 3;
+  if (scope === "project") return 2;
+  return 1;
 }
