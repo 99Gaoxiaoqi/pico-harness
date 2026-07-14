@@ -169,7 +169,11 @@ export class LocalRuntimeDaemon {
           ? await canonicalizeWorkspacePath(cursor.workspacePath)
           : undefined;
         const dispose = this.options.service.subscribe((event) => {
-          if (!subscribedWorkspacePath || event.scope.workspacePath === subscribedWorkspacePath) {
+          if (
+            !subscribedWorkspacePath ||
+            event.scope.workspacePath === cursor.workspacePath ||
+            event.scope.workspacePath === subscribedWorkspacePath
+          ) {
             this.writeEvent(socket, event);
           }
         });
