@@ -309,6 +309,27 @@
     font-weight: 720;
     letter-spacing: 0.02em;
   }
+  .workspace-mode-badge {
+    display: inline-flex;
+    width: max-content;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 8px;
+    border-radius: 999px;
+    background: var(--surface-muted);
+    color: var(--ink-secondary);
+    font-size: 11px;
+    font-weight: 680;
+    white-space: nowrap;
+  }
+  .workspace-mode-badge svg {
+    width: 13px;
+    height: 13px;
+  }
+  .workspace-mode-badge--git {
+    background: var(--accent-soft);
+    color: var(--accent-strong);
+  }
   .empty-state {
     display: grid;
     min-height: 220px;
@@ -957,6 +978,33 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  .workspace-mode-card {
+    display: grid;
+    width: 100%;
+    gap: 6px;
+    margin-top: 12px;
+    padding: 13px 14px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--surface);
+  }
+  .workspace-mode-card > div {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .workspace-mode-card strong {
+    font-size: 12px;
+  }
+  .workspace-mode-card p,
+  .workspace-mode-card small {
+    color: var(--ink-secondary);
+    font-size: 11px;
+  }
+  .workspace-mode-card small {
+    padding-top: 6px;
+    border-top: 1px solid var(--line);
+  }
   .trust-facts {
     display: grid;
     gap: 9px;
@@ -988,6 +1036,15 @@
   .welcome-block > p {
     margin-top: 5px;
     color: var(--ink-secondary);
+  }
+  .workspace-mode-notice {
+    display: flex;
+    width: min(780px, 100%);
+    align-items: center;
+    gap: 10px;
+    margin-top: 13px;
+    color: var(--ink-secondary);
+    font-size: 11px;
   }
   .task-composer {
     display: grid;
@@ -1327,6 +1384,9 @@
     margin: 5px 0 12px;
     color: var(--ink-secondary);
     font-size: 11px;
+  }
+  .side-card--muted {
+    background: var(--surface-muted);
   }
   .usage-mini {
     display: block;
@@ -1840,6 +1900,13 @@
   .settings-section > h3 {
     padding: 14px 0;
     font-size: 13px;
+  }
+  .settings-section__note {
+    grid-column: 2;
+    margin-top: -10px;
+    padding: 0 3px;
+    color: var(--ink-tertiary);
+    font-size: 11px;
   }
   .settings-list {
     overflow: hidden;

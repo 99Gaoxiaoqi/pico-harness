@@ -9,6 +9,7 @@ import {
   Code2,
   FileCode2,
   FileDiff,
+  Folder,
   FolderGit2,
   Gauge,
   History,
@@ -63,7 +64,7 @@ import {
   StatusPill,
   StepState,
 } from "./components.js";
-import type { CapabilityView, ChangeView, SessionView } from "./model.js";
+import type { CapabilityView, ChangeView, SessionView, WorkspaceMode } from "./model.js";
 import { useRuntimeStore, type RuntimeStore } from "./runtime.js";
 
 const RuntimeContext = createContext<RuntimeStore | null>(null);
@@ -216,7 +217,7 @@ function Onboarding() {
           </ol>
           <div className="setup-card__body">
             <div className="setup-icon">
-              <FolderGit2 aria-hidden="true" />
+              <Folder aria-hidden="true" />
             </div>
             <h2>{selected ? "项目已选择" : "选择一个项目文件夹"}</h2>
             <p>它会成为任务的文件边界。你可以稍后添加更多工作区。</p>
@@ -259,6 +260,7 @@ function TrustWorkspace() {
         <h1>你信任这个项目的内容吗？</h1>
         <p>Pico 可能会读取文件、运行项目命令，并根据任务修改代码。危险或越界操作仍需要单独审批。</p>
         <code className="trust-path">{data.workspacePath}</code>
+        <WorkspaceModeCard mode={data.workspaceMode} />
         <ul className="trust-facts">
           <li>
             <CheckCircle2 aria-hidden="true" /> 访问范围限制在此文件夹
@@ -422,6 +424,35 @@ function PreviewBadge() {
   );
 }
 
+function WorkspaceModeBadge({ mode }: { readonly mode: WorkspaceMode | undefined }) {
+  return (
+    <span className={`workspace-mode-badge workspace-mode-badge--${mode ?? "folder"}`}>
+      {mode === "git" ? <ShieldCheck aria-hidden="true" /> : <Folder aria-hidden="true" />}
+      {mode === "git" ? "版本保护" : "基础模式"}
+    </span>
+  );
+}
+
+function WorkspaceModeCard({ mode }: { readonly mode: WorkspaceMode | undefined }) {
+  const protectedMode = mode === "git";
+  return (
+    <section className="workspace-mode-card" aria-label="工作区模式">
+      <div>
+        <WorkspaceModeBadge mode={mode} />
+        <strong>{protectedMode ? "这个文件夹已启用版本保护" : "这个文件夹可以直接使用"}</strong>
+      </div>
+      <p>
+        {protectedMode
+          ? "Pico 可以隔离并行任务，并在确认后合并它们的更改。"
+          : "Pico 仍可读取、修改和回退文件；并行子任务与变更合并暂不可用。"}
+      </p>
+      {!protectedMode && (
+        <small>版本保护是一项进阶能力，由 Git 提供；不了解它也不影响现在开始。</small>
+      )}
+    </section>
+  );
+}
+
 function HomePage() {
   const { data } = useRuntime();
   const latestRun = data.runs[0];
@@ -431,6 +462,12 @@ function HomePage() {
         <span className="eyebrow">本地 Agent 工作区</span>
         <h2>今天想推进什么？</h2>
         <p>描述结果，Pico 会先理解项目、给出计划，再在需要时请求你的决定。</p>
+        {data.workspaceMode === "folder" && (
+          <div className="workspace-mode-notice" role="note">
+            <WorkspaceModeBadge mode={data.workspaceMode} />
+            <span>文件处理与安全回退正常可用；并行子任务和变更合并需要版本保护。</span>
+          </div>
+        )}
         <TaskComposer compact />
       </section>
       <div className="dashboard-grid">
@@ -533,9 +570,13 @@ function TaskComposer({ compact = false }: { readonly compact?: boolean }) {
       />
       <div className="task-composer__footer">
         <div className="composer-context">
-          <FolderGit2 aria-hidden="true" size={15} />
+          {data.workspaceMode === "git" ? (
+            <FolderGit2 aria-hidden="true" size={15} />
+          ) : (
+            <Folder aria-hidden="true" size={15} />
+          )}
           <span>{data.workspacePath?.split(/[\\/]/).at(-1)}</span>
-          <span>自动规划</span>
+          <span>{data.workspaceMode === "git" ? "版本保护" : "基础模式"}</span>
         </div>
         <Button type="submit" variant="primary" disabled={!prompt.trim() || busy === "create-task"}>
           {busy === "create-task" ? "正在创建…" : "开始任务"}
@@ -684,7 +725,16 @@ function TaskPage() {
         </form>
       </div>
       <aside className="task-aside">
-        {agentItems.length === 0 ? (
+        {!data.workspaceCapabilities.isolatedWorktrees ? (
+          <section className="side-card side-card--muted">
+            <span className="side-card__icon">
+              <Folder aria-hidden="true" />
+            </span>
+            <span className="eyebrow">基础模式</span>
+            <h3>当前任务会正常执行</h3>
+            <p>并行子任务与结果合并需要版本保护，当前不会创建隔离的子代理工作区。</p>
+          </section>
+        ) : agentItems.length === 0 ? (
           <section className="side-card">
             <span className="side-card__icon">
               <Bot aria-hidden="true" />
@@ -1322,10 +1372,25 @@ function SettingsPage() {
               撤销信任
             </Button>
           </SettingRow>
+          <SettingRow
+            title="工作区模式"
+            detail={
+              data.workspaceMode === "git"
+                ? "已启用并行任务隔离与变更合并"
+                : "文件处理与安全回退可用；并行子任务与变更合并暂不可用"
+            }
+          >
+            <WorkspaceModeBadge mode={data.workspaceMode} />
+          </SettingRow>
           <SettingRow title="审批策略" detail="危险操作、越界写入与外部访问始终询问">
             <StatusPill status="ready" />
           </SettingRow>
         </div>
+        {data.workspaceMode === "folder" && (
+          <p className="settings-section__note">
+            版本保护是一项面向高级工作流的可选能力，由 Git 提供。Pico 不会自行修改你的文件夹设置。
+          </p>
+        )}
       </section>
       <section className="settings-section">
         <h3>账户与扩展</h3>
