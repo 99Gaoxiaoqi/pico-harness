@@ -3,10 +3,23 @@ import { readFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { listRewindPointSummaries } from "../cli/file-history.js";
 import { createCliSessionId, listCliSessionSummaries } from "../cli/session-resolver.js";
+import { createContextBudget, estimateMessagesTokens } from "../context/context-budget.js";
+import { FullCompactor } from "../context/full-compactor.js";
 import { SkillLoader } from "../context/skill.js";
+import { SessionForkService } from "../engine/session-fork-service.js";
 import { globalSessionManager, Session } from "../engine/session.js";
+import {
+  DEFAULT_INTERACTION_MODE,
+  getOrCreateSessionSettings,
+  setSessionTitle,
+} from "../input/session-settings.js";
 import { loadPicoConfig, type PicoConfig } from "../input/pico-config.js";
 import { McpConnectionManager } from "../mcp/manager.js";
+import { CostTracker } from "../observability/tracker.js";
+import { ensureSessionUsageBaseline } from "../observability/usage-baseline.js";
+import { createProvider, type ProviderKind } from "../provider/factory.js";
+import { loadModelRouter } from "../provider/model-router.js";
+import { resolveProviderProfile } from "../provider/profile.js";
 import { WorkspaceTrustStore } from "../security/workspace-trust.js";
 import {
   fileHistoryChanges,
@@ -53,6 +66,9 @@ export interface DesktopRuntimeServiceOptions {
   readonly conversationStateStore?: DesktopConversationStateStore;
   readonly interactions?: DesktopRuntimeInteractions;
   readonly automations?: DesktopAutomationService;
+  readonly env?: Readonly<Record<string, string | undefined>>;
+  readonly providerFactory?: typeof createProvider;
+  readonly createSessionId?: () => string;
   readonly now?: () => number;
 }
 
@@ -82,6 +98,9 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   private readonly trustStore: WorkspaceTrustStore;
   private readonly sessionStateStore: DesktopSessionStateStore;
   private readonly conversationStateStore: DesktopConversationStateStore;
+  private readonly env: Readonly<Record<string, string | undefined>>;
+  private readonly providerFactory: typeof createProvider;
+  private readonly createSessionId: () => string;
   private readonly now: () => number;
   private readonly unsubscribeRuntimeEvents: () => void;
   private readonly pendingSends = new Map<string, Promise<JsonObject>>();
@@ -93,6 +112,9 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     this.sessionStateStore = options.sessionStateStore ?? new DesktopSessionStateStore();
     this.conversationStateStore =
       options.conversationStateStore ?? new DesktopConversationStateStore();
+    this.env = options.env ?? process.env;
+    this.providerFactory = options.providerFactory ?? createProvider;
+    this.createSessionId = options.createSessionId ?? createCliSessionId;
     this.now = options.now ?? Date.now;
     this.unsubscribeRuntimeEvents = options.runtimeService.subscribe((event) => {
       if (event.topic !== "run.finished" || !event.scope.sessionId) return;
@@ -128,6 +150,16 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
           request.params.sessionId,
           false,
         );
+      case "session.rename":
+        return this.renameSession(
+          request.params.workspacePath,
+          request.params.sessionId,
+          request.params.title,
+        );
+      case "session.fork":
+        return this.forkSession(request.params.workspacePath, request.params.sessionId);
+      case "session.compact":
+        return this.compactSession(request.params.workspacePath, request.params.sessionId);
       case "session.send":
         return this.sendSession(request.params);
       case "session.transcript":
@@ -309,6 +341,110 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const session = await this.requireSession(canonical, sessionId);
     this.publishSession(session);
     return { session };
+  }
+
+  private async renameSession(
+    workspacePath: string,
+    sessionId: string,
+    title: string,
+  ): Promise<JsonValue> {
+    const canonical = await this.requireIdleTrustedSession(workspacePath, sessionId, "重命名");
+    const normalizedTitle = requireText(title, "title");
+    await this.withSession(canonical, sessionId, async (session) => {
+      const settings = await this.getSessionSettings(canonical, session);
+      const result = setSessionTitle(settings, normalizedTitle);
+      if (!result.ok) {
+        throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.INVALID_PARAMS, result.message);
+      }
+      await session.flushPersistence();
+    });
+    // 旧版 Desktop 可能已经保存过展示标题；同步更新，避免它遮蔽 JSONL 真源。
+    await this.sessionStateStore.update(canonical, sessionId, { title: normalizedTitle });
+    const session = await this.requireSession(canonical, sessionId);
+    this.publishSession(session);
+    return { session };
+  }
+
+  private async forkSession(workspacePath: string, sessionId: string): Promise<JsonValue> {
+    const canonical = await this.requireIdleTrustedSession(workspacePath, sessionId, "分叉");
+    const source = await globalSessionManager.getOrCreate(sessionId, canonical, {
+      persistence: true,
+      sessionCatalog: false,
+    });
+    const targetSessionId = this.createSessionId();
+    await new SessionForkService({ workDir: canonical }).fork({
+      sourceSessionId: sessionId,
+      targetSessionId,
+      targetMode: source.getRuntimeStateSnapshot().settings?.mode ?? DEFAULT_INTERACTION_MODE,
+    });
+    const session = await this.requireSession(canonical, targetSessionId);
+    this.publishSession(session);
+    this.publishTranscriptUpdate(canonical, targetSessionId, "reload");
+    return { session, sourceSessionId: sessionId };
+  }
+
+  private async compactSession(workspacePath: string, sessionId: string): Promise<JsonValue> {
+    const canonical = await this.requireIdleTrustedSession(workspacePath, sessionId, "压缩");
+    const result = await this.withSession(canonical, sessionId, async (session) => {
+      const settings = await this.getSessionSettings(canonical, session);
+      const config = await loadPicoConfig(canonical);
+      const router = await loadModelRouter({
+        config,
+        env: this.env,
+        legacyProvider: settings.provider,
+        legacyModel: settings.model,
+        legacyModelExplicit: true,
+      });
+      const active = router.providerConfig(settings.modelRouteId ?? config.model);
+      const rawProvider = this.providerFactory(active.provider, active.config);
+      const ledger = new RuntimeStore({ workDir: canonical, now: this.now });
+      try {
+        ensureSessionUsageBaseline(ledger, session);
+        const provider = new CostTracker(
+          rawProvider,
+          {
+            provider: active.provider,
+            model: active.config.model,
+            baseUrl: active.config.baseURL,
+          },
+          session,
+          {
+            ledger,
+            context: {
+              purpose: "compaction",
+              sessionId: session.id,
+              conversationId: session.conversationId,
+            },
+          },
+        );
+        const beforeMessageCount = session.length;
+        const historyTokens = estimateMessagesTokens(session.getHistory());
+        const profile = resolveProviderProfile(active.provider, active.config.model);
+        const budget = createContextBudget(profile);
+        const compacted = await new FullCompactor({ provider }).compact(session, {
+          inputBudgetTokens: budget.inputBudgetTokens,
+          targetRetainedTokens: Math.max(
+            1,
+            Math.min(Math.floor(budget.inputBudgetTokens * 0.5), Math.floor(historyTokens * 0.5)),
+          ),
+          trigger: "manual",
+        });
+        if (!compacted) {
+          throw new RuntimeProtocolError(
+            RUNTIME_ERROR_CODES.CONFLICT,
+            "当前会话没有可安全压缩的历史边界，或摘要模型未返回有效结果",
+          );
+        }
+        await session.flushPersistence();
+        return { beforeMessageCount, afterMessageCount: session.length };
+      } finally {
+        ledger.close();
+      }
+    });
+    const session = await this.requireSession(canonical, sessionId);
+    this.publishSession(session);
+    this.publishTranscriptUpdate(canonical, sessionId, "truncate");
+    return { session, compacted: true, ...result };
   }
 
   private async sendSession(params: {
@@ -883,6 +1019,38 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     return canonical;
   }
 
+  private async requireIdleTrustedSession(
+    workspacePath: string,
+    sessionId: string,
+    operation: string,
+  ): Promise<string> {
+    const canonical = await this.requireTrustedSession(workspacePath, sessionId);
+    const activeRun = await this.findActiveSessionRun(canonical, sessionId);
+    if (activeRun) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.CONFLICT,
+        `Session ${sessionId} 仍有活动 Run，不能${operation}`,
+      );
+    }
+    return canonical;
+  }
+
+  private async getSessionSettings(workspacePath: string, session: Session) {
+    const persisted = session.getRuntimeStateSnapshot().settings;
+    const defaults =
+      persisted ?? sessionSettingDefaults(await loadPicoConfig(workspacePath), this.env);
+    return getOrCreateSessionSettings(
+      {
+        sessionId: session.id,
+        cwd: workspacePath,
+        provider: defaults.provider,
+        model: defaults.model,
+        ...(defaults.modelRouteId ? { modelRouteId: defaults.modelRouteId } : {}),
+      },
+      { persistence: session },
+    );
+  }
+
   private async withSession<T>(
     workspacePath: string,
     sessionId: string,
@@ -1014,6 +1182,22 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     );
   }
 
+  private publishTranscriptUpdate(
+    workspacePath: string,
+    sessionId: string,
+    operation: "reload" | "truncate",
+  ): void {
+    this.publish(
+      createRuntimeEvent({
+        topic: "session.transcriptUpdated",
+        scope: { workspacePath, sessionId },
+        resourceVersion: this.nextResourceVersion(),
+        at: this.now(),
+        payload: { sessionId, operation },
+      }),
+    );
+  }
+
   private publishJob(job: JsonValue): void {
     if (!isJsonRecord(job)) return;
     const workspacePath = job["workspacePath"];
@@ -1055,6 +1239,38 @@ function sessionPayload(
     ...(summary.lastMessage ? { lastMessage: summary.lastMessage } : {}),
     ...(summary.forkFrom ? { forkFrom: summary.forkFrom } : {}),
   };
+}
+
+function sessionSettingDefaults(
+  config: PicoConfig,
+  env: Readonly<Record<string, string | undefined>>,
+): { provider: ProviderKind; model: string; modelRouteId?: string } {
+  const routeId = config.model?.trim();
+  if (routeId) {
+    const separator = routeId.indexOf("/");
+    const providerId = separator > 0 ? routeId.slice(0, separator) : undefined;
+    const configured = providerId ? config.providers[providerId] : undefined;
+    if (configured) {
+      return {
+        provider: configured.protocol,
+        model: separator > 0 ? routeId.slice(separator + 1) : routeId,
+        modelRouteId: routeId,
+      };
+    }
+  }
+  const firstProvider = Object.entries(config.providers)[0];
+  if (firstProvider) {
+    const [providerId, provider] = firstProvider;
+    const model = provider.models[0] ?? env["LLM_MODEL"]?.trim();
+    if (model) {
+      return {
+        provider: provider.protocol,
+        model,
+        modelRouteId: `${providerId}/${model}`,
+      };
+    }
+  }
+  return { provider: "openai", model: env["LLM_MODEL"]?.trim() || "glm-5.2" };
 }
 
 function safeConfig(config: PicoConfig): JsonValue {

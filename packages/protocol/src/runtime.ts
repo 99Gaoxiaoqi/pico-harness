@@ -167,6 +167,23 @@ export type RuntimeMethodMap = {
     readonly params: WorkspaceParams & { readonly sessionId: SessionId };
     readonly result: { readonly session: RuntimeSession };
   };
+  readonly "session.rename": {
+    readonly params: WorkspaceParams & { readonly sessionId: SessionId; readonly title: string };
+    readonly result: { readonly session: RuntimeSession };
+  };
+  readonly "session.fork": {
+    readonly params: WorkspaceParams & { readonly sessionId: SessionId };
+    readonly result: { readonly session: RuntimeSession; readonly sourceSessionId: SessionId };
+  };
+  readonly "session.compact": {
+    readonly params: WorkspaceParams & { readonly sessionId: SessionId };
+    readonly result: {
+      readonly session: RuntimeSession;
+      readonly compacted: true;
+      readonly beforeMessageCount: number;
+      readonly afterMessageCount: number;
+    };
+  };
   readonly "session.send": {
     readonly params: WorkspaceParams & {
       readonly sessionId?: SessionId;
@@ -417,6 +434,9 @@ export const RUNTIME_METHODS = [
   "session.create",
   "session.archive",
   "session.restore",
+  "session.rename",
+  "session.fork",
+  "session.compact",
   "session.send",
   "session.transcript",
   "run.start",
