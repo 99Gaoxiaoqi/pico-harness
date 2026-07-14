@@ -1000,23 +1000,13 @@ describe("ToolRegistry hooks 集成 (任务 2.6)", () => {
     );
 
     const result = await registry.execute({ id: "c1", name: "say", arguments: "{}" });
-    // fire-and-forget:子进程异步写文件,轮询等待(最多 ~2s)
-    let received: Record<string, unknown> | undefined;
-    for (let i = 0; i < 20; i++) {
-      await new Promise((r) => setTimeout(r, 100));
-      try {
-        received = JSON.parse(await readFile(outFile, "utf8")) as Record<string, unknown>;
-        break;
-      } catch {
-        // 文件尚未写完,继续轮询
-      }
-    }
-    expect(received).toBeDefined();
-    expect(received!.hook_event_name).toBe("PostToolUse");
+    await registry.drainHookEvents();
+    const received = JSON.parse(await readFile(outFile, "utf8")) as Record<string, unknown>;
+    expect(received.hook_event_name).toBe("PostToolUse");
     expect(result.output).toContain("工具输出过长");
-    expect(received!.tool_response).toBe(result.output);
-    expect(received!.tool_response).not.toBe(rawOutput);
-    expect(received!.tool_name).toBe("say");
+    expect(received.tool_response).toBe(result.output);
+    expect(received.tool_response).not.toBe(rawOutput);
+    expect(received.tool_name).toBe("say");
   });
 
   it("未挂载 hookRunner 时 → 零开销,正常执行", async () => {
