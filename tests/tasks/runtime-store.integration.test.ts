@@ -201,6 +201,13 @@ describe("RuntimeStore + JobService integration", () => {
     expect(() => first.recordProviderCall({ ...providerCall, provider: "other" })).toThrow(
       RuntimeConflictError,
     );
+    expect(
+      first.recordProviderCall({
+        ...providerCall,
+        callId: "call-hook-1",
+        purpose: "hook",
+      }).inserted,
+    ).toBe(true);
 
     const baseline = {
       baselineId: "legacy-usage",

@@ -33,7 +33,14 @@ export type JobCompletionPolicy = (typeof JOB_COMPLETION_POLICIES)[number];
 export const JOB_COMMAND_KINDS = ["cancel", "message"] as const;
 export type JobCommandKind = (typeof JOB_COMMAND_KINDS)[number];
 
-export const PROVIDER_CALL_PURPOSES = ["main", "subagent", "compaction", "aux", "grace"] as const;
+export const PROVIDER_CALL_PURPOSES = [
+  "main",
+  "subagent",
+  "compaction",
+  "aux",
+  "grace",
+  "hook",
+] as const;
 export type ProviderCallPurpose = (typeof PROVIDER_CALL_PURPOSES)[number];
 
 export const PROVIDER_CALL_STATUSES = ["succeeded", "failed", "cancelled"] as const;
