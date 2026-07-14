@@ -82,10 +82,17 @@
 
 - [x] 在 `codex/review-fixes-integration` 审查并合并三个任务分支。
 - [x] 统一 `.claude/agents` 兼容导入与 `.claw/agents.yaml` 原生 Profile 的解析、优先级和权限语义。
-- [ ] 处理剩余中风险契约：Markdown command 的模型/工具收窄、显式 Skill Hooks、短生命周期异步委派拒绝。
+- [x] 处理剩余中风险契约：Markdown command 的模型/工具收窄、显式 Skill Hooks、短生命周期异步委派拒绝。
 - [x] 处理 CLI 参数优先级，并修正 TERM=dumb 恢复与 TUI 路由展示。
 - [x] 更新真实模型 E2E 的过期契约、Schema 与安全 fixture；恢复本地测试契约。
-- [ ] 在最终代码状态运行 lint、typecheck、build、全量集成测试、PR-safe E2E、相关真实模型 E2E 和格式检查。
+- [x] 在最终代码状态运行 lint、typecheck、build、全量集成测试、PR-safe E2E、相关真实模型 E2E 和格式检查。
+
+## 最终验证（2026-07-14）
+
+- Node 22 全量测试：238 files / 2289 tests 通过，2 files / 27 tests 按条件跳过。
+- PR-safe E2E：9 files / 25 tests 通过。
+- 真实模型 E2E：15 files / 45 tests 通过，2 tests 按条件跳过；包含 DeepSeek 主代理自然语言创建临时 Agent 并路由到 GLM 子代理。
+- lint、typecheck、build、Prettier、TUI/package smoke 通过；`npm audit --audit-level=high` 为 0 漏洞。
 
 ## 已确认的后续增强（不阻断本轮）
 
