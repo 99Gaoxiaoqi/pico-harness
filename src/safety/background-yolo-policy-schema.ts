@@ -1,7 +1,7 @@
 import { domainToASCII } from "node:url";
 import { isIP } from "node:net";
 
-export type ToolNetworkPolicy = "disabled" | "allowlist";
+export type ToolNetworkPolicy = "disabled" | "allowlist" | "allow";
 
 /**
  * 后台 Job 创建时冻结的工具网络边界。
@@ -15,6 +15,8 @@ export interface BackgroundYoloPolicySnapshotData {
   trustedWorkspace: true;
   toolNetworkPolicy: ToolNetworkPolicy;
   allowedToolNetworkHosts?: string[];
+  /** SHA-256 of the fixed workspace .claw/mcp.json used by this Job. */
+  mcpConfigFingerprint?: string;
   allowedTools: string[];
   hardlineVersion: string;
   hookVersion: string;
@@ -63,7 +65,9 @@ export function parseBackgroundYoloPolicySnapshot(
     value["mode"] !== "yolo" ||
     value["backgroundEnabled"] !== true ||
     value["trustedWorkspace"] !== true ||
-    (toolNetworkPolicy !== "disabled" && toolNetworkPolicy !== "allowlist") ||
+    (toolNetworkPolicy !== "disabled" &&
+      toolNetworkPolicy !== "allowlist" &&
+      toolNetworkPolicy !== "allow") ||
     !Array.isArray(allowedTools) ||
     !allowedTools.every(isNonEmptyString) ||
     typeof value["hardlineVersion"] !== "string" ||
@@ -74,8 +78,16 @@ export function parseBackgroundYoloPolicySnapshot(
     throw invalid("只接受完整的 trusted workspace + yolo policySnapshot");
   }
 
-  if (toolNetworkPolicy === "disabled" && rawHosts !== undefined) {
-    throw invalid("toolNetworkPolicy=disabled 时不得声明工具网络 allowlist");
+  if (toolNetworkPolicy !== "allowlist" && rawHosts !== undefined) {
+    throw invalid(`toolNetworkPolicy=${toolNetworkPolicy} 时不得声明工具网络 allowlist`);
+  }
+
+  const mcpConfigFingerprint = value["mcpConfigFingerprint"];
+  if (
+    mcpConfigFingerprint !== undefined &&
+    (typeof mcpConfigFingerprint !== "string" || !/^[a-f0-9]{64}$/u.test(mcpConfigFingerprint))
+  ) {
+    throw invalid("mcpConfigFingerprint 必须是小写 SHA-256");
   }
 
   let allowedToolNetworkHosts: string[] | undefined;
@@ -96,6 +108,7 @@ export function parseBackgroundYoloPolicySnapshot(
     trustedWorkspace: true,
     toolNetworkPolicy,
     ...(allowedToolNetworkHosts ? { allowedToolNetworkHosts } : {}),
+    ...(typeof mcpConfigFingerprint === "string" ? { mcpConfigFingerprint } : {}),
     allowedTools: [...new Set(allowedTools)],
     hardlineVersion: value["hardlineVersion"],
     hookVersion: value["hookVersion"],
