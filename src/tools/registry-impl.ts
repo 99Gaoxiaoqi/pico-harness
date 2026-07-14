@@ -29,6 +29,7 @@ import { isWindows, resolveShell, shellCommandArgs } from "../os/shell.js";
 import { signalProcessTree } from "../os/process-tree.js";
 import { BackgroundManager } from "./background-manager.js";
 import type { HookRunner } from "../hooks/runner.js";
+import type { HookService } from "../hooks/service.js";
 import { WorkspaceRoots } from "./workspace-roots.js";
 import {
   buildSandboxSpawnPlan,
@@ -95,6 +96,8 @@ export class ToolRegistry implements Registry {
   private readonly truncateResults: boolean;
   /** 第 16 讲:全局挂载的安全拦截中间件链 */
   private readonly requestMiddlewares: RequestMiddleware[] = [];
+  private readonly safetyMiddlewares: RequestMiddleware[] = [];
+  private readonly permissionMiddlewares: RequestMiddleware[] = [];
   private readonly executionMiddlewares: ExecutionMiddleware[] = [];
   private preWriteHook?: (toolName: string, args: string) => Promise<void>;
   /**
@@ -104,6 +107,7 @@ export class ToolRegistry implements Registry {
    * 未挂载(undefined)时跳过所有 hook 逻辑,零开销。
    */
   private hookRunner?: HookRunner;
+  private hookService?: HookService;
   /**
    * 传给 hook stdin 的 session_id。
    * execute(call) 签名无 sessionId 入参,故由 host 在装配时 setSessionId 注入,
@@ -124,6 +128,16 @@ export class ToolRegistry implements Registry {
   setHookRunner(runner: HookRunner): void {
     this.hookRunner = runner;
     logger.info("[Registry] 已挂载 HookRunner (PreToolUse/PostToolUse)");
+  }
+
+  setHookService(service: HookService): void {
+    this.hookService = service;
+    logger.info("[Registry] 已挂载会话级 HookService");
+  }
+
+  async drainHookEvents(): Promise<void> {
+    // 新 HookService 路径不再启动裸 fire-and-forget；保留方法作为
+    // Registry 生命周期的稳定 drain 边界，便于后续引入有界队列。
   }
 
   /** 设置传给 hook stdin 的 session_id(无则默认空串) */
@@ -159,6 +173,14 @@ export class ToolRegistry implements Registry {
       { count: this.requestMiddlewares.length },
       `[Registry] 已挂载 Request Middleware (共 ${this.requestMiddlewares.length} 个)`,
     );
+  }
+
+  useSafety(mw: RequestMiddleware): void {
+    this.safetyMiddlewares.push(mw);
+  }
+
+  usePermission(mw: RequestMiddleware): void {
+    this.permissionMiddlewares.push(mw);
   }
 
   useExecution(mw: ExecutionMiddleware): void {
@@ -236,15 +258,25 @@ export class ToolRegistry implements Registry {
       };
     }
 
-    // 2. 【核心防御】第 16 讲:在执行底层逻辑前,依次运行所有 Middleware。
-    //    hook 若改写参数,必须再跑一次同一链,确保边界与审批针对最终参数。
-    const runRequestMiddlewares = async (): Promise<ToolResult | undefined> => {
-      for (const mw of this.requestMiddlewares) {
-        const { allowed, reason, call: rewrittenCall } = await mw(currentCall);
+    const runMiddlewares = async (
+      middlewares: readonly RequestMiddleware[],
+      source: "safety" | "permission",
+      forceApproval = false,
+    ): Promise<ToolResult | undefined> => {
+      for (const mw of middlewares) {
+        const { allowed, reason, call: rewrittenCall, denialSource } = await mw(currentCall, {
+          forceApproval,
+        });
         if (!allowed) {
           logger.warn(
             { tool: currentCall.name, reason },
             `[Registry] ⚠ 工具 ${currentCall.name} 被 Middleware 拦截: ${reason}`,
+          );
+          await this.notifyPermissionDenied(
+            currentCall,
+            denialSource ?? source,
+            reason ?? "未知原因",
+            context,
           );
           return {
             toolCallId: currentCall.id,
@@ -256,19 +288,56 @@ export class ToolRegistry implements Registry {
       }
       return undefined;
     };
-    const initialRejection = await runRequestMiddlewares();
+
+    // 2. Hardline / Plan / Trust 不可绕过安全门始终先于 Hook。
+    const initialRejection = await runMiddlewares(this.safetyMiddlewares, "safety");
     if (initialRejection) return initialRejection;
+    const usesLegacyHookPipeline = !this.hookService && this.hookRunner !== undefined;
+    if (usesLegacyHookPipeline) {
+      const legacyRequestRejection = await runMiddlewares(
+        this.requestMiddlewares,
+        "permission",
+      );
+      if (legacyRequestRejection) return legacyRequestRejection;
+    }
 
     // 3. 【任务 2.6】PreToolUse hook:在工具执行前判定 allow/deny。
     //    放在 requestMiddlewares 之后(审批先于用户 hook),preWriteHook/tool.execute 之前。
     //    hook 任何故障均 fail-open(由 HookRunner 内部兜底),不会阻断工具。
     let toolInput: unknown;
+    let forceApproval = false;
     try {
       toolInput = JSON.parse(currentCall.arguments);
     } catch {
       toolInput = {};
     }
-    if (this.hookRunner) {
+    if (this.hookService) {
+      const hookResult = await this.hookService.dispatch(
+        "PreToolUse",
+        {
+          tool_name: currentCall.name,
+          tool_input: toolInput,
+          tool_call_id: currentCall.id,
+        },
+        { signal: context?.signal },
+      );
+      if (hookResult.decision === "deny") {
+        const reason = hookResult.reason ?? "(无原因)";
+        await this.notifyPermissionDenied(currentCall, "hook", reason, context);
+        return {
+          toolCallId: currentCall.id,
+          output: `🚫 被 PreToolUse hook 阻断: ${reason}`,
+          isError: true,
+        };
+      }
+      forceApproval = hookResult.decision === "ask" || hookResult.decision === "defer";
+      if (hookResult.modifiedInput !== undefined) {
+        currentCall = { ...currentCall, arguments: JSON.stringify(hookResult.modifiedInput) };
+        toolInput = hookResult.modifiedInput;
+        const rewrittenRejection = await runMiddlewares(this.safetyMiddlewares, "safety");
+        if (rewrittenRejection) return rewrittenRejection;
+      }
+    } else if (this.hookRunner) {
       let hookResult;
       try {
         hookResult = await this.hookRunner.runPreToolUse(
@@ -299,12 +368,28 @@ export class ToolRegistry implements Registry {
       if (hookResult.modifiedInput !== undefined) {
         currentCall = { ...currentCall, arguments: JSON.stringify(hookResult.modifiedInput) };
         toolInput = hookResult.modifiedInput;
-        const rewrittenRejection = await runRequestMiddlewares();
+        const rewrittenRejection = await runMiddlewares(this.safetyMiddlewares, "safety");
         if (rewrittenRejection) return rewrittenRejection;
+        const legacyRequestRejection = await runMiddlewares(
+          this.requestMiddlewares,
+          "permission",
+        );
+        if (legacyRequestRejection) return legacyRequestRejection;
       }
     }
 
-    // 4. 执行工具逻辑:所有 Middleware + PreToolUse hook 都放行了
+    // 4. Hook 改写并重过安全门后，才进入权限 Hook/人工审批。
+    const permissionRejection = await runMiddlewares(
+      [
+        ...this.permissionMiddlewares,
+        ...(usesLegacyHookPipeline ? [] : this.requestMiddlewares),
+      ],
+      "permission",
+      forceApproval,
+    );
+    if (permissionRejection) return permissionRejection;
+
+    // 5. 执行工具逻辑:所有安全门 + Hook + 权限链都放行了
     if (this.preWriteHook) {
       try {
         await this.preWriteHook(currentCall.name, currentCall.arguments);
@@ -330,7 +415,18 @@ export class ToolRegistry implements Registry {
 
       // 5. 【任务 2.6】PostToolUse hook:工具执行成功后 fire-and-forget 通知。
       //    不阻断、不影响返回值;任何故障静默忽略。
-      if (this.hookRunner) {
+      if (this.hookService) {
+        await this.hookService.dispatch(
+          "PostToolUse",
+          {
+            tool_name: currentCall.name,
+            tool_input: toolInput,
+            tool_call_id: currentCall.id,
+            tool_response: finalOutput,
+          },
+          { signal: context?.signal },
+        );
+      } else if (this.hookRunner) {
         try {
           this.hookRunner
             .runPostToolUse(currentCall.name, toolInput, finalOutput, this.sessionId)
@@ -355,12 +451,52 @@ export class ToolRegistry implements Registry {
           : new DOMException("aborted", "AbortError");
       }
       const errMsg = err instanceof Error ? err.message : String(err);
+      if (this.hookService) {
+        await this.hookService.dispatch(
+          "PostToolUseFailure",
+          {
+            tool_name: currentCall.name,
+            tool_input: toolInput,
+            tool_call_id: currentCall.id,
+            error: errMsg,
+          },
+          { signal: context?.signal },
+        );
+      }
       return {
         toolCallId: currentCall.id,
         output: `Error executing ${currentCall.name}: ${errMsg}`,
         isError: true,
       };
     }
+  }
+
+  private async notifyPermissionDenied(
+    call: ToolCall,
+    source: string,
+    reason: string,
+    context?: ToolExecutionContext,
+  ): Promise<void> {
+    if (!this.hookService) return;
+    await this.hookService.dispatch(
+      "PermissionDenied",
+      {
+        tool_name: call.name,
+        tool_input: parseToolInput(call.arguments),
+        tool_call_id: call.id,
+        source,
+        reason,
+      },
+      { signal: context?.signal },
+    );
+  }
+}
+
+function parseToolInput(argumentsJson: string): unknown {
+  try {
+    return JSON.parse(argumentsJson) as unknown;
+  } catch {
+    return {};
   }
 }
 

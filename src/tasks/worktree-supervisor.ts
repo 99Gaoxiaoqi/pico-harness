@@ -147,6 +147,12 @@ export interface CleanupResult {
 }
 
 export type CompletionSubscriber = (snapshot: WorktreeTaskSnapshot) => void;
+export type WorktreeLifecycleEvent = {
+  type: "created" | "removed";
+  path: string;
+  branch: string;
+};
+export type WorktreeLifecycleSubscriber = (event: WorktreeLifecycleEvent) => void;
 
 interface WorktreeTaskRecord {
   taskId: string;
@@ -197,6 +203,7 @@ export class WorktreeSupervisor {
   private readonly finalizer?: WorktreeTaskFinalizer;
   private readonly records = new Map<string, WorktreeTaskRecord>();
   private readonly completionSubscribers = new Set<CompletionSubscriber>();
+  private readonly lifecycleSubscribers = new Set<WorktreeLifecycleSubscriber>();
 
   constructor(options: WorktreeSupervisorOptions) {
     if (!isAbsolute(options.repoRoot)) {
@@ -306,6 +313,11 @@ export class WorktreeSupervisor {
     };
   }
 
+  subscribeLifecycle(subscriber: WorktreeLifecycleSubscriber): () => void {
+    this.lifecycleSubscribers.add(subscriber);
+    return () => this.lifecycleSubscribers.delete(subscriber);
+  }
+
   async wait(taskId: string): Promise<WorktreeTaskSnapshot> {
     const record = this.requireRecord(taskId);
     await record.promise;
@@ -345,6 +357,7 @@ export class WorktreeSupervisor {
         throw new Error(`worktree 存在未提交修改，拒绝清理: ${record.worktreePath}`);
       }
       await this.git(["worktree", "remove", record.worktreePath], { cwd: this.repoRoot });
+      this.emitLifecycle({ type: "removed", path: record.worktreePath, branch: record.branch });
     }
 
     let branchDeleted = false;
@@ -499,6 +512,17 @@ export class WorktreeSupervisor {
         signal: record.controller.signal,
       },
     );
+    this.emitLifecycle({ type: "created", path: record.worktreePath, branch: record.branch });
+  }
+
+  private emitLifecycle(event: WorktreeLifecycleEvent): void {
+    for (const subscriber of this.lifecycleSubscribers) {
+      try {
+        subscriber({ ...event });
+      } catch {
+        // 生命周期观察者不得改变已成功的 Git 状态转换。
+      }
+    }
   }
 
   private async assertRepositoryRoot(): Promise<void> {

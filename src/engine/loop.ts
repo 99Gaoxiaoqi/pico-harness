@@ -50,6 +50,7 @@ import { logger } from "../observability/logger.js";
 import { safeResolve } from "../tools/registry-impl.js";
 import type { WorkspaceRoots } from "../tools/workspace-roots.js";
 import type { Session } from "./session.js";
+import type { HookService } from "../hooks/service.js";
 import type { ToolObservationProcessor } from "../tools/tool-result-observation.js";
 import { ToolAccesses } from "../tools/tool-access.js";
 import { ToolScheduler } from "../tools/tool-scheduler.js";
@@ -104,6 +105,14 @@ function isBackgroundBashCall(call: ToolCall): boolean {
     return input.background === true;
   } catch {
     return false;
+  }
+}
+
+function parseHookToolArguments(argumentsJson: string): unknown {
+  try {
+    return JSON.parse(argumentsJson) as unknown;
+  } catch {
+    return {};
   }
 }
 
@@ -330,7 +339,7 @@ async function commitFileJournal(
   session: Session,
   journal: FileHistoryJournal,
   messageId: string,
-): Promise<void> {
+): Promise<readonly string[]> {
   try {
     const commit = await fileHistoryCommitJournal(
       session.fileHistory,
@@ -341,8 +350,10 @@ async function commitFileJournal(
     if (commit.incomplete) {
       logger.warn({ warnings: commit.warnings }, "[FileHistory] 本轮文件 journal 覆盖不完整");
     }
+    return commit.changedPaths;
   } catch (err) {
     logger.warn({ err: String(err) }, "[FileHistory] 本轮文件 journal 提交失败");
+    return [];
   }
 }
 
@@ -469,6 +480,8 @@ export interface AgentEngineOptions {
    * 重试行为与原有一致(向后兼容)。
    */
   rebuildProvider?: () => LLMProvider | undefined;
+  /** 主会话 Hook 生命周期；子代 verifier/agent 不注入以防递归。 */
+  hookService?: HookService;
 }
 
 /** 微型 OS 的核心驱动 */
@@ -511,6 +524,7 @@ export class AgentEngine implements AgentRunner {
   private readonly shouldContinueAfterStop?: AgentEngineOptions["shouldContinueAfterStop"];
   /** 凭证轮换回调(4.2):429 时切换 key 重建 provider;无多 key 时为 undefined */
   private readonly rebuildProvider?: () => LLMProvider | undefined;
+  private readonly hookService?: HookService;
 
   constructor(opts: AgentEngineOptions) {
     this.provider = opts.provider;
@@ -546,6 +560,7 @@ export class AgentEngine implements AgentRunner {
     this.steerQueue = opts.steerQueue;
     this.shouldContinueAfterStop = opts.shouldContinueAfterStop;
     this.rebuildProvider = opts.rebuildProvider;
+    this.hookService = opts.hookService;
   }
 
   /**
@@ -596,7 +611,7 @@ export class AgentEngine implements AgentRunner {
    * 以反映工作区最新的 AGENTS.md / Skills / 外部化规范状态;
    * 关闭时使用构造时固定的 systemPrompt。
    */
-  private async buildSystemPrompt(): Promise<string> {
+  private async buildSystemPrompt(signal?: AbortSignal): Promise<string> {
     if (this.systemPromptFactory) {
       return this.systemPromptFactory();
     }
@@ -606,6 +621,11 @@ export class AgentEngine implements AgentRunner {
       const opts: ConstructorParameters<typeof PromptComposer>[2] = {};
       if (this.goalManager) opts.goalManager = this.goalManager;
       if (this.todoStore) opts.todoStore = this.todoStore;
+      if (this.hookService) {
+        opts.onInstructionsLoaded = async (paths) => {
+          await this.hookService?.dispatch("InstructionsLoaded", { paths }, { signal });
+        };
+      }
       const composer = new PromptComposer(this.workDir, true, opts);
       return composer.build();
     }
@@ -760,9 +780,19 @@ export class AgentEngine implements AgentRunner {
               { retainLastN },
               `[Engine] ⚠ 字符级降级用尽,触发模型摘要压缩(FullCompactor),保留尾部 ${retainLastN} 条`,
             );
+            await this.hookService?.dispatch(
+              "PreCompact",
+              { source: "auto", messageCount: session.length },
+              { signal },
+            );
             const compacted = await this.fullCompactor.compact(session, retainLastN, signal);
             signal?.throwIfAborted();
             if (compacted) {
+              await this.hookService?.dispatch(
+                "PostCompact",
+                { source: "auto", messageCount: session.length },
+                { signal },
+              );
               // 压缩成功:用新 history 重新组装 context,从默认预算重试
               const newWorkingMemory = session.getWorkingMemory(this.workingMemoryLimit);
               const newContextHistory: Message[] = [
@@ -876,7 +906,7 @@ export class AgentEngine implements AgentRunner {
     );
 
     // Plan Mode 开启时,每次 run 动态组装 System Prompt(反映最新工作区状态)
-    const systemPrompt = await this.buildSystemPrompt();
+    const systemPrompt = await this.buildSystemPrompt(signal);
     signal?.throwIfAborted();
 
     const runHistory = session.getHistory();
@@ -894,6 +924,7 @@ export class AgentEngine implements AgentRunner {
     let exploreSynthesisToolRetries = 0;
     let requiredDelegationRecoveryPending = false;
     let requiredDelegationRecoveryExploreOnly = false;
+    let consecutiveHookStopBlocks = 0;
     const userRewindPointId = session.fileHistory.snapshots.findLast(
       (snapshot) =>
         snapshot.messageId === session.fileHistory.currentMessageId &&
@@ -1239,11 +1270,29 @@ export class AgentEngine implements AgentRunner {
 
           // 3. 退出条件:模型没有请求任何工具调用,说明任务完成,挂起等待下一条指令
           if (toolCalls.length === 0) {
+            const stopHookDecision = await this.hookService?.dispatch(
+              "Stop",
+              { reason: "model_stop", response: responseMsg.content },
+              { signal },
+            );
+            signal?.throwIfAborted();
+            const hookRequestsContinuation = stopHookDecision?.decision === "deny";
+            const hookCanContinue = hookRequestsContinuation && consecutiveHookStopBlocks < 3;
+            if (hookCanContinue) consecutiveHookStopBlocks++;
+            else if (!hookRequestsContinuation) consecutiveHookStopBlocks = 0;
             // 3.7: host 可决定续接(返回 {continue:true} 则不退出,append 续接消息继续)
-            const decision = await this.shouldContinueAfterStop?.({
-              turn: turnCount,
-              lastMessage: responseMsg,
-            });
+            const decision = hookCanContinue
+              ? {
+                  continue: true,
+                  continuePrompt:
+                    stopHookDecision?.additionalContext ??
+                    stopHookDecision?.reason ??
+                    "Stop hook 要求继续推进任务。",
+                }
+              : await this.shouldContinueAfterStop?.({
+                  turn: turnCount,
+                  lastMessage: responseMsg,
+                });
             signal?.throwIfAborted();
 
             // steer 可能在最后一次 provider 调用期间到达。必须在真正 stop
@@ -1288,8 +1337,8 @@ export class AgentEngine implements AgentRunner {
               ? fileSideEffectKind(this.registry, call)
               : "none",
           );
-          const hasWorkspaceEffects = fileSideEffectKinds.includes("workspace");
-          if (hasWorkspaceEffects && journalRoots.length > 0) {
+          const hasFileEffects = fileSideEffectKinds.some((kind) => kind !== "none");
+          if (hasFileEffects && journalRoots.length > 0) {
             if (userRewindPointId) {
               runFileJournal ??= await fileHistoryBeginJournal(journalRoots, session.id, signal);
             } else {
@@ -1370,7 +1419,17 @@ export class AgentEngine implements AgentRunner {
           } finally {
             scheduler.dispose();
             if (turnFileJournal) {
-              await commitFileJournal(session, turnFileJournal, currentMessageId);
+              const changedPaths = await commitFileJournal(
+                session,
+                turnFileJournal,
+                currentMessageId,
+              );
+              if (changedPaths.length > 0) {
+                await this.hookService?.dispatch("FileChanged", {
+                  paths: changedPaths,
+                  origin: "internal",
+                });
+              }
               activeFileJournal = runFileJournal;
             }
           }
@@ -1387,6 +1446,22 @@ export class AgentEngine implements AgentRunner {
 
           // 将所有 Observation 持久化到 Session,开启下一轮复盘与推理
           await session.commitMessages(...observations);
+          await this.hookService?.dispatch(
+            "PostToolBatch",
+            {
+              tools: toolCalls.map((call, index) => {
+                const observation = observations[index]!;
+                return {
+                  tool_name: call.name,
+                  tool_input: parseHookToolArguments(call.arguments),
+                  tool_call_id: call.id,
+                  ok: observation.providerData?.[PICO_TOOL_RESULT_ERROR_KEY] !== true,
+                  output: observation.content,
+                };
+              }),
+            },
+            { signal },
+          );
           if (requiredDelegation && requiredDelegationIndex !== undefined) {
             const assessment = assessRequiredDelegationResult(
               observations[requiredDelegationIndex]!,
@@ -1483,7 +1558,13 @@ export class AgentEngine implements AgentRunner {
       }
     } finally {
       if (runFileJournal && userRewindPointId) {
-        await commitFileJournal(session, runFileJournal, userRewindPointId);
+        const changedPaths = await commitFileJournal(session, runFileJournal, userRewindPointId);
+        if (changedPaths.length > 0) {
+          await this.hookService?.dispatch("FileChanged", {
+            paths: changedPaths,
+            origin: "internal",
+          });
+        }
       }
       activeFileJournal = undefined;
       rootSpan?.end();
@@ -1516,6 +1597,17 @@ export class AgentEngine implements AgentRunner {
       const guardDecision = this.guardrail.beforeCall(toolCall);
       let result: ToolResult;
       if (!guardDecision.allowed) {
+        await this.hookService?.dispatch(
+          "PermissionDenied",
+          {
+            tool_name: toolCall.name,
+            tool_input: parseHookToolArguments(toolCall.arguments),
+            tool_call_id: toolCall.id,
+            source: "guardrail",
+            reason: guardDecision.reason ?? "未知 Guardrail 原因",
+          },
+          { signal },
+        );
         result = {
           toolCallId: toolCall.id,
           output: `执行被 Guardrail 阻断。原因: ${guardDecision.reason ?? "未知"}`,
