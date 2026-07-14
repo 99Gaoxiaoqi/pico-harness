@@ -360,422 +360,435 @@ export async function executeAgentRuntime(
     dependencies.provider !== undefined,
   );
   const ownsRuntimeState = dependencies.runtimeState === undefined;
-  const runtimeState =
-    dependencies.runtimeState ??
-    (await createSessionRuntime({
-      workDir,
-      sessionId: session.id,
-      session,
-      ...(dependencies.toolDisclosure !== undefined
-        ? { toolDisclosure: dependencies.toolDisclosure }
-        : {}),
-      // LSP 是项目配置启动的子进程；后台策略尚未为其提供网络/写入沙箱。
-      lspServers: backgroundPolicy ? [] : picoConfig.lspServers,
-      sessionStartSource:
-        sessionSelection.mode === "resume" || sessionSelection.mode === "continue"
-          ? "resume"
-          : "startup",
-      ...(backgroundPolicy ? { hooks: false as const } : {}),
-      ...(dependencies.hookService ? { hookService: dependencies.hookService } : {}),
-    }));
-  runtimeState.assertCompatible(workDir, session.id);
-  if (dependencies.hookService) runtimeState.attachHookService(dependencies.hookService);
-  if (
-    dependencies.toolDisclosure !== undefined &&
-    dependencies.toolDisclosure !== runtimeState.toolDisclosure
-  ) {
-    throw new Error("runtimeState.toolDisclosure must match dependencies.toolDisclosure");
-  }
+  let cleanupRuntimeState: SessionRuntime | undefined;
   let ownedUsageStore: RuntimeStore | undefined;
-  if (!runtimeState.taskHostRuntime) {
-    try {
-      ownedUsageStore = new RuntimeStore({ workDir });
-    } catch (error) {
-      logger.error(
-        { workDir, error: error instanceof Error ? error.message : String(error) },
-        "[Tracker] runtime usage ledger 初始化失败",
-      );
-    }
-  }
-  const usageLedger = runtimeState.taskHostRuntime?.jobService ?? ownedUsageStore;
-  if (usageLedger) {
-    try {
-      ensureSessionUsageBaseline(usageLedger, session);
-    } catch (error) {
-      logger.error(
-        { sessionId: session.id, error: error instanceof Error ? error.message : String(error) },
-        "[Tracker] Session usage baseline 导入失败",
-      );
-    }
-  }
-  const trackerOptions: CostTrackerOptions = {
-    ...(usageLedger ? { ledger: usageLedger } : {}),
-    context: () => {
-      const goalId = runtimeState.goalManager.getActive()?.id;
-      return {
-        purpose: "main",
-        sessionId: session.id,
-        conversationId: session.conversationId,
-        ...(goalId ? { goalId } : {}),
-      };
-    },
-  };
-  // 凭证轮换(4.2):多 key 时从池取首个 key 覆盖 config.apiKey,并构建轮换回调。
-  // 单 key / 注入 provider 时跳过(向后兼容)。pool 注入点集中在此,便于追踪 currentKey。
-  const credentialPool = effectiveOptions.apiKey === undefined ? getCredentialPool() : undefined;
-  let currentConfig: ProviderConfig = providerConfig;
-  if (credentialPool && credentialPool.size > 1 && dependencies.provider === undefined) {
-    currentConfig = { ...providerConfig, apiKey: credentialPool.getNext() };
-  }
-  const providerFactory = dependencies.providerFactory ?? createRawProvider;
-  const subagentModelRouter =
-    dependencies.modelRouter ??
-    (effectiveOptions.modelRouteId && dependencies.provider === undefined
-      ? activeRouteModelRouter(kind, providerConfig, effectiveOptions.modelRouteId)
-      : undefined);
-  const parentModelRouteId = effectiveOptions.modelRouteId;
-  const resolveSubagentModelRuntime =
-    subagentModelRouter && parentModelRouteId && dependencies.provider === undefined
-      ? (request?: SubagentModelSelectionRequest) => {
-          const requestedModelRoute = request?.ephemeralRouteId ?? request?.profileRouteId;
-          const selection = resolveSubagentModelSelection({
-            router: subagentModelRouter,
-            parentRouteId: parentModelRouteId,
-            ...(request?.ephemeralRouteId !== undefined
-              ? { ephemeralRouteId: request.ephemeralRouteId }
-              : {}),
-            ...(request?.profileRouteId !== undefined
-              ? { profileRouteId: request.profileRouteId }
-              : {}),
-            ...(request?.ephemeralThinkingEffort !== undefined
-              ? { ephemeralThinkingEffort: request.ephemeralThinkingEffort }
-              : {}),
-            ...(request?.profileThinkingEffort !== undefined
-              ? { profileThinkingEffort: request.profileThinkingEffort }
-              : {}),
-            parentThinkingEffort: effectiveOptions.thinkingEffort ?? "off",
-            allowRouteOverride: !backgroundPolicy,
-          });
-          const runtime = createSubagentModelRuntime({
-            router: subagentModelRouter,
-            selection,
-            session,
-            providerFactory,
-            trackerOptions,
-          });
-          return {
-            provider: runtime.provider,
-            compactor: runtime.compactor,
-            thinkingEffort: runtime.thinkingEffort ?? "off",
-            ...(requestedModelRoute ? { requestedModelRoute } : {}),
-            resolvedModelRoute: runtime.route.id,
-            source: selection.source,
-          };
-        }
-      : undefined;
-  const buildTrackedProvider = (config: ProviderConfig): LLMProvider =>
-    effectiveOptions.allowModelFallback === false
-      ? new CostTracker(
-          providerFactory(kind, config),
-          trackingRoute(kind, config),
-          session,
-          trackerOptions,
-        )
-      : createTrackedProviderWithFallback(kind, config, providerFactory, session, trackerOptions);
-  let trackedProvider: LLMProvider;
-  let rebuildProvider: (() => LLMProvider | undefined) | undefined;
-  if (dependencies.provider !== undefined) {
-    trackedProvider = new CostTracker(
-      dependencies.provider,
-      trackingRoute(kind, providerConfig),
-      session,
-      trackerOptions,
-    );
-  } else if (credentialPool && credentialPool.size > 1) {
-    const rotation = new CredentialRotationCoordinator(
-      credentialPool,
-      currentConfig,
-      buildTrackedProvider,
-    );
-    trackedProvider = rotation.provider;
-    rebuildProvider = () => rotation.rotate();
-  } else {
-    trackedProvider = buildTrackedProvider(currentConfig);
-  }
-  let activeMcpManager = dependencies.mcpManager;
-  runtimeState.bindHookRuntime({
-    provider: trackedProvider,
-    mcpInvoker: {
-      async invokeConnectedTool(server, tool, input, context) {
-        if (!activeMcpManager) throw new Error("MCP manager 尚未连接");
-        return await activeMcpManager.invokeConnectedTool(server, tool, input, context);
-      },
-    },
-    agentVerifier: {
-      async verify(request) {
-        const verifierEngine = new AgentEngine({
-          provider: hookPurposeProvider(trackedProvider),
-          registry: new ToolRegistry(),
-          workDir,
-          workspaceRoots,
-        });
-        const verifierRegistry = createSubagentRegistryFactory({
-          workDir,
-          workspaceRoots,
-          runner: verifierEngine,
-          manager: runtimeState.delegationManager,
-          maxSpawnDepth: 0,
-          yoloSandbox: { config: picoConfig.sandbox },
-          ownerSessionId: session.id,
-        })({ mode: "explore", role: "leaf", depth: 0, maxSpawnDepth: 0 });
-        const task = [
-          request.prompt,
-          "",
-          "只读核验以下 Hook input。最终只输出单个 JSON 对象：",
-          '{"ok": boolean, "reason": string}',
-          JSON.stringify(request.input),
-        ].join("\n");
-        const result = await verifierEngine.runSub(task, verifierRegistry, undefined, {
-          maxTurns: request.maxTurns,
-          role: "leaf",
-          depth: 0,
-          maxSpawnDepth: 0,
-          signal: request.signal,
-          workDir,
-        });
-        return result.summary;
-      },
-    },
-    onAsyncRewake(handler, output) {
-      runtimeState.hookRewakeQueue.enqueue(
-        `[Hook asyncRewake ${handler.id}] ${output.reason ?? output.additionalContext ?? output.decision}`,
-      );
-    },
-  });
-  const { goalManager, todoStore, toolDisclosure, backgroundManager, delegationManager } =
-    runtimeState;
-  const registry = buildRegistry(
-    workDir,
-    backgroundManager,
-    goalManager,
-    todoStore,
-    toolDisclosure,
-    workspaceRoots,
-    dependencies.askUserHandler,
-    runtimeState.codeIntelligence,
-    (path) => {
-      if (settings.mode === "yolo") return false;
-      if (settings.mode === "plan" || path === undefined) return true;
-      return !isSensitiveCredentialPath(workspaceRoots.resolveUnchecked(path));
-    },
-    backgroundPolicy
-      ? {
-          config: {
-            network: backgroundPolicy.snapshot.toolNetworkPolicy === "allow" ? "allow" : "deny",
-          },
-        }
-      : undefined,
-    async (skill) => {
-      if (!skill.sourcePath || skill.hooks === undefined) return;
-      await runtimeState.activateComponentHooks({
-        kind: "skill",
-        path: skill.sourcePath,
-        componentId: skill.name,
-        inlineHooks: skill.hooks,
-      });
-    },
-  );
-  if (!backgroundPolicy && dependencies.scheduleDraftCoordinator) {
-    registry.register(new ScheduleTaskTool(dependencies.scheduleDraftCoordinator));
-  }
-  // 【任务 2.6】用户可配置 Shell Hooks:加载 .claw/settings.json 的 hooks 配置,
-  // 存在则挂载 HookRunner 到 registry。fail-open:配置缺失/畸形均不启用 hook,零影响。
-  registry.setSessionId?.(session.id);
-  if (runtimeState.hookService) {
-    registry.setHookService?.(runtimeState.hookService);
-  } else if (!backgroundPolicy) {
-    const hooksConfig = await loadHooksConfig(workDir);
-    if (hooksConfig) {
-      registry.setHookRunner?.(new HookRunner(workDir, hooksConfig));
-    }
-  }
-  const artifactRuntime = buildArtifactRuntime(workDir, session.id);
-  // Inject steer text into the session-scoped queue before the next provider turn.
-  const steerQueue = runtimeState.steerQueue;
-  if (options.steer) {
-    steerQueue.push(options.steer);
-  }
-  const systemPromptFactory = async (): Promise<string> => {
-    const composed = await new PromptComposer(workDir, effectiveOptions.planMode ?? false, {
-      sessionId: session.id,
-      skillRegistry: runtimeState.skillRegistry,
-      ...(runtimeState.memoryNudger !== undefined
-        ? { memoryNudger: runtimeState.memoryNudger }
-        : {}),
-      goalManager,
-      todoStore,
-      onInstructionsLoaded: async (paths) => {
-        await runtimeState.dispatchHook(
-          "InstructionsLoaded",
-          { paths },
-          { signal: dependencies.signal },
-        );
-      },
-    }).build(runtimeState.conversationTurnCount(session));
-    if (
-      backgroundPolicy ||
-      !dependencies.scheduleDraftCoordinator ||
-      !looksLikeScheduleCreationIntent(prompt)
-    ) {
-      return composed;
-    }
-    return `${composed}\n\n<schedule-task-intent>用户明确要求创建周期任务。请调用 schedule_task 提交结构化草案等待用户确认；不得仅用文字声称已经创建。</schedule-task-intent>`;
-  };
-  // 辅助(廉价)模型:用于 FullCompactor 生成摘要,省主模型成本。
-  // 配齐 AUX_LLM_BASE_URL / AUX_LLM_API_KEY / AUX_LLM_MODEL 才启用;缺则用主 provider。
-  const auxProvider = loadAuxProvider(dependencies.env ?? process.env, session, trackerOptions);
-  const reporter = dependencies.reporter ?? new TerminalReporter();
-  const approvalNotifier = dependencies.approvalNotifier ?? failClosedApprovalNotifier;
-  dependencies.onEvent?.({ type: "run.started", sessionId: session.id, workDir, at: Date.now() });
-  const engine = new AgentEngine({
-    provider: trackedProvider,
-    registry,
-    workDir,
-    workspaceRoots,
-    ...(effectiveOptions.thinkingEffort !== undefined
-      ? { thinkingEffort: effectiveOptions.thinkingEffort }
-      : {}),
-    ...(effectiveOptions.modelRouteId !== undefined
-      ? { modelRouteId: effectiveOptions.modelRouteId }
-      : {}),
-    ...(resolveSubagentModelRuntime ? { resolveSubagentModelRuntime } : {}),
-    planMode: effectiveOptions.planMode ?? false,
-    systemPromptFactory,
-    goalManager,
-    todoStore,
-    toolDisclosure,
-    compactor: buildCompactor(kind, providerConfig.model),
-    // 模型摘要压缩:provider 存在即启用,作为字符级降级用尽后的最后防线。
-    // 优先用辅助廉价模型(AUX_LLM_*)生成摘要省主模型成本;未配置则用主 provider。
-    fullCompactor: new FullCompactor({
-      provider: trackedProvider,
-      ...(auxProvider ? { auxProvider } : {}),
-    }),
-    observationProcessor: artifactRuntime.observationProcessor,
-    subagentReportArtifactWriter: artifactRuntime.subagentReportArtifactWriter,
-    reporter,
-    tracer: traceEnabled ? new Tracer() : undefined,
-    steerQueue,
-    ...(runtimeState.hookService ? { hookService: runtimeState.hookService } : {}),
-    ...(rebuildProvider ? { rebuildProvider } : {}),
-  });
+  let cleanupRegistry: ToolRegistry | undefined;
+  let ownsMcpManager = false;
+  let cleanupMcpManager: McpConnectionManager | undefined;
+  let unsubscribeMcpStatus: (() => void) | undefined;
 
-  if (backgroundPolicy) {
-    registry.useSafety?.(
-      buildBackgroundYoloMiddleware({
-        policy: backgroundPolicy,
-        workspaceRoots,
-        sessionId: session.id,
-      }),
-    );
-  } else {
-    registry.useSafety?.(buildForegroundSafetyMiddleware(workDir, settings, workspaceRoots));
-    registry.usePermission?.(
-      buildPermissionMiddleware(
-        approvalNotifier,
+  try {
+    const runtimeState =
+      dependencies.runtimeState ??
+      (await createSessionRuntime({
         workDir,
-        dependencies.signal,
-        globalApprovalManager,
-        settings,
-        workspaceRoots,
-        runtimeState.hookService,
-      ),
-    );
-  }
-  registerDelegationTools(
-    registry,
-    engine,
-    workDir,
-    await loadProfiles(workDir),
-    delegationManager,
-    workspaceRoots,
-    // 主会话的 mode 只控制主 Agent 权限。worker/explore 是独立的不可信执行边界，
-    // 必须始终使用 worktree + OS 沙箱，不得因 default/auto 模式退化为无沙箱 Bash。
-    { config: picoConfig.sandbox },
-    session.id,
-    runtimeState.taskHostRuntime?.supervisor,
-    reporter,
-  );
-  if (backgroundPolicy) pruneRegistryToBackgroundAllowlist(registry, backgroundPolicy);
-  dependencies.toolStatusSink?.(toolStatusFromRegistry(registry));
-
-  // 3.6 Plan Review:把 ExitPlanModeTool 的退出回调接到 engine.exitPlanMode,
-  // 并把审批通知路由到 host 注入的 notifier,使审批通过后真正切换 planMode。
-  const notifier = approvalNotifier;
-  const exitTool = registry.getTool("exit_plan_mode");
-  if (exitTool instanceof ExitPlanModeTool) {
-    exitTool.setExitCallback(() => {
-      markSharedPlanModeExited(settings);
-      engine.exitPlanMode();
-    });
-    exitTool.setNotify(notifier);
-    exitTool.setAbortSignal(dependencies.signal);
-  }
-
-  // MCP 服务器:加载配置 → 并行连接 → 自动注册工具到 registry。
-  // per-server 失败隔离,一个 server 挂了不影响其他。
-  const mcpConfigPath = backgroundPolicy?.mcpConfigPath ?? options.mcpConfigPath;
-  const ownsMcpManager = dependencies.mcpManager === undefined;
-  const mcpManager =
-    dependencies.mcpManager ??
-    (mcpConfigPath
-      ? new McpConnectionManager(registry, {
-          stdioCwd: workDir,
-          ...(backgroundPolicy?.snapshot.mcpConfigFingerprint
-            ? { expectedConfigFingerprint: backgroundPolicy.snapshot.mcpConfigFingerprint }
-            : {}),
-          ...(backgroundPolicy
-            ? {
-                clientFactory: (config) =>
-                  createBackgroundMcpClient(
-                    config,
-                    workDir,
-                    backgroundPolicy.snapshot.toolNetworkPolicy,
-                    backgroundPolicy.allowedToolNetworkHosts,
-                  ),
-              }
-            : {}),
-        })
-      : undefined);
-  activeMcpManager = mcpManager;
-  const unsubscribeMcpStatus =
-    mcpManager && dependencies.mcpStatusSink
-      ? mcpManager.subscribe(dependencies.mcpStatusSink)
-      : undefined;
-  if (mcpManager && !ownsMcpManager) {
-    mcpManager.attachRegistry(registry);
-    dependencies.toolStatusSink?.(toolStatusFromRegistry(registry));
-  } else if (mcpManager && mcpConfigPath) {
-    await mcpManager.loadConfig(mcpConfigPath);
-    dependencies.mcpStatusSink?.(mcpManager.getStatusSnapshot());
-    await mcpManager.connectAll();
-    dependencies.mcpStatusSink?.(mcpManager.getStatusSnapshot());
-    if (backgroundPolicy) {
-      pruneRegistryToBackgroundAllowlist(registry, backgroundPolicy);
-      const missingMcpTools = [...backgroundPolicy.allowedTools].filter(
-        (tool) => isMcpToolName(tool) && registry.getTool(tool) === undefined,
-      );
-      if (missingMcpTools.length > 0) {
-        throw new BackgroundPolicyViolationError(
-          "mcp_unavailable",
-          `后台 MCP 工具不可用: ${missingMcpTools.join(", ")}`,
+        sessionId: session.id,
+        session,
+        ...(dependencies.toolDisclosure !== undefined
+          ? { toolDisclosure: dependencies.toolDisclosure }
+          : {}),
+        // LSP 是项目配置启动的子进程；后台策略尚未为其提供网络/写入沙箱。
+        lspServers: backgroundPolicy ? [] : picoConfig.lspServers,
+        sessionStartSource:
+          sessionSelection.mode === "resume" || sessionSelection.mode === "continue"
+            ? "resume"
+            : "startup",
+        ...(backgroundPolicy ? { hooks: false as const } : {}),
+        ...(dependencies.hookService ? { hookService: dependencies.hookService } : {}),
+      }));
+    cleanupRuntimeState = runtimeState;
+    runtimeState.assertCompatible(workDir, session.id);
+    if (dependencies.hookService) runtimeState.attachHookService(dependencies.hookService);
+    if (
+      dependencies.toolDisclosure !== undefined &&
+      dependencies.toolDisclosure !== runtimeState.toolDisclosure
+    ) {
+      throw new Error("runtimeState.toolDisclosure must match dependencies.toolDisclosure");
+    }
+    if (!runtimeState.taskHostRuntime) {
+      try {
+        ownedUsageStore = new RuntimeStore({ workDir });
+      } catch (error) {
+        logger.error(
+          { workDir, error: error instanceof Error ? error.message : String(error) },
+          "[Tracker] runtime usage ledger 初始化失败",
         );
       }
     }
-    dependencies.toolStatusSink?.(toolStatusFromRegistry(registry));
-  }
+    const usageLedger = runtimeState.taskHostRuntime?.jobService ?? ownedUsageStore;
+    if (usageLedger) {
+      try {
+        ensureSessionUsageBaseline(usageLedger, session);
+      } catch (error) {
+        logger.error(
+          { sessionId: session.id, error: error instanceof Error ? error.message : String(error) },
+          "[Tracker] Session usage baseline 导入失败",
+        );
+      }
+    }
+    const trackerOptions: CostTrackerOptions = {
+      ...(usageLedger ? { ledger: usageLedger } : {}),
+      context: () => {
+        const goalId = runtimeState.goalManager.getActive()?.id;
+        return {
+          purpose: "main",
+          sessionId: session.id,
+          conversationId: session.conversationId,
+          ...(goalId ? { goalId } : {}),
+        };
+      },
+    };
+    // 凭证轮换(4.2):多 key 时从池取首个 key 覆盖 config.apiKey,并构建轮换回调。
+    // 单 key / 注入 provider 时跳过(向后兼容)。pool 注入点集中在此,便于追踪 currentKey。
+    const credentialPool = effectiveOptions.apiKey === undefined ? getCredentialPool() : undefined;
+    let currentConfig: ProviderConfig = providerConfig;
+    if (credentialPool && credentialPool.size > 1 && dependencies.provider === undefined) {
+      currentConfig = { ...providerConfig, apiKey: credentialPool.getNext() };
+    }
+    const providerFactory = dependencies.providerFactory ?? createRawProvider;
+    const subagentModelRouter =
+      dependencies.modelRouter ??
+      (effectiveOptions.modelRouteId && dependencies.provider === undefined
+        ? activeRouteModelRouter(kind, providerConfig, effectiveOptions.modelRouteId)
+        : undefined);
+    const parentModelRouteId = effectiveOptions.modelRouteId;
+    const resolveSubagentModelRuntime =
+      subagentModelRouter && parentModelRouteId && dependencies.provider === undefined
+        ? (request?: SubagentModelSelectionRequest) => {
+            const requestedModelRoute = request?.ephemeralRouteId ?? request?.profileRouteId;
+            const selection = resolveSubagentModelSelection({
+              router: subagentModelRouter,
+              parentRouteId: parentModelRouteId,
+              ...(request?.ephemeralRouteId !== undefined
+                ? { ephemeralRouteId: request.ephemeralRouteId }
+                : {}),
+              ...(request?.profileRouteId !== undefined
+                ? { profileRouteId: request.profileRouteId }
+                : {}),
+              ...(request?.ephemeralThinkingEffort !== undefined
+                ? { ephemeralThinkingEffort: request.ephemeralThinkingEffort }
+                : {}),
+              ...(request?.profileThinkingEffort !== undefined
+                ? { profileThinkingEffort: request.profileThinkingEffort }
+                : {}),
+              parentThinkingEffort: effectiveOptions.thinkingEffort ?? "off",
+              allowRouteOverride: !backgroundPolicy,
+            });
+            const runtime = createSubagentModelRuntime({
+              router: subagentModelRouter,
+              selection,
+              session,
+              providerFactory,
+              trackerOptions,
+            });
+            return {
+              provider: runtime.provider,
+              compactor: runtime.compactor,
+              usageSession: session,
+              thinkingEffort: runtime.thinkingEffort ?? "off",
+              ...(requestedModelRoute ? { requestedModelRoute } : {}),
+              resolvedModelRoute: runtime.route.id,
+              source: selection.source,
+            };
+          }
+        : undefined;
+    const buildTrackedProvider = (config: ProviderConfig): LLMProvider =>
+      effectiveOptions.allowModelFallback === false
+        ? new CostTracker(
+            providerFactory(kind, config),
+            trackingRoute(kind, config),
+            session,
+            trackerOptions,
+          )
+        : createTrackedProviderWithFallback(kind, config, providerFactory, session, trackerOptions);
+    let trackedProvider: LLMProvider;
+    let rebuildProvider: (() => LLMProvider | undefined) | undefined;
+    if (dependencies.provider !== undefined) {
+      trackedProvider = new CostTracker(
+        dependencies.provider,
+        trackingRoute(kind, providerConfig),
+        session,
+        trackerOptions,
+      );
+    } else if (credentialPool && credentialPool.size > 1) {
+      const rotation = new CredentialRotationCoordinator(
+        credentialPool,
+        currentConfig,
+        buildTrackedProvider,
+      );
+      trackedProvider = rotation.provider;
+      rebuildProvider = () => rotation.rotate();
+    } else {
+      trackedProvider = buildTrackedProvider(currentConfig);
+    }
+    let activeMcpManager = dependencies.mcpManager;
+    runtimeState.bindHookRuntime({
+      provider: trackedProvider,
+      mcpInvoker: {
+        async invokeConnectedTool(server, tool, input, context) {
+          if (!activeMcpManager) throw new Error("MCP manager 尚未连接");
+          return await activeMcpManager.invokeConnectedTool(server, tool, input, context);
+        },
+      },
+      agentVerifier: {
+        async verify(request) {
+          const verifierEngine = new AgentEngine({
+            provider: hookPurposeProvider(trackedProvider),
+            registry: new ToolRegistry(),
+            workDir,
+            workspaceRoots,
+            usageSession: session,
+            goalManager: runtimeState.goalManager,
+          });
+          const verifierRegistry = createSubagentRegistryFactory({
+            workDir,
+            workspaceRoots,
+            runner: verifierEngine,
+            manager: runtimeState.delegationManager,
+            maxSpawnDepth: 0,
+            yoloSandbox: { config: picoConfig.sandbox },
+            ownerSessionId: session.id,
+          })({ mode: "explore", role: "leaf", depth: 0, maxSpawnDepth: 0 });
+          const task = [
+            request.prompt,
+            "",
+            "只读核验以下 Hook input。最终只输出单个 JSON 对象：",
+            '{"ok": boolean, "reason": string}',
+            JSON.stringify(request.input),
+          ].join("\n");
+          const result = await verifierEngine.runSub(task, verifierRegistry, undefined, {
+            maxTurns: request.maxTurns,
+            role: "leaf",
+            depth: 0,
+            maxSpawnDepth: 0,
+            signal: request.signal,
+            workDir,
+          });
+          return result.summary;
+        },
+      },
+      onAsyncRewake(handler, output) {
+        runtimeState.hookRewakeQueue.enqueue(
+          `[Hook asyncRewake ${handler.id}] ${output.reason ?? output.additionalContext ?? output.decision}`,
+        );
+      },
+    });
+    const { goalManager, todoStore, toolDisclosure, backgroundManager, delegationManager } =
+      runtimeState;
+    const registry = buildRegistry(
+      workDir,
+      backgroundManager,
+      goalManager,
+      todoStore,
+      toolDisclosure,
+      workspaceRoots,
+      dependencies.askUserHandler,
+      runtimeState.codeIntelligence,
+      (path) => {
+        if (settings.mode === "yolo") return false;
+        if (settings.mode === "plan" || path === undefined) return true;
+        return !isSensitiveCredentialPath(workspaceRoots.resolveUnchecked(path));
+      },
+      backgroundPolicy
+        ? {
+            config: {
+              network: backgroundPolicy.snapshot.toolNetworkPolicy === "allow" ? "allow" : "deny",
+            },
+          }
+        : undefined,
+      async (skill) => {
+        if (!skill.sourcePath || skill.hooks === undefined) return;
+        await runtimeState.activateComponentHooks({
+          kind: "skill",
+          path: skill.sourcePath,
+          componentId: skill.name,
+          inlineHooks: skill.hooks,
+        });
+      },
+    );
+    cleanupRegistry = registry;
+    if (!backgroundPolicy && dependencies.scheduleDraftCoordinator) {
+      registry.register(new ScheduleTaskTool(dependencies.scheduleDraftCoordinator));
+    }
+    // 【任务 2.6】用户可配置 Shell Hooks:加载 .claw/settings.json 的 hooks 配置,
+    // 存在则挂载 HookRunner 到 registry。fail-open:配置缺失/畸形均不启用 hook,零影响。
+    registry.setSessionId?.(session.id);
+    if (runtimeState.hookService) {
+      registry.setHookService?.(runtimeState.hookService);
+    } else if (!backgroundPolicy) {
+      const hooksConfig = await loadHooksConfig(workDir);
+      if (hooksConfig) {
+        registry.setHookRunner?.(new HookRunner(workDir, hooksConfig));
+      }
+    }
+    const artifactRuntime = buildArtifactRuntime(workDir, session.id);
+    // Inject steer text into the session-scoped queue before the next provider turn.
+    const steerQueue = runtimeState.steerQueue;
+    if (options.steer) {
+      steerQueue.push(options.steer);
+    }
+    const systemPromptFactory = async (): Promise<string> => {
+      const composed = await new PromptComposer(workDir, effectiveOptions.planMode ?? false, {
+        sessionId: session.id,
+        skillRegistry: runtimeState.skillRegistry,
+        ...(runtimeState.memoryNudger !== undefined
+          ? { memoryNudger: runtimeState.memoryNudger }
+          : {}),
+        goalManager,
+        todoStore,
+        onInstructionsLoaded: async (paths) => {
+          await runtimeState.dispatchHook(
+            "InstructionsLoaded",
+            { paths },
+            { signal: dependencies.signal },
+          );
+        },
+      }).build(runtimeState.conversationTurnCount(session));
+      if (
+        backgroundPolicy ||
+        !dependencies.scheduleDraftCoordinator ||
+        !looksLikeScheduleCreationIntent(prompt)
+      ) {
+        return composed;
+      }
+      return `${composed}\n\n<schedule-task-intent>用户明确要求创建周期任务。请调用 schedule_task 提交结构化草案等待用户确认；不得仅用文字声称已经创建。</schedule-task-intent>`;
+    };
+    // 辅助(廉价)模型:用于 FullCompactor 生成摘要,省主模型成本。
+    // 配齐 AUX_LLM_BASE_URL / AUX_LLM_API_KEY / AUX_LLM_MODEL 才启用;缺则用主 provider。
+    const auxProvider = loadAuxProvider(dependencies.env ?? process.env, session, trackerOptions);
+    const reporter = dependencies.reporter ?? new TerminalReporter();
+    const approvalNotifier = dependencies.approvalNotifier ?? failClosedApprovalNotifier;
+    dependencies.onEvent?.({ type: "run.started", sessionId: session.id, workDir, at: Date.now() });
+    const engine = new AgentEngine({
+      provider: trackedProvider,
+      registry,
+      workDir,
+      workspaceRoots,
+      usageSession: session,
+      ...(effectiveOptions.thinkingEffort !== undefined
+        ? { thinkingEffort: effectiveOptions.thinkingEffort }
+        : {}),
+      ...(effectiveOptions.modelRouteId !== undefined
+        ? { modelRouteId: effectiveOptions.modelRouteId }
+        : {}),
+      ...(resolveSubagentModelRuntime ? { resolveSubagentModelRuntime } : {}),
+      planMode: effectiveOptions.planMode ?? false,
+      systemPromptFactory,
+      goalManager,
+      todoStore,
+      toolDisclosure,
+      compactor: buildCompactor(kind, providerConfig.model),
+      // 模型摘要压缩:provider 存在即启用,作为字符级降级用尽后的最后防线。
+      // 优先用辅助廉价模型(AUX_LLM_*)生成摘要省主模型成本;未配置则用主 provider。
+      fullCompactor: new FullCompactor({
+        provider: trackedProvider,
+        ...(auxProvider ? { auxProvider } : {}),
+      }),
+      observationProcessor: artifactRuntime.observationProcessor,
+      subagentReportArtifactWriter: artifactRuntime.subagentReportArtifactWriter,
+      reporter,
+      tracer: traceEnabled ? new Tracer() : undefined,
+      steerQueue,
+      ...(runtimeState.hookService ? { hookService: runtimeState.hookService } : {}),
+      ...(rebuildProvider ? { rebuildProvider } : {}),
+    });
 
-  try {
+    if (backgroundPolicy) {
+      registry.useSafety?.(
+        buildBackgroundYoloMiddleware({
+          policy: backgroundPolicy,
+          workspaceRoots,
+          sessionId: session.id,
+        }),
+      );
+    } else {
+      registry.useSafety?.(buildForegroundSafetyMiddleware(workDir, settings, workspaceRoots));
+      registry.usePermission?.(
+        buildPermissionMiddleware(
+          approvalNotifier,
+          workDir,
+          dependencies.signal,
+          globalApprovalManager,
+          settings,
+          workspaceRoots,
+          runtimeState.hookService,
+        ),
+      );
+    }
+    registerDelegationTools(
+      registry,
+      engine,
+      workDir,
+      await loadProfiles(workDir),
+      delegationManager,
+      workspaceRoots,
+      // 主会话的 mode 只控制主 Agent 权限。worker/explore 是独立的不可信执行边界，
+      // 必须始终使用 worktree + OS 沙箱，不得因 default/auto 模式退化为无沙箱 Bash。
+      { config: picoConfig.sandbox },
+      session.id,
+      runtimeState.taskHostRuntime?.supervisor,
+      reporter,
+    );
+    if (backgroundPolicy) pruneRegistryToBackgroundAllowlist(registry, backgroundPolicy);
+    dependencies.toolStatusSink?.(toolStatusFromRegistry(registry));
+
+    // 3.6 Plan Review:把 ExitPlanModeTool 的退出回调接到 engine.exitPlanMode,
+    // 并把审批通知路由到 host 注入的 notifier,使审批通过后真正切换 planMode。
+    const notifier = approvalNotifier;
+    const exitTool = registry.getTool("exit_plan_mode");
+    if (exitTool instanceof ExitPlanModeTool) {
+      exitTool.setExitCallback(() => {
+        markSharedPlanModeExited(settings);
+        engine.exitPlanMode();
+      });
+      exitTool.setNotify(notifier);
+      exitTool.setAbortSignal(dependencies.signal);
+    }
+
+    // MCP 服务器:加载配置 → 并行连接 → 自动注册工具到 registry。
+    // per-server 失败隔离,一个 server 挂了不影响其他。
+    const mcpConfigPath = backgroundPolicy?.mcpConfigPath ?? options.mcpConfigPath;
+    ownsMcpManager = dependencies.mcpManager === undefined;
+    const mcpManager =
+      dependencies.mcpManager ??
+      (mcpConfigPath
+        ? new McpConnectionManager(registry, {
+            stdioCwd: workDir,
+            ...(backgroundPolicy?.snapshot.mcpConfigFingerprint
+              ? { expectedConfigFingerprint: backgroundPolicy.snapshot.mcpConfigFingerprint }
+              : {}),
+            ...(backgroundPolicy
+              ? {
+                  clientFactory: (config) =>
+                    createBackgroundMcpClient(
+                      config,
+                      workDir,
+                      backgroundPolicy.snapshot.toolNetworkPolicy,
+                      backgroundPolicy.allowedToolNetworkHosts,
+                    ),
+                }
+              : {}),
+          })
+        : undefined);
+    cleanupMcpManager = mcpManager;
+    activeMcpManager = mcpManager;
+    unsubscribeMcpStatus =
+      mcpManager && dependencies.mcpStatusSink
+        ? mcpManager.subscribe(dependencies.mcpStatusSink)
+        : undefined;
+    if (mcpManager && !ownsMcpManager) {
+      mcpManager.attachRegistry(registry);
+      dependencies.toolStatusSink?.(toolStatusFromRegistry(registry));
+    } else if (mcpManager && mcpConfigPath) {
+      await mcpManager.loadConfig(mcpConfigPath);
+      dependencies.mcpStatusSink?.(mcpManager.getStatusSnapshot());
+      await mcpManager.connectAll();
+      dependencies.mcpStatusSink?.(mcpManager.getStatusSnapshot());
+      if (backgroundPolicy) {
+        pruneRegistryToBackgroundAllowlist(registry, backgroundPolicy);
+        const missingMcpTools = [...backgroundPolicy.allowedTools].filter(
+          (tool) => isMcpToolName(tool) && registry.getTool(tool) === undefined,
+        );
+        if (missingMcpTools.length > 0) {
+          throw new BackgroundPolicyViolationError(
+            "mcp_unavailable",
+            `后台 MCP 工具不可用: ${missingMcpTools.join(", ")}`,
+          );
+        }
+      }
+      dependencies.toolStatusSink?.(toolStatusFromRegistry(registry));
+    }
+
     return await session.serialize(async () => {
       dependencies.signal?.throwIfAborted();
       if (!resumeExistingSession) {
@@ -850,8 +863,8 @@ export async function executeAgentRuntime(
       return result;
     });
   } catch (error) {
-    if (runtimeState.hookService && !dependencies.signal?.aborted) {
-      await runtimeState
+    if (cleanupRuntimeState?.hookService && !dependencies.signal?.aborted) {
+      await cleanupRuntimeState
         .dispatchHook("StopFailure", {
           category: classifyStopFailure(error),
           error: error instanceof Error ? error.message : String(error),
@@ -869,18 +882,40 @@ export async function executeAgentRuntime(
     });
     throw error;
   } finally {
-    await runtimeState.clearComponentHooks();
-    await registry.drainHookEvents?.();
-    unsubscribeMcpStatus?.();
+    await bestEffortRuntimeCleanup("Session 组件 Hook", () =>
+      cleanupRuntimeState?.clearComponentHooks(),
+    );
+    await bestEffortRuntimeCleanup("Registry Hook 事件", () =>
+      cleanupRegistry?.drainHookEvents?.(),
+    );
+    await bestEffortRuntimeCleanup("MCP 状态订阅", () => unsubscribeMcpStatus?.());
     // 非 TUI 调用仍按轮关闭；TUI 注入的 manager 由宿主在退出时统一关闭。
-    if (mcpManager && ownsMcpManager) {
-      await mcpManager.closeAll();
-      dependencies.mcpStatusSink?.(mcpManager.getStatusSnapshot());
+    if (cleanupMcpManager && ownsMcpManager) {
+      await bestEffortRuntimeCleanup("MCP manager", async () => {
+        await cleanupMcpManager?.closeAll();
+        if (cleanupMcpManager) {
+          dependencies.mcpStatusSink?.(cleanupMcpManager.getStatusSnapshot());
+        }
+      });
     }
-    if (ownsRuntimeState) {
-      await runtimeState.dispose();
+    if (ownsRuntimeState && cleanupRuntimeState) {
+      await bestEffortRuntimeCleanup("SessionRuntime", () => cleanupRuntimeState?.dispose());
     }
-    ownedUsageStore?.close();
+    await bestEffortRuntimeCleanup("Runtime usage ledger", () => ownedUsageStore?.close());
+  }
+}
+
+async function bestEffortRuntimeCleanup(
+  resource: string,
+  cleanup: () => void | Promise<void> | undefined,
+): Promise<void> {
+  try {
+    await cleanup();
+  } catch (error) {
+    logger.warn(
+      { resource, error: error instanceof Error ? error.message : String(error) },
+      "[Runtime] 资源释放失败",
+    );
   }
 }
 
