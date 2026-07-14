@@ -200,7 +200,7 @@ ${agentsContent}
         return null;
       }
 
-      const parts = ["# 已掌握的技能 (来自 .claw/skills/)"];
+      const parts = ["# 已掌握的技能 (来自 Pico workspace memory)"];
 
       for (const skill of topSkills) {
         const { successCount, failCount } = skill.stats;

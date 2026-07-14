@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import { access, readFile, realpath } from "node:fs/promises";
-import { homedir } from "node:os";
 import { dirname, isAbsolute, join, normalize, resolve } from "node:path";
 import { logger } from "../observability/logger.js";
+import { resolvePicoHome } from "../paths/pico-paths.js";
 import { emptyHookSnapshot } from "./service.js";
 import { HookLocalStateStore } from "./management/state.js";
 import { HookTrustStore, type HookTrustStatus } from "./trust/store.js";
@@ -82,10 +82,11 @@ export async function loadHooksConfig(workDir: string): Promise<HooksConfig | un
 
 export function defaultHookConfigSources(
   workDir: string,
-  userHome = homedir(),
+  userHome?: string,
 ): readonly HookConfigSourceSpec[] {
+  const picoHome = userHome ? join(userHome, ".pico") : resolvePicoHome();
   return [
-    { kind: "user", path: join(userHome, ".pico", "hooks.json") },
+    { kind: "user", path: join(picoHome, "hooks.json") },
     { kind: "project", path: join(workDir, ".pico", "hooks.json") },
     { kind: "local", path: join(workDir, ".claw", "hooks.local.json") },
     {

@@ -13,8 +13,8 @@ import {
   open,
 } from "node:fs/promises";
 import { join, dirname, isAbsolute, parse, relative, resolve, sep } from "node:path";
-import { homedir } from "node:os";
 import { isDeepStrictEqual } from "node:util";
+import { resolvePicoHome } from "../paths/pico-paths.js";
 import {
   FileHistoryBlobStore,
   type FileHistoryBlobRef,
@@ -35,7 +35,7 @@ import {
 } from "./file-change-journal.js";
 
 const DEFAULT_BASE_DIR = resolve(
-  process.env.PICO_FILE_HISTORY_DIR ?? join(homedir(), ".pico", "file-history"),
+  process.env.PICO_FILE_HISTORY_DIR ?? join(resolvePicoHome(), "file-history"),
 );
 const MAX_SNAPSHOTS = 100;
 const FILE_HISTORY_MANIFEST_VERSION = 2 as const;

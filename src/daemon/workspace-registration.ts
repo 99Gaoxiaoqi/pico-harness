@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { chmod, mkdir, readFile, realpath, rename, unlink, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { resolvePicoHome } from "../paths/pico-paths.js";
 
 const FILE_MODE = 0o600;
 const DIRECTORY_MODE = 0o700;
@@ -12,7 +12,7 @@ export class WorkspaceRegistrationStore {
   readonly filePath: string;
   private mutationQueue: Promise<void> = Promise.resolve();
 
-  constructor(filePath = join(homedir(), ".pico", "daemon-workspaces.json")) {
+  constructor(filePath = join(resolvePicoHome(), "daemon-workspaces.json")) {
     this.filePath = filePath;
   }
 
