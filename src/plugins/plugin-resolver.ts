@@ -15,6 +15,7 @@ import type {
   PluginPathContribution,
   PluginPathDeclaration,
   PluginResourceFingerprint,
+  PluginScope,
   PluginVariableMap,
   ResolvedPluginIdentity,
 } from "./plugin-types.js";
@@ -99,10 +100,16 @@ export async function resolvePluginContributions(
 export function createPluginVariableMap(
   plugin: Pick<ResolvedPluginIdentity, "id" | "root">,
   projectDir: string,
-  options: Pick<ResolvePluginContributionsOptions, "picoHome" | "homeDir" | "env"> = {},
+  options: Pick<ResolvePluginContributionsOptions, "picoHome" | "homeDir" | "env"> & {
+    readonly scope: PluginScope;
+  },
 ): PluginVariableMap {
   const paths = resolvePicoPaths(projectDir, options);
-  const pluginData = join(paths.home.pluginData, safePluginDataName(plugin.id));
+  const pluginData = join(
+    paths.home.pluginData,
+    options.scope,
+    `${safePluginDataName(plugin.id)}-${createHash("sha256").update(plugin.id).digest("hex").slice(0, 16)}`,
+  );
   return Object.freeze({
     CLAUDE_PLUGIN_ROOT: plugin.root,
     CLAUDE_PLUGIN_DATA: pluginData,

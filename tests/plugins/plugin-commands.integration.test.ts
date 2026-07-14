@@ -35,13 +35,21 @@ describe("plugin slash commands", () => {
     );
     expect(await execute(fixture.registry, confirmation)).toContain("reviewer [project] trusted");
     expect(await execute(fixture.registry, "/plugin enable reviewer")).toContain(
-      "reviewer [project] enabled",
+      "Restart or refresh the host",
     );
     expect(await execute(fixture.registry, "/plugins list --scope=project")).toContain(
       "reviewer [project] · active",
     );
     expect(await execute(fixture.registry, "/plugin disable reviewer")).toContain(
-      "reviewer [project] disabled",
+      "Restart or refresh the host",
+    );
+  });
+
+  it("相对安装路径以命令所属 workDir 为基准", async () => {
+    const fixture = await createFixture(cleanup);
+
+    expect(await execute(fixture.registry, "/plugin install ./plugin")).toContain(
+      "Installed plugin reviewer@1.0.0 to project",
     );
   });
 
@@ -94,7 +102,7 @@ async function createFixture(cleanup: string[]): Promise<{
   cleanup.push(root);
   const workDir = join(root, "workspace");
   const picoHome = join(root, "pico-home");
-  const pluginDir = join(root, "plugin");
+  const pluginDir = join(workDir, "plugin");
   await mkdir(join(workDir), { recursive: true });
   await mkdir(join(pluginDir, ".pico"), { recursive: true });
   await mkdir(join(pluginDir, "skills", "review"), { recursive: true });

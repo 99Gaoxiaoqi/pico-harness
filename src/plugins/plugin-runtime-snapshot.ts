@@ -62,7 +62,10 @@ export async function loadPluginRuntimeSnapshot(
     skillSources.push(...pathSources(contributions, contributions.skills, "skill", priority));
     commandSources.push(...pathSources(contributions, contributions.commands, "command", priority));
     agentSources.push(...(await agentPathSources(contributions, contributions.agents, priority)));
-    const variables = createPluginVariableMap(contributions.plugin, options.workDir, options);
+    const variables = createPluginVariableMap(contributions.plugin, options.workDir, {
+      ...options,
+      scope: installed.scope,
+    });
 
     for (const contribution of contributions.hooks) {
       try {
