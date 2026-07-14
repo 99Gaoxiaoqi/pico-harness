@@ -101,6 +101,7 @@ describe("Hook runtime lifecycle integration", () => {
         "UserPromptSubmit",
         "UserPromptExpansion",
         "InstructionsLoaded",
+        "MessageDisplay",
         "Stop",
         "SessionEnd",
       ],
@@ -126,6 +127,7 @@ describe("Hook runtime lifecycle integration", () => {
       "UserPromptSubmit",
       "UserPromptExpansion",
       "InstructionsLoaded",
+      "MessageDisplay",
       "Stop",
       "SessionEnd",
     ]);

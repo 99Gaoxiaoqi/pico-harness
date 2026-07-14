@@ -24,6 +24,12 @@ import {
   type LspServerConfig,
 } from "../code-intelligence/index.js";
 import { HookService } from "../hooks/service.js";
+import {
+  createSessionHookRuntime,
+  type HookRuntimeBinding,
+  type SessionHookRuntime,
+} from "../hooks/runtime.js";
+import type { SlashCommand } from "../input/types.js";
 import type {
   HookEvent,
   HookEventPayloadMap,
@@ -43,6 +49,11 @@ export interface SessionRuntimeOptions {
   /** Durable completion outbox 的活态发现间隔。 */
   completionPollIntervalMs?: number;
   sessionStartSource?: "startup" | "resume";
+  /** 后台/Cron 显式关闭前台 HookService，继续走严格 command-only policy。 */
+  hooks?: false;
+  /** 测试或宿主可注入自管 HookService；注入时不创建默认 watcher/management。 */
+  hookService?: HookService;
+  hookUserHome?: string;
 }
 
 export interface SessionRuntime {
@@ -63,8 +74,10 @@ export interface SessionRuntime {
   readonly codeIntelligence: CodeIntelligenceService;
   readonly codeIntelligenceManager: CodeIntelligenceManager;
   readonly hookService?: HookService;
+  readonly hookCommands: readonly SlashCommand[];
   /** 同一实例可幂等挂载；运行中替换实例会抛错。 */
   attachHookService(service: HookService): void;
+  bindHookRuntime(dependencies: HookRuntimeBinding): void;
   dispatchHook<E extends HookEvent>(
     event: E,
     payload: HookEventPayloadMap[E],
@@ -348,6 +361,20 @@ export async function createSessionRuntime(
       delegationCompletionQueue.enqueue(completion);
     }
   }
+  const hookRuntime =
+    options.hooks === false || options.hookService
+      ? undefined
+      : await createSessionHookRuntime({
+          workDir,
+          sessionId: options.sessionId,
+          ...(options.hookUserHome ? { userHome: options.hookUserHome } : {}),
+        }).catch((error) => {
+          logger.warn(
+            { sessionId: options.sessionId, error: String(error) },
+            "[Hook] 会话级运行时初始化失败，前台 hooks fail-open",
+          );
+          return undefined;
+        });
   return new DefaultSessionRuntime({
     workDir,
     sessionId: options.sessionId,
@@ -377,6 +404,8 @@ export async function createSessionRuntime(
       completionPollTimer = undefined;
     },
     sessionStartSource: options.sessionStartSource ?? "startup",
+    ...(hookRuntime ? { hookRuntime } : {}),
+    ...(options.hookService ? { hookService: options.hookService } : {}),
   });
 }
 
@@ -523,6 +552,8 @@ interface DefaultSessionRuntimeOptions {
   unbindGoalManager: () => void;
   stopDelegationCompletionPolling: () => void;
   sessionStartSource: "startup" | "resume";
+  hookRuntime?: SessionHookRuntime;
+  hookService?: HookService;
 }
 
 class DefaultSessionRuntime implements SessionRuntime {
@@ -543,10 +574,12 @@ class DefaultSessionRuntime implements SessionRuntime {
   readonly codeIntelligence: CodeIntelligenceService;
   readonly codeIntelligenceManager: CodeIntelligenceManager;
   private _hookService?: HookService;
+  private readonly hookRuntime?: SessionHookRuntime;
   private readonly pendingHookEvents = new Set<Promise<unknown>>();
   private readonly taskStatuses = new Map<string, TaskSnapshot["status"]>();
   private readonly startedSubagents = new Set<string>();
   private readonly sessionStartSource: "startup" | "resume";
+  private sessionStartDispatched = false;
   private readonly unsubscribeTaskHooks: () => void;
   private readonly unsubscribeWorktreeHooks?: () => void;
   private readonly unbindGoalManager: () => void;
@@ -573,11 +606,13 @@ class DefaultSessionRuntime implements SessionRuntime {
     this.unbindGoalManager = options.unbindGoalManager;
     this.stopDelegationCompletionPolling = options.stopDelegationCompletionPolling;
     this.sessionStartSource = options.sessionStartSource;
+    this.hookRuntime = options.hookRuntime;
     this.unsubscribeTaskHooks = this.taskRegistry.subscribe((snapshot) =>
       this.onTaskTransition(snapshot),
     );
     this.unsubscribeWorktreeHooks = this.taskHostRuntime?.supervisor.subscribeLifecycle((event) => {
       if (!this._hookService) return;
+      this.ensureSessionStart();
       this.enqueueHook(
         event.type === "created"
           ? this._hookService.dispatch("WorktreeCreate", {
@@ -591,10 +626,16 @@ class DefaultSessionRuntime implements SessionRuntime {
         event.type === "created" ? "WorktreeCreate" : "WorktreeRemove",
       );
     });
+    if (options.hookRuntime) this._hookService = options.hookRuntime.service;
+    if (options.hookService) this.attachHookService(options.hookService);
   }
 
   get hookService(): HookService | undefined {
     return this._hookService;
+  }
+
+  get hookCommands(): readonly SlashCommand[] {
+    return this.hookRuntime?.commands ?? [];
   }
 
   attachHookService(service: HookService): void {
@@ -603,10 +644,12 @@ class DefaultSessionRuntime implements SessionRuntime {
       throw new Error("SessionRuntime 已挂载不同 HookService，禁止运行中替换。");
     }
     this._hookService = service;
-    this.enqueueHook(
-      service.dispatch("SessionStart", { source: this.sessionStartSource }),
-      "SessionStart",
-    );
+    this.ensureSessionStart();
+  }
+
+  bindHookRuntime(dependencies: HookRuntimeBinding): void {
+    this.hookRuntime?.bind(dependencies);
+    this.ensureSessionStart();
   }
 
   async dispatchHook<E extends HookEvent>(
@@ -615,6 +658,7 @@ class DefaultSessionRuntime implements SessionRuntime {
     context: HookExecutionContext = {},
   ): Promise<HookOutput> {
     if (!this._hookService) return { decision: "allow" };
+    this.ensureSessionStart();
     // 序列边界：新的前台事件不得超过已启动的 SessionStart/任务转换。
     await this.drainHookEvents();
     return this._hookService.dispatch(event, payload, context);
@@ -653,6 +697,7 @@ class DefaultSessionRuntime implements SessionRuntime {
       this.unsubscribeTaskHooks();
       this.unsubscribeWorktreeHooks?.();
       try {
+        this.ensureSessionStart();
         await this.drainHookEvents();
         const runningTasks = this.backgroundManager
           .list()
@@ -667,6 +712,7 @@ class DefaultSessionRuntime implements SessionRuntime {
           await this._hookService.dispatch("SessionEnd", { reason: "runtime_dispose" });
         }
       } finally {
+        await this.hookRuntime?.dispose();
         this.delegationCompletionQueue.close();
         this.unbindGoalManager();
       }
@@ -678,6 +724,7 @@ class DefaultSessionRuntime implements SessionRuntime {
     const previous = this.taskStatuses.get(snapshot.taskId);
     this.taskStatuses.set(snapshot.taskId, snapshot.status);
     if (!this._hookService) return;
+    this.ensureSessionStart();
     if (previous === undefined) {
       this.enqueueHook(
         this._hookService.dispatch("TaskCreated", {
@@ -733,6 +780,15 @@ class DefaultSessionRuntime implements SessionRuntime {
     });
     this.pendingHookEvents.add(tracked);
     void tracked.finally(() => this.pendingHookEvents.delete(tracked));
+  }
+
+  private ensureSessionStart(): void {
+    if (!this._hookService || this.sessionStartDispatched) return;
+    this.sessionStartDispatched = true;
+    this.enqueueHook(
+      this._hookService.dispatch("SessionStart", { source: this.sessionStartSource }),
+      "SessionStart",
+    );
   }
 }
 

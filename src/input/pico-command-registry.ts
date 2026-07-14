@@ -130,6 +130,7 @@ export interface PicoCommandRegistryOptions {
   /** 可注入的只读存储诊断器；默认扫描当前 workspace 和全局 File History。 */
   storageDoctor?: Pick<StorageDoctor, "scan">;
   hookService?: HookService;
+  hookCommands?: readonly SlashCommand[];
   mcpControl?: McpConnectionManager;
 }
 
@@ -169,6 +170,7 @@ export async function createPicoCommandRegistry(
     createPermissionsCommand(settings),
     createCompactCommand(options, settings),
     createInitCommand(options),
+    ...(options.hookCommands ?? []),
     createDoctorCommand(options),
     createModelCommand(settings, options.modelRouter),
     createAddDirectoryCommand(settings, options.additionalDirectoryManager),
