@@ -10,10 +10,7 @@ import type { ModelRoute, ModelRouter } from "../provider/model-router.js";
 import { resolveProviderProfile } from "../provider/profile.js";
 import type { ResolvedSubagentModelSelection } from "./subagent-model-selection.js";
 
-export type SubagentProviderFactory = (
-  kind: ProviderKind,
-  config: ProviderConfig,
-) => LLMProvider;
+export type SubagentProviderFactory = (kind: ProviderKind, config: ProviderConfig) => LLMProvider;
 
 export interface SubagentModelRuntime {
   readonly route: ModelRoute;
@@ -39,10 +36,11 @@ export interface CreateSubagentModelRuntimeOptions {
 export function createSubagentModelRuntime(
   options: CreateSubagentModelRuntimeOptions,
 ): SubagentModelRuntime {
-  const { provider: kind, config, route } = options.router.providerConfig(
-    options.selection.route.id,
-    options.selection.thinking.level,
-  );
+  const {
+    provider: kind,
+    config,
+    route,
+  } = options.router.providerConfig(options.selection.route.id, options.selection.thinking.level);
   const providerFactory = options.providerFactory ?? createRawProvider;
   const provider = new CostTracker(
     providerFactory(kind, config),

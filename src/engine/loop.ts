@@ -23,6 +23,7 @@ import {
 import type { Registry, ToolFileSideEffects } from "../tools/registry.js";
 import type {
   AgentRunner,
+  SubagentModelSelectionRequest,
   SubagentReportArtifactWriter,
   SubagentRunOptions,
   SubagentResult,
@@ -361,6 +362,10 @@ export interface AgentEngineOptions {
    * 此字段在 engine 层仅用于子代理继承;provider 的实际参数注入在构造时已完成。
    */
   thinkingEffort?: string;
+  /** 当前主会话的稳定模型路由标识。 */
+  modelRouteId?: string;
+  /** 可信宿主为每次子代理执行创建独立 Provider/Compactor。 */
+  resolveSubagentModelRuntime?: SubagentModelRuntimeResolver;
   /**
    * 计划模式开关 (第 13 讲)。
    * 开启后,每次 run 动态用 PromptComposer 组装 System Prompt,
@@ -471,6 +476,21 @@ export interface AgentEngineOptions {
   rebuildProvider?: () => LLMProvider | undefined;
 }
 
+export interface SubagentExecutionRuntime {
+  provider: LLMProvider;
+  compactor?: Compactor;
+  thinkingEffort: string;
+  requestedModelRoute?: string;
+  resolvedModelRoute?: string;
+  source: "ephemeral" | "profile" | "parent";
+  /** 仅兼容继承父 Provider 的旧路径；显式路由 Runtime 默认不做跨路由 fallback。 */
+  onRateLimited?: (reporter: Reporter, signal?: AbortSignal) => LLMProvider | undefined;
+}
+
+export type SubagentModelRuntimeResolver = (
+  request?: SubagentModelSelectionRequest,
+) => SubagentExecutionRuntime;
+
 /** 微型 OS 的核心驱动 */
 export class AgentEngine implements AgentRunner {
   private provider: LLMProvider;
@@ -480,6 +500,8 @@ export class AgentEngine implements AgentRunner {
   private readonly systemPrompt: string;
   private readonly systemPromptFactory?: () => Promise<string>;
   private readonly thinkingEffort: string;
+  private readonly modelRouteId?: string;
+  private readonly resolveSubagentModelRuntime?: SubagentModelRuntimeResolver;
   // planMode 非 readonly:ExitPlanMode 审批通过后由 exitPlanMode() 置 false。
   private planMode: boolean;
   private readonly workingMemoryLimit: number;
@@ -523,6 +545,8 @@ export class AgentEngine implements AgentRunner {
         "You have tools to read, write, edit files and run bash. Think step by step.";
     this.systemPromptFactory = opts.systemPromptFactory;
     this.thinkingEffort = opts.thinkingEffort ?? "off";
+    this.modelRouteId = opts.modelRouteId;
+    this.resolveSubagentModelRuntime = opts.resolveSubagentModelRuntime;
     this.planMode = opts.planMode ?? false;
     this.workingMemoryLimit = opts.workingMemoryLimit ?? DEFAULT_WORKING_MEMORY_LIMIT;
     this.maxTurns = opts.maxTurns ?? 50;
@@ -1697,35 +1721,40 @@ export class AgentEngine implements AgentRunner {
     contextHistory: Message[],
     tools: ToolDefinition[],
     reporter: Reporter,
+    runtime: SubagentExecutionRuntime,
     signal?: AbortSignal,
   ): Promise<Message> {
-    if (!this.compactor) {
+    if (!runtime.compactor) {
       // 无 Compactor:子代理无法降级,叠加普通重试层(溢出则原样抛出)
       return generateWithRetry(
-        this.providerForReporter(this.provider, reporter, signal),
+        this.providerForReporter(runtime.provider, reporter, signal),
         contextHistory,
         tools,
         {
           signal,
           onRetry: this.makeRetryReporter(),
-          onRateLimited: () => this.rotateProvider(reporter, signal),
+          ...(runtime.onRateLimited
+            ? { onRateLimited: () => runtime.onRateLimited?.(reporter, signal) }
+            : {}),
         },
       );
     }
     // 首轮:用默认预算压缩(attempt 0,系数 1.0)
-    let context = this.compactSubContext(contextHistory);
+    let context = this.compactSubContext(contextHistory, runtime.compactor);
     for (let attempt = 0; ; attempt++) {
       try {
         // 【集成点】同 generateWithOverflowRetry,叠加普通重试层在内,
         // 响应式压缩在外(子代理版仅降字符预算,不改 WorkingMemory 条数)。
         return await generateWithRetry(
-          this.providerForReporter(this.provider, reporter, signal),
+          this.providerForReporter(runtime.provider, reporter, signal),
           context,
           tools,
           {
             signal,
             onRetry: this.makeRetryReporter(),
-            onRateLimited: () => this.rotateProvider(reporter, signal),
+            ...(runtime.onRateLimited
+              ? { onRateLimited: () => runtime.onRateLimited?.(reporter, signal) }
+              : {}),
           },
         );
       } catch (err) {
@@ -1740,10 +1769,10 @@ export class AgentEngine implements AgentRunner {
           throw err;
         }
         const budgetFactor = AgentEngine.OVERFLOW_BUDGET_FACTORS[attempt + 1]!;
-        const newBudget = Math.max(1, Math.floor(this.compactor.maxChars * budgetFactor));
+        const newBudget = Math.max(1, Math.floor(runtime.compactor.maxChars * budgetFactor));
         // contextHistory 已持久化上一档压缩结果；继续缩紧预算时从该结构化历史降级，
         // 避免下一轮又从未压缩原文开始并重复探索。
-        context = this.compactSubContext(contextHistory, newBudget);
+        context = this.compactSubContext(contextHistory, runtime.compactor, newBudget);
         logger.warn(
           { attempt: attempt + 1, budget: newBudget },
           `[Subagent] ⚠ 上下文溢出,响应式降级重试(attempt ${attempt + 1}):预算 ${newBudget} 字符`,
@@ -1760,7 +1789,11 @@ export class AgentEngine implements AgentRunner {
    * compactToBudget 完全失败时，保留 system/task 和一条结构化 evidence snapshot；
    * 若连 snapshot 也放不下，才退化到只保留 system/task。
    */
-  private compactSubContext(contextHistory: Message[], budget?: number): Message[] {
+  private compactSubContext(
+    contextHistory: Message[],
+    compactor: Compactor,
+    budget?: number,
+  ): Message[] {
     // system prompt 不允许被 Compactor 裁剪。动态 workspace/tool 纪律可能使它大于
     // 最低降级系数算出的预算；若不钳制可行下限，会在真正的 provider
     // overflow 重试之前误抛 ContextCompactionError。
@@ -1771,8 +1804,8 @@ export class AgentEngine implements AgentRunner {
     try {
       const compacted =
         effectiveBudget !== undefined
-          ? this.compactor!.compactToBudget(contextHistory, effectiveBudget)
-          : this.compactor!.compactToBudget(contextHistory);
+          ? compactor.compactToBudget(contextHistory, effectiveBudget)
+          : compactor.compactToBudget(contextHistory);
       return persistSubagentContext(contextHistory, compacted);
     } catch (err) {
       if (err instanceof ContextCompactionError) {
@@ -1803,8 +1836,8 @@ export class AgentEngine implements AgentRunner {
         try {
           const compactedReset =
             effectiveBudget !== undefined
-              ? this.compactor!.compactToBudget(reset, effectiveBudget)
-              : this.compactor!.compactToBudget(reset);
+              ? compactor.compactToBudget(reset, effectiveBudget)
+              : compactor.compactToBudget(reset);
           return persistSubagentContext(contextHistory, compactedReset);
         } catch (resetError) {
           if (!(resetError instanceof ContextCompactionError) || !evidenceSnapshot) {
@@ -1812,8 +1845,8 @@ export class AgentEngine implements AgentRunner {
           }
           const compactedTask =
             effectiveBudget !== undefined
-              ? this.compactor!.compactToBudget(taskBoundary, effectiveBudget)
-              : this.compactor!.compactToBudget(taskBoundary);
+              ? compactor.compactToBudget(taskBoundary, effectiveBudget)
+              : compactor.compactToBudget(taskBoundary);
           return persistSubagentContext(contextHistory, compactedTask);
         }
       }
@@ -1841,19 +1874,66 @@ export class AgentEngine implements AgentRunner {
     reporter?: Reporter,
     opts: SubagentRunOptions = {},
   ): Promise<SubagentResult> {
+    const runtime = this.subagentExecutionRuntime(opts.modelSelection);
+    if (runtime.resolvedModelRoute) {
+      reporter?.onSubagentModelResolved?.({
+        ...(runtime.requestedModelRoute
+          ? { requestedModelRoute: runtime.requestedModelRoute }
+          : {}),
+        resolvedModelRoute: runtime.resolvedModelRoute,
+        ...(runtime.thinkingEffort ? { thinkingEffort: runtime.thinkingEffort } : {}),
+        source: runtime.source,
+      });
+    }
     const run = () =>
-      this.runSubInIsolatedCompactorScope(taskPrompt, readOnlyRegistry, reporter, opts);
+      this.runSubInIsolatedCompactorScope(taskPrompt, readOnlyRegistry, runtime, reporter, opts);
     const runAttributed = () =>
       withProviderCallContext({ purpose: "subagent", ...(opts.usageAttribution ?? {}) }, () =>
-        this.compactor ? this.compactor.runInIsolatedScope(run) : run(),
+        runtime.compactor ? runtime.compactor.runInIsolatedScope(run) : run(),
       );
     return runAttributed();
+  }
+
+  private subagentExecutionRuntime(
+    request?: SubagentModelSelectionRequest,
+  ): SubagentExecutionRuntime {
+    if (this.resolveSubagentModelRuntime) return this.resolveSubagentModelRuntime(request);
+
+    const requestedRoute = request?.ephemeralRouteId ?? request?.profileRouteId;
+    const requestedThinking = request?.ephemeralThinkingEffort ?? request?.profileThinkingEffort;
+    if (
+      requestedRoute !== undefined &&
+      requestedRoute !== "inherit" &&
+      requestedRoute !== this.modelRouteId
+    ) {
+      throw new Error(`当前宿主没有可用的子代理模型路由器，无法切换到 ${requestedRoute}`);
+    }
+    if (requestedThinking !== undefined && requestedThinking !== this.thinkingEffort) {
+      throw new Error(`当前宿主不能为子代理独立设置 thinking_effort=${requestedThinking}`);
+    }
+    return {
+      provider: this.provider,
+      ...(this.compactor ? { compactor: this.compactor } : {}),
+      thinkingEffort: this.thinkingEffort,
+      ...(requestedRoute ? { requestedModelRoute: requestedRoute } : {}),
+      ...(this.modelRouteId || this.provider.modelName
+        ? { resolvedModelRoute: this.modelRouteId ?? this.provider.modelName }
+        : {}),
+      source:
+        request?.ephemeralRouteId !== undefined
+          ? "ephemeral"
+          : request?.profileRouteId !== undefined
+            ? "profile"
+            : "parent",
+      onRateLimited: (reporter, signal) => this.rotateProvider(reporter, signal),
+    };
   }
 
   /** 每个子代理保留注入 Compactor 的行为，但使用独立压缩进度。 */
   private async runSubInIsolatedCompactorScope(
     taskPrompt: string,
     readOnlyRegistry: Registry,
+    runtime: SubagentExecutionRuntime,
     reporter?: Reporter,
     opts: SubagentRunOptions = {},
   ): Promise<SubagentResult> {
@@ -1861,8 +1941,12 @@ export class AgentEngine implements AgentRunner {
     const signal = opts.signal;
     signal?.throwIfAborted();
     logger.info(
-      { task: taskPrompt.slice(0, 100), thinkingEffort: this.thinkingEffort },
-      `[Subagent] 🚀 拉起探路者,任务: ${taskPrompt.slice(0, 100)} (thinkingEffort: ${this.thinkingEffort},继承自主 Agent)`,
+      {
+        task: taskPrompt.slice(0, 100),
+        thinkingEffort: runtime.thinkingEffort,
+        modelRoute: runtime.resolvedModelRoute,
+      },
+      `[Subagent] 🚀 拉起探路者,任务: ${taskPrompt.slice(0, 100)} (thinkingEffort: ${runtime.thinkingEffort})`,
     );
 
     const initialTools = readOnlyRegistry.getAvailableTools();
@@ -1930,6 +2014,7 @@ export class AgentEngine implements AgentRunner {
           contextHistory,
           availableTools,
           rep,
+          runtime,
           signal,
         );
       } catch (error) {
@@ -1994,6 +2079,7 @@ export class AgentEngine implements AgentRunner {
               contextHistory,
               [],
               rep,
+              runtime,
               signal,
             );
             contextHistory.push(continuationResp);

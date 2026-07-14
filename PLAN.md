@@ -14,8 +14,7 @@
 ## 并发与文件所有权
 
 - 本功能在 `codex/subagent-model-routing` 独立 worktree 开发，不修改主工作区已有未跟踪文件。
-- `codex/pico-5-1-phase2-agent-registry` 当前占用 `src/tools/subagent.ts` 和 `tests/subagent.test.ts`；其合并前只开发无冲突文件。
-- `codex/pico-5-1-phase2-tool-ui` 当前占用 `src/tui/tool-card.tsx` 和 `src/tui/tui-reporter.ts`；UI 展示在其合并后串行接入。
+- 旧 `agent-registry` / `tool-ui` 分支已确认基于过期主线且与当前实现冲突，不再整体合并，也不再作为文件所有权阻塞。
 - `src/tools/subagent.ts`、`src/engine/loop.ts`、`src/runtime/agent-runtime.ts` 的最终接线由本功能分支单一所有者完成。
 
 ## 任务
@@ -23,13 +22,15 @@
 - [x] 新增 `src/tools/subagent-spec.ts`，定义并校验临时 Agent 合约；instructions 只能追加安全骨架。
 - [x] 扩展 `src/tools/agent-profile.ts`，支持可选 `modelRouteId` 与 `thinkingEffort`。
 - [x] 扩展 `src/input/agent-loader.ts`，读取 Claude Agent `model` frontmatter，避免静默忽略。
-- [ ] 等 agent-registry 分支合并后，为 `delegate_task` 的单任务与 `tasks[]` 增加受约束的 `agent` 对象。
+- [x] 为 `delegate_task` 的单任务与 `tasks[]` 增加受约束的 `agent` 对象。
 - [x] 实现解析优先级：临时 Agent → 命名 Profile → 父会话，并通过 `ModelRouter` fail-closed 校验。
 - [x] 新增 `src/runtime/subagent-model-runtime.ts`，为显式 route 构造独立 Provider、CostTracker、Compactor 与 reasoning 配置。
-- [ ] 改造 `AgentEngine.runSub` 使用请求级 Model Runtime；未指定时保持当前继承路径。
-- [ ] 接入 `agent-runtime`、usage ledger 与 `SubagentActivityEvent`；后台只允许父路由或可信宿主授权路由。
-- [ ] 等 tool-ui 分支合并后展示 requested/resolved route、thinking effort 与 fallback。
-- [ ] 完成本地集成成功/失败路径、并发隔离测试和一条真实模型自然语言 E2E。
+- [x] 改造 `AgentEngine.runSub` 使用请求级 Model Runtime；未指定时保持当前继承路径。
+- [x] 接入 `agent-runtime`、usage ledger 与 `SubagentActivityEvent`；后台只允许父路由或可信宿主授权路由。
+- [x] 展示 requested/resolved route、thinking effort 与 fallback（首版 fallback 为禁用）。
+- [x] 完成本地集成成功/失败路径和并发隔离测试。
+- [x] 添加真实模型自然语言 E2E，覆盖自然语言生成 `delegate_task.agent` 与 route 解析。
+- [ ] 在具备 `LLM_BASE_URL`、`LLM_API_KEY`、`LLM_MODEL` 的环境执行真实模型 E2E。
 
 ## 验收标准
 
@@ -46,3 +47,10 @@
 - 若修改 TUI，再运行对应 TUI 测试。
 - 在最终代码状态运行一条真实模型 E2E，验证自然语言到 `delegate_task.agent` 的主路径。
 - 合并前同步最新 `origin/main`，重新检查冲突文件和最终差异。
+
+## 当前验证状态
+
+- Node 22：相关集成与 TUI 回归 21 个文件、143 条测试通过。
+- `npm run lint`、`npm run typecheck`、`npm run build` 通过。
+- `npm audit --audit-level=high`：0 个漏洞。
+- 真实模型 E2E 尚未执行：当前环境未配置三项 `LLM_*` 凭证变量。

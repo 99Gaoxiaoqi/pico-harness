@@ -1,9 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
+import { AgentEngine, type SubagentExecutionRuntime } from "../src/engine/loop.js";
 import type { LLMProvider } from "../src/provider/interface.js";
 import { resolveModelRouteCapabilities } from "../src/provider/model-capabilities.js";
 import { ModelRouter, type ModelRoute } from "../src/provider/model-router.js";
 import { createSubagentModelRuntime } from "../src/runtime/subagent-model-runtime.js";
 import { resolveSubagentModelSelection } from "../src/runtime/subagent-model-selection.js";
+import type { Registry } from "../src/tools/registry.js";
+import type { Reporter, SubagentActivityEvent } from "../src/engine/reporter.js";
+import { ScopedSubagentActivityReporter } from "../src/tools/subagent-activity-reporter.js";
 
 describe("子代理模型 Runtime 集成", () => {
   it("为不同 route 构造隔离的 Provider、Compactor 与 reasoning 配置", () => {
@@ -73,6 +77,84 @@ describe("子代理模型 Runtime 集成", () => {
     );
     expect(providerFactory).not.toHaveBeenCalled();
   });
+
+  it("AgentEngine 并发子代理各自使用请求级 Provider 和 Compactor", async () => {
+    const parent = route("volcengine/deepseek-v4-pro", "deepseek-v4-pro");
+    const child = route("volcengine/glm-5.2", "glm-5.2");
+    const router = new ModelRouter(
+      [parent, child],
+      { DEEPSEEK_KEY: "parent-secret", GLM_KEY: "child-secret" },
+      parent.id,
+    );
+    const providers: LLMProvider[] = [];
+    const providerFactory = vi.fn((_kind, config) => {
+      const provider = fakeProvider(`${config.model}:${"完成".repeat(120)}`);
+      providers.push(provider);
+      return provider;
+    });
+    const resolveRuntime = (request?: {
+      ephemeralRouteId?: string;
+      ephemeralThinkingEffort?: string;
+    }): SubagentExecutionRuntime => {
+      const selection = resolveSubagentModelSelection({
+        router,
+        parentRouteId: parent.id,
+        ...(request?.ephemeralRouteId ? { ephemeralRouteId: request.ephemeralRouteId } : {}),
+        ...(request?.ephemeralThinkingEffort
+          ? { ephemeralThinkingEffort: request.ephemeralThinkingEffort }
+          : {}),
+        allowRouteOverride: true,
+      });
+      const runtime = createSubagentModelRuntime({
+        router,
+        selection,
+        providerFactory,
+      });
+      return {
+        provider: runtime.provider,
+        compactor: runtime.compactor,
+        thinkingEffort: runtime.thinkingEffort ?? "off",
+        resolvedModelRoute: runtime.route.id,
+        source: selection.source,
+      };
+    };
+    const engine = new AgentEngine({
+      provider: fakeProvider("主 Provider 不应被子代理调用"),
+      registry: emptyRegistry(),
+      workDir: "/tmp",
+      modelRouteId: parent.id,
+      resolveSubagentModelRuntime: resolveRuntime,
+    });
+    const activities: SubagentActivityEvent[] = [];
+    const childReporter = new ScopedSubagentActivityReporter(recordingReporter(activities), {
+      activityId: "child-route",
+      task: "子路由任务",
+      mode: "explore",
+      completionPolicy: "required",
+      requestedModelRoute: child.id,
+    });
+
+    const [parentResult, childResult] = await Promise.all([
+      engine.runSub("父路由任务", emptyRegistry()),
+      engine.runSub("子路由任务", emptyRegistry(), childReporter, {
+        modelSelection: {
+          ephemeralRouteId: child.id,
+          ephemeralThinkingEffort: "high",
+        },
+      }),
+    ]);
+
+    expect(parentResult.summary).toContain(parent.model);
+    expect(childResult.summary).toContain(child.model);
+    expect(providers).toHaveLength(2);
+    expect(providers[0]).not.toBe(providers[1]);
+    expect(activities.at(-1)).toMatchObject({
+      requestedModelRoute: child.id,
+      resolvedModelRoute: child.id,
+      thinkingEffort: "high",
+      modelSelectionSource: "ephemeral",
+    });
+  });
 });
 
 function route(id: string, model: string): ModelRoute {
@@ -88,11 +170,42 @@ function route(id: string, model: string): ModelRoute {
   };
 }
 
-function fakeProvider(model: string): LLMProvider {
+function fakeProvider(content: string): LLMProvider {
   return {
-    modelName: model,
+    modelName: content.split(":", 1)[0],
     async generate() {
-      return { role: "assistant", content: "ok" };
+      return { role: "assistant", content };
+    },
+  };
+}
+
+function emptyRegistry(): Registry {
+  return {
+    register() {},
+    use() {},
+    getAvailableTools() {
+      return [];
+    },
+    async execute(call) {
+      return { toolCallId: call.id, output: "unused", isError: true };
+    },
+    isReadOnlyTool() {
+      return true;
+    },
+  };
+}
+
+function recordingReporter(events: SubagentActivityEvent[]): Reporter {
+  return {
+    onThinking() {},
+    onToolCall() {},
+    onToolResult() {},
+    onMessage() {},
+    onStart() {},
+    onTurnStart() {},
+    onFinish() {},
+    onSubagentActivity(event) {
+      events.push(event);
     },
   };
 }

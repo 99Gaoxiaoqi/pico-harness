@@ -30,10 +30,16 @@ describe("subagent activity transcript projection", () => {
       mode: "explore",
       status: "running",
       currentAction: "检查 transcript 布局",
+      requestedModelRoute: "volcengine/glm-5.2",
+      resolvedModelRoute: "volcengine/glm-5.2",
+      thinkingEffort: "high",
+      modelSelectionSource: "ephemeral",
     });
     const runningOutput = renderEntries(entries);
     expect(runningOutput).toContain("渲染活动卡片 · running");
     expect(runningOutput).toContain("检查 transcript 布局");
+    expect(runningOutput).toContain("model:volcengine/glm-5.2");
+    expect(runningOutput).toContain("thinking:high");
     reporter.onSubagentActivity({
       activityId: "activity-runtime-secret",
       task: "接入子代理事件",
@@ -63,6 +69,10 @@ describe("subagent activity transcript projection", () => {
       mode: "explore",
       status: "failed",
       summary: "渲染校验失败",
+      requestedModelRoute: "volcengine/glm-5.2",
+      resolvedModelRoute: "volcengine/glm-5.2",
+      thinkingEffort: "high",
+      modelSelectionSource: "ephemeral",
     });
 
     const output = renderEntries(entries);

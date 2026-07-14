@@ -41,6 +41,10 @@ type TuiEntryData =
       completionPolicy?: SubagentActivityEvent["completionPolicy"];
       currentAction?: string;
       summary?: string;
+      requestedModelRoute?: string;
+      resolvedModelRoute?: string;
+      thinkingEffort?: string;
+      modelSelectionSource?: SubagentActivityEvent["modelSelectionSource"];
     }
   | { kind: "thinking" };
 
