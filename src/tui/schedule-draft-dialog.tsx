@@ -129,7 +129,7 @@ export function resolveScheduleDraftDialogKey(
 }
 
 export function formatScheduleDraftDialog(draft: CronDraft): string {
-  const tools = draft.allowedTools.length > 0 ? draft.allowedTools.join(", ") : "全部工具";
+  const tools = draft.allowedTools.length > 0 ? draft.allowedTools.join(", ") : "无可用后台工具";
   const nextRuns = draft.nextRuns.slice(0, 3);
   const lines = [
     "定时任务草案",

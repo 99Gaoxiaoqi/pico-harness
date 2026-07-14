@@ -89,6 +89,13 @@ export function parseBackgroundYoloPolicySnapshot(
   ) {
     throw invalid("mcpConfigFingerprint 必须是小写 SHA-256");
   }
+  const hasMcpTools = allowedTools.some((tool) => tool.startsWith("mcp__"));
+  if (hasMcpTools && mcpConfigFingerprint === undefined) {
+    throw invalid("后台 MCP 工具必须绑定 .claw/mcp.json 的 SHA-256 指纹");
+  }
+  if (!hasMcpTools && mcpConfigFingerprint !== undefined) {
+    throw invalid("未授权 MCP 工具时不得声明 mcpConfigFingerprint");
+  }
 
   let allowedToolNetworkHosts: string[] | undefined;
   if (toolNetworkPolicy === "allowlist") {

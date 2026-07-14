@@ -32,6 +32,32 @@ describe("background network and MCP policy integration", () => {
     ).toMatchObject({ toolNetworkPolicy: "allow", mcpConfigFingerprint: fingerprint });
   });
 
+  it("MCP 工具与配置指纹必须成对冻结", () => {
+    const base = {
+      mode: "yolo",
+      backgroundEnabled: true,
+      trustedWorkspace: true,
+      toolNetworkPolicy: "allow",
+      hardlineVersion: "builtin-v1",
+      hookVersion: "workspace-v1",
+      createdAt: 1,
+    } as const;
+
+    expect(() =>
+      parseBackgroundYoloPolicySnapshot({
+        ...base,
+        allowedTools: ["mcp__github__issues"],
+      }),
+    ).toThrow(/必须绑定/u);
+    expect(() =>
+      parseBackgroundYoloPolicySnapshot({
+        ...base,
+        allowedTools: ["fetch_url"],
+        mcpConfigFingerprint: "a".repeat(64),
+      }),
+    ).toThrow(/不得声明/u);
+  });
+
   it("只接受固定工作区 MCP 配置且在内容漂移后 fail-closed", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "pico-background-mcp-"));
     cleanup.push(workspace);
