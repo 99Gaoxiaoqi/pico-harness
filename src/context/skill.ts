@@ -1,4 +1,4 @@
-// Skill 加载器:扫描 .claude/skills 与 .claw/skills 下的 SKILL.md。
+// Skill Catalog:统一扫描 Pico 原生资源与 Claude 兼容输入。
 // 对应课程第 10 讲 internal/context/skill.go。
 //
 // 遵循 Agent Skills 规范 (agentskills.io):
@@ -7,12 +7,22 @@
 // 渐进式暴露:启动时只加载元数据与正文,按需提供给智能体。
 
 import { open, readdir, realpath, stat } from "node:fs/promises";
+import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import type { Dirent } from "node:fs";
 import * as yaml from "js-yaml";
 import type { BaseTool } from "../tools/registry.js";
 import type { ToolDefinition } from "../schema/message.js";
 import { logger } from "../observability/logger.js";
+import { mapClaudeToolNames } from "../catalog/claude-compat.js";
+import {
+  canonicalResourceName,
+  resolveResourceCatalog,
+  type ExternalResourceCatalogSource,
+  type ResourceCatalogFormat,
+  type ResourceCatalogSource,
+} from "../catalog/resource-catalog.js";
+import { resolvePicoPaths } from "../paths/pico-paths.js";
 
 // agentskills.io 规范的元数据长度上限,超长截断避免撑爆渐进式暴露清单
 const MAX_NAME_LENGTH = 64;
@@ -46,6 +56,11 @@ export interface Skill {
   sourcePath?: string;
   /** Claude/Pico 扩展 frontmatter，由会话 Hook runtime 在 skill 激活期解析。 */
   hooks?: unknown;
+  argumentHint?: string;
+  allowedTools?: string[];
+  model?: string;
+  /** 资源来源只用于优先级、诊断与展示，不影响 Skill 正文语义。 */
+  source?: ResourceCatalogSource;
 }
 
 export interface SkillSummary {
@@ -53,12 +68,24 @@ export interface SkillSummary {
   description: string;
 }
 
+export interface SkillLoaderOptions {
+  readonly homeDir?: string;
+  readonly picoHome?: string;
+  readonly env?: Readonly<Record<string, string | undefined>>;
+  readonly externalSources?: readonly ExternalResourceCatalogSource[];
+  /** 显式开启用户 Pico/Claude Skills；传入 homeDir/picoHome 时也自动开启。 */
+  readonly includeUserResources?: boolean;
+}
+
 /** 负责从本地文件系统中加载并解析符合规范的技能模板 */
 export class SkillLoader {
   // 文件签名缓存:每次扫描 SKILL.md 路径和 mtime/size,未变则复用解析结果。
   private cache?: { skills: Skill[]; signature: string };
 
-  constructor(private readonly workDir: string) {}
+  constructor(
+    private readonly workDir: string,
+    private readonly options: SkillLoaderOptions = {},
+  ) {}
 
   /**
    * 扫描 Claude/Pico 两个 Skill 目录,解析所有 SKILL.md,格式化为字符串准备注入 Context。
@@ -79,8 +106,13 @@ export class SkillLoader {
   }
 
   async listSummaries(): Promise<SkillSummary[]> {
-    const skills = await this.loadSkillFiles();
+    const skills = await this.list();
     return skills.map(({ name, description }) => ({ name, description }));
+  }
+
+  /** 供 system prompt、skill_view 与 Slash Command 投影共用的唯一 Skill Catalog。 */
+  async list(): Promise<Skill[]> {
+    return await this.loadSkillFiles();
   }
 
   async viewBody(name: string): Promise<string | undefined> {
@@ -92,29 +124,49 @@ export class SkillLoader {
   }
 
   async view(name: string): Promise<Skill | undefined> {
-    const skills = await this.loadSkillFiles();
-    return skills.find((skill) => skill.name === name);
+    const skills = await this.list();
+    const key = canonicalResourceName(name);
+    return skills.find((skill) => canonicalResourceName(skill.name) === key);
   }
 
   private async loadSkillFiles(): Promise<Skill[]> {
-    // 与 slash command 投影保持同一发现顺序；同名时 Claude 目录优先。
-    const skillBaseDirs = [
-      join(this.workDir, ".claude", "skills"),
-      join(this.workDir, ".claw", "skills"),
-    ];
-    const skillFiles = (await Promise.all(skillBaseDirs.map(walkForSkillMd))).flat();
-    const signature = await skillFileSignature(skillFiles);
+    const sources = this.catalogSources();
+    const skillFiles = (
+      await Promise.all(
+        sources.map(async (source) =>
+          (await walkForSkillMd(source.root)).map((file) => ({ file, source })),
+        ),
+      )
+    ).flat();
+    const signature = await skillFileSignature(skillFiles.map(({ file }) => file));
     if (this.cache && this.cache.signature === signature) {
       return this.cache.skills;
     }
 
-    const skills: Skill[] = [];
-    for (const file of skillFiles) {
+    const candidates = [];
+    for (const { file, source } of skillFiles) {
       try {
         const content = await readBoundedUtf8(file, MAX_SKILL_FILE_BYTES);
         // frontmatter 无 name 时回退到 SKILL.md 所在目录名(对齐 Hermes)
         const fallbackName = basename(dirname(file));
-        skills.push({ ...parseSkillMD(content, fallbackName), sourcePath: file });
+        const parsed = parseSkillMD(content, fallbackName);
+        const allowedTools = normalizeAllowedTools(
+          parsed.allowedTools,
+          source.format,
+          parsed.name,
+          file,
+        );
+        candidates.push({
+          name: parsed.name,
+          source,
+          sourcePath: file,
+          value: {
+            ...parsed,
+            ...(allowedTools === undefined ? {} : { allowedTools }),
+            sourcePath: file,
+            source,
+          } satisfies Skill,
+        });
       } catch (err) {
         // 区分权限/编码类可预期错误(debug 跳过)与其他异常(warn 跳过)
         if (isErrnoException(err, "EACCES") || isErrnoException(err, "EISDIR")) {
@@ -125,14 +177,74 @@ export class SkillLoader {
       }
     }
 
-    const byName = new Map<string, Skill>();
-    for (const skill of skills) {
-      if (!byName.has(skill.name)) byName.set(skill.name, skill);
+    const resolved = resolveResourceCatalog(candidates);
+    for (const conflict of resolved.conflicts) {
+      logger.warn(conflict, "[skill-catalog] 同级 Skill 名称冲突，已保留第一条");
     }
-    const sorted = [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
+    const sorted = [...resolved.entries];
     this.cache = { skills: sorted, signature };
     return sorted;
   }
+
+  private catalogSources(): ResourceCatalogSource[] {
+    const homeDir = this.options.homeDir ?? homedir();
+    const paths = resolvePicoPaths(this.workDir, {
+      homeDir,
+      env: this.options.env ?? process.env,
+      ...(this.options.picoHome ? { picoHome: this.options.picoHome } : {}),
+    });
+    const includeUserResources =
+      this.options.includeUserResources === true ||
+      this.options.homeDir !== undefined ||
+      this.options.picoHome !== undefined;
+    return [
+      source("project-pico", "project", "pico-native", paths.project.skills, 50),
+      // `.claw` 只作为旧 Pico 版本过渡输入，不再是原生事实源。
+      source(
+        "project-claw-legacy",
+        "project",
+        "pico-legacy",
+        join(this.workDir, ".claw", "skills"),
+        45,
+      ),
+      source(
+        "project-claude",
+        "project",
+        "claude-compat",
+        join(this.workDir, ".claude", "skills"),
+        40,
+      ),
+      ...(includeUserResources
+        ? [
+            source("user-pico", "user", "pico-native", paths.home.skills, 30),
+            source("user-claude", "user", "claude-compat", join(homeDir, ".claude", "skills"), 20),
+          ]
+        : []),
+      ...(this.options.externalSources ?? []),
+    ];
+  }
+}
+
+function source(
+  id: string,
+  scope: ResourceCatalogSource["scope"],
+  format: ResourceCatalogFormat,
+  root: string,
+  priority: number,
+): ResourceCatalogSource {
+  return { id, scope, format, root, priority };
+}
+
+function normalizeAllowedTools(
+  tools: string[] | undefined,
+  format: ResourceCatalogFormat,
+  resource: string,
+  sourcePath: string,
+): string[] | undefined {
+  if (tools === undefined || format !== "claude-compat") return tools;
+  const mapped = mapClaudeToolNames(tools, { resource, sourcePath });
+  // 保留未知名，让运行时 allowlist 在 Provider 调用前明确拒绝整条命令。
+  return [...mapped.tools, ...mapped.unknown];
 }
 
 async function skillFileSignature(files: readonly string[]): Promise<string> {
@@ -381,6 +493,39 @@ export function parseSkillMD(content: string, fallbackName = "Unknown Skill"): S
     description: normalizeDescription(fm["description"]),
     body,
     ...(fm["hooks"] === undefined ? {} : { hooks: fm["hooks"] }),
+    ...optionalSkillString("argumentHint", fm["argument-hint"]),
+    ...optionalSkillString("model", fm["model"]),
+    ...optionalSkillTools(fm["allowed-tools"]),
+  };
+}
+
+function optionalSkillString<K extends "argumentHint" | "model">(
+  key: K,
+  value: unknown,
+): Partial<Record<K, string>> {
+  const normalized = typeof value === "string" ? value.trim() : "";
+  return normalized ? ({ [key]: normalized } as Partial<Record<K, string>>) : {};
+}
+
+function optionalSkillTools(value: unknown): { allowedTools?: string[] } {
+  if (value === undefined) return {};
+  if (Array.isArray(value)) {
+    return {
+      allowedTools: value
+        .map(String)
+        .map((item) => item.trim())
+        .filter(Boolean),
+    };
+  }
+  if (typeof value !== "string") return { allowedTools: [] };
+  const trimmed = value.trim();
+  return {
+    allowedTools: trimmed
+      ? trimmed
+          .split(",")
+          .map((item) => item.trim())
+          .filter(Boolean)
+      : [],
   };
 }
 
