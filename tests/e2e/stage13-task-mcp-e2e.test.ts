@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createPicoCommandRegistry } from "../../src/input/pico-command-registry.js";
 import { processUserInput } from "../../src/input/process-user-input.js";
 import { McpConnectionManager } from "../../src/mcp/manager.js";
+import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 import { TaskHostRuntime } from "../../src/tasks/task-runtime.js";
 import { ToolRegistry } from "../../src/tools/registry-impl.js";
 
@@ -233,7 +234,7 @@ describe("stage 13 task and MCP host integration", () => {
     cleanups.push(() => restoredRuntime.close());
     expect(restoredRuntime.get(started.taskId)?.status).toBe("completed");
     if (process.platform !== "win32") {
-      const taskDir = join(repo, ".claw", "tasks");
+      const taskDir = resolvePicoPaths(repo).workspace.tasks;
       expect((await stat(taskDir)).mode & 0o777).toBe(0o700);
       expect((await stat(join(taskDir, "state.json"))).mode & 0o777).toBe(0o600);
     }
