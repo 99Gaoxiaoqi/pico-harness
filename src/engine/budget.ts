@@ -49,7 +49,11 @@ export class IterationBudget {
     return this.currentDecision();
   }
 
-  private currentDecision(): BudgetDecision {
+  /**
+   * 只读检查当前预算。子代理与主循环共享同一预算时，用于在新的
+   * Provider 调用前阻止已超限的后续请求，不额外消费轮次。
+   */
+  currentDecision(): BudgetDecision {
     if (this.config.maxTokens !== undefined && this.totalTokens > this.config.maxTokens) {
       return {
         allowed: false,
