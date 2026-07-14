@@ -221,6 +221,56 @@ describe("McpConnectionManager 编排", () => {
     await manager.closeAll();
   });
 
+  it("原子合并项目与 Plugin MCP sources 并保留来源诊断", async () => {
+    const projectPath = join(tmpDir, "mcp.json");
+    await writeFile(
+      projectPath,
+      JSON.stringify({ mcpServers: { project: { ...stdioConfig("project"), enabled: false } } }),
+    );
+    const manager = new McpConnectionManager();
+
+    await manager.replaceSources([
+      { id: "project", path: projectPath },
+      {
+        id: "plugin:reviewer",
+        config: {
+          mcpServers: {
+            "plugin:reviewer:policy": {
+              ...stdioConfig("plugin:reviewer:policy"),
+              enabled: false,
+            },
+          },
+        },
+      },
+    ]);
+
+    expect(manager.getStatusSnapshot()).toMatchObject({
+      configSources: ["project", "plugin:reviewer"],
+      servers: [
+        { name: "project", sourceId: "project", status: "disabled" },
+        {
+          name: "plugin:reviewer:policy",
+          sourceId: "plugin:reviewer",
+          status: "disabled",
+        },
+      ],
+    });
+  });
+
+  it("多个 MCP sources 声明同名 server 时 fail-closed", async () => {
+    const manager = new McpConnectionManager();
+    const config = {
+      mcpServers: { duplicate: { ...stdioConfig("duplicate"), enabled: false } },
+    };
+
+    await expect(
+      manager.replaceSources([
+        { id: "project", config },
+        { id: "plugin:duplicate", config },
+      ]),
+    ).rejects.toThrow("拒绝静默覆盖");
+  });
+
   it("closeAll 后保留 server 条目并把已连接状态重置为 pending", async () => {
     const configPath = join(tmpDir, "mcp.json");
     await writeFile(
