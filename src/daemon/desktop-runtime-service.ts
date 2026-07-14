@@ -38,8 +38,6 @@ import { WorkspaceRuntimeService } from "./workspace-runtime-service.js";
 import { DesktopAutomationService } from "./desktop-automation-service.js";
 
 const UNSUPPORTED_DESKTOP_METHODS: ReadonlySet<string> = new Set([
-  "run.pause",
-  "run.resume",
   "approval.respond",
   "prompt.respond",
   "config.update",
@@ -590,7 +588,12 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     if (!run) {
       throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.NOT_FOUND, `Run ${runId} 不存在`);
     }
-    if (run.status === "running" || run.status === "cancelling") {
+    if (
+      run.status === "running" ||
+      run.status === "pause_requested" ||
+      run.status === "paused" ||
+      run.status === "cancelling"
+    ) {
       throw new RuntimeProtocolError(
         RUNTIME_ERROR_CODES.CONFLICT,
         `Run ${runId} 尚未结束，Changes 还未固化`,

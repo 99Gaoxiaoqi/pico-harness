@@ -137,6 +137,7 @@ export function createProductionLocalDaemonHost(
             approvalNotifier: broker.notifyApproval,
             approvalManager: broker.approvalManager,
             askUserHandler: broker.askUserHandler,
+            waitAtSafeBoundary: context.waitAtSafeBoundary,
             rewindPointSink: context.bindCheckpoint,
           },
         );

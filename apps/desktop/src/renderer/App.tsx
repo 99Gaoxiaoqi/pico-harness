@@ -560,6 +560,7 @@ function TaskPage() {
   if (!run)
     return <EmptyState title="找不到这次运行" detail="它可能已被归档，或 Runtime 尚未同步完成。" />;
   const paused = ["paused", "pause_requested"].includes(run.status);
+  const terminal = ["cancelled", "failed", "succeeded"].includes(run.status);
   return (
     <div className="task-layout">
       <div className="task-main page-stack">
@@ -574,7 +575,7 @@ function TaskPage() {
           <div className="task-controls" aria-label="运行控制">
             <Button
               onClick={() => void (paused ? actions.resumeRun(run.id) : actions.pauseRun(run.id))}
-              disabled={Boolean(busy)}
+              disabled={Boolean(busy) || terminal || run.status === "cancelling"}
             >
               {paused ? (
                 <Play aria-hidden="true" size={15} />
@@ -586,7 +587,7 @@ function TaskPage() {
             <Button
               variant="danger"
               onClick={() => void actions.stopRun(run.id)}
-              disabled={Boolean(busy)}
+              disabled={Boolean(busy) || terminal || run.status === "cancelling"}
             >
               <Square aria-hidden="true" size={14} />
               停止
