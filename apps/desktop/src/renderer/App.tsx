@@ -12,12 +12,15 @@ import {
   Folder,
   FolderGit2,
   Gauge,
+  GitFork,
   History,
   Home,
   Layers3,
   MessageSquareMore,
+  Minimize2,
   Network,
   Plus,
+  Pencil,
   RefreshCw,
   RotateCcw,
   Search,
@@ -595,6 +598,9 @@ function ConversationPage() {
   const [selectedApprovalId, setSelectedApprovalId] = useState<string>();
   const [selectedPromptId, setSelectedPromptId] = useState<string>();
   const [inspector, setInspector] = useState<ConversationInspectorView>();
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [titleDraft, setTitleDraft] = useState("");
+  const [confirmCompact, setConfirmCompact] = useState(false);
 
   useEffect(() => {
     if (sessionId) void actions.loadSession(sessionId);
@@ -607,6 +613,8 @@ function ConversationPage() {
     setPromptOpen(false);
     setSelectedApprovalId(undefined);
     setSelectedPromptId(undefined);
+    setEditingTitle(false);
+    setConfirmCompact(false);
   }, [sessionId]);
 
   const session = data.sessions.find((item) => item.id === sessionId);
@@ -620,6 +628,10 @@ function ConversationPage() {
       ? "paused"
       : "running"
     : "idle";
+
+  useEffect(() => {
+    if (!editingTitle) setTitleDraft(session?.title ?? "");
+  }, [editingTitle, session?.title]);
 
   const items = useMemo<readonly ConversationItemView[]>(() => {
     const persisted = conversation?.items ?? [];
@@ -731,7 +743,39 @@ function ConversationPage() {
         <div className="conversation-session-header">
           <div>
             <span className="eyebrow">{sessionId ? "会话" : "新会话"}</span>
-            <h2>{session?.title ?? (sessionId ? "正在载入会话…" : "今天想一起做什么？")}</h2>
+            {editingTitle && sessionId ? (
+              <form
+                className="conversation-title-editor"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void actions
+                    .renameSession(sessionId, titleDraft)
+                    .then(() => setEditingTitle(false));
+                }}
+              >
+                <label className="conversation-sr-only" htmlFor="conversation-title">
+                  会话标题
+                </label>
+                <input
+                  id="conversation-title"
+                  value={titleDraft}
+                  autoFocus
+                  onChange={(event) => setTitleDraft(event.target.value)}
+                />
+                <Button
+                  type="submit"
+                  variant="quiet"
+                  disabled={!titleDraft.trim() || Boolean(busy)}
+                >
+                  保存
+                </Button>
+                <Button type="button" variant="quiet" onClick={() => setEditingTitle(false)}>
+                  取消
+                </Button>
+              </form>
+            ) : (
+              <h2>{session?.title ?? (sessionId ? "正在载入会话…" : "今天想一起做什么？")}</h2>
+            )}
           </div>
           <div className="conversation-session-header__meta">
             {conversation?.usage && (
@@ -743,6 +787,41 @@ function ConversationPage() {
               </span>
             )}
             {activeRun && <StatusPill status={activeRun.status} />}
+            {sessionId && (
+              <div className="conversation-session-actions" aria-label="会话操作">
+                <button
+                  type="button"
+                  disabled={Boolean(activeRun) || Boolean(busy)}
+                  onClick={() => setEditingTitle(true)}
+                >
+                  <Pencil aria-hidden="true" /> 重命名
+                </button>
+                <button
+                  type="button"
+                  disabled={Boolean(activeRun) || Boolean(busy)}
+                  onClick={() =>
+                    void actions
+                      .forkSession(sessionId)
+                      .then((forkedId) => forkedId && navigate(`/session/${forkedId}`))
+                  }
+                >
+                  <GitFork aria-hidden="true" /> 分叉
+                </button>
+                <button
+                  type="button"
+                  disabled={Boolean(activeRun) || Boolean(busy)}
+                  onClick={() => {
+                    if (!confirmCompact) {
+                      setConfirmCompact(true);
+                      return;
+                    }
+                    void actions.compactSession(sessionId).then(() => setConfirmCompact(false));
+                  }}
+                >
+                  <Minimize2 aria-hidden="true" /> {confirmCompact ? "确认压缩" : "压缩"}
+                </button>
+              </div>
+            )}
           </div>
         </div>
       }

@@ -422,6 +422,9 @@ export interface RuntimeActions {
     readonly behavior?: ComposerBehavior;
     readonly expectedRunId?: string;
   }): Promise<string | undefined>;
+  renameSession(sessionId: string, title: string): Promise<void>;
+  forkSession(sessionId: string): Promise<string | undefined>;
+  compactSession(sessionId: string): Promise<void>;
   setSessionArchived(sessionId: string, archived: boolean): Promise<void>;
   pauseRun(runId: string): Promise<void>;
   resumeRun(runId: string): Promise<void>;
@@ -869,6 +872,56 @@ export function useRuntimeStore(): RuntimeStore {
           }
         });
         return resolvedSessionId;
+      },
+      async renameSession(sessionId, title) {
+        const workspacePath = dataRef.current.workspacePath;
+        if (!workspacePath || !title.trim()) return;
+        await perform("rename-session", async (bridge) => {
+          if (!preview) {
+            await invoke(bridge, "session.rename", {
+              workspacePath,
+              sessionId,
+              title: title.trim(),
+            });
+            await loadWorkspace(bridge, workspacePath);
+            return;
+          }
+          setData((current) => ({
+            ...current,
+            sessions: current.sessions.map((session) =>
+              session.id === sessionId ? { ...session, title: title.trim() } : session,
+            ),
+          }));
+        });
+      },
+      async forkSession(sessionId) {
+        const workspacePath = dataRef.current.workspacePath;
+        if (!workspacePath) return undefined;
+        let forkedSessionId: string | undefined;
+        await perform("fork-session", async (bridge) => {
+          if (preview) {
+            forkedSessionId = `${sessionId}-fork`;
+            return;
+          }
+          const value = await invoke(bridge, "session.fork", { workspacePath, sessionId });
+          const result = isRecord(value) ? value : {};
+          const session = isRecord(result.session) ? result.session : {};
+          forkedSessionId = stringValue(session.sessionId);
+          await loadWorkspace(bridge, workspacePath);
+          if (forkedSessionId) await loadConversation(bridge, workspacePath, forkedSessionId);
+        });
+        return forkedSessionId;
+      },
+      async compactSession(sessionId) {
+        const workspacePath = dataRef.current.workspacePath;
+        if (!workspacePath) return;
+        await perform("compact-session", async (bridge) => {
+          if (!preview) {
+            await invoke(bridge, "session.compact", { workspacePath, sessionId });
+            await loadConversation(bridge, workspacePath, sessionId);
+          }
+          setMessage("会话上下文已压缩，可见历史已从 Runtime 重新加载。");
+        });
       },
       async setSessionArchived(sessionId, archived) {
         const workspacePath = dataRef.current.workspacePath;
