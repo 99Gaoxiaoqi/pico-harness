@@ -4,8 +4,13 @@ import { join } from "node:path";
 import { isHardlineCommand } from "../approval/manager.js";
 import { matcherMatches } from "../hooks/runner.js";
 import type { HookHandler, HookInput, HookMatcherGroup, HooksConfig } from "../hooks/types.js";
+import { logger } from "../observability/logger.js";
 import type { ToolCall } from "../schema/message.js";
-import type { RequestMiddleware, RequestMiddlewareResult } from "../tools/registry.js";
+import type {
+  ExecutionMiddleware,
+  RequestMiddleware,
+  RequestMiddlewareResult,
+} from "../tools/registry.js";
 import { WorkspaceRoots, workspaceAccessesFromCall } from "../tools/workspace-roots.js";
 import type { WorkspaceTrustStore } from "../security/workspace-trust.js";
 import { verifyBackgroundMcpConfig } from "./background-mcp-policy.js";
@@ -52,7 +57,17 @@ export interface PreparedBackgroundYoloPolicy {
   readonly allowedTools: ReadonlySet<string>;
   readonly allowedToolNetworkHosts: ReadonlySet<string>;
   readonly mcpConfigPath?: string;
-  readonly hookRunner?: StrictBackgroundHookRunner;
+  readonly hookRunner?: BackgroundHookRunner;
+}
+
+export interface BackgroundHookRunner {
+  runPreToolUse(toolName: string, toolInput: unknown, sessionId: string): Promise<StrictHookResult>;
+  runPostToolUse(
+    toolName: string,
+    toolInput: unknown,
+    toolResponse: string,
+    sessionId: string,
+  ): Promise<void>;
 }
 
 export type BackgroundPolicyViolationCode =
@@ -133,7 +148,7 @@ export async function prepareBackgroundYoloPolicy(input: {
 
   const hooks = await loadStrictHooksConfig(workspacePath);
   let hookRunner: StrictBackgroundHookRunner | undefined;
-  if (hasPreToolHooks(hooks)) {
+  if (hasToolHooks(hooks)) {
     try {
       hookRunner = new StrictBackgroundHookRunner(
         workspacePath,
@@ -196,6 +211,41 @@ export function buildBackgroundYoloMiddleware(input: {
     const rewrittenCall = { ...call, arguments: rewrittenArguments };
     const rewritten = validateBackgroundToolCall(rewrittenCall, input.policy, input.workspaceRoots);
     return rewritten.allowed ? { ...rewritten, call: rewrittenCall } : rewritten;
+  };
+}
+
+/**
+ * 后台 Hook 的执行阶段边界：不改写工具结果，且 PostToolUse 失败不能
+ * 把已经发生的工具副作用伪装成失败或成功。
+ */
+export function buildBackgroundYoloHookExecutionMiddleware(input: {
+  policy: Pick<PreparedBackgroundYoloPolicy, "hookRunner">;
+  sessionId: string;
+}): ExecutionMiddleware {
+  return async (call, next) => {
+    const notify = async (toolResponse: string): Promise<void> => {
+      try {
+        await input.policy.hookRunner?.runPostToolUse(
+          call.name,
+          parseToolInput(call.arguments),
+          toolResponse,
+          input.sessionId,
+        );
+      } catch (error) {
+        logger.warn(
+          { error: errorMessage(error), tool: call.name },
+          "[Hook] 后台 PostToolUse 执行失败，保留原工具结果",
+        );
+      }
+    };
+    try {
+      const output = await next(call);
+      await notify(output);
+      return output;
+    } catch (error) {
+      await notify(`[tool_error] ${errorMessage(error)}`);
+      throw error;
+    }
   };
 }
 
@@ -408,7 +458,7 @@ function assertHookHandler(
   };
 }
 
-interface StrictHookResult {
+export interface StrictHookResult {
   decision: "allow" | "deny";
   reason?: string;
   modifiedInput?: unknown;
@@ -477,6 +527,38 @@ export class StrictBackgroundHookRunner {
       decision: "allow",
       ...(modifiedInput !== undefined ? { modifiedInput } : {}),
     };
+  }
+
+  async runPostToolUse(
+    toolName: string,
+    toolInput: unknown,
+    toolResponse: string,
+    sessionId: string,
+  ): Promise<void> {
+    for (const group of this.config.PostToolUse ?? []) {
+      if (!matcherMatches(group, toolName)) continue;
+      for (const handler of group.hooks) {
+        const result = await this.execute(handler, {
+          session_id: sessionId,
+          cwd: this.workDir,
+          hook_event_name: "PostToolUse",
+          payload: {
+            tool_name: toolName,
+            tool_input: toolInput,
+            tool_response: toolResponse,
+          },
+          tool_name: toolName,
+          tool_input: toolInput,
+          tool_response: toolResponse,
+        });
+        if (result.decision === "deny") {
+          logger.warn(
+            { tool: toolName, reason: result.reason },
+            "[Hook] 后台 PostToolUse 返回 deny，工具结果保持不变",
+          );
+        }
+      }
+    }
   }
 
   private execute(handler: HookHandler, input: HookInput): Promise<StrictHookResult> {
@@ -585,8 +667,8 @@ function interpretStrictHookExit(
   };
 }
 
-function hasPreToolHooks(config: HooksConfig): boolean {
-  return (config.PreToolUse?.length ?? 0) > 0;
+function hasToolHooks(config: HooksConfig): boolean {
+  return (config.PreToolUse?.length ?? 0) > 0 || (config.PostToolUse?.length ?? 0) > 0;
 }
 
 function parseToolInput(argumentsJson: string): unknown {

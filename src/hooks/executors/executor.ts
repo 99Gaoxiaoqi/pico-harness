@@ -57,6 +57,10 @@ export interface HookHandlerExecutorOptions {
 
 /** 五类前台 Hook handler 的统一执行器。普通失败 fail-open，父级取消原样上抛。 */
 export class DefaultHookExecutor implements HookExecutor {
+  private readonly lifecycle = new AbortController();
+  private readonly asyncCommands = new Set<Promise<void>>();
+  private disposed = false;
+
   constructor(private readonly options: HookHandlerExecutorOptions) {}
 
   /** SessionRuntime 每轮重建 Provider/MCP/Engine 时更新活态依赖，HookService 本身保持不变。 */
@@ -76,24 +80,38 @@ export class DefaultHookExecutor implements HookExecutor {
     input: HookInput,
     context: HookExecutionContext,
   ): Promise<HookOutput> {
-    if (context.signal?.aborted) throw abortReason(context.signal);
+    if (this.disposed) throw abortReason(this.lifecycle.signal);
+    const signal = context.signal
+      ? AbortSignal.any([context.signal, this.lifecycle.signal])
+      : this.lifecycle.signal;
+    const effectiveContext = { ...context, signal };
+    if (signal.aborted) throw abortReason(signal);
     try {
       switch (resolved.handler.type) {
         case "command":
-          return await this.executeCommand(resolved, resolved.handler, input, context.signal);
+          return await this.executeCommand(resolved, resolved.handler, input, signal);
         case "http":
-          return await this.executeHttp(resolved, resolved.handler, input, context.signal);
+          return await this.executeHttp(resolved, resolved.handler, input, signal);
         case "mcp_tool":
-          return await this.executeMcp(resolved, resolved.handler, input, context.signal);
+          return await this.executeMcp(resolved, resolved.handler, input, signal);
         case "prompt":
-          return await this.executePrompt(resolved, resolved.handler, input, context.signal);
+          return await this.executePrompt(resolved, resolved.handler, input, signal);
         case "agent":
-          return await this.executeAgent(resolved, resolved.handler, input, context.signal);
+          return await this.executeAgent(resolved, resolved.handler, input, signal);
       }
     } catch (err) {
-      if (context.signal?.aborted) throw abortReason(context.signal);
+      if (effectiveContext.signal.aborted) throw abortReason(effectiveContext.signal);
       return failOpen(resolved, errorMessage(err));
     }
+  }
+
+  /** 终止 Session 内所有活动 handler，并等待已启动的异步 command 收口。 */
+  async dispose(): Promise<void> {
+    if (!this.disposed) {
+      this.disposed = true;
+      this.lifecycle.abort(new Error("Hook runtime disposed"));
+    }
+    await Promise.allSettled([...this.asyncCommands]);
   }
 
   private async executeCommand(
@@ -113,9 +131,9 @@ export class DefaultHookExecutor implements HookExecutor {
     );
     await running.started;
     if (handler.async || handler.asyncRewake) {
-      void running.completion.then(
-        async (output) => {
-          if (handler.asyncRewake && this.options.onAsyncRewake) {
+      const tracked = running.completion
+        .then(async (output) => {
+          if (!this.disposed && handler.asyncRewake && this.options.onAsyncRewake) {
             try {
               await this.options.onAsyncRewake(resolved, output);
             } catch (err) {
@@ -125,18 +143,21 @@ export class DefaultHookExecutor implements HookExecutor {
               );
             }
           }
-        },
-        (err: unknown) => {
-          logger.warn(
-            {
-              err: errorMessage(err),
-              handlerId: resolved.id,
-              source: resolved.source.path,
-            },
-            "[Hook] async command 执行失败",
-          );
-        },
-      );
+        })
+        .catch((err: unknown) => {
+          if (!this.disposed) {
+            logger.warn(
+              {
+                err: errorMessage(err),
+                handlerId: resolved.id,
+                source: resolved.source.path,
+              },
+              "[Hook] async command 执行失败",
+            );
+          }
+        })
+        .finally(() => this.asyncCommands.delete(tracked));
+      this.asyncCommands.add(tracked);
       return { decision: "allow" };
     }
     return await running.completion;

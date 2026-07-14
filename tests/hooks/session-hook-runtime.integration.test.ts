@@ -1,4 +1,4 @@
-import { access, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -137,6 +137,94 @@ describe("SessionHookRuntime integration", () => {
 
       await deactivateB();
       expect(runtime.service.currentSnapshot().handlers.PreToolUse).toHaveLength(0);
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it("组件自身的 ConfigChange deny 不会阻断最后一个租约退租", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pico-component-self-guard-"));
+    cleanup.push(root);
+    const workDir = join(root, "workspace");
+    const userHome = join(root, "home");
+    await Promise.all([mkdir(workDir, { recursive: true }), mkdir(userHome, { recursive: true })]);
+    const runtime = await createSessionHookRuntime({ workDir, userHome, sessionId: "self-guard" });
+    runtime.bind({
+      provider: {
+        async generate() {
+          return { role: "assistant", content: '{"ok":false,"reason":"keep me"}' };
+        },
+      },
+    });
+    try {
+      const deactivate = await runtime.activateComponentSource({
+        kind: "skill",
+        path: join(workDir, ".claude", "skills", "self-guard", "SKILL.md"),
+        componentId: "self-guard",
+        inlineHooks: {
+          ConfigChange: [{ hooks: [{ type: "prompt", prompt: "deny retirement" }] }],
+        },
+      });
+      expect(runtime.service.currentSnapshot().handlers.ConfigChange).toHaveLength(1);
+
+      await deactivate();
+
+      expect(runtime.service.currentSnapshot().handlers.ConfigChange).toHaveLength(0);
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it("组件退租不会绕过同期静态 ConfigChange 守卫", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pico-component-static-guard-"));
+    cleanup.push(root);
+    const workDir = join(root, "workspace");
+    const userHome = join(root, "home");
+    const configPath = join(workDir, ".pico", "hooks.json");
+    await Promise.all([
+      mkdir(join(workDir, ".pico"), { recursive: true }),
+      mkdir(userHome, { recursive: true }),
+    ]);
+    const config = (prompt: string) =>
+      JSON.stringify({ ConfigChange: [{ hooks: [{ type: "prompt", prompt }] }] });
+    await writeFile(configPath, config("old static guard"));
+    let allowConfigChange = true;
+    const runtime = await createSessionHookRuntime({
+      workDir,
+      userHome,
+      sessionId: "static-guard",
+    });
+    runtime.bind({
+      provider: {
+        async generate() {
+          return {
+            role: "assistant",
+            content: JSON.stringify({ ok: allowConfigChange, reason: "static guard" }),
+          };
+        },
+      },
+    });
+    try {
+      const deactivate = await runtime.activateComponentSource({
+        kind: "skill",
+        path: join(workDir, ".claude", "skills", "temporary", "SKILL.md"),
+        componentId: "temporary",
+        inlineHooks: {
+          PreToolUse: [{ matcher: "bash", hooks: [{ type: "prompt", prompt: "temporary" }] }],
+        },
+      });
+      expect(runtime.service.currentSnapshot().handlers.PreToolUse).toHaveLength(1);
+
+      allowConfigChange = false;
+      await writeFile(configPath, config("unaccepted static guard"));
+      await deactivate();
+
+      const snapshot = runtime.service.currentSnapshot();
+      expect(snapshot.handlers.PreToolUse).toHaveLength(0);
+      expect(snapshot.handlers.ConfigChange[0]?.handler).toMatchObject({
+        type: "prompt",
+        prompt: "old static guard",
+      });
     } finally {
       await runtime.dispose();
     }

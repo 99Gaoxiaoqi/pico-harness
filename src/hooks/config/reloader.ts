@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { watch, type FSWatcher } from "node:fs";
 import { access } from "node:fs/promises";
 import { basename, dirname, resolve, sep } from "node:path";
@@ -8,7 +9,7 @@ import {
   type LoadHookSnapshotOptions,
   type LoadHookSnapshotResult,
 } from "../config.js";
-import type { HookOutput, HookSnapshot } from "../types.js";
+import type { HookOutput, HookSnapshot, HookSource } from "../types.js";
 
 export interface HookConfigChangeContext {
   oldSnapshot: HookSnapshot;
@@ -93,6 +94,49 @@ export class HookConfigReloader {
       });
     await this.serial;
     return accepted;
+  }
+
+  /**
+   * 从已接受快照中退租动态 source，不读取可能已同时变更的磁盘配置。
+   * 退租后的常规 reload 仍会通过 ConfigChange 守卫，因此既不会被旧组件
+   * 永久自阻断，也不会把同期静态配置变更捆绑放行。
+   */
+  async retireSources(matches: (source: HookSource) => boolean): Promise<boolean> {
+    let retired = false;
+    this.serial = this.serial
+      .catch(() => undefined)
+      .then(async () => {
+        const previous = this.current ?? (await this.start());
+        const sources = previous.sources.filter((entry) => !matches(entry.source));
+        if (sources.length === previous.sources.length) return;
+        const version = previous.snapshot.version + 1;
+        const handlers = Object.fromEntries(
+          Object.entries(previous.snapshot.handlers).map(([event, entries]) => [
+            event,
+            Object.freeze(entries.filter((entry) => !matches(entry.source))),
+          ]),
+        ) as HookSnapshot["handlers"];
+        const diagnostics = Object.freeze(
+          previous.snapshot.diagnostics.filter((entry) => !matches(entry.source)),
+        );
+        const snapshot = Object.freeze({
+          ...previous.snapshot,
+          id: createHash("sha256")
+            .update(`${previous.snapshot.id}:retire:${version}`)
+            .digest("hex"),
+          version,
+          createdAt: new Date().toISOString(),
+          handlers,
+          diagnostics,
+        });
+        const next = Object.freeze({ ...previous, snapshot, sources: Object.freeze(sources) });
+        await this.options.onSwap(next);
+        this.current = next;
+        await this.refreshWatchers(next);
+        retired = true;
+      });
+    await this.serial;
+    return retired;
   }
 
   stop(): void {

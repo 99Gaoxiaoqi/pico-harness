@@ -58,7 +58,6 @@ export async function createSessionHookRuntime(
   const componentSources = new Map<string, HookConfigSourceSpec>();
   let componentSourceSequence = 0;
   let componentSourceQueue = Promise.resolve();
-  let componentTransition: "activate" | "deactivate" | undefined;
   let candidateRules: readonly HookifyRule[] | undefined;
   const decisionProvider: HookDecisionProvider = {
     evaluate(event, payload) {
@@ -82,7 +81,6 @@ export async function createSessionHookRuntime(
       } catch (error) {
         return { decision: "deny", reason: `Hookify 规则无效: ${errorMessage(error)}` };
       }
-      if (componentTransition === "deactivate") return true;
       return await service.dispatch("ConfigChange", {
         paths: changedPaths,
         proposedHash: candidate.snapshot.id,
@@ -150,6 +148,14 @@ export async function createSessionHookRuntime(
     return await running;
   };
 
+  const sameComponentSource = (
+    current: Pick<HookConfigSourceSpec, "kind" | "path" | "componentId">,
+    expected: Pick<HookConfigSourceSpec, "kind" | "path" | "componentId">,
+  ): boolean =>
+    current.kind === expected.kind &&
+    current.path === expected.path &&
+    current.componentId === expected.componentId;
+
   const activateComponentSource = async (
     source: HookConfigSourceSpec,
   ): Promise<() => Promise<void>> => {
@@ -162,10 +168,7 @@ export async function createSessionHookRuntime(
     const key = `${source.kind}:${source.componentId}:${source.path}:${++componentSourceSequence}`;
     await serializeComponentSourceChange(async () => {
       componentSources.set(key, source);
-      componentTransition = "activate";
-      const accepted = await reloader.reload([source.path]).finally(() => {
-        componentTransition = undefined;
-      });
+      const accepted = await reloader.reload([source.path]);
       if (!accepted) {
         componentSources.delete(key);
         throw new Error(`组件 Hook source 激活被拒绝: ${source.componentId}`);
@@ -177,14 +180,17 @@ export async function createSessionHookRuntime(
       active = false;
       await serializeComponentSourceChange(async () => {
         componentSources.delete(key);
-        componentTransition = "deactivate";
-        const accepted = await reloader.reload([source.path]).finally(() => {
-          componentTransition = undefined;
-        });
+        const equivalentStillActive = [...componentSources.values()].some((candidate) =>
+          sameComponentSource(candidate, source),
+        );
+        if (!equivalentStillActive) {
+          await reloader.retireSources((candidate) => sameComponentSource(candidate, source));
+        }
+        const accepted = await reloader.reload([source.path]);
         if (!accepted) {
           logger.warn(
             { componentId: source.componentId },
-            "[Hook] 组件 Hook source 释放后未能刷新快照",
+            "[Hook] 组件 Hook source 已退租，同期静态配置刷新被拒绝",
           );
         }
       });
@@ -194,14 +200,15 @@ export async function createSessionHookRuntime(
   const clearComponentSources = async (): Promise<void> =>
     await serializeComponentSourceChange(async () => {
       if (componentSources.size === 0) return;
-      const paths = [...componentSources.values()].map((source) => source.path);
+      const sources = [...componentSources.values()];
+      const paths = sources.map((source) => source.path);
       componentSources.clear();
-      componentTransition = "deactivate";
-      const accepted = await reloader.reload(paths).finally(() => {
-        componentTransition = undefined;
-      });
+      await reloader.retireSources((candidate) =>
+        sources.some((source) => sameComponentSource(candidate, source)),
+      );
+      const accepted = await reloader.reload(paths);
       if (!accepted) {
-        logger.warn("[Hook] 清空组件 Hook source 后未能刷新快照");
+        logger.warn("[Hook] 组件 Hook source 已清空，同期静态配置刷新被拒绝");
       }
     });
 
@@ -214,7 +221,10 @@ export async function createSessionHookRuntime(
     reload: async (changedPaths) => await reloader.reload(changedPaths),
     activateComponentSource,
     clearComponentSources,
-    dispose: async () => reloader.stop(),
+    dispose: async () => {
+      reloader.stop();
+      await executor.dispose();
+    },
   };
 }
 
