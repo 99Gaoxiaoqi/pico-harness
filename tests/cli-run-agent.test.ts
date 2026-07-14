@@ -119,20 +119,25 @@ async function waitForApprovalBeforeCompletion<T>(
   nextNotice: Promise<ApprovalNotice>,
   runPromise: Promise<T>,
 ): Promise<ApprovalNotice> {
-  return Promise.race([
-    nextNotice,
-    runPromise.then(
-      () => {
-        throw new Error("agent run completed before requesting approval");
-      },
-      (err) => {
-        throw err;
-      },
-    ),
-    new Promise<never>((_, reject) => {
-      setTimeout(() => reject(new Error("timed out waiting for approval")), 1000);
-    }),
-  ]);
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      nextNotice,
+      runPromise.then(
+        () => {
+          throw new Error("agent run completed before requesting approval");
+        },
+        (err) => {
+          throw err;
+        },
+      ),
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => reject(new Error("timed out waiting for approval")), 3000);
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
 }
 
 async function useDefaultInteractionMode(sessionId: string, workDir: string): Promise<void> {
