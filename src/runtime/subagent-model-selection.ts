@@ -34,9 +34,7 @@ export function resolveSubagentModelSelection(
 ): ResolvedSubagentModelSelection {
   const parentRoute = options.router.require(options.parentRouteId);
   const requested = requestedRoute(options);
-  const route = requested.routeId
-    ? options.router.require(requested.routeId)
-    : parentRoute;
+  const route = requested.routeId ? options.router.require(requested.routeId) : parentRoute;
 
   if (!options.allowRouteOverride && route.id !== parentRoute.id) {
     throw new Error(
@@ -48,10 +46,7 @@ export function resolveSubagentModelSelection(
     options.ephemeralThinkingEffort ??
     options.profileThinkingEffort ??
     options.parentThinkingEffort;
-  const thinking = coordinateReasoningLevel(
-    route.capabilities.reasoningProfile,
-    requestedThinking,
-  );
+  const thinking = coordinateReasoningLevel(route.capabilities.reasoningProfile, requestedThinking);
 
   return {
     route,

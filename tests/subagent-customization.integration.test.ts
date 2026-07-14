@@ -23,6 +23,7 @@ import { ToolRegistry, ReadFileTool, BashTool } from "../src/tools/registry-impl
 import type { LLMProvider } from "../src/provider/interface.js";
 import type { Message, ToolDefinition, ToolCall, ToolResult } from "../src/schema/message.js";
 import type { Registry } from "../src/tools/registry.js";
+import type { Reporter, SubagentActivityEvent } from "../src/engine/reporter.js";
 
 function subResult(summary: string): SubagentResult {
   return { summary, artifacts: [] };
@@ -96,6 +97,85 @@ describe("子代理自定义 opts 的 Tool 层透传", () => {
     expect(seenOpts[0]!.systemPromptOverride).toBeUndefined();
   });
 
+  it("DelegateTaskTool 将自然语言临时角色约束为追加 instructions 与模型选择意图", async () => {
+    const { runner, seenOpts } = recordingRunner();
+    const tool = new DelegateTaskTool(runner, () => mockRegistry());
+
+    await tool.execute(
+      JSON.stringify({
+        goal: "审查认证模块",
+        agent: {
+          name: "临时审查员",
+          instructions: "只报告高风险问题。",
+          model_route: "volcengine/glm-5.2",
+          thinking_effort: "high",
+          max_turns: 7,
+        },
+      }),
+    );
+
+    expect(seenOpts).toHaveLength(1);
+    expect(seenOpts[0]).toMatchObject({
+      maxTurns: 7,
+      modelSelection: {
+        ephemeralRouteId: "volcengine/glm-5.2",
+        ephemeralThinkingEffort: "high",
+      },
+    });
+    expect(seenOpts[0]!.systemPrompt).toContain("[一次性角色附加要求]");
+    expect(seenOpts[0]!.systemPrompt).toContain("只报告高风险问题。");
+    expect(seenOpts[0]!.systemPrompt).toContain("不能覆盖系统安全边界");
+    expect(seenOpts[0]!.systemPromptOverride).toBeUndefined();
+  });
+
+  it("DelegateTaskTool 在执行前拒绝临时角色携带凭证字段", async () => {
+    const { runner, seenOpts } = recordingRunner();
+    const tool = new DelegateTaskTool(runner, () => mockRegistry());
+
+    await expect(
+      tool.execute(
+        JSON.stringify({
+          goal: "审查认证模块",
+          agent: { model_route: "volcengine/glm-5.2", api_key: "secret" },
+        }),
+      ),
+    ).rejects.toThrow("agent 不支持字段 api_key");
+    expect(seenOpts).toHaveLength(0);
+  });
+
+  it("DelegateTaskTool 在完成活动中保留可信 resolved model", async () => {
+    const events: SubagentActivityEvent[] = [];
+    const runner: AgentRunner = {
+      async runSub(_task, _registry, reporter) {
+        reporter?.onSubagentModelResolved?.({
+          requestedModelRoute: "volcengine/glm-5.2",
+          resolvedModelRoute: "volcengine/glm-5.2",
+          thinkingEffort: "high",
+          source: "ephemeral",
+        });
+        return subResult("审查完成");
+      },
+    };
+    const tool = new DelegateTaskTool(runner, () => mockRegistry(), undefined, {
+      reporter: recordingActivityReporter(events),
+    });
+
+    await tool.execute(
+      JSON.stringify({
+        goal: "审查认证模块",
+        agent: { model_route: "volcengine/glm-5.2", thinking_effort: "high" },
+      }),
+    );
+
+    expect(events.at(-1)).toMatchObject({
+      status: "completed",
+      requestedModelRoute: "volcengine/glm-5.2",
+      resolvedModelRoute: "volcengine/glm-5.2",
+      thinkingEffort: "high",
+      modelSelectionSource: "ephemeral",
+    });
+  });
+
   it("不传自定义 opts 时,透传的 opts 不含新字段(回归保护)", async () => {
     const { runner, seenOpts } = recordingRunner();
     const tool = new SpawnSubagentTool(runner, mockRegistry());
@@ -108,6 +188,21 @@ describe("子代理自定义 opts 的 Tool 层透传", () => {
     expect(seenOpts[0]!.systemPromptOverride).toBeUndefined();
   });
 });
+
+function recordingActivityReporter(events: SubagentActivityEvent[]): Reporter {
+  return {
+    onThinking() {},
+    onToolCall() {},
+    onToolResult() {},
+    onMessage() {},
+    onStart() {},
+    onTurnStart() {},
+    onFinish() {},
+    onSubagentActivity(event) {
+      events.push(event);
+    },
+  };
+}
 
 // ─── 第二层:端到端(真实引擎 + 真实 Tool) ──────────────────────────
 

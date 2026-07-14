@@ -57,7 +57,7 @@ import type {
 } from "../input/types.js";
 import type { ImagePart } from "../schema/message.js";
 import type { ProviderKind } from "../provider/factory.js";
-import { loadModelRouter } from "../provider/model-router.js";
+import { loadModelRouter, type ModelRouter } from "../provider/model-router.js";
 import { createPlatformCredentialVault } from "../provider/credential-vault.js";
 import { isAbortError } from "../provider/errors.js";
 import { defaultIsRetryableError } from "../provider/retry.js";
@@ -769,7 +769,11 @@ async function startLineModeRepl(opts: ReplOptions): Promise<void> {
             ...(opts.addDirs !== undefined ? { addDirs: opts.addDirs } : {}),
             sessionSelection: selection,
           },
-          { reporter: new LineModeReporter(process.stdout), signal: abortController.signal },
+          {
+            reporter: new LineModeReporter(process.stdout),
+            signal: abortController.signal,
+            modelRouter,
+          },
         );
         selection = { mode: "resume", sessionId: result.sessionId };
       } catch (error) {
@@ -1573,6 +1577,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
             };
             await runTuiAgentPrompt(cliOpts, {
               reporter,
+              modelRouter,
               toolDisclosure,
               runtimeState,
               askUserHandler: current.askUserHandler,
@@ -1948,6 +1953,7 @@ export async function runTuiAgentPrompt(
   cliOpts: RunAgentCliOptions,
   deps: {
     reporter: TuiReporter;
+    modelRouter?: ModelRouter;
     toolDisclosure?: ToolDisclosure;
     runtimeState?: TuiRuntimeState;
     askUserHandler?: AskUserHandler;
@@ -2003,6 +2009,7 @@ export async function runTuiAgentPrompt(
         );
       },
       ...(deps.toolDisclosure ? { toolDisclosure: deps.toolDisclosure } : {}),
+      ...(deps.modelRouter ? { modelRouter: deps.modelRouter } : {}),
       ...(deps.runtimeState ? { runtimeState: deps.runtimeState } : {}),
       ...(deps.askUserHandler ? { askUserHandler: deps.askUserHandler } : {}),
       ...(deps.mcpStatusSink ? { mcpStatusSink: deps.mcpStatusSink } : {}),

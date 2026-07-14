@@ -375,6 +375,18 @@ export class TuiReporter implements Reporter {
           : {}),
         ...(activity.currentAction !== undefined ? { currentAction: activity.currentAction } : {}),
         ...(activity.summary !== undefined ? { summary: activity.summary } : {}),
+        ...(activity.requestedModelRoute !== undefined
+          ? { requestedModelRoute: activity.requestedModelRoute }
+          : {}),
+        ...(activity.resolvedModelRoute !== undefined
+          ? { resolvedModelRoute: activity.resolvedModelRoute }
+          : {}),
+        ...(activity.thinkingEffort !== undefined
+          ? { thinkingEffort: activity.thinkingEffort }
+          : {}),
+        ...(activity.modelSelectionSource !== undefined
+          ? { modelSelectionSource: activity.modelSelectionSource }
+          : {}),
       },
     });
     if (activity.completionPolicy === "detached" && activity.status === "completed") {
