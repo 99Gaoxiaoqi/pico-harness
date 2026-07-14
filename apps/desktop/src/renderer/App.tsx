@@ -778,6 +778,8 @@ function ConversationPage() {
                 </label>
                 <input
                   id="conversation-title"
+                  name="conversation-title"
+                  autoComplete="off"
                   value={titleDraft}
                   autoFocus
                   onChange={(event) => setTitleDraft(event.target.value)}
@@ -891,6 +893,7 @@ function ConversationPage() {
                   <label className="conversation-context-option">
                     <span className="conversation-sr-only">模型</span>
                     <select
+                      name="model-route"
                       aria-label="模型"
                       value={conversation.settings.modelRouteId ?? ""}
                       disabled={Boolean(activeRun) || Boolean(busy)}
@@ -917,6 +920,7 @@ function ConversationPage() {
                   <label className="conversation-context-option">
                     <span className="conversation-sr-only">权限模式</span>
                     <select
+                      name="interaction-mode"
                       aria-label="权限模式"
                       value={conversation.settings.mode}
                       disabled={Boolean(activeRun) || Boolean(busy)}
@@ -936,6 +940,7 @@ function ConversationPage() {
                     <label className="conversation-context-option">
                       <span className="conversation-sr-only">Thinking</span>
                       <select
+                        name="thinking-effort"
                         aria-label="Thinking"
                         value={conversation.settings.thinkingEffort}
                         disabled={Boolean(activeRun) || Boolean(busy)}
@@ -1272,10 +1277,11 @@ function SessionsPage() {
           <Search aria-hidden="true" />
           <span className="sr-only">搜索会话</span>
           <input
+            name="session-search"
             value={query}
             autoComplete="off"
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="搜索会话"
+            placeholder="搜索会话…"
           />
         </label>
         <label className="check-control">
@@ -1387,7 +1393,7 @@ function AutomationsPage() {
               name="name"
               required
               autoComplete="off"
-              placeholder="例如：每周依赖检查"
+              placeholder="例如：每周依赖检查…"
             />
           </div>
           <div>
@@ -1397,7 +1403,7 @@ function AutomationsPage() {
               name="schedule"
               required
               autoComplete="off"
-              placeholder="例如：0 9 * * 1"
+              placeholder="例如：0 9 * * 1…"
             />
           </div>
           <div className="automation-form__prompt">
@@ -1639,6 +1645,7 @@ function SettingsPage() {
           </SettingRow>
           <SettingRow title="关闭后行为" detail="主进程暂不提供状态读取；请选择要应用的行为">
             <select
+              name="background-mode"
               className="select-control"
               value={background}
               disabled={Boolean(busy)}

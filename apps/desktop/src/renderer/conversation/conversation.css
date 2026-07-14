@@ -99,7 +99,7 @@
   padding: 4px 7px;
   border: 0;
   border-radius: 7px;
-  background: transparent;
+  background-color: var(--conversation-bg);
   color: var(--conversation-ink-muted);
   font: inherit;
   font-size: 11px;
