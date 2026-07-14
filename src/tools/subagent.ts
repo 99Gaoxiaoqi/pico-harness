@@ -117,6 +117,8 @@ export interface SubagentRunOptions {
   };
   /** 仅携带模型选择意图；Provider、凭证和 endpoint 只能由可信宿主解析。 */
   modelSelection?: SubagentModelSelectionRequest;
+  /** 短生命周宿主无法在主轮结束后持有委派运行时，必须拒绝异步交付。 */
+  allowAsyncCompletion?: boolean;
 }
 
 export interface SubagentModelSelectionRequest {
@@ -392,9 +394,14 @@ export class DelegateTaskTool implements BaseTool {
           },
           completion_policy: {
             type: "string",
-            enum: ["required", "optional", "detached"],
+            enum:
+              this.options.allowAsyncCompletion === false
+                ? ["required"]
+                : ["required", "optional", "detached"],
             description:
-              "结果交付策略。required=前台等待(默认);optional=可先结束并在下一个模型边界自动注入结果;detached=独立运行且不进入主上下文。",
+              this.options.allowAsyncCompletion === false
+                ? "当前宿主仅支持 required：前台等待子代理收口。"
+                : "结果交付策略。required=前台等待(默认);optional=可先结束并在下一个模型边界自动注入结果;detached=独立运行且不进入主上下文。",
           },
         },
       },
@@ -431,6 +438,13 @@ export class DelegateTaskTool implements BaseTool {
     }
 
     const completionPolicy = normalizeCompletionPolicy(input);
+    if (this.options.allowAsyncCompletion === false && completionPolicy !== "required") {
+      return JSON.stringify({
+        status: "rejected",
+        completionPolicy,
+        error: `当前宿主不持有跨轮子代理运行时，已拒绝 ${completionPolicy}；请使用 required。`,
+      });
+    }
     const activities = tasks.map((task) => this.createActivity(task, completionPolicy));
     for (const activity of activities) {
       this.emitActivity(activity, "queued", {

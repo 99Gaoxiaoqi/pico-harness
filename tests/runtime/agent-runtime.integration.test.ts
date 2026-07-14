@@ -82,6 +82,45 @@ describe("AgentRuntime integration", () => {
     expect(provider.calls[1]?.messages.at(-1)?.content).toContain("blocked");
   });
 
+  it("rejects async delegation before dispatch when the host owns a short-lived runtime", async () => {
+    const provider = new ScriptedProvider([
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [
+          {
+            id: "optional-on-short-runtime",
+            name: "delegate_task",
+            arguments: JSON.stringify({
+              goal: "do not silently cancel me",
+              completion_policy: "optional",
+            }),
+          },
+        ],
+      },
+      { role: "assistant", content: "async delegation was rejected explicitly" },
+    ]);
+
+    const result = await new AgentRuntime().execute(
+      {
+        prompt: "dispatch optional work",
+        dir: await mkdtemp(join(tmpdir(), "pico-runtime-short-delegation-")),
+      },
+      { provider, reporter: new SilentReporter() },
+    );
+
+    const delegateDefinition = provider.calls[0]?.tools.find(
+      (tool) => tool.name === "delegate_task",
+    );
+    expect(delegateDefinition?.inputSchema).toMatchObject({
+      properties: { completion_policy: { enum: ["required"] } },
+    });
+    expect(provider.calls).toHaveLength(2);
+    expect(provider.calls[1]?.messages.at(-1)?.content).toContain('"status":"rejected"');
+    expect(provider.calls[1]?.messages.at(-1)?.content).toContain("请使用 required");
+    expect(result.finalMessage).toBe("async delegation was rejected explicitly");
+  });
+
   it("routes a natural-language ephemeral agent to its isolated child model", async () => {
     const parentRoute = modelRoute("volcengine/deepseek-v4-pro", "deepseek-v4-pro", "DEEPSEEK_KEY");
     const childRoute = modelRoute("volcengine/glm-5.2", "glm-5.2", "GLM_KEY");

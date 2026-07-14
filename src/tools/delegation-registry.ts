@@ -39,6 +39,8 @@ export interface SubagentRegistryFactoryConfig {
   yoloSandbox?: { config?: Partial<YoloSandboxConfig> };
   worktreeSupervisor?: WorktreeSupervisor;
   ownerSessionId?: string;
+  /** 是否由长生命周期宿主持有 optional/detached 委派。 */
+  allowAsyncCompletion?: boolean;
 }
 
 /**
@@ -202,6 +204,9 @@ function maybeRegisterDelegateTool(
         ...(config.profiles ? { profiles: config.profiles } : {}),
         ...(config.worktreeSupervisor ? { worktreeSupervisor: config.worktreeSupervisor } : {}),
         ...(config.ownerSessionId ? { ownerSessionId: config.ownerSessionId } : {}),
+        ...(config.allowAsyncCompletion !== undefined
+          ? { allowAsyncCompletion: config.allowAsyncCompletion }
+          : {}),
       }),
     );
   }
