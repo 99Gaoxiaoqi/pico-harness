@@ -7,6 +7,8 @@ export type ConversationProgressState = "waiting" | "active" | "done" | "failed"
 interface ConversationItemBase {
   readonly id: string;
   readonly at?: number | undefined;
+  readonly truncated?: boolean | undefined;
+  readonly originalBytes?: number | undefined;
 }
 
 export interface UserMessageItemView extends ConversationItemBase {

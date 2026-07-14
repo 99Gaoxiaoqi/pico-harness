@@ -95,6 +95,12 @@ function progressState(value: unknown): ConversationProgressState {
 function conversationItem(item: JsonRecord, index: number): ConversationItemView | undefined {
   const id = stringValue(item.id, `conversation-item-${index}`);
   const at = numberValue(item.at) || undefined;
+  const meta = {
+    ...(at ? { at } : {}),
+    ...(item.truncated === true
+      ? { truncated: true, originalBytes: numberValue(item.originalBytes) || undefined }
+      : {}),
+  };
   if (item.kind === "userMessage" || item.kind === "assistantMessage") {
     const text = stringValue(item.content);
     if (!text) return undefined;
@@ -102,7 +108,7 @@ function conversationItem(item: JsonRecord, index: number): ConversationItemView
       id,
       kind: item.kind,
       text,
-      ...(at ? { at } : {}),
+      ...meta,
     };
   }
   if (item.kind === "tool") {
@@ -114,7 +120,7 @@ function conversationItem(item: JsonRecord, index: number): ConversationItemView
       detail: stringValue(item.args) || undefined,
       output: stringValue(item.summary) || undefined,
       state: item.status === "success" ? "done" : item.status === "error" ? "failed" : "active",
-      ...(at ? { at } : {}),
+      ...meta,
     };
   }
   if (item.kind === "plan") {
@@ -129,7 +135,7 @@ function conversationItem(item: JsonRecord, index: number): ConversationItemView
           state: progressState(item.state),
         },
       ],
-      ...(at ? { at } : {}),
+      ...meta,
     };
   }
   if (item.kind === "runBoundary") {
@@ -146,7 +152,7 @@ function conversationItem(item: JsonRecord, index: number): ConversationItemView
               ? "completed"
               : "started",
       label: stringValue(item.label, status === "succeeded" ? "运行完成" : "Pico 正在处理"),
-      ...(at ? { at } : {}),
+      ...meta,
     };
   }
   if (item.kind === "goal") {
@@ -156,7 +162,7 @@ function conversationItem(item: JsonRecord, index: number): ConversationItemView
       title: stringValue(item.title, "当前目标"),
       detail: stringValue(item.detail) || undefined,
       state: progressState(item.state),
-      ...(at ? { at } : {}),
+      ...meta,
     };
   }
   if (item.kind === "subagent") {
@@ -167,7 +173,7 @@ function conversationItem(item: JsonRecord, index: number): ConversationItemView
       title: stringValue(item.title, "子代理活动"),
       detail: stringValue(item.detail) || undefined,
       state: progressState(item.state),
-      ...(at ? { at } : {}),
+      ...meta,
     };
   }
   if (item.kind === "approval") {
@@ -177,7 +183,7 @@ function conversationItem(item: JsonRecord, index: number): ConversationItemView
       title: stringValue(item.title, "需要你的批准"),
       detail: stringValue(item.detail, "Runtime 请求执行受保护操作。"),
       state: item.state === "allowed" || item.state === "denied" ? item.state : "pending",
-      ...(at ? { at } : {}),
+      ...meta,
     };
   }
   if (item.kind === "prompt") {
@@ -187,7 +193,7 @@ function conversationItem(item: JsonRecord, index: number): ConversationItemView
       question: stringValue(item.title, "Pico 需要你的回答"),
       detail: stringValue(item.detail) || undefined,
       state: item.state === "answered" ? "answered" : "pending",
-      ...(at ? { at } : {}),
+      ...meta,
     };
   }
   if (item.kind === "changes") {
@@ -201,7 +207,7 @@ function conversationItem(item: JsonRecord, index: number): ConversationItemView
         ? data.files.map((file) => stringValue(file)).filter(Boolean)
         : [],
       state: item.state === "applied" || item.state === "conflict" ? item.state : "pending",
-      ...(at ? { at } : {}),
+      ...meta,
     };
   }
   if (item.kind === "systemNotice" || item.kind === "error") {
@@ -210,7 +216,7 @@ function conversationItem(item: JsonRecord, index: number): ConversationItemView
       kind: "status",
       title: stringValue(item.content, item.kind === "error" ? "运行失败" : "状态更新"),
       tone: item.kind === "error" ? "error" : "neutral",
-      ...(at ? { at } : {}),
+      ...meta,
     };
   }
   return undefined;
