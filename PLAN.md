@@ -25,7 +25,7 @@
 - [x] 扩展 `src/input/agent-loader.ts`，读取 Claude Agent `model` frontmatter，避免静默忽略。
 - [ ] 等 agent-registry 分支合并后，为 `delegate_task` 的单任务与 `tasks[]` 增加受约束的 `agent` 对象。
 - [x] 实现解析优先级：临时 Agent → 命名 Profile → 父会话，并通过 `ModelRouter` fail-closed 校验。
-- [ ] 新增 `src/runtime/subagent-model-runtime.ts`，为显式 route 构造独立 Provider、CostTracker、Compactor 与 reasoning 配置。
+- [x] 新增 `src/runtime/subagent-model-runtime.ts`，为显式 route 构造独立 Provider、CostTracker、Compactor 与 reasoning 配置。
 - [ ] 改造 `AgentEngine.runSub` 使用请求级 Model Runtime；未指定时保持当前继承路径。
 - [ ] 接入 `agent-runtime`、usage ledger 与 `SubagentActivityEvent`；后台只允许父路由或可信宿主授权路由。
 - [ ] 等 tool-ui 分支合并后展示 requested/resolved route、thinking effort 与 fallback。
