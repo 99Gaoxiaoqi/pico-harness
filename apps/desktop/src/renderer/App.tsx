@@ -78,13 +78,13 @@ export class AppErrorBoundary extends Component<
   { readonly children: ReactNode },
   { readonly error?: Error }
 > {
-  state: { readonly error?: Error } = {};
+  override state: { readonly error?: Error } = {};
 
   static getDerivedStateFromError(error: Error) {
     return { error };
   }
 
-  render() {
+  override render() {
     if (this.state.error) {
       return (
         <main className="fatal-state">
