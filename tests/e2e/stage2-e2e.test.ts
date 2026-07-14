@@ -299,15 +299,14 @@ describeOrSkip("���段 2 端到端测试(真实大模型)", { timeout: 180
 describe("fetch_url 本地 fixture", { timeout: 60000 }, () => {
   it("抓本地 fixture 并 HTML strip", async () => {
     globalThis.fetch = vi.fn(async () => {
-      return {
-        ok: true,
-        status: 200,
-        statusText: "OK",
-        headers: new Headers({ "content-type": "text/html; charset=utf-8" }),
-        async text() {
-          return "<html><head><title>Fixture</title></head><body><h1>Fixture Domain</h1><p>Local only</p></body></html>";
+      return new Response(
+        "<html><head><title>Fixture</title></head><body><h1>Fixture Domain</h1><p>Local only</p></body></html>",
+        {
+          status: 200,
+          statusText: "OK",
+          headers: new Headers({ "content-type": "text/html; charset=utf-8" }),
         },
-      } as unknown as Response;
+      );
     }) as unknown as typeof fetch;
     const tool = new FetchURLTool({
       request: (url, _addresses, signal) => fetch(url.href, { signal, redirect: "manual" }),
