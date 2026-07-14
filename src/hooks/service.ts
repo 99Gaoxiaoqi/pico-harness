@@ -125,10 +125,9 @@ export function emptyHookSnapshot(): HookSnapshot {
     id: "empty",
     version: 0,
     createdAt: new Date(0).toISOString(),
-    handlers: new Proxy(
-      {},
-      { get: () => [] },
-    ) as Readonly<Record<HookEvent, readonly ResolvedHookHandler[]>>,
+    handlers: new Proxy({}, { get: () => [] }) as Readonly<
+      Record<HookEvent, readonly ResolvedHookHandler[]>
+    >,
     diagnostics: [],
   };
 }
@@ -170,13 +169,16 @@ function makeInput<E extends HookEvent>(
   payload: HookEventPayloadMap[E],
 ): HookInput<E> {
   const toolPayload = isToolPayload(payload) ? payload : undefined;
-  const response = "tool_response" in Object(payload) ? Reflect.get(payload, "tool_response") : undefined;
+  const response =
+    "tool_response" in Object(payload) ? Reflect.get(payload, "tool_response") : undefined;
   return {
     session_id: sessionId,
     cwd,
     hook_event_name: event,
     payload,
-    ...(toolPayload ? { tool_name: toolPayload.tool_name, tool_input: toolPayload.tool_input } : {}),
+    ...(toolPayload
+      ? { tool_name: toolPayload.tool_name, tool_input: toolPayload.tool_input }
+      : {}),
     ...(typeof response === "string" ? { tool_response: response } : {}),
   };
 }
@@ -187,7 +189,8 @@ function isToolPayload(payload: object): payload is { tool_name: string; tool_in
 
 function matcherMatches(matcher: string | undefined, payload: object): boolean {
   if (!matcher || matcher === "*") return true;
-  const subject = "tool_name" in payload ? String(Reflect.get(payload, "tool_name")) : JSON.stringify(payload);
+  const subject =
+    "tool_name" in payload ? String(Reflect.get(payload, "tool_name")) : JSON.stringify(payload);
   if (/^[A-Za-z0-9_|.-]+$/.test(matcher)) return matcher.split("|").includes(subject);
   try {
     return new RegExp(matcher).test(subject);

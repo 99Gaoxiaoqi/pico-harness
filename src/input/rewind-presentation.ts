@@ -17,14 +17,20 @@ export function formatRewindSelector(
     const prompt = oneLine(snapshot.userPrompt ?? snapshot.messageId);
     const changed = snapshot.changedFileCount ?? snapshot.trackedFileCount;
     lines.push(`  ${truncate(prompt, 72)} · ${snapshot.messageId}`);
-    lines.push(`    ${changed === 1 ? "1 file changed" : `${changed} files changed`} · ${relativeTime(Date.parse(snapshot.timestamp))}`);
+    lines.push(
+      `    ${changed === 1 ? "1 file changed" : `${changed} files changed`} · ${relativeTime(Date.parse(snapshot.timestamp))}`,
+    );
   }
-  if (snapshots.length > visible.length) lines.push(`… ${snapshots.length - visible.length} earlier messages`);
+  if (snapshots.length > visible.length)
+    lines.push(`… ${snapshots.length - visible.length} earlier messages`);
   lines.push("Up/Down to choose · Enter to preview · Esc to cancel");
   return lines.join("\n");
 }
 
-export function formatRewindUsage(sessionId: string, snapshots: readonly FileHistorySnapshotSummary[]): string {
+export function formatRewindUsage(
+  sessionId: string,
+  snapshots: readonly FileHistorySnapshotSummary[],
+): string {
   return formatRewindSelector(sessionId, snapshots, { maxItems: 7 });
 }
 

@@ -58,7 +58,10 @@ describe("Windows TUI render safety integration", () => {
         provider="openai"
         workDir="C:\\workspace\\中文项目"
         entries={[
-          { kind: "user", content: `WINDOWS_CJK_MARKER_请分析这段很长的中文输入_${"路径".repeat(20)}` },
+          {
+            kind: "user",
+            content: `WINDOWS_CJK_MARKER_请分析这段很长的中文输入_${"路径".repeat(20)}`,
+          },
           { kind: "assistant", content },
         ]}
         running={running}

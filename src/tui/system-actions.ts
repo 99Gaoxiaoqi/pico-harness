@@ -110,7 +110,7 @@ async function readMacClipboardFileReference(): Promise<string | undefined> {
   try {
     const output = await runProcessOutput("osascript", [
       "-e",
-      'get POSIX path of (the clipboard as «class furl»)',
+      "get POSIX path of (the clipboard as «class furl»)",
     ]);
     const reference = output.toString("utf8").trim();
     return reference || undefined;
@@ -309,9 +309,7 @@ function imagePartFromBuffer(data: Buffer, source: string): Base64ImagePart {
   }
 
   if (!mimeType) {
-    throw new ClipboardImageError(
-      `${source}不是受支持的图片格式；仅支持 PNG、JPEG、GIF 和 WebP。`,
-    );
+    throw new ClipboardImageError(`${source}不是受支持的图片格式；仅支持 PNG、JPEG、GIF 和 WebP。`);
   }
   return { type: "image_base64", mimeType, data: data.toString("base64") };
 }

@@ -170,9 +170,7 @@ Agent 试图执行以下动作:
         taskId,
         toolName,
         args,
-        ...(options.providerCallId !== undefined
-          ? { providerCallId: options.providerCallId }
-          : {}),
+        ...(options.providerCallId !== undefined ? { providerCallId: options.providerCallId } : {}),
         message,
         preview: buildApprovalPreview(toolName, args, diff),
         ...(diff !== undefined ? { diff } : {}),
