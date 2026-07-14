@@ -250,8 +250,13 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
           .map(runtimeEventFromLedger),
       );
     }
-    // Event IDs are random. Timestamp plus ID gives a deterministic cross-workspace
-    // presentation order; callers needing a resumable cursor use workspacePath.
+    // A single workspace ledger is already in durable rowid order. Preserve it: random
+    // event IDs are not a valid causal tie-breaker for start/finish events in the same ms.
+    if (paths.length === 1) {
+      return cursor.limit === undefined ? events : events.slice(0, cursor.limit);
+    }
+    // Cross-workspace replay has no shared durable sequence yet. Timestamp plus ID only
+    // provides deterministic presentation order; resumable callers scope to a workspace.
     const sorted = events.sort(
       (left, right) => left.at - right.at || left.eventId.localeCompare(right.eventId),
     );
@@ -284,11 +289,13 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
   }
 
   async close(): Promise<void> {
+    // Runtime.close() publishes terminal cancellation events. Keep both the runtime
+    // subscriptions and durable ledgers alive until those events have been recorded.
+    await this.registry.close();
     for (const unsubscribe of this.unsubscribers.values()) unsubscribe();
     this.unsubscribers.clear();
     this.listeners.clear();
     this.registrationChanged = undefined;
-    await this.registry.close();
     for (const store of this.eventStores.values()) store.close();
     this.eventStores.clear();
   }

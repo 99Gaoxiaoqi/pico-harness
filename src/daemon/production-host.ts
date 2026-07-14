@@ -552,6 +552,9 @@ function publishTimelineEvent(
   event: DesktopReporterEvent,
   nextResourceVersion: () => number,
 ): void {
+  // WorkspaceRuntime is the sole lifecycle authority. Reporter lifecycle callbacks
+  // would otherwise create a second, contradictory started/finished status stream.
+  if (["run.started", "run.finished", "run.interrupted"].includes(event.type)) return;
   service.publishDesktopEvent(
     createRuntimeEvent({
       topic: "run.timeline",

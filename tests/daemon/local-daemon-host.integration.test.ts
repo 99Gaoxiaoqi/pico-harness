@@ -360,6 +360,14 @@ describe("LocalDaemonHost integration", () => {
       );
       expect(JSON.stringify(timelineEvents)).not.toContain("SECRET_RAW_TOOL_RESULT");
       expect(JSON.stringify(timelineEvents)).not.toContain("SECRET_SUBAGENT_TOOL_RESULT");
+      expect(
+        timelineEvents.every((event) => {
+          const item = (event.payload as { item?: { eventType?: string } }).item;
+          return !["run.started", "run.finished", "run.interrupted"].includes(
+            item?.eventType ?? "",
+          );
+        }),
+      ).toBe(true);
 
       const transcript = (await client.request("session.transcript", {
         workspacePath: workspace,
