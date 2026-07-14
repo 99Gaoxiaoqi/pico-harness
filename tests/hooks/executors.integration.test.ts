@@ -1,5 +1,5 @@
 import { createServer, type Server } from "node:http";
-import { access, mkdtemp, rm } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -161,10 +161,16 @@ describe("DefaultHookExecutor command", () => {
     if (process.platform === "win32") return;
     const workDir = await mkdtemp(join(tmpdir(), "pico-hook-async-dispose-"));
     const sentinel = join(workDir, "descendant-ran");
+    const pidFile = join(workDir, "parent.pid");
     const rewake = vi.fn();
-    const childScript = `setTimeout(() => require('fs').writeFileSync(${JSON.stringify(sentinel)}, 'x'), 250)`;
+    const childScript = [
+      "process.on('SIGTERM', () => {})",
+      `setTimeout(() => require('fs').writeFileSync(${JSON.stringify(sentinel)}, 'x'), 1000)`,
+    ].join(";");
     const parentScript = [
       "const {spawn}=require('child_process')",
+      "process.on('SIGTERM', () => {})",
+      `require('fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid))`,
       `spawn(process.execPath, ['-e', ${JSON.stringify(childScript)}])`,
       "setTimeout(() => {}, 5000)",
     ].join(";");
@@ -183,10 +189,21 @@ describe("DefaultHookExecutor command", () => {
         ),
       ).resolves.toEqual({ decision: "allow" });
 
+      let parentPid: number | undefined;
+      for (let i = 0; i < 20; i++) {
+        try {
+          parentPid = Number(await readFile(pidFile, "utf8"));
+          break;
+        } catch {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+      }
+      expect(parentPid).toBeTypeOf("number");
+
       await executor.dispose();
-      await new Promise((resolve) => setTimeout(resolve, 350));
 
       expect(rewake).not.toHaveBeenCalled();
+      expect(() => process.kill(parentPid!, 0)).toThrow();
       await expect(access(sentinel)).rejects.toMatchObject({ code: "ENOENT" });
       await expect(
         executor.execute(resolved({ type: "command", command: "true" }), input, {}),

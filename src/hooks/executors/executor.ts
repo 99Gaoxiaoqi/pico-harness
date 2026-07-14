@@ -316,6 +316,8 @@ function startCommand(
     let stderr = "";
     let outputBytes = 0;
     let settled = false;
+    let terminationReason: unknown;
+    let terminationRequested = false;
     const finish = (result: HookOutput) => {
       if (settled) return;
       settled = true;
@@ -328,10 +330,15 @@ function startCommand(
       signal.removeEventListener("abort", onAbort);
       reject(err);
     };
-    const onAbort = () => {
+    const requestTermination = (reason: unknown) => {
+      if (terminationRequested) return;
+      terminationRequested = true;
+      terminationReason = reason;
       terminateProcessTree(child);
+    };
+    const onAbort = () => {
       startReject?.(abortReason(signal));
-      fail(abortReason(signal));
+      requestTermination(abortReason(signal));
     };
     signal.addEventListener("abort", onAbort, { once: true });
     if (signal.aborted) onAbort();
@@ -339,14 +346,16 @@ function startCommand(
     child.once("spawn", () => startResolve?.());
     child.once("error", (err) => {
       startReject?.(err);
-      fail(err);
+      if (!terminationRequested) {
+        terminationRequested = true;
+        terminationReason = err;
+      }
     });
     const append = (chunk: Buffer, target: "stdout" | "stderr") => {
-      if (settled) return;
+      if (settled || terminationRequested) return;
       outputBytes += chunk.byteLength;
       if (outputBytes > MAX_OUTPUT_BYTES) {
-        terminateProcessTree(child);
-        fail(new Error(`command handler 输出超过 ${MAX_OUTPUT_BYTES} bytes`));
+        requestTermination(new Error(`command handler 输出超过 ${MAX_OUTPUT_BYTES} bytes`));
         return;
       }
       if (target === "stdout") stdout += chunk.toString("utf8");
@@ -354,9 +363,13 @@ function startCommand(
     };
     child.stdout?.on("data", (chunk: Buffer) => append(chunk, "stdout"));
     child.stderr?.on("data", (chunk: Buffer) => append(chunk, "stderr"));
-    child.stdin?.once("error", fail);
+    child.stdin?.once("error", requestTermination);
     child.once("close", (code) => {
       if (settled) return;
+      if (terminationRequested) {
+        fail(terminationReason);
+        return;
+      }
       try {
         finish(interpretCommandExit(resolved, code, stdout, stderr));
       } catch (err) {
@@ -366,8 +379,7 @@ function startCommand(
     try {
       child.stdin?.end(JSON.stringify(input));
     } catch (err) {
-      terminateProcessTree(child);
-      fail(err);
+      requestTermination(err);
     }
   });
   // async handler 的 completion 也必须有默认 rejection observer，避免后台 unhandled rejection。
@@ -510,6 +522,7 @@ function terminateProcessTree(child: ChildProcess): void {
   signalProcess("SIGTERM");
   const forceTimer = setTimeout(() => signalProcess("SIGKILL"), ABORT_KILL_GRACE_MS);
   forceTimer.unref();
+  child.once("close", () => clearTimeout(forceTimer));
 }
 
 function resolveHeaders(
