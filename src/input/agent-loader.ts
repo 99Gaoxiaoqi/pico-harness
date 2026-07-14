@@ -12,6 +12,7 @@ export interface ClaudeAgent {
   sourcePath: string;
   source: ClaudeAgentSource;
   tools?: string[];
+  hooks?: unknown;
 }
 
 export interface ClaudeAgentSummary {
@@ -97,6 +98,7 @@ export function parseClaudeAgent(
     source,
     sourcePath,
     ...optionalTools(frontmatter.tools),
+    ...(frontmatter.hooks === undefined ? {} : { hooks: frontmatter.hooks }),
   };
 }
 

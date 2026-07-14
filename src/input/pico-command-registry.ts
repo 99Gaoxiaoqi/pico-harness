@@ -1550,6 +1550,7 @@ function createAgentCommand(options: PicoCommandRegistryOptions): SlashCommand {
           sourcePath: agent.sourcePath,
           task,
           toolName: "delegate_task",
+          ...(agent.hooks === undefined ? {} : { agentHookConfig: agent.hooks }),
         },
       };
     },

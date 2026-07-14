@@ -517,7 +517,7 @@ describe("Pico command registry", () => {
     const sourcePath = join(workDir, ".claude", "agents", "reviewer.md");
     writeFileSync(
       sourcePath,
-      "---\ndescription: 审查代码\ntools: read_file, grep\n---\n\n# Reviewer\n只输出高风险问题。",
+      "---\ndescription: 审查代码\ntools: read_file, grep\nhooks:\n  Stop:\n    - hooks:\n        - type: prompt\n          prompt: Verify review\n---\n\n# Reviewer\n只输出高风险问题。",
     );
 
     const registry = await createPicoCommandRegistry({
@@ -540,6 +540,9 @@ describe("Pico command registry", () => {
       sourcePath,
       task: "检查 src/input",
       toolName: "delegate_task",
+      agentHookConfig: {
+        Stop: [{ hooks: [{ type: "prompt", prompt: "Verify review" }] }],
+      },
     });
   });
 

@@ -5,7 +5,7 @@ export interface ParsedSlashInput {
   argv: readonly string[];
 }
 
-export type LocalUiPanel = "help" | "model" | "sessions" | "rewind";
+export type LocalUiPanel = "help" | "model" | "sessions" | "rewind" | "hooks";
 
 export type LocalUiSelector = "model" | "session" | "rewind";
 

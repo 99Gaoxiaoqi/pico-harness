@@ -20,11 +20,16 @@ import { signalProcessTree } from "../os/process-tree.js";
 import { isWindows } from "../os/shell.js";
 import type { ToolExecutionContext } from "../tools/registry.js";
 import {
+  JsonRpcErrorCode,
+  MCP_ELICITATION_PROTOCOL_VERSION,
   MCP_PROTOCOL_VERSION,
   PICO_MCP_CLIENT_INFO,
   type JsonRpcRequest,
   type JsonRpcResponse,
   type McpClient,
+  type McpClientOptions,
+  type McpElicitationRequest,
+  type McpElicitationResult,
   type McpPromptGetResult,
   type McpPromptListResult,
   type McpResourceListResult,
@@ -41,6 +46,7 @@ const CLOSE_SIGTERM_TIMEOUT_MS = 200;
 const CLOSE_SIGKILL_TIMEOUT_MS = 1000;
 const CANCELLATION_FLUSH_TIMEOUT_MS = 25;
 const MAX_STDIO_MESSAGE_BYTES = 8 * 1024 * 1024;
+const MAX_CONCURRENT_ELICITATIONS = 1;
 
 interface PendingRequest {
   method: string;
@@ -75,8 +81,13 @@ export class StdioMcpClient implements McpClient {
   private abortTermination: Promise<void> | undefined;
   private readonly closeHandlers: Array<(err?: Error) => void> = [];
   private readonly errorHandlers: Array<(err: Error) => void> = [];
+  private readonly elicitationControllers = new Set<AbortController>();
+  private negotiatedProtocolVersion = MCP_PROTOCOL_VERSION;
 
-  constructor(private readonly config: McpServerConfig) {
+  constructor(
+    private readonly config: McpServerConfig,
+    private readonly options: McpClientOptions = {},
+  ) {
     if (config.transport !== "stdio") {
       throw new Error(`StdioMcpClient 不支持 transport=${config.transport},仅支持 stdio`);
     }
@@ -219,6 +230,7 @@ export class StdioMcpClient implements McpClient {
 
   private async closeInternal(): Promise<void> {
     this.connected = false;
+    for (const controller of this.elicitationControllers) controller.abort();
 
     const child = this.child;
     if (child) {
@@ -359,7 +371,12 @@ export class StdioMcpClient implements McpClient {
       return;
     }
     if (typeof msg !== "object" || msg === null) return;
-    const response = msg as JsonRpcResponse;
+    const message = msg as Partial<JsonRpcRequest & JsonRpcResponse>;
+    if (message.id !== undefined && typeof message.method === "string") {
+      void this.handleServerRequest(message as JsonRpcRequest);
+      return;
+    }
+    const response = message as JsonRpcResponse;
     // 只处理有 id 的 response;notification(无 id)忽略
     if (response.id === undefined) {
       logger.debug(
@@ -371,9 +388,101 @@ export class StdioMcpClient implements McpClient {
     this.resolvePending(response);
   }
 
+  private async handleServerRequest(request: JsonRpcRequest): Promise<void> {
+    if (request.method !== "elicitation/create") {
+      this.writeResponse({
+        jsonrpc: "2.0",
+        id: request.id,
+        error: { code: JsonRpcErrorCode.METHOD_NOT_FOUND, message: "Method not found" },
+      });
+      return;
+    }
+    if (
+      this.negotiatedProtocolVersion !== MCP_ELICITATION_PROTOCOL_VERSION ||
+      !this.options.elicitationHandler ||
+      !this.associatedRequest()
+    ) {
+      this.writeResponse({
+        jsonrpc: "2.0",
+        id: request.id,
+        error: { code: JsonRpcErrorCode.INVALID_REQUEST, message: "Elicitation unavailable" },
+      });
+      return;
+    }
+    if (this.elicitationControllers.size >= MAX_CONCURRENT_ELICITATIONS) {
+      this.writeResponse({
+        jsonrpc: "2.0",
+        id: request.id,
+        error: { code: JsonRpcErrorCode.INTERNAL_ERROR, message: "Too many elicitations" },
+      });
+      return;
+    }
+    const parsed = parseElicitationRequest(request.params);
+    if (!parsed) {
+      this.writeResponse({
+        jsonrpc: "2.0",
+        id: request.id,
+        error: { code: JsonRpcErrorCode.INVALID_PARAMS, message: "Invalid elicitation params" },
+      });
+      return;
+    }
+    const controller = new AbortController();
+    const associatedSignal = this.associatedRequest()?.signal;
+    const abortFromOrigin = (): void =>
+      controller.abort(
+        associatedSignal?.reason ?? new DOMException("Request aborted", "AbortError"),
+      );
+    associatedSignal?.addEventListener("abort", abortFromOrigin, { once: true });
+    if (associatedSignal?.aborted) abortFromOrigin();
+    this.elicitationControllers.add(controller);
+    try {
+      const result = normalizeElicitationResult(
+        await this.options.elicitationHandler(parsed, {
+          server: this.config.name,
+          signal: controller.signal,
+        }),
+      );
+      this.writeResponse({ jsonrpc: "2.0", id: request.id, result });
+    } catch (error) {
+      if (!controller.signal.aborted) {
+        this.writeResponse({
+          jsonrpc: "2.0",
+          id: request.id,
+          error: {
+            code: JsonRpcErrorCode.INTERNAL_ERROR,
+            message: redactSensitiveText(error instanceof Error ? error.message : String(error)),
+          },
+        });
+      }
+    } finally {
+      associatedSignal?.removeEventListener("abort", abortFromOrigin);
+      this.elicitationControllers.delete(controller);
+    }
+  }
+
+  private associatedRequest(): PendingRequest | undefined {
+    return [...this.pending.values()].find((pending) =>
+      ["tools/call", "resources/read", "prompts/get"].includes(pending.method),
+    );
+  }
+
+  private writeResponse(response: JsonRpcResponse): void {
+    if (!this.child?.stdin?.writable) return;
+    const line = `${JSON.stringify(response)}\n`;
+    if (Buffer.byteLength(line, "utf8") > MAX_STDIO_MESSAGE_BYTES) return;
+    this.child.stdin.write(line);
+  }
+
   /** 把 JSON-RPC response 派发给对应的 pending Promise */
   private resolvePending(response: JsonRpcResponse): void {
-    const id = typeof response.id === "number" ? response.id : Number(response.id);
+    if (typeof response.id !== "number") {
+      logger.warn(
+        { server: this.config.name, id: response.id },
+        "[MCP] 收到非数字客户端请求 id 的响应,已忽略",
+      );
+      return;
+    }
+    const id = response.id;
     const pending = this.pending.get(id);
     if (!pending) {
       logger.warn({ server: this.config.name, id }, `[MCP] 收到未知 id=${id} 的响应,已忽略`);
@@ -611,12 +720,23 @@ export class StdioMcpClient implements McpClient {
 
   /** MCP initialize 握手:声明客户端身份 + 协议版本 */
   private async initialize(): Promise<void> {
+    const requestedVersion = this.options.elicitationHandler
+      ? MCP_ELICITATION_PROTOCOL_VERSION
+      : MCP_PROTOCOL_VERSION;
     const result = await this.request("initialize", {
-      protocolVersion: MCP_PROTOCOL_VERSION,
-      capabilities: {},
+      protocolVersion: requestedVersion,
+      capabilities: this.options.elicitationHandler ? { elicitation: {} } : {},
       clientInfo: PICO_MCP_CLIENT_INFO,
     });
-    const serverInfo = (result as { serverInfo?: { name?: string; version?: string } }).serverInfo;
+    const initialized = result as {
+      protocolVersion?: unknown;
+      serverInfo?: { name?: string; version?: string };
+    };
+    this.negotiatedProtocolVersion = supportedProtocolVersion(
+      initialized.protocolVersion,
+      requestedVersion,
+    );
+    const serverInfo = initialized.serverInfo;
     logger.info(
       { server: this.config.name, serverInfo },
       `[MCP] 握手成功: ${serverInfo?.name ?? "unknown"} v${serverInfo?.version ?? "?"}`,
@@ -657,6 +777,46 @@ function abortReason(signal: AbortSignal): Error {
   return signal.reason instanceof Error
     ? signal.reason
     : new DOMException("MCP tool call aborted", "AbortError");
+}
+
+function supportedProtocolVersion(value: unknown, fallback: string): string {
+  const version = typeof value === "string" ? value : fallback;
+  if (version === MCP_PROTOCOL_VERSION || version === MCP_ELICITATION_PROTOCOL_VERSION) {
+    return version;
+  }
+  throw new Error(`MCP server 协商了不支持的协议版本: ${version}`);
+}
+
+function parseElicitationRequest(
+  value: Record<string, unknown> | undefined,
+): McpElicitationRequest | undefined {
+  if (!value || typeof value.message !== "string" || value.message.length > 2_000) return undefined;
+  if (value.mode !== undefined && value.mode !== "form") return undefined;
+  if (
+    typeof value.requestedSchema !== "object" ||
+    value.requestedSchema === null ||
+    Array.isArray(value.requestedSchema)
+  ) {
+    return undefined;
+  }
+  return {
+    ...(value.mode === "form" ? { mode: "form" as const } : {}),
+    message: value.message,
+    requestedSchema: value.requestedSchema as Record<string, unknown>,
+  };
+}
+
+function normalizeElicitationResult(result: McpElicitationResult): McpElicitationResult {
+  if (result.action !== "accept" && result.action !== "decline" && result.action !== "cancel") {
+    throw new Error("Elicitation handler 返回了非法 action");
+  }
+  if (result.action === "accept") {
+    if (!result.content || typeof result.content !== "object" || Array.isArray(result.content)) {
+      throw new Error("Elicitation accept 缺少 content");
+    }
+    return { action: "accept", content: result.content };
+  }
+  return { action: result.action };
 }
 
 async function terminateProcessTree(

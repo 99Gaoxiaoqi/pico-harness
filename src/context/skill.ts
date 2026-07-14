@@ -44,6 +44,8 @@ export interface Skill {
   body: string;
   /** SKILL.md 绝对路径。由 SkillLoader 扫描文件时填充,parseSkillMD 直接调用时为空。 */
   sourcePath?: string;
+  /** Claude/Pico 扩展 frontmatter，由会话 Hook runtime 在 skill 激活期解析。 */
+  hooks?: unknown;
 }
 
 export interface SkillSummary {
@@ -82,13 +84,16 @@ export class SkillLoader {
   }
 
   async viewBody(name: string): Promise<string | undefined> {
-    const skills = await this.loadSkillFiles();
-    return skills.find((skill) => skill.name === name)?.body;
+    return (await this.view(name))?.body;
   }
 
   async viewSourcePath(name: string): Promise<string | undefined> {
+    return (await this.view(name))?.sourcePath;
+  }
+
+  async view(name: string): Promise<Skill | undefined> {
     const skills = await this.loadSkillFiles();
-    return skills.find((skill) => skill.name === name)?.sourcePath;
+    return skills.find((skill) => skill.name === name);
   }
 
   private async loadSkillFiles(): Promise<Skill[]> {
@@ -148,7 +153,10 @@ async function skillFileSignature(files: readonly string[]): Promise<string> {
 export class SkillViewTool implements BaseTool {
   readonly readOnly = true;
 
-  constructor(private readonly loader: SkillLoader) {}
+  constructor(
+    private readonly loader: SkillLoader,
+    private readonly onActivateHooks?: (skill: Skill) => void | Promise<void>,
+  ) {}
 
   name(): string {
     return "skill_view";
@@ -184,14 +192,15 @@ export class SkillViewTool implements BaseTool {
     if (!name) {
       throw new Error("skill_view 缺少 name 参数");
     }
-    const body = await this.loader.viewBody(name);
-    if (!body) {
+    const skill = await this.loader.view(name);
+    if (!skill?.body) {
       // 报错时附带可用技能清单,便于调用方自我纠偏(对齐 Hermes skill_view)
       const all = await this.loader.listSummaries();
       const names = all.map((s) => s.name).join(", ");
       throw new Error(`未找到技能: ${name}。可用技能: ${names}`);
     }
-    return body;
+    if (skill.hooks !== undefined) await this.onActivateHooks?.(skill);
+    return skill.body;
   }
 }
 
@@ -371,6 +380,7 @@ export function parseSkillMD(content: string, fallbackName = "Unknown Skill"): S
     name,
     description: normalizeDescription(fm["description"]),
     body,
+    ...(fm["hooks"] === undefined ? {} : { hooks: fm["hooks"] }),
   };
 }
 

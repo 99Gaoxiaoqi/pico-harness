@@ -35,6 +35,8 @@ export interface HookConfigSourceSpec {
   componentId?: string;
   /** plugin/managed 由宿主显式提供；加载器不会自行发现或启用 plugin runtime。 */
   enabled?: boolean;
+  /** Skill/Agent frontmatter 已由组件加载器解析时，以受信的内联值传入。 */
+  inlineHooks?: unknown;
 }
 
 export interface LoadHookSnapshotOptions {
@@ -196,18 +198,22 @@ export async function loadSource(
     ...(spec.componentId === undefined ? {} : { componentId: spec.componentId }),
   };
   if (spec.enabled === false) return { source, status: "disabled" };
-  let raw: string;
-  try {
-    raw = await readFile(source.path, "utf8");
-  } catch (error) {
-    if (isErrno(error, "ENOENT")) return { source, status: "missing" };
-    return { source, status: "invalid", error: errorMessage(error) };
-  }
   let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (error) {
-    return { source, status: "invalid", error: `JSON 解析失败: ${errorMessage(error)}` };
+  if (spec.inlineHooks !== undefined) {
+    parsed = spec.inlineHooks;
+  } else {
+    let raw: string;
+    try {
+      raw = await readFile(source.path, "utf8");
+    } catch (error) {
+      if (isErrno(error, "ENOENT")) return { source, status: "missing" };
+      return { source, status: "invalid", error: errorMessage(error) };
+    }
+    try {
+      parsed = JSON.parse(raw);
+    } catch (error) {
+      return { source, status: "invalid", error: `JSON 解析失败: ${errorMessage(error)}` };
+    }
   }
   const legacy = spec.format === "legacy" || spec.kind === "legacy";
   const field = legacy ? objectField(parsed, "hooks") : parsed;
