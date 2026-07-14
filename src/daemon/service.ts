@@ -8,6 +8,8 @@ export interface RuntimeEventCursor {
    * than one workspace should replay each ledger independently.
    */
   workspacePath?: string;
+  /** Maximum number of events returned after filtering. */
+  limit?: number;
 }
 
 export interface LocalRuntimeService {

@@ -232,6 +232,8 @@ export interface RunAgentCliDependencies extends RuntimeHost {
   runtimeState?: SessionRuntime;
   /** 仅由可展示结构化问题的 TUI bundle 提供。 */
   askUserHandler?: AskUserHandler;
+  /** Host-owned approval state, required when decisions are settled outside the TUI process. */
+  approvalManager?: ApprovalManager;
   /** Receives the complete registry after late delegation/MCP registration. */
   toolStatusSink?: (tools: readonly SessionToolStatus[]) => void;
   mcpStatusSink?: (snapshot: McpStatusSnapshot) => void;
@@ -239,6 +241,10 @@ export interface RunAgentCliDependencies extends RuntimeHost {
   mcpManager?: McpConnectionManager;
   /** 宿主本轮运行的中止信号。 */
   signal?: AbortSignal;
+  /** Host-owned gate used by desktop Pause at tool-safe execution boundaries. */
+  waitAtSafeBoundary?: () => Promise<void>;
+  /** Receives the exact durable rewind point created for this top-level prompt. */
+  rewindPointSink?: (checkpointId: string) => void;
   /** @internal 继续已存在的未完成轮次，不新增 user 消息或 rewind point。 */
   resumeExistingSession?: boolean;
   /** 仅用于后台执行的实时信任校验；生产默认读取用户级 WorkspaceTrustStore。 */
@@ -735,6 +741,9 @@ export async function executeAgentRuntime(
       reporter,
       tracer: traceEnabled ? new Tracer() : undefined,
       steerQueue,
+      ...(dependencies.waitAtSafeBoundary
+        ? { waitAtSafeBoundary: dependencies.waitAtSafeBoundary }
+        : {}),
       ...(runtimeState.hookService ? { hookService: runtimeState.hookService } : {}),
       skillLoaderFactory,
       ...(rebuildProvider ? { rebuildProvider } : {}),
@@ -761,7 +770,7 @@ export async function executeAgentRuntime(
           approvalNotifier,
           workDir,
           dependencies.signal,
-          globalApprovalManager,
+          dependencies.approvalManager ?? globalApprovalManager,
           settings,
           workspaceRoots,
           runtimeState.hookService,
@@ -934,6 +943,7 @@ export async function executeAgentRuntime(
             ? { prePlanMode: effectiveOptions.rewindPrePlanMode }
             : {}),
         });
+        dependencies.rewindPointSink?.(rewindPointId);
         const userReceipt = await session.commitMessageOnce(`user-message:${rewindPointId}`, {
           role: "user",
           content: prompt,

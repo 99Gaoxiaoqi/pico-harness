@@ -492,7 +492,8 @@ describe("RuntimeStore + JobService integration", () => {
       CREATE INDEX provider_calls_session_idx ON provider_calls(session_id, created_at);
       CREATE INDEX provider_calls_goal_idx ON provider_calls(goal_id, created_at);
       CREATE INDEX provider_calls_job_idx ON provider_calls(job_id, created_at);
-      DELETE FROM schema_migrations WHERE version = 5;
+      ALTER TABLE cron_jobs DROP COLUMN name;
+      DELETE FROM schema_migrations WHERE version >= 5;
     `);
     legacy.close();
 

@@ -17,7 +17,7 @@ describe("installable CLI package entry", () => {
     expect(pkg.bin).toEqual({ pico: "./dist/cli/main.js" });
     expect(scripts.clean).toContain("dist");
     expect(scripts.build).toBe("tsc -p tsconfig.build.json");
-    expect(scripts.prebuild).toBe("npm run clean");
+    expect(scripts.prebuild).toBe("npm run clean && npm run build:protocol");
     expect(scripts.prepack).toBe("npm run build && npm run smoke:package");
     expect(scripts["smoke:package"]).toBe("node scripts/package-bin-smoke.mjs");
   });
