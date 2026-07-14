@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -171,11 +172,12 @@ describe("plugin contribution resolver", () => {
     const variables = createPluginVariableMap(
       { id: "vendor/plugin", root: await realpath(plugin) },
       project,
-      { picoHome },
+      { picoHome, scope: "project" },
     );
+    const dataName = `vendor-plugin-${createHash("sha256").update("vendor/plugin").digest("hex").slice(0, 16)}`;
 
     expect(variables.CLAUDE_PLUGIN_ROOT).toBe(await realpath(plugin));
-    expect(variables.CLAUDE_PLUGIN_DATA).toBe(join(picoHome, "plugin-data", "vendor-plugin"));
+    expect(variables.CLAUDE_PLUGIN_DATA).toBe(join(picoHome, "plugin-data", "project", dataName));
     expect(
       substitutePluginVariables("${CLAUDE_PLUGIN_ROOT}/bin:${PICO_PLUGIN_DATA}:${HOME}", variables),
     ).toBe(`${await realpath(plugin)}/bin:${variables.PICO_PLUGIN_DATA}:\${HOME}`);
@@ -185,6 +187,19 @@ describe("plugin contribution resolver", () => {
         variables,
       ),
     ).toEqual({ command: `${await realpath(plugin)}/server`, env: [await realpath(project)] });
+
+    const punctuationCollision = createPluginVariableMap(
+      { id: "vendor-plugin", root: await realpath(plugin) },
+      project,
+      { picoHome, scope: "project" },
+    );
+    const localScope = createPluginVariableMap(
+      { id: "vendor/plugin", root: await realpath(plugin) },
+      project,
+      { picoHome, scope: "local" },
+    );
+    expect(punctuationCollision.PICO_PLUGIN_DATA).not.toBe(variables.PICO_PLUGIN_DATA);
+    expect(localScope.PICO_PLUGIN_DATA).not.toBe(variables.PICO_PLUGIN_DATA);
   });
 
   it("legacy root manifest 可加载但标记 degraded", async () => {

@@ -58,14 +58,16 @@ export function createPluginCommand(options: CreatePluginCommandOptions): SlashC
             const plugin = reference(args, parsed.scope, "enable");
             await service.enable(plugin);
             return message(
-              `Plugin ${plugin.id} [${plugin.scope}] enabled. It becomes available when the host refreshes its Plugin snapshot.`,
+              `Plugin ${plugin.id} [${plugin.scope}] enabled. Restart or refresh the host to apply the immutable Plugin snapshot.`,
             );
           }
           case "disable": {
             const plugin = reference(args, parsed.scope, "disable");
             await service.disable(plugin);
             pendingTrust.delete(referenceKey(plugin));
-            return message(`Plugin ${plugin.id} [${plugin.scope}] disabled.`);
+            return message(
+              `Plugin ${plugin.id} [${plugin.scope}] disabled. Restart or refresh the host to apply the immutable Plugin snapshot.`,
+            );
           }
           default:
             return message(`Unknown Plugin action: ${action}\nUsage: ${USAGE}`);

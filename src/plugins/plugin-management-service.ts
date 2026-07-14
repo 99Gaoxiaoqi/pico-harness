@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import { PluginManager, type InstalledPlugin } from "./plugin-manager.js";
 import { resolvePluginContributions } from "./plugin-resolver.js";
 import {
@@ -32,14 +33,16 @@ export interface PluginManagementServiceOptions {
 export class PluginManagementService {
   private readonly manager: PluginManager;
   private readonly trustStore: PluginTrustStore;
+  private readonly workDir: string;
 
   constructor(options: PluginManagementServiceOptions) {
+    this.workDir = resolve(options.workDir);
     this.manager = options.manager ?? new PluginManager(options);
     this.trustStore = options.trustStore ?? new PluginTrustStore(options);
   }
 
   async install(path: string, scope: PluginScope) {
-    return await this.manager.installFromDirectory(path, scope);
+    return await this.manager.installFromDirectory(resolve(this.workDir, path), scope);
   }
 
   async list(): Promise<readonly ManagedPluginInspection[]> {
