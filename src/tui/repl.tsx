@@ -62,6 +62,7 @@ import { createPlatformCredentialVault } from "../provider/credential-vault.js";
 import { isAbortError } from "../provider/errors.js";
 import { defaultIsRetryableError } from "../provider/retry.js";
 import { ModelRuntimeCommandService } from "../provider/model-runtime-report.js";
+import { coordinateReasoningLevel } from "../provider/reasoning-capability.js";
 import { buildDefaultToolRegistry } from "../tools/default-registry.js";
 import type { ToolRegistry } from "../tools/registry-impl.js";
 import type { ToolDisclosure } from "../tools/tool-disclosure.js";
@@ -210,6 +211,24 @@ export function coordinateTuiStartupSettings(
   return coordinateSessionReasoningLevel(settings, router);
 }
 
+/** Resolve a command frontmatter model for one run without mutating persisted session routing. */
+export function resolveTuiPromptModelRoute(
+  router: ModelRouter,
+  settings: SessionSettings,
+  requestedModel?: string,
+): { route: ModelRoute; reasoningLevel?: string } {
+  const requested = requestedModel?.trim();
+  const inheritsModel = !requested || requested === "inherit";
+  const route = router.require(inheritsModel ? settings.modelRouteId : requested);
+  const reasoningLevel = inheritsModel
+    ? effectiveSessionReasoningLevel(settings, router)
+    : coordinateReasoningLevel(
+        route.capabilities.reasoningProfile,
+        settings.thinkingEffortExplicit ? settings.thinkingEffort : undefined,
+      ).level;
+  return { route, ...(reasoningLevel === undefined ? {} : { reasoningLevel }) };
+}
+
 const SESSION_SELECTOR_DIALOG_ID = "local-ui:session-selector";
 const HISTORY_PREPARING_DIALOG_ID = "local-ui:history-preparing";
 const SELECTOR_DIALOG_PRIORITY = 40;
@@ -239,7 +258,12 @@ export interface HandleTuiInputSubmissionDeps {
   workDir: string;
   runAgent: (
     prompt: string,
-    options?: { images?: ImagePart[]; resumeExistingSession?: boolean },
+    options?: {
+      images?: ImagePart[];
+      resumeExistingSession?: boolean;
+      model?: string;
+      allowedTools?: readonly string[];
+    },
   ) => Promise<void>;
   setRewindContext?: (context: { prompt: string; transcriptIndex: number }) => void;
   exit: () => void;
@@ -379,6 +403,7 @@ export async function handleTuiInputSubmission(
           ? () => deps.activateAgentHooks?.(processed.result.metadata!)
           : undefined,
         () => deps.clearComponentHooks?.(),
+        processed.result.execution,
       );
       return;
     }
@@ -418,6 +443,7 @@ async function runPreparedUserPrompt(
   attachments: readonly ImagePart[],
   beforeRun?: () => void | Promise<void>,
   afterRun?: () => void | Promise<void>,
+  execution?: { model?: string; allowedTools?: readonly string[] },
 ): Promise<void> {
   let prepared: PreparedUserPrompt;
   try {
@@ -439,11 +465,19 @@ async function runPreparedUserPrompt(
   try {
     await beforeRun?.();
     const images = [...(prepared.images ?? []), ...attachments];
+    const runOptions = {
+      ...(execution?.model === undefined ? {} : { model: execution.model }),
+      ...(execution?.allowedTools === undefined ? {} : { allowedTools: execution.allowedTools }),
+    };
     if (images.length > 0) {
-      await deps.runAgent(prepared.prompt, { images });
+      await deps.runAgent(prepared.prompt, { ...runOptions, images });
       return;
     }
-    await deps.runAgent(prepared.prompt);
+    if (Object.keys(runOptions).length === 0) {
+      await deps.runAgent(prepared.prompt);
+    } else {
+      await deps.runAgent(prepared.prompt, runOptions);
+    }
   } finally {
     await afterRun?.();
   }
@@ -1700,9 +1734,10 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
             rewindContextRef.current = context;
           },
           activateAgentHooks: async (metadata) => {
-            const componentId = metadata["agentName"];
-            const path = metadata["sourcePath"];
-            const inlineHooks = metadata["agentHookConfig"];
+            const isSkill = metadata["skillHookConfig"] !== undefined;
+            const componentId = isSkill ? metadata["skillName"] : metadata["agentName"];
+            const path = isSkill ? metadata["skillSourcePath"] : metadata["sourcePath"];
+            const inlineHooks = isSkill ? metadata["skillHookConfig"] : metadata["agentHookConfig"];
             if (
               typeof componentId !== "string" ||
               typeof path !== "string" ||
@@ -1711,7 +1746,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
               return;
             }
             await runtimeState.activateComponentHooks({
-              kind: "agent",
+              kind: isSkill ? "skill" : "agent",
               path,
               componentId,
               inlineHooks,
@@ -1770,8 +1805,12 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
           ),
           runAgent: async (prompt, runOptions) => {
             const resumeExistingSession = runOptions?.resumeExistingSession === true;
-            const reasoningLevel = effectiveSessionReasoningLevel(settings, modelRouter);
-            const activeRoute = modelRouter.providerConfig(settings.modelRouteId, reasoningLevel);
+            const { route, reasoningLevel } = resolveTuiPromptModelRoute(
+              modelRouter,
+              settings,
+              runOptions?.model,
+            );
+            const activeRoute = modelRouter.providerConfig(route.id, reasoningLevel);
             const rewindContext = resumeExistingSession ? null : rewindContextRef.current;
             if (!resumeExistingSession) rewindContextRef.current = null;
             const cliOpts: RunAgentCliOptions = {
@@ -1788,6 +1827,9 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
               modelRouteId: activeRoute.route.id,
               modelCapabilities: activeRoute.route.capabilities,
               allowModelFallback: false,
+              ...(runOptions?.allowedTools === undefined
+                ? {}
+                : { allowedTools: [...runOptions.allowedTools] }),
               ...(reasoningLevel !== undefined ? { thinkingEffort: reasoningLevel } : {}),
               planMode: settings.mode === "plan",
               ...(runOptions?.images ? { images: runOptions.images } : {}),

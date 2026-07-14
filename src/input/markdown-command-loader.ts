@@ -18,6 +18,7 @@ export interface MarkdownPromptCommand {
   allowedTools?: string[];
   model?: string;
   sourcePath?: string;
+  hooks?: unknown;
 }
 
 export interface LoadMarkdownCommandsOptions {
@@ -97,7 +98,7 @@ export function parseMarkdownCommand(
     ...(sourcePath ? { sourcePath } : {}),
     ...optionalString("argumentHint", frontmatter["argument-hint"]),
     ...optionalString("model", frontmatter.model),
-    ...optionalAllowedTools(frontmatter["allowed-tools"]),
+    ...optionalAllowedTools(frontmatter),
   };
 }
 
@@ -250,7 +251,8 @@ function parseSkillProjectionCommand(
     sourcePath,
     ...optionalString("argumentHint", frontmatter["argument-hint"]),
     ...optionalString("model", frontmatter.model),
-    ...optionalAllowedTools(frontmatter["allowed-tools"]),
+    ...optionalAllowedTools(frontmatter),
+    ...(frontmatter.hooks === undefined ? {} : { hooks: frontmatter.hooks }),
   };
 }
 
@@ -314,18 +316,18 @@ function optionalString(
   return normalized ? { [key]: normalized } : {};
 }
 
-function optionalAllowedTools(value: unknown): Partial<MarkdownPromptCommand> {
+function optionalAllowedTools(
+  frontmatter: Record<string, unknown>,
+): Partial<MarkdownPromptCommand> {
+  if (!Object.hasOwn(frontmatter, "allowed-tools")) return {};
+  const value = frontmatter["allowed-tools"];
   if (Array.isArray(value)) {
-    const allowedTools = value.map(normalizeString).filter(Boolean);
-    return allowedTools.length > 0 ? { allowedTools } : {};
+    return { allowedTools: value.map(normalizeString) };
   }
   const normalized = normalizeString(value);
-  if (!normalized) return {};
+  if (!normalized) return { allowedTools: [""] };
   return {
-    allowedTools: normalized
-      .split(",")
-      .map((tool) => tool.trim())
-      .filter(Boolean),
+    allowedTools: normalized.split(",").map((tool) => tool.trim()),
   };
 }
 

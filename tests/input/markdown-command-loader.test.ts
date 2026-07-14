@@ -41,6 +41,17 @@ describe("markdown command loader", () => {
     });
   });
 
+  it("preserves an explicit empty tool list and rejects empty scalar values downstream", () => {
+    expect(
+      parseMarkdownCommand("---\nallowed-tools: []\n---\n\nNo tools", "none", "project")
+        .allowedTools,
+    ).toEqual([]);
+    expect(
+      parseMarkdownCommand("---\nallowed-tools:\n---\n\nInvalid", "invalid", "project")
+        .allowedTools,
+    ).toEqual([""]);
+  });
+
   it("loads project and user .pico/commands/*.md files with project priority", async () => {
     await writeCommand(workDir, "review", "project review", "Project prompt");
     await writeCommand(workDir, "ship", "ship it", "Ship prompt");
@@ -250,6 +261,23 @@ describe("markdown command loader", () => {
       prompt: "# Review\nUse $ARGUMENTS",
       source: "skill",
       sourcePath: join(workDir, ".claude", "skills", "review", "SKILL.md"),
+    });
+  });
+
+  it("preserves projected Skill hooks for run-scoped activation", async () => {
+    await writeClaudeSkill(
+      "guard",
+      `---\nname: guard\ndescription: guard tools\nhooks:\n  PreToolUse:\n    - matcher: bash\n      hooks:\n        - type: prompt\n          prompt: Check command\n---\n\n# Guard`,
+    );
+
+    const commands = await loadMarkdownCommands({
+      includeSkillCommands: true,
+      userCommandsDir,
+      workDir,
+    });
+
+    expect(commands[0]?.hooks).toEqual({
+      PreToolUse: [{ matcher: "bash", hooks: [{ type: "prompt", prompt: "Check command" }] }],
     });
   });
 
