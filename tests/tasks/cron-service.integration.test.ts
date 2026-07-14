@@ -272,6 +272,79 @@ describe("CronService durable ledger integration", () => {
     expect(repeated.scheduledFor).toBe(now + 1);
   });
 
+  it("桌面 name 作为 v5 可选列，旧 CLI 可继续读写同一账本", () => {
+    const workDir = makeTempDir(directories);
+    const now = Date.UTC(2026, 0, 1, 12, 0, 15);
+    const desktop = new CronService({
+      workDir,
+      now: () => now,
+      generateId: () => "desktop-job",
+    });
+    const desktopJob = desktop.create({
+      workspacePath: workDir,
+      name: "Desktop display name",
+      schedule: "0 12 * * *",
+      timeZone: "UTC",
+      prompt: "desktop prompt",
+      enabled: false,
+      policySnapshot: yoloPolicy(now),
+    });
+    desktop.close();
+
+    const databasePath = resolvePicoPaths(workDir).workspace.runtimeDatabase;
+    const legacyCli = new Database(databasePath);
+    const schemaVersion = legacyCli
+      .prepare("SELECT COALESCE(MAX(version), 0) AS version FROM schema_migrations")
+      .get() as { version: number };
+    expect(schemaVersion.version).toBe(5);
+    expect(
+      legacyCli
+        .prepare("PRAGMA table_info(cron_jobs)")
+        .all()
+        .some((column) => (column as { name: string }).name === "name"),
+    ).toBe(true);
+
+    legacyCli
+      .prepare(
+        `INSERT INTO cron_jobs (
+           cron_job_id, workspace_path, schedule, time_zone, prompt, enabled,
+           policy_snapshot_json, credential_ref, version, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 1, ?, ?)`,
+      )
+      .run(
+        "legacy-cli-job",
+        realpathSync(workDir),
+        "30 8 * * 1-5",
+        "UTC",
+        "legacy prompt",
+        0,
+        JSON.stringify(yoloPolicy(now)),
+        now,
+        now,
+      );
+    legacyCli
+      .prepare("UPDATE cron_jobs SET prompt = ?, updated_at = ? WHERE cron_job_id = ?")
+      .run("legacy prompt updated", now + 1, "legacy-cli-job");
+    legacyCli.close();
+
+    const reopened = new CronService({ workDir, now: () => now + 2 });
+    closeables.push(reopened);
+    expect(reopened.list()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          cronJobId: desktopJob.cronJobId,
+          name: "Desktop display name",
+          prompt: "desktop prompt",
+        }),
+        expect.objectContaining({
+          cronJobId: "legacy-cli-job",
+          name: "legacy prompt updated",
+          prompt: "legacy prompt updated",
+        }),
+      ]),
+    );
+  });
+
   it("daemon 重启只收口 lease 已过期的 running Run，并解除工作区阻塞", () => {
     const workDir = makeTempDir(directories);
     let now = Date.UTC(2026, 0, 1, 12, 0, 0);

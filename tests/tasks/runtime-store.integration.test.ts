@@ -514,6 +514,58 @@ describe("RuntimeStore + JobService integration", () => {
       }).inserted,
     ).toBe(true);
   });
+
+  it("识别并降级桌面预览版写入的 v6 name 迁移标记", () => {
+    const workDir = makeTempDir(tempDirs);
+    const databasePath = resolvePicoPaths(workDir).workspace.runtimeDatabase;
+    const initial = new RuntimeStore({ workDir });
+    initial.close();
+
+    const previewDatabase = new Database(databasePath);
+    previewDatabase
+      .prepare(
+        "INSERT OR REPLACE INTO schema_migrations(version, name, applied_at) VALUES (6, ?, ?)",
+      )
+      .run("cron_job_display_name", Date.now());
+    previewDatabase.close();
+
+    const repaired = new RuntimeStore({ workDir });
+    closeables.push(repaired);
+    const inspected = new Database(databasePath, { readonly: true });
+    const migration = inspected
+      .prepare("SELECT MAX(version) AS version FROM schema_migrations")
+      .get() as { version: number };
+    const hasName = (
+      inspected.prepare("PRAGMA table_info(cron_jobs)").all() as Array<{ name: string }>
+    ).some((column) => column.name === "name");
+    inspected.close();
+
+    expect(migration.version).toBe(5);
+    expect(hasName).toBe(true);
+  });
+
+  it("不降级未知的未来 schema 标记", () => {
+    const workDir = makeTempDir(tempDirs);
+    const databasePath = resolvePicoPaths(workDir).workspace.runtimeDatabase;
+    const initial = new RuntimeStore({ workDir });
+    initial.close();
+
+    const futureDatabase = new Database(databasePath);
+    futureDatabase
+      .prepare(
+        "INSERT OR REPLACE INTO schema_migrations(version, name, applied_at) VALUES (6, ?, ?)",
+      )
+      .run("unknown_future_migration", Date.now());
+    futureDatabase.close();
+
+    expect(() => new RuntimeStore({ workDir })).toThrow(/schema 6.*新于.*5/u);
+    const inspected = new Database(databasePath, { readonly: true });
+    const migration = inspected
+      .prepare("SELECT name FROM schema_migrations WHERE version = 6")
+      .get() as { name: string };
+    inspected.close();
+    expect(migration.name).toBe("unknown_future_migration");
+  });
 });
 
 function makeTempDir(tempDirs: string[]): string {
