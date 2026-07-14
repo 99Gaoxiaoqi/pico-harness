@@ -28,6 +28,7 @@ import { TodoTool } from "./todo.js";
 import type { HookService } from "../hooks/service.js";
 import { ReadArtifactTool } from "./artifact-read.js";
 import { resolvePicoPaths } from "../paths/pico-paths.js";
+import type { SubagentModelCatalog } from "../runtime/subagent-model-catalog.js";
 
 export interface SubagentRegistryFactoryConfig {
   workDir: string;
@@ -52,6 +53,8 @@ export interface SubagentRegistryFactoryConfig {
   activateAgentHooks?: (profile: AgentProfile) => Promise<() => void | Promise<void>>;
   /** 父会话的受信 artifact 根；worker worktree 不得改变此边界。 */
   artifactBaseDir?: string;
+  /** 与父会话一致的脱敏、不可变模型目录快照。 */
+  modelCatalog?: SubagentModelCatalog;
 }
 
 /**
@@ -232,6 +235,7 @@ function maybeRegisterDelegateTool(
           : {}),
         ...(config.activateAgentHooks ? { activateAgentHooks: config.activateAgentHooks } : {}),
         ...(config.hookService ? { hookService: config.hookService } : {}),
+        ...(config.modelCatalog ? { modelCatalog: config.modelCatalog } : {}),
       }),
     );
   }
