@@ -83,7 +83,24 @@ export class HookService {
         this.concurrency,
         this.agentConcurrency,
         context.signal,
-        async (entry) => await this.options.executor.execute(entry, input, context),
+        async (entry) => {
+          try {
+            return await this.options.executor.execute(entry, input, context);
+          } catch (error) {
+            if (context.signal?.aborted) throw abortReason(context.signal);
+            return {
+              decision: "allow",
+              diagnostics: [
+                {
+                  handlerId: entry.id,
+                  source: entry.source,
+                  level: "warn",
+                  message: `handler 异常，已 fail-open: ${formatError(error)}`,
+                },
+              ],
+            };
+          }
+        },
       );
       return aggregateHookOutputs(results);
     });
@@ -219,36 +236,63 @@ async function runLimited<T extends ResolvedHookHandler>(
 ): Promise<HookOutput[]> {
   const results: HookOutput[] = new Array(entries.length);
   let next = 0;
-  let agents = 0;
-  let wakeAgent: (() => void) | undefined;
+  const agentSlots = new Semaphore(agentConcurrency);
   const workers = Array.from({ length: Math.min(concurrency, entries.length) }, async () => {
     while (next < entries.length) {
       if (signal?.aborted) throw abortReason(signal);
       const index = next++;
       const entry = entries[index];
       if (!entry) return;
-      if (entry.handler.type === "agent") {
-        while (agents >= agentConcurrency) {
-          await new Promise<void>((resolve) => {
-            wakeAgent = resolve;
-          });
-          if (signal?.aborted) throw abortReason(signal);
-        }
-        agents++;
-      }
+      const releaseAgent =
+        entry.handler.type === "agent" ? await agentSlots.acquire(signal) : undefined;
       try {
         results[index] = await execute(entry);
       } finally {
-        if (entry.handler.type === "agent") {
-          agents--;
-          wakeAgent?.();
-          wakeAgent = undefined;
-        }
+        releaseAgent?.();
       }
     }
   });
   await Promise.all(workers);
   return results;
+}
+
+class Semaphore {
+  private active = 0;
+  private readonly waiters: Array<() => void> = [];
+
+  constructor(private readonly limit: number) {}
+
+  async acquire(signal?: AbortSignal): Promise<() => void> {
+    if (this.limit <= 0) throw new Error("Semaphore limit must be positive");
+    if (this.active >= this.limit) {
+      await new Promise<void>((resolve, reject) => {
+        const onAbort = (): void => {
+          const index = this.waiters.indexOf(onReady);
+          if (index >= 0) this.waiters.splice(index, 1);
+          reject(signal ? abortReason(signal) : new Error("Hook dispatch aborted"));
+        };
+        const onReady = (): void => {
+          signal?.removeEventListener("abort", onAbort);
+          resolve();
+        };
+        this.waiters.push(onReady);
+        signal?.addEventListener("abort", onAbort, { once: true });
+      });
+    }
+    if (signal?.aborted) throw abortReason(signal);
+    this.active++;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.active--;
+      this.waiters.shift()?.();
+    };
+  }
+}
+
+function formatError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function abortReason(signal: AbortSignal): Error {

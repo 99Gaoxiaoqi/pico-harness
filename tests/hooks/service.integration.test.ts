@@ -29,6 +29,13 @@ function command(id: string, order: number): ResolvedHookHandler {
   };
 }
 
+function agent(id: string, order: number): ResolvedHookHandler {
+  return {
+    ...command(id, order),
+    handler: { type: "agent", prompt: id },
+  };
+}
+
 describe("HookService integration", () => {
   it("并行执行命中 handler，并按配置顺序聚合上下文与最高优先级决策", async () => {
     const started: string[] = [];
@@ -97,5 +104,56 @@ describe("HookService integration", () => {
         { decision: "defer", reason: "defer" },
       ]),
     ).toMatchObject({ decision: "deny", reason: "deny", modifiedInput: { value: 1 } });
+  });
+
+  it("agent handler 使用独立并发上限，普通 executor 异常 fail-open", async () => {
+    let active = 0;
+    let peak = 0;
+    const service = new HookService({
+      workDir: "/workspace",
+      sessionId: "session-1",
+      snapshot: snapshot([agent("a", 0), agent("b", 1), agent("c", 2)]),
+      agentConcurrency: 2,
+      executor: {
+        async execute(entry) {
+          active++;
+          peak = Math.max(peak, active);
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          active--;
+          if (entry.id === "c") throw new Error("broken verifier");
+          return { decision: "allow" };
+        },
+      },
+    });
+
+    const result = await service.dispatch("PreToolUse", { tool_name: "bash", tool_input: {} });
+
+    expect(peak).toBe(2);
+    expect(result.decision).toBe("allow");
+    expect(result.diagnostics?.[0]?.message).toContain("broken verifier");
+  });
+
+  it("父 AbortSignal 取消不是 fail-open", async () => {
+    const controller = new AbortController();
+    const service = new HookService({
+      workDir: "/workspace",
+      sessionId: "session-1",
+      snapshot: snapshot([command("slow", 0)]),
+      executor: {
+        async execute() {
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          throw controller.signal.reason;
+        },
+      },
+    });
+    controller.abort(new Error("parent cancelled"));
+
+    await expect(
+      service.dispatch(
+        "PreToolUse",
+        { tool_name: "bash", tool_input: {} },
+        { signal: controller.signal },
+      ),
+    ).rejects.toThrow("parent cancelled");
   });
 });
