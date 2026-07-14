@@ -312,9 +312,7 @@ describe("fetch_url 本地 fixture", { timeout: 60000 }, () => {
     const tool = new FetchURLTool({
       request: (url, _addresses, signal) => fetch(url.href, { signal, redirect: "manual" }),
     });
-    const result = await tool.execute(
-      JSON.stringify({ url: "https://fixture.test", max_chars: 2000 }),
-    );
+    const result = await tool.execute(JSON.stringify({ url: "https://1.1.1.1", max_chars: 2000 }));
     console.log(`[E2E fetch_url] 结果:\n${result.slice(0, 300)}`);
     expect(result).toContain("Fixture Domain");
     expect(globalThis.fetch).toHaveBeenCalledTimes(1);

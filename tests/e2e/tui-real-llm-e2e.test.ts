@@ -1,10 +1,11 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import React from "react";
 import { globalApprovalManager } from "../../src/approval/manager.js";
 import { runAgentFromCli, type RunAgentCliDependencies } from "../../src/cli/run-agent.js";
+import { getOrCreateSessionSettings } from "../../src/input/session-settings.js";
 import { buildTranscriptLayout } from "../../src/tui/transcript-layout.js";
 import type { DialogRequest } from "../../src/tui/dialog-arbiter.js";
 import { LLMStatusError } from "../../src/provider/errors.js";
@@ -199,7 +200,7 @@ describeRealLLM("TUI productization real LLM e2e", { timeout: 240000 }, () => {
   });
 
   function createHarness(name: string): TuiRealHarness {
-    const workDir = mkdtempSync(join(tmpdir(), `pico-tui-real-${name}-`));
+    const workDir = realpathSync(mkdtempSync(join(tmpdir(), `pico-tui-real-${name}-`)));
     tempDirs.push(workDir);
     const snapshots: TuiEntry[][] = [];
     const reporter = new TuiReporter((entries) => snapshots.push(entries));
@@ -310,6 +311,13 @@ describeRealLLM("TUI productization real LLM e2e", { timeout: 240000 }, () => {
 
   it("触发写入时出现真实审批请求且拒绝后文件不变", async () => {
     const harness = createHarness("approval");
+    getOrCreateSessionSettings({
+      sessionId: harness.sessionId,
+      cwd: harness.workDir,
+      provider: "openai",
+      model: realEnv.LLM_MODEL!,
+      mode: "default",
+    });
     const target = join(harness.workDir, "real-approval.txt");
     writeFileSync(target, "ORIGINAL\n");
     const realProvider = new OpenAIProvider({
