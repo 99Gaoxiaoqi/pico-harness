@@ -79,6 +79,7 @@ function resolveLocalUiDialogKind(action: unknown): LocalUiDialogKind | null {
   if (!isLocalUiCommandAction(action)) return null;
 
   if (action.kind === "open-panel") {
+    if (action.panel === "hooks") return null;
     return panelToDialogKind(action);
   }
 
@@ -89,6 +90,9 @@ function panelToDialogKind(
   action: Extract<LocalUiCommandAction, { kind: "open-panel" }>,
 ): LocalUiDialogKind {
   if (action.panel === "sessions") return "session";
+  if (action.panel === "hooks") {
+    throw new Error("Hooks panel is hosted by the session runtime");
+  }
   return action.panel;
 }
 

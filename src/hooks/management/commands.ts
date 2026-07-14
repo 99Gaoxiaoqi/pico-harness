@@ -26,6 +26,13 @@ function createHooksCommand(management: HookManagementService): SlashCommand {
     execute: async (input): Promise<LocalCommandResult> => {
       const action = input.argv[0] ?? "list";
       const handlerId = input.argv[1];
+      if (input.argv.length === 0) {
+        return {
+          ...message(formatList(management.list())),
+          data: management.list(),
+          ui: { kind: "open-panel", panel: "hooks" },
+        };
+      }
       switch (action) {
         case "list":
           return message(formatList(management.list()));

@@ -131,6 +131,33 @@ export interface McpToolResult {
   isError: boolean;
 }
 
+/** MCP 2025-06-18 form elicitation 的受限顶层 schema。 */
+export interface McpElicitationRequest {
+  mode?: "form";
+  message: string;
+  requestedSchema: Record<string, unknown>;
+}
+
+export interface McpElicitationResult {
+  action: "accept" | "decline" | "cancel";
+  content?: Record<string, unknown>;
+}
+
+export interface McpElicitationContext {
+  server: string;
+  signal: AbortSignal;
+}
+
+export type McpElicitationHandler = (
+  request: McpElicitationRequest,
+  context: McpElicitationContext,
+) => Promise<McpElicitationResult>;
+
+export interface McpClientOptions {
+  /** 只有宿主提供用户交互时才声明 elicitation capability。 */
+  elicitationHandler?: McpElicitationHandler;
+}
+
 /**
  * MCP 工具中止能证明的物理边界。
  *
@@ -216,8 +243,10 @@ export const JsonRpcErrorCode = {
   INTERNAL_ERROR: -32603,
 } as const;
 
-/** MCP 协议版本(pico 客户端声明的版本) */
+/** 无双向用户交互时保持的 legacy MCP 协议版本。 */
 export const MCP_PROTOCOL_VERSION = "2024-11-05";
+/** Elicitation 首次进入正式规范的版本。 */
+export const MCP_ELICITATION_PROTOCOL_VERSION = "2025-06-18";
 
 /** pico MCP 客户端在 initialize 握手中声明的身份 */
 export const PICO_MCP_CLIENT_INFO = {

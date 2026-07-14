@@ -7,6 +7,8 @@ export {
   createDelegationCompletionMessage,
   DelegationCompletionWakeQueue,
   DelegationWakeCoordinator,
+  HookRewakeCoordinator,
+  HookRewakeQueue,
 } from "../runtime/session-runtime.js";
 
 export type {
@@ -14,4 +16,6 @@ export type {
   SessionRuntimeOptions as TuiRuntimeStateOptions,
   DelegationCompletionWakeQueueOptions,
   DelegationWakeCoordinatorOptions,
+  HookRewakeCoordinatorOptions,
+  HookRewakeEntry,
 } from "../runtime/session-runtime.js";

@@ -23,6 +23,10 @@ export interface HookConfigReloaderOptions extends LoadHookSnapshotOptions {
   beforeSwap?: (context: HookConfigChangeContext) => Promise<HookOutput | boolean>;
   onSwap: (result: LoadHookSnapshotResult) => void | Promise<void>;
   onReject?: (message: string, candidate?: LoadHookSnapshotResult) => void;
+  /** 组件激活集在会话期间可变，每次候选加载时重新取值。 */
+  dynamicSources?: () =>
+    | Pick<LoadHookSnapshotOptions, "componentSources" | "extensionSources">
+    | undefined;
 }
 
 /**
@@ -43,7 +47,7 @@ export class HookConfigReloader {
 
   async start(): Promise<LoadHookSnapshotResult> {
     this.stopped = false;
-    if (!this.current) this.current = await loadHookSnapshot(this.options);
+    if (!this.current) this.current = await loadHookSnapshot(this.loadOptions());
     await this.refreshWatchers(this.current);
     return this.current;
   }
@@ -57,7 +61,7 @@ export class HookConfigReloader {
         let candidate: LoadHookSnapshotResult;
         try {
           candidate = await loadHookSnapshot({
-            ...this.options,
+            ...this.loadOptions(),
             version: previous.snapshot.version + 1,
           });
         } catch (error) {
@@ -101,6 +105,10 @@ export class HookConfigReloader {
 
   currentResult(): LoadHookSnapshotResult | undefined {
     return this.current;
+  }
+
+  private loadOptions(): LoadHookSnapshotOptions {
+    return { ...this.options, ...(this.options.dynamicSources?.() ?? {}) };
   }
 
   private schedule(path: string): void {

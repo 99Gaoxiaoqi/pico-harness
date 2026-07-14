@@ -32,7 +32,11 @@ describe("Hook management command adapter", () => {
       { raw: "/hooks", name: "hooks", args: "", argv: [] },
       context,
     );
-    expect(list).toMatchObject({ type: "local", message: "No Hooks configured." });
+    expect(list).toMatchObject({
+      type: "local",
+      message: "No Hooks configured.",
+      ui: { kind: "open-panel", panel: "hooks" },
+    });
     const unknown = await hooks!.execute(
       { raw: "/hooks shell rm", name: "hooks", args: "shell rm", argv: ["shell", "rm"] },
       context,

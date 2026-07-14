@@ -524,7 +524,9 @@ function createCompactCommand(
           : rawProvider;
         const ok = await new FullCompactor({
           provider,
-          ...(options.hookService ? { hookService: options.hookService, hookSource: "manual" } : {}),
+          ...(options.hookService
+            ? { hookService: options.hookService, hookSource: "manual" }
+            : {}),
         }).compact(session, retainLastN);
         return {
           type: "local",
@@ -1520,6 +1522,7 @@ function createAgentCommand(options: PicoCommandRegistryOptions): SlashCommand {
           sourcePath: agent.sourcePath,
           task,
           toolName: "delegate_task",
+          ...(agent.hooks === undefined ? {} : { agentHookConfig: agent.hooks }),
         },
       };
     },

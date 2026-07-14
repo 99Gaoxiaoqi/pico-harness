@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { SkillLoader } from "../../src/context/skill.js";
+import { SkillLoader, SkillViewTool } from "../../src/context/skill.js";
 import {
   renderAgentListCommand,
   renderSkillCommand,
@@ -86,6 +86,41 @@ describe("skill command helpers", () => {
       { name: "review", description: "new description" },
     ]);
     await expect(loader.viewBody("review")).resolves.toBe("# Review\nnew body");
+  });
+
+  it("保留 Skill frontmatter hooks，并在 skill_view 激活时交给会话 runtime", async () => {
+    await mkdir(join(workDir, ".claw", "skills", "guard"), { recursive: true });
+    await writeFile(
+      join(workDir, ".claw", "skills", "guard", "SKILL.md"),
+      [
+        "---",
+        "name: guard",
+        "description: 审查命令",
+        "hooks:",
+        "  PreToolUse:",
+        "    - matcher: bash",
+        "      hooks:",
+        "        - type: prompt",
+        "          prompt: Check command",
+        "---",
+        "",
+        "# Guard",
+      ].join("\n"),
+    );
+    const activated: unknown[] = [];
+    const tool = new SkillViewTool(loader, (skill) => activated.push(skill.hooks));
+
+    await expect(tool.execute(JSON.stringify({ name: "guard" }))).resolves.toBe("# Guard");
+    expect(activated).toEqual([
+      {
+        PreToolUse: [
+          {
+            matcher: "bash",
+            hooks: [{ type: "prompt", prompt: "Check command" }],
+          },
+        ],
+      },
+    ]);
   });
 
   it("renders /agents with Claude agent summaries and data", async () => {

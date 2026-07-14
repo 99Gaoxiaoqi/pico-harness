@@ -1,4 +1,4 @@
-import { SkillLoader, SkillViewTool } from "../context/skill.js";
+import { SkillLoader, SkillViewTool, type Skill } from "../context/skill.js";
 import { PlanStore } from "../context/plan-store.js";
 import { TodoStore } from "../context/todo-store.js";
 import { GoalManager } from "../engine/goal-manager.js";
@@ -65,6 +65,8 @@ export interface DefaultToolRegistryOptions extends ToolRegistryOptions {
   excludeSensitiveGrepFiles?: boolean | ((path: string | undefined) => boolean);
   /** 宿主启动后注入的 LSP / Repo Map 统一服务。 */
   codeIntelligence?: CodeIntelligenceService;
+  /** Skill frontmatter hooks 只在当前 Agent run 激活。 */
+  activateSkillHooks?: (skill: Skill) => void | Promise<void>;
 }
 
 export function buildDefaultToolRegistry(
@@ -79,6 +81,7 @@ export function buildDefaultToolRegistry(
     askUserHandler,
     excludeSensitiveGrepFiles,
     codeIntelligence,
+    activateSkillHooks,
     workspaceRoots,
     deferWorkspaceBoundary = false,
     yoloSandbox,
@@ -106,7 +109,7 @@ export function buildDefaultToolRegistry(
   registry.register(new TaskListTool(backgroundManager));
   registry.register(new TaskOutputTool(backgroundManager));
   registry.register(new TaskStopTool(backgroundManager));
-  registry.register(new SkillViewTool(new SkillLoader(workDir)));
+  registry.register(new SkillViewTool(new SkillLoader(workDir), activateSkillHooks));
   registry.register(new GlobTool(roots));
   registry.register(
     new GrepTool(roots, {

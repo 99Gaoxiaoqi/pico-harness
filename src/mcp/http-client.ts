@@ -14,11 +14,16 @@
 import { logger } from "../observability/logger.js";
 import type { ToolExecutionContext } from "../tools/registry.js";
 import {
+  JsonRpcErrorCode,
+  MCP_ELICITATION_PROTOCOL_VERSION,
   MCP_PROTOCOL_VERSION,
   PICO_MCP_CLIENT_INFO,
   type JsonRpcRequest,
   type JsonRpcResponse,
   type McpClient,
+  type McpClientOptions,
+  type McpElicitationRequest,
+  type McpElicitationResult,
   type McpPromptGetResult,
   type McpPromptListResult,
   type McpResourceListResult,
@@ -36,6 +41,7 @@ const MAX_SSE_EVENT_BYTES = 1024 * 1024;
 const MAX_SSE_BUFFER_BYTES = 1024 * 1024;
 const CANCELLATION_POST_TIMEOUT_MS = 1_000;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+const MAX_CONCURRENT_ELICITATIONS = 1;
 
 interface PendingRequest {
   method: string;
@@ -49,6 +55,11 @@ interface PendingRequest {
   transport?: Promise<void>;
   abortTask?: Promise<void>;
 }
+
+type OutgoingJsonRpcMessage =
+  | JsonRpcRequest
+  | JsonRpcResponse
+  | { jsonrpc: "2.0"; method: string; params: Record<string, unknown> };
 
 /**
  * HttpMcpClient:把一个远程 MCP server 封装成 McpClient 接口。
@@ -76,8 +87,14 @@ export class HttpMcpClient implements McpClient {
   private readonly activeTransports = new Set<Promise<unknown>>();
   private readonly closeHandlers: Array<(err?: Error) => void> = [];
   private readonly errorHandlers: Array<(err: Error) => void> = [];
+  private readonly elicitationControllers = new Set<AbortController>();
+  private negotiatedProtocolVersion = MCP_PROTOCOL_VERSION;
+  private sessionId: string | undefined;
 
-  constructor(private readonly config: McpServerConfig) {
+  constructor(
+    private readonly config: McpServerConfig,
+    private readonly options: McpClientOptions = {},
+  ) {
     if (config.transport !== "http" && config.transport !== "sse") {
       throw new Error(`HttpMcpClient 不支持 transport=${config.transport}`);
     }
@@ -186,6 +203,7 @@ export class HttpMcpClient implements McpClient {
     this.closed = true;
     this.connected = false;
     const closeError = new Error(`MCP server "${this.config.name}" 已关闭`);
+    for (const controller of this.elicitationControllers) controller.abort(closeError);
 
     // 中止 SSE 流
     if (this.sseAbort) {
@@ -222,12 +240,23 @@ export class HttpMcpClient implements McpClient {
   // ---------- 内部实现 ----------
 
   private async initialize(): Promise<void> {
+    const requestedVersion = this.options.elicitationHandler
+      ? MCP_ELICITATION_PROTOCOL_VERSION
+      : MCP_PROTOCOL_VERSION;
     const result = await this.request("initialize", {
-      protocolVersion: MCP_PROTOCOL_VERSION,
-      capabilities: {},
+      protocolVersion: requestedVersion,
+      capabilities: this.options.elicitationHandler ? { elicitation: {} } : {},
       clientInfo: PICO_MCP_CLIENT_INFO,
     });
-    const serverInfo = (result as { serverInfo?: { name?: string; version?: string } }).serverInfo;
+    const initialized = result as {
+      protocolVersion?: unknown;
+      serverInfo?: { name?: string; version?: string };
+    };
+    this.negotiatedProtocolVersion = supportedProtocolVersion(
+      initialized.protocolVersion,
+      requestedVersion,
+    );
+    const serverInfo = initialized.serverInfo;
     logger.info(
       { server: this.config.name, serverInfo },
       `[MCP] 握手成功: ${serverInfo?.name ?? "unknown"} v${serverInfo?.version ?? "?"}`,
@@ -396,7 +425,7 @@ export class HttpMcpClient implements McpClient {
    * @returns http 模式返回解析后的 JsonRpcResponse;sse 模式返回 undefined(响应走 SSE 流)
    */
   private sendHttpPost(
-    msg: JsonRpcRequest | { jsonrpc: "2.0"; method: string; params: Record<string, unknown> },
+    msg: OutgoingJsonRpcMessage,
     targetUrl?: string,
     controller = new AbortController(),
     allowWhileClosing = false,
@@ -408,7 +437,7 @@ export class HttpMcpClient implements McpClient {
   }
 
   private async sendHttpPostInternal(
-    msg: JsonRpcRequest | { jsonrpc: "2.0"; method: string; params: Record<string, unknown> },
+    msg: OutgoingJsonRpcMessage,
     targetUrl: string | undefined,
     controller: AbortController,
   ): Promise<JsonRpcResponse | undefined> {
@@ -417,6 +446,10 @@ export class HttpMcpClient implements McpClient {
       "Content-Type": "application/json",
       Accept: "application/json, text/event-stream",
       ...(this.config.headers ?? {}),
+      ...(this.negotiatedProtocolVersion === MCP_ELICITATION_PROTOCOL_VERSION
+        ? { "MCP-Protocol-Version": this.negotiatedProtocolVersion }
+        : {}),
+      ...(this.sessionId ? { "Mcp-Session-Id": this.sessionId } : {}),
     };
 
     try {
@@ -430,6 +463,13 @@ export class HttpMcpClient implements McpClient {
 
       if (!res.ok) {
         throw new Error(`HTTP ${res.status} ${res.statusText}`);
+      }
+      if ("method" in msg && msg.method === "initialize") {
+        this.sessionId = res.headers.get("mcp-session-id") ?? undefined;
+      }
+      if (!("method" in msg) || res.status === 202 || res.status === 204) {
+        await cancelResponseBody(res);
+        return undefined;
       }
 
       const contentType = res.headers.get("content-type") ?? "";
@@ -477,7 +517,7 @@ export class HttpMcpClient implements McpClient {
    */
   private async readSseResponse(
     res: Response,
-    msg: JsonRpcRequest | { jsonrpc: "2.0"; method: string; params: Record<string, unknown> },
+    msg: OutgoingJsonRpcMessage,
   ): Promise<JsonRpcResponse | undefined> {
     const body = res.body;
     const wantId = "id" in msg ? msg.id : undefined;
@@ -510,8 +550,10 @@ export class HttpMcpClient implements McpClient {
           buffer = buffer.slice(sep + separatorLength);
           assertByteLimit(eventBlock, MAX_SSE_EVENT_BYTES, "HTTP SSE 事件");
           const parsed = this.parseSseEvent(eventBlock);
-          if (parsed !== null && parsed.id === wantId) {
-            return parsed;
+          if (parsed !== null && "method" in parsed && parsed.id !== undefined) {
+            void this.handleServerRequest(parsed as JsonRpcRequest);
+          } else if (parsed !== null && parsed.id === wantId) {
+            return parsed as JsonRpcResponse;
           }
         }
         assertByteLimit(buffer, MAX_SSE_BUFFER_BYTES, "HTTP SSE 累计缓冲区");
@@ -527,7 +569,7 @@ export class HttpMcpClient implements McpClient {
   }
 
   /** 解析一个 SSE 事件块(以空行分隔),提取 data 里的 JSON-RPC 消息 */
-  private parseSseEvent(block: string): JsonRpcResponse | null {
+  private parseSseEvent(block: string): (JsonRpcRequest | JsonRpcResponse) | null {
     const lines = splitSseLines(block);
     const dataLines: string[] = [];
     for (const line of lines) {
@@ -537,7 +579,7 @@ export class HttpMcpClient implements McpClient {
     }
     if (dataLines.length === 0) return null;
     try {
-      const msg = JSON.parse(dataLines.join("\n")) as JsonRpcResponse;
+      const msg = JSON.parse(dataLines.join("\n")) as JsonRpcRequest | JsonRpcResponse;
       return msg;
     } catch {
       return null;
@@ -666,9 +708,11 @@ export class HttpMcpClient implements McpClient {
     }
     if (dataLines.length === 0) return;
     try {
-      const msg = JSON.parse(dataLines.join("\n")) as JsonRpcResponse;
-      if (msg.id !== undefined) {
-        this.resolvePending(msg);
+      const msg = JSON.parse(dataLines.join("\n")) as JsonRpcRequest | JsonRpcResponse;
+      if ("method" in msg && msg.id !== undefined) {
+        void this.handleServerRequest(msg);
+      } else if (msg.id !== undefined) {
+        this.resolvePending(msg as JsonRpcResponse);
       }
     } catch {
       /* 忽略无法解析的事件 */
@@ -676,7 +720,8 @@ export class HttpMcpClient implements McpClient {
   }
 
   private resolvePending(response: JsonRpcResponse): void {
-    const id = typeof response.id === "number" ? response.id : Number(response.id);
+    if (typeof response.id !== "number") return;
+    const id = response.id;
     const pending = this.pending.get(id);
     if (!pending) return;
     if (pending.abortReason) return;
@@ -688,6 +733,89 @@ export class HttpMcpClient implements McpClient {
     } else {
       pending.resolve(response.result);
     }
+  }
+
+  private async handleServerRequest(request: JsonRpcRequest): Promise<void> {
+    let response: JsonRpcResponse;
+    if (request.method !== "elicitation/create") {
+      response = {
+        jsonrpc: "2.0",
+        id: request.id,
+        error: { code: JsonRpcErrorCode.METHOD_NOT_FOUND, message: "Method not found" },
+      };
+    } else if (
+      this.negotiatedProtocolVersion !== MCP_ELICITATION_PROTOCOL_VERSION ||
+      !this.options.elicitationHandler ||
+      !this.associatedRequest()
+    ) {
+      response = {
+        jsonrpc: "2.0",
+        id: request.id,
+        error: { code: JsonRpcErrorCode.INVALID_REQUEST, message: "Elicitation unavailable" },
+      };
+    } else if (this.elicitationControllers.size >= MAX_CONCURRENT_ELICITATIONS) {
+      response = {
+        jsonrpc: "2.0",
+        id: request.id,
+        error: { code: JsonRpcErrorCode.INTERNAL_ERROR, message: "Too many elicitations" },
+      };
+    } else {
+      const parsed = parseElicitationRequest(request.params);
+      if (!parsed) {
+        response = {
+          jsonrpc: "2.0",
+          id: request.id,
+          error: { code: JsonRpcErrorCode.INVALID_PARAMS, message: "Invalid elicitation params" },
+        };
+      } else {
+        const controller = new AbortController();
+        const associatedSignal = this.associatedRequest()?.signal;
+        const abortFromOrigin = (): void =>
+          controller.abort(
+            associatedSignal?.reason ?? new DOMException("Request aborted", "AbortError"),
+          );
+        associatedSignal?.addEventListener("abort", abortFromOrigin, { once: true });
+        if (associatedSignal?.aborted) abortFromOrigin();
+        this.elicitationControllers.add(controller);
+        try {
+          const result = normalizeElicitationResult(
+            await this.options.elicitationHandler(parsed, {
+              server: this.config.name,
+              signal: controller.signal,
+            }),
+          );
+          response = { jsonrpc: "2.0", id: request.id, result };
+        } catch (error) {
+          response = {
+            jsonrpc: "2.0",
+            id: request.id,
+            error: {
+              code: JsonRpcErrorCode.INTERNAL_ERROR,
+              message: redactSensitiveText(errorMessage(error)),
+            },
+          };
+        } finally {
+          associatedSignal?.removeEventListener("abort", abortFromOrigin);
+          this.elicitationControllers.delete(controller);
+        }
+      }
+    }
+    if (this.closed) return;
+    await this.sendHttpPost(
+      response,
+      this.config.transport === "sse" ? this.postEndpoint : undefined,
+    ).catch((error) => {
+      logger.warn(
+        { server: this.config.name, err: errorMessage(error) },
+        "[MCP] Elicitation 响应发送失败",
+      );
+    });
+  }
+
+  private associatedRequest(): PendingRequest | undefined {
+    return [...this.pending.values()].find((pending) =>
+      ["tools/call", "resources/read", "prompts/get"].includes(pending.method),
+    );
   }
 
   private failAllPending(err: Error): void {
@@ -895,4 +1023,44 @@ function abortReason(signal: AbortSignal): Error {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function supportedProtocolVersion(value: unknown, fallback: string): string {
+  const version = typeof value === "string" ? value : fallback;
+  if (version === MCP_PROTOCOL_VERSION || version === MCP_ELICITATION_PROTOCOL_VERSION) {
+    return version;
+  }
+  throw new Error(`MCP server 协商了不支持的协议版本: ${version}`);
+}
+
+function parseElicitationRequest(
+  value: Record<string, unknown> | undefined,
+): McpElicitationRequest | undefined {
+  if (!value || typeof value.message !== "string" || value.message.length > 2_000) return undefined;
+  if (value.mode !== undefined && value.mode !== "form") return undefined;
+  if (
+    typeof value.requestedSchema !== "object" ||
+    value.requestedSchema === null ||
+    Array.isArray(value.requestedSchema)
+  ) {
+    return undefined;
+  }
+  return {
+    ...(value.mode === "form" ? { mode: "form" as const } : {}),
+    message: value.message,
+    requestedSchema: value.requestedSchema as Record<string, unknown>,
+  };
+}
+
+function normalizeElicitationResult(result: McpElicitationResult): McpElicitationResult {
+  if (result.action !== "accept" && result.action !== "decline" && result.action !== "cancel") {
+    throw new Error("Elicitation handler 返回了非法 action");
+  }
+  if (result.action === "accept") {
+    if (!result.content || typeof result.content !== "object" || Array.isArray(result.content)) {
+      throw new Error("Elicitation accept 缺少 content");
+    }
+    return { action: "accept", content: result.content };
+  }
+  return { action: result.action };
 }
