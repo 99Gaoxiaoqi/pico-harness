@@ -12,6 +12,7 @@ import { ToolResultArtifactStore } from "../context/artifact-store.js";
 import { createContextBudget, estimateTokenBudgetAsChars } from "../context/context-budget.js";
 import { PromptComposer } from "../context/composer.js";
 import type { TodoStore } from "../context/todo-store.js";
+import type { Skill } from "../context/skill.js";
 import { ToolDisclosure } from "../tools/tool-disclosure.js";
 import {
   createProvider,
@@ -487,7 +488,7 @@ export async function executeAgentRuntime(
       },
     },
     onAsyncRewake(handler, output) {
-      runtimeState.steerQueue.push(
+      runtimeState.hookRewakeQueue.enqueue(
         `[Hook asyncRewake ${handler.id}] ${output.reason ?? output.additionalContext ?? output.decision}`,
       );
     },
@@ -509,6 +510,15 @@ export async function executeAgentRuntime(
       return !isSensitiveCredentialPath(workspaceRoots.resolveUnchecked(path));
     },
     backgroundPolicy ? { config: { network: "deny" } } : undefined,
+    async (skill) => {
+      if (!skill.sourcePath || skill.hooks === undefined) return;
+      await runtimeState.activateComponentHooks({
+        kind: "skill",
+        path: skill.sourcePath,
+        componentId: skill.name,
+        inlineHooks: skill.hooks,
+      });
+    },
   );
   // 【任务 2.6】用户可配置 Shell Hooks:加载 .claw/settings.json 的 hooks 配置,
   // 存在则挂载 HookRunner 到 registry。fail-open:配置缺失/畸形均不启用 hook,零影响。
@@ -748,6 +758,7 @@ export async function executeAgentRuntime(
     });
     throw error;
   } finally {
+    await runtimeState.clearComponentHooks();
     await registry.drainHookEvents?.();
     unsubscribeMcpStatus?.();
     // 非 TUI 调用仍按轮关闭；TUI 注入的 manager 由宿主在退出时统一关闭。
@@ -762,7 +773,10 @@ export async function executeAgentRuntime(
   }
 }
 
-function applyPromptHookDecision(prompt: string, decision: import("../hooks/types.js").HookOutput): string {
+function applyPromptHookDecision(
+  prompt: string,
+  decision: import("../hooks/types.js").HookOutput,
+): string {
   let next = prompt;
   if (typeof decision.modifiedInput === "string") {
     next = decision.modifiedInput;
@@ -795,6 +809,7 @@ function buildRegistry(
   codeIntelligence?: SessionRuntime["codeIntelligence"],
   excludeSensitiveGrepFiles?: boolean | ((path: string | undefined) => boolean),
   yoloSandbox?: { config?: Partial<YoloSandboxConfig> },
+  activateSkillHooks?: (skill: Skill) => void | Promise<void>,
 ): ToolRegistry {
   return buildDefaultToolRegistry(workDir, {
     truncateResults: false,
@@ -808,6 +823,7 @@ function buildRegistry(
     ...(codeIntelligence !== undefined ? { codeIntelligence } : {}),
     ...(excludeSensitiveGrepFiles !== undefined ? { excludeSensitiveGrepFiles } : {}),
     ...(yoloSandbox !== undefined ? { yoloSandbox } : {}),
+    ...(activateSkillHooks !== undefined ? { activateSkillHooks } : {}),
   });
 }
 

@@ -4,12 +4,10 @@ import {
   loadHookSnapshot,
   type LoadHookSnapshotOptions,
   type LoadHookSnapshotResult,
+  type HookConfigSourceSpec,
 } from "./config.js";
 import { HookConfigReloader } from "./config/reloader.js";
-import {
-  DefaultHookExecutor,
-  type HookHandlerExecutorOptions,
-} from "./executors/index.js";
+import { DefaultHookExecutor, type HookHandlerExecutorOptions } from "./executors/index.js";
 import {
   applyHookifyProposal,
   createHookifyProposal,
@@ -24,8 +22,10 @@ import { HookLocalStateStore } from "./management/state.js";
 import { HookService, type HookDecisionProvider } from "./service.js";
 import { HookTrustStore } from "./trust/store.js";
 
-export interface SessionHookRuntimeOptions
-  extends Pick<LoadHookSnapshotOptions, "workDir" | "userHome"> {
+export interface SessionHookRuntimeOptions extends Pick<
+  LoadHookSnapshotOptions,
+  "workDir" | "userHome"
+> {
   sessionId: string;
 }
 
@@ -36,6 +36,8 @@ export interface SessionHookRuntime {
   commands: readonly SlashCommand[];
   bind(dependencies: Parameters<DefaultHookExecutor["bind"]>[0]): void;
   reload(changedPaths?: readonly string[]): Promise<boolean>;
+  activateComponentSource(source: HookConfigSourceSpec): Promise<() => Promise<void>>;
+  clearComponentSources(): Promise<void>;
   dispose(): Promise<void>;
 }
 
@@ -53,6 +55,10 @@ export async function createSessionHookRuntime(
   } satisfies LoadHookSnapshotOptions;
   const initial = await loadHookSnapshot(loadOptions);
   let rules = await safeLoadHookifyRules(options.workDir);
+  const componentSources = new Map<string, HookConfigSourceSpec>();
+  let componentSourceSequence = 0;
+  let componentSourceQueue = Promise.resolve();
+  let componentTransition: "activate" | "deactivate" | undefined;
   let candidateRules: readonly HookifyRule[] | undefined;
   const decisionProvider: HookDecisionProvider = {
     evaluate(event, payload) {
@@ -76,6 +82,7 @@ export async function createSessionHookRuntime(
       } catch (error) {
         return { decision: "deny", reason: `Hookify 规则无效: ${errorMessage(error)}` };
       }
+      if (componentTransition === "deactivate") return true;
       return await service.dispatch("ConfigChange", {
         paths: changedPaths,
         proposedHash: candidate.snapshot.id,
@@ -89,7 +96,13 @@ export async function createSessionHookRuntime(
     onReject(message) {
       candidateRules = undefined;
       logger.warn({ message }, "[Hook] 配置热重载被拒绝，保留旧快照");
+      void service
+        .dispatch("Notification", { level: "error", message })
+        .catch((error) =>
+          logger.warn({ error: errorMessage(error) }, "[Hook] Notification 事件执行失败"),
+        );
     },
+    dynamicSources: () => ({ componentSources: [...componentSources.values()] }),
   });
   await reloader.start();
 
@@ -128,6 +141,70 @@ export async function createSessionHookRuntime(
   };
   const commands = createHookManagementCommands({ management, hookify });
 
+  const serializeComponentSourceChange = async <T>(operation: () => Promise<T>): Promise<T> => {
+    const running = componentSourceQueue.then(operation, operation);
+    componentSourceQueue = running.then(
+      () => undefined,
+      () => undefined,
+    );
+    return await running;
+  };
+
+  const activateComponentSource = async (
+    source: HookConfigSourceSpec,
+  ): Promise<() => Promise<void>> => {
+    if (source.kind !== "skill" && source.kind !== "agent") {
+      throw new Error("组件 Hook source 只允许 skill/agent");
+    }
+    if (!source.componentId || source.inlineHooks === undefined) {
+      throw new Error("组件 Hook source 缺少 componentId/inlineHooks");
+    }
+    const key = `${source.kind}:${source.componentId}:${source.path}:${++componentSourceSequence}`;
+    await serializeComponentSourceChange(async () => {
+      componentSources.set(key, source);
+      componentTransition = "activate";
+      const accepted = await reloader.reload([source.path]).finally(() => {
+        componentTransition = undefined;
+      });
+      if (!accepted) {
+        componentSources.delete(key);
+        throw new Error(`组件 Hook source 激活被拒绝: ${source.componentId}`);
+      }
+    });
+    let active = true;
+    return async () => {
+      if (!active) return;
+      active = false;
+      await serializeComponentSourceChange(async () => {
+        componentSources.delete(key);
+        componentTransition = "deactivate";
+        const accepted = await reloader.reload([source.path]).finally(() => {
+          componentTransition = undefined;
+        });
+        if (!accepted) {
+          logger.warn(
+            { componentId: source.componentId },
+            "[Hook] 组件 Hook source 释放后未能刷新快照",
+          );
+        }
+      });
+    };
+  };
+
+  const clearComponentSources = async (): Promise<void> =>
+    await serializeComponentSourceChange(async () => {
+      if (componentSources.size === 0) return;
+      const paths = [...componentSources.values()].map((source) => source.path);
+      componentSources.clear();
+      componentTransition = "deactivate";
+      const accepted = await reloader.reload(paths).finally(() => {
+        componentTransition = undefined;
+      });
+      if (!accepted) {
+        logger.warn("[Hook] 清空组件 Hook source 后未能刷新快照");
+      }
+    });
+
   return {
     service,
     executor,
@@ -135,6 +212,8 @@ export async function createSessionHookRuntime(
     commands,
     bind: (dependencies) => executor.bind(dependencies),
     reload: async (changedPaths) => await reloader.reload(changedPaths),
+    activateComponentSource,
+    clearComponentSources,
     dispose: async () => reloader.stop(),
   };
 }

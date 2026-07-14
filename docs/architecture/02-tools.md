@@ -45,22 +45,22 @@ interface Registry {
   useExecution?(mw: ExecutionMiddleware): void; // 洋葱包裹执行
   isReadOnlyTool?(name: string): boolean;
   getAccesses?(call: ToolCall): ToolAccesses;
-  setHookRunner?(runner: HookRunner): void; // 用户 Shell Hooks
+  setHookService?(service: HookService): void; // 前台会话 Hooks
 }
 ```
 
-### 执行链（8 步）
+### 执行链
 
 ```
 execute(call)
   ├─ 1. 路由查找 (tools.get)
-  ├─ 2. RequestMiddleware 链      ← 审批、安全拦截(allowed:false 阻断)
-  ├─ 3. PreToolUse Hook            ← 用户 Shell Hook(deny 阻断/fail-open)
-  ├─ 4. preWriteHook               ← 文件快照
-  ├─ 5. ExecutionMiddleware 洋葱链  ← 日志/计费/重试
-  ├─ 6. truncateToolOutput
-  ├─ 7. PostToolUse Hook           ← fire-and-forget
-  └─ 8. 错误封装成 isError ToolResult
+  ├─ 2. Hardline / Plan / Workspace Trust 不可绕过门
+  ├─ 3. PreToolUse Hook（可 deny/改写）
+  ├─ 4. 改写后重跑安全门
+  ├─ 5. PermissionRequest Hook → 人工审批
+  ├─ 6. preWriteHook / ExecutionMiddleware / tool.execute
+  ├─ 7. PostToolUse 或 PostToolUseFailure（有界等待）
+  └─ 8. 并行批次完成后 PostToolBatch
 ```
 
 ---
@@ -184,15 +184,15 @@ L4 逐行去缩进 + 缩进重对齐
 
 ---
 
-## 7. 用户可配置 Shell Hooks (`src/hooks/`)
+## 7. 会话级 Hooks (`src/hooks/`)
 
 对标 Claude Code / Codex / Kimi Code 协议：
 
-- **PreToolUse**：可拦截（deny）或改写参数（modifiedInput）
-- **PostToolUse**：fire-and-forget 通知
-- stdin 传 JSON，exit 0=放行 / exit 2=阻断
-- **fail-open 铁律**：任何故障（超时/崩溃/解析失败）都不阻断工具
-- 配置：`.claw/settings.json` 的 `hooks` 字段
+- 前台 `HookService` 支持完整事件集和 `command/http/mcp_tool/prompt/agent`。
+- 普通 handler 故障 fail-open；父级 Abort 必须中止全部子执行。
+- Canonical 配置位于 `~/.pico/hooks.json`、`.pico/hooks.json`、`.claw/hooks.local.json`；legacy settings 只读兼容。
+- 可执行 handler 经工作区、定义和脚本字节哈希绑定信任。
+- 后台/Cron 继续使用 command-only、network-deny、fail-closed strict runner。
 
 ---
 
@@ -200,7 +200,7 @@ L4 逐行去缩进 + 缩进重对齐
 
 1. **延迟解析**：execute/accesses 收原始 JSON 字符串，各工具内部反序列化
 2. **保守降级**：工具未实现 accesses → `all()`（宁可损失并发不可错判冲突）
-3. **fail-open**：HookRunner 任何故障都不阻断工具
+3. **分层故障语义**：前台普通 Hook 故障 fail-open，父级取消不得被吞掉
 4. **爆炸半径限制**：子代理仅挂载受限工具
 5. **路径安全**：`safeResolve` 防穿越是所有文件工具的防御底线
 6. **解耦**：工具不直接操作 engine 私有状态，通过 host 注入回调

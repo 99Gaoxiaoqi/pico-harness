@@ -55,12 +55,13 @@
 │ │ ⑤ 工具执行(资源冲突图调度)                                    │ │
 │ │   scheduler = new ToolScheduler({maxConcurrency:8})          │ │
 │ │   registry.execute({name:"read_file", args})                 │ │
-│ │     ├─ RequestMiddleware(审批:read_file 安全,放行)             │ │
-│ │     ├─ PreToolUse Hook(fail-open)                             │ │
+│ │     ├─ Hardline/Plan/Trust 安全门                             │ │
+│ │     ├─ PreToolUse Hook(改写后重跑安全门)                 │ │
+│ │     ├─ PermissionRequest Hook / 人工审批                    │ │
 │ │     ├─ preWriteHook(文件历史备份:read 不写,跳过)               │ │
 │ │     ├─ tool.execute(args) → 文件内容                          │ │
 │ │     ├─ truncateToolOutput(截断 8000 字符)                     │ │
-│ │     └─ PostToolUse Hook(fire-and-forget)                     │ │
+│ │     └─ PostToolUse/PostToolUseFailure（有界等待）          │ │
 │ │   session.append(toolResult)                                 │ │
 │ │                                                              │ │
 │ │ ⑥ 文件历史快照(每轮 finally)                                  │ │
