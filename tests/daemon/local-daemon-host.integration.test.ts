@@ -156,6 +156,65 @@ describe("LocalDaemonHost integration", () => {
     }
   });
 
+  it("生产桌面 Run 兼容 TUI 的旧版环境变量模型路由", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pico-daemon-legacy-model-"));
+    cleanups.push(() => rm(root, { recursive: true, force: true }));
+    const workspace = join(root, "workspace");
+    await mkdir(workspace);
+    const runtimeStateRoot = resolvePicoPaths(workspace).workspace.root;
+    cleanups.push(() => rm(runtimeStateRoot, { recursive: true, force: true }));
+    const trustStore = new WorkspaceTrustStore({ userStateDirectory: join(root, "trust") });
+    await trustStore.trust(await trustStore.canonicalize(workspace));
+    const endpoint = resolveLocalDaemonEndpoint({
+      runtimeDir: join(root, "runtime"),
+      userIdentity: "legacy-model-test",
+    });
+    const agentRuntime = new CapturingActivationAgentRuntime();
+    const host = createProductionLocalDaemonHost({
+      endpoint,
+      trustStore,
+      agentRuntime,
+      credentialVault: new AvailableCredentialVault(),
+      registrationStore: new WorkspaceRegistrationStore(join(root, "workspaces.json")),
+      env: {
+        LLM_BASE_URL: "https://legacy-provider.example.test/v1",
+        LLM_API_KEY: "legacy-test-secret",
+        LLM_MODEL: "glm-5.2",
+      },
+    });
+    await host.start();
+    const client = new LocalRuntimeClient(endpoint);
+    let sessionId: string | undefined;
+    try {
+      const started = (await client.request("run.start", {
+        workspacePath: workspace,
+        prompt: "你好",
+      })) as { runId: string };
+      await expect
+        .poll(async () => {
+          const listed = (await client.request("runs.list", { workspacePath: workspace })) as {
+            runs: Array<{ runId: string; status: string }>;
+          };
+          return listed.runs.find((run) => run.runId === started.runId)?.status;
+        })
+        .toBe("succeeded");
+
+      expect(agentRuntime.requests).toHaveLength(1);
+      expect(agentRuntime.requests[0]).toMatchObject({
+        provider: "openai",
+        baseURL: "https://legacy-provider.example.test/v1",
+        apiKey: "legacy-test-secret",
+        model: "glm-5.2",
+        modelRouteId: "legacy/glm-5.2",
+      });
+      sessionId = agentRuntime.requests[0]?.session;
+    } finally {
+      client.close();
+      await host.stop();
+      if (sessionId) globalSessionManager.delete(sessionId, workspace);
+    }
+  });
+
   it("受信任桌面 Run 使用真实交互边界并幂等接收审批与 Ask User", async () => {
     const root = await mkdtemp(join(tmpdir(), "pico-daemon-desktop-run-"));
     cleanups.push(() => rm(root, { recursive: true, force: true }));
