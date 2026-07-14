@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
+import { realpathSync } from "node:fs";
+import { resolve } from "node:path";
 import type {
   HookCondition,
   HookDiagnostic,
@@ -10,6 +12,7 @@ import type {
   HookInput,
   HookOutput,
   HookSnapshot,
+  HookSource,
   ResolvedHookHandler,
 } from "./types.js";
 
@@ -38,6 +41,12 @@ export interface HookServiceOptions {
   decisionProviders?: readonly HookDecisionProvider[];
 }
 
+export interface AgentComponentHookScope {
+  kind: "agent";
+  componentId: string;
+  path: string;
+}
+
 const DECISION_RANK: Readonly<Record<HookOutput["decision"], number>> = {
   allow: 0,
   ask: 1,
@@ -49,6 +58,7 @@ const DECISION_RANK: Readonly<Record<HookOutput["decision"], number>> = {
 export class HookService {
   private snapshot: HookSnapshot;
   private readonly hookScope = new AsyncLocalStorage<boolean>();
+  private readonly agentComponentScope = new AsyncLocalStorage<AgentComponentHookScope>();
   private readonly concurrency: number;
   private readonly agentConcurrency: number;
 
@@ -66,6 +76,18 @@ export class HookService {
     this.snapshot = snapshot;
   }
 
+  /** 将 Agent component Hook 限定在对应子代理的异步调用链内。 */
+  async runInAgentComponentScope<T>(
+    scope: AgentComponentHookScope,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const normalizedScope = {
+      ...scope,
+      path: canonicalComponentPath(scope.path),
+    } satisfies AgentComponentHookScope;
+    return await this.agentComponentScope.run(normalizedScope, operation);
+  }
+
   async dispatch<E extends HookEvent>(
     event: E,
     payload: HookEventPayloadMap[E],
@@ -81,6 +103,7 @@ export class HookService {
       ),
     );
     const candidates = snapshot.handlers[event]
+      .filter((entry) => agentSourceMatchesScope(entry.source, this.agentComponentScope.getStore()))
       .filter((entry) => entry.handler.enabled !== false)
       .filter((entry) => entry.trusted || !isExecutable(entry.handler))
       .filter((entry) => matcherMatches(entry.matcher, payload))
@@ -117,6 +140,26 @@ export class HookService {
       );
       return aggregateHookOutputs([...providerOutputs, ...results]);
     });
+  }
+}
+
+function agentSourceMatchesScope(
+  source: HookSource,
+  scope: AgentComponentHookScope | undefined,
+): boolean {
+  if (source.kind !== "agent") return true;
+  return (
+    scope?.kind === source.kind &&
+    scope.componentId === source.componentId &&
+    scope.path === canonicalComponentPath(source.path)
+  );
+}
+
+function canonicalComponentPath(path: string): string {
+  try {
+    return realpathSync.native(path);
+  } catch {
+    return resolve(path);
   }
 }
 

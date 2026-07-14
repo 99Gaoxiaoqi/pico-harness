@@ -7,6 +7,7 @@ import { render, type Instance } from "ink";
 import { expect, it } from "vitest";
 import { ToolResultArtifactStore } from "../../src/context/artifact-store.js";
 import { Session } from "../../src/engine/session.js";
+import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 import { toolResultMessage, type ToolCall } from "../../src/schema/message.js";
 import {
   fileHistoryBeginRewindPoint,
@@ -157,7 +158,7 @@ it("Stage 11 从结构化询问到水合检查与单文件恢复保持同一条�
     };
     const fullOutput = `日志开始\n${"你好🙂".repeat(400)}\n日志结束\n`;
     const artifactStore = new ToolResultArtifactStore({
-      baseDir: join(workDir, ".claw", "artifacts"),
+      baseDir: resolvePicoPaths(workDir).workspace.artifacts,
     });
     const observationProcessor = createToolResultObservationProcessor({
       store: artifactStore,

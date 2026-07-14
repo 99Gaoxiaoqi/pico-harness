@@ -12,6 +12,7 @@ import {
   type BackgroundYoloPolicySnapshot,
 } from "../../src/safety/background-yolo-policy.js";
 import { WorkspaceRoots } from "../../src/tools/workspace-roots.js";
+import { HookTrustStore } from "../../src/hooks/trust/store.js";
 
 describe("background unrestricted network execution policy integration", () => {
   const cleanup: string[] = [];
@@ -109,6 +110,58 @@ describe("background unrestricted network execution policy integration", () => {
     expect(prepared.hookRunner).toBeDefined();
     await prepared.hookRunner!.runPostToolUse("read_file", { path: "a.txt" }, "content", "job-1");
     await expect(readFile(join(workspace, ".post-hook-ran"), "utf8")).resolves.toBe("post");
+  });
+
+  it("原生 .pico hooks 优先于 legacy，且命令 handler 必须先受信任", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "pico-background-native-hook-"));
+    const trustRoot = await mkdtemp(join(tmpdir(), "pico-background-hook-trust-"));
+    cleanup.push(workspace, trustRoot);
+    await mkdir(join(workspace, ".pico"), { recursive: true });
+    await mkdir(join(workspace, ".claw"), { recursive: true });
+    const nativePath = join(workspace, ".pico", "hooks.json");
+    const handler = { type: "command" as const, command: "printf native > .native-hook-ran" };
+    await writeFile(
+      nativePath,
+      JSON.stringify({ PostToolUse: [{ matcher: "read_file", hooks: [handler] }] }),
+    );
+    await writeFile(
+      join(workspace, ".claw", "settings.json"),
+      JSON.stringify({
+        hooks: {
+          PostToolUse: [
+            {
+              matcher: "read_file",
+              hooks: [{ type: "command", command: "printf legacy > .legacy-hook-ran" }],
+            },
+          ],
+        },
+      }),
+    );
+    const hookTrustStore = new HookTrustStore({
+      filePath: join(trustRoot, "trusted-hooks.json"),
+    });
+    const prepare = () =>
+      prepareBackgroundYoloPolicy({
+        workDir: workspace,
+        policy: policy("disabled", ["read_file"]),
+        trustStore: {
+          canonicalize: (path) => realpath(path),
+          isTrusted: async () => true,
+        },
+        hookTrustStore,
+      });
+
+    await expect(prepare()).rejects.toMatchObject({ code: "hook_unavailable" });
+    await hookTrustStore.trust({
+      workspace,
+      source: { kind: "project", path: nativePath, version: 1 },
+      handler,
+    });
+
+    const prepared = await prepare();
+    await prepared.hookRunner!.runPostToolUse("read_file", { path: "a.txt" }, "content", "job-1");
+    await expect(readFile(join(workspace, ".native-hook-ran"), "utf8")).resolves.toBe("native");
+    await expect(readFile(join(workspace, ".legacy-hook-ran"), "utf8")).rejects.toThrow();
   });
 
   it("execution middleware 在工具成功和失败后都执行 PostToolUse，不改写原结果", async () => {

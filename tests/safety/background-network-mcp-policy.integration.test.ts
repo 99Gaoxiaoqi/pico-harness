@@ -82,16 +82,16 @@ describe("background network and MCP policy integration", () => {
   it("只接受固定工作区 MCP 配置且在内容漂移后 fail-closed", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "pico-background-mcp-"));
     cleanup.push(workspace);
-    await mkdir(join(workspace, ".claw"));
-    await writeFile(join(workspace, ".claw", "mcp.json"), '{"mcpServers":{}}');
+    await mkdir(join(workspace, ".pico"));
+    await writeFile(join(workspace, ".pico", "mcp.json"), '{"mcpServers":{}}');
     const fingerprint = await fingerprintBackgroundMcpConfig(workspace);
 
-    const expectedPath = await realpath(join(workspace, ".claw", "mcp.json"));
+    const expectedPath = await realpath(join(workspace, ".pico", "mcp.json"));
     await expect(
       verifyBackgroundMcpConfig({ workspacePath: workspace, expectedFingerprint: fingerprint }),
     ).resolves.toBe(expectedPath);
 
-    await writeFile(join(workspace, ".claw", "mcp.json"), '{"mcpServers":{"changed":{}}}');
+    await writeFile(join(workspace, ".pico", "mcp.json"), '{"mcpServers":{"changed":{}}}');
     await expect(
       verifyBackgroundMcpConfig({ workspacePath: workspace, expectedFingerprint: fingerprint }),
     ).rejects.toThrow(/重新确认/u);
@@ -100,8 +100,8 @@ describe("background network and MCP policy integration", () => {
   it("MCP manager 校验并解析同一份配置字节，消除校验与加载间漂移", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "pico-background-mcp-load-"));
     cleanup.push(workspace);
-    await mkdir(join(workspace, ".claw"));
-    const configPath = join(workspace, ".claw", "mcp.json");
+    await mkdir(join(workspace, ".pico"));
+    const configPath = join(workspace, ".pico", "mcp.json");
     await writeFile(configPath, '{"mcpServers":{}}');
     const fingerprint = await fingerprintBackgroundMcpConfig(workspace);
     const manager = new McpConnectionManager(undefined, {
@@ -114,13 +114,13 @@ describe("background network and MCP policy integration", () => {
     await expect(manager.loadConfig(configPath)).rejects.toThrow(/重新确认/u);
   });
 
-  it("拒绝通过 .claw/mcp.json 符号链接逃逸工作区", async () => {
+  it("拒绝通过 .pico/mcp.json 符号链接逃逸工作区", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "pico-background-mcp-link-"));
     const outside = await mkdtemp(join(tmpdir(), "pico-background-mcp-outside-"));
     cleanup.push(workspace, outside);
-    await mkdir(join(workspace, ".claw"));
+    await mkdir(join(workspace, ".pico"));
     await writeFile(join(outside, "mcp.json"), '{"mcpServers":{}}');
-    await symlink(join(outside, "mcp.json"), join(workspace, ".claw", "mcp.json"));
+    await symlink(join(outside, "mcp.json"), join(workspace, ".pico", "mcp.json"));
 
     await expect(fingerprintBackgroundMcpConfig(workspace)).rejects.toThrow(/真实工作区/u);
   });

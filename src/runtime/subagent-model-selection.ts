@@ -1,4 +1,5 @@
 import type { ModelRoute, ModelRouter } from "../provider/model-router.js";
+import { resolveCompatibleModelRoute } from "../provider/compatible-model-route.js";
 import {
   coordinateReasoningLevel,
   type ReasoningLevelSelection,
@@ -14,6 +15,10 @@ export interface ResolveSubagentModelSelectionOptions {
   parentThinkingEffort?: string;
   ephemeralThinkingEffort?: string;
   profileThinkingEffort?: string;
+  /** Claude Agent short model names mapped to Pico route ids or unique model ids. */
+  modelAliases?: Readonly<Record<string, string>>;
+  /** 是否允许 Claude 兼容短名与别名；默认 true 保持旧调用兼容。 */
+  claudeCompatibilityEnabled?: boolean;
   /** 后台 credentialRef 绑定单一路由时必须为 false。 */
   allowRouteOverride: boolean;
 }
@@ -34,7 +39,11 @@ export function resolveSubagentModelSelection(
 ): ResolvedSubagentModelSelection {
   const parentRoute = options.router.require(options.parentRouteId);
   const requested = requestedRoute(options);
-  const route = requested.routeId ? options.router.require(requested.routeId) : parentRoute;
+  const route = requested.routeId
+    ? options.claudeCompatibilityEnabled === false
+      ? options.router.require(requested.routeId)
+      : resolveCompatibleModelRoute(options.router, requested.routeId, options.modelAliases)
+    : parentRoute;
 
   if (!options.allowRouteOverride && route.id !== parentRoute.id) {
     throw new Error(
@@ -55,6 +64,8 @@ export function resolveSubagentModelSelection(
     thinking,
   };
 }
+
+export { resolveCompatibleModelRoute } from "../provider/compatible-model-route.js";
 
 function requestedRoute(options: ResolveSubagentModelSelectionOptions): {
   routeId?: string;

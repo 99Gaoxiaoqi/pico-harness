@@ -5,6 +5,7 @@ import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import { CronService, matchesCron } from "../../src/tasks/cron-service.js";
 import type { YoloPolicySnapshot } from "../../src/tasks/runtime-types.js";
+import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 
 describe("CronService durable ledger integration", () => {
   const directories: string[] = [];
@@ -113,7 +114,7 @@ describe("CronService durable ledger integration", () => {
 
     service.close();
     closeables.pop();
-    const databasePath = join(workDir, ".claw", "runtime.sqlite");
+    const databasePath = resolvePicoPaths(workDir).workspace.runtimeDatabase;
     const raw = new Database(databasePath);
     raw.exec(
       "DROP TABLE runtime_events; DROP TABLE cron_runs; DROP TABLE cron_jobs; DELETE FROM schema_migrations WHERE version >= 3",

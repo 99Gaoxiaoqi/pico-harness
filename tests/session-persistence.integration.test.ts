@@ -19,6 +19,7 @@ import { join } from "node:path";
 import { AgentEngine } from "../src/engine/loop.js";
 import { SessionManager } from "../src/engine/session.js";
 import { listCliSessionSummaries } from "../src/cli/session-resolver.js";
+import { resolvePicoPaths } from "../src/paths/pico-paths.js";
 import {
   getOrCreateSessionSettings,
   getStoredSessionSettings,
@@ -169,7 +170,7 @@ describe("Session 持久化端到端集成", () => {
 
   it("v3 规范事件与 legacy 记录混合时，Session 和会话列表使用同一重放结果", async () => {
     const sessionId = "mixed-journal";
-    const sessionsDir = join(workDir, ".claw", "sessions");
+    const sessionsDir = resolvePicoPaths(workDir).workspace.sessions;
     await mkdir(sessionsDir, { recursive: true });
     const summaryMessage: Message = {
       role: "assistant",

@@ -12,6 +12,7 @@ import {
   createPicoCommandRegistry,
 } from "../src/input/pico-command-registry.js";
 import { processUserInput } from "../src/input/process-user-input.js";
+import { resolvePicoPaths } from "../src/paths/pico-paths.js";
 import {
   exitSessionPlanMode,
   getOrCreateSessionSettings,
@@ -244,7 +245,10 @@ describe("Claude Code style rewind integration", () => {
     });
 
     const records = (
-      await readFile(join(workDir, ".claw", "sessions", `${sessionId}.jsonl`), "utf8")
+      await readFile(
+        join(resolvePicoPaths(workDir).workspace.sessions, `${sessionId}.jsonl`),
+        "utf8",
+      )
     )
       .trim()
       .split("\n")

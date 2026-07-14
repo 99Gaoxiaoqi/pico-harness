@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
 import { lstat, readFile, readdir } from "node:fs/promises";
-import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
 import { SessionStore } from "../engine/session-store.js";
@@ -13,6 +12,7 @@ import {
   type StorageOperation,
 } from "./operation-journal.js";
 import { RUNTIME_SCHEMA_VERSION } from "../tasks/runtime-types.js";
+import { resolvePicoPaths } from "../paths/pico-paths.js";
 
 const SHA256_RE = /^[a-f0-9]{64}$/u;
 const SAFE_OPERATION_ID_RE = /^[A-Za-z0-9._-]+$/u;
@@ -95,17 +95,14 @@ export class StorageDoctor {
 
   constructor(options: StorageDoctorOptions) {
     this.workDir = resolve(options.workDir);
-    this.fileHistoryDir = resolve(
-      options.fileHistoryDir ?? join(homedir(), ".pico", "file-history"),
-    );
-    this.sessionsDir = resolve(options.sessionsDir ?? join(this.workDir, ".claw", "sessions"));
+    const paths = resolvePicoPaths(this.workDir);
+    this.fileHistoryDir = resolve(options.fileHistoryDir ?? join(paths.home.root, "file-history"));
+    this.sessionsDir = resolve(options.sessionsDir ?? paths.workspace.sessions);
     this.runtimeDatabasePath = resolve(
-      options.runtimeDatabasePath ?? join(this.workDir, ".claw", "runtime.sqlite"),
+      options.runtimeDatabasePath ?? paths.workspace.runtimeDatabase,
     );
-    this.summariesDir = resolve(
-      options.summariesDir ?? join(this.workDir, ".claw", "memory", "summaries"),
-    );
-    this.artifactsDir = resolve(options.artifactsDir ?? join(this.workDir, ".claw", "artifacts"));
+    this.summariesDir = resolve(options.summariesDir ?? paths.workspace.summaries);
+    this.artifactsDir = resolve(options.artifactsDir ?? paths.workspace.artifacts);
     this.now = options.now ?? (() => new Date());
   }
 

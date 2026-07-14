@@ -37,6 +37,18 @@ export interface PicoConfig {
   providers: Record<string, ModelProviderConfig>;
   sandbox: YoloSandboxConfig;
   lspServers: LspServerConfig[];
+  compatibility: PicoCompatibilityConfig;
+}
+
+export interface ClaudeCompatibilityConfig {
+  enabled: boolean;
+  projectResources: boolean;
+  userResources: boolean;
+  modelAliases: Record<string, string>;
+}
+
+export interface PicoCompatibilityConfig {
+  claude: ClaudeCompatibilityConfig;
 }
 
 export async function loadPicoConfig(workDir: string): Promise<PicoConfig> {
@@ -69,6 +81,7 @@ export async function loadPicoConfig(workDir: string): Promise<PicoConfig> {
     providers: parseProviders(parsed["providers"], configPath),
     sandbox: parseSandbox(parsed["sandbox"], configPath),
     lspServers: parseLspServers(parsed["lsp"], configPath),
+    compatibility: parseCompatibility(parsed["compatibility"], configPath),
   };
 }
 
@@ -81,7 +94,86 @@ function defaultPicoConfig(workDir: string): PicoConfig {
     providers: {},
     sandbox: { network: "deny" },
     lspServers: [],
+    compatibility: defaultCompatibility(),
   };
+}
+
+function defaultCompatibility(): PicoCompatibilityConfig {
+  return {
+    claude: {
+      enabled: true,
+      projectResources: true,
+      userResources: true,
+      modelAliases: {},
+    },
+  };
+}
+
+function parseCompatibility(value: unknown, configPath: string): PicoCompatibilityConfig {
+  if (value === undefined) return defaultCompatibility();
+  if (!isRecord(value)) {
+    throw configError(configPath, "compatibility", "must be an object");
+  }
+  const claude = value["claude"];
+  if (claude === undefined) return defaultCompatibility();
+  if (!isRecord(claude)) {
+    throw configError(configPath, "compatibility.claude", "must be an object");
+  }
+
+  const defaults = defaultCompatibility().claude;
+  return {
+    claude: {
+      enabled: parseOptionalBoolean(
+        claude["enabled"],
+        defaults.enabled,
+        configPath,
+        "compatibility.claude.enabled",
+      ),
+      projectResources: parseOptionalBoolean(
+        claude["projectResources"],
+        defaults.projectResources,
+        configPath,
+        "compatibility.claude.projectResources",
+      ),
+      userResources: parseOptionalBoolean(
+        claude["userResources"],
+        defaults.userResources,
+        configPath,
+        "compatibility.claude.userResources",
+      ),
+      modelAliases: parseStringMap(
+        claude["modelAliases"],
+        configPath,
+        "compatibility.claude.modelAliases",
+      ),
+    },
+  };
+}
+
+function parseOptionalBoolean(
+  value: unknown,
+  fallback: boolean,
+  configPath: string,
+  field: string,
+): boolean {
+  if (value === undefined) return fallback;
+  if (typeof value !== "boolean") throw configError(configPath, field, "must be a boolean");
+  return value;
+}
+
+function parseStringMap(value: unknown, configPath: string, field: string): Record<string, string> {
+  if (value === undefined) return {};
+  if (!isRecord(value)) throw configError(configPath, field, "must be an object");
+  const result: Record<string, string> = {};
+  for (const [rawKey, rawValue] of Object.entries(value)) {
+    const key = rawKey.trim().toLowerCase();
+    if (!key) throw configError(configPath, `${field}.${rawKey}`, "key must not be empty");
+    if (typeof rawValue !== "string" || rawValue.trim().length === 0) {
+      throw configError(configPath, `${field}.${rawKey}`, "must be a non-empty string");
+    }
+    result[key] = rawValue.trim();
+  }
+  return result;
 }
 
 function parseSandbox(value: unknown, configPath: string): YoloSandboxConfig {

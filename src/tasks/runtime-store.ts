@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, mkdirSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
+import { resolvePicoPaths } from "../paths/pico-paths.js";
 import { isDeepStrictEqual } from "node:util";
 import Database from "better-sqlite3";
 import { parseCredentialRef, type CredentialRef } from "../provider/credential-vault.js";
@@ -315,7 +316,8 @@ export class RuntimeStore {
   private readonly now: () => number;
 
   constructor(options: RuntimeStoreOptions) {
-    this.databasePath = options.databasePath ?? join(options.workDir, ".claw", "runtime.sqlite");
+    this.databasePath =
+      options.databasePath ?? resolvePicoPaths(options.workDir).workspace.runtimeDatabase;
     this.now = options.now ?? Date.now;
     mkdirSync(dirname(this.databasePath), { recursive: true, mode: 0o700 });
     chmodSync(dirname(this.databasePath), 0o700);

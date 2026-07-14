@@ -1,7 +1,8 @@
-import { readdir, readFile } from "node:fs/promises";
+import { readdir, readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import * as yaml from "js-yaml";
+import { canonicalResourceName } from "../catalog/resource-catalog.js";
 
 export type ClaudeAgentSource = "builtin" | "project" | "user";
 
@@ -42,6 +43,8 @@ const AGENT_PRIORITIES: Record<ClaudeAgentSource, number> = {
   user: 10,
   project: 20,
 };
+const MAX_AGENT_FILE_BYTES = 256 * 1024;
+const MAX_AGENT_FILES = 500;
 
 const BUILTIN_AGENTS: readonly ClaudeAgent[] = [
   {
@@ -73,8 +76,8 @@ const BUILTIN_AGENTS: readonly ClaudeAgent[] = [
 export async function loadClaudeAgents(options: LoadClaudeAgentsOptions): Promise<ClaudeAgent[]> {
   const userDir = join(options.homeDir ?? homedir(), ".claude", "agents");
   const groups = await Promise.all([
-    loadAgentsFromDir(join(options.workDir, ".claude", "agents"), "project"),
-    loadAgentsFromDir(userDir, "user"),
+    loadClaudeAgentsFromDir(join(options.workDir, ".claude", "agents"), "project"),
+    loadClaudeAgentsFromDir(userDir, "user"),
   ]);
 
   return resolveAgentConflicts([
@@ -121,10 +124,20 @@ export function summarizeClaudeAgents(
   }));
 }
 
-async function loadAgentsFromDir(
+export async function loadClaudeAgentsFromDir(
   agentsDir: string,
   source: ClaudeAgentSource,
 ): Promise<ClaudeAgent[]> {
+  const rootStat = await stat(agentsDir).catch((err: unknown) => {
+    if (isErrnoException(err, "ENOENT")) return undefined;
+    throw err;
+  });
+  if (!rootStat) return [];
+  if (rootStat.isFile()) {
+    if (!agentsDir.endsWith(".md") || rootStat.size > MAX_AGENT_FILE_BYTES) return [];
+    const content = await readFile(agentsDir, "utf8");
+    return [parseClaudeAgent(content, basename(agentsDir, ".md"), agentsDir, source)];
+  }
   let entries;
   try {
     entries = await readdir(agentsDir, { withFileTypes: true });
@@ -134,9 +147,14 @@ async function loadAgentsFromDir(
   }
 
   const agents: ClaudeAgent[] = [];
-  for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
-    if (!entry.isFile() || !entry.name.endsWith(".md")) continue;
+  const files = entries
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".md"))
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .slice(0, MAX_AGENT_FILES);
+  for (const entry of files) {
     const sourcePath = join(agentsDir, entry.name);
+    const fileStat = await stat(sourcePath);
+    if (fileStat.size > MAX_AGENT_FILE_BYTES) continue;
     const content = await readFile(sourcePath, "utf8");
     agents.push(parseClaudeAgent(content, basename(entry.name, ".md"), sourcePath, source));
   }
@@ -146,9 +164,10 @@ async function loadAgentsFromDir(
 function resolveAgentConflicts(agents: ClaudeAgent[]): ClaudeAgent[] {
   const byName = new Map<string, ClaudeAgent>();
   for (const agent of agents) {
-    const current = byName.get(agent.name);
+    const key = canonicalResourceName(agent.name);
+    const current = byName.get(key);
     if (!current || AGENT_PRIORITIES[agent.source] > AGENT_PRIORITIES[current.source]) {
-      byName.set(agent.name, agent);
+      byName.set(key, agent);
     }
   }
   return Array.from(byName.values()).sort((a, b) => a.name.localeCompare(b.name));

@@ -17,9 +17,10 @@ export async function preparePromptWithMentions(prompt: string, workDir: string)
 export async function preparePromptForMessage(
   prompt: string,
   workDir: string,
+  providedSkillLoader?: SkillLoader,
 ): Promise<PreparedUserPrompt> {
   const extracted = extractImageMentions(prompt);
-  const skillLoader = new SkillLoader(workDir);
+  const skillLoader = providedSkillLoader ?? new SkillLoader(workDir);
   const expanded = await expandMentionsToPrompt(extracted.prompt, {
     cwd: workDir,
     skills: (name) => skillLoader.viewBody(name),

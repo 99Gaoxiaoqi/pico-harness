@@ -5,7 +5,7 @@
 // TodoTool 程序化增删改查,并把当前进度渲染成 Markdown 注入 system prompt。
 //
 // 设计借鉴:
-// - PlanStore 的路径绑定模式(构造时固定 <workDir>/.claw/todo.json,杜绝穿越)
+// - PlanStore 的路径绑定模式(构造时固定 workspace state 路径,杜绝穿越)
 // - SkillRegistry 的 JSON 持久化模式(内存缓存 + 每次变更即刻落盘 + IO 错误降级)
 //
 // 错误处理约定:所有 IO 错误降级不阻断主流程。
@@ -13,11 +13,9 @@
 //   - save 失败(权限/磁盘满)→ 只记 warn 不抛,内存缓存仍生效
 
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
 import { dirname } from "node:path";
 import { logger } from "../observability/logger.js";
-
-const TODO_FILENAME = "todo.json";
+import { resolvePicoPaths } from "../paths/pico-paths.js";
 
 /** 任务状态 */
 export type TodoStatus = "pending" | "in_progress" | "completed";
@@ -50,7 +48,7 @@ const PRIORITY_WEIGHT: Record<TodoPriority, number> = {
 /**
  * 结构化 TodoList 存储层,绑定到固定工作区路径。
  *
- * 路径在构造时固定为 <workDir>/.claw/todo.json,外部无法变更,
+ * 路径在构造时固定为 workspace state 下的 todo.json,外部无法变更,
  * 从源头杜绝路径穿越风险(无需额外防护)。
  */
 export class TodoStore {
@@ -63,7 +61,7 @@ export class TodoStore {
   private loaded = false;
 
   constructor(workDir: string) {
-    this.todoPath = join(workDir, ".claw", TODO_FILENAME);
+    this.todoPath = resolvePicoPaths(workDir).workspace.todo;
   }
 
   /**
@@ -128,7 +126,7 @@ export class TodoStore {
 
   /**
    * 把内存缓存落盘。
-   * mkdir recursive 保证 .claw 目录存在;失败只记 warn 不抛,
+   * mkdir recursive 保证 workspace state 目录存在;失败只记 warn 不抛,
    * 内存缓存仍保持最新值,后续操作不受影响。
    */
   async save(): Promise<void> {

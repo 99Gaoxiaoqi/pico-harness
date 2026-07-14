@@ -88,6 +88,30 @@ describe("createToolResultObservationProcessor", () => {
     expect(store.writes).toHaveLength(0);
   });
 
+  it("does not externalize paged read_artifact output again", async () => {
+    const store = new FakeArtifactStore();
+    const processor = createToolResultObservationProcessor({
+      store,
+      externalizeThresholdChars: 4,
+    });
+    const artifactToolCall: ToolCall = {
+      id: "call-artifact",
+      name: "read_artifact",
+      arguments: '{"path":"/tmp/artifact.txt"}',
+    };
+    const output = "artifact page output";
+
+    const observation = await processor({
+      toolCall: artifactToolCall,
+      result: { toolCallId: artifactToolCall.id, output, isError: false },
+      output,
+      sessionId: "session-1",
+    });
+
+    expect(observation).toBe(output);
+    expect(store.writes).toHaveLength(0);
+  });
+
   it("externalizes large outputs with session-scoped artifact URI and write metadata", async () => {
     const store = new FakeArtifactStore({
       id: "artifact-abc",

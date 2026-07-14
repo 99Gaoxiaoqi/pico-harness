@@ -5,13 +5,14 @@ import { tmpdir } from "node:os";
 import { Session, SessionManager } from "../../src/engine/session.js";
 import { SessionStore } from "../../src/engine/session-store.js";
 import { fileHistoryTrackEdit, fileHistoryMakeSnapshot } from "../../src/safety/file-history.js";
+import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 
 async function flushPersistence(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 80));
 }
 
 function sessionJsonlPath(workDir: string, id: string): string {
-  return join(workDir, ".claw", "sessions", `${id}.jsonl`);
+  return join(resolvePicoPaths(workDir).workspace.sessions, `${id}.jsonl`);
 }
 
 describe("SessionStore 1.5.6 undo event sourcing", () => {

@@ -28,6 +28,7 @@ import { CronService } from "../../src/tasks/cron-service.js";
 import type { CronDaemonBridge } from "../../src/input/cron-daemon-bridge.js";
 import { ModelRouter } from "../../src/provider/model-router.js";
 import { resolveModelRouteCapabilities } from "../../src/provider/model-capabilities.js";
+import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 import type { CredentialRef, CredentialVault } from "../../src/provider/credential-vault.js";
 
 describe("Pico command registry", () => {
@@ -627,7 +628,7 @@ describe("Pico command registry", () => {
     mkdirSync(join(workDir, ".claude", "skills", "review"), { recursive: true });
     writeFileSync(
       sourcePath,
-      "---\nname: review\ndescription: review files\nhooks:\n  PreToolUse:\n    - matcher: bash\n      hooks:\n        - type: prompt\n          prompt: Check command\n---\n\nReview $0 carefully.",
+      "---\nname: review\ndescription: review files\nmodel: review/model\nallowed-tools: Read, Bash\nhooks:\n  PreToolUse:\n    - matcher: bash\n      hooks:\n        - type: prompt\n          prompt: Check command\n---\n\nReview $0 carefully.",
     );
     const registry = await createPicoCommandRegistry({
       workDir,
@@ -649,6 +650,10 @@ describe("Pico command registry", () => {
         skillHookConfig: {
           PreToolUse: [{ matcher: "bash", hooks: [{ type: "prompt", prompt: "Check command" }] }],
         },
+      });
+      expect(result.result.execution).toEqual({
+        model: "review/model",
+        allowedTools: ["read_file", "bash"],
       });
     }
   });
@@ -1312,7 +1317,7 @@ function writeSessionLog(
   timestamp: string,
   records: readonly unknown[],
 ): void {
-  const dir = join(workDir, ".claw", "sessions");
+  const dir = resolvePicoPaths(workDir).workspace.sessions;
   const path = join(dir, `${sessionId}.jsonl`);
   mkdirSync(dir, { recursive: true });
   writeFileSync(

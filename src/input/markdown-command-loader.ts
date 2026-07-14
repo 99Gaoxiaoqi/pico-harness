@@ -1,12 +1,19 @@
-import { readdir, readFile } from "node:fs/promises";
+import { readdir, readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, dirname, join, relative, sep } from "node:path";
+import { basename, join, relative, sep } from "node:path";
 import * as yaml from "js-yaml";
-import type { SkillLoader } from "../context/skill.js";
+import { SkillLoader, type Skill } from "../context/skill.js";
+import { mapClaudeToolNames } from "../catalog/claude-compat.js";
+import {
+  resolveResourceCatalog,
+  type ExternalResourceCatalogSource,
+  type ResourceCatalogSource,
+} from "../catalog/resource-catalog.js";
+import { resolvePicoPaths } from "../paths/pico-paths.js";
 import { parseCommandArgs } from "./slash-parser.js";
 import { renderSkillActivation } from "./skill-activation.js";
 
-export type MarkdownCommandSource = "project" | "user" | "skill" | "builtin";
+export type MarkdownCommandSource = "project" | "user" | "skill" | "builtin" | "external";
 
 export interface MarkdownPromptCommand {
   name: string;
@@ -19,6 +26,7 @@ export interface MarkdownPromptCommand {
   model?: string;
   sourcePath?: string;
   hooks?: unknown;
+  catalogSource?: ResourceCatalogSource;
 }
 
 export interface LoadMarkdownCommandsOptions {
@@ -27,19 +35,26 @@ export interface LoadMarkdownCommandsOptions {
   projectCommandsDir?: string;
   userCommandsDir?: string;
   homeDir?: string;
+  picoHome?: string;
+  env?: Readonly<Record<string, string | undefined>>;
   includeSkillCommands?: boolean;
   skillLoader?: SkillLoader;
   builtinNames?: Iterable<string>;
+  /** 由 Plugin 管理层预先验证边界后显式注入，Catalog 不自行发现 Plugin。 */
+  externalSources?: readonly ExternalResourceCatalogSource[];
+  includeClaudeProjectResources?: boolean;
+  includeClaudeUserResources?: boolean;
 }
 
 const COMMAND_PRIORITIES: Record<MarkdownCommandSource, number> = {
-  builtin: 0,
+  // 内置命令包含权限/会话等安全入口，不允许 Markdown 资源遮蔽。
+  builtin: 100,
   skill: 10,
-  user: 20,
-  project: 30,
+  user: 30,
+  project: 50,
+  external: 15,
 };
 
-const COMMAND_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 const COMMAND_PATH_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]*(?::[A-Za-z0-9][A-Za-z0-9_-]*)*$/;
 const NON_COMMAND_DIRS = new Set([
   "README",
@@ -56,29 +71,75 @@ export async function loadMarkdownCommands(
   options: LoadMarkdownCommandsOptions,
 ): Promise<MarkdownPromptCommand[]> {
   const home = options.homeDir ?? homedir();
-  const projectCommandsDirs = [
-    options.projectCommandsDir ?? join(options.workDir, ".pico", "commands"),
-    join(options.workDir, ".claude", "commands"),
+  const paths = resolvePicoPaths(options.workDir, {
+    homeDir: home,
+    env: options.env ?? process.env,
+    ...(options.picoHome
+      ? { picoHome: options.picoHome }
+      : options.homeDir
+        ? { picoHome: join(home, ".pico") }
+        : {}),
+  });
+  const commandSources: Array<{
+    source: MarkdownCommandSource;
+    catalogSource: ResourceCatalogSource;
+  }> = [
+    commandSource(
+      "project-pico",
+      "project",
+      "pico-native",
+      options.projectCommandsDir ?? paths.project.commands,
+      50,
+    ),
+    ...(options.includeClaudeProjectResources === false
+      ? []
+      : [
+          commandSource(
+            "project-claude",
+            "project",
+            "claude-compat",
+            join(options.workDir, ".claude", "commands"),
+            40,
+          ),
+        ]),
   ];
-  const userCommandsDirs = options.userCommandsDir
-    ? [options.userCommandsDir, ...(options.homeDir ? [join(home, ".claude", "commands")] : [])]
-    : [join(home, ".pico", "commands"), join(home, ".claude", "commands")];
+  commandSources.push(
+    commandSource(
+      "user-pico",
+      "user",
+      "pico-native",
+      options.userCommandsDir ?? paths.home.commands,
+      30,
+    ),
+    ...(options.includeClaudeUserResources === false ||
+    (options.userCommandsDir && options.homeDir === undefined)
+      ? []
+      : [
+          commandSource(
+            "user-claude",
+            "user",
+            "claude-compat",
+            join(home, ".claude", "commands"),
+            20,
+          ),
+        ]),
+    ...(options.externalSources ?? []).map((catalogSource) => ({
+      source: "external" as const,
+      catalogSource,
+    })),
+  );
 
   const commandGroups = await Promise.all([
-    loadCommandsFromDirs(projectCommandsDirs, "project"),
-    loadCommandsFromDirs(userCommandsDirs, "user"),
+    ...commandSources.map(({ source, catalogSource }) =>
+      loadCommandsFromDir(catalogSource.root, source, catalogSource),
+    ),
     options.includeSkillCommands ? loadSkillProjectionCommands(options) : Promise.resolve([]),
   ]);
 
   const builtinCommands = Array.from(options.builtinNames ?? [], (name) =>
     makeBuiltinPlaceholder(name),
   );
-  return resolveMarkdownCommandConflicts([
-    ...builtinCommands,
-    ...commandGroups[2],
-    ...commandGroups[1],
-    ...commandGroups[0],
-  ]);
+  return resolveMarkdownCommandConflicts([...builtinCommands, ...commandGroups.flat()]);
 }
 
 export function parseMarkdownCommand(
@@ -86,19 +147,28 @@ export function parseMarkdownCommand(
   name: string,
   source: MarkdownCommandSource,
   sourcePath?: string,
+  catalogSource?: ResourceCatalogSource,
 ): MarkdownPromptCommand {
   const { frontmatter, prompt } = parseMarkdownContent(content);
+  const allowedTools = optionalAllowedTools(frontmatter).allowedTools;
+  const normalizedAllowedTools = normalizeAllowedTools(
+    allowedTools,
+    catalogSource,
+    name,
+    sourcePath,
+  );
 
   return {
     description: normalizeString(frontmatter.description),
     name,
-    priority: COMMAND_PRIORITIES[source],
+    priority: catalogSource?.priority ?? COMMAND_PRIORITIES[source],
     prompt,
     source,
     ...(sourcePath ? { sourcePath } : {}),
     ...optionalString("argumentHint", frontmatter["argument-hint"]),
     ...optionalString("model", frontmatter.model),
-    ...optionalAllowedTools(frontmatter),
+    ...(normalizedAllowedTools === undefined ? {} : { allowedTools: normalizedAllowedTools }),
+    ...(catalogSource ? { catalogSource } : {}),
   };
 }
 
@@ -127,43 +197,50 @@ export function renderMarkdownCommandPrompt(
 export function resolveMarkdownCommandConflicts(
   commands: MarkdownPromptCommand[],
 ): MarkdownPromptCommand[] {
-  const byName = new Map<string, MarkdownPromptCommand>();
-  for (const command of commands) {
-    const current = byName.get(command.name);
-    if (!current || command.priority > current.priority) {
-      byName.set(command.name, command);
-    }
-  }
-
-  return Array.from(byName.values())
+  const resolved = resolveResourceCatalog(
+    commands.map((command) => ({
+      name: command.name,
+      source:
+        command.catalogSource ??
+        commandSource(
+          `command-${command.source}`,
+          command.source,
+          command.source === "builtin" ? "builtin" : "external",
+          command.sourcePath ?? `command:${command.name}`,
+          command.priority,
+        ).catalogSource,
+      sourcePath: command.sourcePath ?? `command:${command.name}`,
+      value: command,
+    })),
+  );
+  return [...resolved.entries]
     .filter((command) => command.source !== "builtin")
     .sort((a, b) => a.name.localeCompare(b.name));
-}
-
-async function loadCommandsFromDirs(
-  commandsDirs: string[],
-  source: MarkdownCommandSource,
-): Promise<MarkdownPromptCommand[]> {
-  const groups = await Promise.all(commandsDirs.map((dir) => loadCommandsFromDir(dir, source)));
-  return groups.flat();
 }
 
 async function loadCommandsFromDir(
   commandsDir: string,
   source: MarkdownCommandSource,
+  catalogSource: ResourceCatalogSource,
 ): Promise<MarkdownPromptCommand[]> {
   const files = await walkMarkdownFiles(commandsDir);
   const commands: MarkdownPromptCommand[] = [];
   for (const sourcePath of files) {
-    const name = commandNameFromPath(commandsDir, sourcePath);
+    const name = `${catalogSource.namespace ?? ""}${commandNameFromPath(commandsDir, sourcePath)}`;
     if (!COMMAND_PATH_PATTERN.test(name)) continue;
     const content = await readFile(sourcePath, "utf8");
-    commands.push(parseMarkdownCommand(content, name, source, sourcePath));
+    commands.push(parseMarkdownCommand(content, name, source, sourcePath, catalogSource));
   }
   return commands;
 }
 
 async function walkMarkdownFiles(dir: string): Promise<string[]> {
+  const rootStat = await stat(dir).catch((err: unknown) => {
+    if (isErrnoException(err, "ENOENT")) return undefined;
+    throw err;
+  });
+  if (!rootStat) return [];
+  if (rootStat.isFile()) return dir.endsWith(".md") ? [dir] : [];
   let entries;
   try {
     entries = await readdir(dir, { withFileTypes: true });
@@ -187,6 +264,7 @@ async function walkMarkdownFiles(dir: string): Promise<string[]> {
 
 function commandNameFromPath(commandsDir: string, sourcePath: string): string {
   const rel = relative(commandsDir, sourcePath);
+  if (!rel) return basename(sourcePath, ".md");
   const withoutExt = rel.slice(0, -".md".length);
   return withoutExt.split(sep).join(":");
 }
@@ -194,65 +272,32 @@ function commandNameFromPath(commandsDir: string, sourcePath: string): string {
 async function loadSkillProjectionCommands(
   options: LoadMarkdownCommandsOptions,
 ): Promise<MarkdownPromptCommand[]> {
-  const skillBaseDirs = [
-    join(options.workDir, ".claude", "skills"),
-    join(options.workDir, ".claw", "skills"),
-  ];
-  const skillFiles = (await Promise.all(skillBaseDirs.map(walkSkillMarkdownFiles))).flat();
-  const commands: MarkdownPromptCommand[] = [];
-
-  for (const sourcePath of skillFiles) {
-    const content = await readFile(sourcePath, "utf8");
-    const fallbackName = basename(dirname(sourcePath));
-    const command = parseSkillProjectionCommand(content, fallbackName, sourcePath);
-    if (command) commands.push(command);
-  }
-
-  return commands;
+  const loader =
+    options.skillLoader ?? new SkillLoader(options.workDir, { homeDir: options.homeDir });
+  return (await loader.list()).flatMap((skill) => {
+    const command = parseSkillProjectionCommand(skill);
+    return command ? [command] : [];
+  });
 }
 
-async function walkSkillMarkdownFiles(dir: string): Promise<string[]> {
-  let entries;
-  try {
-    entries = await readdir(dir, { withFileTypes: true });
-  } catch (err) {
-    if (isErrnoException(err, "ENOENT")) return [];
-    throw err;
-  }
-
-  const files: string[] = [];
-  for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
-    const path = join(dir, entry.name);
-    if (entry.isDirectory()) {
-      if (entry.name === "node_modules" || entry.name === ".git") continue;
-      files.push(...(await walkSkillMarkdownFiles(path)));
-    } else if (entry.isFile() && entry.name === "SKILL.md") {
-      files.push(path);
-    }
-  }
-  return files;
-}
-
-function parseSkillProjectionCommand(
-  content: string,
-  fallbackName: string,
-  sourcePath: string,
-): MarkdownPromptCommand | undefined {
-  const { frontmatter, prompt } = parseMarkdownContent(content);
-  const name = normalizeString(frontmatter.name) || fallbackName;
-  if (!COMMAND_NAME_PATTERN.test(name)) return undefined;
+function parseSkillProjectionCommand(skill: Skill): MarkdownPromptCommand | undefined {
+  const name = skill.name;
+  if (!COMMAND_PATH_PATTERN.test(name)) return undefined;
 
   return {
-    description: normalizeString(frontmatter.description),
+    description: skill.description,
     name,
     priority: COMMAND_PRIORITIES.skill,
-    prompt,
+    prompt: skill.body,
     source: "skill",
-    sourcePath,
-    ...optionalString("argumentHint", frontmatter["argument-hint"]),
-    ...optionalString("model", frontmatter.model),
-    ...optionalAllowedTools(frontmatter),
-    ...(frontmatter.hooks === undefined ? {} : { hooks: frontmatter.hooks }),
+    sourcePath: skill.sourcePath,
+    ...(skill.argumentHint === undefined ? {} : { argumentHint: skill.argumentHint }),
+    ...(skill.model === undefined ? {} : { model: skill.model }),
+    ...(skill.allowedTools === undefined ? {} : { allowedTools: skill.allowedTools }),
+    ...(skill.hooks === undefined ? {} : { hooks: skill.hooks }),
+    ...(skill.source
+      ? { catalogSource: { ...skill.source, priority: COMMAND_PRIORITIES.skill } }
+      : {}),
   };
 }
 
@@ -264,6 +309,35 @@ function makeBuiltinPlaceholder(name: string): MarkdownPromptCommand {
     prompt: "",
     source: "builtin",
   };
+}
+
+function commandSource(
+  id: string,
+  source: MarkdownCommandSource,
+  format: ResourceCatalogSource["format"],
+  root: string,
+  priority: number,
+): { source: MarkdownCommandSource; catalogSource: ResourceCatalogSource } {
+  const scope: ResourceCatalogSource["scope"] =
+    source === "builtin"
+      ? "builtin"
+      : source === "external"
+        ? "external"
+        : source === "user"
+          ? "user"
+          : "project";
+  return { source, catalogSource: { id, scope, format, root, priority } };
+}
+
+function normalizeAllowedTools(
+  tools: string[] | undefined,
+  source: ResourceCatalogSource | undefined,
+  resource: string,
+  sourcePath: string | undefined,
+): string[] | undefined {
+  if (tools === undefined || source?.format !== "claude-compat") return tools;
+  const mapped = mapClaudeToolNames(tools, { resource, sourcePath });
+  return [...mapped.tools, ...mapped.unknown];
 }
 
 function parseMarkdownContent(content: string): {

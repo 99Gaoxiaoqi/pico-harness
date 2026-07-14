@@ -6,6 +6,7 @@
 
 import { access } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
+import { join } from "node:path";
 import type React from "react";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { render, Text, useApp, useInput, type Instance, type RenderOptions } from "ink";
@@ -40,6 +41,7 @@ import { runAgentFromCli } from "../cli/run-agent.js";
 import { listRewindPointSummaries } from "../cli/file-history.js";
 import { createCliSessionId, type CliSessionSelection } from "../cli/session-resolver.js";
 import { loadPicoConfig } from "../input/pico-config.js";
+import { resolveCompatibleModelRoute } from "../provider/compatible-model-route.js";
 import {
   commandArgumentSuggestions,
   commandSuggestions,
@@ -147,6 +149,13 @@ import { ScheduleDraftCoordinator } from "../tasks/cron-draft-coordinator.js";
 import { LocalCronDaemonBridge } from "../input/cron-daemon-bridge.js";
 import { ScheduleDraftReviewHandler } from "./schedule-draft-review.js";
 import { bindScheduleDraftDialogs } from "./schedule-draft-dialog.js";
+import { SkillLoader } from "../context/skill.js";
+import { PluginManagementService } from "../plugins/plugin-management-service.js";
+import {
+  loadPluginRuntimeSnapshot,
+  type PluginRuntimeSnapshot,
+} from "../plugins/plugin-runtime-snapshot.js";
+import { resolvePicoPaths } from "../paths/pico-paths.js";
 
 export interface ReplOptions {
   /** 工作区 */
@@ -216,10 +225,18 @@ export function resolveTuiPromptModelRoute(
   router: ModelRouter,
   settings: SessionSettings,
   requestedModel?: string,
+  claudeCompatibility?: {
+    enabled: boolean;
+    modelAliases: Readonly<Record<string, string>>;
+  },
 ): { route: ModelRoute; reasoningLevel?: string } {
   const requested = requestedModel?.trim();
   const inheritsModel = !requested || requested === "inherit";
-  const route = router.require(inheritsModel ? settings.modelRouteId : requested);
+  const route = inheritsModel
+    ? router.require(settings.modelRouteId)
+    : claudeCompatibility?.enabled
+      ? resolveCompatibleModelRoute(router, requested, claudeCompatibility.modelAliases)
+      : router.require(requested);
   const reasoningLevel = inheritsModel
     ? effectiveSessionReasoningLevel(settings, router)
     : coordinateReasoningLevel(
@@ -284,6 +301,7 @@ export interface HandleTuiInputSubmissionDeps {
   isActive?: () => boolean;
   activateAgentHooks?: (metadata: Record<string, unknown>) => void | Promise<void>;
   clearComponentHooks?: () => void | Promise<void>;
+  skillLoader?: SkillLoader;
 }
 
 export type LocalTuiCommandUiEffect = { kind: "none" } | LocalTuiModelSelectorDialogEffect;
@@ -328,6 +346,7 @@ interface TuiSessionBundle {
   readonly askUserHandler: AskUserHandler;
   readonly scheduleDraft?: TuiScheduleDraftRuntime;
   readonly mcpElicitationHandler: McpElicitationUiHandler;
+  readonly skillLoader: SkillLoader;
   readonly recoveredRewindInputText?: string;
   latestMcpStatus?: McpStatusSnapshot;
 }
@@ -437,7 +456,7 @@ async function runPreparedUserPrompt(
   prompt: string,
   deps: Pick<
     HandleTuiInputSubmissionDeps,
-    "workDir" | "reporter" | "runAgent" | "setRewindContext" | "abortControllerRef"
+    "workDir" | "reporter" | "runAgent" | "setRewindContext" | "abortControllerRef" | "skillLoader"
   >,
   rewind: { rewindPrompt: string; rewindTranscriptIndex: number },
   attachments: readonly ImagePart[],
@@ -448,7 +467,7 @@ async function runPreparedUserPrompt(
   let prepared: PreparedUserPrompt;
   try {
     deps.abortControllerRef?.current?.signal.throwIfAborted();
-    prepared = await preparePromptForMessage(prompt, deps.workDir);
+    prepared = await preparePromptForMessage(prompt, deps.workDir, deps.skillLoader);
     deps.abortControllerRef?.current?.signal.throwIfAborted();
   } catch (error) {
     appendTuiRunError(deps.reporter, error);
@@ -998,7 +1017,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
 
   // 诊断:hook process.stdout.write,记录 ink 实际输出的 ANSI(看擦除行为)
   if (process.env.TUI_DEBUG) {
-    const { appendFileSync } = await import("node:fs");
+    const { appendFileSync, mkdirSync } = await import("node:fs");
     /* eslint-disable @typescript-eslint/no-explicit-any */
     const origWrite = process.stdout.write.bind(process.stdout) as any;
     let frame = 0;
@@ -1008,7 +1027,9 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
       const str = typeof chunk === "string" ? chunk : String(chunk);
       if (str.includes("\x1b[") || frame < 5) {
         const visible = str.replaceAll("\x1b[", "ESC[").replaceAll("\x1b", "ESC").slice(0, 200);
-        appendFileSync(".claw/tui-debug.log", `[stdout f${frame}] ${visible}\n`);
+        const paths = resolvePicoPaths(opts.workDir);
+        mkdirSync(paths.workspace.root, { recursive: true });
+        appendFileSync(paths.workspace.debugLog, `[stdout f${frame}] ${visible}\n`);
       }
       frame++;
       return origWrite(chunk, ...args);
@@ -1018,6 +1039,8 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
 
   const provider = opts.provider ?? "openai";
   const picoConfig = await loadPicoConfig(opts.workDir);
+  const pluginManagement = new PluginManagementService({ workDir: opts.workDir });
+  const claudeCompatibility = picoConfig.compatibility.claude;
   const modelRouter = await loadModelRouter({
     config: picoConfig,
     legacyProvider: provider,
@@ -1041,6 +1064,18 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     taskRuntimeDiagnostic = error instanceof Error ? error.message : String(error);
     return undefined;
   });
+  const pluginSnapshot = await loadPluginRuntimeSnapshot({
+    workDir: opts.workDir,
+    service: pluginManagement,
+  });
+  const createRuntimeSkillLoader = (workDir: string): SkillLoader =>
+    new SkillLoader(workDir, {
+      includeUserResources: true,
+      includeClaudeProjectResources:
+        claudeCompatibility.enabled && claudeCompatibility.projectResources,
+      includeClaudeUserResources: claudeCompatibility.enabled && claudeCompatibility.userResources,
+      externalSources: pluginSnapshot.skillSources,
+    });
   let activeBundle: TuiSessionBundle | undefined;
   const sharedMcpManager = new McpConnectionManager(undefined, {
     stdioCwd: opts.workDir,
@@ -1053,7 +1088,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
       })(request, context);
     },
   });
-  const mcpConfigPath = opts.mcpConfigPath ?? `${opts.workDir}/.claw/mcp.json`;
+  const mcpConfigPath = opts.mcpConfigPath ?? `${opts.workDir}/.pico/mcp.json`;
   let mcpInitialized = false;
   let mcpStatusVisible = opts.mcpConfigPath !== undefined;
   const tuiSessionSelection: CliSessionSelection = opts.sessionSelection ?? {
@@ -1072,7 +1107,8 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
   const pendingTuiDialogActions = new Set<Promise<unknown>>();
   let activeAbortControllerRef: TuiAbortControllerRef | undefined;
   const unsubscribeMcpStatus = sharedMcpManager.subscribe((snapshot) => {
-    mcpStatusVisible = snapshot.configPath !== undefined;
+    mcpStatusVisible =
+      snapshot.configPath !== undefined || (snapshot.configSources?.length ?? 0) > 0;
     if (!activeBundle) return;
     activeBundle.latestMcpStatus = snapshot;
     setSessionTools(activeBundle.settings, toolStatusFromRegistry(activeBundle.toolRegistry));
@@ -1095,7 +1131,10 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
   ): Promise<TuiSessionBundle> => {
     let session = globalSessionManager.get(selection.sessionId, opts.workDir);
     if (selection.mode === "fork" && selection.sourceSessionId && !session) {
-      const targetPath = `${opts.workDir}/.claw/sessions/${selection.sessionId}.jsonl`;
+      const targetPath = join(
+        resolvePicoPaths(opts.workDir).workspace.sessions,
+        `${selection.sessionId}.jsonl`,
+      );
       const targetPublished = await access(targetPath).then(
         () => true,
         () => false,
@@ -1134,7 +1173,8 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
       workDir: opts.workDir,
       sessionId: selection.sessionId,
       session,
-      lspServers: picoConfig.lspServers,
+      lspServers: [...picoConfig.lspServers, ...pluginSnapshot.lspServers],
+      hookExtensionSources: pluginSnapshot.hookSources,
       ...(taskHostRuntime ? { taskHostRuntime } : {}),
     });
 
@@ -1142,16 +1182,19 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
       const { toolDisclosure, fileIndex, codeIntelligence } = runtimeState;
       const askUserHandler = new AskUserHandler();
       const mcpElicitationHandler = new McpElicitationUiHandler();
+      const skillLoader = createRuntimeSkillLoader(opts.workDir);
       const toolRegistry = buildDefaultToolRegistry(opts.workDir, {
         toolDisclosure,
         workspaceRoots,
         askUserHandler,
         codeIntelligence,
+        skillLoader,
       });
       sharedMcpManager.attachRegistry(toolRegistry);
       if (!mcpInitialized) {
         mcpInitialized = true;
         const shouldLoadMcpConfig =
+          pluginSnapshot.mcpSources.length > 0 ||
           opts.mcpConfigPath !== undefined ||
           (await access(mcpConfigPath).then(
             () => true,
@@ -1159,7 +1202,14 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
           ));
         if (shouldLoadMcpConfig) {
           try {
-            await sharedMcpManager.loadConfig(mcpConfigPath);
+            await sharedMcpManager.replaceSources([
+              {
+                id: "project",
+                path: mcpConfigPath,
+                optional: opts.mcpConfigPath === undefined,
+              },
+              ...pluginSnapshot.mcpSources,
+            ]);
             await sharedMcpManager.connectAll();
           } catch {
             // /mcp 展示配置或连接错误；TUI 本身继续可用。
@@ -1226,6 +1276,15 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         goalManager: runtimeState.goalManager,
         ...(runtimeState.hookService ? { hookService: runtimeState.hookService } : {}),
         hookCommands: runtimeState.hookCommands,
+        pluginManagement,
+        includeUserSkillResources: true,
+        includeClaudeProjectResources:
+          claudeCompatibility.enabled && claudeCompatibility.projectResources,
+        includeClaudeUserResources:
+          claudeCompatibility.enabled && claudeCompatibility.userResources,
+        skillSources: pluginSnapshot.skillSources,
+        commandSources: pluginSnapshot.commandSources,
+        agentSources: pluginSnapshot.agentSources,
         modelRuntime: () => {
           const route = modelRouter.resolve(settings.modelRouteId);
           return route
@@ -1272,6 +1331,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         askUserHandler,
         ...(scheduleDraft ? { scheduleDraft } : {}),
         mcpElicitationHandler,
+        skillLoader,
         ...(recoveredRewind ? { recoveredRewindInputText: recoveredRewind.inputText } : {}),
         latestMcpStatus,
       };
@@ -1726,6 +1786,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
             activeBundleRef.current.generation === current.generation,
           registry,
           workDir: opts.workDir,
+          skillLoader: current.skillLoader,
           exit,
           sessionId,
           switchSession,
@@ -1734,10 +1795,9 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
             rewindContextRef.current = context;
           },
           activateAgentHooks: async (metadata) => {
-            const isSkill = metadata["skillHookConfig"] !== undefined;
-            const componentId = isSkill ? metadata["skillName"] : metadata["agentName"];
-            const path = isSkill ? metadata["skillSourcePath"] : metadata["sourcePath"];
-            const inlineHooks = isSkill ? metadata["skillHookConfig"] : metadata["agentHookConfig"];
+            const componentId = metadata["skillName"];
+            const path = metadata["skillSourcePath"];
+            const inlineHooks = metadata["skillHookConfig"];
             if (
               typeof componentId !== "string" ||
               typeof path !== "string" ||
@@ -1746,7 +1806,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
               return;
             }
             await runtimeState.activateComponentHooks({
-              kind: isSkill ? "skill" : "agent",
+              kind: "skill",
               path,
               componentId,
               inlineHooks,
@@ -1809,6 +1869,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
               modelRouter,
               settings,
               runOptions?.model,
+              picoConfig.compatibility.claude,
             );
             const activeRoute = modelRouter.providerConfig(route.id, reasoningLevel);
             const rewindContext = resumeExistingSession ? null : rewindContextRef.current;
@@ -1850,6 +1911,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
               modelRouter,
               toolDisclosure,
               runtimeState,
+              pluginSnapshot,
               askUserHandler: current.askUserHandler,
               mcpElicitationHandler: current.mcpElicitationHandler,
               openDialog: (request) => {
@@ -2009,33 +2071,37 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     await instance.waitUntilExit();
   } finally {
     shuttingDown = true;
-    await terminalGrid.dispose();
-    activeAbortControllerRef?.current?.abort(new DOMException("TUI shutting down", "AbortError"));
-    while (pendingTuiSubmissions.size > 0) {
-      await Promise.allSettled([...pendingTuiSubmissions]);
+    try {
+      await terminalGrid.dispose();
+      activeAbortControllerRef?.current?.abort(new DOMException("TUI shutting down", "AbortError"));
+      while (pendingTuiSubmissions.size > 0) {
+        await Promise.allSettled([...pendingTuiSubmissions]);
+      }
+      while (pendingDelegationWakes.size > 0) {
+        await Promise.allSettled([...pendingDelegationWakes]);
+      }
+      while (pendingHookWakes.size > 0) {
+        await Promise.allSettled([...pendingHookWakes]);
+      }
+      while (pendingSessionSwitches.size > 0) {
+        await Promise.allSettled([...pendingSessionSwitches]);
+      }
+      while (pendingTuiDialogActions.size > 0) {
+        await Promise.allSettled([...pendingTuiDialogActions]);
+      }
+      const finalBundle = activeBundle;
+      if (finalBundle) {
+        await finalBundle.runtimeState.dispose();
+        await finalBundle.session.flushPersistence();
+      }
+      unsubscribeTaskCompletion?.();
+      unsubscribeMcpStatus();
+      await taskHostRuntime?.close();
+      cronService?.close();
+      await sharedMcpManager.closeAll();
+    } finally {
+      await pluginSnapshot.dispose();
     }
-    while (pendingDelegationWakes.size > 0) {
-      await Promise.allSettled([...pendingDelegationWakes]);
-    }
-    while (pendingHookWakes.size > 0) {
-      await Promise.allSettled([...pendingHookWakes]);
-    }
-    while (pendingSessionSwitches.size > 0) {
-      await Promise.allSettled([...pendingSessionSwitches]);
-    }
-    while (pendingTuiDialogActions.size > 0) {
-      await Promise.allSettled([...pendingTuiDialogActions]);
-    }
-    const finalBundle = activeBundle;
-    if (finalBundle) {
-      await finalBundle.runtimeState.dispose();
-      await finalBundle.session.flushPersistence();
-    }
-    unsubscribeTaskCompletion?.();
-    unsubscribeMcpStatus();
-    await taskHostRuntime?.close();
-    cronService?.close();
-    await sharedMcpManager.closeAll();
   }
 }
 
@@ -2232,6 +2298,7 @@ export async function runTuiAgentPrompt(
     modelRouter?: ModelRouter;
     toolDisclosure?: ToolDisclosure;
     runtimeState?: TuiRuntimeState;
+    pluginSnapshot?: PluginRuntimeSnapshot;
     askUserHandler?: AskUserHandler;
     scheduleDraft?: TuiScheduleDraftRuntime;
     mcpElicitationHandler?: McpElicitationUiHandler;
@@ -2309,6 +2376,7 @@ export async function runTuiAgentPrompt(
       ...(deps.toolDisclosure ? { toolDisclosure: deps.toolDisclosure } : {}),
       ...(deps.modelRouter ? { modelRouter: deps.modelRouter } : {}),
       ...(deps.runtimeState ? { runtimeState: deps.runtimeState } : {}),
+      ...(deps.pluginSnapshot ? { pluginSnapshot: deps.pluginSnapshot } : {}),
       ...(deps.askUserHandler ? { askUserHandler: deps.askUserHandler } : {}),
       ...(deps.scheduleDraft ? { scheduleDraftCoordinator: deps.scheduleDraft.coordinator } : {}),
       ...(deps.mcpStatusSink ? { mcpStatusSink: deps.mcpStatusSink } : {}),
