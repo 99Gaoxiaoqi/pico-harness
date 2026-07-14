@@ -4,9 +4,11 @@ import { registerDesktopIpcHandlers } from "./ipc.js";
 import { DesktopLifecycleController } from "./lifecycle.js";
 import { LocalDaemonRuntimeClientAdapter } from "./runtime-client-adapter.js";
 import { createDesktopWindow } from "./window.js";
+import { configureAutoUpdates } from "./updater.js";
 
 let mainWindow: BrowserWindow | undefined;
 let disposeIpc: (() => void) | undefined;
+let disposeUpdater: (() => void) | undefined;
 const runtime = new LocalDaemonRuntimeClientAdapter();
 const lifecycle = new DesktopLifecycleController(() => mainWindow);
 
@@ -17,6 +19,7 @@ if (!app.requestSingleInstanceLock()) {
   app.on("before-quit", () => lifecycle.markQuitting());
   app.on("will-quit", () => {
     disposeIpc?.();
+    disposeUpdater?.();
     runtime.close();
   });
   app.on("window-all-closed", () => {
@@ -28,6 +31,7 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   void app.whenReady().then(async () => {
+    if (process.platform === "win32") app.setAppUserModelId("com.squirrel.pico.Pico");
     const platform = createPlatformServices();
     disposeIpc = registerDesktopIpcHandlers({
       ipcMain,
@@ -36,6 +40,7 @@ if (!app.requestSingleInstanceLock()) {
       platform,
       lifecycle,
     });
+    disposeUpdater = configureAutoUpdates(() => lifecycle.markQuitting());
     await openMainWindow();
   });
 }
