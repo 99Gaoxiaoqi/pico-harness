@@ -14,7 +14,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Box, Text, useApp, useInput, useWindowSize } from "ink";
-import { appendFileSync } from "node:fs";
+import { appendFileSync, mkdirSync } from "node:fs";
 import { InputBox, type InputBoxStateSnapshot, type InputBoxSubmission } from "./input-box.js";
 import type { SlashArgumentSuggestionSource, SuggestionSource } from "./input-controller.js";
 import { pickFocusedDialog, type DialogRequest } from "./dialog-arbiter.js";
@@ -46,6 +46,7 @@ import {
   useTerminalMouseMode,
 } from "./mouse-input.js";
 import { AskUserDialog, type AskUserDialogProps } from "./ask-user-dialog.js";
+import { resolvePicoPaths } from "../paths/pico-paths.js";
 import { ChangesDialogContent, type ChangesDialogContentProps } from "./changes-panel.js";
 import { InspectorDialogContent, type InspectorDialogContentProps } from "./inspector.js";
 import {
@@ -67,9 +68,11 @@ import {
 import { AgentDetailView } from "./agent-detail-view.js";
 
 /** 诊断日志:写文件(绕过 ink patchConsole 劫持),只在 TUI_DEBUG 时 */
-function dbg(msg: string): void {
+function dbg(workDir: string, msg: string): void {
   if (process.env.TUI_DEBUG) {
-    appendFileSync(".claw/tui-debug.log", `${new Date().toISOString()} ${msg}\n`);
+    const paths = resolvePicoPaths(workDir);
+    mkdirSync(paths.workspace.root, { recursive: true });
+    appendFileSync(paths.workspace.debugLog, `${new Date().toISOString()} ${msg}\n`);
   }
 }
 
@@ -463,10 +466,10 @@ export function App({
   const showSpinner = running && !inputDisabled && spinnerMode !== "responding";
 
   // 诊断:记录每次渲染的 entries 状态
-  dbg(`render: entries=${entries.length} running=${running} streaming=${isStreaming}`);
+  dbg(workDir, `render: entries=${entries.length} running=${running} streaming=${isStreaming}`);
   mainEntries.forEach((e, i) => {
     const c = e.kind === "user" || e.kind === "assistant" ? e.content.slice(0, 40) : e.kind;
-    dbg(`  [${i}] ${e.kind}: ${c}`);
+    dbg(workDir, `  [${i}] ${e.kind}: ${c}`);
   });
 
   const phase = approvalNotice

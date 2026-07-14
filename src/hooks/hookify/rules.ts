@@ -2,6 +2,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { basename, dirname, resolve, sep } from "node:path";
 import type { HookEvent, HookEventPayloadMap, HookOutput } from "../types.js";
 import { writeWorkspaceFileAtomic } from "../trust/secure-file.js";
+import { resolvePicoPaths } from "../../paths/pico-paths.js";
 
 export const HOOKIFY_EVENTS = ["bash", "file", "prompt", "stop", "all"] as const;
 export const HOOKIFY_ACTIONS = ["warn", "block"] as const;
@@ -58,7 +59,10 @@ export function createHookifyProposal(options: CreateHookifyProposalOptions): Ho
     condition,
     enabled: true,
   };
-  const targetPath = resolve(options.workDir, ".claw", `hookify.${id}.local.md`);
+  const targetPath = resolve(
+    resolvePicoPaths(options.workDir).project.root,
+    `hookify.${id}.local.md`,
+  );
   const content = renderHookifyRule(rule);
   return {
     workDir: resolve(options.workDir),
@@ -73,7 +77,7 @@ export async function applyHookifyProposal(
   proposal: HookifyProposal,
   options: ApplyHookifyProposalOptions,
 ): Promise<boolean> {
-  const expectedDirectory = resolve(proposal.workDir, ".claw");
+  const expectedDirectory = resolvePicoPaths(proposal.workDir).project.root;
   if (
     dirname(proposal.targetPath) !== expectedDirectory ||
     !isHookifyFilename(basename(proposal.targetPath))
@@ -87,7 +91,15 @@ export async function applyHookifyProposal(
 }
 
 export async function loadHookifyRules(workDir: string): Promise<readonly HookifyRule[]> {
-  const directory = resolve(workDir, ".claw");
+  const paths = resolvePicoPaths(workDir);
+  const legacy = await loadHookifyRulesFromDirectory(resolve(workDir, ".claw"));
+  const native = await loadHookifyRulesFromDirectory(paths.project.root);
+  const byId = new Map(legacy.map((rule) => [rule.id, rule]));
+  for (const rule of native) byId.set(rule.id, rule);
+  return [...byId.values()].sort((left, right) => left.id.localeCompare(right.id));
+}
+
+async function loadHookifyRulesFromDirectory(directory: string): Promise<HookifyRule[]> {
   let entries: string[];
   try {
     entries = await readdir(directory);
