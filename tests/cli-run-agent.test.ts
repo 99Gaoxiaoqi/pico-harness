@@ -157,6 +157,69 @@ describe("runAgentFromCli", () => {
     resetSessionSettingsForTests();
   });
 
+  it("allowedTools 只暴露本轮允许的工具，空列表允许纯文本运行", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-cli-command-tools-"));
+    const provider = new ScriptedProvider([
+      { role: "assistant", content: "read only" },
+      { role: "assistant", content: "text only" },
+    ]);
+
+    await runAgentFromCli(
+      {
+        prompt: "review",
+        dir: workDir,
+        session: "command-tools-read",
+        provider: "openai",
+        allowedTools: ["read_file"],
+      },
+      { provider },
+    );
+    await runAgentFromCli(
+      {
+        prompt: "summarize",
+        dir: workDir,
+        session: "command-tools-none",
+        provider: "openai",
+        allowedTools: [],
+      },
+      { provider },
+    );
+
+    expect(provider.calls[0]?.toolNames).toEqual(["read_file"]);
+    expect(provider.calls[1]?.toolNames).toEqual([]);
+  });
+
+  it("allowedTools 含未知或空工具名时在 Provider 调用前失败", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-cli-command-tools-invalid-"));
+    const provider = new ScriptedProvider([{ role: "assistant", content: "must not run" }]);
+
+    await expect(
+      runAgentFromCli(
+        {
+          prompt: "review",
+          dir: workDir,
+          session: "command-tools-unknown",
+          provider: "openai",
+          allowedTools: ["not_a_tool"],
+        },
+        { provider },
+      ),
+    ).rejects.toThrow("未知工具: not_a_tool");
+    await expect(
+      runAgentFromCli(
+        {
+          prompt: "review",
+          dir: workDir,
+          session: "command-tools-empty",
+          provider: "openai",
+          allowedTools: [""],
+        },
+        { provider },
+      ),
+    ).rejects.toThrow("allowed-tools 含空值");
+    expect(provider.calls).toHaveLength(0);
+  });
+
   it("reuses session-scoped goal state, prompt memory and late tool status", async () => {
     const workDir = await realpath(await mkdtemp(join(tmpdir(), "pico-cli-runtime-state-")));
     const sessionId = "runtime-state-session";
