@@ -43,8 +43,8 @@ export const PROVIDER_CALL_PURPOSES = [
 ] as const;
 export type ProviderCallPurpose = (typeof PROVIDER_CALL_PURPOSES)[number];
 
-/** runtime.sqlite 当前可读写 schema；诊断器与存储迁移共享同一事实源。 */
-export const RUNTIME_SCHEMA_VERSION = 6;
+/** runtime.sqlite 当前可读写 schema；向后兼容的可选列不单独提升版本。 */
+export const RUNTIME_SCHEMA_VERSION = 5;
 
 export const PROVIDER_CALL_STATUSES = ["succeeded", "failed", "cancelled"] as const;
 export type ProviderCallStatus = (typeof PROVIDER_CALL_STATUSES)[number];

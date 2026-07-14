@@ -1798,6 +1798,7 @@ export class RuntimeStore {
            applied_at INTEGER NOT NULL
          )`,
       );
+      this.normalizeDesktopPreviewMigration();
       const migrationRow = this.db
         .prepare("SELECT COALESCE(MAX(version), 0) AS version FROM schema_migrations")
         .get() as { version: number };
@@ -1837,14 +1838,31 @@ export class RuntimeStore {
           .prepare("INSERT INTO schema_migrations(version, name, applied_at) VALUES (5, ?, ?)")
           .run("provider_call_hook_purpose", this.now());
       }
-      if (current < 6) {
-        this.db.exec(SCHEMA_V6);
-        this.db
-          .prepare("INSERT INTO schema_migrations(version, name, applied_at) VALUES (6, ?, ?)")
-          .run("cron_job_display_name", this.now());
-      }
+      this.ensureCronJobDisplayNameColumn();
     });
     migrate();
+  }
+
+  private normalizeDesktopPreviewMigration(): void {
+    const futureMigrations = this.db
+      .prepare("SELECT version, name FROM schema_migrations WHERE version > ? ORDER BY version")
+      .all(RUNTIME_SCHEMA_VERSION) as Array<{ version: number; name: string }>;
+    if (
+      futureMigrations.length !== 1 ||
+      futureMigrations[0]?.version !== 6 ||
+      futureMigrations[0].name !== "cron_job_display_name" ||
+      !hasCronJobDisplayNameColumn(this.db)
+    ) {
+      return;
+    }
+    this.db
+      .prepare("DELETE FROM schema_migrations WHERE version = 6 AND name = ?")
+      .run("cron_job_display_name");
+  }
+
+  private ensureCronJobDisplayNameColumn(): void {
+    if (hasCronJobDisplayNameColumn(this.db)) return;
+    this.db.exec("ALTER TABLE cron_jobs ADD COLUMN name TEXT");
   }
 
   private assertLease(resourceKey: string, ownerId: string, leaseEpoch: number): void {
@@ -2243,17 +2261,6 @@ const SCHEMA_V5 = `
   CREATE INDEX provider_calls_job_idx ON provider_calls(job_id, created_at);
 `;
 
-const SCHEMA_V6 = `
-  ALTER TABLE cron_jobs ADD COLUMN name TEXT;
-  UPDATE cron_jobs
-  SET name = CASE
-    WHEN trim(prompt) = '' THEN cron_job_id
-    WHEN length(trim(prompt)) <= 80 THEN trim(prompt)
-    ELSE substr(trim(prompt), 1, 79) || '…'
-  END
-  WHERE name IS NULL;
-`;
-
 function mapJob(row: JobRow): JobRecord {
   return compact({
     jobId: row.job_id,
@@ -2442,6 +2449,12 @@ function normalizeCronPrompt(prompt: string): string {
   const normalized = prompt.trim();
   if (!normalized) throw new Error("Cron Job prompt 必须是非空字符串");
   return normalized;
+}
+
+function hasCronJobDisplayNameColumn(db: Database.Database): boolean {
+  return (db.pragma("table_info(cron_jobs)") as Array<{ name: string }>).some(
+    (column) => column.name === "name",
+  );
 }
 
 function mapCronRun(row: CronRunRow): CronRunRecord {
