@@ -5,6 +5,7 @@ export default defineConfig({
     sourcemap: true,
     rollupOptions: {
       external: ["electron"],
+      output: { entryFileNames: "preload.js" },
     },
   },
 });

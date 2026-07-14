@@ -534,16 +534,6 @@
     border-color: #9ebcac;
     background: var(--accent-soft);
   }
-  .custom-answer {
-    display: grid;
-    gap: 7px;
-    margin-top: 17px;
-  }
-  .custom-answer label {
-    color: var(--ink-secondary);
-    font-size: 12px;
-    font-weight: 620;
-  }
   @keyframes fade-in {
     from {
       opacity: 0;
@@ -1483,6 +1473,7 @@
     font-style: normal;
   }
   .rewind-panel {
+    grid-row: 2;
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -1506,6 +1497,7 @@
     color: #74501b;
   }
   .diff-view {
+    grid-row: 3;
     min-height: 0;
     padding: 18px;
     overflow: auto;
@@ -1517,6 +1509,7 @@
   }
   .review-composer {
     display: grid;
+    grid-row: 4;
     gap: 7px;
     padding: 12px 14px;
     border-top: 1px solid var(--line);
@@ -1526,6 +1519,7 @@
     font-weight: 660;
   }
   .review-footer {
+    grid-row: 5;
     border-top: 1px solid var(--line);
     border-bottom: 0;
   }
