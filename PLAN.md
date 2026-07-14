@@ -60,3 +60,35 @@
 - 已基于包含自然语言 Cron、Hooks 与 MCP 修复的主线 `c632264` 完成集成。
 - 冲突处理保留了双方语义：Claude Agent 同时支持 `hooks` 与 `model`，Runtime 同时保留 Hook 计费归属与子代理模型路由，命令测试同时覆盖两类 frontmatter。
 - 合并后的本地回归、静态检查、构建、安全审计及 DeepSeek → GLM 真实模型 E2E 均已通过。
+
+---
+
+# 2026-07-14 main 全面 Review 修复计划
+
+## 目标与决策
+
+- 修复全面审查中已复现或代码确认的高风险问题，并补充针对性集成测试。
+- Agent 配置以本产品原生 `AgentProfile` / `.claw/agents.yaml` 为唯一运行时事实源。
+- `.claude/agents/*.md` 作为兼容输入，经适配器归一化后使用；不得与原生 Profile 按名称隐式拼接权限、模型或 Hooks。
+- 并行开发仅处理文件边界清晰的任务；`agent-runtime.ts` 与 Agent 配置统一由单一所有者串行集成。
+
+## 第一批并行任务
+
+- [ ] `codex/review-session-tui`：按 `(cwd, sessionId)` 隔离 SessionSettings；修复失效模型路由恢复迁移；补集成测试。
+- [ ] `codex/review-cron-daemon`：避免 claim 前异常遗留 queued Run；串行化 workspace registration 与 runtime refresh；补并发/恢复测试。
+- [ ] `codex/review-runtime-budget`：将 AgentRuntime 初始化纳入可靠清理边界；让子代理计入 Token/成本预算；补失败与预算测试。
+
+## 串行集成任务
+
+- [ ] 在 `codex/review-fixes-integration` 审查并合并三个任务分支。
+- [ ] 统一 `.claude/agents` 兼容导入与 `.claw/agents.yaml` 原生 Profile 的解析、优先级和权限语义。
+- [ ] 处理剩余中风险契约：子代理 fallback/lifecycle、command/Skill/Hook 元数据、CLI 参数优先级。
+- [ ] 更新真实模型 E2E 的过期契约、Schema 与安全 fixture；恢复测试门禁。
+- [ ] 在最终代码状态运行 lint、typecheck、build、全量集成测试、PR-safe E2E、相关真实模型 E2E 和格式检查。
+
+## 合并与冲突约束
+
+- 三个子任务分别使用独立 worktree 和唯一分支，只提交各自范围，不更新 `main`。
+- `src/runtime/agent-runtime.ts`、Agent Profile/loader、锁文件、Schema 与公共配置由集成线单一所有者处理或审查。
+- 子任务完成后先合并到独立集成分支；验证失败不得更新 `main`。
+- 合并前再次确认 `origin/main` 是否前移；含义不明确的冲突停止自动处理。
