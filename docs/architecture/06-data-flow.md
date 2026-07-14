@@ -29,14 +29,13 @@
 │ │     └─ Goal(如有 active goal)                                │ │
 │ │   availableTools = registry.getAvailableTools()              │ │
 │ │     └─ toolDisclosure.pickForLLM(渐进披露:7 核心+search_tools) │ │
-│ │   workingMemory = session.getWorkingMemory(20)               │ │
-│ │     └─ 丢弃孤儿 ToolResult                                    │ │
-│ │   contextHistory = [system, ...workingMemory]                │ │
+│ │   modelContext = session.getModelContext()                   │ │
+│ │     └─ 完整历史副本 + ToolResult 访问元数据更新                │ │
+│ │   contextHistory = [system, ...modelContext]                 │ │
 │ │                                                              │ │
-│ │ ② 压缩                                                       │ │
-│ │   compactedContext = compactor.compactToBudget(contextHistory)│ │
-│ │     └─ 超 maxChars 才压缩(掩码/掐头去尾/占位符)                │ │
-│ │     └─ 绝不动 toolCalls                                       │ │
+│ │ ② token 水位整理                                             │ │
+│ │   低于 85% 原样发送；超水位先缩短旧 ToolResult                │ │
+│ │   仍超水位则在完整工具批次边界摘要旧前缀                       │ │
 │ │                                                              │ │
 │ │ ③ Phase 1 慢思考(enableThinking)                              │ │
 │ │   reporter.onThinking() → spinner 启动                        │ │
@@ -84,31 +83,23 @@
 ## 2. 上下文溢出时的压缩协作
 
 ```
-provider.generate() → API 返回 400/413 (ContextOverflowError)
+发送前估算（消息 + 工具 Schema）超过输入预算的 85%
     │
     ▼
-generateWithOverflowRetry 外层捕获
+旧 ToolResult 请求投影
     │
-    ├─ attempt 0: 用当前 context(已压缩)
-    │   → 仍 overflow
+    ├─ 回到 85% 以下 → 发送投影（Session 不变）
+    └─ 仍超水位 → FullCompactor
+        ├─ findSafeCompactionCut(token 目标)
+        ├─ toolCalls 与整批 results 不跨边界
+        ├─ session.applyCompaction(summary, compactedCount)
+        └─ 重新组装“摘要 + 完整安全尾部”
+
+provider.generate() 若仍返回 ContextOverflowError
     │
-    ├─ attempt 1: WorkingMemory × 0.7, maxChars × 0.6
-    │   → compactor.compactToBudget(更小窗口+更小预算)
-    │   → 仍 overflow
-    │
-    ├─ attempt 2: WorkingMemory × 0.5, maxChars × 0.4
-    │   → compactor.compactToBudget()
-    │   → 仍 overflow
-    │
-    ├─ attempt 3: 最后兜底 —— 模型摘要压缩(仅 1 次)
-    │   ├─ fullCompactor.compact(session, retainLastN)
-    │   │   ├─ provider 浓缩前 N 条为 13-section 摘要
-    │   │   ├─ session.applyCompaction(summary, compactedCount)
-    │   │   └─ 真替换 Session.history 前 N 条 ← 注意:真改持久化!
-    │   ├─ 成功 → 重新组装 context 从默认预算重试
-    │   └─ 失败 → 抛 ContextOverflowError
-    │
-    └─ run() 硬重置兜底:
+    ├─ 用 10% 尾部目标执行一次紧急 FullCompaction
+    ├─ 重试一次，不做 14/10/6 条消息缩窗
+    └─ 仍失败才硬重置:
         session.truncateTo(beforeLen - 1)
         清空历史只保留本轮用户输入
         continue 下一轮

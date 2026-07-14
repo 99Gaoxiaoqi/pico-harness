@@ -105,13 +105,54 @@ function newEngine(provider: LLMProvider, maxChars: number): AgentEngine {
     registry: new EmptyRegistry(),
     workDir: "/tmp",
     compactor,
-    // 每轮只有一次 generate 调用,便于精确计数
-    workingMemoryLimit: 20,
   });
 }
 
-describe("响应式溢出压缩+重试 (generateWithOverflowRetry)", () => {
-  it("首次溢出、第二次成功 → generate 被调 2 次,第 2 次入参字符数 < 第 1 次", async () => {
+describe("主 Agent 溢出兜底 (generateWithOverflowRetry)", () => {
+  it("低于水位时 Provider 收到超过 20 条的完整历史", async () => {
+    const provider = new OverflowMockProvider([{ kind: "ok", content: "完成" }]);
+    const engine = newEngine(provider, 100_000);
+    const session = new Session("full-model-context", "/tmp");
+    for (let index = 0; index < 25; index++) {
+      session.append({
+        role: index % 2 === 0 ? "user" : "assistant",
+        content: `history-${index}`,
+      });
+    }
+
+    await engine.run(session);
+
+    expect(provider.calls[0]!.messages).toHaveLength(26);
+    expect(provider.calls[0]!.messages.slice(1).map((message) => message.content)).toEqual(
+      Array.from({ length: 25 }, (_, index) => `history-${index}`),
+    );
+  });
+
+  it("单轮 50 个 tool calls 与 results 全部进入 Provider", async () => {
+    const provider = new OverflowMockProvider([{ kind: "ok", content: "完成" }]);
+    const engine = newEngine(provider, 1_000_000);
+    const session = new Session("parallel-tool-context", "/tmp");
+    const toolCalls = Array.from({ length: 50 }, (_, index) => ({
+      id: `call-${index}`,
+      name: "read",
+      arguments: JSON.stringify({ index }),
+    }));
+    session.append({ role: "assistant", content: "", toolCalls });
+    for (const call of toolCalls) {
+      session.append({ role: "user", toolCallId: call.id, content: `result-${call.id}` });
+    }
+
+    await engine.run(session);
+
+    const sent = provider.calls[0]!.messages;
+    expect(sent).toHaveLength(52);
+    expect(sent[1]!.toolCalls).toHaveLength(50);
+    expect(sent.slice(2).map((message) => message.toolCallId)).toEqual(
+      toolCalls.map((call) => call.id),
+    );
+  });
+
+  it("无 FullCompactor 时硬重置只保留当前请求，不再按消息条数缩窗", async () => {
     const provider = new OverflowMockProvider([
       { kind: "throw", error: new ContextOverflowError("context length exceeded") },
       { kind: "ok", content: "完成" },
@@ -126,16 +167,15 @@ describe("响应式溢出压缩+重试 (generateWithOverflowRetry)", () => {
 
     // generate 被调 2 次(attempt 0 溢出 + attempt 1 成功)
     expect(provider.calls).toHaveLength(2);
-    // 第 2 次入参字符数严格小于第 1 次(降级生效)
+    // 当前请求本身不可丢，硬重置后不会再按 14/10/6 条缩窗。
     const chars0 = totalChars(provider.calls[0]!.messages);
     const chars1 = totalChars(provider.calls[1]!.messages);
-    expect(chars1).toBeLessThan(chars0);
+    expect(chars1).toBe(chars0);
     // 最终返回成功消息
     expect(returned[returned.length - 1]!.content).toBe("完成");
   });
 
-  it("连续 3 次降级(共 4 次调用)仍溢出 → 抛出 ContextOverflowError,不无限循环", async () => {
-    // 4 次全部溢出:attempt 0,1,2,3 → attempt 3 达到 MAX_OVERFLOW_RETRY 后抛出
+  it("硬重置后仍溢出只有 2 次 provider 调用，不再进行 4 档降级", async () => {
     const provider = new OverflowMockProvider([
       { kind: "throw", error: new ContextOverflowError("overflow #1") },
       { kind: "throw", error: new ContextOverflowError("overflow #2") },
@@ -150,8 +190,7 @@ describe("响应式溢出压缩+重试 (generateWithOverflowRetry)", () => {
     session.append({ role: "user", content: bigText(2000) });
 
     await expect(engine.run(session)).rejects.toBeInstanceOf(ContextOverflowError);
-    // 恰好 4 次调用,不会无限重试
-    expect(provider.calls).toHaveLength(4);
+    expect(provider.calls).toHaveLength(2);
   });
 
   it("非 overflow 错误(LLMStatusError 400)不触发响应式压缩,直接抛", async () => {

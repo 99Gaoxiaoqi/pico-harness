@@ -8,7 +8,7 @@
 //
 // 第 11 讲:引擎彻底沦为"打工执行器"。它不内部维护状态,
 // 而是依靠喂给它的 Session 实例进行推理 —— 随时休眠、随时被唤醒的记忆连续体。
-// 每轮组装 = SystemPrompt + Session.GetWorkingMemory(N),严格限制 Context 规模。
+// 每轮组装 = SystemPrompt + Session 完整历史投影，接近 token 水位时主动整理。
 
 import type { LLMProvider, LLMProviderRequestOptions } from "../provider/interface.js";
 import { ContextOverflowError, isAbortError } from "../provider/errors.js";
@@ -29,8 +29,15 @@ import type {
   SubagentResult,
 } from "../tools/subagent.js";
 import type { Compactor } from "../context/compactor.js";
-import { ContextCompactionError } from "../context/compactor.js";
+import { ContextCompactionError, sanitizeToolPairs } from "../context/compactor.js";
 import type { FullCompactor } from "../context/full-compactor.js";
+import type { ContextBudget } from "../context/context-budget.js";
+import {
+  estimateModelInputTokens,
+  estimateMessagesTokens,
+  estimateTokenBudgetAsChars,
+} from "../context/context-budget.js";
+import { findSafeCompactionCut } from "../context/safe-compaction-boundary.js";
 import { withProviderCallContext } from "../observability/provider-call-context.js";
 import { PromptComposer } from "../context/composer.js";
 import { SkillLoader } from "../context/skill.js";
@@ -66,8 +73,9 @@ import {
   type FileHistoryJournal,
 } from "../safety/file-history.js";
 
-/** WorkingMemory 滑动窗口大小:截取最近 N 条消息供压缩器判断(含远期历史) */
-const DEFAULT_WORKING_MEMORY_LIMIT = 20;
+const DEFAULT_AUTO_COMPACT_TRIGGER_RATIO = 0.85;
+const DEFAULT_RETAINED_CONTEXT_RATIO = 0.2;
+const EMERGENCY_RETAINED_CONTEXT_RATIO = 0.1;
 
 /** 子代理 summary 低于此字数则触发一轮扩写(对齐 Kimi Code SUMMARY_MIN_LENGTH) */
 const SUBAGENT_SUMMARY_MIN_CHARS = 200;
@@ -383,21 +391,18 @@ export interface AgentEngineOptions {
    * 注入"状态外部化强制规范",引导大模型读写 PLAN.md / TODO.md 管理长程任务。
    */
   planMode?: boolean;
-  /** WorkingMemory 滑动窗口大小(默认 20 条,给压缩器留判断空间) */
-  workingMemoryLimit?: number;
+  /** 当前 route 的统一上下文预算；未注入时仅保留旧 Compactor 兼容路径。 */
+  contextBudget?: ContextBudget;
+  /** 主动整理水位，默认为输入预算的 85%。 */
+  autoCompactTriggerRatio?: number;
   /** 主循环最大轮次兜底(默认 50,防止失控烧穿 Token) */
   maxTurns?: number;
   /**
-   * 上下文压缩器:在向 Provider 发起推理前过一遍,防 OOM (第 12 讲)。
-   * 未提供则不压缩(纯靠 WorkingMemory 条数截断)。
+   * 字符级 ToolResult 投影压缩器；只在 token 超过主动水位时缩短旧结果。
    */
   compactor?: Compactor;
   /**
-   * 模型摘要压缩器:字符级降级用尽后的最后防线(对标 kimi-code FullCompaction)。
-   * 当 generateWithOverflowRetry 的字符级降级(MAX_OVERFLOW_RETRY 次)仍 overflow 时,
-   * 在抛错前调用本压缩器,用 provider 把 history 前缀浓缩成摘要替换,
-   * 成功后用新 history 重新组装 context 重试。未提供则直接抛 ContextOverflowError
-   * (由 run() 的硬重置兜底处理)。
+   * token 水位主动摘要器，也用于 Provider 真实 overflow 后的一次紧急压缩。
    */
   fullCompactor?: FullCompactor;
   /**
@@ -525,7 +530,8 @@ export class AgentEngine implements AgentRunner {
   private readonly resolveSubagentModelRuntime?: SubagentModelRuntimeResolver;
   // planMode 非 readonly:ExitPlanMode 审批通过后由 exitPlanMode() 置 false。
   private planMode: boolean;
-  private readonly workingMemoryLimit: number;
+  private readonly contextBudget?: ContextBudget;
+  private readonly autoCompactTriggerRatio: number;
   private readonly maxTurns: number;
   private readonly compactor?: Compactor;
   private readonly fullCompactor?: FullCompactor;
@@ -578,7 +584,9 @@ export class AgentEngine implements AgentRunner {
     this.modelRouteId = opts.modelRouteId;
     this.resolveSubagentModelRuntime = opts.resolveSubagentModelRuntime;
     this.planMode = opts.planMode ?? false;
-    this.workingMemoryLimit = opts.workingMemoryLimit ?? DEFAULT_WORKING_MEMORY_LIMIT;
+    this.contextBudget = opts.contextBudget;
+    this.autoCompactTriggerRatio =
+      opts.autoCompactTriggerRatio ?? DEFAULT_AUTO_COMPACT_TRIGGER_RATIO;
     this.maxTurns = opts.maxTurns ?? 50;
     this.compactor = opts.compactor;
     this.fullCompactor = opts.fullCompactor;
@@ -739,39 +747,118 @@ export class AgentEngine implements AgentRunner {
     };
   }
 
-  /** 响应式压缩最大重试次数(溢出后再尝试 3 轮渐进降级,合计最多 4 次调用) */
+  /** 子代 Agent 局部上下文的响应式降级次数；主 Agent 不使用此常量。 */
   private static readonly MAX_OVERFLOW_RETRY = 3;
   /** 每轮重试的字符预算降级系数(1.0 → 0.6 → 0.4 → 0.25) */
   private static readonly OVERFLOW_BUDGET_FACTORS = [1.0, 0.6, 0.4, 0.25] as const;
-  /** 每轮重试的 WorkingMemory 条数降级系数(1.0 → 0.7 → 0.5 → 0.3) */
-  private static readonly OVERFLOW_MEMORY_FACTORS = [1.0, 0.7, 0.5, 0.3] as const;
   /**
    * 单轮工具并发上限(对齐 hermes _MAX_TOOL_WORKERS=8)。
    * 超出的任务进 queued 等名额释放,不报错不丢弃,保序返回。
    */
   private static readonly MAX_TOOL_CONCURRENCY = 8;
 
-  /**
-   * 响应式溢出重试:catch 到 ContextOverflowError 后,用更小的 WorkingMemory limit
-   * + 更小的 maxChars 预算,从 Session 重新组装上下文并压缩、重试 provider.generate。
-   *
-   * 借鉴 kimi-code handleOverflowError 的闭环语义,但用 pico-harness 现有的字符级截断
-   * Compactor,不引入模型摘要 —— 全量记忆仍完整保留在 Session 里,压缩只作用于本轮
-   * 发给大模型的临时 Context,写回 Session 的永远是全量真实数据。
-   *
-   * 与普通重试(generateWithRetry)的两层叠加(已集成):
-   *   本方法内部调 generateWithRetry(普通重试层在内),429/5xx/网络错误由其自动退避重试;
-   *   ContextOverflowError 不被普通重试吞掉(defaultIsRetryableError 已排除),冒泡到本
-   *   方法 catch 做响应式降级(压缩层在外)。非 overflow 且非可重试错误直接抛出。
-   *   两层叠加天然成立:普通重试在内,响应式压缩在外。
-   *
-   * @param session 当前会话(重试时从中重取更小的 WorkingMemory,不改写其历史)
-   * @param systemPrompt 本轮系统提示词(重试时用于重建 contextHistory 头部)
-   * @param tools 本轮可用工具(Thinking 阶段传 [],Action 阶段传 availableTools)
-   * @param baseContext 首轮已组装+压缩好的上下文(attempt 0 直接复用,避免重复压缩)
-   * @param span 链路追踪 span(重试时记录 overflowRetry 属性)
-   * @returns 模型响应消息
-   */
+  private async prepareModelContext(
+    session: Session,
+    systemPrompt: string,
+    tools: ToolDefinition[],
+    span?: Span,
+    signal?: AbortSignal,
+    allowFullCompaction = true,
+  ): Promise<Message[]> {
+    signal?.throwIfAborted();
+    const rawHistory = session.getModelContext();
+    const context = sanitizeToolPairs([{ role: "system", content: systemPrompt }, ...rawHistory]);
+
+    // Compatibility for embedders/tests that have not yet supplied a model profile.
+    if (!this.contextBudget) {
+      return this.compactor ? this.compactor.compactToBudget(context) : context;
+    }
+
+    const budget = this.contextBudget.inputBudgetTokens;
+    const triggerTokens = Math.floor(budget * this.autoCompactTriggerRatio);
+    const beforeTokens = estimateModelInputTokens(context, tools);
+    if (beforeTokens <= triggerTokens) return context;
+
+    const targetRetainedTokens = Math.max(
+      1,
+      Math.floor(budget * DEFAULT_RETAINED_CONTEXT_RATIO),
+    );
+    const projectedHistory = context.slice(1);
+    const protectedCut = findSafeCompactionCut(projectedHistory, targetRetainedTokens);
+    const protectFromIndex = protectedCut ? protectedCut.compactedCount + 1 : context.length;
+    const toolSchemaTokens = beforeTokens - estimateMessagesTokens(context);
+    const projectionTargetTokens = Math.max(0, triggerTokens - toolSchemaTokens);
+    const projected = this.compactor
+      ? this.compactor.compactOldToolResults(context, {
+          protectFromIndex,
+          targetTokens: projectionTargetTokens,
+        })
+      : context;
+    const projectedTokens = estimateModelInputTokens(projected, tools);
+    logger.info(
+      {
+        trigger: "watermark",
+        beforeTokens,
+        projectedTokens,
+        budget,
+        triggerTokens,
+        toolSchemaTokens,
+        projectionTargetTokens,
+        protectFromIndex,
+      },
+      "[Engine] 上下文超过主动水位，已缩短旧 ToolResult 投影",
+    );
+    span?.addAttributes({
+      contextCompactionTrigger: "watermark",
+      contextTokensBefore: beforeTokens,
+      contextTokensAfterProjection: projectedTokens,
+      contextInputBudgetTokens: budget,
+      contextTriggerTokens: triggerTokens,
+      contextToolSchemaTokens: toolSchemaTokens,
+      contextProjectionTargetTokens: projectionTargetTokens,
+      contextProtectedFromIndex: protectFromIndex,
+    });
+    if (projectedTokens <= triggerTokens) return projected;
+
+    if (allowFullCompaction && this.fullCompactor) {
+      const persistentCut = findSafeCompactionCut(rawHistory, targetRetainedTokens);
+      const historyCountBefore = session.length;
+      const compacted = await this.fullCompactor.compact(
+        session,
+        {
+          inputBudgetTokens: budget,
+          targetRetainedTokens,
+          trigger: "auto",
+        },
+        signal,
+      );
+      signal?.throwIfAborted();
+      if (compacted) {
+        span?.addAttributes({
+          contextFullCompaction: true,
+          contextCompactionTrigger: "watermark",
+          contextCompactionCutIndex: persistentCut?.compactedCount,
+          contextCompactedMessageCount: persistentCut?.compactedCount,
+          contextRetainedMessageCount: persistentCut
+            ? historyCountBefore - persistentCut.compactedCount
+            : undefined,
+          contextTokensAfterFullCompaction: estimateMessagesTokens(session.getHistory()),
+        });
+        return this.prepareModelContext(session, systemPrompt, tools, span, signal, false);
+      }
+    }
+
+    if (projectedTokens <= budget) return projected;
+    const beforeChars = estimateTraceLength(context);
+    const afterChars = estimateTraceLength(projected);
+    throw new ContextCompactionError(
+      beforeChars,
+      afterChars,
+      estimateTokenBudgetAsChars(budget),
+    );
+  }
+
+  /** Provider overflow 只允许一次更紧的模型摘要重试。 */
   private async generateWithOverflowRetry(
     session: Session,
     systemPrompt: string,
@@ -780,128 +867,70 @@ export class AgentEngine implements AgentRunner {
     reporter: Reporter,
     span?: Span,
     signal?: AbortSignal,
+    allowEmergencyCompaction = true,
   ): Promise<Message> {
-    // attempt 0:直接用调用方已压缩好的 baseContext,避免重复压缩
-    let context = baseContext;
-    // 模型摘要压缩最多触发 1 次/调用,防止压缩后仍 overflow → 再压缩 → 死循环
-    let compactionDone = false;
-    for (let attempt = 0; ; attempt++) {
-      try {
-        signal?.throwIfAborted();
-        // 【集成点】普通重试层(generateWithRetry)在内,响应式压缩在外:
-        // 429/5xx/网络错误在此重试;ContextOverflowError 不被普通重试吞掉
-        // (defaultIsRetryableError 已排除),冒泡到本方法 catch 做响应式降级。
-        return await generateWithRetry(
-          this.providerForReporter(this.provider, reporter, signal),
-          context,
-          tools,
-          {
-            signal,
-            onRetry: this.makeRetryReporter(span),
-            onRateLimited: () => this.rotateProvider(reporter, signal),
-          },
-        );
-      } catch (err) {
-        // 非 overflow 错误直接抛(429/5xx 等普通重试已由 generateWithRetry 处理)
-        if (!(err instanceof ContextOverflowError)) {
-          throw err;
-        }
-        if (attempt >= AgentEngine.MAX_OVERFLOW_RETRY) {
-          // 最后兜底:尝试模型摘要压缩(对标 kimi-code handleOverflowError)
-          // 字符级降级用尽仍 overflow,在抛错前用 provider 把 history 前缀浓缩成摘要替换,
-          // 成功后用新 history 重新组装 context 从默认预算重试。仅触发 1 次,防死循环。
-          if (this.fullCompactor && !compactionDone) {
-            signal?.throwIfAborted();
-            compactionDone = true;
-            // 保留尾部:最近约半个最降级窗口的消息(对标 kimi-code computeCompactCount)
-            const lastMemoryFactor = AgentEngine.OVERFLOW_MEMORY_FACTORS[attempt]!;
-            const retainLastN = Math.max(
-              2,
-              Math.floor(this.workingMemoryLimit * lastMemoryFactor * 0.5),
-            );
-            logger.warn(
-              { retainLastN },
-              `[Engine] ⚠ 字符级降级用尽,触发模型摘要压缩(FullCompactor),保留尾部 ${retainLastN} 条`,
-            );
-            await this.hookService?.dispatch(
-              "PreCompact",
-              { source: "auto", messageCount: session.length },
-              { signal },
-            );
-            const compacted = await this.fullCompactor.compact(session, retainLastN, signal);
-            signal?.throwIfAborted();
-            if (compacted) {
-              await this.hookService?.dispatch(
-                "PostCompact",
-                { source: "auto", messageCount: session.length },
-                { signal },
-              );
-              // 压缩成功:用新 history 重新组装 context,从默认预算重试
-              const newWorkingMemory = session.getWorkingMemory(this.workingMemoryLimit);
-              const newContextHistory: Message[] = [
-                { role: "system", content: systemPrompt },
-                ...newWorkingMemory,
-              ];
-              context = this.compactor
-                ? this.compactor.compactToBudget(newContextHistory)
-                : newContextHistory;
-              span?.addAttributes({
-                fullCompaction: true,
-                fullCompactionRetainLastN: retainLastN,
-              });
-              attempt = -1; // 下次 ++attempt = 0,从默认预算重试
-              continue;
-            }
-            // 压缩失败(返回 false):降级到抛错,由 run() 的硬重置兜底
-            logger.error(`[Engine] 模型摘要压缩失败,降级到抛出 ContextOverflowError(由硬重置兜底)`);
-          }
-          logger.error(
-            { attempt, maxRetry: AgentEngine.MAX_OVERFLOW_RETRY },
-            `[Engine] 响应式压缩已用尽 ${AgentEngine.MAX_OVERFLOW_RETRY} 次降级仍溢出,抛出 ContextOverflowError`,
-          );
-          throw err;
-        }
-        // 渐进降级:更小的 WorkingMemory limit + 更小的 maxChars 预算
-        const memoryFactor = AgentEngine.OVERFLOW_MEMORY_FACTORS[attempt + 1]!;
-        const budgetFactor = AgentEngine.OVERFLOW_BUDGET_FACTORS[attempt + 1]!;
-        const newLimit = Math.max(1, Math.floor(this.workingMemoryLimit * memoryFactor));
-        const newWorkingMemory = session.getWorkingMemory(newLimit);
-        const newContextHistory: Message[] = [
-          { role: "system", content: systemPrompt },
-          ...newWorkingMemory,
-        ];
-        if (this.compactor) {
-          const newBudget = Math.max(1, Math.floor(this.compactor.maxChars * budgetFactor));
-          context = this.compactor.compactToBudget(newContextHistory, newBudget);
-          logger.warn(
-            {
-              attempt: attempt + 1,
-              limit: newLimit,
-              budget: newBudget,
-              beforeChars: this.compactor.estimateLength(newContextHistory),
-            },
-            `[Engine] ⚠ 上下文溢出,响应式降级重试(attempt ${attempt + 1}):WorkingMemory ${newLimit} 条 / 预算 ${newBudget} 字符`,
-          );
-          span?.addAttributes({
-            overflowRetry: true,
-            overflowRetryAttempt: attempt + 1,
-            overflowRetryLimit: newLimit,
-            overflowRetryBudget: newBudget,
-          });
-        } else {
-          // 无 Compactor:仅靠条数截断降级
-          context = newContextHistory;
-          logger.warn(
-            { attempt: attempt + 1, limit: newLimit },
-            `[Engine] ⚠ 上下文溢出,响应式降级重试(attempt ${attempt + 1},无 Compactor):WorkingMemory ${newLimit} 条`,
-          );
-          span?.addAttributes({
-            overflowRetry: true,
-            overflowRetryAttempt: attempt + 1,
-            overflowRetryLimit: newLimit,
-          });
-        }
+    const generate = (context: Message[]) =>
+      generateWithRetry(this.providerForReporter(this.provider, reporter, signal), context, tools, {
+        signal,
+        onRetry: this.makeRetryReporter(span),
+        onRateLimited: () => this.rotateProvider(reporter, signal),
+      });
+    try {
+      return await generate(baseContext);
+    } catch (err) {
+      if (
+        !(err instanceof ContextOverflowError) ||
+        !this.fullCompactor ||
+        !allowEmergencyCompaction
+      ) {
+        throw err;
       }
+      signal?.throwIfAborted();
+      const inputBudgetTokens =
+        this.contextBudget?.inputBudgetTokens ??
+        Math.max(1, Math.floor((this.compactor?.maxChars ?? 4_000) / 4));
+      const historyTokens = estimateMessagesTokens(session.getHistory());
+      const targetRetainedTokens = Math.max(
+        1,
+        Math.min(
+          Math.floor(inputBudgetTokens * EMERGENCY_RETAINED_CONTEXT_RATIO),
+          Math.floor(historyTokens * 0.5),
+        ),
+      );
+      logger.warn(
+        { trigger: "provider-overflow", inputBudgetTokens, targetRetainedTokens, historyTokens },
+        "[Engine] Provider 报告上下文溢出，执行一次紧急 FullCompaction",
+      );
+      const historyBefore = session.getHistory();
+      const emergencyCut = findSafeCompactionCut(historyBefore, targetRetainedTokens);
+      const compacted = await this.fullCompactor.compact(
+        session,
+        { inputBudgetTokens, targetRetainedTokens, trigger: "overflow" },
+        signal,
+      );
+      if (!compacted) throw err;
+      const retryContext = await this.prepareModelContext(
+        session,
+        systemPrompt,
+        tools,
+        span,
+        signal,
+        false,
+      );
+      span?.addAttributes({
+        overflowRetry: true,
+        overflowRetryAttempt: 1,
+        fullCompaction: true,
+        fullCompactionRetainedTokens: targetRetainedTokens,
+        fullCompactionCutIndex: emergencyCut?.compactedCount,
+        fullCompactionCompactedMessageCount: emergencyCut?.compactedCount,
+        fullCompactionRetainedMessageCount: emergencyCut
+          ? historyBefore.length - emergencyCut.compactedCount
+          : undefined,
+        fullCompactionTokensBefore: historyTokens,
+        fullCompactionTokensAfter: estimateMessagesTokens(session.getHistory()),
+      });
+      return generate(retryContext);
     }
   }
 
@@ -909,7 +938,7 @@ export class AgentEngine implements AgentRunner {
    * 启动 Agent 的生命周期(Session 驱动)。
    *
    * 引擎不再"用完即毁":它以传入的 Session 作为上下文承载体,
-   * 从 Session.GetWorkingMemory 恢复记忆,而非从零开始。
+   * 从 Session.getModelContext 恢复完整协议历史,而非从零开始。
    * 所有 Thinking / Action / Observation 均持久化回 Session。
    *
    * @param session 当前会话(已 append 用户本轮输入)
@@ -1056,28 +1085,21 @@ export class AgentEngine implements AgentRunner {
               ? allTools.filter((tool) => tool.name === "delegate_task")
               : availableTools;
 
-          // ====================================================================
-          // 1. 上下文组装:System Prompt + 截取最近 N 条作为 WorkingMemory
-          // 无论聊多久,发给大模型的 Context 规模始终被严格控制。
-          // ====================================================================
-          const workingMemory = session.getWorkingMemory(this.workingMemoryLimit);
-          const contextHistory: Message[] = [
+          // 主 Agent 默认投影完整 Session 历史。只有超过 token 水位时，
+          // 才先缩短旧 ToolResult，再在安全工具边界做持久化摘要。
+          const contextChars = estimateTraceLength([
             { role: "system", content: systemPrompt },
-            ...workingMemory,
-          ];
-
-          // ====================================================================
-          // 2. 【核心注入点】:在向 Provider 发起推理前,过一遍内存压缩器!
-          // 无论带出多少上下文,若字符总数超标,早期日志将被掩码化,
-          // 超大日志将被掐头去尾。Compact 只作用于本轮发给大模型的临时 Context,
-          // 写入 Session 的永远是全量真实数据。
-          // ====================================================================
-          const contextChars = estimateTraceLength(contextHistory);
+            ...session.getHistory(),
+          ]);
           let compactedContext: Message[];
           try {
-            compactedContext = this.compactor
-              ? this.compactor.compactToBudget(contextHistory)
-              : contextHistory;
+            compactedContext = await this.prepareModelContext(
+              session,
+              systemPrompt,
+              providerTools,
+              turnSpan,
+              signal,
+            );
           } catch (err) {
             if (err instanceof ContextCompactionError && !hardResetTriggered) {
               hardResetTriggered = true;
@@ -1105,7 +1127,7 @@ export class AgentEngine implements AgentRunner {
           }
           const compactedChars = estimateTraceLength(compactedContext);
           turnSpan?.addAttributes({
-            contextMessageCount: contextHistory.length,
+            contextMessageCount: session.length + 1,
             compactedMessageCount: compactedContext.length,
             contextChars,
             compactedChars,
@@ -1157,6 +1179,7 @@ export class AgentEngine implements AgentRunner {
               reporter,
               actionSpan,
               signal,
+              !hardResetTriggered,
             );
             signal?.throwIfAborted();
             // 若本轮内部触发了模型摘要压缩(session.history 被缩短),调整 beforeLen
@@ -1171,6 +1194,24 @@ export class AgentEngine implements AgentRunner {
             }
           } catch (err) {
             recordTraceError(actionSpan, err);
+            if (err instanceof ContextOverflowError && !hardResetTriggered) {
+              hardResetTriggered = true;
+              const staticTokens = estimateModelInputTokens(
+                [{ role: "system", content: systemPrompt }],
+                providerTools,
+              );
+              logger.error(
+                {
+                  staticTokens,
+                  inputBudgetTokens: this.contextBudget?.inputBudgetTokens,
+                  currentRequestChars: session.getHistory().at(-1)?.content.length ?? 0,
+                },
+                "[Engine] 紧急摘要重试后仍溢出；系统提示、工具 Schema 或当前请求不可再压缩，触发硬重置",
+              );
+              await session.truncateTo(beforeLen - 1);
+              beforeLen = session.length - 1;
+              continue;
+            }
             throw err;
           } finally {
             actionSpan?.end();
@@ -1579,7 +1620,7 @@ export class AgentEngine implements AgentRunner {
           // ====================================================================
           // 【Steer C 点】(ROADMAP 3.2):工具结果落地后,drain 整个 steer 队列,
           // 把每条引导文本落成一条 user 消息写进 session。
-          // 下一轮 getWorkingMemory 自动浮现 → 永久可见。drain 清空队列,
+          // 下一轮 getModelContext 自动浮现 → 永久可见。drain 清空队列,
           // 避免重复注入。与上方 A 点(本轮临时 peek)配合形成"先瞥见后落盘"。
           // ====================================================================
           const steerTexts = this.steerQueue?.drain() ?? [];
@@ -1771,17 +1812,24 @@ export class AgentEngine implements AgentRunner {
       availableToolCount: 0,
     });
     try {
-      const context: Message[] = [
-        { role: "system", content: systemPrompt },
-        ...session.getWorkingMemory(this.workingMemoryLimit),
-      ];
+      const context = await this.prepareModelContext(
+        session,
+        systemPrompt,
+        [],
+        graceSpan,
+        signal,
+      );
       const costBefore = session.totalCostCNY;
       const response = await withProviderCallContext({ purpose: "grace" }, () =>
-        generateWithRetry(this.providerForReporter(this.provider, reporter, signal), context, [], {
+        this.generateWithOverflowRetry(
+          session,
+          systemPrompt,
+          [],
+          context,
+          reporter,
+          graceSpan,
           signal,
-          onRetry: this.makeRetryReporter(graceSpan),
-          onRateLimited: () => this.rotateProvider(reporter, signal),
-        }),
+        ),
       );
       signal?.throwIfAborted();
       recordLlmResponse(graceSpan, response);

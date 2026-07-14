@@ -1,8 +1,7 @@
 // 上下文压缩器:像操作系统的垃圾回收器一样,防止大模型 Context Window 发生 OOM。
 //
-// 解决第 11 讲遗留的致命漏洞:WorkingMemory 的条数截断防不住"单条消息暴击"。
-// Agent 读一个 1MB 的日志文件,即使只保留最近 3 条消息,只要其中一条 ToolResult
-// 含这 1MB 文本,大模型 API 瞬间 400 Bad Request: context length exceeded。
+// 完整历史投影不能防住"单条消息暴击"，因此接近 token 水位时
+// 先缩短旧 ToolResult；单条超大原文则由 artifact 层在入 Session 前外部化。
 //
 // 驾驭工程铁律:大模型是 CPU,Context Window 是昂贵且容量受限的 RAM。
 // 物理防御(防 OOM)的优先级,永远高于业务逻辑(短期记忆完整性)。
@@ -23,6 +22,7 @@ import { withProviderCallContext } from "../observability/provider-call-context.
 import type { Message } from "../schema/message.js";
 import { logger } from "../observability/logger.js";
 import { countTokens } from "./token-counter.js";
+import { estimateMessageTokens, estimateMessagesTokens } from "./context-budget.js";
 
 /** 远期 ToolResult 触发全量掩码的字符阈值(短于阈值的小输出保留原样) */
 const REMOTE_MASK_THRESHOLD = 200;
@@ -452,6 +452,38 @@ export class Compactor {
   }
 
   /**
+   * Claude-Code-style micro projection used before persistent full compaction.
+   * Only old ToolResult bodies are shortened; the protected recent suffix is
+   * byte-for-byte intact and artifact references are never folded away.
+   */
+  compactOldToolResults(
+    msgs: Message[],
+    options: { protectFromIndex: number; targetTokens: number },
+  ): Message[] {
+    const cutoff = Math.max(0, Math.min(msgs.length, options.protectFromIndex));
+    let currentTokens = estimateMessagesTokens(msgs);
+    const compacted = msgs.map((message, index): Message => {
+      const next: Message = { ...message };
+      if (
+        currentTokens <= options.targetTokens ||
+        index >= cutoff ||
+        !isToolResult(message) ||
+        message.content.startsWith("[大型工具输出已外部化]")
+      ) {
+        return next;
+      }
+      if (message.toolCallId && this.shouldClearByAgeUsage(message.toolCallId)) {
+        next.content = MICRO_CLEARED_MARKER;
+      } else if (message.content.length > REMOTE_MASK_THRESHOLD) {
+        next.content = makeToolResultSummary(message, msgs, index);
+      }
+      currentTokens -= estimateMessageTokens(message) - estimateMessageTokens(next);
+      return next;
+    });
+    return sanitizeToolPairs(compacted);
+  }
+
+  /**
    * 带摘要的异步压缩(第 12 讲前沿升级)。
    *
    * 当总长度超标且提供了 summarizer 时,把远期历史(保护区之前的消息)
@@ -660,43 +692,29 @@ export class Compactor {
 }
 
 export function sanitizeToolPairs(msgs: Message[]): Message[] {
-  const callIds = new Set<string>();
-  for (const msg of msgs) {
-    for (const toolCall of msg.toolCalls ?? []) {
-      callIds.add(toolCall.id);
-    }
-  }
-
-  const resultIds = new Set<string>();
-  const withoutOrphanResults: Message[] = [];
-  for (const msg of msgs) {
-    if (msg.role === "user" && msg.toolCallId) {
-      if (!callIds.has(msg.toolCallId)) {
-        continue;
-      }
-      resultIds.add(msg.toolCallId);
-    }
-    withoutOrphanResults.push({ ...msg });
-  }
-
   const out: Message[] = [];
-  for (let i = 0; i < withoutOrphanResults.length; i++) {
-    const msg = withoutOrphanResults[i]!;
-    out.push(msg);
+  for (let i = 0; i < msgs.length; i++) {
+    const msg = msgs[i]!;
+    // A ToolResult is only valid in the consecutive result segment directly
+    // following its assistant batch. Late/orphan results are request-only noise.
+    if (msg.role === "user" && msg.toolCallId !== undefined) continue;
+    out.push({ ...msg });
     if (msg.role !== "assistant" || !msg.toolCalls || msg.toolCalls.length === 0) {
       continue;
     }
-    const ids = new Set(msg.toolCalls.map((toolCall) => toolCall.id));
-    while (i + 1 < withoutOrphanResults.length) {
-      const nextMsg = withoutOrphanResults[i + 1]!;
-      if (nextMsg.role !== "user" || !nextMsg.toolCallId || !ids.has(nextMsg.toolCallId)) {
-        break;
-      }
+
+    const callsById = new Map(msg.toolCalls.map((toolCall) => [toolCall.id, toolCall]));
+    const seen = new Set<string>();
+    while (i + 1 < msgs.length) {
+      const nextMsg = msgs[i + 1]!;
+      if (nextMsg.role !== "user" || nextMsg.toolCallId === undefined) break;
       i++;
-      out.push(withoutOrphanResults[i]!);
+      if (!callsById.has(nextMsg.toolCallId) || seen.has(nextMsg.toolCallId)) continue;
+      seen.add(nextMsg.toolCallId);
+      out.push({ ...nextMsg });
     }
     for (const toolCall of msg.toolCalls) {
-      if (!resultIds.has(toolCall.id)) {
+      if (!seen.has(toolCall.id)) {
         out.push({
           role: "user",
           toolCallId: toolCall.id,

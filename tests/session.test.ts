@@ -125,6 +125,26 @@ describe("Session", () => {
     wm[0]!.content = "tampered";
     expect(sess.getHistory()[0]!.content).toBe("a");
   });
+
+  it("getModelContext 保留超过 20 条的完整工具批次", () => {
+    const sess = new Session("s1", "/tmp");
+    const toolCalls = Array.from({ length: 50 }, (_, index) => ({
+      id: `c${index}`,
+      name: "read_file",
+      arguments: JSON.stringify({ path: `src/${index}.ts` }),
+    }));
+    sess.append({ role: "assistant", content: "", toolCalls });
+    for (const toolCall of toolCalls) {
+      sess.append(toolResultMsg(toolCall.id, `result-${toolCall.id}`));
+    }
+
+    const context = sess.getModelContext();
+    expect(context).toHaveLength(51);
+    expect(context[0]?.toolCalls).toHaveLength(50);
+    expect(context.slice(1).map((message) => message.toolCallId)).toEqual(
+      toolCalls.map((toolCall) => toolCall.id),
+    );
+  });
 });
 
 describe("SessionManager", () => {

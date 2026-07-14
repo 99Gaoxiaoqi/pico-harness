@@ -17,8 +17,8 @@
 - **双协议 Provider**:OpenAI 兼容 + Claude 原生,统一 Message Schema 双向翻译
 - **极简工具集**:read_file / write_file / edit_file / bash 四原语,多级模糊匹配容错
 - **资源感知并行**:单 Agent 单轮按 ToolAccesses 调度,不同文件可并发,冲突路径自动串行
-- **Session 物理隔离**:TUI 单入口按项目目录绑定会话,WorkingMemory 滑动窗口 + 孤儿 ToolResult 丢弃
-- **阶梯降级 Compactor**:远期历史全量掩码 + 保护区掐头去尾,防 Context OOM
+- **Session 物理隔离**:TUI 单入口按项目目录绑定会话,主 Agent 默认获取完整协议历史
+- **Token 水位 Compaction**:输入预算 85% 时先缩短旧 ToolResult,再按完整工具批次摘要旧前缀
 - **Plan Mode 状态外部化**:PLAN.md / TODO.md 持久化记忆,断点续传 + 零成本人机协同
 - **ErrorRecovery 锦囊**:工具报错时按类型注入恢复建议,引导模型走向正确排障 SOP
 - **SystemReminders 防死循环**:MD5 哈希指纹监控连续失败,3 次同参数失败强行打断

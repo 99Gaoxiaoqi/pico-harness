@@ -9,7 +9,11 @@ import { TerminalReporter, type Reporter } from "../engine/reporter.js";
 import { Compactor } from "../context/compactor.js";
 import { FullCompactor } from "../context/full-compactor.js";
 import { ToolResultArtifactStore } from "../context/artifact-store.js";
-import { createContextBudget, estimateTokenBudgetAsChars } from "../context/context-budget.js";
+import {
+  createContextBudget,
+  estimateTokenBudgetAsChars,
+  type ContextBudget,
+} from "../context/context-budget.js";
 import { PromptComposer } from "../context/composer.js";
 import type { TodoStore } from "../context/todo-store.js";
 import { SkillLoader, type Skill } from "../context/skill.js";
@@ -711,6 +715,7 @@ export async function executeAgentRuntime(
     const reporter = dependencies.reporter ?? new TerminalReporter();
     const approvalNotifier = dependencies.approvalNotifier ?? failClosedApprovalNotifier;
     dependencies.onEvent?.({ type: "run.started", sessionId: session.id, workDir, at: Date.now() });
+    const contextRuntime = buildContextRuntime(kind, providerConfig.model);
     const engine = new AgentEngine({
       provider: trackedProvider,
       registry,
@@ -729,12 +734,14 @@ export async function executeAgentRuntime(
       goalManager,
       todoStore,
       toolDisclosure,
-      compactor: buildCompactor(kind, providerConfig.model),
-      // 模型摘要压缩:provider 存在即启用,作为字符级降级用尽后的最后防线。
+      compactor: contextRuntime.compactor,
+      contextBudget: contextRuntime.budget,
+      // 模型摘要压缩:85% 水位主动整理 + Provider overflow 紧急重试。
       // 优先用辅助廉价模型(AUX_LLM_*)生成摘要省主模型成本;未配置则用主 provider。
       fullCompactor: new FullCompactor({
         provider: trackedProvider,
         ...(auxProvider ? { auxProvider } : {}),
+        ...(runtimeState.hookService ? { hookService: runtimeState.hookService } : {}),
       }),
       observationProcessor: artifactRuntime.observationProcessor,
       subagentReportArtifactWriter: artifactRuntime.subagentReportArtifactWriter,
@@ -1387,14 +1394,20 @@ function registerDelegationTools(
   );
 }
 
-function buildCompactor(kind: ProviderKind, model: string): Compactor {
+function buildContextRuntime(
+  kind: ProviderKind,
+  model: string,
+): { budget: ContextBudget; compactor: Compactor } {
   const protocol = kind === "openai" ? "openai" : kind;
   const profile = resolveProviderProfile(protocol, model);
   const budget = createContextBudget(profile);
-  return new Compactor({
-    maxChars: estimateTokenBudgetAsChars(budget.inputBudgetTokens),
-    retainLastMsgs: 6,
-  });
+  return {
+    budget,
+    compactor: new Compactor({
+      maxChars: estimateTokenBudgetAsChars(budget.inputBudgetTokens),
+      retainLastMsgs: 6,
+    }),
+  };
 }
 
 /** Hook verifier 的所有模型调用都显式覆盖为 purpose=hook。 */

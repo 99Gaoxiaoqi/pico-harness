@@ -1,11 +1,11 @@
-// 模型摘要压缩器:字符级截断失效时的最后防线(对标 kimi-code FullCompaction)。
+// 模型摘要压缩器:token 水位主动整理与 overflow 紧急重试的持久化防线。
 //
-// 现有 Compactor 是字符级截断(掩码/掐头去尾/占位符),到极限后信息全丢。
-// 本类在字符级降级仍 overflow 时,用主 provider 把 history 前缀浓缩成结构化摘要,
+// Compactor 先在本轮请求副本中缩短旧 ToolResult；仍超水位时，
+// 本类用 provider 把 history 安全前缀浓缩成结构化摘要,
 // 真的修改 session.history —— 用一条 role:assistant 的 summary 消息替换前 N 条。
 //
 // 设计差异(对标 kimi-code / hermes):
-//   - 响应式触发:不是预防式(loop 每轮调),而是字符级降级用尽后由 loop 主动调用。
+//   - 双触发:输入预算 85% 主动调用，或 Provider overflow 后更紧目标调用一次。
 //   - 真改 Session:与字符级 Compactor(只改临时 context 不碰 Session)不同,
 //     本类调 session.applyCompaction 真替换 history 前缀,持久化 truncate + summary。
 //   - 13-section 结构化摘要:结合 hermes 的 Historical Task Snapshot / Goal /
@@ -22,6 +22,9 @@ import { logger } from "../observability/logger.js";
 import { withProviderCallContext } from "../observability/provider-call-context.js";
 import type { ProviderCallPurpose } from "../tasks/runtime-types.js";
 import type { HookService } from "../hooks/service.js";
+import { estimateMessagesTokens } from "./context-budget.js";
+import { sanitizeToolPairs } from "./compactor.js";
+import { findSafeCompactionCut, hasIncompleteToolExchange } from "./safe-compaction-boundary.js";
 
 /** 摘要消息前缀:REFERENCE-ONLY,明确告诉模型这是历史提要,不要回答里面的内容 */
 const SUMMARY_PREFIX =
@@ -84,16 +87,22 @@ export interface FullCompactorOptions {
   auxProvider?: LLMProvider;
   /** 摘要调用失败重试次数,默认 3 */
   maxAttempts?: number;
-  /** 触发阈值(预留,响应式场景由 loop 调用方决定) */
-  triggerTokenRatio?: number;
   hookService?: HookService;
-  hookSource?: "auto" | "manual";
+}
+
+export interface FullCompactionRequest {
+  /** Model input budget after reserving output tokens and the safety margin. */
+  inputBudgetTokens: number;
+  /** Desired size of the complete suffix. Defaults to 20% of input budget. */
+  targetRetainedTokens?: number;
+  /** Why compaction was triggered; overflow is reported to hooks as automatic. */
+  trigger: "auto" | "overflow" | "manual";
 }
 
 /**
  * FullCompactor:模型摘要压缩器。
  *
- * 响应式压缩 —— 字符级降级仍 overflow 时调用。优先用 auxProvider(辅助廉价模型)生成摘要;
+ * token 驱动压缩。优先用 auxProvider(辅助廉价模型)生成摘要;
  * 未提供则用主 provider(向后兼容)。把 history 前缀浓缩成摘要,替换 session.history。
  * 成功返回 true,失败返回 false(调用方降级到硬重置)。
  */
@@ -105,7 +114,6 @@ export class FullCompactor {
   /** 上一次摘要,用于迭代增量更新(hermes 第 1475-1489 行语义) */
   private previousSummary?: string;
   private readonly hookService?: HookService;
-  private readonly hookSource: "auto" | "manual";
 
   constructor(opts: FullCompactorOptions) {
     // 有 aux 用 aux(辅助廉价模型),无则用主 —— 向后兼容
@@ -113,58 +121,63 @@ export class FullCompactor {
     this.providerPurpose = opts.auxProvider ? "aux" : "compaction";
     this.maxAttempts = opts.maxAttempts ?? 3;
     this.hookService = opts.hookService;
-    this.hookSource = opts.hookSource ?? "auto";
   }
 
   /**
-   * 响应式压缩:用 provider 把 history 前缀浓缩成摘要,替换 session.history。
+   * 在安全工具协议边界上用 provider 把 history 前缀浓缩成摘要。
    * @param session 要压缩的会话
-   * @param retainLastN 保留最近 N 条不压缩(对标 kimi-code computeCompactCount)
+   * @param request token 目标与触发来源
    * @param signal 本轮运行的中止信号
    * @returns 压缩成功返回 true,失败返回 false(调用方降级到硬重置)
    */
-  async compact(session: Session, retainLastN: number, signal?: AbortSignal): Promise<boolean> {
+  async compact(
+    session: Session,
+    request: FullCompactionRequest,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
     signal?.throwIfAborted();
     const history = session.getHistory();
-    // 计算要压缩的前缀条数:总长 - 保留尾部
-    let compactedCount = history.length - retainLastN;
-    if (compactedCount < 0) compactedCount = 0;
-    if (compactedCount === 0) {
+    const beforeTokens = estimateMessagesTokens(history);
+    const targetRetainedTokens =
+      request.targetRetainedTokens ?? Math.max(1, Math.floor(request.inputBudgetTokens * 0.2));
+    if (hasIncompleteToolExchange(history)) {
       logger.warn(
-        { historyLen: history.length, retainLastN },
-        "[FullCompactor] 历史不足以压缩(前缀为空),跳过",
+        { trigger: request.trigger, historyLen: history.length },
+        "[FullCompactor] 存在未完成工具交换,禁止压缩",
       );
       return false;
     }
+
+    const cut = findSafeCompactionCut(history, targetRetainedTokens);
+    if (!cut) {
+      logger.warn(
+        { trigger: request.trigger, historyLen: history.length, targetRetainedTokens },
+        "[FullCompactor] 找不到可压缩的安全工具协议边界,跳过",
+      );
+      return false;
+    }
+    const compactedCount = cut.compactedCount;
+    const hookSource = request.trigger === "manual" ? "manual" : "auto";
 
     await this.hookService?.dispatch(
       "PreCompact",
-      { source: this.hookSource, messageCount: history.length },
+      { source: hookSource, messageCount: history.length },
       { signal },
     );
 
-    // 边界矫正:若保留区首条是孤儿 ToolResult(其 ToolCall 已被压入前缀),
-    // 把它并入压缩前缀,避免压缩后产生孤儿 ToolResult 导致 API 400
-    // (对标 Session.getWorkingMemory 的孤儿丢弃逻辑,但此处作用于真实 history 边界)
-    while (
-      compactedCount < history.length &&
-      history[compactedCount]!.role === "user" &&
-      history[compactedCount]!.toolCallId !== undefined
-    ) {
-      compactedCount++;
-    }
-    if (compactedCount >= history.length) {
-      logger.warn(
-        { historyLen: history.length, retainLastN },
-        "[FullCompactor] 边界矫正后前缀覆盖全部历史,无尾部可保留,跳过",
-      );
-      return false;
-    }
-
-    const prefix = history.slice(0, compactedCount);
+    const prefix = sanitizeToolPairs(history.slice(0, compactedCount));
     const instruction = this.renderInstruction(prefix, this.previousSummary);
     logger.info(
-      { compactedCount, retainLastN, prefixMsgs: prefix.length },
+      {
+        trigger: request.trigger,
+        beforeTokens,
+        inputBudgetTokens: request.inputBudgetTokens,
+        targetRetainedTokens,
+        cutIndex: compactedCount,
+        compactedCount,
+        retainedCount: history.length - compactedCount,
+        retainedTokens: cut.retainedTokens,
+      },
       `[FullCompactor] 调用 provider 生成摘要:压缩前缀 ${prefix.length} 条,保留尾部 ${history.length - compactedCount} 条`,
     );
 
@@ -219,11 +232,19 @@ export class FullCompactor {
     this.previousSummary = summary;
     await this.hookService?.dispatch(
       "PostCompact",
-      { source: this.hookSource, messageCount: session.length },
+      { source: hookSource, messageCount: session.length },
       { signal },
     );
+    const afterTokens = estimateMessagesTokens(session.getHistory());
     logger.info(
-      { compactedCount, retainLastN, summaryLen: summary.length },
+      {
+        trigger: request.trigger,
+        compactedCount,
+        retainedCount: history.length - compactedCount,
+        beforeTokens,
+        afterTokens,
+        summaryLen: summary.length,
+      },
       "[FullCompactor] ✅ 模型摘要压缩完成",
     );
     return true;

@@ -1,4 +1,8 @@
-import { countTokens } from "../context/token-counter.js";
+import {
+  DEFAULT_SAFETY_MARGIN_TOKENS,
+  estimateModelInputTokens,
+  type ContextBudget,
+} from "../context/context-budget.js";
 import type {
   SessionRuntimeStateSnapshot,
   SessionUsageSnapshot,
@@ -44,6 +48,8 @@ export interface ModelContextReport {
   estimatedInputTokens: number;
   contextWindowTokens: number;
   reservedOutputTokens: number;
+  safetyMarginTokens: number;
+  inputBudgetTokens: number;
   remainingTokens: number;
   usedPercent: number;
   estimation: "estimated";
@@ -62,6 +68,7 @@ export class ModelRuntimeCommandService {
     private readonly route: ModelRoute,
     private readonly runtime: ModelRuntimeSource,
     private readonly tools: readonly ToolDefinition[] = [],
+    private readonly budget?: ContextBudget,
   ) {}
 
   usage(): ModelUsageReport {
@@ -69,7 +76,7 @@ export class ModelRuntimeCommandService {
   }
 
   context(): ModelContextReport {
-    return createModelContextReport(this.route, this.runtime.getHistory(), this.tools);
+    return createModelContextReport(this.route, this.runtime.getHistory(), this.tools, this.budget);
   }
 
   execute(command: "usage" | "context"): {
@@ -123,24 +130,31 @@ export function createModelContextReport(
   route: ModelRoute,
   messages: readonly Message[],
   tools: readonly ToolDefinition[] = [],
+  suppliedBudget?: ContextBudget,
 ): ModelContextReport {
   const estimatedInputTokens = estimateContextTokens(messages, tools);
-  const contextWindowTokens = route.capabilities.contextWindowTokens;
-  const reservedOutputTokens = route.capabilities.maxOutputTokens;
-  const remainingTokens = Math.max(
-    0,
-    contextWindowTokens - reservedOutputTokens - estimatedInputTokens,
-  );
+  const contextWindowTokens =
+    suppliedBudget?.contextWindowTokens ?? route.capabilities.contextWindowTokens;
+  const reservedOutputTokens =
+    suppliedBudget?.reservedOutputTokens ?? route.capabilities.maxOutputTokens;
+  const safetyMarginTokens =
+    suppliedBudget?.safetyMarginTokens ?? DEFAULT_SAFETY_MARGIN_TOKENS;
+  const inputBudgetTokens =
+    suppliedBudget?.inputBudgetTokens ??
+    Math.max(0, contextWindowTokens - reservedOutputTokens - safetyMarginTokens);
+  const remainingTokens = Math.max(0, inputBudgetTokens - estimatedInputTokens);
   return {
     routeId: route.id,
     estimatedInputTokens,
     contextWindowTokens,
     reservedOutputTokens,
+    safetyMarginTokens,
+    inputBudgetTokens,
     remainingTokens,
     usedPercent:
-      contextWindowTokens === 0
+      inputBudgetTokens === 0
         ? 100
-        : Math.min(100, (estimatedInputTokens / contextWindowTokens) * 100),
+        : Math.min(100, (estimatedInputTokens / inputBudgetTokens) * 100),
     estimation: "estimated",
     contextLimitSource: route.capabilities.contextSource,
     outputLimitSource: route.capabilities.outputSource,
@@ -178,8 +192,8 @@ export function formatModelContextReport(report: ModelContextReport): string {
     value === "unknown" ? "unknown" : value ? "yes" : "no";
   return [
     `Route: ${report.routeId}`,
-    `Context: ~${report.estimatedInputTokens.toLocaleString("en-US")} / ${report.contextWindowTokens.toLocaleString("en-US")} tokens (${report.usedPercent.toFixed(1)}%, estimated)`,
-    `Reserved output: ${report.reservedOutputTokens.toLocaleString("en-US")}; remaining: ~${report.remainingTokens.toLocaleString("en-US")}`,
+    `Context: ~${report.estimatedInputTokens.toLocaleString("en-US")} / ${report.inputBudgetTokens.toLocaleString("en-US")} input tokens (${report.usedPercent.toFixed(1)}%, estimated)`,
+    `Window: ${report.contextWindowTokens.toLocaleString("en-US")}; reserved output: ${report.reservedOutputTokens.toLocaleString("en-US")}; safety margin: ${report.safetyMarginTokens.toLocaleString("en-US")}; remaining: ~${report.remainingTokens.toLocaleString("en-US")}`,
     `Limits: context=${report.contextLimitSource}, output=${report.outputLimitSource}`,
     `Capabilities: vision=${support(report.capabilities.vision)}, reasoning=${support(report.capabilities.reasoning)}, tool-call=${support(report.capabilities.toolCall)}, cache=${support(report.capabilities.cache)}`,
   ].join("\n");
@@ -221,13 +235,5 @@ function estimateContextTokens(
   messages: readonly Message[],
   tools: readonly ToolDefinition[],
 ): number {
-  let total = 0;
-  for (const message of messages) {
-    total += countTokens(message.content);
-    for (const call of message.toolCalls ?? []) {
-      total += countTokens(call.name) + countTokens(call.arguments);
-    }
-  }
-  if (tools.length > 0) total += countTokens(JSON.stringify(tools));
-  return total;
+  return estimateModelInputTokens(messages, tools);
 }

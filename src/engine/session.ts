@@ -1,12 +1,11 @@
-// 会话管理:Session 物理隔离与 WorkingMemory (短期工作记忆) 的底层实现。
+// 会话管理:Session 物理隔离与完整模型历史的底层实现。
 //
 // 解决两个核心痛点:
 // 1. 多端并发下的 Session 物理隔离 —— 飞书群 A 在重构代码、群 B 在查日志,
 //    绝不能共用同一个 contextHistory,否则大模型瞬间精神分裂。
 //    通过 SessionManager + 读写锁,为每个用户对话框分配独立安全数据池。
 // 2. 长程任务历史滚雪球 → 超时 / 天价 Token / API 400。
-//    通过 GetWorkingMemory(limit) 滑动窗口,只截取最近 N 条消息发给大模型,
-//    严格控制 Context 规模,同时巧妙处理孤儿 ToolResult,规避 400。
+//    Session 保留全量事实，Engine 在 token 水位超标时做请求投影与安全摘要。
 //
 // 经此改造,engine.Run 沦为纯"打工执行器":不内部维护状态,
 // 依靠喂给它的 Session 推理 —— 随时休眠、随时被唤醒的记忆连续体。
@@ -48,6 +47,7 @@ import {
   type SessionUsageSnapshot,
 } from "./session-runtime.js";
 import { FTS5Store } from "../memory/fts5-store.js";
+import { hasIncompleteToolExchange } from "../context/safe-compaction-boundary.js";
 import { JsonlMemoryStore } from "../memory/jsonl-memory-store.js";
 import type {
   ConversationSearchStore,
@@ -167,7 +167,7 @@ export interface DurableTuiRewindHandoff {
 
 /**
  * Session:一次持续的人机交互过程。
- * 负责维护该会话的完整历史,并提供 WorkingMemory 提取。
+ * 负责维护该会话的完整历史,并提供模型投影副本。
  */
 export class Session implements SessionRuntimePersistence {
   /** 会话标识(终端目录哈希 / 飞书 ChatID / 微信 OpenID) */
@@ -211,7 +211,7 @@ export class Session implements SessionRuntimePersistence {
    * ToolResult 外挂元数据(按 toolCallId 索引),供 MicroCompaction 判断
    * 缓存年龄 + 使用率。不改 Message schema,只在 Session 层维护。
    * - cachedAt:首次 append 该 ToolResult 的时间戳
-   * - accessCount:被 getWorkingMemory 读出的次数
+   * - accessCount:被 getModelContext 投影给模型的次数
    */
   private toolResultMeta = new Map<string, { cachedAt: number; accessCount: number }>();
 
@@ -1530,6 +1530,7 @@ export class Session implements SessionRuntimePersistence {
    * 但发出该 ToolCall 的 assistant 消息已被截断抛弃,API 直接 400 Bad Request。
    * 故切片首条若属孤儿工具响应,必须强行舍弃,顺延到下一条正常消息。
    */
+  /** @deprecated Main-agent inference uses getModelContext(); retained for compatibility tests. */
   getWorkingMemory(limit: number): Message[] {
     const total = this.history.length;
     let res: Message[];
@@ -1560,6 +1561,26 @@ export class Session implements SessionRuntimePersistence {
       }
     }
     return res;
+  }
+
+  /**
+   * Return the complete model-visible history. Unlike the legacy sliding
+   * window this never splits or drops a tool exchange; token-pressure policy
+   * belongs to the projection/compaction layer.
+   */
+  getModelContext(): Message[] {
+    const context = this.history.map((message) => ({ ...message }));
+    for (const message of context) {
+      if (message.role !== "user" || message.toolCallId === undefined) continue;
+      const meta = this.toolResultMeta.get(message.toolCallId);
+      if (meta) meta.accessCount++;
+    }
+    return context;
+  }
+
+  /** True only while the tail tool exchange is still waiting for results. */
+  hasPendingToolResults(): boolean {
+    return hasIncompleteToolExchange(this.history);
   }
 
   /**

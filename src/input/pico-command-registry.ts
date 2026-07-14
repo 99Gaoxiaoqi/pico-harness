@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { SkillLoader } from "../context/skill.js";
 import { FullCompactor } from "../context/full-compactor.js";
+import { createContextBudget, estimateMessagesTokens } from "../context/context-budget.js";
 import { globalSessionManager, type Session } from "../engine/session.js";
 import { defaultCliSessionId, listFileHistorySnapshotSummaries } from "../cli/file-history.js";
 import { formatRewindSelector, formatRewindUsage } from "./rewind-presentation.js";
@@ -39,6 +40,7 @@ import type {
   SlashCommand,
 } from "./types.js";
 import { createProvider, type ProviderKind } from "../provider/factory.js";
+import { resolveProviderProfile } from "../provider/profile.js";
 import { type ModelRouter } from "../provider/model-router.js";
 import {
   credentialRefForModelRoute,
@@ -528,15 +530,6 @@ function createCompactCommand(
       }
       const session = options.session;
 
-      const retainLastN = 6;
-      if (session.length <= retainLastN) {
-        return {
-          type: "local",
-          action: "message",
-          message: `Compact skipped: session has ${session.length} messages; keeping the last ${retainLastN} would leave no history prefix to compact.`,
-        };
-      }
-
       let activeProvider = options.provider;
       let activeConfig: { baseURL: string; apiKey: string; model: string } | undefined;
       if (options.modelRouter) {
@@ -569,6 +562,12 @@ function createCompactCommand(
       try {
         const before = session.length;
         const model = activeConfig?.model ?? settings.model;
+        const profile = resolveProviderProfile(
+          activeProvider === "openai" ? "openai" : activeProvider,
+          model,
+        );
+        const budget = createContextBudget(profile);
+        const historyTokens = estimateMessagesTokens(session.getHistory());
         const rawProvider = createProvider(activeProvider, {
           baseURL,
           apiKey,
@@ -597,10 +596,18 @@ function createCompactCommand(
           : rawProvider;
         const ok = await new FullCompactor({
           provider,
-          ...(options.hookService
-            ? { hookService: options.hookService, hookSource: "manual" }
-            : {}),
-        }).compact(session, retainLastN);
+          ...(options.hookService ? { hookService: options.hookService } : {}),
+        }).compact(session, {
+          inputBudgetTokens: budget.inputBudgetTokens,
+          targetRetainedTokens: Math.max(
+            1,
+            Math.min(
+              Math.floor(budget.inputBudgetTokens * 0.5),
+              Math.floor(historyTokens * 0.5),
+            ),
+          ),
+          trigger: "manual",
+        });
         return {
           type: "local",
           action: "message",

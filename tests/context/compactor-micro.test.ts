@@ -253,8 +253,8 @@ describe("Compactor MicroCompaction 3.1(年龄 + 使用率清理)", () => {
   });
 });
 
-describe("Session.getToolResultMeta 与 getWorkingMemory accessCount 联动", () => {
-  it("append ToolResult 后 meta 登记,getWorkingMemory 调用 bump accessCount", async () => {
+describe("Session.getToolResultMeta 与 getModelContext accessCount 联动", () => {
+  it("append ToolResult 后 meta 登记,getModelContext 调用 bump accessCount", async () => {
     const { Session } = await import("../../src/engine/session.js");
     const sess = new Session("meta-test", "/tmp", { persistence: false });
     sess.append(
@@ -268,12 +268,12 @@ describe("Session.getToolResultMeta 与 getWorkingMemory accessCount 联动", ()
     expect(metaBefore).toBeDefined();
     expect(metaBefore!.accessCount).toBe(0);
 
-    // getWorkingMemory 读出该 tool result → bump
-    sess.getWorkingMemory(10);
+    // getModelContext 投影该 tool result → bump
+    sess.getModelContext();
     expect(sess.getToolResultMeta().get("tr1")!.accessCount).toBe(1);
 
     // 再读一次 → accessCount = 2
-    sess.getWorkingMemory(10);
+    sess.getModelContext();
     expect(sess.getToolResultMeta().get("tr1")!.accessCount).toBe(2);
 
     sess.close();

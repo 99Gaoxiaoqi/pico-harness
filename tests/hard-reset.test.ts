@@ -58,7 +58,6 @@ describe("硬重置兜底", () => {
       registry,
       workDir: "/tmp",
       compactor,
-      workingMemoryLimit: 20,
     });
 
     // 预填:旧 user + 带 8KB toolCalls 的 assistant + 对应 ToolResult

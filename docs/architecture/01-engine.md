@@ -45,12 +45,12 @@ class AgentEngine {
 │ 步骤 1: 上下文组装                                                │
 │   allTools = registry.getAvailableTools()                        │
 │   availableTools = toolDisclosure.pickForLLM(allTools)  // 渐进披露│
-│   workingMemory = session.getWorkingMemory(20)  // 滑动窗口       │
-│   contextHistory = [systemPrompt, ...workingMemory]              │
+│   modelContext = session.getModelContext()       // 完整历史副本  │
+│   contextHistory = [systemPrompt, ...modelContext]               │
 ├─────────────────────────────────────────────────────────────────┤
-│ 步骤 2: 压缩触发                                                 │
-│   compactedContext = compactor.compactToBudget(contextHistory)   │
-│   失败(ContextCompactionError) → 硬重置兜底(清空历史只留本轮)      │
+│ 步骤 2: token 水位整理                                           │
+│   < 85%: 原样发送；超水位:旧 ToolResult 投影 → FullCompaction     │
+│   切分仅落在完整 toolCalls/results 批次之外                       │
 ├─────────────────────────────────────────────────────────────────┤
 │ 步骤 2.5: Steer A 点(peek 不 drain)                               │
 │   pendingSteer = steerQueue.peek()                               │
@@ -80,7 +80,7 @@ class AgentEngine {
 ├─────────────────────────────────────────────────────────────────┤
 │ 步骤 7: Steer C 点(drain 落 session)                               │
 │   steerTexts = steerQueue.drain()                                │
-│   session.append(...steerTexts)  // 下一轮 getWorkingMemory 浮现  │
+│   session.append(...steerTexts)  // 下一轮 getModelContext 浮现   │
 ├─────────────────────────────────────────────────────────────────┤
 │ 步骤 8: 每轮收尾                                                  │
 │   fileHistoryMakeSnapshot(session.fileHistory, messageId)        │
@@ -91,14 +91,11 @@ class AgentEngine {
 ### 两层重试叠加
 
 ```
-generateWithOverflowRetry (外层:响应式压缩降级)
-  ├─ attempt 0-2: 渐进字符级降级
-  │   ├─ WorkingMemory 条数 × [1.0, 0.7, 0.5, 0.3]
-  │   ├─ maxChars 预算 × [1.0, 0.6, 0.4, 0.25]
-  │   └─ compactor.compactToBudget(newContext, newBudget)
-  ├─ attempt 3: 模型摘要压缩(仅 1 次,防死循环)
-  │   └─ fullCompactor.compact(session, retainLastN) → 真改 Session
-  └─ 仍失败 → 抛 ContextOverflowError → run() 硬重置兜底
+generateWithOverflowRetry (主 Agent)
+  ├─ attempt 0: 完整安全投影
+  ├─ Provider overflow:更紧 token 目标 FullCompaction 一次
+  ├─ attempt 1: 用“摘要 + 完整安全尾部”重试
+  └─ 仍失败 → 明确诊断静态提示/当前请求/工具 Schema，再硬重置
       │
       ▼
 generateWithRetry (内层:普通重试)
@@ -111,12 +108,11 @@ generateWithRetry (内层:普通重试)
 
 | 常量                           | 值                    | 作用                   |
 | ------------------------------ | --------------------- | ---------------------- |
-| `MAX_OVERFLOW_RETRY`           | 3                     | 响应式压缩最大重试     |
-| `OVERFLOW_BUDGET_FACTORS`      | [1.0, 0.6, 0.4, 0.25] | 字符预算降级系数       |
-| `OVERFLOW_MEMORY_FACTORS`      | [1.0, 0.7, 0.5, 0.3]  | WorkingMemory 条数降级 |
-| `MAX_TOOL_CONCURRENCY`         | 8                     | 工具并发上限           |
-| `DEFAULT_WORKING_MEMORY_LIMIT` | 20                    | 滑动窗口大小           |
-| `maxTurns` 默认                | 50                    | 主循环兜底             |
+| `DEFAULT_AUTO_COMPACT_TRIGGER_RATIO` | 0.85 | 主动整理输入水位 |
+| `DEFAULT_RETAINED_CONTEXT_RATIO`     | 0.20 | 主动摘要尾部目标 |
+| `EMERGENCY_RETAINED_CONTEXT_RATIO`   | 0.10 | overflow 紧急目标 |
+| `MAX_TOOL_CONCURRENCY`                | 8    | 工具并发上限     |
+| `maxTurns` 默认                       | 50   | 主循环兜底       |
 
 ---
 
@@ -124,11 +120,12 @@ generateWithRetry (内层:普通重试)
 
 ### 核心职责
 
-会话物理隔离（并发 run 不共用 history）+ WorkingMemory 滑动窗口 + 事件溯源持久化。
+会话物理隔离（并发 run 不共用 history）+ 完整模型历史投影 + 事件溯源持久化。
 
 ### 关键机制
 
-- **`getWorkingMemory(limit)`**:截取最近 N 条，**丢弃断头孤儿 ToolResult**（切片首条若是孤儿 ToolResult，发出它的 assistant 已被截断，API 直接 400）
+- **`getModelContext()`**:返回完整历史副本并更新 ToolResult 访问元数据；协议清理由请求投影层完成
+- **`getWorkingMemory(limit)`**:仅为兼容测试保留，主 Agent 不再调用
 - **`append(msg)`**:处理 deferred + toolResultMeta 登记。assistant 带 toolCalls → 登记 pendingToolCallIds；ToolResult 到达 → 从 pending 删除；普通消息且 pending 非空 → 暂存 deferredMessages
 - **`serialize(task)`**:per-session 串行执行队列，同一 Session 的 engine.run 必须串行
 - **`pendingWrites`**:truncate 落盘前必须 await earlier appends，否则乱序导致崩溃恢复历史丢失
