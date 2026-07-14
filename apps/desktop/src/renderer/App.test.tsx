@@ -58,4 +58,24 @@ describe("DesktopApp renderer", () => {
     await user.keyboard("{End}");
     expect(document.activeElement).toBe(screen.getByRole("link", { name: "设置" }));
   });
+
+  it.each([
+    ["/", "今天想推进什么？"],
+    ["/task/new", "新任务"],
+    ["/task/run-atlas", "修复同步冲突，并为关键失败路径补一条集成测试"],
+    ["/review", "更改审阅"],
+    ["/sessions", "会话工作库"],
+    ["/automations", "Automations"],
+    ["/skills", "Skills"],
+    ["/mcp", "MCP 服务"],
+    ["/providers", "模型 Providers"],
+    ["/usage", "用量"],
+    ["/settings", "设置"],
+  ])("renders the full preview route %s", async (route, expectedText) => {
+    window.history.replaceState({}, "", `/?demo=1#${route}`);
+    render(<DesktopApp />);
+
+    expect((await screen.findAllByText(expectedText)).length).toBeGreaterThan(0);
+    expect(screen.getByText("Preview")).toBeTruthy();
+  });
 });
