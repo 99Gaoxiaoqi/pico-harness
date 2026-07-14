@@ -62,7 +62,7 @@ export interface ResolvePicoPathsOptions {
 }
 
 export function resolvePicoHome(options: ResolvePicoPathsOptions = {}): string {
-  const configured = options.picoHome ?? options.env?.["PICO_HOME"];
+  const configured = options.picoHome ?? (options.env ?? process.env)["PICO_HOME"];
   return resolve(configured?.trim() || join(options.homeDir ?? homedir(), ".pico"));
 }
 
