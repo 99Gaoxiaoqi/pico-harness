@@ -1,15 +1,31 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { loadClaudeAgents, type ClaudeAgent } from "../input/agent-loader.js";
+import { loadClaudeAgentsFromDir, type ClaudeAgent } from "../input/agent-loader.js";
 import { logger } from "../observability/logger.js";
 import { AgentProfileLoader, KNOWN_TOOL_NAMES, type AgentProfile } from "../tools/agent-profile.js";
+import { mapClaudeToolNames } from "../catalog/claude-compat.js";
+import {
+  canonicalResourceName,
+  resolveResourceCatalog,
+  type ExternalResourceCatalogSource,
+  type ResourceCatalogCandidate,
+  type ResourceCatalogSource,
+} from "../catalog/resource-catalog.js";
+import { resolvePicoPaths } from "../paths/pico-paths.js";
 
-export type AgentCatalogSource = "builtin" | "user-claude" | "project-claude" | "project-native";
+export type AgentCatalogSource =
+  | "builtin"
+  | "user-claude"
+  | "project-claude"
+  | "project-native"
+  | "user-native"
+  | "external";
 
 export interface CatalogAgentProfile extends AgentProfile {
   readonly source: AgentCatalogSource;
   readonly sourcePath: string;
   readonly hooks?: unknown;
+  readonly catalogSource?: ResourceCatalogSource;
 }
 
 export interface AgentProfileSummary {
@@ -25,30 +41,14 @@ export interface LoadAgentCatalogOptions {
   readonly workDir: string;
   readonly homeDir?: string;
   readonly includeBuiltins?: boolean;
+  readonly picoHome?: string;
+  readonly env?: Readonly<Record<string, string | undefined>>;
+  readonly externalSources?: readonly AgentExternalCatalogSource[];
 }
 
-const CLAUDE_TOOL_TO_PICO: Readonly<Record<string, string>> = Object.freeze({
-  Bash: "bash",
-  Edit: "edit_file",
-  Glob: "glob",
-  Grep: "grep",
-  Read: "read_file",
-  Skill: "skill_view",
-  TodoWrite: "todo",
-  WebFetch: "fetch_url",
-  WebSearch: "web_search",
-  Write: "write_file",
-  bash: "bash",
-  edit_file: "edit_file",
-  fetch_url: "fetch_url",
-  glob: "glob",
-  grep: "grep",
-  read_file: "read_file",
-  skill_view: "skill_view",
-  todo: "todo",
-  web_search: "web_search",
-  write_file: "write_file",
-});
+export interface AgentExternalCatalogSource extends ExternalResourceCatalogSource {
+  readonly adapter: "pico-agent-yaml" | "claude-agent-directory";
+}
 
 const DEFAULT_CLAUDE_TOOLS = Object.freeze(["read_file", "glob", "grep"]);
 
@@ -86,41 +86,57 @@ const BUILTIN_PROFILES: readonly CatalogAgentProfile[] = Object.freeze([
 
 /**
  * 加载统一 Agent 目录。后加入者整条覆盖同名项，禁止把不同来源的 prompt、工具或模型拼接。
- * 优先级：project native > project Claude > user Claude > builtin。
+ * 优先级：project Pico > project legacy > project Claude > user Pico > user Claude > builtin。
  */
 export async function loadAgentCatalog(
   options: LoadAgentCatalogOptions,
 ): Promise<CatalogAgentProfile[]> {
-  const [nativeProfiles, claudeAgents] = await Promise.all([
-    new AgentProfileLoader(options.workDir).loadWithTombstones(),
-    loadClaudeAgents({
-      workDir: options.workDir,
-      homeDir: options.homeDir ?? homedir(),
-      includeBuiltins: false,
-    }),
-  ]);
-
-  const byName = new Map<string, CatalogAgentProfile>();
+  const homeDir = options.homeDir ?? homedir();
+  const paths = resolvePicoPaths(options.workDir, {
+    homeDir,
+    env: options.env ?? process.env,
+    ...(options.picoHome ? { picoHome: options.picoHome } : {}),
+  });
+  const sources = [
+    agentSource("project-pico", "project", "pico-native", paths.project.agents, 50),
+    agentSource(
+      "project-claw-legacy",
+      "project",
+      "pico-legacy",
+      join(options.workDir, ".claw", "agents.yaml"),
+      45,
+    ),
+    agentSource(
+      "project-claude",
+      "project",
+      "claude-compat",
+      join(options.workDir, ".claude", "agents"),
+      40,
+    ),
+    agentSource("user-pico", "user", "pico-native", paths.home.agents, 30),
+    agentSource("user-claude", "user", "claude-compat", join(homeDir, ".claude", "agents"), 20),
+  ];
+  const loaded = await Promise.all(sources.map(loadAgentSource));
+  const candidates: ResourceCatalogCandidate<CatalogAgentProfile>[] = loaded.flat();
   if (options.includeBuiltins !== false) {
-    for (const profile of BUILTIN_PROFILES) byName.set(canonicalAgentName(profile.name), profile);
+    const builtinSource = agentSource("builtin", "builtin", "builtin", "builtin:agents", 0);
+    for (const profile of BUILTIN_PROFILES) {
+      candidates.push({
+        name: profile.name,
+        source: builtinSource,
+        sourcePath: profile.sourcePath,
+        value: { ...profile, catalogSource: builtinSource },
+      });
+    }
   }
-  for (const agent of claudeAgents.filter((candidate) => candidate.source === "user")) {
-    byName.set(canonicalAgentName(agent.name), adaptClaudeAgent(agent));
+  for (const source of options.externalSources ?? []) {
+    candidates.push(...(await loadExternalAgentSource(source)));
   }
-  for (const agent of claudeAgents.filter((candidate) => candidate.source === "project")) {
-    byName.set(canonicalAgentName(agent.name), adaptClaudeAgent(agent));
+  const resolved = resolveResourceCatalog(candidates);
+  for (const conflict of resolved.conflicts) {
+    logger.warn(conflict, "[agent-catalog] 同级 Agent 名称冲突，已保留第一条");
   }
-  for (const profile of nativeProfiles.profiles) {
-    byName.set(canonicalAgentName(profile.name), {
-      ...profile,
-      source: "project-native",
-      sourcePath: join(options.workDir, ".claw", "agents.yaml"),
-    });
-  }
-  for (const tombstoneName of nativeProfiles.tombstoneNames) {
-    byName.delete(tombstoneName);
-  }
-  return Array.from(byName.values()).sort((left, right) => left.name.localeCompare(right.name));
+  return [...resolved.entries];
 }
 
 export function findAgentProfile<T extends AgentProfile>(
@@ -133,7 +149,7 @@ export function findAgentProfile<T extends AgentProfile>(
 }
 
 function canonicalAgentName(name: string): string {
-  return name.trim().toLowerCase();
+  return canonicalResourceName(name);
 }
 
 export function summarizeAgentProfiles(
@@ -149,7 +165,7 @@ export function summarizeAgentProfiles(
   }));
 }
 
-function adaptClaudeAgent(agent: ClaudeAgent): CatalogAgentProfile {
+function adaptClaudeAgent(agent: ClaudeAgent, source: ResourceCatalogSource): CatalogAgentProfile {
   return {
     name: agent.name,
     description: agent.description || agent.name,
@@ -158,26 +174,92 @@ function adaptClaudeAgent(agent: ClaudeAgent): CatalogAgentProfile {
     tools: mapClaudeTools(agent),
     ...(agent.model ? { modelRouteId: agent.model } : {}),
     ...(agent.hooks === undefined ? {} : { hooks: agent.hooks }),
-    source: agent.source === "project" ? "project-claude" : "user-claude",
+    source:
+      source.scope === "project"
+        ? "project-claude"
+        : source.scope === "user"
+          ? "user-claude"
+          : "external",
     sourcePath: agent.sourcePath,
+    catalogSource: source,
   };
 }
 
 function mapClaudeTools(agent: ClaudeAgent): string[] {
   if (agent.tools === undefined) return [...DEFAULT_CLAUDE_TOOLS];
-  const mapped = new Set<string>();
-  for (const declared of agent.tools) {
-    const picoName = CLAUDE_TOOL_TO_PICO[declared];
-    if (!picoName || !KNOWN_TOOL_NAMES.has(picoName)) {
-      logger.warn(
-        { agent: agent.name, sourcePath: agent.sourcePath, tool: declared },
-        "[agent-catalog] Claude Agent 声明了未知工具，已按 fail-closed 忽略",
-      );
-      continue;
-    }
-    mapped.add(picoName);
+  const mapped = mapClaudeToolNames(agent.tools, {
+    resource: agent.name,
+    sourcePath: agent.sourcePath,
+  });
+  return mapped.tools.filter((tool) => KNOWN_TOOL_NAMES.has(tool));
+}
+
+async function loadAgentSource(
+  source: ResourceCatalogSource,
+): Promise<ResourceCatalogCandidate<CatalogAgentProfile>[]> {
+  if (source.format === "claude-compat") {
+    const agents = await loadClaudeAgentsFromDir(
+      source.root,
+      source.scope === "user" ? "user" : "project",
+    );
+    return agents.map((agent) => ({
+      name: agent.name,
+      source,
+      sourcePath: agent.sourcePath,
+      value: adaptClaudeAgent(agent, source),
+    }));
   }
-  return Array.from(mapped);
+  const result = await new AgentProfileLoader(".", { filePath: source.root }).loadWithTombstones();
+  const profileSource: AgentCatalogSource =
+    source.scope === "user"
+      ? "user-native"
+      : source.scope === "external"
+        ? "external"
+        : "project-native";
+  return [
+    ...result.profiles.map((profile) => ({
+      name: profile.name,
+      source,
+      sourcePath: source.root,
+      value: {
+        ...profile,
+        source: profileSource,
+        sourcePath: source.root,
+        catalogSource: source,
+      } satisfies CatalogAgentProfile,
+    })),
+    ...result.tombstoneNames.map((name) => ({
+      name,
+      source,
+      sourcePath: source.root,
+      tombstone: true as const,
+    })),
+  ];
+}
+
+async function loadExternalAgentSource(
+  source: AgentExternalCatalogSource,
+): Promise<ResourceCatalogCandidate<CatalogAgentProfile>[]> {
+  if (source.adapter === "claude-agent-directory") {
+    const agents = await loadClaudeAgentsFromDir(source.root, "project");
+    return agents.map((agent) => ({
+      name: agent.name,
+      source,
+      sourcePath: agent.sourcePath,
+      value: adaptClaudeAgent(agent, source),
+    }));
+  }
+  return await loadAgentSource(source);
+}
+
+function agentSource(
+  id: string,
+  scope: ResourceCatalogSource["scope"],
+  format: ResourceCatalogSource["format"],
+  root: string,
+  priority: number,
+): ResourceCatalogSource {
+  return { id, scope, format, root, priority };
 }
 
 function builtinProfile(

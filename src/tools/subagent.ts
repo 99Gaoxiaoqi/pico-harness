@@ -315,6 +315,7 @@ export class DelegateTaskTool implements BaseTool {
   }
 
   definition(): ToolDefinition {
+    const agentNameSchema = persistentAgentNameSchema(this.profiles);
     return {
       name: "delegate_task",
       description:
@@ -346,7 +347,7 @@ export class DelegateTaskTool implements BaseTool {
                 context: { type: "string" },
                 mode: { type: "string", enum: ["explore", "worker"] },
                 role: { type: "string", enum: ["leaf", "orchestrator"] },
-                agent_name: { type: "string" },
+                agent_name: agentNameSchema,
                 agent: ephemeralAgentSchema(),
                 roots: { type: "array", items: { type: "string" } },
                 max_files: { type: "number", minimum: 1, maximum: MAX_DELEGATION_FILES },
@@ -361,12 +362,7 @@ export class DelegateTaskTool implements BaseTool {
             enum: ["explore", "worker"],
             description: "子智能体工具集。explore=只读探索,worker=受控读写开发。",
           },
-          agent_name: {
-            type: "string",
-            description:
-              "持久子代理角色名（来自统一 Agent 目录）。" +
-              "指定后使用该角色的 systemPrompt 和工具集；未找到时 fail closed。",
-          },
+          agent_name: agentNameSchema,
           agent: ephemeralAgentSchema(),
           role: {
             type: "string",
@@ -1349,6 +1345,27 @@ function ephemeralAgentSchema(): Record<string, unknown> {
     },
     additionalProperties: false,
   };
+}
+
+function persistentAgentNameSchema(profiles: readonly AgentProfile[]): Record<string, unknown> {
+  const names = profiles.map((profile) => profile.name);
+  const catalog = profiles
+    .map((profile) => `${profile.name}: ${singleLine(profile.description).slice(0, 160)}`)
+    .join("\n")
+    .slice(0, 8_000);
+  return {
+    type: "string",
+    ...(names.length > 0 ? { enum: names } : {}),
+    description: [
+      "持久子代理角色名（来自宿主统一 Agent Catalog）。",
+      "指定后使用该角色的 systemPrompt 和工具集；未找到时 fail closed。",
+      catalog ? `可用 Agent:\n${catalog}` : "当前没有可用的持久 Agent。",
+    ].join("\n"),
+  };
+}
+
+function singleLine(value: string): string {
+  return value.replace(/\s+/gu, " ").trim();
 }
 
 function normalizeDelegationRoots(value: string[] | undefined, fallback: string[]): string[] {

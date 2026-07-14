@@ -254,7 +254,7 @@ describe("markdown command loader", () => {
 
     expect(commands).toHaveLength(1);
     expect(commands[0]).toMatchObject({
-      allowedTools: ["Read", "Bash"],
+      allowedTools: ["read_file", "bash"],
       argumentHint: "[path]",
       description: "review code",
       name: "review",
@@ -321,7 +321,7 @@ describe("markdown command loader", () => {
     ]);
   });
 
-  it("uses priority project > user > skill projection > builtin", async () => {
+  it("reserves builtin command names above markdown and skill projections", async () => {
     await writeCommand(workDir, "same", "project", "Project prompt");
     await writeCommand(userCommandsDir, "same", "user", "User prompt");
     await writeSkill("same", "skill", "Skill prompt");
@@ -335,10 +335,7 @@ describe("markdown command loader", () => {
       workDir,
     });
 
-    expect(commands.map((command) => [command.name, command.source, command.prompt])).toEqual([
-      ["builtin-only", "skill", "Skill prompt"],
-      ["same", "project", "Project prompt"],
-    ]);
+    expect(commands).toEqual([]);
   });
 
   it("renders prompt command arguments by replacing $ARGUMENTS", () => {
