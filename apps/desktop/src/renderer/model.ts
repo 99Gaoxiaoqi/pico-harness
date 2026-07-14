@@ -1,3 +1,5 @@
+import type { ConversationItemView } from "./conversation/types.js";
+
 export type JsonRecord = Readonly<Record<string, unknown>>;
 
 export type ConnectionState =
@@ -30,6 +32,17 @@ export interface TimelineItem {
   readonly detail?: string | undefined;
   readonly state?: "done" | "active" | "waiting" | "failed" | undefined;
   readonly at: number;
+  readonly sessionId?: string | undefined;
+  readonly runId?: string | undefined;
+  readonly eventType?: string | undefined;
+}
+
+export interface ConversationView {
+  readonly sessionId: string;
+  readonly items: readonly ConversationItemView[];
+  readonly revision?: string | undefined;
+  readonly nextBefore?: string | undefined;
+  readonly queuedCount: number;
 }
 
 export interface ApprovalView {
@@ -106,6 +119,7 @@ export interface AppData {
   readonly sessions: readonly SessionView[];
   readonly runs: readonly RunView[];
   readonly timeline: readonly TimelineItem[];
+  readonly conversations: Readonly<Record<string, ConversationView>>;
   readonly approvals: readonly ApprovalView[];
   readonly prompts: readonly PromptView[];
   readonly changes: readonly ChangeView[];
@@ -126,6 +140,7 @@ export const emptyData: AppData = {
   sessions: [],
   runs: [],
   timeline: [],
+  conversations: {},
   approvals: [],
   prompts: [],
   changes: [],

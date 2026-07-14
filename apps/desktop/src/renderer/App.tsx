@@ -38,6 +38,8 @@ import {
   Component,
   createContext,
   useContext,
+  useEffect,
+  useMemo,
   useState,
   type KeyboardEvent,
   type ReactNode,
@@ -45,6 +47,7 @@ import {
 import {
   HashRouter,
   Link,
+  Navigate,
   NavLink,
   Outlet,
   Route,
@@ -64,7 +67,22 @@ import {
   StatusPill,
   StepState,
 } from "./components.js";
-import type { CapabilityView, ChangeView, SessionView, WorkspaceMode } from "./model.js";
+import {
+  ConversationComposer,
+  ConversationInspector,
+  ConversationSurface,
+  ConversationTranscript,
+  type ComposerBehavior,
+  type ConversationInspectorView,
+  type ConversationItemView,
+} from "./conversation/index.js";
+import type {
+  CapabilityView,
+  ChangeView,
+  SessionView,
+  TimelineItem,
+  WorkspaceMode,
+} from "./model.js";
 import { useRuntimeStore, type RuntimeStore } from "./runtime.js";
 
 const RuntimeContext = createContext<RuntimeStore | null>(null);
@@ -131,6 +149,7 @@ function AppStateRouter() {
         <Route index element={<HomePage />} />
         <Route path="task/new" element={<NewTaskPage />} />
         <Route path="task/:runId" element={<TaskPage />} />
+        <Route path="session/:sessionId" element={<ConversationPage />} />
         <Route path="review" element={<ReviewPage />} />
         <Route path="sessions" element={<SessionsPage />} />
         <Route path="automations" element={<AutomationsPage />} />
@@ -307,6 +326,8 @@ function AppShell() {
   const { data, preview, message, actions } = useRuntime();
   const location = useLocation();
   const pageTitle = routeTitle(location.pathname);
+  const conversationRoute =
+    location.pathname === "/task/new" || location.pathname.startsWith("/session/");
   const handleNavKeys = (event: KeyboardEvent<HTMLElement>) => {
     if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
     const links = Array.from(
@@ -375,7 +396,11 @@ function AppShell() {
             {message}
           </div>
         )}
-        <main className="page" id="main-content" tabIndex={-1}>
+        <main
+          className={`page ${conversationRoute ? "page--conversation" : ""}`}
+          id="main-content"
+          tabIndex={-1}
+        >
           <Outlet />
         </main>
       </div>
@@ -444,7 +469,7 @@ function WorkspaceModeCard({ mode }: { readonly mode: WorkspaceMode | undefined 
       <p>
         {protectedMode
           ? "Pico 可以隔离并行任务，并在确认后合并它们的更改。"
-          : "Pico 仍可读取、修改和回退文件；并行子任务与变更合并暂不可用。"}
+          : "Pico 可以直接读写文件并运行并行子代理；只有分支、提交和独立合并需要 Git。"}
       </p>
       {!protectedMode && (
         <small>版本保护是一项进阶能力，由 Git 提供；不了解它也不影响现在开始。</small>
@@ -465,7 +490,7 @@ function HomePage() {
         {data.workspaceMode === "folder" && (
           <div className="workspace-mode-notice" role="note">
             <WorkspaceModeBadge mode={data.workspaceMode} />
-            <span>文件处理与安全回退正常可用；并行子任务和变更合并需要版本保护。</span>
+            <span>共享文件夹支持对话、工具和并行子代理；Git 只用于分支与独立合并。</span>
           </div>
         )}
         <TaskComposer compact />
@@ -490,7 +515,10 @@ function HomePage() {
         <section className="panel">
           <PanelHeader title="当前运行" detail={latestRun ? "实时状态" : "没有运行中的任务"} />
           {latestRun ? (
-            <Link className="active-run-card" to={`/task/${latestRun.id}`}>
+            <Link
+              className="active-run-card"
+              to={latestRun.sessionId ? `/session/${latestRun.sessionId}` : `/task/${latestRun.id}`}
+            >
               <span className="active-run-card__icon">
                 <Bot aria-hidden="true" />
               </span>
@@ -527,70 +555,322 @@ function HomePage() {
 }
 
 function NewTaskPage() {
-  return (
-    <div className="new-task-page">
-      <div className="new-task-page__copy">
-        <span className="eyebrow">新任务</span>
-        <h2>
-          把结果说清楚，
-          <br />
-          其余交给 Pico。
-        </h2>
-        <p>可以附上限制、验收标准或不希望改动的部分。任务开始后仍可随时 Steer。</p>
-      </div>
-      <TaskComposer />
-    </div>
-  );
+  return <ConversationPage />;
 }
 
 function TaskComposer({ compact = false }: { readonly compact?: boolean }) {
   const { actions, busy, data } = useRuntime();
   const navigate = useNavigate();
   const [prompt, setPrompt] = useState("");
-  const submit = async () => {
-    const id = await actions.createTask(prompt);
-    if (id) navigate(`/task/${id}`);
+  const submit = async (text: string) => {
+    const sessionId = await actions.sendMessage({ text });
+    if (sessionId) navigate(`/session/${sessionId}`);
+    setPrompt("");
   };
   return (
-    <form
-      className={`task-composer ${compact ? "task-composer--compact" : ""}`}
-      onSubmit={(event) => {
-        event.preventDefault();
-        void submit();
-      }}
-    >
-      <label htmlFor={compact ? "quick-task" : "new-task"}>任务描述</label>
-      <textarea
-        id={compact ? "quick-task" : "new-task"}
+    <div className={`home-conversation-composer ${compact ? "is-compact" : ""}`}>
+      <ConversationComposer
         value={prompt}
-        autoComplete="off"
-        onChange={(event) => setPrompt(event.target.value)}
-        placeholder="例如：修复离线同步冲突，并补一条关键失败路径测试…"
-        rows={compact ? 3 : 8}
+        onValueChange={setPrompt}
+        onSubmit={(value) => void submit(value.text)}
+        status="idle"
+        busy={busy === "send-message"}
+        placeholder="向 Pico 描述你想推进的事情…"
+        leadingAccessory={
+          <span className="conversation-context-label">
+            {data.workspaceMode === "git" ? (
+              <FolderGit2 aria-hidden="true" size={15} />
+            ) : (
+              <Folder aria-hidden="true" size={15} />
+            )}
+            <span>{data.workspacePath?.split(/[\\/]/).at(-1)}</span>
+          </span>
+        }
       />
-      <div className="task-composer__footer">
-        <div className="composer-context">
-          {data.workspaceMode === "git" ? (
-            <FolderGit2 aria-hidden="true" size={15} />
-          ) : (
-            <Folder aria-hidden="true" size={15} />
-          )}
-          <span>{data.workspacePath?.split(/[\\/]/).at(-1)}</span>
-          <span>{data.workspaceMode === "git" ? "版本保护" : "基础模式"}</span>
-        </div>
-        <Button type="submit" variant="primary" disabled={!prompt.trim() || busy === "create-task"}>
-          {busy === "create-task" ? "正在创建…" : "开始任务"}
-          <Send aria-hidden="true" size={15} />
-        </Button>
-      </div>
-    </form>
+    </div>
   );
+}
+
+function ConversationPage() {
+  const { sessionId } = useParams();
+  const { data, actions, busy } = useRuntime();
+  const navigate = useNavigate();
+  const [draft, setDraft] = useState("");
+  const [behavior, setBehavior] = useState<ComposerBehavior>("steer");
+  const [approvalOpen, setApprovalOpen] = useState(false);
+  const [promptOpen, setPromptOpen] = useState(false);
+  const [selectedApprovalId, setSelectedApprovalId] = useState<string>();
+  const [selectedPromptId, setSelectedPromptId] = useState<string>();
+  const [inspector, setInspector] = useState<ConversationInspectorView>();
+
+  useEffect(() => {
+    if (sessionId) void actions.loadSession(sessionId);
+  }, [actions, sessionId]);
+
+  const session = data.sessions.find((item) => item.id === sessionId);
+  const sessionRuns = data.runs.filter((run) => run.sessionId === sessionId);
+  const activeRun = sessionRuns.find((run) => !isTerminalRun(run.status));
+  const selectedApproval = data.approvals.find((item) => item.id === selectedApprovalId);
+  const selectedPrompt = data.prompts.find((item) => item.id === selectedPromptId);
+  const composerStatus = activeRun
+    ? ["paused", "pause_requested"].includes(activeRun.status)
+      ? "paused"
+      : "running"
+    : "idle";
+
+  const items = useMemo<readonly ConversationItemView[]>(() => {
+    const persisted = sessionId ? (data.conversations[sessionId]?.items ?? []) : [];
+    const live = activeRun
+      ? data.timeline
+          .filter((item) => item.runId === activeRun.id)
+          .map(timelineItemToConversationItem)
+      : [];
+    const runIds = new Set(sessionRuns.map((run) => run.id));
+    const decisions: ConversationItemView[] = [
+      ...data.approvals
+        .filter((approval) => runIds.has(approval.runId))
+        .map(
+          (approval): ConversationItemView => ({
+            id: `approval:${approval.id}`,
+            kind: "approval",
+            title: approval.title,
+            detail: approval.detail,
+            state: "pending",
+          }),
+        ),
+      ...data.prompts
+        .filter((prompt) => runIds.has(prompt.runId))
+        .map(
+          (prompt): ConversationItemView => ({
+            id: `prompt:${prompt.id}`,
+            kind: "prompt",
+            question: prompt.question,
+            state: "pending",
+          }),
+        ),
+    ];
+    const latestWorkspaceRun = data.runs[0];
+    const changes: ConversationItemView[] =
+      sessionId && latestWorkspaceRun?.sessionId === sessionId && data.changes.length > 0
+        ? [
+            {
+              id: `changes:${latestWorkspaceRun.id}`,
+              kind: "changes",
+              title: "本轮文件更改",
+              detail: "在应用前审阅 Runtime 生成的差异。",
+              files: data.changes.map((change) => change.path),
+              state: "pending",
+            },
+          ]
+        : [];
+    return [...persisted, ...live, ...decisions, ...changes];
+  }, [
+    activeRun,
+    data.approvals,
+    data.changes,
+    data.conversations,
+    data.prompts,
+    data.runs,
+    data.timeline,
+    sessionId,
+    sessionRuns,
+  ]);
+
+  const submit = async (text: string, nextBehavior: ComposerBehavior) => {
+    const resolvedSessionId = await actions.sendMessage({
+      ...(sessionId ? { sessionId } : {}),
+      text,
+      behavior: nextBehavior,
+      ...(activeRun ? { expectedRunId: activeRun.id } : {}),
+    });
+    if (!resolvedSessionId) return;
+    setDraft("");
+    if (!sessionId) navigate(`/session/${resolvedSessionId}`, { replace: true });
+  };
+
+  const openItem = (item: ConversationItemView) => {
+    if (item.kind === "approval") {
+      setSelectedApprovalId(item.id.replace(/^approval:/, ""));
+      setApprovalOpen(true);
+      return;
+    }
+    if (item.kind === "prompt") {
+      setSelectedPromptId(item.id.replace(/^prompt:/, ""));
+      setPromptOpen(true);
+      return;
+    }
+    if (item.kind === "changes") {
+      navigate(`/review${sessionId ? `?sessionId=${encodeURIComponent(sessionId)}` : ""}`);
+      return;
+    }
+    if (item.kind === "tool") {
+      setInspector({
+        title: item.title,
+        subtitle: item.toolName,
+        content: (
+          <pre className="conversation-inspector-output">
+            {item.output ?? item.detail ?? "没有可显示的输出。"}
+          </pre>
+        ),
+      });
+      return;
+    }
+    if (item.kind === "subagent") {
+      setInspector({
+        title: item.name,
+        subtitle: "子代理会话",
+        content: <p>{item.detail ?? "详细会话仍在 Runtime 中同步。"}</p>,
+      });
+    }
+  };
+
+  return (
+    <ConversationSurface
+      className="session-conversation"
+      header={
+        <div className="conversation-session-header">
+          <div>
+            <span className="eyebrow">{sessionId ? "会话" : "新会话"}</span>
+            <h2>{session?.title ?? (sessionId ? "正在载入会话…" : "今天想一起做什么？")}</h2>
+          </div>
+          {activeRun && <StatusPill status={activeRun.status} />}
+        </div>
+      }
+      inspector={
+        inspector ? (
+          <ConversationInspector
+            open
+            title={inspector.title}
+            subtitle={inspector.subtitle}
+            onClose={() => setInspector(undefined)}
+          >
+            {inspector.content}
+          </ConversationInspector>
+        ) : undefined
+      }
+      composer={
+        <ConversationComposer
+          value={draft}
+          onValueChange={setDraft}
+          onSubmit={(value) => void submit(value.text, value.behavior)}
+          status={composerStatus}
+          behavior={behavior}
+          onBehaviorChange={setBehavior}
+          busy={busy === "send-message"}
+          placeholder={sessionId ? "继续对话，或在运行中调整方向…" : "向 Pico 发送消息…"}
+          statusText={
+            data.conversations[sessionId ?? ""]?.queuedCount
+              ? `${data.conversations[sessionId ?? ""]?.queuedCount} 条消息正在排队`
+              : undefined
+          }
+          onPause={activeRun ? () => void actions.pauseRun(activeRun.id) : undefined}
+          onResume={activeRun ? () => void actions.resumeRun(activeRun.id) : undefined}
+          onStop={activeRun ? () => void actions.stopRun(activeRun.id) : undefined}
+          leadingAccessory={
+            <span className="conversation-context-label">
+              {data.workspaceMode === "git" ? (
+                <FolderGit2 aria-hidden="true" />
+              ) : (
+                <Folder aria-hidden="true" />
+              )}
+              {data.workspacePath?.split(/[\\/]/).at(-1)}
+            </span>
+          }
+        />
+      }
+    >
+      <ConversationTranscript
+        items={items}
+        onOpenItem={openItem}
+        emptyState={
+          <div className="conversation-empty-state">
+            <Sparkles aria-hidden="true" />
+            <h3>{sessionId ? "这个会话还没有可见消息" : "从一条消息开始"}</h3>
+            <p>可以像在 TUI 里一样交代目标、追问方案，或先让 Pico 阅读项目。</p>
+          </div>
+        }
+      />
+      <ApprovalDialog
+        approval={selectedApproval}
+        open={approvalOpen}
+        onOpenChange={setApprovalOpen}
+        busy={busy === "approval"}
+        onDecision={(decision) =>
+          void actions
+            .respondApproval(selectedApproval?.id ?? "", decision)
+            .then(() => setApprovalOpen(false))
+        }
+      />
+      <PromptDialog
+        prompt={selectedPrompt}
+        open={promptOpen}
+        onOpenChange={setPromptOpen}
+        busy={busy === "prompt"}
+        onAnswer={(answer) =>
+          void actions
+            .respondPrompt(selectedPrompt?.id ?? "", answer)
+            .then(() => setPromptOpen(false))
+        }
+      />
+    </ConversationSurface>
+  );
+}
+
+function timelineItemToConversationItem(item: TimelineItem): ConversationItemView {
+  if (item.kind === "plan") {
+    return {
+      id: item.id,
+      kind: "plan",
+      title: item.title,
+      steps: [
+        { id: `${item.id}:step`, title: item.detail ?? item.title, state: item.state ?? "active" },
+      ],
+      at: item.at,
+    };
+  }
+  if (item.kind === "tool") {
+    return {
+      id: item.id,
+      kind: "tool",
+      toolName: item.title,
+      title: item.title,
+      detail: item.detail,
+      state: item.state ?? "active",
+      at: item.at,
+    };
+  }
+  if (item.kind === "agent") {
+    return {
+      id: item.id,
+      kind: "subagent",
+      name: item.title,
+      title: item.title,
+      detail: item.detail,
+      state: item.state ?? "active",
+      at: item.at,
+    };
+  }
+  if (item.eventType === "assistant.message") {
+    return { id: item.id, kind: "assistantMessage", text: item.detail ?? item.title, at: item.at };
+  }
+  return {
+    id: item.id,
+    kind: "status",
+    title: item.title,
+    detail: item.detail,
+    tone: item.state === "failed" ? "error" : item.state === "done" ? "success" : "neutral",
+    at: item.at,
+  };
+}
+
+function isTerminalRun(status: string): boolean {
+  return ["cancelled", "failed", "succeeded", "completed"].includes(status);
 }
 
 function TaskPage() {
   const { runId } = useParams();
   const { data, actions, busy } = useRuntime();
-  const run = data.runs.find((item) => item.id === runId) ?? data.runs[0];
+  const run = data.runs.find((item) => item.id === runId);
   const approval = data.approvals.find((item) => !run || item.runId === run.id);
   const prompt = data.prompts.find((item) => !run || item.runId === run.id);
   const [approvalOpen, setApprovalOpen] = useState(false);
@@ -600,6 +880,7 @@ function TaskPage() {
   const agentItems = data.timeline.filter((item) => item.kind === "agent");
   if (!run)
     return <EmptyState title="找不到这次运行" detail="它可能已被归档，或 Runtime 尚未同步完成。" />;
+  if (run.sessionId) return <Navigate replace to={`/session/${run.sessionId}`} />;
   const paused = ["paused", "pause_requested"].includes(run.status);
   const terminal = ["cancelled", "failed", "succeeded"].includes(run.status);
   return (
@@ -732,7 +1013,7 @@ function TaskPage() {
             </span>
             <span className="eyebrow">基础模式</span>
             <h3>当前任务会正常执行</h3>
-            <p>并行子任务与结果合并需要版本保护，当前不会创建隔离的子代理工作区。</p>
+            <p>并行子代理可在共享文件夹中工作；高冲突任务才需要 Git worktree 隔离。</p>
           </section>
         ) : agentItems.length === 0 ? (
           <section className="side-card">
@@ -1027,7 +1308,7 @@ function SessionRow({
 }) {
   return (
     <div className="session-row-wrap">
-      <Link className="session-row" to={session.status === "active" ? "/" : "/sessions"}>
+      <Link className="session-row" to={`/session/${session.id}`}>
         <span className="session-row__icon">
           {session.status === "archived" ? (
             <Archive aria-hidden="true" />
@@ -1377,7 +1658,7 @@ function SettingsPage() {
             detail={
               data.workspaceMode === "git"
                 ? "已启用并行任务隔离与变更合并"
-                : "文件处理与安全回退可用；并行子任务与变更合并暂不可用"
+                : "对话、工具和并行子代理可用；分支、提交和独立合并不可用"
             }
           >
             <WorkspaceModeBadge mode={data.workspaceMode} />
@@ -1507,6 +1788,7 @@ function NotFound() {
 
 function routeTitle(pathname: string): string {
   if (pathname.startsWith("/task/")) return pathname === "/task/new" ? "新任务" : "任务运行";
+  if (pathname.startsWith("/session/")) return "会话";
   return (
     (
       {

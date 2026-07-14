@@ -52,6 +52,8 @@ export const previewData: AppData = {
       detail: "复现冲突 · 收窄写入边界 · 增加集成验证",
       state: "done",
       at: now - 412_000,
+      sessionId: "session-atlas",
+      runId: "run-atlas",
     },
     {
       id: "tl-agent",
@@ -60,6 +62,8 @@ export const previewData: AppData = {
       detail: "已定位 3 个调用点，未发现 Schema 变更。",
       state: "active",
       at: now - 242_000,
+      sessionId: "session-atlas",
+      runId: "run-atlas",
     },
     {
       id: "tl-tool",
@@ -68,8 +72,38 @@ export const previewData: AppData = {
       detail: "npm test -- sync-conflict.integration.test.ts",
       state: "waiting",
       at: now - 12_000,
+      sessionId: "session-atlas",
+      runId: "run-atlas",
     },
   ],
+  conversations: {
+    "session-atlas": {
+      sessionId: "session-atlas",
+      revision: "preview.1",
+      queuedCount: 0,
+      items: [
+        {
+          id: "preview-user",
+          kind: "userMessage",
+          text: "修复同步冲突，并为关键失败路径补一条集成测试。",
+          at: now - 428_000,
+        },
+        {
+          id: "preview-boundary",
+          kind: "runBoundary",
+          status: "started",
+          label: "Pico 开始处理",
+          at: now - 427_000,
+        },
+        {
+          id: "preview-assistant",
+          kind: "assistantMessage",
+          text: "我会先复现冲突，再收窄写入边界并补充回归验证。",
+          at: now - 410_000,
+        },
+      ],
+    },
+  },
   approvals: [
     {
       id: "approval-test",
