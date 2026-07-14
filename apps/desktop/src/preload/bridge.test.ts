@@ -42,6 +42,7 @@ describe("createDesktopBridge", () => {
     const bridge = createDesktopBridge(mock as unknown as IpcRenderer);
 
     await bridge.runtime["runtime.ping"]({});
+    await bridge.runtime["diagnostics.run"]({ workspacePath: "/workspace" });
     await bridge.runtime["session.rename"]({
       workspacePath: "/workspace",
       sessionId: "session-1",
@@ -56,6 +57,10 @@ describe("createDesktopBridge", () => {
     expect(mock.invoke).toHaveBeenCalledWith(DESKTOP_IPC_CHANNELS.runtimeInvoke, {
       method: "runtime.ping",
       params: {},
+    });
+    expect(mock.invoke).toHaveBeenCalledWith(DESKTOP_IPC_CHANNELS.runtimeInvoke, {
+      method: "diagnostics.run",
+      params: { workspacePath: "/workspace" },
     });
     expect(mock.invoke).toHaveBeenCalledWith(DESKTOP_IPC_CHANNELS.runtimeInvoke, {
       method: "session.rename",
