@@ -56,6 +56,8 @@ export interface SessionRuntimeOptions {
   /** 测试或宿主可注入自管 HookService；注入时不创建默认 watcher/management。 */
   hookService?: HookService;
   hookUserHome?: string;
+  /** 已由 Plugin 信任层冻结的扩展 Hook 来源。 */
+  hookExtensionSources?: readonly HookConfigSourceSpec[];
 }
 
 export interface SessionRuntime {
@@ -500,6 +502,9 @@ export async function createSessionRuntime(
           workDir,
           sessionId: options.sessionId,
           ...(options.hookUserHome ? { userHome: options.hookUserHome } : {}),
+          ...(options.hookExtensionSources
+            ? { extensionSources: options.hookExtensionSources }
+            : {}),
         }).catch((error) => {
           logger.warn(
             { sessionId: options.sessionId, error: String(error) },

@@ -24,7 +24,7 @@ import { HookTrustStore } from "./trust/store.js";
 
 export interface SessionHookRuntimeOptions extends Pick<
   LoadHookSnapshotOptions,
-  "workDir" | "userHome"
+  "workDir" | "userHome" | "extensionSources"
 > {
   sessionId: string;
 }
@@ -52,6 +52,7 @@ export async function createSessionHookRuntime(
     ...(options.userHome ? { userHome: options.userHome } : {}),
     trustStore,
     stateStore,
+    ...(options.extensionSources ? { extensionSources: options.extensionSources } : {}),
   } satisfies LoadHookSnapshotOptions;
   const initial = await loadHookSnapshot(loadOptions);
   let rules = await safeLoadHookifyRules(options.workDir);
