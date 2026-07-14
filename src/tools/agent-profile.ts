@@ -50,6 +50,15 @@ export interface AgentProfile {
   readonly tools: string[];
 }
 
+export interface AgentProfileLoadResult {
+  readonly profiles: AgentProfile[];
+  /**
+   * 具名但未通过校验的最终 native 定义。目录层用它阻止同名低优先级
+   * Claude/builtin Profile 回落，键已按大小写不敏感归一化。
+   */
+  readonly tombstoneNames: string[];
+}
+
 /** YAML 文件的原始结构 */
 interface AgentProfilesFile {
   agents?: unknown;
@@ -83,16 +92,21 @@ export class AgentProfileLoader {
    * 文件不存在或解析失败时返回空数组(静默降级,不阻断主流程)。
    */
   async load(): Promise<AgentProfile[]> {
+    return (await this.loadWithTombstones()).profiles;
+  }
+
+  /** 加载 Profile 及必须在统一目录中保留的 fail-closed tombstone。 */
+  async loadWithTombstones(): Promise<AgentProfileLoadResult> {
     const filePath = join(this.workDir, ".claw", "agents.yaml");
     let content: string;
     try {
       content = await readFile(filePath, "utf8");
     } catch (err) {
       // ENOENT:工作区未配置自定义角色,静默返回空
-      if (isErrnoException(err, "ENOENT")) return [];
+      if (isErrnoException(err, "ENOENT")) return emptyLoadResult();
       // 其他 IO 错误(权限等)记 warn 返回空
       logger.warn({ err, filePath }, "[agent-profile] 读取配置文件失败");
-      return [];
+      return emptyLoadResult();
     }
 
     let parsed: AgentProfilesFile;
@@ -100,11 +114,11 @@ export class AgentProfileLoader {
       parsed = yaml.load(content) as AgentProfilesFile;
     } catch (err) {
       logger.warn({ err, filePath }, "[agent-profile] YAML 解析失败,已忽略自定义角色");
-      return [];
+      return emptyLoadResult();
     }
 
     if (!parsed || !Array.isArray(parsed.agents)) {
-      return [];
+      return emptyLoadResult();
     }
 
     return this.validateProfiles(parsed.agents as RawAgent[]);
@@ -118,8 +132,8 @@ export class AgentProfileLoader {
    * - 重名:后者覆盖前者 + warn
    * 单条校验失败只跳过该条(记 warn),不让一条坏配置废掉整个文件。
    */
-  private validateProfiles(rawAgents: RawAgent[]): AgentProfile[] {
-    const byName = new Map<string, AgentProfile>();
+  private validateProfiles(rawAgents: RawAgent[]): AgentProfileLoadResult {
+    const byName = new Map<string, AgentProfile | null>();
 
     for (let i = 0; i < rawAgents.length; i++) {
       const raw = rawAgents[i]!;
@@ -131,6 +145,7 @@ export class AgentProfileLoader {
         logger.warn({ index: i }, `[agent-profile] ${label}: name 缺失或为空,已跳过`);
         continue;
       }
+      const canonicalName = canonicalAgentName(name);
 
       // description 校验(可选但强烈建议;缺失用 name 兜底)
       const description =
@@ -145,12 +160,16 @@ export class AgentProfileLoader {
           { index: i, name },
           `[agent-profile] ${label} (name=${name}): systemPrompt 缺失或为空,已跳过`,
         );
+        this.recordTombstone(byName, canonicalName, name);
         continue;
       }
 
       // tools 校验:必须是数组,每项在白名单内
       const tools = this.validateTools(raw.tools, label, name);
-      if (tools === null) continue; // 校验失败已 warn,跳过此条
+      if (tools === null) {
+        this.recordTombstone(byName, canonicalName, name);
+        continue;
+      }
 
       // maxTurns 校验:正整数且 ≤ 上限
       let maxTurns: number | undefined;
@@ -190,13 +209,33 @@ export class AgentProfileLoader {
       };
 
       // 重名去重:后者覆盖前者
-      if (byName.has(name)) {
+      if (byName.has(canonicalName)) {
         logger.warn({ name }, `[agent-profile] 角色名 '${name}' 重复,后者覆盖前者`);
       }
-      byName.set(name, profile);
+      byName.set(canonicalName, profile);
     }
 
-    return Array.from(byName.values());
+    const profiles: AgentProfile[] = [];
+    const tombstoneNames: string[] = [];
+    for (const [name, profile] of byName) {
+      if (profile) profiles.push(profile);
+      else tombstoneNames.push(name);
+    }
+    return { profiles, tombstoneNames };
+  }
+
+  private recordTombstone(
+    byName: Map<string, AgentProfile | null>,
+    canonicalName: string,
+    displayName: string,
+  ): void {
+    if (byName.has(canonicalName)) {
+      logger.warn(
+        { name: displayName },
+        `[agent-profile] 角色名 '${displayName}' 重复,后者覆盖前者`,
+      );
+    }
+    byName.set(canonicalName, null);
   }
 
   /** 校验 tools 数组:必须是数组,每项是白名单内的字符串。返回 null 表示校验失败。 */
@@ -229,6 +268,14 @@ export class AgentProfileLoader {
     }
     return tools;
   }
+}
+
+function canonicalAgentName(name: string): string {
+  return name.trim().toLowerCase();
+}
+
+function emptyLoadResult(): AgentProfileLoadResult {
+  return { profiles: [], tombstoneNames: [] };
 }
 
 function optionalString(value: unknown): string | undefined {

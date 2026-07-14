@@ -92,7 +92,7 @@ export async function loadAgentCatalog(
   options: LoadAgentCatalogOptions,
 ): Promise<CatalogAgentProfile[]> {
   const [nativeProfiles, claudeAgents] = await Promise.all([
-    new AgentProfileLoader(options.workDir).load(),
+    new AgentProfileLoader(options.workDir).loadWithTombstones(),
     loadClaudeAgents({
       workDir: options.workDir,
       homeDir: options.homeDir ?? homedir(),
@@ -102,20 +102,23 @@ export async function loadAgentCatalog(
 
   const byName = new Map<string, CatalogAgentProfile>();
   if (options.includeBuiltins !== false) {
-    for (const profile of BUILTIN_PROFILES) byName.set(profile.name, profile);
+    for (const profile of BUILTIN_PROFILES) byName.set(canonicalAgentName(profile.name), profile);
   }
   for (const agent of claudeAgents.filter((candidate) => candidate.source === "user")) {
-    byName.set(agent.name, adaptClaudeAgent(agent));
+    byName.set(canonicalAgentName(agent.name), adaptClaudeAgent(agent));
   }
   for (const agent of claudeAgents.filter((candidate) => candidate.source === "project")) {
-    byName.set(agent.name, adaptClaudeAgent(agent));
+    byName.set(canonicalAgentName(agent.name), adaptClaudeAgent(agent));
   }
-  for (const profile of nativeProfiles) {
-    byName.set(profile.name, {
+  for (const profile of nativeProfiles.profiles) {
+    byName.set(canonicalAgentName(profile.name), {
       ...profile,
       source: "project-native",
       sourcePath: join(options.workDir, ".claw", "agents.yaml"),
     });
+  }
+  for (const tombstoneName of nativeProfiles.tombstoneNames) {
+    byName.delete(tombstoneName);
   }
   return Array.from(byName.values()).sort((left, right) => left.name.localeCompare(right.name));
 }
@@ -125,10 +128,12 @@ export function findAgentProfile<T extends AgentProfile>(
   name: string,
 ): T | undefined {
   const normalized = name.trim();
-  return (
-    profiles.find((profile) => profile.name === normalized) ??
-    profiles.find((profile) => profile.name.toLowerCase() === normalized.toLowerCase())
-  );
+  const canonicalName = canonicalAgentName(normalized);
+  return profiles.find((profile) => canonicalAgentName(profile.name) === canonicalName);
+}
+
+function canonicalAgentName(name: string): string {
+  return name.trim().toLowerCase();
 }
 
 export function summarizeAgentProfiles(

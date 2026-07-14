@@ -125,6 +125,66 @@ describe("统一 Agent 目录集成", () => {
     expect(registry.getAvailableTools().map((tool) => tool.name)).toEqual(["delegate_status"]);
   });
 
+  it("同名覆盖按大小写不敏感键解析，高优先级保留自己的展示名", async () => {
+    const { homeDir, workDir } = await createWorkspace();
+    await writeClaudeAgent(
+      join(homeDir, ".claude", "agents", "reviewer.md"),
+      "---\nname: Reviewer\ndescription: user\ntools: Read\n---\nuser prompt",
+    );
+    await writeClaudeAgent(
+      join(workDir, ".claude", "agents", "reviewer.md"),
+      "---\nname: REVIEWER\ndescription: project\ntools: Grep\n---\nproject prompt",
+    );
+    await mkdir(join(workDir, ".claw"), { recursive: true });
+    await writeFile(
+      join(workDir, ".claw", "agents.yaml"),
+      [
+        "agents:",
+        "  - name: reviewer",
+        "    description: native",
+        "    systemPrompt: native prompt",
+        "    tools: [read_file]",
+      ].join("\n"),
+    );
+
+    const profiles = await loadAgentCatalog({ workDir, homeDir, includeBuiltins: false });
+
+    expect(profiles.filter((profile) => profile.name.toLowerCase() === "reviewer")).toEqual([
+      expect.objectContaining({
+        name: "reviewer",
+        source: "project-native",
+        systemPrompt: "native prompt",
+        tools: ["read_file"],
+      }),
+    ]);
+  });
+
+  it("native 空或全部无效权限作为 tombstone，不让同名 Claude/builtin 回落", async () => {
+    const { homeDir, workDir } = await createWorkspace();
+    await writeClaudeAgent(
+      join(workDir, ".claude", "agents", "locked.md"),
+      "---\ndescription: lower locked\ntools: Read\n---\nlower prompt",
+    );
+    await mkdir(join(workDir, ".claw"), { recursive: true });
+    await writeFile(
+      join(workDir, ".claw", "agents.yaml"),
+      [
+        "agents:",
+        "  - name: LOCKED",
+        "    systemPrompt: native locked",
+        "    tools: []",
+        "  - name: plan",
+        "    systemPrompt: native plan",
+        "    tools: [UnknownPowerTool]",
+      ].join("\n"),
+    );
+
+    const profiles = await loadAgentCatalog({ workDir, homeDir, includeBuiltins: true });
+
+    expect(profiles.some((profile) => profile.name.toLowerCase() === "locked")).toBe(false);
+    expect(profiles.some((profile) => profile.name.toLowerCase() === "plan")).toBe(false);
+  });
+
   async function createWorkspace(): Promise<{ homeDir: string; workDir: string }> {
     const workDir = await mkdtemp(join(tmpdir(), "pico-agent-catalog-work-"));
     const homeDir = await mkdtemp(join(tmpdir(), "pico-agent-catalog-home-"));
