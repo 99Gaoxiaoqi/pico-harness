@@ -414,6 +414,8 @@ export interface AgentEngineOptions {
   guardrailOptions?: GuardrailOptions;
   /** 轮次/token/成本预算配置 */
   budgetConfig?: BudgetConfig;
+  /** 被 CostTracker 记账的主 Session，用于并发子代理成本结算。 */
+  usageSession?: Session;
   /**
    * Goal Manager 单例(ROADMAP 3.5 Goal Mode)。
    * 注入后:planMode 时 PromptComposer 会把 active goal 注入 system prompt;
@@ -496,6 +498,8 @@ export interface SubagentExecutionRuntime {
   requestedModelRoute?: string;
   resolvedModelRoute?: string;
   source: "ephemeral" | "profile" | "parent";
+  /** 该 Provider 写入用量的 Session；显式路由与父路由都应指向主 Session。 */
+  usageSession?: Session;
   /** 仅兼容继承父 Provider 的旧路径；显式路由 Runtime 默认不做跨路由 fallback。 */
   onRateLimited?: (reporter: Reporter, signal?: AbortSignal) => LLMProvider | undefined;
 }
@@ -524,6 +528,12 @@ export class AgentEngine implements AgentRunner {
   private readonly recovery: RecoveryManager;
   private readonly guardrail: ToolGuardrailController;
   private readonly budget: IterationBudget;
+  private readonly usageSession?: Session;
+  /**
+   * Session 成本是累计值。多个子代理并发返回时，以高水位结算增量，
+   * 避免每个请求都用自己的 costBefore 导致重复计费。
+   */
+  private readonly accountedSessionCostCNY = new WeakMap<Session, number>();
   /** Goal Manager 单例(可选);planMode 注入 prompt + Grace Call 收尾对齐目标 */
   private readonly goalManager?: GoalManager;
   /** TodoStore 单例(可选);planMode 下 PromptComposer 复用,与 TodoTool 共享 */
@@ -572,6 +582,7 @@ export class AgentEngine implements AgentRunner {
       ...opts.budgetConfig,
       maxTurns: opts.budgetConfig?.maxTurns ?? this.maxTurns,
     });
+    this.usageSession = opts.usageSession;
     this.goalManager = opts.goalManager;
     this.todoStore = opts.todoStore;
     this.toolDisclosure = opts.toolDisclosure;
@@ -1785,11 +1796,40 @@ export class AgentEngine implements AgentRunner {
       decisions.push(this.goalManager?.consumeUsage(response.usage) ?? { allowed: true });
     }
 
-    const costDelta = Math.max(0, session.totalCostCNY - costBefore);
+    const accountedCost = this.accountedSessionCostCNY.get(session) ?? costBefore;
+    const observedCost = session.totalCostCNY;
+    const costDelta = Math.max(0, observedCost - accountedCost);
+    this.accountedSessionCostCNY.set(session, Math.max(accountedCost, observedCost));
     if (costDelta > 0) {
       decisions.push(this.budget.consumeCost(costDelta));
       decisions.push(this.goalManager?.consumeCost(costDelta) ?? { allowed: true });
     }
+    return decisions.find((decision) => !decision.allowed) ?? { allowed: true };
+  }
+
+  private currentSubagentBudgetDecision(): BudgetDecision {
+    const decisions = [
+      this.budget.currentDecision(),
+      this.goalManager?.currentBudgetDecision() ?? { allowed: true },
+    ];
+    return decisions.find((decision) => !decision.allowed) ?? { allowed: true };
+  }
+
+  private consumeSubagentResponseBudget(
+    runtime: SubagentExecutionRuntime,
+    response: Message,
+    costBefore: number,
+  ): BudgetDecision {
+    const session = runtime.usageSession ?? this.usageSession;
+    if (session) return this.consumeResponseBudget(session, response, costBefore);
+
+    // 非 Runtime 宿主可以直接构造 AgentEngine，此时没有可用的 Session 成本账本；
+    // 仍严格结算 Provider 返回的 Token usage。
+    if (!response.usage) return this.currentSubagentBudgetDecision();
+    const decisions = [
+      this.budget.consumeUsage(response.usage),
+      this.goalManager?.consumeUsage(response.usage) ?? { allowed: true },
+    ];
     return decisions.find((decision) => !decision.allowed) ?? { allowed: true };
   }
 
@@ -2015,6 +2055,7 @@ export class AgentEngine implements AgentRunner {
     return {
       provider: this.provider,
       ...(this.compactor ? { compactor: this.compactor } : {}),
+      ...(this.usageSession ? { usageSession: this.usageSession } : {}),
       thinkingEffort: this.thinkingEffort,
       ...(requestedRoute ? { requestedModelRoute: requestedRoute } : {}),
       ...(this.modelRouteId || this.provider.modelName
@@ -2090,6 +2131,16 @@ export class AgentEngine implements AgentRunner {
 
     for (;;) {
       signal?.throwIfAborted();
+      const availableBudget = this.currentSubagentBudgetDecision();
+      if (!availableBudget.allowed) {
+        return this.finalizeSubagentResult(
+          "partial",
+          `子代理已停止：${availableBudget.reason ?? "执行预算已用尽"}。`,
+          artifactPaths,
+          taskPrompt,
+          runtimeWorkspaceRoot,
+        );
+      }
       turnCount++;
       const finalizing = turnCount >= maxSubTurns;
       if (finalizing) {
@@ -2110,6 +2161,8 @@ export class AgentEngine implements AgentRunner {
       // 响应式溢出重试:子代理用独立 contextHistory(非 Session 驱动),无法重取
       // WorkingMemory,故仅用更小的 maxChars 预算对 contextHistory 重新压缩重试。
       let actionResp: Message;
+      const usageSession = runtime.usageSession ?? this.usageSession;
+      const costBefore = usageSession?.totalCostCNY ?? 0;
       try {
         actionResp = await this.generateSubWithOverflowRetry(
           contextHistory,
@@ -2133,10 +2186,24 @@ export class AgentEngine implements AgentRunner {
           runtimeWorkspaceRoot,
         );
       }
+      const budgetDecision = this.consumeSubagentResponseBudget(runtime, actionResp, costBefore);
       contextHistory.push(actionResp);
 
       if (actionResp.content) {
         rep.onMessage(`[Subagent] ${actionResp.content}`);
+      }
+
+      // 并发子代理可能同时在途，因此限额最多被已在途的单次响应超出。
+      // 每个响应结算后立即停止该子代理，且其他子代理在下一次调用前会共享检查。
+      if (!budgetDecision.allowed) {
+        const evidence = buildSubagentPartialSummary(contextHistory, artifactPaths);
+        return this.finalizeSubagentResult(
+          "partial",
+          `${evidence}\n\n子代理已停止：${budgetDecision.reason ?? "执行预算已用尽"}。`,
+          artifactPaths,
+          taskPrompt,
+          runtimeWorkspaceRoot,
+        );
       }
 
       // 【核心退出条件】子智能体不调工具了,说明做好了总结汇报
@@ -2176,12 +2243,28 @@ export class AgentEngine implements AgentRunner {
             `[Subagent] 📝 探路者总结过短,追加一轮扩写。`,
           );
           try {
+            const continuationBudget = this.currentSubagentBudgetDecision();
+            if (!continuationBudget.allowed) {
+              return this.finalizeSubagentResult(
+                "partial",
+                `${summary}\n\n子代理已停止：${continuationBudget.reason ?? "执行预算已用尽"}。`,
+                artifactPaths,
+                taskPrompt,
+                runtimeWorkspaceRoot,
+              );
+            }
+            const continuationCostBefore = usageSession?.totalCostCNY ?? 0;
             const continuationResp = await this.generateSubWithOverflowRetry(
               contextHistory,
               [],
               rep,
               runtime,
               signal,
+            );
+            const continuationDecision = this.consumeSubagentResponseBudget(
+              runtime,
+              continuationResp,
+              continuationCostBefore,
             );
             contextHistory.push(continuationResp);
             if (
@@ -2190,6 +2273,15 @@ export class AgentEngine implements AgentRunner {
             ) {
               summary = continuationResp.content;
               rep.onMessage(`[Subagent] ${continuationResp.content}`);
+            }
+            if (!continuationDecision.allowed) {
+              return this.finalizeSubagentResult(
+                "partial",
+                `${buildSubagentPartialSummary(contextHistory, artifactPaths)}\n\n子代理已停止：${continuationDecision.reason ?? "执行预算已用尽"}。`,
+                artifactPaths,
+                taskPrompt,
+                runtimeWorkspaceRoot,
+              );
             }
           } catch (error) {
             signal?.throwIfAborted();
