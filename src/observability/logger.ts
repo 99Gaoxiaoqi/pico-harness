@@ -6,8 +6,8 @@
 // - 面向用户输出的文件(reporter/cli/feishu/tracer)保留 console,
 //   确保用户始终能看到关键信息
 //
-// pino 是 Node.js 最快 JSON 日志库。transport 使用 pino-pretty 做彩色格式化输出;
-// 若 transport 加载失败(如测试环境 worker thread 限制),自动降级为 plain pino。
+// pino 是 Node.js 最快 JSON 日志库。CLI 开发态使用 pino-pretty 做彩色格式化输出;
+// Electron 与测试环境使用 plain pino，避免打包应用依赖开发态 transport。
 //
 // 重要:pino transport 模式下 logger.level 动态修改对 transport 不生效
 // (transport 在 worker thread 里)。TUI 启动前可通过 LOG_LEVEL 环境变量压低级别。
@@ -15,11 +15,12 @@
 import pino from "pino";
 
 const level = process.env.LOG_LEVEL ?? "info";
+const usePrettyTransport = process.env.NODE_ENV !== "test" && !process.versions.electron;
 
 export const logger = pino({
   level,
   base: undefined, // 不附加 pid/hostname(教学项目精简输出)
-  ...(process.env.NODE_ENV !== "test"
+  ...(usePrettyTransport
     ? {
         transport: {
           target: "pino-pretty",

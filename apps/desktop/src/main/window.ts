@@ -11,7 +11,7 @@ export interface DesktopWindowOptions {
 export async function createDesktopWindow(options: DesktopWindowOptions): Promise<BrowserWindow> {
   const stateStore = new WindowStateStore(options.userDataPath);
   const state = await stateStore.read();
-  const preloadPath = join(import.meta.dirname, "preload.js");
+  const preloadPath = join(__dirname, "preload.cjs");
   const window = new BrowserWindow({
     ...state.bounds,
     minWidth: 960,
@@ -50,9 +50,7 @@ export async function createDesktopWindow(options: DesktopWindowOptions): Promis
   if (MAIN_WINDOW_VITE_DEV_SERVER_URL) {
     await window.loadURL(MAIN_WINDOW_VITE_DEV_SERVER_URL);
   } else {
-    await window.loadFile(
-      join(import.meta.dirname, `../renderer/${MAIN_WINDOW_VITE_NAME}/index.html`),
-    );
+    await window.loadFile(join(__dirname, `../renderer/${MAIN_WINDOW_VITE_NAME}/index.html`));
   }
   return window;
 }
