@@ -47,6 +47,13 @@ describe("WorkspaceTaskRuntime integration", () => {
       status: "running",
     });
     expect(runtime.workspace).toBe(canonicalRepo);
+    expect(runtime.mode).toBe("git");
+    expect(runtime.capabilities).toEqual({
+      foregroundRuns: true,
+      fileHistory: true,
+      isolatedWorktrees: true,
+      branchMerge: true,
+    });
     expect(runtime.listRuns()).toEqual([expect.objectContaining({ runId: run.runId })]);
     expect(() => runtime.startRun({ description: "second" }, async () => undefined)).toThrow(
       "已有活跃 Run",
@@ -68,7 +75,7 @@ describe("WorkspaceTaskRuntime integration", () => {
         return { summary: "done" };
       },
     );
-    await expect(runtime.taskHostRuntime.supervisor.wait(task.taskId)).resolves.toMatchObject({
+    await expect(runtime.taskHostRuntime?.supervisor.wait(task.taskId)).resolves.toMatchObject({
       status: "completed",
     });
     expect(runtime.getTask(task.taskId)).toMatchObject({
@@ -164,6 +171,24 @@ describe("WorkspaceTaskRuntime integration", () => {
     await paused.promise;
     expect(runtime.cancel(run.runId)).toMatchObject({ status: "cancelling" });
     await expect(runtime.waitForRun(run.runId)).resolves.toMatchObject({ status: "cancelled" });
+  });
+
+  it("无基线提交或 detached HEAD 时降级为基础模式", async () => {
+    const unbornRoot = await mkdtemp(join(tmpdir(), "pico-workspace-unborn-"));
+    cleanups.push(() => rm(unbornRoot, { recursive: true, force: true }));
+    await git(["init", "-b", "main"], unbornRoot);
+    const unbornRuntime = await WorkspaceTaskRuntime.create({ workDir: unbornRoot });
+    cleanups.push(() => unbornRuntime.close());
+    expect(unbornRuntime.mode).toBe("folder");
+    expect(unbornRuntime.capabilities.isolatedWorktrees).toBe(false);
+
+    const { root, repo } = await createRepository();
+    cleanups.push(() => rm(root, { recursive: true, force: true }));
+    await git(["checkout", "--detach"], repo);
+    const detachedRuntime = await WorkspaceTaskRuntime.create({ workDir: repo });
+    cleanups.push(() => detachedRuntime.close());
+    expect(detachedRuntime.mode).toBe("folder");
+    expect(detachedRuntime.capabilities.branchMerge).toBe(false);
   });
 });
 

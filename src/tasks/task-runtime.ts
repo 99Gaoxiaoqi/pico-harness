@@ -101,6 +101,14 @@ export class TaskHostRuntime {
     }
     const targetBranch = await gitOutput(["branch", "--show-current"], repoRoot);
     if (!targetBranch) throw new Error("当前 Git 工作树处于 detached HEAD，无法启动任务监督器");
+    try {
+      await gitOutput(["rev-parse", "--verify", "HEAD"], repoRoot);
+    } catch (error) {
+      throw new Error(
+        "当前 Git 工作区还没有基线提交，无法启动隔离任务",
+        error instanceof Error ? { cause: error } : {},
+      );
+    }
     const { service } = await JobService.create({
       workDir: repoRoot,
       ownerId: `tui-host:${process.pid}`,

@@ -19,6 +19,7 @@ import { WorkspaceRegistrationStore } from "./workspace-registration.js";
 export interface DaemonRunExecutor {
   (input: {
     workspacePath: string;
+    workspaceRuntime: WorkspaceTaskRuntime;
     prompt: string;
     sessionId?: string;
     context: WorkspaceRunContext;
@@ -113,21 +114,15 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
       return { workspacePath: registered, registered: false };
     }
     if (request.method === "workspace.status") {
-      const workspacePath = await canonicalizeWorkspacePath(
-        requiredString(params, "workspacePath"),
-      );
-      const registered = (await this.registrationStore.list()).includes(workspacePath);
-      const result: WorkspaceStatusResult = {
-        workspacePath,
-        registered,
-        // The user service may be absent even while a manually started daemon is reachable.
-        // Do not claim platform daemon installation from a socket probe.
-        schedulerStatus: "unknown",
-      };
+      const runtime = await this.getRuntime(requiredString(params, "workspacePath"));
+      const registered = (await this.registrationStore.list()).includes(runtime.workspace);
+      const result = workspaceStatusResult(runtime, registered);
       return {
         workspacePath: result.workspacePath,
-        registered: result.registered,
+        registered,
         schedulerStatus: result.schedulerStatus,
+        mode: result.mode,
+        capabilities: result.capabilities,
       };
     }
     if (request.method === "run.start") {
@@ -138,6 +133,7 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
       const run = runtime.startRun({ description: prompt }, (context) =>
         this.options.execute({
           workspacePath: runtime.workspace,
+          workspaceRuntime: runtime,
           prompt,
           ...(sessionId ? { sessionId } : {}),
           context,
@@ -285,6 +281,21 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
     const registered = await this.registrationStore.list();
     return [...new Set([...registered, ...this.eventStores.keys()])];
   }
+}
+
+export function workspaceStatusResult(
+  runtime: WorkspaceTaskRuntime,
+  registered: boolean,
+): WorkspaceStatusResult {
+  return {
+    workspacePath: runtime.workspace,
+    registered,
+    // The user service may be absent even while a manually started daemon is reachable.
+    // Do not claim platform daemon installation from a socket probe.
+    schedulerStatus: "unknown",
+    mode: runtime.mode,
+    capabilities: { ...runtime.capabilities },
+  };
 }
 
 function objectParams(value: JsonValue): Record<string, JsonValue> {

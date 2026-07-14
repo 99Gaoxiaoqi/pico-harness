@@ -112,6 +112,13 @@ describe("DesktopRuntimeService integration", () => {
           workspacePath: fixture.canonicalWorkspace,
           registered: true,
           schedulerStatus: "unknown",
+          mode: "git",
+          capabilities: {
+            foregroundRuns: true,
+            fileHistory: true,
+            isolatedWorktrees: true,
+            branchMerge: true,
+          },
         },
       ],
     });
@@ -618,6 +625,20 @@ describe("DesktopRuntimeService integration", () => {
     const workspace = join(root, "workspace");
     await mkdir(workspace);
     await execFile("git", ["init", "-q"], { cwd: workspace });
+    await execFile(
+      "git",
+      [
+        "-c",
+        "user.name=Pico Integration",
+        "-c",
+        "user.email=pico@example.test",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "initial",
+      ],
+      { cwd: workspace },
+    );
     const canonicalWorkspace = await import("node:fs/promises").then(({ realpath }) =>
       realpath(workspace),
     );
