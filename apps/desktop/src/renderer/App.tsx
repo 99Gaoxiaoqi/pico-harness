@@ -565,9 +565,10 @@ function TaskComposer({ compact = false }: { readonly compact?: boolean }) {
     if (sendingRef.current) return;
     sendingRef.current = true;
     try {
-      const sessionId = await actions.sendMessage({ text });
-      if (sessionId) navigate(`/session/${sessionId}`);
+      const result = await actions.sendMessage({ text });
+      if (!result.succeeded) return;
       setPrompt("");
+      if (result.sessionId) navigate(`/session/${result.sessionId}`);
     } finally {
       sendingRef.current = false;
     }
@@ -711,17 +712,19 @@ function ConversationPage() {
     if (sendingRef.current) return;
     sendingRef.current = true;
     try {
-      const resolvedSessionId = await actions.sendMessage({
+      const result = await actions.sendMessage({
         ...(sessionId ? { sessionId } : {}),
         text,
         behavior: nextBehavior,
         ...(activeRun ? { expectedRunId: activeRun.id } : {}),
         ...(activation ? { activation } : {}),
       });
-      if (!resolvedSessionId) return;
+      if (!result.succeeded) return;
       setDraft("");
       setActivation(undefined);
-      if (!sessionId) navigate(`/session/${resolvedSessionId}`, { replace: true });
+      if (!sessionId && result.sessionId) {
+        navigate(`/session/${result.sessionId}`, { replace: true });
+      }
     } finally {
       sendingRef.current = false;
     }
@@ -1063,17 +1066,30 @@ function ConversationPage() {
           </Button>
         </div>
       ) : (
-        <ConversationTranscript
-          items={items}
-          onOpenItem={openItem}
-          emptyState={
-            <div className="conversation-empty-state">
-              <Sparkles aria-hidden="true" />
-              <h3>{sessionId ? "这个会话还没有可见消息" : "从一条消息开始"}</h3>
-              <p>可以像在 TUI 里一样交代目标、追问方案，或先让 Pico 阅读项目。</p>
+        <>
+          {sessionId && conversation?.nextBefore && (
+            <div className="conversation-history-pagination">
+              <Button
+                variant="quiet"
+                disabled={Boolean(busy)}
+                onClick={() => void actions.loadEarlierSession(sessionId)}
+              >
+                {busy === "load-earlier-session" ? "正在加载…" : "加载更早记录"}
+              </Button>
             </div>
-          }
-        />
+          )}
+          <ConversationTranscript
+            items={items}
+            onOpenItem={openItem}
+            emptyState={
+              <div className="conversation-empty-state">
+                <Sparkles aria-hidden="true" />
+                <h3>{sessionId ? "这个会话还没有可见消息" : "从一条消息开始"}</h3>
+                <p>可以像在 TUI 里一样交代目标、追问方案，或先让 Pico 阅读项目。</p>
+              </div>
+            }
+          />
+        </>
       )}
       <ApprovalDialog
         approval={selectedApproval}

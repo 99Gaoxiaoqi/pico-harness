@@ -6,6 +6,27 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { DesktopApp } from "./App.js";
 import type { RendererBridge } from "./runtime.js";
 
+const successful = <T,>(value: T) => Promise.resolve({ ok: true as const, value });
+
+function installBridge(runtime: RendererBridge["runtime"]): void {
+  (window as unknown as { pico?: RendererBridge }).pico = {
+    runtime,
+    events: {
+      subscribe: () => ({ ready: successful({ subscribed: true }), dispose: vi.fn() }),
+    },
+    platform: {
+      chooseWorkspace: () => successful(undefined),
+      openDirectory: () => successful(undefined),
+      getLaunchAtLogin: () => successful(false),
+      setLaunchAtLogin: () => successful(undefined),
+    },
+    lifecycle: {
+      setBackgroundMode: () => successful(undefined),
+      quit: () => successful(undefined),
+    },
+  };
+}
+
 afterEach(() => {
   cleanup();
   delete (window as unknown as { pico?: unknown }).pico;
@@ -254,6 +275,218 @@ describe("DesktopApp renderer", () => {
     });
   });
 
+  it("使用同一 Transcript revision 分页加载更早记录", async () => {
+    const user = userEvent.setup();
+    const workspacePath = "/Users/chen/Documents/long-session";
+    const transcriptCalls: Readonly<Record<string, unknown>>[] = [];
+    const runtime = new Proxy(
+      {},
+      {
+        get: (_target, property) => async (params: Readonly<Record<string, unknown>>) => {
+          const method = String(property);
+          const value = (() => {
+            if (method === "runtime.ping")
+              return { capabilities: ["session-conversation-v1", "runtime-events-v1"] };
+            if (method === "workspace.list") return { workspaces: [{ workspacePath }] };
+            if (method === "workspace.status") return { workspacePath, mode: "folder" };
+            if (method === "workspace.trustStatus") return { trusted: true };
+            if (method === "session.list")
+              return {
+                sessions: [{ sessionId: "session-long", title: "长会话", updatedAt: 2 }],
+              };
+            if (method === "runs.list") return { runs: [] };
+            if (method === "session.transcript") {
+              transcriptCalls.push(params);
+              return params.before
+                ? {
+                    session: { sessionId: "session-long" },
+                    items: [{ id: "message-old", kind: "userMessage", content: "最早的记录" }],
+                    queuedInputs: [],
+                    revision: "revision-stable",
+                  }
+                : {
+                    session: { sessionId: "session-long" },
+                    items: [{ id: "message-new", kind: "assistantMessage", content: "最新的记录" }],
+                    queuedInputs: [],
+                    nextBefore: "cursor-older",
+                    revision: "revision-stable",
+                  };
+            }
+            if (method === "jobs.list") return { jobs: [] };
+            if (method === "config.skills") return { skills: [] };
+            if (method === "config.mcpServers") return { servers: [] };
+            if (method === "config.providers") return { providers: [] };
+            if (method === "config.get") return { version: 0 };
+            if (method === "usage.get") return { usage: {} };
+            return {};
+          })();
+          return successful(value);
+        },
+      },
+    ) as RendererBridge["runtime"];
+    installBridge(runtime);
+    window.history.replaceState({}, "", "/#/session/session-long");
+
+    render(<DesktopApp />);
+    expect(await screen.findByText("最新的记录")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "加载更早记录" }));
+
+    expect(await screen.findByText("最早的记录")).toBeTruthy();
+    expect(screen.getByText("最新的记录")).toBeTruthy();
+    expect(transcriptCalls.at(-1)).toEqual(
+      expect.objectContaining({
+        before: "cursor-older",
+        expectedRevision: "revision-stable",
+        limit: 200,
+      }),
+    );
+    expect(screen.queryByRole("button", { name: "加载更早记录" })).toBeNull();
+  });
+
+  it("Transcript 分页发生 revision 冲突时从首页重载", async () => {
+    const user = userEvent.setup();
+    const workspacePath = "/Users/chen/Documents/changing-session";
+    let firstPageLoads = 0;
+    const runtime = new Proxy(
+      {},
+      {
+        get: (_target, property) => async (params: Readonly<Record<string, unknown>>) => {
+          const method = String(property);
+          if (method === "session.transcript" && params.before) {
+            return {
+              ok: false as const,
+              error: {
+                code: "CONFLICT",
+                message: "会话历史已变化",
+                retryable: true,
+              },
+            };
+          }
+          const value = (() => {
+            if (method === "runtime.ping")
+              return { capabilities: ["session-conversation-v1", "runtime-events-v1"] };
+            if (method === "workspace.list") return { workspaces: [{ workspacePath }] };
+            if (method === "workspace.status") return { workspacePath, mode: "folder" };
+            if (method === "workspace.trustStatus") return { trusted: true };
+            if (method === "session.list")
+              return {
+                sessions: [{ sessionId: "session-changing", title: "变化会话", updatedAt: 2 }],
+              };
+            if (method === "runs.list") return { runs: [] };
+            if (method === "session.transcript") {
+              firstPageLoads += 1;
+              return firstPageLoads === 1
+                ? {
+                    session: { sessionId: "session-changing" },
+                    items: [{ id: "message-a", kind: "userMessage", content: "旧版首页" }],
+                    queuedInputs: [],
+                    nextBefore: "cursor-stale",
+                    revision: "revision-a",
+                  }
+                : {
+                    session: { sessionId: "session-changing" },
+                    items: [{ id: "message-b", kind: "userMessage", content: "新版首页" }],
+                    queuedInputs: [],
+                    revision: "revision-b",
+                  };
+            }
+            if (method === "jobs.list") return { jobs: [] };
+            if (method === "config.skills") return { skills: [] };
+            if (method === "config.mcpServers") return { servers: [] };
+            if (method === "config.providers") return { providers: [] };
+            if (method === "config.get") return { version: 0 };
+            if (method === "usage.get") return { usage: {} };
+            return {};
+          })();
+          return successful(value);
+        },
+      },
+    ) as RendererBridge["runtime"];
+    installBridge(runtime);
+    window.history.replaceState({}, "", "/#/session/session-changing");
+
+    render(<DesktopApp />);
+    expect(await screen.findByText("旧版首页")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "加载更早记录" }));
+
+    expect(await screen.findByText("新版首页")).toBeTruthy();
+    expect(screen.queryByText("旧版首页")).toBeNull();
+    expect(screen.getByText(/已从最新版本重新加载/)).toBeTruthy();
+  });
+
+  it("发送失败时保留草稿，重试复用幂等键且成功后才清空", async () => {
+    const user = userEvent.setup();
+    const workspacePath = "/Users/chen/Documents/retry-send";
+    const sendCalls: Readonly<Record<string, unknown>>[] = [];
+    const runtime = new Proxy(
+      {},
+      {
+        get: (_target, property) => async (params: Readonly<Record<string, unknown>>) => {
+          const method = String(property);
+          if (method === "session.send") {
+            sendCalls.push(params);
+            if (sendCalls.length === 1) {
+              return {
+                ok: false as const,
+                error: { code: "NETWORK", message: "连接暂时中断", retryable: true },
+              };
+            }
+            return successful({
+              session: { sessionId: "session-retry", title: "重试发送", updatedAt: 2 },
+              disposition: "started",
+            });
+          }
+          const value = (() => {
+            if (method === "runtime.ping")
+              return { capabilities: ["session-conversation-v1", "runtime-events-v1"] };
+            if (method === "workspace.list") return { workspaces: [{ workspacePath }] };
+            if (method === "workspace.status") return { workspacePath, mode: "folder" };
+            if (method === "workspace.trustStatus") return { trusted: true };
+            if (method === "session.list")
+              return {
+                sessions:
+                  sendCalls.length > 1
+                    ? [{ sessionId: "session-retry", title: "重试发送", updatedAt: 2 }]
+                    : [],
+              };
+            if (method === "runs.list") return { runs: [] };
+            if (method === "session.transcript")
+              return {
+                session: { sessionId: "session-retry" },
+                items: [{ id: "retry-message", kind: "userMessage", content: "请继续处理" }],
+                queuedInputs: [],
+                revision: "revision-retry",
+              };
+            if (method === "jobs.list") return { jobs: [] };
+            if (method === "config.skills") return { skills: [] };
+            if (method === "config.mcpServers") return { servers: [] };
+            if (method === "config.providers") return { providers: [] };
+            if (method === "config.get") return { version: 0 };
+            if (method === "usage.get") return { usage: {} };
+            return {};
+          })();
+          return successful(value);
+        },
+      },
+    ) as RendererBridge["runtime"];
+    installBridge(runtime);
+    window.history.replaceState({}, "", "/#/task/new");
+
+    render(<DesktopApp />);
+    const textbox = await screen.findByRole("textbox", { name: "消息" });
+    await user.type(textbox, "请继续处理");
+    await user.click(screen.getByRole("button", { name: "发送消息" }));
+
+    expect(await screen.findByText(/NETWORK: 连接暂时中断/)).toBeTruthy();
+    expect((textbox as HTMLTextAreaElement).value).toBe("请继续处理");
+    await user.click(screen.getByRole("button", { name: "发送消息" }));
+
+    await waitFor(() => expect((textbox as HTMLTextAreaElement).value).toBe(""));
+    expect(sendCalls).toHaveLength(2);
+    expect(sendCalls[0]?.idempotencyKey).toBe(sendCalls[1]?.idempotencyKey);
+    expect(window.location.hash).toBe("#/session/session-retry");
+  });
+
   it("按 Session 隔离 Changes，并使用所属 Run 的指纹审批", async () => {
     const user = userEvent.setup();
     const reviewCalls: Readonly<Record<string, unknown>>[] = [];
@@ -367,7 +600,18 @@ describe("DesktopApp renderer", () => {
     render(<DesktopApp />);
     await screen.findByText("只改 B");
     eventListener?.({
-      eventId: "approval-requested-b",
+      eventId: "approval-requested-shared-id",
+      topic: "approval.requested",
+      scope: { workspacePath: "/Users/other/project", sessionId: "session-b", runId: "run-b" },
+      payload: {
+        approvalId: "approval-foreign",
+        runId: "run-b",
+        request: { title: "不应显示的审批", detail: "来自另一个工作区" },
+      },
+    });
+    expect(screen.queryByText("不应显示的审批")).toBeNull();
+    eventListener?.({
+      eventId: "approval-requested-shared-id",
       topic: "approval.requested",
       scope: { workspacePath, sessionId: "session-b", runId: "run-b" },
       payload: {
