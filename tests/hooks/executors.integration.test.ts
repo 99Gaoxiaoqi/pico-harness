@@ -1,5 +1,5 @@
 import { createServer, type Server } from "node:http";
-import { access, mkdtemp } from "node:fs/promises";
+import { access, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -154,6 +154,47 @@ describe("DefaultHookExecutor command", () => {
     expect(result).toEqual({ decision: "allow" });
     expect(Date.now() - started).toBeLessThan(70);
     await expect(rewoken).resolves.toMatchObject({ decision: "defer" });
+    await executor.dispose();
+  });
+
+  it("dispose 终止 async command 进程树并拒绝迟到 rewake", async () => {
+    if (process.platform === "win32") return;
+    const workDir = await mkdtemp(join(tmpdir(), "pico-hook-async-dispose-"));
+    const sentinel = join(workDir, "descendant-ran");
+    const rewake = vi.fn();
+    const childScript = `setTimeout(() => require('fs').writeFileSync(${JSON.stringify(sentinel)}, 'x'), 250)`;
+    const parentScript = [
+      "const {spawn}=require('child_process')",
+      `spawn(process.execPath, ['-e', ${JSON.stringify(childScript)}])`,
+      "setTimeout(() => {}, 5000)",
+    ].join(";");
+    const executor = new DefaultHookExecutor({ workDir, onAsyncRewake: rewake });
+    try {
+      await expect(
+        executor.execute(
+          resolved({
+            type: "command",
+            command: process.execPath,
+            args: ["-e", parentScript],
+            asyncRewake: true,
+          }),
+          input,
+          {},
+        ),
+      ).resolves.toEqual({ decision: "allow" });
+
+      await executor.dispose();
+      await new Promise((resolve) => setTimeout(resolve, 350));
+
+      expect(rewake).not.toHaveBeenCalled();
+      await expect(access(sentinel)).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(
+        executor.execute(resolved({ type: "command", command: "true" }), input, {}),
+      ).rejects.toThrow("Hook runtime disposed");
+    } finally {
+      await executor.dispose();
+      await rm(workDir, { recursive: true, force: true });
+    }
   });
 });
 
