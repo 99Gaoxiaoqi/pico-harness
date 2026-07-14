@@ -63,7 +63,7 @@ export function createToolResultObservationProcessor(
   return async ({ toolCall, result, output, sessionId }) => {
     // read_file 自身提供行分页和页大小上限。如果再走通用外部化，
     // 读 artifact 的结果会被写成新 artifact，形成 artifact→read→artifact 循环。
-    if (toolCall.name === "read_file") {
+    if (toolCall.name === "read_file" || toolCall.name === "read_artifact") {
       return output;
     }
 
@@ -111,6 +111,9 @@ export function createToolResultObservationProcessor(
       `artifactUri: ${buildArtifactUri(meta.sessionId ?? sessionId, meta.id)}`,
       `artifactId: ${meta.id}`,
       ...(meta.path !== undefined ? [`artifactPath: ${meta.path}`] : []),
+      ...(meta.path !== undefined
+        ? ["readBack: 调用 read_artifact 并传入上述 artifactPath 可分页回读原文"]
+        : []),
       `originalChars: ${summary.originalChars}`,
       `summaryStrategy: ${summary.strategy}`,
       "summary:",

@@ -15,7 +15,7 @@ import {
 } from "node:fs/promises";
 // 用 pathe 替代 node:path:artifact 的 meta.path 会被持久化并跨平台对比,
 // 统一正斜杠后断言 .claw/artifacts/sessions/ / tool-results/ 才能稳定成立。
-import { dirname, join, resolve } from "pathe";
+import { dirname, join, relative, resolve } from "pathe";
 import { writeJsonAtomic } from "../storage/atomic-json.js";
 
 const DEFAULT_TTL_HOURS = 168;
@@ -101,6 +101,11 @@ export interface ArtifactCloneSessionResult {
   mappings: ArtifactCloneMapping[];
 }
 
+export interface ReadArtifactPathResult {
+  readonly meta: ToolResultArtifactMeta;
+  readonly content: string;
+}
+
 interface StoredArtifact {
   key: string;
   meta: ToolResultArtifactMeta;
@@ -183,6 +188,50 @@ export class ToolResultArtifactStore {
       }
       throw err;
     }
+  }
+
+  /**
+   * Reads an artifact only when the caller-provided absolute path exactly matches
+   * this store's committed sessions/<safe-session>/tool-results/<id>.txt layout.
+   * This is the model-facing read boundary; it never grants a generic filesystem root.
+   */
+  async readPath(path: string): Promise<ReadArtifactPathResult | undefined> {
+    const absolutePath = resolve(path);
+    const relativePath = relative(this.sessionsDir, absolutePath);
+    const segments = relativePath.split("/");
+    if (
+      segments.length !== 3 ||
+      !SAFE_ID_RE.test(segments[0] ?? "") ||
+      segments[1] !== "tool-results" ||
+      !segments[2]?.endsWith(".txt")
+    ) {
+      throw new ArtifactIntegrityError(path, "path is outside the committed artifact layout");
+    }
+    const safeSessionId = segments[0]!;
+    const id = assertSafeId(segments[2]!.slice(0, -".txt".length));
+    if (absolutePath !== this.contentPath(id, safeSessionId)) {
+      throw new ArtifactIntegrityError(id, "path does not match the canonical artifact path");
+    }
+    const metadataPath = this.metaPath(id, safeSessionId);
+    const metadataInfo = await lstat(metadataPath).catch((error: unknown) => {
+      if (isNodeError(error) && error.code === "ENOENT") return undefined;
+      throw error;
+    });
+    if (!metadataInfo) return undefined;
+    if (!metadataInfo.isFile() || metadataInfo.isSymbolicLink()) {
+      throw new ArtifactIntegrityError(id, "metadata is not a regular non-symlink file");
+    }
+    const parsed = parseMeta(await readFile(metadataPath, "utf8"), safeSessionId);
+    if (!parsed) throw new ArtifactIntegrityError(id, "committed metadata is invalid");
+    const meta = await readCommittedMetaStrict(
+      metadataPath,
+      safeSessionId,
+      parsed.sessionId,
+      absolutePath,
+    );
+    if (meta.availability === "evicted") return undefined;
+    const contents = await readArtifactBytesStrict(meta, absolutePath);
+    return { meta, content: contents.toString("utf8") };
   }
 
   async readMeta(id: string, sessionId?: string): Promise<ToolResultArtifactMeta | undefined> {

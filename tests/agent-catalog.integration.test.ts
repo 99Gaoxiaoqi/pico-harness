@@ -49,7 +49,7 @@ describe("统一 Agent 目录集成", () => {
 
     expect(result.status).toBe("completed");
     expect(seen.systemPrompt).toBe("只报告安全问题。");
-    expect(seen.tools).toEqual(["delegate_status", "grep", "read_file"]);
+    expect(seen.tools).toEqual(["delegate_status", "grep", "read_artifact", "read_file"]);
   });
 
   it("子代理 skill_view 复用宿主的 Plugin Skill Catalog", async () => {
@@ -157,7 +157,10 @@ describe("统一 Agent 目录集成", () => {
     });
 
     expect(profiles.find((profile) => profile.name === "locked")?.tools).toEqual([]);
-    expect(registry.getAvailableTools().map((tool) => tool.name)).toEqual(["delegate_status"]);
+    expect(registry.getAvailableTools().map((tool) => tool.name)).toEqual([
+      "read_artifact",
+      "delegate_status",
+    ]);
   });
 
   it("同名覆盖按大小写不敏感键解析，高优先级保留自己的展示名", async () => {

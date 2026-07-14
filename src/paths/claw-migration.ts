@@ -74,6 +74,9 @@ export class ClawMigrationLockedError extends Error {
 interface PlannedMigrationItem extends ClawMigrationItem {
   readonly mode: number;
   readonly targetRoot: string;
+  readonly targetSize: number;
+  readonly targetSha256: string;
+  readonly transform?: "artifact-metadata-v2";
 }
 
 interface MigrationJournal {
@@ -269,7 +272,6 @@ async function buildMigrationPlan(
   const directoryMappings: ReadonlyArray<readonly [string, string]> = [
     ["sessions", paths.workspace.sessions],
     ["memory", paths.workspace.memory],
-    ["artifacts", paths.workspace.artifacts],
     ["traces", paths.workspace.traces],
     ["tasks", paths.workspace.tasks],
     ["fork-staging", paths.workspace.forkStaging],
@@ -284,6 +286,7 @@ async function buildMigrationPlan(
       items,
     );
   }
+  await addArtifactFiles(paths, legacyRoot, items);
 
   const fileMappings: ReadonlyArray<readonly [string, string]> = [
     ["runtime.sqlite", paths.workspace.runtimeDatabase],
@@ -333,6 +336,28 @@ async function addSkills(
   }
 }
 
+async function addArtifactFiles(
+  paths: PicoPaths,
+  legacyRoot: string,
+  items: PlannedMigrationItem[],
+): Promise<void> {
+  const sourceRoot = join(legacyRoot, "artifacts");
+  for (const sourcePath of await listRegularFiles(sourceRoot)) {
+    const relativePath = relative(sourceRoot, sourcePath);
+    const targetPath = join(paths.workspace.artifacts, relativePath);
+    const transform = isArtifactMetadataPath(relativePath) ? "artifact-metadata-v2" : undefined;
+    await addKnownFile(
+      sourcePath,
+      targetPath,
+      paths.workspace.root,
+      "workspace-state",
+      items,
+      undefined,
+      transform,
+    );
+  }
+}
+
 async function addDirectoryFiles(
   sourceRoot: string,
   targetRoot: string,
@@ -378,6 +403,7 @@ async function addKnownFile(
   kind: ClawMigrationItemKind,
   items: PlannedMigrationItem[],
   sourceInfo?: Stats,
+  transform?: PlannedMigrationItem["transform"],
 ): Promise<void> {
   const infoBefore = sourceInfo ?? (await stat(sourcePath));
   const sha256 = await hashFile(sourcePath);
@@ -388,6 +414,9 @@ async function addKnownFile(
     ]);
   }
   assertWithin(targetRoot, targetPath);
+  const targetContent = transform
+    ? await transformedMigrationContent(transform, sourcePath, targetPath)
+    : undefined;
   items.push({
     kind,
     sourcePath,
@@ -396,6 +425,9 @@ async function addKnownFile(
     size: info.size,
     mode: info.mode & 0o777,
     sha256,
+    targetSize: targetContent?.byteLength ?? info.size,
+    targetSha256: targetContent ? hashBytes(targetContent) : sha256,
+    ...(transform ? { transform } : {}),
   });
 }
 
@@ -525,9 +557,27 @@ async function copyVerifiedWithoutReplace(item: PlannedMigrationItem): Promise<v
     `.${basename(item.targetPath)}.pico-migrate-${process.pid}-${randomUUID()}`,
   );
   try {
-    await copyFile(item.sourcePath, temporaryPath, constants.COPYFILE_EXCL);
-    if ((await hashFile(temporaryPath)) !== item.sha256) {
+    if (item.transform) {
+      const content = await transformedMigrationContent(
+        item.transform,
+        item.sourcePath,
+        item.targetPath,
+      );
+      const handle = await open(temporaryPath, "wx", 0o600);
+      try {
+        await handle.writeFile(content);
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+    } else {
+      await copyFile(item.sourcePath, temporaryPath, constants.COPYFILE_EXCL);
+    }
+    if ((await hashFile(item.sourcePath)) !== item.sha256) {
       throw new Error(`Source changed while copying: ${item.sourcePath}`);
+    }
+    if ((await hashFile(temporaryPath)) !== item.targetSha256) {
+      throw new Error(`Transformed destination verification failed: ${item.targetPath}`);
     }
     await installTemporaryWithoutReplace(temporaryPath, item.targetPath);
     await chmod(item.targetPath, item.mode);
@@ -582,7 +632,9 @@ async function verifyAllTargets(items: readonly PlannedMigrationItem[]): Promise
   if (conflicts.length > 0) throw new ClawMigrationConflictError(conflicts);
 }
 
-async function targetMatches(item: Pick<PlannedMigrationItem, "targetPath" | "size" | "sha256">) {
+async function targetMatches(
+  item: Pick<PlannedMigrationItem, "targetPath" | "targetSize" | "targetSha256">,
+) {
   const info = await lstat(item.targetPath).catch((error: unknown) => {
     if (isErrnoCode(error, "ENOENT")) return undefined;
     throw error;
@@ -590,8 +642,8 @@ async function targetMatches(item: Pick<PlannedMigrationItem, "targetPath" | "si
   return (
     info?.isFile() === true &&
     !info.isSymbolicLink() &&
-    info.size === item.size &&
-    (await hashFile(item.targetPath)) === item.sha256
+    info.size === item.targetSize &&
+    (await hashFile(item.targetPath)) === item.targetSha256
   );
 }
 
@@ -670,7 +722,10 @@ function samePlannedItems(
         item.targetRoot === candidate.targetRoot &&
         item.size === candidate.size &&
         item.mode === candidate.mode &&
-        item.sha256 === candidate.sha256
+        item.sha256 === candidate.sha256 &&
+        item.targetSize === candidate.targetSize &&
+        item.targetSha256 === candidate.targetSha256 &&
+        item.transform === candidate.transform
       );
     })
   );
@@ -783,8 +838,70 @@ function isPlannedItem(value: unknown): value is PlannedMigrationItem {
     isPublicItem(value) &&
     isRecord(value) &&
     typeof value["mode"] === "number" &&
-    typeof value["targetRoot"] === "string"
+    typeof value["targetRoot"] === "string" &&
+    typeof value["targetSize"] === "number" &&
+    typeof value["targetSha256"] === "string" &&
+    (value["transform"] === undefined || value["transform"] === "artifact-metadata-v2")
   );
+}
+
+function isArtifactMetadataPath(relativePath: string): boolean {
+  return /^sessions[/\\][A-Za-z0-9._-]+[/\\]tool-results[/\\][A-Za-z0-9._-]+\.json$/u.test(
+    relativePath,
+  );
+}
+
+async function transformedMigrationContent(
+  transform: NonNullable<PlannedMigrationItem["transform"]>,
+  sourcePath: string,
+  targetPath: string,
+): Promise<Buffer> {
+  if (transform !== "artifact-metadata-v2")
+    throw new Error(`Unknown migration transform: ${transform}`);
+  let value: unknown;
+  try {
+    value = JSON.parse(await readFile(sourcePath, "utf8")) as unknown;
+  } catch (error) {
+    throw new ClawMigrationConflictError([
+      {
+        sourcePath,
+        targetPath,
+        reason: `artifact metadata is not valid JSON: ${errorMessage(error)}`,
+      },
+    ]);
+  }
+  if (
+    !isRecord(value) ||
+    value["schemaVersion"] !== 2 ||
+    typeof value["id"] !== "string" ||
+    typeof value["safeSessionId"] !== "string" ||
+    typeof value["path"] !== "string"
+  ) {
+    throw new ClawMigrationConflictError([
+      {
+        sourcePath,
+        targetPath,
+        reason: "artifact metadata must be a valid schema v2 commit marker",
+      },
+    ]);
+  }
+  const expectedId = basename(targetPath, ".json");
+  const expectedSafeSessionId = basename(dirname(dirname(targetPath)));
+  if (value["id"] !== expectedId || value["safeSessionId"] !== expectedSafeSessionId) {
+    throw new ClawMigrationConflictError([
+      { sourcePath, targetPath, reason: "artifact metadata identity does not match its path" },
+    ]);
+  }
+  const portableContentPath = `${targetPath.slice(0, -".json".length)}.txt`.replaceAll("\\", "/");
+  return Buffer.from(`${JSON.stringify({ ...value, path: portableContentPath }, null, 2)}\n`);
+}
+
+function hashBytes(value: Uint8Array): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function isItemKind(value: unknown): value is ClawMigrationItemKind {

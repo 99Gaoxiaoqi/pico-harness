@@ -4,11 +4,20 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  hashToolResultArtifactArgs,
+  ToolResultArtifactStore,
+} from "../../src/context/artifact-store.js";
+import {
   ClawMigrationConflictError,
   ClawMigrationLockedError,
   migrateLegacyClawWorkspace,
 } from "../../src/paths/claw-migration.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
+import {
+  createArtifactInspectorContext,
+  createArtifactInspectorSource,
+  readInspectorPage,
+} from "../../src/tui/inspector.js";
 
 describe("legacy .claw workspace migration", () => {
   const cleanup: string[] = [];
@@ -137,6 +146,9 @@ describe("legacy .claw workspace migration", () => {
     const sourcePath = join(paths.canonicalWorkDir, ".claw", "mcp.json");
     await writePath(paths.project.mcp, '{"mcpServers":{}}\n');
     const sourceInfo = await stat(sourcePath);
+    const sha256 = createHash("sha256")
+      .update(await readFile(sourcePath))
+      .digest("hex");
     const item = {
       kind: "project-mcp",
       sourcePath,
@@ -144,9 +156,9 @@ describe("legacy .claw workspace migration", () => {
       targetRoot: paths.project.root,
       size: sourceInfo.size,
       mode: sourceInfo.mode & 0o777,
-      sha256: createHash("sha256")
-        .update(await readFile(sourcePath))
-        .digest("hex"),
+      sha256,
+      targetSize: sourceInfo.size,
+      targetSha256: sha256,
     };
     await writePath(
       join(paths.workspace.migrations, "claw-v1.journal.json"),
@@ -182,6 +194,51 @@ describe("legacy .claw workspace migration", () => {
     await expect(
       readFile(join(paths.workspace.sessions, "cross-device.jsonl"), "utf8"),
     ).resolves.toBe("portable\n");
+  });
+
+  it("rewrites artifact metadata so migrated artifacts remain cloneable and inspectable", async () => {
+    const { home, paths, workDir } = await fixture();
+    const args = { command: "npm test" };
+    const legacyStore = new ToolResultArtifactStore({
+      baseDir: join(workDir, ".claw", "artifacts"),
+    });
+    const legacyMeta = await legacyStore.write({
+      id: "result-a",
+      sessionId: "session-a",
+      toolName: "bash",
+      args,
+      output: "artifact body",
+    });
+
+    await migrateLegacyClawWorkspace(workDir, { picoHome: home });
+
+    const migratedStore = new ToolResultArtifactStore({ baseDir: paths.workspace.artifacts });
+    const migratedMeta = await migratedStore.readMeta("result-a", "session-a");
+    expect(migratedMeta?.path).toBe(
+      join(paths.workspace.artifacts, "sessions", "session-a", "tool-results", "result-a.txt"),
+    );
+    expect(migratedMeta?.path).not.toBe(legacyMeta.path);
+    await expect(migratedStore.cloneSession("session-a", "session-b")).resolves.toMatchObject({
+      sourceSessionId: "session-a",
+      targetSessionId: "session-b",
+    });
+
+    const source = createArtifactInspectorSource({
+      title: "bash result",
+      artifactRef: "artifact://session-a/result-a",
+      context: createArtifactInspectorContext({
+        workDir,
+        sessionId: "session-a",
+        trustedRoot: paths.workspace.artifacts,
+      }),
+      expectedToolName: "bash",
+      expectedArgsHash: hashToolResultArtifactArgs(args),
+    });
+    expect(source).toBeDefined();
+    await expect(readInspectorPage(source!)).resolves.toMatchObject({
+      content: "artifact body",
+      availability: "complete",
+    });
   });
 
   async function fixture() {
