@@ -81,6 +81,13 @@ export const previewData: AppData = {
       sessionId: "session-atlas",
       revision: "preview.1",
       queuedCount: 0,
+      settings: {
+        modelRouteId: "openai/gpt-5.4",
+        model: "gpt-5.4",
+        mode: "default",
+        thinkingEffort: "high",
+        reasoningLevels: ["off", "low", "medium", "high"],
+      },
       items: [
         {
           id: "preview-user",
@@ -208,6 +215,10 @@ export const previewData: AppData = {
       state: "disabled",
       meta: "未配置",
     },
+  ],
+  modelRoutes: [
+    { id: "openai/gpt-5.4", label: "gpt-5.4" },
+    { id: "openai/gpt-5.4-mini", label: "gpt-5.4 mini" },
   ],
   usage: {
     inputTokens: 128_400,

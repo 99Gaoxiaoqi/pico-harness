@@ -686,7 +686,11 @@ function ConversationPage() {
             },
           ]
         : [];
-    return [...persisted, ...live, ...decisions, ...changes];
+    const goal =
+      conversation?.goalItem && !persisted.some((item) => item.kind === "goal")
+        ? [conversation.goalItem]
+        : [];
+    return [...persisted, ...goal, ...live, ...decisions, ...changes];
   }, [
     activeRun,
     data.approvals,
@@ -871,14 +875,85 @@ function ConversationPage() {
           onResume={activeRun ? () => void actions.resumeRun(activeRun.id) : undefined}
           onStop={activeRun ? () => void actions.stopRun(activeRun.id) : undefined}
           leadingAccessory={
-            <span className="conversation-context-label">
-              {data.workspaceMode === "git" ? (
-                <FolderGit2 aria-hidden="true" />
-              ) : (
-                <Folder aria-hidden="true" />
+            <>
+              <span className="conversation-context-label">
+                {data.workspaceMode === "git" ? (
+                  <FolderGit2 aria-hidden="true" />
+                ) : (
+                  <Folder aria-hidden="true" />
+                )}
+                {data.workspacePath?.split(/[\\/]/).at(-1)}
+              </span>
+              {sessionId && conversation?.settings && (
+                <>
+                  <label className="conversation-context-option">
+                    <span className="conversation-sr-only">模型</span>
+                    <select
+                      aria-label="模型"
+                      value={conversation.settings.modelRouteId ?? ""}
+                      disabled={Boolean(activeRun) || Boolean(busy)}
+                      onChange={(event) =>
+                        void actions.updateSessionSettings(sessionId, {
+                          modelRouteId: event.target.value,
+                        })
+                      }
+                    >
+                      {!data.modelRoutes.some(
+                        (route) => route.id === conversation.settings?.modelRouteId,
+                      ) && (
+                        <option value={conversation.settings.modelRouteId ?? ""}>
+                          {conversation.settings.model}
+                        </option>
+                      )}
+                      {data.modelRoutes.map((route) => (
+                        <option key={route.id} value={route.id}>
+                          {route.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="conversation-context-option">
+                    <span className="conversation-sr-only">权限模式</span>
+                    <select
+                      aria-label="权限模式"
+                      value={conversation.settings.mode}
+                      disabled={Boolean(activeRun) || Boolean(busy)}
+                      onChange={(event) =>
+                        void actions.updateSessionSettings(sessionId, {
+                          mode: event.target.value as "default" | "plan" | "auto" | "yolo",
+                        })
+                      }
+                    >
+                      <option value="default">默认</option>
+                      <option value="plan">计划</option>
+                      <option value="auto">自动</option>
+                      <option value="yolo">完全访问</option>
+                    </select>
+                  </label>
+                  {conversation.settings.reasoningLevels.length > 0 && (
+                    <label className="conversation-context-option">
+                      <span className="conversation-sr-only">Thinking</span>
+                      <select
+                        aria-label="Thinking"
+                        value={conversation.settings.thinkingEffort}
+                        disabled={Boolean(activeRun) || Boolean(busy)}
+                        onChange={(event) =>
+                          void actions.updateSessionSettings(sessionId, {
+                            thinkingEffort: event.target.value,
+                          })
+                        }
+                      >
+                        {conversation.settings.reasoningLevels.map((level) => (
+                          <option key={level} value={level}>
+                            {level}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
+                </>
               )}
-              {data.workspacePath?.split(/[\\/]/).at(-1)}
-            </span>
+            </>
           }
         />
       }

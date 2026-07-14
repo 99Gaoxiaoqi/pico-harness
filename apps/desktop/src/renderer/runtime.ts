@@ -7,6 +7,8 @@ import {
   type ConnectionState,
   type ConversationView,
   type JsonRecord,
+  type ModelRouteView,
+  type SessionSettingsView,
   type UsageView,
   type WorkspaceCapabilities,
   type WorkspaceMode,
@@ -227,6 +229,63 @@ function parseConversation(value: unknown, sessionId: string): ConversationView 
   };
 }
 
+function parseSessionSettings(value: unknown): SessionSettingsView | undefined {
+  const result = isRecord(value) ? value : {};
+  const settings = isRecord(result.settings) ? result.settings : result;
+  const model = stringValue(settings.model);
+  const mode = settings.mode;
+  if (!model || (mode !== "default" && mode !== "plan" && mode !== "auto" && mode !== "yolo")) {
+    return undefined;
+  }
+  return {
+    modelRouteId: stringValue(settings.modelRouteId) || undefined,
+    model,
+    mode,
+    thinkingEffort: stringValue(settings.thinkingEffort, "off"),
+    reasoningLevels: Array.isArray(settings.reasoningLevels)
+      ? settings.reasoningLevels.map((level) => stringValue(level)).filter(Boolean)
+      : [],
+  };
+}
+
+function parseGoalItem(value: unknown): ConversationItemView | undefined {
+  const result = isRecord(value) ? value : {};
+  const snapshot = isRecord(result.goal) ? result.goal : undefined;
+  if (!snapshot) return undefined;
+  const activeGoalId = stringValue(snapshot.activeGoalId);
+  const goal = recordArray(snapshot.goals).find(
+    (candidate) => stringValue(candidate.id) === activeGoalId,
+  );
+  if (!goal) return undefined;
+  const status = stringValue(goal.status);
+  return {
+    id: `goal:${activeGoalId}`,
+    kind: "goal",
+    title: stringValue(goal.title, "当前目标"),
+    detail: stringValue(goal.progress ?? goal.description) || undefined,
+    state:
+      status === "complete"
+        ? "done"
+        : status === "blocked"
+          ? "failed"
+          : status === "paused"
+            ? "waiting"
+            : "active",
+  };
+}
+
+function parseModelRoutes(value: unknown): readonly ModelRouteView[] {
+  const result = isRecord(value) ? value : {};
+  return recordArray(result.providers).flatMap((provider) => {
+    const providerId = stringValue(provider.id);
+    if (!providerId || !Array.isArray(provider.models)) return [];
+    return provider.models
+      .map((model) => stringValue(model))
+      .filter(Boolean)
+      .map((model) => ({ id: `${providerId}/${model}`, label: model }));
+  });
+}
+
 function parseChanges(value: unknown): {
   readonly changes: readonly ChangeView[];
   readonly fingerprint?: string | undefined;
@@ -389,6 +448,7 @@ function mergeLoadedData(base: AppData, results: Readonly<Record<string, unknown
     skills: recordArray(skillResult.skills).map(capability),
     mcpServers: recordArray(mcpResult.servers).map(capability),
     providers: recordArray(providerResult.providers).map(capability),
+    modelRoutes: parseModelRoutes(providerResult),
     changes: recordArray(changeResult.changes).map((item) => ({
       path: stringValue(item.path),
       status:
@@ -425,6 +485,14 @@ export interface RuntimeActions {
   renameSession(sessionId: string, title: string): Promise<void>;
   forkSession(sessionId: string): Promise<string | undefined>;
   compactSession(sessionId: string): Promise<void>;
+  updateSessionSettings(
+    sessionId: string,
+    patch: Readonly<{
+      modelRouteId?: string;
+      mode?: "default" | "plan" | "auto" | "yolo";
+      thinkingEffort?: string;
+    }>,
+  ): Promise<void>;
   setSessionArchived(sessionId: string, archived: boolean): Promise<void>;
   pauseRun(runId: string): Promise<void>;
   resumeRun(runId: string): Promise<void>;
@@ -577,10 +645,16 @@ export function useRuntimeStore(): RuntimeStore {
       const runId =
         stringValue(activeRun?.runId) ||
         dataRef.current.runs.find((run) => run.sessionId === sessionId)?.id;
-      const sessionUsage = await optionalInvoke(bridge, "usage.get", { workspacePath, sessionId });
+      const [sessionUsage, settingsResult, goalResult] = await Promise.all([
+        optionalInvoke(bridge, "usage.get", { workspacePath, sessionId }),
+        optionalInvoke(bridge, "session.settings.get", { workspacePath, sessionId }),
+        optionalInvoke(bridge, "goal.get", { workspacePath, sessionId }),
+      ]);
       let conversation: ConversationView = {
         ...parseConversation(record, sessionId),
         ...(!sessionUsage.error ? { usage: parseUsage(sessionUsage.value) } : {}),
+        ...(!settingsResult.error ? { settings: parseSessionSettings(settingsResult.value) } : {}),
+        ...(!goalResult.error ? { goalItem: parseGoalItem(goalResult.value) } : {}),
       };
       if (runId) {
         const changeList = await optionalInvoke(bridge, "changes.list", { workspacePath, runId });
@@ -925,6 +999,20 @@ export function useRuntimeStore(): RuntimeStore {
             await loadConversation(bridge, workspacePath, sessionId);
           }
           setMessage("会话上下文已压缩，可见历史已从 Runtime 重新加载。");
+        });
+      },
+      async updateSessionSettings(sessionId, patch) {
+        const workspacePath = dataRef.current.workspacePath;
+        if (!workspacePath) return;
+        await perform("session-settings", async (bridge) => {
+          if (!preview) {
+            await invoke(bridge, "session.settings.update", {
+              workspacePath,
+              sessionId,
+              ...patch,
+            });
+            await loadConversation(bridge, workspacePath, sessionId);
+          }
         });
       },
       async setSessionArchived(sessionId, archived) {

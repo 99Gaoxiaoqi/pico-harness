@@ -47,6 +47,21 @@ export interface ConversationView {
   readonly changes?: readonly ChangeView[] | undefined;
   readonly changeFingerprint?: string | undefined;
   readonly usage?: UsageView | undefined;
+  readonly settings?: SessionSettingsView | undefined;
+  readonly goalItem?: ConversationItemView | undefined;
+}
+
+export interface SessionSettingsView {
+  readonly modelRouteId?: string | undefined;
+  readonly model: string;
+  readonly mode: "default" | "plan" | "auto" | "yolo";
+  readonly thinkingEffort: string;
+  readonly reasoningLevels: readonly string[];
+}
+
+export interface ModelRouteView {
+  readonly id: string;
+  readonly label: string;
 }
 
 export interface ApprovalView {
@@ -132,6 +147,7 @@ export interface AppData {
   readonly skills: readonly CapabilityView[];
   readonly mcpServers: readonly CapabilityView[];
   readonly providers: readonly CapabilityView[];
+  readonly modelRoutes: readonly ModelRouteView[];
   readonly usage: UsageView;
   readonly configVersion: number;
   readonly launchAtLogin?: boolean | undefined;
@@ -152,6 +168,7 @@ export const emptyData: AppData = {
   skills: [],
   mcpServers: [],
   providers: [],
+  modelRoutes: [],
   usage: {},
   configVersion: 0,
   notices: {},
