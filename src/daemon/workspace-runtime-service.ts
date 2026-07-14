@@ -177,16 +177,17 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
           .listRuntimeEvents({
             ...(cursor.afterEventId ? { afterEventId: cursor.afterEventId } : {}),
             workspacePath,
-            limit: 10_000,
+            limit: cursor.limit ?? 10_000,
           })
           .map(runtimeEventFromLedger),
       );
     }
     // Event IDs are random. Timestamp plus ID gives a deterministic cross-workspace
     // presentation order; callers needing a resumable cursor use workspacePath.
-    return events.sort(
+    const sorted = events.sort(
       (left, right) => left.at - right.at || left.eventId.localeCompare(right.eventId),
     );
+    return cursor.limit === undefined ? sorted : sorted.slice(0, cursor.limit);
   }
 
   subscribe(listener: (event: RuntimeEvent) => void): () => void {
@@ -201,6 +202,11 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
 
   setRegistrationChangedListener(listener: () => Promise<void>): void {
     this.registrationChanged = listener;
+  }
+
+  /** Persists and broadcasts events projected by non-Run desktop adapters. */
+  publishDesktopEvent(event: RuntimeEvent): void {
+    this.publish(event);
   }
 
   async close(): Promise<void> {

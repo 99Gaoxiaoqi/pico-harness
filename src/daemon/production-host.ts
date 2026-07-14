@@ -16,6 +16,7 @@ import {
 import { WorkspaceTrustStore } from "../security/workspace-trust.js";
 import type { CronJobRecord } from "../tasks/runtime-types.js";
 import { createCronWorkspaceRuntimeFactory } from "./cron-workspace-runtime.js";
+import { DesktopRuntimeService } from "./desktop-runtime-service.js";
 import type { LocalDaemonEndpoint } from "./endpoint.js";
 import { LocalDaemonHost } from "./runtime-host.js";
 import { WorkspaceRegistrationStore } from "./workspace-registration.js";
@@ -46,6 +47,11 @@ export function createProductionLocalDaemonHost(
     execute: async () => {
       throw new Error("daemon run.start 缺少后台 policySnapshot，已按 fail-closed 拒绝执行");
     },
+  });
+  const desktopService = new DesktopRuntimeService({
+    runtimeService: service,
+    registrationStore,
+    trustStore,
   });
   const validate = async (job: CronJobRecord): Promise<{ allowed: boolean; reason?: string }> => {
     try {
@@ -105,7 +111,7 @@ export function createProductionLocalDaemonHost(
     },
   });
   const host = new LocalDaemonHost({
-    service,
+    service: desktopService,
     cronRuntimeFactory,
     registrationStore,
     ...(options.endpoint ? { endpoint: options.endpoint } : {}),
