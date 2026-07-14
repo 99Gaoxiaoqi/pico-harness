@@ -21,11 +21,13 @@
     "desktop:make": "npm run make --workspace @pico/desktop",
     "desktop:typecheck": "npm run typecheck --workspace @pico/desktop",
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
-    "prebuild": "npm run clean",
+    "build:protocol": "npm run build --workspace @pico/protocol",
+    "prebuild": "npm run clean && npm run build:protocol",
     "build": "tsc -p tsconfig.build.json",
     "postbuild": "node -e \"require('node:fs').chmodSync('dist/cli/main.js',0o755)\"",
     "prepack": "npm run build && npm run smoke:package",
     "smoke:package": "node scripts/package-bin-smoke.mjs",
+    "pretypecheck": "npm run build:protocol",
     "typecheck": "tsc --noEmit",
     "check:storage": "node scripts/check-storage-capability.mjs",
     "pretest": "npm run check:storage",
@@ -45,6 +47,7 @@
     "node": "22.x"
   },
   "dependencies": {
+    "@pico/protocol": "*",
     "better-sqlite3": "^12.11.1",
     "gpt-tokenizer": "^3.4.0",
     "ink": "^7.1.0",
