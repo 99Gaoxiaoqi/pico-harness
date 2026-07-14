@@ -83,6 +83,7 @@ import { SessionForkService } from "../engine/session-fork-service.js";
 import type { Reporter } from "../engine/reporter.js";
 import type { SteerQueue } from "../engine/steer-queue.js";
 import { McpConnectionManager, type McpStatusSnapshot } from "../mcp/manager.js";
+import { createHookedElicitationHandler, McpElicitationUiHandler } from "../mcp/elicitation-ui.js";
 import { hasLocalUiCommandAction } from "./local-ui-command.js";
 import {
   confirmSessionBrowserSelection,
@@ -112,6 +113,7 @@ import {
 import {
   createTuiRuntimeState,
   DelegationWakeCoordinator,
+  HookRewakeCoordinator,
   type TuiRuntimeState,
 } from "./runtime-state.js";
 import { createTuiTerminalGridSession } from "./terminal-grid.js";
@@ -119,6 +121,8 @@ import { hydrateTuiReporter } from "./session-hydration.js";
 import { projectTuiEntriesForRendering } from "./tui-event-store.js";
 import { AskUserHandler } from "../tools/ask-user.js";
 import { bindAskUserDialogs } from "./ask-user-dialog.js";
+import { bindMcpElicitationDialogs } from "./mcp-elicitation-dialog.js";
+import { createHooksPanelDialogRequest, HOOKS_PANEL_DIALOG_ID } from "./hooks-panel.js";
 import {
   createArtifactInspectorContext,
   createInspectorDialogRequest,
@@ -207,6 +211,8 @@ export interface HandleTuiInputSubmissionDeps {
   abortControllerRef?: TuiAbortControllerRef;
   /** 异步解析后确认该输入仍属于当前 bundle generation。 */
   isActive?: () => boolean;
+  activateAgentHooks?: (metadata: Record<string, unknown>) => void | Promise<void>;
+  clearComponentHooks?: () => void | Promise<void>;
 }
 
 export type LocalTuiCommandUiEffect = { kind: "none" } | LocalTuiModelSelectorDialogEffect;
@@ -250,6 +256,7 @@ interface TuiSessionBundle {
   readonly reporter: TuiReporter;
   readonly askUserHandler: AskUserHandler;
   readonly scheduleDraft?: TuiScheduleDraftRuntime;
+  readonly mcpElicitationHandler: McpElicitationUiHandler;
   readonly recoveredRewindInputText?: string;
   latestMcpStatus?: McpStatusSnapshot;
 }
@@ -321,6 +328,10 @@ export async function handleTuiInputSubmission(
           rewindTranscriptIndex,
         },
         attachments,
+        processed.result.metadata
+          ? () => deps.activateAgentHooks?.(processed.result.metadata!)
+          : undefined,
+        () => deps.clearComponentHooks?.(),
       );
       return;
     }
@@ -358,6 +369,8 @@ async function runPreparedUserPrompt(
   >,
   rewind: { rewindPrompt: string; rewindTranscriptIndex: number },
   attachments: readonly ImagePart[],
+  beforeRun?: () => void | Promise<void>,
+  afterRun?: () => void | Promise<void>,
 ): Promise<void> {
   let prepared: PreparedUserPrompt;
   try {
@@ -376,12 +389,17 @@ async function runPreparedUserPrompt(
     prompt: rewind.rewindPrompt,
     transcriptIndex: rewind.rewindTranscriptIndex,
   });
-  const images = [...(prepared.images ?? []), ...attachments];
-  if (images.length > 0) {
-    await deps.runAgent(prepared.prompt, { images });
-    return;
+  try {
+    await beforeRun?.();
+    const images = [...(prepared.images ?? []), ...attachments];
+    if (images.length > 0) {
+      await deps.runAgent(prepared.prompt, { images });
+      return;
+    }
+    await deps.runAgent(prepared.prompt);
+  } finally {
+    await afterRun?.();
   }
-  await deps.runAgent(prepared.prompt);
 }
 
 export async function handleTuiRunningInputSubmission(
@@ -917,7 +935,18 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     taskRuntimeDiagnostic = error instanceof Error ? error.message : String(error);
     return undefined;
   });
-  const sharedMcpManager = new McpConnectionManager(undefined, { stdioCwd: opts.workDir });
+  let activeBundle: TuiSessionBundle | undefined;
+  const sharedMcpManager = new McpConnectionManager(undefined, {
+    stdioCwd: opts.workDir,
+    elicitationHandler: async (request, context) => {
+      const current = activeBundle;
+      if (!current) return { action: "cancel" };
+      return await createHookedElicitationHandler({
+        ui: current.mcpElicitationHandler,
+        hookService: () => current.runtimeState.hookService,
+      })(request, context);
+    },
+  });
   const mcpConfigPath = opts.mcpConfigPath ?? `${opts.workDir}/.claw/mcp.json`;
   let mcpInitialized = false;
   let mcpStatusVisible = opts.mcpConfigPath !== undefined;
@@ -928,12 +957,12 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
   // ink render 需要 setState 驱动重渲染。Reporter 回调只更新当前活跃 bundle，
   // 旧 session 的延迟事件不会穿透到新 transcript。
   let setProjection: (projection: TuiProjection) => void = () => {};
-  let activeBundle: TuiSessionBundle | undefined;
   let nextBundleGeneration = 0;
   let shuttingDown = false;
   const pendingSessionSwitches = new Set<Promise<void>>();
   const pendingTuiSubmissions = new Set<Promise<void>>();
   const pendingDelegationWakes = new Set<Promise<void>>();
+  const pendingHookWakes = new Set<Promise<void>>();
   const pendingTuiDialogActions = new Set<Promise<unknown>>();
   let activeAbortControllerRef: TuiAbortControllerRef | undefined;
   const unsubscribeMcpStatus = sharedMcpManager.subscribe((snapshot) => {
@@ -943,9 +972,16 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     setSessionTools(activeBundle.settings, toolStatusFromRegistry(activeBundle.toolRegistry));
   });
   const unsubscribeTaskCompletion = taskHostRuntime?.supervisor.subscribeCompletion((task) => {
-    activeBundle?.reporter.pushSystemMessage(
-      `Task ${task.taskId} ${task.status}: ${task.description}${task.error ? ` · ${task.error}` : ""}`,
-    );
+    const current = activeBundle;
+    if (!current) return;
+    const message = `Task ${task.taskId} ${task.status}: ${task.description}${task.error ? ` · ${task.error}` : ""}`;
+    current.reporter.pushSystemMessage(message);
+    void current.runtimeState
+      .dispatchHook("Notification", {
+        level: task.error ? "error" : "info",
+        message,
+      })
+      .catch(() => {});
   });
 
   const buildSessionBundleUnsafe = async (
@@ -1002,6 +1038,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     try {
       const { toolDisclosure, fileIndex, codeIntelligence } = runtimeState;
       const askUserHandler = new AskUserHandler();
+      const mcpElicitationHandler = new McpElicitationUiHandler();
       const toolRegistry = buildDefaultToolRegistry(opts.workDir, {
         toolDisclosure,
         workspaceRoots,
@@ -1131,6 +1168,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         reporter,
         askUserHandler,
         ...(scheduleDraft ? { scheduleDraft } : {}),
+        mcpElicitationHandler,
         ...(recoveredRewind ? { recoveredRewindInputText: recoveredRewind.inputText } : {}),
         latestMcpStatus,
       };
@@ -1200,6 +1238,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     const historyMutationRef = useRef(false);
     const runningInputDepsRef = useRef<HandleTuiRunningInputSubmissionDeps | null>(null);
     const delegationWakeRef = useRef<DelegationWakeCoordinator | null>(null);
+    const hookRewakeRef = useRef<HookRewakeCoordinator | null>(null);
     const status = useSyncExternalStore(guard.subscribe, guard.getSnapshot);
     const running = status !== "idle"; // 派生:非 idle 即视为运行中
     const trackDialogAction = <T,>(action: () => Promise<T>): Promise<T> => {
@@ -1268,6 +1307,56 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
 
     useEffect(() => {
       if (status === "idle") delegationWakeRef.current?.notifyIdle();
+    }, [bundle, status]);
+
+    useEffect(() => {
+      const current = bundle;
+      const coordinator = new HookRewakeCoordinator({
+        queue: current.runtimeState.hookRewakeQueue,
+        isIdle: () =>
+          !shuttingDown &&
+          !switchingRef.current &&
+          !historyPreparationRef.current &&
+          !historyMutationRef.current &&
+          activeBundleRef.current === current &&
+          guard.getSnapshot() === "idle" &&
+          runningInputDepsRef.current !== null,
+        resume: async (_ids, deliver) => {
+          const deps = runningInputDepsRef.current;
+          if (!deps) throw new Error("Hook rewake has no active TUI runtime dependencies");
+          const generation = guard.tryStart();
+          if (generation === null) throw new Error("Hook rewake lost the idle reservation");
+          const operation = (async () => {
+            try {
+              await deliver();
+              await deps.runAgent("", { resumeExistingSession: true });
+            } finally {
+              sharedMcpManager.attachRegistry(current.toolRegistry);
+              setSessionTools(current.settings, toolStatusFromRegistry(current.toolRegistry));
+              current.runtimeState.fileIndex.markDirty();
+              if (guard.end(generation)) await drainQueuedTuiInputs(deps);
+            }
+          })();
+          pendingHookWakes.add(operation);
+          try {
+            await operation;
+          } finally {
+            pendingHookWakes.delete(operation);
+          }
+        },
+        onError: (error) => {
+          if (activeBundleRef.current === current) appendTuiRunError(current.reporter, error);
+        },
+      });
+      hookRewakeRef.current = coordinator;
+      return () => {
+        coordinator.dispose();
+        if (hookRewakeRef.current === coordinator) hookRewakeRef.current = null;
+      };
+    }, [bundle, guard]);
+
+    useEffect(() => {
+      if (status === "idle") hookRewakeRef.current?.notifyIdle();
     }, [bundle, status]);
 
     const switchSession = async (request: ResumeSessionCommandData): Promise<void> => {
@@ -1541,6 +1630,25 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
           setRewindContext: (context) => {
             rewindContextRef.current = context;
           },
+          activateAgentHooks: async (metadata) => {
+            const componentId = metadata["agentName"];
+            const path = metadata["sourcePath"];
+            const inlineHooks = metadata["agentHookConfig"];
+            if (
+              typeof componentId !== "string" ||
+              typeof path !== "string" ||
+              inlineHooks === undefined
+            ) {
+              return;
+            }
+            await runtimeState.activateComponentHooks({
+              kind: "agent",
+              path,
+              componentId,
+              inlineHooks,
+            });
+          },
+          clearComponentHooks: async () => runtimeState.clearComponentHooks(),
           openDialog: (request) => {
             setDialogRequests((current) => [
               ...current.filter((item) => item.id !== request.id),
@@ -1553,8 +1661,22 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
             await submitTracked({ text: nextText, attachments: [] });
           },
           openLocalUiDialog: async (result) => {
-            if (result.ui?.kind !== "open-selector" || result.ui.selector !== "rewind") return;
-            await openRewindDialog();
+            if (result.ui?.kind === "open-selector" && result.ui.selector === "rewind") {
+              await openRewindDialog();
+              return;
+            }
+            if (result.ui?.kind === "open-panel" && result.ui.panel === "hooks") {
+              const management = runtimeState.hookManagement;
+              if (!management) return;
+              setDialogRequests((items) => [
+                ...items.filter((item) => item.id !== HOOKS_PANEL_DIALOG_ID),
+                createHooksPanelDialogRequest(management, () =>
+                  setDialogRequests((items) =>
+                    items.filter((item) => item.id !== HOOKS_PANEL_DIALOG_ID),
+                  ),
+                ),
+              ]);
+            }
           },
           currentModelId: settings.modelRouteId,
           modelOptions: buildModelOptions(modelRouter.routes),
@@ -1617,6 +1739,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
               toolDisclosure,
               runtimeState,
               askUserHandler: current.askUserHandler,
+              mcpElicitationHandler: current.mcpElicitationHandler,
               openDialog: (request) => {
                 setDialogRequests((current) => [
                   ...current.filter((item) => item.id !== request.id),
@@ -1780,6 +1903,9 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     }
     while (pendingDelegationWakes.size > 0) {
       await Promise.allSettled([...pendingDelegationWakes]);
+    }
+    while (pendingHookWakes.size > 0) {
+      await Promise.allSettled([...pendingHookWakes]);
     }
     while (pendingSessionSwitches.size > 0) {
       await Promise.allSettled([...pendingSessionSwitches]);
@@ -1994,6 +2120,7 @@ export async function runTuiAgentPrompt(
     runtimeState?: TuiRuntimeState;
     askUserHandler?: AskUserHandler;
     scheduleDraft?: TuiScheduleDraftRuntime;
+    mcpElicitationHandler?: McpElicitationUiHandler;
     mcpStatusSink?: (snapshot: McpStatusSnapshot) => void;
     mcpManager?: McpConnectionManager;
     toolStatusSink?: RunAgentCliDependencies["toolStatusSink"];
@@ -2012,6 +2139,9 @@ export async function runTuiAgentPrompt(
     throw new Error(
       "Schedule draft review requires both openDialog and closeDialog host callbacks.",
     );
+  }
+  if (deps.mcpElicitationHandler && (!deps.openDialog || !deps.closeDialog)) {
+    throw new Error("MCP elicitation requires both openDialog and closeDialog host callbacks.");
   }
   const existingController = deps.abortControllerRef?.current;
   const controller = existingController ?? new AbortController();
@@ -2034,6 +2164,12 @@ export async function runTuiAgentPrompt(
     : undefined;
   const unbindScheduleDraftDialogs = deps.scheduleDraft
     ? bindScheduleDraftDialogs(deps.scheduleDraft.handler, {
+        openDialog: (request) => deps.openDialog?.(request),
+        closeDialog: (id) => deps.closeDialog?.(id),
+      })
+    : undefined;
+  const unbindMcpElicitationDialogs = deps.mcpElicitationHandler
+    ? bindMcpElicitationDialogs(deps.mcpElicitationHandler, {
         openDialog: (request) => deps.openDialog?.(request),
         closeDialog: (id) => deps.closeDialog?.(id),
       })
@@ -2075,7 +2211,9 @@ export async function runTuiAgentPrompt(
     deps.askUserHandler?.cancelAll("当前运行已结束。");
     deps.scheduleDraft?.handler.cancelAll();
     unbindScheduleDraftDialogs?.();
+    deps.mcpElicitationHandler?.cancelAll();
     unbindAskUserDialogs?.();
+    unbindMcpElicitationDialogs?.();
     if (ownsControllerSlot && deps.abortControllerRef?.current === controller) {
       deps.abortControllerRef.current = null;
     }

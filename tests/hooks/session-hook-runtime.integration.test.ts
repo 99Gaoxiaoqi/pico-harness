@@ -16,10 +16,7 @@ describe("SessionHookRuntime integration", () => {
     cleanup.push(root);
     const workDir = join(root, "workspace");
     const userHome = join(root, "home");
-    await Promise.all([
-      mkdir(workDir, { recursive: true }),
-      mkdir(userHome, { recursive: true }),
-    ]);
+    await Promise.all([mkdir(workDir, { recursive: true }), mkdir(userHome, { recursive: true })]);
     const runtime = await createSessionHookRuntime({
       workDir,
       userHome,
@@ -62,6 +59,84 @@ describe("SessionHookRuntime integration", () => {
           tool_input: { command: "rm -rf /prod/database" },
         }),
       ).resolves.toMatchObject({ decision: "deny" });
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it("Skill/Agent component source 只在激活租约期间进入快照", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pico-component-hooks-"));
+    cleanup.push(root);
+    const workDir = join(root, "workspace");
+    const userHome = join(root, "home");
+    await Promise.all([mkdir(workDir, { recursive: true }), mkdir(userHome, { recursive: true })]);
+    const runtime = await createSessionHookRuntime({ workDir, userHome, sessionId: "component" });
+    try {
+      expect(runtime.service.currentSnapshot().handlers.PreToolUse).toHaveLength(0);
+      const deactivate = await runtime.activateComponentSource({
+        kind: "skill",
+        path: join(workDir, ".claude", "skills", "guard", "SKILL.md"),
+        componentId: "guard",
+        inlineHooks: {
+          PreToolUse: [
+            {
+              matcher: "bash",
+              hooks: [{ type: "prompt", prompt: "Check command" }],
+            },
+          ],
+        },
+      });
+      expect(runtime.service.currentSnapshot().handlers.PreToolUse).toHaveLength(1);
+      expect(runtime.service.currentSnapshot().handlers.PreToolUse[0]?.source).toMatchObject({
+        kind: "skill",
+        componentId: "guard",
+      });
+      await deactivate();
+      expect(runtime.service.currentSnapshot().handlers.PreToolUse).toHaveLength(0);
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it("并发组件租约独立释放，不会覆盖仍活跃的 Hook source", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pico-component-hooks-concurrent-"));
+    cleanup.push(root);
+    const workDir = join(root, "workspace");
+    const userHome = join(root, "home");
+    await Promise.all([mkdir(workDir, { recursive: true }), mkdir(userHome, { recursive: true })]);
+    const runtime = await createSessionHookRuntime({
+      workDir,
+      userHome,
+      sessionId: "component-race",
+    });
+    const source = (componentId: string) => ({
+      kind: "skill" as const,
+      path: join(workDir, ".claude", "skills", componentId, "SKILL.md"),
+      componentId,
+      inlineHooks: {
+        PreToolUse: [
+          {
+            matcher: "bash",
+            hooks: [{ type: "prompt" as const, prompt: `Check ${componentId}` }],
+          },
+        ],
+      },
+    });
+    try {
+      const [deactivateA, deactivateB] = await Promise.all([
+        runtime.activateComponentSource(source("guard-a")),
+        runtime.activateComponentSource(source("guard-b")),
+      ]);
+      expect(runtime.service.currentSnapshot().handlers.PreToolUse).toHaveLength(2);
+
+      await deactivateA();
+      expect(runtime.service.currentSnapshot().handlers.PreToolUse).toHaveLength(1);
+      expect(runtime.service.currentSnapshot().handlers.PreToolUse[0]?.source).toMatchObject({
+        componentId: "guard-b",
+      });
+
+      await deactivateB();
+      expect(runtime.service.currentSnapshot().handlers.PreToolUse).toHaveLength(0);
     } finally {
       await runtime.dispose();
     }

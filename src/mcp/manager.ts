@@ -16,6 +16,7 @@ import {
   type McpClient,
   type McpConfig,
   type McpConnectionStatus,
+  type McpElicitationHandler,
   type McpPromptGetResult,
   type McpPromptListResult,
   type McpResourceListResult,
@@ -90,6 +91,8 @@ export interface McpConnectionManagerOptions {
   clientFactory?: (config: McpServerConfig) => McpClient;
   /** 后台 Job 冻结的配置指纹；校验的字节与随后解析的字节完全相同。 */
   expectedConfigFingerprint?: string;
+  /** 有完整用户表单 UI 时才注入；无此回调时 client 不声明 elicitation。 */
+  elicitationHandler?: McpElicitationHandler;
 }
 
 /**
@@ -587,10 +590,20 @@ export class McpConnectionManager {
 
     switch (resolvedConfig.transport) {
       case "stdio": {
-        return new StdioMcpClient(resolvedConfig);
+        return new StdioMcpClient(resolvedConfig, {
+          ...(this.options.elicitationHandler
+            ? { elicitationHandler: this.options.elicitationHandler }
+            : {}),
+        });
       }
       case "http":
+        return new HttpMcpClient(resolvedConfig, {
+          ...(this.options.elicitationHandler
+            ? { elicitationHandler: this.options.elicitationHandler }
+            : {}),
+        });
       case "sse":
+        // legacy SSE 没有 2025-06-18 双向请求协商，不声明 elicitation。
         return new HttpMcpClient(resolvedConfig);
     }
   }

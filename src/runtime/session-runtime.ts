@@ -30,6 +30,8 @@ import {
   type SessionHookRuntime,
 } from "../hooks/runtime.js";
 import type { SlashCommand } from "../input/types.js";
+import type { HookConfigSourceSpec } from "../hooks/config.js";
+import type { HookManagementService } from "../hooks/management/service.js";
 import type {
   HookEvent,
   HookEventPayloadMap,
@@ -67,6 +69,7 @@ export interface SessionRuntime {
   readonly backgroundManager: BackgroundManager;
   readonly delegationManager: DelegationManager;
   readonly delegationCompletionQueue: DelegationCompletionWakeQueue;
+  readonly hookRewakeQueue: HookRewakeQueue;
   readonly skillRegistry: SkillRegistry;
   readonly memoryNudger: MemoryNudger | undefined;
   readonly fileIndex: FileIndex;
@@ -75,9 +78,12 @@ export interface SessionRuntime {
   readonly codeIntelligenceManager: CodeIntelligenceManager;
   readonly hookService?: HookService;
   readonly hookCommands: readonly SlashCommand[];
+  readonly hookManagement?: HookManagementService;
   /** 同一实例可幂等挂载；运行中替换实例会抛错。 */
   attachHookService(service: HookService): void;
   bindHookRuntime(dependencies: HookRuntimeBinding): void;
+  activateComponentHooks(source: HookConfigSourceSpec): Promise<void>;
+  clearComponentHooks(): Promise<void>;
   dispatchHook<E extends HookEvent>(
     event: E,
     payload: HookEventPayloadMap[E],
@@ -257,6 +263,121 @@ export class DelegationWakeCoordinator {
   }
 }
 
+export interface HookRewakeEntry {
+  id: string;
+  message: string;
+}
+
+/** asyncRewake 的有界会话队列；会话关闭后拒绝迟到回调。 */
+export class HookRewakeQueue {
+  private readonly pending = new Map<string, HookRewakeEntry>();
+  private readonly subscribers = new Set<() => void>();
+  private nextId = 1;
+  private closed = false;
+
+  constructor(
+    private readonly deliver: (entries: readonly HookRewakeEntry[]) => Promise<void>,
+    private readonly capacity = 32,
+  ) {}
+
+  enqueue(message: string): boolean {
+    if (this.closed || this.pending.size >= this.capacity) return false;
+    const id = `hook-rewake-${this.nextId++}`;
+    const notify = this.pending.size === 0;
+    this.pending.set(id, { id, message });
+    if (notify) for (const subscriber of this.subscribers) subscriber();
+    return true;
+  }
+
+  pendingIds(): readonly string[] {
+    return [...this.pending.keys()];
+  }
+
+  async deliverPending(ids: readonly string[]): Promise<readonly HookRewakeEntry[]> {
+    const entries = ids.flatMap((id) => {
+      const entry = this.pending.get(id);
+      return entry ? [entry] : [];
+    });
+    if (entries.length === 0) return [];
+    await this.deliver(entries);
+    for (const entry of entries) this.pending.delete(entry.id);
+    return entries;
+  }
+
+  subscribe(subscriber: () => void): () => void {
+    if (this.closed) return () => undefined;
+    this.subscribers.add(subscriber);
+    return () => this.subscribers.delete(subscriber);
+  }
+
+  get hasPending(): boolean {
+    return this.pending.size > 0;
+  }
+
+  close(): void {
+    this.closed = true;
+    this.pending.clear();
+    this.subscribers.clear();
+  }
+}
+
+export interface HookRewakeCoordinatorOptions {
+  queue: HookRewakeQueue;
+  isIdle(): boolean;
+  resume(ids: readonly string[], deliver: () => Promise<readonly HookRewakeEntry[]>): Promise<void>;
+  onError?(error: unknown): void;
+}
+
+/** 空闲时合并一批 asyncRewake，通过 QueryGuard 宿主串行续跑。 */
+export class HookRewakeCoordinator {
+  private readonly unsubscribe: () => void;
+  private scheduled = false;
+  private running = false;
+  private disposed = false;
+
+  constructor(private readonly options: HookRewakeCoordinatorOptions) {
+    this.unsubscribe = options.queue.subscribe(() => this.request());
+    if (options.queue.hasPending) this.request();
+  }
+
+  notifyIdle(): void {
+    this.request();
+  }
+
+  dispose(): void {
+    this.disposed = true;
+    this.unsubscribe();
+  }
+
+  private request(): void {
+    if (this.disposed || this.scheduled) return;
+    this.scheduled = true;
+    queueMicrotask(() => {
+      this.scheduled = false;
+      void this.resumePending();
+    });
+  }
+
+  private async resumePending(): Promise<void> {
+    if (this.disposed || this.running || !this.options.isIdle()) return;
+    const ids = this.options.queue.pendingIds();
+    if (ids.length === 0) return;
+    this.running = true;
+    let delivered: readonly HookRewakeEntry[] | undefined;
+    try {
+      await this.options.resume(ids, async () => {
+        delivered ??= await this.options.queue.deliverPending(ids);
+        return delivered;
+      });
+    } catch (error) {
+      this.options.onError?.(error);
+    } finally {
+      this.running = false;
+      if (delivered !== undefined && this.options.queue.hasPending) this.request();
+    }
+  }
+}
+
 function shouldWakeForCompletion(completion: DelegationCompletionEnvelope): boolean {
   if (completion.completionPolicy === "optional") return true;
   return completion.status !== "completed";
@@ -330,6 +451,17 @@ export async function createSessionRuntime(
       await options.session.commitMessages(createDelegationCompletionMessage(completion));
     },
   });
+  const hookRewakeQueue = new HookRewakeQueue(async (entries) => {
+    await options.session.commitMessages({
+      role: "user",
+      content: entries.map((entry) => entry.message).join("\n\n"),
+      providerData: {
+        picoKind: "hook_async_rewake",
+        picoHiddenFromTranscript: true,
+        picoHookRewakeIds: entries.map((entry) => entry.id),
+      },
+    });
+  });
   let completionPollTimer: ReturnType<typeof setInterval> | undefined;
   if (jobService) {
     if (completionPollIntervalMs === undefined) {
@@ -392,6 +524,7 @@ export async function createSessionRuntime(
       onCompletion: (completion) => delegationCompletionQueue.enqueue(completion),
     }),
     delegationCompletionQueue,
+    hookRewakeQueue,
     skillRegistry,
     memoryNudger: new MemoryNudger(skillRegistry, options.session.sessionSummaryStore),
     fileIndex: FileIndex.create({ cwd: workDir }),
@@ -543,6 +676,7 @@ interface DefaultSessionRuntimeOptions {
   backgroundManager: BackgroundManager;
   delegationManager: DelegationManager;
   delegationCompletionQueue: DelegationCompletionWakeQueue;
+  hookRewakeQueue: HookRewakeQueue;
   skillRegistry: SkillRegistry;
   memoryNudger: MemoryNudger | undefined;
   fileIndex: FileIndex;
@@ -567,6 +701,7 @@ class DefaultSessionRuntime implements SessionRuntime {
   readonly backgroundManager: BackgroundManager;
   readonly delegationManager: DelegationManager;
   readonly delegationCompletionQueue: DelegationCompletionWakeQueue;
+  readonly hookRewakeQueue: HookRewakeQueue;
   readonly skillRegistry: SkillRegistry;
   readonly memoryNudger: MemoryNudger | undefined;
   readonly fileIndex: FileIndex;
@@ -576,6 +711,7 @@ class DefaultSessionRuntime implements SessionRuntime {
   private _hookService?: HookService;
   private readonly hookRuntime?: SessionHookRuntime;
   private readonly pendingHookEvents = new Set<Promise<unknown>>();
+  private readonly componentHookDisposers: Array<() => Promise<void>> = [];
   private readonly taskStatuses = new Map<string, TaskSnapshot["status"]>();
   private readonly startedSubagents = new Set<string>();
   private readonly sessionStartSource: "startup" | "resume";
@@ -597,6 +733,7 @@ class DefaultSessionRuntime implements SessionRuntime {
     this.backgroundManager = options.backgroundManager;
     this.delegationManager = options.delegationManager;
     this.delegationCompletionQueue = options.delegationCompletionQueue;
+    this.hookRewakeQueue = options.hookRewakeQueue;
     this.skillRegistry = options.skillRegistry;
     this.memoryNudger = options.memoryNudger;
     this.fileIndex = options.fileIndex;
@@ -638,6 +775,10 @@ class DefaultSessionRuntime implements SessionRuntime {
     return this.hookRuntime?.commands ?? [];
   }
 
+  get hookManagement(): HookManagementService | undefined {
+    return this.hookRuntime?.management;
+  }
+
   attachHookService(service: HookService): void {
     if (this._hookService === service) return;
     if (this._hookService) {
@@ -650,6 +791,23 @@ class DefaultSessionRuntime implements SessionRuntime {
   bindHookRuntime(dependencies: HookRuntimeBinding): void {
     this.hookRuntime?.bind(dependencies);
     this.ensureSessionStart();
+  }
+
+  async activateComponentHooks(source: HookConfigSourceSpec): Promise<void> {
+    if (!this.hookRuntime) return;
+    this.componentHookDisposers.push(await this.hookRuntime.activateComponentSource(source));
+  }
+
+  async clearComponentHooks(): Promise<void> {
+    const disposers = this.componentHookDisposers.splice(0).reverse();
+    for (const dispose of disposers) {
+      try {
+        await dispose();
+      } catch (error) {
+        logger.warn({ error: String(error) }, "[Hook] 组件 Hook source 释放失败");
+      }
+    }
+    await this.hookRuntime?.clearComponentSources();
   }
 
   async dispatchHook<E extends HookEvent>(
@@ -697,6 +855,7 @@ class DefaultSessionRuntime implements SessionRuntime {
       this.unsubscribeTaskHooks();
       this.unsubscribeWorktreeHooks?.();
       try {
+        await this.clearComponentHooks();
         this.ensureSessionStart();
         await this.drainHookEvents();
         const runningTasks = this.backgroundManager
@@ -714,6 +873,7 @@ class DefaultSessionRuntime implements SessionRuntime {
       } finally {
         await this.hookRuntime?.dispose();
         this.delegationCompletionQueue.close();
+        this.hookRewakeQueue.close();
         this.unbindGoalManager();
       }
     })();
@@ -743,8 +903,7 @@ class DefaultSessionRuntime implements SessionRuntime {
       this.enqueueHook(
         this._hookService.dispatch("SubagentStart", {
           agentId: snapshot.taskId,
-          agentType:
-            typeof snapshot.data?.["mode"] === "string" ? snapshot.data["mode"] : "worker",
+          agentType: typeof snapshot.data?.["mode"] === "string" ? snapshot.data["mode"] : "worker",
           prompt: snapshot.description,
         }),
         "SubagentStart",
