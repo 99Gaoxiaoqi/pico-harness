@@ -54,3 +54,9 @@
 - `npm run lint`、`npm run typecheck`、`npm run build` 通过。
 - `npm audit --audit-level=high`：0 个漏洞。
 - 真实模型 E2E：DeepSeek 主代理根据自然语言创建临时 Agent，并将子代理路由到 GLM，1 条通过。
+
+## 合并状态
+
+- 功能分支 `codex/subagent-model-routing` 已推送；自身可从当前 `main` fast-forward 集成。
+- 暂不更新 `main`：并行开发中的 `codex/natural-language-cron` 与 `codex/hooks-parity-integration` 正在修改 `agent-runtime` 等重叠文件，合并模拟已确认存在内容冲突。
+- 待上述活跃分支收口并确定串行顺序后，在最新 `origin/main` 上重新集成并复跑相关验证。
