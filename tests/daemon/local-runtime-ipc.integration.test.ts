@@ -60,6 +60,42 @@ describe("local runtime daemon IPC integration", () => {
     }
   });
 
+  it("filters replayed and live events by the subscribed workspace cursor", async () => {
+    const root = await temporaryRoot();
+    const firstWorkspace = join(root, "workspace-a");
+    const secondWorkspace = join(root, "workspace-b");
+    await Promise.all([mkdir(firstWorkspace), mkdir(secondWorkspace)]);
+    const service = new FixtureRuntimeService(firstWorkspace);
+    service.emit("run.started", { runId: "run-b-1" }, secondWorkspace);
+    const endpoint = resolveLocalDaemonEndpoint({
+      runtimeDir: join(root, "runtime"),
+      userIdentity: "test-user",
+    });
+    const daemon = new LocalRuntimeDaemon({ endpoint, service });
+    const client = new LocalRuntimeClient(endpoint);
+    try {
+      await daemon.start();
+      const received: RuntimeEvent[] = [];
+      const replayed = await client.subscribe(
+        (event) => received.push(event),
+        undefined,
+        firstWorkspace,
+      );
+      expect(replayed).toEqual([
+        expect.objectContaining({ scope: { workspacePath: firstWorkspace } }),
+      ]);
+
+      service.emit("run.updated", { runId: "run-b-2" }, secondWorkspace);
+      const expected = service.emit("run.updated", { runId: "run-a-2" }, firstWorkspace);
+      await waitFor(() => received.length === 1);
+
+      expect(received).toEqual([expected]);
+    } finally {
+      client.close();
+      await daemon.stop();
+    }
+  });
+
   it("canonicalizes workspaces so aliases share one runtime while distinct workspaces stay isolated", async () => {
     const root = await temporaryRoot();
     const firstPath = join(root, "first");
@@ -241,10 +277,16 @@ class FixtureRuntimeService implements LocalRuntimeService {
     return { pong: true };
   }
 
-  async replayEvents(cursor: { afterEventId?: string }): Promise<readonly RuntimeEvent[]> {
-    if (!cursor.afterEventId) return this.events;
-    const index = this.events.findIndex((event) => event.eventId === cursor.afterEventId);
-    return index < 0 ? this.events : this.events.slice(index + 1);
+  async replayEvents(cursor: {
+    afterEventId?: string;
+    workspacePath?: string;
+  }): Promise<readonly RuntimeEvent[]> {
+    const events = cursor.workspacePath
+      ? this.events.filter((event) => event.scope.workspacePath === cursor.workspacePath)
+      : this.events;
+    if (!cursor.afterEventId) return events;
+    const index = events.findIndex((event) => event.eventId === cursor.afterEventId);
+    return index < 0 ? events : events.slice(index + 1);
   }
 
   subscribe(listener: (event: RuntimeEvent) => void): () => void {
@@ -252,17 +294,21 @@ class FixtureRuntimeService implements LocalRuntimeService {
     return () => this.listeners.delete(listener);
   }
 
-  emit(topic: string, payload: JsonValue): RuntimeEvent {
-    const event = this.event(topic, payload);
+  emit(topic: string, payload: JsonValue, workspacePath = this.workspacePath): RuntimeEvent {
+    const event = this.event(topic, payload, workspacePath);
     this.events.push(event);
     for (const listener of this.listeners) listener(event);
     return event;
   }
 
-  private event(topic: string, payload: JsonValue): RuntimeEvent {
+  private event(
+    topic: string,
+    payload: JsonValue,
+    workspacePath = this.workspacePath,
+  ): RuntimeEvent {
     return createRuntimeEvent({
       topic,
-      scope: { workspacePath: this.workspacePath },
+      scope: { workspacePath },
       resourceVersion: this.events?.length ?? 0,
       at: Date.now(),
       payload,

@@ -16,6 +16,9 @@ import {
 } from "@pico/protocol";
 
 const CONNECT_TIMEOUT_MS = 5_000;
+const DEFAULT_RECONNECT_DELAY_MS = 100;
+const DEFAULT_MAX_RECONNECT_DELAY_MS = 2_000;
+const MAX_REMEMBERED_EVENT_IDS = 10_000;
 
 export class RuntimeClientError extends Error {
   constructor(
@@ -44,14 +47,29 @@ export interface RuntimeClientAdapter {
   close(): void;
 }
 
-interface DaemonEndpoint {
+export interface DaemonEndpoint {
   readonly address: string;
   readonly authTokenPath: string;
+}
+
+export interface LocalDaemonRuntimeClientAdapterOptions {
+  readonly reconnectDelayMs?: number;
+  readonly maxReconnectDelayMs?: number;
 }
 
 interface StoredToken {
   readonly version: 1;
   readonly token: string;
+}
+
+interface RuntimeSubscriptionState {
+  readonly params: RuntimeParams<"events.subscribe">;
+  readonly listener: (event: RuntimeEvent) => void;
+  readonly seenEventIds: Set<string>;
+  readonly pendingLiveEvents: RuntimeEvent[];
+  lastEventId?: string;
+  bufferingLiveEvents: boolean;
+  disposed: boolean;
 }
 
 export class LocalDaemonRuntimeClientAdapter implements RuntimeClientAdapter {
@@ -61,13 +79,29 @@ export class LocalDaemonRuntimeClientAdapter implements RuntimeClientAdapter {
     string,
     { resolve: (response: RuntimeResponse) => void; reject: (error: RuntimeClientError) => void }
   >();
-  private readonly eventListeners = new Set<(event: RuntimeEvent) => void>();
+  private readonly subscriptions = new Map<number, RuntimeSubscriptionState>();
   private connecting: Promise<void> | undefined;
   private authentication:
     | { resolve: () => void; reject: (error: RuntimeClientError) => void }
     | undefined;
+  private reconnectTimer: NodeJS.Timeout | undefined;
+  private reconnectAttempt = 0;
+  private nextSubscriptionId = 1;
+  private connectedOnce = false;
+  private closed = false;
+  private readonly reconnectDelayMs: number;
+  private readonly maxReconnectDelayMs: number;
 
-  constructor(private readonly endpoint: DaemonEndpoint = resolveDaemonEndpoint()) {}
+  constructor(
+    private readonly endpoint: DaemonEndpoint = resolveDaemonEndpoint(),
+    options: LocalDaemonRuntimeClientAdapterOptions = {},
+  ) {
+    this.reconnectDelayMs = positiveDelay(options.reconnectDelayMs, DEFAULT_RECONNECT_DELAY_MS);
+    this.maxReconnectDelayMs = Math.max(
+      this.reconnectDelayMs,
+      positiveDelay(options.maxReconnectDelayMs, DEFAULT_MAX_RECONNECT_DELAY_MS),
+    );
+  }
 
   async request<Method extends RuntimeMethod>(
     method: Method,
@@ -94,47 +128,83 @@ export class LocalDaemonRuntimeClientAdapter implements RuntimeClientAdapter {
     readonly replay: RuntimeResult<"events.subscribe">;
     readonly dispose: () => void;
   }> {
-    this.eventListeners.add(listener);
+    const subscriptionId = this.nextSubscriptionId++;
+    const state: RuntimeSubscriptionState = {
+      params,
+      listener,
+      seenEventIds: new Set(),
+      pendingLiveEvents: [],
+      ...(params.afterEventId ? { lastEventId: params.afterEventId } : {}),
+      bufferingLiveEvents: false,
+      disposed: false,
+    };
+    if (params.afterEventId) rememberEventId(state, params.afterEventId);
+    this.subscriptions.set(subscriptionId, state);
     try {
-      const replay = await this.request("events.subscribe", params);
+      const replay = await this.subscribeTransport(state, false);
+      let disposed = false;
       return {
         replay,
-        dispose: () => this.eventListeners.delete(listener),
+        dispose: () => {
+          if (disposed) return;
+          disposed = true;
+          state.disposed = true;
+          this.subscriptions.delete(subscriptionId);
+          if (this.subscriptions.size === 0) this.cancelReconnect();
+        },
       };
     } catch (error) {
-      this.eventListeners.delete(listener);
+      state.disposed = true;
+      this.subscriptions.delete(subscriptionId);
+      if (this.subscriptions.size === 0) this.cancelReconnect();
       throw error;
     }
   }
 
   close(): void {
+    this.closed = true;
+    this.cancelReconnect();
     this.socket?.destroy();
     this.socket = undefined;
-    this.eventListeners.clear();
+    this.subscriptions.clear();
     this.rejectAll(
       new RuntimeClientError("RUNTIME_CLIENT_CLOSED", "本机 Runtime 连接已关闭", true),
     );
   }
 
   private async ensureConnected(): Promise<void> {
+    if (this.closed) {
+      throw new RuntimeClientError("RUNTIME_CLIENT_CLOSED", "本机 Runtime 连接已关闭", true);
+    }
     if (this.socket && !this.socket.destroyed) return;
+    this.cancelReconnect();
     if (!this.connecting) {
-      this.connecting = this.connectAuthenticated().finally(() => {
-        this.connecting = undefined;
-      });
+      this.connecting = this.connectAuthenticated()
+        .then(() => {
+          this.reconnectAttempt = 0;
+        })
+        .catch((error: unknown) => {
+          if (this.subscriptions.size > 0) this.scheduleReconnect();
+          throw normalizeClientError(error);
+        })
+        .finally(() => {
+          this.connecting = undefined;
+        });
     }
     return await this.connecting;
   }
 
   private async connectAuthenticated(): Promise<void> {
+    const restoreSubscriptions = this.connectedOnce;
     const token = await readAuthToken(this.endpoint.authTokenPath);
     this.decoder = new RuntimeFrameDecoder();
     const socket = await connectWithTimeout(this.endpoint.address);
     this.socket = socket;
     socket.on("data", (chunk: Buffer) => this.handleData(chunk));
-    socket.once("error", (error) => this.handleDisconnect(toUnavailableError(error)));
+    socket.once("error", (error) => this.handleDisconnect(socket, toUnavailableError(error)));
     socket.once("close", () =>
       this.handleDisconnect(
+        socket,
         new RuntimeClientError("RUNTIME_DISCONNECTED", "本机 Runtime daemon 连接已断开", true),
       ),
     );
@@ -147,9 +217,11 @@ export class LocalDaemonRuntimeClientAdapter implements RuntimeClientAdapter {
         CONNECT_TIMEOUT_MS,
         "本机 Runtime IPC 认证超时",
       );
+      this.connectedOnce = true;
+      if (restoreSubscriptions) await this.restoreSubscriptions();
     } catch (error) {
       socket.destroy();
-      this.socket = undefined;
+      if (this.socket === socket) this.socket = undefined;
       throw normalizeClientError(error);
     }
   }
@@ -167,7 +239,7 @@ export class LocalDaemonRuntimeClientAdapter implements RuntimeClientAdapter {
               new RuntimeClientError("RUNTIME_AUTH_FAILED", "本机 Runtime IPC 认证失败", false),
             );
         } else if (message.kind === "event") {
-          for (const listener of this.eventListeners) listener(message.event);
+          this.handleEvent(message.event);
         } else if (message.kind === "response") {
           const pending = this.pending.get(message.requestId);
           if (!pending) continue;
@@ -176,14 +248,19 @@ export class LocalDaemonRuntimeClientAdapter implements RuntimeClientAdapter {
         }
       }
     } catch (error) {
-      this.handleDisconnect(normalizeClientError(error));
-      this.socket?.destroy();
+      const socket = this.socket;
+      if (socket) {
+        this.handleDisconnect(socket, normalizeClientError(error));
+        socket.destroy();
+      }
     }
   }
 
-  private handleDisconnect(error: RuntimeClientError): void {
+  private handleDisconnect(socket: Socket, error: RuntimeClientError): void {
+    if (this.socket !== socket) return;
     this.socket = undefined;
     this.rejectAll(error);
+    if (!this.closed && this.subscriptions.size > 0) this.scheduleReconnect();
   }
 
   private rejectAll(error: RuntimeClientError): void {
@@ -192,6 +269,99 @@ export class LocalDaemonRuntimeClientAdapter implements RuntimeClientAdapter {
     for (const pending of this.pending.values()) pending.reject(error);
     this.pending.clear();
   }
+
+  private handleEvent(event: RuntimeEvent): void {
+    for (const state of this.subscriptions.values()) {
+      if (!matchesWorkspace(state, event)) continue;
+      if (state.bufferingLiveEvents) {
+        state.pendingLiveEvents.push(event);
+        continue;
+      }
+      this.deliverEvent(state, event);
+    }
+  }
+
+  private deliverEvent(state: RuntimeSubscriptionState, event: RuntimeEvent): boolean {
+    if (state.disposed || !matchesWorkspace(state, event) || !rememberEventId(state, event.eventId))
+      return false;
+    state.lastEventId = event.eventId;
+    state.listener(event);
+    return true;
+  }
+
+  private async subscribeTransport(
+    state: RuntimeSubscriptionState,
+    deliverReplay: boolean,
+  ): Promise<RuntimeResult<"events.subscribe">> {
+    state.bufferingLiveEvents = true;
+    try {
+      const replay = await this.request("events.subscribe", {
+        ...(state.params.workspacePath ? { workspacePath: state.params.workspacePath } : {}),
+        ...(state.lastEventId ? { afterEventId: state.lastEventId } : {}),
+      });
+      const events: RuntimeEvent[] = [];
+      for (const event of replay.events) {
+        if (
+          state.disposed ||
+          !matchesWorkspace(state, event) ||
+          !rememberEventId(state, event.eventId)
+        )
+          continue;
+        state.lastEventId = event.eventId;
+        events.push(event);
+        if (deliverReplay) state.listener(event);
+      }
+      return { subscribed: true, events };
+    } finally {
+      state.bufferingLiveEvents = false;
+      for (const event of state.pendingLiveEvents.splice(0)) this.deliverEvent(state, event);
+    }
+  }
+
+  private async restoreSubscriptions(): Promise<void> {
+    for (const state of [...this.subscriptions.values()]) {
+      if (state.disposed) continue;
+      await this.subscribeTransport(state, true);
+    }
+  }
+
+  private scheduleReconnect(): void {
+    if (this.closed || this.reconnectTimer || this.subscriptions.size === 0) return;
+    const delay = Math.min(
+      this.maxReconnectDelayMs,
+      this.reconnectDelayMs * 2 ** Math.min(this.reconnectAttempt++, 10),
+    );
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = undefined;
+      if (this.closed || this.subscriptions.size === 0) return;
+      void this.ensureConnected().catch(() => undefined);
+    }, delay);
+    this.reconnectTimer.unref?.();
+  }
+
+  private cancelReconnect(): void {
+    if (!this.reconnectTimer) return;
+    clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = undefined;
+  }
+}
+
+function matchesWorkspace(state: RuntimeSubscriptionState, event: RuntimeEvent): boolean {
+  return !state.params.workspacePath || event.scope.workspacePath === state.params.workspacePath;
+}
+
+function rememberEventId(state: RuntimeSubscriptionState, eventId: string): boolean {
+  if (state.seenEventIds.has(eventId)) return false;
+  state.seenEventIds.add(eventId);
+  if (state.seenEventIds.size > MAX_REMEMBERED_EVENT_IDS) {
+    const oldest = state.seenEventIds.values().next().value;
+    if (oldest !== undefined) state.seenEventIds.delete(oldest);
+  }
+  return true;
+}
+
+function positiveDelay(value: number | undefined, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
 export function resolveDaemonEndpoint(
