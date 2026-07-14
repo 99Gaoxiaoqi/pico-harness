@@ -667,7 +667,15 @@ export async function executeAgentRuntime(
             ? { expectedConfigFingerprint: backgroundPolicy.snapshot.mcpConfigFingerprint }
             : {}),
           ...(backgroundPolicy
-            ? { clientFactory: (config) => createBackgroundMcpClient(config, workDir) }
+            ? {
+                clientFactory: (config) =>
+                  createBackgroundMcpClient(
+                    config,
+                    workDir,
+                    backgroundPolicy.snapshot.toolNetworkPolicy,
+                    backgroundPolicy.allowedToolNetworkHosts,
+                  ),
+              }
             : {}),
         })
       : undefined);

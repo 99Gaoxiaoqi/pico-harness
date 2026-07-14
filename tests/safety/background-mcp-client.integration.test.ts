@@ -41,4 +41,37 @@ describe("background MCP client integration", () => {
     const remote = { name: "remote", transport: "http" as const, url: "https://mcp.example" };
     expect(secureBackgroundMcpServerConfig(remote, process.cwd(), "linux")).toBe(remote);
   });
+
+  it("保持 disabled/allowlist 的既有网络边界", () => {
+    const deniedStdio = secureBackgroundMcpServerConfig(
+      { name: "local", transport: "stdio", command: "node" },
+      process.cwd(),
+      "darwin",
+      "disabled",
+    );
+    expect(deniedStdio.args?.join(" ")).not.toContain("(allow network*)");
+
+    const remote = { name: "remote", transport: "http" as const, url: "https://mcp.example/rpc" };
+    expect(() =>
+      secureBackgroundMcpServerConfig(remote, process.cwd(), "linux", "disabled"),
+    ).toThrow(/网络策略禁止/u);
+    expect(() =>
+      secureBackgroundMcpServerConfig(
+        remote,
+        process.cwd(),
+        "linux",
+        "allowlist",
+        new Set(["other.example"]),
+      ),
+    ).toThrow(/不在网络 allowlist/u);
+    expect(
+      secureBackgroundMcpServerConfig(
+        remote,
+        process.cwd(),
+        "linux",
+        "allowlist",
+        new Set(["mcp.example"]),
+      ),
+    ).toBe(remote);
+  });
 });
