@@ -37,6 +37,8 @@ export const DESKTOP_RUNTIME_METHODS = [
   "config.get",
   "config.update",
   "config.providers",
+  "catalog.agents",
+  "catalog.skills",
   "config.skills",
   "config.mcpServers",
   "usage.get",

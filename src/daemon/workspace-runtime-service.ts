@@ -22,8 +22,26 @@ export interface DaemonRunExecutor {
     workspaceRuntime: WorkspaceTaskRuntime;
     prompt: string;
     sessionId?: string;
+    execution?: DaemonRunExecution;
     context: WorkspaceRunContext;
   }): Promise<Record<string, unknown> | void>;
+}
+
+export interface DaemonRunExecution {
+  readonly requestedModel?: string;
+  readonly allowedTools?: readonly string[];
+  readonly skillActivation?: {
+    readonly name: string;
+    readonly sourcePath?: string;
+    readonly hooks?: unknown;
+  };
+}
+
+export interface StartDaemonRunInput {
+  readonly workspacePath: string;
+  readonly prompt: string;
+  readonly sessionId?: string;
+  readonly execution?: DaemonRunExecution;
 }
 
 export interface WorkspaceRuntimeServiceOptions {
@@ -85,7 +103,12 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
       return {
         pong: true,
         protocolVersion: LOCAL_RUNTIME_PROTOCOL_VERSION,
-        capabilities: ["session-conversation-v1", "session-management-v1", "runtime-events-v1"],
+        capabilities: [
+          "session-conversation-v1",
+          "session-management-v1",
+          "catalog-activation-v1",
+          "runtime-events-v1",
+        ],
       };
     }
     const params = objectParams(request.params);
@@ -133,22 +156,12 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
       };
     }
     if (request.method === "run.start") {
-      const workspacePath = requiredString(params, "workspacePath");
-      const prompt = requiredString(params, "prompt");
       const sessionId = optionalString(params, "sessionId");
-      const runtime = await this.getRuntime(workspacePath);
-      const run = runtime.startRun(
-        { description: prompt, ...(sessionId ? { sessionId } : {}) },
-        (context) =>
-          this.options.execute({
-            workspacePath: runtime.workspace,
-            workspaceRuntime: runtime,
-            prompt,
-            ...(sessionId ? { sessionId } : {}),
-            context,
-          }),
-      );
-      return runPayload(run);
+      return this.startForegroundRun({
+        workspacePath: requiredString(params, "workspacePath"),
+        prompt: requiredString(params, "prompt"),
+        ...(sessionId ? { sessionId } : {}),
+      });
     }
     if (request.method === "run.cancel") {
       const runtime = await this.getRuntime(requiredString(params, "workspacePath"));
@@ -192,6 +205,27 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
       };
     }
     throw new Error(`此 Runtime service 不支持 ${request.method}`);
+  }
+
+  /**
+   * Trusted server-side adapters may attach ephemeral execution constraints. They are never
+   * accepted from the generic run.start IPC request, preventing clients from forging activations.
+   */
+  async startForegroundRun(input: StartDaemonRunInput): Promise<JsonValue> {
+    const runtime = await this.getRuntime(input.workspacePath);
+    const run = runtime.startRun(
+      { description: input.prompt, ...(input.sessionId ? { sessionId: input.sessionId } : {}) },
+      (context) =>
+        this.options.execute({
+          workspacePath: runtime.workspace,
+          workspaceRuntime: runtime,
+          prompt: input.prompt,
+          ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+          ...(input.execution ? { execution: input.execution } : {}),
+          context,
+        }),
+    );
+    return runPayload(run);
   }
 
   async replayEvents(cursor: RuntimeEventCursor): Promise<readonly RuntimeEvent[]> {

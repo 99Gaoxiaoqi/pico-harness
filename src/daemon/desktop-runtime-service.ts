@@ -6,6 +6,7 @@ import { createCliSessionId, listCliSessionSummaries } from "../cli/session-reso
 import { createContextBudget, estimateMessagesTokens } from "../context/context-budget.js";
 import { FullCompactor } from "../context/full-compactor.js";
 import { SkillLoader } from "../context/skill.js";
+import { findAgentProfile, loadAgentCatalog, summarizeAgentProfiles } from "../agents/catalog.js";
 import { SessionForkService } from "../engine/session-fork-service.js";
 import { globalSessionManager, Session } from "../engine/session.js";
 import {
@@ -14,6 +15,8 @@ import {
   setSessionTitle,
 } from "../input/session-settings.js";
 import { loadPicoConfig, type PicoConfig } from "../input/pico-config.js";
+import { renderAgentDispatchPrompt } from "../input/agent-activation.js";
+import { renderSkillActivation } from "../input/skill-activation.js";
 import { McpConnectionManager } from "../mcp/manager.js";
 import { CostTracker } from "../observability/tracker.js";
 import { ensureSessionUsageBaseline } from "../observability/usage-baseline.js";
@@ -42,6 +45,7 @@ import {
   type JsonObject,
   type RuntimeEvent,
   type RuntimeRequest,
+  type RuntimeUserInput,
 } from "./protocol.js";
 import type { DisposableLocalRuntimeService, RuntimeEventCursor } from "./service.js";
 import { DesktopSessionStateStore } from "./desktop-session-state.js";
@@ -49,7 +53,11 @@ import { DesktopConversationStateStore } from "./desktop-conversation-state.js";
 import { projectRuntimeTranscript, TranscriptRevisionConflict } from "./desktop-transcript.js";
 import { canonicalizeWorkspacePath } from "./workspace-registry.js";
 import { WorkspaceRegistrationStore } from "./workspace-registration.js";
-import { WorkspaceRuntimeService, workspaceStatusResult } from "./workspace-runtime-service.js";
+import {
+  WorkspaceRuntimeService,
+  workspaceStatusResult,
+  type DaemonRunExecution,
+} from "./workspace-runtime-service.js";
 import { DesktopAutomationService } from "./desktop-automation-service.js";
 
 const UNSUPPORTED_DESKTOP_METHODS: ReadonlySet<string> = new Set([
@@ -57,6 +65,11 @@ const UNSUPPORTED_DESKTOP_METHODS: ReadonlySet<string> = new Set([
   "prompt.respond",
   "config.update",
 ] as const);
+
+interface ResolvedRuntimeUserInput {
+  readonly prompt: string;
+  readonly execution?: DaemonRunExecution;
+}
 
 export interface DesktopRuntimeServiceOptions {
   readonly runtimeService: WorkspaceRuntimeService;
@@ -174,8 +187,12 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         return this.getConfig(request.params.workspacePath);
       case "config.providers":
         return this.listProviders(request.params.workspacePath);
+      case "catalog.agents":
+        return this.listAgents(request.params.workspacePath);
+      case "catalog.skills":
+        return this.listSkills(request.params.workspacePath, true);
       case "config.skills":
-        return this.listSkills(request.params.workspacePath);
+        return this.listSkills(request.params.workspacePath, false);
       case "config.mcpServers":
         return this.listMcpServers(request.params.workspacePath);
       case "usage.get":
@@ -456,13 +473,13 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   private async sendSession(params: {
     readonly workspacePath: string;
     readonly sessionId?: string;
-    readonly input: { readonly text: string };
+    readonly input: RuntimeUserInput;
     readonly behavior?: "auto" | "steer" | "queue" | "replace";
     readonly expectedRunId?: string;
     readonly idempotencyKey: string;
   }): Promise<JsonValue> {
     const canonical = await canonicalizeWorkspacePath(params.workspacePath);
-    const text = requireText(params.input?.text, "input.text");
+    const input = normalizeRuntimeUserInput(params.input);
     const idempotencyKey = requireText(params.idempotencyKey, "idempotencyKey");
     const stored = await this.conversationStateStore.getIdempotent(canonical, idempotencyKey);
     if (stored) return stored;
@@ -470,7 +487,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const pendingKey = `${canonical}\0${idempotencyKey}`;
     const pending = this.pendingSends.get(pendingKey);
     if (pending) return pending;
-    const operation = this.sendSessionOnce({ ...params, workspacePath: canonical, text })
+    const operation = this.sendSessionOnce({ ...params, workspacePath: canonical, input })
       .then(async (result) => {
         await this.conversationStateStore.rememberIdempotent(canonical, idempotencyKey, result);
         return result;
@@ -483,16 +500,20 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   private async sendSessionOnce(params: {
     readonly workspacePath: string;
     readonly sessionId?: string;
-    readonly input: { readonly text: string };
+    readonly input: RuntimeUserInput;
     readonly behavior?: "auto" | "steer" | "queue" | "replace";
     readonly expectedRunId?: string;
     readonly idempotencyKey: string;
-    readonly text: string;
   }): Promise<JsonObject> {
     const behavior = params.behavior ?? "auto";
+    // Resolve a first-message activation before creating durable session metadata. Invalid
+    // catalog selections must not leave behind an empty session.
+    const initialResolution = params.sessionId
+      ? undefined
+      : await this.resolveRuntimeUserInput(params.workspacePath, params.input);
     const session = params.sessionId
       ? await this.requireSession(params.workspacePath, params.sessionId)
-      : await this.createSessionForMessage(params.workspacePath, params.text);
+      : await this.createSessionForMessage(params.workspacePath, runtimeInputTitle(params.input));
     const sessionRecord = requireJsonRecord(session, "session");
     const sessionId = requireText(sessionRecord["sessionId"], "session.sessionId");
     const activeRun = await this.findActiveSessionRun(params.workspacePath, sessionId);
@@ -506,8 +527,16 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
 
     if (activeRun) {
       const runId = requireText(activeRun["runId"], "run.runId");
-      if (behavior === "queue" || behavior === "replace") {
-        await this.conversationStateStore.enqueue(params.workspacePath, sessionId, params.text);
+      const activation = params.input.kind === "agent" || params.input.kind === "skill";
+      if (activation && behavior === "steer") {
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.CONFLICT,
+          "Agent/Skill 激活必须在新 Run 中应用；请选择 Queue 或 Replace",
+        );
+      }
+      if (activation) await this.resolveRuntimeUserInput(params.workspacePath, params.input);
+      if (behavior === "queue" || behavior === "replace" || activation) {
+        await this.conversationStateStore.enqueue(params.workspacePath, sessionId, params.input);
         const run =
           behavior === "replace"
             ? await this.options.runtimeService.handle(
@@ -524,11 +553,14 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
           disposition: behavior === "replace" ? "replaced" : "queued",
         };
       }
+      if (params.input.kind !== undefined && params.input.kind !== "text") {
+        throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.INVALID_PARAMS, "无法 Steer 非文本输入");
+      }
       const run = await this.options.runtimeService.handle(
         createRuntimeRequest("run.steer", {
           workspacePath: params.workspacePath,
           runId,
-          message: params.text,
+          message: params.input.text,
         }),
       );
       return {
@@ -544,7 +576,12 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         "目标 Run 已结束，无法继续 Steer；请作为下一轮发送",
       );
     }
-    const run = await this.startSessionRun(params.workspacePath, sessionId, params.text);
+    const run = await this.startSessionRun(
+      params.workspacePath,
+      sessionId,
+      params.input,
+      initialResolution,
+    );
     return { session: sessionRecord, run, disposition: "started" };
   }
 
@@ -605,7 +642,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       queuedInputs: queuedInputs.map((input) => ({
         queueId: input.queueId,
         sessionId: input.sessionId,
-        input: { text: input.text },
+        input: input.input,
         createdAt: input.createdAt,
       })),
       ...(page.nextBefore ? { nextBefore: page.nextBefore } : {}),
@@ -644,13 +681,18 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   private async startSessionRun(
     workspacePath: string,
     sessionId: string,
-    prompt: string,
+    input: RuntimeUserInput,
+    resolvedInput?: ResolvedRuntimeUserInput,
   ): Promise<JsonObject> {
     try {
+      const resolved = resolvedInput ?? (await this.resolveRuntimeUserInput(workspacePath, input));
       return requireJsonRecord(
-        await this.options.runtimeService.handle(
-          createRuntimeRequest("run.start", { workspacePath, sessionId, prompt }),
-        ),
+        await this.options.runtimeService.startForegroundRun({
+          workspacePath,
+          sessionId,
+          prompt: resolved.prompt,
+          ...(resolved.execution ? { execution: resolved.execution } : {}),
+        }),
         "run.start result",
       );
     } catch (error) {
@@ -666,8 +708,78 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const [next] = await this.conversationStateStore.listQueued(workspacePath, sessionId);
     if (!next) return;
     if (await this.findActiveSessionRun(workspacePath, sessionId)) return;
-    await this.startSessionRun(workspacePath, sessionId, next.text);
+    await this.startSessionRun(workspacePath, sessionId, next.input);
     await this.conversationStateStore.removeQueued(next.queueId);
+  }
+
+  private async resolveRuntimeUserInput(
+    workspacePath: string,
+    input: RuntimeUserInput,
+  ): Promise<ResolvedRuntimeUserInput> {
+    if (input.kind === undefined || input.kind === "text") return { prompt: input.text };
+    const canonical = await this.requireTrustedWorkspace(workspacePath);
+    const config = await loadPicoConfig(canonical);
+    const compatibility = config.compatibility.claude;
+    if (input.kind === "agent") {
+      const profiles = await loadAgentCatalog({
+        workDir: canonical,
+        includeBuiltins: true,
+        includeClaudeProjectResources: compatibility.enabled && compatibility.projectResources,
+        includeClaudeUserResources: compatibility.enabled && compatibility.userResources,
+        env: this.env,
+      });
+      const profile = findAgentProfile(profiles, input.name);
+      if (!profile) {
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.NOT_FOUND,
+          `未找到 Agent: ${input.name}。可用 Agents: ${profiles.map((item) => item.name).join(", ") || "none"}`,
+        );
+      }
+      return {
+        prompt: renderAgentDispatchPrompt(profile, input.task),
+        execution: { allowedTools: ["delegate_task"] },
+      };
+    }
+    const skillName = requireText(input["name"], "input.name");
+    const skillArgs = typeof input["args"] === "string" ? input["args"] : "";
+    const loader = new SkillLoader(canonical, {
+      includeUserResources: true,
+      includeClaudeProjectResources: compatibility.enabled && compatibility.projectResources,
+      includeClaudeUserResources: compatibility.enabled && compatibility.userResources,
+      env: this.env,
+    });
+    const skill = await loader.view(skillName);
+    if (!skill) {
+      const available = (await loader.listSummaries()).map((item) => item.name).join(", ");
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.NOT_FOUND,
+        `未找到 Skill: ${skillName}。可用 Skills: ${available || "none"}`,
+      );
+    }
+    const activation = renderSkillActivation({
+      name: skill.name,
+      args: skillArgs,
+      body: skill.body,
+      sourcePath: skill.sourcePath,
+      trigger: "user-slash",
+    });
+    const execution: DaemonRunExecution = {
+      ...(skill.model ? { requestedModel: skill.model } : {}),
+      ...(skill.allowedTools ? { allowedTools: skill.allowedTools } : {}),
+      ...(skill.sourcePath && skill.hooks !== undefined
+        ? {
+            skillActivation: {
+              name: skill.name,
+              sourcePath: skill.sourcePath,
+              hooks: skill.hooks,
+            },
+          }
+        : {}),
+    };
+    return {
+      prompt: activation.prompt,
+      ...(Object.keys(execution).length > 0 ? { execution } : {}),
+    };
   }
 
   private publishConversationFailure(workspacePath: string, error: unknown): void {
@@ -717,17 +829,39 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     };
   }
 
-  private async listSkills(workspacePath: string): Promise<JsonValue> {
+  private async listAgents(workspacePath: string): Promise<JsonValue> {
     const canonical = await this.requireTrustedWorkspace(workspacePath);
-    const loader = new SkillLoader(canonical);
-    const summaries = await loader.listSummaries();
+    const config = await loadPicoConfig(canonical);
+    const compatibility = config.compatibility.claude;
+    const agents = await loadAgentCatalog({
+      workDir: canonical,
+      includeBuiltins: true,
+      includeClaudeProjectResources: compatibility.enabled && compatibility.projectResources,
+      includeClaudeUserResources: compatibility.enabled && compatibility.userResources,
+      env: this.env,
+    });
+    return { agents: toJsonValue(summarizeAgentProfiles(agents)) };
+  }
+
+  private async listSkills(
+    workspacePath: string,
+    includeUserResources: boolean,
+  ): Promise<JsonValue> {
+    const canonical = await this.requireTrustedWorkspace(workspacePath);
+    const loader = includeUserResources
+      ? await loadDesktopSkillLoader(canonical, this.env)
+      : new SkillLoader(canonical);
+    const skills = await loader.list();
     return {
-      skills: await Promise.all(
-        summaries.map(async (skill) => ({
-          ...skill,
-          sourcePath: await loader.viewSourcePath(skill.name),
+      skills: toJsonValue(
+        skills.map((skill) => ({
+          name: skill.name,
+          description: skill.description,
+          ...(skill.sourcePath ? { sourcePath: skill.sourcePath } : {}),
+          ...(skill.allowedTools ? { allowedTools: skill.allowedTools } : {}),
+          ...(skill.model ? { model: skill.model } : {}),
         })),
-      ).then(toJsonValue),
+      ),
     };
   }
 
@@ -1471,6 +1605,63 @@ function requireText(value: unknown, label: string): string {
     throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.INVALID_PARAMS, `${label} 必须是非空字符串`);
   }
   return value.trim();
+}
+
+function normalizeRuntimeUserInput(value: RuntimeUserInput): RuntimeUserInput {
+  if (!isJsonRecord(value)) {
+    throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.INVALID_PARAMS, "input 必须是对象");
+  }
+  const kind = value["kind"];
+  if (kind === undefined || kind === "text") {
+    return {
+      ...(kind === "text" ? { kind } : {}),
+      text: requireText(value["text"], "input.text"),
+    };
+  }
+  if (kind === "skill") {
+    const args = value["args"];
+    if (args !== undefined && typeof args !== "string") {
+      throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.INVALID_PARAMS, "input.args 必须是字符串");
+    }
+    return {
+      kind,
+      name: requireText(value["name"], "input.name"),
+      ...(typeof args === "string" ? { args } : {}),
+    };
+  }
+  if (kind === "agent") {
+    return {
+      kind,
+      name: requireText(value["name"], "input.name"),
+      task: requireText(value["task"], "input.task"),
+    };
+  }
+  throw new RuntimeProtocolError(
+    RUNTIME_ERROR_CODES.INVALID_PARAMS,
+    `input.kind 不支持: ${String(kind)}`,
+  );
+}
+
+function runtimeInputTitle(input: RuntimeUserInput): string {
+  if (input.kind === "agent") return input.task;
+  if (input.kind === "skill") {
+    return [`/${input.name}`, input.args?.trim()].filter(Boolean).join(" ");
+  }
+  return input.text;
+}
+
+async function loadDesktopSkillLoader(
+  workspacePath: string,
+  env: Readonly<Record<string, string | undefined>>,
+): Promise<SkillLoader> {
+  const config = await loadPicoConfig(workspacePath);
+  const compatibility = config.compatibility.claude;
+  return new SkillLoader(workspacePath, {
+    includeUserResources: true,
+    includeClaudeProjectResources: compatibility.enabled && compatibility.projectResources,
+    includeClaudeUserResources: compatibility.enabled && compatibility.userResources,
+    env,
+  });
 }
 
 function isTerminalRunStatus(status: string): boolean {

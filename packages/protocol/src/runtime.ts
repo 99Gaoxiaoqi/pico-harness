@@ -37,8 +37,41 @@ export type RuntimeJobStatus = "idle" | "running" | "failed" | "succeeded";
 export type SessionSendBehavior = "auto" | "steer" | "queue" | "replace";
 export type SessionSendDisposition = "started" | "steered" | "queued" | "replaced";
 
-export type RuntimeUserInput = JsonObject & {
+export type RuntimeTextUserInput = JsonObject & {
+  /** Omitted by legacy desktop clients; new clients should send the explicit discriminator. */
+  readonly kind?: "text";
   readonly text: string;
+};
+
+export type RuntimeSkillUserInput = JsonObject & {
+  readonly kind: "skill";
+  readonly name: string;
+  readonly args?: string;
+};
+
+export type RuntimeAgentUserInput = JsonObject & {
+  readonly kind: "agent";
+  readonly name: string;
+  readonly task: string;
+};
+
+export type RuntimeUserInput = RuntimeTextUserInput | RuntimeSkillUserInput | RuntimeAgentUserInput;
+
+export type RuntimeCatalogAgent = JsonObject & {
+  readonly name: string;
+  readonly description: string;
+  readonly source: string;
+  readonly sourcePath: string;
+  readonly tools: readonly string[];
+  readonly modelRouteId?: string;
+};
+
+export type RuntimeCatalogSkill = JsonObject & {
+  readonly name: string;
+  readonly description: string;
+  readonly sourcePath?: string;
+  readonly allowedTools?: readonly string[];
+  readonly model?: string;
 };
 
 export type RuntimeQueuedInput = JsonObject & {
@@ -370,6 +403,14 @@ export type RuntimeMethodMap = {
     readonly params: WorkspaceParams;
     readonly result: { readonly providers: readonly JsonObject[] };
   };
+  readonly "catalog.agents": {
+    readonly params: WorkspaceParams;
+    readonly result: { readonly agents: readonly RuntimeCatalogAgent[] };
+  };
+  readonly "catalog.skills": {
+    readonly params: WorkspaceParams;
+    readonly result: { readonly skills: readonly RuntimeCatalogSkill[] };
+  };
   readonly "config.skills": {
     readonly params: WorkspaceParams;
     readonly result: { readonly skills: readonly JsonObject[] };
@@ -464,6 +505,8 @@ export const RUNTIME_METHODS = [
   "config.get",
   "config.update",
   "config.providers",
+  "catalog.agents",
+  "catalog.skills",
   "config.skills",
   "config.mcpServers",
   "usage.get",

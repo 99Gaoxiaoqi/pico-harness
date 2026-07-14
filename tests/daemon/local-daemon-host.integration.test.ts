@@ -295,6 +295,76 @@ describe("LocalDaemonHost integration", () => {
     }
   });
 
+  it("生产 daemon 将 Skill 激活解析为指令、模型与工具限制", async () => {
+    const root = await mkdtemp(join(tmpdir(), "p-sa-"));
+    cleanups.push(() => rm(root, { recursive: true, force: true }));
+    const workspace = join(root, "workspace");
+    await mkdir(join(workspace, ".pico", "skills", "review"), { recursive: true });
+    await writeFile(
+      join(workspace, ".pico", "config.json"),
+      JSON.stringify({
+        version: 1,
+        model: "local/default",
+        providers: {
+          local: {
+            protocol: "openai",
+            baseURL: "https://provider.example.test/v1",
+            apiKeyEnv: "PICO_DESKTOP_TEST_KEY",
+            models: ["default", "special"],
+            discoverModels: false,
+          },
+        },
+      }),
+    );
+    await writeFile(
+      join(workspace, ".pico", "skills", "review", "SKILL.md"),
+      [
+        "---",
+        "name: review",
+        "description: Review a target",
+        "allowed-tools:",
+        "  - read_file",
+        "model: local/special",
+        "---",
+        "Inspect $ARGUMENTS.",
+      ].join("\n"),
+    );
+    const trustStore = new WorkspaceTrustStore({ userStateDirectory: join(root, "trust") });
+    await trustStore.trust(await trustStore.canonicalize(workspace));
+    const endpoint = resolveLocalDaemonEndpoint({
+      runtimeDir: join(root, "r"),
+      userIdentity: "skill-activation-test",
+    });
+    const runtime = new CapturingActivationAgentRuntime();
+    const host = createProductionLocalDaemonHost({
+      endpoint,
+      trustStore,
+      agentRuntime: runtime,
+      credentialVault: new AvailableCredentialVault(),
+      registrationStore: new WorkspaceRegistrationStore(join(root, "workspaces.json")),
+    });
+    await host.start();
+    const client = new LocalRuntimeClient(endpoint);
+    try {
+      await client.request("session.send", {
+        workspacePath: workspace,
+        input: { kind: "skill", name: "review", args: "src/runtime.ts" },
+        idempotencyKey: "production-skill",
+      });
+      await expect.poll(() => runtime.requests.length).toBe(1);
+      expect(runtime.requests[0]).toMatchObject({
+        model: "special",
+        modelRouteId: "local/special",
+        allowedTools: ["read_file"],
+        prompt: expect.stringContaining('<pico-skill-loaded name="review" trigger="user-slash"'),
+      });
+      expect(runtime.requests[0]?.prompt).toContain("Inspect src/runtime.ts.");
+    } finally {
+      client.close();
+      await host.stop();
+    }
+  });
+
   it("生产 daemon 通过 IPC 创建、执行并审计桌面 Automation", async () => {
     const root = await mkdtemp(join(tmpdir(), "pico-auto-"));
     cleanups.push(() => rm(root, { recursive: true, force: true }));
@@ -544,6 +614,26 @@ class InteractiveFakeAgentRuntime extends AgentRuntime {
       workDir,
       finalMessage: "已保留兼容并完成验证。",
       usage: { promptTokens: 12, completionTokens: 6, costCNY: 0.01 },
+      messages: [],
+    };
+  }
+}
+
+class CapturingActivationAgentRuntime extends AgentRuntime {
+  readonly requests: RunAgentCliOptions[] = [];
+
+  override async execute(
+    options: RunAgentCliOptions,
+    _dependencies: RunAgentCliDependencies = {},
+  ): Promise<RunAgentCliResult> {
+    this.requests.push(options);
+    const sessionId = options.session ?? "activation-session";
+    return {
+      sessionId,
+      sessionSelection: { mode: "resume", sessionId },
+      workDir: options.dir ?? process.cwd(),
+      finalMessage: "activation complete",
+      usage: { promptTokens: 5, completionTokens: 2, costCNY: 0.001 },
       messages: [],
     };
   }
