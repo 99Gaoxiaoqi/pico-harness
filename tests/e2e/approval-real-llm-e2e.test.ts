@@ -1,9 +1,10 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { globalApprovalManager, type ApprovalNotice } from "../../src/approval/manager.js";
 import { runAgentFromCli } from "../../src/cli/run-agent.js";
+import { getOrCreateSessionSettings } from "../../src/input/session-settings.js";
 import { OpenAIProvider } from "../../src/provider/openai.js";
 import type { LLMProvider } from "../../src/provider/interface.js";
 import type { Message, ToolDefinition } from "../../src/schema/message.js";
@@ -57,8 +58,16 @@ describeRealLLM("approval e2e with real LLM", { timeout: 180000 }, () => {
   });
 
   it("real model write_file is blocked until human approval", async () => {
-    const workDir = mkdtempSync(join(tmpdir(), "pico-real-approval-"));
+    const workDir = realpathSync(mkdtempSync(join(tmpdir(), "pico-real-approval-")));
     tempDirs.push(workDir);
+    const sessionId = `real_approval_${Date.now()}`;
+    getOrCreateSessionSettings({
+      sessionId,
+      cwd: workDir,
+      provider: "openai",
+      model: MODEL!,
+      mode: "default",
+    });
     const provider = new WriteOnlyRealProvider(
       new OpenAIProvider({ baseURL: BASE_URL!, apiKey: API_KEY!, model: MODEL! }),
     );
@@ -73,7 +82,7 @@ describeRealLLM("approval e2e with real LLM", { timeout: 180000 }, () => {
           "Do not answer directly before attempting the tool call.",
         ].join(" "),
         dir: workDir,
-        session: `real_approval_${Date.now()}`,
+        session: sessionId,
         provider: "openai",
         model: MODEL!,
       },

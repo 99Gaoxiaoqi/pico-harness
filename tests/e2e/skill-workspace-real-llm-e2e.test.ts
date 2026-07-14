@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -6,6 +6,7 @@ import { globalApprovalManager, type ApprovalNotice } from "../../src/approval/m
 import { runAgentFromCli } from "../../src/cli/run-agent.js";
 import { createPicoCommandRegistry } from "../../src/input/pico-command-registry.js";
 import { processUserInput } from "../../src/input/process-user-input.js";
+import { getOrCreateSessionSettings } from "../../src/input/session-settings.js";
 import type { LLMProvider, LLMProviderRequestOptions } from "../../src/provider/interface.js";
 import { OpenAIProvider } from "../../src/provider/openai.js";
 import type { Message, ToolDefinition } from "../../src/schema/message.js";
@@ -89,9 +90,9 @@ describeRealLLM("explicit skill and additional workspace real LLM e2e", { timeou
     for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
   });
 
-  it("真实模型遵循显式 Skill，且外部写入仅在 add-dir 后进入审批", async () => {
-    const workDir = mkdtempSync(join(tmpdir(), "pico-real-skill-root-"));
-    const outsideDir = mkdtempSync(join(tmpdir(), "pico-real-skill-outside-"));
+  it("真实模型遵循显式 Skill，且外部写入遵循审批与 add-dir 边界", async () => {
+    const workDir = realpathSync(mkdtempSync(join(tmpdir(), "pico-real-skill-root-")));
+    const outsideDir = realpathSync(mkdtempSync(join(tmpdir(), "pico-real-skill-outside-")));
     tempDirs.push(workDir, outsideDir);
     const outsideFile = join(outsideDir, "skill-marker.txt");
     const skillDir = join(workDir, ".claw", "skills", "marker");
@@ -126,33 +127,56 @@ describeRealLLM("explicit skill and additional workspace real LLM e2e", { timeou
 
     const blockedProvider = createProvider();
     const blockedNotices: ApprovalNotice[] = [];
+    const blockedSessionId = `real_skill_blocked_${Date.now()}`;
+    getOrCreateSessionSettings({
+      sessionId: blockedSessionId,
+      cwd: workDir,
+      provider: "openai",
+      model: realEnv.LLM_MODEL!,
+      mode: "default",
+    });
     const blocked = await runAgentFromCli(
       {
         prompt: command.result.prompt,
         dir: workDir,
-        session: `real_skill_blocked_${Date.now()}`,
+        session: blockedSessionId,
         provider: "openai",
         model: realEnv.LLM_MODEL!,
       },
       {
         provider: blockedProvider,
         env: realEnv,
-        approvalNotifier: (notice) => blockedNotices.push(notice),
+        approvalNotifier: (notice) => {
+          blockedNotices.push(notice);
+          globalApprovalManager.resolveApproval(notice.taskId, false, "real e2e outside denied");
+        },
       },
     );
 
     expect(blockedProvider.responses.some(hasWriteFileCall)).toBe(true);
-    expect(blockedNotices).toHaveLength(0);
-    expect(blocked.messages.some((message) => message.content.includes("/add-dir"))).toBe(true);
+    expect(blockedNotices).toHaveLength(1);
+    expect(
+      blocked.messages.some(
+        (message) => message.toolCallId !== undefined && message.content.startsWith("[ERROR]"),
+      ),
+    ).toBe(true);
     expect(() => readFileSync(outsideFile, "utf8")).toThrow();
 
     const allowedProvider = createProvider();
     const allowedNotices: ApprovalNotice[] = [];
+    const allowedSessionId = `real_skill_allowed_${Date.now()}`;
+    getOrCreateSessionSettings({
+      sessionId: allowedSessionId,
+      cwd: workDir,
+      provider: "openai",
+      model: realEnv.LLM_MODEL!,
+      mode: "default",
+    });
     await runAgentFromCli(
       {
         prompt: command.result.prompt,
         dir: workDir,
-        session: `real_skill_allowed_${Date.now()}`,
+        session: allowedSessionId,
         provider: "openai",
         model: realEnv.LLM_MODEL!,
         addDirs: [outsideDir],

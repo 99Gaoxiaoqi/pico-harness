@@ -3,7 +3,7 @@
 //
 // 测试目标:
 //   1. Auxiliary Client:配 AUX_LLM_* 环境变量,真实模型触发 FullCompactor 压缩,验证 aux 被用
-//   2. 版本化迁移:真实 session 跑一轮后,JSONL 首行有 meta schemaVersion=2
+//   2. 版本化迁移:真实 session 跑一轮后,JSONL 首行有当前 meta schemaVersion
 //   3. Rate Limit:端点不返回 rate limit header,用 mock header 单测已覆盖,这里验证回调机制可接通
 //
 // 凭证通过环境变量显式开启:
@@ -81,7 +81,7 @@ describeOrSkip("阶段 5 端到端测试(真实大模型)", { timeout: 180000 },
 
   // ─── 测试 1: 版本化迁移 ───
   describe("版本化迁移(5.8)", () => {
-    it("真实 session 跑一轮后,JSONL 首行有 meta schemaVersion=2", async () => {
+    it("真实 session 跑一轮后,JSONL 首行有 meta schemaVersion=3", async () => {
       // 用持久化 session(非内存),让 JSONL 真实落盘
       originalPersistence = process.env.PICO_PERSISTENCE;
       process.env.PICO_PERSISTENCE = "1";
@@ -111,7 +111,7 @@ describeOrSkip("阶段 5 端到端测试(真实大模型)", { timeout: 180000 },
       console.log(`[E2E version] JSONL 首行: ${firstLine.slice(0, 100)}`);
 
       expect(record.type).toBe("meta");
-      expect(record.schemaVersion).toBe(2);
+      expect(record.schemaVersion).toBe(3);
 
       if (originalPersistence === undefined) {
         delete process.env.PICO_PERSISTENCE;
