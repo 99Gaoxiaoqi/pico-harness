@@ -28,6 +28,7 @@ import { DesktopSessionStateStore } from "./desktop-session-state.js";
 import { canonicalizeWorkspacePath } from "./workspace-registry.js";
 import { WorkspaceRegistrationStore } from "./workspace-registration.js";
 import { WorkspaceRuntimeService } from "./workspace-runtime-service.js";
+import { DesktopAutomationService } from "./desktop-automation-service.js";
 
 const UNSUPPORTED_DESKTOP_METHODS: ReadonlySet<string> = new Set([
   "run.pause",
@@ -41,13 +42,6 @@ const UNSUPPORTED_DESKTOP_METHODS: ReadonlySet<string> = new Set([
   "rewind.list",
   "rewind.preview",
   "rewind.apply",
-  "jobs.list",
-  "jobs.create",
-  "jobs.update",
-  "jobs.delete",
-  "jobs.setEnabled",
-  "jobs.runNow",
-  "jobs.history",
   "config.update",
 ] as const);
 
@@ -57,6 +51,7 @@ export interface DesktopRuntimeServiceOptions {
   readonly trustStore?: WorkspaceTrustStore;
   readonly sessionStateStore?: DesktopSessionStateStore;
   readonly interactions?: DesktopRuntimeInteractions;
+  readonly automations?: DesktopAutomationService;
   readonly now?: () => number;
 }
 
@@ -126,6 +121,28 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         return this.listMcpServers(request.params.workspacePath);
       case "usage.get":
         return this.getUsage(request.params);
+      case "jobs.list":
+        return this.listJobs(request.params.workspacePath);
+      case "jobs.create":
+        return this.createJob(request.params);
+      case "jobs.update":
+        return this.updateJob(request.params);
+      case "jobs.delete":
+        return this.deleteJob(request.params.workspacePath, request.params.jobId);
+      case "jobs.setEnabled":
+        return this.setJobEnabled(
+          request.params.workspacePath,
+          request.params.jobId,
+          request.params.enabled,
+        );
+      case "jobs.runNow":
+        return this.runJobNow(request.params.workspacePath, request.params.jobId);
+      case "jobs.history":
+        return this.jobHistory(
+          request.params.workspacePath,
+          request.params.jobId,
+          request.params.limit,
+        );
       case "approval.respond":
         if (this.options.interactions) {
           return this.options.interactions.respondApproval(request.params);
@@ -346,6 +363,80 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     }
   }
 
+  private async listJobs(workspacePath: string): Promise<JsonValue> {
+    const [canonical, automations] = await Promise.all([
+      this.requireTrustedWorkspace(workspacePath),
+      Promise.resolve(this.requireAutomations()),
+    ]);
+    return { jobs: automations.list(canonical) };
+  }
+
+  private async createJob(params: {
+    readonly workspacePath: string;
+    readonly name: string;
+    readonly prompt: string;
+    readonly schedule: string;
+    readonly enabled?: boolean;
+  }): Promise<JsonValue> {
+    const canonical = await this.requireTrustedWorkspace(params.workspacePath);
+    const job = await this.requireAutomations().create(canonical, params);
+    this.publishJob(job);
+    return { job };
+  }
+
+  private async updateJob(params: {
+    readonly workspacePath: string;
+    readonly jobId: string;
+    readonly name?: string;
+    readonly prompt?: string;
+    readonly schedule?: string;
+  }): Promise<JsonValue> {
+    const canonical = await this.requireTrustedWorkspace(params.workspacePath);
+    const job = this.requireAutomations().update(canonical, params.jobId, params);
+    this.publishJob(job);
+    return { job };
+  }
+
+  private async deleteJob(workspacePath: string, jobId: string): Promise<JsonValue> {
+    const canonical = await this.requireTrustedWorkspace(workspacePath);
+    return { deleted: this.requireAutomations().delete(canonical, jobId) };
+  }
+
+  private async setJobEnabled(
+    workspacePath: string,
+    jobId: string,
+    enabled: boolean,
+  ): Promise<JsonValue> {
+    const canonical = await this.requireTrustedWorkspace(workspacePath);
+    const job = this.requireAutomations().setEnabled(canonical, jobId, enabled);
+    this.publishJob(job);
+    return { job };
+  }
+
+  private async runJobNow(workspacePath: string, jobId: string): Promise<JsonValue> {
+    const canonical = await this.requireTrustedWorkspace(workspacePath);
+    const result = await this.requireAutomations().runNow(canonical, jobId);
+    this.publishJob(result.job);
+    return result;
+  }
+
+  private async jobHistory(
+    workspacePath: string,
+    jobId: string,
+    limit?: number,
+  ): Promise<JsonValue> {
+    const canonical = await this.requireTrustedWorkspace(workspacePath);
+    return { runs: this.requireAutomations().history(canonical, jobId, limit) };
+  }
+
+  private requireAutomations(): DesktopAutomationService {
+    if (this.options.automations) return this.options.automations;
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.METHOD_NOT_FOUND,
+      "Automations 尚未连接到 daemon Cron runtime",
+    );
+  }
+
   private async requireTrustedWorkspace(workspacePath: string): Promise<string> {
     const canonical = await this.trustStore.canonicalize(workspacePath);
     if (!(await this.trustStore.isTrusted(canonical))) {
@@ -369,6 +460,22 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         resourceVersion: this.nextResourceVersion(),
         at: this.now(),
         payload: { session },
+      }),
+    );
+  }
+
+  private publishJob(job: JsonValue): void {
+    if (!isJsonRecord(job)) return;
+    const workspacePath = job["workspacePath"];
+    const jobId = job["jobId"];
+    if (typeof workspacePath !== "string" || typeof jobId !== "string") return;
+    this.publish(
+      createRuntimeEvent({
+        topic: "job.updated",
+        scope: { workspacePath, jobId },
+        resourceVersion: this.nextResourceVersion(),
+        at: this.now(),
+        payload: { job },
       }),
     );
   }

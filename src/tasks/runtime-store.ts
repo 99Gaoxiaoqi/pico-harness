@@ -119,12 +119,21 @@ export interface LegacyTaskImportResult {
 export interface CreateCronJobInput {
   cronJobId: string;
   workspacePath: string;
+  name?: string;
   schedule: string;
   timeZone: string;
   prompt: string;
   policySnapshot: YoloPolicySnapshot;
   credentialRef?: CredentialRef;
   enabled?: boolean;
+}
+
+export interface UpdateCronJobInput {
+  cronJobId: string;
+  expectedVersion: number;
+  name?: string;
+  schedule?: string;
+  prompt?: string;
 }
 
 export interface CreateCronRunInput {
@@ -271,6 +280,7 @@ interface BaselineRow {
 interface CronJobRow {
   cron_job_id: string;
   workspace_path: string;
+  name: string | null;
   schedule: string;
   time_zone: string;
   prompt: string;
@@ -732,8 +742,7 @@ export class RuntimeStore {
 
   getJob(jobId: string): JobRecord | undefined {
     const row = this.db.prepare("SELECT * FROM jobs WHERE job_id = ?").get(jobId) as
-      | JobRow
-      | undefined;
+      JobRow | undefined;
     return row ? mapJob(row) : undefined;
   }
 
@@ -784,13 +793,14 @@ export class RuntimeStore {
     this.db
       .prepare(
         `INSERT INTO cron_jobs (
-           cron_job_id, workspace_path, schedule, time_zone, prompt, enabled,
+           cron_job_id, workspace_path, name, schedule, time_zone, prompt, enabled,
            policy_snapshot_json, credential_ref, version, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
       )
       .run(
         input.cronJobId,
         input.workspacePath,
+        normalizeCronJobName(input.name, input.prompt),
         input.schedule,
         input.timeZone,
         input.prompt,
@@ -813,10 +823,33 @@ export class RuntimeStore {
     return this.requireCronJob(input.cronJobId);
   }
 
+  updateCronJob(input: UpdateCronJobInput): CronJobRecord {
+    const current = this.requireCronJob(input.cronJobId);
+    const name = input.name === undefined ? current.name : normalizeCronJobName(input.name);
+    const schedule = input.schedule ?? current.schedule;
+    const prompt = input.prompt === undefined ? current.prompt : normalizeCronPrompt(input.prompt);
+    const result = this.db
+      .prepare(
+        `UPDATE cron_jobs
+         SET name = ?, schedule = ?, prompt = ?, updated_at = ?, version = version + 1
+         WHERE cron_job_id = ? AND version = ?`,
+      )
+      .run(name, schedule, prompt, this.now(), input.cronJobId, input.expectedVersion);
+    if (result.changes !== 1) {
+      throw new RuntimeConflictError(`Cron Job ${input.cronJobId} 的版本已变化`);
+    }
+    this.insertRuntimeEvent({
+      topic: "cron.job.updated",
+      workspacePath: current.workspacePath,
+      cronJobId: input.cronJobId,
+      payload: { name, schedule },
+    });
+    return this.requireCronJob(input.cronJobId);
+  }
+
   getCronJob(cronJobId: string): CronJobRecord | undefined {
     const row = this.db.prepare("SELECT * FROM cron_jobs WHERE cron_job_id = ?").get(cronJobId) as
-      | CronJobRow
-      | undefined;
+      CronJobRow | undefined;
     return row ? mapCronJob(row) : undefined;
   }
 
@@ -953,8 +986,7 @@ export class RuntimeStore {
 
   getCronRun(cronRunId: string): CronRunRecord | undefined {
     const row = this.db.prepare("SELECT * FROM cron_runs WHERE cron_run_id = ?").get(cronRunId) as
-      | CronRunRow
-      | undefined;
+      CronRunRow | undefined;
     return row ? mapCronRun(row) : undefined;
   }
 
@@ -1800,6 +1832,12 @@ export class RuntimeStore {
           .prepare("INSERT INTO schema_migrations(version, name, applied_at) VALUES (5, ?, ?)")
           .run("provider_call_hook_purpose", this.now());
       }
+      if (current < 6) {
+        this.db.exec(SCHEMA_V6);
+        this.db
+          .prepare("INSERT INTO schema_migrations(version, name, applied_at) VALUES (6, ?, ?)")
+          .run("cron_job_display_name", this.now());
+      }
     });
     migrate();
   }
@@ -1888,8 +1926,7 @@ export class RuntimeStore {
 
   private requireProviderCall(callId: string): ProviderCallRecord {
     const row = this.db.prepare("SELECT * FROM provider_calls WHERE call_id = ?").get(callId) as
-      | ProviderCallRow
-      | undefined;
+      ProviderCallRow | undefined;
     if (!row) throw new Error(`未知 provider call: ${callId}`);
     return mapProviderCall(row);
   }
@@ -2200,6 +2237,17 @@ const SCHEMA_V5 = `
   CREATE INDEX provider_calls_job_idx ON provider_calls(job_id, created_at);
 `;
 
+const SCHEMA_V6 = `
+  ALTER TABLE cron_jobs ADD COLUMN name TEXT;
+  UPDATE cron_jobs
+  SET name = CASE
+    WHEN trim(prompt) = '' THEN cron_job_id
+    WHEN length(trim(prompt)) <= 80 THEN trim(prompt)
+    ELSE substr(trim(prompt), 1, 79) || '…'
+  END
+  WHERE name IS NULL;
+`;
+
 function mapJob(row: JobRow): JobRecord {
   return compact({
     jobId: row.job_id,
@@ -2365,6 +2413,7 @@ function mapCronJob(row: CronJobRow): CronJobRecord {
   return {
     cronJobId: row.cron_job_id,
     workspacePath: row.workspace_path,
+    name: normalizeCronJobName(row.name ?? undefined, row.prompt),
     schedule: row.schedule,
     timeZone: row.time_zone,
     prompt: row.prompt,
@@ -2375,6 +2424,18 @@ function mapCronJob(row: CronJobRow): CronJobRecord {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+}
+
+function normalizeCronJobName(name: string | undefined, prompt = ""): string {
+  const normalized = (name ?? prompt).trim().replace(/\s+/gu, " ");
+  if (!normalized) throw new Error("Cron Job name 必须是非空字符串");
+  return normalized.length <= 80 ? normalized : `${normalized.slice(0, 79)}…`;
+}
+
+function normalizeCronPrompt(prompt: string): string {
+  const normalized = prompt.trim();
+  if (!normalized) throw new Error("Cron Job prompt 必须是非空字符串");
+  return normalized;
 }
 
 function mapCronRun(row: CronRunRow): CronRunRecord {
