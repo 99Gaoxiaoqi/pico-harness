@@ -7,6 +7,7 @@ import {
   createRuntimeRequest,
   LocalRuntimeClient,
   LocalRuntimeDaemon,
+  RUNTIME_ERROR_CODES,
   resolveLocalDaemonEndpoint,
   WorkspaceRegistrationStore,
   WorkspaceRuntimeRegistry,
@@ -80,6 +81,28 @@ describe("local runtime daemon IPC integration", () => {
       expect(created).toBe(2);
     } finally {
       await registry.close();
+    }
+  });
+
+  it("拒绝注册非 Git 工作区且不留下登记记录", async () => {
+    const root = await temporaryRoot();
+    const workspace = join(root, "plain-folder");
+    await mkdir(workspace);
+    const registrations = new WorkspaceRegistrationStore(join(root, "daemon-workspaces.json"));
+    const service = new WorkspaceRuntimeService({
+      execute: async () => undefined,
+      registrationStore: registrations,
+    });
+    try {
+      await expect(
+        service.handle(createRuntimeRequest("workspace.register", { workspacePath: workspace })),
+      ).rejects.toMatchObject({
+        code: RUNTIME_ERROR_CODES.INVALID_PARAMS,
+        message: expect.stringContaining("所选文件夹不是 Git 仓库"),
+      });
+      await expect(registrations.list()).resolves.toEqual([]);
+    } finally {
+      await service.close();
     }
   });
 
