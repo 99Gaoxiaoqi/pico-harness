@@ -147,6 +147,12 @@ import { ScheduleDraftCoordinator } from "../tasks/cron-draft-coordinator.js";
 import { LocalCronDaemonBridge } from "../input/cron-daemon-bridge.js";
 import { ScheduleDraftReviewHandler } from "./schedule-draft-review.js";
 import { bindScheduleDraftDialogs } from "./schedule-draft-dialog.js";
+import { SkillLoader } from "../context/skill.js";
+import { PluginManagementService } from "../plugins/plugin-management-service.js";
+import {
+  loadPluginRuntimeSnapshot,
+  type PluginRuntimeSnapshot,
+} from "../plugins/plugin-runtime-snapshot.js";
 
 export interface ReplOptions {
   /** 工作区 */
@@ -284,6 +290,7 @@ export interface HandleTuiInputSubmissionDeps {
   isActive?: () => boolean;
   activateAgentHooks?: (metadata: Record<string, unknown>) => void | Promise<void>;
   clearComponentHooks?: () => void | Promise<void>;
+  skillLoader?: SkillLoader;
 }
 
 export type LocalTuiCommandUiEffect = { kind: "none" } | LocalTuiModelSelectorDialogEffect;
@@ -328,6 +335,7 @@ interface TuiSessionBundle {
   readonly askUserHandler: AskUserHandler;
   readonly scheduleDraft?: TuiScheduleDraftRuntime;
   readonly mcpElicitationHandler: McpElicitationUiHandler;
+  readonly skillLoader: SkillLoader;
   readonly recoveredRewindInputText?: string;
   latestMcpStatus?: McpStatusSnapshot;
 }
@@ -437,7 +445,12 @@ async function runPreparedUserPrompt(
   prompt: string,
   deps: Pick<
     HandleTuiInputSubmissionDeps,
-    "workDir" | "reporter" | "runAgent" | "setRewindContext" | "abortControllerRef"
+    | "workDir"
+    | "reporter"
+    | "runAgent"
+    | "setRewindContext"
+    | "abortControllerRef"
+    | "skillLoader"
   >,
   rewind: { rewindPrompt: string; rewindTranscriptIndex: number },
   attachments: readonly ImagePart[],
@@ -448,7 +461,7 @@ async function runPreparedUserPrompt(
   let prepared: PreparedUserPrompt;
   try {
     deps.abortControllerRef?.current?.signal.throwIfAborted();
-    prepared = await preparePromptForMessage(prompt, deps.workDir);
+    prepared = await preparePromptForMessage(prompt, deps.workDir, deps.skillLoader);
     deps.abortControllerRef?.current?.signal.throwIfAborted();
   } catch (error) {
     appendTuiRunError(deps.reporter, error);
@@ -1018,6 +1031,21 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
 
   const provider = opts.provider ?? "openai";
   const picoConfig = await loadPicoConfig(opts.workDir);
+  const pluginManagement = new PluginManagementService({ workDir: opts.workDir });
+  const pluginSnapshot = await loadPluginRuntimeSnapshot({
+    workDir: opts.workDir,
+    service: pluginManagement,
+  });
+  const claudeCompatibility = picoConfig.compatibility.claude;
+  const createRuntimeSkillLoader = (workDir: string): SkillLoader =>
+    new SkillLoader(workDir, {
+      includeUserResources: true,
+      includeClaudeProjectResources:
+        claudeCompatibility.enabled && claudeCompatibility.projectResources,
+      includeClaudeUserResources:
+        claudeCompatibility.enabled && claudeCompatibility.userResources,
+      externalSources: pluginSnapshot.skillSources,
+    });
   const modelRouter = await loadModelRouter({
     config: picoConfig,
     legacyProvider: provider,
@@ -1072,7 +1100,8 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
   const pendingTuiDialogActions = new Set<Promise<unknown>>();
   let activeAbortControllerRef: TuiAbortControllerRef | undefined;
   const unsubscribeMcpStatus = sharedMcpManager.subscribe((snapshot) => {
-    mcpStatusVisible = snapshot.configPath !== undefined;
+    mcpStatusVisible =
+      snapshot.configPath !== undefined || (snapshot.configSources?.length ?? 0) > 0;
     if (!activeBundle) return;
     activeBundle.latestMcpStatus = snapshot;
     setSessionTools(activeBundle.settings, toolStatusFromRegistry(activeBundle.toolRegistry));
@@ -1134,7 +1163,8 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
       workDir: opts.workDir,
       sessionId: selection.sessionId,
       session,
-      lspServers: picoConfig.lspServers,
+      lspServers: [...picoConfig.lspServers, ...pluginSnapshot.lspServers],
+      hookExtensionSources: pluginSnapshot.hookSources,
       ...(taskHostRuntime ? { taskHostRuntime } : {}),
     });
 
@@ -1142,16 +1172,19 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
       const { toolDisclosure, fileIndex, codeIntelligence } = runtimeState;
       const askUserHandler = new AskUserHandler();
       const mcpElicitationHandler = new McpElicitationUiHandler();
+      const skillLoader = createRuntimeSkillLoader(opts.workDir);
       const toolRegistry = buildDefaultToolRegistry(opts.workDir, {
         toolDisclosure,
         workspaceRoots,
         askUserHandler,
         codeIntelligence,
+        skillLoader,
       });
       sharedMcpManager.attachRegistry(toolRegistry);
       if (!mcpInitialized) {
         mcpInitialized = true;
         const shouldLoadMcpConfig =
+          pluginSnapshot.mcpSources.length > 0 ||
           opts.mcpConfigPath !== undefined ||
           (await access(mcpConfigPath).then(
             () => true,
@@ -1159,7 +1192,14 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
           ));
         if (shouldLoadMcpConfig) {
           try {
-            await sharedMcpManager.loadConfig(mcpConfigPath);
+            await sharedMcpManager.replaceSources([
+              {
+                id: "project",
+                path: mcpConfigPath,
+                optional: opts.mcpConfigPath === undefined,
+              },
+              ...pluginSnapshot.mcpSources,
+            ]);
             await sharedMcpManager.connectAll();
           } catch {
             // /mcp 展示配置或连接错误；TUI 本身继续可用。
@@ -1226,6 +1266,15 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         goalManager: runtimeState.goalManager,
         ...(runtimeState.hookService ? { hookService: runtimeState.hookService } : {}),
         hookCommands: runtimeState.hookCommands,
+        pluginManagement,
+        includeUserSkillResources: true,
+        includeClaudeProjectResources:
+          claudeCompatibility.enabled && claudeCompatibility.projectResources,
+        includeClaudeUserResources:
+          claudeCompatibility.enabled && claudeCompatibility.userResources,
+        skillSources: pluginSnapshot.skillSources,
+        commandSources: pluginSnapshot.commandSources,
+        agentSources: pluginSnapshot.agentSources,
         modelRuntime: () => {
           const route = modelRouter.resolve(settings.modelRouteId);
           return route
@@ -1272,6 +1321,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         askUserHandler,
         ...(scheduleDraft ? { scheduleDraft } : {}),
         mcpElicitationHandler,
+        skillLoader,
         ...(recoveredRewind ? { recoveredRewindInputText: recoveredRewind.inputText } : {}),
         latestMcpStatus,
       };
@@ -1726,6 +1776,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
             activeBundleRef.current.generation === current.generation,
           registry,
           workDir: opts.workDir,
+          skillLoader: current.skillLoader,
           exit,
           sessionId,
           switchSession,
@@ -1850,6 +1901,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
               modelRouter,
               toolDisclosure,
               runtimeState,
+              pluginSnapshot,
               askUserHandler: current.askUserHandler,
               mcpElicitationHandler: current.mcpElicitationHandler,
               openDialog: (request) => {
@@ -2232,6 +2284,7 @@ export async function runTuiAgentPrompt(
     modelRouter?: ModelRouter;
     toolDisclosure?: ToolDisclosure;
     runtimeState?: TuiRuntimeState;
+    pluginSnapshot?: PluginRuntimeSnapshot;
     askUserHandler?: AskUserHandler;
     scheduleDraft?: TuiScheduleDraftRuntime;
     mcpElicitationHandler?: McpElicitationUiHandler;
@@ -2309,6 +2362,7 @@ export async function runTuiAgentPrompt(
       ...(deps.toolDisclosure ? { toolDisclosure: deps.toolDisclosure } : {}),
       ...(deps.modelRouter ? { modelRouter: deps.modelRouter } : {}),
       ...(deps.runtimeState ? { runtimeState: deps.runtimeState } : {}),
+      ...(deps.pluginSnapshot ? { pluginSnapshot: deps.pluginSnapshot } : {}),
       ...(deps.askUserHandler ? { askUserHandler: deps.askUserHandler } : {}),
       ...(deps.scheduleDraft ? { scheduleDraftCoordinator: deps.scheduleDraft.coordinator } : {}),
       ...(deps.mcpStatusSink ? { mcpStatusSink: deps.mcpStatusSink } : {}),

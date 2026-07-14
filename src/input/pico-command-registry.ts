@@ -28,7 +28,9 @@ import {
   type AgentCatalogSource,
   type AgentProfileSummary,
   type CatalogAgentProfile,
+  type AgentExternalCatalogSource,
 } from "../agents/catalog.js";
+import type { ExternalResourceCatalogSource } from "../catalog/resource-catalog.js";
 import type {
   CommandListOptions,
   LocalCommandResult,
@@ -151,12 +153,33 @@ export interface PicoCommandRegistryOptions {
   mcpControl?: McpConnectionManager;
   /** Plugin 管理命令可注入测试/宿主单例；未注入时按 workDir 创建。 */
   pluginManagement?: PluginManagementCommandService;
+  picoHome?: string;
+  homeDir?: string;
+  includeUserSkillResources?: boolean;
+  includeClaudeProjectResources?: boolean;
+  includeClaudeUserResources?: boolean;
+  skillSources?: readonly ExternalResourceCatalogSource[];
+  commandSources?: readonly ExternalResourceCatalogSource[];
+  agentSources?: readonly AgentExternalCatalogSource[];
 }
 
 export async function createPicoCommandRegistry(
   options: PicoCommandRegistryOptions,
 ): Promise<CommandRegistry> {
-  const skillLoader = new SkillLoader(options.workDir);
+  const skillLoader = new SkillLoader(options.workDir, {
+    ...(options.picoHome ? { picoHome: options.picoHome } : {}),
+    ...(options.homeDir ? { homeDir: options.homeDir } : {}),
+    ...(options.includeUserSkillResources !== undefined
+      ? { includeUserResources: options.includeUserSkillResources }
+      : {}),
+    ...(options.includeClaudeProjectResources !== undefined
+      ? { includeClaudeProjectResources: options.includeClaudeProjectResources }
+      : {}),
+    ...(options.includeClaudeUserResources !== undefined
+      ? { includeClaudeUserResources: options.includeClaudeUserResources }
+      : {}),
+    ...(options.skillSources ? { externalSources: options.skillSources } : {}),
+  });
   const tools = options.tools ?? toolStatusFromRegistry(buildDefaultToolRegistry(options.workDir));
   const settings = getOrCreateSessionSettings(
     {
@@ -221,6 +244,14 @@ export async function createPicoCommandRegistry(
       : {}),
     includeSkillCommands: true,
     skillLoader,
+    ...(options.homeDir ? { homeDir: options.homeDir } : {}),
+    ...(options.includeClaudeProjectResources !== undefined
+      ? { includeClaudeProjectResources: options.includeClaudeProjectResources }
+      : {}),
+    ...(options.includeClaudeUserResources !== undefined
+      ? { includeClaudeUserResources: options.includeClaudeUserResources }
+      : {}),
+    ...(options.commandSources ? { externalSources: options.commandSources } : {}),
     builtinNames: registry.list().flatMap((command) => [command.name, ...(command.aliases ?? [])]),
   });
   for (const command of markdownCommands) {
@@ -329,13 +360,31 @@ async function loadSkillArgumentCandidates(
 }
 
 async function loadAgentArgumentCandidates(
-  workDir: string,
+  options: PicoCommandRegistryOptions,
 ): Promise<readonly SlashArgumentCandidate[]> {
-  const agents = await loadAgentCatalog({ workDir, includeBuiltins: true });
+  const agents = await loadRegistryAgents(options);
   return summarizeAgentProfiles(agents).map((agent) => ({
     value: agent.name,
     description: agent.description,
   }));
+}
+
+async function loadRegistryAgents(
+  options: PicoCommandRegistryOptions,
+): Promise<CatalogAgentProfile[]> {
+  return await loadAgentCatalog({
+    workDir: options.workDir,
+    includeBuiltins: true,
+    ...(options.homeDir ? { homeDir: options.homeDir } : {}),
+    ...(options.picoHome ? { picoHome: options.picoHome } : {}),
+    ...(options.includeClaudeProjectResources !== undefined
+      ? { includeClaudeProjectResources: options.includeClaudeProjectResources }
+      : {}),
+    ...(options.includeClaudeUserResources !== undefined
+      ? { includeClaudeUserResources: options.includeClaudeUserResources }
+      : {}),
+    ...(options.agentSources ? { externalSources: options.agentSources } : {}),
+  });
 }
 
 async function loadSessionArgumentCandidates(
@@ -914,7 +963,7 @@ function createAgentsCommand(options: PicoCommandRegistryOptions): SlashCommand 
     availability: "idle",
     execute: async (): Promise<LocalCommandResult> => {
       const agents = summarizeAgentProfiles(
-        await loadAgentCatalog({ workDir: options.workDir, includeBuiltins: true }),
+        await loadRegistryAgents(options),
       );
       return {
         type: "local",
@@ -1565,7 +1614,7 @@ function createAgentCommand(options: PicoCommandRegistryOptions): SlashCommand {
     argumentHint: "<name> <task>",
     category: "agent",
     argumentCompleter: async (query) =>
-      filterArgumentCandidates(await loadAgentArgumentCandidates(options.workDir), query),
+      filterArgumentCandidates(await loadAgentArgumentCandidates(options), query),
     kind: "prompt",
     execute: async (input): Promise<PromptCommandResult | LocalCommandResult> => {
       const agentName = input.argv[0]?.trim();
@@ -1578,7 +1627,7 @@ function createAgentCommand(options: PicoCommandRegistryOptions): SlashCommand {
         };
       }
 
-      const agents = await loadAgentCatalog({ workDir: options.workDir, includeBuiltins: true });
+      const agents = await loadRegistryAgents(options);
       const agent = findAgentProfile(agents, agentName);
       if (!agent) {
         return {

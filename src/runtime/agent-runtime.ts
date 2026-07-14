@@ -12,7 +12,7 @@ import { ToolResultArtifactStore } from "../context/artifact-store.js";
 import { createContextBudget, estimateTokenBudgetAsChars } from "../context/context-budget.js";
 import { PromptComposer } from "../context/composer.js";
 import type { TodoStore } from "../context/todo-store.js";
-import type { Skill } from "../context/skill.js";
+import { SkillLoader, type Skill } from "../context/skill.js";
 import { ToolDisclosure } from "../tools/tool-disclosure.js";
 import {
   createProvider,
@@ -37,7 +37,7 @@ import { FetchURLTool } from "../tools/web.js";
 import { DelegationManager, DelegateStatusTool } from "../tools/delegation-manager.js";
 import { createSubagentRegistryFactory } from "../tools/delegation-registry.js";
 import type { AgentProfile } from "../tools/agent-profile.js";
-import { loadAgentCatalog } from "../agents/catalog.js";
+import { loadAgentCatalog, type AgentExternalCatalogSource } from "../agents/catalog.js";
 import {
   DelegateTaskTool,
   SpawnSubagentTool,
@@ -114,6 +114,10 @@ import {
 } from "../safety/background-yolo-policy.js";
 import { resolveSubagentModelSelection } from "./subagent-model-selection.js";
 import { createSubagentModelRuntime } from "./subagent-model-runtime.js";
+import {
+  loadPluginRuntimeSnapshot,
+  type PluginRuntimeSnapshot,
+} from "../plugins/plugin-runtime-snapshot.js";
 
 export type RuntimeExecution =
   | { readonly kind: "foreground" }
@@ -239,6 +243,8 @@ export interface RunAgentCliDependencies extends RuntimeHost {
   hookService?: HookService;
   /** 仅结构化 TUI 前台可提供；后台与兼容行模式不得注入。 */
   scheduleDraftCoordinator?: ScheduleDraftCoordinator;
+  /** TUI/宿主已冻结的受信 Plugin 快照；未注入时前台运行自行加载。 */
+  pluginSnapshot?: PluginRuntimeSnapshot;
 }
 
 /** Runtime-first entry point. CLI/TUI compatibility wrappers call this method. */
@@ -271,6 +277,23 @@ export async function executeAgentRuntime(
       : undefined;
   const backgroundApiKey = await resolveBackgroundCredential(options, execution, dependencies);
   const picoConfig = await loadPicoConfig(workDir);
+  const pluginSnapshot = backgroundPolicy
+    ? undefined
+    : (dependencies.pluginSnapshot ??
+      (await loadPluginRuntimeSnapshot({ workDir, env: dependencies.env ?? process.env })));
+  const claudeCompatibility = picoConfig.compatibility.claude;
+  const skillLoaderFactory = (root: string): SkillLoader =>
+    new SkillLoader(root, {
+      includeUserResources: true,
+      includeClaudeProjectResources:
+        claudeCompatibility.enabled && claudeCompatibility.projectResources,
+      includeClaudeUserResources:
+        claudeCompatibility.enabled && claudeCompatibility.userResources,
+      ...(pluginSnapshot?.skillSources
+        ? { externalSources: pluginSnapshot.skillSources }
+        : {}),
+      env: dependencies.env ?? process.env,
+    });
   const configuredAdditionalDirectories = picoConfig.additionalDirectories;
   const sessionSelection =
     options.sessionSelection ??
@@ -382,13 +405,18 @@ export async function executeAgentRuntime(
           ? { toolDisclosure: dependencies.toolDisclosure }
           : {}),
         // LSP 是项目配置启动的子进程；后台策略尚未为其提供网络/写入沙箱。
-        lspServers: backgroundPolicy ? [] : picoConfig.lspServers,
+        lspServers: backgroundPolicy
+          ? []
+          : [...picoConfig.lspServers, ...(pluginSnapshot?.lspServers ?? [])],
         sessionStartSource:
           sessionSelection.mode === "resume" || sessionSelection.mode === "continue"
             ? "resume"
             : "startup",
         ...(backgroundPolicy ? { hooks: false as const } : {}),
         ...(dependencies.hookService ? { hookService: dependencies.hookService } : {}),
+        ...(pluginSnapshot?.hookSources
+          ? { hookExtensionSources: pluginSnapshot.hookSources }
+          : {}),
       }));
     cleanupRuntimeState = runtimeState;
     runtimeState.assertCompatible(workDir, session.id);
@@ -600,6 +628,7 @@ export async function executeAgentRuntime(
           inlineHooks: skill.hooks,
         });
       },
+      skillLoaderFactory(workDir),
     );
     cleanupRegistry = registry;
     if (!backgroundPolicy && dependencies.scheduleDraftCoordinator) {
@@ -631,6 +660,7 @@ export async function executeAgentRuntime(
           : {}),
         goalManager,
         todoStore,
+        skillLoader: skillLoaderFactory(workDir),
         onInstructionsLoaded: async (paths) => {
           await runtimeState.dispatchHook(
             "InstructionsLoaded",
@@ -685,6 +715,7 @@ export async function executeAgentRuntime(
       tracer: traceEnabled ? new Tracer() : undefined,
       steerQueue,
       ...(runtimeState.hookService ? { hookService: runtimeState.hookService } : {}),
+      skillLoaderFactory,
       ...(rebuildProvider ? { rebuildProvider } : {}),
     });
 
@@ -720,7 +751,14 @@ export async function executeAgentRuntime(
       registry,
       engine,
       workDir,
-      await loadProfiles(workDir),
+      await loadProfiles(workDir, {
+        externalSources: pluginSnapshot?.agentSources,
+        includeClaudeProjectResources:
+          claudeCompatibility.enabled && claudeCompatibility.projectResources,
+        includeClaudeUserResources:
+          claudeCompatibility.enabled && claudeCompatibility.userResources,
+        env: dependencies.env ?? process.env,
+      }),
       delegationManager,
       workspaceRoots,
       // 主会话的 mode 只控制主 Agent 权限。worker/explore 是独立的不可信执行边界，
@@ -750,10 +788,11 @@ export async function executeAgentRuntime(
     // MCP 服务器:加载配置 → 并行连接 → 自动注册工具到 registry。
     // per-server 失败隔离,一个 server 挂了不影响其他。
     const mcpConfigPath = backgroundPolicy?.mcpConfigPath ?? options.mcpConfigPath;
+    const pluginMcpSources = pluginSnapshot?.mcpSources ?? [];
     ownsMcpManager = dependencies.mcpManager === undefined;
     const mcpManager =
       dependencies.mcpManager ??
-      (mcpConfigPath
+      (mcpConfigPath || pluginMcpSources.length > 0
         ? new McpConnectionManager(registry, {
             stdioCwd: workDir,
             ...(backgroundPolicy?.snapshot.mcpConfigFingerprint
@@ -781,8 +820,19 @@ export async function executeAgentRuntime(
     if (mcpManager && !ownsMcpManager) {
       mcpManager.attachRegistry(registry);
       dependencies.toolStatusSink?.(toolStatusFromRegistry(registry));
-    } else if (mcpManager && mcpConfigPath) {
-      await mcpManager.loadConfig(mcpConfigPath);
+    } else if (mcpManager && (mcpConfigPath || pluginMcpSources.length > 0)) {
+      if (backgroundPolicy && mcpConfigPath) {
+        await mcpManager.loadConfig(mcpConfigPath);
+      } else {
+        await mcpManager.replaceSources([
+          {
+            id: "project",
+            path: mcpConfigPath ?? join(workDir, ".pico", "mcp.json"),
+            optional: mcpConfigPath === undefined,
+          },
+          ...pluginMcpSources,
+        ]);
+      }
       dependencies.mcpStatusSink?.(mcpManager.getStatusSnapshot());
       await mcpManager.connectAll();
       dependencies.mcpStatusSink?.(mcpManager.getStatusSnapshot());
@@ -972,6 +1022,7 @@ function buildRegistry(
   excludeSensitiveGrepFiles?: boolean | ((path: string | undefined) => boolean),
   yoloSandbox?: { config?: Partial<YoloSandboxConfig> },
   activateSkillHooks?: (skill: Skill) => void | Promise<void>,
+  skillLoader?: SkillLoader,
 ): ToolRegistry {
   return buildDefaultToolRegistry(workDir, {
     truncateResults: false,
@@ -986,6 +1037,7 @@ function buildRegistry(
     ...(excludeSensitiveGrepFiles !== undefined ? { excludeSensitiveGrepFiles } : {}),
     ...(yoloSandbox !== undefined ? { yoloSandbox } : {}),
     ...(activateSkillHooks !== undefined ? { activateSkillHooks } : {}),
+    ...(skillLoader !== undefined ? { skillLoader } : {}),
   });
 }
 
@@ -1220,9 +1272,17 @@ export class CostTrackedModelFallbackProvider implements LLMProvider {
 }
 
 /** 加载原生 Profile 与 Claude 兼容输入合并后的统一 Agent 目录。 */
-async function loadProfiles(workDir: string): Promise<AgentProfile[]> {
+async function loadProfiles(
+  workDir: string,
+  options: {
+    externalSources?: readonly AgentExternalCatalogSource[];
+    includeClaudeProjectResources: boolean;
+    includeClaudeUserResources: boolean;
+    env: Readonly<Record<string, string | undefined>>;
+  },
+): Promise<AgentProfile[]> {
   try {
-    return await loadAgentCatalog({ workDir, includeBuiltins: true });
+    return await loadAgentCatalog({ workDir, includeBuiltins: true, ...options });
   } catch {
     return [];
   }

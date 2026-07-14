@@ -67,6 +67,8 @@ export interface DefaultToolRegistryOptions extends ToolRegistryOptions {
   codeIntelligence?: CodeIntelligenceService;
   /** Skill frontmatter hooks 只在当前 Agent run 激活。 */
   activateSkillHooks?: (skill: Skill) => void | Promise<void>;
+  /** 宿主冻结的统一 Skill Catalog（含受信 Plugin 来源）。 */
+  skillLoader?: SkillLoader;
 }
 
 export function buildDefaultToolRegistry(
@@ -82,6 +84,7 @@ export function buildDefaultToolRegistry(
     excludeSensitiveGrepFiles,
     codeIntelligence,
     activateSkillHooks,
+    skillLoader,
     workspaceRoots,
     deferWorkspaceBoundary = false,
     yoloSandbox,
@@ -109,7 +112,7 @@ export function buildDefaultToolRegistry(
   registry.register(new TaskListTool(backgroundManager));
   registry.register(new TaskOutputTool(backgroundManager));
   registry.register(new TaskStopTool(backgroundManager));
-  registry.register(new SkillViewTool(new SkillLoader(workDir), activateSkillHooks));
+  registry.register(new SkillViewTool(skillLoader ?? new SkillLoader(workDir), activateSkillHooks));
   registry.register(new GlobTool(roots));
   registry.register(
     new GrepTool(roots, {

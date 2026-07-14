@@ -63,11 +63,12 @@ export class PromptComposer {
       memoryNudger?: IMemoryNudger;
       goalManager?: GoalManager;
       todoStore?: TodoStore;
+      skillLoader?: SkillLoader;
       onInstructionsLoaded?: (paths: readonly string[]) => void | Promise<void>;
     },
   ) {
     this.workDir = workDir;
-    this.skillLoader = new SkillLoader(workDir);
+    this.skillLoader = options?.skillLoader ?? new SkillLoader(workDir);
     this.planMode = planMode;
     this.planStore = new PlanStore(workDir);
     // host 注入 TodoStore 单例,与 TodoTool 共享同一实例(对标 GoalManager 范式)。
