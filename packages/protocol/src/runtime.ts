@@ -166,6 +166,8 @@ export type RuntimeConversationItem = (
       readonly status: RuntimeRunStatus;
       readonly startedAt: number;
       readonly finishedAt?: number;
+      /** Terminal Run failure reason. Running boundaries never carry this field. */
+      readonly error?: string;
     })
   | (JsonObject & {
       readonly id: string;

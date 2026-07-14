@@ -15,6 +15,7 @@ import {
   type CredentialVault,
 } from "../provider/credential-vault.js";
 import { resolveModelRouteCapabilities } from "../provider/model-capabilities.js";
+import type { ProviderKind } from "../provider/factory.js";
 import { coordinateReasoningLevel } from "../provider/reasoning-capability.js";
 import {
   BACKGROUND_HARDLINE_VERSION,
@@ -50,6 +51,7 @@ export interface ProductionLocalDaemonHostOptions {
   trustStore?: WorkspaceTrustStore;
   agentRuntime?: AgentRuntime;
   credentialVault?: CredentialVault;
+  env?: Readonly<Record<string, string | undefined>>;
 }
 
 /**
@@ -63,6 +65,7 @@ export function createProductionLocalDaemonHost(
   const trustStore = options.trustStore ?? new WorkspaceTrustStore();
   const agentRuntime = options.agentRuntime ?? new AgentRuntime();
   const credentialVault = options.credentialVault ?? createPlatformCredentialVault();
+  const env = options.env ?? process.env;
   const registrationStore = options.registrationStore ?? new WorkspaceRegistrationStore();
   const pendingApprovals = new Map<string, PendingInteraction>();
   const pendingPrompts = new Map<string, PendingInteraction>();
@@ -89,6 +92,8 @@ export function createProductionLocalDaemonHost(
         workspacePath,
         credentialVault,
         execution?.requestedModel ?? persistedSettings?.modelRouteId ?? persistedSettings?.model,
+        persistedSettings?.provider,
+        env,
       );
       const reasoningLevel = coordinateReasoningLevel(
         route.capabilities.reasoningProfile,
@@ -240,6 +245,7 @@ export function createProductionLocalDaemonHost(
     runtimeService: service,
     registrationStore,
     trustStore,
+    env,
     automations,
     interactions: {
       respondApproval: ({ workspacePath, approvalId, decision, reason }) => {
@@ -426,9 +432,12 @@ async function resolveDesktopModelRoute(
   workspacePath: string,
   credentialVault: CredentialVault,
   requestedModel?: string,
+  legacyProvider: ProviderKind = "openai",
+  env: Readonly<Record<string, string | undefined>> = process.env,
 ) {
   const config = await loadPicoConfig(workspacePath);
-  const modelRouteId = resolveDesktopRequestedModel(config, requestedModel);
+  const modelRouteId =
+    resolveDesktopRequestedModel(config, requestedModel) ?? env["LLM_MODEL"]?.trim();
   if (!modelRouteId) {
     throw new RuntimeProtocolError(
       RUNTIME_ERROR_CODES.FORBIDDEN,
@@ -436,29 +445,57 @@ async function resolveDesktopModelRoute(
     );
   }
   const slash = modelRouteId.indexOf("/");
-  const providerId = modelRouteId.slice(0, slash);
-  const model = modelRouteId.slice(slash + 1);
-  const provider = config.providers[providerId];
-  if (!provider || !provider.models.includes(model)) {
+  const providerId = slash > 0 ? modelRouteId.slice(0, slash) : undefined;
+  const configuredProvider = providerId ? config.providers[providerId] : undefined;
+  const model = slash > 0 ? modelRouteId.slice(slash + 1) : modelRouteId;
+  let route: {
+    readonly id: string;
+    readonly provider: ProviderKind;
+    readonly baseURL: string;
+    readonly model: string;
+    readonly apiKeyEnv: string;
+    readonly modelRouteId: string;
+    readonly capabilities: ReturnType<typeof resolveModelRouteCapabilities>;
+  };
+  if (configuredProvider?.models.includes(model)) {
+    route = {
+      id: modelRouteId,
+      provider: configuredProvider.protocol,
+      baseURL: configuredProvider.baseURL,
+      model,
+      apiKeyEnv: configuredProvider.apiKeyEnv,
+      modelRouteId,
+      capabilities: resolveModelRouteCapabilities(
+        configuredProvider.protocol,
+        model,
+        configuredProvider.modelCapabilities?.[model],
+      ),
+    };
+  } else if (providerId === undefined || providerId === "legacy") {
+    const baseURL = env["LLM_BASE_URL"]?.trim();
+    if (!baseURL) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.FORBIDDEN,
+        `模型 ${model} 缺少服务地址。请配置 LLM_BASE_URL 或在工作区 .pico/config.json 中添加 Provider`,
+      );
+    }
+    const apiKeyEnv = env["LLM_API_KEYS"]?.trim() ? "LLM_API_KEYS" : "LLM_API_KEY";
+    route = {
+      id: `legacy/${model}`,
+      provider: legacyProvider,
+      baseURL,
+      model,
+      apiKeyEnv,
+      modelRouteId: `legacy/${model}`,
+      capabilities: resolveModelRouteCapabilities(legacyProvider, model, undefined),
+    };
+  } else {
     throw new RuntimeProtocolError(
       RUNTIME_ERROR_CODES.FORBIDDEN,
       `默认模型路由 ${modelRouteId} 不在显式 Provider 模型列表中`,
     );
   }
-  const route = {
-    id: modelRouteId,
-    provider: provider.protocol,
-    baseURL: provider.baseURL,
-    model,
-    apiKeyEnv: provider.apiKeyEnv,
-    modelRouteId,
-    capabilities: resolveModelRouteCapabilities(
-      provider.protocol,
-      model,
-      provider.modelCapabilities?.[model],
-    ),
-  };
-  const environmentSecret = process.env[provider.apiKeyEnv]
+  const environmentSecret = env[route.apiKeyEnv]
     ?.split(",")
     .map((value) => value.trim())
     .find(Boolean);
@@ -468,7 +505,7 @@ async function resolveDesktopModelRoute(
   if (!(await credentialVault.has(credentialRef))) {
     throw new RuntimeProtocolError(
       RUNTIME_ERROR_CODES.FORBIDDEN,
-      `模型路由 ${modelRouteId} 缺少系统凭证库凭证或环境变量 ${provider.apiKeyEnv}`,
+      `模型路由 ${route.id} 缺少系统凭证库凭证或环境变量 ${route.apiKeyEnv}`,
     );
   }
   return { ...route, apiKey: await credentialVault.resolve(credentialRef) };

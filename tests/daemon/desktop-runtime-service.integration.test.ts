@@ -615,6 +615,43 @@ describe("DesktopRuntimeService integration", () => {
     await fixture.service.close();
   });
 
+  it("失败 Run 将真实原因持久化到会话 Transcript", async () => {
+    const fixture = await createFixture(async () => {
+      throw new Error("模型路由缺少凭证");
+    });
+    await fixture.trust.trust(fixture.canonicalWorkspace);
+
+    const sent = (await fixture.service.handle(
+      createRuntimeRequest("session.send", {
+        workspacePath: fixture.workspace,
+        input: { text: "你好" },
+        idempotencyKey: "failed-run-reason",
+      }),
+    )) as { session: { sessionId: string }; run: { runId: string } };
+    managedSessions.push({
+      sessionId: sent.session.sessionId,
+      workspacePath: fixture.canonicalWorkspace,
+    });
+    const workspaceRuntime = await fixture.runtime.getWorkspaceRuntime(fixture.workspace);
+    await workspaceRuntime.waitForRun(sent.run.runId);
+
+    const transcript = (await fixture.service.handle(
+      createRuntimeRequest("session.transcript", {
+        workspacePath: fixture.workspace,
+        sessionId: sent.session.sessionId,
+      }),
+    )) as {
+      activeRun?: unknown;
+      items: Array<{ kind: string; status?: string; error?: string }>;
+    };
+    expect(transcript).not.toHaveProperty("activeRun");
+    expect(transcript.items.filter((item) => item.kind === "runBoundary")).toEqual([
+      expect.objectContaining({ status: "running" }),
+      expect.objectContaining({ status: "failed", error: "模型路由缺少凭证" }),
+    ]);
+    await fixture.service.close();
+  });
+
   it("显式中断会清空当前 Session 的持久化 Queue", async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => {
