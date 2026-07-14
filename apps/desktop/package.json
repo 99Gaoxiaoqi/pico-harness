@@ -6,8 +6,8 @@
   "main": ".vite/build/main.js",
   "scripts": {
     "start": "electron-forge start",
-    "package": "electron-forge package",
-    "make": "electron-forge make",
+    "package": "electron-forge package && node ../../scripts/desktop-package-smoke.mjs",
+    "make": "electron-forge make && node ../../scripts/desktop-package-smoke.mjs",
     "pretypecheck": "npm run build --workspace @pico/protocol",
     "typecheck": "tsc --noEmit -p tsconfig.main.json && tsc --noEmit -p tsconfig.preload.json && tsc --noEmit -p tsconfig.renderer.json",
     "test": "vitest run --config vitest.config.ts"
