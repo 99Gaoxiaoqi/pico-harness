@@ -153,12 +153,7 @@ export class SkillLoader {
         const fallbackName = basename(dirname(file));
         const parsed = parseSkillMD(content, fallbackName);
         const name = `${source.namespace ?? ""}${parsed.name}`;
-        const allowedTools = normalizeAllowedTools(
-          parsed.allowedTools,
-          source.format,
-          name,
-          file,
-        );
+        const allowedTools = normalizeAllowedTools(parsed.allowedTools, source.format, name, file);
         candidates.push({
           name,
           source,

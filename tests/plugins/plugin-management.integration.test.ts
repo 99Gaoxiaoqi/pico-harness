@@ -31,7 +31,11 @@ describe("PluginManagementService", () => {
     await writeFile(join(fixture.pluginDir, "skills", "review", "SKILL.md"), "changed\n");
 
     const inspection = await fixture.service.inspect({ id: "reviewer", scope: "project" });
-    expect(inspection).toMatchObject({ trust: "pending", changedSinceInstall: true, active: false });
+    expect(inspection).toMatchObject({
+      trust: "pending",
+      changedSinceInstall: true,
+      active: false,
+    });
     expect(await fixture.service.activeContributions()).toEqual([]);
   });
 

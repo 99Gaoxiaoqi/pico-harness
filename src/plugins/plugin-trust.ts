@@ -98,7 +98,11 @@ export class PluginTrustStore {
     await ensurePrivateDirectory(dirname(this.filePath));
     if ((await assertRegularNonSymlink(this.filePath)) === "missing") return [];
     const parsed: unknown = JSON.parse(await readFile(this.filePath, "utf8"));
-    if (!isRecord(parsed) || parsed.version !== TRUST_STORE_VERSION || !Array.isArray(parsed.records)) {
+    if (
+      !isRecord(parsed) ||
+      parsed.version !== TRUST_STORE_VERSION ||
+      !Array.isArray(parsed.records)
+    ) {
       throw new Error("trusted-plugins.json schema 无效");
     }
     return parsed.records.map(parseRecord);

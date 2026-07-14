@@ -262,10 +262,7 @@ async function loadExternalAgentSource(
       name: `${source.namespace ?? ""}${agent.name}`,
       source,
       sourcePath: agent.sourcePath,
-      value: adaptClaudeAgent(
-        { ...agent, name: `${source.namespace ?? ""}${agent.name}` },
-        source,
-      ),
+      value: adaptClaudeAgent({ ...agent, name: `${source.namespace ?? ""}${agent.name}` }, source),
     }));
   }
   return await loadAgentSource(source);

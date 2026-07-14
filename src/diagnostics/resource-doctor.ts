@@ -74,7 +74,9 @@ export class ResourceDoctor {
 
     const inspected = await Promise.all(candidates.map(inspectCandidate));
     const winners = new Map<string, ResourceDiagnosticEntry>();
-    for (const item of inspected.toSorted((left, right) => right.candidate.rank - left.candidate.rank)) {
+    for (const item of inspected.toSorted(
+      (left, right) => right.candidate.rank - left.candidate.rank,
+    )) {
       if (item.entry.status === "missing" || winners.has(item.entry.kind)) continue;
       winners.set(item.entry.kind, item.entry);
     }
@@ -138,7 +140,9 @@ async function inspectCandidate(candidate: ResourceCandidate): Promise<{
     };
   }
   const physical = await realpath(candidate.path).catch(() => undefined);
-  const physicalBoundary = await realpath(candidate.boundary).catch(() => resolve(candidate.boundary));
+  const physicalBoundary = await realpath(candidate.boundary).catch(() =>
+    resolve(candidate.boundary),
+  );
   if (!physical || !isWithin(physicalBoundary, physical)) {
     return {
       candidate,

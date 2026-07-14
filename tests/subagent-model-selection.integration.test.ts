@@ -80,9 +80,7 @@ describe("子代理模型选择集成", () => {
       parent.id,
     );
 
-    expect(() => resolveCompatibleModelRoute(aliasRouter, "sonnet")).toThrow(
-      "匹配多个 Pico 路由",
-    );
+    expect(() => resolveCompatibleModelRoute(aliasRouter, "sonnet")).toThrow("匹配多个 Pico 路由");
   });
 });
 

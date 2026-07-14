@@ -2,11 +2,7 @@ import { mkdir, mkdtemp, realpath, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { describe, expect, it } from "vitest";
-import {
-  resolvePicoHome,
-  resolvePicoPaths,
-  workspaceIdForPath,
-} from "../src/paths/pico-paths.js";
+import { resolvePicoHome, resolvePicoPaths, workspaceIdForPath } from "../src/paths/pico-paths.js";
 
 describe("Pico paths", () => {
   it("separates project resources, user resources and workspace runtime state", async () => {
