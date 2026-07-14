@@ -72,7 +72,7 @@ export function createProductionLocalDaemonHost(
   const nextDesktopResourceVersion = () => ++desktopResourceVersion;
   const service = new WorkspaceRuntimeService({
     registrationStore,
-    execute: async ({ workspacePath, workspaceRuntime, prompt, sessionId, context }) => {
+    execute: async ({ workspacePath, workspaceRuntime, prompt, sessionId, execution, context }) => {
       if (!(await trustStore.isTrusted(workspacePath))) {
         throw new RuntimeProtocolError(
           RUNTIME_ERROR_CODES.FORBIDDEN,
@@ -88,7 +88,7 @@ export function createProductionLocalDaemonHost(
       const route = await resolveDesktopModelRoute(
         workspacePath,
         credentialVault,
-        persistedSettings?.modelRouteId ?? persistedSettings?.model,
+        execution?.requestedModel ?? persistedSettings?.modelRouteId ?? persistedSettings?.model,
       );
       const reasoningLevel = coordinateReasoningLevel(
         route.capabilities.reasoningProfile,
@@ -130,6 +130,15 @@ export function createProductionLocalDaemonHost(
       for (const steer of context.drainSteers()) runtimeState.steerQueue.push(steer);
       const unsubscribeSteer = context.onSteer((message) => runtimeState.steerQueue.push(message));
       try {
+        const skillActivation = execution?.skillActivation;
+        if (skillActivation?.sourcePath && skillActivation.hooks !== undefined) {
+          await runtimeState.activateComponentHooks({
+            kind: "skill",
+            path: skillActivation.sourcePath,
+            componentId: skillActivation.name,
+            inlineHooks: skillActivation.hooks,
+          });
+        }
         const result = await agentRuntime.execute(
           {
             prompt,
@@ -148,6 +157,7 @@ export function createProductionLocalDaemonHost(
             ...(persistedSettings?.mode === "plan" && persistedSettings.prePlanMode
               ? { rewindPrePlanMode: persistedSettings.prePlanMode }
               : {}),
+            ...(execution?.allowedTools ? { allowedTools: execution.allowedTools } : {}),
             ...(await existingMcpConfig(workspacePath)),
           },
           {
@@ -417,7 +427,7 @@ async function resolveDesktopModelRoute(
   requestedModel?: string,
 ) {
   const config = await loadPicoConfig(workspacePath);
-  const modelRouteId = resolveConfiguredModelRoute(config, requestedModel);
+  const modelRouteId = resolveDesktopRequestedModel(config, requestedModel);
   if (!modelRouteId) {
     throw new RuntimeProtocolError(
       RUNTIME_ERROR_CODES.FORBIDDEN,
@@ -463,24 +473,27 @@ async function resolveDesktopModelRoute(
   return { ...route, apiKey: await credentialVault.resolve(credentialRef) };
 }
 
-function resolveConfiguredModelRoute(
+function resolveDesktopRequestedModel(
   config: Awaited<ReturnType<typeof loadPicoConfig>>,
-  requestedModel: string | undefined,
+  requestedModel?: string,
 ): string | undefined {
   const requested = requestedModel?.trim();
-  if (!requested) return config.model;
-  if (requested.includes("/")) return requested;
-  const matches = Object.entries(config.providers).flatMap(([providerId, provider]) =>
-    provider.models.includes(requested) ? [`${providerId}/${requested}`] : [],
-  );
+  if (!requested || requested === "inherit") return config.model;
+  const aliased = config.compatibility.claude.enabled
+    ? (config.compatibility.claude.modelAliases[requested] ?? requested)
+    : requested;
+  if (aliased.includes("/")) return aliased;
+  const matches = Object.entries(config.providers)
+    .filter(([, provider]) => provider.models.includes(aliased))
+    .map(([providerId]) => `${providerId}/${aliased}`);
   if (matches.length === 1) return matches[0];
   if (matches.length > 1) {
     throw new RuntimeProtocolError(
-      RUNTIME_ERROR_CODES.CONFLICT,
-      `会话模型 ${requested} 对应多个路由，请重新选择完整 provider/model 路由`,
+      RUNTIME_ERROR_CODES.INVALID_PARAMS,
+      `Skill 模型 ${aliased} 匹配多个 Provider，请使用 provider/model 路由`,
     );
   }
-  return requested;
+  return aliased;
 }
 
 async function existingMcpConfig(
