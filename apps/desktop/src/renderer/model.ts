@@ -49,6 +49,7 @@ export interface ConversationView {
   readonly usage?: UsageView | undefined;
   readonly settings?: SessionSettingsView | undefined;
   readonly goalItem?: ConversationItemView | undefined;
+  readonly loadError?: string | undefined;
 }
 
 export interface SessionSettingsView {

@@ -635,11 +635,28 @@ export function useRuntimeStore(): RuntimeStore {
   const loadConversation = useCallback(
     async (bridge: RendererBridge, workspacePath: string, sessionId: string) => {
       if (preview) return;
-      const value = await invoke(bridge, "session.transcript", {
-        workspacePath,
-        sessionId,
-        limit: 200,
-      });
+      let value: unknown;
+      try {
+        value = await invoke(bridge, "session.transcript", {
+          workspacePath,
+          sessionId,
+          limit: 200,
+        });
+      } catch (error) {
+        setData((current) => ({
+          ...current,
+          conversations: {
+            ...current.conversations,
+            [sessionId]: {
+              sessionId,
+              items: [],
+              queuedCount: 0,
+              loadError: errorMessage(error),
+            },
+          },
+        }));
+        throw error;
+      }
       const record = isRecord(value) ? value : {};
       const activeRun = isRecord(record.activeRun) ? record.activeRun : undefined;
       const runId =
