@@ -466,6 +466,7 @@ export async function executeAgentRuntime(
                 ? { profileThinkingEffort: request.profileThinkingEffort }
                 : {}),
               parentThinkingEffort: effectiveOptions.thinkingEffort ?? "off",
+              modelAliases: picoConfig.compatibility.claude.modelAliases,
               allowRouteOverride: !backgroundPolicy,
             });
             const runtime = createSubagentModelRuntime({
