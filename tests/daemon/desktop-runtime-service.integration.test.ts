@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createRuntimeRequest,
   DesktopConversationStateStore,
@@ -645,6 +645,73 @@ describe("DesktopRuntimeService integration", () => {
     release();
     const workspaceRuntime = await fixture.runtime.getWorkspaceRuntime(fixture.workspace);
     await workspaceRuntime.waitForRun(first.run.runId);
+    await fixture.service.close();
+  });
+
+  it("Queue 消费写盘失败重试时只写入一条用户消息", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let executionCount = 0;
+    const fixture = await createFixture(async ({ workspacePath, sessionId, prompt, context }) => {
+      if (!sessionId) throw new Error("sessionId is required");
+      context.bindSession(sessionId);
+      executionCount += 1;
+      if (executionCount === 1) await gate;
+      const session = await globalSessionManager.getOrCreate(sessionId, workspacePath, {
+        persistence: true,
+        sessionCatalog: false,
+      });
+      await session.commitMessages({ role: "assistant", content: `reply:${prompt}` });
+      await session.flushPersistence();
+      return { sessionId };
+    });
+    const first = (await fixture.service.handle(
+      createRuntimeRequest("session.send", {
+        workspacePath: fixture.workspace,
+        input: { text: "first" },
+        idempotencyKey: "queue-retry-first",
+      }),
+    )) as { session: { sessionId: string }; run: { runId: string } };
+    managedSessions.push({
+      sessionId: first.session.sessionId,
+      workspacePath: fixture.canonicalWorkspace,
+    });
+    await fixture.service.handle(
+      createRuntimeRequest("session.send", {
+        workspacePath: fixture.workspace,
+        sessionId: first.session.sessionId,
+        input: { text: "queued once" },
+        behavior: "queue",
+        expectedRunId: first.run.runId,
+        idempotencyKey: "queue-retry-enqueue",
+      }),
+    );
+    vi.spyOn(fixture.conversationState, "removeQueued").mockRejectedValueOnce(
+      new Error("simulated queue state write failure"),
+    );
+
+    release();
+    const workspaceRuntime = await fixture.runtime.getWorkspaceRuntime(fixture.workspace);
+    await workspaceRuntime.waitForRun(first.run.runId);
+    await expect
+      .poll(async () => {
+        const transcript = (await fixture.service.handle(
+          createRuntimeRequest("session.transcript", {
+            workspacePath: fixture.workspace,
+            sessionId: first.session.sessionId,
+          }),
+        )) as { items: Array<{ kind: string; content?: string }>; queuedInputs: unknown[] };
+        return {
+          queued: transcript.queuedInputs.length,
+          queuedMessages: transcript.items.filter(
+            (item) => item.kind === "userMessage" && item.content === "queued once",
+          ).length,
+        };
+      })
+      .toEqual({ queued: 0, queuedMessages: 1 });
+    expect(executionCount).toBeGreaterThanOrEqual(2);
     await fixture.service.close();
   });
 
