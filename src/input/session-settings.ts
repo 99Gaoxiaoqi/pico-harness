@@ -1,5 +1,3 @@
-import { realpathSync } from "node:fs";
-import { resolve } from "node:path";
 import type { ProviderKind } from "../provider/factory.js";
 import type { ModelRoute, ModelRouter } from "../provider/model-router.js";
 import { resolveProviderProfile } from "../provider/profile.js";
@@ -14,6 +12,7 @@ import type {
   PersistedSessionSettings,
   SessionRuntimePersistence,
 } from "../engine/session-runtime.js";
+import { sessionScopeKey } from "../engine/session-scope.js";
 
 export interface SessionToolStatus {
   name: string;
@@ -78,7 +77,7 @@ const settingsBySession = new Map<string, SessionSettings>();
 let persistenceBySettings = new WeakMap<SessionSettings, SessionRuntimePersistence>();
 const resolvedCliSessionSemantics = new Map<
   string,
-  { sessionMode: SessionMode; forkFrom?: string }
+  { sessionId: string; sessionMode: SessionMode; forkFrom?: string }
 >();
 const permissionCommandModes = new Set([
   "ask",
@@ -91,7 +90,9 @@ const permissionCommandModes = new Set([
 ]);
 
 export function createDefaultSessionSettings(defaults: SessionSettingsDefaults): SessionSettings {
-  const resolvedSemantics = resolvedCliSessionSemantics.get(defaults.sessionId);
+  const resolvedSemantics = resolvedCliSessionSemantics.get(
+    sessionSettingsKey(defaults.sessionId, defaults.cwd),
+  );
   const forkFrom = defaults.forkFrom ?? resolvedSemantics?.forkFrom;
   const title = normalizeSessionTitle(defaults.title);
   const mode =
@@ -129,7 +130,7 @@ export function getOrCreateSessionSettings(
   const key = sessionSettingsKey(defaults.sessionId, defaults.cwd);
   const existing = settingsBySession.get(key);
   if (existing !== undefined) {
-    const resolvedSemantics = resolvedCliSessionSemantics.get(defaults.sessionId);
+    const resolvedSemantics = resolvedCliSessionSemantics.get(key);
     const sessionMode = defaults.sessionMode ?? resolvedSemantics?.sessionMode;
     const forkFrom = defaults.forkFrom ?? resolvedSemantics?.forkFrom;
     if (sessionMode !== undefined) {
@@ -193,12 +194,16 @@ export function getOrCreateSessionSettings(
   return created;
 }
 
-export function rememberResolvedCliSession(selection: {
-  sessionId: string;
-  mode: SessionMode;
-  sourceSessionId?: string;
-}): void {
-  resolvedCliSessionSemantics.set(selection.sessionId, {
+export function rememberResolvedCliSession(
+  selection: {
+    sessionId: string;
+    mode: SessionMode;
+    sourceSessionId?: string;
+  },
+  cwd: string,
+): void {
+  resolvedCliSessionSemantics.set(sessionSettingsKey(selection.sessionId, cwd), {
+    sessionId: selection.sessionId,
     sessionMode: selection.mode,
     ...(selection.sourceSessionId !== undefined ? { forkFrom: selection.sourceSessionId } : {}),
   });
@@ -229,8 +234,14 @@ export function forgetSessionSettings(sessionId: string, cwd?: string): void {
       settingsBySession.delete(key);
     }
   }
-  resolvedCliSessionSemantics.delete(sessionId);
-  globalSessionPermissionGrants.clear(sessionId);
+  if (cwd !== undefined) {
+    resolvedCliSessionSemantics.delete(sessionSettingsKey(sessionId, cwd));
+  } else {
+    for (const [key, semantics] of resolvedCliSessionSemantics) {
+      if (semantics.sessionId === sessionId) resolvedCliSessionSemantics.delete(key);
+    }
+  }
+  globalSessionPermissionGrants.clear(sessionId, cwd);
 }
 
 export function resetSessionSettingsForTests(): void {
@@ -675,17 +686,7 @@ function createAdditionalDirectorySnapshot(directories: readonly string[]): read
 }
 
 function sessionSettingsKey(sessionId: string, cwd: string): string {
-  return JSON.stringify([normalizeSessionSettingsCwd(cwd), sessionId]);
-}
-
-function normalizeSessionSettingsCwd(cwd: string): string {
-  const absolute = resolve(cwd);
-  try {
-    return realpathSync(absolute);
-  } catch {
-    // 嵌入方可能在工作区创建前准备 settings；此时仍以绝对路径稳定隔离。
-    return absolute;
-  }
+  return sessionScopeKey(sessionId, cwd);
 }
 
 export function snapshotSessionSettings(settings: SessionSettings): PersistedSessionSettings {

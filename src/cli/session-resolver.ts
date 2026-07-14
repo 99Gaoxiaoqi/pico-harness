@@ -69,42 +69,33 @@ export async function resolveCliSession(
   if (options.resumeSession) {
     const sessionId = options.resumeSession;
     await assertSessionFileExists(options.workDir, sessionId, "resume");
-    return rememberSelection({
-      mode: "resume",
-      sessionId,
-    });
+    return rememberSelection({ mode: "resume", sessionId }, options.workDir);
   }
 
   if (options.session) {
-    return rememberSelection({
-      mode: "resume",
-      sessionId: options.session,
-    });
+    return rememberSelection({ mode: "resume", sessionId: options.session }, options.workDir);
   }
 
   if (options.forkSession) {
     await assertSessionFileExists(options.workDir, options.forkSession, "fork");
-    return rememberSelection({
-      mode: "fork",
-      sessionId: createCliSessionId(),
-      sourceSessionId: options.forkSession,
-    });
+    return rememberSelection(
+      {
+        mode: "fork",
+        sessionId: createCliSessionId(),
+        sourceSessionId: options.forkSession,
+      },
+      options.workDir,
+    );
   }
 
   if (options.continueSession) {
     const latest = await findLatestSessionId(options.workDir);
     if (latest) {
-      return rememberSelection({
-        mode: "continue",
-        sessionId: latest,
-      });
+      return rememberSelection({ mode: "continue", sessionId: latest }, options.workDir);
     }
   }
 
-  return rememberSelection({
-    mode: "new",
-    sessionId: createCliSessionId(),
-  });
+  return rememberSelection({ mode: "new", sessionId: createCliSessionId() }, options.workDir);
 }
 
 export function createCliSessionId(): string {
@@ -286,8 +277,8 @@ export async function removeCliSessionFile(workDir: string, sessionId: string): 
   await rm(sessionFilePath(workDir, sessionId), { force: true });
 }
 
-function rememberSelection(selection: CliSessionSelection): CliSessionSelection {
-  rememberResolvedCliSession(selection);
+function rememberSelection(selection: CliSessionSelection, workDir: string): CliSessionSelection {
+  rememberResolvedCliSession(selection, workDir);
   return selection;
 }
 

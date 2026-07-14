@@ -1555,6 +1555,7 @@ export function buildPermissionMiddleware(
     if (result.allowForSession) {
       await applySessionPermissionScope(scope, {
         sessionId,
+        workDir,
         settings: settings as PermissionRuntimeSettings,
         workspaceRoots,
       });
@@ -1563,6 +1564,7 @@ export function buildPermissionMiddleware(
           { ...externalScope, enableAutoEdits: false },
           {
             sessionId,
+            workDir,
             settings: settings as PermissionRuntimeSettings,
             workspaceRoots,
           },

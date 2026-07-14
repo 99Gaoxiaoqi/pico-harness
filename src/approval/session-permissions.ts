@@ -1,5 +1,6 @@
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import type { ToolCall } from "../schema/message.js";
+import { sessionScopeKey } from "../engine/session-scope.js";
 import {
   setSessionAdditionalDirectories,
   setSessionMode,
@@ -25,7 +26,10 @@ export type PermissionSessionScope =
   | { type: "tool"; toolName: string };
 
 export class SessionPermissionGrants {
-  private readonly bySession = new Map<string, PermissionSessionScope[]>();
+  private readonly bySession = new Map<
+    string,
+    { sessionId: string; scopes: PermissionSessionScope[] }
+  >();
 
   allows(
     sessionId: string,
@@ -33,7 +37,7 @@ export class SessionPermissionGrants {
     workDir: string,
     workspaceRoots?: WorkspaceRoots,
   ): boolean {
-    return (this.bySession.get(sessionId) ?? []).some((scope) =>
+    return (this.bySession.get(sessionScopeKey(sessionId, workDir))?.scopes ?? []).some((scope) =>
       scopeAllowsCall(scope, call, workDir, workspaceRoots),
     );
   }
@@ -44,7 +48,7 @@ export class SessionPermissionGrants {
     workDir: string,
     workspaceRoots?: WorkspaceRoots,
   ): boolean {
-    return (this.bySession.get(sessionId) ?? []).some(
+    return (this.bySession.get(sessionScopeKey(sessionId, workDir))?.scopes ?? []).some(
       (scope) =>
         (scope.type === "file" || scope.type === "bash-command") &&
         scope.safety === true &&
@@ -52,18 +56,25 @@ export class SessionPermissionGrants {
     );
   }
 
-  add(sessionId: string, scope: PermissionSessionScope): void {
-    const current = this.bySession.get(sessionId) ?? [];
+  add(sessionId: string, workDir: string, scope: PermissionSessionScope): void {
+    const key = sessionScopeKey(sessionId, workDir);
+    const current = this.bySession.get(key)?.scopes ?? [];
     if (current.some((item) => scopeKey(item) === scopeKey(scope))) return;
-    this.bySession.set(sessionId, [...current, cloneScope(scope)]);
+    this.bySession.set(key, { sessionId, scopes: [...current, cloneScope(scope)] });
   }
 
-  clear(sessionId?: string): void {
+  clear(sessionId?: string, workDir?: string): void {
     if (sessionId === undefined) {
       this.bySession.clear();
       return;
     }
-    this.bySession.delete(sessionId);
+    if (workDir !== undefined) {
+      this.bySession.delete(sessionScopeKey(sessionId, workDir));
+      return;
+    }
+    for (const [key, entry] of this.bySession) {
+      if (entry.sessionId === sessionId) this.bySession.delete(key);
+    }
   }
 }
 
@@ -78,6 +89,7 @@ export async function applySessionPermissionScope(
   scope: PermissionSessionScope,
   options: {
     sessionId: string;
+    workDir: string;
     settings: PermissionRuntimeSettings;
     workspaceRoots: WorkspaceRoots;
   },
@@ -101,7 +113,7 @@ export async function applySessionPermissionScope(
   // all-edits 由权威 mode=auto 表达，directory 由 WorkspaceRoots 表达；
   // 仅无法投影到这两者的规则进入结构化 grant store。
   if (scope.type !== "all-edits" && scope.type !== "directories") {
-    globalSessionPermissionGrants.add(options.sessionId, scope);
+    globalSessionPermissionGrants.add(options.sessionId, options.workDir, scope);
   }
 }
 
