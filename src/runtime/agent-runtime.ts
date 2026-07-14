@@ -73,6 +73,9 @@ import { createSessionRuntime, type SessionRuntime } from "./session-runtime.js"
 import type { MiddlewareFunc } from "../tools/registry.js";
 import { McpConnectionManager, type McpStatusSnapshot } from "../mcp/manager.js";
 import { isMcpToolName } from "../mcp/types.js";
+import { createBackgroundMcpClient } from "../safety/background-mcp-client.js";
+import type { ScheduleDraftCoordinator } from "../tasks/cron-draft.js";
+import { looksLikeScheduleCreationIntent, ScheduleTaskTool } from "../tools/schedule-task.js";
 import { BackgroundManager } from "../tools/background-manager.js";
 import { loadHooksConfig } from "../hooks/config.js";
 import { HookRunner } from "../hooks/runner.js";
@@ -220,6 +223,8 @@ export interface RunAgentCliDependencies extends RuntimeHost {
   credentialResolver?: CredentialResolver;
   /** 宿主装配的会话级 HookService；TUI 后续消息必须复用同一实例。 */
   hookService?: HookService;
+  /** 仅结构化 TUI 前台可提供；后台与兼容行模式不得注入。 */
+  scheduleDraftCoordinator?: ScheduleDraftCoordinator;
 }
 
 /** Runtime-first entry point. CLI/TUI compatibility wrappers call this method. */
@@ -508,8 +513,17 @@ export async function executeAgentRuntime(
       if (settings.mode === "plan" || path === undefined) return true;
       return !isSensitiveCredentialPath(workspaceRoots.resolveUnchecked(path));
     },
-    backgroundPolicy ? { config: { network: "deny" } } : undefined,
+    backgroundPolicy
+      ? {
+          config: {
+            network: backgroundPolicy.snapshot.toolNetworkPolicy === "allow" ? "allow" : "deny",
+          },
+        }
+      : undefined,
   );
+  if (!backgroundPolicy && dependencies.scheduleDraftCoordinator) {
+    registry.register(new ScheduleTaskTool(dependencies.scheduleDraftCoordinator));
+  }
   // 【任务 2.6】用户可配置 Shell Hooks:加载 .claw/settings.json 的 hooks 配置,
   // 存在则挂载 HookRunner 到 registry。fail-open:配置缺失/畸形均不启用 hook,零影响。
   registry.setSessionId?.(session.id);
@@ -527,8 +541,8 @@ export async function executeAgentRuntime(
   if (options.steer) {
     steerQueue.push(options.steer);
   }
-  const systemPromptFactory = (): Promise<string> =>
-    new PromptComposer(workDir, effectiveOptions.planMode ?? false, {
+  const systemPromptFactory = async (): Promise<string> => {
+    const composed = await new PromptComposer(workDir, effectiveOptions.planMode ?? false, {
       sessionId: session.id,
       skillRegistry: runtimeState.skillRegistry,
       ...(runtimeState.memoryNudger !== undefined
@@ -544,6 +558,15 @@ export async function executeAgentRuntime(
         );
       },
     }).build(runtimeState.conversationTurnCount(session));
+    if (
+      backgroundPolicy ||
+      !dependencies.scheduleDraftCoordinator ||
+      !looksLikeScheduleCreationIntent(prompt)
+    ) {
+      return composed;
+    }
+    return `${composed}\n\n<schedule-task-intent>用户明确要求创建周期任务。请调用 schedule_task 提交结构化草案等待用户确认；不得仅用文字声称已经创建。</schedule-task-intent>`;
+  };
   // 辅助(廉价)模型:用于 FullCompactor 生成摘要,省主模型成本。
   // 配齐 AUX_LLM_BASE_URL / AUX_LLM_API_KEY / AUX_LLM_MODEL 才启用;缺则用主 provider。
   const auxProvider = loadAuxProvider(dependencies.env ?? process.env, session, trackerOptions);
@@ -633,11 +656,21 @@ export async function executeAgentRuntime(
 
   // MCP 服务器:加载配置 → 并行连接 → 自动注册工具到 registry。
   // per-server 失败隔离,一个 server 挂了不影响其他。
-  const mcpConfigPath = options.mcpConfigPath;
+  const mcpConfigPath = backgroundPolicy?.mcpConfigPath ?? options.mcpConfigPath;
   const ownsMcpManager = dependencies.mcpManager === undefined;
   const mcpManager =
     dependencies.mcpManager ??
-    (mcpConfigPath ? new McpConnectionManager(registry, { stdioCwd: workDir }) : undefined);
+    (mcpConfigPath
+      ? new McpConnectionManager(registry, {
+          stdioCwd: workDir,
+          ...(backgroundPolicy?.snapshot.mcpConfigFingerprint
+            ? { expectedConfigFingerprint: backgroundPolicy.snapshot.mcpConfigFingerprint }
+            : {}),
+          ...(backgroundPolicy
+            ? { clientFactory: (config) => createBackgroundMcpClient(config, workDir) }
+            : {}),
+        })
+      : undefined);
   activeMcpManager = mcpManager;
   const unsubscribeMcpStatus =
     mcpManager && dependencies.mcpStatusSink
@@ -651,6 +684,18 @@ export async function executeAgentRuntime(
     dependencies.mcpStatusSink?.(mcpManager.getStatusSnapshot());
     await mcpManager.connectAll();
     dependencies.mcpStatusSink?.(mcpManager.getStatusSnapshot());
+    if (backgroundPolicy) {
+      pruneRegistryToBackgroundAllowlist(registry, backgroundPolicy);
+      const missingMcpTools = [...backgroundPolicy.allowedTools].filter(
+        (tool) => isMcpToolName(tool) && registry.getTool(tool) === undefined,
+      );
+      if (missingMcpTools.length > 0) {
+        throw new BackgroundPolicyViolationError(
+          "mcp_unavailable",
+          `后台 MCP 工具不可用: ${missingMcpTools.join(", ")}`,
+        );
+      }
+    }
     dependencies.toolStatusSink?.(toolStatusFromRegistry(registry));
   }
 
@@ -762,7 +807,10 @@ export async function executeAgentRuntime(
   }
 }
 
-function applyPromptHookDecision(prompt: string, decision: import("../hooks/types.js").HookOutput): string {
+function applyPromptHookDecision(
+  prompt: string,
+  decision: import("../hooks/types.js").HookOutput,
+): string {
   let next = prompt;
   if (typeof decision.modifiedInput === "string") {
     next = decision.modifiedInput;
@@ -829,7 +877,17 @@ async function prepareBackgroundExecution(
   if (options.mcpConfigPath) {
     throw new BackgroundPolicyViolationError(
       "invalid_policy",
-      "后台执行暂不加载无法继承网络 allowlist 的 MCP 配置。",
+      "后台 MCP 配置只能由 Job policySnapshot 绑定的工作区固定配置加载。",
+    );
+  }
+  if (
+    dependencies.mcpManager ||
+    dependencies.hookService ||
+    dependencies.scheduleDraftCoordinator
+  ) {
+    throw new BackgroundPolicyViolationError(
+      "invalid_policy",
+      "后台执行不得复用前台 MCP、Hook 或定时草案交互宿主。",
     );
   }
   if (dependencies.runtimeState || dependencies.resumeExistingSession) {
@@ -853,7 +911,7 @@ function pruneRegistryToBackgroundAllowlist(
     if (!policy.allowedTools.has(tool.name)) registry.unregister(tool.name);
   }
   const fetchUrl = registry.getTool("fetch_url");
-  if (fetchUrl instanceof FetchURLTool) {
+  if (policy.snapshot.toolNetworkPolicy === "allowlist" && fetchUrl instanceof FetchURLTool) {
     fetchUrl.setAuthorizeUrl((url) => {
       const hostname = url.hostname
         .replace(/^\[|\]$/g, "")

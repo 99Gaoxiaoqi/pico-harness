@@ -17,6 +17,7 @@ import {
   type BackgroundYoloPolicySnapshot,
 } from "../../src/safety/background-yolo-policy.js";
 import type { Message, ToolDefinition } from "../../src/schema/message.js";
+import type { ScheduleDraftCoordinator } from "../../src/tasks/cron-draft.js";
 
 class ScriptedProvider implements LLMProvider {
   readonly calls: Array<{ messages: readonly Message[]; tools: readonly ToolDefinition[] }> = [];
@@ -140,6 +141,85 @@ describe("AgentRuntime background YOLO integration", () => {
         backgroundTrustStore: trustedWorkspaceVerifier(),
       }),
     ).rejects.toThrow(/credentialRef.*凭证解析器/u);
+  });
+
+  it("仅前台结构化 Host 注册 schedule_task，并为明确创建意图注入提示", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-schedule-runtime-"));
+    const proposals: unknown[] = [];
+    const coordinator: ScheduleDraftCoordinator = {
+      propose: async (proposal) => {
+        proposals.push(proposal);
+        return { kind: "cancelled" };
+      },
+    };
+    const provider = new ScriptedProvider([
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [
+          {
+            id: "schedule",
+            name: "schedule_task",
+            arguments: JSON.stringify({
+              title: "工作日报",
+              prompt: "生成工作日报",
+              scheduleText: "每个工作日上午九点",
+              cronExpression: "0 9 * * 1-5",
+              timeZone: "Asia/Shanghai",
+            }),
+          },
+        ],
+      },
+      { role: "assistant", content: "cancelled" },
+    ]);
+
+    const result = await new AgentRuntime().execute(
+      { prompt: "请创建一个每个工作日上午九点生成日报的定时任务", dir: workDir },
+      {
+        provider,
+        reporter: new SilentReporter(),
+        scheduleDraftCoordinator: coordinator,
+      },
+    );
+
+    expect(result.finalMessage).toBe("cancelled");
+    expect(provider.calls[0]?.tools.map((tool) => tool.name)).toContain("schedule_task");
+    expect(
+      provider.calls[0]?.messages.find((message) => message.role === "system")?.content,
+    ).toContain("<schedule-task-intent>");
+    expect(proposals).toHaveLength(1);
+
+    const noHostProvider = new ScriptedProvider([{ role: "assistant", content: "no tool" }]);
+    await new AgentRuntime().execute(
+      { prompt: "请创建一个每天运行的定时任务", dir: workDir },
+      { provider: noHostProvider, reporter: new SilentReporter() },
+    );
+    expect(noHostProvider.calls[0]?.tools.map((tool) => tool.name)).not.toContain("schedule_task");
+  });
+
+  it("后台拒绝复用前台定时草案协调器", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-background-schedule-host-"));
+    const provider = new ScriptedProvider([{ role: "assistant", content: "must not run" }]);
+
+    await expect(
+      new AgentRuntime().execute(
+        {
+          prompt: "run",
+          dir: workDir,
+          execution: { kind: "background", policy: backgroundPolicy([]) },
+        },
+        {
+          provider,
+          reporter: new SilentReporter(),
+          backgroundTrustStore: trustedWorkspaceVerifier(),
+          scheduleDraftCoordinator: { propose: async () => ({ kind: "cancelled" }) },
+        },
+      ),
+    ).rejects.toMatchObject<Partial<BackgroundPolicyViolationError>>({
+      name: "BackgroundPolicyViolationError",
+      code: "invalid_policy",
+    });
+    expect(provider.calls).toHaveLength(0);
   });
 });
 

@@ -1,5 +1,6 @@
 // McpConnectionManager: MCP server 连接、工具桥接与运行时生命周期编排。
 
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import { logger } from "../observability/logger.js";
@@ -87,6 +88,8 @@ export interface McpConnectionManagerOptions {
   oauthHandler?: McpOAuthHandler;
   /** 测试/宿主可注入等价 client；仍由 manager 独占其生命周期。 */
   clientFactory?: (config: McpServerConfig) => McpClient;
+  /** 后台 Job 冻结的配置指纹；校验的字节与随后解析的字节完全相同。 */
+  expectedConfigFingerprint?: string;
 }
 
 /**
@@ -331,9 +334,9 @@ export class McpConnectionManager {
     this.configPath = absPath;
     this.loadError = undefined;
     this.emitSnapshot();
-    let text: string;
+    let content: Buffer;
     try {
-      text = await readFile(absPath, "utf8");
+      content = await readFile(absPath);
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
       if (code === "ENOENT") {
@@ -349,9 +352,19 @@ export class McpConnectionManager {
       throw new Error(this.loadError, { cause: err });
     }
 
+    const expectedFingerprint = this.options.expectedConfigFingerprint;
+    if (expectedFingerprint) {
+      const actualFingerprint = createHash("sha256").update(content).digest("hex");
+      if (actualFingerprint !== expectedFingerprint) {
+        this.loadError = "后台 MCP 配置已变化，必须重新确认定时任务";
+        this.emitSnapshot();
+        throw new Error(this.loadError);
+      }
+    }
+
     let data: unknown;
     try {
-      data = JSON.parse(text);
+      data = JSON.parse(content.toString("utf8"));
     } catch {
       this.loadError = `MCP 配置不是合法 JSON: ${absPath}`;
       this.emitSnapshot();
