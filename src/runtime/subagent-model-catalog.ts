@@ -13,4 +13,6 @@ export interface SubagentModelCatalog {
   readonly routes: readonly SubagentModelCatalogRoute[];
   readonly parentRouteId: string;
   readonly allowRouteOverride: boolean;
+  readonly totalSelectableRoutes: number;
+  readonly truncated: boolean;
 }
