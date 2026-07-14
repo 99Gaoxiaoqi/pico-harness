@@ -66,8 +66,9 @@ npx tsx --env-file=.env --import ./src/tui/preload-env.ts src/cli/main.ts \
 - `/permissions` 是 `/mode` 的兼容别名，不再维护第二套权限状态。
 - `/usage` 展示 provider 实际报告的 token/成本覆盖，缺失字段保持 `unknown`；`/context` 展示当前 route 的上下文预算、来源和能力。
 - REST/WebSocket、ACP、飞书与 one-shot CLI 外壳曾在历史阶段完成，后已退役。
-- `/cron` 是 TUI 内的持久定时任务入口；任务由当前 OS 用户的本机 daemon 执行，不新增 one-shot/headless 公共 CLI。持久 Cron 仅接受可信工作区的 YOLO Job，Provider 凭证通过 `/cron credential import` 导入系统凭证库，SQLite 只保存非秘密 `credentialRef`。
-- Cron 的“工具网络”只约束 `fetch_url`、Bash、Hook、MCP 等额外出口，不会关闭模型 Provider 请求；可用 `/cron add --tool-network=disabled|allowlist:host1,host2 ...` 显式配置。`web_search` 在后台仍保持关闭。
+- 周期任务优先通过自然语言创建，例如“请创建一个每个工作日上午 9 点生成日报的任务”。Pico 会展示时区、工作区、模型、凭证、daemon、联网范围和未来三次运行时间；只有确认后才写入 Job。第一版不支持一次性定时任务。
+- `/cron` 保留为高级入口；任务由当前 OS 用户的本机 daemon 执行，不新增 one-shot/headless 公共 CLI。持久 Cron 仅接受可信工作区的 YOLO Job，Provider 凭证自动检查并导入系统凭证库，SQLite 只保存非秘密 `credentialRef`。
+- 新任务默认允许所有符合后台资格的工具联网；该策略覆盖 `fetch_url`、`web_search`、Bash、严格后台 Hook 与固定配置 MCP，但不改变工作区、敏感文件、hardline、Hook deny 和 SSRF 边界。可用 `/cron add --tool-network=allow|disabled|allowlist:host1,host2 ...` 显式覆盖；模型 Provider 网络是独立通道。
 - Docker 部署和 Plugin runtime 不在当前产品范围。
 
 ## 🏗️ 架构概览
