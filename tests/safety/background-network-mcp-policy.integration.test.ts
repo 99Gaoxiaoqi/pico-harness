@@ -2,6 +2,7 @@ import { mkdtemp, mkdir, realpath, rm, symlink, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { McpConnectionManager } from "../../src/mcp/manager.js";
 import {
   fingerprintBackgroundMcpConfig,
   verifyBackgroundMcpConfig,
@@ -74,6 +75,23 @@ describe("background network and MCP policy integration", () => {
     await expect(
       verifyBackgroundMcpConfig({ workspacePath: workspace, expectedFingerprint: fingerprint }),
     ).rejects.toThrow(/重新确认/u);
+  });
+
+  it("MCP manager 校验并解析同一份配置字节，消除校验与加载间漂移", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "pico-background-mcp-load-"));
+    cleanup.push(workspace);
+    await mkdir(join(workspace, ".claw"));
+    const configPath = join(workspace, ".claw", "mcp.json");
+    await writeFile(configPath, '{"mcpServers":{}}');
+    const fingerprint = await fingerprintBackgroundMcpConfig(workspace);
+    const manager = new McpConnectionManager(undefined, {
+      stdioCwd: workspace,
+      expectedConfigFingerprint: fingerprint,
+    });
+
+    await expect(manager.loadConfig(configPath)).resolves.toBeUndefined();
+    await writeFile(configPath, '{"mcpServers":{"changed":{"transport":"http"}}}');
+    await expect(manager.loadConfig(configPath)).rejects.toThrow(/重新确认/u);
   });
 
   it("拒绝通过 .claw/mcp.json 符号链接逃逸工作区", async () => {

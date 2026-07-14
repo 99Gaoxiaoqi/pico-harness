@@ -8,9 +8,11 @@ import type { ToolCall } from "../schema/message.js";
 import type { RequestMiddleware, RequestMiddlewareResult } from "../tools/registry.js";
 import { WorkspaceRoots, workspaceAccessesFromCall } from "../tools/workspace-roots.js";
 import type { WorkspaceTrustStore } from "../security/workspace-trust.js";
+import { verifyBackgroundMcpConfig } from "./background-mcp-policy.js";
 import {
   buildSandboxSpawnPlan,
   evaluateYoloToolCall,
+  type SandboxNetworkPolicy,
   type SandboxSpawnPlan,
 } from "./yolo-sandbox.js";
 import {
@@ -25,7 +27,13 @@ export const BACKGROUND_HOOK_VERSION = "workspace-v1" as const;
 
 const DEFAULT_HOOK_TIMEOUT_MS = 60_000;
 const MAX_HOOK_OUTPUT_BYTES = 1024 * 1024;
-const UNSAFE_BACKGROUND_TOOLS = new Set(["ask_user", "delegate_task", "spawn_subagent"]);
+const UNSAFE_BACKGROUND_TOOLS = new Set([
+  "ask_user",
+  "delegate_task",
+  "delegate_status",
+  "spawn_subagent",
+  "schedule_task",
+]);
 
 export type BackgroundYoloPolicySnapshot = BackgroundYoloPolicySnapshotData;
 
@@ -39,6 +47,7 @@ export interface PreparedBackgroundYoloPolicy {
   readonly workspacePath: string;
   readonly allowedTools: ReadonlySet<string>;
   readonly allowedToolNetworkHosts: ReadonlySet<string>;
+  readonly mcpConfigPath?: string;
   readonly hookRunner?: StrictBackgroundHookRunner;
 }
 
@@ -47,6 +56,8 @@ export type BackgroundPolicyViolationCode =
   | "invalid_policy"
   | "policy_version_mismatch"
   | "workspace_untrusted"
+  | "mcp_config_invalid"
+  | "mcp_unavailable"
   | "hook_config_invalid"
   | "hook_unavailable";
 
@@ -100,11 +111,31 @@ export async function prepareBackgroundYoloPolicy(input: {
     );
   }
 
+  let mcpConfigPath: string | undefined;
+  if (snapshot.mcpConfigFingerprint) {
+    try {
+      mcpConfigPath = await verifyBackgroundMcpConfig({
+        workspacePath,
+        expectedFingerprint: snapshot.mcpConfigFingerprint,
+      });
+    } catch (error) {
+      throw new BackgroundPolicyViolationError(
+        "mcp_config_invalid",
+        error instanceof Error ? error.message : String(error),
+        { cause: error },
+      );
+    }
+  }
+
   const hooks = await loadStrictHooksConfig(workspacePath);
   let hookRunner: StrictBackgroundHookRunner | undefined;
   if (hasPreToolHooks(hooks)) {
     try {
-      hookRunner = new StrictBackgroundHookRunner(workspacePath, hooks);
+      hookRunner = new StrictBackgroundHookRunner(
+        workspacePath,
+        hooks,
+        backgroundNetworkPolicy(snapshot),
+      );
     } catch (error) {
       throw new BackgroundPolicyViolationError(
         "hook_unavailable",
@@ -122,6 +153,7 @@ export async function prepareBackgroundYoloPolicy(input: {
       snapshot.allowedTools.filter((tool) => !UNSAFE_BACKGROUND_TOOLS.has(tool)),
     ),
     allowedToolNetworkHosts: new Set(snapshot.allowedToolNetworkHosts ?? []),
+    ...(mcpConfigPath ? { mcpConfigPath } : {}),
     ...(hookRunner ? { hookRunner } : {}),
   };
 }
@@ -198,8 +230,8 @@ function validateBackgroundToolCall(
   }
 
   const sandboxDecision = evaluateYoloToolCall(call, policy.workspacePath, workspaceRoots, {
-    // Bash 永远保持网络关闭。allowlist 只开放可验证目标的原生网络工具。
-    network: "deny",
+    // allow 是用户明确确认的无人值守网络边界；allowlist 仍只开放可验证 URL 工具。
+    network: backgroundNetworkPolicy(policy.snapshot),
   });
   if (!sandboxDecision.allowed) {
     return { allowed: false, reason: sandboxDecision.reason ?? "后台沙箱拒绝工具调用" };
@@ -211,6 +243,7 @@ function validateNetworkToolCall(
   call: ToolCall,
   policy: PreparedBackgroundYoloPolicy,
 ): RequestMiddlewareResult {
+  if (policy.snapshot.toolNetworkPolicy === "allow") return { allowed: true };
   if (call.name === "web_search") {
     return {
       allowed: false,
@@ -385,6 +418,7 @@ export class StrictBackgroundHookRunner {
   constructor(
     private readonly workDir: string,
     private readonly config: HooksConfig,
+    network: SandboxNetworkPolicy = "deny",
   ) {
     for (const groups of Object.values(config)) {
       for (const group of groups ?? []) {
@@ -403,7 +437,7 @@ export class StrictBackgroundHookRunner {
               shellArgs: ["-lc", handler.command],
               cwd: workDir,
               writableRoots: [workDir],
-              config: { network: "deny" },
+              config: { network },
             }),
           );
         }
@@ -503,6 +537,10 @@ export class StrictBackgroundHookRunner {
       }
     });
   }
+}
+
+function backgroundNetworkPolicy(snapshot: BackgroundYoloPolicySnapshot): SandboxNetworkPolicy {
+  return snapshot.toolNetworkPolicy === "allow" ? "allow" : "deny";
 }
 
 function interpretStrictHookExit(
