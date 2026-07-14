@@ -30,6 +30,7 @@ export type {
 export type { McpToolBridgeOptions } from "./mcp-tool.js";
 export {
   MCP_PROTOCOL_VERSION,
+  MCP_STREAMABLE_HTTP_PROTOCOL_VERSION,
   MCP_ELICITATION_PROTOCOL_VERSION,
   PICO_MCP_CLIENT_INFO,
   JsonRpcErrorCode,

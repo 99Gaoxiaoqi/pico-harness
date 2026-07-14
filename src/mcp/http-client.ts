@@ -17,6 +17,7 @@ import {
   JsonRpcErrorCode,
   MCP_ELICITATION_PROTOCOL_VERSION,
   MCP_PROTOCOL_VERSION,
+  MCP_STREAMABLE_HTTP_PROTOCOL_VERSION,
   PICO_MCP_CLIENT_INFO,
   type JsonRpcRequest,
   type JsonRpcResponse,
@@ -1027,7 +1028,11 @@ function errorMessage(error: unknown): string {
 
 function supportedProtocolVersion(value: unknown, fallback: string): string {
   const version = typeof value === "string" ? value : fallback;
-  if (version === MCP_PROTOCOL_VERSION || version === MCP_ELICITATION_PROTOCOL_VERSION) {
+  if (
+    version === MCP_PROTOCOL_VERSION ||
+    version === MCP_STREAMABLE_HTTP_PROTOCOL_VERSION ||
+    version === MCP_ELICITATION_PROTOCOL_VERSION
+  ) {
     return version;
   }
   throw new Error(`MCP server 协商了不支持的协议版本: ${version}`);

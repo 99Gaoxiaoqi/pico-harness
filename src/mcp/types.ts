@@ -245,6 +245,8 @@ export const JsonRpcErrorCode = {
 
 /** 无双向用户交互时保持的 legacy MCP 协议版本。 */
 export const MCP_PROTOCOL_VERSION = "2024-11-05";
+/** Streamable HTTP 首次进入正式规范的版本。 */
+export const MCP_STREAMABLE_HTTP_PROTOCOL_VERSION = "2025-03-26";
 /** Elicitation 首次进入正式规范的版本。 */
 export const MCP_ELICITATION_PROTOCOL_VERSION = "2025-06-18";
 
