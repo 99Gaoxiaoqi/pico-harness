@@ -6,10 +6,7 @@ import {
   type IpcMainInvokeEvent,
   type WebContents,
 } from "electron";
-import {
-  parseRuntimeParams,
-  type RuntimeMethod,
-} from "@pico/protocol";
+import { parseRuntimeParams, type RuntimeMethod } from "@pico/protocol";
 import type { PlatformServices } from "../platform/index.js";
 import {
   DESKTOP_IPC_CHANNELS,
@@ -75,7 +72,9 @@ export function registerDesktopIpcHandlers(options: {
         ownerId: event.sender.id,
         dispose: subscription.dispose,
       });
-      event.sender.once("destroyed", () => disposeOwnedSubscriptions(subscriptions, event.sender.id));
+      event.sender.once("destroyed", () =>
+        disposeOwnedSubscriptions(subscriptions, event.sender.id),
+      );
       return success(subscription.replay);
     } catch (error) {
       return failure(error);

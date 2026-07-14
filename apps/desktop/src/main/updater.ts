@@ -19,11 +19,7 @@ export function configureAutoUpdates(
   };
   const initialTimer = setTimeout(check, INITIAL_CHECK_DELAY_MS);
   const interval = setInterval(check, CHECK_INTERVAL_MS);
-  const onDownloaded = (
-    _event: Electron.Event,
-    _releaseNotes: string,
-    releaseName: string,
-  ) => {
+  const onDownloaded = (_event: Electron.Event, _releaseNotes: string, releaseName: string) => {
     void dialog
       .showMessageBox({
         type: "info",

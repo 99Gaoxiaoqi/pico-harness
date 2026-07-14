@@ -25,7 +25,11 @@ export function installApplicationMenu(getWindow: () => BrowserWindow | undefine
       label: "文件",
       submenu: [
         { label: "新建任务", accelerator: "CmdOrCtrl+N", click: () => navigate("/task/new") },
-        { label: "任务工作库", accelerator: "CmdOrCtrl+Shift+O", click: () => navigate("/sessions") },
+        {
+          label: "任务工作库",
+          accelerator: "CmdOrCtrl+Shift+O",
+          click: () => navigate("/sessions"),
+        },
         { type: "separator" },
         process.platform === "darwin" ? { role: "close" } : { role: "quit" },
       ],

@@ -744,7 +744,8 @@ export class RuntimeStore {
 
   getJob(jobId: string): JobRecord | undefined {
     const row = this.db.prepare("SELECT * FROM jobs WHERE job_id = ?").get(jobId) as
-      JobRow | undefined;
+      | JobRow
+      | undefined;
     return row ? mapJob(row) : undefined;
   }
 
@@ -851,7 +852,8 @@ export class RuntimeStore {
 
   getCronJob(cronJobId: string): CronJobRecord | undefined {
     const row = this.db.prepare("SELECT * FROM cron_jobs WHERE cron_job_id = ?").get(cronJobId) as
-      CronJobRow | undefined;
+      | CronJobRow
+      | undefined;
     return row ? mapCronJob(row) : undefined;
   }
 
@@ -988,7 +990,8 @@ export class RuntimeStore {
 
   getCronRun(cronRunId: string): CronRunRecord | undefined {
     const row = this.db.prepare("SELECT * FROM cron_runs WHERE cron_run_id = ?").get(cronRunId) as
-      CronRunRow | undefined;
+      | CronRunRow
+      | undefined;
     return row ? mapCronRun(row) : undefined;
   }
 
@@ -1928,7 +1931,8 @@ export class RuntimeStore {
 
   private requireProviderCall(callId: string): ProviderCallRecord {
     const row = this.db.prepare("SELECT * FROM provider_calls WHERE call_id = ?").get(callId) as
-      ProviderCallRow | undefined;
+      | ProviderCallRow
+      | undefined;
     if (!row) throw new Error(`未知 provider call: ${callId}`);
     return mapProviderCall(row);
   }

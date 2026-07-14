@@ -164,11 +164,7 @@ export class LocalDaemonRuntimeClientAdapter implements RuntimeClientAdapter {
           if (message.ok) authentication.resolve();
           else
             authentication.reject(
-              new RuntimeClientError(
-                "RUNTIME_AUTH_FAILED",
-                "本机 Runtime IPC 认证失败",
-                false,
-              ),
+              new RuntimeClientError("RUNTIME_AUTH_FAILED", "本机 Runtime IPC 认证失败", false),
             );
         } else if (message.kind === "event") {
           for (const listener of this.eventListeners) listener(message.event);
@@ -242,13 +238,7 @@ async function connectWithTimeout(address: string): Promise<Socket> {
       const socket = connect(address);
       const timeout = setTimeout(() => {
         socket.destroy();
-        reject(
-          new RuntimeClientError(
-            "RUNTIME_TIMEOUT",
-            "连接本机 Runtime daemon 超时",
-            true,
-          ),
-        );
+        reject(new RuntimeClientError("RUNTIME_TIMEOUT", "连接本机 Runtime daemon 超时", true));
       }, CONNECT_TIMEOUT_MS);
       const onError = (error: Error) => {
         clearTimeout(timeout);
@@ -287,9 +277,7 @@ function isStoredToken(value: unknown): value is StoredToken {
   if (typeof value !== "object" || value === null) return false;
   const candidate = value as Partial<StoredToken>;
   return (
-    candidate.version === 1 &&
-    typeof candidate.token === "string" &&
-    candidate.token.length >= 43
+    candidate.version === 1 && typeof candidate.token === "string" && candidate.token.length >= 43
   );
 }
 
