@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  createRuntimeEvent,
   createRuntimeRequest,
   DesktopConversationStateStore,
   DesktopAutomationService,
@@ -516,6 +517,32 @@ describe("DesktopRuntimeService integration", () => {
     );
     const secondRunId = (second as { run: { runId: string } }).run.runId;
     await workspaceRuntime.waitForRun(secondRunId);
+    fixture.runtime.publishDesktopEvent(
+      createRuntimeEvent({
+        topic: "changes.updated",
+        scope: {
+          workspacePath: fixture.canonicalWorkspace,
+          sessionId: firstResult.session.sessionId,
+          runId: secondRunId,
+        },
+        resourceVersion: 100,
+        at: 100,
+        payload: { runId: secondRunId, fingerprint: "fingerprint-1" },
+      }),
+    );
+    fixture.runtime.publishDesktopEvent(
+      createRuntimeEvent({
+        topic: "changes.applied",
+        scope: {
+          workspacePath: fixture.canonicalWorkspace,
+          sessionId: firstResult.session.sessionId,
+          runId: secondRunId,
+        },
+        resourceVersion: 101,
+        at: 101,
+        payload: { runId: secondRunId, fingerprint: "fingerprint-1" },
+      }),
+    );
 
     await expect(
       fixture.service.handle(
@@ -531,7 +558,7 @@ describe("DesktopRuntimeService integration", () => {
         workspacePath: fixture.workspace,
         sessionId: firstResult.session.sessionId,
       }),
-    )) as { items: Array<{ kind: string; content?: string; status?: string }> };
+    )) as { items: Array<{ kind: string; content?: string; status?: string; state?: string }> };
     expect(
       completeTranscript.items
         .filter((item) => item.kind === "userMessage" || item.kind === "assistantMessage")
@@ -542,6 +569,10 @@ describe("DesktopRuntimeService integration", () => {
       { kind: "userMessage", content: "继续解释" },
       { kind: "assistantMessage", content: "reply:继续解释" },
     ]);
+    expect(completeTranscript.items.find((item) => item.kind === "changes")).toMatchObject({
+      kind: "changes",
+      state: "applied",
+    });
     expect(
       completeTranscript.items
         .filter((item) => item.kind === "runBoundary")

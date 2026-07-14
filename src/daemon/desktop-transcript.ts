@@ -134,6 +134,7 @@ function projectStructuredItems(snapshot: SessionHydrationSnapshot): RuntimeConv
     ),
   );
   const items: RuntimeConversationItem[] = [];
+  const coalescedIndexes = new Map<string, number>();
   for (const projected of projection.entries) {
     const entry = projected.entry;
     const at = createdAtByEntryId.get(projected.id);
@@ -152,7 +153,7 @@ function projectStructuredItems(snapshot: SessionHydrationSnapshot): RuntimeConv
       case "prompt":
       case "changes": {
         const data = toJsonObject(entry.data);
-        items.push({
+        const item: RuntimeConversationItem = {
           id: projected.id,
           kind: entry.kind,
           title: entry.title,
@@ -160,7 +161,15 @@ function projectStructuredItems(snapshot: SessionHydrationSnapshot): RuntimeConv
           ...(entry.state ? { state: entry.state } : {}),
           ...(at === undefined ? {} : { at }),
           ...(data ? { data } : {}),
-        });
+        };
+        const key = structuredItemKey(entry.kind, data);
+        const priorIndex = key ? coalescedIndexes.get(key) : undefined;
+        if (priorIndex === undefined) {
+          if (key) coalescedIndexes.set(key, items.length);
+          items.push(item);
+        } else {
+          items[priorIndex] = item;
+        }
         break;
       }
       case "run-boundary":
@@ -229,6 +238,16 @@ function projectStructuredItems(snapshot: SessionHydrationSnapshot): RuntimeConv
     }
   }
   return items;
+}
+
+function structuredItemKey(
+  kind: "approval" | "prompt" | "changes",
+  data: JsonObject | undefined,
+): string | undefined {
+  if (!data) return undefined;
+  const value =
+    kind === "approval" ? data["approvalId"] : kind === "prompt" ? data["promptId"] : data["runId"];
+  return typeof value === "string" && value ? `${kind}:${value}` : undefined;
 }
 
 function indexToolResults(messages: readonly Message[]): Map<string, Message[]> {

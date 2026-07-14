@@ -541,20 +541,71 @@ function timelineItem(event: DesktopReporterEvent): JsonObject {
       : "status";
   const state =
     event.type.endsWith("completed") || event.type === "run.finished" ? "done" : "active";
+  const safePayload = safeTimelinePayload(event.type, event.payload);
   const detail = firstString(
-    event.payload["content"],
-    event.payload["result"],
-    event.payload["currentAction"],
-    event.payload["summary"],
+    safePayload["content"],
+    safePayload["resultSummary"],
+    safePayload["outputSummary"],
+    safePayload["currentAction"],
+    safePayload["summary"],
   );
   return jsonObject({
     kind,
-    title: timelineTitle(event.type, event.payload),
+    title: timelineTitle(event.type, safePayload),
     ...(detail ? { detail } : {}),
     state,
     eventType: event.type,
-    data: event.payload,
+    data: safePayload,
   });
+}
+
+function safeTimelinePayload(
+  type: string,
+  payload: Readonly<Record<string, unknown>>,
+): Readonly<Record<string, unknown>> {
+  if (type === "tool.completed") {
+    const resultBytes =
+      typeof payload["result"] === "string" ? Buffer.byteLength(payload["result"], "utf8") : 0;
+    const isError = payload["isError"] === true;
+    return {
+      toolName: payload["toolName"],
+      isError,
+      truncated: payload["truncated"] === true,
+      resultBytes,
+      resultSummary: `${isError ? "Tool failed" : "Tool completed"} · ${resultBytes} bytes`,
+      ...(typeof payload["providerCallId"] === "string"
+        ? { providerCallId: payload["providerCallId"] }
+        : {}),
+    };
+  }
+  if (type === "tool.output") {
+    const outputBytes =
+      typeof payload["chunk"] === "string" ? Buffer.byteLength(payload["chunk"], "utf8") : 0;
+    return {
+      toolName: payload["toolName"],
+      stream: payload["stream"],
+      outputBytes,
+      outputSummary: `${String(payload["stream"] ?? "output")} · ${outputBytes} bytes`,
+      ...(typeof payload["providerCallId"] === "string"
+        ? { providerCallId: payload["providerCallId"] }
+        : {}),
+    };
+  }
+  if (type === "subagent.trace" && payload["type"] === "tool.completed") {
+    const resultBytes =
+      typeof payload["result"] === "string" ? Buffer.byteLength(payload["result"], "utf8") : 0;
+    const isError = payload["isError"] === true;
+    return {
+      activityId: payload["activityId"],
+      traceId: payload["traceId"],
+      type: payload["type"],
+      isError,
+      truncated: payload["truncated"] === true,
+      resultBytes,
+      resultSummary: `${isError ? "Tool failed" : "Tool completed"} · ${resultBytes} bytes`,
+    };
+  }
+  return payload;
 }
 
 function timelineTitle(type: string, payload: Readonly<Record<string, unknown>>): string {
