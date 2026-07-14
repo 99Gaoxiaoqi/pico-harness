@@ -162,14 +162,15 @@ describe("DefaultHookExecutor command", () => {
     const workDir = await mkdtemp(join(tmpdir(), "pico-hook-async-dispose-"));
     const sentinel = join(workDir, "descendant-ran");
     const pidFile = join(workDir, "parent.pid");
+    const descendantPidFile = join(workDir, "descendant.pid");
     const rewake = vi.fn();
     const childScript = [
       "process.on('SIGTERM', () => {})",
+      `require('fs').writeFileSync(${JSON.stringify(descendantPidFile)}, String(process.pid))`,
       `setTimeout(() => require('fs').writeFileSync(${JSON.stringify(sentinel)}, 'x'), 1000)`,
     ].join(";");
     const parentScript = [
       "const {spawn}=require('child_process')",
-      "process.on('SIGTERM', () => {})",
       `require('fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid))`,
       `spawn(process.execPath, ['-e', ${JSON.stringify(childScript)}])`,
       "setTimeout(() => {}, 5000)",
@@ -190,20 +191,26 @@ describe("DefaultHookExecutor command", () => {
       ).resolves.toEqual({ decision: "allow" });
 
       let parentPid: number | undefined;
+      let descendantPid: number | undefined;
       for (let i = 0; i < 20; i++) {
         try {
           parentPid = Number(await readFile(pidFile, "utf8"));
-          break;
+          descendantPid = Number(await readFile(descendantPidFile, "utf8"));
+          if (Number.isInteger(parentPid) && Number.isInteger(descendantPid)) break;
         } catch {
           await new Promise((resolve) => setTimeout(resolve, 10));
         }
       }
       expect(parentPid).toBeTypeOf("number");
+      expect(descendantPid).toBeTypeOf("number");
 
+      const disposeStarted = Date.now();
       await executor.dispose();
 
       expect(rewake).not.toHaveBeenCalled();
+      expect(Date.now() - disposeStarted).toBeGreaterThanOrEqual(200);
       expect(() => process.kill(parentPid!, 0)).toThrow();
+      await expectProcessExit(descendantPid!);
       await expect(access(sentinel)).rejects.toMatchObject({ code: "ENOENT" });
       await expect(
         executor.execute(resolved({ type: "command", command: "true" }), input, {}),
@@ -213,6 +220,18 @@ describe("DefaultHookExecutor command", () => {
       await rm(workDir, { recursive: true, force: true });
     }
   });
+
+  async function expectProcessExit(pid: number): Promise<void> {
+    for (let i = 0; i < 50; i++) {
+      try {
+        process.kill(pid, 0);
+      } catch {
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(() => process.kill(pid, 0)).toThrow();
+  }
 });
 
 describe("DefaultHookExecutor HTTP", () => {
