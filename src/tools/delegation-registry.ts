@@ -9,6 +9,8 @@ import type { BaseTool, RequestMiddleware } from "./registry.js";
 import { isDangerousCommand, isHardlineCommand } from "../approval/manager.js";
 import { isSensitiveCredentialPath } from "../approval/session-permissions.js";
 import { SkillLoader, SkillViewTool } from "../context/skill.js";
+import { TodoStore } from "../context/todo-store.js";
+import { findAgentProfile } from "../agents/catalog.js";
 import type { AgentRunner, SubagentRegistryFactory, SubagentRegistryRequest } from "./subagent.js";
 import { DelegateTaskTool } from "./subagent.js";
 import { DelegateStatusTool, type DelegationManager } from "./delegation-manager.js";
@@ -22,6 +24,7 @@ import type { WorktreeSupervisor } from "../tasks/worktree-supervisor.js";
 import { classifyBashCommand } from "../approval/bash-safety.js";
 import { bashCommandFromArgs } from "../approval/bash-paths.js";
 import { buildMinimalChildProcessEnv } from "../os/child-process-env.js";
+import { TodoTool } from "./todo.js";
 
 export interface SubagentRegistryFactoryConfig {
   workDir: string;
@@ -30,7 +33,7 @@ export interface SubagentRegistryFactoryConfig {
   runner: AgentRunner;
   manager: DelegationManager;
   maxSpawnDepth?: number;
-  /** 用户自定义角色库(来自 .claw/agents.yaml)。agent_name 命中时优先使用。 */
+  /** 宿主统一 Agent 目录。显式 agent_name 未命中时 fail closed。 */
   profiles?: AgentProfile[];
   /** 可写 worker/explore 的独立宿主边界；TUI 无论主会话 mode 都应注入。 */
   yoloSandbox?: { config?: Partial<YoloSandboxConfig> };
@@ -71,6 +74,7 @@ export const TOOL_CONSTRUCTORS: Record<string, ToolCtor> = {
   grep: (wd, roots) => new GrepTool(roots ?? wd, { excludeSensitiveFiles: true }),
   fetch_url: () => new FetchURLTool(),
   web_search: () => new WebSearchTool(),
+  todo: (wd) => new TodoTool(new TodoStore(wd)),
 };
 
 export function createSubagentRegistryFactory(
@@ -93,14 +97,16 @@ export function createSubagentRegistryFactory(
       : resolvedConfig;
 
     // 优先分支:自定义角色(agent_name 命中 profile)
-    const profile = request.agentName
-      ? profiles.find((p) => p.name === request.agentName)
-      : undefined;
+    const profile = request.agentName ? findAgentProfile(profiles, request.agentName) : undefined;
     if (profile) {
       return buildProfileRegistry(activeConfig, request, profile);
     }
 
-    // 默认分支:explore/worker 二档(向后兼容,未传 agent_name 或未命中时走此)
+    if (request.agentName) {
+      throw new Error(`未找到 Agent Profile: ${request.agentName}，已拒绝回落到默认工具集。`);
+    }
+
+    // 默认分支仅服务未显式指定 agent_name 的临时 Agent。
     return buildModeRegistry(activeConfig, request, registry);
   };
 }

@@ -507,7 +507,37 @@ describe("Pico command registry", () => {
     expect(result.result.action).toBe("agents");
     expect(result.result.message).toContain("Available Agents");
     expect(result.result.message).toContain("- Explore [built-in]");
-    expect(result.result.message).toContain("- reviewer [project]: 审查代码");
+    expect(result.result.message).toContain("- reviewer [project/claude]: 审查代码");
+  });
+
+  it("/agents 和 /agent 参数补全共用包含 native Profile 的统一目录", async () => {
+    const workDir = mkdtempSync(join(tmpdir(), "pico-command-native-agent-"));
+    cleanup.push(() => rmSync(workDir, { recursive: true, force: true }));
+    mkdirSync(join(workDir, ".claw"), { recursive: true });
+    writeFileSync(
+      join(workDir, ".claw", "agents.yaml"),
+      [
+        "agents:",
+        "  - name: native-reviewer",
+        "    description: Native reviewer",
+        "    systemPrompt: Native prompt",
+        "    tools: [read_file, grep]",
+      ].join("\n"),
+    );
+    const registry = await createPicoCommandRegistry({
+      workDir,
+      provider: "openai",
+      model: "glm-5.2",
+    });
+
+    const listed = await processUserInput("/agents", { registry });
+    const agentCommand = registry.list().find((command) => command.name === "agent");
+    const candidates = await agentCommand?.argumentCompleter?.("native-");
+
+    expect(listed.type).toBe("local-command");
+    if (listed.type !== "local-command") return;
+    expect(listed.result.message).toContain("native-reviewer [project/native]");
+    expect(candidates).toEqual([{ value: "native-reviewer", description: "Native reviewer" }]);
   });
 
   it("/agent <name> <task> dispatches through delegate_task intent", async () => {
@@ -534,8 +564,8 @@ describe("Pico command registry", () => {
     expect(result.result.prompt).toContain("delegate_task");
     expect(result.result.prompt).toContain('"agent_name": "reviewer"');
     expect(result.result.prompt).toContain('"goal": "检查 src/input"');
-    expect(result.result.prompt).toContain('"model_route": "volcengine/deepseek-v4-pro"');
-    expect(result.result.prompt).toContain("只输出高风险问题。");
+    expect(result.result.prompt).not.toContain('"model_route"');
+    expect(result.result.prompt).not.toContain("只输出高风险问题。");
     expect(result.result.metadata).toEqual({
       agentName: "reviewer",
       sourcePath,
