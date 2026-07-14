@@ -128,6 +128,16 @@ export async function loadClaudeAgentsFromDir(
   agentsDir: string,
   source: ClaudeAgentSource,
 ): Promise<ClaudeAgent[]> {
+  const rootStat = await stat(agentsDir).catch((err: unknown) => {
+    if (isErrnoException(err, "ENOENT")) return undefined;
+    throw err;
+  });
+  if (!rootStat) return [];
+  if (rootStat.isFile()) {
+    if (!agentsDir.endsWith(".md") || rootStat.size > MAX_AGENT_FILE_BYTES) return [];
+    const content = await readFile(agentsDir, "utf8");
+    return [parseClaudeAgent(content, basename(agentsDir, ".md"), agentsDir, source)];
+  }
   let entries;
   try {
     entries = await readdir(agentsDir, { withFileTypes: true });

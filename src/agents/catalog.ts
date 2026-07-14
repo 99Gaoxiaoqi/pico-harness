@@ -243,10 +243,13 @@ async function loadExternalAgentSource(
   if (source.adapter === "claude-agent-directory") {
     const agents = await loadClaudeAgentsFromDir(source.root, "project");
     return agents.map((agent) => ({
-      name: agent.name,
+      name: `${source.namespace ?? ""}${agent.name}`,
       source,
       sourcePath: agent.sourcePath,
-      value: adaptClaudeAgent(agent, source),
+      value: adaptClaudeAgent(
+        { ...agent, name: `${source.namespace ?? ""}${agent.name}` },
+        source,
+      ),
     }));
   }
   return await loadAgentSource(source);

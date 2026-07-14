@@ -13,6 +13,7 @@ export interface ResourceCatalogSource {
   readonly format: ResourceCatalogFormat;
   readonly root: string;
   readonly priority: number;
+  readonly namespace?: string;
 }
 
 /**

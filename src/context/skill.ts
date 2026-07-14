@@ -150,18 +150,20 @@ export class SkillLoader {
         // frontmatter 无 name 时回退到 SKILL.md 所在目录名(对齐 Hermes)
         const fallbackName = basename(dirname(file));
         const parsed = parseSkillMD(content, fallbackName);
+        const name = `${source.namespace ?? ""}${parsed.name}`;
         const allowedTools = normalizeAllowedTools(
           parsed.allowedTools,
           source.format,
-          parsed.name,
+          name,
           file,
         );
         candidates.push({
-          name: parsed.name,
+          name,
           source,
           sourcePath: file,
           value: {
             ...parsed,
+            name,
             ...(allowedTools === undefined ? {} : { allowedTools }),
             sourcePath: file,
             source,
@@ -330,6 +332,9 @@ async function walkForSkillMd(dir: string): Promise<string[]> {
     logger.warn({ err, dir }, "解析技能根目录失败");
     return [];
   }
+
+  const rootStat = await stat(physicalRoot).catch(() => undefined);
+  if (rootStat?.isFile()) return basename(physicalRoot) === "SKILL.md" ? [physicalRoot] : [];
 
   const state: SkillScanState = {
     physicalRoot,
