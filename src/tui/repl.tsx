@@ -6,6 +6,7 @@
 
 import { access } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
+import { join } from "node:path";
 import type React from "react";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { render, Text, useApp, useInput, type Instance, type RenderOptions } from "ink";
@@ -153,6 +154,7 @@ import {
   loadPluginRuntimeSnapshot,
   type PluginRuntimeSnapshot,
 } from "../plugins/plugin-runtime-snapshot.js";
+import { resolvePicoPaths } from "../paths/pico-paths.js";
 
 export interface ReplOptions {
   /** 工作区 */
@@ -1011,7 +1013,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
 
   // 诊断:hook process.stdout.write,记录 ink 实际输出的 ANSI(看擦除行为)
   if (process.env.TUI_DEBUG) {
-    const { appendFileSync } = await import("node:fs");
+    const { appendFileSync, mkdirSync } = await import("node:fs");
     /* eslint-disable @typescript-eslint/no-explicit-any */
     const origWrite = process.stdout.write.bind(process.stdout) as any;
     let frame = 0;
@@ -1021,7 +1023,9 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
       const str = typeof chunk === "string" ? chunk : String(chunk);
       if (str.includes("\x1b[") || frame < 5) {
         const visible = str.replaceAll("\x1b[", "ESC[").replaceAll("\x1b", "ESC").slice(0, 200);
-        appendFileSync(".claw/tui-debug.log", `[stdout f${frame}] ${visible}\n`);
+        const paths = resolvePicoPaths(opts.workDir);
+        mkdirSync(paths.workspace.root, { recursive: true });
+        appendFileSync(paths.workspace.debugLog, `[stdout f${frame}] ${visible}\n`);
       }
       frame++;
       return origWrite(chunk, ...args);
@@ -1124,7 +1128,10 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
   ): Promise<TuiSessionBundle> => {
     let session = globalSessionManager.get(selection.sessionId, opts.workDir);
     if (selection.mode === "fork" && selection.sourceSessionId && !session) {
-      const targetPath = `${opts.workDir}/.claw/sessions/${selection.sessionId}.jsonl`;
+      const targetPath = join(
+        resolvePicoPaths(opts.workDir).workspace.sessions,
+        `${selection.sessionId}.jsonl`,
+      );
       const targetPublished = await access(targetPath).then(
         () => true,
         () => false,

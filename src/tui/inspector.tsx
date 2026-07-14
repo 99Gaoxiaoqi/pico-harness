@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
 import { open, realpath } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Box, Text, useInput } from "ink";
 import { hashToolResultArtifactArgs, ToolResultArtifactStore } from "../context/artifact-store.js";
+import { resolvePicoPaths } from "../paths/pico-paths.js";
 import type { TuiToolCallProjection } from "./tui-event-store.js";
 import type { DialogRequest } from "./dialog-arbiter.js";
 import { truncateTerminalText } from "./terminal-width.js";
@@ -327,7 +328,7 @@ export function createArtifactInspectorContext(input: {
   if (!input.sessionId.trim()) throw new Error("Inspector sessionId must not be empty");
   return Object.freeze({
     expectedSessionId: input.sessionId,
-    trustedRoot: resolve(input.trustedRoot ?? join(input.workDir, ".claw", "artifacts")),
+    trustedRoot: resolve(input.trustedRoot ?? resolvePicoPaths(input.workDir).workspace.artifacts),
   });
 }
 

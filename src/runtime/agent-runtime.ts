@@ -118,6 +118,7 @@ import {
   loadPluginRuntimeSnapshot,
   type PluginRuntimeSnapshot,
 } from "../plugins/plugin-runtime-snapshot.js";
+import { resolvePicoPaths } from "../paths/pico-paths.js";
 
 export type RuntimeExecution =
   | { readonly kind: "foreground" }
@@ -308,7 +309,7 @@ export async function executeAgentRuntime(
     options.model ?? (dependencies.env ?? process.env).LLM_MODEL ?? defaultModel(kind);
   const existingSession = globalSessionManager.get(sessionSelection.sessionId, workDir);
   const targetPublished = await stat(
-    join(workDir, ".claw", "sessions", `${sessionSelection.sessionId}.jsonl`),
+    join(resolvePicoPaths(workDir).workspace.sessions, `${sessionSelection.sessionId}.jsonl`),
   ).then(
     (info) => info.isFile(),
     () => false,
@@ -1415,7 +1416,7 @@ function buildArtifactRuntime(
   subagentReportArtifactWriter: SubagentReportArtifactWriter;
 } {
   const store = new ToolResultArtifactStore({
-    baseDir: join(workDir, ".claw", "artifacts"),
+    baseDir: resolvePicoPaths(workDir).workspace.artifacts,
   });
   const subagentReportArtifactWriter: SubagentReportArtifactWriter = async (input) => {
     const meta = await store.write({
@@ -1865,7 +1866,7 @@ function isTruthyEnv(value: string | undefined): boolean {
 }
 
 async function findTracePath(workDir: string, sessionId: string): Promise<string | undefined> {
-  const traceDir = join(workDir, ".claw", "traces");
+  const traceDir = resolvePicoPaths(workDir).workspace.traces;
   let files: string[];
 
   try {

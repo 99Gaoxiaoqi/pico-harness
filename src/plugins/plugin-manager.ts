@@ -1,6 +1,6 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { readFile } from "node:fs/promises";
 import { resolvePicoPaths } from "../paths/pico-paths.js";
+import { writeJsonAtomic } from "../storage/atomic-json.js";
 import { resolvePluginContributions } from "./plugin-resolver.js";
 import type {
   PluginCompatibility,
@@ -175,8 +175,9 @@ export class PluginManager {
     let raw: string;
     try {
       raw = await readFile(this.statePath, "utf8");
-    } catch {
-      return { plugins: {} };
+    } catch (error) {
+      if (isErrno(error, "ENOENT")) return { plugins: {} };
+      throw error;
     }
 
     try {
@@ -185,14 +186,13 @@ export class PluginManager {
         return { plugins: {} };
       }
       return { plugins: parsed.plugins as PluginState["plugins"] };
-    } catch {
-      return { plugins: {} };
+    } catch (error) {
+      throw new Error(`Plugin state ${this.statePath} is invalid`, { cause: error });
     }
   }
 
   private async writeState(state: PluginState): Promise<void> {
-    await mkdir(dirname(this.statePath), { recursive: true });
-    await writeFile(this.statePath, `${JSON.stringify(state, null, 2)}\n`);
+    await writeJsonAtomic(this.statePath, state);
   }
 }
 
@@ -202,4 +202,8 @@ function scopeRank(scope: PluginScope): number {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isErrno(error: unknown, code: string): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error && error.code === code;
 }
