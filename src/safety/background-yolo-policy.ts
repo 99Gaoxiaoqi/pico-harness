@@ -37,6 +37,10 @@ const UNSAFE_BACKGROUND_TOOLS = new Set([
 
 export type BackgroundYoloPolicySnapshot = BackgroundYoloPolicySnapshotData;
 
+export function filterBackgroundEligibleTools(tools: readonly string[]): string[] {
+  return [...new Set(tools.filter((tool) => tool && !UNSAFE_BACKGROUND_TOOLS.has(tool)))].sort();
+}
+
 export interface BackgroundWorkspaceTrustVerifier {
   canonicalize(workspacePath: string): Promise<string>;
   isTrusted(canonicalWorkspacePath: string): Promise<boolean>;
@@ -149,9 +153,7 @@ export async function prepareBackgroundYoloPolicy(input: {
     snapshot,
     workspacePath,
     // Delegation/交互工具尚不能把同一 policy 传递给下一执行边界，后台不可暴露。
-    allowedTools: new Set(
-      snapshot.allowedTools.filter((tool) => !UNSAFE_BACKGROUND_TOOLS.has(tool)),
-    ),
+    allowedTools: new Set(filterBackgroundEligibleTools(snapshot.allowedTools)),
     allowedToolNetworkHosts: new Set(snapshot.allowedToolNetworkHosts ?? []),
     ...(mcpConfigPath ? { mcpConfigPath } : {}),
     ...(hookRunner ? { hookRunner } : {}),

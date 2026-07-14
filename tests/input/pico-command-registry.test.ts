@@ -97,11 +97,16 @@ describe("Pico command registry", () => {
       cron.close();
       rmSync(workDir, { recursive: true, force: true });
     });
+    let daemonAvailable = true;
+    const disabledCountWhenRegistered: number[] = [];
     const bridge: CronDaemonBridge = {
-      registerWorkspace: async (workspacePath) => ({
-        available: true,
-        message: `daemon registered ${workspacePath}`,
-      }),
+      registerWorkspace: async (workspacePath) => {
+        disabledCountWhenRegistered.push(cron.list(workDir).filter((job) => !job.enabled).length);
+        return {
+          available: daemonAvailable,
+          message: daemonAvailable ? `daemon registered ${workspacePath}` : "daemon unavailable",
+        };
+      },
       statusWorkspace: async () => ({
         available: true,
         registered: true,
@@ -168,7 +173,33 @@ describe("Pico command registry", () => {
     expect(created.type === "local-command" ? created.result.message : undefined).toContain(
       "工具网络：仅允许 api.example.com",
     );
-    expect(cron.list(workDir)[0]?.credentialRef).toMatch(/^pico-keychain:\/\/model-route\//u);
+    const allowlistedJob = cron.list(workDir).find((job) => job.prompt === "检查未提交的改动");
+    expect(allowlistedJob?.credentialRef).toMatch(/^pico-keychain:\/\/model-route\//u);
+    expect(allowlistedJob?.enabled).toBe(true);
+    expect(disabledCountWhenRegistered).toEqual([1]);
+
+    daemonAvailable = false;
+    const offline = await processUserInput("/cron add */10 * * * * 生成默认联网日报", { registry });
+    expect(offline.type === "local-command" ? offline.result.message : undefined).toContain(
+      "(disabled)",
+    );
+    expect(offline.type === "local-command" ? offline.result.message : undefined).toContain(
+      "允许所有符合后台资格的工具联网",
+    );
+    const offlineJob = cron.list(workDir).find((job) => job.prompt === "生成默认联网日报");
+    expect(offlineJob?.enabled).toBe(false);
+    expect(offlineJob?.policySnapshot.toolNetworkPolicy).toBe("allow");
+    expect(disabledCountWhenRegistered).toEqual([1, 1]);
+    const enableOffline = await processUserInput(`/cron enable ${offlineJob!.cronJobId}`, {
+      registry,
+    });
+    expect(
+      enableOffline.type === "local-command" ? enableOffline.result.message : undefined,
+    ).toContain("remains disabled");
+    expect(cron.list(workDir).find((job) => job.cronJobId === offlineJob!.cronJobId)?.enabled).toBe(
+      false,
+    );
+
     const listed = await processUserInput("/cron list", { registry });
     expect(listed.type === "local-command" ? listed.result.message : undefined).toContain(
       "检查未提交的改动",
