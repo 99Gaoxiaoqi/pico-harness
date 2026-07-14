@@ -108,8 +108,16 @@ export class DesktopInteractionBroker {
     return true;
   }
 
-  answerPrompt(requestId: string, optionId: string): boolean {
-    return this.askUserHandler.select(requestId as AskUserRequestId, optionId);
+  answerPrompt(requestId: string, answer: string): boolean {
+    const request = this.askUserHandler
+      .getPendingRequests()
+      .find((candidate) => candidate.requestId === requestId);
+    const option = request?.options.find(
+      (candidate) => candidate.optionId === answer || candidate.label === answer,
+    );
+    return option
+      ? this.askUserHandler.select(requestId as AskUserRequestId, option.optionId)
+      : false;
   }
 
   cancelPrompt(requestId: string, reason?: string): boolean {

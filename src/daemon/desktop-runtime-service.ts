@@ -56,7 +56,20 @@ export interface DesktopRuntimeServiceOptions {
   readonly registrationStore?: WorkspaceRegistrationStore;
   readonly trustStore?: WorkspaceTrustStore;
   readonly sessionStateStore?: DesktopSessionStateStore;
+  readonly interactions?: DesktopRuntimeInteractions;
   readonly now?: () => number;
+}
+
+export interface DesktopRuntimeInteractions {
+  respondApproval(input: {
+    readonly approvalId: string;
+    readonly decision: "allow_once" | "allow_session" | "deny";
+    readonly reason?: string;
+  }): { readonly accepted: boolean; readonly alreadyResolved: boolean };
+  respondPrompt(input: { readonly promptId: string; readonly answer: JsonValue }): {
+    readonly accepted: boolean;
+    readonly alreadyResolved: boolean;
+  };
 }
 
 /**
@@ -113,15 +126,25 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         return this.listMcpServers(request.params.workspacePath);
       case "usage.get":
         return this.getUsage(request.params);
-      default:
-        if (UNSUPPORTED_DESKTOP_METHODS.has(request.method)) {
-          throw new RuntimeProtocolError(
-            RUNTIME_ERROR_CODES.METHOD_NOT_FOUND,
-            `${request.method} 尚未连接可验证的 Runtime 能力，本次请求未执行`,
-          );
+      case "approval.respond":
+        if (this.options.interactions) {
+          return this.options.interactions.respondApproval(request.params);
         }
-        return this.options.runtimeService.handle(request);
+        break;
+      case "prompt.respond":
+        if (this.options.interactions) {
+          return this.options.interactions.respondPrompt(request.params);
+        }
+        break;
+      default:
+        if (!UNSUPPORTED_DESKTOP_METHODS.has(request.method)) {
+          return this.options.runtimeService.handle(request);
+        }
     }
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.METHOD_NOT_FOUND,
+      `${request.method} 尚未连接可验证的 Runtime 能力，本次请求未执行`,
+    );
   }
 
   replayEvents(cursor: RuntimeEventCursor): Promise<readonly RuntimeEvent[]> {
