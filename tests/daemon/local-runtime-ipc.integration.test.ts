@@ -7,7 +7,6 @@ import {
   createRuntimeRequest,
   LocalRuntimeClient,
   LocalRuntimeDaemon,
-  RUNTIME_ERROR_CODES,
   resolveLocalDaemonEndpoint,
   WorkspaceRegistrationStore,
   WorkspaceRuntimeRegistry,
@@ -84,10 +83,11 @@ describe("local runtime daemon IPC integration", () => {
     }
   });
 
-  it("拒绝注册非 Git 工作区且不留下登记记录", async () => {
+  it("注册非 Git 工作区并保留普通文件夹能力边界", async () => {
     const root = await temporaryRoot();
     const workspace = join(root, "plain-folder");
     await mkdir(workspace);
+    const canonicalWorkspace = await realpath(workspace);
     const registrations = new WorkspaceRegistrationStore(join(root, "daemon-workspaces.json"));
     const service = new WorkspaceRuntimeService({
       execute: async () => undefined,
@@ -96,11 +96,21 @@ describe("local runtime daemon IPC integration", () => {
     try {
       await expect(
         service.handle(createRuntimeRequest("workspace.register", { workspacePath: workspace })),
-      ).rejects.toMatchObject({
-        code: RUNTIME_ERROR_CODES.INVALID_PARAMS,
-        message: expect.stringContaining("所选文件夹不是 Git 仓库"),
+      ).resolves.toEqual({
+        workspacePath: canonicalWorkspace,
+        registered: true,
       });
-      await expect(registrations.list()).resolves.toEqual([]);
+      await expect(registrations.list()).resolves.toEqual([canonicalWorkspace]);
+      await expect(service.getWorkspaceRuntime(workspace)).resolves.toMatchObject({
+        workspace: canonicalWorkspace,
+        mode: "folder",
+        capabilities: {
+          foregroundRuns: true,
+          fileHistory: true,
+          isolatedWorktrees: false,
+          branchMerge: false,
+        },
+      });
     } finally {
       await service.close();
     }
