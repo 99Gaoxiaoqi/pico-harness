@@ -48,7 +48,7 @@ export type RuntimeQueuedInput = JsonObject & {
   readonly createdAt: number;
 };
 
-export type RuntimeConversationItem =
+export type RuntimeConversationItem = (
   | (JsonObject & {
       readonly id: string;
       readonly kind: "userMessage" | "assistantMessage" | "systemNotice" | "error";
@@ -96,7 +96,12 @@ export type RuntimeConversationItem =
       readonly state?: string;
       readonly at?: number;
       readonly data?: JsonObject;
-    });
+    })
+) & {
+  /** 单条目超出 IPC 字节预算时的诚实降级标记。 */
+  readonly truncated?: true;
+  readonly originalBytes?: number;
+};
 
 export type RuntimeRun = JsonObject & {
   readonly runId: RunId;
