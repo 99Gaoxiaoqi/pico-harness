@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { resolveModelRouteCapabilities } from "../src/provider/model-capabilities.js";
 import { ModelRouter, type ModelRoute } from "../src/provider/model-router.js";
-import { buildSubagentModelCatalog } from "../src/runtime/subagent-model-catalog.js";
+import {
+  buildSubagentModelCatalog,
+  createInheritOnlySubagentModelCatalog,
+} from "../src/runtime/subagent-model-catalog.js";
 
 describe("子代理模型目录集成", () => {
   it("只投影有效路由并脱敏、深冻结结果", () => {
@@ -118,6 +121,20 @@ describe("子代理模型目录集成", () => {
     expect(catalog.routes[0]!.aliases).toEqual([]);
     expect(catalog.totalSelectableRoutes).toBe(1);
     expect(catalog.truncated).toBe(false);
+  });
+
+  it("没有完整路由器时创建深冻结的 inherit-only 目录", () => {
+    const catalog = createInheritOnlySubagentModelCatalog("fixed/provider-model");
+
+    expect(catalog).toEqual({
+      routes: [],
+      parentRouteId: "fixed/provider-model",
+      allowRouteOverride: false,
+      totalSelectableRoutes: 0,
+      truncated: false,
+    });
+    expect(Object.isFrozen(catalog)).toBe(true);
+    expect(Object.isFrozen(catalog.routes)).toBe(true);
   });
 });
 
