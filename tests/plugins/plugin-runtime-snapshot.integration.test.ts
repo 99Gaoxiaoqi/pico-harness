@@ -1,6 +1,6 @@
-import { mkdir, mkdtemp, realpath, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { loadAgentCatalog } from "../../src/agents/catalog.js";
 import { SkillLoader } from "../../src/context/skill.js";
@@ -56,14 +56,25 @@ describe("Plugin runtime snapshot", () => {
 
     const service = new PluginManagementService({ workDir, picoHome });
     await service.install(pluginDir, "project");
-    expect((await loadPluginRuntimeSnapshot({ workDir, picoHome, service })).pluginIds).toEqual([]);
+    const disabledSnapshot = await loadPluginRuntimeSnapshot({ workDir, picoHome, service });
+    expect(disabledSnapshot.pluginIds).toEqual([]);
+    await disabledSnapshot.dispose();
     const proposal = await service.prepareTrust({ id: "quality", scope: "project" });
     await service.trust(proposal);
     await service.enable({ id: "quality", scope: "project" });
 
     const snapshot = await loadPluginRuntimeSnapshot({ workDir, picoHome, service });
+    const runtimeRoot = dirname(snapshot.skillSources[0]!.root);
     expect(snapshot.pluginIds).toEqual(["quality"]);
     expect(snapshot.diagnostics).toEqual([]);
+    expect(runtimeRoot).not.toBe(await realpath(pluginDir));
+    expect(snapshot.skillSources[0]!.root.startsWith(runtimeRoot)).toBe(true);
+    expect(snapshot.commandSources[0]!.root.startsWith(runtimeRoot)).toBe(true);
+    expect(snapshot.agentSources[0]!.root.startsWith(runtimeRoot)).toBe(true);
+
+    await writeFile(join(pluginDir, "SKILL.md"), "changed after snapshot\n");
+    await writeFile(join(pluginDir, "review.md"), "changed after snapshot\n");
+    await writeFile(join(pluginDir, "reviewer.md"), "changed after snapshot\n");
     expect(
       (await new SkillLoader(workDir, { externalSources: snapshot.skillSources }).list())[0],
     ).toMatchObject({
@@ -109,7 +120,7 @@ describe("Plugin runtime snapshot", () => {
     expect(snapshot.mcpSources[0]?.config).toEqual({
       mcpServers: {
         "quality:browser": expect.objectContaining({
-          command: join(await realpath(pluginDir), "server.js"),
+          command: join(runtimeRoot, "server.js"),
           args: [await realpath(workDir)],
         }),
       },
@@ -117,12 +128,87 @@ describe("Plugin runtime snapshot", () => {
     expect(snapshot.lspServers).toEqual([
       {
         id: "quality:typescript",
-        command: join(await realpath(pluginDir), "typescript-language-server"),
+        command: join(runtimeRoot, "typescript-language-server"),
         languages: ["typescript"],
       },
     ]);
+    await snapshot.dispose();
+    await snapshot.dispose();
+    await expect(access(runtimeRoot)).rejects.toThrow();
+  });
+
+  it("同 ID 只激活 local > project > user 的最高优先级 winner", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-plugin-runtime-work-"));
+    const picoHome = await mkdtemp(join(tmpdir(), "pico-plugin-runtime-home-"));
+    const service = new PluginManagementService({ workDir, picoHome });
+
+    for (const scope of ["user", "project", "local"] as const) {
+      const pluginDir = await createScopedPlugin(scope);
+      await service.install(pluginDir, scope);
+      await service.trust(await service.prepareTrust({ id: "winner", scope }));
+      await service.enable({ id: "winner", scope });
+    }
+
+    const snapshot = await loadPluginRuntimeSnapshot({ workDir, picoHome, service });
+    expect(snapshot.pluginIds).toEqual(["winner"]);
+    expect(snapshot.skillSources).toHaveLength(1);
+    expect(
+      (await new SkillLoader(workDir, { externalSources: snapshot.skillSources }).list())[0],
+    ).toMatchObject({ body: "local winner" });
+    expect(snapshot.mcpSources).toHaveLength(1);
+    expect(snapshot.mcpSources[0]!.config).toEqual({
+      mcpServers: { "winner:server": { command: "local-server" } },
+    });
+    await snapshot.dispose();
+  });
+
+  it("复制前内容变化时 fail closed，不把源目录或外部符号链接投影到运行时", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-plugin-runtime-work-"));
+    const picoHome = await mkdtemp(join(tmpdir(), "pico-plugin-runtime-home-"));
+    const pluginDir = await mkdtemp(join(tmpdir(), "pico-plugin-runtime-source-"));
+    await mkdir(join(pluginDir, ".pico"));
+    await writeJson(join(pluginDir, ".pico", "plugin.json"), { name: "raced" });
+    await writeJson(join(pluginDir, ".mcp.json"), {
+      mcpServers: { safe: { command: "safe" } },
+    });
+    const service = new PluginManagementService({ workDir, picoHome });
+    await service.install(pluginDir, "project");
+    await service.trust(await service.prepareTrust({ id: "raced", scope: "project" }));
+    await service.enable({ id: "raced", scope: "project" });
+
+    const outside = join(await mkdtemp(join(tmpdir(), "pico-plugin-runtime-outside-")), "mcp.json");
+    await writeJson(outside, { mcpServers: { unsafe: { command: "unsafe" } } });
+    await rm(join(pluginDir, ".mcp.json"));
+    await symlink(outside, join(pluginDir, ".mcp.json"));
+
+    const snapshot = await loadPluginRuntimeSnapshot({ workDir, picoHome, service });
+    expect(snapshot.pluginIds).toEqual([]);
+    expect(snapshot.mcpSources).toEqual([]);
+    expect(snapshot.diagnostics).toContainEqual(
+      expect.objectContaining({
+        pluginId: "raced",
+        sourcePath: await realpath(pluginDir),
+        message: expect.stringContaining("changed while creating runtime snapshot"),
+      }),
+    );
+    await snapshot.dispose();
   });
 });
+
+async function createScopedPlugin(scope: "user" | "project" | "local"): Promise<string> {
+  const pluginDir = await mkdtemp(join(tmpdir(), `pico-plugin-runtime-${scope}-`));
+  await mkdir(join(pluginDir, ".pico"));
+  await writeJson(join(pluginDir, ".pico", "plugin.json"), {
+    name: "winner",
+    skills: "./SKILL.md",
+    mcpServers: { server: { command: `${scope}-server` } },
+  });
+  await writeFile(
+    join(pluginDir, "SKILL.md"),
+    `---\nname: winner\ndescription: ${scope} winner\n---\n${scope} winner\n`,
+  );
+  return pluginDir;
+}
 
 async function writeJson(path: string, value: unknown): Promise<void> {
   await writeFile(path, `${JSON.stringify(value, null, 2)}\n`);

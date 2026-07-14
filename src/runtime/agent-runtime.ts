@@ -278,20 +278,7 @@ export async function executeAgentRuntime(
       : undefined;
   const backgroundApiKey = await resolveBackgroundCredential(options, execution, dependencies);
   const picoConfig = await loadPicoConfig(workDir);
-  const pluginSnapshot = backgroundPolicy
-    ? undefined
-    : (dependencies.pluginSnapshot ??
-      (await loadPluginRuntimeSnapshot({ workDir, env: dependencies.env ?? process.env })));
   const claudeCompatibility = picoConfig.compatibility.claude;
-  const skillLoaderFactory = (root: string): SkillLoader =>
-    new SkillLoader(root, {
-      includeUserResources: true,
-      includeClaudeProjectResources:
-        claudeCompatibility.enabled && claudeCompatibility.projectResources,
-      includeClaudeUserResources: claudeCompatibility.enabled && claudeCompatibility.userResources,
-      ...(pluginSnapshot?.skillSources ? { externalSources: pluginSnapshot.skillSources } : {}),
-      env: dependencies.env ?? process.env,
-    });
   const configuredAdditionalDirectories = picoConfig.additionalDirectories;
   const sessionSelection =
     options.sessionSelection ??
@@ -391,6 +378,21 @@ export async function executeAgentRuntime(
   let ownsMcpManager = false;
   let cleanupMcpManager: McpConnectionManager | undefined;
   let unsubscribeMcpStatus: (() => void) | undefined;
+  const pluginSnapshot = backgroundPolicy
+    ? undefined
+    : (dependencies.pluginSnapshot ??
+      (await loadPluginRuntimeSnapshot({ workDir, env: dependencies.env ?? process.env })));
+  const ownsPluginSnapshot =
+    pluginSnapshot !== undefined && dependencies.pluginSnapshot === undefined;
+  const skillLoaderFactory = (root: string): SkillLoader =>
+    new SkillLoader(root, {
+      includeUserResources: true,
+      includeClaudeProjectResources:
+        claudeCompatibility.enabled && claudeCompatibility.projectResources,
+      includeClaudeUserResources: claudeCompatibility.enabled && claudeCompatibility.userResources,
+      ...(pluginSnapshot?.skillSources ? { externalSources: pluginSnapshot.skillSources } : {}),
+      env: dependencies.env ?? process.env,
+    });
 
   try {
     const runtimeState =
@@ -965,6 +967,9 @@ export async function executeAgentRuntime(
     }
     if (ownsRuntimeState && cleanupRuntimeState) {
       await bestEffortRuntimeCleanup("SessionRuntime", () => cleanupRuntimeState?.dispose());
+    }
+    if (ownsPluginSnapshot) {
+      await bestEffortRuntimeCleanup("Plugin runtime snapshot", () => pluginSnapshot.dispose());
     }
     await bestEffortRuntimeCleanup("Runtime usage ledger", () => ownedUsageStore?.close());
   }

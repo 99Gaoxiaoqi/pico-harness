@@ -41,82 +41,93 @@ export interface PluginRuntimeSnapshot {
   readonly mcpSources: readonly McpConfigSource[];
   readonly lspServers: readonly LspServerConfig[];
   readonly diagnostics: readonly PluginRuntimeDiagnostic[];
+  /** Release the host-private immutable Plugin tree. Safe to call more than once. */
+  dispose(): Promise<void>;
 }
 
 export async function loadPluginRuntimeSnapshot(
   options: PluginRuntimeSnapshotOptions,
 ): Promise<PluginRuntimeSnapshot> {
   const service = options.service ?? new PluginManagementService(options);
-  const active = (await service.list()).filter((plugin) => plugin.active);
+  const materialization = await service.materializeRuntimePlugins();
+  const active = materialization.plugins;
   const skillSources: ExternalResourceCatalogSource[] = [];
   const commandSources: ExternalResourceCatalogSource[] = [];
   const agentSources: AgentExternalCatalogSource[] = [];
   const hookSources: HookConfigSourceSpec[] = [];
   const mcpSources: McpConfigSource[] = [];
   const lspServers: LspServerConfig[] = [];
-  const diagnostics: PluginRuntimeDiagnostic[] = [];
+  const diagnostics: PluginRuntimeDiagnostic[] = [...materialization.diagnostics];
 
-  for (const inspection of active) {
-    const { contributions, installed } = inspection;
-    const priority = pluginPriority(installed.scope);
-    skillSources.push(...pathSources(contributions, contributions.skills, "skill", priority));
-    commandSources.push(...pathSources(contributions, contributions.commands, "command", priority));
-    agentSources.push(...(await agentPathSources(contributions, contributions.agents, priority)));
-    const variables = createPluginVariableMap(contributions.plugin, options.workDir, {
-      ...options,
-      scope: installed.scope,
+  try {
+    for (const inspection of active) {
+      const { contributions, installed } = inspection;
+      const priority = pluginPriority(installed.scope);
+      skillSources.push(...pathSources(contributions, contributions.skills, "skill", priority));
+      commandSources.push(
+        ...pathSources(contributions, contributions.commands, "command", priority),
+      );
+      agentSources.push(...(await agentPathSources(contributions, contributions.agents, priority)));
+      const variables = createPluginVariableMap(contributions.plugin, options.workDir, {
+        ...options,
+        scope: installed.scope,
+      });
+
+      for (const contribution of contributions.hooks) {
+        try {
+          const value = unwrap(await readPluginConfig(contribution, variables), "hooks");
+          hookSources.push({
+            kind: "plugin",
+            path: contribution.sourcePath,
+            componentId: contributions.plugin.id,
+            inlineHooks: value,
+          });
+        } catch (error) {
+          diagnostics.push(runtimeDiagnostic(contributions, contribution, error));
+        }
+      }
+      for (const contribution of contributions.mcpServers) {
+        try {
+          mcpSources.push({
+            id: contributionId(contributions.plugin.id, "mcp", contribution, mcpSources.length),
+            config: namespaceMcpConfig(
+              contributions.plugin.id,
+              await readPluginConfig(contribution, variables),
+            ),
+          });
+        } catch (error) {
+          diagnostics.push(runtimeDiagnostic(contributions, contribution, error));
+        }
+      }
+      for (const contribution of contributions.lspServers) {
+        try {
+          lspServers.push(
+            ...parseLspServers(
+              contributions.plugin.id,
+              await readPluginConfig(contribution, variables),
+            ),
+          );
+        } catch (error) {
+          diagnostics.push(runtimeDiagnostic(contributions, contribution, error));
+        }
+      }
+    }
+
+    return Object.freeze({
+      pluginIds: Object.freeze(active.map(({ installed }) => installed.id)),
+      skillSources: Object.freeze(skillSources),
+      commandSources: Object.freeze(commandSources),
+      agentSources: Object.freeze(agentSources),
+      hookSources: Object.freeze(hookSources),
+      mcpSources: Object.freeze(mcpSources),
+      lspServers: Object.freeze(lspServers),
+      diagnostics: Object.freeze(diagnostics),
+      dispose: materialization.dispose,
     });
-
-    for (const contribution of contributions.hooks) {
-      try {
-        const value = unwrap(await readPluginConfig(contribution, variables), "hooks");
-        hookSources.push({
-          kind: "plugin",
-          path: contribution.sourcePath,
-          componentId: contributions.plugin.id,
-          inlineHooks: value,
-        });
-      } catch (error) {
-        diagnostics.push(runtimeDiagnostic(contributions, contribution, error));
-      }
-    }
-    for (const contribution of contributions.mcpServers) {
-      try {
-        mcpSources.push({
-          id: contributionId(contributions.plugin.id, "mcp", contribution, mcpSources.length),
-          config: namespaceMcpConfig(
-            contributions.plugin.id,
-            await readPluginConfig(contribution, variables),
-          ),
-        });
-      } catch (error) {
-        diagnostics.push(runtimeDiagnostic(contributions, contribution, error));
-      }
-    }
-    for (const contribution of contributions.lspServers) {
-      try {
-        lspServers.push(
-          ...parseLspServers(
-            contributions.plugin.id,
-            await readPluginConfig(contribution, variables),
-          ),
-        );
-      } catch (error) {
-        diagnostics.push(runtimeDiagnostic(contributions, contribution, error));
-      }
-    }
+  } catch (error) {
+    await materialization.dispose();
+    throw error;
   }
-
-  return Object.freeze({
-    pluginIds: Object.freeze(active.map(({ installed }) => installed.id)),
-    skillSources: Object.freeze(skillSources),
-    commandSources: Object.freeze(commandSources),
-    agentSources: Object.freeze(agentSources),
-    hookSources: Object.freeze(hookSources),
-    mcpSources: Object.freeze(mcpSources),
-    lspServers: Object.freeze(lspServers),
-    diagnostics: Object.freeze(diagnostics),
-  });
 }
 
 function pathSources(
