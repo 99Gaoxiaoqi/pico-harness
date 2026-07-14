@@ -982,23 +982,24 @@ describe("ToolRegistry hooks 集成 (任务 2.6)", () => {
     expect(result.output).toBe("done");
   });
 
-  it("PostToolUse 收到 tool_response(工具输出)", async () => {
+  it("PostToolUse 收到与返回值一致的截断 tool_response", async () => {
     // hook 把 stdin 写到文件,断言含 tool_response
     const outFile = join(workDir, "post-input.json");
     const command = await writeHookScript(`capture:${outFile}`);
     const registry = new ToolRegistry();
-    registry.register(
-      new FakeTool(
-        "say",
-        { name: "say", description: "", inputSchema: { type: "object" } },
-        async () => "TOOL-OUTPUT-123",
-      ),
+    const rawOutput = "TOOL-OUTPUT-123".repeat(10);
+    const tool = new FakeTool(
+      "say",
+      { name: "say", description: "", inputSchema: { type: "object" } },
+      async () => rawOutput,
     );
+    tool.maxResultSizeChars = 20;
+    registry.register(tool);
     registry.setHookRunner(
       new HookRunner(workDir, { PostToolUse: [{ hooks: [{ type: "command", command }] }] }),
     );
 
-    await registry.execute({ id: "c1", name: "say", arguments: "{}" });
+    const result = await registry.execute({ id: "c1", name: "say", arguments: "{}" });
     // fire-and-forget:子进程异步写文件,轮询等待(最多 ~2s)
     let received: Record<string, unknown> | undefined;
     for (let i = 0; i < 20; i++) {
@@ -1012,7 +1013,9 @@ describe("ToolRegistry hooks 集成 (任务 2.6)", () => {
     }
     expect(received).toBeDefined();
     expect(received!.hook_event_name).toBe("PostToolUse");
-    expect(received!.tool_response).toBe("TOOL-OUTPUT-123");
+    expect(result.output).toContain("工具输出过长");
+    expect(received!.tool_response).toBe(result.output);
+    expect(received!.tool_response).not.toBe(rawOutput);
     expect(received!.tool_name).toBe("say");
   });
 
