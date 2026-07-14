@@ -1,72 +1,219 @@
-// 用户可配置 Shell Hooks 的类型定义。
-//
-// 对应任务 2.6:PreToolUse / PostToolUse 钩子协议。
-// 协议事实标准(对齐 Claude Code / Codex / Kimi Code 三家):
-//   - stdin 传 JSON:{session_id, cwd, hook_event_name, tool_name, tool_input}
-//   - exit code:0=放行,2=阻断(stderr 给模型),其他=fail-open 放行
-//   - stdout JSON:{permissionDecision:"deny",...} 或 {decision:"block",...} → 阻断
-//   - **fail-open 铁律**:任何故障都不能阻断工具
+/** Pico 前台 Hook 的公开事件集合。暂未具备宿主生命周期的事件仍保留类型但不伪造触发。 */
+export const HOOK_EVENTS = [
+  "SessionStart",
+  "Setup",
+  "InstructionsLoaded",
+  "SessionEnd",
+  "UserPromptSubmit",
+  "UserPromptExpansion",
+  "MessageDisplay",
+  "PreToolUse",
+  "PermissionRequest",
+  "PermissionDenied",
+  "PostToolUse",
+  "PostToolUseFailure",
+  "PostToolBatch",
+  "SubagentStart",
+  "SubagentStop",
+  "TaskCreated",
+  "TaskCompleted",
+  "TeammateIdle",
+  "Stop",
+  "StopFailure",
+  "Notification",
+  "ConfigChange",
+  "CwdChanged",
+  "FileChanged",
+  "WorktreeCreate",
+  "WorktreeRemove",
+  "PreCompact",
+  "PostCompact",
+  "Elicitation",
+  "ElicitationResult",
+] as const;
 
-/**
- * 钩子事件类型。
- * - PreToolUse:工具执行前触发,可阻断或改写工具输入
- * - PostToolUse:工具执行后触发,fire-and-forget,不阻断
- */
-export type HookEvent = "PreToolUse" | "PostToolUse";
+export type HookEvent = (typeof HOOK_EVENTS)[number];
 
-/**
- * 单个钩子处理器。
- * 当前仅支持 "command" 类型:执行一段 shell 命令,通过 stdin 传 JSON,靠 exit code / stdout JSON 判定。
- */
-export interface HookHandler {
-  type: "command";
-  /** shell 命令文本,会经 child_process.spawn({shell:true}) 执行 */
-  command: string;
-  /** 超时(毫秒),默认 60s。超时后 kill 子进程并 fail-open 放行 */
-  timeout?: number;
+export type HookSourceKind =
+  | "user"
+  | "project"
+  | "local"
+  | "legacy"
+  | "skill"
+  | "agent"
+  | "managed"
+  | "plugin";
+
+export interface HookSource {
+  kind: HookSourceKind;
+  path: string;
+  /** 同一路径重载时递增，便于诊断在途事件使用了哪个不可变快照。 */
+  version: number;
+  componentId?: string;
 }
 
-/**
- * 一组带 matcher 的钩子。
- * matcher 控制这组 hooks 命中哪些工具名:
- *   - 省略 / "*" / 空 → 全匹配
- *   - 纯 [A-Za-z0-9_|] → 精确 | 分隔匹配
- *   - 其他 → 作为正则匹配 tool_name
- */
+interface HookHandlerBase {
+  /** Canonical 配置单位为秒；legacy 加载器会在归一化时换算为毫秒。 */
+  timeout?: number;
+  /** 归一化后的实际超时，运行时只读取此字段。 */
+  timeoutMs?: number;
+  if?: HookCondition;
+  enabled?: boolean;
+}
+
+export interface CommandHookHandler extends HookHandlerBase {
+  type: "command";
+  command: string;
+  /** 存在时使用无 shell 的 exec form；缺省时使用兼容的 shell form。 */
+  args?: readonly string[];
+  async?: boolean;
+  asyncRewake?: boolean;
+  env?: Readonly<Record<string, string>>;
+}
+
+export interface HttpHookHandler extends HookHandlerBase {
+  type: "http";
+  url: string;
+  headers?: Readonly<Record<string, string>>;
+  allowedEnv?: readonly string[];
+  maxResponseBytes?: number;
+  maxRedirects?: number;
+}
+
+export interface McpToolHookHandler extends HookHandlerBase {
+  type: "mcp_tool";
+  server: string;
+  tool: string;
+  input?: unknown;
+}
+
+export interface PromptHookHandler extends HookHandlerBase {
+  type: "prompt";
+  prompt: string;
+  model?: string;
+}
+
+export interface AgentHookHandler extends HookHandlerBase {
+  type: "agent";
+  prompt: string;
+  model?: string;
+  maxTurns?: number;
+}
+
+export type HookHandler =
+  | CommandHookHandler
+  | HttpHookHandler
+  | McpToolHookHandler
+  | PromptHookHandler
+  | AgentHookHandler;
+
 export interface HookMatcherGroup {
   matcher?: string;
+  if?: HookCondition;
   hooks: HookHandler[];
 }
 
-/**
- * 完整 hooks 配置:每个事件下挂多组 matcher+hooks。
- * 来源:<workDir>/.claw/settings.json 的 `hooks` 字段。
- */
 export type HooksConfig = Partial<Record<HookEvent, HookMatcherGroup[]>>;
 
-/**
- * 传给 hook 子进程 stdin 的输入 JSON。
- * 对齐三家协议:{session_id, cwd, hook_event_name, tool_name, tool_input}。
- * PostToolUse 额外带 tool_response。
- */
-export interface HookInput {
-  session_id: string;
-  cwd: string;
-  hook_event_name: HookEvent;
-  tool_name: string;
-  tool_input: unknown;
-  /** PostToolUse 才有:工具返回的输出文本 */
-  tool_response?: string;
+export type HookCondition =
+  | { op: "equals"; path: string; value: string | number | boolean | null }
+  | { op: "contains"; path: string; value: string }
+  | { op: "regex"; path: string; pattern: string }
+  | { op: "exists"; path: string; value?: boolean };
+
+export interface HookEventPayloadMap {
+  SessionStart: { source: "startup" | "resume" };
+  Setup: { action: string };
+  InstructionsLoaded: { paths: readonly string[] };
+  SessionEnd: { reason: string };
+  UserPromptSubmit: { prompt: string };
+  UserPromptExpansion: { prompt: string; expandedPrompt: string };
+  MessageDisplay: { role: string; content: string };
+  PreToolUse: ToolHookPayload;
+  PermissionRequest: ToolHookPayload & { reason?: string };
+  PermissionDenied: ToolHookPayload & { source: string; reason: string };
+  PostToolUse: ToolHookPayload & { tool_response: string };
+  PostToolUseFailure: ToolHookPayload & { error: string };
+  PostToolBatch: { tools: readonly ToolBatchItem[] };
+  SubagentStart: { agentId: string; agentType?: string; prompt?: string };
+  SubagentStop: { agentId: string; status: string; result?: string };
+  TaskCreated: { taskId: string; subject: string };
+  TaskCompleted: { taskId: string; status: string };
+  TeammateIdle: { teammateId: string };
+  Stop: { reason: string; response?: string };
+  StopFailure: { category: string; error: string };
+  Notification: { level: string; message: string };
+  ConfigChange: { paths: readonly string[]; proposedHash: string };
+  CwdChanged: { from: string; to: string };
+  FileChanged: { paths: readonly string[]; origin: "internal" | "external" };
+  WorktreeCreate: { path: string; branch?: string };
+  WorktreeRemove: { path: string; branch?: string };
+  PreCompact: { source: "auto" | "manual"; messageCount: number };
+  PostCompact: { source: "auto" | "manual"; messageCount: number };
+  Elicitation: { server: string; request: unknown };
+  ElicitationResult: { server: string; result: unknown };
 }
 
-/**
- * Hook 执行结果(仅 PreToolUse 有意义;PostToolUse 为 fire-and-forget)。
- * - decision:"deny" → 阻断工具执行,reason 反馈给模型
- * - decision:"allow" → 放行
- * - modifiedInput:若 PreToolUse hook 改写了工具输入,registry 会替换 arguments
- */
+export interface ToolHookPayload {
+  tool_name: string;
+  tool_input: unknown;
+  tool_call_id?: string;
+}
+
+export interface ToolBatchItem extends ToolHookPayload {
+  ok: boolean;
+  output?: string;
+}
+
+/** 传给 handler 的稳定 envelope；snake_case 字段兼容现有 command hook。 */
+export type HookInput<E extends HookEvent = HookEvent> = {
+  session_id: string;
+  cwd: string;
+  hook_event_name: E;
+  payload: HookEventPayloadMap[E];
+  tool_name?: string;
+  tool_input?: unknown;
+  tool_response?: string;
+};
+
+export type HookDecision = "allow" | "ask" | "defer" | "deny";
+
 export interface HookOutput {
-  decision: "allow" | "deny";
+  decision: HookDecision;
   reason?: string;
   modifiedInput?: unknown;
+  additionalContext?: string;
+  diagnostics?: readonly HookDiagnostic[];
+}
+
+export interface HookDiagnostic {
+  handlerId: string;
+  source: HookSource;
+  level: "info" | "warn" | "error";
+  message: string;
+}
+
+export interface ResolvedHookHandler {
+  id: string;
+  event: HookEvent;
+  source: HookSource;
+  order: number;
+  matcher?: string;
+  groupCondition?: HookCondition;
+  handler: HookHandler;
+  trusted: boolean;
+}
+
+export interface HookSnapshot {
+  id: string;
+  version: number;
+  createdAt: string;
+  handlers: Readonly<Record<HookEvent, readonly ResolvedHookHandler[]>>;
+  diagnostics: readonly HookDiagnostic[];
+}
+
+export interface HookExecutionContext {
+  signal?: AbortSignal;
+  /** 内部 prompt/agent handler 必须设为 true，禁止递归触发 Hook。 */
+  suppressHooks?: boolean;
 }
