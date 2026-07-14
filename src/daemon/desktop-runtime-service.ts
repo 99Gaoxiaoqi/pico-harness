@@ -164,6 +164,12 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         return this.sendSession(request.params);
       case "session.transcript":
         return this.getSessionTranscript(request.params);
+      case "run.cancel":
+        return this.cancelRun(
+          request.params.workspacePath,
+          request.params.runId,
+          request.params.reason,
+        );
       case "config.get":
         return this.getConfig(request.params.workspacePath);
       case "config.providers":
@@ -540,6 +546,29 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     }
     const run = await this.startSessionRun(params.workspacePath, sessionId, params.text);
     return { session: sessionRecord, run, disposition: "started" };
+  }
+
+  private async cancelRun(
+    workspacePath: string,
+    runId: string,
+    reason?: string,
+  ): Promise<JsonValue> {
+    const result = requireJsonRecord(
+      await this.options.runtimeService.handle(
+        createRuntimeRequest("run.cancel", {
+          workspacePath,
+          runId,
+          ...(reason ? { reason } : {}),
+        }),
+      ),
+      "run.cancel result",
+    );
+    const sessionId = typeof result["sessionId"] === "string" ? result["sessionId"] : undefined;
+    if (sessionId) {
+      const canonical = await canonicalizeWorkspacePath(workspacePath);
+      await this.conversationStateStore.clearQueued(canonical, sessionId);
+    }
+    return result;
   }
 
   private async getSessionTranscript(params: {

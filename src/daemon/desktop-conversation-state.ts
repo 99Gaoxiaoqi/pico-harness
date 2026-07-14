@@ -86,6 +86,17 @@ export class DesktopConversationStateStore {
     }));
   }
 
+  async clearQueued(workspacePath: string, sessionId: string): Promise<void> {
+    const canonical = normalizeWorkspacePath(workspacePath);
+    const normalizedSessionId = requireNonEmpty(sessionId, "sessionId");
+    await this.mutate((state) => ({
+      ...state,
+      queuedInputs: state.queuedInputs.filter(
+        (input) => input.workspacePath !== canonical || input.sessionId !== normalizedSessionId,
+      ),
+    }));
+  }
+
   async getIdempotent(workspacePath: string, key: string): Promise<JsonObject | undefined> {
     const canonical = normalizeWorkspacePath(workspacePath);
     const normalized = requireNonEmpty(key, "idempotencyKey");
