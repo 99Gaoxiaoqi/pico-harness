@@ -147,6 +147,8 @@ export function formatScheduleDraftDialog(draft: CronDraft): string {
     ),
     ...(nextRuns.length === 0 ? ["  暂无可预览时间"] : []),
     "详情:",
+    "  任务 Prompt:",
+    ...draft.prompt.split("\n").map((line) => `    ${line}`),
     `  Cron: ${draft.cronExpression}`,
     "Enter/Y 确认 · M 修改 · Esc/N 取消",
   ];

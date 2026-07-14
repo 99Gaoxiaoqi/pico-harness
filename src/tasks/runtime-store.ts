@@ -2409,7 +2409,9 @@ function mapRuntimeEvent(row: RuntimeEventRow): RuntimeEventRecord {
 
 function parseYoloPolicySnapshot(value: string): YoloPolicySnapshot {
   const parsed = JSON.parse(value) as unknown;
-  return parseBackgroundYoloPolicySnapshot(parsed);
+  return parseBackgroundYoloPolicySnapshot(parsed, {
+    allowLegacyMcpWithoutFingerprint: true,
+  });
 }
 
 function stringifyJson(value: Record<string, unknown> | undefined): string | null {
