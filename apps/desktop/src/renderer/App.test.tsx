@@ -232,6 +232,146 @@ describe("DesktopApp renderer", () => {
     expect(calls.some((call) => call.method === "session.create")).toBe(false);
   });
 
+  it("按 Session 隔离 Changes，并使用所属 Run 的指纹审批", async () => {
+    const user = userEvent.setup();
+    const reviewCalls: Readonly<Record<string, unknown>>[] = [];
+    let eventListener: ((event: unknown) => void) | undefined;
+    const success = <T,>(value: T) => Promise.resolve({ ok: true as const, value });
+    const workspacePath = "/Users/chen/Documents/project";
+    const runtime = new Proxy(
+      {},
+      {
+        get: (_target, property) => async (params: Readonly<Record<string, unknown>>) => {
+          const method = String(property);
+          const value = (() => {
+            if (method === "runtime.ping")
+              return { capabilities: ["session-conversation-v1", "runtime-events-v1"] };
+            if (method === "workspace.list") return { workspaces: [{ workspacePath }] };
+            if (method === "workspace.status") return { workspacePath, mode: "folder" };
+            if (method === "workspace.trustStatus") return { trusted: true };
+            if (method === "session.list")
+              return {
+                sessions: [
+                  { sessionId: "session-a", title: "会话 A", updatedAt: 1 },
+                  { sessionId: "session-b", title: "会话 B", updatedAt: 2 },
+                ],
+              };
+            if (method === "runs.list")
+              return {
+                runs: [
+                  {
+                    runId: "run-a",
+                    sessionId: "session-a",
+                    description: "A",
+                    status: "succeeded",
+                  },
+                  {
+                    runId: "run-b",
+                    sessionId: "session-b",
+                    description: "B",
+                    status: "running",
+                  },
+                ],
+              };
+            if (method === "session.transcript")
+              return {
+                session: { sessionId: "session-b", title: "会话 B", updatedAt: 2 },
+                items: [{ id: "b-message", kind: "userMessage", content: "只改 B" }],
+                activeRun: {
+                  runId: "run-b",
+                  sessionId: "session-b",
+                  description: "B",
+                  status: "running",
+                },
+                queuedInputs: [],
+                revision: "revision-b",
+              };
+            if (method === "changes.list") {
+              const runId = String(params.runId);
+              return {
+                changes: [
+                  {
+                    path: runId === "run-b" ? "src/b.ts" : "src/a.ts",
+                    status: "modified",
+                    additions: 1,
+                    deletions: 0,
+                  },
+                ],
+                fingerprint: runId === "run-b" ? "fingerprint-b" : "fingerprint-a",
+              };
+            }
+            if (method === "changes.diff")
+              return { path: params.path, patch: `+${String(params.path)}` };
+            if (method === "changes.review") {
+              reviewCalls.push(params);
+              return { accepted: true, fingerprint: params.expectedFingerprint };
+            }
+            if (method === "jobs.list") return { jobs: [] };
+            if (method === "config.skills") return { skills: [] };
+            if (method === "config.mcpServers") return { servers: [] };
+            if (method === "config.providers") return { providers: [] };
+            if (method === "config.get") return { version: 0 };
+            if (method === "usage.get") return { usage: {} };
+            return {};
+          })();
+          return success(value);
+        },
+      },
+    ) as RendererBridge["runtime"];
+    (window as unknown as { pico?: RendererBridge }).pico = {
+      runtime,
+      events: {
+        subscribe: (_params, listener) => {
+          eventListener = listener;
+          return {
+            ready: success({ subscribed: true, events: [] }),
+            dispose: vi.fn(),
+          };
+        },
+      },
+      platform: {
+        chooseWorkspace: () => success(undefined),
+        openDirectory: () => success(undefined),
+        getLaunchAtLogin: () => success(false),
+        setLaunchAtLogin: () => success(undefined),
+      },
+      lifecycle: {
+        setBackgroundMode: () => success(undefined),
+        quit: () => success(undefined),
+      },
+    };
+    window.history.replaceState({}, "", "/#/session/session-b");
+
+    render(<DesktopApp />);
+    await screen.findByText("只改 B");
+    eventListener?.({
+      eventId: "approval-requested-b",
+      topic: "approval.requested",
+      scope: { workspacePath, sessionId: "session-b", runId: "run-b" },
+      payload: {
+        approvalId: "approval-b",
+        runId: "run-b",
+        request: { title: "批准 B", detail: "只属于 B" },
+      },
+    });
+    expect(await screen.findByRole("button", { name: "处理审批" })).toBeTruthy();
+    eventListener?.({
+      eventId: "approval-resolved-b",
+      topic: "approval.resolved",
+      scope: { workspacePath, sessionId: "session-b", runId: "run-b" },
+      payload: { approvalId: "approval-b", decision: "allow_once" },
+    });
+    await waitFor(() => expect(screen.queryByRole("button", { name: "处理审批" })).toBeNull());
+    await user.click(await screen.findByRole("button", { name: "审阅更改" }));
+    expect(await screen.findByText("b.ts")).toBeTruthy();
+    expect(screen.queryByText("a.ts")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "批准更改" }));
+
+    expect(reviewCalls).toEqual([
+      expect.objectContaining({ runId: "run-b", expectedFingerprint: "fingerprint-b" }),
+    ]);
+  });
+
   it.each([
     ["/", "今天想推进什么？"],
     ["/task/new", "今天想一起做什么？"],

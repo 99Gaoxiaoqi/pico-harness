@@ -76,6 +76,14 @@
   letter-spacing: -0.015em;
 }
 
+.conversation-session-header__meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--conversation-ink-faint);
+  font-size: 11px;
+}
+
 .conversation-surface__scroll {
   min-height: 0;
   overflow: auto;

@@ -43,6 +43,10 @@ export interface ConversationView {
   readonly revision?: string | undefined;
   readonly nextBefore?: string | undefined;
   readonly queuedCount: number;
+  readonly runId?: string | undefined;
+  readonly changes?: readonly ChangeView[] | undefined;
+  readonly changeFingerprint?: string | undefined;
+  readonly usage?: UsageView | undefined;
 }
 
 export interface ApprovalView {
