@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import type { ProviderKind } from "../provider/factory.js";
 import type { ModelRoute, ModelRouter } from "../provider/model-router.js";
@@ -674,7 +675,17 @@ function createAdditionalDirectorySnapshot(directories: readonly string[]): read
 }
 
 function sessionSettingsKey(sessionId: string, cwd: string): string {
-  return JSON.stringify([resolve(cwd), sessionId]);
+  return JSON.stringify([normalizeSessionSettingsCwd(cwd), sessionId]);
+}
+
+function normalizeSessionSettingsCwd(cwd: string): string {
+  const absolute = resolve(cwd);
+  try {
+    return realpathSync(absolute);
+  } catch {
+    // 嵌入方可能在工作区创建前准备 settings；此时仍以绝对路径稳定隔离。
+    return absolute;
+  }
 }
 
 export function snapshotSessionSettings(settings: SessionSettings): PersistedSessionSettings {
