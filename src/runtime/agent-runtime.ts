@@ -159,6 +159,8 @@ export interface RunAgentCliOptions {
   images?: ImagePart[];
   /** Claude Code 风格附加工作目录；可重复传入，当前会话内生效。 */
   addDirs?: string[];
+  /** Per-run command restriction. Unknown names fail before the first provider call. */
+  allowedTools?: readonly string[];
   /** TUI 中用户实际发送的文本，用作 /rewind 的可见名称。 */
   rewindPrompt?: string;
   /** 用户消息写入可见 transcript 前的条目下标。 */
@@ -796,6 +798,10 @@ export async function executeAgentRuntime(
       }
       dependencies.toolStatusSink?.(toolStatusFromRegistry(registry));
     }
+    if (effectiveOptions.allowedTools !== undefined) {
+      pruneRegistryToCommandAllowlist(registry, effectiveOptions.allowedTools);
+      dependencies.toolStatusSink?.(toolStatusFromRegistry(registry));
+    }
 
     return await session.serialize(async () => {
       dependencies.signal?.throwIfAborted();
@@ -1045,6 +1051,25 @@ function pruneRegistryToBackgroundAllowlist(
         );
       }
     });
+  }
+}
+
+function pruneRegistryToCommandAllowlist(
+  registry: ToolRegistry,
+  requestedTools: readonly string[],
+): void {
+  const normalized = requestedTools.map((tool) => tool.trim());
+  if (normalized.some((tool) => tool.length === 0)) {
+    throw new Error("Markdown command allowed-tools 含空值，已拒绝执行。");
+  }
+  const available = new Set(registry.getAvailableTools().map((tool) => tool.name));
+  const unknown = [...new Set(normalized.filter((tool) => !available.has(tool)))];
+  if (unknown.length > 0) {
+    throw new Error(`Markdown command allowed-tools 包含未知工具: ${unknown.join(", ")}`);
+  }
+  const allowed = new Set(normalized);
+  for (const tool of registry.getAvailableTools()) {
+    if (!allowed.has(tool.name)) registry.unregister(tool.name);
   }
 }
 
