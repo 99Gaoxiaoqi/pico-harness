@@ -1,12 +1,18 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { listRewindPointSummaries } from "../cli/file-history.js";
 import { createCliSessionId, listCliSessionSummaries } from "../cli/session-resolver.js";
 import { SkillLoader } from "../context/skill.js";
-import { Session } from "../engine/session.js";
+import { globalSessionManager, Session } from "../engine/session.js";
 import { loadPicoConfig, type PicoConfig } from "../input/pico-config.js";
 import { McpConnectionManager } from "../mcp/manager.js";
 import { WorkspaceTrustStore } from "../security/workspace-trust.js";
+import {
+  fileHistoryChanges,
+  type FileHistoryChanges,
+  type FileHistoryFilePatch,
+} from "../safety/file-history.js";
 import { RuntimeStore } from "../tasks/runtime-store.js";
 import type {
   ProviderCallRecord,
@@ -15,6 +21,7 @@ import type {
 } from "../tasks/runtime-types.js";
 import {
   createRuntimeEvent,
+  createRuntimeRequest,
   isJsonValue,
   RUNTIME_ERROR_CODES,
   RuntimeProtocolError,
@@ -34,13 +41,6 @@ const UNSUPPORTED_DESKTOP_METHODS: ReadonlySet<string> = new Set([
   "run.resume",
   "approval.respond",
   "prompt.respond",
-  "changes.list",
-  "changes.diff",
-  "changes.review",
-  "changes.apply",
-  "rewind.list",
-  "rewind.preview",
-  "rewind.apply",
   "jobs.list",
   "jobs.create",
   "jobs.update",
@@ -126,6 +126,32 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         return this.listMcpServers(request.params.workspacePath);
       case "usage.get":
         return this.getUsage(request.params);
+      case "changes.list":
+        return this.listChanges(request.params.workspacePath, request.params.runId);
+      case "changes.diff":
+        return this.getChangeDiff(
+          request.params.workspacePath,
+          request.params.runId,
+          request.params.path,
+        );
+      case "changes.review":
+        return this.reviewChanges(request.params);
+      case "changes.apply":
+        return this.applyChanges(
+          request.params.workspacePath,
+          request.params.runId,
+          request.params.expectedFingerprint,
+        );
+      case "rewind.list":
+        return this.listRewindPoints(request.params.workspacePath, request.params.sessionId);
+      case "rewind.preview":
+        return this.previewRewind(
+          request.params.workspacePath,
+          request.params.sessionId,
+          request.params.checkpointId,
+        );
+      case "rewind.apply":
+        return this.applyRewind(request.params);
       case "approval.respond":
         if (this.options.interactions) {
           return this.options.interactions.respondApproval(request.params);
@@ -346,6 +372,290 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     }
   }
 
+  private async listChanges(workspacePath: string, runId: string): Promise<JsonValue> {
+    const projection = await this.projectRunChanges(workspacePath, runId);
+    return {
+      changes: projection.changes.files.map((file) =>
+        runtimeChange(file, projection.workspacePath),
+      ),
+      fingerprint: projection.fingerprint,
+    };
+  }
+
+  private async getChangeDiff(
+    workspacePath: string,
+    runId: string,
+    requestedPath: string,
+  ): Promise<JsonValue> {
+    const projection = await this.projectRunChanges(workspacePath, runId);
+    const file = projection.changes.files.find(
+      (candidate) =>
+        displayChangePath(candidate.filePath, projection.workspacePath) === requestedPath,
+    );
+    if (!file) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.NOT_FOUND,
+        `Run ${runId} 的 Changes 中不存在 ${requestedPath}`,
+      );
+    }
+    const truncated = truncateUtf8(file.patch, MAX_DESKTOP_PATCH_BYTES);
+    return {
+      path: requestedPath,
+      patch: truncated.value,
+      truncated: truncated.truncated,
+      fingerprint: projection.fingerprint,
+    };
+  }
+
+  private async reviewChanges(params: {
+    readonly workspacePath: string;
+    readonly runId: string;
+    readonly decision: "approve" | "request_changes";
+    readonly message?: string;
+    readonly expectedFingerprint: string;
+  }): Promise<JsonValue> {
+    const revisionPrompt =
+      params.decision === "request_changes" ? requireRevisionPrompt(params.message) : undefined;
+    const projection = await this.projectRunChanges(params.workspacePath, params.runId);
+    this.assertCompleteChanges(projection.changes, "Changes 审阅");
+    this.assertFingerprint(params.expectedFingerprint, projection.fingerprint, "Changes");
+    if (revisionPrompt) {
+      await this.options.runtimeService.handle(
+        createRuntimeRequest("run.start", {
+          workspacePath: projection.workspacePath,
+          sessionId: projection.sessionId,
+          prompt: revisionPrompt,
+        }),
+      );
+    }
+    this.publish(
+      createRuntimeEvent({
+        topic: "changes.updated",
+        scope: {
+          workspacePath: projection.workspacePath,
+          sessionId: projection.sessionId,
+          runId: params.runId,
+        },
+        resourceVersion: this.nextResourceVersion(),
+        at: this.now(),
+        payload: {
+          runId: params.runId,
+          fingerprint: projection.fingerprint,
+        },
+      }),
+    );
+    return { accepted: true, fingerprint: projection.fingerprint };
+  }
+
+  private async applyChanges(
+    workspacePath: string,
+    runId: string,
+    expectedFingerprint: string,
+  ): Promise<JsonValue> {
+    const projection = await this.projectRunChanges(workspacePath, runId);
+    this.assertCompleteChanges(projection.changes, "Changes 应用");
+    this.assertFingerprint(expectedFingerprint, projection.fingerprint, "Changes");
+    // Foreground Agent tools already commit directly into the trusted workspace. This call
+    // revalidates that the reviewed bytes are still current and records that fact;
+    // it never stages or copies renderer-owned content into the workspace.
+    this.publish(
+      createRuntimeEvent({
+        topic: "changes.applied",
+        scope: {
+          workspacePath: projection.workspacePath,
+          sessionId: projection.sessionId,
+          runId,
+        },
+        resourceVersion: this.nextResourceVersion(),
+        at: this.now(),
+        payload: { runId, fingerprint: projection.fingerprint },
+      }),
+    );
+    return { applied: true, fingerprint: projection.fingerprint };
+  }
+
+  private async listRewindPoints(workspacePath: string, sessionId: string): Promise<JsonValue> {
+    const canonical = await this.requireTrustedSession(workspacePath, sessionId);
+    return this.withSession(canonical, sessionId, async (session) => ({
+      checkpoints: (await listRewindPointSummaries(session)).map((checkpoint) => ({
+        checkpointId: checkpoint.messageId,
+        label: checkpoint.userPrompt ?? "未命名检查点",
+        createdAt: Date.parse(checkpoint.timestamp),
+        changedFileCount: checkpoint.changedFileCount ?? 0,
+        additions: checkpoint.addedLines ?? 0,
+        deletions: checkpoint.removedLines ?? 0,
+        ...(checkpoint.incomplete ? { incomplete: true } : {}),
+      })),
+    }));
+  }
+
+  private async previewRewind(
+    workspacePath: string,
+    sessionId: string,
+    checkpointId: string,
+  ): Promise<JsonValue> {
+    const projection = await this.projectSessionCheckpoint(workspacePath, sessionId, checkpointId);
+    return {
+      checkpointId,
+      changes: projection.changes.files.map((file) =>
+        runtimeChange(file, projection.workspacePath),
+      ),
+      fingerprint: projection.fingerprint,
+    };
+  }
+
+  private async applyRewind(params: {
+    readonly workspacePath: string;
+    readonly sessionId: string;
+    readonly checkpointId: string;
+    readonly expectedFingerprint: string;
+  }): Promise<JsonValue> {
+    const canonical = await this.requireTrustedSession(params.workspacePath, params.sessionId);
+    await this.withSession(canonical, params.sessionId, async (session) => {
+      const checkpoint = session.fileHistory.snapshots.find(
+        (candidate) => candidate.messageId === params.checkpointId,
+      );
+      if (
+        !checkpoint ||
+        checkpoint.userPrompt === undefined ||
+        checkpoint.messageIndex === undefined
+      ) {
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.NOT_FOUND,
+          `Session ${params.sessionId} 中不存在可完整回滚的检查点 ${params.checkpointId}`,
+        );
+      }
+      const changes = await fileHistoryChanges(
+        session.fileHistory,
+        params.checkpointId,
+        session.id,
+      );
+      const fingerprint = changesFingerprint(session, params.checkpointId, changes);
+      this.assertCompleteChanges(changes, "Rewind");
+      this.assertFingerprint(params.expectedFingerprint, fingerprint, "Rewind");
+      const expectedCurrentFingerprints = new Map(
+        changes.files.map((file) => [file.filePath, file.currentFingerprint]),
+      );
+      try {
+        await session.rewindBoth(
+          params.checkpointId,
+          checkpoint.messageIndex,
+          expectedCurrentFingerprints,
+        );
+      } catch (error) {
+        if (isRewindConflict(error)) {
+          throw new RuntimeProtocolError(
+            RUNTIME_ERROR_CODES.CONFLICT,
+            `Rewind 安全检查失败: ${errorMessage(error)}`,
+          );
+        }
+        throw error;
+      }
+    });
+    this.publish(
+      createRuntimeEvent({
+        topic: "rewind.completed",
+        scope: { workspacePath: canonical, sessionId: params.sessionId },
+        resourceVersion: this.nextResourceVersion(),
+        at: this.now(),
+        payload: { sessionId: params.sessionId, checkpointId: params.checkpointId },
+      }),
+    );
+    return { applied: true, sessionId: params.sessionId };
+  }
+
+  private async projectRunChanges(
+    workspacePath: string,
+    runId: string,
+  ): Promise<DesktopChangesProjection> {
+    const canonical = await this.requireTrustedWorkspace(workspacePath);
+    const run = await this.options.runtimeService.getWorkspaceRun(canonical, runId);
+    if (!run) {
+      throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.NOT_FOUND, `Run ${runId} 不存在`);
+    }
+    if (run.status === "running" || run.status === "cancelling") {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.CONFLICT,
+        `Run ${runId} 尚未结束，Changes 还未固化`,
+      );
+    }
+    if (!run.sessionId || !run.checkpointId) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.NOT_FOUND,
+        `Run ${runId} 没有可验证的 Session/Checkpoint 关联`,
+      );
+    }
+    const projection = await this.projectSessionCheckpoint(
+      canonical,
+      run.sessionId,
+      run.checkpointId,
+    );
+    return { ...projection, runId };
+  }
+
+  private async projectSessionCheckpoint(
+    workspacePath: string,
+    sessionId: string,
+    checkpointId: string,
+  ): Promise<DesktopChangesProjection> {
+    const canonical = await this.requireTrustedSession(workspacePath, sessionId);
+    return this.withSession(canonical, sessionId, async (session) => {
+      const checkpoint = session.fileHistory.snapshots.find(
+        (candidate) => candidate.messageId === checkpointId,
+      );
+      if (!checkpoint || checkpoint.userPrompt === undefined) {
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.NOT_FOUND,
+          `Session ${sessionId} 中不存在检查点 ${checkpointId}`,
+        );
+      }
+      const changes = await fileHistoryChanges(session.fileHistory, checkpointId, session.id);
+      return {
+        workspacePath: canonical,
+        sessionId,
+        checkpointId,
+        changes,
+        fingerprint: changesFingerprint(session, checkpointId, changes),
+      };
+    });
+  }
+
+  private async requireTrustedSession(workspacePath: string, sessionId: string): Promise<string> {
+    const canonical = await this.requireTrustedWorkspace(workspacePath);
+    await this.requireSession(canonical, sessionId);
+    return canonical;
+  }
+
+  private async withSession<T>(
+    workspacePath: string,
+    sessionId: string,
+    operation: (session: Session) => Promise<T>,
+  ): Promise<T> {
+    const session = await globalSessionManager.getOrCreate(sessionId, workspacePath, {
+      persistence: true,
+      sessionCatalog: false,
+    });
+    return session.serialize(() => operation(session));
+  }
+
+  private assertFingerprint(expected: string, actual: string, operation: string): void {
+    if (expected !== actual) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.CONFLICT,
+        `${operation} 指纹已变化，请刷新后重试`,
+      );
+    }
+  }
+
+  private assertCompleteChanges(changes: FileHistoryChanges, operation: string): void {
+    if (changes.incomplete) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.CONFLICT,
+        `${operation} 捕获不完整，拒绝在不完整文件集上继续`,
+      );
+    }
+  }
+
   private async requireTrustedWorkspace(workspacePath: string): Promise<string> {
     const canonical = await this.trustStore.canonicalize(workspacePath);
     if (!(await this.trustStore.isTrusted(canonical))) {
@@ -464,6 +774,89 @@ function addUsage(left: UsageLedgerTotals, right: UsageLedgerTotals): UsageLedge
 
 function emptyUsage(): UsageLedgerTotals {
   return { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, cost: 0 };
+}
+
+const MAX_DESKTOP_PATCH_BYTES = 512 * 1024;
+
+interface DesktopChangesProjection {
+  readonly workspacePath: string;
+  readonly sessionId: string;
+  readonly checkpointId: string;
+  readonly runId?: string;
+  readonly changes: FileHistoryChanges;
+  readonly fingerprint: string;
+}
+
+function runtimeChange(file: FileHistoryFilePatch, workspacePath: string): JsonObject {
+  return {
+    path: displayChangePath(file.filePath, workspacePath),
+    status:
+      file.status === "created" ? "added" : file.status === "deleted" ? "deleted" : "modified",
+    additions: file.addedLines,
+    deletions: file.removedLines,
+  };
+}
+
+function displayChangePath(filePath: string, workspacePath: string): string {
+  const absoluteFilePath = resolve(filePath);
+  const fromWorkspace = relative(resolve(workspacePath), absoluteFilePath);
+  if (
+    fromWorkspace &&
+    fromWorkspace !== ".." &&
+    !fromWorkspace.startsWith(`..${sep}`) &&
+    !isAbsolute(fromWorkspace)
+  ) {
+    return fromWorkspace.split("\\").join("/");
+  }
+  return absoluteFilePath;
+}
+
+function changesFingerprint(
+  session: Session,
+  checkpointId: string,
+  changes: FileHistoryChanges,
+): string {
+  const payload = {
+    version: 1,
+    sessionId: session.id,
+    checkpointId,
+    fileHistoryRevision: session.fileHistory.revision,
+    incomplete: changes.incomplete === true,
+    warnings: [...(changes.warnings ?? [])].toSorted(),
+    files: changes.files
+      .map((file) => ({
+        filePath: resolve(file.filePath),
+        status: file.status,
+        addedLines: file.addedLines,
+        removedLines: file.removedLines,
+        currentFingerprint: file.currentFingerprint,
+      }))
+      .toSorted((left, right) => left.filePath.localeCompare(right.filePath)),
+  };
+  return createHash("sha256").update(JSON.stringify(payload)).digest("hex");
+}
+
+function truncateUtf8(value: string, maxBytes: number): { value: string; truncated: boolean } {
+  const bytes = Buffer.from(value, "utf8");
+  if (bytes.byteLength <= maxBytes) return { value, truncated: false };
+  return { value: bytes.subarray(0, maxBytes).toString("utf8"), truncated: true };
+}
+
+function requireRevisionPrompt(value: string | undefined): string {
+  const normalized = value?.trim();
+  if (!normalized) {
+    throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.INVALID_PARAMS, "要求修改时必须说明原因");
+  }
+  return normalized;
+}
+
+function isRewindConflict(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return /(?:conflict|drift|fingerprint|revision|变化|变更|预检|人工处理)/iu.test(error.message);
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function toJsonValue(value: unknown): JsonValue {

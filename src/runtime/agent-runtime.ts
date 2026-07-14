@@ -236,6 +236,8 @@ export interface RunAgentCliDependencies extends RuntimeHost {
   mcpManager?: McpConnectionManager;
   /** 宿主本轮运行的中止信号。 */
   signal?: AbortSignal;
+  /** Receives the exact durable rewind point created for this top-level prompt. */
+  rewindPointSink?: (checkpointId: string) => void;
   /** @internal 继续已存在的未完成轮次，不新增 user 消息或 rewind point。 */
   resumeExistingSession?: boolean;
   /** 仅用于后台执行的实时信任校验；生产默认读取用户级 WorkspaceTrustStore。 */
@@ -915,6 +917,7 @@ export async function executeAgentRuntime(
             ? { prePlanMode: effectiveOptions.rewindPrePlanMode }
             : {}),
         });
+        dependencies.rewindPointSink?.(rewindPointId);
         const userReceipt = await session.commitMessageOnce(`user-message:${rewindPointId}`, {
           role: "user",
           content: prompt,

@@ -1,6 +1,9 @@
+import { createHash } from "node:crypto";
+import { execFile as execFileCallback } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   createRuntimeRequest,
@@ -15,12 +18,28 @@ import {
   WorkspaceRuntimeService,
 } from "../../src/daemon/index.js";
 import { WorkspaceTrustStore } from "../../src/security/workspace-trust.js";
+import { globalSessionManager } from "../../src/engine/session.js";
+import { fileHistoryTrackEdit } from "../../src/safety/file-history.js";
 import { RuntimeStore } from "../../src/tasks/runtime-store.js";
+
+const execFile = promisify(execFileCallback);
 
 describe("DesktopRuntimeService integration", () => {
   const cleanups: string[] = [];
+  const managedSessions: { sessionId: string; workspacePath: string }[] = [];
 
   afterEach(async () => {
+    for (const session of managedSessions.splice(0)) {
+      globalSessionManager.delete(session.sessionId, session.workspacePath);
+      cleanups.push(
+        join(
+          homedir(),
+          ".pico",
+          "file-history",
+          createHash("sha256").update(session.sessionId).digest("hex").slice(0, 32),
+        ),
+      );
+    }
     await Promise.all(cleanups.splice(0).map((path) => rm(path, { recursive: true, force: true })));
   });
 
@@ -298,7 +317,173 @@ describe("DesktopRuntimeService integration", () => {
     }
   });
 
-  async function createFixture() {
+  it("从 Run 精确投影 Changes，并在指纹冲突时 fail-closed 后安全 Rewind", async () => {
+    const sessionId = `desktop-changes-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const checkpointId = "desktop-checkpoint-1";
+    const fixture = await createFixture(async ({ context }) => {
+      context.bindSession(sessionId);
+      context.bindCheckpoint(checkpointId);
+      return { sessionId };
+    });
+    await execFile("git", ["init", "-q"], { cwd: fixture.workspace });
+    managedSessions.push({ sessionId, workspacePath: fixture.canonicalWorkspace });
+    await fixture.trust.setTrusted(fixture.canonicalWorkspace, true);
+
+    const filePath = join(fixture.canonicalWorkspace, "src", "answer.ts");
+    await mkdir(join(fixture.canonicalWorkspace, "src"));
+    await writeFile(filePath, "export const answer = 41;\n");
+    const session = await globalSessionManager.getOrCreate(sessionId, fixture.canonicalWorkspace, {
+      persistence: true,
+      sessionCatalog: false,
+    });
+    await session.beginRewindPoint({
+      messageId: checkpointId,
+      userPrompt: "Update the answer",
+      transcriptIndex: 0,
+      interactionMode: "default",
+    });
+    await session.commitMessages({ role: "user", content: "Update the answer" });
+    await fileHistoryTrackEdit(session.fileHistory, filePath, checkpointId, sessionId);
+    await writeFile(filePath, "export const answer = 42;\n");
+    await session.commitMessages({ role: "assistant", content: "Done" });
+
+    const started = await fixture.service.handle(
+      createRuntimeRequest("run.start", {
+        workspacePath: fixture.workspace,
+        prompt: "Update the answer",
+        sessionId,
+      }),
+    );
+    const runId = (started as { runId: string }).runId;
+    await (await fixture.runtime.getWorkspaceRuntime(fixture.workspace)).waitForRun(runId);
+
+    const listed = await fixture.service.handle(
+      createRuntimeRequest("changes.list", { workspacePath: fixture.workspace, runId }),
+    );
+    expect(listed).toMatchObject({
+      changes: [{ path: "src/answer.ts", status: "modified", additions: 1, deletions: 1 }],
+      fingerprint: expect.stringMatching(/^[a-f0-9]{64}$/u),
+    });
+    const fingerprint = (listed as { fingerprint: string }).fingerprint;
+    await expect(
+      fixture.service.handle(
+        createRuntimeRequest("changes.diff", {
+          workspacePath: fixture.workspace,
+          runId,
+          path: "src/answer.ts",
+        }),
+      ),
+    ).resolves.toMatchObject({
+      path: "src/answer.ts",
+      patch: expect.stringContaining("answer = 42"),
+      truncated: false,
+      fingerprint,
+    });
+    await expect(
+      fixture.service.handle(
+        createRuntimeRequest("changes.review", {
+          workspacePath: fixture.workspace,
+          runId,
+          decision: "approve",
+          expectedFingerprint: fingerprint,
+        }),
+      ),
+    ).resolves.toEqual({ accepted: true, fingerprint });
+    await expect(
+      fixture.service.handle(
+        createRuntimeRequest("changes.review", {
+          workspacePath: fixture.workspace,
+          runId,
+          decision: "request_changes",
+          message: "Keep the exported name and add a comment",
+          expectedFingerprint: fingerprint,
+        }),
+      ),
+    ).resolves.toEqual({ accepted: true, fingerprint });
+    const workspaceRuntime = await fixture.runtime.getWorkspaceRuntime(fixture.workspace);
+    const revisionRun = workspaceRuntime
+      .listRuns()
+      .find((run) => run.description === "Keep the exported name and add a comment");
+    expect(revisionRun).toBeDefined();
+    if (!revisionRun) throw new Error("changes.review 未启动真实修改 Run");
+    await workspaceRuntime.waitForRun(revisionRun.runId);
+    await expect(
+      fixture.service.handle(
+        createRuntimeRequest("changes.apply", {
+          workspacePath: fixture.workspace,
+          runId,
+          expectedFingerprint: fingerprint,
+        }),
+      ),
+    ).resolves.toEqual({ applied: true, fingerprint });
+
+    await expect(
+      fixture.service.handle(
+        createRuntimeRequest("rewind.list", {
+          workspacePath: fixture.workspace,
+          sessionId,
+        }),
+      ),
+    ).resolves.toMatchObject({
+      checkpoints: [{ checkpointId, label: "Update the answer", changedFileCount: 1 }],
+    });
+    const preview = await fixture.service.handle(
+      createRuntimeRequest("rewind.preview", {
+        workspacePath: fixture.workspace,
+        sessionId,
+        checkpointId,
+      }),
+    );
+    const rewindFingerprint = (preview as { fingerprint: string }).fingerprint;
+    await writeFile(filePath, "export const answer = 43;\n");
+
+    await expect(
+      fixture.service.handle(
+        createRuntimeRequest("changes.apply", {
+          workspacePath: fixture.workspace,
+          runId,
+          expectedFingerprint: fingerprint,
+        }),
+      ),
+    ).rejects.toMatchObject({ code: RUNTIME_ERROR_CODES.CONFLICT });
+
+    const conflicted = fixture.service.handle(
+      createRuntimeRequest("rewind.apply", {
+        workspacePath: fixture.workspace,
+        sessionId,
+        checkpointId,
+        expectedFingerprint: rewindFingerprint,
+      }),
+    );
+    await expect(conflicted).rejects.toMatchObject({ code: RUNTIME_ERROR_CODES.CONFLICT });
+    await expect(readFile(filePath, "utf8")).resolves.toBe("export const answer = 43;\n");
+
+    const refreshed = await fixture.service.handle(
+      createRuntimeRequest("rewind.preview", {
+        workspacePath: fixture.workspace,
+        sessionId,
+        checkpointId,
+      }),
+    );
+    await expect(
+      fixture.service.handle(
+        createRuntimeRequest("rewind.apply", {
+          workspacePath: fixture.workspace,
+          sessionId,
+          checkpointId,
+          expectedFingerprint: (refreshed as { fingerprint: string }).fingerprint,
+        }),
+      ),
+    ).resolves.toMatchObject({ applied: true, sessionId });
+    await expect(readFile(filePath, "utf8")).resolves.toBe("export const answer = 41;\n");
+    expect(session.getHistory()).toEqual([]);
+    await fixture.service.close();
+  });
+
+  async function createFixture(
+    execute: ConstructorParameters<typeof WorkspaceRuntimeService>[0]["execute"] = async () =>
+      undefined,
+  ) {
     const root = await mkdtemp(join(tmpdir(), "pico-desktop-runtime-"));
     cleanups.push(root);
     const workspace = join(root, "workspace");
@@ -312,7 +497,7 @@ describe("DesktopRuntimeService integration", () => {
       filePath: join(root, "state", "desktop-sessions.json"),
     });
     const runtime = new WorkspaceRuntimeService({
-      execute: async () => undefined,
+      execute,
       registrationStore: registration,
     });
     const service = new DesktopRuntimeService({
@@ -321,6 +506,15 @@ describe("DesktopRuntimeService integration", () => {
       trustStore: trust,
       sessionStateStore: sessionState,
     });
-    return { root, workspace, canonicalWorkspace, registration, trust, sessionState, service };
+    return {
+      root,
+      workspace,
+      canonicalWorkspace,
+      registration,
+      trust,
+      sessionState,
+      runtime,
+      service,
+    };
   }
 });

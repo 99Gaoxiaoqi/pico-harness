@@ -22,6 +22,10 @@ export type WorkspaceRunStatus = (typeof WORKSPACE_RUN_STATUSES)[number];
 export interface WorkspaceRunSnapshot {
   runId: string;
   workspace: string;
+  /** Runtime-owned linkage used by non-TUI clients to resolve durable session state. */
+  sessionId?: string;
+  /** Exact user-message rewind point created for this Run. */
+  checkpointId?: string;
   description: string;
   status: WorkspaceRunStatus;
   startedAt: number;
@@ -43,6 +47,10 @@ export interface WorkspaceRunContext {
   drainSteers(): string[];
   /** 在 executor 需要立即响应引导时订阅后续消息。 */
   onSteer(listener: (message: string) => void): () => void;
+  /** Bind once the executor has resolved the concrete session. Conflicting rebinds fail closed. */
+  bindSession(sessionId: string): void;
+  /** Bind the exact rewind point created by the executor. Conflicting rebinds fail closed. */
+  bindCheckpoint(checkpointId: string): void;
 }
 
 export type WorkspaceRunExecutor = (
@@ -281,6 +289,9 @@ export class WorkspaceTaskRuntime {
           record.steerSubscribers.add(subscriber);
           return () => record.steerSubscribers.delete(subscriber);
         },
+        bindSession: (sessionId) => this.bindRunIdentifier(record, "sessionId", sessionId),
+        bindCheckpoint: (checkpointId) =>
+          this.bindRunIdentifier(record, "checkpointId", checkpointId),
       });
       this.finishRun(record, record.controller.signal.aborted ? "cancelled" : "succeeded", result);
     } catch (error) {
@@ -293,6 +304,26 @@ export class WorkspaceTaskRuntime {
     } finally {
       record.steerSubscribers.clear();
     }
+  }
+
+  private bindRunIdentifier(
+    record: WorkspaceRunRecord,
+    field: "checkpointId" | "sessionId",
+    value: string,
+  ): void {
+    const normalized = value.trim();
+    if (!normalized) throw new Error(`Run ${field} 不能为空`);
+    const current = record.snapshot[field];
+    if (current !== undefined && current !== normalized) {
+      throw new Error(`Run ${record.snapshot.runId} 已绑定其他 ${field}`);
+    }
+    if (current === normalized) return;
+    record.snapshot = {
+      ...record.snapshot,
+      [field]: normalized,
+      updatedAt: this.now(),
+      version: record.snapshot.version + 1,
+    };
   }
 
   private finishRun(
