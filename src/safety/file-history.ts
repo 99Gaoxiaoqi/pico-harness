@@ -172,6 +172,8 @@ export type FileHistoryJournal = FileChangeJournal;
 export interface FileHistoryJournalCommitResult {
   incomplete: boolean;
   warnings: string[];
+  /** 事务前后实际状态不同的路径，用于 FileChanged 生命周期。 */
+  changedPaths: string[];
 }
 
 export function createFileHistoryState(): FileHistoryState {
@@ -446,6 +448,7 @@ export async function fileHistoryCommitJournal(
   baseDir: string = DEFAULT_BASE_DIR,
 ): Promise<FileHistoryJournalCommitResult> {
   let changed = false;
+  const changedPaths = new Set<string>();
   try {
     const current = await inspectFileChangeJournal(journal);
     const changedPreimages: Array<[string, FileChangePreimage]> = [];
@@ -499,6 +502,7 @@ export async function fileHistoryCommitJournal(
         continue;
       }
       try {
+        changedPaths.add(filePath);
         if (await recordJournalChange(state, filePath, undefined, messageId, sessionId, baseDir)) {
           changed = true;
         }
@@ -512,6 +516,7 @@ export async function fileHistoryCommitJournal(
 
     for (const [filePath, preimage] of changedPreimages) {
       try {
+        changedPaths.add(filePath);
         if (await recordJournalChange(state, filePath, preimage, messageId, sessionId, baseDir)) {
           changed = true;
         }
@@ -531,6 +536,7 @@ export async function fileHistoryCommitJournal(
     return {
       incomplete: warnings.length > 0,
       warnings,
+      changedPaths: [...changedPaths].sort(),
     };
   } finally {
     await discardFileChangeJournal(journal);

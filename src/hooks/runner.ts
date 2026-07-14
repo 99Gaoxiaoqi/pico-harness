@@ -21,6 +21,7 @@ import type {
   HookMatcherGroup,
   HookOutput,
   HooksConfig,
+  HookEventPayloadMap,
 } from "./types.js";
 
 /** 默认 hook 超时(ms):60s。超时后 kill 子进程并 fail-open。 */
@@ -132,15 +133,25 @@ export class HookRunner {
     sessionId: string,
     toolResponse: string | undefined,
   ): Promise<HookOutput> {
+    if (handler.type !== "command") {
+      logger.warn({ event, type: handler.type }, "[Hook] legacy runner 忽略非 command handler");
+      return { decision: "allow" };
+    }
+    const payload = {
+      tool_name: toolName,
+      tool_input: toolInput,
+      ...(toolResponse !== undefined ? { tool_response: toolResponse } : {}),
+    } as HookEventPayloadMap[HookEvent];
     const input: HookInput = {
       session_id: sessionId,
       cwd: this.workDir,
       hook_event_name: event,
+      payload,
       tool_name: toolName,
       tool_input: toolInput,
       ...(toolResponse !== undefined ? { tool_response: toolResponse } : {}),
     };
-    const timeoutMs = handler.timeout ?? DEFAULT_HOOK_TIMEOUT_MS;
+    const timeoutMs = handler.timeoutMs ?? handler.timeout ?? DEFAULT_HOOK_TIMEOUT_MS;
 
     try {
       return await this.spawnAndWait(handler.command, input, timeoutMs);

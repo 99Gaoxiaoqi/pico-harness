@@ -20,6 +20,7 @@ import {
   type ProviderKind,
 } from "../provider/factory.js";
 import { fallbackModelFor, isModelUnavailableError } from "../provider/fallback.js";
+import { ContextOverflowError, isAbortError } from "../provider/errors.js";
 import type { ProviderConfig } from "../provider/config.js";
 import type { CredentialRef, CredentialResolver } from "../provider/credential-vault.js";
 import type { LLMProvider, LLMProviderRequestOptions } from "../provider/interface.js";
@@ -75,6 +76,7 @@ import { isMcpToolName } from "../mcp/types.js";
 import { BackgroundManager } from "../tools/background-manager.js";
 import { loadHooksConfig } from "../hooks/config.js";
 import { HookRunner } from "../hooks/runner.js";
+import type { HookService } from "../hooks/service.js";
 import {
   getOrCreateSessionSettings,
   DEFAULT_INTERACTION_MODE,
@@ -216,6 +218,8 @@ export interface RunAgentCliDependencies extends RuntimeHost {
   backgroundTrustStore?: BackgroundWorkspaceTrustVerifier;
   /** daemon/Cron 注入的系统凭证库读取边界；前台 BYOK 不需要。 */
   credentialResolver?: CredentialResolver;
+  /** 宿主装配的会话级 HookService；TUI 后续消息必须复用同一实例。 */
+  hookService?: HookService;
 }
 
 /** Runtime-first entry point. CLI/TUI compatibility wrappers call this method. */
@@ -238,7 +242,7 @@ export async function executeAgentRuntime(
 ): Promise<RunAgentCliResult> {
   dependencies.signal?.throwIfAborted();
   const resumeExistingSession = dependencies.resumeExistingSession === true;
-  const prompt = resumeExistingSession ? options.prompt : normalizePrompt(options.prompt);
+  let prompt = resumeExistingSession ? options.prompt : normalizePrompt(options.prompt);
   const kind = options.provider ?? "openai";
   const workDir = await resolveWorkDir(options.dir);
   const execution = options.execution ?? ({ kind: "foreground" } as const);
@@ -352,8 +356,15 @@ export async function executeAgentRuntime(
         : {}),
       // LSP 是项目配置启动的子进程；后台策略尚未为其提供网络/写入沙箱。
       lspServers: backgroundPolicy ? [] : picoConfig.lspServers,
+      sessionStartSource:
+        sessionSelection.mode === "resume" || sessionSelection.mode === "continue"
+          ? "resume"
+          : "startup",
+      ...(backgroundPolicy ? { hooks: false as const } : {}),
+      ...(dependencies.hookService ? { hookService: dependencies.hookService } : {}),
     }));
   runtimeState.assertCompatible(workDir, session.id);
+  if (dependencies.hookService) runtimeState.attachHookService(dependencies.hookService);
   if (
     dependencies.toolDisclosure !== undefined &&
     dependencies.toolDisclosure !== runtimeState.toolDisclosure
@@ -431,6 +442,56 @@ export async function executeAgentRuntime(
   } else {
     trackedProvider = buildTrackedProvider(currentConfig);
   }
+  let activeMcpManager = dependencies.mcpManager;
+  runtimeState.bindHookRuntime({
+    provider: trackedProvider,
+    mcpInvoker: {
+      async invokeConnectedTool(server, tool, input, context) {
+        if (!activeMcpManager) throw new Error("MCP manager 尚未连接");
+        return await activeMcpManager.invokeConnectedTool(server, tool, input, context);
+      },
+    },
+    agentVerifier: {
+      async verify(request) {
+        const verifierEngine = new AgentEngine({
+          provider: hookPurposeProvider(trackedProvider),
+          registry: new ToolRegistry(),
+          workDir,
+          workspaceRoots,
+        });
+        const verifierRegistry = createSubagentRegistryFactory({
+          workDir,
+          workspaceRoots,
+          runner: verifierEngine,
+          manager: runtimeState.delegationManager,
+          maxSpawnDepth: 0,
+          yoloSandbox: { config: picoConfig.sandbox },
+          ownerSessionId: session.id,
+        })({ mode: "explore", role: "leaf", depth: 0, maxSpawnDepth: 0 });
+        const task = [
+          request.prompt,
+          "",
+          "只读核验以下 Hook input。最终只输出单个 JSON 对象：",
+          '{"ok": boolean, "reason": string}',
+          JSON.stringify(request.input),
+        ].join("\n");
+        const result = await verifierEngine.runSub(task, verifierRegistry, undefined, {
+          maxTurns: request.maxTurns,
+          role: "leaf",
+          depth: 0,
+          maxSpawnDepth: 0,
+          signal: request.signal,
+          workDir,
+        });
+        return result.summary;
+      },
+    },
+    onAsyncRewake(handler, output) {
+      runtimeState.steerQueue.push(
+        `[Hook asyncRewake ${handler.id}] ${output.reason ?? output.additionalContext ?? output.decision}`,
+      );
+    },
+  });
   const { goalManager, todoStore, toolDisclosure, backgroundManager, delegationManager } =
     runtimeState;
   const registry = buildRegistry(
@@ -452,7 +513,9 @@ export async function executeAgentRuntime(
   // 【任务 2.6】用户可配置 Shell Hooks:加载 .claw/settings.json 的 hooks 配置,
   // 存在则挂载 HookRunner 到 registry。fail-open:配置缺失/畸形均不启用 hook,零影响。
   registry.setSessionId?.(session.id);
-  if (!backgroundPolicy) {
+  if (runtimeState.hookService) {
+    registry.setHookService?.(runtimeState.hookService);
+  } else if (!backgroundPolicy) {
     const hooksConfig = await loadHooksConfig(workDir);
     if (hooksConfig) {
       registry.setHookRunner?.(new HookRunner(workDir, hooksConfig));
@@ -473,6 +536,13 @@ export async function executeAgentRuntime(
         : {}),
       goalManager,
       todoStore,
+      onInstructionsLoaded: async (paths) => {
+        await runtimeState.dispatchHook(
+          "InstructionsLoaded",
+          { paths },
+          { signal: dependencies.signal },
+        );
+      },
     }).build(runtimeState.conversationTurnCount(session));
   // 辅助(廉价)模型:用于 FullCompactor 生成摘要,省主模型成本。
   // 配齐 AUX_LLM_BASE_URL / AUX_LLM_API_KEY / AUX_LLM_MODEL 才启用;缺则用主 provider。
@@ -505,25 +575,32 @@ export async function executeAgentRuntime(
     reporter,
     tracer: traceEnabled ? new Tracer() : undefined,
     steerQueue,
+    ...(runtimeState.hookService ? { hookService: runtimeState.hookService } : {}),
     ...(rebuildProvider ? { rebuildProvider } : {}),
   });
 
-  registry.use(
-    backgroundPolicy
-      ? buildBackgroundYoloMiddleware({
-          policy: backgroundPolicy,
-          workspaceRoots,
-          sessionId: session.id,
-        })
-      : buildApprovalMiddleware(
-          approvalNotifier,
-          workDir,
-          dependencies.signal,
-          globalApprovalManager,
-          settings,
-          workspaceRoots,
-        ),
-  );
+  if (backgroundPolicy) {
+    registry.useSafety?.(
+      buildBackgroundYoloMiddleware({
+        policy: backgroundPolicy,
+        workspaceRoots,
+        sessionId: session.id,
+      }),
+    );
+  } else {
+    registry.useSafety?.(buildForegroundSafetyMiddleware(workDir, settings, workspaceRoots));
+    registry.usePermission?.(
+      buildPermissionMiddleware(
+        approvalNotifier,
+        workDir,
+        dependencies.signal,
+        globalApprovalManager,
+        settings,
+        workspaceRoots,
+        runtimeState.hookService,
+      ),
+    );
+  }
   registerDelegationTools(
     registry,
     engine,
@@ -561,6 +638,7 @@ export async function executeAgentRuntime(
   const mcpManager =
     dependencies.mcpManager ??
     (mcpConfigPath ? new McpConnectionManager(registry, { stdioCwd: workDir }) : undefined);
+  activeMcpManager = mcpManager;
   const unsubscribeMcpStatus =
     mcpManager && dependencies.mcpStatusSink
       ? mcpManager.subscribe(dependencies.mcpStatusSink)
@@ -580,6 +658,32 @@ export async function executeAgentRuntime(
     return await session.serialize(async () => {
       dependencies.signal?.throwIfAborted();
       if (!resumeExistingSession) {
+        const submittedPrompt = prompt;
+        const submitDecision = await runtimeState.dispatchHook(
+          "UserPromptSubmit",
+          { prompt: submittedPrompt },
+          { signal: dependencies.signal },
+        );
+        if (submitDecision.decision === "deny") {
+          throw new Error(
+            `UserPromptSubmit hook 阻断了输入: ${submitDecision.reason ?? "(无原因)"}`,
+          );
+        }
+        prompt = normalizePrompt(applyPromptHookDecision(submittedPrompt, submitDecision));
+        const expansionDecision = await runtimeState.dispatchHook(
+          "UserPromptExpansion",
+          {
+            prompt: effectiveOptions.rewindPrompt ?? submittedPrompt,
+            expandedPrompt: prompt,
+          },
+          { signal: dependencies.signal },
+        );
+        if (expansionDecision.decision === "deny") {
+          throw new Error(
+            `UserPromptExpansion hook 阻断了输入: ${expansionDecision.reason ?? "(无原因)"}`,
+          );
+        }
+        prompt = normalizePrompt(applyPromptHookDecision(prompt, expansionDecision));
         const images: ImagePart[] | undefined =
           effectiveOptions.images ??
           (effectiveOptions.imagePath
@@ -625,6 +729,16 @@ export async function executeAgentRuntime(
       return result;
     });
   } catch (error) {
+    if (runtimeState.hookService && !dependencies.signal?.aborted) {
+      await runtimeState
+        .dispatchHook("StopFailure", {
+          category: classifyStopFailure(error),
+          error: error instanceof Error ? error.message : String(error),
+        })
+        .catch((hookError) =>
+          logger.warn({ hookError: String(hookError) }, "[Hook] StopFailure 事件执行失败"),
+        );
+    }
     dependencies.onEvent?.({
       type: "run.failed",
       sessionId: session.id,
@@ -634,6 +748,7 @@ export async function executeAgentRuntime(
     });
     throw error;
   } finally {
+    await registry.drainHookEvents?.();
     unsubscribeMcpStatus?.();
     // 非 TUI 调用仍按轮关闭；TUI 注入的 manager 由宿主在退出时统一关闭。
     if (mcpManager && ownsMcpManager) {
@@ -645,6 +760,28 @@ export async function executeAgentRuntime(
     }
     ownedUsageStore?.close();
   }
+}
+
+function applyPromptHookDecision(prompt: string, decision: import("../hooks/types.js").HookOutput): string {
+  let next = prompt;
+  if (typeof decision.modifiedInput === "string") {
+    next = decision.modifiedInput;
+  } else if (
+    typeof decision.modifiedInput === "object" &&
+    decision.modifiedInput !== null &&
+    "prompt" in decision.modifiedInput &&
+    typeof Reflect.get(decision.modifiedInput, "prompt") === "string"
+  ) {
+    next = String(Reflect.get(decision.modifiedInput, "prompt"));
+  }
+  return decision.additionalContext ? `${next}\n\n${decision.additionalContext}` : next;
+}
+
+function classifyStopFailure(error: unknown): string {
+  if (isAbortError(error)) return "abort";
+  if (error instanceof ContextOverflowError) return "context";
+  const message = error instanceof Error ? error.message : String(error);
+  return /provider|model|429|rate limit|network/iu.test(message) ? "provider" : "internal";
 }
 
 function buildRegistry(
@@ -933,6 +1070,24 @@ function buildCompactor(kind: ProviderKind, model: string): Compactor {
   });
 }
 
+/** Hook verifier 的所有模型调用都显式覆盖为 purpose=hook。 */
+function hookPurposeProvider(provider: LLMProvider): LLMProvider {
+  return {
+    ...(provider.modelName ? { modelName: provider.modelName } : {}),
+    generate: (messages, tools, options) =>
+      provider.generate(messages, tools, { ...options, purpose: "hook" }),
+    ...(provider.generateStream
+      ? {
+          generateStream: (messages, tools, onDelta, options) =>
+            provider.generateStream!(messages, tools, onDelta, {
+              ...options,
+              purpose: "hook",
+            }),
+        }
+      : {}),
+  };
+}
+
 /**
  * 加载辅助(廉价)模型 provider,供 FullCompactor 生成摘要。
  * 配齐 AUX_LLM_BASE_URL / AUX_LLM_API_KEY / AUX_LLM_MODEL 三项才启用;
@@ -1009,6 +1164,27 @@ export function buildApprovalMiddleware(
     Partial<Pick<SessionSettings, "additionalDirectories">>,
   workspaceRoots?: WorkspaceRoots,
 ): MiddlewareFunc {
+  const safety = buildForegroundSafetyMiddleware(workDir, settings, workspaceRoots);
+  const permission = buildPermissionMiddleware(
+    notifier,
+    workDir,
+    signal,
+    approvalManager,
+    settings,
+    workspaceRoots,
+  );
+  return async (call, context) => {
+    const safetyResult = await safety(call);
+    return safetyResult.allowed ? permission(safetyResult.call ?? call, context) : safetyResult;
+  };
+}
+
+/** Hardline / Plan / Trust 属于不可审批绕过的前置安全门。 */
+export function buildForegroundSafetyMiddleware(
+  workDir: string,
+  settings?: Pick<SessionSettings, "mode">,
+  workspaceRoots?: WorkspaceRoots,
+): MiddlewareFunc {
   return async (call) => {
     const mode = settings?.mode ?? "default";
     const planModeDenial = await planModeDenialReason(call, mode, workDir, workspaceRoots);
@@ -1024,14 +1200,30 @@ export function buildApprovalMiddleware(
         reason: "Hardline 高危命令不可审批绕过,系统直接拒绝。",
       };
     }
+    return { allowed: true };
+  };
+}
 
+/** PreToolUse 通过后的交互权限链；只在确实需要审批时发 PermissionRequest。 */
+export function buildPermissionMiddleware(
+  notifier: ApprovalNotifier,
+  workDir: string,
+  signal?: AbortSignal,
+  approvalManager: ApprovalManager = globalApprovalManager,
+  settings?: Pick<SessionSettings, "sessionId" | "mode"> &
+    Partial<Pick<SessionSettings, "additionalDirectories">>,
+  workspaceRoots?: WorkspaceRoots,
+  hookService?: HookService,
+): MiddlewareFunc {
+  return async (call, context) => {
+    const mode = settings?.mode ?? "default";
     const sessionId = settings?.sessionId ?? "cli";
     const workspaceAccesses = workspaceAccessesFromCall(call);
 
     // 主 TUI 的 YOLO 是全程放权：普通工具不审批，也不施加工作区、网络或
     // 敏感写沙箱。直接文件工具仍需给自身的 WorkspaceRoots 一次性通行证；
     // worker 使用独立 registry/worktree，继续保留显式沙箱隔离。
-    if (mode === "yolo") {
+    if (mode === "yolo" && context?.forceApproval !== true) {
       if (workspaceRoots) {
         for (const access of workspaceAccesses) workspaceRoots.authorizeOnce(access.path);
       }
@@ -1059,6 +1251,7 @@ export function buildApprovalMiddleware(
     );
 
     if (
+      context?.forceApproval !== true &&
       hasSessionGrant &&
       externalDirectories.length === 0 &&
       (safetyPath === undefined || hasExplicitSafetyGrant)
@@ -1067,6 +1260,7 @@ export function buildApprovalMiddleware(
     }
 
     const needsApproval =
+      context?.forceApproval === true ||
       safetyPath !== undefined ||
       externalDirectories.length > 0 ||
       bashNeedsApproval(call) ||
@@ -1074,6 +1268,26 @@ export function buildApprovalMiddleware(
       (mode === "default" && isAgentOpsDangerousCommand(call.name, call.arguments)) ||
       (mode === "auto" && isDangerousCommand(call.name, call.arguments));
     if (!needsApproval) return { allowed: true, reason: `${mode} 模式自动放行` };
+
+    if (hookService) {
+      const hookDecision = await hookService.dispatch(
+        "PermissionRequest",
+        {
+          tool_name: call.name,
+          tool_input: parseHookToolInput(call.arguments),
+          tool_call_id: call.id,
+          reason: "工具调用需要交互审批",
+        },
+        { signal },
+      );
+      if (hookDecision.decision === "deny") {
+        return {
+          allowed: false,
+          reason: hookDecision.reason ?? "PermissionRequest hook 拒绝了该工具调用。",
+          denialSource: "hook",
+        };
+      }
+    }
 
     const externalScope =
       externalDirectories.length > 0
@@ -1100,7 +1314,9 @@ export function buildApprovalMiddleware(
       signal,
       { sessionScope: scope, providerCallId: call.id },
     );
-    if (!result.allowed || !workspaceRoots || !settings) return result;
+    if (!result.allowed || !workspaceRoots || !settings) {
+      return result.allowed ? result : { ...result, denialSource: "human" };
+    }
 
     if (result.allowForSession) {
       await applySessionPermissionScope(scope, {
@@ -1123,6 +1339,14 @@ export function buildApprovalMiddleware(
     }
     return result;
   };
+}
+
+function parseHookToolInput(argumentsJson: string): unknown {
+  try {
+    return JSON.parse(argumentsJson) as unknown;
+  } catch {
+    return {};
+  }
 }
 
 async function externalAuthorizationDirectories(

@@ -1046,6 +1046,8 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         additionalDirectories: settings.additionalDirectories,
         additionalDirectoryManager: workspaceRoots,
         goalManager: runtimeState.goalManager,
+        ...(runtimeState.hookService ? { hookService: runtimeState.hookService } : {}),
+        hookCommands: runtimeState.hookCommands,
         modelRuntime: () => {
           const route = modelRouter.resolve(settings.modelRouteId);
           return route

@@ -91,6 +91,12 @@ describe("provider usage ledger integration", () => {
       session,
       trackerOptions,
     ).generate([], []);
+    await new CostTracker(
+      new SequenceProvider([response("hook", 2, 1)]),
+      { provider: "openai", model: "unknown-test-model" },
+      session,
+      trackerOptions,
+    ).generate([], [], { purpose: "hook" });
     const engine = new AgentEngine({
       provider: trackedMain,
       registry: new EmptyRegistry(),
@@ -150,6 +156,7 @@ describe("provider usage ledger integration", () => {
     expect(calls.map(({ purpose, status }) => ({ purpose, status }))).toEqual([
       { purpose: "main", status: "succeeded" },
       { purpose: "main", status: "succeeded" },
+      { purpose: "hook", status: "succeeded" },
       { purpose: "subagent", status: "succeeded" },
       { purpose: "compaction", status: "succeeded" },
       { purpose: "aux", status: "succeeded" },
@@ -187,7 +194,7 @@ describe("provider usage ledger integration", () => {
 
     const summary = jobs.getUsageSummary({ sessionId: session.id });
     expect(summary).toMatchObject({
-      providerCallCount: 7,
+      providerCallCount: 8,
       baselineCount: 1,
       baselines: {
         inputTokens: 20,
@@ -197,8 +204,8 @@ describe("provider usage ledger integration", () => {
         cost: 1,
       },
       total: {
-        inputTokens: 63,
-        outputTokens: 24,
+        inputTokens: 65,
+        outputTokens: 25,
         cacheReadTokens: 5,
         cacheWriteTokens: 5,
         cost: 1,

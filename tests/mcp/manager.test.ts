@@ -168,6 +168,30 @@ describe("McpConnectionManager 编排", () => {
     tmpDir = await mkdtemp(join(tmpdir(), "pico-mcp-"));
   });
 
+  it("Hook 窄接口只调用已连接且已发现的工具", async () => {
+    const configPath = join(tmpDir, "mcp.json");
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        mcpServers: { policy: stdioConfig("policy", ["--tools", "1"]) },
+      }),
+    );
+    const manager = new McpConnectionManager();
+    await manager.loadConfig(configPath);
+
+    await expect(manager.invokeConnectedTool("policy", "echo", {})).rejects.toThrow("未连接");
+    await manager.connectAll();
+    await expect(
+      manager.invokeConnectedTool("policy", "echo", { message: "hook" }),
+    ).resolves.toMatchObject({ isError: false });
+    await expect(manager.invokeConnectedTool("policy", "ghost", {})).rejects.toThrow(
+      '未发现工具 "ghost"',
+    );
+
+    await manager.closeAll();
+    await expect(manager.invokeConnectedTool("policy", "echo", {})).rejects.toThrow("未连接");
+  });
+
   it("加载配置并并行连接所有 server", async () => {
     const configPath = join(tmpDir, "mcp.json");
     await writeFile(
