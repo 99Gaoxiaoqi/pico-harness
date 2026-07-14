@@ -35,6 +35,8 @@ export interface LoadMarkdownCommandsOptions {
   projectCommandsDir?: string;
   userCommandsDir?: string;
   homeDir?: string;
+  picoHome?: string;
+  env?: Readonly<Record<string, string | undefined>>;
   includeSkillCommands?: boolean;
   skillLoader?: SkillLoader;
   builtinNames?: Iterable<string>;
@@ -70,7 +72,15 @@ export async function loadMarkdownCommands(
   options: LoadMarkdownCommandsOptions,
 ): Promise<MarkdownPromptCommand[]> {
   const home = options.homeDir ?? homedir();
-  const paths = resolvePicoPaths(options.workDir, { homeDir: home, env: process.env });
+  const paths = resolvePicoPaths(options.workDir, {
+    homeDir: home,
+    env: options.env ?? process.env,
+    ...(options.picoHome
+      ? { picoHome: options.picoHome }
+      : options.homeDir
+        ? { picoHome: join(home, ".pico") }
+        : {}),
+  });
   const commandSources: Array<{
     source: MarkdownCommandSource;
     catalogSource: ResourceCatalogSource;
