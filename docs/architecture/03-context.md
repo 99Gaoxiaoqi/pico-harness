@@ -5,7 +5,7 @@
 ## 三条主线
 
 1. **Prompt 动态组装**（composer）：分层编译 System Prompt
-2. **两级上下文压缩**（compactor 字符级 + full-compactor 模型级）：防 OOM
+2. **完整历史 + token 水位整理**（ToolResult 投影 + FullCompactor）：防 OOM
 3. **状态外部化存储**（todo/plan/skill/artifact store）：记忆从易失 RAM 搬到物理文件
 
 ---
@@ -37,49 +37,37 @@ Skills 层只注入元数据清单（name + 触发条件），完整执行指南
 
 ---
 
-## 2. 字符级上下文压缩 (`compactor.ts`)
+## 2. 请求投影与 ToolResult 微压缩 (`compactor.ts`)
 
-> 只改本轮发给 API 的临时 Context，**写回 Session 的永远是全量真实数据**。
+`Session.getModelContext()` 返回完整历史副本。Engine 使用统一预算：
 
-### 触发条件
-
-`estimateLength(msgs) >= maxChars` 才压缩。另有连续 2 次压缩收益不足（<10%）则跳过防抖动。
-
-### 双重降级防线
-
-```
-compact()
-  ├─ System Prompt: 绝对不动
-  ├─ 远期历史(超出保护区):
-  │   ├─ ToolResult: MicroCompaction(年龄>1h 且被读过) → [Old tool result cleared]
-  │   │              否则字符超 200 → 温和摘要(保留工具名/退出码/规模)
-  │   │              usedStrongerCompact → 全量掩码
-  │   └─ Assistant Thinking: 超 200 字符 → [早期的推理思考过程已折叠]
-  └─ WorkingMemory 保护区(最近 6 条):
-      └─ 单条 ToolResult 超 1000 字符 → 掐头去尾(前 500 + 后 500)
+```text
+inputBudgetTokens = contextWindowTokens - maxOutputTokens - 1,024
+autoWatermark     = inputBudgetTokens × 85%
 ```
 
-### 铁律
+输入估算包含 System Prompt、历史消息和工具 Schema。低于 85% 时，除协议修复外不删除历史；超过水位后，`compactOldToolResults()` 只缩短安全尾部之前的旧 ToolResult，近期完整工作段保持原文。
 
-**绝不动 `msg.toolCalls`** —— 删掉 ToolResult 保留 ToolCall 会让模型困惑"命令没发出去"而陷入死循环。
+artifact 引用不会被折叠：Bash 超过 30,000 字符、普通工具超过 50,000 字符、委派批次超过 12,000 字符时，原文落盘，模型只看摘要和可回读路径。
 
-### 预算闭环
+### 工具协议投影
 
-`compact()` 后仍超预算 → `strongerCompact()`（全量掩码）→ 仍超才抛 `ContextCompactionError`。
-
-### sanitizeToolPairs
-
-保证 ToolCall/ToolResult 配对完整性：丢弃孤儿 ToolResult、为缺失 ToolResult 的 ToolCall 补占位符。防止 API 400。
+`sanitizeToolPairs()` 按每个 assistant 工具批次局部配对，允许 provider 在不同批次复用 ToolCall ID。投影会丢弃孤儿/重复结果，并为历史异常缺失结果补 stub；这些修复不写回 Session。
 
 ---
 
-## 3. 模型摘要压缩 (`full-compactor.ts`)
+## 3. token 驱动模型摘要 (`full-compactor.ts`)
 
-> 字符级降级用尽后，用 provider 把 history 前缀浓缩成结构化摘要，**真改 Session.history**。
+ToolResult 投影后仍超过 85% 水位时，FullCompactor 将旧前缀浓缩成结构化摘要，**真改 Session.history**。Provider 实际返回 `ContextOverflowError` 时，使用更紧的尾部 token 目标紧急压缩一次，不再缩成 14/10/6 条消息重试。
 
-### 触发条件
+### 安全切分
 
-由 `engine/loop.ts` 在字符级 3 轮降级用尽后主动调用（响应式，非预���式）。
+`findSafeCompactionCut()` 保证：
+
+- 保留段不以 ToolResult 开头；
+- 不切在普通 user 请求之后；
+- assistant 的整批 toolCalls 与全部连续 results 位于边界同侧；
+- 尾部工具交换未完成时禁止持久化压缩。
 
 ### 13-section 结构化摘要
 
@@ -102,15 +90,14 @@ compact()
 
 ## 4. 两级压缩协作矩阵
 
-| 维度             | 第一级：Compactor（字符级）     | 第二级：FullCompactor（模型级）            |
-| ---------------- | ------------------------------- | ------------------------------------------ |
-| **触发**         | `estimateLength >= maxChars`    | 字符级 3 轮降级用尽仍 overflow             |
-| **作用对象**     | 临时 Context（发给 API 的拷贝） | **Session.history**（持久化）              |
-| **持久化**       | 否（写回 Session 的永远是全量） | 是（`session.applyCompaction` 真替换前缀） |
-| **手段**         | 掩码/掐头去尾/占位符            | LLM 浓缩成 13-section 结构化摘要           |
-| **成本**         | 零（纯字符串操作）              | 高（调一次 provider）                      |
-| **保 toolCalls** | 是（铁律）                      | 否（前缀整体被摘要吞掉）                   |
-| **失败兜底**     | 抛 ContextCompactionError       | 返回 false → 调用方硬重置                  |
+| 维度             | 第一级：ToolResult 投影             | 第二级：FullCompactor                      |
+| ---------------- | ----------------------------------- | ------------------------------------------ |
+| **触发**         | 输入估算超过 85% 水位               | 投影后仍超过水位，或 Provider overflow     |
+| **作用对象**     | 临时 Context（发给 API 的副本）     | **Session.history**（持久化）              |
+| **持久化**       | 否                                  | 是（`session.applyCompaction` 真替换前缀） |
+| **手段**         | 缩短旧 ToolResult，保护安全尾部      | LLM 浓缩成 13-section 结构化摘要           |
+| **边界**         | 不改 toolCalls / artifact 引用       | 完整并发工具批次必须在边界同侧             |
+| **失败兜底**     | 继续尝试 FullCompactor              | 一次紧急重试后才允许硬重置                 |
 
 ---
 

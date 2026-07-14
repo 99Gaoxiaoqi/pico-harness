@@ -6,7 +6,7 @@ Agent 现在能做事了。但它有一个致命问题：**每次启动都失忆
 
 更麻烦的是多端场景。飞书群 A 在重构代码、群 B 在查日志，它们共享同一个上下文历史——Agent 会精神分裂，把群 A 的 `read_file` 结果当成群 B 的上下文。
 
-我需要两样东西：**Session 隔离**和**WorkingMemory 滑动窗口**。但很快我发现还需要第三样——**Prompt 动态组装**。因为 System Prompt 不能是一块硬编码的巨石。
+我需要两样东西：**Session 隔离**和**完整 Model Context 投影**。但很快我发现还需要第三样——**Prompt 动态组装**。因为 System Prompt 不能是一块硬编码的巨石。
 
 ---
 
@@ -55,44 +55,25 @@ serialize<T>(fn: () => Promise<T>): Promise<T> {
 
 ---
 
-## WorkingMemory：只看最近的
+## Model Context：完整历史，按 token 水位整理
 
-Session 保存了完整历史——从第一条消息到现在，一条不丢。但发给大模型时不能全发。
-
-原因很简单：对话历史越长，API 调用越贵、越慢，最终会超出模型的上下文窗口。如果把 100 轮对话全发过去，大部分 Token 都浪费在早已过时的上下文上。
-
-WorkingMemory 的解决方案很直接：**只截取最近 N 条消息。**
+Session 保存完整历史，主 Agent 通过 `getModelContext()` 获取副本，不再固定截取最近 20 条。正常阶段模型能看到完整工作链；输入估算达到预算的 85% 后，Engine 才先缩短旧 ToolResult，仍不足时在完整工具批次边界摘要旧前缀。
 
 ```typescript
-getWorkingMemory(limit: number): Message[] {
-  const slice = this.history.slice(-limit);
-
-  // 关键：清理孤儿 ToolResult
-  const firstToolCallId = slice[0]?.toolCallId;
-  if (firstToolCallId) {
-    const hasMatchingCall = slice.some(m =>
-      m.toolCalls?.some(tc => tc.id === firstToolCallId)
-    );
-    if (!hasMatchingCall) {
-      // 去掉开头的孤儿结果
-      return this.cleanOrphanResults(slice);
-    }
-  }
-  return slice;
+getModelContext(): Message[] {
+  return this.history.map(message => ({ ...message }));
 }
 ```
 
-"孤儿 ToolResult"是一个容易被忽略但致命的细节。当滑动窗口截断历史时，可能恰好截断了一对 `tool_use` 和 `tool_result`——结果在窗口内，但对应的调用被截掉了。大模型看到一条无主的结果，会陷入困惑："这是什么？哪个工具返回的？我调用过它吗？"甚至可能把孤儿结果当成一条新的用户消息。
+工具协议清理发生在本轮请求投影中：孤儿和重复 ToolResult 被删除，历史缺失结果补占位符；同一批 `toolCalls` 与其全部 results 不会被切到边界两侧。投影修复不污染 Session 原始历史。
 
-解决方法：从窗口开头往后扫描，把没有对应 `tool_use` 的 `tool_result` 都删掉，直到找到第一条完整的消息。
-
-默认窗口大小是 20 条消息。这个数值经过权衡：太小（比如 5 条）会导致 Agent 丢失关键上下文，无法完成需要多步推理的复杂任务；太大（比如 100 条）浪费 Token 且稀释模型注意力。20 条是一个在大多数场景下都能工作的经验值。
+`getWorkingMemory(limit)` 仍保留给兼容测试，但不再是主 Agent 的推理策略。
 
 ---
 
 ## 持久化：关机了也不丢
 
-WorkingMemory 解决了"发给大模型什么"的问题，但 `history` 还只在内存里。进程重启，全部丢失。
+Model Context 解决了"发给大模型什么"的问题，但 `history` 还只在内存里。进程重启，全部丢失。
 
 我需要持久化。但不想引入 Redis 或 PostgreSQL——太重了。最简单的方案：**事件溯源 JSONL。**
 
@@ -236,12 +217,12 @@ Memory Nudger 的做法是：每隔 N 轮（比如每 5 轮），从 FTS5 中搜
 Agent 的记忆系统成形了：
 
 - **Session 物理隔离**：每端独立上下文，Promise 链式队列保证并发安全
-- **WorkingMemory 滑动窗口**：只传最近 20 条，孤儿清理避免上下文污染
+- **完整 Model Context**：低于 token 水位时传完整历史，工具协议按局部批次修复
 - **JSONL 事件溯源**：持久化到磁盘，末行撕裂容忍，seq 保证重放顺序
 - **FTS5 跨 Session 检索**：trigram 中文分词，学到的技能跨会话复用
 - **Prompt 模块化组装**：内核 + AGENTS.md + Skills + Plan Context 动态拼接
 
-Agent 能记住对话了。但上下文还在不断膨胀——WorkingMemory 只控制了条数，没控制每条的大小。读一个 1MB 的日志文件，即使只有 1 条 ToolResult，也能把上下文撑爆。
+Agent 能记住对话了。但上下文还在不断膨胀——下一章用 token 水位、artifact 与安全摘要控制体积。
 
 所以接下来，给它装一个"垃圾回收器"。
 

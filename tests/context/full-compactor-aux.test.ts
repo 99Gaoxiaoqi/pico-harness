@@ -54,7 +54,11 @@ describe("FullCompactor 辅助模型(auxProvider)", () => {
       userMsg("recent"),
     );
 
-    const ok = await fc.compact(session, 2);
+    const ok = await fc.compact(session, {
+      inputBudgetTokens: 10_000,
+      targetRetainedTokens: 1,
+      trigger: "auto",
+    });
     expect(ok).toBe(true);
 
     // 核心:aux 被调,主 provider 没被调
@@ -66,8 +70,7 @@ describe("FullCompactor 辅助模型(auxProvider)", () => {
     expect(history[0]!.role).toBe("assistant");
     expect(history[0]!.content).toContain("辅助模型摘要正文");
     expect(history[0]!.content).toContain("[上下文压缩 — 仅供参考]");
-    expect(history[1]!.content).toBe("step2");
-    expect(history[2]!.content).toBe("recent");
+    expect(history.at(-1)!.content).toBe("recent");
   });
 
   it("��传 auxProvider → 用主 provider(向后兼容回归)", async () => {
@@ -84,7 +87,11 @@ describe("FullCompactor 辅助模型(auxProvider)", () => {
       userMsg("recent"),
     );
 
-    const ok = await fc.compact(session, 2);
+    const ok = await fc.compact(session, {
+      inputBudgetTokens: 10_000,
+      targetRetainedTokens: 1,
+      trigger: "auto",
+    });
     expect(ok).toBe(true);
 
     // 回归:主 provider 被调

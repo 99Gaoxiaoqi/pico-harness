@@ -1,8 +1,8 @@
 import type { ProviderProfile } from "../provider/profile.js";
-import type { Message } from "../schema/message.js";
+import type { Message, ToolDefinition } from "../schema/message.js";
 import { countTokens } from "./token-counter.js";
 
-const DEFAULT_SAFETY_MARGIN_TOKENS = 1024;
+export const DEFAULT_SAFETY_MARGIN_TOKENS = 1024;
 /**
  * 字符→token 反向换算用的经验值。仅在 Compactor 的"token 预算 → 字符水位线"
  * 换算时使用(Compactor 仍以字符为压缩水位单位,保持其内部逻辑稳定);
@@ -25,8 +25,22 @@ export function estimateMessageTokens(msg: Message): number {
   return countTokens(text);
 }
 
-export function estimateMessagesTokens(messages: Message[]): number {
+export function estimateMessagesTokens(messages: readonly Message[]): number {
   return messages.reduce((sum, msg) => sum + estimateMessageTokens(msg), 0);
+}
+
+export function estimateToolDefinitionsTokens(tools: readonly ToolDefinition[]): number {
+  return tools.reduce(
+    (sum, tool) => sum + countTokens(tool.name + tool.description + JSON.stringify(tool.inputSchema)),
+    0,
+  );
+}
+
+export function estimateModelInputTokens(
+  messages: readonly Message[],
+  tools: readonly ToolDefinition[],
+): number {
+  return estimateMessagesTokens(messages) + estimateToolDefinitionsTokens(tools);
 }
 
 /**

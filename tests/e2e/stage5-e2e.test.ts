@@ -157,7 +157,11 @@ describeOrSkip("阶段 5 端到端测试(真实大模型)", { timeout: 180000 },
       }
 
       // 调压缩(保留最近 2 条)
-      const success = await fullCompactor.compact(session, 2);
+      const success = await fullCompactor.compact(session, {
+        inputBudgetTokens: 10_000,
+        targetRetainedTokens: 1,
+        trigger: "auto",
+      });
       console.log(`[E2E aux] 压缩成功: ${success}`);
       console.log(`[E2E aux] main provider 调用次数: ${mainCalls.generateCount}`);
       console.log(`[E2E aux] aux provider 调用次数: ${auxCalls.generateCount}`);
@@ -182,7 +186,11 @@ describeOrSkip("阶段 5 端到端测试(真实大模型)", { timeout: 180000 },
         session.append({ role: "assistant", content: `回复 ${i}` });
       }
 
-      const success = await fullCompactor.compact(session, 2);
+      const success = await fullCompactor.compact(session, {
+        inputBudgetTokens: 10_000,
+        targetRetainedTokens: 1,
+        trigger: "auto",
+      });
       console.log(`[E2E aux-regress] 压缩成功: ${success}, main 调用: ${mainCalls.generateCount}`);
       expect(success, "压缩必须成功,否则无法验证主 provider fallback").toBe(true);
       expect(mainCalls.generateCount, "不配 aux 应该用主 provider").toBeGreaterThan(0);

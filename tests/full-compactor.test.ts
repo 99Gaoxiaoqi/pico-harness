@@ -21,6 +21,7 @@ import type { ToolCall, ToolResult } from "../src/schema/message.js";
 import { Session, SessionManager } from "../src/engine/session.js";
 import type { LLMProvider, LLMProviderRequestOptions } from "../src/provider/interface.js";
 import type { Message, ToolDefinition } from "../src/schema/message.js";
+import { estimateMessagesTokens } from "../src/context/context-budget.js";
 
 /**
  * 可编程 Mock Provider:可配置返回摘要内容,或抛错,或返回空。
@@ -66,6 +67,17 @@ function assistantWithToolCall(id: string, name: string, args: string): Message 
   return { role: "assistant", content: "", toolCalls: [{ id, name, arguments: args }] };
 }
 
+function requestRetaining(session: Session, messageCount: number) {
+  return {
+    inputBudgetTokens: 100_000,
+    targetRetainedTokens: Math.max(
+      1,
+      estimateMessagesTokens(session.getHistory().slice(-messageCount)),
+    ),
+    trigger: "auto" as const,
+  };
+}
+
 describe("FullCompactor 模型摘要压缩", () => {
   it("signal 中止摘要 provider 时立即抛 AbortError 且不重试", async () => {
     let started!: () => void;
@@ -95,7 +107,7 @@ describe("FullCompactor 模型摘要压缩", () => {
     const session = new Session("fc-abort", "/tmp");
     session.append(userMsg("a"), assistantMsg("b"), userMsg("c"));
     const controller = new AbortController();
-    const run = fc.compact(session, 1, controller.signal);
+    const run = fc.compact(session, requestRetaining(session, 1), controller.signal);
 
     await requestStarted;
     controller.abort(new DOMException("interrupted", "AbortError"));
@@ -122,10 +134,10 @@ describe("FullCompactor 模型摘要压缩", () => {
     );
     expect(session.length).toBe(5);
 
-    const ok = await fc.compact(session, 2);
+    const ok = await fc.compact(session, requestRetaining(session, 2));
     expect(ok).toBe(true);
-    // 压缩后:1 条 summary + 2 条尾部 = 3 条
-    expect(session.length).toBe(3);
+    // token 目标不会强行切在普通 user 之后，因此安全尾部为 3 条。
+    expect(session.length).toBe(4);
     const history = session.getHistory();
     // 第 1 条是 summary(role=assistant,含 REFERENCE-ONLY 标记 + 摘要正文)
     expect(history[0]!.role).toBe("assistant");
@@ -145,13 +157,13 @@ describe("FullCompactor 模型摘要压缩", () => {
     const tail2 = userMsg("recent");
     session.append(userMsg("task1"), assistantMsg("step1"), userMsg("task2"), tail1, tail2);
 
-    await fc.compact(session, 2);
+    await fc.compact(session, requestRetaining(session, 2));
     const history = session.getHistory();
-    // 尾部 2 条内容不变
-    expect(history[1]!.content).toBe(tail1.content);
-    expect(history[1]!.role).toBe("assistant");
-    expect(history[2]!.content).toBe(tail2.content);
-    expect(history[2]!.role).toBe("user");
+    // 安全边界向前扩展了一条，但最近尾部内容与顺序不变。
+    expect(history.at(-2)!.content).toBe(tail1.content);
+    expect(history.at(-2)!.role).toBe("assistant");
+    expect(history.at(-1)!.content).toBe(tail2.content);
+    expect(history.at(-1)!.role).toBe("user");
   });
 
   it("摘要调用失败(provider 抛错)→ 返回 false,session.history 不变", async () => {
@@ -165,7 +177,7 @@ describe("FullCompactor 模型摘要压缩", () => {
     session.append(userMsg("a"), assistantMsg("b"), userMsg("c"), assistantMsg("d"), userMsg("e"));
     const beforeLen = session.length;
 
-    const ok = await fc.compact(session, 2);
+    const ok = await fc.compact(session, requestRetaining(session, 2));
     expect(ok).toBe(false);
     // 失败时 history 不被修改
     expect(session.length).toBe(beforeLen);
@@ -180,7 +192,7 @@ describe("FullCompactor 模型摘要压缩", () => {
     const session = new Session("fc-4", "/tmp");
     session.append(userMsg("a"), assistantMsg("b"), userMsg("c"), assistantMsg("d"), userMsg("e"));
 
-    const ok = await fc.compact(session, 2);
+    const ok = await fc.compact(session, requestRetaining(session, 2));
     expect(ok).toBe(false);
     expect(session.length).toBe(5);
   });
@@ -196,7 +208,7 @@ describe("FullCompactor 模型摘要压缩", () => {
     session.append(userMsg("a"), assistantMsg("b"), userMsg("c"), assistantMsg("d"), userMsg("e1"));
 
     // 第一次压缩
-    const ok1 = await fc.compact(session, 2);
+    const ok1 = await fc.compact(session, requestRetaining(session, 2));
     expect(ok1).toBe(true);
     // 第一次指令不应包含 previousSummary 块
     const firstInstr = provider.calls[0]!.messages.find((m) => m.role === "user")!.content;
@@ -204,7 +216,7 @@ describe("FullCompactor 模型摘要压缩", () => {
 
     // 追加新历史后再压缩第二次
     session.append(assistantMsg("f"), userMsg("e2"), assistantMsg("g"));
-    const ok2 = await fc.compact(session, 2);
+    const ok2 = await fc.compact(session, requestRetaining(session, 2));
     expect(ok2).toBe(true);
     // 第二次指令应包含 previousSummary(增量更新)
     const secondInstr = provider.calls[1]!.messages.find((m) => m.role === "user")!.content;
@@ -218,9 +230,37 @@ describe("FullCompactor 模型摘要压缩", () => {
     const session = new Session("fc-6", "/tmp");
     session.append(userMsg("a"), assistantMsg("b"));
     // retainLastN = 2,前缀 = 0
-    const ok = await fc.compact(session, 2);
+    const ok = await fc.compact(session, requestRetaining(session, 2));
     expect(ok).toBe(false);
     // provider 不应被调用
+    expect(provider.calls).toHaveLength(0);
+  });
+
+  it("尾部工具交换未完成时不调用摘要模型", async () => {
+    const provider = new SummaryMockProvider([{ kind: "ok", content: "不应调用" }]);
+    const fc = new FullCompactor({ provider });
+    const session = new Session("fc-pending-tools", "/tmp");
+    session.append(
+      userMsg("task"),
+      assistantMsg("ack"),
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [
+          { id: "c1", name: "read_file", arguments: "{}" },
+          { id: "c2", name: "read_file", arguments: "{}" },
+        ],
+      },
+      toolResultMsg("c1", "partial"),
+    );
+
+    const ok = await fc.compact(session, {
+      inputBudgetTokens: 100,
+      targetRetainedTokens: 1,
+      trigger: "auto",
+    });
+
+    expect(ok).toBe(false);
     expect(provider.calls).toHaveLength(0);
   });
 
@@ -237,7 +277,7 @@ describe("FullCompactor 模型摘要压缩", () => {
     );
     // retainLastN=1: naive 前缀=3,保留尾部=[toolResultMsg("call-1")] —— 孤儿!
     // FullCompactor 应把孤儿 ToolResult 并入前缀(前缀=4),保留尾部=[assistantMsg("done")]
-    const ok = await fc.compact(session, 1);
+    const ok = await fc.compact(session, requestRetaining(session, 1));
     expect(ok).toBe(true);
     const history = session.getHistory();
     // 压缩后:summary + assistantMsg("done") = 2 条
@@ -298,27 +338,29 @@ describe("FullCompactor 持久化(applyCompaction 落盘 + recover 重放)", () 
     expect(s1.length).toBe(5);
 
     // 压缩:保留尾部 2 条
-    const ok = await fc.compact(s1, 2);
+    const ok = await fc.compact(s1, requestRetaining(s1, 2));
     expect(ok).toBe(true);
     await flush();
-    // 内存:summary + m3 + m4
-    expect(s1.length).toBe(3);
+    // 普通 user 之后不切分：内存为 summary + m2 + m3 + m4。
+    expect(s1.length).toBe(4);
     const mem = s1.getHistory();
     expect(mem[0]!.role).toBe("assistant");
     expect(mem[0]!.content).toContain("持久化摘要");
-    expect(mem[1]!.content).toBe("m3");
-    expect(mem[2]!.content).toBe("m4");
+    expect(mem[1]!.content).toBe("m2");
+    expect(mem[2]!.content).toBe("m3");
+    expect(mem[3]!.content).toBe("m4");
 
     // 重启恢复
     const mgr2 = new SessionManager();
     const s2 = await mgr2.getOrCreate("fc-persist", workDir, ON);
     // 重放后应与内存一致:summary + m3 + m4
-    expect(s2.length).toBe(3);
+    expect(s2.length).toBe(4);
     const rec = s2.getHistory();
     expect(rec[0]!.role).toBe("assistant");
     expect(rec[0]!.content).toContain("持久化摘要");
-    expect(rec[1]!.content).toBe("m3");
-    expect(rec[2]!.content).toBe("m4");
+    expect(rec[1]!.content).toBe("m2");
+    expect(rec[2]!.content).toBe("m3");
+    expect(rec[3]!.content).toBe("m4");
   });
 
   it("压缩后再 append,重启 recover 历史续接正确(seq 不回退)", async () => {
@@ -332,7 +374,7 @@ describe("FullCompactor 持久化(applyCompaction 落盘 + recover 重放)", () 
     await flush();
 
     // retainLastN=1:压缩前 3 条,保留尾部 [d]
-    await fc.compact(s1, 1);
+    await fc.compact(s1, requestRetaining(s1, 1));
     await flush();
     // 压缩后 append 新消息
     s1.append(userMsg("after-compact"));
@@ -340,12 +382,13 @@ describe("FullCompactor 持久化(applyCompaction 落盘 + recover 重放)", () 
 
     const mgr2 = new SessionManager();
     const s2 = await mgr2.getOrCreate("fc-persist2", workDir, ON);
-    // 期望:summary + d + after-compact
-    expect(s2.length).toBe(3);
+    // 安全切分保留 c+d，再续接 after-compact。
+    expect(s2.length).toBe(4);
     const rec = s2.getHistory();
     expect(rec[0]!.content).toContain("摘要2");
-    expect(rec[1]!.content).toBe("d");
-    expect(rec[2]!.content).toBe("after-compact");
+    expect(rec[1]!.content).toBe("c");
+    expect(rec[2]!.content).toBe("d");
+    expect(rec[3]!.content).toBe("after-compact");
   });
 });
 
@@ -394,13 +437,41 @@ describe("FullCompactor 接入 generateWithOverflowRetry(loop 端到端)", () =>
     }
   }
 
+  it("超过 85% token 水位时在 Provider 调用前主动 FullCompaction", async () => {
+    const engineProvider = new EngineMockProvider([{ kind: "ok", content: "主动压缩后完成" }]);
+    const summaryProvider = new SummaryMockProvider([{ kind: "ok", content: "主动水位摘要" }]);
+    const engine = new AgentEngine({
+      provider: engineProvider,
+      registry: new EmptyRegistry(),
+      workDir: "/tmp",
+      compactor: new Compactor({ maxChars: 10_000, retainLastMsgs: 20 }),
+      fullCompactor: new FullCompactor({ provider: summaryProvider }),
+      contextBudget: {
+        contextWindowTokens: 1_600,
+        reservedOutputTokens: 176,
+        safetyMarginTokens: 1_024,
+        inputBudgetTokens: 400,
+      },
+    });
+    const session = new Session("fc-watermark", "/tmp");
+    for (let index = 0; index < 8; index++) {
+      session.append({
+        role: index % 2 === 0 ? "user" : "assistant",
+        content: Array.from({ length: 50 }, (_, word) => `item-${index}-${word}`).join(" "),
+      });
+    }
+
+    const returned = await engine.run(session);
+
+    expect(summaryProvider.calls).toHaveLength(1);
+    expect(returned.at(-1)!.content).toBe("主动压缩后完成");
+    expect(session.getHistory()[0]!.content).toContain("主动水位摘要");
+  });
+
   it("字符级降级用尽后触发 FullCompactor,压缩成功后重试成功", async () => {
-    // 引擎主 provider:4 次 overflow(触发字符级降级用尽)→ 第 5 次(压缩后)成功
+    // 引擎主 provider:首次 overflow → 紧急 FullCompaction 后单次重试成功
     const engineProvider = new EngineMockProvider([
       { kind: "throw", error: new ContextOverflowError("overflow #1") },
-      { kind: "throw", error: new ContextOverflowError("overflow #2") },
-      { kind: "throw", error: new ContextOverflowError("overflow #3") },
-      { kind: "throw", error: new ContextOverflowError("overflow #4") },
       { kind: "ok", content: "压缩后重试成功" },
     ]);
     // 摘要 provider:返回一段摘要
@@ -416,7 +487,12 @@ describe("FullCompactor 接入 generateWithOverflowRetry(loop 端到端)", () =>
       workDir: "/tmp",
       compactor,
       fullCompactor,
-      workingMemoryLimit: 20,
+      contextBudget: {
+        contextWindowTokens: 10_000,
+        reservedOutputTokens: 1_000,
+        safetyMarginTokens: 1_024,
+        inputBudgetTokens: 7_976,
+      },
     });
 
     const session = new Session("fc-loop-1", "/tmp");
@@ -442,12 +518,10 @@ describe("FullCompactor 接入 generateWithOverflowRetry(loop 端到端)", () =>
   });
 
   it("FullCompactor 压缩也失败时,降级抛出 ContextOverflowError", async () => {
-    // 引擎主 provider:4 次 overflow
+    // 紧急压缩失败时不做第二次 provider 重试
     const engineProvider = new EngineMockProvider([
       { kind: "throw", error: new ContextOverflowError("overflow #1") },
-      { kind: "throw", error: new ContextOverflowError("overflow #2") },
-      { kind: "throw", error: new ContextOverflowError("overflow #3") },
-      { kind: "throw", error: new ContextOverflowError("overflow #4") },
+      { kind: "throw", error: new ContextOverflowError("overflow after hard reset") },
     ]);
     // 摘要 provider:始终抛错(压缩失败)
     const summaryProvider = new SummaryMockProvider([
@@ -463,7 +537,12 @@ describe("FullCompactor 接入 generateWithOverflowRetry(loop 端到端)", () =>
       workDir: "/tmp",
       compactor,
       fullCompactor,
-      workingMemoryLimit: 20,
+      contextBudget: {
+        contextWindowTokens: 10_000,
+        reservedOutputTokens: 1_000,
+        safetyMarginTokens: 1_024,
+        inputBudgetTokens: 7_976,
+      },
     });
 
     const session = new Session("fc-loop-2", "/tmp");

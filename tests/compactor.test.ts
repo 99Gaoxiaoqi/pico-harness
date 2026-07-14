@@ -220,6 +220,46 @@ describe("Compactor", () => {
     expect(stub?.content).toContain("工具结果已归档");
   });
 
+  it("sanitizeToolPairs 按局部批次配对，允许 provider 跨批次复用 ID", () => {
+    const msgs: Message[] = [
+      assistantMsg("", [{ id: "gemini-call-0", name: "read", arguments: "{}" }]),
+      toolResultMsg("gemini-call-0", "first"),
+      assistantMsg("done-1"),
+      assistantMsg("", [{ id: "gemini-call-0", name: "read", arguments: "{}" }]),
+      toolResultMsg("gemini-call-0", "second"),
+      toolResultMsg("gemini-call-0", "duplicate"),
+      assistantMsg("done-2"),
+    ];
+
+    const out = sanitizeToolPairs(msgs);
+
+    expect(out.filter((message) => message.toolCallId === "gemini-call-0")).toHaveLength(2);
+    expect(out.some((message) => message.content === "first")).toBe(true);
+    expect(out.some((message) => message.content === "second")).toBe(true);
+    expect(out.some((message) => message.content === "duplicate")).toBe(false);
+  });
+
+  it("compactOldToolResults 保护近期安全尾部并保留 artifact 回读引用", () => {
+    const c = new Compactor({ maxChars: 100, retainLastMsgs: 1 });
+    const artifact =
+      "[大型工具输出已外部化]\nartifact: .pico/artifacts/tool-results/call-artifact.txt";
+    const recent = "recent-" + "R".repeat(1000);
+    const msgs: Message[] = [
+      assistantMsg("", [{ id: "old", name: "bash", arguments: "{}" }]),
+      toolResultMsg("old", "O".repeat(1000)),
+      assistantMsg("", [{ id: "artifact", name: "bash", arguments: "{}" }]),
+      toolResultMsg("artifact", artifact),
+      assistantMsg("", [{ id: "recent", name: "bash", arguments: "{}" }]),
+      toolResultMsg("recent", recent),
+    ];
+
+    const out = c.compactOldToolResults(msgs, { protectFromIndex: 4, targetTokens: 100 });
+
+    expect(out[1]!.content).not.toBe(msgs[1]!.content);
+    expect(out[3]!.content).toBe(artifact);
+    expect(out[5]!.content).toBe(recent);
+  });
+
   it("连续两次压缩收益不足时触发反抖守卫,跳过后续压缩", () => {
     const c = new Compactor({ maxChars: 10, retainLastMsgs: 10 });
     const msgs = [systemMsg("S".repeat(1000)), userMsg("recent")];
