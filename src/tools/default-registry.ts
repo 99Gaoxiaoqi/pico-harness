@@ -28,6 +28,7 @@ import { WorkspaceRoots, buildWorkspaceBoundaryMiddleware } from "./workspace-ro
 import type { CodeIntelligenceService } from "../code-intelligence/types.js";
 import { createCodeIntelligenceTools } from "./code-intelligence.js";
 import type { YoloSandboxConfig } from "../safety/yolo-sandbox.js";
+import { ReadArtifactTool } from "./artifact-read.js";
 
 export interface DefaultToolRegistryOptions extends ToolRegistryOptions {
   /** Read/Write/Edit/Glob/Grep 与请求边界共享的工作区根集合。 */
@@ -95,6 +96,7 @@ export function buildDefaultToolRegistry(
   // 必须先于 host 后续挂载的审批中间件,避免一次审批扩大文件系统边界。
   if (!deferWorkspaceBoundary) registry.useRequest(buildWorkspaceBoundaryMiddleware(roots));
   registry.register(new ReadFileTool(roots));
+  registry.register(new ReadArtifactTool(workDir));
   registry.register(new WriteFileTool(roots));
   registry.register(new EditFileTool(roots));
   registry.register(

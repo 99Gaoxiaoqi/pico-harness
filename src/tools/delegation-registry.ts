@@ -26,6 +26,8 @@ import { bashCommandFromArgs } from "../approval/bash-paths.js";
 import { buildMinimalChildProcessEnv } from "../os/child-process-env.js";
 import { TodoTool } from "./todo.js";
 import type { HookService } from "../hooks/service.js";
+import { ReadArtifactTool } from "./artifact-read.js";
+import { resolvePicoPaths } from "../paths/pico-paths.js";
 
 export interface SubagentRegistryFactoryConfig {
   workDir: string;
@@ -48,6 +50,8 @@ export interface SubagentRegistryFactoryConfig {
   hookService?: HookService;
   /** 持久 Agent 按每次运行激活内联 Hook 的租约工厂。 */
   activateAgentHooks?: (profile: AgentProfile) => Promise<() => void | Promise<void>>;
+  /** 父会话的受信 artifact 根；worker worktree 不得改变此边界。 */
+  artifactBaseDir?: string;
 }
 
 /**
@@ -92,6 +96,7 @@ export function createSubagentRegistryFactory(
   const resolvedConfig: ResolvedSubagentRegistryFactoryConfig = {
     ...config,
     workspaceRoots: config.workspaceRoots ?? WorkspaceRoots.createSync(config.workDir),
+    artifactBaseDir: config.artifactBaseDir ?? resolvePicoPaths(config.workDir).workspace.artifacts,
   };
   const profiles = resolvedConfig.profiles ?? [];
 
@@ -122,6 +127,7 @@ export function createSubagentRegistryFactory(
 
 interface ResolvedSubagentRegistryFactoryConfig extends SubagentRegistryFactoryConfig {
   workspaceRoots: WorkspaceRoots;
+  artifactBaseDir: string;
 }
 
 /** 按 profile.tools 构造自定义角色的 registry */
@@ -131,6 +137,7 @@ function buildProfileRegistry(
   profile: AgentProfile,
 ): ToolRegistry {
   const registry = new ToolRegistry();
+  registry.register(new ReadArtifactTool(config.workDir, config.artifactBaseDir));
   for (const toolName of profile.tools) {
     if (request.mode === "explore" && EXPLORE_WRITE_TOOLS.has(toolName)) continue;
     if (toolName === "skill_view" && config.skillLoaderFactory) {
@@ -157,6 +164,7 @@ function buildModeRegistry(
   registry: ToolRegistry,
 ): ToolRegistry {
   registry.register(new ReadFileTool(config.workspaceRoots));
+  registry.register(new ReadArtifactTool(config.workDir, config.artifactBaseDir));
   registry.register(
     new SkillViewTool(
       config.skillLoaderFactory?.(config.workDir) ?? new SkillLoader(config.workDir),
