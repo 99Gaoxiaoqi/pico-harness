@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { writeJsonAtomic } from "../storage/atomic-json.js";
-import type { JsonObject } from "./protocol.js";
+import type { JsonObject, RuntimeUserInput } from "./protocol.js";
 
 const DESKTOP_CONVERSATION_STATE_VERSION = 1 as const;
 const MAX_IDEMPOTENCY_RECORDS = 500;
@@ -12,7 +12,7 @@ export interface DesktopQueuedInput {
   readonly queueId: string;
   readonly workspacePath: string;
   readonly sessionId: string;
-  readonly text: string;
+  readonly input: RuntimeUserInput;
   readonly createdAt: number;
 }
 
@@ -62,13 +62,13 @@ export class DesktopConversationStateStore {
   async enqueue(
     workspacePath: string,
     sessionId: string,
-    text: string,
+    input: RuntimeUserInput,
   ): Promise<DesktopQueuedInput> {
     const queued: DesktopQueuedInput = {
       queueId: this.generateId(),
       workspacePath: normalizeWorkspacePath(workspacePath),
       sessionId: requireNonEmpty(sessionId, "sessionId"),
-      text: requireNonEmpty(text, "text"),
+      input,
       createdAt: this.now(),
     };
     await this.mutate((state) => ({
@@ -169,7 +169,6 @@ function parseQueued(value: unknown, filePath: string): DesktopQueuedInput {
     typeof value["queueId"] !== "string" ||
     typeof value["workspacePath"] !== "string" ||
     typeof value["sessionId"] !== "string" ||
-    typeof value["text"] !== "string" ||
     typeof value["createdAt"] !== "number" ||
     !Number.isFinite(value["createdAt"])
   ) {
@@ -179,9 +178,44 @@ function parseQueued(value: unknown, filePath: string): DesktopQueuedInput {
     queueId: requireNonEmpty(value["queueId"], "queueId"),
     workspacePath: normalizeWorkspacePath(value["workspacePath"]),
     sessionId: requireNonEmpty(value["sessionId"], "sessionId"),
-    text: requireNonEmpty(value["text"], "text"),
+    input: parseStoredInput(value, filePath),
     createdAt: value["createdAt"],
   };
+}
+
+function parseStoredInput(value: Record<string, unknown>, filePath: string): RuntimeUserInput {
+  // Version 1 originally stored only `text`; retain migration compatibility for queued entries.
+  const candidate = isRecord(value["input"]) ? value["input"] : { text: value["text"] };
+  const kind = candidate["kind"];
+  if ((kind === undefined || kind === "text") && typeof candidate["text"] === "string") {
+    return {
+      ...(kind === "text" ? { kind } : {}),
+      text: requireNonEmpty(candidate["text"], "input.text"),
+    };
+  }
+  if (kind === "skill" && typeof candidate["name"] === "string") {
+    const args = candidate["args"];
+    if (args !== undefined && typeof args !== "string") {
+      throw new Error(`Desktop conversation queue contains an invalid skill input: ${filePath}`);
+    }
+    return {
+      kind,
+      name: requireNonEmpty(candidate["name"], "input.name"),
+      ...(typeof args === "string" ? { args } : {}),
+    };
+  }
+  if (
+    kind === "agent" &&
+    typeof candidate["name"] === "string" &&
+    typeof candidate["task"] === "string"
+  ) {
+    return {
+      kind,
+      name: requireNonEmpty(candidate["name"], "input.name"),
+      task: requireNonEmpty(candidate["task"], "input.task"),
+    };
+  }
+  throw new Error(`Desktop conversation queue contains an invalid input: ${filePath}`);
 }
 
 function parseIdempotency(value: unknown, filePath: string): DesktopIdempotencyRecord {

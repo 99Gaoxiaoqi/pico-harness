@@ -74,6 +74,8 @@ describe("desktop runtime protocol contract", () => {
         "jobs.list",
         "jobs.create",
         "config.get",
+        "catalog.agents",
+        "catalog.skills",
         "usage.get",
         "workspace.register",
         "workspace.status",
@@ -147,6 +149,7 @@ describe("desktop runtime protocol contract", () => {
     type SettingsUpdate = RuntimeParams<"session.settings.update">;
     type SettingsResult = RuntimeResult<"session.settings.get">;
     type GoalResult = RuntimeResult<"goal.get">;
+    type AgentCatalogResult = RuntimeResult<"catalog.agents">;
 
     expectTypeOf<StartParams>().toMatchTypeOf<{
       workspacePath: string;
@@ -168,6 +171,14 @@ describe("desktop runtime protocol contract", () => {
     expectTypeOf<GoalResult["goal"]>().toMatchTypeOf<{
       readonly activeGoalId: string | null;
     } | null>();
+    expectTypeOf<SessionSendParams["input"]>().toMatchTypeOf<
+      | { kind?: "text"; text: string }
+      | { kind: "skill"; name: string; args?: string }
+      | { kind: "agent"; name: string; task: string }
+    >();
+    expectTypeOf<AgentCatalogResult["agents"][number]["tools"]>().toEqualTypeOf<
+      readonly string[]
+    >();
     expectTypeOf<keyof RuntimeMethodMap>().toEqualTypeOf<(typeof RUNTIME_METHODS)[number]>();
 
     const request = createTypedRuntimeRequest("run.start", {
