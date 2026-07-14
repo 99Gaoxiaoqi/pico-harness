@@ -1415,7 +1415,7 @@ function modelRouteSchema(catalog?: SubagentModelCatalog): Record<string, unknow
   const disclosedRouteLines = boundedCatalogLines(routeLines);
   const routeDescriptionNotice =
     disclosedRouteLines.length < routeLines.length
-      ? `模型说明受长度限制，当前说明 ${disclosedRouteLines.length}/${routeLines.length} 条；enum 仍包含全部已披露规范路由。`
+      ? `模型说明受长度限制，当前说明 ${disclosedRouteLines.length}/${routeLines.length} 条；最终路由仍由 Runtime 权威校验。`
       : undefined;
   const truncationNotice = catalog.truncated
     ? `模型目录已截断：共 ${catalog.totalSelectableRoutes} 条可选路由，当前披露 ${catalog.routes.length} 条；未披露模型可使用完整 provider/model 路由。`
