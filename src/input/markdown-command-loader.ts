@@ -1,6 +1,6 @@
-import { readdir, readFile } from "node:fs/promises";
+import { readdir, readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join, relative, sep } from "node:path";
+import { basename, join, relative, sep } from "node:path";
 import * as yaml from "js-yaml";
 import { SkillLoader, type Skill } from "../context/skill.js";
 import { mapClaudeToolNames } from "../catalog/claude-compat.js";
@@ -210,7 +210,7 @@ async function loadCommandsFromDir(
   const files = await walkMarkdownFiles(commandsDir);
   const commands: MarkdownPromptCommand[] = [];
   for (const sourcePath of files) {
-    const name = commandNameFromPath(commandsDir, sourcePath);
+    const name = `${catalogSource.namespace ?? ""}${commandNameFromPath(commandsDir, sourcePath)}`;
     if (!COMMAND_PATH_PATTERN.test(name)) continue;
     const content = await readFile(sourcePath, "utf8");
     commands.push(parseMarkdownCommand(content, name, source, sourcePath, catalogSource));
@@ -219,6 +219,12 @@ async function loadCommandsFromDir(
 }
 
 async function walkMarkdownFiles(dir: string): Promise<string[]> {
+  const rootStat = await stat(dir).catch((err: unknown) => {
+    if (isErrnoException(err, "ENOENT")) return undefined;
+    throw err;
+  });
+  if (!rootStat) return [];
+  if (rootStat.isFile()) return dir.endsWith(".md") ? [dir] : [];
   let entries;
   try {
     entries = await readdir(dir, { withFileTypes: true });
@@ -242,6 +248,7 @@ async function walkMarkdownFiles(dir: string): Promise<string[]> {
 
 function commandNameFromPath(commandsDir: string, sourcePath: string): string {
   const rel = relative(commandsDir, sourcePath);
+  if (!rel) return basename(sourcePath, ".md");
   const withoutExt = rel.slice(0, -".md".length);
   return withoutExt.split(sep).join(":");
 }
