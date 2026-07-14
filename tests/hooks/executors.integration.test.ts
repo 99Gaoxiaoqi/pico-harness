@@ -203,8 +203,10 @@ describe("DefaultHookExecutor HTTP", () => {
 
   it("跨 origin redirect 不泄露敏感 header，超限响应 fail-open", async () => {
     let receivedAuthorization: string | undefined;
+    let receivedApiKey: string | undefined;
     const target = createServer((request, response) => {
       receivedAuthorization = request.headers.authorization;
+      receivedApiKey = request.headers["x-api-key"] as string | undefined;
       response.end("x".repeat(64));
     });
     const targetBase = await listen(target);
@@ -213,12 +215,19 @@ describe("DefaultHookExecutor HTTP", () => {
       response.end();
     });
     const sourceBase = await listen(source);
-    const executor = new DefaultHookExecutor({ workDir: process.cwd() });
+    const executor = new DefaultHookExecutor({
+      workDir: process.cwd(),
+      env: { HOOK_TOKEN: "redirect-secret" },
+    });
     const result = await executor.execute(
       resolved({
         type: "http",
         url: sourceBase,
-        headers: { Authorization: "Bearer static-secret" },
+        headers: {
+          Authorization: "Bearer static-secret",
+          "X-Api-Key": "${HOOK_TOKEN}",
+        },
+        allowedEnv: ["HOOK_TOKEN"],
         maxResponseBytes: 8,
       }),
       input,
@@ -226,8 +235,34 @@ describe("DefaultHookExecutor HTTP", () => {
     );
 
     expect(receivedAuthorization).toBeUndefined();
+    expect(receivedApiKey).toBeUndefined();
     expect(result).toMatchObject({ decision: "allow" });
     expect(result.diagnostics?.[0]?.handlerId).toBe("handler-1");
+  });
+
+  it("响应超过上限时主动取消底层流", async () => {
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("x".repeat(32)));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const executor = new DefaultHookExecutor({
+      workDir: process.cwd(),
+      fetch: vi.fn().mockResolvedValue(new Response(body, { status: 200 })),
+    });
+
+    await expect(
+      executor.execute(
+        resolved({ type: "http", url: "https://hooks.example.test", maxResponseBytes: 8 }),
+        input,
+        {},
+      ),
+    ).resolves.toMatchObject({ decision: "allow" });
+    expect(cancelled).toBe(true);
   });
 });
 

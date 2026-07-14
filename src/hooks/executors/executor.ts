@@ -166,7 +166,7 @@ export class DefaultHookExecutor implements HookExecutor {
         if (!location) throw new Error("HTTP redirect 缺少 Location");
         const next = new URL(location, url);
         assertHttpUrl(next);
-        if (next.origin !== url.origin) stripSensitiveHeaders(headers);
+        if (next.origin !== url.origin) stripCrossOriginHeaders(headers);
         url = next;
         continue;
       }
@@ -506,8 +506,10 @@ function resolveHeaders(
   return headers;
 }
 
-function stripSensitiveHeaders(headers: Headers): void {
-  for (const name of ["authorization", "cookie", "proxy-authorization"]) headers.delete(name);
+function stripCrossOriginHeaders(headers: Headers): void {
+  for (const name of [...headers.keys()]) {
+    if (name !== "content-type" && name !== "accept") headers.delete(name);
+  }
 }
 
 function assertHttpUrl(url: URL): void {
@@ -534,16 +536,21 @@ async function readLimitedText(
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
+  let completed = false;
   try {
     while (true) {
       if (signal.aborted) throw abortReason(signal);
       const chunk = await reader.read();
-      if (chunk.done) break;
+      if (chunk.done) {
+        completed = true;
+        break;
+      }
       total += chunk.value.byteLength;
       if (total > maxBytes) throw new Error(`HTTP handler 响应超过 ${maxBytes} bytes`);
       chunks.push(chunk.value);
     }
   } finally {
+    if (!completed) await reader.cancel().catch(() => undefined);
     reader.releaseLock();
   }
   const merged = new Uint8Array(total);

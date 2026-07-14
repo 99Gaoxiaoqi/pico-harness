@@ -112,7 +112,9 @@ describe("HookService integration", () => {
     const service = new HookService({
       workDir: "/workspace",
       sessionId: "session-1",
-      snapshot: snapshot([agent("a", 0), agent("b", 1), agent("c", 2)]),
+      snapshot: snapshot(
+        Array.from({ length: 20 }, (_, index) => agent(`agent-${String(index)}`, index)),
+      ),
       agentConcurrency: 2,
       executor: {
         async execute(entry) {
@@ -120,7 +122,7 @@ describe("HookService integration", () => {
           peak = Math.max(peak, active);
           await new Promise((resolve) => setTimeout(resolve, 10));
           active--;
-          if (entry.id === "c") throw new Error("broken verifier");
+          if (entry.id === "agent-19") throw new Error("broken verifier");
           return { decision: "allow" };
         },
       },

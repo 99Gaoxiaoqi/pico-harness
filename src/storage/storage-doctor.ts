@@ -12,10 +12,10 @@ import {
   StorageOperationJournal,
   type StorageOperation,
 } from "./operation-journal.js";
+import { RUNTIME_SCHEMA_VERSION } from "../tasks/runtime-types.js";
 
 const SHA256_RE = /^[a-f0-9]{64}$/u;
 const SAFE_OPERATION_ID_RE = /^[A-Za-z0-9._-]+$/u;
-const SUPPORTED_RUNTIME_SCHEMA_VERSION = 2;
 
 export const STORAGE_DOCTOR_SEVERITIES = ["info", "warning", "error", "critical"] as const;
 export type StorageDoctorSeverity = (typeof STORAGE_DOCTOR_SEVERITIES)[number];
@@ -304,26 +304,26 @@ export class StorageDoctor {
               "authoritative",
             ),
           );
-        } else if (version > SUPPORTED_RUNTIME_SCHEMA_VERSION) {
+        } else if (version > RUNTIME_SCHEMA_VERSION) {
           findings.push(
             finding(
               "runtime_schema_unsupported",
               "critical",
               "runtime",
               this.runtimeDatabasePath,
-              `runtime.sqlite schema ${version} is newer than supported ${SUPPORTED_RUNTIME_SCHEMA_VERSION}`,
+              `runtime.sqlite schema ${version} is newer than supported ${RUNTIME_SCHEMA_VERSION}`,
               "Use a pico build that supports this schema; never downgrade the authoritative database in place",
               "authoritative",
             ),
           );
-        } else if (version < SUPPORTED_RUNTIME_SCHEMA_VERSION) {
+        } else if (version < RUNTIME_SCHEMA_VERSION) {
           findings.push(
             finding(
               "runtime_schema_outdated",
               "warning",
               "runtime",
               this.runtimeDatabasePath,
-              `runtime.sqlite schema ${version} requires migration to ${SUPPORTED_RUNTIME_SCHEMA_VERSION}`,
+              `runtime.sqlite schema ${version} requires migration to ${RUNTIME_SCHEMA_VERSION}`,
               "Open it once with the current RuntimeStore to run the forward-only migration",
               "authoritative",
             ),
