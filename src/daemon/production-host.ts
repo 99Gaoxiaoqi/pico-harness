@@ -20,7 +20,7 @@ import {
   prepareBackgroundYoloPolicy,
 } from "../safety/background-yolo-policy.js";
 import { WorkspaceTrustStore } from "../security/workspace-trust.js";
-import type { CronJobRecord } from "../tasks/runtime-types.js";
+import type { CronJobRecord, CronRunRecord } from "../tasks/runtime-types.js";
 import { createCronWorkspaceRuntimeFactory } from "./cron-workspace-runtime.js";
 import {
   DesktopInteractionBroker,
@@ -28,6 +28,7 @@ import {
 } from "./desktop-interaction-broker.js";
 import { DesktopReporter, type DesktopReporterEvent } from "./desktop-reporter.js";
 import { DesktopRuntimeService } from "./desktop-runtime-service.js";
+import { DesktopAutomationService } from "./desktop-automation-service.js";
 import type { LocalDaemonEndpoint } from "./endpoint.js";
 import {
   createRuntimeEvent,
@@ -152,10 +153,60 @@ export function createProductionLocalDaemonHost(
       }
     },
   });
-  const desktopService = new DesktopRuntimeService({
+  const automations: DesktopAutomationService = new DesktopAutomationService({
+    prepareSecurity: async (workspacePath) => {
+      const route = await resolveDesktopAutomationRoute(workspacePath);
+      const credentialRef = credentialRefForModelRoute(route, workspacePath);
+      if (!(await credentialVault.has(credentialRef))) {
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.FORBIDDEN,
+          `模型路由 ${route.id} 尚未导入系统凭证库，无法创建持久 Automation`,
+        );
+      }
+      return {
+        credentialRef,
+        // The current desktop protocol has no tool/network-policy fields. Keep the
+        // first release fail-closed: model-only jobs are real, tools stay unavailable.
+        policySnapshot: {
+          mode: "yolo",
+          backgroundEnabled: true,
+          trustedWorkspace: true,
+          toolNetworkPolicy: "disabled",
+          allowedTools: [],
+          hardlineVersion: BACKGROUND_HARDLINE_VERSION,
+          hookVersion: BACKGROUND_HOOK_VERSION,
+          createdAt: Date.now(),
+        },
+      };
+    },
+    ensureWorkspaceRuntime: async (workspacePath) => {
+      await registrationStore.register(workspacePath);
+      if (host.status !== "running") {
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.CONFLICT,
+          "Runtime daemon 尚未就绪，Automation 已保存为禁用状态",
+        );
+      }
+      await host.refreshRegisteredWorkspaces();
+      if (!host.registeredWorkspaces.includes(workspacePath)) {
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.CONFLICT,
+          `工作区 Cron runtime 启动失败: ${workspacePath}`,
+        );
+      }
+    },
+    runNow: async (workspacePath, jobId): Promise<CronRunRecord> => {
+      if (host.status !== "running") {
+        throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.CONFLICT, "Runtime daemon 尚未就绪");
+      }
+      return host.runCronJobNow(workspacePath, jobId);
+    },
+  });
+  const desktopService: DesktopRuntimeService = new DesktopRuntimeService({
     runtimeService: service,
     registrationStore,
     trustStore,
+    automations,
     interactions: {
       respondApproval: ({ approvalId, decision, reason }) => {
         const pending = pendingApprovals.get(approvalId);
@@ -261,7 +312,7 @@ export function createProductionLocalDaemonHost(
       };
     },
   });
-  const host = new LocalDaemonHost({
+  const host: LocalDaemonHost = new LocalDaemonHost({
     service: desktopService,
     cronRuntimeFactory,
     registrationStore,
@@ -269,6 +320,34 @@ export function createProductionLocalDaemonHost(
   });
   service.setRegistrationChangedListener(() => host.refreshRegisteredWorkspaces());
   return host;
+}
+
+async function resolveDesktopAutomationRoute(workspacePath: string) {
+  const config = await loadPicoConfig(workspacePath);
+  const modelRouteId = config.model;
+  if (!modelRouteId) {
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.FORBIDDEN,
+      "工作区尚未配置默认 model 路由，无法创建 Automation",
+    );
+  }
+  const slash = modelRouteId.indexOf("/");
+  const providerId = modelRouteId.slice(0, slash);
+  const model = modelRouteId.slice(slash + 1);
+  const provider = config.providers[providerId];
+  if (!provider || !provider.models.includes(model)) {
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.FORBIDDEN,
+      `默认模型路由 ${modelRouteId} 不在显式 Provider 模型列表中`,
+    );
+  }
+  return {
+    id: modelRouteId,
+    provider: provider.protocol,
+    baseURL: provider.baseURL,
+    model,
+    apiKeyEnv: provider.apiKeyEnv,
+  };
 }
 
 async function resolveCronModelRoute(job: CronJobRecord) {
