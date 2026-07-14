@@ -4,7 +4,7 @@ export default defineConfig({
   build: {
     sourcemap: true,
     rollupOptions: {
-      external: ["electron"],
+      external: ["electron", "better-sqlite3", "node-pty"],
     },
   },
 });

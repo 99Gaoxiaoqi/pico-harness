@@ -3,7 +3,7 @@
   "compilerOptions": {
     "lib": ["ES2024"],
     "outDir": ".tsbuild/main",
-    "rootDir": ".",
+    "rootDir": "../..",
     "types": ["node", "electron"]
   },
   "include": [
