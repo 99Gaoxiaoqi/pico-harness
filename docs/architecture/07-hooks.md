@@ -42,4 +42,4 @@ Hookify 只生成 `.claw/hookify.<slug>.local.md` 受限规则：
 
 ## 前后台边界
 
-后台/Cron 仍使用现有独立 strict runner：只支持 legacy `command` Hook，网络关闭，故障 fail-closed，遇到其他 handler 显式拒绝启动。前台的 fail-open 和五类 handler 不得被悄然带入后台。
+后台/Cron 仍使用独立 strict runner：只支持 legacy `command` Hook，故障 fail-closed，遇到其他 handler 显式拒绝启动。Hook 网络遵循 Job 创建时冻结的工具网络策略；新建自然语言任务默认 `allow`，旧 Job 的 `disabled` / `allowlist` 不迁移。前台的 fail-open 和五类 handler 不得被悄然带入后台。

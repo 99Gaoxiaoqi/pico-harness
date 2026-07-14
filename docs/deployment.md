@@ -2,7 +2,7 @@
 
 pico-harness 当前收口为 TUI 单入口。唯一公开启动方式是 `pico` → TUI；`npm run dev` 是仓库开发时的等价入口。
 
-REST/WebSocket、ACP、飞书和 one-shot CLI 外壳曾在历史阶段完成，后已退役。Cron/headless 调度、Docker 部署和 Plugin runtime 不在当前支持范围。`runAgentFromCli` 仅供 TUI 内部装配，不构成公开 headless API。
+REST/WebSocket、ACP、飞书和 one-shot CLI 外壳曾在历史阶段完成，后已退役。`runAgentFromCli` 仅供 TUI 内部装配，不构成公开 headless API。持久 Cron 通过 TUI 创建并由当前 OS 用户的本机 daemon 执行；daemon 是内部 Runtime 宿主，不是公开 headless CLI。Docker 部署和 Plugin runtime 仍不在当前支持范围。
 
 ## 本地开发启动
 

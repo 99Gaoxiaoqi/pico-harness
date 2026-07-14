@@ -212,7 +212,7 @@ new CostTracker(provider, modelRoute, session)
 
 ### 当前部署边界
 
-Docker、Cron/headless 调度和 Plugin runtime 不在当前支持范围。历史 Docker 方案不构成公开入口或可支持的部署承诺。
+Docker、公开 headless CLI 和 Plugin runtime 不在当前支持范围。周期任务通过 TUI 确认后写入本机账本，并由用户级 daemon 在同一安全策略边界内执行；daemon 不构成远程或公开 CLI 入口。
 
 ### 环境变量
 
