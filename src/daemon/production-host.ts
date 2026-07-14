@@ -167,6 +167,7 @@ export function createProductionLocalDaemonHost(
             approvalNotifier: broker.notifyApproval,
             approvalManager: broker.approvalManager,
             askUserHandler: broker.askUserHandler,
+            ...(execution?.resumeExistingSession ? { resumeExistingSession: true } : {}),
             waitAtSafeBoundary: context.waitAtSafeBoundary,
             rewindPointSink: context.bindCheckpoint,
           },

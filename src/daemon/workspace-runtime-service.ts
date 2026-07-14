@@ -30,6 +30,8 @@ export interface DaemonRunExecutor {
 export interface DaemonRunExecution {
   readonly requestedModel?: string;
   readonly allowedTools?: readonly string[];
+  /** Desktop has already committed the visible user input to the Session JSONL. */
+  readonly resumeExistingSession?: boolean;
   readonly skillActivation?: {
     readonly name: string;
     readonly sourcePath?: string;
