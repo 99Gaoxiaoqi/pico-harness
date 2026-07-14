@@ -897,7 +897,8 @@ function formatAgentSummaries(agents: readonly ClaudeAgentSummary[]): string {
       const description = agent.description ? `: ${agent.description}` : "";
       const tools =
         agent.tools && agent.tools.length > 0 ? ` (tools: ${agent.tools.join(", ")})` : "";
-      return `- ${agent.name} [${formatAgentSource(agent.source)}]${description}${tools}`;
+      const model = agent.model ? ` (model: ${agent.model})` : "";
+      return `- ${agent.name} [${formatAgentSource(agent.source)}]${description}${tools}${model}`;
     }),
   ].join("\n");
 }
@@ -1614,6 +1615,7 @@ function renderAgentDispatchPrompt(agent: ClaudeAgent, task: string): string {
     agent_name: agent.name,
     goal: task,
     context,
+    ...(agent.model ? { agent: { model_route: agent.model } } : {}),
   };
 
   return [

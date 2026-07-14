@@ -175,7 +175,16 @@ function buildAgentDetailBlocks(
   const name = shortAgentTitle(agent, width);
   const completionPolicy =
     agent.completionPolicy === "optional" ? "background" : agent.completionPolicy;
-  const metadata = [agent.status, agent.mode, completionPolicy].filter(Boolean).join(" · ");
+  const model = formatModelRoute(agent.requestedModelRoute, agent.resolvedModelRoute);
+  const metadata = [
+    agent.status,
+    agent.mode,
+    completionPolicy,
+    model,
+    agent.thinkingEffort ? `thinking:${agent.thinkingEffort}` : undefined,
+  ]
+    .filter(Boolean)
+    .join(" · ");
   const blocks: DetailBlock[] = [
     singleRowBlock("title", truncateTerminalText(`← Main / ${name}`, width), "normal"),
     singleRowBlock(
@@ -210,6 +219,12 @@ function buildAgentDetailBlocks(
   }
 
   return blocks;
+}
+
+function formatModelRoute(requested: string | undefined, resolved: string | undefined) {
+  if (!requested) return resolved ? `model:${resolved}` : undefined;
+  if (!resolved || requested === resolved) return `model:${requested}`;
+  return `model:${requested}→${resolved}`;
 }
 
 function singleRowBlock(kind: DetailBlock["kind"], text: string, tone: DetailTone): DetailBlock {

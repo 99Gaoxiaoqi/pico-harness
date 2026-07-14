@@ -14,6 +14,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import * as yaml from "js-yaml";
 import { logger } from "../observability/logger.js";
+import { MAX_SUBAGENT_TURNS } from "./subagent-spec.js";
 
 /** 允许在 .claw/agents.yaml 的 tools 里声明的工具名白名单 */
 export const KNOWN_TOOL_NAMES: ReadonlySet<string> = new Set([
@@ -29,9 +30,6 @@ export const KNOWN_TOOL_NAMES: ReadonlySet<string> = new Set([
   "web_search",
 ]);
 
-/** maxTurns 上限:防止配置错误导致子代理无限跑 */
-const MAX_TURNS_LIMIT = 50;
-
 /** 一个自定义子代理角色定义 */
 export interface AgentProfile {
   /** 唯一名(模型按此名调 delegate_task 的 agent_name) */
@@ -44,6 +42,10 @@ export interface AgentProfile {
   readonly systemPromptOverride?: boolean;
   /** 该角色最大轮次。省略=用 runSub 默认值(10)。上限 50。 */
   readonly maxTurns?: number;
+  /** 子代理模型路由(provider/model)；省略或 inherit 时继承主会话。 */
+  readonly modelRouteId?: string | "inherit";
+  /** 子代理原生思考档位；最终由所选模型能力校验。 */
+  readonly thinkingEffort?: string;
   /** 该角色可用的工具名列表(必须是 KNOWN_TOOL_NAMES 子集) */
   readonly tools: string[];
 }
@@ -60,6 +62,8 @@ interface RawAgent {
   systemPrompt?: unknown;
   systemPromptOverride?: unknown;
   maxTurns?: unknown;
+  modelRouteId?: unknown;
+  thinkingEffort?: unknown;
   tools?: unknown;
 }
 
@@ -157,12 +161,12 @@ export class AgentProfileLoader {
             { index: i, name, maxTurns: raw.maxTurns },
             `[agent-profile] ${label} (name=${name}): maxTurns 必须是正整数,已忽略该字段`,
           );
-        } else if (n > MAX_TURNS_LIMIT) {
+        } else if (n > MAX_SUBAGENT_TURNS) {
           logger.warn(
-            { index: i, name, maxTurns: n, limit: MAX_TURNS_LIMIT },
-            `[agent-profile] ${label} (name=${name}): maxTurns ${n} 超过上限 ${MAX_TURNS_LIMIT},已截断`,
+            { index: i, name, maxTurns: n, limit: MAX_SUBAGENT_TURNS },
+            `[agent-profile] ${label} (name=${name}): maxTurns ${n} 超过上限 ${MAX_SUBAGENT_TURNS},已截断`,
           );
-          maxTurns = MAX_TURNS_LIMIT;
+          maxTurns = MAX_SUBAGENT_TURNS;
         } else {
           maxTurns = n;
         }
@@ -171,6 +175,8 @@ export class AgentProfileLoader {
       // systemPromptOverride:布尔,非布尔值忽略
       const systemPromptOverride =
         typeof raw.systemPromptOverride === "boolean" ? raw.systemPromptOverride : undefined;
+      const modelRouteId = optionalString(raw.modelRouteId);
+      const thinkingEffort = optionalString(raw.thinkingEffort);
 
       const profile: AgentProfile = {
         name,
@@ -178,6 +184,8 @@ export class AgentProfileLoader {
         systemPrompt,
         ...(systemPromptOverride !== undefined ? { systemPromptOverride } : {}),
         ...(maxTurns !== undefined ? { maxTurns } : {}),
+        ...(modelRouteId !== undefined ? { modelRouteId } : {}),
+        ...(thinkingEffort !== undefined ? { thinkingEffort } : {}),
         tools,
       };
 
@@ -221,6 +229,10 @@ export class AgentProfileLoader {
     }
     return tools;
   }
+}
+
+function optionalString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
 /** 判断是否为指定 code 的 ErrnoException */

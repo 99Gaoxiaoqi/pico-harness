@@ -42,6 +42,9 @@ export interface AgentNavigationItem {
   completionPolicy?: "required" | "optional" | "detached";
   currentAction?: string;
   summary?: string;
+  requestedModelRoute?: string;
+  resolvedModelRoute?: string;
+  thinkingEffort?: string;
   unreadCount?: number;
   timeline?: readonly AgentTimelineItem[];
   lifecycle?: TuiSubagentLifecycle;
@@ -99,6 +102,15 @@ export function projectAgentNavigationItems(
         ? { currentAction: subagent.activity.currentAction }
         : {}),
       ...(subagent.activity.summary !== undefined ? { summary: subagent.activity.summary } : {}),
+      ...(subagent.activity.requestedModelRoute !== undefined
+        ? { requestedModelRoute: subagent.activity.requestedModelRoute }
+        : {}),
+      ...(subagent.activity.resolvedModelRoute !== undefined
+        ? { resolvedModelRoute: subagent.activity.resolvedModelRoute }
+        : {}),
+      ...(subagent.activity.thinkingEffort !== undefined
+        ? { thinkingEffort: subagent.activity.thinkingEffort }
+        : {}),
       timeline: subagent.timeline.map(projectTimelineItem),
       lifecycle: subagent.lifecycle,
     }));
