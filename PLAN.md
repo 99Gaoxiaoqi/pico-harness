@@ -87,7 +87,7 @@
 - [x] 更新真实模型 E2E 的过期契约、Schema 与安全 fixture；恢复本地测试契约。
 - [x] 按 `realpath(cwd) + sessionId` 统一隔离 Session settings、会话授权与 CLI resume/fork 语义缓存。
 - [x] 按大小写不敏感的 canonical name 合并 Agent 目录，native 无效/空权限声明作为 tombstone 阻止低优先级回落。
-- [x] Hook executor 在 dispose 时等待子进程真实 `close`，并固化 PostToolUse 仅接收截断后输出的契约。
+- [x] Hook executor 在 dispose 时等待进程树终止屏障（POSIX 进程组 / Windows `taskkill /T /F`），降级 HookRunner 也纳入 Registry drain；同时固化 PostToolUse 仅接收截断后输出的契约。
 - [x] 在最终代码状态运行 lint、typecheck、build、全量集成测试、PR-safe E2E、相关真实模型 E2E 和格式检查。
 
 ## 最终验证（2026-07-14）
