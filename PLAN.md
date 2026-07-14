@@ -30,7 +30,7 @@
 - [x] 展示 requested/resolved route、thinking effort 与 fallback（首版 fallback 为禁用）。
 - [x] 完成本地集成成功/失败路径和并发隔离测试。
 - [x] 添加真实模型自然语言 E2E，覆盖自然语言生成 `delegate_task.agent` 与 route 解析。
-- [ ] 在具备 `LLM_BASE_URL`、`LLM_API_KEY`、`LLM_MODEL` 的环境执行真实模型 E2E。
+- [x] 在具备真实凭证的环境执行 DeepSeek 主代理 → GLM 子代理自然语言路由 E2E。
 
 ## 验收标准
 
@@ -53,4 +53,4 @@
 - Node 22：相关集成与 TUI 回归 21 个文件、143 条测试通过。
 - `npm run lint`、`npm run typecheck`、`npm run build` 通过。
 - `npm audit --audit-level=high`：0 个漏洞。
-- 真实模型 E2E 尚未执行：当前环境未配置三项 `LLM_*` 凭证变量。
+- 真实模型 E2E：DeepSeek 主代理根据自然语言创建临时 Agent，并将子代理路由到 GLM，1 条通过。
