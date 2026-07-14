@@ -71,6 +71,8 @@ import {
   DEFAULT_INTERACTION_MODE,
   effectiveSessionReasoningLevel,
   getOrCreateSessionSettings,
+  migrateSessionModelRoute,
+  resolveRestoredSessionModelRoute,
   restoreSessionInteractionMode,
   setSessionAdditionalDirectories,
   setSessionTools,
@@ -747,7 +749,7 @@ async function startLineModeRepl(opts: ReplOptions): Promise<void> {
   process.on("SIGINT", onSigint);
 
   const resolveActiveRoute = async () => {
-    let requestedModel =
+    const fallbackRouteId =
       picoConfig.model ?? (opts.modelExplicit || process.env.LLM_MODEL ? opts.model : undefined);
     // 第二轮开始读取会话已持久化的模型选择，与完整 TUI 的 bundle 装配保持一致。
     // fork 首轮由 runAgentFromCli 先执行 Saga，此时目标会话尚不可安全预创建。
@@ -756,13 +758,33 @@ async function startLineModeRepl(opts: ReplOptions): Promise<void> {
         globalSessionManager.get(selection.sessionId, opts.workDir) ??
         (await globalSessionManager.getOrCreate(selection.sessionId, opts.workDir));
       const restoredSettings = (await session.readHydrationSnapshot()).runtime.settings;
-      requestedModel =
-        restoredSettings?.modelRouteId ??
-        restoredSettings?.model ??
-        picoConfig.model ??
-        (opts.modelExplicit || process.env.LLM_MODEL ? opts.model : undefined);
+      const route = resolveRestoredSessionModelRoute(
+        modelRouter,
+        restoredSettings,
+        fallbackRouteId,
+      );
+      const settings = getOrCreateSessionSettings(
+        {
+          sessionId: selection.sessionId,
+          sessionMode: selection.mode,
+          cwd: opts.workDir,
+          provider: route.provider,
+          model: route.model,
+          modelRouteId: route.id,
+          ...(opts.thinkingEffort !== undefined ? { thinkingEffort: opts.thinkingEffort } : {}),
+        },
+        { persistence: session },
+      );
+      if (
+        settings.modelRouteId !== route.id ||
+        settings.model !== route.model ||
+        settings.provider !== route.provider
+      ) {
+        migrateSessionModelRoute(settings, route);
+      }
+      return modelRouter.providerConfig(route.id, opts.thinkingEffort);
     }
-    const route = modelRouter.resolve(requestedModel) ?? modelRouter.require(opts.model);
+    const route = modelRouter.require(fallbackRouteId);
     return modelRouter.providerConfig(route.id, opts.thinkingEffort);
   };
 
@@ -1011,16 +1033,13 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     // 在 route / WorkspaceRoots / provider 装配前先冻结 Session 的消息与运行态。
     const hydration = await session.readHydrationSnapshot();
     const restoredSettings = hydration.runtime.settings;
-    const requestedModel =
-      restoredSettings?.modelRouteId ??
-      restoredSettings?.model ??
-      picoConfig.model ??
-      (opts.modelExplicit || process.env.LLM_MODEL ? opts.model : undefined);
     // 配置从 legacy 环境变量迁移到 providerID/modelID 后，旧 session 仍可能保存
     // legacy/<model>。优先恢复精确路由，失效时按模型名或项目默认路由平滑迁移。
-    const initialRoute =
-      modelRouter.resolve(requestedModel) ??
-      modelRouter.require(restoredSettings?.model ?? picoConfig.model);
+    const initialRoute = resolveRestoredSessionModelRoute(
+      modelRouter,
+      restoredSettings,
+      picoConfig.model ?? (opts.modelExplicit || process.env.LLM_MODEL ? opts.model : undefined),
+    );
     const workspaceRoots = await WorkspaceRoots.create(
       opts.workDir,
       selection.mode === "fork"
@@ -1086,6 +1105,13 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         },
         { persistence: session },
       );
+      if (
+        settings.modelRouteId !== initialRoute.id ||
+        settings.model !== initialRoute.model ||
+        settings.provider !== initialRoute.provider
+      ) {
+        migrateSessionModelRoute(settings, initialRoute);
+      }
       coordinateSessionReasoningLevel(settings, modelRouter);
       setSessionAdditionalDirectories(settings, workspaceRoots.list().slice(1));
 
@@ -1946,7 +1972,7 @@ async function disposeUnpublishedTuiBundle(
 async function discardFailedTuiFork(sessionId: string, workDir: string): Promise<void> {
   const orphan = globalSessionManager.delete(sessionId, workDir);
   await orphan?.close();
-  forgetSessionSettings(sessionId);
+  forgetSessionSettings(sessionId, workDir);
 }
 
 export function createTuiUpdateScheduler<T>(
