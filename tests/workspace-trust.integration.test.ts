@@ -75,7 +75,14 @@ describe("workspace trust startup integration", () => {
     await expect(runCli(["--dir", workspace], firstRuntime)).resolves.toBe(0);
 
     const canonicalWorkspace = await resolveCliWorkDir(workspace);
-    expect(firstEvents).toEqual(["resolve-dir", "trust", "tokenizer", "session", "tui"]);
+    expect(firstEvents).toEqual([
+      "resolve-dir",
+      "trust",
+      "migration",
+      "tokenizer",
+      "session",
+      "tui",
+    ]);
     expect(prompt.requestTrust).toHaveBeenCalledOnce();
     expect(trustRequests[0]?.workspacePath).toBe(canonicalWorkspace);
     const displayedRisks = trustRequests[0]?.risks.join(" ") ?? "";
@@ -171,6 +178,9 @@ function createRuntime(options: {
         store: options.store,
         ...(options.prompt ? { prompt: options.prompt } : {}),
       });
+    },
+    migrateLegacyWorkspace: async () => {
+      options.events.push("migration");
     },
     primeTokenizer: async () => {
       options.events.push("tokenizer");
