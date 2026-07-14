@@ -157,10 +157,17 @@ function applySessionEvent(state: MutableReplayState, event: SessionEvent): Muta
       history = history.slice(event.data.fromIndex);
       historySequences = historySequences.slice(event.data.fromIndex);
       break;
-    case "history.rewound":
+    case "history.rewound": {
+      const cutoffSequence = historySequences[event.data.messageIndex - 1];
       history = history.slice(0, event.data.messageIndex);
       historySequences = historySequences.slice(0, event.data.messageIndex);
+      ({ transcriptEvents, transcriptEventSequences } = retainTranscriptThroughSequence(
+        transcriptEvents,
+        transcriptEventSequences,
+        cutoffSequence,
+      ));
       break;
+    }
     case "history.compacted": {
       const retainedSequences =
         event.data.retainedMessages.length === 0
@@ -170,13 +177,24 @@ function applySessionEvent(state: MutableReplayState, event: SessionEvent): Muta
         structuredClone(event.data.summaryMessage),
         ...structuredClone(event.data.retainedMessages),
       ];
-      historySequences = [event.seq, ...retainedSequences];
+      historySequences = [
+        retainedSequences.length > 0 ? retainedSequences[0]! - 0.5 : event.seq,
+        ...retainedSequences,
+      ];
       break;
     }
     case "legacy.undo": {
       const { cutIndex, removedCount } = findLegacyUndoCut(history, event.data.count);
-      if (removedCount > 0) history = history.slice(0, cutIndex);
-      if (removedCount > 0) historySequences = historySequences.slice(0, cutIndex);
+      if (removedCount > 0) {
+        const cutoffSequence = historySequences[cutIndex - 1];
+        history = history.slice(0, cutIndex);
+        historySequences = historySequences.slice(0, cutIndex);
+        ({ transcriptEvents, transcriptEventSequences } = retainTranscriptThroughSequence(
+          transcriptEvents,
+          transcriptEventSequences,
+          cutoffSequence,
+        ));
+      }
       break;
     }
     case "runtime.checkpoint":
@@ -207,6 +225,26 @@ function applySessionEvent(state: MutableReplayState, event: SessionEvent): Muta
     maxSeq: Math.max(state.maxSeq, event.seq),
     epoch: Math.max(state.epoch, event.epoch),
   };
+}
+
+function retainTranscriptThroughSequence(
+  events: readonly TranscriptEvent[],
+  sequences: readonly number[],
+  cutoffSequence: number | undefined,
+): { transcriptEvents: TranscriptEvent[]; transcriptEventSequences: number[] } {
+  if (cutoffSequence === undefined) {
+    return { transcriptEvents: [], transcriptEventSequences: [] };
+  }
+  const transcriptEvents: TranscriptEvent[] = [];
+  const transcriptEventSequences: number[] = [];
+  sequences.forEach((sequence, index) => {
+    if (sequence > cutoffSequence) return;
+    const event = events[index];
+    if (!event) return;
+    transcriptEvents.push(event);
+    transcriptEventSequences.push(sequence);
+  });
+  return { transcriptEvents, transcriptEventSequences };
 }
 
 function isCompactionSummaryMessage(message: Message): boolean {

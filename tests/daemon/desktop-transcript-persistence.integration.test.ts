@@ -127,6 +127,94 @@ describe("Desktop Transcript durable projection integration", () => {
     expect(JSON.stringify(page.items)).not.toContain("SECRET_RAW_TOOL_RESULT");
   });
 
+  it("keeps a compaction summary before retained messages", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-desktop-compaction-order-"));
+    cleanups.push(workDir);
+    const identity = createSessionIdentity({ sessionId: "desktop-compaction", cwd: workDir });
+    const store = new SessionStore(join(workDir, "session.jsonl"), identity);
+    const retainedMessage: Message = { role: "user", content: "retained user message" };
+    const summaryMessage: Message = {
+      role: "assistant",
+      content: "summary of older messages",
+      providerData: { picoKind: "compaction_summary" },
+    };
+    await store.commitMessage({ role: "user", content: "old user message" });
+    await store.commitMessage({ role: "assistant", content: "old assistant message" });
+    await store.commitMessage(retainedMessage);
+    await store.commitCompaction(summaryMessage, [retainedMessage]);
+
+    const replay = replaySessionRecords(await store.loadStrict());
+    await store.close();
+    const page = projectRuntimeTranscript(
+      hydration(
+        workDir,
+        replay.history,
+        replay.historySequences,
+        replay.transcriptEvents,
+        replay.transcriptEventSequences,
+        replay.maxSeq,
+        "desktop-compaction",
+      ),
+      { limit: 100 },
+    );
+
+    expect(page.items.map((item) => ("content" in item ? item.content : item.kind))).toEqual([
+      "summary of older messages",
+      "retained user message",
+    ]);
+  });
+
+  it("drops structured entries from a rewound turn and keeps later replacements", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-desktop-rewind-transcript-"));
+    cleanups.push(workDir);
+    const identity = createSessionIdentity({ sessionId: "desktop-rewind", cwd: workDir });
+    const store = new SessionStore(join(workDir, "session.jsonl"), identity);
+    await store.commitMessage({ role: "user", content: "keep this prompt" });
+    await store.commitTranscriptEvent(
+      entryEvent(1, "old-plan", { kind: "plan", title: "obsolete plan", state: "active" }),
+    );
+    await store.commitMessage({ role: "assistant", content: "obsolete answer" });
+    await store.commitTranscriptEvent(
+      entryEvent(2, "old-tool", {
+        kind: "tool",
+        name: "write_file",
+        args: '{"path":"obsolete.txt"}',
+        status: "completed",
+      }),
+    );
+    await store.commitRewind(1);
+    await store.commitMessage({ role: "assistant", content: "replacement answer" });
+    await store.commitTranscriptEvent(
+      entryEvent(1, "new-changes", {
+        kind: "changes",
+        title: "replacement changes",
+        state: "ready",
+      }),
+    );
+
+    const replay = replaySessionRecords(await store.loadStrict());
+    await store.close();
+    const page = projectRuntimeTranscript(
+      hydration(
+        workDir,
+        replay.history,
+        replay.historySequences,
+        replay.transcriptEvents,
+        replay.transcriptEventSequences,
+        replay.maxSeq,
+        "desktop-rewind",
+      ),
+      { limit: 100 },
+    );
+
+    expect(page.items.map((item) => item.kind)).toEqual([
+      "userMessage",
+      "assistantMessage",
+      "changes",
+    ]);
+    expect(JSON.stringify(page.items)).not.toContain("obsolete");
+  });
+
   it("paginates by serialized UTF-8 bytes and marks an oversized item as truncated", () => {
     const workDir = "/tmp/pico-transcript-byte-budget";
     const hugeMultibyteMessage = "汉🤖".repeat(350_000);
@@ -196,14 +284,15 @@ function hydration(
   transcriptEvents: readonly TranscriptEvent[],
   transcriptEventSequences: readonly number[],
   persistenceSequence: number,
+  sessionId = "desktop-restart",
 ): SessionHydrationSnapshot {
   return {
     schemaVersion: 1,
     persistenceSequence,
-    sessionId: "desktop-restart",
-    conversationId: "desktop-restart:0",
+    sessionId,
+    conversationId: `${sessionId}:0`,
     workDir,
-    identity: createSessionIdentity({ sessionId: "desktop-restart", cwd: workDir }),
+    identity: createSessionIdentity({ sessionId, cwd: workDir }),
     createdAt: "2026-07-15T00:00:00.000Z",
     updatedAt: "2026-07-15T00:00:01.000Z",
     messages: structuredClone(messages),
