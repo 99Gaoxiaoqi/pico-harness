@@ -257,36 +257,53 @@ async function runLimited<T extends ResolvedHookHandler>(
 }
 
 class Semaphore {
-  private active = 0;
-  private readonly waiters: Array<() => void> = [];
+  private available: number;
+  private readonly waiters: Array<{
+    resolve: (release: () => void) => void;
+    onAbort?: () => void;
+    signal?: AbortSignal;
+  }> = [];
 
-  constructor(private readonly limit: number) {}
+  constructor(private readonly limit: number) {
+    this.available = limit;
+  }
 
   async acquire(signal?: AbortSignal): Promise<() => void> {
     if (this.limit <= 0) throw new Error("Semaphore limit must be positive");
-    if (this.active >= this.limit) {
-      await new Promise<void>((resolve, reject) => {
-        const onAbort = (): void => {
-          const index = this.waiters.indexOf(onReady);
-          if (index >= 0) this.waiters.splice(index, 1);
-          reject(signal ? abortReason(signal) : new Error("Hook dispatch aborted"));
-        };
-        const onReady = (): void => {
-          signal?.removeEventListener("abort", onAbort);
-          resolve();
-        };
-        this.waiters.push(onReady);
-        signal?.addEventListener("abort", onAbort, { once: true });
-      });
-    }
     if (signal?.aborted) throw abortReason(signal);
-    this.active++;
+    if (this.available > 0 && this.waiters.length === 0) {
+      this.available--;
+      return this.makeRelease();
+    }
+
+    return await new Promise<() => void>((resolve, reject) => {
+      const waiter: (typeof this.waiters)[number] = { resolve, ...(signal ? { signal } : {}) };
+      if (signal) {
+        waiter.onAbort = () => {
+          const index = this.waiters.indexOf(waiter);
+          if (index >= 0) this.waiters.splice(index, 1);
+          reject(abortReason(signal));
+        };
+        signal.addEventListener("abort", waiter.onAbort, { once: true });
+      }
+      this.waiters.push(waiter);
+    });
+  }
+
+  private makeRelease(): () => void {
     let released = false;
     return () => {
       if (released) return;
       released = true;
-      this.active--;
-      this.waiters.shift()?.();
+      const waiter = this.waiters.shift();
+      if (waiter) {
+        if (waiter.signal && waiter.onAbort) {
+          waiter.signal.removeEventListener("abort", waiter.onAbort);
+        }
+        waiter.resolve(this.makeRelease());
+        return;
+      }
+      this.available++;
     };
   }
 }

@@ -15,6 +15,7 @@ import {
   MERGE_REQUEST_STATUSES,
   PROVIDER_CALL_PURPOSES,
   PROVIDER_CALL_STATUSES,
+  RUNTIME_SCHEMA_VERSION,
   type CompletionOutboxRecord,
   type CronJobRecord,
   type CronRunRecord,
@@ -41,7 +42,6 @@ import {
   isTerminalJobStatus,
 } from "./runtime-types.js";
 
-const RUNTIME_SCHEMA_VERSION = 5;
 const DEFAULT_LEASE_TTL_MS = 30_000;
 
 export class RuntimeConflictError extends Error {
