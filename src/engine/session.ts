@@ -24,6 +24,7 @@ import {
 } from "../schema/message.js";
 import type { CostStatus } from "../observability/pricing.js";
 import { logger } from "../observability/logger.js";
+import type { TranscriptEvent } from "../presentation/transcript-event-store.js";
 import {
   SessionStore,
   SessionWriteUncertainError,
@@ -206,6 +207,8 @@ export class Session implements SessionRuntimePersistence {
   totalUnknownCostReports = 0;
 
   private history: Message[] = [];
+  /** 与 history 共用 Session JSONL 的 UI-neutral 结构化事件。 */
+  private transcriptEvents: TranscriptEvent[] = [];
 
   /**
    * ToolResult 外挂元数据(按 toolCallId 索引),供 MicroCompaction 判断
@@ -435,6 +438,7 @@ export class Session implements SessionRuntimePersistence {
 
     const replay = replaySessionRecords(records);
     this.history = replay.history;
+    this.transcriptEvents = [...replay.transcriptEvents];
     this.persistedSettings = replay.runtime.settings;
     this.persistedGoal = replay.runtime.goal;
     // 旧 JSONL 没有 runtime_state:从当前有效 assistant message.usage 回填 token。
@@ -675,6 +679,7 @@ export class Session implements SessionRuntimePersistence {
       createdAt: this.createdAt.toISOString(),
       updatedAt: this.updatedAt.toISOString(),
       messages: structuredClone(this.history),
+      transcriptEvents: structuredClone(this.transcriptEvents),
       runtime: this.getRuntimeStateSnapshot(),
     };
     const barrier = this.persistenceTail;
@@ -1647,6 +1652,32 @@ export class Session implements SessionRuntimePersistence {
    */
   get recordStore(): SessionStore | undefined {
     return this.store;
+  }
+
+  /**
+   * 将完整 Transcript 事件追加到 Session JSONL。调用方不能跳号，
+   * 以便重启后可由共享 projector 确定性恢复。
+   */
+  async recordTranscriptEvent(
+    event: TranscriptEvent,
+    options?: { readonly journalEventId?: string },
+  ): Promise<CommitReceipt> {
+    const expectedSequence = (this.transcriptEvents.at(-1)?.sequence ?? 0) + 1;
+    if (event.sequence !== expectedSequence) {
+      throw new Error(
+        `Transcript event sequence mismatch: ${event.sequence}, expected ${expectedSequence}`,
+      );
+    }
+    const durableEvent = structuredClone(event);
+    const receipt = await this.commitPersistence("transcript.event.recorded", (store, seq) =>
+      store.commitTranscriptEvent(durableEvent, {
+        expectedSeq: seq,
+        ...(options?.journalEventId ? { eventId: options.journalEventId } : {}),
+      }),
+    );
+    this.transcriptEvents.push(durableEvent);
+    this.updatedAt = new Date();
+    return receipt;
   }
 
   /** 所有 canonical event 共用一条队列，保证 seq 分配与物理 append 顺序一致。 */

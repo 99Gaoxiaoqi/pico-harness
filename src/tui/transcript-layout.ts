@@ -111,7 +111,14 @@ function entryRows(
     const label = `Skill activated: ${entry.name}${entry.args ? ` ${entry.args}` : ""}`;
     return visualRows(label, wrapWidth).length + 1;
   }
-  return visualRows(entry.content, wrapWidth).length + 1;
+  if (entry.kind === "plan") {
+    return visualRows([entry.title, entry.detail].filter(Boolean).join("\n"), wrapWidth).length + 1;
+  }
+  if (entry.kind === "approval" || entry.kind === "prompt" || entry.kind === "changes") {
+    return visualRows([entry.title, entry.detail].filter(Boolean).join("\n"), wrapWidth).length + 1;
+  }
+  if (entry.kind === "run-boundary") return 1;
+  return "content" in entry ? visualRows(entry.content, wrapWidth).length + 1 : 1;
 }
 
 function normalizeWrapWidth(width: number): number {

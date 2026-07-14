@@ -397,7 +397,7 @@ describe("DesktopRuntimeService integration", () => {
       }),
     );
     expect(firstPage).toMatchObject({
-      items: [{ kind: "assistantMessage", content: "reply:检查项目" }],
+      items: [{ kind: "runBoundary", status: "succeeded" }],
       nextBefore: expect.any(String),
       revision: expect.any(String),
       queuedInputs: [],
@@ -425,21 +425,27 @@ describe("DesktopRuntimeService integration", () => {
         }),
       ),
     ).rejects.toMatchObject({ code: RUNTIME_ERROR_CODES.CONFLICT });
-    await expect(
-      fixture.service.handle(
-        createRuntimeRequest("session.transcript", {
-          workspacePath: fixture.workspace,
-          sessionId: firstResult.session.sessionId,
-        }),
-      ),
-    ).resolves.toMatchObject({
-      items: [
-        { kind: "userMessage", content: "检查项目" },
-        { kind: "assistantMessage", content: "reply:检查项目" },
-        { kind: "userMessage", content: "继续解释" },
-        { kind: "assistantMessage", content: "reply:继续解释" },
-      ],
-    });
+    const completeTranscript = (await fixture.service.handle(
+      createRuntimeRequest("session.transcript", {
+        workspacePath: fixture.workspace,
+        sessionId: firstResult.session.sessionId,
+      }),
+    )) as { items: Array<{ kind: string; content?: string; status?: string }> };
+    expect(
+      completeTranscript.items
+        .filter((item) => item.kind === "userMessage" || item.kind === "assistantMessage")
+        .map(({ kind, content }) => ({ kind, content })),
+    ).toEqual([
+      { kind: "userMessage", content: "检查项目" },
+      { kind: "assistantMessage", content: "reply:检查项目" },
+      { kind: "userMessage", content: "继续解释" },
+      { kind: "assistantMessage", content: "reply:继续解释" },
+    ]);
+    expect(
+      completeTranscript.items
+        .filter((item) => item.kind === "runBoundary")
+        .map((item) => item.status),
+    ).toEqual(["running", "succeeded", "running", "succeeded"]);
     await fixture.service.close();
   });
 

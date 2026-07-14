@@ -1,4 +1,5 @@
 import type { Message } from "../schema/message.js";
+import type { TranscriptEvent } from "../presentation/transcript-event-store.js";
 import {
   createEmptyUsageSnapshot,
   SESSION_RUNTIME_STATE_VERSION,
@@ -12,6 +13,7 @@ import type { LegacySessionRecord, SessionEvent, SessionRecord } from "./session
  */
 export interface SessionReplayState {
   readonly history: Message[];
+  readonly transcriptEvents: readonly TranscriptEvent[];
   readonly runtime: SessionRuntimeStateSnapshot;
   readonly maxSeq: number;
   readonly epoch: number;
@@ -23,6 +25,7 @@ export function replaySessionRecords(records: readonly SessionRecord[]): Session
     .sort((a, b) => a.seq - b.seq);
   let state: MutableReplayState = {
     history: [],
+    transcriptEvents: [],
     runtime: {
       stateVersion: SESSION_RUNTIME_STATE_VERSION,
       usage: createEmptyUsageSnapshot(),
@@ -38,6 +41,7 @@ export function replaySessionRecords(records: readonly SessionRecord[]): Session
 
   return {
     history: structuredClone(state.history),
+    transcriptEvents: structuredClone(state.transcriptEvents),
     runtime: structuredClone(state.runtime),
     maxSeq: state.maxSeq,
     epoch: state.epoch,
@@ -122,6 +126,7 @@ export function findLegacyUndoCut(
 
 interface MutableReplayState {
   history: Message[];
+  transcriptEvents: TranscriptEvent[];
   runtime: SessionRuntimeStateSnapshot;
   maxSeq: number;
   epoch: number;
@@ -129,6 +134,7 @@ interface MutableReplayState {
 
 function applySessionEvent(state: MutableReplayState, event: SessionEvent): MutableReplayState {
   let history = state.history;
+  let transcriptEvents = state.transcriptEvents;
   let runtime = state.runtime;
   switch (event.kind) {
     case "message.appended":
@@ -164,9 +170,13 @@ function applySessionEvent(state: MutableReplayState, event: SessionEvent): Muta
     case "session.seeded":
       history = [...structuredClone(event.data.messages)];
       break;
+    case "transcript.event.recorded":
+      transcriptEvents = [...transcriptEvents, structuredClone(event.data.event)];
+      break;
   }
   return {
     history,
+    transcriptEvents,
     runtime,
     maxSeq: Math.max(state.maxSeq, event.seq),
     epoch: Math.max(state.epoch, event.epoch),

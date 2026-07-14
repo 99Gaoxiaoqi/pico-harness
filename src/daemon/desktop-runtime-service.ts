@@ -17,6 +17,7 @@ import { loadPicoConfig, type PicoConfig } from "../input/pico-config.js";
 import { McpConnectionManager } from "../mcp/manager.js";
 import { CostTracker } from "../observability/tracker.js";
 import { ensureSessionUsageBaseline } from "../observability/usage-baseline.js";
+import type { TranscriptEntry } from "../presentation/transcript-event-store.js";
 import { createProvider, type ProviderKind } from "../provider/factory.js";
 import { loadModelRouter } from "../provider/model-router.js";
 import { resolveProviderProfile } from "../provider/profile.js";
@@ -36,6 +37,7 @@ import {
   createRuntimeEvent,
   createRuntimeRequest,
   isJsonValue,
+  MAX_RUNTIME_FRAME_BYTES,
   RUNTIME_ERROR_CODES,
   RuntimeProtocolError,
   type JsonValue,
@@ -104,6 +106,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   private readonly now: () => number;
   private readonly unsubscribeRuntimeEvents: () => void;
   private readonly pendingSends = new Map<string, Promise<JsonObject>>();
+  private transcriptPersistenceTail: Promise<void> = Promise.resolve();
   private resourceVersion = 0;
 
   constructor(private readonly options: DesktopRuntimeServiceOptions) {
@@ -117,9 +120,20 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     this.createSessionId = options.createSessionId ?? createCliSessionId;
     this.now = options.now ?? Date.now;
     this.unsubscribeRuntimeEvents = options.runtimeService.subscribe((event) => {
-      if (event.topic !== "run.finished" || !event.scope.sessionId) return;
-      void this.consumeNextQueued(event.scope.workspacePath, event.scope.sessionId).catch(
-        (error: unknown) => this.publishConversationFailure(event.scope.workspacePath, error),
+      const sessionId = event.scope.sessionId;
+      if (!sessionId) return;
+      if (isRunBoundaryTopic(event.topic) && event.scope.runId) {
+        this.transcriptPersistenceTail = this.transcriptPersistenceTail.then(
+          () => this.persistRunBoundary(event),
+          () => this.persistRunBoundary(event),
+        );
+        void this.transcriptPersistenceTail.catch((error: unknown) =>
+          this.publishConversationFailure(event.scope.workspacePath, error),
+        );
+      }
+      if (event.topic !== "run.finished") return;
+      void this.consumeNextQueued(event.scope.workspacePath, sessionId).catch((error: unknown) =>
+        this.publishConversationFailure(event.scope.workspacePath, error),
       );
     });
   }
@@ -257,9 +271,10 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     return this.options.runtimeService.subscribe(listener);
   }
 
-  close(): Promise<void> {
+  async close(): Promise<void> {
     this.unsubscribeRuntimeEvents();
-    return this.options.runtimeService.close();
+    await this.transcriptPersistenceTail.catch(() => undefined);
+    await this.options.runtimeService.close();
   }
 
   private async listWorkspaces(): Promise<JsonValue> {
@@ -579,14 +594,35 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     readonly expectedRevision?: string;
   }): Promise<JsonValue> {
     const canonical = await canonicalizeWorkspacePath(params.workspacePath);
+    await this.transcriptPersistenceTail;
     const session = await this.requireSession(canonical, params.sessionId);
     const runtimeSession = await globalSessionManager.getOrCreate(params.sessionId, canonical, {
       persistence: true,
     });
     const snapshot = await runtimeSession.readHydrationSnapshot();
+    const activeRun = await this.findActiveSessionRun(canonical, params.sessionId);
+    const queuedInputs = (
+      await this.conversationStateStore.listQueued(canonical, params.sessionId)
+    ).map((input) => ({
+      queueId: input.queueId,
+      sessionId: input.sessionId,
+      input: { text: input.text },
+      createdAt: input.createdAt,
+    }));
+    const fixedBytes = Buffer.byteLength(
+      JSON.stringify({ session, ...(activeRun ? { activeRun } : {}), queuedInputs }),
+      "utf8",
+    );
+    const transcriptBudget = MAX_RUNTIME_FRAME_BYTES - fixedBytes - 1024;
+    if (transcriptBudget < 1024) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.FRAME_TOO_LARGE,
+        "会话队列元数据已超过单帧预算，请先处理排队输入",
+      );
+    }
     let page;
     try {
-      page = projectRuntimeTranscript(snapshot, params);
+      page = projectRuntimeTranscript(snapshot, { ...params, maxBytes: transcriptBudget });
     } catch (error) {
       if (error instanceof TranscriptRevisionConflict) {
         throw new RuntimeProtocolError(
@@ -596,21 +632,21 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       }
       throw error;
     }
-    const activeRun = await this.findActiveSessionRun(canonical, params.sessionId);
-    const queuedInputs = await this.conversationStateStore.listQueued(canonical, params.sessionId);
-    return {
+    const result = {
       session,
       items: page.items,
       ...(activeRun ? { activeRun } : {}),
-      queuedInputs: queuedInputs.map((input) => ({
-        queueId: input.queueId,
-        sessionId: input.sessionId,
-        input: { text: input.text },
-        createdAt: input.createdAt,
-      })),
+      queuedInputs,
       ...(page.nextBefore ? { nextBefore: page.nextBefore } : {}),
       revision: page.revision,
     };
+    if (Buffer.byteLength(JSON.stringify(result), "utf8") > MAX_RUNTIME_FRAME_BYTES) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.FRAME_TOO_LARGE,
+        "会话 Transcript 无法安全装入单个 IPC 帧",
+      );
+    }
+    return result;
   }
 
   private async createSessionForMessage(
@@ -668,6 +704,72 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     if (await this.findActiveSessionRun(workspacePath, sessionId)) return;
     await this.startSessionRun(workspacePath, sessionId, next.text);
     await this.conversationStateStore.removeQueued(next.queueId);
+  }
+
+  private async persistRunBoundary(event: RuntimeEvent): Promise<void> {
+    const sessionId = event.scope.sessionId;
+    const runId = event.scope.runId;
+    if (!sessionId || !runId) return;
+    const payload = isJsonRecord(event.payload) ? event.payload : undefined;
+    const run = payload && isJsonRecord(payload["run"]) ? payload["run"] : undefined;
+    if (
+      !run ||
+      run["runId"] !== runId ||
+      run["sessionId"] !== sessionId ||
+      !isRuntimeRunStatus(run["status"]) ||
+      typeof run["startedAt"] !== "number" ||
+      !Number.isFinite(run["startedAt"]) ||
+      !Number.isSafeInteger(run["version"])
+    ) {
+      return;
+    }
+    await this.persistTranscriptEntry({
+      workspacePath: event.scope.workspacePath,
+      sessionId,
+      sourceEventId: event.eventId,
+      entryId: `run:${runId}:${run["version"]}:${event.topic}`,
+      createdAt: event.at,
+      entry: {
+        kind: "run-boundary",
+        runId,
+        status: run["status"],
+        startedAt: run["startedAt"],
+        ...(typeof run["finishedAt"] === "number" ? { finishedAt: run["finishedAt"] } : {}),
+      },
+    });
+  }
+
+  private async persistTranscriptEntry(input: {
+    readonly workspacePath: string;
+    readonly sessionId: string;
+    readonly sourceEventId: string;
+    readonly entryId: string;
+    readonly createdAt: number;
+    readonly entry: TranscriptEntry;
+  }): Promise<void> {
+    await this.withSession(input.workspacePath, input.sessionId, async (session) => {
+      const snapshot = await session.readHydrationSnapshot();
+      if (
+        snapshot.transcriptEvents.some(
+          (event) => event.type === "entry.appended" && event.entryId === input.entryId,
+        )
+      ) {
+        return;
+      }
+      const sequence = (snapshot.transcriptEvents.at(-1)?.sequence ?? 0) + 1;
+      await session.recordTranscriptEvent(
+        {
+          eventId: `runtime:${input.sourceEventId}`,
+          sequence,
+          createdAt: input.createdAt,
+          type: "entry.appended",
+          entryId: input.entryId,
+          entry: input.entry,
+        },
+        { journalEventId: `transcript:${input.sourceEventId}` },
+      );
+    });
+    this.publishTranscriptUpdate(input.workspacePath, input.sessionId, "reload");
   }
 
   private publishConversationFailure(workspacePath: string, error: unknown): void {
@@ -861,6 +963,20 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         },
       }),
     );
+    await this.persistTranscriptEntry({
+      workspacePath: projection.workspacePath,
+      sessionId: projection.sessionId,
+      sourceEventId: `changes-review:${params.runId}:${projection.fingerprint}:${params.decision}`,
+      entryId: `changes:${params.runId}:${projection.fingerprint}:${params.decision}`,
+      createdAt: this.now(),
+      entry: {
+        kind: "changes",
+        title: params.decision === "approve" ? "Changes reviewed" : "Changes requested revision",
+        state: params.decision,
+        ...(revisionPrompt ? { detail: revisionPrompt } : {}),
+        data: { runId: params.runId, fingerprint: projection.fingerprint },
+      },
+    });
     return { accepted: true, fingerprint: projection.fingerprint };
   }
 
@@ -888,6 +1004,19 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         payload: { runId, fingerprint: projection.fingerprint },
       }),
     );
+    await this.persistTranscriptEntry({
+      workspacePath: projection.workspacePath,
+      sessionId: projection.sessionId,
+      sourceEventId: `changes-applied:${runId}:${projection.fingerprint}`,
+      entryId: `changes:${runId}:${projection.fingerprint}:applied`,
+      createdAt: this.now(),
+      entry: {
+        kind: "changes",
+        title: "Changes applied",
+        state: "applied",
+        data: { runId, fingerprint: projection.fingerprint },
+      },
+    });
     return { applied: true, fingerprint: projection.fingerprint };
   }
 
@@ -1475,6 +1604,32 @@ function requireText(value: unknown, label: string): string {
 
 function isTerminalRunStatus(status: string): boolean {
   return status === "cancelled" || status === "failed" || status === "succeeded";
+}
+
+function isRunBoundaryTopic(topic: string): boolean {
+  return new Set([
+    "run.started",
+    "run.pause_requested",
+    "run.paused",
+    "run.resumed",
+    "run.cancel_requested",
+    "run.finished",
+  ]).has(topic);
+}
+
+function isRuntimeRunStatus(
+  value: unknown,
+): value is Extract<TranscriptEntry, { kind: "run-boundary" }>["status"] {
+  return new Set([
+    "queued",
+    "running",
+    "pause_requested",
+    "paused",
+    "cancelling",
+    "cancelled",
+    "failed",
+    "succeeded",
+  ]).has(String(value));
 }
 
 function isJsonRecord(value: unknown): value is JsonObject {
