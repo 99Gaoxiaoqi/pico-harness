@@ -1,138 +1,697 @@
-// Hooks 配置加载器。
-//
-// 从 <workDir>/.claw/settings.json 的 `hooks` 字段加载用户配置。
-// 遵循 PlanStore / TodoStore 的降级约定:任何 IO / 解析失败都不阻断主流程,
-// 返回 undefined 即视为"未配置 hooks",registry 不会挂载 HookRunner。
-//
-// 路径在调用时绑定 workDir,从源头杜绝路径穿越(与 TodoStore 一致)。
-
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { createHash } from "node:crypto";
+import { access, readFile, realpath } from "node:fs/promises";
+import { homedir } from "node:os";
+import { dirname, isAbsolute, join, normalize, resolve } from "node:path";
 import { logger } from "../observability/logger.js";
-import type { HookEvent, HooksConfig } from "./types.js";
+import { emptyHookSnapshot } from "./service.js";
+import { HookLocalStateStore } from "./management/state.js";
+import { HookTrustStore, type HookTrustStatus } from "./trust/store.js";
+import {
+  HOOK_EVENTS,
+  type AgentHookHandler,
+  type CommandHookHandler,
+  type HookCondition,
+  type HookDiagnostic,
+  type HookEvent,
+  type HookHandler,
+  type HookMatcherGroup,
+  type HookSnapshot,
+  type HookSource,
+  type HookSourceKind,
+  type HooksConfig,
+  type HttpHookHandler,
+  type McpToolHookHandler,
+  type PromptHookHandler,
+  type ResolvedHookHandler,
+} from "./types.js";
 
-const SETTINGS_FILENAME = "settings.json";
+const EVENT_SET: ReadonlySet<string> = new Set(HOOK_EVENTS);
+const CONDITION_OPERATORS = new Set(["equals", "contains", "regex", "exists"]);
 
-/** 合法的 HookEvent 集合,用于校验畸形配置 */
-const VALID_EVENTS: ReadonlySet<string> = new Set<HookEvent>(["PreToolUse", "PostToolUse"]);
+export interface HookConfigSourceSpec {
+  kind: HookSourceKind;
+  path: string;
+  format?: "canonical" | "legacy";
+  componentId?: string;
+  /** plugin/managed 由宿主显式提供；加载器不会自行发现或启用 plugin runtime。 */
+  enabled?: boolean;
+}
+
+export interface LoadHookSnapshotOptions {
+  workDir: string;
+  userHome?: string;
+  trustStore?: HookTrustStore;
+  stateStore?: HookLocalStateStore;
+  componentSources?: readonly HookConfigSourceSpec[];
+  extensionSources?: readonly HookConfigSourceSpec[];
+  version?: number;
+}
+
+export interface LoadedHookSource {
+  source: HookSource;
+  config?: HooksConfig;
+  status: "loaded" | "missing" | "invalid" | "disabled";
+  error?: string;
+}
+
+export interface LoadHookSnapshotResult {
+  snapshot: HookSnapshot;
+  sources: readonly LoadedHookSource[];
+  /** 初次启动可继续使用其他合法源；热重载据此决定是否保留旧快照。 */
+  hasErrors: boolean;
+  watchedPaths: readonly string[];
+}
 
 /**
- * 从 <workDir>/.claw/settings.json 加载 hooks 配置。
- *
- * 降级约定(任一失败 → 返回 undefined,registry 不挂 HookRunner):
- *   - 文件不存在(ENOENT)→ undefined(静默,常见全新工作区)
- *   - 权限不足等其他 IO 错误 → undefined(记 warn)
- *   - 畸形 JSON → undefined(记 warn)
- *   - 无 `hooks` 字段或结构非法 → undefined
- *
- * @param workDir 工作区根目录
- * @returns 合法配置返回 HooksConfig;否则 undefined
+ * legacy 兼容入口：只读取 `.claw/settings.json#hooks`，timeout 保持毫秒语义。
+ * 新前台运行时应改用 loadHookSnapshot。
  */
 export async function loadHooksConfig(workDir: string): Promise<HooksConfig | undefined> {
-  const settingsPath = join(workDir, ".claw", SETTINGS_FILENAME);
+  const loaded = await loadSource({
+    kind: "legacy",
+    path: join(workDir, ".claw", "settings.json"),
+    format: "legacy",
+  });
+  if (loaded.status === "invalid") {
+    logger.warn({ path: loaded.source.path, error: loaded.error }, "legacy hooks 配置无效");
+  }
+  return loaded.config;
+}
 
-  let raw: string;
+export function defaultHookConfigSources(
+  workDir: string,
+  userHome = homedir(),
+): readonly HookConfigSourceSpec[] {
+  return [
+    { kind: "user", path: join(userHome, ".pico", "hooks.json") },
+    { kind: "project", path: join(workDir, ".pico", "hooks.json") },
+    { kind: "local", path: join(workDir, ".claw", "hooks.local.json") },
+    {
+      kind: "legacy",
+      path: join(workDir, ".claw", "settings.json"),
+      format: "legacy",
+    },
+  ];
+}
+
+export async function loadHookSnapshot(
+  options: LoadHookSnapshotOptions,
+): Promise<LoadHookSnapshotResult> {
+  const workspace = await canonicalPath(options.workDir);
+  const specs = [
+    ...defaultHookConfigSources(workspace, options.userHome),
+    ...(options.componentSources ?? []),
+    ...(options.extensionSources ?? []),
+  ];
+  const trustStore = options.trustStore ?? new HookTrustStore({ userHome: options.userHome });
+  const stateStore = options.stateStore ?? new HookLocalStateStore(workspace);
+  let localState: Readonly<Record<string, boolean>> = {};
+  let stateError: string | undefined;
   try {
-    raw = await readFile(settingsPath, "utf8");
-  } catch (err) {
-    // ENOENT:全新工作区或未配置,静默返回 undefined
-    if (isErrnoException(err, "ENOENT")) {
-      return undefined;
+    localState = await stateStore.getAll();
+  } catch (error) {
+    stateError = errorMessage(error);
+  }
+  const loadedSources: LoadedHookSource[] = [];
+  const resolvedHandlers = blankHandlers();
+  const diagnostics: HookDiagnostic[] = [];
+  let order = 0;
+
+  for (const spec of specs) {
+    const loaded = await loadSource(spec, options.version ?? 1);
+    loadedSources.push(loaded);
+    if (loaded.status !== "loaded" || !loaded.config) continue;
+    for (const event of HOOK_EVENTS) {
+      for (const group of loaded.config[event] ?? []) {
+        for (const handler of group.hooks) {
+          const id = normalizedHandlerId(loaded.source, event, group, handler);
+          const trust = await executableTrustStatus(handler, trustStore, workspace, loaded.source);
+          const effectiveHandler =
+            localState[id] === undefined
+              ? handler
+              : ({ ...handler, enabled: localState[id] } satisfies HookHandler);
+          resolvedHandlers[event].push({
+            id,
+            event,
+            source: loaded.source,
+            order: order++,
+            ...(group.matcher === undefined ? {} : { matcher: group.matcher }),
+            ...(group.if === undefined ? {} : { groupCondition: group.if }),
+            handler: deepFreeze(effectiveHandler),
+            trusted: trust === "active",
+          });
+        }
+      }
     }
-    // 其他 IO 错误:记 warn 后返回 undefined,不阻断
-    logger.warn({ err, path: settingsPath }, "读取 settings.json 失败,hooks 不启用");
-    return undefined;
   }
 
+  const version = options.version ?? 1;
+  const handlers = Object.fromEntries(
+    HOOK_EVENTS.map((event) => [event, Object.freeze(resolvedHandlers[event].slice())]),
+  ) as Readonly<Record<HookEvent, readonly ResolvedHookHandler[]>>;
+  for (const source of loadedSources) {
+    if (source.status !== "invalid") continue;
+    diagnostics.push({
+      handlerId: `source:${source.source.kind}`,
+      source: source.source,
+      level: "error",
+      message: source.error ?? "Hook 配置无效",
+    });
+  }
+  if (stateError) {
+    diagnostics.push({
+      handlerId: "source:local-state",
+      source: { kind: "local", path: stateStore.filePath, version },
+      level: "error",
+      message: stateError,
+    });
+  }
+  const snapshot: HookSnapshot = deepFreeze({
+    id: snapshotId(workspace, version, handlers),
+    version,
+    createdAt: new Date().toISOString(),
+    handlers,
+    diagnostics,
+  });
+  return {
+    snapshot,
+    sources: Object.freeze(loadedSources),
+    hasErrors: loadedSources.some((source) => source.status === "invalid"),
+    watchedPaths: Object.freeze([
+      ...specs.filter((spec) => spec.enabled !== false).map((spec) => spec.path),
+      stateStore.filePath,
+      trustStore.filePath,
+    ]),
+  };
+}
+
+export async function loadSource(
+  spec: HookConfigSourceSpec,
+  version = 1,
+): Promise<LoadedHookSource> {
+  const source: HookSource = {
+    kind: spec.kind,
+    path: await canonicalPath(spec.path),
+    version,
+    ...(spec.componentId === undefined ? {} : { componentId: spec.componentId }),
+  };
+  if (spec.enabled === false) return { source, status: "disabled" };
+  let raw: string;
+  try {
+    raw = await readFile(source.path, "utf8");
+  } catch (error) {
+    if (isErrno(error, "ENOENT")) return { source, status: "missing" };
+    return { source, status: "invalid", error: errorMessage(error) };
+  }
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
-  } catch (err) {
-    logger.warn({ err, path: settingsPath }, "settings.json 解析失败,hooks 不启用");
-    return undefined;
+  } catch (error) {
+    return { source, status: "invalid", error: `JSON 解析失败: ${errorMessage(error)}` };
   }
-
-  // 只认顶层对象且含 hooks 字段
-  if (parsed === null || typeof parsed !== "object") {
-    return undefined;
+  const legacy = spec.format === "legacy" || spec.kind === "legacy";
+  const field = legacy ? objectField(parsed, "hooks") : parsed;
+  if (field === undefined) return { source, status: "missing" };
+  try {
+    const config = normalizeHooksConfig(field, { legacy });
+    return config ? { source, status: "loaded", config } : { source, status: "missing" };
+  } catch (error) {
+    return { source, status: "invalid", error: errorMessage(error) };
   }
-  const hooksField = (parsed as { hooks?: unknown }).hooks;
-  if (hooksField === undefined || hooksField === null) {
-    return undefined;
-  }
-
-  return normalizeHooksConfig(hooksField);
 }
 
-/**
- * 归一化 hooks 字段:逐事件、逐 matcher 组、逐 handler 校验,丢弃畸形条目。
- * 全部非法或空 → 返回 undefined。
- */
-function normalizeHooksConfig(hooksField: unknown): HooksConfig | undefined {
-  if (typeof hooksField !== "object" || hooksField === null) {
-    return undefined;
+export function normalizeCanonicalHooksConfig(input: unknown): HooksConfig | undefined {
+  return normalizeHooksConfig(input, { legacy: false });
+}
+
+function normalizeHooksConfig(
+  input: unknown,
+  options: { legacy: boolean },
+): HooksConfig | undefined {
+  if (!isRecord(input)) {
+    if (options.legacy) return undefined;
+    throw new Error("hooks 顶层必须是对象");
   }
-
   const config: HooksConfig = {};
-  let hasAny = false;
-
-  for (const [eventKey, groupsRaw] of Object.entries(hooksField as Record<string, unknown>)) {
-    if (!VALID_EVENTS.has(eventKey)) continue;
-    const groups = normalizeMatcherGroups(groupsRaw);
+  let count = 0;
+  for (const [eventName, rawGroups] of Object.entries(input)) {
+    if (!EVENT_SET.has(eventName)) {
+      if (options.legacy) continue;
+      throw new Error(`不支持的 Hook 事件: ${eventName}`);
+    }
+    const groups = normalizeGroups(rawGroups, options);
     if (groups.length > 0) {
-      config[eventKey as HookEvent] = groups;
-      hasAny = true;
+      config[eventName as HookEvent] = groups;
+      count += groups.reduce((total, group) => total + group.hooks.length, 0);
     }
   }
-
-  return hasAny ? config : undefined;
+  return count > 0 ? config : undefined;
 }
 
-/** 归一化某事件下的 matcher 组数组,丢弃结构非法或 hooks 为空的条目 */
-function normalizeMatcherGroups(groupsRaw: unknown) {
-  if (!Array.isArray(groupsRaw)) return [];
-  const groups = [];
-  for (const groupRaw of groupsRaw) {
-    if (groupRaw === null || typeof groupRaw !== "object") continue;
-    const { matcher, hooks } = groupRaw as { matcher?: unknown; hooks?: unknown };
-    const handlers = normalizeHandlers(hooks);
-    if (handlers.length === 0) continue;
-    groups.push({
-      ...(typeof matcher === "string" ? { matcher } : {}),
-      hooks: handlers,
-    });
+function normalizeGroups(input: unknown, options: { legacy: boolean }): HookMatcherGroup[] {
+  if (!Array.isArray(input)) return invalidOrEmpty(options, "matcher group 必须是数组");
+  const groups: HookMatcherGroup[] = [];
+  for (const raw of input) {
+    try {
+      if (!isRecord(raw)) throw new Error("matcher group 必须是对象");
+      if (!options.legacy) assertOnlyKeys(raw, ["matcher", "if", "hooks"], "matcher group");
+      const matcher = optionalString(raw.matcher, "matcher");
+      if (matcher !== undefined) validateRegexOrMatcher(matcher);
+      const condition = raw.if === undefined ? undefined : normalizeCondition(raw.if);
+      if (!Array.isArray(raw.hooks)) throw new Error("matcher group.hooks 必须是数组");
+      const hooks: HookHandler[] = [];
+      for (const hook of raw.hooks) {
+        try {
+          hooks.push(normalizeHandler(hook, options));
+        } catch (error) {
+          if (!options.legacy) throw error;
+        }
+      }
+      if (hooks.length === 0) {
+        if (!options.legacy) throw new Error("matcher group 至少需要一个有效 handler");
+        continue;
+      }
+      groups.push({
+        ...(matcher === undefined ? {} : { matcher }),
+        ...(condition === undefined ? {} : { if: condition }),
+        hooks,
+      });
+    } catch (error) {
+      if (!options.legacy) throw error;
+    }
   }
   return groups;
 }
 
-/** 归一化 hooks 数组,只保留 type:"command" 且 command 非空的处理器 */
-function normalizeHandlers(hooks: unknown) {
-  if (!Array.isArray(hooks)) return [];
-  const handlers = [];
-  for (const hookRaw of hooks) {
-    if (hookRaw === null || typeof hookRaw !== "object") continue;
-    const { type, command, timeout } = hookRaw as {
-      type?: unknown;
-      command?: unknown;
-      timeout?: unknown;
-    };
-    if (type !== "command") continue;
-    if (typeof command !== "string" || command.trim() === "") continue;
-    handlers.push({
-      type: "command" as const,
-      command,
-      ...(typeof timeout === "number" && timeout > 0 ? { timeout } : {}),
-    });
+function normalizeHandler(input: unknown, options: { legacy: boolean }): HookHandler {
+  if (!isRecord(input)) throw new Error("handler 必须是对象");
+  const type = requiredString(input.type, "handler.type");
+  const common = normalizeHandlerCommon(input, options);
+  switch (type) {
+    case "command": {
+      if (!options.legacy)
+        assertOnlyKeys(
+          input,
+          ["type", "command", "args", "async", "asyncRewake", "env", "timeout", "if", "enabled"],
+          "command handler",
+        );
+      const command = requiredNonEmpty(input.command, "command");
+      const args = optionalStringArray(input.args, "args");
+      const env = optionalStringRecord(input.env, "env");
+      return {
+        type,
+        command,
+        ...common,
+        ...(args === undefined ? {} : { args }),
+        ...(env === undefined ? {} : { env }),
+        ...(input.async === undefined ? {} : { async: requiredBoolean(input.async, "async") }),
+        ...(input.asyncRewake === undefined
+          ? {}
+          : { asyncRewake: requiredBoolean(input.asyncRewake, "asyncRewake") }),
+      } satisfies CommandHookHandler;
+    }
+    case "http": {
+      if (!options.legacy)
+        assertOnlyKeys(
+          input,
+          [
+            "type",
+            "url",
+            "headers",
+            "allowedEnv",
+            "maxResponseBytes",
+            "maxRedirects",
+            "timeout",
+            "if",
+            "enabled",
+          ],
+          "http handler",
+        );
+      const url = requiredNonEmpty(input.url, "url");
+      const parsed = new URL(url);
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        throw new Error("http handler 仅支持 http/https");
+      }
+      return {
+        type,
+        url,
+        ...common,
+        ...(input.headers === undefined
+          ? {}
+          : { headers: optionalStringRecord(input.headers, "headers") }),
+        ...(input.allowedEnv === undefined
+          ? {}
+          : { allowedEnv: optionalStringArray(input.allowedEnv, "allowedEnv") }),
+        ...(input.maxResponseBytes === undefined
+          ? {}
+          : {
+              maxResponseBytes: requiredPositiveInteger(input.maxResponseBytes, "maxResponseBytes"),
+            }),
+        ...(input.maxRedirects === undefined
+          ? {}
+          : { maxRedirects: requiredNonNegativeInteger(input.maxRedirects, "maxRedirects") }),
+      } satisfies HttpHookHandler;
+    }
+    case "mcp_tool":
+      if (!options.legacy)
+        assertOnlyKeys(
+          input,
+          ["type", "server", "tool", "input", "timeout", "if", "enabled"],
+          "mcp_tool handler",
+        );
+      return {
+        type,
+        server: requiredNonEmpty(input.server, "server"),
+        tool: requiredNonEmpty(input.tool, "tool"),
+        ...common,
+        ...(input.input === undefined ? {} : { input: input.input }),
+      } satisfies McpToolHookHandler;
+    case "prompt":
+      if (!options.legacy)
+        assertOnlyKeys(
+          input,
+          ["type", "prompt", "model", "timeout", "if", "enabled"],
+          "prompt handler",
+        );
+      return {
+        type,
+        prompt: requiredNonEmpty(input.prompt, "prompt"),
+        ...common,
+        ...(input.model === undefined ? {} : { model: requiredNonEmpty(input.model, "model") }),
+      } satisfies PromptHookHandler;
+    case "agent": {
+      if (!options.legacy)
+        assertOnlyKeys(
+          input,
+          ["type", "prompt", "model", "maxTurns", "timeout", "if", "enabled"],
+          "agent handler",
+        );
+      const maxTurns =
+        input.maxTurns === undefined
+          ? undefined
+          : requiredPositiveInteger(input.maxTurns, "maxTurns");
+      if (maxTurns !== undefined && maxTurns > 50) throw new Error("agent.maxTurns 不能超过 50");
+      return {
+        type,
+        prompt: requiredNonEmpty(input.prompt, "prompt"),
+        ...common,
+        ...(input.model === undefined ? {} : { model: requiredNonEmpty(input.model, "model") }),
+        ...(maxTurns === undefined ? {} : { maxTurns }),
+      } satisfies AgentHookHandler;
+    }
+    default:
+      throw new Error(`不支持的 handler 类型: ${type}`);
   }
+}
+
+function normalizeHandlerCommon(
+  input: Record<string, unknown>,
+  options: { legacy: boolean },
+): Omit<CommandHookHandler, "type" | "command" | "args" | "async" | "asyncRewake" | "env"> {
+  const timeout =
+    input.timeout === undefined ? undefined : requiredPositiveNumber(input.timeout, "timeout");
+  const condition = input.if === undefined ? undefined : normalizeCondition(input.if);
+  const enabled =
+    input.enabled === undefined ? undefined : requiredBoolean(input.enabled, "enabled");
+  return {
+    ...(timeout === undefined
+      ? {}
+      : { timeout, timeoutMs: options.legacy ? timeout : timeout * 1000 }),
+    ...(condition === undefined ? {} : { if: condition }),
+    ...(enabled === undefined ? {} : { enabled }),
+  };
+}
+
+function normalizeCondition(input: unknown): HookCondition {
+  if (!isRecord(input)) throw new Error("if 条件必须是对象");
+  const rawOp = requiredString(input.op, "if.op");
+  if (!isConditionOperator(rawOp)) throw new Error(`不支持的条件操作符: ${rawOp}`);
+  const op = rawOp;
+  const path = requiredNonEmpty(input.path, "if.path");
+  validateDataPath(path);
+  if (op === "exists") {
+    assertOnlyKeys(input, ["op", "path", "value"], "exists condition");
+    return {
+      op,
+      path,
+      ...(input.value === undefined ? {} : { value: requiredBoolean(input.value, "if.value") }),
+    };
+  }
+  if (op === "regex") {
+    assertOnlyKeys(input, ["op", "path", "pattern"], "regex condition");
+    const pattern = requiredString(input.pattern, "if.pattern");
+    new RegExp(pattern);
+    return { op, path, pattern };
+  }
+  if (op === "contains") {
+    assertOnlyKeys(input, ["op", "path", "value"], "contains condition");
+    return { op, path, value: requiredString(input.value, "if.value") };
+  }
+  assertOnlyKeys(input, ["op", "path", "value"], "equals condition");
+  if (!isScalar(input.value)) throw new Error("equals.value 必须是标量");
+  return { op, path, value: input.value };
+}
+
+function normalizedHandlerId(
+  source: HookSource,
+  event: HookEvent,
+  group: HookMatcherGroup,
+  handler: HookHandler,
+): string {
+  return `${source.kind}:${createHash("sha256")
+    .update(
+      stableStringify({
+        source: source.path,
+        event,
+        matcher: group.matcher,
+        if: group.if,
+        handler,
+      }),
+    )
+    .digest("hex")}`;
+}
+
+function snapshotId(
+  workspace: string,
+  version: number,
+  handlers: Readonly<Record<HookEvent, readonly ResolvedHookHandler[]>>,
+): string {
+  return createHash("sha256")
+    .update(stableStringify({ workspace, version, handlers }))
+    .digest("hex");
+}
+
+async function executableTrustStatus(
+  handler: HookHandler,
+  store: HookTrustStore,
+  workspace: string,
+  source: HookSource,
+): Promise<HookTrustStatus> {
+  if (handler.type === "prompt" || handler.type === "agent") return "active";
+  try {
+    return await store.status({ workspace, source, handler });
+  } catch (error) {
+    logger.warn(
+      { error: errorMessage(error), path: store.filePath },
+      "Hook 信任库不可用，handler 保持 pending",
+    );
+    return "pending";
+  }
+}
+
+function blankHandlers(): Record<HookEvent, ResolvedHookHandler[]> {
+  const handlers = {} as Record<HookEvent, ResolvedHookHandler[]>;
+  for (const event of HOOK_EVENTS) handlers[event] = [];
   return handlers;
 }
 
-/** 判断异常是否为指定 code 的 Node ErrnoException */
-function isErrnoException(err: unknown, code: string): boolean {
+function isConditionOperator(input: string): input is HookCondition["op"] {
+  return CONDITION_OPERATORS.has(input);
+}
+
+function validateRegexOrMatcher(matcher: string): void {
+  if (matcher === "*" || /^[A-Za-z0-9_|.-]+$/.test(matcher)) return;
+  new RegExp(matcher);
+}
+
+function validateDataPath(path: string): void {
+  if (!/^[A-Za-z_][A-Za-z0-9_.-]*$/.test(path) || path.includes("..")) {
+    throw new Error(`非法条件路径: ${path}`);
+  }
+}
+
+function assertOnlyKeys(
+  input: Record<string, unknown>,
+  allowed: readonly string[],
+  label: string,
+): void {
+  const unknown = Object.keys(input).filter((key) => !allowed.includes(key));
+  if (unknown.length > 0) throw new Error(`${label} 包含未知字段: ${unknown.join(", ")}`);
+}
+
+function objectField(input: unknown, key: string): unknown {
+  return isRecord(input) ? input[key] : undefined;
+}
+
+function optionalString(input: unknown, field: string): string | undefined {
+  return input === undefined ? undefined : requiredString(input, field);
+}
+
+function requiredString(input: unknown, field: string): string {
+  if (typeof input !== "string") throw new Error(`${field} 必须是字符串`);
+  return input;
+}
+
+function requiredNonEmpty(input: unknown, field: string): string {
+  const value = requiredString(input, field).trim();
+  if (value.length === 0) throw new Error(`${field} 不能为空`);
+  return value;
+}
+
+function requiredBoolean(input: unknown, field: string): boolean {
+  if (typeof input !== "boolean") throw new Error(`${field} 必须是布尔值`);
+  return input;
+}
+
+function requiredPositiveNumber(input: unknown, field: string): number {
+  if (typeof input !== "number" || !Number.isFinite(input) || input <= 0) {
+    throw new Error(`${field} 必须是正数`);
+  }
+  return input;
+}
+
+function requiredPositiveInteger(input: unknown, field: string): number {
+  const value = requiredPositiveNumber(input, field);
+  if (!Number.isInteger(value)) throw new Error(`${field} 必须是正整数`);
+  return value;
+}
+
+function requiredNonNegativeInteger(input: unknown, field: string): number {
+  if (typeof input !== "number" || !Number.isInteger(input) || input < 0) {
+    throw new Error(`${field} 必须是非负整数`);
+  }
+  return input;
+}
+
+function optionalStringArray(input: unknown, field: string): readonly string[] | undefined {
+  if (input === undefined) return undefined;
+  if (!Array.isArray(input) || input.some((value) => typeof value !== "string")) {
+    throw new Error(`${field} 必须是字符串数组`);
+  }
+  return Object.freeze(input.slice() as string[]);
+}
+
+function optionalStringRecord(
+  input: unknown,
+  field: string,
+): Readonly<Record<string, string>> | undefined {
+  if (input === undefined) return undefined;
+  if (!isRecord(input) || Object.values(input).some((value) => typeof value !== "string")) {
+    throw new Error(`${field} 必须是字符串对象`);
+  }
+  return Object.freeze({ ...input } as Record<string, string>);
+}
+
+function invalidOrEmpty(options: { legacy: boolean }, message: string): [] {
+  if (options.legacy) return [];
+  throw new Error(message);
+}
+
+function isRecord(input: unknown): input is Record<string, unknown> {
+  return typeof input === "object" && input !== null && !Array.isArray(input);
+}
+
+function isScalar(input: unknown): input is string | number | boolean | null {
+  return input === null || ["string", "number", "boolean"].includes(typeof input);
+}
+
+function isErrno(error: unknown, code: string): boolean {
+  return isRecord(error) && error.code === code;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+async function canonicalPath(path: string): Promise<string> {
+  const absolute = resolve(path);
+  try {
+    return await realpath(absolute);
+  } catch {
+    return normalize(absolute);
+  }
+}
+
+export function resolveReferencedScriptCandidates(
+  handler: HookHandler,
+  workspace: string,
+): readonly string[] {
+  if (handler.type !== "command") return [];
+  const tokens = handler.args ? [handler.command, ...handler.args] : shellWords(handler.command);
+  return [...new Set(tokens.filter(looksLikePath).map((token) => resolve(workspace, token)))];
+}
+
+function shellWords(command: string): string[] {
   return (
-    typeof err === "object" &&
-    err !== null &&
-    "code" in err &&
-    (err as { code: unknown }).code === code
+    command
+      .match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g)
+      ?.map((part) => part.replace(/^(['"])(.*)\1$/, "$2")) ?? []
   );
+}
+
+function looksLikePath(value: string): boolean {
+  return (
+    isAbsolute(value) ||
+    value.startsWith("./") ||
+    value.startsWith("../") ||
+    /\.(?:sh|bash|zsh|js|mjs|cjs|ts|py|rb|pl)$/.test(value)
+  );
+}
+
+export async function existingReferencedScripts(
+  handler: HookHandler,
+  workspace: string,
+): Promise<readonly string[]> {
+  const paths = resolveReferencedScriptCandidates(handler, workspace);
+  const existing: string[] = [];
+  for (const path of paths) {
+    if (
+      await access(path).then(
+        () => true,
+        () => false,
+      )
+    )
+      existing.push(await canonicalPath(path));
+  }
+  return existing;
+}
+
+export function stableStringify(input: unknown): string {
+  return JSON.stringify(sortValue(input));
+}
+
+function sortValue(input: unknown): unknown {
+  if (Array.isArray(input)) return input.map(sortValue);
+  if (!isRecord(input)) return input;
+  return Object.fromEntries(
+    Object.keys(input)
+      .sort()
+      .map((key) => [key, sortValue(input[key])]),
+  );
+}
+
+function deepFreeze<T>(input: T): T {
+  if (typeof input !== "object" || input === null || Object.isFrozen(input)) return input;
+  Object.freeze(input);
+  for (const value of Object.values(input)) deepFreeze(value);
+  return input;
+}
+
+/** 给热重载器在完全无配置时使用的快照。 */
+export function emptyLoadedHookSnapshot(): LoadHookSnapshotResult {
+  return { snapshot: emptyHookSnapshot(), sources: [], hasErrors: false, watchedPaths: [] };
+}
+
+export function parentDirectories(paths: readonly string[]): readonly string[] {
+  return [...new Set(paths.map(dirname))];
 }
