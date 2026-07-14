@@ -23,6 +23,14 @@ import {
   type CodeIntelligenceService,
   type LspServerConfig,
 } from "../code-intelligence/index.js";
+import { HookService } from "../hooks/service.js";
+import type {
+  HookEvent,
+  HookEventPayloadMap,
+  HookExecutionContext,
+  HookOutput,
+} from "../hooks/types.js";
+import { isTerminalTaskStatus, type TaskSnapshot } from "../tasks/task-registry.js";
 
 /** UI-independent services scoped to one persisted session. */
 export interface SessionRuntimeOptions {
@@ -34,6 +42,7 @@ export interface SessionRuntimeOptions {
   taskHostRuntime?: TaskHostRuntime;
   /** Durable completion outbox 的活态发现间隔。 */
   completionPollIntervalMs?: number;
+  sessionStartSource?: "startup" | "resume";
 }
 
 export interface SessionRuntime {
@@ -53,6 +62,15 @@ export interface SessionRuntime {
   readonly steerQueue: SteerQueue;
   readonly codeIntelligence: CodeIntelligenceService;
   readonly codeIntelligenceManager: CodeIntelligenceManager;
+  readonly hookService?: HookService;
+  /** 同一实例可幂等挂载；运行中替换实例会抛错。 */
+  attachHookService(service: HookService): void;
+  dispatchHook<E extends HookEvent>(
+    event: E,
+    payload: HookEventPayloadMap[E],
+    context?: HookExecutionContext,
+  ): Promise<HookOutput>;
+  drainHookEvents(): Promise<void>;
   assertCompatible(workDir: string, sessionId: string): void;
   conversationTurnCount(session: Session): number;
   dispose(): Promise<void>;
@@ -358,6 +376,7 @@ export async function createSessionRuntime(
       if (completionPollTimer) clearInterval(completionPollTimer);
       completionPollTimer = undefined;
     },
+    sessionStartSource: options.sessionStartSource ?? "startup",
   });
 }
 
@@ -503,6 +522,7 @@ interface DefaultSessionRuntimeOptions {
   codeIntelligenceManager: CodeIntelligenceManager;
   unbindGoalManager: () => void;
   stopDelegationCompletionPolling: () => void;
+  sessionStartSource: "startup" | "resume";
 }
 
 class DefaultSessionRuntime implements SessionRuntime {
@@ -522,6 +542,13 @@ class DefaultSessionRuntime implements SessionRuntime {
   readonly steerQueue: SteerQueue;
   readonly codeIntelligence: CodeIntelligenceService;
   readonly codeIntelligenceManager: CodeIntelligenceManager;
+  private _hookService?: HookService;
+  private readonly pendingHookEvents = new Set<Promise<unknown>>();
+  private readonly taskStatuses = new Map<string, TaskSnapshot["status"]>();
+  private readonly startedSubagents = new Set<string>();
+  private readonly sessionStartSource: "startup" | "resume";
+  private readonly unsubscribeTaskHooks: () => void;
+  private readonly unsubscribeWorktreeHooks?: () => void;
   private readonly unbindGoalManager: () => void;
   private readonly stopDelegationCompletionPolling: () => void;
   private disposePromise?: Promise<void>;
@@ -545,6 +572,58 @@ class DefaultSessionRuntime implements SessionRuntime {
     this.codeIntelligenceManager = options.codeIntelligenceManager;
     this.unbindGoalManager = options.unbindGoalManager;
     this.stopDelegationCompletionPolling = options.stopDelegationCompletionPolling;
+    this.sessionStartSource = options.sessionStartSource;
+    this.unsubscribeTaskHooks = this.taskRegistry.subscribe((snapshot) =>
+      this.onTaskTransition(snapshot),
+    );
+    this.unsubscribeWorktreeHooks = this.taskHostRuntime?.supervisor.subscribeLifecycle((event) => {
+      if (!this._hookService) return;
+      this.enqueueHook(
+        event.type === "created"
+          ? this._hookService.dispatch("WorktreeCreate", {
+              path: event.path,
+              branch: event.branch,
+            })
+          : this._hookService.dispatch("WorktreeRemove", {
+              path: event.path,
+              branch: event.branch,
+            }),
+        event.type === "created" ? "WorktreeCreate" : "WorktreeRemove",
+      );
+    });
+  }
+
+  get hookService(): HookService | undefined {
+    return this._hookService;
+  }
+
+  attachHookService(service: HookService): void {
+    if (this._hookService === service) return;
+    if (this._hookService) {
+      throw new Error("SessionRuntime 已挂载不同 HookService，禁止运行中替换。");
+    }
+    this._hookService = service;
+    this.enqueueHook(
+      service.dispatch("SessionStart", { source: this.sessionStartSource }),
+      "SessionStart",
+    );
+  }
+
+  async dispatchHook<E extends HookEvent>(
+    event: E,
+    payload: HookEventPayloadMap[E],
+    context: HookExecutionContext = {},
+  ): Promise<HookOutput> {
+    if (!this._hookService) return { decision: "allow" };
+    // 序列边界：新的前台事件不得超过已启动的 SessionStart/任务转换。
+    await this.drainHookEvents();
+    return this._hookService.dispatch(event, payload, context);
+  }
+
+  async drainHookEvents(): Promise<void> {
+    while (this.pendingHookEvents.size > 0) {
+      await Promise.allSettled([...this.pendingHookEvents]);
+    }
   }
 
   assertCompatible(workDir: string, sessionId: string): void {
@@ -571,7 +650,10 @@ class DefaultSessionRuntime implements SessionRuntime {
     if (this.disposePromise) return this.disposePromise;
     this.disposePromise = (async () => {
       this.stopDelegationCompletionPolling();
+      this.unsubscribeTaskHooks();
+      this.unsubscribeWorktreeHooks?.();
       try {
+        await this.drainHookEvents();
         const runningTasks = this.backgroundManager
           .list()
           .filter((task) => task.status === "running");
@@ -580,12 +662,77 @@ class DefaultSessionRuntime implements SessionRuntime {
           this.codeIntelligenceManager.close(),
           ...runningTasks.map((task) => this.backgroundManager.stop(task.taskId)),
         ]);
+        await this.drainHookEvents();
+        if (this._hookService) {
+          await this._hookService.dispatch("SessionEnd", { reason: "runtime_dispose" });
+        }
       } finally {
         this.delegationCompletionQueue.close();
         this.unbindGoalManager();
       }
     })();
     return this.disposePromise;
+  }
+
+  private onTaskTransition(snapshot: TaskSnapshot): void {
+    const previous = this.taskStatuses.get(snapshot.taskId);
+    this.taskStatuses.set(snapshot.taskId, snapshot.status);
+    if (!this._hookService) return;
+    if (previous === undefined) {
+      this.enqueueHook(
+        this._hookService.dispatch("TaskCreated", {
+          taskId: snapshot.taskId,
+          subject: snapshot.description,
+        }),
+        "TaskCreated",
+      );
+    }
+    if (
+      snapshot.type === "local_agent" &&
+      snapshot.status === "running" &&
+      !this.startedSubagents.has(snapshot.taskId)
+    ) {
+      this.startedSubagents.add(snapshot.taskId);
+      this.enqueueHook(
+        this._hookService.dispatch("SubagentStart", {
+          agentId: snapshot.taskId,
+          agentType:
+            typeof snapshot.data?.["mode"] === "string" ? snapshot.data["mode"] : "worker",
+          prompt: snapshot.description,
+        }),
+        "SubagentStart",
+      );
+    }
+    if (isTerminalTaskStatus(snapshot.status) && !isTerminalTaskStatus(previous ?? "pending")) {
+      this.enqueueHook(
+        this._hookService.dispatch("TaskCompleted", {
+          taskId: snapshot.taskId,
+          status: snapshot.status,
+        }),
+        "TaskCompleted",
+      );
+      if (this.startedSubagents.has(snapshot.taskId)) {
+        this.enqueueHook(
+          this._hookService.dispatch("SubagentStop", {
+            agentId: snapshot.taskId,
+            status: snapshot.status,
+            ...(snapshot.error ? { result: snapshot.error } : {}),
+          }),
+          "SubagentStop",
+        );
+      }
+    }
+  }
+
+  private enqueueHook(promise: Promise<unknown>, event: HookEvent): void {
+    const tracked = promise.catch((error) => {
+      logger.warn(
+        { event, sessionId: this.sessionId, error: String(error) },
+        "[Hook] 会话生命周期事件执行失败",
+      );
+    });
+    this.pendingHookEvents.add(tracked);
+    void tracked.finally(() => this.pendingHookEvents.delete(tracked));
   }
 }
 

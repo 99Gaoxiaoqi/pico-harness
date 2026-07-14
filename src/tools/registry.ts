@@ -5,6 +5,7 @@
 
 import type { ToolCall, ToolDefinition, ToolResult } from "../schema/message.js";
 import type { ToolAccesses } from "./tool-access.js";
+import type { HookService } from "../hooks/service.js";
 
 export type ToolOutputStream = "stdout" | "stderr";
 
@@ -47,9 +48,18 @@ export interface RequestMiddlewareResult {
   allowed: boolean;
   reason?: string;
   call?: ToolCall;
+  /** 供 PermissionDenied Hook 诊断使用，不影响旧 middleware 协议。 */
+  denialSource?: string;
 }
 
-export type RequestMiddleware = (call: ToolCall) => Promise<RequestMiddlewareResult>;
+export interface RequestMiddlewareContext {
+  /** PreToolUse ask/defer 可将原本自动放行的调用升级为人工审批。 */
+  forceApproval?: boolean;
+}
+export type RequestMiddleware = (
+  call: ToolCall,
+  context?: RequestMiddlewareContext,
+) => Promise<RequestMiddlewareResult>;
 export type ExecutionMiddleware = (
   call: ToolCall,
   next: (call: ToolCall) => Promise<string>,
@@ -107,6 +117,10 @@ export interface Registry {
   use(mw: MiddlewareFunc): void;
   /** request 阶段中间件:可拦截或改写参数 */
   useRequest?(mw: RequestMiddleware): void;
+  /** 不可被 Hook 或人工审批绕过的安全门。 */
+  useSafety?(mw: RequestMiddleware): void;
+  /** 在 PreToolUse 之后运行的交互权限/审批链。 */
+  usePermission?(mw: RequestMiddleware): void;
   /** execution 阶段中间件:可包裹实际执行 */
   useExecution?(mw: ExecutionMiddleware): void;
   /** 返回当前系统挂载的所有工具的 Schema,供 Main Loop 交给 Provider */
@@ -132,6 +146,10 @@ export interface Registry {
   setPreWriteHook?(hook: (toolName: string, args: string) => Promise<void>): void;
   /** 【任务 2.6】挂载 HookRunner,启用 PreToolUse/PostToolUse 钩子 */
   setHookRunner?(runner: import("../hooks/runner.js").HookRunner): void;
+  /** 挂载会话级 HookService；Registry 重建时必须复用同一实例。 */
+  setHookService?(service: HookService): void;
+  /** 等待本 Registry 已启动的后置 Hook 收口。 */
+  drainHookEvents?(): Promise<void>;
   /** 【任务 2.6】设置传给 hook stdin 的 session_id */
   setSessionId?(sessionId: string): void;
 }

@@ -73,6 +73,7 @@ import type { McpConnectionManager } from "../mcp/manager.js";
 import { CostTracker } from "../observability/tracker.js";
 import { ensureSessionUsageBaseline } from "../observability/usage-baseline.js";
 import { readSessionCatalogProjectionHealth } from "../storage/session-catalog-projection.js";
+import type { HookService } from "../hooks/service.js";
 import {
   STORAGE_DOCTOR_COMPONENTS,
   StorageDoctor,
@@ -128,6 +129,7 @@ export interface PicoCommandRegistryOptions {
   taskRuntimeDiagnostic?: string;
   /** 可注入的只读存储诊断器；默认扫描当前 workspace 和全局 File History。 */
   storageDoctor?: Pick<StorageDoctor, "scan">;
+  hookService?: HookService;
   mcpControl?: McpConnectionManager;
 }
 
@@ -518,7 +520,10 @@ function createCompactCommand(
               },
             )
           : rawProvider;
-        const ok = await new FullCompactor({ provider }).compact(session, retainLastN);
+        const ok = await new FullCompactor({
+          provider,
+          ...(options.hookService ? { hookService: options.hookService, hookSource: "manual" } : {}),
+        }).compact(session, retainLastN);
         return {
           type: "local",
           action: "message",
@@ -544,11 +549,15 @@ function createInitCommand(options: PicoCommandRegistryOptions): SlashCommand {
     usage: "/init",
     kind: "local",
     availability: "idle",
-    execute: (): LocalCommandResult => ({
-      type: "local",
-      action: "message",
-      message: initializeProjectEntrypoints(options.workDir),
-    }),
+    execute: async (): Promise<LocalCommandResult> => {
+      const message = initializeProjectEntrypoints(options.workDir);
+      await options.hookService?.dispatch("Setup", { action: "init" });
+      return {
+        type: "local",
+        action: "message",
+        message,
+      };
+    },
   };
 }
 
