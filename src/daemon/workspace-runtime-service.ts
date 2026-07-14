@@ -207,6 +207,12 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
     return this.registry.get(workspacePath);
   }
 
+  /** Read-only lookup for adapters that project a Run's durable Session state. */
+  async getWorkspaceRun(workspacePath: string, runId: string) {
+    const runtime = await this.registry.get(workspacePath);
+    return runtime.getRun(runId);
+  }
+
   setRegistrationChangedListener(listener: () => Promise<void>): void {
     this.registrationChanged = listener;
   }
@@ -296,6 +302,7 @@ function eventPayload(
 function runPayload(run: {
   runId: string;
   workspace: string;
+  sessionId?: string;
   description: string;
   status: string;
   startedAt: number;
@@ -308,6 +315,7 @@ function runPayload(run: {
   return {
     runId: run.runId,
     workspace: run.workspace,
+    ...(run.sessionId !== undefined ? { sessionId: run.sessionId } : {}),
     description: run.description,
     status: run.status,
     startedAt: run.startedAt,
