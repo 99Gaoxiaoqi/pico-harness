@@ -428,10 +428,17 @@ export type TypedRuntimeEvent = {
   [Topic in RuntimeEventTopic]: RuntimeEvent<Topic>;
 }[RuntimeEventTopic];
 
-export interface WorkspaceStatusResult {
+export interface WorkspaceStatusResult extends JsonObject {
   workspacePath: string;
   registered: boolean;
   schedulerStatus: "unknown";
+  mode: "folder" | "git";
+  capabilities: {
+    readonly foregroundRuns: boolean;
+    readonly fileHistory: boolean;
+    readonly isolatedWorktrees: boolean;
+    readonly branchMerge: boolean;
+  };
 }
 
 export type RuntimeRequest<Method extends RuntimeMethod = RuntimeMethod> =

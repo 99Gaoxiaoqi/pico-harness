@@ -34,7 +34,7 @@ import type { DisposableLocalRuntimeService, RuntimeEventCursor } from "./servic
 import { DesktopSessionStateStore } from "./desktop-session-state.js";
 import { canonicalizeWorkspacePath } from "./workspace-registry.js";
 import { WorkspaceRegistrationStore } from "./workspace-registration.js";
-import { WorkspaceRuntimeService } from "./workspace-runtime-service.js";
+import { WorkspaceRuntimeService, workspaceStatusResult } from "./workspace-runtime-service.js";
 import { DesktopAutomationService } from "./desktop-automation-service.js";
 
 const UNSUPPORTED_DESKTOP_METHODS: ReadonlySet<string> = new Set([
@@ -201,11 +201,14 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   }
 
   private async listWorkspaces(): Promise<JsonValue> {
-    const workspaces = (await this.registrationStore.list()).map((workspacePath) => ({
-      workspacePath,
-      registered: true,
-      schedulerStatus: "unknown" as const,
-    }));
+    const workspaces = await Promise.all(
+      (await this.registrationStore.list()).map(async (workspacePath) =>
+        workspaceStatusResult(
+          await this.options.runtimeService.getWorkspaceRuntime(workspacePath),
+          true,
+        ),
+      ),
+    );
     return { workspaces };
   }
 

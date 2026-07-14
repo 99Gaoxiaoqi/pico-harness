@@ -70,7 +70,7 @@ export function createProductionLocalDaemonHost(
   const nextDesktopResourceVersion = () => ++desktopResourceVersion;
   const service = new WorkspaceRuntimeService({
     registrationStore,
-    execute: async ({ workspacePath, prompt, sessionId, context }) => {
+    execute: async ({ workspacePath, workspaceRuntime, prompt, sessionId, context }) => {
       if (!(await trustStore.isTrusted(workspacePath))) {
         throw new RuntimeProtocolError(
           RUNTIME_ERROR_CODES.FORBIDDEN,
@@ -87,6 +87,9 @@ export function createProductionLocalDaemonHost(
         workDir: workspacePath,
         sessionId: targetSessionId,
         session,
+        ...(workspaceRuntime.taskHostRuntime
+          ? { taskHostRuntime: workspaceRuntime.taskHostRuntime }
+          : {}),
       });
       const broker = new DesktopInteractionBroker();
       const interaction: PendingInteraction = {

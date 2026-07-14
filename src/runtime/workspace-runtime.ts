@@ -91,6 +91,15 @@ export interface WorkspaceTaskRuntimeOptions {
   generateRunId?: () => string;
 }
 
+export type WorkspaceMode = "folder" | "git";
+
+export interface WorkspaceCapabilities {
+  readonly foregroundRuns: boolean;
+  readonly fileHistory: boolean;
+  readonly isolatedWorktrees: boolean;
+  readonly branchMerge: boolean;
+}
+
 interface WorkspaceRunRecord {
   snapshot: WorkspaceRunSnapshot;
   controller: AbortController;
@@ -102,7 +111,7 @@ interface WorkspaceRunRecord {
 }
 
 /**
- * UI-neutral owner for one canonical Git workspace.
+ * UI-neutral owner for one canonical workspace.
  *
  * It deliberately wraps the current TaskHostRuntime rather than changing TUI ownership in
  * place. A future daemon can own this class unchanged while the existing TUI keeps using its
@@ -110,7 +119,9 @@ interface WorkspaceRunRecord {
  */
 export class WorkspaceTaskRuntime {
   readonly workspace: string;
-  readonly taskHostRuntime: TaskHostRuntime;
+  readonly taskHostRuntime?: TaskHostRuntime;
+  readonly mode: WorkspaceMode;
+  readonly capabilities: WorkspaceCapabilities;
 
   private readonly now: () => number;
   private readonly generateRunId: () => string;
@@ -127,32 +138,47 @@ export class WorkspaceTaskRuntime {
 
   private constructor(
     workspace: string,
-    taskHostRuntime: TaskHostRuntime,
+    taskHostRuntime: TaskHostRuntime | undefined,
     options: Pick<WorkspaceTaskRuntimeOptions, "now" | "generateRunId">,
   ) {
     this.workspace = workspace;
     this.taskHostRuntime = taskHostRuntime;
+    this.mode = taskHostRuntime ? "git" : "folder";
+    this.capabilities = {
+      foregroundRuns: true,
+      fileHistory: true,
+      isolatedWorktrees: taskHostRuntime !== undefined,
+      branchMerge: taskHostRuntime !== undefined,
+    };
     this.now = options.now ?? Date.now;
     this.generateRunId = options.generateRunId ?? (() => `run_${randomUUID()}`);
-    this.unsubscribeTaskRegistry = this.taskHostRuntime.taskRegistry.subscribe((task) => {
-      this.publish({
-        type: "task.updated",
-        resourceVersion: taskVersion(task),
-        task,
-      });
-    });
+    this.unsubscribeTaskRegistry =
+      this.taskHostRuntime?.taskRegistry.subscribe((task) => {
+        this.publish({
+          type: "task.updated",
+          resourceVersion: taskVersion(task),
+          task,
+        });
+      }) ?? (() => undefined);
     this.publish({ type: "workspace.ready", resourceVersion: 1 });
   }
 
   static async create(options: WorkspaceTaskRuntimeOptions): Promise<WorkspaceTaskRuntime> {
     const requestedWorkspace = await realpath(resolve(options.workDir));
-    const taskHostRuntime =
-      options.taskHostRuntime ??
-      (await TaskHostRuntime.create({
-        workDir: requestedWorkspace,
-        ...(options.taskHostRuntimeOptions ?? {}),
-      }));
-    const workspace = await realpath(taskHostRuntime.repoRoot);
+    let taskHostRuntime = options.taskHostRuntime;
+    if (!taskHostRuntime) {
+      try {
+        taskHostRuntime = await TaskHostRuntime.create({
+          workDir: requestedWorkspace,
+          ...(options.taskHostRuntimeOptions ?? {}),
+        });
+      } catch (error) {
+        if (!isFolderModeFallback(error)) throw error;
+      }
+    }
+    const workspace = taskHostRuntime
+      ? await realpath(taskHostRuntime.repoRoot)
+      : requestedWorkspace;
     return new WorkspaceTaskRuntime(workspace, taskHostRuntime, options);
   }
 
@@ -291,25 +317,25 @@ export class WorkspaceTaskRuntime {
 
   startTask(request: WorktreeTaskRequest, runner: WorktreeTaskRunner): WorktreeTaskSnapshot {
     this.assertOpen();
-    return this.taskHostRuntime.start(request, runner);
+    return this.requireVersionProtection().start(request, runner);
   }
 
   listTasks(): TaskSnapshot[] {
-    return this.taskHostRuntime.list();
+    return this.taskHostRuntime?.list() ?? [];
   }
 
   getTask(taskId: string): TaskSnapshot | undefined {
-    return this.taskHostRuntime.get(taskId);
+    return this.taskHostRuntime?.get(taskId);
   }
 
   cancelTask(taskId: string): Promise<WorktreeTaskSnapshot> {
     this.assertOpen();
-    return this.taskHostRuntime.stop(taskId);
+    return this.requireVersionProtection().stop(taskId);
   }
 
   steerTask(taskId: string, message: string): WorktreeTaskSnapshot {
     this.assertOpen();
-    return this.taskHostRuntime.sendMessage(taskId, message);
+    return this.requireVersionProtection().sendMessage(taskId, message);
   }
 
   async close(): Promise<void> {
@@ -320,7 +346,7 @@ export class WorkspaceTaskRuntime {
       if (!isTerminalRunStatus(record.snapshot.status)) this.cancelDuringClose(record);
     }
     await Promise.allSettled([...this.runs.values()].map((record) => record.promise));
-    await this.taskHostRuntime.close();
+    await this.taskHostRuntime?.close();
     this.subscribers.clear();
   }
 
@@ -450,6 +476,11 @@ export class WorkspaceTaskRuntime {
   private assertOpen(): void {
     if (this.closed) throw new Error("WorkspaceTaskRuntime 已关闭");
   }
+
+  private requireVersionProtection(): TaskHostRuntime {
+    if (this.taskHostRuntime) return this.taskHostRuntime;
+    throw new Error("此功能需要先为项目启用版本保护。当前仍可在基础模式中执行普通任务。");
+  }
 }
 
 function updateRun(
@@ -483,4 +514,14 @@ function taskVersion(task: TaskSnapshot): number {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function isFolderModeFallback(error: unknown): boolean {
+  const message = errorMessage(error);
+  return (
+    message.startsWith("所选文件夹不是 Git 仓库") ||
+    message.startsWith("Pico 未找到 Git") ||
+    message.startsWith("当前 Git 工作树处于 detached HEAD") ||
+    message.startsWith("当前 Git 工作区还没有基线提交")
+  );
 }
