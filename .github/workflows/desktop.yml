@@ -1,0 +1,57 @@
+name: Desktop CI
+
+on:
+  push:
+    branches: [codex/desktop-app]
+    paths:
+      - "apps/desktop/**"
+      - "packages/protocol/**"
+      - "src/daemon/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/desktop.yml"
+  pull_request:
+    paths:
+      - "apps/desktop/**"
+      - "packages/protocol/**"
+      - "src/daemon/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/desktop.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  desktop-check:
+    name: ${{ matrix.os }} desktop check
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Production dependency audit
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Typecheck desktop packages
+        run: npm run desktop:typecheck
+
+      - name: Lint repository and desktop packages
+        run: npm run lint
+
+      - name: Test desktop packages
+        run: npm test --workspace @pico/desktop
+
+      - name: Package unsigned desktop smoke build
+        run: npm run desktop:package
