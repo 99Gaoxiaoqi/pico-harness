@@ -233,6 +233,113 @@ describe("DesktopRuntimeService integration", () => {
     await fixture.service.close();
   });
 
+  it("复用 Session 真源完成重命名、分叉与手动压缩", async () => {
+    const summaryProvider = {
+      async generate() {
+        return { role: "assistant" as const, content: "## 历史任务快照\n已完成前缀压缩" };
+      },
+    };
+    const fixture = await createFixture(undefined, {
+      env: { PICO_TEST_TOKEN: "test-token" },
+      providerFactory: () => summaryProvider,
+      createSessionId: () => "desktop-fork-target",
+    });
+    await mkdir(join(fixture.workspace, ".pico"));
+    await writeFile(
+      join(fixture.workspace, ".pico", "config.json"),
+      JSON.stringify({
+        version: 1,
+        model: "local/coder",
+        providers: {
+          local: {
+            protocol: "openai",
+            baseURL: "https://provider.example.test/v1",
+            apiKeyEnv: "PICO_TEST_TOKEN",
+            models: ["coder"],
+            discoverModels: false,
+          },
+        },
+      }),
+    );
+    await fixture.trust.trust(fixture.canonicalWorkspace);
+    const created = (await fixture.service.handle(
+      createRuntimeRequest("session.create", {
+        workspacePath: fixture.workspace,
+        title: "Desktop seed",
+      }),
+    )) as { session: { sessionId: string } };
+    const sourceSessionId = created.session.sessionId;
+    managedSessions.push({ sessionId: sourceSessionId, workspacePath: fixture.canonicalWorkspace });
+    const source = await globalSessionManager.getOrCreate(
+      sourceSessionId,
+      fixture.canonicalWorkspace,
+      { persistence: true, sessionCatalog: false },
+    );
+    await source.commitMessages({ role: "user", content: "task one" });
+    await source.commitMessages({ role: "assistant", content: "step one" });
+    await source.commitMessages({ role: "user", content: "task two" });
+    await source.commitMessages({ role: "assistant", content: "step two" });
+    await source.commitMessages({ role: "user", content: "recent request" });
+    await source.flushPersistence();
+
+    await expect(
+      fixture.service.handle(
+        createRuntimeRequest("session.rename", {
+          workspacePath: fixture.workspace,
+          sessionId: sourceSessionId,
+          title: "  主会话   重构  ",
+        }),
+      ),
+    ).resolves.toMatchObject({ session: { sessionId: sourceSessionId, title: "主会话 重构" } });
+    expect(source.getRuntimeStateSnapshot().settings?.title).toBe("主会话 重构");
+
+    const forked = await fixture.service.handle(
+      createRuntimeRequest("session.fork", {
+        workspacePath: fixture.workspace,
+        sessionId: sourceSessionId,
+      }),
+    );
+    expect(forked).toMatchObject({
+      sourceSessionId,
+      session: {
+        sessionId: "desktop-fork-target",
+        forkFrom: sourceSessionId,
+        title: expect.stringContaining("主会话 重构"),
+      },
+    });
+    managedSessions.push({
+      sessionId: "desktop-fork-target",
+      workspacePath: fixture.canonicalWorkspace,
+    });
+
+    await expect(
+      fixture.service.handle(
+        createRuntimeRequest("session.compact", {
+          workspacePath: fixture.workspace,
+          sessionId: "desktop-fork-target",
+        }),
+      ),
+    ).resolves.toMatchObject({
+      compacted: true,
+      beforeMessageCount: 5,
+      afterMessageCount: 4,
+      session: { sessionId: "desktop-fork-target" },
+    });
+    const target = await globalSessionManager.getOrCreate(
+      "desktop-fork-target",
+      fixture.canonicalWorkspace,
+      { persistence: true, sessionCatalog: false },
+    );
+    expect(target.getHistory()[0]?.content).toContain("上下文压缩");
+    expect(source.length).toBe(5);
+
+    const events = await fixture.service.replayEvents({ workspacePath: fixture.workspace });
+    expect(events.map((event) => event.topic)).toEqual(
+      expect.arrayContaining(["session.updated", "session.transcriptUpdated"]),
+    );
+    await fixture.service.close();
+  });
+
   it("以 Session 为主体幂等发送多轮消息，并从 JSONL 分页恢复可见 Transcript", async () => {
     const fixture = await createFixture(async ({ workspacePath, sessionId, prompt, context }) => {
       if (!sessionId) throw new Error("session.send 必须预先绑定 Session");
@@ -723,6 +830,10 @@ describe("DesktopRuntimeService integration", () => {
   async function createFixture(
     execute: ConstructorParameters<typeof WorkspaceRuntimeService>[0]["execute"] = async () =>
       undefined,
+    desktopOptions: Pick<
+      ConstructorParameters<typeof DesktopRuntimeService>[0],
+      "env" | "providerFactory" | "createSessionId"
+    > = {},
   ) {
     const root = await mkdtemp(join(tmpdir(), "pico-desktop-runtime-"));
     cleanups.push(root);
@@ -764,6 +875,7 @@ describe("DesktopRuntimeService integration", () => {
       trustStore: trust,
       sessionStateStore: sessionState,
       conversationStateStore: conversationState,
+      ...desktopOptions,
     });
     return {
       root,
