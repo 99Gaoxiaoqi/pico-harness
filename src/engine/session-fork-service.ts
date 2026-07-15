@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { ToolResultArtifactStore, type ArtifactCloneMapping } from "../context/artifact-store.js";
@@ -6,7 +6,7 @@ import { FileSessionSummaryStore } from "../memory/summary-store.js";
 import { resolvePicoPaths } from "../paths/pico-paths.js";
 import { materializeRuntimeHistory } from "../runtime/runtime-event-read-model.js";
 import { RuntimeEventStore } from "../runtime/runtime-event-store.js";
-import { RuntimeRun } from "../runtime/runtime-run.js";
+import { RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX, RuntimeRun } from "../runtime/runtime-run.js";
 import { projectRuntimeSessionMessageEntries } from "../runtime/runtime-session-projection.js";
 import { fileHistoryCloneSession, fileHistoryDefaultBaseDir } from "../safety/file-history.js";
 import type { Message } from "../schema/message.js";
@@ -225,6 +225,9 @@ export class SessionForkService {
           );
         }
       },
+      assertRuntimeTargetOwned: async (operation, bundle) => {
+        await this.assertRuntimeTargetOwned(operation, bundle);
+      },
       cloneSidecars: async (operation) => {
         await this.ensureSidecars(operation);
         await this.hooks?.afterSidecars?.(operation);
@@ -276,40 +279,78 @@ export class SessionForkService {
     operation: ForkStorageOperation,
     prepared: ForkPreparedBundle,
   ): Promise<void> {
-    const frozen = await this.readFrozenBundle(operation, prepared.stagedBundlePath);
-    const sidecars = await this.readSidecars(operation);
+    const { frozen, messages } = await this.readRuntimePublication(operation, prepared);
     const sourceThroughEventId = await resolveFrozenSourceThroughEventId(this.runtimeStore, frozen);
-    const messages = rewriteArtifactReferences(
-      frozen.messages,
-      operation.sourceSessionId,
-      operation.targetSessionId,
-      sidecars.artifactMappings,
-    );
 
     await this.hooks?.beforeRuntimeBootstrap?.(operation);
-    await RuntimeRun.bootstrapFork({
-      sourceSessionId: operation.sourceSessionId,
-      targetSessionId: operation.targetSessionId,
-      operationId: operation.operationId,
-      operationCreatedAt: operation.createdAt,
-      messages,
-      ...(sourceThroughEventId ? { sourceThroughEventId } : {}),
-      workDir: this.workDir,
-      store: this.runtimeStore,
-    });
-
-    const runtimePatch = filteredRuntimePatch(
-      frozen,
-      operation.targetMode ?? "yolo",
-      operation.createdAt,
-    );
-    if (runtimePatch) {
-      const createdAt = parseForkCreatedAt(operation.createdAt);
-      await this.runtimeStore.appendSessionState(operation.targetSessionId, runtimePatch, {
-        eventId: runtimeStateEventId(operation.operationId),
-        now: () => new Date(createdAt),
+    try {
+      await RuntimeRun.bootstrapFork({
+        sourceSessionId: operation.sourceSessionId,
+        targetSessionId: operation.targetSessionId,
+        operationId: operation.operationId,
+        operationCreatedAt: operation.createdAt,
+        messages,
+        ...(sourceThroughEventId ? { sourceThroughEventId } : {}),
+        workDir: this.workDir,
+        store: this.runtimeStore,
       });
+
+      const runtimePatch = filteredRuntimePatch(
+        frozen,
+        operation.targetMode ?? "yolo",
+        operation.createdAt,
+      );
+      if (runtimePatch) {
+        const createdAt = parseForkCreatedAt(operation.createdAt);
+        await this.runtimeStore.appendSessionState(operation.targetSessionId, runtimePatch, {
+          eventId: runtimeStateEventId(operation.operationId),
+          now: () => new Date(createdAt),
+        });
+      }
+    } catch (error) {
+      if (error instanceof ForkOperationConflictError) throw error;
+      await this.assertRuntimeTargetOwned(operation, prepared);
+      throw error;
     }
+  }
+
+  private async assertRuntimeTargetOwned(
+    operation: ForkStorageOperation,
+    prepared: ForkPreparedBundle,
+  ): Promise<void> {
+    if (!(await this.runtimeStore.readSessionManifest(operation.targetSessionId))) return;
+    const events = await this.runtimeStore.readSession(operation.targetSessionId);
+    if (events.length === 0) return;
+    const { messages } = await this.readRuntimePublication(operation, prepared);
+    const expectedRunId = runtimeForkBootstrapRunId(operation, messages);
+    const ownsRuntime = events.every(
+      (event) =>
+        event.runId === expectedRunId ||
+        (event.kind === "session.state.committed" &&
+          event.eventId === runtimeStateEventId(operation.operationId)),
+    );
+    if (ownsRuntime) return;
+    throw new ForkOperationConflictError(
+      `Fork target Runtime belongs to another operation: ${operation.targetSessionId}`,
+      "target_conflict",
+    );
+  }
+
+  private async readRuntimePublication(
+    operation: ForkStorageOperation,
+    prepared: ForkPreparedBundle,
+  ): Promise<{ readonly frozen: FrozenForkBundle; readonly messages: readonly Message[] }> {
+    const frozen = await this.readFrozenBundle(operation, prepared.stagedBundlePath);
+    const sidecars = await this.readSidecars(operation);
+    return {
+      frozen,
+      messages: rewriteArtifactReferences(
+        frozen.messages,
+        operation.sourceSessionId,
+        operation.targetSessionId,
+        sidecars.artifactMappings,
+      ),
+    };
   }
 
   private async readFrozenBundle(
@@ -669,6 +710,25 @@ function forkTitleFrom(sourceTitle: string): string {
 
 function runtimeStateEventId(operationId: string): string {
   return "fork:" + operationId + ":state";
+}
+
+function runtimeForkBootstrapRunId(
+  operation: ForkStorageOperation,
+  messages: readonly Message[],
+): string {
+  const sourceDigest = createHash("sha256").update(JSON.stringify(messages)).digest("hex");
+  const digest = createHash("sha256")
+    .update(
+      JSON.stringify([
+        operation.operationId,
+        operation.sourceSessionId,
+        operation.targetSessionId,
+        sourceDigest,
+        messages.length,
+      ]),
+    )
+    .digest("hex");
+  return `${RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX}${digest}`;
 }
 
 async function resolveFrozenSourceThroughEventId(
