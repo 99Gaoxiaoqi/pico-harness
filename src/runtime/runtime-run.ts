@@ -1,11 +1,13 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { isAbortError } from "../provider/errors.js";
 import { resolvePicoPaths } from "../paths/pico-paths.js";
 import { RunLedger } from "../engine/run-ledger.js";
+import { createEmptyUsageSnapshot, type SessionUsageSnapshot } from "../engine/session-runtime.js";
 import type { CommitReceipt } from "../engine/session-store.js";
 import type { Session } from "../engine/session.js";
-import type { Message } from "../schema/message.js";
+import { toCanonicalUsage, type Message } from "../schema/message.js";
 import {
   RUNTIME_EVENT_SCHEMA_VERSION,
   type RuntimeApprovalRequestedEvent,
@@ -23,6 +25,8 @@ import {
   type RuntimeTerminalStatus,
   type RuntimeToolStartedEvent,
 } from "./runtime-event.js";
+import { runtimeEventHasModelMessage, type RuntimeEvent } from "./runtime-event.js";
+import type { RuntimeHistoryProjectionEntry } from "./runtime-event-read-model.js";
 import {
   RuntimeEventStore,
   createRuntimeEventId,
@@ -31,6 +35,8 @@ import {
 
 const runtimeRunContext = new AsyncLocalStorage<RuntimeRun>();
 const runtimeToolCallContext = new AsyncLocalStorage<string>();
+const externalMessageCommitTails = new Map<string, Promise<void>>();
+const forkBootstrapTails = new Map<string, Promise<void>>();
 
 export interface RuntimeRunStartOptions {
   readonly sessionId: string;
@@ -50,6 +56,34 @@ export interface ReconcileRuntimeRunsOptions {
   readonly store?: RuntimeEventStore;
 }
 
+export interface RepairRuntimeSessionProjectionOptions {
+  readonly workDir: string;
+  readonly store?: RuntimeEventStore;
+}
+
+export interface BootstrapRuntimeForkOptions {
+  readonly sourceSessionId: string;
+  readonly targetSessionId: string;
+  /** The immutable, usage-free Session seed published by SessionForkService. */
+  readonly messages: readonly Message[];
+  readonly workDir: string;
+  readonly store?: RuntimeEventStore;
+}
+
+export interface BootstrapRuntimeSessionHistoryOptions {
+  readonly session: Session;
+  readonly workDir: string;
+  readonly store?: RuntimeEventStore;
+}
+
+export interface RecordRuntimeSessionRewindOptions {
+  readonly sessionId: string;
+  readonly workDir: string;
+  readonly messageIndex: number;
+  readonly branchId: string;
+  readonly store?: RuntimeEventStore;
+}
+
 export interface RuntimeModelCallStartedOptions {
   readonly providerCallId: string;
   readonly provider?: string;
@@ -64,6 +98,19 @@ export interface RuntimeModelCallSettledOptions {
   readonly usage?: RuntimeModelCallSettledEvent["data"]["usage"];
   readonly costCNY?: number;
   readonly error?: string;
+}
+
+export interface RuntimeCheckpointOptions {
+  readonly checkpointId: string;
+  readonly coveredEventCount: number;
+  readonly sourceDigest: string;
+  readonly throughEventId: string;
+  readonly summary: Message;
+}
+
+interface RuntimeForkBootstrapCompletion {
+  readonly sourceDigest: string;
+  readonly messageCount: number;
 }
 
 /** The canonical run bound to the current asynchronous Agent execution. */
@@ -191,6 +238,251 @@ export class RuntimeRun {
     return reconciled;
   }
 
+  /** Repairs the replaceable Session JSONL projection from durable canonical facts. */
+  static async repairSessionProjection(
+    session: Session,
+    options: RepairRuntimeSessionProjectionOptions,
+  ): Promise<boolean> {
+    const store =
+      options.store ??
+      new RuntimeEventStore({ baseDir: resolvePicoPaths(options.workDir).workspace.runs });
+    if (!(await store.readSessionManifest(session.id))) return false;
+    const events = await store.readSession(session.id);
+    const projected = projectSessionMessages(events);
+    const usage = projectSessionUsage(events);
+    const messagesStale = !isDeepStrictEqual(session.getModelContext(), projected);
+    const usageStale = !isDeepStrictEqual(session.getRuntimeStateSnapshot().usage, usage);
+    if (!messagesStale && !usageStale) return false;
+
+    const digest = createHash("sha256")
+      .update(events.map((event) => event.eventId).join("\n"))
+      .digest("hex");
+    if (messagesStale) {
+      await session.replaceRuntimeProjection(projected, `runtime-projection:${digest}`);
+    }
+    if (usageStale) {
+      await session.replaceRuntimeUsage(usage, `runtime-usage:${digest}`);
+    }
+    return true;
+  }
+
+  /**
+   * Creates the canonical history for a fork that has already seeded its replaceable
+   * Session projection. The copied message facts remain immutable and the target gets
+   * its own bootstrap run, rather than silently inheriting the parent's run files.
+   */
+  static async bootstrapFork(options: BootstrapRuntimeForkOptions): Promise<boolean> {
+    if (options.sourceSessionId === options.targetSessionId) {
+      throw new Error("Runtime fork source 与 target sessionId 不能相同");
+    }
+    const store =
+      options.store ??
+      new RuntimeEventStore({ baseDir: resolvePicoPaths(options.workDir).workspace.runs });
+    const messages = options.messages.map(stripMessageUsage);
+    const completion: RuntimeForkBootstrapCompletion = {
+      sourceDigest: forkSeedDigest(messages),
+      messageCount: messages.length,
+    };
+
+    return serializeForkBootstrap(options.targetSessionId, async () => {
+      const existingEvents = await store.readSession(options.targetSessionId);
+      const forkMarkers = existingEvents.filter(
+        (event): event is RuntimeSessionForkedEvent => event.kind === "session.forked",
+      );
+      const conflictingMarker = forkMarkers.find(
+        (event) => event.data.parentSessionId !== options.sourceSessionId,
+      );
+      if (conflictingMarker) {
+        throw new Error(
+          `Runtime fork target ${options.targetSessionId} is already bound to parent ${conflictingMarker.data.parentSessionId}`,
+        );
+      }
+      const completedMarker = forkMarkers.find((event) => event.data.sourceDigest !== undefined);
+      if (completedMarker) {
+        if (
+          completedMarker.data.sourceDigest !== completion.sourceDigest ||
+          completedMarker.data.messageCount !== completion.messageCount
+        ) {
+          throw new Error(
+            `Runtime fork target ${options.targetSessionId} has a conflicting frozen seed`,
+          );
+        }
+        return false;
+      }
+
+      const imported = projectSessionMessageEvents(existingEvents).map((event) =>
+        stripMessageUsage(event.data.message),
+      );
+      if (!isMessagePrefix(imported, messages)) {
+        throw new Error(
+          `Runtime fork target ${options.targetSessionId} has incomplete facts that diverge from its frozen Session seed`,
+        );
+      }
+      // Compatibility: old bootstrap wrote session.forked before its copied messages.
+      // A complete old fork is already a usable history; only incomplete prefixes resume.
+      if (forkMarkers.length > 0 && imported.length === messages.length) return false;
+
+      const forkRun = await RuntimeRun.start({
+        sessionId: options.targetSessionId,
+        workDir: options.workDir,
+        store,
+      });
+      await forkRun.run(async () => {
+        for (const message of messages.slice(imported.length)) {
+          await forkRun.recordImportedMessage(message);
+        }
+        const throughEventId = await resolveForkSourceThroughEventId(
+          store,
+          options.sourceSessionId,
+          messages,
+        );
+        // This is the completion marker. Until it is durable, a future start can replay
+        // the immutable target seed and finish a partially written bootstrap.
+        await forkRun.recordSessionForked(options.sourceSessionId, throughEventId, completion);
+      });
+      return true;
+    });
+  }
+
+  /**
+   * Adopts an existing in-memory Session into canonical history before its first
+   * RuntimeEvent-backed run. This is only valid when no durable legacy transcript exists.
+   */
+  static async bootstrapSessionHistory(
+    options: BootstrapRuntimeSessionHistoryOptions,
+  ): Promise<boolean> {
+    const store =
+      options.store ??
+      new RuntimeEventStore({ baseDir: resolvePicoPaths(options.workDir).workspace.runs });
+    if (await store.readSessionManifest(options.session.id)) return false;
+    const history = options.session.getModelContext();
+    if (history.length === 0) return false;
+
+    const run = await RuntimeRun.start({
+      sessionId: options.session.id,
+      workDir: options.workDir,
+      store,
+    });
+    await run.run(async () => {
+      for (const message of history) {
+        await run.recordBootstrapMessage(message);
+      }
+    });
+    return true;
+  }
+
+  /** Appends an immutable rewind fact after the Session/UI projection has completed its saga. */
+  static async recordSessionRewind(options: RecordRuntimeSessionRewindOptions): Promise<boolean> {
+    const store =
+      options.store ??
+      new RuntimeEventStore({ baseDir: resolvePicoPaths(options.workDir).workspace.runs });
+    if (!(await store.readSessionManifest(options.sessionId))) return false;
+
+    const events = await store.readSession(options.sessionId);
+    const messages = projectSessionMessageEvents(events);
+    const retainedCount = Math.max(0, Math.min(options.messageIndex, messages.length));
+    const throughEventId = messages[retainedCount - 1]?.eventId;
+    const existing = events.find(
+      (event): event is RuntimeHistoryRewoundEvent =>
+        event.kind === "history.rewound" && event.data.branchId === options.branchId,
+    );
+    if (existing) {
+      if (existing.data.throughEventId !== throughEventId) {
+        throw new Error(
+          `Runtime rewind branch ${options.branchId} is already bound to another history boundary`,
+        );
+      }
+      return true;
+    }
+    const rewindRun = await RuntimeRun.start({
+      sessionId: options.sessionId,
+      workDir: options.workDir,
+      store,
+    });
+    await rewindRun.run(async () => {
+      await rewindRun.recordHistoryRewound(options.branchId, throughEventId);
+    });
+    return true;
+  }
+
+  /**
+   * Bridges durable Session writes that originate while no foreground Agent run is active
+   * (for example a delivered subagent completion or an async hook wake-up). RuntimeEvent
+   * remains the write-ahead source; Session is updated only through the short-lived run.
+   */
+  static async commitExternalMessages(
+    session: Session,
+    messages: readonly Message[],
+  ): Promise<boolean> {
+    if (messages.length === 0) return true;
+    const store = new RuntimeEventStore({
+      baseDir: resolvePicoPaths(session.workDir).workspace.runs,
+    });
+    if (!(await store.readSessionManifest(session.id))) return false;
+    const run = await RuntimeRun.start({
+      sessionId: session.id,
+      workDir: session.workDir,
+      store,
+    });
+    await run.run(() => run.commitMessages(session, messages));
+    return true;
+  }
+
+  /**
+   * Exactly-once variant for host-owned message IDs. A retry first reuses the canonical
+   * message fact, repairing only its Session projection instead of appending a duplicate.
+   */
+  static async commitExternalMessageOnce(
+    session: Session,
+    eventId: string,
+    message: Message,
+  ): Promise<CommitReceipt | undefined> {
+    const store = new RuntimeEventStore({
+      baseDir: resolvePicoPaths(session.workDir).workspace.runs,
+    });
+    if (!(await store.readSessionManifest(session.id))) return undefined;
+    return serializeExternalMessageCommit(session.id, eventId, async () => {
+      const existing = (await store.readSession(session.id)).find(
+        (event) => event.eventId === eventId,
+      );
+      if (existing) {
+        if (
+          existing.kind !== "message.committed" ||
+          !isDeepStrictEqual(existing.data.message, message)
+        ) {
+          throw new Error(`Runtime event ID ${eventId} is already bound to another payload`);
+        }
+        return session.commitProjectionMessageOnce(eventId, message);
+      }
+      const run = await RuntimeRun.start({
+        sessionId: session.id,
+        workDir: session.workDir,
+        store,
+      });
+      return run.run(() => run.commitMessageOnce(session, eventId, message));
+    });
+  }
+
+  async readModelHistory(): Promise<Message[]> {
+    const { materializeRuntimeHistory } = await import("./runtime-event-read-model.js");
+    return materializeRuntimeHistory(await this.store.readSession(this.sessionId));
+  }
+
+  async readModelHistoryEntries(): Promise<RuntimeHistoryProjectionEntry[]> {
+    const { materializeRuntimeHistoryEntries } = await import("./runtime-event-read-model.js");
+    return materializeRuntimeHistoryEntries(await this.store.readSession(this.sessionId));
+  }
+
+  /** Raw model-message facts for Session/UI projection, intentionally without checkpoint replacement. */
+  async readSessionProjectionEntries(): Promise<RuntimeHistoryProjectionEntry[]> {
+    return projectSessionMessageEvents(await this.store.readSession(this.sessionId)).map(
+      (event) => ({
+        eventId: event.eventId,
+        message: structuredClone(event.data.message),
+      }),
+    );
+  }
+
   run<Result>(execute: () => Promise<Result>, signal?: AbortSignal): Promise<Result> {
     return runtimeRunContext.run(this, () =>
       RunLedger.runInContext(this.ledger, async () => {
@@ -244,6 +536,43 @@ export class RuntimeRun {
     };
     await this.store.append(event);
     return session.commitProjectionMessageOnce(eventId, message);
+  }
+
+  /** Writes one immutable, usage-free message from a fork's frozen Session seed. */
+  async recordImportedMessage(source: Message): Promise<void> {
+    this.assertOpen();
+    const message = stripMessageUsage(source);
+    const refs = this.messageRefs(message);
+    await this.store.append({
+      ...this.base(createRuntimeEventId("fork-message")),
+      ...(refs ? { refs } : {}),
+      kind: "message.committed",
+      data: { message },
+    });
+  }
+
+  /** Persists a pre-runtime Session message without re-appending its already-present projection. */
+  async recordBootstrapMessage(message: Message): Promise<void> {
+    this.assertOpen();
+    const refs = this.messageRefs(message);
+    await this.store.append({
+      ...this.base(createRuntimeEventId("bootstrap-message")),
+      ...(refs ? { refs } : {}),
+      kind: "message.committed",
+      data: { message: structuredClone(message) },
+    });
+  }
+
+  /** Records an audit-only child-agent message without changing the parent model context. */
+  async recordTranscriptMessage(message: Message): Promise<void> {
+    this.assertOpen();
+    const refs = this.messageRefs(message);
+    await this.store.append({
+      ...this.base(createRuntimeEventId("transcript-message"), true, "transcript"),
+      ...(refs ? { refs } : {}),
+      kind: "message.committed",
+      data: { message: structuredClone(message) },
+    });
   }
 
   async recordToolStarted(
@@ -316,16 +645,18 @@ export class RuntimeRun {
     });
   }
 
-  async recordCheckpoint(
-    checkpointId: string,
-    coveredEventCount: number,
-    sourceDigest: string,
-  ): Promise<void> {
+  async recordCheckpoint(options: RuntimeCheckpointOptions): Promise<void> {
     this.assertOpen();
     const event: RuntimeCheckpointRecordedEvent = {
       ...this.base(createRuntimeEventId("context-checkpoint"), true, "internal"),
       kind: "context.checkpoint.recorded",
-      data: { checkpointId, coveredEventCount, sourceDigest },
+      data: {
+        checkpointId: options.checkpointId,
+        coveredEventCount: options.coveredEventCount,
+        sourceDigest: options.sourceDigest,
+        throughEventId: options.throughEventId,
+        summary: structuredClone(options.summary),
+      },
     };
     await this.store.append(event);
   }
@@ -340,12 +671,20 @@ export class RuntimeRun {
     await this.store.append(event);
   }
 
-  async recordSessionForked(parentSessionId: string, throughEventId?: string): Promise<void> {
+  async recordSessionForked(
+    parentSessionId: string,
+    throughEventId?: string,
+    completion?: RuntimeForkBootstrapCompletion,
+  ): Promise<void> {
     this.assertOpen();
     const event: RuntimeSessionForkedEvent = {
       ...this.base(createRuntimeEventId("session-forked"), false, "internal"),
       kind: "session.forked",
-      data: { parentSessionId, ...(throughEventId ? { throughEventId } : {}) },
+      data: {
+        parentSessionId,
+        ...(throughEventId ? { throughEventId } : {}),
+        ...(completion ?? {}),
+      },
     };
     await this.store.append(event);
   }
@@ -432,7 +771,143 @@ function compactRefs(value: RuntimeEventRefs): RuntimeEventRefs | undefined {
   return entries.length > 0 ? (Object.fromEntries(entries) as RuntimeEventRefs) : undefined;
 }
 
+function serializeExternalMessageCommit<Result>(
+  sessionId: string,
+  eventId: string,
+  operation: () => Promise<Result>,
+): Promise<Result> {
+  const key = `${sessionId}:${eventId}`;
+  const previous = externalMessageCommitTails.get(key) ?? Promise.resolve();
+  const result = previous.then(operation);
+  const tail = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  externalMessageCommitTails.set(key, tail);
+  return result.finally(() => {
+    if (externalMessageCommitTails.get(key) === tail) {
+      externalMessageCommitTails.delete(key);
+    }
+  });
+}
+
+function serializeForkBootstrap<Result>(
+  sessionId: string,
+  operation: () => Promise<Result>,
+): Promise<Result> {
+  const previous = forkBootstrapTails.get(sessionId) ?? Promise.resolve();
+  const result = previous.then(operation);
+  const tail = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  forkBootstrapTails.set(sessionId, tail);
+  return result.finally(() => {
+    if (forkBootstrapTails.get(sessionId) === tail) forkBootstrapTails.delete(sessionId);
+  });
+}
+
+function stripMessageUsage(message: Message): Message {
+  const { usage: _usage, ...copy } = structuredClone(message);
+  return copy;
+}
+
+function forkSeedDigest(messages: readonly Message[]): string {
+  return createHash("sha256").update(JSON.stringify(messages)).digest("hex");
+}
+
+function isMessagePrefix(prefix: readonly Message[], messages: readonly Message[]): boolean {
+  return (
+    prefix.length <= messages.length &&
+    prefix.every((message, index) => isDeepStrictEqual(message, messages[index]))
+  );
+}
+
+async function resolveForkSourceThroughEventId(
+  store: RuntimeEventStore,
+  sourceSessionId: string,
+  frozenMessages: readonly Message[],
+): Promise<string | undefined> {
+  if (!(await store.readSessionManifest(sourceSessionId))) return undefined;
+  const sourceMessages = projectSessionMessageEvents(await store.readSession(sourceSessionId));
+  const normalizedSource = sourceMessages.map((event) => stripMessageUsage(event.data.message));
+  if (!isMessagePrefix(frozenMessages, normalizedSource)) return undefined;
+  return sourceMessages[frozenMessages.length - 1]?.eventId;
+}
+
 function runtimeFailureReason(error: unknown): string {
   const detail = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
   return detail.slice(0, 1_000);
+}
+
+function projectSessionMessages(events: readonly RuntimeEvent[]): Message[] {
+  return projectSessionMessageEvents(events).map((event) => event.data.message);
+}
+
+function projectSessionMessageEvents(
+  events: readonly RuntimeEvent[],
+): RuntimeMessageCommittedEvent[] {
+  const eventIndexes = new Map<string, number>();
+  const projected: Array<{
+    readonly eventIndex: number;
+    readonly event: RuntimeMessageCommittedEvent;
+  }> = [];
+  for (const [eventIndex, event] of events.entries()) {
+    if (eventIndexes.has(event.eventId)) {
+      throw new Error(`Runtime session projection contains duplicate event ID ${event.eventId}`);
+    }
+    if (event.kind === "history.rewound") {
+      if (event.data.throughEventId === undefined) {
+        projected.length = 0;
+      } else {
+        const throughEventIndex = eventIndexes.get(event.data.throughEventId);
+        if (throughEventIndex === undefined) {
+          throw new Error(
+            `Runtime session projection rewind references unknown event ${event.data.throughEventId}`,
+          );
+        }
+        const firstRemoved = projected.findIndex(
+          (candidate) => candidate.eventIndex > throughEventIndex,
+        );
+        if (firstRemoved !== -1) projected.splice(firstRemoved);
+      }
+    } else if (runtimeEventHasModelMessage(event)) {
+      projected.push({ eventIndex, event: structuredClone(event) });
+    }
+    eventIndexes.set(event.eventId, eventIndex);
+  }
+  return projected.map(({ event }) => event);
+}
+
+function projectSessionUsage(events: readonly RuntimeEvent[]): SessionUsageSnapshot {
+  const usage = createEmptyUsageSnapshot();
+  for (const event of events) {
+    if (event.kind !== "model.call.settled" || event.data.status !== "succeeded") continue;
+    usage.totalProviderCalls++;
+    const reportedUsage = event.data.usage;
+    if (!reportedUsage) continue;
+
+    const canonical = toCanonicalUsage(reportedUsage);
+    usage.totalUsageReports++;
+    usage.totalPromptTokens += Math.max(0, canonical.totalPromptTokens);
+    usage.totalCompletionTokens += Math.max(0, canonical.totalCompletionTokens);
+    usage.totalInputTokens += canonical.inputTokens;
+    usage.totalCacheReadTokens += canonical.cacheReadTokens;
+    usage.totalCacheWriteTokens += canonical.cacheWriteTokens;
+    usage.totalReasoningTokens += canonical.reasoningTokens;
+    usage.totalCostCNY += event.data.costCNY ?? 0;
+
+    const status = event.data.costStatus ?? "unknown";
+    usage.lastCostStatus = status;
+    if (status === "estimated") usage.totalEstimatedCostReports++;
+    else if (status === "included") usage.totalIncludedCostReports++;
+    else usage.totalUnknownCostReports++;
+
+    const fields = new Set(reportedUsage.reportedFields ?? ["prompt", "completion"]);
+    if (fields.has("input")) usage.totalInputReports++;
+    if (fields.has("cacheRead")) usage.totalCacheReadReports++;
+    if (fields.has("cacheWrite")) usage.totalCacheWriteReports++;
+    if (fields.has("reasoning")) usage.totalReasoningReports++;
+  }
+  return usage;
 }

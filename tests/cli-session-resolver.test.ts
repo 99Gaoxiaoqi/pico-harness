@@ -12,6 +12,7 @@ import {
   createSessionIdentity,
   isSameSessionProjectGroup,
 } from "../src/engine/session-identity.js";
+import { Session } from "../src/engine/session.js";
 import { resolveCliStartupSession } from "../src/cli/session-args.js";
 import { resolvePicoPaths } from "../src/paths/pico-paths.js";
 import { RuntimeEventStore } from "../src/runtime/runtime-event-store.js";
@@ -165,6 +166,23 @@ describe("resolveCliSession", () => {
     await expect(resolveCliSession({ workDir, forkSession: "cli-legacy" })).rejects.toThrow(
       "legacy 历史为只读",
     );
+  });
+
+  it("允许显式恢复已发布但尚未完成 Runtime bootstrap 的 fork", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-session-resolver-"));
+    const source = new Session("cli-source", workDir, { persistence: true });
+    const target = new Session("cli-pending-fork", workDir, { persistence: true });
+    await source.recover();
+    await target.recover();
+    await source.commitMessages({ role: "user", content: "frozen prompt" });
+    await target.seedForkFrom(source, source.getModelContext());
+    await source.close();
+    await target.close();
+
+    await expect(resolveCliSession({ workDir, session: "cli-pending-fork" })).resolves.toEqual({
+      mode: "resume",
+      sessionId: "cli-pending-fork",
+    });
   });
 
   it("互斥的 session 启动参数会被拒绝", async () => {

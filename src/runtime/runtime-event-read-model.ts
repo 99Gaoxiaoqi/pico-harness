@@ -43,64 +43,71 @@ export function projectRuntimeEventsToMessageEntries(
 export function materializeRuntimeHistoryEntries(
   events: readonly RuntimeEvent[],
 ): RuntimeHistoryProjectionEntry[] {
-  const knownEventIds = new Set<string>();
-  const projected: RuntimeHistoryProjectionEntry[] = [];
-
-  for (const event of events) {
-    if (knownEventIds.has(event.eventId)) {
+  const eventIndexes = new Map<string, number>();
+  for (const [eventIndex, event] of events.entries()) {
+    if (eventIndexes.has(event.eventId)) {
       throw new RuntimeEventReadModelIntegrityError(
         `Runtime history contains duplicate event ID ${event.eventId}`,
       );
     }
-
-    if (event.kind === "history.rewound") {
-      rewindProjectedMessages(projected, event.data.throughEventId, knownEventIds, event.eventId);
-    } else if (event.kind === "context.checkpoint.recorded" && isRollingCheckpoint(event)) {
-      replaceProjectedPrefixWithCheckpoint(projected, event, knownEventIds);
-    } else if (
-      event.kind === "message.committed" &&
-      event.visibility === "model" &&
-      !event.partial
-    ) {
-      projected.push({ eventId: event.eventId, message: cloneMessage(event.data.message) });
-    }
-
-    knownEventIds.add(event.eventId);
+    eventIndexes.set(event.eventId, eventIndex);
   }
 
+  const projected = materializePrefix(events, events.length, eventIndexes);
   assertToolCallPairing(projected.map(({ message }) => message));
   return projected;
 }
 
-function rewindProjectedMessages(
-  projected: RuntimeHistoryProjectionEntry[],
-  throughEventId: string | undefined,
-  knownEventIds: ReadonlySet<string>,
-  rewindEventId: string,
-): void {
-  if (throughEventId === undefined) {
-    projected.length = 0;
-    return;
+/**
+ * Replays an immutable prefix. A rewind may point inside a prior checkpoint, so it
+ * deliberately rebuilds from the raw facts rather than merely trimming the current
+ * summarized projection.
+ */
+function materializePrefix(
+  events: readonly RuntimeEvent[],
+  endExclusive: number,
+  eventIndexes: ReadonlyMap<string, number>,
+): RuntimeHistoryProjectionEntry[] {
+  let projected: RuntimeHistoryProjectionEntry[] = [];
+  for (let eventIndex = 0; eventIndex < endExclusive; eventIndex++) {
+    const event = events[eventIndex]!;
+    if (event.kind === "history.rewound") {
+      const throughEventId = event.data.throughEventId;
+      if (throughEventId === undefined) {
+        projected = [];
+        continue;
+      }
+      const throughEventIndex = eventIndexes.get(throughEventId);
+      if (throughEventIndex === undefined || throughEventIndex >= eventIndex) {
+        throw new RuntimeEventReadModelIntegrityError(
+          `Runtime history rewind ${event.eventId} references an unknown prior event ${throughEventId}`,
+        );
+      }
+      projected = materializePrefix(events, throughEventIndex + 1, eventIndexes);
+      continue;
+    }
+    if (event.kind === "context.checkpoint.recorded" && isRollingCheckpoint(event)) {
+      replaceProjectedPrefixWithCheckpoint(projected, event, eventIndexes, eventIndex);
+      continue;
+    }
+    if (event.kind === "message.committed" && event.visibility === "model" && !event.partial) {
+      projected.push({ eventId: event.eventId, message: cloneMessage(event.data.message) });
+    }
   }
-
-  const throughProjectedIndex = findProjectedEventIndex(
-    projected,
-    throughEventId,
-    knownEventIds,
-    `Runtime history rewind ${rewindEventId}`,
-  );
-  projected.splice(throughProjectedIndex + 1);
+  return projected;
 }
 
 function replaceProjectedPrefixWithCheckpoint(
   projected: RuntimeHistoryProjectionEntry[],
   checkpoint: RuntimeCheckpointRecordedEvent & { readonly data: RuntimeRollingCheckpointData },
-  knownEventIds: ReadonlySet<string>,
+  eventIndexes: ReadonlyMap<string, number>,
+  checkpointEventIndex: number,
 ): void {
   const throughProjectedIndex = findProjectedEventIndex(
     projected,
     checkpoint.data.throughEventId,
-    knownEventIds,
+    eventIndexes,
+    checkpointEventIndex,
     `Runtime checkpoint ${checkpoint.eventId}`,
   );
   projected.splice(0, throughProjectedIndex + 1, {
@@ -112,12 +119,13 @@ function replaceProjectedPrefixWithCheckpoint(
 function findProjectedEventIndex(
   projected: readonly RuntimeHistoryProjectionEntry[],
   eventId: string,
-  knownEventIds: ReadonlySet<string>,
+  eventIndexes: ReadonlyMap<string, number>,
+  currentEventIndex: number,
   referenceKind: string,
 ): number {
   const projectedIndex = projected.findIndex((entry) => entry.eventId === eventId);
   if (projectedIndex !== -1) return projectedIndex;
-  if (knownEventIds.has(eventId)) {
+  if (eventIndexes.has(eventId) && eventIndexes.get(eventId)! < currentEventIndex) {
     throw new RuntimeEventReadModelIntegrityError(
       `${referenceKind} references event ${eventId}, but it is not in the current model projection`,
     );

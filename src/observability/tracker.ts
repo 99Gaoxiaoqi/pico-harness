@@ -115,6 +115,7 @@ export class CostTracker implements LLMProvider {
         latencyMs,
         ...(response.usage ? { usage: response.usage } : {}),
         ...(cost ? { costCNY: cost.costCNY } : {}),
+        ...(cost ? { costStatus: cost.status } : {}),
       });
       this.recordSessionUsage(response, latencyMs, streaming);
       this.recordLedger(callId, context, "succeeded", response, latencyMs);

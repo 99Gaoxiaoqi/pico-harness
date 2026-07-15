@@ -1,3 +1,4 @@
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { SkillLoader } from "../context/skill.js";
@@ -100,6 +101,9 @@ import {
   createPluginCommand,
   type PluginManagementCommandService,
 } from "../plugins/plugin-commands.js";
+import { resolvePicoPaths } from "../paths/pico-paths.js";
+import { RuntimeEventStore } from "../runtime/runtime-event-store.js";
+import { RuntimeRun } from "../runtime/runtime-run.js";
 
 const OVERRIDDEN_BUILTIN_COMMANDS = new Set([
   "skills",
@@ -575,39 +579,108 @@ function createCompactCommand(
         });
         const jobs = options.taskRuntime?.jobService;
         if (jobs) ensureSessionUsageBaseline(jobs, session);
-        const provider = jobs
-          ? new CostTracker(
-              rawProvider,
-              { provider: activeProvider, model, baseUrl: baseURL },
-              session,
-              {
-                ledger: jobs,
-                context: () => {
-                  const goalId = options.goalManager?.getActive()?.id;
-                  return {
-                    purpose: "main",
-                    sessionId: session.id,
-                    conversationId: session.conversationId,
-                    ...(goalId ? { goalId } : {}),
-                  };
+        const runtimeEventStore = new RuntimeEventStore({
+          baseDir: resolvePicoPaths(session.workDir).workspace.runs,
+        });
+        const runtimeBacked = Boolean(await runtimeEventStore.readSessionManifest(session.id));
+        const provider =
+          jobs || runtimeBacked
+            ? new CostTracker(
+                rawProvider,
+                { provider: activeProvider, model, baseUrl: baseURL },
+                session,
+                {
+                  ...(jobs ? { ledger: jobs } : {}),
+                  context: () => {
+                    const goalId = options.goalManager?.getActive()?.id;
+                    return {
+                      purpose: "main",
+                      sessionId: session.id,
+                      conversationId: session.conversationId,
+                      ...(goalId ? { goalId } : {}),
+                    };
+                  },
                 },
-              },
-            )
-          : rawProvider;
-        const ok = await new FullCompactor({
+              )
+            : rawProvider;
+        const fullCompactor = new FullCompactor({
           provider,
           ...(options.hookService ? { hookService: options.hookService } : {}),
-        }).compact(session, {
+        });
+        const request = {
           inputBudgetTokens: budget.inputBudgetTokens,
           targetRetainedTokens: Math.max(
             1,
-            Math.min(
-              Math.floor(budget.inputBudgetTokens * 0.5),
-              Math.floor(historyTokens * 0.5),
-            ),
+            Math.min(Math.floor(budget.inputBudgetTokens * 0.5), Math.floor(historyTokens * 0.5)),
           ),
-          trigger: "manual",
-        });
+          trigger: "manual" as const,
+        };
+        if (runtimeBacked) {
+          const runtimeRun = await RuntimeRun.start({
+            sessionId: session.id,
+            workDir: session.workDir,
+            store: runtimeEventStore,
+          });
+          const preview = await runtimeRun.run(async () => {
+            const entries = await runtimeRun.readModelHistoryEntries();
+            const runtimeHistoryTokens = estimateMessagesTokens(
+              entries.map(({ message }) => message),
+            );
+            const runtimeRequest = {
+              ...request,
+              targetRetainedTokens: Math.max(
+                1,
+                Math.min(
+                  Math.floor(budget.inputBudgetTokens * 0.5),
+                  Math.floor(runtimeHistoryTokens * 0.5),
+                ),
+              ),
+            };
+            await options.hookService?.dispatch("PreCompact", {
+              source: "manual",
+              messageCount: entries.length,
+            });
+            const candidate = await fullCompactor.preview(
+              session,
+              entries.map(({ message }) => message),
+              runtimeRequest,
+            );
+            if (!candidate) return undefined;
+            const covered = entries.slice(0, candidate.compactedCount);
+            const through = covered.at(-1);
+            if (!through) return undefined;
+            const checkpointId = `checkpoint:${randomUUID()}`;
+            await runtimeRun.recordCheckpoint({
+              checkpointId,
+              coveredEventCount: covered.length,
+              sourceDigest: createHash("sha256")
+                .update(covered.map(({ eventId }) => eventId).join("\n"))
+                .digest("hex"),
+              throughEventId: through.eventId,
+              summary: {
+                role: "assistant",
+                content: candidate.wrappedSummary,
+                providerData: {
+                  picoKind: "runtime_checkpoint",
+                  picoCheckpointId: checkpointId,
+                },
+              },
+            });
+            await options.hookService?.dispatch("PostCompact", {
+              source: "manual",
+              messageCount: (await runtimeRun.readModelHistoryEntries()).length,
+            });
+            return candidate;
+          });
+          return {
+            type: "local",
+            action: "message",
+            message: preview
+              ? `Compact complete: recorded a RuntimeEvent checkpoint for ${preview.compactedCount} messages; session transcript remains ${before} messages.`
+              : "Compact unavailable: FullCompactor could not produce a valid summary.",
+          };
+        }
+        const ok = await fullCompactor.compact(session, request);
         return {
           type: "local",
           action: "message",

@@ -189,6 +189,42 @@ describe("runtime event read model", () => {
     expect(discarded.data.message.content).toBe("old answer");
   });
 
+  it("replays raw facts when a rewind targets a message hidden by a later checkpoint", () => {
+    const user = committed("event-user", { role: "user", content: "inspect" });
+    const assistant = committed("event-call", {
+      role: "assistant",
+      content: "",
+      toolCalls: [{ id: "call-1", name: "read_file", arguments: "{}" }],
+    });
+    const observation = committed("event-result", {
+      role: "user",
+      content: "contents",
+      toolCallId: "call-1",
+    });
+    const checkpointEvent = checkpoint("event-checkpoint", observation.eventId, {
+      role: "assistant",
+      content: "The file was inspected.",
+    });
+    const discarded = committed("event-discarded", { role: "assistant", content: "old answer" });
+    const rewind = historyRewound("event-rewind", user.eventId);
+    const replacement = committed("event-replacement", {
+      role: "assistant",
+      content: "new answer",
+    });
+
+    expect(
+      materializeRuntimeHistory([
+        user,
+        assistant,
+        observation,
+        checkpointEvent,
+        discarded,
+        rewind,
+        replacement,
+      ]),
+    ).toEqual([user.data.message, replacement.data.message]);
+  });
+
   it("rejects checkpoints that leave an unpaired tool observation", () => {
     const user = committed("event-user", { role: "user", content: "inspect" });
     const assistant = committed("event-call", {

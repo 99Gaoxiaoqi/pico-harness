@@ -40,12 +40,15 @@ import {
   type SessionMetaV3,
 } from "./session-store.js";
 import { resolvePicoPaths } from "../paths/pico-paths.js";
+import { RuntimeRun } from "../runtime/runtime-run.js";
 
 const SAFE_SESSION_ID = /^[A-Za-z0-9._-]+$/u;
 
 export interface SessionForkServiceHooks {
   /** 故障注入：sidecar 全部可重放提交后、JSONL 公布前。 */
   readonly afterSidecars?: (operation: ForkStorageOperation) => void | Promise<void>;
+  /** 故障注入：目标 JSONL 已公布，但 Runtime bootstrap 尚未写入前。 */
+  readonly beforeRuntimeBootstrap?: (operation: ForkStorageOperation) => void | Promise<void>;
 }
 
 export interface SessionForkServiceOptions {
@@ -210,6 +213,16 @@ export class SessionForkService {
         // 后续追加会把已冻结 fork 误判为冲突。
         await this.hooks?.afterSidecars?.(operation);
       },
+      bootstrapRuntime: async (operation, bundle) => {
+        await this.hooks?.beforeRuntimeBootstrap?.(operation);
+        const messages = await readPublishedRuntimeForkSeed(operation, bundle.targetSessionPath);
+        await RuntimeRun.bootstrapFork({
+          sourceSessionId: operation.sourceSessionId,
+          targetSessionId: operation.targetSessionId,
+          messages,
+          workDir: this.workDir,
+        });
+      },
       publishCatalog: async (operation, bundle) => {
         // 先补父日志投影，否则全新 Catalog 会把已有 durable
         // parent cursor 的 fork 降级为只含 sessionId 的 stale 条目。
@@ -243,11 +256,12 @@ export class SessionForkService {
       operation.targetSessionId,
       sidecars.artifactMappings,
     );
-    const runtimePatch = filteredRuntimePatch(frozen);
+    const runtimePatch = filteredRuntimePatch(frozen, operation.createdAt);
     const lineage = {
       relation: "fork",
       rootLogId: frozen.snapshot.rootLogId,
       parent: frozen.snapshot.cursor,
+      parentSessionId: operation.sourceSessionId,
     } satisfies SessionLineage;
     const stagedSessionPath = this.stagedSessionPath(operation);
     const targetSessionPath = this.sessionPath(operation.targetSessionId);
@@ -341,7 +355,10 @@ export async function reconcileUnfinishedSessionForks(
   return new SessionForkService({ workDir }).reconcileUnfinished();
 }
 
-function filteredRuntimePatch(frozen: FrozenForkSource): SessionRuntimeStatePatch | undefined {
+function filteredRuntimePatch(
+  frozen: FrozenForkSource,
+  forkCreatedAt: string,
+): SessionRuntimeStatePatch | undefined {
   const source = frozen.snapshot.hydration.runtime;
   const settings = source.settings
     ? filterForkSettings(
@@ -354,9 +371,27 @@ function filteredRuntimePatch(frozen: FrozenForkSource): SessionRuntimeStatePatc
   return settings || source.goal
     ? {
         ...(settings ? { settings } : {}),
-        ...(source.goal ? { goal: structuredClone(source.goal) } : {}),
+        ...(source.goal ? { goal: resetForkGoalUsage(source.goal, forkCreatedAt) } : {}),
       }
     : undefined;
+}
+
+/** A fork retains the task definition but begins a new independent budget window. */
+function resetForkGoalUsage(
+  source: NonNullable<SessionRuntimeStatePatch["goal"]>,
+  forkCreatedAt: string,
+): NonNullable<SessionRuntimeStatePatch["goal"]> {
+  const startedAt = Date.parse(forkCreatedAt);
+  if (!Number.isFinite(startedAt)) {
+    throw new Error(`Fork operation has an invalid createdAt timestamp: ${forkCreatedAt}`);
+  }
+  return {
+    ...structuredClone(source),
+    goals: source.goals.map((goal) => ({
+      ...structuredClone(goal),
+      budgetUsage: { turns: 0, tokens: 0, costCNY: 0, startedAt },
+    })),
+  };
 }
 
 function filterForkSettings(
@@ -486,6 +521,30 @@ async function inspectForkSessionFile(
   } catch {
     return undefined;
   }
+}
+
+/** Reads the target's immutable seed; runtime bootstrap must never re-read mutable source history. */
+async function readPublishedRuntimeForkSeed(
+  operation: ForkStorageOperation,
+  targetSessionPath: string,
+): Promise<readonly Message[]> {
+  const snapshot = await new SessionStore(targetSessionPath).inspectJournal({ strict: true });
+  const seed = snapshot.records.find(
+    (record): record is Extract<SessionEvent, { kind: "session.seeded" }> =>
+      record.type === "event" && record.kind === "session.seeded",
+  );
+  if (
+    !seed ||
+    seed.data.lineage?.relation !== "fork" ||
+    seed.data.lineage.parentSessionId !== operation.sourceSessionId
+  ) {
+    throw new ForkOperationConflictError(
+      "Published target session has no matching immutable fork seed",
+      "target_conflict",
+      [targetSessionPath],
+    );
+  }
+  return structuredClone(seed.data.messages);
 }
 
 function isSessionMetaV3(value: unknown): value is SessionMetaV3 {
