@@ -46,6 +46,18 @@ export interface LoadModelRouterOptions {
   legacyModelExplicit?: boolean;
   fetch?: typeof fetch;
   discoveryTimeoutMs?: number;
+  /**
+   * Host-resolved secrets. Values stay process-local and are never projected into routes,
+   * session settings, diagnostics, or persisted configuration.
+   */
+  resolvedSecrets?: ResolvedModelSecrets;
+}
+
+export interface ResolvedModelSecrets {
+  /** Provider-level credentials, used by user providers and model discovery. */
+  readonly providers?: Readonly<Record<string, string>>;
+  /** Route-level credentials, used by strict legacy workspace credential references. */
+  readonly routes?: Readonly<Record<string, string>>;
 }
 
 interface ProviderSource {
@@ -58,15 +70,20 @@ interface ProviderSource {
 export class ModelRouter {
   readonly defaultRouteId?: string;
   private readonly byId: ReadonlyMap<string, ModelRoute>;
+  private readonly providerSecrets: ReadonlyMap<string, string>;
+  private readonly routeSecrets: ReadonlyMap<string, string>;
 
   constructor(
     routes: readonly ModelRoute[],
     private readonly env: Readonly<Record<string, string | undefined>>,
     defaultRouteId?: string,
+    resolvedSecrets: ResolvedModelSecrets = {},
   ) {
     this.routes = Object.freeze(routes.map((route) => Object.freeze({ ...route })));
     this.byId = new Map(this.routes.map((route) => [route.id, route]));
     this.defaultRouteId = defaultRouteId;
+    this.providerSecrets = secretMap(resolvedSecrets.providers);
+    this.routeSecrets = secretMap(resolvedSecrets.routes);
   }
 
   readonly routes: readonly ModelRoute[];
@@ -121,10 +138,10 @@ export class ModelRouter {
         message: `模型路由 ${route.id} 缺少 baseURL。请检查 .pico/config.json 或 LLM_BASE_URL。`,
       };
     }
-    if (!readApiKey(this.env, route.apiKeyEnv)) {
+    if (!this.readCredential(route)) {
       return {
         ok: false,
-        message: `模型路由 ${route.id} 缺少凭证环境变量 ${route.apiKeyEnv}。`,
+        message: `模型路由 ${route.id} 缺少凭证环境变量 ${route.apiKeyEnv}，且系统凭证库中无可用凭证。`,
       };
     }
     return { ok: true, route };
@@ -140,9 +157,11 @@ export class ModelRouter {
         `模型路由 ${route.id} 缺少 baseURL。请检查 .pico/config.json 或 LLM_BASE_URL。`,
       );
     }
-    const apiKey = readApiKey(this.env, route.apiKeyEnv);
+    const apiKey = this.readCredential(route);
     if (!apiKey) {
-      throw new Error(`模型路由 ${route.id} 缺少凭证环境变量 ${route.apiKeyEnv}。`);
+      throw new Error(
+        `模型路由 ${route.id} 缺少凭证环境变量 ${route.apiKeyEnv}，且系统凭证库中无可用凭证。`,
+      );
     }
     return {
       provider: route.provider,
@@ -164,6 +183,14 @@ export class ModelRouter {
     if (exact) return exact;
     const byModel = this.routes.filter((route) => route.model === normalized);
     return byModel.length === 1 ? byModel[0] : undefined;
+  }
+
+  private readCredential(route: ModelRoute): string | undefined {
+    return (
+      this.routeSecrets.get(route.id) ??
+      this.providerSecrets.get(route.providerId) ??
+      readApiKey(this.env, route.apiKeyEnv)
+    );
   }
 }
 
@@ -206,7 +233,7 @@ export async function loadModelRouter(options: LoadModelRouterOptions): Promise<
   const legacyDefault = routes.find(
     (route) => route.provider === options.legacyProvider && route.model === options.legacyModel,
   )?.id;
-  return new ModelRouter(routes, env, configuredDefault || legacyDefault);
+  return new ModelRouter(routes, env, configuredDefault || legacyDefault, options.resolvedSecrets);
 }
 
 function configuredProviders(config: ModelRoutingConfig): ProviderSource[] {
@@ -254,18 +281,21 @@ async function discoverProviderModels(
   options: LoadModelRouterOptions,
 ): Promise<{ provider: ProviderSource; models: string[]; discoveredModels: Set<string> }> {
   const configured = unique(provider.config.models);
+  const apiKey =
+    normalizedSecret(options.resolvedSecrets?.providers?.[provider.id]) ??
+    readApiKey(env, provider.config.apiKeyEnv);
   if (
     !provider.config.discoverModels ||
     provider.config.protocol !== "openai" ||
     !provider.config.baseURL ||
-    !readApiKey(env, provider.config.apiKeyEnv)
+    !apiKey
   ) {
     return { provider, models: configured, discoveredModels: new Set() };
   }
 
   const discovered = await fetchModelIds(
     provider.config.baseURL,
-    readApiKey(env, provider.config.apiKeyEnv)!,
+    apiKey,
     options.fetch ?? fetch,
     options.discoveryTimeoutMs ?? DEFAULT_DISCOVERY_TIMEOUT_MS,
   );
@@ -314,6 +344,22 @@ function readApiKey(
     .split(",")
     .map((part) => part.trim())
     .find(Boolean);
+}
+
+function secretMap(
+  values: Readonly<Record<string, string>> | undefined,
+): ReadonlyMap<string, string> {
+  return new Map(
+    Object.entries(values ?? {}).flatMap(([id, value]) => {
+      const secret = normalizedSecret(value);
+      return id.trim() && secret ? [[id, secret] as const] : [];
+    }),
+  );
+}
+
+function normalizedSecret(value: string | undefined): string | undefined {
+  const normalized = value?.trim();
+  return normalized || undefined;
 }
 
 function splitModels(value: string | undefined): string[] {
