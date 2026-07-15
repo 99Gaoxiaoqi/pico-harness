@@ -84,7 +84,6 @@ import {
 import type { McpConnectionManager } from "../mcp/manager.js";
 import { CostTracker } from "../observability/tracker.js";
 import { ensureSessionUsageBaseline } from "../observability/usage-baseline.js";
-import { readSessionCatalogProjectionHealth } from "../storage/session-catalog-projection.js";
 import type { HookService } from "../hooks/service.js";
 import {
   ResourceDoctor,
@@ -582,27 +581,23 @@ function createCompactCommand(
         const runtimeEventStore = new RuntimeEventStore({
           databasePath: resolvePicoPaths(session.workDir).workspace.runtimeDatabase,
         });
-        const runtimeBacked = Boolean(await runtimeEventStore.readSessionManifest(session.id));
-        const provider =
-          jobs || runtimeBacked
-            ? new CostTracker(
-                rawProvider,
-                { provider: activeProvider, model, baseUrl: baseURL },
-                session,
-                {
-                  ...(jobs ? { ledger: jobs } : {}),
-                  context: () => {
-                    const goalId = options.goalManager?.getActive()?.id;
-                    return {
-                      purpose: "main",
-                      sessionId: session.id,
-                      conversationId: session.conversationId,
-                      ...(goalId ? { goalId } : {}),
-                    };
-                  },
-                },
-              )
-            : rawProvider;
+        const provider = new CostTracker(
+          rawProvider,
+          { provider: activeProvider, model, baseUrl: baseURL },
+          session,
+          {
+            ...(jobs ? { ledger: jobs } : {}),
+            context: () => {
+              const goalId = options.goalManager?.getActive()?.id;
+              return {
+                purpose: "main",
+                sessionId: session.id,
+                conversationId: session.conversationId,
+                ...(goalId ? { goalId } : {}),
+              };
+            },
+          },
+        );
         const fullCompactor = new FullCompactor({
           provider,
           ...(options.hookService ? { hookService: options.hookService } : {}),
@@ -615,77 +610,67 @@ function createCompactCommand(
           ),
           trigger: "manual" as const,
         };
-        if (runtimeBacked) {
-          const runtimeRun = await RuntimeRun.start({
-            sessionId: session.id,
-            workDir: session.workDir,
-            store: runtimeEventStore,
-          });
-          const preview = await runtimeRun.run(async () => {
-            const entries = await runtimeRun.readModelHistoryEntries();
-            const runtimeHistoryTokens = estimateMessagesTokens(
-              entries.map(({ message }) => message),
-            );
-            const runtimeRequest = {
-              ...request,
-              targetRetainedTokens: Math.max(
-                1,
-                Math.min(
-                  Math.floor(budget.inputBudgetTokens * 0.5),
-                  Math.floor(runtimeHistoryTokens * 0.5),
-                ),
+        const runtimeRun = await RuntimeRun.start({
+          sessionId: session.id,
+          workDir: session.workDir,
+          store: runtimeEventStore,
+        });
+        const preview = await runtimeRun.run(async () => {
+          const entries = await runtimeRun.readModelHistoryEntries();
+          const runtimeHistoryTokens = estimateMessagesTokens(
+            entries.map(({ message }) => message),
+          );
+          const runtimeRequest = {
+            ...request,
+            targetRetainedTokens: Math.max(
+              1,
+              Math.min(
+                Math.floor(budget.inputBudgetTokens * 0.5),
+                Math.floor(runtimeHistoryTokens * 0.5),
               ),
-            };
-            await options.hookService?.dispatch("PreCompact", {
-              source: "manual",
-              messageCount: entries.length,
-            });
-            const candidate = await fullCompactor.preview(
-              session,
-              entries.map(({ message }) => message),
-              runtimeRequest,
-            );
-            if (!candidate) return undefined;
-            const covered = entries.slice(0, candidate.compactedCount);
-            const through = covered.at(-1);
-            if (!through) return undefined;
-            const checkpointId = `checkpoint:${randomUUID()}`;
-            await runtimeRun.recordCheckpoint({
-              checkpointId,
-              coveredEventCount: covered.length,
-              sourceDigest: createHash("sha256")
-                .update(covered.map(({ eventId }) => eventId).join("\n"))
-                .digest("hex"),
-              throughEventId: through.eventId,
-              summary: {
-                role: "assistant",
-                content: candidate.wrappedSummary,
-                providerData: {
-                  picoKind: "runtime_checkpoint",
-                  picoCheckpointId: checkpointId,
-                },
-              },
-            });
-            await options.hookService?.dispatch("PostCompact", {
-              source: "manual",
-              messageCount: (await runtimeRun.readModelHistoryEntries()).length,
-            });
-            return candidate;
-          });
-          return {
-            type: "local",
-            action: "message",
-            message: preview
-              ? `Compact complete: recorded a RuntimeEvent checkpoint for ${preview.compactedCount} messages; session transcript remains ${before} messages.`
-              : "Compact unavailable: FullCompactor could not produce a valid summary.",
+            ),
           };
-        }
-        const ok = await fullCompactor.compact(session, request);
+          await options.hookService?.dispatch("PreCompact", {
+            source: "manual",
+            messageCount: entries.length,
+          });
+          const candidate = await fullCompactor.preview(
+            session,
+            entries.map(({ message }) => message),
+            runtimeRequest,
+          );
+          if (!candidate) return undefined;
+          const covered = entries.slice(0, candidate.compactedCount);
+          const through = covered.at(-1);
+          if (!through) return undefined;
+          const checkpointId = `checkpoint:${randomUUID()}`;
+          await runtimeRun.recordCheckpoint({
+            checkpointId,
+            coveredEventCount: covered.length,
+            sourceDigest: createHash("sha256")
+              .update(covered.map(({ eventId }) => eventId).join("\n"))
+              .digest("hex"),
+            throughEventId: through.eventId,
+            summary: {
+              role: "assistant",
+              content: candidate.wrappedSummary,
+              providerData: {
+                picoKind: "runtime_checkpoint",
+                picoCheckpointId: checkpointId,
+              },
+            },
+          });
+          await options.hookService?.dispatch("PostCompact", {
+            source: "manual",
+            messageCount: (await runtimeRun.readModelHistoryEntries()).length,
+          });
+          return candidate;
+        });
         return {
           type: "local",
           action: "message",
-          message: ok
-            ? `Compact complete: session history ${before} -> ${session.length} messages.`
+          message: preview
+            ? `Compact complete: recorded a RuntimeEvent checkpoint for ${preview.compactedCount} messages; session transcript remains ${before} messages.`
             : "Compact unavailable: FullCompactor could not produce a valid summary.",
         };
       } catch (error) {
@@ -1210,7 +1195,10 @@ function createForkCommand(options: PicoCommandRegistryOptions): SlashCommand {
 }
 
 async function sessionExists(workDir: string, sessionId: string): Promise<boolean> {
-  return (await listCliSessionSummaries(workDir)).some((session) => session.id === sessionId);
+  const store = new RuntimeEventStore({
+    databasePath: resolvePicoPaths(workDir).workspace.runtimeDatabase,
+  });
+  return Boolean(await store.readSessionManifest(sessionId));
 }
 
 function createRunningInputCommands(): SlashCommand[] {
@@ -1352,11 +1340,24 @@ function createRewindCommand(options: PicoCommandRegistryOptions): SlashCommand 
 }
 
 async function resolveCommandSession(options: PicoCommandRegistryOptions): Promise<Session> {
-  if (options.session) return options.session;
-  return globalSessionManager.getOrCreate(
-    options.sessionId ?? defaultCliSessionId(options.workDir),
-    options.workDir,
-  );
+  const session =
+    options.session ??
+    (await globalSessionManager.getOrCreate(
+      options.sessionId ?? defaultCliSessionId(options.workDir),
+      options.workDir,
+    ));
+  const runtimeEventStore = new RuntimeEventStore({
+    databasePath: resolvePicoPaths(session.workDir).workspace.runtimeDatabase,
+  });
+  await runtimeEventStore.initializeSession({
+    sessionId: session.id,
+    workDir: session.workDir,
+  });
+  await RuntimeRun.repairSessionProjection(session, {
+    workDir: session.workDir,
+    store: runtimeEventStore,
+  });
+  return session;
 }
 
 function createSkillsCommand(loader: SkillLoader): SlashCommand {
@@ -1913,10 +1914,6 @@ async function formatDoctorReport(options: PicoCommandRegistryOptions): Promise<
   const nodeOk = nodeMajor >= 22;
   const cwdOk = existsSync(options.workDir);
   const envModel = process.env.LLM_MODEL;
-  // /doctor 只读：不为获取状态而触发 Catalog backfill/重建。
-  const catalogHealth =
-    options.session?.sessionCatalogHealth ??
-    (await readSessionCatalogProjectionHealth(options.workDir));
   const storageDiagnostics = await formatStorageDoctorReport(options);
 
   return [
@@ -1927,11 +1924,7 @@ async function formatDoctorReport(options: PicoCommandRegistryOptions): Promise<
     `LLM_BASE_URL: ${process.env.LLM_BASE_URL ? "set" : "missing"}`,
     `LLM_API_KEY[S]: ${apiKeys.length > 0 ? `${apiKeys.length} configured` : "missing"}`,
     `Node: ${process.version} (${nodeOk ? "ok" : "requires >=22.0.0"})`,
-    `Session catalog: ${catalogHealth.state}`,
-    ...(catalogHealth.diagnostic ? [`Session catalog reason: ${catalogHealth.diagnostic}`] : []),
-    ...(catalogHealth.state !== "healthy"
-      ? [`Session catalog recommendation: ${catalogHealth.recommendation}`]
-      : []),
+    "Session history: runtime.sqlite",
     `Task runtime: ${options.taskRuntime ? "healthy" : "unavailable"}`,
     ...(options.taskRuntimeDiagnostic
       ? [`Task runtime reason: ${options.taskRuntimeDiagnostic}`]
