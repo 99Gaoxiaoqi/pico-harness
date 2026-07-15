@@ -1,12 +1,12 @@
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import Database from "better-sqlite3";
-import { RUNTIME_SCHEMA_VERSION } from "../tasks/runtime-types.js";
+import {
+  RUNTIME_SCHEMA_CURRENT_MIGRATION_NAME,
+  RUNTIME_SCHEMA_VERSION,
+} from "../tasks/runtime-types.js";
 
-export { RUNTIME_SCHEMA_VERSION };
-
-export const RUNTIME_SCHEMA_CURRENT_MIGRATION_NAME =
-  "daemon_run_projection_and_idempotency" as const;
+export { RUNTIME_SCHEMA_CURRENT_MIGRATION_NAME, RUNTIME_SCHEMA_VERSION };
 
 export const RUNTIME_SCHEMA_PREFLIGHT_STATUSES = [
   "database_missing",
