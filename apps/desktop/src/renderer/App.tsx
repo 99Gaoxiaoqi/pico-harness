@@ -473,7 +473,7 @@ function WorkspaceModeCard({ mode }: { readonly mode: WorkspaceMode | undefined 
       <p>
         {protectedMode
           ? "Pico 可以隔离并行任务，并在确认后合并它们的更改。"
-          : "Pico 可以直接读写文件并运行并行子代理；只有分支、提交和独立合并需要 Git。"}
+          : "Pico 可以直接读写文件并运行并行分析子代理；可写子代理的隔离、分支和独立合并目前需要 Git。"}
       </p>
       {!protectedMode && (
         <small>版本保护是一项进阶能力，由 Git 提供；不了解它也不影响现在开始。</small>
@@ -494,7 +494,7 @@ function HomePage() {
         {data.workspaceMode === "folder" && (
           <div className="workspace-mode-notice" role="note">
             <WorkspaceModeBadge mode={data.workspaceMode} />
-            <span>共享文件夹支持对话、工具和并行子代理；Git 只用于分支与独立合并。</span>
+            <span>共享文件夹支持对话、工具和并行分析；可写子代理的隔离与合并目前需要 Git。</span>
           </div>
         )}
         <TaskComposer compact />
@@ -1817,7 +1817,7 @@ function SettingsPage() {
             detail={
               data.workspaceMode === "git"
                 ? "已启用并行任务隔离与变更合并"
-                : "对话、工具和并行子代理可用；分支、提交和独立合并不可用"
+                : "对话、工具和并行分析可用；可写子代理隔离、分支与独立合并不可用"
             }
           >
             <WorkspaceModeBadge mode={data.workspaceMode} />
