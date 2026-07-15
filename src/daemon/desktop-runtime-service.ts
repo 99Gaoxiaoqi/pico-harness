@@ -77,8 +77,6 @@ import {
   type CredentialRef,
   type CredentialVault,
 } from "../provider/credential-vault.js";
-import { resolveAutomationCredentialTarget } from "../provider/automation-credential.js";
-import { resolveModelRouteCapabilities } from "../provider/model-capabilities.js";
 import { resolveProviderProfile } from "../provider/profile.js";
 import {
   ProviderOperationJournal,
@@ -86,12 +84,6 @@ import {
 } from "../provider/provider-operation-journal.js";
 import { resolvePicoHome } from "../paths/pico-paths.js";
 import { WorkspaceTrustStore } from "../security/workspace-trust.js";
-import { fingerprintBackgroundMcpConfig } from "../safety/background-mcp-policy.js";
-import {
-  BACKGROUND_HARDLINE_VERSION,
-  BACKGROUND_HOOK_VERSION,
-  filterBackgroundEligibleTools,
-} from "../safety/background-yolo-policy.js";
 import {
   fileHistoryChanges,
   type FileHistoryChanges,
@@ -132,7 +124,9 @@ import {
   type DaemonRunExecution,
 } from "./workspace-runtime-service.js";
 import {
+  createTrustedDesktopAutomation,
   DesktopAutomationService,
+  importDesktopAutomationCredential,
   type AutomationProviderReference,
   type ActiveAutomationReference,
 } from "./desktop-automation-service.js";
@@ -3104,21 +3098,12 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     readonly secret: string;
   }): Promise<JsonValue> {
     const canonical = await this.requireTrustedWorkspace(params.workspacePath);
-    if (!this.credentialVault.capability().available) {
-      throw new RuntimeProtocolError(
-        RUNTIME_ERROR_CODES.FORBIDDEN,
-        this.credentialVault.capability().diagnostic,
-      );
-    }
-    const target = await this.resolveAutomationTarget(canonical, params.modelRouteId);
-    if (target.ref !== params.expectedCredentialRef) {
-      throw new RuntimeProtocolError(
-        RUNTIME_ERROR_CODES.CONFLICT,
-        "Automation Provider authority 已变化，请刷新配置后重试",
-      );
-    }
-    await this.credentialVault.put(target.ref, requireSecret(params.secret));
-    return { imported: true, credentialRef: target.ref };
+    return importDesktopAutomationCredential(canonical, params, {
+      credentialVault: this.credentialVault,
+      effectiveConfigResolver: this.effectiveConfigResolver,
+      userConfigStore: this.userConfigStore,
+      env: this.env,
+    });
   }
 
   private async createTrustedAutomation(params: {
@@ -3135,127 +3120,15 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     readonly enabled?: boolean;
   }): Promise<JsonValue> {
     const canonical = await this.requireTrustedWorkspace(params.workspacePath);
-    const target = await this.resolveAutomationTarget(canonical, params.modelRouteId);
-    if (target.ref !== params.expectedCredentialRef) {
-      throw new RuntimeProtocolError(
-        RUNTIME_ERROR_CODES.CONFLICT,
-        "Automation Provider authority 已变化，请刷新配置后重试",
-      );
-    }
-    if (!(await this.credentialVault.has(target.ref))) {
-      throw new RuntimeProtocolError(
-        RUNTIME_ERROR_CODES.CONFLICT,
-        `模型路由 ${params.modelRouteId} 尚未导入系统凭证库`,
-      );
-    }
-    const requestedTools = uniqueNonEmptyStrings(params.allowedTools, "allowedTools");
-    const eligibleTools = filterBackgroundEligibleTools(requestedTools);
-    if (!sameStringValues(requestedTools, eligibleTools)) {
-      throw new RuntimeProtocolError(
-        RUNTIME_ERROR_CODES.FORBIDDEN,
-        "Automation 包含不允许在后台运行的交互式工具",
-      );
-    }
-    const allowedHosts = uniqueNonEmptyStrings(
-      params.allowedToolNetworkHosts ?? [],
-      "allowedToolNetworkHosts",
-    );
-    if (params.toolNetworkPolicy === "allowlist" && allowedHosts.length === 0) {
-      throw new RuntimeProtocolError(
-        RUNTIME_ERROR_CODES.INVALID_PARAMS,
-        "toolNetworkPolicy=allowlist 时必须提供 allowedToolNetworkHosts",
-      );
-    }
-    if (params.toolNetworkPolicy !== "allowlist" && allowedHosts.length > 0) {
-      throw new RuntimeProtocolError(
-        RUNTIME_ERROR_CODES.INVALID_PARAMS,
-        "只有 toolNetworkPolicy=allowlist 可提供 allowedToolNetworkHosts",
-      );
-    }
-    const mcpConfigFingerprint = requestedTools.some((tool) => tool.startsWith("mcp__"))
-      ? await fingerprintBackgroundMcpConfig(canonical)
-      : undefined;
-    const job = await this.requireAutomations().createWithSecurity(
-      canonical,
-      {
-        ...(params.name ? { name: params.name } : {}),
-        prompt: params.prompt,
-        schedule: params.schedule,
-        ...(params.timeZone ? { timeZone: params.timeZone } : {}),
-        enabled: params.enabled,
-      },
-      {
-        credentialRef: target.ref,
-        modelRouteId: params.modelRouteId,
-        policySnapshot: {
-          mode: "yolo",
-          backgroundEnabled: true,
-          trustedWorkspace: true,
-          toolNetworkPolicy: params.toolNetworkPolicy,
-          ...(allowedHosts.length > 0 ? { allowedToolNetworkHosts: allowedHosts } : {}),
-          ...(mcpConfigFingerprint ? { mcpConfigFingerprint } : {}),
-          allowedTools: requestedTools,
-          hardlineVersion: BACKGROUND_HARDLINE_VERSION,
-          hookVersion: BACKGROUND_HOOK_VERSION,
-          createdAt: this.now(),
-        },
-      },
-    );
+    const job = await createTrustedDesktopAutomation(this.requireAutomations(), canonical, params, {
+      credentialVault: this.credentialVault,
+      effectiveConfigResolver: this.effectiveConfigResolver,
+      userConfigStore: this.userConfigStore,
+      env: this.env,
+      now: this.now,
+    });
     this.publishJob(job);
     return { job };
-  }
-
-  private async resolveAutomationTarget(workspacePath: string, modelRouteId: string) {
-    const normalizedRouteId = requireText(modelRouteId, "modelRouteId");
-    const separator = normalizedRouteId.indexOf("/");
-    if (separator <= 0 || separator === normalizedRouteId.length - 1) {
-      throw new RuntimeProtocolError(
-        RUNTIME_ERROR_CODES.INVALID_PARAMS,
-        "modelRouteId 必须采用 providerID/modelID 格式",
-      );
-    }
-    const providerId = normalizedRouteId.slice(0, separator);
-    const model = normalizedRouteId.slice(separator + 1);
-    const effective = await this.effectiveConfigResolver.resolve({
-      workDir: workspacePath,
-      projectTrusted: true,
-      env: this.env,
-    });
-    const provider = effective.providers[providerId];
-    if (!provider || !provider.models.includes(model)) {
-      throw new RuntimeProtocolError(
-        RUNTIME_ERROR_CODES.CONFLICT,
-        `模型路由 ${normalizedRouteId} 已不存在，请刷新配置后重试`,
-      );
-    }
-    const route: ModelRoute = {
-      id: normalizedRouteId,
-      providerId,
-      provider: provider.protocol,
-      model,
-      baseURL: provider.baseURL,
-      apiKeyEnv: provider.apiKeyEnv,
-      source: "config",
-      capabilities: resolveModelRouteCapabilities(
-        provider.protocol,
-        model,
-        provider.modelCapabilities?.[model],
-      ),
-    };
-    const userProvider = (await this.userConfigStore.read()).config.providers[providerId];
-    try {
-      return resolveAutomationCredentialTarget({
-        route,
-        workspacePath,
-        ...(userProvider ? { userProvider } : {}),
-        configSource: effective.sources[`providers.${providerId}`],
-      });
-    } catch (error) {
-      throw new RuntimeProtocolError(
-        RUNTIME_ERROR_CODES.FORBIDDEN,
-        error instanceof Error ? error.message : String(error),
-      );
-    }
   }
 
   private async createJob(params: {
@@ -4092,18 +3965,6 @@ function requireText(value: unknown, label: string): string {
     throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.INVALID_PARAMS, `${label} 必须是非空字符串`);
   }
   return value.trim();
-}
-
-function uniqueNonEmptyStrings(values: readonly string[], label: string): string[] {
-  const normalized = values.map((value) => requireText(value, label));
-  return [...new Set(normalized)];
-}
-
-function sameStringValues(left: readonly string[], right: readonly string[]): boolean {
-  if (left.length !== right.length) return false;
-  const normalizedLeft = [...left].sort();
-  const normalizedRight = [...right].sort();
-  return normalizedLeft.every((value, index) => value === normalizedRight[index]);
 }
 
 function normalizeRuntimeUserInput(value: RuntimeUserInput): RuntimeUserInput {
