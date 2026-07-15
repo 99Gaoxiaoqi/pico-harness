@@ -126,6 +126,8 @@ export interface PicoCommandRegistryOptions {
   model: string;
   modelRouteId?: string;
   modelRouter?: ModelRouter;
+  /** Re-resolves config and credentials at an idle command boundary. */
+  modelRouterProvider?: () => ModelRouter | Promise<ModelRouter>;
   provider: ProviderKind;
   session?: Session;
   sessionId?: string;
@@ -224,9 +226,9 @@ export async function createPicoCommandRegistry(
     ...(options.hookCommands ?? []),
     createDoctorCommand(options),
     createProviderCommand(options),
-    createModelCommand(settings, options.modelRouter),
+    createModelCommand(settings, options.modelRouter, options.modelRouterProvider),
     createAddDirectoryCommand(settings, options.additionalDirectoryManager),
-    createThinkingCommand(settings, options.modelRouter),
+    createThinkingCommand(settings, options.modelRouter, options.modelRouterProvider),
     createMcpCommand(options.mcpStatus, options.mcpControl),
     createPluginCommand({
       workDir: options.workDir,
@@ -540,11 +542,15 @@ function createCompactCommand(
 
       let activeProvider = options.provider;
       let activeConfig: { baseURL: string; apiKey: string; model: string } | undefined;
-      if (options.modelRouter) {
+      const modelRouter = await resolveCommandModelRouter(
+        options.modelRouter,
+        options.modelRouterProvider,
+      );
+      if (modelRouter) {
         try {
-          const resolved = options.modelRouter.providerConfig(
+          const resolved = modelRouter.providerConfig(
             settings.modelRouteId,
-            effectiveSessionReasoningLevel(settings, options.modelRouter),
+            effectiveSessionReasoningLevel(settings, modelRouter),
           );
           activeProvider = resolved.provider;
           activeConfig = resolved.config;
@@ -914,7 +920,7 @@ async function importEnvironmentProvider(input: {
     );
   }
   return providerMessage(
-    `Provider ${input.providerId} imported into shared user configuration. Credential stored in the OS vault; restart Pico to refresh the active model catalog.`,
+    `Provider ${input.providerId} imported into shared user configuration. Credential stored in the OS vault; the update takes effect at the next session or run safe boundary. An in-flight run is never hot-swapped.`,
   );
 }
 
@@ -940,7 +946,9 @@ async function setDefaultUserProvider(
     },
     { expectedRevision: snapshot.revision },
   );
-  return providerMessage(`Shared default model set to ${routeId}. Restart Pico to apply it.`);
+  return providerMessage(
+    `Shared default model set to ${routeId}. New sessions apply it at their next safe boundary; the current Session keeps its explicit model.`,
+  );
 }
 
 async function deleteUserProvider(
@@ -981,7 +989,9 @@ async function deleteUserProvider(
     },
     { expectedRevision: snapshot.revision },
   );
-  return providerMessage(`Shared user provider ${providerId} deleted.`);
+  return providerMessage(
+    `Shared user provider ${providerId} deleted. The active catalog reloads at the next session or run safe boundary.`,
+  );
 }
 
 function providerUsage(): LocalCommandResult {
@@ -1032,10 +1042,21 @@ function uniqueProviderModels(models: readonly string[]): string[] {
   return [...new Set(models.map((model) => model.trim()).filter(Boolean))];
 }
 
-function createModelCommand(settings: SessionSettings, router?: ModelRouter): SlashCommand {
+async function resolveCommandModelRouter(
+  fallback: ModelRouter | undefined,
+  provider: (() => ModelRouter | Promise<ModelRouter>) | undefined,
+): Promise<ModelRouter | undefined> {
+  return provider ? await provider() : fallback;
+}
+
+function createModelCommand(
+  settings: SessionSettings,
+  fallbackRouter?: ModelRouter,
+  routerProvider?: () => ModelRouter | Promise<ModelRouter>,
+): SlashCommand {
   const candidates = (): readonly SlashArgumentCandidate[] =>
-    router
-      ? router.routes.map((route) => ({
+    fallbackRouter
+      ? fallbackRouter.routes.map((route) => ({
           value: route.id,
           description: `${route.providerId} · ${route.provider}`,
         }))
@@ -1050,7 +1071,8 @@ function createModelCommand(settings: SessionSettings, router?: ModelRouter): Sl
     argumentCompleter: (query) => filterArgumentCandidates(candidates(), query),
     kind: "local",
     availability: "idle",
-    execute: (input): LocalCommandResult => {
+    execute: async (input): Promise<LocalCommandResult> => {
+      const router = await resolveCommandModelRouter(fallbackRouter, routerProvider);
       const result = router
         ? input.args.trim().length === 0
           ? {
@@ -1068,6 +1090,16 @@ function createModelCommand(settings: SessionSettings, router?: ModelRouter): Sl
           provider: settings.provider,
           modelRouteId: settings.modelRouteId,
           ok: result.ok,
+          ...(router
+            ? {
+                modelRoutes: router.routes.map((route) => ({
+                  id: route.id,
+                  providerId: route.providerId,
+                  provider: route.provider,
+                  model: route.model,
+                })),
+              }
+            : {}),
         },
         ...(input.args.trim().length === 0
           ? { ui: { kind: "open-selector", selector: "model" } as const }
@@ -1145,9 +1177,13 @@ function createPermissionsCommand(settings: SessionSettings): SlashCommand {
   };
 }
 
-function createThinkingCommand(settings: SessionSettings, router?: ModelRouter): SlashCommand {
+function createThinkingCommand(
+  settings: SessionSettings,
+  fallbackRouter?: ModelRouter,
+  routerProvider?: () => ModelRouter | Promise<ModelRouter>,
+): SlashCommand {
   const candidates = (): readonly SlashArgumentCandidate[] =>
-    sessionReasoningCandidates(settings, router).map((level) => ({
+    sessionReasoningCandidates(settings, fallbackRouter).map((level) => ({
       value: level,
       description: `Use ${level} reasoning for the current model`,
     }));
@@ -1161,7 +1197,8 @@ function createThinkingCommand(settings: SessionSettings, router?: ModelRouter):
     argumentCompleter: (query) => filterArgumentCandidates(candidates(), query),
     kind: "local",
     availability: "idle",
-    execute: (input): LocalCommandResult => {
+    execute: async (input): Promise<LocalCommandResult> => {
+      const router = await resolveCommandModelRouter(fallbackRouter, routerProvider);
       const raw = input.args.trim();
       if (raw.length === 0) {
         return {
