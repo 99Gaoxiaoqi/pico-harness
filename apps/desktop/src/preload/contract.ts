@@ -41,7 +41,6 @@ export const DESKTOP_RUNTIME_METHODS = [
   "jobs.runNow",
   "jobs.history",
   "config.get",
-  "config.update",
   "config.providers",
   "config.user.get",
   "config.user.update",
