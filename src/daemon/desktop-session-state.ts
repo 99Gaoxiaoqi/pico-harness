@@ -4,6 +4,7 @@ import { resolvePicoHome } from "../paths/pico-paths.js";
 import { writeJsonAtomic } from "../storage/atomic-json.js";
 
 const DESKTOP_SESSION_STATE_VERSION = 2 as const;
+const LEGACY_DESKTOP_SESSION_STATE_VERSION = 1 as const;
 
 export interface DesktopSessionMetadata {
   readonly workspacePath: string;
@@ -17,11 +18,25 @@ interface DesktopSessionStateFile {
   readonly sessions: readonly DesktopSessionMetadata[];
 }
 
+interface LegacyDesktopSessionStateFile {
+  readonly version: typeof LEGACY_DESKTOP_SESSION_STATE_VERSION;
+  readonly sessions: readonly LegacyDesktopSessionMetadata[];
+}
+
+export interface LegacyDesktopSessionMetadata extends DesktopSessionMetadata {
+  readonly title?: string;
+}
+
+export interface LegacyDesktopSessionTitleMetadata extends DesktopSessionMetadata {
+  readonly title: string;
+}
+
 export interface DesktopSessionStateStoreOptions {
   readonly filePath?: string;
   readonly env?: Readonly<Record<string, string | undefined>>;
   readonly picoHome?: string;
   readonly now?: () => number;
+  readonly migrateLegacyTitle?: (metadata: LegacyDesktopSessionTitleMetadata) => Promise<void>;
 }
 
 /**
@@ -31,6 +46,8 @@ export interface DesktopSessionStateStoreOptions {
 export class DesktopSessionStateStore {
   readonly filePath: string;
   private readonly now: () => number;
+  private readonly migrateLegacyTitle?: DesktopSessionStateStoreOptions["migrateLegacyTitle"];
+  private legacyMigration?: Promise<DesktopSessionStateFile>;
   private mutationQueue: Promise<void> = Promise.resolve();
 
   constructor(options: DesktopSessionStateStoreOptions = {}) {
@@ -42,6 +59,7 @@ export class DesktopSessionStateStore {
         "session-state.json",
       );
     this.now = options.now ?? Date.now;
+    this.migrateLegacyTitle = options.migrateLegacyTitle;
   }
 
   async list(workspacePath: string): Promise<readonly DesktopSessionMetadata[]> {
@@ -113,6 +131,9 @@ export class DesktopSessionStateStore {
   private async read(): Promise<DesktopSessionStateFile> {
     try {
       const parsed: unknown = JSON.parse(await readFile(this.filePath, "utf8"));
+      if (isRecord(parsed) && parsed["version"] === LEGACY_DESKTOP_SESSION_STATE_VERSION) {
+        return this.runLegacyMigration(parseLegacyState(parsed, this.filePath));
+      }
       return parseState(parsed, this.filePath);
     } catch (error) {
       if (isNodeCode(error, "ENOENT")) {
@@ -121,6 +142,51 @@ export class DesktopSessionStateStore {
       throw error;
     }
   }
+
+  private runLegacyMigration(legacy: LegacyDesktopSessionStateFile): Promise<DesktopSessionStateFile> {
+    if (this.legacyMigration) return this.legacyMigration;
+    const migration = this.migrateLegacyState(legacy);
+    this.legacyMigration = migration;
+    const clear = () => {
+      if (this.legacyMigration === migration) this.legacyMigration = undefined;
+    };
+    void migration.then(clear, clear);
+    return migration;
+  }
+
+  private async migrateLegacyState(
+    legacy: LegacyDesktopSessionStateFile,
+  ): Promise<DesktopSessionStateFile> {
+    for (const metadata of legacy.sessions) {
+      const title = metadata.title;
+      if (title === undefined) continue;
+      if (!this.migrateLegacyTitle) {
+        throw new Error(`Desktop session state v1 title migration is unavailable: ${this.filePath}`);
+      }
+      await this.migrateLegacyTitle({ ...metadata, title });
+    }
+
+    const migrated: DesktopSessionStateFile = {
+      version: DESKTOP_SESSION_STATE_VERSION,
+      sessions: legacy.sessions.map(({ title: _title, ...metadata }) => metadata),
+    };
+    await writeJsonAtomic(this.filePath, migrated);
+    return migrated;
+  }
+}
+
+function parseLegacyState(value: unknown, filePath: string): LegacyDesktopSessionStateFile {
+  if (!isRecord(value) || value["version"] !== LEGACY_DESKTOP_SESSION_STATE_VERSION) {
+    throw new Error(`Desktop session state v1 format is invalid: ${filePath}`);
+  }
+  const sessions = value["sessions"];
+  if (!Array.isArray(sessions)) {
+    throw new Error(`Desktop session state v1 is missing sessions: ${filePath}`);
+  }
+  return {
+    version: LEGACY_DESKTOP_SESSION_STATE_VERSION,
+    sessions: sessions.map((entry) => parseLegacyMetadata(entry, filePath)),
+  };
 }
 
 function parseState(value: unknown, filePath: string): DesktopSessionStateFile {
@@ -158,8 +224,38 @@ function parseMetadata(value: unknown, filePath: string): DesktopSessionMetadata
   };
 }
 
+function parseLegacyMetadata(value: unknown, filePath: string): LegacyDesktopSessionMetadata {
+  if (
+    !isRecord(value) ||
+    typeof value["workspacePath"] !== "string" ||
+    typeof value["sessionId"] !== "string" ||
+    typeof value["updatedAt"] !== "number" ||
+    !Number.isFinite(value["updatedAt"]) ||
+    (value["title"] !== undefined && typeof value["title"] !== "string") ||
+    (value["archivedAt"] !== undefined &&
+      (typeof value["archivedAt"] !== "number" || !Number.isFinite(value["archivedAt"])))
+  ) {
+    throw new Error(`Desktop session state v1 contains an invalid entry: ${filePath}`);
+  }
+  return {
+    workspacePath: normalizeWorkspacePath(value["workspacePath"]),
+    sessionId: requireNonEmpty(value["sessionId"], "sessionId"),
+    ...(value["title"] !== undefined ? { title: normalizeTitle(value["title"]) } : {}),
+    ...(value["archivedAt"] !== undefined ? { archivedAt: value["archivedAt"] } : {}),
+    updatedAt: value["updatedAt"],
+  };
+}
+
 function normalizeWorkspacePath(workspacePath: string): string {
   return resolve(requireNonEmpty(workspacePath, "workspacePath")).normalize("NFC");
+}
+
+function normalizeTitle(title: string): string {
+  const normalized = title.replace(/\s+/gu, " ").trim();
+  if (!normalized || normalized.length > 120) {
+    throw new Error("title must contain 1 to 120 characters");
+  }
+  return normalized;
 }
 
 function requireNonEmpty(value: string, field: string): string {
