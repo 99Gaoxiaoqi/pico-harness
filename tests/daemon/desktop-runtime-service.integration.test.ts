@@ -601,6 +601,106 @@ describe("DesktopRuntimeService integration", () => {
     await fixture.service.close();
   });
 
+  it("首次发送在 Run 同步启动失败后持久复用同一 Session", async () => {
+    const fixture = await createFixture(undefined, {
+      createSessionId: () => "desktop-retry-session",
+    });
+    vi.spyOn(fixture.runtime, "startForegroundRun").mockRejectedValueOnce(
+      new Error("Run 启动前置检查失败"),
+    );
+    const request = createRuntimeRequest("session.send", {
+      workspacePath: fixture.workspace,
+      input: { text: "不要重复创建会话" },
+      behavior: "auto",
+      idempotencyKey: "retry-same-first-send",
+    });
+
+    await expect(fixture.service.handle(request)).rejects.toMatchObject({
+      code: RUNTIME_ERROR_CODES.CONFLICT,
+      message: "Run 启动前置检查失败",
+    });
+    await expect(
+      fixture.service.handle(
+        createRuntimeRequest("session.list", { workspacePath: fixture.workspace }),
+      ),
+    ).resolves.toMatchObject({
+      sessions: [{ sessionId: "desktop-retry-session" }],
+    });
+    await expect(
+      fixture.conversationState.getFirstSendClaim(
+        fixture.canonicalWorkspace,
+        "retry-same-first-send",
+      ),
+    ).resolves.toMatchObject({ sessionId: "desktop-retry-session" });
+    await expect(
+      fixture.service.handle(
+        createRuntimeRequest("session.send", {
+          workspacePath: fixture.workspace,
+          sessionId: "different-session",
+          input: { text: "不要重复创建会话" },
+          behavior: "auto",
+          idempotencyKey: "retry-same-first-send",
+        }),
+      ),
+    ).rejects.toMatchObject({
+      code: RUNTIME_ERROR_CODES.CONFLICT,
+      message: expect.stringContaining("desktop-retry-session"),
+    });
+    await fixture.service.close();
+
+    const restartedRuntime = new WorkspaceRuntimeService({
+      registrationStore: fixture.registration,
+      execute: async ({ sessionId, context }) => {
+        if (sessionId) context.bindSession(sessionId);
+        return sessionId ? { sessionId } : undefined;
+      },
+    });
+    const restartedService = new DesktopRuntimeService({
+      runtimeService: restartedRuntime,
+      registrationStore: fixture.registration,
+      trustStore: fixture.trust,
+      sessionStateStore: fixture.sessionState,
+      conversationStateStore: fixture.conversationState,
+      createSessionId: () => "must-not-create-a-second-session",
+    });
+    const retried = (await restartedService.handle(request)) as {
+      session: { sessionId: string };
+      run: { runId: string };
+    };
+    expect(retried.session.sessionId).toBe("desktop-retry-session");
+    managedSessions.push({
+      sessionId: retried.session.sessionId,
+      workspacePath: fixture.canonicalWorkspace,
+    });
+    const workspaceRuntime = await restartedRuntime.getWorkspaceRuntime(fixture.workspace);
+    await workspaceRuntime.waitForRun(retried.run.runId);
+    const transcript = (await restartedService.handle(
+      createRuntimeRequest("session.transcript", {
+        workspacePath: fixture.workspace,
+        sessionId: retried.session.sessionId,
+      }),
+    )) as { items: Array<{ kind: string; content?: string }> };
+    expect(
+      transcript.items.filter(
+        (item) => item.kind === "userMessage" && item.content === "不要重复创建会话",
+      ),
+    ).toHaveLength(1);
+    await expect(
+      restartedService.handle(
+        createRuntimeRequest("session.list", { workspacePath: fixture.workspace }),
+      ),
+    ).resolves.toMatchObject({
+      sessions: [{ sessionId: "desktop-retry-session" }],
+    });
+    await expect(
+      fixture.conversationState.getFirstSendClaim(
+        fixture.canonicalWorkspace,
+        "retry-same-first-send",
+      ),
+    ).resolves.toBeUndefined();
+    await restartedService.close();
+  });
+
   it("工作区已有活动 Run 时首次发送不创建空 Session", async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => {

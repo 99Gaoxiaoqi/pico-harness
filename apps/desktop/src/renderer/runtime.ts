@@ -867,7 +867,6 @@ export interface RuntimeActions {
     providerId: string,
     expectedProviderFingerprint: string,
   ): Promise<boolean>;
-  updateSetting(patch: Readonly<Record<string, unknown>>): Promise<void>;
   setLaunchAtLogin(enabled: boolean): Promise<void>;
   setBackgroundMode(enabled: boolean): Promise<void>;
   openWorkspace(): Promise<void>;
@@ -895,6 +894,7 @@ export function useRuntimeStore(): RuntimeStore {
   const dataRef = useRef(data);
   const runtimeCapabilitiesRef = useRef(new Set<string>(preview ? [SHARED_CONFIG_CAPABILITY] : []));
   const seenEventIdsRef = useRef(new Set<string>());
+  const workspaceLoadGenerationRef = useRef(0);
   const conversationLoadGenerationsRef = useRef(new Map<string, number>());
   const pendingSendRef = useRef<
     | {
@@ -910,6 +910,9 @@ export function useRuntimeStore(): RuntimeStore {
   }, []);
 
   const loadWorkspace = useCallback(async (bridge: RendererBridge, workspacePath: string) => {
+    const generation = workspaceLoadGenerationRef.current + 1;
+    workspaceLoadGenerationRef.current = generation;
+    const isCurrentLoad = () => workspaceLoadGenerationRef.current === generation;
     const params = { workspacePath };
     const sharedConfigSupported = runtimeCapabilitiesRef.current.has(SHARED_CONFIG_CAPABILITY);
     const requests: ReadonlyArray<readonly [string, string, Readonly<Record<string, unknown>>]> = [
@@ -990,6 +993,7 @@ export function useRuntimeStore(): RuntimeStore {
     } catch (error) {
       notices.desktopPreferences = errorMessage(error);
     }
+    if (!isCurrentLoad()) return;
     if (trustResult.error) notices.trust = trustResult.error;
     const trustValue = isRecord(trustResult.value) ? trustResult.value : {};
     setData((current) =>
@@ -1994,20 +1998,6 @@ export function useRuntimeStore(): RuntimeStore {
             }));
           }
           setMessage(`Provider ${providerId} 的系统凭证已删除。`);
-        });
-      },
-      async updateSetting(patch) {
-        const current = dataRef.current;
-        if (!current.workspacePath) return;
-        await perform("setting", async (bridge) => {
-          if (!preview)
-            await invoke(bridge, "config.update", {
-              workspacePath: current.workspacePath,
-              patch,
-              expectedVersion: current.configVersion,
-            });
-          setData((value) => ({ ...value, configVersion: value.configVersion + 1 }));
-          setMessage("设置已保存。");
         });
       },
       async setLaunchAtLogin(enabled) {

@@ -35,6 +35,40 @@ describe("createDesktopBridge", () => {
     expect("ipcRenderer" in bridge).toBe(false);
     expect(Object.isFrozen(bridge)).toBe(true);
     expect(Object.isFrozen(bridge.runtime)).toBe(true);
+    expect("config.update" in bridge.runtime).toBe(false);
+  });
+
+  it("rejects extra fields and wrong types before invoking privileged IPC", async () => {
+    const mock = createIpcRendererMock();
+    const bridge = createDesktopBridge(mock as unknown as IpcRenderer);
+    const unsafeRuntime = bridge.runtime as unknown as Record<
+      string,
+      (params: unknown) => Promise<{ readonly ok: boolean; readonly error?: { code: string } }>
+    >;
+
+    await expect(
+      unsafeRuntime["session.rename"]?.({
+        workspacePath: "/workspace",
+        sessionId: "session-1",
+        title: "Renamed",
+        unexpected: true,
+      }),
+    ).resolves.toMatchObject({ ok: false, error: { code: "INVALID_PARAMS" } });
+    await expect(
+      unsafeRuntime["session.send"]?.({
+        workspacePath: "/workspace",
+        input: { text: 42 },
+        idempotencyKey: "send-1",
+      }),
+    ).resolves.toMatchObject({ ok: false, error: { code: "INVALID_PARAMS" } });
+    const invalidSubscription = bridge.events.subscribe({ workspacePath: 42 } as never, vi.fn());
+    await expect(invalidSubscription.ready).resolves.toMatchObject({
+      ok: false,
+      error: { code: "INVALID_PARAMS" },
+    });
+
+    expect(mock.invoke).not.toHaveBeenCalled();
+    expect(mock.on).not.toHaveBeenCalled();
   });
 
   it("binds every runtime call to its allowlisted method", async () => {

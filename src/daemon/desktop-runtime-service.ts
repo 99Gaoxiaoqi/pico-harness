@@ -548,9 +548,12 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     return { session: await this.requireSession(canonical, sessionId) };
   }
 
-  private async createSession(workspacePath: string, title?: string): Promise<JsonValue> {
+  private async createSession(
+    workspacePath: string,
+    title?: string,
+    sessionId = createCliSessionId(),
+  ): Promise<JsonValue> {
     const canonical = await canonicalizeWorkspacePath(workspacePath);
-    const sessionId = createCliSessionId();
     const session = new Session(sessionId, canonical, {
       persistence: true,
       sessionCatalog: false,
@@ -829,18 +832,80 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const initialResolution = params.sessionId
       ? undefined
       : await this.resolveRuntimeUserInput(params.workspacePath, params.input);
+    const existingFirstSendClaim = await this.conversationStateStore.getFirstSendClaim(
+      params.workspacePath,
+      params.idempotencyKey,
+    );
+    const firstSendFingerprint = firstSendRequestFingerprint(params);
+    if (
+      existingFirstSendClaim &&
+      existingFirstSendClaim.requestFingerprint !== firstSendFingerprint
+    ) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.CONFLICT,
+        `idempotencyKey ${params.idempotencyKey} 已绑定不同的首次发送请求`,
+      );
+    }
+    if (
+      existingFirstSendClaim &&
+      params.sessionId &&
+      existingFirstSendClaim.sessionId !== params.sessionId
+    ) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.CONFLICT,
+        `idempotencyKey ${params.idempotencyKey} 已绑定 Session ${existingFirstSendClaim.sessionId}`,
+      );
+    }
+    let firstSendClaim = params.sessionId ? undefined : existingFirstSendClaim;
     if (!params.sessionId) {
       const activeWorkspaceRun = await this.findActiveWorkspaceRun(params.workspacePath);
       if (activeWorkspaceRun) {
+        if (firstSendClaim && activeWorkspaceRun["sessionId"] === firstSendClaim.sessionId) {
+          return {
+            session: requireJsonRecord(
+              await this.requireSession(params.workspacePath, firstSendClaim.sessionId),
+              "session",
+            ),
+            run: activeWorkspaceRun,
+            disposition: "started",
+          };
+        }
         throw new RuntimeProtocolError(
           RUNTIME_ERROR_CODES.CONFLICT,
           `当前工作区已有活动 Run ${String(activeWorkspaceRun["runId"])}，未创建空 Session`,
         );
       }
+      if (!firstSendClaim) {
+        firstSendClaim = await this.conversationStateStore.claimFirstSend(
+          params.workspacePath,
+          params.idempotencyKey,
+          this.createSessionId(),
+          firstSendFingerprint,
+        );
+        if (firstSendClaim.requestFingerprint !== firstSendFingerprint) {
+          throw new RuntimeProtocolError(
+            RUNTIME_ERROR_CODES.CONFLICT,
+            `idempotencyKey ${params.idempotencyKey} 已绑定不同的首次发送请求`,
+          );
+        }
+      }
     }
-    const session = params.sessionId
-      ? await this.requireSession(params.workspacePath, params.sessionId)
-      : await this.createSessionForMessage(params.workspacePath, runtimeInputTitle(params.input));
+    let session: JsonValue;
+    if (params.sessionId) {
+      session = await this.requireSession(params.workspacePath, params.sessionId);
+    } else {
+      if (!firstSendClaim) {
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.INTERNAL_ERROR,
+          "首次发送未能建立可恢复的 Session 关联",
+        );
+      }
+      session = await this.ensureSessionForMessage(
+        params.workspacePath,
+        runtimeInputTitle(params.input),
+        firstSendClaim.sessionId,
+      );
+    }
     const sessionRecord = requireJsonRecord(session, "session");
     const sessionId = requireText(sessionRecord["sessionId"], "session.sessionId");
     const activeRun = await this.findActiveSessionRun(params.workspacePath, sessionId);
@@ -1000,13 +1065,24 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     return result;
   }
 
-  private async createSessionForMessage(
+  private async ensureSessionForMessage(
     workspacePath: string,
     message: string,
+    sessionId: string,
   ): Promise<JsonValue> {
+    try {
+      return await this.requireSession(workspacePath, sessionId);
+    } catch (error) {
+      if (
+        !(error instanceof RuntimeProtocolError) ||
+        error.code !== RUNTIME_ERROR_CODES.NOT_FOUND
+      ) {
+        throw error;
+      }
+    }
     const title = message.replace(/\s+/gu, " ").trim().slice(0, 80);
     const created = requireJsonRecord(
-      await this.createSession(workspacePath, title),
+      await this.createSession(workspacePath, title, sessionId),
       "session.create result",
     );
     return requireJsonRecord(created["session"], "session.create session");
@@ -2767,6 +2843,22 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     this.resourceVersion = Math.max(this.resourceVersion + 1, this.now());
     return this.resourceVersion;
   }
+}
+
+function firstSendRequestFingerprint(params: {
+  readonly input: RuntimeUserInput;
+  readonly behavior?: "auto" | "steer" | "queue" | "replace";
+  readonly expectedRunId?: string;
+}): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        input: params.input,
+        behavior: params.behavior ?? "auto",
+        expectedRunId: params.expectedRunId ?? null,
+      }),
+    )
+    .digest("hex");
 }
 
 function sessionPayload(

@@ -12,6 +12,7 @@ import {
   MAX_RUNTIME_FRAME_BYTES,
   parseRuntimeMessage,
   parseRuntimeParams,
+  parseStrictRuntimeParams,
   RUNTIME_ERROR_CODES,
   RUNTIME_METHODS,
   RuntimeFrameDecoder,
@@ -127,6 +128,46 @@ describe("desktop runtime protocol contract", () => {
     expect(() => createRuntimeRequest("runtime.ping", [])).toThrowError(
       expect.objectContaining({ code: RUNTIME_ERROR_CODES.INVALID_PARAMS }),
     );
+  });
+
+  it("validates exact method params at privileged UI boundaries", () => {
+    expect(parseRuntimeParams("runtime.ping", { probe: true })).toEqual({ probe: true });
+    expectProtocolError(
+      () => parseStrictRuntimeParams("runtime.ping", { probe: true }),
+      RUNTIME_ERROR_CODES.INVALID_PARAMS,
+    );
+    expectProtocolError(
+      () =>
+        parseStrictRuntimeParams("session.rename", {
+          workspacePath: "/tmp",
+          sessionId: "session-1",
+          title: "renamed",
+          extra: true,
+        }),
+      RUNTIME_ERROR_CODES.INVALID_PARAMS,
+    );
+    expectProtocolError(
+      () =>
+        parseStrictRuntimeParams("session.send", {
+          workspacePath: "/tmp",
+          input: { kind: "text", text: "hello", injected: true },
+          idempotencyKey: "send-1",
+        }),
+      RUNTIME_ERROR_CODES.INVALID_PARAMS,
+    );
+    expect(
+      parseStrictRuntimeParams("provider.upsert", {
+        provider: {
+          id: "local",
+          protocol: "openai",
+          baseURL: "https://example.test/v1",
+          apiKeyEnv: "LOCAL_KEY",
+          models: ["coder"],
+          discoverModels: false,
+        },
+        expectedRevision: "revision",
+      }),
+    ).toMatchObject({ provider: { id: "local" } });
   });
 
   it("keeps provider credentials write-only at the protocol result boundary", () => {

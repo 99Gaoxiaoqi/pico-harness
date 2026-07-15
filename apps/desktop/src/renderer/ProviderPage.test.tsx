@@ -245,6 +245,152 @@ describe("Desktop Provider settings", () => {
     );
   });
 
+  it("并发刷新时丢弃较旧的 Provider revision 和凭证状态", async () => {
+    const user = userEvent.setup();
+    const calls: ProviderHarness["calls"] = [];
+    const staleProvider = openAiProvider({
+      baseURL: "https://stale.example.test/v1",
+      credentialStatus: "missing",
+      credentialSource: "none",
+    });
+    const freshProvider = openAiProvider({
+      baseURL: "https://fresh.example.test/v1",
+      credentialStatus: "ready",
+      credentialSource: "keychain",
+    });
+    type UnknownDesktopResult =
+      | { readonly ok: true; readonly value: unknown }
+      | {
+          readonly ok: false;
+          readonly error: {
+            readonly code: string;
+            readonly message: string;
+            readonly retryable: boolean;
+          };
+        };
+    let resolveStaleProvider!: (value: UnknownDesktopResult) => void;
+    const delayedStaleProvider = new Promise<UnknownDesktopResult>((resolve) => {
+      resolveStaleProvider = resolve;
+    });
+    let loadGeneration = 0;
+    let launchAtLoginReads = 0;
+    const runtime = new Proxy(
+      {},
+      {
+        get: (_target, property) => async (params: Readonly<Record<string, unknown>>) => {
+          const method = String(property);
+          calls.push({ method, params });
+          if (method === "runtime.ping") {
+            return successful({
+              version: "test",
+              capabilities: ["session-conversation-v1", "runtime-events-v1", "shared-config-v1"],
+            });
+          }
+          if (method === "workspace.list") {
+            return successful({ workspaces: [{ workspacePath: "/workspace", registered: true }] });
+          }
+          if (method === "workspace.status") {
+            loadGeneration += 1;
+            return successful({ workspacePath: "/workspace", mode: "folder", capabilities: {} });
+          }
+          const provider = loadGeneration >= 3 ? freshProvider : staleProvider;
+          const revision = `revision-${loadGeneration}`;
+          switch (method) {
+            case "provider.list":
+              return loadGeneration === 2
+                ? delayedStaleProvider
+                : successful({ providers: [provider], revision });
+            case "config.user.get":
+              return successful({ config: { version: 1, defaults: {}, providers: [] }, revision });
+            case "config.effective.get":
+              return successful({
+                config: {
+                  providers: [provider],
+                  sources: {},
+                  revisions: { user: revision, project: "project-revision" },
+                },
+              });
+            case "provider.upsert":
+              return successful({ provider: freshProvider, revision: "revision-4" });
+            case "workspace.trustStatus":
+              return successful({ trusted: true });
+            case "session.list":
+              return successful({ sessions: [] });
+            case "runs.list":
+              return successful({ runs: [] });
+            case "jobs.list":
+              return successful({ jobs: [] });
+            case "config.skills":
+              return successful({ skills: [] });
+            case "config.mcpServers":
+              return successful({ servers: [] });
+            case "config.providers":
+              return successful({ providers: [] });
+            case "catalog.agents":
+              return successful({ agents: [] });
+            case "catalog.skills":
+              return successful({ skills: [] });
+            case "usage.get":
+              return successful({ usage: {} });
+            case "config.get":
+              return successful({ config: {}, version: 0 });
+            default:
+              return successful({});
+          }
+        },
+      },
+    ) as RendererBridge["runtime"];
+    (window as unknown as { pico?: RendererBridge }).pico = {
+      runtime,
+      events: {
+        subscribe: () => ({ ready: successful({ subscribed: true }), dispose: vi.fn() }),
+      },
+      platform: {
+        chooseWorkspace: () => successful(undefined),
+        openDirectory: () => successful(undefined),
+        getLaunchAtLogin: () => {
+          launchAtLoginReads += 1;
+          return successful(false);
+        },
+        setLaunchAtLogin: () => successful(undefined),
+      },
+      lifecycle: {
+        setBackgroundMode: () => successful(undefined),
+        quit: () => successful(undefined),
+      },
+    };
+    window.history.replaceState({}, "", "/#/providers");
+    render(<DesktopApp />);
+
+    expect(await screen.findByText("https://stale.example.test/v1")).toBeTruthy();
+    window.dispatchEvent(new Event("focus"));
+    await waitFor(() =>
+      expect(calls.filter((call) => call.method === "provider.list")).toHaveLength(2),
+    );
+    window.dispatchEvent(new Event("focus"));
+    expect(await screen.findByText("https://fresh.example.test/v1")).toBeTruthy();
+    expect(screen.getByText("凭证已保存")).toBeTruthy();
+
+    resolveStaleProvider({
+      ok: true,
+      value: { providers: [staleProvider], revision: "revision-2" },
+    });
+    await waitFor(() => expect(launchAtLoginReads).toBe(3));
+    expect(screen.getByText("https://fresh.example.test/v1")).toBeTruthy();
+    expect(screen.getByText("凭证已保存")).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "编辑" }));
+    await user.click(screen.getByRole("button", { name: "保存更改" }));
+    await waitFor(() =>
+      expect(
+        calls.some(
+          (call) =>
+            call.method === "provider.upsert" && call.params.expectedRevision === "revision-3",
+        ),
+      ).toBe(true),
+    );
+  });
+
   it("adds a provider and updates the shared user default model", async () => {
     const user = userEvent.setup();
     const harness = installProviderBridge();
