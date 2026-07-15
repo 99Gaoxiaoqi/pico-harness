@@ -43,9 +43,9 @@
 
 ## 第一部分：Runtime Context 边界
 
-- [ ] 统一 Session scope，将 `picoHome` 派生的 workspace identity 纳入 Session Settings、CLI semantics 和 Approval Grants 的键。
-- [ ] 断开 `session-settings.ts` 与 `session-permissions.ts` 的运行时循环，把跨 store 操作移动到小型上层协调函数。
-- [ ] 移除进程级 CredentialPool，由 AgentRuntime 根据显式 `runtimeEnv` 创建并持有凭证池。
+- [x] 统一 Session scope，将 `picoHome` 派生的 workspace identity 纳入 Session Settings、CLI semantics 和 Approval Grants 的键。✔️
+- [x] 断开 `session-settings.ts` 与 `session-permissions.ts` 的运行时循环，把跨 store 操作移动到小型上层协调函数。✔️
+- [x] 移除进程级 CredentialPool，由 AgentRuntime 根据显式 `runtimeEnv` 创建并持有凭证池。✔️
 - [ ] 补齐 Artifact、Slash Session 命令、WebSearch 和 Bash 的 `picoHome/env` 显式传播。
 - [ ] 验证同一进程、相同 cwd/sessionId、不同 `PICO_HOME` 时状态、授权、凭证和路径完全隔离。
 
@@ -57,9 +57,9 @@
 
 ### 完成记录
 
-- 提交：待填写
-- 验证：待填写
-- 说明：待填写
+- 提交：`48b1b91 refactor(runtime): 收敛会话与凭证宿主边界`
+- 验证：`npm run lint`、`npm run typecheck`、`npm run build`；临时 smoke 覆盖同 cwd/sessionId 跨 `PICO_HOME` 的 settings、CLI semantics、approval grants 与凭证池隔离。
+- 说明：前三项完成；Artifact、Slash Session、WebSearch、Bash 的显式传播及完整路径隔离仍待后续提交，未提前标记。
 
 ## 第二部分：Desktop 确定性缺陷
 
