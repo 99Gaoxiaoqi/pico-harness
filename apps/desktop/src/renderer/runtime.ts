@@ -528,6 +528,7 @@ function parseProviderConfig(
   if (!supported) {
     return {
       supported: false,
+      writable: false,
       revision: "",
       userDefaults: {},
       providers: [],
@@ -540,13 +541,17 @@ function parseProviderConfig(
   const effectiveConfig = isRecord(effectiveResult.config) ? effectiveResult.config : {};
   const effectiveProviders = recordArray(effectiveConfig.providers);
   const registryProviders = recordArray(registryResult.providers);
+  const revision = stringValue(registryResult.revision ?? userResult.revision);
+  const writable =
+    isRecord(results.providerRegistry) && isRecord(results.userConfig) && revision.length > 0;
   const defaultModelRouteId = stringValue(
     effectiveConfig.defaultModelRouteId ??
       (isRecord(userConfig.defaults) ? userConfig.defaults.modelRouteId : undefined),
   );
   return {
     supported: true,
-    revision: stringValue(registryResult.revision ?? userResult.revision),
+    writable,
+    revision,
     ...(defaultModelRouteId ? { defaultModelRouteId } : {}),
     userDefaults: parseUserDefaults(userConfig.defaults),
     providers: (effectiveProviders.length > 0 ? effectiveProviders : registryProviders).map(
@@ -1287,13 +1292,34 @@ export function useRuntimeStore(): RuntimeStore {
         await operation(bridge);
         return true;
       } catch (error) {
+        if (
+          !preview &&
+          label.startsWith("provider-") &&
+          error instanceof RuntimeInvocationError &&
+          (error.code === "CONFIG_REVISION_CONFLICT" || error.code === "CONFLICT")
+        ) {
+          const bridge = getBridge();
+          const workspacePath = dataRef.current.workspacePath;
+          if (bridge && workspacePath) {
+            try {
+              await loadWorkspace(bridge, workspacePath);
+            } catch (reloadError) {
+              reportFailure(reloadError);
+              return false;
+            }
+          }
+          setMessage(
+            "Provider 配置已被 App 或 TUI 的另一处更新，已重新加载最新内容。请检查后重新应用本次修改。",
+          );
+          return false;
+        }
         reportFailure(error);
         return false;
       } finally {
         setBusy(undefined);
       }
     },
-    [preview, reportFailure],
+    [loadWorkspace, preview, reportFailure],
   );
 
   const actions = useMemo<RuntimeActions>(
@@ -1793,8 +1819,12 @@ export function useRuntimeStore(): RuntimeStore {
       },
       async upsertProvider(provider) {
         const providerConfig = dataRef.current.providerConfig;
-        if (!providerConfig.supported) {
-          setMessage("当前 Runtime 不支持统一 Provider 配置。请完全退出并重新启动 Pico。");
+        if (!providerConfig.writable) {
+          setMessage(
+            providerConfig.supported
+              ? "Provider 配置尚未完整加载，请重新加载后再试。"
+              : "当前 Runtime 不支持统一 Provider 配置。请完全退出并重新启动 Pico。",
+          );
           return false;
         }
         return perform("provider-save", async (bridge) => {
@@ -1834,7 +1864,7 @@ export function useRuntimeStore(): RuntimeStore {
       },
       async deleteProvider(providerId) {
         const providerConfig = dataRef.current.providerConfig;
-        if (!providerConfig.supported) return false;
+        if (!providerConfig.writable) return false;
         return perform("provider-delete", async (bridge) => {
           if (!preview) {
             await invoke(bridge, "provider.delete", {
@@ -1860,7 +1890,7 @@ export function useRuntimeStore(): RuntimeStore {
       },
       async setDefaultModelRoute(modelRouteId) {
         const providerConfig = dataRef.current.providerConfig;
-        if (!providerConfig.supported) return false;
+        if (!providerConfig.writable) return false;
         const defaults: Record<string, unknown> = {};
         if (modelRouteId) defaults.modelRouteId = modelRouteId;
         if (providerConfig.userDefaults.mode) defaults.mode = providerConfig.userDefaults.mode;
@@ -1893,7 +1923,7 @@ export function useRuntimeStore(): RuntimeStore {
       },
       async setProviderCredential(providerId, secret, expectedProviderFingerprint) {
         const providerConfig = dataRef.current.providerConfig;
-        if (!providerConfig.supported || !secret) return false;
+        if (!providerConfig.writable || !secret) return false;
         return perform("provider-credential", async (bridge) => {
           if (!preview) {
             await invoke(bridge, "provider.credential.set", {
@@ -1925,7 +1955,7 @@ export function useRuntimeStore(): RuntimeStore {
       },
       async deleteProviderCredential(providerId, expectedProviderFingerprint) {
         const providerConfig = dataRef.current.providerConfig;
-        if (!providerConfig.supported) return false;
+        if (!providerConfig.writable) return false;
         return perform("provider-credential-delete", async (bridge) => {
           if (!preview) {
             await invoke(bridge, "provider.credential.delete", {

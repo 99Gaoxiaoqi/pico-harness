@@ -84,7 +84,7 @@ export function ProviderPage({ runtime }: { readonly runtime: RuntimeStore }) {
         </div>
         <Button
           variant="primary"
-          disabled={isBusy || !config.supported}
+          disabled={isBusy || !config.writable}
           onClick={() => setEditor(null)}
         >
           <Plus aria-hidden="true" size={16} />
@@ -99,6 +99,11 @@ export function ProviderPage({ runtime }: { readonly runtime: RuntimeStore }) {
       )}
       {config.supported && data.notices.providers && (
         <InlineNotice tone="error">{data.notices.providers}</InlineNotice>
+      )}
+      {config.supported && !config.writable && !data.notices.providers && (
+        <InlineNotice tone="warning">
+          Provider 配置没有完整加载，已暂停编辑以避免覆盖更新的配置。请重新加载后再试。
+        </InlineNotice>
       )}
 
       {config.supported && (
@@ -116,7 +121,7 @@ export function ProviderPage({ runtime }: { readonly runtime: RuntimeStore }) {
             <span>默认模型</span>
             <select
               value={config.userDefaults.modelRouteId ?? ""}
-              disabled={isBusy || models.length === 0}
+              disabled={isBusy || !config.writable || models.length === 0}
               onChange={(event) => handleDefaultChange(event.currentTarget.value)}
             >
               <option value="">不设置用户默认值</option>
@@ -144,7 +149,11 @@ export function ProviderPage({ runtime }: { readonly runtime: RuntimeStore }) {
               title="还没有可用的 Provider"
               detail="添加一个模型服务后，App 与 TUI 会在这台设备上共用它。"
               action={
-                <Button variant="primary" onClick={() => setEditor(null)}>
+                <Button
+                  variant="primary"
+                  disabled={!config.writable}
+                  onClick={() => setEditor(null)}
+                >
                   <Plus aria-hidden="true" size={16} />
                   配置第一个 Provider
                 </Button>
@@ -170,7 +179,7 @@ export function ProviderPage({ runtime }: { readonly runtime: RuntimeStore }) {
                         <>
                           <Button
                             variant="quiet"
-                            disabled={isBusy}
+                            disabled={isBusy || !config.writable}
                             onClick={() => setCredentialProvider(provider)}
                           >
                             <KeyRound aria-hidden="true" size={15} />
@@ -178,7 +187,7 @@ export function ProviderPage({ runtime }: { readonly runtime: RuntimeStore }) {
                           </Button>
                           <Button
                             variant="quiet"
-                            disabled={isBusy}
+                            disabled={isBusy || !config.writable}
                             onClick={() => setEditor(provider)}
                           >
                             <Pencil aria-hidden="true" size={15} />
@@ -186,7 +195,7 @@ export function ProviderPage({ runtime }: { readonly runtime: RuntimeStore }) {
                           </Button>
                           <Button
                             variant="quiet"
-                            disabled={isBusy}
+                            disabled={isBusy || !config.writable}
                             onClick={() => handleDeleteProvider(provider)}
                           >
                             <Trash2 aria-hidden="true" size={15} />

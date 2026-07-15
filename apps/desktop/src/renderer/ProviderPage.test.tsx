@@ -8,6 +8,11 @@ import type { ProviderView } from "./model.js";
 import type { RendererBridge } from "./runtime.js";
 
 const successful = <T,>(value: T) => Promise.resolve({ ok: true as const, value });
+const failed = (code: string, message: string) =>
+  Promise.resolve({
+    ok: false as const,
+    error: { code, message, retryable: false },
+  });
 
 interface ProviderHarness {
   readonly calls: Array<{
@@ -19,6 +24,8 @@ interface ProviderHarness {
 function installProviderBridge(options?: {
   readonly sharedConfig?: boolean;
   readonly initialProviders?: readonly ProviderView[];
+  readonly failUserConfig?: boolean;
+  readonly conflictOnUpsert?: boolean;
 }): ProviderHarness {
   const calls: ProviderHarness["calls"] = [];
   let revision = "revision-1";
@@ -55,6 +62,9 @@ function installProviderBridge(options?: {
           case "provider.list":
             return successful({ providers, revision });
           case "config.user.get":
+            if (options?.failUserConfig) {
+              return failed("INTERNAL_ERROR", "用户配置读取失败");
+            }
             return successful({
               config: { version: 1, defaults, providers: [] },
               revision,
@@ -71,6 +81,9 @@ function installProviderBridge(options?: {
               },
             });
           case "provider.upsert": {
+            if (options?.conflictOnUpsert) {
+              return failed("CONFLICT", "用户配置 revision 已变更");
+            }
             const input = params.provider as Readonly<Record<string, unknown>>;
             const previous = providers.find((provider) => provider.id === input.id);
             const next: ProviderView = {
@@ -351,5 +364,37 @@ describe("Desktop Provider settings", () => {
       (screen.getByRole("button", { name: "添加 Provider" }) as HTMLButtonElement).disabled,
     ).toBe(true);
     expect(harness.calls.some((call) => call.method === "provider.list")).toBe(false);
+  });
+
+  it("权威用户配置加载失败时保持只读", async () => {
+    installProviderBridge({ failUserConfig: true });
+    window.history.replaceState({}, "", "/#/providers");
+    render(<DesktopApp />);
+
+    expect(await screen.findByText(/INTERNAL_ERROR.*用户配置读取失败/u)).toBeTruthy();
+    expect(
+      (screen.getByRole("button", { name: "添加 Provider" }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+  });
+
+  it("OCC 冲突后重新加载最新配置并要求用户重新应用", async () => {
+    const user = userEvent.setup();
+    const harness = installProviderBridge({ conflictOnUpsert: true });
+    window.history.replaceState({}, "", "/#/providers");
+    render(<DesktopApp />);
+
+    await user.click(await screen.findByRole("button", { name: "配置第一个 Provider" }));
+    const dialog = screen.getByRole("dialog", { name: "添加 Provider" });
+    await user.type(within(dialog).getByRole("textbox", { name: "Provider ID" }), "conflict");
+    await user.type(
+      within(dialog).getByRole("textbox", { name: "Endpoint" }),
+      "https://conflict.example.test/v1",
+    );
+    await user.type(within(dialog).getByRole("textbox", { name: "已知模型" }), "model");
+    await user.click(within(dialog).getByRole("button", { name: "添加 Provider" }));
+
+    expect(await screen.findByText(/已重新加载最新内容/u)).toBeTruthy();
+    expect(harness.calls.filter((call) => call.method === "config.user.get")).toHaveLength(2);
+    expect(dialog.isConnected).toBe(true);
   });
 });
