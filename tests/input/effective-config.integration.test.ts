@@ -21,7 +21,7 @@ describe("EffectiveConfigResolver integration", () => {
       providers: {
         shared: {
           protocol: "openai",
-          baseURL: "https://shared.example.test/v1/",
+          baseURL: "HTTPS://SHARED.EXAMPLE.TEST:443/api/../v1/#ignored-fragment",
           apiKeyEnv: "PROJECT_API_KEY",
           models: ["project-model"],
           discoverModels: false,
