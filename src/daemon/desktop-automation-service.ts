@@ -1,4 +1,19 @@
-import { parseAnyCredentialRef, type CredentialRef } from "../provider/credential-vault.js";
+import type { EffectiveConfigResolver } from "../input/effective-config.js";
+import type { UserConfigStore } from "../input/user-config-store.js";
+import { resolveAutomationCredentialTarget } from "../provider/automation-credential.js";
+import {
+  parseAnyCredentialRef,
+  type CredentialRef,
+  type CredentialVault,
+} from "../provider/credential-vault.js";
+import { resolveModelRouteCapabilities } from "../provider/model-capabilities.js";
+import type { ModelRoute } from "../provider/model-router.js";
+import { fingerprintBackgroundMcpConfig } from "../safety/background-mcp-policy.js";
+import {
+  BACKGROUND_HARDLINE_VERSION,
+  BACKGROUND_HOOK_VERSION,
+  filterBackgroundEligibleTools,
+} from "../safety/background-yolo-policy.js";
 import { CronService } from "../tasks/cron-service.js";
 import { RuntimeConflictError } from "../tasks/runtime-store.js";
 import type { CronJobRecord, CronRunRecord, YoloPolicySnapshot } from "../tasks/runtime-types.js";
@@ -24,6 +39,33 @@ export interface DesktopAutomationServiceOptions {
   runNow(workspacePath: string, jobId: string): Promise<CronRunRecord>;
   picoHome?: string;
   now?: () => number;
+}
+
+export interface DesktopAutomationAuthorityDependencies {
+  readonly credentialVault: CredentialVault;
+  readonly effectiveConfigResolver: EffectiveConfigResolver;
+  readonly userConfigStore: UserConfigStore;
+  readonly env: Readonly<Record<string, string | undefined>>;
+  readonly now?: () => number;
+}
+
+export interface DesktopAutomationCredentialImport {
+  readonly modelRouteId: string;
+  readonly expectedCredentialRef: string;
+  readonly secret: string;
+}
+
+export interface DesktopTrustedAutomationInput {
+  readonly name?: string;
+  readonly prompt: string;
+  readonly schedule: string;
+  readonly timeZone?: string;
+  readonly modelRouteId: string;
+  readonly expectedCredentialRef: string;
+  readonly allowedTools: readonly string[];
+  readonly toolNetworkPolicy: "allow" | "disabled" | "allowlist";
+  readonly allowedToolNetworkHosts?: readonly string[];
+  readonly enabled?: boolean;
 }
 
 /**
@@ -267,6 +309,165 @@ export class DesktopAutomationService {
   }
 }
 
+export async function importDesktopAutomationCredential(
+  workspacePath: string,
+  input: DesktopAutomationCredentialImport,
+  dependencies: DesktopAutomationAuthorityDependencies,
+): Promise<{ readonly imported: true; readonly credentialRef: CredentialRef }> {
+  const capability = dependencies.credentialVault.capability();
+  if (!capability.available) {
+    throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.FORBIDDEN, capability.diagnostic);
+  }
+  const target = await resolveDesktopAutomationTarget(
+    workspacePath,
+    input.modelRouteId,
+    dependencies,
+  );
+  if (target.ref !== input.expectedCredentialRef) {
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.CONFLICT,
+      "Automation Provider authority 已变化，请刷新配置后重试",
+    );
+  }
+  await dependencies.credentialVault.put(target.ref, requireSecret(input.secret));
+  return { imported: true, credentialRef: target.ref };
+}
+
+export async function createTrustedDesktopAutomation(
+  automations: DesktopAutomationService,
+  workspacePath: string,
+  input: DesktopTrustedAutomationInput,
+  dependencies: DesktopAutomationAuthorityDependencies,
+): Promise<RuntimeJob> {
+  const target = await resolveDesktopAutomationTarget(
+    workspacePath,
+    input.modelRouteId,
+    dependencies,
+  );
+  if (target.ref !== input.expectedCredentialRef) {
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.CONFLICT,
+      "Automation Provider authority 已变化，请刷新配置后重试",
+    );
+  }
+  if (!(await dependencies.credentialVault.has(target.ref))) {
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.CONFLICT,
+      `模型路由 ${input.modelRouteId} 尚未导入系统凭证库`,
+    );
+  }
+  const requestedTools = uniqueNonEmptyStrings(input.allowedTools, "allowedTools");
+  const eligibleTools = filterBackgroundEligibleTools(requestedTools);
+  if (!sameStringValues(requestedTools, eligibleTools)) {
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.FORBIDDEN,
+      "Automation 包含不允许在后台运行的交互式工具",
+    );
+  }
+  const allowedHosts = uniqueNonEmptyStrings(
+    input.allowedToolNetworkHosts ?? [],
+    "allowedToolNetworkHosts",
+  );
+  if (input.toolNetworkPolicy === "allowlist" && allowedHosts.length === 0) {
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.INVALID_PARAMS,
+      "toolNetworkPolicy=allowlist 时必须提供 allowedToolNetworkHosts",
+    );
+  }
+  if (input.toolNetworkPolicy !== "allowlist" && allowedHosts.length > 0) {
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.INVALID_PARAMS,
+      "只有 toolNetworkPolicy=allowlist 可提供 allowedToolNetworkHosts",
+    );
+  }
+  const mcpConfigFingerprint = requestedTools.some((tool) => tool.startsWith("mcp__"))
+    ? await fingerprintBackgroundMcpConfig(workspacePath)
+    : undefined;
+  return automations.createWithSecurity(
+    workspacePath,
+    {
+      ...(input.name ? { name: input.name } : {}),
+      prompt: input.prompt,
+      schedule: input.schedule,
+      ...(input.timeZone ? { timeZone: input.timeZone } : {}),
+      enabled: input.enabled,
+    },
+    {
+      credentialRef: target.ref,
+      modelRouteId: input.modelRouteId,
+      policySnapshot: {
+        mode: "yolo",
+        backgroundEnabled: true,
+        trustedWorkspace: true,
+        toolNetworkPolicy: input.toolNetworkPolicy,
+        ...(allowedHosts.length > 0 ? { allowedToolNetworkHosts: allowedHosts } : {}),
+        ...(mcpConfigFingerprint ? { mcpConfigFingerprint } : {}),
+        allowedTools: requestedTools,
+        hardlineVersion: BACKGROUND_HARDLINE_VERSION,
+        hookVersion: BACKGROUND_HOOK_VERSION,
+        createdAt: (dependencies.now ?? Date.now)(),
+      },
+    },
+  );
+}
+
+async function resolveDesktopAutomationTarget(
+  workspacePath: string,
+  modelRouteId: string,
+  dependencies: DesktopAutomationAuthorityDependencies,
+) {
+  const normalizedRouteId = requiredText(modelRouteId, "modelRouteId");
+  const separator = normalizedRouteId.indexOf("/");
+  if (separator <= 0 || separator === normalizedRouteId.length - 1) {
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.INVALID_PARAMS,
+      "modelRouteId 必须采用 providerID/modelID 格式",
+    );
+  }
+  const providerId = normalizedRouteId.slice(0, separator);
+  const model = normalizedRouteId.slice(separator + 1);
+  const effective = await dependencies.effectiveConfigResolver.resolve({
+    workDir: workspacePath,
+    projectTrusted: true,
+    env: dependencies.env,
+  });
+  const provider = effective.providers[providerId];
+  if (!provider || !provider.models.includes(model)) {
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.CONFLICT,
+      `模型路由 ${normalizedRouteId} 已不存在，请刷新配置后重试`,
+    );
+  }
+  const route: ModelRoute = {
+    id: normalizedRouteId,
+    providerId,
+    provider: provider.protocol,
+    model,
+    baseURL: provider.baseURL,
+    apiKeyEnv: provider.apiKeyEnv,
+    source: "config",
+    capabilities: resolveModelRouteCapabilities(
+      provider.protocol,
+      model,
+      provider.modelCapabilities?.[model],
+    ),
+  };
+  const userProvider = (await dependencies.userConfigStore.read()).config.providers[providerId];
+  try {
+    return resolveAutomationCredentialTarget({
+      route,
+      workspacePath,
+      ...(userProvider ? { userProvider } : {}),
+      configSource: effective.sources[`providers.${providerId}`],
+    });
+  } catch (error) {
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.FORBIDDEN,
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+}
+
 export interface EnabledAutomationReference {
   readonly workspacePath: string;
   readonly jobId: string;
@@ -350,6 +551,27 @@ function requiredText(value: string, field: string): string {
     throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.INVALID_PARAMS, `${field} 必须是非空字符串`);
   }
   return normalized;
+}
+
+function requireSecret(value: string): string {
+  if (!value.trim() || /[\r\n]/u.test(value)) {
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.INVALID_PARAMS,
+      "secret 必须是不含换行的非空字符串",
+    );
+  }
+  return value.trim();
+}
+
+function uniqueNonEmptyStrings(values: readonly string[], label: string): string[] {
+  return [...new Set(values.map((value) => requiredText(value, label)))];
+}
+
+function sameStringValues(left: readonly string[], right: readonly string[]): boolean {
+  if (left.length !== right.length) return false;
+  const normalizedLeft = [...left].sort();
+  const normalizedRight = [...right].sort();
+  return normalizedLeft.every((value, index) => value === normalizedRight[index]);
 }
 
 function normalizeLimit(limit: number | undefined): number {
