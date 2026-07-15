@@ -58,11 +58,14 @@ import {
 } from "../presentation/transcript-event-store.js";
 import { createProvider, type ProviderKind } from "../provider/factory.js";
 import {
-  loadModelRouter,
   type ModelProviderConfig,
   type ModelRoute,
   type ModelRouter,
 } from "../provider/model-router.js";
+import {
+  loadEffectiveModelRuntime,
+  type EffectiveModelRuntime,
+} from "../provider/effective-model-runtime.js";
 import {
   createPlatformCredentialVault,
   credentialRefForProvider,
@@ -460,8 +463,8 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
 
   private async runDiagnostics(workspacePath: string): Promise<JsonValue> {
     const canonical = await this.requireTrustedWorkspace(workspacePath);
-    const config = await loadPicoConfig(canonical);
-    const defaults = sessionSettingDefaults(config, this.env);
+    const effective = await this.loadSessionModelRuntime(canonical);
+    const defaults = effectiveSessionSettingDefaults(effective, this.env);
     return toJsonValue(
       await runWorkspaceDoctor({
         workDir: canonical,
@@ -701,15 +704,8 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const canonical = await this.requireIdleTrustedSession(workspacePath, sessionId, "压缩");
     const result = await this.withSession(canonical, sessionId, async (session) => {
       const settings = await this.getSessionSettings(canonical, session);
-      const config = await loadPicoConfig(canonical);
-      const router = await loadModelRouter({
-        config,
-        env: this.env,
-        legacyProvider: settings.provider,
-        legacyModel: settings.model,
-        legacyModelExplicit: true,
-      });
-      const active = router.providerConfig(settings.modelRouteId ?? config.model);
+      const effective = await this.loadSessionModelRuntime(canonical, settings);
+      const active = effective.router.providerConfig(settings.modelRouteId ?? settings.model);
       const rawProvider = this.providerFactory(active.provider, active.config);
       const ledger = new RuntimeStore({ workDir: canonical, now: this.now });
       try {
@@ -2425,7 +2421,8 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   private async getSessionSettings(workspacePath: string, session: Session) {
     const persisted = session.getRuntimeStateSnapshot().settings;
     const defaults =
-      persisted ?? sessionSettingDefaults(await loadPicoConfig(workspacePath), this.env);
+      persisted ??
+      effectiveSessionSettingDefaults(await this.loadSessionModelRuntime(workspacePath), this.env);
     return getOrCreateSessionSettings(
       {
         sessionId: session.id,
@@ -2433,6 +2430,8 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         provider: defaults.provider,
         model: defaults.model,
         ...(defaults.modelRouteId ? { modelRouteId: defaults.modelRouteId } : {}),
+        ...(defaults.mode ? { mode: defaults.mode } : {}),
+        ...(defaults.thinkingEffort ? { thinkingEffort: defaults.thinkingEffort } : {}),
       },
       { persistence: session },
     );
@@ -2442,23 +2441,23 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     workspacePath: string,
     settings: SessionSettings,
   ): Promise<ModelRouter> {
-    const config = await loadPicoConfig(workspacePath);
-    return loadModelRouter({
-      // Settings reads must be local and deterministic. Explicit project models are the Desktop
-      // selection allowlist; provider discovery remains a separate config/providers concern.
-      config: {
-        ...config,
-        providers: Object.fromEntries(
-          Object.entries(config.providers).map(([id, provider]) => [
-            id,
-            { ...provider, discoverModels: false },
-          ]),
-        ),
-      },
+    return (await this.loadSessionModelRuntime(workspacePath, settings)).router;
+  }
+
+  private loadSessionModelRuntime(
+    workspacePath: string,
+    settings?: Pick<SessionSettings, "provider" | "model">,
+  ): Promise<EffectiveModelRuntime> {
+    return loadEffectiveModelRuntime({
+      workDir: workspacePath,
+      projectTrusted: true,
+      legacyProvider: settings?.provider ?? "openai",
+      legacyModel: this.env["LLM_MODEL"]?.trim() ?? settings?.model ?? "",
+      legacyModelExplicit: false,
       env: this.env,
-      legacyProvider: settings.provider,
-      legacyModel: settings.model,
-      legacyModelExplicit: true,
+      credentialVault: this.credentialVault,
+      userConfigStore: this.userConfigStore,
+      configResolver: this.effectiveConfigResolver,
     });
   }
 
@@ -3056,36 +3055,36 @@ function invalidSessionSetting(message: string): RuntimeProtocolError {
   return new RuntimeProtocolError(RUNTIME_ERROR_CODES.INVALID_PARAMS, message);
 }
 
-function sessionSettingDefaults(
-  config: PicoConfig,
+function effectiveSessionSettingDefaults(
+  runtime: EffectiveModelRuntime,
   env: Readonly<Record<string, string | undefined>>,
-): { provider: ProviderKind; model: string; modelRouteId?: string } {
-  const routeId = config.model?.trim();
-  if (routeId) {
-    const separator = routeId.indexOf("/");
-    const providerId = separator > 0 ? routeId.slice(0, separator) : undefined;
-    const configured = providerId ? config.providers[providerId] : undefined;
-    if (configured) {
-      return {
-        provider: configured.protocol,
-        model: separator > 0 ? routeId.slice(separator + 1) : routeId,
-        modelRouteId: routeId,
-      };
-    }
+): {
+  provider: ProviderKind;
+  model: string;
+  modelRouteId?: string;
+  mode?: SessionSettings["mode"];
+  thinkingEffort?: string;
+} {
+  const route = runtime.router.resolve(runtime.config.defaultModelRouteId);
+  if (route) {
+    return {
+      provider: route.provider,
+      model: route.model,
+      modelRouteId: route.id,
+      ...(runtime.config.defaults.mode ? { mode: runtime.config.defaults.mode } : {}),
+      ...(runtime.config.defaults.thinkingEffort
+        ? { thinkingEffort: runtime.config.defaults.thinkingEffort }
+        : {}),
+    };
   }
-  const firstProvider = Object.entries(config.providers)[0];
-  if (firstProvider) {
-    const [providerId, provider] = firstProvider;
-    const model = provider.models[0] ?? env["LLM_MODEL"]?.trim();
-    if (model) {
-      return {
-        provider: provider.protocol,
-        model,
-        modelRouteId: `${providerId}/${model}`,
-      };
-    }
-  }
-  return { provider: "openai", model: env["LLM_MODEL"]?.trim() || "glm-5.2" };
+  return {
+    provider: "openai",
+    model: env["LLM_MODEL"]?.trim() || "glm-5.2",
+    ...(runtime.config.defaults.mode ? { mode: runtime.config.defaults.mode } : {}),
+    ...(runtime.config.defaults.thinkingEffort
+      ? { thinkingEffort: runtime.config.defaults.thinkingEffort }
+      : {}),
+  };
 }
 
 function safeConfig(config: PicoConfig): JsonValue {
