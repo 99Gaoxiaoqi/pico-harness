@@ -31,6 +31,10 @@ import { ModelRouter } from "../../src/provider/model-router.js";
 import { resolveModelRouteCapabilities } from "../../src/provider/model-capabilities.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 import type { CredentialRef, CredentialVault } from "../../src/provider/credential-vault.js";
+import {
+  BACKGROUND_HARDLINE_VERSION,
+  BACKGROUND_HOOK_VERSION,
+} from "../../src/safety/background-yolo-policy.js";
 
 describe("Pico command registry", () => {
   const cleanup: Array<() => void> = [];
@@ -101,6 +105,7 @@ describe("Pico command registry", () => {
     });
     let daemonAvailable = true;
     const disabledCountWhenRegistered: number[] = [];
+    const secrets = new Map<CredentialRef, string>();
     const bridge: CronDaemonBridge = {
       deleteProvider: async () => ({
         status: "unavailable",
@@ -118,8 +123,74 @@ describe("Pico command registry", () => {
         registered: true,
         message: "daemon connected; workspace registered; scheduler unknown",
       }),
+      importAutomationCredential: async (input) => {
+        if (!daemonAvailable) return { status: "unavailable", message: "daemon unavailable" };
+        secrets.set(input.expectedCredentialRef as CredentialRef, input.secret);
+        return { status: "ok", message: "安全导入系统凭证库" };
+      },
+      createAutomation: async (input) => {
+        if (!daemonAvailable) return { status: "unavailable", message: "daemon unavailable" };
+        let job = cron.create({
+          workspacePath: input.workspacePath,
+          schedule: input.schedule,
+          ...(input.timeZone ? { timeZone: input.timeZone } : {}),
+          prompt: input.prompt,
+          credentialRef: input.expectedCredentialRef as CredentialRef,
+          modelRouteId: input.modelRouteId,
+          enabled: false,
+          policySnapshot: {
+            mode: "yolo",
+            backgroundEnabled: true,
+            trustedWorkspace: true,
+            toolNetworkPolicy: input.toolNetworkPolicy,
+            ...(input.allowedToolNetworkHosts
+              ? { allowedToolNetworkHosts: input.allowedToolNetworkHosts }
+              : {}),
+            allowedTools: input.allowedTools,
+            hardlineVersion: BACKGROUND_HARDLINE_VERSION,
+            hookVersion: BACKGROUND_HOOK_VERSION,
+            createdAt: Date.now(),
+          },
+        });
+        disabledCountWhenRegistered.push(cron.list(workDir).filter((item) => !item.enabled).length);
+        if (input.enabled !== false) job = cron.setEnabled(job.cronJobId, job.version, true);
+        return {
+          status: "ok",
+          message: `daemon registered ${input.workspacePath}`,
+          job: {
+            jobId: job.cronJobId,
+            workspacePath: job.workspacePath,
+            name: job.name,
+            prompt: job.prompt,
+            schedule: job.schedule,
+            enabled: job.enabled,
+            status: "idle",
+            updatedAt: job.updatedAt,
+            timeZone: job.timeZone,
+          },
+        };
+      },
+      setAutomationEnabled: async (input) => {
+        if (!daemonAvailable) return { status: "unavailable", message: "remains disabled" };
+        const current = cron.list(workDir).find((item) => item.cronJobId === input.jobId)!;
+        const job = cron.setEnabled(current.cronJobId, current.version, input.enabled);
+        return {
+          status: "ok",
+          message: input.enabled ? "enabled" : "disabled",
+          job: {
+            jobId: job.cronJobId,
+            workspacePath: job.workspacePath,
+            name: job.name,
+            prompt: job.prompt,
+            schedule: job.schedule,
+            enabled: job.enabled,
+            status: "idle",
+            updatedAt: job.updatedAt,
+          },
+        };
+      },
+      deleteAutomation: async () => ({ status: "ok", message: "deleted" }),
     };
-    const secrets = new Map<CredentialRef, string>();
     const credentialVault: CredentialVault = {
       capability: () => ({
         available: true,
@@ -226,24 +297,11 @@ describe("Pico command registry", () => {
     daemonAvailable = false;
     const offline = await processUserInput("/cron add */10 * * * * 生成默认联网日报", { registry });
     expect(offline.type === "local-command" ? offline.result.message : undefined).toContain(
-      "(disabled)",
-    );
-    expect(offline.type === "local-command" ? offline.result.message : undefined).toContain(
-      "允许所有符合后台资格的工具联网",
+      "daemon unavailable",
     );
     const offlineJob = cron.list(workDir).find((job) => job.prompt === "生成默认联网日报");
-    expect(offlineJob?.enabled).toBe(false);
-    expect(offlineJob?.policySnapshot.toolNetworkPolicy).toBe("allow");
-    expect(disabledCountWhenRegistered).toEqual([1, 1]);
-    const enableOffline = await processUserInput(`/cron enable ${offlineJob!.cronJobId}`, {
-      registry,
-    });
-    expect(
-      enableOffline.type === "local-command" ? enableOffline.result.message : undefined,
-    ).toContain("remains disabled");
-    expect(cron.list(workDir).find((job) => job.cronJobId === offlineJob!.cronJobId)?.enabled).toBe(
-      false,
-    );
+    expect(offlineJob).toBeUndefined();
+    expect(disabledCountWhenRegistered).toEqual([1]);
 
     const listed = await processUserInput("/cron list", { registry });
     expect(listed.type === "local-command" ? listed.result.message : undefined).toContain(

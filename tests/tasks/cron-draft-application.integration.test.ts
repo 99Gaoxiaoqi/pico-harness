@@ -10,8 +10,15 @@ import {
 import { resolveModelRouteCapabilities } from "../../src/provider/model-capabilities.js";
 import type { ModelRoute } from "../../src/provider/model-router.js";
 import type { CronDraft, CronDraftId } from "../../src/tasks/cron-draft.js";
-import { CronDraftApplication } from "../../src/tasks/cron-draft-application.js";
+import {
+  CronDraftApplication,
+  type CronWorkspaceRegistrar,
+} from "../../src/tasks/cron-draft-application.js";
 import { CronService } from "../../src/tasks/cron-service.js";
+import {
+  BACKGROUND_HARDLINE_VERSION,
+  BACKGROUND_HOOK_VERSION,
+} from "../../src/safety/background-yolo-policy.js";
 
 describe("CronDraftApplication integration", () => {
   const cleanup: string[] = [];
@@ -32,13 +39,7 @@ describe("CronDraftApplication integration", () => {
       listAllowedTools: () => ["schedule_task", "ask_user", "fetch_url", "bash"],
       credentialVault: vault,
       credentialEnv: { TEST_API_KEY: "secret" },
-      workspaceRegistrar: {
-        statusWorkspace: async () => ({ available: true, message: "daemon ready" }),
-        registerWorkspace: async () => {
-          enabledAtRegistration.push(cron.list(workspace)[0]?.enabled ?? true);
-          return { available: true, message: "daemon registered" };
-        },
-      },
+      workspaceRegistrar: testRegistrar(cron, vault, enabledAtRegistration),
       now: () => 100,
     });
     const context = await app.context();
@@ -58,7 +59,7 @@ describe("CronDraftApplication integration", () => {
     cron.close();
   });
 
-  it("daemon 不可用时保留 disabled Job", async () => {
+  it("daemon 不可用时 fail-closed 且不写入 Job", async () => {
     const workspace = await workspaceDir();
     const vault = new MemoryCredentialVault();
     const cron = new CronService({ workDir: workspace });
@@ -69,15 +70,11 @@ describe("CronDraftApplication integration", () => {
       listAllowedTools: () => ["fetch_url"],
       credentialVault: vault,
       credentialEnv: { TEST_API_KEY: "secret" },
-      workspaceRegistrar: {
-        statusWorkspace: async () => ({ available: false, message: "offline" }),
-        registerWorkspace: async () => ({ available: false, message: "offline" }),
-      },
+      workspaceRegistrar: testRegistrar(cron, vault, undefined, false),
     });
 
-    const receipt = await app.commit(draft(workspace, ["fetch_url"]));
-    expect(receipt).toMatchObject({ enabled: false, daemonMessage: "offline" });
-    expect(cron.list(workspace)[0]?.enabled).toBe(false);
+    await expect(app.commit(draft(workspace, ["fetch_url"]))).rejects.toThrow("offline");
+    expect(cron.list(workspace)).toEqual([]);
     cron.close();
   });
 
@@ -91,10 +88,7 @@ describe("CronDraftApplication integration", () => {
       listAllowedTools: () => ["fetch_url"],
       credentialVault: new MemoryCredentialVault(),
       credentialEnv: {},
-      workspaceRegistrar: {
-        statusWorkspace: async () => ({ available: true, message: "ready" }),
-        registerWorkspace: async () => ({ available: true, message: "ready" }),
-      },
+      workspaceRegistrar: testRegistrar(cron, new MemoryCredentialVault()),
     });
 
     await expect(app.commit(draft(workspace, ["fetch_url"]))).rejects.toThrow(/TEST_API_KEY/u);
@@ -120,10 +114,7 @@ describe("CronDraftApplication integration", () => {
       listAllowedTools: () => ["fetch_url"],
       credentialVault: vault,
       resolveCredentialTarget: async () => ({ kind: "provider", provider, ref }),
-      workspaceRegistrar: {
-        statusWorkspace: async () => ({ available: true, message: "ready" }),
-        registerWorkspace: async () => ({ available: true, message: "ready" }),
-      },
+      workspaceRegistrar: testRegistrar(cron, vault),
     });
 
     await expect(app.context()).resolves.toMatchObject({ credentialStatus: "available" });
@@ -170,6 +161,60 @@ class MemoryCredentialVault implements CredentialVault {
     if (!value) throw new Error("missing");
     return value;
   }
+}
+
+function testRegistrar(
+  cron: CronService,
+  vault: MemoryCredentialVault,
+  enabledAtRegistration?: boolean[],
+  available = true,
+): CronWorkspaceRegistrar {
+  return {
+    statusWorkspace: async () => ({ available, message: available ? "daemon ready" : "offline" }),
+    registerWorkspace: async () => ({
+      available,
+      message: available ? "daemon registered" : "offline",
+    }),
+    importAutomationCredential: async (input) => {
+      if (!available) return { status: "unavailable", message: "offline" };
+      await vault.put(input.expectedCredentialRef as CredentialRef, input.secret);
+      return { status: "ok", message: "credential imported" };
+    },
+    createAutomation: async (input) => {
+      if (!available) return { status: "unavailable", message: "offline" };
+      let job = cron.create({
+        workspacePath: input.workspacePath,
+        prompt: input.prompt,
+        schedule: input.schedule,
+        ...(input.timeZone ? { timeZone: input.timeZone } : {}),
+        modelRouteId: input.modelRouteId,
+        credentialRef: input.expectedCredentialRef as CredentialRef,
+        enabled: false,
+        policySnapshot: {
+          mode: "yolo",
+          backgroundEnabled: true,
+          trustedWorkspace: true,
+          toolNetworkPolicy: input.toolNetworkPolicy,
+          allowedTools: input.allowedTools,
+          hardlineVersion: BACKGROUND_HARDLINE_VERSION,
+          hookVersion: BACKGROUND_HOOK_VERSION,
+          createdAt: 100,
+        },
+      });
+      enabledAtRegistration?.push(job.enabled);
+      if (input.enabled !== false) job = cron.setEnabled(job.cronJobId, job.version, true);
+      return {
+        status: "ok",
+        message: "daemon registered",
+        job: {
+          jobId: job.cronJobId,
+          enabled: job.enabled,
+          schedule: job.schedule,
+          timeZone: job.timeZone,
+        },
+      };
+    },
+  };
 }
 
 function modelRoute(): ModelRoute {

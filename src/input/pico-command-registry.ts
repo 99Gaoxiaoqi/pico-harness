@@ -48,7 +48,6 @@ import {
   type CredentialVault,
 } from "../provider/credential-vault.js";
 import {
-  importAutomationCredential,
   resolveAutomationCredentialTarget,
   type AutomationCredentialTarget,
 } from "../provider/automation-credential.js";
@@ -78,13 +77,8 @@ import type { GoalManager } from "../engine/goal-manager.js";
 import type { ModelRuntimeCommandService } from "../provider/model-runtime-report.js";
 import type { TaskHostRuntime } from "../tasks/task-runtime.js";
 import { CronService } from "../tasks/cron-service.js";
-import type { CronDaemonBridge, CronDaemonRegistration } from "./cron-daemon-bridge.js";
-import { fingerprintBackgroundMcpConfig } from "../safety/background-mcp-policy.js";
-import {
-  BACKGROUND_HARDLINE_VERSION,
-  BACKGROUND_HOOK_VERSION,
-  filterBackgroundEligibleTools,
-} from "../safety/background-yolo-policy.js";
+import type { CronDaemonBridge } from "./cron-daemon-bridge.js";
+import { filterBackgroundEligibleTools } from "../safety/background-yolo-policy.js";
 import type { McpConnectionManager } from "../mcp/manager.js";
 import { CostTracker } from "../observability/tracker.js";
 import { ensureSessionUsageBaseline } from "../observability/usage-baseline.js";
@@ -1798,37 +1792,29 @@ function createCronCommand(
           const allowedTools = filterBackgroundEligibleTools(
             settings.tools.map((tool) => tool.name),
           );
-          const mcpConfigFingerprint = allowedTools.some((tool) => tool.startsWith("mcp__"))
-            ? await fingerprintBackgroundMcpConfig(options.workDir)
-            : undefined;
-          const job = cron.create({
+          const daemon = options.cronDaemonBridge;
+          if (!daemon?.createAutomation) {
+            return cronMessage(
+              "本机 Runtime daemon 不支持安全的 Automation 创建；任务未写入，请升级或重启 Runtime。",
+            );
+          }
+          const result = await daemon.createAutomation({
             workspacePath: options.workDir,
             schedule: [minute, hour, day, month, weekday].join(" "),
             prompt: promptParts.join(" "),
-            credentialRef: credential.target.ref,
             modelRouteId: credential.route.id,
-            enabled: false,
-            policySnapshot: {
-              mode: "yolo",
-              backgroundEnabled: true,
-              trustedWorkspace: true,
-              toolNetworkPolicy: toolNetwork.policy,
-              ...(toolNetwork.allowedHosts
-                ? { allowedToolNetworkHosts: toolNetwork.allowedHosts }
-                : {}),
-              ...(mcpConfigFingerprint ? { mcpConfigFingerprint } : {}),
-              allowedTools,
-              hardlineVersion: BACKGROUND_HARDLINE_VERSION,
-              hookVersion: BACKGROUND_HOOK_VERSION,
-              createdAt: Date.now(),
-            },
+            expectedCredentialRef: credential.target.ref,
+            allowedTools,
+            toolNetworkPolicy: toolNetwork.policy,
+            ...(toolNetwork.allowedHosts
+              ? { allowedToolNetworkHosts: toolNetwork.allowedHosts }
+              : {}),
+            enabled: true,
           });
-          const registration = await registerCronWorkspace(options, job.cronJobId);
-          const finalJob = registration.available
-            ? cron.setEnabled(job.cronJobId, job.version, true)
-            : job;
+          if (result.status !== "ok") return cronMessage(result.message);
+          const finalJob = result.job;
           return cronMessage(
-            `Cron job created: ${finalJob.cronJobId} (${finalJob.enabled ? "enabled" : "disabled"})\n${finalJob.schedule} · ${finalJob.timeZone}\n${formatToolNetworkPolicy(finalJob.policySnapshot)}\n${registration.message}`,
+            `Cron job created: ${finalJob.jobId} (${finalJob.enabled ? "enabled" : "disabled"})\n${finalJob.schedule} · ${String(finalJob["timeZone"] ?? "system")}\n${formatRequestedToolNetworkPolicy(toolNetwork.policy, toolNetwork.allowedHosts)}\n${result.message}`,
           );
         }
         const cronJobId = args[0];
@@ -1838,22 +1824,28 @@ function createCronCommand(
           .find((candidate) => candidate.cronJobId === cronJobId);
         if (!job) return cronMessage(`Unknown cron job: ${cronJobId}`);
         if (operation === "enable" || operation === "disable") {
-          if (operation === "enable") {
-            const registration = await registerCronWorkspace(options, job.cronJobId);
-            if (!registration.available) {
-              return cronMessage(
-                `Cron job ${job.cronJobId} remains disabled.\n${registration.message}`,
-              );
-            }
-            const updated = cron.setEnabled(cronJobId, job.version, true);
-            return cronMessage(`Cron job ${updated.cronJobId} enabled.\n${registration.message}`);
+          const daemon = options.cronDaemonBridge;
+          if (!daemon?.setAutomationEnabled) {
+            return cronMessage(
+              `本机 Runtime daemon 不支持安全的 Automation ${operation}；任务未变更。`,
+            );
           }
-          const updated = cron.setEnabled(cronJobId, job.version, false);
-          return cronMessage(`Cron job ${updated.cronJobId} disabled.`);
+          const result = await daemon.setAutomationEnabled({
+            workspacePath: options.workDir,
+            jobId: cronJobId,
+            enabled: operation === "enable",
+          });
+          return cronMessage(result.message);
         }
         if (operation === "delete") {
-          const deleted = cron.delete(cronJobId, job.version);
-          return cronMessage(`Cron job ${deleted.cronJobId} deleted.`);
+          const daemon = options.cronDaemonBridge;
+          if (!daemon?.deleteAutomation) {
+            return cronMessage("本机 Runtime daemon 不支持安全的 Automation 删除；任务未变更。");
+          }
+          return cronMessage(
+            (await daemon.deleteAutomation({ workspacePath: options.workDir, jobId: cronJobId }))
+              .message,
+          );
         }
         return cronMessage(
           "Usage: /cron <status|list|credential|add|enable|disable|delete|runs> [arguments]",
@@ -1889,14 +1881,19 @@ async function manageCronCredential(
   if (action !== "import") {
     return "Usage: /cron credential <status|import> [providerID/modelID]";
   }
-  await importAutomationCredential({
-    target,
-    route,
+  const daemon = options.cronDaemonBridge;
+  if (!daemon?.importAutomationCredential) {
+    return "本机 Runtime daemon 不支持安全的 Automation 凭证导入；凭证未写入。";
+  }
+  const secret = firstCredentialSecret((options.credentialEnv ?? process.env)[route.apiKeyEnv]);
+  if (!secret) return `缺少凭证环境变量 ${route.apiKeyEnv}，无法导入。`;
+  const result = await daemon.importAutomationCredential({
     workspacePath: options.workDir,
-    vault,
-    env: options.credentialEnv ?? process.env,
+    modelRouteId: route.id,
+    expectedCredentialRef: target.ref,
+    secret,
   });
-  return `已将 ${route.apiKeyEnv} 安全导入系统凭证库，引用：${target.ref}`;
+  return result.message;
 }
 
 async function requireCronCredential(
@@ -1935,24 +1932,18 @@ async function resolveCronCredentialTarget(
   });
 }
 
-async function registerCronWorkspace(
-  options: PicoCommandRegistryOptions,
-  cronJobId: string,
-): Promise<CronDaemonRegistration> {
-  if (!options.cronDaemonBridge) {
-    return {
-      available: false,
-      message: `本机 Runtime daemon 未配置；任务 ${cronJobId} 仅已写入账本，尚不会自动执行。`,
-    };
-  }
-  return await options.cronDaemonBridge.registerWorkspace(options.workDir);
-}
-
 async function cronDaemonStatus(options: PicoCommandRegistryOptions): Promise<string> {
   if (!options.cronDaemonBridge) {
     return "本机 Runtime daemon 未配置；守护状态未知，任务仅保存在本地账本中。";
   }
   return (await options.cronDaemonBridge.statusWorkspace(options.workDir)).message;
+}
+
+function firstCredentialSecret(value: string | undefined): string | undefined {
+  return value
+    ?.split(",")
+    .map((item) => item.trim())
+    .find(Boolean);
 }
 
 function cronMessage(message: string): LocalCommandResult {
@@ -1991,6 +1982,17 @@ function formatToolNetworkPolicy(
     : policy.toolNetworkPolicy === "allow"
       ? "工具网络：允许所有符合后台资格的工具联网（模型 Provider 网络独立）"
       : `工具网络：仅允许 ${policy.allowedToolNetworkHosts?.join(", ") ?? "<invalid>"}（模型 Provider 网络不受此项控制）`;
+}
+
+function formatRequestedToolNetworkPolicy(
+  policy: "allow" | "disabled" | "allowlist",
+  allowedHosts?: readonly string[],
+): string {
+  return policy === "disabled"
+    ? "工具网络：关闭（模型 Provider 网络不受此项控制）"
+    : policy === "allow"
+      ? "工具网络：允许所有符合后台资格的工具联网（模型 Provider 网络独立）"
+      : `工具网络：仅允许 ${allowedHosts?.join(", ") ?? "<invalid>"}（模型 Provider 网络不受此项控制）`;
 }
 
 function formatCronJobs(

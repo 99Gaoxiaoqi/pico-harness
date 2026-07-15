@@ -1,22 +1,45 @@
 import type { ModelRoute } from "../provider/model-router.js";
 import { type CredentialVault } from "../provider/credential-vault.js";
 import {
-  importAutomationCredential,
   resolveAutomationCredentialTarget,
   type AutomationCredentialTarget,
 } from "../provider/automation-credential.js";
-import { fingerprintBackgroundMcpConfig } from "../safety/background-mcp-policy.js";
-import {
-  BACKGROUND_HARDLINE_VERSION,
-  BACKGROUND_HOOK_VERSION,
-  filterBackgroundEligibleTools,
-} from "../safety/background-yolo-policy.js";
+import { filterBackgroundEligibleTools } from "../safety/background-yolo-policy.js";
 import type { CronCreationReceipt, CronDraft } from "./cron-draft.js";
 import { nextCronRuns, type CronService } from "./cron-service.js";
 
 export interface CronWorkspaceRegistrar {
   registerWorkspace(workspacePath: string): Promise<{ available: boolean; message: string }>;
   statusWorkspace(workspacePath: string): Promise<{ available: boolean; message: string }>;
+  importAutomationCredential?(input: {
+    workspacePath: string;
+    modelRouteId: string;
+    expectedCredentialRef: string;
+    secret: string;
+  }): Promise<{ status: "ok" | "unavailable" | "rejected"; message: string }>;
+  createAutomation?(input: {
+    workspacePath: string;
+    prompt: string;
+    schedule: string;
+    timeZone?: string;
+    modelRouteId: string;
+    expectedCredentialRef: string;
+    allowedTools: readonly string[];
+    toolNetworkPolicy: "allow" | "disabled" | "allowlist";
+    enabled?: boolean;
+  }): Promise<
+    | {
+        status: "ok";
+        message: string;
+        job: {
+          jobId: string;
+          enabled: boolean;
+          schedule: string;
+          timeZone?: unknown;
+        };
+      }
+    | { status: "unavailable" | "rejected"; message: string }
+  >;
 }
 
 export interface CronDraftApplicationOptions {
@@ -83,60 +106,51 @@ export class CronDraftApplication {
       throw new Error("草案创建后可用工具已变化，请重新提交定时任务");
     }
 
-    const mcpConfigFingerprint = draft.allowedTools.some((tool) => tool.startsWith("mcp__"))
-      ? await fingerprintBackgroundMcpConfig(this.options.workspacePath)
-      : undefined;
-    signal?.throwIfAborted();
-
     const vault = this.options.credentialVault;
     if (!vault.capability().available) throw new Error(vault.capability().diagnostic);
     const credential = await this.resolveCredentialTarget(route);
     if (!(await vault.has(credential.ref))) {
-      await importAutomationCredential({
-        target: credential,
-        route,
+      const importer = this.options.workspaceRegistrar.importAutomationCredential;
+      if (!importer) {
+        throw new Error("本机 Runtime daemon 不支持安全的 Automation 凭证导入");
+      }
+      const secret = firstCredentialSecret(
+        (this.options.credentialEnv ?? process.env)[route.apiKeyEnv],
+      );
+      if (!secret) throw new Error(`缺少凭证环境变量 ${route.apiKeyEnv}，无法导入。`);
+      const imported = await importer({
         workspacePath: this.options.workspacePath,
-        vault,
-        env: this.options.credentialEnv ?? process.env,
+        modelRouteId: route.id,
+        expectedCredentialRef: credential.ref,
+        secret,
       });
+      if (imported.status !== "ok") throw new Error(imported.message);
     }
     signal?.throwIfAborted();
-
-    const job = this.options.cronService.create({
+    const create = this.options.workspaceRegistrar.createAutomation;
+    if (!create) throw new Error("本机 Runtime daemon 不支持安全的 Automation 创建");
+    const result = await create({
       workspacePath: this.options.workspacePath,
       schedule: draft.cronExpression,
       timeZone: draft.timeZone,
       prompt: draft.prompt,
-      credentialRef: credential.ref,
       modelRouteId: route.id,
-      enabled: false,
-      policySnapshot: {
-        mode: "yolo",
-        backgroundEnabled: true,
-        trustedWorkspace: true,
-        toolNetworkPolicy: "allow",
-        allowedTools: [...draft.allowedTools],
-        hardlineVersion: BACKGROUND_HARDLINE_VERSION,
-        hookVersion: BACKGROUND_HOOK_VERSION,
-        createdAt: this.now(),
-        ...(mcpConfigFingerprint ? { mcpConfigFingerprint } : {}),
-      },
+      expectedCredentialRef: credential.ref,
+      allowedTools: draft.allowedTools,
+      toolNetworkPolicy: "allow",
+      enabled: true,
     });
-
-    const registration = await this.options.workspaceRegistrar
-      .registerWorkspace(this.options.workspacePath)
-      .catch(() => ({ available: false, message: "本机 Runtime daemon 当前不可达" }));
-    const finalJob = registration.available
-      ? this.options.cronService.setEnabled(job.cronJobId, job.version, true)
-      : job;
-    const nextRun = nextCronRuns(finalJob.schedule, finalJob.timeZone, this.now(), 1)[0];
+    if (result.status !== "ok") throw new Error(result.message);
+    const finalJob = result.job;
+    const timeZone = typeof finalJob.timeZone === "string" ? finalJob.timeZone : draft.timeZone;
+    const nextRun = nextCronRuns(finalJob.schedule, timeZone, this.now(), 1)[0];
     return {
-      cronJobId: finalJob.cronJobId,
+      cronJobId: finalJob.jobId,
       enabled: finalJob.enabled,
       schedule: finalJob.schedule,
-      timeZone: finalJob.timeZone,
+      timeZone,
       ...(nextRun !== undefined ? { nextRun } : {}),
-      daemonMessage: registration.message,
+      daemonMessage: result.message,
     };
   }
 
@@ -156,6 +170,13 @@ export class CronDraftApplication {
           workspacePath: this.options.workspacePath,
         });
   }
+}
+
+function firstCredentialSecret(value: string | undefined): string | undefined {
+  return value
+    ?.split(",")
+    .map((item) => item.trim())
+    .find(Boolean);
 }
 
 function sameStringSet(left: readonly string[], right: readonly string[]): boolean {

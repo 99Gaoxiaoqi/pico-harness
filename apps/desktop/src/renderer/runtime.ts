@@ -502,6 +502,7 @@ function parseProviderProfile(value: JsonRecord, index: number): ProviderView {
     fingerprint: stringValue(value.fingerprint),
     credentialStatus: providerCredentialStatus(value.credentialStatus),
     credentialSource: providerCredentialSource(value.credentialSource),
+    storedCredentialPresent: booleanValue(value.storedCredentialPresent),
   };
 }
 
@@ -1854,6 +1855,7 @@ export function useRuntimeStore(): RuntimeStore {
               fingerprint: previous?.fingerprint ?? `preview-${provider.id}-fingerprint`,
               credentialStatus: previous?.credentialStatus ?? "missing",
               credentialSource: previous?.credentialSource ?? "none",
+              storedCredentialPresent: previous?.storedCredentialPresent ?? false,
             };
             setData((current) => ({
               ...current,
@@ -1958,8 +1960,11 @@ export function useRuntimeStore(): RuntimeStore {
                   provider.id === providerId
                     ? {
                         ...provider,
-                        credentialStatus: "ready",
-                        credentialSource: "keychain",
+                        credentialStatus:
+                          provider.credentialSource === "environment" ? "environment" : "ready",
+                        credentialSource:
+                          provider.credentialSource === "environment" ? "environment" : "keychain",
+                        storedCredentialPresent: true,
                       }
                     : provider,
                 ),
@@ -1989,8 +1994,11 @@ export function useRuntimeStore(): RuntimeStore {
                   provider.id === providerId
                     ? {
                         ...provider,
-                        credentialStatus: "missing",
-                        credentialSource: "none",
+                        credentialStatus:
+                          provider.credentialSource === "environment" ? "environment" : "missing",
+                        credentialSource:
+                          provider.credentialSource === "environment" ? "environment" : "none",
+                        storedCredentialPresent: false,
                       }
                     : provider,
                 ),

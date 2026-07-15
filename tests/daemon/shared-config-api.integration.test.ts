@@ -32,6 +32,7 @@ import {
   type RunAgentCliResult,
 } from "../../src/runtime/agent-runtime.js";
 import { resolveSubagentModelSelection } from "../../src/runtime/subagent-model-selection.js";
+import { ProviderOperationJournal } from "../../src/provider/provider-operation-journal.js";
 
 describe("Desktop shared configuration API integration", () => {
   const cleanups: Array<() => Promise<void>> = [];
@@ -81,7 +82,7 @@ describe("Desktop shared configuration API integration", () => {
     ).rejects.toMatchObject({ code: RUNTIME_ERROR_CODES.CONFLICT });
   });
 
-  it("daemon 凭证导入失败时用新 revision 补偿恢复原配置", async () => {
+  it("daemon 凭证导入失败时不提交用户配置", async () => {
     const fixture = await createFixture({ credentialVault: new FailingPutCredentialVault() });
     const before = await fixture.userConfigStore.read();
     const secret = "rejected-secret-must-not-escape";
@@ -97,10 +98,97 @@ describe("Desktop shared configuration API integration", () => {
       .catch((error: unknown) => error);
     expect(failure).toMatchObject({
       code: RUNTIME_ERROR_CODES.CONFLICT,
-      message: expect.stringContaining("配置已安全恢复"),
+      message: expect.stringContaining("用户配置尚未变更"),
     });
     expect(String(failure)).not.toContain(secret);
     expect((await fixture.userConfigStore.read()).config).toEqual(before.config);
+  });
+
+  it("daemon 重启后完成凭证已写入但配置未提交的 Provider 导入", async () => {
+    const vault = new MemoryCredentialVault();
+    const ref = credentialRefForProvider({
+      providerId: "shared",
+      protocol: "openai",
+      baseURL: "https://provider.example.test/v1",
+    });
+    const fixture = await createFixture({
+      credentialVault: vault,
+      beforeService: async ({ picoHome, userConfigStore }) => {
+        const previous = await userConfigStore.read();
+        const target = {
+          version: 1 as const,
+          defaults: { modelRouteId: "shared/coder" },
+          providers: { shared: projectProvider("https://provider.example.test/v1") },
+        };
+        const journal = new ProviderOperationJournal({ picoHome });
+        const pending = await journal.prepare({
+          kind: "import",
+          previousUserConfig: previous.config,
+          targetUserConfig: target,
+          credentialRef: ref,
+          credentialExistedBefore: false,
+          configRevision: previous.revision,
+        });
+        await vault.put(ref, "crash-recovery-secret");
+        await journal.update(pending.operationId, { phase: "credential-imported" });
+      },
+    });
+
+    const recoveryJournal = new ProviderOperationJournal({ picoHome: fixture.picoHome });
+    // User config and the recovery journal are separate durable files. The safe WAL order is
+    // config commit first, journal clear second, so wait for the transaction's stable state
+    // instead of treating visibility of the config file as proof that cleanup already finished.
+    await expect
+      .poll(async () => ({
+        modelRouteId: (await fixture.userConfigStore.read()).config.defaults?.modelRouteId,
+        journalPending: (await recoveryJournal.read()) !== undefined,
+      }))
+      .toEqual({ modelRouteId: "shared/coder", journalPending: false });
+    await expect(vault.resolve(ref)).resolves.toBe("crash-recovery-secret");
+  });
+
+  it("daemon 重启后完成凭证已删除但配置未提交的 Provider 删除", async () => {
+    const vault = new MemoryCredentialVault();
+    const ref = credentialRefForProvider({
+      providerId: "shared",
+      protocol: "openai",
+      baseURL: "https://provider.example.test/v1",
+    });
+    const fixture = await createFixture({
+      credentialVault: vault,
+      beforeService: async ({ picoHome, userConfigStore }) => {
+        const empty = await userConfigStore.read();
+        const previousConfig = {
+          version: 1 as const,
+          providers: { shared: projectProvider("https://provider.example.test/v1") },
+        };
+        const previous = await userConfigStore.write(previousConfig, {
+          expectedRevision: empty.revision,
+        });
+        await vault.put(ref, "delete-crash-secret");
+        const journal = new ProviderOperationJournal({ picoHome });
+        const pending = await journal.prepare({
+          kind: "delete",
+          previousUserConfig: previous.config,
+          targetUserConfig: { version: 1, providers: {} },
+          credentialRef: ref,
+          credentialExistedBefore: true,
+          configRevision: previous.revision,
+        });
+        await vault.delete(ref);
+        await journal.update(pending.operationId, { phase: "credential-deleted" });
+      },
+    });
+
+    const recoveryJournal = new ProviderOperationJournal({ picoHome: fixture.picoHome });
+    await expect
+      .poll(async () => ({
+        providerPresent:
+          (await fixture.userConfigStore.read()).config.providers.shared !== undefined,
+        journalPending: (await recoveryJournal.read()) !== undefined,
+      }))
+      .toEqual({ providerPresent: false, journalPending: false });
+    await expect(vault.has(ref)).resolves.toBe(false);
   });
 
   it("App 配置一次后共享 Provider、OCC 和凭证状态，且结果与事件不回显 secret", async () => {
@@ -148,6 +236,7 @@ describe("Desktop shared configuration API integration", () => {
         origin: "user",
         credentialStatus: "ready",
         credentialSource: "keychain",
+        storedCredentialPresent: true,
       }),
     ]);
     expect(JSON.stringify(listed)).not.toContain(secret);
@@ -321,6 +410,29 @@ describe("Desktop shared configuration API integration", () => {
         expect.objectContaining({
           credentialStatus: "environment",
           credentialSource: "environment",
+          storedCredentialPresent: true,
+        }),
+      ],
+    });
+    const listed = (await fixture.service.handle(createRuntimeRequest("provider.list", {}))) as {
+      providers: Array<{ fingerprint: string }>;
+    };
+    await expect(
+      fixture.service.handle(
+        createRuntimeRequest("provider.credential.delete", {
+          providerId: "shared",
+          expectedProviderFingerprint: listed.providers[0]!.fingerprint,
+        }),
+      ),
+    ).resolves.toMatchObject({ storedCredentialPresent: false });
+    await expect(
+      fixture.service.handle(createRuntimeRequest("provider.list", {})),
+    ).resolves.toMatchObject({
+      providers: [
+        expect.objectContaining({
+          credentialStatus: "environment",
+          credentialSource: "environment",
+          storedCredentialPresent: false,
         }),
       ],
     });
@@ -431,7 +543,7 @@ describe("Desktop shared configuration API integration", () => {
     });
   });
 
-  it("凭证库删除失败时恢复 Provider 配置并保留凭证", async () => {
+  it("凭证库删除失败时不提交 Provider 配置", async () => {
     const vault = new FailingDeleteCredentialVault();
     const fixture = await createFixture({ credentialVault: vault });
     const initial = (await fixture.service.handle(createRuntimeRequest("config.user.get", {}))) as {
@@ -465,7 +577,7 @@ describe("Desktop shared configuration API integration", () => {
       ),
     ).rejects.toMatchObject({
       code: RUNTIME_ERROR_CODES.CONFLICT,
-      message: expect.stringContaining("配置已安全恢复"),
+      message: expect.stringContaining("用户配置尚未变更"),
     });
     expect((await fixture.userConfigStore.read()).config.providers.shared).toBeDefined();
     await expect(vault.has(ref)).resolves.toBe(true);
@@ -639,6 +751,117 @@ describe("Desktop shared configuration API integration", () => {
     expect(legacy.modelRouteId).toBe("legacy/coder");
     expect(parseAnyCredentialRef(legacy.credentialRef!)).toMatchObject({ version: "v1" });
     cron.close();
+  });
+
+  it("Provider 删除与 disabled Automation 启用并发时至少一方冲突且不留下悬空引用", async () => {
+    const ref = credentialRefForProvider({
+      providerId: "shared",
+      protocol: "openai",
+      baseURL: "https://provider.example.test/v1",
+    });
+    const fixture = await createFixture({
+      automationSecurity: { credentialRef: ref, modelRouteId: "shared/coder" },
+    });
+    const initial = (await fixture.service.handle(createRuntimeRequest("config.user.get", {}))) as {
+      revision: string;
+    };
+    const upserted = (await fixture.service.handle(
+      createRuntimeRequest("provider.upsert", {
+        provider: providerInput("https://provider.example.test/v1"),
+        expectedRevision: initial.revision,
+      }),
+    )) as { revision: string; provider: { fingerprint: string } };
+    await fixture.service.handle(
+      createRuntimeRequest("provider.credential.set", {
+        providerId: "shared",
+        secret: "race-secret",
+        expectedProviderFingerprint: upserted.provider.fingerprint,
+      }),
+    );
+    const created = (await fixture.service.handle(
+      createRuntimeRequest("jobs.create", {
+        workspacePath: fixture.workspace,
+        name: "race job",
+        prompt: "race provider deletion",
+        schedule: "0 9 * * *",
+        enabled: false,
+      }),
+    )) as { job: { jobId: string } };
+
+    const outcomes = await Promise.allSettled([
+      fixture.service.handle(
+        createRuntimeRequest("provider.delete", {
+          providerId: "shared",
+          expectedRevision: upserted.revision,
+        }),
+      ),
+      fixture.service.handle(
+        createRuntimeRequest("jobs.setEnabled", {
+          workspacePath: fixture.workspace,
+          jobId: created.job.jobId,
+          enabled: true,
+        }),
+      ),
+    ]);
+    expect(outcomes.filter((outcome) => outcome.status === "rejected")).toHaveLength(1);
+
+    const providerExists =
+      (await fixture.userConfigStore.read()).config.providers.shared !== undefined;
+    const cron = new CronService({ workDir: fixture.workspace, picoHome: fixture.picoHome });
+    const job = cron.store.getCronJob(created.job.jobId)!;
+    expect(job.enabled && !providerExists).toBe(false);
+    if (!providerExists) await expect(fixture.credentialVault.has(ref)).resolves.toBe(false);
+    cron.close();
+  });
+
+  it("TUI Automation 通过 daemon 类型化入口导入凭证并创建后台 Job", async () => {
+    const ref = credentialRefForProvider({
+      providerId: "shared",
+      protocol: "openai",
+      baseURL: "https://provider.example.test/v1",
+    });
+    const fixture = await createFixture({
+      automationSecurity: { credentialRef: ref, modelRouteId: "shared/coder" },
+    });
+    const initial = (await fixture.service.handle(createRuntimeRequest("config.user.get", {}))) as {
+      revision: string;
+    };
+    await fixture.service.handle(
+      createRuntimeRequest("provider.upsert", {
+        provider: providerInput("https://provider.example.test/v1"),
+        expectedRevision: initial.revision,
+      }),
+    );
+
+    const secret = "tui-daemon-write-only-secret";
+    const imported = await fixture.service.handle(
+      createRuntimeRequest("automation.credential.import", {
+        workspacePath: fixture.workspace,
+        modelRouteId: "shared/coder",
+        expectedCredentialRef: ref,
+        secret,
+      }),
+    );
+    expect(JSON.stringify(imported)).not.toContain(secret);
+    const created = (await fixture.service.handle(
+      createRuntimeRequest("automation.create", {
+        workspacePath: fixture.workspace,
+        prompt: "生成日报",
+        schedule: "0 9 * * *",
+        timeZone: "Asia/Shanghai",
+        modelRouteId: "shared/coder",
+        expectedCredentialRef: ref,
+        allowedTools: [],
+        toolNetworkPolicy: "disabled",
+        enabled: true,
+      }),
+    )) as { job: { enabled: boolean; modelRouteId: string; timeZone: string } };
+    expect(created.job).toMatchObject({
+      enabled: true,
+      modelRouteId: "shared/coder",
+      timeZone: "Asia/Shanghai",
+    });
+    await expect(fixture.credentialVault.resolve(ref)).resolves.toBe(secret);
   });
 
   it("已禁用 Job 的手动 queued Run 在终态前仍阻断 Provider 凭证变更", async () => {
@@ -925,6 +1148,10 @@ describe("Desktop shared configuration API integration", () => {
       };
       readonly credentialVault?: CredentialVault;
       readonly execute?: ConstructorParameters<typeof WorkspaceRuntimeService>[0]["execute"];
+      readonly beforeService?: (input: {
+        readonly picoHome: string;
+        readonly userConfigStore: UserConfigStore;
+      }) => Promise<void>;
     } = {},
   ) {
     const root = await mkdtemp(join(tmpdir(), "pico-shared-config-api-"));
@@ -940,6 +1167,7 @@ describe("Desktop shared configuration API integration", () => {
     const userConfigStore = new UserConfigStore({ picoHome });
     const effectiveConfigResolver = new EffectiveConfigResolver({ userConfigStore });
     const credentialVault = options.credentialVault ?? new MemoryCredentialVault();
+    await options.beforeService?.({ picoHome, userConfigStore });
     const runtime = new WorkspaceRuntimeService({
       execute: options.execute ?? (async () => undefined),
       registrationStore: registration,
@@ -947,6 +1175,19 @@ describe("Desktop shared configuration API integration", () => {
     });
     const automations = options.automationSecurity
       ? new DesktopAutomationService({
+          validateSecurity: async (job) => {
+            const providerId = job.modelRouteId?.split("/")[0];
+            const provider = providerId
+              ? (await userConfigStore.read()).config.providers[providerId]
+              : undefined;
+            if (
+              !provider ||
+              !job.credentialRef ||
+              !(await credentialVault.has(job.credentialRef))
+            ) {
+              throw new Error("Automation Provider 或凭证已变化");
+            }
+          },
           picoHome,
           prepareSecurity: async () => ({
             ...options.automationSecurity!,

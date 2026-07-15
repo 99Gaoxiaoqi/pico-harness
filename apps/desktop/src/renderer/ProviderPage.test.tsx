@@ -96,10 +96,16 @@ function installProviderBridge(options?: {
               apiKeyEnv: String(input.apiKeyEnv),
               models: Array.isArray(input.models) ? input.models.map(String) : [],
               discoverModels: input.discoverModels === true,
+              ...(input.modelCapabilities && typeof input.modelCapabilities === "object"
+                ? {
+                    modelCapabilities: input.modelCapabilities as ProviderView["modelCapabilities"],
+                  }
+                : {}),
               origin: "user",
               fingerprint: previous?.fingerprint ?? `fingerprint-${String(input.id)}`,
               credentialStatus: previous?.credentialStatus ?? "missing",
               credentialSource: previous?.credentialSource ?? "none",
+              storedCredentialPresent: previous?.storedCredentialPresent ?? false,
             };
             providers = [...providers.filter((provider) => provider.id !== next.id), next];
             revision = "revision-2";
@@ -121,8 +127,11 @@ function installProviderBridge(options?: {
               provider.id === params.providerId
                 ? {
                     ...provider,
-                    credentialStatus: "ready",
-                    credentialSource: "keychain",
+                    credentialStatus:
+                      provider.credentialSource === "environment" ? "environment" : "ready",
+                    credentialSource:
+                      provider.credentialSource === "environment" ? "environment" : "keychain",
+                    storedCredentialPresent: true,
                   }
                 : provider,
             );
@@ -130,6 +139,7 @@ function installProviderBridge(options?: {
               providerId: params.providerId,
               status: "ready",
               source: "keychain",
+              storedCredentialPresent: true,
               providerFingerprint: params.expectedProviderFingerprint,
             });
           case "provider.credential.delete":
@@ -137,8 +147,11 @@ function installProviderBridge(options?: {
               provider.id === params.providerId
                 ? {
                     ...provider,
-                    credentialStatus: "missing",
-                    credentialSource: "none",
+                    credentialStatus:
+                      provider.credentialSource === "environment" ? "environment" : "missing",
+                    credentialSource:
+                      provider.credentialSource === "environment" ? "environment" : "none",
+                    storedCredentialPresent: false,
                   }
                 : provider,
             );
@@ -146,6 +159,7 @@ function installProviderBridge(options?: {
               providerId: params.providerId,
               status: "missing",
               source: "none",
+              storedCredentialPresent: false,
               providerFingerprint: params.expectedProviderFingerprint,
             });
           default:
@@ -185,6 +199,7 @@ function openAiProvider(overrides?: Partial<ProviderView>): ProviderView {
     fingerprint: "openai-fingerprint",
     credentialStatus: "ready",
     credentialSource: "keychain",
+    storedCredentialPresent: true,
     ...overrides,
   };
 }
@@ -252,6 +267,7 @@ describe("Desktop Provider settings", () => {
       baseURL: "https://stale.example.test/v1",
       credentialStatus: "missing",
       credentialSource: "none",
+      storedCredentialPresent: false,
     });
     const freshProvider = openAiProvider({
       baseURL: "https://fresh.example.test/v1",
@@ -446,6 +462,45 @@ describe("Desktop Provider settings", () => {
     );
   });
 
+  it("编辑模型列表时不提交已删除模型的能力配置", async () => {
+    const user = userEvent.setup();
+    const harness = installProviderBridge({
+      initialProviders: [
+        openAiProvider({
+          modelCapabilities: {
+            "gpt-5.4": { reasoningLevels: ["low", "high"] },
+            "gpt-5.4-mini": { reasoningLevels: ["low"] },
+          },
+        }),
+      ],
+    });
+    window.history.replaceState({}, "", "/#/providers");
+    render(<DesktopApp />);
+
+    await user.click(await screen.findByRole("button", { name: "编辑" }));
+    const dialog = screen.getByRole("dialog", { name: "编辑 openai" });
+    const models = within(dialog).getByRole("textbox", { name: "已知模型" });
+    await user.clear(models);
+    await user.type(models, "gpt-5.4");
+    await user.click(within(dialog).getByRole("button", { name: "保存更改" }));
+
+    await waitFor(() =>
+      expect(harness.calls.find((call) => call.method === "provider.upsert")?.params).toMatchObject(
+        {
+          provider: {
+            models: ["gpt-5.4"],
+            modelCapabilities: {
+              "gpt-5.4": { reasoningLevels: ["low", "high"] },
+            },
+          },
+        },
+      ),
+    );
+    const submitted = harness.calls.find((call) => call.method === "provider.upsert")?.params
+      .provider as Readonly<Record<string, unknown>>;
+    expect(submitted.modelCapabilities).not.toHaveProperty("gpt-5.4-mini");
+  });
+
   it("keeps a credential local to the dialog and clears it after the request", async () => {
     const user = userEvent.setup();
     const harness = installProviderBridge({ initialProviders: [openAiProvider()] });
@@ -468,6 +523,34 @@ describe("Desktop Provider settings", () => {
 
     await user.click(await screen.findByRole("button", { name: "凭证" }));
     await user.click(screen.getByRole("button", { name: "删除系统凭证" }));
+    await waitFor(() =>
+      expect(
+        harness.calls.some(
+          (call) =>
+            call.method === "provider.credential.delete" && call.params.providerId === "openai",
+        ),
+      ).toBe(true),
+    );
+  });
+
+  it("环境变量遮蔽凭证时仍可删除已存的系统凭证", async () => {
+    const user = userEvent.setup();
+    const harness = installProviderBridge({
+      initialProviders: [
+        openAiProvider({
+          credentialStatus: "environment",
+          credentialSource: "environment",
+          storedCredentialPresent: true,
+        }),
+      ],
+    });
+    window.history.replaceState({}, "", "/#/providers");
+    render(<DesktopApp />);
+
+    await user.click(await screen.findByRole("button", { name: "凭证" }));
+    expect(screen.getByText(/系统安全存储中仍有一份凭证/u)).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "删除系统凭证" }));
+
     await waitFor(() =>
       expect(
         harness.calls.some(

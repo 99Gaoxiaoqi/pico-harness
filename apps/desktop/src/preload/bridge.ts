@@ -60,7 +60,12 @@ export function createDesktopBridge(ipcRenderer: IpcRenderer): DesktopBridge {
         const pendingEvents: RuntimeEvent[] = [];
         const seenEventIds = new Set<string>();
         let readySettled = false;
+        let disposed = false;
+        const unsubscribe = () => {
+          ipcRenderer.send(DESKTOP_IPC_CHANNELS.runtimeUnsubscribe, { subscriptionId });
+        };
         const dispatch = (event: RuntimeEvent) => {
+          if (disposed) return;
           if (seenEventIds.has(event.eventId)) return;
           seenEventIds.add(event.eventId);
           listener(event);
@@ -77,19 +82,29 @@ export function createDesktopBridge(ipcRenderer: IpcRenderer): DesktopBridge {
             subscriptionId,
             params: checkedParams,
           }) as Promise<DesktopResult<RuntimeResult<"events.subscribe">>>
-        ).then((result) => {
-          if (result.ok) {
-            for (const event of result.value.events) dispatch(event);
-          }
-          readySettled = true;
-          for (const event of pendingEvents.splice(0)) dispatch(event);
-          return result;
-        });
+        )
+          .then((result) => {
+            if (result.ok) {
+              for (const event of result.value.events) dispatch(event);
+            }
+            readySettled = true;
+            for (const event of pendingEvents.splice(0)) dispatch(event);
+            return result;
+          })
+          .finally(() => {
+            // dispose() may race ahead of Main finishing runtimeSubscribe. The first
+            // unsubscribe then observes no subscription, so repeat it once creation has
+            // definitely settled. Main treats unsubscribe as idempotent.
+            if (disposed) unsubscribe();
+          });
         return Object.freeze({
           ready,
           dispose() {
+            if (disposed) return;
+            disposed = true;
+            pendingEvents.splice(0);
             ipcRenderer.removeListener(DESKTOP_IPC_CHANNELS.runtimeEvent, onEvent);
-            ipcRenderer.send(DESKTOP_IPC_CHANNELS.runtimeUnsubscribe, { subscriptionId });
+            unsubscribe();
           },
         });
       },

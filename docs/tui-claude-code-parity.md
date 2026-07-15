@@ -174,7 +174,7 @@ Pico 首次打开一个工作区时会先显示信任确认。信任门通过前
 /provider delete my-provider
 ```
 
-`import-env` 首次只显示不含密钥的预览，必须带 `--confirm` 才会让 daemon 原子协调共享配置与凭证导入。配置修改采用 revision OCC；若 Desktop 或另一 TUI 已更新文件，本次写入会被拒绝，需重新读取。持久凭证当前仅支持 macOS Keychain；其他平台只能继续使用当前进程的环境凭证。
+`import-env` 首次只显示不含密钥的预览，必须带 `--confirm` 才会让 daemon 通过无 secret 操作日志协调共享配置与凭证导入。配置修改采用 revision OCC；若 Desktop 或另一 TUI 已更新文件，本次写入会被拒绝或在恢复时保留无关更新。发布构建当前默认禁用持久凭证；macOS `/usr/bin/security` 兼容层仅能用 `PICO_UNSAFE_KEYCHAIN_CLI=1` 开启本地开发，正式版本需签名的 Credential Broker/XPC。
 
 工具卡默认用 `Ctrl+E` 展开或折叠，卡片右侧会显示完整提示；裸 `e` 保留给输入框。
 

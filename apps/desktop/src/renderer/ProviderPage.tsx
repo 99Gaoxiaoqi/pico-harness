@@ -319,6 +319,13 @@ function ProviderEditorDialog({
           .filter(Boolean),
       ),
     ];
+    const retainedModelCapabilities = provider?.modelCapabilities
+      ? Object.fromEntries(
+          Object.entries(provider.modelCapabilities).filter(([model]) =>
+            normalizedModels.includes(model),
+          ),
+        )
+      : undefined;
     const succeeded = await onSave({
       id: id.trim(),
       protocol,
@@ -326,7 +333,9 @@ function ProviderEditorDialog({
       apiKeyEnv: apiKeyEnv.trim(),
       models: normalizedModels,
       discoverModels: protocol === "openai" && discoverModels,
-      ...(provider?.modelCapabilities ? { modelCapabilities: provider.modelCapabilities } : {}),
+      ...(retainedModelCapabilities && Object.keys(retainedModelCapabilities).length > 0
+        ? { modelCapabilities: retainedModelCapabilities }
+        : {}),
     });
     if (succeeded) onOpenChange(false);
   };
@@ -486,7 +495,7 @@ function CredentialDialog({
   };
 
   if (!provider) return null;
-  const canDelete = provider.credentialSource === "keychain";
+  const canDelete = provider.storedCredentialPresent;
 
   return (
     <Dialog.Root open={open} onOpenChange={handleOpenChange}>
@@ -513,6 +522,8 @@ function CredentialDialog({
             <InlineNotice tone="neutral">
               当前进程正在使用 {provider.apiKeyEnv}。从这里保存后，App 与 TUI
               可在没有该环境变量时共用系统凭证。
+              {provider.storedCredentialPresent &&
+                " 系统安全存储中仍有一份凭证，可在下方单独删除。"}
             </InlineNotice>
           )}
           <form className="provider-credential-form" onSubmit={(event) => void handleSubmit(event)}>

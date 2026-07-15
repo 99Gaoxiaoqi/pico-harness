@@ -71,18 +71,45 @@ export interface ProductionLocalDaemonHostOptions {
 export function createProductionLocalDaemonHost(
   options: ProductionLocalDaemonHostOptions = {},
 ): LocalDaemonHost {
-  const env = options.env ?? process.env;
-  const picoHome = resolvePicoHome({ env });
+  const suppliedEnv = options.env ?? process.env;
+  // `options.env` is an overlay/test seam and may intentionally contain only model
+  // credentials. Freeze one state root up front, then give every assembled service the
+  // same explicit PICO_HOME so no child falls back to a different process/default root.
+  const picoHome = resolvePicoHome({ picoHome: suppliedEnv["PICO_HOME"] });
+  const env: Readonly<Record<string, string | undefined>> = {
+    ...suppliedEnv,
+    PICO_HOME: picoHome,
+  };
   const trustStore =
     options.trustStore ?? new WorkspaceTrustStore({ userStateDirectory: picoHome });
   const agentRuntime = options.agentRuntime ?? new AgentRuntime();
-  const credentialVault = options.credentialVault ?? createPlatformCredentialVault();
+  const credentialVault =
+    options.credentialVault ?? createPlatformCredentialVault(process.platform, env);
   const userConfigStore = options.userConfigStore ?? new UserConfigStore({ picoHome });
   const effectiveConfigResolver =
     options.effectiveConfigResolver ?? new EffectiveConfigResolver({ userConfigStore });
   const registrationStore =
     options.registrationStore ??
     new WorkspaceRegistrationStore(join(picoHome, "daemon-workspaces.json"));
+  const validateAutomation = async (
+    job: CronJobRecord,
+  ): Promise<{ allowed: boolean; reason?: string }> => {
+    try {
+      await prepareBackgroundYoloPolicy({
+        workDir: job.workspacePath,
+        policy: job.policySnapshot,
+        trustStore,
+      });
+      if (!job.credentialRef) throw new Error("Cron Job 缺少 credentialRef");
+      await resolveCronModelRoute(job, effectiveConfigResolver, env);
+      if (!(await credentialVault.has(job.credentialRef))) {
+        throw new Error(`系统凭证库中不存在 ${job.credentialRef}`);
+      }
+      return { allowed: true };
+    } catch (error) {
+      return { allowed: false, reason: error instanceof Error ? error.message : String(error) };
+    }
+  };
   const pendingApprovals = new Map<string, PendingInteraction>();
   const pendingPrompts = new Map<string, PendingInteraction>();
   const resolvedApprovals = new Set<string>();
@@ -267,6 +294,15 @@ export function createProductionLocalDaemonHost(
         },
       };
     },
+    validateSecurity: async (job) => {
+      const decision = await validateAutomation(job);
+      if (!decision.allowed) {
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.CONFLICT,
+          decision.reason ?? "Automation Provider 或凭证已变化",
+        );
+      }
+    },
     ensureWorkspaceRuntime: async (workspacePath) => {
       await registrationStore.register(workspacePath);
       if (host.status !== "running") {
@@ -349,27 +385,10 @@ export function createProductionLocalDaemonHost(
       },
     },
   });
-  const validate = async (job: CronJobRecord): Promise<{ allowed: boolean; reason?: string }> => {
-    try {
-      await prepareBackgroundYoloPolicy({
-        workDir: job.workspacePath,
-        policy: job.policySnapshot,
-        trustStore,
-      });
-      if (!job.credentialRef) throw new Error("Cron Job 缺少 credentialRef");
-      await resolveCronModelRoute(job, effectiveConfigResolver, env);
-      if (!(await credentialVault.has(job.credentialRef))) {
-        throw new Error(`系统凭证库中不存在 ${job.credentialRef}`);
-      }
-      return { allowed: true };
-    } catch (error) {
-      return { allowed: false, reason: error instanceof Error ? error.message : String(error) };
-    }
-  };
   const cronRuntimeFactory = createCronWorkspaceRuntimeFactory({
     picoHome,
     getWorkspaceRuntime: (workspacePath) => service.getWorkspaceRuntime(workspacePath),
-    canRun: validate,
+    canRun: validateAutomation,
     policyGuard: {
       evaluate: (job) =>
         job.policySnapshot.hardlineVersion === BACKGROUND_HARDLINE_VERSION &&

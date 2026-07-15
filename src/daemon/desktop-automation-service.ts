@@ -18,6 +18,8 @@ export interface DesktopAutomationSecurity {
 
 export interface DesktopAutomationServiceOptions {
   prepareSecurity(workspacePath: string): Promise<DesktopAutomationSecurity>;
+  /** Re-validates a persisted Job against the latest Provider/config/vault state. */
+  validateSecurity(job: CronJobRecord): Promise<void>;
   ensureWorkspaceRuntime(workspacePath: string): Promise<void>;
   runNow(workspacePath: string, jobId: string): Promise<CronRunRecord>;
   picoHome?: string;
@@ -41,16 +43,32 @@ export class DesktopAutomationService {
     workspacePath: string,
     input: { name: string; prompt: string; schedule: string; enabled?: boolean },
   ): Promise<RuntimeJob> {
-    const name = requiredText(input.name, "name");
+    const security = await this.options.prepareSecurity(workspacePath);
+    return this.createWithSecurity(workspacePath, input, security);
+  }
+
+  /** Trusted daemon-only path used by TUI Cron after policy and authority validation. */
+  async createWithSecurity(
+    workspacePath: string,
+    input: {
+      name?: string;
+      prompt: string;
+      schedule: string;
+      timeZone?: string;
+      enabled?: boolean;
+    },
+    security: DesktopAutomationSecurity,
+  ): Promise<RuntimeJob> {
+    const name = input.name === undefined ? undefined : requiredText(input.name, "name");
     const prompt = requiredText(input.prompt, "prompt");
     const schedule = requiredText(input.schedule, "schedule");
-    const security = await this.options.prepareSecurity(workspacePath);
     let created = this.withCron(workspacePath, (cron) =>
       cron.create({
         workspacePath,
-        name,
+        ...(name ? { name } : {}),
         prompt,
         schedule,
+        ...(input.timeZone ? { timeZone: requiredText(input.timeZone, "timeZone") } : {}),
         enabled: false,
         policySnapshot: security.policySnapshot,
         credentialRef: security.credentialRef,
@@ -103,11 +121,21 @@ export class DesktopAutomationService {
     });
   }
 
-  setEnabled(workspacePath: string, jobId: string, enabled: boolean): RuntimeJob {
+  async setEnabled(workspacePath: string, jobId: string, enabled: boolean): Promise<RuntimeJob> {
+    const current = this.withCron(workspacePath, (cron) =>
+      requireWorkspaceJob(cron, workspacePath, jobId),
+    );
+    if (enabled) await this.options.validateSecurity(current);
     return this.withCron(workspacePath, (cron) => {
-      const current = requireWorkspaceJob(cron, workspacePath, jobId);
-      if (current.enabled === enabled) return this.projectJob(cron, current);
-      return this.projectJob(cron, cron.setEnabled(jobId, current.version, enabled));
+      const latest = requireWorkspaceJob(cron, workspacePath, jobId);
+      if (latest.version !== current.version) {
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.CONFLICT,
+          `Automation ${jobId} 在安全校验期间已变化，请刷新后重试`,
+        );
+      }
+      if (latest.enabled === enabled) return this.projectJob(cron, latest);
+      return this.projectJob(cron, cron.setEnabled(jobId, latest.version, enabled));
     });
   }
 

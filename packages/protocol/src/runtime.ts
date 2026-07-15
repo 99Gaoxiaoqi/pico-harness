@@ -1,5 +1,3 @@
-import { randomUUID } from "node:crypto";
-
 export const LOCAL_RUNTIME_PROTOCOL_VERSION = 1;
 export const LOCAL_RUNTIME_AUTH_VERSION = 1;
 export const MAX_RUNTIME_FRAME_BYTES = 1024 * 1024;
@@ -63,6 +61,8 @@ export type RuntimeProviderProfile = RuntimeProviderInput & {
   readonly fingerprint: string;
   readonly credentialStatus: RuntimeCredentialStatus;
   readonly credentialSource: RuntimeCredentialSource;
+  /** A durable system credential exists even when an environment variable currently takes precedence. */
+  readonly storedCredentialPresent: boolean;
 };
 
 export type RuntimeUserDefaults = JsonObject & {
@@ -564,6 +564,37 @@ export type RuntimeMethodMap = {
     readonly params: WorkspaceParams & { readonly jobId: JobId; readonly limit?: number };
     readonly result: { readonly runs: readonly RuntimeRun[] };
   };
+  /**
+   * Trusted TUI-to-daemon boundary. These methods are intentionally absent from
+   * the Desktop preload allowlist: the daemon re-resolves Provider authority and
+   * background policy before mutating the durable Cron ledger or credential vault.
+   */
+  readonly "automation.credential.import": {
+    readonly params: WorkspaceParams & {
+      readonly modelRouteId: string;
+      readonly expectedCredentialRef: string;
+      readonly secret: string;
+    };
+    readonly result: {
+      readonly imported: true;
+      readonly credentialRef: string;
+    };
+  };
+  readonly "automation.create": {
+    readonly params: WorkspaceParams & {
+      readonly name?: string;
+      readonly prompt: string;
+      readonly schedule: string;
+      readonly timeZone?: string;
+      readonly modelRouteId: string;
+      readonly expectedCredentialRef: string;
+      readonly allowedTools: readonly string[];
+      readonly toolNetworkPolicy: "allow" | "disabled" | "allowlist";
+      readonly allowedToolNetworkHosts?: readonly string[];
+      readonly enabled?: boolean;
+    };
+    readonly result: { readonly job: RuntimeJob };
+  };
   readonly "config.get": {
     readonly params: WorkspaceParams;
     readonly result: { readonly config: JsonObject; readonly version: number };
@@ -637,6 +668,7 @@ export type RuntimeMethodMap = {
       readonly providerId: string;
       readonly status: RuntimeCredentialStatus;
       readonly source: RuntimeCredentialSource;
+      readonly storedCredentialPresent: boolean;
       readonly providerFingerprint: string;
     };
   };
@@ -650,6 +682,7 @@ export type RuntimeMethodMap = {
       readonly providerId: string;
       readonly status: "ready";
       readonly source: "keychain";
+      readonly storedCredentialPresent: true;
       readonly providerFingerprint: string;
     };
   };
@@ -662,6 +695,7 @@ export type RuntimeMethodMap = {
       readonly providerId: string;
       readonly status: "missing";
       readonly source: "none";
+      readonly storedCredentialPresent: false;
       readonly providerFingerprint: string;
     };
   };
@@ -770,6 +804,8 @@ export const RUNTIME_METHODS = [
   "jobs.setEnabled",
   "jobs.runNow",
   "jobs.history",
+  "automation.credential.import",
+  "automation.create",
   "config.get",
   "config.update",
   "config.providers",
@@ -1010,7 +1046,7 @@ export function createRuntimeRequest(method: RuntimeMethod, params: JsonValue): 
   return {
     kind: "request",
     protocolVersion: LOCAL_RUNTIME_PROTOCOL_VERSION,
-    requestId: randomUUID(),
+    requestId: globalThis.crypto.randomUUID(),
     method,
     params: checkedParams,
   } as RuntimeRequest;
@@ -1028,7 +1064,7 @@ export function createRuntimeEvent<Topic extends string>(
 ): RuntimeEvent<Topic> {
   return {
     ...input,
-    eventId: input.eventId ?? randomUUID(),
+    eventId: input.eventId ?? globalThis.crypto.randomUUID(),
     protocolVersion: LOCAL_RUNTIME_PROTOCOL_VERSION,
   };
 }
@@ -1499,6 +1535,29 @@ const STRICT_RUNTIME_PARAM_VALIDATORS = {
   "jobs.history": exactParamShape(
     { workspacePath: stringParam, jobId: stringParam },
     { limit: finiteNumberParam },
+  ),
+  "automation.credential.import": exactParamShape({
+    workspacePath: stringParam,
+    modelRouteId: stringParam,
+    expectedCredentialRef: stringParam,
+    secret: stringParam,
+  }),
+  "automation.create": exactParamShape(
+    {
+      workspacePath: stringParam,
+      prompt: stringParam,
+      schedule: stringParam,
+      modelRouteId: stringParam,
+      expectedCredentialRef: stringParam,
+      allowedTools: stringArrayParam,
+      toolNetworkPolicy: oneOfParam(["allow", "disabled", "allowlist"]),
+    },
+    {
+      name: stringParam,
+      timeZone: stringParam,
+      allowedToolNetworkHosts: stringArrayParam,
+      enabled: booleanParam,
+    },
   ),
   "config.get": workspaceParams,
   "config.update": exactParamShape({

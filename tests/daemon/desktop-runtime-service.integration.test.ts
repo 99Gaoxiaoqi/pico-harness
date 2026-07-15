@@ -511,6 +511,17 @@ describe("DesktopRuntimeService integration", () => {
       ),
     ).resolves.toEqual(first);
 
+    await expect(
+      fixture.service.handle(
+        createRuntimeRequest("session.send", {
+          workspacePath: fixture.workspace,
+          input: { text: "同一个 key 不能换成另一条消息" },
+          behavior: "auto",
+          idempotencyKey: "send-first",
+        }),
+      ),
+    ).rejects.toMatchObject({ code: RUNTIME_ERROR_CODES.CONFLICT });
+
     const firstPage = await fixture.service.handle(
       createRuntimeRequest("session.transcript", {
         workspacePath: fixture.workspace,
@@ -1376,6 +1387,7 @@ describe("DesktopRuntimeService integration", () => {
       fixture.canonicalWorkspace,
     );
     const automations = new DesktopAutomationService({
+      validateSecurity: async () => undefined,
       prepareSecurity: async () => ({
         credentialRef,
         policySnapshot: {
