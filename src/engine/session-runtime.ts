@@ -4,7 +4,7 @@ import type { Message } from "../schema/message.js";
 import type { Goal, GoalManagerSnapshot, GoalStatus } from "./goal-manager.js";
 import type { SessionIdentity } from "./session-identity.js";
 
-/** runtime_state 记录自身的 schema 版本，与 JSONL meta 版本独立演进。 */
+/** Session runtime-state event schema version. */
 export const SESSION_RUNTIME_STATE_VERSION = 1 as const;
 
 export type PersistedInteractionMode = "default" | "plan" | "auto" | "yolo";
@@ -64,7 +64,7 @@ export interface SessionRuntimeStateSnapshot {
 /** TUI resume 的单次一致读取结果。 */
 export interface SessionHydrationSnapshot {
   schemaVersion: 1;
-  /** 快照对应的最后一条 JSONL seq；持久化关闭/无记录时为 null。 */
+  /** 快照对应的最后一条 RuntimeEvent sequence；持久化关闭/无记录时为 null。 */
   persistenceSequence: number | null;
   sessionId: string;
   conversationId: string;

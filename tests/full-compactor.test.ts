@@ -344,11 +344,6 @@ describe("FullCompactor 持久化(applyCompaction 落盘 + recover 重放)", () 
     await safeRm(workDir);
   });
 
-  /** 等待 fire-and-forget 落盘走完(appendFile 经 libuv 线程池) */
-  async function flush(): Promise<void> {
-    await new Promise((resolve) => setTimeout(resolve, 60));
-  }
-
   /** 跨平台安全删除:Windows 上 SQLite 句柄未释放时 rm 触发 EBUSY,退避重试兜底 */
   async function safeRm(path: string): Promise<void> {
     for (let attempt = 0; attempt < 5; attempt++) {
@@ -376,14 +371,18 @@ describe("FullCompactor 持久化(applyCompaction 落盘 + recover 重放)", () 
 
     const mgr1 = new SessionManager();
     const s1 = await mgr1.getOrCreate("fc-persist", workDir, ON);
-    s1.append(userMsg("m0"), assistantMsg("m1"), userMsg("m2"), assistantMsg("m3"), userMsg("m4"));
-    await flush();
+    await s1.commitMessages(
+      userMsg("m0"),
+      assistantMsg("m1"),
+      userMsg("m2"),
+      assistantMsg("m3"),
+      userMsg("m4"),
+    );
     expect(s1.length).toBe(5);
 
     // 压缩:保留尾部 2 条
     const ok = await fc.compact(s1, requestRetaining(s1, 2));
     expect(ok).toBe(true);
-    await flush();
     // 普通 user 之后不切分：内存为 summary + m2 + m3 + m4。
     expect(s1.length).toBe(4);
     const mem = s1.getHistory();
@@ -394,6 +393,7 @@ describe("FullCompactor 持久化(applyCompaction 落盘 + recover 重放)", () 
     expect(mem[3]!.content).toBe("m4");
 
     // 重启恢复
+    await s1.close();
     const mgr2 = new SessionManager();
     const s2 = await mgr2.getOrCreate("fc-persist", workDir, ON);
     // 重放后应与内存一致:summary + m3 + m4
@@ -404,6 +404,7 @@ describe("FullCompactor 持久化(applyCompaction 落盘 + recover 重放)", () 
     expect(rec[1]!.content).toBe("m2");
     expect(rec[2]!.content).toBe("m3");
     expect(rec[3]!.content).toBe("m4");
+    await s2.close();
   });
 
   it("压缩后再 append,重启 recover 历史续接正确(seq 不回退)", async () => {
@@ -413,16 +414,14 @@ describe("FullCompactor 持久化(applyCompaction 落盘 + recover 重放)", () 
 
     const mgr1 = new SessionManager();
     const s1 = await mgr1.getOrCreate("fc-persist2", workDir, ON);
-    s1.append(userMsg("a"), assistantMsg("b"), userMsg("c"), assistantMsg("d"));
-    await flush();
+    await s1.commitMessages(userMsg("a"), assistantMsg("b"), userMsg("c"), assistantMsg("d"));
 
     // retainLastN=1:压缩前 3 条,保留尾部 [d]
     await fc.compact(s1, requestRetaining(s1, 1));
-    await flush();
     // 压缩后 append 新消息
-    s1.append(userMsg("after-compact"));
-    await flush();
+    await s1.commitMessages(userMsg("after-compact"));
 
+    await s1.close();
     const mgr2 = new SessionManager();
     const s2 = await mgr2.getOrCreate("fc-persist2", workDir, ON);
     // 安全切分保留 c+d，再续接 after-compact。
@@ -432,6 +431,7 @@ describe("FullCompactor 持久化(applyCompaction 落盘 + recover 重放)", () 
     expect(rec[1]!.content).toBe("c");
     expect(rec[2]!.content).toBe("d");
     expect(rec[3]!.content).toBe("after-compact");
+    await s2.close();
   });
 });
 

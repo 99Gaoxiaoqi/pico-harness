@@ -88,7 +88,10 @@ import {
 import { WorkspaceRoots } from "../tools/workspace-roots.js";
 import { globalSessionManager, type Session } from "../engine/session.js";
 import type { PersistedSessionSettings } from "../engine/session-runtime.js";
-import { SessionForkService } from "../engine/session-fork-service.js";
+import {
+  reconcileUnfinishedSessionForksOrThrow,
+  SessionForkService,
+} from "../engine/session-fork-service.js";
 import type { Reporter } from "../engine/reporter.js";
 import type { SteerQueue } from "../engine/steer-queue.js";
 import { McpConnectionManager, type McpStatusSnapshot } from "../mcp/manager.js";
@@ -860,7 +863,12 @@ async function startLineModeRepl(opts: ReplOptions): Promise<void> {
     if (selection.mode !== "fork") {
       const session =
         globalSessionManager.get(selection.sessionId, opts.workDir) ??
-        (await globalSessionManager.getOrCreate(selection.sessionId, opts.workDir));
+        (await globalSessionManager.getOrCreate(selection.sessionId, opts.workDir, {
+          persistence: true,
+        }));
+      if (!session.runtimeEventStore) {
+        throw new Error(`TUI requires a durable Session: ${selection.sessionId}`);
+      }
       await runtimeEventStore.initializeSession({
         sessionId: session.id,
         workDir: opts.workDir,
@@ -1023,6 +1031,7 @@ class LineModeReporter implements Reporter {
 
 /** 启动 TUI REPL 循环 */
 export async function startTuiRepl(opts: ReplOptions): Promise<void> {
+  await reconcileUnfinishedSessionForksOrThrow(opts.workDir);
   if (requiresTuiLineMode()) {
     await startLineModeRepl(opts);
     return;
@@ -1158,6 +1167,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         const sourceSession = await globalSessionManager.getOrCreate(
           selection.sourceSessionId,
           opts.workDir,
+          { persistence: true },
         );
         await RuntimeRun.repairSessionProjection(sourceSession, {
           workDir: opts.workDir,
@@ -1181,7 +1191,12 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         );
       }
     }
-    session ??= await globalSessionManager.getOrCreate(selection.sessionId, opts.workDir);
+    session ??= await globalSessionManager.getOrCreate(selection.sessionId, opts.workDir, {
+      persistence: true,
+    });
+    if (!session.runtimeEventStore) {
+      throw new Error(`TUI requires a durable Session: ${selection.sessionId}`);
+    }
     await runtimeEventStore.initializeSession({
       sessionId: session.id,
       workDir: opts.workDir,

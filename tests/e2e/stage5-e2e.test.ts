@@ -3,7 +3,7 @@
 //
 // 测试目标:
 //   1. Auxiliary Client:配 AUX_LLM_* 环境变量,真实模型触发 FullCompactor 压缩,验证 aux 被用
-//   2. 版本化迁移:真实 session 跑一轮后,JSONL 首行有当前 meta schemaVersion
+//   2. 统一事件库:真实 session 跑一轮后,Runtime manifest 与事件可重放
 //   3. Rate Limit:端点不返回 rate limit header,用 mock header 单测已覆盖,这里验证回调机制可接通
 //
 // 凭证通过环境变量显式开启:
@@ -11,7 +11,7 @@
 // 未设置时自动 skip。AUX 使用同端点同模型(测试用,生产应配廉价模型)。
 
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from "vitest";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { OpenAIProvider } from "../../src/provider/openai.js";
@@ -21,6 +21,7 @@ import { SilentReporter } from "../../src/engine/reporter.js";
 import { buildDefaultToolRegistry } from "../../src/tools/default-registry.js";
 import { FullCompactor } from "../../src/context/full-compactor.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
+import { RuntimeEventStore } from "../../src/runtime/runtime-event-store.js";
 import type { LLMProvider, Message } from "../../src/provider/interface.js";
 
 const BASE_URL = process.env.PICO_OPENAI_E2E_BASE_URL;
@@ -74,11 +75,11 @@ describeOrSkip("阶段 5 端到端测试(真实大模型)", { timeout: 180000 },
     }
   });
 
-  // ─── 测试 1: 版本化迁移 ───
-  describe("版本化迁移(5.8)", () => {
-    it("真实 session 跑一轮后,JSONL 首行有 meta schemaVersion=3", async () => {
+  // ─── 测试 1: 统一事件持久化 ───
+  describe("RuntimeEvent 持久化", () => {
+    it("真实 session 跑一轮后可从 runtime.sqlite 重放", async () => {
       const session = new Session(`e2e-version-${Date.now()}`, workDir, { persistence: true });
-      session.append({ role: "user", content: "你好" });
+      await session.commitMessages({ role: "user", content: "你好" });
 
       const registry = buildDefaultToolRegistry(workDir);
       const engine = new AgentEngine({
@@ -91,17 +92,16 @@ describeOrSkip("阶段 5 端到端测试(真实大模型)", { timeout: 180000 },
       await engine.run(session);
       await session.flushPersistence();
 
-      const sessionLogPath = join(
-        resolvePicoPaths(workDir).workspace.sessions,
-        `${session.id}.jsonl`,
-      );
-      const content = readFileSync(sessionLogPath, "utf8");
-      const firstLine = content.split("\n")[0]!;
-      const record = JSON.parse(firstLine);
-      console.log(`[E2E version] JSONL 首行: ${firstLine.slice(0, 100)}`);
-
-      expect(record.type).toBe("meta");
-      expect(record.schemaVersion).toBe(3);
+      const store = new RuntimeEventStore({
+        databasePath: resolvePicoPaths(workDir).workspace.runtimeDatabase,
+      });
+      await expect(store.readSessionManifest(session.id)).resolves.toMatchObject({
+        sessionId: session.id,
+        historySource: "runtime-event-v1",
+      });
+      expect(
+        (await store.readSession(session.id)).some((event) => event.kind === "message.committed"),
+      ).toBe(true);
     }, 60000);
   });
 

@@ -25,7 +25,7 @@ export interface DesktopSessionStateStoreOptions {
 
 /**
  * Desktop-only presentation metadata. Conversation content remains in the existing
- * workspace JSONL journals; this store never moves, truncates, or deletes a CLI session.
+ * workspace RuntimeEvent history; this store never moves, truncates, or deletes a CLI session.
  */
 export class DesktopSessionStateStore {
   readonly filePath: string;

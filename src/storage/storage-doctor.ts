@@ -12,7 +12,7 @@ import {
   type StorageOperation,
 } from "./operation-journal.js";
 import { RUNTIME_SCHEMA_VERSION } from "../tasks/runtime-types.js";
-import { resolvePicoPaths } from "../paths/pico-paths.js";
+import { canonicalizeWorkspacePath, resolvePicoPaths } from "../paths/pico-paths.js";
 
 const SHA256_RE = /^[a-f0-9]{64}$/u;
 const SAFE_OPERATION_ID_RE = /^[A-Za-z0-9._-]+$/u;
@@ -92,7 +92,7 @@ export class StorageDoctor {
   private readonly now: () => Date;
 
   constructor(options: StorageDoctorOptions) {
-    this.workDir = resolve(options.workDir);
+    this.workDir = canonicalizeWorkspacePath(options.workDir);
     const paths = resolvePicoPaths(this.workDir);
     this.fileHistoryDir = resolve(options.fileHistoryDir ?? join(paths.home.root, "file-history"));
     this.runtimeDatabasePath = resolve(
@@ -203,9 +203,7 @@ export class StorageDoctor {
     }
     try {
       const table = database
-        .prepare(
-          "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'agent_sessions'",
-        )
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'agent_sessions'")
         .get();
       if (!table) return;
       const sessions = database
@@ -266,9 +264,7 @@ export class StorageDoctor {
         )
         .get() as { name: string } | undefined;
       const agentSessionTable = database
-        .prepare(
-          "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'agent_sessions'",
-        )
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'agent_sessions'")
         .get() as { name: string } | undefined;
       const agentEventTable = database
         .prepare(

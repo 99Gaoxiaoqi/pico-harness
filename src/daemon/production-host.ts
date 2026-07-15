@@ -82,7 +82,12 @@ export function createProductionLocalDaemonHost(
       context.bindSession(targetSessionId);
       const session =
         globalSessionManager.get(targetSessionId, workspacePath) ??
-        (await globalSessionManager.getOrCreate(targetSessionId, workspacePath));
+        (await globalSessionManager.getOrCreate(targetSessionId, workspacePath, {
+          persistence: true,
+        }));
+      if (!session.runtimeEventStore) {
+        throw new Error(`Desktop runtime requires a durable Session: ${targetSessionId}`);
+      }
       const runtimeState = await createSessionRuntime({
         workDir: workspacePath,
         sessionId: targetSessionId,

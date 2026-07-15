@@ -8,7 +8,7 @@
 // 2. session_summaries: 会话摘要表,存储每个 session 的浓缩总结
 // 3. skill_usage: 技能使用记录表,追踪哪些 skill 成功/失败,供自愈参考
 //
-// 路径约定:workspace state/sessions.db(与 session-store.jsonl 集中在同一状态根)
+// 路径约定:workspace state/sessions.db；它是可重建搜索投影，不是会话事实源。
 // 错误处理:初始化/插入/查询失败时降级,记 warn 不抛异常,不阻断主流程。
 
 import Database from "better-sqlite3";
@@ -98,7 +98,7 @@ function classifyInitError(err: unknown): ClassifiedInitError {
   ) {
     return {
       reason: "当前 SQLite 构建不支持所需的 FTS5/trigram 全文索引",
-      recommendation: "请重新安装带 FTS5 支持的 better-sqlite3，或使用 JSONL 记忆检索后端。",
+      recommendation: "请重新安装带 FTS5 支持的 better-sqlite3，或使用内存记忆检索后端。",
     };
   }
 
@@ -151,7 +151,7 @@ export class FTS5Store implements ConversationSearchStore {
    * 按 workDir 获取共享 FTS5Store 实例(引用计数 +1)。
    * 同一 workDir 的所有 Session 复用同一个 SQLite 连接,连接数从 O(sessions) 降到 O(1)。
    * 初始化失败时仍返回带 degraded status 的实例，便于调用方
-   * 保留准确的失败原因并切换到 JSONL 后端。
+   * 保留准确的失败原因并切换到进程内后端。
    */
   static acquire(workDir: string): FTS5Store {
     const entry = FTS5Store.pool.get(workDir);

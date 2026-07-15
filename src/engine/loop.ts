@@ -68,8 +68,6 @@ import type { HookService } from "../hooks/service.js";
 import type { ToolObservationProcessor } from "../tools/tool-result-observation.js";
 import { ToolAccesses } from "../tools/tool-access.js";
 import { ToolScheduler } from "../tools/tool-scheduler.js";
-import { resolvePicoPaths } from "../paths/pico-paths.js";
-import { currentRunLedger, RunLedger, type RunTerminalStatus } from "./run-ledger.js";
 import {
   currentRuntimeRun,
   currentRuntimeToolCallId,
@@ -1084,44 +1082,27 @@ export class AgentEngine implements AgentRunner {
     const run = () => this.runInMainCompactorScope(session, runtimeReporter, runtimeTracer, signal);
     const execute = () => (this.compactor ? this.compactor.runInMainScope(run) : run());
     // Tests and explicit in-memory sessions intentionally skip durable runtime facts.
-    // Production sessions get a separate run ledger; RuntimeEventStore owns conversation facts.
-    if (!session.recordStore) return execute();
-    // AgentRuntime owns the canonical RuntimeEvent run and already bound its RunLedger.
-    // Keep this compatibility path for direct embedders that still call AgentEngine.run.
+    if (!session.runtimeEventStore) return execute();
+    // AgentRuntime already owns the canonical RuntimeEvent run. Direct embedders are
+    // serialized here so one durable Session cannot execute overlapping model turns.
     if (currentRuntimeRun()?.sessionId === session.id) return execute();
-    return this.runWithLedger(session, execute, signal);
+    return session.serialize(() => this.runWithRuntimeEvents(session, execute, signal));
   }
 
-  private async runWithLedger(
+  private async runWithRuntimeEvents(
     session: Session,
     execute: () => Promise<Message[]>,
     signal?: AbortSignal,
   ): Promise<Message[]> {
-    const baseDir = resolvePicoPaths(session.workDir).workspace.runs;
-    await RunLedger.reconcileIncompleteRuns({ baseDir, sessionId: session.id });
-    const ledger = await RunLedger.start({
-      baseDir,
+    await RuntimeRun.reconcileIncompleteRuns({
       sessionId: session.id,
       workDir: session.workDir,
     });
-    try {
-      const messages = await RunLedger.runInContext(ledger, execute);
-      await ledger.finish("completed");
-      return messages;
-    } catch (error) {
-      const status: RunTerminalStatus =
-        signal?.aborted || isAbortError(error) ? "cancelled" : "failed";
-      try {
-        await ledger.finish(status, runFailureReason(error));
-      } catch (ledgerError) {
-        throw new AggregateError(
-          [error, ledgerError],
-          "Agent run failed and its terminal runtime fact could not be persisted",
-          { cause: ledgerError },
-        );
-      }
-      throw error;
-    }
+    const runtimeRun = await RuntimeRun.start({
+      sessionId: session.id,
+      workDir: session.workDir,
+    });
+    return runtimeRun.run(execute, signal);
   }
 
   private async runInMainCompactorScope(
@@ -1200,7 +1181,6 @@ export class AgentEngine implements AgentRunner {
           break;
         }
         await currentRuntimeRun()?.recordTurnStarted(turnCount);
-        await currentRunLedger()?.recordTurnStarted({ turn: turnCount });
         reporter.onTurnStart(turnCount);
         const turnSpan = rootSpan?.startChild(`Turn-${turnCount}`);
         const currentMessageId =
@@ -1634,18 +1614,14 @@ export class AgentEngine implements AgentRunner {
           const scheduler = new ToolScheduler<{
             message: Message;
             reminder?: Message;
-            ledgerStarted?: boolean;
           }>({
             maxConcurrency: AgentEngine.MAX_TOOL_CONCURRENCY,
             signal,
           });
-          const settledResults: Array<
-            { message: Message; reminder?: Message; ledgerStarted?: boolean } | undefined
-          > = new Array(toolCalls.length);
-          let results: Array<{ message: Message; reminder?: Message; ledgerStarted?: boolean }>;
-          let scheduled: Array<
-            Promise<{ message: Message; reminder?: Message; ledgerStarted?: boolean }>
-          > = [];
+          const settledResults: Array<{ message: Message; reminder?: Message } | undefined> =
+            new Array(toolCalls.length);
+          let results: Array<{ message: Message; reminder?: Message }>;
+          let scheduled: Array<Promise<{ message: Message; reminder?: Message }>> = [];
           try {
             scheduled = toolCalls.map((tc, index) => {
               const execution =
@@ -1726,19 +1702,6 @@ export class AgentEngine implements AgentRunner {
 
           // 将所有 Observation 持久化到 Session,开启下一轮复盘与推理
           await session.commitMessages(...observations);
-          const ledger = currentRunLedger();
-          const ledgerTurn = ledger?.currentTurn;
-          if (ledger && ledgerTurn !== undefined) {
-            for (let index = 0; index < results.length; index++) {
-              if (!results[index]!.ledgerStarted) continue;
-              await ledger.recordToolObservationCommitted({
-                callId: toolCalls[index]!.id,
-                toolName: toolCalls[index]!.name,
-                turn: ledgerTurn,
-                isError: observations[index]!.providerData?.[PICO_TOOL_RESULT_ERROR_KEY] === true,
-              });
-            }
-          }
           await this.hookService?.dispatch(
             "PostToolBatch",
             {
@@ -1882,7 +1845,6 @@ export class AgentEngine implements AgentRunner {
     message: Message;
     result: ToolResult;
     reminder?: Message;
-    ledgerStarted?: boolean;
   }> {
     const toolSpan = parentSpan?.startChild("Tool.Execute", {
       toolName: toolCall.name,
@@ -1895,7 +1857,6 @@ export class AgentEngine implements AgentRunner {
       const guardDecision = this.guardrail.beforeCall(toolCall);
       const runtimeRun = currentRuntimeRun();
       let result: ToolResult;
-      let ledgerStarted = false;
       if (!guardDecision.allowed) {
         await this.hookService?.dispatch(
           "PermissionDenied",
@@ -1916,16 +1877,6 @@ export class AgentEngine implements AgentRunner {
       } else {
         signal?.throwIfAborted();
         await runtimeRun?.recordToolStarted(toolCall.id, toolCall.name, toolCall.arguments);
-        const ledger = currentRunLedger();
-        const ledgerTurn = ledger?.currentTurn;
-        if (ledger !== undefined && ledgerTurn !== undefined) {
-          await ledger.recordToolStarted({
-            callId: toolCall.id,
-            toolName: toolCall.name,
-            turn: ledgerTurn,
-          });
-          ledgerStarted = true;
-        }
         result = await this.registry.execute(toolCall, {
           signal,
           onOutput: ({ stream, chunk }) => {
@@ -1983,7 +1934,6 @@ export class AgentEngine implements AgentRunner {
           providerData: { [PICO_TOOL_RESULT_ERROR_KEY]: result.isError },
         },
         result,
-        ...(ledgerStarted ? { ledgerStarted } : {}),
         ...(reminder ? { reminder } : {}),
       };
     } catch (err) {
@@ -2976,15 +2926,4 @@ function recordTraceError(span: Span | undefined, error: unknown): void {
     isError: true,
     outputPreview: truncate(error instanceof Error ? error.message : String(error), 500),
   });
-}
-
-/** Keep the durable control-plane diagnosis small and avoid copying tool/provider payloads. */
-function runFailureReason(error: unknown): string {
-  if (isAbortError(error)) return "aborted";
-  if (error instanceof Error) {
-    const name = error.name.trim() || "Error";
-    const message = truncate(error.message.trim() || "runtime failure", 300);
-    return `${name}: ${message}`;
-  }
-  return "unknown runtime failure";
 }

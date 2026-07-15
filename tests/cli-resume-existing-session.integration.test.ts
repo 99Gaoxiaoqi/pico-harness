@@ -22,11 +22,11 @@ describe("runAgentFromCli existing-session resume", () => {
     const workDir = await realpath(await mkdtemp(join(tmpdir(), "pico-resume-existing-")));
     const sessionId = `resume-existing-${Date.now()}`;
     const session = await globalSessionManager.getOrCreate(sessionId, workDir, {
-      persistence: false,
+      persistence: true,
     });
     activeSession = { id: sessionId, workDir };
     await session.beginRewindPoint({ userPrompt: "original request" });
-    session.append({ role: "user", content: "original request" });
+    await session.commitMessages({ role: "user", content: "original request" });
     const runtimeState = await createTuiRuntimeState({ workDir, sessionId, session });
     const seenContexts: Message[][] = [];
     const provider: LLMProvider = {

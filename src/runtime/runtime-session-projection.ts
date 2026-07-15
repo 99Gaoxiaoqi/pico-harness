@@ -124,10 +124,7 @@ function mergeUsage(
   const usePersistedStatus = persisted.totalProviderCalls >= derived.totalProviderCalls;
   return {
     totalPromptTokens: Math.max(derived.totalPromptTokens, persisted.totalPromptTokens),
-    totalCompletionTokens: Math.max(
-      derived.totalCompletionTokens,
-      persisted.totalCompletionTokens,
-    ),
+    totalCompletionTokens: Math.max(derived.totalCompletionTokens, persisted.totalCompletionTokens),
     totalInputTokens: Math.max(derived.totalInputTokens, persisted.totalInputTokens),
     totalCacheReadTokens: Math.max(derived.totalCacheReadTokens, persisted.totalCacheReadTokens),
     totalCacheWriteTokens: Math.max(derived.totalCacheWriteTokens, persisted.totalCacheWriteTokens),
@@ -137,18 +134,12 @@ function mergeUsage(
     totalProviderCalls: Math.max(derived.totalProviderCalls, persisted.totalProviderCalls),
     totalUsageReports: Math.max(derived.totalUsageReports, persisted.totalUsageReports),
     totalInputReports: Math.max(derived.totalInputReports, persisted.totalInputReports),
-    totalCacheReadReports: Math.max(
-      derived.totalCacheReadReports,
-      persisted.totalCacheReadReports,
-    ),
+    totalCacheReadReports: Math.max(derived.totalCacheReadReports, persisted.totalCacheReadReports),
     totalCacheWriteReports: Math.max(
       derived.totalCacheWriteReports,
       persisted.totalCacheWriteReports,
     ),
-    totalReasoningReports: Math.max(
-      derived.totalReasoningReports,
-      persisted.totalReasoningReports,
-    ),
+    totalReasoningReports: Math.max(derived.totalReasoningReports, persisted.totalReasoningReports),
     totalEstimatedCostReports: Math.max(
       derived.totalEstimatedCostReports,
       persisted.totalEstimatedCostReports,

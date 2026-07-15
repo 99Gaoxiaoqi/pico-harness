@@ -4,16 +4,16 @@
 
 ## 文件总览
 
-| 文件               | 行数  | 职责                                                     |
-| ------------------ | ----- | -------------------------------------------------------- |
-| `loop.ts`          | ~1316 | AgentEngine 主循环（心脏）                               |
-| `session.ts`       | ~1800 | Session + SessionManager（会话隔离 + 内存投影 + 工作记忆） |
-| `session-persistence.ts` | ~25 | 会话持久化游标与提交回执协议                         |
-| `reminder.ts`      | ~228  | 死循环探测 + ToolGuardrail                               |
-| `goal-manager.ts`  | ~243  | 长程目标状态机                                           |
-| `reporter.ts`      | ~133  | 事件输出接口（I/O 解耦）                                 |
-| `budget.ts`        | ~67   | 轮次/Token/成本预算                                      |
-| `steer-queue.ts`   | ~47   | 运行时注入引导文本                                       |
+| 文件                     | 行数  | 职责                                                       |
+| ------------------------ | ----- | ---------------------------------------------------------- |
+| `loop.ts`                | ~1316 | AgentEngine 主循环（心脏）                                 |
+| `session.ts`             | ~1800 | Session + SessionManager（会话隔离 + 内存投影 + 工作记忆） |
+| `session-persistence.ts` | ~25   | 会话持久化游标与提交回执协议                               |
+| `reminder.ts`            | ~228  | 死循环探测 + ToolGuardrail                                 |
+| `goal-manager.ts`        | ~243  | 长程目标状态机                                             |
+| `reporter.ts`            | ~133  | 事件输出接口（I/O 解耦）                                   |
+| `budget.ts`              | ~67   | 轮次/Token/成本预算                                        |
+| `steer-queue.ts`         | ~47   | 运行时注入引导文本                                         |
 
 ---
 
@@ -106,13 +106,13 @@ generateWithRetry (内层:普通重试)
 
 ### 关键常量
 
-| 常量                           | 值                    | 作用                   |
-| ------------------------------ | --------------------- | ---------------------- |
-| `DEFAULT_AUTO_COMPACT_TRIGGER_RATIO` | 0.85 | 主动整理输入水位 |
-| `DEFAULT_RETAINED_CONTEXT_RATIO`     | 0.20 | 主动摘要尾部目标 |
+| 常量                                 | 值   | 作用              |
+| ------------------------------------ | ---- | ----------------- |
+| `DEFAULT_AUTO_COMPACT_TRIGGER_RATIO` | 0.85 | 主动整理输入水位  |
+| `DEFAULT_RETAINED_CONTEXT_RATIO`     | 0.20 | 主动摘要尾部目标  |
 | `EMERGENCY_RETAINED_CONTEXT_RATIO`   | 0.10 | overflow 紧急目标 |
-| `MAX_TOOL_CONCURRENCY`                | 8    | 工具并发上限     |
-| `maxTurns` 默认                       | 50   | 主循环兜底       |
+| `MAX_TOOL_CONCURRENCY`               | 8    | 工具并发上限      |
+| `maxTurns` 默认                      | 50   | 主循环兜底        |
 
 ---
 
@@ -129,6 +129,7 @@ generateWithRetry (内层:普通重试)
 - **`getWorkingMemory(limit)`**:仅为兼容测试保留，主 Agent 不再调用
 - **`append(msg)`**:处理 deferred + toolResultMeta 登记。assistant 带 toolCalls → 登记 pendingToolCallIds；ToolResult 到达 → 从 pending 删除；普通消息且 pending 非空 → 暂存 deferredMessages
 - **`serialize(task)`**:per-session 串行执行队列，同一 Session 的 engine.run 必须串行
+- **跨进程单写者**：持久化 Session 从 recover 到 close 持有 owner lease，避免两个进程用不同内存投影并发运行
 - **持久化提交**：消息先提交 `RuntimeEventStore`，再更新 Session 内存投影；相同 `eventId` 重试幂等
 - **LRU + TTL 双重驱逐**:maxSessions=128，TTL=24h
 
@@ -140,7 +141,7 @@ SQLite 追加事件表是会话与运行时的唯一事实源：`message.committ
 - **事务提交**：事件内容与全局 sequence 在同一 SQLite 事务中提交
 - **Exactly-once**：`(session_id, event_id)` 唯一；同 ID 同 payload 重试复用原 cursor，不同 payload 拒绝
 - **可重建投影**：Session history、usage、CLI 会话列表和搜索索引均从事件恢复
-- **单一恢复路径**：不再读取或写入 Session JSONL，也不迁移旧 `.claw` 会话数据
+- **单一恢复路径**：不再读取或写入 Session/run JSONL，也不迁移旧 `.claw` 会话数据
 
 ---
 

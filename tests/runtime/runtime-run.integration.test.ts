@@ -22,7 +22,7 @@ describe("RuntimeRun projection recovery", () => {
   });
 
   it("repairs a stale Session projection from canonical RuntimeEvents and stays idempotent", async () => {
-    const session = new Session("session-a", workDir, { persistence: true });
+    const session = new Session("session-a", workDir, { persistence: false });
     await session.recover();
     await session.commitProjectionMessageOnce("stale-message", {
       role: "user",
@@ -187,6 +187,46 @@ describe("RuntimeRun projection recovery", () => {
       false,
     );
     await session.close();
+  });
+
+  it("canonicalizes undefined provider fields before exactly-once comparison", async () => {
+    const session = new Session("session-a", workDir, { persistence: true });
+    await session.recover();
+    const store = new RuntimeEventStore({
+      databasePath: resolvePicoPaths(workDir).workspace.runtimeDatabase,
+    });
+    const run = await RuntimeRun.start({ sessionId: session.id, workDir, store });
+    await run.run(async () => undefined);
+    const messageWithUndefined = {
+      role: "assistant" as const,
+      content: "canonical answer",
+      providerData: { model: "test-model", omitted: undefined },
+    };
+
+    const first = await session.commitMessageOnce("message:stable", messageWithUndefined);
+    const retry = await session.commitMessageOnce("message:stable", messageWithUndefined);
+
+    expect(first.inserted).toBe(true);
+    expect(retry.inserted).toBe(false);
+    expect(session.getModelContext()).toEqual([
+      {
+        role: "assistant",
+        content: "canonical answer",
+        providerData: { model: "test-model" },
+      },
+    ]);
+    await session.close();
+
+    const reopened = new Session("session-a", workDir, { persistence: true });
+    await reopened.recover();
+    expect(reopened.getModelContext()).toEqual([
+      {
+        role: "assistant",
+        content: "canonical answer",
+        providerData: { model: "test-model" },
+      },
+    ]);
+    await reopened.close();
   });
 
   it("closes an unterminated canonical run as interrupted during recovery", async () => {

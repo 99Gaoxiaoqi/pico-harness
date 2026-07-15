@@ -234,7 +234,7 @@ pico-harness 的"前身"是课程中用 Go 实现的 `go-pico`。我选择用 Ty
 
 **第一，AI 工具的生态在 Node.js。** Claude Code、Cursor、OpenHands——这些 Agent 工具本身大多运行在 Node.js 生态上。用 TypeScript 写 Agent 引擎，让它天然可以嵌入这些工具做子代理。
 
-**第二，JSON 处理是刚需。** Agent 与模型之间的通信全是 JSON——ToolCall 参数是 JSON，Provider 响应解析是 JSON，Session 存储是 JSONL。Go 的 `encoding/json` 需要定义 struct，TypeScript 的 `JSON.parse` 配合 `interface` 零摩擦。
+**第二，JSON 处理是刚需。** Agent 与模型之间的通信全是 JSON——ToolCall 参数是 JSON，Provider 响应解析是 JSON，RuntimeEvent 也以结构化 JSON payload 写入 SQLite。Go 的 `encoding/json` 需要定义 struct，TypeScript 的 `JSON.parse` 配合 `interface` 零摩擦。
 
 **第三，脚本工具的兼容性。** Agent 最常用的 `bash` 工具本质上是在执行 Shell 命令。Node.js 的 `child_process` 比 Go 的 `os/exec` 更适合作为"Agent 的 Shell 层"，因为大部分开发者的工作流本身就在 npm/node 生态中。
 

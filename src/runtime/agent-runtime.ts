@@ -3,9 +3,11 @@ import { lstat, mkdir, readdir, realpath } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { AgentEngine } from "../engine/loop.js";
 import type { GoalManager } from "../engine/goal-manager.js";
-import { currentRunLedger } from "../engine/run-ledger.js";
 import { globalSessionManager, type Session } from "../engine/session.js";
-import { SessionForkService } from "../engine/session-fork-service.js";
+import {
+  reconcileUnfinishedSessionForksOrThrow,
+  SessionForkService,
+} from "../engine/session-fork-service.js";
 import { TerminalReporter, type Reporter } from "../engine/reporter.js";
 import { Compactor } from "../context/compactor.js";
 import { FullCompactor } from "../context/full-compactor.js";
@@ -293,6 +295,7 @@ export async function executeAgentRuntime(
   let prompt = resumeExistingSession ? options.prompt : normalizePrompt(options.prompt);
   const kind = options.provider ?? "openai";
   const workDir = await resolveWorkDir(options.dir);
+  await reconcileUnfinishedSessionForksOrThrow(workDir);
   const execution = options.execution ?? ({ kind: "foreground" } as const);
   const backgroundPolicy =
     execution.kind === "background"
@@ -331,6 +334,7 @@ export async function executeAgentRuntime(
       const sourceSession = await globalSessionManager.getOrCreate(
         sessionSelection.sourceSessionId,
         workDir,
+        { persistence: true },
       );
       await RuntimeRun.repairSessionProjection(sourceSession, {
         workDir,
@@ -358,9 +362,14 @@ export async function executeAgentRuntime(
   const session = resumeExistingSession
     ? globalSessionManager.get(sessionSelection.sessionId, workDir)
     : (existingSession ??
-      (await globalSessionManager.getOrCreate(sessionSelection.sessionId, workDir)));
+      (await globalSessionManager.getOrCreate(sessionSelection.sessionId, workDir, {
+        persistence: true,
+      })));
   if (!session) {
     throw new Error(`Cannot resume missing session: ${sessionSelection.sessionId}`);
+  }
+  if (!session.runtimeEventStore) {
+    throw new Error(`AgentRuntime requires a durable Session: ${sessionSelection.sessionId}`);
   }
   await runtimeEventStore.initializeSession({ sessionId: session.id, workDir });
   await RuntimeRun.repairSessionProjection(session, { workDir, store: runtimeEventStore });
@@ -939,87 +948,90 @@ export async function executeAgentRuntime(
       dependencies.toolStatusSink?.(toolStatusFromRegistry(registry));
     }
 
-    await RuntimeRun.reconcileIncompleteRuns({
-      sessionId: session.id,
-      workDir,
-      store: runtimeEventStore,
-    });
-    const runtimeRun = await RuntimeRun.start({
-      sessionId: session.id,
-      workDir,
-      store: runtimeEventStore,
-    });
-    dependencies.onEvent?.({ type: "run.started", sessionId: session.id, workDir, at: Date.now() });
-    const result = await runtimeRun.run(
-      () =>
-        session.serialize(async () => {
-          dependencies.signal?.throwIfAborted();
-          if (!resumeExistingSession) {
-            const submittedPrompt = prompt;
-            const submitDecision = await runtimeState.dispatchHook(
-              "UserPromptSubmit",
-              { prompt: submittedPrompt },
-              { signal: dependencies.signal },
+    const result = await session.serialize(async () => {
+      await RuntimeRun.reconcileIncompleteRuns({
+        sessionId: session.id,
+        workDir,
+        store: runtimeEventStore,
+      });
+      const runtimeRun = await RuntimeRun.start({
+        sessionId: session.id,
+        workDir,
+        store: runtimeEventStore,
+      });
+      dependencies.onEvent?.({
+        type: "run.started",
+        sessionId: session.id,
+        workDir,
+        at: Date.now(),
+      });
+      return runtimeRun.run(async () => {
+        dependencies.signal?.throwIfAborted();
+        if (!resumeExistingSession) {
+          const submittedPrompt = prompt;
+          const submitDecision = await runtimeState.dispatchHook(
+            "UserPromptSubmit",
+            { prompt: submittedPrompt },
+            { signal: dependencies.signal },
+          );
+          if (submitDecision.decision === "deny") {
+            throw new Error(
+              `UserPromptSubmit hook 阻断了输入: ${submitDecision.reason ?? "(无原因)"}`,
             );
-            if (submitDecision.decision === "deny") {
-              throw new Error(
-                `UserPromptSubmit hook 阻断了输入: ${submitDecision.reason ?? "(无原因)"}`,
-              );
-            }
-            prompt = normalizePrompt(applyPromptHookDecision(submittedPrompt, submitDecision));
-            const expansionDecision = await runtimeState.dispatchHook(
-              "UserPromptExpansion",
-              {
-                prompt: effectiveOptions.rewindPrompt ?? submittedPrompt,
-                expandedPrompt: prompt,
-              },
-              { signal: dependencies.signal },
-            );
-            if (expansionDecision.decision === "deny") {
-              throw new Error(
-                `UserPromptExpansion hook 阻断了输入: ${expansionDecision.reason ?? "(无原因)"}`,
-              );
-            }
-            prompt = normalizePrompt(applyPromptHookDecision(prompt, expansionDecision));
-            const images: ImagePart[] | undefined =
-              effectiveOptions.images ??
-              (effectiveOptions.imagePath
-                ? [loadImage(effectiveOptions.imagePath, workDir)]
-                : undefined);
-            const rewindPointId = await session.beginRewindPoint({
-              userPrompt: effectiveOptions.rewindPrompt ?? prompt,
-              ...(effectiveOptions.rewindTranscriptIndex !== undefined
-                ? { transcriptIndex: effectiveOptions.rewindTranscriptIndex }
-                : {}),
-              ...(effectiveOptions.rewindInteractionMode !== undefined
-                ? { interactionMode: effectiveOptions.rewindInteractionMode }
-                : {}),
-              ...(effectiveOptions.rewindPrePlanMode !== undefined
-                ? { prePlanMode: effectiveOptions.rewindPrePlanMode }
-                : {}),
-            });
-            dependencies.rewindPointSink?.(rewindPointId);
-            const userReceipt = await session.commitMessageOnce(`user-message:${rewindPointId}`, {
-              role: "user",
-              content: prompt,
-              ...(images ? { images } : {}),
-            });
-            await session.bindRewindPointSource(rewindPointId, userReceipt);
           }
+          prompt = normalizePrompt(applyPromptHookDecision(submittedPrompt, submitDecision));
+          const expansionDecision = await runtimeState.dispatchHook(
+            "UserPromptExpansion",
+            {
+              prompt: effectiveOptions.rewindPrompt ?? submittedPrompt,
+              expandedPrompt: prompt,
+            },
+            { signal: dependencies.signal },
+          );
+          if (expansionDecision.decision === "deny") {
+            throw new Error(
+              `UserPromptExpansion hook 阻断了输入: ${expansionDecision.reason ?? "(无原因)"}`,
+            );
+          }
+          prompt = normalizePrompt(applyPromptHookDecision(prompt, expansionDecision));
+          const images: ImagePart[] | undefined =
+            effectiveOptions.images ??
+            (effectiveOptions.imagePath
+              ? [loadImage(effectiveOptions.imagePath, workDir)]
+              : undefined);
+          const rewindPointId = await session.beginRewindPoint({
+            userPrompt: effectiveOptions.rewindPrompt ?? prompt,
+            ...(effectiveOptions.rewindTranscriptIndex !== undefined
+              ? { transcriptIndex: effectiveOptions.rewindTranscriptIndex }
+              : {}),
+            ...(effectiveOptions.rewindInteractionMode !== undefined
+              ? { interactionMode: effectiveOptions.rewindInteractionMode }
+              : {}),
+            ...(effectiveOptions.rewindPrePlanMode !== undefined
+              ? { prePlanMode: effectiveOptions.rewindPrePlanMode }
+              : {}),
+          });
+          dependencies.rewindPointSink?.(rewindPointId);
+          const userReceipt = await session.commitMessageOnce(`user-message:${rewindPointId}`, {
+            role: "user",
+            content: prompt,
+            ...(images ? { images } : {}),
+          });
+          await session.bindRewindPointSource(rewindPointId, userReceipt);
+        }
 
-          const messages = await engine.run(session, undefined, undefined, dependencies.signal);
-          return {
-            sessionId: session.id,
-            sessionSelection,
-            workDir,
-            finalMessage: findFinalMessage(messages),
-            usage: snapshotUsage(session),
-            messages,
-            ...(traceEnabled ? { tracePath: await findTracePath(workDir, session.id) } : {}),
-          } satisfies RunAgentCliResult;
-        }),
-      dependencies.signal,
-    );
+        const messages = await engine.run(session, undefined, undefined, dependencies.signal);
+        return {
+          sessionId: session.id,
+          sessionSelection,
+          workDir,
+          finalMessage: findFinalMessage(messages),
+          usage: snapshotUsage(session),
+          messages,
+          ...(traceEnabled ? { tracePath: await findTracePath(workDir, session.id) } : {}),
+        } satisfies RunAgentCliResult;
+      }, dependencies.signal);
+    });
 
     dependencies.onEvent?.({
       type: "run.finished",
@@ -1722,22 +1734,10 @@ export function buildPermissionMiddleware(
     const diff = await computeApprovalDiff(call.name, call.arguments, workDir, workspaceRoots);
     const approvalId = `approval_${randomUUID()}`;
     const runtimeRun = currentRuntimeRun();
-    const ledger = currentRunLedger();
-    const ledgerTurn = ledger?.currentTurn;
-    let approvalRecorded = false;
     let runtimeApprovalRecorded = false;
     if (runtimeRun) {
       await runtimeRun.recordApprovalRequested(approvalId, call.id, call.name);
       runtimeApprovalRecorded = true;
-    }
-    if (ledger && ledgerTurn !== undefined) {
-      await ledger.recordApprovalRequested({
-        approvalId,
-        callId: call.id,
-        toolName: call.name,
-        turn: ledgerTurn,
-      });
-      approvalRecorded = true;
     }
     let result;
     try {
@@ -1754,19 +1754,10 @@ export function buildPermissionMiddleware(
       if (runtimeApprovalRecorded) {
         await runtimeRun!.recordApprovalSettled(approvalId, "rejected");
       }
-      if (approvalRecorded) {
-        await ledger!.recordApprovalSettled({ approvalId, decision: "rejected" });
-      }
       throw error;
     }
     if (runtimeApprovalRecorded) {
       await runtimeRun!.recordApprovalSettled(approvalId, result.allowed ? "approved" : "rejected");
-    }
-    if (approvalRecorded) {
-      await ledger!.recordApprovalSettled({
-        approvalId,
-        decision: result.allowed ? "approved" : "rejected",
-      });
     }
     if (!result.allowed || !workspaceRoots || !settings) {
       return result.allowed ? result : { ...result, denialSource: "human" };

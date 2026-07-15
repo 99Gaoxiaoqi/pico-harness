@@ -25,6 +25,7 @@ import { RuntimeStore } from "../../src/tasks/runtime-store.js";
 import { CronService } from "../../src/tasks/cron-service.js";
 import { credentialRefForModelRoute } from "../../src/provider/credential-vault.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
+import { RuntimeEventStore } from "../../src/runtime/runtime-event-store.js";
 
 const execFile = promisify(execFileCallback);
 
@@ -176,7 +177,7 @@ describe("DesktopRuntimeService integration", () => {
     await fixture.service.close();
   });
 
-  it("新建会话落入既有 JSONL，归档只持久化桌面元数据且可恢复", async () => {
+  it("新建会话落入 RuntimeEventStore，归档只持久化桌面元数据且可恢复", async () => {
     const fixture = await createFixture();
     const created = await fixture.service.handle(
       createRuntimeRequest("session.create", {
@@ -192,11 +193,13 @@ describe("DesktopRuntimeService integration", () => {
       },
     });
     const sessionId = (created as { session: { sessionId: string } }).session.sessionId;
-    expect(
-      await stat(
-        join(resolvePicoPaths(fixture.workspace).workspace.sessions, `${sessionId}.jsonl`),
-      ),
-    ).toEqual(expect.objectContaining({ size: expect.any(Number) }));
+    const runtimeStore = new RuntimeEventStore({
+      databasePath: resolvePicoPaths(fixture.workspace).workspace.runtimeDatabase,
+    });
+    await expect(runtimeStore.readSessionManifest(sessionId)).resolves.toMatchObject({
+      sessionId,
+      historySource: "runtime-event-v1",
+    });
 
     await fixture.service.handle(
       createRuntimeRequest("session.archive", { workspacePath: fixture.workspace, sessionId }),

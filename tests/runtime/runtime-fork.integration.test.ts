@@ -64,6 +64,13 @@ describe("runtime session fork", () => {
         targetMode: "default",
       }),
     ).rejects.toThrow("injected crash before Runtime bootstrap");
+    expect(await store.readSessionManifest("target-a")).toBeUndefined();
+
+    await source.commitMessages({ role: "user", content: "written after fork" });
+
+    await expect(
+      new SessionForkService({ workDir, sessionManager: sessions }).reconcileUnfinished(),
+    ).resolves.toEqual([expect.objectContaining({ state: "completed" })]);
     const target = await sessions.getOrCreate("target-a", workDir, { persistence: true });
     const seed = await target.readDurableRuntimeForkSeed();
     expect(seed).toEqual({
@@ -73,17 +80,6 @@ describe("runtime session fork", () => {
         { role: "assistant", content: "source answer" },
       ],
     });
-
-    await source.commitMessages({ role: "user", content: "written after fork" });
-
-    await RuntimeRun.bootstrapFork({
-      sourceSessionId: source.id,
-      targetSessionId: target.id,
-      messages: seed!.messages,
-      workDir,
-      store,
-    });
-    await RuntimeRun.repairSessionProjection(target, { workDir, store });
 
     const targetEvents = await store.readSession(target.id);
     expect(targetEvents.some((event) => event.kind === "session.forked")).toBe(true);
@@ -115,7 +111,7 @@ describe("runtime session fork", () => {
     await reopened.close();
   });
 
-  it("resumes a partial Runtime fork bootstrap from the target's durable seed", async () => {
+  it("resumes a partial Runtime fork bootstrap from the frozen source boundary", async () => {
     const store = new RuntimeEventStore({
       databasePath: resolvePicoPaths(workDir).workspace.runtimeDatabase,
     });
@@ -132,25 +128,8 @@ describe("runtime session fork", () => {
       }),
     );
     await RuntimeRun.repairSessionProjection(source, { workDir, store });
-    await expect(
-      new SessionForkService({
-        workDir,
-        sessionManager: sessions,
-        hooks: {
-          beforeRuntimeBootstrap() {
-            throw new Error("injected crash before Runtime bootstrap");
-          },
-        },
-      }).fork({
-        sourceSessionId: source.id,
-        targetSessionId: "target-a",
-        targetMode: "default",
-      }),
-    ).rejects.toThrow("injected crash before Runtime bootstrap");
-    expect(await store.readSessionManifest("target-a")).toBeUndefined();
+    const snapshot = await source.readDurableForkSnapshot();
     const target = await sessions.getOrCreate("target-a", workDir, { persistence: true });
-    const seed = await target.readDurableRuntimeForkSeed();
-    expect(seed).toBeDefined();
 
     const interrupted = await RuntimeRun.start({
       sessionId: target.id,
@@ -158,14 +137,15 @@ describe("runtime session fork", () => {
       store,
     });
     await interrupted.run(async () => {
-      await interrupted.recordImportedMessage(seed!.messages[0]!);
+      await interrupted.recordImportedMessage(snapshot.hydration.messages[0]!);
     });
 
     await expect(
       RuntimeRun.bootstrapFork({
-        sourceSessionId: seed!.sourceSessionId,
+        sourceSessionId: source.id,
         targetSessionId: target.id,
-        messages: seed!.messages,
+        messages: snapshot.hydration.messages,
+        sourceThroughEventId: snapshot.cursor.eventId,
         workDir,
         store,
       }),
@@ -174,19 +154,20 @@ describe("runtime session fork", () => {
 
     const events = await store.readSession(target.id);
     expect(events.filter((event) => event.kind === "message.committed")).toHaveLength(
-      seed!.messages.length,
+      snapshot.hydration.messages.length,
     );
     expect(events.filter((event) => event.kind === "session.forked")).toHaveLength(1);
     expect(events.find((event) => event.kind === "session.forked")?.data).toMatchObject({
       parentSessionId: source.id,
-      messageCount: seed!.messages.length,
+      messageCount: snapshot.hydration.messages.length,
     });
-    expect(target.getModelContext()).toEqual(seed!.messages);
+    expect(target.getModelContext()).toEqual(snapshot.hydration.messages);
     await expect(
       RuntimeRun.bootstrapFork({
-        sourceSessionId: seed!.sourceSessionId,
+        sourceSessionId: source.id,
         targetSessionId: target.id,
-        messages: seed!.messages,
+        messages: snapshot.hydration.messages,
+        sourceThroughEventId: snapshot.cursor.eventId,
         workDir,
         store,
       }),

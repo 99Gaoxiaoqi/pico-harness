@@ -3,7 +3,6 @@ import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { isAbortError } from "../provider/errors.js";
 import { resolvePicoPaths } from "../paths/pico-paths.js";
-import { RunLedger } from "../engine/run-ledger.js";
 import type { CommitReceipt } from "../engine/session-persistence.js";
 import type { Session } from "../engine/session.js";
 import type { Message } from "../schema/message.js";
@@ -70,6 +69,8 @@ export interface BootstrapRuntimeForkOptions {
   readonly targetSessionId: string;
   /** The immutable, usage-free Session seed published by SessionForkService. */
   readonly messages: readonly Message[];
+  /** Last source message included in the frozen seed, before target-side rewrites. */
+  readonly sourceThroughEventId?: string;
   readonly workDir: string;
   readonly store?: RuntimeEventStore;
 }
@@ -133,13 +134,12 @@ export function runWithRuntimeToolCall<Result>(toolCallId: string, run: () => Re
 
 /**
  * Coordinates one Agent invocation. Runtime events are authoritative; Session memory
- * and the smaller RunLedger remain replaceable projections for UI and tooling.
+ * and search indexes remain replaceable projections for UI and tooling.
  */
 export class RuntimeRun {
   readonly runId: string;
   readonly invocationId: string;
   readonly store: RuntimeEventStore;
-  readonly ledger: RunLedger;
   private readonly now: () => Date;
   private readonly parentRefs?: Pick<RuntimeEventRefs, "parentRunId" | "parentToolCallId">;
   private readonly evidenceByToolCallId = new Map<string, RuntimeEvidenceReference>();
@@ -151,17 +151,15 @@ export class RuntimeRun {
   private constructor(
     readonly sessionId: string,
     readonly workDir: string,
-    ledger: RunLedger,
     options: RuntimeRunStartOptions,
   ) {
-    this.runId = ledger.runId;
+    this.runId = options.runId ?? randomUUID();
     this.invocationId = options.invocationId ?? `invocation:${randomUUID()}`;
     this.store =
       options.store ??
       new RuntimeEventStore({
         databasePath: resolvePicoPaths(workDir).workspace.runtimeDatabase,
       } satisfies RuntimeEventStoreOptions);
-    this.ledger = ledger;
     this.now = options.now ?? (() => new Date());
     this.parentRefs = compactRefs({
       ...(options.parentRunId ? { parentRunId: options.parentRunId } : {}),
@@ -182,21 +180,9 @@ export class RuntimeRun {
       workDir: options.workDir,
       ...(options.now ? { now: options.now } : {}),
     });
-    const ledger = await RunLedger.start({
-      baseDir: resolvePicoPaths(options.workDir).workspace.runs,
-      sessionId: options.sessionId,
-      workDir: options.workDir,
-      ...(options.runId ? { runId: options.runId } : {}),
-      ...(options.now ? { now: options.now } : {}),
-    });
-    const run = new RuntimeRun(options.sessionId, options.workDir, ledger, { ...options, store });
-    try {
-      await run.recordRunStarted();
-      return run;
-    } catch (error) {
-      await ledger.finish("failed", "runtime_event_start_failed").catch(() => undefined);
-      throw error;
-    }
+    const run = new RuntimeRun(options.sessionId, options.workDir, { ...options, store });
+    await run.recordRunStarted();
+    return run;
   }
 
   /** Completes old canonical runs that reached neither a terminal event nor a clean stop. */
@@ -208,12 +194,6 @@ export class RuntimeRun {
       });
     const manifest = await store.readSessionManifest(options.sessionId);
     if (!manifest) return [];
-
-    await RunLedger.reconcileIncompleteRuns({
-      baseDir: resolvePicoPaths(options.workDir).workspace.runs,
-      sessionId: options.sessionId,
-      ...(options.now ? { now: options.now } : {}),
-    });
 
     const reconciled: string[] = [];
     for (const runId of await store.listRunIds(options.sessionId)) {
@@ -337,15 +317,13 @@ export class RuntimeRun {
         workDir: options.workDir,
         store,
       });
+      const throughEventId =
+        options.sourceThroughEventId ??
+        (await resolveForkSourceThroughEventId(store, options.sourceSessionId, messages));
       await forkRun.run(async () => {
         for (const message of messages.slice(imported.length)) {
           await forkRun.recordImportedMessage(message);
         }
-        const throughEventId = await resolveForkSourceThroughEventId(
-          store,
-          options.sourceSessionId,
-          messages,
-        );
         // This is the completion marker. Until it is durable, a future start can replay
         // the immutable target seed and finish a partially written bootstrap.
         await forkRun.recordSessionForked(options.sourceSessionId, throughEventId, completion);
@@ -451,6 +429,7 @@ export class RuntimeRun {
     eventId: string,
     message: Message,
   ): Promise<CommitReceipt | undefined> {
+    const canonicalMessage = canonicalizeRuntimeMessage(message);
     const store = new RuntimeEventStore({
       databasePath: resolvePicoPaths(session.workDir).workspace.runtimeDatabase,
     });
@@ -462,12 +441,12 @@ export class RuntimeRun {
       if (existing) {
         if (
           existing.kind !== "message.committed" ||
-          !isDeepStrictEqual(existing.data.message, message)
+          !isDeepStrictEqual(existing.data.message, canonicalMessage)
         ) {
           throw new Error(`Runtime event ID ${eventId} is already bound to another payload`);
         }
         const persisted = await store.append(existing);
-        await session.commitProjectionMessageOnce(eventId, message);
+        await session.commitProjectionMessageOnce(eventId, canonicalMessage);
         return runtimeCommitReceipt(persisted);
       }
       const run = await RuntimeRun.start({
@@ -475,7 +454,7 @@ export class RuntimeRun {
         workDir: session.workDir,
         store,
       });
-      return run.run(() => run.commitMessageOnce(session, eventId, message));
+      return run.run(() => run.commitMessageOnce(session, eventId, canonicalMessage));
     });
   }
 
@@ -495,28 +474,26 @@ export class RuntimeRun {
   }
 
   run<Result>(execute: () => Promise<Result>, signal?: AbortSignal): Promise<Result> {
-    return runtimeRunContext.run(this, () =>
-      RunLedger.runInContext(this.ledger, async () => {
+    return runtimeRunContext.run(this, async () => {
+      try {
+        const result = await execute();
+        await this.finish("completed");
+        return result;
+      } catch (error) {
+        const status: RuntimeTerminalStatus =
+          signal?.aborted || isAbortError(error) ? "cancelled" : "failed";
         try {
-          const result = await execute();
-          await this.finish("completed");
-          return result;
-        } catch (error) {
-          const status: RuntimeTerminalStatus =
-            signal?.aborted || isAbortError(error) ? "cancelled" : "failed";
-          try {
-            await this.finish(status, runtimeFailureReason(error));
-          } catch (finishError) {
-            throw new AggregateError(
-              [error, finishError],
-              "Agent run failed and its canonical terminal fact could not be persisted",
-              { cause: finishError },
-            );
-          }
-          throw error;
+          await this.finish(status, runtimeFailureReason(error));
+        } catch (finishError) {
+          throw new AggregateError(
+            [error, finishError],
+            "Agent run failed and its canonical terminal fact could not be persisted",
+            { cause: finishError },
+          );
         }
-      }),
-    );
+        throw error;
+      }
+    });
   }
 
   async recordTurnStarted(turn: number): Promise<void> {
@@ -538,22 +515,23 @@ export class RuntimeRun {
   ): Promise<CommitReceipt> {
     this.assertSession(session);
     this.assertOpen();
-    const refs = this.messageRefs(message);
+    const canonicalMessage = canonicalizeRuntimeMessage(message);
+    const refs = this.messageRefs(canonicalMessage);
     const event: RuntimeMessageCommittedEvent = {
       ...this.base(eventId),
       ...(refs ? { refs } : {}),
       kind: "message.committed",
-      data: { message: structuredClone(message) },
+      data: { message: canonicalMessage },
     };
     const persisted = await this.store.append(event);
-    await session.commitProjectionMessageOnce(eventId, message);
+    await session.commitProjectionMessageOnce(eventId, canonicalMessage);
     return runtimeCommitReceipt(persisted);
   }
 
   /** Writes one immutable, usage-free message from a fork's frozen Session seed. */
   async recordImportedMessage(source: Message): Promise<void> {
     this.assertOpen();
-    const message = stripMessageUsage(source);
+    const message = canonicalizeRuntimeMessage(stripMessageUsage(source));
     const refs = this.messageRefs(message);
     await this.store.append({
       ...this.base(createRuntimeEventId("fork-message")),
@@ -566,24 +544,26 @@ export class RuntimeRun {
   /** Persists a pre-runtime Session message without re-appending its in-memory projection. */
   async recordBootstrapMessage(message: Message): Promise<void> {
     this.assertOpen();
-    const refs = this.messageRefs(message);
+    const canonicalMessage = canonicalizeRuntimeMessage(message);
+    const refs = this.messageRefs(canonicalMessage);
     await this.store.append({
       ...this.base(createRuntimeEventId("bootstrap-message")),
       ...(refs ? { refs } : {}),
       kind: "message.committed",
-      data: { message: structuredClone(message) },
+      data: { message: canonicalMessage },
     });
   }
 
   /** Records an audit-only child-agent message without changing the parent model context. */
   async recordTranscriptMessage(message: Message): Promise<void> {
     this.assertOpen();
-    const refs = this.messageRefs(message);
+    const canonicalMessage = canonicalizeRuntimeMessage(message);
+    const refs = this.messageRefs(canonicalMessage);
     await this.store.append({
       ...this.base(createRuntimeEventId("transcript-message"), true, "transcript"),
       ...(refs ? { refs } : {}),
       kind: "message.committed",
-      data: { message: structuredClone(message) },
+      data: { message: canonicalMessage },
     });
   }
 
@@ -713,8 +693,6 @@ export class RuntimeRun {
         await this.store.append(terminal);
         this.terminal = terminal;
       }
-      // The canonical terminal record is durable before its operational header projection.
-      await this.ledger.finish(status, reason);
     })();
     return this.finishPromise;
   }
@@ -824,6 +802,16 @@ function stripMessageUsage(message: Message): Message {
   return copy;
 }
 
+function canonicalizeRuntimeMessage(message: Message): Message {
+  try {
+    const encoded = JSON.stringify(message);
+    if (encoded === undefined) throw new Error("message encoded to undefined");
+    return JSON.parse(encoded) as Message;
+  } catch (error) {
+    throw new Error("Runtime message must be JSON-serializable", { cause: error });
+  }
+}
+
 function forkSeedDigest(messages: readonly Message[]): string {
   return createHash("sha256").update(JSON.stringify(messages)).digest("hex");
 }
@@ -841,13 +829,16 @@ async function resolveForkSourceThroughEventId(
   frozenMessages: readonly Message[],
 ): Promise<string | undefined> {
   if (!(await store.readSessionManifest(sourceSessionId))) return undefined;
-  const sourceMessages = projectRuntimeSessionMessageEntries(await store.readSession(sourceSessionId));
+  const sourceMessages = projectRuntimeSessionMessageEntries(
+    await store.readSession(sourceSessionId),
+  );
   const normalizedSource = sourceMessages.map(({ message }) => stripMessageUsage(message));
   if (!isMessagePrefix(frozenMessages, normalizedSource)) return undefined;
   return sourceMessages[frozenMessages.length - 1]?.eventId;
 }
 
 function runtimeFailureReason(error: unknown): string {
+  if (isAbortError(error)) return "aborted";
   const detail = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
   return detail.slice(0, 1_000);
 }

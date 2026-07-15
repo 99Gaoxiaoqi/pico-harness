@@ -1,16 +1,15 @@
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import Database from "better-sqlite3";
 import { ToolResultArtifactStore } from "../src/context/artifact-store.js";
-import { createSessionIdentity } from "../src/engine/session-identity.js";
-import { SessionStore } from "../src/engine/session-store.js";
 import { createPicoCommandRegistry } from "../src/input/pico-command-registry.js";
 import { processUserInput } from "../src/input/process-user-input.js";
 import { FileSessionSummaryStore } from "../src/memory/summary-store.js";
 import { resolvePicoPaths } from "../src/paths/pico-paths.js";
+import { RuntimeEventStore } from "../src/runtime/runtime-event-store.js";
 import { ContentAddressedBlobGarbageCollector } from "../src/storage/blob-garbage-collector.js";
 import {
   FileHistoryBlobStore,
@@ -43,13 +42,7 @@ describe("storage governance integration", () => {
     const fileHistoryDir = join(root, "file-history");
     await mkdir(workDir, { recursive: true });
     const workspacePaths = resolvePicoPaths(workDir).workspace;
-    const sessionPath = join(workspacePaths.sessions, "session-a.jsonl");
-    const sessionStore = new SessionStore(
-      sessionPath,
-      createSessionIdentity({ sessionId: "session-a", cwd: workDir }),
-    );
-    await sessionStore.commitMessage({ role: "user", content: "keep this durable" });
-    await sessionStore.close();
+    await seedRuntimeSession(workDir, "session-a", "keep this durable");
 
     const runtime = new RuntimeStore({ workDir });
     runtime.close();
@@ -92,14 +85,8 @@ describe("storage governance integration", () => {
     cleanup.push(root);
     const workDir = join(root, "workspace");
     const workspacePaths = resolvePicoPaths(workDir).workspace;
-    const sessionPath = join(workspacePaths.sessions, "session-a.jsonl");
-    const sessionStore = new SessionStore(
-      sessionPath,
-      createSessionIdentity({ sessionId: "session-a", cwd: workDir }),
-    );
-    await sessionStore.commitMessage({ role: "user", content: "authoritative" });
-    await sessionStore.close();
-    const before = await readFile(sessionPath);
+    const runtimeStore = await seedRuntimeSession(workDir, "session-a", "authoritative");
+    const before = await runtimeStore.readSession("session-a");
 
     const badSummaryPath = join(
       workspacePaths.summaries,
@@ -115,60 +102,23 @@ describe("storage governance integration", () => {
 
     const repaired = await doctor.repair({ quarantineMalformedSidecars: true });
     expect(repaired.quarantined).toHaveLength(1);
-    await expect(readFile(sessionPath)).resolves.toEqual(before);
-    await expect(new SessionStore(sessionPath).loadStrict()).resolves.toHaveLength(1);
+    await expect(runtimeStore.readSession("session-a")).resolves.toEqual(before);
     await expect(stat(repaired.quarantined[0]!.quarantinePath)).resolves.toBeDefined();
     await expect(doctor.scan()).resolves.toMatchObject({ healthy: true, findings: [] });
   });
 
-  it("accepts a strictly replayable legacy Session and recommends non-destructive migration", async () => {
-    const root = await mkdtemp(join(tmpdir(), "pico-storage-doctor-legacy-"));
-    cleanup.push(root);
-    const workDir = join(root, "workspace");
-    const sessionPath = join(resolvePicoPaths(workDir).workspace.sessions, "legacy.jsonl");
-    await mkdir(dirname(sessionPath), { recursive: true });
-    await writeFile(
-      sessionPath,
-      `${JSON.stringify({
-        type: "message",
-        seq: 0,
-        message: { role: "user", content: "legacy but valid" },
-      })}\n`,
-      "utf8",
-    );
-
-    const report = await new StorageDoctor({
-      workDir,
-      fileHistoryDir: join(root, "file-history"),
-    }).scan();
-    expect(report).toMatchObject({
-      healthy: true,
-      findings: [
-        expect.objectContaining({
-          code: "session_legacy",
-          severity: "warning",
-          authority: "authoritative",
-        }),
-      ],
-    });
-  });
-
-  it("fails closed for future Session and runtime schemas", async () => {
+  it("fails closed for corrupt Session events and future runtime schemas", async () => {
     const root = await mkdtemp(join(tmpdir(), "pico-storage-doctor-future-schema-"));
     cleanup.push(root);
     const workDir = join(root, "workspace");
     const workspacePaths = resolvePicoPaths(workDir).workspace;
-    const sessionPath = join(workspacePaths.sessions, "future.jsonl");
-    await mkdir(dirname(sessionPath), { recursive: true });
-    await writeFile(
-      sessionPath,
-      `${JSON.stringify({ type: "meta", schemaVersion: 999 })}\n`,
-      "utf8",
-    );
-
+    await seedRuntimeSession(workDir, "future", "valid before corruption");
     const runtime = new RuntimeStore({ workDir });
     runtime.close();
     const database = new Database(workspacePaths.runtimeDatabase);
+    database
+      .prepare("UPDATE agent_runtime_events SET event_json = ? WHERE session_id = ?")
+      .run(JSON.stringify({ schemaVersion: 999 }), "future");
     database
       .prepare("INSERT INTO schema_migrations(version, name, applied_at) VALUES (?, ?, ?)")
       .run(999, "future_schema", Date.now());
@@ -690,13 +640,7 @@ describe("storage governance integration", () => {
     const fileHistoryDir = join(root, "file-history");
     await mkdir(workDir, { recursive: true });
     const workspacePaths = resolvePicoPaths(workDir).workspace;
-    const sessionPath = join(workspacePaths.sessions, "session-a.jsonl");
-    const sessionStore = new SessionStore(
-      sessionPath,
-      createSessionIdentity({ sessionId: "session-a", cwd: workDir }),
-    );
-    await sessionStore.commitMessage({ role: "user", content: "authoritative truth" });
-    await sessionStore.close();
+    await seedRuntimeSession(workDir, "session-a", "authoritative truth");
     const badSummaryPath = join(
       workspacePaths.summaries,
       `${createHash("sha256").update("session-a").digest("hex")}.json`,
@@ -737,6 +681,30 @@ describe("storage governance integration", () => {
     expect(unavailable.result.message).toContain("no repair or GC was run");
   });
 });
+
+async function seedRuntimeSession(
+  workDir: string,
+  sessionId: string,
+  content: string,
+): Promise<RuntimeEventStore> {
+  const paths = resolvePicoPaths(workDir);
+  const store = new RuntimeEventStore({ databasePath: paths.workspace.runtimeDatabase });
+  await store.initializeSession({ sessionId, workDir: paths.canonicalWorkDir });
+  await store.append({
+    schemaVersion: 1,
+    eventId: `${sessionId}:message`,
+    sessionId,
+    invocationId: `${sessionId}:fixture`,
+    runId: `${sessionId}:fixture`,
+    turnId: `${sessionId}:fixture`,
+    at: "2026-07-15T00:00:00.000Z",
+    partial: false,
+    visibility: "model",
+    kind: "message.committed",
+    data: { message: { role: "user", content } },
+  });
+  return store;
+}
 
 async function writeManifest(
   fileHistoryDir: string,
