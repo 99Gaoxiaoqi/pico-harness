@@ -53,7 +53,6 @@ export interface PicoWorkspacePaths {
   readonly pluginState: string;
   readonly hookState: string;
   readonly debugLog: string;
-  readonly migrations: string;
 }
 
 export interface PicoPaths {
@@ -151,7 +150,6 @@ export function resolvePicoPaths(
       pluginState: join(workspaceRoot, "plugins.json"),
       hookState: join(workspaceRoot, "hooks-state.json"),
       debugLog: join(workspaceRoot, "tui-debug.log"),
-      migrations: join(workspaceRoot, "migrations"),
     },
   };
 }

@@ -78,7 +78,6 @@ describe("workspace trust startup integration", () => {
     expect(firstEvents).toEqual([
       "resolve-dir",
       "trust",
-      "migration",
       "tokenizer",
       "session",
       "tui",
@@ -178,9 +177,6 @@ function createRuntime(options: {
         store: options.store,
         ...(options.prompt ? { prompt: options.prompt } : {}),
       });
-    },
-    migrateLegacyWorkspace: async () => {
-      options.events.push("migration");
     },
     primeTokenizer: async () => {
       options.events.push("tokenizer");

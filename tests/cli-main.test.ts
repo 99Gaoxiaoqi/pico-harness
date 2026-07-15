@@ -9,14 +9,12 @@ function createRuntime(): {
   primeTokenizer: ReturnType<typeof vi.fn>;
   startTuiRepl: ReturnType<typeof vi.fn>;
   resolveCliStartupSession: ReturnType<typeof vi.fn>;
-  migrateLegacyWorkspace: ReturnType<typeof vi.fn>;
 } {
   const stdout: string[] = [];
   const stderr: string[] = [];
   const primeTokenizer = vi.fn(async () => {});
   const resolveCliWorkDir = vi.fn(async () => "/workspace");
   const ensureWorkspaceTrusted = vi.fn(async () => {});
-  const migrateLegacyWorkspace = vi.fn(async () => {});
   const startTuiRepl = vi.fn(async () => {});
   const startup: CliStartupSession = {
     workDir: "/workspace",
@@ -33,7 +31,6 @@ function createRuntime(): {
       primeTokenizer,
       resolveCliWorkDir,
       ensureWorkspaceTrusted,
-      migrateLegacyWorkspace,
       startTuiRepl,
       resolveCliStartupSession,
     },
@@ -42,7 +39,6 @@ function createRuntime(): {
     primeTokenizer,
     startTuiRepl,
     resolveCliStartupSession,
-    migrateLegacyWorkspace,
   };
 }
 
@@ -95,7 +91,6 @@ describe("pico CLI entry", () => {
     await expect(runCli(args, fixture.runtime)).resolves.toBe(0);
 
     expect(fixture.primeTokenizer).toHaveBeenCalledOnce();
-    expect(fixture.migrateLegacyWorkspace).toHaveBeenCalledWith("/workspace");
     expect(fixture.resolveCliStartupSession).toHaveBeenCalledWith(args, {
       trustedWorkDir: "/workspace",
     });
