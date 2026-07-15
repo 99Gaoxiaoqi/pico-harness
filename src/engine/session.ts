@@ -10,33 +10,22 @@
 // 经此改造,engine.Run 沦为纯"打工执行器":不内部维护状态,
 // 依靠喂给它的 Session 推理 —— 随时休眠、随时被唤醒的记忆连续体。
 
-import { chmodSync, mkdirSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, open, rename, unlink, type FileHandle } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import {
   isMessageHiddenFromTranscript,
-  toCanonicalUsage,
   type CanonicalUsage,
   type Message,
   type UsageReportedField,
 } from "../schema/message.js";
 import type { CostStatus } from "../observability/pricing.js";
 import { logger } from "../observability/logger.js";
-import {
-  SessionStore,
-  SessionWriteUncertainError,
-  type CommitReceipt,
-  type SessionCursor,
-  type SessionLineage,
-  type SessionRecord,
-} from "./session-store.js";
-import { findLegacyUndoCut, replaySessionRecords } from "./session-reducer.js";
+import type { CommitReceipt, SessionCursor } from "./session-persistence.js";
 import { createSessionIdentity, type SessionIdentity } from "./session-identity.js";
 import type { GoalManager } from "./goal-manager.js";
 import {
-  createEmptyUsageSnapshot,
   normalizeSessionRuntimeStatePatch,
   SESSION_RUNTIME_STATE_VERSION,
   type PersistedSessionSettings,
@@ -71,16 +60,6 @@ import {
   fileHistoryRegisterRoot,
   resolveBackupPath,
 } from "../safety/file-history.js";
-import type {
-  SessionCatalog,
-  SessionCatalogEntry,
-  SessionCatalogLineage,
-} from "../storage/session-catalog.js";
-import {
-  getDefaultSessionCatalogProjector,
-  SessionCatalogProjector,
-  type SessionCatalogProjectionHealth,
-} from "../storage/session-catalog-projection.js";
 import { FileHistoryBlobStore } from "../storage/file-history-blob-store.js";
 import {
   StorageOperationJournal,
@@ -95,11 +74,23 @@ import {
 } from "../storage/rewind-operation-coordinator.js";
 import { resolvePicoPaths } from "../paths/pico-paths.js";
 import { currentRuntimeRun, RuntimeRun } from "../runtime/runtime-run.js";
-
-/** 清洗 sessionId 为安全文件名片段(/、: 等破坏路径的字符替换为 _) */
-function sanitizeFilePart(value: string): string {
-  return value.replaceAll(/[^a-zA-Z0-9_-]/gu, "_");
-}
+import {
+  RUNTIME_EVENT_SCHEMA_VERSION,
+  type RuntimeEventBase,
+  type RuntimeHistoryRewoundEvent,
+  type RuntimeMessageCommittedEvent,
+} from "../runtime/runtime-event.js";
+import {
+  RuntimeEventStore,
+  type RuntimeEventStoreAppendResult,
+  type RuntimeEventStoreEntry,
+  type RuntimeSessionManifest,
+} from "../runtime/runtime-event-store.js";
+import {
+  projectRuntimeSessionMessageEntries,
+  projectRuntimeSessionMessages,
+  projectRuntimeSessionState,
+} from "../runtime/runtime-session-projection.js";
 
 /** 进程级 per-key drain 表，让不同 SessionManager 实例也不会越过旧 tail。 */
 const sessionDrains = new Map<string, Promise<void>>();
@@ -142,13 +133,20 @@ function releaseSummaryStore(filePath: string): void {
   if (existing.refCount === 0) summaryStorePool.delete(filePath);
 }
 
+class SessionWriteUncertainError extends Error {
+  constructor(message: string, cause?: unknown) {
+    super(message, cause === undefined ? undefined : { cause });
+    this.name = "SessionWriteUncertainError";
+  }
+}
+
 export interface SessionOptions {
   persistence?: boolean;
   identity?: SessionIdentity;
   /** Deterministic backend injection for integration and embedders. */
   memorySearchStore?: ConversationSearchStore;
-  /** Catalog 是 JSONL 的可重建投影；false 仅供无持久测试显式关闭。 */
-  sessionCatalog?: SessionCatalog | false;
+  /** @deprecated Session catalog is no longer written by Session. */
+  sessionCatalog?: false;
 }
 
 /** fork 只读边界：hydration 与父日志游标必须指向同一次 durable flush。 */
@@ -183,7 +181,7 @@ export class Session implements SessionRuntimePersistence {
   readonly workDir: string;
   /** 会话与项目/worktree 的显式身份,供后续 resume 过滤使用。 */
   readonly identity: SessionIdentity;
-  readonly createdAt: Date;
+  createdAt: Date;
   updatedAt: Date;
 
   /** 累计输入 Token(由 CostTracker 在每轮推理后累加) */
@@ -243,19 +241,13 @@ export class Session implements SessionRuntimePersistence {
   conversationId: string;
 
   /**
-   * 持久化:事件溯源 JSONL。undefined 表示持久化关闭(环境变量门控)。
-   * 默认开启(对标 kimi-code wire.jsonl);PICO_PERSISTENCE=0 关闭。
+   * RuntimeEventStore 是唯一 durable 会话真源。undefined 表示持久化关闭。
+   * 默认开启；PICO_PERSISTENCE=0 关闭。
    */
-  private store?: SessionStore;
-  /** 下一条 record 的序列号(单调递增,保证重放顺序与幂等) */
-  private nextSeq = 0;
-  /**
-   * 唯一 JSONL 写入队列。所有 record 在逻辑变更点同步分配 seq，
-   * 再串行接到 tail，因此物理落盘顺序与逻辑调用顺序一致。
-   */
+  private store?: RuntimeEventStore;
+  private runtimeInitialization?: Promise<RuntimeSessionManifest>;
+  /** Session 发起的 RuntimeEvent 共用一条队列，保留调用顺序。 */
   private persistenceTail: Promise<void> = Promise.resolve();
-  /** Catalog 与 JSONL writer 解耦；失败只降级投影，close/flush 会等它收敛。 */
-  private catalogTail: Promise<void> = Promise.resolve();
   private compatibilityAppendTail: Promise<void> = Promise.resolve();
   private lifecycle: "open" | "write_uncertain" | "closing" | "closed" = "open";
   private persistenceFailure?: SessionWriteUncertainError;
@@ -273,16 +265,12 @@ export class Session implements SessionRuntimePersistence {
    */
   private runQueue: Promise<unknown> = Promise.resolve();
 
-  /** 当前检索后端；SQLite 不可用时由 JSONL 重放消息重建内存索引。 */
+  /** 当前检索后端；FTS5 不可用时由 RuntimeEvent 投影重建内存索引。 */
   private searchStore!: ConversationSearchStore;
   /** acquire 得到的共享 FTS5 租约；即使降级也需要对称 release。 */
   private fts5Lease?: FTS5Store;
   private summaryStore!: SessionSummaryStore;
   private summaryStoreLeasePath?: string;
-  private catalogProjector?: SessionCatalogProjector;
-  private catalogHealthState?: SessionCatalogProjectionHealth;
-  private catalogEntryState?: SessionCatalogEntry;
-  private sessionLogPath?: string;
 
   constructor(id: string, workDir: string, options?: SessionOptions) {
     this.id = id;
@@ -301,16 +289,6 @@ export class Session implements SessionRuntimePersistence {
     this.updatedAt = new Date();
     fileHistoryRegisterRoot(this.fileHistory, "workspace", resolve(workDir));
     this.initPersistence(options?.persistence);
-    const defaultCatalogEnabled = process.env.PICO_SESSION_CATALOG !== "0";
-    if (
-      this.store &&
-      options?.sessionCatalog !== false &&
-      (options?.sessionCatalog !== undefined || defaultCatalogEnabled)
-    ) {
-      this.catalogProjector = options?.sessionCatalog
-        ? new SessionCatalogProjector(options.sessionCatalog)
-        : getDefaultSessionCatalogProjector();
-    }
     this.initMemorySearch(options?.memorySearchStore);
     const summaryPath = join(resolvePicoPaths(this.workDir).workspace.memory, "summaries.json");
     if (this.store) {
@@ -327,23 +305,14 @@ export class Session implements SessionRuntimePersistence {
    *      并行测试间相互污染(vitest 默认并行跑文件,共享 process.env 不安全)。
    *   2. 环境变量 PICO_PERSISTENCE —— 生产入口的全局默认,=0 关闭。
    *   3. 默认开启。
-   * 文件落点使用隔离的 workspace state sessions/<id>.jsonl。
+   * durable 事件落点为 workspace runtime.sqlite。
    */
   private initPersistence(explicit?: boolean): void {
-    // 显式参数优先;未传时回落到环境变量,再回落到默认开启
     const enabled = explicit ?? process.env.PICO_PERSISTENCE !== "0";
     if (!enabled) return;
-    try {
-      const dir = resolvePicoPaths(this.workDir).workspace.sessions;
-      mkdirSync(dir, { recursive: true, mode: 0o700 });
-      chmodSync(dir, 0o700);
-      this.sessionLogPath = join(dir, `${sanitizeFilePart(this.id)}.jsonl`);
-      this.store = new SessionStore(this.sessionLogPath, this.identity);
-    } catch (error) {
-      // 持久化初始化失败不应阻断会话本身,降级为纯内存
-      logger.warn({ error: String(error) }, "[session] 持久化初始化失败,降级为纯内存");
-      this.store = undefined;
-    }
+    this.store = new RuntimeEventStore({
+      databasePath: resolvePicoPaths(this.workDir).workspace.runtimeDatabase,
+    });
   }
 
   /**
@@ -366,7 +335,7 @@ export class Session implements SessionRuntimePersistence {
       }
       this.searchStore = this.createJsonlMemoryFallback(store?.status);
     } catch (err) {
-      logger.warn({ err }, "[session] FTS5 初始化失败,降级为 JSONL 重建索引");
+      logger.warn({ err }, "[session] FTS5 初始化失败,降级为 RuntimeEvent 可重建内存索引");
       this.searchStore = this.createJsonlMemoryFallback({
         backend: "sqlite_fts5",
         state: "degraded",
@@ -382,7 +351,7 @@ export class Session implements SessionRuntimePersistence {
 
   private createJsonlMemoryFallback(status?: MemoryBackendStatus): JsonlMemoryStore {
     return new JsonlMemoryStore({
-      persistentSource: this.store ? "session_jsonl" : "none",
+      persistentSource: this.store ? "sqlite" : "none",
       reason: status?.reason ?? "SQLite FTS5 unavailable",
       ...(status?.recommendation ? { recommendation: status.recommendation } : {}),
       nodeVersion: status?.nodeVersion,
@@ -390,7 +359,7 @@ export class Session implements SessionRuntimePersistence {
     });
   }
 
-  /** SQLite 在运行期失效时立即切换到可重建的 JSONL 内存索引。 */
+  /** FTS5 在运行期失效时立即切换到可重建的进程内索引。 */
   private switchMemorySearchToJsonlIfDegraded(): boolean {
     const current = this.searchStore;
     const status = current.status;
@@ -408,13 +377,13 @@ export class Session implements SessionRuntimePersistence {
     }
     logger.warn(
       { reason: status.reason, backend: status.backend },
-      "[session] 记忆索引运行期降级,已切换为 JSONL 重建索引",
+      "[session] 记忆索引运行期降级,已切换为 RuntimeEvent 可重建内存索引",
     );
     return true;
   }
 
   /**
-   * 重启后重放事件日志,重建内存 history(对标 kimi-code AgentRecords.replay)。
+   * 重启后读取 runtime.sqlite manifest + events，重建内存投影。
    * 在 SessionManager.getOrCreate 新建实例时自动调用一次。
    * 持久化关闭时为空操作。
    */
@@ -424,39 +393,47 @@ export class Session implements SessionRuntimePersistence {
       this.rebuildSearchIndex();
       return;
     }
-    let records;
     try {
-      await this.store.openWriter();
-      records = await this.store.loadStrict();
-      this.conversationId = `${this.store.getLogId()}:${this.store.getEpoch()}`;
+      const manifest = await this.ensureRuntimeSession();
+      const entries = await this.store.readSessionEntries(this.id);
+      const events = entries.map(({ event }) => event);
+      const runtime = projectRuntimeSessionState(events);
+      this.createdAt = new Date(manifest.createdAt);
+      this.persistedSettings = runtime.settings;
+      this.persistedGoal = runtime.goal;
+      this.restoreUsage(runtime.usage);
+      this.applyRuntimeHistoryProjection(entries);
+      await this.recoverRewindPointBindings(entries);
     } catch (error) {
-      this.markWriteUncertain("Session journal open/replay failed", error);
+      this.markWriteUncertain("Runtime session initialize/replay failed", error);
       throw error;
     }
-    await this.projectSessionCatalog({ openedAt: new Date().toISOString() });
-    if (records.length === 0) {
-      this.rebuildSearchIndex(this.store.getHeadCursor());
-      await this.recoverStorageOperations();
-      return;
-    }
-
-    const replay = replaySessionRecords(records);
-    this.history = replay.history;
-    this.persistedSettings = replay.runtime.settings;
-    this.persistedGoal = replay.runtime.goal;
-    // 旧 JSONL 没有 runtime_state:从当前有效 assistant message.usage 回填 token。
-    // 旧数据无计价路由，成本只能保持 0/null。新日志取持久值与可恢复值的较大者，
-    // 容忍“message 已落盘、usage 记录末行撕裂”。
-    this.restoreUsage(
-      mergeUsageWithHistory(replay.runtime.usage, deriveUsageFromHistory(this.history)),
-    );
-    // 3.1:重放后从 history 重建 toolResultMeta(cachedAt 未知,用当前时间;
-    // accessCount 归零)。避免恢复后已有 ToolResult 丢失年龄追踪。
-    this.rebuildToolResultMeta();
-    this.nextSeq = replay.maxSeq + 1;
-    await this.recoverRewindPointBindings(records);
-    this.rebuildSearchIndex(this.store.getHeadCursor());
     await this.recoverStorageOperations();
+  }
+
+  private ensureRuntimeSession(): Promise<RuntimeSessionManifest> {
+    const store = this.store;
+    if (!store) return Promise.reject(new Error("Session persistence is disabled"));
+    if (this.runtimeInitialization) return this.runtimeInitialization;
+    const initialization = store.initializeSession({ sessionId: this.id, workDir: this.workDir });
+    const tracked = initialization.catch((error: unknown) => {
+      if (this.runtimeInitialization === tracked) this.runtimeInitialization = undefined;
+      throw error;
+    });
+    this.runtimeInitialization = tracked;
+    return tracked;
+  }
+
+  private applyRuntimeHistoryProjection(entries: readonly RuntimeEventStoreEntry[]): void {
+    this.history = projectRuntimeSessionMessages(entries.map(({ event }) => event));
+    this.deferredMessages = [];
+    this.rebuildPendingToolState();
+    this.rebuildToolResultMeta();
+    const cursor = runtimeCursorForEntries(this.id, entries);
+    this.conversationId = cursor ? `${cursor.logId}:${cursor.epoch}` : this.id;
+    const lastEvent = entries.at(-1)?.event;
+    this.updatedAt = lastEvent ? new Date(lastEvent.at) : this.createdAt;
+    this.rebuildSearchIndex(cursor);
   }
 
   private rebuildSearchIndex(cursor?: CommitReceipt["cursor"]): void {
@@ -480,6 +457,17 @@ export class Session implements SessionRuntimePersistence {
         if (!this.toolResultMeta.has(msg.toolCallId)) {
           this.toolResultMeta.set(msg.toolCallId, { cachedAt: now, accessCount: 0 });
         }
+      }
+    }
+  }
+
+  private rebuildPendingToolState(): void {
+    this.pendingToolCallIds.clear();
+    for (const message of this.history) {
+      if (message.role === "assistant") {
+        for (const toolCall of message.toolCalls ?? []) this.pendingToolCallIds.add(toolCall.id);
+      } else if (message.role === "user" && message.toolCallId) {
+        this.pendingToolCallIds.delete(message.toolCallId);
       }
     }
   }
@@ -511,11 +499,16 @@ export class Session implements SessionRuntimePersistence {
     }
   }
 
-  private async recoverRewindPointBindings(records: readonly SessionRecord[]): Promise<void> {
+  private async recoverRewindPointBindings(
+    entries: readonly RuntimeEventStoreEntry[],
+  ): Promise<void> {
     const events = new Map(
-      records
-        .filter((record) => record.type === "event" && record.kind === "message.appended")
-        .map((record) => [record.eventId, record] as const),
+      entries
+        .filter(
+          (entry): entry is RuntimeEventStoreEntry & { event: RuntimeMessageCommittedEvent } =>
+            entry.event.kind === "message.committed",
+        )
+        .map((entry) => [entry.event.eventId, entry] as const),
     );
     for (const snapshot of this.fileHistory.snapshots) {
       if (snapshot.sourceMessageEventId) continue;
@@ -526,8 +519,8 @@ export class Session implements SessionRuntimePersistence {
         this.fileHistory,
         {
           messageId: snapshot.messageId,
-          sourceMessageEventId: event.eventId,
-          beforeSessionSeq: snapshot.beforeSessionSeq ?? event.seq,
+          sourceMessageEventId: event.event.eventId,
+          beforeSessionSeq: snapshot.beforeSessionSeq ?? event.sequence,
         },
         this.id,
       );
@@ -615,7 +608,7 @@ export class Session implements SessionRuntimePersistence {
     return structuredClone(snapshot);
   }
 
-  /** 更新一个完整 section，内存立即生效，然后追加到现有 Session JSONL。 */
+  /** 更新一个完整 section，内存立即生效，然后追加 session.state.committed。 */
   updateRuntimeState(patch: SessionRuntimeStatePatch): void {
     const normalized = normalizeSessionRuntimeStatePatch(patch);
     if (!normalized) {
@@ -629,18 +622,17 @@ export class Session implements SessionRuntimePersistence {
 
     if (this.store) {
       const persisted = structuredClone(normalized);
-      void this.commitPersistence("runtime_state", (store, seq) =>
-        store.commitRuntimeState(persisted, { expectedSeq: seq }),
-      )
-        .then((receipt) => this.scheduleSessionCatalog(receipt))
-        .catch((error: unknown) => {
-          logger.error({ error: String(error) }, "[session] runtime_state 持久化失败");
-        });
+      void this.enqueuePersistence("runtime state", async (store) => {
+        await this.ensureRuntimeSession();
+        return store.appendSessionState(this.id, persisted);
+      }).catch((error: unknown) => {
+        logger.error({ error: String(error) }, "[session] runtime state 持久化失败");
+      });
     }
   }
 
   /**
-   * 把会话 GoalManager 绑定到同一份 JSONL。返回解绑函数供 11.4 热切换使用。
+   * 把会话 GoalManager 绑定到 RuntimeEvent 状态流。
    * 有持久快照时先恢复；无快照时保存当前初始状态。
    */
   bindGoalManager(manager: GoalManager): () => void {
@@ -666,79 +658,51 @@ export class Session implements SessionRuntimePersistence {
   async flushPersistence(): Promise<void> {
     await this.compatibilityAppendTail;
     await this.persistenceTail;
-    await this.catalogTail;
     if (this.persistenceFailure) throw this.persistenceFailure;
   }
 
-  /** 在首个 await 前同步冻结状态与当前 tail，不被后来写入污染边界。 */
-  readHydrationSnapshot(): Promise<SessionHydrationSnapshot> {
-    const snapshot: SessionHydrationSnapshot = {
-      schemaVersion: 1,
-      persistenceSequence: this.store && this.nextSeq > 0 ? this.nextSeq - 1 : null,
-      sessionId: this.id,
-      conversationId: this.conversationId,
-      workDir: this.workDir,
-      identity: structuredClone(this.identity),
-      createdAt: this.createdAt.toISOString(),
-      updatedAt: this.updatedAt.toISOString(),
-      messages: structuredClone(this.history),
-      runtime: this.getRuntimeStateSnapshot(),
-    };
-    const barrier = this.persistenceTail;
-    return barrier.then(() => snapshot);
+  /** 从 durable RuntimeEvent 边界读取水合快照。 */
+  async readHydrationSnapshot(): Promise<SessionHydrationSnapshot> {
+    await this.flushPersistence();
+    const store = this.store;
+    if (!store) {
+      return {
+        schemaVersion: 1,
+        persistenceSequence: null,
+        sessionId: this.id,
+        conversationId: this.conversationId,
+        workDir: this.workDir,
+        identity: structuredClone(this.identity),
+        createdAt: this.createdAt.toISOString(),
+        updatedAt: this.updatedAt.toISOString(),
+        messages: structuredClone(this.history),
+        runtime: this.getRuntimeStateSnapshot(),
+      };
+    }
+    const manifest = await this.ensureRuntimeSession();
+    const entries = await store.readSessionEntries(this.id);
+    return this.runtimeHydrationSnapshot(manifest, entries);
   }
 
   /**
-   * 在 fork 前把 source 的兼容写、JSONL 和 Catalog 队列全部 drain，
-   * 再从同一条 JSONL 真源解析精确 head。返回后 source 可继续追加，
+   * 在 fork 前 drain Session 写队列，再从同一批 RuntimeEvent entries
+   * 生成 hydration 与 cursor。返回后 source 可继续追加，
    * 调用方必须以 cursor 作为已冻结 bundle 的父边界。
    */
   async readDurableForkSnapshot(): Promise<DurableSessionForkSnapshot> {
     await this.flushPersistence();
-    const hydration = await this.readHydrationSnapshot();
     const store = this.store;
-    if (!store || hydration.persistenceSequence === null) {
+    if (!store) {
       throw new Error(`Session ${this.id} 还没有可用于 fork 的 durable event`);
     }
-
-    const journal = await store.inspectJournal({ strict: true });
-    const record = journal.records.find(
-      (candidate) => candidate.seq === hydration.persistenceSequence,
-    );
-    if (!record) {
-      throw new Error(
-        `Session ${this.id} 的 fork 游标 ${hydration.persistenceSequence} 无法从 JSONL 恢复`,
-      );
-    }
-    let epoch = 0;
-    let rootLogId = store.getLogId();
-    if (journal.metadata && "lineage" in journal.metadata) {
-      rootLogId = journal.metadata.lineage.rootLogId;
-    }
-    for (const candidate of journal.records) {
-      if (candidate.seq > record.seq) break;
-      if (candidate.type === "event") {
-        epoch = Math.max(epoch, candidate.epoch);
-        if (candidate.kind === "session.seeded" && candidate.data.lineage) {
-          rootLogId = candidate.data.lineage.rootLogId;
-        }
-      } else if (
-        candidate.type === "truncate" ||
-        candidate.type === "undo" ||
-        candidate.type === "rewind_to"
-      ) {
-        epoch++;
-      }
-    }
+    const manifest = await this.ensureRuntimeSession();
+    const entries = await store.readSessionEntries(this.id);
+    const cursor = runtimeCursorForEntries(this.id, entries);
+    if (!cursor) throw new Error(`Session ${this.id} 还没有可用于 fork 的 durable event`);
     return {
-      hydration,
-      rootLogId,
-      cursor: {
-        logId: store.getLogId(),
-        seq: record.seq,
-        epoch,
-        eventId: record.type === "event" ? record.eventId : `legacy:${record.seq}:${record.type}`,
-      },
+      hydration: this.runtimeHydrationSnapshot(manifest, entries),
+      rootLogId: await resolveRuntimeRootSessionId(store, this.id),
+      cursor,
     };
   }
 
@@ -748,32 +712,47 @@ export class Session implements SessionRuntimePersistence {
    */
   async readDurableRuntimeForkSeed(): Promise<DurableRuntimeForkSeed | undefined> {
     await this.flushPersistence();
-    // RuntimeEvent remains durable even when a caller deliberately opens this Session
-    // without a writer. A published fork must still be able to recover its immutable seed.
-    const store =
-      this.store ??
-      new SessionStore(
-        join(
-          resolvePicoPaths(this.workDir).workspace.sessions,
-          `${sanitizeFilePart(this.id)}.jsonl`,
-        ),
-      );
-    const journal = await store.inspectJournal({ strict: true });
-    const seed = journal.records.find(
-      (record) => record.type === "event" && record.kind === "session.seeded",
+    const store = this.store;
+    if (!store) return undefined;
+    await this.ensureRuntimeSession();
+    const events = await store.readSession(this.id);
+    const seedIndex = events.findIndex(
+      (event) => event.kind === "session.forked" && event.data.sourceDigest !== undefined,
     );
-    if (!seed) return undefined;
-    const lineage = seed.data.lineage;
+    if (seedIndex < 0) return undefined;
+    const seed = events[seedIndex]!;
+    if (seed.kind !== "session.forked" || seed.data.parentSessionId === this.id) return undefined;
+    const messages = projectRuntimeSessionMessages(events.slice(0, seedIndex + 1));
     if (
-      lineage?.relation !== "fork" ||
-      !lineage.parentSessionId ||
-      lineage.parentSessionId === this.id
+      seed.data.messageCount !== messages.length ||
+      seed.data.sourceDigest !== messageDigest(messages)
     ) {
-      return undefined;
+      throw new Error(`Runtime fork seed ${this.id} 与完成标记不一致`);
     }
     return {
-      sourceSessionId: lineage.parentSessionId,
-      messages: structuredClone(seed.data.messages),
+      sourceSessionId: seed.data.parentSessionId,
+      messages,
+    };
+  }
+
+  private runtimeHydrationSnapshot(
+    manifest: RuntimeSessionManifest,
+    entries: readonly RuntimeEventStoreEntry[],
+  ): SessionHydrationSnapshot {
+    const events = entries.map(({ event }) => event);
+    const cursor = runtimeCursorForEntries(this.id, entries);
+    const updatedAt = entries.at(-1)?.event.at ?? manifest.createdAt;
+    return {
+      schemaVersion: 1,
+      persistenceSequence: cursor?.seq ?? null,
+      sessionId: this.id,
+      conversationId: cursor ? `${cursor.logId}:${cursor.epoch}` : this.id,
+      workDir: this.workDir,
+      identity: structuredClone(this.identity),
+      createdAt: manifest.createdAt,
+      updatedAt,
+      messages: projectRuntimeSessionMessages(events),
+      runtime: projectRuntimeSessionState(events),
     };
   }
 
@@ -819,68 +798,38 @@ export class Session implements SessionRuntimePersistence {
     this.totalUnknownCostReports = usage.totalUnknownCostReports;
   }
 
-  /**
-   * 向 Session 追加消息(可批量)。内存写后追加事件到 JSONL(对标 kimi-code wire.jsonl)
-   *
-   * 3.4 deferredMessages:tool 调用顺序完整性保证。
-   * - assistant 带 toolCalls:登记 pendingToolCallIds(等待对应 ToolResult)
-   * - ToolResult 到达:从 pendingToolCallIds 删除;若清空,把 deferredMessages flush 入 history
-   * - 其他消息:若 pendingToolCallIds 非空,暂存到 deferredMessages 不入 history;
-   *   否则正常入 history
-   */
   /** @deprecated 仅供 legacy 同步调用方；生产路径必须 await commitMessages。 */
   append(...msgs: Message[]): void {
-    if (this.store) {
-      for (const msg of msgs) this.appendOneCompatibility(msg);
+    if (!this.store) {
+      for (const msg of msgs) this.appendOneInMemory(msg);
       return;
     }
-    for (const msg of msgs) this.appendOneInMemory(msg);
-  }
-
-  private appendOneCompatibility(msg: Message): void {
-    const prepared = this.prepareAppend(msg);
-    if (prepared.deferred) return;
-    this.doAppend(msg);
-    const persisted = structuredClone(msg);
-    const operation = this.commitPersistence("compatibility message", (store, seq) =>
-      store.commitMessage(persisted, { expectedSeq: seq }),
-    );
-    void operation.then(
-      (receipt) => this.scheduleSessionCatalog(receipt, { appendedMessage: msg }),
-      () => undefined,
-    );
+    const operation = this.commitMessages(...msgs);
     this.compatibilityAppendTail = Promise.all([this.compatibilityAppendTail, operation])
       .then(() => undefined)
       .catch((error: unknown) => {
         logger.error({ error: String(error) }, "[session] 兼容 append 持久化失败");
       });
-    if (
-      prepared.toolResult &&
-      this.pendingToolCallIds.size === 0 &&
-      this.deferredMessages.length > 0
-    ) {
-      const pending = this.deferredMessages;
-      this.deferredMessages = [];
-      for (const deferred of pending) this.appendOneCompatibility(deferred);
-    }
   }
 
-  /** 生产接口：每条消息在 JSONL fdatasync 后才进入正式 history/FTS。 */
+  /** 生产接口：RuntimeEvent durable 后才刷新 Session/FTS 内存投影。 */
   async commitMessages(...msgs: Message[]): Promise<void> {
     this.assertWritable();
-    const runtimeRun = currentRuntimeRun();
-    if (runtimeRun?.sessionId === this.id) {
-      await runtimeRun.commitMessages(this, msgs);
-      return;
-    }
-    if (this.store && (await RuntimeRun.commitExternalMessages(this, msgs))) {
-      return;
-    }
     if (!this.store) {
       for (const msg of msgs) this.appendOneInMemory(msg);
       return;
     }
-    for (const msg of msgs) await this.appendOneDurable(msg);
+    const runtimeRun = currentRuntimeRun();
+    await this.enqueuePersistence("messages", async () => {
+      await this.ensureRuntimeSession();
+      if (runtimeRun?.sessionId === this.id) {
+        await runtimeRun.commitMessages(this, msgs);
+        return;
+      }
+      if (!(await RuntimeRun.commitExternalMessages(this, msgs))) {
+        throw new Error(`Runtime session ${this.id} is not initialized`);
+      }
+    });
   }
 
   /**
@@ -890,15 +839,17 @@ export class Session implements SessionRuntimePersistence {
    */
   async commitMessageOnce(eventId: string, message: Message): Promise<CommitReceipt> {
     this.assertWritable();
+    if (!this.store) return this.commitProjectionMessageOnce(eventId, message);
     const runtimeRun = currentRuntimeRun();
-    if (runtimeRun?.sessionId === this.id) {
-      return runtimeRun.commitMessageOnce(this, eventId, message);
-    }
-    const runtimeReceipt = this.store
-      ? await RuntimeRun.commitExternalMessageOnce(this, eventId, message)
-      : undefined;
-    if (runtimeReceipt) return runtimeReceipt;
-    return this.commitProjectionMessageOnce(eventId, message);
+    return this.enqueuePersistence("message", async () => {
+      await this.ensureRuntimeSession();
+      if (runtimeRun?.sessionId === this.id) {
+        return runtimeRun.commitMessageOnce(this, eventId, message);
+      }
+      const receipt = await RuntimeRun.commitExternalMessageOnce(this, eventId, message);
+      if (!receipt) throw new Error(`Runtime session ${this.id} is not initialized`);
+      return receipt;
+    });
   }
 
   /**
@@ -949,34 +900,31 @@ export class Session implements SessionRuntimePersistence {
       }
       return receipt;
     }
-    const prepared = this.prepareAppend(message);
-    if (prepared.deferred) {
-      throw new Error("Exactly-once message cannot be deferred behind incomplete tool results");
+    await this.ensureRuntimeSession();
+    const entries = await this.store.readSessionEntries(this.id);
+    const entry = entries.find((candidate) => candidate.event.eventId === eventId);
+    if (!entry || entry.event.kind !== "message.committed") {
+      throw new Error(`Runtime message event ${eventId} is not durable`);
     }
-    const receipt = await this.commitAppend(message, eventId);
-    if (
-      prepared.toolResult &&
-      this.pendingToolCallIds.size === 0 &&
-      this.deferredMessages.length > 0
-    ) {
-      const pending = this.deferredMessages;
-      this.deferredMessages = [];
-      for (const deferred of pending) await this.appendOneDurable(deferred);
+    if (!isDeepStrictEqual(entry.event.data.message, message)) {
+      throw new Error(`Runtime event ID ${eventId} is already bound to another payload`);
     }
-    return receipt;
+    this.applyRuntimeHistoryProjection(entries);
+    return commitReceiptFromEntry(this.id, entries, entry, false);
   }
 
-  /** Checks whether the Session JSONL projection already contains a stable RuntimeEvent ID. */
+  /** Checks the canonical RuntimeEvent entries for a stable event ID. */
   async hasProjectionEvent(eventId: string): Promise<boolean> {
     if (!eventId.trim()) return false;
     if (!this.store) return this.inMemoryCommitReceipts.has(eventId);
-    return this.store.hasEvent(eventId);
+    await this.ensureRuntimeSession();
+    return (await this.store.readSessionEntries(this.id)).some(
+      (entry) => entry.event.eventId === eventId,
+    );
   }
 
   /**
-   * Rebuilds this replaceable Session projection from canonical RuntimeEvent history.
-   * The event is deliberately a Session compaction record because it atomically replaces
-   * the entire projection while leaving the RuntimeEvent source untouched.
+   * Rebuilds the disposable Session projection from canonical RuntimeEvent history.
    */
   async replaceRuntimeProjection(
     messages: readonly Message[],
@@ -984,32 +932,22 @@ export class Session implements SessionRuntimePersistence {
   ): Promise<void> {
     this.assertWritable();
     if (!projectionEventId.trim()) throw new Error("Runtime projection eventId 不能为空");
-    const nextHistory: Message[] = structuredClone([...messages]);
-    let receipt: CommitReceipt | undefined;
-    if (this.store) {
-      receipt =
-        nextHistory.length === 0
-          ? await this.commitPersistence("runtime projection clear", (store, seq) =>
-              store.commitTruncate(this.history.length, {
-                expectedSeq: seq,
-                eventId: projectionEventId,
-              }),
-            )
-          : await this.commitPersistence("runtime projection replace", (store, seq) =>
-              store.commitCompaction(nextHistory[0]!, nextHistory.slice(1), {
-                expectedSeq: seq,
-                eventId: projectionEventId,
-              }),
-            );
+    if (!this.store) {
+      this.history = structuredClone([...messages]);
+      this.deferredMessages = [];
+      this.rebuildPendingToolState();
+      this.rebuildToolResultMeta();
+      this.rebuildSearchIndex();
+      this.updatedAt = new Date();
+      return;
     }
-    this.history = nextHistory;
-    this.deferredMessages = [];
-    this.pendingToolCallIds.clear();
-    this.rebuildToolResultMeta();
-    this.rebuildSearchIndex(receipt?.cursor);
-    if (receipt) this.conversationId = `${receipt.cursor.logId}:${receipt.cursor.epoch}`;
-    this.updatedAt = new Date();
-    if (receipt) this.scheduleSessionCatalog(receipt, { rebuildSummary: true });
+    await this.ensureRuntimeSession();
+    const entries = await this.store.readSessionEntries(this.id);
+    const projected = projectRuntimeSessionMessages(entries.map(({ event }) => event));
+    if (!isDeepStrictEqual(projected, messages)) {
+      throw new Error(`Runtime projection ${projectionEventId} does not match canonical events`);
+    }
+    this.applyRuntimeHistoryProjection(entries);
   }
 
   /** Rebuilds the replaceable Session usage projection from canonical model-call facts. */
@@ -1018,74 +956,42 @@ export class Session implements SessionRuntimePersistence {
     if (!projectionEventId.trim()) throw new Error("Runtime usage projection eventId 不能为空");
     const normalized = normalizeSessionRuntimeStatePatch({ usage })?.usage;
     if (!normalized) throw new Error("Runtime usage projection is invalid");
-    let receipt: CommitReceipt | undefined;
-    if (this.store) {
-      receipt = await this.commitPersistence("runtime usage projection", (store, seq) =>
-        store.commitRuntimeState(
-          { usage: normalized },
-          { expectedSeq: seq, eventId: projectionEventId },
-        ),
-      );
+    if (!this.store) {
+      this.restoreUsage(normalized);
+      this.updatedAt = new Date();
+      return;
     }
-    this.restoreUsage(normalized);
-    this.updatedAt = new Date();
-    if (receipt) this.scheduleSessionCatalog(receipt);
+    await this.ensureRuntimeSession();
+    const events = await this.store.readSession(this.id);
+    const projected = projectRuntimeSessionState(events).usage;
+    if (!isDeepStrictEqual(projected, normalized)) {
+      throw new Error(`Runtime usage projection ${projectionEventId} is stale`);
+    }
+    this.restoreUsage(projected);
+    this.updatedAt = new Date(events.at(-1)?.at ?? this.updatedAt);
   }
 
-  /**
-   * 用父会话的 durable cursor 原子播种 fork。Catalog 重建时从
-   * session.seeded 事件取 parentLogId/forkEventId，不再依赖可变的标题。
-   */
+  /** 用 RuntimeEvent 拷贝父会话的冻结消息投影。 */
   async seedForkFrom(source: Session, messages: readonly Message[]): Promise<void> {
     this.assertWritable();
-    if (this.history.length > 0) return;
-    const parent = await source.readDurableForkPoint();
-    const lineage = {
-      relation: "fork",
-      rootLogId: parent.rootLogId,
-      ...(parent.cursor ? { parent: parent.cursor } : {}),
-      parentSessionId: source.id,
-    } satisfies SessionLineage;
     const seeded = [...structuredClone(messages)];
     if (!this.store) {
+      if (this.history.length > 0) return;
       for (const message of seeded) this.appendOneInMemory(message);
       return;
     }
-    const receipt = await this.commitPersistence("fork seed", (store, seq) =>
-      store.commitSeed(seeded, lineage, { expectedSeq: seq }),
-    );
-    this.history = seeded;
-    this.conversationId = `${receipt.cursor.logId}:${receipt.cursor.epoch}`;
-    this.updatedAt = new Date();
-    this.rebuildToolResultMeta();
-    this.rebuildSearchIndex(receipt.cursor);
-    this.scheduleSessionCatalog(receipt, {
-      rebuildSummary: true,
-      lineage: catalogLineageFromSession(lineage, source.id),
+    await source.readDurableForkSnapshot();
+    await this.enqueuePersistence("fork seed", async (store) => {
+      await this.ensureRuntimeSession();
+      await RuntimeRun.bootstrapFork({
+        sourceSessionId: source.id,
+        targetSessionId: this.id,
+        messages: seeded,
+        workDir: this.workDir,
+        store,
+      });
+      this.applyRuntimeHistoryProjection(await store.readSessionEntries(this.id));
     });
-  }
-
-  private async readDurableForkPoint(): Promise<{
-    readonly rootLogId: string;
-    readonly cursor?: CommitReceipt["cursor"];
-  }> {
-    await this.flushPersistence();
-    const store = this.store;
-    if (!store) return { rootLogId: this.id };
-    const snapshot = await store.inspectJournal();
-    let rootLogId =
-      snapshot.metadata && "lineage" in snapshot.metadata
-        ? snapshot.metadata.lineage.rootLogId
-        : store.getLogId();
-    for (const record of snapshot.records) {
-      if (record.type === "event" && record.kind === "session.seeded" && record.data.lineage) {
-        rootLogId = record.data.lineage.rootLogId;
-      }
-    }
-    return {
-      rootLogId,
-      ...(store.getHeadCursor() ? { cursor: store.getHeadCursor() } : {}),
-    };
   }
 
   private prepareAppend(msg: Message): {
@@ -1142,21 +1048,6 @@ export class Session implements SessionRuntimePersistence {
     }
   }
 
-  private async appendOneDurable(msg: Message): Promise<void> {
-    const prepared = this.prepareAppend(msg);
-    if (prepared.deferred) return;
-    await this.commitAppend(msg);
-    if (
-      prepared.toolResult &&
-      this.pendingToolCallIds.size === 0 &&
-      this.deferredMessages.length > 0
-    ) {
-      const pending = this.deferredMessages;
-      this.deferredMessages = [];
-      for (const deferred of pending) await this.appendOneDurable(deferred);
-    }
-  }
-
   /** persistence:false 兼容路径。 */
   private doAppend(msg: Message): void {
     const beforeLen = this.history.length;
@@ -1171,30 +1062,6 @@ export class Session implements SessionRuntimePersistence {
     }
   }
 
-  private async commitAppend(msg: Message, eventId?: string): Promise<CommitReceipt> {
-    const beforeLen = this.history.length;
-    const persisted = structuredClone(msg);
-    const receipt = await this.commitPersistence("message", (store, seq) =>
-      store.commitMessage(persisted, { expectedSeq: seq, ...(eventId ? { eventId } : {}) }),
-    );
-    if (!receipt.inserted) return receipt;
-    this.history.push(msg);
-    this.conversationId = `${receipt.cursor.logId}:${receipt.cursor.epoch}`;
-    this.updatedAt = new Date();
-    try {
-      if (this.searchStore.projectInsert) {
-        this.searchStore.projectInsert(this.id, beforeLen, msg, receipt.cursor);
-      } else {
-        this.searchStore.insert(this.id, beforeLen, msg);
-      }
-      this.switchMemorySearchToJsonlIfDegraded();
-    } catch (err) {
-      logger.warn({ err }, "[session] 记忆投影失败");
-    }
-    this.scheduleSessionCatalog(receipt, { appendedMessage: msg });
-    return receipt;
-  }
-
   /**
    * 硬重置兜底:截断历史,只保留 fromIndex 起的消息(含)。
    * 用于 loop.ts 捕获 ContextCompactionError 后,丢弃爆掉的历史,
@@ -1205,49 +1072,40 @@ export class Session implements SessionRuntimePersistence {
     this.assertWritable();
     if (fromIndex < 0) fromIndex = 0;
     const nextHistory = fromIndex >= this.history.length ? [] : this.history.slice(fromIndex);
-    const receipt = this.store
-      ? await this.commitPersistence("truncate", (store, seq) =>
-          store.commitTruncate(fromIndex, { expectedSeq: seq }),
-        )
-      : undefined;
+    if (this.store) {
+      await this.replaceRuntimeHistory(nextHistory, "truncate");
+      return;
+    }
     this.history = nextHistory;
-    if (receipt) this.conversationId = `${receipt.cursor.logId}:${receipt.cursor.epoch}`;
-    this.rebuildSearchIndex(receipt?.cursor);
+    this.rebuildSearchIndex();
     this.pruneToolResultMeta();
     this.updatedAt = new Date();
-    if (receipt) this.scheduleSessionCatalog(receipt, { rebuildSummary: true });
   }
 
   /**
    * 对话 undo:从末尾向前删 count 个 user prompt 轮次。
    * 跳过 system injection 消息,遇到 compaction 边界停止。
-   * fork 语义:生成新 conversationId,旧 JSONL 保留在磁盘。
+   * fork 语义:生成新 conversationId，旧 RuntimeEvent 保留在事件流中。
    */
   async undo(count: number): Promise<void> {
     this.assertWritable();
     if (count <= 0) return;
-    const { cutIndex, removedCount } = findLegacyUndoCut(this.history, count);
+    const { cutIndex, removedCount } = findUndoCut(this.history, count);
     if (removedCount === 0) return;
     const runtimeBranchId = `undo:${randomUUID()}`;
-    // RuntimeEvent is authoritative: persist the branch fact before replacing its Session projection.
-    if (this.store) await this.recordRuntimeHistoryRewind(cutIndex, runtimeBranchId);
+    if (this.store) {
+      await this.commitRuntimeRewind(cutIndex, runtimeBranchId);
+      return;
+    }
     const nextHistory = this.history.slice(0, cutIndex);
-    const receipt = this.store
-      ? await this.commitPersistence("rewind", (store, seq) =>
-          store.commitRewind(cutIndex, { expectedSeq: seq }),
-        )
-      : undefined;
     this.history = nextHistory;
-    this.rebuildSearchIndex(receipt?.cursor);
+    this.rebuildSearchIndex();
     this.pruneToolResultMeta();
     // 3.4: undo 时清空 deferred 与 pending,避免遗留半截 tool 配对状态
     this.deferredMessages = [];
     this.pendingToolCallIds.clear();
-    this.conversationId = receipt
-      ? `${receipt.cursor.logId}:${receipt.cursor.epoch}`
-      : `${this.id}-${Date.now().toString(36)}`;
+    this.conversationId = `${this.id}-${Date.now().toString(36)}`;
     this.updatedAt = new Date();
-    if (receipt) this.scheduleSessionCatalog(receipt, { rebuildSummary: true });
   }
 
   async beginRewindPoint(input: {
@@ -1261,7 +1119,8 @@ export class Session implements SessionRuntimePersistence {
       throw new Error("prePlanMode requires interactionMode=plan");
     }
     const messageId = input.messageId ?? randomUUID();
-    const beforeSessionSeq = this.nextSeq;
+    await this.flushPersistence();
+    const beforeSessionSeq = Math.max(0, (await this.store?.getHeadCursor(this.id))?.seq ?? 0);
     await fileHistoryBeginRewindPoint(
       this.fileHistory,
       {
@@ -1309,42 +1168,43 @@ export class Session implements SessionRuntimePersistence {
   ): Promise<CommitReceipt | undefined> {
     this.assertWritable();
     const runtimeBranchId = eventId ?? `rewind:${randomUUID()}`;
-    // Keep the canonical history branch durable before its replaceable Session projection.
-    if (this.store) await this.recordRuntimeHistoryRewind(messageIndex, runtimeBranchId);
+    if (this.store) return this.commitRuntimeRewind(messageIndex, runtimeBranchId);
     const nextHistory = this.history.slice(0, messageIndex);
-    const receipt = this.store
-      ? await this.commitPersistence("rewind", (store, seq) =>
-          store.commitRewind(messageIndex, {
-            expectedSeq: seq,
-            ...(eventId ? { eventId } : {}),
-          }),
-        )
-      : undefined;
-    // A stable operationId may be retried after later messages arrived. Its durable
-    // rewind already happened, so applying the old cut to today's in-memory tail
-    // would incorrectly discard those newer messages.
-    if (receipt && !receipt.inserted) return receipt;
     this.history = nextHistory;
-    this.rebuildSearchIndex(receipt?.cursor);
+    this.rebuildSearchIndex();
     this.pruneToolResultMeta();
     this.deferredMessages = [];
     this.pendingToolCallIds.clear();
-    this.conversationId = receipt
-      ? `${receipt.cursor.logId}:${receipt.cursor.epoch}`
-      : `${this.id}-${Date.now().toString(36)}`;
+    this.conversationId = `${this.id}-${Date.now().toString(36)}`;
     this.updatedAt = new Date();
-    if (receipt) this.scheduleSessionCatalog(receipt, { rebuildSummary: true });
-    return receipt;
+    return undefined;
   }
 
-  /** Mirrors conversation undo/rewind into RuntimeEvent when this is a runtime-backed Session. */
-  private async recordRuntimeHistoryRewind(messageIndex: number, branchId: string): Promise<void> {
-    if (!this.store) return;
-    await RuntimeRun.recordSessionRewind({
-      sessionId: this.id,
-      workDir: this.workDir,
-      messageIndex,
-      branchId,
+  private commitRuntimeRewind(messageIndex: number, eventId: string): Promise<CommitReceipt> {
+    return this.enqueuePersistence("rewind", async (store) => {
+      await this.ensureRuntimeSession();
+      let entries = await store.readSessionEntries(this.id);
+      const existing = entries.find((entry) => entry.event.eventId === eventId);
+      if (existing) {
+        if (existing.event.kind !== "history.rewound" || existing.event.data.branchId !== eventId) {
+          throw new Error(`Runtime event ID ${eventId} is already bound to another payload`);
+        }
+        this.applyRuntimeHistoryProjection(entries);
+        return commitReceiptFromEntry(this.id, entries, existing, false);
+      }
+
+      const messages = projectRuntimeSessionMessageEntries(entries.map(({ event }) => event));
+      const retainedCount = Math.max(0, Math.min(Math.trunc(messageIndex), messages.length));
+      const throughEventId = messages[retainedCount - 1]?.eventId;
+      const event: RuntimeHistoryRewoundEvent = {
+        ...this.runtimeEventBase(eventId, "session-rewind", "internal"),
+        kind: "history.rewound",
+        data: { branchId: eventId, ...(throughEventId ? { throughEventId } : {}) },
+      };
+      const appended = await store.append(event);
+      entries = await store.readSessionEntries(this.id);
+      this.applyRuntimeHistoryProjection(entries);
+      return commitReceiptFromAppend(appended);
     });
   }
 
@@ -1418,7 +1278,7 @@ export class Session implements SessionRuntimePersistence {
         mode === "conversation"
           ? []
           : await this.buildRewindFileTransitions(snapshot.messageId, expectedCurrentFingerprints);
-      const head = this.store?.getHeadCursor();
+      const head = await this.store?.getHeadCursor(this.id);
       return {
         operationId,
         kind: "rewind",
@@ -1511,20 +1371,21 @@ export class Session implements SessionRuntimePersistence {
         operation.target.transcriptIndex !== undefined,
     );
     if (operations.length === 0) return undefined;
-    const records = (await this.store.inspectJournal({ strict: true })).records;
+    const entries = await this.store.readSessionEntries(this.id);
     for (const operation of operations.toReversed()) {
-      const rewind = records.find(
-        (record) => record.type === "event" && record.eventId === `rewind:${operation.operationId}`,
+      const rewind = entries.find(
+        (entry) => entry.event.eventId === `rewind:${operation.operationId}`,
       );
-      if (!rewind || rewind.type !== "event") continue;
-      const superseded = records.some(
-        (record) =>
-          record.type === "event" &&
-          record.seq > rewind.seq &&
-          record.kind === "message.appended" &&
-          record.data.message.role === "user" &&
-          record.data.message.toolCallId === undefined &&
-          !isMessageHiddenFromTranscript(record.data.message),
+      if (!rewind || rewind.event.kind !== "history.rewound") continue;
+      const superseded = entries.some(
+        (entry) =>
+          entry.sequence > rewind.sequence &&
+          entry.event.kind === "message.committed" &&
+          entry.event.visibility === "model" &&
+          !entry.event.partial &&
+          entry.event.data.message.role === "user" &&
+          entry.event.data.message.toolCallId === undefined &&
+          !isMessageHiddenFromTranscript(entry.event.data.message),
       );
       if (superseded) return undefined;
       return {
@@ -1549,17 +1410,34 @@ export class Session implements SessionRuntimePersistence {
       operation.target.prePlanMode,
     );
     const patch: SessionRuntimeStatePatch = { settings };
-    const receipt = this.store
-      ? await this.commitPersistence("rewind runtime", (store, seq) =>
-          store.commitRuntimeState(patch, {
-            expectedSeq: seq,
-            eventId: `rewind:${operation.operationId}:runtime`,
-          }),
-        )
-      : undefined;
+    if (this.store) {
+      await this.commitRuntimeStateOnce(patch, `rewind:${operation.operationId}:runtime`);
+    }
     this.persistedSettings = settings;
     this.updatedAt = new Date();
-    if (receipt) this.scheduleSessionCatalog(receipt);
+  }
+
+  private commitRuntimeStateOnce(
+    patch: SessionRuntimeStatePatch,
+    eventId: string,
+  ): Promise<CommitReceipt> {
+    return this.enqueuePersistence("runtime state", async (store) => {
+      await this.ensureRuntimeSession();
+      const entries = await store.readSessionEntries(this.id);
+      const existing = entries.find((entry) => entry.event.eventId === eventId);
+      if (existing) {
+        if (
+          existing.event.kind !== "session.state.committed" ||
+          !isDeepStrictEqual(existing.event.data.patch, patch)
+        ) {
+          throw new Error(`Runtime event ID ${eventId} is already bound to another payload`);
+        }
+        return commitReceiptFromEntry(this.id, entries, existing, false);
+      }
+      return commitReceiptFromAppend(
+        await store.appendSessionState(this.id, structuredClone(patch), { eventId }),
+      );
+    });
   }
 
   private async buildRewindFileTransitions(
@@ -1582,16 +1460,11 @@ export class Session implements SessionRuntimePersistence {
   }
 
   private async validateRewindPrecondition(operation: RewindStorageOperation): Promise<void> {
-    const records = this.store ? (await this.store.inspectJournal({ strict: true })).records : [];
-    const existing = records.find(
-      (record) => record.type === "event" && record.eventId === `rewind:${operation.operationId}`,
-    );
+    const entries = this.store ? await this.store.readSessionEntries(this.id) : [];
+    const eventId = `rewind:${operation.operationId}`;
+    const existing = entries.find((entry) => entry.event.eventId === eventId);
     if (existing) {
-      if (
-        existing.type === "event" &&
-        existing.kind === "history.rewound" &&
-        existing.data.messageIndex === operation.target.messageIndex
-      ) {
+      if (existing.event.kind === "history.rewound" && existing.event.data.branchId === eventId) {
         return;
       }
       throw new RewindOperationConflictError(
@@ -1600,7 +1473,7 @@ export class Session implements SessionRuntimePersistence {
       );
     }
 
-    const currentSeq = Math.max(0, this.store?.getHeadCursor()?.seq ?? this.nextSeq - 1);
+    const currentSeq = Math.max(0, (await this.store?.getHeadCursor(this.id))?.seq ?? 0);
     const currentDigest = sessionHistoryDigest(this.history);
     const mismatches = [
       ...(currentSeq !== operation.precondition.sessionLastSeq
@@ -1632,8 +1505,7 @@ export class Session implements SessionRuntimePersistence {
    * 内存语义:history = [summaryMsg, ...history.slice(compactedCount)]。
    * 保留尾部(从 compactedCount 起的消息)不动,前缀浓缩成一条摘要。
    *
-   * 持久化使用单个 history.compacted canonical event，其 JSONL fdatasync
-   * 成功后才替换正式内存 history 并重建投影。
+   * 持久化通过 RuntimeEvent rewind + message facts 重建活动分支。
    *
    * 本方法只做纯存储,summary 内容的 REFERENCE-ONLY 包装由调用方(FullCompactor)负责。
    *
@@ -1656,18 +1528,55 @@ export class Session implements SessionRuntimePersistence {
       providerData: { ...options.summaryProviderData, picoKind: "compaction_summary" },
     };
     const nextHistory = [summaryMsg, ...retained];
-    const receipt = this.store
-      ? await this.commitPersistence("compaction", (store, seq) =>
-          store.commitCompaction(summaryMsg, retained, { expectedSeq: seq }),
-        )
-      : undefined;
+    if (this.store) {
+      await this.replaceRuntimeHistory(nextHistory, "compaction");
+      return;
+    }
     this.history = nextHistory;
-    if (receipt) this.conversationId = `${receipt.cursor.logId}:${receipt.cursor.epoch}`;
-    this.rebuildSearchIndex(receipt?.cursor);
+    this.rebuildSearchIndex();
     // 压缩后清理已消失 ToolResult 的 meta(被摘要吞掉的前缀条目)
     this.pruneToolResultMeta();
     this.updatedAt = new Date();
-    if (receipt) this.scheduleSessionCatalog(receipt, { rebuildSummary: true });
+  }
+
+  private replaceRuntimeHistory(messages: readonly Message[], reason: string): Promise<void> {
+    const operationId = `${reason}:${randomUUID()}`;
+    return this.enqueuePersistence(reason, async (store) => {
+      await this.ensureRuntimeSession();
+      const rewindEvent: RuntimeHistoryRewoundEvent = {
+        ...this.runtimeEventBase(`${operationId}:rewind`, "session-history", "internal"),
+        kind: "history.rewound",
+        data: { branchId: operationId },
+      };
+      await store.append(rewindEvent);
+      for (const [index, message] of messages.entries()) {
+        const event: RuntimeMessageCommittedEvent = {
+          ...this.runtimeEventBase(`${operationId}:message:${index}`, "session-history", "model"),
+          kind: "message.committed",
+          data: { message: structuredClone(message) },
+        };
+        await store.append(event);
+      }
+      this.applyRuntimeHistoryProjection(await store.readSessionEntries(this.id));
+    });
+  }
+
+  private runtimeEventBase(
+    eventId: string,
+    runId: string,
+    visibility: RuntimeEventBase["visibility"],
+  ): RuntimeEventBase {
+    return {
+      schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,
+      eventId,
+      sessionId: this.id,
+      invocationId: `session:${this.id}`,
+      runId,
+      turnId: runId,
+      at: new Date().toISOString(),
+      partial: false,
+      visibility,
+    };
   }
 
   /** 返回全量历史的深拷贝(仅供调试 / 测试,不参与推理) */
@@ -1787,8 +1696,9 @@ export class Session implements SessionRuntimePersistence {
     return this.searchStore.status;
   }
 
-  get sessionCatalogHealth(): SessionCatalogProjectionHealth | undefined {
-    return this.catalogHealthState;
+  /** @deprecated Session no longer owns a JSONL catalog projector. */
+  get sessionCatalogHealth(): undefined {
+    return undefined;
   }
 
   get sessionSummaryStore(): SessionSummaryStore {
@@ -1799,30 +1709,21 @@ export class Session implements SessionRuntimePersistence {
     this.summaryStore.save(this.id, summary, messageCount);
   }
 
-  /**
-   * 获取底层 SessionStore(4.3 cursor 多端同步)。
-   * WS 层通过它订阅 onRecord 推送事件流、读取 epoch 判断世代。
-   * 持久化关闭时返回 undefined,WS 层据此降级为无推送模式。
-   */
-  get recordStore(): SessionStore | undefined {
+  /** @deprecated 仅为现有调用方判断 durable Session；不再暴露 JSONL record API。 */
+  get recordStore(): RuntimeEventStore | undefined {
     return this.store;
   }
 
-  /** 所有 canonical event 共用一条队列，保证 seq 分配与物理 append 顺序一致。 */
-  private commitPersistence(
+  /** Session 发起的 durable 操作共用一条队列。 */
+  private enqueuePersistence<Result>(
     kind: string,
-    write: (store: SessionStore, seq: number) => Promise<CommitReceipt>,
-  ): Promise<CommitReceipt> {
+    write: (store: RuntimeEventStore) => Promise<Result>,
+  ): Promise<Result> {
     this.assertWritable();
     const store = this.store;
     if (!store) throw new Error("Session persistence is disabled");
 
-    const operation = this.persistenceTail.then(async () => {
-      const seq = this.nextSeq;
-      const receipt = await write(store, seq);
-      this.nextSeq = Math.max(this.nextSeq, receipt.cursor.seq + 1);
-      return receipt;
-    });
+    const operation = this.persistenceTail.then(() => write(store));
     const settled = operation.then(
       () => undefined,
       (error: unknown) => {
@@ -1831,83 +1732,6 @@ export class Session implements SessionRuntimePersistence {
     );
     this.persistenceTail = settled;
     return operation;
-  }
-
-  private async projectSessionCatalog(options: { openedAt?: string } = {}): Promise<void> {
-    const projector = this.catalogProjector;
-    const logPath = this.sessionLogPath;
-    if (!projector || !logPath) return;
-    try {
-      const result = await projector.projectJournal(logPath, this.workDir, options);
-      this.catalogHealthState = result.health;
-      if (result.entry) this.catalogEntryState = result.entry;
-    } catch (error) {
-      // Projector 的契约是 fail-open，但 Session 边界仍不信任任何派生存储。
-      logger.warn(
-        { error: String(error), sessionId: this.id },
-        "[session-catalog] 目录同步失败，JSONL 仍是可恢复真源",
-      );
-    }
-  }
-
-  private scheduleSessionCatalog(
-    receipt: CommitReceipt,
-    update: {
-      readonly appendedMessage?: Message;
-      readonly rebuildSummary?: boolean;
-      readonly lineage?: SessionCatalogLineage;
-    } = {},
-  ): void {
-    const projector = this.catalogProjector;
-    const logPath = this.sessionLogPath;
-    if (!projector || !logPath) return;
-    const prior = this.catalogEntryState;
-    let firstUserMessage = prior?.firstUserMessage;
-    let lastUserMessage = prior?.lastUserMessage;
-    if (update.rebuildSummary) {
-      ({ firstUserMessage, lastUserMessage } = catalogUserSummary(this.history));
-    } else if (update.appendedMessage && isCatalogUserMessage(update.appendedMessage)) {
-      const content = compactCatalogText(update.appendedMessage.content);
-      firstUserMessage ??= content;
-      lastUserMessage = content;
-    }
-    const title = compactCatalogText(this.persistedSettings?.title) ?? firstUserMessage;
-    const lineage =
-      update.lineage ??
-      prior?.lineage ??
-      ({ relation: "root", rootLogId: receipt.cursor.logId } satisfies SessionCatalogLineage);
-    const entry = {
-      schemaVersion: 1,
-      logId: receipt.cursor.logId,
-      sessionId: this.id,
-      logPath,
-      identity: this.identity,
-      lineage,
-      ...(title ? { title } : {}),
-      ...(firstUserMessage ? { firstUserMessage } : {}),
-      ...(lastUserMessage ? { lastUserMessage } : {}),
-      messageCount: this.history.length,
-      createdAt: prior?.createdAt ?? this.createdAt.toISOString(),
-      updatedAt: this.updatedAt.toISOString(),
-      lastOpenedAt: prior?.lastOpenedAt ?? this.createdAt.toISOString(),
-      journalSchemaVersion: 3,
-      head: receipt.cursor,
-      health: "healthy",
-    } satisfies SessionCatalogEntry;
-    // 先更新进程内摘要，后续 commit 可在 O(1) 基础上继续投影。
-    this.catalogEntryState = entry;
-    this.catalogTail = this.catalogTail
-      .then(async () => {
-        const result = await projector.projectEntry(entry);
-        this.catalogHealthState = result.health;
-        if (result.entry && this.catalogEntryState?.head?.eventId === result.entry.head?.eventId) {
-          this.catalogEntryState = result.entry;
-        }
-      })
-      .catch((error: unknown) => {
-        // Catalog 绝不得把 durable Session 标记为 write_uncertain。
-        logger.warn({ error: String(error) }, "[session-catalog] 增量投影队列异常，已降级");
-      });
   }
 
   private assertWritable(): void {
@@ -1932,7 +1756,7 @@ export class Session implements SessionRuntimePersistence {
 
   /**
    * 发起关闭：同步释放 FTS5 句柄以保持旧调用方行为，返回的 Promise
-   * 在已排队 run 结束且 JSONL tail 完全 drain 后 resolve。
+   * 在已排队 run 结束且 RuntimeEvent tail 完全 drain 后 resolve。
    * 【连接池化】只释放本 Session 持有的引用(FTS5Store.release),引用计数归零
    * 才真正关闭共享的 sessions.db。关键:Windows 上 SQLite 文件未释放句柄时删除会
    * 触发 EBUSY,必须释放后才能 rm 工作目录。幂等(重复调用安全)。
@@ -1963,7 +1787,6 @@ export class Session implements SessionRuntimePersistence {
         this.lifecycle = "closed";
         return this.persistenceTail;
       })
-      .then(() => this.catalogTail)
       .then(() => {
         const store = this.store;
         this.store = undefined;
@@ -2112,117 +1935,105 @@ async function syncRewindDirectory(directory: string): Promise<void> {
   }
 }
 
-function catalogUserSummary(history: readonly Message[]): {
-  firstUserMessage?: string;
-  lastUserMessage?: string;
-} {
-  const visible = history.filter(isCatalogUserMessage);
-  const firstUserMessage = compactCatalogText(visible[0]?.content);
-  const lastUserMessage = compactCatalogText(visible.at(-1)?.content);
+function runtimeCursorForEntries(
+  sessionId: string,
+  entries: readonly RuntimeEventStoreEntry[],
+): SessionCursor | undefined {
+  const head = entries.at(-1);
+  return head ? runtimeCursorForEntry(sessionId, entries, head) : undefined;
+}
+
+function runtimeCursorForEntry(
+  sessionId: string,
+  entries: readonly RuntimeEventStoreEntry[],
+  entry: RuntimeEventStoreEntry,
+): SessionCursor {
   return {
-    ...(firstUserMessage ? { firstUserMessage } : {}),
-    ...(lastUserMessage ? { lastUserMessage } : {}),
+    logId: sessionId,
+    seq: entry.sequence,
+    epoch: entries.filter(
+      (candidate) =>
+        candidate.sequence <= entry.sequence && candidate.event.kind === "history.rewound",
+    ).length,
+    eventId: entry.event.eventId,
   };
 }
 
-function isCatalogUserMessage(message: Message): boolean {
-  return (
-    message.role === "user" &&
-    message.toolCallId === undefined &&
-    !isMessageHiddenFromTranscript(message) &&
-    message.content.trim().length > 0
-  );
-}
-
-function compactCatalogText(value: string | undefined): string | undefined {
-  const compacted = value?.replace(/\s+/gu, " ").trim();
-  if (!compacted) return undefined;
-  return compacted.length <= 240 ? compacted : `${compacted.slice(0, 239)}…`;
-}
-
-function catalogLineageFromSession(
-  lineage: SessionLineage,
-  parentSessionId?: string,
-): SessionCatalogLineage {
+function commitReceiptFromAppend(result: RuntimeEventStoreAppendResult): CommitReceipt {
   return {
-    relation: lineage.relation,
-    rootLogId: lineage.rootLogId,
-    ...(lineage.parent ? { parentLogId: lineage.parent.logId } : {}),
-    ...(lineage.relation === "fork" && lineage.parent
-      ? { forkEventId: lineage.parent.eventId }
-      : {}),
-    ...(parentSessionId ? { parentSessionId } : {}),
-    ...(lineage.parentTaskId ? { parentTaskId: lineage.parentTaskId } : {}),
+    eventId: result.cursor.eventId,
+    cursor: result.cursor,
+    committedAt: result.committedAt,
+    durable: true,
+    inserted: result.inserted,
   };
 }
 
-function deriveUsageFromHistory(history: readonly Message[]): SessionUsageSnapshot {
-  const usage = createEmptyUsageSnapshot();
-  for (const message of history) {
-    if (!message.usage) continue;
-    const canonical = toCanonicalUsage(message.usage);
-    usage.totalPromptTokens += Math.max(0, canonical.totalPromptTokens);
-    usage.totalCompletionTokens += Math.max(0, canonical.totalCompletionTokens);
-    usage.totalInputTokens += canonical.inputTokens;
-    usage.totalCacheReadTokens += canonical.cacheReadTokens;
-    usage.totalCacheWriteTokens += canonical.cacheWriteTokens;
-    usage.totalReasoningTokens += canonical.reasoningTokens;
-    usage.totalProviderCalls++;
-    usage.totalUsageReports++;
-    const reported = new Set(message.usage.reportedFields ?? ["prompt", "completion"]);
-    if (reported.has("input")) usage.totalInputReports++;
-    if (reported.has("cacheRead")) usage.totalCacheReadReports++;
-    if (reported.has("cacheWrite")) usage.totalCacheWriteReports++;
-    if (reported.has("reasoning")) usage.totalReasoningReports++;
+function commitReceiptFromEntry(
+  sessionId: string,
+  entries: readonly RuntimeEventStoreEntry[],
+  entry: RuntimeEventStoreEntry,
+  inserted: boolean,
+): CommitReceipt {
+  return {
+    eventId: entry.event.eventId,
+    cursor: runtimeCursorForEntry(sessionId, entries, entry),
+    committedAt: entry.event.at,
+    durable: true,
+    inserted,
+  };
+}
+
+async function resolveRuntimeRootSessionId(
+  store: RuntimeEventStore,
+  sessionId: string,
+): Promise<string> {
+  const visited = new Set<string>();
+  let current = sessionId;
+  while (!visited.has(current)) {
+    visited.add(current);
+    const fork = (await store.readSession(current)).find(
+      (event) => event.kind === "session.forked",
+    );
+    if (!fork || fork.kind !== "session.forked") return current;
+    current = fork.data.parentSessionId;
   }
-  return usage;
+  throw new Error(`Runtime session lineage contains a cycle at ${current}`);
 }
 
-function mergeUsageWithHistory(
-  persisted: SessionUsageSnapshot | undefined,
-  fromHistory: SessionUsageSnapshot,
-): SessionUsageSnapshot {
-  if (!persisted) return fromHistory;
-  return {
-    totalPromptTokens: Math.max(persisted.totalPromptTokens, fromHistory.totalPromptTokens),
-    totalCompletionTokens: Math.max(
-      persisted.totalCompletionTokens,
-      fromHistory.totalCompletionTokens,
-    ),
-    totalInputTokens: Math.max(persisted.totalInputTokens, fromHistory.totalInputTokens),
-    totalCacheReadTokens: Math.max(
-      persisted.totalCacheReadTokens,
-      fromHistory.totalCacheReadTokens,
-    ),
-    totalCacheWriteTokens: Math.max(
-      persisted.totalCacheWriteTokens,
-      fromHistory.totalCacheWriteTokens,
-    ),
-    totalReasoningTokens: Math.max(
-      persisted.totalReasoningTokens,
-      fromHistory.totalReasoningTokens,
-    ),
-    totalCostCNY: persisted.totalCostCNY,
-    lastCostStatus: persisted.lastCostStatus,
-    totalProviderCalls: Math.max(persisted.totalProviderCalls, fromHistory.totalProviderCalls),
-    totalUsageReports: Math.max(persisted.totalUsageReports, fromHistory.totalUsageReports),
-    totalInputReports: Math.max(persisted.totalInputReports, fromHistory.totalInputReports),
-    totalCacheReadReports: Math.max(
-      persisted.totalCacheReadReports,
-      fromHistory.totalCacheReadReports,
-    ),
-    totalCacheWriteReports: Math.max(
-      persisted.totalCacheWriteReports,
-      fromHistory.totalCacheWriteReports,
-    ),
-    totalReasoningReports: Math.max(
-      persisted.totalReasoningReports,
-      fromHistory.totalReasoningReports,
-    ),
-    totalEstimatedCostReports: persisted.totalEstimatedCostReports,
-    totalIncludedCostReports: persisted.totalIncludedCostReports,
-    totalUnknownCostReports: persisted.totalUnknownCostReports,
-  };
+function messageDigest(messages: readonly Message[]): string {
+  return createHash("sha256").update(JSON.stringify(messages)).digest("hex");
+}
+
+/** 旧 undo 交互语义：跳过 system，且不跨越 compaction summary。 */
+function findUndoCut(
+  history: readonly Message[],
+  count: number,
+): { cutIndex: number; removedCount: number } {
+  if (count <= 0) return { cutIndex: history.length, removedCount: 0 };
+  let removedCount = 0;
+  let cutIndex = 0;
+  for (let index = history.length - 1; index >= 0; index--) {
+    const message = history[index]!;
+    if (isCompactionSummaryMessage(message)) return { cutIndex: index + 1, removedCount };
+    if (message.role !== "user") continue;
+    removedCount++;
+    if (removedCount === count) {
+      cutIndex = index;
+      break;
+    }
+  }
+  return { cutIndex, removedCount };
+}
+
+function isCompactionSummaryMessage(message: Message): boolean {
+  if (message.role !== "assistant") return false;
+  const marker = message.providerData?.["picoKind"];
+  return (
+    marker === "compaction_summary" ||
+    message.content.startsWith("[上下文压缩") ||
+    message.content.includes("--- 历史摘要结束")
+  );
 }
 
 function isPersistedInteractionMode(value: unknown): value is PersistedSessionSettings["mode"] {
@@ -2259,11 +2070,11 @@ function restorePersistedInteractionMode(
  * - LRU:maxSessions 上限(默认 128)。超出时驱逐"最近最少使用"的 Session,
  *   驱逐前调 session.close() 释放 SQLite 句柄(防 fd 泄漏)。
  * - TTL:空闲超时(默认 24h)。每次 getOrCreate 惰性扫描,驱逐长期闲置 Session。
- *   飞书多群场景下,沉默群的历史不再常驻内存,被再次唤醒时从 JSONL recover 重建。
+ *   飞书多群场景下,沉默群的历史不再常驻内存,被再次唤醒时从 RuntimeEvent recover 重建。
  * - MRU 提升:get/getOrCreate/delete+set 把目标提到 Map 末尾(最近使用),
  *   Map 的迭代序即 LRU 序,首个元素即最旧。对标 hermes GatewaySession 的容量管理。
  *
- * 注意:驱逐只释放内存实例 + SQLite 句柄;持久化在磁盘的 JSONL 不删,
+ * 注意:驱逐只释放内存实例 + SQLite 句柄;runtime.sqlite 事件不删,
  * 被 recover 唤醒即可续传。
  */
 export class SessionManager {
@@ -2285,7 +2096,7 @@ export class SessionManager {
 
   /**
    * 获取或创建一个会话(同 id + 同 workDir 复用,否则物理隔离)。
-   * 新建时自动重放磁盘日志恢复历史(recover)。返回 Promise 以支持异步恢复。
+   * 新建时自动投影 runtime.sqlite 事件恢复历史。返回 Promise 以支持异步恢复。
    * persistence 显式透传给 Session(测试场景精确控制,避免环境变量并行污染)。
    *
    * 命中时做 MRU 提升(删除后重新 set 到末尾);新建后触发 LRU 驱赶 + TTL 惰性清理。

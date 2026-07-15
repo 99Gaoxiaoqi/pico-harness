@@ -22,7 +22,7 @@ export interface JsonlMemoryStoreOptions {
   recommendation?: string;
   nodeVersion?: string;
   nodeModuleAbi?: string;
-  persistentSource?: "session_jsonl" | "none";
+  persistentSource?: "sqlite" | "none";
 }
 
 interface IndexedMessage {
@@ -41,11 +41,10 @@ interface ScoredMessage {
 }
 
 /**
- * Searchable in-process index rebuilt from Session JSONL messages.
+ * Searchable in-process index rebuilt from the Session RuntimeEvent projection.
  *
- * This store deliberately performs no file I/O. SessionStore remains the sole
- * owner of durable JSONL writes; this index is disposable and can be rebuilt by
- * calling replaceSession after Session recovery.
+ * This store deliberately performs no file I/O. RuntimeEventStore owns durable
+ * writes; this index is disposable and can be rebuilt after Session recovery.
  */
 export class JsonlMemoryStore implements ConversationSearchStore {
   readonly status: MemoryBackendStatus;
@@ -64,14 +63,14 @@ export class JsonlMemoryStore implements ConversationSearchStore {
     this.status = {
       backend: "jsonl_memory",
       state: "degraded",
-      persistentSource: options.persistentSource ?? "session_jsonl",
+      persistentSource: options.persistentSource ?? "sqlite",
       nodeVersion: options.nodeVersion ?? process.version,
       nodeModuleAbi: options.nodeModuleAbi ?? process.versions.modules,
       reason:
         options.reason ??
         (options.persistentSource === "none"
           ? "SQLite FTS5 unavailable and Session persistence is disabled; the search index exists only in this process."
-          : "SQLite FTS5 unavailable; the search index is rebuilt from Session JSONL and is not stored separately."),
+          : "SQLite FTS5 unavailable; the search index is rebuilt from RuntimeEvent history and is not stored separately."),
       ...(options.recommendation ? { recommendation: options.recommendation } : {}),
     };
   }
