@@ -1,6 +1,6 @@
-# Provider 适配与 TUI 入口
+# Provider 适配与共享 Runtime 入口
 
-> TUI 入口最终装配一个 AgentEngine，引擎通过 LLMProvider 接口与模型通信。入口层负责 provider 配置、session、reporter、工具与审批装配。
+> TUI 与 Desktop 共用同一 Provider 配置、凭证解析和 Agent Runtime。入口层负责 session、reporter、工具与审批装配，不各自维护模型配置副本。
 
 ---
 
@@ -40,6 +40,27 @@ interface LLMProvider {
 - OpenAI 走 `createOpenAIProviderWithFallback`（带模型 fallback：glm-5.2 → kimi-k2.5）
 - `getCredentialPool()`：进程级单例，多 key 时自动轮换
 
+### 配置与凭证分层
+
+```text
+Session / CLI 显式选择
+          ↓
+已信任项目 .pico/config.json
+          ↓
+$PICO_HOME/config.json（Desktop + TUI 共享）
+          ↓
+LLM_* 环境变量（兼容入口）
+```
+
+`EffectiveConfigResolver` 只合并非秘密配置，并为每个字段保留来源。工作区未信任时不读取项目配置；同 ID Provider 的协议或规范化 Endpoint 冲突时直接拒绝合并。`UserConfigStore` 以内容 SHA-256 revision 执行 OCC，在短锁内复查 revision 并原子替换文件。
+
+`loadEffectiveModelRuntime` 是 TUI、Desktop 前台运行、Compact 和子代理的统一模型解析入口。它先解析配置，再从显式环境变量或 OS 凭证库向 `ModelRouter` 注入进程内 secret。secret 不属于 `EffectiveConfigSnapshot`，也不会被 Runtime 协议、Renderer Store 或日志投影。
+
+凭证引用分两代：
+
+- v2 按 `providerId + protocol + normalized endpoint + slot` 绑定，用于设备级共享 Provider。
+- v1 按工作区与完整 model route 绑定，仅保留给旧项目配置和已持久 Automation。
+
 ### 重试 + 凭证轮换
 
 ```
@@ -75,9 +96,9 @@ new CostTracker(provider, modelRoute, session);
 
 ---
 
-## 第二部分：TUI 单入口
+## 第二部分：产品入口
 
-`pico` → TUI 是唯一公开产品入口。REST/WebSocket、ACP、飞书和 one-shot/headless CLI 属于已退役的历史外壳。
+`pico` → TUI 是已安装命令入口；Desktop 通过类型化本地 daemon 协议使用同一 Runtime。REST/WebSocket、ACP、飞书和 one-shot/headless CLI 属于已退役的历史外壳。
 
 ### 入口边界
 
@@ -101,7 +122,7 @@ main.ts parseArgs
 
 `runAgentFromCli` 是 TUI 每轮运行的内部装配函数，不是公开 one-shot/headless API。其装配链：
 
-1. resolveProviderConfig（CLI 参数 > 环境变量）
+1. loadEffectiveModelRuntime（Session / CLI > 项目 > 用户 > 环境）
 2. globalSessionManager.getOrCreate（固定 ID 复用）
 3. 凭证轮换装配（rebuildProvider 回调）
 4. CostTracker 包裹
