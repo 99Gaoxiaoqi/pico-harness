@@ -213,7 +213,7 @@ async function indexForkTargetOperations(
   const operations = await new StorageOperationJournal({ workDir }).list();
   const targets = new Map<string, ForkTargetOperations>();
   for (const operation of operations) {
-    if (operation.kind !== "fork") continue;
+    if (operation.kind !== "fork" || operation.state === "aborted") continue;
     const existing = targets.get(operation.targetSessionId);
     targets.set(operation.targetSessionId, {
       hasCompleted: existing?.hasCompleted === true || operation.state === "completed",

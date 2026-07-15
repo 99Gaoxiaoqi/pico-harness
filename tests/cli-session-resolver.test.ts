@@ -16,6 +16,7 @@ import {
 import { Session } from "../src/engine/session.js";
 import { resolvePicoPaths } from "../src/paths/pico-paths.js";
 import type { Message } from "../src/schema/message.js";
+import { StorageOperationJournal } from "../src/storage/operation-journal.js";
 import { RuntimeEventStore } from "../src/runtime/runtime-event-store.js";
 
 describe("resolveCliSession", () => {
@@ -153,6 +154,43 @@ describe("resolveCliSession", () => {
     await expect(resolveCliSession({ workDir, session: "cli-fork" })).resolves.toEqual({
       mode: "resume",
       sessionId: "cli-fork",
+    });
+  });
+
+  it("允许普通 session 复用未发布的 aborted fork target id", async () => {
+    const workDir = await temporaryWorkspace();
+    const targetSessionId = "reused-aborted-target";
+    const journal = new StorageOperationJournal({ workDir });
+    const operation = await journal.create({
+      kind: "fork",
+      operationId: "aborted-fork",
+      sessionId: "aborted-source",
+      sourceSessionId: "aborted-source",
+      sourceCursor: {
+        logId: "aborted-source",
+        seq: 1,
+        epoch: 0,
+        eventId: "aborted-source-event",
+      },
+      targetSessionId,
+      targetMode: "default",
+      stagingDirectory: join(workDir, "aborted-fork-staging"),
+    });
+    await journal.advance({
+      operationId: operation.operationId,
+      expectedVersion: operation.version,
+      nextState: "aborted",
+    });
+    await initializeRuntimeSession(workDir, targetSessionId, "2026-07-09T03:00:00.000Z", [
+      { role: "user", content: "reused as a normal session" },
+    ]);
+
+    await expect(listCliSessionSummaries(workDir)).resolves.toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: targetSessionId })]),
+    );
+    await expect(resolveCliSession({ workDir, resumeSession: targetSessionId })).resolves.toEqual({
+      mode: "resume",
+      sessionId: targetSessionId,
     });
   });
 
