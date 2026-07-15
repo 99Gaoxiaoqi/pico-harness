@@ -322,7 +322,7 @@ export class OpenAIProvider implements LLMProvider {
     const decoder = new TextDecoder();
     let buffer = "";
 
-    for (;;) {
+    readLoop: for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
 
@@ -337,7 +337,10 @@ export class OpenAIProvider implements LLMProvider {
         for (const line of lines) {
           if (!line.startsWith("data: ")) continue;
           const data = line.slice(6);
-          if (data === "[DONE]") continue;
+          if (data === "[DONE]") {
+            await reader.cancel().catch(() => undefined);
+            break readLoop;
+          }
 
           try {
             const chunk = JSON.parse(data) as {
