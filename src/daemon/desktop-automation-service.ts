@@ -20,6 +20,7 @@ export interface DesktopAutomationServiceOptions {
   prepareSecurity(workspacePath: string): Promise<DesktopAutomationSecurity>;
   ensureWorkspaceRuntime(workspacePath: string): Promise<void>;
   runNow(workspacePath: string, jobId: string): Promise<CronRunRecord>;
+  picoHome?: string;
   now?: () => number;
 }
 
@@ -184,6 +185,7 @@ export class DesktopAutomationService {
   ): Result {
     const cron = new CronService({
       workDir: workspacePath,
+      ...(this.options.picoHome ? { picoHome: this.options.picoHome } : {}),
       ...(this.options.now ? { now: this.options.now } : {}),
     });
     try {

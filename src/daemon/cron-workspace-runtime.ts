@@ -13,6 +13,7 @@ export interface CronWorkspaceRuntimeOptions extends Omit<
   workspacePath: string;
   ownerId: string;
   databasePath?: string;
+  picoHome?: string;
   policyGuard?: CronPolicyGuard;
 }
 
@@ -27,6 +28,7 @@ export class CronWorkspaceRuntime {
       workDir: options.workspacePath,
       ownerId: options.ownerId,
       ...(options.databasePath ? { databasePath: options.databasePath } : {}),
+      ...(options.picoHome ? { picoHome: options.picoHome } : {}),
       ...(options.policyGuard ? { policyGuard: options.policyGuard } : {}),
       ...(options.now ? { now: options.now } : {}),
     });
@@ -84,6 +86,7 @@ export function createCronWorkspaceRuntimeFactory(options: {
   execute: CronRuntimeSchedulerOptions["execute"];
   canRun: CronRuntimeSchedulerOptions["canRun"];
   policyGuard?: CronPolicyGuard;
+  picoHome?: string;
   leaseHeartbeatMs?: number;
   now?: () => number;
 }): CronWorkspaceRuntimeFactory {
@@ -95,6 +98,7 @@ export function createCronWorkspaceRuntimeFactory(options: {
         getWorkspaceRuntime: options.getWorkspaceRuntime,
         execute: options.execute,
         canRun: options.canRun,
+        ...(options.picoHome ? { picoHome: options.picoHome } : {}),
         ...(options.policyGuard ? { policyGuard: options.policyGuard } : {}),
         ...(options.leaseHeartbeatMs ? { leaseHeartbeatMs: options.leaseHeartbeatMs } : {}),
         ...(options.now ? { now: options.now } : {}),
