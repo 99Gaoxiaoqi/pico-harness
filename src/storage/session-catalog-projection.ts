@@ -20,7 +20,7 @@ import {
   type SessionCatalogEntry,
   type SessionCatalogLineage,
 } from "./session-catalog.js";
-import { resolvePicoPaths } from "../paths/pico-paths.js";
+import { resolvePicoHome, resolvePicoPaths } from "../paths/pico-paths.js";
 
 const PROJECTION_HEALTH_VERSION = 1 as const;
 const CATALOG_RECOMMENDATION =
@@ -58,8 +58,17 @@ interface JournalCandidate {
  */
 export class SessionCatalogProjector {
   private readonly healthByWorkDir = new Map<string, SessionCatalogProjectionHealth>();
+  readonly catalog: SessionCatalog;
+  private readonly picoHome?: string;
 
-  constructor(readonly catalog: SessionCatalog = new SessionCatalog()) {}
+  constructor(catalog?: SessionCatalog, options: { readonly picoHome?: string } = {}) {
+    this.picoHome = options.picoHome ? resolvePicoHome({ picoHome: options.picoHome }) : undefined;
+    this.catalog =
+      catalog ??
+      new SessionCatalog(
+        this.picoHome ? { baseDirectory: join(this.picoHome, "session-catalog") } : {},
+      );
+  }
 
   /** durable commit 热路径：直接写 Session 已维护的 O(1) 摘要，不重放 JSONL。 */
   async projectEntry(entry: SessionCatalogEntry): Promise<SessionCatalogProjectionResult> {
@@ -128,7 +137,7 @@ export class SessionCatalogProjector {
       const candidates: JournalCandidate[] = [];
       const staleDiagnostics: string[] = [];
 
-      for (const logPath of await listSessionLogPaths(normalizedWorkDir)) {
+      for (const logPath of await listSessionLogPaths(normalizedWorkDir, this.picoHome)) {
         const info = await stat(logPath);
         const prior = existingByPath.get(logPath);
         if (
@@ -192,15 +201,16 @@ export class SessionCatalogProjector {
     const normalized = resolve(workDir).normalize("NFC");
     const inMemory = this.healthByWorkDir.get(normalized);
     if (inMemory) return inMemory;
-    return readSessionCatalogProjectionHealth(normalized);
+    return readSessionCatalogProjectionHealth(normalized, { picoHome: this.picoHome });
   }
 
   private async recordHealthy(workDir: string): Promise<SessionCatalogProjectionHealth> {
-    const previous = this.healthByWorkDir.get(workDir) ?? (await readPersistedHealth(workDir));
+    const previous =
+      this.healthByWorkDir.get(workDir) ?? (await readPersistedHealth(workDir, this.picoHome));
     const health = healthyProjectionHealth();
     this.healthByWorkDir.set(workDir, health);
     if (previous && previous.state !== "healthy") {
-      await persistProjectionHealth(workDir, health).catch(() => undefined);
+      await persistProjectionHealth(workDir, health, this.picoHome).catch(() => undefined);
     }
     return health;
   }
@@ -217,7 +227,7 @@ export class SessionCatalogProjector {
       diagnostic: describeError(error),
     } satisfies SessionCatalogProjectionHealth;
     this.healthByWorkDir.set(workDir, health);
-    await persistProjectionHealth(workDir, health).catch((persistError: unknown) => {
+    await persistProjectionHealth(workDir, health, this.picoHome).catch((persistError: unknown) => {
       logger.warn(
         { workDir, error: describeError(persistError) },
         "[session-catalog] 投影诊断状态无法落盘",
@@ -238,7 +248,7 @@ export class SessionCatalogProjector {
       diagnostic,
     } satisfies SessionCatalogProjectionHealth;
     this.healthByWorkDir.set(workDir, health);
-    await persistProjectionHealth(workDir, health).catch(() => undefined);
+    await persistProjectionHealth(workDir, health, this.picoHome).catch(() => undefined);
     return health;
   }
 }
@@ -252,9 +262,11 @@ export function getDefaultSessionCatalogProjector(): SessionCatalogProjector {
 
 export async function readSessionCatalogProjectionHealth(
   workDir: string,
+  options: { readonly picoHome?: string } = {},
 ): Promise<SessionCatalogProjectionHealth> {
   return (
-    (await readPersistedHealth(resolve(workDir).normalize("NFC"))) ?? healthyProjectionHealth()
+    (await readPersistedHealth(resolve(workDir).normalize("NFC"), options.picoHome)) ??
+    healthyProjectionHealth()
   );
 }
 
@@ -529,8 +541,8 @@ function isLegacyJournalRecordType(value: unknown): value is LegacySessionRecord
   );
 }
 
-async function listSessionLogPaths(workDir: string): Promise<string[]> {
-  const directory = resolvePicoPaths(workDir).workspace.sessions;
+async function listSessionLogPaths(workDir: string, picoHome?: string): Promise<string[]> {
+  const directory = resolvePicoPaths(workDir, { picoHome }).workspace.sessions;
   let names: string[];
   try {
     names = await readdir(directory);
@@ -548,15 +560,19 @@ async function listSessionLogPaths(workDir: string): Promise<string[]> {
   return paths;
 }
 
-function projectionHealthPath(workDir: string): string {
-  return join(resolvePicoPaths(workDir).workspace.root, "session-catalog-health.json");
+function projectionHealthPath(workDir: string, picoHome?: string): string {
+  return join(
+    resolvePicoPaths(workDir, { picoHome }).workspace.root,
+    "session-catalog-health.json",
+  );
 }
 
 async function readPersistedHealth(
   workDir: string,
+  picoHome?: string,
 ): Promise<SessionCatalogProjectionHealth | undefined> {
   try {
-    return await readVersionedJson(projectionHealthPath(workDir), decodeProjectionHealth);
+    return await readVersionedJson(projectionHealthPath(workDir, picoHome), decodeProjectionHealth);
   } catch (error) {
     if (isNodeCode(error, "ENOENT")) return undefined;
     return {
@@ -572,8 +588,9 @@ async function readPersistedHealth(
 async function persistProjectionHealth(
   workDir: string,
   health: SessionCatalogProjectionHealth,
+  picoHome?: string,
 ): Promise<void> {
-  await writeJsonAtomic(projectionHealthPath(workDir), health);
+  await writeJsonAtomic(projectionHealthPath(workDir, picoHome), health);
 }
 
 function decodeProjectionHealth(value: unknown): SessionCatalogProjectionHealth {

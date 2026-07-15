@@ -169,6 +169,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   private readonly sessionStateStore: DesktopSessionStateStore;
   private readonly conversationStateStore: DesktopConversationStateStore;
   private readonly env: Readonly<Record<string, string | undefined>>;
+  private readonly picoHome: string;
   private readonly providerFactory: typeof createProvider;
   private readonly userConfigStore: UserConfigStore;
   private readonly effectiveConfigResolver: EffectiveConfigResolver;
@@ -188,16 +189,19 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
 
   constructor(private readonly options: DesktopRuntimeServiceOptions) {
     this.env = options.env ?? process.env;
-    this.registrationStore = options.registrationStore ?? new WorkspaceRegistrationStore();
-    this.trustStore = options.trustStore ?? new WorkspaceTrustStore();
+    this.picoHome = resolvePicoHome({ env: this.env });
+    this.registrationStore =
+      options.registrationStore ??
+      new WorkspaceRegistrationStore(join(this.picoHome, "daemon-workspaces.json"));
+    this.trustStore =
+      options.trustStore ?? new WorkspaceTrustStore({ userStateDirectory: this.picoHome });
     this.sessionStateStore =
       options.sessionStateStore ?? new DesktopSessionStateStore({ env: this.env });
     this.conversationStateStore =
       options.conversationStateStore ?? new DesktopConversationStateStore({ env: this.env });
     this.providerFactory = options.providerFactory ?? createProvider;
     this.userConfigStore =
-      options.userConfigStore ??
-      new UserConfigStore({ picoHome: resolvePicoHome({ env: this.env }) });
+      options.userConfigStore ?? new UserConfigStore({ picoHome: this.picoHome });
     this.effectiveConfigResolver =
       options.effectiveConfigResolver ??
       new EffectiveConfigResolver({ userConfigStore: this.userConfigStore });
@@ -480,7 +484,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const canonical = await this.requireTrustedWorkspace(workspacePath);
     const report = await new ResourceDoctor({
       workDir: canonical,
-      picoHome: resolvePicoHome({ env: this.env }),
+      picoHome: this.picoHome,
     }).scan();
     return toJsonValue({
       ...report,
@@ -511,7 +515,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   private async listSessions(workspacePath: string, includeArchived = false): Promise<JsonValue> {
     const canonical = await canonicalizeWorkspacePath(workspacePath);
     const [summaries, metadata] = await Promise.all([
-      listCliSessionSummaries(canonical),
+      listCliSessionSummaries(canonical, { picoHome: this.picoHome }),
       this.sessionStateStore.list(canonical),
     ]);
     const metadataById = new Map(metadata.map((entry) => [entry.sessionId, entry]));
@@ -532,6 +536,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const session = new Session(sessionId, canonical, {
       persistence: true,
       sessionCatalog: false,
+      picoHome: this.picoHome,
     });
     try {
       await session.recover();
@@ -590,9 +595,13 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const source = await globalSessionManager.getOrCreate(sessionId, canonical, {
       persistence: true,
       sessionCatalog: false,
+      picoHome: this.picoHome,
     });
     const targetSessionId = this.createSessionId();
-    await new SessionForkService({ workDir: canonical }).fork({
+    await new SessionForkService({
+      workDir: canonical,
+      picoHome: this.picoHome,
+    }).fork({
       sourceSessionId: sessionId,
       targetSessionId,
       targetMode: source.getRuntimeStateSnapshot().settings?.mode ?? DEFAULT_INTERACTION_MODE,
@@ -707,7 +716,11 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       const effective = await this.loadSessionModelRuntime(canonical, settings);
       const active = effective.router.providerConfig(settings.modelRouteId ?? settings.model);
       const rawProvider = this.providerFactory(active.provider, active.config);
-      const ledger = new RuntimeStore({ workDir: canonical, now: this.now });
+      const ledger = new RuntimeStore({
+        workDir: canonical,
+        picoHome: this.picoHome,
+        now: this.now,
+      });
       try {
         ensureSessionUsageBaseline(ledger, session);
         const provider = new CostTracker(
@@ -917,6 +930,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const session = await this.requireSession(canonical, params.sessionId);
     const runtimeSession = await globalSessionManager.getOrCreate(params.sessionId, canonical, {
       persistence: true,
+      picoHome: this.picoHome,
     });
     const snapshot = await runtimeSession.readHydrationSnapshot();
     const activeRun = await this.findActiveSessionRun(canonical, params.sessionId);
@@ -1573,7 +1587,9 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   }
 
   private async requireSession(workspacePath: string, sessionId: string): Promise<JsonValue> {
-    const summaries = await listCliSessionSummaries(workspacePath);
+    const summaries = await listCliSessionSummaries(workspacePath, {
+      picoHome: this.picoHome,
+    });
     const summary = summaries.find((candidate) => candidate.id === sessionId);
     if (!summary) {
       throw new RuntimeProtocolError(
@@ -2111,7 +2127,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         "usage.get 的 from 不能晚于 to",
       );
     }
-    const store = new RuntimeStore({ workDir: canonical });
+    const store = new RuntimeStore({ workDir: canonical, picoHome: this.picoHome });
     try {
       const filter = params.sessionId ? { sessionId: params.sessionId } : {};
       const calls = store
@@ -2469,6 +2485,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const session = await globalSessionManager.getOrCreate(sessionId, workspacePath, {
       persistence: true,
       sessionCatalog: false,
+      picoHome: this.picoHome,
     });
     return session.serialize(() => operation(session));
   }
