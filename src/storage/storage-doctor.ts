@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { lstat, readFile, readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
-import { SessionStore } from "../engine/session-store.js";
+import { assertRuntimeEvent } from "../runtime/runtime-event.js";
 import { createFileHistoryState, fileHistoryLoadState } from "../safety/file-history.js";
 import { quarantineCorruptJson, type QuarantinedJson } from "./atomic-json.js";
 import { FileHistoryBlobStore } from "./file-history-blob-store.js";
@@ -52,7 +52,6 @@ export interface StorageDoctorReport {
 export interface StorageDoctorOptions {
   readonly workDir: string;
   readonly fileHistoryDir?: string;
-  readonly sessionsDir?: string;
   readonly runtimeDatabasePath?: string;
   readonly summariesDir?: string;
   readonly artifactsDir?: string;
@@ -87,7 +86,6 @@ export interface StorageDoctorRepairResult {
 export class StorageDoctor {
   private readonly workDir: string;
   private readonly fileHistoryDir: string;
-  private readonly sessionsDir: string;
   private readonly runtimeDatabasePath: string;
   private readonly summariesDir: string;
   private readonly artifactsDir: string;
@@ -97,7 +95,6 @@ export class StorageDoctor {
     this.workDir = resolve(options.workDir);
     const paths = resolvePicoPaths(this.workDir);
     this.fileHistoryDir = resolve(options.fileHistoryDir ?? join(paths.home.root, "file-history"));
-    this.sessionsDir = resolve(options.sessionsDir ?? paths.workspace.sessions);
     this.runtimeDatabasePath = resolve(
       options.runtimeDatabasePath ?? paths.workspace.runtimeDatabase,
     );
@@ -197,61 +194,57 @@ export class StorageDoctor {
     findings: StorageDoctorFinding[],
     scanned: Record<StorageDoctorComponent, number>,
   ): Promise<void> {
-    for (const entry of await readDirectoryEntries(this.sessionsDir)) {
-      if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
-      const path = join(this.sessionsDir, entry.name);
-      scanned.session++;
-      try {
-        const raw = await readFile(path, "utf8");
-        const nonEmptyLines = raw.split("\n").filter((line) => line.length > 0);
-        if (nonEmptyLines.length === 0) throw new Error("empty journal");
-        const first = parseJson(nonEmptyLines[0]!, "journal header");
-        const legacy = !isRecord(first) || first["type"] !== "meta";
-        if (!raw.endsWith("\n")) {
-          try {
-            JSON.parse(nonEmptyLines.at(-1)!);
-          } catch {
-            findings.push(
-              finding(
-                "session_torn_tail",
-                "warning",
-                "session",
-                path,
-                "Session journal has an incomplete final line; strict replay will ignore it",
-                "Restart the writer and verify the last committed receipt before truncating the tail",
-                "authoritative",
-              ),
+    if (!(await pathExists(this.runtimeDatabasePath))) return;
+    let database: Database.Database;
+    try {
+      database = new Database(this.runtimeDatabasePath, { readonly: true, fileMustExist: true });
+    } catch {
+      return;
+    }
+    try {
+      const table = database
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'agent_sessions'",
+        )
+        .get();
+      if (!table) return;
+      const sessions = database
+        .prepare("SELECT session_id, work_dir FROM agent_sessions ORDER BY session_id")
+        .all() as Array<{ session_id: string; work_dir: string }>;
+      const readEvents = database.prepare(
+        "SELECT event_json FROM agent_runtime_events WHERE session_id = ? ORDER BY sequence",
+      );
+      for (const manifest of sessions) {
+        scanned.session++;
+        try {
+          if (resolve(manifest.work_dir) !== this.workDir) {
+            throw new Error(
+              `session ${manifest.session_id} belongs to unexpected workspace ${manifest.work_dir}`,
             );
           }
-        }
-        const records = await new SessionStore(path).loadStrict();
-        if (legacy) {
-          if (records.length === 0) throw new Error("legacy journal has no replayable records");
+          for (const row of readEvents.all(manifest.session_id) as Array<{ event_json: string }>) {
+            const value: unknown = JSON.parse(row.event_json);
+            assertRuntimeEvent(value);
+            if (value.sessionId !== manifest.session_id) {
+              throw new Error("runtime event/session identity mismatch");
+            }
+          }
+        } catch (error) {
           findings.push(
             finding(
-              "session_legacy",
-              "warning",
+              "session_replay_failed",
+              "critical",
               "session",
-              path,
-              "Session journal uses the supported legacy format without a meta header",
-              "Migrate by publishing a new v3 Session journal; do not rewrite this source in place",
+              this.runtimeDatabasePath,
+              errorMessage(error),
+              "Keep runtime.sqlite unchanged and restore it from a verified backup",
               "authoritative",
             ),
           );
         }
-      } catch (error) {
-        findings.push(
-          finding(
-            "session_replay_failed",
-            "critical",
-            "session",
-            path,
-            errorMessage(error),
-            "Do not rewrite the journal; restore/salvage it into a new Session after manual review",
-            "authoritative",
-          ),
-        );
       }
+    } finally {
+      database.close();
     }
   }
 
@@ -272,19 +265,29 @@ export class StorageDoctor {
           "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'",
         )
         .get() as { name: string } | undefined;
-      if (!migrationTable) {
+      const agentSessionTable = database
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'agent_sessions'",
+        )
+        .get() as { name: string } | undefined;
+      const agentEventTable = database
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'agent_runtime_events'",
+        )
+        .get() as { name: string } | undefined;
+      if (!migrationTable && (!agentSessionTable || !agentEventTable)) {
         findings.push(
           finding(
             "runtime_schema_missing",
             "critical",
             "runtime",
             this.runtimeDatabasePath,
-            "runtime.sqlite has no schema_migrations authority record",
-            "Do not infer a schema; open it with a compatible pico version or restore a verified database",
+            "runtime.sqlite has neither task schema metadata nor Agent runtime event tables",
+            "Open it with a compatible pico version or restore a verified database",
             "authoritative",
           ),
         );
-      } else {
+      } else if (migrationTable) {
         const schema = database
           .prepare("SELECT COALESCE(MAX(version), 0) AS version FROM schema_migrations")
           .get() as { version: unknown };

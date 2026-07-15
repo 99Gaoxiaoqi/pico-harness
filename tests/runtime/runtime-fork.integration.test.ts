@@ -31,10 +31,12 @@ describe("runtime session fork", () => {
   });
 
   it("materializes the frozen fork seed without leaking later parent history or usage", async () => {
-    const store = new RuntimeEventStore({ baseDir: resolvePicoPaths(workDir).workspace.runs });
+    const store = new RuntimeEventStore({
+      databasePath: resolvePicoPaths(workDir).workspace.runtimeDatabase,
+    });
     const source = await sessions.getOrCreate("source-a", workDir, { persistence: true });
     await store.initializeSession({ sessionId: source.id, workDir });
-    await store.append(runStarted("source-a", "source-run"));
+    await store.append(runStarted("source-a", "source-run", workDir));
     await store.append(
       message("source-a", "source-run", "source-user", { role: "user", content: "inspect this" }),
     );
@@ -114,10 +116,12 @@ describe("runtime session fork", () => {
   });
 
   it("resumes a partial Runtime fork bootstrap from the target's durable seed", async () => {
-    const store = new RuntimeEventStore({ baseDir: resolvePicoPaths(workDir).workspace.runs });
+    const store = new RuntimeEventStore({
+      databasePath: resolvePicoPaths(workDir).workspace.runtimeDatabase,
+    });
     const source = await sessions.getOrCreate("source-a", workDir, { persistence: true });
     await store.initializeSession({ sessionId: source.id, workDir });
-    await store.append(runStarted("source-a", "source-run"));
+    await store.append(runStarted("source-a", "source-run", workDir));
     await store.append(
       message("source-a", "source-run", "source-user", { role: "user", content: "inspect this" }),
     );
@@ -191,10 +195,12 @@ describe("runtime session fork", () => {
   });
 
   it("AgentRuntime resumes a published fork seed before constructing model context", async () => {
-    const store = new RuntimeEventStore({ baseDir: resolvePicoPaths(workDir).workspace.runs });
+    const store = new RuntimeEventStore({
+      databasePath: resolvePicoPaths(workDir).workspace.runtimeDatabase,
+    });
     const source = await sessions.getOrCreate("source-a", workDir, { persistence: true });
     await store.initializeSession({ sessionId: source.id, workDir });
-    await store.append(runStarted("source-a", "source-run"));
+    await store.append(runStarted("source-a", "source-run", workDir));
     await store.append(
       message("source-a", "source-run", "source-user", { role: "user", content: "inspect this" }),
     );
@@ -255,11 +261,11 @@ class ForkCompletionProvider implements LLMProvider {
   }
 }
 
-function runStarted(sessionId: string, runId: string): RuntimeEvent {
+function runStarted(sessionId: string, runId: string, workDir: string): RuntimeEvent {
   return {
     ...eventBase(sessionId, runId, "run-started"),
     kind: "run.started",
-    data: { workDir: "/workspace" },
+    data: { workDir },
   };
 }
 

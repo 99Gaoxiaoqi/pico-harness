@@ -1280,7 +1280,9 @@ describe("Pico command registry", () => {
       session.close();
       rmSync(workDir, { recursive: true, force: true });
     });
-    const store = new RuntimeEventStore({ baseDir: resolvePicoPaths(workDir).workspace.runs });
+    const store = new RuntimeEventStore({
+      databasePath: resolvePicoPaths(workDir).workspace.runtimeDatabase,
+    });
     const seedRun = await RuntimeRun.start({ sessionId: session.id, workDir, store });
     const rawHistory = Array.from({ length: 8 }, (_, index) => ({
       role: index % 2 === 0 ? ("user" as const) : ("assistant" as const),
