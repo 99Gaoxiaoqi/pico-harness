@@ -37,7 +37,7 @@ pico-harness 是一个用 TypeScript 实现的**工业级 Agent Harness 引擎**
                     ┌──────────────────┐         ┌──────────────────────┐    ┌──────────────────┐
                     │ src/safety/      │         │ src/observability/    │    │ src/schema/       │
                     │  file-history    │         │  logger/tracker/trace │    │  message.ts       │
-                    │  checkpoint legacy │         │  pricing              │    │  (核心数据结构)    │
+                    │  rewind journal  │         │  pricing              │    │  (核心数据结构)    │
                     └──────────────────┘         └──────────────────────┘    └──────────────────┘
 ```
 

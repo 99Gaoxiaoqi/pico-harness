@@ -1,6 +1,6 @@
 # 文件历史系统 Implementation Plan
 
-> **归档状态（2026-07-10）：** 本文保留当时的 CLI 实现计划供追溯，不再作为当前使用说明。当前唯一公开入口是 TUI，文件历史使用 `/snapshots` / `/rewind`；`checkpoint-manager.ts` 只是 legacy/manual fallback。
+> **归档状态（2026-07-10）：** 本文保留当时的 CLI 实现计划供追溯，不再作为当前使用说明。文件历史使用 `/snapshots` / `/rewind`；文中提到的 legacy `checkpoint-manager.ts` 后续已删除。
 
 > **历史存储方案（已被替代）：** 下文的 `SessionStore`、Session JSONL 与 `sessions/` 布局只记录当时设计。当前会话与 Agent run 的唯一事实源是 workspace `runtime.sqlite` 中的 RuntimeEvent；`sessions.db` 仅为可重建 FTS 投影。
 
