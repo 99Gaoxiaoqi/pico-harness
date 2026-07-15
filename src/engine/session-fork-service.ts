@@ -14,14 +14,19 @@ import { readVersionedJson, writeJsonAtomic } from "../storage/atomic-json.js";
 import {
   ForkOperationCoordinator,
   ForkOperationConflictError,
+  ForkOperationLeaseTimeoutError,
+  type ForkAbortResult,
   type ForkOperationCallbacks,
   type ForkPreparedBundle,
+  type ForkReconciliationOptions,
   type ForkReconciliationResult,
   type ForkSourceCursor,
 } from "../storage/fork-operation-coordinator.js";
 import {
   StorageOperationJournal,
   type ForkStorageOperation,
+  type StorageOperation,
+  type StorageOperationDispositionInput,
 } from "../storage/operation-journal.js";
 import type {
   PersistedInteractionMode,
@@ -71,6 +76,13 @@ export interface ForkSessionResult {
   readonly operation: ForkStorageOperation;
   readonly sourceTitle?: string;
   readonly targetTitle?: string;
+}
+
+export interface ForkOperationDispositionResult {
+  readonly operation: ForkStorageOperation;
+  readonly reconciliation?: ForkReconciliationResult;
+  readonly stagingCleanup?: ForkAbortResult["stagingCleanup"];
+  readonly cleanupDiagnostic?: string;
 }
 
 export class SessionForkNeedsAttentionError extends Error {
@@ -206,8 +218,54 @@ export class SessionForkService {
     });
   }
 
-  async reconcileUnfinished(): Promise<ForkReconciliationResult[]> {
-    return this.coordinator.reconcileUnfinished();
+  async reconcileUnfinished(
+    options: ForkReconciliationOptions = {},
+  ): Promise<ForkReconciliationResult[]> {
+    return this.coordinator.reconcileUnfinished(options);
+  }
+
+  async listNeedsAttention(): Promise<StorageOperation[]> {
+    return this.journal.listNeedsAttention();
+  }
+
+  async getOperation(operationId: string): Promise<StorageOperation | undefined> {
+    return this.journal.get(operationId);
+  }
+
+  async retryNeedsAttention(
+    input: StorageOperationDispositionInput,
+    options: ForkReconciliationOptions = {},
+  ): Promise<ForkOperationDispositionResult> {
+    try {
+      const operation = await this.coordinator.retryNeedsAttention(input, options);
+      return {
+        operation,
+        reconciliation: { operationId: operation.operationId, state: operation.state },
+      };
+    } catch (error) {
+      if (!(error instanceof ForkOperationLeaseTimeoutError)) throw error;
+      const operation = await this.requireForkOperation(input.operationId);
+      return {
+        operation,
+        reconciliation: {
+          operationId: operation.operationId,
+          state: operation.state,
+          status: "lease_timeout",
+          diagnostic: error.diagnostic,
+        },
+      };
+    }
+  }
+
+  async abortNeedsAttention(
+    input: StorageOperationDispositionInput,
+  ): Promise<ForkOperationDispositionResult> {
+    const result = await this.coordinator.abortNeedsAttention(input);
+    return {
+      operation: result.operation,
+      stagingCleanup: result.stagingCleanup,
+      ...(result.cleanupDiagnostic ? { cleanupDiagnostic: result.cleanupDiagnostic } : {}),
+    };
   }
 
   private createCallbacks(): ForkOperationCallbacks {
@@ -405,17 +463,34 @@ export class SessionForkService {
   private sidecarsPath(operation: ForkStorageOperation): string {
     return join(operation.stagingDirectory, FORK_SIDECARS_NAME);
   }
+
+  private async requireForkOperation(operationId: string): Promise<ForkStorageOperation> {
+    const operation = await this.journal.get(operationId);
+    if (!operation) throw new Error(`Storage operation not found: ${operationId}`);
+    if (operation.kind !== "fork") {
+      throw new Error(`Storage operation is not a fork: ${operationId}`);
+    }
+    return operation;
+  }
 }
 
 export async function reconcileUnfinishedSessionForks(
   workDir: string,
+  options: ForkReconciliationOptions = {},
 ): Promise<ForkReconciliationResult[]> {
-  return new SessionForkService({ workDir }).reconcileUnfinished();
+  return new SessionForkService({ workDir }).reconcileUnfinished(options);
 }
 
-export async function reconcileUnfinishedSessionForksOrThrow(workDir: string): Promise<void> {
-  const results = await reconcileUnfinishedSessionForks(workDir);
-  const blocked = results.filter((result) => result.state === "needs_attention");
+export async function reconcileUnfinishedSessionForksOrThrow(
+  workDir: string,
+  options: ForkReconciliationOptions = {},
+): Promise<void> {
+  const results = await reconcileUnfinishedSessionForks(workDir, options);
+  const blocked = results.filter(
+    (result) =>
+      result.state === "needs_attention" ||
+      ("status" in result && result.status === "lease_timeout"),
+  );
   if (blocked.length === 0) return;
   throw new Error(
     `未完成的 fork 恢复需要人工处理: ${blocked.map((result) => result.operationId).join(", ")}`,

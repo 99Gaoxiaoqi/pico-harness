@@ -5,6 +5,7 @@ import { SkillLoader } from "../context/skill.js";
 import { FullCompactor } from "../context/full-compactor.js";
 import { createContextBudget, estimateMessagesTokens } from "../context/context-budget.js";
 import { globalSessionManager, type Session } from "../engine/session.js";
+import { SessionForkService } from "../engine/session-fork-service.js";
 import { defaultCliSessionId, listFileHistorySnapshotSummaries } from "../cli/file-history.js";
 import { formatRewindSelector, formatRewindUsage } from "./rewind-presentation.js";
 import { formatSessionCandidateDetails, sessionDisplayTitle } from "./session-presentation.js";
@@ -96,6 +97,11 @@ import {
   type StorageDoctorFinding,
   type StorageDoctorReport,
 } from "../storage/storage-doctor.js";
+import type {
+  StorageOperation,
+  StorageOperationDispositionInput,
+} from "../storage/operation-journal.js";
+import type { ForkReconciliationResult } from "../storage/fork-operation-coordinator.js";
 import {
   createPluginCommand,
   type PluginManagementCommandService,
@@ -120,6 +126,24 @@ const OVERRIDDEN_BUILTIN_COMMANDS = new Set([
 ]);
 
 export type McpStatusProvider = () => McpStatusSnapshot | undefined;
+
+export interface OperationRecoveryCommandResult {
+  readonly operation: StorageOperation;
+  readonly reconciliation?: ForkReconciliationResult;
+  readonly stagingCleanup?: "completed" | "failed";
+  readonly cleanupDiagnostic?: string;
+}
+
+export interface OperationRecoveryCommandService {
+  listNeedsAttention(): Promise<readonly StorageOperation[]>;
+  getOperation(operationId: string): Promise<StorageOperation | undefined>;
+  retryNeedsAttention(
+    input: StorageOperationDispositionInput,
+  ): Promise<OperationRecoveryCommandResult>;
+  abortNeedsAttention(
+    input: StorageOperationDispositionInput,
+  ): Promise<OperationRecoveryCommandResult>;
+}
 
 export interface PicoCommandRegistryOptions {
   workDir: string;
@@ -152,6 +176,8 @@ export interface PicoCommandRegistryOptions {
   taskRuntimeDiagnostic?: string;
   /** 可注入的只读存储诊断器；默认扫描当前 workspace 和全局 File History。 */
   storageDoctor?: Pick<StorageDoctor, "scan">;
+  /** needs_attention 人工处置入口；默认只允许 SessionForkService 可证明的 fork 恢复。 */
+  operationRecovery?: OperationRecoveryCommandService;
   resourceDoctor?: { scan(): Promise<ResourceDoctorReport> };
   hookService?: HookService;
   hookCommands?: readonly SlashCommand[];
@@ -219,6 +245,7 @@ export async function createPicoCommandRegistry(
     createInitCommand(options),
     ...(options.hookCommands ?? []),
     createDoctorCommand(options),
+    createOperationsCommand(options),
     createModelCommand(settings, options.modelRouter),
     createAddDirectoryCommand(settings, options.additionalDirectoryManager),
     createThinkingCommand(settings, options.modelRouter),
@@ -738,6 +765,157 @@ function createDoctorCommand(options: PicoCommandRegistryOptions): SlashCommand 
       }
     },
   };
+}
+
+function createOperationsCommand(options: PicoCommandRegistryOptions): SlashCommand {
+  let fallback: SessionForkService | undefined;
+  const recovery = (): OperationRecoveryCommandService =>
+    options.operationRecovery ??
+    (fallback ??= new SessionForkService({ workDir: options.workDir }));
+  const subcommands: readonly SlashArgumentCandidate[] = [
+    { value: "list", description: "List operations requiring manual disposition" },
+    { value: "show", description: "Show one operation and its recorded failure" },
+    { value: "retry", description: "Retry from the recorded failed phase" },
+    { value: "abort", description: "Abort and release the operation claim" },
+  ];
+  return {
+    name: "operations",
+    aliases: ["ops"],
+    description: "Inspect and dispose storage operations needing attention",
+    usage: operationsUsage(),
+    argumentHint: "[list|show|retry|abort]",
+    category: "system",
+    kind: "local",
+    availability: "idle",
+    argumentCompleter: completeFromCandidates(subcommands),
+    execute: async (input): Promise<LocalCommandResult> => {
+      const action = input.argv[0] ?? "list";
+      try {
+        if (action === "list") {
+          if (input.argv.length > 1) return operationsUsageResult();
+          const operations = await recovery().listNeedsAttention();
+          return {
+            type: "local",
+            action: "message",
+            message: formatNeedsAttentionOperations(operations),
+            data: operations,
+          };
+        }
+
+        const operationId = input.argv[1];
+        if (action === "show") {
+          if (!operationId || input.argv.length !== 2) return operationsUsageResult();
+          const operation = await recovery().getOperation(operationId);
+          return {
+            type: "local",
+            action: "message",
+            message: operation
+              ? formatStorageOperation(operation)
+              : `Storage operation not found: ${operationId}`,
+            ...(operation ? { data: operation } : {}),
+          };
+        }
+
+        if (action !== "retry" && action !== "abort") return operationsUsageResult();
+        const expectedVersion = parseOperationVersion(input.argv[2]);
+        if (!operationId || expectedVersion === undefined) return operationsUsageResult();
+        const reason =
+          input.argv.slice(3).join(" ").trim() || `requested via /operations ${action}`;
+        const dispositionInput = { operationId, expectedVersion, reason };
+        const result =
+          action === "retry"
+            ? await recovery().retryNeedsAttention(dispositionInput)
+            : await recovery().abortNeedsAttention(dispositionInput);
+        return {
+          type: "local",
+          action: "message",
+          message: formatOperationDisposition(action, result),
+          data: result,
+        };
+      } catch (error) {
+        return {
+          type: "local",
+          action: "message",
+          message: `Operation disposition failed closed: ${error instanceof Error ? error.message : String(error)}`,
+        };
+      }
+    },
+  };
+}
+
+function operationsUsageResult(): LocalCommandResult {
+  return { type: "local", action: "message", message: operationsUsage() };
+}
+
+function operationsUsage(): string {
+  return [
+    "Usage:",
+    "  /operations list",
+    "  /operations show <operation-id>",
+    "  /operations retry <operation-id> <expected-version> [reason]",
+    "  /operations abort <operation-id> <expected-version> [reason]",
+  ].join("\n");
+}
+
+function parseOperationVersion(value: string | undefined): number | undefined {
+  if (!value || !/^[1-9][0-9]*$/u.test(value)) return undefined;
+  const version = Number(value);
+  return Number.isSafeInteger(version) ? version : undefined;
+}
+
+function formatNeedsAttentionOperations(operations: readonly StorageOperation[]): string {
+  if (operations.length === 0) return "No storage operations need attention.";
+  return [
+    `Storage operations needing attention: ${operations.length}`,
+    ...operations.map(
+      (operation) =>
+        `${operation.operationId} · ${operation.kind} · v${operation.version} · phase=${operation.error?.phase ?? "unknown"}\n  ${operation.error?.message ?? "No failure reason was recorded"}`,
+    ),
+    "Use /operations show <operation-id> before retry or abort.",
+  ].join("\n");
+}
+
+function formatStorageOperation(operation: StorageOperation): string {
+  const dispositions = operation.dispositions ?? [];
+  return [
+    `Operation: ${operation.operationId}`,
+    `Kind: ${operation.kind}`,
+    `State: ${operation.state}`,
+    `Version: ${operation.version}`,
+    `Failure phase: ${operation.error?.phase ?? "none"}`,
+    `Failure reason: ${operation.error?.message ?? "none"}`,
+    ...(operation.error?.conflictingPaths?.length
+      ? [`Conflicting paths: ${operation.error.conflictingPaths.join(", ")}`]
+      : []),
+    `Disposition history: ${dispositions.length}`,
+    ...dispositions.map(
+      (entry) => `  ${entry.action} from v${entry.fromVersion} at ${entry.at}: ${entry.reason}`,
+    ),
+  ].join("\n");
+}
+
+function formatOperationDisposition(
+  action: "retry" | "abort",
+  result: OperationRecoveryCommandResult,
+): string {
+  const reconciliation = result.reconciliation;
+  const leaseTimeout =
+    reconciliation && "status" in reconciliation && reconciliation.status === "lease_timeout"
+      ? reconciliation.diagnostic
+      : undefined;
+  return [
+    `Operation ${action}: ${result.operation.operationId}`,
+    `State: ${result.operation.state}`,
+    `Version: ${result.operation.version}`,
+    ...(leaseTimeout
+      ? [
+          `Recovery status: lease_timeout`,
+          `Lease diagnostic: target=${leaseTimeout.targetSessionId}, attempts=${leaseTimeout.attempts}, waitedMs=${leaseTimeout.waitedMs}`,
+        ]
+      : []),
+    ...(result.stagingCleanup ? [`Staging cleanup: ${result.stagingCleanup}`] : []),
+    ...(result.cleanupDiagnostic ? [`Cleanup diagnostic: ${result.cleanupDiagnostic}`] : []),
+  ].join("\n");
 }
 
 function createModelCommand(settings: SessionSettings, router?: ModelRouter): SlashCommand {
