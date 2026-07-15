@@ -7,7 +7,6 @@ import {
   type ResolvedModelReasoningCapability,
 } from "../provider/reasoning-capability.js";
 import type { Registry } from "../tools/registry.js";
-import { globalSessionPermissionGrants } from "../approval/session-permissions.js";
 import type {
   PersistedSessionSettings,
   SessionRuntimePersistence,
@@ -52,6 +51,8 @@ export interface SessionSettingsDefaults {
   sessionMode?: SessionMode;
   forkFrom?: string;
   cwd: string;
+  /** Host-owned Pico state root used only to isolate process-local session state. */
+  picoHome?: string;
   provider: ProviderKind;
   mode?: InteractionMode;
   model: string;
@@ -74,7 +75,7 @@ export interface SessionSettingsPersistenceOptions {
 }
 
 const settingsBySession = new Map<string, SessionSettings>();
-let persistenceBySettings = new WeakMap<SessionSettings, SessionRuntimePersistence>();
+const persistenceBySettings = new WeakMap<SessionSettings, SessionRuntimePersistence>();
 const resolvedCliSessionSemantics = new Map<
   string,
   { sessionId: string; sessionMode: SessionMode; forkFrom?: string }
@@ -91,7 +92,7 @@ const permissionCommandModes = new Set([
 
 export function createDefaultSessionSettings(defaults: SessionSettingsDefaults): SessionSettings {
   const resolvedSemantics = resolvedCliSessionSemantics.get(
-    sessionSettingsKey(defaults.sessionId, defaults.cwd),
+    sessionSettingsKey(defaults.sessionId, defaults.cwd, defaults.picoHome),
   );
   const forkFrom = defaults.forkFrom ?? resolvedSemantics?.forkFrom;
   const title = normalizeSessionTitle(defaults.title);
@@ -127,7 +128,7 @@ export function getOrCreateSessionSettings(
     persistenceOptions?.restore === false
       ? undefined
       : persistenceOptions?.persistence.getRuntimeStateSnapshot().settings;
-  const key = sessionSettingsKey(defaults.sessionId, defaults.cwd);
+  const key = sessionSettingsKey(defaults.sessionId, defaults.cwd, defaults.picoHome);
   const existing = settingsBySession.get(key);
   if (existing !== undefined) {
     const resolvedSemantics = resolvedCliSessionSemantics.get(key);
@@ -201,8 +202,9 @@ export function rememberResolvedCliSession(
     sourceSessionId?: string;
   },
   cwd: string,
+  picoHome?: string,
 ): void {
-  resolvedCliSessionSemantics.set(sessionSettingsKey(selection.sessionId, cwd), {
+  resolvedCliSessionSemantics.set(sessionSettingsKey(selection.sessionId, cwd, picoHome), {
     sessionId: selection.sessionId,
     sessionMode: selection.mode,
     ...(selection.sourceSessionId !== undefined ? { forkFrom: selection.sourceSessionId } : {}),
@@ -212,8 +214,9 @@ export function rememberResolvedCliSession(
 export function getStoredSessionSettings(
   sessionId: string,
   cwd?: string,
+  picoHome?: string,
 ): SessionSettings | undefined {
-  if (cwd !== undefined) return settingsBySession.get(sessionSettingsKey(sessionId, cwd));
+  if (cwd !== undefined) return settingsBySession.get(sessionSettingsKey(sessionId, cwd, picoHome));
   for (const settings of [...settingsBySession.values()].reverse()) {
     if (settings.sessionId === sessionId) return settings;
   }
@@ -221,9 +224,9 @@ export function getStoredSessionSettings(
 }
 
 /** 新 fork 在公布前失败时，同步移除其未对外可见的运行态。 */
-export function forgetSessionSettings(sessionId: string, cwd?: string): void {
+export function forgetSessionSettings(sessionId: string, cwd?: string, picoHome?: string): void {
   if (cwd !== undefined) {
-    const key = sessionSettingsKey(sessionId, cwd);
+    const key = sessionSettingsKey(sessionId, cwd, picoHome);
     const settings = settingsBySession.get(key);
     if (settings) persistenceBySettings.delete(settings);
     settingsBySession.delete(key);
@@ -235,20 +238,12 @@ export function forgetSessionSettings(sessionId: string, cwd?: string): void {
     }
   }
   if (cwd !== undefined) {
-    resolvedCliSessionSemantics.delete(sessionSettingsKey(sessionId, cwd));
+    resolvedCliSessionSemantics.delete(sessionSettingsKey(sessionId, cwd, picoHome));
   } else {
     for (const [key, semantics] of resolvedCliSessionSemantics) {
       if (semantics.sessionId === sessionId) resolvedCliSessionSemantics.delete(key);
     }
   }
-  globalSessionPermissionGrants.clear(sessionId, cwd);
-}
-
-export function resetSessionSettingsForTests(): void {
-  settingsBySession.clear();
-  resolvedCliSessionSemantics.clear();
-  globalSessionPermissionGrants.clear();
-  persistenceBySettings = new WeakMap<SessionSettings, SessionRuntimePersistence>();
 }
 
 export function addSessionAdditionalDirectory(
@@ -685,8 +680,8 @@ function createAdditionalDirectorySnapshot(directories: readonly string[]): read
   return Object.freeze([...new Set(directories)]);
 }
 
-function sessionSettingsKey(sessionId: string, cwd: string): string {
-  return sessionScopeKey(sessionId, cwd);
+function sessionSettingsKey(sessionId: string, cwd: string, picoHome?: string): string {
+  return sessionScopeKey(sessionId, cwd, picoHome);
 }
 
 export function snapshotSessionSettings(settings: SessionSettings): PersistedSessionSettings {

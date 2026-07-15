@@ -223,6 +223,7 @@ export async function createPicoCommandRegistry(
       ...(options.sessionMode !== undefined ? { sessionMode: options.sessionMode } : {}),
       ...(options.forkFrom !== undefined ? { forkFrom: options.forkFrom } : {}),
       cwd: options.workDir,
+      ...(options.picoHome ? { picoHome: options.picoHome } : {}),
       provider: options.provider,
       model: options.model,
       ...(options.modelRouteId !== undefined ? { modelRouteId: options.modelRouteId } : {}),

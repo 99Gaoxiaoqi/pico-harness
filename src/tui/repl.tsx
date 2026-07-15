@@ -79,7 +79,6 @@ import { buildDefaultToolRegistry } from "../tools/default-registry.js";
 import type { ToolRegistry } from "../tools/registry-impl.js";
 import type { ToolDisclosure } from "../tools/tool-disclosure.js";
 import {
-  forgetSessionSettings,
   coordinateSessionReasoningLevel,
   DEFAULT_INTERACTION_MODE,
   effectiveSessionReasoningLevel,
@@ -92,6 +91,7 @@ import {
   toolStatusFromRegistry,
   type SessionSettings,
 } from "../input/session-settings.js";
+import { forgetSessionPolicyState } from "../input/session-policy.js";
 import { WorkspaceRoots } from "../tools/workspace-roots.js";
 import { globalSessionManager, type Session } from "../engine/session.js";
 import type { PersistedSessionSettings } from "../engine/session-runtime.js";
@@ -2295,7 +2295,7 @@ async function discardFailedTuiFork(sessionId: string, workDir: string): Promise
   const orphan = globalSessionManager.delete(sessionId, workDir);
   await orphan?.close();
   await removeCliSessionFile(workDir, sessionId);
-  forgetSessionSettings(sessionId, workDir);
+  forgetSessionPolicyState(sessionId, workDir);
 }
 
 export function createTuiUpdateScheduler<T>(
