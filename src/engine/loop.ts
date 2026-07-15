@@ -62,6 +62,8 @@ import type { HookService } from "../hooks/service.js";
 import type { ToolObservationProcessor } from "../tools/tool-result-observation.js";
 import { ToolAccesses } from "../tools/tool-access.js";
 import { ToolScheduler } from "../tools/tool-scheduler.js";
+import { resolvePicoPaths } from "../paths/pico-paths.js";
+import { RunLedger, type RunTerminalStatus } from "./run-ledger.js";
 import { SUBAGENT_OUTPUT_BUDGET } from "../tools/subagent-budget.js";
 import {
   fileHistoryAddJournalWarning,
@@ -953,7 +955,43 @@ export class AgentEngine implements AgentRunner {
     signal?: AbortSignal,
   ): Promise<Message[]> {
     const run = () => this.runInMainCompactorScope(session, runtimeReporter, runtimeTracer, signal);
-    return this.compactor ? this.compactor.runInMainScope(run) : run();
+    const execute = () => (this.compactor ? this.compactor.runInMainScope(run) : run());
+    // Tests and explicit in-memory sessions intentionally skip durable runtime facts.
+    // Production sessions get a separate run ledger; Session JSONL stays focused on memory.
+    if (!session.recordStore) return execute();
+    return this.runWithLedger(session, execute, signal);
+  }
+
+  private async runWithLedger(
+    session: Session,
+    execute: () => Promise<Message[]>,
+    signal?: AbortSignal,
+  ): Promise<Message[]> {
+    const baseDir = resolvePicoPaths(session.workDir).workspace.runs;
+    await RunLedger.reconcileIncompleteRuns({ baseDir, sessionId: session.id });
+    const ledger = await RunLedger.start({
+      baseDir,
+      sessionId: session.id,
+      workDir: session.workDir,
+    });
+    try {
+      const messages = await execute();
+      await ledger.finish("completed");
+      return messages;
+    } catch (error) {
+      const status: RunTerminalStatus =
+        signal?.aborted || isAbortError(error) ? "cancelled" : "failed";
+      try {
+        await ledger.finish(status, runFailureReason(error));
+      } catch (ledgerError) {
+        throw new AggregateError(
+          [error, ledgerError],
+          "Agent run failed and its terminal runtime fact could not be persisted",
+          { cause: ledgerError },
+        );
+      }
+      throw error;
+    }
   }
 
   private async runInMainCompactorScope(
@@ -2702,4 +2740,15 @@ function recordTraceError(span: Span | undefined, error: unknown): void {
     isError: true,
     outputPreview: truncate(error instanceof Error ? error.message : String(error), 500),
   });
+}
+
+/** Keep the durable control-plane diagnosis small and avoid copying tool/provider payloads. */
+function runFailureReason(error: unknown): string {
+  if (isAbortError(error)) return "aborted";
+  if (error instanceof Error) {
+    const name = error.name.trim() || "Error";
+    const message = truncate(error.message.trim() || "runtime failure", 300);
+    return `${name}: ${message}`;
+  }
+  return "unknown runtime failure";
 }

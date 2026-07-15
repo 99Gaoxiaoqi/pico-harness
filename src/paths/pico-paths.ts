@@ -37,6 +37,8 @@ export interface PicoWorkspacePaths {
   readonly id: WorkspaceId;
   readonly root: string;
   readonly sessions: string;
+  /** Per-execution ledger: canonical lifecycle facts plus a replaceable run projection. */
+  readonly runs: string;
   readonly runtimeDatabase: string;
   readonly memory: string;
   readonly summaries: string;
@@ -133,6 +135,7 @@ export function resolvePicoPaths(
       id: workspaceId,
       root: workspaceRoot,
       sessions: join(workspaceRoot, "sessions"),
+      runs: join(workspaceRoot, "runs"),
       runtimeDatabase: join(workspaceRoot, "runtime.sqlite"),
       memory: join(workspaceRoot, "memory"),
       summaries: join(workspaceRoot, "memory", "summaries"),
