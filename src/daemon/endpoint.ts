@@ -54,15 +54,27 @@ export function resolveLocalDaemonEndpoint(
   const runtimeDir =
     configuredRuntimeDir === undefined
       ? join(tmpdir(), `pico-${digest}`)
-      : join(configuredRuntimeDir, compactDigest);
+      : join(configuredRuntimeDir, compactDigest.slice(0, 8));
   // Keep macOS Unix socket paths below the ~104-byte kernel limit. The default directory
   // already carries the full digest; an external root gets a compact Pico-private child.
   // Never place or chmod a socket directly in XDG_RUNTIME_DIR/an injected shared root.
+  const address = join(
+    runtimeDir,
+    configuredRuntimeDir === undefined ? "runtime-v1.sock" : "s",
+  );
+  assertUnixSocketPath(address, runtimeDir);
   return {
     transport: "unix",
-    address: join(runtimeDir, configuredRuntimeDir === undefined ? "runtime-v1.sock" : "s"),
+    address,
     authTokenPath: join(runtimeDir, configuredRuntimeDir === undefined ? "runtime-v1.auth" : "a"),
   };
+}
+
+function assertUnixSocketPath(address: string, runtimeDir: string): void {
+  // macOS sockaddr_un.sun_path is 104 bytes including the trailing NUL.
+  if (Buffer.byteLength(address, "utf8") > 103) {
+    throw new Error(`Runtime 目录过长，无法安全创建 Unix Socket: ${runtimeDir}`);
+  }
 }
 
 /** Prepares a current-user-only POSIX socket parent. No-op for Windows named pipes. */

@@ -111,6 +111,7 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
         protocolVersion: LOCAL_RUNTIME_PROTOCOL_VERSION,
         picoHome: this.picoHome,
         capabilities: [
+          "shared-config-v1",
           "session-conversation-v1",
           "session-management-v1",
           "session-settings-v1",

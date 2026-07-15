@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { unwatchFile, watchFile } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { listRewindPointSummaries } from "../cli/file-history.js";
@@ -24,7 +25,25 @@ import {
   setSessionTitle,
   type SessionSettings,
 } from "../input/session-settings.js";
-import { loadPicoConfig, type PicoConfig } from "../input/pico-config.js";
+import {
+  loadPicoConfig,
+  parseModelProviderConfigs,
+  type PicoConfig,
+} from "../input/pico-config.js";
+import {
+  EffectiveConfigResolver,
+  ProviderIdConflictError,
+  type ConfigSource,
+} from "../input/effective-config.js";
+import {
+  parseUserConfig,
+  UserConfigLockTimeoutError,
+  UserConfigRevisionConflictError,
+  UserConfigStore,
+  type PicoUserConfig,
+  type PicoUserConfigDefaults,
+  type UserConfigSnapshot,
+} from "../input/user-config-store.js";
 import { renderAgentDispatchPrompt } from "../input/agent-activation.js";
 import { renderSkillActivation } from "../input/skill-activation.js";
 import { initializeProjectEntrypoints } from "../input/project-initializer.js";
@@ -38,7 +57,19 @@ import {
   type TranscriptEvent,
 } from "../presentation/transcript-event-store.js";
 import { createProvider, type ProviderKind } from "../provider/factory.js";
-import { loadModelRouter, type ModelRoute, type ModelRouter } from "../provider/model-router.js";
+import {
+  loadModelRouter,
+  type ModelProviderConfig,
+  type ModelRoute,
+  type ModelRouter,
+} from "../provider/model-router.js";
+import {
+  createPlatformCredentialVault,
+  credentialRefForProvider,
+  importProviderCredential,
+  normalizeProviderEndpoint,
+  type CredentialVault,
+} from "../provider/credential-vault.js";
 import { resolveProviderProfile } from "../provider/profile.js";
 import { resolvePicoHome } from "../paths/pico-paths.js";
 import { WorkspaceTrustStore } from "../security/workspace-trust.js";
@@ -64,6 +95,7 @@ import {
   type JsonObject,
   type RuntimeEvent,
   type RuntimeRequest,
+  type RuntimeProviderInput,
   type RuntimeUserInput,
 } from "./protocol.js";
 import type { DisposableLocalRuntimeService, RuntimeEventCursor } from "./service.js";
@@ -98,6 +130,9 @@ export interface DesktopRuntimeServiceOptions {
   readonly conversationStateStore?: DesktopConversationStateStore;
   readonly interactions?: DesktopRuntimeInteractions;
   readonly automations?: DesktopAutomationService;
+  readonly userConfigStore?: UserConfigStore;
+  readonly effectiveConfigResolver?: EffectiveConfigResolver;
+  readonly credentialVault?: CredentialVault;
   readonly env?: Readonly<Record<string, string | undefined>>;
   readonly providerFactory?: typeof createProvider;
   readonly createSessionId?: () => string;
@@ -132,11 +167,20 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   private readonly conversationStateStore: DesktopConversationStateStore;
   private readonly env: Readonly<Record<string, string | undefined>>;
   private readonly providerFactory: typeof createProvider;
+  private readonly userConfigStore: UserConfigStore;
+  private readonly effectiveConfigResolver: EffectiveConfigResolver;
+  private readonly credentialVault: CredentialVault;
   private readonly createSessionId: () => string;
   private readonly now: () => number;
   private readonly unsubscribeRuntimeEvents: () => void;
+  private readonly userConfigWatchListener = () => this.scheduleUserConfigRefresh();
+  private readonly userConfigWatchReady: Promise<void>;
   private readonly pendingSends = new Map<string, Promise<JsonObject>>();
   private transcriptPersistenceTail: Promise<void> = Promise.resolve();
+  private userConfigWatchTail: Promise<void> = Promise.resolve();
+  private userConfigWatchTimer?: NodeJS.Timeout;
+  private observedUserConfig?: UserConfigSnapshot;
+  private userConfigWatchClosed = false;
   private resourceVersion = 0;
 
   constructor(private readonly options: DesktopRuntimeServiceOptions) {
@@ -148,8 +192,16 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     this.conversationStateStore =
       options.conversationStateStore ?? new DesktopConversationStateStore({ env: this.env });
     this.providerFactory = options.providerFactory ?? createProvider;
+    this.userConfigStore =
+      options.userConfigStore ??
+      new UserConfigStore({ picoHome: resolvePicoHome({ env: this.env }) });
+    this.effectiveConfigResolver =
+      options.effectiveConfigResolver ??
+      new EffectiveConfigResolver({ userConfigStore: this.userConfigStore });
+    this.credentialVault = options.credentialVault ?? createPlatformCredentialVault();
     this.createSessionId = options.createSessionId ?? createCliSessionId;
     this.now = options.now ?? Date.now;
+    this.userConfigWatchReady = this.startUserConfigWatch();
     this.unsubscribeRuntimeEvents = options.runtimeService.subscribe((event) => {
       const sessionId = event.scope.sessionId;
       if (!sessionId) return;
@@ -239,6 +291,24 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         return this.getConfig(request.params.workspacePath);
       case "config.providers":
         return this.listProviders(request.params.workspacePath);
+      case "config.user.get":
+        return this.getUserConfig(request.params);
+      case "config.user.update":
+        return this.updateUserConfig(request.params);
+      case "config.effective.get":
+        return this.getEffectiveConfig(request.params);
+      case "provider.list":
+        return this.listUserProviders(request.params);
+      case "provider.upsert":
+        return this.upsertUserProvider(request.params);
+      case "provider.delete":
+        return this.deleteUserProvider(request.params);
+      case "provider.credential.status":
+        return this.getProviderCredentialStatus(request.params);
+      case "provider.credential.set":
+        return this.setProviderCredential(request.params);
+      case "provider.credential.delete":
+        return this.deleteProviderCredential(request.params);
       case "catalog.agents":
         return this.listAgents(request.params.workspacePath);
       case "catalog.skills":
@@ -327,6 +397,11 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   }
 
   async close(): Promise<void> {
+    this.userConfigWatchClosed = true;
+    if (this.userConfigWatchTimer) clearTimeout(this.userConfigWatchTimer);
+    unwatchFile(this.userConfigStore.filePath, this.userConfigWatchListener);
+    await this.userConfigWatchReady.catch(() => undefined);
+    await this.userConfigWatchTail.catch(() => undefined);
     // Workspace shutdown emits the terminal boundary for every active foreground Run.
     // Keep the projection subscriber alive until those events are durably appended.
     await this.options.runtimeService.close();
@@ -1532,6 +1607,451 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     };
   }
 
+  private async getUserConfig(params: unknown): Promise<JsonValue> {
+    assertExactObjectKeys(params, [], "config.user.get params");
+    const snapshot = await this.userConfigStore.read();
+    return {
+      config: runtimeUserConfig(snapshot.config),
+      revision: snapshot.revision,
+    };
+  }
+
+  private async updateUserConfig(params: unknown): Promise<JsonValue> {
+    const record = assertExactObjectKeys(
+      params,
+      ["defaults", "expectedRevision"],
+      "config.user.update params",
+    );
+    const defaults = normalizeRuntimeUserDefaults(record["defaults"]);
+    const expectedRevision = requireSha256(record["expectedRevision"], "expectedRevision");
+    const current = await this.userConfigStore.read();
+    const next = validatedUserConfig(
+      {
+        version: 1,
+        ...(Object.keys(defaults).length > 0 ? { defaults } : {}),
+        providers: current.config.providers,
+      },
+      "config.user.update",
+    );
+    assertUserDefaultRoute(next);
+    const written = await this.writeUserConfig(next, expectedRevision);
+    await this.publishUserConfigUpdated(written.revision, []);
+    return { config: runtimeUserConfig(written.config), revision: written.revision };
+  }
+
+  private async getEffectiveConfig(params: unknown): Promise<JsonValue> {
+    const record = assertExactObjectKeys(params, ["workspacePath"], "config.effective.get params");
+    const workspacePath = await this.requireTrustedWorkspace(
+      requireText(record["workspacePath"], "workspacePath"),
+    );
+    let snapshot;
+    try {
+      snapshot = await this.effectiveConfigResolver.resolve({
+        workDir: workspacePath,
+        projectTrusted: true,
+        env: this.env,
+      });
+    } catch (error) {
+      if (error instanceof ProviderIdConflictError) {
+        throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.CONFLICT, error.message);
+      }
+      throw error;
+    }
+    const userProviders = (await this.userConfigStore.read()).config.providers;
+    const providers = await Promise.all(
+      Object.entries(snapshot.providers)
+        .toSorted(([left], [right]) => left.localeCompare(right))
+        .map(([id, provider]) => {
+          const origin = providerOrigin(snapshot.sources[`providers.${id}`]);
+          const userProvider = userProviders[id];
+          const supportsSharedCredential =
+            origin === "user" ||
+            (userProvider !== undefined &&
+              userProvider.protocol === provider.protocol &&
+              sameProviderEndpoint(userProvider.baseURL, provider.baseURL));
+          return this.projectProviderProfile(id, provider, origin, supportsSharedCredential);
+        }),
+    );
+    return {
+      config: {
+        ...(snapshot.defaultModelRouteId
+          ? { defaultModelRouteId: snapshot.defaultModelRouteId }
+          : {}),
+        defaults: toJsonValue(snapshot.defaults),
+        providers,
+        sources: toJsonValue(snapshot.sources),
+        revisions: snapshot.revisions,
+      },
+    };
+  }
+
+  private async listUserProviders(params: unknown): Promise<JsonValue> {
+    assertExactObjectKeys(params, [], "provider.list params");
+    const snapshot = await this.userConfigStore.read();
+    const providers = await Promise.all(
+      Object.entries(snapshot.config.providers)
+        .toSorted(([left], [right]) => left.localeCompare(right))
+        .map(([id, provider]) => this.projectProviderProfile(id, provider, "user")),
+    );
+    return { providers, revision: snapshot.revision };
+  }
+
+  private async upsertUserProvider(params: unknown): Promise<JsonValue> {
+    const record = assertExactObjectKeys(
+      params,
+      ["provider", "expectedRevision"],
+      "provider.upsert params",
+    );
+    const expectedRevision = requireSha256(record["expectedRevision"], "expectedRevision");
+    const { id, config } = normalizeRuntimeProvider(record["provider"]);
+    const current = await this.userConfigStore.read();
+    const previousProvider = current.config.providers[id];
+    if (
+      previousProvider &&
+      (previousProvider.protocol !== config.protocol ||
+        !sameProviderEndpoint(previousProvider.baseURL, config.baseURL))
+    ) {
+      await this.assertNoStoredCredentialBeforeAuthorityChange(id, previousProvider);
+    }
+    const next = validatedUserConfig(
+      {
+        version: 1,
+        ...(current.config.defaults ? { defaults: current.config.defaults } : {}),
+        providers: { ...current.config.providers, [id]: config },
+      },
+      "provider.upsert",
+    );
+    assertUserDefaultRoute(next);
+    const written = await this.writeUserConfig(next, expectedRevision);
+    const provider = await this.projectProviderProfile(id, written.config.providers[id]!, "user");
+    await this.publishUserConfigUpdated(written.revision, [id]);
+    return { provider, revision: written.revision };
+  }
+
+  private async deleteUserProvider(params: unknown): Promise<JsonValue> {
+    const record = assertExactObjectKeys(
+      params,
+      ["providerId", "expectedRevision"],
+      "provider.delete params",
+    );
+    const providerId = requireProviderId(record["providerId"]);
+    const expectedRevision = requireSha256(record["expectedRevision"], "expectedRevision");
+    const current = await this.userConfigStore.read();
+    if (!current.config.providers[providerId]) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.NOT_FOUND,
+        `Provider ${providerId} 不存在`,
+      );
+    }
+    await this.assertNoStoredCredentialBeforeAuthorityChange(
+      providerId,
+      current.config.providers[providerId]!,
+    );
+    if (providerIdForModelRoute(current.config.defaults?.modelRouteId) === providerId) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.CONFLICT,
+        `Provider ${providerId} 仍是用户默认模型路由，请先更换默认模型`,
+      );
+    }
+    const workspacePaths = await this.registrationStore.list();
+    await this.assertNoActiveRunsBeforeProviderDelete(providerId, workspacePaths);
+    const automationReferences =
+      this.options.automations?.enabledProviderReferences(providerId, workspacePaths) ?? [];
+    if (automationReferences.length > 0) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.CONFLICT,
+        `Provider ${providerId} 仍被已启用 Automation ${automationReferences[0]!.jobId} 引用`,
+      );
+    }
+    const providers = { ...current.config.providers };
+    delete providers[providerId];
+    const next = validatedUserConfig(
+      {
+        version: 1,
+        ...(current.config.defaults ? { defaults: current.config.defaults } : {}),
+        providers,
+      },
+      "provider.delete",
+    );
+    const written = await this.writeUserConfig(next, expectedRevision);
+    await this.publishUserConfigUpdated(written.revision, [providerId]);
+    return { deleted: true, revision: written.revision };
+  }
+
+  private async getProviderCredentialStatus(params: unknown): Promise<JsonValue> {
+    const record = assertExactObjectKeys(
+      params,
+      ["providerId"],
+      "provider.credential.status params",
+    );
+    const providerId = requireProviderId(record["providerId"]);
+    const provider = await this.requireUserProvider(providerId);
+    return {
+      providerId,
+      ...(await this.projectCredentialStatus(providerId, provider)),
+      providerFingerprint: providerFingerprint(providerId, provider),
+    };
+  }
+
+  private async setProviderCredential(params: unknown): Promise<JsonValue> {
+    const record = assertExactObjectKeys(
+      params,
+      ["providerId", "secret", "expectedProviderFingerprint"],
+      "provider.credential.set params",
+    );
+    const providerId = requireProviderId(record["providerId"]);
+    const provider = await this.requireUserProvider(providerId);
+    const fingerprint = providerFingerprint(providerId, provider);
+    this.assertProviderFingerprint(record["expectedProviderFingerprint"], fingerprint);
+    if (!this.credentialVault.capability().available) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.FORBIDDEN,
+        this.credentialVault.capability().diagnostic,
+      );
+    }
+    const secret = requireSecret(record["secret"]);
+    await importProviderCredential({
+      provider: providerCredentialIdentity(providerId, provider),
+      secret,
+      vault: this.credentialVault,
+    });
+    const revision = (await this.userConfigStore.read()).revision;
+    await this.publishUserConfigUpdated(revision, [providerId]);
+    return {
+      providerId,
+      status: "ready",
+      source: "keychain",
+      providerFingerprint: fingerprint,
+    };
+  }
+
+  private async deleteProviderCredential(params: unknown): Promise<JsonValue> {
+    const record = assertExactObjectKeys(
+      params,
+      ["providerId", "expectedProviderFingerprint"],
+      "provider.credential.delete params",
+    );
+    const providerId = requireProviderId(record["providerId"]);
+    const provider = await this.requireUserProvider(providerId);
+    const fingerprint = providerFingerprint(providerId, provider);
+    this.assertProviderFingerprint(record["expectedProviderFingerprint"], fingerprint);
+    if (!this.credentialVault.capability().available) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.FORBIDDEN,
+        this.credentialVault.capability().diagnostic,
+      );
+    }
+    await this.credentialVault.delete(
+      credentialRefForProvider(providerCredentialIdentity(providerId, provider)),
+    );
+    const revision = (await this.userConfigStore.read()).revision;
+    await this.publishUserConfigUpdated(revision, [providerId]);
+    return {
+      providerId,
+      status: "missing",
+      source: "none",
+      providerFingerprint: fingerprint,
+    };
+  }
+
+  private async requireUserProvider(providerId: string): Promise<ModelProviderConfig> {
+    const provider = (await this.userConfigStore.read()).config.providers[providerId];
+    if (!provider) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.NOT_FOUND,
+        `Provider ${providerId} 不存在`,
+      );
+    }
+    return provider;
+  }
+
+  private async assertNoStoredCredentialBeforeAuthorityChange(
+    providerId: string,
+    provider: ModelProviderConfig,
+  ): Promise<void> {
+    if (!this.credentialVault.capability().available) return;
+    let stored: boolean;
+    try {
+      stored = await this.credentialVault.has(
+        credentialRefForProvider(providerCredentialIdentity(providerId, provider)),
+      );
+    } catch (error) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.CONFLICT,
+        `无法确认 Provider ${providerId} 的系统凭证状态，已拒绝变更: ${errorMessage(error)}`,
+      );
+    }
+    if (stored) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.CONFLICT,
+        `Provider ${providerId} 仍有系统凭证，请先删除凭证再修改 Endpoint/协议或删除 Provider`,
+      );
+    }
+  }
+
+  private async projectProviderProfile(
+    id: string,
+    provider: ModelProviderConfig,
+    origin: "user" | "project-legacy" | "environment",
+    supportsSharedCredential = true,
+  ): Promise<JsonObject> {
+    return {
+      ...runtimeProviderInput(id, provider),
+      origin,
+      fingerprint: providerFingerprint(id, provider),
+      ...(await this.projectCredentialStatus(id, provider, supportsSharedCredential)),
+    };
+  }
+
+  private async projectCredentialStatus(
+    providerId: string,
+    provider: ModelProviderConfig,
+    supportsSharedCredential = true,
+  ): Promise<{
+    readonly credentialStatus: "ready" | "missing" | "environment" | "unsupported";
+    readonly credentialSource: "keychain" | "environment" | "none";
+  }> {
+    if (readEnvironmentSecret(this.env, provider.apiKeyEnv)) {
+      return { credentialStatus: "environment", credentialSource: "environment" };
+    }
+    if (!supportsSharedCredential) {
+      return { credentialStatus: "unsupported", credentialSource: "none" };
+    }
+    if (!this.credentialVault.capability().available) {
+      return { credentialStatus: "unsupported", credentialSource: "none" };
+    }
+    try {
+      const ref = credentialRefForProvider(providerCredentialIdentity(providerId, provider));
+      return (await this.credentialVault.has(ref))
+        ? { credentialStatus: "ready", credentialSource: "keychain" }
+        : { credentialStatus: "missing", credentialSource: "none" };
+    } catch {
+      return { credentialStatus: "unsupported", credentialSource: "none" };
+    }
+  }
+
+  private async writeUserConfig(config: PicoUserConfig, expectedRevision: string) {
+    // Do not let the async watch bootstrap replace a snapshot written through this service.
+    await this.userConfigWatchReady;
+    try {
+      const written = await this.userConfigStore.write(config, { expectedRevision });
+      this.observedUserConfig = written;
+      return written;
+    } catch (error) {
+      if (
+        error instanceof UserConfigRevisionConflictError ||
+        error instanceof UserConfigLockTimeoutError
+      ) {
+        throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.CONFLICT, error.message);
+      }
+      throw error;
+    }
+  }
+
+  private async startUserConfigWatch(): Promise<void> {
+    try {
+      this.observedUserConfig = await this.userConfigStore.read();
+    } catch {
+      // The typed config methods surface corrupt state. Keep watching so an external repair
+      // is detected without requiring a daemon restart.
+    }
+    if (this.userConfigWatchClosed) return;
+    watchFile(
+      this.userConfigStore.filePath,
+      { persistent: false, interval: 200 },
+      this.userConfigWatchListener,
+    );
+  }
+
+  private scheduleUserConfigRefresh(): void {
+    if (this.userConfigWatchClosed) return;
+    if (this.userConfigWatchTimer) clearTimeout(this.userConfigWatchTimer);
+    this.userConfigWatchTimer = setTimeout(() => {
+      this.userConfigWatchTimer = undefined;
+      this.userConfigWatchTail = this.userConfigWatchTail
+        .then(
+          () => this.refreshObservedUserConfig(),
+          () => this.refreshObservedUserConfig(),
+        )
+        .catch(() => undefined);
+    }, 60);
+    this.userConfigWatchTimer.unref();
+  }
+
+  private async refreshObservedUserConfig(): Promise<void> {
+    if (this.userConfigWatchClosed) return;
+    const current = await this.userConfigStore.read();
+    const previous = this.observedUserConfig;
+    if (previous?.revision === current.revision) return;
+    this.observedUserConfig = current;
+    await this.publishUserConfigUpdated(
+      current.revision,
+      changedProviderIds(previous?.config.providers, current.config.providers),
+    );
+  }
+
+  private async assertNoActiveRunsBeforeProviderDelete(
+    providerId: string,
+    workspacePaths: readonly string[],
+  ): Promise<void> {
+    for (const workspacePath of workspacePaths) {
+      let result: JsonObject;
+      try {
+        result = requireJsonRecord(
+          await this.options.runtimeService.handle(
+            createRuntimeRequest("runs.list", { workspacePath }),
+          ),
+          "runs.list result",
+        );
+      } catch (error) {
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.CONFLICT,
+          `无法确认工作区是否仍在使用 Provider ${providerId}: ${errorMessage(error)}`,
+        );
+      }
+      const runs = Array.isArray(result["runs"]) ? result["runs"] : [];
+      if (
+        runs.filter(isJsonRecord).some((run) => !isTerminalRunStatus(String(run["status"] ?? "")))
+      ) {
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.CONFLICT,
+          `工作区 ${workspacePath} 仍有活动 Run，拒绝删除 Provider ${providerId}`,
+        );
+      }
+    }
+  }
+
+  private assertProviderFingerprint(expected: unknown, actual: string): void {
+    const normalized = requireSha256(expected, "expectedProviderFingerprint");
+    if (normalized !== actual) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.CONFLICT,
+        "Provider 配置已变化，请刷新后重试",
+      );
+    }
+  }
+
+  private async publishUserConfigUpdated(
+    revision: string,
+    providerIds: readonly string[],
+  ): Promise<void> {
+    for (const workspacePath of await this.registrationStore.list()) {
+      this.publish(
+        createRuntimeEvent({
+          topic: "config.updated",
+          scope: { workspacePath },
+          resourceVersion: this.nextResourceVersion(),
+          at: this.now(),
+          payload: {
+            scope: "user",
+            revision,
+            providerIds: [...providerIds],
+          },
+        }),
+      );
+    }
+  }
+
   private async listAgents(workspacePath: string): Promise<JsonValue> {
     const canonical = await this.requireTrustedWorkspace(workspacePath);
     const config = await loadPicoConfig(canonical);
@@ -2130,6 +2650,348 @@ function sessionPayload(
     ...(summary.lastMessage ? { lastMessage: summary.lastMessage } : {}),
     ...(summary.forkFrom ? { forkFrom: summary.forkFrom } : {}),
   };
+}
+
+function runtimeUserConfig(config: PicoUserConfig): JsonObject {
+  return {
+    version: 1,
+    defaults: toJsonValue(config.defaults ?? {}),
+    providers: Object.entries(config.providers)
+      .toSorted(([left], [right]) => left.localeCompare(right))
+      .map(([id, provider]) => runtimeProviderInput(id, provider)),
+  };
+}
+
+function runtimeProviderInput(id: string, provider: ModelProviderConfig): JsonObject {
+  const modelCapabilities =
+    provider.modelCapabilities === undefined
+      ? undefined
+      : requireJsonRecord(toJsonValue(provider.modelCapabilities), "modelCapabilities");
+  return {
+    id,
+    protocol: provider.protocol,
+    baseURL: provider.baseURL,
+    apiKeyEnv: provider.apiKeyEnv,
+    models: [...provider.models],
+    discoverModels: provider.discoverModels,
+    ...(modelCapabilities ? { modelCapabilities } : {}),
+  } satisfies RuntimeProviderInput;
+}
+
+function normalizeRuntimeUserDefaults(value: unknown): PicoUserConfigDefaults {
+  const record = assertExactObjectKeys(
+    value,
+    ["modelRouteId", "mode", "thinkingEffort"],
+    "defaults",
+  );
+  const modelRouteId = record["modelRouteId"];
+  const mode = record["mode"];
+  const thinkingEffort = record["thinkingEffort"];
+  if (
+    modelRouteId !== undefined &&
+    (typeof modelRouteId !== "string" || !/^[^/\s]+\/.+$/u.test(modelRouteId.trim()))
+  ) {
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.INVALID_PARAMS,
+      "defaults.modelRouteId 必须使用 providerID/modelID 格式",
+    );
+  }
+  if (mode !== undefined && !isOneOf(mode, ["default", "plan", "auto", "yolo"] as const)) {
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.INVALID_PARAMS,
+      "defaults.mode 必须是 default、plan、auto 或 yolo",
+    );
+  }
+  if (
+    thinkingEffort !== undefined &&
+    (typeof thinkingEffort !== "string" || !thinkingEffort.trim())
+  ) {
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.INVALID_PARAMS,
+      "defaults.thinkingEffort 必须是非空字符串",
+    );
+  }
+  return {
+    ...(typeof modelRouteId === "string" ? { modelRouteId: modelRouteId.trim() } : {}),
+    ...(isOneOf(mode, ["default", "plan", "auto", "yolo"] as const) ? { mode } : {}),
+    ...(typeof thinkingEffort === "string" ? { thinkingEffort: thinkingEffort.trim() } : {}),
+  };
+}
+
+function normalizeRuntimeProvider(value: unknown): {
+  readonly id: string;
+  readonly config: ModelProviderConfig;
+} {
+  const record = assertExactObjectKeys(
+    value,
+    ["id", "protocol", "baseURL", "apiKeyEnv", "models", "discoverModels", "modelCapabilities"],
+    "provider",
+  );
+  const id = requireProviderId(record["id"]);
+  const protocol = record["protocol"];
+  if (!isOneOf(protocol, ["openai", "claude", "gemini"] as const)) {
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.INVALID_PARAMS,
+      "provider.protocol 必须是 openai、claude 或 gemini",
+    );
+  }
+  const baseURL = requireText(record["baseURL"], "provider.baseURL");
+  let normalizedEndpoint: string;
+  try {
+    normalizedEndpoint = normalizeProviderEndpoint(baseURL);
+  } catch (error) {
+    throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.INVALID_PARAMS, errorMessage(error));
+  }
+  const apiKeyEnv = requireText(record["apiKeyEnv"], "provider.apiKeyEnv");
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(apiKeyEnv)) {
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.INVALID_PARAMS,
+      "provider.apiKeyEnv 必须是环境变量名",
+    );
+  }
+  const rawModels = record["models"];
+  if (!Array.isArray(rawModels) || rawModels.some((model) => typeof model !== "string")) {
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.INVALID_PARAMS,
+      "provider.models 必须是字符串数组",
+    );
+  }
+  const models = rawModels.map((model) => String(model).trim()).filter(Boolean);
+  if (new Set(models).size !== models.length) {
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.INVALID_PARAMS,
+      "provider.models 不能包含重复模型",
+    );
+  }
+  const discoverModels = record["discoverModels"];
+  if (typeof discoverModels !== "boolean") {
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.INVALID_PARAMS,
+      "provider.discoverModels 必须是布尔值",
+    );
+  }
+  if (models.length === 0) {
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.INVALID_PARAMS,
+      "provider.models 首版必须至少包含一个显式模型",
+    );
+  }
+  if (discoverModels && protocol !== "openai") {
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.INVALID_PARAMS,
+      "provider.discoverModels 首版仅支持 openai 协议",
+    );
+  }
+  const modelCapabilitiesValue = record["modelCapabilities"];
+  const modelCapabilities =
+    modelCapabilitiesValue === undefined
+      ? undefined
+      : assertExactModelCapabilities(modelCapabilitiesValue, models);
+  const rawProvider = {
+    protocol,
+    baseURL: normalizedEndpoint,
+    apiKeyEnv,
+    discoverModels,
+    models:
+      modelCapabilities === undefined
+        ? models
+        : Object.fromEntries(models.map((model) => [model, modelCapabilities[model] ?? {}])),
+  };
+  try {
+    const config = parseModelProviderConfigs({ [id]: rawProvider }, "provider.upsert")[id];
+    if (!config) throw new Error(`Provider ${id} 解析后丢失`);
+    return { id, config };
+  } catch (error) {
+    if (error instanceof RuntimeProtocolError) throw error;
+    throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.INVALID_PARAMS, errorMessage(error));
+  }
+}
+
+function assertExactModelCapabilities(value: unknown, models: readonly string[]): JsonObject {
+  if (!isJsonRecord(value)) {
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.INVALID_PARAMS,
+      "provider.modelCapabilities 必须是对象",
+    );
+  }
+  for (const [model, capabilities] of Object.entries(value)) {
+    if (!models.includes(model)) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.INVALID_PARAMS,
+        `provider.modelCapabilities.${model} 不在 models 列表中`,
+      );
+    }
+    if (!isJsonRecord(capabilities)) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.INVALID_PARAMS,
+        `provider.modelCapabilities.${model} 必须是对象`,
+      );
+    }
+  }
+  return value;
+}
+
+function validatedUserConfig(config: PicoUserConfig, operation: string): PicoUserConfig {
+  try {
+    return parseUserConfig(config, operation);
+  } catch (error) {
+    throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.INVALID_PARAMS, errorMessage(error));
+  }
+}
+
+function assertUserDefaultRoute(config: PicoUserConfig): void {
+  const routeId = config.defaults?.modelRouteId;
+  if (!routeId) return;
+  const separator = routeId.indexOf("/");
+  const providerId = routeId.slice(0, separator);
+  const model = routeId.slice(separator + 1);
+  const provider = config.providers[providerId];
+  if (!provider || !provider.models.includes(model)) {
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.INVALID_PARAMS,
+      `默认模型路由 ${routeId} 不在用户 Provider 模型列表中`,
+    );
+  }
+}
+
+function providerFingerprint(providerId: string, provider: ModelProviderConfig): string {
+  return createHash("sha256")
+    .update(
+      stableJson({
+        providerId,
+        protocol: provider.protocol,
+        baseURL: provider.baseURL.trim().replace(/\/+$/u, ""),
+        apiKeyEnv: provider.apiKeyEnv,
+        models: [...provider.models],
+        discoverModels: provider.discoverModels,
+        modelCapabilities: provider.modelCapabilities ?? {},
+      }),
+    )
+    .digest("hex");
+}
+
+function changedProviderIds(
+  previous: Readonly<Record<string, ModelProviderConfig>> | undefined,
+  current: Readonly<Record<string, ModelProviderConfig>>,
+): string[] {
+  const ids = new Set([...Object.keys(previous ?? {}), ...Object.keys(current)]);
+  return [...ids]
+    .filter((id) => {
+      const before = previous?.[id];
+      const after = current[id];
+      if (!before || !after) return true;
+      return providerFingerprint(id, before) !== providerFingerprint(id, after);
+    })
+    .toSorted();
+}
+
+function providerCredentialIdentity(providerId: string, provider: ModelProviderConfig) {
+  return {
+    providerId,
+    protocol: provider.protocol,
+    baseURL: provider.baseURL,
+  } as const;
+}
+
+function sameProviderEndpoint(left: string, right: string): boolean {
+  try {
+    return normalizeProviderEndpoint(left) === normalizeProviderEndpoint(right);
+  } catch {
+    return left.trim().replace(/\/+$/u, "") === right.trim().replace(/\/+$/u, "");
+  }
+}
+
+function providerOrigin(
+  source: ConfigSource | undefined,
+): "user" | "project-legacy" | "environment" {
+  if (source === "user" || source === "project-legacy" || source === "environment") {
+    return source;
+  }
+  throw new RuntimeProtocolError(
+    RUNTIME_ERROR_CODES.INTERNAL_ERROR,
+    `Provider 配置来源无效: ${String(source)}`,
+  );
+}
+
+function readEnvironmentSecret(
+  env: Readonly<Record<string, string | undefined>>,
+  name: string,
+): string | undefined {
+  return env[name]
+    ?.split(",")
+    .map((value) => value.trim())
+    .find(Boolean);
+}
+
+function requireProviderId(value: unknown): string {
+  const providerId = requireText(value, "providerId");
+  if (
+    !/^[^/\s]+$/u.test(providerId) ||
+    ["__proto__", "prototype", "constructor"].includes(providerId)
+  ) {
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.INVALID_PARAMS,
+      "providerId 不能包含空白或斜杠",
+    );
+  }
+  return providerId;
+}
+
+function providerIdForModelRoute(modelRouteId: string | undefined): string | undefined {
+  if (!modelRouteId) return undefined;
+  const separator = modelRouteId.indexOf("/");
+  return separator > 0 ? modelRouteId.slice(0, separator) : undefined;
+}
+
+function requireSha256(value: unknown, field: string): string {
+  if (typeof value !== "string" || !/^[a-f0-9]{64}$/u.test(value)) {
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.INVALID_PARAMS,
+      `${field} 必须是小写 SHA-256`,
+    );
+  }
+  return value;
+}
+
+function requireSecret(value: unknown): string {
+  if (typeof value !== "string" || !value.trim() || /[\r\n]/u.test(value)) {
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.INVALID_PARAMS,
+      "secret 必须是不含换行的非空字符串",
+    );
+  }
+  return value.trim();
+}
+
+function assertExactObjectKeys(
+  value: unknown,
+  allowedKeys: readonly string[],
+  label: string,
+): JsonObject {
+  if (!isJsonRecord(value)) {
+    throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.INVALID_PARAMS, `${label} 必须是对象`);
+  }
+  const allowed = new Set(allowedKeys);
+  const unexpected = Object.keys(value).filter((key) => !allowed.has(key));
+  if (unexpected.length > 0) {
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.INVALID_PARAMS,
+      `${label} 包含未知字段: ${unexpected.join(", ")}`,
+    );
+  }
+  return value;
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map((item) => stableJson(item)).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    return `{${Object.entries(value)
+      .filter(([, item]) => item !== undefined)
+      .toSorted(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => `${JSON.stringify(key)}:${stableJson(item)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
 }
 
 function runtimeSessionSettings(settings: SessionSettings, router: ModelRouter): JsonObject {

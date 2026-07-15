@@ -5,7 +5,7 @@ import { dirname } from "node:path";
 import { resolvePicoPaths } from "../paths/pico-paths.js";
 import { isDeepStrictEqual } from "node:util";
 import Database from "better-sqlite3";
-import { parseCredentialRef, type CredentialRef } from "../provider/credential-vault.js";
+import { parseAnyCredentialRef, type CredentialRef } from "../provider/credential-vault.js";
 import { quarantineCorruptJson } from "../storage/atomic-json.js";
 import { parseBackgroundYoloPolicySnapshot } from "../safety/background-yolo-policy-schema.js";
 import {
@@ -126,6 +126,7 @@ export interface CreateCronJobInput {
   prompt: string;
   policySnapshot: YoloPolicySnapshot;
   credentialRef?: CredentialRef;
+  modelRouteId?: string;
   enabled?: boolean;
 }
 
@@ -288,6 +289,7 @@ interface CronJobRow {
   enabled: number;
   policy_snapshot_json: string;
   credential_ref: string | null;
+  model_route_id: string | null;
   version: number;
   created_at: number;
   updated_at: number;
@@ -791,14 +793,33 @@ export class RuntimeStore {
 
   createCronJob(input: CreateCronJobInput): CronJobRecord {
     const policySnapshot = parseBackgroundYoloPolicySnapshot(input.policySnapshot);
-    if (input.credentialRef !== undefined) parseCredentialRef(input.credentialRef);
+    const parsedCredential =
+      input.credentialRef === undefined ? undefined : parseAnyCredentialRef(input.credentialRef);
+    const modelRouteId = normalizeOptionalModelRouteId(input.modelRouteId);
+    if (parsedCredential?.version === "v2" && modelRouteId === undefined) {
+      throw new Error("v2 Provider credentialRef 必须配套固定 modelRouteId");
+    }
+    if (
+      parsedCredential?.version === "v1" &&
+      modelRouteId !== undefined &&
+      parsedCredential.modelRouteId !== modelRouteId
+    ) {
+      throw new Error("modelRouteId 与 v1 credentialRef 绑定的路由不一致");
+    }
+    if (
+      parsedCredential?.version === "v2" &&
+      modelRouteId !== undefined &&
+      providerIdFromModelRoute(modelRouteId) !== parsedCredential.providerId
+    ) {
+      throw new Error("modelRouteId 与 v2 credentialRef 绑定的 Provider 不一致");
+    }
     const now = this.now();
     this.db
       .prepare(
         `INSERT INTO cron_jobs (
            cron_job_id, workspace_path, name, schedule, time_zone, prompt, enabled,
-           policy_snapshot_json, credential_ref, version, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+           policy_snapshot_json, credential_ref, model_route_id, version, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
       )
       .run(
         input.cronJobId,
@@ -810,6 +831,7 @@ export class RuntimeStore {
         input.enabled === false ? 0 : 1,
         JSON.stringify(policySnapshot),
         input.credentialRef ?? null,
+        modelRouteId ?? null,
         now,
         now,
       );
@@ -1839,6 +1861,7 @@ export class RuntimeStore {
           .run("provider_call_hook_purpose", this.now());
       }
       this.ensureCronJobDisplayNameColumn();
+      this.ensureCronJobModelRouteColumn();
     });
     migrate();
   }
@@ -1863,6 +1886,11 @@ export class RuntimeStore {
   private ensureCronJobDisplayNameColumn(): void {
     if (hasCronJobDisplayNameColumn(this.db)) return;
     this.db.exec("ALTER TABLE cron_jobs ADD COLUMN name TEXT");
+  }
+
+  private ensureCronJobModelRouteColumn(): void {
+    if (hasCronJobModelRouteColumn(this.db)) return;
+    this.db.exec("ALTER TABLE cron_jobs ADD COLUMN model_route_id TEXT");
   }
 
   private assertLease(resourceKey: string, ownerId: string, leaseEpoch: number): void {
@@ -2423,6 +2451,12 @@ function mapBaseline(row: BaselineRow): UsageBaselineRecord {
 }
 
 function mapCronJob(row: CronJobRow): CronJobRecord {
+  const parsedCredential = row.credential_ref
+    ? parseAnyCredentialRef(row.credential_ref)
+    : undefined;
+  const modelRouteId =
+    row.model_route_id ??
+    (parsedCredential?.version === "v1" ? parsedCredential.modelRouteId : undefined);
   return {
     cronJobId: row.cron_job_id,
     workspacePath: row.workspace_path,
@@ -2432,11 +2466,25 @@ function mapCronJob(row: CronJobRow): CronJobRecord {
     prompt: row.prompt,
     enabled: row.enabled === 1,
     policySnapshot: parseYoloPolicySnapshot(row.policy_snapshot_json),
-    ...(row.credential_ref ? { credentialRef: parseCredentialRef(row.credential_ref).ref } : {}),
+    ...(parsedCredential ? { credentialRef: parsedCredential.ref } : {}),
+    ...(modelRouteId ? { modelRouteId } : {}),
     version: row.version,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+}
+
+function normalizeOptionalModelRouteId(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  const normalized = value.trim();
+  if (!/^[^/\s]+\/.+$/u.test(normalized)) {
+    throw new Error("modelRouteId 必须使用 providerID/modelID 格式");
+  }
+  return normalized;
+}
+
+function providerIdFromModelRoute(modelRouteId: string): string {
+  return modelRouteId.slice(0, modelRouteId.indexOf("/"));
 }
 
 function normalizeCronJobName(name: string | undefined, prompt = ""): string {
@@ -2454,6 +2502,12 @@ function normalizeCronPrompt(prompt: string): string {
 function hasCronJobDisplayNameColumn(db: Database.Database): boolean {
   return (db.pragma("table_info(cron_jobs)") as Array<{ name: string }>).some(
     (column) => column.name === "name",
+  );
+}
+
+function hasCronJobModelRouteColumn(db: Database.Database): boolean {
+  return (db.pragma("table_info(cron_jobs)") as Array<{ name: string }>).some(
+    (column) => column.name === "model_route_id",
   );
 }
 
