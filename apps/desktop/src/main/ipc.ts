@@ -11,6 +11,7 @@ import {
   parseStrictRuntimeParams,
   RuntimeProtocolError,
   type RuntimeMethod,
+  type RuntimeNotification,
 } from "@pico/protocol";
 import type { PlatformServices } from "../platform/index.js";
 import {
@@ -64,27 +65,61 @@ export function registerDesktopIpcHandlers(options: {
 
   ipcMain.handle(DESKTOP_IPC_CHANNELS.runtimeSubscribe, async (event, value: unknown) => {
     if (!trusted(event)) return unauthorized();
+    let subscription: Awaited<ReturnType<RuntimeClientAdapter["subscribe"]>> | undefined;
+    let managedSubscription: RuntimeSubscription | undefined;
+    let ready = false;
+    let disposed = false;
+    const pendingNotifications: RuntimeNotification[] = [];
+    let subscriptionId: string | undefined;
+
+    const dispose = () => {
+      if (disposed) return;
+      disposed = true;
+      pendingNotifications.length = 0;
+      event.sender.removeListener("destroyed", dispose);
+      subscription?.dispose();
+      if (subscriptionId && subscriptions.get(subscriptionId) === managedSubscription) {
+        subscriptions.delete(subscriptionId);
+      }
+    };
+    event.sender.once("destroyed", dispose);
+
     try {
       const envelope = readSubscription(value);
+      subscriptionId = envelope.subscriptionId;
       const params = parseStrictRuntimeParams("events.subscribe", envelope.params);
       subscriptions.get(envelope.subscriptionId)?.dispose();
-      const subscription = await runtime.subscribe(params, (runtimeEvent) => {
-        if (!event.sender.isDestroyed()) {
-          event.sender.send(DESKTOP_IPC_CHANNELS.runtimeEvent, {
-            subscriptionId: envelope.subscriptionId,
-            event: runtimeEvent,
-          });
-        }
+      const sendNotification = (notification: RuntimeNotification) => {
+        if (disposed || event.sender.isDestroyed()) return;
+        event.sender.send(DESKTOP_IPC_CHANNELS.runtimeEvent, {
+          subscriptionId: envelope.subscriptionId,
+          event: notification,
+        });
+      };
+      subscription = await runtime.subscribe(params, (notification) => {
+        if (disposed || event.sender.isDestroyed()) return;
+        if (!ready) pendingNotifications.push(notification);
+        else sendNotification(notification);
       });
-      subscriptions.set(envelope.subscriptionId, {
+      if (disposed || event.sender.isDestroyed()) {
+        subscription.dispose();
+        throw new RuntimeClientError(
+          "RUNTIME_CLIENT_CLOSED",
+          "Desktop Renderer 已关闭，Runtime 事件订阅已取消",
+          true,
+        );
+      }
+      const replay = parseDesktopRuntimeResult("events.subscribe", subscription.replay);
+      managedSubscription = {
         ownerId: event.sender.id,
-        dispose: subscription.dispose,
-      });
-      event.sender.once("destroyed", () =>
-        disposeOwnedSubscriptions(subscriptions, event.sender.id),
-      );
-      return success(parseDesktopRuntimeResult("events.subscribe", subscription.replay));
+        dispose,
+      };
+      subscriptions.set(envelope.subscriptionId, managedSubscription);
+      ready = true;
+      for (const notification of pendingNotifications.splice(0)) sendNotification(notification);
+      return success(replay);
     } catch (error) {
+      dispose();
       return failure(error);
     }
   });
@@ -243,17 +278,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
   const actual = Object.keys(value);
   return actual.length === keys.length && keys.every((key) => Object.hasOwn(value, key));
-}
-
-function disposeOwnedSubscriptions(
-  subscriptions: Map<string, RuntimeSubscription>,
-  ownerId: number,
-): void {
-  for (const [id, subscription] of subscriptions) {
-    if (subscription.ownerId !== ownerId) continue;
-    subscription.dispose();
-    subscriptions.delete(id);
-  }
 }
 
 function success<T>(value: T): DesktopResult<T> {

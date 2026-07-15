@@ -15,7 +15,7 @@
 
 ## 验证顺序
 
-1. `npm ci`，然后运行生产依赖审计、typecheck、lint、桌面测试与现有仓库测试。
+1. `npm ci`，然后运行生产依赖审计、Desktop typecheck 与全仓 lint。当前仓库不包含自动化测试代码，发布流程不声称存在 test gate。
 2. 分别执行 `npm run desktop:make -- --arch=arm64` 与 `--arch=x64`。
 3. 用 `codesign --verify --deep --strict` 验证 `.app`，用 `spctl --assess --type execute` 验证 Gatekeeper。
 4. 用 `xcrun stapler validate` 验证公证票据已装订。
