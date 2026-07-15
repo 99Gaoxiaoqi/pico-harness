@@ -761,13 +761,13 @@ export type RuntimeMethodMap = {
       readonly afterEventId?: string;
       readonly limit?: number;
     };
-    readonly result: { readonly events: readonly RuntimeEvent[] };
+    readonly result: { readonly events: readonly RuntimeNotification[] };
   };
   readonly "events.subscribe": {
     readonly params: WorkspaceParams & { readonly afterEventId?: string };
     readonly result: {
       readonly subscribed: true;
-      readonly events: readonly RuntimeEvent[];
+      readonly events: readonly RuntimeNotification[];
     };
   };
 };
@@ -921,7 +921,7 @@ export const DESKTOP_RUNTIME_METHODS = [
 
 export type DesktopRuntimeMethod = (typeof DESKTOP_RUNTIME_METHODS)[number];
 
-export type RuntimeEventMap = {
+export type RuntimeNotificationMap = {
   readonly "workspace.registered": { readonly registered: true };
   readonly "workspace.unregistered": { readonly registered: false };
   readonly "workspace.trustChanged": { readonly trusted: boolean };
@@ -978,12 +978,12 @@ export type RuntimeEventMap = {
   };
 };
 
-export type RuntimeEventTopic = keyof RuntimeEventMap;
-type EventPayload<Topic extends string> = Topic extends RuntimeEventTopic
-  ? RuntimeEventMap[Topic]
+export type RuntimeNotificationTopic = keyof RuntimeNotificationMap;
+type NotificationPayload<Topic extends string> = Topic extends RuntimeNotificationTopic
+  ? RuntimeNotificationMap[Topic]
   : JsonValue;
 
-export interface RuntimeEvent<Topic extends string = string> {
+export interface RuntimeNotification<Topic extends string = string> {
   protocolVersion: typeof LOCAL_RUNTIME_PROTOCOL_VERSION;
   eventId: string;
   topic: Topic;
@@ -995,12 +995,12 @@ export interface RuntimeEvent<Topic extends string = string> {
   };
   resourceVersion: number;
   at: number;
-  payload: EventPayload<Topic>;
+  payload: NotificationPayload<Topic>;
 }
 
-export type TypedRuntimeEvent = {
-  [Topic in RuntimeEventTopic]: RuntimeEvent<Topic>;
-}[RuntimeEventTopic];
+export type TypedRuntimeNotification = {
+  [Topic in RuntimeNotificationTopic]: RuntimeNotification<Topic>;
+}[RuntimeNotificationTopic];
 
 export interface WorkspaceStatusResult extends JsonObject {
   workspacePath: string;
@@ -1062,10 +1062,10 @@ export interface RuntimeErrorResponse {
   error: { code: RuntimeErrorCode; message: string };
 }
 
-export interface RuntimeEventMessage {
+export interface RuntimeNotificationMessage {
   kind: "event";
   protocolVersion: typeof LOCAL_RUNTIME_PROTOCOL_VERSION;
-  event: RuntimeEvent;
+  event: RuntimeNotification;
 }
 
 export interface RuntimeAuthRequest {
@@ -1088,7 +1088,7 @@ export type RuntimeMessage =
   | RuntimeAuthResult
   | RuntimeRequest
   | RuntimeResponse
-  | RuntimeEventMessage;
+  | RuntimeNotificationMessage;
 
 export class RuntimeProtocolError extends Error {
   readonly code: RuntimeErrorCode;
@@ -1141,9 +1141,9 @@ export function createTypedRuntimeRequest<Method extends RuntimeMethod>(
   return createRuntimeRequest(method, params) as RuntimeRequest<Method>;
 }
 
-export function createRuntimeEvent<Topic extends string>(
-  input: Omit<RuntimeEvent<Topic>, "eventId" | "protocolVersion"> & { eventId?: string },
-): RuntimeEvent<Topic> {
+export function createRuntimeNotification<Topic extends string>(
+  input: Omit<RuntimeNotification<Topic>, "eventId" | "protocolVersion"> & { eventId?: string },
+): RuntimeNotification<Topic> {
   return {
     ...input,
     eventId: input.eventId ?? globalThis.crypto.randomUUID(),
@@ -1165,7 +1165,7 @@ export function createRuntimeError(
   };
 }
 
-export function serializeRuntimeEvent(event: RuntimeEvent): JsonValue {
+export function serializeRuntimeNotification(event: RuntimeNotification): JsonValue {
   return {
     protocolVersion: event.protocolVersion,
     eventId: event.eventId,
@@ -1240,7 +1240,7 @@ export function parseRuntimeMessage(raw: string): RuntimeMessage {
   }
   if (parsed.kind === "request") return assertRequest(parsed);
   if (parsed.kind === "response") return assertResponse(parsed);
-  if (parsed.kind === "event") return assertEventMessage(parsed);
+  if (parsed.kind === "event") return assertNotificationMessage(parsed);
   if (parsed.kind === "auth") return assertAuthRequest(parsed);
   if (parsed.kind === "auth_result") return assertAuthResult(parsed);
   throw protocolError("INVALID_KIND", "IPC 消息 kind 无效");
@@ -1293,14 +1293,14 @@ function assertResponse(value: Record<string, unknown>): RuntimeResponse {
   throw protocolError("INVALID_REQUEST", "IPC response 内容无效");
 }
 
-function assertEventMessage(value: Record<string, unknown>): RuntimeEventMessage {
-  if (!isJsonObject(value.event) || !isRuntimeEvent(value.event)) {
+function assertNotificationMessage(value: Record<string, unknown>): RuntimeNotificationMessage {
+  if (!isJsonObject(value.event) || !isRuntimeNotification(value.event)) {
     throw protocolError("INVALID_REQUEST", "IPC event 无效");
   }
-  return value as unknown as RuntimeEventMessage;
+  return value as unknown as RuntimeNotificationMessage;
 }
 
-function isRuntimeEvent(value: Record<string, unknown>): boolean {
+function isRuntimeNotification(value: Record<string, unknown>): boolean {
   const scope = value.scope;
   return (
     value.protocolVersion === LOCAL_RUNTIME_PROTOCOL_VERSION &&
@@ -1913,8 +1913,8 @@ const runtimeChangeResult = resultShape({
   deletions: resultFiniteNumber,
 });
 
-const runtimeEventResult: RuntimeResultRule = (value, path) => {
-  if (!isJsonObject(value) || !isRuntimeEvent(value)) {
+const runtimeNotificationResult: RuntimeResultRule = (value, path) => {
+  if (!isJsonObject(value) || !isRuntimeNotification(value)) {
     throw invalidResult(`${path} 不是有效的 Runtime event`);
   }
 };
@@ -1982,10 +1982,10 @@ const DESKTOP_CRITICAL_RESULT_VALIDATORS: Partial<
     truncated: resultBoolean,
     fingerprint: resultString,
   }),
-  "events.replay": resultShape({ events: resultArray(runtimeEventResult) }),
+  "events.replay": resultShape({ events: resultArray(runtimeNotificationResult) }),
   "events.subscribe": resultShape({
     subscribed: resultOneOf([true]),
-    events: resultArray(runtimeEventResult),
+    events: resultArray(runtimeNotificationResult),
   }),
 };
 

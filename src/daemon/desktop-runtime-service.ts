@@ -104,7 +104,7 @@ import type {
   UsageLedgerTotals,
 } from "../tasks/runtime-types.js";
 import {
-  createRuntimeEvent,
+  createRuntimeNotification,
   createRuntimeRequest,
   isJsonValue,
   MAX_RUNTIME_FRAME_BYTES,
@@ -112,12 +112,12 @@ import {
   RuntimeProtocolError,
   type JsonValue,
   type JsonObject,
-  type RuntimeEvent,
+  type RuntimeNotification,
   type RuntimeRequest,
   type RuntimeProviderInput,
   type RuntimeUserInput,
 } from "./protocol.js";
-import type { DisposableLocalRuntimeService, RuntimeEventCursor } from "./service.js";
+import type { DisposableLocalRuntimeService, RuntimeNotificationCursor } from "./service.js";
 import {
   DesktopSessionStateStore,
   type LegacyDesktopSessionTitleMetadata,
@@ -271,8 +271,8 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       if (!sessionId) return;
       if (isPersistedConversationTopic(event.topic)) {
         this.transcriptPersistenceTail = this.transcriptPersistenceTail.then(
-          () => this.persistRuntimeEvent(event),
-          () => this.persistRuntimeEvent(event),
+          () => this.persistRuntimeNotification(event),
+          () => this.persistRuntimeNotification(event),
         );
         void this.transcriptPersistenceTail.catch((error: unknown) =>
           this.publishConversationFailure(event.scope.workspacePath, error),
@@ -472,11 +472,11 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     );
   }
 
-  replayEvents(cursor: RuntimeEventCursor): Promise<readonly RuntimeEvent[]> {
+  replayEvents(cursor: RuntimeNotificationCursor): Promise<readonly RuntimeNotification[]> {
     return this.options.runtimeService.replayEvents(cursor);
   }
 
-  subscribe(listener: (event: RuntimeEvent) => void): () => void {
+  subscribe(listener: (notification: RuntimeNotification) => void): () => void {
     return this.options.runtimeService.subscribe(listener);
   }
 
@@ -525,7 +525,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     try {
       const result = await initializeProjectEntrypoints(canonical);
       this.publish(
-        createRuntimeEvent({
+        createRuntimeNotification({
           topic: "workspace.initialized",
           scope: { workspacePath: canonical },
           resourceVersion: this.nextResourceVersion(),
@@ -579,7 +579,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const canonical = await this.trustStore.canonicalize(workspacePath);
     await this.trustStore.setTrusted(canonical, trusted);
     this.publish(
-      createRuntimeEvent({
+      createRuntimeNotification({
         topic: "workspace.trustChanged",
         scope: { workspacePath: canonical },
         resourceVersion: this.nextResourceVersion(),
@@ -799,7 +799,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       return runtimeSessionSettings(current, router);
     });
     this.publish(
-      createRuntimeEvent({
+      createRuntimeNotification({
         topic: "session.settingsUpdated",
         scope: { workspacePath: canonical, sessionId: params.sessionId },
         resourceVersion: this.nextResourceVersion(),
@@ -1319,7 +1319,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     await this.conversationStateStore.removeQueued(next.queueId);
   }
 
-  private async persistRuntimeEvent(event: RuntimeEvent): Promise<void> {
+  private async persistRuntimeNotification(event: RuntimeNotification): Promise<void> {
     if (isRunBoundaryTopic(event.topic)) {
       await this.persistRunBoundary(event);
       return;
@@ -1347,7 +1347,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     }
   }
 
-  private async persistRunBoundary(event: RuntimeEvent): Promise<void> {
+  private async persistRunBoundary(event: RuntimeNotification): Promise<void> {
     const sessionId = event.scope.sessionId;
     const runId = event.scope.runId;
     if (!sessionId || !runId) return;
@@ -1383,7 +1383,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     });
   }
 
-  private async persistTimelineEvent(event: RuntimeEvent): Promise<void> {
+  private async persistTimelineEvent(event: RuntimeNotification): Promise<void> {
     const sessionId = event.scope.sessionId;
     const runId = event.scope.runId;
     const payload = isJsonRecord(event.payload) ? event.payload : undefined;
@@ -1528,7 +1528,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     }
   }
 
-  private async persistApprovalRequested(event: RuntimeEvent): Promise<void> {
+  private async persistApprovalRequested(event: RuntimeNotification): Promise<void> {
     const sessionId = event.scope.sessionId;
     const payload = isJsonRecord(event.payload) ? event.payload : undefined;
     const approvalId = payload && optionalNonEmptyText(payload["approvalId"]);
@@ -1558,7 +1558,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     });
   }
 
-  private async persistApprovalResolved(event: RuntimeEvent): Promise<void> {
+  private async persistApprovalResolved(event: RuntimeNotification): Promise<void> {
     const sessionId = event.scope.sessionId;
     const payload = isJsonRecord(event.payload) ? event.payload : undefined;
     const approvalId = payload && optionalNonEmptyText(payload["approvalId"]);
@@ -1579,7 +1579,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     });
   }
 
-  private async persistPromptRequested(event: RuntimeEvent): Promise<void> {
+  private async persistPromptRequested(event: RuntimeNotification): Promise<void> {
     const sessionId = event.scope.sessionId;
     const payload = isJsonRecord(event.payload) ? event.payload : undefined;
     const promptId = payload && optionalNonEmptyText(payload["promptId"]);
@@ -1606,7 +1606,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     });
   }
 
-  private async persistPromptResolved(event: RuntimeEvent): Promise<void> {
+  private async persistPromptResolved(event: RuntimeNotification): Promise<void> {
     const sessionId = event.scope.sessionId;
     const payload = isJsonRecord(event.payload) ? event.payload : undefined;
     const promptId = payload && optionalNonEmptyText(payload["promptId"]);
@@ -1626,7 +1626,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     });
   }
 
-  private async persistChangesEvent(event: RuntimeEvent): Promise<void> {
+  private async persistChangesEvent(event: RuntimeNotification): Promise<void> {
     const sessionId = event.scope.sessionId;
     const payload = isJsonRecord(event.payload) ? event.payload : undefined;
     const runId = (payload && optionalNonEmptyText(payload["runId"])) ?? event.scope.runId;
@@ -1788,7 +1788,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
 
   private publishConversationFailure(workspacePath: string, error: unknown): void {
     this.publish(
-      createRuntimeEvent({
+      createRuntimeNotification({
         topic: "runtime.error",
         scope: { workspacePath },
         resourceVersion: this.nextResourceVersion(),
@@ -2645,7 +2645,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   ): Promise<void> {
     for (const workspacePath of await this.registrationStore.list()) {
       this.publish(
-        createRuntimeEvent({
+        createRuntimeNotification({
           topic: "config.updated",
           scope: { workspacePath },
           resourceVersion: this.nextResourceVersion(),
@@ -2790,7 +2790,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       );
     }
     this.publish(
-      createRuntimeEvent({
+      createRuntimeNotification({
         topic: "changes.updated",
         scope: {
           workspacePath: projection.workspacePath,
@@ -2820,7 +2820,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     // revalidates that the reviewed bytes are still current and records that fact;
     // it never stages or copies renderer-owned content into the workspace.
     this.publish(
-      createRuntimeEvent({
+      createRuntimeNotification({
         topic: "changes.applied",
         scope: {
           workspacePath: projection.workspacePath,
@@ -2915,7 +2915,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       }
     });
     this.publish(
-      createRuntimeEvent({
+      createRuntimeNotification({
         topic: "rewind.completed",
         scope: { workspacePath: canonical, sessionId: params.sessionId },
         resourceVersion: this.nextResourceVersion(),
@@ -3341,7 +3341,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const sessionId = session["sessionId"];
     if (typeof workspacePath !== "string" || typeof sessionId !== "string") return;
     this.publish(
-      createRuntimeEvent({
+      createRuntimeNotification({
         topic: "session.updated",
         scope: { workspacePath, sessionId },
         resourceVersion: this.nextResourceVersion(),
@@ -3357,7 +3357,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     operation: "reload" | "truncate",
   ): void {
     this.publish(
-      createRuntimeEvent({
+      createRuntimeNotification({
         topic: "session.transcriptUpdated",
         scope: { workspacePath, sessionId },
         resourceVersion: this.nextResourceVersion(),
@@ -3373,7 +3373,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const jobId = job["jobId"];
     if (typeof workspacePath !== "string" || typeof jobId !== "string") return;
     this.publish(
-      createRuntimeEvent({
+      createRuntimeNotification({
         topic: "job.updated",
         scope: { workspacePath, jobId },
         resourceVersion: this.nextResourceVersion(),
@@ -3383,8 +3383,8 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     );
   }
 
-  private publish(event: RuntimeEvent): void {
-    this.options.runtimeService.publishDesktopEvent(event);
+  private publish(notification: RuntimeNotification): void {
+    this.options.runtimeService.publishDesktopNotification(notification);
   }
 
   private nextResourceVersion(): number {

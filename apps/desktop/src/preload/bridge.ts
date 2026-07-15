@@ -3,7 +3,7 @@ import {
   parseStrictRuntimeParams,
   RUNTIME_ERROR_CODES,
   RuntimeProtocolError,
-  type RuntimeEvent,
+  type RuntimeNotification,
   type RuntimeParams,
   type RuntimeResult,
 } from "@pico/protocol";
@@ -44,7 +44,7 @@ export function createDesktopBridge(ipcRenderer: IpcRenderer): DesktopBridge {
     events: Object.freeze({
       subscribe(
         params: RuntimeParams<"events.subscribe">,
-        listener: (event: RuntimeEvent) => void,
+        listener: (notification: RuntimeNotification) => void,
       ) {
         let checkedParams: RuntimeParams<"events.subscribe">;
         try {
@@ -57,21 +57,24 @@ export function createDesktopBridge(ipcRenderer: IpcRenderer): DesktopBridge {
           });
         }
         const subscriptionId = crypto.randomUUID();
-        const pendingEvents: RuntimeEvent[] = [];
+        const pendingEvents: RuntimeNotification[] = [];
         const seenEventIds = new Set<string>();
         let readySettled = false;
         let disposed = false;
         const unsubscribe = () => {
           ipcRenderer.send(DESKTOP_IPC_CHANNELS.runtimeUnsubscribe, { subscriptionId });
         };
-        const dispatch = (event: RuntimeEvent) => {
+        const dispatch = (event: RuntimeNotification) => {
           if (disposed) return;
           if (seenEventIds.has(event.eventId)) return;
           seenEventIds.add(event.eventId);
           listener(event);
         };
         const onEvent = (_electronEvent: unknown, envelope: unknown) => {
-          if (!isRuntimeEventEnvelope(envelope) || envelope.subscriptionId !== subscriptionId)
+          if (
+            !isRuntimeNotificationEnvelope(envelope) ||
+            envelope.subscriptionId !== subscriptionId
+          )
             return;
           if (readySettled) dispatch(envelope.event);
           else pendingEvents.push(envelope.event);
@@ -147,14 +150,14 @@ export function createDesktopBridge(ipcRenderer: IpcRenderer): DesktopBridge {
   });
 }
 
-interface RuntimeEventEnvelope {
+interface RuntimeNotificationEnvelope {
   readonly subscriptionId: string;
-  readonly event: RuntimeEvent;
+  readonly event: RuntimeNotification;
 }
 
-function isRuntimeEventEnvelope(value: unknown): value is RuntimeEventEnvelope {
+function isRuntimeNotificationEnvelope(value: unknown): value is RuntimeNotificationEnvelope {
   if (typeof value !== "object" || value === null) return false;
-  const candidate = value as Partial<RuntimeEventEnvelope>;
+  const candidate = value as Partial<RuntimeNotificationEnvelope>;
   return (
     typeof candidate.subscriptionId === "string" &&
     typeof candidate.event === "object" &&

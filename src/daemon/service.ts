@@ -1,6 +1,6 @@
-import type { JsonValue, RuntimeEvent, RuntimeRequest } from "./protocol.js";
+import type { JsonValue, RuntimeNotification, RuntimeRequest } from "./protocol.js";
 
-export interface RuntimeEventCursor {
+export interface RuntimeNotificationCursor {
   /** Exclusive event ID cursor. Omit it to read from the oldest retained event. */
   afterEventId?: string;
   /**
@@ -16,9 +16,9 @@ export interface LocalRuntimeService {
   /** Handles non-subscription control requests. The daemon owns transport concerns. */
   handle(request: RuntimeRequest): Promise<JsonValue>;
   /** Returns retained events after an exclusive cursor, in ascending event order. */
-  replayEvents(cursor: RuntimeEventCursor): Promise<readonly RuntimeEvent[]>;
+  replayEvents(cursor: RuntimeNotificationCursor): Promise<readonly RuntimeNotification[]>;
   /** Registers a live event listener and returns an idempotent disposer. */
-  subscribe(listener: (event: RuntimeEvent) => void): () => void;
+  subscribe(listener: (notification: RuntimeNotification) => void): () => void;
 }
 
 /** Optional capability for services that need orderly daemon shutdown. */

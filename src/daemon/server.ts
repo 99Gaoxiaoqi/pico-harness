@@ -4,13 +4,13 @@ import {
   createRuntimeAuthResult,
   createRuntimeError,
   encodeRuntimeFrame,
-  type RuntimeEvent,
+  type RuntimeNotification,
   RuntimeFrameDecoder,
   RuntimeProtocolError,
   type RuntimeRequest,
   type RuntimeResponse,
   type JsonValue,
-  serializeRuntimeEvent,
+  serializeRuntimeNotification,
   isJsonObject,
 } from "./protocol.js";
 import {
@@ -20,7 +20,7 @@ import {
   type LocalDaemonEndpoint,
 } from "./endpoint.js";
 import { createLocalIpcAuthTokenStore, type LocalIpcAuthTokenStore } from "./ipc-auth.js";
-import type { LocalRuntimeService, RuntimeEventCursor } from "./service.js";
+import type { LocalRuntimeService, RuntimeNotificationCursor } from "./service.js";
 import { canonicalizeWorkspacePath } from "./workspace-registry.js";
 
 export interface LocalRuntimeDaemonOptions {
@@ -160,7 +160,7 @@ export class LocalRuntimeDaemon {
     try {
       if (request.method === "events.replay") {
         const events = await this.options.service.replayEvents(readCursor(request.params));
-        this.write(socket, success(request, { events: events.map(serializeRuntimeEvent) }));
+        this.write(socket, success(request, { events: events.map(serializeRuntimeNotification) }));
         return;
       }
       if (request.method === "events.subscribe") {
@@ -182,7 +182,7 @@ export class LocalRuntimeDaemon {
           socket,
           success(request, {
             subscribed: true,
-            events: events.map(serializeRuntimeEvent),
+            events: events.map(serializeRuntimeNotification),
           }),
         );
         return;
@@ -200,7 +200,7 @@ export class LocalRuntimeDaemon {
     if (!socket.destroyed) socket.write(encodeRuntimeFrame(message));
   }
 
-  private writeEvent(socket: Socket, event: RuntimeEvent): void {
+  private writeEvent(socket: Socket, event: RuntimeNotification): void {
     if (!socket.destroyed) {
       socket.write(encodeRuntimeFrame({ kind: "event", protocolVersion: 1, event }));
     }
@@ -211,7 +211,7 @@ function success(request: RuntimeRequest, result: JsonValue): RuntimeResponse {
   return { kind: "response", protocolVersion: 1, requestId: request.requestId, ok: true, result };
 }
 
-function readCursor(params: import("./protocol.js").JsonValue): RuntimeEventCursor {
+function readCursor(params: import("./protocol.js").JsonValue): RuntimeNotificationCursor {
   if (!isJsonObject(params)) {
     throw new RuntimeProtocolError("事件 cursor 必须是对象");
   }

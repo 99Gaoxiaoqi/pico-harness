@@ -4,7 +4,7 @@ import {
   createRuntimeAuthRequest,
   createRuntimeRequest,
   encodeRuntimeFrame,
-  type RuntimeEvent,
+  type RuntimeNotification,
   RuntimeFrameDecoder,
   type RuntimeMethod,
   type RuntimeParams,
@@ -34,7 +34,7 @@ export interface RuntimeClient {
   ): Promise<RuntimeResult<Method>>;
   subscribe(
     params: RuntimeParams<"events.subscribe">,
-    listener: (event: RuntimeEvent) => void,
+    listener: (notification: RuntimeNotification) => void,
   ): Promise<{
     readonly replay: RuntimeResult<"events.subscribe">;
     readonly dispose: () => void;
@@ -100,7 +100,7 @@ export class LocalRuntimeClient implements RuntimeClient {
 
   async subscribe(
     params: RuntimeParams<"events.subscribe">,
-    listener: (event: RuntimeEvent) => void,
+    listener: (notification: RuntimeNotification) => void,
   ): Promise<{
     readonly replay: RuntimeResult<"events.subscribe">;
     readonly dispose: () => void;
@@ -149,7 +149,7 @@ export class LocalRuntimeClient implements RuntimeClient {
 interface RuntimeSubscriptionOptions {
   readonly connection: RuntimeConnection;
   readonly params: RuntimeParams<"events.subscribe">;
-  readonly listener: (event: RuntimeEvent) => void;
+  readonly listener: (notification: RuntimeNotification) => void;
   readonly reconnectDelayMs: number;
   readonly maxReconnectDelayMs: number;
   readonly onDispose: () => void;
@@ -157,7 +157,7 @@ interface RuntimeSubscriptionOptions {
 
 class RuntimeSubscription {
   private readonly seenEventIds = new Set<string>();
-  private readonly pendingLiveEvents: RuntimeEvent[] = [];
+  private readonly pendingLiveEvents: RuntimeNotification[] = [];
   private lastEventId?: string;
   private bufferingLiveEvents = false;
   private reconnectTimer?: NodeJS.Timeout;
@@ -196,7 +196,7 @@ class RuntimeSubscription {
         workspacePath: this.options.params.workspacePath,
         ...(this.lastEventId ? { afterEventId: this.lastEventId } : {}),
       });
-      const events: RuntimeEvent[] = [];
+      const events: RuntimeNotification[] = [];
       for (const event of replay.events) {
         if (!this.acceptEvent(event)) continue;
         events.push(event);
@@ -210,7 +210,7 @@ class RuntimeSubscription {
     }
   }
 
-  private handleEvent(event: RuntimeEvent): void {
+  private handleEvent(event: RuntimeNotification): void {
     if (this.disposed || !this.matchesWorkspace(event)) return;
     if (this.bufferingLiveEvents) {
       this.pendingLiveEvents.push(event);
@@ -219,11 +219,11 @@ class RuntimeSubscription {
     this.deliverLiveEvent(event);
   }
 
-  private deliverLiveEvent(event: RuntimeEvent): void {
+  private deliverLiveEvent(event: RuntimeNotification): void {
     if (this.acceptEvent(event)) this.notify(event);
   }
 
-  private acceptEvent(event: RuntimeEvent): boolean {
+  private acceptEvent(event: RuntimeNotification): boolean {
     if (this.disposed || !this.matchesWorkspace(event) || !this.rememberEventId(event.eventId)) {
       return false;
     }
@@ -231,11 +231,11 @@ class RuntimeSubscription {
     return true;
   }
 
-  private matchesWorkspace(event: RuntimeEvent): boolean {
+  private matchesWorkspace(event: RuntimeNotification): boolean {
     return event.scope.workspacePath === this.options.params.workspacePath;
   }
 
-  private notify(event: RuntimeEvent): void {
+  private notify(event: RuntimeNotification): void {
     try {
       this.options.listener(event);
     } catch {
@@ -288,7 +288,7 @@ class RuntimeConnection {
     readonly resolve: () => void;
     readonly reject: (error: RuntimeClientError) => void;
   };
-  private eventListener?: (event: RuntimeEvent) => void;
+  private eventListener?: (notification: RuntimeNotification) => void;
   private disconnectListener?: () => void;
   private closed = false;
 
@@ -297,7 +297,7 @@ class RuntimeConnection {
     private readonly authTokenStore: LocalIpcAuthTokenStore,
   ) {}
 
-  setEventListener(listener: (event: RuntimeEvent) => void): void {
+  setEventListener(listener: (notification: RuntimeNotification) => void): void {
     this.eventListener = listener;
   }
 
