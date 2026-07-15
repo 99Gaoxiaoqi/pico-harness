@@ -10,6 +10,7 @@
 // 经此改造,engine.Run 沦为纯"打工执行器":不内部维护状态,
 // 依靠喂给它的 Session 推理 —— 随时休眠、随时被唤醒的记忆连续体。
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, open, rename, unlink, type FileHandle } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
@@ -259,6 +260,8 @@ export class Session implements SessionRuntimePersistence {
   /** close() seals task admission before the durable/resource drain starts. */
   private acceptingSerializedTasks = true;
   private pendingSerializedTasks = 0;
+  /** close 前已接纳的任务/持久化操作在该 token 有效期内可完成写入。 */
+  private readonly writeAdmission = new AsyncLocalStorage<{ active: boolean }>();
 
   private persistedSettings?: PersistedSessionSettings;
   private persistedGoal?: ReturnType<GoalManager["snapshot"]>;
@@ -591,13 +594,14 @@ export class Session implements SessionRuntimePersistence {
       return Promise.reject(new Error(`Session ${this.id} is ${state}`));
     }
     this.pendingSerializedTasks++;
-    const runTask = async (): Promise<T> => {
-      try {
-        return await task();
-      } finally {
-        this.pendingSerializedTasks--;
-      }
-    };
+    const runTask = (): Promise<T> =>
+      this.runWithWriteAdmission(async () => {
+        try {
+          return await task();
+        } finally {
+          this.pendingSerializedTasks--;
+        }
+      });
     const result = this.runQueue.then(runTask, runTask);
     // 无论成功失败,都更新队列链;吞掉错误让调用方自己的 catch 处理
     this.runQueue = result.then(
@@ -621,6 +625,7 @@ export class Session implements SessionRuntimePersistence {
     costStatus?: CostStatus,
     reportedFields: readonly UsageReportedField[] = ["prompt", "completion"],
   ): void {
+    this.assertWritable();
     this.totalProviderCalls++;
     this.totalUsageReports++;
     this.totalPromptTokens += promptTokens;
@@ -648,6 +653,7 @@ export class Session implements SessionRuntimePersistence {
 
   /** Record a completed provider call whose response did not include usage metadata. */
   recordMissingUsage(): void {
+    this.assertWritable();
     this.totalProviderCalls++;
     this.updateRuntimeState({ usage: this.getUsageSnapshot() });
   }
@@ -665,6 +671,7 @@ export class Session implements SessionRuntimePersistence {
 
   /** 更新一个完整 section，内存立即生效，然后追加 session.state.committed。 */
   updateRuntimeState(patch: SessionRuntimeStatePatch): void {
+    this.assertWritable();
     const normalized = normalizeSessionRuntimeStatePatch(patch);
     if (!normalized) {
       logger.warn("[session] 忽略无效的 runtime_state 更新");
@@ -691,6 +698,7 @@ export class Session implements SessionRuntimePersistence {
    * 有持久快照时先恢复；无快照时保存当前初始状态。
    */
   bindGoalManager(manager: GoalManager): () => void {
+    this.assertWritable();
     this.goalBinding?.unsubscribe();
     if (this.persistedGoal) {
       manager.restore(this.persistedGoal);
@@ -855,6 +863,7 @@ export class Session implements SessionRuntimePersistence {
 
   /** @deprecated 仅供 legacy 同步调用方；生产路径必须 await commitMessages。 */
   append(...msgs: Message[]): void {
+    this.assertWritable();
     if (!this.store) {
       for (const msg of msgs) this.appendOneInMemory(msg);
       return;
@@ -1170,6 +1179,7 @@ export class Session implements SessionRuntimePersistence {
     prePlanMode?: NonNullable<PersistedSessionSettings["prePlanMode"]>;
     messageId?: string;
   }): Promise<string> {
+    this.assertWritable();
     if (input.prePlanMode !== undefined && input.interactionMode !== "plan") {
       throw new Error("prePlanMode requires interactionMode=plan");
     }
@@ -1193,6 +1203,7 @@ export class Session implements SessionRuntimePersistence {
   }
 
   async bindRewindPointSource(messageId: string, receipt: CommitReceipt): Promise<void> {
+    this.assertWritable();
     const snapshot = this.fileHistory.snapshots.find(
       (candidate) => candidate.messageId === messageId,
     );
@@ -1267,6 +1278,7 @@ export class Session implements SessionRuntimePersistence {
     messageId: string,
     expectedCurrentFingerprints?: ReadonlyMap<string, string>,
   ): Promise<void> {
+    this.assertWritable();
     const snapshot = this.requireRewindSnapshot(messageId);
     await this.executeRewindOperation(
       "code",
@@ -1286,6 +1298,7 @@ export class Session implements SessionRuntimePersistence {
   }
 
   async rewindConversation(messageIndex: number, messageId?: string): Promise<void> {
+    this.assertWritable();
     if (!messageId) {
       await this.rewindTo(messageIndex);
       return;
@@ -1302,6 +1315,7 @@ export class Session implements SessionRuntimePersistence {
     messageIndex: number,
     expectedCurrentFingerprints?: ReadonlyMap<string, string>,
   ): Promise<void> {
+    this.assertWritable();
     await this.executeRewindOperation(
       "both",
       this.requireRewindSnapshot(messageId),
@@ -1757,6 +1771,7 @@ export class Session implements SessionRuntimePersistence {
   }
 
   saveMemorySummary(summary: string, messageCount: number): void {
+    this.assertWritable();
     this.summaryStore.save(this.id, summary, messageCount);
   }
 
@@ -1774,7 +1789,9 @@ export class Session implements SessionRuntimePersistence {
     const store = this.store;
     if (!store) throw new Error("Session persistence is disabled");
 
-    const operation = this.persistenceTail.then(() => write(store));
+    const operation = this.persistenceTail.then(() =>
+      this.runWithWriteAdmission(() => write(store)),
+    );
     const settled = operation.then(
       () => undefined,
       (error: unknown) => {
@@ -1786,22 +1803,31 @@ export class Session implements SessionRuntimePersistence {
   }
 
   private assertWritable(): void {
-    if (this.lifecycle === "write_uncertain" && this.persistenceFailure) {
-      throw this.persistenceFailure;
-    }
-    if (this.lifecycle !== "open") {
-      throw new SessionWriteUncertainError(`Session is not writable (${this.lifecycle})`);
-    }
+    if (this.persistenceFailure) throw this.persistenceFailure;
+    if (this.lifecycle === "open") return;
+    if (this.lifecycle === "closing" && this.writeAdmission.getStore()?.active) return;
+    throw new SessionWriteUncertainError(`Session is not writable (${this.lifecycle})`);
+  }
+
+  private runWithWriteAdmission<Result>(operation: () => Promise<Result>): Promise<Result> {
+    const admission = { active: true };
+    return this.writeAdmission.run(admission, async () => {
+      try {
+        return await operation();
+      } finally {
+        admission.active = false;
+      }
+    });
   }
 
   private markWriteUncertain(message: string, cause: unknown): void {
-    if (this.lifecycle === "closed" || this.lifecycle === "closing") return;
+    if (this.lifecycle === "closed") return;
     const error =
       cause instanceof SessionWriteUncertainError
         ? cause
         : new SessionWriteUncertainError(message, cause);
     this.persistenceFailure ??= error;
-    this.lifecycle = "write_uncertain";
+    if (this.lifecycle !== "closing") this.lifecycle = "write_uncertain";
     logger.error({ error: String(cause) }, `[session] ${message}; 已进入 write_uncertain`);
   }
 
@@ -1815,11 +1841,11 @@ export class Session implements SessionRuntimePersistence {
   close(): Promise<void> {
     if (this.closePromise) return this.closePromise;
     this.acceptingSerializedTasks = false;
+    this.lifecycle = "closing";
     const drain = this.runQueue
       .then(() => this.compatibilityAppendTail)
       .then(() => this.persistenceTail)
       .then(async () => {
-        this.lifecycle = "closing";
         const store = this.store;
         const ownership =
           this.runtimeOwnership ?? (await this.runtimeOwnershipPromise?.catch(() => undefined));
@@ -2233,14 +2259,12 @@ export class SessionManager {
 
   /** LRU 驱赶:超出 maxSessions 时驱逐最旧项,直到回到上限内。 */
   private evictLru(): void {
-    for (;;) {
-      const inactiveKeys = [...this.entries]
-        .filter(([, entry]) => !entry.session.hasPendingTasks)
-        .map(([key]) => key);
-      if (!(inactiveKeys.length > this.maxSessions)) break;
-      const oldest = inactiveKeys[0];
-      if (oldest === undefined) break;
-      this.deleteByKey(oldest);
+    while (this.entries.size > this.maxSessions) {
+      const oldestInactive = [...this.entries].find(
+        ([, entry]) => !entry.session.hasPendingTasks,
+      )?.[0];
+      if (oldestInactive === undefined) break;
+      this.deleteByKey(oldestInactive);
     }
   }
 

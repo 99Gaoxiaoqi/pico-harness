@@ -41,6 +41,13 @@ describe("durable Runtime Session reliability", () => {
     const closing = session.close();
     expect(session.close()).toBe(closing);
     await expect(session.serialize(async () => undefined)).rejects.toThrow("is closing");
+    await expect(
+      session.commitMessages({ role: "user", content: "rejected direct commit" }),
+    ).rejects.toThrow("Session is not writable (closing)");
+    expect(() =>
+      session.append({ role: "user", content: "rejected compatibility append" }),
+    ).toThrow("Session is not writable (closing)");
+    expect(() => session.recordMissingUsage()).toThrow("Session is not writable (closing)");
     let closeSettled = false;
     void closing.then(() => {
       closeSettled = true;
