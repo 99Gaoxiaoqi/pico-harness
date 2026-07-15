@@ -60,6 +60,8 @@ export interface StorageDoctorReport {
 
 export interface StorageDoctorOptions {
   readonly workDir: string;
+  /** Host-owned Pico state root. Omitted callers keep the process default. */
+  readonly picoHome?: string;
   readonly fileHistoryDir?: string;
   readonly runtimeDatabasePath?: string;
   readonly summariesDir?: string;
@@ -112,6 +114,7 @@ interface AgentRuntimeEventRow {
  */
 export class StorageDoctor {
   private readonly workDir: string;
+  private readonly picoHome?: string;
   private readonly fileHistoryDir: string;
   private readonly runtimeDatabasePath: string;
   private readonly summariesDir: string;
@@ -120,7 +123,10 @@ export class StorageDoctor {
 
   constructor(options: StorageDoctorOptions) {
     this.workDir = canonicalizeWorkspacePath(options.workDir);
-    const paths = resolvePicoPaths(this.workDir);
+    this.picoHome = options.picoHome;
+    const paths = resolvePicoPaths(this.workDir, {
+      ...(this.picoHome ? { picoHome: this.picoHome } : {}),
+    });
     this.fileHistoryDir = resolve(options.fileHistoryDir ?? join(paths.home.root, "file-history"));
     this.runtimeDatabasePath = resolve(
       options.runtimeDatabasePath ?? paths.workspace.runtimeDatabase,
@@ -181,7 +187,11 @@ export class StorageDoctor {
     const reconciledOperationIds: string[] = [];
     const needsAttentionOperationIds: string[] = [];
     if (options.reconcileOperations) {
-      const journal = new StorageOperationJournal({ workDir: this.workDir, now: this.now });
+      const journal = new StorageOperationJournal({
+        workDir: this.workDir,
+        ...(this.picoHome ? { picoHome: this.picoHome } : {}),
+        now: this.now,
+      });
       for (const operation of await journal.listUnfinished()) {
         let outcome: "forwarded" | "needs_attention";
         try {
@@ -412,7 +422,11 @@ export class StorageDoctor {
     findings: StorageDoctorFinding[],
     scanned: Record<StorageDoctorComponent, number>,
   ): Promise<void> {
-    const journal = new StorageOperationJournal({ workDir: this.workDir, now: this.now });
+    const journal = new StorageOperationJournal({
+      workDir: this.workDir,
+      ...(this.picoHome ? { picoHome: this.picoHome } : {}),
+      now: this.now,
+    });
     for (const entry of await readDirectoryEntries(journal.directory)) {
       if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
       const path = join(journal.directory, entry.name);
@@ -554,7 +568,7 @@ export class StorageDoctor {
             "summary",
             path,
             errorMessage(error),
-            "Quarantine this derived sidecar and rebuild it from the Session journal",
+            "Quarantine this derived sidecar and rebuild it from the RuntimeEvent ledger",
             "derived",
           ),
         );
@@ -619,7 +633,7 @@ export class StorageDoctor {
               "artifact",
               path,
               errorMessage(error),
-              "Quarantine the bad metadata marker; do not modify the Session journal",
+              "Quarantine the bad metadata marker; do not modify the RuntimeEvent ledger",
               "sidecar",
             ),
           );

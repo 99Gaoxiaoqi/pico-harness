@@ -1,3 +1,5 @@
+import { join } from "node:path";
+import { resolvePicoHome } from "../paths/pico-paths.js";
 import {
   WorkspaceTaskRuntime,
   type WorkspaceRunContext,
@@ -30,12 +32,34 @@ export interface DaemonRunExecutor {
     workspaceRuntime: WorkspaceTaskRuntime;
     prompt: string;
     sessionId?: string;
+    execution?: DaemonRunExecution;
     context: WorkspaceRunContext;
   }): Promise<Record<string, unknown> | void>;
 }
 
+export interface DaemonRunExecution {
+  readonly requestedModel?: string;
+  readonly allowedTools?: readonly string[];
+  /** Desktop has already committed the visible user input to the canonical RuntimeEvent ledger. */
+  readonly resumeExistingSession?: boolean;
+  readonly skillActivation?: {
+    readonly name: string;
+    readonly sourcePath?: string;
+    readonly hooks?: unknown;
+  };
+}
+
+export interface StartDaemonRunInput {
+  readonly workspacePath: string;
+  readonly prompt: string;
+  readonly sessionId?: string;
+  readonly execution?: DaemonRunExecution;
+  readonly idempotencyKey?: string;
+}
+
 export interface WorkspaceRuntimeServiceOptions {
   execute: DaemonRunExecutor;
+  env?: Readonly<Record<string, string | undefined>>;
   createWorkspaceRuntime?: (workspacePath: string) => Promise<WorkspaceTaskRuntime>;
   now?: () => number;
   maxRetainedEvents?: number;
@@ -55,16 +79,23 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
   private readonly eventStores = new Map<string, RuntimeStore>();
   private readonly maxRetainedEvents: number;
   private readonly registrationStore: WorkspaceRegistrationStore;
+  private readonly picoHome: string;
   private registrationChanged?: () => Promise<void>;
 
   constructor(private readonly options: WorkspaceRuntimeServiceOptions) {
     this.maxRetainedEvents = Math.max(1, options.maxRetainedEvents ?? 2_000);
-    this.registrationStore = options.registrationStore ?? new WorkspaceRegistrationStore();
+    this.picoHome = resolvePicoHome({ env: options.env });
+    this.registrationStore =
+      options.registrationStore ??
+      new WorkspaceRegistrationStore(join(this.picoHome, "daemon-workspaces.json"));
     this.registry = new WorkspaceRuntimeRegistry({
       create: async (workspacePath) => {
         this.eventStore(workspacePath);
         const runtime = await (options.createWorkspaceRuntime?.(workspacePath) ??
-          WorkspaceTaskRuntime.create({ workDir: workspacePath }));
+          WorkspaceTaskRuntime.create({
+            workDir: workspacePath,
+            taskHostRuntimeOptions: { picoHome: this.picoHome },
+          }));
         this.unsubscribers.set(
           workspacePath,
           runtime.subscribe((event) => {
@@ -76,6 +107,7 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
                 topic: event.type,
                 scope: {
                   workspacePath: event.workspace,
+                  ...(event.run?.sessionId ? { sessionId: event.run.sessionId } : {}),
                   ...(event.run ? { runId: event.run.runId } : {}),
                 },
                 resourceVersion: event.resourceVersion,
@@ -91,7 +123,23 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
   }
 
   async handle(request: RuntimeRequest): Promise<JsonValue> {
-    if (request.method === "runtime.ping") return { pong: true };
+    if (request.method === "runtime.ping") {
+      return {
+        pong: true,
+        protocolVersion: LOCAL_RUNTIME_PROTOCOL_VERSION,
+        picoHome: this.picoHome,
+        capabilities: [
+          "shared-config-v1",
+          "session-conversation-v1",
+          "session-management-v1",
+          "session-settings-v1",
+          "session-goal-v1",
+          "catalog-activation-v1",
+          "workspace-diagnostics-v1",
+          "runtime-events-v1",
+        ],
+      };
+    }
     const params = objectParams(request.params);
     if (request.method === "workspace.register") {
       const workspacePath = requiredString(params, "workspacePath");
@@ -141,56 +189,12 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
       const prompt = requiredString(params, "prompt");
       const sessionId = optionalString(params, "sessionId");
       const idempotencyKey = optionalIdempotencyKey(params);
-      const runtime = await this.getRuntime(workspacePath);
-      const start = () => {
-        const run = runtime.startRun(
-          { description: prompt, ...(sessionId ? { sessionId } : {}) },
-          (context) =>
-            this.options.execute({
-              workspacePath: runtime.workspace,
-              workspaceRuntime: runtime,
-              prompt,
-              ...(sessionId ? { sessionId } : {}),
-              context,
-            }),
-        );
-        return { result: runPayload(run), resourceId: run.runId };
-      };
-      if (!idempotencyKey) return start().result;
-
-      let startedRunId: string | undefined;
-      try {
-        const outcome = await this.executeIdempotentDaemonCommand(
-          runtime.workspace,
-          {
-            commandType: "run.start",
-            idempotencyKey,
-            request: {
-              workspacePath: runtime.workspace,
-              prompt,
-              ...(sessionId ? { sessionId } : {}),
-            },
-          },
-          () => {
-            const started = start();
-            startedRunId = started.resourceId;
-            return started;
-          },
-        );
-        if (outcome.resourceId) {
-          const durable = this.eventStore(runtime.workspace).getDaemonRun(
-            runtime.workspace,
-            outcome.resourceId,
-          );
-          if (durable) return runPayload(workspaceRunSnapshot(durable));
-        }
-        return outcome.result;
-      } catch (error) {
-        if (startedRunId) {
-          runtime.failBeforeExecution(startedRunId, "run.start 幂等记录持久化失败");
-        }
-        throw error;
-      }
+      return this.startForegroundRun({
+        workspacePath,
+        prompt,
+        ...(sessionId ? { sessionId } : {}),
+        ...(idempotencyKey ? { idempotencyKey } : {}),
+      });
     }
     if (request.method === "run.cancel") {
       const runtime = await this.getRuntime(requiredString(params, "workspacePath"));
@@ -249,6 +253,64 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
     throw new Error(`此 Runtime service 不支持 ${request.method}`);
   }
 
+  /**
+   * Trusted server-side adapters may attach ephemeral execution constraints. They are never
+   * accepted from the generic run.start IPC request, preventing clients from forging activations.
+   */
+  async startForegroundRun(input: StartDaemonRunInput): Promise<JsonValue> {
+    const runtime = await this.getRuntime(input.workspacePath);
+    const start = () => {
+      const run = runtime.startRun(
+        { description: input.prompt, ...(input.sessionId ? { sessionId: input.sessionId } : {}) },
+        (context) =>
+          this.options.execute({
+            workspacePath: runtime.workspace,
+            workspaceRuntime: runtime,
+            prompt: input.prompt,
+            ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+            ...(input.execution ? { execution: input.execution } : {}),
+            context,
+          }),
+      );
+      return { result: runPayload(run), resourceId: run.runId };
+    };
+    if (!input.idempotencyKey) return start().result;
+
+    let startedRunId: string | undefined;
+    try {
+      const outcome = await this.executeIdempotentDaemonCommand(
+        runtime.workspace,
+        {
+          commandType: "run.start",
+          idempotencyKey: input.idempotencyKey,
+          request: {
+            workspacePath: runtime.workspace,
+            prompt: input.prompt,
+            ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+          },
+        },
+        () => {
+          const started = start();
+          startedRunId = started.resourceId;
+          return started;
+        },
+      );
+      if (outcome.resourceId) {
+        const durable = this.eventStore(runtime.workspace).getDaemonRun(
+          runtime.workspace,
+          outcome.resourceId,
+        );
+        if (durable) return runPayload(workspaceRunSnapshot(durable));
+      }
+      return outcome.result;
+    } catch (error) {
+      if (startedRunId) {
+        runtime.failBeforeExecution(startedRunId, "run.start 幂等记录持久化失败");
+      }
+      throw error;
+    }
+  }
+
   async replayEvents(cursor: RuntimeEventCursor): Promise<readonly RuntimeEvent[]> {
     const paths = cursor.workspacePath
       ? [await canonicalizeWorkspacePath(cursor.workspacePath)]
@@ -266,8 +328,13 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
           .map(runtimeEventFromLedger),
       );
     }
-    // Event IDs are random. Timestamp plus ID gives a deterministic cross-workspace
-    // presentation order; callers needing a resumable cursor use workspacePath.
+    // A single workspace ledger is already in durable rowid order. Preserve it: random
+    // event IDs are not a valid causal tie-breaker for start/finish events in the same ms.
+    if (paths.length === 1) {
+      return cursor.limit === undefined ? events : events.slice(0, cursor.limit);
+    }
+    // Cross-workspace replay has no shared durable sequence yet. Timestamp plus ID only
+    // provides deterministic presentation order; resumable callers scope to a workspace.
     const sorted = events.sort(
       (left, right) => left.at - right.at || left.eventId.localeCompare(right.eventId),
     );
@@ -327,6 +394,8 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
   }
 
   async close(): Promise<void> {
+    // Runtime.close() publishes terminal cancellation events. Keep both the runtime
+    // subscriptions and durable ledgers alive until those events have been recorded.
     this.registrationChanged = undefined;
     await this.registry.close();
     for (const unsubscribe of this.unsubscribers.values()) unsubscribe();
@@ -369,7 +438,11 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
   private eventStore(workspacePath: string): RuntimeStore {
     const store = this.eventStores.get(workspacePath);
     if (store) return store;
-    const created = new RuntimeStore({ workDir: workspacePath, now: this.options.now });
+    const created = new RuntimeStore({
+      workDir: workspacePath,
+      picoHome: this.picoHome,
+      now: this.options.now,
+    });
     created.recoverInterruptedDaemonRuns(
       workspacePath,
       "daemon 重启前 Run 未进入终态，当前 executor 无法安全恢复",
@@ -465,7 +538,7 @@ function runPayload(run: {
 }): Record<string, JsonValue> {
   return {
     runId: run.runId,
-    workspace: run.workspace,
+    workspacePath: run.workspace,
     ...(run.sessionId !== undefined ? { sessionId: run.sessionId } : {}),
     description: run.description,
     status: run.status,

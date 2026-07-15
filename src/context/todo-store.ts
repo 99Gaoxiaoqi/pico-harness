@@ -15,7 +15,7 @@
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { logger } from "../observability/logger.js";
-import { resolvePicoPaths } from "../paths/pico-paths.js";
+import { resolvePicoPaths, type ResolvePicoPathsOptions } from "../paths/pico-paths.js";
 
 /** 任务状态 */
 export type TodoStatus = "pending" | "in_progress" | "completed";
@@ -60,8 +60,8 @@ export class TodoStore {
   /** 是否已加载过磁盘状态(避免每次操作都重读文件) */
   private loaded = false;
 
-  constructor(workDir: string) {
-    this.todoPath = resolvePicoPaths(workDir).workspace.todo;
+  constructor(workDir: string, options: ResolvePicoPathsOptions = {}) {
+    this.todoPath = resolvePicoPaths(workDir, options).workspace.todo;
   }
 
   /**

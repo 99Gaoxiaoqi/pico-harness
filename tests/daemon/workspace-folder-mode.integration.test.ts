@@ -63,7 +63,7 @@ describe("普通文件夹 Runtime integration", () => {
     const started = await desktopService.handle(
       createRuntimeRequest("run.start", { workspacePath: workspace, prompt: "organize notes" }),
     );
-    expect(started).toMatchObject({ workspace: canonicalWorkspace, status: "running" });
+    expect(started).toMatchObject({ workspacePath: canonicalWorkspace, status: "running" });
     const runId = objectString(started, "runId");
     const runtime = await runtimeService.getWorkspaceRuntime(workspace);
     await expect(runtime.waitForRun(runId)).resolves.toMatchObject({

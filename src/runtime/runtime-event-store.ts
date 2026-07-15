@@ -14,6 +14,7 @@ import {
   type SessionRuntimeStatePatch,
 } from "../engine/session-runtime.js";
 import type { SessionCursor } from "../engine/session-persistence.js";
+import type { TranscriptEvent } from "../presentation/transcript-event-store.js";
 import {
   RUNTIME_EVENT_SCHEMA_VERSION,
   decodeRuntimeEvent,
@@ -68,6 +69,10 @@ export interface RuntimeSessionProjectionDelta {
 export interface AppendRuntimeSessionStateOptions {
   readonly eventId?: string;
   readonly now?: () => Date;
+}
+
+export interface AppendRuntimeTranscriptEventOptions {
+  readonly eventId?: string;
 }
 
 interface SessionRow {
@@ -221,6 +226,26 @@ export class RuntimeEventStore {
         stateVersion: SESSION_RUNTIME_STATE_VERSION,
         patch: structuredClone(patch),
       },
+    });
+  }
+
+  async appendTranscriptEvent(
+    sessionId: string,
+    event: TranscriptEvent,
+    options: AppendRuntimeTranscriptEventOptions = {},
+  ): Promise<RuntimeEventStoreAppendResult> {
+    return this.append({
+      schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,
+      eventId: options.eventId ?? `transcript:${event.eventId}`,
+      sessionId,
+      invocationId: `session:${sessionId}:transcript`,
+      runId: "session-transcript",
+      turnId: "transcript",
+      at: new Date(event.createdAt).toISOString(),
+      partial: false,
+      visibility: "transcript",
+      kind: "transcript.event.recorded",
+      data: { event: structuredClone(event) },
     });
   }
 

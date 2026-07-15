@@ -6,7 +6,7 @@ import {
   type IpcMainInvokeEvent,
   type WebContents,
 } from "electron";
-import { parseRuntimeParams, type RuntimeMethod } from "@pico/protocol";
+import { parseStrictRuntimeParams, RuntimeProtocolError, type RuntimeMethod } from "@pico/protocol";
 import type { PlatformServices } from "../platform/index.js";
 import {
   DESKTOP_IPC_CHANNELS,
@@ -46,7 +46,7 @@ export function registerDesktopIpcHandlers(options: {
     if (!trusted(event)) return unauthorized();
     try {
       const envelope = readInvocation(value);
-      const params = parseRuntimeParams(envelope.method, envelope.params);
+      const params = parseStrictRuntimeParams(envelope.method, envelope.params);
       const result = await runtime.request(envelope.method, params);
       return success(result);
     } catch (error) {
@@ -58,7 +58,7 @@ export function registerDesktopIpcHandlers(options: {
     if (!trusted(event)) return unauthorized();
     try {
       const envelope = readSubscription(value);
-      const params = parseRuntimeParams("events.subscribe", envelope.params);
+      const params = parseStrictRuntimeParams("events.subscribe", envelope.params);
       subscriptions.get(envelope.subscriptionId)?.dispose();
       const subscription = await runtime.subscribe(params, (runtimeEvent) => {
         if (!event.sender.isDestroyed()) {
@@ -171,7 +171,11 @@ function readInvocation(value: unknown): {
   readonly method: DesktopRuntimeMethod;
   readonly params: unknown;
 } {
-  if (!isRecord(value) || !isDesktopRuntimeMethod(value.method)) {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, ["method", "params"]) ||
+    !isDesktopRuntimeMethod(value.method)
+  ) {
     throw invalidArgument("桌面端 Runtime 调用无效");
   }
   return { method: value.method, params: value.params };
@@ -181,14 +185,23 @@ function readSubscription(value: unknown): {
   readonly subscriptionId: string;
   readonly params: unknown;
 } {
-  if (!isRecord(value) || !isValidSubscriptionId(value.subscriptionId)) {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, ["subscriptionId", "params"]) ||
+    !isValidSubscriptionId(value.subscriptionId)
+  ) {
     throw invalidArgument("事件订阅参数无效");
   }
   return { subscriptionId: value.subscriptionId, params: value.params };
 }
 
 function readSubscriptionId(value: unknown): string | undefined {
-  if (!isRecord(value) || !isValidSubscriptionId(value.subscriptionId)) return undefined;
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, ["subscriptionId"]) ||
+    !isValidSubscriptionId(value.subscriptionId)
+  )
+    return undefined;
   return value.subscriptionId;
 }
 
@@ -199,6 +212,7 @@ function isValidSubscriptionId(value: unknown): value is string {
 function readNotification(value: unknown): { readonly title: string; readonly body: string } {
   if (
     !isRecord(value) ||
+    !hasExactKeys(value, ["title", "body"]) ||
     typeof value.title !== "string" ||
     value.title.length === 0 ||
     value.title.length > 120 ||
@@ -216,6 +230,11 @@ function isDesktopRuntimeMethod(value: unknown): value is DesktopRuntimeMethod {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  const actual = Object.keys(value);
+  return actual.length === keys.length && keys.every((key) => Object.hasOwn(value, key));
 }
 
 function disposeOwnedSubscriptions(
@@ -248,6 +267,9 @@ function failure(error: unknown): DesktopResult<never> {
 function toDesktopError(error: unknown): DesktopError {
   if (error instanceof RuntimeClientError) {
     return { code: error.code, message: error.message, retryable: error.retryable };
+  }
+  if (error instanceof RuntimeProtocolError) {
+    return { code: error.code, message: error.message, retryable: false };
   }
   if (error instanceof DesktopIpcError) {
     return { code: error.code, message: error.message, retryable: false };

@@ -1,6 +1,4 @@
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 import { SkillLoader } from "../context/skill.js";
 import { FullCompactor } from "../context/full-compactor.js";
 import { createContextBudget, estimateMessagesTokens } from "../context/context-budget.js";
@@ -24,6 +22,7 @@ import {
   resolveSkillCommand,
 } from "./skill-commands.js";
 import { renderSkillActivation } from "./skill-activation.js";
+import { renderAgentDispatchPrompt } from "./agent-activation.js";
 import {
   findAgentProfile,
   loadAgentCatalog,
@@ -43,14 +42,19 @@ import type {
 } from "./types.js";
 import { createProvider, type ProviderKind } from "../provider/factory.js";
 import { resolveProviderProfile } from "../provider/profile.js";
-import { type ModelRouter } from "../provider/model-router.js";
+import { type ModelProviderConfig, type ModelRouter } from "../provider/model-router.js";
+import type { EffectiveProviderCredentialStatus } from "../provider/effective-model-runtime.js";
 import {
-  credentialRefForModelRoute,
-  importModelRouteCredential,
-  type CredentialRef,
+  credentialRefForProvider,
+  normalizeProviderEndpoint,
   type CredentialVault,
 } from "../provider/credential-vault.js";
+import {
+  resolveAutomationCredentialTarget,
+  type AutomationCredentialTarget,
+} from "../provider/automation-credential.js";
 import { loadApiKeys } from "../provider/config.js";
+import { initializeProjectEntrypoints } from "./project-initializer.js";
 import { buildDefaultToolRegistry } from "../tools/default-registry.js";
 import {
   formatSessionStatus,
@@ -75,13 +79,8 @@ import type { GoalManager } from "../engine/goal-manager.js";
 import type { ModelRuntimeCommandService } from "../provider/model-runtime-report.js";
 import type { TaskHostRuntime } from "../tasks/task-runtime.js";
 import { CronService } from "../tasks/cron-service.js";
-import type { CronDaemonBridge, CronDaemonRegistration } from "./cron-daemon-bridge.js";
-import { fingerprintBackgroundMcpConfig } from "../safety/background-mcp-policy.js";
-import {
-  BACKGROUND_HARDLINE_VERSION,
-  BACKGROUND_HOOK_VERSION,
-  filterBackgroundEligibleTools,
-} from "../safety/background-yolo-policy.js";
+import type { CronDaemonBridge } from "./cron-daemon-bridge.js";
+import { filterBackgroundEligibleTools } from "../safety/background-yolo-policy.js";
 import type { McpConnectionManager } from "../mcp/manager.js";
 import { CostTracker } from "../observability/tracker.js";
 import { ensureSessionUsageBaseline } from "../observability/usage-baseline.js";
@@ -91,17 +90,15 @@ import {
   renderResourceDoctorReport,
   type ResourceDoctorReport,
 } from "../diagnostics/resource-doctor.js";
-import {
-  STORAGE_DOCTOR_COMPONENTS,
-  StorageDoctor,
-  type StorageDoctorFinding,
-  type StorageDoctorReport,
-} from "../storage/storage-doctor.js";
+import { StorageDoctor } from "../storage/storage-doctor.js";
 import type {
   StorageOperation,
   StorageOperationDispositionInput,
 } from "../storage/operation-journal.js";
 import type { ForkReconciliationResult } from "../storage/fork-operation-coordinator.js";
+import { runWorkspaceDoctor } from "../diagnostics/workspace-doctor.js";
+import type { EffectiveConfigSnapshot } from "./effective-config.js";
+import { UserConfigStore } from "./user-config-store.js";
 import {
   createPluginCommand,
   type PluginManagementCommandService,
@@ -120,6 +117,7 @@ const OVERRIDDEN_BUILTIN_COMMANDS = new Set([
   "compact",
   "init",
   "doctor",
+  "provider",
   "mcp",
   "thinking",
   "agents",
@@ -151,6 +149,8 @@ export interface PicoCommandRegistryOptions {
   model: string;
   modelRouteId?: string;
   modelRouter?: ModelRouter;
+  /** Re-resolves config and credentials at an idle command boundary. */
+  modelRouterProvider?: () => ModelRouter | Promise<ModelRouter>;
   provider: ProviderKind;
   session?: Session;
   sessionId?: string;
@@ -172,6 +172,11 @@ export interface PicoCommandRegistryOptions {
   /** TUI 专用系统凭证库；导入仅从进程环境读取，命令参数永不接收 secret。 */
   credentialVault?: CredentialVault;
   credentialEnv?: Readonly<Record<string, string | undefined>>;
+  /** Effective startup snapshot used only for source/status diagnostics. */
+  effectiveConfig?: EffectiveConfigSnapshot;
+  providerCredentialStatuses?: Readonly<Record<string, EffectiveProviderCredentialStatus>>;
+  /** Injectable durable user store for tests and alternate PICO_HOME hosts. */
+  userConfigStore?: UserConfigStore;
   /** TaskHostRuntime 不可用时的宿主诊断；TUI 仍可在非 Git 目录运行。 */
   taskRuntimeDiagnostic?: string;
   /** 可注入的只读存储诊断器；默认扫描当前 workspace 和全局 File History。 */
@@ -246,9 +251,10 @@ export async function createPicoCommandRegistry(
     ...(options.hookCommands ?? []),
     createDoctorCommand(options),
     createOperationsCommand(options),
-    createModelCommand(settings, options.modelRouter),
+    createProviderCommand(options),
+    createModelCommand(settings, options.modelRouter, options.modelRouterProvider),
     createAddDirectoryCommand(settings, options.additionalDirectoryManager),
-    createThinkingCommand(settings, options.modelRouter),
+    createThinkingCommand(settings, options.modelRouter, options.modelRouterProvider),
     createMcpCommand(options.mcpStatus, options.mcpControl),
     createPluginCommand({
       workDir: options.workDir,
@@ -562,11 +568,15 @@ function createCompactCommand(
 
       let activeProvider = options.provider;
       let activeConfig: { baseURL: string; apiKey: string; model: string } | undefined;
-      if (options.modelRouter) {
+      const modelRouter = await resolveCommandModelRouter(
+        options.modelRouter,
+        options.modelRouterProvider,
+      );
+      if (modelRouter) {
         try {
-          const resolved = options.modelRouter.providerConfig(
+          const resolved = modelRouter.providerConfig(
             settings.modelRouteId,
-            effectiveSessionReasoningLevel(settings, options.modelRouter),
+            effectiveSessionReasoningLevel(settings, modelRouter),
           );
           activeProvider = resolved.provider;
           activeConfig = resolved.config;
@@ -605,9 +615,14 @@ function createCompactCommand(
         });
         const jobs = options.taskRuntime?.jobService;
         if (jobs) ensureSessionUsageBaseline(jobs, session);
-        const runtimeEventStore = new RuntimeEventStore({
-          databasePath: resolvePicoPaths(session.workDir).workspace.runtimeDatabase,
-        });
+        const runtimeEventStore = session.runtimeEventStore;
+        if (!runtimeEventStore) {
+          return {
+            type: "local",
+            action: "message",
+            message: "Compact unavailable: the current session has no durable RuntimeEvent store.",
+          };
+        }
         const provider = new CostTracker(
           rawProvider,
           { provider: activeProvider, model, baseUrl: baseURL },
@@ -719,12 +734,13 @@ function createInitCommand(options: PicoCommandRegistryOptions): SlashCommand {
     kind: "local",
     availability: "idle",
     execute: async (): Promise<LocalCommandResult> => {
-      const message = initializeProjectEntrypoints(options.workDir);
+      const result = await initializeProjectEntrypoints(options.workDir);
       await options.hookService?.dispatch("Setup", { action: "init" });
       return {
         type: "local",
         action: "message",
-        message,
+        message: result.message,
+        data: result,
       };
     },
   };
@@ -741,14 +757,50 @@ function createDoctorCommand(options: PicoCommandRegistryOptions): SlashCommand 
     execute: async (input): Promise<LocalCommandResult> => {
       const subcommand = input.args.trim();
       if (!subcommand) {
-        return { type: "local", action: "message", message: await formatDoctorReport(options) };
+        const report = await runWorkspaceDoctor({
+          workDir: options.workDir,
+          ...(options.picoHome ? { picoHome: options.picoHome } : {}),
+          provider: options.provider,
+          model: options.model,
+          taskRuntimeAvailable: options.taskRuntime !== undefined,
+          ...(options.taskRuntimeDiagnostic
+            ? { taskRuntimeDiagnostic: options.taskRuntimeDiagnostic }
+            : {}),
+          ...(options.session ? { memoryStatus: options.session.memoryStatus } : {}),
+          ...(options.storageDoctor ? { storageDoctor: options.storageDoctor } : {}),
+          ...(options.effectiveConfig
+            ? {
+                configuration: {
+                  defaultModelRouteId: options.effectiveConfig.defaultModelRouteId,
+                  defaultSource: options.effectiveConfig.sources["defaults.modelRouteId"],
+                  providerSources: Object.fromEntries(
+                    Object.keys(options.effectiveConfig.providers).map((id) => [
+                      id,
+                      options.effectiveConfig?.sources[`providers.${id}`] ?? "unknown",
+                    ]),
+                  ),
+                  credentialStates: Object.fromEntries(
+                    Object.entries(options.providerCredentialStatuses ?? {}).map(([id, status]) => [
+                      id,
+                      status.state,
+                    ]),
+                  ),
+                },
+              }
+            : {}),
+        });
+        return { type: "local", action: "message", message: report.output, data: report };
       }
       if (subcommand !== "resources") {
         return { type: "local", action: "message", message: "Usage: /doctor [resources]" };
       }
       try {
         const report = await (
-          options.resourceDoctor ?? new ResourceDoctor({ workDir: options.workDir })
+          options.resourceDoctor ??
+          new ResourceDoctor({
+            workDir: options.workDir,
+            ...(options.picoHome ? { picoHome: options.picoHome } : {}),
+          })
         ).scan();
         return {
           type: "local",
@@ -771,7 +823,10 @@ function createOperationsCommand(options: PicoCommandRegistryOptions): SlashComm
   let fallback: SessionForkService | undefined;
   const recovery = (): OperationRecoveryCommandService =>
     options.operationRecovery ??
-    (fallback ??= new SessionForkService({ workDir: options.workDir }));
+    (fallback ??= new SessionForkService({
+      workDir: options.workDir,
+      ...(options.picoHome ? { picoHome: options.picoHome } : {}),
+    }));
   const subcommands: readonly SlashArgumentCandidate[] = [
     { value: "list", description: "List operations requiring manual disposition" },
     { value: "show", description: "Show one operation and its recorded failure" },
@@ -837,6 +892,59 @@ function createOperationsCommand(options: PicoCommandRegistryOptions): SlashComm
           type: "local",
           action: "message",
           message: `Operation disposition failed closed: ${error instanceof Error ? error.message : String(error)}`,
+        };
+      }
+    },
+  };
+}
+
+function createProviderCommand(options: PicoCommandRegistryOptions): SlashCommand {
+  const store = options.userConfigStore ?? new UserConfigStore({ picoHome: options.picoHome });
+  const env = options.credentialEnv ?? process.env;
+  return {
+    name: "provider",
+    description: "Manage shared user providers without exposing credentials in command arguments",
+    usage:
+      "/provider [list | import-env <id> [--confirm] | default <provider/model|clear> | delete <id>]",
+    argumentHint: "[list | import-env | default | delete]",
+    category: "model",
+    kind: "local",
+    availability: "idle",
+    execute: async (input): Promise<LocalCommandResult> => {
+      const [subcommand = "list", first, confirmation, ...rest] = input.argv;
+      if (rest.length > 0) return providerUsage();
+      try {
+        if (subcommand === "list" && first === undefined && confirmation === undefined) {
+          return await listUserProviders(store, options, env);
+        }
+        if (subcommand === "import-env") {
+          if (!first || (confirmation !== undefined && confirmation !== "--confirm")) {
+            return providerUsage();
+          }
+          return await importEnvironmentProvider({
+            providerId: first,
+            confirmed: confirmation === "--confirm",
+            providerKind: options.provider,
+            store,
+            env,
+            daemon: options.cronDaemonBridge,
+          });
+        }
+        if (subcommand === "default" && first && confirmation === undefined) {
+          if (first === "clear" || first === "none") {
+            return await clearDefaultUserProvider(store);
+          }
+          return await setDefaultUserProvider(store, first);
+        }
+        if (subcommand === "delete" && first && confirmation === undefined) {
+          return await deleteUserProvider(store, first, options.cronDaemonBridge);
+        }
+        return providerUsage();
+      } catch (error) {
+        return {
+          type: "local",
+          action: "message",
+          message: `Provider command failed: ${safeProviderError(error)}`,
         };
       }
     },
@@ -918,10 +1026,269 @@ function formatOperationDisposition(
   ].join("\n");
 }
 
-function createModelCommand(settings: SessionSettings, router?: ModelRouter): SlashCommand {
+async function listUserProviders(
+  store: UserConfigStore,
+  options: PicoCommandRegistryOptions,
+  env: Readonly<Record<string, string | undefined>>,
+): Promise<LocalCommandResult> {
+  const snapshot = await store.read();
+  const effective = options.effectiveConfig;
+  const providers = Object.fromEntries(
+    Object.entries(effective?.providers ?? {}).filter(
+      ([id]) => effective?.sources[`providers.${id}`] !== "user",
+    ),
+  );
+  Object.assign(providers, snapshot.config.providers);
+  const entries = Object.entries(providers);
+  if (entries.length === 0) {
+    return {
+      type: "local",
+      action: "message",
+      message:
+        "No providers configured. Set complete LLM_* variables, then run /provider import-env <id> to preview an import.",
+    };
+  }
+  const lines = await Promise.all(
+    entries.map(async ([id, provider]) => {
+      const source = snapshot.config.providers[id]
+        ? "user"
+        : (effective?.sources[`providers.${id}`] ?? "unknown");
+      const state = await providerCredentialState(id, provider, source, options, env);
+      const effectiveDefault =
+        effective?.sources["defaults.modelRouteId"] === "user"
+          ? undefined
+          : effective?.defaultModelRouteId;
+      const defaultMarker =
+        (snapshot.config.defaults?.modelRouteId ?? effectiveDefault)?.startsWith(`${id}/`) === true
+          ? " · default"
+          : "";
+      return `${id} · ${provider.protocol} · ${source} · credential=${state}${defaultMarker}\n  ${provider.baseURL}\n  models: ${provider.models.join(", ") || "discovery"}`;
+    }),
+  );
+  return { type: "local", action: "message", message: lines.join("\n") };
+}
+
+async function providerCredentialState(
+  id: string,
+  provider: ModelProviderConfig,
+  source: string,
+  options: PicoCommandRegistryOptions,
+  env: Readonly<Record<string, string | undefined>>,
+): Promise<string> {
+  if (firstCredential(env[provider.apiKeyEnv])) return "environment";
+  if (source === "user" && options.credentialVault) {
+    if (!options.credentialVault.capability().available) return "unsupported";
+    const ref = credentialRefForProvider({
+      providerId: id,
+      protocol: provider.protocol,
+      baseURL: provider.baseURL,
+    });
+    return (await options.credentialVault.has(ref)) ? "keychain" : "missing";
+  }
+  return options.providerCredentialStatuses?.[id]?.state ?? "missing";
+}
+
+async function importEnvironmentProvider(input: {
+  providerId: string;
+  confirmed: boolean;
+  providerKind: ProviderKind;
+  store: UserConfigStore;
+  env: Readonly<Record<string, string | undefined>>;
+  daemon?: CronDaemonBridge;
+}): Promise<LocalCommandResult> {
+  if (!/^[^/\s]+$/u.test(input.providerId)) {
+    return providerMessage("Provider ID cannot contain whitespace or a slash.");
+  }
+  const baseURL = input.env["LLM_BASE_URL"]?.trim();
+  const defaultModel = input.env["LLM_MODEL"]?.trim();
+  const apiKeyEnv = firstCredential(input.env["LLM_API_KEYS"]) ? "LLM_API_KEYS" : "LLM_API_KEY";
+  const secret = firstCredential(input.env[apiKeyEnv]);
+  if (!baseURL || !defaultModel || !secret) {
+    return providerMessage(
+      "Import unavailable: LLM_BASE_URL, LLM_MODEL and LLM_API_KEY[S] must all be set in this process.",
+    );
+  }
+  const models = uniqueProviderModels([
+    defaultModel,
+    ...splitProviderModels(input.env["LLM_MODELS"]),
+  ]);
+  const provider: ModelProviderConfig = {
+    protocol: input.providerKind,
+    baseURL: normalizeProviderEndpoint(baseURL),
+    apiKeyEnv,
+    models,
+    discoverModels: input.providerKind === "openai",
+  };
+  if (!input.confirmed) {
+    return providerMessage(
+      [
+        `Import preview for ${input.providerId}:`,
+        `protocol: ${provider.protocol}`,
+        `endpoint: ${provider.baseURL}`,
+        `models: ${provider.models.join(", ")}`,
+        "credential: current process environment -> OS credential vault (value hidden)",
+        `Confirm with: /provider import-env ${input.providerId} --confirm`,
+      ].join("\n"),
+    );
+  }
+  const snapshot = await input.store.read();
+  const existing = snapshot.config.providers[input.providerId];
+  if (existing && !sameProviderAuthority(existing, provider)) {
+    return providerMessage(
+      `Provider ${input.providerId} already uses a different protocol or endpoint; delete it explicitly before importing.`,
+    );
+  }
+  if (!input.daemon?.importEnvironmentProvider) {
+    return providerMessage(
+      "Local Runtime daemon is unavailable; Provider import is fail-closed so config and OS credentials cannot diverge.",
+    );
+  }
+  const result = await input.daemon.importEnvironmentProvider({
+    provider: {
+      id: input.providerId,
+      protocol: provider.protocol,
+      baseURL: provider.baseURL,
+      apiKeyEnv: provider.apiKeyEnv,
+      models: provider.models,
+      discoverModels: provider.discoverModels,
+    },
+    defaultModel,
+    secret,
+    expectedRevision: snapshot.revision,
+  });
+  return providerMessage(
+    result.status === "imported"
+      ? `${result.message} 更新会在下一个 Session 或 Run 安全边界生效；运行中请求不会热切换。`
+      : result.message,
+  );
+}
+
+async function setDefaultUserProvider(
+  store: UserConfigStore,
+  routeId: string,
+): Promise<LocalCommandResult> {
+  const separator = routeId.indexOf("/");
+  if (separator <= 0 || separator === routeId.length - 1) return providerUsage();
+  const providerId = routeId.slice(0, separator);
+  const model = routeId.slice(separator + 1);
+  const snapshot = await store.read();
+  const provider = snapshot.config.providers[providerId];
+  if (!provider || !provider.models.includes(model)) {
+    return providerMessage(
+      `Cannot set default ${routeId}: it is not an explicit model in the shared user provider registry.`,
+    );
+  }
+  await store.write(
+    {
+      ...snapshot.config,
+      defaults: { ...snapshot.config.defaults, modelRouteId: routeId },
+    },
+    { expectedRevision: snapshot.revision },
+  );
+  return providerMessage(
+    `Shared default model set to ${routeId}. New sessions apply it at their next safe boundary; the current Session keeps its explicit model.`,
+  );
+}
+
+async function clearDefaultUserProvider(store: UserConfigStore): Promise<LocalCommandResult> {
+  const snapshot = await store.read();
+  if (!snapshot.config.defaults?.modelRouteId) {
+    return providerMessage("Shared default model is already clear.");
+  }
+  await store.write(
+    {
+      ...snapshot.config,
+      defaults: { ...snapshot.config.defaults, modelRouteId: undefined },
+    },
+    { expectedRevision: snapshot.revision },
+  );
+  return providerMessage("Shared default model cleared. You can now delete its Provider.");
+}
+
+async function deleteUserProvider(
+  store: UserConfigStore,
+  providerId: string,
+  daemon: CronDaemonBridge | undefined,
+): Promise<LocalCommandResult> {
+  if (!/^[^/\s]+$/u.test(providerId)) return providerUsage();
+  const snapshot = await store.read();
+  const provider = snapshot.config.providers[providerId];
+  if (!provider) return providerMessage(`Shared user provider ${providerId} does not exist.`);
+  if (!daemon) {
+    return providerMessage(
+      "Local Runtime daemon is unavailable; Provider deletion is fail-closed so config and OS credentials cannot diverge.",
+    );
+  }
+  const result = await daemon.deleteProvider({
+    providerId,
+    expectedRevision: snapshot.revision,
+  });
+  return providerMessage(result.message);
+}
+
+function providerUsage(): LocalCommandResult {
+  return providerMessage(
+    "Usage: /provider [list | import-env <id> [--confirm] | default <provider/model|clear> | delete <id>]",
+  );
+}
+
+function providerMessage(message: string): LocalCommandResult {
+  return { type: "local", action: "message", message };
+}
+
+function safeProviderError(error: unknown): string {
+  if (
+    error instanceof Error &&
+    (error.name === "UserConfigRevisionConflictError" ||
+      error.name === "UserConfigLockTimeoutError")
+  ) {
+    return error.message;
+  }
+  return error instanceof Error
+    ? error.message.replace(/(api[_-]?key|token|secret)\s*[=:]\s*\S+/giu, "$1=<redacted>")
+    : "unknown error";
+}
+
+function sameProviderAuthority(left: ModelProviderConfig, right: ModelProviderConfig): boolean {
+  return (
+    left.protocol === right.protocol &&
+    normalizeProviderEndpoint(left.baseURL) === normalizeProviderEndpoint(right.baseURL)
+  );
+}
+
+function firstCredential(value: string | undefined): string | undefined {
+  return value
+    ?.split(",")
+    .map((item) => item.trim())
+    .find(Boolean);
+}
+
+function splitProviderModels(value: string | undefined): string[] {
+  return (value ?? "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function uniqueProviderModels(models: readonly string[]): string[] {
+  return [...new Set(models.map((model) => model.trim()).filter(Boolean))];
+}
+
+async function resolveCommandModelRouter(
+  fallback: ModelRouter | undefined,
+  provider: (() => ModelRouter | Promise<ModelRouter>) | undefined,
+): Promise<ModelRouter | undefined> {
+  return provider ? await provider() : fallback;
+}
+
+function createModelCommand(
+  settings: SessionSettings,
+  fallbackRouter?: ModelRouter,
+  routerProvider?: () => ModelRouter | Promise<ModelRouter>,
+): SlashCommand {
   const candidates = (): readonly SlashArgumentCandidate[] =>
-    router
-      ? router.routes.map((route) => ({
+    fallbackRouter
+      ? fallbackRouter.routes.map((route) => ({
           value: route.id,
           description: `${route.providerId} · ${route.provider}`,
         }))
@@ -936,7 +1303,8 @@ function createModelCommand(settings: SessionSettings, router?: ModelRouter): Sl
     argumentCompleter: (query) => filterArgumentCandidates(candidates(), query),
     kind: "local",
     availability: "idle",
-    execute: (input): LocalCommandResult => {
+    execute: async (input): Promise<LocalCommandResult> => {
+      const router = await resolveCommandModelRouter(fallbackRouter, routerProvider);
       const result = router
         ? input.args.trim().length === 0
           ? {
@@ -954,6 +1322,16 @@ function createModelCommand(settings: SessionSettings, router?: ModelRouter): Sl
           provider: settings.provider,
           modelRouteId: settings.modelRouteId,
           ok: result.ok,
+          ...(router
+            ? {
+                modelRoutes: router.routes.map((route) => ({
+                  id: route.id,
+                  providerId: route.providerId,
+                  provider: route.provider,
+                  model: route.model,
+                })),
+              }
+            : {}),
         },
         ...(input.args.trim().length === 0
           ? { ui: { kind: "open-selector", selector: "model" } as const }
@@ -1031,9 +1409,13 @@ function createPermissionsCommand(settings: SessionSettings): SlashCommand {
   };
 }
 
-function createThinkingCommand(settings: SessionSettings, router?: ModelRouter): SlashCommand {
+function createThinkingCommand(
+  settings: SessionSettings,
+  fallbackRouter?: ModelRouter,
+  routerProvider?: () => ModelRouter | Promise<ModelRouter>,
+): SlashCommand {
   const candidates = (): readonly SlashArgumentCandidate[] =>
-    sessionReasoningCandidates(settings, router).map((level) => ({
+    sessionReasoningCandidates(settings, fallbackRouter).map((level) => ({
       value: level,
       description: `Use ${level} reasoning for the current model`,
     }));
@@ -1047,7 +1429,8 @@ function createThinkingCommand(settings: SessionSettings, router?: ModelRouter):
     argumentCompleter: (query) => filterArgumentCandidates(candidates(), query),
     kind: "local",
     availability: "idle",
-    execute: (input): LocalCommandResult => {
+    execute: async (input): Promise<LocalCommandResult> => {
+      const router = await resolveCommandModelRouter(fallbackRouter, routerProvider);
       const raw = input.args.trim();
       if (raw.length === 0) {
         return {
@@ -1524,9 +1907,11 @@ async function resolveCommandSession(options: PicoCommandRegistryOptions): Promi
       options.sessionId ?? defaultCliSessionId(options.workDir),
       options.workDir,
     ));
-  const runtimeEventStore = new RuntimeEventStore({
-    databasePath: resolvePicoPaths(session.workDir).workspace.runtimeDatabase,
-  });
+  const runtimeEventStore =
+    session.runtimeEventStore ??
+    new RuntimeEventStore({
+      databasePath: resolvePicoPaths(session.workDir).workspace.runtimeDatabase,
+    });
   await runtimeEventStore.initializeSession({
     sessionId: session.id,
     workDir: session.workDir,
@@ -1666,40 +2051,33 @@ function createCronCommand(
               "Usage: /cron add [--tool-network=allow|disabled|allowlist:host1,host2] <minute> <hour> <day> <month> <weekday> <prompt>",
             );
           const [minute, hour, day, month, weekday, ...promptParts] = toolNetwork.args;
-          const credentialRef = await requireCronCredential(options, settings);
+          const credential = await requireCronCredential(options, settings);
           const allowedTools = filterBackgroundEligibleTools(
             settings.tools.map((tool) => tool.name),
           );
-          const mcpConfigFingerprint = allowedTools.some((tool) => tool.startsWith("mcp__"))
-            ? await fingerprintBackgroundMcpConfig(options.workDir)
-            : undefined;
-          const job = cron.create({
+          const daemon = options.cronDaemonBridge;
+          if (!daemon?.createAutomation) {
+            return cronMessage(
+              "本机 Runtime daemon 不支持安全的 Automation 创建；任务未写入，请升级或重启 Runtime。",
+            );
+          }
+          const result = await daemon.createAutomation({
             workspacePath: options.workDir,
             schedule: [minute, hour, day, month, weekday].join(" "),
             prompt: promptParts.join(" "),
-            credentialRef,
-            enabled: false,
-            policySnapshot: {
-              mode: "yolo",
-              backgroundEnabled: true,
-              trustedWorkspace: true,
-              toolNetworkPolicy: toolNetwork.policy,
-              ...(toolNetwork.allowedHosts
-                ? { allowedToolNetworkHosts: toolNetwork.allowedHosts }
-                : {}),
-              ...(mcpConfigFingerprint ? { mcpConfigFingerprint } : {}),
-              allowedTools,
-              hardlineVersion: BACKGROUND_HARDLINE_VERSION,
-              hookVersion: BACKGROUND_HOOK_VERSION,
-              createdAt: Date.now(),
-            },
+            modelRouteId: credential.route.id,
+            expectedCredentialRef: credential.target.ref,
+            allowedTools,
+            toolNetworkPolicy: toolNetwork.policy,
+            ...(toolNetwork.allowedHosts
+              ? { allowedToolNetworkHosts: toolNetwork.allowedHosts }
+              : {}),
+            enabled: true,
           });
-          const registration = await registerCronWorkspace(options, job.cronJobId);
-          const finalJob = registration.available
-            ? cron.setEnabled(job.cronJobId, job.version, true)
-            : job;
+          if (result.status !== "ok") return cronMessage(result.message);
+          const finalJob = result.job;
           return cronMessage(
-            `Cron job created: ${finalJob.cronJobId} (${finalJob.enabled ? "enabled" : "disabled"})\n${finalJob.schedule} · ${finalJob.timeZone}\n${formatToolNetworkPolicy(finalJob.policySnapshot)}\n${registration.message}`,
+            `Cron job created: ${finalJob.jobId} (${finalJob.enabled ? "enabled" : "disabled"})\n${finalJob.schedule} · ${String(finalJob["timeZone"] ?? "system")}\n${formatRequestedToolNetworkPolicy(toolNetwork.policy, toolNetwork.allowedHosts)}\n${result.message}`,
           );
         }
         const cronJobId = args[0];
@@ -1709,22 +2087,28 @@ function createCronCommand(
           .find((candidate) => candidate.cronJobId === cronJobId);
         if (!job) return cronMessage(`Unknown cron job: ${cronJobId}`);
         if (operation === "enable" || operation === "disable") {
-          if (operation === "enable") {
-            const registration = await registerCronWorkspace(options, job.cronJobId);
-            if (!registration.available) {
-              return cronMessage(
-                `Cron job ${job.cronJobId} remains disabled.\n${registration.message}`,
-              );
-            }
-            const updated = cron.setEnabled(cronJobId, job.version, true);
-            return cronMessage(`Cron job ${updated.cronJobId} enabled.\n${registration.message}`);
+          const daemon = options.cronDaemonBridge;
+          if (!daemon?.setAutomationEnabled) {
+            return cronMessage(
+              `本机 Runtime daemon 不支持安全的 Automation ${operation}；任务未变更。`,
+            );
           }
-          const updated = cron.setEnabled(cronJobId, job.version, false);
-          return cronMessage(`Cron job ${updated.cronJobId} disabled.`);
+          const result = await daemon.setAutomationEnabled({
+            workspacePath: options.workDir,
+            jobId: cronJobId,
+            enabled: operation === "enable",
+          });
+          return cronMessage(result.message);
         }
         if (operation === "delete") {
-          const deleted = cron.delete(cronJobId, job.version);
-          return cronMessage(`Cron job ${deleted.cronJobId} deleted.`);
+          const daemon = options.cronDaemonBridge;
+          if (!daemon?.deleteAutomation) {
+            return cronMessage("本机 Runtime daemon 不支持安全的 Automation 删除；任务未变更。");
+          }
+          return cronMessage(
+            (await daemon.deleteAutomation({ workspacePath: options.workDir, jobId: cronJobId }))
+              .message,
+          );
         }
         return cronMessage(
           "Usage: /cron <status|list|credential|add|enable|disable|delete|runs> [arguments]",
@@ -1753,54 +2137,62 @@ async function manageCronCredential(
   if (route.source === "legacy") {
     return "持久 Cron 不支持 legacy 环境变量路由；请先在 .pico/config.json 配置 provider。";
   }
-  const ref = credentialRefForModelRoute(route, options.workDir);
+  const target = await resolveCronCredentialTarget(options, route);
   if (action === "status") {
-    return `${capability.diagnostic}\n${route.id}: ${(await vault.has(ref)) ? "已导入" : "未导入"}`;
+    return `${capability.diagnostic}\n${route.id}: ${(await vault.has(target.ref)) ? "已导入" : "未导入"}`;
   }
   if (action !== "import") {
     return "Usage: /cron credential <status|import> [providerID/modelID]";
   }
-  await importModelRouteCredential({
-    route,
+  const daemon = options.cronDaemonBridge;
+  if (!daemon?.importAutomationCredential) {
+    return "本机 Runtime daemon 不支持安全的 Automation 凭证导入；凭证未写入。";
+  }
+  const secret = firstCredentialSecret((options.credentialEnv ?? process.env)[route.apiKeyEnv]);
+  if (!secret) return `缺少凭证环境变量 ${route.apiKeyEnv}，无法导入。`;
+  const result = await daemon.importAutomationCredential({
     workspacePath: options.workDir,
-    vault,
-    env: options.credentialEnv ?? process.env,
+    modelRouteId: route.id,
+    expectedCredentialRef: target.ref,
+    secret,
   });
-  return `已将 ${route.apiKeyEnv} 安全导入系统凭证库，引用：${ref}`;
+  return result.message;
 }
 
 async function requireCronCredential(
   options: PicoCommandRegistryOptions,
   settings: SessionSettings,
-): Promise<CredentialRef> {
+): Promise<{
+  readonly route: import("../provider/model-router.js").ModelRoute;
+  readonly target: AutomationCredentialTarget;
+}> {
   const vault = options.credentialVault;
   if (!vault?.capability().available) {
     throw new Error(vault?.capability().diagnostic ?? "系统凭证库未配置");
   }
   const route = options.modelRouter?.require(settings.modelRouteId);
-  if (!route || route.source === "legacy") {
-    throw new Error(
-      "持久 Cron 需要 .pico/config.json 中的 providerID/modelID 路由，不能依赖 shell legacy 配置。",
-    );
-  }
-  const ref = credentialRefForModelRoute(route, options.workDir);
-  if (!(await vault.has(ref))) {
+  if (!route) throw new Error("当前没有可用模型路由。");
+  const target = await resolveCronCredentialTarget(options, route);
+  if (!(await vault.has(target.ref))) {
     throw new Error(`模型路由 ${route.id} 尚未导入系统凭证库；请先执行 /cron credential import。`);
   }
-  return ref;
+  return { route, target };
 }
 
-async function registerCronWorkspace(
+async function resolveCronCredentialTarget(
   options: PicoCommandRegistryOptions,
-  cronJobId: string,
-): Promise<CronDaemonRegistration> {
-  if (!options.cronDaemonBridge) {
-    return {
-      available: false,
-      message: `本机 Runtime daemon 未配置；任务 ${cronJobId} 仅已写入账本，尚不会自动执行。`,
-    };
-  }
-  return await options.cronDaemonBridge.registerWorkspace(options.workDir);
+  route: import("../provider/model-router.js").ModelRoute,
+): Promise<AutomationCredentialTarget> {
+  const store = options.userConfigStore ?? new UserConfigStore({ picoHome: options.picoHome });
+  const userProvider = (await store.read()).config.providers[route.providerId];
+  return resolveAutomationCredentialTarget({
+    route,
+    workspacePath: options.workDir,
+    ...(userProvider ? { userProvider } : {}),
+    ...(options.effectiveConfig?.sources[`providers.${route.providerId}`]
+      ? { configSource: options.effectiveConfig.sources[`providers.${route.providerId}`] }
+      : {}),
+  });
 }
 
 async function cronDaemonStatus(options: PicoCommandRegistryOptions): Promise<string> {
@@ -1808,6 +2200,13 @@ async function cronDaemonStatus(options: PicoCommandRegistryOptions): Promise<st
     return "本机 Runtime daemon 未配置；守护状态未知，任务仅保存在本地账本中。";
   }
   return (await options.cronDaemonBridge.statusWorkspace(options.workDir)).message;
+}
+
+function firstCredentialSecret(value: string | undefined): string | undefined {
+  return value
+    ?.split(",")
+    .map((item) => item.trim())
+    .find(Boolean);
 }
 
 function cronMessage(message: string): LocalCommandResult {
@@ -1846,6 +2245,17 @@ function formatToolNetworkPolicy(
     : policy.toolNetworkPolicy === "allow"
       ? "工具网络：允许所有符合后台资格的工具联网（模型 Provider 网络独立）"
       : `工具网络：仅允许 ${policy.allowedToolNetworkHosts?.join(", ") ?? "<invalid>"}（模型 Provider 网络不受此项控制）`;
+}
+
+function formatRequestedToolNetworkPolicy(
+  policy: "allow" | "disabled" | "allowlist",
+  allowedHosts?: readonly string[],
+): string {
+  return policy === "disabled"
+    ? "工具网络：关闭（模型 Provider 网络不受此项控制）"
+    : policy === "allow"
+      ? "工具网络：允许所有符合后台资格的工具联网（模型 Provider 网络独立）"
+      : `工具网络：仅允许 ${allowedHosts?.join(", ") ?? "<invalid>"}（模型 Provider 网络不受此项控制）`;
 }
 
 function formatCronJobs(
@@ -1952,21 +2362,6 @@ function closestAgentName(name: string, candidates: readonly string[]): string |
   return best?.name;
 }
 
-function renderAgentDispatchPrompt(agent: CatalogAgentProfile, task: string): string {
-  const args = {
-    agent_name: agent.name,
-    goal: task,
-  };
-
-  return [
-    "请把下面任务委派给指定 Agent 执行,不要由主 Agent 直接完成。",
-    "必须调用工具: delegate_task",
-    "",
-    "建议调用参数:",
-    JSON.stringify(args, null, 2),
-  ].join("\n");
-}
-
 function editDistance(left: string, right: string): number {
   const previous = Array.from({ length: right.length + 1 }, (_, index) => index);
   for (let leftIndex = 1; leftIndex <= left.length; leftIndex++) {
@@ -2037,129 +2432,6 @@ function commandExecution(
     ...(command.model === undefined ? {} : { model: command.model }),
     ...(command.allowedTools === undefined ? {} : { allowedTools: command.allowedTools }),
   };
-}
-
-function initializeProjectEntrypoints(workDir: string): string {
-  const messages: string[] = [];
-  const agentsPath = join(workDir, "AGENTS.md");
-  const picoDir = join(workDir, ".pico");
-  const configPath = join(picoDir, "config.json");
-
-  if (existsSync(agentsPath)) {
-    messages.push("AGENTS.md already exists");
-  } else {
-    writeFileSync(
-      agentsPath,
-      [
-        "# AGENTS.md",
-        "",
-        "## Project Guidance",
-        "",
-        "- Keep changes small and easy to review.",
-        "- Prefer existing project conventions before adding new patterns.",
-        "",
-      ].join("\n"),
-    );
-    messages.push("Created AGENTS.md");
-  }
-
-  mkdirSync(picoDir, { recursive: true });
-  if (existsSync(configPath)) {
-    messages.push(".pico/config.json already exists");
-  } else {
-    writeFileSync(
-      configPath,
-      `${JSON.stringify(
-        {
-          version: 1,
-          commandsDir: ".pico/commands",
-          keybindings: {},
-        },
-        null,
-        2,
-      )}\n`,
-    );
-    messages.push("Created .pico/config.json");
-  }
-
-  return messages.join("\n");
-}
-
-async function formatDoctorReport(options: PicoCommandRegistryOptions): Promise<string> {
-  const envPath = join(options.workDir, ".env");
-  const apiKeys = loadApiKeys();
-  const nodeMajor = Number(process.versions.node.split(".")[0] ?? "0");
-  const nodeOk = nodeMajor >= 22;
-  const cwdOk = existsSync(options.workDir);
-  const envModel = process.env.LLM_MODEL;
-  const storageDiagnostics = await formatStorageDoctorReport(options);
-
-  return [
-    `CWD: ${options.workDir} (${cwdOk ? "ok" : "missing"})`,
-    `.env: ${existsSync(envPath) ? "found" : "missing"}`,
-    `Provider: ${options.provider}`,
-    `Model: ${options.model}${envModel && envModel !== options.model ? ` (env: ${envModel})` : ""}`,
-    `LLM_BASE_URL: ${process.env.LLM_BASE_URL ? "set" : "missing"}`,
-    `LLM_API_KEY[S]: ${apiKeys.length > 0 ? `${apiKeys.length} configured` : "missing"}`,
-    `Node: ${process.version} (${nodeOk ? "ok" : "requires >=22.0.0"})`,
-    "Session history: runtime.sqlite",
-    `Task runtime: ${options.taskRuntime ? "healthy" : "unavailable"}`,
-    ...(options.taskRuntimeDiagnostic
-      ? [`Task runtime reason: ${options.taskRuntimeDiagnostic}`]
-      : []),
-    ...formatMemoryBackend(options.session, true),
-    ...storageDiagnostics,
-  ].join("\n");
-}
-
-async function formatStorageDoctorReport(options: PicoCommandRegistryOptions): Promise<string[]> {
-  try {
-    const report = await (
-      options.storageDoctor ?? new StorageDoctor({ workDir: options.workDir })
-    ).scan();
-    return renderStorageDoctorReport(report);
-  } catch (error) {
-    return [
-      "Storage: diagnostic unavailable",
-      `Storage diagnostic: ${error instanceof Error ? error.message : String(error)}`,
-      "Storage recommendation: retry /doctor after checking storage permissions; no repair or GC was run.",
-    ];
-  }
-}
-
-function renderStorageDoctorReport(report: StorageDoctorReport): string[] {
-  const severityCounts = {
-    critical: countStorageFindings(report.findings, "critical"),
-    error: countStorageFindings(report.findings, "error"),
-    warning: countStorageFindings(report.findings, "warning"),
-  };
-  const sessionTruthHealthy = !report.findings.some(
-    (finding) =>
-      finding.component === "session" &&
-      (finding.severity === "critical" || finding.severity === "error"),
-  );
-  const priorityFindings = report.findings
-    .filter((finding) => finding.severity !== "info")
-    .slice(0, 5);
-  return [
-    `Storage: ${report.healthy ? "healthy" : "degraded"}`,
-    `Storage scanned: ${STORAGE_DOCTOR_COMPONENTS.map(
-      (component) => `${component}=${report.scanned[component]}`,
-    ).join(", ")}`,
-    `Storage severity: critical=${severityCounts.critical}, error=${severityCounts.error}, warning=${severityCounts.warning}`,
-    `Storage Session truth: ${sessionTruthHealthy ? "healthy" : "degraded"} (scanned=${report.scanned.session})`,
-    ...priorityFindings.flatMap((finding, index) => [
-      `Storage finding ${index + 1}: [${finding.severity}/${finding.component}/${finding.code}] ${finding.message} (${finding.path})`,
-      `Storage recommendation ${index + 1}: ${finding.recommendation}`,
-    ]),
-  ];
-}
-
-function countStorageFindings(
-  findings: readonly StorageDoctorFinding[],
-  severity: StorageDoctorFinding["severity"],
-): number {
-  return findings.filter((finding) => finding.severity === severity).length;
 }
 
 function formatMemoryBackend(

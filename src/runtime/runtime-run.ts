@@ -513,9 +513,8 @@ export class RuntimeRun {
     messages: readonly Message[],
   ): Promise<boolean> {
     if (messages.length === 0) return true;
-    const store = new RuntimeEventStore({
-      databasePath: resolvePicoPaths(session.workDir).workspace.runtimeDatabase,
-    });
+    const store = session.runtimeEventStore;
+    if (!store) return false;
     if (!(await store.readSessionManifest(session.id))) return false;
     const run = await RuntimeRun.start({
       sessionId: session.id,
@@ -536,9 +535,8 @@ export class RuntimeRun {
     message: Message,
   ): Promise<CommitReceipt | undefined> {
     const canonicalMessage = canonicalizeRuntimeMessage(message);
-    const store = new RuntimeEventStore({
-      databasePath: resolvePicoPaths(session.workDir).workspace.runtimeDatabase,
-    });
+    const store = session.runtimeEventStore;
+    if (!store) return undefined;
     if (!(await store.readSessionManifest(session.id))) return undefined;
     const sessionKey = runtimeSessionKey(session.workDir, session.id);
     return serializeExternalMessageCommit(sessionKey, eventId, async () => {

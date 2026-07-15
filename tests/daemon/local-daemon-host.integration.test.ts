@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -12,6 +12,9 @@ import {
 } from "../../src/runtime/agent-runtime.js";
 import type { AskUserRequestId } from "../../src/tools/ask-user.js";
 import { WorkspaceTrustStore } from "../../src/security/workspace-trust.js";
+import { globalSessionManager } from "../../src/engine/session.js";
+import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
+import { RuntimeEventStore } from "../../src/runtime/runtime-event-store.js";
 import {
   LocalDaemonAlreadyRunningError,
   LocalDaemonHost,
@@ -142,10 +145,279 @@ describe("LocalDaemonHost integration", () => {
     await host.start();
     try {
       const client = new LocalRuntimeClient(endpoint);
-      await expect(client.request("runtime.ping", {})).resolves.toEqual({ pong: true });
+      await expect(client.request("runtime.ping", {})).resolves.toEqual(
+        expect.objectContaining({
+          pong: true,
+          capabilities: expect.arrayContaining(["session-conversation-v1"]),
+        }),
+      );
       client.close();
     } finally {
       await host.stop();
+    }
+  });
+
+  it("生产 Desktop 以 host env 的 PICO_HOME 统一落盘，不跟随 process env", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pico-daemon-home-context-"));
+    cleanups.push(() => rm(root, { recursive: true, force: true }));
+    const workspace = join(root, "workspace");
+    const hostPicoHome = join(root, "host-pico-home");
+    const processPicoHome = join(root, "process-pico-home");
+    await mkdir(workspace);
+    execFileSync("git", ["init", "--quiet"], { cwd: workspace });
+    execFileSync(
+      "git",
+      [
+        "-c",
+        "user.name=Pico Integration",
+        "-c",
+        "user.email=pico@example.test",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "initial",
+      ],
+      { cwd: workspace },
+    );
+    const endpoint = resolveLocalDaemonEndpoint({
+      runtimeDir: join(root, "runtime"),
+      userIdentity: "home-context-test",
+    });
+    const previousPicoHome = process.env.PICO_HOME;
+    process.env.PICO_HOME = processPicoHome;
+    const trustStore = new WorkspaceTrustStore({ userStateDirectory: hostPicoHome });
+    await trustStore.trust(await trustStore.canonicalize(workspace));
+    const host = createProductionLocalDaemonHost({
+      endpoint,
+      trustStore,
+      agentRuntime: new TaskStateAgentRuntime(),
+      credentialVault: new AvailableCredentialVault(),
+      env: {
+        PICO_HOME: hostPicoHome,
+        LLM_BASE_URL: "https://home-context.example.test/v1",
+        LLM_API_KEY: "home-context-secret",
+        LLM_MODEL: "context-model",
+      },
+    });
+    let sessionId: string | undefined;
+    try {
+      await host.start();
+      const client = new LocalRuntimeClient(endpoint);
+      try {
+        await expect(
+          client.request("workspace.register", { workspacePath: workspace }),
+        ).resolves.toEqual(expect.objectContaining({ registered: true }));
+        const created = (await client.request("session.create", {
+          workspacePath: workspace,
+          title: "Host-owned state",
+        })) as { session: { sessionId: string } };
+        sessionId = created.session.sessionId;
+        const started = (await client.request("run.start", {
+          workspacePath: workspace,
+          sessionId,
+          prompt: "persist task state",
+        })) as { runId: string };
+        await expect
+          .poll(async () => {
+            const listed = (await client.request("runs.list", { workspacePath: workspace })) as {
+              runs: Array<{ runId: string; status: string }>;
+            };
+            return listed.runs.find((run) => run.runId === started.runId)?.status;
+          })
+          .toBe("succeeded");
+        const activeSession = globalSessionManager.get(sessionId, workspace, {
+          picoHome: hostPicoHome,
+        });
+        if (!activeSession) throw new Error("Host-owned session is not active");
+        activeSession.sessionSummaryStore.save(
+          sessionId,
+          "host-owned summary",
+          activeSession.length,
+        );
+        await expect(client.request("session.list", { workspacePath: workspace })).resolves.toEqual(
+          {
+            sessions: expect.arrayContaining([
+              expect.objectContaining({ sessionId, title: "Host-owned state" }),
+            ]),
+          },
+        );
+      } finally {
+        client.close();
+        await host.stop();
+        if (sessionId) {
+          await globalSessionManager
+            .delete(sessionId, workspace, { picoHome: hostPicoHome })
+            ?.close();
+        }
+      }
+    } finally {
+      if (previousPicoHome === undefined) delete process.env.PICO_HOME;
+      else process.env.PICO_HOME = previousPicoHome;
+    }
+    if (!sessionId) throw new Error("Desktop session was not created");
+
+    const hostPaths = resolvePicoPaths(workspace, { picoHome: hostPicoHome });
+    await expect(readdir(hostPaths.workspace.summaries)).resolves.toEqual([
+      expect.stringMatching(/\.json$/u),
+    ]);
+    await expect(stat(hostPaths.workspace.runtimeDatabase)).resolves.toEqual(
+      expect.objectContaining({}),
+    );
+    await expect(stat(join(hostPaths.workspace.tasks, "state.json"))).resolves.toEqual(
+      expect.objectContaining({}),
+    );
+    await expect(stat(hostPaths.home.daemonWorkspaces)).resolves.toEqual(
+      expect.objectContaining({}),
+    );
+    await expect(
+      stat(resolvePicoPaths(workspace, { picoHome: processPicoHome }).workspace.root),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("生产 Desktop 将 partial host env 与 process PICO_HOME 合成后贯穿 session.send", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pico-daemon-partial-env-"));
+    cleanups.push(() => rm(root, { recursive: true, force: true }));
+    const workspace = join(root, "workspace");
+    const picoHome = join(root, "process-pico-home");
+    await mkdir(workspace);
+    execFileSync("git", ["init", "--quiet"], { cwd: workspace });
+    execFileSync(
+      "git",
+      [
+        "-c",
+        "user.name=Pico Integration",
+        "-c",
+        "user.email=pico@example.test",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "initial",
+      ],
+      { cwd: workspace },
+    );
+    const endpoint = resolveLocalDaemonEndpoint({
+      runtimeDir: join(root, "runtime"),
+      userIdentity: "partial-env-home-test",
+    });
+    const previousPicoHome = process.env.PICO_HOME;
+    process.env.PICO_HOME = picoHome;
+    const trustStore = new WorkspaceTrustStore({ userStateDirectory: picoHome });
+    await trustStore.trust(await trustStore.canonicalize(workspace));
+    const host = createProductionLocalDaemonHost({
+      endpoint,
+      trustStore,
+      agentRuntime: new TaskStateAgentRuntime(),
+      credentialVault: new AvailableCredentialVault(),
+      env: {
+        LLM_BASE_URL: "https://partial-env.example.test/v1",
+        LLM_API_KEY: "partial-env-secret",
+        LLM_MODEL: "partial-env-model",
+      },
+    });
+    let sessionId: string | undefined;
+    try {
+      await host.start();
+      const client = new LocalRuntimeClient(endpoint);
+      try {
+        await expect(client.request("runtime.ping", {})).resolves.toEqual(
+          expect.objectContaining({ picoHome }),
+        );
+        const sent = (await client.request("session.send", {
+          workspacePath: workspace,
+          input: { text: "persist partial-env task state" },
+          idempotencyKey: "partial-env-first-send",
+        })) as {
+          session: { sessionId: string };
+          run?: { runId: string };
+        };
+        sessionId = sent.session.sessionId;
+        if (!sent.run) throw new Error("session.send did not start its first Run");
+        await expect
+          .poll(async () => {
+            const listed = (await client.request("runs.list", { workspacePath: workspace })) as {
+              runs: Array<{ runId: string; status: string }>;
+            };
+            return listed.runs.find((run) => run.runId === sent.run?.runId)?.status;
+          })
+          .toBe("succeeded");
+      } finally {
+        client.close();
+        await host.stop();
+        if (sessionId) {
+          await globalSessionManager.delete(sessionId, workspace, { picoHome })?.close();
+        }
+      }
+    } finally {
+      if (previousPicoHome === undefined) delete process.env.PICO_HOME;
+      else process.env.PICO_HOME = previousPicoHome;
+    }
+    if (!sessionId) throw new Error("Desktop session was not created");
+
+    const paths = resolvePicoPaths(workspace, { picoHome });
+    await expect(stat(paths.workspace.runtimeDatabase)).resolves.toEqual(
+      expect.objectContaining({}),
+    );
+    await expect(stat(join(paths.workspace.tasks, "state.json"))).resolves.toEqual(
+      expect.objectContaining({}),
+    );
+  });
+
+  it("生产桌面 Run 兼容 TUI 的旧版环境变量模型路由", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pico-daemon-legacy-model-"));
+    cleanups.push(() => rm(root, { recursive: true, force: true }));
+    const workspace = join(root, "workspace");
+    await mkdir(workspace);
+    const runtimeStateRoot = resolvePicoPaths(workspace).workspace.root;
+    cleanups.push(() => rm(runtimeStateRoot, { recursive: true, force: true }));
+    const trustStore = new WorkspaceTrustStore({ userStateDirectory: join(root, "trust") });
+    await trustStore.trust(await trustStore.canonicalize(workspace));
+    const endpoint = resolveLocalDaemonEndpoint({
+      runtimeDir: join(root, "runtime"),
+      userIdentity: "legacy-model-test",
+    });
+    const agentRuntime = new CapturingActivationAgentRuntime();
+    const host = createProductionLocalDaemonHost({
+      endpoint,
+      trustStore,
+      agentRuntime,
+      credentialVault: new AvailableCredentialVault(),
+      registrationStore: new WorkspaceRegistrationStore(join(root, "workspaces.json")),
+      env: {
+        LLM_BASE_URL: "https://legacy-provider.example.test/v1",
+        LLM_API_KEY: "legacy-test-secret",
+        LLM_MODEL: "glm-5.2",
+      },
+    });
+    await host.start();
+    const client = new LocalRuntimeClient(endpoint);
+    let sessionId: string | undefined;
+    try {
+      const started = (await client.request("run.start", {
+        workspacePath: workspace,
+        prompt: "你好",
+      })) as { runId: string };
+      await expect
+        .poll(async () => {
+          const listed = (await client.request("runs.list", { workspacePath: workspace })) as {
+            runs: Array<{ runId: string; status: string }>;
+          };
+          return listed.runs.find((run) => run.runId === started.runId)?.status;
+        })
+        .toBe("succeeded");
+
+      expect(agentRuntime.requests).toHaveLength(1);
+      expect(agentRuntime.requests[0]).toMatchObject({
+        provider: "openai",
+        baseURL: "https://legacy-provider.example.test/v1",
+        apiKey: "legacy-test-secret",
+        model: "glm-5.2",
+        modelRouteId: "legacy/glm-5.2",
+      });
+      sessionId = agentRuntime.requests[0]?.session;
+    } finally {
+      client.close();
+      await host.stop();
+      if (sessionId) globalSessionManager.delete(sessionId, workspace);
     }
   });
 
@@ -154,6 +426,7 @@ describe("LocalDaemonHost integration", () => {
     cleanups.push(() => rm(root, { recursive: true, force: true }));
     const workspace = join(root, "workspace");
     const otherWorkspace = join(root, "other-workspace");
+    const picoHome = join(root, "pico-home");
     await mkdir(join(workspace, ".pico"), { recursive: true });
     await mkdir(otherWorkspace);
     execFileSync("git", ["init", "--quiet"], { cwd: workspace });
@@ -194,15 +467,18 @@ describe("LocalDaemonHost integration", () => {
       runtimeDir: join(root, "runtime"),
       userIdentity: "desktop-run-test",
     });
-    const host = createProductionLocalDaemonHost({
+    const hostOptions = {
       endpoint,
       trustStore,
       agentRuntime: new InteractiveFakeAgentRuntime(),
       credentialVault: new AvailableCredentialVault(),
       registrationStore: new WorkspaceRegistrationStore(join(root, "workspaces.json")),
-    });
+      env: { PICO_HOME: picoHome },
+    } satisfies Parameters<typeof createProductionLocalDaemonHost>[0];
+    const host = createProductionLocalDaemonHost(hostOptions);
     await host.start();
     const client = new LocalRuntimeClient(endpoint);
+    let persistedSessionId: string | undefined;
     try {
       const approvalEvent = deferred<RuntimeEvent>();
       const promptEvent = deferred<RuntimeEvent>();
@@ -217,9 +493,15 @@ describe("LocalDaemonHost integration", () => {
         workspace,
       );
 
+      const created = (await client.request("session.create", {
+        workspacePath: workspace,
+        title: "Structured transcript",
+      })) as { session: { sessionId: string } };
+      const sessionId = created.session.sessionId;
+      persistedSessionId = sessionId;
       const run = (await client.request("run.start", {
         workspacePath: workspace,
-        sessionId: "desktop-session-1",
+        sessionId,
         prompt: "检查项目并给出结论",
       })) as { runId: string };
       const approval = await approvalEvent.promise;
@@ -246,7 +528,7 @@ describe("LocalDaemonHost integration", () => {
         workspacePath: workspace,
         approvalId: "approval-1",
         runId: run.runId,
-        sessionId: "desktop-session-1",
+        sessionId,
         decision: "allow_once" as const,
         idempotencyKey: "approval-response-once",
       };
@@ -263,7 +545,7 @@ describe("LocalDaemonHost integration", () => {
           workspacePath: workspace,
           approvalId: "approval-1",
           runId: run.runId,
-          sessionId: "desktop-session-1",
+          sessionId,
           decision: "deny",
           idempotencyKey: "approval-response-once",
         }),
@@ -293,7 +575,7 @@ describe("LocalDaemonHost integration", () => {
         workspacePath: workspace,
         promptId: "prompt-1",
         runId: run.runId,
-        sessionId: "desktop-session-1",
+        sessionId,
         answer: "保留兼容",
         idempotencyKey: "prompt-response-once",
       };
@@ -328,6 +610,222 @@ describe("LocalDaemonHost integration", () => {
           }),
         ]),
       );
+      expect(JSON.stringify(timelineEvents)).not.toContain("SECRET_RAW_TOOL_RESULT");
+      expect(JSON.stringify(timelineEvents)).not.toContain("SECRET_SUBAGENT_TOOL_RESULT");
+      expect(
+        timelineEvents.every((event) => {
+          const item = (event.payload as { item?: { eventType?: string } }).item;
+          return !["run.started", "run.finished", "run.interrupted"].includes(
+            item?.eventType ?? "",
+          );
+        }),
+      ).toBe(true);
+
+      const transcript = (await client.request("session.transcript", {
+        workspacePath: workspace,
+        sessionId,
+      })) as { items: Array<{ kind: string; state?: string; summary?: string }> };
+      expect(transcript.items.map((item) => item.kind)).toEqual(
+        expect.arrayContaining(["runBoundary", "plan", "tool", "approval", "prompt", "subagent"]),
+      );
+      expect(transcript.items.find((item) => item.kind === "tool")).toMatchObject({
+        summary: expect.stringContaining("bytes"),
+      });
+      expect(transcript.items.find((item) => item.kind === "approval")).toMatchObject({
+        state: "allow_once",
+      });
+      expect(transcript.items.find((item) => item.kind === "prompt")).toMatchObject({
+        state: "resolved",
+      });
+      expect(transcript.items.find((item) => item.kind === "subagent")).toMatchObject({
+        state: "completed",
+      });
+      expect(JSON.stringify(transcript)).not.toContain("SECRET_RAW_TOOL_RESULT");
+      expect(JSON.stringify(transcript)).not.toContain("SECRET_SUBAGENT_TOOL_RESULT");
+    } finally {
+      client.close();
+      await host.stop();
+    }
+    if (!persistedSessionId) throw new Error("production transcript session was not created");
+    const eventStore = new RuntimeEventStore({
+      databasePath: resolvePicoPaths(workspace, { picoHome }).workspace.runtimeDatabase,
+    });
+    const durableEntries = await eventStore.readSessionEntries(persistedSessionId);
+    const durableJson = JSON.stringify(durableEntries);
+    expect(durableJson).not.toContain("SECRET_RAW_PLAN_TOOL_RESULT");
+    expect(durableJson).not.toContain("SECRET_RAW_TOOL_RESULT");
+    expect(durableJson).not.toContain("SECRET_SUBAGENT_TOOL_RESULT");
+    const transcriptEventIds = durableEntries.flatMap(({ event }) =>
+      event.kind === "transcript.event.recorded" && event.data.event.eventId.startsWith("runtime:")
+        ? [event.data.event.eventId]
+        : [],
+    );
+    expect(new Set(transcriptEventIds).size).toBe(transcriptEventIds.length);
+    await globalSessionManager.delete(persistedSessionId, workspace, { picoHome })?.close();
+
+    const restartedHost = createProductionLocalDaemonHost(hostOptions);
+    await restartedHost.start();
+    const restartedClient = new LocalRuntimeClient(endpoint);
+    try {
+      const restored = (await restartedClient.request("session.transcript", {
+        workspacePath: workspace,
+        sessionId: persistedSessionId,
+      })) as { items: Array<{ kind: string; state?: string }> };
+      expect(restored.items.map((item) => item.kind)).toEqual(
+        expect.arrayContaining(["plan", "tool", "approval", "prompt", "subagent"]),
+      );
+      expect(restored.items.find((item) => item.kind === "approval")?.state).toBe("allow_once");
+      expect(restored.items.find((item) => item.kind === "prompt")?.state).toBe("resolved");
+      expect(JSON.stringify(restored)).not.toContain("SECRET_RAW_TOOL_RESULT");
+      expect(JSON.stringify(restored)).not.toContain("SECRET_SUBAGENT_TOOL_RESULT");
+    } finally {
+      restartedClient.close();
+      await restartedHost.stop();
+      await globalSessionManager.delete(persistedSessionId, workspace, { picoHome })?.close();
+    }
+  });
+
+  it("生产桌面 Run 使用 Session 选择的模型、模式和思考档位", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pico-ds-"));
+    cleanups.push(() => rm(root, { recursive: true, force: true }));
+    const workspace = join(root, "workspace");
+    await mkdir(join(workspace, ".pico"), { recursive: true });
+    execFileSync("git", ["init", "--quiet"], { cwd: workspace });
+    await writeFile(
+      join(workspace, ".pico", "config.json"),
+      JSON.stringify({
+        version: 1,
+        model: "local/coder",
+        providers: {
+          local: {
+            protocol: "openai",
+            baseURL: "https://provider.example.test/v1",
+            apiKeyEnv: "PICO_DESKTOP_TEST_KEY",
+            models: {
+              coder: {},
+              reasoner: {
+                reasoning: {
+                  enabled: true,
+                  defaultLevel: "high",
+                  levels: ["off", "high", "max"],
+                },
+              },
+            },
+          },
+        },
+      }),
+    );
+    const trustStore = new WorkspaceTrustStore({ userStateDirectory: join(root, "trust") });
+    await trustStore.trust(await trustStore.canonicalize(workspace));
+    const endpoint = resolveLocalDaemonEndpoint({
+      runtimeDir: join(root, "runtime"),
+      userIdentity: "settings",
+    });
+    const agentRuntime = new CapturingSettingsAgentRuntime();
+    const host = createProductionLocalDaemonHost({
+      endpoint,
+      trustStore,
+      agentRuntime,
+      credentialVault: new AvailableCredentialVault(),
+      registrationStore: new WorkspaceRegistrationStore(join(root, "workspaces.json")),
+    });
+    await host.start();
+    const client = new LocalRuntimeClient(endpoint);
+    try {
+      const created = (await client.request("session.create", {
+        workspacePath: workspace,
+      })) as { session: { sessionId: string } };
+      await client.request("session.settings.update", {
+        workspacePath: workspace,
+        sessionId: created.session.sessionId,
+        modelRouteId: "local/reasoner",
+        permissions: "plan",
+        thinkingEffort: "max",
+      });
+      await client.request("run.start", {
+        workspacePath: workspace,
+        sessionId: created.session.sessionId,
+        prompt: "按计划检查项目",
+      });
+
+      await expect(agentRuntime.received.promise).resolves.toMatchObject({
+        session: created.session.sessionId,
+        model: "reasoner",
+        modelRouteId: "local/reasoner",
+        thinkingEffort: "max",
+        planMode: true,
+        rewindInteractionMode: "plan",
+      });
+    } finally {
+      client.close();
+      await host.stop();
+    }
+  });
+
+  it("生产 daemon 将 Skill 激活解析为指令、模型与工具限制", async () => {
+    const root = await mkdtemp(join(tmpdir(), "p-sa-"));
+    cleanups.push(() => rm(root, { recursive: true, force: true }));
+    const workspace = join(root, "workspace");
+    await mkdir(join(workspace, ".pico", "skills", "review"), { recursive: true });
+    await writeFile(
+      join(workspace, ".pico", "config.json"),
+      JSON.stringify({
+        version: 1,
+        model: "local/default",
+        providers: {
+          local: {
+            protocol: "openai",
+            baseURL: "https://provider.example.test/v1",
+            apiKeyEnv: "PICO_DESKTOP_TEST_KEY",
+            models: ["default", "special"],
+            discoverModels: false,
+          },
+        },
+      }),
+    );
+    await writeFile(
+      join(workspace, ".pico", "skills", "review", "SKILL.md"),
+      [
+        "---",
+        "name: review",
+        "description: Review a target",
+        "allowed-tools:",
+        "  - read_file",
+        "model: local/special",
+        "---",
+        "Inspect $ARGUMENTS.",
+      ].join("\n"),
+    );
+    const trustStore = new WorkspaceTrustStore({ userStateDirectory: join(root, "trust") });
+    await trustStore.trust(await trustStore.canonicalize(workspace));
+    const endpoint = resolveLocalDaemonEndpoint({
+      runtimeDir: join(root, "r"),
+      userIdentity: "skill-activation-test",
+    });
+    const runtime = new CapturingActivationAgentRuntime();
+    const host = createProductionLocalDaemonHost({
+      endpoint,
+      trustStore,
+      agentRuntime: runtime,
+      credentialVault: new AvailableCredentialVault(),
+      registrationStore: new WorkspaceRegistrationStore(join(root, "workspaces.json")),
+    });
+    await host.start();
+    const client = new LocalRuntimeClient(endpoint);
+    try {
+      await client.request("session.send", {
+        workspacePath: workspace,
+        input: { kind: "skill", name: "review", args: "src/runtime.ts" },
+        idempotencyKey: "production-skill",
+      });
+      await expect.poll(() => runtime.requests.length).toBe(1);
+      expect(runtime.requests[0]).toMatchObject({
+        model: "special",
+        modelRouteId: "local/special",
+        allowedTools: ["read_file"],
+        prompt: expect.stringContaining('<pico-skill-loaded name="review" trigger="user-slash"'),
+      });
+      expect(runtime.requests[0]?.prompt).toContain("Inspect src/runtime.ts.");
     } finally {
       client.close();
       await host.stop();
@@ -530,6 +1028,8 @@ class AvailableCredentialVault implements CredentialVault {
     return true;
   }
 
+  async delete(): Promise<void> {}
+
   async resolve(_ref: CredentialRef): Promise<string> {
     return "desktop-test-secret";
   }
@@ -550,6 +1050,33 @@ class InteractiveFakeAgentRuntime extends AgentRuntime {
     const sessionId = options.session ?? "missing-session";
     const workDir = options.dir ?? process.cwd();
     dependencies.reporter?.onStart(workDir);
+    dependencies.reporter?.onToolCall(
+      "todo",
+      '{"action":"add","content":"Persist structured transcript"}',
+      "plan-call",
+    );
+    dependencies.reporter?.onToolResult("todo", "SECRET_RAW_PLAN_TOOL_RESULT", false, "plan-call");
+    dependencies.reporter?.onSubagentActivity?.({
+      activityId: "activity-1",
+      task: "Review transcript persistence",
+      status: "running",
+      agentName: "Reviewer",
+      currentAction: "Inspecting the event chain",
+    });
+    dependencies.reporter?.onSubagentTrace?.({
+      activityId: "activity-1",
+      traceId: "trace-tool-1",
+      type: "tool.started",
+      name: "read_file",
+      args: '{"path":"src/daemon/desktop-runtime-service.ts"}',
+    });
+    dependencies.reporter?.onSubagentTrace?.({
+      activityId: "activity-1",
+      traceId: "trace-tool-1",
+      type: "tool.completed",
+      result: "SECRET_SUBAGENT_TOOL_RESULT",
+      isError: false,
+    });
     dependencies.reporter?.onToolCall("bash", '{"command":"npm test"}', "call-1");
     const approval = dependencies.approvalManager.waitForApproval(
       "approval-1",
@@ -574,7 +1101,15 @@ class InteractiveFakeAgentRuntime extends AgentRuntime {
     if (!approvalResult.allowed || promptResult.kind !== "selected") {
       throw new Error("desktop interaction rejected");
     }
-    dependencies.reporter?.onToolResult("bash", "tests passed", false, "call-1");
+    dependencies.reporter?.onToolResult("bash", "SECRET_RAW_TOOL_RESULT", false, "call-1");
+    dependencies.reporter?.onSubagentActivity?.({
+      activityId: "activity-1",
+      task: "Review transcript persistence",
+      status: "completed",
+      agentName: "Reviewer",
+      summary: "Persistence is consistent",
+    });
+    dependencies.reporter?.onSubagentActivitiesClaimed?.(["activity-1"]);
     dependencies.reporter?.onMessage("已保留兼容并完成验证。\n");
     dependencies.reporter?.onFinish();
     return {
@@ -583,6 +1118,53 @@ class InteractiveFakeAgentRuntime extends AgentRuntime {
       workDir,
       finalMessage: "已保留兼容并完成验证。",
       usage: { promptTokens: 12, completionTokens: 6, costCNY: 0.01 },
+      messages: [],
+    };
+  }
+}
+
+class CapturingActivationAgentRuntime extends AgentRuntime {
+  readonly requests: RunAgentCliOptions[] = [];
+
+  override async execute(
+    options: RunAgentCliOptions,
+    _dependencies: RunAgentCliDependencies = {},
+  ): Promise<RunAgentCliResult> {
+    this.requests.push(options);
+    const sessionId = options.session ?? "activation-session";
+    return {
+      sessionId,
+      sessionSelection: { mode: "resume", sessionId },
+      workDir: options.dir ?? process.cwd(),
+      finalMessage: "activation complete",
+      usage: { promptTokens: 5, completionTokens: 2, costCNY: 0.001 },
+      messages: [],
+    };
+  }
+}
+
+class TaskStateAgentRuntime extends AgentRuntime {
+  override async execute(
+    options: RunAgentCliOptions,
+    dependencies: RunAgentCliDependencies = {},
+  ): Promise<RunAgentCliResult> {
+    const sessionId = options.session ?? "home-context-session";
+    const workDir = options.dir ?? process.cwd();
+    if (!dependencies.picoHome || dependencies.env?.PICO_HOME !== dependencies.picoHome) {
+      throw new Error("production host did not propagate its PICO_HOME environment");
+    }
+    if (!dependencies.runtimeState?.taskHostRuntime) {
+      throw new Error("home context test requires a Git task host");
+    }
+    dependencies.runtimeState.taskRegistry.create("local_bash", {
+      description: "persist host-owned task state",
+    });
+    return {
+      sessionId,
+      sessionSelection: { mode: "resume", sessionId },
+      workDir,
+      finalMessage: "task state persisted",
+      usage: { promptTokens: 1, completionTokens: 1, costCNY: 0 },
       messages: [],
     };
   }
@@ -603,6 +1185,26 @@ class AutomationFakeAgentRuntime extends AgentRuntime {
       workDir: options.dir ?? process.cwd(),
       finalMessage: "repository healthy",
       usage: { promptTokens: 8, completionTokens: 2, costCNY: 0.001 },
+      messages: [],
+    };
+  }
+}
+
+class CapturingSettingsAgentRuntime extends AgentRuntime {
+  readonly received = deferred<RunAgentCliOptions>();
+
+  override async execute(
+    options: RunAgentCliOptions,
+    _dependencies: RunAgentCliDependencies = {},
+  ): Promise<RunAgentCliResult> {
+    this.received.resolve(options);
+    const sessionId = options.session ?? "missing-session";
+    return {
+      sessionId,
+      sessionSelection: { mode: "resume", sessionId },
+      workDir: options.dir ?? process.cwd(),
+      finalMessage: "settings applied",
+      usage: { promptTokens: 1, completionTokens: 1, costCNY: 0 },
       messages: [],
     };
   }

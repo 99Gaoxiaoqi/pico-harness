@@ -137,8 +137,7 @@ export function createModelContextReport(
     suppliedBudget?.contextWindowTokens ?? route.capabilities.contextWindowTokens;
   const reservedOutputTokens =
     suppliedBudget?.reservedOutputTokens ?? route.capabilities.maxOutputTokens;
-  const safetyMarginTokens =
-    suppliedBudget?.safetyMarginTokens ?? DEFAULT_SAFETY_MARGIN_TOKENS;
+  const safetyMarginTokens = suppliedBudget?.safetyMarginTokens ?? DEFAULT_SAFETY_MARGIN_TOKENS;
   const inputBudgetTokens =
     suppliedBudget?.inputBudgetTokens ??
     Math.max(0, contextWindowTokens - reservedOutputTokens - safetyMarginTokens);

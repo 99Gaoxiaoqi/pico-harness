@@ -38,6 +38,8 @@ interface HookTrustFile {
 
 export interface HookTrustStoreOptions {
   userHome?: string;
+  /** Host-owned Pico state root. Takes precedence over the legacy userHome seam. */
+  picoHome?: string;
   filePath?: string;
 }
 
@@ -46,7 +48,8 @@ export class HookTrustStore {
   readonly filePath: string;
 
   constructor(options: HookTrustStoreOptions = {}) {
-    const picoHome = options.userHome ? join(options.userHome, ".pico") : resolvePicoHome();
+    const picoHome =
+      options.picoHome ?? (options.userHome ? join(options.userHome, ".pico") : resolvePicoHome());
     this.filePath = options.filePath ?? join(picoHome, "trusted-hooks.json");
   }
 

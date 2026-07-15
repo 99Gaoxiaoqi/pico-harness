@@ -40,6 +40,7 @@ export interface WorkspaceRunSnapshot {
 
 export interface WorkspaceRunRequest {
   description: string;
+  /** Known durable Session linkage. Desktop supplies this before run.started is published. */
   sessionId?: string;
 }
 

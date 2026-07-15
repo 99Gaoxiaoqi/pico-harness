@@ -1,3 +1,5 @@
+import type { ConversationItemView } from "./conversation/types.js";
+
 export type JsonRecord = Readonly<Record<string, unknown>>;
 
 export type ConnectionState =
@@ -30,6 +32,92 @@ export interface TimelineItem {
   readonly detail?: string | undefined;
   readonly state?: "done" | "active" | "waiting" | "failed" | undefined;
   readonly at: number;
+  readonly sessionId?: string | undefined;
+  readonly runId?: string | undefined;
+  readonly eventType?: string | undefined;
+}
+
+export interface ConversationView {
+  readonly sessionId: string;
+  readonly items: readonly ConversationItemView[];
+  readonly revision?: string | undefined;
+  readonly nextBefore?: string | undefined;
+  readonly queuedCount: number;
+  readonly runId?: string | undefined;
+  readonly changes?: readonly ChangeView[] | undefined;
+  readonly changeFingerprint?: string | undefined;
+  readonly usage?: UsageView | undefined;
+  readonly settings?: SessionSettingsView | undefined;
+  readonly goalItem?: ConversationItemView | undefined;
+  readonly loadError?: string | undefined;
+}
+
+export interface SessionSettingsView {
+  readonly modelRouteId?: string | undefined;
+  readonly model: string;
+  readonly mode: "default" | "plan" | "auto" | "yolo";
+  readonly thinkingEffort: string;
+  readonly reasoningLevels: readonly string[];
+}
+
+export interface ModelRouteView {
+  readonly id: string;
+  readonly label: string;
+}
+
+export type ProviderOrigin = "user" | "project-legacy" | "environment";
+export type ProviderProtocol = "openai" | "claude" | "gemini";
+export type ProviderCredentialStatus = "ready" | "missing" | "environment" | "unsupported";
+export type ProviderCredentialSource = "keychain" | "environment" | "none";
+
+export interface ProviderView {
+  readonly id: string;
+  readonly protocol: ProviderProtocol;
+  readonly baseURL: string;
+  readonly apiKeyEnv: string;
+  readonly models: readonly string[];
+  readonly discoverModels: boolean;
+  readonly modelCapabilities?: JsonRecord | undefined;
+  readonly origin: ProviderOrigin;
+  readonly fingerprint: string;
+  readonly credentialStatus: ProviderCredentialStatus;
+  readonly credentialSource: ProviderCredentialSource;
+  readonly storedCredentialPresent: boolean;
+}
+
+export type ProviderDraft = Pick<
+  ProviderView,
+  "id" | "protocol" | "baseURL" | "apiKeyEnv" | "models" | "discoverModels" | "modelCapabilities"
+>;
+
+export interface UserDefaultsView {
+  readonly modelRouteId?: string | undefined;
+  readonly mode?: "default" | "plan" | "auto" | "yolo" | undefined;
+  readonly thinkingEffort?: string | undefined;
+}
+
+export interface ProviderConfigView {
+  readonly supported: boolean;
+  readonly writable: boolean;
+  readonly revision: string;
+  readonly defaultModelRouteId?: string | undefined;
+  readonly userDefaults: UserDefaultsView;
+  readonly providers: readonly ProviderView[];
+}
+
+export interface CatalogAgentView {
+  readonly name: string;
+  readonly description: string;
+  readonly source: string;
+  readonly tools: readonly string[];
+  readonly modelRouteId?: string | undefined;
+}
+
+export interface CatalogSkillView {
+  readonly name: string;
+  readonly description: string;
+  readonly allowedTools: readonly string[];
+  readonly model?: string | undefined;
 }
 
 export interface ApprovalView {
@@ -106,6 +194,7 @@ export interface AppData {
   readonly sessions: readonly SessionView[];
   readonly runs: readonly RunView[];
   readonly timeline: readonly TimelineItem[];
+  readonly conversations: Readonly<Record<string, ConversationView>>;
   readonly approvals: readonly ApprovalView[];
   readonly prompts: readonly PromptView[];
   readonly changes: readonly ChangeView[];
@@ -114,6 +203,10 @@ export interface AppData {
   readonly skills: readonly CapabilityView[];
   readonly mcpServers: readonly CapabilityView[];
   readonly providers: readonly CapabilityView[];
+  readonly providerConfig: ProviderConfigView;
+  readonly modelRoutes: readonly ModelRouteView[];
+  readonly catalogAgents: readonly CatalogAgentView[];
+  readonly catalogSkills: readonly CatalogSkillView[];
   readonly usage: UsageView;
   readonly configVersion: number;
   readonly launchAtLogin?: boolean | undefined;
@@ -126,6 +219,7 @@ export const emptyData: AppData = {
   sessions: [],
   runs: [],
   timeline: [],
+  conversations: {},
   approvals: [],
   prompts: [],
   changes: [],
@@ -133,6 +227,16 @@ export const emptyData: AppData = {
   skills: [],
   mcpServers: [],
   providers: [],
+  providerConfig: {
+    supported: false,
+    writable: false,
+    revision: "",
+    userDefaults: {},
+    providers: [],
+  },
+  modelRoutes: [],
+  catalogAgents: [],
+  catalogSkills: [],
   usage: {},
   configVersion: 0,
   notices: {},

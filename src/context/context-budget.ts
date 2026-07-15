@@ -31,7 +31,8 @@ export function estimateMessagesTokens(messages: readonly Message[]): number {
 
 export function estimateToolDefinitionsTokens(tools: readonly ToolDefinition[]): number {
   return tools.reduce(
-    (sum, tool) => sum + countTokens(tool.name + tool.description + JSON.stringify(tool.inputSchema)),
+    (sum, tool) =>
+      sum + countTokens(tool.name + tool.description + JSON.stringify(tool.inputSchema)),
     0,
   );
 }

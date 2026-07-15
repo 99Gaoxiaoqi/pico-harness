@@ -264,6 +264,8 @@ export interface CronJobRecord {
   policySnapshot: YoloPolicySnapshot;
   /** 非秘密的系统凭证库引用；旧 Job 迁移后可能为空并由 daemon fail-closed。 */
   credentialRef?: CredentialRef;
+  /** 创建时固定的 providerID/modelID；旧 v1 Job 可从 credentialRef 反推。 */
+  modelRouteId?: string;
   version: number;
   createdAt: number;
   updatedAt: number;
