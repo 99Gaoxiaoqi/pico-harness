@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -15,13 +15,29 @@ async function main() {
   const repoRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
   const entry = join(repoRoot, "dist", "cli", "main.js");
   const { resolvePicoPaths } = await import("../dist/paths/pico-paths.js");
-  await runBuiltTuiScenario({ pty, repoRoot, entry, resolvePicoPaths, term: "xterm-256color" });
-  await runBuiltTuiScenario({ pty, repoRoot, entry, resolvePicoPaths, term: "dumb" });
+  const { RuntimeEventStore } = await import("../dist/runtime/runtime-event-store.js");
   await runBuiltTuiScenario({
     pty,
     repoRoot,
     entry,
     resolvePicoPaths,
+    RuntimeEventStore,
+    term: "xterm-256color",
+  });
+  await runBuiltTuiScenario({
+    pty,
+    repoRoot,
+    entry,
+    resolvePicoPaths,
+    RuntimeEventStore,
+    term: "dumb",
+  });
+  await runBuiltTuiScenario({
+    pty,
+    repoRoot,
+    entry,
+    resolvePicoPaths,
+    RuntimeEventStore,
     term: "dumb",
     interrupt: true,
   });
@@ -32,6 +48,7 @@ async function runBuiltTuiScenario({
   repoRoot,
   entry,
   resolvePicoPaths,
+  RuntimeEventStore,
   term,
   interrupt = false,
 }) {
@@ -165,8 +182,17 @@ async function runBuiltTuiScenario({
       if (alternateFakeServer.requestCount !== 0) {
         throw new Error("TERM=dumb routed a same-name model turn to the wrong configured endpoint");
       }
-      const persistedSession = await readPersistedSession(workDir, picoHome, resolvePicoPaths);
-      if (!persistedSession.includes('"modelRouteId":"configured-primary/shared-model"')) {
+      const persistedRuntime = await readPersistedRuntime(
+        workDir,
+        picoHome,
+        resolvePicoPaths,
+        RuntimeEventStore,
+      );
+      if (
+        !JSON.stringify(persistedRuntime).includes(
+          '"modelRouteId":"configured-primary/shared-model"',
+        )
+      ) {
         throw new Error("TERM=dumb did not persist the selected provider/model route identity");
       }
     }
@@ -184,12 +210,27 @@ async function runBuiltTuiScenario({
   }
 }
 
-async function readPersistedSession(workDir, picoHome, resolvePicoPaths) {
-  const sessionsDir = resolvePicoPaths(workDir, { picoHome }).workspace.sessions;
-  const files = (await readdir(sessionsDir)).filter((file) => file.endsWith(".jsonl"));
-  return (await Promise.all(files.map((file) => readFile(join(sessionsDir, file), "utf8")))).join(
-    "\n",
+async function readPersistedRuntime(workDir, picoHome, resolvePicoPaths, RuntimeEventStore) {
+  const paths = resolvePicoPaths(workDir, { picoHome });
+  const store = new RuntimeEventStore({ databasePath: paths.workspace.runtimeDatabase });
+  const manifests = await store.listSessionManifests();
+  if (manifests.length === 0) {
+    throw new Error("TERM=dumb did not persist a RuntimeEvent session manifest");
+  }
+  const sessions = await Promise.all(
+    manifests.map(async (manifest) => ({
+      manifest,
+      events: await store.readSession(manifest.sessionId),
+    })),
   );
+  const events = sessions.flatMap((session) => session.events);
+  if (!events.some((event) => event.kind === "message.committed")) {
+    throw new Error("TERM=dumb runtime.sqlite contains no committed messages");
+  }
+  if (!events.some((event) => event.kind === "run.terminal")) {
+    throw new Error("TERM=dumb runtime.sqlite contains no terminal run fact");
+  }
+  return sessions;
 }
 
 async function ensureNodePtyHelperExecutable() {

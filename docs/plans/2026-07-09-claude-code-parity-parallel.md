@@ -2,6 +2,8 @@
 
 > **归档状态（2026-07-10）：** 本计划对应能力已合并并在 `ROADMAP.md` 标记历史完成；下方未勾选项保留为历史执行清单，不再作为当前进度来源。当前公开入口为 `pico` → TUI。
 
+> **历史存储方案（已被替代）：** 下文涉及的 `session-store.ts`、Session JSONL 与旧 metadata 测试不代表当前实现。当前唯一事实源是 workspace `runtime.sqlite` 中的 RuntimeEvent，`sessions.db` FTS 可随时重建。
+
 > **面向 AI 代理的工作者：** 必需子技能：使用 superpowers:subagent-driven-development 或等价的隔离子代理流程。每个任务必须先写/补测试，再实现，再运行目标测试。不要回退他人改动。
 
 **目标：** 将 Pico TUI 与项目启动/交互方式向 Claude Code 靠齐，优先解决重复输入框、命令体系、`@` 附件、`/rewind`、session 绑定和工具状态展示。

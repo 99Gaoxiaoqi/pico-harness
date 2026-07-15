@@ -2,6 +2,8 @@
 
 > **归档状态（2026-07-10）：** 本计划对应机制已合并；下方未勾选项保留为历史执行清单，不再作为当前进度来源。PluginManager 只代表历史本地 manager 机制，Plugin runtime 不在当前公开 TUI 范围。
 
+> **历史存储方案（已被替代）：** 下文提到的 Session JSONL/meta 兼容逻辑仅是历史计划。当前会话与 Agent run 统一记录到 workspace `runtime.sqlite`；RuntimeEventStore 是事实源，`sessions.db` 只是可重建检索投影。
+
 > **面向 AI 代理的工作者：** 必需子技能：使用 superpowers:subagent-driven-development（推荐）或 superpowers:executing-plans 逐任务实现此计划。步骤使用复选框（`- [ ]`）语法来跟踪进度。
 
 **目标：** 将 Pico 从“Claude Code 风格 TUI”推进到“Claude Code 风格运行时”，优先补齐任务模型、按键系统、长会话性能、权限仲裁、文件索引、插件生命周期和上下文恢复能力。
