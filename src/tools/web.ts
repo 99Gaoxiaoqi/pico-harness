@@ -542,6 +542,8 @@ function renderResults(results: SearchResult[], max: number): string {
 export class WebSearchTool implements BaseTool {
   readonly readOnly = true;
 
+  constructor(private readonly env: Readonly<Record<string, string | undefined>> = process.env) {}
+
   name(): string {
     return "web_search";
   }
@@ -586,8 +588,8 @@ export class WebSearchTool implements BaseTool {
     }
 
     // 2. 读环境变量;未配置时返回明确提示(不抛错,让模型知道可改用 fetch_url)
-    const apiBase = process.env["SEARCH_API_BASE"];
-    const apiKey = process.env["SEARCH_API_KEY"];
+    const apiBase = this.env["SEARCH_API_BASE"];
+    const apiKey = this.env["SEARCH_API_KEY"];
 
     if (!apiBase || !apiKey) {
       return (

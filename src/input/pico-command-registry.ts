@@ -430,8 +430,11 @@ async function loadRegistryAgents(
 async function loadSessionArgumentCandidates(
   workDir: string,
   currentSessionId?: string,
+  picoHome?: string,
 ): Promise<readonly SlashArgumentCandidate[]> {
-  const sessions = await listCliSessionSummaries(workDir);
+  const sessions = await listCliSessionSummaries(workDir, {
+    ...(picoHome ? { picoHome } : {}),
+  });
   const titlesById = new Map(sessions.map((session) => [session.id, sessionDisplayTitle(session)]));
   return sessions.map((session) => {
     const presentation = {
@@ -1634,7 +1637,9 @@ function createSessionsCommand(options: PicoCommandRegistryOptions): SlashComman
     kind: "local",
     availability: "idle",
     execute: async (): Promise<LocalCommandResult> => {
-      const summaries = await listCliSessionSummaries(options.workDir);
+      const summaries = await listCliSessionSummaries(options.workDir, {
+        ...(options.picoHome ? { picoHome: options.picoHome } : {}),
+      });
       return {
         type: "local",
         action: "message",
@@ -1679,7 +1684,7 @@ function createResumeCommand(options: PicoCommandRegistryOptions): SlashCommand 
     category: "session",
     argumentCompleter: async (query) =>
       filterSessionArgumentCandidates(
-        await loadSessionArgumentCandidates(options.workDir, options.sessionId),
+        await loadSessionArgumentCandidates(options.workDir, options.sessionId, options.picoHome),
         query,
       ),
     kind: "local",
@@ -1698,7 +1703,7 @@ function createResumeCommand(options: PicoCommandRegistryOptions): SlashCommand 
         };
       }
 
-      if (!(await sessionExists(options.workDir, sessionId))) {
+      if (!(await sessionExists(options.workDir, sessionId, options.picoHome))) {
         return {
           type: "local",
           action: "message",
@@ -1725,7 +1730,7 @@ function createForkCommand(options: PicoCommandRegistryOptions): SlashCommand {
     category: "session",
     argumentCompleter: async (query) =>
       filterSessionArgumentCandidates(
-        await loadSessionArgumentCandidates(options.workDir, options.sessionId),
+        await loadSessionArgumentCandidates(options.workDir, options.sessionId, options.picoHome),
         query,
       ),
     kind: "local",
@@ -1739,7 +1744,7 @@ function createForkCommand(options: PicoCommandRegistryOptions): SlashCommand {
           message: "Usage: /fork <session-id>",
         };
       }
-      if (!(await sessionExists(options.workDir, sessionId))) {
+      if (!(await sessionExists(options.workDir, sessionId, options.picoHome))) {
         return {
           type: "local",
           action: "message",
@@ -1756,9 +1761,13 @@ function createForkCommand(options: PicoCommandRegistryOptions): SlashCommand {
   };
 }
 
-async function sessionExists(workDir: string, sessionId: string): Promise<boolean> {
+async function sessionExists(
+  workDir: string,
+  sessionId: string,
+  picoHome?: string,
+): Promise<boolean> {
   const store = new RuntimeEventStore({
-    databasePath: resolvePicoPaths(workDir).workspace.runtimeDatabase,
+    databasePath: resolvePicoPaths(workDir, { picoHome }).workspace.runtimeDatabase,
   });
   return Boolean(await store.readSessionManifest(sessionId));
 }
@@ -1907,11 +1916,16 @@ async function resolveCommandSession(options: PicoCommandRegistryOptions): Promi
     (await globalSessionManager.getOrCreate(
       options.sessionId ?? defaultCliSessionId(options.workDir),
       options.workDir,
+      {
+        persistence: true,
+        ...(options.picoHome ? { picoHome: options.picoHome } : {}),
+      },
     ));
   const runtimeEventStore =
     session.runtimeEventStore ??
     new RuntimeEventStore({
-      databasePath: resolvePicoPaths(session.workDir).workspace.runtimeDatabase,
+      databasePath: resolvePicoPaths(session.workDir, { picoHome: session.picoHome }).workspace
+        .runtimeDatabase,
     });
   await runtimeEventStore.initializeSession({
     sessionId: session.id,

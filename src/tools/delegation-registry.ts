@@ -53,6 +53,8 @@ export interface SubagentRegistryFactoryConfig {
   activateAgentHooks?: (profile: AgentProfile) => Promise<() => void | Promise<void>>;
   /** 父会话的受信 artifact 根；worker worktree 不得改变此边界。 */
   artifactBaseDir?: string;
+  /** Runtime host environment used only by tools that intentionally consume host config. */
+  env?: Readonly<Record<string, string | undefined>>;
   /** 与父会话一致的脱敏、不可变模型目录快照。 */
   modelCatalog?: SubagentModelCatalog;
 }
@@ -147,6 +149,10 @@ function buildProfileRegistry(
       registry.register(new SkillViewTool(config.skillLoaderFactory(config.workDir)));
       continue;
     }
+    if (toolName === "web_search") {
+      registry.register(new WebSearchTool(config.env));
+      continue;
+    }
     const ctor = TOOL_CONSTRUCTORS[toolName];
     if (ctor) registry.register(ctor(config.workDir, config.workspaceRoots, config.yoloSandbox));
   }
@@ -198,7 +204,7 @@ function buildModeRegistry(
   if (request.mode === "explore") {
     // 探索语义:联网搜索是 explore 的合理扩展(全只读,无副作用)
     registry.register(new FetchURLTool());
-    registry.register(new WebSearchTool());
+    registry.register(new WebSearchTool(config.env));
   }
 
   if (request.mode === "worker") {
