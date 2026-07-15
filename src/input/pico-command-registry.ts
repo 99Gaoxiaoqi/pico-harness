@@ -40,10 +40,14 @@ import type {
 } from "./types.js";
 import { createProvider, type ProviderKind } from "../provider/factory.js";
 import { resolveProviderProfile } from "../provider/profile.js";
-import { type ModelRouter } from "../provider/model-router.js";
+import { type ModelProviderConfig, type ModelRouter } from "../provider/model-router.js";
+import type { EffectiveProviderCredentialStatus } from "../provider/effective-model-runtime.js";
 import {
   credentialRefForModelRoute,
+  credentialRefForProvider,
   importModelRouteCredential,
+  importProviderCredential,
+  normalizeProviderEndpoint,
   type CredentialRef,
   type CredentialVault,
 } from "../provider/credential-vault.js";
@@ -91,6 +95,8 @@ import {
 } from "../diagnostics/resource-doctor.js";
 import type { StorageDoctor } from "../storage/storage-doctor.js";
 import { runWorkspaceDoctor } from "../diagnostics/workspace-doctor.js";
+import type { EffectiveConfigSnapshot } from "./effective-config.js";
+import { UserConfigStore, type PicoUserConfig } from "./user-config-store.js";
 import {
   createPluginCommand,
   type PluginManagementCommandService,
@@ -106,6 +112,7 @@ const OVERRIDDEN_BUILTIN_COMMANDS = new Set([
   "compact",
   "init",
   "doctor",
+  "provider",
   "mcp",
   "thinking",
   "agents",
@@ -140,6 +147,11 @@ export interface PicoCommandRegistryOptions {
   /** TUI 专用系统凭证库；导入仅从进程环境读取，命令参数永不接收 secret。 */
   credentialVault?: CredentialVault;
   credentialEnv?: Readonly<Record<string, string | undefined>>;
+  /** Effective startup snapshot used only for source/status diagnostics. */
+  effectiveConfig?: EffectiveConfigSnapshot;
+  providerCredentialStatuses?: Readonly<Record<string, EffectiveProviderCredentialStatus>>;
+  /** Injectable durable user store for tests and alternate PICO_HOME hosts. */
+  userConfigStore?: UserConfigStore;
   /** TaskHostRuntime 不可用时的宿主诊断；TUI 仍可在非 Git 目录运行。 */
   taskRuntimeDiagnostic?: string;
   /** 可注入的只读存储诊断器；默认扫描当前 workspace 和全局 File History。 */
@@ -211,6 +223,7 @@ export async function createPicoCommandRegistry(
     createInitCommand(options),
     ...(options.hookCommands ?? []),
     createDoctorCommand(options),
+    createProviderCommand(options),
     createModelCommand(settings, options.modelRouter),
     createAddDirectoryCommand(settings, options.additionalDirectoryManager),
     createThinkingCommand(settings, options.modelRouter),
@@ -662,6 +675,26 @@ function createDoctorCommand(options: PicoCommandRegistryOptions): SlashCommand 
             : {}),
           ...(options.session ? { memoryStatus: options.session.memoryStatus } : {}),
           ...(options.storageDoctor ? { storageDoctor: options.storageDoctor } : {}),
+          ...(options.effectiveConfig
+            ? {
+                configuration: {
+                  defaultModelRouteId: options.effectiveConfig.defaultModelRouteId,
+                  defaultSource: options.effectiveConfig.sources["defaults.modelRouteId"],
+                  providerSources: Object.fromEntries(
+                    Object.keys(options.effectiveConfig.providers).map((id) => [
+                      id,
+                      options.effectiveConfig?.sources[`providers.${id}`] ?? "unknown",
+                    ]),
+                  ),
+                  credentialStates: Object.fromEntries(
+                    Object.entries(options.providerCredentialStatuses ?? {}).map(([id, status]) => [
+                      id,
+                      status.state,
+                    ]),
+                  ),
+                },
+              }
+            : {}),
         });
         return { type: "local", action: "message", message: report.output, data: report };
       }
@@ -687,6 +720,316 @@ function createDoctorCommand(options: PicoCommandRegistryOptions): SlashCommand 
       }
     },
   };
+}
+
+function createProviderCommand(options: PicoCommandRegistryOptions): SlashCommand {
+  const store = options.userConfigStore ?? new UserConfigStore({ picoHome: options.picoHome });
+  const env = options.credentialEnv ?? process.env;
+  return {
+    name: "provider",
+    description: "Manage shared user providers without exposing credentials in command arguments",
+    usage:
+      "/provider [list | import-env <id> [--confirm] | default <provider/model> | delete <id>]",
+    argumentHint: "[list | import-env | default | delete]",
+    category: "model",
+    kind: "local",
+    availability: "idle",
+    execute: async (input): Promise<LocalCommandResult> => {
+      const [subcommand = "list", first, confirmation, ...rest] = input.argv;
+      if (rest.length > 0) return providerUsage();
+      try {
+        if (subcommand === "list" && first === undefined && confirmation === undefined) {
+          return await listUserProviders(store, options, env);
+        }
+        if (subcommand === "import-env") {
+          if (!first || (confirmation !== undefined && confirmation !== "--confirm")) {
+            return providerUsage();
+          }
+          return await importEnvironmentProvider({
+            providerId: first,
+            confirmed: confirmation === "--confirm",
+            providerKind: options.provider,
+            store,
+            env,
+            vault: options.credentialVault,
+          });
+        }
+        if (subcommand === "default" && first && confirmation === undefined) {
+          return await setDefaultUserProvider(store, first);
+        }
+        if (subcommand === "delete" && first && confirmation === undefined) {
+          return await deleteUserProvider(store, first, options.credentialVault);
+        }
+        return providerUsage();
+      } catch (error) {
+        return {
+          type: "local",
+          action: "message",
+          message: `Provider command failed: ${safeProviderError(error)}`,
+        };
+      }
+    },
+  };
+}
+
+async function listUserProviders(
+  store: UserConfigStore,
+  options: PicoCommandRegistryOptions,
+  env: Readonly<Record<string, string | undefined>>,
+): Promise<LocalCommandResult> {
+  const snapshot = await store.read();
+  const effective = options.effectiveConfig;
+  const providers = Object.fromEntries(
+    Object.entries(effective?.providers ?? {}).filter(
+      ([id]) => effective?.sources[`providers.${id}`] !== "user",
+    ),
+  );
+  Object.assign(providers, snapshot.config.providers);
+  const entries = Object.entries(providers);
+  if (entries.length === 0) {
+    return {
+      type: "local",
+      action: "message",
+      message:
+        "No providers configured. Set complete LLM_* variables, then run /provider import-env <id> to preview an import.",
+    };
+  }
+  const lines = await Promise.all(
+    entries.map(async ([id, provider]) => {
+      const source = snapshot.config.providers[id]
+        ? "user"
+        : (effective?.sources[`providers.${id}`] ?? "unknown");
+      const state = await providerCredentialState(id, provider, source, options, env);
+      const effectiveDefault =
+        effective?.sources["defaults.modelRouteId"] === "user"
+          ? undefined
+          : effective?.defaultModelRouteId;
+      const defaultMarker =
+        (snapshot.config.defaults?.modelRouteId ?? effectiveDefault)?.startsWith(`${id}/`) === true
+          ? " · default"
+          : "";
+      return `${id} · ${provider.protocol} · ${source} · credential=${state}${defaultMarker}\n  ${provider.baseURL}\n  models: ${provider.models.join(", ") || "discovery"}`;
+    }),
+  );
+  return { type: "local", action: "message", message: lines.join("\n") };
+}
+
+async function providerCredentialState(
+  id: string,
+  provider: ModelProviderConfig,
+  source: string,
+  options: PicoCommandRegistryOptions,
+  env: Readonly<Record<string, string | undefined>>,
+): Promise<string> {
+  if (firstCredential(env[provider.apiKeyEnv])) return "environment";
+  if (source === "user" && options.credentialVault) {
+    if (!options.credentialVault.capability().available) return "unsupported";
+    const ref = credentialRefForProvider({
+      providerId: id,
+      protocol: provider.protocol,
+      baseURL: provider.baseURL,
+    });
+    return (await options.credentialVault.has(ref)) ? "keychain" : "missing";
+  }
+  return options.providerCredentialStatuses?.[id]?.state ?? "missing";
+}
+
+async function importEnvironmentProvider(input: {
+  providerId: string;
+  confirmed: boolean;
+  providerKind: ProviderKind;
+  store: UserConfigStore;
+  env: Readonly<Record<string, string | undefined>>;
+  vault?: CredentialVault;
+}): Promise<LocalCommandResult> {
+  if (!/^[^/\s]+$/u.test(input.providerId)) {
+    return providerMessage("Provider ID cannot contain whitespace or a slash.");
+  }
+  const baseURL = input.env["LLM_BASE_URL"]?.trim();
+  const defaultModel = input.env["LLM_MODEL"]?.trim();
+  const apiKeyEnv = firstCredential(input.env["LLM_API_KEYS"]) ? "LLM_API_KEYS" : "LLM_API_KEY";
+  const secret = firstCredential(input.env[apiKeyEnv]);
+  if (!baseURL || !defaultModel || !secret) {
+    return providerMessage(
+      "Import unavailable: LLM_BASE_URL, LLM_MODEL and LLM_API_KEY[S] must all be set in this process.",
+    );
+  }
+  const models = uniqueProviderModels([
+    defaultModel,
+    ...splitProviderModels(input.env["LLM_MODELS"]),
+  ]);
+  const provider: ModelProviderConfig = {
+    protocol: input.providerKind,
+    baseURL: normalizeProviderEndpoint(baseURL),
+    apiKeyEnv,
+    models,
+    discoverModels: input.providerKind === "openai",
+  };
+  if (!input.confirmed) {
+    return providerMessage(
+      [
+        `Import preview for ${input.providerId}:`,
+        `protocol: ${provider.protocol}`,
+        `endpoint: ${provider.baseURL}`,
+        `models: ${provider.models.join(", ")}`,
+        "credential: current process environment -> OS credential vault (value hidden)",
+        `Confirm with: /provider import-env ${input.providerId} --confirm`,
+      ].join("\n"),
+    );
+  }
+  if (!input.vault?.capability().available) {
+    return providerMessage("Import unavailable: no supported OS credential vault is available.");
+  }
+
+  const snapshot = await input.store.read();
+  const existing = snapshot.config.providers[input.providerId];
+  if (existing && !sameProviderAuthority(existing, provider)) {
+    return providerMessage(
+      `Provider ${input.providerId} already uses a different protocol or endpoint; delete it explicitly before importing.`,
+    );
+  }
+  const defaultRoute = `${input.providerId}/${defaultModel}`;
+  const next: PicoUserConfig = {
+    ...snapshot.config,
+    defaults: {
+      ...snapshot.config.defaults,
+      modelRouteId: snapshot.config.defaults?.modelRouteId ?? defaultRoute,
+    },
+    providers: { ...snapshot.config.providers, [input.providerId]: provider },
+  };
+  await input.store.write(next, { expectedRevision: snapshot.revision });
+  try {
+    await importProviderCredential({
+      provider: {
+        providerId: input.providerId,
+        protocol: provider.protocol,
+        baseURL: provider.baseURL,
+      },
+      secret,
+      vault: input.vault,
+    });
+  } catch {
+    return providerMessage(
+      `Provider ${input.providerId} configuration was saved, but the OS vault rejected the credential update. It remains visible; retry the import after fixing the vault.`,
+    );
+  }
+  return providerMessage(
+    `Provider ${input.providerId} imported into shared user configuration. Credential stored in the OS vault; restart Pico to refresh the active model catalog.`,
+  );
+}
+
+async function setDefaultUserProvider(
+  store: UserConfigStore,
+  routeId: string,
+): Promise<LocalCommandResult> {
+  const separator = routeId.indexOf("/");
+  if (separator <= 0 || separator === routeId.length - 1) return providerUsage();
+  const providerId = routeId.slice(0, separator);
+  const model = routeId.slice(separator + 1);
+  const snapshot = await store.read();
+  const provider = snapshot.config.providers[providerId];
+  if (!provider || !provider.models.includes(model)) {
+    return providerMessage(
+      `Cannot set default ${routeId}: it is not an explicit model in the shared user provider registry.`,
+    );
+  }
+  await store.write(
+    {
+      ...snapshot.config,
+      defaults: { ...snapshot.config.defaults, modelRouteId: routeId },
+    },
+    { expectedRevision: snapshot.revision },
+  );
+  return providerMessage(`Shared default model set to ${routeId}. Restart Pico to apply it.`);
+}
+
+async function deleteUserProvider(
+  store: UserConfigStore,
+  providerId: string,
+  vault: CredentialVault | undefined,
+): Promise<LocalCommandResult> {
+  if (!/^[^/\s]+$/u.test(providerId)) return providerUsage();
+  const snapshot = await store.read();
+  const provider = snapshot.config.providers[providerId];
+  if (!provider) return providerMessage(`Shared user provider ${providerId} does not exist.`);
+  const providers = { ...snapshot.config.providers };
+  delete providers[providerId];
+  const previousDefault = snapshot.config.defaults?.modelRouteId;
+  const clearDefault = previousDefault?.startsWith(`${providerId}/`) === true;
+  const defaults = clearDefault
+    ? { ...snapshot.config.defaults, modelRouteId: undefined }
+    : snapshot.config.defaults;
+  if (vault?.capability().available) {
+    const ref = credentialRefForProvider({
+      providerId,
+      protocol: provider.protocol,
+      baseURL: provider.baseURL,
+    });
+    try {
+      if (await vault.has(ref)) await vault.delete(ref);
+    } catch {
+      return providerMessage(
+        `Shared user provider ${providerId} was not deleted because its OS vault credential could not be removed. Fix the vault and retry.`,
+      );
+    }
+  }
+  await store.write(
+    {
+      ...snapshot.config,
+      ...(defaults ? { defaults } : {}),
+      providers,
+    },
+    { expectedRevision: snapshot.revision },
+  );
+  return providerMessage(`Shared user provider ${providerId} deleted.`);
+}
+
+function providerUsage(): LocalCommandResult {
+  return providerMessage(
+    "Usage: /provider [list | import-env <id> [--confirm] | default <provider/model> | delete <id>]",
+  );
+}
+
+function providerMessage(message: string): LocalCommandResult {
+  return { type: "local", action: "message", message };
+}
+
+function safeProviderError(error: unknown): string {
+  if (
+    error instanceof Error &&
+    (error.name === "UserConfigRevisionConflictError" ||
+      error.name === "UserConfigLockTimeoutError")
+  ) {
+    return error.message;
+  }
+  return error instanceof Error
+    ? error.message.replace(/(api[_-]?key|token|secret)\s*[=:]\s*\S+/giu, "$1=<redacted>")
+    : "unknown error";
+}
+
+function sameProviderAuthority(left: ModelProviderConfig, right: ModelProviderConfig): boolean {
+  return (
+    left.protocol === right.protocol &&
+    normalizeProviderEndpoint(left.baseURL) === normalizeProviderEndpoint(right.baseURL)
+  );
+}
+
+function firstCredential(value: string | undefined): string | undefined {
+  return value
+    ?.split(",")
+    .map((item) => item.trim())
+    .find(Boolean);
+}
+
+function splitProviderModels(value: string | undefined): string[] {
+  return (value ?? "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function uniqueProviderModels(models: readonly string[]): string[] {
+  return [...new Set(models.map((model) => model.trim()).filter(Boolean))];
 }
 
 function createModelCommand(settings: SessionSettings, router?: ModelRouter): SlashCommand {
