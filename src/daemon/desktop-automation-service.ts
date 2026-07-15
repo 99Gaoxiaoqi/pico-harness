@@ -1,4 +1,4 @@
-import type { CredentialRef } from "../provider/credential-vault.js";
+import { parseAnyCredentialRef, type CredentialRef } from "../provider/credential-vault.js";
 import { CronService } from "../tasks/cron-service.js";
 import { RuntimeConflictError } from "../tasks/runtime-store.js";
 import type { CronJobRecord, CronRunRecord, YoloPolicySnapshot } from "../tasks/runtime-types.js";
@@ -144,6 +144,27 @@ export class DesktopAutomationService {
     );
   }
 
+  /**
+   * Provider dependencies include durable enabled jobs and queued/running Cron
+   * Runs. A disabled job therefore keeps its Provider alive until a manual Run
+   * reaches a terminal state.
+   */
+  providerReferences(
+    providerId: string,
+    workspacePaths: readonly string[],
+  ): AutomationProviderReference[] {
+    const references = new Map<string, AutomationProviderReference>();
+    for (const reference of this.enabledReferences(workspacePaths)) {
+      if (providerIdForReference(reference) !== providerId) continue;
+      references.set(`${reference.workspacePath}:${reference.jobId}`, reference);
+    }
+    for (const reference of this.activeRunReferences(workspacePaths)) {
+      if (providerIdForReference(reference) !== providerId) continue;
+      references.set(`${reference.workspacePath}:${reference.jobId}`, reference);
+    }
+    return [...references.values()];
+  }
+
   enabledReferences(workspacePaths: readonly string[]): EnabledAutomationReference[] {
     const references: EnabledAutomationReference[] = [];
     for (const workspacePath of workspacePaths) {
@@ -153,6 +174,27 @@ export class DesktopAutomationService {
             workspacePath,
             jobId: job.cronJobId,
             ...(job.modelRouteId ? { modelRouteId: job.modelRouteId } : {}),
+            ...(job.credentialRef ? { credentialRef: job.credentialRef } : {}),
+          });
+        }
+      });
+    }
+    return references;
+  }
+
+  activeRunReferences(workspacePaths: readonly string[]): ActiveAutomationReference[] {
+    const references: ActiveAutomationReference[] = [];
+    for (const workspacePath of workspacePaths) {
+      this.withCron(workspacePath, (cron) => {
+        for (const run of cron.store.listActiveCronRuns(workspacePath)) {
+          const job = cron.store.getCronJob(run.cronJobId);
+          if (!job) continue;
+          references.push({
+            workspacePath,
+            jobId: job.cronJobId,
+            runId: run.cronRunId,
+            ...(job.modelRouteId ? { modelRouteId: job.modelRouteId } : {}),
+            ...(job.credentialRef ? { credentialRef: job.credentialRef } : {}),
           });
         }
       });
@@ -201,6 +243,25 @@ export interface EnabledAutomationReference {
   readonly workspacePath: string;
   readonly jobId: string;
   readonly modelRouteId?: string;
+  readonly credentialRef?: CredentialRef;
+}
+
+export interface ActiveAutomationReference extends EnabledAutomationReference {
+  readonly runId: string;
+}
+
+export type AutomationProviderReference = EnabledAutomationReference | ActiveAutomationReference;
+
+function providerIdForReference(reference: AutomationProviderReference): string | undefined {
+  const routeProviderId = providerIdForRoute(reference.modelRouteId);
+  if (routeProviderId) return routeProviderId;
+  if (!reference.credentialRef) return undefined;
+  try {
+    const parsed = parseAnyCredentialRef(reference.credentialRef);
+    return parsed.version === "v2" ? parsed.providerId : providerIdForRoute(parsed.modelRouteId);
+  } catch {
+    return undefined;
+  }
 }
 
 function providerIdForRoute(modelRouteId: string | undefined): string | undefined {

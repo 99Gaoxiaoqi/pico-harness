@@ -43,14 +43,15 @@ import { resolveProviderProfile } from "../provider/profile.js";
 import { type ModelProviderConfig, type ModelRouter } from "../provider/model-router.js";
 import type { EffectiveProviderCredentialStatus } from "../provider/effective-model-runtime.js";
 import {
-  credentialRefForModelRoute,
   credentialRefForProvider,
-  importModelRouteCredential,
-  importProviderCredential,
   normalizeProviderEndpoint,
-  type CredentialRef,
   type CredentialVault,
 } from "../provider/credential-vault.js";
+import {
+  importAutomationCredential,
+  resolveAutomationCredentialTarget,
+  type AutomationCredentialTarget,
+} from "../provider/automation-credential.js";
 import { loadApiKeys } from "../provider/config.js";
 import { initializeProjectEntrypoints } from "./project-initializer.js";
 import { buildDefaultToolRegistry } from "../tools/default-registry.js";
@@ -96,7 +97,7 @@ import {
 import type { StorageDoctor } from "../storage/storage-doctor.js";
 import { runWorkspaceDoctor } from "../diagnostics/workspace-doctor.js";
 import type { EffectiveConfigSnapshot } from "./effective-config.js";
-import { UserConfigStore, type PicoUserConfig } from "./user-config-store.js";
+import { UserConfigStore } from "./user-config-store.js";
 import {
   createPluginCommand,
   type PluginManagementCommandService,
@@ -762,7 +763,7 @@ function createProviderCommand(options: PicoCommandRegistryOptions): SlashComman
             providerKind: options.provider,
             store,
             env,
-            vault: options.credentialVault,
+            daemon: options.cronDaemonBridge,
           });
         }
         if (subcommand === "default" && first && confirmation === undefined) {
@@ -854,7 +855,7 @@ async function importEnvironmentProvider(input: {
   providerKind: ProviderKind;
   store: UserConfigStore;
   env: Readonly<Record<string, string | undefined>>;
-  vault?: CredentialVault;
+  daemon?: CronDaemonBridge;
 }): Promise<LocalCommandResult> {
   if (!/^[^/\s]+$/u.test(input.providerId)) {
     return providerMessage("Provider ID cannot contain whitespace or a slash.");
@@ -891,10 +892,6 @@ async function importEnvironmentProvider(input: {
       ].join("\n"),
     );
   }
-  if (!input.vault?.capability().available) {
-    return providerMessage("Import unavailable: no supported OS credential vault is available.");
-  }
-
   const snapshot = await input.store.read();
   const existing = snapshot.config.providers[input.providerId];
   if (existing && !sameProviderAuthority(existing, provider)) {
@@ -902,33 +899,28 @@ async function importEnvironmentProvider(input: {
       `Provider ${input.providerId} already uses a different protocol or endpoint; delete it explicitly before importing.`,
     );
   }
-  const defaultRoute = `${input.providerId}/${defaultModel}`;
-  const next: PicoUserConfig = {
-    ...snapshot.config,
-    defaults: {
-      ...snapshot.config.defaults,
-      modelRouteId: snapshot.config.defaults?.modelRouteId ?? defaultRoute,
-    },
-    providers: { ...snapshot.config.providers, [input.providerId]: provider },
-  };
-  await input.store.write(next, { expectedRevision: snapshot.revision });
-  try {
-    await importProviderCredential({
-      provider: {
-        providerId: input.providerId,
-        protocol: provider.protocol,
-        baseURL: provider.baseURL,
-      },
-      secret,
-      vault: input.vault,
-    });
-  } catch {
+  if (!input.daemon?.importEnvironmentProvider) {
     return providerMessage(
-      `Provider ${input.providerId} configuration was saved, but the OS vault rejected the credential update. It remains visible; retry the import after fixing the vault.`,
+      "Local Runtime daemon is unavailable; Provider import is fail-closed so config and OS credentials cannot diverge.",
     );
   }
+  const result = await input.daemon.importEnvironmentProvider({
+    provider: {
+      id: input.providerId,
+      protocol: provider.protocol,
+      baseURL: provider.baseURL,
+      apiKeyEnv: provider.apiKeyEnv,
+      models: provider.models,
+      discoverModels: provider.discoverModels,
+    },
+    defaultModel,
+    secret,
+    expectedRevision: snapshot.revision,
+  });
   return providerMessage(
-    `Provider ${input.providerId} imported into shared user configuration. Credential stored in the OS vault; the update takes effect at the next session or run safe boundary. An in-flight run is never hot-swapped.`,
+    result.status === "imported"
+      ? `${result.message} 更新会在下一个 Session 或 Run 安全边界生效；运行中请求不会热切换。`
+      : result.message,
   );
 }
 
@@ -1802,7 +1794,7 @@ function createCronCommand(
               "Usage: /cron add [--tool-network=allow|disabled|allowlist:host1,host2] <minute> <hour> <day> <month> <weekday> <prompt>",
             );
           const [minute, hour, day, month, weekday, ...promptParts] = toolNetwork.args;
-          const credentialRef = await requireCronCredential(options, settings);
+          const credential = await requireCronCredential(options, settings);
           const allowedTools = filterBackgroundEligibleTools(
             settings.tools.map((tool) => tool.name),
           );
@@ -1813,7 +1805,8 @@ function createCronCommand(
             workspacePath: options.workDir,
             schedule: [minute, hour, day, month, weekday].join(" "),
             prompt: promptParts.join(" "),
-            credentialRef,
+            credentialRef: credential.target.ref,
+            modelRouteId: credential.route.id,
             enabled: false,
             policySnapshot: {
               mode: "yolo",
@@ -1889,41 +1882,57 @@ async function manageCronCredential(
   if (route.source === "legacy") {
     return "持久 Cron 不支持 legacy 环境变量路由；请先在 .pico/config.json 配置 provider。";
   }
-  const ref = credentialRefForModelRoute(route, options.workDir);
+  const target = await resolveCronCredentialTarget(options, route);
   if (action === "status") {
-    return `${capability.diagnostic}\n${route.id}: ${(await vault.has(ref)) ? "已导入" : "未导入"}`;
+    return `${capability.diagnostic}\n${route.id}: ${(await vault.has(target.ref)) ? "已导入" : "未导入"}`;
   }
   if (action !== "import") {
     return "Usage: /cron credential <status|import> [providerID/modelID]";
   }
-  await importModelRouteCredential({
+  await importAutomationCredential({
+    target,
     route,
     workspacePath: options.workDir,
     vault,
     env: options.credentialEnv ?? process.env,
   });
-  return `已将 ${route.apiKeyEnv} 安全导入系统凭证库，引用：${ref}`;
+  return `已将 ${route.apiKeyEnv} 安全导入系统凭证库，引用：${target.ref}`;
 }
 
 async function requireCronCredential(
   options: PicoCommandRegistryOptions,
   settings: SessionSettings,
-): Promise<CredentialRef> {
+): Promise<{
+  readonly route: import("../provider/model-router.js").ModelRoute;
+  readonly target: AutomationCredentialTarget;
+}> {
   const vault = options.credentialVault;
   if (!vault?.capability().available) {
     throw new Error(vault?.capability().diagnostic ?? "系统凭证库未配置");
   }
   const route = options.modelRouter?.require(settings.modelRouteId);
-  if (!route || route.source === "legacy") {
-    throw new Error(
-      "持久 Cron 需要 .pico/config.json 中的 providerID/modelID 路由，不能依赖 shell legacy 配置。",
-    );
-  }
-  const ref = credentialRefForModelRoute(route, options.workDir);
-  if (!(await vault.has(ref))) {
+  if (!route) throw new Error("当前没有可用模型路由。");
+  const target = await resolveCronCredentialTarget(options, route);
+  if (!(await vault.has(target.ref))) {
     throw new Error(`模型路由 ${route.id} 尚未导入系统凭证库；请先执行 /cron credential import。`);
   }
-  return ref;
+  return { route, target };
+}
+
+async function resolveCronCredentialTarget(
+  options: PicoCommandRegistryOptions,
+  route: import("../provider/model-router.js").ModelRoute,
+): Promise<AutomationCredentialTarget> {
+  const store = options.userConfigStore ?? new UserConfigStore({ picoHome: options.picoHome });
+  const userProvider = (await store.read()).config.providers[route.providerId];
+  return resolveAutomationCredentialTarget({
+    route,
+    workspacePath: options.workDir,
+    ...(userProvider ? { userProvider } : {}),
+    ...(options.effectiveConfig?.sources[`providers.${route.providerId}`]
+      ? { configSource: options.effectiveConfig.sources[`providers.${route.providerId}`] }
+      : {}),
+  });
 }
 
 async function registerCronWorkspace(
