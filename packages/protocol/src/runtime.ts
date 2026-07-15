@@ -131,6 +131,8 @@ export type RuntimeMethodMap = {
   readonly "approval.respond": {
     readonly params: WorkspaceParams & {
       readonly approvalId: ApprovalId;
+      readonly runId?: RunId;
+      readonly sessionId?: SessionId;
       readonly decision: "allow_once" | "allow_session" | "deny";
       readonly reason?: string;
       readonly idempotencyKey?: string;
@@ -140,6 +142,8 @@ export type RuntimeMethodMap = {
   readonly "prompt.respond": {
     readonly params: WorkspaceParams & {
       readonly promptId: PromptId;
+      readonly runId?: RunId;
+      readonly sessionId?: SessionId;
       readonly answer: JsonValue;
       readonly idempotencyKey?: string;
     };
@@ -305,7 +309,7 @@ export type RuntimeMethodMap = {
     readonly result: { readonly events: readonly RuntimeEvent[] };
   };
   readonly "events.subscribe": {
-    readonly params: { readonly workspacePath?: string; readonly afterEventId?: string };
+    readonly params: WorkspaceParams & { readonly afterEventId?: string };
     readonly result: {
       readonly subscribed: true;
       readonly events: readonly RuntimeEvent[];

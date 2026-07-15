@@ -13,6 +13,7 @@ import {
   JOB_EXECUTION_CLASSES,
   JOB_STATUSES,
   CRON_RUN_STATUSES,
+  DAEMON_RUN_STATUSES,
   MERGE_REQUEST_STATUSES,
   PROVIDER_CALL_PURPOSES,
   PROVIDER_CALL_STATUSES,
@@ -21,6 +22,8 @@ import {
   type CronJobRecord,
   type CronRunRecord,
   type CronRunStatus,
+  type DaemonRunRecord,
+  type DaemonRunStatus,
   type JobAttemptRecord,
   type JobCommandKind,
   type JobCommandRecord,
@@ -56,6 +59,12 @@ export interface RuntimeStoreOptions {
   workDir: string;
   databasePath?: string;
   now?: () => number;
+}
+
+export interface DaemonIdempotentCommandResult<Result extends Record<string, unknown>> {
+  result: Result;
+  replayed: boolean;
+  resourceId?: string;
 }
 
 export interface CreateJobInput {
@@ -317,6 +326,33 @@ interface RuntimeEventRow {
   cron_run_id: string | null;
   payload_json: string | null;
   created_at: number;
+}
+
+interface DaemonRunRow {
+  run_id: string;
+  workspace_path: string;
+  session_id: string | null;
+  checkpoint_id: string | null;
+  description: string;
+  status: string;
+  started_at: number;
+  updated_at: number;
+  finished_at: number | null;
+  error: string | null;
+  result_json: string | null;
+  version: number;
+}
+
+interface DaemonCommandRow {
+  command_type: string;
+  idempotency_key: string;
+  request_hash: string;
+  request_json: string;
+  status: string;
+  result_json: string | null;
+  resource_id: string | null;
+  created_at: number;
+  updated_at: number;
 }
 
 /** SQLite control plane for recoverable tasks; Agent events share the runtime database. */
@@ -1244,6 +1280,185 @@ export class RuntimeStore {
     return this.insertRuntimeEvent(input);
   }
 
+  executeIdempotentDaemonCommand<Result extends Record<string, unknown>>(
+    input: {
+      commandType: string;
+      idempotencyKey: string;
+      request: Record<string, unknown>;
+    },
+    execute: () => { result: Result; resourceId?: string },
+  ): DaemonIdempotentCommandResult<Result> {
+    const commandType = input.commandType.trim();
+    const idempotencyKey = input.idempotencyKey.trim();
+    if (!commandType) throw new Error("daemon commandType 必须是非空字符串");
+    if (!idempotencyKey) throw new Error("daemon idempotencyKey 必须是非空字符串");
+    const requestJson = canonicalJson(input.request);
+    const requestHash = createHash("sha256").update(requestJson).digest("hex");
+
+    const executeOnce = this.db.transaction(() => {
+      const existing = this.db
+        .prepare(
+          `SELECT * FROM daemon_commands
+           WHERE command_type = ? AND idempotency_key = ?`,
+        )
+        .get(commandType, idempotencyKey) as DaemonCommandRow | undefined;
+      if (existing) {
+        if (existing.request_hash !== requestHash || existing.request_json !== requestJson) {
+          throw new RuntimeConflictError(
+            `${commandType} 的幂等键 ${idempotencyKey} 已用于其他参数`,
+          );
+        }
+        const result = parseJsonRecord(existing.result_json);
+        if (existing.status !== "completed" || !result) {
+          throw new RuntimeConflictError(
+            `${commandType} 的幂等键 ${idempotencyKey} 尚未完成持久化`,
+          );
+        }
+        return compact({
+          result: result as Result,
+          replayed: true,
+          resourceId: nullToUndefined(existing.resource_id),
+        });
+      }
+
+      const now = this.now();
+      this.db
+        .prepare(
+          `INSERT INTO daemon_commands (
+             command_type, idempotency_key, request_hash, request_json,
+             status, created_at, updated_at
+           ) VALUES (?, ?, ?, ?, 'pending', ?, ?)`,
+        )
+        .run(commandType, idempotencyKey, requestHash, requestJson, now, now);
+      const executed = execute();
+      const result = this.db
+        .prepare(
+          `UPDATE daemon_commands
+           SET status = 'completed', result_json = ?, resource_id = ?, updated_at = ?
+           WHERE command_type = ? AND idempotency_key = ? AND status = 'pending'`,
+        )
+        .run(
+          stringifyJson(executed.result),
+          executed.resourceId ?? null,
+          this.now(),
+          commandType,
+          idempotencyKey,
+        );
+      if (result.changes !== 1) {
+        throw new RuntimeConflictError(`${commandType} 的幂等键 ${idempotencyKey} 完成 CAS 失败`);
+      }
+      return compact({
+        result: executed.result,
+        replayed: false,
+        resourceId: executed.resourceId,
+      });
+    });
+    return executeOnce();
+  }
+
+  upsertDaemonRun(input: DaemonRunRecord): DaemonRunRecord {
+    const persist = this.db.transaction(() => {
+      const existing = this.db
+        .prepare("SELECT * FROM daemon_runs WHERE run_id = ?")
+        .get(input.runId) as DaemonRunRow | undefined;
+      if (existing && existing.workspace_path !== input.workspacePath) {
+        throw new RuntimeConflictError(`Run ID ${input.runId} 已属于其他工作区`);
+      }
+      this.db
+        .prepare(
+          `INSERT INTO daemon_runs (
+             run_id, workspace_path, session_id, checkpoint_id, description, status,
+             started_at, updated_at, finished_at, error, result_json, version
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(run_id) DO UPDATE SET
+             session_id = excluded.session_id,
+             checkpoint_id = excluded.checkpoint_id,
+             description = excluded.description,
+             status = excluded.status,
+             started_at = excluded.started_at,
+             updated_at = excluded.updated_at,
+             finished_at = excluded.finished_at,
+             error = excluded.error,
+             result_json = excluded.result_json,
+             version = excluded.version
+           WHERE excluded.version >= daemon_runs.version`,
+        )
+        .run(
+          input.runId,
+          input.workspacePath,
+          input.sessionId ?? null,
+          input.checkpointId ?? null,
+          input.description,
+          input.status,
+          input.startedAt,
+          input.updatedAt,
+          input.finishedAt ?? null,
+          input.error ?? null,
+          stringifyJson(input.result),
+          input.version,
+        );
+      return this.getDaemonRun(input.workspacePath, input.runId)!;
+    });
+    return persist();
+  }
+
+  getDaemonRun(workspacePath: string, runId: string): DaemonRunRecord | undefined {
+    const row = this.db
+      .prepare("SELECT * FROM daemon_runs WHERE workspace_path = ? AND run_id = ?")
+      .get(workspacePath, runId) as DaemonRunRow | undefined;
+    return row ? mapDaemonRun(row) : undefined;
+  }
+
+  listDaemonRuns(input: { workspacePath: string; sessionId?: string }): DaemonRunRecord[] {
+    const clauses = ["workspace_path = ?"];
+    const params: string[] = [input.workspacePath];
+    if (input.sessionId !== undefined) {
+      clauses.push("session_id = ?");
+      params.push(input.sessionId);
+    }
+    return (
+      this.db
+        .prepare(
+          `SELECT * FROM daemon_runs
+           WHERE ${clauses.join(" AND ")}
+           ORDER BY started_at, run_id`,
+        )
+        .all(...params) as DaemonRunRow[]
+    ).map(mapDaemonRun);
+  }
+
+  recoverInterruptedDaemonRuns(
+    workspacePath: string,
+    reason = "daemon restarted before the Run reached a terminal state",
+  ): DaemonRunRecord[] {
+    const recover = this.db.transaction(() => {
+      const activeStatuses = DAEMON_RUN_STATUSES.filter(
+        (status) =>
+          status === "running" ||
+          status === "pause_requested" ||
+          status === "paused" ||
+          status === "cancelling",
+      );
+      const rows = this.db
+        .prepare(
+          `SELECT run_id FROM daemon_runs
+           WHERE workspace_path = ? AND status IN (${sqlValues(activeStatuses)})`,
+        )
+        .all(workspacePath) as Array<{ run_id: string }>;
+      if (rows.length === 0) return [];
+      const now = this.now();
+      this.db
+        .prepare(
+          `UPDATE daemon_runs
+           SET status = 'failed', error = ?, updated_at = ?, finished_at = ?, version = version + 1
+           WHERE workspace_path = ? AND status IN (${sqlValues(activeStatuses)})`,
+        )
+        .run(reason, now, now, workspacePath);
+      return rows.map((row) => this.getDaemonRun(workspacePath, row.run_id)!);
+    });
+    return recover();
+  }
+
   insertCommand(input: {
     commandId: string;
     jobId: string;
@@ -1808,6 +2023,16 @@ export class RuntimeStore {
           `runtime.sqlite schema ${current} 新于当前支持版本 ${RUNTIME_SCHEMA_VERSION}`,
         );
       }
+      if (current === 6) {
+        const migration = this.db
+          .prepare("SELECT name FROM schema_migrations WHERE version = 6")
+          .get() as { name: string } | undefined;
+        if (migration?.name !== "daemon_run_projection_and_idempotency") {
+          throw new Error(
+            `runtime.sqlite schema 6 migration ${migration?.name ?? "缺失"} 不受支持`,
+          );
+        }
+      }
       if (current < 1) {
         this.db.exec(SCHEMA_V1);
         this.db
@@ -1838,19 +2063,27 @@ export class RuntimeStore {
           .prepare("INSERT INTO schema_migrations(version, name, applied_at) VALUES (5, ?, ?)")
           .run("provider_call_hook_purpose", this.now());
       }
+      if (current < 6) {
+        this.db.exec(SCHEMA_V6);
+        this.db
+          .prepare("INSERT INTO schema_migrations(version, name, applied_at) VALUES (6, ?, ?)")
+          .run("daemon_run_projection_and_idempotency", this.now());
+      }
       this.ensureCronJobDisplayNameColumn();
     });
     migrate();
   }
 
   private normalizeDesktopPreviewMigration(): void {
-    const futureMigrations = this.db
-      .prepare("SELECT version, name FROM schema_migrations WHERE version > ? ORDER BY version")
-      .all(RUNTIME_SCHEMA_VERSION) as Array<{ version: number; name: string }>;
+    const previewMigration = this.db
+      .prepare("SELECT version, name FROM schema_migrations WHERE version = 6")
+      .get() as { version: number; name: string } | undefined;
+    const futureMigration = this.db
+      .prepare("SELECT version FROM schema_migrations WHERE version > 6 ORDER BY version LIMIT 1")
+      .get() as { version: number } | undefined;
     if (
-      futureMigrations.length !== 1 ||
-      futureMigrations[0]?.version !== 6 ||
-      futureMigrations[0].name !== "cron_job_display_name" ||
+      futureMigration ||
+      previewMigration?.name !== "cron_job_display_name" ||
       !hasCronJobDisplayNameColumn(this.db)
     ) {
       return;
@@ -2261,6 +2494,42 @@ const SCHEMA_V5 = `
   CREATE INDEX provider_calls_job_idx ON provider_calls(job_id, created_at);
 `;
 
+const SCHEMA_V6 = `
+  CREATE TABLE IF NOT EXISTS daemon_runs (
+    run_id TEXT PRIMARY KEY,
+    workspace_path TEXT NOT NULL,
+    session_id TEXT,
+    checkpoint_id TEXT,
+    description TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN (${sqlValues(DAEMON_RUN_STATUSES)})),
+    started_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    finished_at INTEGER,
+    error TEXT,
+    result_json TEXT,
+    version INTEGER NOT NULL CHECK (version > 0)
+  );
+  CREATE INDEX IF NOT EXISTS daemon_runs_workspace_started_idx
+    ON daemon_runs(workspace_path, started_at, run_id);
+  CREATE INDEX IF NOT EXISTS daemon_runs_workspace_session_idx
+    ON daemon_runs(workspace_path, session_id, started_at);
+
+  CREATE TABLE IF NOT EXISTS daemon_commands (
+    command_type TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    request_hash TEXT NOT NULL,
+    request_json TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'completed')),
+    result_json TEXT,
+    resource_id TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY(command_type, idempotency_key)
+  );
+  CREATE INDEX IF NOT EXISTS daemon_commands_resource_idx
+    ON daemon_commands(command_type, resource_id);
+`;
+
 function mapJob(row: JobRow): JobRecord {
   return compact({
     jobId: row.job_id,
@@ -2487,6 +2756,23 @@ function mapRuntimeEvent(row: RuntimeEventRow): RuntimeEventRecord {
   });
 }
 
+function mapDaemonRun(row: DaemonRunRow): DaemonRunRecord {
+  return compact({
+    runId: row.run_id,
+    workspacePath: row.workspace_path,
+    sessionId: nullToUndefined(row.session_id),
+    checkpointId: nullToUndefined(row.checkpoint_id),
+    description: row.description,
+    status: row.status as DaemonRunStatus,
+    startedAt: row.started_at,
+    updatedAt: row.updated_at,
+    finishedAt: nullToUndefined(row.finished_at),
+    error: nullToUndefined(row.error),
+    result: parseJsonRecord(row.result_json),
+    version: row.version,
+  });
+}
+
 function parseYoloPolicySnapshot(value: string): YoloPolicySnapshot {
   const parsed = JSON.parse(value) as unknown;
   return parseBackgroundYoloPolicySnapshot(parsed, {
@@ -2496,6 +2782,21 @@ function parseYoloPolicySnapshot(value: string): YoloPolicySnapshot {
 
 function stringifyJson(value: Record<string, unknown> | undefined): string | null {
   return value ? JSON.stringify(value) : null;
+}
+
+function canonicalJson(value: Record<string, unknown>): string {
+  return JSON.stringify(sortJson(value));
+}
+
+function sortJson(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortJson);
+  if (!isRecord(value)) return value;
+  return Object.fromEntries(
+    Object.keys(value)
+      .sort()
+      .filter((key) => value[key] !== undefined)
+      .map((key) => [key, sortJson(value[key])]),
+  );
 }
 
 function parseJsonRecord(value: string | null): Record<string, unknown> | undefined {

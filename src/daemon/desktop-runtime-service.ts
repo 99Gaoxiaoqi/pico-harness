@@ -57,14 +57,26 @@ export interface DesktopRuntimeServiceOptions {
 
 export interface DesktopRuntimeInteractions {
   respondApproval(input: {
+    readonly workspacePath: string;
     readonly approvalId: string;
+    readonly runId?: string;
+    readonly sessionId?: string;
     readonly decision: "allow_once" | "allow_session" | "deny";
     readonly reason?: string;
-  }): { readonly accepted: boolean; readonly alreadyResolved: boolean };
-  respondPrompt(input: { readonly promptId: string; readonly answer: JsonValue }): {
-    readonly accepted: boolean;
-    readonly alreadyResolved: boolean;
-  };
+    readonly idempotencyKey?: string;
+  }):
+    | { readonly accepted: boolean; readonly alreadyResolved: boolean }
+    | Promise<{ readonly accepted: boolean; readonly alreadyResolved: boolean }>;
+  respondPrompt(input: {
+    readonly workspacePath: string;
+    readonly promptId: string;
+    readonly runId?: string;
+    readonly sessionId?: string;
+    readonly answer: JsonValue;
+    readonly idempotencyKey?: string;
+  }):
+    | { readonly accepted: boolean; readonly alreadyResolved: boolean }
+    | Promise<{ readonly accepted: boolean; readonly alreadyResolved: boolean }>;
 }
 
 /**

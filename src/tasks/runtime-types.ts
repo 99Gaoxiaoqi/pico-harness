@@ -44,7 +44,19 @@ export const PROVIDER_CALL_PURPOSES = [
 export type ProviderCallPurpose = (typeof PROVIDER_CALL_PURPOSES)[number];
 
 /** runtime.sqlite 当前可读写 schema；向后兼容的可选列不单独提升版本。 */
-export const RUNTIME_SCHEMA_VERSION = 5;
+export const RUNTIME_SCHEMA_VERSION = 6;
+
+export const DAEMON_RUN_STATUSES = [
+  "running",
+  "pause_requested",
+  "paused",
+  "cancelling",
+  "succeeded",
+  "failed",
+  "cancelled",
+] as const;
+
+export type DaemonRunStatus = (typeof DAEMON_RUN_STATUSES)[number];
 
 export const PROVIDER_CALL_STATUSES = ["succeeded", "failed", "cancelled"] as const;
 export type ProviderCallStatus = (typeof PROVIDER_CALL_STATUSES)[number];
@@ -279,6 +291,22 @@ export interface RuntimeEventRecord {
   cronRunId?: string;
   payload?: Record<string, unknown>;
   createdAt: number;
+}
+
+/** Durable daemon projection used when the in-process workspace runtime is unavailable. */
+export interface DaemonRunRecord {
+  runId: string;
+  workspacePath: string;
+  sessionId?: string;
+  checkpointId?: string;
+  description: string;
+  status: DaemonRunStatus;
+  startedAt: number;
+  updatedAt: number;
+  finishedAt?: number;
+  error?: string;
+  result?: Record<string, unknown>;
+  version: number;
 }
 
 export interface CronRunWithJob {
