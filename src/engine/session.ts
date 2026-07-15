@@ -77,6 +77,7 @@ import { resolvePicoPaths } from "../paths/pico-paths.js";
 import { currentRuntimeRun, RuntimeRun } from "../runtime/runtime-run.js";
 import {
   RUNTIME_EVENT_SCHEMA_VERSION,
+  runtimeEventHasModelMessage,
   type RuntimeEventBase,
   type RuntimeEvent,
   type RuntimeHistoryRewoundEvent,
@@ -88,6 +89,7 @@ import {
   type RuntimeEventStoreAppendResult,
   type RuntimeEventStoreEntry,
   type RuntimeSessionManifest,
+  type RuntimeSessionProjectionSnapshot,
 } from "../runtime/runtime-event-store.js";
 import {
   projectRuntimeSessionMessageEntries,
@@ -259,6 +261,8 @@ export class Session implements SessionRuntimePersistence {
   private runtimeInitialization?: Promise<RuntimeSessionManifest>;
   private runtimeOwnership?: OwnerLease;
   private runtimeOwnershipPromise?: Promise<OwnerLease>;
+  private runtimeProjectionCursor?: SessionCursor;
+  private runtimeProjectionBranchId?: string;
   /** Session 发起的 RuntimeEvent 共用一条队列，保留调用顺序。 */
   private persistenceTail: Promise<void> = Promise.resolve();
   private compatibilityAppendTail: Promise<void> = Promise.resolve();
@@ -416,14 +420,16 @@ export class Session implements SessionRuntimePersistence {
     }
     try {
       const manifest = await this.ensureRuntimeSession();
-      const entries = await this.store.readSessionEntries(this.id);
+      const projection = await this.store.readSessionProjection(this.id);
+      if (!projection) throw new Error(`Runtime session ${this.id} disappeared during recovery`);
+      const entries = projection.entries;
       const events = entries.map(({ event }) => event);
       const runtime = projectRuntimeSessionState(events);
       this.createdAt = new Date(manifest.createdAt);
       this.persistedSettings = runtime.settings;
       this.persistedGoal = runtime.goal;
       this.restoreUsage(runtime.usage);
-      this.applyRuntimeHistoryProjection(entries);
+      this.applyRuntimeHistoryProjection(projection);
       await this.recoverRewindPointBindings(entries);
     } catch (error) {
       this.markWriteUncertain("Runtime session initialize/replay failed", error);
@@ -478,25 +484,66 @@ export class Session implements SessionRuntimePersistence {
     return acquisition;
   }
 
-  private applyRuntimeHistoryProjection(entries: readonly RuntimeEventStoreEntry[]): void {
-    this.history = projectRuntimeSessionMessages(entries.map(({ event }) => event));
+  private applyRuntimeHistoryProjection(projection: RuntimeSessionProjectionSnapshot): void {
+    this.history = projectRuntimeSessionMessages(projection.entries.map(({ event }) => event));
     this.deferredMessages = [];
     this.rebuildPendingToolState();
     this.rebuildToolResultMeta();
-    const cursor = runtimeCursorForEntries(this.id, entries);
+    const cursor = projection.cursor;
+    this.runtimeProjectionCursor = cursor ? { ...cursor } : undefined;
+    this.runtimeProjectionBranchId = projection.activeBranchId;
     this.conversationId = cursor ? `${cursor.logId}:${cursor.epoch}` : this.id;
-    const lastEvent = entries.at(-1)?.event;
+    const lastEvent = projection.entries.at(-1)?.event;
     this.updatedAt = lastEvent ? new Date(lastEvent.at) : this.createdAt;
     this.rebuildSearchIndex(cursor);
   }
 
-  private rebuildSearchIndex(cursor?: CommitReceipt["cursor"]): void {
-    if (cursor && this.searchStore.projectReplace) {
-      this.searchStore.projectReplace(this.id, this.history, cursor);
-    } else {
-      this.searchStore.replaceSession(this.id, this.history);
+  private async replayRuntimeHistoryProjection(): Promise<void> {
+    const store = this.store;
+    if (!store) throw new Error("Session persistence is disabled");
+    const projection = await store.readSessionProjection(this.id);
+    if (!projection) throw new Error(`Runtime session ${this.id} has no canonical projection`);
+    this.applyRuntimeHistoryProjection(projection);
+  }
+
+  private applyRuntimeHistoryProjectionDelta(
+    messages: readonly Message[],
+    cursor: SessionCursor,
+    activeBranchId: string,
+    updatedAt: string,
+  ): void {
+    for (const message of messages) {
+      this.history.push(message);
+      this.applyRuntimeMessageState(message);
     }
-    this.switchMemorySearchToInMemoryIfDegraded();
+    this.runtimeProjectionCursor = { ...cursor };
+    this.runtimeProjectionBranchId = activeBranchId;
+    this.conversationId = `${cursor.logId}:${cursor.epoch}`;
+    this.updatedAt = new Date(updatedAt);
+  }
+
+  private applyRuntimeMessageState(message: Message): void {
+    if (message.role === "assistant") {
+      for (const toolCall of message.toolCalls ?? []) this.pendingToolCallIds.add(toolCall.id);
+      return;
+    }
+    if (message.role !== "user" || !message.toolCallId) return;
+    this.pendingToolCallIds.delete(message.toolCallId);
+    if (!this.toolResultMeta.has(message.toolCallId)) {
+      this.toolResultMeta.set(message.toolCallId, { cachedAt: Date.now(), accessCount: 0 });
+    }
+  }
+
+  private rebuildSearchIndex(cursor?: CommitReceipt["cursor"]): void {
+    const replace = (): void => {
+      if (cursor && this.searchStore.projectReplace) {
+        this.searchStore.projectReplace(this.id, this.history, cursor);
+      } else {
+        this.searchStore.replaceSession(this.id, this.history);
+      }
+    };
+    replace();
+    if (this.switchMemorySearchToInMemoryIfDegraded()) replace();
   }
 
   /**
@@ -936,6 +983,94 @@ export class Session implements SessionRuntimePersistence {
     });
   }
 
+  /** Advances the disposable Session/search projection once for one durable append batch. */
+  async commitRuntimeProjectionBatch(
+    commits: readonly RuntimeEventStoreAppendResult[],
+  ): Promise<void> {
+    this.assertWritable();
+    if (commits.length === 0) return;
+    const store = this.store;
+    if (!store) throw new Error("Session persistence is disabled");
+    await this.ensureRuntimeSession();
+
+    const previousCursor = this.runtimeProjectionCursor;
+    const previousBranchId = this.runtimeProjectionBranchId;
+    const targetCursor = commits.at(-1)!.cursor;
+    const indexedCursor = this.searchStore.getProjectionCursor?.(this.id);
+    const projectAppend = this.searchStore.projectAppend?.bind(this.searchStore);
+    let precedingSequence = previousCursor?.seq ?? -1;
+    const commitsAreFreshAndOrdered = commits.every((commit) => {
+      const ordered =
+        commit.inserted && commit.cursor.logId === this.id && commit.cursor.seq > precedingSequence;
+      precedingSequence = commit.cursor.seq;
+      return ordered;
+    });
+
+    if (
+      !previousCursor ||
+      !previousBranchId ||
+      this.deferredMessages.length > 0 ||
+      !projectAppend ||
+      !indexedCursor ||
+      !sessionCursorsEqual(indexedCursor, previousCursor) ||
+      !commitsAreFreshAndOrdered
+    ) {
+      await this.replayRuntimeHistoryProjection();
+      return;
+    }
+
+    const delta = await store.readSessionProjectionDelta(
+      this.id,
+      previousCursor,
+      targetCursor,
+      previousBranchId,
+    );
+    if (!delta || delta.entries.some((entry) => entry.event.kind === "history.rewound")) {
+      await this.replayRuntimeHistoryProjection();
+      return;
+    }
+
+    const entriesByEventId = new Map(delta.entries.map((entry) => [entry.event.eventId, entry]));
+    const commitsMatchCanonicalMessages = commits.every((commit) => {
+      const entry = entriesByEventId.get(commit.cursor.eventId);
+      return (
+        entry !== undefined &&
+        entry.sequence === commit.cursor.seq &&
+        entry.event.at === commit.committedAt &&
+        runtimeEventHasModelMessage(entry.event)
+      );
+    });
+    if (!commitsMatchCanonicalMessages) {
+      await this.replayRuntimeHistoryProjection();
+      return;
+    }
+
+    const messages = delta.entries
+      .filter((entry): entry is RuntimeEventStoreEntry & { event: RuntimeMessageCommittedEvent } =>
+        runtimeEventHasModelMessage(entry.event),
+      )
+      .map((entry) => structuredClone(entry.event.data.message));
+    const applied = projectAppend(
+      this.id,
+      this.history.length,
+      messages,
+      previousCursor,
+      delta.cursor,
+    );
+    if (!applied) {
+      this.switchMemorySearchToInMemoryIfDegraded();
+      await this.replayRuntimeHistoryProjection();
+      return;
+    }
+
+    this.applyRuntimeHistoryProjectionDelta(
+      messages,
+      delta.cursor,
+      delta.activeBranchId,
+      delta.entries.at(-1)!.event.at,
+    );
+  }
+
   /**
    * RuntimeEvent 已经 durable 后写入 Session 投影的内部入口。
    * 调用方必须使用同一个 RuntimeEvent ID，避免投影重试产生新事实。
@@ -985,16 +1120,16 @@ export class Session implements SessionRuntimePersistence {
       return receipt;
     }
     await this.ensureRuntimeSession();
-    const entries = await this.store.readSessionEntries(this.id);
-    const entry = entries.find((candidate) => candidate.event.eventId === eventId);
+    const entry = await this.store.readSessionEvent(this.id, eventId);
     if (!entry || entry.event.kind !== "message.committed") {
       throw new Error(`Runtime message event ${eventId} is not durable`);
     }
     if (!isDeepStrictEqual(entry.event.data.message, message)) {
       throw new Error(`Runtime event ID ${eventId} is already bound to another payload`);
     }
-    this.applyRuntimeHistoryProjection(entries);
-    return commitReceiptFromEntry(this.id, entries, entry, false);
+    const persisted = await this.store.append(entry.event);
+    await this.replayRuntimeHistoryProjection();
+    return commitReceiptFromAppend(persisted);
   }
 
   /** Checks the canonical RuntimeEvent entries for a stable event ID. */
@@ -1002,9 +1137,7 @@ export class Session implements SessionRuntimePersistence {
     if (!eventId.trim()) return false;
     if (!this.store) return this.inMemoryCommitReceipts.has(eventId);
     await this.ensureRuntimeSession();
-    return (await this.store.readSessionEntries(this.id)).some(
-      (entry) => entry.event.eventId === eventId,
-    );
+    return (await this.store.readSessionEvent(this.id, eventId)) !== undefined;
   }
 
   /**
@@ -1026,12 +1159,13 @@ export class Session implements SessionRuntimePersistence {
       return;
     }
     await this.ensureRuntimeSession();
-    const entries = await this.store.readSessionEntries(this.id);
-    const projected = projectRuntimeSessionMessages(entries.map(({ event }) => event));
+    const projection = await this.store.readSessionProjection(this.id);
+    if (!projection) throw new Error(`Runtime session ${this.id} has no canonical projection`);
+    const projected = projectRuntimeSessionMessages(projection.entries.map(({ event }) => event));
     if (!isDeepStrictEqual(projected, messages)) {
       throw new Error(`Runtime projection ${projectionEventId} does not match canonical events`);
     }
-    this.applyRuntimeHistoryProjection(entries);
+    this.applyRuntimeHistoryProjection(projection);
   }
 
   /** Rebuilds the replaceable Session usage projection from canonical model-call facts. */
@@ -1074,7 +1208,7 @@ export class Session implements SessionRuntimePersistence {
         workDir: this.workDir,
         store,
       });
-      this.applyRuntimeHistoryProjection(await store.readSessionEntries(this.id));
+      await this.replayRuntimeHistoryProjection();
     });
   }
 
@@ -1269,13 +1403,13 @@ export class Session implements SessionRuntimePersistence {
   private commitRuntimeRewind(messageIndex: number, eventId: string): Promise<CommitReceipt> {
     return this.enqueuePersistence("rewind", async (store) => {
       await this.ensureRuntimeSession();
-      let entries = await store.readSessionEntries(this.id);
+      const entries = await store.readSessionEntries(this.id);
       const existing = entries.find((entry) => entry.event.eventId === eventId);
       if (existing) {
         if (existing.event.kind !== "history.rewound" || existing.event.data.branchId !== eventId) {
           throw new Error(`Runtime event ID ${eventId} is already bound to another payload`);
         }
-        this.applyRuntimeHistoryProjection(entries);
+        await this.replayRuntimeHistoryProjection();
         return commitReceiptFromEntry(this.id, entries, existing, false);
       }
 
@@ -1288,8 +1422,7 @@ export class Session implements SessionRuntimePersistence {
         data: { branchId: eventId, ...(throughEventId ? { throughEventId } : {}) },
       };
       const appended = await store.append(event);
-      entries = await store.readSessionEntries(this.id);
-      this.applyRuntimeHistoryProjection(entries);
+      await this.replayRuntimeHistoryProjection();
       return commitReceiptFromAppend(appended);
     });
   }
@@ -1647,7 +1780,7 @@ export class Session implements SessionRuntimePersistence {
         events.push(event);
       }
       await store.appendBatch(events);
-      this.applyRuntimeHistoryProjection(await store.readSessionEntries(this.id));
+      await this.replayRuntimeHistoryProjection();
     });
   }
 
@@ -2104,6 +2237,15 @@ function runtimeCursorForEntries(
 ): SessionCursor | undefined {
   const head = entries.at(-1);
   return head ? runtimeCursorForEntry(sessionId, entries, head) : undefined;
+}
+
+function sessionCursorsEqual(left: SessionCursor, right: SessionCursor): boolean {
+  return (
+    left.logId === right.logId &&
+    left.seq === right.seq &&
+    left.epoch === right.epoch &&
+    left.eventId === right.eventId
+  );
 }
 
 function runtimeCursorForEntry(
