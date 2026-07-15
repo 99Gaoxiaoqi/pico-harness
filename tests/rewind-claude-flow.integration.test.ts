@@ -13,6 +13,7 @@ import {
 } from "../src/input/pico-command-registry.js";
 import { processUserInput } from "../src/input/process-user-input.js";
 import { resolvePicoPaths } from "../src/paths/pico-paths.js";
+import { RuntimeEventStore } from "../src/runtime/runtime-event-store.js";
 import {
   exitSessionPlanMode,
   getOrCreateSessionSettings,
@@ -244,24 +245,19 @@ describe("Claude Code style rewind integration", () => {
       text: "把 note 改成第一版",
     });
 
-    const records = (
-      await readFile(
-        join(resolvePicoPaths(workDir).workspace.sessions, `${sessionId}.jsonl`),
-        "utf8",
-      )
-    )
-      .trim()
-      .split("\n")
-      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    const runtimeStore = new RuntimeEventStore({
+      databasePath: resolvePicoPaths(workDir).workspace.runtimeDatabase,
+    });
+    const records = (await runtimeStore.readSession(sessionId)).filter(
+      (event) => event.kind === "history.rewound" || event.kind === "session.state.committed",
+    );
     expect(records.slice(-2)).toMatchObject([
       {
-        type: "event",
         kind: "history.rewound",
-        data: { messageIndex: 0 },
+        data: { branchId: expect.stringMatching(/^rewind:/) as string },
       },
       {
-        type: "event",
-        kind: "runtime.checkpoint",
+        kind: "session.state.committed",
         data: { patch: { settings: { mode: "default" } } },
       },
     ]);

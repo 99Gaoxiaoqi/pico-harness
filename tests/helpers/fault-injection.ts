@@ -39,17 +39,6 @@ export function restorePermissions(dbPath: string): void {
   chmodSync(dbPath, 0o644);
 }
 
-/** 损坏 JSONL 文件末行(模拟写入中断) */
-export function corruptJSONL(jsonlPath: string): void {
-  if (!existsSync(jsonlPath)) {
-    throw new Error(`JSONL file not found: ${jsonlPath}`);
-  }
-  const content = readFileSync(jsonlPath, "utf8");
-  // 末尾追加一个半截损坏行(未闭合的 JSON)
-  const torn = `${content}{"type":"message","seq":999,"message":{"ro`;
-  writeFileSync(jsonlPath, torn);
-}
-
 /** 模拟并发写入锁竞争(通过 PRAGMA locking_mode = EXCLUSIVE) */
 export function lockDatabase(dbPath: string): Database.Database {
   if (!existsSync(dbPath)) {

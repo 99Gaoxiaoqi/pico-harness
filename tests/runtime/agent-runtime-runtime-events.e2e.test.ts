@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -92,7 +92,8 @@ describe("AgentRuntime runtime event E2E", () => {
     const runStarted = onlyEvent(sessionEvents, "run.started");
     const events = await store.readRun(SESSION_ID, runStarted.runId);
 
-    expect(events).toEqual(sessionEvents);
+    expect(events).toEqual(sessionEvents.filter((event) => event.runId === runStarted.runId));
+    expect(sessionEvents.some((event) => event.kind === "session.state.committed")).toBe(true);
     expect(events.map((event) => event.kind)).toEqual([
       "run.started",
       "message.committed",
@@ -183,6 +184,8 @@ describe("AgentRuntime runtime event E2E", () => {
       toolCallId: TOOL_CALL_ID,
       content: expect.stringContaining("artifactUri:"),
     });
+    await expect(access(join(paths.workspace.root, "sessions"))).rejects.toThrow();
+    await expect(access(join(paths.workspace.root, "runs"))).rejects.toThrow();
   });
 });
 

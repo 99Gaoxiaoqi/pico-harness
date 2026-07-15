@@ -225,7 +225,7 @@ describe("runAgentFromCli", () => {
     const workDir = await realpath(await mkdtemp(join(tmpdir(), "pico-cli-runtime-state-")));
     const sessionId = "runtime-state-session";
     const session = await globalSessionManager.getOrCreate(sessionId, workDir, {
-      persistence: false,
+      persistence: true,
     });
     const runtimeState = await createTuiRuntimeState({ workDir, sessionId, session });
     const provider = new ScriptedProvider([

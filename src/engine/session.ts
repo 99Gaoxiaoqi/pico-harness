@@ -37,7 +37,7 @@ import {
 } from "./session-runtime.js";
 import { FTS5Store } from "../memory/fts5-store.js";
 import { hasIncompleteToolExchange } from "../context/safe-compaction-boundary.js";
-import { JsonlMemoryStore } from "../memory/jsonl-memory-store.js";
+import { InMemorySearchStore } from "../memory/in-memory-search-store.js";
 import type {
   ConversationSearchStore,
   MemoryBackendStatus,
@@ -91,6 +91,7 @@ import {
   projectRuntimeSessionMessages,
   projectRuntimeSessionState,
 } from "../runtime/runtime-session-projection.js";
+import { OwnerLease } from "../storage/owner-lease.js";
 
 /** 进程级 per-key drain 表，让不同 SessionManager 实例也不会越过旧 tail。 */
 const sessionDrains = new Map<string, Promise<void>>();
@@ -246,6 +247,8 @@ export class Session implements SessionRuntimePersistence {
    */
   private store?: RuntimeEventStore;
   private runtimeInitialization?: Promise<RuntimeSessionManifest>;
+  private runtimeOwnership?: OwnerLease;
+  private runtimeOwnershipPromise?: Promise<OwnerLease>;
   /** Session 发起的 RuntimeEvent 共用一条队列，保留调用顺序。 */
   private persistenceTail: Promise<void> = Promise.resolve();
   private compatibilityAppendTail: Promise<void> = Promise.resolve();
@@ -323,7 +326,7 @@ export class Session implements SessionRuntimePersistence {
   private initMemorySearch(explicit?: ConversationSearchStore): void {
     if (explicit) {
       this.searchStore = explicit;
-      this.switchMemorySearchToJsonlIfDegraded();
+      this.switchMemorySearchToInMemoryIfDegraded();
       return;
     }
     try {
@@ -333,10 +336,10 @@ export class Session implements SessionRuntimePersistence {
         this.searchStore = store;
         return;
       }
-      this.searchStore = this.createJsonlMemoryFallback(store?.status);
+      this.searchStore = this.createInMemorySearchFallback(store?.status);
     } catch (err) {
       logger.warn({ err }, "[session] FTS5 初始化失败,降级为 RuntimeEvent 可重建内存索引");
-      this.searchStore = this.createJsonlMemoryFallback({
+      this.searchStore = this.createInMemorySearchFallback({
         backend: "sqlite_fts5",
         state: "degraded",
         persistentSource: "sqlite",
@@ -349,8 +352,8 @@ export class Session implements SessionRuntimePersistence {
     }
   }
 
-  private createJsonlMemoryFallback(status?: MemoryBackendStatus): JsonlMemoryStore {
-    return new JsonlMemoryStore({
+  private createInMemorySearchFallback(status?: MemoryBackendStatus): InMemorySearchStore {
+    return new InMemorySearchStore({
       persistentSource: this.store ? "sqlite" : "none",
       reason: status?.reason ?? "SQLite FTS5 unavailable",
       ...(status?.recommendation ? { recommendation: status.recommendation } : {}),
@@ -360,12 +363,12 @@ export class Session implements SessionRuntimePersistence {
   }
 
   /** FTS5 在运行期失效时立即切换到可重建的进程内索引。 */
-  private switchMemorySearchToJsonlIfDegraded(): boolean {
+  private switchMemorySearchToInMemoryIfDegraded(): boolean {
     const current = this.searchStore;
     const status = current.status;
-    if (status.state !== "degraded" || status.backend === "jsonl_memory") return false;
+    if (status.state !== "degraded" || status.backend === "in_memory") return false;
 
-    const fallback = this.createJsonlMemoryFallback(status);
+    const fallback = this.createInMemorySearchFallback(status);
     fallback.replaceSession(this.id, this.history);
     this.searchStore = fallback;
 
@@ -388,6 +391,7 @@ export class Session implements SessionRuntimePersistence {
    * 持久化关闭时为空操作。
    */
   async recover(): Promise<void> {
+    if (this.store) await this.ensureRuntimeOwnership();
     await this.recoverFileHistory();
     if (!this.store) {
       this.rebuildSearchIndex();
@@ -415,13 +419,46 @@ export class Session implements SessionRuntimePersistence {
     const store = this.store;
     if (!store) return Promise.reject(new Error("Session persistence is disabled"));
     if (this.runtimeInitialization) return this.runtimeInitialization;
-    const initialization = store.initializeSession({ sessionId: this.id, workDir: this.workDir });
+    const initialization = this.ensureRuntimeOwnership().then(() =>
+      store.initializeSession({ sessionId: this.id, workDir: this.workDir }),
+    );
     const tracked = initialization.catch((error: unknown) => {
       if (this.runtimeInitialization === tracked) this.runtimeInitialization = undefined;
       throw error;
     });
     this.runtimeInitialization = tracked;
     return tracked;
+  }
+
+  /** One live process owns a durable Session until close; SQLite remains the data authority. */
+  private ensureRuntimeOwnership(): Promise<OwnerLease> {
+    if (!this.store) return Promise.reject(new Error("Session persistence is disabled"));
+    if (this.runtimeOwnership) return Promise.resolve(this.runtimeOwnership);
+    if (this.runtimeOwnershipPromise) return this.runtimeOwnershipPromise;
+
+    const paths = resolvePicoPaths(this.workDir).workspace;
+    const scope = createHash("sha256").update(`${paths.id}\0${this.id}`).digest("hex");
+    const acquisition = OwnerLease.acquire({
+      leaseDirectory: join(paths.root, "session-owners", scope),
+      ownerId: `runtime-session:${this.id}`,
+    }).then((lease) => {
+      this.runtimeOwnership = lease;
+      return lease;
+    });
+    this.runtimeOwnershipPromise = acquisition;
+    void acquisition.then(
+      () => {
+        if (this.runtimeOwnershipPromise === acquisition) {
+          this.runtimeOwnershipPromise = undefined;
+        }
+      },
+      () => {
+        if (this.runtimeOwnershipPromise === acquisition) {
+          this.runtimeOwnershipPromise = undefined;
+        }
+      },
+    );
+    return acquisition;
   }
 
   private applyRuntimeHistoryProjection(entries: readonly RuntimeEventStoreEntry[]): void {
@@ -442,7 +479,7 @@ export class Session implements SessionRuntimePersistence {
     } else {
       this.searchStore.replaceSession(this.id, this.history);
     }
-    this.switchMemorySearchToJsonlIfDegraded();
+    this.switchMemorySearchToInMemoryIfDegraded();
   }
 
   /**
@@ -1056,7 +1093,7 @@ export class Session implements SessionRuntimePersistence {
 
     try {
       this.searchStore.insert(this.id, beforeLen, msg);
-      this.switchMemorySearchToJsonlIfDegraded();
+      this.switchMemorySearchToInMemoryIfDegraded();
     } catch (err) {
       logger.warn({ err }, "[session] 记忆索引失败");
     }
@@ -1673,7 +1710,7 @@ export class Session implements SessionRuntimePersistence {
     try {
       // 传入 sessionId 过滤,只返回当前 Session 的消息
       let results = this.searchStore.search(query, limit, this.id);
-      if (this.switchMemorySearchToJsonlIfDegraded()) {
+      if (this.switchMemorySearchToInMemoryIfDegraded()) {
         results = this.searchStore.search(query, limit, this.id);
       }
       return results.map((r) => ({
@@ -1696,11 +1733,6 @@ export class Session implements SessionRuntimePersistence {
     return this.searchStore.status;
   }
 
-  /** @deprecated Session no longer owns a JSONL catalog projector. */
-  get sessionCatalogHealth(): undefined {
-    return undefined;
-  }
-
   get sessionSummaryStore(): SessionSummaryStore {
     return this.summaryStore;
   }
@@ -1709,8 +1741,8 @@ export class Session implements SessionRuntimePersistence {
     this.summaryStore.save(this.id, summary, messageCount);
   }
 
-  /** @deprecated 仅为现有调用方判断 durable Session；不再暴露 JSONL record API。 */
-  get recordStore(): RuntimeEventStore | undefined {
+  /** Durable event authority; undefined only for explicitly in-memory sessions. */
+  get runtimeEventStore(): RuntimeEventStore | undefined {
     return this.store;
   }
 
@@ -1787,10 +1819,15 @@ export class Session implements SessionRuntimePersistence {
         this.lifecycle = "closed";
         return this.persistenceTail;
       })
-      .then(() => {
+      .then(async () => {
         const store = this.store;
         this.store = undefined;
-        return store?.close();
+        store?.close();
+        const ownership =
+          this.runtimeOwnership ?? (await this.runtimeOwnershipPromise?.catch(() => undefined));
+        this.runtimeOwnership = undefined;
+        this.runtimeOwnershipPromise = undefined;
+        await ownership?.release();
       });
     this.closePromise = registerSessionDrain(sessionEntryKey(this.id, this.workDir), drain);
     return this.closePromise;
@@ -2208,7 +2245,12 @@ export class SessionManager {
     }
 
     const session = new Session(id, workDir, options);
-    await session.recover();
+    try {
+      await session.recover();
+    } catch (error) {
+      await session.close().catch(() => undefined);
+      throw error;
+    }
     this.entries.set(key, { session, lastAccessMs: Date.now() });
     this.evictLru();
     return session;

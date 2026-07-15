@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { ToolResultArtifactStore, type ArtifactCloneMapping } from "../context/artifact-store.js";
 import { FileSessionSummaryStore } from "../memory/summary-store.js";
 import { resolvePicoPaths } from "../paths/pico-paths.js";
 import { RuntimeEventStore } from "../runtime/runtime-event-store.js";
 import { RuntimeRun } from "../runtime/runtime-run.js";
+import { projectRuntimeSessionMessageEntries } from "../runtime/runtime-session-projection.js";
 import { fileHistoryCloneSession, fileHistoryDefaultBaseDir } from "../safety/file-history.js";
 import type { Message } from "../schema/message.js";
 import { readVersionedJson, writeJsonAtomic } from "../storage/atomic-json.js";
@@ -148,7 +150,12 @@ export class SessionForkService {
     if (input.sourceSessionId === input.targetSessionId) {
       throw new Error("Fork source 与 target sessionId 不能相同");
     }
-    const source = await this.sessionManager.getOrCreate(input.sourceSessionId, this.workDir);
+    const source = await this.sessionManager.getOrCreate(input.sourceSessionId, this.workDir, {
+      persistence: true,
+    });
+    if (!source.runtimeEventStore) {
+      throw new Error(`Fork requires a durable source Session: ${input.sourceSessionId}`);
+    }
     return source.serialize(async () => {
       await assertTargetNotPublished(this.runtimeStore, input.targetSessionId);
       const snapshot = await source.readDurableForkSnapshot();
@@ -251,6 +258,7 @@ export class SessionForkService {
   ): Promise<void> {
     const frozen = await this.readFrozenBundle(operation, prepared.stagedBundlePath);
     const sidecars = await this.readSidecars(operation);
+    const sourceThroughEventId = await resolveFrozenSourceThroughEventId(this.runtimeStore, frozen);
     const messages = rewriteArtifactReferences(
       frozen.messages,
       operation.sourceSessionId,
@@ -263,6 +271,7 @@ export class SessionForkService {
       sourceSessionId: operation.sourceSessionId,
       targetSessionId: operation.targetSessionId,
       messages,
+      ...(sourceThroughEventId ? { sourceThroughEventId } : {}),
       workDir: this.workDir,
       store: this.runtimeStore,
     });
@@ -339,6 +348,15 @@ export async function reconcileUnfinishedSessionForks(
   workDir: string,
 ): Promise<ForkReconciliationResult[]> {
   return new SessionForkService({ workDir }).reconcileUnfinished();
+}
+
+export async function reconcileUnfinishedSessionForksOrThrow(workDir: string): Promise<void> {
+  const results = await reconcileUnfinishedSessionForks(workDir);
+  const blocked = results.filter((result) => result.state === "needs_attention");
+  if (blocked.length === 0) return;
+  throw new Error(
+    `未完成的 fork 恢复需要人工处理: ${blocked.map((result) => result.operationId).join(", ")}`,
+  );
 }
 
 function createFrozenForkBundle(
@@ -629,6 +647,34 @@ function forkTitleFrom(sourceTitle: string): string {
 
 function runtimeStateEventId(operationId: string): string {
   return "fork:" + operationId + ":state";
+}
+
+async function resolveFrozenSourceThroughEventId(
+  store: RuntimeEventStore,
+  frozen: FrozenForkBundle,
+): Promise<string | undefined> {
+  const entries = await store.readSessionEntries(frozen.sourceSessionId);
+  const cursorEntry = entries.find((entry) => entry.sequence === frozen.sourceCursor.seq);
+  if (
+    frozen.sourceCursor.logId !== frozen.sourceSessionId ||
+    !cursorEntry ||
+    cursorEntry.event.eventId !== frozen.sourceCursor.eventId
+  ) {
+    throw new ForkOperationConflictError(
+      "Frozen source cursor is no longer resolvable in RuntimeEventStore",
+      "source_cursor_changed",
+    );
+  }
+  const bounded = entries.filter((entry) => entry.sequence <= frozen.sourceCursor.seq);
+  const projected = projectRuntimeSessionMessageEntries(bounded.map(({ event }) => event));
+  const messages = projected.map(({ message }) => stripMessageUsage(message));
+  if (!isDeepStrictEqual(messages, frozen.messages)) {
+    throw new ForkOperationConflictError(
+      "Frozen source messages do not match the RuntimeEvent cursor",
+      "source_cursor_changed",
+    );
+  }
+  return projected.at(-1)?.eventId;
 }
 
 function parseForkCreatedAt(createdAt: string): number {

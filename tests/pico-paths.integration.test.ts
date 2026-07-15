@@ -13,7 +13,7 @@ describe("Pico paths", () => {
     expect(paths.project.skills).toBe(join(await realpath(workDir), ".pico", "skills"));
     expect(paths.home.skills).toBe(join(picoHome, "skills"));
     expect(paths.workspace.root).toBe(join(picoHome, "workspaces", paths.workspace.id));
-    expect(paths.workspace.sessions).toBe(join(paths.workspace.root, "sessions"));
+    expect(paths.workspace.runtimeDatabase).toBe(join(paths.workspace.root, "runtime.sqlite"));
     expect(paths.workspace.runtimeDatabase).toBe(join(paths.workspace.root, "runtime.sqlite"));
   });
 

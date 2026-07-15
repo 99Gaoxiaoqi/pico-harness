@@ -9,7 +9,7 @@ export function normalizeMemorySearchLimit(limit: number | undefined): number {
   return Math.min(MAX_MEMORY_SEARCH_LIMIT, Math.max(1, Math.trunc(limit)));
 }
 
-export type MemoryBackendKind = "sqlite_fts5" | "jsonl_memory";
+export type MemoryBackendKind = "sqlite_fts5" | "in_memory";
 export type MemoryBackendState = "healthy" | "degraded";
 
 /** TUI-visible health of the active conversation-search backend. */
@@ -17,7 +17,7 @@ export interface MemoryBackendStatus {
   backend: MemoryBackendKind;
   state: MemoryBackendState;
   /** Durable source from which the searchable index can be rebuilt. */
-  persistentSource: "sqlite" | "session_jsonl" | "none";
+  persistentSource: "sqlite" | "none";
   nodeVersion: string;
   nodeModuleAbi?: string;
   reason?: string;
@@ -42,16 +42,16 @@ export interface ConversationProjectionCursor {
 }
 
 /**
- * Search index contract; persistence remains owned by SQLite or Session JSONL.
+ * Search index contract; conversation persistence remains owned by RuntimeEventStore.
  * Results are ordered by descending relevance and limit is clamped to 1..100.
  * Query syntax remains backend-specific: SQLite accepts FTS5 operators while
- * the JSONL fallback treats the query as normalized literal text/tokens.
+ * the in-memory fallback treats the query as normalized literal text/tokens.
  */
 export interface ConversationSearchStore {
   readonly status: MemoryBackendStatus;
   insert(sessionId: string, turnIndex: number, message: Message): void;
   replaceSession(sessionId: string, messages: readonly Message[]): void;
-  /** JSONL durable commit 之后的原子投影；索引与 cursor 同一事务。 */
+  /** durable event commit 之后的原子投影；索引与 cursor 同一事务。 */
   projectInsert?(
     sessionId: string,
     turnIndex: number,

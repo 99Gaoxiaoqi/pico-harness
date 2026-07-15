@@ -42,7 +42,7 @@ describe("durable completion outbox integration", () => {
     const otherEnvelope = completionEnvelope("job-other", "other-session", 12);
     finishOptional(firstJobs.service, otherEnvelope);
 
-    // 故障窗口：Session JSONL 已 fdatasync，但 completion_outbox 尚未 ack。
+    // 故障窗口：Session RuntimeEvent 已提交，但 completion_outbox 尚未 ack。
     const firstSession = await new SessionManager().getOrCreate("owner-session", repo, {
       persistence: true,
     });

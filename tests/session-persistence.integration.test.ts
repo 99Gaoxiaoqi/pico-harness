@@ -2,7 +2,7 @@
 //
 // 验证的不是 Session 单元逻辑(那是 session-persistence.test.ts 的职责),
 // 而是"持久化在真实引擎链路里端到端生效":
-//   1. engine.run 跑完 → 历史落盘到 .claw/sessions/<id>.jsonl
+//   1. engine.run 跑完 → 历史提交到 workspace runtime.sqlite
 //   2. 模拟进程重启:新建 SessionManager(内存清空) + getOrCreate(触发 recover 重放)
 //   3. 新 engine 实例基于恢复的历史继续跑 → 验证 provider 收到了恢复的历史
 //
@@ -13,7 +13,7 @@
 // 用 mkdtemp 隔离。
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AgentEngine } from "../src/engine/loop.js";
@@ -94,11 +94,6 @@ class MockRegistry implements Registry {
   }
 }
 
-/** 等待 fire-and-forget 落盘完成(appendFile 走 libuv 线程池,需让出事件循环) */
-async function flush(): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, 60));
-}
-
 /** 显式持久化开关(传给 getOrCreate,避免环境变量并行污染) */
 const ON = { persistence: true } as const;
 const OFF = { persistence: false } as const;
@@ -112,6 +107,7 @@ describe("Session 持久化端到端集成", () => {
 
   afterEach(async () => {
     resetSessionSettingsForTests();
+    await safeRm(resolvePicoPaths(workDir).workspace.root);
     await safeRm(workDir);
   });
 
@@ -119,7 +115,7 @@ describe("Session 持久化端到端集成", () => {
     // ── 第一段:初始会话跑一轮工具调用 ──
     const mgr1 = new SessionManager();
     const sess1 = await mgr1.getOrCreate("integ-chat", workDir, ON);
-    sess1.append({ role: "user", content: "第一次对话" });
+    await sess1.commitMessages({ role: "user", content: "第一次对话" });
 
     const provider1 = new RecordingScriptedProvider([
       {
@@ -135,16 +131,18 @@ describe("Session 持久化端到端集成", () => {
       workDir,
     });
     await engine1.run(sess1);
-    await flush();
+    await sess1.flushPersistence();
 
     // 落盘后历史应有:user / assistant(带 toolCall) / observation / assistant(最终)
     expect(sess1.length).toBeGreaterThanOrEqual(4);
+    const firstSessionLength = sess1.length;
+    await sess1.close();
 
     // ── 模拟进程重启:全新的 SessionManager(内存清空) ──
     const mgr2 = new SessionManager();
     const sess2 = await mgr2.getOrCreate("integ-chat", workDir, ON);
     // recover 后历史应与重启前一致
-    expect(sess2.length).toBe(sess1.length);
+    expect(sess2.length).toBe(firstSessionLength);
     expect(sess2.getHistory()[0]!.content).toBe("第一次对话");
 
     // ── 第二段:新引擎实例,基于恢复的历史继续跑 ──
@@ -156,7 +154,7 @@ describe("Session 持久化端到端集成", () => {
       registry: new MockRegistry(),
       workDir,
     });
-    sess2.append({ role: "user", content: "继续聊" });
+    await sess2.commitMessages({ role: "user", content: "继续聊" });
     await engine2.run(sess2);
 
     // 关键断言:第二段引擎的 provider 必须收到恢复的历史(含"第一次对话"),
@@ -166,83 +164,18 @@ describe("Session 持久化端到端集成", () => {
     const allContents = lastReceived.map((m) => m.content);
     expect(allContents).toContain("第一次对话"); // ← 恢复的历史被喂给了 provider
     expect(allContents).toContain("继续聊"); // 本轮新输入也在
-  });
-
-  it("v3 规范事件与 legacy 记录混合时，Session 和会话列表使用同一重放结果", async () => {
-    const sessionId = "mixed-journal";
-    const sessionsDir = resolvePicoPaths(workDir).workspace.sessions;
-    await mkdir(sessionsDir, { recursive: true });
-    const summaryMessage: Message = {
-      role: "assistant",
-      content: "历史摘要",
-      providerData: { picoKind: "compaction_summary" },
-    };
-    const records = [
-      { type: "message", seq: 0, message: { role: "user", content: "legacy-old" } },
-      {
-        type: "event",
-        recordVersion: 1,
-        eventId: "seed-1",
-        seq: 1,
-        epoch: 0,
-        at: "2026-07-13T00:00:00.000Z",
-        kind: "session.seeded",
-        data: {
-          messages: [
-            { role: "user", content: "seed" },
-            { role: "assistant", content: "seed reply" },
-          ],
-        },
-      },
-      {
-        type: "event",
-        recordVersion: 1,
-        eventId: "compact-1",
-        seq: 2,
-        epoch: 1,
-        at: "2026-07-13T00:00:01.000Z",
-        kind: "history.compacted",
-        data: {
-          summaryMessage,
-          retainedMessages: [{ role: "user", content: "retained prompt" }],
-        },
-      },
-      { type: "message", seq: 3, message: { role: "user", content: "remove me" } },
-      { type: "undo", seq: 4, count: 1, at: "2026-07-13T00:00:02.000Z" },
-    ];
-    await writeFile(
-      join(sessionsDir, `${sessionId}.jsonl`),
-      `${records.map((record) => JSON.stringify(record)).join("\n")}\n`,
-      "utf8",
-    );
-
-    const manager = new SessionManager();
-    const session = await manager.getOrCreate(sessionId, workDir, ON);
-    const summaries = await listCliSessionSummaries(workDir);
-
-    expect(session.getHistory()).toEqual([
-      summaryMessage,
-      { role: "user", content: "retained prompt" },
-    ]);
-    expect(summaries).toMatchObject([
-      {
-        id: sessionId,
-        messageCount: 2,
-        title: "retained prompt",
-        firstMessage: "retained prompt",
-        lastMessage: "retained prompt",
-      },
-    ]);
-    await session.close();
+    await sess2.close();
   });
 
   it("多会话隔离:两个会话各自落盘各自恢复,引擎不会串台", async () => {
     const mgr1 = new SessionManager();
     const sA = await mgr1.getOrCreate("chat-A", workDir, ON);
     const sB = await mgr1.getOrCreate("chat-B", workDir, ON);
-    sA.append({ role: "user", content: "A 的首轮" });
-    sB.append({ role: "user", content: "B 的首轮" });
-    await flush();
+    await Promise.all([
+      sA.commitMessages({ role: "user", content: "A 的首轮" }),
+      sB.commitMessages({ role: "user", content: "B 的首轮" }),
+    ]);
+    await Promise.all([sA.close(), sB.close()]);
 
     // 重启恢复
     const mgr2 = new SessionManager();
@@ -261,6 +194,7 @@ describe("Session 持久化端到端集成", () => {
     expect(aContents).not.toContain("B 的首轮");
     expect(bContents).toContain("B 的首轮");
     expect(bContents).not.toContain("A 的首轮");
+    await Promise.all([rA.close(), rB.close()]);
   });
 
   it("会话标题经 runtime_state 落盘，重启和会话列表均读取显式标题", async () => {
@@ -516,16 +450,15 @@ describe("Session 持久化端到端集成", () => {
     // 第一段:构造一段会被 truncate 的历史
     const mgr1 = new SessionManager();
     const s1 = await mgr1.getOrCreate("trunc-chat", workDir, ON);
-    s1.append(
+    await s1.commitMessages(
       { role: "user", content: "m0" },
       { role: "assistant", content: "m1" },
       { role: "user", content: "m2" },
       { role: "assistant", content: "m3" },
     );
-    await flush();
-    s1.truncateTo(2); // 只保留 m2, m3
-    await flush();
+    await s1.truncateTo(2); // 只保留 m2, m3
     expect(s1.length).toBe(2);
+    await s1.close();
 
     // 重启恢复
     const mgr2 = new SessionManager();
@@ -548,13 +481,13 @@ describe("Session 持久化端到端集成", () => {
     expect(contents).toContain("m3");
     expect(contents).not.toContain("m0");
     expect(contents).not.toContain("m1");
+    await s2.close();
   });
 
   it("持久化关闭时:重启不恢复,引擎当作全新会话", async () => {
     const mgr1 = new SessionManager();
     const s1 = await mgr1.getOrCreate("no-persist", workDir, OFF);
-    s1.append({ role: "user", content: "不会落盘的内容" });
-    await flush();
+    await s1.commitMessages({ role: "user", content: "不会落盘的内容" });
 
     const mgr2 = new SessionManager();
     const s2 = await mgr2.getOrCreate("no-persist", workDir, OFF);
@@ -562,7 +495,7 @@ describe("Session 持久化端到端集成", () => {
 
     // 引擎当作全新会话:provider 收到的只有本轮新输入(不含"不会落盘的内容")
     const provider = new RecordingScriptedProvider([{ role: "assistant", content: "全新开始" }]);
-    s2.append({ role: "user", content: "新输入" });
+    await s2.commitMessages({ role: "user", content: "新输入" });
     await new AgentEngine({
       provider,
       registry: new MockRegistry(),

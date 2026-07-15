@@ -1,12 +1,4 @@
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  utimesSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -33,6 +25,7 @@ import type { CredentialRef, CredentialVault } from "../../src/provider/credenti
 import { RuntimeEventStore } from "../../src/runtime/runtime-event-store.js";
 import { materializeRuntimeHistory } from "../../src/runtime/runtime-event-read-model.js";
 import { RuntimeRun } from "../../src/runtime/runtime-run.js";
+import type { Message } from "../../src/schema/message.js";
 
 const { createProviderMock } = vi.hoisted(() => ({
   createProviderMock: vi.fn(),
@@ -708,7 +701,7 @@ describe("Pico command registry", () => {
       join(workDir, ".claude", "agents", "reviewer.md"),
       "---\ndescription: 审查 Agent\n---\n\n# Reviewer",
     );
-    writeSessionLog(workDir, "cli-review", "2026-07-09T02:00:00.000Z", [
+    await writeSessionLog(workDir, "cli-review", "2026-07-09T02:00:00.000Z", [
       { type: "message", seq: 1, message: { role: "user", content: "review me" } },
     ]);
     const session = new Session("snapshot-session", workDir, { persistence: false });
@@ -946,7 +939,7 @@ describe("Pico command registry", () => {
   it("/sessions lists resumable sessions for the current project", async () => {
     const workDir = mkdtempSync(join(tmpdir(), "pico-command-sessions-"));
     cleanup.push(() => rmSync(workDir, { recursive: true, force: true }));
-    writeSessionLog(workDir, "cli-current", "2026-07-09T03:00:00.000Z", [
+    await writeSessionLog(workDir, "cli-current", "2026-07-09T03:00:00.000Z", [
       { type: "message", seq: 0, message: { role: "user", content: "hi" } },
       { type: "message", seq: 1, message: { role: "assistant", content: "hello" } },
     ]);
@@ -977,7 +970,7 @@ describe("Pico command registry", () => {
   it("/resume requests a hot switch to an existing session", async () => {
     const workDir = mkdtempSync(join(tmpdir(), "pico-command-resume-"));
     cleanup.push(() => rmSync(workDir, { recursive: true, force: true }));
-    writeSessionLog(workDir, "cli-known", "2026-07-09T03:00:00.000Z", [
+    await writeSessionLog(workDir, "cli-known", "2026-07-09T03:00:00.000Z", [
       { type: "message", seq: 0, message: { role: "user", content: "resume me" } },
     ]);
     const registry = await createPicoCommandRegistry({
@@ -1375,23 +1368,38 @@ describe("Pico command registry", () => {
   });
 });
 
-function writeSessionLog(
+async function writeSessionLog(
   workDir: string,
   sessionId: string,
   timestamp: string,
   records: readonly unknown[],
-): void {
-  const dir = resolvePicoPaths(workDir).workspace.sessions;
-  const path = join(dir, `${sessionId}.jsonl`);
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(
-    path,
-    [
-      JSON.stringify({ type: "meta", schemaVersion: 1 }),
-      ...records.map((record) => JSON.stringify(record)),
-    ].join("\n") + "\n",
-    "utf8",
-  );
-  const time = new Date(timestamp);
-  utimesSync(path, time, time);
+): Promise<void> {
+  const paths = resolvePicoPaths(workDir);
+  const store = new RuntimeEventStore({ databasePath: paths.workspace.runtimeDatabase });
+  const baseTime = new Date(timestamp).getTime();
+  await store.initializeSession({
+    sessionId,
+    workDir: paths.canonicalWorkDir,
+    now: () => new Date(baseTime),
+  });
+  for (const [index, record] of records.entries()) {
+    if (!isRecord(record) || !isRecord(record["message"])) continue;
+    await store.append({
+      schemaVersion: 1,
+      eventId: `${sessionId}:fixture:${index}`,
+      sessionId,
+      invocationId: `${sessionId}:fixture`,
+      runId: `${sessionId}:fixture`,
+      turnId: `${sessionId}:fixture`,
+      at: new Date(baseTime + index).toISOString(),
+      partial: false,
+      visibility: "model",
+      kind: "message.committed",
+      data: { message: record["message"] as unknown as Message },
+    });
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

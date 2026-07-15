@@ -40,7 +40,7 @@ describe("Session FTS5 集成", () => {
 
     it("降级检索后端不影响 Session 主流程", () => {
       const degradedStore = new MockFTS5Store({
-        backend: "jsonl_memory",
+        backend: "in_memory",
         state: "degraded",
         persistentSource: "none",
         reason: "SQLite FTS5 unavailable",
@@ -51,7 +51,7 @@ describe("Session FTS5 集成", () => {
       });
 
       expect(testSession.memoryStatus.state).toBe("degraded");
-      expect(testSession.memoryStatus.backend).toBe("jsonl_memory");
+      expect(testSession.memoryStatus.backend).toBe("in_memory");
       testSession.append({ role: "user", content: "test" });
       expect(testSession.length).toBe(1);
       expect(degradedStore.insert).toHaveBeenCalledOnce();
@@ -110,7 +110,7 @@ describe("Session FTS5 集成", () => {
 
     it("降级检索后端时 append 不抛出异常", () => {
       const degradedStore = new MockFTS5Store({
-        backend: "jsonl_memory",
+        backend: "in_memory",
         state: "degraded",
         persistentSource: "none",
         reason: "SQLite FTS5 unavailable",

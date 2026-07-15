@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { FTS5Store } from "../../src/memory/fts5-store.js";
-import { JsonlMemoryStore } from "../../src/memory/jsonl-memory-store.js";
+import { InMemorySearchStore } from "../../src/memory/in-memory-search-store.js";
 import type { ConversationSearchStore } from "../../src/memory/memory-store.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 
@@ -18,10 +18,10 @@ describe("conversation search backend integration", () => {
     }
   });
 
-  it("keeps relevance and limit semantics consistent across SQLite and JSONL", () => {
+  it("keeps relevance and limit semantics consistent across SQLite and in-memory search", () => {
     const workDir = mkdtempSync(join(tmpdir(), "pico-memory-contract-"));
     tempDirs.push(workDir);
-    const stores: ConversationSearchStore[] = [new FTS5Store(workDir), new JsonlMemoryStore()];
+    const stores: ConversationSearchStore[] = [new FTS5Store(workDir), new InMemorySearchStore()];
 
     for (const store of stores) {
       store.insert("session", 0, { role: "user", content: "alpha" });

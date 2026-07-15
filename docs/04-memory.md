@@ -53,6 +53,8 @@ serialize<T>(fn: () => Promise<T>): Promise<T> {
 
 `catch(() => {})` 是一个刻意的不优雅——即使前一条任务失败了，队列也不能阻塞。宁愿放弃一条有问题的请求，也不能让整个飞书群的消息积压。
 
+Promise 队列只约束单个进程。持久化 Session 还会在首次恢复时取得 workspace 级 owner lease，并持有到 `close()`；第二个进程不能同时打开同一 Session 写入。SQLite 负责事实事务，lease 只负责单写者仲裁，不承载对话数据。
+
 ---
 
 ## Model Context：完整历史，按 token 水位整理
@@ -71,47 +73,42 @@ getModelContext(): Message[] {
 
 ---
 
-## 持久化：关机了也不丢
+## 持久化：RuntimeEvent 是唯一真源
 
-Model Context 解决了"发给大模型什么"的问题，但 `history` 还只在内存里。进程重启，全部丢失。
+Model Context 解决了"发给大模型什么"的问题，但 `history` 不能同时充当内存状态和持久化真源。如果消息、run 状态、usage、rewind 和 fork 分散在几套文件中，崩溃后就无法判断哪份数据才是真的。
 
-我需要持久化。但不想引入 Redis 或 PostgreSQL——太重了。最简单的方案：**事件溯源 JSONL。**
+现在的设计是：**`RuntimeEventStore` 中的不可变事件是 Session/Agent 运行的唯一 durable authority，`Session.history` 只是内存投影。**
 
-每条消息追加一行 JSON 到文件：
-
-```jsonl
-{"type":"message","seq":0,"message":{"role":"system","content":"你是 pico..."}}
-{"type":"message","seq":1,"message":{"role":"user","content":"重构 utils.ts"}}
-{"type":"message","seq":2,"message":{"role":"assistant","content":"我需要先读文件","toolCalls":[...]}}
-{"type":"truncate","seq":15,"fromIndex":5}
+```text
+AgentRuntime
+    │
+    ├─ message / tool / model / usage / rewind / fork 事件
+    ▼
+RuntimeEventStore
+    └─ ~/.pico/workspaces/<workspace-id>/runtime.sqlite
+             │
+             ├─ Session.history 投影
+             ├─ CLI/TUI 会话列表投影
+             └─ FTS5 / 内存检索投影
 ```
 
-启动时逐行读取、重建 `history`。关键是容忍错误：文件末尾可能不完整（进程在写入时崩溃），最后一行 JSON.parse 失败了就停，不报错。**健壮性 > 完美性。**
+写入顺序也变得明确：
+
+1. 在 SQLite 事务中追加 RuntimeEvent。
+2. 以 `(session_id, event_id)` 保证精确一次语义；同 ID 同 payload 可幂等重试，同 ID 不同 payload 直接拒绝。
+3. durable commit 成功后，再更新 `Session.history` 和检索投影。
+4. 启动时从 RuntimeEvent 重放消息、usage 和 Session state，不信任旧的内存状态。
 
 ```typescript
-// src/engine/session-store.ts
-async load(): Promise<SessionRecord[]> {
-  let content: string;
-  try {
-    content = await readFile(this.filePath, "utf8");
-  } catch {
-    return []; // 文件不存在(首次启动)视为空日志
-  }
-  const records: SessionRecord[] = [];
-  for (const line of content.split("\n")) {
-    if (!line) continue;
-    try {
-      records.push(JSON.parse(line));
-    } catch {
-      logger.warn(`session 末行撕裂: ${line.slice(0, 80)}...`);
-      break; // 末行不完整,后面的都不读了
-    }
-  }
-  return records;
-}
+await session.commitMessages(
+  { role: "user", content: "重构 utils.ts" },
+  { role: "assistant", content: "我需要先读文件" },
+);
 ```
 
-`seq` 字段保证重放的顺序正确——写入是异步的，但 seq 单调递增，启动时按 seq 排序重建。这也是 Kimi Code 和 OpenCode 都遵循的不变量：序列号解耦"写入顺序"和"逻辑顺序"。
+`rewind` 不删除旧消息，而是追加 `history.rewound`事件改变有效历史投影。`fork` 先冻结源会话游标，再通过 forward-only Saga 克隆 sidecar，最后以 `session.forked` 事件作为唯一发布点。如果中途崩溃，下次 CLI/TUI 启动会自动继续未完成操作；在发布事件落盘前，目标 Session 对用户不可见。
+
+这次收敛不再读取、写入或迁移旧 Session JSONL，也移除了重复的 run JSONL 账本。旧数据如果已明确放弃，保留第二套恢复路径反而会让真源重新变得模糊。
 
 ---
 
@@ -133,7 +130,7 @@ CREATE VIRTUAL TABLE skills USING fts5(
 
 `token='trigram'` 是中文分词的关键。SQLite 默认的分词器只认空格——对英文工作良好，对中文全失效（"全文检索"被当成一个 Token）。trigram 分词按每三个字符一个 Token 切分，对中英文都适用。
 
-FTS5 建在 Session 之外，存储每个 Session 中学到的"技能"——一段可复用的知识。当新 Session 的 System Prompt 组装时，SkillRegistry 从 FTS5 中搜索相关技能，注入上下文。
+FTS5 建在 Session 之外，但它只是可重建的检索投影，不再保存任何唯一事实。它索引当前有效的 Session 消息与可复用技能；如果 SQLite FTS5 不可用，Session 会从 RuntimeEvent 历史重建有界的进程内检索索引。检索失效会降级功能，但不会丢失会话事实。
 
 ---
 
@@ -218,8 +215,8 @@ Agent 的记忆系统成形了：
 
 - **Session 物理隔离**：每端独立上下文，Promise 链式队列保证并发安全
 - **完整 Model Context**：低于 token 水位时传完整历史，工具协议按局部批次修复
-- **JSONL 事件溯源**：持久化到磁盘，末行撕裂容忍，seq 保证重放顺序
-- **FTS5 跨 Session 检索**：trigram 中文分词，学到的技能跨会话复用
+- **RuntimeEvent 事件溯源**：SQLite 事务、稳定游标与精确一次事件 ID 保证可重放
+- **FTS5 跨 Session 检索**：trigram 中文分词，故障时从 RuntimeEvent 重建内存投影
 - **Prompt 模块化组装**：内核 + AGENTS.md + Skills + Plan Context 动态拼接
 
 Agent 能记住对话了。但上下文还在不断膨胀——下一章用 token 水位、artifact 与安全摘要控制体积。

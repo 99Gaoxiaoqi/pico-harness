@@ -10,12 +10,12 @@ import {
   normalizeMemorySearchLimit,
 } from "./memory-store.js";
 
-export const DEFAULT_JSONL_MEMORY_MAX_ENTRIES = 10_000;
-export const DEFAULT_JSONL_MEMORY_MAX_CONTENT_LENGTH = 32_000;
-export const DEFAULT_JSONL_MEMORY_SEARCH_LIMIT = DEFAULT_MEMORY_SEARCH_LIMIT;
-export const MAX_JSONL_MEMORY_SEARCH_LIMIT = MAX_MEMORY_SEARCH_LIMIT;
+export const DEFAULT_IN_MEMORY_SEARCH_MAX_ENTRIES = 10_000;
+export const DEFAULT_IN_MEMORY_SEARCH_MAX_CONTENT_LENGTH = 32_000;
+export const DEFAULT_IN_MEMORY_SEARCH_LIMIT = DEFAULT_MEMORY_SEARCH_LIMIT;
+export const MAX_IN_MEMORY_SEARCH_LIMIT = MAX_MEMORY_SEARCH_LIMIT;
 
-export interface JsonlMemoryStoreOptions {
+export interface InMemorySearchStoreOptions {
   maxEntries?: number;
   maxContentLength?: number;
   reason?: string;
@@ -46,7 +46,7 @@ interface ScoredMessage {
  * This store deliberately performs no file I/O. RuntimeEventStore owns durable
  * writes; this index is disposable and can be rebuilt after Session recovery.
  */
-export class JsonlMemoryStore implements ConversationSearchStore {
+export class InMemorySearchStore implements ConversationSearchStore {
   readonly status: MemoryBackendStatus;
 
   private readonly maxEntries: number;
@@ -54,14 +54,14 @@ export class JsonlMemoryStore implements ConversationSearchStore {
   private entries: IndexedMessage[] = [];
   private nextSequence = 0;
 
-  constructor(options: JsonlMemoryStoreOptions = {}) {
-    this.maxEntries = positiveInteger(options.maxEntries, DEFAULT_JSONL_MEMORY_MAX_ENTRIES);
+  constructor(options: InMemorySearchStoreOptions = {}) {
+    this.maxEntries = positiveInteger(options.maxEntries, DEFAULT_IN_MEMORY_SEARCH_MAX_ENTRIES);
     this.maxContentLength = positiveInteger(
       options.maxContentLength,
-      DEFAULT_JSONL_MEMORY_MAX_CONTENT_LENGTH,
+      DEFAULT_IN_MEMORY_SEARCH_MAX_CONTENT_LENGTH,
     );
     this.status = {
-      backend: "jsonl_memory",
+      backend: "in_memory",
       state: "degraded",
       persistentSource: options.persistentSource ?? "sqlite",
       nodeVersion: options.nodeVersion ?? process.version,
@@ -90,7 +90,7 @@ export class JsonlMemoryStore implements ConversationSearchStore {
 
   search(
     query: string,
-    limit = DEFAULT_JSONL_MEMORY_SEARCH_LIMIT,
+    limit = DEFAULT_IN_MEMORY_SEARCH_LIMIT,
     sessionId?: string,
   ): MemorySearchResult[] {
     const normalizedQuery = normalize(query).trim();

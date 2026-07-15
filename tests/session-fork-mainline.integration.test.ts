@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { access, mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -7,7 +7,6 @@ import { globalSessionPermissionGrants } from "../src/approval/session-permissio
 import { ToolResultArtifactStore } from "../src/context/artifact-store.js";
 import { SessionForkService } from "../src/engine/session-fork-service.js";
 import { SessionManager } from "../src/engine/session.js";
-import { SessionStore } from "../src/engine/session-store.js";
 import { FileSessionSummaryStore } from "../src/memory/summary-store.js";
 import { resolvePicoPaths } from "../src/paths/pico-paths.js";
 import { materializeRuntimeHistory } from "../src/runtime/runtime-event-read-model.js";
@@ -18,8 +17,6 @@ import {
   fileHistoryLoadState,
 } from "../src/safety/file-history.js";
 import type { ToolCall } from "../src/schema/message.js";
-import { SessionCatalog } from "../src/storage/session-catalog.js";
-import { SessionCatalogProjector } from "../src/storage/session-catalog-projection.js";
 import { JobService } from "../src/tasks/job-service.js";
 
 describe("session fork published mainline", () => {
@@ -36,16 +33,11 @@ describe("session fork published mainline", () => {
     const workDir = join(root, "workspace");
     const workspacePaths = resolvePicoPaths(workDir).workspace;
     const fileHistoryBaseDir = join(root, "file-history");
-    const catalog = new SessionCatalog({ baseDirectory: join(root, "catalog") });
-    const projector = new SessionCatalogProjector(catalog);
     const manager = new SessionManager();
     const sourceId = "source-session";
     const targetId = "target-session";
     const operationId = "fork-mainline";
-    const source = await manager.getOrCreate(sourceId, workDir, {
-      persistence: true,
-      sessionCatalog: false,
-    });
+    const source = await manager.getOrCreate(sourceId, workDir, { persistence: true });
     const artifactStore = new ToolResultArtifactStore({
       baseDir: workspacePaths.artifacts,
     });
@@ -153,7 +145,6 @@ describe("session fork published mainline", () => {
     const crashing = new SessionForkService({
       workDir,
       sessionManager: manager,
-      catalogProjector: projector,
       fileHistoryBaseDir,
       createOperationId: () => operationId,
       hooks: {
@@ -172,9 +163,10 @@ describe("session fork published mainline", () => {
       }),
     ).rejects.toThrow("injected crash after sidecars");
 
-    const targetPath = join(workspacePaths.sessions, targetId + ".jsonl");
-    await expect(access(targetPath)).rejects.toMatchObject({ code: "ENOENT" });
-    await expect(catalog.list({ sessionProjectDir: workDir })).resolves.toEqual([]);
+    const runtimeStore = new RuntimeEventStore({
+      databasePath: workspacePaths.runtimeDatabase,
+    });
+    await expect(runtimeStore.readSessionManifest(targetId)).resolves.toBeUndefined();
     await expect(crashing.journal.get(operationId)).resolves.toMatchObject({
       state: "workspace_applied",
       sourceCursor: sourceForkPoint.cursor,
@@ -187,36 +179,26 @@ describe("session fork published mainline", () => {
     const restarted = new SessionForkService({
       workDir,
       sessionManager: manager,
-      catalogProjector: projector,
       fileHistoryBaseDir,
     });
     await expect(restarted.reconcileUnfinished()).resolves.toEqual([
       { operationId, state: "completed" },
     ]);
     const publishedHash = createHash("sha256")
-      .update(await readFile(targetPath))
+      .update(JSON.stringify(await runtimeStore.readSession(targetId)))
       .digest("hex");
     await expect(restarted.reconcileUnfinished()).resolves.toEqual([]);
     expect(
       createHash("sha256")
-        .update(await readFile(targetPath))
+        .update(JSON.stringify(await runtimeStore.readSession(targetId)))
         .digest("hex"),
     ).toBe(publishedHash);
 
-    const prepared = await new SessionStore(targetPath).inspectJournal({ strict: true });
-    expect(prepared.records.map((record) => record.type === "event" && record.kind)).toEqual([
-      "session.seeded",
-      "runtime.checkpoint",
-    ]);
-    const target = await manager.getOrCreate(targetId, workDir, {
-      persistence: true,
-      sessionCatalog: false,
-    });
+    const target = await manager.getOrCreate(targetId, workDir, { persistence: true });
     const hydration = await target.readHydrationSnapshot();
     expect(hydration.messages).toHaveLength(2);
     expect(hydration.messages.some((message) => message.content.includes("fork 之后"))).toBe(false);
     expect(hydration.messages.every((message) => message.usage === undefined)).toBe(true);
-    const runtimeStore = new RuntimeEventStore({ baseDir: workspacePaths.runs });
     const runtimeEvents = await runtimeStore.readSession(targetId);
     expect(materializeRuntimeHistory(runtimeEvents)).toEqual(hydration.messages);
     expect(await runtimeStore.readSessionManifest(targetId)).toMatchObject({
@@ -261,6 +243,13 @@ describe("session fork published mainline", () => {
       totalProviderCalls: 0,
     });
 
+    const sourceThroughEventId = (await runtimeStore.readSessionEntries(sourceId))
+      .filter(
+        (entry) =>
+          entry.sequence <= sourceForkPoint.cursor.seq && entry.event.kind === "message.committed",
+      )
+      .at(-1)?.event.eventId;
+
     const targetFileHistory = createFileHistoryState();
     await expect(
       fileHistoryLoadState(targetFileHistory, targetId, fileHistoryBaseDir),
@@ -272,16 +261,13 @@ describe("session fork published mainline", () => {
       summary: "source summary",
       basis: { throughEventId: sourceForkPoint.cursor.eventId, messageCount: 2 },
     });
-    const catalogEntry = (await catalog.list({ sessionProjectDir: workDir })).find(
-      (entry) => entry.sessionId === targetId,
-    );
-    expect(catalogEntry).toMatchObject({
-      sessionId: targetId,
-      lineage: {
-        relation: "fork",
-        parentLogId: sourceForkPoint.cursor.logId,
-        forkEventId: sourceForkPoint.cursor.eventId,
+    expect(runtimeEvents.find((event) => event.kind === "session.forked")).toMatchObject({
+      kind: "session.forked",
+      data: {
         parentSessionId: sourceId,
+        throughEventId: sourceThroughEventId,
+        sourceDigest: expect.any(String) as string,
+        messageCount: 2,
       },
     });
 
@@ -304,12 +290,8 @@ describe("session fork published mainline", () => {
     const root = await mkdtemp(join(tmpdir(), "pico-session-fork-mode-recovery-"));
     cleanup.push(root);
     const workDir = join(root, "workspace");
-    const workspacePaths = resolvePicoPaths(workDir).workspace;
     const manager = new SessionManager();
-    const source = await manager.getOrCreate("mode-source", workDir, {
-      persistence: true,
-      sessionCatalog: false,
-    });
+    const source = await manager.getOrCreate("mode-source", workDir, { persistence: true });
     await source.commitMessages({ role: "user", content: "先形成计划" });
     source.updateRuntimeState({
       settings: {
@@ -322,33 +304,37 @@ describe("session fork published mainline", () => {
       },
     });
     await source.flushPersistence();
-    const snapshot = await source.readDurableForkSnapshot();
+    let injected = false;
     const service = new SessionForkService({
       workDir,
       sessionManager: manager,
       fileHistoryBaseDir: join(root, "file-history"),
-      catalogProjector: new SessionCatalogProjector(
-        new SessionCatalog({ baseDirectory: join(root, "catalog") }),
-      ),
+      createOperationId: () => "prepared-plan-fork",
+      hooks: {
+        afterSidecars() {
+          if (injected) return;
+          injected = true;
+          throw new Error("pause before Runtime publish");
+        },
+      },
     });
-    await service.journal.create({
-      kind: "fork",
-      operationId: "prepared-plan-fork",
-      sessionId: source.id,
-      sourceSessionId: source.id,
-      sourceCursor: snapshot.cursor,
-      targetSessionId: "mode-target",
-      targetMode: "plan",
-      stagingDirectory: join(workspacePaths.forkStaging, "prepared-plan-fork"),
-    });
+    await expect(
+      service.fork({
+        sourceSessionId: source.id,
+        targetSessionId: "mode-target",
+        targetMode: "plan",
+      }),
+    ).rejects.toThrow("pause before Runtime publish");
 
-    await expect(service.reconcileUnfinished()).resolves.toEqual([
+    const restarted = new SessionForkService({
+      workDir,
+      sessionManager: manager,
+      fileHistoryBaseDir: join(root, "file-history"),
+    });
+    await expect(restarted.reconcileUnfinished()).resolves.toEqual([
       { operationId: "prepared-plan-fork", state: "completed" },
     ]);
-    const target = await manager.getOrCreate("mode-target", workDir, {
-      persistence: true,
-      sessionCatalog: false,
-    });
+    const target = await manager.getOrCreate("mode-target", workDir, { persistence: true });
     expect((await target.readHydrationSnapshot()).runtime.settings).toMatchObject({
       mode: "plan",
       prePlanMode: "yolo",
@@ -358,7 +344,7 @@ describe("session fork published mainline", () => {
     await source.close();
   });
 
-  it("freezes File History in the same source-session boundary as the JSONL cursor", async () => {
+  it("freezes File History in the same source-session boundary as the RuntimeEvent cursor", async () => {
     const root = await mkdtemp(join(tmpdir(), "pico-session-fork-atomic-scene-"));
     cleanup.push(root);
     const workDir = join(root, "workspace");
@@ -366,10 +352,7 @@ describe("session fork published mainline", () => {
     const manager = new SessionManager();
     const sourceId = "atomic-source";
     const targetId = "atomic-target";
-    const source = await manager.getOrCreate(sourceId, workDir, {
-      persistence: true,
-      sessionCatalog: false,
-    });
+    const source = await manager.getOrCreate(sourceId, workDir, { persistence: true });
     await source.commitMessages({ role: "user", content: "冻结这一幕" });
     await source.flushPersistence();
     const initialSnapshot = await source.readDurableForkSnapshot();
@@ -411,9 +394,6 @@ describe("session fork published mainline", () => {
       workDir,
       sessionManager: manager,
       fileHistoryBaseDir,
-      catalogProjector: new SessionCatalogProjector(
-        new SessionCatalog({ baseDirectory: join(root, "catalog") }),
-      ),
     });
     const fork = service.fork({
       sourceSessionId: sourceId,

@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -6,7 +6,7 @@ import { Session } from "../../src/engine/session.js";
 import { createPicoCommandRegistry } from "../../src/input/pico-command-registry.js";
 import { processUserInput } from "../../src/input/process-user-input.js";
 import { resetSessionSettingsForTests } from "../../src/input/session-settings.js";
-import { JsonlMemoryStore } from "../../src/memory/jsonl-memory-store.js";
+import { InMemorySearchStore } from "../../src/memory/in-memory-search-store.js";
 import type {
   ConversationSearchStore,
   MemoryBackendStatus,
@@ -16,6 +16,7 @@ import { MemoryNudger } from "../../src/memory/memory-nudger.js";
 import type { Message } from "../../src/schema/message.js";
 import { SkillRegistry } from "../../src/memory/skill-registry.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
+import { RuntimeEventStore } from "../../src/runtime/runtime-event-store.js";
 
 class RuntimeDegradingStore implements ConversationSearchStore {
   status: MemoryBackendStatus = {
@@ -59,7 +60,7 @@ describe("memory resilience integration", () => {
 
     const first = new Session(sessionId, workDir, {
       persistence: true,
-      memorySearchStore: new JsonlMemoryStore({
+      memorySearchStore: new InMemorySearchStore({
         reason: degradedReason,
         recommendation,
       }),
@@ -72,7 +73,7 @@ describe("memory resilience integration", () => {
 
     const restored = new Session(sessionId, workDir, {
       persistence: true,
-      memorySearchStore: new JsonlMemoryStore({
+      memorySearchStore: new InMemorySearchStore({
         reason: degradedReason,
         recommendation,
       }),
@@ -81,9 +82,9 @@ describe("memory resilience integration", () => {
 
     expect(restored.length).toBe(2);
     expect(restored.memoryStatus).toMatchObject({
-      backend: "jsonl_memory",
+      backend: "in_memory",
       state: "degraded",
-      persistentSource: "session_jsonl",
+      persistentSource: "sqlite",
       reason: degradedReason,
     });
     expect(restored.search("青铜猫头鹰")).toEqual([
@@ -118,7 +119,7 @@ describe("memory resilience integration", () => {
     });
     const status = await processUserInput("/status", { registry });
     const statusMessage = status.type === "local-command" ? status.result.message : "";
-    expect(statusMessage).toContain("Memory: jsonl_memory (degraded; source=session_jsonl)");
+    expect(statusMessage).toContain("Memory: in_memory (degraded; source=sqlite)");
     expect(statusMessage).toContain(degradedReason);
 
     const doctor = await processUserInput("/doctor", { registry });
@@ -127,15 +128,16 @@ describe("memory resilience integration", () => {
     expect(doctorMessage).toContain(recommendation);
 
     const workspacePaths = resolvePicoPaths(workDir).workspace;
-    const sessionLog = await readFile(join(workspacePaths.sessions, `${sessionId}.jsonl`), "utf8");
-    expect(sessionLog).toContain("青铜猫头鹰计划");
+    const runtimeStore = new RuntimeEventStore({ databasePath: workspacePaths.runtimeDatabase });
+    expect(JSON.stringify(await runtimeStore.readSession(sessionId))).toContain("青铜猫头鹰计划");
+    await expect(access(join(workspacePaths.root, "sessions"))).rejects.toThrow();
     const summaries = await readFile(join(workspacePaths.memory, "summaries.json"), "utf8");
     expect(summaries).toContain("用户确定了青铜猫头鹰计划");
 
     await restored.close();
   });
 
-  it("switches to JSONL and rebuilds history after a runtime SQLite failure", async () => {
+  it("switches to in-memory search and rebuilds history after an FTS5 failure", async () => {
     const workDir = await mkdtemp(join(tmpdir(), "pico-memory-runtime-fallback-"));
     cleanups.push(() => rm(workDir, { recursive: true, force: true }));
     const session = new Session("runtime-fallback", workDir, {
@@ -146,7 +148,7 @@ describe("memory resilience integration", () => {
     session.append({ role: "user", content: "运行期降级后仍可搜索青铜灯塔" });
 
     expect(session.memoryStatus).toMatchObject({
-      backend: "jsonl_memory",
+      backend: "in_memory",
       state: "degraded",
       persistentSource: "none",
       reason: "simulated SQLite write failure",
