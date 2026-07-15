@@ -39,6 +39,7 @@ import {
   type JsonObject,
 } from "./protocol.js";
 import { LocalDaemonHost } from "./runtime-host.js";
+import { canonicalizeWorkspacePath } from "./workspace-registry.js";
 import { WorkspaceRegistrationStore } from "./workspace-registration.js";
 import { WorkspaceRuntimeService } from "./workspace-runtime-service.js";
 
@@ -64,8 +65,8 @@ export function createProductionLocalDaemonHost(
   const registrationStore = options.registrationStore ?? new WorkspaceRegistrationStore();
   const pendingApprovals = new Map<string, PendingInteraction>();
   const pendingPrompts = new Map<string, PendingInteraction>();
-  const resolvedApprovals = new Set<string>();
-  const resolvedPrompts = new Set<string>();
+  const resolvedApprovals = new Map<string, InteractionScope>();
+  const resolvedPrompts = new Map<string, InteractionScope>();
   let desktopResourceVersion = Date.now();
   const nextDesktopResourceVersion = () => ++desktopResourceVersion;
   const service = new WorkspaceRuntimeService({
@@ -219,50 +220,99 @@ export function createProductionLocalDaemonHost(
     trustStore,
     automations,
     interactions: {
-      respondApproval: ({ approvalId, decision, reason }) => {
-        const pending = pendingApprovals.get(approvalId);
-        if (!pending) {
-          if (resolvedApprovals.has(approvalId)) return { accepted: true, alreadyResolved: true };
-          throw unknownInteraction("Approval", approvalId);
-        }
-        const accepted = pending.broker.resolveApproval({
-          taskId: approvalId,
-          decision:
-            decision === "allow_session"
-              ? "approve-session"
-              : decision === "allow_once"
-                ? "approve"
-                : "reject",
-          ...(reason ? { reason } : {}),
-        });
-        if (!accepted) {
-          throw new RuntimeProtocolError(
-            RUNTIME_ERROR_CODES.CONFLICT,
-            `Approval ${approvalId} 已在另一请求中处理`,
-          );
-        }
-        return { accepted, alreadyResolved: false };
+      respondApproval: async (input) => {
+        const workspacePath = await canonicalizeWorkspacePath(input.workspacePath);
+        const respond = () => {
+          const key = interactionKey(workspacePath, input.approvalId);
+          const pending = pendingApprovals.get(key);
+          if (!pending) {
+            const resolved = resolvedApprovals.get(key);
+            if (!resolved) throw unknownInteraction("Approval", input.approvalId);
+            assertInteractionScope(resolved, input, "Approval", input.approvalId, workspacePath);
+            return { accepted: true, alreadyResolved: true };
+          }
+          assertInteractionScope(pending, input, "Approval", input.approvalId, workspacePath);
+          const accepted = pending.broker.resolveApproval({
+            taskId: input.approvalId,
+            decision:
+              input.decision === "allow_session"
+                ? "approve-session"
+                : input.decision === "allow_once"
+                  ? "approve"
+                  : "reject",
+            ...(input.reason ? { reason: input.reason } : {}),
+          });
+          if (!accepted) {
+            throw new RuntimeProtocolError(
+              RUNTIME_ERROR_CODES.CONFLICT,
+              `Approval ${input.approvalId} 已在另一请求中处理`,
+            );
+          }
+          return { accepted, alreadyResolved: false };
+        };
+        if (!input.idempotencyKey) return respond();
+        const outcome = await service.executeIdempotentDaemonCommand(
+          workspacePath,
+          {
+            commandType: "approval.respond",
+            idempotencyKey: input.idempotencyKey,
+            request: {
+              workspacePath,
+              approvalId: input.approvalId,
+              decision: input.decision,
+              ...(input.reason !== undefined ? { reason: input.reason } : {}),
+              ...(input.runId !== undefined ? { runId: input.runId } : {}),
+              ...(input.sessionId !== undefined ? { sessionId: input.sessionId } : {}),
+            },
+          },
+          () => ({ result: respond() }),
+        );
+        return outcome.result;
       },
-      respondPrompt: ({ promptId, answer }) => {
-        const pending = pendingPrompts.get(promptId);
-        if (!pending) {
-          if (resolvedPrompts.has(promptId)) return { accepted: true, alreadyResolved: true };
-          throw unknownInteraction("Prompt", promptId);
-        }
-        if (typeof answer !== "string" || !answer.trim()) {
-          throw new RuntimeProtocolError(
-            RUNTIME_ERROR_CODES.INVALID_PARAMS,
-            "prompt.respond answer 必须是非空选项 ID 或标签",
-          );
-        }
-        const accepted = pending.broker.answerPrompt(promptId, answer.trim());
-        if (!accepted) {
-          throw new RuntimeProtocolError(
-            RUNTIME_ERROR_CODES.INVALID_PARAMS,
-            `Prompt ${promptId} 的 answer 不是服务端提供的选项`,
-          );
-        }
-        return { accepted, alreadyResolved: false };
+      respondPrompt: async (input) => {
+        const workspacePath = await canonicalizeWorkspacePath(input.workspacePath);
+        const respond = () => {
+          const key = interactionKey(workspacePath, input.promptId);
+          const pending = pendingPrompts.get(key);
+          if (!pending) {
+            const resolved = resolvedPrompts.get(key);
+            if (!resolved) throw unknownInteraction("Prompt", input.promptId);
+            assertInteractionScope(resolved, input, "Prompt", input.promptId, workspacePath);
+            return { accepted: true, alreadyResolved: true };
+          }
+          assertInteractionScope(pending, input, "Prompt", input.promptId, workspacePath);
+          if (typeof input.answer !== "string" || !input.answer.trim()) {
+            throw new RuntimeProtocolError(
+              RUNTIME_ERROR_CODES.INVALID_PARAMS,
+              "prompt.respond answer 必须是非空选项 ID 或标签",
+            );
+          }
+          const accepted = pending.broker.answerPrompt(input.promptId, input.answer.trim());
+          if (!accepted) {
+            throw new RuntimeProtocolError(
+              RUNTIME_ERROR_CODES.INVALID_PARAMS,
+              `Prompt ${input.promptId} 的 answer 不是服务端提供的选项`,
+            );
+          }
+          return { accepted, alreadyResolved: false };
+        };
+        if (!input.idempotencyKey) return respond();
+        const outcome = await service.executeIdempotentDaemonCommand(
+          workspacePath,
+          {
+            commandType: "prompt.respond",
+            idempotencyKey: input.idempotencyKey,
+            request: {
+              workspacePath,
+              promptId: input.promptId,
+              answer: input.answer,
+              ...(input.runId !== undefined ? { runId: input.runId } : {}),
+              ...(input.sessionId !== undefined ? { sessionId: input.sessionId } : {}),
+            },
+          },
+          () => ({ result: respond() }),
+        );
+        return outcome.result;
       },
     },
   });
@@ -390,11 +440,14 @@ async function resolveCronModelRoute(job: CronJobRecord) {
   return resolved;
 }
 
-interface PendingInteraction {
-  readonly broker: DesktopInteractionBroker;
+interface InteractionScope {
   readonly workspacePath: string;
   readonly runId: string;
   readonly sessionId: string;
+}
+
+interface PendingInteraction extends InteractionScope {
+  readonly broker: DesktopInteractionBroker;
 }
 
 async function resolveDesktopModelRoute(workspacePath: string, credentialVault: CredentialVault) {
@@ -525,8 +578,8 @@ function publishInteractionEvent(
   event: DesktopInteractionEvent,
   pendingApprovals: Map<string, PendingInteraction>,
   pendingPrompts: Map<string, PendingInteraction>,
-  resolvedApprovals: Set<string>,
-  resolvedPrompts: Set<string>,
+  resolvedApprovals: Map<string, InteractionScope>,
+  resolvedPrompts: Map<string, InteractionScope>,
   nextResourceVersion: () => number,
 ): void {
   const scope = {
@@ -535,7 +588,10 @@ function publishInteractionEvent(
     runId: interaction.runId,
   };
   if (event.kind === "approval.pending") {
-    pendingApprovals.set(event.notice.taskId, interaction);
+    pendingApprovals.set(
+      interactionKey(interaction.workspacePath, event.notice.taskId),
+      interaction,
+    );
     service.publishDesktopEvent(
       createRuntimeEvent({
         topic: "approval.requested",
@@ -559,8 +615,9 @@ function publishInteractionEvent(
     return;
   }
   if (event.kind === "approval.settled") {
-    pendingApprovals.delete(event.taskId);
-    rememberResolved(resolvedApprovals, event.taskId);
+    const key = interactionKey(interaction.workspacePath, event.taskId);
+    pendingApprovals.delete(key);
+    rememberResolved(resolvedApprovals, key, interaction);
     service.publishDesktopEvent(
       createRuntimeEvent({
         topic: "approval.resolved",
@@ -581,7 +638,10 @@ function publishInteractionEvent(
     return;
   }
   if (event.kind === "prompt.pending") {
-    pendingPrompts.set(event.request.requestId, interaction);
+    pendingPrompts.set(
+      interactionKey(interaction.workspacePath, event.request.requestId),
+      interaction,
+    );
     service.publishDesktopEvent(
       createRuntimeEvent({
         topic: "prompt.requested",
@@ -605,8 +665,9 @@ function publishInteractionEvent(
     );
     return;
   }
-  pendingPrompts.delete(event.requestId);
-  rememberResolved(resolvedPrompts, event.requestId);
+  const key = interactionKey(interaction.workspacePath, event.requestId);
+  pendingPrompts.delete(key);
+  rememberResolved(resolvedPrompts, key, interaction);
   service.publishDesktopEvent(
     createRuntimeEvent({
       topic: "prompt.resolved",
@@ -622,6 +683,26 @@ function unknownInteraction(kind: "Approval" | "Prompt", id: string): RuntimePro
   return new RuntimeProtocolError(RUNTIME_ERROR_CODES.NOT_FOUND, `${kind} ${id} 不存在或已过期`);
 }
 
+function assertInteractionScope(
+  expected: InteractionScope,
+  requested: { readonly runId?: string; readonly sessionId?: string },
+  kind: "Approval" | "Prompt",
+  id: string,
+  workspacePath: string,
+): void {
+  if (
+    expected.workspacePath !== workspacePath ||
+    (requested.runId !== undefined && requested.runId !== expected.runId) ||
+    (requested.sessionId !== undefined && requested.sessionId !== expected.sessionId)
+  ) {
+    throw unknownInteraction(kind, id);
+  }
+}
+
+function interactionKey(workspacePath: string, id: string): string {
+  return `${workspacePath}\0${id}`;
+}
+
 function removeBrokerInteractions(
   interactions: Map<string, PendingInteraction>,
   broker: DesktopInteractionBroker,
@@ -631,9 +712,13 @@ function removeBrokerInteractions(
   }
 }
 
-function rememberResolved(ids: Set<string>, id: string): void {
-  ids.add(id);
-  if (ids.size > 2_000) ids.delete(ids.values().next().value as string);
+function rememberResolved(
+  interactions: Map<string, InteractionScope>,
+  key: string,
+  scope: InteractionScope,
+): void {
+  interactions.set(key, scope);
+  if (interactions.size > 2_000) interactions.delete(interactions.keys().next().value as string);
 }
 
 function jsonObject(value: unknown): JsonObject {
