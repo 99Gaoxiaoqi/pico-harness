@@ -2,6 +2,7 @@ import { app, autoUpdater, dialog } from "electron";
 
 const INITIAL_CHECK_DELAY_MS = 15_000;
 const CHECK_INTERVAL_MS = 6 * 60 * 60 * 1_000;
+declare const __PICO_UPDATE_FEED_URL__: string | null;
 
 /**
  * Enables the signed Squirrel update path only for packaged builds with an explicit HTTPS feed.
@@ -9,7 +10,7 @@ const CHECK_INTERVAL_MS = 6 * 60 * 60 * 1_000;
  */
 export function configureAutoUpdates(
   onBeforeQuit: () => void,
-  feedUrl = process.env.PICO_UPDATE_FEED_URL,
+  feedUrl = __PICO_UPDATE_FEED_URL__,
 ): () => void {
   if (!app.isPackaged || !isHttpsUrl(feedUrl)) return () => undefined;
 
@@ -50,7 +51,7 @@ export function configureAutoUpdates(
   };
 }
 
-function isHttpsUrl(value: string | undefined): value is string {
+function isHttpsUrl(value: string | null | undefined): value is string {
   if (!value) return false;
   try {
     return new URL(value).protocol === "https:";

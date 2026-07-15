@@ -9,9 +9,9 @@
 - `PICO_MAC_SIGN_IDENTITY`：Developer ID Application 证书身份。
 - `PICO_APPLE_ID`、`PICO_APPLE_ID_PASSWORD`、`PICO_APPLE_TEAM_ID`：`notarytool` 公证凭证。
 - `PICO_UPDATE_BASE_URL`：Forge 生成更新 manifest 时使用的 HTTPS 静态发布根地址。
-- `PICO_UPDATE_FEED_URL`：应用运行时读取的 Squirrel HTTPS 更新源。
+- `PICO_UPDATE_FEED_URL`：构建时验证并写入应用的 Squirrel HTTPS 更新源，安装后不再依赖用户运行环境变量。
 
-缺少任一签名/公证变量时，只能生成本地无签名 smoke 包，不能标记为 Release。更新源缺失或不是 HTTPS 时，自动更新能力保持禁用并在界面中显示不可用。
+缺少任一签名/公证变量时，只能生成本地无签名 smoke 包，不能标记为 Release。正式发布缺少任一更新地址、地址非 HTTPS，或 tag/手工输入版本与 `apps/desktop/package.json` 不一致时，工作流直接失败。本地未配置更新地址的 smoke 包保持禁用自动更新。
 
 ## 验证顺序
 
