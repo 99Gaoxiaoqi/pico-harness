@@ -181,6 +181,33 @@ export type RuntimeEvent =
   | RuntimeSessionStateCommittedEvent
   | RuntimeRunTerminalEvent;
 
+export const RUNTIME_EVENT_KINDS = [
+  "run.started",
+  "message.committed",
+  "tool.started",
+  "approval.requested",
+  "approval.settled",
+  "model.call.started",
+  "model.call.settled",
+  "context.checkpoint.recorded",
+  "history.rewound",
+  "session.forked",
+  "session.state.committed",
+  "run.terminal",
+] as const satisfies readonly RuntimeEvent["kind"][];
+
+export const RUNTIME_EVENT_DECODE_ERROR_CODES = [
+  "malformed_json",
+  "unsupported_legacy_version",
+  "unsupported_future_version",
+  "unknown_kind",
+  "invalid_payload",
+] as const;
+
+export type RuntimeEventDecodeErrorCode = (typeof RUNTIME_EVENT_DECODE_ERROR_CODES)[number];
+
+const RUNTIME_EVENT_KIND_SET = new Set<string>(RUNTIME_EVENT_KINDS);
+
 export function isRuntimeTerminalEvent(event: RuntimeEvent): event is RuntimeRunTerminalEvent {
   return event.kind === "run.terminal";
 }
@@ -193,6 +220,66 @@ export function runtimeEventHasModelMessage(
   event: RuntimeEvent,
 ): event is RuntimeMessageCommittedEvent {
   return event.kind === "message.committed" && event.visibility === "model" && !event.partial;
+}
+
+/** Decodes a supported event without rewriting or upgrading the persisted fact. */
+export function decodeRuntimeEvent(value: unknown): RuntimeEvent {
+  if (isRecord(value)) {
+    const schemaVersion = value["schemaVersion"];
+    if (Number.isSafeInteger(schemaVersion)) {
+      if ((schemaVersion as number) < RUNTIME_EVENT_SCHEMA_VERSION) {
+        throw new RuntimeEventDecodeError(
+          "unsupported_legacy_version",
+          `Runtime event schema version ${String(schemaVersion)} is older than supported ${RUNTIME_EVENT_SCHEMA_VERSION}`,
+        );
+      }
+      if ((schemaVersion as number) > RUNTIME_EVENT_SCHEMA_VERSION) {
+        throw new RuntimeEventDecodeError(
+          "unsupported_future_version",
+          `Runtime event schema version ${String(schemaVersion)} is newer than supported ${RUNTIME_EVENT_SCHEMA_VERSION}`,
+        );
+      }
+    }
+
+    const kind = value["kind"];
+    if (
+      schemaVersion === RUNTIME_EVENT_SCHEMA_VERSION &&
+      typeof kind === "string" &&
+      kind.length > 0 &&
+      !RUNTIME_EVENT_KIND_SET.has(kind)
+    ) {
+      throw new RuntimeEventDecodeError(
+        "unknown_kind",
+        `Runtime event kind is unsupported: ${kind}`,
+      );
+    }
+  }
+
+  try {
+    assertRuntimeEvent(value);
+  } catch (error) {
+    if (error instanceof RuntimeEventDecodeError) throw error;
+    throw new RuntimeEventDecodeError(
+      "invalid_payload",
+      `Runtime event payload is invalid: ${errorMessage(error)}`,
+      { cause: error },
+    );
+  }
+  return value;
+}
+
+export function decodeRuntimeEventJson(raw: string): RuntimeEvent {
+  let value: unknown;
+  try {
+    value = JSON.parse(raw) as unknown;
+  } catch (error) {
+    throw new RuntimeEventDecodeError(
+      "malformed_json",
+      `Runtime event JSON is malformed: ${errorMessage(error)}`,
+      { cause: error },
+    );
+  }
+  return decodeRuntimeEvent(value);
 }
 
 export function assertRuntimeEvent(value: unknown): asserts value is RuntimeEvent {
@@ -313,9 +400,19 @@ export function assertRuntimeEvent(value: unknown): asserts value is RuntimeEven
 }
 
 export class RuntimeEventIntegrityError extends Error {
-  constructor(message: string) {
-    super(message);
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
     this.name = "RuntimeEventIntegrityError";
+  }
+}
+
+export class RuntimeEventDecodeError extends RuntimeEventIntegrityError {
+  readonly code: RuntimeEventDecodeErrorCode;
+
+  constructor(code: RuntimeEventDecodeErrorCode, message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "RuntimeEventDecodeError";
+    this.code = code;
   }
 }
 
@@ -413,4 +510,8 @@ function isNonNegativeNumber(value: unknown): boolean {
 
 function isNonNegativeInteger(value: unknown): boolean {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
