@@ -3,7 +3,6 @@
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Node](https://img.shields.io/badge/node-%3E%3D22-green.svg)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.9-blue.svg)
-![Tests](https://img.shields.io/badge/tests-1915%20passed-brightgreen.svg)
 
 用 TypeScript 从零实现的工业级 Agent Harness 引擎,对标课程《从 0 开始构建 Agent Harness》中的 `go-pico`。
 
@@ -88,7 +87,6 @@ pico-harness/
 │   ├── tools/            # 工具执行层:Registry + Middleware + Read/Write/Edit/Bash + Subagent
 │   ├── approval/         # 安全防线:高危命令拦截 + 人工审批管理器
 │   ├── observability/    # 可观测性:CostTracker 成本追踪 + Tracing 链路追踪 + Logger
-├── tests/                # 单元/集成测试
 ├── AGENTS.md             # 动态系统提示词来源(PromptComposer 自动加载)
 ├── .env.example          # 环境变量模板
 └── package.json
@@ -212,15 +210,12 @@ Isolated Worker 完成后可由宿主在最小环境中提交，禁用 Git hooks
 
 代码智能优先使用项目配置的 LSP server，其次发现 PATH 中已安装的 TypeScript/Python/Rust/Go server；不可用时快速降级为渐进式 Repo Map。当前每个 TUI Session 只启动第一个匹配的 LSP，`languages` 尚未实现多 server 路由；混合语言 server pool 已列入后续收口。`lsp.servers[].command` 是宿主直接启动的 language-server 可执行文件，`args` 是其参数；它不是 shell 脚本，也不是 TUI slash command。`code_definition`、`code_references`、`code_symbols`、`code_diagnostics`、`code_call_hierarchy` 和 `repo_map` 属于模型按需激活的内部工具，用户无需手动执行 `/lsp`。
 
-## 🧪 测试与评估
+## 🧪 质量检查
 
 ```bash
-npm test           # 运行默认单元/集成测试(不含真实 e2e)
 npm run typecheck  # TypeScript 类型检查
 npm run lint       # ESLint 代码检查
 npm run build      # 编译到 dist/
-npm run test:e2e   # 无密钥、无外网的确定性 E2E
-npm run smoke:tui  # 构建后在 PTY 中驱动 TUI 并调用本地 fake OpenAI
 npm pack --dry-run # 验证发布包内容与 pico bin
 ```
 

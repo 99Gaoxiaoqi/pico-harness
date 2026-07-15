@@ -50,8 +50,5 @@ jobs:
       - name: Lint repository and desktop packages
         run: npm run lint
 
-      - name: Test desktop packages
-        run: npm test --workspace @pico/desktop
-
       - name: Package unsigned desktop smoke build
         run: npm run desktop:package

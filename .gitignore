@@ -7,6 +7,12 @@ dist/
 **/.vite/
 apps/desktop/out/
 
+# Test and browser automation output
+coverage/
+test-results/
+playwright-report/
+output/playwright/
+
 # Environment variables(含密钥,绝不提交)
 .env
 .env.local
