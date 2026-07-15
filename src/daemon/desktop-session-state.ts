@@ -3,12 +3,11 @@ import { join, resolve } from "node:path";
 import { resolvePicoHome } from "../paths/pico-paths.js";
 import { writeJsonAtomic } from "../storage/atomic-json.js";
 
-const DESKTOP_SESSION_STATE_VERSION = 1 as const;
+const DESKTOP_SESSION_STATE_VERSION = 2 as const;
 
 export interface DesktopSessionMetadata {
   readonly workspacePath: string;
   readonly sessionId: string;
-  readonly title?: string;
   readonly archivedAt?: number;
   readonly updatedAt: number;
 }
@@ -26,8 +25,8 @@ export interface DesktopSessionStateStoreOptions {
 }
 
 /**
- * Desktop-only presentation metadata. Conversation content remains in the existing
- * workspace RuntimeEvent history; this store never moves, truncates, or deletes a CLI session.
+ * Desktop-only archive and UI metadata. Session identity and title remain in the workspace
+ * RuntimeEvent history; this store never moves, truncates, or deletes a CLI session.
  */
 export class DesktopSessionStateStore {
   readonly filePath: string;
@@ -60,11 +59,10 @@ export class DesktopSessionStateStore {
   async update(
     workspacePath: string,
     sessionId: string,
-    patch: { readonly title?: string; readonly archived?: boolean },
+    patch: { readonly archived?: boolean },
   ): Promise<DesktopSessionMetadata> {
     const canonical = normalizeWorkspacePath(workspacePath);
     const normalizedId = requireNonEmpty(sessionId, "sessionId");
-    const title = normalizeTitle(patch.title);
     let result: DesktopSessionMetadata | undefined;
     await this.mutate(async (state) => {
       const current = state.sessions.find(
@@ -74,7 +72,6 @@ export class DesktopSessionStateStore {
       result = {
         workspacePath: canonical,
         sessionId: normalizedId,
-        ...((title ?? current?.title) ? { title: title ?? current?.title } : {}),
         ...(patch.archived === true
           ? { archivedAt: current?.archivedAt ?? now }
           : patch.archived === false
@@ -147,7 +144,7 @@ function parseMetadata(value: unknown, filePath: string): DesktopSessionMetadata
     typeof value["sessionId"] !== "string" ||
     typeof value["updatedAt"] !== "number" ||
     !Number.isFinite(value["updatedAt"]) ||
-    (value["title"] !== undefined && typeof value["title"] !== "string") ||
+    value["title"] !== undefined ||
     (value["archivedAt"] !== undefined &&
       (typeof value["archivedAt"] !== "number" || !Number.isFinite(value["archivedAt"])))
   ) {
@@ -156,7 +153,6 @@ function parseMetadata(value: unknown, filePath: string): DesktopSessionMetadata
   return {
     workspacePath: normalizeWorkspacePath(value["workspacePath"]),
     sessionId: requireNonEmpty(value["sessionId"], "sessionId"),
-    ...(value["title"] !== undefined ? { title: normalizeTitle(value["title"]) } : {}),
     ...(value["archivedAt"] !== undefined ? { archivedAt: value["archivedAt"] } : {}),
     updatedAt: value["updatedAt"],
   };
@@ -164,15 +160,6 @@ function parseMetadata(value: unknown, filePath: string): DesktopSessionMetadata
 
 function normalizeWorkspacePath(workspacePath: string): string {
   return resolve(requireNonEmpty(workspacePath, "workspacePath")).normalize("NFC");
-}
-
-function normalizeTitle(title: string | undefined): string | undefined {
-  if (title === undefined) return undefined;
-  const normalized = title.replace(/\s+/gu, " ").trim();
-  if (!normalized || normalized.length > 120) {
-    throw new Error("title must contain 1 to 120 characters");
-  }
-  return normalized;
 }
 
 function requireNonEmpty(value: string, field: string): string {
