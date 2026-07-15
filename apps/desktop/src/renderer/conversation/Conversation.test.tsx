@@ -1,12 +1,14 @@
 // @vitest-environment jsdom
 
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { userEvent } from "@testing-library/user-event";
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ConversationComposer } from "./ConversationComposer.js";
 import { ConversationInspector } from "./ConversationInspector.js";
+import { ConversationSurface } from "./ConversationSurface.js";
 import { ConversationTranscript } from "./ConversationTranscript.js";
+import { mergeConversationItemGroups } from "./items.js";
 import type { ComposerBehavior, ConversationItemView } from "./types.js";
 
 afterEach(cleanup);
@@ -53,6 +55,54 @@ const transcript: readonly ConversationItemView[] = [
 ];
 
 describe("Conversation components", () => {
+  it("hides non-terminal run boundaries and renders one quiet failure summary", () => {
+    render(
+      <ConversationTranscript
+        items={[
+          {
+            id: "run-started",
+            kind: "runBoundary",
+            status: "started",
+            label: "Pico 正在处理",
+          },
+          {
+            id: "run-failed",
+            kind: "runBoundary",
+            status: "failed",
+            label: "Pico 正在处理",
+            duration: "12 秒",
+            detail: "连接已中断",
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.getAllByText("运行失败")).toHaveLength(1);
+    expect(screen.getByText("12 秒")).toBeTruthy();
+    expect(screen.getByText("连接已中断")).toBeTruthy();
+    expect(screen.queryByText(/Pico 正在处理/)).toBeNull();
+    expect(screen.getByRole("list", { name: "会话记录" }).children).toHaveLength(1);
+  });
+
+  it("keeps persisted interaction state when live and synthetic entries catch up", () => {
+    const persisted: ConversationItemView = {
+      id: "approval:approval-1",
+      kind: "approval",
+      title: "允许执行测试？",
+      detail: "npm test",
+      state: "allowed",
+    };
+    const synthetic: ConversationItemView = {
+      id: "approval-1",
+      kind: "approval",
+      title: "允许执行测试？",
+      detail: "npm test",
+      state: "pending",
+    };
+
+    expect(mergeConversationItemGroups([persisted], [synthetic])).toEqual([persisted]);
+  });
+
   it("renders a continuous, semantic transcript and exposes inspectable items", async () => {
     const user = userEvent.setup();
     const onOpenItem = vi.fn();
@@ -120,7 +170,10 @@ describe("Conversation components", () => {
     }
 
     render(<Harness />);
+    expect(screen.getByRole("form", { name: "消息输入" })).toBeTruthy();
+    expect(screen.queryByText("就绪")).toBeNull();
     const textbox = screen.getByRole("textbox", { name: "消息" });
+    expect(textbox.getAttribute("aria-describedby")).toBeNull();
     await user.type(textbox, "第一行{Shift>}{Enter}{/Shift}第二行");
     expect((textbox as HTMLTextAreaElement).value).toBe("第一行\n第二行");
     expect(onSubmit).not.toHaveBeenCalled();
@@ -133,6 +186,37 @@ describe("Conversation components", () => {
     await user.type(textbox, "   ");
     await user.keyboard("{Enter}");
     expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("only follows new content while the reader remains near the bottom", () => {
+    const { rerender } = render(
+      <ConversationSurface composer={<div>输入区</div>}>
+        <div>第一条</div>
+      </ConversationSurface>,
+    );
+    const scroll = screen.getByRole("region", { name: "会话内容" });
+    Object.defineProperties(scroll, {
+      clientHeight: { configurable: true, value: 100 },
+      scrollHeight: { configurable: true, value: 1_000 },
+      scrollTop: { configurable: true, writable: true, value: 200 },
+    });
+
+    fireEvent.scroll(scroll);
+    rerender(
+      <ConversationSurface composer={<div>输入区</div>}>
+        <div>第二条</div>
+      </ConversationSurface>,
+    );
+    expect(scroll.scrollTop).toBe(200);
+
+    scroll.scrollTop = 850;
+    fireEvent.scroll(scroll);
+    rerender(
+      <ConversationSurface composer={<div>输入区</div>}>
+        <div>第三条</div>
+      </ConversationSurface>,
+    );
+    expect(scroll.scrollTop).toBe(1_000);
   });
 
   it("exposes resume and stop controls while paused", async () => {

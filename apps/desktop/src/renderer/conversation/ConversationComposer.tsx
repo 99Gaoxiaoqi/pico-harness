@@ -64,6 +64,15 @@ export function ConversationComposer({
   const statusId = useId();
   const canSubmit = value.trim().length > 0 && !disabled && !busy;
   const effectiveBehavior = status === "idle" ? "auto" : behavior === "auto" ? "steer" : behavior;
+  const resolvedStatusText =
+    statusText ??
+    (busy
+      ? "正在发送…"
+      : status === "running"
+        ? "Pico 正在工作"
+        : status === "paused"
+          ? "已暂停"
+          : undefined);
 
   const submit = () => {
     if (!canSubmit) return;
@@ -103,7 +112,7 @@ export function ConversationComposer({
         rows={1}
         disabled={disabled}
         placeholder={placeholder}
-        aria-describedby={statusId}
+        aria-describedby={resolvedStatusText ? statusId : undefined}
         onChange={(event) => onValueChange(event.target.value)}
         onKeyDown={handleKeyDown}
       />
@@ -156,10 +165,11 @@ export function ConversationComposer({
           )}
         </div>
         <div className="conversation-composer__actions">
-          <span id={statusId} className="conversation-composer__status" role="status">
-            {statusText ??
-              (status === "idle" ? "就绪" : status === "running" ? "Pico 正在工作" : "已暂停")}
-          </span>
+          {resolvedStatusText && (
+            <span id={statusId} className="conversation-composer__status" role="status">
+              {resolvedStatusText}
+            </span>
+          )}
           {trailingAccessory}
           {status === "running" && onPause && (
             <button

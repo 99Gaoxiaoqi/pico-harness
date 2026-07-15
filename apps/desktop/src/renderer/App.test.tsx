@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { userEvent } from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DesktopApp } from "./App.js";
@@ -487,6 +487,204 @@ describe("DesktopApp renderer", () => {
     expect(window.location.hash).toBe("#/session/session-retry");
   });
 
+  it("映射持久化审批与提问的完成状态，并保留会话作为唯一标题栏", async () => {
+    const workspacePath = "/Users/chen/Documents/interaction-state";
+    const runtime = new Proxy(
+      {},
+      {
+        get: (_target, property) => async () => {
+          const method = String(property);
+          const value = (() => {
+            if (method === "runtime.ping")
+              return { capabilities: ["session-conversation-v1", "runtime-events-v1"] };
+            if (method === "workspace.list") return { workspaces: [{ workspacePath }] };
+            if (method === "workspace.status") return { workspacePath, mode: "folder" };
+            if (method === "workspace.trustStatus") return { trusted: true };
+            if (method === "session.list")
+              return {
+                sessions: [{ sessionId: "session-interactions", title: "交互状态", updatedAt: 2 }],
+              };
+            if (method === "runs.list") return { runs: [] };
+            if (method === "session.transcript")
+              return {
+                session: { sessionId: "session-interactions" },
+                items: [
+                  {
+                    id: "approval-once-entry",
+                    kind: "approval",
+                    title: "单次允许",
+                    state: "allow_once",
+                    data: { approvalId: "approval-once", decision: "allow_once" },
+                  },
+                  {
+                    id: "approval-session-entry",
+                    kind: "approval",
+                    title: "会话允许",
+                    state: "allow_session",
+                    data: { approvalId: "approval-session", decision: "allow_session" },
+                  },
+                  {
+                    id: "approval-denied-entry",
+                    kind: "approval",
+                    title: "拒绝执行",
+                    state: "deny",
+                    data: { approvalId: "approval-denied", decision: "deny" },
+                  },
+                  {
+                    id: "prompt-answered-entry",
+                    kind: "prompt",
+                    title: "选择实现方式",
+                    state: "resolved",
+                    data: { promptId: "prompt-answered" },
+                  },
+                ],
+                queuedInputs: [],
+                revision: "revision-interactions",
+              };
+            if (method === "jobs.list") return { jobs: [] };
+            if (method === "config.skills") return { skills: [] };
+            if (method === "config.mcpServers") return { servers: [] };
+            if (method === "config.providers") return { providers: [] };
+            if (method === "config.get") return { version: 0 };
+            if (method === "usage.get") return { usage: {} };
+            return {};
+          })();
+          return successful(value);
+        },
+      },
+    ) as RendererBridge["runtime"];
+    installBridge(runtime);
+    window.history.replaceState({}, "", "/#/session/session-interactions");
+
+    render(<DesktopApp />);
+
+    expect(await screen.findByRole("heading", { level: 1, name: "交互状态" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "会话" })).toBeNull();
+    expect(await screen.findAllByText("已允许")).toHaveLength(2);
+    expect(screen.getByText("已拒绝")).toBeTruthy();
+    expect(screen.getByText("已回答")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "处理审批" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "回答问题" })).toBeNull();
+  });
+
+  it("忽略过期会话响应，并在权威 Transcript 无 activeRun 时清除旧运行态", async () => {
+    const workspacePath = "/Users/chen/Documents/conversation-race";
+    let eventListener: ((event: unknown) => void) | undefined;
+    let transcriptLoads = 0;
+    let resolveFirstTranscript:
+      | ((result: { readonly ok: true; readonly value: unknown }) => void)
+      | undefined;
+    const firstTranscript = new Promise<{ readonly ok: true; readonly value: unknown }>(
+      (resolve) => {
+        resolveFirstTranscript = resolve;
+      },
+    );
+    const runtime = new Proxy(
+      {},
+      {
+        get: (_target, property) => async () => {
+          const method = String(property);
+          if (method === "session.transcript") {
+            transcriptLoads += 1;
+            if (transcriptLoads === 1) return firstTranscript;
+            return successful({
+              session: { sessionId: "session-race" },
+              items: [{ id: "latest-message", kind: "assistantMessage", content: "最新会话响应" }],
+              queuedInputs: [],
+              revision: "revision-latest",
+            });
+          }
+          const value = (() => {
+            if (method === "runtime.ping")
+              return { capabilities: ["session-conversation-v1", "runtime-events-v1"] };
+            if (method === "workspace.list") return { workspaces: [{ workspacePath }] };
+            if (method === "workspace.status") return { workspacePath, mode: "folder" };
+            if (method === "workspace.trustStatus") return { trusted: true };
+            if (method === "session.list")
+              return {
+                sessions: [{ sessionId: "session-race", title: "竞态会话", updatedAt: 2 }],
+              };
+            if (method === "runs.list")
+              return {
+                runs: [
+                  {
+                    runId: "run-stale",
+                    sessionId: "session-race",
+                    description: "过期运行",
+                    status: "running",
+                  },
+                ],
+              };
+            if (method === "jobs.list") return { jobs: [] };
+            if (method === "config.skills") return { skills: [] };
+            if (method === "config.mcpServers") return { servers: [] };
+            if (method === "config.providers") return { providers: [] };
+            if (method === "config.get") return { version: 0 };
+            if (method === "usage.get") return { usage: {} };
+            return {};
+          })();
+          return successful(value);
+        },
+      },
+    ) as RendererBridge["runtime"];
+    (window as unknown as { pico?: RendererBridge }).pico = {
+      runtime,
+      events: {
+        subscribe: (_params, listener) => {
+          eventListener = listener;
+          return { ready: successful({ subscribed: true }), dispose: vi.fn() };
+        },
+      },
+      platform: {
+        chooseWorkspace: () => successful(undefined),
+        openDirectory: () => successful(undefined),
+        getLaunchAtLogin: () => successful(false),
+        setLaunchAtLogin: () => successful(undefined),
+      },
+      lifecycle: {
+        setBackgroundMode: () => successful(undefined),
+        quit: () => successful(undefined),
+      },
+    };
+    window.history.replaceState({}, "", "/#/session/session-race");
+
+    render(<DesktopApp />);
+    await waitFor(() => expect(transcriptLoads).toBe(1));
+    eventListener?.({
+      eventId: "run-finished-race",
+      topic: "run.finished",
+      scope: { workspacePath, sessionId: "session-race", runId: "run-stale" },
+      payload: { runId: "run-stale" },
+    });
+
+    expect(await screen.findByText("最新会话响应")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "停止运行" })).toBeNull();
+    expect(screen.queryByText("Pico 正在工作")).toBeNull();
+
+    await act(async () => {
+      resolveFirstTranscript?.(
+        await successful({
+          session: { sessionId: "session-race" },
+          items: [{ id: "stale-message", kind: "assistantMessage", content: "过期会话响应" }],
+          activeRun: {
+            runId: "run-stale",
+            sessionId: "session-race",
+            description: "过期运行",
+            status: "running",
+          },
+          queuedInputs: [],
+          revision: "revision-stale",
+        }),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText("最新会话响应")).toBeTruthy();
+    expect(screen.queryByText("过期会话响应")).toBeNull();
+    expect(screen.queryByRole("button", { name: "停止运行" })).toBeNull();
+  });
+
   it("按 Session 隔离 Changes，并使用所属 Run 的指纹审批", async () => {
     const user = userEvent.setup();
     const reviewCalls: Readonly<Record<string, unknown>>[] = [];
@@ -628,6 +826,26 @@ describe("DesktopApp renderer", () => {
       payload: { approvalId: "approval-b", decision: "allow_once" },
     });
     await waitFor(() => expect(screen.queryByRole("button", { name: "处理审批" })).toBeNull());
+    expect(await screen.findByText("已允许")).toBeTruthy();
+    eventListener?.({
+      eventId: "prompt-requested-b",
+      topic: "prompt.requested",
+      scope: { workspacePath, sessionId: "session-b", runId: "run-b" },
+      payload: {
+        promptId: "prompt-b",
+        runId: "run-b",
+        prompt: { question: "继续审阅 B？", options: ["继续", "停止"] },
+      },
+    });
+    expect(await screen.findByRole("button", { name: "回答问题" })).toBeTruthy();
+    eventListener?.({
+      eventId: "prompt-resolved-b",
+      topic: "prompt.resolved",
+      scope: { workspacePath, sessionId: "session-b", runId: "run-b" },
+      payload: { promptId: "prompt-b" },
+    });
+    await waitFor(() => expect(screen.queryByRole("button", { name: "回答问题" })).toBeNull());
+    expect(await screen.findByText("已回答")).toBeTruthy();
     await user.click(await screen.findByRole("button", { name: "审阅更改" }));
     expect(await screen.findByText("b.ts")).toBeTruthy();
     expect(screen.queryByText("a.ts")).toBeNull();
