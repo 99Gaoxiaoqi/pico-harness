@@ -7,8 +7,8 @@
 | 文件               | 行数  | 职责                                                     |
 | ------------------ | ----- | -------------------------------------------------------- |
 | `loop.ts`          | ~1316 | AgentEngine 主循环（心脏）                               |
-| `session.ts`       | ~853  | Session + SessionManager（会话隔离 + 持久化 + 工作记忆） |
-| `session-store.ts` | ~265  | JSONL 事件日志读写器                                     |
+| `session.ts`       | ~1800 | Session + SessionManager（会话隔离 + 内存投影 + 工作记忆） |
+| `session-persistence.ts` | ~25 | 会话持久化游标与提交回执协议                         |
 | `reminder.ts`      | ~228  | 死循环探测 + ToolGuardrail                               |
 | `goal-manager.ts`  | ~243  | 长程目标状态机                                           |
 | `reporter.ts`      | ~133  | 事件输出接口（I/O 解耦）                                 |
@@ -120,7 +120,8 @@ generateWithRetry (内层:普通重试)
 
 ### 核心职责
 
-会话物理隔离（并发 run 不共用 history）+ 完整模型历史投影 + 事件溯源持久化。
+会话物理隔离（并发 run 不共用 history）+ 完整模型历史的内存投影。持久化事实统一由
+`RuntimeEventStore` 写入 workspace 的 `runtime.sqlite`，Session 可随时从事件重建。
 
 ### 关键机制
 
@@ -128,16 +129,18 @@ generateWithRetry (内层:普通重试)
 - **`getWorkingMemory(limit)`**:仅为兼容测试保留，主 Agent 不再调用
 - **`append(msg)`**:处理 deferred + toolResultMeta 登记。assistant 带 toolCalls → 登记 pendingToolCallIds；ToolResult 到达 → 从 pending 删除；普通消息且 pending 非空 → 暂存 deferredMessages
 - **`serialize(task)`**:per-session 串行执行队列，同一 Session 的 engine.run 必须串行
-- **`pendingWrites`**:truncate 落盘前必须 await earlier appends，否则乱序导致崩溃恢复历史丢失
+- **持久化提交**：消息先提交 `RuntimeEventStore`，再更新 Session 内存投影；相同 `eventId` 重试幂等
 - **LRU + TTL 双重驱逐**:maxSessions=128，TTL=24h
 
-### SessionStore (`session-store.ts`)
+### RuntimeEventStore (`src/runtime/runtime-event-store.ts`)
 
-JSONL 事件日志：`message`/`truncate`/`undo`/`rewind_to`/`meta`（schema 版本）。
+SQLite 追加事件表是会话与运行时的唯一事实源：`message.committed`、
+`session.state.committed`、`history.rewound`、`session.forked` 与 run/tool/model 事实共享一条全序列。
 
-- **末行撕裂容忍**:崩溃 append 写一半正常，末行 parse 失败 break
-- **中间行损坏跳过**:旧 throw 会全量丢失有效记录
-- **按 seq 排序**:解耦写入顺序与逻辑顺序
+- **事务提交**：事件内容与全局 sequence 在同一 SQLite 事务中提交
+- **Exactly-once**：`(session_id, event_id)` 唯一；同 ID 同 payload 重试复用原 cursor，不同 payload 拒绝
+- **可重建投影**：Session history、usage、CLI 会话列表和搜索索引均从事件恢复
+- **单一恢复路径**：不再读取或写入 Session JSONL，也不迁移旧 `.claw` 会话数据
 
 ---
 
@@ -186,7 +189,7 @@ JSONL 事件日志：`message`/`truncate`/`undo`/`rewind_to`/`meta`（schema 版
 
 ## 关键设计决策
 
-1. **Compact 不碰 Session**：字符级压缩只作用于发给 LLM 的临时 Context，写入 Session 的永远是全量真实数据
+1. **Compact 不改事实**：字符级压缩只作用于发给 LLM 的临时 Context，`RuntimeEventStore` 保留完整事实
 2. **流式能力零侵入**：provider 支持 generateStream 时在构造器包装替换 generate，delta 转发给 reporter.onTextDelta
 3. **资源冲突图调度**：工具按文件路径×操作类型声明访问意图，冲突图上最大独立集贪心并行
 4. **Point of Decision 注入**：Reminder/Guardrail/Steer/Recovery 四套机制都遵循此范式

@@ -187,7 +187,7 @@ export class RunLedgerIntegrityError extends Error {
 /**
  * A durable control-plane ledger for one Agent execution.
  *
- * The Session JSONL is the conversational memory. This ledger answers a different
+ * RuntimeEventStore is the conversational authority. This ledger answers a different
  * question: whether a particular execution reached a durable terminal state.
  */
 export class RunLedger {

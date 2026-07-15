@@ -24,7 +24,7 @@ npx tsx --env-file=/path/to/pico-harness/.env \
 
 - 工具读写、Bash、`@` 文件引用默认都相对 `cwd` 解析。
 - `AGENTS.md`、`.pico/commands`、`.claude/commands`、`.claude/agents` 都从当前项目读取。
-- CLI session 保存在当前项目的 `.claw/sessions/<session-id>.jsonl`，不同项目目录互不混用。
+- CLI session 以 workspace `runtime.sqlite` 中的 RuntimeEvent 为事实源，不同项目目录互不混用。
 - 已安装的 `pico` 不会自动读取本仓库 `.env`；请提前导出环境变量，或使用上面的开发命令显式传 `--env-file`。
 
 ## Trace 调试入口

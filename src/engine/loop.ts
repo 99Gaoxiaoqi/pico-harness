@@ -1084,7 +1084,7 @@ export class AgentEngine implements AgentRunner {
     const run = () => this.runInMainCompactorScope(session, runtimeReporter, runtimeTracer, signal);
     const execute = () => (this.compactor ? this.compactor.runInMainScope(run) : run());
     // Tests and explicit in-memory sessions intentionally skip durable runtime facts.
-    // Production sessions get a separate run ledger; Session JSONL stays focused on memory.
+    // Production sessions get a separate run ledger; RuntimeEventStore owns conversation facts.
     if (!session.recordStore) return execute();
     // AgentRuntime owns the canonical RuntimeEvent run and already bound its RunLedger.
     // Keep this compatibility path for direct embedders that still call AgentEngine.run.

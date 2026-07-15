@@ -319,7 +319,7 @@ interface RuntimeEventRow {
   created_at: number;
 }
 
-/** SQLite control plane for recoverable tasks. Session JSONL remains a separate source of truth. */
+/** SQLite control plane for recoverable tasks; Agent events share the runtime database. */
 export class RuntimeStore {
   readonly databasePath: string;
   private readonly db: Database.Database;
