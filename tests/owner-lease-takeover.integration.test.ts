@@ -165,7 +165,7 @@ describe("owner lease stale takeover integration", () => {
 });
 
 const CONTENDER_SCRIPT = String.raw`
-  import { access, writeFile } from "node:fs/promises";
+  import { access, rename, writeFile } from "node:fs/promises";
   import { setTimeout as delay } from "node:timers/promises";
 
   const {
@@ -195,6 +195,11 @@ const CONTENDER_SCRIPT = String.raw`
       await delay(2);
     }
   };
+  const publishOutcome = async (outcome) => {
+    const candidatePath = outcomePath + "." + process.pid + ".tmp";
+    await writeFile(candidatePath, JSON.stringify(outcome), "utf8");
+    await rename(candidatePath, outcomePath);
+  };
 
   await writeFile(readyPath, "ready\n", "utf8");
   await waitForPath(startPath);
@@ -207,22 +212,14 @@ const CONTENDER_SCRIPT = String.raw`
     });
   } catch (error) {
     if (error instanceof LeaseConflictError) {
-      await writeFile(outcomePath, JSON.stringify({ status: "conflict" }), "utf8");
+      await publishOutcome({ status: "conflict" });
       process.exit(0);
     }
-    await writeFile(
-      outcomePath,
-      JSON.stringify({ status: "error", message: String(error) }),
-      "utf8",
-    );
+    await publishOutcome({ status: "error", message: String(error) });
     throw error;
   }
 
-  await writeFile(
-    outcomePath,
-    JSON.stringify({ status: "acquired", leaseId: lease.id }),
-    "utf8",
-  );
+  await publishOutcome({ status: "acquired", leaseId: lease.id });
   await waitForPath(releasePath);
   await lease.assertOwnership();
   await writeFile(verifiedPath, "verified\n", "utf8");
