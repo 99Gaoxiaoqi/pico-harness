@@ -147,14 +147,12 @@ describe("TUI input routing", () => {
   });
 
   it("新 TUI Session 应用 effective mode/thinking，显式 CLI thinking 优先", () => {
+    expect(resolveTuiStartupSettingDefaults({ mode: "plan", thinkingEffort: "high" })).toEqual({
+      mode: "plan",
+      thinkingEffort: "high",
+    });
     expect(
-      resolveTuiStartupSettingDefaults({ mode: "plan", thinkingEffort: "high" }),
-    ).toEqual({ mode: "plan", thinkingEffort: "high" });
-    expect(
-      resolveTuiStartupSettingDefaults(
-        { mode: "plan", thinkingEffort: "high" },
-        "off",
-      ),
+      resolveTuiStartupSettingDefaults({ mode: "plan", thinkingEffort: "high" }, "off"),
     ).toEqual({ mode: "plan", thinkingEffort: "off" });
   });
 
@@ -281,11 +279,7 @@ describe("TUI input routing", () => {
   it("App/TUI 配置变更后 /model 在空闲边界刷新路由目录", async () => {
     const initial = testRoute("shared/model-a");
     const added = testRoute("shared/model-b");
-    const initialRouter = new ModelRouter(
-      [initial],
-      { TEST_API_KEY: "test-key" },
-      initial.id,
-    );
+    const initialRouter = new ModelRouter([initial], { TEST_API_KEY: "test-key" }, initial.id);
     const refreshedRouter = new ModelRouter(
       [initial, added],
       { TEST_API_KEY: "test-key" },
