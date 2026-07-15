@@ -130,6 +130,8 @@ import {
   type PluginRuntimeSnapshot,
 } from "../plugins/plugin-runtime-snapshot.js";
 import { resolvePicoPaths } from "../paths/pico-paths.js";
+import { RuntimeEventStore } from "./runtime-event-store.js";
+import { currentRuntimeRun, RuntimeRun } from "./runtime-run.js";
 
 export type RuntimeExecution =
   | { readonly kind: "foreground" }
@@ -209,13 +211,16 @@ export type RunAgentEnv = Record<string, string | undefined>;
 export type RunAgentProviderFactory = (kind: ProviderKind, config: ProviderConfig) => LLMProvider;
 
 /** A UI-neutral lifecycle event for a runtime host. */
-export interface RuntimeEvent {
+export interface RuntimeLifecycleEvent {
   type: "run.started" | "run.finished" | "run.failed";
   sessionId?: string;
   workDir?: string;
   at: number;
   detail?: string;
 }
+
+/** @deprecated Use RuntimeLifecycleEvent. Canonical runtime facts are RuntimeEvent. */
+export type RuntimeEvent = RuntimeLifecycleEvent;
 
 /**
  * Host-provided effects. The runtime never renders an Ink component or assumes a terminal.
@@ -224,7 +229,7 @@ export interface RuntimeEvent {
 export interface RuntimeHost {
   reporter?: Reporter;
   approvalNotifier?: ApprovalNotifier;
-  onEvent?: (event: RuntimeEvent) => void;
+  onEvent?: (event: RuntimeLifecycleEvent) => void;
 }
 
 export interface RunAgentCliDependencies extends RuntimeHost {
@@ -315,6 +320,25 @@ export async function executeAgentRuntime(
     (info) => info.isFile(),
     () => false,
   );
+  const runtimeEventStore = new RuntimeEventStore({
+    baseDir: resolvePicoPaths(workDir).workspace.runs,
+  });
+  const existingRuntimeManifest = await runtimeEventStore.readSessionManifest(
+    sessionSelection.sessionId,
+  );
+  if (targetPublished && !existingRuntimeManifest && sessionSelection.mode !== "fork") {
+    throw new Error(`legacy session ${sessionSelection.sessionId} 仅支持只读查看，无法继续运行`);
+  }
+  if (sessionSelection.mode === "fork" && sessionSelection.sourceSessionId) {
+    const sourceManifest = await runtimeEventStore.readSessionManifest(
+      sessionSelection.sourceSessionId,
+    );
+    if (!sourceManifest) {
+      throw new Error(
+        `legacy session ${sessionSelection.sourceSessionId} 仅支持只读查看，无法作为 fork 来源`,
+      );
+    }
+  }
   if (
     !resumeExistingSession &&
     !existingSession &&
@@ -714,9 +738,11 @@ export async function executeAgentRuntime(
     // 辅助(廉价)模型:用于 FullCompactor 生成摘要,省主模型成本。
     // 配齐 AUX_LLM_BASE_URL / AUX_LLM_API_KEY / AUX_LLM_MODEL 才启用;缺则用主 provider。
     const auxProvider = loadAuxProvider(dependencies.env ?? process.env, session, trackerOptions);
+    const evidenceArchive = new EvidenceArchive({
+      baseDir: resolvePicoPaths(workDir).workspace.evidence,
+    });
     const reporter = dependencies.reporter ?? new TerminalReporter();
     const approvalNotifier = dependencies.approvalNotifier ?? failClosedApprovalNotifier;
-    dependencies.onEvent?.({ type: "run.started", sessionId: session.id, workDir, at: Date.now() });
     const contextRuntime = buildContextRuntime(kind, providerConfig.model);
     const engine = new AgentEngine({
       provider: trackedProvider,
@@ -744,11 +770,10 @@ export async function executeAgentRuntime(
         provider: trackedProvider,
         ...(auxProvider ? { auxProvider } : {}),
         ...(runtimeState.hookService ? { hookService: runtimeState.hookService } : {}),
-        evidenceArchive: new EvidenceArchive({
-          baseDir: resolvePicoPaths(workDir).workspace.evidence,
-        }),
+        evidenceArchive,
       }),
       observationProcessor: artifactRuntime.observationProcessor,
+      runtimeEvidenceArchive: evidenceArchive,
       subagentReportArtifactWriter: artifactRuntime.subagentReportArtifactWriter,
       reporter,
       tracer: traceEnabled ? new Tracer() : undefined,
@@ -909,80 +934,95 @@ export async function executeAgentRuntime(
       dependencies.toolStatusSink?.(toolStatusFromRegistry(registry));
     }
 
-    return await session.serialize(async () => {
-      dependencies.signal?.throwIfAborted();
-      if (!resumeExistingSession) {
-        const submittedPrompt = prompt;
-        const submitDecision = await runtimeState.dispatchHook(
-          "UserPromptSubmit",
-          { prompt: submittedPrompt },
-          { signal: dependencies.signal },
-        );
-        if (submitDecision.decision === "deny") {
-          throw new Error(
-            `UserPromptSubmit hook 阻断了输入: ${submitDecision.reason ?? "(无原因)"}`,
-          );
-        }
-        prompt = normalizePrompt(applyPromptHookDecision(submittedPrompt, submitDecision));
-        const expansionDecision = await runtimeState.dispatchHook(
-          "UserPromptExpansion",
-          {
-            prompt: effectiveOptions.rewindPrompt ?? submittedPrompt,
-            expandedPrompt: prompt,
-          },
-          { signal: dependencies.signal },
-        );
-        if (expansionDecision.decision === "deny") {
-          throw new Error(
-            `UserPromptExpansion hook 阻断了输入: ${expansionDecision.reason ?? "(无原因)"}`,
-          );
-        }
-        prompt = normalizePrompt(applyPromptHookDecision(prompt, expansionDecision));
-        const images: ImagePart[] | undefined =
-          effectiveOptions.images ??
-          (effectiveOptions.imagePath
-            ? [loadImage(effectiveOptions.imagePath, workDir)]
-            : undefined);
-        const rewindPointId = await session.beginRewindPoint({
-          userPrompt: effectiveOptions.rewindPrompt ?? prompt,
-          ...(effectiveOptions.rewindTranscriptIndex !== undefined
-            ? { transcriptIndex: effectiveOptions.rewindTranscriptIndex }
-            : {}),
-          ...(effectiveOptions.rewindInteractionMode !== undefined
-            ? { interactionMode: effectiveOptions.rewindInteractionMode }
-            : {}),
-          ...(effectiveOptions.rewindPrePlanMode !== undefined
-            ? { prePlanMode: effectiveOptions.rewindPrePlanMode }
-            : {}),
-        });
-        dependencies.rewindPointSink?.(rewindPointId);
-        const userReceipt = await session.commitMessageOnce(`user-message:${rewindPointId}`, {
-          role: "user",
-          content: prompt,
-          ...(images ? { images } : {}),
-        });
-        await session.bindRewindPointSource(rewindPointId, userReceipt);
-      }
-
-      const messages = await engine.run(session, undefined, undefined, dependencies.signal);
-      const result: RunAgentCliResult = {
-        sessionId: session.id,
-        sessionSelection,
-        workDir,
-        finalMessage: findFinalMessage(messages),
-        usage: snapshotUsage(session),
-        messages,
-        ...(traceEnabled ? { tracePath: await findTracePath(workDir, session.id) } : {}),
-      };
-
-      dependencies.onEvent?.({
-        type: "run.finished",
-        sessionId: session.id,
-        workDir,
-        at: Date.now(),
-      });
-      return result;
+    await RuntimeRun.reconcileIncompleteRuns({
+      sessionId: session.id,
+      workDir,
+      store: runtimeEventStore,
     });
+    const runtimeRun = await RuntimeRun.start({
+      sessionId: session.id,
+      workDir,
+      store: runtimeEventStore,
+    });
+    dependencies.onEvent?.({ type: "run.started", sessionId: session.id, workDir, at: Date.now() });
+    const result = await runtimeRun.run(
+      () =>
+        session.serialize(async () => {
+          dependencies.signal?.throwIfAborted();
+          if (!resumeExistingSession) {
+            const submittedPrompt = prompt;
+            const submitDecision = await runtimeState.dispatchHook(
+              "UserPromptSubmit",
+              { prompt: submittedPrompt },
+              { signal: dependencies.signal },
+            );
+            if (submitDecision.decision === "deny") {
+              throw new Error(
+                `UserPromptSubmit hook 阻断了输入: ${submitDecision.reason ?? "(无原因)"}`,
+              );
+            }
+            prompt = normalizePrompt(applyPromptHookDecision(submittedPrompt, submitDecision));
+            const expansionDecision = await runtimeState.dispatchHook(
+              "UserPromptExpansion",
+              {
+                prompt: effectiveOptions.rewindPrompt ?? submittedPrompt,
+                expandedPrompt: prompt,
+              },
+              { signal: dependencies.signal },
+            );
+            if (expansionDecision.decision === "deny") {
+              throw new Error(
+                `UserPromptExpansion hook 阻断了输入: ${expansionDecision.reason ?? "(无原因)"}`,
+              );
+            }
+            prompt = normalizePrompt(applyPromptHookDecision(prompt, expansionDecision));
+            const images: ImagePart[] | undefined =
+              effectiveOptions.images ??
+              (effectiveOptions.imagePath
+                ? [loadImage(effectiveOptions.imagePath, workDir)]
+                : undefined);
+            const rewindPointId = await session.beginRewindPoint({
+              userPrompt: effectiveOptions.rewindPrompt ?? prompt,
+              ...(effectiveOptions.rewindTranscriptIndex !== undefined
+                ? { transcriptIndex: effectiveOptions.rewindTranscriptIndex }
+                : {}),
+              ...(effectiveOptions.rewindInteractionMode !== undefined
+                ? { interactionMode: effectiveOptions.rewindInteractionMode }
+                : {}),
+              ...(effectiveOptions.rewindPrePlanMode !== undefined
+                ? { prePlanMode: effectiveOptions.rewindPrePlanMode }
+                : {}),
+            });
+            dependencies.rewindPointSink?.(rewindPointId);
+            const userReceipt = await session.commitMessageOnce(`user-message:${rewindPointId}`, {
+              role: "user",
+              content: prompt,
+              ...(images ? { images } : {}),
+            });
+            await session.bindRewindPointSource(rewindPointId, userReceipt);
+          }
+
+          const messages = await engine.run(session, undefined, undefined, dependencies.signal);
+          return {
+            sessionId: session.id,
+            sessionSelection,
+            workDir,
+            finalMessage: findFinalMessage(messages),
+            usage: snapshotUsage(session),
+            messages,
+            ...(traceEnabled ? { tracePath: await findTracePath(workDir, session.id) } : {}),
+          } satisfies RunAgentCliResult;
+        }),
+      dependencies.signal,
+    );
+
+    dependencies.onEvent?.({
+      type: "run.finished",
+      sessionId: session.id,
+      workDir,
+      at: Date.now(),
+    });
+    return result;
   } catch (error) {
     if (cleanupRuntimeState?.hookService && !dependencies.signal?.aborted) {
       await cleanupRuntimeState
@@ -1676,9 +1716,15 @@ export function buildPermissionMiddleware(
     });
     const diff = await computeApprovalDiff(call.name, call.arguments, workDir, workspaceRoots);
     const approvalId = `approval_${randomUUID()}`;
+    const runtimeRun = currentRuntimeRun();
     const ledger = currentRunLedger();
     const ledgerTurn = ledger?.currentTurn;
     let approvalRecorded = false;
+    let runtimeApprovalRecorded = false;
+    if (runtimeRun) {
+      await runtimeRun.recordApprovalRequested(approvalId, call.id, call.name);
+      runtimeApprovalRecorded = true;
+    }
     if (ledger && ledgerTurn !== undefined) {
       await ledger.recordApprovalRequested({
         approvalId,
@@ -1700,10 +1746,16 @@ export function buildPermissionMiddleware(
         { sessionScope: scope, providerCallId: call.id },
       );
     } catch (error) {
+      if (runtimeApprovalRecorded) {
+        await runtimeRun!.recordApprovalSettled(approvalId, "rejected");
+      }
       if (approvalRecorded) {
         await ledger!.recordApprovalSettled({ approvalId, decision: "rejected" });
       }
       throw error;
+    }
+    if (runtimeApprovalRecorded) {
+      await runtimeRun!.recordApprovalSettled(approvalId, result.allowed ? "approved" : "rejected");
     }
     if (approvalRecorded) {
       await ledger!.recordApprovalSettled({
