@@ -1,53 +1,47 @@
 import { randomUUID } from "node:crypto";
-import { lstat, mkdir, rm } from "node:fs/promises";
-import { basename, join, resolve } from "node:path";
-import { isDeepStrictEqual } from "node:util";
+import { join, resolve } from "node:path";
 import { ToolResultArtifactStore, type ArtifactCloneMapping } from "../context/artifact-store.js";
 import { FileSessionSummaryStore } from "../memory/summary-store.js";
-import type { Message } from "../schema/message.js";
+import { resolvePicoPaths } from "../paths/pico-paths.js";
+import { RuntimeEventStore } from "../runtime/runtime-event-store.js";
+import { RuntimeRun } from "../runtime/runtime-run.js";
 import { fileHistoryCloneSession, fileHistoryDefaultBaseDir } from "../safety/file-history.js";
+import type { Message } from "../schema/message.js";
+import { readVersionedJson, writeJsonAtomic } from "../storage/atomic-json.js";
 import {
   ForkOperationCoordinator,
   ForkOperationConflictError,
   type ForkOperationCallbacks,
-  type ForkPreparedSessionFile,
+  type ForkPreparedBundle,
   type ForkReconciliationResult,
-  type ForkTargetSessionIdentity,
+  type ForkSourceCursor,
 } from "../storage/fork-operation-coordinator.js";
 import {
   StorageOperationJournal,
   type ForkStorageOperation,
 } from "../storage/operation-journal.js";
-import {
-  getDefaultSessionCatalogProjector,
-  type SessionCatalogProjector,
-} from "../storage/session-catalog-projection.js";
-import { createSessionIdentity } from "./session-identity.js";
 import type {
   PersistedInteractionMode,
   PersistedSessionSettings,
   SessionRuntimeStatePatch,
 } from "./session-runtime.js";
+import { normalizeSessionRuntimeStatePatch } from "./session-runtime.js";
 import {
   globalSessionManager,
   type DurableSessionForkSnapshot,
   type SessionManager,
 } from "./session.js";
-import {
-  SessionStore,
-  type SessionEvent,
-  type SessionLineage,
-  type SessionMetaV3,
-} from "./session-store.js";
-import { resolvePicoPaths } from "../paths/pico-paths.js";
-import { RuntimeRun } from "../runtime/runtime-run.js";
 
 const SAFE_SESSION_ID = /^[A-Za-z0-9._-]+$/u;
+const FROZEN_FORK_BUNDLE_VERSION = 1 as const;
+const FROZEN_FORK_BUNDLE_NAME = "runtime-fork.json";
+const FORK_SIDECARS_VERSION = 1 as const;
+const FORK_SIDECARS_NAME = "fork-sidecars.json";
 
 export interface SessionForkServiceHooks {
-  /** 故障注入：sidecar 全部可重放提交后、JSONL 公布前。 */
+  /** 故障注入：sidecar 结果已可重放、Runtime 发布前。 */
   readonly afterSidecars?: (operation: ForkStorageOperation) => void | Promise<void>;
-  /** 故障注入：目标 JSONL 已公布，但 Runtime bootstrap 尚未写入前。 */
+  /** 故障注入：Runtime fork bootstrap 写入前。 */
   readonly beforeRuntimeBootstrap?: (operation: ForkStorageOperation) => void | Promise<void>;
 }
 
@@ -55,7 +49,7 @@ export interface SessionForkServiceOptions {
   readonly workDir: string;
   readonly sessionManager?: SessionManager;
   readonly journal?: StorageOperationJournal;
-  readonly catalogProjector?: SessionCatalogProjector;
+  readonly runtimeStore?: RuntimeEventStore;
   readonly fileHistoryBaseDir?: string;
   readonly summaryIndexPath?: string;
   readonly artifactBaseDir?: string;
@@ -88,42 +82,55 @@ export class SessionForkNeedsAttentionError extends Error {
   }
 }
 
-interface FrozenForkSource {
+interface FrozenForkBundle {
+  readonly schemaVersion: typeof FROZEN_FORK_BUNDLE_VERSION;
+  readonly operationId: string;
   readonly sourceSessionId: string;
   readonly targetSessionId: string;
-  readonly targetMode: PersistedInteractionMode;
-  readonly snapshot: DurableSessionForkSnapshot;
+  readonly sourceCursor: ForkSourceCursor;
+  readonly messages: readonly Message[];
+  readonly sourceTitle?: string;
+  readonly settings?: PersistedSessionSettings;
+  readonly goal?: NonNullable<SessionRuntimeStatePatch["goal"]>;
 }
 
-interface ClonedSidecars {
-  readonly artifactMappings: readonly ArtifactCloneMapping[];
+interface PersistedArtifactCloneMapping {
+  readonly sourceId: string;
+  readonly sourcePath: string;
+  readonly targetId: string;
+  readonly targetPath: string;
 }
 
-/**
- * Session JSONL 是 fork 的公布 commit marker。File History / Summary /
- * Artifact 先幂等提交，只有它们全部完成后 Coordinator 才会 rename
- * 隐藏 JSONL 并投影 Catalog。
- */
+interface ForkSidecarsBundle {
+  readonly schemaVersion: typeof FORK_SIDECARS_VERSION;
+  readonly operationId: string;
+  readonly sourceSessionId: string;
+  readonly targetSessionId: string;
+  readonly artifactMappings: readonly PersistedArtifactCloneMapping[];
+}
+
+/** Runtime SQLite 的 fork marker 是唯一发布点；staging 只保存崩溃恢复输入。 */
 export class SessionForkService {
   readonly workDir: string;
   readonly journal: StorageOperationJournal;
   private readonly sessionManager: SessionManager;
-  private readonly catalogProjector: SessionCatalogProjector;
+  private readonly runtimeStore: RuntimeEventStore;
   private readonly fileHistoryBaseDir: string;
   private readonly summaryIndexPath: string;
   private readonly artifactBaseDir: string;
   private readonly hooks?: SessionForkServiceHooks;
   private readonly createOperationId: () => string;
-  private readonly frozenByOperation = new Map<string, FrozenForkSource>();
   private readonly coordinator: ForkOperationCoordinator;
 
   constructor(options: SessionForkServiceOptions) {
     this.workDir = resolve(options.workDir);
     this.sessionManager = options.sessionManager ?? globalSessionManager;
     this.journal = options.journal ?? new StorageOperationJournal({ workDir: this.workDir });
-    this.catalogProjector = options.catalogProjector ?? getDefaultSessionCatalogProjector();
-    this.fileHistoryBaseDir = options.fileHistoryBaseDir ?? fileHistoryDefaultBaseDir();
     const workspacePaths = resolvePicoPaths(this.workDir).workspace;
+    this.runtimeStore =
+      options.runtimeStore ??
+      new RuntimeEventStore({ databasePath: workspacePaths.runtimeDatabase });
+    this.fileHistoryBaseDir = options.fileHistoryBaseDir ?? fileHistoryDefaultBaseDir();
     this.summaryIndexPath =
       options.summaryIndexPath ?? join(workspacePaths.memory, "summaries.json");
     this.artifactBaseDir = options.artifactBaseDir ?? workspacePaths.artifacts;
@@ -143,16 +150,18 @@ export class SessionForkService {
     }
     const source = await this.sessionManager.getOrCreate(input.sourceSessionId, this.workDir);
     return source.serialize(async () => {
-      // JSONL cursor、File History、Summary 与 Artifact 必须属于同一源会话
-      // 串行边界。否则 cursor 冻结后新产生的 sidecar 会被克隆进旧对话 fork。
-      await assertTargetNotPublished(this.sessionPath(input.targetSessionId));
+      await assertTargetNotPublished(this.runtimeStore, input.targetSessionId);
       const snapshot = await source.readDurableForkSnapshot();
       const operationId = this.createOperationId();
-      this.frozenByOperation.set(operationId, {
-        ...input,
-        snapshot,
-      });
+      const stagingDirectory = join(
+        resolvePicoPaths(this.workDir).workspace.forkStaging,
+        operationId,
+      );
+      const frozen = createFrozenForkBundle(operationId, input, snapshot);
 
+      // 必须先冻结 payload 再创建 journal。这样 journal 一旦可见，reconcile
+      // 就永远不需要从已经继续推进的 source 重建消息。
+      await writeJsonAtomic(this.frozenBundlePath(stagingDirectory), frozen);
       const operation = await this.coordinator.execute({
         kind: "fork",
         operationId,
@@ -161,191 +170,168 @@ export class SessionForkService {
         sourceCursor: snapshot.cursor,
         targetSessionId: input.targetSessionId,
         targetMode: input.targetMode,
-        stagingDirectory: join(resolvePicoPaths(this.workDir).workspace.forkStaging, operationId),
+        stagingDirectory,
       });
       if (operation.state === "needs_attention") {
         throw new SessionForkNeedsAttentionError(operation);
       }
-      const sourceTitle = sourceDisplayTitle(snapshot);
       return {
         operation,
-        ...(sourceTitle ? { sourceTitle, targetTitle: forkTitleFrom(sourceTitle) } : {}),
+        ...(frozen.sourceTitle
+          ? {
+              sourceTitle: frozen.sourceTitle,
+              targetTitle: forkTitleFrom(frozen.sourceTitle),
+            }
+          : {}),
       };
     });
   }
 
   async reconcileUnfinished(): Promise<ForkReconciliationResult[]> {
-    const results: ForkReconciliationResult[] = [];
-    for (const operation of await this.journal.listUnfinished()) {
-      if (operation.kind !== "fork") continue;
-      const source = await this.sessionManager.getOrCreate(operation.sourceSessionId, this.workDir);
-      const reconciled = await source.serialize(() =>
-        this.coordinator.reconcile(operation.operationId),
-      );
-      results.push({ operationId: reconciled.operationId, state: reconciled.state });
-    }
-    return results;
+    return this.coordinator.reconcileUnfinished();
   }
 
   private createCallbacks(): ForkOperationCallbacks {
     return {
-      readSourceCursor: async (operation) => {
-        const source = await this.sessionManager.getOrCreate(
-          operation.sourceSessionId,
-          this.workDir,
-        );
-        const snapshot = await source.readDurableForkSnapshot();
-        if (!this.frozenByOperation.has(operation.operationId)) {
-          this.frozenByOperation.set(operation.operationId, {
-            sourceSessionId: operation.sourceSessionId,
-            targetSessionId: operation.targetSessionId,
-            targetMode: operation.targetMode ?? "yolo",
-            snapshot,
-          });
-        }
-        return snapshot.cursor;
+      prepareTargetBundle: async (operation, stagingDirectory) => {
+        const stagedBundlePath = this.frozenBundlePath(stagingDirectory);
+        await this.readFrozenBundle(operation, stagedBundlePath);
+        return { stagedBundlePath };
       },
-      prepareTargetBundle: async (operation) => this.prepareTargetBundle(operation),
-      inspectSessionFile: async (operation, path) => inspectForkSessionFile(operation, path),
       cloneSidecars: async (operation) => {
-        // prepareTargetBundle 在返回 JSONL 之前已经冻结并提交全部
-        // sidecar。workspace_applied 后不再读 source，否则 source 的
-        // 后续追加会把已冻结 fork 误判为冲突。
+        await this.ensureSidecars(operation);
         await this.hooks?.afterSidecars?.(operation);
       },
-      bootstrapRuntime: async (operation, bundle) => {
-        await this.hooks?.beforeRuntimeBootstrap?.(operation);
-        const messages = await readPublishedRuntimeForkSeed(operation, bundle.targetSessionPath);
-        await RuntimeRun.bootstrapFork({
-          sourceSessionId: operation.sourceSessionId,
-          targetSessionId: operation.targetSessionId,
-          messages,
-          workDir: this.workDir,
-        });
-      },
-      publishCatalog: async (operation, bundle) => {
-        // 先补父日志投影，否则全新 Catalog 会把已有 durable
-        // parent cursor 的 fork 降级为只含 sessionId 的 stale 条目。
-        await this.catalogProjector.projectJournal(
-          this.sessionPath(operation.sourceSessionId),
-          this.workDir,
-        );
-        await this.catalogProjector.projectJournal(bundle.targetSessionPath, this.workDir);
-      },
+      publishRuntime: async (operation, bundle) => this.publishRuntime(operation, bundle),
     };
   }
 
-  private async prepareTargetBundle(
-    operation: ForkStorageOperation,
-  ): Promise<ForkPreparedSessionFile> {
-    const frozen = await this.getFrozenSource(operation);
-    // 提前完成 sidecar 快照，使 operation 进入 workspace_applied 后 source
-    // 可以继续追加，后续 forward reconcile 不会读取新的 sidecar 状态。
-    let sidecars: ClonedSidecars;
+  private async ensureSidecars(operation: ForkStorageOperation): Promise<ForkSidecarsBundle> {
+    const existing = await this.tryReadSidecars(operation);
+    if (existing) return existing;
+
+    let artifactMappings: readonly ArtifactCloneMapping[];
     try {
-      sidecars = await this.cloneSidecars(operation);
+      await fileHistoryCloneSession(
+        operation.sourceSessionId,
+        operation.targetSessionId,
+        this.fileHistoryBaseDir,
+      );
+      new FileSessionSummaryStore(this.summaryIndexPath).cloneSession(
+        operation.sourceSessionId,
+        operation.targetSessionId,
+      );
+      artifactMappings = (
+        await new ToolResultArtifactStore({ baseDir: this.artifactBaseDir }).cloneSession(
+          operation.sourceSessionId,
+          operation.targetSessionId,
+        )
+      ).mappings;
     } catch (error) {
       throw new ForkOperationConflictError(
         `Fork sidecar 快照无法完整冻结: ${errorMessage(error)}`,
         "staging_corrupt",
       );
     }
+
+    const sidecars = {
+      schemaVersion: FORK_SIDECARS_VERSION,
+      operationId: operation.operationId,
+      sourceSessionId: operation.sourceSessionId,
+      targetSessionId: operation.targetSessionId,
+      artifactMappings: artifactMappings.map(persistArtifactMapping),
+    } satisfies ForkSidecarsBundle;
+    await writeJsonAtomic(this.sidecarsPath(operation), sidecars);
+    return sidecars;
+  }
+
+  private async publishRuntime(
+    operation: ForkStorageOperation,
+    prepared: ForkPreparedBundle,
+  ): Promise<void> {
+    const frozen = await this.readFrozenBundle(operation, prepared.stagedBundlePath);
+    const sidecars = await this.readSidecars(operation);
     const messages = rewriteArtifactReferences(
-      frozen.snapshot.hydration.messages.map(stripMessageUsage),
+      frozen.messages,
       operation.sourceSessionId,
       operation.targetSessionId,
       sidecars.artifactMappings,
     );
-    const runtimePatch = filteredRuntimePatch(frozen, operation.createdAt);
-    const lineage = {
-      relation: "fork",
-      rootLogId: frozen.snapshot.rootLogId,
-      parent: frozen.snapshot.cursor,
-      parentSessionId: operation.sourceSessionId,
-    } satisfies SessionLineage;
-    const stagedSessionPath = this.stagedSessionPath(operation);
-    const targetSessionPath = this.sessionPath(operation.targetSessionId);
-    await mkdir(resolvePicoPaths(this.workDir).workspace.sessions, {
-      recursive: true,
-      mode: 0o700,
-    });
 
-    if (
-      !(await isCompletePreparedJournal(
-        stagedSessionPath,
-        operation,
-        messages,
-        lineage,
-        runtimePatch,
-      ))
-    ) {
-      await rm(stagedSessionPath, { force: true });
-      const targetIdentity = createSessionIdentity({
-        sessionId: operation.targetSessionId,
-        cwd: frozen.snapshot.hydration.identity.cwd,
-        originalCwd: frozen.snapshot.hydration.identity.originalCwd,
-        projectRoot: frozen.snapshot.hydration.identity.projectRoot,
-        sessionProjectDir: frozen.snapshot.hydration.identity.sessionProjectDir,
-      });
-      const store = new SessionStore(stagedSessionPath, targetIdentity);
-      try {
-        await store.commitSeed(messages, lineage, {
-          eventId: seedEventId(operation.operationId),
-          expectedSeq: 0,
-        });
-        if (runtimePatch) {
-          await store.commitRuntimeState(runtimePatch, {
-            eventId: runtimeEventId(operation.operationId),
-            expectedSeq: 1,
-          });
-        }
-      } finally {
-        await store.close();
-      }
-    }
-    return { stagedSessionPath, targetSessionPath };
-  }
-
-  private async getFrozenSource(operation: ForkStorageOperation): Promise<FrozenForkSource> {
-    const cached = this.frozenByOperation.get(operation.operationId);
-    if (cached) return cached;
-    const source = await this.sessionManager.getOrCreate(operation.sourceSessionId, this.workDir);
-    const snapshot = await source.readDurableForkSnapshot();
-    const frozen = {
+    await this.hooks?.beforeRuntimeBootstrap?.(operation);
+    await RuntimeRun.bootstrapFork({
       sourceSessionId: operation.sourceSessionId,
       targetSessionId: operation.targetSessionId,
-      targetMode: operation.targetMode ?? "yolo",
-      snapshot,
-    } satisfies FrozenForkSource;
-    this.frozenByOperation.set(operation.operationId, frozen);
-    return frozen;
+      messages,
+      workDir: this.workDir,
+      store: this.runtimeStore,
+    });
+
+    const runtimePatch = filteredRuntimePatch(
+      frozen,
+      operation.targetMode ?? "yolo",
+      operation.createdAt,
+    );
+    if (runtimePatch) {
+      const createdAt = parseForkCreatedAt(operation.createdAt);
+      await this.runtimeStore.appendSessionState(operation.targetSessionId, runtimePatch, {
+        eventId: runtimeStateEventId(operation.operationId),
+        now: () => new Date(createdAt),
+      });
+    }
   }
 
-  private async cloneSidecars(operation: ForkStorageOperation): Promise<ClonedSidecars> {
-    await fileHistoryCloneSession(
-      operation.sourceSessionId,
-      operation.targetSessionId,
-      this.fileHistoryBaseDir,
-    );
-    new FileSessionSummaryStore(this.summaryIndexPath).cloneSession(
-      operation.sourceSessionId,
-      operation.targetSessionId,
-    );
-    const artifacts = await new ToolResultArtifactStore({
-      baseDir: this.artifactBaseDir,
-    }).cloneSession(operation.sourceSessionId, operation.targetSessionId);
-    return { artifactMappings: artifacts.mappings };
+  private async readFrozenBundle(
+    operation: ForkStorageOperation,
+    path: string,
+  ): Promise<FrozenForkBundle> {
+    try {
+      const frozen = await readVersionedJson(path, parseFrozenForkBundle);
+      validateFrozenBundleForOperation(frozen, operation, path);
+      return frozen;
+    } catch (error) {
+      if (error instanceof ForkOperationConflictError) throw error;
+      throw new ForkOperationConflictError(
+        `Frozen Runtime fork bundle cannot be decoded: ${errorMessage(error)}`,
+        "staging_corrupt",
+        [path],
+      );
+    }
   }
 
-  private stagedSessionPath(operation: ForkStorageOperation): string {
-    return join(
-      resolvePicoPaths(this.workDir).workspace.sessions,
-      "." + operation.targetSessionId + ".fork-" + operation.operationId + ".jsonl",
-    );
+  private async tryReadSidecars(
+    operation: ForkStorageOperation,
+  ): Promise<ForkSidecarsBundle | undefined> {
+    const path = this.sidecarsPath(operation);
+    try {
+      const sidecars = await readVersionedJson(path, parseForkSidecarsBundle);
+      validateSidecarsForOperation(sidecars, operation, path);
+      return sidecars;
+    } catch (error) {
+      if (isNodeCode(error, "ENOENT")) return undefined;
+      if (error instanceof ForkOperationConflictError) throw error;
+      throw new ForkOperationConflictError(
+        `Fork sidecar result cannot be decoded: ${errorMessage(error)}`,
+        "staging_corrupt",
+        [path],
+      );
+    }
   }
 
-  private sessionPath(sessionId: string): string {
-    return join(resolvePicoPaths(this.workDir).workspace.sessions, sessionId + ".jsonl");
+  private async readSidecars(operation: ForkStorageOperation): Promise<ForkSidecarsBundle> {
+    const sidecars = await this.tryReadSidecars(operation);
+    if (sidecars) return sidecars;
+    throw new ForkOperationConflictError("Fork sidecar result is missing", "staging_corrupt", [
+      this.sidecarsPath(operation),
+    ]);
+  }
+
+  private frozenBundlePath(stagingDirectory: string): string {
+    return join(stagingDirectory, FROZEN_FORK_BUNDLE_NAME);
+  }
+
+  private sidecarsPath(operation: ForkStorageOperation): string {
+    return join(operation.stagingDirectory, FORK_SIDECARS_NAME);
   }
 }
 
@@ -355,23 +341,41 @@ export async function reconcileUnfinishedSessionForks(
   return new SessionForkService({ workDir }).reconcileUnfinished();
 }
 
+function createFrozenForkBundle(
+  operationId: string,
+  input: ForkSessionInput,
+  snapshot: DurableSessionForkSnapshot,
+): FrozenForkBundle {
+  const sourceTitle = sourceDisplayTitle(snapshot);
+  return {
+    schemaVersion: FROZEN_FORK_BUNDLE_VERSION,
+    operationId,
+    sourceSessionId: input.sourceSessionId,
+    targetSessionId: input.targetSessionId,
+    sourceCursor: structuredClone(snapshot.cursor),
+    messages: snapshot.hydration.messages.map(stripMessageUsage),
+    ...(sourceTitle ? { sourceTitle } : {}),
+    ...(snapshot.hydration.runtime.settings
+      ? { settings: structuredClone(snapshot.hydration.runtime.settings) }
+      : {}),
+    ...(snapshot.hydration.runtime.goal
+      ? { goal: structuredClone(snapshot.hydration.runtime.goal) }
+      : {}),
+  };
+}
+
 function filteredRuntimePatch(
-  frozen: FrozenForkSource,
+  frozen: FrozenForkBundle,
+  targetMode: PersistedInteractionMode,
   forkCreatedAt: string,
 ): SessionRuntimeStatePatch | undefined {
-  const source = frozen.snapshot.hydration.runtime;
-  const settings = source.settings
-    ? filterForkSettings(
-        source.settings,
-        frozen.sourceSessionId,
-        frozen.targetMode,
-        sourceDisplayTitle(frozen.snapshot),
-      )
+  const settings = frozen.settings
+    ? filterForkSettings(frozen.settings, frozen.sourceSessionId, targetMode, frozen.sourceTitle)
     : undefined;
-  return settings || source.goal
+  return settings || frozen.goal
     ? {
         ...(settings ? { settings } : {}),
-        ...(source.goal ? { goal: resetForkGoalUsage(source.goal, forkCreatedAt) } : {}),
+        ...(frozen.goal ? { goal: resetForkGoalUsage(frozen.goal, forkCreatedAt) } : {}),
       }
     : undefined;
 }
@@ -381,10 +385,7 @@ function resetForkGoalUsage(
   source: NonNullable<SessionRuntimeStatePatch["goal"]>,
   forkCreatedAt: string,
 ): NonNullable<SessionRuntimeStatePatch["goal"]> {
-  const startedAt = Date.parse(forkCreatedAt);
-  if (!Number.isFinite(startedAt)) {
-    throw new Error(`Fork operation has an invalid createdAt timestamp: ${forkCreatedAt}`);
-  }
+  const startedAt = parseForkCreatedAt(forkCreatedAt);
   return {
     ...structuredClone(source),
     goals: source.goals.map((goal) => ({
@@ -419,11 +420,20 @@ function stripMessageUsage(message: Message): Message {
   return copy;
 }
 
+function persistArtifactMapping(mapping: ArtifactCloneMapping): PersistedArtifactCloneMapping {
+  return {
+    sourceId: mapping.sourceId,
+    sourcePath: mapping.sourcePath,
+    targetId: mapping.targetId,
+    targetPath: mapping.targetPath,
+  };
+}
+
 function rewriteArtifactReferences(
   messages: readonly Message[],
   sourceSessionId: string,
   targetSessionId: string,
-  mappings: readonly ArtifactCloneMapping[],
+  mappings: readonly PersistedArtifactCloneMapping[],
 ): Message[] {
   const replacements: Array<readonly [string, string]> = [];
   for (const mapping of mappings) {
@@ -461,100 +471,144 @@ function rewriteStrings(
   return value;
 }
 
-async function isCompletePreparedJournal(
-  path: string,
-  operation: ForkStorageOperation,
-  messages: readonly Message[],
-  lineage: SessionLineage,
-  runtimePatch: SessionRuntimeStatePatch | undefined,
-): Promise<boolean> {
-  try {
-    const snapshot = await new SessionStore(path).inspectJournal({ strict: true });
-    const records = snapshot.records;
-    if (records.length !== (runtimePatch ? 2 : 1)) return false;
-    const seed = records[0];
-    if (
-      seed?.type !== "event" ||
-      seed.eventId !== seedEventId(operation.operationId) ||
-      seed.seq !== 0 ||
-      seed.epoch !== 0 ||
-      seed.kind !== "session.seeded" ||
-      !isDeepStrictEqual(seed.data, {
-        messages: structuredClone(messages),
-        lineage: structuredClone(lineage),
-      })
-    ) {
-      return false;
-    }
-    if (!runtimePatch) return true;
-    const runtime = records[1];
-    return (
-      runtime?.type === "event" &&
-      runtime.eventId === runtimeEventId(operation.operationId) &&
-      runtime.seq === 1 &&
-      runtime.epoch === 0 &&
-      runtime.kind === "runtime.checkpoint" &&
-      isDeepStrictEqual(runtime.data.patch, runtimePatch)
-    );
-  } catch {
-    return false;
-  }
-}
-
-async function inspectForkSessionFile(
-  operation: ForkStorageOperation,
-  path: string,
-): Promise<ForkTargetSessionIdentity | undefined> {
-  try {
-    const snapshot = await new SessionStore(path).inspectJournal({ strict: true });
-    const metadata = snapshot.metadata;
-    if (!isSessionMetaV3(metadata) || metadata.sessionId !== operation.targetSessionId) {
-      return undefined;
-    }
-    const seed = snapshot.records.find(
-      (record): record is Extract<SessionEvent, { kind: "session.seeded" }> =>
-        record.type === "event" && record.kind === "session.seeded",
-    );
-    const parent = seed?.data.lineage?.parent;
-    if (!parent || seed.data.lineage?.relation !== "fork") return undefined;
-    return { sessionId: metadata.sessionId, logId: metadata.logId, forkedFrom: parent };
-  } catch {
-    return undefined;
-  }
-}
-
-/** Reads the target's immutable seed; runtime bootstrap must never re-read mutable source history. */
-async function readPublishedRuntimeForkSeed(
-  operation: ForkStorageOperation,
-  targetSessionPath: string,
-): Promise<readonly Message[]> {
-  const snapshot = await new SessionStore(targetSessionPath).inspectJournal({ strict: true });
-  const seed = snapshot.records.find(
-    (record): record is Extract<SessionEvent, { kind: "session.seeded" }> =>
-      record.type === "event" && record.kind === "session.seeded",
-  );
+function parseFrozenForkBundle(value: unknown): FrozenForkBundle {
   if (
-    !seed ||
-    seed.data.lineage?.relation !== "fork" ||
-    seed.data.lineage.parentSessionId !== operation.sourceSessionId
+    !isRecord(value) ||
+    value["schemaVersion"] !== FROZEN_FORK_BUNDLE_VERSION ||
+    typeof value["operationId"] !== "string" ||
+    typeof value["sourceSessionId"] !== "string" ||
+    typeof value["targetSessionId"] !== "string" ||
+    !isForkSourceCursor(value["sourceCursor"]) ||
+    !Array.isArray(value["messages"]) ||
+    !value["messages"].every(isMessageValue) ||
+    (value["sourceTitle"] !== undefined && typeof value["sourceTitle"] !== "string")
+  ) {
+    throw new Error("Invalid frozen Runtime fork bundle");
+  }
+
+  const hasSettings = value["settings"] !== undefined;
+  const hasGoal = value["goal"] !== undefined;
+  const normalized =
+    hasSettings || hasGoal
+      ? normalizeSessionRuntimeStatePatch({
+          ...(hasSettings ? { settings: value["settings"] } : {}),
+          ...(hasGoal ? { goal: value["goal"] } : {}),
+        })
+      : undefined;
+  if (
+    (hasSettings && !normalized?.settings) ||
+    (hasGoal && !normalized?.goal) ||
+    (!hasSettings && normalized?.settings) ||
+    (!hasGoal && normalized?.goal)
+  ) {
+    throw new Error("Invalid frozen Runtime state");
+  }
+
+  return {
+    schemaVersion: FROZEN_FORK_BUNDLE_VERSION,
+    operationId: value["operationId"],
+    sourceSessionId: value["sourceSessionId"],
+    targetSessionId: value["targetSessionId"],
+    sourceCursor: structuredClone(value["sourceCursor"]),
+    messages: structuredClone(value["messages"] as Message[]),
+    ...(value["sourceTitle"] !== undefined ? { sourceTitle: value["sourceTitle"] } : {}),
+    ...(normalized?.settings ? { settings: normalized.settings } : {}),
+    ...(normalized?.goal ? { goal: normalized.goal } : {}),
+  };
+}
+
+function parseForkSidecarsBundle(value: unknown): ForkSidecarsBundle {
+  if (
+    !isRecord(value) ||
+    value["schemaVersion"] !== FORK_SIDECARS_VERSION ||
+    typeof value["operationId"] !== "string" ||
+    typeof value["sourceSessionId"] !== "string" ||
+    typeof value["targetSessionId"] !== "string" ||
+    !Array.isArray(value["artifactMappings"]) ||
+    !value["artifactMappings"].every(isPersistedArtifactMapping)
+  ) {
+    throw new Error("Invalid fork sidecar result");
+  }
+  return {
+    schemaVersion: FORK_SIDECARS_VERSION,
+    operationId: value["operationId"],
+    sourceSessionId: value["sourceSessionId"],
+    targetSessionId: value["targetSessionId"],
+    artifactMappings: structuredClone(value["artifactMappings"] as PersistedArtifactCloneMapping[]),
+  };
+}
+
+function validateFrozenBundleForOperation(
+  frozen: FrozenForkBundle,
+  operation: ForkStorageOperation,
+  path: string,
+): void {
+  if (
+    frozen.operationId !== operation.operationId ||
+    frozen.sourceSessionId !== operation.sourceSessionId ||
+    frozen.targetSessionId !== operation.targetSessionId ||
+    !sameCursor(frozen.sourceCursor, operation.sourceCursor)
   ) {
     throw new ForkOperationConflictError(
-      "Published target session has no matching immutable fork seed",
-      "target_conflict",
-      [targetSessionPath],
+      "Frozen Runtime fork bundle belongs to another operation or source cursor",
+      "staging_corrupt",
+      [path],
     );
   }
-  return structuredClone(seed.data.messages);
 }
 
-function isSessionMetaV3(value: unknown): value is SessionMetaV3 {
+function validateSidecarsForOperation(
+  sidecars: ForkSidecarsBundle,
+  operation: ForkStorageOperation,
+  path: string,
+): void {
+  if (
+    sidecars.operationId !== operation.operationId ||
+    sidecars.sourceSessionId !== operation.sourceSessionId ||
+    sidecars.targetSessionId !== operation.targetSessionId
+  ) {
+    throw new ForkOperationConflictError(
+      "Fork sidecar result belongs to another operation",
+      "staging_corrupt",
+      [path],
+    );
+  }
+}
+
+function isPersistedArtifactMapping(value: unknown): value is PersistedArtifactCloneMapping {
   return (
-    typeof value === "object" &&
-    value !== null &&
-    "schemaVersion" in value &&
-    value.schemaVersion === 3 &&
-    "logId" in value &&
-    typeof value.logId === "string"
+    isRecord(value) &&
+    typeof value["sourceId"] === "string" &&
+    typeof value["sourcePath"] === "string" &&
+    typeof value["targetId"] === "string" &&
+    typeof value["targetPath"] === "string"
+  );
+}
+
+function isMessageValue(value: unknown): value is Message {
+  return (
+    isRecord(value) &&
+    (value["role"] === "system" || value["role"] === "user" || value["role"] === "assistant") &&
+    typeof value["content"] === "string"
+  );
+}
+
+function isForkSourceCursor(value: unknown): value is ForkSourceCursor {
+  return (
+    isRecord(value) &&
+    typeof value["logId"] === "string" &&
+    isNonNegativeInteger(value["seq"]) &&
+    isNonNegativeInteger(value["epoch"]) &&
+    typeof value["eventId"] === "string"
+  );
+}
+
+function sameCursor(left: ForkSourceCursor, right: ForkSourceCursor): boolean {
+  return (
+    left.logId === right.logId &&
+    left.seq === right.seq &&
+    left.epoch === right.epoch &&
+    left.eventId === right.eventId
   );
 }
 
@@ -573,27 +627,41 @@ function forkTitleFrom(sourceTitle: string): string {
   return prefix + compacted.slice(0, 120 - prefix.length);
 }
 
-function seedEventId(operationId: string): string {
-  return "fork:" + operationId + ":seed";
+function runtimeStateEventId(operationId: string): string {
+  return "fork:" + operationId + ":state";
 }
 
-function runtimeEventId(operationId: string): string {
-  return "fork:" + operationId + ":runtime";
+function parseForkCreatedAt(createdAt: string): number {
+  const timestamp = Date.parse(createdAt);
+  if (!Number.isFinite(timestamp)) {
+    throw new Error(`Fork operation has an invalid createdAt timestamp: ${createdAt}`);
+  }
+  return timestamp;
 }
 
 function assertSafeSessionId(sessionId: string): void {
   if (!SAFE_SESSION_ID.test(sessionId)) throw new Error("无效 sessionId: " + sessionId);
 }
 
-async function assertTargetNotPublished(path: string): Promise<void> {
-  try {
-    const info = await lstat(path);
-    if (info.isFile()) throw new Error("Fork 目标已存在: " + basename(path));
-    throw new Error("Fork 目标路径不是普通文件: " + path);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
-    throw error;
+async function assertTargetNotPublished(
+  runtimeStore: RuntimeEventStore,
+  targetSessionId: string,
+): Promise<void> {
+  if (await runtimeStore.readSessionManifest(targetSessionId)) {
+    throw new Error("Fork 目标 Runtime 已存在: " + targetSessionId);
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isNodeCode(error: unknown, code: string): boolean {
+  return error instanceof Error && "code" in error && error.code === code;
 }
 
 function errorMessage(error: unknown): string {
