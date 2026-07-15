@@ -843,6 +843,80 @@ export type RuntimeMethodName = RuntimeMethod;
 export type RuntimeParams<Method extends RuntimeMethod> = RuntimeMethodMap[Method]["params"];
 export type RuntimeResult<Method extends RuntimeMethod> = RuntimeMethodMap[Method]["result"];
 
+/**
+ * Runtime methods that the Electron preload may expose to its sandboxed Renderer.
+ *
+ * This is an explicit security surface rather than a derived subset of RUNTIME_METHODS:
+ * trusted-host methods that import credentials or create background automations must not
+ * become Renderer-accessible merely because they exist in the local daemon protocol.
+ */
+export const DESKTOP_RUNTIME_METHODS = [
+  "runtime.ping",
+  "workspace.init",
+  "diagnostics.run",
+  "diagnostics.resources",
+  "session.list",
+  "session.get",
+  "session.create",
+  "session.archive",
+  "session.restore",
+  "session.rename",
+  "session.fork",
+  "session.compact",
+  "session.settings.get",
+  "session.settings.update",
+  "goal.get",
+  "session.send",
+  "session.transcript",
+  "run.start",
+  "run.cancel",
+  "run.pause",
+  "run.resume",
+  "run.steer",
+  "runs.list",
+  "approval.respond",
+  "prompt.respond",
+  "changes.list",
+  "changes.diff",
+  "changes.review",
+  "changes.apply",
+  "rewind.list",
+  "rewind.preview",
+  "rewind.apply",
+  "jobs.list",
+  "jobs.create",
+  "jobs.update",
+  "jobs.delete",
+  "jobs.setEnabled",
+  "jobs.runNow",
+  "jobs.history",
+  "config.get",
+  "config.providers",
+  "config.user.get",
+  "config.user.update",
+  "config.effective.get",
+  "provider.list",
+  "provider.upsert",
+  "provider.delete",
+  "provider.credential.status",
+  "provider.credential.set",
+  "provider.credential.delete",
+  "catalog.agents",
+  "catalog.skills",
+  "config.skills",
+  "config.mcpServers",
+  "usage.get",
+  "workspace.register",
+  "workspace.unregister",
+  "workspace.status",
+  "workspace.list",
+  "workspace.trust",
+  "workspace.trustStatus",
+  "events.replay",
+] as const satisfies readonly RuntimeMethod[];
+
+export type DesktopRuntimeMethod = (typeof DESKTOP_RUNTIME_METHODS)[number];
+
 export type RuntimeEventMap = {
   readonly "workspace.registered": { readonly registered: true };
   readonly "workspace.unregistered": { readonly registered: false };

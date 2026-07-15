@@ -1,5 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  isJsonValue,
+  type DesktopRuntimeMethod,
+  type RuntimeProviderInput,
+  type RuntimeParams,
+  type RuntimeResult,
+  type RuntimeUserDefaults,
+} from "@pico/protocol";
+import type { DesktopBridge, DesktopResult } from "../preload/contract.js";
+import {
   emptyData,
   folderWorkspaceCapabilities,
   type AppData,
@@ -33,46 +42,8 @@ import { conversationItemKey } from "./conversation/items.js";
 
 const SHARED_CONFIG_CAPABILITY = "shared-config-v1";
 
-type DesktopResult<T> =
-  | { readonly ok: true; readonly value: T }
-  | {
-      readonly ok: false;
-      readonly error: {
-        readonly code: string;
-        readonly message: string;
-        readonly retryable: boolean;
-      };
-    };
-
-interface RuntimeSubscription {
-  readonly ready: Promise<DesktopResult<unknown>>;
-  dispose(): void;
-}
-
-export interface RendererBridge {
-  readonly runtime: Readonly<
-    Record<string, (params: Readonly<Record<string, unknown>>) => Promise<DesktopResult<unknown>>>
-  >;
-  readonly events: {
-    subscribe(
-      params: Readonly<Record<string, unknown>>,
-      listener: (event: unknown) => void,
-    ): RuntimeSubscription;
-  };
-  readonly platform: {
-    chooseWorkspace(): Promise<DesktopResult<string | undefined>>;
-    openDirectory(path: string): Promise<DesktopResult<void>>;
-    getLaunchAtLogin(): Promise<DesktopResult<boolean>>;
-    setLaunchAtLogin(enabled: boolean): Promise<DesktopResult<void>>;
-  };
-  readonly lifecycle: {
-    setBackgroundMode(enabled: boolean): Promise<DesktopResult<void>>;
-    quit(): Promise<DesktopResult<void>>;
-  };
-}
-
-function getBridge(): RendererBridge | undefined {
-  return (window as unknown as { readonly pico?: RendererBridge }).pico;
+function getBridge(): DesktopBridge | undefined {
+  return window.pico;
 }
 
 export function isPreviewMode(): boolean {
@@ -651,13 +622,12 @@ class RuntimeInvocationError extends Error {
   }
 }
 
-async function invoke(
-  bridge: RendererBridge,
-  method: string,
-  params: Readonly<Record<string, unknown>>,
-): Promise<unknown> {
+async function invoke<Method extends DesktopRuntimeMethod>(
+  bridge: DesktopBridge,
+  method: Method,
+  params: RuntimeParams<Method>,
+): Promise<RuntimeResult<Method>> {
   const call = bridge.runtime[method];
-  if (!call) throw new Error(`当前 Runtime 不支持 ${method}`);
   const result = await call(params);
   if (!result.ok) {
     throw new RuntimeInvocationError(
@@ -669,16 +639,28 @@ async function invoke(
   return result.value;
 }
 
-async function optionalInvoke(
-  bridge: RendererBridge,
-  method: string,
-  params: Readonly<Record<string, unknown>>,
-): Promise<{ readonly value?: unknown; readonly error?: string }> {
+async function optionalInvoke<Method extends DesktopRuntimeMethod>(
+  bridge: DesktopBridge,
+  method: Method,
+  params: RuntimeParams<Method>,
+): Promise<
+  | { readonly value: RuntimeResult<Method>; readonly error?: never }
+  | { readonly value?: never; readonly error: string }
+> {
   try {
     return { value: await invoke(bridge, method, params) };
   } catch (error) {
     return { error: errorMessage(error) };
   }
+}
+
+async function optionalEntry<Key extends string, Method extends DesktopRuntimeMethod>(
+  key: Key,
+  bridge: DesktopBridge,
+  method: Method,
+  params: RuntimeParams<Method>,
+) {
+  return [key, await optionalInvoke(bridge, method, params)] as const;
 }
 
 function parseWorkspaceList(value: unknown): readonly JsonRecord[] {
@@ -910,42 +892,33 @@ export function useRuntimeStore(): RuntimeStore {
     setMessage(errorMessage(error));
   }, []);
 
-  const loadWorkspace = useCallback(async (bridge: RendererBridge, workspacePath: string) => {
+  const loadWorkspace = useCallback(async (bridge: DesktopBridge, workspacePath: string) => {
     const generation = workspaceLoadGenerationRef.current + 1;
     workspaceLoadGenerationRef.current = generation;
     const isCurrentLoad = () => workspaceLoadGenerationRef.current === generation;
     const params = { workspacePath };
     const sharedConfigSupported = runtimeCapabilitiesRef.current.has(SHARED_CONFIG_CAPABILITY);
-    const requests: ReadonlyArray<readonly [string, string, Readonly<Record<string, unknown>>]> = [
-      ["workspace", "workspace.status", params],
-      ["sessions", "session.list", { ...params, includeArchived: true }],
-      ["runs", "runs.list", params],
-      ["jobs", "jobs.list", params],
-      ["skills", "config.skills", params],
-      ["mcp", "config.mcpServers", params],
-      ["legacyProviders", "config.providers", params],
-      ["agentCatalog", "catalog.agents", params],
-      ["skillCatalog", "catalog.skills", params],
-      ["usage", "usage.get", params],
-      ["config", "config.get", params],
+    const requests = [
+      optionalEntry("workspace", bridge, "workspace.status", params),
+      optionalEntry("sessions", bridge, "session.list", { ...params, includeArchived: true }),
+      optionalEntry("runs", bridge, "runs.list", params),
+      optionalEntry("jobs", bridge, "jobs.list", params),
+      optionalEntry("skills", bridge, "config.skills", params),
+      optionalEntry("mcp", bridge, "config.mcpServers", params),
+      optionalEntry("legacyProviders", bridge, "config.providers", params),
+      optionalEntry("agentCatalog", bridge, "catalog.agents", params),
+      optionalEntry("skillCatalog", bridge, "catalog.skills", params),
+      optionalEntry("usage", bridge, "usage.get", params),
+      optionalEntry("config", bridge, "config.get", params),
       ...(sharedConfigSupported
         ? ([
-            ["providerRegistry", "provider.list", {}],
-            ["userConfig", "config.user.get", {}],
-            ["effectiveConfig", "config.effective.get", params],
+            optionalEntry("providerRegistry", bridge, "provider.list", {}),
+            optionalEntry("userConfig", bridge, "config.user.get", {}),
+            optionalEntry("effectiveConfig", bridge, "config.effective.get", params),
           ] as const)
         : []),
     ];
-    const entries = await Promise.all(
-      requests.map(async ([key, method, invocationParams]) => {
-        const result = await optionalInvoke(
-          bridge,
-          String(method),
-          invocationParams as Readonly<Record<string, unknown>>,
-        );
-        return [String(key), result] as const;
-      }),
-    );
+    const entries = await Promise.all(requests);
     const values: Record<string, unknown> = {};
     const notices: Record<string, string> = {};
     for (const [key, result] of entries) {
@@ -964,10 +937,10 @@ export function useRuntimeStore(): RuntimeStore {
     const runId = stringValue(loadedRuns[0]?.runId);
     if (runId) {
       const changeList = await optionalInvoke(bridge, "changes.list", { workspacePath, runId });
-      if (changeList.error) {
-        notices.changes = changeList.error;
+      if ("error" in changeList) {
+        notices.changes = changeList.error ?? "Runtime 未返回变更列表。";
       } else {
-        const listValue = isRecord(changeList.value) ? changeList.value : {};
+        const listValue = changeList.value;
         const changes = recordArray(listValue.changes);
         const hydrated = await Promise.all(
           changes.map(async (change) => {
@@ -978,8 +951,7 @@ export function useRuntimeStore(): RuntimeStore {
               runId,
               path,
             });
-            const diffValue = isRecord(diff.value) ? diff.value : {};
-            return { ...change, patch: stringValue(diffValue.patch) || undefined };
+            return { ...change, patch: stringValue(diff.value?.patch) || undefined };
           }),
         );
         values.changes = { ...listValue, changes: hydrated };
@@ -996,13 +968,12 @@ export function useRuntimeStore(): RuntimeStore {
     }
     if (!isCurrentLoad()) return;
     if (trustResult.error) notices.trust = trustResult.error;
-    const trustValue = isRecord(trustResult.value) ? trustResult.value : {};
     setData((current) =>
       mergeLoadedData(
         {
           ...current,
           workspacePath,
-          trusted: booleanValue(trustValue.trusted),
+          trusted: booleanValue(trustResult.value?.trusted),
           launchAtLogin,
           notices,
           providerConfig: {
@@ -1016,7 +987,7 @@ export function useRuntimeStore(): RuntimeStore {
   }, []);
 
   const loadConversation = useCallback(
-    async (bridge: RendererBridge, workspacePath: string, sessionId: string) => {
+    async (bridge: DesktopBridge, workspacePath: string, sessionId: string) => {
       if (preview) return;
       const loadKey = `${workspacePath}\0${sessionId}`;
       const generation = (conversationLoadGenerationsRef.current.get(loadKey) ?? 0) + 1;
@@ -1069,8 +1040,8 @@ export function useRuntimeStore(): RuntimeStore {
       if (runId) {
         const changeList = await optionalInvoke(bridge, "changes.list", { workspacePath, runId });
         if (!isCurrentLoad()) return;
-        if (!changeList.error) {
-          const listValue = isRecord(changeList.value) ? changeList.value : {};
+        if (!changeList.error && changeList.value) {
+          const listValue = changeList.value;
           const changes = await Promise.all(
             recordArray(listValue.changes).map(async (change) => {
               const path = stringValue(change.path);
@@ -1080,8 +1051,7 @@ export function useRuntimeStore(): RuntimeStore {
                 runId,
                 path,
               });
-              const diffValue = isRecord(diff.value) ? diff.value : {};
-              return { ...change, patch: stringValue(diffValue.patch) || undefined };
+              return { ...change, patch: stringValue(diff.value?.patch) || undefined };
             }),
           );
           if (!isCurrentLoad()) return;
@@ -1132,10 +1102,7 @@ export function useRuntimeStore(): RuntimeStore {
     }
     try {
       const pingValue = await invoke(bridge, "runtime.ping", {});
-      const ping = isRecord(pingValue) ? pingValue : {};
-      const capabilities = Array.isArray(ping.capabilities)
-        ? ping.capabilities.map((capability) => stringValue(capability))
-        : [];
+      const capabilities = pingValue.capabilities.map((capability) => stringValue(capability));
       runtimeCapabilitiesRef.current = new Set(capabilities);
       if (!capabilities.includes("session-conversation-v1")) {
         throw new Error("当前 Runtime 缺少会话能力。请完全退出并重新启动 Pico。");
@@ -1178,8 +1145,7 @@ export function useRuntimeStore(): RuntimeStore {
     const bridge = getBridge();
     if (!bridge) return;
     const subscription = bridge.events.subscribe({ workspacePath: data.workspacePath }, (event) => {
-      if (!isRecord(event)) return;
-      const scope = isRecord(event.scope) ? event.scope : {};
+      const scope = event.scope;
       const scopedWorkspacePath = stringValue(scope.workspacePath);
       if (scopedWorkspacePath && scopedWorkspacePath !== dataRef.current.workspacePath) return;
       const eventId = stringValue(event.eventId);
@@ -1295,7 +1261,7 @@ export function useRuntimeStore(): RuntimeStore {
   const perform = useCallback(
     async (
       label: string,
-      operation: (bridge: RendererBridge) => Promise<void>,
+      operation: (bridge: DesktopBridge) => Promise<void>,
     ): Promise<boolean> => {
       setBusy(label);
       setMessage(undefined);
@@ -1349,8 +1315,7 @@ export function useRuntimeStore(): RuntimeStore {
           const registeredValue = await invoke(bridge, "workspace.register", {
             workspacePath: result.value,
           });
-          const registered = isRecord(registeredValue) ? registeredValue : {};
-          const workspacePath = stringValue(registered.workspacePath, result.value);
+          const workspacePath = stringValue(registeredValue.workspacePath, result.value);
           setData({ ...emptyData, workspacePath });
           if (!preview) await loadWorkspace(bridge, workspacePath);
         });
@@ -1487,8 +1452,7 @@ export function useRuntimeStore(): RuntimeStore {
             ...(input.expectedRunId ? { expectedRunId: input.expectedRunId } : {}),
             idempotencyKey,
           });
-          const result = isRecord(value) ? value : {};
-          const session = isRecord(result.session) ? result.session : {};
+          const session = value.session;
           resolvedSessionId = stringValue(session.sessionId, input.sessionId);
           await loadWorkspace(bridge, workspacePath);
           if (resolvedSessionId) {
@@ -1534,8 +1498,7 @@ export function useRuntimeStore(): RuntimeStore {
             return;
           }
           const value = await invoke(bridge, "session.fork", { workspacePath, sessionId });
-          const result = isRecord(value) ? value : {};
-          const session = isRecord(result.session) ? result.session : {};
+          const session = value.session;
           forkedSessionId = stringValue(session.sessionId);
           await loadWorkspace(bridge, workspacePath);
           if (forkedSessionId) await loadConversation(bridge, workspacePath, forkedSessionId);
@@ -1738,11 +1701,10 @@ export function useRuntimeStore(): RuntimeStore {
             sessionId,
             checkpointId,
           });
-          const result = isRecord(value) ? value : {};
           previewResult = {
             checkpointId,
-            fingerprint: stringValue(result.fingerprint),
-            changeCount: recordArray(result.changes).length,
+            fingerprint: stringValue(value.fingerprint),
+            changeCount: recordArray(value.changes).length,
           };
         });
         return previewResult;
@@ -1871,8 +1833,22 @@ export function useRuntimeStore(): RuntimeStore {
             setMessage(`Provider ${provider.id} 已保存。`);
             return;
           }
+          if (provider.modelCapabilities && !isJsonValue(provider.modelCapabilities)) {
+            throw new Error("Provider modelCapabilities 必须是 JSON 对象。");
+          }
+          const runtimeProvider: RuntimeProviderInput = {
+            id: provider.id,
+            protocol: provider.protocol,
+            baseURL: provider.baseURL,
+            apiKeyEnv: provider.apiKeyEnv,
+            models: provider.models,
+            discoverModels: provider.discoverModels,
+            ...(provider.modelCapabilities
+              ? { modelCapabilities: provider.modelCapabilities }
+              : {}),
+          };
           await invoke(bridge, "provider.upsert", {
-            provider,
+            provider: runtimeProvider,
             expectedRevision: providerConfig.revision,
           });
           const workspacePath = dataRef.current.workspacePath;
@@ -1909,12 +1885,13 @@ export function useRuntimeStore(): RuntimeStore {
       async setDefaultModelRoute(modelRouteId) {
         const providerConfig = dataRef.current.providerConfig;
         if (!providerConfig.writable) return false;
-        const defaults: Record<string, unknown> = {};
-        if (modelRouteId) defaults.modelRouteId = modelRouteId;
-        if (providerConfig.userDefaults.mode) defaults.mode = providerConfig.userDefaults.mode;
-        if (providerConfig.userDefaults.thinkingEffort) {
-          defaults.thinkingEffort = providerConfig.userDefaults.thinkingEffort;
-        }
+        const defaults: RuntimeUserDefaults = {
+          ...(modelRouteId ? { modelRouteId } : {}),
+          ...(providerConfig.userDefaults.mode ? { mode: providerConfig.userDefaults.mode } : {}),
+          ...(providerConfig.userDefaults.thinkingEffort
+            ? { thinkingEffort: providerConfig.userDefaults.thinkingEffort }
+            : {}),
+        };
         return perform("provider-default", async (bridge) => {
           if (!preview) {
             await invoke(bridge, "config.user.update", {
@@ -2053,8 +2030,7 @@ export function useRuntimeStore(): RuntimeStore {
             kind === "resources" ? "diagnostics.resources" : "diagnostics.run",
             { workspacePath },
           );
-          const result = isRecord(value) ? value : {};
-          output = stringValue(result.output, "诊断完成，未返回文本报告。");
+          output = stringValue(value.output, "诊断完成，未返回文本报告。");
         });
         return output;
       },
@@ -2065,7 +2041,7 @@ export function useRuntimeStore(): RuntimeStore {
   return { preview, connection, data, busy, message, actions };
 }
 
-function createPreviewBridge(): RendererBridge {
+function createPreviewBridge(): DesktopBridge {
   const success = <T>(value: T): Promise<DesktopResult<T>> => Promise.resolve({ ok: true, value });
   return {
     runtime: new Proxy(
@@ -2073,7 +2049,7 @@ function createPreviewBridge(): RendererBridge {
       {
         get: () => () => success({}),
       },
-    ),
+    ) as DesktopBridge["runtime"],
     events: {
       subscribe: () => ({
         ready: success({ subscribed: true, events: [] }),
@@ -2082,6 +2058,7 @@ function createPreviewBridge(): RendererBridge {
     },
     platform: {
       chooseWorkspace: () => success(previewData.workspacePath),
+      showNotification: () => success(undefined),
       openDirectory: () => success(undefined),
       getLaunchAtLogin: () => success(false),
       setLaunchAtLogin: () => success(undefined),
