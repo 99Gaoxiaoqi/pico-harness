@@ -35,9 +35,11 @@ pico
 
 ## 共享配置与凭证
 
-TUI 和 Desktop 从同一个 `PICO_HOME`（默认 `~/.pico`）读取设备级配置。`config.json` 只保存 Provider 元数据和默认值；密钥保存在当前 OS 凭证库。Desktop 的 Provider 页和 TUI `/provider` 命令修改的是同一份配置。
+TUI 和 Desktop 从同一个 `PICO_HOME`（默认 `~/.pico`）读取设备级配置。`config.json` 只保存 Provider 元数据和默认值；密钥与配置分离。当前持久凭证后端仅实现 macOS Keychain，其他平台在安全后端补齐前只能使用环境兼容入口，不能导入持久密钥或创建持久 Automation。Desktop 的 Provider 页和 TUI `/provider` 命令修改的是同一份配置。
 
 `PICO_HOME` 也参与本地 daemon endpoint 命名；两个不同的 `PICO_HOME` 不会误连到对方的 Runtime。工作区 `.pico/config.json` 只在信任后读取，并可覆盖用户默认模型。MCP 默认读取 `.pico/mcp.json`；旧 `.claw/mcp.json` 仅作兼容回退。
+
+运行中的 Run 固定使用启动时的配置快照，不会中途热换模型或凭证。TUI 在下一轮发送前重新解析配置；Desktop 通过 Runtime 事件刷新，并在窗口重新聚焦时补一次读取。损坏配置、revision 冲突或 Provider authority 冲突都会 fail-closed。
 
 ## 环境变量兼容
 

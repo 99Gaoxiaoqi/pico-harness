@@ -1,6 +1,6 @@
 # Pico Desktop 架构边界
 
-Pico Desktop 是现有本地 Agent Runtime 的图形宿主，不是第二套 Agent 实现。CLI/TUI 与桌面端共享 `~/.pico` 数据、Runtime 协议和安全约束。
+Pico Desktop 是现有本地 Agent Runtime 的图形宿主，不是第二套 Agent 实现。CLI/TUI 与桌面端共享 `$PICO_HOME`（默认 `~/.pico`）数据、Runtime 协议和安全约束。
 
 ## 进程边界
 
@@ -24,10 +24,10 @@ Pico daemon ── Agent Runtime / Session / Rewind / Automations
 
 ## 数据所有权
 
-- `~/.pico`：Session catalog、信任、daemon 注册等跨 CLI/App 的唯一真源。
+- `$PICO_HOME`：Session catalog、信任、daemon 注册等跨 CLI/App 的唯一真源。
 - 工作区 `.pico` / `.claw`：项目配置和 Runtime 数据，仍受工作区信任边界约束。
 - Electron `userData`：窗口尺寸、主题、更新通道等纯界面状态。
-- Provider 密钥：只保存在系统凭证库，协议和 Renderer 只接触 `credentialRef`。
+- Provider 密钥：持久密钥当前只保存在 macOS Keychain，协议和 Renderer 只接触 `credentialRef`；其他平台的安全后端尚未开放。
 
 ## 平台边界
 

@@ -69,7 +69,7 @@ CanonicalUsage = {
 
 ### 备份路径
 
-`~/.pico/file-history/<sha256(sessionId)[:32]>/<sha256(filePath)[:16]>@v<N>`
+`$PICO_HOME/file-history/<sha256(sessionId)[:32]>/<sha256(filePath)[:16]>@v<N>`（默认位于 `~/.pico`）
 
 ### 持久化
 

@@ -52,9 +52,11 @@ $PICO_HOME/config.json（Desktop + TUI 共享）
 LLM_* 环境变量（兼容入口）
 ```
 
-`EffectiveConfigResolver` 只合并非秘密配置，并为每个字段保留来源。工作区未信任时不读取项目配置；同 ID Provider 的协议或规范化 Endpoint 冲突时直接拒绝合并。`UserConfigStore` 以内容 SHA-256 revision 执行 OCC，在短锁内复查 revision 并原子替换文件。
+上图只描述非秘密配置和模型路由的优先级。`EffectiveConfigResolver` 为每个字段保留来源；工作区未信任时不读取项目配置；同 ID Provider 的协议或规范化 Endpoint 冲突时直接拒绝合并。`UserConfigStore` 以内容 SHA-256 revision 执行 OCC，在短锁内复查 revision 并原子替换文件。
 
-`loadEffectiveModelRuntime` 是 TUI、Desktop 前台运行、Compact 和子代理的统一模型解析入口。它先解析配置，再从显式环境变量或 OS 凭证库向 `ModelRouter` 注入进程内 secret。secret 不属于 `EffectiveConfigSnapshot`，也不会被 Runtime 协议、Renderer Store 或日志投影。
+`loadEffectiveModelRuntime` 是 TUI、Desktop 前台运行、Compact 和子代理的统一模型解析入口。它先解析配置，再按“Provider 指定的进程环境变量 > 匹配 authority 的 v2 凭证 > 项目路由 v1 凭证”向 `ModelRouter` 注入进程内 secret。环境凭证会遮蔽但不会改写 Keychain。secret 不属于 `EffectiveConfigSnapshot`，也不会被 Runtime 协议、Renderer Store 或日志投影。当前持久凭证后端仅实现 macOS Keychain，其他平台 fail-closed。
+
+每个 Run 固定使用启动时的配置快照。TUI 在下一轮 Run 前重新解析配置和凭证；daemon 通过 `config.updated` 通知 Desktop，Renderer 在事件后刷新，并在窗口重新聚焦时补读。刷新不会热换正在运行的 Provider，Session 显式路由仍优先；损坏配置、过期 revision 与 authority 冲突都 fail-closed。
 
 凭证引用分两代：
 
@@ -102,14 +104,14 @@ new CostTracker(provider, modelRoute, session);
 
 ### 入口边界
 
-| 维度         | 当前实现                       |
-| ------------ | ------------------------------ |
-| **启动**     | `pico` / `npm run dev`         |
-| **I/O**      | ink React TUI + `TuiReporter`  |
-| **Provider** | CostTracker + fallback         |
-| **Session**  | 当前项目 TUI session           |
-| **审批**     | 本地 TUI/终端审批              |
-| **MCP**      | 通过 `--mcp-config` 启动时加载 |
+| 维度         | TUI                                     | Desktop                                          |
+| ------------ | --------------------------------------- | ------------------------------------------------ |
+| **启动**     | `pico` / `npm run dev`                  | Electron Main 连接当前 `PICO_HOME` 的本地 daemon |
+| **I/O**      | ink React TUI + `TuiReporter`           | React Renderer + 类型化 Preload/Runtime 事件     |
+| **Provider** | 共享 ModelRouter + CostTracker/fallback | 同一 ModelRouter；Renderer 不接触 secret         |
+| **Session**  | 当前项目 TUI Session                    | Workspace → Session → 多轮 Run 的连续 Transcript |
+| **审批**     | 本地 TUI/终端审批                       | Transcript 内 Approval / Ask User                |
+| **MCP**      | 工作区配置，可用高级命令管理            | 同一工作区配置，通过 daemon 类型化方法管理       |
 
 ### 启动装配 (`cli/main.ts` → `tui/repl.tsx` → `run-agent.ts`)
 
