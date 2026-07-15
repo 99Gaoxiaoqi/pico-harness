@@ -239,9 +239,9 @@ describe("Desktop Provider settings", () => {
     const before = harness.calls.filter((call) => call.method === "provider.list").length;
     window.dispatchEvent(new Event("focus"));
     await waitFor(() =>
-      expect(harness.calls.filter((call) => call.method === "provider.list").length).toBeGreaterThan(
-        before,
-      ),
+      expect(
+        harness.calls.filter((call) => call.method === "provider.list").length,
+      ).toBeGreaterThan(before),
     );
   });
 
