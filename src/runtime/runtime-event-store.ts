@@ -48,6 +48,18 @@ export interface RuntimeEventStoreEntry {
   readonly event: RuntimeEvent;
 }
 
+export interface RuntimeSessionProjectionSnapshot {
+  readonly activeBranchId: string;
+  readonly entries: readonly RuntimeEventStoreEntry[];
+  readonly cursor?: SessionCursor;
+}
+
+export interface RuntimeSessionProjectionDelta {
+  readonly activeBranchId: string;
+  readonly entries: readonly RuntimeEventStoreEntry[];
+  readonly cursor: SessionCursor;
+}
+
 export interface AppendRuntimeSessionStateOptions {
   readonly eventId?: string;
   readonly now?: () => Date;
@@ -226,6 +238,25 @@ export class RuntimeEventStore {
     return (await this.readSessionEntries(sessionId)).map(({ event }) => event);
   }
 
+  async readSessionEvent(
+    sessionId: string,
+    eventId: string,
+  ): Promise<RuntimeEventStoreEntry | undefined> {
+    const db = this.openDatabase();
+    try {
+      const row = db
+        .prepare(
+          `SELECT sequence, session_id, run_id, event_id, kind, at, event_json
+           FROM agent_runtime_events
+           WHERE session_id = ? AND event_id = ?`,
+        )
+        .get(sessionId, eventId) as EventRow | undefined;
+      return row ? decodeEventRow(row, sessionId) : undefined;
+    } finally {
+      db.close();
+    }
+  }
+
   async readSessionEntries(sessionId: string): Promise<RuntimeEventStoreEntry[]> {
     const db = this.openDatabase();
     try {
@@ -238,6 +269,106 @@ export class RuntimeEventStore {
         )
         .all(sessionId) as EventRow[];
       return rows.map((row) => decodeEventRow(row, sessionId));
+    } finally {
+      db.close();
+    }
+  }
+
+  /** Reads one internally consistent canonical projection for recovery or repair. */
+  async readSessionProjection(
+    sessionId: string,
+  ): Promise<RuntimeSessionProjectionSnapshot | undefined> {
+    const db = this.openDatabase();
+    try {
+      return db.transaction((): RuntimeSessionProjectionSnapshot | undefined => {
+        const session = this.selectSession(db, sessionId);
+        if (!session) return undefined;
+        const entries = this.selectSessionEntries(db, sessionId);
+        const activeBranchId = activeBranchForEntries(entries);
+        if (activeBranchId !== session.active_branch_id) {
+          throw new RuntimeEventStoreIntegrityError(
+            `Runtime session ${sessionId} active branch does not match its canonical events`,
+          );
+        }
+        const head = entries.at(-1);
+        return {
+          activeBranchId,
+          entries,
+          ...(head
+            ? { cursor: cursorForEntries(sessionId, entries, head.sequence, head.event.eventId) }
+            : {}),
+        };
+      })();
+    } finally {
+      db.close();
+    }
+  }
+
+  /**
+   * Reads only the canonical suffix needed to advance a disposable projection.
+   * Undefined means the caller must replay a full snapshot instead of inferring state.
+   */
+  async readSessionProjectionDelta(
+    sessionId: string,
+    after: SessionCursor,
+    through: SessionCursor,
+    expectedBranchId: string,
+  ): Promise<RuntimeSessionProjectionDelta | undefined> {
+    if (
+      after.logId !== sessionId ||
+      through.logId !== sessionId ||
+      through.seq <= after.seq ||
+      !expectedBranchId
+    ) {
+      return undefined;
+    }
+
+    const db = this.openDatabase();
+    try {
+      return db.transaction((): RuntimeSessionProjectionDelta | undefined => {
+        const session = this.selectSession(db, sessionId);
+        if (!session) return undefined;
+        const cursorRow = this.selectSessionEventAtSequence(db, sessionId, after.seq);
+        const targetRow = this.selectSessionEventAtSequence(db, sessionId, through.seq);
+        const headRow = this.selectSessionHead(db, sessionId);
+        if (!cursorRow || !targetRow || !headRow) return undefined;
+
+        const cursorEntry = decodeEventRow(cursorRow, sessionId);
+        const targetEntry = decodeEventRow(targetRow, sessionId);
+        const headEntry = decodeEventRow(headRow, sessionId);
+        if (
+          cursorEntry.event.eventId !== after.eventId ||
+          targetEntry.event.eventId !== through.eventId ||
+          headEntry.sequence !== through.seq ||
+          headEntry.event.eventId !== through.eventId ||
+          this.activeBranchAt(db, sessionId, after.seq) !== expectedBranchId
+        ) {
+          return undefined;
+        }
+
+        const rows = db
+          .prepare(
+            `SELECT sequence, session_id, run_id, event_id, kind, at, event_json
+             FROM agent_runtime_events
+             WHERE session_id = ? AND sequence > ? AND sequence <= ?
+             ORDER BY sequence`,
+          )
+          .all(sessionId, after.seq, through.seq) as EventRow[];
+        const entries = rows.map((row) => decodeEventRow(row, sessionId));
+        if (entries.at(-1)?.event.eventId !== through.eventId) return undefined;
+
+        let epoch = after.epoch;
+        let activeBranchId = expectedBranchId;
+        for (const entry of entries) {
+          if (entry.event.kind !== "history.rewound") continue;
+          epoch++;
+          activeBranchId = entry.event.data.branchId;
+        }
+        if (epoch !== through.epoch || activeBranchId !== session.active_branch_id)
+          return undefined;
+
+        return { activeBranchId, entries, cursor: { ...through } };
+      })();
     } finally {
       db.close();
     }
@@ -261,10 +392,15 @@ export class RuntimeEventStore {
   }
 
   async getHeadCursor(sessionId: string): Promise<SessionCursor | undefined> {
-    const entries = await this.readSessionEntries(sessionId);
-    const head = entries.at(-1);
-    if (!head) return undefined;
-    return cursorForEntries(sessionId, entries, head.sequence, head.event.eventId);
+    const db = this.openDatabase();
+    try {
+      const row = this.selectSessionHead(db, sessionId);
+      if (!row) return undefined;
+      const head = decodeEventRow(row, sessionId);
+      return this.cursorForEvent(db, head.sequence, head.event);
+    } finally {
+      db.close();
+    }
   }
 
   async deleteSession(sessionId: string): Promise<boolean> {
@@ -288,6 +424,18 @@ export class RuntimeEventStore {
     event: RuntimeEvent,
     inserted: boolean,
   ): RuntimeEventStoreAppendResult {
+    return {
+      inserted,
+      cursor: this.cursorForEvent(db, sequence, event),
+      committedAt: event.at,
+    };
+  }
+
+  private cursorForEvent(
+    db: Database.Database,
+    sequence: number,
+    event: RuntimeEvent,
+  ): SessionCursor {
     const epoch = Number(
       db
         .prepare(
@@ -299,14 +447,10 @@ export class RuntimeEventStore {
         .get(event.sessionId, sequence),
     );
     return {
-      inserted,
-      cursor: {
-        logId: event.sessionId,
-        seq: sequence,
-        epoch,
-        eventId: event.eventId,
-      },
-      committedAt: event.at,
+      logId: event.sessionId,
+      seq: sequence,
+      epoch,
+      eventId: event.eventId,
     };
   }
 
@@ -385,6 +529,62 @@ export class RuntimeEventStore {
     return row;
   }
 
+  private selectSessionEntries(db: Database.Database, sessionId: string): RuntimeEventStoreEntry[] {
+    const rows = db
+      .prepare(
+        `SELECT sequence, session_id, run_id, event_id, kind, at, event_json
+         FROM agent_runtime_events
+         WHERE session_id = ?
+         ORDER BY sequence`,
+      )
+      .all(sessionId) as EventRow[];
+    return rows.map((row) => decodeEventRow(row, sessionId));
+  }
+
+  private selectSessionEventAtSequence(
+    db: Database.Database,
+    sessionId: string,
+    sequence: number,
+  ): EventRow | undefined {
+    return db
+      .prepare(
+        `SELECT sequence, session_id, run_id, event_id, kind, at, event_json
+         FROM agent_runtime_events
+         WHERE session_id = ? AND sequence = ?`,
+      )
+      .get(sessionId, sequence) as EventRow | undefined;
+  }
+
+  private selectSessionHead(db: Database.Database, sessionId: string): EventRow | undefined {
+    return db
+      .prepare(
+        `SELECT sequence, session_id, run_id, event_id, kind, at, event_json
+         FROM agent_runtime_events
+         WHERE session_id = ?
+         ORDER BY sequence DESC
+         LIMIT 1`,
+      )
+      .get(sessionId) as EventRow | undefined;
+  }
+
+  private activeBranchAt(db: Database.Database, sessionId: string, sequence: number): string {
+    const row = db
+      .prepare(
+        `SELECT sequence, session_id, run_id, event_id, kind, at, event_json
+         FROM agent_runtime_events
+         WHERE session_id = ? AND kind = 'history.rewound' AND sequence <= ?
+         ORDER BY sequence DESC
+         LIMIT 1`,
+      )
+      .get(sessionId, sequence) as EventRow | undefined;
+    if (!row) return "main";
+    const entry = decodeEventRow(row, sessionId);
+    if (entry.event.kind !== "history.rewound") {
+      throw new RuntimeEventStoreIntegrityError("Runtime active branch event has an invalid kind");
+    }
+    return entry.event.data.branchId;
+  }
+
   private openDatabase(): Database.Database {
     const db = new Database(this.databasePath);
     try {
@@ -415,7 +615,9 @@ export class RuntimeEventStore {
          CREATE INDEX IF NOT EXISTS idx_agent_runtime_events_session_sequence
            ON agent_runtime_events(session_id, sequence);
          CREATE INDEX IF NOT EXISTS idx_agent_runtime_events_session_run_sequence
-           ON agent_runtime_events(session_id, run_id, sequence);`,
+           ON agent_runtime_events(session_id, run_id, sequence);
+         CREATE INDEX IF NOT EXISTS idx_agent_runtime_events_session_kind_sequence
+           ON agent_runtime_events(session_id, kind, sequence);`,
       );
       return db;
     } catch (error) {
@@ -494,6 +696,16 @@ function cursorForEntries(
     ).length,
     eventId,
   };
+}
+
+function activeBranchForEntries(entries: readonly RuntimeEventStoreEntry[]): string {
+  let activeBranchId = "main";
+  for (const entry of entries) {
+    if (entry.event.kind === "history.rewound") {
+      activeBranchId = entry.event.data.branchId;
+    }
+  }
+  return activeBranchId;
 }
 
 function canonicalizeRuntimeEvent(event: RuntimeEvent): {

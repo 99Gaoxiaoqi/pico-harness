@@ -318,13 +318,19 @@ export class FTS5Store implements ConversationSearchStore {
         INSERT INTO conversation_chunks (session_id, turn_index, role, content, timestamp)
         VALUES (?, ?, ?, ?, ?)
       `);
-      stmt.run(
-        sessionId,
-        turnIndex,
-        message.role,
-        typeof message.content === "string" ? message.content : JSON.stringify(message.content),
-        new Date().toISOString(),
+      const clearCursor = this.db.prepare(
+        "DELETE FROM session_projection_cursor WHERE session_id = ?",
       );
+      this.db.transaction(() => {
+        stmt.run(
+          sessionId,
+          turnIndex,
+          message.role,
+          typeof message.content === "string" ? message.content : JSON.stringify(message.content),
+          new Date().toISOString(),
+        );
+        clearCursor.run(sessionId);
+      })();
     } catch (err) {
       this.markRuntimeDegraded("插入消息", err);
       logger.warn({ err, sessionId, turnIndex }, "[fts5] 插入消息失败");
@@ -343,6 +349,9 @@ export class FTS5Store implements ConversationSearchStore {
         INSERT INTO conversation_chunks (session_id, turn_index, role, content, timestamp)
         VALUES (?, ?, ?, ?, ?)
       `);
+      const clearCursor = this.db.prepare(
+        "DELETE FROM session_projection_cursor WHERE session_id = ?",
+      );
       const replace = this.db.transaction((currentMessages: readonly Message[]) => {
         deleteStmt.run(sessionId);
         const timestamp = new Date().toISOString();
@@ -355,6 +364,7 @@ export class FTS5Store implements ConversationSearchStore {
             timestamp,
           );
         }
+        clearCursor.run(sessionId);
       });
       replace(messages);
     } catch (err) {
@@ -396,6 +406,62 @@ export class FTS5Store implements ConversationSearchStore {
     } catch (err) {
       this.markRuntimeDegraded("投影消息与游标", err);
       logger.warn({ err, sessionId, turnIndex }, "[fts5] 消息投影失败");
+    }
+  }
+
+  projectAppend(
+    sessionId: string,
+    startTurnIndex: number,
+    messages: readonly Message[],
+    expectedCursor: ConversationProjectionCursor,
+    cursor: ConversationProjectionCursor,
+  ): boolean {
+    if (
+      !this.db ||
+      !Number.isSafeInteger(startTurnIndex) ||
+      startTurnIndex < 0 ||
+      !projectionCursorCanAdvance(sessionId, expectedCursor, cursor)
+    ) {
+      return false;
+    }
+    try {
+      const readCursor = this.db.prepare(
+        `SELECT log_id AS logId, seq, epoch, event_id AS eventId
+         FROM session_projection_cursor WHERE session_id = ?`,
+      );
+      const insert = this.db.prepare(`
+        INSERT INTO conversation_chunks (session_id, turn_index, role, content, timestamp)
+        VALUES (?, ?, ?, ?, ?)
+      `);
+      const upsertCursor = this.prepareProjectionCursorUpsert();
+      return this.db.transaction(() => {
+        const currentCursor = readCursor.get(sessionId) as ConversationProjectionCursor | undefined;
+        if (!currentCursor || !projectionCursorsEqual(currentCursor, expectedCursor)) return false;
+
+        const timestamp = new Date().toISOString();
+        for (const [offset, message] of messages.entries()) {
+          insert.run(
+            sessionId,
+            startTurnIndex + offset,
+            message.role,
+            typeof message.content === "string" ? message.content : JSON.stringify(message.content),
+            timestamp,
+          );
+        }
+        upsertCursor.run(
+          sessionId,
+          cursor.logId,
+          cursor.seq,
+          cursor.epoch,
+          cursor.eventId,
+          timestamp,
+        );
+        return true;
+      })();
+    } catch (err) {
+      this.markRuntimeDegraded("增量投影消息与游标", err);
+      logger.warn({ err, sessionId, startTurnIndex }, "[fts5] 增量消息投影失败");
+      return false;
     }
   }
 
@@ -722,4 +788,33 @@ export class FTS5Store implements ConversationSearchStore {
       };
     }
   }
+}
+
+function projectionCursorsEqual(
+  left: ConversationProjectionCursor,
+  right: ConversationProjectionCursor,
+): boolean {
+  return (
+    left.logId === right.logId &&
+    left.seq === right.seq &&
+    left.epoch === right.epoch &&
+    left.eventId === right.eventId
+  );
+}
+
+function projectionCursorCanAdvance(
+  sessionId: string,
+  current: ConversationProjectionCursor,
+  next: ConversationProjectionCursor,
+): boolean {
+  return (
+    current.logId === sessionId &&
+    next.logId === sessionId &&
+    Number.isSafeInteger(current.seq) &&
+    Number.isSafeInteger(next.seq) &&
+    Number.isSafeInteger(current.epoch) &&
+    current.epoch >= 0 &&
+    next.seq > current.seq &&
+    next.epoch === current.epoch
+  );
 }

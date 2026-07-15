@@ -58,6 +58,17 @@ export interface ConversationSearchStore {
     message: Message,
     cursor: ConversationProjectionCursor,
   ): void;
+  /**
+   * Atomically appends one canonical projection delta and advances its cursor.
+   * Returns false without changing either side when the stored cursor is stale.
+   */
+  projectAppend?(
+    sessionId: string,
+    startTurnIndex: number,
+    messages: readonly Message[],
+    expectedCursor: ConversationProjectionCursor,
+    cursor: ConversationProjectionCursor,
+  ): boolean;
   projectReplace?(
     sessionId: string,
     messages: readonly Message[],
