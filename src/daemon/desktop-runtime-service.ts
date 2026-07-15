@@ -84,11 +84,7 @@ import {
 } from "../provider/provider-operation-journal.js";
 import { resolvePicoHome } from "../paths/pico-paths.js";
 import { WorkspaceTrustStore } from "../security/workspace-trust.js";
-import {
-  fileHistoryChanges,
-  type FileHistoryChanges,
-  type FileHistoryFilePatch,
-} from "../safety/file-history.js";
+import type { FileHistoryFilePatch } from "../safety/file-history.js";
 import { RuntimeStore } from "../tasks/runtime-store.js";
 import type {
   ProviderCallRecord,
@@ -135,6 +131,13 @@ import {
   listDesktopMcpServers,
   listDesktopSkills,
 } from "./desktop-resource-catalog.js";
+import {
+  applyDesktopRewind,
+  assertDesktopChangesComplete,
+  assertDesktopChangesFingerprint,
+  projectDesktopCheckpoint,
+  type DesktopCheckpointProjection,
+} from "./desktop-review.js";
 
 const UNSUPPORTED_DESKTOP_METHODS: ReadonlySet<string> = new Set([
   "approval.respond",
@@ -2772,8 +2775,8 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const revisionPrompt =
       params.decision === "request_changes" ? requireRevisionPrompt(params.message) : undefined;
     const projection = await this.projectRunChanges(params.workspacePath, params.runId);
-    this.assertCompleteChanges(projection.changes, "Changes 审阅");
-    this.assertFingerprint(params.expectedFingerprint, projection.fingerprint, "Changes");
+    assertDesktopChangesComplete(projection.changes, "Changes 审阅");
+    assertDesktopChangesFingerprint(params.expectedFingerprint, projection.fingerprint, "Changes");
     if (revisionPrompt) {
       await this.options.runtimeService.handle(
         createRuntimeRequest("run.start", {
@@ -2808,8 +2811,8 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     expectedFingerprint: string,
   ): Promise<JsonValue> {
     const projection = await this.projectRunChanges(workspacePath, runId);
-    this.assertCompleteChanges(projection.changes, "Changes 应用");
-    this.assertFingerprint(expectedFingerprint, projection.fingerprint, "Changes");
+    assertDesktopChangesComplete(projection.changes, "Changes 应用");
+    assertDesktopChangesFingerprint(expectedFingerprint, projection.fingerprint, "Changes");
     // Foreground Agent tools already commit directly into the trusted workspace. This call
     // revalidates that the reviewed bytes are still current and records that fact;
     // it never stages or copies renderer-owned content into the workspace.
@@ -2866,48 +2869,9 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     readonly expectedFingerprint: string;
   }): Promise<JsonValue> {
     const canonical = await this.requireTrustedSession(params.workspacePath, params.sessionId);
-    await this.withSession(canonical, params.sessionId, async (session) => {
-      const checkpoint = session.fileHistory.snapshots.find(
-        (candidate) => candidate.messageId === params.checkpointId,
-      );
-      if (
-        !checkpoint ||
-        checkpoint.userPrompt === undefined ||
-        checkpoint.messageIndex === undefined
-      ) {
-        throw new RuntimeProtocolError(
-          RUNTIME_ERROR_CODES.NOT_FOUND,
-          `Session ${params.sessionId} 中不存在可完整回滚的检查点 ${params.checkpointId}`,
-        );
-      }
-      const changes = await fileHistoryChanges(
-        session.fileHistory,
-        params.checkpointId,
-        session.id,
-        session.fileHistoryBaseDir,
-      );
-      const fingerprint = changesFingerprint(session, params.checkpointId, changes);
-      this.assertCompleteChanges(changes, "Rewind");
-      this.assertFingerprint(params.expectedFingerprint, fingerprint, "Rewind");
-      const expectedCurrentFingerprints = new Map(
-        changes.files.map((file) => [file.filePath, file.currentFingerprint]),
-      );
-      try {
-        await session.rewindBoth(
-          params.checkpointId,
-          checkpoint.messageIndex,
-          expectedCurrentFingerprints,
-        );
-      } catch (error) {
-        if (isRewindConflict(error)) {
-          throw new RuntimeProtocolError(
-            RUNTIME_ERROR_CODES.CONFLICT,
-            `Rewind 安全检查失败: ${errorMessage(error)}`,
-          );
-        }
-        throw error;
-      }
-    });
+    await this.withSession(canonical, params.sessionId, (session) =>
+      applyDesktopRewind(session, params.checkpointId, params.expectedFingerprint),
+    );
     this.publish(
       createRuntimeNotification({
         topic: "rewind.completed",
@@ -2960,30 +2924,10 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     checkpointId: string,
   ): Promise<DesktopChangesProjection> {
     const canonical = await this.requireTrustedSession(workspacePath, sessionId);
-    return this.withSession(canonical, sessionId, async (session) => {
-      const checkpoint = session.fileHistory.snapshots.find(
-        (candidate) => candidate.messageId === checkpointId,
-      );
-      if (!checkpoint || checkpoint.userPrompt === undefined) {
-        throw new RuntimeProtocolError(
-          RUNTIME_ERROR_CODES.NOT_FOUND,
-          `Session ${sessionId} 中不存在检查点 ${checkpointId}`,
-        );
-      }
-      const changes = await fileHistoryChanges(
-        session.fileHistory,
-        checkpointId,
-        session.id,
-        session.fileHistoryBaseDir,
-      );
-      return {
-        workspacePath: canonical,
-        sessionId,
-        checkpointId,
-        changes,
-        fingerprint: changesFingerprint(session, checkpointId, changes),
-      };
-    });
+    return this.withSession(canonical, sessionId, async (session) => ({
+      workspacePath: canonical,
+      ...(await projectDesktopCheckpoint(session, checkpointId)),
+    }));
   }
 
   private async requireTrustedSession(workspacePath: string, sessionId: string): Promise<string> {
@@ -3063,24 +3007,6 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       picoHome: this.picoHome,
     });
     return session.serialize(() => operation(session));
-  }
-
-  private assertFingerprint(expected: string, actual: string, operation: string): void {
-    if (expected !== actual) {
-      throw new RuntimeProtocolError(
-        RUNTIME_ERROR_CODES.CONFLICT,
-        `${operation} 指纹已变化，请刷新后重试`,
-      );
-    }
-  }
-
-  private assertCompleteChanges(changes: FileHistoryChanges, operation: string): void {
-    if (changes.incomplete) {
-      throw new RuntimeProtocolError(
-        RUNTIME_ERROR_CODES.CONFLICT,
-        `${operation} 捕获不完整，拒绝在不完整文件集上继续`,
-      );
-    }
   }
 
   private async listJobs(workspacePath: string): Promise<JsonValue> {
@@ -3864,13 +3790,9 @@ function emptyUsage(): UsageLedgerTotals {
 
 const MAX_DESKTOP_PATCH_BYTES = 512 * 1024;
 
-interface DesktopChangesProjection {
+interface DesktopChangesProjection extends DesktopCheckpointProjection {
   readonly workspacePath: string;
-  readonly sessionId: string;
-  readonly checkpointId: string;
   readonly runId?: string;
-  readonly changes: FileHistoryChanges;
-  readonly fingerprint: string;
 }
 
 function runtimeChange(file: FileHistoryFilePatch, workspacePath: string): JsonObject {
@@ -3897,31 +3819,6 @@ function displayChangePath(filePath: string, workspacePath: string): string {
   return absoluteFilePath;
 }
 
-function changesFingerprint(
-  session: Session,
-  checkpointId: string,
-  changes: FileHistoryChanges,
-): string {
-  const payload = {
-    version: 1,
-    sessionId: session.id,
-    checkpointId,
-    fileHistoryRevision: session.fileHistory.revision,
-    incomplete: changes.incomplete === true,
-    warnings: [...(changes.warnings ?? [])].toSorted(),
-    files: changes.files
-      .map((file) => ({
-        filePath: resolve(file.filePath),
-        status: file.status,
-        addedLines: file.addedLines,
-        removedLines: file.removedLines,
-        currentFingerprint: file.currentFingerprint,
-      }))
-      .toSorted((left, right) => left.filePath.localeCompare(right.filePath)),
-  };
-  return createHash("sha256").update(JSON.stringify(payload)).digest("hex");
-}
-
 function truncateUtf8(value: string, maxBytes: number): { value: string; truncated: boolean } {
   const bytes = Buffer.from(value, "utf8");
   if (bytes.byteLength <= maxBytes) return { value, truncated: false };
@@ -3934,11 +3831,6 @@ function requireRevisionPrompt(value: string | undefined): string {
     throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.INVALID_PARAMS, "要求修改时必须说明原因");
   }
   return normalized;
-}
-
-function isRewindConflict(error: unknown): boolean {
-  if (!(error instanceof Error)) return false;
-  return /(?:conflict|drift|fingerprint|revision|变化|变更|预检|人工处理)/iu.test(error.message);
 }
 
 function errorMessage(error: unknown): string {
