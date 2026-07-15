@@ -20,6 +20,8 @@ export interface PicoProjectPaths {
 
 export interface PicoHomePaths {
   readonly root: string;
+  /** Device-local defaults and provider registry shared by TUI and Desktop. */
+  readonly userConfig: string;
   readonly commands: string;
   readonly skills: string;
   readonly agents: string;
@@ -117,6 +119,7 @@ export function resolvePicoPaths(
     },
     home: {
       root: picoHome,
+      userConfig: join(picoHome, "config.json"),
       commands: join(picoHome, "commands"),
       skills: join(picoHome, "skills"),
       agents: join(picoHome, "agents.yaml"),

@@ -26,7 +26,7 @@ const CONFIG_VERSION = 1 as const;
 const KEYBINDING_CONTEXT_SET: ReadonlySet<string> = new Set(KEYBINDING_CONTEXTS);
 const KEYBINDING_ACTION_SET: ReadonlySet<string> = new Set(KEYBINDING_ACTIONS);
 
-export interface PicoConfig {
+export interface PicoProjectConfig {
   version: typeof CONFIG_VERSION;
   /** Absolute project command directory resolved from the config file. */
   commandsDir: string;
@@ -40,6 +40,9 @@ export interface PicoConfig {
   compatibility: PicoCompatibilityConfig;
 }
 
+/** @deprecated Prefer PicoProjectConfig so user and project configuration stay distinct. */
+export type PicoConfig = PicoProjectConfig;
+
 export interface ClaudeCompatibilityConfig {
   enabled: boolean;
   projectResources: boolean;
@@ -51,7 +54,7 @@ export interface PicoCompatibilityConfig {
   claude: ClaudeCompatibilityConfig;
 }
 
-export async function loadPicoConfig(workDir: string): Promise<PicoConfig> {
+export async function loadPicoProjectConfig(workDir: string): Promise<PicoProjectConfig> {
   const configPath = join(workDir, ".pico", "config.json");
   let content: string;
   try {
@@ -71,21 +74,26 @@ export async function loadPicoConfig(workDir: string): Promise<PicoConfig> {
     throw configError(configPath, "root", "must be an object");
   }
 
-  const model = parseDefaultModel(parsed["model"], configPath);
+  const model = parseModelRouteId(parsed["model"], configPath);
   return {
     version: parseVersion(parsed["version"], configPath),
     commandsDir: parseCommandsDir(parsed["commandsDir"], workDir, configPath),
     additionalDirectories: parseAdditionalDirectories(parsed["permissions"], configPath),
     keybindings: parseKeybindings(parsed["keybindings"], configPath),
     ...(model !== undefined ? { model } : {}),
-    providers: parseProviders(parsed["providers"], configPath),
+    providers: parseModelProviderConfigs(parsed["providers"], configPath),
     sandbox: parseSandbox(parsed["sandbox"], configPath),
     lspServers: parseLspServers(parsed["lsp"], configPath),
     compatibility: parseCompatibility(parsed["compatibility"], configPath),
   };
 }
 
-function defaultPicoConfig(workDir: string): PicoConfig {
+/** Compatibility entrypoint retained for existing TUI and Runtime callers. */
+export function loadPicoConfig(workDir: string): Promise<PicoProjectConfig> {
+  return loadPicoProjectConfig(workDir);
+}
+
+function defaultPicoConfig(workDir: string): PicoProjectConfig {
   return {
     version: CONFIG_VERSION,
     commandsDir: join(workDir, ".pico", "commands"),
@@ -248,24 +256,35 @@ function parseOptionalPositiveInteger(
   return value as number;
 }
 
-function parseDefaultModel(value: unknown, configPath: string): string | undefined {
+export function parseModelRouteId(
+  value: unknown,
+  configPath: string,
+  field = "model",
+): string | undefined {
   if (value === undefined) return undefined;
   if (typeof value !== "string" || !/^[^/\s]+\/.+$/u.test(value.trim())) {
-    throw configError(configPath, "model", "must use providerID/modelID format");
+    throw configError(configPath, field, "must use providerID/modelID format");
   }
   return value.trim();
 }
 
-function parseProviders(value: unknown, configPath: string): Record<string, ModelProviderConfig> {
+export function parseModelProviderConfigs(
+  value: unknown,
+  configPath: string,
+  fieldPrefix = "providers",
+): Record<string, ModelProviderConfig> {
   if (value === undefined) return {};
-  if (!isRecord(value)) throw configError(configPath, "providers", "must be an object");
+  if (!isRecord(value)) throw configError(configPath, fieldPrefix, "must be an object");
 
   const providers: Record<string, ModelProviderConfig> = {};
   for (const [rawId, rawProvider] of Object.entries(value)) {
     const id = rawId.trim();
-    const field = `providers.${rawId}`;
-    if (!id || id.includes("/")) {
+    const field = `${fieldPrefix}.${rawId}`;
+    if (!id || id.includes("/") || isUnsafeObjectKey(id)) {
       throw configError(configPath, field, "id must be non-empty and must not contain /");
+    }
+    if (Object.hasOwn(providers, id)) {
+      throw configError(configPath, field, `duplicates normalized provider id ${id}`);
     }
     if (!isRecord(rawProvider)) throw configError(configPath, field, "must be an object");
     const protocol = rawProvider["protocol"] ?? "openai";
@@ -666,6 +685,10 @@ function configError(configPath: string, fieldPath: string, detail: string): Err
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isUnsafeObjectKey(value: string): boolean {
+  return value === "__proto__" || value === "prototype" || value === "constructor";
 }
 
 function isErrnoCode(error: unknown, code: string): boolean {
