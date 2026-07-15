@@ -102,6 +102,7 @@ export class CronDraftApplication {
       timeZone: draft.timeZone,
       prompt: draft.prompt,
       credentialRef,
+      modelRouteId: route.id,
       enabled: false,
       policySnapshot: {
         mode: "yolo",

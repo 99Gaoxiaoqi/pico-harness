@@ -55,12 +55,26 @@ export function resolveLocalDaemonEndpoint(
   // Keep macOS Unix socket paths below the ~104-byte kernel limit. The default directory
   // already carries the full digest; shared/overridden runtime directories use a short suffix.
   // The protocol generation is part of the digest input, so the compact name remains versioned.
-  const endpointName = configuredRuntimeDir === undefined ? "runtime-v1" : compactDigest;
+  const endpointName =
+    configuredRuntimeDir === undefined
+      ? "runtime-v1"
+      : unixSocketEndpointName(runtimeDir, compactDigest);
   return {
     transport: "unix",
     address: join(runtimeDir, `${endpointName}.sock`),
     authTokenPath: join(runtimeDir, `${endpointName}.auth`),
   };
+}
+
+function unixSocketEndpointName(runtimeDir: string, digest: string): string {
+  // macOS sockaddr_un.sun_path is 104 bytes including the trailing NUL.
+  const maxPathBytes = 103;
+  const fixedBytes = Buffer.byteLength(join(runtimeDir, ".sock"), "utf8");
+  const available = maxPathBytes - fixedBytes;
+  if (available < 8) {
+    throw new Error(`Runtime 目录过长，无法安全创建 Unix Socket: ${runtimeDir}`);
+  }
+  return digest.slice(0, available);
 }
 
 /** Prepares a current-user-only POSIX socket parent. No-op for Windows named pipes. */
