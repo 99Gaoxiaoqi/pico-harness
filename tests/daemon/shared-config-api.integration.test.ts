@@ -273,11 +273,33 @@ describe("Desktop shared configuration API integration", () => {
     }
   });
 
+  it("Keychain 被锁时不将凭证状态误报为平台不支持", async () => {
+    const vault = new ToggleFailingStatusCredentialVault();
+    const fixture = await createFixture({ credentialVault: vault });
+    const initial = (await fixture.service.handle(createRuntimeRequest("config.user.get", {}))) as {
+      revision: string;
+    };
+    await fixture.service.handle(
+      createRuntimeRequest("provider.upsert", {
+        provider: providerInput("https://provider.example.test/v1"),
+        expectedRevision: initial.revision,
+      }),
+    );
+
+    vault.failStatusReads = true;
+    await expect(
+      fixture.service.handle(createRuntimeRequest("provider.list", {})),
+    ).rejects.toMatchObject({
+      code: RUNTIME_ERROR_CODES.CONFLICT,
+      message: expect.stringContaining("无法读取 Provider shared 的系统凭证状态"),
+    });
+  });
+
   it("Provider 带 v2 凭证可一键删除，OCC 失败时不会先丢失 secret", async () => {
     const fixture = await createFixture();
-    const initial = (await fixture.service.handle(
-      createRuntimeRequest("config.user.get", {}),
-    )) as { revision: string };
+    const initial = (await fixture.service.handle(createRuntimeRequest("config.user.get", {}))) as {
+      revision: string;
+    };
     const upserted = (await fixture.service.handle(
       createRuntimeRequest("provider.upsert", {
         provider: providerInput("https://provider.example.test/v1"),
@@ -342,9 +364,9 @@ describe("Desktop shared configuration API integration", () => {
   it("凭证库删除失败时恢复 Provider 配置并保留凭证", async () => {
     const vault = new FailingDeleteCredentialVault();
     const fixture = await createFixture({ credentialVault: vault });
-    const initial = (await fixture.service.handle(
-      createRuntimeRequest("config.user.get", {}),
-    )) as { revision: string };
+    const initial = (await fixture.service.handle(createRuntimeRequest("config.user.get", {}))) as {
+      revision: string;
+    };
     const upserted = (await fixture.service.handle(
       createRuntimeRequest("provider.upsert", {
         provider: providerInput("https://provider.example.test/v1"),
@@ -385,9 +407,9 @@ describe("Desktop shared configuration API integration", () => {
       releaseRun = resolve;
     });
     const fixture = await createFixture({ execute: async () => blockedRun });
-    const initial = (await fixture.service.handle(
-      createRuntimeRequest("config.user.get", {}),
-    )) as { revision: string };
+    const initial = (await fixture.service.handle(createRuntimeRequest("config.user.get", {}))) as {
+      revision: string;
+    };
     const upserted = (await fixture.service.handle(
       createRuntimeRequest("provider.upsert", {
         provider: providerInput("https://provider.example.test/v1"),
@@ -499,7 +521,7 @@ describe("Desktop shared configuration API integration", () => {
     });
     await expect(fixture.registration.list()).resolves.toContain(fixture.workspace);
 
-    const cron = new CronService({ workDir: fixture.workspace });
+    const cron = new CronService({ workDir: fixture.workspace, picoHome: fixture.picoHome });
     const persistedV2 = cron.store.getCronJob(created.job.jobId)!;
     expect(persistedV2.modelRouteId).toBe("shared/coder");
     expect(parseAnyCredentialRef(persistedV2.credentialRef!)).toMatchObject({ version: "v2" });
@@ -590,7 +612,7 @@ describe("Desktop shared configuration API integration", () => {
       client.close();
       await host.stop();
     }
-    const cron = new CronService({ workDir: canonicalWorkspace });
+    const cron = new CronService({ workDir: canonicalWorkspace, picoHome });
     const job = cron.store.getCronJob(jobId)!;
     expect(job.modelRouteId).toBe("shared/coder");
     expect(parseAnyCredentialRef(job.credentialRef!)).toMatchObject({
@@ -761,13 +783,14 @@ describe("Desktop shared configuration API integration", () => {
     });
     const automations = options.automationSecurity
       ? new DesktopAutomationService({
+          picoHome,
           prepareSecurity: async () => ({
             ...options.automationSecurity!,
             policySnapshot: policy(),
           }),
           ensureWorkspaceRuntime: async () => undefined,
           runNow: async (workDir, jobId) => {
-            const cron = new CronService({ workDir });
+            const cron = new CronService({ workDir, picoHome });
             try {
               return cron.runNow(jobId);
             } finally {
@@ -866,6 +889,15 @@ class MemoryCredentialVault implements CredentialVault {
 class FailingDeleteCredentialVault extends MemoryCredentialVault {
   override async delete(_ref: CredentialRef): Promise<void> {
     throw new Error("simulated credential vault delete failure");
+  }
+}
+
+class ToggleFailingStatusCredentialVault extends MemoryCredentialVault {
+  failStatusReads = false;
+
+  override async has(ref: CredentialRef): Promise<boolean> {
+    if (this.failStatusReads) throw new Error("User interaction is not allowed");
+    return super.has(ref);
   }
 }
 
