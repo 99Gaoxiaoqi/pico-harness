@@ -52,7 +52,7 @@ export interface HookHandlerExecutorOptions {
   mcpInvoker?: ConnectedMcpToolInvoker;
   agentVerifier?: HookAgentVerifier;
   fetch?: typeof globalThis.fetch;
-  env?: NodeJS.ProcessEnv;
+  env?: Readonly<NodeJS.ProcessEnv>;
   onAsyncRewake?: (handler: ResolvedHookHandler, output: HookOutput) => void | Promise<void>;
 }
 
@@ -292,7 +292,7 @@ function startCommand(
   handler: CommandHookHandler,
   input: HookInput,
   cwd: string,
-  baseEnv: NodeJS.ProcessEnv,
+  baseEnv: Readonly<NodeJS.ProcessEnv>,
   signal: AbortSignal,
 ): RunningCommand {
   let child: ChildProcess;

@@ -45,6 +45,10 @@ export interface SessionRuntimeOptions {
   workDir: string;
   sessionId: string;
   session: Session;
+  /** Host-owned Pico state root for session-scoped durable stores. */
+  picoHome?: string;
+  /** Host-owned environment inherited by the session Hook executor. */
+  env?: Readonly<NodeJS.ProcessEnv>;
   toolDisclosure?: ToolDisclosure;
   lspServers?: readonly LspServerConfig[];
   taskHostRuntime?: TaskHostRuntime;
@@ -406,7 +410,7 @@ export async function createSessionRuntime(
   }
 
   const taskRegistry = options.taskHostRuntime?.taskRegistry ?? new TaskRegistry();
-  const skillRegistry = new SkillRegistry(workDir);
+  const skillRegistry = new SkillRegistry(workDir, { picoHome: options.picoHome });
   await skillRegistry.init();
   const goalManager = new GoalManager();
   const unbindGoalManager = options.session.bindGoalManager(goalManager);
@@ -503,6 +507,8 @@ export async function createSessionRuntime(
       : await createSessionHookRuntime({
           workDir,
           sessionId: options.sessionId,
+          ...(options.picoHome ? { picoHome: options.picoHome } : {}),
+          ...(options.env ? { env: options.env } : {}),
           ...(options.hookUserHome ? { userHome: options.hookUserHome } : {}),
           ...(options.hookExtensionSources
             ? { extensionSources: options.hookExtensionSources }
@@ -518,7 +524,7 @@ export async function createSessionRuntime(
     workDir,
     sessionId: options.sessionId,
     goalManager,
-    todoStore: new TodoStore(workDir),
+    todoStore: new TodoStore(workDir, { picoHome: options.picoHome }),
     toolDisclosure: options.toolDisclosure ?? new ToolDisclosure(),
     taskRegistry,
     ...(options.taskHostRuntime ? { taskHostRuntime: options.taskHostRuntime } : {}),

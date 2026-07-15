@@ -67,6 +67,7 @@ export type TranscriptEntryData =
         | "succeeded";
       startedAt: number;
       finishedAt?: number;
+      error?: string;
     }
   | {
       kind: "subagent-activity";

@@ -41,6 +41,7 @@ export interface CreateCronJobInput {
   prompt: string;
   policySnapshot: YoloPolicySnapshot;
   credentialRef?: CredentialRef;
+  modelRouteId?: string;
   enabled?: boolean;
 }
 
@@ -87,6 +88,7 @@ export class CronService {
       prompt: input.prompt,
       policySnapshot: input.policySnapshot,
       credentialRef: input.credentialRef,
+      modelRouteId: input.modelRouteId,
       enabled: input.enabled,
     });
   }

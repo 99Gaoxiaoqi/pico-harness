@@ -11,6 +11,7 @@ describe("Pico paths", () => {
     const paths = resolvePicoPaths(workDir, { picoHome });
 
     expect(paths.project.skills).toBe(join(await realpath(workDir), ".pico", "skills"));
+    expect(paths.home.userConfig).toBe(join(picoHome, "config.json"));
     expect(paths.home.skills).toBe(join(picoHome, "skills"));
     expect(paths.workspace.root).toBe(join(picoHome, "workspaces", paths.workspace.id));
     expect(paths.workspace.sessions).toBe(join(paths.workspace.root, "sessions"));

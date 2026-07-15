@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import { logger } from "../observability/logger.js";
 import type { SlashCommand } from "../input/types.js";
 import {
@@ -24,9 +25,11 @@ import { HookTrustStore } from "./trust/store.js";
 
 export interface SessionHookRuntimeOptions extends Pick<
   LoadHookSnapshotOptions,
-  "workDir" | "userHome" | "extensionSources"
+  "workDir" | "userHome" | "picoHome" | "extensionSources"
 > {
   sessionId: string;
+  /** Environment inherited by Hook processes. Hosts should pair it with picoHome. */
+  env?: Readonly<NodeJS.ProcessEnv>;
 }
 
 export interface SessionHookRuntime {
@@ -45,11 +48,21 @@ export interface SessionHookRuntime {
 export async function createSessionHookRuntime(
   options: SessionHookRuntimeOptions,
 ): Promise<SessionHookRuntime> {
-  const trustStore = new HookTrustStore({ userHome: options.userHome });
-  const stateStore = new HookLocalStateStore(options.workDir);
+  const trustStore = new HookTrustStore({
+    ...(options.userHome ? { userHome: options.userHome } : {}),
+    ...(options.picoHome ? { picoHome: options.picoHome } : {}),
+  });
+  const stateStore = new HookLocalStateStore(options.workDir, {
+    ...(options.picoHome
+      ? { picoHome: options.picoHome }
+      : options.userHome
+        ? { picoHome: join(options.userHome, ".pico") }
+        : {}),
+  });
   const loadOptions = {
     workDir: options.workDir,
     ...(options.userHome ? { userHome: options.userHome } : {}),
+    ...(options.picoHome ? { picoHome: options.picoHome } : {}),
     trustStore,
     stateStore,
     ...(options.extensionSources ? { extensionSources: options.extensionSources } : {}),
@@ -65,7 +78,10 @@ export async function createSessionHookRuntime(
       return evaluateHookifyRules(rules, event, payload);
     },
   };
-  const executor = new DefaultHookExecutor({ workDir: options.workDir });
+  const executor = new DefaultHookExecutor({
+    workDir: options.workDir,
+    ...(options.env ? { env: options.env } : {}),
+  });
   const service = new HookService({
     workDir: options.workDir,
     sessionId: options.sessionId,

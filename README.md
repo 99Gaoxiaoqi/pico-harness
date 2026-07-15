@@ -43,7 +43,7 @@ cp .env.example .env
 
 ## 🚀 快速开始
 
-Pico 当前唯一公开产品入口是 `pico` 启动的交互式 TUI。`npm run dev` 是仓库开发入口，进入同一 TUI。
+Pico 的 Agent Runtime 同时服务于 TUI 和 Desktop。`pico` / `npm run dev` 启动 TUI；Desktop 当前作为仓库内开发入口。
 
 ```bash
 # 在当前项目目录启动 TUI
@@ -54,6 +54,9 @@ npx tsx --env-file=.env --import ./src/tui/preload-env.ts src/cli/main.ts \
   --dir /path/to/project \
   --provider openai \
   --model glm-5.2
+
+# 启动 Desktop 开发版
+npm run desktop:dev
 ```
 
 想像 Claude Code 一样在任意项目目录启动交互式 Pico,见 [Pico Claude Code 风格交互启动指南](./docs/tui-claude-code-parity.md)。
@@ -67,7 +70,7 @@ npx tsx --env-file=.env --import ./src/tui/preload-env.ts src/cli/main.ts \
 - `/usage` 展示 provider 实际报告的 token/成本覆盖，缺失字段保持 `unknown`；`/context` 展示当前 route 的上下文预算、来源和能力。
 - REST/WebSocket、ACP、飞书与 one-shot CLI 外壳曾在历史阶段完成，后已退役。
 - 周期任务优先通过自然语言创建，例如“请创建一个每个工作日上午 9 点生成日报的任务”。Pico 会展示时区、工作区、模型、凭证、daemon、联网范围和未来三次运行时间；只有确认后才写入 Job。第一版不支持一次性定时任务。
-- `/cron` 保留为高级入口；任务由当前 OS 用户的本机 daemon 执行，不新增 one-shot/headless 公共 CLI。持久 Cron 仅接受可信工作区的 YOLO Job，Provider 凭证自动检查并导入系统凭证库，SQLite 只保存非秘密 `credentialRef`。
+- `/cron` 保留为高级入口；任务由当前 OS 用户的本机 daemon 执行，不新增 one-shot/headless 公共 CLI。持久 Cron 仅接受可信工作区的 YOLO Job，并固定创建时的模型路由与 `credentialRef`。自然语言草案会在确认时尝试导入当前环境凭证；Desktop 和 `/cron add` 则要求凭证已存在，SQLite 始终只保存非秘密引用。
 - 新任务默认允许所有符合后台资格的工具联网；该策略覆盖 `fetch_url`、`web_search`、Bash、严格后台 Hook 与固定配置 MCP，但不改变工作区、敏感文件、hardline、Hook deny 和 SSRF 边界。可用 `/cron add --tool-network=allow|disabled|allowlist:host1,host2 ...` 显式覆盖；模型 Provider 网络是独立通道。
 - Docker 部署和 Plugin runtime 不在当前产品范围。
 
@@ -93,22 +96,36 @@ pico-harness/
 
 ## 🔐 工作区信任
 
-首次在一个工作区启动 `pico` 时，会在进入 TUI 前询问是否信任该真实目录。只有明确选择信任后，Pico 才会读取项目 `AGENTS.md` / Skills / Session，启用 `.pico/config.json` 中的 Provider 与 LSP，以及 `.claw` 中的 MCP 和 Hook。
+首次在一个工作区启动 `pico` 时，会在进入 TUI 前询问是否信任该真实目录。只有明确选择信任后，Pico 才会读取项目 `AGENTS.md` / Skills / Session，启用项目 `.pico/config.json` 中的 Provider 与 LSP，以及 `.pico/mcp.json` 中的 MCP。旧 `.claw/mcp.json` 仅作为只读兼容回退。
 
-信任记录按 `realpath` 持久化到用户目录 `~/.pico/trusted-workspaces.json`；项目内文件不能自行声明信任。未信任工作区在非交互环境中会直接停止，不会默认放行。
+信任记录按 `realpath` 持久化到 `$PICO_HOME/trusted-workspaces.json`（默认 `~/.pico/trusted-workspaces.json`）；项目内文件不能自行声明信任。未信任工作区在非交互环境中会直接停止，不会默认放行。
 
-## 🔧 环境变量
+## 🔧 共享 Provider 配置
 
-| 变量           | 必填 | 说明                                      |
-| -------------- | ---- | ----------------------------------------- |
-| `LLM_BASE_URL` | ✅   | 大模型 API 端点(OpenAI 兼容)              |
-| `LLM_API_KEY`  | ✅   | API Key                                   |
-| `LLM_MODEL`    | ✅   | 模型名(如 `glm-5.2`)                      |
-| `LOG_LEVEL`    | 可选 | 日志级别:debug/info/warn/error(默认 info) |
+Desktop 和 TUI 使用同一份设备级配置：`$PICO_HOME/config.json`（默认 `~/.pico/config.json`）。Provider 的协议、Endpoint、模型列表和用户默认值写入该文件；API Key 不进入 JSON、Session、IPC 响应或日志。发布构建默认禁用持久密钥，等待签名的 Pico Credential Broker/XPC 后端。
+
+- Desktop：在 `Providers` 页面添加 Provider、保存凭证并选择默认模型。
+- TUI：用 `/provider list` 查看来源；可先设置旧 `LLM_*` 变量，再用 `/provider import-env <id>` 预览、`/provider import-env <id> --confirm` 确认导入。
+- 非秘密模型路由的选择优先级是：当前 Session / CLI 显式选择 > 已信任项目配置 > 用户默认 > 旧环境变量。
+- 项目配置在工作区通过信任门之前不会读取。同一 Provider ID 若在不同来源指向不同协议或 Endpoint，Runtime 会 fail-closed，不会静默混用凭证。
+
+密钥使用独立优先级：当前进程为该 Provider 声明的环境变量 > 匹配 Provider authority 的 v2 系统凭证 > 旧项目路由的 v1 凭证。环境变量存在时会暂时遮蔽持久凭证，但不会改写它。当前 `/usr/bin/security` Keychain 适配只可通过 `PICO_UNSAFE_KEYCHAIN_CLI=1` 显式用于本地开发；它不能隔离同一用户下的 Agent Shell，禁止用于发布。安全后端补齐前，各平台均只能使用前台环境变量，不能导入持久密钥或创建持久 Automation。
+
+App 与 TUI 也共用 `PICO_HOME` 命名空间中的信任记录、Session 和 Runtime 数据。Desktop 的窗口大小、主题和更新状态仍是界面私有数据，不影响 TUI。修改 `PICO_HOME` 会得到一个独立的配置、状态与本地 Runtime 命名空间；OS 凭证则仍按 Provider 身份管理，不因 `PICO_HOME` 复制密钥。
+
+### 环境变量兼容入口
+
+| 变量                           | 要求 | 说明                                      |
+| ------------------------------ | ---- | ----------------------------------------- |
+| `LLM_BASE_URL`                 | 兼容 | 旧 OpenAI 兼容端点                        |
+| `LLM_API_KEY` / `LLM_API_KEYS` | 兼容 | 旧单 key / 多 key 轮换入口                |
+| `LLM_MODEL`                    | 兼容 | 旧默认模型名（如 `glm-5.2`）              |
+| `PICO_HOME`                    | 可选 | 覆盖设备级配置与 Runtime 数据根目录       |
+| `LOG_LEVEL`                    | 可选 | 日志级别:debug/info/warn/error(默认 info) |
 
 ### 多模型路由
 
-旧的 `LLM_BASE_URL` / `LLM_API_KEY[S]` / `LLM_MODEL` 配置继续可用；Pico 会把它们视为 `legacy/<model>` 路由。需要在 DeepSeek、GLM 等不同端点之间安全切换时，在工作区的 `.pico/config.json` 配置 provider map：
+旧的 `LLM_BASE_URL` / `LLM_API_KEY[S]` / `LLM_MODEL` 配置继续可用；Pico 会把它们视为 `legacy/<model>` 路由。建议导入为上述设备级共享配置。只希望为某个已信任项目声明路由时，仍可在工作区 `.pico/config.json` 配置 provider map：
 
 ```json
 {

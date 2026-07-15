@@ -60,6 +60,27 @@ describe("local runtime daemon IPC integration", () => {
     }
   });
 
+  it("reports the daemon PICO_HOME in the runtime handshake", async () => {
+    const root = await temporaryRoot();
+    const picoHome = join(root, "custom-pico-home");
+    const service = new WorkspaceRuntimeService({
+      env: { PICO_HOME: picoHome },
+      registrationStore: new WorkspaceRegistrationStore(join(root, "workspaces.json")),
+      execute: async () => undefined,
+    });
+    try {
+      await expect(service.handle(createRuntimeRequest("runtime.ping", {}))).resolves.toMatchObject(
+        {
+          pong: true,
+          picoHome,
+          capabilities: expect.arrayContaining(["shared-config-v1"]),
+        },
+      );
+    } finally {
+      await service.close();
+    }
+  });
+
   it("filters replayed and live events by the subscribed workspace cursor", async () => {
     const root = await temporaryRoot();
     const firstWorkspace = join(root, "workspace-a");
@@ -197,6 +218,43 @@ describe("local runtime daemon IPC integration", () => {
       } finally {
         await restarted.close();
       }
+    } finally {
+      await service.close();
+    }
+  });
+
+  it("preserves durable event order when workspace events share a timestamp", async () => {
+    const root = await temporaryRoot();
+    const workspace = join(root, "workspace");
+    await mkdir(workspace);
+    const canonicalWorkspace = await realpath(workspace);
+    const service = new WorkspaceRuntimeService({ execute: async () => undefined });
+    try {
+      service.publishDesktopEvent(
+        createRuntimeEvent({
+          eventId: "z-started",
+          topic: "run.started",
+          scope: { workspacePath: canonicalWorkspace, runId: "run-1" },
+          resourceVersion: 1,
+          at: 1_000,
+          payload: { runId: "run-1" },
+        }),
+      );
+      service.publishDesktopEvent(
+        createRuntimeEvent({
+          eventId: "a-finished",
+          topic: "run.finished",
+          scope: { workspacePath: canonicalWorkspace, runId: "run-1" },
+          resourceVersion: 2,
+          at: 1_000,
+          payload: { runId: "run-1" },
+        }),
+      );
+
+      await expect(service.replayEvents({ workspacePath: workspace })).resolves.toMatchObject([
+        { eventId: "z-started", topic: "run.started" },
+        { eventId: "a-finished", topic: "run.finished" },
+      ]);
     } finally {
       await service.close();
     }

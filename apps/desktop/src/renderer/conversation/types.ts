@@ -27,6 +27,7 @@ export interface RunBoundaryItemView extends ConversationItemBase {
   readonly status: ConversationRunStatus;
   readonly label: string;
   readonly duration?: string | undefined;
+  readonly detail?: string | undefined;
 }
 
 export interface PlanStepView {

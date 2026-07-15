@@ -1,6 +1,6 @@
-# Provider 适配与 TUI 入口
+# Provider 适配与共享 Runtime 入口
 
-> TUI 入口最终装配一个 AgentEngine，引擎通过 LLMProvider 接口与模型通信。入口层负责 provider 配置、session、reporter、工具与审批装配。
+> TUI 与 Desktop 共用同一 Provider 配置、凭证解析和 Agent Runtime。入口层负责 session、reporter、工具与审批装配，不各自维护模型配置副本。
 
 ---
 
@@ -40,6 +40,29 @@ interface LLMProvider {
 - OpenAI 走 `createOpenAIProviderWithFallback`（带模型 fallback：glm-5.2 → kimi-k2.5）
 - `getCredentialPool()`：进程级单例，多 key 时自动轮换
 
+### 配置与凭证分层
+
+```text
+Session / CLI 显式选择
+          ↓
+已信任项目 .pico/config.json
+          ↓
+$PICO_HOME/config.json（Desktop + TUI 共享）
+          ↓
+LLM_* 环境变量（兼容入口）
+```
+
+上图只描述非秘密配置和模型路由的优先级。`EffectiveConfigResolver` 为每个字段保留来源；工作区未信任时不读取项目配置；同 ID Provider 的协议或规范化 Endpoint 冲突时直接拒绝合并。`UserConfigStore` 以内容 SHA-256 revision 执行 OCC，在短锁内复查 revision 并原子替换文件。
+
+`loadEffectiveModelRuntime` 是 TUI、Desktop 前台运行、Compact 和子代理的统一模型解析入口。它先解析配置，再按“Provider 指定的进程环境变量 > 匹配 authority 的 v2 凭证 > 项目路由 v1 凭证”向 `ModelRouter` 注入进程内 secret。环境凭证会遮蔽但不会改写已存的系统凭证。secret 不属于 `EffectiveConfigSnapshot`；经过本机认证的 TUI/Desktop 可以用 write-only Runtime 请求在进程间短暂传递 secret，但它不得出现在 Runtime 响应、事件、持久配置、Renderer Store 或日志中，也不得写入请求之外的长期内存状态。发布构建默认禁用持久凭证并 fail-closed：现有 `/usr/bin/security` 适配无法阻止同一 macOS 用户下的 Agent Shell 读取条目，只允许本地开发通过 `PICO_UNSAFE_KEYCHAIN_CLI=1` 显式启用，不得用于发布。正式 macOS 版本必须改用签名的 Pico Credential Broker/XPC 进程；在该后端和其他平台安全后端完成前，只支持环境变量兼容入口。
+
+每个 Run 固定使用启动时的配置快照。TUI 在下一轮 Run 前重新解析配置和凭证；daemon 通过 `config.updated` 通知 Desktop，Renderer 在事件后刷新，并在窗口重新聚焦时补读。刷新不会热换正在运行的 Provider，Session 显式路由仍优先；损坏配置、过期 revision 与 authority 冲突都 fail-closed。
+
+凭证引用分两代：
+
+- v2 按 `providerId + protocol + normalized endpoint + slot` 绑定，用于设备级共享 Provider。
+- v1 按工作区与完整 model route 绑定，仅保留给旧项目配置和已持久 Automation。
+
 ### 重试 + 凭证轮换
 
 ```
@@ -75,20 +98,20 @@ new CostTracker(provider, modelRoute, session);
 
 ---
 
-## 第二部分：TUI 单入口
+## 第二部分：产品入口
 
-`pico` → TUI 是唯一公开产品入口。REST/WebSocket、ACP、飞书和 one-shot/headless CLI 属于已退役的历史外壳。
+`pico` → TUI 是已安装命令入口；Desktop 通过类型化本地 daemon 协议使用同一 Runtime。REST/WebSocket、ACP、飞书和 one-shot/headless CLI 属于已退役的历史外壳。
 
 ### 入口边界
 
-| 维度         | 当前实现                       |
-| ------------ | ------------------------------ |
-| **启动**     | `pico` / `npm run dev`         |
-| **I/O**      | ink React TUI + `TuiReporter`  |
-| **Provider** | CostTracker + fallback         |
-| **Session**  | 当前项目 TUI session           |
-| **审批**     | 本地 TUI/终端审批              |
-| **MCP**      | 通过 `--mcp-config` 启动时加载 |
+| 维度         | TUI                                     | Desktop                                          |
+| ------------ | --------------------------------------- | ------------------------------------------------ |
+| **启动**     | `pico` / `npm run dev`                  | Electron Main 连接当前 `PICO_HOME` 的本地 daemon |
+| **I/O**      | ink React TUI + `TuiReporter`           | React Renderer + 类型化 Preload/Runtime 事件     |
+| **Provider** | 共享 ModelRouter + CostTracker/fallback | 同一 ModelRouter；Renderer 不接触 secret         |
+| **Session**  | 当前项目 TUI Session                    | Workspace → Session → 多轮 Run 的连续 Transcript |
+| **审批**     | 本地 TUI/终端审批                       | Transcript 内 Approval / Ask User                |
+| **MCP**      | 工作区配置，可用高级命令管理            | 同一工作区配置，通过 daemon 类型化方法管理       |
 
 ### 启动装配 (`cli/main.ts` → `tui/repl.tsx` → `run-agent.ts`)
 
@@ -101,7 +124,7 @@ main.ts parseArgs
 
 `runAgentFromCli` 是 TUI 每轮运行的内部装配函数，不是公开 one-shot/headless API。其装配链：
 
-1. resolveProviderConfig（CLI 参数 > 环境变量）
+1. loadEffectiveModelRuntime（Session / CLI > 项目 > 用户 > 环境）
 2. globalSessionManager.getOrCreate（固定 ID 复用）
 3. 凭证轮换装配（rebuildProvider 回调）
 4. CostTracker 包裹

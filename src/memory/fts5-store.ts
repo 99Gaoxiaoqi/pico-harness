@@ -15,7 +15,7 @@ import Database from "better-sqlite3";
 import { chmodSync, mkdirSync } from "node:fs";
 import { dirname, join } from "pathe";
 import { logger } from "../observability/logger.js";
-import { resolvePicoPaths } from "../paths/pico-paths.js";
+import { resolvePicoPaths, type ResolvePicoPathsOptions } from "../paths/pico-paths.js";
 import type { Message } from "../schema/message.js";
 import type {
   ConversationProjectionCursor,
@@ -153,15 +153,16 @@ export class FTS5Store implements ConversationSearchStore {
    * 初始化失败时仍返回带 degraded status 的实例，便于调用方
    * 保留准确的失败原因并切换到 JSONL 后端。
    */
-  static acquire(workDir: string): FTS5Store {
-    const entry = FTS5Store.pool.get(workDir);
+  static acquire(workDir: string, options: ResolvePicoPathsOptions = {}): FTS5Store {
+    const poolKey = FTS5Store.poolKey(workDir, options);
+    const entry = FTS5Store.pool.get(poolKey);
     if (entry) {
       entry.refCount++;
       return entry.store;
     }
-    const store = new FTS5Store(workDir);
+    const store = new FTS5Store(workDir, options);
     // degraded 实例也入池：同一工作目录复用诊断结果，避免重复初始化和刷屏。
-    FTS5Store.pool.set(workDir, { store, refCount: 1 });
+    FTS5Store.pool.set(poolKey, { store, refCount: 1 });
     return store;
   }
 
@@ -169,14 +170,19 @@ export class FTS5Store implements ConversationSearchStore {
    * 释放引用(计数 -1)。归零时真正 close db 并从池移除。
    * 幂等:重复 release 不使 refCount 变负。
    */
-  static release(workDir: string): void {
-    const entry = FTS5Store.pool.get(workDir);
+  static release(workDir: string, options: ResolvePicoPathsOptions = {}): void {
+    const poolKey = FTS5Store.poolKey(workDir, options);
+    const entry = FTS5Store.pool.get(poolKey);
     if (!entry) return;
     entry.refCount = Math.max(0, entry.refCount - 1);
     if (entry.refCount === 0) {
       entry.store.closeInternal();
-      FTS5Store.pool.delete(workDir);
+      FTS5Store.pool.delete(poolKey);
     }
+  }
+
+  private static poolKey(workDir: string, options: ResolvePicoPathsOptions): string {
+    return join(resolvePicoPaths(workDir, options).workspace.root, "sessions.db");
   }
 
   /** 关闭所有 workDir 的连接(进程退出前调用) */
@@ -202,8 +208,8 @@ export class FTS5Store implements ConversationSearchStore {
     return { ...this.backendStatus };
   }
 
-  constructor(workDir: string) {
-    this.dbPath = join(resolvePicoPaths(workDir).workspace.root, "sessions.db");
+  constructor(workDir: string, options: ResolvePicoPathsOptions = {}) {
+    this.dbPath = join(resolvePicoPaths(workDir, options).workspace.root, "sessions.db");
     try {
       // 确保 workspace state 目录存在
       mkdirSync(dirname(this.dbPath), { recursive: true, mode: 0o700 });

@@ -29,6 +29,8 @@ export interface WorkspaceDoctorReport {
 
 export interface WorkspaceDoctorOptions {
   readonly workDir: string;
+  /** Host-owned Pico state root. Omitted callers keep the CLI/process default. */
+  readonly picoHome?: string;
   readonly provider: string;
   readonly model: string;
   readonly env?: Readonly<Record<string, string | undefined>>;
@@ -37,6 +39,14 @@ export interface WorkspaceDoctorOptions {
   readonly taskRuntimeDiagnostic?: string;
   readonly memoryStatus?: MemoryBackendStatus;
   readonly storageDoctor?: Pick<StorageDoctor, "scan">;
+  readonly configuration?: WorkspaceConfigurationDiagnostic;
+}
+
+export interface WorkspaceConfigurationDiagnostic {
+  readonly defaultModelRouteId?: string;
+  readonly defaultSource?: string;
+  readonly providerSources: Readonly<Record<string, string>>;
+  readonly credentialStates: Readonly<Record<string, string>>;
 }
 
 /** Shared read-only `/doctor` domain operation. It never repairs, rebuilds, or runs GC. */
@@ -49,8 +59,15 @@ export async function runWorkspaceDoctor(
   const nodeOk = nodeMajor >= 22;
   const cwdOk = existsSync(options.workDir);
   const apiKeys = readApiKeys(env);
+  const effectiveProviderCount = Object.keys(options.configuration?.providerSources ?? {}).length;
+  const effectiveCredentialCount = Object.values(
+    options.configuration?.credentialStates ?? {},
+  ).filter((state) => state === "environment" || state === "keychain").length;
   const catalogHealth =
-    options.catalogHealth ?? (await readSessionCatalogProjectionHealth(options.workDir));
+    options.catalogHealth ??
+    (await readSessionCatalogProjectionHealth(options.workDir, {
+      ...(options.picoHome ? { picoHome: options.picoHome } : {}),
+    }));
   const storage = await scanStorage(options);
   const checks: WorkspaceDiagnosticCheck[] = [
     check("cwd", "CWD", cwdOk ? "ok" : "error", `${options.workDir} (${cwdOk ? "ok" : "missing"})`),
@@ -62,17 +79,26 @@ export async function runWorkspaceDoctor(
     ),
     check("provider", "Provider", options.provider ? "ok" : "error", options.provider || "missing"),
     check("model", "Model", options.model ? "ok" : "error", options.model || "missing"),
+    configurationCheck(options.configuration),
     check(
       "base-url",
       "LLM_BASE_URL",
-      env["LLM_BASE_URL"] ? "ok" : "warning",
-      env["LLM_BASE_URL"] ? "set" : "missing",
+      env["LLM_BASE_URL"] || effectiveProviderCount > 0 ? "ok" : "warning",
+      env["LLM_BASE_URL"]
+        ? "set in environment"
+        : effectiveProviderCount > 0
+          ? "provided by effective configuration"
+          : "missing",
     ),
     check(
       "api-key",
       "LLM_API_KEY[S]",
-      apiKeys.length > 0 ? "ok" : "warning",
-      apiKeys.length > 0 ? `${apiKeys.length} configured` : "missing",
+      apiKeys.length > 0 || effectiveCredentialCount > 0 ? "ok" : "warning",
+      apiKeys.length > 0
+        ? `${apiKeys.length} configured in environment`
+        : effectiveCredentialCount > 0
+          ? `${effectiveCredentialCount} available from effective configuration`
+          : "missing",
     ),
     check(
       "node",
@@ -106,8 +132,21 @@ export async function runWorkspaceDoctor(
     `.env: ${existsSync(envPath) ? "found" : "missing"}`,
     `Provider: ${options.provider}`,
     `Model: ${options.model}${env["LLM_MODEL"] && env["LLM_MODEL"] !== options.model ? ` (env: ${env["LLM_MODEL"]})` : ""}`,
-    `LLM_BASE_URL: ${env["LLM_BASE_URL"] ? "set" : "missing"}`,
-    `LLM_API_KEY[S]: ${apiKeys.length > 0 ? `${apiKeys.length} configured` : "missing"}`,
+    ...renderConfiguration(options.configuration),
+    `LLM_BASE_URL: ${
+      env["LLM_BASE_URL"]
+        ? "set in environment"
+        : effectiveProviderCount > 0
+          ? "provided by effective configuration"
+          : "missing"
+    }`,
+    `LLM_API_KEY[S]: ${
+      apiKeys.length > 0
+        ? `${apiKeys.length} configured in environment`
+        : effectiveCredentialCount > 0
+          ? `${effectiveCredentialCount} available from effective configuration`
+          : "missing"
+    }`,
     `Node: ${process.version} (${nodeOk ? "ok" : "requires >=22.0.0"})`,
     `Session catalog: ${catalogHealth.state}`,
     ...(catalogHealth.diagnostic ? [`Session catalog reason: ${catalogHealth.diagnostic}`] : []),
@@ -127,6 +166,39 @@ export async function runWorkspaceDoctor(
     checks: Object.freeze(checks),
     output,
   };
+}
+
+function configurationCheck(
+  configuration: WorkspaceConfigurationDiagnostic | undefined,
+): WorkspaceDiagnosticCheck {
+  if (!configuration) return check("configuration", "Configuration", "unavailable", "legacy");
+  const providerCount = Object.keys(configuration.providerSources).length;
+  return check(
+    "configuration",
+    "Configuration",
+    providerCount > 0 ? "ok" : "warning",
+    `${providerCount} provider(s); default source=${configuration.defaultSource ?? "built-in"}`,
+  );
+}
+
+function renderConfiguration(
+  configuration: WorkspaceConfigurationDiagnostic | undefined,
+): string[] {
+  if (!configuration) return ["Configuration sources: legacy environment diagnostics only"];
+  const providers = Object.entries(configuration.providerSources);
+  return [
+    `Configuration default: ${configuration.defaultModelRouteId ?? "none"} (source=${configuration.defaultSource ?? "built-in"})`,
+    `Configuration providers: ${
+      providers.length > 0
+        ? providers
+            .map(
+              ([id, source]) =>
+                `${id}=${source}/credential-${configuration.credentialStates[id] ?? "unknown"}`,
+            )
+            .join(", ")
+        : "none"
+    }`,
+  ];
 }
 
 function check(
@@ -178,7 +250,11 @@ async function scanStorage(options: WorkspaceDoctorOptions): Promise<{
   try {
     return {
       report: await (
-        options.storageDoctor ?? new StorageDoctor({ workDir: options.workDir })
+        options.storageDoctor ??
+        new StorageDoctor({
+          workDir: options.workDir,
+          ...(options.picoHome ? { picoHome: options.picoHome } : {}),
+        })
       ).scan(),
     };
   } catch (error) {

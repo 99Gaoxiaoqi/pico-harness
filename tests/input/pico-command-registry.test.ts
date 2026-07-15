@@ -26,10 +26,15 @@ import {
 import { fileHistoryMakeSnapshot, fileHistoryTrackEdit } from "../../src/safety/file-history.js";
 import { CronService } from "../../src/tasks/cron-service.js";
 import type { CronDaemonBridge } from "../../src/input/cron-daemon-bridge.js";
+import { UserConfigStore } from "../../src/input/user-config-store.js";
 import { ModelRouter } from "../../src/provider/model-router.js";
 import { resolveModelRouteCapabilities } from "../../src/provider/model-capabilities.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 import type { CredentialRef, CredentialVault } from "../../src/provider/credential-vault.js";
+import {
+  BACKGROUND_HARDLINE_VERSION,
+  BACKGROUND_HOOK_VERSION,
+} from "../../src/safety/background-yolo-policy.js";
 
 describe("Pico command registry", () => {
   const cleanup: Array<() => void> = [];
@@ -100,7 +105,12 @@ describe("Pico command registry", () => {
     });
     let daemonAvailable = true;
     const disabledCountWhenRegistered: number[] = [];
+    const secrets = new Map<CredentialRef, string>();
     const bridge: CronDaemonBridge = {
+      deleteProvider: async () => ({
+        status: "unavailable",
+        message: "daemon unavailable",
+      }),
       registerWorkspace: async (workspacePath) => {
         disabledCountWhenRegistered.push(cron.list(workDir).filter((job) => !job.enabled).length);
         return {
@@ -113,8 +123,74 @@ describe("Pico command registry", () => {
         registered: true,
         message: "daemon connected; workspace registered; scheduler unknown",
       }),
+      importAutomationCredential: async (input) => {
+        if (!daemonAvailable) return { status: "unavailable", message: "daemon unavailable" };
+        secrets.set(input.expectedCredentialRef as CredentialRef, input.secret);
+        return { status: "ok", message: "安全导入系统凭证库" };
+      },
+      createAutomation: async (input) => {
+        if (!daemonAvailable) return { status: "unavailable", message: "daemon unavailable" };
+        let job = cron.create({
+          workspacePath: input.workspacePath,
+          schedule: input.schedule,
+          ...(input.timeZone ? { timeZone: input.timeZone } : {}),
+          prompt: input.prompt,
+          credentialRef: input.expectedCredentialRef as CredentialRef,
+          modelRouteId: input.modelRouteId,
+          enabled: false,
+          policySnapshot: {
+            mode: "yolo",
+            backgroundEnabled: true,
+            trustedWorkspace: true,
+            toolNetworkPolicy: input.toolNetworkPolicy,
+            ...(input.allowedToolNetworkHosts
+              ? { allowedToolNetworkHosts: input.allowedToolNetworkHosts }
+              : {}),
+            allowedTools: input.allowedTools,
+            hardlineVersion: BACKGROUND_HARDLINE_VERSION,
+            hookVersion: BACKGROUND_HOOK_VERSION,
+            createdAt: Date.now(),
+          },
+        });
+        disabledCountWhenRegistered.push(cron.list(workDir).filter((item) => !item.enabled).length);
+        if (input.enabled !== false) job = cron.setEnabled(job.cronJobId, job.version, true);
+        return {
+          status: "ok",
+          message: `daemon registered ${input.workspacePath}`,
+          job: {
+            jobId: job.cronJobId,
+            workspacePath: job.workspacePath,
+            name: job.name,
+            prompt: job.prompt,
+            schedule: job.schedule,
+            enabled: job.enabled,
+            status: "idle",
+            updatedAt: job.updatedAt,
+            timeZone: job.timeZone,
+          },
+        };
+      },
+      setAutomationEnabled: async (input) => {
+        if (!daemonAvailable) return { status: "unavailable", message: "remains disabled" };
+        const current = cron.list(workDir).find((item) => item.cronJobId === input.jobId)!;
+        const job = cron.setEnabled(current.cronJobId, current.version, input.enabled);
+        return {
+          status: "ok",
+          message: input.enabled ? "enabled" : "disabled",
+          job: {
+            jobId: job.cronJobId,
+            workspacePath: job.workspacePath,
+            name: job.name,
+            prompt: job.prompt,
+            schedule: job.schedule,
+            enabled: job.enabled,
+            status: "idle",
+            updatedAt: job.updatedAt,
+          },
+        };
+      },
+      deleteAutomation: async () => ({ status: "ok", message: "deleted" }),
     };
-    const secrets = new Map<CredentialRef, string>();
     const credentialVault: CredentialVault = {
       capability: () => ({
         available: true,
@@ -124,6 +200,7 @@ describe("Pico command registry", () => {
       put: async (ref, secret) => void secrets.set(ref, secret),
       resolve: async (ref) => secrets.get(ref) ?? Promise.reject(new Error("missing")),
       has: async (ref) => secrets.has(ref),
+      delete: async (ref) => void secrets.delete(ref),
     };
     const modelRouter = new ModelRouter(
       [
@@ -141,6 +218,24 @@ describe("Pico command registry", () => {
       { TEST_CRON_API_KEY: "secret-never-rendered" },
       "configured/glm-5.2",
     );
+    const userConfigStore = new UserConfigStore({ picoHome: join(workDir, "user-home") });
+    const initialUserConfig = await userConfigStore.read();
+    await userConfigStore.write(
+      {
+        version: 1,
+        defaults: { modelRouteId: "configured/glm-5.2" },
+        providers: {
+          configured: {
+            protocol: "openai",
+            baseURL: "https://example.test/v1",
+            apiKeyEnv: "TEST_CRON_API_KEY",
+            models: ["glm-5.2"],
+            discoverModels: false,
+          },
+        },
+      },
+      { expectedRevision: initialUserConfig.revision },
+    );
     const registry = await createPicoCommandRegistry({
       workDir,
       provider: "openai",
@@ -152,6 +247,25 @@ describe("Pico command registry", () => {
       cronDaemonBridge: bridge,
       credentialVault,
       credentialEnv: { TEST_CRON_API_KEY: "secret-never-rendered" },
+      userConfigStore,
+      effectiveConfig: {
+        defaultModelRouteId: "configured/glm-5.2",
+        defaults: { modelRouteId: "configured/glm-5.2" },
+        providers: {
+          configured: {
+            protocol: "openai",
+            baseURL: "https://example.test/v1",
+            apiKeyEnv: "TEST_CRON_API_KEY",
+            models: ["glm-5.2"],
+            discoverModels: false,
+          },
+        },
+        sources: {
+          "providers.configured": "user",
+          "defaults.modelRouteId": "user",
+        },
+        revisions: { user: "test-user", project: "test-project" },
+      },
     });
 
     const imported = await processUserInput("/cron credential import", { registry });
@@ -175,31 +289,19 @@ describe("Pico command registry", () => {
       "工具网络：仅允许 api.example.com",
     );
     const allowlistedJob = cron.list(workDir).find((job) => job.prompt === "检查未提交的改动");
-    expect(allowlistedJob?.credentialRef).toMatch(/^pico-keychain:\/\/model-route\//u);
+    expect(allowlistedJob?.credentialRef).toMatch(/^pico-keychain:\/\/provider\/v2\//u);
+    expect(allowlistedJob?.modelRouteId).toBe("configured/glm-5.2");
     expect(allowlistedJob?.enabled).toBe(true);
     expect(disabledCountWhenRegistered).toEqual([1]);
 
     daemonAvailable = false;
     const offline = await processUserInput("/cron add */10 * * * * 生成默认联网日报", { registry });
     expect(offline.type === "local-command" ? offline.result.message : undefined).toContain(
-      "(disabled)",
-    );
-    expect(offline.type === "local-command" ? offline.result.message : undefined).toContain(
-      "允许所有符合后台资格的工具联网",
+      "daemon unavailable",
     );
     const offlineJob = cron.list(workDir).find((job) => job.prompt === "生成默认联网日报");
-    expect(offlineJob?.enabled).toBe(false);
-    expect(offlineJob?.policySnapshot.toolNetworkPolicy).toBe("allow");
-    expect(disabledCountWhenRegistered).toEqual([1, 1]);
-    const enableOffline = await processUserInput(`/cron enable ${offlineJob!.cronJobId}`, {
-      registry,
-    });
-    expect(
-      enableOffline.type === "local-command" ? enableOffline.result.message : undefined,
-    ).toContain("remains disabled");
-    expect(cron.list(workDir).find((job) => job.cronJobId === offlineJob!.cronJobId)?.enabled).toBe(
-      false,
-    );
+    expect(offlineJob).toBeUndefined();
+    expect(disabledCountWhenRegistered).toEqual([1]);
 
     const listed = await processUserInput("/cron list", { registry });
     expect(listed.type === "local-command" ? listed.result.message : undefined).toContain(
@@ -215,6 +317,79 @@ describe("Pico command registry", () => {
     expect(status.type === "local-command" ? status.result.message : undefined).toContain(
       "模型 Provider 调用仍需联网",
     );
+  });
+
+  it("/cron 不将 effective environment Provider 误当成可持久 config", async () => {
+    const workDir = mkdtempSync(join(tmpdir(), "pico-command-env-cron-"));
+    const cron = new CronService({ workDir });
+    cleanup.push(() => {
+      cron.close();
+      rmSync(workDir, { recursive: true, force: true });
+    });
+    const secrets = new Map<CredentialRef, string>();
+    const vault: CredentialVault = {
+      capability: () => ({
+        available: true,
+        backend: "macos-keychain",
+        diagnostic: "test keychain",
+      }),
+      put: async (ref, secret) => void secrets.set(ref, secret),
+      resolve: async (ref) => secrets.get(ref) ?? Promise.reject(new Error("missing")),
+      has: async (ref) => secrets.has(ref),
+      delete: async (ref) => void secrets.delete(ref),
+    };
+    const environmentProvider = {
+      protocol: "openai" as const,
+      baseURL: "https://environment.example.test/v1",
+      apiKeyEnv: "LLM_API_KEY",
+      models: ["env-model"],
+      discoverModels: false,
+    };
+    const router = new ModelRouter(
+      [
+        {
+          id: "legacy/env-model",
+          providerId: "legacy",
+          provider: "openai",
+          model: "env-model",
+          baseURL: environmentProvider.baseURL,
+          apiKeyEnv: "LLM_API_KEY",
+          // EffectiveConfigResolver flattens the environment entry before ModelRouter,
+          // so source alone is not sufficient to classify persistence authority.
+          source: "config",
+          capabilities: resolveModelRouteCapabilities("openai", "env-model"),
+        },
+      ],
+      { LLM_API_KEY: "environment-only-secret" },
+      "legacy/env-model",
+    );
+    const registry = await createPicoCommandRegistry({
+      workDir,
+      provider: "openai",
+      model: "env-model",
+      modelRouteId: "legacy/env-model",
+      modelRouter: router,
+      sessionId: "session-env-cron",
+      cronService: cron,
+      credentialVault: vault,
+      credentialEnv: { LLM_API_KEY: "environment-only-secret" },
+      effectiveConfig: {
+        defaultModelRouteId: "legacy/env-model",
+        defaults: { modelRouteId: "legacy/env-model" },
+        providers: { legacy: environmentProvider },
+        sources: {
+          "providers.legacy": "environment",
+          "defaults.modelRouteId": "environment",
+        },
+        revisions: { user: "env-user", project: "env-project" },
+      },
+    });
+
+    const result = await processUserInput("/cron credential import", { registry });
+    const message = result.type === "local-command" ? result.result.message : "";
+    expect(message).toContain("仅由当前进程环境提供");
+    expect(message).not.toContain("environment-only-secret");
+    expect(secrets.size).toBe(0);
   });
 
   it("/rename 为当前 session 设置可持久化的可读标题", async () => {

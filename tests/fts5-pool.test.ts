@@ -51,6 +51,28 @@ describe("FTS5Store 连接池化", () => {
     }
   });
 
+  it("同 workDir 的不同 PICO_HOME 不共享连接", () => {
+    const dir = freshDir();
+    const picoHomeA = join(dir, "home-a");
+    const picoHomeB = join(dir, "home-b");
+    const a = FTS5Store.acquire(dir, { picoHome: picoHomeA });
+    const b = FTS5Store.acquire(dir, { picoHome: picoHomeB });
+
+    expect(a).not.toBe(b);
+    expect(
+      existsSync(
+        join(resolvePicoPaths(dir, { picoHome: picoHomeA }).workspace.root, "sessions.db"),
+      ),
+    ).toBe(true);
+    expect(
+      existsSync(
+        join(resolvePicoPaths(dir, { picoHome: picoHomeB }).workspace.root, "sessions.db"),
+      ),
+    ).toBe(true);
+    FTS5Store.release(dir, { picoHome: picoHomeA });
+    FTS5Store.release(dir, { picoHome: picoHomeB });
+  });
+
   it("引用计数:多次 acquire 需等量 release 才真关并从池移除", () => {
     const dir = freshDir();
     const a = FTS5Store.acquire(dir)!;
