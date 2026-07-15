@@ -321,9 +321,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       case "provider.credential.set":
         return this.withProviderDependencyLock(() => this.setProviderCredential(request.params));
       case "provider.credential.delete":
-        return this.withProviderDependencyLock(() =>
-          this.deleteProviderCredential(request.params),
-        );
+        return this.withProviderDependencyLock(() => this.deleteProviderCredential(request.params));
       case "catalog.agents":
         return this.listAgents(request.params.workspacePath);
       case "catalog.skills":
@@ -1987,8 +1985,11 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       return (await this.credentialVault.has(ref))
         ? { credentialStatus: "ready", credentialSource: "keychain" }
         : { credentialStatus: "missing", credentialSource: "none" };
-    } catch {
-      return { credentialStatus: "unsupported", credentialSource: "none" };
+    } catch (error) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.CONFLICT,
+        `无法读取 Provider ${providerId} 的系统凭证状态: ${errorMessage(error)}`,
+      );
     }
   }
 
@@ -2056,10 +2057,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     providerId: string,
     workspacePaths: readonly string[],
   ): Promise<void> {
-    await this.assertNoActiveRuns(
-      workspacePaths,
-      `删除 Provider ${providerId} 或其系统凭证`,
-    );
+    await this.assertNoActiveRuns(workspacePaths, `删除 Provider ${providerId} 或其系统凭证`);
     const automationReferences =
       this.options.automations?.enabledProviderReferences(providerId, workspacePaths) ?? [];
     if (automationReferences.length > 0) {
