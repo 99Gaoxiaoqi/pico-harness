@@ -260,6 +260,8 @@ export class Session implements SessionRuntimePersistence {
   /** close() seals task admission before the durable/resource drain starts. */
   private acceptingSerializedTasks = true;
   private pendingSerializedTasks = 0;
+  /** Nested admission for the same Session is unsafe and would otherwise self-deadlock. */
+  private readonly serializedTask = new AsyncLocalStorage<boolean>();
   /** close 前已接纳的任务/持久化操作在该 token 有效期内可完成写入。 */
   private readonly writeAdmission = new AsyncLocalStorage<{ active: boolean }>();
 
@@ -589,19 +591,26 @@ export class Session implements SessionRuntimePersistence {
    * 返回任务的 Promise(结果需调用方 await)。
    */
   serialize<T>(task: () => Promise<T>): Promise<T> {
+    if (this.serializedTask.getStore()) {
+      return Promise.reject(
+        new Error(`Session ${this.id} does not support re-entrant serialized execution`),
+      );
+    }
     if (!this.acceptingSerializedTasks || this.lifecycle !== "open") {
       const state = this.acceptingSerializedTasks ? this.lifecycle : "closing";
       return Promise.reject(new Error(`Session ${this.id} is ${state}`));
     }
     this.pendingSerializedTasks++;
     const runTask = (): Promise<T> =>
-      this.runWithWriteAdmission(async () => {
-        try {
-          return await task();
-        } finally {
-          this.pendingSerializedTasks--;
-        }
-      });
+      this.serializedTask.run(true, () =>
+        this.runWithWriteAdmission(async () => {
+          try {
+            return await task();
+          } finally {
+            this.pendingSerializedTasks--;
+          }
+        }),
+      );
     const result = this.runQueue.then(runTask, runTask);
     // 无论成功失败,都更新队列链;吞掉错误让调用方自己的 catch 处理
     this.runQueue = result.then(
@@ -886,7 +895,7 @@ export class Session implements SessionRuntimePersistence {
     const runtimeRun = currentRuntimeRun();
     await this.enqueuePersistence("messages", async () => {
       await this.ensureRuntimeSession();
-      if (runtimeRun?.sessionId === this.id) {
+      if (runtimeRun?.claimsSession(this)) {
         await runtimeRun.commitMessages(this, msgs);
         return;
       }
@@ -907,7 +916,7 @@ export class Session implements SessionRuntimePersistence {
     const runtimeRun = currentRuntimeRun();
     return this.enqueuePersistence("message", async () => {
       await this.ensureRuntimeSession();
-      if (runtimeRun?.sessionId === this.id) {
+      if (runtimeRun?.claimsSession(this)) {
         return runtimeRun.commitMessageOnce(this, eventId, message);
       }
       const receipt = await RuntimeRun.commitExternalMessageOnce(this, eventId, message);

@@ -67,6 +67,23 @@ describe("durable Runtime Session reliability", () => {
     ]);
   });
 
+  it("fails fast when the same Session serialize scope re-enters", async () => {
+    const session = track(new Session("session-reentry", workDir, { persistence: true }));
+    await session.recover();
+    let nestedExecuted = false;
+
+    await session.serialize(async () => {
+      await expect(
+        session.serialize(async () => {
+          nestedExecuted = true;
+        }),
+      ).rejects.toThrow("does not support re-entrant serialized execution");
+    });
+
+    expect(nestedExecuted).toBe(false);
+    expect(session.hasPendingTasks).toBe(false);
+  });
+
   it.each([
     {
       operation: "truncateTo",

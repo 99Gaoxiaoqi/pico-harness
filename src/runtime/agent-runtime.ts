@@ -669,6 +669,7 @@ export async function executeAgentRuntime(
     });
     const { goalManager, todoStore, toolDisclosure, backgroundManager, delegationManager } =
       runtimeState;
+    const approvalManager = dependencies.approvalManager ?? globalApprovalManager;
     const registry = buildRegistry(
       workDir,
       backgroundManager,
@@ -700,6 +701,7 @@ export async function executeAgentRuntime(
         });
       },
       skillLoaderFactory(workDir),
+      approvalManager,
     );
     cleanupRegistry = registry;
     if (!backgroundPolicy && dependencies.scheduleDraftCoordinator) {
@@ -756,7 +758,8 @@ export async function executeAgentRuntime(
       baseDir: resolvePicoPaths(workDir).workspace.evidence,
     });
     const reporter = dependencies.reporter ?? new TerminalReporter();
-    const approvalNotifier = dependencies.approvalNotifier ?? failClosedApprovalNotifier;
+    const approvalNotifier =
+      dependencies.approvalNotifier ?? buildFailClosedApprovalNotifier(approvalManager);
     const contextRuntime = buildContextRuntime(kind, providerConfig.model);
     const engine = new AgentEngine({
       provider: trackedProvider,
@@ -821,7 +824,7 @@ export async function executeAgentRuntime(
           approvalNotifier,
           workDir,
           dependencies.signal,
-          dependencies.approvalManager ?? globalApprovalManager,
+          approvalManager,
           settings,
           workspaceRoots,
           runtimeState.hookService,
@@ -870,6 +873,7 @@ export async function executeAgentRuntime(
     const notifier = approvalNotifier;
     const exitTool = registry.getTool("exit_plan_mode");
     if (exitTool instanceof ExitPlanModeTool) {
+      exitTool.setApprovalManager(approvalManager);
       exitTool.setExitCallback(() => {
         markSharedPlanModeExited(settings);
         engine.exitPlanMode();
@@ -1142,6 +1146,7 @@ function buildRegistry(
   yoloSandbox?: { config?: Partial<YoloSandboxConfig> },
   activateSkillHooks?: (skill: Skill) => void | Promise<void>,
   skillLoader?: SkillLoader,
+  approvalManager?: ApprovalManager,
 ): ToolRegistry {
   return buildDefaultToolRegistry(workDir, {
     truncateResults: false,
@@ -1157,6 +1162,7 @@ function buildRegistry(
     ...(yoloSandbox !== undefined ? { yoloSandbox } : {}),
     ...(activateSkillHooks !== undefined ? { activateSkillHooks } : {}),
     ...(skillLoader !== undefined ? { skillLoader } : {}),
+    ...(approvalManager !== undefined ? { approvalManager } : {}),
   });
 }
 
@@ -1892,16 +1898,18 @@ function markSharedPlanModeExited(settings: SessionSettings): void {
   exitSessionPlanMode(settings);
 }
 
-/** A headless runtime never waits for an approval that no host can answer. */
-const failClosedApprovalNotifier: ApprovalNotifier = (notice) => {
-  queueMicrotask(() => {
-    globalApprovalManager.resolveApproval(
-      notice.taskId,
-      false,
-      "当前 Runtime Host 未提供审批交互，已安全拒绝。",
-    );
-  });
-};
+/** A headless runtime settles the same manager it asked, so it never waits for absent UI. */
+function buildFailClosedApprovalNotifier(approvalManager: ApprovalManager): ApprovalNotifier {
+  return (notice) => {
+    queueMicrotask(() => {
+      approvalManager.resolveApproval(
+        notice.taskId,
+        false,
+        "当前 Runtime Host 未提供审批交互，已安全拒绝。",
+      );
+    });
+  };
+}
 
 async function resolveBackgroundCredential(
   options: RunAgentCliOptions,

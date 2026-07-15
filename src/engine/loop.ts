@@ -10,6 +10,7 @@
 // 而是依靠喂给它的 Session 实例进行推理 —— 随时休眠、随时被唤醒的记忆连续体。
 // 每轮组装 = SystemPrompt + Session 完整历史投影，接近 token 水位时主动整理。
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import type { LLMProvider, LLMProviderRequestOptions } from "../provider/interface.js";
 import { ContextOverflowError, isAbortError } from "../provider/errors.js";
@@ -61,6 +62,7 @@ import { IterationBudget, type BudgetConfig, type BudgetDecision } from "./budge
 import type { GoalManager } from "./goal-manager.js";
 import { Tracer, exportTraceToFile, truncate, type Span } from "../observability/trace.js";
 import { logger } from "../observability/logger.js";
+import { canonicalizeWorkspacePath } from "../paths/pico-paths.js";
 import { safeResolve } from "../tools/registry-impl.js";
 import type { WorkspaceRoots } from "../tools/workspace-roots.js";
 import type { Session } from "./session.js";
@@ -88,6 +90,15 @@ import {
 const DEFAULT_AUTO_COMPACT_TRIGGER_RATIO = 0.85;
 const DEFAULT_RETAINED_CONTEXT_RATIO = 0.2;
 const EMERGENCY_RETAINED_CONTEXT_RATIO = 0.1;
+const engineSessionContext = new AsyncLocalStorage<string>();
+
+function engineSessionCapability(session: Session): string {
+  return JSON.stringify([
+    canonicalizeWorkspacePath(session.workDir),
+    session.id,
+    session.runtimeEventStore?.databasePath ?? null,
+  ]);
+}
 
 /** 子代理 summary 低于此字数则触发一轮扩写(对齐 Kimi Code SUMMARY_MIN_LENGTH) */
 const SUBAGENT_SUMMARY_MIN_CHARS = 200;
@@ -815,12 +826,12 @@ export class AgentEngine implements AgentRunner {
   /** RuntimeEvent is the source of truth for production model history; Session is its UI projection. */
   private async readModelHistory(session: Session): Promise<Message[]> {
     const runtimeRun = currentRuntimeRun();
-    if (runtimeRun?.sessionId === session.id) return runtimeRun.readModelHistory();
+    if (runtimeRun?.claimsSession(session)) return runtimeRun.readModelHistory();
     return session.getModelContext();
   }
 
   private isRuntimeSession(session: Session): boolean {
-    return currentRuntimeRun()?.sessionId === session.id;
+    return currentRuntimeRun()?.claimsSession(session) === true;
   }
 
   /**
@@ -833,7 +844,7 @@ export class AgentEngine implements AgentRunner {
     signal?: AbortSignal,
   ): Promise<FullCompactionPreview | undefined> {
     const runtimeRun = currentRuntimeRun();
-    if (!runtimeRun || runtimeRun.sessionId !== session.id || !this.fullCompactor) {
+    if (!runtimeRun?.claimsSession(session) || !this.fullCompactor) {
       return undefined;
     }
     const entries = await runtimeRun.readModelHistoryEntries();
@@ -882,7 +893,7 @@ export class AgentEngine implements AgentRunner {
     currentRequestSessionIndex: number,
   ): Promise<void> {
     const runtimeRun = currentRuntimeRun();
-    if (!runtimeRun || runtimeRun.sessionId !== session.id) {
+    if (!runtimeRun?.claimsSession(session)) {
       throw new Error("Runtime hard reset requires the active canonical run");
     }
     const rawProjection = await runtimeRun.readSessionProjectionEntries();
@@ -1118,13 +1129,26 @@ export class AgentEngine implements AgentRunner {
     runtimeTracer?: Tracer,
     signal?: AbortSignal,
   ): Promise<Message[]> {
-    const run = () => this.runInMainCompactorScope(session, runtimeReporter, runtimeTracer, signal);
+    const capability = engineSessionCapability(session);
+    if (engineSessionContext.getStore() === capability) {
+      throw new Error(`AgentEngine does not support re-entrant runs for Session ${session.id}`);
+    }
+    const run = () =>
+      engineSessionContext.run(capability, () =>
+        this.runInMainCompactorScope(session, runtimeReporter, runtimeTracer, signal),
+      );
     const execute = () => (this.compactor ? this.compactor.runInMainScope(run) : run());
+    const ambientRun = currentRuntimeRun();
     // Tests and explicit in-memory sessions intentionally skip durable runtime facts.
-    if (!session.runtimeEventStore) return execute();
+    if (!session.runtimeEventStore) {
+      if (ambientRun && !ambientRun.claimsSession(session)) {
+        throw new Error("An in-memory Session cannot run inside another RuntimeRun capability");
+      }
+      return execute();
+    }
     // AgentRuntime already owns the canonical RuntimeEvent run. Direct embedders are
     // serialized here so one durable Session cannot execute overlapping model turns.
-    if (currentRuntimeRun()?.sessionId === session.id) return execute();
+    if (ambientRun?.claimsSession(session)) return execute();
     return session.serialize(() => this.runWithRuntimeEvents(session, execute, signal));
   }
 
