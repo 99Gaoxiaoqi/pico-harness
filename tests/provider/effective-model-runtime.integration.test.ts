@@ -3,6 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Session } from "../../src/engine/session.js";
+import type {
+  CronDaemonBridge,
+  ProviderDaemonDeleteInput,
+  ProviderDaemonDeleteResult,
+} from "../../src/input/cron-daemon-bridge.js";
 import { createPicoCommandRegistry } from "../../src/input/pico-command-registry.js";
 import { processUserInput } from "../../src/input/process-user-input.js";
 import { UserConfigStore, type PicoUserConfig } from "../../src/input/user-config-store.js";
@@ -289,6 +294,32 @@ describe("effective model runtime integration", () => {
       LLM_MODELS: "import-model,other-model",
       LLM_API_KEY: "must-never-be-rendered",
     };
+    const daemon = providerDeleteBridge(async ({ providerId, expectedRevision }) => {
+      const current = await store.read();
+      if (current.revision !== expectedRevision) {
+        return { status: "rejected", message: "CONFIG_REVISION_CONFLICT" };
+      }
+      const provider = current.config.providers[providerId];
+      if (!provider) return { status: "rejected", message: "Provider not found" };
+      const providers = { ...current.config.providers };
+      delete providers[providerId];
+      const written = await store.write(
+        { ...current.config, providers },
+        { expectedRevision },
+      );
+      await vault.delete(
+        credentialRefForProvider({
+          providerId,
+          protocol: provider.protocol,
+          baseURL: provider.baseURL,
+        }),
+      );
+      return {
+        status: "deleted",
+        revision: written.revision,
+        message: `Shared user provider ${providerId} deleted.`,
+      };
+    });
     const registry = await createPicoCommandRegistry({
       workDir,
       provider: "openai",
@@ -296,6 +327,7 @@ describe("effective model runtime integration", () => {
       userConfigStore: store,
       credentialVault: vault,
       credentialEnv: env,
+      cronDaemonBridge: daemon,
       effectiveConfig: {
         defaults: {},
         providers: {},
@@ -346,6 +378,9 @@ describe("effective model runtime integration", () => {
       mode: "auto",
       modelRouteId: "imported/other-model",
     });
+
+    const clearedDefault = await processUserInput("/provider default clear", { registry });
+    expect(JSON.stringify(clearedDefault)).toContain("default model cleared");
 
     const deleted = await processUserInput("/provider delete imported", { registry });
     expect(JSON.stringify(deleted)).not.toContain(env.LLM_API_KEY);
@@ -409,6 +444,11 @@ describe("effective model runtime integration", () => {
       model: "fallback",
       userConfigStore: store,
       credentialVault: deleteVault,
+      cronDaemonBridge: providerDeleteBridge(async () => ({
+        status: "rejected",
+        message:
+          "Shared user provider shared was not deleted because its OS vault credential could not be removed.",
+      })),
       credentialEnv: {},
     });
     const failedDelete = await processUserInput("/provider delete shared", {
@@ -417,7 +457,89 @@ describe("effective model runtime integration", () => {
     expect(JSON.stringify(failedDelete)).not.toContain(secret);
     expect((await store.read()).config.providers.shared).toBeDefined();
   });
+
+  it("TUI 在 daemon 不可达时 fail-closed，不直接删配置或凭证", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-provider-offline-work-"));
+    const picoHome = await mkdtemp(join(tmpdir(), "pico-provider-offline-home-"));
+    const store = new UserConfigStore({ picoHome });
+    await writeUserConfig(store, userProviderConfig());
+    const vault = new MemoryCredentialVault();
+    const ref = credentialRefForProvider({
+      providerId: "shared",
+      protocol: "openai",
+      baseURL: "https://provider.example.test/v1",
+    });
+    await vault.put(ref, "offline-secret");
+    const registry = await createPicoCommandRegistry({
+      workDir,
+      provider: "openai",
+      model: "user-model",
+      userConfigStore: store,
+      credentialVault: vault,
+      credentialEnv: {},
+      cronDaemonBridge: providerDeleteBridge(async () => ({
+        status: "unavailable",
+        message: "Local Runtime daemon is unavailable; Provider deletion is fail-closed.",
+      })),
+    });
+
+    const result = await processUserInput("/provider delete shared", { registry });
+    expect(JSON.stringify(result)).toContain("fail-closed");
+    expect((await store.read()).config.providers.shared).toBeDefined();
+    await expect(vault.has(ref)).resolves.toBe(true);
+  });
+
+  it("TUI 将读到的 revision 交给 daemon，OCC 冲突后保留 Provider 与凭证", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-provider-occ-work-"));
+    const picoHome = await mkdtemp(join(tmpdir(), "pico-provider-occ-home-"));
+    const store = new UserConfigStore({ picoHome });
+    await writeUserConfig(store, userProviderConfig());
+    const vault = new MemoryCredentialVault();
+    const ref = credentialRefForProvider({
+      providerId: "shared",
+      protocol: "openai",
+      baseURL: "https://provider.example.test/v1",
+    });
+    await vault.put(ref, "occ-secret");
+    let receivedRevision = "";
+    const registry = await createPicoCommandRegistry({
+      workDir,
+      provider: "openai",
+      model: "user-model",
+      userConfigStore: store,
+      credentialVault: vault,
+      credentialEnv: {},
+      cronDaemonBridge: providerDeleteBridge(async (input) => {
+        receivedRevision = input.expectedRevision;
+        const current = await store.read();
+        await store.write(
+          { ...current.config, defaults: { ...current.config.defaults, mode: "plan" } },
+          { expectedRevision: current.revision },
+        );
+        return { status: "rejected", message: "CONFIG_REVISION_CONFLICT" };
+      }),
+    });
+    const before = await store.read();
+
+    const result = await processUserInput("/provider delete shared", { registry });
+    expect(receivedRevision).toBe(before.revision);
+    expect(JSON.stringify(result)).toContain("CONFIG_REVISION_CONFLICT");
+    expect((await store.read()).config.providers.shared).toBeDefined();
+    await expect(vault.has(ref)).resolves.toBe(true);
+  });
 });
+
+function providerDeleteBridge(
+  deleteProvider: (
+    input: ProviderDaemonDeleteInput,
+  ) => Promise<ProviderDaemonDeleteResult>,
+): CronDaemonBridge {
+  return {
+    registerWorkspace: async () => ({ available: true, message: "registered" }),
+    statusWorkspace: async () => ({ available: true, registered: true, message: "connected" }),
+    deleteProvider,
+  };
+}
 
 class MemoryCredentialVault implements CredentialVault {
   private readonly values = new Map<CredentialRef, string>();

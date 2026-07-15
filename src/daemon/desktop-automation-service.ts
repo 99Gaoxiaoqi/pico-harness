@@ -135,24 +135,23 @@ export class DesktopAutomationService {
   enabledProviderReferences(
     providerId: string,
     workspacePaths: readonly string[],
-  ): Array<{
-    readonly workspacePath: string;
-    readonly jobId: string;
-    readonly modelRouteId: string;
-  }> {
-    const references: Array<{
-      readonly workspacePath: string;
-      readonly jobId: string;
-      readonly modelRouteId: string;
-    }> = [];
+  ): Array<EnabledAutomationReference & { readonly modelRouteId: string }> {
+    return this.enabledReferences(workspacePaths).filter(
+      (reference): reference is EnabledAutomationReference & { readonly modelRouteId: string } =>
+        providerIdForRoute(reference.modelRouteId) === providerId &&
+        reference.modelRouteId !== undefined,
+    );
+  }
+
+  enabledReferences(workspacePaths: readonly string[]): EnabledAutomationReference[] {
+    const references: EnabledAutomationReference[] = [];
     for (const workspacePath of workspacePaths) {
       this.withCron(workspacePath, (cron) => {
         for (const job of cron.store.listCronJobs({ workspacePath, enabled: true })) {
-          if (providerIdForRoute(job.modelRouteId) !== providerId || !job.modelRouteId) continue;
           references.push({
             workspacePath,
             jobId: job.cronJobId,
-            modelRouteId: job.modelRouteId,
+            ...(job.modelRouteId ? { modelRouteId: job.modelRouteId } : {}),
           });
         }
       });
@@ -194,6 +193,12 @@ export class DesktopAutomationService {
       cron.close();
     }
   }
+}
+
+export interface EnabledAutomationReference {
+  readonly workspacePath: string;
+  readonly jobId: string;
+  readonly modelRouteId?: string;
 }
 
 function providerIdForRoute(modelRouteId: string | undefined): string | undefined {

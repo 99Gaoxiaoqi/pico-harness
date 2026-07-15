@@ -10,7 +10,25 @@ import {
 export interface CronDaemonBridge {
   registerWorkspace(workspacePath: string): Promise<CronDaemonRegistration>;
   statusWorkspace(workspacePath: string): Promise<CronDaemonStatus>;
+  /** Provider/config/vault deletion is daemon-owned so TUI never mutates two stores itself. */
+  deleteProvider(input: ProviderDaemonDeleteInput): Promise<ProviderDaemonDeleteResult>;
 }
+
+export interface ProviderDaemonDeleteInput {
+  readonly providerId: string;
+  readonly expectedRevision: string;
+}
+
+export type ProviderDaemonDeleteResult =
+  | {
+      readonly status: "deleted";
+      readonly revision: string;
+      readonly message: string;
+    }
+  | {
+      readonly status: "unavailable" | "rejected";
+      readonly message: string;
+    };
 
 export interface CronDaemonRegistration {
   available: boolean;
@@ -109,6 +127,46 @@ export class LocalCronDaemonBridge implements CronDaemonBridge {
       client.close();
     }
   }
+
+  async deleteProvider(input: ProviderDaemonDeleteInput): Promise<ProviderDaemonDeleteResult> {
+    const client = this.createClient();
+    try {
+      try {
+        await client.request("runtime.ping", {});
+      } catch {
+        return {
+          status: "unavailable",
+          message:
+            "本机 Runtime daemon 不可达；为避免配置与系统凭证失去同步，Provider 未删除。",
+        };
+      }
+      try {
+        const value = await client.request("provider.delete", {
+          providerId: input.providerId,
+          expectedRevision: input.expectedRevision,
+        });
+        const revision = readProviderDeleteRevision(value);
+        if (!revision) {
+          return {
+            status: "rejected",
+            message: "Runtime daemon 返回了无效的 Provider 删除结果；Provider 状态未确认。",
+          };
+        }
+        return {
+          status: "deleted",
+          revision,
+          message: `Shared user provider ${input.providerId} 及其系统凭证已删除。`,
+        };
+      } catch (error) {
+        return {
+          status: "rejected",
+          message: `Provider ${input.providerId} 未删除: ${safeDaemonMessage(error)}`,
+        };
+      }
+    } finally {
+      client.close();
+    }
+  }
 }
 
 async function startOrInstallLocalDaemon(): Promise<"installed" | "process"> {
@@ -155,4 +213,18 @@ function readWorkspaceStatus(value: unknown): { registered: boolean } | undefine
   return typeof registered === "boolean" && schedulerStatus === "unknown"
     ? { registered }
     : undefined;
+}
+
+function readProviderDeleteRevision(value: unknown): string | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const deleted = (value as { deleted?: unknown }).deleted;
+  const revision = (value as { revision?: unknown }).revision;
+  return deleted === true && typeof revision === "string" && /^[a-f0-9]{64}$/u.test(revision)
+    ? revision
+    : undefined;
+}
+
+function safeDaemonMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.replace(/(api[_-]?key|token|secret)\s*[=:]\s*\S+/giu, "$1=<redacted>");
 }
