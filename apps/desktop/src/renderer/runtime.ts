@@ -1160,6 +1160,18 @@ export function useRuntimeStore(): RuntimeStore {
     if (preview || connection.kind !== "ready" || !data.workspacePath) return;
     const bridge = getBridge();
     if (!bridge) return;
+    const refreshOnFocus = () => {
+      const workspacePath = dataRef.current.workspacePath;
+      if (workspacePath) void loadWorkspace(bridge, workspacePath).catch(reportFailure);
+    };
+    window.addEventListener("focus", refreshOnFocus);
+    return () => window.removeEventListener("focus", refreshOnFocus);
+  }, [connection.kind, data.workspacePath, loadWorkspace, preview, reportFailure]);
+
+  useEffect(() => {
+    if (preview || connection.kind !== "ready" || !data.workspacePath) return;
+    const bridge = getBridge();
+    if (!bridge) return;
     const subscription = bridge.events.subscribe({ workspacePath: data.workspacePath }, (event) => {
       if (!isRecord(event)) return;
       const scope = isRecord(event.scope) ? event.scope : {};
