@@ -78,6 +78,11 @@ import {
 } from "../runtime/runtime-run.js";
 import { SUBAGENT_OUTPUT_BUDGET } from "../tools/subagent-budget.js";
 import {
+  delegationTaskCountFromArguments,
+  isExploreOnlyRequiredDelegationArguments,
+  isRequiredDelegationArguments,
+} from "../tools/delegation-contract.js";
+import {
   fileHistoryAddJournalWarning,
   fileHistoryBeginJournal,
   fileHistoryCommitJournal,
@@ -148,17 +153,6 @@ function parseHookToolArguments(argumentsJson: string): unknown {
   }
 }
 
-interface DelegateTaskPolicyInput {
-  completion_policy?: unknown;
-  background?: unknown;
-}
-
-interface DelegateTaskModeInput extends DelegateTaskPolicyInput {
-  goal?: unknown;
-  mode?: unknown;
-  tasks?: Array<{ goal?: unknown; mode?: unknown }>;
-}
-
 /**
  * required delegate_task 是引擎控制流边界，不是普通并行工具。
  * 与 DelegateTaskTool 的兼容规则保持一致：明确 optional/detached 或旧式
@@ -166,17 +160,7 @@ interface DelegateTaskModeInput extends DelegateTaskPolicyInput {
  * 安全地独占执行。
  */
 function isRequiredDelegateTaskCall(call: ToolCall): boolean {
-  if (call.name !== "delegate_task") return false;
-  try {
-    const input = JSON.parse(call.arguments) as DelegateTaskPolicyInput;
-    if (input.completion_policy === "optional" || input.completion_policy === "detached") {
-      return false;
-    }
-    if (input.completion_policy === "required") return true;
-    return input.background !== true;
-  } catch {
-    return true;
-  }
+  return call.name === "delegate_task" && isRequiredDelegationArguments(call.arguments);
 }
 
 function findRequiredDelegationIndex(toolCalls: readonly ToolCall[]): number | undefined {
@@ -186,33 +170,7 @@ function findRequiredDelegationIndex(toolCalls: readonly ToolCall[]): number | u
 
 /** 与 DelegateTaskTool 的任务归一化规则保持一致：省略/无效 mode 默认 explore。 */
 function isExploreOnlyRequiredDelegation(call: ToolCall): boolean {
-  if (!isRequiredDelegateTaskCall(call)) return false;
-  try {
-    const input = JSON.parse(call.arguments) as DelegateTaskModeInput;
-    const defaultMode = input.mode === "worker" ? "worker" : "explore";
-    const tasks =
-      Array.isArray(input.tasks) && input.tasks.length > 0
-        ? input.tasks.filter(
-            (task) =>
-              typeof task === "object" &&
-              task !== null &&
-              typeof task.goal === "string" &&
-              task.goal.trim().length > 0,
-          )
-        : typeof input.goal === "string" && input.goal.trim().length > 0
-          ? [{ goal: input.goal, mode: input.mode }]
-          : [];
-    return (
-      tasks.length > 0 &&
-      tasks.every(
-        (task) =>
-          (task.mode === "worker" || task.mode === "explore" ? task.mode : defaultMode) ===
-          "explore",
-      )
-    );
-  } catch {
-    return false;
-  }
+  return call.name === "delegate_task" && isExploreOnlyRequiredDelegationArguments(call.arguments);
 }
 
 function buildSynthesisToolRejection(toolCall: ToolCall): Message {
@@ -269,21 +227,7 @@ function isSubagentCompletionWake(messages: readonly Message[]): boolean {
 }
 
 function requiredDelegationTaskCount(call: ToolCall): number {
-  try {
-    const input = JSON.parse(call.arguments) as DelegateTaskModeInput;
-    if (Array.isArray(input.tasks) && input.tasks.length > 0) {
-      return input.tasks.filter(
-        (task) =>
-          typeof task === "object" &&
-          task !== null &&
-          typeof task.goal === "string" &&
-          task.goal.trim().length > 0,
-      ).length;
-    }
-    return typeof input.goal === "string" && input.goal.trim().length > 0 ? 1 : 0;
-  } catch {
-    return 0;
-  }
+  return call.name === "delegate_task" ? delegationTaskCountFromArguments(call.arguments) : 0;
 }
 
 function satisfiesRequestedDelegationCount(
