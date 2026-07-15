@@ -1,5 +1,6 @@
 import type { Message } from "../schema/message.js";
 import type {
+  ConversationProjectionCursor,
   ConversationSearchStore,
   MemoryBackendStatus,
   MemorySearchResult,
@@ -53,6 +54,7 @@ export class InMemorySearchStore implements ConversationSearchStore {
   private readonly maxContentLength: number;
   private entries: IndexedMessage[] = [];
   private nextSequence = 0;
+  private readonly projectionCursors = new Map<string, ConversationProjectionCursor>();
 
   constructor(options: InMemorySearchStoreOptions = {}) {
     this.maxEntries = positiveInteger(options.maxEntries, DEFAULT_IN_MEMORY_SEARCH_MAX_ENTRIES);
@@ -76,16 +78,70 @@ export class InMemorySearchStore implements ConversationSearchStore {
   }
 
   insert(sessionId: string, turnIndex: number, message: Message): void {
+    this.projectionCursors.delete(sessionId);
     this.entries.push(this.toIndexedMessage(sessionId, turnIndex, message));
     this.evictOldestEntries();
   }
 
   replaceSession(sessionId: string, messages: readonly Message[]): void {
+    this.projectionCursors.delete(sessionId);
     this.entries = this.entries.filter((entry) => entry.sessionId !== sessionId);
     for (const [turnIndex, message] of messages.entries()) {
       this.entries.push(this.toIndexedMessage(sessionId, turnIndex, message));
     }
     this.evictOldestEntries();
+  }
+
+  projectAppend(
+    sessionId: string,
+    startTurnIndex: number,
+    messages: readonly Message[],
+    expectedCursor: ConversationProjectionCursor,
+    cursor: ConversationProjectionCursor,
+  ): boolean {
+    const currentCursor = this.projectionCursors.get(sessionId);
+    if (
+      !Number.isSafeInteger(startTurnIndex) ||
+      startTurnIndex < 0 ||
+      !currentCursor ||
+      !projectionCursorsEqual(currentCursor, expectedCursor) ||
+      !projectionCursorCanAdvance(sessionId, expectedCursor, cursor)
+    ) {
+      return false;
+    }
+    if (
+      this.entries.some(
+        (entry) => entry.sessionId === sessionId && entry.turnIndex >= startTurnIndex,
+      )
+    ) {
+      return false;
+    }
+
+    const appended = messages.map((message, offset) =>
+      this.toIndexedMessage(sessionId, startTurnIndex + offset, message),
+    );
+    for (const entry of appended) this.entries.push(entry);
+    this.evictOldestEntries();
+    this.projectionCursors.set(sessionId, { ...cursor });
+    return true;
+  }
+
+  projectReplace(
+    sessionId: string,
+    messages: readonly Message[],
+    cursor: ConversationProjectionCursor,
+  ): void {
+    this.entries = this.entries.filter((entry) => entry.sessionId !== sessionId);
+    for (const [turnIndex, message] of messages.entries()) {
+      this.entries.push(this.toIndexedMessage(sessionId, turnIndex, message));
+    }
+    this.evictOldestEntries();
+    this.projectionCursors.set(sessionId, { ...cursor });
+  }
+
+  getProjectionCursor(sessionId: string): ConversationProjectionCursor | undefined {
+    const cursor = this.projectionCursors.get(sessionId);
+    return cursor ? { ...cursor } : undefined;
   }
 
   search(
@@ -122,6 +178,7 @@ export class InMemorySearchStore implements ConversationSearchStore {
 
   close(): void {
     this.entries = [];
+    this.projectionCursors.clear();
   }
 
   private toIndexedMessage(sessionId: string, turnIndex: number, message: Message): IndexedMessage {
@@ -141,6 +198,35 @@ export class InMemorySearchStore implements ConversationSearchStore {
     const overflow = this.entries.length - this.maxEntries;
     if (overflow > 0) this.entries.splice(0, overflow);
   }
+}
+
+function projectionCursorsEqual(
+  left: ConversationProjectionCursor,
+  right: ConversationProjectionCursor,
+): boolean {
+  return (
+    left.logId === right.logId &&
+    left.seq === right.seq &&
+    left.epoch === right.epoch &&
+    left.eventId === right.eventId
+  );
+}
+
+function projectionCursorCanAdvance(
+  sessionId: string,
+  current: ConversationProjectionCursor,
+  next: ConversationProjectionCursor,
+): boolean {
+  return (
+    current.logId === sessionId &&
+    next.logId === sessionId &&
+    Number.isSafeInteger(current.seq) &&
+    Number.isSafeInteger(next.seq) &&
+    Number.isSafeInteger(current.epoch) &&
+    current.epoch >= 0 &&
+    next.seq > current.seq &&
+    next.epoch === current.epoch
+  );
 }
 
 function positiveInteger(value: number | undefined, fallback: number): number {

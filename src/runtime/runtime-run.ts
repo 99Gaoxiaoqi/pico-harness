@@ -542,18 +542,16 @@ export class RuntimeRun {
     if (!(await store.readSessionManifest(session.id))) return undefined;
     const sessionKey = runtimeSessionKey(session.workDir, session.id);
     return serializeExternalMessageCommit(sessionKey, eventId, async () => {
-      const existing = (await store.readSession(session.id)).find(
-        (event) => event.eventId === eventId,
-      );
+      const existing = await store.readSessionEvent(session.id, eventId);
       if (existing) {
         if (
-          existing.kind !== "message.committed" ||
-          !isDeepStrictEqual(existing.data.message, canonicalMessage)
+          existing.event.kind !== "message.committed" ||
+          !isDeepStrictEqual(existing.event.data.message, canonicalMessage)
         ) {
           throw new Error(`Runtime event ID ${eventId} is already bound to another payload`);
         }
-        const persisted = await store.append(existing);
-        await session.commitProjectionMessageOnce(eventId, canonicalMessage);
+        const persisted = await store.append(existing.event);
+        await session.commitRuntimeProjectionBatch([persisted]);
         return runtimeCommitReceipt(persisted);
       }
       const run = await RuntimeRun.start({
@@ -628,10 +626,8 @@ export class RuntimeRun {
     const events = messages.map((message) =>
       this.messageCommittedEvent(createRuntimeEventId("message"), message),
     );
-    await this.store.appendBatch(events);
-    for (const event of events) {
-      await session.commitProjectionMessageOnce(event.eventId, event.data.message);
-    }
+    const persisted = await this.store.appendBatch(events);
+    await session.commitRuntimeProjectionBatch(persisted);
   }
 
   async commitMessageOnce(
@@ -643,7 +639,7 @@ export class RuntimeRun {
     this.assertOpen();
     const event = this.messageCommittedEvent(eventId, message);
     const persisted = await this.store.append(event);
-    await session.commitProjectionMessageOnce(eventId, event.data.message);
+    await session.commitRuntimeProjectionBatch([persisted]);
     return runtimeCommitReceipt(persisted);
   }
 
