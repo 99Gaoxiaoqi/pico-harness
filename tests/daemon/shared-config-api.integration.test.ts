@@ -31,6 +31,7 @@ import {
   type RunAgentCliOptions,
   type RunAgentCliResult,
 } from "../../src/runtime/agent-runtime.js";
+import { resolveSubagentModelSelection } from "../../src/runtime/subagent-model-selection.js";
 
 describe("Desktop shared configuration API integration", () => {
   const cleanups: Array<() => Promise<void>> = [];
@@ -426,13 +427,33 @@ describe("Desktop shared configuration API integration", () => {
     await userConfigStore.write(
       {
         version: 1,
-        defaults: { modelRouteId: "shared/coder", mode: "auto" },
+        defaults: {
+          modelRouteId: "shared/coder",
+          mode: "auto",
+          thinkingEffort: "high",
+        },
         providers: {
           shared: {
             protocol: "openai",
             baseURL: "https://provider.example.test/v1",
             apiKeyEnv: "SHARED_KEY",
             models: ["coder"],
+            discoverModels: false,
+            modelCapabilities: {
+              coder: {
+                reasoning: {
+                  enabled: true,
+                  defaultLevel: "off",
+                  levels: ["off", "high"],
+                },
+              },
+            },
+          },
+          reviewer: {
+            protocol: "openai",
+            baseURL: "https://reviewer.example.test/v1",
+            apiKeyEnv: "REVIEWER_KEY",
+            models: ["reviewer"],
             discoverModels: false,
           },
         },
@@ -447,6 +468,14 @@ describe("Desktop shared configuration API integration", () => {
         baseURL: "https://provider.example.test/v1",
       }),
       "shared-runtime-secret",
+    );
+    await vault.put(
+      credentialRefForProvider({
+        providerId: "reviewer",
+        protocol: "openai",
+        baseURL: "https://reviewer.example.test/v1",
+      }),
+      "reviewer-runtime-secret",
     );
     const endpoint = resolveLocalDaemonEndpoint({
       runtimeDir: join(root, "runtime"),
@@ -466,13 +495,36 @@ describe("Desktop shared configuration API integration", () => {
     await host.start();
     const client = new LocalRuntimeClient(endpoint);
     try {
-      const created = (await client.request("session.create", {
+      const sent = (await client.request("session.send", {
         workspacePath: canonicalWorkspace,
+        input: { text: "检查共享配置" },
+        idempotencyKey: "shared-first-message",
       })) as { session: { sessionId: string } };
+      await expect.poll(() => runtime.requests.length).toBe(1);
+      expect(runtime.requests[0]).toMatchObject({
+        session: sent.session.sessionId,
+        provider: "openai",
+        model: "coder",
+        modelRouteId: "shared/coder",
+        baseURL: "https://provider.example.test/v1",
+        apiKey: "shared-runtime-secret",
+        thinkingEffort: "high",
+        rewindInteractionMode: "auto",
+      });
+      expect(runtime.modelRoutes).toEqual([["shared/coder", "reviewer/reviewer"]]);
+      expect(runtime.explicitChildSelections).toEqual([
+        {
+          parentRouteId: "shared/coder",
+          childRouteId: "reviewer/reviewer",
+          childModel: "reviewer",
+          childApiKey: "reviewer-runtime-secret",
+          source: "ephemeral",
+        },
+      ]);
       await expect(
         client.request("session.settings.get", {
           workspacePath: canonicalWorkspace,
-          sessionId: created.session.sessionId,
+          sessionId: sent.session.sessionId,
         }),
       ).resolves.toMatchObject({
         settings: {
@@ -480,23 +532,10 @@ describe("Desktop shared configuration API integration", () => {
           model: "coder",
           modelRouteId: "shared/coder",
           mode: "auto",
+          thinkingEffort: "high",
+          thinkingEffortExplicit: true,
         },
       });
-      await client.request("run.start", {
-        workspacePath: canonicalWorkspace,
-        sessionId: created.session.sessionId,
-        prompt: "检查共享配置",
-      });
-      await expect.poll(() => runtime.requests.length).toBe(1);
-      expect(runtime.requests[0]).toMatchObject({
-        session: created.session.sessionId,
-        provider: "openai",
-        model: "coder",
-        modelRouteId: "shared/coder",
-        baseURL: "https://provider.example.test/v1",
-        apiKey: "shared-runtime-secret",
-      });
-      expect(runtime.modelRoutes).toEqual([["shared/coder"]]);
     } finally {
       client.close();
       await host.stop();
@@ -638,6 +677,13 @@ class MemoryCredentialVault implements CredentialVault {
 class CapturingAgentRuntime extends AgentRuntime {
   readonly requests: RunAgentCliOptions[] = [];
   readonly modelRoutes: string[][] = [];
+  readonly explicitChildSelections: Array<{
+    parentRouteId: string;
+    childRouteId: string;
+    childModel: string;
+    childApiKey: string;
+    source: string;
+  }> = [];
 
   override async execute(
     options: RunAgentCliOptions,
@@ -645,6 +691,22 @@ class CapturingAgentRuntime extends AgentRuntime {
   ): Promise<RunAgentCliResult> {
     this.requests.push(options);
     this.modelRoutes.push(_dependencies.modelRouter?.routes.map((route) => route.id) ?? []);
+    if (_dependencies.modelRouter && options.modelRouteId) {
+      const selection = resolveSubagentModelSelection({
+        router: _dependencies.modelRouter,
+        parentRouteId: options.modelRouteId,
+        ephemeralRouteId: "reviewer/reviewer",
+        allowRouteOverride: true,
+      });
+      const child = _dependencies.modelRouter.providerConfig(selection.route.id);
+      this.explicitChildSelections.push({
+        parentRouteId: options.modelRouteId,
+        childRouteId: selection.route.id,
+        childModel: child.config.model,
+        childApiKey: child.config.apiKey,
+        source: selection.source,
+      });
+    }
     const sessionId = options.session ?? "shared-config-session";
     return {
       sessionId,
