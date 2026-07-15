@@ -43,6 +43,8 @@ export interface PicoWorkspacePaths {
   readonly memory: string;
   readonly summaries: string;
   readonly artifacts: string;
+  /** Immutable raw tool exchanges removed from Session history by full compaction. */
+  readonly evidence: string;
   readonly traces: string;
   readonly tasks: string;
   readonly forkStaging: string;
@@ -140,6 +142,7 @@ export function resolvePicoPaths(
       memory: join(workspaceRoot, "memory"),
       summaries: join(workspaceRoot, "memory", "summaries"),
       artifacts: join(workspaceRoot, "artifacts"),
+      evidence: join(workspaceRoot, "evidence"),
       traces: join(workspaceRoot, "traces"),
       tasks: join(workspaceRoot, "tasks"),
       forkStaging: join(workspaceRoot, "fork-staging"),

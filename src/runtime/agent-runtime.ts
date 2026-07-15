@@ -3,11 +3,13 @@ import { lstat, mkdir, readdir, realpath, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { AgentEngine } from "../engine/loop.js";
 import type { GoalManager } from "../engine/goal-manager.js";
+import { currentRunLedger } from "../engine/run-ledger.js";
 import { globalSessionManager, type Session } from "../engine/session.js";
 import { SessionForkService } from "../engine/session-fork-service.js";
 import { TerminalReporter, type Reporter } from "../engine/reporter.js";
 import { Compactor } from "../context/compactor.js";
 import { FullCompactor } from "../context/full-compactor.js";
+import { EvidenceArchive } from "../context/evidence-archive.js";
 import { ToolResultArtifactStore } from "../context/artifact-store.js";
 import {
   createContextBudget,
@@ -742,6 +744,9 @@ export async function executeAgentRuntime(
         provider: trackedProvider,
         ...(auxProvider ? { auxProvider } : {}),
         ...(runtimeState.hookService ? { hookService: runtimeState.hookService } : {}),
+        evidenceArchive: new EvidenceArchive({
+          baseDir: resolvePicoPaths(workDir).workspace.evidence,
+        }),
       }),
       observationProcessor: artifactRuntime.observationProcessor,
       subagentReportArtifactWriter: artifactRuntime.subagentReportArtifactWriter,
@@ -1670,15 +1675,42 @@ export function buildPermissionMiddleware(
       autoEditsAlreadyEnabled: mode === "auto",
     });
     const diff = await computeApprovalDiff(call.name, call.arguments, workDir, workspaceRoots);
-    const result = await approvalManager.waitForApproval(
-      `approval_${randomUUID()}`,
-      call.name,
-      call.arguments,
-      notifier,
-      diff,
-      signal,
-      { sessionScope: scope, providerCallId: call.id },
-    );
+    const approvalId = `approval_${randomUUID()}`;
+    const ledger = currentRunLedger();
+    const ledgerTurn = ledger?.currentTurn;
+    let approvalRecorded = false;
+    if (ledger && ledgerTurn !== undefined) {
+      await ledger.recordApprovalRequested({
+        approvalId,
+        callId: call.id,
+        toolName: call.name,
+        turn: ledgerTurn,
+      });
+      approvalRecorded = true;
+    }
+    let result;
+    try {
+      result = await approvalManager.waitForApproval(
+        approvalId,
+        call.name,
+        call.arguments,
+        notifier,
+        diff,
+        signal,
+        { sessionScope: scope, providerCallId: call.id },
+      );
+    } catch (error) {
+      if (approvalRecorded) {
+        await ledger!.recordApprovalSettled({ approvalId, decision: "rejected" });
+      }
+      throw error;
+    }
+    if (approvalRecorded) {
+      await ledger!.recordApprovalSettled({
+        approvalId,
+        decision: result.allowed ? "approved" : "rejected",
+      });
+    }
     if (!result.allowed || !workspaceRoots || !settings) {
       return result.allowed ? result : { ...result, denialSource: "human" };
     }
