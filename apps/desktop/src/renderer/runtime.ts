@@ -21,6 +21,7 @@ import type {
   ConversationItemView,
   ConversationProgressState,
 } from "./conversation/types.js";
+import { conversationItemKey } from "./conversation/items.js";
 
 type DesktopResult<T> =
   | { readonly ok: true; readonly value: T }
@@ -94,9 +95,29 @@ function progressState(value: unknown): ConversationProgressState {
   return value === "done" || value === "failed" || value === "waiting" ? value : "active";
 }
 
+function formatRunDuration(startedAt: number, finishedAt: number): string | undefined {
+  if (startedAt <= 0 || finishedAt <= startedAt) return undefined;
+  const seconds = Math.max(1, Math.round((finishedAt - startedAt) / 1_000));
+  if (seconds < 60) return `${seconds} 秒`;
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
+  return remainingSeconds > 0 ? `${minutes} 分 ${remainingSeconds} 秒` : `${minutes} 分`;
+}
+
+function structuredItemId(
+  kind: "approval" | "prompt" | "changes",
+  data: JsonRecord,
+  fallback: string,
+): string {
+  const sourceId = stringValue(
+    kind === "approval" ? data.approvalId : kind === "prompt" ? data.promptId : data.runId,
+  );
+  return sourceId ? `${kind}:${sourceId}` : fallback;
+}
+
 function conversationItem(item: JsonRecord, index: number): ConversationItemView | undefined {
   const id = stringValue(item.id, `conversation-item-${index}`);
-  const at = numberValue(item.at) || undefined;
+  const at = numberValue(item.at ?? item.startedAt) || undefined;
   const meta = {
     ...(at ? { at } : {}),
     ...(item.truncated === true
@@ -142,18 +163,30 @@ function conversationItem(item: JsonRecord, index: number): ConversationItemView
   }
   if (item.kind === "runBoundary") {
     const status = stringValue(item.status);
+    const viewStatus =
+      status === "failed"
+        ? "failed"
+        : status === "cancelled"
+          ? "interrupted"
+          : status === "succeeded" || status === "completed"
+            ? "completed"
+            : "started";
+    const labels = {
+      started: "运行中",
+      completed: "运行完成",
+      interrupted: "运行已停止",
+      failed: "运行失败",
+    } as const;
+    const duration = formatRunDuration(numberValue(item.startedAt), numberValue(item.finishedAt));
     return {
       id,
       kind: "runBoundary",
-      status:
-        status === "failed"
-          ? "failed"
-          : status === "cancelled"
-            ? "interrupted"
-            : status === "succeeded"
-              ? "completed"
-              : "started",
-      label: stringValue(item.label, status === "succeeded" ? "运行完成" : "Pico 正在处理"),
+      status: viewStatus,
+      label: labels[viewStatus],
+      ...(duration ? { duration } : {}),
+      ...(stringValue(item.detail ?? item.error)
+        ? { detail: stringValue(item.detail ?? item.error) }
+        : {}),
       ...meta,
     };
   }
@@ -179,29 +212,38 @@ function conversationItem(item: JsonRecord, index: number): ConversationItemView
     };
   }
   if (item.kind === "approval") {
+    const data = isRecord(item.data) ? item.data : {};
+    const decision = stringValue(data.decision ?? item.state);
     return {
-      id,
+      id: structuredItemId("approval", data, id),
       kind: "approval",
       title: stringValue(item.title, "需要你的批准"),
       detail: stringValue(item.detail, "Runtime 请求执行受保护操作。"),
-      state: item.state === "allowed" || item.state === "denied" ? item.state : "pending",
+      state:
+        decision === "deny" || decision === "denied"
+          ? "denied"
+          : decision === "allow_once" || decision === "allow_session" || decision === "allowed"
+            ? "allowed"
+            : "pending",
       ...meta,
     };
   }
   if (item.kind === "prompt") {
+    const data = isRecord(item.data) ? item.data : {};
+    const state = stringValue(item.state);
     return {
-      id,
+      id: structuredItemId("prompt", data, id),
       kind: "prompt",
       question: stringValue(item.title, "Pico 需要你的回答"),
       detail: stringValue(item.detail) || undefined,
-      state: item.state === "answered" ? "answered" : "pending",
+      state: state === "answered" || state === "resolved" ? "answered" : "pending",
       ...meta,
     };
   }
   if (item.kind === "changes") {
     const data = isRecord(item.data) ? item.data : {};
     return {
-      id,
+      id: structuredItemId("changes", data, id),
       kind: "changes",
       title: stringValue(item.title, "文件已修改"),
       detail: stringValue(item.detail) || undefined,
@@ -234,6 +276,129 @@ function parseConversation(value: unknown, sessionId: string): ConversationView 
     revision: stringValue(result.revision) || undefined,
     nextBefore: stringValue(result.nextBefore) || undefined,
     queuedCount: recordArray(result.queuedInputs).length,
+  };
+}
+
+function isTerminalRunStatus(status: string): boolean {
+  return ["cancelled", "failed", "succeeded", "completed"].includes(status);
+}
+
+function interactionSessionId(
+  data: AppData,
+  explicitSessionId: string,
+  runId: string,
+): string | undefined {
+  if (explicitSessionId) return explicitSessionId;
+  return data.runs.find((run) => run.id === runId)?.sessionId;
+}
+
+function resolveApprovalState(
+  current: AppData,
+  input: {
+    readonly approvalId: string;
+    readonly decision: string;
+    readonly sessionId: string;
+    readonly runId: string;
+  },
+): AppData {
+  const pending = current.approvals.find((approval) => approval.id === input.approvalId);
+  const sessionId = interactionSessionId(
+    current,
+    input.sessionId,
+    input.runId || pending?.runId || "",
+  );
+  const conversation = sessionId ? current.conversations[sessionId] : undefined;
+  const state: "allowed" | "denied" =
+    input.decision === "deny" || input.decision === "denied" ? "denied" : "allowed";
+
+  if (!sessionId || !conversation) {
+    return {
+      ...current,
+      approvals: current.approvals.filter((approval) => approval.id !== input.approvalId),
+    };
+  }
+
+  const stableKey = `approval:${input.approvalId}`;
+  let found = false;
+  const items = conversation.items.map((item) => {
+    if (item.kind !== "approval" || conversationItemKey(item) !== stableKey) return item;
+    found = true;
+    return { ...item, id: stableKey, state };
+  });
+  const resolvedItems =
+    found || !pending
+      ? items
+      : [
+          ...items,
+          {
+            id: stableKey,
+            kind: "approval" as const,
+            title: pending.title,
+            detail: pending.detail,
+            state,
+          },
+        ];
+
+  return {
+    ...current,
+    approvals: current.approvals.filter((approval) => approval.id !== input.approvalId),
+    conversations: {
+      ...current.conversations,
+      [sessionId]: { ...conversation, items: resolvedItems },
+    },
+  };
+}
+
+function resolvePromptState(
+  current: AppData,
+  input: {
+    readonly promptId: string;
+    readonly sessionId: string;
+    readonly runId: string;
+  },
+): AppData {
+  const pending = current.prompts.find((prompt) => prompt.id === input.promptId);
+  const sessionId = interactionSessionId(
+    current,
+    input.sessionId,
+    input.runId || pending?.runId || "",
+  );
+  const conversation = sessionId ? current.conversations[sessionId] : undefined;
+
+  if (!sessionId || !conversation) {
+    return {
+      ...current,
+      prompts: current.prompts.filter((prompt) => prompt.id !== input.promptId),
+    };
+  }
+
+  const stableKey = `prompt:${input.promptId}`;
+  let found = false;
+  const items = conversation.items.map((item) => {
+    if (item.kind !== "prompt" || conversationItemKey(item) !== stableKey) return item;
+    found = true;
+    return { ...item, id: stableKey, state: "answered" as const };
+  });
+  const resolvedItems =
+    found || !pending
+      ? items
+      : [
+          ...items,
+          {
+            id: stableKey,
+            kind: "prompt" as const,
+            question: pending.question,
+            state: "answered" as const,
+          },
+        ];
+
+  return {
+    ...current,
+    prompts: current.prompts.filter((prompt) => prompt.id !== input.promptId),
+    conversations: {
+      ...current.conversations,
+      [sessionId]: { ...conversation, items: resolvedItems },
+    },
   };
 }
 
@@ -611,10 +776,14 @@ export function useRuntimeStore(): RuntimeStore {
   const [message, setMessage] = useState<string>();
   const dataRef = useRef(data);
   const seenEventIdsRef = useRef(new Set<string>());
-  const pendingSendRef = useRef<{
-    readonly identity: string;
-    readonly idempotencyKey: string;
-  }>();
+  const conversationLoadGenerationsRef = useRef(new Map<string, number>());
+  const pendingSendRef = useRef<
+    | {
+        readonly identity: string;
+        readonly idempotencyKey: string;
+      }
+    | undefined
+  >(undefined);
   dataRef.current = data;
 
   const reportFailure = useCallback((error: unknown) => {
@@ -704,6 +873,11 @@ export function useRuntimeStore(): RuntimeStore {
   const loadConversation = useCallback(
     async (bridge: RendererBridge, workspacePath: string, sessionId: string) => {
       if (preview) return;
+      const loadKey = `${workspacePath}\0${sessionId}`;
+      const generation = (conversationLoadGenerationsRef.current.get(loadKey) ?? 0) + 1;
+      conversationLoadGenerationsRef.current.set(loadKey, generation);
+      const isCurrentLoad = () =>
+        conversationLoadGenerationsRef.current.get(loadKey) === generation;
       let value: unknown;
       try {
         value = await invoke(bridge, "session.transcript", {
@@ -712,6 +886,7 @@ export function useRuntimeStore(): RuntimeStore {
           limit: 200,
         });
       } catch (error) {
+        if (!isCurrentLoad()) return;
         setData((current) => ({
           ...current,
           conversations: {
@@ -726,16 +901,20 @@ export function useRuntimeStore(): RuntimeStore {
         }));
         throw error;
       }
+      if (!isCurrentLoad()) return;
       const record = isRecord(value) ? value : {};
       const activeRun = isRecord(record.activeRun) ? record.activeRun : undefined;
       const runId =
         stringValue(activeRun?.runId) ||
-        dataRef.current.runs.find((run) => run.sessionId === sessionId)?.id;
+        dataRef.current.runs.find(
+          (run) => run.sessionId === sessionId && isTerminalRunStatus(run.status),
+        )?.id;
       const [sessionUsage, settingsResult, goalResult] = await Promise.all([
         optionalInvoke(bridge, "usage.get", { workspacePath, sessionId }),
         optionalInvoke(bridge, "session.settings.get", { workspacePath, sessionId }),
         optionalInvoke(bridge, "goal.get", { workspacePath, sessionId }),
       ]);
+      if (!isCurrentLoad()) return;
       let conversation: ConversationView = {
         ...parseConversation(record, sessionId),
         ...(!sessionUsage.error ? { usage: parseUsage(sessionUsage.value) } : {}),
@@ -744,6 +923,7 @@ export function useRuntimeStore(): RuntimeStore {
       };
       if (runId) {
         const changeList = await optionalInvoke(bridge, "changes.list", { workspacePath, runId });
+        if (!isCurrentLoad()) return;
         if (!changeList.error) {
           const listValue = isRecord(changeList.value) ? changeList.value : {};
           const changes = await Promise.all(
@@ -759,6 +939,7 @@ export function useRuntimeStore(): RuntimeStore {
               return { ...change, patch: stringValue(diffValue.patch) || undefined };
             }),
           );
+          if (!isCurrentLoad()) return;
           const parsed = parseChanges({ ...listValue, changes });
           conversation = {
             ...conversation,
@@ -768,6 +949,7 @@ export function useRuntimeStore(): RuntimeStore {
           };
         }
       }
+      if (!isCurrentLoad()) return;
       setData((current) => ({
         ...current,
         conversations: { ...current.conversations, [sessionId]: conversation },
@@ -783,7 +965,9 @@ export function useRuntimeStore(): RuntimeStore {
               },
               ...current.runs.filter((run) => run.id !== stringValue(activeRun.runId)),
             ]
-          : current.runs,
+          : current.runs.filter(
+              (run) => run.sessionId !== sessionId || isTerminalRunStatus(run.status),
+            ),
       }));
     },
     [preview],
@@ -853,7 +1037,7 @@ export function useRuntimeStore(): RuntimeStore {
             ...current.approvals.filter((item) => item.id !== stringValue(payload.approvalId)),
             {
               id: stringValue(payload.approvalId),
-              runId: stringValue(payload.runId),
+              runId: stringValue(payload.runId ?? scope.runId),
               title: stringValue(request.title, "需要你的批准"),
               detail: stringValue(
                 request.detail ?? request.description,
@@ -877,7 +1061,7 @@ export function useRuntimeStore(): RuntimeStore {
             ...current.prompts.filter((item) => item.id !== stringValue(payload.promptId)),
             {
               id: stringValue(payload.promptId),
-              runId: stringValue(payload.runId),
+              runId: stringValue(payload.runId ?? scope.runId),
               question: stringValue(prompt.question ?? prompt.message, "Pico 需要你的选择"),
               options,
             },
@@ -885,16 +1069,23 @@ export function useRuntimeStore(): RuntimeStore {
         }));
       } else if (topic === "approval.resolved") {
         const approvalId = stringValue(payload.approvalId);
-        setData((current) => ({
-          ...current,
-          approvals: current.approvals.filter((approval) => approval.id !== approvalId),
-        }));
+        setData((current) =>
+          resolveApprovalState(current, {
+            approvalId,
+            decision: stringValue(payload.decision),
+            sessionId: stringValue(scope.sessionId),
+            runId: stringValue(scope.runId ?? payload.runId),
+          }),
+        );
       } else if (topic === "prompt.resolved") {
         const promptId = stringValue(payload.promptId);
-        setData((current) => ({
-          ...current,
-          prompts: current.prompts.filter((prompt) => prompt.id !== promptId),
-        }));
+        setData((current) =>
+          resolvePromptState(current, {
+            promptId,
+            sessionId: stringValue(scope.sessionId),
+            runId: stringValue(scope.runId ?? payload.runId),
+          }),
+        );
       } else if (topic === "run.timeline") {
         const item = isRecord(payload.item) ? payload.item : {};
         setData((current) => ({
@@ -902,7 +1093,7 @@ export function useRuntimeStore(): RuntimeStore {
           timeline: [
             ...current.timeline,
             {
-              id: stringValue(event.eventId, `timeline-${Date.now()}`),
+              id: stringValue(item.id ?? event.eventId, `timeline-${Date.now()}`),
               kind:
                 item.kind === "plan" || item.kind === "tool" || item.kind === "agent"
                   ? item.kind
@@ -920,9 +1111,10 @@ export function useRuntimeStore(): RuntimeStore {
       } else if (topic.startsWith("run.") || topic.startsWith("session.")) {
         const workspace = dataRef.current.workspacePath;
         if (workspace) {
-          void loadWorkspace(bridge, workspace);
           const sessionId = stringValue(scope.sessionId);
-          if (sessionId) void loadConversation(bridge, workspace, sessionId);
+          void loadWorkspace(bridge, workspace)
+            .then(() => (sessionId ? loadConversation(bridge, workspace, sessionId) : undefined))
+            .catch(reportFailure);
         }
       }
     });
@@ -930,7 +1122,14 @@ export function useRuntimeStore(): RuntimeStore {
       if (!result.ok) setMessage(`事件订阅失败：${result.error.message}`);
     });
     return () => subscription.dispose();
-  }, [connection.kind, data.workspacePath, loadConversation, loadWorkspace, preview]);
+  }, [
+    connection.kind,
+    data.workspacePath,
+    loadConversation,
+    loadWorkspace,
+    preview,
+    reportFailure,
+  ]);
 
   const perform = useCallback(
     async (
@@ -1268,10 +1467,14 @@ export function useRuntimeStore(): RuntimeStore {
               decision,
               idempotencyKey: crypto.randomUUID(),
             });
-          setData((current) => ({
-            ...current,
-            approvals: current.approvals.filter((approval) => approval.id !== id),
-          }));
+          setData((current) =>
+            resolveApprovalState(current, {
+              approvalId: id,
+              decision,
+              sessionId: "",
+              runId: current.approvals.find((approval) => approval.id === id)?.runId ?? "",
+            }),
+          );
         });
       },
       async respondPrompt(id, answer) {
@@ -1285,10 +1488,13 @@ export function useRuntimeStore(): RuntimeStore {
               answer: answer.trim(),
               idempotencyKey: crypto.randomUUID(),
             });
-          setData((current) => ({
-            ...current,
-            prompts: current.prompts.filter((prompt) => prompt.id !== id),
-          }));
+          setData((current) =>
+            resolvePromptState(current, {
+              promptId: id,
+              sessionId: "",
+              runId: current.prompts.find((prompt) => prompt.id === id)?.runId ?? "",
+            }),
+          );
         });
       },
       async reviewChanges(decision, reviewMessage, target) {
