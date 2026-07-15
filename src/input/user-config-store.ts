@@ -1,9 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
-import { chmod, lstat, mkdir, open, readFile, unlink, type FileHandle } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, open, rename, unlink, type FileHandle } from "node:fs/promises";
 import { join } from "node:path";
 import { resolvePicoHome } from "../paths/pico-paths.js";
 import type { ModelProviderConfig } from "../provider/model-router.js";
-import { writeJsonAtomic } from "../storage/atomic-json.js";
 import { parseModelProviderConfigs, parseModelRouteId } from "./pico-config.js";
 
 const USER_CONFIG_VERSION = 1 as const;
@@ -68,6 +67,39 @@ export class UserConfigLockTimeoutError extends Error {
   }
 }
 
+export class UserConfigLockLostError extends Error {
+  readonly code = "CONFIG_LOCK_LOST" as const;
+
+  constructor(readonly lockPath: string) {
+    super(`用户配置写锁所有权已丢失: ${lockPath}`);
+    this.name = "UserConfigLockLostError";
+  }
+}
+
+interface UserConfigLockRecord {
+  readonly version: 1;
+  readonly token: string;
+  readonly pid: number;
+  readonly acquiredAt: number;
+}
+
+interface UserConfigLockIdentity {
+  readonly token: string;
+  readonly dev: number;
+  readonly ino: number;
+}
+
+interface UserConfigLockSnapshot extends UserConfigLockIdentity {
+  readonly raw: string;
+  readonly mtimeMs: number;
+  readonly record?: UserConfigLockRecord;
+}
+
+interface AcquiredUserConfigLock {
+  readonly handle: FileHandle;
+  readonly identity: UserConfigLockIdentity;
+}
+
 /**
  * Device-local configuration shared by TUI and Desktop.
  *
@@ -99,16 +131,19 @@ export class UserConfigStore {
     options: UserConfigWriteOptions,
   ): Promise<UserConfigSnapshot> {
     const normalized = parseUserConfig(config, this.filePath);
-    return this.withWriteLock(async () => {
+    return this.withWriteLock(async (lock) => {
       const current = await this.readUnlocked();
       if (options.expectedRevision !== current.revision) {
         throw new UserConfigRevisionConflictError(options.expectedRevision, current.revision);
       }
-      await this.assertWritableTarget();
-      await writeJsonAtomic(this.filePath, normalized, {
-        directoryMode: DIRECTORY_MODE,
-        fileMode: FILE_MODE,
-        durability: "file-and-directory",
+      await this.writeConfigAtomic(normalized, async () => {
+        await this.assertOwnedLock(lock);
+        await this.assertWritableTarget();
+        const latest = await this.readUnlocked();
+        if (options.expectedRevision !== latest.revision) {
+          throw new UserConfigRevisionConflictError(options.expectedRevision, latest.revision);
+        }
+        await this.assertOwnedLock(lock);
       });
       return this.readUnlocked();
     });
@@ -153,30 +188,16 @@ export class UserConfigStore {
     }
   }
 
-  private async withWriteLock<T>(operation: () => Promise<T>): Promise<T> {
+  private async withWriteLock<T>(
+    operation: (lock: UserConfigLockIdentity) => Promise<T>,
+  ): Promise<T> {
     await this.secureDirectory();
     const deadline = Date.now() + this.lockTimeoutMs;
-    let lockHandle: FileHandle | undefined;
-    let token = "";
-    while (lockHandle === undefined) {
-      token = randomUUID();
-      let createdLock = false;
+    let acquired: AcquiredUserConfigLock | undefined;
+    while (acquired === undefined) {
       try {
-        lockHandle = await open(this.lockPath, "wx", FILE_MODE);
-        createdLock = true;
-        await lockHandle.writeFile(
-          `${JSON.stringify({ version: 1, token, pid: process.pid, acquiredAt: Date.now() })}\n`,
-          "utf8",
-        );
-        await lockHandle.sync();
+        acquired = await this.acquireWriteLock();
       } catch (error) {
-        await lockHandle?.close().catch(() => undefined);
-        lockHandle = undefined;
-        if (createdLock) {
-          await unlink(this.lockPath).catch((cleanupError: unknown) => {
-            if (!isErrnoCode(cleanupError, "ENOENT")) throw cleanupError;
-          });
-        }
         if (!isErrnoCode(error, "EEXIST")) throw error;
         if (await this.removeStaleLock()) continue;
         if (Date.now() >= deadline) throw new UserConfigLockTimeoutError(this.lockPath);
@@ -185,57 +206,169 @@ export class UserConfigStore {
     }
 
     try {
-      return await operation();
+      return await operation(acquired.identity);
     } finally {
-      await lockHandle.close().catch(() => undefined);
-      await this.releaseOwnedLock(token);
+      await acquired.handle.close().catch(() => undefined);
+      await this.releaseOwnedLock(acquired.identity);
+    }
+  }
+
+  private async acquireWriteLock(): Promise<AcquiredUserConfigLock> {
+    const token = randomUUID();
+    const handle = await open(this.lockPath, "wx", FILE_MODE);
+    const metadata = await handle.stat();
+    const identity = { token, dev: metadata.dev, ino: metadata.ino };
+    try {
+      const record: UserConfigLockRecord = {
+        version: 1,
+        token,
+        pid: process.pid,
+        acquiredAt: Date.now(),
+      };
+      await handle.writeFile(`${JSON.stringify(record)}\n`, "utf8");
+      await handle.sync();
+      await this.assertOwnedLock(identity);
+      return { handle, identity };
+    } catch (error) {
+      await handle.close().catch(() => undefined);
+      await this.removeLockByIdentity(identity, false);
+      throw error;
     }
   }
 
   private async removeStaleLock(): Promise<boolean> {
-    let metadata;
-    try {
-      metadata = await lstat(this.lockPath);
-    } catch (error) {
-      if (isErrnoCode(error, "ENOENT")) return true;
-      throw error;
-    }
-    if (metadata.isSymbolicLink() || !metadata.isFile()) {
-      throw new Error(`用户配置写锁必须是普通文件: ${this.lockPath}`);
-    }
-    if (Date.now() - metadata.mtimeMs < this.staleLockMs) return false;
-    let currentMetadata;
-    try {
-      currentMetadata = await lstat(this.lockPath);
-    } catch (error) {
-      if (isErrnoCode(error, "ENOENT")) return true;
-      throw error;
-    }
-    if (
-      currentMetadata.dev !== metadata.dev ||
-      currentMetadata.ino !== metadata.ino ||
-      currentMetadata.mtimeMs !== metadata.mtimeMs
-    ) {
-      return false;
-    }
-    await unlink(this.lockPath).catch((error: unknown) => {
-      if (!isErrnoCode(error, "ENOENT")) throw error;
-    });
-    return true;
+    const snapshot = await this.readLockSnapshot(this.lockPath);
+    if (snapshot === undefined) return true;
+    if (Date.now() - snapshot.mtimeMs < this.staleLockMs) return false;
+    // Age only makes a lock eligible for inspection. A live owner is authoritative even when a
+    // write is paused longer than the stale threshold.
+    if (snapshot.record !== undefined && isProcessAlive(snapshot.record.pid)) return false;
+    return this.claimAndRemoveLock(snapshot, "stale");
   }
 
-  private async releaseOwnedLock(token: string): Promise<void> {
-    let raw: string;
+  private async releaseOwnedLock(identity: UserConfigLockIdentity): Promise<void> {
+    await this.removeLockByIdentity(identity, true);
+  }
+
+  private async removeLockByIdentity(
+    identity: UserConfigLockIdentity,
+    requireToken: boolean,
+  ): Promise<void> {
+    const snapshot = await this.readLockSnapshot(this.lockPath);
+    if (snapshot === undefined || !matchesIdentity(snapshot, identity, requireToken)) return;
+    await this.claimAndRemoveLock(snapshot, "release", requireToken);
+  }
+
+  private async claimAndRemoveLock(
+    expected: UserConfigLockSnapshot,
+    purpose: "release" | "stale",
+    requireToken = true,
+  ): Promise<boolean> {
+    const claimPath = `${this.lockPath}.${purpose}-${sha256(
+      `${expected.dev}:${expected.ino}:${expected.token}:${sha256(expected.raw)}`,
+    )}`;
+    let createdClaim = false;
     try {
-      raw = await readFile(this.lockPath, "utf8");
+      // Only the contender that creates this hard-link claim may unlink lockPath. The claim and
+      // the two identity checks prevent delayed reclaimers from deleting a successor lock.
+      try {
+        await link(this.lockPath, claimPath);
+        createdClaim = true;
+      } catch (error) {
+        if (isErrnoCode(error, "ENOENT")) return true;
+        if (isErrnoCode(error, "EEXIST")) return false;
+        throw error;
+      }
+
+      const claimed = await this.readLockSnapshot(claimPath);
+      if (claimed === undefined || !matchesSnapshot(claimed, expected, requireToken)) return false;
+      const current = await this.readLockSnapshot(this.lockPath);
+      if (current === undefined) return true;
+      if (!matchesSnapshot(current, expected, requireToken)) return false;
+
+      await unlink(this.lockPath).catch((error: unknown) => {
+        if (!isErrnoCode(error, "ENOENT")) throw error;
+      });
+      return true;
+    } finally {
+      if (createdClaim) {
+        await unlink(claimPath).catch(() => undefined);
+      }
+    }
+  }
+
+  private async assertOwnedLock(identity: UserConfigLockIdentity): Promise<void> {
+    const snapshot = await this.readLockSnapshot(this.lockPath);
+    if (snapshot === undefined || !matchesIdentity(snapshot, identity, true)) {
+      throw new UserConfigLockLostError(this.lockPath);
+    }
+  }
+
+  private async readLockSnapshot(path: string): Promise<UserConfigLockSnapshot | undefined> {
+    let before;
+    try {
+      before = await lstat(path);
     } catch (error) {
-      if (isErrnoCode(error, "ENOENT")) return;
+      if (isErrnoCode(error, "ENOENT")) return undefined;
       throw error;
     }
-    if (!raw.includes(`"token":"${token}"`)) return;
-    await unlink(this.lockPath).catch((error: unknown) => {
-      if (!isErrnoCode(error, "ENOENT")) throw error;
-    });
+    if (before.isSymbolicLink() || !before.isFile()) {
+      throw new Error(`用户配置写锁必须是普通文件: ${path}`);
+    }
+
+    let handle: FileHandle | undefined;
+    try {
+      handle = await open(path, "r");
+      const opened = await handle.stat();
+      if (!sameFile(before, opened)) return undefined;
+      const raw = await handle.readFile("utf8");
+      let after;
+      try {
+        after = await lstat(path);
+      } catch (error) {
+        if (isErrnoCode(error, "ENOENT")) return undefined;
+        throw error;
+      }
+      if (!sameFile(opened, after)) return undefined;
+      const record = parseLockRecord(raw);
+      return {
+        token: record?.token ?? `legacy:${sha256(raw)}`,
+        dev: opened.dev,
+        ino: opened.ino,
+        raw,
+        mtimeMs: opened.mtimeMs,
+        ...(record !== undefined ? { record } : {}),
+      };
+    } finally {
+      await handle?.close().catch(() => undefined);
+    }
+  }
+
+  private async writeConfigAtomic(
+    config: PicoUserConfig,
+    beforePublish: () => Promise<void>,
+  ): Promise<void> {
+    const temporaryPath = join(
+      this.directoryPath,
+      `.config.json.${process.pid}.${Date.now()}.${randomUUID()}.tmp`,
+    );
+    let handle: FileHandle | undefined;
+    let published = false;
+    try {
+      handle = await open(temporaryPath, "wx", FILE_MODE);
+      await handle.writeFile(`${JSON.stringify(config, null, 2)}\n`, "utf8");
+      await handle.sync();
+      await handle.close();
+      handle = undefined;
+
+      await beforePublish();
+      await rename(temporaryPath, this.filePath);
+      published = true;
+      await syncDirectory(this.directoryPath);
+    } finally {
+      await handle?.close().catch(() => undefined);
+      if (!published) await unlink(temporaryPath).catch(() => undefined);
+    }
   }
 
   private async assertWritableTarget(): Promise<void> {
@@ -304,6 +437,92 @@ function emptyUserConfig(): PicoUserConfig {
 
 function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function parseLockRecord(raw: string): UserConfigLockRecord | undefined {
+  let value: unknown;
+  try {
+    value = JSON.parse(raw) as unknown;
+  } catch {
+    return undefined;
+  }
+  if (
+    !isRecord(value) ||
+    value["version"] !== 1 ||
+    typeof value["token"] !== "string" ||
+    value["token"].length === 0 ||
+    typeof value["pid"] !== "number" ||
+    !Number.isSafeInteger(value["pid"]) ||
+    value["pid"] <= 0 ||
+    typeof value["acquiredAt"] !== "number" ||
+    !Number.isFinite(value["acquiredAt"])
+  ) {
+    return undefined;
+  }
+  return {
+    version: 1,
+    token: value["token"],
+    pid: value["pid"],
+    acquiredAt: value["acquiredAt"],
+  };
+}
+
+function matchesIdentity(
+  snapshot: UserConfigLockSnapshot,
+  identity: UserConfigLockIdentity,
+  requireToken: boolean,
+): boolean {
+  return (
+    snapshot.dev === identity.dev &&
+    snapshot.ino === identity.ino &&
+    (!requireToken || snapshot.token === identity.token)
+  );
+}
+
+function matchesSnapshot(
+  actual: UserConfigLockSnapshot,
+  expected: UserConfigLockSnapshot,
+  requireToken: boolean,
+): boolean {
+  return matchesIdentity(actual, expected, requireToken) && actual.raw === expected.raw;
+}
+
+function sameFile(
+  left: { readonly dev: number; readonly ino: number },
+  right: { readonly dev: number; readonly ino: number },
+): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return !isErrnoCode(error, "ESRCH");
+  }
+}
+
+async function syncDirectory(directoryPath: string): Promise<void> {
+  let handle: FileHandle | undefined;
+  try {
+    handle = await open(directoryPath, "r");
+    await handle.sync();
+  } catch (error) {
+    if (!isUnsupportedDirectorySync(error)) throw error;
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+function isUnsupportedDirectorySync(error: unknown): boolean {
+  return (
+    isErrnoCode(error, "EACCES") ||
+    isErrnoCode(error, "EINVAL") ||
+    isErrnoCode(error, "EISDIR") ||
+    isErrnoCode(error, "ENOTSUP") ||
+    isErrnoCode(error, "EPERM")
+  );
 }
 
 function isRuntimeInteractionMode(value: unknown): value is PicoInteractionMode {
