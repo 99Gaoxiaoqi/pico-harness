@@ -34,14 +34,11 @@ import {
   type FileChangePreimage,
 } from "./file-change-journal.js";
 
-const DEFAULT_BASE_DIR = resolve(
-  process.env.PICO_FILE_HISTORY_DIR ?? join(resolvePicoHome(), "file-history"),
-);
 const MAX_SNAPSHOTS = 100;
 const FILE_HISTORY_MANIFEST_VERSION = 2 as const;
 
 export function fileHistoryDefaultBaseDir(): string {
-  return DEFAULT_BASE_DIR;
+  return resolve(process.env.PICO_FILE_HISTORY_DIR ?? join(resolvePicoHome(), "file-history"));
 }
 
 export type FileHistoryStorageStatus = "healthy" | "legacy" | "degraded";
@@ -221,12 +218,15 @@ function getSessionDirName(sessionId: string): string {
 export function resolveBackupPath(
   sessionId: string,
   backupFileName: string,
-  baseDir: string = DEFAULT_BASE_DIR,
+  baseDir: string = fileHistoryDefaultBaseDir(),
 ): string {
   return join(baseDir, getSessionDirName(sessionId), backupFileName);
 }
 
-function resolveManifestPath(sessionId: string, baseDir: string = DEFAULT_BASE_DIR): string {
+function resolveManifestPath(
+  sessionId: string,
+  baseDir: string = fileHistoryDefaultBaseDir(),
+): string {
   return join(baseDir, getSessionDirName(sessionId), "manifest.json");
 }
 
@@ -239,7 +239,7 @@ export async function fileHistoryBeginJournal(
   roots: readonly string[],
   sessionId: string,
   signal?: AbortSignal,
-  baseDir: string = DEFAULT_BASE_DIR,
+  baseDir: string = fileHistoryDefaultBaseDir(),
 ): Promise<FileHistoryJournal> {
   const stagingDir = join(baseDir, getSessionDirName(sessionId), ".transactions", randomUUID());
   return beginFileChangeJournal(roots, stagingDir, signal);
@@ -266,7 +266,7 @@ export async function createBackup(
   filePath: string,
   version: number,
   sessionId: string,
-  baseDir: string = DEFAULT_BASE_DIR,
+  baseDir: string = fileHistoryDefaultBaseDir(),
 ): Promise<string> {
   const backupFileName = getBackupFileName(filePath, version);
   const backupPath = resolveBackupPath(sessionId, backupFileName, baseDir);
@@ -289,7 +289,7 @@ export async function restoreBackup(
   filePath: string,
   backupFileName: string,
   sessionId: string,
-  baseDir: string = DEFAULT_BASE_DIR,
+  baseDir: string = fileHistoryDefaultBaseDir(),
   beforeCommit?: () => Promise<void>,
 ): Promise<void> {
   const backupPath = resolveBackupPath(sessionId, backupFileName, baseDir);
@@ -360,7 +360,7 @@ export async function fileHistoryTrackEdit(
   filePath: string,
   messageId: string,
   sessionId: string,
-  baseDir: string = DEFAULT_BASE_DIR,
+  baseDir: string = fileHistoryDefaultBaseDir(),
 ): Promise<void> {
   const rewindPoint = state.snapshots.findLast(
     (snapshot) => snapshot.messageId === messageId && snapshot.userPrompt !== undefined,
@@ -445,7 +445,7 @@ export async function fileHistoryCommitJournal(
   journal: FileHistoryJournal,
   messageId: string,
   sessionId: string,
-  baseDir: string = DEFAULT_BASE_DIR,
+  baseDir: string = fileHistoryDefaultBaseDir(),
 ): Promise<FileHistoryJournalCommitResult> {
   let changed = false;
   const changedPaths = new Set<string>();
@@ -699,7 +699,7 @@ export async function fileHistoryMakeSnapshot(
   state: FileHistoryState,
   messageId: string,
   sessionId: string,
-  baseDir: string = DEFAULT_BASE_DIR,
+  baseDir: string = fileHistoryDefaultBaseDir(),
   messageIndex?: number,
   metadata?: {
     userPrompt: string;
@@ -812,7 +812,7 @@ export async function fileHistoryBeginRewindPoint(
     beforeSessionSeq?: number;
   },
   sessionId: string,
-  baseDir: string = DEFAULT_BASE_DIR,
+  baseDir: string = fileHistoryDefaultBaseDir(),
 ): Promise<void> {
   await fileHistoryMakeSnapshot(state, input.messageId, sessionId, baseDir, input.messageIndex, {
     userPrompt: input.userPrompt,
@@ -834,7 +834,7 @@ export async function fileHistoryBindSourceEvent(
   state: FileHistoryState,
   input: { messageId: string; sourceMessageEventId: string; beforeSessionSeq: number },
   sessionId: string,
-  baseDir: string = DEFAULT_BASE_DIR,
+  baseDir: string = fileHistoryDefaultBaseDir(),
 ): Promise<void> {
   const snapshot = state.snapshots.find((candidate) => candidate.messageId === input.messageId);
   if (!snapshot) throw new Error(`FileHistory: 找不到 messageId=${input.messageId} 的快照`);
@@ -860,7 +860,7 @@ export async function fileHistoryDiscardFrom(
   state: FileHistoryState,
   messageId: string,
   sessionId: string,
-  baseDir: string = DEFAULT_BASE_DIR,
+  baseDir: string = fileHistoryDefaultBaseDir(),
 ): Promise<void> {
   const targetIndex = state.snapshots.findIndex((snapshot) => snapshot.messageId === messageId);
   if (targetIndex === -1) return;
@@ -875,7 +875,7 @@ export async function fileHistoryRewind(
   state: FileHistoryState,
   messageId: string,
   sessionId: string,
-  baseDir: string = DEFAULT_BASE_DIR,
+  baseDir: string = fileHistoryDefaultBaseDir(),
   options: { expectedCurrentFingerprints?: ReadonlyMap<string, string> } = {},
 ): Promise<void> {
   const prepared = await fileHistoryPrepareRewind(state, messageId, sessionId, baseDir, options);
@@ -911,7 +911,7 @@ export async function fileHistoryPrepareRewind(
   state: FileHistoryState,
   messageId: string,
   sessionId: string,
-  baseDir: string = DEFAULT_BASE_DIR,
+  baseDir: string = fileHistoryDefaultBaseDir(),
   options: { expectedCurrentFingerprints?: ReadonlyMap<string, string> } = {},
 ): Promise<FileHistoryPreparedRewind> {
   const target = state.snapshots.find((snapshot) => snapshot.messageId === messageId);
@@ -972,7 +972,7 @@ export async function fileHistoryDiffStat(
   state: FileHistoryState,
   messageId: string,
   sessionId: string,
-  baseDir: string = DEFAULT_BASE_DIR,
+  baseDir: string = fileHistoryDefaultBaseDir(),
 ): Promise<FileHistoryDiffStat> {
   const target = state.snapshots.find((s) => s.messageId === messageId);
   if (!target) {
@@ -1024,7 +1024,7 @@ export async function fileHistoryChanges(
   state: FileHistoryState,
   messageId: string,
   sessionId: string,
-  baseDir: string = DEFAULT_BASE_DIR,
+  baseDir: string = fileHistoryDefaultBaseDir(),
 ): Promise<FileHistoryChanges> {
   const target = state.snapshots.find((snapshot) => snapshot.messageId === messageId);
   if (!target) {
@@ -1071,7 +1071,7 @@ export async function fileHistoryRestoreFile(
   filePath: string,
   expectedCurrentFingerprint: string,
   sessionId: string,
-  baseDir: string = DEFAULT_BASE_DIR,
+  baseDir: string = fileHistoryDefaultBaseDir(),
 ): Promise<FileHistoryRestoreFileResult> {
   const target = state.snapshots.find((snapshot) => snapshot.messageId === messageId);
   if (!target) {
@@ -1187,7 +1187,7 @@ export async function fileHistoryMessageDiffStat(
   state: FileHistoryState,
   messageId: string,
   sessionId: string,
-  baseDir: string = DEFAULT_BASE_DIR,
+  baseDir: string = fileHistoryDefaultBaseDir(),
 ): Promise<FileHistoryDiffStat> {
   const targetIndex = state.snapshots.findIndex((snapshot) => snapshot.messageId === messageId);
   const target = state.snapshots[targetIndex];
@@ -1687,7 +1687,7 @@ function encodeBackupV2(backup: FileHistoryBackup): PersistedFileHistoryBackupV2
 export async function fileHistoryLoadState(
   state: FileHistoryState,
   sessionId: string,
-  baseDir: string = DEFAULT_BASE_DIR,
+  baseDir: string = fileHistoryDefaultBaseDir(),
 ): Promise<boolean> {
   let raw: string;
   try {
@@ -1725,7 +1725,7 @@ export async function fileHistoryLoadState(
 export async function fileHistoryCloneSession(
   sourceSessionId: string,
   targetSessionId: string,
-  baseDir: string = DEFAULT_BASE_DIR,
+  baseDir: string = fileHistoryDefaultBaseDir(),
 ): Promise<FileHistoryCloneResult> {
   return withFileHistoryMutationLease(
     baseDir,

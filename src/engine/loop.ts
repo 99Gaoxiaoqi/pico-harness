@@ -1051,6 +1051,7 @@ export class AgentEngine implements AgentRunner {
                 resolvedPath,
                 currentMessageId,
                 session.id,
+                session.fileHistoryBaseDir,
               );
             }
           } catch {

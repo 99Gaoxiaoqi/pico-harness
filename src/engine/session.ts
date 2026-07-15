@@ -63,6 +63,7 @@ import {
   type FileHistoryDiffStat,
   fileHistoryBeginRewindPoint,
   fileHistoryBindSourceEvent,
+  fileHistoryDefaultBaseDir,
   fileHistoryDiscardFrom,
   fileHistoryDiffStat,
   fileHistoryLoadState,
@@ -291,9 +292,11 @@ export class Session implements SessionRuntimePersistence {
     this.id = id;
     this.workDir = workDir;
     this.picoHome = resolvePicoHome({ picoHome: options?.picoHome });
-    this.fileHistoryBaseDir = resolvePicoPaths(workDir, {
-      picoHome: this.picoHome,
-    }).home.fileHistory;
+    // Explicit host roots must be isolated from process-level overrides. Default CLI/test
+    // sessions retain the long-standing PICO_FILE_HISTORY_DIR compatibility seam.
+    this.fileHistoryBaseDir = options?.picoHome
+      ? resolvePicoPaths(workDir, { picoHome: this.picoHome }).home.fileHistory
+      : fileHistoryDefaultBaseDir();
     this.identity =
       options?.identity ??
       createSessionIdentity({
