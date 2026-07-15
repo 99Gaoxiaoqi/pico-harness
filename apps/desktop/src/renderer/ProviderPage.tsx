@@ -1,6 +1,6 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import { BrainCircuit, Check, KeyRound, Pencil, Plus, Server, Trash2, X } from "lucide-react";
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { Button, EmptyState, IconButton, InlineNotice } from "./components.js";
 import type {
   ProviderCredentialStatus,
@@ -439,25 +439,30 @@ function CredentialDialog({
   ) => Promise<boolean>;
   readonly onDelete: (providerId: string, expectedProviderFingerprint: string) => Promise<boolean>;
 }) {
-  const [secret, setSecret] = useState("");
+  const secretInputRef = useRef<HTMLInputElement>(null);
+
+  const clearSecret = () => {
+    if (secretInputRef.current) secretInputRef.current.value = "";
+  };
 
   useEffect(() => {
-    if (!open) setSecret("");
+    if (!open && secretInputRef.current) secretInputRef.current.value = "";
   }, [open]);
 
   const handleOpenChange = (nextOpen: boolean) => {
-    if (!nextOpen) setSecret("");
+    if (!nextOpen) clearSecret();
     onOpenChange(nextOpen);
   };
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    const secret = secretInputRef.current?.value ?? "";
     if (!provider || !secret) return;
     try {
       const succeeded = await onSave(provider.id, secret, provider.fingerprint);
       if (succeeded) handleOpenChange(false);
     } finally {
-      setSecret("");
+      clearSecret();
     }
   };
 
@@ -467,7 +472,7 @@ function CredentialDialog({
       const succeeded = await onDelete(provider.id, provider.fingerprint);
       if (succeeded) handleOpenChange(false);
     } finally {
-      setSecret("");
+      clearSecret();
     }
   };
 
@@ -484,7 +489,7 @@ function CredentialDialog({
         >
           <Dialog.Title>{provider.id} 凭证</Dialog.Title>
           <Dialog.Description id="provider-credential-detail">
-            密钥会直接发送给本地 Runtime 并保存到系统安全存储，不会进入会话或界面状态。
+            密钥会直接发送给本地 Runtime 并保存到系统安全存储，不会进入会话或 App 状态。
           </Dialog.Description>
           <Dialog.Close asChild>
             <IconButton className="dialog__close" label="关闭凭证编辑器">
@@ -505,12 +510,11 @@ function CredentialDialog({
             <label>
               <span>API Key / Token</span>
               <input
+                ref={secretInputRef}
                 required
                 type="password"
                 autoComplete="off"
-                value={secret}
                 placeholder="输入新凭证"
-                onChange={(event) => setSecret(event.currentTarget.value)}
               />
             </label>
             <div className="dialog__actions">
@@ -523,7 +527,7 @@ function CredentialDialog({
               <Dialog.Close asChild>
                 <Button disabled={busy}>取消</Button>
               </Dialog.Close>
-              <Button type="submit" variant="primary" disabled={busy || !secret}>
+              <Button type="submit" variant="primary" disabled={busy}>
                 保存凭证
               </Button>
             </div>
