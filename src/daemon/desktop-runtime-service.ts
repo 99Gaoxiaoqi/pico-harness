@@ -67,10 +67,12 @@ import {
   type EffectiveModelRuntime,
 } from "../provider/effective-model-runtime.js";
 import {
+  CredentialNotFoundError,
   createPlatformCredentialVault,
   credentialRefForProvider,
   importProviderCredential,
   normalizeProviderEndpoint,
+  type CredentialRef,
   type CredentialVault,
 } from "../provider/credential-vault.js";
 import { resolveProviderProfile } from "../provider/profile.js";
@@ -181,6 +183,8 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   private readonly pendingSends = new Map<string, Promise<JsonObject>>();
   private transcriptPersistenceTail: Promise<void> = Promise.resolve();
   private userConfigWatchTail: Promise<void> = Promise.resolve();
+  /** Serializes operations that can create or remove live Provider dependencies. */
+  private providerDependencyTail: Promise<void> = Promise.resolve();
   private userConfigWatchTimer?: NodeJS.Timeout;
   private observedUserConfig?: UserConfigSnapshot;
   private userConfigWatchClosed = false;
@@ -281,7 +285,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       case "goal.get":
         return this.getGoal(request.params.workspacePath, request.params.sessionId);
       case "session.send":
-        return this.sendSession(request.params);
+        return this.withProviderDependencyLock(() => this.sendSession(request.params));
       case "session.transcript":
         return this.getSessionTranscript(request.params);
       case "run.cancel":
@@ -290,6 +294,8 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
           request.params.runId,
           request.params.reason,
         );
+      case "run.start":
+        return this.withProviderDependencyLock(() => this.options.runtimeService.handle(request));
       case "config.get":
         return this.getConfig(request.params.workspacePath);
       case "config.providers":
@@ -297,21 +303,23 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       case "config.user.get":
         return this.getUserConfig(request.params);
       case "config.user.update":
-        return this.updateUserConfig(request.params);
+        return this.withProviderDependencyLock(() => this.updateUserConfig(request.params));
       case "config.effective.get":
         return this.getEffectiveConfig(request.params);
       case "provider.list":
         return this.listUserProviders(request.params);
       case "provider.upsert":
-        return this.upsertUserProvider(request.params);
+        return this.withProviderDependencyLock(() => this.upsertUserProvider(request.params));
       case "provider.delete":
-        return this.deleteUserProvider(request.params);
+        return this.withProviderDependencyLock(() => this.deleteUserProvider(request.params));
       case "provider.credential.status":
         return this.getProviderCredentialStatus(request.params);
       case "provider.credential.set":
-        return this.setProviderCredential(request.params);
+        return this.withProviderDependencyLock(() => this.setProviderCredential(request.params));
       case "provider.credential.delete":
-        return this.deleteProviderCredential(request.params);
+        return this.withProviderDependencyLock(() =>
+          this.deleteProviderCredential(request.params),
+        );
       case "catalog.agents":
         return this.listAgents(request.params.workspacePath);
       case "catalog.skills":
@@ -351,19 +359,23 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       case "jobs.list":
         return this.listJobs(request.params.workspacePath);
       case "jobs.create":
-        return this.createJob(request.params);
+        return this.withProviderDependencyLock(() => this.createJob(request.params));
       case "jobs.update":
         return this.updateJob(request.params);
       case "jobs.delete":
         return this.deleteJob(request.params.workspacePath, request.params.jobId);
       case "jobs.setEnabled":
-        return this.setJobEnabled(
-          request.params.workspacePath,
-          request.params.jobId,
-          request.params.enabled,
+        return this.withProviderDependencyLock(() =>
+          this.setJobEnabled(
+            request.params.workspacePath,
+            request.params.jobId,
+            request.params.enabled,
+          ),
         );
       case "jobs.runNow":
-        return this.runJobNow(request.params.workspacePath, request.params.jobId);
+        return this.withProviderDependencyLock(() =>
+          this.runJobNow(request.params.workspacePath, request.params.jobId),
+        );
       case "jobs.history":
         return this.jobHistory(
           request.params.workspacePath,
@@ -380,6 +392,10 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
           return this.options.interactions.respondPrompt(request.params);
         }
         break;
+      case "workspace.unregister":
+        return this.withProviderDependencyLock(() =>
+          this.unregisterWorkspace(request.params.workspacePath),
+        );
       default:
         if (!UNSUPPORTED_DESKTOP_METHODS.has(request.method)) {
           return this.options.runtimeService.handle(request);
@@ -1733,16 +1749,19 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const providerId = requireProviderId(record["providerId"]);
     const expectedRevision = requireSha256(record["expectedRevision"], "expectedRevision");
     const current = await this.userConfigStore.read();
-    if (!current.config.providers[providerId]) {
+    const provider = current.config.providers[providerId];
+    if (!provider) {
       throw new RuntimeProtocolError(
         RUNTIME_ERROR_CODES.NOT_FOUND,
         `Provider ${providerId} 不存在`,
       );
     }
-    await this.assertNoStoredCredentialBeforeAuthorityChange(
-      providerId,
-      current.config.providers[providerId]!,
-    );
+    if (current.revision !== expectedRevision) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.CONFLICT,
+        `用户配置已更改: expected ${expectedRevision}, actual ${current.revision}`,
+      );
+    }
     if (providerIdForModelRoute(current.config.defaults?.modelRouteId) === providerId) {
       throw new RuntimeProtocolError(
         RUNTIME_ERROR_CODES.CONFLICT,
@@ -1750,15 +1769,11 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       );
     }
     const workspacePaths = await this.registrationStore.list();
-    await this.assertNoActiveRunsBeforeProviderDelete(providerId, workspacePaths);
-    const automationReferences =
-      this.options.automations?.enabledProviderReferences(providerId, workspacePaths) ?? [];
-    if (automationReferences.length > 0) {
-      throw new RuntimeProtocolError(
-        RUNTIME_ERROR_CODES.CONFLICT,
-        `Provider ${providerId} 仍被已启用 Automation ${automationReferences[0]!.jobId} 引用`,
-      );
-    }
+    await this.assertProviderDependenciesIdle(providerId, workspacePaths);
+    const credentialRef = credentialRefForProvider(
+      providerCredentialIdentity(providerId, provider),
+    );
+    const storedCredential = await this.hasStoredProviderCredential(providerId, credentialRef);
     const providers = { ...current.config.providers };
     delete providers[providerId];
     const next = validatedUserConfig(
@@ -1770,6 +1785,28 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       "provider.delete",
     );
     const written = await this.writeUserConfig(next, expectedRevision);
+    if (storedCredential) {
+      try {
+        await this.credentialVault.delete(credentialRef);
+      } catch (error) {
+        if (!(error instanceof CredentialNotFoundError)) {
+          let restoredRevision: string | undefined;
+          try {
+            restoredRevision = (await this.writeUserConfig(current.config, written.revision))
+              .revision;
+          } catch (restoreError) {
+            throw new RuntimeProtocolError(
+              RUNTIME_ERROR_CODES.CONFLICT,
+              `Provider ${providerId} 的系统凭证未删除，且配置补偿恢复失败。请立即刷新配置并重试: ${errorMessage(restoreError)}`,
+            );
+          }
+          throw new RuntimeProtocolError(
+            RUNTIME_ERROR_CODES.CONFLICT,
+            `Provider ${providerId} 的系统凭证删除失败，配置已安全恢复到 revision ${restoredRevision}: ${errorMessage(error)}`,
+          );
+        }
+      }
+    }
     await this.publishUserConfigUpdated(written.revision, [providerId]);
     return { deleted: true, revision: written.revision };
   }
@@ -1837,9 +1874,15 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         this.credentialVault.capability().diagnostic,
       );
     }
-    await this.credentialVault.delete(
-      credentialRefForProvider(providerCredentialIdentity(providerId, provider)),
-    );
+    const workspacePaths = await this.registrationStore.list();
+    await this.assertProviderDependenciesIdle(providerId, workspacePaths);
+    try {
+      await this.credentialVault.delete(
+        credentialRefForProvider(providerCredentialIdentity(providerId, provider)),
+      );
+    } catch (error) {
+      if (!(error instanceof CredentialNotFoundError)) throw error;
+    }
     const revision = (await this.userConfigStore.read()).revision;
     await this.publishUserConfigUpdated(revision, [providerId]);
     return {
@@ -1986,9 +2029,61 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     );
   }
 
-  private async assertNoActiveRunsBeforeProviderDelete(
+  private async assertProviderDependenciesIdle(
     providerId: string,
     workspacePaths: readonly string[],
+  ): Promise<void> {
+    await this.assertNoActiveRuns(
+      workspacePaths,
+      `删除 Provider ${providerId} 或其系统凭证`,
+    );
+    const automationReferences =
+      this.options.automations?.enabledProviderReferences(providerId, workspacePaths) ?? [];
+    if (automationReferences.length > 0) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.CONFLICT,
+        `Provider ${providerId} 仍被已启用 Automation ${automationReferences[0]!.jobId} 引用`,
+      );
+    }
+  }
+
+  private async hasStoredProviderCredential(
+    providerId: string,
+    credentialRef: CredentialRef,
+  ): Promise<boolean> {
+    const capability = this.credentialVault.capability();
+    // An unavailable adapter cannot have accepted a v2 credential on this platform.
+    // Preserve configuration management on Linux/Windows while still failing closed on
+    // metadata errors from an actually available vault.
+    if (!capability.available) return false;
+    try {
+      return await this.credentialVault.has(credentialRef);
+    } catch (error) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.CONFLICT,
+        `无法确认 Provider ${providerId} 的系统凭证状态，已拒绝删除: ${errorMessage(error)}`,
+      );
+    }
+  }
+
+  private async unregisterWorkspace(workspacePath: string): Promise<JsonValue> {
+    const canonical = await canonicalizeWorkspacePath(workspacePath);
+    await this.assertNoActiveRuns([canonical], "注销工作区");
+    const automationReferences = this.options.automations?.enabledReferences([canonical]) ?? [];
+    if (automationReferences.length > 0) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.CONFLICT,
+        `工作区仍有已启用 Automation ${automationReferences[0]!.jobId}，拒绝注销`,
+      );
+    }
+    return this.options.runtimeService.handle(
+      createRuntimeRequest("workspace.unregister", { workspacePath: canonical }),
+    );
+  }
+
+  private async assertNoActiveRuns(
+    workspacePaths: readonly string[],
+    operation: string,
   ): Promise<void> {
     for (const workspacePath of workspacePaths) {
       let result: JsonObject;
@@ -2002,7 +2097,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       } catch (error) {
         throw new RuntimeProtocolError(
           RUNTIME_ERROR_CODES.CONFLICT,
-          `无法确认工作区是否仍在使用 Provider ${providerId}: ${errorMessage(error)}`,
+          `无法确认工作区是否有活动 Run，已拒绝${operation}: ${errorMessage(error)}`,
         );
       }
       const runs = Array.isArray(result["runs"]) ? result["runs"] : [];
@@ -2011,10 +2106,21 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       ) {
         throw new RuntimeProtocolError(
           RUNTIME_ERROR_CODES.CONFLICT,
-          `工作区 ${workspacePath} 仍有活动 Run，拒绝删除 Provider ${providerId}`,
+          `工作区 ${workspacePath} 仍有活动 Run，拒绝${operation}`,
         );
       }
     }
+  }
+
+  private async withProviderDependencyLock<Result extends JsonValue>(
+    operation: () => Promise<Result>,
+  ): Promise<Result> {
+    const queued = this.providerDependencyTail.then(operation, operation);
+    this.providerDependencyTail = queued.then(
+      () => undefined,
+      () => undefined,
+    );
+    return queued;
   }
 
   private assertProviderFingerprint(expected: unknown, actual: string): void {

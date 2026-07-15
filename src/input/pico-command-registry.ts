@@ -729,7 +729,7 @@ function createProviderCommand(options: PicoCommandRegistryOptions): SlashComman
     name: "provider",
     description: "Manage shared user providers without exposing credentials in command arguments",
     usage:
-      "/provider [list | import-env <id> [--confirm] | default <provider/model> | delete <id>]",
+      "/provider [list | import-env <id> [--confirm] | default <provider/model|clear> | delete <id>]",
     argumentHint: "[list | import-env | default | delete]",
     category: "model",
     kind: "local",
@@ -755,10 +755,13 @@ function createProviderCommand(options: PicoCommandRegistryOptions): SlashComman
           });
         }
         if (subcommand === "default" && first && confirmation === undefined) {
+          if (first === "clear" || first === "none") {
+            return await clearDefaultUserProvider(store);
+          }
           return await setDefaultUserProvider(store, first);
         }
         if (subcommand === "delete" && first && confirmation === undefined) {
-          return await deleteUserProvider(store, first, options.credentialVault);
+          return await deleteUserProvider(store, first, options.cronDaemonBridge);
         }
         return providerUsage();
       } catch (error) {
@@ -943,50 +946,45 @@ async function setDefaultUserProvider(
   return providerMessage(`Shared default model set to ${routeId}. Restart Pico to apply it.`);
 }
 
+async function clearDefaultUserProvider(store: UserConfigStore): Promise<LocalCommandResult> {
+  const snapshot = await store.read();
+  if (!snapshot.config.defaults?.modelRouteId) {
+    return providerMessage("Shared default model is already clear.");
+  }
+  await store.write(
+    {
+      ...snapshot.config,
+      defaults: { ...snapshot.config.defaults, modelRouteId: undefined },
+    },
+    { expectedRevision: snapshot.revision },
+  );
+  return providerMessage("Shared default model cleared. You can now delete its Provider.");
+}
+
 async function deleteUserProvider(
   store: UserConfigStore,
   providerId: string,
-  vault: CredentialVault | undefined,
+  daemon: CronDaemonBridge | undefined,
 ): Promise<LocalCommandResult> {
   if (!/^[^/\s]+$/u.test(providerId)) return providerUsage();
   const snapshot = await store.read();
   const provider = snapshot.config.providers[providerId];
   if (!provider) return providerMessage(`Shared user provider ${providerId} does not exist.`);
-  const providers = { ...snapshot.config.providers };
-  delete providers[providerId];
-  const previousDefault = snapshot.config.defaults?.modelRouteId;
-  const clearDefault = previousDefault?.startsWith(`${providerId}/`) === true;
-  const defaults = clearDefault
-    ? { ...snapshot.config.defaults, modelRouteId: undefined }
-    : snapshot.config.defaults;
-  if (vault?.capability().available) {
-    const ref = credentialRefForProvider({
-      providerId,
-      protocol: provider.protocol,
-      baseURL: provider.baseURL,
-    });
-    try {
-      if (await vault.has(ref)) await vault.delete(ref);
-    } catch {
-      return providerMessage(
-        `Shared user provider ${providerId} was not deleted because its OS vault credential could not be removed. Fix the vault and retry.`,
-      );
-    }
+  if (!daemon) {
+    return providerMessage(
+      "Local Runtime daemon is unavailable; Provider deletion is fail-closed so config and OS credentials cannot diverge.",
+    );
   }
-  await store.write(
-    {
-      ...snapshot.config,
-      ...(defaults ? { defaults } : {}),
-      providers,
-    },
-    { expectedRevision: snapshot.revision },
-  );
-  return providerMessage(`Shared user provider ${providerId} deleted.`);
+  const result = await daemon.deleteProvider({
+    providerId,
+    expectedRevision: snapshot.revision,
+  });
+  return providerMessage(result.message);
 }
 
 function providerUsage(): LocalCommandResult {
   return providerMessage(
-    "Usage: /provider [list | import-env <id> [--confirm] | default <provider/model> | delete <id>]",
+    "Usage: /provider [list | import-env <id> [--confirm] | default <provider/model|clear> | delete <id>]",
   );
 }
 
