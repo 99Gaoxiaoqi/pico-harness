@@ -21,6 +21,8 @@ export interface CredentialVaultCapability {
   available: boolean;
   backend: "macos-keychain" | "unavailable";
   diagnostic: string;
+  /** Metadata lookup/deletion for legacy entries; never permits storing or resolving plaintext. */
+  cleanupAvailable?: boolean;
 }
 
 export interface CredentialResolver {
@@ -334,8 +336,17 @@ function isFingerprint(value: string | undefined): value is string {
 
 export function createPlatformCredentialVault(
   platform: NodeJS.Platform = process.platform,
+  env: Readonly<Record<string, string | undefined>> = process.env,
 ): CredentialVault {
-  if (platform === "darwin") return new MacOsKeychainCredentialVault();
+  if (platform === "darwin" && env["PICO_UNSAFE_KEYCHAIN_CLI"] === "1") {
+    return new MacOsKeychainCredentialVault();
+  }
+  if (platform === "darwin") {
+    return new UnavailableCredentialVault(
+      "持久 Provider 凭证已按 fail-closed 禁用：当前 /usr/bin/security 适配无法阻止同一用户的 Agent Shell 读取。正式版本需使用签名的 Pico Credential Broker；仅本地开发可显式设置 PICO_UNSAFE_KEYCHAIN_CLI=1。已有旧条目不会自动删除。",
+      new MacOsKeychainCredentialVault(),
+    );
+  }
   return new UnavailableCredentialVault(
     `${platform} 尚未提供经过验证的系统凭证库适配；后台 Provider 凭证已按 fail-closed 禁用。`,
   );
@@ -352,7 +363,8 @@ export class MacOsKeychainCredentialVault implements CredentialVault {
     return {
       available: true,
       backend: "macos-keychain",
-      diagnostic: "Provider 凭证由当前 macOS 用户的 Login Keychain 保存。",
+      diagnostic:
+        "不安全开发模式：Provider 凭证由 /usr/bin/security 写入 Login Keychain，同一 macOS 用户的其他进程可能读取；禁止用于发布构建。",
     };
   }
 
@@ -403,15 +415,27 @@ export class MacOsKeychainCredentialVault implements CredentialVault {
 
   async delete(ref: CredentialRef): Promise<void> {
     parseAnyCredentialRef(ref);
-    await this.runner.run(["delete-generic-password", "-a", ref, "-s", KEYCHAIN_SERVICE]);
+    try {
+      await this.runner.run(["delete-generic-password", "-a", ref, "-s", KEYCHAIN_SERVICE]);
+    } catch (error) {
+      if (!isMacKeychainItemNotFound(error)) throw error;
+    }
   }
 }
 
 class UnavailableCredentialVault implements CredentialVault {
-  constructor(private readonly diagnostic: string) {}
+  constructor(
+    private readonly diagnostic: string,
+    private readonly cleanup?: Pick<CredentialVault, "has" | "delete">,
+  ) {}
 
   capability(): CredentialVaultCapability {
-    return { available: false, backend: "unavailable", diagnostic: this.diagnostic };
+    return {
+      available: false,
+      backend: "unavailable",
+      diagnostic: this.diagnostic,
+      ...(this.cleanup ? { cleanupAvailable: true } : {}),
+    };
   }
 
   async put(): Promise<void> {
@@ -422,11 +446,12 @@ class UnavailableCredentialVault implements CredentialVault {
     throw new CredentialVaultUnavailableError(this.diagnostic);
   }
 
-  async has(): Promise<boolean> {
-    return false;
+  async has(ref: CredentialRef): Promise<boolean> {
+    return this.cleanup?.has(ref) ?? false;
   }
 
-  async delete(): Promise<void> {
+  async delete(ref: CredentialRef): Promise<void> {
+    if (this.cleanup) return this.cleanup.delete(ref);
     throw new CredentialVaultUnavailableError(this.diagnostic);
   }
 }

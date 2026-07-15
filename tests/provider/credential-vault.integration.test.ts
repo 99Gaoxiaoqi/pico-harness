@@ -110,6 +110,18 @@ describe("Provider credential vault integration", () => {
     await expect(vault.delete(ref)).rejects.toBeInstanceOf(CredentialVaultUnavailableError);
   });
 
+  it("macOS 通用 security CLI 默认 fail-closed，仅显式不安全开发开关可启用", async () => {
+    const production = createPlatformCredentialVault("darwin", {});
+    expect(production.capability()).toMatchObject({ available: false, backend: "unavailable" });
+    expect(production.capability().diagnostic).toContain("Agent Shell");
+
+    const development = createPlatformCredentialVault("darwin", {
+      PICO_UNSAFE_KEYCHAIN_CLI: "1",
+    });
+    expect(development.capability()).toMatchObject({ available: true, backend: "macos-keychain" });
+    expect(development.capability().diagnostic).toContain("不安全开发模式");
+  });
+
   it("把凭证引用绑定到工作区和 Provider 端点，配置漂移时 fail-closed", () => {
     const route = modelRoute("provider/model", "https://provider.example/v1");
     const workspace = process.cwd();

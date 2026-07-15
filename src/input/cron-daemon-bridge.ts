@@ -4,6 +4,7 @@ import {
   createUserDaemonInstaller,
   LocalRuntimeClient,
   resolveLocalDaemonEndpoint,
+  type RuntimeJob,
   type RuntimeProviderInput,
 } from "../daemon/index.js";
 
@@ -17,7 +18,54 @@ export interface CronDaemonBridge {
   importEnvironmentProvider?(
     input: ProviderDaemonEnvironmentImportInput,
   ): Promise<ProviderDaemonEnvironmentImportResult>;
+  importAutomationCredential?(
+    input: AutomationCredentialDaemonInput,
+  ): Promise<CronDaemonActionResult>;
+  createAutomation?(input: AutomationCreateDaemonInput): Promise<CronDaemonJobActionResult>;
+  setAutomationEnabled?(
+    input: AutomationJobMutationInput & { readonly enabled: boolean },
+  ): Promise<CronDaemonJobActionResult>;
+  deleteAutomation?(input: AutomationJobMutationInput): Promise<CronDaemonActionResult>;
 }
+
+export interface AutomationCredentialDaemonInput {
+  readonly workspacePath: string;
+  readonly modelRouteId: string;
+  readonly expectedCredentialRef: string;
+  readonly secret: string;
+}
+
+export interface AutomationCreateDaemonInput {
+  readonly workspacePath: string;
+  readonly name?: string;
+  readonly prompt: string;
+  readonly schedule: string;
+  readonly timeZone?: string;
+  readonly modelRouteId: string;
+  readonly expectedCredentialRef: string;
+  readonly allowedTools: readonly string[];
+  readonly toolNetworkPolicy: "allow" | "disabled" | "allowlist";
+  readonly allowedToolNetworkHosts?: readonly string[];
+  readonly enabled?: boolean;
+}
+
+export interface AutomationJobMutationInput {
+  readonly workspacePath: string;
+  readonly jobId: string;
+}
+
+type CronDaemonFailure = {
+  readonly status: "unavailable" | "rejected";
+  readonly message: string;
+};
+
+export type CronDaemonActionResult =
+  | { readonly status: "ok"; readonly message: string }
+  | CronDaemonFailure;
+
+export type CronDaemonJobActionResult =
+  | { readonly status: "ok"; readonly job: RuntimeJob; readonly message: string }
+  | CronDaemonFailure;
 
 export interface ProviderDaemonEnvironmentImportInput {
   readonly provider: RuntimeProviderInput;
@@ -233,6 +281,114 @@ export class LocalCronDaemonBridge implements CronDaemonBridge {
       client.close();
     }
   }
+
+  async importAutomationCredential(
+    input: AutomationCredentialDaemonInput,
+  ): Promise<CronDaemonActionResult> {
+    return this.withConnectedDaemon(
+      async (client) => {
+        await client.request("automation.credential.import", {
+          workspacePath: input.workspacePath,
+          modelRouteId: input.modelRouteId,
+          expectedCredentialRef: input.expectedCredentialRef,
+          secret: input.secret,
+        });
+        return {
+          status: "ok" as const,
+          message: `模型路由 ${input.modelRouteId} 的凭证已由 Runtime daemon 写入系统凭证库。`,
+        };
+      },
+      "Automation 凭证未导入",
+      input.secret,
+    );
+  }
+
+  async createAutomation(input: AutomationCreateDaemonInput): Promise<CronDaemonJobActionResult> {
+    return this.withConnectedDaemon(async (client) => {
+      const value = await client.request("automation.create", {
+        workspacePath: input.workspacePath,
+        ...(input.name ? { name: input.name } : {}),
+        prompt: input.prompt,
+        schedule: input.schedule,
+        ...(input.timeZone ? { timeZone: input.timeZone } : {}),
+        modelRouteId: input.modelRouteId,
+        expectedCredentialRef: input.expectedCredentialRef,
+        allowedTools: input.allowedTools,
+        toolNetworkPolicy: input.toolNetworkPolicy,
+        ...(input.allowedToolNetworkHosts
+          ? { allowedToolNetworkHosts: input.allowedToolNetworkHosts }
+          : {}),
+        ...(input.enabled === undefined ? {} : { enabled: input.enabled }),
+      });
+      const job = readRuntimeJob(value);
+      if (!job) throw new Error("Runtime daemon 返回了无效的 Automation 创建结果");
+      return {
+        status: "ok" as const,
+        job,
+        message: `Runtime daemon 已创建 Automation ${job.jobId}。`,
+      };
+    }, "Automation 未创建");
+  }
+
+  async setAutomationEnabled(
+    input: AutomationJobMutationInput & { readonly enabled: boolean },
+  ): Promise<CronDaemonJobActionResult> {
+    return this.withConnectedDaemon(async (client) => {
+      const value = await client.request("jobs.setEnabled", {
+        workspacePath: input.workspacePath,
+        jobId: input.jobId,
+        enabled: input.enabled,
+      });
+      const job = readRuntimeJob(value);
+      if (!job) throw new Error("Runtime daemon 返回了无效的 Automation 变更结果");
+      return {
+        status: "ok" as const,
+        job,
+        message: `Automation ${job.jobId} 已${job.enabled ? "启用" : "禁用"}。`,
+      };
+    }, `Automation ${input.jobId} 未变更`);
+  }
+
+  async deleteAutomation(input: AutomationJobMutationInput): Promise<CronDaemonActionResult> {
+    return this.withConnectedDaemon(async (client) => {
+      await client.request("jobs.delete", {
+        workspacePath: input.workspacePath,
+        jobId: input.jobId,
+      });
+      return {
+        status: "ok" as const,
+        message: `Automation ${input.jobId} 已删除。`,
+      };
+    }, `Automation ${input.jobId} 未删除`);
+  }
+
+  private async withConnectedDaemon<Result>(
+    operation: (client: Pick<LocalRuntimeClient, "request" | "close">) => Promise<Result>,
+    failureLabel: string,
+    secret?: string,
+  ): Promise<Result | CronDaemonFailure> {
+    const client = this.createClient();
+    try {
+      try {
+        await client.request("runtime.ping", {});
+      } catch {
+        return {
+          status: "unavailable",
+          message: `本机 Runtime daemon 不可达；${failureLabel}。`,
+        };
+      }
+      try {
+        return await operation(client);
+      } catch (error) {
+        return {
+          status: "rejected",
+          message: `${failureLabel}: ${safeDaemonMessage(error, secret)}`,
+        };
+      }
+    } finally {
+      client.close();
+    }
+  }
 }
 
 async function startOrInstallLocalDaemon(): Promise<"installed" | "process"> {
@@ -300,6 +456,26 @@ function readProviderImportRevision(value: unknown): string | undefined {
     /^[a-f0-9]{64}$/u.test(revision)
     ? revision
     : undefined;
+}
+
+function readRuntimeJob(value: unknown): RuntimeJob | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const job = (value as { job?: unknown }).job;
+  if (typeof job !== "object" || job === null || Array.isArray(job)) return undefined;
+  const record = job as Record<string, unknown>;
+  if (
+    typeof record["jobId"] !== "string" ||
+    typeof record["workspacePath"] !== "string" ||
+    typeof record["name"] !== "string" ||
+    typeof record["prompt"] !== "string" ||
+    typeof record["schedule"] !== "string" ||
+    typeof record["enabled"] !== "boolean" ||
+    typeof record["status"] !== "string" ||
+    typeof record["updatedAt"] !== "number"
+  ) {
+    return undefined;
+  }
+  return job as RuntimeJob;
 }
 
 function safeDaemonMessage(error: unknown, secret?: string): string {

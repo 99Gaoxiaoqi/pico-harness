@@ -197,6 +197,9 @@ describe("desktop runtime protocol contract", () => {
     expectTypeOf<RuntimeResult<"provider.credential.set">>().not.toHaveProperty("secret");
     expectTypeOf<RuntimeResult<"provider.credential.status">>().not.toHaveProperty("secret");
     expectTypeOf<RuntimeResult<"provider.importEnvironment">>().not.toHaveProperty("secret");
+    expectTypeOf<
+      RuntimeResult<"provider.credential.status">["storedCredentialPresent"]
+    >().toEqualTypeOf<boolean>();
   });
 
   it("decodes fragmented frames and rejects frames beyond 1 MB", () => {

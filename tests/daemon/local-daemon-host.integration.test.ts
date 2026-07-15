@@ -279,6 +279,97 @@ describe("LocalDaemonHost integration", () => {
     ).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  it("生产 Desktop 将 partial host env 与 process PICO_HOME 合成后贯穿 session.send", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pico-daemon-partial-env-"));
+    cleanups.push(() => rm(root, { recursive: true, force: true }));
+    const workspace = join(root, "workspace");
+    const picoHome = join(root, "process-pico-home");
+    await mkdir(workspace);
+    execFileSync("git", ["init", "--quiet"], { cwd: workspace });
+    execFileSync(
+      "git",
+      [
+        "-c",
+        "user.name=Pico Integration",
+        "-c",
+        "user.email=pico@example.test",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "initial",
+      ],
+      { cwd: workspace },
+    );
+    const endpoint = resolveLocalDaemonEndpoint({
+      runtimeDir: join(root, "runtime"),
+      userIdentity: "partial-env-home-test",
+    });
+    const previousPicoHome = process.env.PICO_HOME;
+    process.env.PICO_HOME = picoHome;
+    const trustStore = new WorkspaceTrustStore({ userStateDirectory: picoHome });
+    await trustStore.trust(await trustStore.canonicalize(workspace));
+    const host = createProductionLocalDaemonHost({
+      endpoint,
+      trustStore,
+      agentRuntime: new TaskStateAgentRuntime(),
+      credentialVault: new AvailableCredentialVault(),
+      env: {
+        LLM_BASE_URL: "https://partial-env.example.test/v1",
+        LLM_API_KEY: "partial-env-secret",
+        LLM_MODEL: "partial-env-model",
+      },
+    });
+    let sessionId: string | undefined;
+    try {
+      await host.start();
+      const client = new LocalRuntimeClient(endpoint);
+      try {
+        await expect(client.request("runtime.ping", {})).resolves.toEqual(
+          expect.objectContaining({ picoHome }),
+        );
+        const sent = (await client.request("session.send", {
+          workspacePath: workspace,
+          input: { text: "persist partial-env task state" },
+          idempotencyKey: "partial-env-first-send",
+        })) as {
+          session: { sessionId: string };
+          run?: { runId: string };
+        };
+        sessionId = sent.session.sessionId;
+        if (!sent.run) throw new Error("session.send did not start its first Run");
+        await expect
+          .poll(async () => {
+            const listed = (await client.request("runs.list", { workspacePath: workspace })) as {
+              runs: Array<{ runId: string; status: string }>;
+            };
+            return listed.runs.find((run) => run.runId === sent.run?.runId)?.status;
+          })
+          .toBe("succeeded");
+      } finally {
+        client.close();
+        await host.stop();
+        if (sessionId) {
+          await globalSessionManager.delete(sessionId, workspace, { picoHome })?.close();
+        }
+      }
+    } finally {
+      if (previousPicoHome === undefined) delete process.env.PICO_HOME;
+      else process.env.PICO_HOME = previousPicoHome;
+    }
+    if (!sessionId) throw new Error("Desktop session was not created");
+
+    const paths = resolvePicoPaths(workspace, { picoHome });
+    await expect(stat(join(paths.workspace.sessions, `${sessionId}.jsonl`))).resolves.toEqual(
+      expect.objectContaining({}),
+    );
+    await expect(stat(paths.workspace.runtimeDatabase)).resolves.toEqual(
+      expect.objectContaining({}),
+    );
+    await expect(stat(join(paths.workspace.tasks, "state.json"))).resolves.toEqual(
+      expect.objectContaining({}),
+    );
+  });
+
   it("生产桌面 Run 兼容 TUI 的旧版环境变量模型路由", async () => {
     const root = await mkdtemp(join(tmpdir(), "pico-daemon-legacy-model-"));
     cleanups.push(() => rm(root, { recursive: true, force: true }));

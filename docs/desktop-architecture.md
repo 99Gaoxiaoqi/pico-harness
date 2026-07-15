@@ -27,7 +27,7 @@ Pico daemon ── Agent Runtime / Session / Rewind / Automations
 - `$PICO_HOME`：Session catalog、信任、daemon 注册等跨 CLI/App 的唯一真源。
 - 工作区 `.pico` / `.claw`：项目配置和 Runtime 数据，仍受工作区信任边界约束。
 - Electron `userData`：窗口尺寸、主题、更新通道等纯界面状态。
-- Provider 密钥：持久密钥当前只保存在 macOS Keychain，协议和 Renderer 只接触 `credentialRef`；其他平台的安全后端尚未开放。
+- Provider 密钥：协议和 Renderer 只接触状态与 `credentialRef`。发布构建默认禁用持久密钥；macOS `/usr/bin/security` 仅是显式开启的不安全本地开发兼容层，正式版本需由签名的 Pico Credential Broker/XPC 直接访问 Keychain。
 
 ## 平台边界
 

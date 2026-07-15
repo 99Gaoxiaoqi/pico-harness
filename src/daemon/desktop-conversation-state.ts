@@ -21,6 +21,8 @@ export interface DesktopQueuedInput {
 interface DesktopIdempotencyRecord {
   readonly workspacePath: string;
   readonly key: string;
+  /** Added in v1 as a backward-compatible field; absent only on legacy records. */
+  readonly requestFingerprint?: string;
   readonly result: JsonObject;
   readonly createdAt: number;
 }
@@ -115,12 +117,21 @@ export class DesktopConversationStateStore {
     }));
   }
 
-  async getIdempotent(workspacePath: string, key: string): Promise<JsonObject | undefined> {
+  async getIdempotent(
+    workspacePath: string,
+    key: string,
+  ): Promise<Pick<DesktopIdempotencyRecord, "requestFingerprint" | "result"> | undefined> {
     const canonical = normalizeWorkspacePath(workspacePath);
     const normalized = requireNonEmpty(key, "idempotencyKey");
-    return (await this.read()).idempotency.find(
+    const record = (await this.read()).idempotency.find(
       (record) => record.workspacePath === canonical && record.key === normalized,
-    )?.result;
+    );
+    return record
+      ? {
+          ...(record.requestFingerprint ? { requestFingerprint: record.requestFingerprint } : {}),
+          result: record.result,
+        }
+      : undefined;
   }
 
   async getFirstSendClaim(
@@ -174,7 +185,12 @@ export class DesktopConversationStateStore {
     return claimed;
   }
 
-  async rememberIdempotent(workspacePath: string, key: string, result: JsonObject): Promise<void> {
+  async rememberIdempotent(
+    workspacePath: string,
+    key: string,
+    requestFingerprint: string,
+    result: JsonObject,
+  ): Promise<void> {
     const canonical = normalizeWorkspacePath(workspacePath);
     const normalized = requireNonEmpty(key, "idempotencyKey");
     await this.mutate((state) => ({
@@ -186,7 +202,13 @@ export class DesktopConversationStateStore {
         ...state.idempotency.filter(
           (record) => record.workspacePath !== canonical || record.key !== normalized,
         ),
-        { workspacePath: canonical, key: normalized, result, createdAt: this.now() },
+        {
+          workspacePath: canonical,
+          key: normalized,
+          requestFingerprint: requireNonEmpty(requestFingerprint, "requestFingerprint"),
+          result,
+          createdAt: this.now(),
+        },
       ]
         .sort((left, right) => right.createdAt - left.createdAt)
         .slice(0, MAX_IDEMPOTENCY_RECORDS),
@@ -304,6 +326,8 @@ function parseIdempotency(value: unknown, filePath: string): DesktopIdempotencyR
     !isRecord(value) ||
     typeof value["workspacePath"] !== "string" ||
     typeof value["key"] !== "string" ||
+    (value["requestFingerprint"] !== undefined &&
+      typeof value["requestFingerprint"] !== "string") ||
     !isRecord(value["result"]) ||
     typeof value["createdAt"] !== "number" ||
     !Number.isFinite(value["createdAt"])
@@ -313,6 +337,11 @@ function parseIdempotency(value: unknown, filePath: string): DesktopIdempotencyR
   return {
     workspacePath: normalizeWorkspacePath(value["workspacePath"]),
     key: requireNonEmpty(value["key"], "idempotencyKey"),
+    ...(typeof value["requestFingerprint"] === "string"
+      ? {
+          requestFingerprint: requireNonEmpty(value["requestFingerprint"], "requestFingerprint"),
+        }
+      : {}),
     result: value["result"] as JsonObject,
     createdAt: value["createdAt"],
   };

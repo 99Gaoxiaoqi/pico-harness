@@ -82,6 +82,7 @@ export interface ProviderView {
   readonly fingerprint: string;
   readonly credentialStatus: ProviderCredentialStatus;
   readonly credentialSource: ProviderCredentialSource;
+  readonly storedCredentialPresent: boolean;
 }
 
 export type ProviderDraft = Pick<

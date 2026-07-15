@@ -102,14 +102,14 @@ pico-harness/
 
 ## 🔧 共享 Provider 配置
 
-Desktop 和 TUI 使用同一份设备级配置：`$PICO_HOME/config.json`（默认 `~/.pico/config.json`）。Provider 的协议、Endpoint、模型列表和用户默认值写入该文件；API Key 只写入 macOS Keychain 等系统凭证库，不进入 JSON、Session、IPC 响应或日志。
+Desktop 和 TUI 使用同一份设备级配置：`$PICO_HOME/config.json`（默认 `~/.pico/config.json`）。Provider 的协议、Endpoint、模型列表和用户默认值写入该文件；API Key 不进入 JSON、Session、IPC 响应或日志。发布构建默认禁用持久密钥，等待签名的 Pico Credential Broker/XPC 后端。
 
 - Desktop：在 `Providers` 页面添加 Provider、保存凭证并选择默认模型。
 - TUI：用 `/provider list` 查看来源；可先设置旧 `LLM_*` 变量，再用 `/provider import-env <id>` 预览、`/provider import-env <id> --confirm` 确认导入。
 - 非秘密模型路由的选择优先级是：当前 Session / CLI 显式选择 > 已信任项目配置 > 用户默认 > 旧环境变量。
 - 项目配置在工作区通过信任门之前不会读取。同一 Provider ID 若在不同来源指向不同协议或 Endpoint，Runtime 会 fail-closed，不会静默混用凭证。
 
-密钥使用独立优先级：当前进程为该 Provider 声明的环境变量 > 匹配 Provider authority 的 v2 系统凭证 > 旧项目路由的 v1 凭证。环境变量存在时会暂时遮蔽 Keychain，但不会改写它。当前持久凭证仅实现 macOS Keychain；其他平台可继续使用环境兼容入口，但在安全凭证后端补齐前不能导入持久密钥或创建持久 Automation。
+密钥使用独立优先级：当前进程为该 Provider 声明的环境变量 > 匹配 Provider authority 的 v2 系统凭证 > 旧项目路由的 v1 凭证。环境变量存在时会暂时遮蔽持久凭证，但不会改写它。当前 `/usr/bin/security` Keychain 适配只可通过 `PICO_UNSAFE_KEYCHAIN_CLI=1` 显式用于本地开发；它不能隔离同一用户下的 Agent Shell，禁止用于发布。安全后端补齐前，各平台均只能使用前台环境变量，不能导入持久密钥或创建持久 Automation。
 
 App 与 TUI 也共用 `PICO_HOME` 命名空间中的信任记录、Session 和 Runtime 数据。Desktop 的窗口大小、主题和更新状态仍是界面私有数据，不影响 TUI。修改 `PICO_HOME` 会得到一个独立的配置、状态与本地 Runtime 命名空间；OS 凭证则仍按 Provider 身份管理，不因 `PICO_HOME` 复制密钥。
 

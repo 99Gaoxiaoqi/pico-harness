@@ -121,6 +121,47 @@ describe("createDesktopBridge", () => {
     );
   });
 
+  it("unsubscribes again after a delayed subscribe settles when disposed early", async () => {
+    const mock = createIpcRendererMock();
+    let resolveReady: ((value: unknown) => void) | undefined;
+    mock.invoke.mockImplementationOnce(() => new Promise((resolve) => (resolveReady = resolve)));
+    const bridge = createDesktopBridge(mock as unknown as IpcRenderer);
+    const listener = vi.fn();
+    const subscription = bridge.events.subscribe({}, listener);
+    const subscriptionId = (mock.invoke.mock.calls[0]?.[1] as { readonly subscriptionId: string })
+      .subscriptionId;
+
+    subscription.dispose();
+    expect(mock.send).toHaveBeenCalledTimes(1);
+    resolveReady?.({
+      ok: true,
+      value: {
+        subscribed: true,
+        events: [
+          {
+            protocolVersion: 1,
+            eventId: "replay-after-dispose",
+            topic: "run.timeline",
+            scope: { workspacePath: "/workspace" },
+            resourceVersion: 1,
+            at: 1,
+            payload: {},
+          },
+        ],
+      },
+    });
+
+    await subscription.ready;
+    expect(listener).not.toHaveBeenCalled();
+    expect(mock.send).toHaveBeenCalledTimes(2);
+    expect(mock.send).toHaveBeenLastCalledWith(DESKTOP_IPC_CHANNELS.runtimeUnsubscribe, {
+      subscriptionId,
+    });
+
+    subscription.dispose();
+    expect(mock.send).toHaveBeenCalledTimes(2);
+  });
+
   it("delivers replay before buffered live events and removes duplicates", async () => {
     const mock = createIpcRendererMock();
     let resolveReady: ((value: unknown) => void) | undefined;

@@ -238,6 +238,7 @@ export const previewData: AppData = {
         fingerprint: "preview-openai-fingerprint",
         credentialStatus: "ready",
         credentialSource: "keychain",
+        storedCredentialPresent: true,
       },
       {
         id: "local",
@@ -250,6 +251,7 @@ export const previewData: AppData = {
         fingerprint: "preview-local-fingerprint",
         credentialStatus: "missing",
         credentialSource: "none",
+        storedCredentialPresent: false,
       },
     ],
   },

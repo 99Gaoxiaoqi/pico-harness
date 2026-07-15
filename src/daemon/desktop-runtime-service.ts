@@ -75,12 +75,25 @@ import {
   importProviderCredential,
   normalizeProviderEndpoint,
   parseAnyCredentialRef,
+  parseProviderCredentialRef,
   type CredentialRef,
   type CredentialVault,
 } from "../provider/credential-vault.js";
+import { resolveAutomationCredentialTarget } from "../provider/automation-credential.js";
+import { resolveModelRouteCapabilities } from "../provider/model-capabilities.js";
 import { resolveProviderProfile } from "../provider/profile.js";
+import {
+  ProviderOperationJournal,
+  type ProviderOperationRecord,
+} from "../provider/provider-operation-journal.js";
 import { resolvePicoHome } from "../paths/pico-paths.js";
 import { WorkspaceTrustStore } from "../security/workspace-trust.js";
+import { fingerprintBackgroundMcpConfig } from "../safety/background-mcp-policy.js";
+import {
+  BACKGROUND_HARDLINE_VERSION,
+  BACKGROUND_HOOK_VERSION,
+  filterBackgroundEligibleTools,
+} from "../safety/background-yolo-policy.js";
 import {
   fileHistoryChanges,
   type FileHistoryChanges,
@@ -145,6 +158,7 @@ export interface DesktopRuntimeServiceOptions {
   readonly userConfigStore?: UserConfigStore;
   readonly effectiveConfigResolver?: EffectiveConfigResolver;
   readonly credentialVault?: CredentialVault;
+  readonly providerOperationJournal?: ProviderOperationJournal;
   readonly env?: Readonly<Record<string, string | undefined>>;
   readonly providerFactory?: typeof createProvider;
   readonly createSessionId?: () => string;
@@ -183,16 +197,22 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   private readonly userConfigStore: UserConfigStore;
   private readonly effectiveConfigResolver: EffectiveConfigResolver;
   private readonly credentialVault: CredentialVault;
+  private readonly providerOperationJournal: ProviderOperationJournal;
+  private readonly providerRecoveryReady: Promise<void>;
   private readonly createSessionId: () => string;
   private readonly now: () => number;
   private readonly unsubscribeRuntimeEvents: () => void;
   private readonly userConfigWatchListener = () => this.scheduleUserConfigRefresh();
   private readonly userConfigWatchReady: Promise<void>;
-  private readonly pendingSends = new Map<string, Promise<JsonObject>>();
+  private readonly pendingSends = new Map<
+    string,
+    { readonly requestFingerprint: string; readonly promise: Promise<JsonObject> }
+  >();
   private transcriptPersistenceTail: Promise<void> = Promise.resolve();
   private userConfigWatchTail: Promise<void> = Promise.resolve();
   /** Serializes operations that can create or remove live Provider dependencies. */
   private providerDependencyTail: Promise<void> = Promise.resolve();
+  private providerRecoveryError?: unknown;
   private userConfigWatchTimer?: NodeJS.Timeout;
   private observedUserConfig?: UserConfigSnapshot;
   private userConfigWatchClosed = false;
@@ -219,9 +239,15 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     this.effectiveConfigResolver =
       options.effectiveConfigResolver ??
       new EffectiveConfigResolver({ userConfigStore: this.userConfigStore });
-    this.credentialVault = options.credentialVault ?? createPlatformCredentialVault();
+    this.credentialVault =
+      options.credentialVault ?? createPlatformCredentialVault(process.platform, this.env);
+    this.providerOperationJournal =
+      options.providerOperationJournal ?? new ProviderOperationJournal({ picoHome: this.picoHome });
     this.createSessionId = options.createSessionId ?? createCliSessionId;
     this.now = options.now ?? Date.now;
+    this.providerRecoveryReady = this.recoverProviderOperation().catch((error: unknown) => {
+      this.providerRecoveryError = error;
+    });
     this.userConfigWatchReady = this.startUserConfigWatch();
     this.unsubscribeRuntimeEvents = options.runtimeService.subscribe((event) => {
       const sessionId = event.scope.sessionId;
@@ -398,6 +424,12 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
           request.params.jobId,
           request.params.limit,
         );
+      case "automation.credential.import":
+        return this.withProviderDependencyLock(() =>
+          this.importAutomationCredential(request.params),
+        );
+      case "automation.create":
+        return this.withProviderDependencyLock(() => this.createTrustedAutomation(request.params));
       case "approval.respond":
         if (this.options.interactions) {
           return this.options.interactions.respondApproval(request.params);
@@ -813,19 +845,44 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const canonical = await canonicalizeWorkspacePath(params.workspacePath);
     const input = normalizeRuntimeUserInput(params.input);
     const idempotencyKey = requireText(params.idempotencyKey, "idempotencyKey");
+    const requestFingerprint = firstSendRequestFingerprint({ ...params, input });
     const stored = await this.conversationStateStore.getIdempotent(canonical, idempotencyKey);
-    if (stored) return stored;
+    if (stored) {
+      if (
+        stored.requestFingerprint !== undefined &&
+        stored.requestFingerprint !== requestFingerprint
+      ) {
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.CONFLICT,
+          `idempotencyKey ${idempotencyKey} 已绑定不同的发送请求`,
+        );
+      }
+      return stored.result;
+    }
 
     const pendingKey = `${canonical}\0${idempotencyKey}`;
     const pending = this.pendingSends.get(pendingKey);
-    if (pending) return pending;
+    if (pending) {
+      if (pending.requestFingerprint !== requestFingerprint) {
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.CONFLICT,
+          `idempotencyKey ${idempotencyKey} 正在处理不同的发送请求`,
+        );
+      }
+      return pending.promise;
+    }
     const operation = this.sendSessionOnce({ ...params, workspacePath: canonical, input })
       .then(async (result) => {
-        await this.conversationStateStore.rememberIdempotent(canonical, idempotencyKey, result);
+        await this.conversationStateStore.rememberIdempotent(
+          canonical,
+          idempotencyKey,
+          requestFingerprint,
+          result,
+        );
         return result;
       })
       .finally(() => this.pendingSends.delete(pendingKey));
-    this.pendingSends.set(pendingKey, operation);
+    this.pendingSends.set(pendingKey, { requestFingerprint, promise: operation });
     return operation;
   }
 
@@ -850,21 +907,21 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const firstSendFingerprint = firstSendRequestFingerprint(params);
     if (
       existingFirstSendClaim &&
-      existingFirstSendClaim.requestFingerprint !== firstSendFingerprint
-    ) {
-      throw new RuntimeProtocolError(
-        RUNTIME_ERROR_CODES.CONFLICT,
-        `idempotencyKey ${params.idempotencyKey} 已绑定不同的首次发送请求`,
-      );
-    }
-    if (
-      existingFirstSendClaim &&
       params.sessionId &&
       existingFirstSendClaim.sessionId !== params.sessionId
     ) {
       throw new RuntimeProtocolError(
         RUNTIME_ERROR_CODES.CONFLICT,
         `idempotencyKey ${params.idempotencyKey} 已绑定 Session ${existingFirstSendClaim.sessionId}`,
+      );
+    }
+    if (
+      existingFirstSendClaim &&
+      existingFirstSendClaim.requestFingerprint !== firstSendFingerprint
+    ) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.CONFLICT,
+        `idempotencyKey ${params.idempotencyKey} 已绑定不同的首次发送请求`,
       );
     }
     let firstSendClaim = params.sessionId ? undefined : existingFirstSendClaim;
@@ -1875,14 +1932,13 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         `默认模型 ${defaultModel} 不在 Provider ${id} 的显式模型列表中`,
       );
     }
-    if (!this.credentialVault.capability().available) {
-      throw new RuntimeProtocolError(
-        RUNTIME_ERROR_CODES.FORBIDDEN,
-        this.credentialVault.capability().diagnostic,
-      );
+    const capability = this.credentialVault.capability();
+    if (!capability.available) {
+      throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.FORBIDDEN, capability.diagnostic);
     }
     const secret = requireSecret(record["secret"]);
     const current = await this.userConfigStore.read();
+    this.assertUserConfigRevision(expectedRevision, current.revision);
     const previousProvider = current.config.providers[id];
     if (previousProvider && !sameProviderAuthority(previousProvider, config)) {
       throw new RuntimeProtocolError(
@@ -1908,27 +1964,40 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       "provider.importEnvironment",
     );
     assertUserDefaultRoute(next);
-    const written = await this.writeUserConfig(next, expectedRevision);
+    const credentialRef = credentialRefForProvider(providerCredentialIdentity(id, config));
+    const pending = await this.providerOperationJournal.prepare({
+      kind: "import",
+      previousUserConfig: current.config,
+      targetUserConfig: next,
+      credentialRef,
+      credentialExistedBefore: await this.credentialVault.has(credentialRef),
+      configRevision: current.revision,
+    });
     try {
       await importProviderCredential({
         provider: providerCredentialIdentity(id, config),
         secret,
         vault: this.credentialVault,
       });
-    } catch {
-      try {
-        await this.writeUserConfig(current.config, written.revision);
-      } catch (restoreError) {
-        throw new RuntimeProtocolError(
-          RUNTIME_ERROR_CODES.CONFLICT,
-          `Provider ${id} 凭证导入失败，且配置补偿恢复失败。请立即刷新配置并重试: ${errorMessage(restoreError)}`,
-        );
+      await this.providerOperationJournal.update(pending.operationId, {
+        phase: "credential-imported",
+      });
+    } catch (error) {
+      if (!pending.credentialExistedBefore) {
+        await this.credentialVault.delete(credentialRef).catch(() => undefined);
       }
+      await this.providerOperationJournal.clear(pending.operationId).catch(() => undefined);
       throw new RuntimeProtocolError(
         RUNTIME_ERROR_CODES.CONFLICT,
-        `Provider ${id} 凭证导入失败，配置已安全恢复`,
+        `Provider ${id} 凭证导入失败，用户配置尚未变更: ${redactedErrorMessage(error, secret)}`,
       );
     }
+    const written = await this.commitProviderOperationConfig(pending);
+    await this.providerOperationJournal.update(pending.operationId, {
+      phase: "config-committed",
+      configRevision: written.revision,
+    });
+    await this.providerOperationJournal.clear(pending.operationId);
     const provider = await this.projectProviderProfile(id, written.config.providers[id]!, "user");
     await this.publishUserConfigUpdated(written.revision, [id]);
     return { provider, revision: written.revision };
@@ -1978,29 +2047,36 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       },
       "provider.delete",
     );
-    const written = await this.writeUserConfig(next, expectedRevision);
+    const pending = await this.providerOperationJournal.prepare({
+      kind: "delete",
+      previousUserConfig: current.config,
+      targetUserConfig: next,
+      credentialRef,
+      credentialExistedBefore: storedCredential,
+      configRevision: current.revision,
+    });
     if (storedCredential) {
       try {
         await this.credentialVault.delete(credentialRef);
       } catch (error) {
         if (!(error instanceof CredentialNotFoundError)) {
-          let restoredRevision: string | undefined;
-          try {
-            restoredRevision = (await this.writeUserConfig(current.config, written.revision))
-              .revision;
-          } catch (restoreError) {
-            throw new RuntimeProtocolError(
-              RUNTIME_ERROR_CODES.CONFLICT,
-              `Provider ${providerId} 的系统凭证未删除，且配置补偿恢复失败。请立即刷新配置并重试: ${errorMessage(restoreError)}`,
-            );
-          }
+          await this.providerOperationJournal.clear(pending.operationId).catch(() => undefined);
           throw new RuntimeProtocolError(
             RUNTIME_ERROR_CODES.CONFLICT,
-            `Provider ${providerId} 的系统凭证删除失败，配置已安全恢复到 revision ${restoredRevision}: ${errorMessage(error)}`,
+            `Provider ${providerId} 的系统凭证删除失败，用户配置尚未变更: ${errorMessage(error)}`,
           );
         }
       }
     }
+    await this.providerOperationJournal.update(pending.operationId, {
+      phase: "credential-deleted",
+    });
+    const written = await this.commitProviderOperationConfig(pending);
+    await this.providerOperationJournal.update(pending.operationId, {
+      phase: "config-committed",
+      configRevision: written.revision,
+    });
+    await this.providerOperationJournal.clear(pending.operationId);
     await this.publishUserConfigUpdated(written.revision, [providerId]);
     return { deleted: true, revision: written.revision };
   }
@@ -2030,11 +2106,9 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const provider = await this.requireUserProvider(providerId);
     const fingerprint = providerFingerprint(providerId, provider);
     this.assertProviderFingerprint(record["expectedProviderFingerprint"], fingerprint);
-    if (!this.credentialVault.capability().available) {
-      throw new RuntimeProtocolError(
-        RUNTIME_ERROR_CODES.FORBIDDEN,
-        this.credentialVault.capability().diagnostic,
-      );
+    const capability = this.credentialVault.capability();
+    if (!capability.available) {
+      throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.FORBIDDEN, capability.diagnostic);
     }
     const secret = requireSecret(record["secret"]);
     await importProviderCredential({
@@ -2048,6 +2122,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       providerId,
       status: "ready",
       source: "keychain",
+      storedCredentialPresent: true,
       providerFingerprint: fingerprint,
     };
   }
@@ -2062,11 +2137,9 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const provider = await this.requireUserProvider(providerId);
     const fingerprint = providerFingerprint(providerId, provider);
     this.assertProviderFingerprint(record["expectedProviderFingerprint"], fingerprint);
-    if (!this.credentialVault.capability().available) {
-      throw new RuntimeProtocolError(
-        RUNTIME_ERROR_CODES.FORBIDDEN,
-        this.credentialVault.capability().diagnostic,
-      );
+    const capability = this.credentialVault.capability();
+    if (!capability.available && !capability.cleanupAvailable) {
+      throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.FORBIDDEN, capability.diagnostic);
     }
     const workspacePaths = await this.registrationStore.list();
     await this.assertProviderDependenciesIdle(providerId, workspacePaths);
@@ -2083,6 +2156,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       providerId,
       status: "missing",
       source: "none",
+      storedCredentialPresent: false,
       providerFingerprint: fingerprint,
     };
   }
@@ -2102,7 +2176,8 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     providerId: string,
     provider: ModelProviderConfig,
   ): Promise<void> {
-    if (!this.credentialVault.capability().available) return;
+    const capability = this.credentialVault.capability();
+    if (!capability.available && !capability.cleanupAvailable) return;
     let stored: boolean;
     try {
       stored = await this.credentialVault.has(
@@ -2143,21 +2218,56 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   ): Promise<{
     readonly credentialStatus: "ready" | "missing" | "environment" | "unsupported";
     readonly credentialSource: "keychain" | "environment" | "none";
+    readonly storedCredentialPresent: boolean;
   }> {
-    if (readEnvironmentSecret(this.env, provider.apiKeyEnv)) {
-      return { credentialStatus: "environment", credentialSource: "environment" };
-    }
+    const environmentCredentialPresent = Boolean(
+      readEnvironmentSecret(this.env, provider.apiKeyEnv),
+    );
     if (!supportsSharedCredential) {
-      return { credentialStatus: "unsupported", credentialSource: "none" };
+      return environmentCredentialPresent
+        ? {
+            credentialStatus: "environment",
+            credentialSource: "environment",
+            storedCredentialPresent: false,
+          }
+        : {
+            credentialStatus: "unsupported",
+            credentialSource: "none",
+            storedCredentialPresent: false,
+          };
     }
-    if (!this.credentialVault.capability().available) {
-      return { credentialStatus: "unsupported", credentialSource: "none" };
-    }
+    const capability = this.credentialVault.capability();
     try {
       const ref = credentialRefForProvider(providerCredentialIdentity(providerId, provider));
-      return (await this.credentialVault.has(ref))
-        ? { credentialStatus: "ready", credentialSource: "keychain" }
-        : { credentialStatus: "missing", credentialSource: "none" };
+      const storedCredentialPresent =
+        capability.available || capability.cleanupAvailable
+          ? await this.credentialVault.has(ref)
+          : false;
+      if (environmentCredentialPresent) {
+        return {
+          credentialStatus: "environment",
+          credentialSource: "environment",
+          storedCredentialPresent,
+        };
+      }
+      if (!capability.available) {
+        return {
+          credentialStatus: "unsupported",
+          credentialSource: "none",
+          storedCredentialPresent,
+        };
+      }
+      return storedCredentialPresent
+        ? {
+            credentialStatus: "ready",
+            credentialSource: "keychain",
+            storedCredentialPresent: true,
+          }
+        : {
+            credentialStatus: "missing",
+            credentialSource: "none",
+            storedCredentialPresent: false,
+          };
     } catch (error) {
       throw new RuntimeProtocolError(
         RUNTIME_ERROR_CODES.CONFLICT,
@@ -2302,7 +2412,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     // An unavailable adapter cannot have accepted a v2 credential on this platform.
     // Preserve configuration management on Linux/Windows while still failing closed on
     // metadata errors from an actually available vault.
-    if (!capability.available) return false;
+    if (!capability.available && !capability.cleanupAvailable) return false;
     try {
       return await this.credentialVault.has(credentialRef);
     } catch (error) {
@@ -2366,10 +2476,98 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     }
   }
 
+  private async recoverProviderOperation(): Promise<void> {
+    let pending = await this.providerOperationJournal.read();
+    if (!pending) return;
+    if (pending.phase === "config-committed") {
+      await this.providerOperationJournal.clear(pending.operationId);
+      return;
+    }
+    if (pending.kind === "import") {
+      if (!this.credentialVault.capability().available) {
+        throw new Error(
+          `Provider 操作 ${pending.operationId} 等待凭证后端恢复: ${this.credentialVault.capability().diagnostic}`,
+        );
+      }
+      const credentialPresent = await this.credentialVault.has(pending.credentialRef);
+      if (!credentialPresent) {
+        if (pending.phase === "prepared") {
+          await this.providerOperationJournal.clear(pending.operationId);
+          return;
+        }
+        throw new Error(`Provider 操作 ${pending.operationId} 的凭证阶段已提交但凭证不存在`);
+      }
+      if (pending.phase === "prepared") {
+        pending = await this.providerOperationJournal.update(pending.operationId, {
+          phase: "credential-imported",
+        });
+      }
+    } else if (pending.phase === "prepared") {
+      const capability = this.credentialVault.capability();
+      if (
+        pending.credentialExistedBefore &&
+        !capability.available &&
+        !capability.cleanupAvailable
+      ) {
+        throw new Error(
+          `Provider 删除 ${pending.operationId} 等待凭证后端恢复: ${this.credentialVault.capability().diagnostic}`,
+        );
+      }
+      if (pending.credentialExistedBefore) {
+        try {
+          await this.credentialVault.delete(pending.credentialRef);
+        } catch (error) {
+          if (!(error instanceof CredentialNotFoundError)) throw error;
+        }
+      }
+      pending = await this.providerOperationJournal.update(pending.operationId, {
+        phase: "credential-deleted",
+      });
+    }
+    const written = await this.commitProviderOperationConfig(pending);
+    await this.providerOperationJournal.update(pending.operationId, {
+      phase: "config-committed",
+      configRevision: written.revision,
+    });
+    await this.providerOperationJournal.clear(pending.operationId);
+  }
+
+  private async commitProviderOperationConfig(
+    operation: ProviderOperationRecord,
+  ): Promise<UserConfigSnapshot> {
+    let lastConflict: unknown;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const current = await this.userConfigStore.read();
+      const next = reconcileProviderOperationConfig(operation, current.config);
+      if (sameConfigValue(next, current.config)) return current;
+      try {
+        return await this.userConfigStore.write(next, { expectedRevision: current.revision });
+      } catch (error) {
+        if (!(error instanceof UserConfigRevisionConflictError)) throw error;
+        lastConflict = error;
+      }
+    }
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.CONFLICT,
+      `Provider 操作 ${operation.operationId} 在并发配置更新后仍无法提交: ${errorMessage(lastConflict)}`,
+    );
+  }
+
   private async withProviderDependencyLock<Result extends JsonValue>(
     operation: () => Promise<Result>,
   ): Promise<Result> {
-    const queued = this.providerDependencyTail.then(operation, operation);
+    const guarded = async () => {
+      await this.providerRecoveryReady;
+      if (this.providerRecoveryError) {
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.CONFLICT,
+          `Provider 配置恢复尚未完成，已拒绝新的依赖变更: ${errorMessage(this.providerRecoveryError)}`,
+        );
+      }
+      await this.recoverProviderOperation();
+      return operation();
+    };
+    const queued = this.providerDependencyTail.then(guarded, guarded);
     this.providerDependencyTail = queued.then(
       () => undefined,
       () => undefined,
@@ -2383,6 +2581,15 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       throw new RuntimeProtocolError(
         RUNTIME_ERROR_CODES.CONFLICT,
         "Provider 配置已变化，请刷新后重试",
+      );
+    }
+  }
+
+  private assertUserConfigRevision(expected: string, actual: string): void {
+    if (expected !== actual) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.CONFLICT,
+        `用户配置已更改: expected ${expected}, actual ${actual}`,
       );
     }
   }
@@ -2861,6 +3068,167 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     return { jobs: automations.list(canonical) };
   }
 
+  private async importAutomationCredential(params: {
+    readonly workspacePath: string;
+    readonly modelRouteId: string;
+    readonly expectedCredentialRef: string;
+    readonly secret: string;
+  }): Promise<JsonValue> {
+    const canonical = await this.requireTrustedWorkspace(params.workspacePath);
+    if (!this.credentialVault.capability().available) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.FORBIDDEN,
+        this.credentialVault.capability().diagnostic,
+      );
+    }
+    const target = await this.resolveAutomationTarget(canonical, params.modelRouteId);
+    if (target.ref !== params.expectedCredentialRef) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.CONFLICT,
+        "Automation Provider authority 已变化，请刷新配置后重试",
+      );
+    }
+    await this.credentialVault.put(target.ref, requireSecret(params.secret));
+    return { imported: true, credentialRef: target.ref };
+  }
+
+  private async createTrustedAutomation(params: {
+    readonly workspacePath: string;
+    readonly name?: string;
+    readonly prompt: string;
+    readonly schedule: string;
+    readonly timeZone?: string;
+    readonly modelRouteId: string;
+    readonly expectedCredentialRef: string;
+    readonly allowedTools: readonly string[];
+    readonly toolNetworkPolicy: "allow" | "disabled" | "allowlist";
+    readonly allowedToolNetworkHosts?: readonly string[];
+    readonly enabled?: boolean;
+  }): Promise<JsonValue> {
+    const canonical = await this.requireTrustedWorkspace(params.workspacePath);
+    const target = await this.resolveAutomationTarget(canonical, params.modelRouteId);
+    if (target.ref !== params.expectedCredentialRef) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.CONFLICT,
+        "Automation Provider authority 已变化，请刷新配置后重试",
+      );
+    }
+    if (!(await this.credentialVault.has(target.ref))) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.CONFLICT,
+        `模型路由 ${params.modelRouteId} 尚未导入系统凭证库`,
+      );
+    }
+    const requestedTools = uniqueNonEmptyStrings(params.allowedTools, "allowedTools");
+    const eligibleTools = filterBackgroundEligibleTools(requestedTools);
+    if (!sameStringValues(requestedTools, eligibleTools)) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.FORBIDDEN,
+        "Automation 包含不允许在后台运行的交互式工具",
+      );
+    }
+    const allowedHosts = uniqueNonEmptyStrings(
+      params.allowedToolNetworkHosts ?? [],
+      "allowedToolNetworkHosts",
+    );
+    if (params.toolNetworkPolicy === "allowlist" && allowedHosts.length === 0) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.INVALID_PARAMS,
+        "toolNetworkPolicy=allowlist 时必须提供 allowedToolNetworkHosts",
+      );
+    }
+    if (params.toolNetworkPolicy !== "allowlist" && allowedHosts.length > 0) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.INVALID_PARAMS,
+        "只有 toolNetworkPolicy=allowlist 可提供 allowedToolNetworkHosts",
+      );
+    }
+    const mcpConfigFingerprint = requestedTools.some((tool) => tool.startsWith("mcp__"))
+      ? await fingerprintBackgroundMcpConfig(canonical)
+      : undefined;
+    const job = await this.requireAutomations().createWithSecurity(
+      canonical,
+      {
+        ...(params.name ? { name: params.name } : {}),
+        prompt: params.prompt,
+        schedule: params.schedule,
+        ...(params.timeZone ? { timeZone: params.timeZone } : {}),
+        enabled: params.enabled,
+      },
+      {
+        credentialRef: target.ref,
+        modelRouteId: params.modelRouteId,
+        policySnapshot: {
+          mode: "yolo",
+          backgroundEnabled: true,
+          trustedWorkspace: true,
+          toolNetworkPolicy: params.toolNetworkPolicy,
+          ...(allowedHosts.length > 0 ? { allowedToolNetworkHosts: allowedHosts } : {}),
+          ...(mcpConfigFingerprint ? { mcpConfigFingerprint } : {}),
+          allowedTools: requestedTools,
+          hardlineVersion: BACKGROUND_HARDLINE_VERSION,
+          hookVersion: BACKGROUND_HOOK_VERSION,
+          createdAt: this.now(),
+        },
+      },
+    );
+    this.publishJob(job);
+    return { job };
+  }
+
+  private async resolveAutomationTarget(workspacePath: string, modelRouteId: string) {
+    const normalizedRouteId = requireText(modelRouteId, "modelRouteId");
+    const separator = normalizedRouteId.indexOf("/");
+    if (separator <= 0 || separator === normalizedRouteId.length - 1) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.INVALID_PARAMS,
+        "modelRouteId 必须采用 providerID/modelID 格式",
+      );
+    }
+    const providerId = normalizedRouteId.slice(0, separator);
+    const model = normalizedRouteId.slice(separator + 1);
+    const effective = await this.effectiveConfigResolver.resolve({
+      workDir: workspacePath,
+      projectTrusted: true,
+      env: this.env,
+    });
+    const provider = effective.providers[providerId];
+    if (!provider || !provider.models.includes(model)) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.CONFLICT,
+        `模型路由 ${normalizedRouteId} 已不存在，请刷新配置后重试`,
+      );
+    }
+    const route: ModelRoute = {
+      id: normalizedRouteId,
+      providerId,
+      provider: provider.protocol,
+      model,
+      baseURL: provider.baseURL,
+      apiKeyEnv: provider.apiKeyEnv,
+      source: "config",
+      capabilities: resolveModelRouteCapabilities(
+        provider.protocol,
+        model,
+        provider.modelCapabilities?.[model],
+      ),
+    };
+    const userProvider = (await this.userConfigStore.read()).config.providers[providerId];
+    try {
+      return resolveAutomationCredentialTarget({
+        route,
+        workspacePath,
+        ...(userProvider ? { userProvider } : {}),
+        configSource: effective.sources[`providers.${providerId}`],
+      });
+    } catch (error) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.FORBIDDEN,
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  }
+
   private async createJob(params: {
     readonly workspacePath: string;
     readonly name: string;
@@ -2898,7 +3266,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     enabled: boolean,
   ): Promise<JsonValue> {
     const canonical = await this.requireTrustedWorkspace(workspacePath);
-    const job = this.requireAutomations().setEnabled(canonical, jobId, enabled);
+    const job = await this.requireAutomations().setEnabled(canonical, jobId, enabled);
     this.publishJob(job);
     return { job };
   }
@@ -2996,7 +3364,57 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   }
 }
 
+function reconcileProviderOperationConfig(
+  operation: ProviderOperationRecord,
+  current: PicoUserConfig,
+): PicoUserConfig {
+  const providerId = parseProviderCredentialRef(operation.credentialRef).providerId;
+  const previousProvider = operation.previousUserConfig.providers[providerId];
+  const targetProvider = operation.targetUserConfig.providers[providerId];
+  const currentProvider = current.providers[providerId];
+  if (
+    !sameConfigValue(currentProvider, previousProvider) &&
+    !sameConfigValue(currentProvider, targetProvider)
+  ) {
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.CONFLICT,
+      `Provider ${providerId} 在恢复操作期间被修改，拒绝覆盖`,
+    );
+  }
+
+  const providers = { ...current.providers };
+  if (targetProvider) providers[providerId] = targetProvider;
+  else delete providers[providerId];
+
+  const defaults = { ...(current.defaults ?? {}) };
+  const previousDefault = operation.previousUserConfig.defaults?.modelRouteId;
+  const targetDefault = operation.targetUserConfig.defaults?.modelRouteId;
+  if (previousDefault !== targetDefault && defaults.modelRouteId === previousDefault) {
+    if (targetDefault === undefined) delete defaults.modelRouteId;
+    else defaults.modelRouteId = targetDefault;
+  }
+  const next = validatedUserConfig(
+    {
+      version: 1,
+      ...(Object.keys(defaults).length > 0 ? { defaults } : {}),
+      providers,
+    },
+    `provider.${operation.kind}.recovery`,
+  );
+  assertUserDefaultRoute(next);
+  return next;
+}
+
+function sameConfigValue(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function redactedErrorMessage(error: unknown, secret: string): string {
+  return errorMessage(error).split(secret).join("<redacted>");
+}
+
 function firstSendRequestFingerprint(params: {
+  readonly sessionId?: string;
   readonly input: RuntimeUserInput;
   readonly behavior?: "auto" | "steer" | "queue" | "replace";
   readonly expectedRunId?: string;
@@ -3004,6 +3422,7 @@ function firstSendRequestFingerprint(params: {
   return createHash("sha256")
     .update(
       JSON.stringify({
+        sessionId: params.sessionId ?? null,
         input: params.input,
         behavior: params.behavior ?? "auto",
         expectedRunId: params.expectedRunId ?? null,
@@ -3644,6 +4063,18 @@ function requireText(value: unknown, label: string): string {
     throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.INVALID_PARAMS, `${label} 必须是非空字符串`);
   }
   return value.trim();
+}
+
+function uniqueNonEmptyStrings(values: readonly string[], label: string): string[] {
+  const normalized = values.map((value) => requireText(value, label));
+  return [...new Set(normalized)];
+}
+
+function sameStringValues(left: readonly string[], right: readonly string[]): boolean {
+  if (left.length !== right.length) return false;
+  const normalizedLeft = [...left].sort();
+  const normalizedRight = [...right].sort();
+  return normalizedLeft.every((value, index) => value === normalizedRight[index]);
 }
 
 function normalizeRuntimeUserInput(value: RuntimeUserInput): RuntimeUserInput {

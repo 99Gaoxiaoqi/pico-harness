@@ -54,7 +54,7 @@ LLM_* 环境变量（兼容入口）
 
 上图只描述非秘密配置和模型路由的优先级。`EffectiveConfigResolver` 为每个字段保留来源；工作区未信任时不读取项目配置；同 ID Provider 的协议或规范化 Endpoint 冲突时直接拒绝合并。`UserConfigStore` 以内容 SHA-256 revision 执行 OCC，在短锁内复查 revision 并原子替换文件。
 
-`loadEffectiveModelRuntime` 是 TUI、Desktop 前台运行、Compact 和子代理的统一模型解析入口。它先解析配置，再按“Provider 指定的进程环境变量 > 匹配 authority 的 v2 凭证 > 项目路由 v1 凭证”向 `ModelRouter` 注入进程内 secret。环境凭证会遮蔽但不会改写 Keychain。secret 不属于 `EffectiveConfigSnapshot`，也不会被 Runtime 协议、Renderer Store 或日志投影。当前持久凭证后端仅实现 macOS Keychain，其他平台 fail-closed。
+`loadEffectiveModelRuntime` 是 TUI、Desktop 前台运行、Compact 和子代理的统一模型解析入口。它先解析配置，再按“Provider 指定的进程环境变量 > 匹配 authority 的 v2 凭证 > 项目路由 v1 凭证”向 `ModelRouter` 注入进程内 secret。环境凭证会遮蔽但不会改写已存的系统凭证。secret 不属于 `EffectiveConfigSnapshot`；经过本机认证的 TUI/Desktop 可以用 write-only Runtime 请求在进程间短暂传递 secret，但它不得出现在 Runtime 响应、事件、持久配置、Renderer Store 或日志中，也不得写入请求之外的长期内存状态。发布构建默认禁用持久凭证并 fail-closed：现有 `/usr/bin/security` 适配无法阻止同一 macOS 用户下的 Agent Shell 读取条目，只允许本地开发通过 `PICO_UNSAFE_KEYCHAIN_CLI=1` 显式启用，不得用于发布。正式 macOS 版本必须改用签名的 Pico Credential Broker/XPC 进程；在该后端和其他平台安全后端完成前，只支持环境变量兼容入口。
 
 每个 Run 固定使用启动时的配置快照。TUI 在下一轮 Run 前重新解析配置和凭证；daemon 通过 `config.updated` 通知 Desktop，Renderer 在事件后刷新，并在窗口重新聚焦时补读。刷新不会热换正在运行的 Provider，Session 显式路由仍优先；损坏配置、过期 revision 与 authority 冲突都 fail-closed。
 
