@@ -156,16 +156,16 @@
 
 ### 入口与系统 (cli / feishu / eval / approval / os / schema)
 
-| 文件                  | 职责                                            | 关键导出                            |
-| --------------------- | ----------------------------------------------- | ----------------------------------- |
-| `cli/main.ts`         | CLI 主入口 + 飞书启动                           | —                                   |
-| `cli/run-agent.ts`    | 单次跑 Agent 的 CLI                             | —                                   |
-| `cli/bench.ts`        | Benchmark CLI(npm run bench)                    | —                                   |
-| `feishu/bot.ts`       | 飞书 Bot:WSClient 长连接 + 意图过滤 + 审批卡片  | `FeishuBot`、`FeishuReporter`       |
-| `eval/benchmark.ts`   | 隔离 workDir 评估运行器                         | `BenchmarkRunner`                   |
-| `approval/manager.ts` | **人工审批 Middleware**:高危命令拦截 + 挂起等待 | `ApprovalManager`、`ApprovalPolicy` |
-| `os/shell.ts`         | 跨平台 shell(Git Bash on Windows)               | `execAsync`、`resolveShell`         |
-| `schema/message.ts`   | Message 协议(role/content/toolCalls/usage)      | `Message`、`ToolCall`、`ToolResult` |
+| 文件                  | 职责                                           | 关键导出                            |
+| --------------------- | ---------------------------------------------- | ----------------------------------- |
+| `cli/main.ts`         | CLI 主入口 + 飞书启动                          | —                                   |
+| `cli/run-agent.ts`    | 单次跑 Agent 的 CLI                            | —                                   |
+| `cli/bench.ts`        | Benchmark CLI(npm run bench)                   | —                                   |
+| `feishu/bot.ts`       | 飞书 Bot:WSClient 长连接 + 意图过滤 + 审批卡片 | `FeishuBot`、`FeishuReporter`       |
+| `eval/benchmark.ts`   | 隔离 workDir 评估运行器                        | `BenchmarkRunner`                   |
+| `approval/manager.ts` | **人工审批协调器**:审批请求挂起、响应与恢复    | `ApprovalManager`                   |
+| `os/shell.ts`         | 跨平台 shell(Git Bash on Windows)              | `execAsync`、`resolveShell`         |
+| `schema/message.ts`   | Message 协议(role/content/toolCalls/usage)     | `Message`、`ToolCall`、`ToolResult` |
 
 ---
 

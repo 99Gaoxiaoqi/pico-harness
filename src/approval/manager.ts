@@ -455,65 +455,6 @@ function compactPreview(value: string, max: number): string {
   return `${value.slice(0, max - 1)}…`;
 }
 
-export class ApprovalPolicy {
-  private readonly sessionAllowlist = new Map<string, Set<string>>();
-  private readonly permanentAllowlist = new Set<string>();
-  private readonly yoloSessions = new Set<string>();
-
-  async decide(
-    sessionId: string,
-    call: { id: string; name: string; arguments: string },
-    askHuman: () => Promise<ApprovalResult>,
-    isDangerous: (toolName: string, args: string) => boolean = isDangerousCommand,
-  ): Promise<ApprovalResult> {
-    if (isHardlineCommand(call.name, call.arguments)) {
-      return {
-        allowed: false,
-        reason: "Hardline 高危命令不可审批绕过,系统直接拒绝。",
-      };
-    }
-    if (!isDangerous(call.name, call.arguments)) {
-      return { allowed: true, reason: "安全命令自动放行" };
-    }
-    const key = this.patternKey(call.name, call.arguments);
-    if (this.permanentAllowlist.has(key)) {
-      return { allowed: true, reason: "永久 allowlist 放行" };
-    }
-    if (this.sessionAllowlist.get(sessionId)?.has(key)) {
-      return { allowed: true, reason: "会话 allowlist 放行" };
-    }
-    if (this.yoloSessions.has(sessionId)) {
-      return { allowed: true, reason: "YOLO 模式放行" };
-    }
-    return askHuman();
-  }
-
-  allowForSession(sessionId: string, call: { name: string; arguments: string }): void {
-    const key = this.patternKey(call.name, call.arguments);
-    const set = this.sessionAllowlist.get(sessionId) ?? new Set<string>();
-    set.add(key);
-    this.sessionAllowlist.set(sessionId, set);
-  }
-
-  allowPermanently(call: { name: string; arguments: string }): void {
-    this.permanentAllowlist.add(this.patternKey(call.name, call.arguments));
-  }
-
-  setYoloMode(sessionId: string, enabled: boolean): void {
-    if (enabled) {
-      this.yoloSessions.add(sessionId);
-    } else {
-      this.yoloSessions.delete(sessionId);
-    }
-  }
-
-  private patternKey(toolName: string, args: string): string {
-    return `${toolName}:${args}`;
-  }
-}
-
-export const globalApprovalPolicy = new ApprovalPolicy();
-
 /**
  * AgentOps 生产运维策略:
  * - 读操作继续 YOLO 放行
