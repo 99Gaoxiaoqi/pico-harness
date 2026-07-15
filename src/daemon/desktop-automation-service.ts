@@ -12,6 +12,8 @@ import {
 export interface DesktopAutomationSecurity {
   readonly policySnapshot: YoloPolicySnapshot;
   readonly credentialRef: CredentialRef;
+  /** 创建时固定的 Provider/模型路由；v1 兼容调用方可省略并由 credentialRef 反推。 */
+  readonly modelRouteId?: string;
 }
 
 export interface DesktopAutomationServiceOptions {
@@ -51,6 +53,7 @@ export class DesktopAutomationService {
         enabled: false,
         policySnapshot: security.policySnapshot,
         credentialRef: security.credentialRef,
+        modelRouteId: security.modelRouteId,
       }),
     );
     try {
@@ -129,6 +132,34 @@ export class DesktopAutomationService {
     });
   }
 
+  enabledProviderReferences(
+    providerId: string,
+    workspacePaths: readonly string[],
+  ): Array<{
+    readonly workspacePath: string;
+    readonly jobId: string;
+    readonly modelRouteId: string;
+  }> {
+    const references: Array<{
+      readonly workspacePath: string;
+      readonly jobId: string;
+      readonly modelRouteId: string;
+    }> = [];
+    for (const workspacePath of workspacePaths) {
+      this.withCron(workspacePath, (cron) => {
+        for (const job of cron.store.listCronJobs({ workspacePath, enabled: true })) {
+          if (providerIdForRoute(job.modelRouteId) !== providerId || !job.modelRouteId) continue;
+          references.push({
+            workspacePath,
+            jobId: job.cronJobId,
+            modelRouteId: job.modelRouteId,
+          });
+        }
+      });
+    }
+    return references;
+  }
+
   private projectJob(cron: CronService, job: CronJobRecord): RuntimeJob {
     const latest = cron.runs({ cronJobId: job.cronJobId, limit: 1 })[0];
     return {
@@ -142,6 +173,7 @@ export class DesktopAutomationService {
       updatedAt: Math.max(job.updatedAt, latest?.finishedAt ?? latest?.createdAt ?? 0),
       timeZone: job.timeZone,
       version: job.version,
+      ...(job.modelRouteId ? { modelRouteId: job.modelRouteId } : {}),
       ...(latest ? { latestRunId: latest.cronRunId } : {}),
     };
   }
@@ -162,6 +194,12 @@ export class DesktopAutomationService {
       cron.close();
     }
   }
+}
+
+function providerIdForRoute(modelRouteId: string | undefined): string | undefined {
+  if (!modelRouteId) return undefined;
+  const separator = modelRouteId.indexOf("/");
+  return separator > 0 ? modelRouteId.slice(0, separator) : undefined;
 }
 
 function requireWorkspaceJob(

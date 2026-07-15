@@ -301,6 +301,16 @@ export function parseModelProviderConfigs(
       throw configError(configPath, `${field}.apiKeyEnv`, "must be an environment variable name");
     }
     const parsedModels = parseModels(rawProvider["models"], configPath, `${field}.models`);
+    const normalizedCapabilities = parseNormalizedModelCapabilities(
+      rawProvider["modelCapabilities"],
+      parsedModels.models,
+      configPath,
+      `${field}.modelCapabilities`,
+    );
+    const modelCapabilities = {
+      ...parsedModels.capabilities,
+      ...normalizedCapabilities,
+    };
     const discoverModels = rawProvider["discoverModels"];
     if (discoverModels !== undefined && typeof discoverModels !== "boolean") {
       throw configError(configPath, `${field}.discoverModels`, "must be a boolean");
@@ -311,12 +321,34 @@ export function parseModelProviderConfigs(
       apiKeyEnv,
       models: parsedModels.models,
       discoverModels: discoverModels ?? protocol === "openai",
-      ...(Object.keys(parsedModels.capabilities).length > 0
-        ? { modelCapabilities: parsedModels.capabilities }
-        : {}),
+      ...(Object.keys(modelCapabilities).length > 0 ? { modelCapabilities } : {}),
     };
   }
   return providers;
+}
+
+/** Accept the normalized in-memory shape emitted by UserConfigStore as well as project syntax. */
+function parseNormalizedModelCapabilities(
+  value: unknown,
+  models: readonly string[],
+  configPath: string,
+  field: string,
+): Record<string, ModelCapabilityConfig> {
+  if (value === undefined) return {};
+  if (!isRecord(value)) throw configError(configPath, field, "must be an object");
+  const capabilities: Record<string, ModelCapabilityConfig> = {};
+  for (const [rawModel, rawCapabilities] of Object.entries(value)) {
+    const model = rawModel.trim();
+    const modelField = `${field}.${rawModel}`;
+    if (!model || !models.includes(model)) {
+      throw configError(configPath, modelField, "must reference a model in providers.*.models");
+    }
+    if (!isRecord(rawCapabilities)) {
+      throw configError(configPath, modelField, "must be a capability object");
+    }
+    capabilities[model] = parseModelCapabilities(rawCapabilities, configPath, modelField);
+  }
+  return capabilities;
 }
 
 function parseModels(
