@@ -496,6 +496,7 @@ describe("Desktop shared configuration API integration", () => {
         baseURL: "https://provider.example.test/v1",
         apiKey: "shared-runtime-secret",
       });
+      expect(runtime.modelRoutes).toEqual([["shared/coder"]]);
     } finally {
       client.close();
       await host.stop();
@@ -636,12 +637,14 @@ class MemoryCredentialVault implements CredentialVault {
 
 class CapturingAgentRuntime extends AgentRuntime {
   readonly requests: RunAgentCliOptions[] = [];
+  readonly modelRoutes: string[][] = [];
 
   override async execute(
     options: RunAgentCliOptions,
     _dependencies: RunAgentCliDependencies = {},
   ): Promise<RunAgentCliResult> {
     this.requests.push(options);
+    this.modelRoutes.push(_dependencies.modelRouter?.routes.map((route) => route.id) ?? []);
     const sessionId = options.session ?? "shared-config-session";
     return {
       sessionId,

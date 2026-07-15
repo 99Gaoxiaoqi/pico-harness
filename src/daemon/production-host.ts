@@ -188,6 +188,7 @@ export function createProductionLocalDaemonHost(
             signal: context.signal,
             runtimeState,
             reporter,
+            modelRouter: route.modelRouter,
             approvalNotifier: broker.notifyApproval,
             approvalManager: broker.approvalManager,
             askUserHandler: broker.askUserHandler,
@@ -544,6 +545,7 @@ async function resolveDesktopModelRoute(
       apiKeyEnv: active.route.apiKeyEnv,
       modelRouteId: active.route.id,
       capabilities: active.route.capabilities,
+      modelRouter: runtime.router,
     };
   } catch (error) {
     if (error instanceof RuntimeProtocolError) throw error;
