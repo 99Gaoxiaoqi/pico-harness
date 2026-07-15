@@ -17,6 +17,7 @@ import {
   MERGE_REQUEST_STATUSES,
   PROVIDER_CALL_PURPOSES,
   PROVIDER_CALL_STATUSES,
+  RUNTIME_SCHEMA_CURRENT_MIGRATION_NAME,
   RUNTIME_SCHEMA_VERSION,
   type CompletionOutboxRecord,
   type CronJobRecord,
@@ -2027,7 +2028,7 @@ export class RuntimeStore {
         const migration = this.db
           .prepare("SELECT name FROM schema_migrations WHERE version = 6")
           .get() as { name: string } | undefined;
-        if (migration?.name !== "daemon_run_projection_and_idempotency") {
+        if (migration?.name !== RUNTIME_SCHEMA_CURRENT_MIGRATION_NAME) {
           throw new Error(
             `runtime.sqlite schema 6 migration ${migration?.name ?? "缺失"} 不受支持`,
           );
@@ -2067,7 +2068,7 @@ export class RuntimeStore {
         this.db.exec(SCHEMA_V6);
         this.db
           .prepare("INSERT INTO schema_migrations(version, name, applied_at) VALUES (6, ?, ?)")
-          .run("daemon_run_projection_and_idempotency", this.now());
+          .run(RUNTIME_SCHEMA_CURRENT_MIGRATION_NAME, this.now());
       }
       this.ensureCronJobDisplayNameColumn();
     });

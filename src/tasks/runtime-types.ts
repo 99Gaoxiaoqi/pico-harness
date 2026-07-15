@@ -45,6 +45,8 @@ export type ProviderCallPurpose = (typeof PROVIDER_CALL_PURPOSES)[number];
 
 /** runtime.sqlite 当前可读写 schema；向后兼容的可选列不单独提升版本。 */
 export const RUNTIME_SCHEMA_VERSION = 6;
+export const RUNTIME_SCHEMA_CURRENT_MIGRATION_NAME =
+  "daemon_run_projection_and_idempotency" as const;
 
 export const DAEMON_RUN_STATUSES = [
   "running",
