@@ -73,6 +73,7 @@ describe("local runtime daemon IPC integration", () => {
         {
           pong: true,
           picoHome,
+          capabilities: expect.arrayContaining(["shared-config-v1"]),
         },
       );
     } finally {

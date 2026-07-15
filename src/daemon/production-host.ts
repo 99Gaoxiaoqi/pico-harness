@@ -1,21 +1,27 @@
 import { realpathSync } from "node:fs";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { createCliSessionId } from "../cli/session-resolver.js";
 import { globalSessionManager } from "../engine/session.js";
 import { AgentRuntime } from "../runtime/agent-runtime.js";
 import { createSessionRuntime } from "../runtime/session-runtime.js";
 import { SilentReporter } from "../engine/reporter.js";
 import { loadPicoConfig } from "../input/pico-config.js";
+import { EffectiveConfigResolver } from "../input/effective-config.js";
+import { UserConfigStore } from "../input/user-config-store.js";
 import { resolveProjectMcpConfigPath } from "../mcp/config-path.js";
 import {
+  assertCredentialRefMatchesProvider,
   assertCredentialRefMatchesModelRoute,
+  credentialRefForProvider,
   credentialRefForModelRoute,
   createPlatformCredentialVault,
-  parseCredentialRef,
+  normalizeProviderEndpoint,
+  parseAnyCredentialRef,
   type CredentialVault,
 } from "../provider/credential-vault.js";
 import { resolveModelRouteCapabilities } from "../provider/model-capabilities.js";
 import type { ProviderKind } from "../provider/factory.js";
+import { resolvePicoHome } from "../paths/pico-paths.js";
 import { coordinateReasoningLevel } from "../provider/reasoning-capability.js";
 import {
   BACKGROUND_HARDLINE_VERSION,
@@ -51,6 +57,8 @@ export interface ProductionLocalDaemonHostOptions {
   trustStore?: WorkspaceTrustStore;
   agentRuntime?: AgentRuntime;
   credentialVault?: CredentialVault;
+  userConfigStore?: UserConfigStore;
+  effectiveConfigResolver?: EffectiveConfigResolver;
   env?: Readonly<Record<string, string | undefined>>;
 }
 
@@ -62,11 +70,18 @@ export interface ProductionLocalDaemonHostOptions {
 export function createProductionLocalDaemonHost(
   options: ProductionLocalDaemonHostOptions = {},
 ): LocalDaemonHost {
-  const trustStore = options.trustStore ?? new WorkspaceTrustStore();
+  const env = options.env ?? process.env;
+  const picoHome = resolvePicoHome({ env });
+  const trustStore =
+    options.trustStore ?? new WorkspaceTrustStore({ userStateDirectory: picoHome });
   const agentRuntime = options.agentRuntime ?? new AgentRuntime();
   const credentialVault = options.credentialVault ?? createPlatformCredentialVault();
-  const env = options.env ?? process.env;
-  const registrationStore = options.registrationStore ?? new WorkspaceRegistrationStore();
+  const userConfigStore = options.userConfigStore ?? new UserConfigStore({ picoHome });
+  const effectiveConfigResolver =
+    options.effectiveConfigResolver ?? new EffectiveConfigResolver({ userConfigStore });
+  const registrationStore =
+    options.registrationStore ??
+    new WorkspaceRegistrationStore(join(picoHome, "daemon-workspaces.json"));
   const pendingApprovals = new Map<string, PendingInteraction>();
   const pendingPrompts = new Map<string, PendingInteraction>();
   const resolvedApprovals = new Set<string>();
@@ -195,8 +210,29 @@ export function createProductionLocalDaemonHost(
   });
   const automations: DesktopAutomationService = new DesktopAutomationService({
     prepareSecurity: async (workspacePath) => {
-      const route = await resolveDesktopAutomationRoute(workspacePath);
-      const credentialRef = credentialRefForModelRoute(route, workspacePath);
+      const route = await resolveDesktopAutomationRoute(
+        workspacePath,
+        effectiveConfigResolver,
+        env,
+      );
+      const userProvider = (await userConfigStore.read()).config.providers[route.providerId];
+      const useSharedProviderCredential =
+        userProvider !== undefined &&
+        userProvider.protocol === route.provider &&
+        sameEndpoint(userProvider.baseURL, route.baseURL);
+      if (route.origin === "environment" && !useSharedProviderCredential) {
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.FORBIDDEN,
+          "持久 Automation 不支持仅由当前进程环境提供的 Provider，请先导入用户 Provider",
+        );
+      }
+      const credentialRef = useSharedProviderCredential
+        ? credentialRefForProvider({
+            providerId: route.providerId,
+            protocol: route.provider,
+            baseURL: route.baseURL,
+          })
+        : credentialRefForModelRoute(route, workspacePath);
       if (!(await credentialVault.has(credentialRef))) {
         throw new RuntimeProtocolError(
           RUNTIME_ERROR_CODES.FORBIDDEN,
@@ -205,6 +241,7 @@ export function createProductionLocalDaemonHost(
       }
       return {
         credentialRef,
+        modelRouteId: route.id,
         // The current desktop protocol has no tool/network-policy fields. Keep the
         // first release fail-closed: model-only jobs are real, tools stay unavailable.
         policySnapshot: {
@@ -248,6 +285,9 @@ export function createProductionLocalDaemonHost(
     trustStore,
     env,
     automations,
+    userConfigStore,
+    effectiveConfigResolver,
+    credentialVault,
     interactions: {
       respondApproval: ({ workspacePath, approvalId, decision, reason }) => {
         const pending = pendingApprovals.get(approvalId);
@@ -306,7 +346,7 @@ export function createProductionLocalDaemonHost(
         trustStore,
       });
       if (!job.credentialRef) throw new Error("Cron Job 缺少 credentialRef");
-      await resolveCronModelRoute(job);
+      await resolveCronModelRoute(job, effectiveConfigResolver, env);
       if (!(await credentialVault.has(job.credentialRef))) {
         throw new Error(`系统凭证库中不存在 ${job.credentialRef}`);
       }
@@ -327,7 +367,7 @@ export function createProductionLocalDaemonHost(
     },
     execute: async (job, context) => {
       if (!job.credentialRef) throw new Error("Cron Job 缺少 credentialRef");
-      const route = await resolveCronModelRoute(job);
+      const route = await resolveCronModelRoute(job, effectiveConfigResolver, env);
       const result = await agentRuntime.execute(
         {
           prompt: job.prompt,
@@ -365,9 +405,17 @@ export function createProductionLocalDaemonHost(
   return host;
 }
 
-async function resolveDesktopAutomationRoute(workspacePath: string) {
-  const config = await loadPicoConfig(workspacePath);
-  const modelRouteId = config.model;
+async function resolveDesktopAutomationRoute(
+  workspacePath: string,
+  effectiveConfigResolver: EffectiveConfigResolver,
+  env: Readonly<Record<string, string | undefined>>,
+) {
+  const config = await effectiveConfigResolver.resolve({
+    workDir: workspacePath,
+    projectTrusted: true,
+    env,
+  });
+  const modelRouteId = config.defaultModelRouteId;
   if (!modelRouteId) {
     throw new RuntimeProtocolError(
       RUNTIME_ERROR_CODES.FORBIDDEN,
@@ -386,20 +434,34 @@ async function resolveDesktopAutomationRoute(workspacePath: string) {
   }
   return {
     id: modelRouteId,
+    providerId,
     provider: provider.protocol,
     baseURL: provider.baseURL,
     model,
     apiKeyEnv: provider.apiKeyEnv,
+    origin: config.sources[`providers.${providerId}`] ?? "user",
   };
 }
 
-async function resolveCronModelRoute(job: CronJobRecord) {
+async function resolveCronModelRoute(
+  job: CronJobRecord,
+  effectiveConfigResolver: EffectiveConfigResolver,
+  env: Readonly<Record<string, string | undefined>>,
+) {
   if (!job.credentialRef) throw new Error("Cron Job 缺少 credentialRef");
-  const { modelRouteId } = parseCredentialRef(job.credentialRef);
+  const parsedCredential = parseAnyCredentialRef(job.credentialRef);
+  const modelRouteId =
+    job.modelRouteId ??
+    (parsedCredential.version === "v1" ? parsedCredential.modelRouteId : undefined);
+  if (!modelRouteId) throw new Error("v2 Cron Job 缺少固定 modelRouteId");
   const slash = modelRouteId.indexOf("/");
   const providerId = modelRouteId.slice(0, slash);
   const model = modelRouteId.slice(slash + 1);
-  const config = await loadPicoConfig(job.workspacePath);
+  const config = await effectiveConfigResolver.resolve({
+    workDir: job.workspacePath,
+    projectTrusted: true,
+    env,
+  });
   const provider = config.providers[providerId];
   if (!provider) throw new Error(`配置模型路由 ${modelRouteId} 的 provider 已不存在`);
   if (!provider.models.includes(model)) {
@@ -407,6 +469,7 @@ async function resolveCronModelRoute(job: CronJobRecord) {
   }
   const resolved = {
     id: modelRouteId,
+    providerId,
     provider: provider.protocol,
     baseURL: provider.baseURL,
     model,
@@ -418,8 +481,24 @@ async function resolveCronModelRoute(job: CronJobRecord) {
       provider.modelCapabilities?.[model],
     ),
   };
-  assertCredentialRefMatchesModelRoute(job.credentialRef, resolved, job.workspacePath);
+  if (parsedCredential.version === "v1") {
+    assertCredentialRefMatchesModelRoute(job.credentialRef, resolved, job.workspacePath);
+  } else {
+    assertCredentialRefMatchesProvider(job.credentialRef, {
+      providerId,
+      protocol: provider.protocol,
+      baseURL: provider.baseURL,
+    });
+  }
   return resolved;
+}
+
+function sameEndpoint(left: string, right: string): boolean {
+  try {
+    return normalizeProviderEndpoint(left) === normalizeProviderEndpoint(right);
+  } catch {
+    return false;
+  }
 }
 
 interface PendingInteraction {

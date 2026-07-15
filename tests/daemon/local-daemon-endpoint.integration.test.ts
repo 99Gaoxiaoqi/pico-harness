@@ -35,5 +35,8 @@ describe("local Runtime daemon endpoint namespace", () => {
     expect(alias).toEqual(first);
     expect(second.address).not.toBe(first.address);
     expect(second.authTokenPath).not.toBe(first.authTokenPath);
+    if (first.transport === "unix") {
+      expect(Buffer.byteLength(first.address, "utf8")).toBeLessThanOrEqual(103);
+    }
   });
 });
