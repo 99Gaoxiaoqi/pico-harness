@@ -59,7 +59,8 @@ import type {
 } from "../input/types.js";
 import type { ImagePart } from "../schema/message.js";
 import type { ProviderKind } from "../provider/factory.js";
-import { loadModelRouter, type ModelRoute, type ModelRouter } from "../provider/model-router.js";
+import type { ModelRoute, ModelRouter } from "../provider/model-router.js";
+import { loadEffectiveModelRuntime } from "../provider/effective-model-runtime.js";
 import { createPlatformCredentialVault } from "../provider/credential-vault.js";
 import { isAbortError } from "../provider/errors.js";
 import { defaultIsRetryableError } from "../provider/retry.js";
@@ -813,13 +814,16 @@ function formatUnavailableCommandBlocked(command: string, disabledReason: string
  */
 async function startLineModeRepl(opts: ReplOptions): Promise<void> {
   const provider = opts.provider ?? "openai";
-  const picoConfig = await loadPicoConfig(opts.workDir);
-  const modelRouter = await loadModelRouter({
-    config: picoConfig,
+  const credentialVault = createPlatformCredentialVault();
+  const effectiveModelRuntime = await loadEffectiveModelRuntime({
+    workDir: opts.workDir,
+    projectTrusted: true,
     legacyProvider: provider,
     legacyModel: opts.model,
     legacyModelExplicit: opts.modelExplicit,
+    credentialVault,
   });
+  const modelRouter = effectiveModelRuntime.router;
   const input = createInterface({
     input: process.stdin,
     output: process.stdout,
@@ -858,7 +862,7 @@ async function startLineModeRepl(opts: ReplOptions): Promise<void> {
       const route = resolveTuiStartupModelRoute(modelRouter, restoredSettings, {
         cliModel: opts.model,
         modelExplicit: opts.modelExplicit,
-        projectDefaultRouteId: picoConfig.model,
+        projectDefaultRouteId: effectiveModelRuntime.config.defaultModelRouteId,
       });
       const settings = getOrCreateSessionSettings(
         {
@@ -881,7 +885,9 @@ async function startLineModeRepl(opts: ReplOptions): Promise<void> {
       return modelRouter.providerConfig(route.id, thinkingEffort);
     }
     const route = modelRouter.require(
-      opts.modelExplicit ? opts.model : (picoConfig.model ?? opts.model),
+      opts.modelExplicit
+        ? opts.model
+        : (effectiveModelRuntime.config.defaultModelRouteId ?? opts.model),
     );
     return modelRouter.providerConfig(route.id, opts.thinkingEffort);
   };
@@ -1042,12 +1048,16 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
   const picoConfig = await loadPicoConfig(opts.workDir);
   const pluginManagement = new PluginManagementService({ workDir: opts.workDir });
   const claudeCompatibility = picoConfig.compatibility.claude;
-  const modelRouter = await loadModelRouter({
-    config: picoConfig,
+  const credentialVault = createPlatformCredentialVault();
+  const effectiveModelRuntime = await loadEffectiveModelRuntime({
+    workDir: opts.workDir,
+    projectTrusted: true,
     legacyProvider: provider,
     legacyModel: opts.model,
     legacyModelExplicit: opts.modelExplicit,
+    credentialVault,
   });
+  const modelRouter = effectiveModelRuntime.router;
   let cronRuntimeDiagnostic: string | undefined;
   const cronService = (() => {
     try {
@@ -1059,7 +1069,6 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
   })();
   // 只在用户创建或启用任务时短连接 daemon；TUI 不接管后台 Runtime 生命周期。
   const cronDaemonBridge = new LocalCronDaemonBridge();
-  const credentialVault = createPlatformCredentialVault();
   let taskRuntimeDiagnostic: string | undefined;
   const taskHostRuntime = await TaskHostRuntime.create({ workDir: opts.workDir }).catch((error) => {
     taskRuntimeDiagnostic = error instanceof Error ? error.message : String(error);
@@ -1161,7 +1170,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     const initialRoute = resolveTuiStartupModelRoute(modelRouter, restoredSettings, {
       cliModel: opts.model,
       modelExplicit: opts.modelExplicit,
-      projectDefaultRouteId: picoConfig.model,
+      projectDefaultRouteId: effectiveModelRuntime.config.defaultModelRouteId,
     });
     const workspaceRoots = await WorkspaceRoots.create(
       opts.workDir,
@@ -1270,7 +1279,9 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         ...(taskHostRuntime ? { taskRuntime: taskHostRuntime } : {}),
         ...(cronService ? { cronService } : {}),
         ...(cronService ? { cronDaemonBridge } : {}),
-        ...(cronService ? { credentialVault } : {}),
+        credentialVault,
+        effectiveConfig: effectiveModelRuntime.config,
+        providerCredentialStatuses: effectiveModelRuntime.credentials,
         ...(taskRuntimeDiagnostic ? { taskRuntimeDiagnostic } : {}),
         additionalDirectories: settings.additionalDirectories,
         additionalDirectoryManager: workspaceRoots,
