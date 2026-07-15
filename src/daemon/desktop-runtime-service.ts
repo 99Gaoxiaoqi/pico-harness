@@ -7,7 +7,7 @@ import { createCliSessionId, listCliSessionSummaries } from "../cli/session-reso
 import { createContextBudget, estimateMessagesTokens } from "../context/context-budget.js";
 import { FullCompactor } from "../context/full-compactor.js";
 import { SkillLoader } from "../context/skill.js";
-import { findAgentProfile, loadAgentCatalog, summarizeAgentProfiles } from "../agents/catalog.js";
+import { findAgentProfile, loadAgentCatalog } from "../agents/catalog.js";
 import { ResourceDoctor, renderResourceDoctorReport } from "../diagnostics/resource-doctor.js";
 import { runWorkspaceDoctor } from "../diagnostics/workspace-doctor.js";
 import { SessionForkService } from "../engine/session-fork-service.js";
@@ -47,8 +47,6 @@ import {
 import { renderAgentDispatchPrompt } from "../input/agent-activation.js";
 import { renderSkillActivation } from "../input/skill-activation.js";
 import { initializeProjectEntrypoints } from "../input/project-initializer.js";
-import { resolveProjectMcpConfigPath } from "../mcp/config-path.js";
-import { McpConnectionManager } from "../mcp/manager.js";
 import { CostTracker } from "../observability/tracker.js";
 import { ensureSessionUsageBaseline } from "../observability/usage-baseline.js";
 import {
@@ -138,6 +136,11 @@ import {
   type AutomationProviderReference,
   type ActiveAutomationReference,
 } from "./desktop-automation-service.js";
+import {
+  listDesktopAgents,
+  listDesktopMcpServers,
+  listDesktopSkills,
+} from "./desktop-resource-catalog.js";
 
 const UNSUPPORTED_DESKTOP_METHODS: ReadonlySet<string> = new Set([
   "approval.respond",
@@ -2659,17 +2662,11 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
 
   private async listAgents(workspacePath: string): Promise<JsonValue> {
     const canonical = await this.requireTrustedWorkspace(workspacePath);
-    const config = await loadPicoConfig(canonical);
-    const compatibility = config.compatibility.claude;
-    const agents = await loadAgentCatalog({
-      workDir: canonical,
-      includeBuiltins: true,
-      includeClaudeProjectResources: compatibility.enabled && compatibility.projectResources,
-      includeClaudeUserResources: compatibility.enabled && compatibility.userResources,
+    const agents = await listDesktopAgents(canonical, {
       env: this.env,
       picoHome: this.picoHome,
     });
-    return { agents: toJsonValue(summarizeAgentProfiles(agents)) };
+    return { agents: toJsonValue(agents) };
   }
 
   private async listSkills(
@@ -2677,33 +2674,16 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     includeUserResources: boolean,
   ): Promise<JsonValue> {
     const canonical = await this.requireTrustedWorkspace(workspacePath);
-    const loader = includeUserResources
-      ? await loadDesktopSkillLoader(canonical, this.env, this.picoHome)
-      : new SkillLoader(canonical);
-    const skills = await loader.list();
-    return {
-      skills: toJsonValue(
-        skills.map((skill) => ({
-          name: skill.name,
-          description: skill.description,
-          ...(skill.sourcePath ? { sourcePath: skill.sourcePath } : {}),
-          ...(skill.allowedTools ? { allowedTools: skill.allowedTools } : {}),
-          ...(skill.model ? { model: skill.model } : {}),
-        })),
-      ),
-    };
+    const skills = await listDesktopSkills(canonical, includeUserResources, {
+      env: this.env,
+      picoHome: this.picoHome,
+    });
+    return { skills: toJsonValue(skills) };
   }
 
   private async listMcpServers(workspacePath: string): Promise<JsonValue> {
     const canonical = await this.requireTrustedWorkspace(workspacePath);
-    const manager = new McpConnectionManager(undefined, { stdioCwd: canonical });
-    try {
-      const resolution = await resolveProjectMcpConfigPath(canonical);
-      await manager.loadConfig(resolution.path);
-      return { servers: toJsonValue(manager.getStatusSnapshot().servers) };
-    } finally {
-      await manager.closeAll();
-    }
+    return { servers: toJsonValue(await listDesktopMcpServers(canonical)) };
   }
 
   private async getUsage(params: {
@@ -4352,22 +4332,6 @@ function isOneOf<const Values extends readonly unknown[]>(
   values: Values,
 ): value is Values[number] {
   return values.includes(value);
-}
-
-async function loadDesktopSkillLoader(
-  workspacePath: string,
-  env: Readonly<Record<string, string | undefined>>,
-  picoHome: string,
-): Promise<SkillLoader> {
-  const config = await loadPicoConfig(workspacePath);
-  const compatibility = config.compatibility.claude;
-  return new SkillLoader(workspacePath, {
-    includeUserResources: true,
-    includeClaudeProjectResources: compatibility.enabled && compatibility.projectResources,
-    includeClaudeUserResources: compatibility.enabled && compatibility.userResources,
-    env,
-    picoHome,
-  });
 }
 
 function isTerminalRunStatus(status: string): boolean {
