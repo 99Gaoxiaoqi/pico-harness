@@ -294,6 +294,7 @@ function ProviderEditorDialog({
 
   const handleProtocolChange = (next: ProviderProtocol) => {
     setProtocol(next);
+    if (next !== "openai") setDiscoverModels(false);
     if (!apiKeyEnv || apiKeyEnv === defaultApiKeyEnvs[protocol]) {
       setApiKeyEnv(defaultApiKeyEnvs[next]);
     }
@@ -315,7 +316,7 @@ function ProviderEditorDialog({
       baseURL: baseURL.trim(),
       apiKeyEnv: apiKeyEnv.trim(),
       models: normalizedModels,
-      discoverModels,
+      discoverModels: protocol === "openai" && discoverModels,
       ...(provider?.modelCapabilities ? { modelCapabilities: provider.modelCapabilities } : {}),
     });
     if (succeeded) onOpenChange(false);
@@ -386,6 +387,7 @@ function ProviderEditorDialog({
               <input
                 type="checkbox"
                 checked={discoverModels}
+                disabled={protocol !== "openai"}
                 onChange={(event) => setDiscoverModels(event.currentTarget.checked)}
               />
               <span>允许从 Provider 动态发现模型</span>
@@ -394,12 +396,13 @@ function ProviderEditorDialog({
               <span>已知模型</span>
               <textarea
                 aria-label="已知模型"
+                required
                 rows={4}
                 value={models}
                 placeholder={"gpt-5.4\ngpt-5.4-mini"}
                 onChange={(event) => setModels(event.currentTarget.value)}
               />
-              <small>每行一个模型，也可以使用逗号分隔。</small>
+              <small>至少填写一个可稳定选择的模型；每行一个，也可以使用逗号分隔。</small>
             </label>
             <div className="dialog__actions provider-form__wide">
               <Dialog.Close asChild>

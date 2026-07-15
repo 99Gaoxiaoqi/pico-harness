@@ -184,6 +184,26 @@ afterEach(() => {
 });
 
 describe("Desktop Provider settings", () => {
+  it("要求显式模型并仅为 OpenAI 兼容协议开放发现", async () => {
+    const user = userEvent.setup();
+    installProviderBridge();
+    window.history.replaceState({}, "", "/#/providers");
+    render(<DesktopApp />);
+
+    await user.click(await screen.findByRole("button", { name: "配置第一个 Provider" }));
+    const dialog = screen.getByRole("dialog", { name: "添加 Provider" });
+    const models = within(dialog).getByRole("textbox", { name: "已知模型" });
+    const discovery = within(dialog).getByRole("checkbox", {
+      name: "允许从 Provider 动态发现模型",
+    });
+    expect((models as HTMLTextAreaElement).required).toBe(true);
+    expect((discovery as HTMLInputElement).disabled).toBe(false);
+
+    await user.selectOptions(within(dialog).getByRole("combobox", { name: "协议" }), "claude");
+    expect((discovery as HTMLInputElement).disabled).toBe(true);
+    expect((discovery as HTMLInputElement).checked).toBe(false);
+  });
+
   it("shows provider source, endpoint, models, and credential status", async () => {
     installProviderBridge({ initialProviders: [openAiProvider()] });
     window.history.replaceState({}, "", "/#/providers");
