@@ -41,6 +41,7 @@ import { runAgentFromCli } from "../cli/run-agent.js";
 import { listRewindPointSummaries } from "../cli/file-history.js";
 import { createCliSessionId, type CliSessionSelection } from "../cli/session-resolver.js";
 import { loadPicoConfig } from "../input/pico-config.js";
+import type { EffectiveConfigDefaults } from "../input/effective-config.js";
 import { resolveCompatibleModelRoute } from "../provider/compatible-model-route.js";
 import {
   commandArgumentSuggestions,
@@ -60,7 +61,10 @@ import type {
 import type { ImagePart } from "../schema/message.js";
 import type { ProviderKind } from "../provider/factory.js";
 import type { ModelRoute, ModelRouter } from "../provider/model-router.js";
-import { loadEffectiveModelRuntime } from "../provider/effective-model-runtime.js";
+import {
+  loadEffectiveModelRuntime,
+  type EffectiveModelRuntime,
+} from "../provider/effective-model-runtime.js";
 import { createPlatformCredentialVault } from "../provider/credential-vault.js";
 import { isAbortError } from "../provider/errors.js";
 import { defaultIsRetryableError } from "../provider/retry.js";
@@ -176,6 +180,31 @@ export interface ReplOptions {
   sessionSelection?: CliSessionSelection;
   /** CLI --add-dir 提供的附加工作目录。 */
   addDirs?: string[];
+}
+
+/** Resolve durable startup defaults while keeping an explicit CLI thinking value authoritative. */
+export function resolveTuiStartupSettingDefaults(
+  defaults: EffectiveConfigDefaults,
+  explicitThinkingEffort?: string,
+): Partial<Pick<SessionSettings, "mode" | "thinkingEffort">> {
+  return {
+    ...(defaults.mode ? { mode: defaults.mode } : {}),
+    ...(explicitThinkingEffort !== undefined
+      ? { thinkingEffort: explicitThinkingEffort }
+      : defaults.thinkingEffort
+        ? { thinkingEffort: defaults.thinkingEffort }
+        : {}),
+  };
+}
+
+function effectiveRuntimeConfigurationChanged(
+  previous: EffectiveModelRuntime,
+  current: EffectiveModelRuntime,
+): boolean {
+  return (
+    previous.config.revisions.user !== current.config.revisions.user ||
+    previous.config.revisions.project !== current.config.revisions.project
+  );
 }
 
 interface TuiStartupModelOptions {
@@ -815,15 +844,17 @@ function formatUnavailableCommandBlocked(command: string, disabledReason: string
 async function startLineModeRepl(opts: ReplOptions): Promise<void> {
   const provider = opts.provider ?? "openai";
   const credentialVault = createPlatformCredentialVault();
-  const effectiveModelRuntime = await loadEffectiveModelRuntime({
-    workDir: opts.workDir,
-    projectTrusted: true,
-    legacyProvider: provider,
-    legacyModel: opts.model,
-    legacyModelExplicit: opts.modelExplicit,
-    credentialVault,
-  });
-  const modelRouter = effectiveModelRuntime.router;
+  const loadCurrentModelRuntime = () =>
+    loadEffectiveModelRuntime({
+      workDir: opts.workDir,
+      projectTrusted: true,
+      legacyProvider: provider,
+      legacyModel: opts.model,
+      legacyModelExplicit: opts.modelExplicit,
+      credentialVault,
+    });
+  let effectiveModelRuntime = await loadCurrentModelRuntime();
+  let modelRouter = effectiveModelRuntime.router;
   const input = createInterface({
     input: process.stdin,
     output: process.stdout,
@@ -852,6 +883,18 @@ async function startLineModeRepl(opts: ReplOptions): Promise<void> {
   process.on("SIGINT", onSigint);
 
   const resolveActiveRoute = async () => {
+    const previousRuntime = effectiveModelRuntime;
+    effectiveModelRuntime = await loadCurrentModelRuntime();
+    modelRouter = effectiveModelRuntime.router;
+    if (effectiveRuntimeConfigurationChanged(previousRuntime, effectiveModelRuntime)) {
+      process.stdout.write(
+        "Shared Provider configuration changed; reloaded at the next-run safe boundary.\n",
+      );
+    }
+    const startupDefaults = resolveTuiStartupSettingDefaults(
+      effectiveModelRuntime.config.defaults,
+      opts.thinkingEffort,
+    );
     // 第二轮开始读取会话已持久化的模型选择，与完整 TUI 的 bundle 装配保持一致。
     // fork 首轮由 runAgentFromCli 先执行 Saga，此时目标会话尚不可安全预创建。
     if (selection.mode !== "fork") {
@@ -872,7 +915,7 @@ async function startLineModeRepl(opts: ReplOptions): Promise<void> {
           provider: route.provider,
           model: route.model,
           modelRouteId: route.id,
-          ...(opts.thinkingEffort !== undefined ? { thinkingEffort: opts.thinkingEffort } : {}),
+          ...startupDefaults,
         },
         { persistence: session },
       );
@@ -889,7 +932,7 @@ async function startLineModeRepl(opts: ReplOptions): Promise<void> {
         ? opts.model
         : (effectiveModelRuntime.config.defaultModelRouteId ?? opts.model),
     );
-    return modelRouter.providerConfig(route.id, opts.thinkingEffort);
+    return modelRouter.providerConfig(route.id, startupDefaults.thinkingEffort);
   };
 
   process.stdout.write(
@@ -1049,15 +1092,30 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
   const pluginManagement = new PluginManagementService({ workDir: opts.workDir });
   const claudeCompatibility = picoConfig.compatibility.claude;
   const credentialVault = createPlatformCredentialVault();
-  const effectiveModelRuntime = await loadEffectiveModelRuntime({
-    workDir: opts.workDir,
-    projectTrusted: true,
-    legacyProvider: provider,
-    legacyModel: opts.model,
-    legacyModelExplicit: opts.modelExplicit,
-    credentialVault,
-  });
-  const modelRouter = effectiveModelRuntime.router;
+  const loadCurrentModelRuntime = () =>
+    loadEffectiveModelRuntime({
+      workDir: opts.workDir,
+      projectTrusted: true,
+      legacyProvider: provider,
+      legacyModel: opts.model,
+      legacyModelExplicit: opts.modelExplicit,
+      credentialVault,
+    });
+  let effectiveModelRuntime = await loadCurrentModelRuntime();
+  let modelRouter = effectiveModelRuntime.router;
+  const reloadModelRuntimeAtSafeBoundary = async (): Promise<{
+    readonly runtime: EffectiveModelRuntime;
+    readonly configurationChanged: boolean;
+  }> => {
+    const previous = effectiveModelRuntime;
+    const current = await loadCurrentModelRuntime();
+    effectiveModelRuntime = current;
+    modelRouter = current.router;
+    return {
+      runtime: current,
+      configurationChanged: effectiveRuntimeConfigurationChanged(previous, current),
+    };
+  };
   let cronRuntimeDiagnostic: string | undefined;
   const cronService = (() => {
     try {
@@ -1142,6 +1200,10 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
   const buildSessionBundleUnsafe = async (
     selection: CliSessionSelection,
   ): Promise<TuiSessionBundle> => {
+    // Session construction is an idle boundary. Re-resolve both durable config and the OS vault so
+    // App/TUI edits and key rotation are visible without replacing an in-flight Provider.
+    const { runtime: bundleModelRuntime } = await reloadModelRuntimeAtSafeBoundary();
+    const bundleModelRouter = bundleModelRuntime.router;
     let session = globalSessionManager.get(selection.sessionId, opts.workDir);
     if (selection.mode === "fork" && selection.sourceSessionId && !session) {
       const targetPath = join(
@@ -1167,11 +1229,15 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     const restoredSettings = hydration.runtime.settings;
     // 配置从 legacy 环境变量迁移到 providerID/modelID 后，旧 session 仍可能保存
     // legacy/<model>。优先恢复精确路由，失效时按模型名或项目默认路由平滑迁移。
-    const initialRoute = resolveTuiStartupModelRoute(modelRouter, restoredSettings, {
+    const initialRoute = resolveTuiStartupModelRoute(bundleModelRouter, restoredSettings, {
       cliModel: opts.model,
       modelExplicit: opts.modelExplicit,
-      projectDefaultRouteId: effectiveModelRuntime.config.defaultModelRouteId,
+      projectDefaultRouteId: bundleModelRuntime.config.defaultModelRouteId,
     });
+    const startupDefaults = resolveTuiStartupSettingDefaults(
+      bundleModelRuntime.config.defaults,
+      opts.thinkingEffort,
+    );
     const workspaceRoots = await WorkspaceRoots.create(
       opts.workDir,
       selection.mode === "fork"
@@ -1239,13 +1305,18 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
           provider: initialRoute.provider,
           model: initialRoute.model,
           modelRouteId: initialRoute.id,
-          ...(opts.thinkingEffort !== undefined ? { thinkingEffort: opts.thinkingEffort } : {}),
+          ...startupDefaults,
           tools: toolStatusFromRegistry(toolRegistry),
           additionalDirectories: workspaceRoots.list().slice(1),
         },
         { persistence: session },
       );
-      coordinateTuiStartupSettings(settings, modelRouter, initialRoute, opts.thinkingEffort);
+      coordinateTuiStartupSettings(
+        settings,
+        bundleModelRouter,
+        initialRoute,
+        opts.thinkingEffort,
+      );
       setSessionAdditionalDirectories(settings, workspaceRoots.list().slice(1));
 
       const scheduleDraft = cronService
@@ -1266,7 +1337,9 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         provider: settings.provider,
         model: settings.model,
         modelRouteId: settings.modelRouteId,
-        modelRouter,
+        modelRouter: bundleModelRouter,
+        modelRouterProvider: async () =>
+          (await reloadModelRuntimeAtSafeBoundary()).runtime.router,
         session,
         sessionId: selection.sessionId,
         sessionMode: selection.mode,
@@ -1280,8 +1353,8 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         ...(cronService ? { cronService } : {}),
         ...(cronService ? { cronDaemonBridge } : {}),
         credentialVault,
-        effectiveConfig: effectiveModelRuntime.config,
-        providerCredentialStatuses: effectiveModelRuntime.credentials,
+        effectiveConfig: bundleModelRuntime.config,
+        providerCredentialStatuses: bundleModelRuntime.credentials,
         ...(taskRuntimeDiagnostic ? { taskRuntimeDiagnostic } : {}),
         additionalDirectories: settings.additionalDirectories,
         additionalDirectoryManager: workspaceRoots,
@@ -1877,13 +1950,20 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
           ),
           runAgent: async (prompt, runOptions) => {
             const resumeExistingSession = runOptions?.resumeExistingSession === true;
+            const refreshed = await reloadModelRuntimeAtSafeBoundary();
+            const runModelRouter = refreshed.runtime.router;
+            if (refreshed.configurationChanged) {
+              reporter.pushSystemMessage(
+                "Shared Provider configuration changed; reloaded at this next-run safe boundary. The previous in-flight run was not hot-swapped.",
+              );
+            }
             const { route, reasoningLevel } = resolveTuiPromptModelRoute(
-              modelRouter,
+              runModelRouter,
               settings,
               runOptions?.model,
               picoConfig.compatibility.claude,
             );
-            const activeRoute = modelRouter.providerConfig(route.id, reasoningLevel);
+            const activeRoute = runModelRouter.providerConfig(route.id, reasoningLevel);
             const rewindContext = resumeExistingSession ? null : rewindContextRef.current;
             if (!resumeExistingSession) rewindContextRef.current = null;
             const cliOpts: RunAgentCliOptions = {
@@ -1920,7 +2000,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
             };
             await runTuiAgentPrompt(cliOpts, {
               reporter,
-              modelRouter,
+              modelRouter: runModelRouter,
               toolDisclosure,
               runtimeState,
               pluginSnapshot,
@@ -2287,7 +2367,8 @@ export function resolveLocalTuiCommandUiEffect(
     return { kind: "none" };
   }
 
-  const models = options.models ?? buildModelOptions();
+  const commandModels = modelOptionsFromLocalCommand(result.data);
+  const models = commandModels ?? options.models ?? buildModelOptions();
   const request = createLocalUiDialogRequest(result.ui, {
     currentModelId: options.currentModelId,
     models,
@@ -2301,6 +2382,29 @@ export function resolveLocalTuiCommandUiEffect(
     models,
     currentModelId: options.currentModelId,
   };
+}
+
+function modelOptionsFromLocalCommand(data: unknown): readonly ModelOption[] | undefined {
+  if (!isRecord(data) || !Array.isArray(data.modelRoutes)) return undefined;
+  const models = data.modelRoutes.flatMap((value): ModelOption[] => {
+    if (
+      !isRecord(value) ||
+      typeof value.id !== "string" ||
+      typeof value.model !== "string" ||
+      typeof value.providerId !== "string" ||
+      typeof value.provider !== "string"
+    ) {
+      return [];
+    }
+    return [
+      {
+        id: value.id,
+        name: value.model,
+        description: `${value.providerId} · ${value.provider}`,
+      },
+    ];
+  });
+  return models.length > 0 ? models : undefined;
 }
 
 export async function runTuiAgentPrompt(

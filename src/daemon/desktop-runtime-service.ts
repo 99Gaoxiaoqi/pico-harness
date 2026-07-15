@@ -1018,6 +1018,13 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   ): Promise<JsonObject> {
     try {
       const resolved = resolvedInput ?? (await this.resolveRuntimeUserInput(workspacePath, input));
+      // A conversation-first client is allowed to send its first message without opening the
+      // settings screen. Materialize the effective user/project defaults before run.start so the
+      // production host observes the same durable Session settings as an explicit settings.get.
+      await this.withSession(workspacePath, sessionId, async (session) => {
+        await this.getSessionSettings(workspacePath, session);
+        await session.flushPersistence();
+      });
       await this.commitSessionInputOnce(
         workspacePath,
         sessionId,
