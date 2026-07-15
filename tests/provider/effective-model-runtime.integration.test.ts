@@ -5,6 +5,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { Session } from "../../src/engine/session.js";
 import type {
   CronDaemonBridge,
+  ProviderDaemonEnvironmentImportInput,
+  ProviderDaemonEnvironmentImportResult,
   ProviderDaemonDeleteInput,
   ProviderDaemonDeleteResult,
 } from "../../src/input/cron-daemon-bridge.js";
@@ -357,32 +359,32 @@ describe("effective model runtime integration", () => {
       LLM_MODELS: "import-model,other-model",
       LLM_API_KEY: "must-never-be-rendered",
     };
-    const daemon = providerDeleteBridge(async ({ providerId, expectedRevision }) => {
-      const current = await store.read();
-      if (current.revision !== expectedRevision) {
-        return { status: "rejected", message: "CONFIG_REVISION_CONFLICT" };
-      }
-      const provider = current.config.providers[providerId];
-      if (!provider) return { status: "rejected", message: "Provider not found" };
-      const providers = { ...current.config.providers };
-      delete providers[providerId];
-      const written = await store.write(
-        { ...current.config, providers },
-        { expectedRevision },
-      );
-      await vault.delete(
-        credentialRefForProvider({
-          providerId,
-          protocol: provider.protocol,
-          baseURL: provider.baseURL,
-        }),
-      );
-      return {
-        status: "deleted",
-        revision: written.revision,
-        message: `Shared user provider ${providerId} deleted.`,
-      };
-    });
+    const daemon = providerDeleteBridge(
+      async ({ providerId, expectedRevision }) => {
+        const current = await store.read();
+        if (current.revision !== expectedRevision) {
+          return { status: "rejected", message: "CONFIG_REVISION_CONFLICT" };
+        }
+        const provider = current.config.providers[providerId];
+        if (!provider) return { status: "rejected", message: "Provider not found" };
+        const providers = { ...current.config.providers };
+        delete providers[providerId];
+        const written = await store.write({ ...current.config, providers }, { expectedRevision });
+        await vault.delete(
+          credentialRefForProvider({
+            providerId,
+            protocol: provider.protocol,
+            baseURL: provider.baseURL,
+          }),
+        );
+        return {
+          status: "deleted",
+          revision: written.revision,
+          message: `Shared user provider ${providerId} deleted.`,
+        };
+      },
+      (input) => coordinatedEnvironmentImport(input, store, vault),
+    );
     const registry = await createPicoCommandRegistry({
       workDir,
       provider: "openai",
@@ -463,7 +465,7 @@ describe("effective model runtime integration", () => {
     ).resolves.toBe(false);
   });
 
-  it("keeps a provider visible when vault import fails and keeps config when vault deletion fails", async () => {
+  it("compensates config when daemon vault import fails and keeps config when vault deletion fails", async () => {
     const workDir = await mkdtemp(join(tmpdir(), "pico-provider-failure-work-"));
     const picoHome = await mkdtemp(join(tmpdir(), "pico-provider-failure-home-"));
     const store = new UserConfigStore({ picoHome });
@@ -480,15 +482,17 @@ describe("effective model runtime integration", () => {
         LLM_MODEL: "failure-model",
         LLM_API_KEY: secret,
       },
+      cronDaemonBridge: providerDeleteBridge(
+        async () => ({ status: "unavailable", message: "unused" }),
+        (input) => coordinatedEnvironmentImport(input, store, importVault),
+      ),
     });
 
     const failedImport = await processUserInput("/provider import-env failure --confirm", {
       registry: importRegistry,
     });
     expect(JSON.stringify(failedImport)).not.toContain(secret);
-    expect((await store.read()).config.providers.failure?.baseURL).toBe(
-      "https://failure.example.test/v1",
-    );
+    expect((await store.read()).config.providers.failure).toBeUndefined();
 
     const stored = await store.read();
     await store.write(userProviderConfig(), { expectedRevision: stored.revision });
@@ -593,14 +597,64 @@ describe("effective model runtime integration", () => {
 });
 
 function providerDeleteBridge(
-  deleteProvider: (
-    input: ProviderDaemonDeleteInput,
-  ) => Promise<ProviderDaemonDeleteResult>,
+  deleteProvider: (input: ProviderDaemonDeleteInput) => Promise<ProviderDaemonDeleteResult>,
+  importEnvironmentProvider?: (
+    input: ProviderDaemonEnvironmentImportInput,
+  ) => Promise<ProviderDaemonEnvironmentImportResult>,
 ): CronDaemonBridge {
   return {
     registerWorkspace: async () => ({ available: true, message: "registered" }),
     statusWorkspace: async () => ({ available: true, registered: true, message: "connected" }),
     deleteProvider,
+    ...(importEnvironmentProvider ? { importEnvironmentProvider } : {}),
+  };
+}
+
+async function coordinatedEnvironmentImport(
+  input: ProviderDaemonEnvironmentImportInput,
+  store: UserConfigStore,
+  vault: CredentialVault,
+): Promise<ProviderDaemonEnvironmentImportResult> {
+  const current = await store.read();
+  if (current.revision !== input.expectedRevision) {
+    return { status: "rejected", message: "CONFIG_REVISION_CONFLICT" };
+  }
+  const provider = {
+    protocol: input.provider.protocol,
+    baseURL: input.provider.baseURL,
+    apiKeyEnv: input.provider.apiKeyEnv,
+    models: input.provider.models,
+    discoverModels: input.provider.discoverModels,
+  };
+  const written = await store.write(
+    {
+      ...current.config,
+      defaults: {
+        ...current.config.defaults,
+        modelRouteId:
+          current.config.defaults?.modelRouteId ?? `${input.provider.id}/${input.defaultModel}`,
+      },
+      providers: { ...current.config.providers, [input.provider.id]: provider },
+    },
+    { expectedRevision: current.revision },
+  );
+  try {
+    await vault.put(
+      credentialRefForProvider({
+        providerId: input.provider.id,
+        protocol: input.provider.protocol,
+        baseURL: input.provider.baseURL,
+      }),
+      input.secret,
+    );
+  } catch {
+    await store.write(current.config, { expectedRevision: written.revision });
+    return { status: "rejected", message: "vault write rejected; config compensated" };
+  }
+  return {
+    status: "imported",
+    revision: written.revision,
+    message: `Shared user provider ${input.provider.id} imported.`,
   };
 }
 

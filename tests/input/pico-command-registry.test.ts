@@ -26,6 +26,7 @@ import {
 import { fileHistoryMakeSnapshot, fileHistoryTrackEdit } from "../../src/safety/file-history.js";
 import { CronService } from "../../src/tasks/cron-service.js";
 import type { CronDaemonBridge } from "../../src/input/cron-daemon-bridge.js";
+import { UserConfigStore } from "../../src/input/user-config-store.js";
 import { ModelRouter } from "../../src/provider/model-router.js";
 import { resolveModelRouteCapabilities } from "../../src/provider/model-capabilities.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
@@ -146,6 +147,24 @@ describe("Pico command registry", () => {
       { TEST_CRON_API_KEY: "secret-never-rendered" },
       "configured/glm-5.2",
     );
+    const userConfigStore = new UserConfigStore({ picoHome: join(workDir, "user-home") });
+    const initialUserConfig = await userConfigStore.read();
+    await userConfigStore.write(
+      {
+        version: 1,
+        defaults: { modelRouteId: "configured/glm-5.2" },
+        providers: {
+          configured: {
+            protocol: "openai",
+            baseURL: "https://example.test/v1",
+            apiKeyEnv: "TEST_CRON_API_KEY",
+            models: ["glm-5.2"],
+            discoverModels: false,
+          },
+        },
+      },
+      { expectedRevision: initialUserConfig.revision },
+    );
     const registry = await createPicoCommandRegistry({
       workDir,
       provider: "openai",
@@ -157,6 +176,25 @@ describe("Pico command registry", () => {
       cronDaemonBridge: bridge,
       credentialVault,
       credentialEnv: { TEST_CRON_API_KEY: "secret-never-rendered" },
+      userConfigStore,
+      effectiveConfig: {
+        defaultModelRouteId: "configured/glm-5.2",
+        defaults: { modelRouteId: "configured/glm-5.2" },
+        providers: {
+          configured: {
+            protocol: "openai",
+            baseURL: "https://example.test/v1",
+            apiKeyEnv: "TEST_CRON_API_KEY",
+            models: ["glm-5.2"],
+            discoverModels: false,
+          },
+        },
+        sources: {
+          "providers.configured": "user",
+          "defaults.modelRouteId": "user",
+        },
+        revisions: { user: "test-user", project: "test-project" },
+      },
     });
 
     const imported = await processUserInput("/cron credential import", { registry });
@@ -180,7 +218,8 @@ describe("Pico command registry", () => {
       "工具网络：仅允许 api.example.com",
     );
     const allowlistedJob = cron.list(workDir).find((job) => job.prompt === "检查未提交的改动");
-    expect(allowlistedJob?.credentialRef).toMatch(/^pico-keychain:\/\/model-route\//u);
+    expect(allowlistedJob?.credentialRef).toMatch(/^pico-keychain:\/\/provider\/v2\//u);
+    expect(allowlistedJob?.modelRouteId).toBe("configured/glm-5.2");
     expect(allowlistedJob?.enabled).toBe(true);
     expect(disabledCountWhenRegistered).toEqual([1]);
 
@@ -220,6 +259,79 @@ describe("Pico command registry", () => {
     expect(status.type === "local-command" ? status.result.message : undefined).toContain(
       "模型 Provider 调用仍需联网",
     );
+  });
+
+  it("/cron 不将 effective environment Provider 误当成可持久 config", async () => {
+    const workDir = mkdtempSync(join(tmpdir(), "pico-command-env-cron-"));
+    const cron = new CronService({ workDir });
+    cleanup.push(() => {
+      cron.close();
+      rmSync(workDir, { recursive: true, force: true });
+    });
+    const secrets = new Map<CredentialRef, string>();
+    const vault: CredentialVault = {
+      capability: () => ({
+        available: true,
+        backend: "macos-keychain",
+        diagnostic: "test keychain",
+      }),
+      put: async (ref, secret) => void secrets.set(ref, secret),
+      resolve: async (ref) => secrets.get(ref) ?? Promise.reject(new Error("missing")),
+      has: async (ref) => secrets.has(ref),
+      delete: async (ref) => void secrets.delete(ref),
+    };
+    const environmentProvider = {
+      protocol: "openai" as const,
+      baseURL: "https://environment.example.test/v1",
+      apiKeyEnv: "LLM_API_KEY",
+      models: ["env-model"],
+      discoverModels: false,
+    };
+    const router = new ModelRouter(
+      [
+        {
+          id: "legacy/env-model",
+          providerId: "legacy",
+          provider: "openai",
+          model: "env-model",
+          baseURL: environmentProvider.baseURL,
+          apiKeyEnv: "LLM_API_KEY",
+          // EffectiveConfigResolver flattens the environment entry before ModelRouter,
+          // so source alone is not sufficient to classify persistence authority.
+          source: "config",
+          capabilities: resolveModelRouteCapabilities("openai", "env-model"),
+        },
+      ],
+      { LLM_API_KEY: "environment-only-secret" },
+      "legacy/env-model",
+    );
+    const registry = await createPicoCommandRegistry({
+      workDir,
+      provider: "openai",
+      model: "env-model",
+      modelRouteId: "legacy/env-model",
+      modelRouter: router,
+      sessionId: "session-env-cron",
+      cronService: cron,
+      credentialVault: vault,
+      credentialEnv: { LLM_API_KEY: "environment-only-secret" },
+      effectiveConfig: {
+        defaultModelRouteId: "legacy/env-model",
+        defaults: { modelRouteId: "legacy/env-model" },
+        providers: { legacy: environmentProvider },
+        sources: {
+          "providers.legacy": "environment",
+          "defaults.modelRouteId": "environment",
+        },
+        revisions: { user: "env-user", project: "env-project" },
+      },
+    });
+
+    const result = await processUserInput("/cron credential import", { registry });
+    const message = result.type === "local-command" ? result.result.message : "";
+    expect(message).toContain("仅由当前进程环境提供");
+    expect(message).not.toContain("environment-only-secret");
+    expect(secrets.size).toBe(0);
   });
 
   it("/rename 为当前 session 设置可持久化的可读标题", async () => {
