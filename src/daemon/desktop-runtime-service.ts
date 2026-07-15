@@ -193,16 +193,19 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
 
   constructor(private readonly options: DesktopRuntimeServiceOptions) {
     this.env = options.env ?? process.env;
-    this.picoHome = resolvePicoHome({ env: this.env });
+    // Test embedders commonly inject only model credentials. Treat a missing PICO_HOME
+    // as an overlay omission, while still freezing an explicitly supplied host state root.
+    this.picoHome = resolvePicoHome({ picoHome: this.env["PICO_HOME"] });
     this.registrationStore =
       options.registrationStore ??
       new WorkspaceRegistrationStore(join(this.picoHome, "daemon-workspaces.json"));
     this.trustStore =
       options.trustStore ?? new WorkspaceTrustStore({ userStateDirectory: this.picoHome });
     this.sessionStateStore =
-      options.sessionStateStore ?? new DesktopSessionStateStore({ env: this.env });
+      options.sessionStateStore ?? new DesktopSessionStateStore({ picoHome: this.picoHome });
     this.conversationStateStore =
-      options.conversationStateStore ?? new DesktopConversationStateStore({ env: this.env });
+      options.conversationStateStore ??
+      new DesktopConversationStateStore({ picoHome: this.picoHome });
     this.providerFactory = options.providerFactory ?? createProvider;
     this.userConfigStore =
       options.userConfigStore ?? new UserConfigStore({ picoHome: this.picoHome });
