@@ -10,7 +10,7 @@ import { SessionForkService } from "../../src/engine/session-fork-service.js";
 import { SessionManager } from "../../src/engine/session.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 import { RuntimeEventStore } from "../../src/runtime/runtime-event-store.js";
-import { RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX } from "../../src/runtime/runtime-run.js";
+import { RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX, RuntimeRun } from "../../src/runtime/runtime-run.js";
 
 const exec = promisify(execFile);
 
@@ -64,6 +64,12 @@ describe("runtime fork publication concurrency", () => {
     expect(partialEvents.filter((event) => event.kind === "message.committed")).toHaveLength(1);
     expect(partialEvents.filter((event) => event.kind === "session.forked")).toHaveLength(0);
     expect(partialEvents.filter((event) => event.kind === "run.terminal")).toHaveLength(0);
+    await expect(
+      RuntimeRun.reconcileIncompleteRuns({ sessionId: targetSessionId, workDir, store }),
+    ).resolves.toEqual([]);
+    expect(
+      (await store.readSession(targetSessionId)).filter((event) => event.kind === "run.terminal"),
+    ).toHaveLength(0);
     await expect(listCliSessionSummaries(workDir)).resolves.not.toEqual(
       expect.arrayContaining([expect.objectContaining({ id: targetSessionId })]),
     );
@@ -141,6 +147,12 @@ describe("runtime fork publication concurrency", () => {
     const publishedEvents = await store.readSession(targetSessionId);
     expect(publishedEvents.filter((event) => event.kind === "session.forked")).toHaveLength(1);
     expect(publishedEvents.filter((event) => event.kind === "run.terminal")).toHaveLength(0);
+    await expect(
+      RuntimeRun.reconcileIncompleteRuns({ sessionId: targetSessionId, workDir, store }),
+    ).resolves.toEqual([]);
+    expect(
+      (await store.readSession(targetSessionId)).filter((event) => event.kind === "run.terminal"),
+    ).toHaveLength(0);
 
     await expect(
       new SessionForkService({
@@ -156,6 +168,9 @@ describe("runtime fork publication concurrency", () => {
     expect(bootstrapEvents.filter((event) => event.kind === "run.started")).toHaveLength(1);
     expect(bootstrapEvents.filter((event) => event.kind === "session.forked")).toHaveLength(1);
     expect(bootstrapEvents.filter((event) => event.kind === "run.terminal")).toHaveLength(1);
+    expect(bootstrapEvents.find((event) => event.kind === "run.terminal")).toMatchObject({
+      data: { status: "completed" },
+    });
     expect(new Set(bootstrapEvents.map((event) => event.runId)).size).toBe(1);
     await source.close();
   });
