@@ -82,7 +82,8 @@ import {
   ProviderOperationJournal,
   type ProviderOperationRecord,
 } from "../provider/provider-operation-journal.js";
-import { resolvePicoHome } from "../paths/pico-paths.js";
+import { resolvePicoHome, resolvePicoPaths } from "../paths/pico-paths.js";
+import { RuntimeEventStore, type RuntimeEventStoreEntry } from "../runtime/runtime-event-store.js";
 import { WorkspaceTrustStore } from "../security/workspace-trust.js";
 import type { FileHistoryFilePatch } from "../safety/file-history.js";
 import { RuntimeStore } from "../tasks/runtime-store.js";
@@ -670,30 +671,36 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
 
   private async migrateLegacySessionTitle(
     metadata: LegacyDesktopSessionTitleMetadata,
-  ): Promise<void> {
-    const sessionExists = (
-      await listCliSessionSummaries(metadata.workspacePath, { picoHome: this.picoHome })
-    ).some((summary) => summary.id === metadata.sessionId);
-    if (!sessionExists) {
-      throw new Error(
-        `Cannot migrate Desktop title for missing session ${metadata.sessionId} in ${metadata.workspacePath}`,
-      );
+  ): Promise<"migrated" | "orphan"> {
+    const eventStore = new RuntimeEventStore({
+      databasePath: resolvePicoPaths(metadata.workspacePath, { picoHome: this.picoHome }).workspace
+        .runtimeDatabase,
+    });
+    // Read the canonical ledger before Session hydration can append another settings snapshot.
+    const projection = await eventStore.readSessionProjection(metadata.sessionId);
+    if (!projection) return "orphan";
+    const initialTitle = latestRuntimeTitle(projection.entries);
+    if (canonicalTitleWins(initialTitle, metadata) || initialTitle.title === metadata.title) {
+      return "migrated";
     }
+
     await this.withSession(metadata.workspacePath, metadata.sessionId, async (session) => {
+      // A queued Session operation may have renamed the title after the first read. Re-read while
+      // serialized, still before getSessionSettings() can enqueue its hydration snapshot.
+      const currentTitle = latestRuntimeTitle(
+        await eventStore.readSessionEntries(metadata.sessionId),
+      );
+      if (canonicalTitleWins(currentTitle, metadata) || currentTitle.title === metadata.title)
+        return;
+
       const settings = await this.getSessionSettings(metadata.workspacePath, session);
-      const latestSettingsEvent = (await session.runtimeEventStore?.readSession(metadata.sessionId))
-        ?.filter((event) => event.kind === "session.state.committed" && event.data.patch.settings)
-        .at(-1);
-      const canonicalTitleIsNewer =
-        settings.title !== undefined &&
-        latestSettingsEvent !== undefined &&
-        Date.parse(latestSettingsEvent.at) > metadata.updatedAt;
-      if (!canonicalTitleIsNewer && settings.title !== metadata.title) {
+      if (settings.title !== metadata.title) {
         const result = setSessionTitle(settings, metadata.title);
         if (!result.ok) throw new Error(result.message);
       }
       await session.flushPersistence();
     });
+    return "migrated";
   }
 
   private async forkSession(workspacePath: string, sessionId: string): Promise<JsonValue> {
@@ -3257,6 +3264,45 @@ function firstSendRequestFingerprint(params: {
       }),
     )
     .digest("hex");
+}
+
+interface RuntimeTitleVersion {
+  readonly title?: string;
+  readonly changedAt?: number;
+}
+
+function latestRuntimeTitle(entries: readonly RuntimeEventStoreEntry[]): RuntimeTitleVersion {
+  let observedSettings = false;
+  let title: string | undefined;
+  let changedAt: number | undefined;
+  for (const { event } of entries) {
+    if (event.kind !== "session.state.committed" || !event.data.patch.settings) continue;
+    const nextTitle = event.data.patch.settings.title;
+    const titleChanged = observedSettings ? nextTitle !== title : nextTitle !== undefined;
+    observedSettings = true;
+    title = nextTitle;
+    if (!titleChanged) continue;
+    const eventAt = Date.parse(event.at);
+    if (!Number.isFinite(eventAt)) {
+      throw new Error(`RuntimeEvent ${event.eventId} has an invalid title timestamp`);
+    }
+    changedAt = eventAt;
+  }
+  return {
+    ...(title === undefined ? {} : { title }),
+    ...(changedAt === undefined ? {} : { changedAt }),
+  };
+}
+
+function canonicalTitleWins(
+  canonical: RuntimeTitleVersion,
+  legacy: LegacyDesktopSessionTitleMetadata,
+): boolean {
+  return (
+    canonical.title !== undefined &&
+    canonical.changedAt !== undefined &&
+    canonical.changedAt > legacy.updatedAt
+  );
 }
 
 function sessionPayload(

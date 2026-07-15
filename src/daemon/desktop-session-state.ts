@@ -5,6 +5,7 @@ import { writeJsonAtomic } from "../storage/atomic-json.js";
 
 const DESKTOP_SESSION_STATE_VERSION = 2 as const;
 const LEGACY_DESKTOP_SESSION_STATE_VERSION = 1 as const;
+const LEGACY_DESKTOP_SESSION_ORPHAN_BACKUP_VERSION = 1 as const;
 
 export interface DesktopSessionMetadata {
   readonly workspacePath: string;
@@ -31,12 +32,24 @@ export interface LegacyDesktopSessionTitleMetadata extends DesktopSessionMetadat
   readonly title: string;
 }
 
+export type LegacyDesktopSessionTitleMigrationOutcome = "migrated" | "orphan";
+
+interface LegacyDesktopSessionOrphanBackup {
+  readonly version: typeof LEGACY_DESKTOP_SESSION_ORPHAN_BACKUP_VERSION;
+  readonly sourceVersion: typeof LEGACY_DESKTOP_SESSION_STATE_VERSION;
+  readonly quarantinedAt: number;
+  readonly sessions: readonly LegacyDesktopSessionTitleMetadata[];
+}
+
 export interface DesktopSessionStateStoreOptions {
   readonly filePath?: string;
   readonly env?: Readonly<Record<string, string | undefined>>;
   readonly picoHome?: string;
   readonly now?: () => number;
-  readonly migrateLegacyTitle?: (metadata: LegacyDesktopSessionTitleMetadata) => Promise<void>;
+  readonly legacyOrphanBackupPath?: string;
+  readonly migrateLegacyTitle?: (
+    metadata: LegacyDesktopSessionTitleMetadata,
+  ) => Promise<LegacyDesktopSessionTitleMigrationOutcome>;
 }
 
 /**
@@ -45,6 +58,7 @@ export interface DesktopSessionStateStoreOptions {
  */
 export class DesktopSessionStateStore {
   readonly filePath: string;
+  readonly legacyOrphanBackupPath: string;
   private readonly now: () => number;
   private readonly migrateLegacyTitle?: DesktopSessionStateStoreOptions["migrateLegacyTitle"];
   private legacyMigration?: Promise<DesktopSessionStateFile>;
@@ -58,6 +72,8 @@ export class DesktopSessionStateStore {
         "desktop",
         "session-state.json",
       );
+    this.legacyOrphanBackupPath =
+      options.legacyOrphanBackupPath ?? `${this.filePath}.v1-orphans.json`;
     this.now = options.now ?? Date.now;
     this.migrateLegacyTitle = options.migrateLegacyTitle;
   }
@@ -143,7 +159,9 @@ export class DesktopSessionStateStore {
     }
   }
 
-  private runLegacyMigration(legacy: LegacyDesktopSessionStateFile): Promise<DesktopSessionStateFile> {
+  private runLegacyMigration(
+    legacy: LegacyDesktopSessionStateFile,
+  ): Promise<DesktopSessionStateFile> {
     if (this.legacyMigration) return this.legacyMigration;
     const migration = this.migrateLegacyState(legacy);
     this.legacyMigration = migration;
@@ -157,13 +175,31 @@ export class DesktopSessionStateStore {
   private async migrateLegacyState(
     legacy: LegacyDesktopSessionStateFile,
   ): Promise<DesktopSessionStateFile> {
+    const orphanedTitles: LegacyDesktopSessionTitleMetadata[] = [];
     for (const metadata of legacy.sessions) {
       const title = metadata.title;
       if (title === undefined) continue;
       if (!this.migrateLegacyTitle) {
-        throw new Error(`Desktop session state v1 title migration is unavailable: ${this.filePath}`);
+        throw new Error(
+          `Desktop session state v1 title migration is unavailable: ${this.filePath}`,
+        );
       }
-      await this.migrateLegacyTitle({ ...metadata, title });
+      const legacyTitle = { ...metadata, title };
+      if ((await this.migrateLegacyTitle(legacyTitle)) === "orphan") {
+        orphanedTitles.push(legacyTitle);
+      }
+    }
+
+    if (orphanedTitles.length > 0) {
+      const backup: LegacyDesktopSessionOrphanBackup = {
+        version: LEGACY_DESKTOP_SESSION_ORPHAN_BACKUP_VERSION,
+        sourceVersion: LEGACY_DESKTOP_SESSION_STATE_VERSION,
+        quarantinedAt: this.now(),
+        sessions: orphanedTitles,
+      };
+      // The active v2 file drops title ownership permanently. Publish this one-time
+      // quarantine first so an unreachable RuntimeEvent session cannot lose its old title.
+      await writeJsonAtomic(this.legacyOrphanBackupPath, backup);
     }
 
     const migrated: DesktopSessionStateFile = {
