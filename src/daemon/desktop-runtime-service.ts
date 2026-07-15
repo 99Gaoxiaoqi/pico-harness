@@ -611,14 +611,18 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     });
     try {
       await session.recover();
+      if (title !== undefined) {
+        const settings = await this.getSessionSettings(canonical, session);
+        const result = setSessionTitle(settings, requireText(title, "title"));
+        if (!result.ok) {
+          throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.INVALID_PARAMS, result.message);
+        }
+      }
       // Persist a zero-usage runtime snapshot so every surface discovers the new ledger session.
       session.updateRuntimeState({ usage: session.getRuntimeStateSnapshot().usage });
       await session.flushPersistence();
     } finally {
       await session.close();
-    }
-    if (title !== undefined) {
-      await this.sessionStateStore.update(canonical, sessionId, { title });
     }
     const created = await this.requireSession(canonical, sessionId);
     this.publishSession(created);
@@ -653,8 +657,6 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       }
       await session.flushPersistence();
     });
-    // 旧版 Desktop 可能已经保存过展示标题；同步更新，避免它遮蔽 RuntimeEvent 真源。
-    await this.sessionStateStore.update(canonical, sessionId, { title: normalizedTitle });
     const session = await this.requireSession(canonical, sessionId);
     this.publishSession(session);
     return { session };
@@ -3450,7 +3452,7 @@ function sessionPayload(
   return {
     sessionId: summary.id,
     workspacePath: summary.cwd,
-    title: metadata?.title ?? summary.title ?? summary.firstMessage ?? "未命名会话",
+    title: summary.title ?? summary.firstMessage ?? "未命名会话",
     status: metadata?.archivedAt === undefined ? "active" : "archived",
     createdAt: summary.createdAt.getTime(),
     updatedAt: Math.max(summary.updatedAt.getTime(), metadata?.updatedAt ?? 0),
