@@ -163,6 +163,30 @@ describe("desktop runtime protocol contract", () => {
     );
   });
 
+  it("releases consumed credential frames and detaches a fragmented remainder", () => {
+    const decoder = new RuntimeFrameDecoder();
+    const credential = encodeRuntimeFrame(
+      createTypedRuntimeRequest("provider.credential.set", {
+        providerId: "openai",
+        secret: "sentinel-local-secret",
+        expectedProviderFingerprint: "f".repeat(64),
+      }),
+    );
+    const next = encodeRuntimeFrame(createRuntimeRequest("runtime.ping", {}));
+    const combined = Buffer.concat([credential, next.subarray(0, 3)]);
+
+    expect(decoder.push(combined)).toHaveLength(1);
+    const fragmented = decoderPending(decoder);
+    expect(fragmented).toEqual(next.subarray(0, 3));
+    expect(fragmented.buffer).not.toBe(combined.buffer);
+    combined.fill(0);
+    expect(decoder.push(next.subarray(3))).toHaveLength(1);
+
+    const empty = decoderPending(decoder);
+    expect(empty.byteLength).toBe(0);
+    expect(empty.buffer).not.toBe(next.buffer);
+  });
+
   it("exposes method and event maps for end-to-end type inference", () => {
     type StartParams = RuntimeParams<"run.start">;
     type StartResult = RuntimeResult<"run.start">;
@@ -225,6 +249,10 @@ describe("desktop runtime protocol contract", () => {
     expect(request.params.prompt).toBe("fix tests");
   });
 });
+
+function decoderPending(decoder: RuntimeFrameDecoder): Buffer {
+  return (decoder as unknown as { readonly pending: Buffer }).pending;
+}
 
 function requestJson(method: string, params: unknown): string {
   return JSON.stringify({

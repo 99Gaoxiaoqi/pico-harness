@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
-import { chmod, mkdir, rm } from "node:fs/promises";
+import { chmod, lstat, mkdir, rm } from "node:fs/promises";
 import { homedir, platform, tmpdir, userInfo } from "node:os";
 import { dirname, join, normalize } from "node:path";
 import { resolvePicoHome } from "../paths/pico-paths.js";
@@ -51,23 +51,34 @@ export function resolveLocalDaemonEndpoint(
     };
   }
   const configuredRuntimeDir = options.runtimeDir ?? env["XDG_RUNTIME_DIR"];
-  const runtimeDir = configuredRuntimeDir ?? join(tmpdir(), `pico-${digest}`);
+  const runtimeDir =
+    configuredRuntimeDir === undefined
+      ? join(tmpdir(), `pico-${digest}`)
+      : join(configuredRuntimeDir, compactDigest);
   // Keep macOS Unix socket paths below the ~104-byte kernel limit. The default directory
-  // already carries the full digest; shared/overridden runtime directories use a short suffix.
-  // The protocol generation is part of the digest input, so the compact name remains versioned.
-  const endpointName = configuredRuntimeDir === undefined ? "runtime-v1" : compactDigest;
+  // already carries the full digest; an external root gets a compact Pico-private child.
+  // Never place or chmod a socket directly in XDG_RUNTIME_DIR/an injected shared root.
   return {
     transport: "unix",
-    address: join(runtimeDir, `${endpointName}.sock`),
-    authTokenPath: join(runtimeDir, `${endpointName}.auth`),
+    address: join(runtimeDir, configuredRuntimeDir === undefined ? "runtime-v1.sock" : "s"),
+    authTokenPath: join(runtimeDir, configuredRuntimeDir === undefined ? "runtime-v1.auth" : "a"),
   };
 }
 
 /** Prepares a current-user-only POSIX socket parent. No-op for Windows named pipes. */
 export async function prepareLocalDaemonEndpoint(endpoint: LocalDaemonEndpoint): Promise<void> {
   if (endpoint.transport !== "unix") return;
-  await mkdir(dirname(endpoint.address), { recursive: true, mode: 0o700 });
-  await chmod(dirname(endpoint.address), 0o700);
+  const privateDirectory = dirname(endpoint.address);
+  await mkdir(privateDirectory, { recursive: true, mode: 0o700 });
+  const metadata = await lstat(privateDirectory);
+  if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+    throw new Error(`Runtime 目录必须是当前用户的普通目录: ${privateDirectory}`);
+  }
+  const currentUid = process.getuid?.();
+  if (currentUid !== undefined && metadata.uid !== currentUid) {
+    throw new Error(`Runtime 目录不属于当前用户: ${privateDirectory}`);
+  }
+  await chmod(privateDirectory, 0o700);
 }
 
 export async function secureLocalDaemonEndpoint(endpoint: LocalDaemonEndpoint): Promise<void> {

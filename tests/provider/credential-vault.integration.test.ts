@@ -59,6 +59,42 @@ describe("Provider credential vault integration", () => {
     expect(calls[0]?.args.join(" ")).not.toContain("vault-secret");
   });
 
+  it("检查凭证存在性时不使用 -w 读取明文，且只将 item-not-found 映射为 false", async () => {
+    const calls: string[][] = [];
+    let outcome: "found" | "missing" | "denied" = "found";
+    const vault = new MacOsKeychainCredentialVault({
+      run: async (args) => {
+        calls.push([...args]);
+        if (outcome === "missing") {
+          throw new Error("The specified item could not be found in the keychain.");
+        }
+        if (outcome === "denied") throw new Error("User interaction is not allowed");
+        return "keychain metadata only";
+      },
+    });
+    const ref = credentialRefForProvider({
+      providerId: "status-only",
+      protocol: "openai",
+      baseURL: "https://provider.example/v1",
+    });
+
+    await expect(vault.has(ref)).resolves.toBe(true);
+    expect(calls[0]).toEqual([
+      "find-generic-password",
+      "-a",
+      ref,
+      "-s",
+      "dev.pico.runtime.provider",
+    ]);
+    expect(calls[0]).not.toContain("-w");
+
+    outcome = "missing";
+    await expect(vault.has(ref)).resolves.toBe(false);
+    outcome = "denied";
+    await expect(vault.has(ref)).rejects.toThrow("User interaction is not allowed");
+    await expect(vault.resolve(ref)).rejects.toThrow("User interaction is not allowed");
+  });
+
   it("未验证的平台明确诊断并 fail-closed，不回退到文件或进程环境", async () => {
     const vault = createPlatformCredentialVault("linux");
     const ref = credentialRefForModelRoute(
