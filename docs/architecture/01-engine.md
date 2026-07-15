@@ -129,8 +129,9 @@ generateWithRetry (内层:普通重试)
 - **`getWorkingMemory(limit)`**:仅为兼容测试保留，主 Agent 不再调用
 - **`append(msg)`**:处理 deferred + toolResultMeta 登记。assistant 带 toolCalls → 登记 pendingToolCallIds；ToolResult 到达 → 从 pending 删除；普通消息且 pending 非空 → 暂存 deferredMessages
 - **`serialize(task)`**:per-session 串行执行队列，同一 Session 的 engine.run 必须串行
-- **跨进程单写者**：持久化 Session 从 recover 到 close 持有 owner lease，避免两个进程用不同内存投影并发运行
+- **跨进程单写者**：持久化 Session 从 recover 到 close 持有 owner lease；每个排队写在提交前后校验所有权，heartbeat 报告丢锁后立即进入 `write_uncertain`，已接纳的后续写也会停止
 - **持久化提交**：消息先提交 `RuntimeEventStore`，再更新 Session 内存投影；相同 `eventId` 重试幂等
+- **增量投影**：正常 append 只读取 canonical suffix，并在同一事务推进 FTS 消息和 projection cursor；首次恢复、rewind、重复事件或游标/分支错位才做全量 replay
 - **LRU + TTL 双重驱逐**:maxSessions=128，TTL=24h
 
 ### RuntimeEventStore (`src/runtime/runtime-event-store.ts`)
@@ -141,6 +142,7 @@ SQLite 追加事件表是会话与运行时的唯一事实源：`message.committ
 - **事务提交**：事件内容与全局 sequence 在同一 SQLite 事务中提交
 - **Exactly-once**：`(session_id, event_id)` 唯一；同 ID 同 payload 重试复用原 cursor，不同 payload 拒绝
 - **可重建投影**：Session history、usage、CLI 会话列表和搜索索引均从事件恢复
+- **版本边界**：Store 与 Storage Doctor 共用 RuntimeEvent decoder；未知/旧版/未来版事件 fail closed，共享 SQLite 若为未来 schema 或 migration 身份不匹配则在 WAL、DDL 和写入前拒绝
 - **单一恢复路径**：不再读取或写入 Session/run JSONL，也不迁移旧 `.claw` 会话数据
 
 ---
