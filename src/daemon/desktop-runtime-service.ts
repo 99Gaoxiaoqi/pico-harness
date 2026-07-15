@@ -68,10 +68,13 @@ import {
 } from "../provider/effective-model-runtime.js";
 import {
   CredentialNotFoundError,
+  assertCredentialRefMatchesModelRoute,
+  assertCredentialRefMatchesProvider,
   createPlatformCredentialVault,
   credentialRefForProvider,
   importProviderCredential,
   normalizeProviderEndpoint,
+  parseAnyCredentialRef,
   type CredentialRef,
   type CredentialVault,
 } from "../provider/credential-vault.js";
@@ -114,7 +117,11 @@ import {
   workspaceStatusResult,
   type DaemonRunExecution,
 } from "./workspace-runtime-service.js";
-import { DesktopAutomationService } from "./desktop-automation-service.js";
+import {
+  DesktopAutomationService,
+  type AutomationProviderReference,
+  type ActiveAutomationReference,
+} from "./desktop-automation-service.js";
 
 const UNSUPPORTED_DESKTOP_METHODS: ReadonlySet<string> = new Set([
   "approval.respond",
@@ -317,6 +324,10 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         return this.listUserProviders(request.params);
       case "provider.upsert":
         return this.withProviderDependencyLock(() => this.upsertUserProvider(request.params));
+      case "provider.importEnvironment":
+        return this.withProviderDependencyLock(() =>
+          this.importEnvironmentProvider(request.params),
+        );
       case "provider.delete":
         return this.withProviderDependencyLock(() => this.deleteUserProvider(request.params));
       case "provider.credential.status":
@@ -1821,6 +1832,12 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const { id, config } = normalizeRuntimeProvider(record["provider"]);
     const current = await this.userConfigStore.read();
     const previousProvider = current.config.providers[id];
+    const workspacePaths = await this.registrationStore.list();
+    this.assertProviderCompatibleWithAutomationReferences(
+      id,
+      config,
+      this.options.automations?.providerReferences(id, workspacePaths) ?? [],
+    );
     if (
       previousProvider &&
       (previousProvider.protocol !== config.protocol ||
@@ -1838,6 +1855,80 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     );
     assertUserDefaultRoute(next);
     const written = await this.writeUserConfig(next, expectedRevision);
+    const provider = await this.projectProviderProfile(id, written.config.providers[id]!, "user");
+    await this.publishUserConfigUpdated(written.revision, [id]);
+    return { provider, revision: written.revision };
+  }
+
+  private async importEnvironmentProvider(params: unknown): Promise<JsonValue> {
+    const record = assertExactObjectKeys(
+      params,
+      ["provider", "defaultModel", "secret", "expectedRevision"],
+      "provider.importEnvironment params",
+    );
+    const expectedRevision = requireSha256(record["expectedRevision"], "expectedRevision");
+    const { id, config } = normalizeRuntimeProvider(record["provider"]);
+    const defaultModel = requireText(record["defaultModel"], "defaultModel");
+    if (!config.models.includes(defaultModel)) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.INVALID_PARAMS,
+        `默认模型 ${defaultModel} 不在 Provider ${id} 的显式模型列表中`,
+      );
+    }
+    if (!this.credentialVault.capability().available) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.FORBIDDEN,
+        this.credentialVault.capability().diagnostic,
+      );
+    }
+    const secret = requireSecret(record["secret"]);
+    const current = await this.userConfigStore.read();
+    const previousProvider = current.config.providers[id];
+    if (previousProvider && !sameProviderAuthority(previousProvider, config)) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.CONFLICT,
+        `Provider ${id} 已使用不同的协议或 Endpoint，请先显式删除后再导入`,
+      );
+    }
+    const workspacePaths = await this.registrationStore.list();
+    this.assertProviderCompatibleWithAutomationReferences(
+      id,
+      config,
+      this.options.automations?.providerReferences(id, workspacePaths) ?? [],
+    );
+    const next = validatedUserConfig(
+      {
+        version: 1,
+        defaults: {
+          ...current.config.defaults,
+          modelRouteId: current.config.defaults?.modelRouteId ?? `${id}/${defaultModel}`,
+        },
+        providers: { ...current.config.providers, [id]: config },
+      },
+      "provider.importEnvironment",
+    );
+    assertUserDefaultRoute(next);
+    const written = await this.writeUserConfig(next, expectedRevision);
+    try {
+      await importProviderCredential({
+        provider: providerCredentialIdentity(id, config),
+        secret,
+        vault: this.credentialVault,
+      });
+    } catch {
+      try {
+        await this.writeUserConfig(current.config, written.revision);
+      } catch (restoreError) {
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.CONFLICT,
+          `Provider ${id} 凭证导入失败，且配置补偿恢复失败。请立即刷新配置并重试: ${errorMessage(restoreError)}`,
+        );
+      }
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.CONFLICT,
+        `Provider ${id} 凭证导入失败，配置已安全恢复`,
+      );
+    }
     const provider = await this.projectProviderProfile(id, written.config.providers[id]!, "user");
     await this.publishUserConfigUpdated(written.revision, [id]);
     return { provider, revision: written.revision };
@@ -2141,12 +2232,65 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   ): Promise<void> {
     await this.assertNoActiveRuns(workspacePaths, `删除 Provider ${providerId} 或其系统凭证`);
     const automationReferences =
-      this.options.automations?.enabledProviderReferences(providerId, workspacePaths) ?? [];
+      this.options.automations?.providerReferences(providerId, workspacePaths) ?? [];
     if (automationReferences.length > 0) {
+      const active = automationReferences.find(isActiveAutomationReference);
       throw new RuntimeProtocolError(
         RUNTIME_ERROR_CODES.CONFLICT,
-        `Provider ${providerId} 仍被已启用 Automation ${automationReferences[0]!.jobId} 引用`,
+        active
+          ? `Provider ${providerId} 仍被运行中 Automation Run ${active.runId} 引用`
+          : `Provider ${providerId} 仍被已启用 Automation ${automationReferences[0]!.jobId} 引用`,
       );
+    }
+  }
+
+  private assertProviderCompatibleWithAutomationReferences(
+    providerId: string,
+    provider: ModelProviderConfig,
+    references: readonly AutomationProviderReference[],
+  ): void {
+    for (const reference of references) {
+      const modelRouteId = reference.modelRouteId;
+      const separator = modelRouteId?.indexOf("/") ?? -1;
+      const model = separator > 0 ? modelRouteId!.slice(separator + 1) : undefined;
+      if (!model || !provider.models.includes(model)) {
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.CONFLICT,
+          `Provider ${providerId} 的模型变更会破坏 Automation ${reference.jobId} 固定的路由 ${modelRouteId ?? "<unknown>"}`,
+        );
+      }
+      if (!reference.credentialRef) {
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.CONFLICT,
+          `Automation ${reference.jobId} 缺少可验证的 credentialRef，已拒绝变更 Provider ${providerId}`,
+        );
+      }
+      try {
+        const parsed = parseAnyCredentialRef(reference.credentialRef);
+        if (parsed.version === "v2") {
+          assertCredentialRefMatchesProvider(
+            reference.credentialRef,
+            providerCredentialIdentity(providerId, provider),
+          );
+        } else {
+          assertCredentialRefMatchesModelRoute(
+            reference.credentialRef,
+            {
+              id: modelRouteId!,
+              provider: provider.protocol,
+              baseURL: provider.baseURL,
+              model,
+              apiKeyEnv: provider.apiKeyEnv,
+            },
+            reference.workspacePath,
+          );
+        }
+      } catch (error) {
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.CONFLICT,
+          `Provider ${providerId} 的协议或 Endpoint 变更会破坏 Automation ${reference.jobId}: ${errorMessage(error)}`,
+        );
+      }
     }
   }
 
@@ -2172,6 +2316,13 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   private async unregisterWorkspace(workspacePath: string): Promise<JsonValue> {
     const canonical = await canonicalizeWorkspacePath(workspacePath);
     await this.assertNoActiveRuns([canonical], "注销工作区");
+    const activeAutomationRuns = this.options.automations?.activeRunReferences([canonical]) ?? [];
+    if (activeAutomationRuns.length > 0) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.CONFLICT,
+        `工作区仍有活动 Automation Run ${activeAutomationRuns[0]!.runId}，拒绝注销`,
+      );
+    }
     const automationReferences = this.options.automations?.enabledReferences([canonical]) ?? [];
     if (automationReferences.length > 0) {
       throw new RuntimeProtocolError(
@@ -3167,6 +3318,16 @@ function providerIdForModelRoute(modelRouteId: string | undefined): string | und
   if (!modelRouteId) return undefined;
   const separator = modelRouteId.indexOf("/");
   return separator > 0 ? modelRouteId.slice(0, separator) : undefined;
+}
+
+function sameProviderAuthority(left: ModelProviderConfig, right: ModelProviderConfig): boolean {
+  return left.protocol === right.protocol && sameProviderEndpoint(left.baseURL, right.baseURL);
+}
+
+function isActiveAutomationReference(
+  reference: AutomationProviderReference,
+): reference is ActiveAutomationReference {
+  return "runId" in reference;
 }
 
 function requireSha256(value: unknown, field: string): string {

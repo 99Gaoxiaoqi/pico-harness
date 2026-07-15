@@ -1,9 +1,10 @@
 import type { ModelRoute } from "../provider/model-router.js";
+import { type CredentialVault } from "../provider/credential-vault.js";
 import {
-  credentialRefForModelRoute,
-  importModelRouteCredential,
-  type CredentialVault,
-} from "../provider/credential-vault.js";
+  importAutomationCredential,
+  resolveAutomationCredentialTarget,
+  type AutomationCredentialTarget,
+} from "../provider/automation-credential.js";
 import { fingerprintBackgroundMcpConfig } from "../safety/background-mcp-policy.js";
 import {
   BACKGROUND_HARDLINE_VERSION,
@@ -25,6 +26,8 @@ export interface CronDraftApplicationOptions {
   listAllowedTools: () => readonly string[];
   credentialVault: CredentialVault;
   credentialEnv?: Readonly<Record<string, string | undefined>>;
+  /** Host-supplied source-aware resolver; TUI uses it to prefer shared v2 credentials. */
+  resolveCredentialTarget?: (route: ModelRoute) => Promise<AutomationCredentialTarget>;
   workspaceRegistrar: CronWorkspaceRegistrar;
   now?: () => number;
 }
@@ -49,8 +52,10 @@ export class CronDraftApplication {
     const capability = this.options.credentialVault.capability();
     let credentialStatus: CronDraft["credentialStatus"] = "unavailable";
     if (capability.available) {
-      const ref = credentialRefForModelRoute(route, this.options.workspacePath);
-      credentialStatus = (await this.options.credentialVault.has(ref)) ? "available" : "missing";
+      const target = await this.resolveCredentialTarget(route);
+      credentialStatus = (await this.options.credentialVault.has(target.ref))
+        ? "available"
+        : "missing";
     }
     const daemonStatus = await this.options.workspaceRegistrar
       .statusWorkspace(this.options.workspacePath)
@@ -85,9 +90,10 @@ export class CronDraftApplication {
 
     const vault = this.options.credentialVault;
     if (!vault.capability().available) throw new Error(vault.capability().diagnostic);
-    const credentialRef = credentialRefForModelRoute(route, this.options.workspacePath);
-    if (!(await vault.has(credentialRef))) {
-      await importModelRouteCredential({
+    const credential = await this.resolveCredentialTarget(route);
+    if (!(await vault.has(credential.ref))) {
+      await importAutomationCredential({
+        target: credential,
         route,
         workspacePath: this.options.workspacePath,
         vault,
@@ -101,7 +107,7 @@ export class CronDraftApplication {
       schedule: draft.cronExpression,
       timeZone: draft.timeZone,
       prompt: draft.prompt,
-      credentialRef,
+      credentialRef: credential.ref,
       modelRouteId: route.id,
       enabled: false,
       policySnapshot: {
@@ -140,6 +146,15 @@ export class CronDraftApplication {
       throw new Error("后台定时任务需要 .pico/config.json 中的 providerID/modelID 路由");
     }
     return route;
+  }
+
+  private async resolveCredentialTarget(route: ModelRoute): Promise<AutomationCredentialTarget> {
+    return this.options.resolveCredentialTarget
+      ? this.options.resolveCredentialTarget(route)
+      : resolveAutomationCredentialTarget({
+          route,
+          workspacePath: this.options.workspacePath,
+        });
   }
 }
 

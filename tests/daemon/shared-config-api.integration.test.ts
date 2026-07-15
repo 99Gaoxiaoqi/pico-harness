@@ -40,6 +40,69 @@ describe("Desktop shared configuration API integration", () => {
     for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
   });
 
+  it("daemon 以单一 OCC 协调导入 Provider 配置与凭证，且不回显 secret", async () => {
+    const fixture = await createFixture();
+    const initial = (await fixture.service.handle(createRuntimeRequest("config.user.get", {}))) as {
+      revision: string;
+    };
+    const secret = "daemon-import-secret-must-stay-write-only";
+    const imported = await fixture.service.handle(
+      createRuntimeRequest("provider.importEnvironment", {
+        provider: providerInput("https://provider.example.test/v1"),
+        defaultModel: "coder",
+        secret,
+        expectedRevision: initial.revision,
+      }),
+    );
+    expect(JSON.stringify(imported)).not.toContain(secret);
+    expect((await fixture.userConfigStore.read()).config).toMatchObject({
+      defaults: { modelRouteId: "shared/coder" },
+      providers: { shared: { models: ["coder"] } },
+    });
+    await expect(
+      fixture.credentialVault.resolve(
+        credentialRefForProvider({
+          providerId: "shared",
+          protocol: "openai",
+          baseURL: "https://provider.example.test/v1",
+        }),
+      ),
+    ).resolves.toBe(secret);
+
+    await expect(
+      fixture.service.handle(
+        createRuntimeRequest("provider.importEnvironment", {
+          provider: providerInput("https://provider.example.test/v1"),
+          defaultModel: "coder",
+          secret: "stale-secret",
+          expectedRevision: initial.revision,
+        }),
+      ),
+    ).rejects.toMatchObject({ code: RUNTIME_ERROR_CODES.CONFLICT });
+  });
+
+  it("daemon 凭证导入失败时用新 revision 补偿恢复原配置", async () => {
+    const fixture = await createFixture({ credentialVault: new FailingPutCredentialVault() });
+    const before = await fixture.userConfigStore.read();
+    const secret = "rejected-secret-must-not-escape";
+    const failure = await fixture.service
+      .handle(
+        createRuntimeRequest("provider.importEnvironment", {
+          provider: providerInput("https://provider.example.test/v1"),
+          defaultModel: "coder",
+          secret,
+          expectedRevision: before.revision,
+        }),
+      )
+      .catch((error: unknown) => error);
+    expect(failure).toMatchObject({
+      code: RUNTIME_ERROR_CODES.CONFLICT,
+      message: expect.stringContaining("配置已安全恢复"),
+    });
+    expect(String(failure)).not.toContain(secret);
+    expect((await fixture.userConfigStore.read()).config).toEqual(before.config);
+  });
+
   it("App 配置一次后共享 Provider、OCC 和凭证状态，且结果与事件不回显 secret", async () => {
     const fixture = await createFixture();
     const observed: unknown[] = [];
@@ -498,6 +561,28 @@ describe("Desktop shared configuration API integration", () => {
     expect(created.job).toMatchObject({ modelRouteId: "shared/coder" });
     await expect(
       fixture.service.handle(
+        createRuntimeRequest("provider.upsert", {
+          provider: { ...providerInput("https://provider.example.test/v1"), models: ["other"] },
+          expectedRevision: upserted.revision,
+        }),
+      ),
+    ).rejects.toMatchObject({
+      code: RUNTIME_ERROR_CODES.CONFLICT,
+      message: expect.stringContaining("固定的路由"),
+    });
+    await expect(
+      fixture.service.handle(
+        createRuntimeRequest("provider.upsert", {
+          provider: providerInput("https://changed.example.test/v1"),
+          expectedRevision: upserted.revision,
+        }),
+      ),
+    ).rejects.toMatchObject({
+      code: RUNTIME_ERROR_CODES.CONFLICT,
+      message: expect.stringContaining("破坏 Automation"),
+    });
+    await expect(
+      fixture.service.handle(
         createRuntimeRequest("provider.credential.delete", {
           providerId: "shared",
           expectedProviderFingerprint: upserted.provider.fingerprint,
@@ -554,6 +639,78 @@ describe("Desktop shared configuration API integration", () => {
     expect(legacy.modelRouteId).toBe("legacy/coder");
     expect(parseAnyCredentialRef(legacy.credentialRef!)).toMatchObject({ version: "v1" });
     cron.close();
+  });
+
+  it("已禁用 Job 的手动 queued Run 在终态前仍阻断 Provider 凭证变更", async () => {
+    const v2Ref = credentialRefForProvider({
+      providerId: "shared",
+      protocol: "openai",
+      baseURL: "https://provider.example.test/v1",
+    });
+    const fixture = await createFixture({
+      automationSecurity: { credentialRef: v2Ref, modelRouteId: "shared/coder" },
+    });
+    const initial = await fixture.userConfigStore.read();
+    const upserted = (await fixture.service.handle(
+      createRuntimeRequest("provider.upsert", {
+        provider: providerInput("https://provider.example.test/v1"),
+        expectedRevision: initial.revision,
+      }),
+    )) as { provider: { fingerprint: string } };
+    const created = (await fixture.service.handle(
+      createRuntimeRequest("jobs.create", {
+        workspacePath: fixture.workspace,
+        name: "Manual run dependency",
+        prompt: "review repository",
+        schedule: "0 9 * * *",
+      }),
+    )) as { job: { jobId: string } };
+    await fixture.service.handle(
+      createRuntimeRequest("jobs.setEnabled", {
+        workspacePath: fixture.workspace,
+        jobId: created.job.jobId,
+        enabled: false,
+      }),
+    );
+    const triggered = (await fixture.service.handle(
+      createRuntimeRequest("jobs.runNow", {
+        workspacePath: fixture.workspace,
+        jobId: created.job.jobId,
+      }),
+    )) as { runId: string };
+
+    await expect(
+      fixture.service.handle(
+        createRuntimeRequest("provider.credential.delete", {
+          providerId: "shared",
+          expectedProviderFingerprint: upserted.provider.fingerprint,
+        }),
+      ),
+    ).rejects.toMatchObject({
+      code: RUNTIME_ERROR_CODES.CONFLICT,
+      message: expect.stringContaining(triggered.runId),
+    });
+    await expect(
+      fixture.service.handle(
+        createRuntimeRequest("workspace.unregister", { workspacePath: fixture.workspace }),
+      ),
+    ).rejects.toMatchObject({
+      code: RUNTIME_ERROR_CODES.CONFLICT,
+      message: expect.stringContaining(triggered.runId),
+    });
+    await expect(fixture.registration.list()).resolves.toContain(fixture.workspace);
+
+    const cron = new CronService({ workDir: fixture.workspace, picoHome: fixture.picoHome });
+    cron.skip(triggered.runId, "test_terminal");
+    cron.close();
+    await expect(
+      fixture.service.handle(
+        createRuntimeRequest("provider.credential.delete", {
+          providerId: "shared",
+          expectedProviderFingerprint: upserted.provider.fingerprint,
+        }),
+      ),
+    ).resolves.toMatchObject({ status: "missing" });
   });
 
   it("生产 daemon 将同一 UserConfigStore 与 Vault 注入 Automation 并创建 v2 Job", async () => {
@@ -896,6 +1053,12 @@ class MemoryCredentialVault implements CredentialVault {
 class FailingDeleteCredentialVault extends MemoryCredentialVault {
   override async delete(_ref: CredentialRef): Promise<void> {
     throw new Error("simulated credential vault delete failure");
+  }
+}
+
+class FailingPutCredentialVault extends MemoryCredentialVault {
+  override async put(_ref: CredentialRef, secret: string): Promise<void> {
+    throw new Error(`simulated credential vault import failure: ${secret}`);
   }
 }
 

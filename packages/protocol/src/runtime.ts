@@ -39,12 +39,7 @@ export type SessionSendDisposition = "started" | "steered" | "queued" | "replace
 export type RuntimeInteractionMode = "default" | "plan" | "auto" | "yolo";
 export type RuntimeProviderKind = "openai" | "claude" | "gemini";
 export type RuntimeConfigSource =
-  | "user"
-  | "project"
-  | "project-legacy"
-  | "environment"
-  | "session"
-  | "cli";
+  "user" | "project" | "project-legacy" | "environment" | "session" | "cli";
 export type RuntimeCredentialStatus = "ready" | "missing" | "environment" | "unsupported";
 export type RuntimeCredentialSource = "keychain" | "environment" | "none";
 
@@ -611,6 +606,22 @@ export type RuntimeMethodMap = {
       readonly revision: string;
     };
   };
+  /**
+   * Trusted local-host import used by TUI. The secret is write-only and never
+   * appears in the result, events, or persisted user configuration.
+   */
+  readonly "provider.importEnvironment": {
+    readonly params: {
+      readonly provider: RuntimeProviderInput;
+      readonly defaultModel: string;
+      readonly secret: string;
+      readonly expectedRevision: string;
+    };
+    readonly result: {
+      readonly provider: RuntimeProviderProfile;
+      readonly revision: string;
+    };
+  };
   readonly "provider.delete": {
     readonly params: { readonly providerId: string; readonly expectedRevision: string };
     readonly result: { readonly deleted: true; readonly revision: string };
@@ -762,6 +773,7 @@ export const RUNTIME_METHODS = [
   "config.effective.get",
   "provider.list",
   "provider.upsert",
+  "provider.importEnvironment",
   "provider.delete",
   "provider.credential.status",
   "provider.credential.set",
@@ -949,11 +961,7 @@ export interface RuntimeAuthResult {
 
 export type RuntimeResponse = RuntimeSuccessResponse | RuntimeErrorResponse;
 export type RuntimeMessage =
-  | RuntimeAuthRequest
-  | RuntimeAuthResult
-  | RuntimeRequest
-  | RuntimeResponse
-  | RuntimeEventMessage;
+  RuntimeAuthRequest | RuntimeAuthResult | RuntimeRequest | RuntimeResponse | RuntimeEventMessage;
 
 export class RuntimeProtocolError extends Error {
   readonly code: RuntimeErrorCode;
