@@ -12,7 +12,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { FullCompactor } from "../src/context/full-compactor.js";
+import { FullCompactor, wrapFullCompactionSummary } from "../src/context/full-compactor.js";
 import { AgentEngine } from "../src/engine/loop.js";
 import { Compactor } from "../src/context/compactor.js";
 import { ContextOverflowError } from "../src/provider/errors.js";
@@ -22,6 +22,7 @@ import { Session, SessionManager } from "../src/engine/session.js";
 import type { LLMProvider, LLMProviderRequestOptions } from "../src/provider/interface.js";
 import type { Message, ToolDefinition } from "../src/schema/message.js";
 import { estimateMessagesTokens } from "../src/context/context-budget.js";
+import type { EvidenceArchive } from "../src/context/evidence-archive.js";
 
 /**
  * 可编程 Mock Provider:可配置返回摘要内容,或抛错,或返回空。
@@ -79,6 +80,48 @@ function requestRetaining(session: Session, messageCount: number) {
 }
 
 describe("FullCompactor 模型摘要压缩", () => {
+  it("preview 不改写 Session 或 history，结果可供 checkpoint 复用", async () => {
+    const provider = new SummaryMockProvider([{ kind: "ok", content: "checkpoint 摘要正文" }]);
+    let archiveCalls = 0;
+    const evidenceArchive = {
+      async archiveToolExchanges(): Promise<never> {
+        archiveCalls++;
+        throw new Error("preview 不应归档证据");
+      },
+    } as unknown as EvidenceArchive;
+    const fc = new FullCompactor({ provider, evidenceArchive });
+    const session = new Session("fc-preview", "/tmp");
+    session.append(
+      userMsg("task1"),
+      assistantMsg("step1"),
+      userMsg("task2"),
+      assistantMsg("step2"),
+      userMsg("recent"),
+    );
+    const history = session.getHistory();
+    const before = structuredClone(history);
+
+    const preview = await fc.preview(session, history, requestRetaining(session, 2));
+
+    expect(preview).toBeDefined();
+    if (!preview) throw new Error("expected compaction preview");
+    expect(preview.summary).toBe("checkpoint 摘要正文");
+    expect(preview.wrappedSummary).toBe(wrapFullCompactionSummary(preview.summary));
+    expect(preview.compactedCount).toBe(2);
+    expect(preview.retainedCount).toBe(before.length - preview.compactedCount);
+    expect(preview.beforeTokens).toBe(estimateMessagesTokens(before));
+    expect(provider.calls).toHaveLength(1);
+    expect(archiveCalls).toBe(0);
+    expect(history).toEqual(before);
+    expect(session.getHistory()).toEqual(before);
+    expect(session.length).toBe(before.length);
+
+    // RuntimeEvent checkpoint 可使用同一结果自行写入，而不必再次调用摘要模型。
+    await session.applyCompaction(preview.wrappedSummary, preview.compactedCount);
+    expect(session.getHistory()[0]!.content).toBe(preview.wrappedSummary);
+    expect(session.length).toBe(before.length - preview.compactedCount + 1);
+  });
+
   it("signal 中止摘要 provider 时立即抛 AbortError 且不重试", async () => {
     let started!: () => void;
     const requestStarted = new Promise<void>((resolve) => {
