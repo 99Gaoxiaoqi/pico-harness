@@ -296,7 +296,7 @@ describe("CronService durable ledger integration", () => {
     const schemaVersion = legacyCli
       .prepare("SELECT COALESCE(MAX(version), 0) AS version FROM schema_migrations")
       .get() as { version: number };
-    expect(schemaVersion.version).toBe(5);
+    expect(schemaVersion.version).toBe(6);
     expect(
       legacyCli
         .prepare("PRAGMA table_info(cron_jobs)")

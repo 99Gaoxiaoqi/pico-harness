@@ -21,6 +21,7 @@ import {
 } from "./endpoint.js";
 import { createLocalIpcAuthTokenStore, type LocalIpcAuthTokenStore } from "./ipc-auth.js";
 import type { LocalRuntimeService, RuntimeEventCursor } from "./service.js";
+import { canonicalizeWorkspacePath } from "./workspace-registry.js";
 
 export interface LocalRuntimeDaemonOptions {
   endpoint: LocalDaemonEndpoint;
@@ -164,9 +165,19 @@ export class LocalRuntimeDaemon {
       }
       if (request.method === "events.subscribe") {
         const cursor = readCursor(request.params);
-        const dispose = this.options.service.subscribe((event) => this.writeEvent(socket, event));
+        if (!cursor.workspacePath) {
+          throw new RuntimeProtocolError(
+            "INVALID_PARAMS",
+            "events.subscribe 必须绑定 workspacePath",
+          );
+        }
+        const workspacePath = await canonicalizeWorkspacePath(cursor.workspacePath);
+        const scopedCursor = { ...cursor, workspacePath };
+        const dispose = this.options.service.subscribe((event) => {
+          if (event.scope.workspacePath === workspacePath) this.writeEvent(socket, event);
+        });
         setSubscription(dispose);
-        const events = await this.options.service.replayEvents(cursor);
+        const events = await this.options.service.replayEvents(scopedCursor);
         this.write(
           socket,
           success(request, {
