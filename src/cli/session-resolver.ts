@@ -11,6 +11,8 @@ import {
   projectRuntimeSessionMessages,
   projectRuntimeSessionState,
 } from "../runtime/runtime-session-projection.js";
+import { RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX } from "../runtime/runtime-run.js";
+import { StorageOperationJournal } from "../storage/operation-journal.js";
 
 export type CliSessionMode = "new" | "continue" | "resume" | "fork";
 export type CliSessionHistorySource = RuntimeSessionManifest["historySource"];
@@ -96,23 +98,26 @@ export function createCliSessionId(): string {
 
 export async function listCliSessionSummaries(workDir: string): Promise<CliSessionSummary[]> {
   const runtimeEventStore = createRuntimeEventStore(workDir);
+  const forkTargets = await listReservedForkTargets(workDir);
   const sequenced = await Promise.all(
-    (await runtimeEventStore.listSessionManifests()).map(async (manifest) =>
-      summaryFromRuntimeSession(
-        manifest,
-        await runtimeEventStore.readSessionEntries(manifest.sessionId),
-      ),
-    ),
+    (await runtimeEventStore.listSessionManifests()).map(async (manifest) => {
+      const entries = await runtimeEventStore.readSessionEntries(manifest.sessionId);
+      if (!isPublishedRuntimeSession(manifest.sessionId, entries, forkTargets)) return undefined;
+      return summaryFromRuntimeSession(manifest, entries);
+    }),
+  );
+  const published = sequenced.filter(
+    (entry): entry is SequencedCliSessionSummary => entry !== undefined,
   );
 
-  sequenced.sort(
+  published.sort(
     (a, b) =>
       b.summary.updatedAt.getTime() - a.summary.updatedAt.getTime() ||
       b.headSequence - a.headSequence ||
       b.summary.createdAt.getTime() - a.summary.createdAt.getTime() ||
       b.summary.id.localeCompare(a.summary.id),
   );
-  return sequenced.map(({ summary }) => summary);
+  return published.map(({ summary }) => summary);
 }
 
 function summaryFromRuntimeSession(
@@ -185,11 +190,44 @@ async function assertRuntimeSessionExists(
   action: "resume" | "fork",
   required: boolean,
 ): Promise<void> {
-  if (await createRuntimeEventStore(workDir).readSessionManifest(sessionId)) return;
-  if (!required) return;
-
   const prefix = action === "fork" ? "无法 fork" : "无法恢复";
-  throw new Error(`${prefix} session ${sessionId}: runtime.sqlite 中不存在`);
+  const store = createRuntimeEventStore(workDir);
+  const manifest = await store.readSessionManifest(sessionId);
+  if (!manifest) {
+    if (!required) return;
+    throw new Error(`${prefix} session ${sessionId}: runtime.sqlite 中不存在`);
+  }
+  const entries = await store.readSessionEntries(sessionId);
+  const forkTargets = await listReservedForkTargets(workDir);
+  if (isPublishedRuntimeSession(sessionId, entries, forkTargets)) return;
+  throw new Error(`${prefix} session ${sessionId}: fork 尚未完成发布`);
+}
+
+async function listReservedForkTargets(workDir: string): Promise<ReadonlySet<string>> {
+  const operations = await new StorageOperationJournal({ workDir }).list();
+  const targets = new Set<string>();
+  for (const operation of operations) {
+    if (operation.kind === "fork" && operation.state !== "aborted") {
+      targets.add(operation.targetSessionId);
+    }
+  }
+  return targets;
+}
+
+function isPublishedRuntimeSession(
+  sessionId: string,
+  entries: readonly RuntimeEventStoreEntry[],
+  reservedForkTargets: ReadonlySet<string>,
+): boolean {
+  if (
+    entries.some(
+      ({ event }) => event.kind === "session.forked" && event.data.sourceDigest !== undefined,
+    )
+  ) {
+    return true;
+  }
+  if (reservedForkTargets.has(sessionId)) return false;
+  return !entries.some(({ event }) => event.runId.startsWith(RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX));
 }
 
 /** 仅用于新 fork 构建失败时清理尚未公布的目标会话。 */

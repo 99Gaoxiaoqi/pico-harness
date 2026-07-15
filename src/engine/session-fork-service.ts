@@ -270,6 +270,8 @@ export class SessionForkService {
     await RuntimeRun.bootstrapFork({
       sourceSessionId: operation.sourceSessionId,
       targetSessionId: operation.targetSessionId,
+      operationId: operation.operationId,
+      operationCreatedAt: operation.createdAt,
       messages,
       ...(sourceThroughEventId ? { sourceThroughEventId } : {}),
       workDir: this.workDir,
