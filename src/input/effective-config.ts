@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { ProviderKind } from "../provider/factory.js";
+import { normalizeProviderEndpoint } from "../provider/credential-vault.js";
 import type { ModelProviderConfig } from "../provider/model-router.js";
 import { loadPicoProjectConfig, type PicoProjectConfig } from "./pico-config.js";
 import {
@@ -175,12 +176,8 @@ function mergeProvider(
 function sameProviderAuthority(left: ModelProviderConfig, right: ModelProviderConfig): boolean {
   return (
     left.protocol === right.protocol &&
-    normalizeEndpoint(left.baseURL) === normalizeEndpoint(right.baseURL)
+    normalizeProviderEndpoint(left.baseURL) === normalizeProviderEndpoint(right.baseURL)
   );
-}
-
-function normalizeEndpoint(value: string): string {
-  return value.trim().replace(/\/+$/u, "");
 }
 
 interface LegacyEnvironmentProvider {
