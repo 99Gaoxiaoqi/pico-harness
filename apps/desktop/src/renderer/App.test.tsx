@@ -253,7 +253,7 @@ describe("DesktopApp renderer", () => {
 
     await user.click(screen.getByRole("button", { name: "信任并继续" }));
     expect(await screen.findByRole("heading", { name: "今天想推进什么？" })).toBeTruthy();
-    expect(screen.getByText(/共享文件夹支持对话、工具和并行子代理/)).toBeTruthy();
+    expect(screen.getByText(/共享文件夹支持对话、工具和并行分析/)).toBeTruthy();
 
     await user.type(screen.getByRole("textbox", { name: "消息" }), "整理会议记录");
     await user.click(screen.getByRole("button", { name: "发送消息" }));
