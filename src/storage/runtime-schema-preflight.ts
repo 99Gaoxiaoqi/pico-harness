@@ -86,6 +86,22 @@ export function preflightRuntimeSchema(databasePath: string): RuntimeSchemaPrefl
   let database: Database.Database | undefined;
   try {
     database = new Database(canonicalDatabasePath, { readonly: true, fileMustExist: true });
+    database.pragma("busy_timeout = 5000");
+    return preflightOpenedRuntimeSchema(database, canonicalDatabasePath);
+  } catch (error) {
+    return invalidSchemaResult(canonicalDatabasePath, error);
+  } finally {
+    database?.close();
+  }
+}
+
+/** Inspects an already-open connection before its caller enables WAL, runs DDL, or writes. */
+export function preflightOpenedRuntimeSchema(
+  database: Database.Database,
+  databasePath: string,
+): RuntimeSchemaPreflightResult {
+  const canonicalDatabasePath = resolve(databasePath);
+  try {
     const tableNames = new Set(
       (
         database
@@ -174,12 +190,14 @@ export function preflightRuntimeSchema(databasePath: string): RuntimeSchemaPrefl
       migrationName: RUNTIME_SCHEMA_CURRENT_MIGRATION_NAME,
     };
   } catch (error) {
-    return {
-      databasePath: canonicalDatabasePath,
-      status: "invalid",
-      reason: error instanceof Error ? error.message : String(error),
-    };
-  } finally {
-    database?.close();
+    return invalidSchemaResult(canonicalDatabasePath, error);
   }
+}
+
+function invalidSchemaResult(databasePath: string, error: unknown): RuntimeSchemaPreflightResult {
+  return {
+    databasePath,
+    status: "invalid",
+    reason: error instanceof Error ? error.message : String(error),
+  };
 }

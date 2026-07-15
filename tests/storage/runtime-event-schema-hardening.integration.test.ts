@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
@@ -11,6 +11,7 @@ import {
   type RuntimeEvent,
   type RuntimeEventDecodeErrorCode,
 } from "../../src/runtime/runtime-event.js";
+import { RuntimeEventStore } from "../../src/runtime/runtime-event-store.js";
 import {
   preflightRuntimeSchema,
   RUNTIME_SCHEMA_CURRENT_MIGRATION_NAME,
@@ -63,6 +64,49 @@ describe("runtime event schema hardening", () => {
 
     expect(decodeRuntimeEvent(event)).toBe(event);
     expect(decodeRuntimeEventJson(JSON.stringify(event))).toEqual(event);
+  });
+
+  it("refuses a future shared SQLite schema before changing the database", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pico-runtime-schema-future-store-"));
+    cleanup.push(root);
+    const databasePath = join(root, "runtime.sqlite");
+    const database = new Database(databasePath);
+    database.exec(`CREATE TABLE schema_migrations (
+      version INTEGER PRIMARY KEY,
+      name TEXT NOT NULL,
+      applied_at INTEGER NOT NULL
+    );
+    CREATE TABLE sentinel (value TEXT NOT NULL);`);
+    database
+      .prepare("INSERT INTO schema_migrations(version, name, applied_at) VALUES (?, ?, ?)")
+      .run(RUNTIME_SCHEMA_VERSION + 1, "future_schema", Date.now());
+    database.prepare("INSERT INTO sentinel(value) VALUES (?)").run("untouched");
+    database.close();
+    const before = await readFile(databasePath);
+
+    expect(() => new RuntimeEventStore({ databasePath })).toThrow(
+      `schema ${RUNTIME_SCHEMA_VERSION + 1} is newer than supported ${RUNTIME_SCHEMA_VERSION}`,
+    );
+    expect(await readFile(databasePath)).toEqual(before);
+  });
+
+  it("uses the shared decoder when a persisted RuntimeEvent row is malformed", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pico-runtime-event-store-decoder-"));
+    cleanup.push(root);
+    const databasePath = join(root, "runtime.sqlite");
+    const store = new RuntimeEventStore({ databasePath });
+    await store.initializeSession({ sessionId: "session-a", workDir: root });
+    await store.append(messageEvent());
+    const database = new Database(databasePath);
+    database
+      .prepare("UPDATE agent_runtime_events SET event_json = ? WHERE event_id = ?")
+      .run("{", "event-message");
+    database.close();
+
+    await expect(store.readSession("session-a")).rejects.toMatchObject({
+      name: "RuntimeEventDecodeError",
+      code: "malformed_json",
+    });
   });
 
   it("preflights missing metadata, old, mismatched current, future, and current schemas read-only", async () => {

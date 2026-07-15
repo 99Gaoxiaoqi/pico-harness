@@ -5,14 +5,19 @@ import { isDeepStrictEqual } from "node:util";
 import Database from "better-sqlite3";
 import { canonicalizeWorkspacePath } from "../paths/pico-paths.js";
 import {
+  preflightOpenedRuntimeSchema,
+  RUNTIME_SCHEMA_VERSION,
+  type RuntimeSchemaPreflightResult,
+} from "../storage/runtime-schema-preflight.js";
+import {
   SESSION_RUNTIME_STATE_VERSION,
   type SessionRuntimeStatePatch,
 } from "../engine/session-runtime.js";
 import type { SessionCursor } from "../engine/session-persistence.js";
 import {
   RUNTIME_EVENT_SCHEMA_VERSION,
-  RuntimeEventIntegrityError,
-  assertRuntimeEvent,
+  decodeRuntimeEvent,
+  decodeRuntimeEventJson,
   type RuntimeEvent,
 } from "./runtime-event.js";
 
@@ -103,7 +108,7 @@ export class RuntimeEventStore {
     this.databasePath = resolve(options.databasePath);
     mkdirSync(dirname(this.databasePath), { recursive: true, mode: 0o700 });
     chmodSync(dirname(this.databasePath), 0o700);
-    const db = this.openDatabase();
+    const db = this.openDatabase(true);
     db.close();
   }
 
@@ -115,6 +120,7 @@ export class RuntimeEventStore {
     try {
       return db
         .transaction(() => {
+          assertRuntimeEventStoreSchema(preflightOpenedRuntimeSchema(db, this.databasePath));
           const existing = this.selectSession(db, options.sessionId);
           if (existing) {
             if (existing.work_dir !== workDir) {
@@ -174,7 +180,7 @@ export class RuntimeEventStore {
     events: readonly RuntimeEvent[],
   ): Promise<readonly RuntimeEventStoreAppendResult[]> {
     const canonicalEvents = events.map((event) => {
-      assertRuntimeEvent(event);
+      decodeRuntimeEvent(event);
       return canonicalizeRuntimeEvent(event);
     });
     if (canonicalEvents.length === 0) return [];
@@ -182,11 +188,12 @@ export class RuntimeEventStore {
     const db = this.openDatabase();
     try {
       return db
-        .transaction(() =>
-          canonicalEvents.map(({ event: canonicalEvent, encoded }) =>
+        .transaction(() => {
+          assertRuntimeEventStoreSchema(preflightOpenedRuntimeSchema(db, this.databasePath));
+          return canonicalEvents.map(({ event: canonicalEvent, encoded }) =>
             this.appendCanonicalEvent(db, canonicalEvent, encoded),
-          ),
-        )
+          );
+        })
         .immediate();
     } finally {
       db.close();
@@ -406,9 +413,14 @@ export class RuntimeEventStore {
   async deleteSession(sessionId: string): Promise<boolean> {
     const db = this.openDatabase();
     try {
-      return (
-        db.prepare("DELETE FROM agent_sessions WHERE session_id = ?").run(sessionId).changes > 0
-      );
+      return db
+        .transaction(() => {
+          assertRuntimeEventStoreSchema(preflightOpenedRuntimeSchema(db, this.databasePath));
+          return (
+            db.prepare("DELETE FROM agent_sessions WHERE session_id = ?").run(sessionId).changes > 0
+          );
+        })
+        .immediate();
     } finally {
       db.close();
     }
@@ -585,16 +597,20 @@ export class RuntimeEventStore {
     return entry.event.data.branchId;
   }
 
-  private openDatabase(): Database.Database {
+  private openDatabase(initializeSchema = false): Database.Database {
     const db = new Database(this.databasePath);
     try {
+      db.pragma("busy_timeout = 5000");
+      assertRuntimeEventStoreSchema(preflightOpenedRuntimeSchema(db, this.databasePath));
       chmodSync(this.databasePath, 0o600);
       db.pragma("journal_mode = WAL");
       db.pragma("foreign_keys = ON");
-      db.pragma("busy_timeout = 5000");
       db.pragma("synchronous = FULL");
-      db.exec(
-        `CREATE TABLE IF NOT EXISTS agent_sessions (
+      if (initializeSchema) {
+        db.transaction(() => {
+          assertRuntimeEventStoreSchema(preflightOpenedRuntimeSchema(db, this.databasePath));
+          db.exec(
+            `CREATE TABLE IF NOT EXISTS agent_sessions (
            session_id TEXT PRIMARY KEY,
            work_dir TEXT NOT NULL,
            history_source TEXT NOT NULL CHECK (history_source = 'runtime-event-v1'),
@@ -618,7 +634,9 @@ export class RuntimeEventStore {
            ON agent_runtime_events(session_id, run_id, sequence);
          CREATE INDEX IF NOT EXISTS idx_agent_runtime_events_session_kind_sequence
            ON agent_runtime_events(session_id, kind, sequence);`,
-      );
+          );
+        }).immediate();
+      }
       return db;
     } catch (error) {
       db.close();
@@ -652,22 +670,7 @@ function decodeEventRow(
   expectedSessionId: string,
   expectedRunId?: string,
 ): RuntimeEventStoreEntry {
-  let value: unknown;
-  try {
-    value = JSON.parse(row.event_json);
-  } catch {
-    throw new RuntimeEventStoreIntegrityError(
-      `Runtime event ${row.event_id} contains invalid JSON`,
-    );
-  }
-  try {
-    assertRuntimeEvent(value);
-  } catch (error) {
-    if (error instanceof RuntimeEventIntegrityError) throw error;
-    throw new RuntimeEventStoreIntegrityError(
-      `Runtime event ${row.event_id} has an invalid payload`,
-    );
-  }
+  const value = decodeRuntimeEventJson(row.event_json);
   if (
     value.sessionId !== expectedSessionId ||
     row.session_id !== expectedSessionId ||
@@ -726,6 +729,26 @@ function canonicalizeRuntimeEvent(event: RuntimeEvent): {
     );
   }
   const canonical: unknown = JSON.parse(encoded);
-  assertRuntimeEvent(canonical);
-  return { event: canonical, encoded };
+  return { event: decodeRuntimeEvent(canonical), encoded };
+}
+
+function assertRuntimeEventStoreSchema(schema: RuntimeSchemaPreflightResult): void {
+  if (schema.status === "future") {
+    throw new RuntimeEventStoreIntegrityError(
+      `runtime.sqlite schema ${schema.schemaVersion} is newer than supported ${RUNTIME_SCHEMA_VERSION}`,
+    );
+  }
+  if (schema.status === "current_migration_name_mismatch") {
+    throw new RuntimeEventStoreIntegrityError(
+      `runtime.sqlite schema ${schema.schemaVersion} migration ${schema.migrationName} does not match ${schema.expectedMigrationName}`,
+    );
+  }
+  if (schema.status === "invalid") {
+    throw new RuntimeEventStoreIntegrityError(`runtime.sqlite schema is invalid: ${schema.reason}`);
+  }
+  if ("tables" in schema && schema.tables.agentSessions !== schema.tables.agentRuntimeEvents) {
+    throw new RuntimeEventStoreIntegrityError(
+      "runtime.sqlite contains only part of the Agent runtime event schema",
+    );
+  }
 }

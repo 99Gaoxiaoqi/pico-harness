@@ -466,6 +466,7 @@ export class Session implements SessionRuntimePersistence {
       ownerId: `runtime-session:${this.id}`,
     }).then((lease) => {
       this.runtimeOwnership = lease;
+      this.watchRuntimeOwnership(lease);
       return lease;
     });
     this.runtimeOwnershipPromise = acquisition;
@@ -482,6 +483,19 @@ export class Session implements SessionRuntimePersistence {
       },
     );
     return acquisition;
+  }
+
+  private watchRuntimeOwnership(lease: OwnerLease): void {
+    const markLost = (): void => {
+      if (this.runtimeOwnership !== lease) return;
+      if (this.lifecycle === "closing" || this.lifecycle === "closed") return;
+      this.markWriteUncertain("Runtime Session owner lease was lost", lease.lostSignal.reason);
+    };
+    if (lease.lostSignal.aborted) {
+      markLost();
+      return;
+    }
+    lease.lostSignal.addEventListener("abort", markLost, { once: true });
   }
 
   private applyRuntimeHistoryProjection(projection: RuntimeSessionProjectionSnapshot): void {
@@ -1943,7 +1957,15 @@ export class Session implements SessionRuntimePersistence {
     if (!store) throw new Error("Session persistence is disabled");
 
     const operation = this.persistenceTail.then(() =>
-      this.runWithWriteAdmission(() => write(store)),
+      this.runWithWriteAdmission(async () => {
+        this.assertWritable();
+        const ownership = await this.ensureRuntimeOwnership();
+        await ownership.assertOwnership();
+        this.assertWritable();
+        const result = await write(store);
+        await ownership.assertOwnership();
+        return result;
+      }),
     );
     const settled = operation.then(
       () => undefined,
@@ -1975,11 +1997,12 @@ export class Session implements SessionRuntimePersistence {
 
   private markWriteUncertain(message: string, cause: unknown): void {
     if (this.lifecycle === "closed") return;
+    if (this.persistenceFailure) return;
     const error =
       cause instanceof SessionWriteUncertainError
         ? cause
         : new SessionWriteUncertainError(message, cause);
-    this.persistenceFailure ??= error;
+    this.persistenceFailure = error;
     if (this.lifecycle !== "closing") this.lifecycle = "write_uncertain";
     logger.error({ error: String(cause) }, `[session] ${message}; 已进入 write_uncertain`);
   }
