@@ -10,7 +10,15 @@ import {
   type ConversationView,
   type JsonRecord,
   type ModelRouteView,
+  type ProviderConfigView,
+  type ProviderCredentialSource,
+  type ProviderCredentialStatus,
+  type ProviderDraft,
+  type ProviderOrigin,
+  type ProviderProtocol,
+  type ProviderView,
   type SessionSettingsView,
+  type UserDefaultsView,
   type UsageView,
   type WorkspaceCapabilities,
   type WorkspaceMode,
@@ -22,6 +30,8 @@ import type {
   ConversationProgressState,
 } from "./conversation/types.js";
 import { conversationItemKey } from "./conversation/items.js";
+
+const SHARED_CONFIG_CAPABILITY = "shared-config-v1";
 
 type DesktopResult<T> =
   | { readonly ok: true; readonly value: T }
@@ -459,6 +469,92 @@ function parseModelRoutes(value: unknown): readonly ModelRouteView[] {
   });
 }
 
+function providerProtocol(value: unknown): ProviderProtocol {
+  return value === "claude" || value === "gemini" ? value : "openai";
+}
+
+function providerOrigin(value: unknown): ProviderOrigin {
+  return value === "project-legacy" || value === "environment" ? value : "user";
+}
+
+function providerCredentialStatus(value: unknown): ProviderCredentialStatus {
+  return value === "ready" || value === "environment" || value === "unsupported"
+    ? value
+    : "missing";
+}
+
+function providerCredentialSource(value: unknown): ProviderCredentialSource {
+  return value === "keychain" || value === "environment" ? value : "none";
+}
+
+function parseProviderProfile(value: JsonRecord, index: number): ProviderView {
+  return {
+    id: stringValue(value.id, `provider-${index}`),
+    protocol: providerProtocol(value.protocol),
+    baseURL: stringValue(value.baseURL),
+    apiKeyEnv: stringValue(value.apiKeyEnv),
+    models: Array.isArray(value.models)
+      ? value.models.map((model) => stringValue(model)).filter(Boolean)
+      : [],
+    discoverModels: booleanValue(value.discoverModels),
+    ...(isRecord(value.modelCapabilities) ? { modelCapabilities: value.modelCapabilities } : {}),
+    origin: providerOrigin(value.origin),
+    fingerprint: stringValue(value.fingerprint),
+    credentialStatus: providerCredentialStatus(value.credentialStatus),
+    credentialSource: providerCredentialSource(value.credentialSource),
+  };
+}
+
+function parseUserDefaults(value: unknown): UserDefaultsView {
+  const defaults = isRecord(value) ? value : {};
+  const mode = defaults.mode;
+  return {
+    ...(stringValue(defaults.modelRouteId)
+      ? { modelRouteId: stringValue(defaults.modelRouteId) }
+      : {}),
+    ...(mode === "default" || mode === "plan" || mode === "auto" || mode === "yolo"
+      ? { mode }
+      : {}),
+    ...(stringValue(defaults.thinkingEffort)
+      ? { thinkingEffort: stringValue(defaults.thinkingEffort) }
+      : {}),
+  };
+}
+
+function parseProviderConfig(
+  results: Readonly<Record<string, unknown>>,
+  supported: boolean,
+): ProviderConfigView {
+  if (!supported) {
+    return {
+      supported: false,
+      revision: "",
+      userDefaults: {},
+      providers: [],
+    };
+  }
+  const registryResult = isRecord(results.providerRegistry) ? results.providerRegistry : {};
+  const userResult = isRecord(results.userConfig) ? results.userConfig : {};
+  const userConfig = isRecord(userResult.config) ? userResult.config : {};
+  const effectiveResult = isRecord(results.effectiveConfig) ? results.effectiveConfig : {};
+  const effectiveConfig = isRecord(effectiveResult.config) ? effectiveResult.config : {};
+  const effectiveProviders = recordArray(effectiveConfig.providers);
+  const registryProviders = recordArray(registryResult.providers);
+  const defaultModelRouteId = stringValue(
+    effectiveConfig.defaultModelRouteId ??
+      (isRecord(userConfig.defaults) ? userConfig.defaults.modelRouteId : undefined),
+  );
+  return {
+    supported: true,
+    revision: stringValue(registryResult.revision ?? userResult.revision),
+    ...(defaultModelRouteId ? { defaultModelRouteId } : {}),
+    userDefaults: parseUserDefaults(userConfig.defaults),
+    providers: (effectiveProviders.length > 0 ? effectiveProviders : registryProviders).map(
+      parseProviderProfile,
+    ),
+  };
+}
+
 function parseCatalogAgents(value: unknown): readonly CatalogAgentView[] {
   const result = isRecord(value) ? value : {};
   return recordArray(result.agents).map((agent) => ({
@@ -621,7 +717,7 @@ function mergeLoadedData(base: AppData, results: Readonly<Record<string, unknown
   const jobResult = isRecord(results.jobs) ? results.jobs : {};
   const skillResult = isRecord(results.skills) ? results.skills : {};
   const mcpResult = isRecord(results.mcp) ? results.mcp : {};
-  const providerResult = isRecord(results.providers) ? results.providers : {};
+  const providerResult = isRecord(results.legacyProviders) ? results.legacyProviders : {};
   const usageResult = isRecord(results.usage) ? results.usage : {};
   const usage = isRecord(usageResult.usage) ? usageResult.usage : {};
   const usageTotal = isRecord(usage.total) ? usage.total : usage;
@@ -665,7 +761,12 @@ function mergeLoadedData(base: AppData, results: Readonly<Record<string, unknown
     skills: recordArray(skillResult.skills).map(capability),
     mcpServers: recordArray(mcpResult.servers).map(capability),
     providers: recordArray(providerResult.providers).map(capability),
-    modelRoutes: parseModelRoutes(providerResult),
+    providerConfig: parseProviderConfig(results, base.providerConfig.supported),
+    modelRoutes: parseModelRoutes(
+      isRecord(results.effectiveConfig) && isRecord(results.effectiveConfig.config)
+        ? results.effectiveConfig.config
+        : providerResult,
+    ),
     catalogAgents: parseCatalogAgents(agentCatalogResult),
     catalogSkills: parseCatalogSkills(skillCatalogResult),
     changes: recordArray(changeResult.changes).map((item) => ({
@@ -749,6 +850,18 @@ export interface RuntimeActions {
   }): Promise<void>;
   runJob(id: string): Promise<void>;
   deleteJob(id: string): Promise<void>;
+  upsertProvider(provider: ProviderDraft): Promise<boolean>;
+  deleteProvider(providerId: string): Promise<boolean>;
+  setDefaultModelRoute(modelRouteId?: string): Promise<boolean>;
+  setProviderCredential(
+    providerId: string,
+    secret: string,
+    expectedProviderFingerprint: string,
+  ): Promise<boolean>;
+  deleteProviderCredential(
+    providerId: string,
+    expectedProviderFingerprint: string,
+  ): Promise<boolean>;
   updateSetting(patch: Readonly<Record<string, unknown>>): Promise<void>;
   setLaunchAtLogin(enabled: boolean): Promise<void>;
   setBackgroundMode(enabled: boolean): Promise<void>;
@@ -775,6 +888,7 @@ export function useRuntimeStore(): RuntimeStore {
   const [busy, setBusy] = useState<string>();
   const [message, setMessage] = useState<string>();
   const dataRef = useRef(data);
+  const runtimeCapabilitiesRef = useRef(new Set<string>(preview ? [SHARED_CONFIG_CAPABILITY] : []));
   const seenEventIdsRef = useRef(new Set<string>());
   const conversationLoadGenerationsRef = useRef(new Map<string, number>());
   const pendingSendRef = useRef<
@@ -792,20 +906,29 @@ export function useRuntimeStore(): RuntimeStore {
 
   const loadWorkspace = useCallback(async (bridge: RendererBridge, workspacePath: string) => {
     const params = { workspacePath };
+    const sharedConfigSupported = runtimeCapabilitiesRef.current.has(SHARED_CONFIG_CAPABILITY);
+    const requests: ReadonlyArray<readonly [string, string, Readonly<Record<string, unknown>>]> = [
+      ["workspace", "workspace.status", params],
+      ["sessions", "session.list", { ...params, includeArchived: true }],
+      ["runs", "runs.list", params],
+      ["jobs", "jobs.list", params],
+      ["skills", "config.skills", params],
+      ["mcp", "config.mcpServers", params],
+      ["legacyProviders", "config.providers", params],
+      ["agentCatalog", "catalog.agents", params],
+      ["skillCatalog", "catalog.skills", params],
+      ["usage", "usage.get", params],
+      ["config", "config.get", params],
+      ...(sharedConfigSupported
+        ? ([
+            ["providerRegistry", "provider.list", {}],
+            ["userConfig", "config.user.get", {}],
+            ["effectiveConfig", "config.effective.get", params],
+          ] as const)
+        : []),
+    ];
     const entries = await Promise.all(
-      [
-        ["workspace", "workspace.status", params],
-        ["sessions", "session.list", { ...params, includeArchived: true }],
-        ["runs", "runs.list", params],
-        ["jobs", "jobs.list", params],
-        ["skills", "config.skills", params],
-        ["mcp", "config.mcpServers", params],
-        ["providers", "config.providers", params],
-        ["agentCatalog", "catalog.agents", params],
-        ["skillCatalog", "catalog.skills", params],
-        ["usage", "usage.get", params],
-        ["config", "config.get", params],
-      ].map(async ([key, method, invocationParams]) => {
+      requests.map(async ([key, method, invocationParams]) => {
         const result = await optionalInvoke(
           bridge,
           String(method),
@@ -819,6 +942,14 @@ export function useRuntimeStore(): RuntimeStore {
     for (const [key, result] of entries) {
       if (result.error) notices[key] = result.error;
       else values[key] = result.value;
+    }
+    if (!sharedConfigSupported) {
+      notices.providers =
+        "当前 Runtime 缺少统一配置能力。请完全退出并重新启动 Pico 后再管理 Provider。";
+    } else {
+      notices.providers =
+        notices.providerRegistry ?? notices.userConfig ?? notices.effectiveConfig ?? "";
+      if (!notices.providers) delete notices.providers;
     }
     const loadedRuns = isRecord(values.runs) ? recordArray(values.runs.runs) : [];
     const runId = stringValue(loadedRuns[0]?.runId);
@@ -864,6 +995,10 @@ export function useRuntimeStore(): RuntimeStore {
           trusted: booleanValue(trustValue.trusted),
           launchAtLogin,
           notices,
+          providerConfig: {
+            ...current.providerConfig,
+            supported: sharedConfigSupported,
+          },
         },
         values,
       ),
@@ -991,6 +1126,7 @@ export function useRuntimeStore(): RuntimeStore {
       const capabilities = Array.isArray(ping.capabilities)
         ? ping.capabilities.map((capability) => stringValue(capability))
         : [];
+      runtimeCapabilitiesRef.current = new Set(capabilities);
       if (!capabilities.includes("session-conversation-v1")) {
         throw new Error("当前 Runtime 缺少会话能力。请完全退出并重新启动 Pico。");
       }
@@ -1108,6 +1244,9 @@ export function useRuntimeStore(): RuntimeStore {
             },
           ],
         }));
+      } else if (topic === "config.updated") {
+        const workspace = dataRef.current.workspacePath;
+        if (workspace) void loadWorkspace(bridge, workspace).catch(reportFailure);
       } else if (topic.startsWith("run.") || topic.startsWith("session.")) {
         const workspace = dataRef.current.workspacePath;
         if (workspace) {
@@ -1650,6 +1789,169 @@ export function useRuntimeStore(): RuntimeStore {
             ...current,
             jobs: current.jobs.filter((job) => job.id !== id),
           }));
+        });
+      },
+      async upsertProvider(provider) {
+        const providerConfig = dataRef.current.providerConfig;
+        if (!providerConfig.supported) {
+          setMessage("当前 Runtime 不支持统一 Provider 配置。请完全退出并重新启动 Pico。");
+          return false;
+        }
+        return perform("provider-save", async (bridge) => {
+          if (preview) {
+            const previous = dataRef.current.providerConfig.providers.find(
+              (item) => item.id === provider.id,
+            );
+            const next: ProviderView = {
+              ...provider,
+              origin: "user",
+              fingerprint: previous?.fingerprint ?? `preview-${provider.id}-fingerprint`,
+              credentialStatus: previous?.credentialStatus ?? "missing",
+              credentialSource: previous?.credentialSource ?? "none",
+            };
+            setData((current) => ({
+              ...current,
+              providerConfig: {
+                ...current.providerConfig,
+                revision: `${current.providerConfig.revision}-next`,
+                providers: [
+                  ...current.providerConfig.providers.filter((item) => item.id !== provider.id),
+                  next,
+                ],
+              },
+            }));
+            setMessage(`Provider ${provider.id} 已保存。`);
+            return;
+          }
+          await invoke(bridge, "provider.upsert", {
+            provider,
+            expectedRevision: providerConfig.revision,
+          });
+          const workspacePath = dataRef.current.workspacePath;
+          if (workspacePath) await loadWorkspace(bridge, workspacePath);
+          setMessage(`Provider ${provider.id} 已保存。`);
+        });
+      },
+      async deleteProvider(providerId) {
+        const providerConfig = dataRef.current.providerConfig;
+        if (!providerConfig.supported) return false;
+        return perform("provider-delete", async (bridge) => {
+          if (!preview) {
+            await invoke(bridge, "provider.delete", {
+              providerId,
+              expectedRevision: providerConfig.revision,
+            });
+            const workspacePath = dataRef.current.workspacePath;
+            if (workspacePath) await loadWorkspace(bridge, workspacePath);
+          } else {
+            setData((current) => ({
+              ...current,
+              providerConfig: {
+                ...current.providerConfig,
+                revision: `${current.providerConfig.revision}-next`,
+                providers: current.providerConfig.providers.filter(
+                  (provider) => provider.id !== providerId,
+                ),
+              },
+            }));
+          }
+          setMessage(`Provider ${providerId} 已删除。`);
+        });
+      },
+      async setDefaultModelRoute(modelRouteId) {
+        const providerConfig = dataRef.current.providerConfig;
+        if (!providerConfig.supported) return false;
+        const defaults: Record<string, unknown> = {};
+        if (modelRouteId) defaults.modelRouteId = modelRouteId;
+        if (providerConfig.userDefaults.mode) defaults.mode = providerConfig.userDefaults.mode;
+        if (providerConfig.userDefaults.thinkingEffort) {
+          defaults.thinkingEffort = providerConfig.userDefaults.thinkingEffort;
+        }
+        return perform("provider-default", async (bridge) => {
+          if (!preview) {
+            await invoke(bridge, "config.user.update", {
+              defaults,
+              expectedRevision: providerConfig.revision,
+            });
+            const workspacePath = dataRef.current.workspacePath;
+            if (workspacePath) await loadWorkspace(bridge, workspacePath);
+          } else {
+            setData((current) => ({
+              ...current,
+              providerConfig: {
+                ...current.providerConfig,
+                revision: `${current.providerConfig.revision}-next`,
+                userDefaults: {
+                  ...current.providerConfig.userDefaults,
+                  ...(modelRouteId ? { modelRouteId } : { modelRouteId: undefined }),
+                },
+              },
+            }));
+          }
+          setMessage(modelRouteId ? "默认模型已更新。" : "已清除用户默认模型。");
+        });
+      },
+      async setProviderCredential(providerId, secret, expectedProviderFingerprint) {
+        const providerConfig = dataRef.current.providerConfig;
+        if (!providerConfig.supported || !secret) return false;
+        return perform("provider-credential", async (bridge) => {
+          if (!preview) {
+            await invoke(bridge, "provider.credential.set", {
+              providerId,
+              secret,
+              expectedProviderFingerprint,
+            });
+            const workspacePath = dataRef.current.workspacePath;
+            if (workspacePath) await loadWorkspace(bridge, workspacePath);
+          } else {
+            setData((current) => ({
+              ...current,
+              providerConfig: {
+                ...current.providerConfig,
+                providers: current.providerConfig.providers.map((provider) =>
+                  provider.id === providerId
+                    ? {
+                        ...provider,
+                        credentialStatus: "ready",
+                        credentialSource: "keychain",
+                      }
+                    : provider,
+                ),
+              },
+            }));
+          }
+          setMessage(`Provider ${providerId} 的凭证已保存到系统安全存储。`);
+        });
+      },
+      async deleteProviderCredential(providerId, expectedProviderFingerprint) {
+        const providerConfig = dataRef.current.providerConfig;
+        if (!providerConfig.supported) return false;
+        return perform("provider-credential-delete", async (bridge) => {
+          if (!preview) {
+            await invoke(bridge, "provider.credential.delete", {
+              providerId,
+              expectedProviderFingerprint,
+            });
+            const workspacePath = dataRef.current.workspacePath;
+            if (workspacePath) await loadWorkspace(bridge, workspacePath);
+          } else {
+            setData((current) => ({
+              ...current,
+              providerConfig: {
+                ...current.providerConfig,
+                providers: current.providerConfig.providers.map((provider) =>
+                  provider.id === providerId
+                    ? {
+                        ...provider,
+                        credentialStatus: "missing",
+                        credentialSource: "none",
+                      }
+                    : provider,
+                ),
+              },
+            }));
+          }
+          setMessage(`Provider ${providerId} 的系统凭证已删除。`);
         });
       },
       async updateSetting(patch) {

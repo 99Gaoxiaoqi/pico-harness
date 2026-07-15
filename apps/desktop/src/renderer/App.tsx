@@ -82,6 +82,7 @@ import type {
   TimelineItem,
   WorkspaceMode,
 } from "./model.js";
+import { ProviderPage } from "./ProviderPage.js";
 import { useRuntimeStore, type RuntimeStore } from "./runtime.js";
 
 const RuntimeContext = createContext<RuntimeStore | null>(null);
@@ -154,7 +155,7 @@ function AppStateRouter() {
         <Route path="automations" element={<AutomationsPage />} />
         <Route path="skills" element={<CapabilityPage kind="skills" />} />
         <Route path="mcp" element={<CapabilityPage kind="mcp" />} />
-        <Route path="providers" element={<CapabilityPage kind="providers" />} />
+        <Route path="providers" element={<ProviderPageRoute />} />
         <Route path="usage" element={<UsagePage />} />
         <Route path="settings" element={<SettingsPage />} />
         <Route path="*" element={<NotFound />} />
@@ -1592,7 +1593,11 @@ function AutomationsPage() {
   );
 }
 
-function CapabilityPage({ kind }: { readonly kind: "skills" | "mcp" | "providers" }) {
+function ProviderPageRoute() {
+  return <ProviderPage runtime={useRuntime()} />;
+}
+
+function CapabilityPage({ kind }: { readonly kind: "skills" | "mcp" }) {
   const { data } = useRuntime();
   const config = {
     skills: {
@@ -1612,15 +1617,6 @@ function CapabilityPage({ kind }: { readonly kind: "skills" | "mcp" | "providers
       items: data.mcpServers,
       notice: data.notices.mcp,
       empty: "没有发现 MCP 服务",
-    },
-    providers: {
-      title: "模型 Providers",
-      eyebrow: "推理能力",
-      detail: "选择任务使用的模型。密钥只保存在系统安全存储中。",
-      icon: BrainCircuit,
-      items: data.providers,
-      notice: data.notices.providers,
-      empty: "没有可用的 Provider",
     },
   }[kind];
   return (
@@ -1644,11 +1640,6 @@ function CapabilityPage({ kind }: { readonly kind: "skills" | "mcp" | "providers
           emptyDetail="当前 Runtime 没有返回任何配置；Pico 不会填充示例项。"
         />
       </section>
-      {kind === "providers" && (
-        <InlineNotice tone="neutral">
-          登录同步尚未开放。Provider 配置仅存放在当前设备。
-        </InlineNotice>
-      )}
       {kind === "skills" && (
         <InlineNotice tone="neutral">
           公开 Plugin Runtime 尚未开放；这里只显示 Runtime 已加载的 Skills。
