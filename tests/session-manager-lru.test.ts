@@ -9,7 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { SessionManager } from "../src/engine/session.js";
+import { Session, SessionManager } from "../src/engine/session.js";
 
 let workDir: string;
 let activeMgr: SessionManager | undefined;
@@ -80,23 +80,40 @@ describe("SessionManager LRU 驱逐", () => {
     expect(mgr.get("s2")).toBeUndefined();
   });
 
-  it("活跃 serialize 队列使 LRU 上限暂时成为软上限", async () => {
-    const mgr = makeMgr({ maxSessions: 1, ttlMs: 60_000 });
-    const s1 = await mgr.getOrCreate("s1", workDir, { persistence: false });
+  it("总量超限时淘汰最旧 inactive，仅在全员 active 时软超限", async () => {
+    const mgr = makeMgr({ maxSessions: 2, ttlMs: 60_000 });
     const release = deferred<void>();
-    const active = s1.serialize(async () => {
-      await release.promise;
-      s1.append({ role: "user", content: "completed" });
+    const activeTasks: Promise<void>[] = [];
+    const recover = vi.spyOn(Session.prototype, "recover").mockImplementation(function (
+      this: Session,
+    ) {
+      if (this.id !== "inactive") {
+        activeTasks.push(
+          this.serialize(async () => {
+            await release.promise;
+            this.append({ role: "user", content: "completed" });
+          }),
+        );
+      }
+      return Promise.resolve();
     });
 
-    await mgr.getOrCreate("s2", workDir, { persistence: false });
-    expect(mgr.size).toBe(2);
-    release.resolve();
-    await expect(active).resolves.toBeUndefined();
+    let inactive: Session | undefined;
+    try {
+      await mgr.getOrCreate("active-1", workDir, { persistence: false });
+      await mgr.getOrCreate("active-2", workDir, { persistence: false });
+      await mgr.getOrCreate("active-3", workDir, { persistence: false });
+      expect(mgr.size).toBe(3);
 
-    await mgr.getOrCreate("s3", workDir, { persistence: false });
-    expect(mgr.size).toBe(1);
-    expect(mgr.get("s3")).toBeDefined();
+      inactive = await mgr.getOrCreate("inactive", workDir, { persistence: false });
+      expect(mgr.size).toBe(3);
+      expect(mgr.get("inactive")).toBeUndefined();
+    } finally {
+      recover.mockRestore();
+      release.resolve();
+      await Promise.all(activeTasks);
+      await inactive?.close();
+    }
   });
 });
 
