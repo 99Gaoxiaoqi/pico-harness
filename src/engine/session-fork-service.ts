@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { ToolResultArtifactStore, type ArtifactCloneMapping } from "../context/artifact-store.js";
@@ -6,7 +6,11 @@ import { FileSessionSummaryStore } from "../memory/summary-store.js";
 import { resolvePicoPaths } from "../paths/pico-paths.js";
 import { materializeRuntimeHistory } from "../runtime/runtime-event-read-model.js";
 import { RuntimeEventStore } from "../runtime/runtime-event-store.js";
-import { RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX, RuntimeRun } from "../runtime/runtime-run.js";
+import {
+  deriveRuntimeForkBootstrapRunId,
+  RuntimeRun,
+  type RuntimeForkModelCheckpointSeed,
+} from "../runtime/runtime-run.js";
 import { projectRuntimeSessionMessageEntries } from "../runtime/runtime-session-projection.js";
 import { fileHistoryCloneSession, fileHistoryDefaultBaseDir } from "../safety/file-history.js";
 import type { Message } from "../schema/message.js";
@@ -41,7 +45,8 @@ import {
 } from "./session.js";
 
 const SAFE_SESSION_ID = /^[A-Za-z0-9._-]+$/u;
-const FROZEN_FORK_BUNDLE_VERSION = 1 as const;
+const LEGACY_FROZEN_FORK_BUNDLE_VERSION = 1 as const;
+const FROZEN_FORK_BUNDLE_VERSION = 2 as const;
 const FROZEN_FORK_BUNDLE_NAME = "runtime-fork.json";
 const FORK_SIDECARS_VERSION = 1 as const;
 const FORK_SIDECARS_NAME = "fork-sidecars.json";
@@ -98,12 +103,15 @@ export class SessionForkNeedsAttentionError extends Error {
 }
 
 interface FrozenForkBundle {
-  readonly schemaVersion: typeof FROZEN_FORK_BUNDLE_VERSION;
+  readonly schemaVersion:
+    | typeof LEGACY_FROZEN_FORK_BUNDLE_VERSION
+    | typeof FROZEN_FORK_BUNDLE_VERSION;
   readonly operationId: string;
   readonly sourceSessionId: string;
   readonly targetSessionId: string;
   readonly sourceCursor: ForkSourceCursor;
   readonly messages: readonly Message[];
+  readonly modelCheckpoint?: RuntimeForkModelCheckpointSeed;
   readonly sourceTitle?: string;
   readonly settings?: PersistedSessionSettings;
   readonly goal?: NonNullable<SessionRuntimeStatePatch["goal"]>;
@@ -337,7 +345,10 @@ export class SessionForkService {
     operation: ForkStorageOperation,
     prepared: ForkPreparedBundle,
   ): Promise<void> {
-    const { frozen, messages } = await this.readRuntimePublication(operation, prepared);
+    const { frozen, messages, modelCheckpoint } = await this.readRuntimePublication(
+      operation,
+      prepared,
+    );
     const sourceThroughEventId = await resolveFrozenSourceThroughEventId(this.runtimeStore, frozen);
 
     await this.hooks?.beforeRuntimeBootstrap?.(operation);
@@ -348,6 +359,7 @@ export class SessionForkService {
         operationId: operation.operationId,
         operationCreatedAt: operation.createdAt,
         messages,
+        ...(modelCheckpoint ? { modelCheckpoint } : {}),
         ...(sourceThroughEventId ? { sourceThroughEventId } : {}),
         workDir: this.workDir,
         store: this.runtimeStore,
@@ -379,8 +391,16 @@ export class SessionForkService {
     if (!(await this.runtimeStore.readSessionManifest(operation.targetSessionId))) return;
     const events = await this.runtimeStore.readSession(operation.targetSessionId);
     if (events.length === 0) return;
-    const { messages } = await this.readRuntimePublication(operation, prepared);
-    const expectedRunId = runtimeForkBootstrapRunId(operation, messages);
+    const { messages, modelCheckpoint } = await this.readRuntimePublication(operation, prepared);
+    const expectedRunId = deriveRuntimeForkBootstrapRunId({
+      sourceSessionId: operation.sourceSessionId,
+      targetSessionId: operation.targetSessionId,
+      operationId: operation.operationId,
+      operationCreatedAt: operation.createdAt,
+      messages,
+      ...(modelCheckpoint ? { modelCheckpoint } : {}),
+      workDir: this.workDir,
+    });
     const ownsRuntime = events.every(
       (event) =>
         event.runId === expectedRunId ||
@@ -397,17 +417,32 @@ export class SessionForkService {
   private async readRuntimePublication(
     operation: ForkStorageOperation,
     prepared: ForkPreparedBundle,
-  ): Promise<{ readonly frozen: FrozenForkBundle; readonly messages: readonly Message[] }> {
+  ): Promise<{
+    readonly frozen: FrozenForkBundle;
+    readonly messages: readonly Message[];
+    readonly modelCheckpoint?: RuntimeForkModelCheckpointSeed;
+  }> {
     const frozen = await this.readFrozenBundle(operation, prepared.stagedBundlePath);
     const sidecars = await this.readSidecars(operation);
+    const rewritten = rewriteArtifactReferences(
+      [...frozen.messages, ...(frozen.modelCheckpoint ? [frozen.modelCheckpoint.summary] : [])],
+      operation.sourceSessionId,
+      operation.targetSessionId,
+      sidecars.artifactMappings,
+    );
+    const messages = rewritten.slice(0, frozen.messages.length);
+    const summary = frozen.modelCheckpoint ? rewritten.at(-1) : undefined;
     return {
       frozen,
-      messages: rewriteArtifactReferences(
-        frozen.messages,
-        operation.sourceSessionId,
-        operation.targetSessionId,
-        sidecars.artifactMappings,
-      ),
+      messages,
+      ...(frozen.modelCheckpoint && summary
+        ? {
+            modelCheckpoint: {
+              coveredMessageCount: frozen.modelCheckpoint.coveredMessageCount,
+              summary,
+            },
+          }
+        : {}),
     };
   }
 
@@ -510,6 +545,14 @@ function createFrozenForkBundle(
     targetSessionId: input.targetSessionId,
     sourceCursor: structuredClone(snapshot.cursor),
     messages: snapshot.hydration.messages.map(stripMessageUsage),
+    ...(snapshot.modelCheckpoint
+      ? {
+          modelCheckpoint: {
+            coveredMessageCount: snapshot.modelCheckpoint.coveredMessageCount,
+            summary: stripMessageUsage(snapshot.modelCheckpoint.summary),
+          },
+        }
+      : {}),
     ...(sourceTitle ? { sourceTitle } : {}),
     ...(snapshot.hydration.runtime.settings
       ? { settings: structuredClone(snapshot.hydration.runtime.settings) }
@@ -630,16 +673,27 @@ function rewriteStrings(
 function parseFrozenForkBundle(value: unknown): FrozenForkBundle {
   if (
     !isRecord(value) ||
-    value["schemaVersion"] !== FROZEN_FORK_BUNDLE_VERSION ||
+    (value["schemaVersion"] !== LEGACY_FROZEN_FORK_BUNDLE_VERSION &&
+      value["schemaVersion"] !== FROZEN_FORK_BUNDLE_VERSION) ||
     typeof value["operationId"] !== "string" ||
     typeof value["sourceSessionId"] !== "string" ||
     typeof value["targetSessionId"] !== "string" ||
     !isForkSourceCursor(value["sourceCursor"]) ||
     !Array.isArray(value["messages"]) ||
     !value["messages"].every(isMessageValue) ||
+    !isRuntimeForkModelCheckpointSeed(value["modelCheckpoint"]) ||
+    (value["schemaVersion"] === LEGACY_FROZEN_FORK_BUNDLE_VERSION &&
+      value["modelCheckpoint"] !== undefined) ||
     (value["sourceTitle"] !== undefined && typeof value["sourceTitle"] !== "string")
   ) {
     throw new Error("Invalid frozen Runtime fork bundle");
+  }
+  const modelCheckpoint = value["modelCheckpoint"];
+  if (
+    modelCheckpoint &&
+    modelCheckpoint.coveredMessageCount > (value["messages"] as unknown[]).length
+  ) {
+    throw new Error("Frozen Runtime fork checkpoint exceeds its transcript seed");
   }
 
   const hasSettings = value["settings"] !== undefined;
@@ -661,12 +715,13 @@ function parseFrozenForkBundle(value: unknown): FrozenForkBundle {
   }
 
   return {
-    schemaVersion: FROZEN_FORK_BUNDLE_VERSION,
+    schemaVersion: value["schemaVersion"],
     operationId: value["operationId"],
     sourceSessionId: value["sourceSessionId"],
     targetSessionId: value["targetSessionId"],
     sourceCursor: structuredClone(value["sourceCursor"]),
     messages: structuredClone(value["messages"] as Message[]),
+    ...(modelCheckpoint ? { modelCheckpoint: structuredClone(modelCheckpoint) } : {}),
     ...(value["sourceTitle"] !== undefined ? { sourceTitle: value["sourceTitle"] } : {}),
     ...(normalized?.settings ? { settings: normalized.settings } : {}),
     ...(normalized?.goal ? { goal: normalized.goal } : {}),
@@ -749,6 +804,19 @@ function isMessageValue(value: unknown): value is Message {
   );
 }
 
+function isRuntimeForkModelCheckpointSeed(
+  value: unknown,
+): value is RuntimeForkModelCheckpointSeed | undefined {
+  return (
+    value === undefined ||
+    (isRecord(value) &&
+      typeof value["coveredMessageCount"] === "number" &&
+      Number.isSafeInteger(value["coveredMessageCount"]) &&
+      value["coveredMessageCount"] > 0 &&
+      isMessageValue(value["summary"]))
+  );
+}
+
 function isForkSourceCursor(value: unknown): value is ForkSourceCursor {
   return (
     isRecord(value) &&
@@ -785,25 +853,6 @@ function forkTitleFrom(sourceTitle: string): string {
 
 function runtimeStateEventId(operationId: string): string {
   return "fork:" + operationId + ":state";
-}
-
-function runtimeForkBootstrapRunId(
-  operation: ForkStorageOperation,
-  messages: readonly Message[],
-): string {
-  const sourceDigest = createHash("sha256").update(JSON.stringify(messages)).digest("hex");
-  const digest = createHash("sha256")
-    .update(
-      JSON.stringify([
-        operation.operationId,
-        operation.sourceSessionId,
-        operation.targetSessionId,
-        sourceDigest,
-        messages.length,
-      ]),
-    )
-    .digest("hex");
-  return `${RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX}${digest}`;
 }
 
 async function resolveFrozenSourceThroughEventId(

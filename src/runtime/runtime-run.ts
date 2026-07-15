@@ -79,10 +79,17 @@ export interface BootstrapRuntimeForkOptions {
   readonly operationCreatedAt?: string;
   /** The immutable, usage-free Session seed published by SessionForkService. */
   readonly messages: readonly Message[];
+  /** Effective model prefix replacement frozen at the same source cursor as messages. */
+  readonly modelCheckpoint?: RuntimeForkModelCheckpointSeed;
   /** Last source message included in the frozen seed, before target-side rewrites. */
   readonly sourceThroughEventId?: string;
   readonly workDir: string;
   readonly store?: RuntimeEventStore;
+}
+
+export interface RuntimeForkModelCheckpointSeed {
+  readonly coveredMessageCount: number;
+  readonly summary: Message;
 }
 
 export interface BootstrapRuntimeSessionHistoryOptions {
@@ -116,6 +123,7 @@ export interface RuntimeModelCallSettledOptions {
 }
 
 export interface RuntimeCheckpointOptions {
+  readonly eventId?: string;
   readonly checkpointId: string;
   readonly coveredEventCount: number;
   readonly sourceDigest: string;
@@ -134,6 +142,8 @@ interface RuntimeForkBootstrapIdentity {
   readonly runStartedEventId: string;
   readonly markerEventId: string;
   readonly terminalEventId: string;
+  readonly checkpointEventId: string;
+  readonly checkpointId: string;
   messageEventId(index: number): string;
 }
 
@@ -152,6 +162,17 @@ export function currentRuntimeRun(): RuntimeRun | undefined {
 /** The tool that caused the current nested Agent work, including a delegated child run. */
 export function currentRuntimeToolCallId(): string | undefined {
   return runtimeToolCallContext.getStore();
+}
+
+/** Pure identity helper used by fork recovery before it trusts target Runtime facts. */
+export function deriveRuntimeForkBootstrapRunId(options: BootstrapRuntimeForkOptions): string {
+  const messages = options.messages.map(stripMessageUsage);
+  const completion: RuntimeForkBootstrapCompletion = {
+    sourceDigest: forkSeedDigest(messages),
+    messageCount: messages.length,
+  };
+  const checkpoint = normalizeForkModelCheckpoint(options.modelCheckpoint, messages.length);
+  return runtimeForkBootstrapIdentity(options, completion, checkpoint).runId;
 }
 
 export function runWithRuntimeToolCall<Result>(toolCallId: string, run: () => Result): Result {
@@ -313,11 +334,12 @@ export class RuntimeRun {
         databasePath: resolvePicoPaths(options.workDir).workspace.runtimeDatabase,
       });
     const messages = options.messages.map(stripMessageUsage);
+    const modelCheckpoint = normalizeForkModelCheckpoint(options.modelCheckpoint, messages.length);
     const completion: RuntimeForkBootstrapCompletion = {
       sourceDigest: forkSeedDigest(messages),
       messageCount: messages.length,
     };
-    const identity = runtimeForkBootstrapIdentity(options, completion);
+    const identity = runtimeForkBootstrapIdentity(options, completion, modelCheckpoint);
     const targetSessionKey = runtimeSessionKey(options.workDir, options.targetSessionId);
 
     return serializeForkBootstrap(targetSessionKey, async () => {
@@ -343,7 +365,13 @@ export class RuntimeRun {
             `Runtime fork target ${options.targetSessionId} has a conflicting frozen seed`,
           );
         }
+        if (modelCheckpoint && completedMarker.runId !== identity.runId) {
+          throw new Error(
+            `Runtime fork target ${options.targetSessionId} has a conflicting checkpoint seed`,
+          );
+        }
         if (completedMarker.runId === identity.runId) {
+          assertRuntimeForkCheckpoint(existingEvents, identity, modelCheckpoint);
           await ensureRuntimeForkTerminal(options, store, existingEvents, identity);
         }
         return false;
@@ -359,7 +387,9 @@ export class RuntimeRun {
       }
       // Compatibility: old bootstrap wrote session.forked before its copied messages.
       // A complete old fork is already a usable history; only incomplete prefixes resume.
-      if (forkMarkers.length > 0 && imported.length === messages.length) return false;
+      if (!modelCheckpoint && forkMarkers.length > 0 && imported.length === messages.length) {
+        return false;
+      }
 
       const existingStart = existingEvents.find(
         (event) => event.kind === "run.started" && event.runId === identity.runId,
@@ -380,6 +410,20 @@ export class RuntimeRun {
         (await resolveForkSourceThroughEventId(store, options.sourceSessionId, messages));
       for (let index = imported.length; index < messages.length; index += 1) {
         await forkRun.recordImportedMessage(messages[index]!, identity.messageEventId(index));
+      }
+      if (modelCheckpoint) {
+        const coveredEventIds = Array.from(
+          { length: modelCheckpoint.coveredMessageCount },
+          (_, index) => identity.messageEventId(index),
+        );
+        await forkRun.recordCheckpoint({
+          eventId: identity.checkpointEventId,
+          checkpointId: identity.checkpointId,
+          coveredEventCount: modelCheckpoint.coveredMessageCount,
+          sourceDigest: runtimeEventIdDigest(coveredEventIds),
+          throughEventId: identity.messageEventId(modelCheckpoint.coveredMessageCount - 1),
+          summary: modelCheckpoint.summary,
+        });
       }
       // This is the publication marker. A failed bootstrap deliberately has no terminal fact;
       // the same operation can replay its stable event IDs and complete the one logical run.
@@ -718,7 +762,7 @@ export class RuntimeRun {
   async recordCheckpoint(options: RuntimeCheckpointOptions): Promise<void> {
     this.assertOpen();
     const event: RuntimeCheckpointRecordedEvent = {
-      ...this.base(createRuntimeEventId("context-checkpoint"), true, "internal"),
+      ...this.base(options.eventId ?? createRuntimeEventId("context-checkpoint"), true, "internal"),
       kind: "context.checkpoint.recorded",
       data: {
         checkpointId: options.checkpointId,
@@ -994,7 +1038,11 @@ function runtimeSessionKey(workDir: string, sessionId: string): string {
 function runtimeForkBootstrapIdentity(
   options: BootstrapRuntimeForkOptions,
   completion: RuntimeForkBootstrapCompletion,
+  modelCheckpoint: RuntimeForkModelCheckpointSeed | undefined,
 ): RuntimeForkBootstrapIdentity {
+  const checkpointSeed = modelCheckpoint
+    ? [modelCheckpoint.coveredMessageCount, modelCheckpoint.summary]
+    : undefined;
   const digest = createHash("sha256")
     .update(
       JSON.stringify([
@@ -1003,6 +1051,7 @@ function runtimeForkBootstrapIdentity(
         options.targetSessionId,
         completion.sourceDigest,
         completion.messageCount,
+        ...(checkpointSeed ? [checkpointSeed] : []),
       ]),
     )
     .digest("hex");
@@ -1013,8 +1062,61 @@ function runtimeForkBootstrapIdentity(
     runStartedEventId: `${eventNamespace}:started`,
     markerEventId: `${eventNamespace}:published`,
     terminalEventId: `${eventNamespace}:terminal`,
+    checkpointEventId: `${eventNamespace}:checkpoint`,
+    checkpointId: `${eventNamespace}:checkpoint`,
     messageEventId: (index) => `${eventNamespace}:message:${index}`,
   };
+}
+
+function normalizeForkModelCheckpoint(
+  checkpoint: RuntimeForkModelCheckpointSeed | undefined,
+  messageCount: number,
+): RuntimeForkModelCheckpointSeed | undefined {
+  if (!checkpoint) return undefined;
+  if (
+    !Number.isSafeInteger(checkpoint.coveredMessageCount) ||
+    checkpoint.coveredMessageCount <= 0 ||
+    checkpoint.coveredMessageCount > messageCount
+  ) {
+    throw new Error("Runtime fork checkpoint must cover a non-empty transcript prefix");
+  }
+  return {
+    coveredMessageCount: checkpoint.coveredMessageCount,
+    summary: stripMessageUsage(checkpoint.summary),
+  };
+}
+
+function assertRuntimeForkCheckpoint(
+  events: readonly RuntimeEvent[],
+  identity: RuntimeForkBootstrapIdentity,
+  checkpoint: RuntimeForkModelCheckpointSeed | undefined,
+): void {
+  const existing = events.find((event) => event.eventId === identity.checkpointEventId);
+  if (!checkpoint) {
+    if (existing) {
+      throw new Error(`Runtime fork run ${identity.runId} has an unexpected checkpoint fact`);
+    }
+    return;
+  }
+  const coveredEventIds = Array.from({ length: checkpoint.coveredMessageCount }, (_, index) =>
+    identity.messageEventId(index),
+  );
+  if (
+    !existing ||
+    existing.kind !== "context.checkpoint.recorded" ||
+    existing.runId !== identity.runId ||
+    existing.data.checkpointId !== identity.checkpointId ||
+    existing.data.coveredEventCount !== checkpoint.coveredMessageCount ||
+    existing.data.sourceDigest !== runtimeEventIdDigest(coveredEventIds) ||
+    existing.data.throughEventId !== coveredEventIds.at(-1) ||
+    !isDeepStrictEqual(existing.data.summary, checkpoint.summary)
+  ) {
+    throw new Error(`Runtime fork run ${identity.runId} has a conflicting checkpoint fact`);
+  }
+}
+
+function runtimeEventIdDigest(eventIds: readonly string[]): string {
+  return createHash("sha256").update(eventIds.join("\n")).digest("hex");
 }
 
 async function ensureRuntimeForkTerminal(

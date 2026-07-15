@@ -82,6 +82,7 @@ import {
   type RuntimeHistoryRewoundEvent,
   type RuntimeMessageCommittedEvent,
 } from "../runtime/runtime-event.js";
+import { materializeRuntimeHistoryEntries } from "../runtime/runtime-event-read-model.js";
 import {
   RuntimeEventStore,
   type RuntimeEventStoreAppendResult,
@@ -153,10 +154,17 @@ export interface SessionOptions {
 }
 
 /** fork 只读边界：hydration 与父日志游标必须指向同一次 durable flush。 */
+export interface DurableRuntimeForkCheckpoint {
+  /** Target bootstrap replaces this many copied transcript messages with summary. */
+  readonly coveredMessageCount: number;
+  readonly summary: Message;
+}
+
 export interface DurableSessionForkSnapshot {
   readonly hydration: SessionHydrationSnapshot;
   readonly cursor: SessionCursor;
   readonly rootLogId: string;
+  readonly modelCheckpoint?: DurableRuntimeForkCheckpoint;
 }
 
 /** Immutable target seed published before the Runtime fork bootstrap begins. */
@@ -771,10 +779,13 @@ export class Session implements SessionRuntimePersistence {
     const entries = await store.readSessionEntries(this.id);
     const cursor = runtimeCursorForEntries(this.id, entries);
     if (!cursor) throw new Error(`Session ${this.id} 还没有可用于 fork 的 durable event`);
+    const events = entries.map(({ event }) => event);
+    const modelCheckpoint = durableForkModelCheckpoint(events);
     return {
       hydration: this.runtimeHydrationSnapshot(manifest, entries),
       rootLogId: await resolveRuntimeRootSessionId(store, this.id),
       cursor,
+      ...(modelCheckpoint ? { modelCheckpoint } : {}),
     };
   }
 
@@ -2034,6 +2045,56 @@ async function syncRewindDirectory(directory: string): Promise<void> {
     }
   } finally {
     await handle?.close().catch(() => undefined);
+  }
+}
+
+function durableForkModelCheckpoint(
+  events: readonly RuntimeEvent[],
+): DurableRuntimeForkCheckpoint | undefined {
+  const modelHead = materializeRuntimeHistoryEntries(events)[0];
+  if (!modelHead) return undefined;
+  const checkpoint = events.find(
+    (event) => event.eventId === modelHead.eventId && event.kind === "context.checkpoint.recorded",
+  );
+  if (!checkpoint || checkpoint.kind !== "context.checkpoint.recorded") return undefined;
+  const summary = checkpoint.data.summary;
+  const checkpointThroughEventId = checkpoint.data.throughEventId;
+  if (!summary || !checkpointThroughEventId) return undefined;
+
+  const transcript = projectRuntimeSessionMessageEntries(events);
+  let throughEventId = checkpointThroughEventId;
+  const visited = new Set<string>();
+  for (;;) {
+    if (visited.has(throughEventId)) {
+      throw new Error(`Runtime checkpoint lineage contains a cycle at ${throughEventId}`);
+    }
+    visited.add(throughEventId);
+
+    const transcriptIndex = transcript.findIndex((entry) => entry.eventId === throughEventId);
+    if (transcriptIndex >= 0) {
+      return {
+        coveredMessageCount: transcriptIndex + 1,
+        summary: structuredClone(summary),
+      };
+    }
+
+    const parent = events.find(
+      (event) =>
+        event.eventId === throughEventId &&
+        event.kind === "context.checkpoint.recorded" &&
+        event.data.throughEventId !== undefined &&
+        event.data.summary !== undefined,
+    );
+    if (!parent || parent.kind !== "context.checkpoint.recorded") {
+      throw new Error(
+        `Runtime checkpoint ${checkpoint.eventId} cannot resolve transcript boundary ${throughEventId}`,
+      );
+    }
+    const parentThroughEventId = parent.data.throughEventId;
+    if (!parentThroughEventId) {
+      throw new Error(`Runtime checkpoint ${parent.eventId} has no transcript boundary`);
+    }
+    throughEventId = parentThroughEventId;
   }
 }
 
