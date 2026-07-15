@@ -1,9 +1,9 @@
 # Pico Harness 架构收敛计划
 
-> 状态：实现已完成，待最终集成验收、合并与推送
+> 状态：实现与最终集成验收已完成，待合并与推送
 > 建立日期：2026-07-16
 > 基线：`main@260dbac`
-> 实现快照：`codex/architecture-convergence@3924955`
+> 实现快照：`codex/architecture-convergence@8d64385`
 > 原则：先修确定性边界，再做局部拆分，最后清理；保持实现直接、可读，避免过度抽象。
 
 ## 目标
@@ -77,7 +77,7 @@
 
 ### 完成记录
 
-- 提交：`4fc56c0 fix(desktop): 修复状态迁移与连接关闭竞态`；`d3ebab5 fix(desktop): 加固会话状态迁移`。
+- 提交：`4fc56c0 fix(desktop): 修复状态迁移与连接关闭竞态`；`d3ebab5 fix(desktop): 加固会话状态迁移`；`bac0176 fix(daemon): 阻止关闭后创建事件订阅`。
 - 验证：`npm run lint`、`npm run typecheck`、`npm run build`、`npm run desktop:typecheck`、`npm run desktop:package`；临时 smoke 覆盖真实 title RuntimeEvent 迁移、archive 保留、失败时保留 v1、并发 migration/update、title 后续 mode 快照、hydration 竞态、跨 workspace orphan、quarantine 写失败、重跑幂等及 request/close 同 tick 明确 reject。
 - 说明：title 新旧只按 RuntimeEvent 顺序中的真实 title 变化判定；orphan title 先写一次性 quarantine 再发布 active v2，正常路径不读取 quarantine，其他迁移错误 fail-closed 并保留 v1。
 
@@ -91,7 +91,7 @@
 
 ### 完成记录
 
-- 提交：`66315cd fix(desktop): 增加运行时协议兼容校验`；`2947c23 ci(desktop): 扩展拉取请求检查路径`；`f034f64 build(desktop): 收敛发布配置与未使用依赖`。
+- 提交：`66315cd fix(desktop): 增加运行时协议兼容校验`；`2947c23 ci(desktop): 扩展拉取请求检查路径`；`f034f64 build(desktop): 收敛发布配置与未使用依赖`；`8d64385 fix(desktop): 收紧订阅校验与发布说明`。
 - 验证：`npm run lint`、`npm run typecheck`、`npm run build`、`npm run desktop:typecheck`、`npm run desktop:package`、`npm audit --omit=dev --audit-level=high`；临时 smoke 覆盖真实 daemon ping、旧 schema 拒绝、畸形 Session/Transcript/Event result 拒绝和 Desktop allowlist 未扩大，并验证 HTTP 更新地址会使打包失败、HTTPS feed 已写入打包产物。
 - 说明：Desktop `package.json` 是应用版本真源，tag 与手工 version 输入仅做一致性校验；协议校验在 IPC 边界 fail-closed。
 
@@ -139,14 +139,22 @@
 
 > 上述完成记录为各实现提交的局部验收证据；下列项必须在最终集成态重新执行，不因分支已验证而提前标记。
 
-- [ ] 在最终集成态运行 `npm run lint`。
-- [ ] 在最终集成态运行 `npm run typecheck`。
-- [ ] 在最终集成态运行 `npm run build`。
-- [ ] 在最终集成态运行 `npm run desktop:typecheck` 和 `npm run desktop:package`。
-- [ ] 使用不提交到仓库的临时 smoke 覆盖多 `PICO_HOME` 隔离、Artifact 回读、Desktop migration、daemon close race、双工作区订阅和打包启动/ping/退出。
-- [ ] 检查最终 Git 差异，只提交本计划范围内的变更，并保护用户已有文件。
+- [x] 在最终集成态运行 `npm run lint`。✔️
+- [x] 在最终集成态运行 `npm run typecheck`。✔️
+- [x] 在最终集成态运行 `npm run build`。✔️
+- [x] 在最终集成态运行 `npm run desktop:typecheck` 和 `npm run desktop:package`。✔️
+- [x] 使用不提交到仓库的临时 smoke 覆盖多 `PICO_HOME` 隔离、Artifact 回读、Desktop migration、daemon close race、双工作区订阅和打包启动/ping/退出。✔️
+- [x] 检查最终 Git 差异，只提交本计划范围内的变更，并保护用户已有文件。✔️
 - [ ] 将验收通过的集成分支合并到 `main`。
 - [ ] 确认远程 `main` 未前移后推送，并确认无未提交或未推送内容。
+
+### 最终验收记录
+
+- 环境：Node `22.23.1`；系统 Node 26 不用于验收。
+- 命令：`npm run lint`、`npm run typecheck`、`npm run build`、`npm run desktop:typecheck`、`npm run desktop:package`、`npm run format`、`npm run check:storage`、`npm pack --dry-run --json`、`npm audit --omit=dev --audit-level=high`、`git diff --check`，均通过；生产依赖审计为 0 漏洞。
+- 产物：`app.asar` 中 `.map`、`node-pty`、`zustand` 与 `@radix-ui/react-tabs` 的匹配数均为 0。
+- 临时 smoke：覆盖多 `PICO_HOME` 状态/凭证/endpoint 隔离、Artifact canonical root 与跨 Home 拒绝、v1→v2 migration 正常/orphan/失败保留、request/close 与 realpath/close 竞态、非法 subscription replay fail-closed、合法 replay/live 顺序、Renderer 销毁释放、双工作区订阅隔离，以及最新打包应用启动/schema ping/退出/socket 清理；临时文件与进程已清理。
+- 最终只读复审：未发现可证实的 P0/P1/P2；`blob-garbage-collector.ts` 与 `retention-policy.ts` 相对计划基线保持零差异。
 
 ## 建议实施顺序
 
