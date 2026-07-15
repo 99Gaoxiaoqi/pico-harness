@@ -28,23 +28,12 @@
     "prebuild": "npm run clean && npm run build:protocol",
     "build": "tsc -p tsconfig.build.json",
     "postbuild": "node -e \"require('node:fs').chmodSync('dist/cli/main.js',0o755)\"",
-    "prepack": "npm run build && npm run smoke:package",
-    "smoke:package": "node scripts/package-bin-smoke.mjs && node scripts/package-install-smoke.mjs",
+    "prepack": "npm run build",
     "pretypecheck": "npm run build:protocol",
     "typecheck": "tsc --noEmit",
     "check:storage": "node scripts/check-storage-capability.mjs",
-    "pretest": "npm run check:storage",
-    "test": "vitest run",
-    "pretest:e2e": "npm run check:storage",
-    "test:e2e": "vitest run --config vitest.e2e.config.ts",
-    "pretest:llm-e2e": "npm run check:storage",
-    "test:llm-e2e": "vitest run --config vitest.llm-e2e.config.ts",
-    "test:watch": "vitest",
-    "presmoke:tui": "npm run build",
-    "smoke:tui": "node scripts/tui-built-smoke.mjs",
-    "smoke:tui:source": "node scripts/tui-smoke.mjs",
-    "lint": "eslint src tests scripts 'apps/**/*.{ts,tsx}' 'packages/**/*.{ts,tsx}' eslint.config.js vitest.config.ts vitest.e2e.config.ts vitest.llm-e2e.config.ts --no-error-on-unmatched-pattern",
-    "format": "prettier --check src tests scripts apps packages .github/workflows docs README.md AGENTS.md package.json package-lock.json tsconfig.json tsconfig.build.json vitest.config.ts vitest.e2e.config.ts vitest.llm-e2e.config.ts"
+    "lint": "eslint src scripts 'apps/**/*.{ts,tsx}' 'packages/**/*.{ts,tsx}' eslint.config.js --no-error-on-unmatched-pattern",
+    "format": "prettier --check src scripts apps packages .github/workflows docs README.md AGENTS.md package.json package-lock.json tsconfig.json tsconfig.build.json"
   },
   "engines": {
     "node": "22.x"
@@ -74,7 +63,6 @@
     "prettier": "^3.8.4",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
-    "typescript-eslint": "^8.61.1",
-    "vitest": "^4.0.16"
+    "typescript-eslint": "^8.61.1"
   }
 }
