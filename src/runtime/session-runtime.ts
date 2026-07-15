@@ -47,6 +47,8 @@ export interface SessionRuntimeOptions {
   session: Session;
   /** Host-owned Pico state root for session-scoped durable stores. */
   picoHome?: string;
+  /** Host-owned environment inherited by the session Hook executor. */
+  env?: Readonly<NodeJS.ProcessEnv>;
   toolDisclosure?: ToolDisclosure;
   lspServers?: readonly LspServerConfig[];
   taskHostRuntime?: TaskHostRuntime;
@@ -505,6 +507,8 @@ export async function createSessionRuntime(
       : await createSessionHookRuntime({
           workDir,
           sessionId: options.sessionId,
+          ...(options.picoHome ? { picoHome: options.picoHome } : {}),
+          ...(options.env ? { env: options.env } : {}),
           ...(options.hookUserHome ? { userHome: options.hookUserHome } : {}),
           ...(options.hookExtensionSources
             ? { extensionSources: options.hookExtensionSources }
