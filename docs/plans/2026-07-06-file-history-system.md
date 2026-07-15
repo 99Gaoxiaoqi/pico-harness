@@ -2,6 +2,8 @@
 
 > **归档状态（2026-07-10）：** 本文保留当时的 CLI 实现计划供追溯，不再作为当前使用说明。当前唯一公开入口是 TUI，文件历史使用 `/snapshots` / `/rewind`；`checkpoint-manager.ts` 只是 legacy/manual fallback。
 
+> **历史存储方案（已被替代）：** 下文的 `SessionStore`、Session JSONL 与 `sessions/` 布局只记录当时设计。当前会话与 Agent run 的唯一事实源是 workspace `runtime.sqlite` 中的 RuntimeEvent；`sessions.db` 仅为可重建 FTS 投影。
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans / superpowers:test-driven-development 实现本计划。每个子模块先写测试再写实现,`npm test` 全过后才提交。
 
 **Goal:** 用纯 `copyFile` 备份方案替换 1.2 的 git stash 快照,实现文件回滚与对话回滚解耦的三轴 rewind。

@@ -6,10 +6,13 @@
 //   B. ToolScheduler 并发:多个不冲突工具调用在真实链路下并行执行
 //   C. 基础链路不回归:正常任务 + skill 加载仍跑通
 
-import { mkdtemp, cp, readFile } from "node:fs/promises";
+import { mkdtemp, cp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runAgentFromCli } from "../src/cli/run-agent.js";
+import { resolvePicoPaths } from "../src/paths/pico-paths.js";
+import { materializeRuntimeHistory } from "../src/runtime/runtime-event-read-model.js";
+import { RuntimeEventStore } from "../src/runtime/runtime-event-store.js";
 
 async function flush(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 100));
@@ -41,16 +44,22 @@ async function main(): Promise<void> {
   console.log(`[第一段] 模型回复: ${result1.finalMessage.slice(0, 80)}...`);
   await flush();
 
-  // 检查 session 文件是否落盘
-  const sessionFile = join(workDir, ".claw", "sessions", `${sessionId}.jsonl`);
-  let fileExists = false;
-  try {
-    const content = await readFile(sessionFile, "utf8");
-    fileExists = content.length > 0;
-    console.log(`[落盘检查] session 文件存在且有内容: ${fileExists} (${content.length} 字符)`);
-  } catch {
-    console.log(`[落盘检查] session 文件不存在`);
-  }
+  // 检查 canonical RuntimeEvent 是否落入 runtime.sqlite，并以严格 read model 重放。
+  const runtimeStore = new RuntimeEventStore({
+    databasePath: resolvePicoPaths(workDir).workspace.runtimeDatabase,
+  });
+  const manifest = await runtimeStore.readSessionManifest(sessionId);
+  const runtimeEvents = await runtimeStore.readSession(sessionId);
+  const persistedHistory = materializeRuntimeHistory(runtimeEvents);
+  const runtimePersisted =
+    manifest !== undefined &&
+    persistedHistory.length > 0 &&
+    runtimeEvents.some((event) => event.kind === "message.committed") &&
+    runtimeEvents.some((event) => event.kind === "run.terminal");
+  console.log(
+    `[落盘检查] runtime.sqlite RuntimeEvent 完整: ${runtimePersisted} ` +
+      `(${runtimeEvents.length} events, ${persistedHistory.length} messages)`,
+  );
 
   // 第二段:用同一个 sessionId 再跑一次,验证恢复的历史被喂给模型
   const result2 = await runAgentFromCli({
@@ -62,7 +71,7 @@ async function main(): Promise<void> {
     planMode: false,
   });
   // 模型应该能回忆第一轮的话题(工具相关)
-  const passA = fileExists && /工具|tool|可用/i.test(result2.finalMessage);
+  const passA = runtimePersisted && /工具|tool|可用/i.test(result2.finalMessage);
   console.log(`[第二段] 模型回忆: ${result2.finalMessage.slice(0, 80)}...`);
   console.log(`[验证 A] Session 持久化 + 重启恢复: ${passA ? "✅ 通过" : "❌ 失败"}\n`);
 

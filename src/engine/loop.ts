@@ -288,6 +288,45 @@ interface RequiredDelegationAssessment {
   batchFailed: boolean;
 }
 
+interface ToolExecutionOutcome {
+  message: Message;
+  reminder?: Message;
+}
+
+interface ToolProtocolFailure {
+  status: "cancelled" | "failed";
+  reason: string;
+}
+
+function toolProtocolFailureFrom(error: unknown, signal?: AbortSignal): ToolProtocolFailure {
+  const cancelled = signal?.aborted === true || isAbortError(error);
+  if (cancelled) {
+    return {
+      status: "cancelled",
+      reason: "本轮运行被中止",
+    };
+  }
+  const detail = error instanceof Error ? error.message : String(error);
+  return {
+    status: "failed",
+    reason: `工具批次异常中止: ${truncate(detail, 500)}`,
+  };
+}
+
+function buildSyntheticToolObservation(toolCall: ToolCall, failure: ToolProtocolFailure): Message {
+  const prefix = failure.status === "cancelled" ? "工具执行已取消" : "工具执行失败";
+  return {
+    role: "user",
+    content: `${prefix}: ${failure.reason}；该调用未获得可用结果。`,
+    toolCallId: toolCall.id,
+    providerData: {
+      [PICO_TOOL_RESULT_ERROR_KEY]: true,
+      picoKind: "synthetic_tool_result",
+      picoToolResultStatus: failure.status,
+    },
+  };
+}
+
 function assessRequiredDelegationResult(message: Message): RequiredDelegationAssessment {
   try {
     const parsed = JSON.parse(message.content) as {
@@ -1390,9 +1429,11 @@ export class AgentEngine implements AgentRunner {
                 picoHiddenFromTranscript: true,
               },
             };
-            await session.commitMessages(rejectedResponse);
+            await session.commitMessages(
+              rejectedResponse,
+              ...toolCalls.map(buildSynthesisToolRejection),
+            );
             this.onTurn?.({ turn: turnCount, message: rejectedResponse });
-            await session.commitMessages(...toolCalls.map(buildSynthesisToolRejection));
 
             if (exploreSynthesisToolRetries >= MAX_EXPLORE_SYNTHESIS_TOOL_RETRIES) {
               const failedResponse: Message = {
@@ -1445,9 +1486,11 @@ export class AgentEngine implements AgentRunner {
                 picoHiddenFromTranscript: true,
               },
             };
-            await session.commitMessages(rejectedResponse);
+            await session.commitMessages(
+              rejectedResponse,
+              ...toolCalls.map(buildDelegationRecoveryToolRejection),
+            );
             this.onTurn?.({ turn: turnCount, message: rejectedResponse });
-            await session.commitMessages(...toolCalls.map(buildDelegationRecoveryToolRejection));
             const failedResponse: Message = {
               role: "assistant",
               content: requiredFirstDelegationActive
@@ -1470,9 +1513,11 @@ export class AgentEngine implements AgentRunner {
                 picoHiddenFromTranscript: true,
               },
             };
-            await session.commitMessages(rejectedResponse);
+            await session.commitMessages(
+              rejectedResponse,
+              ...toolCalls.map(buildRequiredFirstToolRejection),
+            );
             this.onTurn?.({ turn: turnCount, message: rejectedResponse });
-            await session.commitMessages(...toolCalls.map(buildRequiredFirstToolRejection));
             requiredFirstDelegationAttempts++;
 
             if (requiredFirstDelegationAttempts >= MAX_REQUIRED_FIRST_DELEGATION_ATTEMPTS) {
@@ -1503,72 +1548,110 @@ export class AgentEngine implements AgentRunner {
           // tool calls，不让委派前的解释正文再次进入主上下文。
           await session.commitMessages(responseMsg);
           compactedContext.push(responseMsg);
-          this.onTurn?.({ turn: turnCount, message: responseMsg });
-          if (exhaustedReason) {
-            break;
-          }
-
-          // 模型回复纯文本时广播 (通常是思考过程或最终结果)
-          if (responseMsg.content) {
-            await this.reportMessage(reporter, responseMsg.content, signal);
-          }
-
-          // 3. 退出条件:模型没有请求任何工具调用,说明任务完成,挂起等待下一条指令
-          if (toolCalls.length === 0) {
-            const stopHookDecision = await this.hookService?.dispatch(
-              "Stop",
-              { reason: "model_stop", response: responseMsg.content },
-              { signal },
+          const settledResults: Array<ToolExecutionOutcome | undefined> = new Array(
+            toolCalls.length,
+          );
+          const scheduled: Array<Promise<ToolExecutionOutcome>> = [];
+          let toolProtocolClosed = toolCalls.length === 0;
+          const closeToolProtocol = async (failure: ToolProtocolFailure): Promise<void> => {
+            if (toolProtocolClosed) return;
+            await this.closeToolProtocolBatch(
+              session,
+              toolCalls,
+              settledResults,
+              failure,
+              reporter,
             );
-            signal?.throwIfAborted();
-            const hookRequestsContinuation = stopHookDecision?.decision === "deny";
-            const hookCanContinue = hookRequestsContinuation && consecutiveHookStopBlocks < 3;
-            if (hookCanContinue) consecutiveHookStopBlocks++;
-            else if (!hookRequestsContinuation) consecutiveHookStopBlocks = 0;
-            // 3.7: host 可决定续接(返回 {continue:true} 则不退出,append 续接消息继续)
-            const decision = hookCanContinue
-              ? {
-                  continue: true,
-                  continuePrompt:
-                    stopHookDecision?.additionalContext ??
-                    stopHookDecision?.reason ??
-                    "Stop hook 要求继续推进任务。",
-                }
-              : await this.shouldContinueAfterStop?.({
-                  turn: turnCount,
-                  lastMessage: responseMsg,
+            toolProtocolClosed = true;
+          };
+          const failToolProtocol = async (error: unknown): Promise<never> => {
+            await Promise.allSettled(scheduled);
+            try {
+              await closeToolProtocol(toolProtocolFailureFrom(error, signal));
+            } catch (closureError) {
+              throw new AggregateError(
+                [error, closureError],
+                "Agent run failed and its committed tool-call batch could not be closed",
+                { cause: closureError },
+              );
+            }
+            throw error;
+          };
+
+          try {
+            this.onTurn?.({ turn: turnCount, message: responseMsg });
+            if (exhaustedReason) {
+              await closeToolProtocol({
+                status: "cancelled",
+                reason: `执行预算已耗尽: ${exhaustedReason}`,
+              });
+              break;
+            }
+
+            // 模型回复纯文本时广播 (通常是思考过程或最终结果)
+            if (responseMsg.content) {
+              await this.reportMessage(reporter, responseMsg.content, signal);
+            }
+
+            // 3. 退出条件:模型没有请求任何工具调用,说明任务完成,挂起等待下一条指令
+            if (toolCalls.length === 0) {
+              const stopHookDecision = await this.hookService?.dispatch(
+                "Stop",
+                { reason: "model_stop", response: responseMsg.content },
+                { signal },
+              );
+              signal?.throwIfAborted();
+              const hookRequestsContinuation = stopHookDecision?.decision === "deny";
+              const hookCanContinue = hookRequestsContinuation && consecutiveHookStopBlocks < 3;
+              if (hookCanContinue) consecutiveHookStopBlocks++;
+              else if (!hookRequestsContinuation) consecutiveHookStopBlocks = 0;
+              // 3.7: host 可决定续接(返回 {continue:true} 则不退出,append 续接消息继续)
+              const decision = hookCanContinue
+                ? {
+                    continue: true,
+                    continuePrompt:
+                      stopHookDecision?.additionalContext ??
+                      stopHookDecision?.reason ??
+                      "Stop hook 要求继续推进任务。",
+                  }
+                : await this.shouldContinueAfterStop?.({
+                    turn: turnCount,
+                    lastMessage: responseMsg,
+                  });
+              signal?.throwIfAborted();
+
+              // steer 可能在最后一次 provider 调用期间到达。必须在真正 stop
+              // 前同步 drain 并续接本轮，否则它会泄漏到下一次无关 run。
+              const stopSteers = this.steerQueue?.drain() ?? [];
+              for (const text of stopSteers) {
+                await session.commitMessages({
+                  role: "user",
+                  content: text,
+                  providerData: { picoKind: "steer" },
                 });
+              }
+              if (decision?.continue) {
+                await session.commitMessages({
+                  role: "user",
+                  content: decision.continuePrompt ?? "请继续推进任务。",
+                  providerData: { picoKind: "continuation", picoHiddenFromTranscript: true },
+                });
+              }
+              if (stopSteers.length > 0 || decision?.continue) {
+                continue; // 不 break,回 for(;;) 顶部继续下一轮
+              }
+              reporter.onFinish();
+              break;
+            }
+
+            // A pause requested during provider inference takes effect before any new tool starts.
+            // A pause requested while tools are running is observed at the next loop boundary,
+            // after the whole scheduled batch and file journal have safely settled.
+            await this.waitAtSafeBoundary?.();
             signal?.throwIfAborted();
-
-            // steer 可能在最后一次 provider 调用期间到达。必须在真正 stop
-            // 前同步 drain 并续接本轮，否则它会泄漏到下一次无关 run。
-            const stopSteers = this.steerQueue?.drain() ?? [];
-            for (const text of stopSteers) {
-              await session.commitMessages({
-                role: "user",
-                content: text,
-                providerData: { picoKind: "steer" },
-              });
-            }
-            if (decision?.continue) {
-              await session.commitMessages({
-                role: "user",
-                content: decision.continuePrompt ?? "请继续推进任务。",
-                providerData: { picoKind: "continuation", picoHiddenFromTranscript: true },
-              });
-            }
-            if (stopSteers.length > 0 || decision?.continue) {
-              continue; // 不 break,回 for(;;) 顶部继续下一轮
-            }
-            reporter.onFinish();
-            break;
+          } catch (error) {
+            await failToolProtocol(error);
           }
-
-          // A pause requested during provider inference takes effect before any new tool starts.
-          // A pause requested while tools are running is observed at the next loop boundary,
-          // after the whole scheduled batch and file journal have safely settled.
-          await this.waitAtSafeBoundary?.();
-          signal?.throwIfAborted();
 
           // 4. 执行行动 (Action) 与 获取观察结果 (Observation)
           // 资源冲突图调度(对标 kimi-code ToolScheduler):工具按文件路径 × 操作类型
@@ -1576,118 +1659,104 @@ export class AgentEngine implements AgentRunner {
           //   - 不冲突(read+read / write 不同文件)→ 并行
           //   - 冲突(同文件含写 / kind:"all")→ 串行
           // 结果按 provider 原始顺序回传(add 顺序即 resolve 顺序)。
-          const getAccesses = this.registry.getAccesses;
           // Kimi AgentSwarm 式独占语义：required delegate_task 是这一轮唯一
           // 允许真实执行的工具。保留原始 toolCalls 和每个对应 observation，
           // 以维持 provider 要求的 tool-call/result 完整配对。
           // maxConcurrency 限制并发执行的工具数(对齐 hermes _MAX_TOOL_WORKERS=8),
           // 防止一批大量不冲突只读工具同时打 IO 把系统压垮。
           let turnFileJournal: FileHistoryJournal | undefined;
-          const fileSideEffectKinds = toolCalls.map((call, index) =>
-            requiredDelegationIndex === undefined || index === requiredDelegationIndex
-              ? fileSideEffectKind(this.registry, call)
-              : "none",
-          );
-          const hasFileEffects = fileSideEffectKinds.some((kind) => kind !== "none");
-          if (hasFileEffects && journalRoots.length > 0) {
-            if (userRewindPointId) {
-              runFileJournal ??= await fileHistoryBeginJournal(journalRoots, session.id, signal);
-            } else {
-              turnFileJournal = await fileHistoryBeginJournal(journalRoots, session.id, signal);
-            }
-            const activeJournal = runFileJournal ?? turnFileJournal;
-            activeFileJournal = activeJournal;
-            if (
-              activeJournal &&
-              toolCalls.some(
-                (call, index) =>
-                  (requiredDelegationIndex === undefined || index === requiredDelegationIndex) &&
-                  isBackgroundBashCall(call),
-              )
-            ) {
-              fileHistoryAddJournalWarning(
-                activeJournal,
-                "background bash 在工具返回后仍可继续写入，本轮 rewind 只覆盖返回前的变化",
-              );
-            }
-          }
-          const scheduler = new ToolScheduler<{
-            message: Message;
-            reminder?: Message;
-          }>({
-            maxConcurrency: AgentEngine.MAX_TOOL_CONCURRENCY,
-            signal,
-          });
-          const settledResults: Array<{ message: Message; reminder?: Message } | undefined> =
-            new Array(toolCalls.length);
-          let results: Array<{ message: Message; reminder?: Message }>;
-          let scheduled: Array<Promise<{ message: Message; reminder?: Message }>> = [];
+          let scheduler: ToolScheduler<ToolExecutionOutcome> | undefined;
+          let results: ToolExecutionOutcome[] = [];
           try {
-            scheduled = toolCalls.map((tc, index) => {
-              const execution =
-                requiredDelegation && index !== requiredDelegationIndex
-                  ? Promise.resolve(buildExclusiveDelegationRejection(tc, requiredDelegation))
-                  : scheduler.add({
-                      accesses: getAccesses
-                        ? getAccesses.call(this.registry, tc)
-                        : ToolAccesses.all(),
-                      // 文件事务只能在活跃写任务的 start Promise 真实收口后提交。
-                      settleOnAbort: fileSideEffectKinds[index] !== "none",
-                      start: async () => {
-                        signal?.throwIfAborted();
-                        return runWithRuntimeToolCall(tc.id, () =>
-                          this.runOneTool(tc, reporter, session.id, turnSpan, signal),
-                        );
-                      },
-                    });
-              return execution.then((result) => {
-                settledResults[index] = result;
-                return result;
+            try {
+              const getAccesses = this.registry.getAccesses;
+              const fileSideEffectKinds = toolCalls.map((call, index) =>
+                requiredDelegationIndex === undefined || index === requiredDelegationIndex
+                  ? fileSideEffectKind(this.registry, call)
+                  : "none",
+              );
+              const hasFileEffects = fileSideEffectKinds.some((kind) => kind !== "none");
+              if (hasFileEffects && journalRoots.length > 0) {
+                if (userRewindPointId) {
+                  runFileJournal ??= await fileHistoryBeginJournal(
+                    journalRoots,
+                    session.id,
+                    signal,
+                  );
+                } else {
+                  turnFileJournal = await fileHistoryBeginJournal(journalRoots, session.id, signal);
+                }
+                const activeJournal = runFileJournal ?? turnFileJournal;
+                activeFileJournal = activeJournal;
+                if (
+                  activeJournal &&
+                  toolCalls.some(
+                    (call, index) =>
+                      (requiredDelegationIndex === undefined ||
+                        index === requiredDelegationIndex) &&
+                      isBackgroundBashCall(call),
+                  )
+                ) {
+                  fileHistoryAddJournalWarning(
+                    activeJournal,
+                    "background bash 在工具返回后仍可继续写入，本轮 rewind 只覆盖返回前的变化",
+                  );
+                }
+              }
+              scheduler = new ToolScheduler<ToolExecutionOutcome>({
+                maxConcurrency: AgentEngine.MAX_TOOL_CONCURRENCY,
+                signal,
               });
-            });
-            results = await Promise.all(scheduled);
-            signal?.throwIfAborted();
-          } catch (err) {
-            if (signal?.aborted) {
-              // 队列任务已拒绝；workspace/exact 活跃任务则等底层 start 真实 settle。
+              for (const [index, tc] of toolCalls.entries()) {
+                const execution =
+                  requiredDelegation && index !== requiredDelegationIndex
+                    ? Promise.resolve(buildExclusiveDelegationRejection(tc, requiredDelegation))
+                    : scheduler.add({
+                        accesses: getAccesses
+                          ? getAccesses.call(this.registry, tc)
+                          : ToolAccesses.all(),
+                        // 文件事务只能在活跃写任务的 start Promise 真实收口后提交。
+                        settleOnAbort: fileSideEffectKinds[index] !== "none",
+                        start: async () => {
+                          signal?.throwIfAborted();
+                          return runWithRuntimeToolCall(tc.id, () =>
+                            this.runOneTool(tc, reporter, session.id, turnSpan, signal),
+                          );
+                        },
+                      });
+                scheduled.push(
+                  execution.then((result) => {
+                    settledResults[index] = result;
+                    return result;
+                  }),
+                );
+              }
+              results = await Promise.all(scheduled);
+              signal?.throwIfAborted();
+            } finally {
+              // 异常时也要先等已启动任务收口，再提交文件 journal 和协议闭合结果。
               await Promise.allSettled(scheduled);
-              const abortedObservations = toolCalls.map((toolCall, index) => {
-                const settled = settledResults[index];
-                if (settled) return settled.message;
-                const content = "工具执行已取消:本轮运行被中止,未产生可用结果。";
-                reporter.onToolResult(toolCall.name, content, true, toolCall.id);
-                return {
-                  role: "user" as const,
-                  content,
-                  toolCallId: toolCall.id,
-                  providerData: { [PICO_TOOL_RESULT_ERROR_KEY]: true },
-                };
-              });
-              await session.commitMessages(...abortedObservations);
-              const settledReminders = settledResults.flatMap((result) =>
-                result?.reminder ? [result.reminder] : [],
-              );
-              if (settledReminders.length > 0) {
-                await session.commitMessages(...settledReminders);
+              scheduler?.dispose();
+              if (turnFileJournal) {
+                try {
+                  const changedPaths = await commitFileJournal(
+                    session,
+                    turnFileJournal,
+                    currentMessageId,
+                  );
+                  if (changedPaths.length > 0) {
+                    await this.hookService?.dispatch("FileChanged", {
+                      paths: changedPaths,
+                      origin: "internal",
+                    });
+                  }
+                } finally {
+                  activeFileJournal = runFileJournal;
+                }
               }
             }
-            throw err;
-          } finally {
-            scheduler.dispose();
-            if (turnFileJournal) {
-              const changedPaths = await commitFileJournal(
-                session,
-                turnFileJournal,
-                currentMessageId,
-              );
-              if (changedPaths.length > 0) {
-                await this.hookService?.dispatch("FileChanged", {
-                  paths: changedPaths,
-                  origin: "internal",
-                });
-              }
-              activeFileJournal = runFileJournal;
-            }
+          } catch (error) {
+            await failToolProtocol(error);
           }
 
           const observations: Message[] = new Array(toolCalls.length);
@@ -1702,6 +1771,7 @@ export class AgentEngine implements AgentRunner {
 
           // 将所有 Observation 持久化到 Session,开启下一轮复盘与推理
           await session.commitMessages(...observations);
+          toolProtocolClosed = true;
           await this.hookService?.dispatch(
             "PostToolBatch",
             {
@@ -1834,6 +1904,39 @@ export class AgentEngine implements AgentRunner {
     return session.getHistory().slice(beforeLen);
   }
 
+  private async closeToolProtocolBatch(
+    session: Session,
+    toolCalls: readonly ToolCall[],
+    settledResults: readonly (ToolExecutionOutcome | undefined)[],
+    failure: ToolProtocolFailure,
+    reporter: Reporter,
+  ): Promise<void> {
+    const syntheticIndexes: number[] = [];
+    const observations = toolCalls.map((toolCall, index) => {
+      const settled = settledResults[index];
+      if (settled) return settled.message;
+      syntheticIndexes.push(index);
+      return buildSyntheticToolObservation(toolCall, failure);
+    });
+
+    const reminders = settledResults.flatMap((result) =>
+      result?.reminder ? [result.reminder] : [],
+    );
+    await session.commitMessages(...observations, ...reminders);
+    for (const index of syntheticIndexes) {
+      const toolCall = toolCalls[index]!;
+      const observation = observations[index]!;
+      try {
+        reporter.onToolResult(toolCall.name, observation.content, true, toolCall.id);
+      } catch (error) {
+        logger.warn(
+          { error: String(error), tool: toolCall.name },
+          "[Engine] synthetic ToolResult 已持久化，但 Reporter 通知失败",
+        );
+      }
+    }
+  }
+
   /** 执行单个工具调用并返回观察结果消息 + 原始结果 (带日志 + 错误自愈注入) */
   private async runOneTool(
     toolCall: ToolCall,
@@ -1885,7 +1988,6 @@ export class AgentEngine implements AgentRunner {
             }
           },
         });
-        signal?.throwIfAborted();
       }
 
       // 【核心拦截与注入】工具执行失败时,交由 RecoveryManager 诊断并注入"锦囊妙计"。
@@ -1902,7 +2004,6 @@ export class AgentEngine implements AgentRunner {
         finalOutput,
         sessionId,
       );
-      signal?.throwIfAborted();
       if (runtimeRun && this.runtimeEvidenceArchive) {
         const evidence = await this.runtimeEvidenceArchive.archiveRuntimeToolExchange(
           runtimeRun.sessionId,
