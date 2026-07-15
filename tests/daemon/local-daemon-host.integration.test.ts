@@ -153,7 +153,9 @@ describe("LocalDaemonHost integration", () => {
     const root = await mkdtemp(join(tmpdir(), "pico-daemon-desktop-run-"));
     cleanups.push(() => rm(root, { recursive: true, force: true }));
     const workspace = join(root, "workspace");
+    const otherWorkspace = join(root, "other-workspace");
     await mkdir(join(workspace, ".pico"), { recursive: true });
+    await mkdir(otherWorkspace);
     execFileSync("git", ["init", "--quiet"], { cwd: workspace });
     execFileSync(
       "git",
@@ -227,11 +229,45 @@ describe("LocalDaemonHost integration", () => {
 
       await expect(
         client.request("approval.respond", {
-          workspacePath: workspace,
+          workspacePath: otherWorkspace,
           approvalId: "approval-1",
           decision: "allow_once",
         }),
-      ).resolves.toEqual({ accepted: true, alreadyResolved: false });
+      ).rejects.toThrow(/^NOT_FOUND:/u);
+      await expect(
+        client.request("approval.respond", {
+          workspacePath: workspace,
+          approvalId: "approval-1",
+          runId: "wrong-run",
+          decision: "allow_once",
+        }),
+      ).rejects.toThrow(/^NOT_FOUND:/u);
+      const approvalResponse = {
+        workspacePath: workspace,
+        approvalId: "approval-1",
+        runId: run.runId,
+        sessionId: "desktop-session-1",
+        decision: "allow_once" as const,
+        idempotencyKey: "approval-response-once",
+      };
+      await expect(client.request("approval.respond", approvalResponse)).resolves.toEqual({
+        accepted: true,
+        alreadyResolved: false,
+      });
+      await expect(client.request("approval.respond", approvalResponse)).resolves.toEqual({
+        accepted: true,
+        alreadyResolved: false,
+      });
+      await expect(
+        client.request("approval.respond", {
+          workspacePath: workspace,
+          approvalId: "approval-1",
+          runId: run.runId,
+          sessionId: "desktop-session-1",
+          decision: "deny",
+          idempotencyKey: "approval-response-once",
+        }),
+      ).rejects.toThrow(/^CONFLICT:/u);
       await expect(
         client.request("approval.respond", {
           workspacePath: workspace,
@@ -241,18 +277,40 @@ describe("LocalDaemonHost integration", () => {
       ).resolves.toEqual({ accepted: true, alreadyResolved: true });
       await expect(
         client.request("prompt.respond", {
+          workspacePath: otherWorkspace,
+          promptId: "prompt-1",
+          answer: "保留兼容",
+        }),
+      ).rejects.toThrow(/^NOT_FOUND:/u);
+      await expect(
+        client.request("prompt.respond", {
           workspacePath: workspace,
           promptId: "prompt-1",
           answer: "任意自由文本",
         }),
       ).rejects.toThrow(/^INVALID_PARAMS:/u);
+      const promptResponse = {
+        workspacePath: workspace,
+        promptId: "prompt-1",
+        runId: run.runId,
+        sessionId: "desktop-session-1",
+        answer: "保留兼容",
+        idempotencyKey: "prompt-response-once",
+      };
+      await expect(client.request("prompt.respond", promptResponse)).resolves.toEqual({
+        accepted: true,
+        alreadyResolved: false,
+      });
+      await expect(client.request("prompt.respond", promptResponse)).resolves.toEqual({
+        accepted: true,
+        alreadyResolved: false,
+      });
       await expect(
         client.request("prompt.respond", {
-          workspacePath: workspace,
-          promptId: "prompt-1",
-          answer: "保留兼容",
+          ...promptResponse,
+          answer: "允许破坏",
         }),
-      ).resolves.toEqual({ accepted: true, alreadyResolved: false });
+      ).rejects.toThrow(/^CONFLICT:/u);
 
       await expect
         .poll(async () => {

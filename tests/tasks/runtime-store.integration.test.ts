@@ -54,6 +54,8 @@ describe("RuntimeStore + JobService integration", () => {
         "merge_requests",
         "provider_calls",
         "usage_baselines",
+        "daemon_runs",
+        "daemon_commands",
       ]),
     );
 
@@ -540,11 +542,11 @@ describe("RuntimeStore + JobService integration", () => {
     ).some((column) => column.name === "name");
     inspected.close();
 
-    expect(migration.version).toBe(5);
+    expect(migration.version).toBe(6);
     expect(hasName).toBe(true);
   });
 
-  it("不降级未知的未来 schema 标记", () => {
+  it("不接受未知的同版本 schema 标记", () => {
     const workDir = makeTempDir(tempDirs);
     const databasePath = resolvePicoPaths(workDir).workspace.runtimeDatabase;
     const initial = new RuntimeStore({ workDir });
@@ -558,7 +560,9 @@ describe("RuntimeStore + JobService integration", () => {
       .run("unknown_future_migration", Date.now());
     futureDatabase.close();
 
-    expect(() => new RuntimeStore({ workDir })).toThrow(/schema 6.*新于.*5/u);
+    expect(() => new RuntimeStore({ workDir })).toThrow(
+      /schema 6 migration unknown_future_migration 不受支持/u,
+    );
     const inspected = new Database(databasePath, { readonly: true });
     const migration = inspected
       .prepare("SELECT name FROM schema_migrations WHERE version = 6")

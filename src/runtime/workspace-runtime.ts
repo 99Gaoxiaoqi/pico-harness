@@ -40,6 +40,7 @@ export interface WorkspaceRunSnapshot {
 
 export interface WorkspaceRunRequest {
   description: string;
+  sessionId?: string;
 }
 
 export interface WorkspaceRunContext {
@@ -203,6 +204,7 @@ export class WorkspaceTaskRuntime {
       snapshot: {
         runId,
         workspace: this.workspace,
+        ...(request.sessionId ? { sessionId: request.sessionId } : {}),
         description,
         status: "running",
         startedAt,
@@ -216,11 +218,16 @@ export class WorkspaceTaskRuntime {
       promise: Promise.resolve(),
     };
     this.runs.set(runId, record);
-    this.publish({
-      type: "run.started",
-      resourceVersion: record.snapshot.version,
-      run: cloneRun(record.snapshot),
-    });
+    try {
+      this.publish({
+        type: "run.started",
+        resourceVersion: record.snapshot.version,
+        run: cloneRun(record.snapshot),
+      });
+    } catch (error) {
+      this.runs.delete(runId);
+      throw error;
+    }
     record.promise = Promise.resolve().then(() => this.executeRun(record, executor));
     return cloneRun(record.snapshot);
   }
@@ -228,6 +235,14 @@ export class WorkspaceTaskRuntime {
   getRun(runId: string): WorkspaceRunSnapshot | undefined {
     const record = this.runs.get(runId);
     return record ? cloneRun(record.snapshot) : undefined;
+  }
+
+  failBeforeExecution(runId: string, error: string): WorkspaceRunSnapshot {
+    const record = this.requireRun(runId);
+    if (isTerminalRunStatus(record.snapshot.status)) return cloneRun(record.snapshot);
+    record.controller.abort(new DOMException(error, "AbortError"));
+    this.finishRun(record, "failed", undefined, error);
+    return cloneRun(record.snapshot);
   }
 
   listRuns(): WorkspaceRunSnapshot[] {
@@ -355,6 +370,7 @@ export class WorkspaceTaskRuntime {
     executor: WorkspaceRunExecutor,
   ): Promise<void> {
     try {
+      if (isTerminalRunStatus(record.snapshot.status)) return;
       const result = await executor({
         run: cloneRun(record.snapshot),
         signal: record.controller.signal,

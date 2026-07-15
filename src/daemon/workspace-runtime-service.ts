@@ -1,4 +1,8 @@
-import { WorkspaceTaskRuntime, type WorkspaceRunContext } from "../runtime/workspace-runtime.js";
+import {
+  WorkspaceTaskRuntime,
+  type WorkspaceRunContext,
+  type WorkspaceRunSnapshot,
+} from "../runtime/workspace-runtime.js";
 import {
   createRuntimeEvent,
   isJsonObject,
@@ -11,8 +15,12 @@ import {
   type WorkspaceStatusResult,
 } from "./protocol.js";
 import type { LocalRuntimeService, RuntimeEventCursor } from "./service.js";
-import { RuntimeStore } from "../tasks/runtime-store.js";
-import type { RuntimeEventRecord } from "../tasks/runtime-types.js";
+import {
+  RuntimeConflictError,
+  RuntimeStore,
+  type DaemonIdempotentCommandResult,
+} from "../tasks/runtime-store.js";
+import type { DaemonRunRecord, RuntimeEventRecord } from "../tasks/runtime-types.js";
 import { canonicalizeWorkspacePath, WorkspaceRuntimeRegistry } from "./workspace-registry.js";
 import { WorkspaceRegistrationStore } from "./workspace-registration.js";
 
@@ -60,6 +68,9 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
         this.unsubscribers.set(
           workspacePath,
           runtime.subscribe((event) => {
+            if (event.run) {
+              this.eventStore(event.workspace).upsertDaemonRun(daemonRunRecord(event.run));
+            }
             this.publish(
               createRuntimeEvent({
                 topic: event.type,
@@ -129,17 +140,57 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
       const workspacePath = requiredString(params, "workspacePath");
       const prompt = requiredString(params, "prompt");
       const sessionId = optionalString(params, "sessionId");
+      const idempotencyKey = optionalIdempotencyKey(params);
       const runtime = await this.getRuntime(workspacePath);
-      const run = runtime.startRun({ description: prompt }, (context) =>
-        this.options.execute({
-          workspacePath: runtime.workspace,
-          workspaceRuntime: runtime,
-          prompt,
-          ...(sessionId ? { sessionId } : {}),
-          context,
-        }),
-      );
-      return runPayload(run);
+      const start = () => {
+        const run = runtime.startRun(
+          { description: prompt, ...(sessionId ? { sessionId } : {}) },
+          (context) =>
+            this.options.execute({
+              workspacePath: runtime.workspace,
+              workspaceRuntime: runtime,
+              prompt,
+              ...(sessionId ? { sessionId } : {}),
+              context,
+            }),
+        );
+        return { result: runPayload(run), resourceId: run.runId };
+      };
+      if (!idempotencyKey) return start().result;
+
+      let startedRunId: string | undefined;
+      try {
+        const outcome = await this.executeIdempotentDaemonCommand(
+          runtime.workspace,
+          {
+            commandType: "run.start",
+            idempotencyKey,
+            request: {
+              workspacePath: runtime.workspace,
+              prompt,
+              ...(sessionId ? { sessionId } : {}),
+            },
+          },
+          () => {
+            const started = start();
+            startedRunId = started.resourceId;
+            return started;
+          },
+        );
+        if (outcome.resourceId) {
+          const durable = this.eventStore(runtime.workspace).getDaemonRun(
+            runtime.workspace,
+            outcome.resourceId,
+          );
+          if (durable) return runPayload(workspaceRunSnapshot(durable));
+        }
+        return outcome.result;
+      } catch (error) {
+        if (startedRunId) {
+          runtime.failBeforeExecution(startedRunId, "run.start 幂等记录持久化失败");
+        }
+        throw error;
+      }
     }
     if (request.method === "run.cancel") {
       const runtime = await this.getRuntime(requiredString(params, "workspacePath"));
@@ -163,7 +214,26 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
     }
     if (request.method === "runs.list") {
       const runtime = await this.getRuntime(requiredString(params, "workspacePath"));
-      return { runs: runtime.listRuns().map(runPayload) };
+      const sessionId = optionalString(params, "sessionId");
+      const runs = new Map(
+        this.eventStore(runtime.workspace)
+          .listDaemonRuns({
+            workspacePath: runtime.workspace,
+            ...(sessionId ? { sessionId } : {}),
+          })
+          .map((run) => [run.runId, workspaceRunSnapshot(run)]),
+      );
+      for (const run of runtime.listRuns()) {
+        if (!sessionId || run.sessionId === sessionId) runs.set(run.runId, run);
+      }
+      return {
+        runs: [...runs.values()]
+          .sort(
+            (left, right) =>
+              left.startedAt - right.startedAt || left.runId.localeCompare(right.runId),
+          )
+          .map(runPayload),
+      };
     }
     if (request.method === "jobs.list") {
       const runtime = await this.getRuntime(requiredString(params, "workspacePath"));
@@ -217,7 +287,34 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
   /** Read-only lookup for adapters that project a Run's durable Session state. */
   async getWorkspaceRun(workspacePath: string, runId: string) {
     const runtime = await this.getRuntime(workspacePath);
-    return runtime.getRun(runId);
+    const current = runtime.getRun(runId);
+    if (current) return current;
+    const durable = this.eventStore(runtime.workspace).getDaemonRun(runtime.workspace, runId);
+    return durable ? workspaceRunSnapshot(durable) : undefined;
+  }
+
+  async executeIdempotentDaemonCommand<Result extends Record<string, unknown>>(
+    workspacePath: string,
+    input: {
+      commandType: string;
+      idempotencyKey: string;
+      request: Record<string, unknown>;
+    },
+    execute: () => { result: Result; resourceId?: string },
+  ): Promise<DaemonIdempotentCommandResult<Result>> {
+    const canonical = await canonicalizeWorkspacePath(workspacePath);
+    const idempotencyKey = normalizeIdempotencyKey(input.idempotencyKey);
+    try {
+      return this.eventStore(canonical).executeIdempotentDaemonCommand(
+        { ...input, idempotencyKey },
+        execute,
+      );
+    } catch (error) {
+      if (error instanceof RuntimeConflictError) {
+        throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.CONFLICT, error.message);
+      }
+      throw error;
+    }
   }
 
   setRegistrationChangedListener(listener: () => Promise<void>): void {
@@ -230,11 +327,11 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
   }
 
   async close(): Promise<void> {
+    this.registrationChanged = undefined;
+    await this.registry.close();
     for (const unsubscribe of this.unsubscribers.values()) unsubscribe();
     this.unsubscribers.clear();
     this.listeners.clear();
-    this.registrationChanged = undefined;
-    await this.registry.close();
     for (const store of this.eventStores.values()) store.close();
     this.eventStores.clear();
   }
@@ -273,6 +370,10 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
     const store = this.eventStores.get(workspacePath);
     if (store) return store;
     const created = new RuntimeStore({ workDir: workspacePath, now: this.options.now });
+    created.recoverInterruptedDaemonRuns(
+      workspacePath,
+      "daemon 重启前 Run 未进入终态，当前 executor 无法安全恢复",
+    );
     this.eventStores.set(workspacePath, created);
     return created;
   }
@@ -316,6 +417,22 @@ function optionalString(params: Record<string, JsonValue>, key: string): string 
   return value;
 }
 
+function optionalIdempotencyKey(params: Record<string, JsonValue>): string | undefined {
+  const value = optionalString(params, "idempotencyKey");
+  return value === undefined ? undefined : normalizeIdempotencyKey(value);
+}
+
+function normalizeIdempotencyKey(value: string): string {
+  const normalized = value.trim();
+  if (!normalized || normalized.length > 512) {
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.INVALID_PARAMS,
+      "idempotencyKey 必须是 1 到 512 字符的非空字符串",
+    );
+  }
+  return normalized;
+}
+
 function eventPayload(
   event: import("../runtime/workspace-runtime.js").WorkspaceRuntimeEvent,
 ): JsonValue {
@@ -345,7 +462,7 @@ function runPayload(run: {
   error?: string;
   result?: Record<string, unknown>;
   version: number;
-}): JsonValue {
+}): Record<string, JsonValue> {
   return {
     runId: run.runId,
     workspace: run.workspace,
@@ -357,6 +474,40 @@ function runPayload(run: {
     ...(run.finishedAt !== undefined ? { finishedAt: run.finishedAt } : {}),
     ...(run.error !== undefined ? { error: run.error } : {}),
     ...(run.result !== undefined ? { result: run.result as JsonValue } : {}),
+    version: run.version,
+  };
+}
+
+function daemonRunRecord(run: WorkspaceRunSnapshot): DaemonRunRecord {
+  return {
+    runId: run.runId,
+    workspacePath: run.workspace,
+    ...(run.sessionId !== undefined ? { sessionId: run.sessionId } : {}),
+    ...(run.checkpointId !== undefined ? { checkpointId: run.checkpointId } : {}),
+    description: run.description,
+    status: run.status,
+    startedAt: run.startedAt,
+    updatedAt: run.updatedAt,
+    ...(run.finishedAt !== undefined ? { finishedAt: run.finishedAt } : {}),
+    ...(run.error !== undefined ? { error: run.error } : {}),
+    ...(run.result !== undefined ? { result: run.result } : {}),
+    version: run.version,
+  };
+}
+
+function workspaceRunSnapshot(run: DaemonRunRecord): WorkspaceRunSnapshot {
+  return {
+    runId: run.runId,
+    workspace: run.workspacePath,
+    ...(run.sessionId !== undefined ? { sessionId: run.sessionId } : {}),
+    ...(run.checkpointId !== undefined ? { checkpointId: run.checkpointId } : {}),
+    description: run.description,
+    status: run.status,
+    startedAt: run.startedAt,
+    updatedAt: run.updatedAt,
+    ...(run.finishedAt !== undefined ? { finishedAt: run.finishedAt } : {}),
+    ...(run.error !== undefined ? { error: run.error } : {}),
+    ...(run.result !== undefined ? { result: run.result } : {}),
     version: run.version,
   };
 }
