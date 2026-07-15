@@ -120,7 +120,10 @@ import {
   type RuntimeUserInput,
 } from "./protocol.js";
 import type { DisposableLocalRuntimeService, RuntimeEventCursor } from "./service.js";
-import { DesktopSessionStateStore } from "./desktop-session-state.js";
+import {
+  DesktopSessionStateStore,
+  type LegacyDesktopSessionTitleMetadata,
+} from "./desktop-session-state.js";
 import { DesktopConversationStateStore } from "./desktop-conversation-state.js";
 import { projectRuntimeTranscript, TranscriptRevisionConflict } from "./desktop-transcript.js";
 import { canonicalizeWorkspacePath } from "./workspace-registry.js";
@@ -236,7 +239,11 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     this.trustStore =
       options.trustStore ?? new WorkspaceTrustStore({ userStateDirectory: this.picoHome });
     this.sessionStateStore =
-      options.sessionStateStore ?? new DesktopSessionStateStore({ picoHome: this.picoHome });
+      options.sessionStateStore ??
+      new DesktopSessionStateStore({
+        picoHome: this.picoHome,
+        migrateLegacyTitle: (metadata) => this.migrateLegacySessionTitle(metadata),
+      });
     this.conversationStateStore =
       options.conversationStateStore ??
       new DesktopConversationStateStore({ picoHome: this.picoHome });
@@ -582,10 +589,9 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
 
   private async listSessions(workspacePath: string, includeArchived = false): Promise<JsonValue> {
     const canonical = await canonicalizeWorkspacePath(workspacePath);
-    const [summaries, metadata] = await Promise.all([
-      listCliSessionSummaries(canonical, { picoHome: this.picoHome }),
-      this.sessionStateStore.list(canonical),
-    ]);
+    // v1 metadata migration commits legacy titles to RuntimeEvent before summaries are projected.
+    const metadata = await this.sessionStateStore.list(canonical);
+    const summaries = await listCliSessionSummaries(canonical, { picoHome: this.picoHome });
     const metadataById = new Map(metadata.map((entry) => [entry.sessionId, entry]));
     const sessions = summaries
       .map((summary) => sessionPayload(summary, metadataById.get(summary.id)))
@@ -660,6 +666,34 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const session = await this.requireSession(canonical, sessionId);
     this.publishSession(session);
     return { session };
+  }
+
+  private async migrateLegacySessionTitle(
+    metadata: LegacyDesktopSessionTitleMetadata,
+  ): Promise<void> {
+    const sessionExists = (
+      await listCliSessionSummaries(metadata.workspacePath, { picoHome: this.picoHome })
+    ).some((summary) => summary.id === metadata.sessionId);
+    if (!sessionExists) {
+      throw new Error(
+        `Cannot migrate Desktop title for missing session ${metadata.sessionId} in ${metadata.workspacePath}`,
+      );
+    }
+    await this.withSession(metadata.workspacePath, metadata.sessionId, async (session) => {
+      const settings = await this.getSessionSettings(metadata.workspacePath, session);
+      const latestSettingsEvent = (await session.runtimeEventStore?.readSession(metadata.sessionId))
+        ?.filter((event) => event.kind === "session.state.committed" && event.data.patch.settings)
+        .at(-1);
+      const canonicalTitleIsNewer =
+        settings.title !== undefined &&
+        latestSettingsEvent !== undefined &&
+        Date.parse(latestSettingsEvent.at) > metadata.updatedAt;
+      if (!canonicalTitleIsNewer && settings.title !== metadata.title) {
+        const result = setSessionTitle(settings, metadata.title);
+        if (!result.ok) throw new Error(result.message);
+      }
+      await session.flushPersistence();
+    });
   }
 
   private async forkSession(workspacePath: string, sessionId: string): Promise<JsonValue> {

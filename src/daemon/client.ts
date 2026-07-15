@@ -323,10 +323,27 @@ class RuntimeConnection {
     params: RuntimeParams<Method>,
   ): Promise<RuntimeResult<Method>> {
     await this.open();
+    if (this.closed) {
+      throw new RuntimeClientError("RUNTIME_CLIENT_CLOSED", "本机 Runtime 连接已关闭", true);
+    }
+    const socket = this.socket;
+    if (!socket || socket.destroyed) {
+      throw new RuntimeClientError("RUNTIME_DISCONNECTED", "本机 Runtime daemon 连接已断开", true);
+    }
     const request = createRuntimeRequest(method, params);
     const response = await new Promise<RuntimeResponse>((resolve, reject) => {
-      this.pending.set(request.requestId, { resolve, reject });
-      this.socket?.write(encodeRuntimeFrame(request));
+      const pending = { resolve, reject };
+      this.pending.set(request.requestId, pending);
+      try {
+        socket.write(encodeRuntimeFrame(request), (error) => {
+          if (!error || this.pending.get(request.requestId) !== pending) return;
+          this.pending.delete(request.requestId);
+          reject(toUnavailableError(error));
+        });
+      } catch (error) {
+        this.pending.delete(request.requestId);
+        reject(toUnavailableError(error));
+      }
     });
     if (!response.ok) {
       throw new RuntimeClientError(response.error.code, response.error.message, false);
@@ -357,8 +374,15 @@ class RuntimeConnection {
         error instanceof Error ? { cause: error } : undefined,
       );
     }
+    if (this.closed) {
+      throw new RuntimeClientError("RUNTIME_CLIENT_CLOSED", "本机 Runtime 连接已关闭", true);
+    }
     this.decoder = new RuntimeFrameDecoder();
     const socket = await connectWithTimeout(this.endpoint.address);
+    if (this.closed) {
+      socket.destroy();
+      throw new RuntimeClientError("RUNTIME_CLIENT_CLOSED", "本机 Runtime 连接已关闭", true);
+    }
     this.socket = socket;
     socket.on("data", (chunk: Buffer) => this.handleData(socket, chunk));
     socket.once("error", (error) => this.handleDisconnect(socket, toUnavailableError(error)));
