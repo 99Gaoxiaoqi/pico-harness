@@ -124,6 +124,10 @@ class MemoryCredentialVault implements CredentialVault {
     return this.values.has(ref);
   }
 
+  async delete(ref: CredentialRef): Promise<void> {
+    this.values.delete(ref);
+  }
+
   async resolve(ref: CredentialRef): Promise<string> {
     const value = this.values.get(ref);
     if (!value) throw new Error("missing");

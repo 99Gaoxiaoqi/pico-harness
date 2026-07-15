@@ -124,6 +124,7 @@ describe("Pico command registry", () => {
       put: async (ref, secret) => void secrets.set(ref, secret),
       resolve: async (ref) => secrets.get(ref) ?? Promise.reject(new Error("missing")),
       has: async (ref) => secrets.has(ref),
+      delete: async (ref) => void secrets.delete(ref),
     };
     const modelRouter = new ModelRouter(
       [
