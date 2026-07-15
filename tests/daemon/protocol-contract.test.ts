@@ -77,6 +77,15 @@ describe("desktop runtime protocol contract", () => {
         "jobs.list",
         "jobs.create",
         "config.get",
+        "config.user.get",
+        "config.user.update",
+        "config.effective.get",
+        "provider.list",
+        "provider.upsert",
+        "provider.delete",
+        "provider.credential.status",
+        "provider.credential.set",
+        "provider.credential.delete",
         "catalog.agents",
         "catalog.skills",
         "usage.get",
@@ -118,6 +127,18 @@ describe("desktop runtime protocol contract", () => {
     expect(() => createRuntimeRequest("runtime.ping", [])).toThrowError(
       expect.objectContaining({ code: RUNTIME_ERROR_CODES.INVALID_PARAMS }),
     );
+  });
+
+  it("keeps provider credentials write-only at the protocol result boundary", () => {
+    const request = createTypedRuntimeRequest("provider.credential.set", {
+      providerId: "openai",
+      secret: "local-test-secret",
+      expectedProviderFingerprint: "f".repeat(64),
+    });
+
+    expect(request.params.secret).toBe("local-test-secret");
+    expectTypeOf<RuntimeResult<"provider.credential.set">>().not.toHaveProperty("secret");
+    expectTypeOf<RuntimeResult<"provider.credential.status">>().not.toHaveProperty("secret");
   });
 
   it("decodes fragmented frames and rejects frames beyond 1 MB", () => {
