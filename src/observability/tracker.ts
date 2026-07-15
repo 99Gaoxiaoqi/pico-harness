@@ -20,6 +20,7 @@ import type { ProviderCallRecord } from "../tasks/runtime-types.js";
 import { estimateCost, type BillingRoute } from "./pricing.js";
 import { logger } from "./logger.js";
 import { getProviderCallContext, type ProviderCallContext } from "./provider-call-context.js";
+import { currentRuntimeRun } from "../runtime/runtime-run.js";
 
 export interface ProviderCallLedger {
   recordProviderCall(record: Omit<ProviderCallRecord, "createdAt"> & { createdAt?: number }): {
@@ -95,23 +96,39 @@ export class CostTracker implements LLMProvider {
   ): Promise<Message> {
     const callId = this.options.callId?.() ?? `call_${randomUUID()}`;
     const context = this.resolveContext(purpose);
+    const runtimeRun = currentRuntimeRun();
+    const route = normalizeRoute(this.modelRoute);
+    await runtimeRun?.recordModelCallStarted({
+      providerCallId: callId,
+      provider: route.provider,
+      model: route.model,
+      purpose: context.purpose,
+    });
     const start = Date.now();
     try {
       const response = await invoke();
       const latencyMs = Date.now() - start;
+      const cost = response.usage ? estimateCost(this.modelRoute, response.usage) : undefined;
+      await runtimeRun?.recordModelCallSettled({
+        providerCallId: callId,
+        status: "succeeded",
+        latencyMs,
+        ...(response.usage ? { usage: response.usage } : {}),
+        ...(cost ? { costCNY: cost.costCNY } : {}),
+      });
       this.recordSessionUsage(response, latencyMs, streaming);
       this.recordLedger(callId, context, "succeeded", response, latencyMs);
       return response;
     } catch (error) {
       const latencyMs = Date.now() - start;
-      this.recordLedger(
-        callId,
-        context,
-        signal?.aborted || isAbortError(error) ? "cancelled" : "failed",
-        undefined,
+      const status = signal?.aborted || isAbortError(error) ? "cancelled" : "failed";
+      await runtimeRun?.recordModelCallSettled({
+        providerCallId: callId,
+        status,
         latencyMs,
-        error,
-      );
+        error: runtimeErrorMessage(error),
+      });
+      this.recordLedger(callId, context, status, undefined, latencyMs, error);
       throw error;
     }
   }
@@ -212,4 +229,9 @@ export class CostTracker implements LLMProvider {
 
 function normalizeRoute(route: string | BillingRoute): BillingRoute {
   return typeof route === "string" ? { provider: "unknown", model: route } : route;
+}
+
+function runtimeErrorMessage(error: unknown): string {
+  const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+  return message.slice(0, 1_000);
 }

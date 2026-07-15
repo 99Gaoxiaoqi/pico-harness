@@ -31,6 +31,7 @@ import type {
 import type { Compactor } from "../context/compactor.js";
 import { ContextCompactionError, sanitizeToolPairs } from "../context/compactor.js";
 import type { FullCompactor } from "../context/full-compactor.js";
+import type { EvidenceArchive } from "../context/evidence-archive.js";
 import type { ContextBudget } from "../context/context-budget.js";
 import {
   estimateModelInputTokens,
@@ -64,6 +65,7 @@ import { ToolAccesses } from "../tools/tool-access.js";
 import { ToolScheduler } from "../tools/tool-scheduler.js";
 import { resolvePicoPaths } from "../paths/pico-paths.js";
 import { currentRunLedger, RunLedger, type RunTerminalStatus } from "./run-ledger.js";
+import { currentRuntimeRun, runWithRuntimeToolCall } from "../runtime/runtime-run.js";
 import { SUBAGENT_OUTPUT_BUDGET } from "../tools/subagent-budget.js";
 import {
   fileHistoryAddJournalWarning,
@@ -459,6 +461,8 @@ export interface AgentEngineOptions {
   reporter?: Reporter;
   /** 工具 Observation 入上下文前的处理器,用于大输出摘要与 artifact 外部化 */
   observationProcessor?: ToolObservationProcessor;
+  /** 完整原始工具交换的不可变归档；仅 RuntimeEvent 主链启用。 */
+  runtimeEvidenceArchive?: EvidenceArchive;
   /** 子代理完整报告写入器；超过常规摘要目标时先落盘，再向主上下文回灌预览。 */
   subagentReportArtifactWriter?: SubagentReportArtifactWriter;
   /**
@@ -557,6 +561,7 @@ export class AgentEngine implements AgentRunner {
   private readonly onPlanExit?: () => void;
   private readonly reporter: Reporter;
   private readonly observationProcessor?: ToolObservationProcessor;
+  private readonly runtimeEvidenceArchive?: EvidenceArchive;
   private readonly subagentReportArtifactWriter?: SubagentReportArtifactWriter;
   private readonly tracer?: Tracer;
   /**
@@ -606,6 +611,7 @@ export class AgentEngine implements AgentRunner {
     this.onPlanExit = opts.onPlanExit;
     this.reporter = opts.reporter ?? new SilentReporter();
     this.observationProcessor = opts.observationProcessor;
+    this.runtimeEvidenceArchive = opts.runtimeEvidenceArchive;
     this.subagentReportArtifactWriter = opts.subagentReportArtifactWriter;
     this.tracer = opts.tracer;
     this.steerQueue = opts.steerQueue;
@@ -952,6 +958,9 @@ export class AgentEngine implements AgentRunner {
     // Tests and explicit in-memory sessions intentionally skip durable runtime facts.
     // Production sessions get a separate run ledger; Session JSONL stays focused on memory.
     if (!session.recordStore) return execute();
+    // AgentRuntime owns the canonical RuntimeEvent run and already bound its RunLedger.
+    // Keep this compatibility path for direct embedders that still call AgentEngine.run.
+    if (currentRuntimeRun()?.sessionId === session.id) return execute();
     return this.runWithLedger(session, execute, signal);
   }
 
@@ -1062,6 +1071,7 @@ export class AgentEngine implements AgentRunner {
           );
           break;
         }
+        await currentRuntimeRun()?.recordTurnStarted(turnCount);
         await currentRunLedger()?.recordTurnStarted({ turn: turnCount });
         reporter.onTurnStart(turnCount);
         const turnSpan = rootSpan?.startChild(`Turn-${turnCount}`);
@@ -1512,7 +1522,9 @@ export class AgentEngine implements AgentRunner {
                       settleOnAbort: fileSideEffectKinds[index] !== "none",
                       start: async () => {
                         signal?.throwIfAborted();
-                        return this.runOneTool(tc, reporter, session.id, turnSpan, signal);
+                        return runWithRuntimeToolCall(tc.id, () =>
+                          this.runOneTool(tc, reporter, session.id, turnSpan, signal),
+                        );
                       },
                     });
               return execution.then((result) => {
@@ -1744,6 +1756,7 @@ export class AgentEngine implements AgentRunner {
       signal?.throwIfAborted();
       reporter.onToolCall(toolCall.name, toolCall.arguments, toolCall.id);
       const guardDecision = this.guardrail.beforeCall(toolCall);
+      const runtimeRun = currentRuntimeRun();
       let result: ToolResult;
       let ledgerStarted = false;
       if (!guardDecision.allowed) {
@@ -1765,6 +1778,7 @@ export class AgentEngine implements AgentRunner {
         };
       } else {
         signal?.throwIfAborted();
+        await runtimeRun?.recordToolStarted(toolCall.id, toolCall.name, toolCall.arguments);
         const ledger = currentRunLedger();
         const ledgerTurn = ledger?.currentTurn;
         if (ledger !== undefined && ledgerTurn !== undefined) {
@@ -1801,6 +1815,18 @@ export class AgentEngine implements AgentRunner {
         sessionId,
       );
       signal?.throwIfAborted();
+      if (runtimeRun && this.runtimeEvidenceArchive) {
+        const evidence = await this.runtimeEvidenceArchive.archiveRuntimeToolExchange(
+          runtimeRun.sessionId,
+          toolCall.id,
+          toolCall.name,
+          toolCall.arguments,
+          result.output,
+          observationOutput,
+          result.isError,
+        );
+        runtimeRun.registerToolEvidence(toolCall.id, evidence);
+      }
 
       toolSpan?.addAttributes({
         isError: result.isError,

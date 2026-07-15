@@ -94,6 +94,7 @@ import {
   type RewindWorkspaceTarget,
 } from "../storage/rewind-operation-coordinator.js";
 import { resolvePicoPaths } from "../paths/pico-paths.js";
+import { currentRuntimeRun } from "../runtime/runtime-run.js";
 
 /** 清洗 sessionId 为安全文件名片段(/、: 等破坏路径的字符替换为 _) */
 function sanitizeFilePart(value: string): string {
@@ -826,6 +827,11 @@ export class Session implements SessionRuntimePersistence {
   /** 生产接口：每条消息在 JSONL fdatasync 后才进入正式 history/FTS。 */
   async commitMessages(...msgs: Message[]): Promise<void> {
     this.assertWritable();
+    const runtimeRun = currentRuntimeRun();
+    if (runtimeRun?.sessionId === this.id) {
+      await runtimeRun.commitMessages(this, msgs);
+      return;
+    }
     if (!this.store) {
       for (const msg of msgs) this.appendOneInMemory(msg);
       return;
@@ -839,6 +845,19 @@ export class Session implements SessionRuntimePersistence {
    * persistence:false 只提供进程内幂等，receipt.durable=false。
    */
   async commitMessageOnce(eventId: string, message: Message): Promise<CommitReceipt> {
+    this.assertWritable();
+    const runtimeRun = currentRuntimeRun();
+    if (runtimeRun?.sessionId === this.id) {
+      return runtimeRun.commitMessageOnce(this, eventId, message);
+    }
+    return this.commitProjectionMessageOnce(eventId, message);
+  }
+
+  /**
+   * RuntimeEvent 已经 durable 后写入 Session 投影的内部入口。
+   * 调用方必须使用同一个 RuntimeEvent ID，避免投影重试产生新事实。
+   */
+  async commitProjectionMessageOnce(eventId: string, message: Message): Promise<CommitReceipt> {
     this.assertWritable();
     if (!eventId.trim()) throw new Error("Session eventId 不能为空");
     if (!this.store) {
