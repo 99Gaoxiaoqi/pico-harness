@@ -6,7 +6,6 @@
 
 import { access } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
-import { join } from "node:path";
 import type React from "react";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { render, Text, useApp, useInput, type Instance, type RenderOptions } from "ink";
@@ -39,7 +38,11 @@ import type {
 } from "../cli/run-agent.js";
 import { runAgentFromCli } from "../cli/run-agent.js";
 import { listRewindPointSummaries } from "../cli/file-history.js";
-import { createCliSessionId, type CliSessionSelection } from "../cli/session-resolver.js";
+import {
+  createCliSessionId,
+  removeCliSessionFile,
+  type CliSessionSelection,
+} from "../cli/session-resolver.js";
 import { loadPicoConfig } from "../input/pico-config.js";
 import { resolveCompatibleModelRoute } from "../provider/compatible-model-route.js";
 import {
@@ -156,6 +159,8 @@ import {
   type PluginRuntimeSnapshot,
 } from "../plugins/plugin-runtime-snapshot.js";
 import { resolvePicoPaths } from "../paths/pico-paths.js";
+import { RuntimeEventStore } from "../runtime/runtime-event-store.js";
+import { RuntimeRun } from "../runtime/runtime-run.js";
 
 export interface ReplOptions {
   /** 工作区 */
@@ -819,6 +824,9 @@ async function startLineModeRepl(opts: ReplOptions): Promise<void> {
     legacyModel: opts.model,
     legacyModelExplicit: opts.modelExplicit,
   });
+  const runtimeEventStore = new RuntimeEventStore({
+    databasePath: resolvePicoPaths(opts.workDir).workspace.runtimeDatabase,
+  });
   const input = createInterface({
     input: process.stdin,
     output: process.stdout,
@@ -853,6 +861,14 @@ async function startLineModeRepl(opts: ReplOptions): Promise<void> {
       const session =
         globalSessionManager.get(selection.sessionId, opts.workDir) ??
         (await globalSessionManager.getOrCreate(selection.sessionId, opts.workDir));
+      await runtimeEventStore.initializeSession({
+        sessionId: session.id,
+        workDir: opts.workDir,
+      });
+      await RuntimeRun.repairSessionProjection(session, {
+        workDir: opts.workDir,
+        store: runtimeEventStore,
+      });
       const restoredSettings = (await session.readHydrationSnapshot()).runtime.settings;
       const route = resolveTuiStartupModelRoute(modelRouter, restoredSettings, {
         cliModel: opts.model,
@@ -1095,6 +1111,9 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     mode: "new",
     sessionId: createCliSessionId(),
   };
+  const runtimeEventStore = new RuntimeEventStore({
+    databasePath: resolvePicoPaths(opts.workDir).workspace.runtimeDatabase,
+  });
   // ink render 需要 setState 驱动重渲染。Reporter 回调只更新当前活跃 bundle，
   // 旧 session 的延迟事件不会穿透到新 transcript。
   let setProjection: (projection: TuiProjection) => void = () => {};
@@ -1130,24 +1149,47 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
     selection: CliSessionSelection,
   ): Promise<TuiSessionBundle> => {
     let session = globalSessionManager.get(selection.sessionId, opts.workDir);
-    if (selection.mode === "fork" && selection.sourceSessionId && !session) {
-      const targetPath = join(
-        resolvePicoPaths(opts.workDir).workspace.sessions,
-        `${selection.sessionId}.jsonl`,
-      );
-      const targetPublished = await access(targetPath).then(
-        () => true,
-        () => false,
-      );
-      if (!targetPublished) {
+    if (selection.mode === "fork" && selection.sourceSessionId) {
+      const sourceManifest = await runtimeEventStore.readSessionManifest(selection.sourceSessionId);
+      if (!sourceManifest) {
+        throw new Error(`无法 fork session ${selection.sourceSessionId}: runtime.sqlite 中不存在`);
+      }
+      if (!(await runtimeEventStore.readSessionManifest(selection.sessionId))) {
+        const sourceSession = await globalSessionManager.getOrCreate(
+          selection.sourceSessionId,
+          opts.workDir,
+        );
+        await RuntimeRun.repairSessionProjection(sourceSession, {
+          workDir: opts.workDir,
+          store: runtimeEventStore,
+        });
         await new SessionForkService({ workDir: opts.workDir }).fork({
           sourceSessionId: selection.sourceSessionId,
           targetSessionId: selection.sessionId,
           targetMode: DEFAULT_INTERACTION_MODE,
         });
       }
+      const forkEvent = (await runtimeEventStore.readSession(selection.sessionId)).findLast(
+        (event) => event.kind === "session.forked",
+      );
+      if (!forkEvent) {
+        throw new Error(`fork target ${selection.sessionId} 缺少完整的 RuntimeEvent 历史`);
+      }
+      if (forkEvent.data.parentSessionId !== selection.sourceSessionId) {
+        throw new Error(
+          `fork target ${selection.sessionId} 记录的 parent ${forkEvent.data.parentSessionId} 与当前请求不一致`,
+        );
+      }
     }
     session ??= await globalSessionManager.getOrCreate(selection.sessionId, opts.workDir);
+    await runtimeEventStore.initializeSession({
+      sessionId: session.id,
+      workDir: opts.workDir,
+    });
+    await RuntimeRun.repairSessionProjection(session, {
+      workDir: opts.workDir,
+      store: runtimeEventStore,
+    });
 
     // 在 route / WorkspaceRoots / provider 装配前先冻结 Session 的消息与运行态。
     const hydration = await session.readHydrationSnapshot();
@@ -2120,6 +2162,7 @@ async function disposeUnpublishedTuiBundle(
 async function discardFailedTuiFork(sessionId: string, workDir: string): Promise<void> {
   const orphan = globalSessionManager.delete(sessionId, workDir);
   await orphan?.close();
+  await removeCliSessionFile(workDir, sessionId);
   forgetSessionSettings(sessionId, workDir);
 }
 
