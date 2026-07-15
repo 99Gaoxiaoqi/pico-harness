@@ -2,7 +2,11 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import type { CredentialRef, CredentialVault } from "../../src/provider/credential-vault.js";
+import {
+  credentialRefForProvider,
+  type CredentialRef,
+  type CredentialVault,
+} from "../../src/provider/credential-vault.js";
 import { resolveModelRouteCapabilities } from "../../src/provider/model-capabilities.js";
 import type { ModelRoute } from "../../src/provider/model-router.js";
 import type { CronDraft, CronDraftId } from "../../src/tasks/cron-draft.js";
@@ -95,6 +99,39 @@ describe("CronDraftApplication integration", () => {
 
     await expect(app.commit(draft(workspace, ["fetch_url"]))).rejects.toThrow(/TEST_API_KEY/u);
     expect(cron.list(workspace)).toEqual([]);
+    cron.close();
+  });
+
+  it("调度草案优先复用 App 已写入的 v2 Provider 凭证", async () => {
+    const workspace = await workspaceDir();
+    const vault = new MemoryCredentialVault();
+    const cron = new CronService({ workDir: workspace });
+    const provider = {
+      providerId: "test",
+      protocol: "openai" as const,
+      baseURL: "https://provider.example/v1",
+    };
+    const ref = credentialRefForProvider(provider);
+    await vault.put(ref, "app-shared-secret");
+    const app = new CronDraftApplication({
+      cronService: cron,
+      workspacePath: workspace,
+      resolveModelRoute: modelRoute,
+      listAllowedTools: () => ["fetch_url"],
+      credentialVault: vault,
+      resolveCredentialTarget: async () => ({ kind: "provider", provider, ref }),
+      workspaceRegistrar: {
+        statusWorkspace: async () => ({ available: true, message: "ready" }),
+        registerWorkspace: async () => ({ available: true, message: "ready" }),
+      },
+    });
+
+    await expect(app.context()).resolves.toMatchObject({ credentialStatus: "available" });
+    await app.commit(draft(workspace, ["fetch_url"]));
+    expect(cron.list(workspace)[0]).toMatchObject({
+      credentialRef: ref,
+      modelRouteId: "test/model",
+    });
     cron.close();
   });
 

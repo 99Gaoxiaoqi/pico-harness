@@ -4,6 +4,7 @@ import {
   createUserDaemonInstaller,
   LocalRuntimeClient,
   resolveLocalDaemonEndpoint,
+  type RuntimeProviderInput,
 } from "../daemon/index.js";
 
 /** The small boundary between TUI commands and the local Runtime daemon. */
@@ -12,7 +13,29 @@ export interface CronDaemonBridge {
   statusWorkspace(workspacePath: string): Promise<CronDaemonStatus>;
   /** Provider/config/vault deletion is daemon-owned so TUI never mutates two stores itself. */
   deleteProvider(input: ProviderDaemonDeleteInput): Promise<ProviderDaemonDeleteResult>;
+  /** Trusted local IPC; the secret remains write-only and is never returned to the TUI. */
+  importEnvironmentProvider?(
+    input: ProviderDaemonEnvironmentImportInput,
+  ): Promise<ProviderDaemonEnvironmentImportResult>;
 }
+
+export interface ProviderDaemonEnvironmentImportInput {
+  readonly provider: RuntimeProviderInput;
+  readonly defaultModel: string;
+  readonly secret: string;
+  readonly expectedRevision: string;
+}
+
+export type ProviderDaemonEnvironmentImportResult =
+  | {
+      readonly status: "imported";
+      readonly revision: string;
+      readonly message: string;
+    }
+  | {
+      readonly status: "unavailable" | "rejected";
+      readonly message: string;
+    };
 
 export interface ProviderDaemonDeleteInput {
   readonly providerId: string;
@@ -136,8 +159,7 @@ export class LocalCronDaemonBridge implements CronDaemonBridge {
       } catch {
         return {
           status: "unavailable",
-          message:
-            "本机 Runtime daemon 不可达；为避免配置与系统凭证失去同步，Provider 未删除。",
+          message: "本机 Runtime daemon 不可达；为避免配置与系统凭证失去同步，Provider 未删除。",
         };
       }
       try {
@@ -161,6 +183,50 @@ export class LocalCronDaemonBridge implements CronDaemonBridge {
         return {
           status: "rejected",
           message: `Provider ${input.providerId} 未删除: ${safeDaemonMessage(error)}`,
+        };
+      }
+    } finally {
+      client.close();
+    }
+  }
+
+  async importEnvironmentProvider(
+    input: ProviderDaemonEnvironmentImportInput,
+  ): Promise<ProviderDaemonEnvironmentImportResult> {
+    const client = this.createClient();
+    try {
+      try {
+        await client.request("runtime.ping", {});
+      } catch {
+        return {
+          status: "unavailable",
+          message:
+            "本机 Runtime daemon 不可达；为避免用户配置与系统凭证失去同步，Provider 未导入。",
+        };
+      }
+      try {
+        const value = await client.request("provider.importEnvironment", {
+          provider: input.provider,
+          defaultModel: input.defaultModel,
+          secret: input.secret,
+          expectedRevision: input.expectedRevision,
+        });
+        const revision = readProviderImportRevision(value);
+        if (!revision) {
+          return {
+            status: "rejected",
+            message: "Runtime daemon 返回了无效的 Provider 导入结果；Provider 状态未确认。",
+          };
+        }
+        return {
+          status: "imported",
+          revision,
+          message: `Provider ${input.provider.id} 已导入共享用户配置，凭证已写入系统凭证库。`,
+        };
+      } catch (error) {
+        return {
+          status: "rejected",
+          message: `Provider ${input.provider.id} 未导入: ${safeDaemonMessage(error, input.secret)}`,
         };
       }
     } finally {
@@ -224,7 +290,20 @@ function readProviderDeleteRevision(value: unknown): string | undefined {
     : undefined;
 }
 
-function safeDaemonMessage(error: unknown): string {
+function readProviderImportRevision(value: unknown): string | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const provider = (value as { provider?: unknown }).provider;
+  const revision = (value as { revision?: unknown }).revision;
+  return typeof provider === "object" &&
+    provider !== null &&
+    typeof revision === "string" &&
+    /^[a-f0-9]{64}$/u.test(revision)
+    ? revision
+    : undefined;
+}
+
+function safeDaemonMessage(error: unknown, secret?: string): string {
   const message = error instanceof Error ? error.message : String(error);
-  return message.replace(/(api[_-]?key|token|secret)\s*[=:]\s*\S+/giu, "$1=<redacted>");
+  const withoutKnownSecret = secret ? message.split(secret).join("<redacted>") : message;
+  return withoutKnownSecret.replace(/(api[_-]?key|token|secret)\s*[=:]\s*\S+/giu, "$1=<redacted>");
 }

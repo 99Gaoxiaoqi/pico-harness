@@ -82,6 +82,7 @@ describe("desktop runtime protocol contract", () => {
         "config.effective.get",
         "provider.list",
         "provider.upsert",
+        "provider.importEnvironment",
         "provider.delete",
         "provider.credential.status",
         "provider.credential.set",
@@ -139,6 +140,7 @@ describe("desktop runtime protocol contract", () => {
     expect(request.params.secret).toBe("local-test-secret");
     expectTypeOf<RuntimeResult<"provider.credential.set">>().not.toHaveProperty("secret");
     expectTypeOf<RuntimeResult<"provider.credential.status">>().not.toHaveProperty("secret");
+    expectTypeOf<RuntimeResult<"provider.importEnvironment">>().not.toHaveProperty("secret");
   });
 
   it("decodes fragmented frames and rejects frames beyond 1 MB", () => {

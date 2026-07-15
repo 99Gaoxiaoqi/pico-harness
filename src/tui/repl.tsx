@@ -42,6 +42,7 @@ import { listRewindPointSummaries } from "../cli/file-history.js";
 import { createCliSessionId, type CliSessionSelection } from "../cli/session-resolver.js";
 import { loadPicoConfig } from "../input/pico-config.js";
 import type { EffectiveConfigDefaults } from "../input/effective-config.js";
+import { UserConfigStore } from "../input/user-config-store.js";
 import { resolveCompatibleModelRoute } from "../provider/compatible-model-route.js";
 import {
   commandArgumentSuggestions,
@@ -66,6 +67,7 @@ import {
   type EffectiveModelRuntime,
 } from "../provider/effective-model-runtime.js";
 import { createPlatformCredentialVault } from "../provider/credential-vault.js";
+import { resolveAutomationCredentialTarget } from "../provider/automation-credential.js";
 import { isAbortError } from "../provider/errors.js";
 import { defaultIsRetryableError } from "../provider/retry.js";
 import { ModelRuntimeCommandService } from "../provider/model-runtime-report.js";
@@ -844,6 +846,7 @@ function formatUnavailableCommandBlocked(command: string, disabledReason: string
 async function startLineModeRepl(opts: ReplOptions): Promise<void> {
   const provider = opts.provider ?? "openai";
   const credentialVault = createPlatformCredentialVault();
+  const userConfigStore = new UserConfigStore();
   const loadCurrentModelRuntime = () =>
     loadEffectiveModelRuntime({
       workDir: opts.workDir,
@@ -852,6 +855,7 @@ async function startLineModeRepl(opts: ReplOptions): Promise<void> {
       legacyModel: opts.model,
       legacyModelExplicit: opts.modelExplicit,
       credentialVault,
+      userConfigStore,
     });
   let effectiveModelRuntime = await loadCurrentModelRuntime();
   let modelRouter = effectiveModelRuntime.router;
@@ -1092,6 +1096,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
   const pluginManagement = new PluginManagementService({ workDir: opts.workDir });
   const claudeCompatibility = picoConfig.compatibility.claude;
   const credentialVault = createPlatformCredentialVault();
+  const userConfigStore = new UserConfigStore();
   const loadCurrentModelRuntime = () =>
     loadEffectiveModelRuntime({
       workDir: opts.workDir,
@@ -1100,6 +1105,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
       legacyModel: opts.model,
       legacyModelExplicit: opts.modelExplicit,
       credentialVault,
+      userConfigStore,
     });
   let effectiveModelRuntime = await loadCurrentModelRuntime();
   let modelRouter = effectiveModelRuntime.router;
@@ -1311,12 +1317,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         },
         { persistence: session },
       );
-      coordinateTuiStartupSettings(
-        settings,
-        bundleModelRouter,
-        initialRoute,
-        opts.thinkingEffort,
-      );
+      coordinateTuiStartupSettings(settings, bundleModelRouter, initialRoute, opts.thinkingEffort);
       setSessionAdditionalDirectories(settings, workspaceRoots.list().slice(1));
 
       const scheduleDraft = cronService
@@ -1326,6 +1327,22 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
             resolveModelRoute: () => modelRouter.require(settings.modelRouteId),
             listAllowedTools: () => settings.tools.map((tool) => tool.name),
             credentialVault,
+            resolveCredentialTarget: async (route) => {
+              const userProvider = (await userConfigStore.read()).config.providers[
+                route.providerId
+              ];
+              return resolveAutomationCredentialTarget({
+                route,
+                workspacePath: opts.workDir,
+                ...(userProvider ? { userProvider } : {}),
+                ...(bundleModelRuntime.config.sources[`providers.${route.providerId}`]
+                  ? {
+                      configSource:
+                        bundleModelRuntime.config.sources[`providers.${route.providerId}`],
+                    }
+                  : {}),
+              });
+            },
             workspaceRegistrar: cronDaemonBridge,
           })
         : undefined;
@@ -1338,8 +1355,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         model: settings.model,
         modelRouteId: settings.modelRouteId,
         modelRouter: bundleModelRouter,
-        modelRouterProvider: async () =>
-          (await reloadModelRuntimeAtSafeBoundary()).runtime.router,
+        modelRouterProvider: async () => (await reloadModelRuntimeAtSafeBoundary()).runtime.router,
         session,
         sessionId: selection.sessionId,
         sessionMode: selection.mode,
@@ -1355,6 +1371,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         // even when the local Cron ledger itself could not be opened.
         cronDaemonBridge,
         credentialVault,
+        userConfigStore,
         effectiveConfig: bundleModelRuntime.config,
         providerCredentialStatuses: bundleModelRuntime.credentials,
         ...(taskRuntimeDiagnostic ? { taskRuntimeDiagnostic } : {}),
