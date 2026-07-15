@@ -50,7 +50,9 @@ describe("runtime checkpoint integration", () => {
   it("uses a canonical checkpoint for model context without compacting the Session/UI projection", async () => {
     const session = new Session("session-a", workDir, { persistence: true });
     await session.recover();
-    const store = new RuntimeEventStore({ baseDir: resolvePicoPaths(workDir).workspace.runs });
+    const store = new RuntimeEventStore({
+      databasePath: resolvePicoPaths(workDir).workspace.runtimeDatabase,
+    });
     const runtimeRun = await RuntimeRun.start({ sessionId: session.id, workDir, store });
     const registry = { getAvailableTools: () => [] } as unknown as Registry;
     const engine = new AgentEngine({

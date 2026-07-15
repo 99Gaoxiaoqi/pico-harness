@@ -87,7 +87,7 @@ describe("AgentRuntime runtime event E2E", () => {
     expect(provider.calls).toHaveLength(2);
     expect(provider.calls[0]?.tools.some((tool) => tool.name === "grep")).toBe(true);
 
-    const store = new RuntimeEventStore({ baseDir: paths.workspace.runs });
+    const store = new RuntimeEventStore({ databasePath: paths.workspace.runtimeDatabase });
     const sessionEvents = await store.readSession(SESSION_ID);
     const runStarted = onlyEvent(sessionEvents, "run.started");
     const events = await store.readRun(SESSION_ID, runStarted.runId);

@@ -29,9 +29,11 @@ describe("RuntimeRun projection recovery", () => {
       content: "stale projection",
     });
 
-    const store = new RuntimeEventStore({ baseDir: resolvePicoPaths(workDir).workspace.runs });
+    const store = new RuntimeEventStore({
+      databasePath: resolvePicoPaths(workDir).workspace.runtimeDatabase,
+    });
     await store.initializeSession({ sessionId: session.id, workDir });
-    await store.append(runStarted());
+    await store.append(runStarted(workDir));
     await store.append(message("message-user", { role: "user", content: "canonical prompt" }));
     await store.append(
       message("message-assistant", { role: "assistant", content: "canonical answer" }),
@@ -61,9 +63,11 @@ describe("RuntimeRun projection recovery", () => {
   it("rebuilds usage and records a Session rewind as a canonical history branch", async () => {
     const session = new Session("session-a", workDir, { persistence: true });
     await session.recover();
-    const store = new RuntimeEventStore({ baseDir: resolvePicoPaths(workDir).workspace.runs });
+    const store = new RuntimeEventStore({
+      databasePath: resolvePicoPaths(workDir).workspace.runtimeDatabase,
+    });
     await store.initializeSession({ sessionId: session.id, workDir });
-    await store.append(runStarted());
+    await store.append(runStarted(workDir));
     await store.append(message("message-user", { role: "user", content: "canonical prompt" }));
     await store.append(
       message("message-assistant", { role: "assistant", content: "canonical answer" }),
@@ -120,9 +124,11 @@ describe("RuntimeRun projection recovery", () => {
   it("writes an exactly-once rewind branch before retrying its Session projection", async () => {
     const session = new Session("session-a", workDir, { persistence: true });
     await session.recover();
-    const store = new RuntimeEventStore({ baseDir: resolvePicoPaths(workDir).workspace.runs });
+    const store = new RuntimeEventStore({
+      databasePath: resolvePicoPaths(workDir).workspace.runtimeDatabase,
+    });
     await store.initializeSession({ sessionId: session.id, workDir });
-    await store.append(runStarted());
+    await store.append(runStarted(workDir));
     await store.append(message("message-user", { role: "user", content: "canonical prompt" }));
     await store.append(
       message("message-assistant", { role: "assistant", content: "canonical answer" }),
@@ -151,7 +157,9 @@ describe("RuntimeRun projection recovery", () => {
   it("records Session writes delivered outside a foreground run in canonical history", async () => {
     const session = new Session("session-a", workDir, { persistence: true });
     await session.recover();
-    const store = new RuntimeEventStore({ baseDir: resolvePicoPaths(workDir).workspace.runs });
+    const store = new RuntimeEventStore({
+      databasePath: resolvePicoPaths(workDir).workspace.runtimeDatabase,
+    });
     const seedRun = await RuntimeRun.start({ sessionId: session.id, workDir, store });
     await seedRun.run(() => session.commitMessages({ role: "user", content: "initial prompt" }));
 
@@ -182,9 +190,11 @@ describe("RuntimeRun projection recovery", () => {
   });
 
   it("closes an unterminated canonical run as interrupted during recovery", async () => {
-    const store = new RuntimeEventStore({ baseDir: resolvePicoPaths(workDir).workspace.runs });
+    const store = new RuntimeEventStore({
+      databasePath: resolvePicoPaths(workDir).workspace.runtimeDatabase,
+    });
     await store.initializeSession({ sessionId: "session-a", workDir });
-    await store.append(runStarted());
+    await store.append(runStarted(workDir));
 
     await expect(
       RuntimeRun.reconcileIncompleteRuns({ sessionId: "session-a", workDir, store }),
@@ -201,11 +211,11 @@ describe("RuntimeRun projection recovery", () => {
   });
 });
 
-function runStarted(): RuntimeEvent {
+function runStarted(workDir: string): RuntimeEvent {
   return {
     ...eventBase("run-started"),
     kind: "run.started",
-    data: { workDir: "/workspace" },
+    data: { workDir },
   };
 }
 
