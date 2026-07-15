@@ -230,6 +230,21 @@ describe("Desktop Provider settings", () => {
     expect(screen.getByText("凭证已保存")).toBeTruthy();
   });
 
+  it("重新获得窗口焦点时刷新跨进程凭证状态", async () => {
+    const harness = installProviderBridge();
+    window.history.replaceState({}, "", "/#/providers");
+    render(<DesktopApp />);
+
+    await screen.findByText("模型 Providers");
+    const before = harness.calls.filter((call) => call.method === "provider.list").length;
+    window.dispatchEvent(new Event("focus"));
+    await waitFor(() =>
+      expect(harness.calls.filter((call) => call.method === "provider.list").length).toBeGreaterThan(
+        before,
+      ),
+    );
+  });
+
   it("adds a provider and updates the shared user default model", async () => {
     const user = userEvent.setup();
     const harness = installProviderBridge();
