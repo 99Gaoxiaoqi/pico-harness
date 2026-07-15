@@ -25,6 +25,7 @@ import type { HookService } from "../hooks/service.js";
 import { estimateMessagesTokens } from "./context-budget.js";
 import { sanitizeToolPairs } from "./compactor.js";
 import { findSafeCompactionCut, hasIncompleteToolExchange } from "./safe-compaction-boundary.js";
+import { EvidenceArchive, type EvidenceArchiveReference } from "./evidence-archive.js";
 
 /** 摘要消息前缀:REFERENCE-ONLY,明确告诉模型这是历史提要,不要回答里面的内容 */
 const SUMMARY_PREFIX =
@@ -88,6 +89,8 @@ export interface FullCompactorOptions {
   /** 摘要调用失败重试次数,默认 3 */
   maxAttempts?: number;
   hookService?: HookService;
+  /** Durable evidence required before this compactor removes raw tool exchanges from Session history. */
+  evidenceArchive?: EvidenceArchive;
 }
 
 export interface FullCompactionRequest {
@@ -97,6 +100,44 @@ export interface FullCompactionRequest {
   targetRetainedTokens?: number;
   /** Why compaction was triggered; overflow is reported to hooks as automatic. */
   trigger: "auto" | "overflow" | "manual";
+}
+
+/**
+ * 一次只读摘要预览的结果。
+ *
+ * `summary` 是模型返回的原始摘要，`wrappedSummary` 可直接交给持久化端写入。
+ * 调用方持有显式 `history`，可通过 `compactedCount` 自行构造 checkpoint 的
+ * summary 与保留尾部，而无需改写 Session。
+ */
+export interface FullCompactionPreview {
+  /** 模型返回的原始摘要正文，不含 REFERENCE-ONLY 包装。 */
+  readonly summary: string;
+  /** 可直接作为压缩摘要消息正文保存的 REFERENCE-ONLY 包装文本。 */
+  readonly wrappedSummary: string;
+  /** 将被摘要折叠的 history 前缀消息数。 */
+  readonly compactedCount: number;
+  /** 压缩前 history 的估算 token 数。 */
+  readonly beforeTokens: number;
+  /** 本次用于选择安全切点的保留尾部目标 token 数。 */
+  readonly targetRetainedTokens: number;
+  /** 安全切点后保留的 history 消息数。 */
+  readonly retainedCount: number;
+  /** 安全切点后保留尾部的估算 token 数。 */
+  readonly retainedTokens: number;
+}
+
+interface FullCompactionPreviewPlan {
+  readonly beforeTokens: number;
+  readonly targetRetainedTokens: number;
+  readonly compactedCount: number;
+  readonly retainedCount: number;
+  readonly retainedTokens: number;
+  readonly prefix: Message[];
+}
+
+/** 将原始摘要包装成可存入上下文的 REFERENCE-ONLY 摘要消息正文。 */
+export function wrapFullCompactionSummary(summary: string): string {
+  return `${SUMMARY_PREFIX}\n\n${summary}\n\n${SUMMARY_END_MARKER}`;
 }
 
 /**
@@ -114,6 +155,7 @@ export class FullCompactor {
   /** 上一次摘要,用于迭代增量更新(hermes 第 1475-1489 行语义) */
   private previousSummary?: string;
   private readonly hookService?: HookService;
+  private readonly evidenceArchive?: EvidenceArchive;
 
   constructor(opts: FullCompactorOptions) {
     // 有 aux 用 aux(辅助廉价模型),无则用主 —— 向后兼容
@@ -121,6 +163,26 @@ export class FullCompactor {
     this.providerPurpose = opts.auxProvider ? "aux" : "compaction";
     this.maxAttempts = opts.maxAttempts ?? 3;
     this.hookService = opts.hookService;
+    this.evidenceArchive = opts.evidenceArchive;
+  }
+
+  /**
+   * 只读地生成一次完整历史压缩预览。
+   *
+   * 此方法只读取 Session 标识以归属 provider 调用；不会写入 Session、归档证据、
+   * 修改传入 history、派发压缩 hook，或更新迭代摘要状态。RuntimeEvent checkpoint
+   * 可消费返回的摘要和切点，自行持久化对应事件。
+   */
+  async preview(
+    session: Session,
+    history: readonly Message[],
+    request: FullCompactionRequest,
+    signal?: AbortSignal,
+  ): Promise<FullCompactionPreview | undefined> {
+    signal?.throwIfAborted();
+    const plan = this.createPreviewPlan(history, request);
+    if (!plan) return undefined;
+    return await this.generatePreview(session, request, plan, signal);
   }
 
   /**
@@ -137,26 +199,8 @@ export class FullCompactor {
   ): Promise<boolean> {
     signal?.throwIfAborted();
     const history = session.getHistory();
-    const beforeTokens = estimateMessagesTokens(history);
-    const targetRetainedTokens =
-      request.targetRetainedTokens ?? Math.max(1, Math.floor(request.inputBudgetTokens * 0.2));
-    if (hasIncompleteToolExchange(history)) {
-      logger.warn(
-        { trigger: request.trigger, historyLen: history.length },
-        "[FullCompactor] 存在未完成工具交换,禁止压缩",
-      );
-      return false;
-    }
-
-    const cut = findSafeCompactionCut(history, targetRetainedTokens);
-    if (!cut) {
-      logger.warn(
-        { trigger: request.trigger, historyLen: history.length, targetRetainedTokens },
-        "[FullCompactor] 找不到可压缩的安全工具协议边界,跳过",
-      );
-      return false;
-    }
-    const compactedCount = cut.compactedCount;
+    const plan = this.createPreviewPlan(history, request);
+    if (!plan) return false;
     const hookSource = request.trigger === "manual" ? "manual" : "auto";
 
     await this.hookService?.dispatch(
@@ -165,20 +209,114 @@ export class FullCompactor {
       { signal },
     );
 
-    const prefix = sanitizeToolPairs(history.slice(0, compactedCount));
-    const instruction = this.renderInstruction(prefix, this.previousSummary);
+    const preview = await this.generatePreview(session, request, plan, signal);
+    if (!preview) return false;
+
+    let evidenceReference: EvidenceArchiveReference | undefined;
+    if (this.evidenceArchive) {
+      try {
+        // Archive is the write-ahead proof for raw tool exchanges. Do not mutate Session
+        // history until this immutable copy has been durably published.
+        evidenceReference = await this.evidenceArchive.archiveToolExchanges(
+          session.id,
+          history.slice(0, preview.compactedCount),
+        );
+      } catch (error) {
+        logger.error(
+          { err: String(error), sessionId: session.id, compactedCount: preview.compactedCount },
+          "[FullCompactor] 证据归档失败，拒绝删除原始历史",
+        );
+        return false;
+      }
+    }
+
+    // 应用压缩:用 REFERENCE-ONLY 前后标记包装摘要,替换 session.history 前 compactedCount 条。
+    // 包装职责归 FullCompactor(表现层),Session.applyCompaction 只做纯存储。
+    await session.applyCompaction(
+      preview.wrappedSummary,
+      preview.compactedCount,
+      evidenceReference
+        ? { summaryProviderData: { picoEvidenceArchives: [evidenceReference] } }
+        : undefined,
+    );
+    session.saveMemorySummary(preview.summary, preview.compactedCount);
+    // previousSummary 存原始摘要(不带包装标记),供下次迭代增量更新
+    this.previousSummary = preview.summary;
+    await this.hookService?.dispatch(
+      "PostCompact",
+      { source: hookSource, messageCount: session.length },
+      { signal },
+    );
+    const afterTokens = estimateMessagesTokens(session.getHistory());
     logger.info(
       {
         trigger: request.trigger,
-        beforeTokens,
-        inputBudgetTokens: request.inputBudgetTokens,
-        targetRetainedTokens,
-        cutIndex: compactedCount,
-        compactedCount,
-        retainedCount: history.length - compactedCount,
-        retainedTokens: cut.retainedTokens,
+        compactedCount: preview.compactedCount,
+        retainedCount: preview.retainedCount,
+        beforeTokens: preview.beforeTokens,
+        afterTokens,
+        summaryLen: preview.summary.length,
       },
-      `[FullCompactor] 调用 provider 生成摘要:压缩前缀 ${prefix.length} 条,保留尾部 ${history.length - compactedCount} 条`,
+      "[FullCompactor] ✅ 模型摘要压缩完成",
+    );
+    return true;
+  }
+
+  /** 计算安全切点和摘要输入，不触发任何外部副作用。 */
+  private createPreviewPlan(
+    history: readonly Message[],
+    request: FullCompactionRequest,
+  ): FullCompactionPreviewPlan | undefined {
+    const beforeTokens = estimateMessagesTokens(history);
+    const targetRetainedTokens =
+      request.targetRetainedTokens ?? Math.max(1, Math.floor(request.inputBudgetTokens * 0.2));
+    if (hasIncompleteToolExchange(history)) {
+      logger.warn(
+        { trigger: request.trigger, historyLen: history.length },
+        "[FullCompactor] 存在未完成工具交换,禁止压缩",
+      );
+      return undefined;
+    }
+
+    const cut = findSafeCompactionCut(history, targetRetainedTokens);
+    if (!cut) {
+      logger.warn(
+        { trigger: request.trigger, historyLen: history.length, targetRetainedTokens },
+        "[FullCompactor] 找不到可压缩的安全工具协议边界,跳过",
+      );
+      return undefined;
+    }
+
+    return {
+      beforeTokens,
+      targetRetainedTokens,
+      compactedCount: cut.compactedCount,
+      retainedCount: history.length - cut.compactedCount,
+      retainedTokens: cut.retainedTokens,
+      prefix: sanitizeToolPairs(history.slice(0, cut.compactedCount)),
+    };
+  }
+
+  /** 调用摘要模型并返回可由 Session 或 checkpoint 消费的只读结果。 */
+  private async generatePreview(
+    session: Session,
+    request: FullCompactionRequest,
+    plan: FullCompactionPreviewPlan,
+    signal?: AbortSignal,
+  ): Promise<FullCompactionPreview | undefined> {
+    const instruction = this.renderInstruction(plan.prefix, this.previousSummary);
+    logger.info(
+      {
+        trigger: request.trigger,
+        beforeTokens: plan.beforeTokens,
+        inputBudgetTokens: request.inputBudgetTokens,
+        targetRetainedTokens: plan.targetRetainedTokens,
+        cutIndex: plan.compactedCount,
+        compactedCount: plan.compactedCount,
+        retainedCount: plan.retainedCount,
+        retainedTokens: plan.retainedTokens,
+      },
+      `[FullCompactor] 调用 provider 生成摘要:压缩前缀 ${plan.prefix.length} 条,保留尾部 ${plan.retainedCount} 条`,
     );
 
     // 调用 provider 生成摘要(带重试,失败/空都重试)
@@ -220,34 +358,18 @@ export class FullCompactor {
         { maxAttempts: this.maxAttempts },
         "[FullCompactor] 摘要生成失败(重试耗尽或返回空),降级到硬重置",
       );
-      return false;
+      return undefined;
     }
 
-    // 应用压缩:用 REFERENCE-ONLY 前后标记包装摘要,替换 session.history 前 compactedCount 条。
-    // 包装职责归 FullCompactor(表现层),Session.applyCompaction 只做纯存储。
-    const wrappedSummary = `${SUMMARY_PREFIX}\n\n${summary}\n\n${SUMMARY_END_MARKER}`;
-    await session.applyCompaction(wrappedSummary, compactedCount);
-    session.saveMemorySummary(summary, compactedCount);
-    // previousSummary 存原始摘要(不带包装标记),供下次迭代增量更新
-    this.previousSummary = summary;
-    await this.hookService?.dispatch(
-      "PostCompact",
-      { source: hookSource, messageCount: session.length },
-      { signal },
-    );
-    const afterTokens = estimateMessagesTokens(session.getHistory());
-    logger.info(
-      {
-        trigger: request.trigger,
-        compactedCount,
-        retainedCount: history.length - compactedCount,
-        beforeTokens,
-        afterTokens,
-        summaryLen: summary.length,
-      },
-      "[FullCompactor] ✅ 模型摘要压缩完成",
-    );
-    return true;
+    return {
+      summary,
+      wrappedSummary: wrapFullCompactionSummary(summary),
+      compactedCount: plan.compactedCount,
+      beforeTokens: plan.beforeTokens,
+      targetRetainedTokens: plan.targetRetainedTokens,
+      retainedCount: plan.retainedCount,
+      retainedTokens: plan.retainedTokens,
+    };
   }
 
   /** 渲染摘要指令:13-section 模板 + 历史前缀序列化 + 迭代更新块 */

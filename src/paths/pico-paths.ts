@@ -37,10 +37,14 @@ export interface PicoWorkspacePaths {
   readonly id: WorkspaceId;
   readonly root: string;
   readonly sessions: string;
+  /** Per-execution ledger: canonical lifecycle facts plus a replaceable run projection. */
+  readonly runs: string;
   readonly runtimeDatabase: string;
   readonly memory: string;
   readonly summaries: string;
   readonly artifacts: string;
+  /** Immutable raw tool exchanges removed from Session history by full compaction. */
+  readonly evidence: string;
   readonly traces: string;
   readonly tasks: string;
   readonly forkStaging: string;
@@ -133,10 +137,12 @@ export function resolvePicoPaths(
       id: workspaceId,
       root: workspaceRoot,
       sessions: join(workspaceRoot, "sessions"),
+      runs: join(workspaceRoot, "runs"),
       runtimeDatabase: join(workspaceRoot, "runtime.sqlite"),
       memory: join(workspaceRoot, "memory"),
       summaries: join(workspaceRoot, "memory", "summaries"),
       artifacts: join(workspaceRoot, "artifacts"),
+      evidence: join(workspaceRoot, "evidence"),
       traces: join(workspaceRoot, "traces"),
       tasks: join(workspaceRoot, "tasks"),
       forkStaging: join(workspaceRoot, "fork-staging"),

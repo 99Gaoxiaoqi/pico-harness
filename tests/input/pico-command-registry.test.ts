@@ -30,6 +30,17 @@ import { ModelRouter } from "../../src/provider/model-router.js";
 import { resolveModelRouteCapabilities } from "../../src/provider/model-capabilities.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 import type { CredentialRef, CredentialVault } from "../../src/provider/credential-vault.js";
+import { RuntimeEventStore } from "../../src/runtime/runtime-event-store.js";
+import { materializeRuntimeHistory } from "../../src/runtime/runtime-event-read-model.js";
+import { RuntimeRun } from "../../src/runtime/runtime-run.js";
+
+const { createProviderMock } = vi.hoisted(() => ({
+  createProviderMock: vi.fn(),
+}));
+
+vi.mock("../../src/provider/factory.js", () => ({
+  createProvider: createProviderMock,
+}));
 
 describe("Pico command registry", () => {
   const cleanup: Array<() => void> = [];
@@ -37,6 +48,7 @@ describe("Pico command registry", () => {
 
   afterEach(() => {
     resetSessionSettingsForTests();
+    createProviderMock.mockReset();
     process.env = { ...originalEnv };
     while (cleanup.length > 0) {
       cleanup.pop()?.();
@@ -1258,6 +1270,56 @@ describe("Pico command registry", () => {
     expect(result.command).toBe("compact");
     expect(result.result.message).toContain("Compact unavailable");
     expect(result.result.message).toContain("no live session");
+  });
+
+  it("/compact 为 Runtime 会话记录 checkpoint 而不截断 UI 历史", async () => {
+    const workDir = mkdtempSync(join(tmpdir(), "pico-command-runtime-compact-"));
+    const session = new Session("runtime-compact-session", workDir, { persistence: true });
+    await session.recover();
+    cleanup.push(() => {
+      session.close();
+      rmSync(workDir, { recursive: true, force: true });
+    });
+    const store = new RuntimeEventStore({ baseDir: resolvePicoPaths(workDir).workspace.runs });
+    const seedRun = await RuntimeRun.start({ sessionId: session.id, workDir, store });
+    const rawHistory = Array.from({ length: 8 }, (_, index) => ({
+      role: index % 2 === 0 ? ("user" as const) : ("assistant" as const),
+      content: Array.from({ length: 80 }, (_, word) => `seed-${index}-${word}`).join(" "),
+    }));
+    await seedRun.run(async () => {
+      await session.commitMessages(...rawHistory);
+    });
+    createProviderMock.mockReturnValue({
+      modelName: "glm-5.2",
+      generate: async () => ({
+        role: "assistant",
+        content: "A durable manual-compaction summary.",
+        usage: { promptTokens: 6, completionTokens: 2 },
+      }),
+    });
+    process.env.LLM_BASE_URL = "https://llm.example.test/v1";
+    process.env.LLM_API_KEY = "test-key";
+    const registry = await createPicoCommandRegistry({
+      workDir,
+      provider: "openai",
+      model: "glm-5.2",
+      session,
+      sessionId: session.id,
+    });
+
+    const result = await processUserInput("/compact", { registry });
+
+    expect(result.type).toBe("local-command");
+    if (result.type !== "local-command") return;
+    expect(result.result.message).toContain("RuntimeEvent checkpoint");
+    expect(session.getHistory()).toHaveLength(rawHistory.length);
+    expect(session.getHistory()[0]?.content).toBe(rawHistory[0]?.content);
+    const events = await store.readSession(session.id);
+    expect(events.some((event) => event.kind === "context.checkpoint.recorded")).toBe(true);
+    expect(events.filter((event) => event.kind === "model.call.settled")).toHaveLength(1);
+    const modelHistory = materializeRuntimeHistory(events);
+    expect(modelHistory.length).toBeLessThan(rawHistory.length);
+    expect(modelHistory[0]?.providerData?.["picoKind"]).toBe("runtime_checkpoint");
   });
 
   it("/init creates lightweight Pico project entry files without overwriting existing AGENTS.md", async () => {
