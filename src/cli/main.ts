@@ -11,7 +11,6 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { primeTokenizer } from "../context/token-counter.js";
 import { FTS5Store } from "../memory/fts5-store.js";
-import { migrateLegacyClawWorkspace } from "../paths/claw-migration.js";
 import type { ProviderKind } from "../provider/factory.js";
 import { resolveThinkingEffort, type ThinkingEffort } from "../provider/thinking.js";
 import { ensureWorkspaceTrusted } from "../security/workspace-trust.js";
@@ -70,7 +69,6 @@ export interface CliRuntime {
   primeTokenizer(): Promise<void>;
   resolveCliWorkDir(dir: string | undefined): Promise<string>;
   ensureWorkspaceTrusted(workDir: string): Promise<void>;
-  migrateLegacyWorkspace(workDir: string): Promise<void>;
   resolveCliStartupSession(
     args: readonly string[],
     options?: ResolveCliStartupSessionOptions,
@@ -123,7 +121,6 @@ export async function runCli(args: readonly string[], runtime: CliRuntime): Prom
     // 也不启动 Provider、LSP、MCP 或 Hook。
     const workDir = await runtime.resolveCliWorkDir(options.dir);
     await runtime.ensureWorkspaceTrusted(workDir);
-    await runtime.migrateLegacyWorkspace(workDir);
     await runtime.primeTokenizer();
     const { sessionSelection } = await runtime.resolveCliStartupSession(args, {
       trustedWorkDir: workDir,
@@ -287,9 +284,6 @@ async function executeEntrypoint(): Promise<void> {
           ? createTerminalWorkspaceTrustPrompt({ input: process.stdin, output: process.stdout })
           : undefined;
       await ensureWorkspaceTrusted(workDir, { ...(prompt ? { prompt } : {}) });
-    },
-    migrateLegacyWorkspace: async (workDir) => {
-      await migrateLegacyClawWorkspace(workDir, { env: process.env });
     },
     resolveCliStartupSession,
     startTuiRepl,
