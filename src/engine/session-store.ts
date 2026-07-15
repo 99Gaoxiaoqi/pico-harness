@@ -22,6 +22,8 @@ import type { Message } from "../schema/message.js";
 import { logger } from "../observability/logger.js";
 import { OwnerLease } from "../storage/owner-lease.js";
 import type { SessionIdentity } from "./session-identity.js";
+import type { CommitReceipt, SessionCursor, SessionLineage } from "./session-persistence.js";
+export type { CommitReceipt, SessionCursor, SessionLineage } from "./session-persistence.js";
 import {
   normalizeSessionRuntimeStatePatch,
   SESSION_RUNTIME_STATE_VERSION,
@@ -49,23 +51,6 @@ export type SessionMetadataInput = Omit<SessionMetadata, "schemaVersion"> & {
   readonly schemaVersion?: number;
 };
 
-/** v3 会话身份与派生关系；仅描述事实，不引入运行时句柄。 */
-export interface SessionLineage {
-  readonly relation: "root" | "fork" | "spawn" | "salvage";
-  readonly rootLogId: string;
-  readonly parent?: SessionCursor;
-  /** Fork 的父 Session 标识；用于恢复已发布 fork 的 Runtime bootstrap。 */
-  readonly parentSessionId?: string;
-  readonly parentTaskId?: string;
-}
-
-export interface SessionCursor {
-  readonly logId: string;
-  readonly seq: number;
-  readonly epoch: number;
-  readonly eventId: string;
-}
-
 export interface SessionMetaV3 {
   readonly type: "meta";
   readonly schemaVersion: 3;
@@ -74,16 +59,6 @@ export interface SessionMetaV3 {
   readonly createdAt: string;
   readonly identity: SessionIdentity;
   readonly lineage: SessionLineage;
-}
-
-export interface CommitReceipt {
-  readonly eventId: string;
-  readonly cursor: SessionCursor;
-  readonly committedAt: string;
-  /** persistence:false 兼容会话只能保证进程内幂等。 */
-  readonly durable: boolean;
-  /** false 表示同 eventId 的相同事件已耐久落盘，本次只返回原 receipt。 */
-  readonly inserted: boolean;
 }
 
 interface SessionEventBase {

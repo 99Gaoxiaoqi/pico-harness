@@ -1,4 +1,9 @@
 import type { Message, Usage } from "../schema/message.js";
+import {
+  SESSION_RUNTIME_STATE_VERSION,
+  normalizeSessionRuntimeStatePatch,
+  type SessionRuntimeStatePatch,
+} from "../engine/session-runtime.js";
 
 export const RUNTIME_EVENT_SCHEMA_VERSION = 1 as const;
 
@@ -144,6 +149,15 @@ export interface RuntimeSessionForkedEvent extends RuntimeEventBase {
   };
 }
 
+/** Session-scoped settings and goal facts that are not part of model history. */
+export interface RuntimeSessionStateCommittedEvent extends RuntimeEventBase {
+  readonly kind: "session.state.committed";
+  readonly data: {
+    readonly stateVersion: typeof SESSION_RUNTIME_STATE_VERSION;
+    readonly patch: SessionRuntimeStatePatch;
+  };
+}
+
 export interface RuntimeRunTerminalEvent extends RuntimeEventBase {
   readonly kind: "run.terminal";
   readonly data: {
@@ -164,6 +178,7 @@ export type RuntimeEvent =
   | RuntimeCheckpointRecordedEvent
   | RuntimeHistoryRewoundEvent
   | RuntimeSessionForkedEvent
+  | RuntimeSessionStateCommittedEvent
   | RuntimeRunTerminalEvent;
 
 export function isRuntimeTerminalEvent(event: RuntimeEvent): event is RuntimeRunTerminalEvent {
@@ -275,6 +290,16 @@ export function assertRuntimeEvent(value: unknown): asserts value is RuntimeEven
         }
       }
       return;
+    case "session.state.committed": {
+      if (value["data"]["stateVersion"] !== SESSION_RUNTIME_STATE_VERSION) {
+        throw new RuntimeEventIntegrityError("Runtime session state version is invalid");
+      }
+      const patch = normalizeSessionRuntimeStatePatch(value["data"]["patch"]);
+      if (!patch) {
+        throw new RuntimeEventIntegrityError("Runtime session state patch is invalid");
+      }
+      return;
+    }
     case "run.terminal":
       if (!isTerminalStatus(value["data"]["status"])) {
         throw new RuntimeEventIntegrityError("Runtime terminal status is invalid");

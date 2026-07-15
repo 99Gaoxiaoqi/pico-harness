@@ -123,7 +123,7 @@ export async function listCliSessionSummaries(
   const catalogEntries = projector ? (await projector.syncWorkspace(workDir)).entries : [];
   const catalogBySession = new Map(catalogEntries.map((entry) => [entry.sessionId, entry]));
   const runtimeEventStore = new RuntimeEventStore({
-    baseDir: resolvePicoPaths(workDir).workspace.runs,
+    databasePath: resolvePicoPaths(workDir).workspace.runtimeDatabase,
   });
   const files = await listSessionFiles(workDir);
   const summaries: CliSessionSummary[] = [];
@@ -290,7 +290,7 @@ async function assertSessionIsWritable(
   }
 
   const runtimeEventStore = new RuntimeEventStore({
-    baseDir: resolvePicoPaths(workDir).workspace.runs,
+    databasePath: resolvePicoPaths(workDir).workspace.runtimeDatabase,
   });
   if ((await getSessionHistorySource(runtimeEventStore, sessionId)) === "runtime-event-v1") return;
   if (await isEmptySessionProjection(path, sessionId)) return;

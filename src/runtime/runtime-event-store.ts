@@ -1,15 +1,21 @@
-import { chmod, mkdir, open, readFile, readdir, type FileHandle } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
+import { chmodSync, mkdirSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { isDeepStrictEqual } from "node:util";
+import Database from "better-sqlite3";
 import {
+  SESSION_RUNTIME_STATE_VERSION,
+  type SessionRuntimeStatePatch,
+} from "../engine/session-runtime.js";
+import type { SessionCursor } from "../engine/session-persistence.js";
+import {
+  RUNTIME_EVENT_SCHEMA_VERSION,
   RuntimeEventIntegrityError,
   assertRuntimeEvent,
   type RuntimeEvent,
 } from "./runtime-event.js";
-import { readVersionedJson, writeJsonAtomic } from "../storage/atomic-json.js";
 
 const RUNTIME_SESSION_MANIFEST_VERSION = 1 as const;
-const SAFE_FILE_PART = /[^A-Za-z0-9._-]/g;
 
 export interface RuntimeSessionManifest {
   readonly schemaVersion: typeof RUNTIME_SESSION_MANIFEST_VERSION;
@@ -27,11 +33,41 @@ export interface InitializeRuntimeSessionOptions {
 }
 
 export interface RuntimeEventStoreOptions {
-  readonly baseDir: string;
+  readonly databasePath: string;
 }
 
 export interface RuntimeEventStoreAppendResult {
   readonly inserted: boolean;
+  readonly cursor: SessionCursor;
+  readonly committedAt: string;
+}
+
+export interface RuntimeEventStoreEntry {
+  readonly sequence: number;
+  readonly event: RuntimeEvent;
+}
+
+export interface AppendRuntimeSessionStateOptions {
+  readonly eventId?: string;
+  readonly now?: () => Date;
+}
+
+interface SessionRow {
+  readonly session_id: string;
+  readonly work_dir: string;
+  readonly history_source: string;
+  readonly created_at: string;
+  readonly active_branch_id: string;
+}
+
+interface EventRow {
+  readonly sequence: number;
+  readonly session_id: string;
+  readonly run_id: string;
+  readonly event_id: string;
+  readonly kind: string;
+  readonly at: string;
+  readonly event_json: string;
 }
 
 export class RuntimeEventStoreIntegrityError extends Error {
@@ -42,151 +78,311 @@ export class RuntimeEventStoreIntegrityError extends Error {
 }
 
 /**
- * Canonical per-run runtime fact storage. The run ledger header and Session JSONL
- * are projections; a session-local RuntimeEvent journal preserves causal ties between runs.
+ * Canonical Session and Agent runtime fact store.
+ *
+ * One SQLite transaction commits each fact and its global sequence. Session memory,
+ * run headers, FTS, and UI state are projections that may be rebuilt from this store.
  */
 export class RuntimeEventStore {
-  private static readonly writeTails = new Map<string, Promise<void>>();
-  private readonly baseDir: string;
+  readonly databasePath: string;
 
   constructor(options: RuntimeEventStoreOptions) {
-    this.baseDir = resolve(options.baseDir);
+    this.databasePath = resolve(options.databasePath);
+    mkdirSync(dirname(this.databasePath), { recursive: true, mode: 0o700 });
+    chmodSync(dirname(this.databasePath), 0o700);
+    const db = this.openDatabase();
+    db.close();
   }
 
   async initializeSession(
     options: InitializeRuntimeSessionOptions,
   ): Promise<RuntimeSessionManifest> {
-    const existing = await this.readSessionManifest(options.sessionId);
-    if (existing) {
-      if (existing.workDir !== options.workDir) {
-        throw new RuntimeEventStoreIntegrityError(
-          `Runtime session ${options.sessionId} belongs to another workspace`,
-        );
-      }
-      return existing;
+    const db = this.openDatabase();
+    try {
+      return db.transaction(() => {
+        const existing = this.selectSession(db, options.sessionId);
+        if (existing) {
+          if (existing.work_dir !== options.workDir) {
+            throw new RuntimeEventStoreIntegrityError(
+              `Runtime session ${options.sessionId} belongs to another workspace`,
+            );
+          }
+          return manifestFromRow(existing);
+        }
+        const createdAt = (options.now ?? (() => new Date()))().toISOString();
+        db.prepare(
+          `INSERT INTO agent_sessions
+             (session_id, work_dir, history_source, created_at, active_branch_id)
+           VALUES (?, ?, 'runtime-event-v1', ?, 'main')`,
+        ).run(options.sessionId, options.workDir, createdAt);
+        return manifestFromRow(this.requireSession(db, options.sessionId));
+      })();
+    } finally {
+      db.close();
     }
-    const manifest: RuntimeSessionManifest = {
-      schemaVersion: RUNTIME_SESSION_MANIFEST_VERSION,
-      sessionId: options.sessionId,
-      workDir: options.workDir,
-      historySource: "runtime-event-v1",
-      createdAt: (options.now ?? (() => new Date()))().toISOString(),
-      activeBranchId: "main",
-    };
-    await writeJsonAtomic(this.sessionManifestPath(options.sessionId), manifest, {
-      directoryMode: 0o700,
-      fileMode: 0o600,
-    });
-    return manifest;
   }
 
   async readSessionManifest(sessionId: string): Promise<RuntimeSessionManifest | undefined> {
+    const db = this.openDatabase();
     try {
-      return await readVersionedJson(this.sessionManifestPath(sessionId), decodeManifest);
-    } catch (error) {
-      if (isMissing(error)) return undefined;
-      throw error;
+      const row = this.selectSession(db, sessionId);
+      return row ? manifestFromRow(row) : undefined;
+    } finally {
+      db.close();
+    }
+  }
+
+  async listSessionManifests(): Promise<RuntimeSessionManifest[]> {
+    const db = this.openDatabase();
+    try {
+      const rows = db
+        .prepare("SELECT * FROM agent_sessions ORDER BY created_at DESC, session_id DESC")
+        .all() as SessionRow[];
+      return rows.map(manifestFromRow);
+    } finally {
+      db.close();
     }
   }
 
   async append(event: RuntimeEvent): Promise<RuntimeEventStoreAppendResult> {
     assertRuntimeEvent(event);
-    const path = this.runtimeEventsPath(event.sessionId, event.runId);
-    const key = this.sessionDirectory(event.sessionId);
-    const previous = RuntimeEventStore.writeTails.get(key) ?? Promise.resolve();
-    const operation = previous.then(async (): Promise<RuntimeEventStoreAppendResult> => {
-      await this.seedSessionEventOrder(event.sessionId);
-      const inserted = await appendEvent(path, event, event.runId);
-      await appendEvent(this.sessionEventOrderPath(event.sessionId), event, undefined);
-      return { inserted };
+    const db = this.openDatabase();
+    try {
+      return db.transaction(() => {
+        const session = this.requireSession(db, event.sessionId);
+        if (event.kind === "run.started" && event.data.workDir !== session.work_dir) {
+          throw new RuntimeEventStoreIntegrityError(
+            `Runtime event workspace does not match session ${event.sessionId}`,
+          );
+        }
+
+        const existing = db
+          .prepare(
+            `SELECT sequence, session_id, run_id, event_id, kind, at, event_json
+             FROM agent_runtime_events
+             WHERE session_id = ? AND event_id = ?`,
+          )
+          .get(event.sessionId, event.eventId) as EventRow | undefined;
+        if (existing) {
+          const stored = decodeEventRow(existing, event.sessionId);
+          if (!isDeepStrictEqual(stored.event, event)) {
+            throw new RuntimeEventStoreIntegrityError(
+              `Runtime event ID ${event.eventId} is already bound to another payload`,
+            );
+          }
+          return this.appendResult(db, stored.sequence, stored.event, false);
+        }
+
+        const inserted = db
+          .prepare(
+            `INSERT INTO agent_runtime_events
+               (session_id, run_id, event_id, kind, at, event_json)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            event.sessionId,
+            event.runId,
+            event.eventId,
+            event.kind,
+            event.at,
+            JSON.stringify(event),
+          );
+        const sequence = Number(inserted.lastInsertRowid);
+        if (!Number.isSafeInteger(sequence) || sequence < 1) {
+          throw new RuntimeEventStoreIntegrityError("Runtime event sequence is invalid");
+        }
+        if (event.kind === "history.rewound") {
+          db.prepare(
+            "UPDATE agent_sessions SET active_branch_id = ? WHERE session_id = ?",
+          ).run(event.data.branchId, event.sessionId);
+        }
+        return this.appendResult(db, sequence, event, true);
+      })();
+    } finally {
+      db.close();
+    }
+  }
+
+  async appendSessionState(
+    sessionId: string,
+    patch: SessionRuntimeStatePatch,
+    options: AppendRuntimeSessionStateOptions = {},
+  ): Promise<RuntimeEventStoreAppendResult> {
+    const at = (options.now ?? (() => new Date()))().toISOString();
+    return this.append({
+      schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,
+      eventId: options.eventId ?? createRuntimeEventId("session-state"),
+      sessionId,
+      invocationId: `session:${sessionId}:state`,
+      runId: "session-state",
+      turnId: "session-state",
+      at,
+      partial: false,
+      visibility: "internal",
+      kind: "session.state.committed",
+      data: {
+        stateVersion: SESSION_RUNTIME_STATE_VERSION,
+        patch: structuredClone(patch),
+      },
     });
-    RuntimeEventStore.writeTails.set(
-      key,
-      operation.then(
-        () => undefined,
-        () => undefined,
-      ),
-    );
-    return operation;
   }
 
   async readRun(sessionId: string, runId: string): Promise<RuntimeEvent[]> {
-    return readEvents(this.runtimeEventsPath(sessionId, runId), sessionId, runId);
+    const db = this.openDatabase();
+    try {
+      const rows = db
+        .prepare(
+          `SELECT sequence, session_id, run_id, event_id, kind, at, event_json
+           FROM agent_runtime_events
+           WHERE session_id = ? AND run_id = ?
+           ORDER BY sequence`,
+        )
+        .all(sessionId, runId) as EventRow[];
+      return rows.map((row) => decodeEventRow(row, sessionId, runId).event);
+    } finally {
+      db.close();
+    }
   }
 
   async readSession(sessionId: string): Promise<RuntimeEvent[]> {
-    const ordered = await this.readSessionRunEvents(sessionId);
-    const eventOrder = await readSessionEventOrder(
-      this.sessionEventOrderPath(sessionId),
-      sessionId,
-    );
-    if (!eventOrder) return ordered.map(({ event }) => event);
-
-    const eventOrderIndexes = new Map(
-      eventOrder.map((event, index) => [eventOrderKey(event.runId, event.eventId), index]),
-    );
-    ordered.sort(
-      (left, right) =>
-        Date.parse(left.event.at) - Date.parse(right.event.at) ||
-        compareEventOrder(left, right, eventOrderIndexes),
-    );
-    return ordered.map(({ event }) => event);
+    return (await this.readSessionEntries(sessionId)).map(({ event }) => event);
   }
 
-  private async seedSessionEventOrder(sessionId: string): Promise<void> {
-    const path = this.sessionEventOrderPath(sessionId);
-    if ((await readSessionEventOrder(path, sessionId)) !== undefined) return;
-    for (const { event } of await this.readSessionRunEvents(sessionId)) {
-      await appendEvent(path, event, undefined);
-    }
-  }
-
-  private async readSessionRunEvents(sessionId: string): Promise<OrderedRuntimeEvent[]> {
-    const directory = this.sessionDirectory(sessionId);
-    let entries;
+  async readSessionEntries(sessionId: string): Promise<RuntimeEventStoreEntry[]> {
+    const db = this.openDatabase();
     try {
-      entries = await readdir(directory, { withFileTypes: true });
-    } catch (error) {
-      if (isMissing(error)) return [];
-      throw error;
+      const rows = db
+        .prepare(
+          `SELECT sequence, session_id, run_id, event_id, kind, at, event_json
+           FROM agent_runtime_events
+           WHERE session_id = ?
+           ORDER BY sequence`,
+        )
+        .all(sessionId) as EventRow[];
+      return rows.map((row) => decodeEventRow(row, sessionId));
+    } finally {
+      db.close();
     }
-    const ordered: OrderedRuntimeEvent[] = [];
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
-      const events = await this.readRun(sessionId, entry.name);
-      events.forEach((event, index) => ordered.push({ event, runId: entry.name, index }));
-    }
-    ordered.sort(compareRuntimeEvents);
-    return ordered;
   }
 
   async listRunIds(sessionId: string): Promise<string[]> {
+    const db = this.openDatabase();
     try {
-      const entries = await readdir(this.sessionDirectory(sessionId), { withFileTypes: true });
-      return entries
-        .filter((entry) => entry.isDirectory())
-        .map((entry) => entry.name)
-        .toSorted();
-    } catch (error) {
-      if (isMissing(error)) return [];
-      throw error;
+      const rows = db
+        .prepare(
+          `SELECT DISTINCT run_id
+           FROM agent_runtime_events
+           WHERE session_id = ? AND run_id <> 'session-state'
+           ORDER BY run_id`,
+        )
+        .all(sessionId) as Array<{ run_id: string }>;
+      return rows.map((row) => row.run_id);
+    } finally {
+      db.close();
     }
   }
 
-  sessionDirectory(sessionId: string): string {
-    return join(this.baseDir, sanitizeFilePart(sessionId));
+  async getHeadCursor(sessionId: string): Promise<SessionCursor | undefined> {
+    const entries = await this.readSessionEntries(sessionId);
+    const head = entries.at(-1);
+    if (!head) return undefined;
+    return cursorForEntries(sessionId, entries, head.sequence, head.event.eventId);
   }
 
-  sessionManifestPath(sessionId: string): string {
-    return join(this.sessionDirectory(sessionId), "runtime-session.json");
+  async deleteSession(sessionId: string): Promise<boolean> {
+    const db = this.openDatabase();
+    try {
+      return db.prepare("DELETE FROM agent_sessions WHERE session_id = ?").run(sessionId).changes > 0;
+    } finally {
+      db.close();
+    }
   }
 
-  runtimeEventsPath(sessionId: string, runId: string): string {
-    return join(this.sessionDirectory(sessionId), sanitizeFilePart(runId), "runtime-events.jsonl");
+  close(): void {
+    // Connections are intentionally scoped to individual operations.
   }
 
-  private sessionEventOrderPath(sessionId: string): string {
-    return join(this.sessionDirectory(sessionId), "runtime-event-order.jsonl");
+  private appendResult(
+    db: Database.Database,
+    sequence: number,
+    event: RuntimeEvent,
+    inserted: boolean,
+  ): RuntimeEventStoreAppendResult {
+    const epoch = Number(
+      db
+        .prepare(
+          `SELECT COUNT(*)
+           FROM agent_runtime_events
+           WHERE session_id = ? AND sequence <= ? AND kind = 'history.rewound'`,
+        )
+        .pluck()
+        .get(event.sessionId, sequence),
+    );
+    return {
+      inserted,
+      cursor: {
+        logId: event.sessionId,
+        seq: sequence,
+        epoch,
+        eventId: event.eventId,
+      },
+      committedAt: event.at,
+    };
+  }
+
+  private selectSession(db: Database.Database, sessionId: string): SessionRow | undefined {
+    return db
+      .prepare("SELECT * FROM agent_sessions WHERE session_id = ?")
+      .get(sessionId) as SessionRow | undefined;
+  }
+
+  private requireSession(db: Database.Database, sessionId: string): SessionRow {
+    const row = this.selectSession(db, sessionId);
+    if (!row) {
+      throw new RuntimeEventStoreIntegrityError(
+        `Runtime session ${sessionId} must be initialized before appending events`,
+      );
+    }
+    return row;
+  }
+
+  private openDatabase(): Database.Database {
+    const db = new Database(this.databasePath);
+    try {
+      chmodSync(this.databasePath, 0o600);
+      db.pragma("journal_mode = WAL");
+      db.pragma("foreign_keys = ON");
+      db.pragma("busy_timeout = 5000");
+      db.pragma("synchronous = FULL");
+      db.exec(
+        `CREATE TABLE IF NOT EXISTS agent_sessions (
+           session_id TEXT PRIMARY KEY,
+           work_dir TEXT NOT NULL,
+           history_source TEXT NOT NULL CHECK (history_source = 'runtime-event-v1'),
+           created_at TEXT NOT NULL,
+           active_branch_id TEXT NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS agent_runtime_events (
+           sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+           session_id TEXT NOT NULL,
+           run_id TEXT NOT NULL,
+           event_id TEXT NOT NULL,
+           kind TEXT NOT NULL,
+           at TEXT NOT NULL,
+           event_json TEXT NOT NULL,
+           UNIQUE (session_id, event_id),
+           FOREIGN KEY (session_id) REFERENCES agent_sessions(session_id) ON DELETE CASCADE
+         );
+         CREATE INDEX IF NOT EXISTS idx_agent_runtime_events_session_sequence
+           ON agent_runtime_events(session_id, sequence);
+         CREATE INDEX IF NOT EXISTS idx_agent_runtime_events_session_run_sequence
+           ON agent_runtime_events(session_id, run_id, sequence);`,
+      );
+      return db;
+    } catch (error) {
+      db.close();
+      throw error;
+    }
   }
 }
 
@@ -194,225 +390,69 @@ export function createRuntimeEventId(prefix = "runtime-event"): string {
   return `${prefix}:${randomUUID()}`;
 }
 
-async function appendEvent(
-  path: string,
-  event: RuntimeEvent,
-  expectedRunId: string | undefined,
-): Promise<boolean> {
-  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-  await chmod(dirname(path), 0o700);
-  let handle: FileHandle | undefined;
-  try {
-    handle = await open(path, "a+", 0o600);
-    await chmod(path, 0o600);
-    await repairTornTail(handle);
-    const existing = await readEventsFromHandle(handle, event.sessionId, expectedRunId);
-    const sameId = existing.find((candidate) => candidate.eventId === event.eventId);
-    if (sameId) {
-      if (JSON.stringify(sameId) !== JSON.stringify(event)) {
-        throw new RuntimeEventStoreIntegrityError(
-          `Runtime event ID ${event.eventId} is already bound to another payload`,
-        );
-      }
-      return false;
-    }
-    await writeAll(handle, Buffer.from(`${JSON.stringify(event)}\n`, "utf8"));
-    await handle.datasync();
-    return true;
-  } finally {
-    await handle?.close().catch(() => undefined);
-  }
-}
-
-async function readEvents(
-  path: string,
-  expectedSessionId: string,
-  expectedRunId: string | undefined,
-): Promise<RuntimeEvent[]> {
-  return (await readEventsIfPresent(path, expectedSessionId, expectedRunId)) ?? [];
-}
-
-async function readSessionEventOrder(
-  path: string,
-  expectedSessionId: string,
-): Promise<RuntimeEvent[] | undefined> {
-  return readEventsIfPresent(path, expectedSessionId, undefined);
-}
-
-async function readEventsIfPresent(
-  path: string,
-  expectedSessionId: string,
-  expectedRunId: string | undefined,
-): Promise<RuntimeEvent[] | undefined> {
-  let raw: string;
-  try {
-    raw = await readFile(path, "utf8");
-  } catch (error) {
-    if (isMissing(error)) return undefined;
-    throw error;
-  }
-  return decodeEventLines(raw, expectedSessionId, expectedRunId);
-}
-
-async function readEventsFromHandle(
-  handle: FileHandle,
-  expectedSessionId: string,
-  expectedRunId: string | undefined,
-): Promise<RuntimeEvent[]> {
-  const { size } = await handle.stat();
-  if (size === 0) return [];
-  const bytes = Buffer.allocUnsafe(size);
-  let offset = 0;
-  while (offset < size) {
-    const { bytesRead } = await handle.read(bytes, offset, size - offset, offset);
-    if (bytesRead <= 0)
-      throw new RuntimeEventStoreIntegrityError("Runtime event read made no progress");
-    offset += bytesRead;
-  }
-  return decodeEventLines(bytes.toString("utf8"), expectedSessionId, expectedRunId);
-}
-
-function decodeEventLines(
-  raw: string,
-  expectedSessionId: string,
-  expectedRunId: string | undefined,
-): RuntimeEvent[] {
-  const lines = raw.split("\n");
-  const tornTail = raw.length > 0 && !raw.endsWith("\n");
-  const events: RuntimeEvent[] = [];
-  for (let index = 0; index < lines.length; index++) {
-    const line = lines[index];
-    if (!line) continue;
-    try {
-      const parsed: unknown = JSON.parse(line);
-      assertRuntimeEvent(parsed);
-      if (
-        parsed.sessionId !== expectedSessionId ||
-        (expectedRunId !== undefined && parsed.runId !== expectedRunId)
-      ) {
-        throw new RuntimeEventStoreIntegrityError("Runtime event identity does not match its path");
-      }
-      if (events.some((event) => event.eventId === parsed.eventId)) {
-        throw new RuntimeEventStoreIntegrityError(`Duplicate runtime event ID ${parsed.eventId}`);
-      }
-      events.push(parsed);
-    } catch (error) {
-      if (tornTail && index === lines.length - 1) break;
-      if (
-        error instanceof RuntimeEventIntegrityError ||
-        error instanceof RuntimeEventStoreIntegrityError
-      ) {
-        throw error;
-      }
-      throw new RuntimeEventStoreIntegrityError(
-        `Runtime event log has invalid JSON at line ${index + 1}`,
-      );
-    }
-  }
-  return events;
-}
-
-interface OrderedRuntimeEvent {
-  readonly event: RuntimeEvent;
-  readonly runId: string;
-  readonly index: number;
-}
-
-function compareRuntimeEvents(left: OrderedRuntimeEvent, right: OrderedRuntimeEvent): number {
-  return (
-    Date.parse(left.event.at) - Date.parse(right.event.at) ||
-    left.runId.localeCompare(right.runId) ||
-    left.index - right.index ||
-    left.event.eventId.localeCompare(right.event.eventId)
-  );
-}
-
-function compareEventOrder(
-  left: OrderedRuntimeEvent,
-  right: OrderedRuntimeEvent,
-  eventOrderIndexes: ReadonlyMap<string, number>,
-): number {
-  const leftIndex = eventOrderIndexes.get(eventOrderKey(left.event.runId, left.event.eventId));
-  const rightIndex = eventOrderIndexes.get(eventOrderKey(right.event.runId, right.event.eventId));
-  if (leftIndex !== undefined && rightIndex !== undefined) return leftIndex - rightIndex;
-  return compareRuntimeEvents(left, right);
-}
-
-function eventOrderKey(runId: string, eventId: string): string {
-  return JSON.stringify([runId, eventId]);
-}
-
-async function repairTornTail(handle: FileHandle): Promise<void> {
-  const { size } = await handle.stat();
-  if (size === 0) return;
-  const bytes = Buffer.allocUnsafe(size);
-  let offset = 0;
-  while (offset < size) {
-    const { bytesRead } = await handle.read(bytes, offset, size - offset, offset);
-    if (bytesRead <= 0)
-      throw new RuntimeEventStoreIntegrityError("Runtime event tail read made no progress");
-    offset += bytesRead;
-  }
-  if (bytes.at(-1) === 0x0a) return;
-  const tailStart = bytes.lastIndexOf(0x0a) + 1;
-  try {
-    JSON.parse(bytes.subarray(tailStart).toString("utf8"));
-    await writeAll(handle, Buffer.from("\n", "utf8"));
-  } catch {
-    await handle.truncate(tailStart);
-  }
-  await handle.datasync();
-}
-
-async function writeAll(handle: FileHandle, bytes: Uint8Array): Promise<void> {
-  let offset = 0;
-  while (offset < bytes.byteLength) {
-    const { bytesWritten } = await handle.write(bytes, offset, bytes.byteLength - offset, null);
-    if (bytesWritten <= 0)
-      throw new RuntimeEventStoreIntegrityError("Runtime event write made no progress");
-    offset += bytesWritten;
-  }
-}
-
-function decodeManifest(value: unknown): RuntimeSessionManifest {
-  if (!isRecord(value) || value["schemaVersion"] !== RUNTIME_SESSION_MANIFEST_VERSION) {
+function manifestFromRow(row: SessionRow): RuntimeSessionManifest {
+  if (row.history_source !== "runtime-event-v1") {
     throw new RuntimeEventStoreIntegrityError(
-      "Runtime session manifest has an invalid schema version",
+      `Runtime session ${row.session_id} has an unsupported history source`,
     );
-  }
-  if (
-    !isNonEmptyString(value["sessionId"]) ||
-    !isNonEmptyString(value["workDir"]) ||
-    value["historySource"] !== "runtime-event-v1" ||
-    !isNonEmptyString(value["createdAt"]) ||
-    !isNonEmptyString(value["activeBranchId"])
-  ) {
-    throw new RuntimeEventStoreIntegrityError("Runtime session manifest is invalid");
   }
   return {
     schemaVersion: RUNTIME_SESSION_MANIFEST_VERSION,
-    sessionId: value["sessionId"],
-    workDir: value["workDir"],
+    sessionId: row.session_id,
+    workDir: row.work_dir,
     historySource: "runtime-event-v1",
-    createdAt: value["createdAt"],
-    activeBranchId: value["activeBranchId"],
+    createdAt: row.created_at,
+    activeBranchId: row.active_branch_id,
   };
 }
 
-function sanitizeFilePart(value: string): string {
-  const sanitized = value.replace(SAFE_FILE_PART, "_");
-  if (!sanitized) throw new RuntimeEventStoreIntegrityError("Runtime path identifier is empty");
-  return sanitized;
+function decodeEventRow(
+  row: EventRow,
+  expectedSessionId: string,
+  expectedRunId?: string,
+): RuntimeEventStoreEntry {
+  let value: unknown;
+  try {
+    value = JSON.parse(row.event_json);
+  } catch {
+    throw new RuntimeEventStoreIntegrityError(
+      `Runtime event ${row.event_id} contains invalid JSON`,
+    );
+  }
+  try {
+    assertRuntimeEvent(value);
+  } catch (error) {
+    if (error instanceof RuntimeEventIntegrityError) throw error;
+    throw new RuntimeEventStoreIntegrityError(
+      `Runtime event ${row.event_id} has an invalid payload`,
+    );
+  }
+  if (
+    value.sessionId !== expectedSessionId ||
+    row.session_id !== expectedSessionId ||
+    value.eventId !== row.event_id ||
+    value.runId !== row.run_id ||
+    value.kind !== row.kind ||
+    value.at !== row.at ||
+    (expectedRunId !== undefined && value.runId !== expectedRunId)
+  ) {
+    throw new RuntimeEventStoreIntegrityError("Runtime event identity does not match its row");
+  }
+  return { sequence: row.sequence, event: value };
 }
 
-function isMissing(error: unknown): boolean {
-  return error instanceof Error && "code" in error && error.code === "ENOENT";
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function isNonEmptyString(value: unknown): value is string {
-  return typeof value === "string" && value.length > 0;
+function cursorForEntries(
+  sessionId: string,
+  entries: readonly RuntimeEventStoreEntry[],
+  sequence: number,
+  eventId: string,
+): SessionCursor {
+  return {
+    logId: sessionId,
+    seq: sequence,
+    epoch: entries.filter(
+      (entry) => entry.sequence <= sequence && entry.event.kind === "history.rewound",
+    ).length,
+    eventId,
+  };
 }

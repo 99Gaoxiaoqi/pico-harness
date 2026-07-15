@@ -321,7 +321,7 @@ export async function executeAgentRuntime(
     () => false,
   );
   const runtimeEventStore = new RuntimeEventStore({
-    baseDir: resolvePicoPaths(workDir).workspace.runs,
+    databasePath: resolvePicoPaths(workDir).workspace.runtimeDatabase,
   });
   const existingRuntimeManifest = await runtimeEventStore.readSessionManifest(
     sessionSelection.sessionId,
