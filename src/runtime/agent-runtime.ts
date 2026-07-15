@@ -218,9 +218,6 @@ export interface RuntimeLifecycleEvent {
   detail?: string;
 }
 
-/** @deprecated Use RuntimeLifecycleEvent. Canonical runtime facts are RuntimeEvent. */
-export type RuntimeEvent = RuntimeLifecycleEvent;
-
 /**
  * Host-provided effects. The runtime never renders an Ink component or assumes a terminal.
  * Missing approval delivery fails closed when a dangerous tool is requested.

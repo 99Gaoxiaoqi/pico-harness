@@ -19,6 +19,6 @@ export type {
   RunAgentEnv,
   RunAgentProviderFactory,
   RunAgentUsage,
-  RuntimeEvent,
+  RuntimeLifecycleEvent,
   RuntimeHost,
 } from "../runtime/agent-runtime.js";
