@@ -268,20 +268,22 @@ export class UserConfigStore {
       `${expected.dev}:${expected.ino}:${expected.token}:${sha256(expected.raw)}`,
     )}`;
     let createdClaim = false;
+    let matchedClaim = false;
     try {
-      // Only the contender that creates this hard-link claim may unlink lockPath. The claim and
-      // the two identity checks prevent delayed reclaimers from deleting a successor lock.
+      // The hard-link pins the expected inode while the two identity checks prevent a delayed
+      // reclaimer from deleting a successor lock. An existing matching claim may be reused after
+      // its creator crashed; otherwise one abandoned claim could make the lock unrecoverable.
       try {
         await link(this.lockPath, claimPath);
         createdClaim = true;
       } catch (error) {
         if (isErrnoCode(error, "ENOENT")) return true;
-        if (isErrnoCode(error, "EEXIST")) return false;
-        throw error;
+        if (!isErrnoCode(error, "EEXIST")) throw error;
       }
 
       const claimed = await this.readLockSnapshot(claimPath);
       if (claimed === undefined || !matchesSnapshot(claimed, expected, requireToken)) return false;
+      matchedClaim = true;
       const current = await this.readLockSnapshot(this.lockPath);
       if (current === undefined) return true;
       if (!matchesSnapshot(current, expected, requireToken)) return false;
@@ -291,7 +293,7 @@ export class UserConfigStore {
       });
       return true;
     } finally {
-      if (createdClaim) {
+      if (createdClaim || matchedClaim) {
         await unlink(claimPath).catch(() => undefined);
       }
     }

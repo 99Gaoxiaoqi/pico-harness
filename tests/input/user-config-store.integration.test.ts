@@ -1,6 +1,8 @@
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { once } from "node:events";
 import {
+  link,
   lstat,
   mkdir,
   mkdtemp,
@@ -174,6 +176,35 @@ describe("UserConfigStore integration", () => {
     });
     await expect(lstat(store.lockPath)).rejects.toMatchObject({ code: "ENOENT" });
   });
+
+  it("recovers a dead lock even when a previous reclaimer left its hard-link claim", async () => {
+    const picoHome = await mkdtemp(join(tmpdir(), "pico-user-config-orphan-claim-"));
+    const store = new UserConfigStore({ picoHome, staleLockMs: 1, lockTimeoutMs: 500 });
+    const initial = await store.read();
+    const deadPid = await exitedProcessId();
+    const raw = `${JSON.stringify({
+      version: 1,
+      token: "dead-writer-with-claim",
+      pid: deadPid,
+      acquiredAt: Date.now() - 60_000,
+    })}\n`;
+    await writeFile(store.lockPath, raw, { mode: 0o600 });
+    const metadata = await stat(store.lockPath);
+    const claimDigest = sha256(
+      `${metadata.dev}:${metadata.ino}:dead-writer-with-claim:${sha256(raw)}`,
+    );
+    const claimPath = `${store.lockPath}.stale-${claimDigest}`;
+    await link(store.lockPath, claimPath);
+    const old = new Date(Date.now() - 60_000);
+    await utimes(store.lockPath, old, old);
+
+    const config = userConfig("https://recovered.example.test/v1", "recovered");
+    await expect(
+      store.write(config, { expectedRevision: initial.revision }),
+    ).resolves.toMatchObject({ config });
+    await expect(lstat(store.lockPath)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(lstat(claimPath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
 });
 
 interface Deferred<T> {
@@ -211,4 +242,8 @@ function userConfig(baseURL: string, model: string): PicoUserConfig {
       },
     },
   };
+}
+
+function sha256(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
 }
