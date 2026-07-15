@@ -125,6 +125,7 @@ export function createProductionLocalDaemonHost(
         sessionId: targetSessionId,
         session,
         picoHome,
+        env,
         ...(workspaceRuntime.taskHostRuntime
           ? { taskHostRuntime: workspaceRuntime.taskHostRuntime }
           : {}),
@@ -199,6 +200,7 @@ export function createProductionLocalDaemonHost(
             waitAtSafeBoundary: context.waitAtSafeBoundary,
             rewindPointSink: context.bindCheckpoint,
             picoHome,
+            env,
           },
         );
         return {
@@ -397,6 +399,7 @@ export function createProductionLocalDaemonHost(
           backgroundTrustStore: trustStore,
           credentialResolver: credentialVault,
           picoHome,
+          env,
         },
       );
       return {

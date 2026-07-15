@@ -1030,6 +1030,9 @@ class TaskStateAgentRuntime extends AgentRuntime {
   ): Promise<RunAgentCliResult> {
     const sessionId = options.session ?? "home-context-session";
     const workDir = options.dir ?? process.cwd();
+    if (!dependencies.picoHome || dependencies.env?.PICO_HOME !== dependencies.picoHome) {
+      throw new Error("production host did not propagate its PICO_HOME environment");
+    }
     if (!dependencies.runtimeState?.taskHostRuntime) {
       throw new Error("home context test requires a Git task host");
     }

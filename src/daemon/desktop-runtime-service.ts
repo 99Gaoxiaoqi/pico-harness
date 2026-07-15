@@ -1540,6 +1540,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         includeClaudeProjectResources: compatibility.enabled && compatibility.projectResources,
         includeClaudeUserResources: compatibility.enabled && compatibility.userResources,
         env: this.env,
+        picoHome: this.picoHome,
       });
       const profile = findAgentProfile(profiles, input.name);
       if (!profile) {
@@ -1560,6 +1561,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       includeClaudeProjectResources: compatibility.enabled && compatibility.projectResources,
       includeClaudeUserResources: compatibility.enabled && compatibility.userResources,
       env: this.env,
+      picoHome: this.picoHome,
     });
     const skill = await loader.view(skillName);
     if (!skill) {
@@ -2189,6 +2191,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       includeClaudeProjectResources: compatibility.enabled && compatibility.projectResources,
       includeClaudeUserResources: compatibility.enabled && compatibility.userResources,
       env: this.env,
+      picoHome: this.picoHome,
     });
     return { agents: toJsonValue(summarizeAgentProfiles(agents)) };
   }
@@ -2199,7 +2202,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   ): Promise<JsonValue> {
     const canonical = await this.requireTrustedWorkspace(workspacePath);
     const loader = includeUserResources
-      ? await loadDesktopSkillLoader(canonical, this.env)
+      ? await loadDesktopSkillLoader(canonical, this.env, this.picoHome)
       : new SkillLoader(canonical);
     const skills = await loader.list();
     return {
@@ -3621,6 +3624,7 @@ function isOneOf<const Values extends readonly unknown[]>(
 async function loadDesktopSkillLoader(
   workspacePath: string,
   env: Readonly<Record<string, string | undefined>>,
+  picoHome: string,
 ): Promise<SkillLoader> {
   const config = await loadPicoConfig(workspacePath);
   const compatibility = config.compatibility.claude;
@@ -3629,6 +3633,7 @@ async function loadDesktopSkillLoader(
     includeClaudeProjectResources: compatibility.enabled && compatibility.projectResources,
     includeClaudeUserResources: compatibility.enabled && compatibility.userResources,
     env,
+    picoHome,
   });
 }
 
