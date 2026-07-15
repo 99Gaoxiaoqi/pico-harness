@@ -24,7 +24,7 @@ npx tsx --env-file=/path/to/pico-harness/.env \
 
 - 工具读写、Bash、`@` 文件引用默认都相对 `cwd` 解析。
 - `AGENTS.md`、`.pico/commands`、`.claude/commands`、`.claude/agents` 都从当前项目读取。
-- CLI session 保存在当前项目的 `.claw/sessions/<session-id>.jsonl`，不同项目目录互不混用。
+- Session 保存在 `$PICO_HOME/workspaces/<workspace-id>/sessions/<session-id>.jsonl`，TUI 与 Desktop 共用；`workspace-id` 由真实项目路径稳定派生，不同项目互不混用。
 - 已安装的 `pico` 不会自动读取本仓库 `.env`；请提前导出环境变量，或使用上面的开发命令显式传 `--env-file`。
 
 ## Trace 调试入口
@@ -58,13 +58,14 @@ Pico 的 CLI session 以当前项目目录为边界：
 | `/status`      | 查看当前 session、cwd、provider、model route、thinking、mode 和 fork 来源。                |
 | `/mode`        | 查看或切换唯一交互模式：`default`、`plan`、`auto`、`yolo`；默认是 `yolo`。                 |
 | `/model`       | 从已配置/发现的 `providerID/modelID` 路由中切换完整 provider、端点、凭证来源和模型。       |
+| `/provider`    | 查看设备级 Provider，导入旧环境变量，设置用户默认模型或删除用户 Provider。                 |
 | `/thinking`    | 查看或切换思考强度：`off`、`low`、`medium`、`high`。别名：`/effort`。                      |
 | `/permissions` | `/mode` 的兼容别名；不再维护第二套权限状态。                                               |
 | `/help`        | 列出命令；`/help <command>` 查看单个命令用法。                                             |
 | `/clear`       | 清空本地 TUI transcript 视图。                                                             |
 | `/compact`     | 对当前 session 历史做摘要压缩；缺少模型配置时会说明不可用原因。                            |
 | `/init`        | 在当前项目创建轻量入口文件：`AGENTS.md` 和 `.pico/config.json`，不会覆盖已有 `AGENTS.md`。 |
-| `/doctor`      | 检查 cwd、`.env`、provider、model、`LLM_BASE_URL`、`LLM_API_KEY[S]` 和 Node 版本。         |
+| `/doctor`      | 检查 cwd、有效配置来源、provider 凭证状态、model、兼容 `LLM_*` 变量和 Node 版本。          |
 | `/sessions`    | 打开当前项目的会话选择器；按标题、相对时间、消息数和 fork 来源识别会话。                   |
 | `/rename`      | 为当前 session 设置 1–120 字符的可读标题：`/rename <title>`。                              |
 | `/resume`      | 切换到指定 session；补全和选择器都优先展示会话标题。                                       |
@@ -161,6 +162,20 @@ Pico 首次打开一个工作区时会先显示信任确认。信任门通过前
 
 键位值可以是内置 action、`command:/...` slash command，或 `null` 用于解绑默认键。已知字段会在启动时严格校验，错误会带配置路径和字段名；`commandsDir` 必须保持在项目目录内。
 
+### 设备级 Provider 配置
+
+`$PICO_HOME/config.json`（默认 `~/.pico/config.json`）是 Desktop 与 TUI 共享的用户默认值和 Provider registry。它不存储 API Key；凭证只进入 OS 凭证库。
+
+```text
+/provider list
+/provider import-env my-provider
+/provider import-env my-provider --confirm
+/provider default my-provider/my-model
+/provider delete my-provider
+```
+
+`import-env` 首次只显示不含密钥的预览，必须带 `--confirm` 才会将 Provider 写入共享配置并将当前进程的凭证导入系统凭证库。配置修改采用 revision OCC；若 Desktop 或另一 TUI 已更新文件，本次写入会被拒绝，需重新读取。
+
 工具卡默认用 `Ctrl+E` 展开或折叠，卡片右侧会显示完整提示；裸 `e` 保留给输入框。
 
 ## Claude Code 兼容入口
@@ -211,11 +226,11 @@ Pico 会加载项目级 Claude agent profile：
 npx tsx --env-file=/path/to/pico-harness/.env /path/to/pico-harness/src/cli/main.ts
 ```
 
-已安装的 `pico` 命令不会自动加载 `.env`，需要先在 shell 中设置 `LLM_BASE_URL`、`LLM_API_KEY`、`LLM_MODEL`，或用外部工具加载环境变量。
+已安装的 `pico` 命令不会自动加载 `.env`。已在 Desktop 或 `/provider import-env` 中配置共享 Provider 时不需要 `.env`；仅使用旧兼容入口时，需先在 shell 中设置 `LLM_BASE_URL`、`LLM_API_KEY[S]`、`LLM_MODEL`，或用外部工具加载。
 
 ### Provider 配置缺失
 
-如果看到「缺少 Provider 配置」或 `/doctor` 显示 `LLM_BASE_URL`、`LLM_API_KEY[S]` missing，请检查：
+如果看到「缺少 Provider 配置」，先运行 `/provider list` 和 `/doctor`。共享 Provider 应显示配置来源与 `keychain` / `environment` 凭证状态。如仍使用旧环境入口，请检查：
 
 - `LLM_BASE_URL` 是否已设置。
 - `LLM_API_KEY` 或 `LLM_API_KEYS` 是否已设置。
