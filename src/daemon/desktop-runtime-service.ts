@@ -7,6 +7,8 @@ import { SkillLoader } from "../context/skill.js";
 import { globalSessionManager, Session } from "../engine/session.js";
 import { loadPicoConfig, type PicoConfig } from "../input/pico-config.js";
 import { McpConnectionManager } from "../mcp/manager.js";
+import { resolvePicoPaths } from "../paths/pico-paths.js";
+import { RuntimeEventStore } from "../runtime/runtime-event-store.js";
 import { WorkspaceTrustStore } from "../security/workspace-trust.js";
 import {
   fileHistoryChanges,
@@ -259,10 +261,9 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     });
     try {
       await session.recover();
-      // A metadata-only JSONL has no session records for the CLI projector to identify.
-      // Persist the real zero-usage runtime snapshot so both surfaces discover it immediately.
-      session.updateRuntimeState({ usage: session.getRuntimeStateSnapshot().usage });
-      await session.flushPersistence();
+      await new RuntimeEventStore({
+        databasePath: resolvePicoPaths(canonical).workspace.runtimeDatabase,
+      }).initializeSession({ sessionId, workDir: canonical });
     } finally {
       await session.close();
     }
