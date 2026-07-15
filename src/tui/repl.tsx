@@ -1351,7 +1351,9 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         mcpControl: sharedMcpManager,
         ...(taskHostRuntime ? { taskRuntime: taskHostRuntime } : {}),
         ...(cronService ? { cronService } : {}),
-        ...(cronService ? { cronDaemonBridge } : {}),
+        // Provider deletion also uses the daemon as the single config/vault coordinator,
+        // even when the local Cron ledger itself could not be opened.
+        cronDaemonBridge,
         credentialVault,
         effectiveConfig: bundleModelRuntime.config,
         providerCredentialStatuses: bundleModelRuntime.credentials,
