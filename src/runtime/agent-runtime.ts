@@ -286,6 +286,7 @@ export async function executeAgentRuntime(
   options: RunAgentCliOptions,
   dependencies: RunAgentCliDependencies = {},
 ): Promise<RunAgentCliResult> {
+  // 阶段 1：解析宿主请求与静态配置。
   dependencies.signal?.throwIfAborted();
   const runtimeEnv: RunAgentEnv = dependencies.picoHome
     ? { ...(dependencies.env ?? process.env), PICO_HOME: dependencies.picoHome }
@@ -317,75 +318,15 @@ export async function executeAgentRuntime(
       ...(options.forkSession ? { forkSession: options.forkSession } : {}),
     }));
   const defaultConfigModel = options.model ?? runtimeEnv.LLM_MODEL ?? defaultModel(kind);
-  const existingSession = globalSessionManager.get(sessionSelection.sessionId, workDir, {
-    ...(dependencies.picoHome ? { picoHome: dependencies.picoHome } : {}),
+
+  // 阶段 2：获取持久化 Session，并推导会话级有效配置。
+  const { session, runtimeEventStore } = await acquireRuntimeSession({
+    sessionSelection,
+    workDir,
+    picoHome: dependencies.picoHome,
+    resumeExistingSession,
+    planMode: options.planMode === true,
   });
-  const runtimeEventStore = new RuntimeEventStore({
-    databasePath: resolvePicoPaths(workDir, { picoHome: dependencies.picoHome }).workspace
-      .runtimeDatabase,
-  });
-  let targetManifest = await runtimeEventStore.readSessionManifest(sessionSelection.sessionId);
-  if (sessionSelection.mode === "fork" && sessionSelection.sourceSessionId) {
-    const sourceManifest = await runtimeEventStore.readSessionManifest(
-      sessionSelection.sourceSessionId,
-    );
-    if (!sourceManifest) {
-      throw new Error(
-        `无法 fork session ${sessionSelection.sourceSessionId}: runtime.sqlite 中不存在`,
-      );
-    }
-    if (!targetManifest) {
-      const sourceSession = await globalSessionManager.getOrCreate(
-        sessionSelection.sourceSessionId,
-        workDir,
-        {
-          persistence: true,
-          ...(dependencies.picoHome ? { picoHome: dependencies.picoHome } : {}),
-        },
-      );
-      await RuntimeRun.repairSessionProjection(sourceSession, {
-        workDir,
-        store: runtimeEventStore,
-      });
-      await new SessionForkService({
-        workDir,
-        ...(dependencies.picoHome ? { picoHome: dependencies.picoHome } : {}),
-      }).fork({
-        sourceSessionId: sessionSelection.sourceSessionId,
-        targetSessionId: sessionSelection.sessionId,
-        targetMode: options.planMode === true ? "plan" : DEFAULT_INTERACTION_MODE,
-      });
-      targetManifest = await runtimeEventStore.readSessionManifest(sessionSelection.sessionId);
-    }
-    const forkEvent = (await runtimeEventStore.readSession(sessionSelection.sessionId)).findLast(
-      (event) => event.kind === "session.forked",
-    );
-    if (!targetManifest || !forkEvent) {
-      throw new Error(`fork target ${sessionSelection.sessionId} 缺少完整的 RuntimeEvent 历史`);
-    }
-    if (forkEvent.data.parentSessionId !== sessionSelection.sourceSessionId) {
-      throw new Error(
-        `fork target ${sessionSelection.sessionId} 记录的 parent ${forkEvent.data.parentSessionId} 与当前请求不一致`,
-      );
-    }
-  }
-  const session = resumeExistingSession
-    ? globalSessionManager.get(sessionSelection.sessionId, workDir, {
-        ...(dependencies.picoHome ? { picoHome: dependencies.picoHome } : {}),
-      })
-    : (existingSession ??
-      (await globalSessionManager.getOrCreate(sessionSelection.sessionId, workDir, {
-        persistence: true,
-        ...(dependencies.picoHome ? { picoHome: dependencies.picoHome } : {}),
-      })));
-  if (!session) {
-    throw new Error(`Cannot resume missing session: ${sessionSelection.sessionId}`);
-  }
-  if (!session.runtimeEventStore) {
-    throw new Error(`AgentRuntime requires a durable Session: ${sessionSelection.sessionId}`);
-  }
-  await runtimeEventStore.initializeSession({ sessionId: session.id, workDir });
-  await RuntimeRun.repairSessionProjection(session, { workDir, store: runtimeEventStore });
   if (resumeExistingSession && dependencies.runtimeState === undefined) {
     throw new Error("resumeExistingSession requires an existing runtimeState.");
   }
@@ -471,6 +412,7 @@ export async function executeAgentRuntime(
       ...(dependencies.picoHome ? { picoHome: dependencies.picoHome } : {}),
     });
 
+  // 阶段 3：装配 Provider、工具、Hook 与 AgentEngine 能力图。
   try {
     const runtimeState =
       dependencies.runtimeState ??
@@ -989,6 +931,7 @@ export async function executeAgentRuntime(
       dependencies.toolStatusSink?.(toolStatusFromRegistry(registry));
     }
 
+    // 阶段 4：在当前 Session 内串行执行一次 RuntimeRun。
     const result = await session.serialize(async () => {
       await RuntimeRun.reconcileIncompleteRuns({
         sessionId: session.id,
@@ -1107,6 +1050,7 @@ export async function executeAgentRuntime(
     });
     throw error;
   } finally {
+    // 阶段 5：只释放本次调用持有的资源。
     await bestEffortRuntimeCleanup("Session 组件 Hook", () =>
       cleanupRuntimeState?.clearComponentHooks(),
     );
@@ -1131,6 +1075,90 @@ export async function executeAgentRuntime(
     }
     await bestEffortRuntimeCleanup("Runtime usage ledger", () => ownedUsageStore?.close());
   }
+}
+
+async function acquireRuntimeSession({
+  sessionSelection,
+  workDir,
+  picoHome,
+  resumeExistingSession,
+  planMode,
+}: {
+  sessionSelection: CliSessionSelection;
+  workDir: string;
+  picoHome: string | undefined;
+  resumeExistingSession: boolean;
+  planMode: boolean;
+}): Promise<{ session: Session; runtimeEventStore: RuntimeEventStore }> {
+  const existingSession = globalSessionManager.get(sessionSelection.sessionId, workDir, {
+    ...(picoHome ? { picoHome } : {}),
+  });
+  const runtimeEventStore = new RuntimeEventStore({
+    databasePath: resolvePicoPaths(workDir, { picoHome }).workspace.runtimeDatabase,
+  });
+  let targetManifest = await runtimeEventStore.readSessionManifest(sessionSelection.sessionId);
+  if (sessionSelection.mode === "fork" && sessionSelection.sourceSessionId) {
+    const sourceManifest = await runtimeEventStore.readSessionManifest(
+      sessionSelection.sourceSessionId,
+    );
+    if (!sourceManifest) {
+      throw new Error(
+        `无法 fork session ${sessionSelection.sourceSessionId}: runtime.sqlite 中不存在`,
+      );
+    }
+    if (!targetManifest) {
+      const sourceSession = await globalSessionManager.getOrCreate(
+        sessionSelection.sourceSessionId,
+        workDir,
+        {
+          persistence: true,
+          ...(picoHome ? { picoHome } : {}),
+        },
+      );
+      await RuntimeRun.repairSessionProjection(sourceSession, {
+        workDir,
+        store: runtimeEventStore,
+      });
+      await new SessionForkService({
+        workDir,
+        ...(picoHome ? { picoHome } : {}),
+      }).fork({
+        sourceSessionId: sessionSelection.sourceSessionId,
+        targetSessionId: sessionSelection.sessionId,
+        targetMode: planMode ? "plan" : DEFAULT_INTERACTION_MODE,
+      });
+      targetManifest = await runtimeEventStore.readSessionManifest(sessionSelection.sessionId);
+    }
+    const forkEvent = (await runtimeEventStore.readSession(sessionSelection.sessionId)).findLast(
+      (event) => event.kind === "session.forked",
+    );
+    if (!targetManifest || !forkEvent) {
+      throw new Error(`fork target ${sessionSelection.sessionId} 缺少完整的 RuntimeEvent 历史`);
+    }
+    if (forkEvent.data.parentSessionId !== sessionSelection.sourceSessionId) {
+      throw new Error(
+        `fork target ${sessionSelection.sessionId} 记录的 parent ${forkEvent.data.parentSessionId} 与当前请求不一致`,
+      );
+    }
+  }
+  const session = resumeExistingSession
+    ? globalSessionManager.get(sessionSelection.sessionId, workDir, {
+        ...(picoHome ? { picoHome } : {}),
+      })
+    : (existingSession ??
+      (await globalSessionManager.getOrCreate(sessionSelection.sessionId, workDir, {
+        persistence: true,
+        ...(picoHome ? { picoHome } : {}),
+      })));
+  if (!session) {
+    throw new Error(`Cannot resume missing session: ${sessionSelection.sessionId}`);
+  }
+  if (!session.runtimeEventStore) {
+    throw new Error(`AgentRuntime requires a durable Session: ${sessionSelection.sessionId}`);
+  }
+  await runtimeEventStore.initializeSession({ sessionId: session.id, workDir });
+  await RuntimeRun.repairSessionProjection(session, { workDir, store: runtimeEventStore });
+  return { session, runtimeEventStore };
 }
 
 async function bestEffortRuntimeCleanup(
