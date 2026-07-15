@@ -1,4 +1,5 @@
 import { app, BrowserWindow, ipcMain } from "electron";
+import { parseDesktopRuntimeResult } from "@pico/protocol";
 import { createPlatformServices } from "../platform/index.js";
 import { registerDesktopIpcHandlers } from "./ipc.js";
 import { DesktopLifecycleController } from "./lifecycle.js";
@@ -51,6 +52,7 @@ if (!app.requestSingleInstanceLock()) {
       if (process.platform === "win32") app.setAppUserModelId("com.squirrel.pico.Pico");
       installApplicationMenu(() => mainWindow);
       await daemon.start();
+      parseDesktopRuntimeResult("runtime.ping", await runtime.request("runtime.ping", {}));
       const platform = createPlatformServices();
       disposeIpc = registerDesktopIpcHandlers({
         ipcMain,

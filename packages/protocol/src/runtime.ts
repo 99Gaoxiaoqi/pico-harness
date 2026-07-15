@@ -1,5 +1,8 @@
 export const LOCAL_RUNTIME_PROTOCOL_VERSION = 1;
 export const LOCAL_RUNTIME_AUTH_VERSION = 1;
+/** Increment when the Desktop-required result schema changes incompatibly. */
+export const DESKTOP_RUNTIME_SCHEMA_REVISION = 1;
+export const DESKTOP_RUNTIME_SCHEMA_CAPABILITY = "desktop-runtime-schema-v1";
 export const MAX_RUNTIME_FRAME_BYTES = 1024 * 1024;
 
 export type JsonScalar = boolean | null | number | string;
@@ -320,6 +323,7 @@ export type RuntimeMethodMap = {
     readonly result: {
       readonly pong: true;
       readonly protocolVersion: typeof LOCAL_RUNTIME_PROTOCOL_VERSION;
+      readonly desktopSchemaRevision: typeof DESKTOP_RUNTIME_SCHEMA_REVISION;
       readonly capabilities: readonly string[];
       /** Canonical state root used by this daemon. Omitted by legacy runtimes. */
       readonly picoHome?: string;
@@ -1717,6 +1721,288 @@ export function parseStrictRuntimeParams<Method extends RuntimeMethod>(
   return params;
 }
 
+type DesktopRuntimeBoundaryMethod = DesktopRuntimeMethod | "events.subscribe";
+type RuntimeResultRule = (value: unknown, path: string) => void;
+type RuntimeResultShape = Readonly<Record<string, RuntimeResultRule>>;
+
+const resultString: RuntimeResultRule = (value, path) => {
+  if (typeof value !== "string") throw invalidResult(`${path} 必须是字符串`);
+};
+const resultBoolean: RuntimeResultRule = (value, path) => {
+  if (typeof value !== "boolean") throw invalidResult(`${path} 必须是布尔值`);
+};
+const resultFiniteNumber: RuntimeResultRule = (value, path) => {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw invalidResult(`${path} 必须是有限数字`);
+  }
+};
+const resultJsonObject: RuntimeResultRule = (value, path) => {
+  if (!isJsonObject(value)) throw invalidResult(`${path} 必须是 JSON 对象`);
+};
+const resultStringArray = resultArray(resultString);
+
+function resultOneOf<const Values extends readonly (boolean | number | string)[]>(
+  values: Values,
+): RuntimeResultRule {
+  const allowed = new Set<boolean | number | string>(values);
+  return (value, path) => {
+    if (
+      (typeof value !== "boolean" && typeof value !== "number" && typeof value !== "string") ||
+      !allowed.has(value)
+    ) {
+      throw invalidResult(`${path} 必须是 ${values.join(" | ")} 之一`);
+    }
+  };
+}
+
+function resultArray(itemRule: RuntimeResultRule): RuntimeResultRule {
+  return (value, path) => {
+    if (!Array.isArray(value)) throw invalidResult(`${path} 必须是数组`);
+    value.forEach((item, index) => itemRule(item, `${path}[${index}]`));
+  };
+}
+
+function resultShape(
+  required: RuntimeResultShape,
+  optional: RuntimeResultShape = {},
+): RuntimeResultRule {
+  return (value, path) => {
+    if (!isJsonObject(value)) throw invalidResult(`${path} 必须是 JSON 对象`);
+    for (const [key, rule] of Object.entries(required)) {
+      if (!Object.hasOwn(value, key)) throw invalidResult(`${path}.${key} 为必填字段`);
+      rule(value[key], `${path}.${key}`);
+    }
+    for (const [key, rule] of Object.entries(optional)) {
+      if (Object.hasOwn(value, key)) rule(value[key], `${path}.${key}`);
+    }
+  };
+}
+
+const runtimeSessionResult = resultShape({
+  sessionId: resultString,
+  workspacePath: resultString,
+  title: resultString,
+  status: resultOneOf(["active", "archived"]),
+  createdAt: resultFiniteNumber,
+  updatedAt: resultFiniteNumber,
+});
+
+const runtimeRunStatusResult = resultOneOf([
+  "queued",
+  "running",
+  "pause_requested",
+  "paused",
+  "cancelling",
+  "cancelled",
+  "failed",
+  "succeeded",
+]);
+
+const runtimeRunResult = resultShape(
+  {
+    runId: resultString,
+    workspacePath: resultString,
+    description: resultString,
+    status: runtimeRunStatusResult,
+    startedAt: resultFiniteNumber,
+    updatedAt: resultFiniteNumber,
+    version: resultFiniteNumber,
+  },
+  { sessionId: resultString, finishedAt: resultFiniteNumber, error: resultString },
+);
+
+const workspaceStatusResultRule = resultShape({
+  workspacePath: resultString,
+  registered: resultBoolean,
+  schedulerStatus: resultOneOf(["unknown"]),
+  mode: resultOneOf(["folder", "git"]),
+  capabilities: resultShape({
+    foregroundRuns: resultBoolean,
+    fileHistory: resultBoolean,
+    isolatedWorktrees: resultBoolean,
+    branchMerge: resultBoolean,
+  }),
+});
+
+const runtimeConversationItemResult: RuntimeResultRule = (value, path) => {
+  if (!isJsonObject(value)) throw invalidResult(`${path} 必须是对象`);
+  const kind = value["kind"];
+  resultShape(
+    {
+      id: resultString,
+      kind: resultOneOf([
+        "userMessage",
+        "assistantMessage",
+        "systemNotice",
+        "error",
+        "skill",
+        "plan",
+        "tool",
+        "runBoundary",
+        "approval",
+        "prompt",
+        "changes",
+        "subagent",
+        "goal",
+      ]),
+    },
+    {
+      at: resultFiniteNumber,
+      truncated: resultOneOf([true]),
+      originalBytes: resultFiniteNumber,
+    },
+  )(value, path);
+  if (
+    kind === "userMessage" ||
+    kind === "assistantMessage" ||
+    kind === "systemNotice" ||
+    kind === "error"
+  ) {
+    resultShape({ content: resultString })(value, path);
+    return;
+  }
+  if (kind === "skill") {
+    resultShape({
+      name: resultString,
+      args: resultString,
+      trigger: resultOneOf(["user-slash", "model-tool"]),
+    })(value, path);
+    return;
+  }
+  if (
+    kind === "plan" ||
+    ["approval", "prompt", "changes", "subagent", "goal"].includes(String(kind))
+  ) {
+    resultShape({ title: resultString }, { detail: resultString, state: resultString })(
+      value,
+      path,
+    );
+    return;
+  }
+  if (kind === "tool") {
+    resultShape(
+      {
+        name: resultString,
+        args: resultString,
+        status: resultOneOf(["running", "success", "error"]),
+      },
+      { summary: resultString },
+    )(value, path);
+    return;
+  }
+  if (kind === "runBoundary") {
+    resultShape(
+      { status: runtimeRunStatusResult, startedAt: resultFiniteNumber },
+      { runId: resultString, finishedAt: resultFiniteNumber, error: resultString },
+    )(value, path);
+    return;
+  }
+};
+
+const runtimeQueuedInputResult = resultShape({
+  queueId: resultString,
+  sessionId: resultString,
+  input: resultJsonObject,
+  createdAt: resultFiniteNumber,
+});
+
+const runtimeChangeResult = resultShape({
+  path: resultString,
+  status: resultOneOf(["added", "modified", "deleted", "renamed"]),
+  additions: resultFiniteNumber,
+  deletions: resultFiniteNumber,
+});
+
+const runtimeEventResult: RuntimeResultRule = (value, path) => {
+  if (!isJsonObject(value) || !isRuntimeEvent(value)) {
+    throw invalidResult(`${path} 不是有效的 Runtime event`);
+  }
+};
+
+const runtimePingResult: RuntimeResultRule = (value, path) => {
+  resultShape(
+    {
+      pong: resultOneOf([true]),
+      protocolVersion: resultOneOf([LOCAL_RUNTIME_PROTOCOL_VERSION]),
+      capabilities: resultStringArray,
+    },
+    { desktopSchemaRevision: resultFiniteNumber, picoHome: resultString },
+  )(value, path);
+  if (!isJsonObject(value)) return;
+  const capabilities = value["capabilities"];
+  if (
+    value["desktopSchemaRevision"] !== DESKTOP_RUNTIME_SCHEMA_REVISION ||
+    !Array.isArray(capabilities) ||
+    !capabilities.includes(DESKTOP_RUNTIME_SCHEMA_CAPABILITY)
+  ) {
+    throw protocolError(
+      RUNTIME_ERROR_CODES.VERSION_MISMATCH,
+      `Desktop 需要 Runtime schema v${DESKTOP_RUNTIME_SCHEMA_REVISION}，请完全退出并重新启动 Pico`,
+    );
+  }
+};
+
+const DESKTOP_CRITICAL_RESULT_VALIDATORS: Partial<
+  Record<DesktopRuntimeBoundaryMethod, RuntimeResultRule>
+> = {
+  "runtime.ping": runtimePingResult,
+  "workspace.list": resultShape({ workspaces: resultArray(workspaceStatusResultRule) }),
+  "workspace.status": workspaceStatusResultRule,
+  "workspace.register": resultShape({
+    workspacePath: resultString,
+    registered: resultOneOf([true]),
+  }),
+  "workspace.trustStatus": resultShape({ workspacePath: resultString, trusted: resultBoolean }),
+  "session.list": resultShape({ sessions: resultArray(runtimeSessionResult) }),
+  "session.fork": resultShape({ session: runtimeSessionResult, sourceSessionId: resultString }),
+  "session.send": resultShape(
+    {
+      session: runtimeSessionResult,
+      disposition: resultOneOf(["started", "steered", "queued", "replaced"]),
+    },
+    { run: runtimeRunResult },
+  ),
+  "session.transcript": resultShape(
+    {
+      session: runtimeSessionResult,
+      items: resultArray(runtimeConversationItemResult),
+      queuedInputs: resultArray(runtimeQueuedInputResult),
+      revision: resultString,
+    },
+    { activeRun: runtimeRunResult, nextBefore: resultString },
+  ),
+  "runs.list": resultShape({ runs: resultArray(runtimeRunResult) }),
+  "changes.list": resultShape({
+    changes: resultArray(runtimeChangeResult),
+    fingerprint: resultString,
+  }),
+  "changes.diff": resultShape({
+    path: resultString,
+    patch: resultString,
+    truncated: resultBoolean,
+    fingerprint: resultString,
+  }),
+  "events.replay": resultShape({ events: resultArray(runtimeEventResult) }),
+  "events.subscribe": resultShape({
+    subscribed: resultOneOf([true]),
+    events: resultArray(runtimeEventResult),
+  }),
+};
+
+/**
+ * Validates the daemon results required for Desktop bootstrap and its conversation/run path.
+ * Other allowlisted methods retain their existing feature-local parsing until they become a
+ * startup or state-authority dependency; this intentionally is not a generated whole protocol.
+ */
+export function parseDesktopRuntimeResult<Method extends DesktopRuntimeBoundaryMethod>(
+  method: Method,
+  value: unknown,
+): RuntimeResult<Method> {
+  if (!isJsonValue(value)) throw invalidResult(`${method} result 必须是 JSON 值`);
+  DESKTOP_CRITICAL_RESULT_VALIDATORS[method]?.(value, `${method} result`);
+  return value as RuntimeResult<Method>;
+}
+
 export function isRuntimeErrorCode(value: unknown): value is RuntimeErrorCode {
   return (
     typeof value === "string" &&
@@ -1743,4 +2029,8 @@ function protocolError(code: RuntimeErrorCode, message: string): RuntimeProtocol
 
 function invalidParams(message: string): RuntimeProtocolError {
   return protocolError(RUNTIME_ERROR_CODES.INVALID_PARAMS, message);
+}
+
+function invalidResult(message: string): RuntimeProtocolError {
+  return protocolError(RUNTIME_ERROR_CODES.INVALID_REQUEST, `Runtime 响应不兼容: ${message}`);
 }

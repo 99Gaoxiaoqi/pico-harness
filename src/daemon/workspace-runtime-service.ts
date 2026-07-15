@@ -7,6 +7,8 @@ import {
 } from "../runtime/workspace-runtime.js";
 import {
   createRuntimeEvent,
+  DESKTOP_RUNTIME_SCHEMA_CAPABILITY,
+  DESKTOP_RUNTIME_SCHEMA_REVISION,
   isJsonObject,
   LOCAL_RUNTIME_PROTOCOL_VERSION,
   RUNTIME_ERROR_CODES,
@@ -127,8 +129,10 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
       return {
         pong: true,
         protocolVersion: LOCAL_RUNTIME_PROTOCOL_VERSION,
+        desktopSchemaRevision: DESKTOP_RUNTIME_SCHEMA_REVISION,
         picoHome: this.picoHome,
         capabilities: [
+          DESKTOP_RUNTIME_SCHEMA_CAPABILITY,
           "shared-config-v1",
           "session-conversation-v1",
           "session-management-v1",

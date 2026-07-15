@@ -6,7 +6,12 @@ import {
   type IpcMainInvokeEvent,
   type WebContents,
 } from "electron";
-import { parseStrictRuntimeParams, RuntimeProtocolError, type RuntimeMethod } from "@pico/protocol";
+import {
+  parseDesktopRuntimeResult,
+  parseStrictRuntimeParams,
+  RuntimeProtocolError,
+  type RuntimeMethod,
+} from "@pico/protocol";
 import type { PlatformServices } from "../platform/index.js";
 import {
   DESKTOP_IPC_CHANNELS,
@@ -47,7 +52,10 @@ export function registerDesktopIpcHandlers(options: {
     try {
       const envelope = readInvocation(value);
       const params = parseStrictRuntimeParams(envelope.method, envelope.params);
-      const result = await runtime.request(envelope.method, params);
+      const result = parseDesktopRuntimeResult(
+        envelope.method,
+        await runtime.request(envelope.method, params),
+      );
       return success(result);
     } catch (error) {
       return failure(error);
@@ -75,7 +83,7 @@ export function registerDesktopIpcHandlers(options: {
       event.sender.once("destroyed", () =>
         disposeOwnedSubscriptions(subscriptions, event.sender.id),
       );
-      return success(subscription.replay);
+      return success(parseDesktopRuntimeResult("events.subscribe", subscription.replay));
     } catch (error) {
       return failure(error);
     }
