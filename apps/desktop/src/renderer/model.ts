@@ -65,6 +65,44 @@ export interface ModelRouteView {
   readonly label: string;
 }
 
+export type ProviderOrigin = "user" | "project-legacy" | "environment";
+export type ProviderProtocol = "openai" | "claude" | "gemini";
+export type ProviderCredentialStatus = "ready" | "missing" | "environment" | "unsupported";
+export type ProviderCredentialSource = "keychain" | "environment" | "none";
+
+export interface ProviderView {
+  readonly id: string;
+  readonly protocol: ProviderProtocol;
+  readonly baseURL: string;
+  readonly apiKeyEnv: string;
+  readonly models: readonly string[];
+  readonly discoverModels: boolean;
+  readonly modelCapabilities?: JsonRecord | undefined;
+  readonly origin: ProviderOrigin;
+  readonly fingerprint: string;
+  readonly credentialStatus: ProviderCredentialStatus;
+  readonly credentialSource: ProviderCredentialSource;
+}
+
+export type ProviderDraft = Pick<
+  ProviderView,
+  "id" | "protocol" | "baseURL" | "apiKeyEnv" | "models" | "discoverModels" | "modelCapabilities"
+>;
+
+export interface UserDefaultsView {
+  readonly modelRouteId?: string | undefined;
+  readonly mode?: "default" | "plan" | "auto" | "yolo" | undefined;
+  readonly thinkingEffort?: string | undefined;
+}
+
+export interface ProviderConfigView {
+  readonly supported: boolean;
+  readonly revision: string;
+  readonly defaultModelRouteId?: string | undefined;
+  readonly userDefaults: UserDefaultsView;
+  readonly providers: readonly ProviderView[];
+}
+
 export interface CatalogAgentView {
   readonly name: string;
   readonly description: string;
@@ -163,6 +201,7 @@ export interface AppData {
   readonly skills: readonly CapabilityView[];
   readonly mcpServers: readonly CapabilityView[];
   readonly providers: readonly CapabilityView[];
+  readonly providerConfig: ProviderConfigView;
   readonly modelRoutes: readonly ModelRouteView[];
   readonly catalogAgents: readonly CatalogAgentView[];
   readonly catalogSkills: readonly CatalogSkillView[];
@@ -186,6 +225,12 @@ export const emptyData: AppData = {
   skills: [],
   mcpServers: [],
   providers: [],
+  providerConfig: {
+    supported: false,
+    revision: "",
+    userDefaults: {},
+    providers: [],
+  },
   modelRoutes: [],
   catalogAgents: [],
   catalogSkills: [],
