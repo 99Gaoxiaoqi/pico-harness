@@ -42,6 +42,7 @@ export class OwnerLease {
   private readonly staleAfterMs: number;
   private readonly now: () => number;
   private readonly ownerPath: string;
+  private readonly lostController = new AbortController();
   private heartbeatTimer?: NodeJS.Timeout;
   private released = false;
 
@@ -72,11 +73,22 @@ export class OwnerLease {
     return this.leaseId;
   }
 
+  /** heartbeat 或显式校验无法继续证明所有权时触发，供集成层中断长任务。 */
+  get lostSignal(): AbortSignal {
+    return this.lostController.signal;
+  }
+
   async assertOwnership(): Promise<void> {
     if (this.released) throw new LeaseConflictError("Lease has already been released");
-    const current = await readLeaseRecord(this.ownerPath);
-    if (current?.leaseId !== this.leaseId) {
-      throw new LeaseConflictError("Lease ownership changed", current);
+    if (this.lostSignal.aborted) throw leaseLossReason(this.lostSignal);
+    try {
+      const current = await readLeaseRecord(this.ownerPath);
+      if (current?.leaseId !== this.leaseId) {
+        throw new LeaseConflictError("Lease ownership changed", current);
+      }
+    } catch (error) {
+      this.markLost(error);
+      throw error;
     }
   }
 
@@ -143,7 +155,8 @@ export class OwnerLease {
 
   private startHeartbeat(): void {
     this.heartbeatTimer = setInterval(() => {
-      void this.heartbeat().catch(() => {
+      void this.heartbeat().catch((error: unknown) => {
+        this.markLost(error);
         if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
         this.heartbeatTimer = undefined;
       });
@@ -154,6 +167,13 @@ export class OwnerLease {
   private async heartbeat(): Promise<void> {
     await this.assertOwnership();
     await this.writeRecord();
+  }
+
+  private markLost(reason: unknown): void {
+    if (this.released || this.lostSignal.aborted) return;
+    this.lostController.abort(
+      reason instanceof Error ? reason : new LeaseConflictError(String(reason)),
+    );
   }
 
   private async writeRecord(path = this.ownerPath): Promise<void> {
@@ -174,6 +194,12 @@ export class OwnerLease {
     };
     await writeJsonAtomic(path, record);
   }
+}
+
+function leaseLossReason(signal: AbortSignal): Error {
+  return signal.reason instanceof Error
+    ? signal.reason
+    : new LeaseConflictError("Lease ownership was lost");
 }
 
 type LeaseInspection =
