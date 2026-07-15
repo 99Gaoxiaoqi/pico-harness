@@ -1,5 +1,12 @@
 import type { IpcRenderer } from "electron";
-import type { RuntimeEvent, RuntimeParams, RuntimeResult } from "@pico/protocol";
+import {
+  parseStrictRuntimeParams,
+  RUNTIME_ERROR_CODES,
+  RuntimeProtocolError,
+  type RuntimeEvent,
+  type RuntimeParams,
+  type RuntimeResult,
+} from "@pico/protocol";
 import {
   DESKTOP_IPC_CHANNELS,
   DESKTOP_RUNTIME_METHODS,
@@ -16,11 +23,17 @@ interface RuntimeInvocationEnvelope {
 export function createDesktopBridge(ipcRenderer: IpcRenderer): DesktopBridge {
   const runtimeEntries = DESKTOP_RUNTIME_METHODS.map((method) => [
     method,
-    (params: unknown) =>
-      ipcRenderer.invoke(DESKTOP_IPC_CHANNELS.runtimeInvoke, {
-        method,
-        params,
-      } satisfies RuntimeInvocationEnvelope),
+    async (params: unknown) => {
+      try {
+        const checkedParams = parseStrictRuntimeParams(method, params);
+        return await ipcRenderer.invoke(DESKTOP_IPC_CHANNELS.runtimeInvoke, {
+          method,
+          params: checkedParams,
+        } satisfies RuntimeInvocationEnvelope);
+      } catch (error) {
+        return validationFailure(error);
+      }
+    },
   ]);
   // The keys originate exclusively from the immutable allowlist above; callers never receive a
   // generic invoke primitive or an ipcRenderer reference.
@@ -33,6 +46,16 @@ export function createDesktopBridge(ipcRenderer: IpcRenderer): DesktopBridge {
         params: RuntimeParams<"events.subscribe">,
         listener: (event: RuntimeEvent) => void,
       ) {
+        let checkedParams: RuntimeParams<"events.subscribe">;
+        try {
+          checkedParams = parseStrictRuntimeParams("events.subscribe", params);
+          if (typeof listener !== "function") throw invalidBridgeParams("事件监听器必须是函数");
+        } catch (error) {
+          return Object.freeze({
+            ready: Promise.resolve(validationFailure(error)),
+            dispose() {},
+          });
+        }
         const subscriptionId = crypto.randomUUID();
         const pendingEvents: RuntimeEvent[] = [];
         const seenEventIds = new Set<string>();
@@ -52,7 +75,7 @@ export function createDesktopBridge(ipcRenderer: IpcRenderer): DesktopBridge {
         const ready = (
           ipcRenderer.invoke(DESKTOP_IPC_CHANNELS.runtimeSubscribe, {
             subscriptionId,
-            params,
+            params: checkedParams,
           }) as Promise<DesktopResult<RuntimeResult<"events.subscribe">>>
         ).then((result) => {
           if (result.ok) {
@@ -73,16 +96,37 @@ export function createDesktopBridge(ipcRenderer: IpcRenderer): DesktopBridge {
     }),
     platform: Object.freeze({
       chooseWorkspace: () => ipcRenderer.invoke(DESKTOP_IPC_CHANNELS.chooseWorkspace),
-      showNotification: (input: { readonly title: string; readonly body: string }) =>
-        ipcRenderer.invoke(DESKTOP_IPC_CHANNELS.showNotification, input),
-      openDirectory: (path: string) => ipcRenderer.invoke(DESKTOP_IPC_CHANNELS.openDirectory, path),
+      showNotification: (input: { readonly title: string; readonly body: string }) => {
+        if (!hasExactStringFields(input, ["title", "body"])) {
+          return Promise.resolve(validationFailure(invalidBridgeParams("系统通知参数无效")));
+        }
+        return ipcRenderer.invoke(DESKTOP_IPC_CHANNELS.showNotification, input);
+      },
+      openDirectory: (path: string) => {
+        if (typeof path !== "string") {
+          return Promise.resolve(validationFailure(invalidBridgeParams("目录参数必须是字符串")));
+        }
+        return ipcRenderer.invoke(DESKTOP_IPC_CHANNELS.openDirectory, path);
+      },
       getLaunchAtLogin: () => ipcRenderer.invoke(DESKTOP_IPC_CHANNELS.getLaunchAtLogin),
-      setLaunchAtLogin: (enabled: boolean) =>
-        ipcRenderer.invoke(DESKTOP_IPC_CHANNELS.setLaunchAtLogin, enabled),
+      setLaunchAtLogin: (enabled: boolean) => {
+        if (typeof enabled !== "boolean") {
+          return Promise.resolve(
+            validationFailure(invalidBridgeParams("开机启动参数必须是布尔值")),
+          );
+        }
+        return ipcRenderer.invoke(DESKTOP_IPC_CHANNELS.setLaunchAtLogin, enabled);
+      },
     }),
     lifecycle: Object.freeze({
-      setBackgroundMode: (enabled: boolean) =>
-        ipcRenderer.invoke(DESKTOP_IPC_CHANNELS.setBackgroundMode, enabled),
+      setBackgroundMode: (enabled: boolean) => {
+        if (typeof enabled !== "boolean") {
+          return Promise.resolve(
+            validationFailure(invalidBridgeParams("后台模式参数必须是布尔值")),
+          );
+        }
+        return ipcRenderer.invoke(DESKTOP_IPC_CHANNELS.setBackgroundMode, enabled);
+      },
       quit: () => ipcRenderer.invoke(DESKTOP_IPC_CHANNELS.quit),
     }),
   });
@@ -100,5 +144,30 @@ function isRuntimeEventEnvelope(value: unknown): value is RuntimeEventEnvelope {
     typeof candidate.subscriptionId === "string" &&
     typeof candidate.event === "object" &&
     candidate.event !== null
+  );
+}
+
+function validationFailure(error: unknown): DesktopResult<never> {
+  return {
+    ok: false,
+    error: {
+      code: error instanceof RuntimeProtocolError ? error.code : RUNTIME_ERROR_CODES.INVALID_PARAMS,
+      message: error instanceof Error ? error.message : "Desktop bridge 参数无效",
+      retryable: false,
+    },
+  };
+}
+
+function invalidBridgeParams(message: string): RuntimeProtocolError {
+  return new RuntimeProtocolError(RUNTIME_ERROR_CODES.INVALID_PARAMS, message);
+}
+
+function hasExactStringFields(value: unknown, fields: readonly string[]): boolean {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record);
+  return (
+    keys.length === fields.length &&
+    fields.every((field) => Object.hasOwn(record, field) && typeof record[field] === "string")
   );
 }

@@ -7,6 +7,8 @@ import type { JsonObject, RuntimeUserInput } from "./protocol.js";
 
 const DESKTOP_CONVERSATION_STATE_VERSION = 1 as const;
 const MAX_IDEMPOTENCY_RECORDS = 500;
+const MAX_FIRST_SEND_CLAIMS = 500;
+const FIRST_SEND_CLAIM_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
 
 export interface DesktopQueuedInput {
   readonly queueId: string;
@@ -23,10 +25,19 @@ interface DesktopIdempotencyRecord {
   readonly createdAt: number;
 }
 
+export interface DesktopFirstSendClaim {
+  readonly workspacePath: string;
+  readonly key: string;
+  readonly sessionId: string;
+  readonly requestFingerprint: string;
+  readonly createdAt: number;
+}
+
 interface DesktopConversationStateFile {
   readonly version: typeof DESKTOP_CONVERSATION_STATE_VERSION;
   readonly queuedInputs: readonly DesktopQueuedInput[];
   readonly idempotency: readonly DesktopIdempotencyRecord[];
+  readonly firstSendClaims: readonly DesktopFirstSendClaim[];
 }
 
 export interface DesktopConversationStateStoreOptions {
@@ -112,11 +123,65 @@ export class DesktopConversationStateStore {
     )?.result;
   }
 
+  async getFirstSendClaim(
+    workspacePath: string,
+    key: string,
+  ): Promise<DesktopFirstSendClaim | undefined> {
+    const canonical = normalizeWorkspacePath(workspacePath);
+    const normalized = requireNonEmpty(key, "idempotencyKey");
+    const state = await this.read();
+    const retained = retainFirstSendClaims(state.firstSendClaims, this.now());
+    if (retained.length !== state.firstSendClaims.length) {
+      await this.mutate((current) => ({
+        ...current,
+        firstSendClaims: retainFirstSendClaims(current.firstSendClaims, this.now()),
+      }));
+    }
+    return retained.find((claim) => claim.workspacePath === canonical && claim.key === normalized);
+  }
+
+  async claimFirstSend(
+    workspacePath: string,
+    key: string,
+    sessionId: string,
+    requestFingerprint: string,
+  ): Promise<DesktopFirstSendClaim> {
+    const canonical = normalizeWorkspacePath(workspacePath);
+    const normalizedKey = requireNonEmpty(key, "idempotencyKey");
+    const normalizedSessionId = requireNonEmpty(sessionId, "sessionId");
+    const normalizedFingerprint = requireNonEmpty(requestFingerprint, "requestFingerprint");
+    let claimed: DesktopFirstSendClaim | undefined;
+    await this.mutate((state) => {
+      const now = this.now();
+      const retained = retainFirstSendClaims(state.firstSendClaims, now);
+      const existing = retained.find(
+        (claim) => claim.workspacePath === canonical && claim.key === normalizedKey,
+      );
+      claimed = existing ?? {
+        workspacePath: canonical,
+        key: normalizedKey,
+        sessionId: normalizedSessionId,
+        requestFingerprint: normalizedFingerprint,
+        createdAt: now,
+      };
+      if (existing) return { ...state, firstSendClaims: retained };
+      return {
+        ...state,
+        firstSendClaims: [claimed, ...retained].slice(0, MAX_FIRST_SEND_CLAIMS),
+      };
+    });
+    if (!claimed) throw new Error("Desktop first-send claim did not produce a result");
+    return claimed;
+  }
+
   async rememberIdempotent(workspacePath: string, key: string, result: JsonObject): Promise<void> {
     const canonical = normalizeWorkspacePath(workspacePath);
     const normalized = requireNonEmpty(key, "idempotencyKey");
     await this.mutate((state) => ({
       ...state,
+      firstSendClaims: retainFirstSendClaims(state.firstSendClaims, this.now()).filter(
+        (claim) => claim.workspacePath !== canonical || claim.key !== normalized,
+      ),
       idempotency: [
         ...state.idempotency.filter(
           (record) => record.workspacePath !== canonical || record.key !== normalized,
@@ -151,7 +216,12 @@ export class DesktopConversationStateStore {
 }
 
 function emptyState(): DesktopConversationStateFile {
-  return { version: DESKTOP_CONVERSATION_STATE_VERSION, queuedInputs: [], idempotency: [] };
+  return {
+    version: DESKTOP_CONVERSATION_STATE_VERSION,
+    queuedInputs: [],
+    idempotency: [],
+    firstSendClaims: [],
+  };
 }
 
 function parseState(value: unknown, filePath: string): DesktopConversationStateFile {
@@ -159,7 +229,8 @@ function parseState(value: unknown, filePath: string): DesktopConversationStateF
     !isRecord(value) ||
     value["version"] !== DESKTOP_CONVERSATION_STATE_VERSION ||
     !Array.isArray(value["queuedInputs"]) ||
-    !Array.isArray(value["idempotency"])
+    !Array.isArray(value["idempotency"]) ||
+    (value["firstSendClaims"] !== undefined && !Array.isArray(value["firstSendClaims"]))
   ) {
     throw new Error(`Desktop conversation state format is invalid: ${filePath}`);
   }
@@ -167,6 +238,9 @@ function parseState(value: unknown, filePath: string): DesktopConversationStateF
     version: DESKTOP_CONVERSATION_STATE_VERSION,
     queuedInputs: value["queuedInputs"].map((item) => parseQueued(item, filePath)),
     idempotency: value["idempotency"].map((item) => parseIdempotency(item, filePath)),
+    firstSendClaims: (value["firstSendClaims"] ?? []).map((item) =>
+      parseFirstSendClaim(item, filePath),
+    ),
   };
 }
 
@@ -242,6 +316,43 @@ function parseIdempotency(value: unknown, filePath: string): DesktopIdempotencyR
     result: value["result"] as JsonObject,
     createdAt: value["createdAt"],
   };
+}
+
+function parseFirstSendClaim(value: unknown, filePath: string): DesktopFirstSendClaim {
+  if (
+    !isRecord(value) ||
+    typeof value["workspacePath"] !== "string" ||
+    typeof value["key"] !== "string" ||
+    typeof value["sessionId"] !== "string" ||
+    typeof value["requestFingerprint"] !== "string" ||
+    typeof value["createdAt"] !== "number" ||
+    !Number.isFinite(value["createdAt"])
+  ) {
+    throw new Error(`Desktop first-send claim contains an invalid entry: ${filePath}`);
+  }
+  return {
+    workspacePath: normalizeWorkspacePath(value["workspacePath"]),
+    key: requireNonEmpty(value["key"], "idempotencyKey"),
+    sessionId: requireNonEmpty(value["sessionId"], "sessionId"),
+    requestFingerprint: requireNonEmpty(value["requestFingerprint"], "requestFingerprint"),
+    createdAt: value["createdAt"],
+  };
+}
+
+function retainFirstSendClaims(
+  claims: readonly DesktopFirstSendClaim[],
+  now: number,
+): DesktopFirstSendClaim[] {
+  const cutoff = now - FIRST_SEND_CLAIM_RETENTION_MS;
+  return claims
+    .filter((claim) => claim.createdAt >= cutoff)
+    .toSorted(
+      (left, right) =>
+        right.createdAt - left.createdAt ||
+        left.workspacePath.localeCompare(right.workspacePath) ||
+        left.key.localeCompare(right.key),
+    )
+    .slice(0, MAX_FIRST_SEND_CLAIMS);
 }
 
 function normalizeWorkspacePath(workspacePath: string): string {

@@ -147,6 +147,13 @@ describe("Desktop shared configuration API integration", () => {
         expectedRevision: listed.revision,
       }),
     )) as { revision: string };
+    const persistedUserConfig: unknown = JSON.parse(
+      await readFile(join(fixture.picoHome, "config.json"), "utf8"),
+    );
+    expect(persistedUserConfig).toMatchObject({
+      version: 1,
+      defaults: { modelRouteId: "shared/coder", mode: "auto" },
+    });
 
     await expect(
       fixture.service.handle(
