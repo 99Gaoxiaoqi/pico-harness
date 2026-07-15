@@ -7,7 +7,10 @@ import { SessionManager } from "../../src/engine/session.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 import type { RuntimeEvent } from "../../src/runtime/runtime-event.js";
 import { materializeRuntimeHistory } from "../../src/runtime/runtime-event-read-model.js";
-import { RuntimeEventStore } from "../../src/runtime/runtime-event-store.js";
+import {
+  RuntimeEventStore,
+  type RuntimeEventStoreAppendResult,
+} from "../../src/runtime/runtime-event-store.js";
 import { RuntimeRun } from "../../src/runtime/runtime-run.js";
 import type { Message } from "../../src/schema/message.js";
 
@@ -62,13 +65,35 @@ describe("runtime fork checkpoint projection", () => {
       "tail answer",
     ]);
 
+    const interruptedStore = new FailOnceForkMarkerStore({
+      databasePath: resolvePicoPaths(workDir).workspace.runtimeDatabase,
+    });
     await expect(
-      new SessionForkService({ workDir, sessionManager: sessions, runtimeStore: store }).fork({
+      new SessionForkService({
+        workDir,
+        sessionManager: sessions,
+        runtimeStore: interruptedStore,
+      }).fork({
         sourceSessionId: source.id,
         targetSessionId: "target-checkpoint",
         targetMode: "default",
       }),
-    ).resolves.toMatchObject({ operation: { state: "completed" } });
+    ).rejects.toThrow("injected failure before fork publication marker");
+
+    const partialEvents = await store.readSession("target-checkpoint");
+    expect(
+      partialEvents.filter((event) => event.kind === "context.checkpoint.recorded"),
+    ).toHaveLength(1);
+    expect(partialEvents.filter((event) => event.kind === "session.forked")).toHaveLength(0);
+    expect(partialEvents.filter((event) => event.kind === "run.terminal")).toHaveLength(0);
+
+    await expect(
+      new SessionForkService({
+        workDir,
+        sessionManager: sessions,
+        runtimeStore: store,
+      }).reconcileUnfinished(),
+    ).resolves.toEqual([expect.objectContaining({ state: "completed" })]);
 
     const target = await sessions.getOrCreate("target-checkpoint", workDir, {
       persistence: true,
@@ -76,13 +101,83 @@ describe("runtime fork checkpoint projection", () => {
     const targetEvents = await store.readSession(target.id);
     expect(target.getHistory()).toEqual(sourceTranscript);
     expect(materializeRuntimeHistory(targetEvents)).toEqual(sourceModelHistory);
-    expect(targetEvents.filter((event) => event.kind === "context.checkpoint.recorded")).toHaveLength(
-      1,
+    expect(
+      targetEvents.filter((event) => event.kind === "context.checkpoint.recorded"),
+    ).toHaveLength(1);
+    expect(targetEvents.filter((event) => event.kind === "session.forked")).toHaveLength(1);
+    expect(targetEvents.filter((event) => event.kind === "run.terminal")).toHaveLength(1);
+    await source.close();
+    await target.close();
+  });
+
+  it("resolves a checkpoint that summarizes an earlier checkpoint back to the raw prefix", async () => {
+    const store = new RuntimeEventStore({
+      databasePath: resolvePicoPaths(workDir).workspace.runtimeDatabase,
+    });
+    const source = await sessions.getOrCreate("nested-source", workDir, { persistence: true });
+    await store.initializeSession({ sessionId: source.id, workDir });
+    await store.append(runStarted(source.id, "nested-run", workDir));
+    await store.append(message(source.id, "nested-run", "nested-user", "user", "old user"));
+    await store.append(
+      message(source.id, "nested-run", "nested-assistant", "assistant", "old answer"),
     );
+    await store.append(
+      checkpointEvent(
+        source.id,
+        "nested-run",
+        "nested-checkpoint-1",
+        "nested-assistant",
+        "first summary",
+      ),
+    );
+    await store.append(
+      checkpointEvent(
+        source.id,
+        "nested-run",
+        "nested-checkpoint-2",
+        "nested-checkpoint-1",
+        "summary of the first summary",
+      ),
+    );
+    await store.append(runTerminal(source.id, "nested-run"));
+    await RuntimeRun.repairSessionProjection(source, { workDir, store });
+
+    await expect(
+      new SessionForkService({ workDir, sessionManager: sessions, runtimeStore: store }).fork({
+        sourceSessionId: source.id,
+        targetSessionId: "nested-target",
+        targetMode: "default",
+      }),
+    ).resolves.toMatchObject({ operation: { state: "completed" } });
+
+    const target = await sessions.getOrCreate("nested-target", workDir, { persistence: true });
+    const targetEvents = await store.readSession(target.id);
+    expect(target.getHistory().map(({ content }) => content)).toEqual(["old user", "old answer"]);
+    expect(materializeRuntimeHistory(targetEvents).map(({ content }) => content)).toEqual([
+      "summary of the first summary",
+    ]);
+    expect(
+      targetEvents.find((event) => event.kind === "context.checkpoint.recorded")?.data,
+    ).toMatchObject({
+      coveredEventCount: 2,
+      throughEventId: expect.stringMatching(/:message:1$/u),
+    });
     await source.close();
     await target.close();
   });
 });
+
+class FailOnceForkMarkerStore extends RuntimeEventStore {
+  private failMarker = true;
+
+  override async append(event: RuntimeEvent): Promise<RuntimeEventStoreAppendResult> {
+    if (this.failMarker && event.kind === "session.forked") {
+      this.failMarker = false;
+      throw new Error("injected failure before fork publication marker");
+    }
+    return super.append(event);
+  }
+}
 
 function runStarted(sessionId: string, runId: string, workDir: string): RuntimeEvent {
   return {
@@ -118,6 +213,30 @@ function checkpoint(sessionId: string, runId: string): RuntimeEvent {
       summary: {
         role: "assistant",
         content: "summary of old exchange",
+        providerData: { picoKind: "runtime_checkpoint" },
+      },
+    },
+  };
+}
+
+function checkpointEvent(
+  sessionId: string,
+  runId: string,
+  eventId: string,
+  throughEventId: string,
+  content: string,
+): RuntimeEvent {
+  return {
+    ...eventBase(sessionId, runId, eventId, "internal"),
+    kind: "context.checkpoint.recorded",
+    data: {
+      checkpointId: eventId,
+      coveredEventCount: 1,
+      sourceDigest: `${eventId}-digest`,
+      throughEventId,
+      summary: {
+        role: "assistant",
+        content,
         providerData: { picoKind: "runtime_checkpoint" },
       },
     },
