@@ -724,6 +724,8 @@ describe("runAgentFromCli", () => {
       },
     ]);
     const approval = makeApprovalCapture();
+    const approvalManager = new ApprovalManager(60_000);
+    const cancelApproval = vi.spyOn(approvalManager, "cancelApproval");
     const controller = new AbortController();
     const runPromise = runAgentFromCli(
       {
@@ -735,6 +737,7 @@ describe("runAgentFromCli", () => {
       },
       {
         provider,
+        approvalManager,
         approvalNotifier: approval.notifier,
         signal: controller.signal,
       },
@@ -747,21 +750,67 @@ describe("runAgentFromCli", () => {
     const notice = await waitForApprovalBeforeCompletion(approval.nextNotice, runPromise);
     controller.abort(new DOMException("interrupted", "AbortError"));
     await Promise.resolve();
-    const pendingAfterAbort = globalApprovalManager.pendingCount;
-    const lateModify = globalApprovalManager.resolveApprovalWithModify(
+    const pendingAfterAbort = approvalManager.pendingCount;
+    const lateModify = approvalManager.resolveApprovalWithModify(
       notice.taskId,
       "late modify",
       "# 不应写入",
     );
-    const lateApprove = globalApprovalManager.resolveApproval(notice.taskId, true, "late approve");
+    const lateApprove = approvalManager.resolveApproval(notice.taskId, true, "late approve");
     const outcome = await outcomePromise;
 
     expect(outcome).toMatchObject({ name: "AbortError" });
     expect(pendingAfterAbort).toBe(0);
+    expect(cancelApproval).toHaveBeenCalledWith(
+      notice.taskId,
+      "审批请求已因本轮中止而取消。",
+      expect.objectContaining({ name: "AbortError" }),
+    );
     expect(lateModify).toBe(false);
     expect(lateApprove).toBe(false);
+    expect(globalApprovalManager.pendingCount).toBe(0);
     expect(provider.calls).toHaveLength(1);
     await expect(readFile(join(workDir, "PLAN.md"), "utf8")).resolves.toBe(originalPlan);
+  });
+
+  it("exit_plan_mode 无 UI 时用宿主 ApprovalManager fail-closed", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-cli-plan-exit-headless-"));
+    await writeFile(join(workDir, "PLAN.md"), "# 等待审批的计划", "utf8");
+    const provider = new ScriptedProvider([
+      {
+        role: "assistant",
+        content: "Submit the plan.",
+        toolCalls: [{ id: "call_exit_plan_headless", name: "exit_plan_mode", arguments: "{}" }],
+      },
+      { role: "assistant", content: "Plan remains pending." },
+    ]);
+    const approvalManager = new ApprovalManager(60_000);
+    const resolveApproval = vi.spyOn(approvalManager, "resolveApproval");
+
+    const result = await runAgentFromCli(
+      {
+        prompt: "Submit PLAN.md",
+        dir: workDir,
+        session: "plan_exit_headless_session",
+        provider: "openai",
+        planMode: true,
+      },
+      { provider, approvalManager },
+    );
+
+    expect(result.finalMessage).toBe("Plan remains pending.");
+    expect(resolveApproval).toHaveBeenCalledWith(
+      expect.stringMatching(/^exit_plan_/u),
+      false,
+      "当前 Runtime Host 未提供审批交互，已安全拒绝。",
+    );
+    expect(approvalManager.pendingCount).toBe(0);
+    expect(globalApprovalManager.pendingCount).toBe(0);
+    expect(
+      provider.calls[1]?.messages.some((message) =>
+        message.content.includes("当前 Runtime Host 未提供审批交互"),
+      ),
+    ).toBe(true);
   });
 
   it("exit_plan_mode approval updates shared settings and allows same-turn writes", async () => {
@@ -801,6 +850,7 @@ describe("runAgentFromCli", () => {
       },
     ]);
     const approval = makeApprovalCapture();
+    const approvalManager = new ApprovalManager(60_000);
 
     const runPromise = runAgentFromCli(
       {
@@ -811,13 +861,16 @@ describe("runAgentFromCli", () => {
       },
       {
         provider,
+        approvalManager,
         approvalNotifier: approval.notifier,
       },
     );
 
     const notice = await waitForApprovalBeforeCompletion(approval.nextNotice, runPromise);
     expect(notice.toolName).toBe("exit_plan_mode");
-    globalApprovalManager.resolveApproval(notice.taskId, true, "approve plan");
+    expect(approvalManager.pendingCount).toBe(1);
+    expect(globalApprovalManager.pendingCount).toBe(0);
+    approvalManager.resolveApproval(notice.taskId, true, "approve plan");
 
     await expect(runPromise).resolves.toMatchObject({ finalMessage: "Done after plan." });
     expect(await readFile(join(workDir, "after-plan.txt"), "utf8")).toBe("implemented");

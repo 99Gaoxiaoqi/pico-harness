@@ -1,10 +1,14 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { AgentEngine } from "../../src/engine/loop.js";
+import { SilentReporter } from "../../src/engine/reporter.js";
 import { Session } from "../../src/engine/session.js";
+import { CostTracker } from "../../src/observability/tracker.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
+import type { LLMProvider } from "../../src/provider/interface.js";
 import { PICO_TOOL_RESULT_ERROR_KEY, type Message } from "../../src/schema/message.js";
 import type {
   RuntimeEvent,
@@ -13,6 +17,7 @@ import type {
 import { materializeRuntimeHistory } from "../../src/runtime/runtime-event-read-model.js";
 import { RuntimeEventStore } from "../../src/runtime/runtime-event-store.js";
 import { RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX, RuntimeRun } from "../../src/runtime/runtime-run.js";
+import type { Registry } from "../../src/tools/registry.js";
 
 describe("RuntimeRun projection recovery", () => {
   let workDir: string;
@@ -192,6 +197,188 @@ describe("RuntimeRun projection recovery", () => {
       false,
     );
     await session.close();
+  });
+
+  it("isolates nested ambient runs for the same sessionId across workspaces", async () => {
+    const workDirA = join(workDir, "workspace-a");
+    const workDirB = join(workDir, "workspace-b");
+    await Promise.all([mkdir(workDirA), mkdir(workDirB)]);
+    const sessionId = "same-session";
+    const sessionA = new Session(sessionId, workDirA, { persistence: true });
+    const sessionB = new Session(sessionId, workDirB, { persistence: true });
+    const storeA = new RuntimeEventStore({
+      databasePath: resolvePicoPaths(workDirA).workspace.runtimeDatabase,
+    });
+    const storeB = new RuntimeEventStore({
+      databasePath: resolvePicoPaths(workDirB).workspace.runtimeDatabase,
+    });
+
+    try {
+      await Promise.all([sessionA.recover(), sessionB.recover()]);
+      await Promise.all([
+        sessionA.commitMessages({ role: "user", content: "workspace A seed" }),
+        sessionB.commitMessages({ role: "user", content: "workspace B seed" }),
+      ]);
+
+      const registry = { getAvailableTools: () => [] } as unknown as Registry;
+      const nestedInputs: Message[][] = [];
+      const nestedProvider: LLMProvider = {
+        async generate(messages) {
+          nestedInputs.push(structuredClone(messages));
+          return {
+            role: "assistant",
+            content: "workspace B answer",
+            usage: { promptTokens: 1, completionTokens: 1 },
+          };
+        },
+      };
+      const nestedEngine = new AgentEngine({
+        provider: new CostTracker(nestedProvider, "unknown-model", sessionB),
+        registry,
+        workDir: workDirB,
+        systemPrompt: "nested test",
+        reporter: new SilentReporter(),
+      });
+      const outerProvider: LLMProvider = {
+        async generate() {
+          await sessionB.commitMessages({ role: "user", content: "workspace B nested prompt" });
+          await nestedEngine.run(sessionB);
+          return {
+            role: "assistant",
+            content: "workspace A answer",
+            usage: { promptTokens: 1, completionTokens: 1 },
+          };
+        },
+      };
+      const outerEngine = new AgentEngine({
+        provider: new CostTracker(outerProvider, "unknown-model", sessionA),
+        registry,
+        workDir: workDirA,
+        systemPrompt: "outer test",
+        reporter: new SilentReporter(),
+      });
+
+      await sessionA.commitMessages({ role: "user", content: "workspace A outer prompt" });
+      await outerEngine.run(sessionA);
+
+      expect(nestedInputs).toHaveLength(1);
+      expect(nestedInputs[0]?.map((message) => message.content)).toEqual(
+        expect.arrayContaining(["workspace B seed", "workspace B nested prompt"]),
+      );
+      expect(nestedInputs[0]?.some((message) => message.content.includes("workspace A"))).toBe(
+        false,
+      );
+      expect(sessionA.getModelContext().map((message) => message.content)).toEqual([
+        "workspace A seed",
+        "workspace A outer prompt",
+        "workspace A answer",
+      ]);
+      expect(sessionB.getModelContext().map((message) => message.content)).toEqual([
+        "workspace B seed",
+        "workspace B nested prompt",
+        "workspace B answer",
+      ]);
+      const eventsA = await storeA.readSession(sessionId);
+      const eventsB = await storeB.readSession(sessionId);
+      expect(materializeRuntimeHistory(eventsA).map((message) => message.content)).toEqual([
+        "workspace A seed",
+        "workspace A outer prompt",
+        "workspace A answer",
+      ]);
+      expect(materializeRuntimeHistory(eventsB).map((message) => message.content)).toEqual([
+        "workspace B seed",
+        "workspace B nested prompt",
+        "workspace B answer",
+      ]);
+      expect(
+        new Set(
+          eventsA
+            .filter((event) => event.kind === "run.started")
+            .map((event) => event.data.workDir),
+        ),
+      ).toEqual(new Set([workDirA]));
+      expect(
+        new Set(
+          eventsB
+            .filter((event) => event.kind === "run.started")
+            .map((event) => event.data.workDir),
+        ),
+      ).toEqual(new Set([workDirB]));
+      expect(eventsA.filter((event) => event.kind === "model.call.started")).toHaveLength(1);
+      expect(eventsB.filter((event) => event.kind === "model.call.started")).toHaveLength(1);
+    } finally {
+      await Promise.allSettled([sessionA.close(), sessionB.close()]);
+      await Promise.all([
+        rm(resolvePicoPaths(workDirA).workspace.root, { recursive: true, force: true }),
+        rm(resolvePicoPaths(workDirB).workspace.root, { recursive: true, force: true }),
+      ]);
+    }
+  });
+
+  it("never lets an in-memory Session inherit a matching ambient run", async () => {
+    const sessionId = "same-session";
+    const session = new Session(sessionId, workDir, { persistence: false });
+    await session.recover();
+    const store = new RuntimeEventStore({
+      databasePath: resolvePicoPaths(workDir).workspace.runtimeDatabase,
+    });
+    const run = await RuntimeRun.start({ sessionId, workDir, store });
+    let providerCalls = 0;
+    const provider: LLMProvider = {
+      async generate() {
+        providerCalls++;
+        return { role: "assistant", content: "must not run" };
+      },
+    };
+    const registry = { getAvailableTools: () => [] } as unknown as Registry;
+    const engine = new AgentEngine({ provider, registry, workDir });
+
+    try {
+      await run.run(async () => {
+        await expect(engine.run(session)).rejects.toThrow(
+          "cannot run inside another RuntimeRun capability",
+        );
+      });
+
+      expect(providerCalls).toBe(0);
+      expect((await store.readSession(sessionId)).map((event) => event.kind)).toEqual([
+        "run.started",
+        "run.terminal",
+      ]);
+    } finally {
+      await session.close();
+    }
+  });
+
+  it("routes a matching Session away from an ambient run backed by another store", async () => {
+    const sessionId = "same-session";
+    const session = new Session(sessionId, workDir, { persistence: true });
+    await session.recover();
+    const alternateStore = new RuntimeEventStore({
+      databasePath: join(workDir, "alternate-runtime.sqlite"),
+    });
+    const ambientRun = await RuntimeRun.start({
+      sessionId,
+      workDir,
+      store: alternateStore,
+    });
+
+    try {
+      expect(ambientRun.claimsSession(session)).toBe(false);
+      await ambientRun.run(() =>
+        session.commitMessages({ role: "user", content: "canonical store only" }),
+      );
+
+      expect(materializeRuntimeHistory(await alternateStore.readSession(sessionId))).toEqual([]);
+      const canonicalStore = new RuntimeEventStore({
+        databasePath: resolvePicoPaths(workDir).workspace.runtimeDatabase,
+      });
+      expect(materializeRuntimeHistory(await canonicalStore.readSession(sessionId))).toEqual([
+        { role: "user", content: "canonical store only" },
+      ]);
+    } finally {
+      await session.close();
+    }
   });
 
   it("canonicalizes undefined provider fields before exactly-once comparison", async () => {

@@ -29,6 +29,7 @@ import type { CodeIntelligenceService } from "../code-intelligence/types.js";
 import { createCodeIntelligenceTools } from "./code-intelligence.js";
 import type { YoloSandboxConfig } from "../safety/yolo-sandbox.js";
 import { ReadArtifactTool } from "./artifact-read.js";
+import type { ApprovalManager } from "../approval/manager.js";
 
 export interface DefaultToolRegistryOptions extends ToolRegistryOptions {
   /** Read/Write/Edit/Glob/Grep 与请求边界共享的工作区根集合。 */
@@ -70,6 +71,8 @@ export interface DefaultToolRegistryOptions extends ToolRegistryOptions {
   activateSkillHooks?: (skill: Skill) => void | Promise<void>;
   /** 宿主冻结的统一 Skill Catalog（含受信 Plugin 来源）。 */
   skillLoader?: SkillLoader;
+  /** exit_plan_mode 使用的宿主审批实例；缺失时该工具 fail-closed。 */
+  approvalManager?: ApprovalManager;
 }
 
 export function buildDefaultToolRegistry(
@@ -86,6 +89,7 @@ export function buildDefaultToolRegistry(
     codeIntelligence,
     activateSkillHooks,
     skillLoader,
+    approvalManager,
     workspaceRoots,
     deferWorkspaceBoundary = false,
     yoloSandbox,
@@ -129,7 +133,7 @@ export function buildDefaultToolRegistry(
   // ExitPlanModeTool:onExit 回调在 default-registry 构造时无法注入(无 engine 引用)。
   // host(run-agent.ts / main.ts)构造 engine 后需遍历工具调 setExitCallback 注入,
   // 否则审批通过也不会真正切换 planMode。Plan Mode 关闭时该工具不被模型调用。
-  registry.register(new ExitPlanModeTool(new PlanStore(workDir)));
+  registry.register(new ExitPlanModeTool(new PlanStore(workDir), approvalManager));
   // Goal Mode 工具:三工具共享同一个 goalManager 单例(由 host 注入)。
   // 单例约束:goalManager 必须与传给 AgentEngine 的是同一实例,
   // 否则工具改的状态 PromptComposer/Grace Call 看不到。
