@@ -1,8 +1,11 @@
 import { createHash } from "node:crypto";
 import { lstat, mkdir, readFile, rm } from "node:fs/promises";
 import { isAbsolute, join, parse, relative, resolve } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { readVersionedJson, writeJsonAtomic } from "./atomic-json.js";
+import { LeaseConflictError, OwnerLease } from "./owner-lease.js";
 import {
+  isTerminalStorageOperation,
   StorageOperationJournal,
   type ForkStorageOperation,
   type NewStorageOperation,
@@ -11,6 +14,7 @@ import {
 
 const FORK_BUNDLE_MANIFEST_VERSION = 2 as const;
 const FORK_BUNDLE_MANIFEST_NAME = "fork-bundle.json";
+const FORK_LEASE_RETRY_MS = 20;
 const SHA256_DIGEST = /^[0-9a-f]{64}$/u;
 
 export type NewForkStorageOperation = Extract<NewStorageOperation, { kind: "fork" }>;
@@ -119,23 +123,66 @@ export class ForkOperationCoordinator {
   }
 
   private async forward(initial: ForkStorageOperation): Promise<ForkStorageOperation> {
+    for (;;) {
+      const current = await this.reloadOperation(initial);
+      if (isTerminalStorageOperation(current.state)) {
+        if (current.state === "completed") await this.cleanupStaging(current);
+        return current;
+      }
+
+      let lease: OwnerLease;
+      try {
+        lease = await OwnerLease.acquire({
+          leaseDirectory: this.targetLeaseDirectory(current.targetSessionId),
+          ownerId: `fork-operation:${current.operationId}`,
+        });
+      } catch (error) {
+        if (!(error instanceof LeaseConflictError) || !error.owner) throw error;
+        await delay(FORK_LEASE_RETRY_MS);
+        continue;
+      }
+
+      try {
+        const owned = await this.reloadOperation(initial);
+        if (isTerminalStorageOperation(owned.state)) {
+          if (owned.state === "completed") await this.cleanupStaging(owned);
+          return owned;
+        }
+        await lease.assertOwnership();
+        return await this.forwardOwned(owned, lease);
+      } finally {
+        await lease.release();
+      }
+    }
+  }
+
+  private async forwardOwned(
+    initial: ForkStorageOperation,
+    lease: OwnerLease,
+  ): Promise<ForkStorageOperation> {
     let operation = initial;
     try {
       if (operation.state === "prepared") {
         this.assertOperation(operation);
+        await lease.assertOwnership();
         await this.prepareBundle(operation);
+        await lease.assertOwnership();
         operation = await this.advance(operation, "workspace_applied");
       }
 
       if (operation.state === "workspace_applied" || operation.state === "session_committed") {
         const bundle = await this.loadAndVerifyStagedBundle(operation);
+        await lease.assertOwnership();
         await this.callbacks.cloneSidecars(operation, bundle);
+        await lease.assertOwnership();
         operation = await this.advance(operation, "sidecars_committed");
       }
 
       if (operation.state === "sidecars_committed") {
         const bundle = await this.loadAndVerifyStagedBundle(operation);
+        await lease.assertOwnership();
         await this.callbacks.publishRuntime(operation, bundle);
+        await lease.assertOwnership();
         operation = await this.advance(operation, "completed");
         await this.cleanupStaging(operation);
       }
@@ -150,6 +197,28 @@ export class ForkOperationCoordinator {
           : {}),
       });
     }
+  }
+
+  private async reloadOperation(initial: ForkStorageOperation): Promise<ForkStorageOperation> {
+    const current = await this.journal.get(initial.operationId);
+    if (!current) throw new Error(`Storage operation not found: ${initial.operationId}`);
+    if (current.kind !== "fork") {
+      throw new Error(`Storage operation is not a fork: ${initial.operationId}`);
+    }
+    if (
+      current.sourceSessionId !== initial.sourceSessionId ||
+      current.targetSessionId !== initial.targetSessionId ||
+      current.stagingDirectory !== initial.stagingDirectory ||
+      !sameCursor(current.sourceCursor, initial.sourceCursor)
+    ) {
+      throw new Error(`Fork operation identity changed: ${initial.operationId}`);
+    }
+    return current;
+  }
+
+  private targetLeaseDirectory(targetSessionId: string): string {
+    const targetDigest = createHash("sha256").update(targetSessionId).digest("hex");
+    return join(this.journal.directory, ".fork-target-leases", targetDigest);
   }
 
   private assertOperation(operation: ForkStorageOperation): void {

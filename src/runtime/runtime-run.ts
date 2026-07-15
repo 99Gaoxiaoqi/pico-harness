@@ -12,6 +12,7 @@ import {
   type RuntimeApprovalSettledEvent,
   type RuntimeCheckpointRecordedEvent,
   type RuntimeEvidenceReference,
+  type RuntimeEvent,
   type RuntimeEventBase,
   type RuntimeEventRefs,
   type RuntimeHistoryRewoundEvent,
@@ -41,11 +42,15 @@ const runtimeToolCallContext = new AsyncLocalStorage<string>();
 const externalMessageCommitTails = new Map<string, Promise<void>>();
 const forkBootstrapTails = new Map<string, Promise<void>>();
 
+export const RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX = "fork-bootstrap:";
+
 export interface RuntimeRunStartOptions {
   readonly sessionId: string;
   readonly workDir: string;
   readonly runId?: string;
   readonly invocationId?: string;
+  readonly runStartedEventId?: string;
+  readonly terminalEventId?: string;
   readonly parentRunId?: string;
   readonly parentToolCallId?: string;
   readonly now?: () => Date;
@@ -67,6 +72,10 @@ export interface RepairRuntimeSessionProjectionOptions {
 export interface BootstrapRuntimeForkOptions {
   readonly sourceSessionId: string;
   readonly targetSessionId: string;
+  /** Durable fork operation identity used to make a crash retry reuse the same Runtime facts. */
+  readonly operationId?: string;
+  /** Durable operation timestamp; required for byte-identical cross-process retries. */
+  readonly operationCreatedAt?: string;
   /** The immutable, usage-free Session seed published by SessionForkService. */
   readonly messages: readonly Message[];
   /** Last source message included in the frozen seed, before target-side rewrites. */
@@ -118,6 +127,15 @@ interface RuntimeForkBootstrapCompletion {
   readonly messageCount: number;
 }
 
+interface RuntimeForkBootstrapIdentity {
+  readonly runId: string;
+  readonly invocationId: string;
+  readonly runStartedEventId: string;
+  readonly markerEventId: string;
+  readonly terminalEventId: string;
+  messageEventId(index: number): string;
+}
+
 /** The canonical run bound to the current asynchronous Agent execution. */
 export function currentRuntimeRun(): RuntimeRun | undefined {
   return runtimeRunContext.getStore();
@@ -141,6 +159,8 @@ export class RuntimeRun {
   readonly invocationId: string;
   readonly store: RuntimeEventStore;
   private readonly now: () => Date;
+  private readonly runStartedEventId?: string;
+  private readonly terminalEventId?: string;
   private readonly parentRefs?: Pick<RuntimeEventRefs, "parentRunId" | "parentToolCallId">;
   private readonly evidenceByToolCallId = new Map<string, RuntimeEvidenceReference>();
   private turnId: string;
@@ -161,6 +181,8 @@ export class RuntimeRun {
         databasePath: resolvePicoPaths(workDir).workspace.runtimeDatabase,
       } satisfies RuntimeEventStoreOptions);
     this.now = options.now ?? (() => new Date());
+    this.runStartedEventId = options.runStartedEventId;
+    this.terminalEventId = options.terminalEventId;
     this.parentRefs = compactRefs({
       ...(options.parentRunId ? { parentRunId: options.parentRunId } : {}),
       ...(options.parentToolCallId ? { parentToolCallId: options.parentToolCallId } : {}),
@@ -273,6 +295,7 @@ export class RuntimeRun {
       sourceDigest: forkSeedDigest(messages),
       messageCount: messages.length,
     };
+    const identity = runtimeForkBootstrapIdentity(options, completion);
 
     return serializeForkBootstrap(options.targetSessionId, async () => {
       const existingEvents = await store.readSession(options.targetSessionId);
@@ -297,6 +320,9 @@ export class RuntimeRun {
             `Runtime fork target ${options.targetSessionId} has a conflicting frozen seed`,
           );
         }
+        if (completedMarker.runId === identity.runId) {
+          await ensureRuntimeForkTerminal(options, store, existingEvents, identity);
+        }
         return false;
       }
 
@@ -312,22 +338,35 @@ export class RuntimeRun {
       // A complete old fork is already a usable history; only incomplete prefixes resume.
       if (forkMarkers.length > 0 && imported.length === messages.length) return false;
 
+      const existingStart = existingEvents.find(
+        (event) => event.kind === "run.started" && event.runId === identity.runId,
+      );
+      const bootstrapAt = existingStart?.at ?? runtimeForkBootstrapAt(options.operationCreatedAt);
       const forkRun = await RuntimeRun.start({
         sessionId: options.targetSessionId,
         workDir: options.workDir,
+        runId: identity.runId,
+        invocationId: identity.invocationId,
+        runStartedEventId: identity.runStartedEventId,
+        terminalEventId: identity.terminalEventId,
+        now: () => new Date(bootstrapAt),
         store,
       });
       const throughEventId =
         options.sourceThroughEventId ??
         (await resolveForkSourceThroughEventId(store, options.sourceSessionId, messages));
-      await forkRun.run(async () => {
-        for (const message of messages.slice(imported.length)) {
-          await forkRun.recordImportedMessage(message);
-        }
-        // This is the completion marker. Until it is durable, a future start can replay
-        // the immutable target seed and finish a partially written bootstrap.
-        await forkRun.recordSessionForked(options.sourceSessionId, throughEventId, completion);
-      });
+      for (let index = imported.length; index < messages.length; index += 1) {
+        await forkRun.recordImportedMessage(messages[index]!, identity.messageEventId(index));
+      }
+      // This is the publication marker. A failed bootstrap deliberately has no terminal fact;
+      // the same operation can replay its stable event IDs and complete the one logical run.
+      await forkRun.recordSessionForked(
+        options.sourceSessionId,
+        throughEventId,
+        completion,
+        identity.markerEventId,
+      );
+      await forkRun.finish("completed");
       return true;
     });
   }
@@ -529,12 +568,15 @@ export class RuntimeRun {
   }
 
   /** Writes one immutable, usage-free message from a fork's frozen Session seed. */
-  async recordImportedMessage(source: Message): Promise<void> {
+  async recordImportedMessage(
+    source: Message,
+    eventId = createRuntimeEventId("fork-message"),
+  ): Promise<void> {
     this.assertOpen();
     const message = canonicalizeRuntimeMessage(stripMessageUsage(source));
     const refs = this.messageRefs(message);
     await this.store.append({
-      ...this.base(createRuntimeEventId("fork-message")),
+      ...this.base(eventId),
       ...(refs ? { refs } : {}),
       kind: "message.committed",
       data: { message },
@@ -667,10 +709,11 @@ export class RuntimeRun {
     parentSessionId: string,
     throughEventId?: string,
     completion?: RuntimeForkBootstrapCompletion,
+    eventId = createRuntimeEventId("session-forked"),
   ): Promise<void> {
     this.assertOpen();
     const event: RuntimeSessionForkedEvent = {
-      ...this.base(createRuntimeEventId("session-forked"), false, "internal"),
+      ...this.base(eventId, false, "internal"),
       kind: "session.forked",
       data: {
         parentSessionId,
@@ -685,7 +728,11 @@ export class RuntimeRun {
     if (this.finishPromise) return this.finishPromise;
     this.finishPromise = (async () => {
       const terminal = this.terminal ?? {
-        ...this.base(createRuntimeEventId("run-terminal"), false, "internal"),
+        ...this.base(
+          this.terminalEventId ?? createRuntimeEventId("run-terminal"),
+          false,
+          "internal",
+        ),
         kind: "run.terminal" as const,
         data: { status, ...(reason ? { reason } : {}) },
       };
@@ -699,7 +746,11 @@ export class RuntimeRun {
 
   private async recordRunStarted(): Promise<void> {
     const event: RuntimeRunStartedEvent = {
-      ...this.base(createRuntimeEventId("run-started"), false, "internal"),
+      ...this.base(
+        this.runStartedEventId ?? createRuntimeEventId("run-started"),
+        false,
+        "internal",
+      ),
       kind: "run.started",
       data: { workDir: this.workDir },
     };
@@ -795,6 +846,77 @@ function serializeForkBootstrap<Result>(
   return result.finally(() => {
     if (forkBootstrapTails.get(sessionId) === tail) forkBootstrapTails.delete(sessionId);
   });
+}
+
+function runtimeForkBootstrapIdentity(
+  options: BootstrapRuntimeForkOptions,
+  completion: RuntimeForkBootstrapCompletion,
+): RuntimeForkBootstrapIdentity {
+  const digest = createHash("sha256")
+    .update(
+      JSON.stringify([
+        options.operationId ?? "seed-derived",
+        options.sourceSessionId,
+        options.targetSessionId,
+        completion.sourceDigest,
+        completion.messageCount,
+      ]),
+    )
+    .digest("hex");
+  const eventNamespace = `fork:${digest}`;
+  return {
+    runId: `${RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX}${digest}`,
+    invocationId: `${eventNamespace}:invocation`,
+    runStartedEventId: `${eventNamespace}:started`,
+    markerEventId: `${eventNamespace}:published`,
+    terminalEventId: `${eventNamespace}:terminal`,
+    messageEventId: (index) => `${eventNamespace}:message:${index}`,
+  };
+}
+
+async function ensureRuntimeForkTerminal(
+  options: BootstrapRuntimeForkOptions,
+  store: RuntimeEventStore,
+  events: readonly RuntimeEvent[],
+  identity: RuntimeForkBootstrapIdentity,
+): Promise<void> {
+  const terminal = events.find(
+    (event): event is RuntimeRunTerminalEvent =>
+      event.kind === "run.terminal" && event.runId === identity.runId,
+  );
+  if (terminal) {
+    if (terminal.eventId !== identity.terminalEventId || terminal.data.status !== "completed") {
+      throw new Error(`Runtime fork run ${identity.runId} has a conflicting terminal fact`);
+    }
+    return;
+  }
+
+  const started = events.find(
+    (event): event is RuntimeRunStartedEvent =>
+      event.kind === "run.started" && event.runId === identity.runId,
+  );
+  if (!started || started.eventId !== identity.runStartedEventId) {
+    throw new Error(`Runtime fork run ${identity.runId} is missing its stable start fact`);
+  }
+  const run = await RuntimeRun.start({
+    sessionId: options.targetSessionId,
+    workDir: options.workDir,
+    runId: identity.runId,
+    invocationId: identity.invocationId,
+    runStartedEventId: identity.runStartedEventId,
+    terminalEventId: identity.terminalEventId,
+    now: () => new Date(started.at),
+    store,
+  });
+  await run.finish("completed");
+}
+
+function runtimeForkBootstrapAt(operationCreatedAt: string | undefined): string {
+  const timestamp = operationCreatedAt === undefined ? Date.now() : Date.parse(operationCreatedAt);
+  if (!Number.isFinite(timestamp)) {
+    throw new Error(`Fork operation has an invalid createdAt timestamp: ${operationCreatedAt}`);
+  }
+  return new Date(timestamp).toISOString();
 }
 
 function stripMessageUsage(message: Message): Message {
