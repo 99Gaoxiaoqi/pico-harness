@@ -72,6 +72,33 @@ describe("owner lease stale takeover integration", () => {
     await lease.release();
   });
 
+  it("signals lost ownership when the heartbeat can no longer verify its lease", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pico-owner-lease-lost-signal-"));
+    cleanup.push(root);
+    const leaseDirectory = join(root, "leases", "session-a");
+    const displacedDirectory = join(root, "leases", "session-a-displaced");
+    const lease = await OwnerLease.acquire({
+      leaseDirectory,
+      ownerId: "original-owner",
+      heartbeatIntervalMs: 10,
+    });
+
+    await rename(leaseDirectory, displacedDirectory);
+    await mkdir(leaseDirectory);
+    await writeFile(
+      join(leaseDirectory, "owner.json"),
+      JSON.stringify(createDeadOwner("replacement-owner")),
+      "utf8",
+    );
+    await waitForAbort(lease.lostSignal);
+
+    expect(lease.lostSignal.aborted).toBe(true);
+    expect(lease.lostSignal.reason).toBeInstanceOf(LeaseConflictError);
+    await expect(lease.assertOwnership()).rejects.toBe(lease.lostSignal.reason);
+    await lease.release();
+    await expect(stat(displacedDirectory)).resolves.toBeDefined();
+  });
+
   it("allows only one of 48 processes to enter after observing the same dead owner", async () => {
     const root = await mkdtemp(join(tmpdir(), "pico-owner-lease-race-"));
     cleanup.push(root);
@@ -222,6 +249,21 @@ async function waitForFileCount(directory: string, count: number): Promise<void>
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   throw new Error(`Timed out waiting for ${count} files in ${directory}`);
+}
+
+async function waitForAbort(signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return;
+  await new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error("Timed out waiting for lease loss")), 1_000);
+    signal.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(timeout);
+        resolve();
+      },
+      { once: true },
+    );
+  });
 }
 
 async function readJsonDirectory<T>(directory: string): Promise<T[]> {

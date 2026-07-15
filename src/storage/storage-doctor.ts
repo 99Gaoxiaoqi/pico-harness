@@ -383,7 +383,19 @@ export class StorageDoctor {
         if (!SAFE_OPERATION_ID_RE.test(operationId)) throw new Error("invalid operation filename");
         const operation = await journal.get(operationId);
         if (!operation) throw new Error("operation disappeared during scan");
-        if (!isTerminalStorageOperation(operation.state)) {
+        if (operation.state === "needs_attention") {
+          findings.push(
+            finding(
+              "operation_needs_attention",
+              "error",
+              "operation",
+              path,
+              `Operation ${operation.operationId} v${operation.version} needs attention at ${operation.error?.phase ?? "unknown phase"}: ${operation.error?.message ?? "no failure reason was recorded"}`,
+              `Inspect with /operations show ${operation.operationId}; then use /operations retry ${operation.operationId} ${operation.version} or /operations abort ${operation.operationId} ${operation.version}`,
+              "authoritative",
+            ),
+          );
+        } else if (!isTerminalStorageOperation(operation.state)) {
           findings.push(
             finding(
               "operation_unfinished",

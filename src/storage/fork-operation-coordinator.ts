@@ -3,18 +3,21 @@ import { lstat, mkdir, readFile, rm } from "node:fs/promises";
 import { isAbsolute, join, parse, relative, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { readVersionedJson, writeJsonAtomic } from "./atomic-json.js";
-import { LeaseConflictError, OwnerLease } from "./owner-lease.js";
+import { LeaseConflictError, OwnerLease, type OwnerLeaseRecord } from "./owner-lease.js";
 import {
   isTerminalStorageOperation,
   StorageOperationJournal,
   type ForkStorageOperation,
   type NewStorageOperation,
   type StorageOperation,
+  type StorageOperationDispositionInput,
 } from "./operation-journal.js";
 
 const FORK_BUNDLE_MANIFEST_VERSION = 2 as const;
 const FORK_BUNDLE_MANIFEST_NAME = "fork-bundle.json";
-const FORK_LEASE_RETRY_MS = 20;
+const DEFAULT_FORK_LEASE_ACQUISITION_TIMEOUT_MS = 5_000;
+const DEFAULT_FORK_LEASE_RETRY_INITIAL_MS = 20;
+const DEFAULT_FORK_LEASE_RETRY_MAX_MS = 500;
 const SHA256_DIGEST = /^[0-9a-f]{64}$/u;
 
 export type NewForkStorageOperation = Extract<NewStorageOperation, { kind: "fork" }>;
@@ -57,11 +60,46 @@ export interface ForkOperationCallbacks {
 export interface ForkOperationCoordinatorOptions {
   readonly journal: StorageOperationJournal;
   readonly callbacks: ForkOperationCallbacks;
+  readonly leaseAcquisitionTimeoutMs?: number;
+  readonly leaseRetryInitialMs?: number;
+  readonly leaseRetryMaxMs?: number;
+  readonly random?: () => number;
 }
 
-export interface ForkReconciliationResult {
+export interface ForkReconciliationOptions {
+  readonly signal?: AbortSignal;
+  /** 每个 target 独立计算截止时间，避免一个冲突 target 吃掉整批恢复预算。 */
+  readonly leaseAcquisitionTimeoutMs?: number;
+  /** 可选的绝对截止时间（Unix epoch milliseconds）。 */
+  readonly deadlineAt?: number;
+}
+
+export interface ForkLeaseContentionDiagnostic {
+  readonly code: "fork_target_lease_timeout";
+  readonly targetSessionId: string;
+  readonly leaseDirectory: string;
+  readonly attempts: number;
+  readonly waitedMs: number;
+  readonly deadlineAt: string;
+  readonly lastOwner?: OwnerLeaseRecord;
+}
+
+export type ForkReconciliationResult = ForkReconciliationSuccess | ForkReconciliationTimeout;
+
+export interface ForkReconciliationSuccess {
   readonly operationId: string;
   readonly state: ForkStorageOperation["state"];
+}
+
+export interface ForkReconciliationTimeout extends ForkReconciliationSuccess {
+  readonly status: "lease_timeout";
+  readonly diagnostic: ForkLeaseContentionDiagnostic;
+}
+
+export interface ForkAbortResult {
+  readonly operation: ForkStorageOperation;
+  readonly stagingCleanup: "completed" | "failed";
+  readonly cleanupDiagnostic?: string;
 }
 
 export type ForkOperationConflictReason =
@@ -81,6 +119,15 @@ export class ForkOperationConflictError extends Error {
   }
 }
 
+export class ForkOperationLeaseTimeoutError extends Error {
+  constructor(readonly diagnostic: ForkLeaseContentionDiagnostic) {
+    super(
+      `Timed out acquiring fork target lease for ${diagnostic.targetSessionId} after ${diagnostic.waitedMs}ms`,
+    );
+    this.name = "ForkOperationLeaseTimeoutError";
+  }
+}
+
 /**
  * fork 的 forward-only Saga：
  * prepared -> 校验不可变 source bundle -> workspace_applied
@@ -93,30 +140,70 @@ export class ForkOperationConflictError extends Error {
 export class ForkOperationCoordinator {
   private readonly journal: StorageOperationJournal;
   private readonly callbacks: ForkOperationCallbacks;
+  private readonly leaseAcquisitionTimeoutMs: number;
+  private readonly leaseRetryInitialMs: number;
+  private readonly leaseRetryMaxMs: number;
+  private readonly random: () => number;
 
   constructor(options: ForkOperationCoordinatorOptions) {
     this.journal = options.journal;
     this.callbacks = options.callbacks;
+    this.leaseAcquisitionTimeoutMs = assertNonNegativeFinite(
+      options.leaseAcquisitionTimeoutMs ?? DEFAULT_FORK_LEASE_ACQUISITION_TIMEOUT_MS,
+      "leaseAcquisitionTimeoutMs",
+    );
+    this.leaseRetryInitialMs = assertPositiveFinite(
+      options.leaseRetryInitialMs ?? DEFAULT_FORK_LEASE_RETRY_INITIAL_MS,
+      "leaseRetryInitialMs",
+    );
+    this.leaseRetryMaxMs = assertPositiveFinite(
+      options.leaseRetryMaxMs ?? DEFAULT_FORK_LEASE_RETRY_MAX_MS,
+      "leaseRetryMaxMs",
+    );
+    if (this.leaseRetryMaxMs < this.leaseRetryInitialMs) {
+      throw new Error("leaseRetryMaxMs must be greater than or equal to leaseRetryInitialMs");
+    }
+    this.random = options.random ?? Math.random;
   }
 
-  async execute(input: NewForkStorageOperation): Promise<ForkStorageOperation> {
+  async execute(
+    input: NewForkStorageOperation,
+    options: ForkReconciliationOptions = {},
+  ): Promise<ForkStorageOperation> {
     const operation = await this.journal.create(input);
     if (operation.kind !== "fork") throw new Error("Expected fork operation");
-    return this.forward(operation);
+    return this.forward(operation, options);
   }
 
-  async reconcileUnfinished(): Promise<ForkReconciliationResult[]> {
+  async reconcileUnfinished(
+    options: ForkReconciliationOptions = {},
+  ): Promise<ForkReconciliationResult[]> {
     const results: ForkReconciliationResult[] = [];
     for (const operation of await this.journal.listUnfinished()) {
+      options.signal?.throwIfAborted();
       if (operation.kind !== "fork") continue;
-      const result = await this.forward(operation);
-      results.push({ operationId: result.operationId, state: result.state });
+      try {
+        const result = await this.forward(operation, options);
+        results.push({ operationId: result.operationId, state: result.state });
+      } catch (error) {
+        if (!(error instanceof ForkOperationLeaseTimeoutError)) throw error;
+        const latest = await this.reloadOperation(operation);
+        results.push({
+          operationId: latest.operationId,
+          state: latest.state,
+          status: "lease_timeout",
+          diagnostic: error.diagnostic,
+        });
+      }
     }
     return results;
   }
 
   /** 显式重放单个操作；已 completed 时仅补做 staging 清理。 */
-  async reconcile(operationId: string): Promise<ForkStorageOperation> {
+  async reconcile(
+    operationId: string,
+    options: ForkReconciliationOptions = {},
+  ): Promise<ForkStorageOperation> {
     const operation = await this.journal.get(operationId);
     if (!operation) throw new Error(`Storage operation not found: ${operationId}`);
     if (operation.kind !== "fork") {
@@ -126,11 +213,49 @@ export class ForkOperationCoordinator {
       await this.cleanupStaging(operation);
       return operation;
     }
-    return this.forward(operation);
+    return this.forward(operation, options);
   }
 
-  private async forward(initial: ForkStorageOperation): Promise<ForkStorageOperation> {
+  async retryNeedsAttention(
+    input: StorageOperationDispositionInput,
+    options: ForkReconciliationOptions = {},
+  ): Promise<ForkStorageOperation> {
+    const current = await this.journal.get(input.operationId);
+    if (!current) throw new Error(`Storage operation not found: ${input.operationId}`);
+    if (current.kind !== "fork") {
+      throw new Error(`Storage operation is not a fork: ${input.operationId}`);
+    }
+    const restored = await this.journal.retryNeedsAttention(input);
+    if (restored.kind !== "fork") throw new Error("Fork operation changed kind");
+    return this.forward(restored, options);
+  }
+
+  async abortNeedsAttention(input: StorageOperationDispositionInput): Promise<ForkAbortResult> {
+    const current = await this.journal.get(input.operationId);
+    if (!current) throw new Error(`Storage operation not found: ${input.operationId}`);
+    if (current.kind !== "fork") {
+      throw new Error(`Storage operation is not a fork: ${input.operationId}`);
+    }
+    const aborted = await this.journal.abortNeedsAttention(input);
+    if (aborted.kind !== "fork") throw new Error("Fork operation changed kind");
+    try {
+      await this.cleanupStaging(aborted);
+      return { operation: aborted, stagingCleanup: "completed" };
+    } catch (error) {
+      return {
+        operation: aborted,
+        stagingCleanup: "failed",
+        cleanupDiagnostic: errorMessage(error),
+      };
+    }
+  }
+
+  private async forward(
+    initial: ForkStorageOperation,
+    options: ForkReconciliationOptions,
+  ): Promise<ForkStorageOperation> {
     for (;;) {
+      options.signal?.throwIfAborted();
       const current = await this.reloadOperation(initial);
       if (isTerminalStorageOperation(current.state)) {
         if (current.state === "completed") await this.cleanupStaging(current);
@@ -139,14 +264,15 @@ export class ForkOperationCoordinator {
 
       let lease: OwnerLease;
       try {
-        lease = await OwnerLease.acquire({
-          leaseDirectory: this.targetLeaseDirectory(current.targetSessionId),
-          ownerId: `fork-operation:${current.operationId}`,
-        });
+        lease = await this.acquireTargetLease(current, options);
       } catch (error) {
-        if (!(error instanceof LeaseConflictError) || !error.owner) throw error;
-        await delay(FORK_LEASE_RETRY_MS);
-        continue;
+        if (!(error instanceof ForkOperationLeaseTimeoutError)) throw error;
+        const latest = await this.reloadOperation(initial);
+        if (isTerminalStorageOperation(latest.state)) {
+          if (latest.state === "completed") await this.cleanupStaging(latest);
+          return latest;
+        }
+        throw error;
       }
 
       try {
@@ -160,6 +286,60 @@ export class ForkOperationCoordinator {
       } finally {
         await lease.release();
       }
+    }
+  }
+
+  private async acquireTargetLease(
+    operation: ForkStorageOperation,
+    options: ForkReconciliationOptions,
+  ): Promise<OwnerLease> {
+    const timeoutMs = assertNonNegativeFinite(
+      options.leaseAcquisitionTimeoutMs ?? this.leaseAcquisitionTimeoutMs,
+      "leaseAcquisitionTimeoutMs",
+    );
+    const startedAt = Date.now();
+    const deadline = Math.min(
+      startedAt + timeoutMs,
+      options.deadlineAt === undefined
+        ? Number.POSITIVE_INFINITY
+        : assertFinite(options.deadlineAt, "deadlineAt"),
+    );
+    const leaseDirectory = this.targetLeaseDirectory(operation.targetSessionId);
+    let attempts = 0;
+    let lastOwner: OwnerLeaseRecord | undefined;
+    for (;;) {
+      options.signal?.throwIfAborted();
+      attempts += 1;
+      try {
+        return await OwnerLease.acquire({
+          leaseDirectory,
+          ownerId: `fork-operation:${operation.operationId}`,
+        });
+      } catch (error) {
+        if (!(error instanceof LeaseConflictError)) throw error;
+        lastOwner = error.owner;
+      }
+
+      const now = Date.now();
+      if (now >= deadline) {
+        throw new ForkOperationLeaseTimeoutError({
+          code: "fork_target_lease_timeout",
+          targetSessionId: operation.targetSessionId,
+          leaseDirectory,
+          attempts,
+          waitedMs: Math.max(0, now - startedAt),
+          deadlineAt: new Date(deadline).toISOString(),
+          ...(lastOwner ? { lastOwner: structuredClone(lastOwner) } : {}),
+        });
+      }
+
+      const exponentialDelay = Math.min(
+        this.leaseRetryMaxMs,
+        this.leaseRetryInitialMs * 2 ** Math.min(attempts - 1, 30),
+      );
+      const jitter = 0.5 + clampRandom(this.random());
+      const waitMs = Math.max(1, Math.min(deadline - now, Math.round(exponentialDelay * jitter)));
+      await delay(waitMs, undefined, options.signal ? { signal: options.signal } : undefined);
     }
   }
 
@@ -544,6 +724,30 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isNonNegativeInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function assertNonNegativeFinite(value: number, name: string): number {
+  if (!Number.isFinite(value) || value < 0) {
+    throw new Error(`${name} must be a non-negative finite number`);
+  }
+  return value;
+}
+
+function assertPositiveFinite(value: number, name: string): number {
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new Error(`${name} must be a positive finite number`);
+  }
+  return value;
+}
+
+function assertFinite(value: number, name: string): number {
+  if (!Number.isFinite(value)) throw new Error(`${name} must be a finite number`);
+  return value;
+}
+
+function clampRandom(value: number): number {
+  if (!Number.isFinite(value)) return 0.5;
+  return Math.min(1, Math.max(0, value));
 }
 
 function isNodeCode(error: unknown, code: string): boolean {
