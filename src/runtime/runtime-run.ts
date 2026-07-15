@@ -4,10 +4,9 @@ import { isDeepStrictEqual } from "node:util";
 import { isAbortError } from "../provider/errors.js";
 import { resolvePicoPaths } from "../paths/pico-paths.js";
 import { RunLedger } from "../engine/run-ledger.js";
-import { createEmptyUsageSnapshot, type SessionUsageSnapshot } from "../engine/session-runtime.js";
-import type { CommitReceipt } from "../engine/session-store.js";
+import type { CommitReceipt } from "../engine/session-persistence.js";
 import type { Session } from "../engine/session.js";
-import { toCanonicalUsage, type Message } from "../schema/message.js";
+import type { Message } from "../schema/message.js";
 import {
   RUNTIME_EVENT_SCHEMA_VERSION,
   type RuntimeApprovalRequestedEvent,
@@ -25,13 +24,18 @@ import {
   type RuntimeTerminalStatus,
   type RuntimeToolStartedEvent,
 } from "./runtime-event.js";
-import { runtimeEventHasModelMessage, type RuntimeEvent } from "./runtime-event.js";
 import type { RuntimeHistoryProjectionEntry } from "./runtime-event-read-model.js";
 import {
   RuntimeEventStore,
   createRuntimeEventId,
+  type RuntimeEventStoreAppendResult,
   type RuntimeEventStoreOptions,
 } from "./runtime-event-store.js";
+import {
+  projectRuntimeSessionMessageEntries,
+  projectRuntimeSessionMessages,
+  projectRuntimeSessionState,
+} from "./runtime-session-projection.js";
 
 const runtimeRunContext = new AsyncLocalStorage<RuntimeRun>();
 const runtimeToolCallContext = new AsyncLocalStorage<string>();
@@ -155,7 +159,7 @@ export class RuntimeRun {
     this.store =
       options.store ??
       new RuntimeEventStore({
-        baseDir: resolvePicoPaths(workDir).workspace.runs,
+        databasePath: resolvePicoPaths(workDir).workspace.runtimeDatabase,
       } satisfies RuntimeEventStoreOptions);
     this.ledger = ledger;
     this.now = options.now ?? (() => new Date());
@@ -171,7 +175,7 @@ export class RuntimeRun {
     const store =
       options.store ??
       new RuntimeEventStore({
-        baseDir: resolvePicoPaths(options.workDir).workspace.runs,
+        databasePath: resolvePicoPaths(options.workDir).workspace.runtimeDatabase,
       });
     await store.initializeSession({
       sessionId: options.sessionId,
@@ -199,7 +203,9 @@ export class RuntimeRun {
   static async reconcileIncompleteRuns(options: ReconcileRuntimeRunsOptions): Promise<string[]> {
     const store =
       options.store ??
-      new RuntimeEventStore({ baseDir: resolvePicoPaths(options.workDir).workspace.runs });
+      new RuntimeEventStore({
+        databasePath: resolvePicoPaths(options.workDir).workspace.runtimeDatabase,
+      });
     const manifest = await store.readSessionManifest(options.sessionId);
     if (!manifest) return [];
 
@@ -245,11 +251,13 @@ export class RuntimeRun {
   ): Promise<boolean> {
     const store =
       options.store ??
-      new RuntimeEventStore({ baseDir: resolvePicoPaths(options.workDir).workspace.runs });
+      new RuntimeEventStore({
+        databasePath: resolvePicoPaths(options.workDir).workspace.runtimeDatabase,
+      });
     if (!(await store.readSessionManifest(session.id))) return false;
     const events = await store.readSession(session.id);
-    const projected = projectSessionMessages(events);
-    const usage = projectSessionUsage(events);
+    const projected = projectRuntimeSessionMessages(events);
+    const usage = projectRuntimeSessionState(events).usage;
     const messagesStale = !isDeepStrictEqual(session.getModelContext(), projected);
     const usageStale = !isDeepStrictEqual(session.getRuntimeStateSnapshot().usage, usage);
     if (!messagesStale && !usageStale) return false;
@@ -277,7 +285,9 @@ export class RuntimeRun {
     }
     const store =
       options.store ??
-      new RuntimeEventStore({ baseDir: resolvePicoPaths(options.workDir).workspace.runs });
+      new RuntimeEventStore({
+        databasePath: resolvePicoPaths(options.workDir).workspace.runtimeDatabase,
+      });
     const messages = options.messages.map(stripMessageUsage);
     const completion: RuntimeForkBootstrapCompletion = {
       sourceDigest: forkSeedDigest(messages),
@@ -310,8 +320,8 @@ export class RuntimeRun {
         return false;
       }
 
-      const imported = projectSessionMessageEvents(existingEvents).map((event) =>
-        stripMessageUsage(event.data.message),
+      const imported = projectRuntimeSessionMessageEntries(existingEvents).map(({ message }) =>
+        stripMessageUsage(message),
       );
       if (!isMessagePrefix(imported, messages)) {
         throw new Error(
@@ -353,7 +363,9 @@ export class RuntimeRun {
   ): Promise<boolean> {
     const store =
       options.store ??
-      new RuntimeEventStore({ baseDir: resolvePicoPaths(options.workDir).workspace.runs });
+      new RuntimeEventStore({
+        databasePath: resolvePicoPaths(options.workDir).workspace.runtimeDatabase,
+      });
     if (await store.readSessionManifest(options.session.id)) return false;
     const history = options.session.getModelContext();
     if (history.length === 0) return false;
@@ -375,11 +387,13 @@ export class RuntimeRun {
   static async recordSessionRewind(options: RecordRuntimeSessionRewindOptions): Promise<boolean> {
     const store =
       options.store ??
-      new RuntimeEventStore({ baseDir: resolvePicoPaths(options.workDir).workspace.runs });
+      new RuntimeEventStore({
+        databasePath: resolvePicoPaths(options.workDir).workspace.runtimeDatabase,
+      });
     if (!(await store.readSessionManifest(options.sessionId))) return false;
 
     const events = await store.readSession(options.sessionId);
-    const messages = projectSessionMessageEvents(events);
+    const messages = projectRuntimeSessionMessageEntries(events);
     const retainedCount = Math.max(0, Math.min(options.messageIndex, messages.length));
     const throughEventId = messages[retainedCount - 1]?.eventId;
     const existing = events.find(
@@ -416,7 +430,7 @@ export class RuntimeRun {
   ): Promise<boolean> {
     if (messages.length === 0) return true;
     const store = new RuntimeEventStore({
-      baseDir: resolvePicoPaths(session.workDir).workspace.runs,
+      databasePath: resolvePicoPaths(session.workDir).workspace.runtimeDatabase,
     });
     if (!(await store.readSessionManifest(session.id))) return false;
     const run = await RuntimeRun.start({
@@ -438,7 +452,7 @@ export class RuntimeRun {
     message: Message,
   ): Promise<CommitReceipt | undefined> {
     const store = new RuntimeEventStore({
-      baseDir: resolvePicoPaths(session.workDir).workspace.runs,
+      databasePath: resolvePicoPaths(session.workDir).workspace.runtimeDatabase,
     });
     if (!(await store.readSessionManifest(session.id))) return undefined;
     return serializeExternalMessageCommit(session.id, eventId, async () => {
@@ -452,7 +466,9 @@ export class RuntimeRun {
         ) {
           throw new Error(`Runtime event ID ${eventId} is already bound to another payload`);
         }
-        return session.commitProjectionMessageOnce(eventId, message);
+        const persisted = await store.append(existing);
+        await session.commitProjectionMessageOnce(eventId, message);
+        return runtimeCommitReceipt(persisted);
       }
       const run = await RuntimeRun.start({
         sessionId: session.id,
@@ -475,12 +491,7 @@ export class RuntimeRun {
 
   /** Raw model-message facts for Session/UI projection, intentionally without checkpoint replacement. */
   async readSessionProjectionEntries(): Promise<RuntimeHistoryProjectionEntry[]> {
-    return projectSessionMessageEvents(await this.store.readSession(this.sessionId)).map(
-      (event) => ({
-        eventId: event.eventId,
-        message: structuredClone(event.data.message),
-      }),
-    );
+    return projectRuntimeSessionMessageEntries(await this.store.readSession(this.sessionId));
   }
 
   run<Result>(execute: () => Promise<Result>, signal?: AbortSignal): Promise<Result> {
@@ -534,8 +545,9 @@ export class RuntimeRun {
       kind: "message.committed",
       data: { message: structuredClone(message) },
     };
-    await this.store.append(event);
-    return session.commitProjectionMessageOnce(eventId, message);
+    const persisted = await this.store.append(event);
+    await session.commitProjectionMessageOnce(eventId, message);
+    return runtimeCommitReceipt(persisted);
   }
 
   /** Writes one immutable, usage-free message from a fork's frozen Session seed. */
@@ -829,8 +841,8 @@ async function resolveForkSourceThroughEventId(
   frozenMessages: readonly Message[],
 ): Promise<string | undefined> {
   if (!(await store.readSessionManifest(sourceSessionId))) return undefined;
-  const sourceMessages = projectSessionMessageEvents(await store.readSession(sourceSessionId));
-  const normalizedSource = sourceMessages.map((event) => stripMessageUsage(event.data.message));
+  const sourceMessages = projectRuntimeSessionMessageEntries(await store.readSession(sourceSessionId));
+  const normalizedSource = sourceMessages.map(({ message }) => stripMessageUsage(message));
   if (!isMessagePrefix(frozenMessages, normalizedSource)) return undefined;
   return sourceMessages[frozenMessages.length - 1]?.eventId;
 }
@@ -840,74 +852,12 @@ function runtimeFailureReason(error: unknown): string {
   return detail.slice(0, 1_000);
 }
 
-function projectSessionMessages(events: readonly RuntimeEvent[]): Message[] {
-  return projectSessionMessageEvents(events).map((event) => event.data.message);
-}
-
-function projectSessionMessageEvents(
-  events: readonly RuntimeEvent[],
-): RuntimeMessageCommittedEvent[] {
-  const eventIndexes = new Map<string, number>();
-  const projected: Array<{
-    readonly eventIndex: number;
-    readonly event: RuntimeMessageCommittedEvent;
-  }> = [];
-  for (const [eventIndex, event] of events.entries()) {
-    if (eventIndexes.has(event.eventId)) {
-      throw new Error(`Runtime session projection contains duplicate event ID ${event.eventId}`);
-    }
-    if (event.kind === "history.rewound") {
-      if (event.data.throughEventId === undefined) {
-        projected.length = 0;
-      } else {
-        const throughEventIndex = eventIndexes.get(event.data.throughEventId);
-        if (throughEventIndex === undefined) {
-          throw new Error(
-            `Runtime session projection rewind references unknown event ${event.data.throughEventId}`,
-          );
-        }
-        const firstRemoved = projected.findIndex(
-          (candidate) => candidate.eventIndex > throughEventIndex,
-        );
-        if (firstRemoved !== -1) projected.splice(firstRemoved);
-      }
-    } else if (runtimeEventHasModelMessage(event)) {
-      projected.push({ eventIndex, event: structuredClone(event) });
-    }
-    eventIndexes.set(event.eventId, eventIndex);
-  }
-  return projected.map(({ event }) => event);
-}
-
-function projectSessionUsage(events: readonly RuntimeEvent[]): SessionUsageSnapshot {
-  const usage = createEmptyUsageSnapshot();
-  for (const event of events) {
-    if (event.kind !== "model.call.settled" || event.data.status !== "succeeded") continue;
-    usage.totalProviderCalls++;
-    const reportedUsage = event.data.usage;
-    if (!reportedUsage) continue;
-
-    const canonical = toCanonicalUsage(reportedUsage);
-    usage.totalUsageReports++;
-    usage.totalPromptTokens += Math.max(0, canonical.totalPromptTokens);
-    usage.totalCompletionTokens += Math.max(0, canonical.totalCompletionTokens);
-    usage.totalInputTokens += canonical.inputTokens;
-    usage.totalCacheReadTokens += canonical.cacheReadTokens;
-    usage.totalCacheWriteTokens += canonical.cacheWriteTokens;
-    usage.totalReasoningTokens += canonical.reasoningTokens;
-    usage.totalCostCNY += event.data.costCNY ?? 0;
-
-    const status = event.data.costStatus ?? "unknown";
-    usage.lastCostStatus = status;
-    if (status === "estimated") usage.totalEstimatedCostReports++;
-    else if (status === "included") usage.totalIncludedCostReports++;
-    else usage.totalUnknownCostReports++;
-
-    const fields = new Set(reportedUsage.reportedFields ?? ["prompt", "completion"]);
-    if (fields.has("input")) usage.totalInputReports++;
-    if (fields.has("cacheRead")) usage.totalCacheReadReports++;
-    if (fields.has("cacheWrite")) usage.totalCacheWriteReports++;
-    if (fields.has("reasoning")) usage.totalReasoningReports++;
-  }
-  return usage;
+function runtimeCommitReceipt(result: RuntimeEventStoreAppendResult): CommitReceipt {
+  return {
+    eventId: result.cursor.eventId,
+    cursor: result.cursor,
+    committedAt: result.committedAt,
+    durable: true,
+    inserted: result.inserted,
+  };
 }

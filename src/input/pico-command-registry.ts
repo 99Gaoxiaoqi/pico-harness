@@ -580,7 +580,7 @@ function createCompactCommand(
         const jobs = options.taskRuntime?.jobService;
         if (jobs) ensureSessionUsageBaseline(jobs, session);
         const runtimeEventStore = new RuntimeEventStore({
-          baseDir: resolvePicoPaths(session.workDir).workspace.runs,
+          databasePath: resolvePicoPaths(session.workDir).workspace.runtimeDatabase,
         });
         const runtimeBacked = Boolean(await runtimeEventStore.readSessionManifest(session.id));
         const provider =

@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -21,7 +21,7 @@ describe("RuntimeEventStore", () => {
   });
 
   it("initializes a versioned runtime session manifest without treating it as a mutable projection", async () => {
-    const store = new RuntimeEventStore({ baseDir });
+    const store = new RuntimeEventStore({ databasePath: join(baseDir, "runtime.sqlite") });
 
     const manifest = await store.initializeSession({
       sessionId: "session-a",
@@ -43,11 +43,12 @@ describe("RuntimeEventStore", () => {
   });
 
   it("appends a canonical event exactly once and rejects divergent reuse of its id", async () => {
-    const store = new RuntimeEventStore({ baseDir });
+    const store = new RuntimeEventStore({ databasePath: join(baseDir, "runtime.sqlite") });
     const event = messageEvent("event-a", "run-a", "one");
+    await store.initializeSession({ sessionId: "session-a", workDir: "/workspace/a" });
 
-    expect(await store.append(event)).toEqual({ inserted: true });
-    expect(await store.append(event)).toEqual({ inserted: false });
+    expect((await store.append(event)).inserted).toBe(true);
+    expect((await store.append(event)).inserted).toBe(false);
     await expect(
       store.append({ ...event, data: { message: { role: "user", content: "different" } } }),
     ).rejects.toBeInstanceOf(RuntimeEventStoreIntegrityError);
@@ -55,10 +56,11 @@ describe("RuntimeEventStore", () => {
     await expect(store.readRun("session-a", "run-a")).resolves.toEqual([event]);
   });
 
-  it("orders a session replay deterministically across run logs", async () => {
-    const store = new RuntimeEventStore({ baseDir });
-    await store.append(messageEvent("event-b", "run-b", "second", "2026-07-15T00:00:01.000Z"));
-    await store.append(messageEvent("event-a", "run-a", "first", "2026-07-15T00:00:00.000Z"));
+  it("preserves one durable append order across runs", async () => {
+    const store = new RuntimeEventStore({ databasePath: join(baseDir, "runtime.sqlite") });
+    await store.initializeSession({ sessionId: "session-a", workDir: "/workspace/a" });
+    await store.append(messageEvent("event-a", "run-a", "first", "2026-07-15T00:00:01.000Z"));
+    await store.append(messageEvent("event-b", "run-b", "second", "2026-07-15T00:00:00.000Z"));
 
     expect((await store.readSession("session-a")).map((event) => event.eventId)).toEqual([
       "event-a",
@@ -67,38 +69,34 @@ describe("RuntimeEventStore", () => {
   });
 
   it("rebuilds same-millisecond cross-run causality from durable append order", async () => {
-    const store = new RuntimeEventStore({ baseDir });
+    const databasePath = join(baseDir, "runtime.sqlite");
+    const store = new RuntimeEventStore({ databasePath });
+    await store.initializeSession({ sessionId: "session-a", workDir: "/workspace/a" });
     const message = messageEvent("event-message", "run-z", "keep this message");
     const rewind = historyRewoundEvent("event-rewind", "run-a", message.eventId);
 
     await store.append(message);
     await store.append(rewind);
 
-    const restartedStore = new RuntimeEventStore({ baseDir });
+    const restartedStore = new RuntimeEventStore({ databasePath });
     const events = await restartedStore.readSession("session-a");
 
     expect(events).toEqual([message, rewind]);
     expect(materializeRuntimeHistory(events)).toEqual([message.data.message]);
-    expect(
-      JSON.parse((await readFile(store.runtimeEventsPath("session-a", "run-z"), "utf8")).trim()),
-    ).toEqual(message);
+    expect(await restartedStore.readRun("session-a", "run-z")).toEqual([message]);
   });
 
-  it("repairs only a torn final line before the next durable append", async () => {
-    const store = new RuntimeEventStore({ baseDir });
+  it("returns a stable durable cursor when the same event is retried after restart", async () => {
+    const databasePath = join(baseDir, "runtime.sqlite");
+    const store = new RuntimeEventStore({ databasePath });
+    await store.initializeSession({ sessionId: "session-a", workDir: "/workspace/a" });
     const first = messageEvent("event-a", "run-a", "first");
-    await store.append(first);
-    const path = store.runtimeEventsPath("session-a", "run-a");
-    await writeFile(path, `${JSON.stringify(first)}\n{"eventId":"partial`, "utf8");
+    const committed = await store.append(first);
+    const restarted = new RuntimeEventStore({ databasePath });
+    const retried = await restarted.append(first);
 
-    const second = messageEvent("event-b", "run-a", "second", "2026-07-15T00:00:01.000Z");
-    await store.append(second);
-
-    expect((await store.readRun("session-a", "run-a")).map((event) => event.eventId)).toEqual([
-      "event-a",
-      "event-b",
-    ]);
-    expect(await readFile(path, "utf8")).toContain("event-b");
+    expect(retried).toEqual({ ...committed, inserted: false });
+    expect(await restarted.getHeadCursor("session-a")).toEqual(committed.cursor);
   });
 });
 
