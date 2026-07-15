@@ -284,6 +284,9 @@ export async function executeAgentRuntime(
   dependencies: RunAgentCliDependencies = {},
 ): Promise<RunAgentCliResult> {
   dependencies.signal?.throwIfAborted();
+  const runtimeEnv: RunAgentEnv = dependencies.picoHome
+    ? { ...(dependencies.env ?? process.env), PICO_HOME: dependencies.picoHome }
+    : (dependencies.env ?? process.env);
   const resumeExistingSession = dependencies.resumeExistingSession === true;
   let prompt = resumeExistingSession ? options.prompt : normalizePrompt(options.prompt);
   const kind = options.provider ?? "openai";
@@ -307,8 +310,7 @@ export async function executeAgentRuntime(
       ...(options.resumeSession ? { resumeSession: options.resumeSession } : {}),
       ...(options.forkSession ? { forkSession: options.forkSession } : {}),
     }));
-  const defaultConfigModel =
-    options.model ?? (dependencies.env ?? process.env).LLM_MODEL ?? defaultModel(kind);
+  const defaultConfigModel = options.model ?? runtimeEnv.LLM_MODEL ?? defaultModel(kind);
   const existingSession = globalSessionManager.get(sessionSelection.sessionId, workDir, {
     picoHome: dependencies.picoHome,
   });
@@ -375,8 +377,7 @@ export async function executeAgentRuntime(
         ],
   );
   setSessionAdditionalDirectories(settings, workspaceRoots.list().slice(1));
-  const traceEnabled =
-    options.trace === true || isTruthyEnv((dependencies.env ?? process.env).PICO_TRACE);
+  const traceEnabled = options.trace === true || isTruthyEnv(runtimeEnv.PICO_TRACE);
   const effectiveOptions: RunAgentCliOptions = {
     ...options,
     ...(backgroundApiKey !== undefined ? { apiKey: backgroundApiKey } : {}),
@@ -395,7 +396,7 @@ export async function executeAgentRuntime(
   };
   const providerConfig = resolveProviderConfig(
     effectiveOptions,
-    dependencies.env ?? process.env,
+    runtimeEnv,
     dependencies.provider !== undefined,
   );
   const ownsRuntimeState = dependencies.runtimeState === undefined;
@@ -408,7 +409,11 @@ export async function executeAgentRuntime(
   const pluginSnapshot = backgroundPolicy
     ? undefined
     : (dependencies.pluginSnapshot ??
-      (await loadPluginRuntimeSnapshot({ workDir, env: dependencies.env ?? process.env })));
+      (await loadPluginRuntimeSnapshot({
+        workDir,
+        env: runtimeEnv,
+        ...(dependencies.picoHome ? { picoHome: dependencies.picoHome } : {}),
+      })));
   const ownsPluginSnapshot =
     pluginSnapshot !== undefined && dependencies.pluginSnapshot === undefined;
   const skillLoaderFactory = (root: string): SkillLoader =>
@@ -418,7 +423,8 @@ export async function executeAgentRuntime(
         claudeCompatibility.enabled && claudeCompatibility.projectResources,
       includeClaudeUserResources: claudeCompatibility.enabled && claudeCompatibility.userResources,
       ...(pluginSnapshot?.skillSources ? { externalSources: pluginSnapshot.skillSources } : {}),
-      env: dependencies.env ?? process.env,
+      env: runtimeEnv,
+      ...(dependencies.picoHome ? { picoHome: dependencies.picoHome } : {}),
     });
 
   try {
@@ -429,6 +435,7 @@ export async function executeAgentRuntime(
         sessionId: session.id,
         session,
         ...(dependencies.picoHome ? { picoHome: dependencies.picoHome } : {}),
+        env: runtimeEnv,
         ...(dependencies.toolDisclosure !== undefined
           ? { toolDisclosure: dependencies.toolDisclosure }
           : {}),
@@ -724,7 +731,7 @@ export async function executeAgentRuntime(
     };
     // 辅助(廉价)模型:用于 FullCompactor 生成摘要,省主模型成本。
     // 配齐 AUX_LLM_BASE_URL / AUX_LLM_API_KEY / AUX_LLM_MODEL 才启用;缺则用主 provider。
-    const auxProvider = loadAuxProvider(dependencies.env ?? process.env, session, trackerOptions);
+    const auxProvider = loadAuxProvider(runtimeEnv, session, trackerOptions);
     const reporter = dependencies.reporter ?? new TerminalReporter();
     const approvalNotifier = dependencies.approvalNotifier ?? failClosedApprovalNotifier;
     dependencies.onEvent?.({ type: "run.started", sessionId: session.id, workDir, at: Date.now() });
@@ -807,7 +814,8 @@ export async function executeAgentRuntime(
           claudeCompatibility.enabled && claudeCompatibility.projectResources,
         includeClaudeUserResources:
           claudeCompatibility.enabled && claudeCompatibility.userResources,
-        env: dependencies.env ?? process.env,
+        env: runtimeEnv,
+        ...(dependencies.picoHome ? { picoHome: dependencies.picoHome } : {}),
       }),
       delegationManager,
       workspaceRoots,
@@ -1149,7 +1157,11 @@ async function prepareBackgroundExecution(
   return prepareBackgroundYoloPolicy({
     workDir,
     policy: execution.policy,
-    trustStore: dependencies.backgroundTrustStore ?? new WorkspaceTrustStore(),
+    trustStore:
+      dependencies.backgroundTrustStore ??
+      new WorkspaceTrustStore({
+        ...(dependencies.picoHome ? { userStateDirectory: dependencies.picoHome } : {}),
+      }),
   });
 }
 
@@ -1347,6 +1359,7 @@ async function loadProfiles(
     includeClaudeProjectResources: boolean;
     includeClaudeUserResources: boolean;
     env: Readonly<Record<string, string | undefined>>;
+    picoHome?: string;
   },
 ): Promise<AgentProfile[]> {
   try {

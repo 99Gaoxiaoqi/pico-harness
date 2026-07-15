@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { assertRegularNonSymlink, writeWorkspaceFileAtomic } from "../trust/secure-file.js";
-import { resolvePicoPaths } from "../../paths/pico-paths.js";
+import { resolvePicoPaths, type ResolvePicoPathsOptions } from "../../paths/pico-paths.js";
 
 interface HookLocalStateFile {
   version: 1;
@@ -10,8 +10,8 @@ interface HookLocalStateFile {
 export class HookLocalStateStore {
   readonly filePath: string;
 
-  constructor(workDir: string) {
-    this.filePath = resolvePicoPaths(workDir).workspace.hookState;
+  constructor(workDir: string, options: ResolvePicoPathsOptions = {}) {
+    this.filePath = resolvePicoPaths(workDir, options).workspace.hookState;
   }
 
   async getAll(): Promise<Readonly<Record<string, boolean>>> {
