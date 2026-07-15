@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -154,6 +154,129 @@ describe("LocalDaemonHost integration", () => {
     } finally {
       await host.stop();
     }
+  });
+
+  it("生产 Desktop 以 host env 的 PICO_HOME 统一落盘，不跟随 process env", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pico-daemon-home-context-"));
+    cleanups.push(() => rm(root, { recursive: true, force: true }));
+    const workspace = join(root, "workspace");
+    const hostPicoHome = join(root, "host-pico-home");
+    const processPicoHome = join(root, "process-pico-home");
+    await mkdir(workspace);
+    execFileSync("git", ["init", "--quiet"], { cwd: workspace });
+    execFileSync(
+      "git",
+      [
+        "-c",
+        "user.name=Pico Integration",
+        "-c",
+        "user.email=pico@example.test",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "initial",
+      ],
+      { cwd: workspace },
+    );
+    const endpoint = resolveLocalDaemonEndpoint({
+      runtimeDir: join(root, "runtime"),
+      userIdentity: "home-context-test",
+    });
+    const previousPicoHome = process.env.PICO_HOME;
+    process.env.PICO_HOME = processPicoHome;
+    const trustStore = new WorkspaceTrustStore({ userStateDirectory: hostPicoHome });
+    await trustStore.trust(await trustStore.canonicalize(workspace));
+    const host = createProductionLocalDaemonHost({
+      endpoint,
+      trustStore,
+      agentRuntime: new TaskStateAgentRuntime(),
+      credentialVault: new AvailableCredentialVault(),
+      env: {
+        PICO_HOME: hostPicoHome,
+        LLM_BASE_URL: "https://home-context.example.test/v1",
+        LLM_API_KEY: "home-context-secret",
+        LLM_MODEL: "context-model",
+      },
+    });
+    let sessionId: string | undefined;
+    try {
+      await host.start();
+      const client = new LocalRuntimeClient(endpoint);
+      try {
+        await expect(
+          client.request("workspace.register", { workspacePath: workspace }),
+        ).resolves.toEqual(expect.objectContaining({ registered: true }));
+        const created = (await client.request("session.create", {
+          workspacePath: workspace,
+          title: "Host-owned state",
+        })) as { session: { sessionId: string } };
+        sessionId = created.session.sessionId;
+        const started = (await client.request("run.start", {
+          workspacePath: workspace,
+          sessionId,
+          prompt: "persist task state",
+        })) as { runId: string };
+        await expect
+          .poll(async () => {
+            const listed = (await client.request("runs.list", { workspacePath: workspace })) as {
+              runs: Array<{ runId: string; status: string }>;
+            };
+            return listed.runs.find((run) => run.runId === started.runId)?.status;
+          })
+          .toBe("succeeded");
+        const activeSession = globalSessionManager.get(sessionId, workspace, {
+          picoHome: hostPicoHome,
+        });
+        if (!activeSession) throw new Error("Host-owned session is not active");
+        activeSession.sessionSummaryStore.save(
+          sessionId,
+          "host-owned summary",
+          activeSession.length,
+        );
+        await expect(client.request("session.list", { workspacePath: workspace })).resolves.toEqual(
+          {
+            sessions: expect.arrayContaining([
+              expect.objectContaining({ sessionId, title: "Host-owned state" }),
+            ]),
+          },
+        );
+      } finally {
+        client.close();
+        await host.stop();
+        if (sessionId) {
+          await globalSessionManager
+            .delete(sessionId, workspace, { picoHome: hostPicoHome })
+            ?.close();
+        }
+      }
+    } finally {
+      if (previousPicoHome === undefined) delete process.env.PICO_HOME;
+      else process.env.PICO_HOME = previousPicoHome;
+    }
+    if (!sessionId) throw new Error("Desktop session was not created");
+
+    const hostPaths = resolvePicoPaths(workspace, { picoHome: hostPicoHome });
+    await expect(stat(join(hostPaths.workspace.sessions, `${sessionId}.jsonl`))).resolves.toEqual(
+      expect.objectContaining({}),
+    );
+    await expect(stat(join(hostPaths.workspace.root, "sessions.db"))).resolves.toEqual(
+      expect.objectContaining({}),
+    );
+    await expect(readdir(hostPaths.workspace.summaries)).resolves.toEqual([
+      expect.stringMatching(/\.json$/u),
+    ]);
+    await expect(stat(hostPaths.workspace.runtimeDatabase)).resolves.toEqual(
+      expect.objectContaining({}),
+    );
+    await expect(stat(join(hostPaths.workspace.tasks, "state.json"))).resolves.toEqual(
+      expect.objectContaining({}),
+    );
+    await expect(stat(hostPaths.home.daemonWorkspaces)).resolves.toEqual(
+      expect.objectContaining({}),
+    );
+    await expect(
+      stat(resolvePicoPaths(workspace, { picoHome: processPicoHome }).workspace.root),
+    ).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("生产桌面 Run 兼容 TUI 的旧版环境变量模型路由", async () => {
@@ -895,6 +1018,30 @@ class CapturingActivationAgentRuntime extends AgentRuntime {
       workDir: options.dir ?? process.cwd(),
       finalMessage: "activation complete",
       usage: { promptTokens: 5, completionTokens: 2, costCNY: 0.001 },
+      messages: [],
+    };
+  }
+}
+
+class TaskStateAgentRuntime extends AgentRuntime {
+  override async execute(
+    options: RunAgentCliOptions,
+    dependencies: RunAgentCliDependencies = {},
+  ): Promise<RunAgentCliResult> {
+    const sessionId = options.session ?? "home-context-session";
+    const workDir = options.dir ?? process.cwd();
+    if (!dependencies.runtimeState?.taskHostRuntime) {
+      throw new Error("home context test requires a Git task host");
+    }
+    dependencies.runtimeState.taskRegistry.create("local_bash", {
+      description: "persist host-owned task state",
+    });
+    return {
+      sessionId,
+      sessionSelection: { mode: "resume", sessionId },
+      workDir,
+      finalMessage: "task state persisted",
+      usage: { promptTokens: 1, completionTokens: 1, costCNY: 0 },
       messages: [],
     };
   }

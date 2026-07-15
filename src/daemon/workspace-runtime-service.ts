@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import { WorkspaceTaskRuntime, type WorkspaceRunContext } from "../runtime/workspace-runtime.js";
 import { resolvePicoHome } from "../paths/pico-paths.js";
 import {
@@ -74,13 +75,18 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
 
   constructor(private readonly options: WorkspaceRuntimeServiceOptions) {
     this.maxRetainedEvents = Math.max(1, options.maxRetainedEvents ?? 2_000);
-    this.registrationStore = options.registrationStore ?? new WorkspaceRegistrationStore();
     this.picoHome = resolvePicoHome({ env: options.env });
+    this.registrationStore =
+      options.registrationStore ??
+      new WorkspaceRegistrationStore(join(this.picoHome, "daemon-workspaces.json"));
     this.registry = new WorkspaceRuntimeRegistry({
       create: async (workspacePath) => {
         this.eventStore(workspacePath);
         const runtime = await (options.createWorkspaceRuntime?.(workspacePath) ??
-          WorkspaceTaskRuntime.create({ workDir: workspacePath }));
+          WorkspaceTaskRuntime.create({
+            workDir: workspacePath,
+            taskHostRuntimeOptions: { picoHome: this.picoHome },
+          }));
         this.unsubscribers.set(
           workspacePath,
           runtime.subscribe((event) => {
@@ -339,7 +345,11 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
   private eventStore(workspacePath: string): RuntimeStore {
     const store = this.eventStores.get(workspacePath);
     if (store) return store;
-    const created = new RuntimeStore({ workDir: workspacePath, now: this.options.now });
+    const created = new RuntimeStore({
+      workDir: workspacePath,
+      picoHome: this.picoHome,
+      now: this.options.now,
+    });
     this.eventStores.set(workspacePath, created);
     return created;
   }

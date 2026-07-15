@@ -95,6 +95,7 @@ export type NewStorageOperation =
 
 export interface OperationJournalOptions {
   workDir: string;
+  picoHome?: string;
   now?: () => Date;
 }
 
@@ -104,7 +105,9 @@ export class StorageOperationJournal {
   private referenceIndex?: OperationReferenceIndex;
 
   constructor(options: OperationJournalOptions) {
-    this.directory = resolvePicoPaths(resolve(options.workDir)).workspace.storageOperations;
+    this.directory = resolvePicoPaths(resolve(options.workDir), {
+      picoHome: options.picoHome,
+    }).workspace.storageOperations;
     this.now = options.now ?? (() => new Date());
   }
 

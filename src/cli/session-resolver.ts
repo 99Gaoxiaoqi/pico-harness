@@ -39,6 +39,7 @@ export interface CliSessionSummary {
 }
 
 export interface ListCliSessionSummariesOptions {
+  picoHome?: string;
   /** Integration/embedded override; production defaults to ~/.pico/session-catalog. */
   catalog?: SessionCatalog;
   projector?: SessionCatalogProjector;
@@ -46,6 +47,7 @@ export interface ListCliSessionSummariesOptions {
 
 export interface ResolveCliSessionOptions {
   workDir: string;
+  picoHome?: string;
   session?: string;
   continueSession?: boolean;
   resumeSession?: string;
@@ -64,12 +66,12 @@ interface SessionFileInfo {
 export async function resolveCliSession(
   options: ResolveCliSessionOptions,
 ): Promise<CliSessionSelection> {
-  await reconcileUnfinishedSessionForks(options.workDir);
+  await reconcileUnfinishedSessionForks(options.workDir, { picoHome: options.picoHome });
   assertSingleSessionMode(options);
 
   if (options.resumeSession) {
     const sessionId = options.resumeSession;
-    await assertSessionFileExists(options.workDir, sessionId, "resume");
+    await assertSessionFileExists(options.workDir, sessionId, "resume", options.picoHome);
     return rememberSelection({ mode: "resume", sessionId }, options.workDir);
   }
 
@@ -78,7 +80,7 @@ export async function resolveCliSession(
   }
 
   if (options.forkSession) {
-    await assertSessionFileExists(options.workDir, options.forkSession, "fork");
+    await assertSessionFileExists(options.workDir, options.forkSession, "fork", options.picoHome);
     return rememberSelection(
       {
         mode: "fork",
@@ -90,7 +92,7 @@ export async function resolveCliSession(
   }
 
   if (options.continueSession) {
-    const latest = await findLatestSessionId(options.workDir);
+    const latest = await findLatestSessionId(options.workDir, options.picoHome);
     if (latest) {
       return rememberSelection({ mode: "continue", sessionId: latest }, options.workDir);
     }
@@ -107,17 +109,19 @@ export async function listCliSessionSummaries(
   workDir: string,
   options: ListCliSessionSummariesOptions = {},
 ): Promise<CliSessionSummary[]> {
-  await reconcileUnfinishedSessionForks(workDir);
+  await reconcileUnfinishedSessionForks(workDir, { picoHome: options.picoHome });
   const projector =
     options.projector ??
     (options.catalog
-      ? new SessionCatalogProjector(options.catalog)
-      : process.env.PICO_SESSION_CATALOG === "0"
-        ? undefined
-        : getDefaultSessionCatalogProjector());
+      ? new SessionCatalogProjector(options.catalog, { picoHome: options.picoHome })
+      : options.picoHome
+        ? new SessionCatalogProjector(undefined, { picoHome: options.picoHome })
+        : process.env.PICO_SESSION_CATALOG === "0"
+          ? undefined
+          : getDefaultSessionCatalogProjector());
   const catalogEntries = projector ? (await projector.syncWorkspace(workDir)).entries : [];
   const catalogBySession = new Map(catalogEntries.map((entry) => [entry.sessionId, entry]));
-  const files = await listSessionFiles(workDir);
+  const files = await listSessionFiles(workDir, options.picoHome);
   const summaries: CliSessionSummary[] = [];
   for (const file of files) {
     const catalog = catalogBySession.get(file.sessionId);
@@ -189,12 +193,15 @@ function assertSingleSessionMode(options: ResolveCliSessionOptions): void {
   }
 }
 
-async function findLatestSessionId(workDir: string): Promise<string | undefined> {
-  return (await listCliSessionSummaries(workDir))[0]?.id;
+async function findLatestSessionId(
+  workDir: string,
+  picoHome?: string,
+): Promise<string | undefined> {
+  return (await listCliSessionSummaries(workDir, { picoHome }))[0]?.id;
 }
 
-async function listSessionFiles(workDir: string): Promise<SessionFileInfo[]> {
-  const sessionsDir = sessionsDirectory(workDir);
+async function listSessionFiles(workDir: string, picoHome?: string): Promise<SessionFileInfo[]> {
+  const sessionsDir = sessionsDirectory(workDir, picoHome);
   let entries: string[];
   try {
     entries = await readdir(sessionsDir);
@@ -264,8 +271,9 @@ async function assertSessionFileExists(
   workDir: string,
   sessionId: string,
   action: "resume" | "fork",
+  picoHome?: string,
 ): Promise<void> {
-  const path = sessionFilePath(workDir, sessionId);
+  const path = sessionFilePath(workDir, sessionId, picoHome);
   const info = await stat(path).catch(() => undefined);
   if (info?.isFile()) return;
 
@@ -283,10 +291,10 @@ function rememberSelection(selection: CliSessionSelection, workDir: string): Cli
   return selection;
 }
 
-function sessionsDirectory(workDir: string): string {
-  return resolvePicoPaths(workDir).workspace.sessions;
+function sessionsDirectory(workDir: string, picoHome?: string): string {
+  return resolvePicoPaths(workDir, { picoHome }).workspace.sessions;
 }
 
-function sessionFilePath(workDir: string, sessionId: string): string {
-  return join(sessionsDirectory(workDir), `${sessionId}.jsonl`);
+function sessionFilePath(workDir: string, sessionId: string, picoHome?: string): string {
+  return join(sessionsDirectory(workDir, picoHome), `${sessionId}.jsonl`);
 }

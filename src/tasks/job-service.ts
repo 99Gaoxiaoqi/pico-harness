@@ -112,7 +112,10 @@ export class JobService {
     const service = new JobService(options);
     const legacyPath =
       options.legacyTaskStorePath ??
-      join(resolvePicoPaths(options.workDir).workspace.tasks, "state.json");
+      join(
+        resolvePicoPaths(options.workDir, { picoHome: options.picoHome }).workspace.tasks,
+        "state.json",
+      );
     const legacyImport = await service.store.importLegacyTaskStore(legacyPath);
     return { service, legacyImport };
   }

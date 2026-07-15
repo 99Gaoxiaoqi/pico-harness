@@ -20,7 +20,7 @@ import {
 } from "../storage/operation-journal.js";
 import {
   getDefaultSessionCatalogProjector,
-  type SessionCatalogProjector,
+  SessionCatalogProjector,
 } from "../storage/session-catalog-projection.js";
 import { createSessionIdentity } from "./session-identity.js";
 import type {
@@ -39,7 +39,7 @@ import {
   type SessionLineage,
   type SessionMetaV3,
 } from "./session-store.js";
-import { resolvePicoPaths } from "../paths/pico-paths.js";
+import { resolvePicoHome, resolvePicoPaths, type PicoWorkspacePaths } from "../paths/pico-paths.js";
 
 const SAFE_SESSION_ID = /^[A-Za-z0-9._-]+$/u;
 
@@ -50,6 +50,7 @@ export interface SessionForkServiceHooks {
 
 export interface SessionForkServiceOptions {
   readonly workDir: string;
+  readonly picoHome?: string;
   readonly sessionManager?: SessionManager;
   readonly journal?: StorageOperationJournal;
   readonly catalogProjector?: SessionCatalogProjector;
@@ -103,6 +104,8 @@ interface ClonedSidecars {
  */
 export class SessionForkService {
   readonly workDir: string;
+  private readonly picoHome?: string;
+  private readonly workspacePaths: PicoWorkspacePaths;
   readonly journal: StorageOperationJournal;
   private readonly sessionManager: SessionManager;
   private readonly catalogProjector: SessionCatalogProjector;
@@ -116,14 +119,24 @@ export class SessionForkService {
 
   constructor(options: SessionForkServiceOptions) {
     this.workDir = resolve(options.workDir);
+    this.picoHome = options.picoHome ? resolvePicoHome({ picoHome: options.picoHome }) : undefined;
+    const paths = resolvePicoPaths(this.workDir, { picoHome: this.picoHome });
+    this.workspacePaths = paths.workspace;
     this.sessionManager = options.sessionManager ?? globalSessionManager;
-    this.journal = options.journal ?? new StorageOperationJournal({ workDir: this.workDir });
-    this.catalogProjector = options.catalogProjector ?? getDefaultSessionCatalogProjector();
-    this.fileHistoryBaseDir = options.fileHistoryBaseDir ?? fileHistoryDefaultBaseDir();
-    const workspacePaths = resolvePicoPaths(this.workDir).workspace;
+    this.journal =
+      options.journal ??
+      new StorageOperationJournal({ workDir: this.workDir, picoHome: this.picoHome });
+    this.catalogProjector =
+      options.catalogProjector ??
+      (this.picoHome
+        ? new SessionCatalogProjector(undefined, { picoHome: this.picoHome })
+        : getDefaultSessionCatalogProjector());
+    this.fileHistoryBaseDir =
+      options.fileHistoryBaseDir ??
+      (this.picoHome ? paths.home.fileHistory : fileHistoryDefaultBaseDir());
     this.summaryIndexPath =
-      options.summaryIndexPath ?? join(workspacePaths.memory, "summaries.json");
-    this.artifactBaseDir = options.artifactBaseDir ?? workspacePaths.artifacts;
+      options.summaryIndexPath ?? join(this.workspacePaths.memory, "summaries.json");
+    this.artifactBaseDir = options.artifactBaseDir ?? this.workspacePaths.artifacts;
     this.hooks = options.hooks;
     this.createOperationId = options.createOperationId ?? randomUUID;
     this.coordinator = new ForkOperationCoordinator({
@@ -138,7 +151,9 @@ export class SessionForkService {
     if (input.sourceSessionId === input.targetSessionId) {
       throw new Error("Fork source 与 target sessionId 不能相同");
     }
-    const source = await this.sessionManager.getOrCreate(input.sourceSessionId, this.workDir);
+    const source = await this.sessionManager.getOrCreate(input.sourceSessionId, this.workDir, {
+      picoHome: this.picoHome,
+    });
     return source.serialize(async () => {
       // JSONL cursor、File History、Summary 与 Artifact 必须属于同一源会话
       // 串行边界。否则 cursor 冻结后新产生的 sidecar 会被克隆进旧对话 fork。
@@ -158,7 +173,7 @@ export class SessionForkService {
         sourceCursor: snapshot.cursor,
         targetSessionId: input.targetSessionId,
         targetMode: input.targetMode,
-        stagingDirectory: join(resolvePicoPaths(this.workDir).workspace.forkStaging, operationId),
+        stagingDirectory: join(this.workspacePaths.forkStaging, operationId),
       });
       if (operation.state === "needs_attention") {
         throw new SessionForkNeedsAttentionError(operation);
@@ -175,7 +190,11 @@ export class SessionForkService {
     const results: ForkReconciliationResult[] = [];
     for (const operation of await this.journal.listUnfinished()) {
       if (operation.kind !== "fork") continue;
-      const source = await this.sessionManager.getOrCreate(operation.sourceSessionId, this.workDir);
+      const source = await this.sessionManager.getOrCreate(
+        operation.sourceSessionId,
+        this.workDir,
+        { picoHome: this.picoHome },
+      );
       const reconciled = await source.serialize(() =>
         this.coordinator.reconcile(operation.operationId),
       );
@@ -190,6 +209,7 @@ export class SessionForkService {
         const source = await this.sessionManager.getOrCreate(
           operation.sourceSessionId,
           this.workDir,
+          { picoHome: this.picoHome },
         );
         const snapshot = await source.readDurableForkSnapshot();
         if (!this.frozenByOperation.has(operation.operationId)) {
@@ -251,7 +271,7 @@ export class SessionForkService {
     } satisfies SessionLineage;
     const stagedSessionPath = this.stagedSessionPath(operation);
     const targetSessionPath = this.sessionPath(operation.targetSessionId);
-    await mkdir(resolvePicoPaths(this.workDir).workspace.sessions, {
+    await mkdir(this.workspacePaths.sessions, {
       recursive: true,
       mode: 0o700,
     });
@@ -295,7 +315,9 @@ export class SessionForkService {
   private async getFrozenSource(operation: ForkStorageOperation): Promise<FrozenForkSource> {
     const cached = this.frozenByOperation.get(operation.operationId);
     if (cached) return cached;
-    const source = await this.sessionManager.getOrCreate(operation.sourceSessionId, this.workDir);
+    const source = await this.sessionManager.getOrCreate(operation.sourceSessionId, this.workDir, {
+      picoHome: this.picoHome,
+    });
     const snapshot = await source.readDurableForkSnapshot();
     const frozen = {
       sourceSessionId: operation.sourceSessionId,
@@ -325,20 +347,21 @@ export class SessionForkService {
 
   private stagedSessionPath(operation: ForkStorageOperation): string {
     return join(
-      resolvePicoPaths(this.workDir).workspace.sessions,
+      this.workspacePaths.sessions,
       "." + operation.targetSessionId + ".fork-" + operation.operationId + ".jsonl",
     );
   }
 
   private sessionPath(sessionId: string): string {
-    return join(resolvePicoPaths(this.workDir).workspace.sessions, sessionId + ".jsonl");
+    return join(this.workspacePaths.sessions, sessionId + ".jsonl");
   }
 }
 
 export async function reconcileUnfinishedSessionForks(
   workDir: string,
+  options: { readonly picoHome?: string } = {},
 ): Promise<ForkReconciliationResult[]> {
-  return new SessionForkService({ workDir }).reconcileUnfinished();
+  return new SessionForkService({ workDir, picoHome: options.picoHome }).reconcileUnfinished();
 }
 
 function filteredRuntimePatch(frozen: FrozenForkSource): SessionRuntimeStatePatch | undefined {
