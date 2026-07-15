@@ -12,8 +12,10 @@ import {
   SessionCatalogProjector,
 } from "../storage/session-catalog-projection.js";
 import { resolvePicoPaths } from "../paths/pico-paths.js";
+import { RuntimeEventStore } from "../runtime/runtime-event-store.js";
 
 export type CliSessionMode = "new" | "continue" | "resume" | "fork";
+export type CliSessionHistorySource = "legacy" | "runtime-event-v1";
 
 export interface CliSessionSelection {
   mode: CliSessionMode;
@@ -30,6 +32,8 @@ export interface CliSessionSummary {
   title?: string;
   firstMessage?: string;
   lastMessage?: string;
+  /** Canonical history source; legacy records remain listable but read-only. */
+  historySource?: CliSessionHistorySource;
   /** Source session ID persisted with a forked conversation. */
   forkFrom?: string;
   /** Durable journal identity; sessionId remains the human-facing compatibility key. */
@@ -69,16 +73,17 @@ export async function resolveCliSession(
 
   if (options.resumeSession) {
     const sessionId = options.resumeSession;
-    await assertSessionFileExists(options.workDir, sessionId, "resume");
+    await assertSessionIsWritable(options.workDir, sessionId, "--resume", true);
     return rememberSelection({ mode: "resume", sessionId }, options.workDir);
   }
 
   if (options.session) {
+    await assertSessionIsWritable(options.workDir, options.session, "--session", false);
     return rememberSelection({ mode: "resume", sessionId: options.session }, options.workDir);
   }
 
   if (options.forkSession) {
-    await assertSessionFileExists(options.workDir, options.forkSession, "fork");
+    await assertSessionIsWritable(options.workDir, options.forkSession, "--fork", true);
     return rememberSelection(
       {
         mode: "fork",
@@ -117,12 +122,16 @@ export async function listCliSessionSummaries(
         : getDefaultSessionCatalogProjector());
   const catalogEntries = projector ? (await projector.syncWorkspace(workDir)).entries : [];
   const catalogBySession = new Map(catalogEntries.map((entry) => [entry.sessionId, entry]));
+  const runtimeEventStore = new RuntimeEventStore({
+    baseDir: resolvePicoPaths(workDir).workspace.runs,
+  });
   const files = await listSessionFiles(workDir);
   const summaries: CliSessionSummary[] = [];
   for (const file of files) {
+    const historySource = await getSessionHistorySource(runtimeEventStore, file.sessionId);
     const catalog = catalogBySession.get(file.sessionId);
     if (catalog && catalogMatchesSessionFile(catalog, file)) {
-      summaries.push(summaryFromCatalog(workDir, file, catalog));
+      summaries.push({ ...summaryFromCatalog(workDir, file, catalog), historySource });
       continue;
     }
     const records = await new SessionStore(file.path).load();
@@ -157,6 +166,7 @@ export async function listCliSessionSummaries(
       ...(catalog ? { logId: catalog.logId } : {}),
       ...(catalog?.lineage.parentLogId ? { parentLogId: catalog.lineage.parentLogId } : {}),
       ...(catalog?.lineage.forkEventId ? { forkEventId: catalog.lineage.forkEventId } : {}),
+      historySource,
     });
   }
 
@@ -190,7 +200,9 @@ function assertSingleSessionMode(options: ResolveCliSessionOptions): void {
 }
 
 async function findLatestSessionId(workDir: string): Promise<string | undefined> {
-  return (await listCliSessionSummaries(workDir))[0]?.id;
+  return (await listCliSessionSummaries(workDir)).find(
+    (session) => session.historySource === "runtime-event-v1",
+  )?.id;
 }
 
 async function listSessionFiles(workDir: string): Promise<SessionFileInfo[]> {
@@ -260,17 +272,70 @@ function compactSessionText(value: string | undefined): string | undefined {
   return compacted.length <= 240 ? compacted : `${compacted.slice(0, 239)}…`;
 }
 
-async function assertSessionFileExists(
+type ExplicitSessionOption = "--resume" | "--session" | "--fork";
+
+async function assertSessionIsWritable(
   workDir: string,
   sessionId: string,
-  action: "resume" | "fork",
+  option: ExplicitSessionOption,
+  required: boolean,
 ): Promise<void> {
   const path = sessionFilePath(workDir, sessionId);
   const info = await stat(path).catch(() => undefined);
-  if (info?.isFile()) return;
+  if (!info?.isFile()) {
+    if (!required) return;
 
-  const prefix = action === "resume" ? "无法恢复" : "无法 fork";
-  throw new Error(`${prefix} session ${sessionId}: 找不到 ${path}`);
+    const prefix = option === "--fork" ? "无法 fork" : "无法恢复";
+    throw new Error(`${prefix} session ${sessionId}: 找不到 ${path}`);
+  }
+
+  const runtimeEventStore = new RuntimeEventStore({
+    baseDir: resolvePicoPaths(workDir).workspace.runs,
+  });
+  if ((await getSessionHistorySource(runtimeEventStore, sessionId)) === "runtime-event-v1") return;
+  if (await isEmptySessionProjection(path, sessionId)) return;
+  if (await isPendingRuntimeForkProjection(path, sessionId)) return;
+
+  throw new Error(`${option} 不能使用 session ${sessionId}: legacy 历史为只读`);
+}
+
+/** A brand-new Session JSONL may exist before RuntimeEvent initializes its manifest. */
+async function isEmptySessionProjection(path: string, sessionId: string): Promise<boolean> {
+  const snapshot = await new SessionStore(path).inspectJournal();
+  const metadata = snapshot.metadata;
+  return (
+    replaySessionRecords(snapshot.records).history.length === 0 &&
+    metadata?.schemaVersion === 3 &&
+    "logId" in metadata &&
+    metadata.sessionId === sessionId
+  );
+}
+
+/** A published fork seed is a recoverable Runtime bootstrap, not legacy history. */
+async function isPendingRuntimeForkProjection(path: string, sessionId: string): Promise<boolean> {
+  const snapshot = await new SessionStore(path).inspectJournal();
+  const metadata = snapshot.metadata;
+  if (metadata?.schemaVersion !== 3 || !("logId" in metadata) || metadata.sessionId !== sessionId) {
+    return false;
+  }
+  const seed = snapshot.records.find(
+    (record) => record.type === "event" && record.kind === "session.seeded",
+  );
+  return (
+    seed?.data.lineage?.relation === "fork" &&
+    typeof seed.data.lineage.parentSessionId === "string" &&
+    seed.data.lineage.parentSessionId.length > 0
+  );
+}
+
+async function getSessionHistorySource(
+  runtimeEventStore: RuntimeEventStore,
+  sessionId: string,
+): Promise<CliSessionHistorySource> {
+  const manifest = await runtimeEventStore.readSessionManifest(sessionId).catch(() => undefined);
+  return manifest?.sessionId === sessionId && manifest.historySource === "runtime-event-v1"
+    ? "runtime-event-v1"
+    : "legacy";
 }
 
 /** 仅用于新 fork 构建失败时清理尚未公布的目标会话。 */

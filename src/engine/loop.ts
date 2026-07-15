@@ -10,6 +10,7 @@
 // 而是依靠喂给它的 Session 实例进行推理 —— 随时休眠、随时被唤醒的记忆连续体。
 // 每轮组装 = SystemPrompt + Session 完整历史投影，接近 token 水位时主动整理。
 
+import { createHash, randomUUID } from "node:crypto";
 import type { LLMProvider, LLMProviderRequestOptions } from "../provider/interface.js";
 import { ContextOverflowError, isAbortError } from "../provider/errors.js";
 import { generateWithRetry, type RetryInfo } from "../provider/retry.js";
@@ -30,7 +31,12 @@ import type {
 } from "../tools/subagent.js";
 import type { Compactor } from "../context/compactor.js";
 import { ContextCompactionError, sanitizeToolPairs } from "../context/compactor.js";
-import type { FullCompactor } from "../context/full-compactor.js";
+import type {
+  FullCompactionPreview,
+  FullCompactionRequest,
+  FullCompactor,
+} from "../context/full-compactor.js";
+import type { EvidenceArchive } from "../context/evidence-archive.js";
 import type { ContextBudget } from "../context/context-budget.js";
 import {
   estimateModelInputTokens,
@@ -62,6 +68,14 @@ import type { HookService } from "../hooks/service.js";
 import type { ToolObservationProcessor } from "../tools/tool-result-observation.js";
 import { ToolAccesses } from "../tools/tool-access.js";
 import { ToolScheduler } from "../tools/tool-scheduler.js";
+import { resolvePicoPaths } from "../paths/pico-paths.js";
+import { currentRunLedger, RunLedger, type RunTerminalStatus } from "./run-ledger.js";
+import {
+  currentRuntimeRun,
+  currentRuntimeToolCallId,
+  RuntimeRun,
+  runWithRuntimeToolCall,
+} from "../runtime/runtime-run.js";
 import { SUBAGENT_OUTPUT_BUDGET } from "../tools/subagent-budget.js";
 import {
   fileHistoryAddJournalWarning,
@@ -457,6 +471,8 @@ export interface AgentEngineOptions {
   reporter?: Reporter;
   /** 工具 Observation 入上下文前的处理器,用于大输出摘要与 artifact 外部化 */
   observationProcessor?: ToolObservationProcessor;
+  /** 完整原始工具交换的不可变归档；仅 RuntimeEvent 主链启用。 */
+  runtimeEvidenceArchive?: EvidenceArchive;
   /** 子代理完整报告写入器；超过常规摘要目标时先落盘，再向主上下文回灌预览。 */
   subagentReportArtifactWriter?: SubagentReportArtifactWriter;
   /**
@@ -555,6 +571,7 @@ export class AgentEngine implements AgentRunner {
   private readonly onPlanExit?: () => void;
   private readonly reporter: Reporter;
   private readonly observationProcessor?: ToolObservationProcessor;
+  private readonly runtimeEvidenceArchive?: EvidenceArchive;
   private readonly subagentReportArtifactWriter?: SubagentReportArtifactWriter;
   private readonly tracer?: Tracer;
   /**
@@ -604,6 +621,7 @@ export class AgentEngine implements AgentRunner {
     this.onPlanExit = opts.onPlanExit;
     this.reporter = opts.reporter ?? new SilentReporter();
     this.observationProcessor = opts.observationProcessor;
+    this.runtimeEvidenceArchive = opts.runtimeEvidenceArchive;
     this.subagentReportArtifactWriter = opts.subagentReportArtifactWriter;
     this.tracer = opts.tracer;
     this.steerQueue = opts.steerQueue;
@@ -757,6 +775,112 @@ export class AgentEngine implements AgentRunner {
    */
   private static readonly MAX_TOOL_CONCURRENCY = 8;
 
+  /** RuntimeEvent is the source of truth for production model history; Session is its UI projection. */
+  private async readModelHistory(session: Session): Promise<Message[]> {
+    const runtimeRun = currentRuntimeRun();
+    if (runtimeRun?.sessionId === session.id) return runtimeRun.readModelHistory();
+    return session.getModelContext();
+  }
+
+  private isRuntimeSession(session: Session): boolean {
+    return currentRuntimeRun()?.sessionId === session.id;
+  }
+
+  /**
+   * Runtime sessions never destructively compact the Session projection. A checkpoint
+   * replaces only the model read model and leaves the immutable facts/UI transcript intact.
+   */
+  private async recordRuntimeCheckpoint(
+    session: Session,
+    request: FullCompactionRequest,
+    signal?: AbortSignal,
+  ): Promise<FullCompactionPreview | undefined> {
+    const runtimeRun = currentRuntimeRun();
+    if (!runtimeRun || runtimeRun.sessionId !== session.id || !this.fullCompactor) {
+      return undefined;
+    }
+    const entries = await runtimeRun.readModelHistoryEntries();
+    if (entries.length < 2) return undefined;
+
+    const hookSource = request.trigger === "manual" ? "manual" : "auto";
+    await this.hookService?.dispatch(
+      "PreCompact",
+      { source: hookSource, messageCount: entries.length },
+      { signal },
+    );
+    const preview = await this.fullCompactor.preview(
+      session,
+      entries.map(({ message }) => message),
+      request,
+      signal,
+    );
+    if (!preview) return undefined;
+
+    const covered = entries.slice(0, preview.compactedCount);
+    const through = covered.at(-1);
+    if (!through) return undefined;
+    const checkpointId = `checkpoint:${randomUUID()}`;
+    await runtimeRun.recordCheckpoint({
+      checkpointId,
+      coveredEventCount: covered.length,
+      sourceDigest: runtimeHistoryDigest(covered.map(({ eventId }) => eventId)),
+      throughEventId: through.eventId,
+      summary: {
+        role: "assistant",
+        content: preview.wrappedSummary,
+        providerData: { picoKind: "runtime_checkpoint", picoCheckpointId: checkpointId },
+      },
+    });
+    await this.hookService?.dispatch(
+      "PostCompact",
+      { source: hookSource, messageCount: (await runtimeRun.readModelHistoryEntries()).length },
+      { signal },
+    );
+    return preview;
+  }
+
+  /** Replaces prior context with a minimal, auditable checkpoint while preserving this input. */
+  private async hardResetRuntimeHistory(
+    session: Session,
+    currentRequestSessionIndex: number,
+  ): Promise<void> {
+    const runtimeRun = currentRuntimeRun();
+    if (!runtimeRun || runtimeRun.sessionId !== session.id) {
+      throw new Error("Runtime hard reset requires the active canonical run");
+    }
+    const rawProjection = await runtimeRun.readSessionProjectionEntries();
+    const currentRequest = rawProjection[currentRequestSessionIndex];
+    if (!currentRequest) {
+      throw new Error("Runtime hard reset cannot locate the current user request");
+    }
+    const entries = await runtimeRun.readModelHistoryEntries();
+    const currentIndex = entries.findIndex((entry) => entry.eventId === currentRequest.eventId);
+    if (currentIndex === 0) return;
+
+    const covered = currentIndex > 0 ? entries.slice(0, currentIndex) : entries;
+    const through = covered.at(-1);
+    if (!through) return;
+    const checkpointId = `hard-reset:${randomUUID()}`;
+    const summary =
+      currentIndex === -1 &&
+      currentRequest.message.role === "user" &&
+      currentRequest.message.toolCallId === undefined
+        ? structuredClone(currentRequest.message)
+        : {
+            role: "assistant" as const,
+            content:
+              "[CONTEXT RESET] Earlier conversation context was intentionally reset after a context-limit recovery. Treat the current user request as the only active task.",
+            providerData: { picoKind: "runtime_hard_reset", picoCheckpointId: checkpointId },
+          };
+    await runtimeRun.recordCheckpoint({
+      checkpointId,
+      coveredEventCount: covered.length,
+      sourceDigest: runtimeHistoryDigest(covered.map(({ eventId }) => eventId)),
+      throughEventId: through.eventId,
+      summary,
+    });
+  }
+
   private async prepareModelContext(
     session: Session,
     systemPrompt: string,
@@ -766,7 +890,7 @@ export class AgentEngine implements AgentRunner {
     allowFullCompaction = true,
   ): Promise<Message[]> {
     signal?.throwIfAborted();
-    const rawHistory = session.getModelContext();
+    const rawHistory = await this.readModelHistory(session);
     const context = sanitizeToolPairs([{ role: "system", content: systemPrompt }, ...rawHistory]);
 
     // Compatibility for embedders/tests that have not yet supplied a model profile.
@@ -779,10 +903,7 @@ export class AgentEngine implements AgentRunner {
     const beforeTokens = estimateModelInputTokens(context, tools);
     if (beforeTokens <= triggerTokens) return context;
 
-    const targetRetainedTokens = Math.max(
-      1,
-      Math.floor(budget * DEFAULT_RETAINED_CONTEXT_RATIO),
-    );
+    const targetRetainedTokens = Math.max(1, Math.floor(budget * DEFAULT_RETAINED_CONTEXT_RATIO));
     const projectedHistory = context.slice(1);
     const protectedCut = findSafeCompactionCut(projectedHistory, targetRetainedTokens);
     const protectFromIndex = protectedCut ? protectedCut.compactedCount + 1 : context.length;
@@ -822,27 +943,34 @@ export class AgentEngine implements AgentRunner {
 
     if (allowFullCompaction && this.fullCompactor) {
       const persistentCut = findSafeCompactionCut(rawHistory, targetRetainedTokens);
-      const historyCountBefore = session.length;
-      const compacted = await this.fullCompactor.compact(
-        session,
-        {
-          inputBudgetTokens: budget,
-          targetRetainedTokens,
-          trigger: "auto",
-        },
-        signal,
-      );
+      const historyCountBefore = rawHistory.length;
+      const request = {
+        inputBudgetTokens: budget,
+        targetRetainedTokens,
+        trigger: "auto" as const,
+      };
+      const runtimePreview = this.isRuntimeSession(session)
+        ? await this.recordRuntimeCheckpoint(session, request, signal)
+        : undefined;
+      const compacted = runtimePreview
+        ? true
+        : this.isRuntimeSession(session)
+          ? false
+          : await this.fullCompactor.compact(session, request, signal);
       signal?.throwIfAborted();
       if (compacted) {
+        const compactedCount = runtimePreview?.compactedCount ?? persistentCut?.compactedCount;
         span?.addAttributes({
           contextFullCompaction: true,
           contextCompactionTrigger: "watermark",
-          contextCompactionCutIndex: persistentCut?.compactedCount,
-          contextCompactedMessageCount: persistentCut?.compactedCount,
-          contextRetainedMessageCount: persistentCut
-            ? historyCountBefore - persistentCut.compactedCount
+          contextCompactionCutIndex: compactedCount,
+          contextCompactedMessageCount: compactedCount,
+          contextRetainedMessageCount: compactedCount
+            ? historyCountBefore - compactedCount
             : undefined,
-          contextTokensAfterFullCompaction: estimateMessagesTokens(session.getHistory()),
+          contextTokensAfterFullCompaction: estimateMessagesTokens(
+            await this.readModelHistory(session),
+          ),
         });
         return this.prepareModelContext(session, systemPrompt, tools, span, signal, false);
       }
@@ -851,11 +979,7 @@ export class AgentEngine implements AgentRunner {
     if (projectedTokens <= budget) return projected;
     const beforeChars = estimateTraceLength(context);
     const afterChars = estimateTraceLength(projected);
-    throw new ContextCompactionError(
-      beforeChars,
-      afterChars,
-      estimateTokenBudgetAsChars(budget),
-    );
+    throw new ContextCompactionError(beforeChars, afterChars, estimateTokenBudgetAsChars(budget));
   }
 
   /** Provider overflow 只允许一次更紧的模型摘要重试。 */
@@ -889,7 +1013,8 @@ export class AgentEngine implements AgentRunner {
       const inputBudgetTokens =
         this.contextBudget?.inputBudgetTokens ??
         Math.max(1, Math.floor((this.compactor?.maxChars ?? 4_000) / 4));
-      const historyTokens = estimateMessagesTokens(session.getHistory());
+      const historyBefore = await this.readModelHistory(session);
+      const historyTokens = estimateMessagesTokens(historyBefore);
       const targetRetainedTokens = Math.max(
         1,
         Math.min(
@@ -901,13 +1026,16 @@ export class AgentEngine implements AgentRunner {
         { trigger: "provider-overflow", inputBudgetTokens, targetRetainedTokens, historyTokens },
         "[Engine] Provider 报告上下文溢出，执行一次紧急 FullCompaction",
       );
-      const historyBefore = session.getHistory();
       const emergencyCut = findSafeCompactionCut(historyBefore, targetRetainedTokens);
-      const compacted = await this.fullCompactor.compact(
-        session,
-        { inputBudgetTokens, targetRetainedTokens, trigger: "overflow" },
-        signal,
-      );
+      const request = { inputBudgetTokens, targetRetainedTokens, trigger: "overflow" as const };
+      const runtimePreview = this.isRuntimeSession(session)
+        ? await this.recordRuntimeCheckpoint(session, request, signal)
+        : undefined;
+      const compacted = runtimePreview
+        ? true
+        : this.isRuntimeSession(session)
+          ? false
+          : await this.fullCompactor.compact(session, request, signal);
       if (!compacted) throw err;
       const retryContext = await this.prepareModelContext(
         session,
@@ -922,13 +1050,14 @@ export class AgentEngine implements AgentRunner {
         overflowRetryAttempt: 1,
         fullCompaction: true,
         fullCompactionRetainedTokens: targetRetainedTokens,
-        fullCompactionCutIndex: emergencyCut?.compactedCount,
-        fullCompactionCompactedMessageCount: emergencyCut?.compactedCount,
-        fullCompactionRetainedMessageCount: emergencyCut
-          ? historyBefore.length - emergencyCut.compactedCount
-          : undefined,
+        fullCompactionCutIndex: runtimePreview?.compactedCount ?? emergencyCut?.compactedCount,
+        fullCompactionCompactedMessageCount:
+          runtimePreview?.compactedCount ?? emergencyCut?.compactedCount,
+        fullCompactionRetainedMessageCount:
+          runtimePreview?.retainedCount ??
+          (emergencyCut ? historyBefore.length - emergencyCut.compactedCount : undefined),
         fullCompactionTokensBefore: historyTokens,
-        fullCompactionTokensAfter: estimateMessagesTokens(session.getHistory()),
+        fullCompactionTokensAfter: estimateMessagesTokens(await this.readModelHistory(session)),
       });
       return generate(retryContext);
     }
@@ -953,7 +1082,46 @@ export class AgentEngine implements AgentRunner {
     signal?: AbortSignal,
   ): Promise<Message[]> {
     const run = () => this.runInMainCompactorScope(session, runtimeReporter, runtimeTracer, signal);
-    return this.compactor ? this.compactor.runInMainScope(run) : run();
+    const execute = () => (this.compactor ? this.compactor.runInMainScope(run) : run());
+    // Tests and explicit in-memory sessions intentionally skip durable runtime facts.
+    // Production sessions get a separate run ledger; Session JSONL stays focused on memory.
+    if (!session.recordStore) return execute();
+    // AgentRuntime owns the canonical RuntimeEvent run and already bound its RunLedger.
+    // Keep this compatibility path for direct embedders that still call AgentEngine.run.
+    if (currentRuntimeRun()?.sessionId === session.id) return execute();
+    return this.runWithLedger(session, execute, signal);
+  }
+
+  private async runWithLedger(
+    session: Session,
+    execute: () => Promise<Message[]>,
+    signal?: AbortSignal,
+  ): Promise<Message[]> {
+    const baseDir = resolvePicoPaths(session.workDir).workspace.runs;
+    await RunLedger.reconcileIncompleteRuns({ baseDir, sessionId: session.id });
+    const ledger = await RunLedger.start({
+      baseDir,
+      sessionId: session.id,
+      workDir: session.workDir,
+    });
+    try {
+      const messages = await RunLedger.runInContext(ledger, execute);
+      await ledger.finish("completed");
+      return messages;
+    } catch (error) {
+      const status: RunTerminalStatus =
+        signal?.aborted || isAbortError(error) ? "cancelled" : "failed";
+      try {
+        await ledger.finish(status, runFailureReason(error));
+      } catch (ledgerError) {
+        throw new AggregateError(
+          [error, ledgerError],
+          "Agent run failed and its terminal runtime fact could not be persisted",
+          { cause: ledgerError },
+        );
+      }
+      throw error;
+    }
   }
 
   private async runInMainCompactorScope(
@@ -981,7 +1149,7 @@ export class AgentEngine implements AgentRunner {
     const systemPrompt = await this.buildSystemPrompt(signal);
     signal?.throwIfAborted();
 
-    const runHistory = session.getHistory();
+    const runHistory = await this.readModelHistory(session);
     const firstTurnDelegationPolicy = createFirstTurnDelegationPolicy(
       isSubagentCompletionWake(runHistory) ? "" : latestVisibleUserInput(runHistory),
     );
@@ -1031,6 +1199,8 @@ export class AgentEngine implements AgentRunner {
           );
           break;
         }
+        await currentRuntimeRun()?.recordTurnStarted(turnCount);
+        await currentRunLedger()?.recordTurnStarted({ turn: turnCount });
         reporter.onTurnStart(turnCount);
         const turnSpan = rootSpan?.startChild(`Turn-${turnCount}`);
         const currentMessageId =
@@ -1089,7 +1259,7 @@ export class AgentEngine implements AgentRunner {
           // 才先缩短旧 ToolResult，再在安全工具边界做持久化摘要。
           const contextChars = estimateTraceLength([
             { role: "system", content: systemPrompt },
-            ...session.getHistory(),
+            ...(await this.readModelHistory(session)),
           ]);
           let compactedContext: Message[];
           try {
@@ -1118,9 +1288,13 @@ export class AgentEngine implements AgentRunner {
                   maxChars: err.maxChars,
                 })
                 ?.end();
-              await session.truncateTo(beforeLen - 1);
-              // 硬重置改变了 session 起点,更新 beforeLen 让返回值切片正确
-              beforeLen = session.length - 1;
+              if (this.isRuntimeSession(session)) {
+                await this.hardResetRuntimeHistory(session, beforeLen - 1);
+              } else {
+                await session.truncateTo(beforeLen - 1);
+                // 硬重置改变了 session 起点,更新 beforeLen 让返回值切片正确
+                beforeLen = session.length - 1;
+              }
               continue;
             }
             throw err;
@@ -1184,7 +1358,7 @@ export class AgentEngine implements AgentRunner {
             signal?.throwIfAborted();
             // 若本轮内部触发了模型摘要压缩(session.history 被缩短),调整 beforeLen
             // 让返回切片包含摘要起的所有消息(对标硬重置路径的 beforeLen 调整)
-            if (session.length < beforeLen) {
+            if (!this.isRuntimeSession(session) && session.length < beforeLen) {
               beforeLen = 0;
             }
             recordLlmResponse(actionSpan, responseMsg);
@@ -1204,12 +1378,17 @@ export class AgentEngine implements AgentRunner {
                 {
                   staticTokens,
                   inputBudgetTokens: this.contextBudget?.inputBudgetTokens,
-                  currentRequestChars: session.getHistory().at(-1)?.content.length ?? 0,
+                  currentRequestChars:
+                    (await this.readModelHistory(session)).at(-1)?.content.length ?? 0,
                 },
                 "[Engine] 紧急摘要重试后仍溢出；系统提示、工具 Schema 或当前请求不可再压缩，触发硬重置",
               );
-              await session.truncateTo(beforeLen - 1);
-              beforeLen = session.length - 1;
+              if (this.isRuntimeSession(session)) {
+                await this.hardResetRuntimeHistory(session, beforeLen - 1);
+              } else {
+                await session.truncateTo(beforeLen - 1);
+                beforeLen = session.length - 1;
+              }
               continue;
             }
             throw err;
@@ -1452,14 +1631,21 @@ export class AgentEngine implements AgentRunner {
               );
             }
           }
-          const scheduler = new ToolScheduler<{ message: Message; reminder?: Message }>({
+          const scheduler = new ToolScheduler<{
+            message: Message;
+            reminder?: Message;
+            ledgerStarted?: boolean;
+          }>({
             maxConcurrency: AgentEngine.MAX_TOOL_CONCURRENCY,
             signal,
           });
-          const settledResults: Array<{ message: Message; reminder?: Message } | undefined> =
-            new Array(toolCalls.length);
-          let results: Array<{ message: Message; reminder?: Message }>;
-          let scheduled: Array<Promise<{ message: Message; reminder?: Message }>> = [];
+          const settledResults: Array<
+            { message: Message; reminder?: Message; ledgerStarted?: boolean } | undefined
+          > = new Array(toolCalls.length);
+          let results: Array<{ message: Message; reminder?: Message; ledgerStarted?: boolean }>;
+          let scheduled: Array<
+            Promise<{ message: Message; reminder?: Message; ledgerStarted?: boolean }>
+          > = [];
           try {
             scheduled = toolCalls.map((tc, index) => {
               const execution =
@@ -1473,7 +1659,9 @@ export class AgentEngine implements AgentRunner {
                       settleOnAbort: fileSideEffectKinds[index] !== "none",
                       start: async () => {
                         signal?.throwIfAborted();
-                        return this.runOneTool(tc, reporter, session.id, turnSpan, signal);
+                        return runWithRuntimeToolCall(tc.id, () =>
+                          this.runOneTool(tc, reporter, session.id, turnSpan, signal),
+                        );
                       },
                     });
               return execution.then((result) => {
@@ -1538,6 +1726,19 @@ export class AgentEngine implements AgentRunner {
 
           // 将所有 Observation 持久化到 Session,开启下一轮复盘与推理
           await session.commitMessages(...observations);
+          const ledger = currentRunLedger();
+          const ledgerTurn = ledger?.currentTurn;
+          if (ledger && ledgerTurn !== undefined) {
+            for (let index = 0; index < results.length; index++) {
+              if (!results[index]!.ledgerStarted) continue;
+              await ledger.recordToolObservationCommitted({
+                callId: toolCalls[index]!.id,
+                toolName: toolCalls[index]!.name,
+                turn: ledgerTurn,
+                isError: observations[index]!.providerData?.[PICO_TOOL_RESULT_ERROR_KEY] === true,
+              });
+            }
+          }
           await this.hookService?.dispatch(
             "PostToolBatch",
             {
@@ -1677,7 +1878,12 @@ export class AgentEngine implements AgentRunner {
     sessionId?: string,
     parentSpan?: Span,
     signal?: AbortSignal,
-  ): Promise<{ message: Message; result: ToolResult; reminder?: Message }> {
+  ): Promise<{
+    message: Message;
+    result: ToolResult;
+    reminder?: Message;
+    ledgerStarted?: boolean;
+  }> {
     const toolSpan = parentSpan?.startChild("Tool.Execute", {
       toolName: toolCall.name,
       toolCallId: toolCall.id,
@@ -1687,7 +1893,9 @@ export class AgentEngine implements AgentRunner {
       signal?.throwIfAborted();
       reporter.onToolCall(toolCall.name, toolCall.arguments, toolCall.id);
       const guardDecision = this.guardrail.beforeCall(toolCall);
+      const runtimeRun = currentRuntimeRun();
       let result: ToolResult;
+      let ledgerStarted = false;
       if (!guardDecision.allowed) {
         await this.hookService?.dispatch(
           "PermissionDenied",
@@ -1707,6 +1915,17 @@ export class AgentEngine implements AgentRunner {
         };
       } else {
         signal?.throwIfAborted();
+        await runtimeRun?.recordToolStarted(toolCall.id, toolCall.name, toolCall.arguments);
+        const ledger = currentRunLedger();
+        const ledgerTurn = ledger?.currentTurn;
+        if (ledger !== undefined && ledgerTurn !== undefined) {
+          await ledger.recordToolStarted({
+            callId: toolCall.id,
+            toolName: toolCall.name,
+            turn: ledgerTurn,
+          });
+          ledgerStarted = true;
+        }
         result = await this.registry.execute(toolCall, {
           signal,
           onOutput: ({ stream, chunk }) => {
@@ -1733,6 +1952,18 @@ export class AgentEngine implements AgentRunner {
         sessionId,
       );
       signal?.throwIfAborted();
+      if (runtimeRun && this.runtimeEvidenceArchive) {
+        const evidence = await this.runtimeEvidenceArchive.archiveRuntimeToolExchange(
+          runtimeRun.sessionId,
+          toolCall.id,
+          toolCall.name,
+          toolCall.arguments,
+          result.output,
+          observationOutput,
+          result.isError,
+        );
+        runtimeRun.registerToolEvidence(toolCall.id, evidence);
+      }
 
       toolSpan?.addAttributes({
         isError: result.isError,
@@ -1752,6 +1983,7 @@ export class AgentEngine implements AgentRunner {
           providerData: { [PICO_TOOL_RESULT_ERROR_KEY]: result.isError },
         },
         result,
+        ...(ledgerStarted ? { ledgerStarted } : {}),
         ...(reminder ? { reminder } : {}),
       };
     } catch (err) {
@@ -1812,13 +2044,7 @@ export class AgentEngine implements AgentRunner {
       availableToolCount: 0,
     });
     try {
-      const context = await this.prepareModelContext(
-        session,
-        systemPrompt,
-        [],
-        graceSpan,
-        signal,
-      );
+      const context = await this.prepareModelContext(session, systemPrompt, [], graceSpan, signal);
       const costBefore = session.totalCostCNY;
       const response = await withProviderCallContext({ purpose: "grace" }, () =>
         this.generateWithOverflowRetry(
@@ -2096,7 +2322,31 @@ export class AgentEngine implements AgentRunner {
       withProviderCallContext({ purpose: "subagent", ...(opts.usageAttribution ?? {}) }, () =>
         runtime.compactor ? runtime.compactor.runInIsolatedScope(run) : run(),
       );
-    return runAttributed();
+    const parentRun = currentRuntimeRun();
+    if (!parentRun) return runAttributed();
+
+    const childRun = await RuntimeRun.start({
+      sessionId: parentRun.sessionId,
+      // The parent Session owns the durable run directory even when the child operates
+      // in an isolated worktree. This keeps one recoverable session ledger.
+      workDir: parentRun.workDir,
+      parentRunId: parentRun.runId,
+      ...(currentRuntimeToolCallId() ? { parentToolCallId: currentRuntimeToolCallId() } : {}),
+      store: parentRun.store,
+    });
+    return childRun.run(async () => {
+      const result = await runAttributed();
+      await childRun.recordTranscriptMessage({
+        role: "assistant",
+        content: result.summary,
+        providerData: {
+          picoKind: "subagent_report",
+          picoSubagentStatus: result.status,
+          ...(result.artifacts.length > 0 ? { picoSubagentArtifacts: result.artifacts } : {}),
+        },
+      });
+      return result;
+    }, opts.signal);
   }
 
   private subagentExecutionRuntime(
@@ -2184,6 +2434,7 @@ export class AgentEngine implements AgentRunner {
       { role: "system", content: subSystemPrompt },
       { role: "user", content: effectiveTaskPrompt },
     ];
+    await currentRuntimeRun()?.recordTranscriptMessage(contextHistory[1]!);
 
     // maxTurns 可由调用方覆盖(默认 10)。最后一轮始终预留为 tools=[] 收口，
     // 不通过提高上限隐藏控制流问题。
@@ -2256,6 +2507,7 @@ export class AgentEngine implements AgentRunner {
       }
       const budgetDecision = this.consumeSubagentResponseBudget(runtime, actionResp, costBefore);
       contextHistory.push(actionResp);
+      await currentRuntimeRun()?.recordTranscriptMessage(actionResp);
 
       if (actionResp.content) {
         rep.onMessage(`[Subagent] ${actionResp.content}`);
@@ -2388,7 +2640,11 @@ export class AgentEngine implements AgentRunner {
           start: async () => {
             signal?.throwIfAborted();
             rep.onToolCall(`[Subagent] ${tc.name}`, tc.arguments, tc.id);
-            const result = await readOnlyRegistry.execute(tc, { signal });
+            const runtimeRun = currentRuntimeRun();
+            await runtimeRun?.recordToolStarted(tc.id, tc.name, tc.arguments);
+            const result = await runWithRuntimeToolCall(tc.id, () =>
+              readOnlyRegistry.execute(tc, { signal }),
+            );
             let finalOutput = result.output;
             if (result.isError) {
               finalOutput = this.recovery.analyzeAndInject(tc.name, result.output);
@@ -2402,13 +2658,27 @@ export class AgentEngine implements AgentRunner {
             // 从外部化占位文本中提取磁盘路径,回传给主 Agent 供其用 read_file 回查。
             const artifactPath = extractArtifactPath(observationOutput);
             rep.onToolResult(`[Subagent] ${tc.name}`, observationOutput, result.isError, tc.id);
+            const message: Message = {
+              role: "user" as const,
+              content: observationOutput,
+              toolCallId: tc.id,
+              providerData: { [PICO_TOOL_RESULT_ERROR_KEY]: result.isError },
+            };
+            if (runtimeRun && this.runtimeEvidenceArchive) {
+              const evidence = await this.runtimeEvidenceArchive.archiveRuntimeToolExchange(
+                runtimeRun.sessionId,
+                tc.id,
+                tc.name,
+                tc.arguments,
+                result.output,
+                observationOutput,
+                result.isError,
+              );
+              runtimeRun.registerToolEvidence(tc.id, evidence);
+            }
+            await runtimeRun?.recordTranscriptMessage(message);
             return {
-              message: {
-                role: "user" as const,
-                content: observationOutput,
-                toolCallId: tc.id,
-                providerData: { [PICO_TOOL_RESULT_ERROR_KEY]: result.isError },
-              },
+              message,
               ...(artifactPath !== undefined ? { artifactPath } : {}),
             };
           },
@@ -2677,6 +2947,10 @@ function estimateTraceLength(messages: Message[]): number {
   return length;
 }
 
+function runtimeHistoryDigest(eventIds: readonly string[]): string {
+  return createHash("sha256").update(eventIds.join("\n")).digest("hex");
+}
+
 function recordCompaction(span: Span | undefined, beforeChars: number, afterChars: number): void {
   if (!span || beforeChars === afterChars) {
     return;
@@ -2702,4 +2976,15 @@ function recordTraceError(span: Span | undefined, error: unknown): void {
     isError: true,
     outputPreview: truncate(error instanceof Error ? error.message : String(error), 500),
   });
+}
+
+/** Keep the durable control-plane diagnosis small and avoid copying tool/provider payloads. */
+function runFailureReason(error: unknown): string {
+  if (isAbortError(error)) return "aborted";
+  if (error instanceof Error) {
+    const name = error.name.trim() || "Error";
+    const message = truncate(error.message.trim() || "runtime failure", 300);
+    return `${name}: ${message}`;
+  }
+  return "unknown runtime failure";
 }

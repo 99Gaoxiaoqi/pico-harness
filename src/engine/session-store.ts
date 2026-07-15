@@ -54,6 +54,8 @@ export interface SessionLineage {
   readonly relation: "root" | "fork" | "spawn" | "salvage";
   readonly rootLogId: string;
   readonly parent?: SessionCursor;
+  /** Fork 的父 Session 标识；用于恢复已发布 fork 的 Runtime bootstrap。 */
+  readonly parentSessionId?: string;
   readonly parentTaskId?: string;
 }
 
@@ -318,6 +320,13 @@ export class SessionStore {
    */
   async openWriter(): Promise<void> {
     await this.acquireWriter();
+  }
+
+  /** RuntimeEvent projection repair uses this to avoid replaying an already durable event. */
+  async hasEvent(eventId: string): Promise<boolean> {
+    if (!eventId.trim()) return false;
+    const writer = await this.acquireWriter();
+    return writer.eventIds.has(eventId);
   }
 
   /** v3 生产接口：JSONL fdatasync 完成后才返回 durable receipt。 */
@@ -1059,6 +1068,9 @@ function isSessionLineageValue(value: unknown): value is SessionLineage {
   }
   if (!isNonEmptyString(value["rootLogId"])) return false;
   if (value["parent"] !== undefined && !isSessionCursorValue(value["parent"])) return false;
+  if (value["parentSessionId"] !== undefined && !isNonEmptyString(value["parentSessionId"])) {
+    return false;
+  }
   return value["parentTaskId"] === undefined || isNonEmptyString(value["parentTaskId"]);
 }
 

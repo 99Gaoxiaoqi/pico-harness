@@ -12,8 +12,10 @@ import {
   createSessionIdentity,
   isSameSessionProjectGroup,
 } from "../src/engine/session-identity.js";
+import { Session } from "../src/engine/session.js";
 import { resolveCliStartupSession } from "../src/cli/session-args.js";
 import { resolvePicoPaths } from "../src/paths/pico-paths.js";
+import { RuntimeEventStore } from "../src/runtime/runtime-event-store.js";
 
 describe("resolveCliSession", () => {
   it("默认每次启动都创建新的 session id", async () => {
@@ -29,20 +31,21 @@ describe("resolveCliSession", () => {
     expect(second.sessionId).not.toBe(first.sessionId);
   });
 
-  it("--continue 继续当前项目最近一次 session", async () => {
+  it("--continue 只继续最近的 runtime-event-v1 session", async () => {
     const workDir = await mkdtemp(join(tmpdir(), "pico-session-resolver-"));
-    await touchSessionFile(workDir, "cli-old", "2026-07-09T01:00:00.000Z");
-    await touchSessionFile(workDir, "cli-new", "2026-07-09T02:00:00.000Z");
+    await touchSessionFile(workDir, "cli-runtime", "2026-07-09T02:00:00.000Z");
+    await initializeRuntimeSession(workDir, "cli-runtime");
+    await touchSessionFile(workDir, "cli-legacy-newest", "2026-07-09T03:00:00.000Z");
 
     const selection = await resolveCliSession({ workDir, continueSession: true });
 
     expect(selection).toEqual<CliSessionSelection>({
       mode: "continue",
-      sessionId: "cli-new",
+      sessionId: "cli-runtime",
     });
   });
 
-  it("列出当前项目可恢复 session 摘要并按更新时间倒序排列", async () => {
+  it("列出混合历史来源的 session 摘要并按更新时间倒序排列", async () => {
     const workDir = await mkdtemp(join(tmpdir(), "pico-session-resolver-"));
     await writeSessionFile(workDir, "cli-old", "2026-07-09T01:00:00.000Z", [
       { type: "meta", schemaVersion: 1 },
@@ -53,6 +56,7 @@ describe("resolveCliSession", () => {
       { type: "message", seq: 0, message: { role: "user", content: "hi" } },
       { type: "message", seq: 1, message: { role: "assistant", content: "hello" } },
     ]);
+    await initializeRuntimeSession(workDir, "cli-new");
 
     const summaries = await listCliSessionSummaries(workDir);
 
@@ -63,6 +67,7 @@ describe("resolveCliSession", () => {
         createdAt: expect.any(Date) as Date,
         updatedAt: new Date("2026-07-09T02:00:00.000Z"),
         messageCount: 2,
+        historySource: "runtime-event-v1",
       },
       {
         id: "cli-old",
@@ -70,6 +75,7 @@ describe("resolveCliSession", () => {
         createdAt: expect.any(Date) as Date,
         updatedAt: new Date("2026-07-09T01:00:00.000Z"),
         messageCount: 1,
+        historySource: "legacy",
       },
     ]);
     expect(summaries[0]?.createdAt).toBeInstanceOf(Date);
@@ -101,6 +107,7 @@ describe("resolveCliSession", () => {
   it("--resume 恢复指定 session", async () => {
     const workDir = await mkdtemp(join(tmpdir(), "pico-session-resolver-"));
     await touchSessionFile(workDir, "cli-known", "2026-07-09T01:00:00.000Z");
+    await initializeRuntimeSession(workDir, "cli-known");
 
     await expect(resolveCliSession({ workDir, resumeSession: "cli-known" })).resolves.toEqual({
       mode: "resume",
@@ -116,7 +123,7 @@ describe("resolveCliSession", () => {
     );
   });
 
-  it("legacy --session keeps allowing an explicit id without pre-existing history", async () => {
+  it("--session 仍允许指定尚未存在的新 session id", async () => {
     const workDir = await mkdtemp(join(tmpdir(), "pico-session-resolver-"));
 
     await expect(resolveCliSession({ workDir, session: "cli-explicit" })).resolves.toEqual({
@@ -128,6 +135,7 @@ describe("resolveCliSession", () => {
   it("--fork-session 从指定 session 派生新 session id", async () => {
     const workDir = await mkdtemp(join(tmpdir(), "pico-session-resolver-"));
     await touchSessionFile(workDir, "cli-source", "2026-07-09T01:00:00.000Z");
+    await initializeRuntimeSession(workDir, "cli-source");
 
     const selection = await resolveCliSession({ workDir, forkSession: "cli-source" });
 
@@ -143,6 +151,38 @@ describe("resolveCliSession", () => {
     await expect(resolveCliSession({ workDir, forkSession: "cli-missing" })).rejects.toThrow(
       "无法 fork session cli-missing",
     );
+  });
+
+  it("legacy session 对显式恢复和 fork 参数只读", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-session-resolver-"));
+    await touchSessionFile(workDir, "cli-legacy", "2026-07-09T01:00:00.000Z");
+
+    await expect(resolveCliSession({ workDir, resumeSession: "cli-legacy" })).rejects.toThrow(
+      "legacy 历史为只读",
+    );
+    await expect(resolveCliSession({ workDir, session: "cli-legacy" })).rejects.toThrow(
+      "legacy 历史为只读",
+    );
+    await expect(resolveCliSession({ workDir, forkSession: "cli-legacy" })).rejects.toThrow(
+      "legacy 历史为只读",
+    );
+  });
+
+  it("允许显式恢复已发布但尚未完成 Runtime bootstrap 的 fork", async () => {
+    const workDir = await mkdtemp(join(tmpdir(), "pico-session-resolver-"));
+    const source = new Session("cli-source", workDir, { persistence: true });
+    const target = new Session("cli-pending-fork", workDir, { persistence: true });
+    await source.recover();
+    await target.recover();
+    await source.commitMessages({ role: "user", content: "frozen prompt" });
+    await target.seedForkFrom(source, source.getModelContext());
+    await source.close();
+    await target.close();
+
+    await expect(resolveCliSession({ workDir, session: "cli-pending-fork" })).resolves.toEqual({
+      mode: "resume",
+      sessionId: "cli-pending-fork",
+    });
   });
 
   it("互斥的 session 启动参数会被拒绝", async () => {
@@ -179,6 +219,7 @@ describe("CLI main session flags", () => {
     const workDir = await mkdtemp(join(tmpdir(), "pico-session-args-"));
     await touchSessionFile(workDir, "cli-old", "2026-07-09T01:00:00.000Z");
     await touchSessionFile(workDir, "cli-new", "2026-07-09T02:00:00.000Z");
+    await initializeRuntimeSession(workDir, "cli-new");
 
     await expect(resolveCliStartupSession(["--dir", workDir, "--continue"])).resolves.toEqual({
       workDir: await realpath(workDir),
@@ -250,4 +291,12 @@ async function writeSessionFile(
   await writeFile(path, `${records.map((record) => JSON.stringify(record)).join("\n")}\n`, "utf8");
   const time = new Date(timestamp);
   await utimes(path, time, time);
+}
+
+async function initializeRuntimeSession(workDir: string, sessionId: string): Promise<void> {
+  const paths = resolvePicoPaths(workDir);
+  await new RuntimeEventStore({ baseDir: paths.workspace.runs }).initializeSession({
+    sessionId,
+    workDir: paths.canonicalWorkDir,
+  });
 }

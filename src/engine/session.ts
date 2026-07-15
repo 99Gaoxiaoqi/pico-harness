@@ -94,6 +94,7 @@ import {
   type RewindWorkspaceTarget,
 } from "../storage/rewind-operation-coordinator.js";
 import { resolvePicoPaths } from "../paths/pico-paths.js";
+import { currentRuntimeRun, RuntimeRun } from "../runtime/runtime-run.js";
 
 /** 清洗 sessionId 为安全文件名片段(/、: 等破坏路径的字符替换为 _) */
 function sanitizeFilePart(value: string): string {
@@ -155,6 +156,12 @@ export interface DurableSessionForkSnapshot {
   readonly hydration: SessionHydrationSnapshot;
   readonly cursor: SessionCursor;
   readonly rootLogId: string;
+}
+
+/** Immutable target seed published before the Runtime fork bootstrap begins. */
+export interface DurableRuntimeForkSeed {
+  readonly sourceSessionId: string;
+  readonly messages: readonly Message[];
 }
 
 export interface DurableTuiRewindHandoff {
@@ -735,6 +742,41 @@ export class Session implements SessionRuntimePersistence {
     };
   }
 
+  /**
+   * Reads the original fork seed rather than the mutable current Session projection.
+   * Runtime uses this durable boundary to resume a fork bootstrap after interruption.
+   */
+  async readDurableRuntimeForkSeed(): Promise<DurableRuntimeForkSeed | undefined> {
+    await this.flushPersistence();
+    // RuntimeEvent remains durable even when a caller deliberately opens this Session
+    // without a writer. A published fork must still be able to recover its immutable seed.
+    const store =
+      this.store ??
+      new SessionStore(
+        join(
+          resolvePicoPaths(this.workDir).workspace.sessions,
+          `${sanitizeFilePart(this.id)}.jsonl`,
+        ),
+      );
+    const journal = await store.inspectJournal({ strict: true });
+    const seed = journal.records.find(
+      (record) => record.type === "event" && record.kind === "session.seeded",
+    );
+    if (!seed) return undefined;
+    const lineage = seed.data.lineage;
+    if (
+      lineage?.relation !== "fork" ||
+      !lineage.parentSessionId ||
+      lineage.parentSessionId === this.id
+    ) {
+      return undefined;
+    }
+    return {
+      sourceSessionId: lineage.parentSessionId,
+      messages: structuredClone(seed.data.messages),
+    };
+  }
+
   private getUsageSnapshot(): SessionUsageSnapshot {
     return {
       totalPromptTokens: this.totalPromptTokens,
@@ -826,6 +868,14 @@ export class Session implements SessionRuntimePersistence {
   /** 生产接口：每条消息在 JSONL fdatasync 后才进入正式 history/FTS。 */
   async commitMessages(...msgs: Message[]): Promise<void> {
     this.assertWritable();
+    const runtimeRun = currentRuntimeRun();
+    if (runtimeRun?.sessionId === this.id) {
+      await runtimeRun.commitMessages(this, msgs);
+      return;
+    }
+    if (this.store && (await RuntimeRun.commitExternalMessages(this, msgs))) {
+      return;
+    }
     if (!this.store) {
       for (const msg of msgs) this.appendOneInMemory(msg);
       return;
@@ -839,6 +889,23 @@ export class Session implements SessionRuntimePersistence {
    * persistence:false 只提供进程内幂等，receipt.durable=false。
    */
   async commitMessageOnce(eventId: string, message: Message): Promise<CommitReceipt> {
+    this.assertWritable();
+    const runtimeRun = currentRuntimeRun();
+    if (runtimeRun?.sessionId === this.id) {
+      return runtimeRun.commitMessageOnce(this, eventId, message);
+    }
+    const runtimeReceipt = this.store
+      ? await RuntimeRun.commitExternalMessageOnce(this, eventId, message)
+      : undefined;
+    if (runtimeReceipt) return runtimeReceipt;
+    return this.commitProjectionMessageOnce(eventId, message);
+  }
+
+  /**
+   * RuntimeEvent 已经 durable 后写入 Session 投影的内部入口。
+   * 调用方必须使用同一个 RuntimeEvent ID，避免投影重试产生新事实。
+   */
+  async commitProjectionMessageOnce(eventId: string, message: Message): Promise<CommitReceipt> {
     this.assertWritable();
     if (!eventId.trim()) throw new Error("Session eventId 不能为空");
     if (!this.store) {
@@ -899,6 +966,72 @@ export class Session implements SessionRuntimePersistence {
     return receipt;
   }
 
+  /** Checks whether the Session JSONL projection already contains a stable RuntimeEvent ID. */
+  async hasProjectionEvent(eventId: string): Promise<boolean> {
+    if (!eventId.trim()) return false;
+    if (!this.store) return this.inMemoryCommitReceipts.has(eventId);
+    return this.store.hasEvent(eventId);
+  }
+
+  /**
+   * Rebuilds this replaceable Session projection from canonical RuntimeEvent history.
+   * The event is deliberately a Session compaction record because it atomically replaces
+   * the entire projection while leaving the RuntimeEvent source untouched.
+   */
+  async replaceRuntimeProjection(
+    messages: readonly Message[],
+    projectionEventId: string,
+  ): Promise<void> {
+    this.assertWritable();
+    if (!projectionEventId.trim()) throw new Error("Runtime projection eventId 不能为空");
+    const nextHistory: Message[] = structuredClone([...messages]);
+    let receipt: CommitReceipt | undefined;
+    if (this.store) {
+      receipt =
+        nextHistory.length === 0
+          ? await this.commitPersistence("runtime projection clear", (store, seq) =>
+              store.commitTruncate(this.history.length, {
+                expectedSeq: seq,
+                eventId: projectionEventId,
+              }),
+            )
+          : await this.commitPersistence("runtime projection replace", (store, seq) =>
+              store.commitCompaction(nextHistory[0]!, nextHistory.slice(1), {
+                expectedSeq: seq,
+                eventId: projectionEventId,
+              }),
+            );
+    }
+    this.history = nextHistory;
+    this.deferredMessages = [];
+    this.pendingToolCallIds.clear();
+    this.rebuildToolResultMeta();
+    this.rebuildSearchIndex(receipt?.cursor);
+    if (receipt) this.conversationId = `${receipt.cursor.logId}:${receipt.cursor.epoch}`;
+    this.updatedAt = new Date();
+    if (receipt) this.scheduleSessionCatalog(receipt, { rebuildSummary: true });
+  }
+
+  /** Rebuilds the replaceable Session usage projection from canonical model-call facts. */
+  async replaceRuntimeUsage(usage: SessionUsageSnapshot, projectionEventId: string): Promise<void> {
+    this.assertWritable();
+    if (!projectionEventId.trim()) throw new Error("Runtime usage projection eventId 不能为空");
+    const normalized = normalizeSessionRuntimeStatePatch({ usage })?.usage;
+    if (!normalized) throw new Error("Runtime usage projection is invalid");
+    let receipt: CommitReceipt | undefined;
+    if (this.store) {
+      receipt = await this.commitPersistence("runtime usage projection", (store, seq) =>
+        store.commitRuntimeState(
+          { usage: normalized },
+          { expectedSeq: seq, eventId: projectionEventId },
+        ),
+      );
+    }
+    this.restoreUsage(normalized);
+    this.updatedAt = new Date();
+    if (receipt) this.scheduleSessionCatalog(receipt);
+  }
+
   /**
    * 用父会话的 durable cursor 原子播种 fork。Catalog 重建时从
    * session.seeded 事件取 parentLogId/forkEventId，不再依赖可变的标题。
@@ -911,6 +1044,7 @@ export class Session implements SessionRuntimePersistence {
       relation: "fork",
       rootLogId: parent.rootLogId,
       ...(parent.cursor ? { parent: parent.cursor } : {}),
+      parentSessionId: source.id,
     } satisfies SessionLineage;
     const seeded = [...structuredClone(messages)];
     if (!this.store) {
@@ -1094,6 +1228,9 @@ export class Session implements SessionRuntimePersistence {
     if (count <= 0) return;
     const { cutIndex, removedCount } = findLegacyUndoCut(this.history, count);
     if (removedCount === 0) return;
+    const runtimeBranchId = `undo:${randomUUID()}`;
+    // RuntimeEvent is authoritative: persist the branch fact before replacing its Session projection.
+    if (this.store) await this.recordRuntimeHistoryRewind(cutIndex, runtimeBranchId);
     const nextHistory = this.history.slice(0, cutIndex);
     const receipt = this.store
       ? await this.commitPersistence("rewind", (store, seq) =>
@@ -1171,6 +1308,9 @@ export class Session implements SessionRuntimePersistence {
     messageIndex: number,
   ): Promise<CommitReceipt | undefined> {
     this.assertWritable();
+    const runtimeBranchId = eventId ?? `rewind:${randomUUID()}`;
+    // Keep the canonical history branch durable before its replaceable Session projection.
+    if (this.store) await this.recordRuntimeHistoryRewind(messageIndex, runtimeBranchId);
     const nextHistory = this.history.slice(0, messageIndex);
     const receipt = this.store
       ? await this.commitPersistence("rewind", (store, seq) =>
@@ -1180,6 +1320,10 @@ export class Session implements SessionRuntimePersistence {
           }),
         )
       : undefined;
+    // A stable operationId may be retried after later messages arrived. Its durable
+    // rewind already happened, so applying the old cut to today's in-memory tail
+    // would incorrectly discard those newer messages.
+    if (receipt && !receipt.inserted) return receipt;
     this.history = nextHistory;
     this.rebuildSearchIndex(receipt?.cursor);
     this.pruneToolResultMeta();
@@ -1191,6 +1335,17 @@ export class Session implements SessionRuntimePersistence {
     this.updatedAt = new Date();
     if (receipt) this.scheduleSessionCatalog(receipt, { rebuildSummary: true });
     return receipt;
+  }
+
+  /** Mirrors conversation undo/rewind into RuntimeEvent when this is a runtime-backed Session. */
+  private async recordRuntimeHistoryRewind(messageIndex: number, branchId: string): Promise<void> {
+    if (!this.store) return;
+    await RuntimeRun.recordSessionRewind({
+      sessionId: this.id,
+      workDir: this.workDir,
+      messageIndex,
+      branchId,
+    });
   }
 
   async rewindCode(
@@ -1485,7 +1640,11 @@ export class Session implements SessionRuntimePersistence {
    * @param summary 摘要消息正文(已由调用方套上 REFERENCE-ONLY 前后标记)
    * @param compactedCount 被压缩的前缀条数(0..history.length)
    */
-  async applyCompaction(summary: string, compactedCount: number): Promise<void> {
+  async applyCompaction(
+    summary: string,
+    compactedCount: number,
+    options: { readonly summaryProviderData?: Record<string, unknown> } = {},
+  ): Promise<void> {
     this.assertWritable();
     if (compactedCount < 0) compactedCount = 0;
     if (compactedCount > this.history.length) compactedCount = this.history.length;
@@ -1494,7 +1653,7 @@ export class Session implements SessionRuntimePersistence {
     const summaryMsg: Message = {
       role: "assistant",
       content: summary,
-      providerData: { picoKind: "compaction_summary" },
+      providerData: { ...options.summaryProviderData, picoKind: "compaction_summary" },
     };
     const nextHistory = [summaryMsg, ...retained];
     const receipt = this.store

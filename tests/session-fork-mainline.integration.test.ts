@@ -10,6 +10,8 @@ import { SessionManager } from "../src/engine/session.js";
 import { SessionStore } from "../src/engine/session-store.js";
 import { FileSessionSummaryStore } from "../src/memory/summary-store.js";
 import { resolvePicoPaths } from "../src/paths/pico-paths.js";
+import { materializeRuntimeHistory } from "../src/runtime/runtime-event-read-model.js";
+import { RuntimeEventStore } from "../src/runtime/runtime-event-store.js";
 import {
   createFileHistoryState,
   fileHistoryBeginRewindPoint,
@@ -214,6 +216,13 @@ describe("session fork published mainline", () => {
     expect(hydration.messages).toHaveLength(2);
     expect(hydration.messages.some((message) => message.content.includes("fork 之后"))).toBe(false);
     expect(hydration.messages.every((message) => message.usage === undefined)).toBe(true);
+    const runtimeStore = new RuntimeEventStore({ baseDir: workspacePaths.runs });
+    const runtimeEvents = await runtimeStore.readSession(targetId);
+    expect(materializeRuntimeHistory(runtimeEvents)).toEqual(hydration.messages);
+    expect(await runtimeStore.readSessionManifest(targetId)).toMatchObject({
+      sessionId: targetId,
+      historySource: "runtime-event-v1",
+    });
     const targetArtifact = (await artifactStore.readMeta(sourceArtifact.id, targetId))!;
     expect(hydration.messages[1]?.content).toContain(targetArtifact.path);
     expect(hydration.messages[1]?.content).toContain(
@@ -232,7 +241,20 @@ describe("session fork published mainline", () => {
       additionalDirectories: [],
     });
     expect(hydration.runtime.settings).not.toHaveProperty("prePlanMode");
-    expect(hydration.runtime.goal).toEqual(sourceForkPoint.hydration.runtime.goal);
+    const completedFork = await restarted.journal.get(operationId);
+    expect(completedFork).toMatchObject({ state: "completed" });
+    expect(hydration.runtime.goal).toEqual({
+      ...sourceForkPoint.hydration.runtime.goal,
+      goals: sourceForkPoint.hydration.runtime.goal!.goals.map((goal) => ({
+        ...goal,
+        budgetUsage: {
+          turns: 0,
+          tokens: 0,
+          costCNY: 0,
+          startedAt: Date.parse(completedFork!.createdAt),
+        },
+      })),
+    });
     expect(hydration.runtime.usage).toMatchObject({
       totalPromptTokens: 0,
       totalCompletionTokens: 0,
