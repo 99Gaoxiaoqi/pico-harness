@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -71,6 +71,22 @@ describe("buildDefaultToolRegistry", () => {
     expect(tools).not.toContain("echo");
     expect(tools).not.toContain("delegate_task");
     expect(tools).not.toContain("spawn_subagent");
+  });
+
+  it("未注入 ApprovalManager 时 exit_plan_mode fail-closed", async () => {
+    await writeFile(join(workDir, "PLAN.md"), "# 计划", "utf8");
+    const registry = buildDefaultToolRegistry(workDir);
+
+    const result = await registry.execute({
+      id: "call_exit_plan_without_approval",
+      name: "exit_plan_mode",
+      arguments: "{}",
+    });
+
+    expect(result).toMatchObject({
+      isError: true,
+      output: expect.stringContaining("未配置宿主 ApprovalManager"),
+    });
   });
 
   it("动态注册的核心委派直接可见，MCP 工具经搜索披露", async () => {

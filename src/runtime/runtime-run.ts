@@ -2,7 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { isAbortError } from "../provider/errors.js";
-import { resolvePicoPaths } from "../paths/pico-paths.js";
+import { canonicalizeWorkspacePath, resolvePicoPaths } from "../paths/pico-paths.js";
 import type { CommitReceipt } from "../engine/session-persistence.js";
 import type { Session } from "../engine/session.js";
 import { PICO_TOOL_RESULT_ERROR_KEY, type Message, type ToolCall } from "../schema/message.js";
@@ -166,6 +166,7 @@ export class RuntimeRun {
   readonly runId: string;
   readonly invocationId: string;
   readonly store: RuntimeEventStore;
+  private readonly canonicalWorkDir: string;
   private readonly now: () => Date;
   private readonly runStartedEventId?: string;
   private readonly terminalEventId?: string;
@@ -188,6 +189,7 @@ export class RuntimeRun {
       new RuntimeEventStore({
         databasePath: resolvePicoPaths(workDir).workspace.runtimeDatabase,
       } satisfies RuntimeEventStoreOptions);
+    this.canonicalWorkDir = canonicalizeWorkspacePath(workDir);
     this.now = options.now ?? (() => new Date());
     this.runStartedEventId = options.runStartedEventId;
     this.terminalEventId = options.terminalEventId;
@@ -316,8 +318,9 @@ export class RuntimeRun {
       messageCount: messages.length,
     };
     const identity = runtimeForkBootstrapIdentity(options, completion);
+    const targetSessionKey = runtimeSessionKey(options.workDir, options.targetSessionId);
 
-    return serializeForkBootstrap(options.targetSessionId, async () => {
+    return serializeForkBootstrap(targetSessionKey, async () => {
       const existingEvents = await store.readSession(options.targetSessionId);
       const forkMarkers = existingEvents.filter(
         (event): event is RuntimeSessionForkedEvent => event.kind === "session.forked",
@@ -493,7 +496,8 @@ export class RuntimeRun {
       databasePath: resolvePicoPaths(session.workDir).workspace.runtimeDatabase,
     });
     if (!(await store.readSessionManifest(session.id))) return undefined;
-    return serializeExternalMessageCommit(session.id, eventId, async () => {
+    const sessionKey = runtimeSessionKey(session.workDir, session.id);
+    return serializeExternalMessageCommit(sessionKey, eventId, async () => {
       const existing = (await store.readSession(session.id)).find(
         (event) => event.eventId === eventId,
       );
@@ -520,6 +524,18 @@ export class RuntimeRun {
   async readModelHistory(): Promise<Message[]> {
     const { materializeRuntimeHistory } = await import("./runtime-event-read-model.js");
     return materializeRuntimeHistory(await this.store.readSession(this.sessionId));
+  }
+
+  /** True only when this run owns the Session's canonical workspace and durable store. */
+  claimsSession(session: Session): boolean {
+    if (
+      session.id !== this.sessionId ||
+      canonicalizeWorkspacePath(session.workDir) !== this.canonicalWorkDir
+    ) {
+      return false;
+    }
+    const sessionStore = session.runtimeEventStore;
+    return sessionStore !== undefined && sessionStore.databasePath === this.store.databasePath;
   }
 
   async readModelHistoryEntries(): Promise<RuntimeHistoryProjectionEntry[]> {
@@ -826,8 +842,10 @@ export class RuntimeRun {
   }
 
   private assertSession(session: Session): void {
-    if (session.id !== this.sessionId) {
-      throw new Error(`Runtime run ${this.runId} cannot project another session`);
+    if (!this.claimsSession(session)) {
+      throw new Error(
+        `Runtime run ${this.runId} cannot project a Session outside its workspace/store capability`,
+      );
     }
   }
 
@@ -934,11 +952,11 @@ function compactRefs(value: RuntimeEventRefs): RuntimeEventRefs | undefined {
 }
 
 function serializeExternalMessageCommit<Result>(
-  sessionId: string,
+  sessionKey: string,
   eventId: string,
   operation: () => Promise<Result>,
 ): Promise<Result> {
-  const key = `${sessionId}:${eventId}`;
+  const key = `${sessionKey}\0${eventId}`;
   const previous = externalMessageCommitTails.get(key) ?? Promise.resolve();
   const result = previous.then(operation);
   const tail = result.then(
@@ -954,19 +972,23 @@ function serializeExternalMessageCommit<Result>(
 }
 
 function serializeForkBootstrap<Result>(
-  sessionId: string,
+  sessionKey: string,
   operation: () => Promise<Result>,
 ): Promise<Result> {
-  const previous = forkBootstrapTails.get(sessionId) ?? Promise.resolve();
+  const previous = forkBootstrapTails.get(sessionKey) ?? Promise.resolve();
   const result = previous.then(operation);
   const tail = result.then(
     () => undefined,
     () => undefined,
   );
-  forkBootstrapTails.set(sessionId, tail);
+  forkBootstrapTails.set(sessionKey, tail);
   return result.finally(() => {
-    if (forkBootstrapTails.get(sessionId) === tail) forkBootstrapTails.delete(sessionId);
+    if (forkBootstrapTails.get(sessionKey) === tail) forkBootstrapTails.delete(sessionKey);
   });
+}
+
+function runtimeSessionKey(workDir: string, sessionId: string): string {
+  return `${canonicalizeWorkspacePath(workDir)}\0${sessionId}`;
 }
 
 function runtimeForkBootstrapIdentity(

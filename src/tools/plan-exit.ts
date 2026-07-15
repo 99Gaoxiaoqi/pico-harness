@@ -6,7 +6,7 @@
 //
 // 流程:
 //   1. 模型在 Plan Mode 规划完毕后调用 exit_plan_mode
-//   2. 工具读 PLAN.md 当前内容 → 调 globalApprovalManager.waitForApproval 提交审批
+//   2. 工具读 PLAN.md 当前内容 → 调宿主注入的 ApprovalManager 提交审批
 //   3. 用户 approve / reject / modify:
 //      - approve:调 onExit 回调通知 engine 退出 Plan Mode
 //      - reject:保持 Plan Mode
@@ -23,11 +23,7 @@ import type { ToolDefinition } from "../schema/message.js";
 import type { ToolAccesses } from "./tool-access.js";
 import { ToolAccesses as ToolAccessesNs } from "./tool-access.js";
 import { PlanStore } from "../context/plan-store.js";
-import {
-  ApprovalManager,
-  globalApprovalManager,
-  type ApprovalNotice,
-} from "../approval/manager.js";
+import type { ApprovalManager, ApprovalNotice } from "../approval/manager.js";
 
 /**
  * 退出 Plan Mode 时由 host 注入的回���。
@@ -57,9 +53,14 @@ export class ExitPlanModeTool implements BaseTool {
 
   constructor(
     private readonly store: PlanStore,
-    /** 审批管理器,默认用全局单例;测试时可注入隔离实例 */
-    private readonly approval: ApprovalManager = globalApprovalManager,
+    /** 审批管理器必须由可信宿主显式装配；缺失时 execute fail-closed。 */
+    private approval?: ApprovalManager,
   ) {}
+
+  /** Registry 可先注册工具，再由宿主绑定本轮唯一的审批实例。 */
+  setApprovalManager(approval: ApprovalManager): void {
+    this.approval = approval;
+  }
 
   /** host(run-agent.ts)构造 engine 后注入退出回调 */
   setExitCallback(cb: PlanExitCallback): void {
@@ -114,10 +115,14 @@ export class ExitPlanModeTool implements BaseTool {
     if (plan === null) {
       return "⚠ 当前没有 PLAN.md,无 plan 可提交审批。请先用 write_file 写好 PLAN.md,再调用 exit_plan_mode。";
     }
+    const approval = this.approval;
+    if (!approval) {
+      throw new Error("exit_plan_mode 未配置宿主 ApprovalManager，已安全拒绝审批");
+    }
 
     // 2. 提交审批:plan 内容作为 diff 展示给用户(用户据此决定 approve/reject/modify)
     const taskId = `exit_plan_${Date.now().toString(36)}_${randomUUID()}`;
-    const result = await this.approval.waitForApproval(
+    const result = await approval.waitForApproval(
       taskId,
       "exit_plan_mode",
       "退出 Plan Mode",
