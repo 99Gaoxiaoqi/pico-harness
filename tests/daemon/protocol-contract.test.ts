@@ -169,6 +169,21 @@ describe("desktop runtime protocol contract", () => {
         expectedRevision: "revision",
       }),
     ).toMatchObject({ provider: { id: "local" } });
+    expect(
+      parseStrictRuntimeParams("provider.importEnvironment", {
+        provider: {
+          id: "local",
+          protocol: "openai",
+          baseURL: "https://example.test/v1",
+          apiKeyEnv: "LOCAL_KEY",
+          models: ["coder"],
+          discoverModels: false,
+        },
+        defaultModel: "coder",
+        secret: "write-only-secret",
+        expectedRevision: "revision",
+      }),
+    ).toMatchObject({ provider: { id: "local" }, defaultModel: "coder" });
   });
 
   it("keeps provider credentials write-only at the protocol result boundary", () => {
