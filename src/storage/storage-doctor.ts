@@ -2,7 +2,12 @@ import { createHash } from "node:crypto";
 import { lstat, readFile, readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
-import { assertRuntimeEvent } from "../runtime/runtime-event.js";
+import { decodeRuntimeEventJson, type RuntimeEvent } from "../runtime/runtime-event.js";
+import { materializeRuntimeHistory } from "../runtime/runtime-event-read-model.js";
+import {
+  projectRuntimeSessionMessages,
+  projectRuntimeSessionState,
+} from "../runtime/runtime-session-projection.js";
 import { createFileHistoryState, fileHistoryLoadState } from "../safety/file-history.js";
 import { quarantineCorruptJson, type QuarantinedJson } from "./atomic-json.js";
 import { FileHistoryBlobStore } from "./file-history-blob-store.js";
@@ -11,8 +16,12 @@ import {
   StorageOperationJournal,
   type StorageOperation,
 } from "./operation-journal.js";
-import { RUNTIME_SCHEMA_VERSION } from "../tasks/runtime-types.js";
 import { canonicalizeWorkspacePath, resolvePicoPaths } from "../paths/pico-paths.js";
+import {
+  preflightRuntimeSchema,
+  RUNTIME_SCHEMA_VERSION,
+  type RuntimeSchemaPreflightResult,
+} from "./runtime-schema-preflight.js";
 
 const SHA256_RE = /^[a-f0-9]{64}$/u;
 const SAFE_OPERATION_ID_RE = /^[A-Za-z0-9._-]+$/u;
@@ -79,6 +88,24 @@ export interface StorageDoctorRepairResult {
   readonly needsAttentionOperationIds: readonly string[];
 }
 
+interface AgentSessionRow {
+  readonly session_id: string;
+  readonly work_dir: string;
+  readonly history_source: string;
+  readonly created_at: string;
+  readonly active_branch_id: string;
+}
+
+interface AgentRuntimeEventRow {
+  readonly sequence: number;
+  readonly session_id: string;
+  readonly run_id: string;
+  readonly event_id: string;
+  readonly kind: string;
+  readonly at: string;
+  readonly event_json: string;
+}
+
 /**
  * 跨持久层的只读诊断器。scan 从不修复/删除权威数据；repair 也只执行
  * 调用方明确开启的安全动作。
@@ -108,8 +135,8 @@ export class StorageDoctor {
     const scanned = Object.fromEntries(
       STORAGE_DOCTOR_COMPONENTS.map((component) => [component, 0]),
     ) as Record<StorageDoctorComponent, number>;
-    await this.scanSessions(findings, scanned);
-    await this.scanRuntime(findings, scanned);
+    const runtimeSchema = await this.scanRuntime(findings, scanned);
+    await this.scanSessions(findings, scanned, runtimeSchema);
     await this.scanOperations(findings, scanned);
     await this.scanFileHistory(findings, scanned);
     await this.scanSummaries(findings, scanned);
@@ -193,54 +220,59 @@ export class StorageDoctor {
   private async scanSessions(
     findings: StorageDoctorFinding[],
     scanned: Record<StorageDoctorComponent, number>,
+    runtimeSchema: RuntimeSchemaPreflightResult,
   ): Promise<void> {
-    if (!(await pathExists(this.runtimeDatabasePath))) return;
+    if (!hasAgentRuntimeTables(runtimeSchema)) return;
     let database: Database.Database;
     try {
       database = new Database(this.runtimeDatabasePath, { readonly: true, fileMustExist: true });
-    } catch {
+    } catch (error) {
+      findings.push(sessionReplayFinding(this.runtimeDatabasePath, error));
       return;
     }
     try {
-      const table = database
-        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'agent_sessions'")
-        .get();
-      if (!table) return;
       const sessions = database
-        .prepare("SELECT session_id, work_dir FROM agent_sessions ORDER BY session_id")
-        .all() as Array<{ session_id: string; work_dir: string }>;
+        .prepare(
+          `SELECT session_id, work_dir, history_source, created_at, active_branch_id
+           FROM agent_sessions
+           ORDER BY session_id`,
+        )
+        .all() as AgentSessionRow[];
       const readEvents = database.prepare(
-        "SELECT event_json FROM agent_runtime_events WHERE session_id = ? ORDER BY sequence",
+        `SELECT sequence, session_id, run_id, event_id, kind, at, event_json
+         FROM agent_runtime_events
+         WHERE session_id = ?
+         ORDER BY sequence`,
       );
       for (const manifest of sessions) {
         scanned.session++;
         try {
-          if (resolve(manifest.work_dir) !== this.workDir) {
+          assertNonEmptyString(manifest.session_id, "session_id");
+          assertNonEmptyString(manifest.work_dir, "work_dir");
+          assertNonEmptyString(manifest.created_at, "created_at");
+          assertNonEmptyString(manifest.active_branch_id, "active_branch_id");
+          if (manifest.history_source !== "runtime-event-v1") {
+            throw new Error(
+              `session ${manifest.session_id} has unsupported history source ${String(manifest.history_source)}`,
+            );
+          }
+          if (canonicalizeWorkspacePath(manifest.work_dir) !== this.workDir) {
             throw new Error(
               `session ${manifest.session_id} belongs to unexpected workspace ${manifest.work_dir}`,
             );
           }
-          for (const row of readEvents.all(manifest.session_id) as Array<{ event_json: string }>) {
-            const value: unknown = JSON.parse(row.event_json);
-            assertRuntimeEvent(value);
-            if (value.sessionId !== manifest.session_id) {
-              throw new Error("runtime event/session identity mismatch");
-            }
-          }
-        } catch (error) {
-          findings.push(
-            finding(
-              "session_replay_failed",
-              "critical",
-              "session",
-              this.runtimeDatabasePath,
-              errorMessage(error),
-              "Keep runtime.sqlite unchanged and restore it from a verified backup",
-              "authoritative",
-            ),
+          const events = (readEvents.all(manifest.session_id) as AgentRuntimeEventRow[]).map(
+            (row) => decodeAgentRuntimeEventRow(row, manifest.session_id),
           );
+          projectRuntimeSessionState(events);
+          projectRuntimeSessionMessages(events);
+          materializeRuntimeHistory(events);
+        } catch (error) {
+          findings.push(sessionReplayFinding(this.runtimeDatabasePath, error));
         }
       }
+    } catch (error) {
+      findings.push(sessionReplayFinding(this.runtimeDatabasePath, error));
     } finally {
       database.close();
     }
@@ -249,83 +281,89 @@ export class StorageDoctor {
   private async scanRuntime(
     findings: StorageDoctorFinding[],
     scanned: Record<StorageDoctorComponent, number>,
-  ): Promise<void> {
-    if (!(await pathExists(this.runtimeDatabasePath))) return;
+  ): Promise<RuntimeSchemaPreflightResult> {
+    const schema = preflightRuntimeSchema(this.runtimeDatabasePath);
+    if (schema.status === "database_missing") return schema;
     scanned.runtime++;
+
+    switch (schema.status) {
+      case "invalid":
+        findings.push(
+          finding(
+            "runtime_schema_invalid",
+            "critical",
+            "runtime",
+            this.runtimeDatabasePath,
+            schema.reason,
+            "Preserve the database and inspect its schema before any task execution",
+            "authoritative",
+          ),
+        );
+        return schema;
+      case "future":
+        findings.push(
+          finding(
+            "runtime_schema_unsupported",
+            "critical",
+            "runtime",
+            this.runtimeDatabasePath,
+            `runtime.sqlite schema ${schema.schemaVersion} is newer than supported ${RUNTIME_SCHEMA_VERSION}`,
+            "Use a pico build that supports this schema; never downgrade the authoritative database in place",
+            "authoritative",
+          ),
+        );
+        break;
+      case "current_migration_name_mismatch":
+        findings.push(
+          finding(
+            "runtime_schema_migration_mismatch",
+            "critical",
+            "runtime",
+            this.runtimeDatabasePath,
+            `runtime.sqlite schema ${schema.schemaVersion} migration ${schema.migrationName} does not match ${schema.expectedMigrationName}`,
+            "Use a pico build that recognizes this migration; never rewrite schema_migrations in place",
+            "authoritative",
+          ),
+        );
+        break;
+      case "outdated":
+        findings.push(
+          finding(
+            "runtime_schema_outdated",
+            "warning",
+            "runtime",
+            this.runtimeDatabasePath,
+            `runtime.sqlite schema ${schema.schemaVersion} requires migration to ${RUNTIME_SCHEMA_VERSION}`,
+            "Open it once with the current RuntimeStore to run the forward-only migration",
+            "authoritative",
+          ),
+        );
+        break;
+      case "current":
+      case "schema_migrations_missing":
+        break;
+    }
+
+    if (schema.tables.agentSessions !== schema.tables.agentRuntimeEvents) {
+      findings.push(
+        finding(
+          "runtime_schema_missing",
+          "critical",
+          "runtime",
+          this.runtimeDatabasePath,
+          "runtime.sqlite contains only part of the Agent runtime event schema",
+          "Keep the database unchanged and restore or migrate it with a compatible pico build",
+          "authoritative",
+        ),
+      );
+    }
+
     let database: Database.Database | undefined;
     try {
       database = new Database(this.runtimeDatabasePath, { readonly: true, fileMustExist: true });
       const quick = database.pragma("quick_check") as Array<Record<string, unknown>>;
       const integrity = database.pragma("integrity_check") as Array<Record<string, unknown>>;
       const foreignKeys = database.pragma("foreign_key_check") as Array<Record<string, unknown>>;
-      const migrationTable = database
-        .prepare(
-          "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'",
-        )
-        .get() as { name: string } | undefined;
-      const agentSessionTable = database
-        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'agent_sessions'")
-        .get() as { name: string } | undefined;
-      const agentEventTable = database
-        .prepare(
-          "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'agent_runtime_events'",
-        )
-        .get() as { name: string } | undefined;
-      if (!migrationTable && (!agentSessionTable || !agentEventTable)) {
-        findings.push(
-          finding(
-            "runtime_schema_missing",
-            "critical",
-            "runtime",
-            this.runtimeDatabasePath,
-            "runtime.sqlite has neither task schema metadata nor Agent runtime event tables",
-            "Open it with a compatible pico version or restore a verified database",
-            "authoritative",
-          ),
-        );
-      } else if (migrationTable) {
-        const schema = database
-          .prepare("SELECT COALESCE(MAX(version), 0) AS version FROM schema_migrations")
-          .get() as { version: unknown };
-        const version = Number(schema.version);
-        if (!Number.isSafeInteger(version) || version < 0) {
-          findings.push(
-            finding(
-              "runtime_schema_invalid",
-              "critical",
-              "runtime",
-              this.runtimeDatabasePath,
-              `runtime.sqlite reports invalid schema version ${String(schema.version)}`,
-              "Preserve the database and inspect schema_migrations before any task execution",
-              "authoritative",
-            ),
-          );
-        } else if (version > RUNTIME_SCHEMA_VERSION) {
-          findings.push(
-            finding(
-              "runtime_schema_unsupported",
-              "critical",
-              "runtime",
-              this.runtimeDatabasePath,
-              `runtime.sqlite schema ${version} is newer than supported ${RUNTIME_SCHEMA_VERSION}`,
-              "Use a pico build that supports this schema; never downgrade the authoritative database in place",
-              "authoritative",
-            ),
-          );
-        } else if (version < RUNTIME_SCHEMA_VERSION) {
-          findings.push(
-            finding(
-              "runtime_schema_outdated",
-              "warning",
-              "runtime",
-              this.runtimeDatabasePath,
-              `runtime.sqlite schema ${version} requires migration to ${RUNTIME_SCHEMA_VERSION}`,
-              "Open it once with the current RuntimeStore to run the forward-only migration",
-              "authoritative",
-            ),
-          );
-        }
-      }
       if (!pragmaReportsOk(quick) || !pragmaReportsOk(integrity)) {
         findings.push(
           finding(
@@ -367,6 +405,7 @@ export class StorageDoctor {
     } finally {
       database?.close();
     }
+    return schema;
   }
 
   private async scanOperations(
@@ -628,6 +667,56 @@ interface ParsedArtifactMeta {
   readonly availability: "available" | "evicted";
 }
 
+function hasAgentRuntimeTables(schema: RuntimeSchemaPreflightResult): boolean {
+  return "tables" in schema && schema.tables.agentSessions && schema.tables.agentRuntimeEvents;
+}
+
+function decodeAgentRuntimeEventRow(
+  row: AgentRuntimeEventRow,
+  expectedSessionId: string,
+): RuntimeEvent {
+  if (!isNonNegativeInteger(row.sequence) || row.sequence < 1) {
+    throw new Error(`Runtime event row has invalid sequence ${String(row.sequence)}`);
+  }
+  for (const [field, value] of [
+    ["session_id", row.session_id],
+    ["run_id", row.run_id],
+    ["event_id", row.event_id],
+    ["kind", row.kind],
+    ["at", row.at],
+    ["event_json", row.event_json],
+  ] as const) {
+    assertNonEmptyString(value, `agent_runtime_events.${field}`);
+  }
+
+  const event = decodeRuntimeEventJson(row.event_json);
+  const mismatches: string[] = [];
+  if (row.session_id !== expectedSessionId) mismatches.push("row.session_id/session_id");
+  if (event.sessionId !== row.session_id) mismatches.push("event.sessionId/row.session_id");
+  if (event.runId !== row.run_id) mismatches.push("event.runId/row.run_id");
+  if (event.eventId !== row.event_id) mismatches.push("event.eventId/row.event_id");
+  if (event.kind !== row.kind) mismatches.push("event.kind/row.kind");
+  if (event.at !== row.at) mismatches.push("event.at/row.at");
+  if (mismatches.length > 0) {
+    throw new Error(
+      `Runtime event ${row.event_id} row identity mismatch: ${mismatches.join(", ")}`,
+    );
+  }
+  return event;
+}
+
+function sessionReplayFinding(path: string, error: unknown): StorageDoctorFinding {
+  return finding(
+    "session_replay_failed",
+    "critical",
+    "session",
+    path,
+    errorMessage(error),
+    "Keep runtime.sqlite unchanged and restore it from a verified backup",
+    "authoritative",
+  );
+}
+
 function parseArtifactMetaV2(
   value: unknown,
   safeSessionId: string,
@@ -712,6 +801,12 @@ async function pathExists(path: string): Promise<boolean> {
 
 function isNonNegativeInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function assertNonEmptyString(value: unknown, field: string): asserts value is string {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error(`${field} must be a non-empty string`);
+  }
 }
 
 function isInspectableJsonSidecar(name: string): boolean {
