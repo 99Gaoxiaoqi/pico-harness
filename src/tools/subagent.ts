@@ -32,9 +32,21 @@ import {
   type SubagentActivityScope,
 } from "./subagent-activity-reporter.js";
 import { SUBAGENT_OUTPUT_BUDGET } from "./subagent-budget.js";
-import { parseEphemeralAgentSpec, type EphemeralAgentSpec } from "./subagent-spec.js";
+import type { EphemeralAgentSpec } from "./subagent-spec.js";
 import type { HookService } from "../hooks/service.js";
 import type { SubagentModelCatalog } from "../runtime/subagent-model-catalog.js";
+import {
+  DEFAULT_DELEGATION_MAX_FILES,
+  MAX_DELEGATION_FILES,
+  normalizeDelegateTasks,
+  requireDelegateTaskArgs,
+  resolveDelegationCompletionPolicy,
+  type NormalizedDelegateTask,
+  type SubagentMode,
+  type SubagentRole,
+} from "./delegation-contract.js";
+
+export type { SubagentMode, SubagentRole } from "./delegation-contract.js";
 
 /**
  * AgentRunner:打破循环依赖的抽象接口。
@@ -81,9 +93,6 @@ export interface AgentRunner {
     opts?: SubagentRunOptions,
   ): Promise<SubagentResult>;
 }
-
-export type SubagentRole = "leaf" | "orchestrator";
-export type SubagentMode = "explore" | "worker";
 
 export interface SubagentRunOptions {
   depth?: number;
@@ -148,52 +157,9 @@ interface SubagentArgs {
   task_prompt: string;
 }
 
-interface DelegateTaskInput {
-  goal?: string;
-  context?: string;
-  mode?: SubagentMode;
-  role?: SubagentRole;
-  /** 指定宿主统一 Agent 目录中的持久子代理角色。 */
-  agent_name?: string;
-  /** 主 Agent 可根据用户自然语言生成的一次性角色；不含工具、endpoint 或凭证。 */
-  agent?: unknown;
-  /** 子代理允许聚焦的相对根目录；默认 ["."]。 */
-  roots?: string[];
-  /** 最多检查文件数，硬上限 100；默认 30。 */
-  max_files?: number;
-  stopping_condition?: string;
-  expected_output?: string;
-}
-
-interface DelegateTaskArgs extends DelegateTaskInput {
-  tasks?: DelegateTaskInput[];
-  completion_policy?: DelegationCompletionPolicy;
-  /** @deprecated 兼容旧模型调用；true 等价于 completion_policy=optional。 */
-  background?: boolean;
-}
-
-interface NormalizedDelegateTask {
-  goal: string;
-  context?: string;
-  mode: SubagentMode;
-  role: SubagentRole;
-  agentName?: string;
-  ephemeralAgent?: EphemeralAgentSpec;
-  roots: string[];
-  maxFiles: number;
-  stoppingCondition: string;
-  expectedOutput: string;
-  contractExplicit: boolean;
-}
-
-const DEFAULT_DELEGATION_ROOTS = ["."];
-const DEFAULT_DELEGATION_MAX_FILES = 30;
-const MAX_DELEGATION_FILES = 100;
 const MAX_DISCLOSED_MODEL_ALIASES = 8;
 const MAX_DISCLOSED_MODEL_ALIAS_LENGTH = 80;
 const MAX_MODEL_ROUTE_CATALOG_DESCRIPTION = 7_000;
-const DEFAULT_STOPPING_CONDITION = "找到足以回答目标的证据，或达到文件上限时立即停止。";
-const DEFAULT_EXPECTED_OUTPUT = "给出结论、关键证据路径和仍待确认的风险。";
 
 /**
  * SubagentTool:拉起子智能体的特殊"套娃"工具。
@@ -414,7 +380,7 @@ export class DelegateTaskTool implements BaseTool {
   }
 
   async execute(args: string, context?: ToolExecutionContext): Promise<string> {
-    const input = parseDelegateArgs(args);
+    const input = requireDelegateTaskArgs(args);
     const depth = this.options.depth ?? 0;
     const maxSpawnDepth = this.options.maxSpawnDepth ?? 2;
     if (depth >= maxSpawnDepth) {
@@ -442,7 +408,7 @@ export class DelegateTaskTool implements BaseTool {
       });
     }
 
-    const completionPolicy = normalizeCompletionPolicy(input);
+    const completionPolicy = resolveDelegationCompletionPolicy(input);
     if (this.options.allowAsyncCompletion === false && completionPolicy !== "required") {
       return JSON.stringify({
         status: "rejected",
@@ -1251,79 +1217,6 @@ function sliceUtf16Safe(value: string, maxChars: number): string {
   return value.slice(0, end);
 }
 
-function parseDelegateArgs(args: string): DelegateTaskArgs {
-  try {
-    return JSON.parse(args) as DelegateTaskArgs;
-  } catch {
-    throw new Error("解析 delegate_task 参数失败:需 JSON 格式");
-  }
-}
-
-function normalizeDelegateTasks(input: DelegateTaskArgs): NormalizedDelegateTask[] {
-  const defaultMode = normalizeMode(input.mode);
-  const defaultRole = normalizeRole(input.role);
-  const defaultRoots = normalizeDelegationRoots(input.roots, DEFAULT_DELEGATION_ROOTS);
-  const defaultMaxFiles = normalizeMaxFiles(input.max_files, DEFAULT_DELEGATION_MAX_FILES);
-  const defaultStoppingCondition = normalizeContractText(
-    input.stopping_condition,
-    DEFAULT_STOPPING_CONDITION,
-  );
-  const defaultExpectedOutput = normalizeContractText(
-    input.expected_output,
-    DEFAULT_EXPECTED_OUTPUT,
-  );
-  const topLevelContractExplicit = hasExplicitTaskContract(input);
-  const defaultAgent = parseDelegateAgent(input.agent, "agent");
-  const rawTasks =
-    input.tasks && input.tasks.length > 0
-      ? input.tasks
-      : [
-          {
-            goal: input.goal,
-            context: input.context,
-            mode: input.mode,
-            role: input.role,
-            agent_name: input.agent_name,
-            agent: input.agent,
-            roots: input.roots,
-            max_files: input.max_files,
-            stopping_condition: input.stopping_condition,
-            expected_output: input.expected_output,
-          },
-        ];
-
-  return rawTasks
-    .filter((task): task is DelegateTaskInput & { goal: string } => Boolean(task.goal?.trim()))
-    .map((task) => ({
-      goal: task.goal.trim(),
-      ...(task.context ? { context: task.context } : {}),
-      mode: normalizeMode(task.mode, defaultMode),
-      role: normalizeRole(task.role, defaultRole),
-      ...(task.agent_name?.trim() ? { agentName: task.agent_name.trim() } : {}),
-      ...normalizeEphemeralAgent(task.agent, defaultAgent),
-      roots: normalizeDelegationRoots(task.roots, defaultRoots),
-      maxFiles: normalizeMaxFiles(task.max_files, defaultMaxFiles),
-      stoppingCondition: normalizeContractText(task.stopping_condition, defaultStoppingCondition),
-      expectedOutput: normalizeContractText(task.expected_output, defaultExpectedOutput),
-      contractExplicit: topLevelContractExplicit || hasExplicitTaskContract(task),
-    }));
-}
-
-function parseDelegateAgent(value: unknown, field: string): EphemeralAgentSpec | undefined {
-  const parsed = parseEphemeralAgentSpec(value);
-  if (!parsed.ok) throw new Error(`${field}: ${parsed.error}`);
-  return parsed.spec;
-}
-
-function normalizeEphemeralAgent(
-  value: unknown,
-  fallback: EphemeralAgentSpec | undefined,
-): { ephemeralAgent?: EphemeralAgentSpec } {
-  if (value === undefined) return fallback ? { ephemeralAgent: fallback } : {};
-  const parsed = parseDelegateAgent(value, "tasks[].agent");
-  return parsed ? { ephemeralAgent: parsed } : {};
-}
-
 function appendEphemeralInstructions(base: string | undefined, instructions: string | undefined) {
   if (!instructions) return base;
   return [
@@ -1475,48 +1368,6 @@ function singleLine(value: string): string {
   return value.replace(/\s+/gu, " ").trim();
 }
 
-function normalizeDelegationRoots(value: string[] | undefined, fallback: string[]): string[] {
-  if (!Array.isArray(value)) return [...fallback];
-  const roots = [
-    ...new Set(
-      value
-        .filter((root): root is string => typeof root === "string")
-        .map(normalizeDelegationRoot)
-        .filter((root): root is string => root !== undefined),
-    ),
-  ].slice(0, 20);
-  return roots.length > 0 ? roots : [...fallback];
-}
-
-function normalizeDelegationRoot(value: string): string | undefined {
-  const root = value.trim().replaceAll("\\", "/");
-  if (!root || root.includes("\0")) return undefined;
-  // roots 是相对可信 workspace 的聚焦范围，不接受宿主绝对路径或路径穿越。
-  if (root.startsWith("/") || /^[A-Za-z]:\//u.test(root)) return undefined;
-  const segments = root.split("/").filter((segment) => segment !== "" && segment !== ".");
-  if (segments.includes("..")) return undefined;
-  return (segments.length > 0 ? segments.join("/") : ".").slice(0, 240);
-}
-
-function normalizeMaxFiles(value: number | undefined, fallback: number): number {
-  if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
-  return Math.min(MAX_DELEGATION_FILES, Math.max(1, Math.floor(value)));
-}
-
-function normalizeContractText(value: string | undefined, fallback: string): string {
-  const normalized = value?.replace(/\s+/gu, " ").trim();
-  return normalized ? normalized.slice(0, 500) : fallback;
-}
-
-function hasExplicitTaskContract(task: DelegateTaskInput): boolean {
-  return (
-    task.roots !== undefined ||
-    task.max_files !== undefined ||
-    task.stopping_condition !== undefined ||
-    task.expected_output !== undefined
-  );
-}
-
 function renderBoundedTaskPrompt(task: NormalizedDelegateTask): string {
   return [
     task.context,
@@ -1531,28 +1382,6 @@ function renderBoundedTaskPrompt(task: NormalizedDelegateTask): string {
   ]
     .filter((line): line is string => line !== undefined)
     .join("\n");
-}
-
-function normalizeMode(
-  value: string | undefined,
-  fallback: SubagentMode = "explore",
-): SubagentMode {
-  return value === "worker" || value === "explore" ? value : fallback;
-}
-
-function normalizeRole(value: string | undefined, fallback: SubagentRole = "leaf"): SubagentRole {
-  return value === "orchestrator" || value === "leaf" ? value : fallback;
-}
-
-function normalizeCompletionPolicy(input: DelegateTaskArgs): DelegationCompletionPolicy {
-  if (
-    input.completion_policy === "required" ||
-    input.completion_policy === "optional" ||
-    input.completion_policy === "detached"
-  ) {
-    return input.completion_policy;
-  }
-  return input.background === true ? "optional" : "required";
 }
 
 function summarizeDelegation(tasks: readonly NormalizedDelegateTask[]): string {

@@ -31,6 +31,7 @@ import {
 import { fallbackModelFor, isModelUnavailableError } from "../provider/fallback.js";
 import { ContextOverflowError, isAbortError } from "../provider/errors.js";
 import type { ProviderConfig } from "../provider/config.js";
+import { resolveAuxProviderConfig } from "../provider/aux-provider.js";
 import type { CredentialRef, CredentialResolver } from "../provider/credential-vault.js";
 import type { LLMProvider, LLMProviderRequestOptions } from "../provider/interface.js";
 import { CredentialRotationCoordinator } from "../provider/credential-rotation.js";
@@ -1571,15 +1572,11 @@ function loadAuxProvider(
   session: Session,
   trackerOptions: CostTrackerOptions,
 ): LLMProvider | undefined {
-  const baseURL = env.AUX_LLM_BASE_URL;
-  const apiKey = env.AUX_LLM_API_KEY;
-  const model = env.AUX_LLM_MODEL;
-  if (!baseURL || !apiKey || !model) return undefined;
-  const kind = (env.AUX_LLM_PROVIDER as ProviderKind | undefined) ?? "openai";
-  const config = { baseURL, apiKey, model };
+  const resolved = resolveAuxProviderConfig(env);
+  if (!resolved) return undefined;
   return new CostTracker(
-    createProvider(kind, config),
-    trackingRoute(kind, config),
+    createProvider(resolved.kind, resolved.config),
+    trackingRoute(resolved.kind, resolved.config),
     session,
     trackerOptions,
   );
