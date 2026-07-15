@@ -5,9 +5,10 @@ import { isAbortError } from "../provider/errors.js";
 import { resolvePicoPaths } from "../paths/pico-paths.js";
 import type { CommitReceipt } from "../engine/session-persistence.js";
 import type { Session } from "../engine/session.js";
-import type { Message } from "../schema/message.js";
+import { PICO_TOOL_RESULT_ERROR_KEY, type Message, type ToolCall } from "../schema/message.js";
 import {
   RUNTIME_EVENT_SCHEMA_VERSION,
+  runtimeEventHasModelMessage,
   type RuntimeApprovalRequestedEvent,
   type RuntimeApprovalSettledEvent,
   type RuntimeCheckpointRecordedEvent,
@@ -136,6 +137,13 @@ interface RuntimeForkBootstrapIdentity {
   messageEventId(index: number): string;
 }
 
+interface PendingRuntimeToolCall {
+  readonly source: RuntimeMessageCommittedEvent;
+  readonly toolCall: ToolCall;
+  readonly callIndex: number;
+  resolved: boolean;
+}
+
 /** The canonical run bound to the current asynchronous Agent execution. */
 export function currentRuntimeRun(): RuntimeRun | undefined {
   return runtimeRunContext.getStore();
@@ -224,14 +232,18 @@ export class RuntimeRun {
       const started = events.find((event) => event.kind === "run.started");
       if (!started || events.some((event) => event.kind === "run.terminal")) continue;
       const last = events.at(-1) ?? started;
-      await store.append({
+      const recoveryAt = last.at;
+      const syntheticToolResults = findDanglingRuntimeToolCalls(events).map((pending) =>
+        buildInterruptedToolResultEvent(events, pending, recoveryAt),
+      );
+      const terminal: RuntimeRunTerminalEvent = {
         schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,
-        eventId: createRuntimeEventId("run-terminal"),
+        eventId: runtimeInterruptionRecoveryEventId("terminal", [options.sessionId, runId]),
         sessionId: options.sessionId,
         invocationId: last.invocationId,
         runId,
         turnId: last.turnId,
-        at: (options.now ?? (() => new Date()))().toISOString(),
+        at: recoveryAt,
         partial: false,
         visibility: "internal",
         ...(last.refs ? { refs: last.refs } : {}),
@@ -241,7 +253,8 @@ export class RuntimeRun {
           reason: "recovered_without_terminal_fact",
           recovered: true,
         },
-      });
+      };
+      await store.appendBatch([...syntheticToolResults, terminal]);
       reconciled.push(runId);
     }
     return reconciled;
@@ -806,6 +819,96 @@ export class RuntimeRun {
       throw new Error(`Runtime run ${this.runId} is already terminal`);
     }
   }
+}
+
+function findDanglingRuntimeToolCalls(events: readonly RuntimeEvent[]): PendingRuntimeToolCall[] {
+  const pending: PendingRuntimeToolCall[] = [];
+  const unresolvedByToolCallId = new Map<string, PendingRuntimeToolCall[]>();
+
+  for (const event of events) {
+    if (!runtimeEventHasModelMessage(event)) continue;
+    const message = event.data.message;
+    if (message.role === "assistant") {
+      for (const [callIndex, toolCall] of (message.toolCalls ?? []).entries()) {
+        const entry: PendingRuntimeToolCall = {
+          source: event,
+          toolCall,
+          callIndex,
+          resolved: false,
+        };
+        pending.push(entry);
+        const unresolved = unresolvedByToolCallId.get(toolCall.id) ?? [];
+        unresolved.push(entry);
+        unresolvedByToolCallId.set(toolCall.id, unresolved);
+      }
+      continue;
+    }
+    if (message.role !== "user" || message.toolCallId === undefined) continue;
+
+    const unresolved = unresolvedByToolCallId.get(message.toolCallId);
+    const matched = unresolved?.shift();
+    if (matched) matched.resolved = true;
+    if (unresolved?.length === 0) unresolvedByToolCallId.delete(message.toolCallId);
+  }
+
+  return pending.filter((entry) => !entry.resolved);
+}
+
+function buildInterruptedToolResultEvent(
+  events: readonly RuntimeEvent[],
+  pending: PendingRuntimeToolCall,
+  at: string,
+): RuntimeMessageCommittedEvent {
+  const source = pending.source;
+  const toolContext = events.findLast(
+    (event) => event.turnId === source.turnId && event.refs?.toolCallId === pending.toolCall.id,
+  );
+  const refs = compactRefs({
+    ...(source.refs ?? {}),
+    ...(toolContext?.refs ?? {}),
+    toolCallId: pending.toolCall.id,
+  });
+  return {
+    schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,
+    eventId: runtimeInterruptionRecoveryEventId("tool-result", [
+      source.sessionId,
+      source.runId,
+      source.eventId,
+      pending.callIndex,
+      pending.toolCall.id,
+    ]),
+    sessionId: source.sessionId,
+    invocationId: source.invocationId,
+    runId: source.runId,
+    turnId: source.turnId,
+    at,
+    partial: false,
+    visibility: "model",
+    ...(refs ? { refs } : {}),
+    kind: "message.committed",
+    data: {
+      message: {
+        role: "user",
+        content: "工具执行已中断: 运行进程在该工具结果持久化前终止；该调用未获得可用结果。",
+        toolCallId: pending.toolCall.id,
+        providerData: {
+          [PICO_TOOL_RESULT_ERROR_KEY]: true,
+          picoKind: "synthetic_tool_result",
+          picoToolResultStatus: "interrupted",
+        },
+      },
+    },
+  };
+}
+
+function runtimeInterruptionRecoveryEventId(
+  kind: "terminal" | "tool-result",
+  identity: readonly (number | string)[],
+): string {
+  const digest = createHash("sha256")
+    .update(JSON.stringify(["runtime-interruption-recovery-v1", kind, ...identity]))
+    .digest("hex");
+  return `runtime-recovery:${kind}:${digest}`;
 }
 
 function compactRefs(value: RuntimeEventRefs): RuntimeEventRefs | undefined {

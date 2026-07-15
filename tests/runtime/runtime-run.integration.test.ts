@@ -4,7 +4,11 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Session } from "../../src/engine/session.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
-import type { RuntimeEvent } from "../../src/runtime/runtime-event.js";
+import { PICO_TOOL_RESULT_ERROR_KEY, type Message } from "../../src/schema/message.js";
+import type {
+  RuntimeEvent,
+  RuntimeMessageCommittedEvent,
+} from "../../src/runtime/runtime-event.js";
 import { materializeRuntimeHistory } from "../../src/runtime/runtime-event-read-model.js";
 import { RuntimeEventStore } from "../../src/runtime/runtime-event-store.js";
 import { RuntimeRun } from "../../src/runtime/runtime-run.js";
@@ -249,6 +253,113 @@ describe("RuntimeRun projection recovery", () => {
       },
     });
   });
+
+  it("closes only dangling tool calls before interrupting a durable run", async () => {
+    const store = new RuntimeEventStore({
+      databasePath: resolvePicoPaths(workDir).workspace.runtimeDatabase,
+    });
+    await store.initializeSession({ sessionId: "session-a", workDir });
+    await store.appendBatch([
+      runStarted(workDir),
+      message("message-user", { role: "user", content: "run both tools" }),
+      {
+        ...eventBase("message-assistant"),
+        turnId: "turn-tools",
+        refs: {
+          stepId: "step-tools",
+          parentRunId: "parent-run",
+          parentToolCallId: "parent-call",
+        },
+        kind: "message.committed",
+        data: {
+          message: {
+            role: "assistant",
+            content: "",
+            toolCalls: [
+              { id: "call-complete", name: "read", arguments: "{}" },
+              { id: "call-dangling", name: "write", arguments: "{}" },
+            ],
+          },
+        },
+      },
+      {
+        ...eventBase("message-result"),
+        turnId: "turn-tools",
+        refs: { stepId: "step-tools", toolCallId: "call-complete" },
+        kind: "message.committed",
+        data: {
+          message: {
+            role: "user",
+            content: "real result",
+            toolCallId: "call-complete",
+            providerData: { [PICO_TOOL_RESULT_ERROR_KEY]: false },
+          },
+        },
+      },
+    ]);
+
+    const session = new Session("session-a", workDir, { persistence: true });
+    await session.recover();
+    const incompleteEvents = await store.readSession("session-a");
+    expect(() => materializeRuntimeHistory(incompleteEvents)).toThrow();
+
+    await expect(
+      RuntimeRun.reconcileIncompleteRuns({ sessionId: "session-a", workDir, store }),
+    ).resolves.toEqual(["run-a"]);
+
+    const recovered = await store.readRun("session-a", "run-a");
+    const synthetic = recovered.filter(
+      (event): event is RuntimeMessageCommittedEvent =>
+        event.kind === "message.committed" &&
+        event.data.message.providerData?.["picoKind"] === "synthetic_tool_result",
+    );
+    expect(synthetic).toHaveLength(1);
+    expect(synthetic[0]).toMatchObject({
+      eventId: expect.stringMatching(/^runtime-recovery:tool-result:/u),
+      turnId: "turn-tools",
+      at: "2026-07-15T00:00:00.000Z",
+      refs: {
+        stepId: "step-tools",
+        parentRunId: "parent-run",
+        parentToolCallId: "parent-call",
+        toolCallId: "call-dangling",
+      },
+      data: {
+        message: {
+          role: "user",
+          toolCallId: "call-dangling",
+          providerData: {
+            [PICO_TOOL_RESULT_ERROR_KEY]: true,
+            picoKind: "synthetic_tool_result",
+            picoToolResultStatus: "interrupted",
+          },
+        },
+      },
+    });
+    expect(
+      recovered.filter(
+        (event) =>
+          event.kind === "message.committed" && event.data.message.toolCallId === "call-complete",
+      ),
+    ).toHaveLength(1);
+    expect(recovered.at(-1)).toMatchObject({
+      eventId: expect.stringMatching(/^runtime-recovery:terminal:/u),
+      kind: "run.terminal",
+      data: { status: "interrupted", recovered: true },
+    });
+
+    const strictHistory = materializeRuntimeHistory(await store.readSession("session-a"));
+    await expect(RuntimeRun.repairSessionProjection(session, { workDir, store })).resolves.toBe(
+      true,
+    );
+    expect(session.getModelContext()).toEqual(strictHistory);
+
+    await expect(
+      RuntimeRun.reconcileIncompleteRuns({ sessionId: "session-a", workDir, store }),
+    ).resolves.toEqual([]);
+    expect(await store.readRun("session-a", "run-a")).toEqual(recovered);
+    await session.close();
+  });
 });
 
 function runStarted(workDir: string): RuntimeEvent {
@@ -259,10 +370,7 @@ function runStarted(workDir: string): RuntimeEvent {
   };
 }
 
-function message(
-  eventId: string,
-  value: { role: "user" | "assistant"; content: string },
-): RuntimeEvent {
+function message(eventId: string, value: Message): RuntimeMessageCommittedEvent {
   return {
     ...eventBase(eventId),
     kind: "message.committed",

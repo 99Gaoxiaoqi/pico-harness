@@ -954,6 +954,10 @@ export async function executeAgentRuntime(
         workDir,
         store: runtimeEventStore,
       });
+      await RuntimeRun.repairSessionProjection(session, {
+        workDir,
+        store: runtimeEventStore,
+      });
       const runtimeRun = await RuntimeRun.start({
         sessionId: session.id,
         workDir,

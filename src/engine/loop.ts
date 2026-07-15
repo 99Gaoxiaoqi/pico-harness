@@ -1137,6 +1137,7 @@ export class AgentEngine implements AgentRunner {
       sessionId: session.id,
       workDir: session.workDir,
     });
+    await RuntimeRun.repairSessionProjection(session, { workDir: session.workDir });
     const runtimeRun = await RuntimeRun.start({
       sessionId: session.id,
       workDir: session.workDir,
