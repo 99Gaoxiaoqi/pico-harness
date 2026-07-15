@@ -104,13 +104,31 @@ export interface RuntimeModelCallSettledEvent extends RuntimeEventBase {
   };
 }
 
+interface RuntimeCheckpointRecordedEventDataBase {
+  readonly checkpointId: string;
+  readonly coveredEventCount: number;
+  readonly sourceDigest: string;
+}
+
+/** A checkpoint that can replace a prefix of the current model-history projection. */
+export interface RuntimeRollingCheckpointData extends RuntimeCheckpointRecordedEventDataBase {
+  readonly throughEventId: string;
+  readonly summary: Message;
+}
+
+/** Pre-rolling checkpoint facts remain decodable but do not change the model projection. */
+interface RuntimeLegacyCheckpointData extends RuntimeCheckpointRecordedEventDataBase {
+  readonly throughEventId?: undefined;
+  readonly summary?: undefined;
+}
+
+export type RuntimeCheckpointRecordedEventData =
+  | RuntimeLegacyCheckpointData
+  | RuntimeRollingCheckpointData;
+
 export interface RuntimeCheckpointRecordedEvent extends RuntimeEventBase {
   readonly kind: "context.checkpoint.recorded";
-  readonly data: {
-    readonly checkpointId: string;
-    readonly coveredEventCount: number;
-    readonly sourceDigest: string;
-  };
+  readonly data: RuntimeCheckpointRecordedEventData;
 }
 
 export interface RuntimeHistoryRewoundEvent extends RuntimeEventBase {
@@ -226,6 +244,7 @@ export function assertRuntimeEvent(value: unknown): asserts value is RuntimeEven
       if (!isNonNegativeNumber(value["data"]["coveredEventCount"])) {
         throw new RuntimeEventIntegrityError("Runtime checkpoint event count is invalid");
       }
+      assertCheckpointSummary(value["data"]);
       return;
     case "history.rewound":
       assertString(value["data"]["branchId"], "history.rewound.branchId");
@@ -256,6 +275,19 @@ function assertMessage(value: unknown): asserts value is Message {
   if (!isRecord(value) || !isRole(value["role"]) || typeof value["content"] !== "string") {
     throw new RuntimeEventIntegrityError("Runtime message payload is invalid");
   }
+}
+
+function assertCheckpointSummary(value: Record<string, unknown>): void {
+  const throughEventId = value["throughEventId"];
+  const summary = value["summary"];
+  if (throughEventId === undefined && summary === undefined) return;
+  if (throughEventId === undefined || summary === undefined) {
+    throw new RuntimeEventIntegrityError(
+      "Runtime checkpoint must include throughEventId and summary together",
+    );
+  }
+  assertString(throughEventId, "context.checkpoint.recorded.throughEventId");
+  assertMessage(summary);
 }
 
 function assertEqual(value: unknown, expected: unknown, field: string): void {

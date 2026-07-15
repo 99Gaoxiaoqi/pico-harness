@@ -1,8 +1,13 @@
 import type { Message, ToolCall } from "../schema/message.js";
-import type { RuntimeEvent } from "./runtime-event.js";
+import type {
+  RuntimeCheckpointRecordedEvent,
+  RuntimeEvent,
+  RuntimeRollingCheckpointData,
+} from "./runtime-event.js";
 
-interface ProjectedMessage {
-  readonly eventIndex: number;
+export interface RuntimeHistoryProjectionEntry {
+  /** The immutable event that currently contributes this model-visible message. */
+  readonly eventId: string;
   readonly message: Message;
 }
 
@@ -22,53 +27,110 @@ export function projectRuntimeEventsToMessages(events: readonly RuntimeEvent[]):
 }
 
 export function materializeRuntimeHistory(events: readonly RuntimeEvent[]): Message[] {
-  const eventIndexes = new Map<string, number>();
-  const projected: ProjectedMessage[] = [];
+  return materializeRuntimeHistoryEntries(events).map(({ message }) => message);
+}
 
-  for (const [eventIndex, event] of events.entries()) {
-    if (eventIndexes.has(event.eventId)) {
+/**
+ * Returns the model-history projection together with the immutable event IDs that
+ * currently own each entry. Checkpoint summaries are owned by their checkpoint event.
+ */
+export function projectRuntimeEventsToMessageEntries(
+  events: readonly RuntimeEvent[],
+): RuntimeHistoryProjectionEntry[] {
+  return materializeRuntimeHistoryEntries(events);
+}
+
+export function materializeRuntimeHistoryEntries(
+  events: readonly RuntimeEvent[],
+): RuntimeHistoryProjectionEntry[] {
+  const knownEventIds = new Set<string>();
+  const projected: RuntimeHistoryProjectionEntry[] = [];
+
+  for (const event of events) {
+    if (knownEventIds.has(event.eventId)) {
       throw new RuntimeEventReadModelIntegrityError(
         `Runtime history contains duplicate event ID ${event.eventId}`,
       );
     }
 
     if (event.kind === "history.rewound") {
-      rewindProjectedMessages(projected, event.data.throughEventId, eventIndexes);
+      rewindProjectedMessages(projected, event.data.throughEventId, knownEventIds, event.eventId);
+    } else if (event.kind === "context.checkpoint.recorded" && isRollingCheckpoint(event)) {
+      replaceProjectedPrefixWithCheckpoint(projected, event, knownEventIds);
     } else if (
       event.kind === "message.committed" &&
       event.visibility === "model" &&
       !event.partial
     ) {
-      projected.push({ eventIndex, message: cloneMessage(event.data.message) });
+      projected.push({ eventId: event.eventId, message: cloneMessage(event.data.message) });
     }
 
-    eventIndexes.set(event.eventId, eventIndex);
+    knownEventIds.add(event.eventId);
   }
 
-  const messages = projected.map(({ message }) => message);
-  assertToolCallPairing(messages);
-  return messages;
+  assertToolCallPairing(projected.map(({ message }) => message));
+  return projected;
 }
 
 function rewindProjectedMessages(
-  projected: ProjectedMessage[],
+  projected: RuntimeHistoryProjectionEntry[],
   throughEventId: string | undefined,
-  eventIndexes: ReadonlyMap<string, number>,
+  knownEventIds: ReadonlySet<string>,
+  rewindEventId: string,
 ): void {
   if (throughEventId === undefined) {
     projected.length = 0;
     return;
   }
 
-  const throughEventIndex = eventIndexes.get(throughEventId);
-  if (throughEventIndex === undefined) {
+  const throughProjectedIndex = findProjectedEventIndex(
+    projected,
+    throughEventId,
+    knownEventIds,
+    `Runtime history rewind ${rewindEventId}`,
+  );
+  projected.splice(throughProjectedIndex + 1);
+}
+
+function replaceProjectedPrefixWithCheckpoint(
+  projected: RuntimeHistoryProjectionEntry[],
+  checkpoint: RuntimeCheckpointRecordedEvent & { readonly data: RuntimeRollingCheckpointData },
+  knownEventIds: ReadonlySet<string>,
+): void {
+  const throughProjectedIndex = findProjectedEventIndex(
+    projected,
+    checkpoint.data.throughEventId,
+    knownEventIds,
+    `Runtime checkpoint ${checkpoint.eventId}`,
+  );
+  projected.splice(0, throughProjectedIndex + 1, {
+    eventId: checkpoint.eventId,
+    message: cloneMessage(checkpoint.data.summary),
+  });
+}
+
+function findProjectedEventIndex(
+  projected: readonly RuntimeHistoryProjectionEntry[],
+  eventId: string,
+  knownEventIds: ReadonlySet<string>,
+  referenceKind: string,
+): number {
+  const projectedIndex = projected.findIndex((entry) => entry.eventId === eventId);
+  if (projectedIndex !== -1) return projectedIndex;
+  if (knownEventIds.has(eventId)) {
     throw new RuntimeEventReadModelIntegrityError(
-      `Runtime history rewind references an unknown prior event ${throughEventId}`,
+      `${referenceKind} references event ${eventId}, but it is not in the current model projection`,
     );
   }
+  throw new RuntimeEventReadModelIntegrityError(
+    `${referenceKind} references an unknown prior event ${eventId}`,
+  );
+}
 
-  const firstRemoved = projected.findIndex(({ eventIndex }) => eventIndex > throughEventIndex);
-  if (firstRemoved !== -1) projected.splice(firstRemoved);
+function isRollingCheckpoint(
+  event: RuntimeCheckpointRecordedEvent,
+): event is RuntimeCheckpointRecordedEvent & { readonly data: RuntimeRollingCheckpointData } {
+  return event.data.throughEventId !== undefined && event.data.summary !== undefined;
 }
 
 function assertToolCallPairing(messages: readonly Message[]): void {
