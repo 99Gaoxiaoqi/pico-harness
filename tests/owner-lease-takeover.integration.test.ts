@@ -147,7 +147,7 @@ describe("owner lease stale takeover integration", () => {
 
     await waitForFileCount(readyDirectory, CONTENDER_COUNT);
     await writeFile(startPath, "start\n", "utf8");
-    await waitForFileCount(outcomeDirectory, CONTENDER_COUNT);
+    await waitForFileCount(outcomeDirectory, CONTENDER_COUNT, ".json");
 
     const outcomes = await readJsonDirectory<{ status: string }>(outcomeDirectory);
     expect(outcomes.filter((outcome) => outcome.status === "acquired")).toHaveLength(1);
@@ -239,10 +239,13 @@ function createDeadOwner(leaseId: string): OwnerLeaseRecord {
   };
 }
 
-async function waitForFileCount(directory: string, count: number): Promise<void> {
+async function waitForFileCount(directory: string, count: number, suffix?: string): Promise<void> {
   const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
-    if ((await readdir(directory)).length === count) return;
+    const names = await readdir(directory);
+    if (names.filter((name) => suffix === undefined || name.endsWith(suffix)).length === count) {
+      return;
+    }
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   throw new Error(`Timed out waiting for ${count} files in ${directory}`);
@@ -264,7 +267,7 @@ async function waitForAbort(signal: AbortSignal): Promise<void> {
 }
 
 async function readJsonDirectory<T>(directory: string): Promise<T[]> {
-  const names = await readdir(directory);
+  const names = (await readdir(directory)).filter((name) => name.endsWith(".json"));
   return Promise.all(
     names.map(async (name) => JSON.parse(await readFile(join(directory, name), "utf8")) as T),
   );
