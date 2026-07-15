@@ -545,6 +545,9 @@ export async function executeAgentRuntime(
         };
       },
     };
+    const artifactBaseDir = resolvePicoPaths(workDir, {
+      picoHome: session.picoHome,
+    }).workspace.artifacts;
     // 凭证轮换(4.2):多 key 时从池取首个 key 覆盖 config.apiKey,并构建轮换回调。
     // 单 key / 注入 provider 时跳过(向后兼容)。pool 注入点集中在此,便于追踪 currentKey。
     let currentConfig: ProviderConfig = providerConfig;
@@ -671,6 +674,8 @@ export async function executeAgentRuntime(
             maxSpawnDepth: 0,
             yoloSandbox: { config: picoConfig.sandbox },
             ownerSessionId: session.id,
+            artifactBaseDir,
+            env: runtimeEnv,
           })({ mode: "explore", role: "leaf", depth: 0, maxSpawnDepth: 0 });
           const task = [
             request.prompt,
@@ -731,6 +736,8 @@ export async function executeAgentRuntime(
       },
       skillLoaderFactory(workDir),
       approvalManager,
+      artifactBaseDir,
+      runtimeEnv,
     );
     cleanupRegistry = registry;
     if (!backgroundPolicy && dependencies.scheduleDraftCoordinator) {
@@ -747,7 +754,7 @@ export async function executeAgentRuntime(
         registry.setHookRunner?.(new HookRunner(workDir, hooksConfig));
       }
     }
-    const artifactRuntime = buildArtifactRuntime(workDir, session.id, dependencies.picoHome);
+    const artifactRuntime = buildArtifactRuntime(session.id, artifactBaseDir);
     // Inject steer text into the session-scoped queue before the next provider turn.
     const steerQueue = runtimeState.steerQueue;
     if (options.steer) {
@@ -886,6 +893,8 @@ export async function executeAgentRuntime(
       skillLoaderFactory,
       runtimeState.hookService,
       subagentModelCatalog,
+      artifactBaseDir,
+      runtimeEnv,
       async (profile) => {
         if (!profile.sourcePath || profile.hooks === undefined) return async () => undefined;
         return await runtimeState.activateComponentHookLease({
@@ -1180,6 +1189,8 @@ function buildRegistry(
   activateSkillHooks?: (skill: Skill) => void | Promise<void>,
   skillLoader?: SkillLoader,
   approvalManager?: ApprovalManager,
+  artifactBaseDir?: string,
+  env?: NodeJS.ProcessEnv,
 ): ToolRegistry {
   return buildDefaultToolRegistry(workDir, {
     truncateResults: false,
@@ -1196,6 +1207,8 @@ function buildRegistry(
     ...(activateSkillHooks !== undefined ? { activateSkillHooks } : {}),
     ...(skillLoader !== undefined ? { skillLoader } : {}),
     ...(approvalManager !== undefined ? { approvalManager } : {}),
+    ...(artifactBaseDir !== undefined ? { artifactBaseDir } : {}),
+    ...(env !== undefined ? { env } : {}),
   });
 }
 
@@ -1466,6 +1479,8 @@ function registerDelegationTools(
   skillLoaderFactory?: (workDir: string) => SkillLoader,
   hookService?: HookService,
   modelCatalog?: SubagentModelCatalog,
+  artifactBaseDir?: string,
+  env?: Readonly<Record<string, string | undefined>>,
   activateAgentHooks?: (profile: AgentProfile) => Promise<() => void | Promise<void>>,
 ): void {
   const registryFactory = createSubagentRegistryFactory({
@@ -1479,6 +1494,8 @@ function registerDelegationTools(
     ...(skillLoaderFactory ? { skillLoaderFactory } : {}),
     ...(hookService ? { hookService } : {}),
     ...(modelCatalog ? { modelCatalog } : {}),
+    ...(artifactBaseDir ? { artifactBaseDir } : {}),
+    ...(env ? { env } : {}),
     ...(activateAgentHooks ? { activateAgentHooks } : {}),
     ...(worktreeSupervisor ? { worktreeSupervisor } : {}),
     ...(profiles.length > 0 ? { profiles } : {}),
@@ -1584,15 +1601,14 @@ function loadAuxProvider(
 }
 
 function buildArtifactRuntime(
-  workDir: string,
   sessionId: string,
-  picoHome?: string,
+  artifactBaseDir: string,
 ): {
   observationProcessor: ToolObservationProcessor;
   subagentReportArtifactWriter: SubagentReportArtifactWriter;
 } {
   const store = new ToolResultArtifactStore({
-    baseDir: resolvePicoPaths(workDir, { picoHome }).workspace.artifacts,
+    baseDir: artifactBaseDir,
   });
   const subagentReportArtifactWriter: SubagentReportArtifactWriter = async (input) => {
     const meta = await store.write({

@@ -73,6 +73,10 @@ export interface DefaultToolRegistryOptions extends ToolRegistryOptions {
   skillLoader?: SkillLoader;
   /** exit_plan_mode 使用的宿主审批实例；缺失时该工具 fail-closed。 */
   approvalManager?: ApprovalManager;
+  /** Host-owned artifact root shared by writer and read_artifact. */
+  artifactBaseDir?: string;
+  /** Host-owned process environment for tools that intentionally inherit it. */
+  env?: NodeJS.ProcessEnv;
 }
 
 export function buildDefaultToolRegistry(
@@ -90,6 +94,8 @@ export function buildDefaultToolRegistry(
     activateSkillHooks,
     skillLoader,
     approvalManager,
+    artifactBaseDir,
+    env,
     workspaceRoots,
     deferWorkspaceBoundary = false,
     yoloSandbox,
@@ -100,7 +106,7 @@ export function buildDefaultToolRegistry(
   // 必须先于 host 后续挂载的审批中间件,避免一次审批扩大文件系统边界。
   if (!deferWorkspaceBoundary) registry.useRequest(buildWorkspaceBoundaryMiddleware(roots));
   registry.register(new ReadFileTool(roots));
-  registry.register(new ReadArtifactTool(workDir));
+  registry.register(new ReadArtifactTool(workDir, artifactBaseDir));
   registry.register(new WriteFileTool(roots));
   registry.register(new EditFileTool(roots));
   registry.register(
@@ -113,6 +119,7 @@ export function buildDefaultToolRegistry(
             },
           }
         : {}),
+      ...(env ? { env } : {}),
     }),
   );
   registry.register(new TaskListTool(backgroundManager));
@@ -145,7 +152,7 @@ export function buildDefaultToolRegistry(
   }
   if (askUserHandler) registerAskUserTool(registry, askUserHandler);
   registry.register(new FetchURLTool());
-  registry.register(new WebSearchTool());
+  registry.register(new WebSearchTool(env));
   if (codeIntelligence) {
     for (const tool of createCodeIntelligenceTools(workDir, codeIntelligence)) {
       registry.register(tool);
