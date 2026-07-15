@@ -1,6 +1,6 @@
 # Pico Harness 架构收敛计划
 
-> 状态：实现与最终集成验收已完成，待合并与推送
+> 状态：已完成，已合并并推送 `main`
 > 建立日期：2026-07-16
 > 基线：`main@260dbac`
 > 实现快照：`codex/architecture-convergence@8d64385`
@@ -145,8 +145,8 @@
 - [x] 在最终集成态运行 `npm run desktop:typecheck` 和 `npm run desktop:package`。✔️
 - [x] 使用不提交到仓库的临时 smoke 覆盖多 `PICO_HOME` 隔离、Artifact 回读、Desktop migration、daemon close race、双工作区订阅和打包启动/ping/退出。✔️
 - [x] 检查最终 Git 差异，只提交本计划范围内的变更，并保护用户已有文件。✔️
-- [ ] 将验收通过的集成分支合并到 `main`。
-- [ ] 确认远程 `main` 未前移后推送，并确认无未提交或未推送内容。
+- [x] 将验收通过的集成分支合并到 `main`。✔️
+- [x] 确认远程 `main` 未前移后推送，并确认无未提交或未推送内容。✔️
 
 ### 最终验收记录
 
@@ -155,6 +155,7 @@
 - 产物：`app.asar` 中 `.map`、`node-pty`、`zustand` 与 `@radix-ui/react-tabs` 的匹配数均为 0。
 - 临时 smoke：覆盖多 `PICO_HOME` 状态/凭证/endpoint 隔离、Artifact canonical root 与跨 Home 拒绝、v1→v2 migration 正常/orphan/失败保留、request/close 与 realpath/close 竞态、非法 subscription replay fail-closed、合法 replay/live 顺序、Renderer 销毁释放、双工作区订阅隔离，以及最新打包应用启动/schema ping/退出/socket 清理；临时文件与进程已清理。
 - 最终只读复审：未发现可证实的 P0/P1/P2；`blob-garbage-collector.ts` 与 `retention-policy.ts` 相对计划基线保持零差异。
+- 交付：集成分支以 fast-forward 方式合并到 `main`，远程 `main` 首轮推送至 `0fcc9ad`；完成记录随后单独提交并再次推送。
 
 ## 建议实施顺序
 
