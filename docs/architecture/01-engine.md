@@ -186,7 +186,7 @@ SQLite 追加事件表是会话与运行时的唯一事实源：`message.committ
 
 ### Reporter (`reporter.ts`)
 
-8 个回调接口：`onStart/onTurnStart/onThinking/onToolCall/onToolResult/onMessage/onFinish/onTextDelta?`。注入不同实现切换展现层（TerminalReporter/TuiReporter/FeishuReporter/AcpStreamCollector）。
+8 个回调接口：`onStart/onTurnStart/onThinking/onToolCall/onToolResult/onMessage/onFinish/onTextDelta?`。注入不同实现切换展现层（`TerminalReporter`、`TuiReporter`、`DesktopReporter`、`SilentReporter`）。
 
 ---
 

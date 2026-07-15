@@ -10,9 +10,9 @@
 用户输入 "读一下 README.md 并总结"
     │
     ▼
-┌─ cli/run-agent.ts ─────────────────────────────────────────────┐
-│ session.append({role:"user", content:"读一下 README.md..."})    │
-│ engine.run(session)                                             │
+┌─ runtime/agent-runtime.ts ─────────────────────────────────────┐
+│ 固定 picoHome/runtimeEnv、Session、Provider 与工具依赖          │
+│ RuntimeRun.run(() => engine.run(session))                       │
 └─────────────────────────────────────────────────────────────────┘
     │
     ▼
@@ -24,8 +24,8 @@
 │ │   systemPrompt = PromptComposer.build()                      │ │
 │ │     ├─ 极简内核(身份+纪律)                                    │ │
 │ │     ├─ AGENTS.md(项目规范)                                    │ │
-│ │     ├─ Skills 清单(.claw/skills/)                            │ │
-│ │     ├─ TodoList(.claw/todo.json)                             │ │
+│ │     ├─ Skills 清单(.pico/skills + $PICO_HOME/skills)         │ │
+│ │     ├─ TodoList($PICO_HOME/workspaces/<id>/todo.json)        │ │
 │ │     └─ Goal(如有 active goal)                                │ │
 │ │   availableTools = registry.getAvailableTools()              │ │
 │ │     └─ toolDisclosure.pickForLLM(渐进披露:7 核心+search_tools) │ │
@@ -120,7 +120,7 @@ generateWithRetry 内层捕获
     │   ├─ YES: 调 onRateLimited()
     │   │   │
     │   │   ▼
-    │   │   run-agent.ts 的 rebuildProvider 回调:
+    │   │   AgentRuntime 的 CredentialRotationCoordinator:
     │   │   ├─ credentialPool.markRateLimited(currentKey)
     │   │   │   └─ 标记限流,60s 冷却
     │   │   ├─ nextKey = credentialPool.getNext()
@@ -202,7 +202,7 @@ AgentEngine.runSub():
   │
   ├─ summary < 200 字? → 追加一轮强制扩写
   └─ return {summary, artifacts[]}
-      └─ artifacts: 大输出落盘 .claw/artifacts/
+      └─ artifacts: 大输出落盘 $PICO_HOME/workspaces/<id>/artifacts/
 
 主 Agent 收到浓缩 summary(几百字) + artifacts 路径
   └─ contextHistory 不被几百个文件内容污染
@@ -222,7 +222,6 @@ InputBox.onSubmit("你好")
 ReplApp.handleSubmit:
   ├─ guard.tryStart() → generation=1 (并发防护)
   ├─ reporter.pushUserMessage("你好") → entries.push({kind:"user"}) → emit
-  │   └─ onUpdate([...entries]) → setEntries → App 重渲染
   └─ runAgentFromCli({prompt:"你好", reporter})  // TUI 内部装配，非公开 CLI
       │
       ▼ engine 事件流
@@ -241,7 +240,33 @@ ReplApp.handleSubmit:
 
 ---
 
-## 7. 渐进披露交互流程
+## 7. Desktop 到 Runtime 的控制流
+
+```text
+Renderer 用户操作
+  └─ window.pico.runtime.invoke(method, params)
+       └─ Preload DesktopBridge
+            └─ Electron IPC（method allowlist + sender 校验）
+                 └─ Electron Main LocalRuntimeClient
+                      └─ authenticated local daemon socket/pipe
+                           └─ DesktopRuntimeService / WorkspaceRuntimeService
+                                ├─ 读写 RuntimeEventStore / RuntimeStore
+                                └─ 需要模型执行时调用 AgentRuntime
+
+daemon subscription
+  └─ Runtime notification
+       └─ LocalRuntimeClient 独立订阅连接
+            └─ Preload callback
+                 └─ Renderer 将通知投影为 Transcript / Timeline / status
+```
+
+Renderer 不直接读取 SQLite、文件系统或 secret。Session 标题来自 RuntimeEvent；Desktop
+metadata 只保留 archive 等 UI 状态。Jobs、Runs 和 Usage 来自 RuntimeStore 控制面，不能
+替代 Session Transcript。
+
+---
+
+## 8. 渐进披露交互流程
 
 ```
 轮次 N:

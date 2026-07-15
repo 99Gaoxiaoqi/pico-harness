@@ -126,7 +126,7 @@ manager        McpConnectionManager(连接编排 + 自动注册)
 ### 自动注册流程
 
 ```
-loadConfig(.claw/mcp.json)
+resolveProjectMcpConfigPath(.pico/mcp.json)
   → validateConfig(结构校验)
   → connectAll(Promise.allSettled 并行连接,per-server 失败隔离)
     → connectAndList:
@@ -135,6 +135,9 @@ loadConfig(.claw/mcp.json)
         每个 tool → new McpToolBridge → registry.register
   → closeAll(退出时并行 close)
 ```
+
+`.pico/mcp.json` 是 Pico 原生配置。旧 `.claw/mcp.json` 只在原生文件不存在时作为只读
+兼容输入，所有新建和修改都以 `.pico` 为目标。
 
 ### 工具名限定
 
@@ -167,7 +170,7 @@ new CostTracker(provider, modelRoute, session)
 
 - 借鉴 OpenTelemetry/Jaeger 的 Span 机制
 - 三层结构：Root Span(一次 Run) → Turn Span → Leaf Span(Generate/Execute/Compaction)
-- 导出 JSON 到 `.claw/traces/`
+- 导出 JSON 到 `$PICO_HOME/workspaces/<workspace-id>/traces/`
 - 入口：显式 `trace: true` 或环境变量 `PICO_TRACE=1`
 - TUI 每轮结束后把 `result.tracePath` 追加为 system message，方便直接打开文件复盘
 
@@ -183,15 +186,15 @@ new CostTracker(provider, modelRoute, session)
 
 ### 技术栈
 
-| 维度         | 选择                                           |
-| ------------ | ---------------------------------------------- |
-| 语言         | TypeScript ESM, target ES2024, **全开 strict** |
-| 运行时       | Node.js ≥ 22                                   |
-| 原生模块     | better-sqlite3（需 node-gyp 编译）             |
-| TUI          | ink 7 + React 19                               |
-| 日志         | pino + pino-pretty                             |
-| 测试         | vitest                                         |
-| 公开运行方式 | `pico` 启动 TUI                                |
+| 维度     | 选择                                           |
+| -------- | ---------------------------------------------- |
+| 语言     | TypeScript ESM, target ES2024, **全开 strict** |
+| 运行时   | Node.js 22.x                                   |
+| 原生模块 | better-sqlite3（需 node-gyp 编译）             |
+| TUI      | ink 7 + React 19                               |
+| Desktop  | Electron + React                               |
+| 日志     | pino + pino-pretty                             |
+| 产品外壳 | `pico` TUI + Pico Desktop                      |
 
 ### tsconfig 关键项
 
@@ -201,11 +204,14 @@ new CostTracker(provider, modelRoute, session)
 
 ### 当前部署边界
 
-Docker、公开 headless CLI 和 Plugin runtime 不在当前支持范围。周期任务通过 TUI 确认后写入本机账本，并由用户级 daemon 在同一安全策略边界内执行；daemon 不构成远程或公开 CLI 入口。
+Docker、公开 headless CLI 和远程 Runtime API 不在当前支持范围。TUI 和 Desktop 共享本机
+Plugin/Skill/Agent Catalog；周期任务写入本机账本，并由用户级 daemon 在同一安全策略边界内
+执行。daemon 不构成远程入口。
 
 ### 环境变量
 
-- `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL`（必填）
+- `PICO_HOME`（用户状态根，默认 `~/.pico`）
+- `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL`（兼容环境配置入口）
 - `LLM_API_KEYS`（复数，逗号分隔，429 自动轮换）
 - `AUX_LLM_*`（辅助廉价模型，FullCompactor 用）
 - `PICO_TRACE=1`（每轮导出 trace JSON）
