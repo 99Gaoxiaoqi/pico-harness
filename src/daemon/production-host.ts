@@ -102,8 +102,10 @@ export function createProductionLocalDaemonHost(
       const targetSessionId = sessionId ?? createCliSessionId();
       context.bindSession(targetSessionId);
       const session =
-        globalSessionManager.get(targetSessionId, workspacePath) ??
-        (await globalSessionManager.getOrCreate(targetSessionId, workspacePath));
+        globalSessionManager.get(targetSessionId, workspacePath, { picoHome }) ??
+        (await globalSessionManager.getOrCreate(targetSessionId, workspacePath, {
+          picoHome,
+        }));
       const persistedSettings = (await session.readHydrationSnapshot()).runtime.settings;
       const route = await resolveDesktopModelRoute(
         workspacePath,
@@ -122,6 +124,7 @@ export function createProductionLocalDaemonHost(
         workDir: workspacePath,
         sessionId: targetSessionId,
         session,
+        picoHome,
         ...(workspaceRuntime.taskHostRuntime
           ? { taskHostRuntime: workspaceRuntime.taskHostRuntime }
           : {}),
@@ -194,6 +197,7 @@ export function createProductionLocalDaemonHost(
             ...(execution?.resumeExistingSession ? { resumeExistingSession: true } : {}),
             waitAtSafeBoundary: context.waitAtSafeBoundary,
             rewindPointSink: context.bindCheckpoint,
+            picoHome,
           },
         );
         return {
@@ -212,6 +216,7 @@ export function createProductionLocalDaemonHost(
     },
   });
   const automations: DesktopAutomationService = new DesktopAutomationService({
+    picoHome,
     prepareSecurity: async (workspacePath) => {
       const route = await resolveDesktopAutomationRoute(
         workspacePath,
@@ -359,6 +364,7 @@ export function createProductionLocalDaemonHost(
     }
   };
   const cronRuntimeFactory = createCronWorkspaceRuntimeFactory({
+    picoHome,
     getWorkspaceRuntime: (workspacePath) => service.getWorkspaceRuntime(workspacePath),
     canRun: validate,
     policyGuard: {
@@ -389,6 +395,7 @@ export function createProductionLocalDaemonHost(
           reporter: new SilentReporter(),
           backgroundTrustStore: trustStore,
           credentialResolver: credentialVault,
+          picoHome,
         },
       );
       return {

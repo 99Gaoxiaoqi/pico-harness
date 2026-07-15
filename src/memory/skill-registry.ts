@@ -14,7 +14,7 @@
 import { chmod, readFile, readdir, writeFile, mkdir } from "node:fs/promises";
 import { join } from "pathe";
 import { logger } from "../observability/logger.js";
-import { resolvePicoPaths } from "../paths/pico-paths.js";
+import { resolvePicoPaths, type ResolvePicoPathsOptions } from "../paths/pico-paths.js";
 import type { LearnedSkill } from "./skill-schema.js";
 import { createLearnedSkill, calculateSuccessRate } from "./skill-schema.js";
 
@@ -42,8 +42,8 @@ export class SkillRegistry {
   /** 初始化标记：确保 init() 只执行一次 */
   private initialized = false;
 
-  constructor(workDir: string) {
-    this.skillsDir = join(resolvePicoPaths(workDir).workspace.memory, "skills");
+  constructor(workDir: string, options: ResolvePicoPathsOptions = {}) {
+    this.skillsDir = join(resolvePicoPaths(workDir, options).workspace.memory, "skills");
   }
 
   /**

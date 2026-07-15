@@ -55,6 +55,8 @@ export class RuntimeConflictError extends Error {
 export interface RuntimeStoreOptions {
   workDir: string;
   databasePath?: string;
+  /** Host-owned Pico state root. Omitted callers keep the CLI/process default. */
+  picoHome?: string;
   now?: () => number;
 }
 
@@ -329,7 +331,8 @@ export class RuntimeStore {
 
   constructor(options: RuntimeStoreOptions) {
     this.databasePath =
-      options.databasePath ?? resolvePicoPaths(options.workDir).workspace.runtimeDatabase;
+      options.databasePath ??
+      resolvePicoPaths(options.workDir, { picoHome: options.picoHome }).workspace.runtimeDatabase;
     this.now = options.now ?? Date.now;
     mkdirSync(dirname(this.databasePath), { recursive: true, mode: 0o700 });
     chmodSync(dirname(this.databasePath), 0o700);

@@ -355,6 +355,7 @@ async function commitFileJournal(
       journal,
       messageId,
       session.id,
+      session.fileHistoryBaseDir,
     );
     if (commit.incomplete) {
       logger.warn({ warnings: commit.warnings }, "[FileHistory] 本轮文件 journal 覆盖不完整");
@@ -779,10 +780,7 @@ export class AgentEngine implements AgentRunner {
     const beforeTokens = estimateModelInputTokens(context, tools);
     if (beforeTokens <= triggerTokens) return context;
 
-    const targetRetainedTokens = Math.max(
-      1,
-      Math.floor(budget * DEFAULT_RETAINED_CONTEXT_RATIO),
-    );
+    const targetRetainedTokens = Math.max(1, Math.floor(budget * DEFAULT_RETAINED_CONTEXT_RATIO));
     const projectedHistory = context.slice(1);
     const protectedCut = findSafeCompactionCut(projectedHistory, targetRetainedTokens);
     const protectFromIndex = protectedCut ? protectedCut.compactedCount + 1 : context.length;
@@ -851,11 +849,7 @@ export class AgentEngine implements AgentRunner {
     if (projectedTokens <= budget) return projected;
     const beforeChars = estimateTraceLength(context);
     const afterChars = estimateTraceLength(projected);
-    throw new ContextCompactionError(
-      beforeChars,
-      afterChars,
-      estimateTokenBudgetAsChars(budget),
-    );
+    throw new ContextCompactionError(beforeChars, afterChars, estimateTokenBudgetAsChars(budget));
   }
 
   /** Provider overflow 只允许一次更紧的模型摘要重试。 */
@@ -1432,9 +1426,19 @@ export class AgentEngine implements AgentRunner {
           const hasFileEffects = fileSideEffectKinds.some((kind) => kind !== "none");
           if (hasFileEffects && journalRoots.length > 0) {
             if (userRewindPointId) {
-              runFileJournal ??= await fileHistoryBeginJournal(journalRoots, session.id, signal);
+              runFileJournal ??= await fileHistoryBeginJournal(
+                journalRoots,
+                session.id,
+                signal,
+                session.fileHistoryBaseDir,
+              );
             } else {
-              turnFileJournal = await fileHistoryBeginJournal(journalRoots, session.id, signal);
+              turnFileJournal = await fileHistoryBeginJournal(
+                journalRoots,
+                session.id,
+                signal,
+                session.fileHistoryBaseDir,
+              );
             }
             const activeJournal = runFileJournal ?? turnFileJournal;
             activeFileJournal = activeJournal;
@@ -1637,7 +1641,7 @@ export class AgentEngine implements AgentRunner {
               session.fileHistory,
               currentMessageId,
               session.id,
-              undefined,
+              session.fileHistoryBaseDir,
               session.length,
             ).catch((err) => logger.warn({ err: String(err) }, "[FileHistory] 每轮快照创建失败"));
           }
@@ -1661,7 +1665,13 @@ export class AgentEngine implements AgentRunner {
       activeFileJournal = undefined;
       rootSpan?.end();
       if (rootSpan) {
-        const tracePath = exportTraceToFile(rootSpan, session.workDir, session.id);
+        const tracePath = exportTraceToFile(
+          rootSpan,
+          session.workDir,
+          session.id,
+          undefined,
+          session.picoHome,
+        );
         logger.info({ tracePath }, `[Tracing] 执行回放链路已保存: ${tracePath}`);
       }
     }
@@ -1812,13 +1822,7 @@ export class AgentEngine implements AgentRunner {
       availableToolCount: 0,
     });
     try {
-      const context = await this.prepareModelContext(
-        session,
-        systemPrompt,
-        [],
-        graceSpan,
-        signal,
-      );
+      const context = await this.prepareModelContext(session, systemPrompt, [], graceSpan, signal);
       const costBefore = session.totalCostCNY;
       const response = await withProviderCallContext({ purpose: "grace" }, () =>
         this.generateWithOverflowRetry(

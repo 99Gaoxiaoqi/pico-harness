@@ -63,7 +63,6 @@ import {
   type FileHistoryDiffStat,
   fileHistoryBeginRewindPoint,
   fileHistoryBindSourceEvent,
-  fileHistoryDefaultBaseDir,
   fileHistoryDiscardFrom,
   fileHistoryDiffStat,
   fileHistoryLoadState,
@@ -94,7 +93,7 @@ import {
   type NewRewindStorageOperation,
   type RewindWorkspaceTarget,
 } from "../storage/rewind-operation-coordinator.js";
-import { resolvePicoPaths } from "../paths/pico-paths.js";
+import { resolvePicoHome, resolvePicoPaths } from "../paths/pico-paths.js";
 
 /** 清洗 sessionId 为安全文件名片段(/、: 等破坏路径的字符替换为 _) */
 function sanitizeFilePart(value: string): string {
@@ -105,8 +104,8 @@ function sanitizeFilePart(value: string): string {
 const sessionDrains = new Map<string, Promise<void>>();
 const summaryStorePool = new Map<string, { store: SessionSummaryStore; refCount: number }>();
 
-function sessionEntryKey(id: string, workDir: string): string {
-  return `${resolve(workDir)}\0${id}`;
+function sessionEntryKey(id: string, workDir: string, picoHome?: string): string {
+  return `${resolvePicoPaths(workDir, { picoHome }).workspace.root}\0${id}`;
 }
 
 function registerSessionDrain(key: string, drain: Promise<void>): Promise<void> {
@@ -144,6 +143,8 @@ function releaseSummaryStore(filePath: string): void {
 
 export interface SessionOptions {
   persistence?: boolean;
+  /** Host-owned Pico state root. Omitted callers keep the CLI/process default. */
+  picoHome?: string;
   identity?: SessionIdentity;
   /** Deterministic backend injection for integration and embedders. */
   memorySearchStore?: ConversationSearchStore;
@@ -177,6 +178,10 @@ export class Session implements SessionRuntimePersistence {
   readonly workDir: string;
   /** 会话与项目/worktree 的显式身份,供后续 resume 过滤使用。 */
   readonly identity: SessionIdentity;
+  /** Frozen state root so one Session never follows later process.env changes. */
+  readonly picoHome: string;
+  /** Frozen File History root used by the engine's per-turn journals. */
+  readonly fileHistoryBaseDir: string;
   readonly createdAt: Date;
   updatedAt: Date;
 
@@ -285,6 +290,10 @@ export class Session implements SessionRuntimePersistence {
   constructor(id: string, workDir: string, options?: SessionOptions) {
     this.id = id;
     this.workDir = workDir;
+    this.picoHome = resolvePicoHome({ picoHome: options?.picoHome });
+    this.fileHistoryBaseDir = resolvePicoPaths(workDir, {
+      picoHome: this.picoHome,
+    }).home.fileHistory;
     this.identity =
       options?.identity ??
       createSessionIdentity({
@@ -306,11 +315,16 @@ export class Session implements SessionRuntimePersistence {
       (options?.sessionCatalog !== undefined || defaultCatalogEnabled)
     ) {
       this.catalogProjector = options?.sessionCatalog
-        ? new SessionCatalogProjector(options.sessionCatalog)
-        : getDefaultSessionCatalogProjector();
+        ? new SessionCatalogProjector(options.sessionCatalog, { picoHome: this.picoHome })
+        : options?.picoHome
+          ? new SessionCatalogProjector(undefined, { picoHome: this.picoHome })
+          : getDefaultSessionCatalogProjector();
     }
     this.initMemorySearch(options?.memorySearchStore);
-    const summaryPath = join(resolvePicoPaths(this.workDir).workspace.memory, "summaries.json");
+    const summaryPath = join(
+      resolvePicoPaths(this.workDir, { picoHome: this.picoHome }).workspace.memory,
+      "summaries.json",
+    );
     if (this.store) {
       this.summaryStore = acquireSummaryStore(summaryPath);
       this.summaryStoreLeasePath = summaryPath;
@@ -332,7 +346,7 @@ export class Session implements SessionRuntimePersistence {
     const enabled = explicit ?? process.env.PICO_PERSISTENCE !== "0";
     if (!enabled) return;
     try {
-      const dir = resolvePicoPaths(this.workDir).workspace.sessions;
+      const dir = resolvePicoPaths(this.workDir, { picoHome: this.picoHome }).workspace.sessions;
       mkdirSync(dir, { recursive: true, mode: 0o700 });
       chmodSync(dir, 0o700);
       this.sessionLogPath = join(dir, `${sanitizeFilePart(this.id)}.jsonl`);
@@ -356,7 +370,7 @@ export class Session implements SessionRuntimePersistence {
       return;
     }
     try {
-      const store = FTS5Store.acquire(this.workDir);
+      const store = FTS5Store.acquire(this.workDir, { picoHome: this.picoHome });
       if (store) this.fts5Lease = store;
       if (store?.status.state === "healthy") {
         this.searchStore = store;
@@ -399,7 +413,7 @@ export class Session implements SessionRuntimePersistence {
     this.searchStore = fallback;
 
     if (current === this.fts5Lease) {
-      FTS5Store.release(this.workDir);
+      FTS5Store.release(this.workDir, { picoHome: this.picoHome });
       this.fts5Lease = undefined;
     } else {
       current.close();
@@ -503,7 +517,7 @@ export class Session implements SessionRuntimePersistence {
 
   private async recoverFileHistory(): Promise<void> {
     try {
-      await fileHistoryLoadState(this.fileHistory, this.id);
+      await fileHistoryLoadState(this.fileHistory, this.id, this.fileHistoryBaseDir);
       if (!this.fileHistory.roots.has("workspace")) {
         fileHistoryRegisterRoot(this.fileHistory, "workspace", resolve(this.workDir));
       }
@@ -531,6 +545,7 @@ export class Session implements SessionRuntimePersistence {
           beforeSessionSeq: snapshot.beforeSessionSeq ?? event.seq,
         },
         this.id,
+        this.fileHistoryBaseDir,
       );
     }
   }
@@ -1159,6 +1174,7 @@ export class Session implements SessionRuntimePersistence {
         beforeSessionSeq,
       },
       this.id,
+      this.fileHistoryBaseDir,
     );
     return messageId;
   }
@@ -1175,6 +1191,7 @@ export class Session implements SessionRuntimePersistence {
         beforeSessionSeq: snapshot?.beforeSessionSeq ?? receipt.cursor.seq,
       },
       this.id,
+      this.fileHistoryBaseDir,
     );
   }
 
@@ -1233,11 +1250,16 @@ export class Session implements SessionRuntimePersistence {
   }
 
   async getRewindDiffStat(messageId: string): Promise<FileHistoryDiffStat> {
-    return fileHistoryDiffStat(this.fileHistory, messageId, this.id);
+    return fileHistoryDiffStat(this.fileHistory, messageId, this.id, this.fileHistoryBaseDir);
   }
 
   async getRewindPointChangeStat(messageId: string): Promise<FileHistoryDiffStat> {
-    return fileHistoryMessageDiffStat(this.fileHistory, messageId, this.id);
+    return fileHistoryMessageDiffStat(
+      this.fileHistory,
+      messageId,
+      this.id,
+      this.fileHistoryBaseDir,
+    );
   }
 
   async rewindConversation(messageIndex: number, messageId?: string): Promise<void> {
@@ -1330,9 +1352,12 @@ export class Session implements SessionRuntimePersistence {
   }
 
   private createRewindCoordinator(): RewindOperationCoordinator {
-    const baseDir = fileHistoryDefaultBaseDir();
+    const baseDir = this.fileHistoryBaseDir;
     return new RewindOperationCoordinator({
-      journal: new StorageOperationJournal({ workDir: this.workDir }),
+      journal: new StorageOperationJournal({
+        workDir: this.workDir,
+        picoHome: this.picoHome,
+      }),
       blobStore: new FileHistoryBlobStore({ baseDir }),
       callbacks: {
         resolveRoot: (rootId) => this.fileHistory.roots.get(rootId),
@@ -1353,7 +1378,12 @@ export class Session implements SessionRuntimePersistence {
         },
         commitSidecars: async (operation) => {
           if (operation.mode === "code") return;
-          await fileHistoryDiscardFrom(this.fileHistory, operation.target.messageId, this.id);
+          await fileHistoryDiscardFrom(
+            this.fileHistory,
+            operation.target.messageId,
+            this.id,
+            this.fileHistoryBaseDir,
+          );
           this.summaryStore.invalidateIfBeyond?.(this.id, {
             throughEventId: operation.target.sourceMessageEventId ?? null,
             messageCount: operation.target.messageIndex,
@@ -1371,7 +1401,12 @@ export class Session implements SessionRuntimePersistence {
   async getPendingTuiRewindHandoff(): Promise<DurableTuiRewindHandoff | undefined> {
     if (!this.store) return undefined;
     await this.flushPersistence();
-    const operations = (await new StorageOperationJournal({ workDir: this.workDir }).list()).filter(
+    const operations = (
+      await new StorageOperationJournal({
+        workDir: this.workDir,
+        picoHome: this.picoHome,
+      }).list()
+    ).filter(
       (operation): operation is RewindStorageOperation =>
         operation.kind === "rewind" &&
         operation.sessionId === this.id &&
@@ -1436,7 +1471,7 @@ export class Session implements SessionRuntimePersistence {
     messageId: string,
     expectedCurrentFingerprints?: ReadonlyMap<string, string>,
   ): Promise<NewRewindStorageOperation["files"]> {
-    const baseDir = fileHistoryDefaultBaseDir();
+    const baseDir = this.fileHistoryBaseDir;
     const prepared = await fileHistoryPrepareRewind(this.fileHistory, messageId, this.id, baseDir, {
       ...(expectedCurrentFingerprints ? { expectedCurrentFingerprints } : {}),
     });
@@ -1866,7 +1901,7 @@ export class Session implements SessionRuntimePersistence {
     this.goalBinding = undefined;
     const leasedFts5 = this.fts5Lease;
     if (leasedFts5) {
-      FTS5Store.release(this.workDir);
+      FTS5Store.release(this.workDir, { picoHome: this.picoHome });
       this.fts5Lease = undefined;
     }
     if (this.searchStore !== leasedFts5) {
@@ -1891,7 +1926,10 @@ export class Session implements SessionRuntimePersistence {
         this.store = undefined;
         return store?.close();
       });
-    this.closePromise = registerSessionDrain(sessionEntryKey(this.id, this.workDir), drain);
+    this.closePromise = registerSessionDrain(
+      sessionEntryKey(this.id, this.workDir, this.picoHome),
+      drain,
+    );
     return this.closePromise;
   }
 }
@@ -2216,7 +2254,7 @@ export class SessionManager {
     // TTL 惰性清理:借这次访问顺带扫一遍过期项(低频,不阻塞主流程)。
     this.evictExpired();
 
-    const key = this.entryKey(id, workDir);
+    const key = this.entryKey(id, workDir, options?.picoHome);
     const existing = this.entries.get(key);
     if (existing) {
       existing.lastAccessMs = Date.now();
@@ -2240,8 +2278,12 @@ export class SessionManager {
    * 获取已存在的会话(不创建)。命中时做 MRU 提升与 lastAccess 更新。
    * 不触发 TTL 清理(get 应轻量;清理在 getOrCreate 路径做)。
    */
-  get(id: string, workDir?: string): Session | undefined {
-    const key = this.findEntryKey(id, workDir);
+  get(
+    id: string,
+    workDir?: string,
+    options: { readonly picoHome?: string } = {},
+  ): Session | undefined {
+    const key = this.findEntryKey(id, workDir, options.picoHome);
     if (!key) return undefined;
     const entry = this.entries.get(key);
     if (!entry) return undefined;
@@ -2251,8 +2293,12 @@ export class SessionManager {
   }
 
   /** 删除已存在的会话并返回被删除实例;不存在时返回 undefined。释放底层资源。 */
-  delete(id: string, workDir?: string): Session | undefined {
-    const key = this.findEntryKey(id, workDir);
+  delete(
+    id: string,
+    workDir?: string,
+    options: { readonly picoHome?: string } = {},
+  ): Session | undefined {
+    const key = this.findEntryKey(id, workDir, options.picoHome);
     if (!key) return undefined;
     return this.deleteByKey(key);
   }
@@ -2331,13 +2377,13 @@ export class SessionManager {
     });
   }
 
-  private entryKey(id: string, workDir: string): string {
-    return sessionEntryKey(id, workDir);
+  private entryKey(id: string, workDir: string, picoHome?: string): string {
+    return sessionEntryKey(id, workDir, picoHome);
   }
 
-  private findEntryKey(id: string, workDir?: string): string | undefined {
+  private findEntryKey(id: string, workDir?: string, picoHome?: string): string | undefined {
     if (workDir !== undefined) {
-      const key = this.entryKey(id, workDir);
+      const key = this.entryKey(id, workDir, picoHome);
       return this.entries.has(key) ? key : undefined;
     }
 

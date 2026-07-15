@@ -24,6 +24,8 @@ import {
 export interface TaskHostRuntimeOptions {
   workDir: string;
   repoRoot?: string;
+  /** Host-owned Pico state root. Omitted callers keep the CLI/process default. */
+  picoHome?: string;
   runtimeMirror?: RuntimeTaskMirrorOptions;
   reconcileIntervalMs?: number;
   now?: () => number;
@@ -46,6 +48,7 @@ export class TaskHostRuntime {
     repoRoot: string,
     targetBranch: string,
     jobService: JobService,
+    picoHome: string | undefined,
     runtimeMirrorOptions: RuntimeTaskMirrorOptions = {},
     reconcileIntervalMs = 5_000,
   ) {
@@ -54,7 +57,7 @@ export class TaskHostRuntime {
     this.jobService = jobService;
     this.taskRegistry = new TaskRegistry();
     this.taskStore = new TaskStore({
-      filePath: join(resolvePicoPaths(repoRoot).workspace.tasks, "state.json"),
+      filePath: join(resolvePicoPaths(repoRoot, { picoHome }).workspace.tasks, "state.json"),
     });
     this.jobService.reconcileExpiredJobs();
     this.taskRegistry.hydrate(materializeRuntimeTaskSnapshots(this.jobService), {
@@ -112,12 +115,14 @@ export class TaskHostRuntime {
     const { service } = await JobService.create({
       workDir: repoRoot,
       ownerId: `tui-host:${process.pid}`,
+      ...(options.picoHome ? { picoHome: options.picoHome } : {}),
       ...(options.now ? { now: options.now } : {}),
     });
     return new TaskHostRuntime(
       repoRoot,
       targetBranch,
       service,
+      options.picoHome,
       options.runtimeMirror ?? {},
       options.reconcileIntervalMs ?? 5_000,
     );
