@@ -63,6 +63,12 @@ export interface ForkOperationCallbacks {
   ): Promise<ForkTargetSessionIdentity | undefined>;
   /** 克隆 File History / Summary / Artifact；必须以 operationId 幂等。 */
   cloneSidecars(operation: ForkStorageOperation, bundle: ForkPreparedBundle): Promise<void>;
+  /**
+   * 在目标 JSONL 原子发布后，Catalog 投影前物化 Runtime fork seed；必须以
+   * operationId 幂等。缺失时 Coordinator 会 fail-closed，避免可见但未完成
+   * Runtime bootstrap 的 fork。
+   */
+  bootstrapRuntime?(operation: ForkStorageOperation, bundle: ForkPreparedBundle): Promise<void>;
   /** 发布可重建 Catalog 投影；必须以 operationId 幂等。 */
   publishCatalog(operation: ForkStorageOperation, bundle: ForkPreparedBundle): Promise<void>;
 }
@@ -98,7 +104,7 @@ export class ForkOperationConflictError extends Error {
  * fork 的 forward-only Saga：
  * prepared -> 准备并校验隐藏 JSONL -> workspace_applied
  * workspace_applied -> 克隆 sidecars -> sidecars_committed
- * sidecars_committed -> rename 发布 JSONL -> Catalog -> completed
+ * sidecars_committed -> 原子发布 JSONL -> Runtime bootstrap -> Catalog -> completed
  *
  * Journal 总在外部副作用完成后才前进，因此所有写 callback 都必须把
  * operationId 当作幂等键。进程可在任意 callback 返回前后崩溃并继续收敛。
@@ -159,6 +165,7 @@ export class ForkOperationCoordinator {
       if (operation.state === "sidecars_committed") {
         const bundle = await this.loadBundleManifest(operation);
         await this.publishTarget(operation, bundle);
+        await this.bootstrapRuntime(operation, bundle);
         await this.callbacks.publishCatalog(operation, bundle);
         operation = await this.advance(operation, "completed");
         await this.cleanupStaging(operation);
@@ -282,6 +289,19 @@ export class ForkOperationCoordinator {
     }
     await syncFileAndDirectory(bundle.targetSessionPath);
     await this.assertPublishedTarget(operation, bundle);
+  }
+
+  private async bootstrapRuntime(
+    operation: ForkStorageOperation,
+    bundle: ForkPreparedBundle,
+  ): Promise<void> {
+    const callback = this.callbacks.bootstrapRuntime;
+    if (!callback) {
+      throw new Error(
+        "Fork Runtime bootstrap callback is required before publishing the Session Catalog",
+      );
+    }
+    await callback(operation, bundle);
   }
 
   private async assertNoConflictingTarget(
