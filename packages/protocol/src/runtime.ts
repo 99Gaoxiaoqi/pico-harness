@@ -39,7 +39,12 @@ export type SessionSendDisposition = "started" | "steered" | "queued" | "replace
 export type RuntimeInteractionMode = "default" | "plan" | "auto" | "yolo";
 export type RuntimeProviderKind = "openai" | "claude" | "gemini";
 export type RuntimeConfigSource =
-  "user" | "project" | "project-legacy" | "environment" | "session" | "cli";
+  | "user"
+  | "project"
+  | "project-legacy"
+  | "environment"
+  | "session"
+  | "cli";
 export type RuntimeCredentialStatus = "ready" | "missing" | "environment" | "unsupported";
 export type RuntimeCredentialSource = "keychain" | "environment" | "none";
 
@@ -961,7 +966,11 @@ export interface RuntimeAuthResult {
 
 export type RuntimeResponse = RuntimeSuccessResponse | RuntimeErrorResponse;
 export type RuntimeMessage =
-  RuntimeAuthRequest | RuntimeAuthResult | RuntimeRequest | RuntimeResponse | RuntimeEventMessage;
+  | RuntimeAuthRequest
+  | RuntimeAuthResult
+  | RuntimeRequest
+  | RuntimeResponse
+  | RuntimeEventMessage;
 
 export class RuntimeProtocolError extends Error {
   readonly code: RuntimeErrorCode;
@@ -1507,6 +1516,12 @@ const STRICT_RUNTIME_PARAM_VALIDATORS = {
   "provider.list": noParams,
   "provider.upsert": exactParamShape({
     provider: runtimeProviderParam,
+    expectedRevision: stringParam,
+  }),
+  "provider.importEnvironment": exactParamShape({
+    provider: runtimeProviderParam,
+    defaultModel: stringParam,
+    secret: stringParam,
     expectedRevision: stringParam,
   }),
   "provider.delete": exactParamShape({ providerId: stringParam, expectedRevision: stringParam }),
