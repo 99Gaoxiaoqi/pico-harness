@@ -14,7 +14,7 @@ on:
     paths:
       - "apps/desktop/**"
       - "packages/protocol/**"
-      - "src/daemon/**"
+      - "src/**"
       - "package.json"
       - "package-lock.json"
       - ".github/workflows/desktop.yml"
