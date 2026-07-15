@@ -670,6 +670,7 @@ function createDoctorCommand(options: PicoCommandRegistryOptions): SlashCommand 
       if (!subcommand) {
         const report = await runWorkspaceDoctor({
           workDir: options.workDir,
+          ...(options.picoHome ? { picoHome: options.picoHome } : {}),
           provider: options.provider,
           model: options.model,
           ...(options.session?.sessionCatalogHealth
@@ -709,7 +710,11 @@ function createDoctorCommand(options: PicoCommandRegistryOptions): SlashCommand 
       }
       try {
         const report = await (
-          options.resourceDoctor ?? new ResourceDoctor({ workDir: options.workDir })
+          options.resourceDoctor ??
+          new ResourceDoctor({
+            workDir: options.workDir,
+            ...(options.picoHome ? { picoHome: options.picoHome } : {}),
+          })
         ).scan();
         return {
           type: "local",
