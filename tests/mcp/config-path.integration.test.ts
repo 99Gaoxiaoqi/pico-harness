@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -38,5 +38,37 @@ describe("project MCP config path", () => {
       source: "pico",
       exists: true,
     });
+  });
+
+  it.each([".pico", ".claw"])("拒绝 %s/mcp.json 符号链接", async (configDir) => {
+    const workspace = await mkdtemp(join(tmpdir(), "pico-mcp-path-link-"));
+    cleanups.push(workspace);
+    await mkdir(join(workspace, configDir));
+    const target = join(workspace, "safe-mcp.json");
+    await writeFile(target, '{"mcpServers":{}}');
+    await symlink(target, join(workspace, configDir, "mcp.json"));
+
+    await expect(resolveProjectMcpConfigPath(workspace)).rejects.toThrow(/符号链接/u);
+  });
+
+  it.each([".pico", ".claw"])(
+    "拒绝 %s 目录符号链接导致配置 realpath 越出工作区",
+    async (configDir) => {
+      const workspace = await mkdtemp(join(tmpdir(), "pico-mcp-path-workspace-"));
+      const outside = await mkdtemp(join(tmpdir(), "pico-mcp-path-outside-"));
+      cleanups.push(workspace, outside);
+      await writeFile(join(outside, "mcp.json"), '{"mcpServers":{}}');
+      await symlink(outside, join(workspace, configDir));
+
+      await expect(resolveProjectMcpConfigPath(workspace)).rejects.toThrow(/真实工作区/u);
+    },
+  );
+
+  it.each([".pico", ".claw"])("拒绝非普通文件 %s/mcp.json", async (configDir) => {
+    const workspace = await mkdtemp(join(tmpdir(), "pico-mcp-path-not-file-"));
+    cleanups.push(workspace);
+    await mkdir(join(workspace, configDir, "mcp.json"), { recursive: true });
+
+    await expect(resolveProjectMcpConfigPath(workspace)).rejects.toThrow(/普通文件/u);
   });
 });
