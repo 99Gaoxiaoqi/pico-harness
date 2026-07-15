@@ -27,14 +27,18 @@ describe("fork operation coordinator integration", () => {
     await Promise.all(cleanup.splice(0).map((path) => rm(path, { recursive: true, force: true })));
   });
 
-  it("reconciles crashes at every fork phase and publishes only after sidecars", async () => {
+  it("reconciles crashes at every fork phase and publishes Catalog only after Runtime bootstrap", async () => {
     const fixture = await createFixture(cleanup);
     const durableEffects = {
       prepared: new Set<string>(),
       sidecars: new Set<string>(),
+      runtimeBootstrap: new Set<string>(),
+      runtimeBootstrapSucceeded: new Set<string>(),
       catalog: new Set<string>(),
+      order: [] as string[],
+      bootstrapAttempts: 0,
     };
-    const restart = (crashAfter?: "prepare" | "sidecars" | "catalog") =>
+    const restart = (crashAfter?: "prepare" | "sidecars" | "bootstrap" | "catalog") =>
       new ForkOperationCoordinator({
         journal: fixture.journal,
         callbacks: createCallbacks(fixture, durableEffects, () => crashAfter),
@@ -50,9 +54,23 @@ describe("fork operation coordinator integration", () => {
     expect(durableEffects.catalog.size).toBe(0);
     await expect(fixture.operationState()).resolves.toBe("workspace_applied");
 
+    await expect(restart("bootstrap").reconcileUnfinished()).rejects.toThrow(
+      "crash after bootstrap",
+    );
+    await expect(fixture.targetExists()).resolves.toBe(true);
+    expect(durableEffects.sidecars).toEqual(new Set([fixture.operationId]));
+    expect(durableEffects.runtimeBootstrap).toEqual(new Set([fixture.operationId]));
+    expect(durableEffects.runtimeBootstrapSucceeded.size).toBe(0);
+    expect(durableEffects.bootstrapAttempts).toBe(1);
+    expect(durableEffects.catalog.size).toBe(0);
+    await expect(fixture.operationState()).resolves.toBe("sidecars_committed");
+
     await expect(restart("catalog").reconcileUnfinished()).rejects.toThrow("crash after catalog");
     await expect(fixture.targetExists()).resolves.toBe(true);
     expect(durableEffects.sidecars).toEqual(new Set([fixture.operationId]));
+    expect(durableEffects.runtimeBootstrap).toEqual(new Set([fixture.operationId]));
+    expect(durableEffects.runtimeBootstrapSucceeded).toEqual(new Set([fixture.operationId]));
+    expect(durableEffects.bootstrapAttempts).toBe(2);
     expect(durableEffects.catalog).toEqual(new Set([fixture.operationId]));
     await expect(fixture.operationState()).resolves.toBe("sidecars_committed");
 
@@ -61,7 +79,11 @@ describe("fork operation coordinator integration", () => {
     expect(reconciled).toEqual([{ operationId: fixture.operationId, state: "completed" }]);
     expect(durableEffects.prepared).toEqual(new Set([fixture.operationId]));
     expect(durableEffects.sidecars).toEqual(new Set([fixture.operationId]));
+    expect(durableEffects.runtimeBootstrap).toEqual(new Set([fixture.operationId]));
+    expect(durableEffects.runtimeBootstrapSucceeded).toEqual(new Set([fixture.operationId]));
+    expect(durableEffects.bootstrapAttempts).toBe(3);
     expect(durableEffects.catalog).toEqual(new Set([fixture.operationId]));
+    expect(durableEffects.order).toEqual(["prepare", "sidecars", "bootstrap", "catalog"]);
     await expect(readFile(fixture.targetPath, "utf8")).resolves.toBe(fixture.contents);
     await expect(stat(fixture.stagingDirectory)).rejects.toMatchObject({ code: "ENOENT" });
     await expect(coordinator.reconcile(fixture.operationId)).resolves.toMatchObject({
@@ -119,6 +141,21 @@ describe("fork operation coordinator integration", () => {
       { operationId: conflict.operationId, state: "needs_attention" },
     ]);
     await expect(conflict.operationState()).resolves.toBe("needs_attention");
+  });
+
+  it("fails closed before Catalog publication when Runtime bootstrap is not wired", async () => {
+    const fixture = await createFixture(cleanup, "missing-bootstrap");
+    const effects = emptyEffects();
+    const callbacks = createCallbacks(fixture, effects, () => undefined);
+    callbacks.bootstrapRuntime = undefined;
+
+    await expect(
+      new ForkOperationCoordinator({ journal: fixture.journal, callbacks }).execute(fixture.input),
+    ).rejects.toThrow("Fork Runtime bootstrap callback is required");
+
+    await expect(fixture.targetExists()).resolves.toBe(true);
+    expect(effects.catalog.size).toBe(0);
+    await expect(fixture.operationState()).resolves.toBe("sidecars_committed");
   });
 });
 
@@ -194,11 +231,11 @@ async function createFixture(cleanup: string[], suffix = "restart"): Promise<Fix
 function createCallbacks(
   fixture: Fixture,
   effects: ReturnType<typeof emptyEffects>,
-  crashAfter: () => "prepare" | "sidecars" | "catalog" | undefined,
+  crashAfter: () => "prepare" | "sidecars" | "bootstrap" | "catalog" | undefined,
   sourceCursor: ForkSourceCursor = SOURCE_CURSOR,
 ): ForkOperationCallbacks {
   const crashed = new Set<string>();
-  const maybeCrash = (phase: "prepare" | "sidecars" | "catalog"): void => {
+  const maybeCrash = (phase: "prepare" | "sidecars" | "bootstrap" | "catalog"): void => {
     if (crashAfter() !== phase || crashed.has(phase)) return;
     crashed.add(phase);
     throw new Error(`crash after ${phase}`);
@@ -213,6 +250,7 @@ function createCallbacks(
       if (!effects.prepared.has(operation.operationId)) {
         await writeFile(fixture.stagedPath, fixture.contents);
         effects.prepared.add(operation.operationId);
+        effects.order.push("prepare");
       }
       maybeCrash("prepare");
       return {
@@ -247,12 +285,33 @@ function createCallbacks(
     },
     async cloneSidecars(operation) {
       if (await fixture.targetExists()) throw new Error("target became visible before sidecars");
-      effects.sidecars.add(operation.operationId);
+      if (!effects.sidecars.has(operation.operationId)) {
+        effects.sidecars.add(operation.operationId);
+        effects.order.push("sidecars");
+      }
       maybeCrash("sidecars");
+    },
+    async bootstrapRuntime(operation) {
+      if (!(await fixture.targetExists())) {
+        throw new Error("Runtime bootstrap ran before target JSONL publication");
+      }
+      effects.bootstrapAttempts += 1;
+      if (!effects.runtimeBootstrap.has(operation.operationId)) {
+        effects.runtimeBootstrap.add(operation.operationId);
+        effects.order.push("bootstrap");
+      }
+      maybeCrash("bootstrap");
+      effects.runtimeBootstrapSucceeded.add(operation.operationId);
     },
     async publishCatalog(operation) {
       if (!(await fixture.targetExists())) throw new Error("catalog published before target JSONL");
-      effects.catalog.add(operation.operationId);
+      if (!effects.runtimeBootstrapSucceeded.has(operation.operationId)) {
+        throw new Error("catalog published before Runtime bootstrap");
+      }
+      if (!effects.catalog.has(operation.operationId)) {
+        effects.catalog.add(operation.operationId);
+        effects.order.push("catalog");
+      }
       maybeCrash("catalog");
     },
   };
@@ -261,9 +320,21 @@ function createCallbacks(
 function emptyEffects(): {
   prepared: Set<string>;
   sidecars: Set<string>;
+  runtimeBootstrap: Set<string>;
+  runtimeBootstrapSucceeded: Set<string>;
   catalog: Set<string>;
+  order: string[];
+  bootstrapAttempts: number;
 } {
-  return { prepared: new Set(), sidecars: new Set(), catalog: new Set() };
+  return {
+    prepared: new Set(),
+    sidecars: new Set(),
+    runtimeBootstrap: new Set(),
+    runtimeBootstrapSucceeded: new Set(),
+    catalog: new Set(),
+    order: [],
+    bootstrapAttempts: 0,
+  };
 }
 
 function targetIdentity(): ForkTargetSessionIdentity {
