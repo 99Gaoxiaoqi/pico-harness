@@ -2,13 +2,82 @@ import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promise
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { loadHookSnapshot } from "../../src/hooks/config.js";
+import { HookLocalStateStore } from "../../src/hooks/management/state.js";
 import { createSessionHookRuntime } from "../../src/hooks/runtime.js";
+import { HookTrustStore } from "../../src/hooks/trust/store.js";
+import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 
 describe("SessionHookRuntime integration", () => {
   const cleanup: string[] = [];
 
   afterEach(async () => {
     await Promise.all(cleanup.splice(0).map((path) => rm(path, { recursive: true, force: true })));
+  });
+
+  it("host-owned PICO_HOME isolates Hook config, trust and local enabled state", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pico-session-hook-profile-"));
+    cleanup.push(root);
+    const workDir = join(root, "workspace");
+    const hostPicoHome = join(root, "host-home");
+    const processPicoHome = join(root, "process-home");
+    await Promise.all([
+      mkdir(join(workDir, ".pico"), { recursive: true }),
+      mkdir(hostPicoHome, { recursive: true }),
+      mkdir(processPicoHome, { recursive: true }),
+    ]);
+    await writeFile(
+      join(workDir, ".pico", "hooks.json"),
+      JSON.stringify({
+        PreToolUse: [
+          { matcher: "bash", hooks: [{ type: "command", command: "echo profile-check" }] },
+        ],
+      }),
+    );
+
+    const processSnapshot = await loadHookSnapshot({
+      workDir,
+      picoHome: processPicoHome,
+    });
+    const processEntry = processSnapshot.snapshot.handlers.PreToolUse[0];
+    if (!processEntry) throw new Error("expected the project Hook fixture to load");
+    await new HookTrustStore({ picoHome: processPicoHome }).trustResolved(workDir, processEntry);
+    await new HookLocalStateStore(workDir, { picoHome: processPicoHome }).set(
+      processEntry.id,
+      false,
+    );
+
+    const previousPicoHome = process.env.PICO_HOME;
+    process.env.PICO_HOME = processPicoHome;
+    const runtime = await createSessionHookRuntime({
+      workDir,
+      picoHome: hostPicoHome,
+      env: { PICO_HOME: hostPicoHome },
+      sessionId: "host-profile",
+    });
+    try {
+      expect(runtime.management.list()).toEqual([
+        expect.objectContaining({ id: processEntry.id, status: "pending" }),
+      ]);
+
+      await runtime.management.trust(processEntry.id);
+      expect(runtime.management.list()).toEqual([
+        expect.objectContaining({ id: processEntry.id, status: "active" }),
+      ]);
+
+      await runtime.management.disable(processEntry.id);
+      expect(runtime.management.list()).toEqual([
+        expect.objectContaining({ id: processEntry.id, status: "disabled" }),
+      ]);
+      await expect(access(join(hostPicoHome, "trusted-hooks.json"))).resolves.toBeUndefined();
+      await expect(
+        access(resolvePicoPaths(workDir, { picoHome: hostPicoHome }).workspace.hookState),
+      ).resolves.toBeUndefined();
+    } finally {
+      await runtime.dispose();
+      if (previousPicoHome === undefined) delete process.env.PICO_HOME;
+      else process.env.PICO_HOME = previousPicoHome;
+    }
   });
 
   it("/hookify 先展示完整 diff，显式 confirm 后无重启阻断下一次 bash", async () => {

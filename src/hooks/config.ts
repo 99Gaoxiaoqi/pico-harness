@@ -42,6 +42,8 @@ export interface HookConfigSourceSpec {
 export interface LoadHookSnapshotOptions {
   workDir: string;
   userHome?: string;
+  /** Host-owned Pico state root. Takes precedence over the legacy userHome seam. */
+  picoHome?: string;
   trustStore?: HookTrustStore;
   stateStore?: HookLocalStateStore;
   componentSources?: readonly HookConfigSourceSpec[];
@@ -83,10 +85,11 @@ export async function loadHooksConfig(workDir: string): Promise<HooksConfig | un
 export function defaultHookConfigSources(
   workDir: string,
   userHome?: string,
+  picoHome?: string,
 ): readonly HookConfigSourceSpec[] {
-  const picoHome = userHome ? join(userHome, ".pico") : resolvePicoHome();
+  const resolvedPicoHome = picoHome ?? (userHome ? join(userHome, ".pico") : resolvePicoHome());
   return [
-    { kind: "user", path: join(picoHome, "hooks.json") },
+    { kind: "user", path: join(resolvedPicoHome, "hooks.json") },
     { kind: "project", path: join(workDir, ".pico", "hooks.json") },
     { kind: "local", path: join(workDir, ".claw", "hooks.local.json") },
     {
@@ -102,12 +105,25 @@ export async function loadHookSnapshot(
 ): Promise<LoadHookSnapshotResult> {
   const workspace = await canonicalPath(options.workDir);
   const specs = [
-    ...defaultHookConfigSources(workspace, options.userHome),
+    ...defaultHookConfigSources(workspace, options.userHome, options.picoHome),
     ...(options.componentSources ?? []),
     ...(options.extensionSources ?? []),
   ];
-  const trustStore = options.trustStore ?? new HookTrustStore({ userHome: options.userHome });
-  const stateStore = options.stateStore ?? new HookLocalStateStore(workspace);
+  const trustStore =
+    options.trustStore ??
+    new HookTrustStore({
+      ...(options.userHome ? { userHome: options.userHome } : {}),
+      ...(options.picoHome ? { picoHome: options.picoHome } : {}),
+    });
+  const stateStore =
+    options.stateStore ??
+    new HookLocalStateStore(workspace, {
+      ...(options.picoHome
+        ? { picoHome: options.picoHome }
+        : options.userHome
+          ? { picoHome: join(options.userHome, ".pico") }
+          : {}),
+    });
   let localState: Readonly<Record<string, boolean>> = {};
   let stateError: string | undefined;
   try {
