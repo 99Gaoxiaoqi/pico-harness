@@ -79,6 +79,25 @@ describe("SessionManager LRU 驱逐", () => {
     expect(mgr.get("s1")).toBeDefined();
     expect(mgr.get("s2")).toBeUndefined();
   });
+
+  it("活跃 serialize 队列使 LRU 上限暂时成为软上限", async () => {
+    const mgr = makeMgr({ maxSessions: 1, ttlMs: 60_000 });
+    const s1 = await mgr.getOrCreate("s1", workDir, { persistence: false });
+    const release = deferred<void>();
+    const active = s1.serialize(async () => {
+      await release.promise;
+      s1.append({ role: "user", content: "completed" });
+    });
+
+    await mgr.getOrCreate("s2", workDir, { persistence: false });
+    expect(mgr.size).toBe(2);
+    release.resolve();
+    await expect(active).resolves.toBeUndefined();
+
+    await mgr.getOrCreate("s3", workDir, { persistence: false });
+    expect(mgr.size).toBe(1);
+    expect(mgr.get("s3")).toBeDefined();
+  });
 });
 
 describe("SessionManager TTL 过期", () => {
@@ -97,6 +116,26 @@ describe("SessionManager TTL 过期", () => {
     await mgr.getOrCreate("s1", workDir, { persistence: false });
     await mgr.getOrCreate("s2", workDir, { persistence: false });
     expect(mgr.size).toBe(2);
+  });
+
+  it("TTL 清理跳过仍有排队任务的会话", async () => {
+    const mgr = makeMgr({ maxSessions: 100, ttlMs: 1 });
+    const s1 = await mgr.getOrCreate("s1", workDir, { persistence: false });
+    const release = deferred<void>();
+    const active = s1.serialize(async () => {
+      await release.promise;
+      s1.append({ role: "user", content: "completed" });
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    await mgr.getOrCreate("s2", workDir, { persistence: false });
+    expect(mgr.size).toBe(2);
+    release.resolve();
+    await expect(active).resolves.toBeUndefined();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    await mgr.getOrCreate("s3", workDir, { persistence: false });
+    expect(mgr.get("s1")).toBeUndefined();
   });
 });
 
@@ -139,3 +178,14 @@ describe("SessionManager 默认配置", () => {
     expect(mgr.size).toBe(0);
   });
 });
+
+function deferred<T>(): {
+  readonly promise: Promise<T>;
+  readonly resolve: (value: T | PromiseLike<T>) => void;
+} {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((settle) => {
+    resolve = settle;
+  });
+  return { promise, resolve };
+}

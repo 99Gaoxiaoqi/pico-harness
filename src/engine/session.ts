@@ -77,6 +77,7 @@ import { currentRuntimeRun, RuntimeRun } from "../runtime/runtime-run.js";
 import {
   RUNTIME_EVENT_SCHEMA_VERSION,
   type RuntimeEventBase,
+  type RuntimeEvent,
   type RuntimeHistoryRewoundEvent,
   type RuntimeMessageCommittedEvent,
 } from "../runtime/runtime-event.js";
@@ -255,6 +256,9 @@ export class Session implements SessionRuntimePersistence {
   private lifecycle: "open" | "write_uncertain" | "closing" | "closed" = "open";
   private persistenceFailure?: SessionWriteUncertainError;
   private closePromise?: Promise<void>;
+  /** close() seals task admission before the durable/resource drain starts. */
+  private acceptingSerializedTasks = true;
+  private pendingSerializedTasks = 0;
 
   private persistedSettings?: PersistedSessionSettings;
   private persistedGoal?: ReturnType<GoalManager["snapshot"]>;
@@ -582,16 +586,30 @@ export class Session implements SessionRuntimePersistence {
    * 返回任务的 Promise(结果需调用方 await)。
    */
   serialize<T>(task: () => Promise<T>): Promise<T> {
-    if (this.lifecycle !== "open") {
-      return Promise.reject(new Error(`Session ${this.id} is ${this.lifecycle}`));
+    if (!this.acceptingSerializedTasks || this.lifecycle !== "open") {
+      const state = this.acceptingSerializedTasks ? this.lifecycle : "closing";
+      return Promise.reject(new Error(`Session ${this.id} is ${state}`));
     }
-    const result = this.runQueue.then(task, task);
+    this.pendingSerializedTasks++;
+    const runTask = async (): Promise<T> => {
+      try {
+        return await task();
+      } finally {
+        this.pendingSerializedTasks--;
+      }
+    };
+    const result = this.runQueue.then(runTask, runTask);
     // 无论成功失败,都更新队列链;吞掉错误让调用方自己的 catch 处理
     this.runQueue = result.then(
       () => undefined,
       () => undefined,
     );
     return result;
+  }
+
+  /** True while an already-admitted serialize task is queued or running. */
+  get hasPendingTasks(): boolean {
+    return this.pendingSerializedTasks > 0;
   }
 
   /** 记录一次推理的 Token 用量与花费(供 CostTracker 调用) */
@@ -1585,15 +1603,16 @@ export class Session implements SessionRuntimePersistence {
         kind: "history.rewound",
         data: { branchId: operationId },
       };
-      await store.append(rewindEvent);
+      const events: RuntimeEvent[] = [rewindEvent];
       for (const [index, message] of messages.entries()) {
         const event: RuntimeMessageCommittedEvent = {
           ...this.runtimeEventBase(`${operationId}:message:${index}`, "session-history", "model"),
           kind: "message.committed",
           data: { message: structuredClone(message) },
         };
-        await store.append(event);
+        events.push(event);
       }
+      await store.appendBatch(events);
       this.applyRuntimeHistoryProjection(await store.readSessionEntries(this.id));
     });
   }
@@ -1787,47 +1806,58 @@ export class Session implements SessionRuntimePersistence {
   }
 
   /**
-   * 发起关闭：同步释放 FTS5 句柄以保持旧调用方行为，返回的 Promise
-   * 在已排队 run 结束且 RuntimeEvent tail 完全 drain 后 resolve。
+   * 发起关闭：同步停止接收新的 serialize 任务，返回的 Promise 在已接纳
+   * 的任务、兼容写入与 RuntimeEvent tail 完全 drain 后关闭资源并 resolve。
    * 【连接池化】只释放本 Session 持有的引用(FTS5Store.release),引用计数归零
    * 才真正关闭共享的 sessions.db。关键:Windows 上 SQLite 文件未释放句柄时删除会
    * 触发 EBUSY,必须释放后才能 rm 工作目录。幂等(重复调用安全)。
    */
   close(): Promise<void> {
     if (this.closePromise) return this.closePromise;
-    this.lifecycle = "closing";
-    this.goalBinding?.unsubscribe();
-    this.goalBinding = undefined;
-    const leasedFts5 = this.fts5Lease;
-    if (leasedFts5) {
-      FTS5Store.release(this.workDir);
-      this.fts5Lease = undefined;
-    }
-    if (this.searchStore !== leasedFts5) {
-      this.searchStore.close();
-    }
-    if (this.summaryStoreLeasePath) {
-      releaseSummaryStore(this.summaryStoreLeasePath);
-      this.summaryStoreLeasePath = undefined;
-    }
-
+    this.acceptingSerializedTasks = false;
     const drain = this.runQueue
       .then(() => this.compatibilityAppendTail)
-      .then(() => {
-        // 已排队 run 全部结束后，在同一同步边界禁止后续写入并冻结最终 tail。
-        // 若先捕获 tail、再异步标记 closed，窗口内的新写入会逃出 close 的 drain。
-        this.lifecycle = "closed";
-        return this.persistenceTail;
-      })
+      .then(() => this.persistenceTail)
       .then(async () => {
+        this.lifecycle = "closing";
         const store = this.store;
-        this.store = undefined;
-        store?.close();
         const ownership =
           this.runtimeOwnership ?? (await this.runtimeOwnershipPromise?.catch(() => undefined));
+        this.store = undefined;
         this.runtimeOwnership = undefined;
         this.runtimeOwnershipPromise = undefined;
-        await ownership?.release();
+        let closeError: unknown;
+        try {
+          this.goalBinding?.unsubscribe();
+          this.goalBinding = undefined;
+          const leasedFts5 = this.fts5Lease;
+          if (leasedFts5) {
+            FTS5Store.release(this.workDir);
+            this.fts5Lease = undefined;
+          }
+          if (this.searchStore !== leasedFts5) {
+            this.searchStore.close();
+          }
+          if (this.summaryStoreLeasePath) {
+            releaseSummaryStore(this.summaryStoreLeasePath);
+            this.summaryStoreLeasePath = undefined;
+          }
+        } catch (error) {
+          closeError = error;
+        }
+        try {
+          store?.close();
+        } catch (error) {
+          closeError ??= error;
+        }
+        try {
+          await ownership?.release();
+        } catch (error) {
+          closeError ??= error;
+        } finally {
+          this.lifecycle = "closed";
+        }
+        if (closeError) throw closeError;
       });
     this.closePromise = registerSessionDrain(sessionEntryKey(this.id, this.workDir), drain);
     return this.closePromise;
@@ -2203,8 +2233,12 @@ export class SessionManager {
 
   /** LRU 驱赶:超出 maxSessions 时驱逐最旧项,直到回到上限内。 */
   private evictLru(): void {
-    while (this.entries.size > this.maxSessions) {
-      const oldest = this.entries.keys().next().value;
+    for (;;) {
+      const inactiveKeys = [...this.entries]
+        .filter(([, entry]) => !entry.session.hasPendingTasks)
+        .map(([key]) => key);
+      if (!(inactiveKeys.length > this.maxSessions)) break;
+      const oldest = inactiveKeys[0];
       if (oldest === undefined) break;
       this.deleteByKey(oldest);
     }
@@ -2214,7 +2248,7 @@ export class SessionManager {
   private evictExpired(): void {
     const now = Date.now();
     for (const [key, entry] of this.entries) {
-      if (now - entry.lastAccessMs > this.ttlMs) {
+      if (!entry.session.hasPendingTasks && now - entry.lastAccessMs > this.ttlMs) {
         this.deleteByKey(key);
       }
     }
