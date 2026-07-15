@@ -326,9 +326,7 @@ export async function executeAgentRuntime(
   const existingRuntimeManifest = await runtimeEventStore.readSessionManifest(
     sessionSelection.sessionId,
   );
-  if (targetPublished && !existingRuntimeManifest && sessionSelection.mode !== "fork") {
-    throw new Error(`legacy session ${sessionSelection.sessionId} 仅支持只读查看，无法继续运行`);
-  }
+  const hasRuntimeManifest = existingRuntimeManifest !== undefined;
   if (sessionSelection.mode === "fork" && sessionSelection.sourceSessionId) {
     const sourceManifest = await runtimeEventStore.readSessionManifest(
       sessionSelection.sourceSessionId,
@@ -346,6 +344,14 @@ export async function executeAgentRuntime(
     sessionSelection.mode === "fork" &&
     sessionSelection.sourceSessionId
   ) {
+    const sourceSession = await globalSessionManager.getOrCreate(
+      sessionSelection.sourceSessionId,
+      workDir,
+    );
+    await RuntimeRun.repairSessionProjection(sourceSession, {
+      workDir,
+      store: runtimeEventStore,
+    });
     await new SessionForkService({ workDir }).fork({
       sourceSessionId: sessionSelection.sourceSessionId,
       targetSessionId: sessionSelection.sessionId,
@@ -358,6 +364,38 @@ export async function executeAgentRuntime(
       (await globalSessionManager.getOrCreate(sessionSelection.sessionId, workDir)));
   if (!session) {
     throw new Error(`Cannot resume missing session: ${sessionSelection.sessionId}`);
+  }
+  const forkSeed = await session.readDurableRuntimeForkSeed();
+  if (
+    sessionSelection.mode === "fork" &&
+    sessionSelection.sourceSessionId &&
+    forkSeed &&
+    forkSeed.sourceSessionId !== sessionSelection.sourceSessionId
+  ) {
+    throw new Error(
+      `fork target ${session.id} 记录的 parent ${forkSeed.sourceSessionId} 与当前请求不一致`,
+    );
+  }
+  if (targetPublished && !hasRuntimeManifest && session.getModelContext().length > 0 && !forkSeed) {
+    throw new Error(`legacy session ${sessionSelection.sessionId} 仅支持只读查看，无法继续运行`);
+  }
+  if (forkSeed) {
+    await RuntimeRun.bootstrapFork({
+      sourceSessionId: forkSeed.sourceSessionId,
+      targetSessionId: session.id,
+      messages: forkSeed.messages,
+      workDir,
+      store: runtimeEventStore,
+    });
+    await RuntimeRun.repairSessionProjection(session, { workDir, store: runtimeEventStore });
+  } else if (!hasRuntimeManifest && !targetPublished && session.getModelContext().length > 0) {
+    await RuntimeRun.bootstrapSessionHistory({
+      session,
+      workDir,
+      store: runtimeEventStore,
+    });
+  } else if (hasRuntimeManifest) {
+    await RuntimeRun.repairSessionProjection(session, { workDir, store: runtimeEventStore });
   }
   if (resumeExistingSession && dependencies.runtimeState === undefined) {
     throw new Error("resumeExistingSession requires an existing runtimeState.");

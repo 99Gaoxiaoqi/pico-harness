@@ -1,4 +1,4 @@
-import type { Message } from "../schema/message.js";
+import type { Message, Usage } from "../schema/message.js";
 
 export const RUNTIME_EVENT_SCHEMA_VERSION = 1 as const;
 
@@ -91,15 +91,9 @@ export interface RuntimeModelCallSettledEvent extends RuntimeEventBase {
     readonly providerCallId: string;
     readonly status: "succeeded" | "failed" | "cancelled";
     readonly latencyMs: number;
-    readonly usage?: {
-      readonly promptTokens: number;
-      readonly completionTokens: number;
-      readonly inputTokens?: number;
-      readonly cacheReadTokens?: number;
-      readonly cacheWriteTokens?: number;
-      readonly reasoningTokens?: number;
-    };
+    readonly usage?: Usage;
     readonly costCNY?: number;
+    readonly costStatus?: "estimated" | "included" | "unknown";
     readonly error?: string;
   };
 }
@@ -144,6 +138,9 @@ export interface RuntimeSessionForkedEvent extends RuntimeEventBase {
   readonly data: {
     readonly parentSessionId: string;
     readonly throughEventId?: string;
+    /** Present only once the frozen Session seed has been fully materialized. */
+    readonly sourceDigest?: string;
+    readonly messageCount?: number;
   };
 }
 
@@ -237,6 +234,18 @@ export function assertRuntimeEvent(value: unknown): asserts value is RuntimeEven
       if (!isNonNegativeNumber(value["data"]["latencyMs"])) {
         throw new RuntimeEventIntegrityError("Runtime model call latency is invalid");
       }
+      if (value["data"]["usage"] !== undefined) {
+        assertUsage(value["data"]["usage"]);
+      }
+      if (
+        value["data"]["costCNY"] !== undefined &&
+        !isNonNegativeNumber(value["data"]["costCNY"])
+      ) {
+        throw new RuntimeEventIntegrityError("Runtime model call cost is invalid");
+      }
+      if (value["data"]["costStatus"] !== undefined && !isCostStatus(value["data"]["costStatus"])) {
+        throw new RuntimeEventIntegrityError("Runtime model call cost status is invalid");
+      }
       return;
     case "context.checkpoint.recorded":
       assertString(value["data"]["checkpointId"], "context.checkpoint.recorded.checkpointId");
@@ -251,6 +260,20 @@ export function assertRuntimeEvent(value: unknown): asserts value is RuntimeEven
       return;
     case "session.forked":
       assertString(value["data"]["parentSessionId"], "session.forked.parentSessionId");
+      if (
+        (value["data"]["sourceDigest"] === undefined) !==
+        (value["data"]["messageCount"] === undefined)
+      ) {
+        throw new RuntimeEventIntegrityError(
+          "Runtime session fork completion digest and message count must appear together",
+        );
+      }
+      if (value["data"]["sourceDigest"] !== undefined) {
+        assertString(value["data"]["sourceDigest"], "session.forked.sourceDigest");
+        if (!isNonNegativeInteger(value["data"]["messageCount"])) {
+          throw new RuntimeEventIntegrityError("Runtime session fork message count is invalid");
+        }
+      }
       return;
     case "run.terminal":
       if (!isTerminalStatus(value["data"]["status"])) {
@@ -274,6 +297,28 @@ export class RuntimeEventIntegrityError extends Error {
 function assertMessage(value: unknown): asserts value is Message {
   if (!isRecord(value) || !isRole(value["role"]) || typeof value["content"] !== "string") {
     throw new RuntimeEventIntegrityError("Runtime message payload is invalid");
+  }
+}
+
+function assertUsage(value: unknown): asserts value is Usage {
+  if (!isRecord(value)) throw new RuntimeEventIntegrityError("Runtime model usage is invalid");
+  if (
+    !isNonNegativeNumber(value["promptTokens"]) ||
+    !isNonNegativeNumber(value["completionTokens"])
+  ) {
+    throw new RuntimeEventIntegrityError("Runtime model usage totals are invalid");
+  }
+  for (const field of ["inputTokens", "cacheReadTokens", "cacheWriteTokens", "reasoningTokens"]) {
+    if (value[field] !== undefined && !isNonNegativeNumber(value[field])) {
+      throw new RuntimeEventIntegrityError(`Runtime model usage ${field} is invalid`);
+    }
+  }
+  const reportedFields = value["reportedFields"];
+  if (
+    reportedFields !== undefined &&
+    (!Array.isArray(reportedFields) || !reportedFields.every(isUsageReportedField))
+  ) {
+    throw new RuntimeEventIntegrityError("Runtime model usage reportedFields is invalid");
   }
 }
 
@@ -316,6 +361,21 @@ function isModelCallStatus(value: unknown): boolean {
   return value === "succeeded" || value === "failed" || value === "cancelled";
 }
 
+function isCostStatus(value: unknown): boolean {
+  return value === "estimated" || value === "included" || value === "unknown";
+}
+
+function isUsageReportedField(value: unknown): boolean {
+  return (
+    value === "prompt" ||
+    value === "completion" ||
+    value === "input" ||
+    value === "cacheRead" ||
+    value === "cacheWrite" ||
+    value === "reasoning"
+  );
+}
+
 function isTerminalStatus(value: unknown): value is RuntimeTerminalStatus {
   return (
     value === "completed" || value === "failed" || value === "cancelled" || value === "interrupted"
@@ -324,4 +384,8 @@ function isTerminalStatus(value: unknown): value is RuntimeTerminalStatus {
 
 function isNonNegativeNumber(value: unknown): boolean {
   return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+function isNonNegativeInteger(value: unknown): boolean {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }

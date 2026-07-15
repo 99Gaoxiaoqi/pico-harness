@@ -293,8 +293,39 @@ async function assertSessionIsWritable(
     baseDir: resolvePicoPaths(workDir).workspace.runs,
   });
   if ((await getSessionHistorySource(runtimeEventStore, sessionId)) === "runtime-event-v1") return;
+  if (await isEmptySessionProjection(path, sessionId)) return;
+  if (await isPendingRuntimeForkProjection(path, sessionId)) return;
 
   throw new Error(`${option} 不能使用 session ${sessionId}: legacy 历史为只读`);
+}
+
+/** A brand-new Session JSONL may exist before RuntimeEvent initializes its manifest. */
+async function isEmptySessionProjection(path: string, sessionId: string): Promise<boolean> {
+  const snapshot = await new SessionStore(path).inspectJournal();
+  const metadata = snapshot.metadata;
+  return (
+    replaySessionRecords(snapshot.records).history.length === 0 &&
+    metadata?.schemaVersion === 3 &&
+    "logId" in metadata &&
+    metadata.sessionId === sessionId
+  );
+}
+
+/** A published fork seed is a recoverable Runtime bootstrap, not legacy history. */
+async function isPendingRuntimeForkProjection(path: string, sessionId: string): Promise<boolean> {
+  const snapshot = await new SessionStore(path).inspectJournal();
+  const metadata = snapshot.metadata;
+  if (metadata?.schemaVersion !== 3 || !("logId" in metadata) || metadata.sessionId !== sessionId) {
+    return false;
+  }
+  const seed = snapshot.records.find(
+    (record) => record.type === "event" && record.kind === "session.seeded",
+  );
+  return (
+    seed?.data.lineage?.relation === "fork" &&
+    typeof seed.data.lineage.parentSessionId === "string" &&
+    seed.data.lineage.parentSessionId.length > 0
+  );
 }
 
 async function getSessionHistorySource(
