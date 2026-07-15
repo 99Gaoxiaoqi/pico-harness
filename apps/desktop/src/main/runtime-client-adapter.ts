@@ -1,8 +1,5 @@
-import { createHash } from "node:crypto";
 import { readFile, realpath } from "node:fs/promises";
 import { connect, type Socket } from "node:net";
-import { homedir, platform, tmpdir, userInfo } from "node:os";
-import { join } from "node:path";
 import {
   createRuntimeAuthRequest,
   createRuntimeRequest,
@@ -14,6 +11,10 @@ import {
   type RuntimeResponse,
   type RuntimeResult,
 } from "@pico/protocol";
+import {
+  resolveLocalDaemonEndpoint,
+  type LocalDaemonEndpoint,
+} from "../../../../src/daemon/endpoint.js";
 
 const CONNECT_TIMEOUT_MS = 5_000;
 const DEFAULT_RECONNECT_DELAY_MS = 100;
@@ -47,10 +48,7 @@ export interface RuntimeClientAdapter {
   close(): void;
 }
 
-export interface DaemonEndpoint {
-  readonly address: string;
-  readonly authTokenPath: string;
-}
+export type DaemonEndpoint = Pick<LocalDaemonEndpoint, "address" | "authTokenPath">;
 
 export interface LocalDaemonRuntimeClientAdapterOptions {
   readonly reconnectDelayMs?: number;
@@ -367,28 +365,8 @@ function positiveDelay(value: number | undefined, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
-export function resolveDaemonEndpoint(
-  targetPlatform: NodeJS.Platform = platform(),
-): DaemonEndpoint {
-  const identity = currentUserIdentity();
-  const digest = createHash("sha256").update(identity).digest("hex").slice(0, 16);
-  if (targetPlatform === "win32") {
-    const runtimeDir = join(
-      process.env.LOCALAPPDATA ?? join(homedir(), "AppData", "Local"),
-      "Pico",
-      "runtime",
-    );
-    return {
-      address: `\\\\.\\pipe\\pico-runtime-${digest}-v1`,
-      authTokenPath: join(runtimeDir, `runtime-${digest}-v1.auth`),
-    };
-  }
-  const runtimeDir = process.env.XDG_RUNTIME_DIR ?? join(tmpdir(), `pico-${digest}`);
-  return {
-    address: join(runtimeDir, "runtime-v1.sock"),
-    authTokenPath: join(runtimeDir, "runtime-v1.auth"),
-  };
-}
+/** @deprecated Import resolveLocalDaemonEndpoint from the shared daemon package. */
+export const resolveDaemonEndpoint = resolveLocalDaemonEndpoint;
 
 async function readAuthToken(path: string): Promise<string> {
   try {
@@ -452,14 +430,6 @@ function isStoredToken(value: unknown): value is StoredToken {
   return (
     candidate.version === 1 && typeof candidate.token === "string" && candidate.token.length >= 43
   );
-}
-
-function currentUserIdentity(): string {
-  try {
-    return `${userInfo().username}:${homedir()}`;
-  } catch {
-    return process.env.USER ?? process.env.USERNAME ?? "unknown-user";
-  }
 }
 
 function normalizeClientError(error: unknown): RuntimeClientError {

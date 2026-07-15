@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { resolvePicoHome } from "../paths/pico-paths.js";
 import { writeJsonAtomic } from "../storage/atomic-json.js";
 import type { JsonObject, RuntimeUserInput } from "./protocol.js";
 
@@ -31,6 +31,8 @@ interface DesktopConversationStateFile {
 
 export interface DesktopConversationStateStoreOptions {
   readonly filePath?: string;
+  readonly env?: Readonly<Record<string, string | undefined>>;
+  readonly picoHome?: string;
   readonly now?: () => number;
   readonly generateId?: () => string;
 }
@@ -44,7 +46,12 @@ export class DesktopConversationStateStore {
 
   constructor(options: DesktopConversationStateStoreOptions = {}) {
     this.filePath =
-      options.filePath ?? join(homedir(), ".pico", "desktop", "conversation-state.json");
+      options.filePath ??
+      join(
+        resolvePicoHome({ env: options.env, picoHome: options.picoHome }),
+        "desktop",
+        "conversation-state.json",
+      );
     this.now = options.now ?? Date.now;
     this.generateId = options.generateId ?? (() => `queued_${randomUUID()}`);
   }

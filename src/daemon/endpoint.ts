@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
+import { realpathSync } from "node:fs";
 import { chmod, mkdir, rm } from "node:fs/promises";
 import { homedir, platform, tmpdir, userInfo } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, normalize } from "node:path";
+import { resolvePicoHome } from "../paths/pico-paths.js";
 
 export interface LocalDaemonEndpoint {
   readonly transport: "pipe" | "unix";
@@ -14,30 +16,50 @@ export interface LocalDaemonEndpointOptions {
   runtimeDir?: string;
   platform?: NodeJS.Platform;
   userIdentity?: string;
+  env?: Readonly<Record<string, string | undefined>>;
+  homeDir?: string;
+  picoHome?: string;
 }
 
 export function resolveLocalDaemonEndpoint(
   options: LocalDaemonEndpointOptions = {},
 ): LocalDaemonEndpoint {
   const targetPlatform = options.platform ?? platform();
+  const env = options.env ?? process.env;
   const identity = options.userIdentity ?? currentUserIdentity();
-  const digest = createHash("sha256").update(identity).digest("hex").slice(0, 16);
+  const picoHome = canonicalPicoHome(
+    resolvePicoHome({ env, homeDir: options.homeDir, picoHome: options.picoHome }),
+    targetPlatform,
+  );
+  const namespaceHash = createHash("sha256")
+    .update("pico-runtime-v1")
+    .update("\0")
+    .update(identity)
+    .update("\0")
+    .update(picoHome)
+    .digest();
+  const digest = namespaceHash.toString("hex").slice(0, 16);
+  const compactDigest = namespaceHash.toString("base64url").slice(0, 11);
   if (targetPlatform === "win32") {
     const runtimeDir =
       options.runtimeDir ??
-      join(process.env.LOCALAPPDATA ?? join(homedir(), "AppData", "Local"), "Pico", "runtime");
+      join(env["LOCALAPPDATA"] ?? join(homedir(), "AppData", "Local"), "Pico", "runtime");
     return {
       transport: "pipe",
       address: `\\\\.\\pipe\\pico-runtime-${digest}-v1`,
       authTokenPath: join(runtimeDir, `runtime-${digest}-v1.auth`),
     };
   }
-  const runtimeDir =
-    options.runtimeDir ?? process.env.XDG_RUNTIME_DIR ?? join(tmpdir(), `pico-${digest}`);
+  const configuredRuntimeDir = options.runtimeDir ?? env["XDG_RUNTIME_DIR"];
+  const runtimeDir = configuredRuntimeDir ?? join(tmpdir(), `pico-${digest}`);
+  // Keep macOS Unix socket paths below the ~104-byte kernel limit. The default directory
+  // already carries the full digest; shared/overridden runtime directories use a short suffix.
+  // The protocol generation is part of the digest input, so the compact name remains versioned.
+  const endpointName = configuredRuntimeDir === undefined ? "runtime-v1" : compactDigest;
   return {
     transport: "unix",
-    address: join(runtimeDir, "runtime-v1.sock"),
-    authTokenPath: join(runtimeDir, "runtime-v1.auth"),
+    address: join(runtimeDir, `${endpointName}.sock`),
+    authTokenPath: join(runtimeDir, `${endpointName}.auth`),
   };
 }
 
@@ -62,4 +84,15 @@ function currentUserIdentity(): string {
   } catch {
     return process.env.USER ?? process.env.USERNAME ?? "unknown-user";
   }
+}
+
+function canonicalPicoHome(picoHome: string, targetPlatform: NodeJS.Platform): string {
+  let physical = picoHome;
+  try {
+    physical = realpathSync.native(picoHome);
+  } catch {
+    // The directory may not exist before first launch; the normalized absolute path is stable.
+  }
+  const canonical = normalize(physical).normalize("NFC");
+  return targetPlatform === "win32" ? canonical.toLowerCase() : canonical;
 }

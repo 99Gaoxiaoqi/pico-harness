@@ -50,9 +50,12 @@ describe("DesktopRuntimeService integration", () => {
   });
 
   it("仅在信任工作区安全初始化入口文件，并提供只诊断不修复的 Doctor 结果", async () => {
+    const diagnosticPicoHome = await mkdtemp(join(tmpdir(), "pico-desktop-diagnostics-home-"));
+    cleanups.push(diagnosticPicoHome);
     const fixture = await createFixture(undefined, {
       env: {
         ...process.env,
+        PICO_HOME: diagnosticPicoHome,
         LLM_PROVIDER: "openai",
         LLM_MODEL: "gpt-test",
         LLM_API_KEY: "test-only",
@@ -112,6 +115,7 @@ describe("DesktopRuntimeService integration", () => {
     );
     expect(resources).toMatchObject({
       workDir: fixture.canonicalWorkspace,
+      picoHome: diagnosticPicoHome,
       entries: expect.arrayContaining([
         expect.objectContaining({
           kind: "skills",
@@ -182,6 +186,17 @@ describe("DesktopRuntimeService integration", () => {
             transport: "http",
             url: "https://mcp.example.test",
             headers: { Authorization: "Bearer never-expose" },
+          },
+        },
+      }),
+    );
+    await writeFile(
+      join(fixture.workspace, ".pico", "mcp.json"),
+      JSON.stringify({
+        mcpServers: {
+          native: {
+            transport: "http",
+            url: "https://native-mcp.example.test",
           },
         },
       }),
@@ -259,7 +274,7 @@ describe("DesktopRuntimeService integration", () => {
     );
     expect(mcp).toMatchObject({
       servers: [
-        { name: "local", transport: "http", status: "pending", toolCount: 0, toolNames: [] },
+        { name: "native", transport: "http", status: "pending", toolCount: 0, toolNames: [] },
       ],
     });
     expect(JSON.stringify(mcp)).not.toContain("never-expose");

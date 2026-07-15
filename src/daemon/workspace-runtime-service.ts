@@ -1,4 +1,5 @@
 import { WorkspaceTaskRuntime, type WorkspaceRunContext } from "../runtime/workspace-runtime.js";
+import { resolvePicoHome } from "../paths/pico-paths.js";
 import {
   createRuntimeEvent,
   isJsonObject,
@@ -48,6 +49,7 @@ export interface StartDaemonRunInput {
 
 export interface WorkspaceRuntimeServiceOptions {
   execute: DaemonRunExecutor;
+  env?: Readonly<Record<string, string | undefined>>;
   createWorkspaceRuntime?: (workspacePath: string) => Promise<WorkspaceTaskRuntime>;
   now?: () => number;
   maxRetainedEvents?: number;
@@ -67,11 +69,13 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
   private readonly eventStores = new Map<string, RuntimeStore>();
   private readonly maxRetainedEvents: number;
   private readonly registrationStore: WorkspaceRegistrationStore;
+  private readonly picoHome: string;
   private registrationChanged?: () => Promise<void>;
 
   constructor(private readonly options: WorkspaceRuntimeServiceOptions) {
     this.maxRetainedEvents = Math.max(1, options.maxRetainedEvents ?? 2_000);
     this.registrationStore = options.registrationStore ?? new WorkspaceRegistrationStore();
+    this.picoHome = resolvePicoHome({ env: options.env });
     this.registry = new WorkspaceRuntimeRegistry({
       create: async (workspacePath) => {
         this.eventStore(workspacePath);
@@ -105,6 +109,7 @@ export class WorkspaceRuntimeService implements LocalRuntimeService {
       return {
         pong: true,
         protocolVersion: LOCAL_RUNTIME_PROTOCOL_VERSION,
+        picoHome: this.picoHome,
         capabilities: [
           "session-conversation-v1",
           "session-management-v1",
