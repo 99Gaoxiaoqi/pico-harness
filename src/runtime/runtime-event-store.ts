@@ -43,7 +43,7 @@ export class RuntimeEventStoreIntegrityError extends Error {
 
 /**
  * Canonical per-run runtime fact storage. The run ledger header and Session JSONL
- * are projections; this log is the source used for replay and recovery.
+ * are projections; a session-local RuntimeEvent journal preserves causal ties between runs.
  */
 export class RuntimeEventStore {
   private static readonly writeTails = new Map<string, Promise<void>>();
@@ -92,21 +92,13 @@ export class RuntimeEventStore {
   async append(event: RuntimeEvent): Promise<RuntimeEventStoreAppendResult> {
     assertRuntimeEvent(event);
     const path = this.runtimeEventsPath(event.sessionId, event.runId);
-    const key = path;
-    let resolveResult!: (value: RuntimeEventStoreAppendResult) => void;
-    let rejectResult!: (reason?: unknown) => void;
-    const result = new Promise<RuntimeEventStoreAppendResult>((resolve, reject) => {
-      resolveResult = resolve;
-      rejectResult = reject;
-    });
+    const key = this.sessionDirectory(event.sessionId);
     const previous = RuntimeEventStore.writeTails.get(key) ?? Promise.resolve();
-    const operation = previous.then(async () => {
-      try {
-        const inserted = await appendEvent(path, event);
-        resolveResult({ inserted });
-      } catch (error) {
-        rejectResult(error);
-      }
+    const operation = previous.then(async (): Promise<RuntimeEventStoreAppendResult> => {
+      await this.seedSessionEventOrder(event.sessionId);
+      const inserted = await appendEvent(path, event, event.runId);
+      await appendEvent(this.sessionEventOrderPath(event.sessionId), event, undefined);
+      return { inserted };
     });
     RuntimeEventStore.writeTails.set(
       key,
@@ -115,8 +107,7 @@ export class RuntimeEventStore {
         () => undefined,
       ),
     );
-    await operation;
-    return result;
+    return operation;
   }
 
   async readRun(sessionId: string, runId: string): Promise<RuntimeEvent[]> {
@@ -124,6 +115,33 @@ export class RuntimeEventStore {
   }
 
   async readSession(sessionId: string): Promise<RuntimeEvent[]> {
+    const ordered = await this.readSessionRunEvents(sessionId);
+    const eventOrder = await readSessionEventOrder(
+      this.sessionEventOrderPath(sessionId),
+      sessionId,
+    );
+    if (!eventOrder) return ordered.map(({ event }) => event);
+
+    const eventOrderIndexes = new Map(
+      eventOrder.map((event, index) => [eventOrderKey(event.runId, event.eventId), index]),
+    );
+    ordered.sort(
+      (left, right) =>
+        Date.parse(left.event.at) - Date.parse(right.event.at) ||
+        compareEventOrder(left, right, eventOrderIndexes),
+    );
+    return ordered.map(({ event }) => event);
+  }
+
+  private async seedSessionEventOrder(sessionId: string): Promise<void> {
+    const path = this.sessionEventOrderPath(sessionId);
+    if ((await readSessionEventOrder(path, sessionId)) !== undefined) return;
+    for (const { event } of await this.readSessionRunEvents(sessionId)) {
+      await appendEvent(path, event, undefined);
+    }
+  }
+
+  private async readSessionRunEvents(sessionId: string): Promise<OrderedRuntimeEvent[]> {
     const directory = this.sessionDirectory(sessionId);
     let entries;
     try {
@@ -132,24 +150,14 @@ export class RuntimeEventStore {
       if (isMissing(error)) return [];
       throw error;
     }
-    const ordered: Array<{
-      readonly event: RuntimeEvent;
-      readonly runId: string;
-      readonly index: number;
-    }> = [];
+    const ordered: OrderedRuntimeEvent[] = [];
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
       const events = await this.readRun(sessionId, entry.name);
       events.forEach((event, index) => ordered.push({ event, runId: entry.name, index }));
     }
-    ordered.sort(
-      (left, right) =>
-        Date.parse(left.event.at) - Date.parse(right.event.at) ||
-        left.runId.localeCompare(right.runId) ||
-        left.index - right.index ||
-        left.event.eventId.localeCompare(right.event.eventId),
-    );
-    return ordered.map(({ event }) => event);
+    ordered.sort(compareRuntimeEvents);
+    return ordered;
   }
 
   async listRunIds(sessionId: string): Promise<string[]> {
@@ -176,13 +184,21 @@ export class RuntimeEventStore {
   runtimeEventsPath(sessionId: string, runId: string): string {
     return join(this.sessionDirectory(sessionId), sanitizeFilePart(runId), "runtime-events.jsonl");
   }
+
+  private sessionEventOrderPath(sessionId: string): string {
+    return join(this.sessionDirectory(sessionId), "runtime-event-order.jsonl");
+  }
 }
 
 export function createRuntimeEventId(prefix = "runtime-event"): string {
   return `${prefix}:${randomUUID()}`;
 }
 
-async function appendEvent(path: string, event: RuntimeEvent): Promise<boolean> {
+async function appendEvent(
+  path: string,
+  event: RuntimeEvent,
+  expectedRunId: string | undefined,
+): Promise<boolean> {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   await chmod(dirname(path), 0o700);
   let handle: FileHandle | undefined;
@@ -190,7 +206,7 @@ async function appendEvent(path: string, event: RuntimeEvent): Promise<boolean> 
     handle = await open(path, "a+", 0o600);
     await chmod(path, 0o600);
     await repairTornTail(handle);
-    const existing = await readEventsFromHandle(handle, event.sessionId, event.runId);
+    const existing = await readEventsFromHandle(handle, event.sessionId, expectedRunId);
     const sameId = existing.find((candidate) => candidate.eventId === event.eventId);
     if (sameId) {
       if (JSON.stringify(sameId) !== JSON.stringify(event)) {
@@ -211,13 +227,28 @@ async function appendEvent(path: string, event: RuntimeEvent): Promise<boolean> 
 async function readEvents(
   path: string,
   expectedSessionId: string,
-  expectedRunId: string,
+  expectedRunId: string | undefined,
 ): Promise<RuntimeEvent[]> {
+  return (await readEventsIfPresent(path, expectedSessionId, expectedRunId)) ?? [];
+}
+
+async function readSessionEventOrder(
+  path: string,
+  expectedSessionId: string,
+): Promise<RuntimeEvent[] | undefined> {
+  return readEventsIfPresent(path, expectedSessionId, undefined);
+}
+
+async function readEventsIfPresent(
+  path: string,
+  expectedSessionId: string,
+  expectedRunId: string | undefined,
+): Promise<RuntimeEvent[] | undefined> {
   let raw: string;
   try {
     raw = await readFile(path, "utf8");
   } catch (error) {
-    if (isMissing(error)) return [];
+    if (isMissing(error)) return undefined;
     throw error;
   }
   return decodeEventLines(raw, expectedSessionId, expectedRunId);
@@ -226,7 +257,7 @@ async function readEvents(
 async function readEventsFromHandle(
   handle: FileHandle,
   expectedSessionId: string,
-  expectedRunId: string,
+  expectedRunId: string | undefined,
 ): Promise<RuntimeEvent[]> {
   const { size } = await handle.stat();
   if (size === 0) return [];
@@ -244,7 +275,7 @@ async function readEventsFromHandle(
 function decodeEventLines(
   raw: string,
   expectedSessionId: string,
-  expectedRunId: string,
+  expectedRunId: string | undefined,
 ): RuntimeEvent[] {
   const lines = raw.split("\n");
   const tornTail = raw.length > 0 && !raw.endsWith("\n");
@@ -255,7 +286,10 @@ function decodeEventLines(
     try {
       const parsed: unknown = JSON.parse(line);
       assertRuntimeEvent(parsed);
-      if (parsed.sessionId !== expectedSessionId || parsed.runId !== expectedRunId) {
+      if (
+        parsed.sessionId !== expectedSessionId ||
+        (expectedRunId !== undefined && parsed.runId !== expectedRunId)
+      ) {
         throw new RuntimeEventStoreIntegrityError("Runtime event identity does not match its path");
       }
       if (events.some((event) => event.eventId === parsed.eventId)) {
@@ -276,6 +310,36 @@ function decodeEventLines(
     }
   }
   return events;
+}
+
+interface OrderedRuntimeEvent {
+  readonly event: RuntimeEvent;
+  readonly runId: string;
+  readonly index: number;
+}
+
+function compareRuntimeEvents(left: OrderedRuntimeEvent, right: OrderedRuntimeEvent): number {
+  return (
+    Date.parse(left.event.at) - Date.parse(right.event.at) ||
+    left.runId.localeCompare(right.runId) ||
+    left.index - right.index ||
+    left.event.eventId.localeCompare(right.event.eventId)
+  );
+}
+
+function compareEventOrder(
+  left: OrderedRuntimeEvent,
+  right: OrderedRuntimeEvent,
+  eventOrderIndexes: ReadonlyMap<string, number>,
+): number {
+  const leftIndex = eventOrderIndexes.get(eventOrderKey(left.event.runId, left.event.eventId));
+  const rightIndex = eventOrderIndexes.get(eventOrderKey(right.event.runId, right.event.eventId));
+  if (leftIndex !== undefined && rightIndex !== undefined) return leftIndex - rightIndex;
+  return compareRuntimeEvents(left, right);
+}
+
+function eventOrderKey(runId: string, eventId: string): string {
+  return JSON.stringify([runId, eventId]);
 }
 
 async function repairTornTail(handle: FileHandle): Promise<void> {

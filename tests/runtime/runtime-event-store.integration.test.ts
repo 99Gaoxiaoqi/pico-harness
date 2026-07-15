@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { RuntimeEvent } from "../../src/runtime/runtime-event.js";
+import { materializeRuntimeHistory } from "../../src/runtime/runtime-event-read-model.js";
 import {
   RuntimeEventStore,
   RuntimeEventStoreIntegrityError,
@@ -65,12 +66,30 @@ describe("RuntimeEventStore", () => {
     ]);
   });
 
+  it("rebuilds same-millisecond cross-run causality from durable append order", async () => {
+    const store = new RuntimeEventStore({ baseDir });
+    const message = messageEvent("event-message", "run-z", "keep this message");
+    const rewind = historyRewoundEvent("event-rewind", "run-a", message.eventId);
+
+    await store.append(message);
+    await store.append(rewind);
+
+    const restartedStore = new RuntimeEventStore({ baseDir });
+    const events = await restartedStore.readSession("session-a");
+
+    expect(events).toEqual([message, rewind]);
+    expect(materializeRuntimeHistory(events)).toEqual([message.data.message]);
+    expect(
+      JSON.parse((await readFile(store.runtimeEventsPath("session-a", "run-z"), "utf8")).trim()),
+    ).toEqual(message);
+  });
+
   it("repairs only a torn final line before the next durable append", async () => {
     const store = new RuntimeEventStore({ baseDir });
     const first = messageEvent("event-a", "run-a", "first");
     await store.append(first);
     const path = store.runtimeEventsPath("session-a", "run-a");
-    await writeFile(path, `${JSON.stringify(first)}\n{\"eventId\":\"partial`, "utf8");
+    await writeFile(path, `${JSON.stringify(first)}\n{"eventId":"partial`, "utf8");
 
     const second = messageEvent("event-b", "run-a", "second", "2026-07-15T00:00:01.000Z");
     await store.append(second);
@@ -101,5 +120,26 @@ function messageEvent(
     visibility: "model",
     kind: "message.committed",
     data: { message: { role: "user", content } },
+  };
+}
+
+function historyRewoundEvent(
+  eventId: string,
+  runId: string,
+  throughEventId: string,
+  at = "2026-07-15T00:00:00.000Z",
+): RuntimeEvent {
+  return {
+    schemaVersion: 1,
+    eventId,
+    sessionId: "session-a",
+    invocationId: "invocation-a",
+    runId,
+    turnId: "turn-a",
+    at,
+    partial: false,
+    visibility: "model",
+    kind: "history.rewound",
+    data: { branchId: "main", throughEventId },
   };
 }
