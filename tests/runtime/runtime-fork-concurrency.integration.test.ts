@@ -362,6 +362,75 @@ describe("runtime fork publication concurrency", () => {
     await Promise.all([ownerSource.close(), contenderSource.close()]);
   });
 
+  it("rejects foreign partial Runtime facts while reconciling the durable owner", async () => {
+    const source = await seedSource(sessions, workDir, "foreign-runtime-source");
+    const targetSessionId = "foreign-runtime-target";
+    const operationId = "durable-owner-operation";
+    const owner = new SessionForkService({
+      workDir,
+      sessionManager: sessions,
+      createOperationId: () => operationId,
+      hooks: {
+        beforeRuntimeBootstrap() {
+          throw new Error("injected crash before owner Runtime bootstrap");
+        },
+      },
+    });
+    await expect(
+      owner.fork({
+        sourceSessionId: source.id,
+        targetSessionId,
+        targetMode: "default",
+      }),
+    ).rejects.toThrow("injected crash before owner Runtime bootstrap");
+    await expect(owner.journal.get(operationId)).resolves.toMatchObject({
+      state: "sidecars_committed",
+    });
+
+    const store = runtimeStore(workDir);
+    const append = store.append.bind(store);
+    const appendSpy = vi.spyOn(store, "append").mockImplementation(async (event) => {
+      if (event.sessionId === targetSessionId && event.kind === "message.committed") {
+        throw new Error("injected foreign bootstrap crash");
+      }
+      return append(event);
+    });
+    await expect(
+      RuntimeRun.bootstrapFork({
+        sourceSessionId: source.id,
+        targetSessionId,
+        operationId: "foreign-operation",
+        operationCreatedAt: "2026-07-15T09:00:00.000Z",
+        messages: [{ role: "user", content: "foreign partial history" }],
+        workDir,
+        store,
+      }),
+    ).rejects.toThrow("injected foreign bootstrap crash");
+    appendSpy.mockRestore();
+
+    const foreignEvents = await store.readSession(targetSessionId);
+    expect(foreignEvents).toHaveLength(1);
+    expect(foreignEvents[0]).toMatchObject({
+      kind: "run.started",
+      runId: expect.stringMatching(/^fork-bootstrap:/u),
+    });
+
+    await expect(
+      new SessionForkService({
+        workDir,
+        sessionManager: sessions,
+        runtimeStore: store,
+      }).reconcileUnfinished(),
+    ).resolves.toEqual([{ operationId, state: "needs_attention" }]);
+    await expect(owner.journal.get(operationId)).resolves.toMatchObject({
+      state: "needs_attention",
+      error: { message: expect.stringContaining("target_conflict") as string },
+    });
+    await expect(owner.journal.listUnfinished()).resolves.toEqual([]);
+    await expect(store.readSession(targetSessionId)).resolves.toEqual(foreignEvents);
+    await source.close();
+  });
+
   it("selects one stable owner when two prepared operations already exist", async () => {
     const sourceA = await seedSource(sessions, workDir, "prepared-source-a");
     const sourceB = await seedSource(sessions, workDir, "prepared-source-b");
