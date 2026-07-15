@@ -218,6 +218,7 @@ export const previewData: AppData = {
   ],
   providerConfig: {
     supported: true,
+    writable: true,
     revision: "preview-provider-revision",
     defaultModelRouteId: "openai/gpt-5.4",
     userDefaults: {

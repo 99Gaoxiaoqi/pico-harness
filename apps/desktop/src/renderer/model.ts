@@ -97,6 +97,7 @@ export interface UserDefaultsView {
 
 export interface ProviderConfigView {
   readonly supported: boolean;
+  readonly writable: boolean;
   readonly revision: string;
   readonly defaultModelRouteId?: string | undefined;
   readonly userDefaults: UserDefaultsView;
@@ -227,6 +228,7 @@ export const emptyData: AppData = {
   providers: [],
   providerConfig: {
     supported: false,
+    writable: false,
     revision: "",
     userDefaults: {},
     providers: [],
