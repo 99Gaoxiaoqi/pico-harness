@@ -132,8 +132,8 @@ export function runWithRuntimeToolCall<Result>(toolCallId: string, run: () => Re
 }
 
 /**
- * Coordinates one Agent invocation. Runtime events are authoritative; Session JSONL
- * and the smaller RunLedger remain durable projections for existing UI and tooling.
+ * Coordinates one Agent invocation. Runtime events are authoritative; Session memory
+ * and the smaller RunLedger remain replaceable projections for UI and tooling.
  */
 export class RuntimeRun {
   readonly runId: string;
@@ -244,7 +244,7 @@ export class RuntimeRun {
     return reconciled;
   }
 
-  /** Repairs the replaceable Session JSONL projection from durable canonical facts. */
+  /** Repairs the in-memory Session projection from durable canonical facts. */
   static async repairSessionProjection(
     session: Session,
     options: RepairRuntimeSessionProjectionOptions,
@@ -275,8 +275,8 @@ export class RuntimeRun {
   }
 
   /**
-   * Creates the canonical history for a fork that has already seeded its replaceable
-   * Session projection. The copied message facts remain immutable and the target gets
+   * Creates the canonical history for a fork from a frozen source snapshot. The copied
+   * message facts remain immutable and the target gets
    * its own bootstrap run, rather than silently inheriting the parent's run files.
    */
   static async bootstrapFork(options: BootstrapRuntimeForkOptions): Promise<boolean> {
@@ -356,7 +356,7 @@ export class RuntimeRun {
 
   /**
    * Adopts an existing in-memory Session into canonical history before its first
-   * RuntimeEvent-backed run. This is only valid when no durable legacy transcript exists.
+   * RuntimeEvent-backed run.
    */
   static async bootstrapSessionHistory(
     options: BootstrapRuntimeSessionHistoryOptions,
@@ -420,7 +420,7 @@ export class RuntimeRun {
   }
 
   /**
-   * Bridges durable Session writes that originate while no foreground Agent run is active
+   * Bridges Session writes that originate while no foreground Agent run is active
    * (for example a delivered subagent completion or an async hook wake-up). RuntimeEvent
    * remains the write-ahead source; Session is updated only through the short-lived run.
    */
@@ -444,7 +444,7 @@ export class RuntimeRun {
 
   /**
    * Exactly-once variant for host-owned message IDs. A retry first reuses the canonical
-   * message fact, repairing only its Session projection instead of appending a duplicate.
+   * message fact, repairing only its in-memory projection instead of appending a duplicate.
    */
   static async commitExternalMessageOnce(
     session: Session,
@@ -563,7 +563,7 @@ export class RuntimeRun {
     });
   }
 
-  /** Persists a pre-runtime Session message without re-appending its already-present projection. */
+  /** Persists a pre-runtime Session message without re-appending its in-memory projection. */
   async recordBootstrapMessage(message: Message): Promise<void> {
     this.assertOpen();
     const refs = this.messageRefs(message);

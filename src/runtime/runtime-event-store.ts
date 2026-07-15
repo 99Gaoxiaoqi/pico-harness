@@ -3,6 +3,7 @@ import { chmodSync, mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import Database from "better-sqlite3";
+import { canonicalizeWorkspacePath } from "../paths/pico-paths.js";
 import {
   SESSION_RUNTIME_STATE_VERSION,
   type SessionRuntimeStatePatch,
@@ -97,12 +98,13 @@ export class RuntimeEventStore {
   async initializeSession(
     options: InitializeRuntimeSessionOptions,
   ): Promise<RuntimeSessionManifest> {
+    const workDir = canonicalizeWorkspacePath(options.workDir);
     const db = this.openDatabase();
     try {
       return db.transaction(() => {
         const existing = this.selectSession(db, options.sessionId);
         if (existing) {
-          if (existing.work_dir !== options.workDir) {
+          if (existing.work_dir !== workDir) {
             throw new RuntimeEventStoreIntegrityError(
               `Runtime session ${options.sessionId} belongs to another workspace`,
             );
@@ -114,7 +116,7 @@ export class RuntimeEventStore {
           `INSERT INTO agent_sessions
              (session_id, work_dir, history_source, created_at, active_branch_id)
            VALUES (?, ?, 'runtime-event-v1', ?, 'main')`,
-        ).run(options.sessionId, options.workDir, createdAt);
+        ).run(options.sessionId, workDir, createdAt);
         return manifestFromRow(this.requireSession(db, options.sessionId));
       })();
     } finally {
@@ -150,7 +152,10 @@ export class RuntimeEventStore {
     try {
       return db.transaction(() => {
         const session = this.requireSession(db, event.sessionId);
-        if (event.kind === "run.started" && event.data.workDir !== session.work_dir) {
+        if (
+          event.kind === "run.started" &&
+          canonicalizeWorkspacePath(event.data.workDir) !== session.work_dir
+        ) {
           throw new RuntimeEventStoreIntegrityError(
             `Runtime event workspace does not match session ${event.sessionId}`,
           );

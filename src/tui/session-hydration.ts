@@ -9,7 +9,7 @@ import type { TuiEntry } from "./tui-reporter.js";
 import type { TuiReporter } from "./tui-reporter.js";
 
 /**
- * Session JSONL 是模型上下文的权威源，TUI EventStore 是当前界面 segment。
+ * RuntimeEventStore 是模型上下文的权威源，TUI EventStore 是当前界面 segment。
  * 恢复/热切换时从前者重建最小可见 transcript，不暴露 system injection。
  */
 export function hydrateTuiEntries(snapshot: SessionHydrationSnapshot): TuiEntry[] {
