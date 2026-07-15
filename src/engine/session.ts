@@ -1485,7 +1485,11 @@ export class Session implements SessionRuntimePersistence {
    * @param summary 摘要消息正文(已由调用方套上 REFERENCE-ONLY 前后标记)
    * @param compactedCount 被压缩的前缀条数(0..history.length)
    */
-  async applyCompaction(summary: string, compactedCount: number): Promise<void> {
+  async applyCompaction(
+    summary: string,
+    compactedCount: number,
+    options: { readonly summaryProviderData?: Record<string, unknown> } = {},
+  ): Promise<void> {
     this.assertWritable();
     if (compactedCount < 0) compactedCount = 0;
     if (compactedCount > this.history.length) compactedCount = this.history.length;
@@ -1494,7 +1498,7 @@ export class Session implements SessionRuntimePersistence {
     const summaryMsg: Message = {
       role: "assistant",
       content: summary,
-      providerData: { picoKind: "compaction_summary" },
+      providerData: { ...options.summaryProviderData, picoKind: "compaction_summary" },
     };
     const nextHistory = [summaryMsg, ...retained];
     const receipt = this.store

@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { chmod, mkdir, open, readFile, readdir, type FileHandle } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
@@ -33,7 +34,112 @@ export interface RunTerminalEvent {
   };
 }
 
-export type RunEvent = RunStartedEvent | RunTerminalEvent;
+export interface TurnStartedEvent {
+  readonly schemaVersion: typeof RUN_LEDGER_SCHEMA_VERSION;
+  readonly eventId: string;
+  readonly runId: string;
+  readonly at: string;
+  readonly type: "turn.started";
+  readonly data: {
+    readonly turn: number;
+  };
+}
+
+export interface ToolStartedEvent {
+  readonly schemaVersion: typeof RUN_LEDGER_SCHEMA_VERSION;
+  readonly eventId: string;
+  readonly runId: string;
+  readonly at: string;
+  readonly type: "tool.started";
+  readonly data: {
+    readonly callId: string;
+    readonly toolName: string;
+    readonly turn: number;
+  };
+}
+
+export interface ToolObservationCommittedEvent {
+  readonly schemaVersion: typeof RUN_LEDGER_SCHEMA_VERSION;
+  readonly eventId: string;
+  readonly runId: string;
+  readonly at: string;
+  readonly type: "tool.observation_committed";
+  readonly data: {
+    readonly callId: string;
+    readonly toolName: string;
+    readonly turn: number;
+    readonly isError: boolean;
+  };
+}
+
+export interface ApprovalRequestedEvent {
+  readonly schemaVersion: typeof RUN_LEDGER_SCHEMA_VERSION;
+  readonly eventId: string;
+  readonly runId: string;
+  readonly at: string;
+  readonly type: "approval.requested";
+  readonly data: {
+    readonly approvalId: string;
+    readonly callId: string;
+    readonly toolName: string;
+    readonly turn: number;
+  };
+}
+
+export type ApprovalDecision = "approved" | "rejected";
+
+export interface ApprovalSettledEvent {
+  readonly schemaVersion: typeof RUN_LEDGER_SCHEMA_VERSION;
+  readonly eventId: string;
+  readonly runId: string;
+  readonly at: string;
+  readonly type: "approval.settled";
+  readonly data: {
+    readonly approvalId: string;
+    readonly decision: ApprovalDecision;
+  };
+}
+
+export type RunEvent =
+  | RunStartedEvent
+  | RunTerminalEvent
+  | TurnStartedEvent
+  | ToolStartedEvent
+  | ToolObservationCommittedEvent
+  | ApprovalRequestedEvent
+  | ApprovalSettledEvent;
+
+type RuntimeRunEvent = Exclude<RunEvent, RunStartedEvent | RunTerminalEvent>;
+
+export interface RunLedgerTurnStartedOptions {
+  readonly turn: number;
+}
+
+export interface RunLedgerToolStartedOptions {
+  readonly callId: string;
+  readonly toolName: string;
+  readonly turn: number;
+}
+
+export interface RunLedgerToolObservationCommittedOptions extends RunLedgerToolStartedOptions {
+  readonly isError: boolean;
+}
+
+export interface RunLedgerApprovalRequestedOptions extends RunLedgerToolStartedOptions {
+  readonly approvalId: string;
+}
+
+export interface RunLedgerApprovalSettledOptions {
+  readonly approvalId: string;
+  readonly decision: ApprovalDecision;
+}
+
+const runLedgerContext = new AsyncLocalStorage<RunLedger>();
+
+/** Returns the durable ledger associated with the current async execution, if any. */
+export function currentRunLedger(): RunLedger | undefined {
+  return runLedgerContext.getStore();
+}
 
 /**
  * `run.json` is a projection. `events.jsonl` remains the source of truth so a stale
@@ -90,7 +196,9 @@ export class RunLedger {
   private readonly runDirectory: string;
   private readonly eventsPath: string;
   private readonly headerPath: string;
+  private operationTail: Promise<void> = Promise.resolve();
   private terminal?: RunTerminalEvent;
+  private currentTurnNumber?: number;
 
   private constructor(
     private readonly options: Required<
@@ -107,6 +215,18 @@ export class RunLedger {
 
   get runId(): string {
     return this.options.runId;
+  }
+
+  get currentTurn(): number | undefined {
+    return this.currentTurnNumber;
+  }
+
+  /**
+   * Binds this ledger to an async execution so middleware can append durable facts
+   * without depending on Reporter plumbing. The context never carries event payloads.
+   */
+  static runInContext<Result>(ledger: RunLedger, fn: () => Result): Result {
+    return runLedgerContext.run(ledger, fn);
   }
 
   static async start(options: RunLedgerStartOptions): Promise<RunLedger> {
@@ -134,6 +254,7 @@ export class RunLedger {
         type: "run.started",
         data: { sessionId: ledger.options.sessionId, workDir: ledger.options.workDir },
       };
+      decodeRunEvent(started);
       await appendEventDurably(ledger.eventsPath, started);
       await ledger.writeProjection([started]);
       return ledger;
@@ -208,39 +329,147 @@ export class RunLedger {
   }
 
   async finish(status: RunTerminalStatus, reason?: string): Promise<RunHeader> {
-    if (this.terminal) {
-      const snapshot = await this.load();
-      return snapshot.header;
-    }
-    const snapshot = await this.load();
-    const existing = findTerminalEvent(snapshot.events);
-    if (existing) {
-      this.terminal = existing;
-      this.releaseActiveRun();
-      return snapshot.header;
-    }
+    return this.enqueue(async () => {
+      if (this.terminal) {
+        const snapshot = await this.readSnapshot();
+        return this.writeProjection(snapshot.events);
+      }
 
-    const terminal: RunTerminalEvent = {
+      const snapshot = await this.readSnapshot();
+      const existing = findTerminalEvent(snapshot.events);
+      if (existing) {
+        this.terminal = existing;
+        try {
+          return await this.writeProjection(snapshot.events);
+        } finally {
+          this.releaseActiveRun();
+        }
+      }
+
+      const terminal: RunTerminalEvent = {
+        schemaVersion: RUN_LEDGER_SCHEMA_VERSION,
+        eventId: randomUUID(),
+        runId: this.runId,
+        at: this.nowIso(),
+        type: "run.terminal",
+        data: { status, ...(reason ? { reason } : {}) },
+      };
+      decodeRunEvent(terminal);
+      validateRunEventFlow([...snapshot.events, terminal], this.runId);
+      // The event is durable before `run.json` is allowed to say this run is terminal.
+      try {
+        await appendEventDurably(this.eventsPath, terminal);
+        this.terminal = terminal;
+        return await this.writeProjection([...snapshot.events, terminal]);
+      } finally {
+        this.releaseActiveRun();
+      }
+    });
+  }
+
+  /** Records a turn boundary without the user prompt or model response. */
+  recordTurnStarted({ turn }: RunLedgerTurnStartedOptions): Promise<void> {
+    return this.appendRuntimeEvent(() => ({
       schemaVersion: RUN_LEDGER_SCHEMA_VERSION,
       eventId: randomUUID(),
       runId: this.runId,
       at: this.nowIso(),
-      type: "run.terminal",
-      data: { status, ...(reason ? { reason } : {}) },
-    };
-    // The event is durable before `run.json` is allowed to say this run is terminal.
-    try {
-      await appendEventDurably(this.eventsPath, terminal);
-      this.terminal = terminal;
-      return await this.writeProjection([...snapshot.events, terminal]);
-    } finally {
-      this.releaseActiveRun();
-    }
+      type: "turn.started",
+      data: { turn },
+    })).then(() => {
+      this.currentTurnNumber = turn;
+    });
   }
 
-  async load(): Promise<RunLedgerSnapshot> {
+  /** Records a tool invocation identity without its arguments. */
+  recordToolStarted({ callId, toolName, turn }: RunLedgerToolStartedOptions): Promise<void> {
+    return this.appendRuntimeEvent(() => ({
+      schemaVersion: RUN_LEDGER_SCHEMA_VERSION,
+      eventId: randomUUID(),
+      runId: this.runId,
+      at: this.nowIso(),
+      type: "tool.started",
+      data: { callId, toolName, turn },
+    }));
+  }
+
+  /** Records that a tool observation crossed the model boundary, never its content. */
+  recordToolObservationCommitted({
+    callId,
+    toolName,
+    turn,
+    isError,
+  }: RunLedgerToolObservationCommittedOptions): Promise<void> {
+    return this.appendRuntimeEvent(() => ({
+      schemaVersion: RUN_LEDGER_SCHEMA_VERSION,
+      eventId: randomUUID(),
+      runId: this.runId,
+      at: this.nowIso(),
+      type: "tool.observation_committed",
+      data: { callId, toolName, turn, isError },
+    }));
+  }
+
+  /** Records an approval correlation identity without the approval preview or tool arguments. */
+  recordApprovalRequested({
+    approvalId,
+    callId,
+    toolName,
+    turn,
+  }: RunLedgerApprovalRequestedOptions): Promise<void> {
+    return this.appendRuntimeEvent(() => ({
+      schemaVersion: RUN_LEDGER_SCHEMA_VERSION,
+      eventId: randomUUID(),
+      runId: this.runId,
+      at: this.nowIso(),
+      type: "approval.requested",
+      data: { approvalId, callId, toolName, turn },
+    }));
+  }
+
+  /** Records only the approval outcome; the caller must not pass a reason or edited content. */
+  recordApprovalSettled({ approvalId, decision }: RunLedgerApprovalSettledOptions): Promise<void> {
+    return this.appendRuntimeEvent(() => ({
+      schemaVersion: RUN_LEDGER_SCHEMA_VERSION,
+      eventId: randomUUID(),
+      runId: this.runId,
+      at: this.nowIso(),
+      type: "approval.settled",
+      data: { approvalId, decision },
+    }));
+  }
+
+  load(): Promise<RunLedgerSnapshot> {
+    return this.enqueue(() => this.readSnapshot());
+  }
+
+  private async readSnapshot(): Promise<RunLedgerSnapshot> {
     const events = await loadEvents(this.eventsPath, this.runId);
     return { events, header: headerFromEvents(events, this.runId) };
+  }
+
+  private appendRuntimeEvent(createEvent: () => RuntimeRunEvent): Promise<void> {
+    return this.enqueue(async () => {
+      const snapshot = await this.readSnapshot();
+      if (this.terminal || findTerminalEvent(snapshot.events)) {
+        throw new RunLedgerIntegrityError(`Run ${this.runId} is already terminal`);
+      }
+
+      const event = createEvent();
+      decodeRunEvent(event);
+      validateRunEventFlow([...snapshot.events, event], this.runId);
+      await appendEventDurably(this.eventsPath, event);
+      await this.writeProjection([...snapshot.events, event]);
+    });
+  }
+
+  private enqueue<Result>(operation: () => Promise<Result>): Promise<Result> {
+    const result = this.operationTail.then(operation);
+    this.operationTail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
   }
 
   private async writeProjection(events: readonly RunEvent[]): Promise<RunHeader> {
@@ -372,6 +601,53 @@ function decodeRunEvent(value: unknown): RunEvent {
     }
     return value as unknown as RunTerminalEvent;
   }
+  if (value["type"] === "turn.started") {
+    if (!isPositiveInteger(value["data"]["turn"])) {
+      throw new RunLedgerIntegrityError("Run turn event has invalid data");
+    }
+    return value as unknown as TurnStartedEvent;
+  }
+  if (value["type"] === "tool.started") {
+    if (
+      !isNonEmptyString(value["data"]["callId"]) ||
+      !isNonEmptyString(value["data"]["toolName"]) ||
+      !isPositiveInteger(value["data"]["turn"])
+    ) {
+      throw new RunLedgerIntegrityError("Run tool start event has invalid data");
+    }
+    return value as unknown as ToolStartedEvent;
+  }
+  if (value["type"] === "tool.observation_committed") {
+    if (
+      !isNonEmptyString(value["data"]["callId"]) ||
+      !isNonEmptyString(value["data"]["toolName"]) ||
+      !isPositiveInteger(value["data"]["turn"]) ||
+      typeof value["data"]["isError"] !== "boolean"
+    ) {
+      throw new RunLedgerIntegrityError("Run tool observation event has invalid data");
+    }
+    return value as unknown as ToolObservationCommittedEvent;
+  }
+  if (value["type"] === "approval.requested") {
+    if (
+      !isNonEmptyString(value["data"]["approvalId"]) ||
+      !isNonEmptyString(value["data"]["callId"]) ||
+      !isNonEmptyString(value["data"]["toolName"]) ||
+      !isPositiveInteger(value["data"]["turn"])
+    ) {
+      throw new RunLedgerIntegrityError("Run approval request event has invalid data");
+    }
+    return value as unknown as ApprovalRequestedEvent;
+  }
+  if (value["type"] === "approval.settled") {
+    if (
+      !isNonEmptyString(value["data"]["approvalId"]) ||
+      !isApprovalDecision(value["data"]["decision"])
+    ) {
+      throw new RunLedgerIntegrityError("Run approval settlement event has invalid data");
+    }
+    return value as unknown as ApprovalSettledEvent;
+  }
   throw new RunLedgerIntegrityError(`Unknown run event type: ${String(value["type"])}`);
 }
 
@@ -385,6 +661,7 @@ function headerFromEvents(events: readonly RunEvent[], runId: string): RunHeader
   if (events.filter((event) => event.type === "run.terminal").length > 1) {
     throw new RunLedgerIntegrityError(`Run ${runId} has more than one terminal fact`);
   }
+  validateRunEventFlow(events, runId);
   return {
     schemaVersion: RUN_LEDGER_SCHEMA_VERSION,
     runId,
@@ -401,6 +678,89 @@ function headerFromEvents(events: readonly RunEvent[], runId: string): RunHeader
         }
       : {}),
   };
+}
+
+function validateRunEventFlow(events: readonly RunEvent[], runId: string): void {
+  const tools = new Map<
+    string,
+    { readonly toolName: string; readonly turn: number; observed: boolean }
+  >();
+  const approvals = new Map<string, boolean>();
+  let sawStart = false;
+  let terminalSeen = false;
+  let currentTurn = 0;
+
+  for (const event of events) {
+    if (event.runId !== runId) {
+      throw new RunLedgerIntegrityError(`Run ${runId} event identity mismatch`);
+    }
+    if (terminalSeen) {
+      throw new RunLedgerIntegrityError(`Run ${runId} has facts after its terminal event`);
+    }
+    if (event.type === "run.started") {
+      if (sawStart) throw new RunLedgerIntegrityError(`Run ${runId} has more than one start fact`);
+      sawStart = true;
+      continue;
+    }
+    if (!sawStart)
+      throw new RunLedgerIntegrityError(`Run ${runId} has activity before its start fact`);
+    switch (event.type) {
+      case "run.terminal":
+        terminalSeen = true;
+        break;
+      case "turn.started":
+        if (event.data.turn <= currentTurn) {
+          throw new RunLedgerIntegrityError(`Run ${runId} has a non-monotonic turn number`);
+        }
+        currentTurn = event.data.turn;
+        break;
+      case "tool.started":
+        if (event.data.turn !== currentTurn || tools.has(event.data.callId)) {
+          throw new RunLedgerIntegrityError(`Run ${runId} has an invalid tool start fact`);
+        }
+        tools.set(event.data.callId, {
+          toolName: event.data.toolName,
+          turn: event.data.turn,
+          observed: false,
+        });
+        break;
+      case "tool.observation_committed": {
+        const tool = tools.get(event.data.callId);
+        if (
+          !tool ||
+          tool.observed ||
+          tool.toolName !== event.data.toolName ||
+          tool.turn !== event.data.turn
+        ) {
+          throw new RunLedgerIntegrityError(`Run ${runId} has an invalid tool observation fact`);
+        }
+        tool.observed = true;
+        break;
+      }
+      case "approval.requested": {
+        const tool = tools.get(event.data.callId);
+        if (
+          !tool ||
+          approvals.has(event.data.approvalId) ||
+          tool.toolName !== event.data.toolName ||
+          tool.turn !== event.data.turn
+        ) {
+          throw new RunLedgerIntegrityError(`Run ${runId} has an invalid approval request fact`);
+        }
+        approvals.set(event.data.approvalId, false);
+        break;
+      }
+      case "approval.settled":
+        if (
+          !approvals.has(event.data.approvalId) ||
+          approvals.get(event.data.approvalId) === true
+        ) {
+          throw new RunLedgerIntegrityError(`Run ${runId} has an invalid approval settlement fact`);
+        }
+        approvals.set(event.data.approvalId, true);
+        break;
+    }
+  }
 }
 
 function findTerminalEvent(events: readonly RunEvent[]): RunTerminalEvent | undefined {
@@ -435,6 +795,14 @@ function isNonEmptyString(value: unknown): value is string {
 
 function isOptionalString(value: unknown): value is string | undefined {
   return value === undefined || typeof value === "string";
+}
+
+function isPositiveInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
+
+function isApprovalDecision(value: unknown): value is ApprovalDecision {
+  return value === "approved" || value === "rejected";
 }
 
 function isMissing(error: unknown): boolean {

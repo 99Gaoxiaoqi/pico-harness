@@ -103,6 +103,41 @@ describe("RunLedger integration", () => {
     await ledger.finish("completed");
   });
 
+  it("records ordered, content-free control facts for turns and completed tool observations", async () => {
+    const baseDir = join(workDir, "runs");
+    const ledger = await RunLedger.start({
+      baseDir,
+      sessionId: "session-a",
+      workDir,
+      runId: "run-a",
+    });
+
+    await expect(
+      ledger.recordToolStarted({ callId: "call-a", toolName: "read_file", turn: 1 }),
+    ).rejects.toThrow("invalid tool start fact");
+    await ledger.recordTurnStarted({ turn: 1 });
+    await ledger.recordToolStarted({ callId: "call-a", toolName: "read_file", turn: 1 });
+    await ledger.recordToolObservationCommitted({
+      callId: "call-a",
+      toolName: "read_file",
+      turn: 1,
+      isError: false,
+    });
+    await ledger.finish("completed");
+
+    const snapshot = await ledger.load();
+    expect(snapshot.events.map((event) => event.type)).toEqual([
+      "run.started",
+      "turn.started",
+      "tool.started",
+      "tool.observation_committed",
+      "run.terminal",
+    ]);
+    const serialized = await readFile(join(baseDir, "session-a", "run-a", "events.jsonl"), "utf8");
+    expect(serialized).not.toContain("secret tool output");
+    expect(serialized).not.toContain("arguments");
+  });
+
   it("records cancelled and failed terminal states at the AgentEngine boundary", async () => {
     const cancelledSession = await createPersistentSession("cancelled-session", workDir);
     const cancelledEngine = new AgentEngine({
@@ -135,6 +170,37 @@ describe("RunLedger integration", () => {
       terminalReason: "Error: provider failed",
     });
   });
+
+  it("writes tool control facts only after a real Engine tool exchange reaches Session", async () => {
+    const session = await createPersistentSession("tool-session", workDir);
+    const engine = new AgentEngine({
+      provider: new ScriptedProvider([
+        {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "call-1", name: "read_file", arguments: '{"path":"a.txt"}' }],
+        },
+        { role: "assistant", content: "done" },
+      ]),
+      registry: new OutputRegistry(),
+      workDir,
+    });
+
+    await engine.run(session);
+    await session.close();
+
+    const events = await latestRunEvents(workDir, "tool-session");
+    expect(events.map((event) => event.type)).toEqual([
+      "run.started",
+      "turn.started",
+      "tool.started",
+      "tool.observation_committed",
+      "turn.started",
+      "run.terminal",
+    ]);
+    expect(JSON.stringify(events)).not.toContain("highly sensitive tool output");
+    expect(JSON.stringify(events)).not.toContain('{"path":"a.txt"}');
+  });
 });
 
 async function createPersistentSession(id: string, workDir: string): Promise<Session> {
@@ -155,6 +221,19 @@ async function latestRunHeader(
     string,
     unknown
   >;
+}
+
+async function latestRunEvents(
+  workDir: string,
+  sessionId: string,
+): Promise<Array<{ type: string; data: Record<string, unknown> }>> {
+  const directory = join(resolvePicoPaths(workDir).workspace.runs, sessionId);
+  const runIds = await readdir(directory);
+  expect(runIds).toHaveLength(1);
+  return (await readFile(join(directory, runIds[0]!, "events.jsonl"), "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as { type: string; data: Record<string, unknown> });
 }
 
 class ScriptedProvider implements LLMProvider {
@@ -185,5 +264,15 @@ class EmptyRegistry implements Registry {
   }
   isReadOnlyTool(): boolean {
     return true;
+  }
+}
+
+class OutputRegistry extends EmptyRegistry {
+  override getAvailableTools(): ToolDefinition[] {
+    return [{ name: "read_file", description: "read", inputSchema: {} }];
+  }
+
+  override async execute(call: ToolCall): Promise<ToolResult> {
+    return { toolCallId: call.id, output: "highly sensitive tool output", isError: false };
   }
 }

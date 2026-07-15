@@ -63,7 +63,7 @@ import type { ToolObservationProcessor } from "../tools/tool-result-observation.
 import { ToolAccesses } from "../tools/tool-access.js";
 import { ToolScheduler } from "../tools/tool-scheduler.js";
 import { resolvePicoPaths } from "../paths/pico-paths.js";
-import { RunLedger, type RunTerminalStatus } from "./run-ledger.js";
+import { currentRunLedger, RunLedger, type RunTerminalStatus } from "./run-ledger.js";
 import { SUBAGENT_OUTPUT_BUDGET } from "../tools/subagent-budget.js";
 import {
   fileHistoryAddJournalWarning,
@@ -781,10 +781,7 @@ export class AgentEngine implements AgentRunner {
     const beforeTokens = estimateModelInputTokens(context, tools);
     if (beforeTokens <= triggerTokens) return context;
 
-    const targetRetainedTokens = Math.max(
-      1,
-      Math.floor(budget * DEFAULT_RETAINED_CONTEXT_RATIO),
-    );
+    const targetRetainedTokens = Math.max(1, Math.floor(budget * DEFAULT_RETAINED_CONTEXT_RATIO));
     const projectedHistory = context.slice(1);
     const protectedCut = findSafeCompactionCut(projectedHistory, targetRetainedTokens);
     const protectFromIndex = protectedCut ? protectedCut.compactedCount + 1 : context.length;
@@ -853,11 +850,7 @@ export class AgentEngine implements AgentRunner {
     if (projectedTokens <= budget) return projected;
     const beforeChars = estimateTraceLength(context);
     const afterChars = estimateTraceLength(projected);
-    throw new ContextCompactionError(
-      beforeChars,
-      afterChars,
-      estimateTokenBudgetAsChars(budget),
-    );
+    throw new ContextCompactionError(beforeChars, afterChars, estimateTokenBudgetAsChars(budget));
   }
 
   /** Provider overflow 只允许一次更紧的模型摘要重试。 */
@@ -975,7 +968,7 @@ export class AgentEngine implements AgentRunner {
       workDir: session.workDir,
     });
     try {
-      const messages = await execute();
+      const messages = await RunLedger.runInContext(ledger, execute);
       await ledger.finish("completed");
       return messages;
     } catch (error) {
@@ -1069,6 +1062,7 @@ export class AgentEngine implements AgentRunner {
           );
           break;
         }
+        await currentRunLedger()?.recordTurnStarted({ turn: turnCount });
         reporter.onTurnStart(turnCount);
         const turnSpan = rootSpan?.startChild(`Turn-${turnCount}`);
         const currentMessageId =
@@ -1490,14 +1484,21 @@ export class AgentEngine implements AgentRunner {
               );
             }
           }
-          const scheduler = new ToolScheduler<{ message: Message; reminder?: Message }>({
+          const scheduler = new ToolScheduler<{
+            message: Message;
+            reminder?: Message;
+            ledgerStarted?: boolean;
+          }>({
             maxConcurrency: AgentEngine.MAX_TOOL_CONCURRENCY,
             signal,
           });
-          const settledResults: Array<{ message: Message; reminder?: Message } | undefined> =
-            new Array(toolCalls.length);
-          let results: Array<{ message: Message; reminder?: Message }>;
-          let scheduled: Array<Promise<{ message: Message; reminder?: Message }>> = [];
+          const settledResults: Array<
+            { message: Message; reminder?: Message; ledgerStarted?: boolean } | undefined
+          > = new Array(toolCalls.length);
+          let results: Array<{ message: Message; reminder?: Message; ledgerStarted?: boolean }>;
+          let scheduled: Array<
+            Promise<{ message: Message; reminder?: Message; ledgerStarted?: boolean }>
+          > = [];
           try {
             scheduled = toolCalls.map((tc, index) => {
               const execution =
@@ -1576,6 +1577,19 @@ export class AgentEngine implements AgentRunner {
 
           // 将所有 Observation 持久化到 Session,开启下一轮复盘与推理
           await session.commitMessages(...observations);
+          const ledger = currentRunLedger();
+          const ledgerTurn = ledger?.currentTurn;
+          if (ledger && ledgerTurn !== undefined) {
+            for (let index = 0; index < results.length; index++) {
+              if (!results[index]!.ledgerStarted) continue;
+              await ledger.recordToolObservationCommitted({
+                callId: toolCalls[index]!.id,
+                toolName: toolCalls[index]!.name,
+                turn: ledgerTurn,
+                isError: observations[index]!.providerData?.[PICO_TOOL_RESULT_ERROR_KEY] === true,
+              });
+            }
+          }
           await this.hookService?.dispatch(
             "PostToolBatch",
             {
@@ -1715,7 +1729,12 @@ export class AgentEngine implements AgentRunner {
     sessionId?: string,
     parentSpan?: Span,
     signal?: AbortSignal,
-  ): Promise<{ message: Message; result: ToolResult; reminder?: Message }> {
+  ): Promise<{
+    message: Message;
+    result: ToolResult;
+    reminder?: Message;
+    ledgerStarted?: boolean;
+  }> {
     const toolSpan = parentSpan?.startChild("Tool.Execute", {
       toolName: toolCall.name,
       toolCallId: toolCall.id,
@@ -1726,6 +1745,7 @@ export class AgentEngine implements AgentRunner {
       reporter.onToolCall(toolCall.name, toolCall.arguments, toolCall.id);
       const guardDecision = this.guardrail.beforeCall(toolCall);
       let result: ToolResult;
+      let ledgerStarted = false;
       if (!guardDecision.allowed) {
         await this.hookService?.dispatch(
           "PermissionDenied",
@@ -1745,6 +1765,16 @@ export class AgentEngine implements AgentRunner {
         };
       } else {
         signal?.throwIfAborted();
+        const ledger = currentRunLedger();
+        const ledgerTurn = ledger?.currentTurn;
+        if (ledger !== undefined && ledgerTurn !== undefined) {
+          await ledger.recordToolStarted({
+            callId: toolCall.id,
+            toolName: toolCall.name,
+            turn: ledgerTurn,
+          });
+          ledgerStarted = true;
+        }
         result = await this.registry.execute(toolCall, {
           signal,
           onOutput: ({ stream, chunk }) => {
@@ -1790,6 +1820,7 @@ export class AgentEngine implements AgentRunner {
           providerData: { [PICO_TOOL_RESULT_ERROR_KEY]: result.isError },
         },
         result,
+        ...(ledgerStarted ? { ledgerStarted } : {}),
         ...(reminder ? { reminder } : {}),
       };
     } catch (err) {
@@ -1850,13 +1881,7 @@ export class AgentEngine implements AgentRunner {
       availableToolCount: 0,
     });
     try {
-      const context = await this.prepareModelContext(
-        session,
-        systemPrompt,
-        [],
-        graceSpan,
-        signal,
-      );
+      const context = await this.prepareModelContext(session, systemPrompt, [], graceSpan, signal);
       const costBefore = session.totalCostCNY;
       const response = await withProviderCallContext({ purpose: "grace" }, () =>
         this.generateWithOverflowRetry(

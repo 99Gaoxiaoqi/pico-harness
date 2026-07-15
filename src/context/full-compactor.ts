@@ -25,6 +25,7 @@ import type { HookService } from "../hooks/service.js";
 import { estimateMessagesTokens } from "./context-budget.js";
 import { sanitizeToolPairs } from "./compactor.js";
 import { findSafeCompactionCut, hasIncompleteToolExchange } from "./safe-compaction-boundary.js";
+import { EvidenceArchive, type EvidenceArchiveReference } from "./evidence-archive.js";
 
 /** 摘要消息前缀:REFERENCE-ONLY,明确告诉模型这是历史提要,不要回答里面的内容 */
 const SUMMARY_PREFIX =
@@ -88,6 +89,8 @@ export interface FullCompactorOptions {
   /** 摘要调用失败重试次数,默认 3 */
   maxAttempts?: number;
   hookService?: HookService;
+  /** Durable evidence required before this compactor removes raw tool exchanges from Session history. */
+  evidenceArchive?: EvidenceArchive;
 }
 
 export interface FullCompactionRequest {
@@ -114,6 +117,7 @@ export class FullCompactor {
   /** 上一次摘要,用于迭代增量更新(hermes 第 1475-1489 行语义) */
   private previousSummary?: string;
   private readonly hookService?: HookService;
+  private readonly evidenceArchive?: EvidenceArchive;
 
   constructor(opts: FullCompactorOptions) {
     // 有 aux 用 aux(辅助廉价模型),无则用主 —— 向后兼容
@@ -121,6 +125,7 @@ export class FullCompactor {
     this.providerPurpose = opts.auxProvider ? "aux" : "compaction";
     this.maxAttempts = opts.maxAttempts ?? 3;
     this.hookService = opts.hookService;
+    this.evidenceArchive = opts.evidenceArchive;
   }
 
   /**
@@ -223,10 +228,34 @@ export class FullCompactor {
       return false;
     }
 
+    let evidenceReference: EvidenceArchiveReference | undefined;
+    if (this.evidenceArchive) {
+      try {
+        // Archive is the write-ahead proof for raw tool exchanges. Do not mutate Session
+        // history until this immutable copy has been durably published.
+        evidenceReference = await this.evidenceArchive.archiveToolExchanges(
+          session.id,
+          history.slice(0, compactedCount),
+        );
+      } catch (error) {
+        logger.error(
+          { err: String(error), sessionId: session.id, compactedCount },
+          "[FullCompactor] 证据归档失败，拒绝删除原始历史",
+        );
+        return false;
+      }
+    }
+
     // 应用压缩:用 REFERENCE-ONLY 前后标记包装摘要,替换 session.history 前 compactedCount 条。
     // 包装职责归 FullCompactor(表现层),Session.applyCompaction 只做纯存储。
     const wrappedSummary = `${SUMMARY_PREFIX}\n\n${summary}\n\n${SUMMARY_END_MARKER}`;
-    await session.applyCompaction(wrappedSummary, compactedCount);
+    await session.applyCompaction(
+      wrappedSummary,
+      compactedCount,
+      evidenceReference
+        ? { summaryProviderData: { picoEvidenceArchives: [evidenceReference] } }
+        : undefined,
+    );
     session.saveMemorySummary(summary, compactedCount);
     // previousSummary 存原始摘要(不带包装标记),供下次迭代增量更新
     this.previousSummary = summary;
