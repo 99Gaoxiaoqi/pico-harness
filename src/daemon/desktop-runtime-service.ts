@@ -489,6 +489,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     return toJsonValue(
       await runWorkspaceDoctor({
         workDir: canonical,
+        picoHome: this.picoHome,
         provider: defaults.provider,
         model: defaults.model,
         env: this.env,

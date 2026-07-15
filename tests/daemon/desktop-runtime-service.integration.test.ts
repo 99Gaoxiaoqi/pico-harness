@@ -97,6 +97,10 @@ describe("DesktopRuntimeService integration", () => {
     });
 
     await mkdir(join(fixture.workspace, ".pico", "skills", "review"), { recursive: true });
+    const diagnosticPaths = resolvePicoPaths(fixture.workspace, { picoHome: diagnosticPicoHome });
+    await mkdir(diagnosticPaths.workspace.sessions, { recursive: true });
+    await writeFile(join(diagnosticPaths.workspace.sessions, "broken.jsonl"), "{broken\n");
+    await writeFile(join(diagnosticPaths.workspace.root, "session-catalog-health.json"), "{broken");
     const diagnostics = await fixture.service.handle(
       createRuntimeRequest("diagnostics.run", { workspacePath: fixture.workspace }),
     );
@@ -104,11 +108,12 @@ describe("DesktopRuntimeService integration", () => {
       workspacePath: fixture.canonicalWorkspace,
       checks: expect.arrayContaining([
         expect.objectContaining({ id: "cwd", status: "ok" }),
-        expect.objectContaining({ id: "session-catalog" }),
-        expect.objectContaining({ id: "storage" }),
+        expect.objectContaining({ id: "session-catalog", status: "warning" }),
+        expect.objectContaining({ id: "storage", status: "error" }),
       ]),
       output: expect.stringContaining(`CWD: ${fixture.canonicalWorkspace} (ok)`),
     });
+    expect((diagnostics as { output: string }).output).toContain(diagnosticPaths.workspace.root);
 
     const resources = await fixture.service.handle(
       createRuntimeRequest("diagnostics.resources", { workspacePath: fixture.workspace }),

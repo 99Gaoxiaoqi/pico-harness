@@ -29,6 +29,8 @@ export interface WorkspaceDoctorReport {
 
 export interface WorkspaceDoctorOptions {
   readonly workDir: string;
+  /** Host-owned Pico state root. Omitted callers keep the CLI/process default. */
+  readonly picoHome?: string;
   readonly provider: string;
   readonly model: string;
   readonly env?: Readonly<Record<string, string | undefined>>;
@@ -62,7 +64,10 @@ export async function runWorkspaceDoctor(
     options.configuration?.credentialStates ?? {},
   ).filter((state) => state === "environment" || state === "keychain").length;
   const catalogHealth =
-    options.catalogHealth ?? (await readSessionCatalogProjectionHealth(options.workDir));
+    options.catalogHealth ??
+    (await readSessionCatalogProjectionHealth(options.workDir, {
+      ...(options.picoHome ? { picoHome: options.picoHome } : {}),
+    }));
   const storage = await scanStorage(options);
   const checks: WorkspaceDiagnosticCheck[] = [
     check("cwd", "CWD", cwdOk ? "ok" : "error", `${options.workDir} (${cwdOk ? "ok" : "missing"})`),
@@ -245,7 +250,11 @@ async function scanStorage(options: WorkspaceDoctorOptions): Promise<{
   try {
     return {
       report: await (
-        options.storageDoctor ?? new StorageDoctor({ workDir: options.workDir })
+        options.storageDoctor ??
+        new StorageDoctor({
+          workDir: options.workDir,
+          ...(options.picoHome ? { picoHome: options.picoHome } : {}),
+        })
       ).scan(),
     };
   } catch (error) {

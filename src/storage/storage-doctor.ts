@@ -51,6 +51,8 @@ export interface StorageDoctorReport {
 
 export interface StorageDoctorOptions {
   readonly workDir: string;
+  /** Host-owned Pico state root. Omitted callers keep the CLI/process default. */
+  readonly picoHome?: string;
   readonly fileHistoryDir?: string;
   readonly sessionsDir?: string;
   readonly runtimeDatabasePath?: string;
@@ -86,6 +88,7 @@ export interface StorageDoctorRepairResult {
  */
 export class StorageDoctor {
   private readonly workDir: string;
+  private readonly picoHome?: string;
   private readonly fileHistoryDir: string;
   private readonly sessionsDir: string;
   private readonly runtimeDatabasePath: string;
@@ -95,7 +98,10 @@ export class StorageDoctor {
 
   constructor(options: StorageDoctorOptions) {
     this.workDir = resolve(options.workDir);
-    const paths = resolvePicoPaths(this.workDir);
+    this.picoHome = options.picoHome;
+    const paths = resolvePicoPaths(this.workDir, {
+      ...(this.picoHome ? { picoHome: this.picoHome } : {}),
+    });
     this.fileHistoryDir = resolve(options.fileHistoryDir ?? join(paths.home.root, "file-history"));
     this.sessionsDir = resolve(options.sessionsDir ?? paths.workspace.sessions);
     this.runtimeDatabasePath = resolve(
@@ -157,7 +163,11 @@ export class StorageDoctor {
     const reconciledOperationIds: string[] = [];
     const needsAttentionOperationIds: string[] = [];
     if (options.reconcileOperations) {
-      const journal = new StorageOperationJournal({ workDir: this.workDir, now: this.now });
+      const journal = new StorageOperationJournal({
+        workDir: this.workDir,
+        ...(this.picoHome ? { picoHome: this.picoHome } : {}),
+        now: this.now,
+      });
       for (const operation of await journal.listUnfinished()) {
         let outcome: "forwarded" | "needs_attention";
         try {
@@ -374,7 +384,11 @@ export class StorageDoctor {
     findings: StorageDoctorFinding[],
     scanned: Record<StorageDoctorComponent, number>,
   ): Promise<void> {
-    const journal = new StorageOperationJournal({ workDir: this.workDir, now: this.now });
+    const journal = new StorageOperationJournal({
+      workDir: this.workDir,
+      ...(this.picoHome ? { picoHome: this.picoHome } : {}),
+      now: this.now,
+    });
     for (const entry of await readDirectoryEntries(journal.directory)) {
       if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
       const path = join(journal.directory, entry.name);
