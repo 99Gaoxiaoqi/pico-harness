@@ -20,6 +20,7 @@ import {
   type CredentialVault,
 } from "../provider/credential-vault.js";
 import { resolveModelRouteCapabilities } from "../provider/model-capabilities.js";
+import { loadEffectiveModelRuntime } from "../provider/effective-model-runtime.js";
 import type { ProviderKind } from "../provider/factory.js";
 import { resolvePicoHome } from "../paths/pico-paths.js";
 import { coordinateReasoningLevel } from "../provider/reasoning-capability.js";
@@ -107,6 +108,8 @@ export function createProductionLocalDaemonHost(
       const route = await resolveDesktopModelRoute(
         workspacePath,
         credentialVault,
+        userConfigStore,
+        effectiveConfigResolver,
         execution?.requestedModel ?? persistedSettings?.modelRouteId ?? persistedSettings?.model,
         persistedSettings?.provider,
         env,
@@ -511,84 +514,44 @@ interface PendingInteraction {
 async function resolveDesktopModelRoute(
   workspacePath: string,
   credentialVault: CredentialVault,
+  userConfigStore: UserConfigStore,
+  effectiveConfigResolver: EffectiveConfigResolver,
   requestedModel?: string,
   legacyProvider: ProviderKind = "openai",
   env: Readonly<Record<string, string | undefined>> = process.env,
 ) {
-  const config = await loadPicoConfig(workspacePath);
-  const modelRouteId =
-    resolveDesktopRequestedModel(config, requestedModel) ?? env["LLM_MODEL"]?.trim();
-  if (!modelRouteId) {
-    throw new RuntimeProtocolError(
-      RUNTIME_ERROR_CODES.FORBIDDEN,
-      "工作区尚未配置默认 model 路由，无法启动桌面任务",
-    );
-  }
-  const slash = modelRouteId.indexOf("/");
-  const providerId = slash > 0 ? modelRouteId.slice(0, slash) : undefined;
-  const configuredProvider = providerId ? config.providers[providerId] : undefined;
-  const model = slash > 0 ? modelRouteId.slice(slash + 1) : modelRouteId;
-  let route: {
-    readonly id: string;
-    readonly provider: ProviderKind;
-    readonly baseURL: string;
-    readonly model: string;
-    readonly apiKeyEnv: string;
-    readonly modelRouteId: string;
-    readonly capabilities: ReturnType<typeof resolveModelRouteCapabilities>;
-  };
-  if (configuredProvider?.models.includes(model)) {
-    route = {
-      id: modelRouteId,
-      provider: configuredProvider.protocol,
-      baseURL: configuredProvider.baseURL,
-      model,
-      apiKeyEnv: configuredProvider.apiKeyEnv,
-      modelRouteId,
-      capabilities: resolveModelRouteCapabilities(
-        configuredProvider.protocol,
-        model,
-        configuredProvider.modelCapabilities?.[model],
-      ),
+  const projectConfig = await loadPicoConfig(workspacePath);
+  const requested = resolveDesktopRequestedModel(projectConfig, requestedModel);
+  try {
+    const runtime = await loadEffectiveModelRuntime({
+      workDir: workspacePath,
+      projectTrusted: true,
+      legacyProvider,
+      legacyModel: env["LLM_MODEL"]?.trim() ?? "",
+      legacyModelExplicit: false,
+      env,
+      credentialVault,
+      userConfigStore,
+      configResolver: effectiveConfigResolver,
+    });
+    const active = runtime.router.providerConfig(requested ?? runtime.config.defaultModelRouteId);
+    return {
+      id: active.route.id,
+      provider: active.provider,
+      baseURL: active.config.baseURL,
+      apiKey: active.config.apiKey,
+      model: active.config.model,
+      apiKeyEnv: active.route.apiKeyEnv,
+      modelRouteId: active.route.id,
+      capabilities: active.route.capabilities,
     };
-  } else if (providerId === undefined || providerId === "legacy") {
-    const baseURL = env["LLM_BASE_URL"]?.trim();
-    if (!baseURL) {
-      throw new RuntimeProtocolError(
-        RUNTIME_ERROR_CODES.FORBIDDEN,
-        `模型 ${model} 缺少服务地址。请配置 LLM_BASE_URL 或在工作区 .pico/config.json 中添加 Provider`,
-      );
-    }
-    const apiKeyEnv = env["LLM_API_KEYS"]?.trim() ? "LLM_API_KEYS" : "LLM_API_KEY";
-    route = {
-      id: `legacy/${model}`,
-      provider: legacyProvider,
-      baseURL,
-      model,
-      apiKeyEnv,
-      modelRouteId: `legacy/${model}`,
-      capabilities: resolveModelRouteCapabilities(legacyProvider, model, undefined),
-    };
-  } else {
+  } catch (error) {
+    if (error instanceof RuntimeProtocolError) throw error;
     throw new RuntimeProtocolError(
       RUNTIME_ERROR_CODES.FORBIDDEN,
-      `默认模型路由 ${modelRouteId} 不在显式 Provider 模型列表中`,
+      error instanceof Error ? error.message : String(error),
     );
   }
-  const environmentSecret = env[route.apiKeyEnv]
-    ?.split(",")
-    .map((value) => value.trim())
-    .find(Boolean);
-  if (environmentSecret) return { ...route, apiKey: environmentSecret };
-
-  const credentialRef = credentialRefForModelRoute(route, workspacePath);
-  if (!(await credentialVault.has(credentialRef))) {
-    throw new RuntimeProtocolError(
-      RUNTIME_ERROR_CODES.FORBIDDEN,
-      `模型路由 ${route.id} 缺少系统凭证库凭证或环境变量 ${route.apiKeyEnv}`,
-    );
-  }
-  return { ...route, apiKey: await credentialVault.resolve(credentialRef) };
 }
 
 function resolveDesktopRequestedModel(

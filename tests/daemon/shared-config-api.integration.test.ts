@@ -25,6 +25,12 @@ import {
 import { WorkspaceTrustStore } from "../../src/security/workspace-trust.js";
 import { CronService } from "../../src/tasks/cron-service.js";
 import type { YoloPolicySnapshot } from "../../src/tasks/runtime-types.js";
+import {
+  AgentRuntime,
+  type RunAgentCliDependencies,
+  type RunAgentCliOptions,
+  type RunAgentCliResult,
+} from "../../src/runtime/agent-runtime.js";
 
 describe("Desktop shared configuration API integration", () => {
   const cleanups: Array<() => Promise<void>> = [];
@@ -407,6 +413,96 @@ describe("Desktop shared configuration API integration", () => {
     await rm(root, { recursive: true, force: true });
   });
 
+  it("生产 Desktop 新会话与前台执行复用用户默认 Provider 和 v2 凭证", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pcfg-run-"));
+    const workspace = join(root, "workspace");
+    const picoHome = join(root, "home");
+    await mkdir(workspace, { recursive: true });
+    const canonicalWorkspace = await realpath(workspace);
+    const trust = new WorkspaceTrustStore({ userStateDirectory: picoHome });
+    await trust.trust(canonicalWorkspace);
+    const userConfigStore = new UserConfigStore({ picoHome });
+    const initial = await userConfigStore.read();
+    await userConfigStore.write(
+      {
+        version: 1,
+        defaults: { modelRouteId: "shared/coder", mode: "auto" },
+        providers: {
+          shared: {
+            protocol: "openai",
+            baseURL: "https://provider.example.test/v1",
+            apiKeyEnv: "SHARED_KEY",
+            models: ["coder"],
+            discoverModels: false,
+          },
+        },
+      },
+      { expectedRevision: initial.revision },
+    );
+    const vault = new MemoryCredentialVault();
+    await vault.put(
+      credentialRefForProvider({
+        providerId: "shared",
+        protocol: "openai",
+        baseURL: "https://provider.example.test/v1",
+      }),
+      "shared-runtime-secret",
+    );
+    const endpoint = resolveLocalDaemonEndpoint({
+      runtimeDir: join(root, "runtime"),
+      userIdentity: "shared-config-foreground",
+      picoHome,
+    });
+    const runtime = new CapturingAgentRuntime();
+    const host = createProductionLocalDaemonHost({
+      endpoint,
+      env: { PICO_HOME: picoHome },
+      trustStore: trust,
+      registrationStore: new WorkspaceRegistrationStore(join(picoHome, "daemon-workspaces.json")),
+      userConfigStore,
+      credentialVault: vault,
+      agentRuntime: runtime,
+    });
+    await host.start();
+    const client = new LocalRuntimeClient(endpoint);
+    try {
+      const created = (await client.request("session.create", {
+        workspacePath: canonicalWorkspace,
+      })) as { session: { sessionId: string } };
+      await expect(
+        client.request("session.settings.get", {
+          workspacePath: canonicalWorkspace,
+          sessionId: created.session.sessionId,
+        }),
+      ).resolves.toMatchObject({
+        settings: {
+          provider: "openai",
+          model: "coder",
+          modelRouteId: "shared/coder",
+          mode: "auto",
+        },
+      });
+      await client.request("run.start", {
+        workspacePath: canonicalWorkspace,
+        sessionId: created.session.sessionId,
+        prompt: "检查共享配置",
+      });
+      await expect.poll(() => runtime.requests.length).toBe(1);
+      expect(runtime.requests[0]).toMatchObject({
+        session: created.session.sessionId,
+        provider: "openai",
+        model: "coder",
+        modelRouteId: "shared/coder",
+        baseURL: "https://provider.example.test/v1",
+        apiKey: "shared-runtime-secret",
+      });
+    } finally {
+      client.close();
+      await host.stop();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   async function createFixture(
     options: {
       readonly env?: Readonly<Record<string, string | undefined>>;
@@ -535,6 +631,26 @@ class MemoryCredentialVault implements CredentialVault {
     const secret = this.secrets.get(ref);
     if (!secret) throw new Error("credential missing");
     return secret;
+  }
+}
+
+class CapturingAgentRuntime extends AgentRuntime {
+  readonly requests: RunAgentCliOptions[] = [];
+
+  override async execute(
+    options: RunAgentCliOptions,
+    _dependencies: RunAgentCliDependencies = {},
+  ): Promise<RunAgentCliResult> {
+    this.requests.push(options);
+    const sessionId = options.session ?? "shared-config-session";
+    return {
+      sessionId,
+      sessionSelection: { mode: "resume", sessionId },
+      workDir: options.dir ?? process.cwd(),
+      finalMessage: "shared configuration applied",
+      usage: { promptTokens: 1, completionTokens: 1, costCNY: 0 },
+      messages: [],
+    };
   }
 }
 
