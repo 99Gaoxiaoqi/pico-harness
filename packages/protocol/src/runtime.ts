@@ -321,6 +321,8 @@ export type RuntimeMethodMap = {
       readonly pong: true;
       readonly protocolVersion: typeof LOCAL_RUNTIME_PROTOCOL_VERSION;
       readonly capabilities: readonly string[];
+      /** Canonical state root used by this daemon. Omitted by legacy runtimes. */
+      readonly picoHome?: string;
     };
   };
   readonly "workspace.init": {
