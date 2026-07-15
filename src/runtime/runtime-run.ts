@@ -230,12 +230,16 @@ export class RuntimeRun {
       if (runId.startsWith(RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX)) continue;
       const events = await store.readRun(options.sessionId, runId);
       const started = events.find((event) => event.kind === "run.started");
-      if (!started || events.some((event) => event.kind === "run.terminal")) continue;
+      if (!started) continue;
+      const existingTerminal = events.find(
+        (event): event is RuntimeRunTerminalEvent => event.kind === "run.terminal",
+      );
       const last = events.at(-1) ?? started;
-      const recoveryAt = last.at;
+      const recoveryAt = existingTerminal?.at ?? last.at;
       const syntheticToolResults = findDanglingRuntimeToolCalls(events).map((pending) =>
         buildInterruptedToolResultEvent(events, pending, recoveryAt),
       );
+      if (existingTerminal && syntheticToolResults.length === 0) continue;
       const terminal: RuntimeRunTerminalEvent = {
         schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,
         eventId: runtimeInterruptionRecoveryEventId("terminal", [options.sessionId, runId]),
@@ -254,8 +258,10 @@ export class RuntimeRun {
           recovered: true,
         },
       };
-      await store.appendBatch([...syntheticToolResults, terminal]);
-      reconciled.push(runId);
+      const results = await store.appendBatch(
+        existingTerminal ? syntheticToolResults : [...syntheticToolResults, terminal],
+      );
+      if (results.some((result) => result.inserted)) reconciled.push(runId);
     }
     return reconciled;
   }
@@ -556,8 +562,15 @@ export class RuntimeRun {
   }
 
   async commitMessages(session: Session, messages: readonly Message[]): Promise<void> {
-    for (const message of messages) {
-      await this.commitMessageOnce(session, createRuntimeEventId("message"), message);
+    if (messages.length === 0) return;
+    this.assertSession(session);
+    this.assertOpen();
+    const events = messages.map((message) =>
+      this.messageCommittedEvent(createRuntimeEventId("message"), message),
+    );
+    await this.store.appendBatch(events);
+    for (const event of events) {
+      await session.commitProjectionMessageOnce(event.eventId, event.data.message);
     }
   }
 
@@ -568,16 +581,9 @@ export class RuntimeRun {
   ): Promise<CommitReceipt> {
     this.assertSession(session);
     this.assertOpen();
-    const canonicalMessage = canonicalizeRuntimeMessage(message);
-    const refs = this.messageRefs(canonicalMessage);
-    const event: RuntimeMessageCommittedEvent = {
-      ...this.base(eventId),
-      ...(refs ? { refs } : {}),
-      kind: "message.committed",
-      data: { message: canonicalMessage },
-    };
+    const event = this.messageCommittedEvent(eventId, message);
     const persisted = await this.store.append(event);
-    await session.commitProjectionMessageOnce(eventId, canonicalMessage);
+    await session.commitProjectionMessageOnce(eventId, event.data.message);
     return runtimeCommitReceipt(persisted);
   }
 
@@ -806,6 +812,17 @@ export class RuntimeRun {
       toolCallId: message.toolCallId,
       ...(evidence ? { evidence } : {}),
     });
+  }
+
+  private messageCommittedEvent(eventId: string, message: Message): RuntimeMessageCommittedEvent {
+    const canonicalMessage = canonicalizeRuntimeMessage(message);
+    const refs = this.messageRefs(canonicalMessage);
+    return {
+      ...this.base(eventId),
+      ...(refs ? { refs } : {}),
+      kind: "message.committed",
+      data: { message: canonicalMessage },
+    };
   }
 
   private assertSession(session: Session): void {

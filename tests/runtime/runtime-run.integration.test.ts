@@ -1,6 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Session } from "../../src/engine/session.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
@@ -11,7 +12,7 @@ import type {
 } from "../../src/runtime/runtime-event.js";
 import { materializeRuntimeHistory } from "../../src/runtime/runtime-event-read-model.js";
 import { RuntimeEventStore } from "../../src/runtime/runtime-event-store.js";
-import { RuntimeRun } from "../../src/runtime/runtime-run.js";
+import { RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX, RuntimeRun } from "../../src/runtime/runtime-run.js";
 
 describe("RuntimeRun projection recovery", () => {
   let workDir: string;
@@ -233,6 +234,40 @@ describe("RuntimeRun projection recovery", () => {
     await reopened.close();
   });
 
+  it("does not expose part of a message batch when a later insert fails", async () => {
+    const session = new Session("session-a", workDir, { persistence: true });
+    await session.recover();
+    const store = new RuntimeEventStore({
+      databasePath: resolvePicoPaths(workDir).workspace.runtimeDatabase,
+    });
+    const run = await RuntimeRun.start({ sessionId: session.id, workDir, store });
+    const database = new Database(store.databasePath);
+    try {
+      database.exec(`CREATE TRIGGER fail_second_runtime_message
+        BEFORE INSERT ON agent_runtime_events
+        WHEN NEW.kind = 'message.committed'
+          AND json_extract(NEW.event_json, '$.data.message.content') = 'second message'
+        BEGIN
+          SELECT RAISE(ABORT, 'injected message batch failure');
+        END;`);
+    } finally {
+      database.close();
+    }
+
+    await expect(
+      run.commitMessages(session, [
+        { role: "user", content: "first message" },
+        { role: "assistant", content: "second message" },
+      ]),
+    ).rejects.toThrow("injected message batch failure");
+
+    const events = await store.readRun(session.id, run.runId);
+    expect(events.filter((event) => event.kind === "message.committed")).toEqual([]);
+    expect(materializeRuntimeHistory(events)).toEqual([]);
+    expect(session.getModelContext()).toEqual([]);
+    await session.close();
+  });
+
   it("closes an unterminated canonical run as interrupted during recovery", async () => {
     const store = new RuntimeEventStore({
       databasePath: resolvePicoPaths(workDir).workspace.runtimeDatabase,
@@ -359,6 +394,128 @@ describe("RuntimeRun projection recovery", () => {
     ).resolves.toEqual([]);
     expect(await store.readRun("session-a", "run-a")).toEqual(recovered);
     await session.close();
+  });
+
+  it.each(["failed", "cancelled"] as const)(
+    "repairs a dangling tool result behind an existing %s terminal without replacing it",
+    async (status) => {
+      const store = new RuntimeEventStore({
+        databasePath: resolvePicoPaths(workDir).workspace.runtimeDatabase,
+      });
+      await store.initializeSession({ sessionId: "session-a", workDir });
+      const existingTerminal: RuntimeEvent = {
+        ...eventBase(`terminal-${status}`),
+        at: "2026-07-15T00:00:01.000Z",
+        visibility: "internal",
+        kind: "run.terminal",
+        data: { status, reason: "injected observation batch failure" },
+      };
+      await store.appendBatch([
+        runStarted(workDir),
+        {
+          ...eventBase("message-assistant"),
+          turnId: "turn-tools",
+          refs: { stepId: "step-tools" },
+          kind: "message.committed",
+          data: {
+            message: {
+              role: "assistant",
+              content: "",
+              toolCalls: [
+                { id: "call-persisted", name: "read", arguments: "{}" },
+                { id: "call-missing", name: "write", arguments: "{}" },
+              ],
+            },
+          },
+        },
+        {
+          ...eventBase("message-result"),
+          turnId: "turn-tools",
+          refs: { stepId: "step-tools", toolCallId: "call-persisted" },
+          kind: "message.committed",
+          data: {
+            message: {
+              role: "user",
+              content: "real result",
+              toolCallId: "call-persisted",
+              providerData: { [PICO_TOOL_RESULT_ERROR_KEY]: false },
+            },
+          },
+        },
+      ]);
+      const database = new Database(store.databasePath);
+      try {
+        database.exec(`CREATE TRIGGER fail_missing_tool_result
+          BEFORE INSERT ON agent_runtime_events
+          WHEN NEW.event_id = 'message-result-missing'
+          BEGIN
+            SELECT RAISE(ABORT, 'injected observation batch failure');
+          END;`);
+      } finally {
+        database.close();
+      }
+      await expect(
+        store.append({
+          ...eventBase("message-result-missing"),
+          turnId: "turn-tools",
+          refs: { stepId: "step-tools", toolCallId: "call-missing" },
+          kind: "message.committed",
+          data: {
+            message: {
+              role: "user",
+              content: "missing result",
+              toolCallId: "call-missing",
+              providerData: { [PICO_TOOL_RESULT_ERROR_KEY]: false },
+            },
+          },
+        }),
+      ).rejects.toThrow("injected observation batch failure");
+      await store.append(existingTerminal);
+      const incomplete = await store.readSession("session-a");
+      expect(() => materializeRuntimeHistory(incomplete)).toThrow();
+
+      await expect(
+        RuntimeRun.reconcileIncompleteRuns({ sessionId: "session-a", workDir, store }),
+      ).resolves.toEqual(["run-a"]);
+
+      const recovered = await store.readRun("session-a", "run-a");
+      const synthetic = recovered.filter(
+        (event): event is RuntimeMessageCommittedEvent =>
+          event.kind === "message.committed" &&
+          event.data.message.providerData?.["picoKind"] === "synthetic_tool_result",
+      );
+      expect(synthetic).toHaveLength(1);
+      expect(synthetic[0]).toMatchObject({
+        at: existingTerminal.at,
+        turnId: "turn-tools",
+        refs: { stepId: "step-tools", toolCallId: "call-missing" },
+        data: { message: { toolCallId: "call-missing" } },
+      });
+      expect(recovered.filter((event) => event.kind === "run.terminal")).toEqual([
+        existingTerminal,
+      ]);
+      expect(() => materializeRuntimeHistory(recovered)).not.toThrow();
+
+      await expect(
+        RuntimeRun.reconcileIncompleteRuns({ sessionId: "session-a", workDir, store }),
+      ).resolves.toEqual([]);
+      expect(await store.readRun("session-a", "run-a")).toEqual(recovered);
+    },
+  );
+
+  it("continues to skip unterminated fork bootstrap runs", async () => {
+    const store = new RuntimeEventStore({
+      databasePath: resolvePicoPaths(workDir).workspace.runtimeDatabase,
+    });
+    await store.initializeSession({ sessionId: "session-a", workDir });
+    const runId = `${RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX}seed`;
+    const started = { ...runStarted(workDir), runId };
+    await store.append(started);
+
+    await expect(
+      RuntimeRun.reconcileIncompleteRuns({ sessionId: "session-a", workDir, store }),
+    ).resolves.toEqual([]);
+    expect(await store.readRun("session-a", runId)).toEqual([started]);
   });
 });
 
