@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,12 +7,15 @@ import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { listCliSessionSummaries, resolveCliSession } from "../../src/cli/session-resolver.js";
+import { ToolResultArtifactStore } from "../../src/context/artifact-store.js";
 import { SessionForkService } from "../../src/engine/session-fork-service.js";
 import { SessionManager } from "../../src/engine/session.js";
 import { FileSessionSummaryStore } from "../../src/memory/summary-store.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 import { RuntimeEventStore } from "../../src/runtime/runtime-event-store.js";
 import { RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX, RuntimeRun } from "../../src/runtime/runtime-run.js";
+import { StorageOperationJournal } from "../../src/storage/operation-journal.js";
+import { OwnerLease } from "../../src/storage/owner-lease.js";
 
 const exec = promisify(execFile);
 
@@ -259,72 +263,172 @@ describe("runtime fork publication concurrency", () => {
     await source.close();
   });
 
-  it("settles different operations for one target without cloning loser sidecars", async () => {
-    const winnerSource = await seedSource(sessions, workDir, "winner-source");
-    const loserSource = await seedSource(sessions, workDir, "loser-source");
-    loserSource.saveMemorySummary("loser-only summary", 2);
+  it("preserves the durable owner across a pre-Runtime crash", async () => {
+    const ownerSource = await seedSource(sessions, workDir, "owner-source");
+    const contenderSource = await seedSource(sessions, workDir, "contender-source");
+    ownerSource.saveMemorySummary("owner summary", 2);
+    contenderSource.saveMemorySummary("contender summary", 2);
     const targetSessionId = "contested-target";
-    let signalWinnerSidecars!: () => void;
-    let releaseWinner!: () => void;
-    const winnerSidecars = new Promise<void>((resolve) => {
-      signalWinnerSidecars = resolve;
+    const paths = resolvePicoPaths(workDir).workspace;
+    const artifacts = new ToolResultArtifactStore({ baseDir: paths.artifacts });
+    await artifacts.write({
+      id: "owner-artifact",
+      sessionId: ownerSource.id,
+      toolName: "bash",
+      args: {},
+      output: "owner artifact",
     });
-    const winnerGate = new Promise<void>((resolve) => {
-      releaseWinner = resolve;
+    await artifacts.write({
+      id: "contender-artifact",
+      sessionId: contenderSource.id,
+      toolName: "bash",
+      args: {},
+      output: "contender artifact",
     });
-    const winner = new SessionForkService({
+    let injected = false;
+    const owner = new SessionForkService({
       workDir,
       sessionManager: sessions,
-      createOperationId: () => "winner-operation",
+      createOperationId: () => "owner-operation",
       hooks: {
-        async afterSidecars() {
-          signalWinnerSidecars();
-          await winnerGate;
+        beforeRuntimeBootstrap() {
+          if (injected) return;
+          injected = true;
+          throw new Error("injected crash before Runtime manifest");
         },
       },
     });
-    const loser = new SessionForkService({
+    await expect(
+      owner.fork({
+        sourceSessionId: ownerSource.id,
+        targetSessionId,
+        targetMode: "default",
+      }),
+    ).rejects.toThrow("injected crash before Runtime manifest");
+    await expect(owner.journal.get("owner-operation")).resolves.toMatchObject({
+      state: "sidecars_committed",
+    });
+    await expect(
+      runtimeStore(workDir).readSessionManifest(targetSessionId),
+    ).resolves.toBeUndefined();
+
+    const contender = new SessionForkService({
       workDir,
       sessionManager: sessions,
-      createOperationId: () => "loser-operation",
+      createOperationId: () => "contender-operation",
     });
-
-    const winnerFork = winner.fork({
-      sourceSessionId: winnerSource.id,
-      targetSessionId,
-      targetMode: "default",
-    });
-    await winnerSidecars;
-    const loserFork = loser.fork({
-      sourceSessionId: loserSource.id,
-      targetSessionId,
-      targetMode: "default",
-    });
-    await waitForOperation(loser, "loser-operation");
-    releaseWinner();
-
-    await expect(winnerFork).resolves.toMatchObject({ operation: { state: "completed" } });
-    await expect(loserFork).rejects.toThrow("target_conflict");
-    await expect(winner.journal.get("winner-operation")).resolves.toMatchObject({
-      state: "completed",
-    });
-    await expect(loser.journal.get("loser-operation")).resolves.toMatchObject({
+    await expect(
+      contender.fork({
+        sourceSessionId: contenderSource.id,
+        targetSessionId,
+        targetMode: "default",
+      }),
+    ).rejects.toThrow("target_conflict");
+    await expect(contender.journal.get("contender-operation")).resolves.toMatchObject({
       state: "needs_attention",
       error: { message: expect.stringContaining("target_conflict") as string },
     });
-    await expect(loser.journal.listUnfinished()).resolves.toEqual([]);
+    const summaryPath = join(paths.memory, "summaries.json");
+    expect(new FileSessionSummaryStore(summaryPath).get(targetSessionId)).toMatchObject({
+      summary: "owner summary",
+    });
+    await expect(artifacts.readMeta("owner-artifact", targetSessionId)).resolves.toBeDefined();
+    await expect(
+      artifacts.readMeta("contender-artifact", targetSessionId),
+    ).resolves.toBeUndefined();
+
+    await expect(
+      new SessionForkService({ workDir, sessionManager: sessions }).reconcileUnfinished(),
+    ).resolves.toEqual([{ operationId: "owner-operation", state: "completed" }]);
+    await expect(owner.journal.get("owner-operation")).resolves.toMatchObject({
+      state: "completed",
+    });
+    await expect(owner.journal.listUnfinished()).resolves.toEqual([]);
 
     const targetEvents = await runtimeStore(workDir).readSession(targetSessionId);
     expect(targetEvents.filter((event) => event.kind === "session.forked")).toHaveLength(1);
     expect(targetEvents.find((event) => event.kind === "session.forked")).toMatchObject({
-      data: { parentSessionId: winnerSource.id },
+      data: { parentSessionId: ownerSource.id },
     });
-    const summaryPath = join(resolvePicoPaths(workDir).workspace.memory, "summaries.json");
-    expect(new FileSessionSummaryStore(summaryPath).get(targetSessionId)).toBeNull();
-    await expect(listCliSessionSummaries(workDir)).resolves.toEqual(
-      expect.arrayContaining([expect.objectContaining({ id: targetSessionId })]),
-    );
-    await Promise.all([winnerSource.close(), loserSource.close()]);
+    expect(new FileSessionSummaryStore(summaryPath).get(targetSessionId)).toMatchObject({
+      summary: "owner summary",
+    });
+    const ownerArtifact = await artifacts.readMeta("owner-artifact", targetSessionId);
+    expect(ownerArtifact).toBeDefined();
+    await expect(artifacts.read(ownerArtifact!)).resolves.toBe("owner artifact");
+    await expect(
+      artifacts.readMeta("contender-artifact", targetSessionId),
+    ).resolves.toBeUndefined();
+    await Promise.all([ownerSource.close(), contenderSource.close()]);
+  });
+
+  it("selects one stable owner when two prepared operations already exist", async () => {
+    const sourceA = await seedSource(sessions, workDir, "prepared-source-a");
+    const sourceB = await seedSource(sessions, workDir, "prepared-source-b");
+    const targetSessionId = "prepared-target";
+    const fixedNow = () => new Date("2026-07-15T08:00:00.000Z");
+    const journalA = new StorageOperationJournal({ workDir, now: fixedNow });
+    const journalB = new StorageOperationJournal({ workDir, now: fixedNow });
+    const heldLease = await OwnerLease.acquire({
+      leaseDirectory: join(
+        journalA.directory,
+        ".fork-target-leases",
+        createHash("sha256").update(targetSessionId).digest("hex"),
+      ),
+      ownerId: "test-prepared-barrier",
+    });
+    const serviceA = new SessionForkService({
+      workDir,
+      sessionManager: sessions,
+      journal: journalA,
+      createOperationId: () => "prepared-a",
+    });
+    const serviceB = new SessionForkService({
+      workDir,
+      sessionManager: sessions,
+      journal: journalB,
+      createOperationId: () => "prepared-b",
+    });
+    const forkA = serviceA.fork({
+      sourceSessionId: sourceA.id,
+      targetSessionId,
+      targetMode: "default",
+    });
+    const forkB = serviceB.fork({
+      sourceSessionId: sourceB.id,
+      targetSessionId,
+      targetMode: "default",
+    });
+    const outcomes = Promise.allSettled([forkA, forkB]);
+    try {
+      await Promise.all([
+        waitForOperation(serviceA, "prepared-a"),
+        waitForOperation(serviceB, "prepared-b"),
+      ]);
+      await expect(journalA.get("prepared-a")).resolves.toMatchObject({ state: "prepared" });
+      await expect(journalB.get("prepared-b")).resolves.toMatchObject({ state: "prepared" });
+    } finally {
+      await heldLease.release();
+    }
+
+    const [resultA, resultB] = await outcomes;
+    expect(resultA).toMatchObject({
+      status: "fulfilled",
+      value: { operation: { state: "completed" } },
+    });
+    expect(resultB).toMatchObject({
+      status: "rejected",
+      reason: expect.objectContaining({ message: expect.stringContaining("target_conflict") }),
+    });
+    await expect(journalA.get("prepared-a")).resolves.toMatchObject({ state: "completed" });
+    await expect(journalB.get("prepared-b")).resolves.toMatchObject({ state: "needs_attention" });
+    await expect(journalA.listUnfinished()).resolves.toEqual([]);
+    expect(
+      (await runtimeStore(workDir).readSession(targetSessionId)).find(
+        (event) => event.kind === "session.forked",
+      ),
+    ).toMatchObject({ data: { parentSessionId: sourceA.id } });
+    await Promise.all([sourceA.close(), sourceB.close()]);
   });
 
   it("publishes exactly once when two Node processes reconcile the same target", async () => {

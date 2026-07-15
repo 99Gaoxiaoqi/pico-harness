@@ -43,6 +43,11 @@ export interface ForkOperationCallbacks {
   ): Promise<ForkPreparedBundleFile>;
   /** 持有 target lease 后重查 Runtime 归属；必须在任何 sidecar 写入前完成。 */
   assertTargetAvailable(operation: ForkStorageOperation): Promise<void>;
+  /** Runtime 已初始化时，验证其事实属于当前 operation 的可重放 bootstrap。 */
+  assertRuntimeTargetOwned(
+    operation: ForkStorageOperation,
+    bundle: ForkPreparedBundle,
+  ): Promise<void>;
   /** 克隆 File History / Summary / Artifact；必须以 operationId 幂等。 */
   cloneSidecars(operation: ForkStorageOperation, bundle: ForkPreparedBundle): Promise<void>;
   /** 向 RuntimeEventStore 发布消息、fork marker 与过滤后的 Session state。 */
@@ -167,6 +172,9 @@ export class ForkOperationCoordinator {
       if (operation.state === "prepared") {
         this.assertOperation(operation);
         await lease.assertOwnership();
+        await this.assertTargetOwner(operation);
+        await this.callbacks.assertTargetAvailable(operation);
+        await lease.assertOwnership();
         await this.prepareBundle(operation);
         await lease.assertOwnership();
         operation = await this.advance(operation, "workspace_applied");
@@ -175,6 +183,7 @@ export class ForkOperationCoordinator {
       if (operation.state === "workspace_applied" || operation.state === "session_committed") {
         const bundle = await this.loadAndVerifyStagedBundle(operation);
         await lease.assertOwnership();
+        await this.assertTargetOwner(operation);
         await this.callbacks.assertTargetAvailable(operation);
         await lease.assertOwnership();
         await this.callbacks.cloneSidecars(operation, bundle);
@@ -184,6 +193,9 @@ export class ForkOperationCoordinator {
 
       if (operation.state === "sidecars_committed") {
         const bundle = await this.loadAndVerifyStagedBundle(operation);
+        await lease.assertOwnership();
+        await this.assertTargetOwner(operation);
+        await this.callbacks.assertRuntimeTargetOwned(operation, bundle);
         await lease.assertOwnership();
         await this.callbacks.publishRuntime(operation, bundle);
         await lease.assertOwnership();
@@ -232,6 +244,22 @@ export class ForkOperationCoordinator {
         "invalid_operation",
       );
     }
+  }
+
+  private async assertTargetOwner(operation: ForkStorageOperation): Promise<void> {
+    const contenders = (await this.journal.list()).filter(
+      (candidate): candidate is ForkStorageOperation =>
+        candidate.kind === "fork" &&
+        candidate.targetSessionId === operation.targetSessionId &&
+        retainsTargetClaim(candidate),
+    );
+    const advanced = contenders.filter((candidate) => candidate.state !== "prepared");
+    const owner = (advanced.length > 0 ? advanced : contenders).toSorted(compareForkClaims)[0];
+    if (owner?.operationId === operation.operationId) return;
+    throw new ForkOperationConflictError(
+      `Fork target ${operation.targetSessionId} is claimed by operation ${owner?.operationId ?? "unknown"}`,
+      "target_conflict",
+    );
   }
 
   private async prepareBundle(operation: ForkStorageOperation): Promise<ForkPreparedBundle> {
@@ -334,6 +362,21 @@ export class ForkOperationCoordinator {
     if (advanced.kind !== "fork") throw new Error("Fork operation changed kind");
     return advanced;
   }
+}
+
+function retainsTargetClaim(operation: ForkStorageOperation): boolean {
+  if (operation.state === "aborted") return false;
+  return !(
+    operation.state === "needs_attention" &&
+    operation.error?.message.startsWith("target_conflict:") === true
+  );
+}
+
+function compareForkClaims(left: ForkStorageOperation, right: ForkStorageOperation): number {
+  return (
+    left.createdAt.localeCompare(right.createdAt) ||
+    left.operationId.localeCompare(right.operationId)
+  );
 }
 
 function parseBundleManifest(value: unknown): ForkPreparedBundle {
