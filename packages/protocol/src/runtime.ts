@@ -38,6 +38,54 @@ export type SessionSendBehavior = "auto" | "steer" | "queue" | "replace";
 export type SessionSendDisposition = "started" | "steered" | "queued" | "replaced";
 export type RuntimeInteractionMode = "default" | "plan" | "auto" | "yolo";
 export type RuntimeProviderKind = "openai" | "claude" | "gemini";
+export type RuntimeConfigSource =
+  | "user"
+  | "project"
+  | "project-legacy"
+  | "environment"
+  | "session"
+  | "cli";
+export type RuntimeCredentialStatus = "ready" | "missing" | "environment" | "unsupported";
+export type RuntimeCredentialSource = "keychain" | "environment" | "none";
+
+export type RuntimeProviderInput = JsonObject & {
+  readonly id: string;
+  readonly protocol: RuntimeProviderKind;
+  readonly baseURL: string;
+  readonly apiKeyEnv: string;
+  readonly models: readonly string[];
+  readonly discoverModels: boolean;
+  readonly modelCapabilities?: JsonObject;
+};
+
+export type RuntimeProviderProfile = RuntimeProviderInput & {
+  readonly origin: Extract<RuntimeConfigSource, "user" | "project-legacy" | "environment">;
+  readonly fingerprint: string;
+  readonly credentialStatus: RuntimeCredentialStatus;
+  readonly credentialSource: RuntimeCredentialSource;
+};
+
+export type RuntimeUserDefaults = JsonObject & {
+  readonly modelRouteId?: string;
+  readonly mode?: RuntimeInteractionMode;
+  readonly thinkingEffort?: string;
+};
+
+export type RuntimeUserConfig = JsonObject & {
+  readonly version: 1;
+  readonly defaults: RuntimeUserDefaults;
+  readonly providers: readonly RuntimeProviderInput[];
+};
+
+export type RuntimeEffectiveConfig = JsonObject & {
+  readonly defaultModelRouteId?: string;
+  readonly providers: readonly RuntimeProviderProfile[];
+  readonly sources: JsonObject;
+  readonly revisions: {
+    readonly user: string;
+    readonly project: string;
+  };
+};
 
 export type RuntimeSessionSettings = {
   readonly sessionId: SessionId;
@@ -529,6 +577,76 @@ export type RuntimeMethodMap = {
     readonly params: WorkspaceParams;
     readonly result: { readonly providers: readonly JsonObject[] };
   };
+  readonly "config.user.get": {
+    readonly params: EmptyParams;
+    readonly result: { readonly config: RuntimeUserConfig; readonly revision: string };
+  };
+  readonly "config.user.update": {
+    readonly params: {
+      readonly defaults: RuntimeUserDefaults;
+      readonly expectedRevision: string;
+    };
+    readonly result: { readonly config: RuntimeUserConfig; readonly revision: string };
+  };
+  readonly "config.effective.get": {
+    readonly params: WorkspaceParams;
+    readonly result: { readonly config: RuntimeEffectiveConfig };
+  };
+  readonly "provider.list": {
+    readonly params: EmptyParams;
+    readonly result: {
+      readonly providers: readonly RuntimeProviderProfile[];
+      readonly revision: string;
+    };
+  };
+  readonly "provider.upsert": {
+    readonly params: {
+      readonly provider: RuntimeProviderInput;
+      readonly expectedRevision: string;
+    };
+    readonly result: {
+      readonly provider: RuntimeProviderProfile;
+      readonly revision: string;
+    };
+  };
+  readonly "provider.delete": {
+    readonly params: { readonly providerId: string; readonly expectedRevision: string };
+    readonly result: { readonly deleted: true; readonly revision: string };
+  };
+  readonly "provider.credential.status": {
+    readonly params: { readonly providerId: string };
+    readonly result: {
+      readonly providerId: string;
+      readonly status: RuntimeCredentialStatus;
+      readonly source: RuntimeCredentialSource;
+      readonly providerFingerprint: string;
+    };
+  };
+  readonly "provider.credential.set": {
+    readonly params: {
+      readonly providerId: string;
+      readonly secret: string;
+      readonly expectedProviderFingerprint: string;
+    };
+    readonly result: {
+      readonly providerId: string;
+      readonly status: "ready";
+      readonly source: "keychain";
+      readonly providerFingerprint: string;
+    };
+  };
+  readonly "provider.credential.delete": {
+    readonly params: {
+      readonly providerId: string;
+      readonly expectedProviderFingerprint: string;
+    };
+    readonly result: {
+      readonly providerId: string;
+      readonly status: "missing";
+      readonly source: "none";
+      readonly providerFingerprint: string;
+    };
+  };
   readonly "catalog.agents": {
     readonly params: WorkspaceParams;
     readonly result: { readonly agents: readonly RuntimeCatalogAgent[] };
@@ -637,6 +755,15 @@ export const RUNTIME_METHODS = [
   "config.get",
   "config.update",
   "config.providers",
+  "config.user.get",
+  "config.user.update",
+  "config.effective.get",
+  "provider.list",
+  "provider.upsert",
+  "provider.delete",
+  "provider.credential.status",
+  "provider.credential.set",
+  "provider.credential.delete",
   "catalog.agents",
   "catalog.skills",
   "config.skills",
@@ -699,7 +826,13 @@ export type RuntimeEventMap = {
   };
   readonly "job.updated": { readonly job: RuntimeJob };
   readonly "job.runFinished": { readonly jobId: JobId; readonly run: RuntimeRun };
-  readonly "config.updated": { readonly version: number };
+  readonly "config.updated": {
+    /** Legacy project-config version retained for older clients. */
+    readonly version?: number;
+    readonly scope?: "user" | "project";
+    readonly revision?: string;
+    readonly providerIds?: readonly string[];
+  };
   readonly "usage.updated": { readonly usage: JsonObject };
   readonly "runtime.error": {
     readonly code: RuntimeErrorCode;
