@@ -54,6 +54,10 @@ interface SequencedCliSessionSummary {
   readonly headSequence: number;
 }
 
+interface ForkTargetOperations {
+  readonly hasCompleted: boolean;
+}
+
 export async function resolveCliSession(
   options: ResolveCliSessionOptions,
 ): Promise<CliSessionSelection> {
@@ -98,7 +102,7 @@ export function createCliSessionId(): string {
 
 export async function listCliSessionSummaries(workDir: string): Promise<CliSessionSummary[]> {
   const runtimeEventStore = createRuntimeEventStore(workDir);
-  const forkTargets = await listReservedForkTargets(workDir);
+  const forkTargets = await indexForkTargetOperations(workDir);
   const sequenced = await Promise.all(
     (await runtimeEventStore.listSessionManifests()).map(async (manifest) => {
       const entries = await runtimeEventStore.readSessionEntries(manifest.sessionId);
@@ -198,18 +202,22 @@ async function assertRuntimeSessionExists(
     throw new Error(`${prefix} session ${sessionId}: runtime.sqlite 中不存在`);
   }
   const entries = await store.readSessionEntries(sessionId);
-  const forkTargets = await listReservedForkTargets(workDir);
+  const forkTargets = await indexForkTargetOperations(workDir);
   if (isPublishedRuntimeSession(sessionId, entries, forkTargets)) return;
   throw new Error(`${prefix} session ${sessionId}: fork 尚未完成发布`);
 }
 
-async function listReservedForkTargets(workDir: string): Promise<ReadonlySet<string>> {
+async function indexForkTargetOperations(
+  workDir: string,
+): Promise<ReadonlyMap<string, ForkTargetOperations>> {
   const operations = await new StorageOperationJournal({ workDir }).list();
-  const targets = new Set<string>();
+  const targets = new Map<string, ForkTargetOperations>();
   for (const operation of operations) {
-    if (operation.kind === "fork" && operation.state !== "aborted") {
-      targets.add(operation.targetSessionId);
-    }
+    if (operation.kind !== "fork") continue;
+    const existing = targets.get(operation.targetSessionId);
+    targets.set(operation.targetSessionId, {
+      hasCompleted: existing?.hasCompleted === true || operation.state === "completed",
+    });
   }
   return targets;
 }
@@ -217,17 +225,28 @@ async function listReservedForkTargets(workDir: string): Promise<ReadonlySet<str
 function isPublishedRuntimeSession(
   sessionId: string,
   entries: readonly RuntimeEventStoreEntry[],
-  reservedForkTargets: ReadonlySet<string>,
+  forkTargets: ReadonlyMap<string, ForkTargetOperations>,
 ): boolean {
-  if (
-    entries.some(
-      ({ event }) => event.kind === "session.forked" && event.data.sourceDigest !== undefined,
-    )
-  ) {
-    return true;
-  }
-  if (reservedForkTargets.has(sessionId)) return false;
-  return !entries.some(({ event }) => event.runId.startsWith(RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX));
+  const targetOperations = forkTargets.get(sessionId);
+  const hasForkFacts = entries.some(
+    ({ event }) =>
+      event.kind === "session.forked" || event.runId.startsWith(RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX),
+  );
+  if (!hasForkFacts) return targetOperations === undefined;
+
+  const completedBootstrap = entries.some(
+    ({ sequence: markerSequence, event: marker }) =>
+      marker.kind === "session.forked" &&
+      entries.some(
+        ({ sequence: terminalSequence, event: terminal }) =>
+          terminalSequence > markerSequence &&
+          terminal.kind === "run.terminal" &&
+          terminal.runId === marker.runId &&
+          terminal.data.status === "completed",
+      ),
+  );
+  if (!completedBootstrap) return false;
+  return targetOperations?.hasCompleted ?? true;
 }
 
 /** 仅用于新 fork 构建失败时清理尚未公布的目标会话。 */

@@ -4,6 +4,7 @@ import { isDeepStrictEqual } from "node:util";
 import { ToolResultArtifactStore, type ArtifactCloneMapping } from "../context/artifact-store.js";
 import { FileSessionSummaryStore } from "../memory/summary-store.js";
 import { resolvePicoPaths } from "../paths/pico-paths.js";
+import { materializeRuntimeHistory } from "../runtime/runtime-event-read-model.js";
 import { RuntimeEventStore } from "../runtime/runtime-event-store.js";
 import { RuntimeRun } from "../runtime/runtime-run.js";
 import { projectRuntimeSessionMessageEntries } from "../runtime/runtime-session-projection.js";
@@ -111,7 +112,7 @@ interface ForkSidecarsBundle {
   readonly artifactMappings: readonly PersistedArtifactCloneMapping[];
 }
 
-/** Runtime SQLite 的 fork marker 是唯一发布点；staging 只保存崩溃恢复输入。 */
+/** Runtime facts 与 operation journal 共同构成发布边界；staging 只保存崩溃恢复输入。 */
 export class SessionForkService {
   readonly workDir: string;
   readonly journal: StorageOperationJournal;
@@ -153,11 +154,22 @@ export class SessionForkService {
     const source = await this.sessionManager.getOrCreate(input.sourceSessionId, this.workDir, {
       persistence: true,
     });
-    if (!source.runtimeEventStore) {
+    const sourceRuntimeStore = source.runtimeEventStore;
+    if (!sourceRuntimeStore) {
       throw new Error(`Fork requires a durable source Session: ${input.sourceSessionId}`);
     }
     return source.serialize(async () => {
       await assertTargetNotPublished(this.runtimeStore, input.targetSessionId);
+      await RuntimeRun.reconcileIncompleteRuns({
+        sessionId: source.id,
+        workDir: this.workDir,
+        store: sourceRuntimeStore,
+      });
+      await RuntimeRun.repairSessionProjection(source, {
+        workDir: this.workDir,
+        store: sourceRuntimeStore,
+      });
+      materializeRuntimeHistory(await sourceRuntimeStore.readSession(source.id));
       const snapshot = await source.readDurableForkSnapshot();
       const operationId = this.createOperationId();
       const stagingDirectory = join(
@@ -204,6 +216,14 @@ export class SessionForkService {
         const stagedBundlePath = this.frozenBundlePath(stagingDirectory);
         await this.readFrozenBundle(operation, stagedBundlePath);
         return { stagedBundlePath };
+      },
+      assertTargetAvailable: async (operation) => {
+        if (await this.runtimeStore.readSessionManifest(operation.targetSessionId)) {
+          throw new ForkOperationConflictError(
+            `Fork target Runtime is already occupied: ${operation.targetSessionId}`,
+            "target_conflict",
+          );
+        }
       },
       cloneSidecars: async (operation) => {
         await this.ensureSidecars(operation);

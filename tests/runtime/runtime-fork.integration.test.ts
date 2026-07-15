@@ -175,6 +175,50 @@ describe("runtime session fork", () => {
     await target.close();
   });
 
+  it("repairs a dangling source tool call before freezing a strictly materializable fork", async () => {
+    const store = new RuntimeEventStore({
+      databasePath: resolvePicoPaths(workDir).workspace.runtimeDatabase,
+    });
+    const source = await sessions.getOrCreate("dangling-source", workDir, { persistence: true });
+    const dangling = await RuntimeRun.start({
+      sessionId: source.id,
+      workDir,
+      runId: "dangling-source-run",
+      store,
+    });
+    await dangling.recordImportedMessage(
+      { role: "user", content: "run the tool" },
+      "dangling-source-user",
+    );
+    await dangling.recordImportedMessage(
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [{ id: "dangling-call", name: "bash", arguments: "{}" }],
+      },
+      "dangling-source-assistant",
+    );
+
+    await expect(
+      new SessionForkService({ workDir, sessionManager: sessions }).fork({
+        sourceSessionId: source.id,
+        targetSessionId: "repaired-target",
+        targetMode: "default",
+      }),
+    ).resolves.toMatchObject({ operation: { state: "completed" } });
+
+    const sourceEvents = await store.readSession(source.id);
+    expect(sourceEvents.some((event) => event.kind === "run.terminal")).toBe(true);
+    expect(() => materializeRuntimeHistory(sourceEvents)).not.toThrow();
+    const targetEvents = await store.readSession("repaired-target");
+    const targetHistory = materializeRuntimeHistory(targetEvents);
+    expect(targetHistory.find((message) => message.toolCallId === "dangling-call")).toMatchObject({
+      role: "user",
+      providerData: { picoKind: "synthetic_tool_result" },
+    });
+    await source.close();
+  });
+
   it("AgentRuntime resumes a published fork seed before constructing model context", async () => {
     const store = new RuntimeEventStore({
       databasePath: resolvePicoPaths(workDir).workspace.runtimeDatabase,

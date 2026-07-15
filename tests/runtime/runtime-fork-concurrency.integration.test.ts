@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { listCliSessionSummaries, resolveCliSession } from "../../src/cli/session-resolver.js";
 import { SessionForkService } from "../../src/engine/session-fork-service.js";
 import { SessionManager } from "../../src/engine/session.js";
+import { FileSessionSummaryStore } from "../../src/memory/summary-store.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 import { RuntimeEventStore } from "../../src/runtime/runtime-event-store.js";
 import { RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX, RuntimeRun } from "../../src/runtime/runtime-run.js";
@@ -175,6 +176,157 @@ describe("runtime fork publication concurrency", () => {
     await source.close();
   });
 
+  it("hides marker and terminal facts until state and journal publication complete", async () => {
+    const source = await seedSource(sessions, workDir, "state-source");
+    source.updateRuntimeState({
+      settings: {
+        provider: "openai",
+        model: "test-model",
+        mode: "default",
+        thinkingEffort: "high",
+        thinkingEffortExplicit: true,
+        additionalDirectories: [],
+      },
+    });
+    await source.flushPersistence();
+    const targetSessionId = "state-target";
+    const operationId = "state-publication";
+    const store = runtimeStore(workDir);
+    const appendSessionState = store.appendSessionState.bind(store);
+    let stateFailed = false;
+    const stateSpy = vi
+      .spyOn(store, "appendSessionState")
+      .mockImplementation(async (sessionId, patch, options) => {
+        if (!stateFailed && sessionId === targetSessionId) {
+          stateFailed = true;
+          throw new Error("injected crash before state publication");
+        }
+        return appendSessionState(sessionId, patch, options);
+      });
+
+    const crashing = new SessionForkService({
+      workDir,
+      sessionManager: sessions,
+      runtimeStore: store,
+      createOperationId: () => operationId,
+    });
+    await expect(
+      crashing.fork({
+        sourceSessionId: source.id,
+        targetSessionId,
+        targetMode: "default",
+      }),
+    ).rejects.toThrow("injected crash before state publication");
+    stateSpy.mockRestore();
+
+    const partialEvents = await store.readSession(targetSessionId);
+    expect(partialEvents.some((event) => event.kind === "session.forked")).toBe(true);
+    expect(
+      partialEvents.some(
+        (event) => event.kind === "run.terminal" && event.data.status === "completed",
+      ),
+    ).toBe(true);
+    expect(partialEvents.some((event) => event.kind === "session.state.committed")).toBe(false);
+    await expect(crashing.journal.get(operationId)).resolves.toMatchObject({
+      state: "sidecars_committed",
+    });
+    await expect(listCliSessionSummaries(workDir)).resolves.not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: targetSessionId })]),
+    );
+    await expect(resolveCliSession({ workDir, resumeSession: targetSessionId })).rejects.toThrow(
+      "fork 尚未完成发布",
+    );
+
+    await expect(
+      new SessionForkService({
+        workDir,
+        sessionManager: sessions,
+        runtimeStore: store,
+      }).reconcileUnfinished(),
+    ).resolves.toEqual([{ operationId, state: "completed" }]);
+    expect(
+      (await store.readSession(targetSessionId)).some(
+        (event) => event.kind === "session.state.committed",
+      ),
+    ).toBe(true);
+    await expect(listCliSessionSummaries(workDir)).resolves.toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: targetSessionId })]),
+    );
+    await expect(resolveCliSession({ workDir, resumeSession: targetSessionId })).resolves.toEqual({
+      mode: "resume",
+      sessionId: targetSessionId,
+    });
+    await source.close();
+  });
+
+  it("settles different operations for one target without cloning loser sidecars", async () => {
+    const winnerSource = await seedSource(sessions, workDir, "winner-source");
+    const loserSource = await seedSource(sessions, workDir, "loser-source");
+    loserSource.saveMemorySummary("loser-only summary", 2);
+    const targetSessionId = "contested-target";
+    let signalWinnerSidecars!: () => void;
+    let releaseWinner!: () => void;
+    const winnerSidecars = new Promise<void>((resolve) => {
+      signalWinnerSidecars = resolve;
+    });
+    const winnerGate = new Promise<void>((resolve) => {
+      releaseWinner = resolve;
+    });
+    const winner = new SessionForkService({
+      workDir,
+      sessionManager: sessions,
+      createOperationId: () => "winner-operation",
+      hooks: {
+        async afterSidecars() {
+          signalWinnerSidecars();
+          await winnerGate;
+        },
+      },
+    });
+    const loser = new SessionForkService({
+      workDir,
+      sessionManager: sessions,
+      createOperationId: () => "loser-operation",
+    });
+
+    const winnerFork = winner.fork({
+      sourceSessionId: winnerSource.id,
+      targetSessionId,
+      targetMode: "default",
+    });
+    await winnerSidecars;
+    const loserFork = loser.fork({
+      sourceSessionId: loserSource.id,
+      targetSessionId,
+      targetMode: "default",
+    });
+    await waitForOperation(loser, "loser-operation");
+    releaseWinner();
+
+    await expect(winnerFork).resolves.toMatchObject({ operation: { state: "completed" } });
+    await expect(loserFork).rejects.toThrow("target_conflict");
+    await expect(winner.journal.get("winner-operation")).resolves.toMatchObject({
+      state: "completed",
+    });
+    await expect(loser.journal.get("loser-operation")).resolves.toMatchObject({
+      state: "needs_attention",
+      error: { message: expect.stringContaining("target_conflict") as string },
+    });
+    await expect(loser.journal.listUnfinished()).resolves.toEqual([]);
+
+    const targetEvents = await runtimeStore(workDir).readSession(targetSessionId);
+    expect(targetEvents.filter((event) => event.kind === "session.forked")).toHaveLength(1);
+    expect(targetEvents.find((event) => event.kind === "session.forked")).toMatchObject({
+      data: { parentSessionId: winnerSource.id },
+    });
+    const summaryPath = join(resolvePicoPaths(workDir).workspace.memory, "summaries.json");
+    expect(new FileSessionSummaryStore(summaryPath).get(targetSessionId)).toBeNull();
+    await expect(listCliSessionSummaries(workDir)).resolves.toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: targetSessionId })]),
+    );
+    await Promise.all([winnerSource.close(), loserSource.close()]);
+  });
+
   it("publishes exactly once when two Node processes reconcile the same target", async () => {
     const source = await seedSource(sessions, workDir, "concurrent-source");
     const targetSessionId = "concurrent-target";
@@ -314,4 +466,13 @@ async function waitForFileCount(directory: string, count: number): Promise<void>
     await delay(10);
   }
   throw new Error(`Timed out waiting for ${count} files in ${directory}`);
+}
+
+async function waitForOperation(service: SessionForkService, operationId: string): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    if (await service.journal.get(operationId)) return;
+    await delay(5);
+  }
+  throw new Error(`Timed out waiting for fork operation ${operationId}`);
 }
