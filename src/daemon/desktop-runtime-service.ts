@@ -28,6 +28,7 @@ import { loadPicoConfig, type PicoConfig } from "../input/pico-config.js";
 import { renderAgentDispatchPrompt } from "../input/agent-activation.js";
 import { renderSkillActivation } from "../input/skill-activation.js";
 import { initializeProjectEntrypoints } from "../input/project-initializer.js";
+import { resolveProjectMcpConfigPath } from "../mcp/config-path.js";
 import { McpConnectionManager } from "../mcp/manager.js";
 import { CostTracker } from "../observability/tracker.js";
 import { ensureSessionUsageBaseline } from "../observability/usage-baseline.js";
@@ -39,6 +40,7 @@ import {
 import { createProvider, type ProviderKind } from "../provider/factory.js";
 import { loadModelRouter, type ModelRoute, type ModelRouter } from "../provider/model-router.js";
 import { resolveProviderProfile } from "../provider/profile.js";
+import { resolvePicoHome } from "../paths/pico-paths.js";
 import { WorkspaceTrustStore } from "../security/workspace-trust.js";
 import {
   fileHistoryChanges,
@@ -138,12 +140,13 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   private resourceVersion = 0;
 
   constructor(private readonly options: DesktopRuntimeServiceOptions) {
+    this.env = options.env ?? process.env;
     this.registrationStore = options.registrationStore ?? new WorkspaceRegistrationStore();
     this.trustStore = options.trustStore ?? new WorkspaceTrustStore();
-    this.sessionStateStore = options.sessionStateStore ?? new DesktopSessionStateStore();
+    this.sessionStateStore =
+      options.sessionStateStore ?? new DesktopSessionStateStore({ env: this.env });
     this.conversationStateStore =
-      options.conversationStateStore ?? new DesktopConversationStateStore();
-    this.env = options.env ?? process.env;
+      options.conversationStateStore ?? new DesktopConversationStateStore({ env: this.env });
     this.providerFactory = options.providerFactory ?? createProvider;
     this.createSessionId = options.createSessionId ?? createCliSessionId;
     this.now = options.now ?? Date.now;
@@ -397,7 +400,10 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
 
   private async runResourceDiagnostics(workspacePath: string): Promise<JsonValue> {
     const canonical = await this.requireTrustedWorkspace(workspacePath);
-    const report = await new ResourceDoctor({ workDir: canonical }).scan();
+    const report = await new ResourceDoctor({
+      workDir: canonical,
+      picoHome: resolvePicoHome({ env: this.env }),
+    }).scan();
     return toJsonValue({
       ...report,
       output: renderResourceDoctorReport(report).join("\n"),
@@ -1566,7 +1572,8 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const canonical = await this.requireTrustedWorkspace(workspacePath);
     const manager = new McpConnectionManager(undefined, { stdioCwd: canonical });
     try {
-      await manager.loadConfig(join(canonical, ".claw", "mcp.json"));
+      const resolution = await resolveProjectMcpConfigPath(canonical);
+      await manager.loadConfig(resolution.path);
       return { servers: toJsonValue(manager.getStatusSnapshot().servers) };
     } finally {
       await manager.closeAll();

@@ -60,6 +60,26 @@ describe("local runtime daemon IPC integration", () => {
     }
   });
 
+  it("reports the daemon PICO_HOME in the runtime handshake", async () => {
+    const root = await temporaryRoot();
+    const picoHome = join(root, "custom-pico-home");
+    const service = new WorkspaceRuntimeService({
+      env: { PICO_HOME: picoHome },
+      registrationStore: new WorkspaceRegistrationStore(join(root, "workspaces.json")),
+      execute: async () => undefined,
+    });
+    try {
+      await expect(service.handle(createRuntimeRequest("runtime.ping", {}))).resolves.toMatchObject(
+        {
+          pong: true,
+          picoHome,
+        },
+      );
+    } finally {
+      await service.close();
+    }
+  });
+
   it("filters replayed and live events by the subscribed workspace cursor", async () => {
     const root = await temporaryRoot();
     const firstWorkspace = join(root, "workspace-a");

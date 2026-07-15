@@ -7,6 +7,12 @@
 //   - 协议类型与工具函数
 
 export { McpConnectionManager, DEFAULT_CONFIG_RELATIVE } from "./manager.js";
+export {
+  LEGACY_PROJECT_MCP_RELATIVE_PATH,
+  PICO_PROJECT_MCP_RELATIVE_PATH,
+  resolveProjectMcpConfigPath,
+} from "./config-path.js";
+export type { ProjectMcpConfigPathResolution, ProjectMcpConfigSource } from "./config-path.js";
 export type {
   McpConnectionManagerOptions,
   McpOAuthCredentials,

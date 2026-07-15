@@ -89,6 +89,7 @@ import { SessionForkService } from "../engine/session-fork-service.js";
 import type { Reporter } from "../engine/reporter.js";
 import type { SteerQueue } from "../engine/steer-queue.js";
 import { McpConnectionManager, type McpStatusSnapshot } from "../mcp/manager.js";
+import { resolveProjectMcpConfigPath } from "../mcp/config-path.js";
 import { createHookedElicitationHandler, McpElicitationUiHandler } from "../mcp/elicitation-ui.js";
 import { hasLocalUiCommandAction } from "./local-ui-command.js";
 import {
@@ -1088,9 +1089,12 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
       })(request, context);
     },
   });
-  const mcpConfigPath = opts.mcpConfigPath ?? `${opts.workDir}/.pico/mcp.json`;
+  const defaultMcpConfig =
+    opts.mcpConfigPath === undefined ? await resolveProjectMcpConfigPath(opts.workDir) : undefined;
+  const mcpConfigPath =
+    opts.mcpConfigPath ?? defaultMcpConfig?.path ?? join(opts.workDir, ".pico", "mcp.json");
   let mcpInitialized = false;
-  let mcpStatusVisible = opts.mcpConfigPath !== undefined;
+  let mcpStatusVisible = opts.mcpConfigPath !== undefined || defaultMcpConfig?.exists === true;
   const tuiSessionSelection: CliSessionSelection = opts.sessionSelection ?? {
     mode: "new",
     sessionId: createCliSessionId(),
@@ -1196,10 +1200,7 @@ export async function startTuiRepl(opts: ReplOptions): Promise<void> {
         const shouldLoadMcpConfig =
           pluginSnapshot.mcpSources.length > 0 ||
           opts.mcpConfigPath !== undefined ||
-          (await access(mcpConfigPath).then(
-            () => true,
-            (error: NodeJS.ErrnoException) => error.code !== "ENOENT",
-          ));
+          defaultMcpConfig?.exists === true;
         if (shouldLoadMcpConfig) {
           try {
             await sharedMcpManager.replaceSources([
