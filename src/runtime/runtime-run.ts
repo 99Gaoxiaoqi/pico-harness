@@ -219,6 +219,7 @@ export class RuntimeRun {
 
     const reconciled: string[] = [];
     for (const runId of await store.listRunIds(options.sessionId)) {
+      if (runId.startsWith(RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX)) continue;
       const events = await store.readRun(options.sessionId, runId);
       const started = events.find((event) => event.kind === "run.started");
       if (!started || events.some((event) => event.kind === "run.terminal")) continue;
