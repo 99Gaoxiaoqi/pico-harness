@@ -101,6 +101,10 @@ describe("Pico command registry", () => {
     let daemonAvailable = true;
     const disabledCountWhenRegistered: number[] = [];
     const bridge: CronDaemonBridge = {
+      deleteProvider: async () => ({
+        status: "unavailable",
+        message: "daemon unavailable",
+      }),
       registerWorkspace: async (workspacePath) => {
         disabledCountWhenRegistered.push(cron.list(workDir).filter((job) => !job.enabled).length);
         return {
