@@ -58,10 +58,7 @@ export function resolveLocalDaemonEndpoint(
   // Keep macOS Unix socket paths below the ~104-byte kernel limit. The default directory
   // already carries the full digest; an external root gets a compact Pico-private child.
   // Never place or chmod a socket directly in XDG_RUNTIME_DIR/an injected shared root.
-  const address = join(
-    runtimeDir,
-    configuredRuntimeDir === undefined ? "runtime-v1.sock" : "s",
-  );
+  const address = join(runtimeDir, configuredRuntimeDir === undefined ? "runtime-v1.sock" : "s");
   assertUnixSocketPath(address, runtimeDir);
   return {
     transport: "unix",
